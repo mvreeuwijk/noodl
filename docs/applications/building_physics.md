@@ -1443,7 +1443,7 @@ model time to the spacing of doubles near a year, 3.7e-9 s, and noodl rounds it 
 `PressurizationData` and `TrickleVent` import, but they are not compared as dynamic models (see
 Limitations). Their weather and wind pressures are compared, in the last rows above.
 
-**Dynamic models (14, with volumes).** Every volume stores its air compressibly, as MBL's
+**Dynamic models (15, with volumes).** Every volume stores its air compressibly, as MBL's
 `MixingVolume` does (see "Volume mass storage" below), and every model is compared at the
 reference's own precision. The reference CSVs were regenerated with DASSL at a tolerance of
 1e-13; at 1e-14 DASSL returns no trajectory. At the models' declared 1e-6 the reference's
@@ -1472,11 +1472,11 @@ steps are laid out with care:
   at MBL's `p_start`, so a start that releases an imbalance begins on a graded sub-grid; a
   start in balance only doubles its steps up from a tiny first one.
 
-`ClosedDoors`, `ReverseBuoyancy` and `ChimneyShaftWithVolume` combine two and four substeps per
-output interval: at one step per interval their crack flows switching on (`ClosedDoors`),
-their orifices reversing at 18 s (`ReverseBuoyancy`) and the room controller answering the end
-of the injection at 601 s (`ChimneyShaftWithVolume`) are not yet in the asymptotic range of
-the extrapolation.
+`ClosedDoors`, `ReverseBuoyancy`, `ChimneyShaftWithVolume` and `ChimneyShaftNoVolume` combine
+two and four substeps per output interval: at one step per interval their crack flows switching
+on (`ClosedDoors`), their orifices reversing at 18 s (`ReverseBuoyancy`) and the room controller
+answering the end of the injection at 601 s (both chimney shafts) are not yet in the asymptotic
+range of the extrapolation.
 
 `ChimneyShaftWithVolume` adds a room heated by a P controller on its temperature
 (`LimPID`, through a `Gain` into a `PrescribedHeatFlow`), a `MediumColumnDynamic` shaft and a
@@ -1485,6 +1485,17 @@ is compared like any other column; it is five times the room's deviation from it
 difference of two temperatures, so its relative error is the strictest of the model's. It is at
 7.4e-7 (7.1e-7 beyond the reference's resolution), 4 s after the injection stops: its 3.6e-8
 there is 7e-9 K of room temperature (2.5e-11 relative).
+
+`ChimneyShaftNoVolume` is the same room with its shaft a plain column between two orifices in
+series, joined at a junction without storage. The shaft's density is that of the air entering
+it (`densitySelection = actual`): the room's while the flow goes up, the outside air's while it
+comes down, so the shaft's head jumps where its flow reverses, at 0.192 s and at 1800.25 s
+(the extraction's onset). The run locates each reversal and starts the next step from the
+airflow of the new direction. Its controller output is within 1.3e-7 of the reference beyond
+its resolution, its flows within 2.4e-7, its room temperature within 8e-12. OpenModelica
+chatters at the first reversal: its result holds six rows at 0.192 s in place of the output
+times 7.2 to 43.2 s, which are not compared; from 50.4 s on, noodl physics, reversing at
+0.192 s, agrees with both the 1e-12 and the 1e-13 exports.
 
 The metric is `|noodl - omc| / max(|omc|, floor)` at every row after `t = StartTime`. The floor
 is 1e-3 of the model's largest flow for flows, and 1e-3 of the column's largest value
@@ -1521,6 +1532,7 @@ differ and the first is above 1e-6, and the wall time of the two runs:
 | ReverseBuoyancy | 8.1e-06 (0) | 1.5e-10 | 4.7e-10 | 4.7e-10 | — | 2, 4 | 481 s |
 | OneEffectiveAirLeakageArea | 4.4e-07 | 7.4e-13 | 1.8e-13 | 3.0e-13 | — | 1, 2 | 114 s |
 | ChimneyShaftWithVolume | 1.1e-08 | 2.7e-11 | 9.1e-14 | 1.3e-12 | — | 2, 4 | 591 s |
+| ChimneyShaftNoVolume | 2.7e-07 | 8.6e-12 | 2.2e-11 | — | — | 2, 4 | 1300 s |
 
 No model needs a bound above 1e-6 (`PARITY_STORAGE` is empty). The storage-dominated models
 also assert the storage mechanism on noodl physics' own history. `ClosedDoors` and

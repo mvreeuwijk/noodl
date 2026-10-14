@@ -10,8 +10,10 @@ What each MBL construct becomes
 -------------------------------
 * **Nodes.** One network node per zone (`MixingVolume`, `DelayFirstOrder`) and per boundary
   (`Boundary_pT`, `Outside`, `Outside_Cp`, `Outside_CpLowRise`, `Outside_CpData`), in the
-  document's component order, zones first. Junction nodes
-  of fused column chains do not appear: each chain is one edge (`graph.FlowPath`).
+  document's component order, zones first, then the junctions where one-way elements in
+  series meet (`graph.ComponentGraph.junctions`; "Flow elements in series" below). The
+  junctions inside a fused column chain do not appear: each chain is one edge
+  (`graph.FlowPath`).
 * **Air layer** ("air", `PotentialFlowLayer`, quantity pressure, Pa). Potentials are GAUGE
   pressures relative to `names.p_ref` (see "Gauge reference" below). One edge kind per MBL
   instance, so that each element keeps its own `dp_turbulent`, form and drives:
@@ -22,11 +24,14 @@ What each MBL construct becomes
   `DoorCompartmentHead` evaluated inside the element, so that the streams carry the door's
   enthalpy, moisture and trace substances as MBL's ports do), and
   `"zonal_ab:<name>"`/`"zonal_ba:<name>"` for a zonal flow. A fused column chain
-  adds a `_ColumnHead` drive to its path. The air-layer boundary is every boundary node plus,
+  adds a `_ColumnHead` drive to its path (a `densitySelection = actual` column reads the
+  driver `"air.forward"`, "Flow elements in series" below). The air-layer boundary is every
+  boundary node plus,
   for each group of zones joined by pressure-dependent edges with no boundary among them, the
   group's zone wired straight to a boundary (at that boundary's pressure) or else its first
   zone at its own `p_start` (see "Closed zone groups" below).
-* **Thermal layer** ("thermal", `TransportLayer`, K) over every edge kind, boundaries =
+* **Thermal layer** ("thermal", `TransportLayer`, K) over every edge kind (a run of
+  elements in series as one edge, below), boundaries =
   boundary nodes plus the zones pinned by a `FixedTemperature` -> `ThermalConductor`
   (`G >= 1e6` W/K) construction. Omitted when no zone is left unpinned.
 * **Species layer** ("species", `TransportLayer`, kg/kg) with one species per
@@ -35,6 +40,29 @@ What each MBL construct becomes
 * **Closure** (`_ZoneStateClosure`) writing the full-node drivers `"T"` (K), `"p_abs"` (Pa) and,
   when moisture is carried, `"X_w"`; otherwise `"X_w"` is a constant driver at the medium
   default (0 for SimpleAir).
+
+Flow elements in series
+-----------------------
+One-way elements in series (`graph.SeriesChain`: `Examples/ChimneyShaftNoVolume.mo`'s two
+orifices in one shaft) meet at junctions that hold no mass. A junction is an interior node of
+the air layer, where the elements' flows balance, and no node of the transport layers: every
+element, column and junction of the run passes the stream on unchanged (`MediumColumn.mo`,
+`PartialOneWayFlowElement`), so the run advects as ONE edge from one end to the other, the
+edge kind `"series:<element>"` named after its first element in name order, carrying that
+element's flow. The transport layers therefore take their flows from the closure
+(`"thermal.q"`, `"species.q"`: the columns of `"air.q"` of their edges), and a step with
+the exact scheme needs no storage-free node. The closure writes each junction's `"T"`,
+`"X_w"` and mass fractions as those of the run's upwind end, which is the stream passing
+through it. A column's `fromTop` or `fromBottom` density is that of the run's end on that
+side of it (`inStream`, the stream arriving from there, whatever the flow's direction).
+
+`densitySelection = actual` (`MediumColumn.mo`: the density of `actualStream(port_a...)`,
+the stream entering the column) is the density of the upwind end of the run: its `src` end
+while the path's flow is forward, its `tgt` end while it is reverse. The closure writes
+`"air.forward"` (one entry per edge of `"air.q"`, 1.0 where the last solved flow is
+`>= 0`) from the state's flows; the head therefore jumps where the flow reverses, by
+`h g (rho_up - rho_down)`, and `run.simulate` puts a step boundary there (a flow's sign is a
+switch).
 
 Volume mass storage
 -------------------
@@ -311,6 +339,8 @@ class ModelicaNames:
     `controls` maps each feedback block (`LimPID` and the Math blocks it drives, module
     docstring, "Feedback control") to its position in the feedback network's outputs: the
     column of `run.simulate`'s `"controls"` holding its output `y`.
+    `junctions` names the nodes where one-way elements in series meet (module docstring,
+    "Flow elements in series"); each is in `nodes` too.
     """
 
     edges: dict[str, tuple[tuple[int, int], ...]]
@@ -323,6 +353,7 @@ class ModelicaNames:
     storage: tuple[str, ...] = ()  # zones with volume mass storage (storage.py)
     weather: dict[str, Tensor] = field(default_factory=dict)
     controls: dict[str, int] = field(default_factory=dict)
+    junctions: tuple[str, ...] = ()
 
 
 # --------------------------------------------------------------------------- helpers
@@ -669,22 +700,39 @@ class _ColumnHead:
     `sum(sign h rho g_n)` with `rho = density_pTX(p_default, T, X_w)` of the node each
     column's `densitySelection` names (`MediumColumn.mo`, equation section: `fromTop` reads
     `inStream(port_a...)`, the state beyond the column's top port, `fromBottom` the one beyond
-    its bottom port; every medium through `Psychrometrics.Functions.density_pTX` with
-    `X_w = 0` when the medium has no moisture). Shape `(..., 1)`."""
+    its bottom port, `actual` `actualStream(port_a...)`, the stream entering the column;
+    every medium through `Psychrometrics.Functions.density_pTX` with `X_w = 0` when the medium
+    has no moisture). Shape `(..., 1)`.
 
-    def __init__(self, kind: str, coeff: Tensor, nodes: Tensor) -> None:
+    `nodes` are the columns' nodes while the path's flow (column `edge` of `"air.q"`) is
+    forward, `nodes_reverse` while it is reverse, read from the driver `"air.forward"`
+    (module docstring, "Flow elements in series"); they differ only for `actual`. Without
+    `nodes_reverse` the head does not depend on the flow's direction."""
+
+    def __init__(self, kind: str, coeff: Tensor, nodes: Tensor,
+                 nodes_reverse: Tensor | None = None, edge: int | None = None) -> None:
         self.kind = kind
         self.coeff = coeff.detach()
         self.nodes = nodes
+        self.nodes_reverse = nodes_reverse
+        self.edge = edge  # set once the air layer's edge order is known
 
     def __call__(self, drivers: Mapping[str, Tensor]) -> Tensor:
         def head() -> Tensor:
-            T = drivers["T"][..., self.nodes]
-            X = drivers["X_w"][..., self.nodes]
+            nodes = self.nodes
+            if self.nodes_reverse is not None:
+                forward = drivers["air.forward"][..., self.edge:self.edge + 1] > 0.5
+                nodes = torch.where(forward, self.nodes, self.nodes_reverse)
+            T, X = drivers["T"], drivers["X_w"]
+            batch = broadcast_shapes(T.shape[:-1], X.shape[:-1], nodes.shape[:-1])
+            idx = nodes.expand(batch + nodes.shape[-1:])
+            T = T.expand(batch + T.shape[-1:]).gather(-1, idx)
+            X = X.expand(batch + X.shape[-1:]).gather(-1, idx)
             rho = _moist_air_buoyancy_density(T, X)
             return (self.coeff * rho).sum(-1, keepdim=True)
 
-        return memo(self, "head", (drivers.get("T"), drivers.get("X_w")), head)
+        key = (drivers.get("T"), drivers.get("X_w"), drivers.get("air.forward"))
+        return memo(self, "head", key, head)
 
 
 # ------------------------------------------------------------------------ elements
@@ -746,20 +794,55 @@ class _ZonalFlowEdge(Element):
 
 # ------------------------------------------------------------------------- closure
 EXTRACTION = "extraction.sources"  # kg/s, <= 0, full node: air a source draws out of a zone
+FORWARD = "air.forward"  # 1.0 where an edge's last solved flow is >= 0, else 0.0
+
+
+@dataclass(frozen=True)
+class _Series:
+    """Flow elements in series as the closure sees them (module docstring, "Flow elements in
+    series"). `flow_cols`: the `"air.q"` column of each flow edge of the transport layers
+    `layers`, in their `flow_kinds` order (a run's edge: its first element's column).
+    `junctions`: the junction nodes; `col`, `src`, `tgt`: the `"air.q"` column of each one's
+    run and the run's two ends (the upwind end is `src` while that flow is `>= 0`)."""
+
+    flow_cols: Tensor
+    layers: tuple[str, ...]
+    junctions: Tensor
+    col: Tensor
+    src: Tensor
+    tgt: Tensor
+
+    def fill(self, values: Tensor, q: Tensor | None) -> Tensor:
+        """`values` `(..., n, K)` with each junction's row set to its run's upwind end's at
+        the flows `q` (`src` without flows)."""
+        up = self.src if q is None else torch.where(q[..., self.col] >= 0, self.src, self.tgt)
+        batch = broadcast_shapes(values.shape[:-2], up.shape[:-1])
+        out = values.expand(batch + values.shape[-2:]).clone()
+        idx = up.expand(batch + up.shape[-1:]).unsqueeze(-1).expand(
+            batch + up.shape[-1:] + values.shape[-1:])
+        out[..., self.junctions, :] = out.gather(-2, idx)
+        return out
 
 
 class _ZoneStateClosure:
     """Writes the full-node drivers `"T"`, `"p_abs"` (and `"X_w"` when moisture is carried)
     from the transport states, the boundary drivers and the last solved `"air.phi"` (module
     docstring, "p_abs"), and the sources of air drawn out of a zone at its own state
-    (`EXTRACTION`, module docstring, "Sources")."""
+    (`EXTRACTION`, module docstring, "Sources"). With elements in series (`series`) it fills
+    each junction with its run's upwind end and writes the transport layers' flows
+    `"<layer>.q"`; with an `actual` column (`forward_edges`, the number of air edges) it
+    writes `FORWARD`, both from the state's `"air.q"` (module docstring, "Flow elements in
+    series")."""
 
     def __init__(self, *, medium: AirMedium, p_ref: float, T0: Tensor, phi0: Tensor,
                  X0: Tensor,
                  air_interior: Tensor, air_bound: Tensor, th_interior: Tensor | None,
                  th_bound: Tensor, sp_interior: Tensor | None, sp_bound: Tensor | None,
                  water: int | None, n_species: int,
-                 heat_edges: tuple[Tensor, Tensor] | None = None) -> None:
+                 heat_edges: tuple[Tensor, Tensor] | None = None,
+                 series: _Series | None = None, forward_edges: int | None = None,
+                 heads: tuple[_ColumnHead, ...] = (), jump_edges: tuple[int, ...] = (),
+                 state0_layer=None) -> None:
         self.medium = medium
         self.p_ref = float(p_ref)
         self.T0, self.phi0, self.X0 = T0, phi0, X0
@@ -772,6 +855,16 @@ class _ZoneStateClosure:
         # every air-layer edge in `"air.q"` order, set only when water vapour is carried
         # into a thermal layer by a medium whose cp depends on it.
         self.heat_edges = heat_edges
+        self.series = series
+        self.forward_edges = forward_edges
+        # The heads of `actual` columns (reading FORWARD), and the air layer of the algebraic
+        # pressures at a step's start when flows reverse there (`run._Midpoint`): with volume
+        # mass storage the storing zones are its boundary; None for the whole air layer.
+        self.heads = heads
+        # The edges whose flow's sign the heads read: each head's path and the other
+        # elements of its run in series, which carry the same flow.
+        self.jump_edges = jump_edges
+        self.state0_layer = state0_layer
         self.c0 = medium.specific_heat_cp(medium.X_default[0] if medium.has_moisture else 0.0)
         self.cp_dry = medium.specific_heat_cp(0.0)
         self.cp_slope = medium.specific_heat_cp(1.0) - self.cp_dry
@@ -790,7 +883,10 @@ class _ZoneStateClosure:
         parts = [(drivers["thermal.x_boundary"], self.th_bound)]
         if self.th_interior is not None:
             parts.append((state["thermal.x"], self.th_interior))
-        return self._scatter(self.T0, parts)
+        T = self._scatter(self.T0, parts)
+        if self.series is not None:
+            T = self.series.fill(T.unsqueeze(-1), state.get("air.q")).squeeze(-1)
+        return T
 
     def species(self, state, drivers) -> Tensor | None:
         """Full-node species mass fractions `(..., n, K)` (water last when carried)."""
@@ -806,6 +902,8 @@ class _ZoneStateClosure:
                                                             self.n_species))
         out[..., self.sp_bound, :] = x_b.expand(batch + (self.sp_bound.numel(),
                                                          self.n_species))
+        if self.series is not None:
+            out = self.series.fill(out, state.get("air.q"))
         return out
 
     def pressures(self, state, drivers) -> Tensor:
@@ -843,6 +941,15 @@ class _ZoneStateClosure:
     def __call__(self, state, drivers):
         T = self.temperatures(state, drivers)
         out = {"T": T, "p_abs": self.pressures(state, drivers)}
+        q = state.get("air.q")
+        if self.forward_edges is not None:
+            out[FORWARD] = (torch.ones(self.forward_edges, dtype=F64) if q is None
+                            else (q >= 0).to(F64))
+        if self.series is not None:
+            flows = (torch.zeros(self.series.flow_cols.numel(), dtype=F64) if q is None
+                     else q[..., self.series.flow_cols])
+            for name in self.series.layers:
+                out[f"{name}.q"] = flows
         if self.water is not None:
             out["X_w"] = self.species(state, drivers)[..., self.water]
             q = state.get("air.q")
@@ -1216,6 +1323,8 @@ class _Builder:
         self._inputs: dict[str, Tensor] = {}
         # MediumColumn name -> (the flow element whose path holds it, its sign there).
         self._columns: dict[str, tuple[str, int]] = {}
+        # A one-way element in series -> the zone/boundary its src and tgt sides reach.
+        self._ends: dict[str, tuple[str, str]] = {}
         # ZonalFlow_m_flow instances: (component, mAB_flow, mBA_flow, side A, side B).
         self._zonal_pairs: list[tuple[Component, Tensor, Tensor, int, int]] = []
 
@@ -1347,7 +1456,7 @@ class _Builder:
                           "(massDynamics is SteadyState everywhere)")
         use_storage = bool(storage_zones)
 
-        node_names = [n for n in g.zones] + [n for n in g.boundaries]
+        node_names = [n for n in g.zones] + [n for n in g.boundaries] + list(g.junctions)
         index = {n: i for i, n in enumerate(node_names)}
         net = Network(dtype=F64)
         for n in node_names:
@@ -1356,6 +1465,12 @@ class _Builder:
                 net.add_node(n, volume=z.V, T0=z.T_start, z_ref=0.0)
             else:
                 net.add_node(n, volume=0.0, T0=med.T_default, z_ref=0.0)
+        # Each path's ends as its columns see them: across a junction, the run's end on
+        # that side (module docstring, "Flow elements in series").
+        for chain in g.series:
+            for path, sign in zip(chain.paths, chain.signs, strict=True):
+                ends = (chain.src, chain.tgt) if sign > 0 else (chain.tgt, chain.src)
+                self._ends[path.element.name] = ends
 
         elements: list[Element] = []
         drives: list = []
@@ -1366,6 +1481,15 @@ class _Builder:
 
         for path in g.paths:
             self._path(path, net, index, elements, drives, kinds, edge_dirs, pressure_edges)
+        # Each run of elements in series is one edge of the transport layers (module
+        # docstring, "Flow elements in series").
+        in_series: set[str] = set()
+        series_kinds: dict[str, str] = {}  # "series:<first>" -> the first element's kind
+        for chain in g.series:
+            first = min(p.element.name for p in chain.paths)
+            in_series.update(f"airpath:{p.element.name}" for p in chain.paths)
+            series_kinds[f"series:{first}"] = f"airpath:{first}"
+            net.add_edge(chain.src, chain.tgt, kind=f"series:{first}")
         for door in g.doors:
             self._door(door, net, index, elements, drives, kinds, edge_dirs, extra_ports,
                        pressure_edges)
@@ -1492,7 +1616,12 @@ class _Builder:
                     node_sources=[storage.ZoneStorage(storage_air, vols, p_ref, th_store)],
                     quantity="pressure", unit="Pa", flow_unit="kg/s")
         layers: dict = {"air": air}
-        flow_kinds = tuple(air.kinds)
+        flow_kinds = tuple(k for k in air.kinds if k not in in_series) + tuple(series_kinds)
+        for d in drives:
+            if isinstance(d, _ColumnHead) and d.nodes_reverse is not None:
+                d.edge = air.kind_slice(d.kind).start
+        n_edges = sum(air.kind_slice(k).stop - air.kind_slice(k).start
+                      for k in dict.fromkeys(air.kinds))
 
         pinned = [nm for nm, z in zones.items() if z.pinned is not None]
         th_boundary = list(g.boundaries) + pinned
@@ -1590,6 +1719,12 @@ class _Builder:
         X_const = med.X_default[0] if med.has_moisture else 0.0
         if water is None:
             const["X_w"] = torch.full((n,), X_const, dtype=F64)
+        heads = tuple(d for d in drives
+                      if isinstance(d, _ColumnHead) and d.nodes_reverse is not None)
+        if heads:
+            # Rewritten by the closure from the solved flows (module docstring, "Flow
+            # elements in series").
+            const[FORWARD] = torch.ones(n_edges, dtype=F64)
 
         s_air, s_th, s_sp, s_air_point, s_out = sources
         air_idx = set(air.interior.tolist())
@@ -1657,6 +1792,12 @@ class _Builder:
             heat_edges=self._heat_edges(air, net) if (
                 water is not None and "thermal" in layers and not use_storage
                 and med.specific_heat_cp(1.0) != med.specific_heat_cp(0.0)) else None,
+            series=self._series(g, air, index, flow_kinds, series_kinds,
+                                [nm for nm in ("thermal", "species") if nm in layers]),
+            forward_edges=n_edges if heads else None, heads=heads,
+            jump_edges=self._jump_edges(heads, g, air),
+            state0_layer=self._state0_layer(net, elements, drives, air_boundary, storage_air,
+                                            air) if heads and use_storage else None,
         )
         zone_closure.append(closure)
         closures: list = [closure]
@@ -1742,7 +1883,8 @@ class _Builder:
                               attached={b.name: path(z) for z, b in g.attached}, p_ref=p_ref,
                               storage=tuple(path(z) for z in g.zones if z in storage_zones),
                               weather=self.weather.columns(_rows(self.times, self.out_times)),
-                              controls=dict(fb.blocks) if fb is not None else {})
+                              controls=dict(fb.blocks) if fb is not None else {},
+                              junctions=tuple(path(j) for j in g.junctions))
         return model, state, drivers, names
 
     def _storage_closure(self, mbl, th, p_ref, zones, node_names, index, storage_zones,
@@ -1763,7 +1905,9 @@ class _Builder:
                 if zones[node_names[i]].mass_dynamics == "SteadyStateInitial"
                 and zones[node_names[i]].initialize_p]
         init_layer = None
-        if free:
+        # A junction between elements in series holds no mass: its pressure is solved at
+        # t = StartTime too.
+        if free or self.graph.junctions:
             fixed = [node_names[i] for i in storage_air if i not in free]
             init_layer = PotentialFlowLayer(net, "air", elements, drives=drives,
                                             boundary=list(air_boundary) + fixed,
@@ -1850,6 +1994,53 @@ class _Builder:
             layers["species"].capacity = torch.tensor([mass(i) for i in idx], dtype=F64)
 
     @staticmethod
+    def _series(g: ComponentGraph, air: PotentialFlowLayer, index: dict[str, int],
+                flow_kinds: tuple[str, ...], series_kinds: dict[str, str],
+                layers: list[str]) -> _Series | None:
+        """The closure's view of the elements in series (`_Series`), or None without."""
+        if not g.series:
+            return None
+        cols: list[int] = []
+        for k in flow_kinds:
+            sl = air.kind_slice(series_kinds.get(k, k))
+            cols.extend(range(sl.start, sl.stop) if k not in series_kinds else [sl.start])
+        junctions, col, src, tgt = [], [], [], []
+        for chain in g.series:
+            first = min(p.element.name for p in chain.paths)
+            for j in chain.junctions:
+                junctions.append(index[j])
+                col.append(air.kind_slice(f"airpath:{first}").start)
+                src.append(index[chain.src])
+                tgt.append(index[chain.tgt])
+
+        def long(v: list[int]) -> Tensor:
+            return torch.tensor(v, dtype=torch.long)
+
+        return _Series(flow_cols=long(cols), layers=tuple(layers), junctions=long(junctions),
+                       col=long(col), src=long(src), tgt=long(tgt))
+
+    @staticmethod
+    def _jump_edges(heads, g: ComponentGraph, air: PotentialFlowLayer) -> tuple[int, ...]:
+        """The `"air.q"` columns of the heads' paths and of the elements in series with them."""
+        kinds = {h.kind for h in heads}
+        for chain in g.series:
+            members = {f"airpath:{p.element.name}" for p in chain.paths}
+            if members & kinds:
+                kinds |= members
+        return tuple(sorted(air.kind_slice(k).start for k in kinds))
+
+    @staticmethod
+    def _state0_layer(net, elements, drives, air_boundary, storage_air,
+                      air) -> PotentialFlowLayer | None:
+        """The air layer with every storing zone a boundary: its interior is the pressures that
+        are algebraic at a step's start (junctions, zones without storage), or None."""
+        if not set(air.interior.tolist()) - set(storage_air):
+            return None
+        fixed = list(air_boundary) + [net.nodes[i] for i in storage_air]
+        return PotentialFlowLayer(net, "air", elements, drives=drives, boundary=fixed,
+                                  quantity="pressure", unit="Pa", flow_unit="kg/s")
+
+    @staticmethod
     def _heat_edges(air: PotentialFlowLayer, net: Network) -> tuple[Tensor, Tensor]:
         """`(src, tgt)` node positions of every air-layer edge, in `"air.q"` column order."""
         src = torch.empty(sum(air.kind_slice(k).stop - air.kind_slice(k).start
@@ -1892,31 +2083,41 @@ class _Builder:
         comp = path.element
         kind = f"airpath:{comp.name}"
         el = _one_way(comp, kind, self.med, self.errors)
-        coeff, nodes = [], []
+        coeff, nodes, nodes_reverse = [], [], []
+        # The stream arriving from each side: across a junction, the run's end there.
+        src, tgt = self._ends.get(comp.name, (path.src, path.tgt))
         for col, sign in path.columns:
             h = float(col.parameters.get("h", 3.0))  # MediumColumn.mo:10
             sel = _short(col.parameters.get("densitySelection"), "")
             # sign = +1: the column's port_a (top) faces the path's src side.
-            top, bottom = (path.src, path.tgt) if sign > 0 else (path.tgt, path.src)
+            top, bottom = (src, tgt) if sign > 0 else (tgt, src)
             if sel == "fromTop":
-                node = top
+                node = node_reverse = top
             elif sel == "fromBottom":
-                node = bottom
+                node = node_reverse = bottom
+            elif sel == "actual":
+                # The stream entering the column: the upwind end (module docstring, "Flow
+                # elements in series").
+                node, node_reverse = src, tgt
             else:
                 self.errors.append(
                     f"{col.name} ({col.cls}): densitySelection = {sel or 'unset'} is not "
-                    f"supported (fromTop and fromBottom are)"
+                    f"supported (fromTop, fromBottom and actual are)"
                 )
                 continue
             coeff.append(sign * h * G_N)
             nodes.append(index[node])
+            nodes_reverse.append(index[node_reverse])
             self._columns[col.name] = (comp.name, sign)
         if el is None:
             return
         net.add_edge(path.src, path.tgt, kind=kind)
         elements.append(el)
         if coeff:
-            drives.append(_ColumnHead(kind, _t(coeff), torch.tensor(nodes, dtype=torch.long)))
+            reverse = None if nodes_reverse == nodes else torch.tensor(nodes_reverse,
+                                                                      dtype=torch.long)
+            drives.append(_ColumnHead(kind, _t(coeff), torch.tensor(nodes, dtype=torch.long),
+                                      reverse))
         kinds[comp.name] = (kind,)
         edge_dirs[comp.name] = [(kind, 0, 1)]
         pressure_edges.append((index[path.src], index[path.tgt]))

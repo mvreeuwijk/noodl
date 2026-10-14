@@ -118,20 +118,48 @@ def _initial_air(model: Model, store: StorageClosure, state: State, drivers: Dri
     `"air.phi"`) and the flows the elements give there, or, when some zone's initial
     equation is `der(p) = 0`, the air layer solved with the others held at their start
     pressures. The carried `"air.storage"` is re-evaluated at the result."""
-    drv = dict(drivers)
-    drv.update(_closure(model)(state, drv))
-    new = dict(state)
+    closure = _closure(model)
     air = model.potential["air"]
-    if store.init_layer is None:
-        new["air.q"] = air.flows(state["air.phi"], drv)
-    else:
-        init = store.init_layer
-        phi_b = state["air.phi"][..., init.bound]
-        new["air.phi"], new["air.q"] = init.solve(phi_b, drv, drv.get("air.sources"),
-                                                  phi0=None, **solve_kwargs)
-    drv.update(_closure(model)(new, drv))
+    new = dict(state)
+    for _ in range(_DIRECTION_PASSES):
+        drv = dict(drivers)
+        drv.update(closure(new, drv))
+        before = new.get("air.q")
+        if store.init_layer is None:
+            new["air.q"] = air.flows(state["air.phi"], drv)
+        else:
+            init = store.init_layer
+            phi_b = state["air.phi"][..., init.bound]
+            new["air.phi"], new["air.q"] = init.solve(phi_b, drv, drv.get("air.sources"),
+                                                      phi0=None, **solve_kwargs)
+        if _same_directions(closure, before, new["air.q"]):
+            break
+    drv.update(closure(new, drv))
     new["air.storage"] = store(new, drv)["air.storage"]
     return new
+
+
+# The airflow at a state whose flows decide an `actual` column's density (`assemble`, "Flow
+# elements in series") is solved again with the directions of its own flows until they agree,
+# at most this many times (a single reversal settles in two).
+_DIRECTION_PASSES = 4
+
+
+def _same_directions(closure: _ZoneStateClosure, before: Tensor | None, after: Tensor,
+                     at_switch: float | None = None) -> bool:
+    """Whether the flows `after` have the directions `before` had on the edges whose
+    direction an `actual` column's density reads (always, without such a column). With
+    `at_switch`, only the edges where `|before|` is within it count (a reversal at the
+    start of a step, `_Midpoint.step`)."""
+    if not closure.heads:
+        return True
+    if before is None:
+        before = torch.ones_like(after)  # the closure's directions before any solve
+    cols = torch.tensor([h.edge for h in closure.heads], dtype=torch.long)
+    changed = (before[..., cols] >= 0) != (after[..., cols] >= 0)
+    if at_switch is not None:
+        changed = changed & (before[..., cols].abs() <= at_switch)
+    return not bool(changed.any())
 
 
 # Volume mass storage (`storage` module docstring, "Initial state"): MBL starts every
@@ -376,14 +404,19 @@ def _solve_air(model: Model, state: State, drivers: Drivers, **solve_kwargs) -> 
     `p_start` is far from a stack's hydrostatic solution, and from there Newton cycles on
     MBL's discretised doors (`Validation/ThreeRoomsContamDiscretizedDoor.mo`: residual
     0.084 kg/s after 50 iterations), while the linear guess converges in three."""
-    drv = dict(drivers)
-    for c in model.closures:
-        drv.update(c(state, drv))
+    closure = next((c for c in model.closures if isinstance(c, _ZoneStateClosure)), None)
     new = dict(state)
-    for name, layer in model.potential.items():
-        phi, q = layer.solve(drv[f"{name}.phi_boundary"], drv, drv.get(f"{name}.sources"),
-                             phi0=None, **solve_kwargs)
-        new[f"{name}.phi"], new[f"{name}.q"] = phi, q
+    for _ in range(_DIRECTION_PASSES):
+        drv = dict(drivers)
+        for c in model.closures:
+            drv.update(c(new, drv))
+        before = new.get("air.q")
+        for name, layer in model.potential.items():
+            phi, q = layer.solve(drv[f"{name}.phi_boundary"], drv, drv.get(f"{name}.sources"),
+                                 phi0=None, **solve_kwargs)
+            new[f"{name}.phi"], new[f"{name}.q"] = phi, q
+        if closure is None or _same_directions(closure, before, new["air.q"]):
+            break
     return new
 
 
@@ -593,7 +626,10 @@ class _Switches:
     edge flow's sign, in units of `q_scale` (the transport layers upwind on it: the
     advected state switches from one end's to the other's where a flow reverses) and, with a
     feedback network, its limiters' corners (`ControlNetwork.switching`, in units of each
-    limiter's range), last. `parts` are the elements that have switches."""
+    limiter's range), last. `parts` are the elements that have switches. `jumps` holds the
+    positions of the switches where the right-hand side jumps rather than changes piece:
+    the signs of the flows an `actual` column's density reads, and of the flows in series
+    with them (`assemble`, "Flow elements in series")."""
 
     def __init__(self, model: Model, closure: _ZoneStateClosure, q_scale: float) -> None:
         ((self.name, self.air),) = model.potential.items()
@@ -602,6 +638,8 @@ class _Switches:
         self.q_scale = q_scale
         self._last: tuple | None = None  # (state, point drivers, values) of the last call
         self.parts = []
+        self.jump_edges = list(closure.jump_edges)
+        self.jumps: set[int] = set()
         for kind in self.air.kinds:
             el, sl = self.air.element_for(kind)
             if type(el).switching is not Element.switching:
@@ -628,6 +666,8 @@ class _Switches:
         drv.update(self.closure(state, drv))
         dp = self.air.dp(state[f"{self.name}.phi"], drv)
         vals = [el.switching(dp[..., sl], drv) for el, sl in self.parts]
+        offset = sum(v.numel() for v in vals if v is not None)
+        self.jumps = {offset + e for e in self.jump_edges}
         vals.append(state[f"{self.name}.q"] / self.q_scale)
         if self.control is not None:
             vals.append(self.control.network.switching(state, drv))
@@ -694,14 +734,18 @@ def _advance_located(state: State, pts: list[float], advance, switches: _Switche
         if b - a <= 4 * margin:
             return end  # a step this short is not split (SWITCH_MARGIN)
         lo, hi, g_lo, g_hi, side = a, b, float(g_a[k]), float(g_b[k]), 0
-        best = None
+        best = before_k = None
         for _ in range(SWITCH_MAX_ITER):
-            t = lo + (hi - lo) * g_lo / (g_lo - g_hi)
+            # Across a jump the switch's value is no guide to where it lies: bisection.
+            t = (0.5 * (lo + hi) if k in switches.jumps
+                 else lo + (hi - lo) * g_lo / (g_lo - g_hi))
             t = min(max(t, a + margin), b - margin)
             mid.restore(snap)
             trial, d_t = advance(state, _split(a, t, n))
             g_t = switches(trial, d_t)
             best = (t, trial, mid.snapshot())
+            if float(g_t[k]) * float(g_a[k]) > 0:
+                before_k = best  # the latest trial ending before switch k
             before = _crossed(g_a, g_t) & (g_t.abs() > SWITCH_TOL)
             if skip:
                 before[list(skip)] = False
@@ -709,6 +753,7 @@ def _advance_located(state: State, pts: list[float], advance, switches: _Switche
                 j = _first(g_a, g_t, before)
                 if j != k:  # another switch is crossed first: locate that one
                     k, lo, hi, g_lo, g_hi, side = j, a, t, float(g_a[j]), float(g_t[j]), 0
+                    before_k = None
                     continue
             gk = float(g_t[k])
             if abs(gk) <= SWITCH_TOL:
@@ -728,14 +773,27 @@ def _advance_located(state: State, pts: list[float], advance, switches: _Switche
                 if side == 1:
                     g_hi *= 0.5
                 side = 1
+        jump = k in switches.jumps
+        if jump and before_k is not None:
+            # Where the right-hand side jumps, the run is taken to the trial nearest the
+            # switch on its near side (to SWITCH_TOL or the time resolution): one beyond it
+            # was stepped across the jump.
+            best = before_k
         t, trial, post = best
         skip.add(k)
+        if jump and before_k is None:
+            # A jump within the margin of the start: the step starts at it.
+            mid.restore(snap)
+            mid.jump_from = state
+            continue
         if t <= a + margin * (1 + 1e-9) or t >= b - margin * (1 + 1e-9):
             # The switch lies within the margin of an end: the step is not split there.
             mid.restore(snap)
             continue
         state = trial
         mid.restore(post)
+        if jump:
+            mid.jump_from = state  # the step from here starts at the jump (`_Midpoint.step`)
         a, skip = t, {k}
         pts = _split(a, b, n)
 
@@ -848,6 +906,9 @@ class _Midpoint:
         self.storage_hist: tuple[tuple[Tensor, ...], tuple[float, ...]] = ((), ())
         self.kw = dict(solve_kwargs, differentiable=False)
         self.last: tuple[float, Tensor, Tensor] | None = None  # (h, z at start, z at end)
+        # The state a located jump was taken to (`_advance_located`): a step from it starts
+        # at the jump (`step`).
+        self.jump_from: State | None = None
 
     def restart(self) -> None:
         """Forget the storage rate's BDF2 history (at a signal event, `simulate`): the next
@@ -893,6 +954,35 @@ class _Midpoint:
             written = self.closure(state, d)
         return {n: written[f"{n}.sources"] - d.get(f"{n}.sources", 0.0)
                 for n in self.layers if f"{n}.sources" in written}
+
+    def _flows(self, layer, q: Tensor) -> Tensor:
+        """The transport layer's flows from the air layer's `q`: its own kinds', or with
+        elements in series the closure's columns (`assemble`, "Flow elements in series")."""
+        series = self.closure.series
+        if series is None:
+            return self.air.flows_of_kind(q, layer.flow_kinds)
+        return q[..., series.flow_cols]
+
+    def _start_with_directions(self, s0: State, d0: Drivers, q1: Tensor) -> State:
+        """State 0 with its algebraic pressures and flows solved again with the directions of
+        the flows `q1` at the step's end (an `actual` column's density, `step`)."""
+        name = self.air_name
+        s = dict(s0)
+        s[f"{name}.q"] = q1
+        drv = dict(d0)
+        drv.update(self.closure(s, drv))
+        layer = self.closure.state0_layer
+        if self.store is None:
+            phi, q = self._solve_air(drv, drv.get(f"{name}.sources"),
+                                     s0[f"{name}.phi"][..., self.air.interior], 0.0)
+        elif layer is None:
+            phi, q = s0[f"{name}.phi"], self.air.flows(s0[f"{name}.phi"], drv)
+        else:
+            phi, q = self._solve_air(drv, drv.get(f"{name}.sources"),
+                                     s0[f"{name}.phi"][..., layer.interior], 0.0, layer,
+                                     s0[f"{name}.phi"][..., layer.bound])
+        s[f"{name}.phi"], s[f"{name}.q"] = phi, q
+        return s
 
     def _zero_sources(self, n: str, x: Tensor) -> Tensor:
         layer = self.layers[n]
@@ -951,25 +1041,61 @@ class _Midpoint:
                            torch.zeros_like(w_mass))
         return store.terms(s, {**drv, "_q": q}, w, net, s_air, dnet=dnet)
 
-    def _solve_air(self, drv: Drivers, sources, phi0: Tensor, h: float):
-        """The air layer at state 1 (`air.solve`); with storage a solve that stalls within
-        STORAGE_STALL times its tolerance is accepted (the round-off of the storage terms)."""
+    def _solve_air(self, drv: Drivers, sources, phi0: Tensor | None, h: float, layer=None,
+                   phi_b: Tensor | None = None):
+        """The air layer (`layer`, default the model's, with boundary values `phi_b`,
+        default `"air.phi_boundary"`) at state 1 (`air.solve`); with
+        storage a solve that stalls within STORAGE_STALL times its tolerance is accepted (the
+        round-off of the storage terms). A solve from `phi0` that fails is made again from
+        the layer's linear initial guess: from the pressures before a run of elements in
+        series reversed (its junction 37 Pa off, ChimneyShaftNoVolume at 0.19 s) Newton did
+        not converge, from the linear guess it does."""
         name = self.air_name
-        if self.store is None:
-            return self.air.solve(drv[f"{name}.phi_boundary"], drv, sources, phi0=phi0,
-                                  **self.kw)
-        diag: dict = {}
-        phi, q = self.air.solve(drv[f"{name}.phi_boundary"], drv, sources, phi0=phi0,
-                                diagnostics=diag, **{**self.kw, "on_failure": "return"})
-        if not bool(torch.as_tensor(diag["converged"]).all()):
+        layer = self.air if layer is None else layer
+        limit = 0.0 if self.store is None else STORAGE_STALL * self.kw.get("atol",
+                                                                           STORAGE_AIR_ATOL)
+
+        def attempt(start):
+            diag: dict = {}
+            phi, q = layer.solve(drv[f"{name}.phi_boundary"] if phi_b is None else phi_b,
+                                 drv, sources, phi0=start, diagnostics=diag,
+                                 **{**self.kw, "on_failure": "return"})
             res = float(torch.as_tensor(diag["residual_norm"]).max())
-            if not res <= STORAGE_STALL * self.kw.get("atol", STORAGE_AIR_ATOL):
-                raise RuntimeError(
-                    f"simulate(scheme='midpoint'): the airflow solve of a {h!r} s step did "
-                    f"not converge (residual {res:.3g} kg/s)")
+            return phi, q, bool(torch.as_tensor(diag["converged"]).all()) or res <= limit, res
+
+        phi, q, ok, res = attempt(phi0)
+        if not ok and phi0 is not None:
+            phi, q, ok, res = attempt(None)
+        if not ok:
+            raise RuntimeError(
+                f"simulate(scheme='midpoint'): the airflow solve of a {h!r} s step did "
+                f"not converge (residual {res:.3g} kg/s)")
         return phi, q
 
     def step(self, s0: State, d0: Drivers, d1: Drivers, h: float) -> State:
+        """State 1 after a step of `h` from state 0 (class docstring). Where a flow whose
+        direction decides an `actual` column's density reverses at the step's start (located
+        there, `_advance_located`: `jump_from`, or within SWITCH_SKIP of its switch at state 0,
+        of the other direction at state 1), the density jumps there: state 0's algebraic
+        pressures and flows are taken with the end's directions, and the step is made again
+        from there. A reversal inside the step is left to `_advance_located`, which splits
+        the step at it."""
+        name = self.air_name
+        at_jump = s0 is self.jump_from
+        s1 = self._step(s0, d0, d1, h)
+        for _ in range(_DIRECTION_PASSES):
+            q0, q1 = s0[f"{name}.q"], s1[f"{name}.q"]
+            if _same_directions(self.closure, q0, q1,
+                                at_switch=None if at_jump else SWITCH_SKIP * SWITCH_FLOW):
+                break
+            # The flows jump there, and with them the volumes' storage rate: the BDF2
+            # history before the jump does not carry over (`restart`).
+            self.restart()
+            s0 = self._start_with_directions(s0, d0, q1)
+            s1 = self._step(s0, d0, d1, h)
+        return s1
+
+    def _step(self, s0: State, d0: Drivers, d1: Drivers, h: float) -> State:
         air, name = self.air, self.air_name
         control = self.control
         # Every step-mean driver (`"<...>.sources"`: the sources and the air drawn out of a
@@ -992,14 +1118,21 @@ class _Midpoint:
         if store is not None:
             s_end = d1.get(f"{name}.sources_point", s_end)
 
+        # The last solved flows: the closure's view of the flows at state 1 (the directions of
+        # an `actual` column, a junction's upwind end), from state 0's until the first solve.
+        q_last = [q0]
+
         def G(z: Tensor) -> tuple[Tensor, State]:
             s = self._unpack(z, s0)
+            if self.closure.heads or self.closure.series is not None:
+                s[f"{name}.q"] = q_last[0]
             drv = dict(d1)
             drv.update(self.closure(s, drv))
             if store is not None:
                 drv.update(air_drv)
             phi, q = self._solve_air(drv, s_end, s[f"{name}.phi"][..., air.interior], h)
             s[f"{name}.phi"], s[f"{name}.q"] = phi, q
+            q_last[0] = q
             written1 = self.closure(s, d1)  # at state 1 (the closure reads, never writes, d1)
             extra1 = self._extra_sources(s, d1, written1)
             qm = 0.5 * (q0 + q)
@@ -1051,11 +1184,11 @@ class _Midpoint:
                     else:
                         xbm, rm = _hermite(xb0, xb1, r0, r1, h, 0.5)
                         rates0, rates1 = (r0, rm), (rm, r1)
-                    xm = layer.step(x0, air.flows_of_kind(q0, layer.flow_kinds),
+                    xm = layer.step(x0, self._flows(layer, q0),
                                     src + ext0.get(n, 0.0), xb0, 0.5 * h,
                                     capacity=cap0.get(n), x_boundary_end=xbm,
                                     x_boundary_rates=rates0, removal=rem0)
-                    s[f"{n}.x"] = layer.step(xm, air.flows_of_kind(q, layer.flow_kinds),
+                    s[f"{n}.x"] = layer.step(xm, self._flows(layer, q),
                                              src + ext1.get(n, 0.0), xbm, 0.5 * h,
                                              capacity=cap1.get(n), x_boundary_end=xb1,
                                              x_boundary_rates=rates1, removal=rem1)
@@ -1064,7 +1197,7 @@ class _Midpoint:
                     if n in ext0 or n in ext1:
                         src = src + 0.5 * (ext0.get(n, 0.0) + ext1.get(n, 0.0))
                     removal = None if rem0 is None else 0.5 * (rem0 + rem1)
-                    s[f"{n}.x"] = layer.step(x0, air.flows_of_kind(qm, layer.flow_kinds), src,
+                    s[f"{n}.x"] = layer.step(x0, self._flows(layer, qm), src,
                                              0.5 * (xb0 + xb1), h, capacity=cap,
                                              removal=removal)
             return self._pack(s), s

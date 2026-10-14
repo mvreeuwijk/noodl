@@ -23,7 +23,7 @@ print(result["T"][-1])       # zone temperatures (K) at the last grid time, node
 print(result["air.q"][-1])   # edge flows (kg/s); names.edges maps an MBL instance to its columns
 ```
 
-**Supported (21 models: 8 `Validation` + 12 `Examples` of `Buildings.Airflow.Multizone`, and
+**Supported (22 models: 8 `Validation` + 13 `Examples` of `Buildings.Airflow.Multizone`, and
 `Buildings.Fluid.Sources.Examples.Outside_Cp`).** `Buildings.Airflow.Multizone`
 elements, `MixingVolume` zones, pressure/temperature boundaries, trace substances, the outside
 boundaries `Outside`, `Outside_Cp`, `Outside_CpLowRise` and `Outside_CpData` and the weather
@@ -31,7 +31,7 @@ reader `ReaderTMY3` (see "Weather and wind" below) — not `Buildings.ThermalZon
 district networks. `Validation`: `OneWayFlow`,
 `DoorOpenClosed`, `OpenDoorPressure`, `OpenDoorTemperature`, `ThreeRoomsContam`,
 `ThreeRoomsContamDiscretizedDoor`, `OpenDoorBuoyancyDynamic`, `OpenDoorBuoyancyPressureDynamic`.
-`Examples`: `ChimneyShaftWithVolume`, `CO2TransportStep`, `ClosedDoors`, `NaturalVentilation`,
+`Examples`: `ChimneyShaftNoVolume`, `ChimneyShaftWithVolume`, `CO2TransportStep`, `ClosedDoors`, `NaturalVentilation`,
 `OneEffectiveAirLeakageArea`, `OneOpenDoor`, `OneRoom`, `Orifice`, `PowerLaw`, `ReverseBuoyancy`,
 `ReverseBuoyancy3Zones`, `ZonalFlow`. The weather and wind pressure of the `Buildings.Fluid.Sources` examples
 `Outside_CpLowRise`, `Outside_CpData`, `Outside_CpData_Angles` and
@@ -42,6 +42,18 @@ top one taking its density from below and the bottom one from above, both the vo
 (`use_HeatTransfer = false` only). Its volume is named `<column>.vol` in `names.nodes`, as in
 MBL's results. A `TemperatureSensor` on a volume's `heatPort` reads that volume's
 temperature; its `T` may feed a signal block's input.
+
+**Flow elements in series.** One-way flow elements may be wired in series, joined through
+columns or directly (`ChimneyShaftNoVolume`: two orifices at the ends of one shaft with no
+volume in it). The columns between two elements go with the first in name order; the joint is
+a junction without storage, a node of the air layer (`names.junctions`, also in
+`names.nodes`), where the elements' flows balance. Every element, column and junction passes
+the stream on unchanged, so the transport of heat and species takes the whole run as one edge
+from one end to the other; the junction's temperature and composition are those of the run's
+upwind end. `MediumColumn` takes `densitySelection = actual` too: the density of the stream
+entering the column, which is the upwind end's by the flow's direction (the driver
+`"air.forward"`). Where that flow reverses, the column's head jumps; `simulate` puts a step
+boundary there and starts the next step from the airflow of the new direction.
 
 **Feedback control.** `LimPID` is supported as a P controller, `y = clamp(k (wp u_s - u_m),
 yMin, yMax)`, transcribed from MSL 4.1.0 (`Blocks/Continuous.mo`): its measurement from a
@@ -92,8 +104,8 @@ follow-up.
 **Refused, each with a named error** (`ModelicaImportError` lists every offending instance and
 its class):
 
-- `ChimneyShaftNoVolume` — a chain of two flow elements (its two orifices in one column, with
-  no volume between them).
+- A door or zonal flow inside a column chain, and a ring of one-way elements in series with
+  no volume or boundary.
 - A `LimPID` with an integral or derivative part (`controllerType` PI, PD or PID), with
   feed-forward, or with the steady-state or initial-output initialisation; a feedback loop
   whose signal drives anything but a `PrescribedHeatFlow`'s `Q_flow`, a heat flow into a zone
@@ -112,12 +124,11 @@ its class):
   driving one of its inputs that it does not read (an output taken from the file, or an
   input of another output).
 
-For example, reading `ChimneyShaftNoVolume` raises:
+For example, an orifice `ori` wired to a door's `port_a1` raises:
 
 ```text
-ModelicaImportError: modelica: refused 2 items:
-  - oriChiBot (Buildings.Airflow.Multizone.Orifice): chain has more than one flow element: also found oriChiTop
-  - oriChiTop (Buildings.Airflow.Multizone.Orifice): chain has more than one flow element: also found oriChiBot
+ModelicaImportError: modelica: refused 1 item:
+  - ori (Buildings.Airflow.Multizone.Orifice): a door or zonal flow in a hydrostatic-column chain
 ```
 
 **Conventions:**
@@ -152,9 +163,9 @@ ModelicaImportError: modelica: refused 2 items:
 - Refused, also with a named error: with `mass_storage=False` (or volumes whose `massDynamics`
   is `SteadyState`), a closed group of zones (joined only by pressure-dependent
   edges or zonal flows, no boundary among them) with a net flow imbalance — an unequal
-  `ZonalFlow_m_flow` pair or a mass source into it; `MediumColumn.densitySelection = "actual"`;
-  and an outside boundary whose weather-bus inputs come from no `ReaderTMY3` and no signal. With
-  storage, none of the 21 supported models needs any of the three.
+  `ZonalFlow_m_flow` pair or a mass source into it; and an outside boundary whose weather-bus
+  inputs come from no `ReaderTMY3` and no signal. With storage, none of the 22 supported models
+  needs either.
 
 **Weather and wind.** A `ReaderTMY3` supplies the outside boundaries wired to it with the dry-bulb
 temperature, the atmospheric pressure, the relative humidity, the wind speed and the wind

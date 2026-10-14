@@ -50,7 +50,6 @@ import dataclasses
 import json
 import multiprocessing
 import os
-import re
 import time
 from pathlib import Path
 
@@ -59,9 +58,9 @@ import pytest
 import torch
 
 from noodl.apps.building_physics import read_modelica
-from noodl.apps.building_physics.modelica.assemble import weather_columns
+from noodl.apps.building_physics.modelica.assemble import experiment_times, weather_columns
 from noodl.apps.building_physics.modelica.run import extrapolate, simulate
-from noodl.apps.building_physics.modelica.schema import ModelicaImportError, load
+from noodl.apps.building_physics.modelica.schema import load
 
 ROOT = Path(__file__).resolve().parents[2]
 DATA = ROOT / "tests" / "data" / "modelica"
@@ -74,11 +73,25 @@ VOLUME_CLASSES = ("Buildings.Fluid.MixingVolumes.MixingVolume",
                   "Buildings.Fluid.Delays.DelayFirstOrder")
 
 
+# Reference rows OpenModelica wrote off the output grid, per model: they are not compared.
+# ChimneyShaftNoVolume's shaft flow reverses at 0.192 s, where the column's density jumps
+# (`densitySelection = actual`); DASSL chatters there, and the result holds six rows at
+# 0.19198838931 s (+1.8e-12 s apart, the state at the reversal) in place of the output times
+# 7.2 to 43.2 s (the 1e-12 export, two in place of 7.2 and 14.4 s). From 50.4 s on the rows are
+# on the grid, and noodl physics' runs, reversing at 0.192 s, agree with both exports there.
+OFF_GRID_ROWS = {"ChimneyShaftNoVolume": 6}
+
+
 def _csv(model: str) -> tuple[list[str], np.ndarray]:
     lines = [ln for ln in (DATA / f"{model}.csv").read_text().splitlines()
              if ln and not ln.startswith("#")]
     head = [h.strip('"') for h in lines[0].split(",")]
     data = np.array([[float(x) for x in ln.split(",")] for ln in lines[1:]])
+    if model in OFF_GRID_ROWS:
+        grid = experiment_times(load(DATA / f"{model}.json")).numpy()
+        on = np.abs(data[:, :1] - grid[None, :]).min(axis=1) <= 1e-9 * max(1.0, grid[-1])
+        assert int((~on).sum()) == OFF_GRID_ROWS[model], (model, int((~on).sum()))
+        data = data[on]
     return head, data
 
 
@@ -243,12 +256,6 @@ def test_one_way_flow_against_the_embedded_contam_table():
     assert total == 13 * 8
 
 
-REFUSED = {
-    # Two orifices in one column chain (no storing node between them).
-    "ChimneyShaftNoVolume": {"oriChiBot", "oriChiTop"},
-}
-
-
 # Models `read_modelica` imports but the dynamic parity set refuses, each with the reason.
 DEFERRED = {
     # A 62.5 m3 room between two Outside_CpLowRise walls over 30 days of San Francisco
@@ -290,14 +297,6 @@ def test_deferred_models_import():
         assert columns and columns <= set(names.weather), (model, columns)
 
 
-@pytest.mark.parametrize("model", sorted(REFUSED))
-def test_refused_models_name_their_offending_instances(model):
-    with pytest.raises(ModelicaImportError) as exc:
-        read_modelica(DATA / f"{model}.json")
-    message = str(exc.value)
-    named = set(re.findall(r"^\s+- (\S+) \(", message, flags=re.MULTILINE))
-    assert named == REFUSED[model], message
-    assert f"refused {len(REFUSED[model])} item" in message
 
 
 # ------------------------------------------------------- weather and wind pressure
@@ -394,7 +393,7 @@ DYNAMIC = ("OpenDoorBuoyancyDynamic", "OpenDoorBuoyancyPressureDynamic", "ThreeR
            "ThreeRoomsContamDiscretizedDoor", "CO2TransportStep", "ClosedDoors",
            "NaturalVentilation", "OneOpenDoor", "OneRoom", "ReverseBuoyancy",
            "ReverseBuoyancy3Zones", "ZonalFlow", "OneEffectiveAirLeakageArea",
-           "ChimneyShaftWithVolume")
+           "ChimneyShaftWithVolume", "ChimneyShaftNoVolume")
 # The models whose dynamics MBL's volume mass storage dominates (a closed heated building, a
 # start far from the airflow's balance, a source into sealed volumes): besides parity, each
 # asserts that noodl reproduces the storage mechanism (`_check_storage_mechanism`).
@@ -404,11 +403,11 @@ UNITS = {"flow": "kg/s", "T": "K", "p": "Pa", "Xi": "kg/kg", "C": "kg/kg", "pWin
          "TDryBul": "K", "pAtm": "Pa", "relHum": "1", "winSpe": "m/s", "y": "-"}
 
 
-def test_every_fixture_is_parity_checked_or_refused():
+def test_every_fixture_is_parity_checked_or_deferred():
     # "parity-algebraic"/"parity-dynamic" are the committed recorded-error files this
     # module writes (see RECORD/RECORD_DYNAMIC, NOODL_RECORD_PARITY), not model fixtures.
     fixtures = {p.stem for p in DATA.glob("*.json")} - {"parity-algebraic", "parity-dynamic"}
-    sets = (set(ALGEBRAIC), set(DYNAMIC), set(REFUSED), set(WEATHER_ONLY), set(DEFERRED))
+    sets = (set(ALGEBRAIC), set(DYNAMIC), set(WEATHER_ONLY), set(DEFERRED))
     assert set().union(*sets) == fixtures
     assert sum(len(s) for s in sets) == len(fixtures)  # disjoint
     assert set(PARITY_ROWS) == set(DYNAMIC) == set(REFERENCE_RESOLUTION) == set(WINDOW_COST)
@@ -469,6 +468,8 @@ REFERENCE_RESOLUTION: dict[str, dict[str, float]] = {
     "ZonalFlow": {"T": 3.2e-10, "Xi": 1.6e-13, "flow": 0.0, "p": 0.0},
     "ChimneyShaftWithVolume": {"T": 1.4e-09, "Xi": 3.3e-14, "flow": 6.8e-10, "p": 8.6e-08,
                                "y": 1.2e-09},
+    # Over the output-grid rows both exports hold (OFF_GRID_ROWS).
+    "ChimneyShaftNoVolume": {"T": 2.7e-10, "flow": 2.5e-10, "p": 3.2e-08, "y": 1.4e-09},
 }
 # The substeps per output interval of the two runs `run.extrapolate` combines: (1, 2), or
 # (2, 4) where one step per output interval is too long for the extrapolation to be
@@ -479,9 +480,13 @@ REFERENCE_RESOLUTION: dict[str, dict[str, float]] = {
 # across the end of its injection (the source's ramp to zero over 600-601 s), which its room
 # controller answers within a few seconds (con.y 3.5e-7 and 2.5e-8 at 604.8 s, where it is
 # 0.034; the extrapolation's own correction at (1, 2) was 4e-8, an eighth of the error).
+# ChimneyShaftNoVolume likewise: con.y 8.2e-6 and 1.3e-7 relative at 604.8 s beyond the
+# resolution, its bottom orifice 3.4e-6 and 2.4e-7 at 2412 s, after the extraction stops
+# (the extrapolation's own correction at (1, 2) 2.1e-5 and 6.9e-6: not asymptotic).
 PARITY_SUBSTEPS: dict[str, tuple[int, int]] = {"ClosedDoors": (2, 4),
                                                "ReverseBuoyancy": (2, 4),
-                                               "ChimneyShaftWithVolume": (2, 4)}
+                                               "ChimneyShaftWithVolume": (2, 4),
+                                               "ChimneyShaftNoVolume": (2, 4)}
 # Bounds above PARITY_RTOL (beyond the resolution), each with its demonstrated cause: none.
 PARITY_STORAGE: dict[str, dict[str, float]] = {}
 # The default run compares the first rows of every model (`-m slow` compares every row),
@@ -491,15 +496,17 @@ PARITY_STORAGE: dict[str, dict[str, float]] = {}
 # before its orifices reverse (18 s), the rows that need (2, 4) substeps (PARITY_SUBSTEPS),
 # and runs at (1, 2) (DEFAULT_SUBSTEPS), a third of the cost; so does ChimneyShaftWithVolume's,
 # whose window (its room controller's start transient, through its limits within the first
-# second) ends long before its injection stops at 601 s.
+# second) ends long before its injection stops at 601 s, and ChimneyShaftNoVolume's (its
+# shaft flow reversing at 0.192 s, and the first rows on the output grid, OFF_GRID_ROWS).
 PARITY_ROWS = {"ClosedDoors": 3, "CO2TransportStep": 2, "NaturalVentilation": 3,
                "OneEffectiveAirLeakageArea": 8, "OneOpenDoor": 4, "OneRoom": 21,
                "OpenDoorBuoyancyDynamic": 2, "OpenDoorBuoyancyPressureDynamic": 2,
                "ReverseBuoyancy": 2, "ReverseBuoyancy3Zones": 2, "ThreeRoomsContam": 3,
                "ThreeRoomsContamDiscretizedDoor": 3, "ZonalFlow": 11,
-               "ChimneyShaftWithVolume": 3}
+               "ChimneyShaftWithVolume": 3, "ChimneyShaftNoVolume": 3}
 DEFAULT_SUBSTEPS: dict[str, tuple[int, int]] = {"ReverseBuoyancy": (1, 2),
-                                                "ChimneyShaftWithVolume": (1, 2)}
+                                                "ChimneyShaftWithVolume": (1, 2),
+                                                "ChimneyShaftNoVolume": (1, 2)}
 
 
 def _columns_of(out: dict, names, head: list[str]) -> dict[str, np.ndarray]:
@@ -550,9 +557,10 @@ def _run(model: str, rows: int | None, r: int, threads: int | None = None):
     start = time.perf_counter()
     net, state, drivers, names = read_modelica(DATA / f"{model}.json", return_names=True,
                                                substeps=r)
-    times = names.times[:data.shape[0]]
-    assert torch.allclose(times, torch.tensor(data[:, 0], dtype=torch.float64),
-                          rtol=0.0, atol=1e-9)
+    times = torch.tensor(data[:, 0], dtype=torch.float64)  # output-grid times (`_csv`)
+    gap = (times.unsqueeze(1) - names.times.unsqueeze(0)).abs().min(dim=1).values
+    assert bool((gap <= 1e-9 * max(1.0, float(names.times[-1]))).all())
+    times = names.times[(times.unsqueeze(1) - names.times.unsqueeze(0)).abs().argmin(dim=1)]
     out = simulate(net, state, drivers, times, scheme="midpoint")
     return out, names, time.perf_counter() - start
 
@@ -640,7 +648,7 @@ WINDOW_COST = {"ClosedDoors": 25, "CO2TransportStep": 43, "NaturalVentilation": 
                "OpenDoorBuoyancyDynamic": 46, "OpenDoorBuoyancyPressureDynamic": 44,
                "ReverseBuoyancy": 60, "ReverseBuoyancy3Zones": 56, "ThreeRoomsContam": 48,
                "ThreeRoomsContamDiscretizedDoor": 46, "ZonalFlow": 3,
-               "ChimneyShaftWithVolume": 30}
+               "ChimneyShaftWithVolume": 30, "ChimneyShaftNoVolume": 60}
 
 
 def _default_substeps(model: str) -> tuple[int, int]:

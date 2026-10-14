@@ -70,7 +70,21 @@ matching the formula above; at zero flow (`dp_oriWesTop = 0`) this is the ordina
 balance `p(volWes) - p(volTop) = 2*h*rho*g` (`test_graph.py`'s `test_stack_chain_...` checks
 this exact identity, and a second fixture/test checks a column wired the other way along its
 path, which gets sign -1). A chain with zero flow elements (a run of columns alone between two
-zones/boundaries) or more than one is refused, naming every element found in it.
+zones/boundaries) is refused, naming the columns.
+
+Flow elements in series
+-----------------------
+A chain may hold several one-way elements, wired to each other directly or through columns
+(`Examples/ChimneyShaftNoVolume.mo`: `roo - oriChiBot - sha - oriChiTop - bou0`). Each element
+still gets its own `FlowPath`; two neighbouring elements meet at a JUNCTION node with no
+storage, and the columns between them go with the element whose name sorts first: its path
+holds them and ends at the junction next to the other element, whose path starts there
+(`ComponentGraph.junctions`). Every element, column and junction of such a run passes the
+stream on unchanged, and the junction holds no mass, so the run carries one flow from one
+end to the other: `ComponentGraph.series` lists each run (`SeriesChain`) with its two
+zone/boundary ends, oriented along its first element in name order. A run that closes on
+itself with no zone or boundary (a ring of flow elements) is refused, naming its elements,
+and so is a door or zonal flow inside a column chain.
 
 Two-way elements
 ----------------
@@ -169,6 +183,22 @@ class FlowPath:
 
 
 @dataclass(frozen=True)
+class SeriesChain:
+    """One-way flow paths in series through junctions (module docstring, "Flow elements in
+    series"): `paths` in order from the zone/boundary `src` to the zone/boundary `tgt`,
+    `signs[k]` +1 where `paths[k]` is oriented along the chain (its `src` toward the
+    chain's `src`) and -1 where against it, `junctions[k]` the node between `paths[k]` and
+    `paths[k + 1]`. The chain is oriented along its first element in name order, whose sign
+    is +1: its flow is that element's."""
+
+    paths: tuple[FlowPath, ...]
+    signs: tuple[int, ...]
+    src: str
+    tgt: str
+    junctions: tuple[str, ...]
+
+
+@dataclass(frozen=True)
 class TwoWayEdge:
     """A door or zonal-flow element wired directly between two zone/boundary nodes."""
 
@@ -219,6 +249,10 @@ class ComponentGraph:
     heat_sensors: tuple[tuple[Component, str], ...] = ()
     # ("<sensor>.T", "<signal block>.<input>"): a sensor output wired into a signal input.
     signal_wires: tuple[tuple[str, str], ...] = ()
+    # The junctions where one-way elements in series meet, and the runs they join (module
+    # docstring, "Flow elements in series").
+    junctions: tuple[str, ...] = ()
+    series: tuple[SeriesChain, ...] = ()
 
 
 class _UnionFind:
@@ -655,14 +689,28 @@ def _resolve_sensors(doc: ModelicaDoc, ctx: _Ctx) -> list[InlineSensor]:
     return sensors
 
 
-def _fuse_paths(ctx: _Ctx) -> list[FlowPath]:
-    """One walk per one-way flow element; see the module docstring for sign and orientation."""
+@dataclass
+class _End:
+    """Where a walk out of a flow element's port ended: at a zone or boundary `node`, or at
+    another one-way `element` (`node` None), with the junction roots it passed (walk order)
+    and the `(column, sign)` it collected."""
+
+    node: str | None
+    element: str | None = None
+    roots: list[str] = field(default_factory=list)
+    columns: list[tuple[Component, int]] = field(default_factory=list)
+
+
+def _fuse_paths(ctx: _Ctx) -> tuple[list[FlowPath], list[str]]:
+    """One walk per one-way flow element (module docstring for sign and orientation, and
+    "Flow elements in series"): the paths and the junctions where elements in series meet."""
     visited_columns: set[str] = set()
     visited_junction_roots: set[str] = set()
 
-    def walk(own_ref: str, reversed_walk: bool) -> tuple[str, list[tuple[Component, int]]]:
+    def walk(own_ref: str, reversed_walk: bool) -> _End:
         """Walk outward from `own_ref` (a flow element's own `port_a` or `port_b`) to the
-        zone/boundary it terminates at, collecting `(column, sign)` in WALK order.
+        zone/boundary, or the next one-way element, it reaches, collecting `(column, sign)`
+        in WALK order.
 
         `reversed_walk` is true for the `port_a` side: that walk proceeds from the element
         toward the path's `src` end, i.e. backwards along the `src`-to-`tgt` convention the
@@ -670,17 +718,19 @@ def _fuse_paths(ctx: _Ctx) -> list[FlowPath]:
         list order (handled by the caller) are flipped relative to a plain forward walk.
         """
         ref = own_ref
-        columns: list[tuple[Component, int]] = []
+        end = _End(None)
         while True:
             if ref not in ctx.uf:
                 raise _ChainRefused(f"{ref}: not connected", quiet=ref in ctx.beside_refused)
             root = ctx.uf.find(ref)
             kind = ctx.root_to_kind[root]
             if kind in ("zone", "boundary"):
-                return ctx.root_to_name[root], columns
+                end.node = ctx.root_to_name[root]
+                return end
             if kind == "conflict":
                 raise _ChainRefused("touches a node that was already refused", quiet=True)
             visited_junction_roots.add(root)
+            end.roots.append(root)
             members = ctx.members_of_root[root]
             if len(members) != 2:
                 raise _ChainRefused(
@@ -693,23 +743,38 @@ def _fuse_paths(ctx: _Ctx) -> list[FlowPath]:
                 visited_columns.add(other_inst)
                 raw_sign = 1 if other_port == "port_a" else -1
                 sign = -raw_sign if reversed_walk else raw_sign
-                columns.append((ctx.by_name[other_inst], sign))
+                end.columns.append((ctx.by_name[other_inst], sign))
                 exit_port = "port_b" if other_port == "port_a" else "port_a"
                 ref = f"{other_inst}.{exit_port}"
                 continue
-            if other_kind in ("one_way", "door", "zonal"):
-                raise _ChainRefused(
-                    f"chain has more than one flow element: also found {other_inst}"
-                )
+            if other_kind == "one_way":
+                end.element = other_inst
+                return end
+            if other_kind in ("door", "zonal"):
+                raise _ChainRefused("a door or zonal flow in a hydrostatic-column chain")
             raise _ChainRefused(f"{other_inst}: unsupported in a hydrostatic-column chain")
+
+    junctions: set[str] = set()
+
+    def side(name: str, end: _End) -> tuple[str, list[tuple[Component, int]]]:
+        """This element's end node and its columns on this side: up to the next element, the
+        columns go with the one whose name sorts first, and the junction is the one next to
+        the other (module docstring, "Flow elements in series")."""
+        if end.element is None:
+            return end.node, end.columns
+        owner = min(name, end.element)
+        root = end.roots[-1] if name == owner else end.roots[0]
+        junction = ctx.root_to_name[root]
+        junctions.add(junction)
+        return junction, end.columns if name == owner else []
 
     paths: list[FlowPath] = []
     for name, comp in ctx.by_name.items():
         if ctx.kind_of[name] != "one_way":
             continue
         try:
-            src, cols_a = walk(f"{name}.port_a", reversed_walk=True)
-            tgt, cols_b = walk(f"{name}.port_b", reversed_walk=False)
+            src, cols_a = side(name, walk(f"{name}.port_a", reversed_walk=True))
+            tgt, cols_b = side(name, walk(f"{name}.port_b", reversed_walk=False))
         except _ChainRefused as exc:
             if not exc.quiet:
                 ctx.errors.append(f"{name} ({comp.cls}): {exc.message}")
@@ -721,7 +786,7 @@ def _fuse_paths(ctx: _Ctx) -> list[FlowPath]:
     for leftover in sorted(all_columns - visited_columns):
         ctx.errors.append(
             f"{leftover} ({ctx.by_name[leftover].cls}): not part of any flow-element chain "
-            f"(a hydrostatic-column chain needs exactly one flow element)"
+            f"(a hydrostatic-column chain needs a flow element)"
         )
     all_junction_roots = {root for root, kind in ctx.root_to_kind.items() if kind == "junction"}
     for root in sorted(all_junction_roots - visited_junction_roots,
@@ -730,7 +795,74 @@ def _fuse_paths(ctx: _Ctx) -> list[FlowPath]:
             f"{sorted(ctx.members_of_root[root])}: connects components with no flow element"
         )
 
-    return paths
+    return paths, sorted(junctions)
+
+
+def _series_chains(paths: list[FlowPath], junctions: list[str],
+                   ctx: _Ctx) -> list[SeriesChain]:
+    """The runs of paths in series through `junctions` (`SeriesChain`); a run that closes
+    on itself is refused, naming its elements."""
+    is_junction = set(junctions)
+    at: dict[str, list[FlowPath]] = {}
+    for p in paths:
+        for node in (p.src, p.tgt):
+            if node in is_junction:
+                at.setdefault(node, []).append(p)
+    if any(len(v) != 2 for v in at.values()):
+        return []  # an element at the junction was refused already (named)
+
+    def across(path: FlowPath, node: str) -> tuple[FlowPath, str]:
+        """The other path at junction `node`, and its far end."""
+        other = next(q for q in at[node] if q is not path)
+        return other, other.tgt if other.src == node else other.src
+
+    seen: set[str] = set()
+    chains: list[SeriesChain] = []
+    for start in sorted((p for p in paths if p.src in is_junction or p.tgt in is_junction),
+                        key=lambda p: p.element.name):
+        if start.element.name in seen:
+            continue
+        # Walk to one end of the run, through the junctions on `start`'s src side.
+        path, node = start, start.src
+        while node in is_junction:
+            path, node = across(path, node)
+            if path is start:
+                break
+        if path is start and node in is_junction:  # back at `start`: a ring
+            members, (path, node) = [start.element.name], across(start, start.tgt)
+            while path is not start:
+                members.append(path.element.name)
+                path, node = across(path, node)
+            seen.update(members)
+            for nm in members:
+                ctx.errors.append(
+                    f"{nm} ({ctx.by_name[nm].cls}): a ring of flow elements in series "
+                    f"({', '.join(sorted(members))}) with no volume or boundary"
+                )
+            continue
+        # From that end (`node`, reached through `path`), along the run to the other.
+        ordered, signs, joints = [], [], []
+        left = node
+        while True:
+            ordered.append(path)
+            signs.append(1 if path.src == left else -1)
+            right = path.tgt if path.src == left else path.src
+            if right not in is_junction:
+                break
+            joints.append(right)
+            path, _ = across(path, right)
+            left = right
+        first, last = node, right
+        owner = min(range(len(ordered)), key=lambda k: ordered[k].element.name)
+        if signs[owner] < 0:
+            ordered.reverse()
+            signs = [-s for s in reversed(signs)]
+            joints.reverse()
+            first, last = last, first
+        seen.update(p.element.name for p in ordered)
+        chains.append(SeriesChain(paths=tuple(ordered), signs=tuple(signs), src=first,
+                                  tgt=last, junctions=tuple(joints)))
+    return chains
 
 
 def _resolve_pins(doc: ModelicaDoc, ctx: _Ctx) -> tuple[
@@ -911,7 +1043,9 @@ def build(doc: ModelicaDoc) -> ComponentGraph:
     doors = tuple(_two_way_edges(ctx, "door"))
     zonal = tuple(_two_way_edges(ctx, "zonal"))
     sources = tuple(_resolve_sources(ctx))
-    paths = tuple(_fuse_paths(ctx))
+    path_list, junction_list = _fuse_paths(ctx)
+    paths = tuple(path_list)
+    series = tuple(_series_chains(path_list, junction_list, ctx))
     pin_list, heat_list, sensor_list = _resolve_pins(doc, ctx)
     pins, heat_sources, heat_sensors = tuple(pin_list), tuple(heat_list), tuple(sensor_list)
     sensors = tuple(_resolve_sensors(doc, ctx))
@@ -922,5 +1056,6 @@ def build(doc: ModelicaDoc) -> ComponentGraph:
         nodes=nodes, zones=zones, boundaries=boundaries, paths=paths, doors=doors,
         zonal=zonal, pins=pins, sources=sources, sensors=sensors, heat_sources=heat_sources,
         attached=attached, weather=weather, heat_sensors=heat_sensors,
-        signal_wires=tuple(ctx.signal_wires),
+        signal_wires=tuple(ctx.signal_wires), junctions=tuple(junction_list),
+        series=series,
     )

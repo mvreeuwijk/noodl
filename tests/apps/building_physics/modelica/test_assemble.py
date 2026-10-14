@@ -25,6 +25,7 @@ from noodl.apps.building_physics.modelica import ModelicaImportError
 from noodl.apps.building_physics.modelica.run import extrapolate, simulate, step_drivers
 
 FIX = Path(__file__).parent / "fixtures"
+DATA = Path(__file__).resolve().parents[3] / "data" / "modelica"
 F64 = torch.float64
 
 # MSL SingleGasesData.mo:5,49,9187 (R_NASA_2002, Air.MM, H2O.MM).
@@ -234,13 +235,69 @@ def test_steady_state_energy_balance_is_refused(tmp_path):
         read_modelica(_write(tmp_path, doc))
 
 
-def test_actual_column_density_is_refused(tmp_path):
+def test_an_unknown_column_density_selection_is_refused(tmp_path):
     doc = _doc("mixed_rooms.json")
     for c in doc["components"]:
         if c["name"] == "colTop":
-            c["parameters"]["densitySelection"] = "actual"
+            c["parameters"]["densitySelection"] = "fromSomewhere"
     with pytest.raises(ModelicaImportError, match="colTop"):
         read_modelica(_write(tmp_path, doc))
+
+
+def test_the_actual_column_density_is_the_upwind_end_of_its_path():
+    """The shaft column's head uses roo's density while the shaft flow is upward (from roo,
+    the path's source) and, when it reverses, that of the air coming down through the
+    junction: the far end of the run, bou0 (graph.py, "Flow elements in series")."""
+    model, state, drivers, names = read_modelica(DATA / "ChimneyShaftNoVolume.json",
+                                                 return_names=True)
+    (kind,) = names.kinds["oriChiBot"]
+    zone = next(c for c in model.closures if type(c).__name__ == "_ZoneStateClosure")
+    (drive,) = (h for h in zone.heads if h.kind == kind)
+    base = {**drivers, **zone(state, drivers)}
+    (junction,) = names.junctions
+    T = base["T"].clone()
+    T[names.nodes["roo"]], T[names.nodes["bou0"]] = 293.15, 273.15
+    up = {**base, "T": T, "air.forward": torch.ones_like(base["air.forward"])}
+    down = {**up, "air.forward": torch.zeros_like(base["air.forward"])}
+    # h g rho of the 3 m shaft: air at 293.15 K going up, at 273.15 K coming down
+    assert abs(drive(down).item()) > abs(drive(up).item())
+    assert drive(up).item() * drive(down).item() > 0
+    # The junction carries the upwind end's state: bou0's while the shaft flow is downward.
+    q = torch.full((3,), -1.0, dtype=F64)
+    T_down = zone({**state, "air.q": q}, drivers)["T"]
+    assert T_down[names.nodes[junction]] == T_down[names.nodes["bou0"]]
+    T_up = zone({**state, "air.q": -q}, drivers)["T"]
+    assert T_up[names.nodes[junction]] == T_up[names.nodes["roo"]]
+
+
+def test_the_start_takes_the_flow_directions_its_own_flows_give():
+    """At t = 0 roo is at bou0's pressure, so the shaft's weight drives air down it, and the
+    shaft holds the outside air coming down (`actual`). From the closure's first guess, flow
+    upward, the start is solved again with the downward direction: MBL's -0.04398 kg/s (the
+    upward guess alone gives a lighter shaft and a smaller flow)."""
+    model, state, drivers, names = _read_modelica(DATA / "ChimneyShaftNoVolume.json",
+                                                  return_names=True)
+    out = simulate(model, state, drivers, names.times[:1], scheme="midpoint")
+    ((col, sign),) = names.edges["oriChiBot"]
+    assert sign * out["air.q"][0, col].item() == pytest.approx(-0.04397898789993136,
+                                                               rel=1e-12)
+
+
+def test_a_run_in_series_advects_as_one_edge():
+    """The transport layers take the run roo -> bou0 as one edge carrying oriChiBot's flow:
+    the junction is no node of theirs, and their flows are the closure's `"<layer>.q"`."""
+    model, state, drivers, names = read_modelica(DATA / "ChimneyShaftNoVolume.json",
+                                                 return_names=True)
+    th = model.transport["thermal"]
+    (junction,) = names.junctions
+    assert names.nodes[junction] not in th.interior_idx.tolist()
+    assert th.flow_kinds == ("airpath:oriBot", "series:oriChiBot")
+    zone = next(c for c in model.closures if type(c).__name__ == "_ZoneStateClosure")
+    q = torch.tensor([0.1, 0.2, 0.3], dtype=F64)
+    (col,) = names.edges["oriChiBot"]
+    (bot,) = names.edges["oriBot"]
+    flows = zone({**state, "air.q": q}, drivers)["thermal.q"]
+    assert flows.tolist() == [q[bot[0]].item(), q[col[0]].item()]
 
 
 def test_bad_door_dp_turbulent_joins_the_gather_all_error(tmp_path):

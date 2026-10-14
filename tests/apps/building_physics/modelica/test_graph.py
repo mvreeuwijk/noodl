@@ -82,12 +82,84 @@ def test_bad_door_wiring_is_refused_naming_the_door() -> None:
         _graph("bad_door_wiring.json")
 
 
-def test_two_elements_in_a_chain_is_refused_naming_both() -> None:
+def test_two_elements_in_series_meet_at_a_junction() -> None:
+    """`volA - oriA - oriB - volB`: two paths joined at one junction, and one series chain
+    from volA to volB carrying oriA's flow (the first element in name order)."""
+    g = _graph("two_elements_in_chain.json")
+    (j,) = g.junctions
+    assert g.nodes[j] == "junction"
+    by = {p.element.name: p for p in g.paths}
+    assert (by["oriA"].src, by["oriA"].tgt) == ("volA", j)
+    assert (by["oriB"].src, by["oriB"].tgt) == (j, "volB")
+    (chain,) = g.series
+    assert (chain.src, chain.tgt, chain.junctions) == ("volA", "volB", (j,))
+    assert [(p.element.name, s) for p, s in zip(chain.paths, chain.signs, strict=True)] == [
+        ("oriA", 1), ("oriB", 1)]
+
+
+def test_a_series_chain_takes_the_orientation_of_its_first_element_by_name() -> None:
+    """oriB turned round (`volA - oriA - oriB.port_b ... oriB.port_a - volB`): the chain
+    runs along oriA, oriB against it."""
+    doc = load(FIXTURES / "two_elements_in_chain.json")
+    doc = dataclasses.replace(doc, connections=(
+        ("volA.ports[1]", "oriA.port_a"), ("oriA.port_b", "oriB.port_b"),
+        ("oriB.port_a", "volB.ports[1]")))
+    g = build(doc)
+    (chain,) = g.series
+    assert (chain.src, chain.tgt) == ("volA", "volB")
+    assert [s for s in chain.signs] == [1, -1]
+    doc = dataclasses.replace(doc, connections=(
+        ("volB.ports[1]", "oriA.port_a"), ("oriA.port_b", "oriB.port_b"),
+        ("oriB.port_a", "volA.ports[1]")))
+    (chain,) = build(doc).series
+    assert (chain.src, chain.tgt) == ("volB", "volA")
+    assert [p.element.name for p in chain.paths] == ["oriA", "oriB"]
+
+
+def test_a_ring_of_flow_elements_with_no_volume_is_refused() -> None:
+    doc = load(FIXTURES / "two_elements_in_chain.json")
+    doc = dataclasses.replace(doc, connections=(
+        ("oriA.port_b", "oriB.port_a"), ("oriB.port_b", "oriA.port_a"),
+        ("volA.ports[1]", "volB.ports[1]")))
     with pytest.raises(ModelicaImportError) as excinfo:
-        _graph("two_elements_in_chain.json")
+        build(doc)
     message = str(excinfo.value)
-    assert "oriA" in message
-    assert "oriB" in message
+    assert "oriA" in message and "oriB" in message
+    assert "a ring of flow elements" in message
+
+
+def test_a_door_in_a_column_chain_is_refused() -> None:
+    doc = load(FIXTURES / "door_wiring.json")
+    comps = {c.name: c for c in doc.components}
+    ori = dataclasses.replace(comps["dooOpeClo"], name="ori",
+                              cls="Buildings.Airflow.Multizone.Orifice",
+                              parameters={"A": 0.01, "m": 0.5})
+    doc = dataclasses.replace(doc, components=(*doc.components, ori), connections=(
+        *[c for c in doc.connections if "dooOpeClo.port_a1" not in c],
+        ("dooOpeClo.port_a1", "ori.port_b"), ("ori.port_a", "volWes.ports[3]")))
+    with pytest.raises(ModelicaImportError,
+                       match="ori .*a door or zonal flow in a hydrostatic-column chain"):
+        build(doc)
+
+
+def test_two_orifices_in_series_through_a_column_meet_at_a_junction():
+    """ChimneyShaftNoVolume: roo - oriChiBot - sha (MediumColumn, actual) - oriChiTop -
+    bou0. The column belongs to the element whose name sorts first (oriChiBot), whose path
+    ends at the junction next to oriChiTop; oriChiTop's path starts there. Walking oriChiBot
+    from roo, the column's bottom port comes first: sign -1."""
+    doc = schema.load(DATA / "ChimneyShaftNoVolume.json")
+    ctx = graph._classify_components(doc)
+    graph._process_fluid_connections(doc, ctx)
+    graph._assign_nodes(ctx)
+    paths, junctions = graph._fuse_paths(ctx)
+    by = {p.element.name: p for p in paths}
+    (j,) = junctions
+    assert (by["oriChiBot"].src, by["oriChiBot"].tgt) == ("roo", j)
+    assert (by["oriChiTop"].src, by["oriChiTop"].tgt) == (j, "bou0")
+    assert [(c.name, s) for c, s in by["oriChiBot"].columns] == [("sha", -1)]
+    assert by["oriChiTop"].columns == ()
+    assert ctx.uf.find("oriChiTop.port_a") == ctx.uf.find("sha.port_a")
+    assert ctx.root_to_name[ctx.uf.find("oriChiTop.port_a")] == j
 
 
 def test_no_flow_element_chain_is_refused_naming_the_column() -> None:

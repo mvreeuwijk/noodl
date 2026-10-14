@@ -97,12 +97,11 @@ such enhancements or derivative works thereof, in binary and source code form.
 `MediumColumnDynamic`, read as a volume between two half columns) is compared as a dynamic model.
 `TrickleVent.json` imports and its weather is compared, but it is not yet compared as a dynamic
 model (its controlled room's 5 s lag behind the flows is not resolved; see
-`tests/verification/test_modelica_parity.py`, `DEFERRED`). One of the 23 multizone models is
-refused by `read_modelica` (`ModelicaImportError`, naming the offending instances); its JSON is
-exported and kept here for the refusal test:
-
-- `ChimneyShaftNoVolume.json` — a chain of more than one flow element between two nodes is not
-  supported.
+`tests/verification/test_modelica_parity.py`, `DEFERRED`). `ChimneyShaftNoVolume.json` (two
+orifices in series at the ends of one shaft, joined through a junction without storage) is
+compared as a dynamic model; six rows of its CSV are off the output grid (OpenModelica's chatter
+at the shaft flow's reversal at 0.192 s, in place of 7.2 to 43.2 s) and are not compared
+(`OFF_GRID_ROWS`).
 
 These three were re-exported on 14 Oct 2026 with `--tolerance 1e-13`, as the dynamic references
 above: the JSON now keeps the temperature sensor's `T` wired into the controller's `u_m`, and the
@@ -115,9 +114,7 @@ unresolved freeze of the room where its flow fades; `docs/formats/modelica.md`).
 1e-13, is the reference for that comparison, and its weather and wind-pressure columns are
 compared now.
 
-All three refused models still simulate cleanly in OpenModelica, so their `.csv` was exported
-too (this export script does not know which models `noodl`'s reader refuses); they are kept
-here for completeness even though noodl's tests only read the JSON of these three.
+`read_modelica` now reads every multizone model of the set; none is kept for a refusal test.
 
 The four `Buildings.Fluid.Sources` models other than `Outside_Cp` are boundaries with no flow
 element, which `read_modelica` refuses; their weather and wind-pressure columns are compared

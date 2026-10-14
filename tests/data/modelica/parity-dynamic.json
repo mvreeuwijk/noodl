@@ -359,6 +359,189 @@
       }
     }
   },
+  "ChimneyShaftNoVolume": {
+    "columns": {
+      "con.y": {
+        "floor": 0.0003340304968008923,
+        "kind": "y",
+        "max_abs": 1.2531036930329975e-08,
+        "max_rel": 1.627840477497801e-07,
+        "max_rel_beyond_resolution": 1.2642255532906433e-07,
+        "resolution": 1.4e-09,
+        "rows": 494,
+        "t0_abs": 0.0,
+        "t0_rel": 0.0,
+        "t_max_rel": 604.8,
+        "t_max_rel_beyond_resolution": 604.8
+      },
+      "oriBot.m_flow": {
+        "floor": 2.8806241815142076e-05,
+        "kind": "flow",
+        "max_abs": 4.052365210754916e-09,
+        "max_rel": 2.738592800720897e-07,
+        "max_rel_beyond_resolution": 2.371184971612172e-07,
+        "resolution": 2.5e-10,
+        "rows": 494,
+        "t0_abs": 1.5265566588595902e-15,
+        "t0_rel": 2.497407236610019e-14,
+        "t_max_rel": 2412.0,
+        "t_max_rel_beyond_resolution": 2412.0
+      },
+      "oriChiBot.m_flow": {
+        "floor": 2.8806241815142076e-05,
+        "kind": "flow",
+        "max_abs": 2.657571426811778e-09,
+        "max_rel": 1.4817617332761067e-07,
+        "max_rel_beyond_resolution": 1.1095566553709792e-07,
+        "resolution": 2.5e-10,
+        "rows": 494,
+        "t0_abs": 6.522560269672795e-16,
+        "t0_rel": 1.483108316297332e-14,
+        "t_max_rel": 2412.0,
+        "t_max_rel_beyond_resolution": 1814.4
+      },
+      "oriChiTop.m_flow": {
+        "floor": 2.8806241815142076e-05,
+        "kind": "flow",
+        "max_abs": 2.657571423342331e-09,
+        "max_rel": 1.4817617107336438e-07,
+        "max_rel_beyond_resolution": 1.1095566537720452e-07,
+        "resolution": 2.5e-10,
+        "rows": 494,
+        "t0_abs": 6.522560269672795e-16,
+        "t0_rel": 1.483108316297332e-14,
+        "t_max_rel": 2412.0,
+        "t_max_rel_beyond_resolution": 1814.4
+      },
+      "roo.T": {
+        "floor": 0.29315000175381334,
+        "kind": "T",
+        "max_abs": 2.5062263375730254e-09,
+        "max_rel": 8.551163486213019e-12,
+        "max_rel_beyond_resolution": 7.629932188518925e-12,
+        "resolution": 2.7e-10,
+        "rows": 494,
+        "t0_abs": 0.0,
+        "t0_rel": 0.0,
+        "t_max_rel": 1814.4,
+        "t_max_rel_beyond_resolution": 1814.4
+      },
+      "roo.p": {
+        "floor": 101.3696277290635,
+        "kind": "p",
+        "max_abs": 2.267013769596815e-06,
+        "max_rel": 2.2367336780698797e-11,
+        "max_rel_beyond_resolution": 2.20516109626286e-11,
+        "resolution": 3.2e-08,
+        "rows": 494,
+        "t0_abs": 0.0,
+        "t0_rel": 0.0,
+        "t_max_rel": 1814.4,
+        "t_max_rel_beyond_resolution": 1814.4
+      }
+    },
+    "floor_frac": 0.001,
+    "group": "parity",
+    "mechanism": null,
+    "own_error": {
+      "T": {
+        "beyond": 6.596245324605944e-11,
+        "beyond_column": "roo.T",
+        "beyond_t": 2404.8,
+        "column": "roo.T",
+        "max_abs": 1.933489102157182e-08,
+        "max_rel": 6.596245324605944e-11,
+        "t": 2404.8,
+        "t0_rel": 0.0
+      },
+      "flow": {
+        "beyond": 2.525208601397984e-06,
+        "beyond_column": "oriBot.m_flow",
+        "beyond_t": 2412.0,
+        "column": "oriBot.m_flow",
+        "max_abs": 1.718259458414334e-08,
+        "max_rel": 2.525208601397984e-06,
+        "t": 2412.0,
+        "t0_rel": 0.0
+      },
+      "p": {
+        "beyond": 9.238780588996168e-11,
+        "beyond_column": "roo.p",
+        "beyond_t": 1814.4,
+        "column": "roo.p",
+        "max_abs": 9.363851859234273e-06,
+        "max_rel": 9.238780588996168e-11,
+        "t": 1814.4,
+        "t0_rel": 0.0
+      },
+      "y": {
+        "beyond": 4.8964829685316806e-06,
+        "beyond_column": "con.y",
+        "beyond_t": 50.4,
+        "column": "con.y",
+        "max_abs": 9.667436037807953e-08,
+        "max_rel": 4.8964829685316806e-06,
+        "t": 50.4,
+        "t0_rel": 0.0
+      }
+    },
+    "reference_resolution": {
+      "T": 2.7e-10,
+      "flow": 2.5e-10,
+      "p": 3.2e-08,
+      "y": 1.4e-09
+    },
+    "reference_tolerance": 1e-13,
+    "rtol": 1e-06,
+    "seconds": 1299.6690829000436,
+    "storage_bounds": {},
+    "substeps": [
+      2,
+      4
+    ],
+    "worst": {
+      "T": {
+        "beyond": 7.629932188518925e-12,
+        "beyond_column": "roo.T",
+        "beyond_t": 1814.4,
+        "column": "roo.T",
+        "max_abs": 2.5062263375730254e-09,
+        "max_rel": 8.551163486213019e-12,
+        "t": 1814.4,
+        "t0_rel": 0.0
+      },
+      "flow": {
+        "beyond": 2.371184971612172e-07,
+        "beyond_column": "oriBot.m_flow",
+        "beyond_t": 2412.0,
+        "column": "oriBot.m_flow",
+        "max_abs": 4.052365210754916e-09,
+        "max_rel": 2.738592800720897e-07,
+        "t": 2412.0,
+        "t0_rel": 2.497407236610019e-14
+      },
+      "p": {
+        "beyond": 2.20516109626286e-11,
+        "beyond_column": "roo.p",
+        "beyond_t": 1814.4,
+        "column": "roo.p",
+        "max_abs": 2.267013769596815e-06,
+        "max_rel": 2.2367336780698797e-11,
+        "t": 1814.4,
+        "t0_rel": 0.0
+      },
+      "y": {
+        "beyond": 1.2642255532906433e-07,
+        "beyond_column": "con.y",
+        "beyond_t": 604.8,
+        "column": "con.y",
+        "max_abs": 1.2531036930329975e-08,
+        "max_rel": 1.627840477497801e-07,
+        "t": 604.8,
+        "t0_rel": 0.0
+      }
+    }
+  },
   "ChimneyShaftWithVolume": {
     "columns": {
       "con.y": {
