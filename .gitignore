@@ -52,3 +52,6 @@ benchmarks_stderr.log
 
 # Local tool workspaces
 .superpowers/
+
+# opt-in parity recording lock files (NOODL_RECORD_PARITY=1)
+tests/data/**/parity-*.lock

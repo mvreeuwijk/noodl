@@ -98,9 +98,25 @@ def _record(stem: str, stats: dict, record: Path = RECORD) -> None:
 
 # MSL's Resistor example couples a heat-port thermal network (Joule heat in, temperature-
 # dependent resistance back) at every row: ~95 ms a row, ~48 s over its 501 rows. Its full
-# comparison is marked slow; the default run compares every tenth row.
-SLOW = ("Analog.Examples.Resistor",)
+# comparison is marked slow; the default run compares every tenth row. Every model listed
+# here is slow in full and subsampled in the default run.
 SUBSAMPLED = {"Analog.Examples.Resistor": 10}
+
+
+def _check(stem: str, column: str, times: np.ndarray, mine: np.ndarray,
+           omc: np.ndarray) -> dict:
+    """Assert `mine` is within the bound of `omc` at every row (a NaN or infinity on either
+    side fails, naming the first such row); the worst absolute and relative error."""
+    with np.errstate(invalid="ignore"):  # inf - inf: NaN, caught as off the bound below
+        err = np.abs(mine - omc)
+    within = err <= RTOL_ALGEBRAIC * np.abs(omc) + ATOL_ALGEBRAIC
+    bad = ~(np.isfinite(mine) & np.isfinite(omc) & within)
+    if bad.any():
+        k = int(bad.argmax())
+        raise AssertionError(f"{stem}: {column} off the bound from t = {float(times[k])!r}: "
+                             f"noodl {float(mine[k])!r}, omc {float(omc[k])!r}")
+    return {"max_abs": float(err.max()),
+            "max_rel": float((err / np.maximum(np.abs(omc), ATOL_ALGEBRAIC)).max())}
 
 
 def _compare(stem: str, every: int = 1) -> dict:
@@ -122,13 +138,7 @@ def _compare(stem: str, every: int = 1) -> dict:
         if h in skipped or h in omitted:
             continue
         assert h in names.columns, f"{stem}: CSV column {h!r} maps to no noodl variable"
-        mine = names.value(out, h).numpy()
-        omc = data[:, j]
-        err = np.abs(mine - omc)
-        bad = err > RTOL_ALGEBRAIC * np.abs(omc) + ATOL_ALGEBRAIC
-        stats[h] = {"max_abs": float(err.max()),
-                    "max_rel": float((err / np.maximum(np.abs(omc), ATOL_ALGEBRAIC)).max())}
-        assert not bad.any(), (stem, h, float(data[bad.argmax(), 0]), float(err.max()))
+        stats[h] = _check(stem, h, data[:, 0], names.value(out, h).numpy(), data[:, j])
     if names.phasor:  # DC parts of a phasor model stay real
         dc = [n for n in names.nodes if n.endswith(("[1]", "[2]"))]
         for n in dc:
@@ -136,16 +146,28 @@ def _compare(stem: str, every: int = 1) -> dict:
     return stats
 
 
-@pytest.mark.parametrize("stem", [pytest.param(s, marks=pytest.mark.slow) if s in SLOW else s
-                                  for s in ALGEBRAIC])
+@pytest.mark.parametrize("stem", [pytest.param(s, marks=pytest.mark.slow)
+                                  if s in SUBSAMPLED else s for s in ALGEBRAIC])
 def test_parity_on_the_algebraic_models(stem):
     _record(stem, _compare(stem))
 
 
 @pytest.mark.parametrize("stem", sorted(SUBSAMPLED))
 def test_parity_on_the_algebraic_models_at_subsampled_rows(stem):
-    assert stem in SLOW
     _compare(stem, every=SUBSAMPLED[stem])
+
+
+def test_the_bound_check_fails_on_a_nan_or_an_infinity():
+    t = np.array([0.0, 1.0, 2.0])
+    omc = np.array([1.0, 2.0, 3.0])
+    assert _check("m", "c", t, omc.copy(), omc)["max_abs"] == 0.0
+    for bad in (np.nan, np.inf):
+        mine = omc.copy()
+        mine[1] = bad
+        with pytest.raises(AssertionError, match=r"m: c off the bound from t = 1\.0"):
+            _check("m", "c", t, mine, omc)
+        with pytest.raises(AssertionError, match=r"t = 1\.0"):
+            _check("m", "c", t, omc, mine)
 
 
 def test_every_fixture_is_parity_checked():
