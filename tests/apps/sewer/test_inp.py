@@ -243,17 +243,53 @@ def test_a_tidal_outfall_is_read_with_its_curve_and_gate(tmp_path):
     assert outfall.tide == ((0.0, 8.1), (6.0, 8.4), (12.0, 8.2), (24.0, 8.1))
 
 
-def test_a_timeseries_outfall_takes_its_stage_from_a_driver(tmp_path):
-    """TIMESERIES: the reader records the series name and requires the driver; the series is
-    the driver's data, so it is not read, and neither is any series no inflow names."""
+def test_a_timeseries_outfall_takes_its_stage_from_its_series(tmp_path):
+    """TIMESERIES (node.c:1385-1389, 1454-1458): the reader reads the named series, in
+    metres, as the outfall's default stage; it is held at its ends (table_tseriesLookup with
+    extend TRUE, table.c:779) where an inflow series is 0 outside. A series no inflow or
+    outfall names is not read."""
     edits = [("Outfall          8.0        FREE                        NO",
               "Outfall          8.0        TIMESERIES Tide1            NO"),
              ("[REPORT]", "[TIMESERIES]\nTide1 0:00 8.1\nTide1 6:00 8.4\n\n[REPORT]")]
     net, _, _ = read_swmm_inp(_dyn(tmp_path, edits))
     (outfall,) = net.outfalls
     assert (outfall.kind, outfall.series, outfall.stage) == ("timeseries", "Tide1", None)
+    series = outfall.stage_series
+    assert series.times == (0.0, 21600.0) and series.values == (8.1, 8.4)
+    assert [series.held(t) for t in (-5.0, 0.0, 10800.0, 21600.0, 1e6)] == pytest.approx(
+        [8.1, 8.1, 8.25, 8.4, 8.4], abs=1e-12)
+    assert series(1e6) == 0.0                       # an inflow series is 0 beyond its end
     edits[1] = ("[REPORT]", "[TIMESERIES]\nOther 0:00 8.1\n\n[REPORT]")
-    assert read_swmm_inp(_dyn(tmp_path, edits))[0].inflows is None
+    with pytest.raises(ValueError, match=r"Tide1.*no \[TIMESERIES\] entry"):
+        read_swmm_inp(_dyn(tmp_path, edits))
+
+
+def test_a_timeseries_outfall_stage_is_converted_to_metres(tmp_path):
+    """A US-unit file gives the series in feet; `stage_series` is in metres."""
+    text = _dyn(tmp_path, [
+        ("Outfall          8.0        FREE                        NO",
+         "Outfall          8.0        TIMESERIES Tide1            NO"),
+        ("[REPORT]", "[TIMESERIES]\nTide1 0:00 8.0\nTide1 1:00 10.0\n\n[REPORT]"),
+        ("FLOW_UNITS           CMS", "FLOW_UNITS           CFS")]).read_text()
+    (tmp_path / "us.inp").write_text(text)
+    (outfall,) = read_swmm_inp(tmp_path / "us.inp")[0].outfalls
+    assert outfall.stage_series.values == pytest.approx((8.0 * 0.3048, 10.0 * 0.3048))
+
+
+def test_the_stage_series_is_the_default_outfall_stage_and_an_argument_overrides_it(tmp_path):
+    """`build_model` and `simulate_dynamic_wave` need no `outfall_stage` for a file's
+    TIMESERIES outfall; naming it replaces the series."""
+    from noodl.apps.sewer import build_model
+    path = _dyn(tmp_path, [
+        ("Outfall          8.0        FREE                        NO",
+         "Outfall          8.0        TIMESERIES Tide1            NO"),
+        ("[REPORT]", "[TIMESERIES]\nTide1 0:00 8.1\nTide1 1:00 8.5\n\n[REPORT]")])
+    net, _, _ = read_swmm_inp(path)
+    model, _, _ = build_model(net)
+    hyd = model.dynamic_wave
+    assert hyd.outfall_stage(1800.0, model.outfall_stage).tolist() == pytest.approx([8.3])
+    model, _, _ = build_model(net, outfall_stage={"Outfall": 9.0})
+    assert hyd.outfall_stage(1800.0, model.outfall_stage).tolist() == [9.0]
 
 
 def test_a_tide_curve_must_be_a_tidal_curve(tmp_path):
@@ -923,3 +959,59 @@ def test_raingages_without_subcatchments_are_ignored(tmp_path):
     path.write_text(path.read_text() + "\n[SUBCATCHMENTS]\nS1 G1 J1 1 50 100 0.5 0\n")
     with pytest.raises(ValueError, match="time series 'R1', which has no"):
         read_swmm_inp(path)         # subcatchments are read now (tests/apps/sewer/test_runoff.py)
+
+
+NEG = ("C1               J1               J3               200        0.013      0"
+       "          0")
+
+
+@pytest.mark.parametrize("dynwave", [False, True])
+@pytest.mark.parametrize("offsets", ["DEPTH", "ELEVATION"])
+def test_a_negative_conduit_offset_is_zero(tmp_path, dynwave, offsets):
+    """link.c:1057-1067 (`conduit_validate`, DEPTH) and :498-502 (`link_getOffsetHeight`,
+    ELEVATION) set a negative offset height to 0 with a warning; the slope is taken from the
+    clamped end elevations (link.c:1269), so C1 (inlet 0.3 m below J1's invert) is the same
+    conduit as with no offsets."""
+    text = (DATA / "tree_kinwave.inp").read_text()
+    if dynwave:
+        text = (text.replace("FLOW_ROUTING         KINWAVE", "FLOW_ROUTING         DYNWAVE")
+                .replace("VARIABLE_STEP        0.75", "VARIABLE_STEP        0"))
+    assert text.count(NEG) == 1
+    c1 = NEG[:-18] + ("      -0.3        0" if offsets == "DEPTH" else "      11.7       10")
+    text = text.replace(NEG, c1).replace("LINK_OFFSETS         DEPTH",
+                                         f"LINK_OFFSETS         {offsets}")
+    (tmp_path / "neg.inp").write_text(text)
+    net, _, _ = read_swmm_inp(tmp_path / "neg.inp")
+    net.validate()
+    pipe = next(p for p in net.pipes if p.name == "C1")
+    assert (pipe.inlet_offset, pipe.outlet_offset) == (0.0, 0.0)
+    assert pipe.slope == pytest.approx(2.0 / (200.0**2 - 2.0**2) ** 0.5, rel=1e-12)
+
+
+def test_a_junction_with_no_link_and_an_outfall_free_group_are_allowed_under_dynwave(tmp_path):
+    """SWMM asks for one outfall in the network (flowrout.c:325) and nothing per component:
+    the dynamic-wave reader accepts a junction no link reaches and a conduit pair draining
+    nowhere; KINWAVE keeps the tree rules, by name."""
+    from noodl.apps.sewer import build_model
+    path = _dyn(tmp_path, [
+        ("[JUNCTIONS]\n", "[JUNCTIONS]\nJX 5.0 2 0 0 0\nJA 5.0 2 0 0 0\nJB 4.0 2 0 0 0\n"),
+        ("[XSECTIONS]\n", "[XSECTIONS]\nCX CIRCULAR 0.30 0 0 0 1\n"),
+        ("[CONDUITS]\n", "[CONDUITS]\nCX JA JB 50 0.013 0 0 0\n")])
+    net, _, _ = read_swmm_inp(path)
+    net.validate()
+    model, _, _ = build_model(net)
+    assert "JX" in model.dynamic_wave.junction_names
+    kin = tmp_path / "k.inp"
+    kin.write_text(path.read_text().replace("FLOW_ROUTING         DYNWAVE",
+                                            "FLOW_ROUTING         KINWAVE"))
+    with pytest.raises(ValueError, match="'JX' has 0 outgoing"):
+        read_swmm_inp(kin)[0].validate()
+
+
+def test_a_dynwave_network_without_any_outfall_is_refused():
+    from noodl.apps.sewer.network import Manhole, Pipe, SewerNetwork
+    net = SewerNetwork((Manhole("A", 1.0), Manhole("B", 0.5)),
+                       (Pipe("AB", "A", "B", 100.0, 0.3, 0.013, 0.005),), (),
+                       routing="dynamic_wave")
+    with pytest.raises(ValueError, match="no outfall"):
+        net.validate()

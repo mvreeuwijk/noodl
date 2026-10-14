@@ -59,8 +59,8 @@ a time series, a pattern or patterned dry-weather flow gets ``SewerNetwork.inflo
 `Manhole.inflow` is then its value at the start of the run. A pollutant inflow must be a
 constant `CONCEN` (or `CONCENTRATION`) baseline with Mfactor 1; a pollutant with a time series
 or pattern, a `MASS` inflow, a pollutant `[DWF]` line and a non-zero Cdwf with a `[DWF]`
-flow are refused. A `[TIMESERIES]` no inflow names is not read. A `TIMESERIES` outfall takes
-its stage from the `outfall_stage` driver.
+flow are refused. A `[TIMESERIES]` no inflow or outfall names is not read. A `TIMESERIES`
+outfall takes its stage from its series (`Outfall.stage_series`, m).
 
 DYNWAVE reads `VARIABLE_STEP` (the Courant factor; absent means SWMM's default 0.75,
 project.c:854) and `MINIMUM_STEP`, and clips `ROUTING_STEP` to `WET_STEP` (default 300 s)
@@ -70,9 +70,9 @@ reads `ALLOW_PONDING` (YES or NO, as SWMM's keyword test) for every routing: YES
 junction or divider with a non-zero Aponded pond (`Manhole.ponded_area`), under DYNWAVE only;
 with STEADY or KINWAVE and an Aponded it is refused by name, with the line. A TIDAL outfall
 reads its `[CURVES]` TIDAL curve (`Outfall.tide`, hours and stage elevations). A TIMESERIES
-outfall takes its stage from the `outfall_stage` driver (time variation belongs in the
-drivers): the reader records the series name (`Outfall.series`) and does not read that
-series; the model builder then refuses a network whose TIMESERIES outfall has no driver.
+outfall's series is read (values to m) as `Outfall.stage_series`, the default of the
+`outfall_stage` argument of the model builder, held at its ends as SWMM does (node.c:1457);
+a negative conduit offset is 0, as in SWMM (link.c:498-502, 1057-1067).
 
 A conduit the reader reverses (adverse, below) has its `InitFlow` sign flipped and its flap
 gate recorded as reversed (`Pipe.flap_gate_reversed`), as SWMM does (`conduit_reverse`,
@@ -525,12 +525,14 @@ def read_swmm_inp(
                     f"{path}: line {line.number}: conduit {name!r} names node {end!r}, "
                     f"which is in neither [JUNCTIONS] nor [OUTFALLS]"
                 )
-        if offsets == "DEPTH":
-            z1, z2 = invert[node1] + in_offset, invert[node2] + out_offset
-        else:
-            z1, z2 = in_offset, out_offset
+        if offsets != "DEPTH":
             # `Pipe` offsets are heights above the end node's invert in either mode.
-            in_offset, out_offset = z1 - invert[node1], z2 - invert[node2]
+            in_offset, out_offset = in_offset - invert[node1], out_offset - invert[node2]
+        # A negative offset height is 0 (a warning in SWMM): link.c:498-502 `link_getOffsetHeight`
+        # for LINK_OFFSETS ELEVATION, link.c:1057-1067 `conduit_validate` for DEPTH; the
+        # slope below is taken from the clamped end elevations (link.c:1269).
+        in_offset, out_offset = max(in_offset, 0.0), max(out_offset, 0.0)
+        z1, z2 = invert[node1] + in_offset, invert[node2] + out_offset
         if name not in shapes:
             raise ValueError(
                 f"{path}: line {line.number}: conduit {name!r} has no [XSECTIONS] entry"
@@ -599,6 +601,7 @@ def read_swmm_inp(
                           ("outlet", regulators["OUTLETS"]), ("pump", pumps)):
         link_kinds.update({d.name: kind for d in devices})
     series_rows = _tseries(sections, path)
+    outfalls = [_with_stage_series(o, series_rows, start, lf, path) for o in outfalls]
 
     def control_series(name):
         if name not in series_rows:
@@ -1225,6 +1228,19 @@ def _outfall(line, name: str, elevation: float, dynamic: bool, tides: dict,
     flap = len(line.fields) > gated_at and line.fields[gated_at].upper() == "YES"
     return Outfall(name, elevation, kind=kind.lower(), stage=stage, flap_gate=flap,
                    tide=tide, series=series)
+
+
+def _with_stage_series(outfall: Outfall, series_rows, start, lf: float, path) -> Outfall:
+    """A TIMESERIES outfall with its `[TIMESERIES]` stage series read (values converted to m
+    with `lf`), which is the default `outfall_stage` of the model; any other outfall as is."""
+    if outfall.kind != "timeseries":
+        return outfall
+    if outfall.series not in series_rows:
+        raise ValueError(f"{path}: TIMESERIES outfall {outfall.name!r} names series "
+                         f"{outfall.series!r}, which has no [TIMESERIES] entry")
+    read = _read_series(outfall.series, series_rows[outfall.series], start, path)
+    stage = TimeSeries(read.name, read.times, tuple(v * lf for v in read.values))
+    return dataclasses.replace(outfall, stage_series=stage)
 
 
 def _start_datetime(lines, path):

@@ -245,8 +245,8 @@ def check_air_topology(net) -> None:
     have exactly one outgoing conduit (the air side's assumption: its capacity and leak are
     the outgoing conduit's), no outfall an outgoing one. A loop, a junction with several
     outgoing conduits or none (an adverse conduit, or one drained only by a regulator) is
-    refused; a cycle that reaches no outfall
-    is already refused by `SewerNetwork.validate`."""
+    refused, and so is one that reaches no outfall (a cycle or a dead end, which dynamic-wave
+    routing itself allows)."""
     outgoing: dict[str, list[str]] = {m.name: [] for m in net.manholes}
     outfalls = {o.name for o in net.outfalls}
     for pipe in net.pipes:
@@ -264,6 +264,17 @@ def check_air_topology(net) -> None:
             f"{[len(v) for v in bad.values()]} (conduits {list(bad.values())}): a loop, a "
             f"branch, an adverse conduit or a junction drained only by a regulator; build "
             f"with air=False")
+    drains = {pipe.u: pipe.v for pipe in net.pipes}
+    for name in outgoing:                  # one outgoing conduit each: follow it downstream
+        seen, node = set(), name
+        while node in drains and node not in seen and node not in outfalls:
+            seen.add(node)
+            node = drains[node]
+        if node not in outfalls:
+            raise ValueError(
+                f"build_model: air=True needs every junction to drain to an outfall, but "
+                f"junction {name!r} reaches none (a cycle, or a dead end: dynamic-wave "
+                f"routing allows these, the headspace air does not); build with air=False")
 
 
 def add_air_edges(graph: Network, net, fans: tuple = ()) -> AirPlan:

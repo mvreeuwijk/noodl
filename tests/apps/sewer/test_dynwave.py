@@ -2887,7 +2887,7 @@ def test_air_refuses_loops_branches_and_regulator_drains_by_name():
 
 def test_air_refuses_a_cycle_that_never_reaches_an_outfall():
     """Every junction with one outgoing conduit is not enough: J1 -> J2 -> J1 is a loop with
-    no outfall (`SewerNetwork.validate` refuses it before the air builder sees it)."""
+    no outfall (dynamic-wave routing allows it, as SWMM does; the air builder refuses it)."""
     from noodl.apps.sewer import SewerNetwork
     from noodl.apps.sewer.network import Manhole, Outfall, Pipe
     net = SewerNetwork(
@@ -2896,8 +2896,9 @@ def test_air_refuses_a_cycle_that_never_reaches_an_outfall():
         pipes=(Pipe("C1", "J1", "J2", 100.0, 0.3, 0.013, 0.01),
                Pipe("C2", "J2", "J1", 100.0, 0.3, 0.013, 0.01),
                Pipe("C3", "J3", "Out", 100.0, 0.3, 0.013, 0.005)),
-        outfalls=(Outfall("Out", 10.0),), routing="dynamic_wave")
-    with pytest.raises(ValueError, match="reach no outfall"):
+        outfalls=(Outfall("Out", 10.0),), routing="dynamic_wave", geometry="tabulated")
+    build_model(net)                                  # the water alone routes it
+    with pytest.raises(ValueError, match=r"junction 'J1' reaches none"):
         build_model(net, air=True)
 
 

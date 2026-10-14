@@ -207,9 +207,13 @@ and VELOCITY and a link's DEPTH, conduit actions, and everything SWMM itself rej
 
 **Outfalls.** `FREE`, `NORMAL`, `FIXED` (with its stage, m), `TIDAL` (with the name of its
 `[CURVES]` TIDAL curve, read as hours and stage elevations) and `TIMESERIES` (with the name of
-its series) are read. A `TIMESERIES` outfall takes its stage from the `outfall_stage` driver
-of `build_model` / `simulate_dynamic_wave` (time variation belongs in the drivers): that
-series is not read. An outfall may sit
+its series) are read. A `TIMESERIES` outfall takes its stage from its `[TIMESERIES]` series
+(`Outfall.stage_series`: times in seconds since the start, values converted from the file's
+length unit to m), which is the default of the `outfall_stage` argument of `build_model` /
+`simulate_dynamic_wave`; naming the outfall there overrides it. SWMM reads the series at the
+step's END time with the series held at its first value before it and its last after it
+(`table_tseriesLookup` with `extend` TRUE, node.c:1454-1458), unlike an inflow series, which
+is 0 outside its range. An outfall may sit
 at the end of a conduit or of a regulator (exactly one link, SWMM's ERR_OUTFALL).
 
 **Barrels.** A conduit with more than one barrel is read under `DYNWAVE` (1 to 127; the
@@ -388,7 +392,11 @@ is a fall $\ge$ length. Under `DYNWAVE` the reader follows SWMM's `conduit_getSl
 floored at SWMM's `MIN_DELTA_Z` (0.001 ft, 0.0003048 m), `MIN_SLOPE` floors the slope, and a
 conduit is reversed only when it is adverse, so a flat conduit keeps the orientation of the
 file. Conduit offsets are kept (`Pipe.inlet_offset`, `Pipe.outlet_offset`, m above the end
-node's invert) and swap with the ends on a reversal.
+node's invert) and swap with the ends on a reversal. A negative offset is 0, as in SWMM
+(a warning there): `link_getOffsetHeight` (link.c:498-502) clamps an elevation below the node's
+invert under `LINK_OFFSETS ELEVATION`, and `conduit_validate` (link.c:1057-1067) a negative
+depth offset under `DEPTH`, for every routing; the slope comes from the clamped end
+elevations (link.c:1269). Regulators already read a negative offset as 0.
 
 ```python
 from noodl.apps.sewer import read_swmm_inp, build_model
