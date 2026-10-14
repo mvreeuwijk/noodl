@@ -573,23 +573,24 @@ class LimitedPID(Block):
     def initial_memory(self) -> list[float]:
         return [self.initial_integral] if self.memory_size else []
 
-    def _v(self, u, memory) -> Tensor:
+    def unlimited(self, u, memory) -> Tensor:
+        """`v`, the output before the limiter, from the inputs `u` and the memory."""
         xi = memory[..., 0] if self.memory_size else 0.0
         return self.gain * (self.setpoint_weight * _f64(u[0]) - _f64(u[1]) + xi)
 
     def step(self, u, memory, ev):
-        return self._v(u, memory).clamp(self.y_min, self.y_max), memory
+        return self.unlimited(u, memory).clamp(self.y_min, self.y_max), memory
 
     def rate(self, u, memory, ev):
         if not self.memory_size:
             return memory
-        v = self._v(u, memory)
+        v = self.unlimited(u, memory)
         y = v.clamp(self.y_min, self.y_max)
         track = (y - v) / (self.gain * self.windup_ratio)
         return ((_f64(u[0]) - _f64(u[1]) + track) / self.integral_time).unsqueeze(-1)
 
     def switching(self, u, memory, ev):
-        v = self._v(u, memory)
+        v = self.unlimited(u, memory)
         width = self.y_max - self.y_min if self.y_max > self.y_min else 1.0
         return _stack([(v - self.y_max) / width, (v - self.y_min) / width])
 

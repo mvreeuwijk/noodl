@@ -106,7 +106,8 @@ HEAT_SOURCES = frozenset({"Modelica.Thermal.HeatTransfer.Sources.PrescribedHeatF
 # `graph.build` records which zone it reads and which signal inputs its `T` is wired into.
 HEAT_SENSORS = frozenset({"Modelica.Thermal.HeatTransfer.Sensors.TemperatureSensor"})
 # Feedback controllers: MSL 4.1.0's `LimPID` (`Blocks/Continuous.mo`). They sit in the JSON's
-# `signals`, like the Math blocks; one also listed in `REFUSED` is refused with that reason.
+# `signals`, like the Math blocks; `feedback` reads them (a P controller; the other settings
+# are refused by name there).
 CONTROLLERS = frozenset({"Modelica.Blocks.Continuous.LimPID"})
 # Composite classes `expand.expand` rewrites into supported ones before `graph.build`
 # (`MediumColumnDynamic`: a mixing volume between two half columns).
@@ -173,9 +174,7 @@ SUPPORTED = (
 
 # Refused classes, each with the short reason `graph.build` reports
 # against every instance of it.
-REFUSED: dict[str, str] = {
-    "Modelica.Blocks.Continuous.LimPID": "feedback controllers are not supported",
-}
+REFUSED: dict[str, str] = {}
 # `BoundaryConditions.WeatherData.*`: every class under this package but the supported
 # `ReaderTMY3` (`WEATHER_READERS`).
 REFUSED_PREFIXES: dict[str, str] = {

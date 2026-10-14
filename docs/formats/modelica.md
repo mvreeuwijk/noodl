@@ -23,7 +23,7 @@ print(result["T"][-1])       # zone temperatures (K) at the last grid time, node
 print(result["air.q"][-1])   # edge flows (kg/s); names.edges maps an MBL instance to its columns
 ```
 
-**Supported (20 models: 8 `Validation` + 11 `Examples` of `Buildings.Airflow.Multizone`, and
+**Supported (21 models: 8 `Validation` + 12 `Examples` of `Buildings.Airflow.Multizone`, and
 `Buildings.Fluid.Sources.Examples.Outside_Cp`).** `Buildings.Airflow.Multizone`
 elements, `MixingVolume` zones, pressure/temperature boundaries, trace substances, the outside
 boundaries `Outside`, `Outside_Cp`, `Outside_CpLowRise` and `Outside_CpData` and the weather
@@ -31,9 +31,9 @@ reader `ReaderTMY3` (see "Weather and wind" below) — not `Buildings.ThermalZon
 district networks. `Validation`: `OneWayFlow`,
 `DoorOpenClosed`, `OpenDoorPressure`, `OpenDoorTemperature`, `ThreeRoomsContam`,
 `ThreeRoomsContamDiscretizedDoor`, `OpenDoorBuoyancyDynamic`, `OpenDoorBuoyancyPressureDynamic`.
-`Examples`: `CO2TransportStep`, `ClosedDoors`, `NaturalVentilation`, `OneEffectiveAirLeakageArea`,
-`OneOpenDoor`, `OneRoom`, `Orifice`, `PowerLaw`, `ReverseBuoyancy`, `ReverseBuoyancy3Zones`,
-`ZonalFlow`. The weather and wind pressure of the `Buildings.Fluid.Sources` examples
+`Examples`: `ChimneyShaftWithVolume`, `CO2TransportStep`, `ClosedDoors`, `NaturalVentilation`,
+`OneEffectiveAirLeakageArea`, `OneOpenDoor`, `OneRoom`, `Orifice`, `PowerLaw`, `ReverseBuoyancy`,
+`ReverseBuoyancy3Zones`, `ZonalFlow`. The weather and wind pressure of the `Buildings.Fluid.Sources` examples
 `Outside_CpLowRise`, `Outside_CpData`, `Outside_CpData_Angles` and
 `Validation.Outside_CpData_Directions` (boundaries with no flow element, so not importable as
 models) are compared with `assemble.weather_columns`.
@@ -43,8 +43,23 @@ top one taking its density from below and the bottom one from above, both the vo
 MBL's results. A `TemperatureSensor` on a volume's `heatPort` reads that volume's
 temperature; its `T` may feed a signal block's input.
 
-**Imported, not yet compared.** `PressurizationData` imports (`read_modelica` builds it, and its weather and
-wind pressures match MBL's to round-off), but it is not yet compared as a dynamic model. It is a
+**Feedback control.** `LimPID` is supported as a P controller, `y = clamp(k (wp u_s - u_m),
+yMin, yMax)`, transcribed from MSL 4.1.0 (`Blocks/Continuous.mo`): its measurement from a
+temperature sensor, its output, through Math blocks (`Gain`, `Add`, `Add3`, `Sum`, `MultiSum`,
+`Feedback`, `Product`, `Division`), into a `PrescribedHeatFlow` on the sensed zone. The
+blocks the sensor's reading reaches form a continuous control network
+(`ControlNetwork`, see [Controls](../applications/building_physics.md#controls)); the
+signals that feed it from outside the loop (the set point) are evaluated on the driver grid.
+The heat flow is affine in the zone temperature on each piece of the limiter, and enters the
+zone's energy balance in that form, so that the transport step treats it implicitly: MBL's
+examples heat a 75 kJ/K room with `k gain` = 15000 W/K, a loop that settles in 5 s. The
+limiter's corners are switches, located on step boundaries like an element's. `names.controls`
+maps each block of the loop (`con`, `gain`) to its column of `simulate`'s `"controls"`,
+which holds the blocks' outputs `y`.
+
+**Imported, not yet compared.** `PressurizationData` and `TrickleVent` import (`read_modelica`
+builds them, and their weather and wind pressures match MBL's to round-off), but they are not yet
+compared as dynamic models. `PressurizationData` It is a
 62.5 m3 room between two `Outside_CpLowRise` walls over 30 days of San Francisco weather. The room
 flushes in about 10 s, against steps of 50 to 3000 s. Where the flow fades, in a calm or with the
 wind parallel to both walls, it can fall by orders of magnitude within one step, and the room
@@ -59,15 +74,37 @@ refinement, together with a transport step that treats the flows' change within 
 is the direction for the follow-up. The wind boundaries are verified on the
 `Buildings.Fluid.Sources` models and `Outside_Cp`.
 
+`TrickleVent` is the same room between two trickle vents (tabulated flow laws) over the same
+30 days, its temperature held at 293.15 K by a P controller (`k gain` = 15000 W/K, a loop that
+settles in 5 s). The room tracks its controller's balance between `k gain (T_set - T)` and
+the heat the outside air carries in, `q cp (T_out - T)`, 5 s behind it. Within a step the
+transport sees the flows at the step's two ends only, so the room settles on that balance at
+the end flows and misses the lag: an error of 5 s times the rate of the room's deviation,
+the same at every step length (600 s down to 150 s). Over the first 7200 s, at 1 and 2 and at
+2 and 4 substeps alike, the room temperature is up to 4.3e-5 K from the reference (1.5e-7
+relative) and the controller output, five times the room's deviation from its set point, up
+to 2.2e-4 (1.1e-2 of its value); the flows are within 1.5e-5 and the humidity within 1.8e-4.
+Over every row the run at 1 substep does not get through: at 959400-960000 s (day 11) its
+airflow solve stops at a 0.142 kg/s residual (not diagnosed). As for `PressurizationData`, a
+transport step that follows the flows' change within a step is the direction for the
+follow-up.
+
 **Refused, each with a named error** (`ModelicaImportError` lists every offending instance and
 its class):
 
-- `TrickleVent`, `ChimneyShaftNoVolume`, `ChimneyShaftWithVolume` — feedback controllers
-  (`LimPID`), and in `ChimneyShaftNoVolume` a chain of two flow elements.
+- `ChimneyShaftNoVolume` — a chain of two flow elements (its two orifices in one column, with
+  no volume between them).
+- A `LimPID` with an integral or derivative part (`controllerType` PI, PD or PID), with
+  feed-forward, or with the steady-state or initial-output initialisation; a feedback loop
+  whose signal drives anything but a `PrescribedHeatFlow`'s `Q_flow`, a heat flow into a zone
+  a fixed temperature holds, or a zone's heat flow read from another zone's temperature; a
+  product of two feedback signals or a division by one (not affine in the zone temperature).
 - A `MediumColumnDynamic` with `use_HeatTransfer = true` (heat exchanged through its
   `heatPort`).
-- A component output other than a temperature sensor's `T` wired into a signal block, naming
-  the connection; a temperature sensor whose `port` is not wired to a volume's `heatPort`.
+- A component output other than a temperature sensor's `T` wired into a signal block, or a
+  sensor's `T` wired to anything but one of a block's inputs, naming the connection; a
+  temperature sensor whose `port` is not wired to a volume's `heatPort`.
+- A `TraceSubstancesFlowSource` with a negative (extracting) flow.
 - Every `Buildings.BoundaryConditions.WeatherData` class but `ReaderTMY3`; a weather bus wired
   to anything but an `Outside` boundary's `weaBus`, or any weather-bus output other than
   `TDryBul`, `pAtm`, `relHum`, `winSpe` and `winDir` read by anything; a `ReaderTMY3` wired
@@ -75,11 +112,12 @@ its class):
   driving one of its inputs that it does not read (an output taken from the file, or an
   input of another output).
 
-For example, reading `TrickleVent` raises:
+For example, reading `ChimneyShaftNoVolume` raises:
 
 ```text
-ModelicaImportError: modelica: refused 1 item:
-  - con (Modelica.Blocks.Continuous.LimPID): feedback controllers are not supported
+ModelicaImportError: modelica: refused 2 items:
+  - oriChiBot (Buildings.Airflow.Multizone.Orifice): chain has more than one flow element: also found oriChiTop
+  - oriChiTop (Buildings.Airflow.Multizone.Orifice): chain has more than one flow element: also found oriChiBot
 ```
 
 **Conventions:**
@@ -97,6 +135,10 @@ ModelicaImportError: modelica: refused 1 item:
   no node and no pressure drop.
 - `PrescribedHeatFlow` is supported only at `alpha = 0` (MSL's default: no temperature
   dependence); a nonzero `alpha` is refused.
+- A `MassFlowSource_T` with a negative `m_flow` draws air out of its volume. By Modelica's
+  stream semantics the air entering the source is the volume's own, so it leaves at the
+  zone's temperature and composition, whatever the source's `T`, `X` and `C`
+  (`ChimneyShaftWithVolume` extracts 0.05 kg/s for ten minutes).
 - A boundary wired straight to one zone's port, and to no other port, is supported: it fixes that
   zone's pressure.
 - `"air.phi"` is GAUGE pressure relative to a per-model reference `p_ref` (the first boundary's
@@ -112,7 +154,7 @@ ModelicaImportError: modelica: refused 1 item:
   edges or zonal flows, no boundary among them) with a net flow imbalance — an unequal
   `ZonalFlow_m_flow` pair or a mass source into it; `MediumColumn.densitySelection = "actual"`;
   and an outside boundary whose weather-bus inputs come from no `ReaderTMY3` and no signal. With
-  storage, none of the 20 supported models needs any of the three.
+  storage, none of the 21 supported models needs any of the three.
 
 **Weather and wind.** A `ReaderTMY3` supplies the outside boundaries wired to it with the dry-bulb
 temperature, the atmospheric pressure, the relative humidity, the wind speed and the wind

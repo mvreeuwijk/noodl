@@ -766,6 +766,42 @@ The fan runs at its 0.2 floor until the CO2 nears the set point, around 09:00; t
 output then rises until the exhaust holds zone one at 650 ppm, and falls back to 0 once the
 occupants leave.
 
+**From Modelica.** `read_modelica` reads a `LimPID` whose measurement is a temperature sensor
+on a volume, and the Math blocks between it and a `PrescribedHeatFlow`, into a continuous
+network: a `LimitedPID` (a P controller; the integral and derivative parts are refused by
+name) and `Affine`/`Sum`/`Product`/`Divide` blocks. Its heat flow does not go through an
+actuator. On each piece of the limiter it is affine in the zone temperature, `A + B T`, and
+the closure `FeedbackHeat` hands it to the thermal layer as the source `A` and the removal
+rate `-B/C`, so that each transport step treats it implicitly: the MBL examples' loop, 15000
+W/K on a 75 kJ/K room, settles in 5 s, shorter than their steps. `simulate(...,
+scheme="midpoint")` takes both halves of a step on the step's piece and splits a step where the
+limiter reaches a limit. `names.controls` maps each block to its column of `simulate`'s
+`"controls"` (the block outputs). MBL's `ChimneyShaftWithVolume` holds its room at 293.15 K
+while its volumes release their start imbalance:
+
+```python
+from noodl.apps.building_physics import read_modelica
+from noodl.apps.building_physics.modelica import simulate
+
+model, state, drivers, names = read_modelica("ChimneyShaftWithVolume.json", return_names=True)
+out = simulate(model, state, drivers, names.times[:3])
+print(names.controls)
+heat = out["controls"][:, names.controls["gain"]]       # the heat into the room, W
+room = out["T"][:, names.nodes["roo"]]
+for k in range(3):
+    print(f"{float(names.times[k]):4.1f} s  room {float(room[k]):.4f} K  heat {float(heat[k]):6.1f} W")
+```
+
+```text
+{'con': 2, 'gain': 3}
+ 0.0 s  room 293.1500 K  heat    0.0 W
+ 7.2 s  room 293.1558 K  heat  -86.9 W
+14.4 s  room 293.1514 K  heat  -20.9 W
+```
+
+The compressed air warms the room at first, and the controller cools it back (MBL's room is
+at 293.1558 K at 7.2 s too).
+
 ## The API
 
 ### Zones and walls
@@ -1389,7 +1425,7 @@ pressure, relative humidity, wind speed) and every wind boundary's `pWin` are co
 separately from any time integration (`assemble.weather_columns`), on MBL's
 `Buildings.Fluid.Sources` examples (four orientations of `Outside_CpLowRise` and of `Outside_CpData`
 over a week from day 200, a full sweep of the wind direction over symmetric, asymmetric and narrow
-profiles), on `Outside_Cp` and on `PressurizationData`. Being the same arithmetic as MBL's, they are
+profiles), on `Outside_Cp`, `PressurizationData` and `TrickleVent`. Being the same arithmetic as MBL's, they are
 held to round-off, `|noodl - omc| <= 1e-12 |omc|` with no absolute floor; the weather comes out
 identical to the last bit, the calendar time included (MBL's `t - k lenWea + lenWea` rounds the
 model time to the spacing of doubles near a year, 3.7e-9 s, and noodl rounds it the same way):
@@ -1402,11 +1438,12 @@ model time to the spacing of doubles near a year, 3.7e-9 s, and noodl rounds it 
 | Outside_CpData_Angles | 0.0e+00 | 4.6e-16 | 501 |
 | Outside_CpData_Directions | 0.0e+00 | 4.3e-16 | 501 |
 | PressurizationData | 0.0e+00 | 9.1e-16 | 501 |
+| TrickleVent | 0.0e+00 | 1.6e-15 | 4321 |
 
-`PressurizationData` imports, but it is not compared as a dynamic model (see Limitations). Its
-weather and wind pressures are compared, in the last row above.
+`PressurizationData` and `TrickleVent` import, but they are not compared as dynamic models (see
+Limitations). Their weather and wind pressures are compared, in the last rows above.
 
-**Dynamic models (13, with volumes).** Every volume stores its air compressibly, as MBL's
+**Dynamic models (14, with volumes).** Every volume stores its air compressibly, as MBL's
 `MixingVolume` does (see "Volume mass storage" below), and every model is compared at the
 reference's own precision. The reference CSVs were regenerated with DASSL at a tolerance of
 1e-13; at 1e-14 DASSL returns no trajectory. At the models' declared 1e-6 the reference's
@@ -1435,9 +1472,19 @@ steps are laid out with care:
   at MBL's `p_start`, so a start that releases an imbalance begins on a graded sub-grid; a
   start in balance only doubles its steps up from a tiny first one.
 
-`ClosedDoors` and `ReverseBuoyancy` combine two and four substeps per output interval: at one
-step per interval their crack flows switching on (`ClosedDoors`) and their orifices reversing
-at 18 s (`ReverseBuoyancy`) are not yet in the asymptotic range of the extrapolation.
+`ClosedDoors`, `ReverseBuoyancy` and `ChimneyShaftWithVolume` combine two and four substeps per
+output interval: at one step per interval their crack flows switching on (`ClosedDoors`),
+their orifices reversing at 18 s (`ReverseBuoyancy`) and the room controller answering the end
+of the extraction at 601 s (`ChimneyShaftWithVolume`) are not yet in the asymptotic range of
+the extrapolation.
+
+`ChimneyShaftWithVolume` adds a room heated by a P controller on its temperature
+(`LimPID`, through a `Gain` into a `PrescribedHeatFlow`), a `MediumColumnDynamic` shaft and a
+source that injects and then extracts 0.05 kg/s. Its controller output `con.y` (column `y`)
+is compared like any other column; it is five times the room's deviation from its set point, a
+difference of two temperatures, so its relative error is the strictest of the model's. It is at
+7.4e-7 (7.1e-7 beyond the reference's resolution), 4 s after the extraction stops: its 3.6e-8
+there is 7e-9 K of room temperature (2.5e-11 relative).
 
 The metric is `|noodl - omc| / max(|omc|, floor)` at every row after `t = StartTime`. The floor
 is 1e-3 of the model's largest flow for flows, and 1e-3 of the column's largest value
@@ -1473,6 +1520,7 @@ differ and the first is above 1e-6, and the wall time of the two runs:
 | OneOpenDoor | 7.2e-05 (0) | 1.2e-10 | 2.1e-11 | — | — | 1, 2 | 288 s |
 | ReverseBuoyancy | 8.1e-06 (0) | 1.5e-10 | 4.7e-10 | 4.7e-10 | — | 2, 4 | 481 s |
 | OneEffectiveAirLeakageArea | 4.4e-07 | 7.4e-13 | 1.8e-13 | 3.0e-13 | — | 1, 2 | 114 s |
+| ChimneyShaftWithVolume | 1.1e-08 | 2.7e-11 | 9.1e-14 | 1.3e-12 | — | 2, 4 | 951 s |
 
 No model needs a bound above 1e-6 (`PARITY_STORAGE` is empty). The storage-dominated models
 also assert the storage mechanism on noodl physics' own history. `ClosedDoors` and
@@ -1585,9 +1633,18 @@ regression at rtol 1e-8.
   that treats the flows' change within a step implicitly, is the direction for the follow-up.
   The wind boundaries themselves are verified on the `Buildings.Fluid.Sources` models
   (above).
-- **The Modelica import accepts a stated subset.** Controllers and dynamic medium columns are
-  refused with a named error, and only the weather reader's airflow outputs are read; see [the
-  Modelica import's refused content](../formats/modelica.md).
+- **`TrickleVent` is imported but not compared.** Its room, held at its set point by a P
+  controller with a 5 s loop, lags the flows' change by those 5 s, which a step that sees the
+  flows at its two ends only misses. Over its first 7200 s the room temperature is up to
+  4.3e-5 K (1.5e-7 relative) from the reference at 1 and 2 and at 2 and 4 substeps alike, and
+  the controller output, five times the room's deviation from its set point, 1.1e-2 relative.
+  Over every row the run at 1 substep does not get through: at 959400-960000 s (day
+  11) its airflow solve stops at a 0.142 kg/s residual (not diagnosed). Its weather and wind pressures are compared (above).
+- **The Modelica import accepts a stated subset.** A `LimPID` is read as a P controller on a
+  zone temperature driving a heat flow; integral and derivative parts, other feedback targets
+  and two flow elements in one column are refused with a named error, and only the weather
+  reader's airflow outputs are read; see [the Modelica import's refused
+  content](../formats/modelica.md).
 
 ## Install
 

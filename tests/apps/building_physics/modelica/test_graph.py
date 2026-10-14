@@ -101,8 +101,8 @@ def test_refused_classes_are_named_together() -> None:
     message = str(excinfo.value)
     assert "bouOut" in message
     assert "component class is not supported" in message
-    assert "ctrl" in message
-    assert "feedback controllers are not supported" in message
+    assert "wea" in message
+    assert "weather data other than a ReaderTMY3 is not supported" in message
 
 
 def test_malformed_connection_ref_is_gathered_not_raised_immediately() -> None:
@@ -351,13 +351,20 @@ def test_ports_beside_a_refused_component_add_no_follow_on_message(tmp_path) -> 
 
 def test_a_temperature_sensor_on_a_volume_is_wired_into_its_controller():
     doc = expand.expand(schema.load(DATA / "ChimneyShaftWithVolume.json"))
-    with pytest.raises(ModelicaImportError) as err:      # the controller is still refused
-        graph.build(doc)
-    assert "con (Modelica.Blocks.Continuous.LimPID)" in str(err.value)
-    assert "temSen" not in str(err.value)
-    ctx = graph._classify_components(doc)
-    graph._process_fluid_connections(doc, ctx)
-    assert ctx.signal_wires == [("temSen.T", "con.u_m")]
+    g = graph.build(doc)
+    assert g.signal_wires == (("temSen.T", "con.u_m"),)
+    assert [(c.name, zone) for c, zone in g.heat_sensors] == [("temSen", "roo")]
+
+
+def test_a_temperature_sensor_wired_to_anything_but_a_block_input_is_refused():
+    doc = schema.load(DATA / "ChimneyShaftWithVolume.json")
+    rewired = dataclasses.replace(doc, connections=tuple(
+        ("temSen.T", "gain.y") if tuple(c) == ("temSen.T", "con.u_m") else c
+        for c in doc.connections))
+    with pytest.raises(ModelicaImportError,
+                       match=r"temSen\.T -> gain\.y: y is not an input of gain "
+                             r"\(Modelica\.Blocks\.Math\.Gain\); its inputs are u"):
+        graph.build(expand.expand(rewired))
 
 
 def test_a_component_output_into_a_signal_must_come_from_a_temperature_sensor():

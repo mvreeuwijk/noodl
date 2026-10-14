@@ -118,7 +118,8 @@ that zone's temperature and draws no heat; it is recorded in `ComponentGraph.hea
 `(component, zone)`, and wired to anything else it is refused. A connection from a component's
 output to an input of a signal block (`doc.signals`) is accepted only from such a sensor's `T`
 and recorded in `ComponentGraph.signal_wires` as `("<sensor>.T", "<block>.<input>")`; any
-other component output wired into a signal block is refused, naming the connection.
+other component output wired into a signal block, and a sensor wired to anything but one of the
+block's inputs (`signals.block_inputs`), is refused, naming the connection.
 
 Weather bus
 -----------
@@ -139,11 +140,12 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 
-from noodl.apps.building_physics.modelica import schema
+from noodl.apps.building_physics.modelica import schema, signals
 from noodl.apps.building_physics.modelica.schema import (
     Component,
     ModelicaDoc,
     ModelicaImportError,
+    Signal,
 )
 
 _FIXED_TEMPERATURE = "Buildings.HeatTransfer.Sources.FixedTemperature"
@@ -405,28 +407,36 @@ def _classify_components(doc: ModelicaDoc) -> _Ctx:
 
 
 def _sensor_wire(ctx: _Ctx, ref_a: str, ref_b: str,
-                 signal_names: set[str]) -> tuple[str, str] | None:
+                 signal_of: dict[str, Signal]) -> tuple[str, str] | None:
     """`(sensor output, signal input)` when one end is a signal block's input and the other a
     component's output, or None when neither end is a signal block. Only a temperature
-    sensor's `T` may feed a signal; any other component output is reported by name (and
-    `("", "")` returned)."""
+    sensor's `T` may feed a signal, and only into one of the block's inputs
+    (`signals.block_inputs`); anything else is reported by name (and `("", "")`
+    returned)."""
     for src, dst in ((ref_a, ref_b), (ref_b, ref_a)):
         s_inst, _, s_port = src.partition(".")
-        d_inst = dst.partition(".")[0]
-        if d_inst in signal_names and s_inst in ctx.by_name:
-            if ctx.kind_of[s_inst] == "heat_sensor" and s_port == "T":
-                return src, dst
-            ctx.errors.append(f"{src} -> {dst}: a component output wired into a signal is "
-                              f"supported only from a temperature sensor's T "
-                              f"({', '.join(sorted(schema.HEAT_SENSORS))})")
-            return "", ""
+        d_inst, _, d_port = dst.partition(".")
+        if d_inst in signal_of and s_inst in ctx.by_name:
+            if ctx.kind_of[s_inst] != "heat_sensor" or s_port != "T":
+                ctx.errors.append(f"{src} -> {dst}: a component output wired into a signal "
+                                  f"is supported only from a temperature sensor's T "
+                                  f"({', '.join(sorted(schema.HEAT_SENSORS))})")
+                return "", ""
+            sig = signal_of[d_inst]
+            inputs = signals.block_inputs(sig)
+            if d_port not in inputs:
+                has = f"its inputs are {', '.join(inputs)}" if inputs else "it has no inputs"
+                ctx.errors.append(f"{src} -> {dst}: {d_port} is not an input of {d_inst} "
+                                  f"({sig.cls}); {has}")
+                return "", ""
+            return src, dst
     return None
 
 
 def _process_fluid_connections(doc: ModelicaDoc, ctx: _Ctx) -> None:
     """Union every fluid `connect()` pair; record a temperature sensor wired into a signal;
     note a signal-style connection's refusal, if any."""
-    signal_names = {s.name for s in doc.signals}
+    signal_of = {s.name: s for s in doc.signals}
     for a, b in doc.connections:
         if _bus_end(a) is not None or _bus_end(b) is not None:
             continue  # weather-bus wiring: `_resolve_weather`
@@ -436,7 +446,7 @@ def _process_fluid_connections(doc: ModelicaDoc, ctx: _Ctx) -> None:
         ia, pa = split_a
         ib, pb = split_b
         if ia not in ctx.by_name or ib not in ctx.by_name:
-            wire = _sensor_wire(ctx, a, b, signal_names)
+            wire = _sensor_wire(ctx, a, b, signal_of)
             if wire is not None:
                 if wire != ("", ""):
                     ctx.signal_wires.append(wire)

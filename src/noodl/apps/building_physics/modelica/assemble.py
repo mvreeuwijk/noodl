@@ -176,15 +176,23 @@ Sources
 `C = 1` for the named substance (0 for the others). This becomes an air-layer mass source,
 a thermal source `cp m T_default`, a species source `m` for the substance and, when moisture
 is carried, `m X_default[1]` of water. `MassFlowSource_T` injects `m_flow` at `T`, `X`, `C`
-likewise; a negative (extracting) flow is refused, since the extracted enthalpy would depend
-on the zone state.
+likewise. A negative `m_flow` draws air out of the zone (`Examples/ChimneyShaftWithVolume.mo`
+extracts 0.05 kg/s for ten minutes): by Modelica's stream semantics the air entering the
+source is the volume's own (`inStream` of its port), so it leaves at the zone's temperature,
+water and trace-substance fractions. That part of the flow (its step mean, `<= 0`) is the
+driver `"extraction.sources"` (full node, kg/s), besides its share of `"air.sources"`, and
+the closure (`_ZoneStateClosure`) turns it into the zone's state-dependent sources `cp e T`
+and `e x`: the outflow carries away what the zone holds, and no more (with mass storage the
+`storage` terms of the stored-mass change cancel them, as MBL's balances have no outflow
+term). A `TraceSubstancesFlowSource` with a negative flow is refused.
 
 `PrescribedHeatFlow` into a volume's `heatPort` (MSL `PrescribedHeatFlow.mo:15`:
 `port.Q_flow = -Q_flow (1 + alpha (port.T - T_ref))`; the volume adds `heatPort.Q_flow` to
 `der(U)`, `PartialMixingVolume.mo:185-189`, `ConservationEquation.mo:303`) becomes a thermal
 source `Q_flow` W at that zone, read from the signal driving its `Q_flow` input. Only
 `alpha = 0` (the MSL default) is supported: a temperature-dependent heat flow is refused. Into
-a pinned zone it has no effect, as in MBL, where the stiff conductor carries it away.
+a pinned zone it has no effect, as in MBL, where the stiff conductor carries it away. One driven
+by a feedback loop is not a driver ("Feedback control" below).
 
 Every source driver (air, heat and species) is the MEAN of the source over each step, not its
 value at the step's end time (`_Signals.mean`, `signals.interval_means`): row `k >= 1` of the
@@ -197,6 +205,21 @@ the grid the source is also constant within each step: `Examples/CO2TransportSte
 its CO2 in a 3.6 s pulse that falls between two 172.8 s output times, and is stepped as its
 own 3.6 s step. Boundary values, openings and prescribed flows stay point values at the step's
 end time. `run.simulate` steps over every driver-grid time between the times it reports.
+
+Feedback control
+----------------
+A `TemperatureSensor` wired into a signal block closes a loop (`feedback`): the blocks its
+reading reaches, and every `LimPID`, are not evaluated over the grid but become a continuous
+`ControlNetwork`. `LimPID` is read as a P controller (`LimitedPID`, MSL 4.1.0
+`Blocks/Continuous.mo`); the integral and derivative parts, feed-forward and the
+steady-state and initial-output initialisations are refused by name. The open-loop signals
+feeding the network (a set point) are point values on the driver grid in
+`"controls.input"`. A closed-loop signal may drive only a `PrescribedHeatFlow` into an
+unpinned zone, from that zone's own temperature: the heat flow is affine in that temperature
+on each piece of the limiters, and `feedback.FeedbackHeat` (the last closure) puts it into
+the zone's energy balance as a source and a removal rate, so that the transport step treats
+it implicitly. `ModelicaNames.controls` names each block's output column of
+`run.simulate`'s `"controls"`.
 """
 
 from __future__ import annotations
@@ -208,7 +231,15 @@ from dataclasses import dataclass, field
 import torch
 
 from noodl._broadcast import broadcast_shapes
-from noodl.apps.building_physics.modelica import expand, outside, schema, signals, storage, weather
+from noodl.apps.building_physics.modelica import (
+    expand,
+    feedback,
+    outside,
+    schema,
+    signals,
+    storage,
+    weather,
+)
 from noodl.apps.building_physics.modelica.graph import ComponentGraph, FlowPath, TwoWayEdge
 from noodl.apps.building_physics.modelica.graph import _raise as _refuse
 from noodl.apps.building_physics.modelica.graph import build as build_graph
@@ -277,6 +308,9 @@ class ModelicaNames:
     is `"sha.vol"` (`expand`).
     `weather` maps `"<reader>.weaBus.<output>"` (K, Pa, 1, m/s, rad) and `"<boundary>.pWin"`
     (Pa) to their values on the output grid `times` (module docstring, "Weather and wind").
+    `controls` maps each feedback block (`LimPID` and the Math blocks it drives, module
+    docstring, "Feedback control") to its position in the feedback network's outputs: the
+    column of `run.simulate`'s `"controls"` holding its output `y`.
     """
 
     edges: dict[str, tuple[tuple[int, int], ...]]
@@ -288,6 +322,7 @@ class ModelicaNames:
     attached: dict[str, str] = field(default_factory=dict)  # boundary -> zone it is wired to
     storage: tuple[str, ...] = ()  # zones with volume mass storage (storage.py)
     weather: dict[str, Tensor] = field(default_factory=dict)
+    controls: dict[str, int] = field(default_factory=dict)
 
 
 # --------------------------------------------------------------------------- helpers
@@ -433,6 +468,11 @@ def _component_kinds(doc: ModelicaDoc) -> dict[str, str]:
             else "component" for c in doc.components}
 
 
+def _injected(m) -> Tensor:
+    """The injecting (positive) part of a source's mass flow (module docstring, "Sources")."""
+    return _t(m).clamp(min=0.0)
+
+
 def _stack(values: list[Tensor], n_t: int) -> tuple[Tensor, bool]:
     """Stack scalars (`()`) and series (`(n_t,)`) along a new LAST axis: a series
     `(n_t, len(values))` if any entry is one (flag True), else `(len(values),)`."""
@@ -460,7 +500,8 @@ class _Signals:
     A `Modelica.Blocks.Math` block (`signals.combine`) takes the value of each of its inputs
     `"<block>.<input>"` from the signal that drives it, recursively, so a chain such as
     `ramp -> add.u1`, `add -> bouA.p_in` is evaluated from its sources outwards. A block
-    input nothing drives, and a loop of blocks (feedback), are refused by name.
+    input nothing drives, and a loop of blocks with no sensor in it, are refused by name. The
+    closed-loop blocks (`closed`, `feedback.closed_loop`) are left to the feedback network.
     """
 
     def __init__(self, doc: ModelicaDoc, times: Tensor, kind_of: Mapping[str, str],
@@ -471,6 +512,9 @@ class _Signals:
         self.used: set[str] = set()
         self.kind_of = kind_of
         self.signal_names = {s.name for s in doc.signals}
+        # The closed-loop blocks (`feedback.closed_loop`): never evaluated here (their inputs
+        # are the state's), and their inputs and outputs are read by the feedback network.
+        self.closed: set[str] = set()
         self._values: dict[str, Tensor | None] = {}
         for s in doc.signals:
             for target in s.drives:  # one block output may feed several inputs
@@ -499,6 +543,8 @@ class _Signals:
         be evaluated. Evaluated once, however many inputs it feeds."""
         if s.name in self._values:
             return self._values[s.name]
+        if s.name in self.closed:
+            return None  # read by the feedback network (`feedback`), not over the grid
         if s.name in chain:
             loop = " -> ".join((*chain[chain.index(s.name):], s.name))
             self.errors.append(f"{s.name} ({s.cls}): signal loop {loop} (feedback is not "
@@ -607,6 +653,8 @@ class _Signals:
                 continue
             if self.kind_of.get(inst) == "observer":
                 continue  # feeds a block the reader ignores
+            if inst in self.closed or s.name in self.closed:
+                continue  # read, or refused by name, by the feedback network
             if inst in self.signal_names:
                 continue  # feeds a Math block that is itself unused: reported for that block
             self.errors.append(
@@ -697,10 +745,14 @@ class _ZonalFlowEdge(Element):
 
 
 # ------------------------------------------------------------------------- closure
+EXTRACTION = "extraction.sources"  # kg/s, <= 0, full node: air a source draws out of a zone
+
+
 class _ZoneStateClosure:
     """Writes the full-node drivers `"T"`, `"p_abs"` (and `"X_w"` when moisture is carried)
     from the transport states, the boundary drivers and the last solved `"air.phi"` (module
-    docstring, "p_abs")."""
+    docstring, "p_abs"), and the sources of air drawn out of a zone at its own state
+    (`EXTRACTION`, module docstring, "Sources")."""
 
     def __init__(self, *, medium: AirMedium, p_ref: float, T0: Tensor, phi0: Tensor,
                  X0: Tensor,
@@ -783,6 +835,11 @@ class _ZoneStateClosure:
         keep[self.th_interior] = True
         return torch.where(keep, out, torch.zeros_like(out))
 
+    @staticmethod
+    def _add(out: dict, drivers, key: str, src: Tensor) -> None:
+        base = out.get(key, drivers.get(key))
+        out[key] = src if base is None else base + src
+
     def __call__(self, state, drivers):
         T = self.temperatures(state, drivers)
         out = {"T": T, "p_abs": self.pressures(state, drivers)}
@@ -790,9 +847,22 @@ class _ZoneStateClosure:
             out["X_w"] = self.species(state, drivers)[..., self.water]
             q = state.get("air.q")
             if self.heat_edges is not None and q is not None:
-                src = self.cp_correction(q, T, out["X_w"])
-                base = drivers.get("thermal.sources")
-                out["thermal.sources"] = src if base is None else base + src
+                self._add(out, drivers, "thermal.sources", self.cp_correction(q, T, out["X_w"]))
+        e = drivers.get(EXTRACTION)
+        if e is not None:
+            # Air drawn out at the zone's own state (module docstring, "Sources").
+            if self.th_interior is not None:
+                keep = torch.zeros(T.shape[-1], dtype=torch.bool)
+                keep[self.th_interior] = True
+                src = torch.where(keep, self.c0 * e * T, torch.zeros_like(T))
+                self._add(out, drivers, "thermal.sources", src)
+            if self.sp_interior is not None:
+                x = self.species(state, drivers)
+                keep = torch.zeros(x.shape[-2], dtype=torch.bool)
+                keep[self.sp_interior] = True
+                src = torch.where(keep.unsqueeze(-1), e.unsqueeze(-1) * x,
+                                  torch.zeros_like(x))
+                self._add(out, drivers, "species.sources", src)
         return out
 
 
@@ -1223,6 +1293,9 @@ class _Builder:
     # ------------------------------------------------------------- build
     def build(self) -> tuple[Model, State, Drivers, ModelicaNames]:
         g, med, errors = self.graph, self.med, self.errors
+        # Feedback control (module docstring): the closed-loop blocks are not evaluated
+        # over the grid; the heat flows they drive enter through the feedback network.
+        self.sig.closed = feedback.closed_loop(self.doc, g)
         zones: dict[str, _Zone] = {}
         for name in g.zones:
             z = _zone(self.by_name[name], med, errors)
@@ -1381,6 +1454,14 @@ class _Builder:
                     f"flow would accumulate there; not supported"
                 )
 
+        # The feedback network (module docstring, "Feedback control"); its sensors read the
+        # zone temperatures through the closure built below.
+        zone_closure: list[_ZoneStateClosure] = []
+        fb = feedback.feedback_network(
+            self.doc, g, zone_index={z: index[z] for z in g.zones},
+            zone_temperature=lambda s, d: zone_closure[0].temperatures(s, d),
+            pinned={nm for nm, z in zones.items() if z.pinned is not None}, errors=errors)
+
         _refuse(errors)
         if not elements:
             raise ModelicaImportError("modelica: the model has no flow element")
@@ -1500,11 +1581,17 @@ class _Builder:
                         _stack_nested(rows, K, self.n_t))
         for key, value in self._inputs.items():
             put(key, (value, bool(value.ndim)))
+        if fb is not None and fb.inputs:
+            # The open-loop signals feeding the feedback network: point values, like a
+            # boundary value.
+            put(feedback.INPUT_KEY,
+                _stack([self.sig.point(lambda v: v, target) for target in fb.inputs],
+                       self.n_t))
         X_const = med.X_default[0] if med.has_moisture else 0.0
         if water is None:
             const["X_w"] = torch.full((n,), X_const, dtype=F64)
 
-        s_air, s_th, s_sp, s_air_point = sources
+        s_air, s_th, s_sp, s_air_point, s_out = sources
         air_idx = set(air.interior.tolist())
         vals = [s_air[i] if i in air_idx else _t(0.0) for i in range(n)]
         if any(bool((v != 0).any()) for v in vals):
@@ -1513,6 +1600,8 @@ class _Builder:
             # storage rate `run._Midpoint` forms at a step's end balances these.
             put("air.sources_point", _stack([s_air_point[i] if i in air_idx else _t(0.0)
                                              for i in range(n)], self.n_t))
+        if any(bool((v != 0).any()) for v in s_out):
+            put(EXTRACTION, _stack(s_out, self.n_t))
         if "thermal" in layers:
             th_idx = set(layers["thermal"].interior_idx.tolist())
             vals = [s_th[i] if i in th_idx else _t(0.0) for i in range(n)]
@@ -1569,6 +1658,7 @@ class _Builder:
                 water is not None and "thermal" in layers and not use_storage
                 and med.specific_heat_cp(1.0) != med.specific_heat_cp(0.0)) else None,
         )
+        zone_closure.append(closure)
         closures: list = [closure]
         store = None
         if use_storage:
@@ -1583,6 +1673,10 @@ class _Builder:
                 storage_air, air, air_boundary, elements, drives, layers, sp_interior,
                 sp_dilution if "species" in layers else None, m0, net, lam_T)
             closures.append(store)
+        if fb is not None and fb.heat:
+            closures.append(feedback.FeedbackHeat(
+                fb, zone_index=index, zone_temperature=closure.temperatures,
+                layer=layers["thermal"]))
         tol = {}
         if "thermal" in layers:
             tol["thermal"] = THERMAL_ITERATE_TOL
@@ -1645,7 +1739,8 @@ class _Builder:
                               air_references=tuple(path(z) for z in references),
                               attached={b.name: path(z) for z, b in g.attached}, p_ref=p_ref,
                               storage=tuple(path(z) for z in g.zones if z in storage_zones),
-                              weather=self.weather.columns(_rows(self.times, self.out_times)))
+                              weather=self.weather.columns(_rows(self.times, self.out_times)),
+                              controls=dict(fb.blocks) if fb is not None else {})
         return model, state, drivers, names
 
     def _storage_closure(self, mbl, th, p_ref, zones, node_names, index, storage_zones,
@@ -1942,6 +2037,7 @@ class _Builder:
         s_air_point = [zero] * n
         s_th = [zero] * n
         s_sp = [[zero] * K for _ in range(n)]
+        s_out = [zero] * n  # air drawn out of each zone (`EXTRACTION`)
         cp = med.specific_heat_cp(med.X_default[0] if med.has_moisture else 0.0)
         for comp, node in self.graph.sources:
             p = comp.parameters
@@ -1958,7 +2054,7 @@ class _Builder:
                 m_term = float(m)
             if m is None:
                 continue
-            if bool((m < 0).any()):
+            if cls == "TraceSubstancesFlowSource" and bool((m < 0).any()):
                 self.errors.append(f"{comp.name} ({comp.cls}): a negative (extracting) mass "
                                    f"flow is not supported")
                 continue
@@ -2000,28 +2096,34 @@ class _Builder:
                 if T_in is None or any(c is None for c in C_in):
                     continue
             # Step means, not point values (`_Signals.mean`): the amount injected over each
-            # step is exact whatever the signal does inside it.
+            # step is exact whatever the signal does inside it. The injected part carries the
+            # source's state, the drawn part the zone's (module docstring, "Sources").
             mean = self.sig.mean
             i = index[node]
             s_air[i] = s_air[i] + mean(lambda m: m, m_term)
             s_air_point[i] = s_air_point[i] + self.sig.point(lambda m: m, m_term)
-            s_th[i] = s_th[i] + mean(lambda m, T: cp * m * T, m_term, T_term)
+            s_th[i] = s_th[i] + mean(lambda m, T: cp * _injected(m) * T, m_term, T_term)
             for k, c in enumerate(C_in):
-                s_sp[i][k] = s_sp[i][k] + mean(lambda m, c: m * c, m_term, c)
+                s_sp[i][k] = s_sp[i][k] + mean(lambda m, c: _injected(m) * c, m_term, c)
             if water is not None:
-                s_sp[i][water] = s_sp[i][water] + mean(lambda m, x=X_in: m * x, m_term)
+                s_sp[i][water] = s_sp[i][water] + mean(lambda m, x=X_in: _injected(m) * x,
+                                                       m_term)
+            s_out[i] = s_out[i] + mean(lambda m: _t(m).clamp(max=0.0), m_term)
         for comp, node in self.graph.heat_sources:
             alpha = float(comp.parameters.get("alpha", 0.0))  # PrescribedHeatFlow.mo:5
             if alpha != 0.0:
                 self.errors.append(f"{comp.name} ({comp.cls}): alpha = {alpha!r} (a "
                                    f"temperature-dependent heat flow) is not supported")
                 continue
+            driver = self.sig.by_target.get(f"{comp.name}.Q_flow")
+            if driver is not None and driver.name in self.sig.closed:
+                continue  # in the zone's heat balance through the feedback network
             Q = self.sig.require(comp, "Q_flow")
             if Q is None or node not in zones:
                 continue
             i = index[node]
             s_th[i] = s_th[i] + self.sig.mean(lambda q: q, f"{comp.name}.Q_flow")
-        return s_air, s_th, s_sp, s_air_point
+        return s_air, s_th, s_sp, s_air_point, s_out
 
 
 def build(graph: ComponentGraph, doc: ModelicaDoc, *, substeps: int = 1,

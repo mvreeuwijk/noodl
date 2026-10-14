@@ -244,12 +244,8 @@ def test_one_way_flow_against_the_embedded_contam_table():
 
 
 REFUSED = {
-    # The feedback controller (LimPID) its temperature sensor feeds.
-    "TrickleVent": {"con"},
-    # Two orifices in one column chain (no storing node between them), plus the controller.
-    "ChimneyShaftNoVolume": {"con", "oriChiBot", "oriChiTop"},
-    # The controller; its MediumColumnDynamic is read as a volume between two half columns.
-    "ChimneyShaftWithVolume": {"con"},
+    # Two orifices in one column chain (no storing node between them).
+    "ChimneyShaftNoVolume": {"oriChiBot", "oriChiTop"},
 }
 
 
@@ -268,6 +264,19 @@ DEFERRED = {
     # wind pressure are compared (WEATHER).
     "PressurizationData": "unresolved calm-onset freeze (T 2.9e-3, Xi 3.4e-2 at (1, 2) "
                           "substeps over every row)",
+    # The same room between two trickle vents, held at 293.15 K by a P controller (k gain =
+    # 15000 W/K on 75 kJ/K: a 5 s loop) against 600 s output intervals. The room tracks the
+    # controller's quasi-steady balance against the outside air's heat, `q cp (T_out - T)`,
+    # 5 s behind it. Within a step the transport sees the flows at its two ends only, so the
+    # room settles on the balance at the end flows and misses that lag: an error of 5 s times
+    # the rate of the deviation, the same at every step length (measured over the first 7200
+    # s: room T -4.3e-5 K at 5400 s at (1, 2) and at (2, 4) substeps alike; con.y, five times
+    # the deviation, 2.2e-4, 1.1e-2 relative). The follow-up is PressurizationData's: a
+    # transport step following the flows' change within a step. Over every row
+    # the run at 1 substep stops at 959400-960000 s (day 11), its airflow solve at a
+    # 0.142 kg/s residual (not diagnosed).
+    "TrickleVent": "the controlled room misses its 5 s lag behind the flows within a step "
+                   "(con.y 1.1e-2 relative over the first 7200 s, at (1, 2) and (2, 4))",
 }
 
 
@@ -302,7 +311,7 @@ def test_refused_models_name_their_offending_instances(model):
 WEATHER_RTOL = 1e-12
 WEATHER_ONLY = ("Outside_CpData", "Outside_CpData_Angles", "Outside_CpData_Directions",
                 "Outside_CpLowRise")
-WEATHER = (*WEATHER_ONLY, "Outside_Cp", "PressurizationData")
+WEATHER = (*WEATHER_ONLY, "Outside_Cp", "PressurizationData", "TrickleVent")
 
 
 @pytest.mark.parametrize("model", WEATHER)
@@ -384,14 +393,15 @@ def _dynamic_stats(head: list[str], data: np.ndarray, cols: dict[str, np.ndarray
 DYNAMIC = ("OpenDoorBuoyancyDynamic", "OpenDoorBuoyancyPressureDynamic", "ThreeRoomsContam",
            "ThreeRoomsContamDiscretizedDoor", "CO2TransportStep", "ClosedDoors",
            "NaturalVentilation", "OneOpenDoor", "OneRoom", "ReverseBuoyancy",
-           "ReverseBuoyancy3Zones", "ZonalFlow", "OneEffectiveAirLeakageArea")
+           "ReverseBuoyancy3Zones", "ZonalFlow", "OneEffectiveAirLeakageArea",
+           "ChimneyShaftWithVolume")
 # The models whose dynamics MBL's volume mass storage dominates (a closed heated building, a
 # start far from the airflow's balance, a source into sealed volumes): besides parity, each
 # asserts that noodl reproduces the storage mechanism (`_check_storage_mechanism`).
 STORAGE_DOMINATED = ("ClosedDoors", "OneOpenDoor", "ReverseBuoyancy",
                      "OneEffectiveAirLeakageArea")
 UNITS = {"flow": "kg/s", "T": "K", "p": "Pa", "Xi": "kg/kg", "C": "kg/kg", "pWin": "Pa",
-         "TDryBul": "K", "pAtm": "Pa", "relHum": "1", "winSpe": "m/s"}
+         "TDryBul": "K", "pAtm": "Pa", "relHum": "1", "winSpe": "m/s", "y": "-"}
 
 
 def test_every_fixture_is_parity_checked_or_refused():
@@ -457,15 +467,21 @@ REFERENCE_RESOLUTION: dict[str, dict[str, float]] = {
     "ThreeRoomsContamDiscretizedDoor": {"C": 0.0, "T": 2.3e-13, "Xi": 1.1e-13,
                                         "flow": 2.9e-10, "p": 1.2e-10},
     "ZonalFlow": {"T": 3.2e-10, "Xi": 1.6e-13, "flow": 0.0, "p": 0.0},
+    "ChimneyShaftWithVolume": {"T": 1.4e-09, "Xi": 3.3e-14, "flow": 6.8e-10, "p": 8.6e-08,
+                               "y": 1.2e-09},
 }
 # The substeps per output interval of the two runs `run.extrapolate` combines: (1, 2), or
 # (2, 4) where one step per output interval is too long for the extrapolation to be
 # asymptotic (measured, worst flow error at (1, 2) and (2, 4) substeps): ClosedDoors'
 # 14.4 s steps across its crack flows switching on (3.5e-10 and 1.2e-12 kg/s at 993.6 s,
 # against a 1.3e-11 kg/s resolution), ReverseBuoyancy's 7.2 s steps across its orifices'
-# reversal at 18 s (8.4e-8 and 1.6e-8 kg/s at 21.6 s).
+# reversal at 18 s (8.4e-8 and 1.6e-8 kg/s at 21.6 s), ChimneyShaftWithVolume's 7.2 s steps
+# across the end of its extraction (the source's ramp to zero over 600-601 s), which its room
+# controller answers within a few seconds (con.y 3.5e-7 and 2.5e-8 at 604.8 s, where it is
+# 0.034; the extrapolation's own correction at (1, 2) was 4e-8, an eighth of the error).
 PARITY_SUBSTEPS: dict[str, tuple[int, int]] = {"ClosedDoors": (2, 4),
-                                               "ReverseBuoyancy": (2, 4)}
+                                               "ReverseBuoyancy": (2, 4),
+                                               "ChimneyShaftWithVolume": (2, 4)}
 # Bounds above PARITY_RTOL (beyond the resolution), each with its demonstrated cause: none.
 PARITY_STORAGE: dict[str, dict[str, float]] = {}
 # The default run compares the first rows of every model (`-m slow` compares every row),
@@ -473,13 +489,17 @@ PARITY_STORAGE: dict[str, dict[str, float]] = {}
 # first output intervals, most of whose cost is the graded start (`run.GRADING_WINDOW`);
 # where it is in balance, a stretch past its smooth start. ReverseBuoyancy's window ends
 # before its orifices reverse (18 s), the rows that need (2, 4) substeps (PARITY_SUBSTEPS),
-# and runs at (1, 2) (DEFAULT_SUBSTEPS), a third of the cost.
+# and runs at (1, 2) (DEFAULT_SUBSTEPS), a third of the cost; so does ChimneyShaftWithVolume's,
+# whose window (its room controller's start transient, through its limits within the first
+# second) ends long before its extraction stops at 601 s.
 PARITY_ROWS = {"ClosedDoors": 3, "CO2TransportStep": 2, "NaturalVentilation": 3,
                "OneEffectiveAirLeakageArea": 8, "OneOpenDoor": 4, "OneRoom": 21,
                "OpenDoorBuoyancyDynamic": 2, "OpenDoorBuoyancyPressureDynamic": 2,
                "ReverseBuoyancy": 2, "ReverseBuoyancy3Zones": 2, "ThreeRoomsContam": 3,
-               "ThreeRoomsContamDiscretizedDoor": 3, "ZonalFlow": 11}
-DEFAULT_SUBSTEPS: dict[str, tuple[int, int]] = {"ReverseBuoyancy": (1, 2)}
+               "ThreeRoomsContamDiscretizedDoor": 3, "ZonalFlow": 11,
+               "ChimneyShaftWithVolume": 3}
+DEFAULT_SUBSTEPS: dict[str, tuple[int, int]] = {"ReverseBuoyancy": (1, 2),
+                                                "ChimneyShaftWithVolume": (1, 2)}
 
 
 def _columns_of(out: dict, names, head: list[str]) -> dict[str, np.ndarray]:
@@ -490,6 +510,9 @@ def _columns_of(out: dict, names, head: list[str]) -> dict[str, np.ndarray]:
             cols[h] = col
             continue
         inst, var = h.rsplit(".", 1)
+        if var == "y" and inst in names.controls:
+            cols[h] = out["controls"][:, names.controls[inst]].numpy()
+            continue
         if inst in names.nodes and (var in _NODE_VARS or var.startswith("C[")):
             i = names.nodes[inst]
             cols[h] = (out["C"][:, i, int(var[2:-1]) - 1].numpy() if var.startswith("C[")
@@ -616,7 +639,8 @@ WINDOW_COST = {"ClosedDoors": 25, "CO2TransportStep": 43, "NaturalVentilation": 
                "OneEffectiveAirLeakageArea": 1, "OneOpenDoor": 12, "OneRoom": 2,
                "OpenDoorBuoyancyDynamic": 46, "OpenDoorBuoyancyPressureDynamic": 44,
                "ReverseBuoyancy": 60, "ReverseBuoyancy3Zones": 56, "ThreeRoomsContam": 48,
-               "ThreeRoomsContamDiscretizedDoor": 46, "ZonalFlow": 3}
+               "ThreeRoomsContamDiscretizedDoor": 46, "ZonalFlow": 3,
+               "ChimneyShaftWithVolume": 30}
 
 
 def _default_substeps(model: str) -> tuple[int, int]:

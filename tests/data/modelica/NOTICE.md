@@ -93,14 +93,16 @@ such enhancements or derivative works thereof, in binary and source code form.
 
 ---
 
-Three of the 23 multizone models are refused by `read_modelica` (`ModelicaImportError`,
-naming the offending instances); their JSON is exported and kept here for the refusal tests:
+`ChimneyShaftWithVolume.json` (a P controller, `LimPID`, heating its room; its dynamic column,
+`MediumColumnDynamic`, read as a volume between two half columns) is compared as a dynamic model.
+`TrickleVent.json` imports and its weather is compared, but it is not yet compared as a dynamic
+model (its controlled room's 5 s lag behind the flows is not resolved; see
+`tests/verification/test_modelica_parity.py`, `DEFERRED`). One of the 23 multizone models is
+refused by `read_modelica` (`ModelicaImportError`, naming the offending instances); its JSON is
+exported and kept here for the refusal test:
 
-- `TrickleVent.json` — a feedback controller (`LimPID`) is not supported.
-- `ChimneyShaftNoVolume.json` — a chain of more than one flow element between two nodes and a
-  feedback controller are not supported.
-- `ChimneyShaftWithVolume.json` — a feedback controller is not supported (its dynamic column,
-  `MediumColumnDynamic`, is read as a volume between two half columns).
+- `ChimneyShaftNoVolume.json` — a chain of more than one flow element between two nodes is not
+  supported.
 
 These three were re-exported on 14 Oct 2026 with `--tolerance 1e-13`, as the dynamic references
 above: the JSON now keeps the temperature sensor's `T` wired into the controller's `u_m`, and the

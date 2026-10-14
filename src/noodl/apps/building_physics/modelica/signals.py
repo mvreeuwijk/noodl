@@ -73,7 +73,11 @@ import math
 import numpy as np
 import torch
 
-from noodl.apps.building_physics.modelica.schema import ModelicaImportError, Signal
+from noodl.apps.building_physics.modelica.schema import (
+    CONTROLLERS,
+    ModelicaImportError,
+    Signal,
+)
 
 Tensor = torch.Tensor
 F64 = torch.float64
@@ -359,6 +363,17 @@ def math_inputs(sig: Signal) -> tuple[str, ...]:
     if short in ("Sum", "MultiSum"):
         return tuple(f"u[{i + 1}]" for i in range(_vector_size(sig, short)))
     return _MATH_TWO
+
+
+def block_inputs(sig: Signal) -> tuple[str, ...]:
+    """The input connector names of signal block ``sig``: a feedback controller's set point
+    ``u_s`` and measurement ``u_m`` (MSL 4.1.0 ``LimPID``), a Math block's (``math_inputs``),
+    none for a source."""
+    if sig.cls in CONTROLLERS:
+        return ("u_s", "u_m")
+    if is_math(sig):
+        return math_inputs(sig)
+    return ()
 
 
 def _gains(sig: Signal, n: int) -> list[float]:

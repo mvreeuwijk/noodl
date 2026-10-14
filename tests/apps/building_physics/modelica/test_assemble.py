@@ -335,9 +335,32 @@ def test_mass_flow_source_injects_mass_and_enthalpy(tmp_path):
     assert float(air._accumulate(hist["air.q"][-1])[i]) == pytest.approx(0.01, abs=1e-10)
 
 
-def test_extracting_mass_flow_source_is_refused(tmp_path):
+def test_an_extracting_mass_flow_source_draws_the_zones_own_air(tmp_path):
+    """A negative `m_flow` draws air out of the volume, which (Modelica's stream semantics)
+    enters the source at the volume's own state: nothing at the source's 310 K, and the
+    closure's sink `cp e T` at the zone's temperature instead."""
+    model, state, drivers, names = read_modelica(_write(tmp_path, _with_supply(-0.01)),
+                                                 return_names=True)
+    i = names.nodes["vol"]
+    cp = 1006.0 * 0.99 + 1860.0 * 0.01  # Air.mo:567-575 at X_default
+    assert float(drivers["air.sources"][i]) == pytest.approx(-0.01)
+    assert float(drivers["extraction.sources"][i]) == pytest.approx(-0.01)
+    assert "thermal.sources" not in drivers
+    written = model.closures[0](state, drivers)
+    T = float(written["T"][i])
+    assert float(written["thermal.sources"][i]) == pytest.approx(-cp * 0.01 * T, rel=1e-14)
+    assert float(written["thermal.sources"].abs().sum()) == pytest.approx(cp * 0.01 * T)
+    hist = simulate(model, state, drivers, names.times[:3])
+    air = model.potential["air"]
+    assert float(air._accumulate(hist["air.q"][-1])[i]) == pytest.approx(-0.01, abs=1e-10)
+
+
+def test_an_extracting_trace_substance_source_is_refused(tmp_path):
+    doc = _with_supply(-0.01)
+    doc["components"][-1]["class"] = (
+        "Buildings.Fluid.Sources.TraceSubstancesFlowSource")
     with pytest.raises(ModelicaImportError, match="sup .*negative"):
-        read_modelica(_write(tmp_path, _with_supply(-0.01)))
+        read_modelica(_write(tmp_path, doc))
 
 
 def test_outside_without_weather_signals_is_refused(tmp_path):

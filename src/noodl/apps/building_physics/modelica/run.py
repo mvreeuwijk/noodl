@@ -25,6 +25,7 @@ from noodl.apps.building_physics.modelica.assemble import (
     boundary_rate_key,
     is_boundary_rate_key,
 )
+from noodl.apps.building_physics.modelica.feedback import FeedbackHeat
 from noodl.apps.building_physics.modelica.storage import StorageClosure, mass_change
 from noodl.elements import Element
 from noodl.model import Drivers, Model, State
@@ -104,6 +105,10 @@ def _closure(model: Model) -> _ZoneStateClosure:
 
 def _storage(model: Model) -> StorageClosure | None:
     return next((c for c in model.closures if isinstance(c, StorageClosure)), None)
+
+
+def _feedback(model: Model) -> FeedbackHeat | None:
+    return next((c for c in model.closures if isinstance(c, FeedbackHeat)), None)
 
 
 def _initial_air(model: Model, store: StorageClosure, state: State, drivers: Drivers,
@@ -389,8 +394,10 @@ def simulate(model: Model, state: State, drivers: Drivers, times, *,
     Returns `"time"` `(N,)`, `"air.q"` `(N, b)` in the air layer's edge order (see
     `ModelicaNames.edges`), `"air.phi"` `(N, n)` gauge pressure (relative to
     `ModelicaNames.p_ref`), `"p"` `(N, n)` absolute
-    pressure (Pa), `"T"` `(N, n)` (K), `"X_w"` `(N, n)`, and `"C"` `(N, n, K)` for the species
-    layer's mass fractions (water last when carried) when the model has one. `step_kwargs`
+    pressure (Pa), `"T"` `(N, n)` (K), `"X_w"` `(N, n)`, `"C"` `(N, n, K)` for the species
+    layer's mass fractions (water last when carried) when the model has one, and
+    `"controls"` `(N, n_blocks)`, every feedback block's output (`ModelicaNames.controls`),
+    when it has a feedback network (`feedback.FeedbackHeat`). `step_kwargs`
     reach `Model.step`/`Model.steady` (and so the airflow solves); the airflow Newton
     tolerances default to `atol=AIR_ATOL` (`STORAGE_AIR_ATOL` with volume mass storage),
     `rtol=AIR_RTOL`.
@@ -406,7 +413,9 @@ def simulate(model: Model, state: State, drivers: Drivers, times, *,
 
     `scheme="midpoint"` also puts a step boundary on every switch (`_Switches`): where an
     element's law changes piece (the edges of its regularisation band,
-    `Element.switching`) or an edge flow changes sign (the transport layers upwind on it). A
+    `Element.switching`), a feedback controller's limiter reaches a limit
+    (`ControlNetwork.switching`) or an edge flow changes sign (the transport layers upwind on
+    it). A
     step across one is split there, the crossing located on the step's own runs
     (`_advance_located`), so that the right-hand side is smooth within every step: a door's
     flows reversing through its bands across a 14.4 s step were off by 1.1e-4 of the flow
@@ -431,10 +440,13 @@ def simulate(model: Model, state: State, drivers: Drivers, times, *,
     idx = _grid_index(grid, times)
     closure = _closure(model)
     store = _storage(model)
+    control = _feedback(model)
     dynamic = bool(model.transport)
     rows: dict[str, list[Tensor]] = {"air.q": [], "air.phi": [], "p": [], "T": [], "X_w": []}
     if closure.sp_interior is not None:
         rows["C"] = []
+    if control is not None:
+        rows["controls"] = []
 
     def record(state: State, d: Drivers) -> None:
         extra = closure(state, d)
@@ -445,6 +457,8 @@ def simulate(model: Model, state: State, drivers: Drivers, times, *,
         rows["X_w"].append(extra["X_w"] if "X_w" in extra else d["X_w"])
         if "C" in rows:
             rows["C"].append(closure.species(state, d))
+        if control is not None:
+            rows["controls"].append(control.network.evaluate(state, d))
 
     if not dynamic:  # algebraic: the steady solve at each time asked for
         for k in idx:
@@ -575,14 +589,16 @@ def _same(a, b) -> bool:
 class _Switches:
     """The switching values at a state: every value changes sign where the step's right-hand
     side stops being smooth. These are the air layer's elements' own switches
-    (`Element.switching`: a regularisation band's edge, where the law changes piece) and
-    every edge flow's sign, in units of `q_scale` (the transport layers upwind on it: the
-    advected state switches from one end's to the other's where a flow reverses). `parts`
-    are the elements that have switches."""
+    (`Element.switching`: a regularisation band's edge, where the law changes piece), every
+    edge flow's sign, in units of `q_scale` (the transport layers upwind on it: the
+    advected state switches from one end's to the other's where a flow reverses) and, with a
+    feedback network, its limiters' corners (`ControlNetwork.switching`, in units of each
+    limiter's range), last. `parts` are the elements that have switches."""
 
     def __init__(self, model: Model, closure: _ZoneStateClosure, q_scale: float) -> None:
         ((self.name, self.air),) = model.potential.items()
         self.closure = closure
+        self.control = _feedback(model)
         self.q_scale = q_scale
         self._last: tuple | None = None  # (state, point drivers, values) of the last call
         self.parts = []
@@ -613,6 +629,8 @@ class _Switches:
         dp = self.air.dp(state[f"{self.name}.phi"], drv)
         vals = [el.switching(dp[..., sl], drv) for el, sl in self.parts]
         vals.append(state[f"{self.name}.q"] / self.q_scale)
+        if self.control is not None:
+            vals.append(self.control.network.switching(state, drv))
         return torch.cat([v.reshape(-1) for v in vals if v is not None])
 
 
@@ -805,7 +823,15 @@ class _Midpoint:
     carried +-2.1e-5 kg/s of it at every row (measured), where BDF2 leaves 1.7e-7, the same
     as the quasi-steady route. The transport layers take the mean of the storage terms
     (`StorageClosure.terms`: capacity and sources) at the two states, with the step's mass
-    change `(m1 - m0)/h` as the storage rate."""
+    change `(m1 - m0)/h` as the storage rate.
+
+    A feedback network's heat flows (`feedback.FeedbackHeat`) are affine in their zone's
+    temperature on each piece of its limiters, `A + B T`. Both halves take the piece of the
+    whole step (`FeedbackHeat.pieces_between`: a step lies on one side of every corner,
+    `_Switches`), each with `A` and `B` at its own end, `A` as a source and `-B/C` as the
+    removal rate of the half's exact transport step: implicit in the zone temperature, so
+    that a controller far faster than the step (`k gain/C` of 0.2 1/s against 7.2 s steps)
+    stays exact."""
 
     def __init__(self, model: Model, closure: _ZoneStateClosure, solve_kwargs: dict,
                  store: StorageClosure | None = None) -> None:
@@ -815,6 +841,7 @@ class _Midpoint:
         self.layers = dict(model.transport)
         self.closure = closure
         self.store = store
+        self.control = _feedback(model)
         # (h, "air.storage" at the start, at the end) of the last step, for BDF2.
         # The storage history for the BDF rate: the carried "air.storage" at the last few
         # step ends (the last is the next step's start) and the steps between them.
@@ -944,6 +971,7 @@ class _Midpoint:
 
     def step(self, s0: State, d0: Drivers, d1: Drivers, h: float) -> State:
         air, name = self.air, self.air_name
+        control = self.control
         q0 = s0[f"{name}.q"]
         extra0 = self._extra_sources(s0, d0)
         z0 = self._pack(s0)
@@ -989,12 +1017,24 @@ class _Midpoint:
                         ext0[n] = ext0.get(n, 0.0) + t0[f"{n}.extra"]
                         ext1[n] = ext1.get(n, 0.0) + t1[f"{n}.extra"]
                 s["air.storage"] = now1
+            removal0 = removal1 = None
+            if control is not None:
+                # The heat flows' affine form at each end, on the step's pieces (class
+                # docstring).
+                pieces = control.pieces_between(s0, d0, s, d1)
+                A0, B0 = control.affine(s0, d0, pieces)
+                A1, B1 = control.affine(s, d1, pieces)
+                removal0 = control.removal(B0, cap0.get("thermal"))
+                removal1 = control.removal(B1, cap1.get("thermal"))
+                ext0["thermal"] = ext0.get("thermal", 0.0) + A0
+                ext1["thermal"] = ext1.get("thermal", 0.0) + A1
             for n, layer in self.layers.items():
                 x0 = s0[f"{n}.x"]
                 src = d1.get(f"{n}.sources")
                 if src is None:
                     src = self._zero_sources(n, x0)
                 xb0, xb1 = d0[f"{n}.x_boundary"], d1[f"{n}.x_boundary"]
+                rem0, rem1 = (removal0, removal1) if n == "thermal" else (None, None)
                 if layer.scheme == "exact":
                     # Two halves, the first with state 0's flows, capacity and sources,
                     # the second with state 1's; the boundary values through both ends,
@@ -1009,17 +1049,19 @@ class _Midpoint:
                     xm = layer.step(x0, air.flows_of_kind(q0, layer.flow_kinds),
                                     src + ext0.get(n, 0.0), xb0, 0.5 * h,
                                     capacity=cap0.get(n), x_boundary_end=xbm,
-                                    x_boundary_rates=rates0)
+                                    x_boundary_rates=rates0, removal=rem0)
                     s[f"{n}.x"] = layer.step(xm, air.flows_of_kind(q, layer.flow_kinds),
                                              src + ext1.get(n, 0.0), xbm, 0.5 * h,
                                              capacity=cap1.get(n), x_boundary_end=xb1,
-                                             x_boundary_rates=rates1)
+                                             x_boundary_rates=rates1, removal=rem1)
                 else:
                     cap = (0.5 * (cap0[n] + cap1[n])) if n in cap0 else None
                     if n in ext0 or n in ext1:
                         src = src + 0.5 * (ext0.get(n, 0.0) + ext1.get(n, 0.0))
+                    removal = None if rem0 is None else 0.5 * (rem0 + rem1)
                     s[f"{n}.x"] = layer.step(x0, air.flows_of_kind(qm, layer.flow_kinds), src,
-                                             0.5 * (xb0 + xb1), h, capacity=cap)
+                                             0.5 * (xb0 + xb1), h, capacity=cap,
+                                             removal=removal)
             return self._pack(s), s
 
         z = z0.clone()
