@@ -18,6 +18,7 @@ This module must not import `network.py` at module level: `network.py` imports
 
 from __future__ import annotations
 
+import dataclasses
 import math
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
@@ -42,11 +43,20 @@ from noodl.apps.sewer.dynwave_terms import (
     SURCHARGE_METHODS,
     ConduitGeometry,
     ConduitTerms,
+    LossInputs,
     conduit_terms,
     lengthening_factor,
 )
 from noodl.apps.sewer.hydraulics import CAPACITY_FLOOR, air_density_nodes
 from noodl.apps.sewer.linkcontrol import LinkControl
+from noodl.apps.sewer.losses import (
+    EVAP_DRIVER,
+    HYDCON_DRIVER,
+    STORAGE_DRIVER,
+    ClimateClock,
+    StorageLosses,
+    seepage_depth_limit,
+)
 from noodl.apps.sewer.pumps import (
     IDEAL_PUMP,
     TYPE3_PUMP,
@@ -57,6 +67,7 @@ from noodl.apps.sewer.pumps import (
     pump_curve_flow,
 )
 from noodl.apps.sewer.quality import H2STransfer, LateralLoads, SulfideGeneration
+from noodl.apps.sewer.runoff import RunoffModel, evaporation_can_be_positive
 from noodl.apps.sewer.storage import StorageCurves
 from noodl.apps.sewer.structures import (
     CIRCULAR,
@@ -1171,6 +1182,7 @@ class DynamicWaveHydraulics:
         losses = tuple(torch.tensor([getattr(p, f"loss_{k}") for p in net.pipes], dtype=F64)
                        for k in ("inlet", "outlet", "average"))
         self.losses = losses if any(bool((c != 0).any()) for c in losses) else None
+        self._init_wet_losses(net)
         self.transect_factor = torch.tensor([p.transect_length_factor for p in net.pipes],
                                             dtype=F64)
         #: per pipe: its culvert code (0 for none)
@@ -1348,6 +1360,10 @@ class DynamicWaveHydraulics:
             StorageCurves([m.storage for m in net.manholes], self.full_depth,
                           names=self.junction_names)
             if bool(self.is_storage.any()) else None)
+        if self._storage_inputs is not None:
+            self.storage_losses = StorageLosses(
+                self._storage_inputs, self.storage_curves,
+                us_units=self.climate is not None and self.climate.us_units)
         if air:
             outgoing = {p.u: i for i, p in enumerate(net.pipes)}
             #: per junction: its outgoing conduit's position among the pipes (air.py has
@@ -1396,6 +1412,34 @@ class DynamicWaveHydraulics:
             pond_head=pond_head)
         if self.controlled:
             self._init_controls(net)
+
+    def _init_wet_losses(self, net: SewerNetwork) -> None:
+        """The evaporation and seepage of the conduits and the evaporation and exfiltration of
+        the storage units (`losses.py`): which conduits lose water, which storage units do,
+        and the climate source. Sets `pipe_losses`, `storage_losses` (``None`` when there
+        are none) and `climate`; a network with neither is untouched by any of it."""
+        source = net.climate_source
+        self.climate = source
+        self.pipe_losses = False
+        self.storage_losses: StorageLosses | None = None
+        seep = torch.tensor([p.seepage for p in net.pipes], dtype=F64)
+        evaporates = torch.tensor(
+            [source is not None and evaporation_can_be_positive(source)
+             and p.xsect is not None and p.xsect.open for p in net.pipes], dtype=torch.bool)
+        self._seep_rate = seep / LCF if bool((seep > 0.0).any()) else None      # ft/s
+        self._loss_evap = evaporates if bool(evaporates.any()) else None
+        self.pipe_losses = self._seep_rate is not None or self._loss_evap is not None
+        if self.pipe_losses:
+            self.state_keys = (*self.state_keys, "sewer.pipe_depth")
+            self.key_labels["sewer.pipe_depth"] = list(self.pipe_names)
+        if (any(m.exfiltration is not None for m in net.manholes)
+                or (source is not None and any(m.evaporation_factor != 0.0
+                                               for m in net.manholes))):
+            self._storage_inputs = list(net.manholes)
+        else:
+            self._storage_inputs = None
+        #: whether the closure needs the climate drivers (`losses.EVAP_DRIVER` ...)
+        self.has_wet_losses = self.pipe_losses or self._storage_inputs is not None
 
     def _init_controls(self, net: SewerNetwork) -> None:
         """The data of the link settings and pumps: the initial settings, each orifice's
@@ -1522,6 +1566,17 @@ class DynamicWaveHydraulics:
             length_factor=factor, sections=self.sections,
             force_main_equation=opts.force_main_equation, losses=self.losses,
             transect_factor=self.transect_factor, culverts=self.culverts)
+        if self.pipe_losses:                   # link.c:1359-1378, `losses.py`
+            fields: dict = {}
+            if self._loss_evap is not None:
+                fields["loss_evap"] = self._loss_evap
+            if self._seep_rate is not None:
+                geo = self.geo
+                kinds = [] if geo.xsect is None else geo.xsect.kinds
+                rect = torch.tensor([k == "RECT_CLOSED" for k in kinds], dtype=torch.bool)
+                fields.update(seep_rate=self._seep_rate, seep_depth=seepage_depth_limit(geo),
+                              seep_rect=rect if bool(rect.any()) else None)
+            self.geo = replace(self.geo, **fields)
 
     def set_roughness(self, i: int, value) -> None:
         """Set Manning's n (s m^(-1/3)) of pipe `i` to `value`, which may be a tensor that
@@ -1552,9 +1607,74 @@ class DynamicWaveHydraulics:
                 f"head is set by its conduit, not by a node balance")
         return inflow
 
+    def _loss_inputs(self, state: Mapping, drivers: Mapping | None) -> LossInputs | None:
+        """What the conduits' evaporation and seepage read (`conduit_terms`): the climate
+        drivers (`losses.EVAP_DRIVER`, `HYDCON_DRIVER`) and the carried link depths; ``None``
+        for a network without conduit losses or a query given no drivers."""
+        if not self.pipe_losses or drivers is None:
+            return None
+        for key in (EVAP_DRIVER, HYDCON_DRIVER):
+            if key not in drivers:
+                raise KeyError(
+                    f"DynamicWaveHydraulics: driver {key!r} is required: the network has "
+                    f"conduits that evaporate or seep (`simulate_dynamic_wave` sets it each "
+                    f"step from the file's climate)")
+        evap = torch.as_tensor(drivers[EVAP_DRIVER], dtype=F64) / LCF
+        hydcon = torch.as_tensor(drivers[HYDCON_DRIVER], dtype=F64)
+        return LossInputs(evap, hydcon, state["sewer.pipe_depth"] / LCF)
+
+    def _storage_loss(self, drivers: Mapping | None) -> Tensor | None:
+        """The storage units' loss (m3/s) at every node from the driver
+        `losses.STORAGE_DRIVER` (one per junction); ``None`` for a network without."""
+        if self.storage_losses is None or drivers is None:
+            return None
+        if STORAGE_DRIVER not in drivers:
+            raise KeyError(
+                f"DynamicWaveHydraulics: driver {STORAGE_DRIVER!r} (m3/s per junction) is "
+                f"required: the network has storage units that evaporate or exfiltrate "
+                f"(`simulate_dynamic_wave` sets it each step; see `storage_loss`)")
+        loss = torch.as_tensor(drivers[STORAGE_DRIVER], dtype=F64)
+        full = torch.zeros(loss.shape[:-1] + self.node_invert.shape, dtype=F64)
+        return full.index_copy(-1, self.junction_idx, loss)
+
+    def _conduit_loss_nodes(self, terms: ConduitTerms) -> Tensor | None:
+        """The rate (m3/s) the conduits' evaporation and seepage take from every node
+        (`dynwave.c::updateNodeFlows`, dynwave.c:555-572): the conduit's rate times its
+        barrels, half from each end, or all from the end that is not an outfall; ``None``
+        where the conduits lose nothing."""
+        if terms.loss_rate is None:
+            return None
+        rate = terms.loss_rate * QCF
+        u_out, v_out = self.is_outfall[self.u], self.is_outfall[self.v]
+        half = torch.where(u_out | v_out, 1.0, 0.5)
+        at_u = torch.where(u_out, 0.0, half)
+        at_v = torch.where(v_out, 0.0, half)
+        full = torch.zeros(rate.shape[:-1] + self.node_invert.shape, dtype=F64)
+        return full.index_add(-1, self.u, rate * at_u).index_add(-1, self.v, rate * at_v)
+
+    def reset_losses(self) -> None:
+        """Return the storage units' Green-Ampt exfiltration states to the start of a run
+        (`simulate_dynamic_wave` does at its start; a continuation call restarts them)."""
+        if self.storage_losses is not None:
+            self.storage_losses.reset()
+
+    def storage_loss(self, state: Mapping, dt: float, climate) -> Tensor | None:
+        """The loss rate (m3/s, one per junction) of the storage units that evaporate or
+        exfiltrate over a routing step of `dt` s that starts at `state` (``None``: the network
+        has none), for the driver `losses.STORAGE_DRIVER`. `climate` is a `losses.ClimateValues`.
+        SWMM computes it once per routing step from the step-start depth and volume
+        (routing.c:363-365, `StorageLosses.rates`); the rate carries gradients through that
+        depth. A unit with a positive IMDmax advances its Green-Ampt state by this call, so call
+        it once per step, in order (`simulate_dynamic_wave` does)."""
+        if self.storage_losses is None:
+            return None
+        depth_ft = state["sewer.junction_depth"] / LCF
+        return self.storage_losses.rates(depth_ft, dt, climate) * QCF
+
     def _terms(self, state: Mapping, dt: float,
                hold: tuple[Tensor, Tensor] | None = None,
-               flow_depths: tuple[Tensor, Tensor] | None = None) -> ConduitTerms:
+               flow_depths: tuple[Tensor, Tensor] | None = None,
+               drivers: Mapping | None = None) -> ConduitTerms:
         heads = state[f"{self.layer}.phi"]
         q = state[f"{self.layer}.q"][..., :self.n_pipes]
         # SWMM's node depth is never negative (dynwave.c:743); the stiff bed lets a dry
@@ -1567,7 +1687,7 @@ class DynamicWaveHydraulics:
             normal_flow_limited=self.options.normal_flow_limited,
             surcharge_method=self.options.surcharge_method,
             hold1=None if hold is None else hold[0], hold2=None if hold is None else hold[1],
-            flow_depths=flow_depths)
+            flow_depths=flow_depths, loss=self._loss_inputs(state, drivers))
 
     def _depth_constants(self) -> tuple[Tensor, ...]:
         """The section constants of `_flow_depths`' joint evaluation: every pipe's, then
@@ -1855,7 +1975,8 @@ class DynamicWaveHydraulics:
         at_ft = torch.where(self.is_storage, self.full_depth / LCF, self.crown_ft)
         return self.surchargeable & (depth_ft > at_ft)
 
-    def _carried(self, state: Mapping, terms: ConduitTerms, inflow: Tensor) -> State:
+    def _carried(self, state: Mapping, terms: ConduitTerms, inflow: Tensor,
+                 storage_loss: Tensor | None = None) -> State:
         heads = state[f"{self.layer}.phi"]
         q = state[f"{self.layer}.q"]
         jidx = self.junction_idx
@@ -1866,6 +1987,11 @@ class DynamicWaveHydraulics:
         # every link's flow, conduits and regulators (dynwave.c:528-541, 382-412)
         through = through.index_add(-1, self.edge_v, q_b).index_add(-1, self.edge_u, -q_b)
         net_inflow = inflow + through                                  # dynwave.c:528-541
+        conduit_loss = self._conduit_loss_nodes(terms)
+        if conduit_loss is not None:                                   # dynwave.c:555-572
+            net_inflow = net_inflow - conduit_loss
+        if storage_loss is not None:                                   # dynwave.c:320
+            net_inflow = net_inflow - storage_loss
         carried = {
             "sewer.junction_depth": torch.clamp(heads[..., jidx] - self.node_invert[jidx],
                                                 min=0.0),
@@ -1873,6 +1999,8 @@ class DynamicWaveHydraulics:
             "sewer.mid_area": terms.mid_area * _AREA_SI,
             "sewer.net_inflow": net_inflow[..., jidx],
         }
+        if self.pipe_losses:              # the next step's Link.oldDepth
+            carried["sewer.pipe_depth"] = terms.depth * LCF
         if self.controlled:               # the link settings only change between steps
             for key in CONTROL_KEYS:
                 carried[key] = state[key]
@@ -2037,15 +2165,16 @@ class DynamicWaveHydraulics:
         ``ctx.dt is None``) returns the carried and reporting keys only."""
         dt = None if ctx is None else ctx.dt
         inflow = self._inflow(drivers)
+        storage_loss = self._storage_loss(drivers)
         heads = state[f"{self.layer}.phi"]
         drop = None
         regulators: dict = {}
         if dt is None:
-            terms = self._terms(state, self.options.routing_step)
-            out = self._carried(state, terms, inflow)
+            terms = self._terms(state, self.options.routing_step, drivers=drivers)
+            out = self._carried(state, terms, inflow, storage_loss)
         else:
             terms, out, drop, regulators, storage_ft2, depths = self._pass_terms(
-                state, inflow, dt)
+                state, inflow, dt, drivers, storage_loss)
         q_all = state[f"{self.layer}.q"]
         q = q_all[..., :self.n_pipes]
         depth_ft = terms.depth
@@ -2071,6 +2200,10 @@ class DynamicWaveHydraulics:
             return out
         jidx = self.junction_idx
         n = self.node_invert.shape[-1]
+        sources = inflow            # the lateral inflow less the conduits' and storage losses
+        for loss in (self._conduit_loss_nodes(terms), storage_loss):
+            if loss is not None:
+                sources = sources - loss
         surf = torch.zeros(terms.surface_area1.shape[:-1] + (n,), dtype=F64)
         surf = surf.index_add(-1, self.u, terms.surface_area1)                # dynwave.c:582-583
         surf = surf.index_add(-1, self.v, terms.surface_area2)
@@ -2104,7 +2237,7 @@ class DynamicWaveHydraulics:
         else:
             out_pond = {}
         out.update({
-            f"{self.layer}.sources": inflow,
+            f"{self.layer}.sources": sources,
             f"{self.layer}.phi_boundary": outfall_heads,
             "water.flow_offset": terms.flow_offset * QCF,
             "water.conveyance": terms.conveyance * (QCF / LCF),
@@ -2299,13 +2432,16 @@ class DynamicWaveHydraulics:
         hold."""
         dt = self.options.routing_step if dt is None else dt
         inflow = self._inflow(drivers)
+        storage_loss = self._storage_loss(drivers)
         if start is None:
-            return self._carried(state, self._terms(state, dt), inflow)
+            return self._carried(state, self._terms(state, dt, drivers=drivers), inflow,
+                                 storage_loss)
         pinned = dict(state, **{k: start[k] for k in self.state_keys})
-        terms = self._pass_terms(pinned, inflow, dt)[0]
-        return self._carried(state, terms, inflow)
+        terms = self._pass_terms(pinned, inflow, dt, drivers, storage_loss)[0]
+        return self._carried(state, terms, inflow, storage_loss)
 
-    def _pass_terms(self, state: Mapping, inflow: Tensor, dt: float
+    def _pass_terms(self, state: Mapping, inflow: Tensor, dt: float,
+                    drivers: Mapping | None = None, storage_loss: Tensor | None = None
                     ) -> tuple[ConduitTerms, State, dict, dict, Tensor, dict]:
         """One pass's conduit terms at `state` (its carried keys the step start's), with
         the drop-end area switch's hold: ``(terms, carried, drop, regulators,
@@ -2314,8 +2450,8 @@ class DynamicWaveHydraulics:
         included) and the pass's `_flow_depths`."""
         depths = self._flow_depths(state[f"{self.layer}.q"][..., :self.n_pipes])
         flow_depths = (depths["normal"], depths["critical"])
-        terms = self._terms(state, dt, flow_depths=flow_depths)
-        out = self._carried(state, terms, inflow)
+        terms = self._terms(state, dt, flow_depths=flow_depths, drivers=drivers)
+        out = self._carried(state, terms, inflow, storage_loss)
         heads = state[f"{self.layer}.phi"]
         # a storage unit's own area at the previous pass's depth (dynwave.c:315)
         storage_ft2 = self._storage_area_ft2(heads)
@@ -2334,8 +2470,9 @@ class DynamicWaveHydraulics:
         # would let the class it sets feed back into its own decision within one pass.
         drop = self._drop_switch(state, terms, out["sewer.net_inflow"], dt, storage_ft2)
         if bool(drop["held"].any()):
-            terms = self._terms(state, dt, (drop["hold1"], drop["hold2"]), flow_depths)
-            out = self._carried(state, terms, inflow)
+            terms = self._terms(state, dt, (drop["hold1"], drop["hold2"]), flow_depths,
+                                drivers)
+            out = self._carried(state, terms, inflow, storage_loss)
             drop = self._drop_switch(state, terms, out["sewer.net_inflow"], dt, storage_ft2)
         return terms, out, drop, regulators, storage_ft2, depths
 
@@ -2417,6 +2554,8 @@ class DynamicWaveHydraulics:
             "sewer.mid_area": geo.area(y) * _AREA_SI,                         # :497
             "sewer.net_inflow": through[jidx],                                # flowrout.c:458
         }
+        if self.pipe_losses:                    # Link.newDepth (flowrout.c:389-420)
+            state["sewer.pipe_depth"] = y * LCF
         if self.controlled:
             start = (control_start(self.controls) if self.controls is not None else 0.0)
             state.update({
@@ -2610,6 +2749,13 @@ def build_dynamic_wave_model(net: SewerNetwork, *, iterate_tol: float | None = N
     closure = DynamicWaveHydraulics(graph, net,
                                     quality_layer="water_quality" if quality else None,
                                     air=air)
+    if quality and closure.has_wet_losses:
+        raise ValueError(
+            "build_dynamic_wave_model: the network has conduits that evaporate or seep or "
+            "storage units that evaporate or exfiltrate; water quality with those losses is "
+            "not modelled (the lost water would have to take its dissolved mass or leave the "
+            "transport volumes unchanged, and SWMM's choice is not reproduced) -- build with "
+            "quality=False")
     junction_idx = closure.junction_idx
     junction_invert = closure.node_invert[junction_idx]
 
@@ -2672,6 +2818,15 @@ def build_dynamic_wave_model(net: SewerNetwork, *, iterate_tol: float | None = N
     }
     if "outfall_stage" in initial:
         drivers["outfall_stage"] = initial["outfall_stage"]
+    if closure.has_wet_losses:
+        # the climate at the start of the run; `simulate_dynamic_wave` sets it each step
+        start = ClimateClock(None if closure.climate is None else
+                             dataclasses.replace(closure.climate, subcatchments=(), gages=()))
+        first = start.at(0.0, 0.0)
+        drivers[EVAP_DRIVER] = torch.tensor(first.evap * LCF, dtype=F64)
+        drivers[HYDCON_DRIVER] = torch.tensor(first.hydcon, dtype=F64)
+        if closure.storage_losses is not None:
+            drivers[STORAGE_DRIVER] = torch.zeros(len(net.manholes), dtype=F64)
     drivers.update(parts["drivers"])
     if air:
         state.update(air_state(model))
@@ -2699,6 +2854,20 @@ def build_dynamic_wave_model(net: SewerNetwork, *, iterate_tol: float | None = N
                        over="nodes"),
     }
     model.input_specs.update(parts["specs"])
+    if closure.has_wet_losses:
+        model.input_specs.update({
+            EVAP_DRIVER: dict(description="potential evaporation rate (SWMM's Evap.rate; "
+                                          "simulate_dynamic_wave sets it each step from the "
+                                          "file's climate)", unit="m/s", over="scalar"),
+            HYDCON_DRIVER: dict(description="monthly conductivity adjustment (SWMM's "
+                                            "Adjust.hydconFactor) of conduit seepage and "
+                                            "storage exfiltration", unit="-", over="scalar"),
+        })
+        if closure.storage_losses is not None:
+            model.input_specs[STORAGE_DRIVER] = dict(
+                description="evaporation plus exfiltration lost from each storage unit over the "
+                            "step (DynamicWaveHydraulics.storage_loss)", unit="m3/s",
+                over="junctions")
     if quality or air:
         model.manhole_idx = junction_idx
     if quality:
@@ -3091,6 +3260,11 @@ def simulate_dynamic_wave(model: Model, state: State, drivers: Drivers, *,
         step_inflow = None
 
     step_aware = bool(getattr(step_inflow, "step_aware", False))
+    clock = None
+    if hyd.has_wet_losses:        # the evaporation and seepage losses read the file's climate
+        shared = getattr(step_inflow, "model", None)
+        clock = ClimateClock(hyd.climate, shared if isinstance(shared, RunoffModel) else None)
+        hyd.reset_losses()
 
     def inflow_at(k: int, t: float, step: float | None = None) -> Tensor | None:
         if series is not None:
@@ -3161,6 +3335,14 @@ def simulate_dynamic_wave(model: Model, state: State, drivers: Drivers, *,
         if control is not None:      # the pump limits and rules, on the step-start state
             state = control.apply(state, now_ms, step, lateral)
         before = state
+        if clock is not None:                                      # routing.c:363-365
+            climate = clock.at(now_ms, next_ms)
+            drivers = dict(drivers, **{
+                EVAP_DRIVER: torch.tensor(climate.evap * LCF, dtype=F64),
+                HYDCON_DRIVER: torch.tensor(climate.hydcon, dtype=F64)})
+            lost = hyd.storage_loss(state, step, climate)
+            if lost is not None:
+                drivers[STORAGE_DRIVER] = lost
         try:
             state = model.step(state, drivers, step, t=t, diagnostics=diag, **kwargs)
         except RuntimeError as err:

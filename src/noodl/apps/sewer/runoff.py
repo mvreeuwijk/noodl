@@ -285,6 +285,19 @@ class Adjustments:
     conductivity: tuple[float, ...] = (1.0,) * 12
 
 
+def evaporation_can_be_positive(h: Hydrology) -> bool:
+    """Whether `h`'s evaporation rate (`climate.c::setEvap`: the file's rate plus the monthly
+    ``[ADJUSTMENTS] EVAPORATION``) is positive in any month or time-series entry. A conduit or
+    storage unit loses water to evaporation only while it is (``Evap.rate > 0``, link.c:1359,
+    node.c:1076); a file where it never is needs no climate at all."""
+    adjust = h.adjustments.evaporation
+    ev = h.evaporation
+    if ev.kind == "timeseries":
+        return max(ev.series.values) + max(adjust) > 0.0
+    base = ev.monthly[:1] * 12 if ev.kind == "constant" else ev.monthly
+    return any(b + a > 0.0 for b, a in zip(base, adjust, strict=True))
+
+
 @dataclasses.dataclass(frozen=True)
 class Hydrology:
     """The hydrology of a SWMM file: `gages`, `subcatchments`, `evaporation` and `adjustments`,
@@ -1397,5 +1410,5 @@ class RunoffInflows:
 __all__ = [
     "Adjustments", "CurveNumber", "Evaporation", "GreenAmpt", "Horton", "Hydrology",
     "RainGage", "RunoffDriver", "RunoffInflows", "RunoffModel", "Subareas", "Subcatchment",
-    "odesolve_integrate", "SAMPLE_OFFSET",
+    "evaporation_can_be_positive", "odesolve_integrate", "SAMPLE_OFFSET",
 ]

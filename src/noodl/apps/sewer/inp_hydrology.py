@@ -431,6 +431,34 @@ def read_hydrology(sections: dict, path, options: dict, start: datetime.datetime
         adjustments=adjustments, ignore_rainfall=ignore_rain, rdii=rdii)
 
 
+def read_climate(sections: dict, path, options: dict, start: datetime.datetime, *,
+                 us: bool, read_series: Callable[[str], TimeSeries], evaporation: bool = True
+                 ) -> Hydrology:
+    """The climate of a file with no `[SUBCATCHMENTS]` (a `Hydrology` with no gages or
+    subcatchments): `[EVAPORATION]` (unless `evaporation` is False) and `[ADJUSTMENTS]`, read
+    as `read_hydrology` reads them. SWMM's conduit seepage, open conduits and storage units
+    read the evaporation rate and the conductivity adjustment at every routing step
+    (`losses.ClimateClock`). `options`, `start`, `us` and `read_series` are those of
+    `read_hydrology`. An ``[ADJUSTMENTS]`` line that names a subcatchment is refused: there
+    is none."""
+    patterns = patterns_from_lines(
+        [(line.number, tokens(line.raw)) for line in sections.get("PATTERNS", [])
+         if tokens(line.raw)], path)
+
+    def monthly(label: str, line: InpLine) -> tuple[float, ...] | None:
+        if label not in patterns:
+            _fail(path, line, f"names the pattern {label!r}, which has no [PATTERNS] entry")
+        p: TimePattern = patterns[label]
+        return p.factors if p.kind == "monthly" else None
+
+    lines = sections.get("EVAPORATION", []) if evaporation else []
+    evap, _ = _evaporation(lines, path, read_series, monthly)
+    adjustments, _ = _adjustments(sections.get("ADJUSTMENTS", []), path, monthly, {})
+    return Hydrology(gages=(), subcatchments=(), start=start,
+                     total_duration=_total_duration(options, start, path), us_units=us,
+                     evaporation=evap, adjustments=adjustments)
+
+
 def _infiltration(path, line: InpLine, toks: list[str], default_model: str, us: bool):
     """An `[INFILTRATION]` line (`infil_readParams`, infil.c:130) as Horton, GreenAmpt or
     CurveNumber in SI."""
@@ -559,4 +587,4 @@ def _adjustments(lines, path, monthly, sub_lines):
     return Adjustments(tuple(evap), tuple(rain), tuple(cond)), patterned
 
 
-__all__ = ["HYDROLOGY_SECTIONS", "read_hydrology", "swmm_total_duration"]
+__all__ = ["HYDROLOGY_SECTIONS", "read_climate", "read_hydrology", "swmm_total_duration"]
