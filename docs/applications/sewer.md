@@ -83,6 +83,10 @@ net, inflows, pollutants = read_swmm_inp("tree_steady.inp")
 model, state, drivers = build_model(net)
 ```
 
+The file's `FLOW_UNITS` (CFS, GPM, MGD, CMS, LPS or MLD) are converted to noodl's SI as it is
+read; see the Units paragraph of [File formats](../formats/swmm.md). A network with no links (no conduits, orifices, weirs or
+outlets) is refused by `build_model` by name.
+
 For a single step rather than a steady state:
 
 ```python
@@ -135,8 +139,10 @@ model, state, drivers = build_model(
 a prescribed extraction (m³/s, positive out).
 
 `build_model` dispatches on `net.routing`. A `"dynamic_wave"` network is built by
-`build_dynamic_wave_model`, with `iterate_tol` (m, default 1e-11) and
-`iterate_max` (default 2000 passes) controlling the head iteration. For it, `air`, `quality`
+`build_dynamic_wave_model`, with `iterate_tol` (m), `iterate_flow_tol` (m³/s) and
+`iterate_max` (passes) controlling the iteration; left out, they follow the file's
+`HEAD_TOLERANCE` and `MAX_TRIALS` (see [Iteration and convergence](#iteration-and-convergence)).
+For it, `air`, `quality`
 and `storage` default to `False`; `quality=True` adds the water-quality layer of `species`
 (see [Quality on the dynamic wave](#quality-on-the-dynamic-wave)); `air=True` builds the
 headspace air on the solved conduits (see
@@ -144,10 +150,10 @@ headspace air on the solved conduits (see
 `f_i`, `c_s`, `leak_area`, `leak_cd` and `fans` as above; `storage=True`, a non-default
 `coupling` or `dt_storage` (kinematic-wave options: the dynamic wave always iterates its passes
 on its routing step) and a `geometry="analytic"` network (it always routes on SWMM's tabulated
-circle) are refused, naming the option; `iterate_tol` and
+circle) are refused, naming the option; `iterate_tol`, `iterate_flow_tol` and
 `iterate_max` are refused for the other routings. Run it with `simulate_dynamic_wave` (see
 [Dynamic wave](#dynamic-wave)), not `sewer_steady`. To tune the iteration itself
-(`relaxation`, `acceleration`, `memory`, `iterate_flow_tol`), call
+(`relaxation`, `acceleration`, `memory`), call
 `build_dynamic_wave_model(net, ...)` from `noodl.apps.sewer` directly; it takes the same
 dynamic-wave arguments as `build_model`.
 
@@ -209,8 +215,9 @@ piecewise-linear tables, unrolled Newton loops, and one implicit-function root.
 Scope: on the kinematic path `geometry="tabulated"` covers the steady case only, and is refused
 by name with `storage=True`. Dynamic-wave routing always uses the tables and refuses
 `geometry="analytic"` by name. The discharge limit is SWMM's `Qfull` rather than the analytic 0.938 D capacity.
-The headspace, top width, hydraulic radius and mean depth (air side, sulfide) remain the exact
-circle, evaluated at SWMM's depth. SWMM has no headspace to compare them with.
+The headspace, top width, hydraulic radius and mean depth (air side, sulfide) of a circular conduit remain the exact
+circle, evaluated at SWMM's depth. SWMM has no headspace to compare them with. Other shapes are
+dynamic-wave only (below); the kinematic and steady paths refuse them by name.
 
 Numerical care worth noting: the `arccos` argument is clamped to the *exact* domain $[-1, 1]$,
 not an epsilon-shrunk one — that was tried and rejected because it shifts the boundary value by
@@ -302,13 +309,14 @@ a stage that varies in time (see "Tidal and time-series outfalls").
 
 For frozen coefficients the conduit and junction equations are linear in the heads apart from
 the min-clamps, so one pass is a single `PotentialFlowLayer` solve. The model then refreshes the
-coefficients and repeats until the heads change by less than `iterate_tol` (m, default 1e-11)
-or `iterate_max` passes (default 2000) are used (`Model(coupling="iterate")`, converging on the
-layer's own interior head). The result is the head and flow field at which a SWMM trial
-reproduces its own input.
+coefficients and repeats until the heads change by less than `iterate_tol` (m) and the flows
+by less than `iterate_flow_tol` (m³/s), or `iterate_max` passes are used
+(`Model(coupling="iterate")`, converging on the layer's own interior head; the defaults follow
+the file, see [Iteration and convergence](#iteration-and-convergence)). The result is the head
+and flow field at which a SWMM trial reproduces its own input.
 
 The passes are Anderson-accelerated by default (`noodl.apps.sewer.build_dynamic_wave_model(net,
-acceleration="anderson", memory=5, iterate_flow_tol=1e-10)`; `Model`'s `iterate_acceleration`,
+acceleration="anderson", memory=5)`; `Model`'s `iterate_acceleration`,
 see [Layers and models](../concepts/layers.md)). Each pass's flows must then also reproduce the
 flows it was fed to within `iterate_flow_tol` (m³/s): the head solve stops on its warm start once
 every junction balance is within its `atol` (`solve_atol`), so near convergence the heads stand
@@ -320,19 +328,81 @@ solve (`atol=1e-12`) they agree to 2e-12 m; at the default `solve_atol` each lan
 solve's own resolution, `atol dt / (2 A_s)` (a few 1e-9 m). The mixing keeps to the fixed points
 plain relaxation (and SWMM's relaxed trials) can reach: a flat, near-dry conduit's flow can have
 a second, repelling fixed point, and a mixed step heading for it is replaced by the relaxed step.
-`acceleration=None` is plain relaxation. A flow tolerance is required either way:
-`iterate_flow_tol=None` (the heads judged alone) is refused by name, because on
-the normal-flow slope switch (below) the heads bound the flows' residual only weakly, and a
-heads-only test was measured stopping 3e-5 m³/s short of the fixed point.
+`acceleration=None` is plain relaxation. The flows are judged either way, never the heads
+alone, because on the normal-flow slope switch (below) the heads bound the flows' residual only
+weakly, and a heads-only test was measured stopping 3e-5 m³/s short of the fixed point.
 
 **SWMM's iteration artefacts are not modelled**: trial relaxation, the 0.001 cfs flow-reversal
-rule, link bypassing, `MAX_TRIALS` and `HEAD_TOLERANCE`. Each is a device for reaching the fixed
-point and none moves it. The reader records `HEAD_TOLERANCE` and `MAX_TRIALS` in
-`DynamicWaveOptions`, but noodl does not use them. This has a visible consequence. SWMM stops a
-step when two successive relaxed trials differ by less than `HEAD_TOLERANCE`, which at SWMM's
-defaults (0.0015 m, 8 trials) leaves its answer short of its own fixed point (see
-[Verification](#verification)). SWMM still reports 0 % of steps not converging, because its
-criterion is the change between trials, not the distance to the fixed point.
+rule and link bypassing. Each is a device for reaching the fixed point and none moves it.
+
+#### Iteration and convergence
+
+`HEAD_TOLERANCE` and `MAX_TRIALS` are read into `DynamicWaveOptions` and are the defaults of
+the iteration (`noodl.apps.sewer.dynwave.iterate_tolerances`); an explicit `iterate_tol`,
+`iterate_flow_tol` or `iterate_max` overrides each:
+
+| control | default | SWMM |
+|---|---|---|
+| `iterate_tol` (m) | `HEAD_TOLERANCE` (the file's length unit), else 0.005 ft = 0.001524 m | the same test: every node's depth change between trials (`dynwave.c::findNodeDepths`) |
+| `iterate_flow_tol` (m³/s) | $2 A_{\min} \epsilon_H / \Delta t$ ($\epsilon_H$ = `iterate_tol`), at least 1e-10 | none: SWMM judges the heads alone |
+| `iterate_max` (passes) | `MAX_TRIALS`, else 8 (at least 2) | the same limit |
+
+The flow tolerance is the flow residual that matches the head tolerance: a flow error $dQ$
+moves a junction's next depth by $\Delta t\, dQ / (2 A_s)$ (the trapezoid), so at the
+surface-area floor $A_{\min}$ (`MIN_SURFAREA`, 12.566 ft² by default) and the routing step
+$\Delta t$ it is a move of exactly `iterate_tol`, and less at every larger junction. At SWMM's
+defaults on a 5 s step that is 7.1e-4 m³/s.
+
+A step that uses up the file's trials is **accepted**, as SWMM accepts it (it counts it as "not
+converging", `NonConvergeCount`): the step is taken with its last pass, its diagnostics say
+`converged` False, and `simulate_dynamic_wave` returns `out["converged"]` per step, so
+`(~out["converged"]).sum()` is SWMM's count. With an explicit `iterate_max` such a step is
+refused by name, as before, and a step that has to be differentiated is always refused when it
+does not converge (there is no fixed point to differentiate).
+
+**The head solve within a pass.** Every law of a pass is non-decreasing in its own head
+difference (conduits, regulators) or head (junction withdrawals), so the head solve's residual is
+the gradient of a convex function, and the layer's Newton runs with `line_search="convex"` and
+`step_floor=16` (`dynwave.HEAD_SOLVE_NEWTON`; see [Solvers](../concepts/solvers.md#newton)). The
+first cuts back a step that overshoots across a kink: the stiff bed below a dry junction's
+invert met by a fast inflow, the normal-flow switch's flat-steep-flat flow, the hold band and
+flood wall. A damped Newton step there could fall into a 2-cycle it never left, and the run
+stopped with "failed to converge after 50 iterations" (13 files of the SWMM corpus did, among
+them a junction fed down a 20 m drop and a looped siphon). The second ends a solve whose residual
+sits at the round-off of its own terms above `solve_atol` (a junction flooding 17 m above its
+outfall behind a 0.1 m³/s cap, or a large storage area at a high head), which failed every step
+before. A pass whose head solve still stops short is one iterate of the pass iteration, not the
+end of the step: it hands back its last Newton iterate, is never judged converged, and the
+iteration goes on from it (`Model`, ``on_failure="return_primal"``); a differentiated solve
+still raises. `tests/verification/test_sewer_dynwave_parity.py` runs both kinds against SWMM
+(`robust_orifice_dynwave.inp` at every step, `robust_drop_dynwave.inp` until SWMM's own first
+non-converging step).
+
+Measured at SWMM's defaults (the fixtures with `HEAD_TOLERANCE` and `MAX_TRIALS` removed, 30
+min), against SWMM 5.2.4's own 2.02 trials per step on the tree:
+
+| network | passes per step | steps at the limit | worst depth against the tight fixed point (m) | SWMM at its defaults, same measure (m) |
+|---|---|---|---|---|
+| tree | 2.06 | 1 / 360 | 1.6e-3 | 2.3e-3 |
+| backwater | 2.22 | 1 / 360 | 6.9e-3 | 1.3e-2 |
+| loop | 2.01 | 0 / 360 | 7.0e-4 | 3.6e-3 |
+| structures | 2.39 | 0 / 360 | 4.4e-4 | 5.9e-3 |
+| storage | 2.06 | 1 / 360 | 1.0e-3 | 2.3e-3 |
+
+So noodl at SWMM's tolerances is at least as close to the converged answer as SWMM is, in about
+SWMM's number of trials. A judgement on the flows at 1e-4 m³/s instead takes 2.54 passes on the
+tree for a 7.8e-5 m answer; the parity tests pass their own tight tolerances (1e-13 m, 2000
+passes) and the fixtures set `HEAD_TOLERANCE` 1e-12 and `MAX_TRIALS` 500.
+
+**Speed.** One pass costs a nearly fixed few thousand small tensor operations, whatever the
+network's size: 10-15 ms on the 6-node tree, from 37 ms, and 38 ms on a 2,047-conduit tree,
+from 55 ms (`benchmarks/sewer_dynwave_speed.py`, which also times SWMM). With SWMM's own
+tolerances the tree's 30 minutes take 11.5 s (123 s before), about 850 times SWMM; the
+2,047-conduit tree is about 40 times SWMM. Most of it is the conduit update (`dynwave_terms.conduit_terms`), SWMM's
+normal and critical depths, and the head solve, whose Newton Jacobian is the elements' own
+analytic `dflow` on the primal passes (`PotentialFlowLayer(analytic_primal=True)`; the implicit
+adjoint still differentiates the converged pass). A batch of B scenarios (`simulate_dynamic_wave`
+with a `(B, n)` inflow) costs about the same per pass, so an ensemble amortises it.
 
 #### Units
 
@@ -486,10 +556,11 @@ conduit; the backwater fixture avoids an exact tie for that reason.
 
 #### Scope
 
-Circular conduits, SWMM's tabulated geometry; the fixed routing step or
+Conduits of every SWMM cross section (the circle's tabulated geometry or any other shape, below)
+with local losses, force mains, transects and culverts; the fixed routing step or
 SWMM's variable step (`VARIABLE_STEP > 0`, below); a cold start or SWMM's `InitDepth` and
-`InitFlow` (above); constant or
-driver-supplied lateral inflows; `FREE`, `NORMAL`, `FIXED`, `TIDAL` and `TIMESERIES` outfalls,
+`InitFlow` (above); constant, file-defined (time series, dry-weather flow and patterns, see
+[Lateral inflows from a file](#lateral-inflows-from-a-swmm-file)) or driver-supplied lateral inflows; `FREE`, `NORMAL`, `FIXED`, `TIDAL` and `TIMESERIES` outfalls,
 with flap gates;
 parallel barrels, `MaxFlow`, conduit flap gates and conduit lengthening (below); storage
 units with `FUNCTIONAL`, `TABULAR` and the closed-shape area curves (below); orifices
@@ -527,7 +598,8 @@ sits on its bed.
 
 #### Flooding
 
-Flooding follows SWMM without ponding (`ALLOW_PONDING NO`, `dynwave.c:743-795`). A junction's
+Flooding follows SWMM without ponding (`ALLOW_PONDING NO`, or a junction without a ponded
+area; [Ponding](#ponding) below, `dynwave.c:743-795`). A junction's
 full depth is its `MaxDepth`, raised to the top of every conduit end it carries (so a
 `MaxDepth` of 0 means the crown, `link.c:440-463`), and it floods above
 `y_max = full depth + SurDepth` (`Manhole.surcharge_depth`). A flooded junction is held at
@@ -540,6 +612,34 @@ offset by the previous pass's excess of net inflow over what the junction would 
 take there; at the fixed point that offset is the solved excess, so a flooded junction sits
 exactly at `y_max` (not at a penalty's offset above it), and the excess falling to zero
 releases it on the next pass, without a flag to chatter.
+
+#### Ponding
+
+With `DynamicWaveOptions.allow_ponding` (`ALLOW_PONDING YES`) a junction with a positive
+`Manhole.ponded_area` (SWMM's Aponded, m²) does not flood (`dynwave.c:661, 738-748, 753, 766-795`):
+the water above its full depth stays, spread over `ponded_area` plus the conduit ends' surface
+areas (`node_getPondedArea`, `dynwave.c:309-312`), and `SurDepth` plays no part (`yMax` is the full
+depth, `dynwave.c:748`). SWMM takes the area from the previous trial's depth, so the junction
+is the drop-end area switch of the head solve with its threshold at the full head: the line with
+the conduit areas below it, the line with the ponded area added above it, and, from a step start
+below the full head, the junction held there where the lower line ends above it and the upper
+one below it (SWMM's trials alternate about the full depth there); from a start at or above it
+the line of the previous pass's side. A junction above its full depth does not surcharge
+(`dynwave.c:679-680`) and has no hold band; the flood wall of the previous section acts only on a
+ponding junction that is surcharged, at the full head plus SWMM's `FUDGE` depth (a newly ponded
+node rises barely above its full depth in the surcharged update, `dynwave.c:738-740`, and
+continues in the ponded one). A junction whose full depth is its crown has no surcharge zone.
+`sewer.overflow` of a ponding junction is the step's trapezoidal net inflow while it ends above
+its full depth (set to 0 below SWMM's 1e-4 cfs), which is the rate of SWMM's ponded-volume
+growth (`dynwave.c:787-792`); the ponded water stays in the network.
+
+The tie is the only place the model and SWMM can differ at the level of SWMM's own
+iteration: on the step where a rising junction crosses its full depth with the lower line ending
+above it and the upper one below it, SWMM's trials alternate about the full depth, stop wherever
+`MAX_TRIALS` or the head tolerance leaves them (a few `FUDGE` above or below), and the next steps
+inherit that depth; the model holds the junction exactly at the full depth. Ponding is refused
+together with water quality or headspace air (the ponded water would have to stay in the transport
+volume), and for a storage unit (SWMM deprecates its ponded area).
 
 #### Storage units
 
@@ -603,8 +703,84 @@ A regulator also enters the junctions as SWMM's does:
   `NORMAL` or `FIXED` rule with the regulator's crest height as its offset;
 - a regulator starts dry and counts, with depth 0, in its nodes' initial average depth.
 
-Roadway weirs, weir coefficient curves, pumps and dividers are refused by name, and so are
-control rules (a regulator is always fully open).
+Roadway weirs and weir coefficient curves are refused by name. Flow dividers (`[DIVIDERS]`) are
+junctions under dynamic-wave routing, as in SWMM, and are refused by name under steady and
+kinematic-wave routing, where SWMM diverts flow (see [SWMM `.inp`](../formats/swmm.md)).
+
+#### Pumps
+
+A pump (`[PUMPS]`; `Pump`) is a fourth `StructureLink` kind, `"pump"`, whose column follows the
+outlets' in `"water.q"` (`model.link_names`). Its flow is SWMM's `pump_getInflow`
+(`link.c:1548-1634`, `noodl.apps.sewer.pumps`): the curve at the previous pass's inlet state,
+times the pump's setting, never negative. The curve kinds are PUMP1 (a step in the inlet node's
+volume: the flow of the first curve point whose volume exceeds it), PUMP2 (the same in the inlet
+depth), PUMP3 (continuous in the head DELIVERED, outlet minus inlet head, clamped at 0), PUMP4
+(continuous in the inlet depth) and PUMP5 (PUMP3 with the head divided by the squared speed
+setting), and an *ideal* pump (`*` for the curve) takes its inlet node's inflow. `dqdh` (the
+slope that shapes a pass) is the negated curve slope for PUMP3 and PUMP5, none for the others;
+the fixed point does not depend on it.
+
+SWMM then limits the flow to the water at the inlet (`dynwave.c::getModPumpFlow`,
+`pumps.mod_pump_flow`): at a storage unit and for a PUMP1 the outflow is capped at the node's
+inflow plus its volume over the step; for PUMP2-4 at a junction, where the step would leave a
+depth that is not positive the pump takes the inflow. These read the inlet node's inflow,
+outflow and surface area **so far in the trial**, and SWMM visits the conduits first, then the
+other links in input order, so a regulator or pump listed after the pump does not count yet.
+`pumps.PumpStation` reproduces that (the links' file order is the line number of the entry).
+An ideal pump also takes the node's overflow in SWMM; a run in which an ideal pump's inlet
+floods is refused by name (RuntimeError), not simulated differently. A PUMP1 curve gives a plain
+junction inlet its largest volume as its full volume, linear in the depth (`link.c:1521-1527`).
+
+Status ON or OFF, the startup and shutoff depths (the pump switches OFF below the shutoff
+depth and ON above the startup depth of its inlet, `link_setTargetSetting`) and the speed
+`setting` are the pump's discrete state (below). Pumps need at least one conduit in the
+network, like any dynamic-wave network, and an outfall at a pump's end gets normal and critical
+depth 0 as at any regulator.
+
+A stepped curve (PUMP1, PUMP2) crossed by a rising or falling inlet can have no fixed point
+inside a step: the pump flow depends on the depth, the depth on the pump flow, and the two
+branches never agree. SWMM then oscillates until its trials run out (it reports the step as not
+converging) and noodl's iteration does not converge either. That is the equations, not the
+solver, and the verification fixtures avoid it.
+
+#### Link settings and control rules
+
+With pumps or `[CONTROLS]` the closure carries each regulator's and pump's setting as the
+state keys `"sewer.setting"` (SWMM's `Link.setting`: a pump's speed, an orifice's, weir's or
+outlet's fraction open; `hyd.setting_names` names the columns), `"sewer.target_setting"`,
+`"sewer.time_last_set"` (the DateTime it was last opened or closed, for TIMEOPEN and
+TIMECLOSED) and `"sewer.orifice_hold"`. They are discrete state between steps: the pump depth
+limits, the rules and the orifice opening rate change them at the start of each step and
+nothing differentiates through them. `simulate_dynamic_wave(..., record=("water.q",
+"sewer.setting"))` reports each link's flow and setting.
+
+`linkcontrol.LinkControl` is SWMM's `evaluateControlRules` (`routing.c:271-310`) on the state
+at the START of a step: pump targets from the depth limits, then the rules
+(`controls.ControlEngine`, `controls_evaluate`) every routing step or, with `RULE_STEP`, at
+each multiple of it (the routing steps are shortened to end there), then every link whose
+target differs from its setting is changed - pumps, weirs and outlets at once, an orifice at
+the rate `CloseTime` gives (hours per full opening) - and a link opened or closed has its
+time-last-set updated. Rules follow `controls.c`: premises are judged strictly left to right
+(an AND after a false result stops the chain; an OR is tried only while false), the actions of
+the branch taken are visited last-written first and, per link, the first stays unless a later
+one comes from a strictly higher PRIORITY; a CURVE setting is the CONTROL curve at the value
+of the last premise compared, a TIMESERIES one the series at the clock (one millisecond late,
+as SWMM's clock is), a PID one SWMM's recursive PID on the last comparison's two sides.
+Comparisons use the values in the file's units (as SWMM), the clock premises SWMM's DateTime.
+`NODE INFLOW` reads the lateral inflow of the PREVIOUS step, as SWMM evaluates the rules
+before adding the new inflows.
+
+A setting changes the devices as in SWMM: an orifice's opening height is `setting` times the
+full height (`orifice_setSetting`, its `cOrif`, `cWeir` and critical height follow), a weir's
+crest rises by `(1 - setting)` of its opening, a V-notch becomes a trapezoid below 1 and the
+equivalent orifice coefficient is recomputed (`weir_setSetting`), an outlet's flow is scaled,
+and a setting of 0 closes the device (`link_getInflow`). A closed orifice keeps contributing
+the surface area it last had to its end nodes, as in SWMM, where it is no longer evaluated.
+
+Not modelled, refused by name when the file is read: `VARIABLE` and `EXPRESSION` in `[CONTROLS]`,
+rain-gauge premises, the premise attributes MAXDEPTH, FULLFLOW, FULLDEPTH, LENGTH, SLOPE and
+VELOCITY and the DEPTH of a link, and actions on conduits (a closed conduit). Control rules
+need an unbatched state.
 
 #### Conduit options
 
@@ -636,14 +812,15 @@ the element's flow against a constant, so the flow stays continuous and non-decr
 head difference, as the head solve's Newton step needs. A set `InitDepth`, `InitFlow`,
 `MaxFlow`, flap gate or barrel count is refused by name under STEADY or KINWAVE routing.
 
-The reader refuses by name, with the line number, `ALLOW_PONDING YES`, loss coefficients
-and seepage in `[LOSSES]`, storage evaporation and exfiltration, roadway weirs, weir coefficient curves and regulators with `LINK_OFFSETS
+The reader refuses by name, with the line number, seepage
+in `[LOSSES]`, the `DUMMY` and `STREET` sections, storage evaporation and exfiltration, roadway weirs, weir coefficient curves and regulators with `LINK_OFFSETS
 ELEVATION` (see [SWMM `.inp`](../formats/swmm.md)).
 `build_model` with `storage=True` is refused by name; `quality=True` builds
 the water-quality layer on the solved flows (see
 [Quality on the dynamic wave](#quality-on-the-dynamic-wave)) and `air=True` the headspace air
 (see [Headspace air on the dynamic wave](#headspace-air-on-the-dynamic-wave)). Ponding
-(`ALLOW_PONDING YES`) is refused; see [Limitations](#limitations).
+(`ALLOW_PONDING YES` with a ponded area) is modelled, see [Ponding](#ponding), but not together
+with water quality or air; see [Limitations](#limitations).
 
 ```python
 from noodl.apps.sewer import read_swmm_inp, build_model, simulate_dynamic_wave
@@ -665,6 +842,99 @@ step's length). `simulate_dynamic_wave` also takes an `inflow=` override (`(n,)`
 constant, `(B, n)` a batch, `(steps, B, n)` a series, or a function `inflow(t)` of the
 start time `t` in s) and `record=` for other state keys and for `"sewer.overflow"` (m³/s
 per junction).
+
+#### Cross sections, losses, transects and culverts
+
+A conduit's section is SWMM's, whatever its shape (`Pipe.xsect`, an `Xsect` of
+`noodl.apps.sewer.xsect_spec`; a `Pipe` without one is the tabulated circle of
+[SWMM's own circular geometry](#swmms-own-circular-geometry), whose code path is unchanged).
+SWMM evaluates every section through the same few functions -- area, top width and hydraulic
+radius from the depth, depth from the area, and, for the normal depth that classifies the flow
+and sets a free outfall, the area from the section factor -- and the dynamic wave reads them
+through the surface areas, the momentum update, the Froude number and the critical and normal
+depth. `noodl.apps.sewer.xsect_shapes` reproduces each, operation for operation:
+
+- the **tabulated shapes** of `xsect.dat` (`EGG`, `HORSESHOE`, `GOTHIC`, `CATENARY`,
+  `SEMIELLIPTICAL`, `BASKETHANDLE`, `SEMICIRCULAR`, `HORIZ_ELLIPSE`, `VERT_ELLIPSE`, `ARCH`, with
+  the standard elliptical and arch sizes by code), through SWMM's `lookup` / `invLookup`; which
+  tables each shape reads forwards and which it inverts is SWMM's (a `GOTHIC` area is the
+  inverse of its depth table, an `EGG` area a direct lookup);
+- the **closed forms**: `RECT_CLOSED` (with its 0.97 sloped section-factor limit), `RECT_OPEN`,
+  `TRAPEZOIDAL`, `TRIANGULAR`, `PARABOLIC`, `POWER` (its perimeter by numerical arc length),
+  `RECT_TRIANGULAR`, `RECT_ROUND` and `MODBASKETHANDLE`, `FILLED_CIRCULAR` (the circle's tables
+  shifted by the fill, with the fill added to both offsets) and `FORCE_MAIN` (the circle's
+  tables with its own section factor);
+- the **per-conduit tables**: `IRREGULAR`, from the 51-point tables SWMM builds from a
+  `[TRANSECTS]` entry (`xsect_spec.transect_tables`: each depth slice's area, width and
+  conveyance with the overbank and channel Manning n, the hydraulic radius from the Manning
+  flow), and `CUSTOM`, from the tables of a SHAPE curve (`custom_tables`);
+- the **area from the section factor**, `generic_getAofS`: a bracketed Newton iteration on the
+  shape's own `S(A)` and `dS/dA` (`findroot_Newton`, 60 iterations, tolerance `1e-4 A_full`),
+  not the exact root; and the **critical depth**, `xsect_getYcrit`: a closed form for the
+  rectangular, triangular, parabolic and power sections, the 25-interval enumeration where the
+  section's area is within a factor of two of the equivalent circle's, Ridder's method
+  (`findroot_Ridder`, tolerance 0.001 ft, and `-1e20` where it does not bracket, as SWMM) where
+  it is not.
+
+SWMM's own quirks are reproduced because the engine is the reference: the hydraulic radius of the
+circular bottom of `RECT_ROUND` is `0.5 r (1 - sin t) / t` (`xsect.c:2062`), which falls to zero at
+the springing line; a `FILLED_CIRCULAR` reads the width of its fill at `(2 y_fill) / (D + y_fill)`
+(`xsect.c:281`); the transect `Yfactor` is divided by the unit factor twice.
+
+All of it is batched: the conduits are grouped by shape (`XsectSet`) and each query is a few
+vectorised calls per shape present, not one per conduit, so a mixed network costs a few
+more tensor operations per pass, and a network of circles none (the circle path is
+`xsect_tables`, bit for bit). The normal and critical depths are evaluated only for the
+conduits that read them: those with an offset (the flow class) and the outfall conduits. An
+open shape (`xsect_isOpen`: `RECT_OPEN`, `TRAPEZOIDAL`, `TRIANGULAR`, `PARABOLIC`, `POWER`,
+`IRREGULAR`) has no crown: its top width is not frozen near the top, it has no slot, and
+`yFull` of its Courant length is `A_full / W(y_full)`. Reporting keys: `"sewer.R_h"`, `"sewer.d_m"`,
+`"sewer.T"`, `"sewer.A_air"`, `"sewer.D_h"` and `"sewer.V_air"` come from the section for a
+non-circular conduit (the headspace perimeter is `P_full - A/R + W`); the quality and air models are the
+circular-pipe correlations and are refused by name for a network with a non-circular conduit.
+
+**Local losses.** The `[LOSSES]` entry, exit and average coefficients enter the momentum
+update's denominator as `dq5 = (c_in q/a_1 + c_out q/a_2 + c_avg q/a_mid)/2/L dt`
+(`dwflow.c:228-239`, each term where its area exceeds `FUDGE`), with the coefficients
+swapped for a conduit the reader reverses. Seepage (the sixth field) and evaporation are refused.
+
+**Force mains.** A `FORCE_MAIN` flows partly full as a circular conduit with the Manning n that
+gives the same full normal flow as its Hazen-Williams C or Darcy-Weisbach roughness
+(`forcmain.c::forcemain_getEquivN`, from `FORCE_MAIN_EQUATION`; the file's n is ignored), and
+full by the force-main friction slope instead of Manning's: `sBot v^0.852 / R^1.1667`
+(Hazen-Williams) or `f sBot v / R` (Darcy-Weisbach, the Swamee-Jain friction factor of the
+Reynolds number `4 R v / 1.1e-5`).
+
+**Culverts.** A culvert code (1 to 57, `culvert.c`, FHWA HEC-5) replaces the normal-flow limit of a
+conduit that is not full by its inlet-control flow for the head `y` above its upstream invert:
+unsubmerged (`y <= 0.95 y_full`) the form-1 implicit critical-depth equation (Ridder's method,
+whose flow is SWMM's value at the iteration's LAST evaluation) or the form-2 power law,
+submerged (`y >= y_full (16 C + Y - scf)`) an orifice equation, and linear between. Like the
+normal-flow limit it is a cap on the conduit's flow; because the cap follows the upstream head
+within a pass, it is applied as the line `q_inlet + (dQ/dH)(dH_1 - dH_1,fed)` (SWMM's own `dQ/dH`,
+capped by the junction's grounding as the slope switch's wall is), which has the same fixed
+points and converges where a lagged flag does not.
+
+**Verification.** `tests/verification/test_sewer_shapes_parity.py` runs the fixtures of
+`tests/data/sewer/make_shape_fixtures.py` through live SWMM 5.2.4 and noodl (one independent
+chain per section, subcritical so that SWMM's own iteration converges on every step, asserted):
+
+| Fixture | Chains | Worst depth (m) | Flows |
+|---|---|---|---|
+| `shapes_dynwave.inp` | every modelled shape, free surface | 3.0e-9 | within rel 1e-6 + 1e-9 at every step |
+| `shapes_drop_dynwave.inp` | the same with offsets at both ends (flow classes DN_CRITICAL) | 1.2e-9 | idem |
+| `shapes_surcharge_dynwave.inp` / `shapes_slot_dynwave.inp` | closed shapes under a FIXED stage past the crown | 7.2e-8 / 2.1e-8 | idem |
+| `shapes_us_dynwave.inp` | CFS: standard ellipse and arch sizes by code, channels | 1.6e-9 | idem |
+| `force_main_hw_dynwave.inp` / `force_main_dw_dynwave.inp` | full force mains | 1.8e-8 / 2.7e-8 | idem |
+| `losses_dynwave.inp` | entry, exit and average losses | 5.6e-9 | idem |
+| `irregular_dynwave.inp` | compound and meandering transects | 5.8e-10 | idem |
+| `culvert_dynwave.inp` | six inlet types, unsubmerged to submerged | 1.1e-8 | idem |
+
+Where a fixture sat in a regime in which SWMM itself does not converge (a dry start, a
+supercritical slope) there is no answer to compare with and it was changed, not the tolerance.
+The `RECT_ROUND` chain is omitted from the offset fixture: with a free fall at the outfall its end depth sits in the
+circular bottom, whose radius is SWMM's `(1 - sin t)/t` above, and the lagged equations then
+have two fixed points that SWMM and noodl may pick between in the same step.
 
 #### Variable step and time-varying inflow
 
@@ -696,12 +966,166 @@ An inflow function `inflow(t)` returns the `(n,)` lateral inflow of the step tha
 `swmm5.c`'s `getDateTime`: a function that stands for a SWMM `[TIMESERIES]` should add
 0.001 s), and the inflow enters the step's trapezoid with the end state, as a constant
 inflow does. A function (or an `(steps, B, n)` series) in `simulate_dynamic_wave` is how
-time variation enters: the reader still refuses a `[TIMESERIES]` other than a `TIMESERIES`
-outfall's, whose stage is a driver (below). The step sequence and every
+time variation enters; a SWMM file's own `[TIMESERIES]`, `[PATTERNS]`, `[INFLOWS]` and
+`[DWF]` become such a function ([below](#lateral-inflows-from-a-swmm-file)). The step sequence and every
 state of the variable-step tree, with and without a ramping inflow, match SWMM 5.2.4 to the
 millisecond and to the targets of the other dynamic-wave comparisons
 (`tests/verification/test_sewer_dynwave_parity.py`). Because the step depends on the state
 through switches, a variable-step run is not differentiable through its step sizes.
+
+#### Lateral inflows from a SWMM file
+
+`read_swmm_inp` reads SWMM's `[INFLOWS]` (`FLOW` from a time series, with `Sfactor`, a baseline
+and a baseline pattern), `[DWF]` with `[PATTERNS]` (monthly, daily, hourly and weekend, one pattern
+per kind, as SWMM keeps them) and `[TIMESERIES]` (inline, or `name FILE path` beside the
+`.inp`), on the calendar of `START_DATE` and `START_TIME`, with SWMM 5.2.4's own rules for
+interpolation (linear; zero outside the series; a series with no dates counts hours since the
+start), the sampling time (step start + 1 ms), `Mfactor` (ignored for a flow) and the `FLOW_TOL`
+of 1e-5 cfs ([SWMM `.inp`](../formats/swmm.md) lists them with their sources).
+A file whose flows vary gets `SewerNetwork.inflows`, an `InflowSchedule`; the model keeps it as
+`model.inflow_schedule`, and
+
+```python
+net, _, _ = read_swmm_inp("inflow_dwf_dynwave.inp")
+model, state, drivers = build_model(net)
+state, hist = simulate_dynamic_wave(model, state, drivers, duration=60.0)     # uses the schedule
+inflow = net.inflows.driver(list(model.net.nodes))                          # inflow(t) -> (n,) m3/s
+```
+
+`simulate_dynamic_wave` takes the schedule when it is given no `inflow`; the function above is
+the same thing as an explicit `inflow=`, and a caller's own `inflow` overrides it. Under
+`STEADY` and `KINWAVE` the model is quasi-steady, so the caller sets
+`dict(drivers, inflow=inflow(t))` for the time it wants. `tests/verification/test_sewer_inflows_parity.py`
+compares the lateral inflow of every node at every step with SWMM's own, over inline dated and
+hour-based series, a `FILE` series, dry-weather flow with all four pattern kinds across a
+midnight, month and weekend change, and an MGD file with `Mfactor`, `Sfactor` and a baseline
+pattern, and routes three of them against SWMM at the depth (1e-7 m) and flow (1e-6 relative)
+targets of the other dynamic-wave comparisons.
+
+#### Subcatchment runoff from a SWMM file
+
+A file with `[SUBCATCHMENTS]` gets its hydrology: `read_swmm_inp` reads `[RAINGAGES]`,
+`[SUBCATCHMENTS]`, `[SUBAREAS]`, `[INFILTRATION]`, `[EVAPORATION]` and `[ADJUSTMENTS]` into
+`net.hydrology` (`noodl.apps.sewer.runoff.Hydrology`), and `net.inflows` becomes a
+`RunoffInflows`: the file's inflow schedule plus the runoff of the subcatchments, which
+`simulate_dynamic_wave` takes as its lateral inflow (`model.inflow_schedule`) with no argument from
+the caller. It is SWMM 5.2.4's own computation, operation for operation (`subcatch.c`,
+`runoff.c`, `infil.c`, `gage.c`, `climate.c`, `odesolve.c` and `routing.c`; the module
+docstring of `runoff.py` lists each rule with its source):
+
+- **Rain.** A `TIMESERIES` gage, `INTENSITY`, `VOLUME` or `CUMULATIVE`; the rain of an entry
+  falls for the gage's recording interval from the entry's date and is zero until the next
+  non-zero entry; a record that starts after (before) the run is dry before it (already running);
+  gages that share a series take the rainfall of the first. A gage's interval shorter than
+  `WET_STEP` lowers `WET_STEP`, and with it the routing step, as `gage_validate` does.
+- **Runoff clock.** SWMM's runoff steps are not the routing steps. A runoff step is
+  `WET_STEP` while it rains or a subcatchment had runoff on the previous step, `DRY_STEP`
+  otherwise, shortened to the next change of rain or of monthly evaporation, and the last one is
+  cut at the end of the run; routing then adds each subcatchment's runoff to its outlet node
+  linearly interpolated between the runoff at the start and at the end of the runoff step that
+  covers the start of the routing step. `simulate_dynamic_wave` therefore passes the length of
+  each routing step to the runoff driver (an inflow callable with `step_aware = True` is called
+  as `inflow(t, step)`).
+- **Surface.** Each subcatchment is an impervious area without depression storage, an impervious
+  area with it and a pervious area; each is a nonlinear reservoir `q = alpha (d - d_s)^(5/3)`
+  integrated over the step by SWMM's Cash-Karp Runge-Kutta with its adaptive step (tolerance
+  1e-4). `RouteTo` `IMPERVIOUS` or `PERVIOUS` sends `PctRouted` of one area's runoff of the
+  previous step onto the other; the runoff of a subcatchment that drains to another one is that
+  one's runon on the next runoff step.
+- **Infiltration.** `HORTON`, `MODIFIED_HORTON`, `GREEN_AMPT`, `MODIFIED_GREEN_AMPT` and
+  `CURVE_NUMBER`, as the `[OPTIONS]` default or per subcatchment on its `[INFILTRATION]` line
+  (SWMM 5.2's trailing method keyword), with the soil recovery of dry weather and the monthly
+  `RECOVERY` pattern. A subcatchment with no `[INFILTRATION]` line has none, as in SWMM.
+- **Evaporation.** `CONSTANT`, `MONTHLY` or `TIMESERIES` (a step function), `DRY_ONLY`, and the
+  `[ADJUSTMENTS]` of evaporation, rainfall and conductivity and the `N-PERV`, `DSTORE` and
+  `INFIL` patterns, which SWMM applies only to a subcatchment named *before* the line (it resets
+  them when it reads `[SUBCATCHMENTS]`; the reader does the same, so a file with them in the other
+  order has them ignored, here as in SWMM).
+
+Refused by name, with the line: `[LID_USAGE]`; `[GROUNDWATER]` (unless `IGNORE_GROUNDWATER YES`); a
+subcatchment with a snow pack (unless `IGNORE_SNOWMELT YES`); `[LANDUSES]`, `[COVERAGES]`,
+`[BUILDUP]`, `[WASHOFF]`, `[LOADINGS]` and a rain concentration of a pollutant (their load is not
+modelled; `IGNORE_QUALITY YES` lets them pass); an outfall that routes onto a subcatchment;
+rain `FILE` gages; `[EVAPORATION]` `TEMPERATURE` and `FILE`; `[RDII]` and `[HYDROGRAPHS]`. The
+evaporation of **open conduits** (`link.c:1359-1362`, subtracted from the end nodes in
+`dynwave.c:560-572` from every trial's mean depth) stays refused: a file whose
+evaporation can be positive while a conduit is open still names the conduit. `[SNOWPACKS]` no
+subcatchment names, `[TEMPERATURE]`, `[AQUIFERS]` and `[LID_CONTROLS]` that nothing uses are
+inert, as they are in SWMM.
+
+```python
+from noodl.apps.sewer import read_swmm_inp
+from noodl.apps.sewer.runoff import RunoffModel
+
+net, _, _ = read_swmm_inp("runoff_horton_dynwave.inp")
+hydrology = net.hydrology
+runoff = RunoffModel(hydrology)
+runoff.advance_to(540_000.0)           # the runoff steps SWMM has taken by t = 540 s
+print({name: round(float(q), 4) for name, q in runoff.runoff_m3s.items()})
+print(runoff.steps[:3], len(runoff.steps))
+```
+
+```text
+{'S1': 0.916, 'S2': 0.2232, 'S3': 0.3022}
+[(0.0, 120.0), (120.0, 60.0), (180.0, 60.0)] 8
+```
+
+(The first runoff step is the 120 s the dry step is cut to by the first rain; the runoff steps are
+then the one-minute `WET_STEP`.) The routed run needs nothing more:
+
+```py
+model, state, drivers = build_model(net)
+state, hist = simulate_dynamic_wave(model, state, drivers, duration=600.0)   # runoff is the inflow
+```
+
+**Differentiability.** The runoff is plain arithmetic in which tensors flow, so every
+parameter of a subcatchment can carry a gradient: area, percent imperviousness, width, slope,
+the Manning roughness and depression storage of both areas, `PctZero`, `PctRouted`, and every
+parameter of the infiltration models (rates, decay, drying time, suction, conductivity, initial
+deficit, curve number). `Hydrology.with_gradients` makes leaf tensors of them (and returns them
+by name, e.g. `"S1.area"`, `"S1.infiltration.f0"`); a `RunoffInflows` built from it
+(`RunoffInflows(h2, schedule, nodes)`, set as `model.inflow_schedule`) gives
+`simulate_dynamic_wave` a lateral inflow with that graph, and the gradient of a routed depth or
+flow reaches the runoff parameters through the head solve's implicit differentiation:
+
+```python
+h2, leaves = hydrology.with_gradients(fields=("area",), subareas=(), infiltration=False,
+                                      only=("S1",))
+m = RunoffModel(h2)
+m.advance_to(540_000.0)
+m.runoff_m3s["S1"].backward()
+print(round(float(leaves["S1.area"].grad), 8))     # d runoff / d area, m3/s per m2
+```
+
+```text
+2.136e-05
+```
+
+The gradient is that of the branch the values select (rain on or off, ponding above the depression
+storage, saturation of the Green-Ampt or Curve Number surface, the Horton curve against the
+available water, the 10..99 clamp of the Curve Number), exact in each smooth region and
+one-sided at a switch, and it is that of the discrete scheme: the Runge-Kutta step sizes are chosen
+on the values and held fixed (the solver's tolerance, 1e-4, bounds the difference from the
+derivative of the exact solution; the tests compare with finite differences to 2e-3). Not
+differentiable: the rain itself (series values, recording interval, snow catch factor), the
+**runoff clock** (which step is wet or dry, where the last step is cut) and everything that
+selects the routing step. `Hydrology.with_duration` re-cuts the run, as SWMM does, if the
+simulation is shorter than the file's `END_DATE`.
+
+**Notes on reproducing SWMM.** (1) SWMM's total duration is the floor of `(END - START) * 86400`
+evaluated by the compiled engine as `(EndDate - StartDate) + (EndTime - StartTime)`, which is
+1199 s, not 1200 s, for 12:20:00 after 12:00:00; the reader does the same arithmetic
+(`inp_hydrology.swmm_total_duration`), because the last runoff step is cut there. (2) SWMM matches
+keywords by prefix of the field (`IMPERV`, `PERV`, `VOLUME`...), and so does the reader.
+(3) `WET_STEP` and `DRY_STEP` are read as SWMM's times (decimal hours or `H:MM:SS`).
+
+`tests/verification/test_sewer_runoff_parity.py` compares, against live SWMM 5.2.4, the runoff of
+every subcatchment and the lateral inflow of every node after every routing step (1e-6 relative
++ 1e-9 m3/s) and the routed depths (1e-7 m) and flows of five fixtures (Horton, modified Horton,
+Curve Number, Green-Ampt and modified Green-Ampt; SI, LPS and US units; `RouteTo` `OUTLET`,
+`IMPERVIOUS` and `PERVIOUS`; subcatchment-to-subcatchment routing; the three rain formats; co-gages; monthly,
+constant and time-series evaporation; the adjustments and recovery patterns; a month boundary;
+gages faster than `WET_STEP`) and of sixteen variants of them.
 
 #### Tidal and time-series outfalls
 
@@ -725,9 +1149,8 @@ function). The two share one code path: `simulate_dynamic_wave` fills the per-ou
 `"outfall_stage"` (m) each step, from the tide curves and the functions, and the closure
 reads it for every `TIDAL` and `TIMESERIES` outfall; a user stepping `Model.step` directly
 supplies that driver. Both work under the fixed and the variable step. A `.inp` with a
-`TIMESERIES` outfall is read (its `[TIMESERIES]` section may hold only the series that
-outfalls name, and is not read: the driver is required, and `build_model` refuses a network
-without one by name). `tests/verification/test_sewer_dynwave_parity.py` runs the tide fixture
+`TIMESERIES` outfall is read (its series is not read: the driver is required, and
+`build_model` refuses a network without one by name). `tests/verification/test_sewer_dynwave_parity.py` runs the tide fixture
 `tidal_dynwave.inp` (a tide that backs the outfall conduit up to 0.38 m of its 0.45 m and
 lets it fall) against SWMM 5.2.4 at every step for the `TIDAL` outfall and for the same stage
 as a `TIMESERIES` outfall, and the variable-step tree with the tide, with SWMM converging on
@@ -818,9 +1241,12 @@ each is confined to the cases named.
 - **Water-quality transients.** noodl's reactors are the junctions' control volumes and SWMM's
   the conduits, so in transit the tracer arrives shifted by the difference of the mean delays;
   steady concentrations agree (see [Quality on the dynamic wave](#quality-on-the-dynamic-wave)).
-- **Iteration artefacts.** `HEAD_TOLERANCE`, `MAX_TRIALS`, trial relaxation, link bypassing and
-  the 0.001 cfs reversal rule are not modelled, and SWMM at its default tolerance is off its own
-  fixed point by centimetres (see [What is solved](#what-is-solved)).
+- **Iteration artefacts.** Trial relaxation, link bypassing and the 0.001 cfs reversal rule are
+  not modelled; `HEAD_TOLERANCE` and `MAX_TRIALS` are the iteration's defaults, with a flow
+  tolerance SWMM does not have (see [Iteration and convergence](#iteration-and-convergence)).
+  SWMM at its default tolerance is off its own fixed point by centimetres on a backwater, and
+  by up to metres on some corpus files (see [the SWMM corpus](#dynamic-wave-against-swmm)),
+  which noodl, solving to the fixed point, does not reproduce.
 - **Refused where SWMM accepts.** A `FUNCTIONAL` storage exponent below 0 (infinite area at zero
   depth), a negative storage `MaxDepth`, `InitDepth` or `SurDepth`, a nonzero pollutant
   `Cinit`, and the sections listed under [Limitations](#limitations).
@@ -912,8 +1338,8 @@ of circular conduits:
 
 - `tree_kinwave.inp`, the hand-built 5-conduit tree.
 - `example1_kinwave.inp`, the 13-conduit network of EPA SWMM's published *Example 1*. It is
-  converted to metres, and its runoff is replaced by rational-method constant inflows, because
-  runoff and CFS units are outside this reader.
+  converted to metres, and its runoff is replaced by rational-method constant inflows (the
+  runoff itself is compared separately, [below](#subcatchment-runoff-from-a-swmm-file)).
 - `tree_kinwave_large.inp`, a synthetic 32-conduit tree with fills from 8e-5 to 0.81 of `Qfull`.
 
 `tests/data/sewer/make_kinwave_fixtures.py` regenerates the last two. The engine identity is
@@ -1122,6 +1548,38 @@ SWMM reports 0 % of steps not converging at those defaults too. Its stopping rul
 change between relaxed trials, not the distance to the fixed point, so a result that SWMM
 calls converged can sit centimetres away from the equations' solution on a backwater.
 
+**The SWMM corpus.** `benchmarks/swmm_corpus.py` runs every file of a folder of SWMM models
+through both engines for a short window and compares the node depths at its end (the corpus
+is an argument, never part of the repository). On the 1,646 files of the SWMMEnablement
+collection, 107 run in noodl (the others are refused by name, mostly for hydrology, pumps and
+non-circular shapes), with a 600 s window. At each file's own `HEAD_TOLERANCE` and
+`MAX_TRIALS` the largest depth difference per file is under 1 mm on 12 files, 1-10 mm on 22,
+1-5 cm on 34, 5-20 cm on 29, 0.2-1 m on 8 and over 1 m on 2. That spread is SWMM's own
+iteration error, not a difference of model: run four ways (each engine at the file's
+tolerances and at `HEAD_TOLERANCE` 1e-12, `MAX_TRIALS` 500) on the 87 distinct files, noodl at
+the file's tolerances is within 1 mm of its own converged answer on 58 of them and within
+1 cm on 71, while SWMM at the file's tolerances is 1 cm or more from its own converged answer
+on 57; on 54 of the 60 files that differ by 1 cm or more, SWMM's own error is at least half
+the difference (`95_Linear_H_Elements`, 3.18 m between the engines, is 3.18 m between SWMM's
+two runs and 2 mm between noodl's). With `--tight`, both engines converge each step:
+
+| Max depth difference | < 1 mm | 1-10 mm | 1-5 cm | 5-20 cm | 0.2-1 m | > 1 m |
+|---|---|---|---|---|---|---|
+| file's tolerances (107 files) | 12 | 22 | 34 | 29 | 8 | 2 |
+| `--tight` (107 files) | 79 | 9 | 7 | 5 | 6 | 1 |
+| `--tight`, SWMM converging on every step (37 files) | 37 | 0 | 0 | 0 | 0 | 0 |
+
+Every file whose tight difference exceeds 1 mm has steps on which SWMM itself does not
+converge in 500 trials (its report's "% of Steps Not Converging", which the harness records
+with noodl's own count): there SWMM's trials alternate around a switch with no fixed point
+(the tie rules under [Intentional differences](#intentional-differences-from-swmm)), and the
+histories differ from SWMM's first such step on. Up to that step, at the instants both engines
+share (a variable step is the same sequence only while the states agree), they agree to below
+0.6 mm on every file but two: `2079_Nodes`, whose 5 mm conduits let noodl's passes land on a
+second (surcharged) fixed point of the first step, and `STEEP_drop_example_2`, 2.7 cm on a
+step where noodl's own iteration does not converge either. No option the reader accepts was
+found ignored.
+
 Non-SWMM checks, for the physics SWMM does not model:
 
 | Check | Result |
@@ -1159,18 +1617,26 @@ publish numbers from this application.
   manhole, no loops. Dynamic-wave routing allows loops and flat or adverse conduits.
 - **Dynamic wave, not supported.** Each is refused by name, with the line number when it comes
   from a file (see [SWMM `.inp`](../formats/swmm.md)), unless it says otherwise:
-    - pumps (`[PUMPS]`), flow dividers (`[DIVIDERS]`), control rules (`[CONTROLS]`: a regulator
-      is always fully open), culvert inlet control (a conduit's culvert code), roadway weirs and
-      weir coefficient curves;
-    - ponding (`ALLOW_PONDING YES`): flooded water is lost, as in SWMM without ponding. A junction
+    - flow dividers under steady and kinematic-wave routing (a divider is a junction under
+      dynamic-wave routing, as in SWMM), roadway weirs and weir coefficient curves; of the control
+      rules, `VARIABLE` and `EXPRESSION`, rain-gauge premises, some premise attributes and
+      conduit actions (see "Link settings and control rules"); an ideal pump whose inlet floods;
+    - ponding together with water quality or headspace air, and for a storage unit; a junction
       with no ground (`MaxDepth` 0) and no `SurDepth` floods as soon as it fills to its crown;
-    - runoff, groundwater and LID (`[SUBCATCHMENTS]`, `[RAINGAGES]`, `[LID_USAGE]`), dry-weather
-      flow (`[DWF]`), time-series inflows (supply them as drivers) and `[TIMESERIES]` data
-      (a `TIMESERIES` outfall's stage is a driver);
-    - the `[LOSSES]` entry, exit and average coefficients and seepage (the flap gate is read),
-      storage evaporation (`Fevap`) and exfiltration, and a nonzero pollutant `Cinit`;
-    - non-circular conduit shapes, flow units other than CMS, and regulators with
-      `LINK_OFFSETS ELEVATION`;
+    - groundwater, LID, snowmelt and the pollutant buildup and washoff of the runoff
+      (`[GROUNDWATER]`, `[LID_USAGE]`, snow packs, `[LANDUSES]`), RDII (`[RDII]`,
+      `[HYDROGRAPHS]`), rain `FILE` gages, evaporation read from a climate file or computed from
+      temperature, and the evaporation of open conduits, pollutant time-series, mass and
+      dry-weather inflows, and the `[FILES]` `USE HOTSTART`, `USE INFLOWS`, `USE RDII` and
+      `USE RUNOFF` (a `TIMESERIES` outfall's stage is a driver); surface runoff itself is
+      modelled ([Subcatchment runoff](#subcatchment-runoff-from-a-swmm-file));
+    - conduit seepage (the `[LOSSES]` sixth field), storage evaporation (`Fevap`) and
+      exfiltration, and a nonzero pollutant `Cinit`;
+    - the `DUMMY` section (a link that routes its node's outflow without a section) and the
+      `STREET` section, and non-circular conduits under steady or kinematic-wave routing;
+    - water quality and headspace air for a network with a non-circular conduit (their
+      correlations are the circular pipe's);
+    - regulators with `LINK_OFFSETS ELEVATION`;
     - headspace air on networks that are not dendritic: loops, junctions with several outgoing
       conduits or none, a junction drained only by a regulator (orifice, weir or outlet), a cycle
       that reaches no outfall (refused by network validation), and an outfall at a conduit's
@@ -1187,6 +1653,14 @@ publish numbers from this application.
   elapsed time, and batched `TIDAL` or `TIMESERIES` outfalls (a batched stage only via the
   driver); and a fully submerged weir whose flow reverses through zero, where SWMM itself
   fails to converge on a few steps.
+- **Dynamic wave, shapes: where SWMM's trials limit-cycle.** A section or outfall regime in which
+  SWMM's own iteration does not converge (a dry start, a supercritical slope, culverts running
+  from unsubmerged to submerged in a few steps) has no converged answer to compare with, and
+  noodl's lagged flags can fail to settle there too (`ValueError`: the step did not converge). The
+  culvert cap is applied as a line in the head difference, not the upstream head alone, so the
+  iteration of a culvert whose downstream end moves is slower (about 30 passes per step on the
+  parity fixture) though its fixed point is SWMM's. A free outfall below the springing line of a
+  `RECT_ROUND` conduit is such a regime (the section above).
 - **Dynamic wave, where SWMM has no fixed point** (the three tie rules above): the EXTRAN
   crown hold, the normal-flow slope switch and the drop-end area switch. The Froude test of the
   normal-flow limit stays a lagged flag. The area switch picks one threshold per junction (the

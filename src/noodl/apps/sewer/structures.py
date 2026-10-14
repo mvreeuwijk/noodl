@@ -26,7 +26,7 @@ Every source reference is to SWMM 5.2.4 ``src/solver``.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import NamedTuple
 
 import torch
@@ -231,6 +231,7 @@ class OrificeSet:
     c_orif: Tensor
     c_weir: Tensor
     h_crit: Tensor
+    setting: Tensor | None = None
 
     @classmethod
     def build(cls, opening: Opening, bottom, c_disch, gated, route_step: float) -> OrificeSet:
@@ -239,7 +240,17 @@ class OrificeSet:
         length."""
         bottom = torch.as_tensor(bottom, dtype=torch.bool)
         c_disch = torch.as_tensor(c_disch, dtype=F64)
-        h = opening.y_full                                                   # link.c:1752
+        base = cls(opening, bottom, c_disch, torch.as_tensor(gated, dtype=torch.bool),
+                   equivalent_length(opening.y_full, route_step), c_disch, c_disch, c_disch)
+        return base._constants(torch.ones_like(opening.y_full))
+
+    def _constants(self, setting: Tensor) -> OrificeSet:
+        """This set with SWMM's setting-dependent constants at `setting` (``Link.setting``, a
+        fraction of the opening height; > 0): the opening height ``h = setting yFull``, the
+        effective discharge constant ``cOrif``, the weir constant ``cWeir`` and the critical
+        height ``hCrit`` (`orifice_setSetting`, `orifice_getWeirCoeff`, link.c:1750-1808)."""
+        opening, bottom, c_disch = self.opening, self.bottom, self.c_disch
+        h = opening.y_full * setting                                         # link.c:1752
         f = opening.area(h) * torch.sqrt(torch.tensor(2.0 * GRAVITY_FT, dtype=F64))  # :1753
         c_orif = c_disch * f                                                 # link.c:1754
         a_over_l = torch.where(opening.shape == CIRCULAR, h / 4.0,           # link.c:1786
@@ -247,8 +258,14 @@ class OrificeSet:
         h_crit = torch.where(bottom, c_disch / 0.414 * a_over_l, h)          # link.c:1792, 1800
         h_ref = torch.where(bottom, h_crit, h / 2.0)                         # link.c:1803
         c_weir = c_disch * torch.sqrt(h_ref) * f                             # link.c:1758, 1807
-        return cls(opening, bottom, c_disch, torch.as_tensor(gated, dtype=torch.bool),
-                   equivalent_length(opening.y_full, route_step), c_orif, c_weir, h_crit)
+        return replace(self, c_orif=c_orif, c_weir=c_weir, h_crit=h_crit, setting=setting)
+
+    def at_setting(self, setting: Tensor) -> OrificeSet:
+        """This set at the per-device `setting` (0..1; 1 fully open). A setting of 0 closes the
+        orifice (`link_getInflow` returns 0, link.c:550); its constants are then those of the
+        open orifice, which `orifice_flow` does not use."""
+        safe = torch.where(setting > 0.0, setting, torch.ones_like(setting))
+        return replace(self._constants(safe), setting=setting)
 
 
 def _orifice_get_flow(orf: OrificeSet, head: Tensor, f: Tensor) -> tuple[Tensor, Tensor]:
@@ -276,7 +293,13 @@ def orifice_flow(orf: OrificeSet, h1: Tensor, h2: Tensor, z1: Tensor, z2: Tensor
     the crest elevation ``crest`` (ft: node 1's invert plus the crest offset, also for
     reverse flow, link.c:1865, 1877) and the flap-gate closures (`_gate`)."""
     forward, hu, hd, yu = _orient(h1, h2, z1, z2, strict=False)               # link.c:1846-1856
-    yf = orf.opening.y_full
+    yf_full = orf.opening.y_full
+    shut = None                                              # a setting of 0 (link.c:550)
+    if orf.setting is None:
+        yf = yf_full
+    else:
+        shut = orf.setting <= 0.0
+        yf = yf_full * torch.where(shut, torch.ones_like(orf.setting), orf.setting)  # :1876, 1910
     hc_safe = torch.where(orf.h_crit > 0.0, orf.h_crit, torch.ones_like(orf.h_crit))
     # bottom orifice (link.c:1862-1873)
     head_b = torch.where(hu < crest, torch.zeros_like(hu),
@@ -293,6 +316,8 @@ def orifice_flow(orf: OrificeSet, h1: Tensor, h2: Tensor, z1: Tensor, z2: Tensor
     f = torch.where(orf.bottom, f_b, f_s)
     head = torch.where(orf.bottom, head_b, head_s)
     closed = (head <= FUDGE) | (yu <= FUDGE) | _gate(forward, block_forward, block_reverse)
+    if shut is not None:
+        closed = closed | shut
     cls = _flow_class(closed, forward, crest, hd)                            # link.c:1904-1910
     depth = torch.where(orf.bottom, yf.expand_as(f), yf * f)                 # link.c:1913-1925
     surf = torch.where(orf.bottom, orf.opening.area(yf).expand_as(f),
@@ -342,6 +367,22 @@ class WeirSet:
     gated: Tensor
     slope: Tensor
     c_surcharge: Tensor
+    setting: Tensor | None = None
+
+    def at_setting(self, setting: Tensor) -> WeirSet:
+        """This set at the per-device `setting` (0..1; 1 fully open): the crest rises by
+        ``(1 - setting) yFull`` (link.c:2255), a V-notch becomes a trapezoid below 1
+        (link.c:2361), and the equivalent orifice coefficient is recomputed from the flow at a
+        head of ``setting yFull`` (`weir_setSetting`, link.c:2166-2194; 0 at a setting of
+        0, which closes the weir, link.c:550)."""
+        safe = torch.where(setting > 0.0, setting, torch.ones_like(setting))
+        weir = replace(self, setting=safe)
+        h = weir.opening.y_full * safe                                       # link.c:2186
+        q1, q2, _ = _weir_get_flow(weir, h, torch.ones_like(h) > 0, gated=False)  # :2188
+        c = (q1 + q2) / torch.sqrt(h / 2.0)                                  # link.c:2192
+        c = torch.where(setting > 0.0, c, torch.zeros_like(c))               # link.c:2182
+        c = torch.where(self.can_surcharge, c, self.c_surcharge)             # link.c:2178
+        return replace(weir, c_surcharge=c, setting=setting)
 
     @classmethod
     def build(cls, opening: Opening, weir_type, c_disch1, c_disch2, end_contractions,
@@ -380,7 +421,15 @@ def _weir_q(weir: WeirSet, head: Tensor, forward: Tensor) -> tuple[Tensor, Tenso
                            torch.zeros_like(h))                              # link.c:2386
     sideflow = torch.where(forward, side_fwd, side_back)                     # link.c:2380
     vnotch = weir.c_disch1 * weir.slope * h ** 2.5                           # link.c:2391
-    trap_len = weir.opening.width(torch.zeros_like(h)) * LCF                 # link.c:2395-2396
+    if weir.setting is None:
+        offset = torch.zeros_like(h)
+    else:
+        # a V-notch below setting 1 is a trapezoid (link.c:2361); the central width is the
+        # opening's at the raised crest
+        offset = (1.0 - weir.setting) * weir.opening.y_full
+        t = torch.where((t == VNOTCH_WEIR) & (weir.setting < 1.0),
+                        torch.full_like(t, TRAPEZOIDAL_WEIR), t)
+    trap_len = weir.opening.width(offset) * LCF                              # link.c:2395-2396
     trap = weir.c_disch1 * trap_len * h ** 1.5                               # link.c:2397
     q1 = torch.where(t == TRANSVERSE_WEIR, transverse,
                      torch.where(t == SIDEFLOW_WEIR, sideflow,
@@ -410,8 +459,13 @@ def _weir_dqdh(weir: WeirSet, forward: Tensor, h: Tensor, q1: Tensor, q2: Tensor
 
 
 def _weir_open_area(weir: WeirSet, y: Tensor) -> Tensor:
-    """`weir_getOpenArea` at setting 1 (link.c:2467-2488): ``A(min(y, yFull)) - A(0)``."""
-    return weir.opening.area(torch.minimum(y, weir.opening.y_full))
+    """`weir_getOpenArea` (link.c:2467-2488): ``A(min(z + y, yFull)) - A(z)`` with the crest
+    offset ``z = (1 - setting) yFull`` (0 at setting 1)."""
+    if weir.setting is None:
+        return weir.opening.area(torch.minimum(y, weir.opening.y_full))
+    z = (1.0 - weir.setting) * weir.opening.y_full                           # link.c:2478
+    return (weir.opening.area(torch.minimum(z + y, weir.opening.y_full))
+            - weir.opening.area(z))                                          # :2487
 
 
 def _weir_get_flow(weir: WeirSet, head: Tensor, forward: Tensor, gated=None
@@ -434,11 +488,11 @@ def _weir_get_flow(weir: WeirSet, head: Tensor, forward: Tensor, gated=None
     return q1, q2, _weir_dqdh(weir, forward, head, q1, q2)                  # link.c:2427
 
 
-def _weir_orifice_flow(weir: WeirSet, head: Tensor) -> tuple[Tensor, Tensor]:
+def _weir_orifice_flow(weir: WeirSet, head: Tensor, y: Tensor) -> tuple[Tensor, Tensor]:
     """`weir_getOrificeFlow` (link.c:2432-2463) for a surcharged weir: ``(q, dqdh)`` with the
-    opening full (``y = yFull``) and the ARMCO loss where gated."""
+    water `y` ft above the (raised) crest, the opening full, and the ARMCO loss where
+    gated."""
     q = weir.c_surcharge * _sqrt(head)                                       # link.c:2446
-    y = weir.opening.y_full
     a = _weir_open_area(weir, y)                                             # link.c:2451
     use = weir.gated & (a > 0.0)
     v = q / torch.where(use, a, torch.ones_like(a))
@@ -454,21 +508,31 @@ def _weir_orifice_flow(weir: WeirSet, head: Tensor) -> tuple[Tensor, Tensor]:
 def weir_flow(weir: WeirSet, h1: Tensor, h2: Tensor, z1: Tensor, z2: Tensor, crest: Tensor,
               block_forward=False, block_reverse=False) -> StructureFlow:
     """`link.c::weir_getInflow` under dynamic wave (link.c:2198-2317), arguments as
-    `orifice_flow`. Roadway weirs are not covered (refused by the network)."""
+    `orifice_flow` (`crest` the crest elevation at setting 1; the setting, if the set has one,
+    raises it by ``(1 - setting) yFull``, link.c:2255). Roadway weirs are not covered (refused
+    by the network)."""
     forward, hu, hd, _ = _orient(h1, h2, z1, z2, strict=True)                # link.c:2241-2249
     yf = weir.opening.y_full
     crown = crest + yf                                                       # link.c:2253
+    shut = None
+    if weir.setting is not None:
+        shut = weir.setting <= 0.0                                           # hcrest >= hcrown
+        crest = crest + (1.0 - weir.setting) * yf                            # link.c:2255
     head = hu - crest                                                        # link.c:2263
     closed = (head <= FUDGE) | _gate(forward, block_forward, block_reverse)  # link.c:2267-2268
+    if shut is not None:
+        closed = closed | shut
     cls = _flow_class(closed, forward, crest, hd)                            # link.c:2275-2281
     surcharged = hu >= crown                                                 # link.c:2289
     # surcharged and able to: equivalent orifice (link.c:2291-2299)
     mid = (crest + crown) / 2.0
     head_s = torch.where(hd < mid, hu - mid, hu - hd)                        # link.c:2294-2295
-    q_s, dq_s = _weir_orifice_flow(weir, torch.where(closed, torch.ones_like(head_s), head_s))
+    y_open = crown - crest                                                   # link.c:2296
+    q_s, dq_s = _weir_orifice_flow(weir, torch.where(closed, torch.ones_like(head_s), head_s),
+                                   y_open)
     orifice = surcharged & weir.can_surcharge
     # weir equation, head capped at the opening height when it cannot surcharge (:2303)
-    head_w = torch.where(surcharged, yf.expand_as(head), head)
+    head_w = torch.where(surcharged, y_open.expand_as(head), head)
     head_w = torch.where(closed, torch.ones_like(head_w), head_w)
     q1, q2, dq_w = _weir_get_flow(weir, head_w, forward)                     # link.c:2308
     vill = hd > crest                                                        # link.c:2311
@@ -479,7 +543,7 @@ def weir_flow(weir: WeirSet, h1: Tensor, h2: Tensor, z1: Tensor, z2: Tensor, cre
     q2 = torch.where(vill & (q2 > 0.0), q2 * _villemonte(ratio, 2.5), q2)   # link.c:2315-2316
     q = torch.where(orifice, q_s, q1 + q2)
     dqdh = torch.where(orifice, dq_s, dq_w)
-    depth = torch.where(orifice, yf.expand_as(head), torch.minimum(head, yf))  # :2298, 2319
+    depth = torch.where(orifice, y_open.expand_as(head), torch.minimum(head, yf))  # :2298, 2319
     sign = torch.where(forward, torch.ones_like(q), -torch.ones_like(q))
     zero = torch.zeros_like(q)
     return StructureFlow(torch.where(closed, zero, sign * q), torch.where(closed, zero, dqdh),
@@ -561,13 +625,19 @@ def _outlet_q(out: OutletSet, head: Tensor) -> Tensor:
 
 
 def outlet_flow(out: OutletSet, h1: Tensor, h2: Tensor, z1: Tensor, z2: Tensor, crest: Tensor,
-                block_forward=False, block_reverse=False) -> StructureFlow:
+                block_forward=False, block_reverse=False, setting=None) -> StructureFlow:
     """`link.c::outlet_getInflow` under dynamic wave (link.c:2608-2668), arguments as
-    `orifice_flow`. SWMM sets no ``dqdh`` for an outlet (0; see `outlet_dqdh`)."""
+    `orifice_flow`; the flow is scaled by the per-device `setting` (0..1, link.c:2667), which
+    closes the outlet at 0 (link.c:550). SWMM sets no ``dqdh`` for an outlet (0; see
+    `outlet_dqdh`)."""
     forward, hu, hd, yu = _orient(h1, h2, z1, z2, strict=False)               # link.c:2633-2643
     head = torch.where(out.head_based, hu - torch.maximum(hd, crest), hu - crest)  # :2648-2650
     closed = (head <= FUDGE) | (yu <= FUDGE) | _gate(forward, block_forward, block_reverse)
+    if setting is not None:
+        closed = closed | (setting <= 0.0)
     q = _outlet_q(out, torch.where(closed, torch.ones_like(head), head))
+    if setting is not None:
+        q = q * setting
     sign = torch.where(forward, torch.ones_like(q), -torch.ones_like(q))
     zero = torch.zeros_like(q)
     cls = torch.where(closed, torch.full_like(head, DRY, dtype=torch.long),
@@ -577,7 +647,8 @@ def outlet_flow(out: OutletSet, h1: Tensor, h2: Tensor, z1: Tensor, z2: Tensor, 
 
 
 def outlet_dqdh(out: OutletSet, h1: Tensor, h2: Tensor, z1: Tensor, z2: Tensor, crest: Tensor,
-                block_forward=False, block_reverse=False, step: float = FUDGE) -> Tensor:
+                block_forward=False, block_reverse=False, step: float = FUDGE,
+                setting=None) -> Tensor:
     """The outlet flow's central-difference slope in its upstream head (cfs/ft, >= 0):
     ``(Q(h_up + step) - Q(h_up - step)) / (2 step)``, the upstream node being node 1 where
     ``h1 >= h2`` and node 2 otherwise (`step` in ft, default SWMM's FUDGE). SWMM computes
@@ -585,7 +656,9 @@ def outlet_dqdh(out: OutletSet, h1: Tensor, h2: Tensor, z1: Tensor, z2: Tensor, 
     forward = h1 >= h2
     d1 = torch.where(forward, torch.full_like(h1, step), torch.zeros_like(h1))
     d2 = torch.where(forward, torch.zeros_like(h2), torch.full_like(h2, step))
-    up = outlet_flow(out, h1 + d1, h2 + d2, z1, z2, crest, block_forward, block_reverse).flow
-    down = outlet_flow(out, h1 - d1, h2 - d2, z1, z2, crest, block_forward, block_reverse).flow
+    up = outlet_flow(out, h1 + d1, h2 + d2, z1, z2, crest, block_forward, block_reverse,
+                     setting).flow
+    down = outlet_flow(out, h1 - d1, h2 - d2, z1, z2, crest, block_forward, block_reverse,
+                       setting).flow
     slope = torch.where(forward, up - down, down - up) / (2.0 * step)
     return torch.clamp(slope, min=0.0)

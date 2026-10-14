@@ -20,11 +20,12 @@ from __future__ import annotations
 
 import math
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
 import torch
 
+from noodl._broadcast import broadcast_shapes
 from noodl.apps.sewer import geometry as geom
 from noodl.apps.sewer.air import (
     F_AIR_DEFAULT,
@@ -33,6 +34,7 @@ from noodl.apps.sewer.air import (
     air_layer,
     check_air_topology,
 )
+from noodl.apps.sewer.controls import start_serial
 from noodl.apps.sewer.dynwave_terms import (
     DAMPING,
     FUDGE,
@@ -44,6 +46,16 @@ from noodl.apps.sewer.dynwave_terms import (
     lengthening_factor,
 )
 from noodl.apps.sewer.hydraulics import CAPACITY_FLOOR, air_density_nodes
+from noodl.apps.sewer.linkcontrol import LinkControl
+from noodl.apps.sewer.pumps import (
+    IDEAL_PUMP,
+    TYPE3_PUMP,
+    TYPE5_PUMP,
+    PumpSet,
+    PumpStation,
+    mod_pump_flow,
+    pump_curve_flow,
+)
 from noodl.apps.sewer.quality import H2STransfer, LateralLoads, SulfideGeneration
 from noodl.apps.sewer.storage import StorageCurves
 from noodl.apps.sewer.structures import (
@@ -58,6 +70,7 @@ from noodl.apps.sewer.structures import (
     Opening,
     OrificeSet,
     OutletSet,
+    StructureFlow,
     WeirSet,
     orifice_flow,
     outlet_dqdh,
@@ -67,7 +80,6 @@ from noodl.apps.sewer.structures import (
 from noodl.apps.sewer.xsect_tables import (
     LCF,
     QCF,
-    area_of_depth,
     critical_depth,
     normal_depth_ft,
 )
@@ -86,6 +98,13 @@ Tensor = torch.Tensor
 F64 = torch.float64
 State = dict[str, Tensor]
 Drivers = dict[str, Tensor]
+
+#: The carried keys of the link settings (regulators and pumps; `LinkControl`): each link's
+#: setting (SWMM's ``Link.setting``: a pump's speed, a regulator's fraction open), its target
+#: setting, the DateTime (days) it was last opened or closed and the end areas a closed orifice
+#: keeps giving its junctions (m2, SI area; first ends, then second ends).
+CONTROL_KEYS = ("sewer.setting", "sewer.target_setting", "sewer.time_last_set",
+                "sewer.orifice_hold")
 
 #: SWMM's dry-node flow cap (`dwflow.c:273-276`): 1e-4 cfs, in m3/s.
 FUDGE_FLOW = 1.0e-4 * QCF
@@ -137,6 +156,32 @@ K_SWITCH = 1.0
 SOLVE_ATOL = 1.0e-12
 #: `solve_atol`'s margin over the bed's round-off floor (see there).
 _BED_FLOOR_MARGIN = 4.0
+#: The head solve's Newton keywords (`PotentialFlowLayer(newton_defaults=...)`; docs:
+#: "Iteration and convergence"). Every law of the pass is non-decreasing in its own head
+#: difference (conduits, regulators) or head (junction withdrawals), so the head solve's
+#: residual is the gradient of a convex function, and ``line_search="convex"`` cuts a step
+#: that overshoots its minimum back to it: the kinked laws (the stiff bed below an invert,
+#: the normal-flow switch's S-curve, the hold band and flood wall, a regulator's lagged
+#: slope) otherwise send the damped Newton into a 2-cycle it never leaves. ``step_floor``
+#: ends a solve whose Newton step is within 16 ULPs of the heads: its residual is then at the
+#: round-off of its own terms (a stiff wall or a large storage area at a high head can put
+#: that above `solve_atol`).
+HEAD_SOLVE_NEWTON = {"line_search": "convex", "step_floor": 16.0}
+#: The head solve's inner linear solver is the dense LU (``linear_solver="direct"``) up to
+#: this many junctions, and the layer's ``"auto"`` (SciPy's sparse LU) above it: on a small
+#: network the dense factorisation costs a handful of tensor operations against SuperLU's
+#: per-call conversion (measured on `benchmarks/sewer_dynwave_speed.py`'s binary trees, ms
+#: per pass dense / sparse: 17.6 / 18.3 at 63 junctions, 18.5 / 19.3 at 127, 21.4 / 20.2 at
+#: 255).
+DENSE_SOLVE_MAX_JUNCTIONS = 128
+#: SWMM's default HEAD_TOLERANCE, 0.005 ft (`dynwave.c:63`, ``DEFAULT_HEADTOL``), in m.
+DEFAULT_HEAD_TOLERANCE = 0.005 * LCF
+#: SWMM's default MAX_TRIALS (`dynwave.c:66`, ``DEFAULT_MAXTRIALS``).
+DEFAULT_MAX_TRIALS = 8
+#: The floor of the derived flow tolerance (m3/s, `iterate_tolerances`): the flow residual
+#: the head solve resolves at its `SOLVE_ATOL` with margin, and the tolerance the parity
+#: tests' 1e-13 m heads always ran with.
+FLOW_TOL_FLOOR = 1.0e-10
 #: SWMM's default junction surface-area floor (`dynwave.c:62`), ft2.
 DEFAULT_MIN_SURFACE_AREA_FT2 = 12.566
 #: SI area per SWMM ft2 (docs: "Units"): makes ``A_s dy = 0.5 dt N`` exact in m, m3/s.
@@ -193,7 +238,7 @@ def _table_interpolate(x: float, x1: float, y1: float, x2: float, y2: float) -> 
     return y1 + (x - x1) * (y2 - y1) / dx
 #: The flow regulators' edge kinds in the ``"water"`` layer, in the order their columns
 #: follow the pipes' in ``"water.q"`` (only the kinds a network has are present).
-STRUCTURE_KINDS = ("orifice", "weir", "outlet")
+STRUCTURE_KINDS = ("orifice", "weir", "outlet", "pump")
 _WEIR_TYPES = {"transverse": 0, "sideflow": 1, "v_notch": 2, "trapezoidal": 3}
 _WEIR_SHAPES = {"transverse": RECT_OPEN, "sideflow": RECT_OPEN, "v_notch": TRIANGULAR,
                 "trapezoidal": TRAPEZOIDAL}
@@ -203,8 +248,8 @@ _WEIR_SHAPES = {"transverse": RECT_OPEN, "sideflow": RECT_OPEN, "v_notch": TRIAN
 class DynamicWaveOptions:
     """SWMM 5.2.4's dynamic-wave [OPTIONS] that change the physics, with SWMM's defaults
     (`project.c:841-880`). `head_tolerance` and `max_trials` are SWMM's own iteration
-    controls: recorded so a file round-trips, never used -- noodl solves the same
-    equations to `build_model`'s own `iterate_tol` (docs: "Dynamic wave").
+    controls, and the defaults of `build_dynamic_wave_model`'s (`iterate_tolerances`; docs:
+    "Iteration and convergence").
 
     `routing_step` is the fixed routing step (s); `inertial_damping` is ``"none"``,
     ``"partial"`` or ``"full"``; `normal_flow_limited` is ``"slope"``, ``"froude"``,
@@ -212,8 +257,10 @@ class DynamicWaveOptions:
     crown, a junction above its crown holds continuity without storage) or ``"slot"``
     (Preissmann slot);
     `min_surface_area` is the junction surface-area floor (m2), ``None`` for SWMM's
-    12.566 ft2; `head_tolerance` is SWMM's head convergence tolerance (m); `max_trials` is
-    SWMM's trial limit (-).
+    12.566 ft2; `head_tolerance` is SWMM's head convergence tolerance (the file's length
+    unit, m for the CMS files read today; ``None`` for SWMM's 0.005 ft,
+    `DEFAULT_HEAD_TOLERANCE`); `max_trials` is SWMM's trial limit (-, ``None`` for SWMM's 8,
+    `DEFAULT_MAX_TRIALS`).
 
     `variable_step` is SWMM's VARIABLE_STEP, the Courant factor of the variable routing step
     (-, 0 to 2): 0 routes with the fixed `routing_step`, above 0 each step is the smallest
@@ -229,6 +276,14 @@ class DynamicWaveOptions:
     SWMM takes the routing step before it is lowered to WET_STEP (`project.c:238-250`
     validates the conduits first), so `lengthening_routing_step` (s) is the ROUTING_STEP of
     the file where that differs from `routing_step`; ``None`` means `routing_step`.
+
+    `force_main_equation` is SWMM's FORCE_MAIN_EQUATION, ``"H-W"`` (Hazen-Williams) or
+    ``"D-W"`` (Darcy-Weisbach): the friction law of a full FORCE_MAIN conduit
+    (`forcmain.c`; a partly full one uses the Manning n equivalent to it).
+
+    `allow_ponding` is SWMM's ALLOW_PONDING: a junction that floods and has a positive
+    `Manhole.ponded_area` keeps the water above its full depth, over that area, instead of
+    losing it (`JunctionStorage`, "Ponding").
     """
 
     routing_step: float = 20.0
@@ -242,6 +297,20 @@ class DynamicWaveOptions:
     minimum_step: float = 0.5
     lengthening_step: float = 0.0
     lengthening_routing_step: float | None = None
+    force_main_equation: str = "H-W"
+    allow_ponding: bool = False
+
+    @property
+    def head_tol(self) -> float:
+        """SWMM's ``HeadTol`` (m): `head_tolerance`, or SWMM's default 0.005 ft
+        (`DEFAULT_HEAD_TOLERANCE`, dynwave.c:63) where the file sets none."""
+        return DEFAULT_HEAD_TOLERANCE if self.head_tolerance is None else self.head_tolerance
+
+    @property
+    def trials(self) -> int:
+        """SWMM's ``MaxTrials`` (-): `max_trials`, or SWMM's default 8
+        (`DEFAULT_MAX_TRIALS`, dynwave.c:66) where the file sets none."""
+        return DEFAULT_MAX_TRIALS if self.max_trials is None else int(self.max_trials)
 
     @property
     def min_route_step(self) -> float:
@@ -281,8 +350,19 @@ class DynamicWaveOptions:
         if not self.minimum_step >= 0.0:
             raise ValueError(
                 f"DynamicWaveOptions: minimum_step must be >= 0 s, got {self.minimum_step!r}")
+        if self.force_main_equation not in ("H-W", "D-W"):
+            raise ValueError(
+                f"DynamicWaveOptions: force_main_equation must be 'H-W' or 'D-W', got "
+                f"{self.force_main_equation!r}")
         if self.min_surface_area is not None and not self.min_surface_area > 0:
             raise ValueError("DynamicWaveOptions: min_surface_area must be > 0 m2")
+        if self.head_tolerance is not None and not self.head_tolerance > 0:
+            raise ValueError(
+                f"DynamicWaveOptions: head_tolerance must be > 0 or None, got "
+                f"{self.head_tolerance!r}")
+        if self.max_trials is not None and not self.max_trials >= 1:
+            raise ValueError(
+                f"DynamicWaveOptions: max_trials must be >= 1 or None, got {self.max_trials!r}")
 
 
 class DynamicWaveConduit(Element):
@@ -327,8 +407,9 @@ class DynamicWaveConduit(Element):
 
     The element limits that follow the normal-flow limit, in SWMM's order (`dwflow.c:269-281`;
     SWMM's under-relaxation, :259-267, is not modelled): the user flow limit ``|q| <=``
-    ``"water.max_flow"`` (m3/s, +inf for none, the default; `dwflow.c:269-273`), the flap gate
-    zeroing flow against it (`link.c::link_setFlapGate`: ``"water.flap_block_reverse"`` 1 zeroes
+    ``"water.max_flow"`` (m3/s, absent or +inf for none, the default; `dwflow.c:269-273`),
+    the flap gate zeroing flow against it (`link.c::link_setFlapGate`:
+    ``"water.flap_block_reverse"`` 1 zeroes
     ``q < 0``, ``"water.flap_block_forward"`` 1 zeroes ``q > 0``; `dwflow.c:276`), then the
     dry-node caps at ``"water.dry_flow_cap"`` (m3/s, `FUDGE_FLOW` times the barrels;
     `dwflow.c:280-281`). Each is a
@@ -339,8 +420,10 @@ class DynamicWaveConduit(Element):
     def __init__(self, kind: str = "pipe") -> None:
         super().__init__(kind)
 
-    def _parts(self, dp: Tensor, drivers: Mapping) -> tuple[Tensor, Tensor, Tensor]:
-        """The momentum line, the flow and the switch's wall (NaN where no wall acts)."""
+    def _parts(self, dp: Tensor, drivers: Mapping
+               ) -> tuple[Tensor, Tensor, Tensor, Tensor | None]:
+        """The momentum line, the flow, the switch's wall (NaN where no wall acts) and the
+        culvert cap's line (None without culverts)."""
         lin = drivers["water.flow_offset"] + drivers["water.conveyance"] * dp
         q_norm = drivers["water.normal_flow"]
         limited = drivers["water.limited"] > 0.5
@@ -350,21 +433,30 @@ class DynamicWaveConduit(Element):
         slid = torch.minimum(lin, torch.maximum(q_norm, wall))
         q = torch.where(limited, torch.minimum(lin, q_norm),
                         torch.where(switch, slid, lin))                    # dwflow.c:255-258
-        inf = torch.full_like(q, torch.inf)
-        zero = torch.zeros_like(q)
-        limit = drivers.get("water.max_flow", inf)
-        q = torch.minimum(torch.maximum(q, -limit), limit)                 # dwflow.c:269-273
-        block_reverse = drivers.get("water.flap_block_reverse", zero) > 0.5
-        block_forward = drivers.get("water.flap_block_forward", zero) > 0.5
-        q = torch.minimum(torch.maximum(q, torch.where(block_reverse, zero, -inf)),
-                          torch.where(block_forward, zero, inf))          # dwflow.c:276
-        cap = drivers.get("water.dry_flow_cap", torch.full_like(q, FUDGE_FLOW))
+        inlet = None
+        cap_flow = drivers.get("water.cap_flow")
+        if cap_flow is not None:
+            # inlet control (dwflow.c:250-252): the culvert's inlet flow at the upstream
+            # head, linearised about the fed head difference with SWMM's dQ/dH
+            line = cap_flow + drivers["water.cap_slope"] * (dp - drivers["water.cap_drop"])
+            inlet = torch.where(torch.isfinite(cap_flow), line, torch.inf)
+            q = torch.minimum(q, inlet)
+        # each limit below is optional (absent: none), a clamp against a constant
+        limit = drivers.get("water.max_flow")
+        if limit is not None:
+            q = torch.minimum(torch.maximum(q, -limit), limit)             # dwflow.c:269-273
+        block_reverse = drivers.get("water.flap_block_reverse")
+        if block_reverse is not None:
+            q = torch.where(block_reverse > 0.5, torch.clamp(q, min=0.0), q)  # dwflow.c:276
+        block_forward = drivers.get("water.flap_block_forward")
+        if block_forward is not None:
+            q = torch.where(block_forward > 0.5, torch.clamp(q, max=0.0), q)
+        cap = drivers.get("water.dry_flow_cap", FUDGE_FLOW)
         up = drivers["water.dry_upstream"] > 0.5
         dn = drivers["water.dry_downstream"] > 0.5
-        q = torch.where(up, torch.minimum(q, cap), q)                      # dwflow.c:280
-        q = torch.where(dn, torch.maximum(q, -cap), q)                     # dwflow.c:281
-        on_wall = switch & ~limited
-        return lin, q, torch.where(on_wall, wall, torch.full_like(wall, torch.nan))
+        q = torch.where(up, torch.clamp(q, max=cap), q)                      # dwflow.c:280
+        q = torch.where(dn, torch.clamp(q, min=-cap), q)                     # dwflow.c:281
+        return lin, q, torch.where(switch & ~limited, wall, torch.nan), inlet
 
     def flow(self, dp: Tensor, drivers: Mapping | None = None) -> Tensor:
         """Conduit flow (m3/s, positive from the pipe's first node to its second)."""
@@ -374,23 +466,28 @@ class DynamicWaveConduit(Element):
         """dq/d(dp) (m2/s): k where the flow is the momentum line, the wall slope S where it
         is on the switch's wall, else 0 (every other limit is a constant, so ``q == lin``
         and ``q == wall`` are exact tests)."""
-        lin, q, wall = self._parts(dp, drivers)
-        k = drivers["water.conveyance"].expand_as(q)
-        s = drivers["water.switch_slope"].expand_as(q)
-        zero = torch.zeros_like(k)
-        return torch.where(q == lin, k, torch.where(q == wall, s, zero))
+        lin, q, wall, inlet = self._parts(dp, drivers)
+        out = torch.where(q == lin, drivers["water.conveyance"],
+                          torch.where(q == wall, drivers["water.switch_slope"], 0.0))
+        if inlet is not None:
+            out = torch.where((q == inlet) & (q != lin) & (q != wall),
+                              drivers["water.cap_slope"], out)
+        return out
 
 
 class StructureLink(Element):
-    """A flow regulator (orifice, weir or outlet) with its flow linearised about the previous
-    pass: ``q = c0 + g (dp - dp_fed)`` (m3/s, dp = H1 - H2 in m), then the flap gate's clamp.
+    """A flow regulator (orifice, weir or outlet) or pump with its flow linearised about the
+    previous pass: ``q = c0 + g (dp - dp_fed)`` (m3/s, dp = H1 - H2 in m), then the flap
+    gate's clamp (a pump's, which never flows backwards).
 
     ``c0`` is SWMM's own regulator flow at the previous pass's heads (`link.c`
-    ``orifice_getInflow`` / ``weir_getInflow`` / ``outlet_getInflow``,
-    `noodl.apps.sewer.structures`), ``dp_fed`` that pass's head difference, so at a fixed
-    point (dp = dp_fed) the flow is SWMM's exactly, whatever ``g``. ``g >= 0`` (m2/s) is
-    SWMM's ``dqdh`` for orifices and weirs, a central difference in the upstream head for
-    outlets: it only makes each pass a Newton-like step in the device's heads. The flow is
+    ``orifice_getInflow`` / ``weir_getInflow`` / ``outlet_getInflow`` / ``pump_getInflow``,
+    `noodl.apps.sewer.structures`, `noodl.apps.sewer.pumps`), ``dp_fed`` that pass's head
+    difference, so at a fixed point (dp = dp_fed) the flow is SWMM's exactly, whatever ``g``.
+    ``g >= 0`` (m2/s) is SWMM's ``dqdh`` for orifices and weirs, a central difference in the
+    upstream head for outlets, the slope of the curve in the head delivered for a PUMP3 or
+    PUMP5 pump (none for the other pumps, whose flow does not depend on the head difference):
+    it only makes each pass a Newton-like step in the device's heads. The flow is
     non-decreasing in dp (``g >= 0``, the clamps are constants), as the head solve needs.
 
     Reads the per-device drivers ``"water.<kind>.flow_offset"`` c0 (m3/s),
@@ -452,6 +549,8 @@ class _Structures:
     block_forward: Tensor
     block_reverse: Tensor
     extends: Tensor
+    order: Tensor | None = None
+    first: int = 0
 
 
 def _build_structures(kind: str, devices, nodes: list, invert: Tensor, gated_outfalls: set,
@@ -460,6 +559,16 @@ def _build_structures(kind: str, devices, nodes: list, invert: Tensor, gated_out
     the orifice and weir equivalent lengths."""
     u = torch.tensor([nodes.index(s.u) for s in devices], dtype=torch.long)
     v = torch.tensor([nodes.index(s.v) for s in devices], dtype=torch.long)
+    order = torch.tensor([s.order for s in devices], dtype=torch.long)
+    if kind == "pump":
+        # a pump has no crest, opening or flap gate and never flows backwards; link_validate
+        # skips it (link.c:443-445)
+        zero = torch.zeros(len(devices), dtype=F64)
+        return _Structures(kind, [s.name for s in devices], u, v, zero, zero, zero,
+                           PumpSet.build(devices),
+                           torch.zeros(len(devices), dtype=torch.bool),
+                           torch.ones(len(devices), dtype=torch.bool),
+                           torch.zeros(len(devices), dtype=torch.bool), order)
     crest = torch.tensor([s.crest_height for s in devices], dtype=F64)
     inv1, inv2 = invert[u], invert[v]
     # link.c:425-433: under DW a crest below node 2's invert is raised to it (offset1 only)
@@ -495,7 +604,7 @@ def _build_structures(kind: str, devices, nodes: list, invert: Tensor, gated_out
                                  [s.head_difference for s in devices], own_gate)
         y_full = torch.full((len(devices),), TINY, dtype=F64)                # xsect.c:233
     return _Structures(kind, [s.name for s in devices], u, v, offset1, crest / LCF, y_full,
-                       params, block_forward, block_reverse, extends)
+                       params, block_forward, block_reverse, extends, order)
 
 
 class JunctionStorage(NodeSource):
@@ -583,6 +692,24 @@ class JunctionStorage(NodeSource):
     or the threshold itself, H = H*, with the withdrawal inside the jump: the solution where
     SWMM has none.
 
+    Ponding (`pond_head` given, SWMM's ALLOW_PONDING with a positive Aponded). Such a junction
+    does not flood: it keeps its depth above the full depth (`dynwave.c:661, 738-748, 753,
+    766-795`) over the area ``A_p`` plus its conduits' (``"water.pond_area"``, m2; a trial's
+    area is the ponded one when the previous trial's depth is above the full depth,
+    `node_getPondedArea`, `dynwave.c:309-312`), so SWMM's update is one of two lines about the
+    full head H* (``pond_head``): the unponded one below it (storage, the band, or the
+    surcharged update ``wu``) and the ponded one above it (``wp``, storage over the larger
+    area, no surcharge: `dynwave.c:679-680`). A surcharged update that ends above H* is cut at
+    H* + FUDGE and the next trial is ponded (`dynwave.c:738-740`); a ponded update that ends
+    below H* is raised to H* - FUDGE (`dynwave.c:708-710`) and the next is unponded. Where
+    ``wu(H*) <= wp(H*)`` (the junction rises through H*) those trials alternate when the
+    unponded update ends above H* and the ponded one below it, and the junction is held at H*,
+    the drop-end area switch's tie rule (``"water.pond_switch_slope"`` the wall's slope);
+    otherwise the line of the fed head's side (``"water.ponded"``, 0/1: the fed head above H*)
+    is the one SWMM's trials settle on. `_pond_free` has the formula. A ponding junction has
+    no flood wall, and `surchargeable` is False where its full depth is its crown (nothing is
+    surcharged between).
+
     Reads the per-junction drivers ``"water.storage_area"`` A_s (m2, `_AREA_SI`),
     ``"water.head_start"`` (m), ``"water.net_inflow_start"`` (m3/s) and
     ``"water.storage_rate"`` 1/dt (1/s); with `crown` also ``"water.surcharged"`` (0/1)
@@ -599,7 +726,8 @@ class JunctionStorage(NodeSource):
 
     def __init__(self, nodes: Tensor, bed: Tensor, bed_area: float,
                  crown: Tensor | None = None, top: Tensor | None = None,
-                 surchargeable: Tensor | None = None) -> None:
+                 surchargeable: Tensor | None = None,
+                 pond_head: Tensor | None = None) -> None:
         super().__init__(nodes)
         self.register_buffer("bed", torch.as_tensor(bed, dtype=F64))
         self.bed_area = float(bed_area)
@@ -612,6 +740,11 @@ class JunctionStorage(NodeSource):
         self.floods = top is not None
         if self.floods:
             self.register_buffer("top", torch.as_tensor(top, dtype=F64))
+        #: whether any junction ponds; `pond_head` is H* per junction (+inf where none)
+        self.ponds = pond_head is not None and bool(torch.isfinite(
+            torch.as_tensor(pond_head, dtype=F64)).any())
+        if self.ponds:
+            self.register_buffer("pond_head", torch.as_tensor(pond_head, dtype=F64))
 
     def _storage(self, phi: Tensor, drivers: Mapping) -> tuple[Tensor, Tensor, Tensor]:
         """The free-surface storage withdrawal (m3/s) and slope (m2/s) at `phi`, and the band's
@@ -639,6 +772,8 @@ class JunctionStorage(NodeSource):
         rate2 = 2.0 * drivers["water.storage_rate"]
         h_star = drivers["water.area_switch_head"]
         on = torch.isfinite(h_star)
+        if not bool(on.any()):
+            return storage, slope
         h_safe = torch.where(on, h_star, phi)
         n_start = drivers["water.net_inflow_start"]
         lo = rate2 * drivers["water.area_below"] * rise - n_start
@@ -653,19 +788,87 @@ class JunctionStorage(NodeSource):
                         s.expand_as(wall)))
         return torch.where(on, switched, storage), torch.where(on, slope_sw, slope)
 
+    def ponded(self, drivers: Mapping) -> Tensor:
+        """The ponded state (0/1, float64, per junction): a ponding junction whose fed head
+        ``drivers["water.head_last"]`` is above its full head (SWMM's ``isPonded``,
+        `dynwave.c:662`); 0 elsewhere."""
+        head_last = drivers["water.head_last"]
+        if not self.ponds:
+            return torch.zeros_like(head_last)
+        return (head_last > self.pond_head).to(F64)
+
+    def _pond_free(self, phi: Tensor, drivers: Mapping) -> tuple[Tensor, Tensor]:
+        """The ponding junctions' withdrawal and slope at `phi` (class docstring, "Ponding"),
+        the other junctions' `_unponded` one. ``wu`` is the withdrawal below the full head H*
+        (storage, the hold band, or the surcharged anchor taken as SWMM's next trial would, from
+        the fed head capped at H*), ``wp`` the line with the ponded area added. Where ``wu(H*)
+        <= wp(H*)`` the junction rises through H*: ``max(wu, min(wp, N_last + S (H - H*)))``,
+        the drop-end area switch with its hold at H* (SWMM's trials alternate about the full
+        depth where the unponded update ends above it and the ponded one below it). Otherwise
+        the previous trial's side decides (``"water.ponded"``): ``wp`` above, ``wu`` below."""
+        base, base_slope = self._unponded(phi, drivers)
+        on = torch.isfinite(self.pond_head)
+        h_star = torch.where(on, self.pond_head, phi)
+        rate2 = 2.0 * drivers["water.storage_rate"]
+        a_hi = drivers["water.pond_area"]
+        head_start, n_start = drivers["water.head_start"], drivers["water.net_inflow_start"]
+        # the surcharged form as the next trial would take it, also at a fed head above H*
+        anchor_slope = drivers["water.surcharge_slope"]
+        eligible = self._eligible(drivers)
+        head_c = torch.minimum(drivers["water.head_last"], h_star)
+
+        def unponded(x: Tensor, free: Tensor, free_slope: Tensor) -> tuple[Tensor, Tensor]:
+            if not self.extran:
+                return free, free_slope
+            return (torch.where(eligible, anchor_slope * (x - head_c), free),
+                    torch.where(eligible, anchor_slope.expand_as(free_slope), free_slope))
+
+        def ponded_line(x: Tensor) -> Tensor:
+            return rate2 * a_hi * (x - head_start) - n_start
+
+        wu, wu_slope = unponded(phi, base, base_slope)
+        wp = ponded_line(phi)
+        wp_slope = (rate2 * a_hi).expand_as(wp)
+        at_star, _ = self._unponded(h_star, drivers)
+        at_star, _ = unponded(h_star, at_star, at_star)
+        rises = at_star <= ponded_line(h_star)
+        s_wall = drivers["water.pond_switch_slope"]
+        wall = drivers["water.net_inflow_last"] + s_wall * (phi - h_star)
+        capped = torch.minimum(wp, wall)
+        tie = torch.maximum(wu, capped)
+        tie_slope = torch.where(tie == wu, wu_slope,
+                                torch.where(capped == wp, wp_slope, s_wall.expand_as(wall)))
+        ponded = drivers["water.ponded"] > 0.5
+        lag = torch.where(ponded, wp, wu)
+        lag_slope = torch.where(ponded, wp_slope, wu_slope.expand_as(wp))
+        chosen = torch.where(rises, tie, lag)
+        chosen_slope = torch.where(rises, tie_slope, lag_slope)
+        return torch.where(on, chosen, base), torch.where(on, chosen_slope, base_slope)
+
     def _stiff(self, drivers: Mapping) -> Tensor:
         """The band's slope (m2/s, per junction): ``(2/dt) max(K_HOLD A_bed,
-        K_HOLD_STORAGE A_s)``."""
+        K_HOLD_STORAGE A_s)``; the driver ``"water.hold_stiffness"`` where the closure has
+        written it for the pass."""
+        stiff = drivers.get("water.hold_stiffness")
+        if stiff is not None:
+            return stiff
         rate2 = 2.0 * drivers["water.storage_rate"]
         return rate2 * torch.clamp(K_HOLD_STORAGE * drivers["water.storage_area"],
                                    min=K_HOLD * self.bed_area)
 
+    def crown_withdrawal(self, drivers: Mapping) -> Tensor:
+        """``w_c`` (m3/s, per junction): the free storage withdrawal at the crown, the
+        drop-end area switch included (so that the withdrawal is continuous there). It
+        depends on the drivers only: the closure writes it once per pass as the driver
+        ``"water.crown_withdrawal"``, which `flow` and `dflow` then read."""
+        return self._storage(self.crown, drivers)[0]
+
     def _band(self, phi: Tensor, drivers: Mapping) -> Tensor:
-        """The band ``w_c + stiff (H - H_crown)`` (m3/s) at `phi` (m), with ``w_c`` the free
-        storage withdrawal at the crown, the drop-end area switch included (so that the
-        withdrawal is continuous there)."""
-        w_c, _, stiff = self._storage(self.crown, drivers)
-        return w_c + stiff * (phi - self.crown)
+        """The band ``w_c + stiff (H - H_crown)`` (m3/s) at `phi` (m) (`crown_withdrawal`)."""
+        w_c = drivers.get("water.crown_withdrawal")
+        if w_c is None:
+            w_c = self.crown_withdrawal(drivers)
+        return w_c + self._stiff(drivers) * (phi - self.crown)
 
     def surcharged(self, drivers: Mapping) -> Tensor:
         """The EXTRAN surcharge flag (0/1, float64) from the fed heads
@@ -676,19 +879,38 @@ class JunctionStorage(NodeSource):
         head_last = drivers["water.head_last"]
         if not self.extran:
             return torch.zeros_like(head_last)
+        return (self._eligible(drivers) & ~(self.ponded(drivers) > 0.5)).to(F64)  # :679-691
+
+    def _eligible(self, drivers: Mapping) -> Tensor:
+        """Where the fed head makes a junction surcharged but for ponding (bool): above the
+        crown, surchargeable, and the band positive there (`surcharged`); a ponding junction's
+        fed head counts at most at its full head, where SWMM's next trial would start."""
+        head_last = drivers["water.head_last"]
+        if not self.extran:
+            return torch.zeros_like(head_last, dtype=torch.bool)
         if self.floods:
             head_last = torch.minimum(head_last, self.top)
         return ((head_last > self.crown) & self.surchargeable
-                & (self._band(head_last, drivers) > 0.0)).to(F64)        # dynwave.c:683-691
+                & (self._band(head_last, drivers) > 0.0))                # dynwave.c:683-691
 
     def _free(self, phi: Tensor, drivers: Mapping) -> tuple[Tensor, Tensor]:
         """The non-flooded withdrawal (m3/s) and its slope (m2/s) at `phi` (m): storage,
-        the hold band above the crown, or the surcharged anchor (class docstring)."""
+        the hold band above the crown, or the surcharged anchor (class docstring), and for a
+        ponding junction `_pond_free`."""
+        if self.ponds and "water.pond_area" in drivers:
+            return self._pond_free(phi, drivers)
+        return self._unponded(phi, drivers)
+
+    def _unponded(self, phi: Tensor, drivers: Mapping) -> tuple[Tensor, Tensor]:
+        """`_free` without ponding: the withdrawal and slope of the junction below its full
+        head (and of every junction that does not pond)."""
         storage, slope, stiff = self._storage(phi, drivers)
         if not self.extran:
             return storage, slope
         band = self._band(phi, drivers)
         above = (phi > self.crown) & self.surchargeable
+        if self.ponds and "water.ponded" in drivers:
+            above = above & (drivers["water.ponded"] < 0.5)             # dynwave.c:679-680
         free = torch.where(above, torch.maximum(storage, band), storage)
         slope = torch.where(above & (band > storage), stiff.expand_as(band), slope)
         surcharged = drivers["water.surcharged"] > 0.5
@@ -700,25 +922,51 @@ class JunctionStorage(NodeSource):
     def _wall_slope(self, drivers: Mapping) -> Tensor:
         """The flood wall's slope (m2/s): the hold band's stiffness, and at least the
         anchor's slope where surcharged, so that above the top the wall always rises
-        faster than the withdrawal it caps."""
+        faster than the withdrawal it caps. The driver ``"water.flood_wall_slope"`` where the
+        closure has written it for the pass."""
+        given = drivers.get("water.flood_wall_slope")
+        if given is not None:
+            return given
         stiff = self._stiff(drivers)
         if not self.extran:
             return stiff
         return torch.where(drivers["water.surcharged"] > 0.5,
                            torch.maximum(stiff, drivers["water.surcharge_slope"]), stiff)
 
+    def top_withdrawal(self, drivers: Mapping) -> Tensor:
+        """``w(top)`` (m3/s, per junction): the non-flooded withdrawal at the top (shaped as
+        ``drivers["water.net_inflow_last"]``). It depends on the drivers only (the
+        surcharge flag included): the closure writes it once per pass as the driver
+        ``"water.top_withdrawal"``, which `flood_excess`, `flow` and `dflow` then read."""
+        w_top = drivers.get("water.top_withdrawal")
+        if w_top is None:
+            top = self.top.expand(drivers["water.net_inflow_last"].shape)
+            w_top = self._free(top, drivers)[0]
+        return w_top
+
+    def _wall_on(self, drivers: Mapping) -> Tensor | None:
+        """Where the flood wall acts (bool per junction), ``None`` for everywhere: at the
+        junctions that do not pond (a ponding junction's ``_pond_free`` is its own wall at the
+        full head)."""
+        if not self.ponds:
+            return None
+        return ~torch.isfinite(self.pond_head)
+
     def flood_excess(self, drivers: Mapping) -> Tensor:
         """The lagged flood excess E (m3/s, >= 0): the fed net inflow
         ``drivers["water.net_inflow_last"]`` over the non-flooded withdrawal at the top,
         ``max(N_last - w(top), 0)``; > 0 exactly where SWMM's update would end above y_max
         (`dynwave.c:752`), i.e. where the junction floods."""
-        top = self.top.expand(drivers["water.net_inflow_last"].shape)
-        w_top, _ = self._free(top, drivers)
-        return torch.clamp(drivers["water.net_inflow_last"] - w_top, min=0.0)
+        excess = torch.clamp(drivers["water.net_inflow_last"] - self.top_withdrawal(drivers),
+                             min=0.0)
+        on = self._wall_on(drivers)
+        return excess if on is None else torch.where(on, excess, torch.zeros_like(excess))
 
     def _wall(self, phi: Tensor, drivers: Mapping) -> Tensor:
         """The flood wall ``w(top) + E + S (H - top)`` (m3/s) at `phi` (m)."""
-        w_top, _ = self._free(self.top.expand(phi.shape), drivers)
+        w_top = drivers.get("water.top_withdrawal")
+        if w_top is None:
+            w_top, _ = self._free(self.top.expand(phi.shape), drivers)
         return (w_top + drivers["water.flood_excess"]
                 + self._wall_slope(drivers) * (phi - self.top))
 
@@ -727,7 +975,9 @@ class JunctionStorage(NodeSource):
         free, _ = self._free(phi_nodes, drivers)
         if not self.floods:
             return free
-        return torch.maximum(free, self._wall(phi_nodes, drivers))         # dynwave.c:752
+        walled = torch.maximum(free, self._wall(phi_nodes, drivers))       # dynwave.c:752
+        on = self._wall_on(drivers)
+        return walled if on is None else torch.where(on, walled, free)
 
     def dflow(self, phi_nodes: Tensor, drivers: Mapping | None = None) -> Tensor:
         """d(withdrawal)/dH (m2/s), analytic and strictly positive."""
@@ -735,8 +985,12 @@ class JunctionStorage(NodeSource):
         if self.floods:
             wall = self._wall(phi_nodes, drivers)
             wall_slope = self._wall_slope(drivers).expand_as(wall)
-            slope = torch.where(wall >= free, wall_slope, slope)
-        return slope.expand(torch.broadcast_shapes(slope.shape, phi_nodes.shape))
+            hold = wall >= free
+            on = self._wall_on(drivers)
+            if on is not None:
+                hold = hold & on
+            slope = torch.where(hold, wall_slope, slope)
+        return slope.expand(broadcast_shapes(slope.shape, phi_nodes.shape))
 
 
 class DynamicWaveHydraulics:
@@ -900,8 +1154,27 @@ class DynamicWaveHydraulics:
         self.roughness = torch.tensor([p.n for p in net.pipes], dtype=F64)
         self.slope = torch.tensor([p.slope for p in net.pipes], dtype=F64)
         self.length = torch.tensor([p.length for p in net.pipes], dtype=F64)
-        self.offset1 = torch.tensor([p.inlet_offset for p in net.pipes], dtype=F64)
-        self.offset2 = torch.tensor([p.outlet_offset for p in net.pipes], dtype=F64)
+        #: per pipe: its `Xsect` (None for the circle of `diameter`); ``self.sections`` is None
+        #: when every pipe is a plain circle (the tabulated circle's own path)
+        sections = [p.xsect for p in net.pipes]
+        self.sections = sections if any(x is not None for x in sections) else None
+        #: per pipe: whether its section is the circle (exact reporting geometry applies)
+        self.is_circle = torch.tensor([x is None or x.kind == "CIRCULAR" for x in sections],
+                                      dtype=torch.bool)
+        # a FILLED_CIRCULAR's offsets rise by its fill (link.c:1069-1074)
+        fill = torch.tensor([x.params()["y_bot"] * LCF if x is not None
+                             and x.kind == "FILLED_CIRCULAR" else 0.0 for x in sections],
+                            dtype=F64)
+        self.offset1 = torch.tensor([p.inlet_offset for p in net.pipes], dtype=F64) + fill
+        self.offset2 = torch.tensor([p.outlet_offset for p in net.pipes], dtype=F64) + fill
+        #: per pipe: SWMM's entry, exit and average loss coefficients (None: none set)
+        losses = tuple(torch.tensor([getattr(p, f"loss_{k}") for p in net.pipes], dtype=F64)
+                       for k in ("inlet", "outlet", "average"))
+        self.losses = losses if any(bool((c != 0).any()) for c in losses) else None
+        self.transect_factor = torch.tensor([p.transect_length_factor for p in net.pipes],
+                                            dtype=F64)
+        #: per pipe: its culvert code (0 for none)
+        self.culverts = torch.tensor([p.culvert for p in net.pipes], dtype=torch.long)
         self.barrels = torch.tensor([float(p.barrels) for p in net.pipes], dtype=F64)
         #: per-pipe flow limit (m3/s, total over the barrels: SWMM limits one barrel's flow
         #: to MaxFlow, dwflow.c:270-273; +inf for none)
@@ -935,6 +1208,26 @@ class DynamicWaveHydraulics:
             kind: _build_structures(kind, net.structures[kind], nodes, self.node_invert,
                                     outfall_gated, route)
             for kind in STRUCTURE_KINDS if net.structures[kind]}
+        # the link settings (regulators and pumps) are one vector in this order
+        first = 0
+        for kind, st in list(self.structures.items()):
+            self.structures[kind] = replace(st, first=first)
+            first += len(st.names)
+        #: the number of regulators and pumps: the length of ``"sewer.setting"``
+        self.n_settings = first
+        #: the name of each regulator and pump, in ``"sewer.setting"`` order
+        self.setting_names = [name for st in self.structures.values() for name in st.names]
+        #: whether the network has pumps or control rules: then the closure carries each
+        #: regulator's and pump's setting (``"sewer.setting"`` ...; `LinkControl` changes it)
+        self.controlled = bool(net.pumps) or net.controls is not None
+        self.controls = net.controls
+        if self.controlled:
+            self.state_keys = (*self.state_keys, *CONTROL_KEYS)
+            self.key_labels.update({
+                "sewer.setting": list(self.setting_names),
+                "sewer.target_setting": list(self.setting_names),
+                "sewer.time_last_set": list(self.setting_names),
+            })
         #: the edge kinds of the ``"water"`` layer, in column order
         self.edge_kinds = ("pipe", *self.structures)
         #: every ``"water.q"`` column's link name: the pipes, then the regulators by kind
@@ -1077,11 +1370,139 @@ class DynamicWaveHydraulics:
                 f"their full depth plus surcharge depth (SWMM: initial depth exceeds max. "
                 f"depth)")
         jinv = self.node_invert[self.junction_idx]
+        # Ponding (ALLOW_PONDING, a junction with a positive Aponded; dynwave.c:661): such a
+        # junction's flood depth is its full depth, SurDepth plays no part (dynwave.c:748), and
+        # it surcharges only between its crown and its full depth (dynwave.c:679-680, 690).
+        pond_ft2 = torch.tensor([m.ponded_area for m in net.manholes], dtype=F64) / LCF**2
+        #: per junction: whether it ponds (`DynamicWaveOptions.allow_ponding`, a positive
+        #: `Manhole.ponded_area`)
+        self.can_pond = (pond_ft2 > 0.0) & ~self.is_storage & self.options.allow_ponding
+        self.pond_area_ft2 = torch.where(self.can_pond, pond_ft2, torch.zeros_like(pond_ft2))
+        top = jinv + torch.where(self.can_pond, self.full_depth + FUDGE * LCF, self.flood_depth)
+        if bool(self.can_pond.any()) and (quality_layer is not None or air):
+            raise ValueError(
+                "DynamicWaveHydraulics: ponding (allow_ponding with a ponded area) is not "
+                "modelled together with water quality or air; the ponded water would have to "
+                "stay in the junction's transport volume")
+        pond_head = torch.where(self.can_pond, jinv + self.full_depth,
+                                torch.full_like(jinv, torch.inf))
         #: the junctions' `JunctionStorage` (the model's node source; `junction_residual`)
         self.storage = JunctionStorage(
             self.junction_idx, jinv, bed_area=self.min_area_ft2 * _AREA_SI,
             crown=jinv + self.surcharge_at if self.options.surcharge_method == "extran"
-            else None, top=jinv + self.flood_depth, surchargeable=self.surchargeable)
+            else None, top=top,
+            surchargeable=self.surchargeable & ~(self.can_pond
+                                                 & ~(self.full_depth > self.crown_depth)),
+            pond_head=pond_head)
+        if self.controlled:
+            self._init_controls(net)
+
+    def _init_controls(self, net: SewerNetwork) -> None:
+        """The data of the link settings and pumps: the initial settings, each orifice's
+        opening rate, the pumps' startup and shutoff depths and the node facts a pump's flow
+        reads (`pumps.PumpStation`, the junctions' wet-well volumes)."""
+        n_nodes = self.node_invert.shape[0]
+        jpos = torch.full((n_nodes,), -1, dtype=torch.long)
+        jpos[self.junction_idx] = torch.arange(self.junction_idx.shape[0])
+        #: per node: its position among the junctions (-1 for an outfall)
+        self.junction_pos = jpos
+        nodes = list(self.net.nodes)
+        #: node name -> index over all nodes; link name -> its ``"water.q"`` column; link name
+        #: -> SWMM's link kind (``"conduit"``, ``"orifice"``, ...); regulator or pump name ->
+        #: its position in ``"sewer.setting"``; per column, SWMM's ``Link.direction`` (-1 for
+        #: a conduit the reader reversed): what the control rules read link flows through
+        self.node_index = {name: i for i, name in enumerate(nodes)}
+        self.link_column = {name: i for i, name in enumerate(self.link_names)}
+        self.link_direction = [-1.0 if p.flap_gate_reversed else 1.0 for p in net.pipes] + [
+            1.0] * (len(self.link_names) - len(net.pipes))
+        self.link_kind = {p.name: "conduit" for p in net.pipes}
+        for kind, st in self.structures.items():
+            self.link_kind.update({name: kind for name in st.names})
+        self.setting_index = {name: i for i, name in enumerate(self.setting_names)}
+        initial = torch.ones(self.n_settings, dtype=F64)
+        for kind, st in self.structures.items():
+            if kind == "pump":
+                on = torch.tensor([p.initial_on for p in net.pumps], dtype=F64)
+                initial[st.first:st.first + len(st.names)] = on             # link.c:1542
+        #: the settings a run starts with (pumps at their Status, the rest fully open)
+        self.initial_setting = initial
+        orifices = self.structures.get("orifice")
+        #: per orifice: its opening rate (s per unit of setting; 0: instantaneous), SWMM's
+        #: ``orate`` (CloseTime in hours, link.c:369)
+        self.orifice_rate = (torch.tensor([o.close_time * 3600.0 for o in net.orifices],
+                                          dtype=F64) if orifices is not None
+                             else torch.zeros(0, dtype=F64))
+        pumps = self.structures.get("pump")
+        #: the junctions (positions) an ideal pump draws from
+        self.ideal_inlet = torch.zeros(0, dtype=torch.long)
+        if pumps is None:
+            return
+        n_pipes, n_edges = self.n_pipes, self.edge_u.shape[0]
+        column = torch.arange(n_edges)
+        order = torch.zeros(n_edges, dtype=torch.long)
+        for st in self.structures.values():
+            lo = n_pipes + st.first
+            # SWMM's link index: the file's order, the column order where it gives none
+            order[lo:lo + len(st.names)] = st.order * (n_edges + 1) + column[lo:lo + len(st.names)]
+        pump_cols = n_pipes + pumps.first + torch.arange(len(pumps.names))
+        orifice_cols = (n_pipes + orifices.first + torch.arange(len(orifices.names))
+                        if orifices is not None else torch.zeros(0, dtype=torch.long))
+        self.pump_station = PumpStation(pumps.u, pump_cols, self.edge_u, self.edge_v, n_pipes,
+                                        order, orifice_cols)
+        #: per pump: the inlet node's position among the junctions
+        self.pump_inlet = jpos[pumps.u]
+        #: per pump: the inlet node is a storage unit
+        self.pump_storage = self.is_storage[self.pump_inlet]
+        # A PUMP1's x values are a wet-well volume: a plain junction inlet is given that
+        # volume at its full depth, linear in the depth (link.c:1521-1527, node.c:251, 376)
+        wells = torch.zeros(self.junction_idx.shape[0], dtype=F64)
+        for p, j in zip(net.pumps, self.pump_inlet.tolist(), strict=True):
+            if p.kind == "type1" and not bool(self.is_storage[j]):
+                wells[j] = max(float(wells[j]), float(p.curve[0][-1]) / QCF)
+        #: per junction: the full volume (ft3) a PUMP1 gives a non-storage inlet, else 0
+        self.well_volume_ft3 = wells
+        full = wells[self.pump_inlet]
+        if self.storage_curves is not None:
+            stored = self.storage_curves.volume(self.full_depth)[self.pump_inlet] / LCF**3
+            full = torch.where(self.pump_storage, stored, full)
+        #: per pump: its inlet node's full volume (ft3; node.c:251)
+        self.pump_full_volume_ft3 = full
+        ideal = [i for i, p in enumerate(net.pumps) if p.kind == "ideal"]
+        self.ideal_inlet = self.pump_inlet[ideal]
+        #: per pump: the startup and shutoff depths of its inlet (ft; 0: none)
+        self.pump_on_ft = torch.tensor([p.startup_depth for p in net.pumps], dtype=F64) / LCF
+        self.pump_off_ft = torch.tensor([p.shutoff_depth for p in net.pumps], dtype=F64) / LCF
+
+    def check_pump_inlets(self, state: Mapping) -> None:
+        """Refuse, BY NAME, an ideal pump whose inlet junction floods. SWMM's ideal pump takes
+        the node's inflow PLUS its overflow (`pump_getInflow`, link.c:1572-1573), a coupling
+        of the flooding loss to the pump this implementation does not model (the pump takes
+        the inflow alone), so the run stops rather than report a different flood."""
+        if self.ideal_inlet.numel() == 0:
+            return
+        depth = state["sewer.junction_depth"][..., self.ideal_inlet]
+        if bool((depth >= self.flood_depth[self.ideal_inlet] - 1e-9).any()):
+            bad = sorted({self.junction_names[int(j)] for j in
+                          self.ideal_inlet[(depth >= self.flood_depth[self.ideal_inlet]
+                                            - 1e-9).reshape(-1, self.ideal_inlet.numel())
+                                           .any(0)]})
+            raise RuntimeError(
+                f"DynamicWaveHydraulics: the inlet junction(s) {bad} of an ideal pump flood; "
+                f"SWMM's ideal pump also pumps the node's overflow, which is not modelled")
+
+    def _node_volume_ft3(self, heads: Tensor) -> Tensor:
+        """Each junction's volume (ft3) at full-node `heads` (m), SWMM's ``Node.newVolume``: a
+        storage unit's curve, a plain junction's linear share of its PUMP1 wet-well volume
+        (`node_getVolume`, node.c:362-379), else 0."""
+        depth_m = torch.clamp(heads[..., self.junction_idx] - self.node_invert[self.junction_idx],
+                              min=0.0)
+        safe = torch.where(self.full_depth > 0.0, self.full_depth, torch.ones_like(depth_m))
+        well = torch.where(depth_m >= self.flood_depth, self.well_volume_ft3,
+                           self.well_volume_ft3 * depth_m / safe)       # dynwave.c:783
+        well = torch.where(self.full_depth > 0.0, well, torch.zeros_like(well))
+        if self.storage_curves is None:
+            return well
+        return torch.where(self.is_storage, self._storage_volume(heads) / LCF**3, well)
 
     # ------------------------------------------------------------------ geometry
     def _rebuild_geometry(self) -> None:
@@ -1092,12 +1513,15 @@ class DynamicWaveHydraulics:
                      else opts.lengthening_routing_step)
             step = min(route, opts.lengthening_step)                          # link.c:1248
             factor = lengthening_factor(self.diameter, self.roughness, self.slope,
-                                        self.length, step)
+                                        self.length, step, sections=self.sections,
+                                        force_main_equation=opts.force_main_equation)
         self.geo = ConduitGeometry.from_si(
             self.diameter, self.roughness, self.slope, self.length,
             self.node_invert[self.u], self.node_invert[self.v], self.offset1, self.offset2,
             self.is_outfall[self.u], self.is_outfall[self.v], barrels=self.barrels,
-            length_factor=factor)
+            length_factor=factor, sections=self.sections,
+            force_main_equation=opts.force_main_equation, losses=self.losses,
+            transect_factor=self.transect_factor, culverts=self.culverts)
 
     def set_roughness(self, i: int, value) -> None:
         """Set Manning's n (s m^(-1/3)) of pipe `i` to `value`, which may be a tensor that
@@ -1129,7 +1553,8 @@ class DynamicWaveHydraulics:
         return inflow
 
     def _terms(self, state: Mapping, dt: float,
-               hold: tuple[Tensor, Tensor] | None = None) -> ConduitTerms:
+               hold: tuple[Tensor, Tensor] | None = None,
+               flow_depths: tuple[Tensor, Tensor] | None = None) -> ConduitTerms:
         heads = state[f"{self.layer}.phi"]
         q = state[f"{self.layer}.q"][..., :self.n_pipes]
         # SWMM's node depth is never negative (dynwave.c:743); the stiff bed lets a dry
@@ -1141,7 +1566,59 @@ class DynamicWaveHydraulics:
             damping=self.options.inertial_damping,
             normal_flow_limited=self.options.normal_flow_limited,
             surcharge_method=self.options.surcharge_method,
-            hold1=None if hold is None else hold[0], hold2=None if hold is None else hold[1])
+            hold1=None if hold is None else hold[0], hold2=None if hold is None else hold[1],
+            flow_depths=flow_depths)
+
+    def _depth_constants(self) -> tuple[Tensor, ...]:
+        """The section constants of `_flow_depths`' joint evaluation: every pipe's, then
+        each outfall pipe's again, ``(y_full, a_full, s_full, beta, critical_flows)``; cached
+        on the geometry (rebuilt with it)."""
+        cached = getattr(self, "_depth_cache", None)
+        if cached is not None and cached[0] is self.geo:
+            return cached[1]
+        geo, op = self.geo, self._outfall_pipe
+        if geo.xsect is None:
+            consts = tuple(torch.cat([x, x[op]]) for x in (
+                geo.y_full, geo.a_full, geo.s_full, geo.beta, geo.critical_flows))
+        else:
+            # Only a conduit with an offset reads its yN, yC for the flow class (zr > 0,
+            # dwflow.c:327-411), and an outfall conduit's are the outfall head's. So the
+            # sections of those conduits, then of each outfall pipe again (its bumped flow),
+            # and their betas.
+            wanted = (self.offset1 > 0.0) | (self.offset2 > 0.0)
+            wanted[op] = True
+            need = wanted.nonzero().flatten()
+            pick = torch.cat([need, op])
+            consts = (geo.xsect.take(pick), geo.beta[pick], need)
+        self._depth_cache = (geo, consts)
+        return consts
+
+    def _flow_depths(self, q: Tensor) -> dict[str, Tensor]:
+        """SWMM's normal and critical depths (ft, one barrel's, `normal_depth_ft`,
+        `critical_depth`) for one pass, in one evaluation: ``"normal"``/``"critical"`` at
+        each pipe's fed flow `q` (m3/s, total; what `conduit_terms` classifies on, and the
+        outfall depth's yN/yC, link.c:759-764), ``"normal_bumped"``/``"critical_bumped"``
+        at each outfall pipe's flow bumped by ``"step"`` (m3/s; `_switch_slope`'s forward
+        difference)."""
+        n, op = self.n_pipes, self._outfall_pipe
+        q_abs = q.abs()
+        step = 1e-6 * torch.clamp(q_abs[..., op], min=1e-3)
+        per_barrel = (q / QCF / self.geo.barrels).abs()                     # dwflow.c:102
+        bumped = ((q_abs[..., op] + step) / QCF / self.barrels[op]).abs()    # link.c:759
+        flows = torch.cat([per_barrel, bumped], -1)
+        if self.geo.xsect is None:
+            y_full, a_full, s_full, beta, stations = self._depth_constants()
+            y_norm = normal_depth_ft(flows, y_full, a_full, s_full, beta)
+            y_crit = critical_depth(flows, y_full, a_full, stations)
+        else:
+            xsect, beta, need = self._depth_constants()
+            pick = torch.cat([need, torch.arange(n, n + op.shape[0])])
+            f_pick = flows[..., pick]
+            y_norm = torch.zeros_like(flows).index_copy(-1, pick, xsect.normal_depth(f_pick, beta))
+            y_crit = torch.zeros_like(flows).index_copy(-1, pick, xsect.critical_depth(f_pick))
+        return {"normal": y_norm[..., :n], "critical": y_crit[..., :n],
+                "normal_bumped": y_norm[..., n:], "critical_bumped": y_crit[..., n:],
+                "step": step}
 
     def _junction_depth_ft(self, heads: Tensor) -> Tensor:
         """The junction depths (ft, >= 0) at full-node `heads` (m), SWMM's (dynwave.c:743)."""
@@ -1185,6 +1662,20 @@ class DynamicWaveHydraulics:
         z = torch.cat([geo.invert1 + geo.offset1, geo.invert2 + geo.offset2])
         depth = torch.cat([terms.drop_depth1, terms.drop_depth2], -1)
         finite = torch.isfinite(depth) & ~self.is_outfall[nodes]
+        jidx = self.junction_idx
+        if not bool(finite.any()):
+            # no drop end has a threshold: no junction switches (the general path's values)
+            batch = depth.shape[:-1]
+            surf = torch.zeros(batch + (n,), dtype=F64)
+            surf = surf.index_add(-1, self.u, terms.surface_area1)
+            surf = surf.index_add(-1, self.v, terms.surface_area2)[..., jidx] + storage_ft2
+            area = torch.clamp(surf, min=self.min_area_ft2) * _AREA_SI
+            start = (self.node_invert[jidx] + state["sewer.junction_depth"]).expand(area.shape)
+            no = torch.zeros(area.shape, dtype=torch.bool)
+            hold = torch.full(depth.shape, -1.0, dtype=F64)
+            p = self.u.shape[-1]
+            return {"head": start, "below": area, "above": area, "applies": no, "held": no,
+                    "hold1": hold[..., :p], "hold2": hold[..., p:]}
         head_thr = torch.where(finite, (z + torch.where(finite, depth, torch.zeros_like(depth)))
                                * LCF, torch.zeros_like(depth))
         batch = head_thr.shape[:-1]
@@ -1235,40 +1726,124 @@ class DynamicWaveHydraulics:
         return {"head": safe_star, "below": lo, "above": hi, "applies": applies,
                 "held": held, "hold1": hold[..., :p], "hold2": hold[..., p:]}
 
-    def _structure_terms(self, heads: Tensor) -> tuple[dict, Tensor]:
-        """The regulators at full-node `heads` (m): per kind ``(StructureFlow, slope)`` (ft
-        units: SWMM's flow and its ``dqdh``, an outlet's a central difference,
+    def _structure_terms(self, heads: Tensor, state: Mapping | None = None,
+                         inflow: Tensor | None = None, dt: float | None = None,
+                         terms: ConduitTerms | None = None,
+                         storage_ft2: Tensor | None = None) -> tuple[dict, Tensor]:
+        """The regulators and pumps at full-node `heads` (m): per kind ``(StructureFlow,
+        slope)`` (ft units: SWMM's flow and its ``dqdh``, an outlet's a central difference,
         `structures.outlet_dqdh`), and every node's regulator surface area (ft2):
         `findNonConduitSurfArea` (dynwave.c:503-524), an orifice's ``surfArea / 2`` at each
-        end (weirs and outlets none), zeroed at an UP_CRITICAL first end, a DN_CRITICAL
-        second end and at a storage unit."""
+        end (weirs, outlets and pumps none), zeroed at an UP_CRITICAL first end, a DN_CRITICAL
+        second end and at a storage unit.
+
+        With link settings (`state` carries ``"sewer.setting"``) each device is at its
+        setting, a closed orifice keeping the end areas it last had
+        (``"sewer.orifice_hold"``: SWMM's ``Orifice.surfArea`` and flow class are not touched
+        while ``link_getInflow`` returns 0, link.c:550). A pump (`pumps.pump_curve_flow`)
+        also reads the step start in `state`, the lateral `inflow` (m3/s), the step `dt`, the
+        pass's conduit `terms` and the junctions' own `storage_ft2`: its limit by the water
+        at its inlet (`pumps.mod_pump_flow`) and an ideal pump's flow are those of the
+        inlet's partial sums in the trial (`pumps.PumpStation`)."""
         inv = self.node_invert
         h_ft = (inv + torch.clamp(heads - inv, min=0.0)) / LCF               # dynwave.c:743
         z_ft = inv / LCF
         area = torch.zeros(heads.shape[:-1] + inv.shape[-1:], dtype=F64)
         found: dict = {}
+        setting = None if state is None else state.get("sewer.setting")
+        ends = None
         for kind, s in self.structures.items():
             h1, h2 = h_ft[..., s.u], h_ft[..., s.v]
             z1, z2 = z_ft[s.u], z_ft[s.v]
             crest = z1 + s.offset1                                            # link.c:1865
             gates = (s.block_forward, s.block_reverse)
+            k = None if setting is None else setting[..., s.first:s.first + len(s.names)]
             if kind == "orifice":
-                flow = orifice_flow(s.params, h1, h2, z1, z2, crest, *gates)
+                params = s.params if k is None else s.params.at_setting(k)
+                flow = orifice_flow(params, h1, h2, z1, z2, crest, *gates)
                 slope = flow.dqdh
                 half = flow.surf_area / 2.0                                   # dynwave.c:511
                 end1 = torch.where((flow.flow_class == UP_CRITICAL) | self.node_storage[s.u],
                                    torch.zeros_like(half), half)              # dynwave.c:518-520
                 end2 = torch.where((flow.flow_class == DN_CRITICAL) | self.node_storage[s.v],
                                    torch.zeros_like(half), half)              # dynwave.c:521-523
+                if k is not None:
+                    hold = state["sewer.orifice_hold"] / _AREA_SI
+                    n = len(s.names)
+                    shut = k <= 0.0
+                    end1 = torch.where(shut, hold[..., :n], end1)
+                    end2 = torch.where(shut, hold[..., n:], end2)
                 area = area.index_add(-1, s.u, end1).index_add(-1, s.v, end2)
+                ends = (end1, end2)
             elif kind == "weir":
-                flow = weir_flow(s.params, h1, h2, z1, z2, crest, *gates)
+                params = s.params if k is None else s.params.at_setting(k)
+                flow = weir_flow(params, h1, h2, z1, z2, crest, *gates)
                 slope = flow.dqdh
+            elif kind == "outlet":
+                flow = outlet_flow(s.params, h1, h2, z1, z2, crest, *gates, setting=k)
+                slope = outlet_dqdh(s.params, h1, h2, z1, z2, crest, *gates, setting=k)
             else:
-                flow = outlet_flow(s.params, h1, h2, z1, z2, crest, *gates)
-                slope = outlet_dqdh(s.params, h1, h2, z1, z2, crest, *gates)
+                flow, slope = self._pump_flow(s, k, heads, h1, h2, state, inflow, dt, terms,
+                                              storage_ft2, ends)
             found[kind] = (flow, slope)
         return found, area
+
+    def _pump_flow(self, s: _Structures, k: Tensor, heads: Tensor, h1: Tensor, h2: Tensor,
+                   state: Mapping, inflow: Tensor, dt: float, terms: ConduitTerms,
+                   storage_ft2: Tensor, ends: tuple | None):
+        """The pumps' `StructureFlow` and slope (cfs, cfs/ft) at `heads`, the pumps' settings
+        `k`, the previous pass's flows in `state` and the conduit `terms` of the pass:
+        ``pump_getInflow`` then ``getModPumpFlow`` (`pumps`), the node sums those of the
+        inlet before the pump's own turn in the trial (`pumps.PumpStation`)."""
+        ps, st = s.params, self.pump_station
+        q_all = state[f"{self.layer}.q"] / QCF
+        in_p, out_p = st.inflow_outflow(q_all, inflow / QCF)
+        n_nodes = self.node_invert.shape[0]
+        conduit_area = torch.zeros(heads.shape[:-1] + (n_nodes,), dtype=F64)
+        conduit_area = (conduit_area.index_add(-1, self.u, terms.surface_area1)
+                        .index_add(-1, self.v, terms.surface_area2))           # dynwave.c:545-546
+        own = storage_ft2[..., self.pump_inlet]
+        first, second = (None, None) if ends is None else ends
+        surf = st.surface_area(own, conduit_area[..., s.u], first, second)
+        jinv = self.node_invert[self.junction_idx]
+        depth_ft = torch.clamp(heads[..., self.junction_idx] - jinv, min=0.0) / LCF
+        volume_ft3 = self._node_volume_ft3(heads)
+        start_depth = state["sewer.junction_depth"]
+        start_heads = jinv + start_depth
+        q_curve, dqdh = pump_curve_flow(ps, k, depth_ft[..., self.pump_inlet],
+                                        volume_ft3[..., self.pump_inlet], h1, h2)
+        q = torch.where(ps.kind == IDEAL_PUMP, in_p * k, q_curve)              # link.c:1572
+        q = mod_pump_flow(
+            ps.kind, q, self.pump_storage, self.pump_full_volume_ft3, in_p, out_p,
+            state["sewer.net_inflow"][..., self.pump_inlet] / QCF,
+            start_depth[..., self.pump_inlet] / LCF,
+            self._node_volume_ft3(start_heads)[..., self.pump_inlet], surf, dt)
+        q = torch.where(k == 0.0, torch.zeros_like(q), q)                      # link.c:550
+        by_head = (ps.kind == TYPE3_PUMP) | (ps.kind == TYPE5_PUMP)
+        slope = torch.where(by_head & (k != 0.0), torch.clamp(dqdh, min=0.0),
+                            torch.zeros_like(dqdh))
+        zero = torch.zeros_like(q)
+        return StructureFlow(q, slope, zero.long(), zero, zero), slope
+
+    def orifice_end_areas(self, state: Mapping) -> tuple[Tensor, Tensor]:
+        """The end areas (ft2) the orifices give their first and second nodes at `state`'s
+        heads and settings, as `_structure_terms` sums them (zero at a UP_ or DN_CRITICAL
+        end and at a storage unit): the values a closing orifice keeps."""
+        s = self.structures["orifice"]
+        inv = self.node_invert
+        heads = state[f"{self.layer}.phi"]
+        h_ft = (inv + torch.clamp(heads - inv, min=0.0)) / LCF
+        z_ft = inv / LCF
+        k = state["sewer.setting"][..., s.first:s.first + len(s.names)]
+        z1, z2 = z_ft[s.u], z_ft[s.v]
+        flow = orifice_flow(s.params.at_setting(k), h_ft[..., s.u], h_ft[..., s.v], z1, z2,
+                            z1 + s.offset1, s.block_forward, s.block_reverse)
+        half = flow.surf_area / 2.0
+        end1 = torch.where((flow.flow_class == UP_CRITICAL) | self.node_storage[s.u],
+                           torch.zeros_like(half), half)
+        end2 = torch.where((flow.flow_class == DN_CRITICAL) | self.node_storage[s.v],
+                           torch.zeros_like(half), half)
+        return end1, end2
 
     def _surcharged(self, heads: Tensor) -> Tensor:
         """EXTRAN's surcharge test on the junction heads `heads` (m, full-node): depth above
@@ -1285,19 +1860,23 @@ class DynamicWaveHydraulics:
         q = state[f"{self.layer}.q"]
         jidx = self.junction_idx
         n = self.node_invert.shape[-1]
-        batch = torch.broadcast_shapes(q.shape[:-1], inflow.shape[:-1])
+        batch = broadcast_shapes(q.shape[:-1], inflow.shape[:-1])
         through = torch.zeros(batch + (n,), dtype=F64)
         q_b = q.expand(batch + q.shape[-1:])
         # every link's flow, conduits and regulators (dynwave.c:528-541, 382-412)
         through = through.index_add(-1, self.edge_v, q_b).index_add(-1, self.edge_u, -q_b)
         net_inflow = inflow + through                                  # dynwave.c:528-541
-        return {
+        carried = {
             "sewer.junction_depth": torch.clamp(heads[..., jidx] - self.node_invert[jidx],
                                                 min=0.0),
             "sewer.pipe_flow": q[..., :self.n_pipes],
             "sewer.mid_area": terms.mid_area * _AREA_SI,
             "sewer.net_inflow": net_inflow[..., jidx],
         }
+        if self.controlled:               # the link settings only change between steps
+            for key in CONTROL_KEYS:
+                carried[key] = state[key]
+        return carried
 
     def outfall_stage(self, t: float, series: Mapping | None = None) -> Tensor:
         """Every outfall's stage elevation (m, shape ``(n_outfalls,)``) `t` s into the run:
@@ -1367,18 +1946,27 @@ class DynamicWaveHydraulics:
             raise ValueError(f"DynamicWaveHydraulics: non-finite outfall_stage at {bad}")
         return torch.where(self.outfall_staged, given / LCF, self.outfall_stage_ft)
 
-    def _outfall_heads(self, q: Tensor, stage_ft: Tensor | None = None) -> Tensor:
+    def _outfall_heads(self, q: Tensor | None, stage_ft: Tensor | None = None,
+                       depths: tuple[Tensor, Tensor] | None = None) -> Tensor:
         """`link.c::link_setOutfallDepth` + `node.c::outfall_setOutletDepth` (link.c:728-766,
         node.c:1413-1492), from each outfall conduit's flow `q` (m3/s, the pipes' columns)
         and the outfalls' stages `stage_ft` (ft, `_stage_ft`; default the static ones):
-        heads (m). An outfall on a regulator takes yN = yC = 0. FIXED, TIDAL and TIMESERIES
-        outfalls share the stage rule (node.c:1469-1490); they differ only in the stage."""
+        heads (m). `depths` is ``(yN, yC)`` (ft, per outfall) of those flows when the caller
+        has them (`_flow_depths`; `q` is then not read). An outfall on a regulator takes
+        yN = yC = 0. FIXED, TIDAL and TIMESERIES outfalls share the stage rule
+        (node.c:1469-1490); they differ only in the stage."""
         op = self._outfall_pipe
         geo = self.geo
-        q_ft = (q[..., op] / QCF / self.barrels[op]).abs()                # link.c:759
-        yf, af = geo.y_full[op], geo.a_full[op]
-        y_norm = normal_depth_ft(q_ft, yf, af, geo.s_full[op], geo.beta[op])
-        y_crit = critical_depth(q_ft, yf, af)
+        if depths is None:
+            if geo.xsect is None:
+                q_ft = (q[..., op] / QCF / self.barrels[op]).abs()        # link.c:759
+                yf, af = geo.y_full[op], geo.a_full[op]
+                depths = (normal_depth_ft(q_ft, yf, af, geo.s_full[op], geo.beta[op]),
+                          critical_depth(q_ft, yf, af, geo.critical_flows[op]))
+            else:
+                q_ft = (q[..., :self.n_pipes] / QCF / self.barrels).abs()
+                depths = (geo.normal_depth(q_ft)[..., op], geo.critical_depth(q_ft)[..., op])
+        y_norm, y_crit = depths
         # a regulator's outfall: yNorm = yCrit = 0 (link.c:753-765)
         reg = self.outfall_on_structure
         y_norm = torch.where(reg, torch.zeros_like(y_norm), y_norm)
@@ -1403,9 +1991,22 @@ class DynamicWaveHydraulics:
                             torch.where(kind == 1, normal, fixed))    # kinds >= 2 are staged
         return self.node_invert[self.outfall_idx] + depth * LCF
 
-    def _switch_slope(self, q: Tensor, terms: ConduitTerms, area_ft2: Tensor, surf: Tensor,
-                      dt: float, stage_ft: Tensor) -> Tensor:
-        """The slope switch's wall slope S (m2/s, per pipe; `DynamicWaveConduit`): the
+    def _wall_cap(self, terms: ConduitTerms, area_ft2: Tensor, surf: Tensor, dt: float
+                  ) -> Tensor:
+        """``S_max`` (m2/s, per pipe): `K_SWITCH` times the smaller end junction's grounding
+        (storage slope ``2 A_s/dt`` plus its conduits' conveyance), the cap on a wall's slope
+        (`_switch_slope`) and on the culvert cap's."""
+        k_si = terms.conveyance * (QCF / LCF)
+        ground = torch.zeros_like(surf).index_add(-1, self.u, k_si).index_add(-1, self.v, k_si)
+        ground = ground.index_add(-1, self.junction_idx, 2.0 / dt * area_ft2 * _AREA_SI)
+        ground = torch.where(self.is_outfall, torch.full_like(ground, torch.inf), ground)
+        return K_SWITCH * torch.minimum(ground[..., self.u], ground[..., self.v])
+
+    def _switch_slope(self, terms: ConduitTerms, area_ft2: Tensor, surf: Tensor, dt: float,
+                      stage_ft: Tensor, depths: Mapping) -> tuple[Tensor, Tensor]:
+        """``(S, heads)``: the outfall heads at the fed flows (m, `_outfall_heads`, from the
+        pass's `_flow_depths` `depths`, in one call with the bumped flows below) and the
+        slope switch's wall slope S (m2/s, per pipe; `DynamicWaveConduit`): the
         linearised switching surface ``1/(c + 1/S_max)``. ``c`` (m per m3/s) is how far the
         lagged outfall depth at the conduit's downstream end moves per unit of its flow
         (`_outfall_heads`, a forward difference; 0 for other conduits): on the surface
@@ -1415,23 +2016,19 @@ class DynamicWaveHydraulics:
         switch stays exact at the fixed point but may take more passes to settle. ``S_max``
         is `K_SWITCH` times the smaller end junction's grounding (storage slope ``2 A_s/dt``
         plus its conduits' conveyance)."""
-        k_si = terms.conveyance * (QCF / LCF)
-        ground = torch.zeros_like(surf).index_add(-1, self.u, k_si).index_add(-1, self.v, k_si)
-        ground = ground.index_add(-1, self.junction_idx, 2.0 / dt * area_ft2 * _AREA_SI)
-        ground = torch.where(self.is_outfall, torch.full_like(ground, torch.inf), ground)
-        s_max = K_SWITCH * torch.minimum(ground[..., self.u], ground[..., self.v])
+        s_max = self._wall_cap(terms, area_ft2, surf, dt)
         op = self._outfall_pipe
-        q_abs = q.abs()
-        step = 1e-6 * torch.clamp(q_abs[..., op], min=1e-3)
-        bumped = q_abs.clone()
-        bumped[..., op] = q_abs[..., op] + step
-        rise = (self._outfall_heads(bumped, stage_ft)
-                - self._outfall_heads(q_abs, stage_ft)) / step
+        step = depths["step"]
+        # the heads at the fed and the bumped flows, in one evaluation
+        heads = self._outfall_heads(None, stage_ft, (
+            torch.stack([depths["normal"][..., op], depths["normal_bumped"]]),
+            torch.stack([depths["critical"][..., op], depths["critical_bumped"]])))
+        rise = (heads[1] - heads[0]) / step
         rise = torch.where(self.outfall_at_v & ~self.outfall_on_structure,
                            torch.clamp(rise, min=0.0), torch.zeros_like(rise))
         compliance = torch.zeros_like(s_max).index_add(-1, op, rise.expand(
             s_max.shape[:-1] + rise.shape[-1:]))
-        return 1.0 / (compliance + 1.0 / s_max)
+        return 1.0 / (compliance + 1.0 / s_max), heads[0]
 
     # ------------------------------------------------------------------ protocol
     def __call__(self, state: Mapping, drivers: Mapping,
@@ -1447,11 +2044,12 @@ class DynamicWaveHydraulics:
             terms = self._terms(state, self.options.routing_step)
             out = self._carried(state, terms, inflow)
         else:
-            terms, out, drop, regulators, storage_ft2 = self._pass_terms(state, inflow, dt)
+            terms, out, drop, regulators, storage_ft2, depths = self._pass_terms(
+                state, inflow, dt)
         q_all = state[f"{self.layer}.q"]
         q = q_all[..., :self.n_pipes]
         depth_ft = terms.depth
-        a_link = area_of_depth(depth_ft, self.geo.y_full, self.geo.a_full)
+        a_link = self.geo.area(depth_ft)
         moving = (depth_ft > _VELOCITY_MIN_DEPTH) & (a_link > FUDGE)          # link.c:834-840
         v_ft = (q / QCF / self.barrels) / torch.where(moving, a_link, torch.ones_like(a_link))
         out.update({
@@ -1461,8 +2059,7 @@ class DynamicWaveHydraulics:
             "sewer.V_wet": terms.volume * QCF,
             "sewer.surcharged": self._surcharged(heads).to(F64),
             "sewer.storage_volume": self._storage_volume(heads),
-            "sewer.R_h": geom.hydraulic_radius(depth_ft * LCF, self.diameter),
-            "sewer.d_m": geom.hydraulic_mean_depth(depth_ft * LCF, self.diameter),
+            **self._hydraulic_radius_depth(depth_ft),
         })
         out.update(self._headspace(depth_ft * LCF, heads, drivers))
         if self.quality_layer is not None and dt is None:
@@ -1488,16 +2085,27 @@ class DynamicWaveHydraulics:
         anchor = lagged * (QCF / LCF) + K_ANCHOR * 2.0 / dt * area_ft2 * _AREA_SI
         switch = terms.slope_switch
         stage_ft = self._stage_ft(drivers)
-        switch_slope = self._switch_slope(q, terms, area_ft2, surf, dt, stage_ft)
+        switch_slope, outfall_heads = self._switch_slope(terms, area_ft2, surf, dt, stage_ft,
+                                                         depths)
         # the drop switch's wall slope: K_SWITCH times the junction's grounding above it
         k_si = terms.conveyance * (QCF / LCF)
         sum_k = torch.zeros_like(surf).index_add(-1, self.u, k_si).index_add(-1, self.v, k_si)
         drop_slope = K_SWITCH * (2.0 / dt * drop["above"] + sum_k[..., jidx])
         drop_head = torch.where(drop["applies"], drop["head"],
                                 torch.full_like(drop["head"], torch.inf))
+        if self.storage.ponds:                    # the ponding junctions' second line
+            raw_ft2 = surf[..., jidx] + storage_ft2
+            pond_area = torch.where(
+                self.can_pond, torch.clamp(raw_ft2 + self.pond_area_ft2, min=self.min_area_ft2),
+                area_ft2) * _AREA_SI                                        # dynwave.c:309-312
+            out_pond = {"water.pond_area": pond_area,
+                        "water.pond_switch_slope":
+                            K_SWITCH * (2.0 / dt * pond_area + sum_k[..., jidx])}
+        else:
+            out_pond = {}
         out.update({
             f"{self.layer}.sources": inflow,
-            f"{self.layer}.phi_boundary": self._outfall_heads(q, stage_ft),
+            f"{self.layer}.phi_boundary": outfall_heads,
             "water.flow_offset": terms.flow_offset * QCF,
             "water.conveyance": terms.conveyance * (QCF / LCF),
             "water.normal_flow": torch.where(switch, terms.switch_normal_flow,
@@ -1508,9 +2116,6 @@ class DynamicWaveHydraulics:
             "water.switch_slope": torch.where(switch, switch_slope,
                                               torch.zeros_like(switch_slope)),
             "water.flow_last": q,
-            "water.max_flow": self.max_flow,
-            "water.flap_block_reverse": self.flap_block_reverse.to(F64),
-            "water.flap_block_forward": self.flap_block_forward.to(F64),
             "water.dry_flow_cap": FUDGE_FLOW * self.barrels,
             "water.dry_upstream": terms.dry_upstream.to(F64),
             "water.dry_downstream": terms.dry_downstream.to(F64),
@@ -1525,7 +2130,24 @@ class DynamicWaveHydraulics:
             "water.area_below": drop["below"],
             "water.area_above": drop["above"],
             "water.area_switch_slope": drop_slope,
+            **out_pond,
         })
+        if self.storage.ponds:
+            out["water.ponded"] = self.storage.ponded(out)
+        if terms.cap_flow is not None:        # the culverts' inlet control (`culvert.py`)
+            cap_slope = terms.cap_slope * (QCF / LCF)
+            out.update({
+                "water.cap_flow": terms.cap_flow * QCF,
+                "water.cap_drop": terms.cap_drop * LCF,
+                "water.cap_slope": torch.minimum(
+                    cap_slope, self._wall_cap(terms, area_ft2, surf, dt))})
+        # the conduit limits a network has at all (`DynamicWaveConduit`: absent is none)
+        if bool(torch.isfinite(self.max_flow).any()):
+            out["water.max_flow"] = self.max_flow
+        if bool(self.flap_block_reverse.any()):
+            out["water.flap_block_reverse"] = self.flap_block_reverse.to(F64)
+        if bool(self.flap_block_forward.any()):
+            out["water.flap_block_forward"] = self.flap_block_forward.to(F64)
         for kind, (flow, slope) in regulators.items():
             s = self.structures[kind]
             out.update({
@@ -1535,7 +2157,13 @@ class DynamicWaveHydraulics:
                 f"water.{kind}.flap_block_reverse": s.block_reverse.to(F64),
                 f"water.{kind}.flap_block_forward": s.block_forward.to(F64),
             })
+        # the pass constants of the junction withdrawal, evaluated once (`JunctionStorage`)
+        out["water.hold_stiffness"] = self.storage._stiff(out)
+        if self.storage.extran:
+            out["water.crown_withdrawal"] = self.storage.crown_withdrawal(out)
         out["water.surcharged"] = self.storage.surcharged(out)
+        out["water.top_withdrawal"] = self.storage.top_withdrawal(out)
+        out["water.flood_wall_slope"] = self.storage._wall_slope(out)
         excess = self.storage.flood_excess(out)
         flooded = excess > 0.0
         # SWMM's overflow is the step's trapezoid net inflow dV/dt, zeroed below FUDGE
@@ -1544,11 +2172,40 @@ class DynamicWaveHydraulics:
         overflow = 0.5 * (state["sewer.net_inflow"] + out["sewer.net_inflow"])
         overflow = torch.where(flooded & (overflow >= FUDGE_FLOW), overflow,
                                torch.zeros_like(overflow))
+        if self.storage.ponds:
+            # a ponding junction floods whenever it ends above its full depth, and the
+            # volume it gains then is its flooding (getFloodedDepth, dynwave.c:787-792: the
+            # ponded volume rises by dV and falls back without a negative overflow)
+            ponded = out["water.ponded"] > 0.5
+            trapezoid = 0.5 * (state["sewer.net_inflow"] + out["sewer.net_inflow"])
+            pond_overflow = torch.where(ponded & (trapezoid >= FUDGE_FLOW), trapezoid,
+                                        torch.zeros_like(trapezoid))
+            flooded = torch.where(self.can_pond, ponded, flooded)
+            overflow = torch.where(self.can_pond, pond_overflow, overflow)
         out.update({"water.flood_excess": excess, "water.flooded": flooded.to(F64),
                     "sewer.overflow": overflow})
         if self.quality_layer is not None:
             out.update(self._quality_volume(state, out["sewer.net_inflow"], overflow, dt))
         return out
+
+    def _hydraulic_radius_depth(self, depth_ft: Tensor) -> dict[str, Tensor]:
+        """``"sewer.R_h"`` (hydraulic radius, m) and ``"sewer.d_m"`` (hydraulic mean depth
+        A/T, m, 0 for a conduit flowing full) at the link depths `depth_ft`: the exact
+        circle's for a circular pipe, SWMM's section tables' (`XsectSet`) otherwise."""
+        out = {"sewer.R_h": geom.hydraulic_radius(depth_ft * LCF, self.diameter),
+               "sewer.d_m": geom.hydraulic_mean_depth(depth_ft * LCF, self.diameter)}
+        if self.geo.xsect is None:
+            return out
+        xs, geo = self.geo.xsect, self.geo
+        dead = (depth_ft <= FUDGE) | (~geo.is_open & (geo.y_full - depth_ft <= FUDGE))
+        y = torch.where(dead, 0.5 * geo.y_full, depth_ft)
+        area, width = xs.area_width(y)
+        radius = torch.where(depth_ft >= geo.y_full, geo.r_full, xs.radius(y))
+        d_m = torch.where(dead, torch.zeros_like(y), area / torch.where(
+            width > 0.0, width, torch.ones_like(width))) * LCF
+        circle = self.is_circle
+        return {"sewer.R_h": torch.where(circle, out["sewer.R_h"], radius * LCF),
+                "sewer.d_m": torch.where(circle, out["sewer.d_m"], d_m)}
 
     def _headspace(self, depth: Tensor, heads: Tensor, drivers: Mapping) -> dict[str, Tensor]:
         """The headspace keys at the link depths `depth` (m, one barrel's, per pipe) and the
@@ -1557,10 +2214,26 @@ class DynamicWaveHydraulics:
         derivatives are safe at both ends of the circle (`geometry.air_geometry`)."""
         capped = torch.minimum(depth, AIR_DEPTH_RATIO_MAX * self.diameter)
         a_air, _p_air, d_h = geom.air_geometry(capped, self.diameter)
+        top = geom.top_width(capped, self.diameter)
+        if self.geo.xsect is not None:
+            # the section tables' headspace: the free area aFull - A(y), the free-surface
+            # width W(y) and the air perimeter P - A/R + W (P = aFull/rFull the full wetted
+            # perimeter), over the non-circular pipes
+            geo = self.geo
+            y = capped / LCF
+            area, width = geo.xsect.area_width(y)
+            radius = geo.xsect.radius(y)
+            free = (geo.a_full - area) * LCF**2
+            wetted = area / torch.where(radius > 0.0, radius, torch.ones_like(radius))
+            p_air = (geo.a_full / geo.r_full - wetted + width) * LCF
+            d_gen = 4.0 * free / torch.where(p_air > 0.0, p_air, torch.ones_like(p_air))
+            circle = self.is_circle
+            a_air = torch.where(circle, a_air, free)
+            d_h = torch.where(circle, d_h, d_gen)
+            top = torch.where(circle, top, width * LCF)
         a_total = self.barrels * a_air
         volume = a_total * self.length
-        out = {"sewer.A_air": a_total, "sewer.D_h": d_h,
-               "sewer.T": self.barrels * geom.top_width(capped, self.diameter),
+        out = {"sewer.A_air": a_total, "sewer.D_h": d_h, "sewer.T": self.barrels * top,
                "sewer.V_air": volume}
         if not self.air:
             return out
@@ -1633,13 +2306,15 @@ class DynamicWaveHydraulics:
         return self._carried(state, terms, inflow)
 
     def _pass_terms(self, state: Mapping, inflow: Tensor, dt: float
-                    ) -> tuple[ConduitTerms, State, dict, dict, Tensor]:
+                    ) -> tuple[ConduitTerms, State, dict, dict, Tensor, dict]:
         """One pass's conduit terms at `state` (its carried keys the step start's), with
         the drop-end area switch's hold: ``(terms, carried, drop, regulators,
-        storage_ft2)``, `drop` from `_drop_switch`, the regulators from
-        `_structure_terms` and each junction's own storage area (ft2, its regulators' ends
-        included)."""
-        terms = self._terms(state, dt)
+        storage_ft2, depths)``, `drop` from `_drop_switch`, the regulators from
+        `_structure_terms`, each junction's own storage area (ft2, its regulators' ends
+        included) and the pass's `_flow_depths`."""
+        depths = self._flow_depths(state[f"{self.layer}.q"][..., :self.n_pipes])
+        flow_depths = (depths["normal"], depths["critical"])
+        terms = self._terms(state, dt, flow_depths=flow_depths)
         out = self._carried(state, terms, inflow)
         heads = state[f"{self.layer}.phi"]
         # a storage unit's own area at the previous pass's depth (dynwave.c:315)
@@ -1648,7 +2323,8 @@ class DynamicWaveHydraulics:
         if self.structures:
             # the regulators at the previous pass's heads (dynwave.c:423-454): their flows,
             # slopes and end areas, which join the storage units' own (dynwave.c:503-524)
-            regulators, reg_ft2 = self._structure_terms(heads)
+            regulators, reg_ft2 = self._structure_terms(heads, state, inflow, dt, terms,
+                                                        storage_ft2)
             storage_ft2 = storage_ft2 + reg_ft2[..., self.junction_idx]
         # the drop-end area switch (JunctionStorage): a junction held on its threshold
         # has its chosen drop end classified on the upper side, SWMM's class AT it. The
@@ -1658,10 +2334,10 @@ class DynamicWaveHydraulics:
         # would let the class it sets feed back into its own decision within one pass.
         drop = self._drop_switch(state, terms, out["sewer.net_inflow"], dt, storage_ft2)
         if bool(drop["held"].any()):
-            terms = self._terms(state, dt, (drop["hold1"], drop["hold2"]))
+            terms = self._terms(state, dt, (drop["hold1"], drop["hold2"]), flow_depths)
             out = self._carried(state, terms, inflow)
             drop = self._drop_switch(state, terms, out["sewer.net_inflow"], dt, storage_ft2)
-        return terms, out, drop, regulators, storage_ft2
+        return terms, out, drop, regulators, storage_ft2, depths
 
     def _initial_stage_ft(self, drivers: Mapping | None) -> Tensor:
         """The outfalls' stages (ft) at t = 0 for the initial heads: the driver's if it is
@@ -1706,8 +2382,7 @@ class DynamicWaveHydraulics:
         geo = self.geo
         q0 = self.initial_flow.clone()
         # link.c:783-804 / 1311: normal depth of one barrel's initial flow (0 where none)
-        y_link = normal_depth_ft(q0.abs() / QCF / self.barrels, geo.y_full, geo.a_full,
-                                 geo.s_full, geo.beta)
+        y_link = geo.normal_depth(q0.abs() / QCF / self.barrels)
         # flowrout.c:353-363: depth + the first offset, at both ends, where depth > FUDGE
         y_end = torch.where(y_link > FUDGE, y_link + geo.offset1, torch.zeros_like(y_link))
         total = torch.zeros(self.node_invert.shape, dtype=F64)
@@ -1739,9 +2414,17 @@ class DynamicWaveHydraulics:
             f"{self.layer}.q": torch.cat([q0, torch.zeros(n_reg, dtype=F64)]),  # link.c:518
             "sewer.junction_depth": depth_j * LCF,
             "sewer.pipe_flow": q0.clone(),
-            "sewer.mid_area": area_of_depth(y, geo.y_full, geo.a_full) * _AREA_SI,  # :497
+            "sewer.mid_area": geo.area(y) * _AREA_SI,                         # :497
             "sewer.net_inflow": through[jidx],                                # flowrout.c:458
         }
+        if self.controlled:
+            start = (control_start(self.controls) if self.controls is not None else 0.0)
+            state.update({
+                "sewer.setting": self.initial_setting.clone(),               # link.c:1542-1543
+                "sewer.target_setting": self.initial_setting.clone(),
+                "sewer.time_last_set": torch.full((self.n_settings,), start, dtype=F64),
+                "sewer.orifice_hold": torch.zeros(2 * self.orifice_rate.shape[0], dtype=F64),
+            })
         if self.quality_layer is not None:
             # the half-volumes at the initial depths: the conduit volumes SWMM starts
             # from (as "sewer.V_wet" at this state) and a storage unit's own
@@ -1780,10 +2463,52 @@ class DynamicWaveHydraulics:
         return 0.5 * dt * (withdrawal - now["sewer.net_inflow"])
 
 
-def build_dynamic_wave_model(net: SewerNetwork, *, iterate_tol: float = 1e-11,
-                             iterate_max: int = 2000, relaxation: float = 0.5,
+def control_start(controls) -> float:
+    """SWMM's ``StartDate`` (link.c:526): the DateTime (days) of the midnight of the day a run
+    starts, which a link's time since last set counts from until its first change."""
+    return float(int(start_serial(controls.start)))
+
+
+def iterate_tolerances(options: DynamicWaveOptions, *, iterate_tol: float | None = None,
+                       iterate_max: int | None = None,
+                       iterate_flow_tol: float | None = None) -> dict:
+    """The iteration controls `build_dynamic_wave_model` builds with: ``{"iterate_tol",
+    "iterate_flow_tol", "iterate_max", "on_limit"}``. Each argument given is used as is;
+    each left ``None`` follows the file (`options`) as SWMM does:
+
+    - `iterate_tol` (m) is SWMM's ``HeadTol`` (`DynamicWaveOptions.head_tol`: HEAD_TOLERANCE,
+      or 0.005 ft). SWMM's trial test is the depth change of every node between trials
+      (`dynwave.c::findNodeDepths`, ``|yNew - yOld| > HeadTol``); noodl's is the head
+      change between passes, the same test.
+    - `iterate_flow_tol` (m3/s): SWMM judges the heads alone, but on noodl's normal-flow
+      slope switch the heads can stop moving while the flows the closure reads still do
+      (`build_dynamic_wave_model`), so noodl judges the flows too, to the flow residual that
+      matches the head tolerance at the smallest junction: a flow residual ``dQ`` changes a
+      junction's next depth by ``dt dQ / (2 A_s)`` (SWMM's trapezoid, dynwave.c:694-711),
+      so ``dQ = 2 A_min iterate_tol / dt`` moves the head by `iterate_tol` at the
+      surface-area floor A_min (MIN_SURFAREA, dynwave.c:186-187), the largest move any
+      junction makes for it, ``dt`` the routing step (the longest). It is floored at
+      `FLOW_TOL_FLOOR`.
+    - `iterate_max` is SWMM's ``MaxTrials`` (`DynamicWaveOptions.trials`: MAX_TRIALS, or 8;
+      at least 2, `Model`'s minimum). Then ``"on_limit"`` is ``"accept"``: as SWMM, a step
+      that uses up its trials is taken with its last pass and counted as not converging
+      (`dynwave.c::dynwave_execute`, ``NonConvergeCount``; `simulate_dynamic_wave`'s
+      ``"converged"``), not refused. An explicit `iterate_max` keeps ``"raise"``, `Model`'s default.
+    """
+    tol = options.head_tol if iterate_tol is None else float(iterate_tol)
+    if iterate_flow_tol is None:
+        min_area = (DEFAULT_MIN_SURFACE_AREA_FT2 * _AREA_SI if options.min_surface_area is None
+                    else options.min_surface_area)
+        iterate_flow_tol = max(FLOW_TOL_FLOOR, 2.0 * min_area * tol / options.routing_step)
+    return {"iterate_tol": tol, "iterate_flow_tol": float(iterate_flow_tol),
+            "iterate_max": max(2, options.trials) if iterate_max is None else int(iterate_max),
+            "on_limit": "accept" if iterate_max is None else "raise"}
+
+
+def build_dynamic_wave_model(net: SewerNetwork, *, iterate_tol: float | None = None,
+                             iterate_max: int | None = None, relaxation: float = 0.5,
                              acceleration: str | None = "anderson", memory: int = 5,
-                             iterate_flow_tol: float | None = 1e-10,
+                             iterate_flow_tol: float | None = None,
                              outfall_stage: Mapping | None = None,
                              quality: bool = False,
                              species: tuple[str, ...] = ("bod", "sulfide"),
@@ -1798,7 +2523,10 @@ def build_dynamic_wave_model(net: SewerNetwork, *, iterate_tol: float = 1e-11,
     One `PotentialFlowLayer` ``"water"`` (quantity ``"head"``, m; flows m3/s) over the pipes,
     with the outfalls as its boundary and a `JunctionStorage` at every junction, and the
     `DynamicWaveHydraulics` closure; ``coupling="iterate"`` converges on the junction heads
-    to `iterate_tol` (m) within `iterate_max` passes. The passes are Anderson-accelerated
+    to `iterate_tol` (m) and the conduit flows to `iterate_flow_tol` (m3/s) within
+    `iterate_max` passes, by default the file's own HEAD_TOLERANCE and MAX_TRIALS and the
+    flow tolerance matching them (`iterate_tolerances`; as SWMM, a step that uses up the
+    file's trials is then accepted and reported, not refused). The passes are Anderson-accelerated
     over the last `memory` of them by default (``acceleration="anderson"``, `Model`'s
     `iterate_acceleration`), with `relaxation` the damping of the steps it falls back to;
     ``acceleration=None`` is plain relaxation, which reaches the same fixed point in two to
@@ -1809,8 +2537,8 @@ def build_dynamic_wave_model(net: SewerNetwork, *, iterate_tol: float = 1e-11,
     t = 0) and is the default of `simulate_dynamic_wave`'s own `outfall_stage`.
     `iterate_flow_tol` (m3/s) is the tolerance on the conduit
     flows' own fixed-point residual, judged alongside the heads (`Model`'s
-    `iterate_flow_tol`), and is required: ``None`` (heads judged alone) is
-    refused by name. On the normal-flow slope switch (`DynamicWaveConduit`) the heads
+    `iterate_flow_tol`); the heads are never judged alone. On the normal-flow slope switch
+    (`DynamicWaveConduit`) the heads
     bound the flow residual only through the wall slope S over the junction's grounding,
     so a heads-only test can stop a pass short of the fixed point (a flow residual of
     3e-5 m3/s was measured on the tree's drain-down). The state is
@@ -1847,13 +2575,20 @@ def build_dynamic_wave_model(net: SewerNetwork, *, iterate_tol: float = 1e-11,
             f"build_dynamic_wave_model: network geometry is {net.geometry!r}; dynamic wave "
             f"always routes on SWMM's tabulated circle (xsect_tables.py), so build the "
             f"network with geometry='tabulated' (read_swmm_inp's default)")
-    if iterate_flow_tol is None:
-        raise ValueError(
-            "build_dynamic_wave_model: iterate_flow_tol (m3/s) is required, got None: on the "
-            "normal-flow slope switch a heads-only convergence test can stop short of the "
-            "fixed point; plain relaxation is acceleration=None with a flow tolerance")
+    controls = iterate_tolerances(net.dynamic_wave, iterate_tol=iterate_tol,
+                                  iterate_max=iterate_max, iterate_flow_tol=iterate_flow_tol)
+    iterate_tol, iterate_max = controls["iterate_tol"], controls["iterate_max"]
+    iterate_flow_tol = controls["iterate_flow_tol"]
     if air:
         check_air_topology(net)
+    if air or quality:
+        shaped = [p.name for p in net.pipes if p.xsect is not None and p.xsect.kind != "CIRCULAR"]
+        if shaped:
+            raise ValueError(
+                f"build_dynamic_wave_model: conduit(s) {shaped} have a non-circular cross "
+                f"section; the water quality and headspace air models are circular-pipe "
+                f"geometry (the sulfide and two-film correlations, the headspace law) and "
+                f"are refused for them (build with air=False, quality=False)")
     graph = Network(dtype=F64)
     for manhole in net.manholes:
         graph.add_node(manhole.name, invert=manhole.invert, ground=manhole.ground)
@@ -1891,7 +2626,9 @@ def build_dynamic_wave_model(net: SewerNetwork, *, iterate_tol: float = 1e-11,
     layer = PotentialFlowLayer(
         graph, "water", elements(), boundary=boundary,
         node_sources=[closure.storage],
-        quantity="head", unit="m", flow_unit="m3/s")
+        quantity="head", unit="m", flow_unit="m3/s", analytic_primal=True,
+        linear_solver="direct" if len(net.manholes) <= DENSE_SOLVE_MAX_JUNCTIONS else "auto",
+        newton_defaults=HEAD_SOLVE_NEWTON)
     if layer.bound.tolist() != closure.outfall_idx.tolist():
         raise ValueError("build_dynamic_wave_model: the layer's boundary order differs from "
                          "the outfall order the closure writes 'water.phi_boundary' in")
@@ -1923,7 +2660,8 @@ def build_dynamic_wave_model(net: SewerNetwork, *, iterate_tol: float = 1e-11,
                   iterate_tol=tolerances, iterate_max=iterate_max,
                   iterate_relaxation=relaxation, iterate_acceleration=acceleration,
                   iterate_memory=memory,
-                  iterate_flow_tol={"water": iterate_flow_tol})
+                  iterate_flow_tol={"water": iterate_flow_tol},
+                  iterate_on_limit=controls["on_limit"])
     inflow = torch.zeros(graph.n, dtype=F64)
     inflow[junction_idx] = torch.tensor([m.inflow for m in net.manholes], dtype=F64)
     stage_functions = closure.check_outfall_stage(outfall_stage)
@@ -1947,7 +2685,8 @@ def build_dynamic_wave_model(net: SewerNetwork, *, iterate_tol: float = 1e-11,
         + f" and flows to {iterate_flow_tol} m3/s"
         + f" within {iterate_max} passes"
         + ("" if acceleration is None else f" ({acceleration}-accelerated)")
-        + "; SWMM's HEAD_TOLERANCE and MAX_TRIALS are not used")
+        + ("; a step that uses them up is accepted, as SWMM does"
+           if controls["on_limit"] == "accept" else ""))
     model.notes = closure.notes
     model.junction_idx = junction_idx
     model.junction_invert = junction_invert
@@ -1975,6 +2714,7 @@ def build_dynamic_wave_model(net: SewerNetwork, *, iterate_tol: float = 1e-11,
                         "curve or the outfall_stage functions)",
             unit="m", over=list(closure.outfall_names))
     model.driver_template = dict(drivers)
+    model.inflow_schedule = net.inflows
     return model, state, drivers
 
 
@@ -2257,7 +2997,10 @@ def simulate_dynamic_wave(model: Model, state: State, drivers: Drivers, *,
     `swmm5.c:530-545`) reaches it, and the last step is cut to the time that remains (at
     least 1 ms), so the run ends exactly at `duration` whatever the step rule.
 
-    `inflow` (m3/s, full-node) overrides ``drivers["inflow"]``: ``(n,)`` is one constant
+    `inflow` (m3/s, full-node) overrides ``drivers["inflow"]``; without it a model built from
+    a SWMM file with time series, patterns or dry-weather flow (``model.inflow_schedule``,
+    `noodl.apps.sewer.inflows`) uses that schedule, and any other model the constant
+    ``drivers["inflow"]``. ``(n,)`` is one constant
     inflow; ``(B, n)`` a batch of B constant inflows -- a 2-D inflow is ALWAYS a batch,
     never a series; ``(steps, B, n)`` the inflow of each step for a batch of B (one
     network's series is ``(steps, 1, n)``; needs `steps`); or a callable ``inflow(t)``
@@ -2268,9 +3011,12 @@ def simulate_dynamic_wave(model: Model, state: State, drivers: Drivers, *,
     inflow is its start), so ``inflow(t)`` is called once per step, with the step's start
     time. (SWMM's own clock reads 1 ms late, ``getDateTime`` adds 1 ms: `swmm5.c:1551`, so
     a [TIMESERIES] is sampled at ``t + 0.001`` s; a function standing in for one must add
-    that, as the verification test does.) A batched inflow expands an unbatched `state` to
-    the batch (a batch cannot be combined with a variable step: each member would need its
-    own). After every
+    that, as the verification test does.) A callable with a true ``step_aware`` attribute
+    (the runoff driver of a file with subcatchments, `noodl.apps.sewer.runoff`) is called
+    ``inflow(t, step)``, with the step's length in s as well, because SWMM takes the runoff
+    steps a routing step needs up to its end time (`execRouting`, swmm5.c:546). A batched
+    inflow expands an unbatched `state` to the batch (a batch cannot be combined with a
+    variable step: each member would need its own). After every
     step the carried keys are re-evaluated at the returned state. `record` may also name
     ``"sewer.overflow"`` (m3/s per junction, SWMM's flooding loss over each step:
     `DynamicWaveHydraulics.overflow`), which is not a state key, and the closure's
@@ -2285,14 +3031,24 @@ def simulate_dynamic_wave(model: Model, state: State, drivers: Drivers, *,
     the step: a function is called once per step with the step's end time in s -- not the
     start time `inflow` gets, and with no 1 ms offset (`NewRoutingTime`, not `getDateTime`).
     It works under fixed and variable steps alike.
+    With pumps or control rules (``hyd.controlled``) every step starts as SWMM's does
+    (`linkcontrol.LinkControl`): the pumps' startup and shutoff depths, the rules (at the
+    RULE_STEP, which also shortens the routing steps to end at each rule time) and the
+    orifice opening rate move the links' settings, carried as ``"sewer.setting"``,
+    ``"sewer.target_setting"`` and ``"sewer.time_last_set"`` (recordable like any state
+    key; ``record=("water.q", "sewer.setting")`` reports each link's flow and setting).
+    Settings are discrete, not differentiable.
     `diagnostics`, when a list, receives each step's `Model.step` diagnostics.
     `solve_kwargs` reach the head solve (Newton); `atol` defaults to `solve_atol` for each
     step's length (m3/s: `SOLVE_ATOL`, or the bed's round-off floor where larger) and
     `rtol` to 0, because Newton's own default (sqrt(eps), 1.5e-8 m3/s) would stop a
     warm-started pass before it moves and leave the junction balance off by that much.
     Returns the final state and the recorded `record` keys stacked over steps (leading
-    dimension: the steps), plus ``"t"`` (s, the END time of each step) and ``"dt"`` (s, each
-    step's length).
+    dimension: the steps), plus ``"t"`` (s, the END time of each step), ``"dt"`` (s, each
+    step's length) and ``"converged"`` (bool per step, every batch instance's passes
+    converged): under the file's own MAX_TRIALS (`iterate_tolerances`) a step that uses
+    them up is taken, as SWMM takes it, and is False here; ``(~out["converged"]).sum()``
+    is SWMM's count of non-converging steps.
     """
     hyd = model.dynamic_wave
     if (steps is None) == (duration is None):
@@ -2314,6 +3070,9 @@ def simulate_dynamic_wave(model: Model, state: State, drivers: Drivers, *,
     solve_kwargs.setdefault("rtol", 0.0)
     n = model.net.n
     series = None
+    schedule = getattr(model, "inflow_schedule", None)
+    if inflow is None and schedule is not None:      # the file's [INFLOWS] and [DWF]
+        inflow = schedule.driver(list(model.net.nodes))
     if callable(inflow):
         step_inflow = inflow
     elif inflow is None:
@@ -2333,19 +3092,28 @@ def simulate_dynamic_wave(model: Model, state: State, drivers: Drivers, *,
                                  f"steps, {steps} asked")
         step_inflow = None
 
-    def inflow_at(k: int, t: float) -> Tensor | None:
+    step_aware = bool(getattr(step_inflow, "step_aware", False))
+
+    def inflow_at(k: int, t: float, step: float | None = None) -> Tensor | None:
         if series is not None:
             return series[k] if series.dim() == 3 else series
         if step_inflow is None:
             return None
-        value = torch.as_tensor(step_inflow(t), dtype=F64)
+        value = torch.as_tensor(step_inflow(t, step) if step_aware else step_inflow(t),
+                                dtype=F64)
         if value.dim() not in (1, 2) or value.shape[-1] != n:
             raise ValueError(
                 f"simulate_dynamic_wave: inflow(t={t}) must return (n,) or (B, n) with "
                 f"n = {n} nodes, got shape {tuple(value.shape)}")
         return value
 
-    first = inflow_at(0, 0.0)    # step 0's inflow, reused in the loop; it also sets the batch
+    first_step = None
+    if step_aware:          # a runoff driver needs the step's length: the first step's
+        first_step = (routing_step_size(hyd, None, state, None) if variable else fixed_dt)
+        if duration is not None and 1000.0 * first_step > 1000.0 * duration:
+            first_step = max(float(duration), 1.0 / 1000.0)
+    first = inflow_at(0, 0.0, first_step)   # step 0's inflow, reused in the loop; it also
+    #                                         sets the batch
     batch: tuple[int, ...] = ()
     if first is not None and first.dim() > 1:
         batch = tuple(first.shape[:-1])
@@ -2363,9 +3131,12 @@ def simulate_dynamic_wave(model: Model, state: State, drivers: Drivers, *,
     rows: dict[str, list[Tensor]] = {key: [] for key in record}
     ends: list[float] = []
     lengths: list[float] = []
+    converged: list[Tensor] = []
     now_ms = 0.0                                          # swmm5.c: NewRoutingTime, ms
     end_ms = None if duration is None else 1000.0 * float(duration)
     previous: tuple[State, float] | None = None
+    control = LinkControl(hyd) if hyd.controlled else None
+    lateral = None
     k = 0
     while (k < steps) if steps is not None else (now_ms < end_ms):
         if variable:
@@ -2373,13 +3144,15 @@ def simulate_dynamic_wave(model: Model, state: State, drivers: Drivers, *,
                                      None if previous is None else previous[1])
         else:
             step = fixed_dt
+        if control is not None:                                             # routing.c:189-195
+            step = control.rule_step_limit(now_ms, step)
         next_ms = now_ms + 1000.0 * step                                    # swmm5.c:530
         if end_ms is not None and next_ms > end_ms:                         # swmm5.c:531-536
             step = max((end_ms - now_ms) / 1000.0, 1.0 / 1000.0)
             next_ms = end_ms
         t = now_ms / 1000.0
         if inflow is not None:
-            drivers = dict(drivers, inflow=first if k == 0 else inflow_at(k, t))
+            drivers = dict(drivers, inflow=first if k == 0 else inflow_at(k, t, step))
         if staged:                                    # node.c:1449, 1456: the step's END
             drivers = dict(drivers,
                            outfall_stage=hyd.outfall_stage(next_ms / 1000.0, stage_functions))
@@ -2387,6 +3160,8 @@ def simulate_dynamic_wave(model: Model, state: State, drivers: Drivers, *,
         if not atol_given:
             kwargs["atol"] = solve_atol(model, step)
         diag: dict = {}
+        if control is not None:      # the pump limits and rules, on the step-start state
+            state = control.apply(state, now_ms, step, lateral)
         before = state
         try:
             state = model.step(state, drivers, step, t=t, diagnostics=diag, **kwargs)
@@ -2395,10 +3170,14 @@ def simulate_dynamic_wave(model: Model, state: State, drivers: Drivers, *,
         # resync, as modelica/run.py does, with the step's drop-end hold
         state.update(hyd.carried(state, drivers, dt=step, start=before))
         previous = (before, step)
+        lateral = drivers["inflow"]
+        if control is not None:
+            hyd.check_pump_inlets(state)
         now_ms = next_ms
         k += 1
         ends.append(now_ms / 1000.0)
         lengths.append(step)
+        converged.append(torch.as_tensor(diag["converged"]).all())
         if diagnostics is not None:
             diagnostics.append(diag)
         report = None
@@ -2417,4 +3196,5 @@ def simulate_dynamic_wave(model: Model, state: State, drivers: Drivers, *,
     out = {key: torch.stack(v) for key, v in rows.items()}
     out["t"] = torch.tensor(ends, dtype=F64)
     out["dt"] = torch.tensor(lengths, dtype=F64)
+    out["converged"] = torch.stack(converged)
     return state, out

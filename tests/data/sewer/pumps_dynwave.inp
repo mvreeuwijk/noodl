@@ -1,0 +1,151 @@
+[TITLE]
+;;Project Title/Notes
+Pumps under dynamic wave, ramped, constant and pulsed inflows, SI units - noodl test fixture
+One subsystem per pump kind: inflow junction Jk -> conduit Ck -> wet well Wk (a junction whose
+surface area is the 100 m2 MIN_SURFAREA floor) -> pump Pk -> fixed outfall Ok. A, H: PUMP3 with startup and
+shutoff depths (H against a lift of 2.5 m); B: PUMP2 steps in the well depth; C: PUMP4,
+continuous in it; D: PUMP1 steps in the volume of a storage well (50 m2); F: an ideal pump.
+The pulses and curves are chosen so that SWMM converges on every step (a stepped pump curve
+crossed by a rising or falling well can have no fixed point inside a step).
+
+[OPTIONS]
+;;Option             Value
+FLOW_UNITS           CMS
+INFILTRATION         HORTON
+FLOW_ROUTING         DYNWAVE
+LINK_OFFSETS         DEPTH
+MIN_SLOPE            0
+ALLOW_PONDING        NO
+SKIP_STEADY_STATE    NO
+
+START_DATE           01/01/2026
+START_TIME           00:00:00
+REPORT_START_DATE    01/01/2026
+REPORT_START_TIME    00:00:00
+END_DATE             01/01/2026
+END_TIME             00:30:00
+SWEEP_START          01/01
+SWEEP_END            12/31
+DRY_DAYS             0
+REPORT_STEP          00:05:00
+WET_STEP             00:01:00
+DRY_STEP             00:01:00
+ROUTING_STEP         5
+
+INERTIAL_DAMPING     PARTIAL
+NORMAL_FLOW_LIMITED  BOTH
+FORCE_MAIN_EQUATION  H-W
+VARIABLE_STEP        0
+LENGTHENING_STEP     0
+MIN_SURFAREA         100
+MAX_TRIALS           500
+HEAD_TOLERANCE       1e-12
+SYS_FLOW_TOL         5
+LAT_FLOW_TOL         5
+MINIMUM_STEP         0.5
+THREADS              1
+
+[JUNCTIONS]
+JA   11.2  5 0 0 0
+WA   10.5  5 0.3 0 0
+JH   11.2  5 0 0 0
+WH   10.5  5 0.3 0 0
+JB   11.2  5 0 0 0
+WB   10.5  5 0.15 0 0
+JC   11.2  5 0 0 0
+WC   10.5  5 0.2 0 0
+JD   11.2  5 0 0 0
+JF   11.2  5 0 0 0
+WF   10.5  5 0.5 0 0
+
+[STORAGE]
+WD   10.5  5 0.1 FUNCTIONAL 0 0 50 0 0
+
+[OUTFALLS]
+OA   9.0 FIXED 9.0 NO
+OH   9.0 FIXED 13.0 NO
+OB   9.0 FIXED 9.0 NO
+OC   9.0 FIXED 9.0 NO
+OD   9.0 FIXED 9.0 NO
+OF   9.0 FIXED 9.0 NO
+
+[CONDUITS]
+CA   JA  WA  30 0.013 0 0 0 0
+CH   JH  WH  30 0.013 0 0 0 0
+CB   JB  WB  30 0.013 0 0 0 0
+CC   JC  WC  30 0.013 0 0 0 0
+CD   JD  WD  30 0.013 0 0 0 0
+CF   JF  WF  30 0.013 0 0 0 0
+
+[PUMPS]
+PA   WA  OA  PC_A  OFF 0.6  0.15
+PH   WH  OH  PC_H  OFF 0.6  0.15
+PB   WB  OB  PC_B  OFF 0.2  0.1
+PC   WC  OC  PC_C  ON
+PD   WD  OD  PC_D  OFF 0.2  0.05
+PF   WF  OF  *  ON
+
+[XSECTIONS]
+CA   CIRCULAR 0.9 0 0 0 1
+CH   CIRCULAR 0.9 0 0 0 1
+CB   CIRCULAR 0.9 0 0 0 1
+CC   CIRCULAR 0.9 0 0 0 1
+CD   CIRCULAR 0.9 0 0 0 1
+CF   CIRCULAR 0.9 0 0 0 1
+
+[CURVES]
+PC_A  Pump3  0 0.3
+PC_A         2 0.25
+PC_A         4 0.15
+PC_H  Pump3  0 0.3
+PC_H         1 0.24
+PC_H         2 0.18
+PC_H         4 0.02
+PC_B  Pump2  0.38 0.18
+PC_B         0.64 0.24
+PC_B         1.2 0.3
+PC_C  Pump4  0 0.0
+PC_C         0.5 0.1
+PC_C         1.0 0.3
+PC_C         2.0 0.6
+PC_D  Pump1  0 0.0
+PC_D         8 0.1
+PC_D         20 0.28
+PC_D         40 0.4
+
+[TIMESERIES]
+TS_A  0:00 0.0
+TS_A  0:01 0.2
+TS_A  0:31 0.2
+TS_H  0:00 0.0
+TS_H  0:01 0.2
+TS_H  0:31 0.2
+TS_B  0:00 0.0
+TS_B  0:01 0.6
+TS_B  0:04:00 0.6
+TS_B  0:04:05 0.0
+TS_C  0:00 0.0
+TS_C  0:01 0.2
+TS_C  0:31 0.2
+TS_D  0:00 0.0
+TS_D  0:01 0.5
+TS_D  0:03:40 0.5
+TS_D  0:03:45 0.0
+TS_F  0:00 0.0
+TS_F  0:01 0.15
+TS_F  0:31 0.15
+
+[INFLOWS]
+JA   FLOW TS_A FLOW 1.0 1.0 0.0
+JH   FLOW TS_H FLOW 1.0 1.0 0.0
+JB   FLOW TS_B FLOW 1.0 1.0 0.0
+JC   FLOW TS_C FLOW 1.0 1.0 0.0
+JD   FLOW TS_D FLOW 1.0 1.0 0.0
+JF   FLOW TS_F FLOW 1.0 1.0 0.0
+
+[REPORT]
+INPUT      NO
+CONTROLS   NO
+SUBCATCHMENTS NONE
+NODES ALL
+LINKS ALL

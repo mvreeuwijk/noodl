@@ -84,16 +84,6 @@ def test_conduits_are_normalised_upstream_to_downstream():
     assert pipe.slope == pytest.approx(2.0 / (200.0**2 - 2.0**2) ** 0.5, rel=1e-12)
 
 
-def test_non_cms_flow_units_are_refused(tmp_path):
-    text = (DATA / "tree_steady.inp").read_text().replace(
-        "FLOW_UNITS           CMS", "FLOW_UNITS           CFS"
-    )
-    path = tmp_path / "cfs.inp"
-    path.write_text(text)
-    with pytest.raises(ValueError, match="FLOW_UNITS must be CMS"):
-        read_swmm_inp(path)
-
-
 def test_an_unknown_section_with_content_is_refused(tmp_path):
     text = (DATA / "tree_steady.inp").read_text() + "\n[PUMPS]\nP1 J1 J3 HEAD C1\n"
     path = tmp_path / "pumps.inp"
@@ -102,14 +92,14 @@ def test_an_unknown_section_with_content_is_refused(tmp_path):
         read_swmm_inp(path)
 
 
-def test_a_time_series_inflow_is_refused(tmp_path):
+def test_an_inflow_naming_an_undefined_time_series_is_refused(tmp_path):
     text = (DATA / "tree_steady.inp").read_text().replace(
         'J1               FLOW             ""               FLOW     1.0      1.0      0.05',
         "J1               FLOW             TS1              FLOW     1.0      1.0      0.05",
     )
     path = tmp_path / "ts.inp"
     path.write_text(text)
-    with pytest.raises(ValueError, match="time series"):
+    with pytest.raises(ValueError, match=r"time series 'TS1', which has no \[TIMESERIES\]"):
         read_swmm_inp(path)
 
 
@@ -119,7 +109,7 @@ def test_a_non_circular_cross_section_is_refused(tmp_path):
     )
     path = tmp_path / "rect.inp"
     path.write_text(text)
-    with pytest.raises(ValueError, match="only CIRCULAR"):
+    with pytest.raises(ValueError, match="shape other than CIRCULAR"):
         read_swmm_inp(path)
 
 
@@ -133,11 +123,14 @@ def test_a_conduit_with_zero_fall_is_refused(tmp_path):
         read_swmm_inp(path)
 
 
-def test_a_dwf_section_is_refused(tmp_path):
-    text = (DATA / "tree_steady.inp").read_text() + "\n[DWF]\nJ1 FLOW 0.01\n"
+def test_a_dwf_flow_is_read_and_a_pollutant_dwf_line_is_refused(tmp_path):
+    text = (DATA / "tree_steady.inp").read_text() + "\n[DWF]\nJ3 FLOW 0.01\n"
     path = tmp_path / "dwf.inp"
     path.write_text(text)
-    with pytest.raises(ValueError, match=r"\[DWF\]"):
+    net, _, _ = read_swmm_inp(path)
+    assert next(m for m in net.manholes if m.name == "J3").inflow == 0.01
+    path.write_text(text + "J3 BOD 5\n")
+    with pytest.raises(ValueError, match="only the dry-weather FLOW"):
         read_swmm_inp(path)
 
 
@@ -212,7 +205,6 @@ def test_dynwave_refuses_a_bad_variable_step_option_with_its_line(tmp_path, old,
 
 
 @pytest.mark.parametrize("old,new,match", [
-    ("ALLOW_PONDING        NO", "ALLOW_PONDING        YES", "ALLOW_PONDING"),
     ("LENGTHENING_STEP     0", "LENGTHENING_STEP     -5", r"line \d+: LENGTHENING_STEP"),
     ("J1               12.0       5          0", "J1               12.0       5          -0.2",
      "negative initial depth"),
@@ -252,9 +244,8 @@ def test_a_tidal_outfall_is_read_with_its_curve_and_gate(tmp_path):
 
 
 def test_a_timeseries_outfall_takes_its_stage_from_a_driver(tmp_path):
-    """TIMESERIES: the reader records the series name and requires the driver; a
-    [TIMESERIES] section is accepted only for series that outfalls name (their data is the
-    driver's), any other is refused as before."""
+    """TIMESERIES: the reader records the series name and requires the driver; the series is
+    the driver's data, so it is not read, and neither is any series no inflow names."""
     edits = [("Outfall          8.0        FREE                        NO",
               "Outfall          8.0        TIMESERIES Tide1            NO"),
              ("[REPORT]", "[TIMESERIES]\nTide1 0:00 8.1\nTide1 6:00 8.4\n\n[REPORT]")]
@@ -262,8 +253,7 @@ def test_a_timeseries_outfall_takes_its_stage_from_a_driver(tmp_path):
     (outfall,) = net.outfalls
     assert (outfall.kind, outfall.series, outfall.stage) == ("timeseries", "Tide1", None)
     edits[1] = ("[REPORT]", "[TIMESERIES]\nOther 0:00 8.1\n\n[REPORT]")
-    with pytest.raises(ValueError, match=r"\[TIMESERIES\].*'Other'"):
-        read_swmm_inp(_dyn(tmp_path, edits))
+    assert read_swmm_inp(_dyn(tmp_path, edits))[0].inflows is None
 
 
 def test_a_tide_curve_must_be_a_tidal_curve(tmp_path):
@@ -339,9 +329,9 @@ def test_dynwave_reads_lengthening_with_the_files_own_routing_step(tmp_path):
 
 
 @pytest.mark.parametrize("what,edit,match", [
-    ("an entry loss", "C1  0.5  0  0", "entry loss"),
-    ("an exit loss", "C1  0  0.5  0", "exit loss"),
-    ("an average loss", "C1  0  0  0.5", "average loss"),
+    ("a negative entry loss", "C1  -0.5  0  0", "negative entry loss"),
+    ("a negative exit loss", "C1  0  -0.5  0", "negative exit loss"),
+    ("a negative average loss", "C1  0  0  -0.5", "negative average loss"),
     ("seepage", "C1  0  0  0  NO  0.5", "seepage"),
     ("a bad flap word", "C1  0  0  0  MAYBE", "YES or NO"),
     ("an unknown link", "Cx  0  0  0  YES", "Cx.*not a conduit"),
@@ -560,6 +550,7 @@ def test_storage_units_are_read_with_their_curves(tmp_path):
     ("CYLINDRICAL", "4 2 0", ("cylindrical", 4.0, 2.0)),
     ("CONICAL", "4 2 0.5", ("conical", 4.0, 2.0, 0.5)),
     ("PARABOLOID", "4 2 3", ("paraboloid", 4.0, 2.0, 3.0)),
+    ("PARABOLIC", "4 2 3", ("paraboloid", 4.0, 2.0, 3.0)),      # SWMM 5.2.4's own keyword
     ("PYRAMIDAL", "4 2 0.5", ("pyramidal", 4.0, 2.0, 0.5)),
 ])
 def test_closed_storage_shapes_are_read(tmp_path, shape, params, expected):
@@ -577,7 +568,7 @@ def test_closed_storage_shapes_are_read(tmp_path, shape, params, expected):
     (("FUNCTIONAL 20 1.5 5", "FUNCTIONAL 20 1.5 -5"), r"c \(area at zero depth"),
     (("FUNCTIONAL 20 1.5 5", "BOWL 1 2 3"), "shape"),
     (("TABULAR  Bowl", "TABULAR  Cup"), "curve 'Cup'"),
-    (("Bowl    STORAGE", "Bowl    SHAPE"), "type SHAPE"),
+    (("Bowl    STORAGE", "Bowl    PUMP1"), "not a STORAGE curve"),
     (("Bowl             1.0 60", "Bowl             0.4 60"), "strictly increasing"),
     (("J3      10.0 2.0      0", "J3      10.0 -2.0     0"), "negative maximum depth"),
     (("J3      10.0 2.0      0", "J3      10.0 2.0      -1"), "negative initial depth"),
@@ -600,9 +591,10 @@ def test_storage_and_curves_are_dynamic_wave_only(tmp_path):
 
 
 def test_a_curve_section_without_storage_units_is_refused_unless_storage(tmp_path):
-    """[CURVES] is read for STORAGE curves only: a PUMP1 curve has nothing to drive."""
-    path = _dyn(tmp_path, [("[OUTFALLS]\n", "[CURVES]\nP1 PUMP1 0 0 1 1\n\n[OUTFALLS]\n")])
-    with pytest.raises(ValueError, match="P1.*type PUMP1"):
+    """[CURVES] is read for the types an object uses: a WEIR (coefficient) curve drives nothing
+    that is modelled."""
+    path = _dyn(tmp_path, [("[OUTFALLS]\n", "[CURVES]\nP1 WEIR 0 0 1 1\n\n[OUTFALLS]\n")])
+    with pytest.raises(ValueError, match="P1.*type WEIR"):
         read_swmm_inp(path)
 
 
@@ -636,8 +628,14 @@ def _structures(tmp_path, edits=()):
 def test_orifices_weirs_and_outlets_are_read():
     """[ORIFICES], [WEIRS] and [OUTLETS] (link.c:1641-1692, 2010-2099, 2524-2604) with
     their [XSECTIONS] openings and the [CURVES] RATING curve of a tabular outlet."""
+    import dataclasses
+
     from noodl.apps.sewer.network import Orifice, Outlet, Weir
     net, _, _ = read_swmm_inp(DATA / STRUCTURES)
+    for kind in ("orifices", "weirs", "outlets"):     # `order` is the line of the entry
+        assert all(d.order > 0 for d in getattr(net, kind))
+        net = dataclasses.replace(net, **{kind: tuple(dataclasses.replace(d, order=0)
+                                                      for d in getattr(net, kind))})
     assert net.orifices == (Orifice("OR1", "J2", "J3", "side", "rectangular", 0.2, 0.1, 0.65,
                                     width=0.3),)
     assert net.weirs == (
@@ -725,3 +723,203 @@ def test_regulators_are_dynamic_wave_only(tmp_path):
     with pytest.raises(ValueError, match=r"\[ORIFICES\].*flow regulators are read under "
                                          r"dynamic-wave routing only"):
         read_swmm_inp(path)
+
+
+# ----------------------------------------------------------------------------- dividers
+def _divider_inp(tmp_path, row, dynwave=True, extra=()):
+    """The DYNWAVE tree with J3 moved from [JUNCTIONS] to [DIVIDERS] as `row`."""
+    path = _dyn(tmp_path) if dynwave else DATA / "tree_kinwave.inp"
+    text = path.read_text()
+    j3 = next(line for line in text.splitlines() if line.startswith("J3 "))
+    text = text.replace(j3 + "\n", "").replace(
+        "[OUTFALLS]", f"[DIVIDERS]\n{row}\n\n[OUTFALLS]", 1)
+    for old, new in extra:
+        assert old in text, old
+        text = text.replace(old, new)
+    out = tmp_path / "divider.inp"
+    out.write_text(text)
+    return out
+
+
+@pytest.mark.parametrize("row,kind", [
+    ("J3 10.0 C3 OVERFLOW 0.7 0.1 0.2 5", "overflow"),
+    ("J3 10.0 C3 CUTOFF 0.05 0.7 0.1 0.2 5", "cutoff"),
+    ("J3 10.0 C3 TABULAR D1 0.7 0.1 0.2 5", "tabular"),
+    ("J3 10.0 C3 WEIR 0.01 0.5 3.0 0.7 0.1 0.2 5", "weir"),
+])
+def test_a_divider_is_read_as_a_junction_with_its_depths(tmp_path, row, kind):
+    """node.c:1157-1208: the MaxDepth, InitDepth, SurDepth and Aponded follow the fields
+    of the divider type (none for OVERFLOW, one for CUTOFF and TABULAR, three for WEIR);
+    under DYNWAVE the divider is a plain junction (the diversion is never called)."""
+    text = _divider_inp(tmp_path, row).read_text()
+    path = tmp_path / "read.inp"
+    path.write_text(text + "\n[CURVES]\nD1 DIVERSION 0 0 1 1\n")
+    net, _, _ = read_swmm_inp(path)
+    j3 = next(m for m in net.manholes if m.name == "J3")
+    assert (j3.invert, j3.ground, j3.initial_depth, j3.surcharge_depth) == (
+        10.0, pytest.approx(10.7), 0.1, 0.2)
+
+
+@pytest.mark.parametrize("row,match", [
+    ("J3 10.0 C9 OVERFLOW", "'C9', which is not a link"),
+    ("J3 10.0 C4 OVERFLOW", "'C4', which is not attached"),
+    ("J3 10.0 * OVERFLOW", "no diverted link"),
+    ("J3 10.0 C3 SPILL", "'SPILL'"),
+    ("J3 10.0 C3 CUTOFF", "needs 5 fields"),
+    ("J3 10.0 C3 TABULAR NoCurve", "'NoCurve', which is not in"),
+    ("J3 10.0 C3 CUTOFF abc", "must be a number"),
+    ("J3 10.0 C3 WEIR 0.01 0 3.0", "ERR_WEIR_DIVIDER"),
+    ("J3 10.0 C3 WEIR 0.01 0.5 0", "ERR_WEIR_DIVIDER"),
+    ("J3 10.0 C3 WEIR 9 0.5 3.0", "ERR_WEIR_DIVIDER"),
+    ("J3 10.0 C3 OVERFLOW 5 0 -1", "negative surcharge depth"),
+])
+def test_divider_refusals_are_swmms_own(tmp_path, row, match):
+    """What `node_validate`/`divider_readParams` reject whatever the routing."""
+    with pytest.raises(ValueError, match=match):
+        read_swmm_inp(_divider_inp(tmp_path, row))
+
+
+def test_dividers_are_refused_by_name_under_kinwave_and_steady(tmp_path):
+    """Outside DYNWAVE SWMM diverts flow at a divider (node.c `divider_getOutflow`), which
+    is not modelled."""
+    with pytest.raises(ValueError, match=r"\[DIVIDERS\].*dynamic-wave routing only"):
+        read_swmm_inp(_divider_inp(tmp_path, "J3 10.0 C3 OVERFLOW", dynwave=False))
+
+
+# ------------------------------------------------------------- content before a section
+def test_lines_before_the_first_section_are_title_text_as_in_swmm(tmp_path):
+    """SWMM's second pass over the file starts in `[TITLE]` (input.c:174), so text before
+    the first header is title text; the model is the file's own."""
+    path = tmp_path / "title.inp"
+    path.write_text("A stray title line\n; a comment\nJ1 12.0 not a record\n"
+                    + _dyn(tmp_path).read_text())
+    assert read_swmm_inp(path)[0].routing == "dynamic_wave"
+
+
+def test_a_merge_conflict_marker_is_refused(tmp_path):
+    """A file with both sides of a merge holds its sections twice: refused, naming the
+    marker and its line, wherever it sits."""
+    path = tmp_path / "merge.inp"
+    path.write_text("<<<<<<< HEAD\n" + _dyn(tmp_path).read_text())
+    with pytest.raises(ValueError, match=r"line 1: version-control merge-conflict marker"):
+        read_swmm_inp(path)
+    path.write_text(_dyn(tmp_path).read_text() + "\n[MAP]\n=======\n")
+    with pytest.raises(ValueError, match="merge-conflict marker '======='"):
+        read_swmm_inp(path)
+
+
+# --------------------------------------------------------------------------- ponding
+def test_allow_ponding_yes_is_read_with_the_junction_ponded_areas(tmp_path):
+    """`ALLOW_PONDING YES` (project.c:603-616, NoYesWords) is `allow_ponding`; Aponded (the
+    sixth [JUNCTIONS] field, or the one after SurDepth of a divider) is `ponded_area`, m2."""
+    j1 = "J1               12.0       5          0          0          0"
+    net, _, _ = read_swmm_inp(_dyn(tmp_path, [
+        ("ALLOW_PONDING        NO", "ALLOW_PONDING        YES"),
+        (j1, "J1               12.0       5          0          0          2.5")]))
+    assert net.dynamic_wave.allow_ponding
+    assert {m.name: m.ponded_area for m in net.manholes}["J1"] == 2.5
+    net, _, _ = read_swmm_inp(_dyn(tmp_path, [(j1, j1[:-1] + "2.5")]))
+    assert not net.dynamic_wave.allow_ponding            # the default is NO
+    assert {m.name: m.ponded_area for m in net.manholes}["J1"] == 2.5   # read, unused
+    row = "J3 10.0 C3 CUTOFF 0.05 0.7 0.1 0.2 5"
+    assert next(m for m in read_swmm_inp(_divider_inp(tmp_path, row))[0].manholes
+                if m.name == "J3").ponded_area == 5.0
+
+
+@pytest.mark.parametrize("old,new,match", [
+    ("ALLOW_PONDING        NO", "ALLOW_PONDING        MAYBE", r"line \d+: ALLOW_PONDING must be"),
+    ("J1               12.0       5          0          0          0",
+     "J1               12.0       5          0          0          -1", "negative ponded area"),
+])
+def test_ponding_refusals(tmp_path, old, new, match):
+    with pytest.raises(ValueError, match=match):
+        read_swmm_inp(_dyn(tmp_path, [(old, new)]))
+
+
+def test_ponding_with_a_ponded_area_is_dynamic_wave_only(tmp_path):
+    """Under STEADY or KINWAVE SWMM re-releases ponded water into the next step's flow
+    (flowrout.c:151-156), which is not modelled; without an Aponded it changes nothing."""
+    text = (DATA / "tree_kinwave.inp").read_text().replace(
+        "ALLOW_PONDING        NO", "ALLOW_PONDING        YES")
+    path = tmp_path / "k.inp"
+    path.write_text(text)
+    read_swmm_inp(path)
+    j1 = "J1               12.0       5          0          0          0"
+    assert j1 in text
+    path.write_text(text.replace(j1, j1[:-1] + "2"))
+    with pytest.raises(ValueError, match=r"line \d+: ALLOW_PONDING YES with node 'J1'"):
+        read_swmm_inp(path)
+
+
+# ------------------------------------------------------- options and sections that matter
+@pytest.mark.parametrize("old,new,match", [
+    ("SKIP_STEADY_STATE    NO", "SKIP_STEADY_STATE    YES", "SKIP_STEADY_STATE YES"),
+    ("SKIP_STEADY_STATE    NO", "SKIP_STEADY_STATE    MAYBE", "must be YES or NO"),
+    ("SKIP_STEADY_STATE    NO", "SKIP_STEADY_STATE    NO\nIGNORE_ROUTING YES",
+     "IGNORE_ROUTING YES"),
+    ("FLOW_ROUTING         DYNWAVE", "FLOW_ROUTING         NONE", "FLOW_ROUTING NONE"),
+])
+@pytest.mark.parametrize("dynwave", [True, False])
+def test_options_that_change_what_is_routed_are_refused_by_name(tmp_path, old, new, match,
+                                                                dynwave):
+    """IGNORE_ROUTING, FLOW_ROUTING NONE and SKIP_STEADY_STATE YES change the routed result
+    (swmm5.c:375, routing.c:386-392), under every routing; NO is SWMM's default."""
+    if dynwave:
+        path = _dyn(tmp_path, [(old, new)] if old != "FLOW_ROUTING         DYNWAVE" else [])
+        if old.startswith("FLOW_ROUTING"):
+            path.write_text(path.read_text().replace(old, new))
+    else:
+        old = old.replace("DYNWAVE", "KINWAVE")
+        path = tmp_path / "k.inp"
+        text = (DATA / "tree_kinwave.inp").read_text()
+        assert old in text
+        path.write_text(text.replace(old, new.replace("DYNWAVE", "KINWAVE")))
+    with pytest.raises(ValueError, match=match):
+        read_swmm_inp(path)
+
+
+OPEN_C1 = [("C1               CIRCULAR     0.30             0          0          0          1",
+            "C1               RECT_OPEN    0.30             1.0        0          0          1")]
+
+
+def test_evaporation_that_can_be_positive_is_refused_with_an_open_conduit(tmp_path):
+    """An open conduit loses ``topWidth * length * Evap.rate`` (link.c:1359-1362); that is
+    not modelled, so a rate that is not zero is refused naming the conduit, while a zero
+    rate, or only closed conduits, leave the section ignored."""
+    zero = _dyn(tmp_path, OPEN_C1)
+    read_swmm_inp(zero)
+    for row in ("CONSTANT         0.1", "MONTHLY 0 0 0 0 0 0 0 0 0 0 0 0.2",
+                "TIMESERIES       Evap", "TEMPERATURE"):
+        path = _dyn(tmp_path, [*OPEN_C1, ("CONSTANT         0.0", row)])
+        with pytest.raises(ValueError, match=r"line \d+: \[EVAPORATION\] .*conduit 'C1' is open"):
+            read_swmm_inp(path)
+    read_swmm_inp(_dyn(tmp_path, [("CONSTANT         0.0", "CONSTANT         0.1")]))
+    read_swmm_inp(_dyn(tmp_path, [*OPEN_C1, ("CONSTANT         0.0",
+                                             "MONTHLY 0 0 0 0 0 0 0 0 0 0 0 0")]))
+
+
+def test_an_inflow_at_an_outfall_reaches_no_link_and_is_dropped(tmp_path):
+    """A lateral inflow into an outfall (a node dynamic-wave routing never solves) is read and
+    dropped; an unknown node is still refused."""
+    inflows = "J1               FLOW             \"\"               FLOW     1.0      1.0      0.05"
+    edit = [(inflows, inflows + "\nOutfall          FLOW             \"\"               FLOW"
+             "     1.0      1.0      0.07")]
+    net, _, _ = read_swmm_inp(_dyn(tmp_path, edit))
+    base, _, _ = read_swmm_inp(_dyn(tmp_path))
+    assert net.manholes == base.manholes and net.outfalls == base.outfalls
+    edit = [(inflows, inflows + "\nNowhere          FLOW             \"\"               FLOW"
+             "     1.0      1.0      0.07")]
+    with pytest.raises(ValueError, match="inflow at 'Nowhere', which is not a junction"):
+        read_swmm_inp(_dyn(tmp_path, edit))
+
+
+def test_raingages_without_subcatchments_are_ignored(tmp_path):
+    """A gage only feeds subcatchments (and RDII, a refused section of its own)."""
+    gages = ("\n[RAINGAGES]\n;;Name Format Interval SCF Source\nG1 VOLUME 0:05 1.0 "
+             "TIMESERIES R1\n")
+    path = tmp_path / "gage.inp"
+    path.write_text(_dyn(tmp_path).read_text() + gages)
+    read_swmm_inp(path)
+    path.write_text(path.read_text() + "\n[SUBCATCHMENTS]\nS1 G1 J1 1 50 100 0.5 0\n")
+    with pytest.raises(ValueError, match="time series 'R1', which has no"):
+        read_swmm_inp(path)         # subcatchments are read now (tests/apps/sewer/test_runoff.py)

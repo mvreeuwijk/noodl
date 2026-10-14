@@ -1,0 +1,157 @@
+[TITLE]
+;;Project Title/Notes
+Month boundary, adjustments, soil recovery pattern, fast gage - noodl test fixture
+
+[OPTIONS]
+;;Option             Value
+FLOW_UNITS           CMS
+INFILTRATION         HORTON
+FLOW_ROUTING         DYNWAVE
+LINK_OFFSETS         DEPTH
+MIN_SLOPE            0
+ALLOW_PONDING        NO
+SKIP_STEADY_STATE    NO
+
+START_DATE           01/31/2026
+START_TIME           23:40:00
+REPORT_START_DATE    01/31/2026
+REPORT_START_TIME    23:40:00
+END_DATE             02/01/2026
+END_TIME             00:08:00
+SWEEP_START          01/01
+SWEEP_END            12/31
+DRY_DAYS             0
+REPORT_STEP          00:02:00
+WET_STEP             00:05:00
+DRY_STEP             00:10:00
+ROUTING_STEP         120
+
+INERTIAL_DAMPING     PARTIAL
+NORMAL_FLOW_LIMITED  BOTH
+FORCE_MAIN_EQUATION  H-W
+VARIABLE_STEP        0
+LENGTHENING_STEP     0
+MIN_SURFAREA         0
+MAX_TRIALS           500
+HEAD_TOLERANCE       1e-12
+SYS_FLOW_TOL         5
+LAT_FLOW_TOL         5
+MINIMUM_STEP         0.5
+THREADS              1
+
+
+[EVAPORATION]
+;;Data Source    Parameters
+;;-------------- ----------------
+MONTHLY          6.0 12.0 5 5 5 5 5 5 5 5 5 5
+RECOVERY         Rec
+DRY_ONLY         NO
+
+[PATTERNS]
+;;Name           Type       Multipliers
+Rec              MONTHLY    0.5 2.0 1 1 1 1 1 1 1 1 1 1
+Nv               MONTHLY    1.0 1.6 1 1 1 1 1 1 1 1 1 1
+Dv               MONTHLY    1.0 0.5 1 1 1 1 1 1 1 1 1 1
+Iv               MONTHLY    1.0 0.7 1 1 1 1 1 1 1 1 1 1
+
+[RAINGAGES]
+;;Name           Format    Interval SCF      Source
+;;-------------- --------- ------ ------ ----------
+RG1              VOLUME    0:01:30  1.0      TIMESERIES Rf
+
+[SUBCATCHMENTS]
+;;Name           Rain Gage        Outlet           Area     %Imperv  Width    %Slope   CurbLen  SnowPack
+;;-------------- ---------------- ---------------- -------- -------- -------- -------- -------- ----------------
+S1               RG1              J1               2.0      35       120      1.5      0
+S2               RG1              J2               1.0      55       100      2.5      0
+
+[SUBAREAS]
+;;Subcatchment   N-Imperv   N-Perv     S-Imperv   S-Perv     PctZero    RouteTo    PctRouted
+;;-------------- ---------- ---------- ---------- ---------- ---------- ---------- ----------
+S1               0.013      0.20       1.5        4.0        25         OUTLET
+S2               0.013      0.15       1.5        3.0        25         OUTLET
+
+[INFILTRATION]
+;;Subcatchment   MaxRate    MinRate    Decay      DryTime    MaxInfil
+;;-------------- ---------- ---------- ---------- ---------- ----------
+S1               40         6          4          7          0
+S2               30         4          3          5          25
+
+;; SWMM reads [ADJUSTMENTS] in file order: the N-PERV, DSTORE and INFIL lines count only
+;; when they come after the subcatchment's line in [SUBCATCHMENTS]
+[ADJUSTMENTS]
+;;Parameter      Subcatchment  Pattern / Monthly values
+EVAPORATION      1.0 -1.0 0 0 0 0 0 0 0 0 0 0
+RAINFALL         1.0 1.5 1 1 1 1 1 1 1 1 1 1
+CONDUCTIVITY     1.0 0.5 1 1 1 1 1 1 1 1 1 1
+N-PERV           S1       Nv
+DSTORE           S1       Dv
+INFIL            S2       Iv
+
+[TIMESERIES]
+;;Name           Date       Time       Value
+;;-------------- ---------- ---------- ----------
+Rf               01/31/2026 23:40:00    0.8
+Rf                          23:41:30    1.2
+Rf                          23:43:00    0.0
+Rf                          23:44:30    0.0
+Rf                          23:46:00    1.5
+Rf                          23:47:30    2.0
+Rf                          23:49:00    1.0
+Rf                          23:50:30    2.5
+Rf                          23:52:00    3.0
+Rf                          23:53:30    0.0
+Rf                          23:55:00    0.0
+Rf                          23:56:30    1.5
+Rf                          23:58:00    2.5
+Rf                          23:59:30    1.0
+Rf                          02/01/2026 00:01:00   2.0
+Rf                          00:02:30   0.5
+Rf                          00:04:00   0.0
+
+[JUNCTIONS]
+;;Name           Elevation  MaxDepth   InitDepth  SurDepth   Aponded
+;;-------------- ---------- ---------- ---------- ---------- ----------
+J1               12.0       5          0          0          0
+J2               11.0       5          0          0          0
+J3               10.0       5          0          0          0
+
+[OUTFALLS]
+;;Name           Elevation  Type       Stage Data       Gated    Route To
+;;-------------- ---------- ---------- ---------------- -------- ----------------
+Outfall          9.0        FIXED      9.6              NO
+
+[CONDUITS]
+;;Name           From Node        To Node          Length     Roughness  InOffset   OutOffset  InitFlow   MaxFlow
+;;-------------- ---------------- ---------------- ---------- ---------- ---------- ---------- ---------- ----------
+C1               J1               J3               200        0.013      0          0          0          0
+C2               J2               J3               200        0.013      0          0          0          0
+C3               J3               Outfall          200        0.013      0          0          0          0
+
+[XSECTIONS]
+;;Link           Shape        Geom1            Geom2      Geom3      Geom4      Barrels    Culvert
+;;-------------- ------------ ---------------- ---------- ---------- ---------- ---------- ----------
+C1               CIRCULAR     1.20             0          0          0          1
+C2               CIRCULAR     1.00             0          0          0          1
+C3               CIRCULAR     1.60             0          0          0          1
+
+[REPORT]
+INPUT      NO
+CONTROLS   NO
+SUBCATCHMENTS ALL
+NODES ALL
+LINKS ALL
+
+[TAGS]
+
+[MAP]
+DIMENSIONS 0.000 0.000 1000.000 1000.000
+Units      None
+
+[COORDINATES]
+;;Node           X-Coord            Y-Coord
+;;-------------- ------------------ ------------------
+J1               0                  200
+J2               0                  100
+J3               100                150
+Outfall          200                150
