@@ -92,7 +92,7 @@ def test_grid_halves_with_twice_the_substeps():
 
 
 def test_every_compared_column_maps():
-    for path in sorted(DATA.glob("*.json")):
+    for path in sorted(p for p in DATA.glob("*.json") if p.name != "parity-electrical.json"):
         omit = ("RL_3", "load_sc_3") if "ACLine_RL" in path.name else ()
         *_, names = read_modelica_circuit(path, omit=omit)
         doc = load(path)

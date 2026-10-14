@@ -9,7 +9,7 @@ MAX_CSV_BYTES = 300_000
 
 
 def test_fourteen_json_csv_pairs():
-    jsons = {p.stem for p in DATA.glob("*.json")}
+    jsons = {p.stem for p in DATA.glob("*.json") if p.name != "parity-electrical.json"}
     csvs = {p.stem for p in DATA.glob("*.csv")}
     assert len(jsons) == 14
     assert jsons == csvs

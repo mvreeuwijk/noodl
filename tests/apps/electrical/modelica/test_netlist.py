@@ -227,7 +227,7 @@ def test_converter_without_dc_ground_is_refused(tmp_path):
 
 
 def test_every_fixture_builds():
-    for path in sorted(DATA.glob("*.json")):
+    for path in sorted(p for p in DATA.glob("*.json") if p.name != "parity-electrical.json"):
         omit = ("RL_3", "load_sc_3") if "ACLine_RL" in path.name else ()
         nl = build(load(path), omit=omit)
         assert nl.devices, path.name
