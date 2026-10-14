@@ -14,7 +14,10 @@ DYNWAVE `[STORAGE]` (FUNCTIONAL, TABULAR and the closed shapes CYLINDRICAL, CONI
 PARABOLIC (also spelled PARABOLOID), PYRAMIDAL, with SurDepth; a non-zero evaporation factor and
 exfiltration are refused) with the `[CURVES]` of type STORAGE that its TABULAR units name, and
 `[ORIFICES]`, `[WEIRS]` and `[OUTLETS]` (their `[XSECTIONS]` openings and RATING curves;
-`_regulators`). The `[CURVES]` of type SHAPE give the `CUSTOM` sections their width curves.
+`_regulators`), `[PUMPS]` (curves of type PUMP1-PUMP5, `inp_controls.read_pumps`) and
+`[CONTROLS]` (rule-based controls with their CONTROL curves and time series, `RULE_STEP`,
+`inp_controls.read_controls`). The `[CURVES]` of type SHAPE give the `CUSTOM` sections their
+width curves.
 InitDepth,
 InitFlow, MaxFlow, flap gates and barrels are dynamic-wave physics: under STEADY or KINWAVE
 routing a non-zero or gated value is refused by name rather than skipped.
@@ -36,9 +39,9 @@ positive and a conduit is open: `_check_evaporation`), `[REPORT]`,
 `[TAGS]`, `[MAP]`, `[COORDINATES]`.
 
 REFUSED BY NAME, because skipping them would silently change the physics:
-`[STORAGE]`, `[ORIFICES]`, `[WEIRS]` and `[OUTLETS]` under STEADY or KINWAVE, `[PUMPS]`,
-`[DIVIDERS]` under STEADY or KINWAVE, `[CONTROLS]`,
-`[CURVES]` of any type but STORAGE, RATING, TIDAL, SHAPE and DIVERSION, `[LID_USAGE]`,
+`[STORAGE]`, `[ORIFICES]`, `[WEIRS]`, `[OUTLETS]`, `[PUMPS]`, `[CONTROLS]` and `[DIVIDERS]` under
+STEADY or KINWAVE, `[CURVES]` of any type but STORAGE, RATING, TIDAL, SHAPE, DIVERSION,
+PUMP1-PUMP5 and CONTROL, `[LID_USAGE]`,
 `IGNORE_ROUTING YES`, `FLOW_ROUTING NONE`, `SKIP_STEADY_STATE YES`, roadway weirs, weir
 coefficient curves, `[FILES]` `USE HOTSTART`, `USE INFLOWS`, `USE RDII` and `USE RUNOFF`
 (`SAVE` lines are harmless and ignored), and any other section carrying content. A conduit with a
@@ -130,6 +133,7 @@ from noodl.apps.sewer.inflows import (
     timeseries_entries,
     tokens,
 )
+from noodl.apps.sewer.inp_controls import read_controls, read_pumps
 from noodl.apps.sewer.inp_hydrology import HYDROLOGY_SECTIONS, read_hydrology
 from noodl.apps.sewer.inp_xsect import read_transects, read_xsect
 from noodl.apps.sewer.network import (
@@ -211,7 +215,7 @@ _IGNORED = {
 }
 _READ = {"OPTIONS", "JUNCTIONS", "OUTFALLS", "CONDUITS", "XSECTIONS", "LOSSES", "INFLOWS",
          "POLLUTANTS", "STORAGE", "CURVES", "ORIFICES", "WEIRS", "OUTLETS", "TIMESERIES",
-         "PATTERNS", "DWF", "FILES", "TRANSECTS", "DIVIDERS"}
+         "PATTERNS", "DWF", "FILES", "TRANSECTS", "DIVIDERS", "PUMPS", "CONTROLS"}
 #: `[FILES]` ``USE`` kinds that change the physics (a hot-start state, interface inflows, RDII
 #: or runoff flows): refused. ``USE RAINFALL`` only feeds ``FILE`` rain gages, which are refused.
 _REFUSED_FILES = {"HOTSTART": "the initial state", "INFLOWS": "interface inflows",
@@ -229,6 +233,10 @@ _WEIR_XSECT = {"transverse": "RECT_OPEN", "sideflow": "RECT_OPEN", "v_notch": "T
 #: SWMM's [STORAGE] shape keywords (keywords.c:108 `RelationWords`)
 _STORAGE_SHAPES = ("TABULAR", "FUNCTIONAL", "CYLINDRICAL", "CONICAL", "PARABOLIC",
                    "PARABOLOID", "PYRAMIDAL")
+#: The curve types the reader keeps: the pump curves (`pumps.py`) and the CONTROL curves of
+#: rule actions (`controls.py`) join the storage, rating, tidal and shape curves.
+_READ_CURVES = ("STORAGE", "RATING", "TIDAL", "SHAPE", "DIVERSION", "PUMP1", "PUMP2", "PUMP3",
+                "PUMP4", "PUMP5", "CONTROL")
 #: SWMM's curve types (keywords.c `CurveTypeWords`)
 _CURVE_TYPES = ("STORAGE", "DIVERSION", "TIDAL", "RATING", "CONTROL", "SHAPE", "WEIR",
                 "PUMP1", "PUMP2", "PUMP3", "PUMP4", "PUMP5")
@@ -264,6 +272,7 @@ def read_swmm_inp(
     offsets = "DEPTH"
     flow_units = "CFS"                  # SWMM's default (project.c)
     ponding = None                      # the ALLOW_PONDING line, if YES
+    rule_step = 0.0                     # RULE_STEP: 0 evaluates the rules every routing step
     raw: dict[str, object] = {}
     opts: dict[str, tuple] = {}
     for line in sections.get("OPTIONS", []):
@@ -304,6 +313,9 @@ def read_swmm_inp(
                 raise ValueError(
                     f"{path}: line {line.number}: FLOW_ROUTING NONE skips flow routing "
                     f"altogether (SWMM's IgnoreRouting), which is not modelled")
+        elif key == "RULE_STEP":
+            require_fields(line, 2, "RULE_STEP", path)
+            rule_step = _seconds(line, path)
         elif key == "LINK_OFFSETS":
             require_fields(line, 2, "LINK_OFFSETS", path)
             offsets = line.fields[1].upper()
@@ -580,6 +592,23 @@ def read_swmm_inp(
 
     regulators = _regulators(sections, regulator_xsect, ratings, invert, dynamic, offsets,
                              routing, path, lf, qf)
+    pumps = read_pumps(sections.get("PUMPS", []), curves=all_curves, nodes=set(invert),
+                       dynamic=dynamic, routing=routing, path=path, lf=lf)
+    link_kinds = {p.name: "conduit" for p in pipes}
+    for kind, devices in (("orifice", regulators["ORIFICES"]), ("weir", regulators["WEIRS"]),
+                          ("outlet", regulators["OUTLETS"]), ("pump", pumps)):
+        link_kinds.update({d.name: kind for d in devices})
+    series_rows = _tseries(sections, path)
+
+    def control_series(name):
+        if name not in series_rows:
+            raise ValueError(f"time series {name!r} is not in [TIMESERIES]")
+        return _read_series(name, series_rows[name], start, path)
+
+    controls = read_controls(
+        sections.get("CONTROLS", []), links=link_kinds, nodes=set(invert), curves=all_curves,
+        series=control_series, rule_step=rule_step, start=start, dynamic=dynamic,
+        routing=routing, path=path, lf=lf, qf=qf)
 
     pollutants: dict[str, dict] = {}
     cdwf: list[str] = []                          # pollutants with a dry-weather concentration
@@ -624,7 +653,7 @@ def read_swmm_inp(
         manholes=tuple(manholes), pipes=tuple(pipes), outfalls=tuple(outfalls),
         routing=routing, geometry=geometry, dynamic_wave=dynamic_wave,
         orifices=regulators["ORIFICES"], weirs=regulators["WEIRS"],
-        outlets=regulators["OUTLETS"], inflows=schedule,
+        outlets=regulators["OUTLETS"], inflows=schedule, pumps=pumps, controls=controls,
     )
     network.validate()
     return network, loads, pollutants
@@ -828,11 +857,11 @@ def _curves(lines, path, lf: float = 1.0, qf: float = 1.0
                 raise ValueError(
                     f"{path}: line {line.number}: curve {name!r} needs its type (one of "
                     f"{_CURVE_TYPES}) on its first line")
-            if kind not in ("STORAGE", "RATING", "TIDAL", "SHAPE", "DIVERSION"):
+            if kind not in _READ_CURVES:
                 raise ValueError(
                     f"{path}: line {line.number}: curve {name!r} is of type {kind}; only "
-                    f"STORAGE, RATING, TIDAL, SHAPE and DIVERSION curves are read (no object "
-                    f"that uses another type is modelled)")
+                    f"{', '.join(_READ_CURVES)} curves are read (no object that uses "
+                    f"another type is modelled)")
             points[name] = []
             kinds[name] = kind
             start = 2
@@ -848,9 +877,12 @@ def _curves(lines, path, lf: float = 1.0, qf: float = 1.0
                     f"must be strictly increasing (SWMM's ERR_CURVE_SEQUENCE), got {x} "
                     f"after {points[name][-1][0]}")
             points[name].append((x, y))
+    # a PUMP1 curve's x values are a volume: SWMM's UCF(VOLUME) is 1 (ft3) or QCF (m3)
+    vf = QCF if lf != 1.0 else 1.0
     scales = {"STORAGE": (lf, lf * lf), "RATING": (lf, qf), "TIDAL": (1.0, lf),
-              "SHAPE": (1.0, 1.0),
-              "DIVERSION": (qf, qf)}
+              "SHAPE": (1.0, 1.0), "DIVERSION": (qf, qf), "PUMP1": (vf, qf),
+              "PUMP2": (lf, qf), "PUMP3": (lf, qf), "PUMP4": (lf, qf), "PUMP5": (lf, qf),
+              "CONTROL": (1.0, 1.0)}
     return {name: (kinds[name], (tuple(p[0] * scales[kinds[name]][0] for p in pts),
                                  tuple(p[1] * scales[kinds[name]][1] for p in pts)))
             for name, pts in points.items()}
@@ -946,12 +978,14 @@ def _orifice(line, name, u, v, where, xsect, ratings, path, lf, qf) -> Orifice:
     if cd < 0.0:                                                             # link.c:1675
         raise ValueError(f"{where}: negative discharge coefficient {cd}")
     gated = _yes_no(line, 6, "the flap gate", path) if len(line.fields) > 6 else False
-    if len(line.fields) > 7 and as_float(line, 7, "the close time", path) < 0.0:
+    close_time = as_float(line, 7, "the close time", path) if len(line.fields) > 7 else 0.0
+    if close_time < 0.0:
         raise ValueError(f"{where}: negative close time {line.fields[7]}")    # link.c:1688
     shape, geoms = _opening(xsect.get(name), name, ("CIRCULAR", "RECT_CLOSED"), path, lf)
     return Orifice(name, u, v, orientation.lower(),
                    "circular" if shape == "CIRCULAR" else "rectangular", geoms[0], crest, cd,
-                   width=None if shape == "CIRCULAR" else geoms[1], flap_gate=gated)
+                   width=None if shape == "CIRCULAR" else geoms[1], flap_gate=gated,
+                   close_time=close_time, order=line.number)
 
 
 def _weir(line, name, u, v, where, xsect, ratings, path, lf, qf) -> Weir:
@@ -988,7 +1022,7 @@ def _weir(line, name, u, v, where, xsect, ratings, path, lf, qf) -> Weir:
     return Weir(name, u, v, kind, geoms[0], geoms[1], crest, cd,
                 side_slopes=(geoms[2], geoms[3]) if shape == "TRAPEZOIDAL" else (0.0, 0.0),
                 end_contractions=end_con, end_discharge_coefficient=cd2,
-                can_surcharge=surcharge, flap_gate=gated)
+                can_surcharge=surcharge, flap_gate=gated, order=line.number)
 
 
 def _outlet(line, name, u, v, where, xsect, ratings, path, lf, qf) -> Outlet:
@@ -1016,7 +1050,7 @@ def _outlet(line, name, u, v, where, xsect, ratings, path, lf, qf) -> Outlet:
         n = 6
     gated = _yes_no(line, n, "the flap gate", path) if len(line.fields) > n else False
     return Outlet(name, u, v, crest, rating, head_difference=qualifier == "HEAD",
-                  flap_gate=gated)
+                  flap_gate=gated, order=line.number)
 
 
 _REGULATOR_READERS = {"ORIFICES": _orifice, "WEIRS": _weir, "OUTLETS": _outlet}
