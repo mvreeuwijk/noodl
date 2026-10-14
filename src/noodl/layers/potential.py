@@ -468,36 +468,34 @@ class PotentialFlowLayer:
         """`self._accumulate(w)` restricted to boundary rows -- the repeated `A_bound w` site."""
         return self._accumulate(w)[..., self.bound]
 
+    def _scatter_node_sources(self, value) -> torch.Tensor | None:
+        """The sum over node sources of `value(j, ns)` (one value per node of source `j`),
+        scattered to the INTERIOR rows; `None` when this layer has no node sources. Every
+        node-source withdrawal and slope (classic, threaded and Modified Nodal Analysis)
+        is assembled here."""
+        if not self._node_sources:
+            return None
+        out = None
+        for j, (ns, pos) in enumerate(
+                zip(self._node_sources, self._source_positions, strict=True)):
+            v = value(j, ns)
+            zeros = torch.zeros(
+                v.shape[:-1] + (len(self.interior),), dtype=v.dtype, device=v.device
+            )
+            term = zeros.index_add(-1, pos, v)
+            out = term if out is None else out + term
+        return out
+
     def _node_source_withdrawal(
         self, phi: torch.Tensor, drivers: Mapping
     ) -> torch.Tensor | None:
         """Total potential-dependent withdrawal per INTERIOR row, or `None` when this layer
         has no node sources. `phi` is full-node."""
-        if not self._node_sources:
-            return None
-        out = None
-        for ns, pos in zip(self._node_sources, self._source_positions, strict=True):
-            w = ns.flow(phi[..., ns.nodes], drivers)
-            zeros = torch.zeros(
-                w.shape[:-1] + (len(self.interior),), dtype=w.dtype, device=w.device
-            )
-            term = zeros.index_add(-1, pos, w)
-            out = term if out is None else out + term
-        return out
+        return self._scatter_node_sources(lambda j, ns: ns.flow(phi[..., ns.nodes], drivers))
 
     def _node_source_slopes(self, phi: torch.Tensor, drivers: Mapping) -> torch.Tensor | None:
         """`diag(w')` per INTERIOR row, or `None` when this layer has no node sources."""
-        if not self._node_sources:
-            return None
-        out = None
-        for ns, pos in zip(self._node_sources, self._source_positions, strict=True):
-            d = ns.dflow(phi[..., ns.nodes], drivers)
-            zeros = torch.zeros(
-                d.shape[:-1] + (len(self.interior),), dtype=d.dtype, device=d.device
-            )
-            term = zeros.index_add(-1, pos, d)
-            out = term if out is None else out + term
-        return out
+        return self._scatter_node_sources(lambda j, ns: ns.dflow(phi[..., ns.nodes], drivers))
 
     def _operator_at(
         self, slopes: torch.Tensor, node_slopes: torch.Tensor | None = None
@@ -1210,39 +1208,18 @@ class PotentialFlowLayer:
             return torch.cat(parts, dim=-1)
 
         def _node_withdrawal_functional(phi, drv, rebuilt):
-            if not self._node_sources:
-                return None
-            out = None
-            for ns, d, pos in zip(
-                self._node_sources, rebuilt[n_el:], self._source_positions, strict=True
-            ):
-                w = torch.func.functional_call(ns, d, (phi[..., ns.nodes], drv))
-                zeros = torch.zeros(
-                    w.shape[:-1] + (len(self.interior),), dtype=w.dtype, device=w.device
-                )
-                term = zeros.index_add(-1, pos, w)
-                out = term if out is None else out + term
-            return out
+            return self._scatter_node_sources(lambda j, ns: torch.func.functional_call(
+                ns, rebuilt[n_el + j], (phi[..., ns.nodes], drv)))
 
         def _node_slopes_functional(phi, drv, rebuilt):
-            if not self._node_sources:
-                return None
-            out = None
-            for ns, d, pos in zip(
-                self._node_sources, rebuilt[n_el:], self._source_positions, strict=True
-            ):
+            def slope(j, ns):
                 leaf = phi[..., ns.nodes].detach().requires_grad_(True)
                 with torch.enable_grad():
-                    w = torch.func.functional_call(ns, d, (leaf, drv))
+                    w = torch.func.functional_call(ns, rebuilt[n_el + j], (leaf, drv))
                     (grad,) = torch.autograd.grad(w.sum(), leaf)
-                zeros = torch.zeros(
-                    grad.shape[:-1] + (len(self.interior),),
-                    dtype=grad.dtype,
-                    device=grad.device,
-                )
-                term = zeros.index_add(-1, pos, grad)
-                out = term if out is None else out + term
-            return out
+                return grad
+
+            return self._scatter_node_sources(slope)
 
         def _dp_dependence_error(el, i: int) -> RuntimeError:
             return RuntimeError(

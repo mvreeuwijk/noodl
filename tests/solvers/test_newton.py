@@ -5,7 +5,7 @@ import torch
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
-from noodl.solvers.newton import NewtonResult, newton
+from noodl.solvers.newton import NewtonResult, newton, newton_tolerances
 
 
 def _linear_system(A, b):
@@ -167,3 +167,11 @@ def test_sqrt_law_dead_end_does_not_cycle_once_relaxation_switches_off():
 
     assert bool(torch.all(result.converged))
     assert float(result.x.abs().max()) < 1e-15
+
+
+def test_newton_tolerances_default_each_missing_value_to_half_the_digits():
+    half = torch.finfo(torch.float64).eps ** 0.5
+    assert newton_tolerances(torch.float64, None, None) == (half, half)
+    assert newton_tolerances(torch.float64, 1e-6, None) == (1e-6, half)
+    assert newton_tolerances(torch.float32, None, 1e-3) == (
+        torch.finfo(torch.float32).eps ** 0.5, 1e-3)

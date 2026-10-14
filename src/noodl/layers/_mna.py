@@ -30,7 +30,7 @@ from noodl._tracking import bulk_values, same_tracking
 from noodl.elements.base import INTEGRATIONS, LawContext
 from noodl.operators.mna import MnaOperator
 from noodl.solvers.implicit import implicit_solve
-from noodl.solvers.newton import newton
+from noodl.solvers.newton import newton, newton_tolerances
 
 Tensor = torch.Tensor
 
@@ -395,36 +395,22 @@ class MnaSystem:
 
     def _withdrawal(self, phi, drivers, call) -> Tensor | None:
         """The node sources' withdrawal per interior row, or `None` without node sources."""
-        layer = self.layer
-        n_el = len(layer._elements)
-        out = None
-        for j, (ns, pos) in enumerate(
-                zip(layer._node_sources, layer._source_positions, strict=True)):
-            w = call(n_el + j, (phi[..., ns.nodes], drivers))
-            zeros = torch.zeros(w.shape[:-1] + (self.n_I,), dtype=w.dtype, device=w.device)
-            term = zeros.index_add(-1, pos, w)
-            out = term if out is None else out + term
-        return out
+        n_el = len(self.layer._elements)
+        return self.layer._scatter_node_sources(
+            lambda j, ns: call(n_el + j, (phi[..., ns.nodes], drivers)))
 
     def _node_slopes(self, phi, drivers, call) -> Tensor | None:
         """`d w / d phi` per interior row (a node source reads its own node's potential
         only, so one forward-mode derivative gives the whole diagonal)."""
-        layer = self.layer
-        n_el = len(layer._elements)
-        out = None
-        for j, (ns, pos) in enumerate(
-                zip(layer._node_sources, layer._source_positions, strict=True)):
-            phi_n = phi[..., ns.nodes]
-            _, d = jvp(self._node_source_fn(call, n_el + j, drivers), (phi_n,),
-                       (torch.ones_like(phi_n),))
-            zeros = torch.zeros(d.shape[:-1] + (self.n_I,), dtype=d.dtype, device=d.device)
-            term = zeros.index_add(-1, pos, d)
-            out = term if out is None else out + term
-        return out
+        n_el = len(self.layer._elements)
 
-    @staticmethod
-    def _node_source_fn(call, i, drivers):
-        return lambda v: call(i, (v, drivers))
+        def slope(j, ns):
+            phi_n = phi[..., ns.nodes]
+            _, d = jvp(lambda v: call(n_el + j, (v, drivers)), (phi_n,),
+                       (torch.ones_like(phi_n),))
+            return d
+
+        return self.layer._scatter_node_sources(slope)
 
     # ------------------------------------------------------------- residual and Jacobian
     def residual(self, x, phi_boundary, drivers, sources, ctx, call) -> Tensor:
@@ -517,11 +503,8 @@ class MnaSystem:
         r = last["r"].reshape(-1, last["r"].shape[-1])
         if r.shape != r0.shape or r.shape[-1] == 0:
             return 0
-        default = math.sqrt(torch.finfo(r.dtype).eps)
-        atol = newton_kwargs.get("atol")
-        rtol = newton_kwargs.get("rtol")
-        atol = default if atol is None else atol
-        rtol = default if rtol is None else rtol
+        atol, rtol = newton_tolerances(
+            r.dtype, newton_kwargs.get("atol"), newton_kwargs.get("rtol"))
         norm0 = r0.abs().amax(dim=-1)
         norm = r.abs().amax(dim=-1)
         bad = torch.nonzero(~(norm < atol + rtol * norm0)).flatten()

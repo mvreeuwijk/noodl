@@ -105,6 +105,16 @@ class NewtonResult:
     backend: str | None = None
 
 
+def newton_tolerances(
+    dtype: torch.dtype, atol: float | None, rtol: float | None
+) -> tuple[float, float]:
+    """``newton``'s ``(atol, rtol)``: each given value, or ``sqrt(finfo(dtype).eps)`` for
+    one left ``None``, ``dtype`` being the residual's. An instance has converged when its
+    residual's max-norm is below ``atol + rtol`` times its first residual's."""
+    default_tol = math.sqrt(torch.finfo(dtype).eps)
+    return (default_tol if atol is None else atol, default_tol if rtol is None else rtol)
+
+
 def newton(
     residual: Callable[[torch.Tensor], torch.Tensor],
     operator: Callable[[torch.Tensor], LinearOperator | torch.Tensor],
@@ -159,12 +169,7 @@ def newton(
     """
     x = x0
     r = residual(x)
-    if atol is None or rtol is None:
-        default_tol = math.sqrt(torch.finfo(r.dtype).eps)
-        if atol is None:
-            atol = default_tol
-        if rtol is None:
-            rtol = default_tol
+    atol, rtol = newton_tolerances(r.dtype, atol, rtol)
     if r.shape[-1] == 0:
         # Zero interior unknowns (every node is a boundary node): there is nothing to
         # iterate on, and `r.abs().amax(dim=-1)` below would raise IndexError ("Expected
