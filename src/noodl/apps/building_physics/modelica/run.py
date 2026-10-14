@@ -760,8 +760,10 @@ def _advance_located(state: State, pts: list[float], advance, switches: _Switche
 
     def done(end: State) -> State:
         if mid.frozen is not None:  # a jump moved to the end: the next run starts at it
+            # `end` was solved with the run's starting directions, though its flows may have
+            # crossed zero by then: the next step compares against those (`_Midpoint.step`).
+            mid.jump_from, mid.jump_directions = end, mid.frozen
             mid.frozen = None
-            mid.jump_from = end
         return end
 
     while True:
@@ -777,10 +779,11 @@ def _advance_located(state: State, pts: list[float], advance, switches: _Switche
         k = _first(g_a, g_b, cross)
         margin = max(SWITCH_MARGIN * (b - a), min_step)
         if b - a <= 4 * margin:
-            if k in switches.jumps and mid.frozen is None:
+            jumps = [j for j in switches.jumps if bool(cross[j])]
+            if jumps and mid.frozen is None:  # whichever switch is crossed first
                 mid.restore(snap)
                 mid.frozen = state["air.q"]  # the jump to the end of this short run
-                skip.add(k)
+                skip.update(jumps)
                 continue
             return done(end)  # a step this short is not split (SWITCH_MARGIN)
         lo, hi, g_lo, g_hi, side = a, b, float(g_a[k]), float(g_b[k]), 0
@@ -834,7 +837,7 @@ def _advance_located(state: State, pts: list[float], advance, switches: _Switche
         if jump and before_k is None:
             # A jump within the margin of the start: the step starts at it.
             mid.restore(snap)
-            mid.jump_from = state
+            mid.jump_from, mid.jump_directions = state, None
             continue
         if jump and t >= b - margin * (1 + 1e-9):
             # A jump within the margin of the end: the run keeps its directions to the end.
@@ -849,7 +852,8 @@ def _advance_located(state: State, pts: list[float], advance, switches: _Switche
         mid.restore(post)
         mid.frozen = None
         if jump:
-            mid.jump_from = state  # the step from here starts at the jump (`_Midpoint.step`)
+            # The step from here starts at the jump (`_Midpoint.step`).
+            mid.jump_from, mid.jump_directions = state, None
         a, skip = t, {k}
         pts = _split(a, b, n)
 
@@ -967,6 +971,9 @@ class _Midpoint:
         # jump was moved to its end), the steps take their directions from it.
         self.jump_from: State | None = None
         self.frozen: Tensor | None = None
+        # The flows whose directions `jump_from` was solved with, when they are not its own
+        # (a jump moved to the end of a run), else None.
+        self.jump_directions: Tensor | None = None
 
     def restart(self) -> None:
         """Forget the storage rate's BDF2 history (at a signal event, `simulate`): the next
@@ -1147,11 +1154,16 @@ class _Midpoint:
         it starts with). Directions that do not settle raise `ConvergenceError`."""
         name = self.air_name
         strict = s0 is self.jump_from  # every direction counts, not only those at a switch
+        # The directions state 0 was solved with: its own flows', or, at a jump moved to the
+        # end of the run before, that run's starting ones (its end flows may have crossed
+        # zero under the old density).
+        solved = (self.jump_directions if strict and self.jump_directions is not None
+                  else s0[f"{name}.q"])
         s1 = self._step(s0, d0, d1, h)
         if self.frozen is not None:
             return s1
         for _ in range(_DIRECTION_PASSES):
-            q0, q1 = s0[f"{name}.q"], s1[f"{name}.q"]
+            q0, q1 = solved, s1[f"{name}.q"]
             if _same_directions(self.closure, q0, q1,
                                 at_switch=None if strict else SWITCH_SKIP * SWITCH_FLOW):
                 return s1
@@ -1159,6 +1171,7 @@ class _Midpoint:
             # history before the jump does not carry over (`restart`).
             self.restart()
             s0 = self._start_with_directions(s0, d0, q1)
+            solved = s0[f"{name}.q"]
             s1 = self._step(s0, d0, d1, h)
             strict = True  # state 0 now has the end's directions: they must stay
         if _same_directions(self.closure, s0[f"{name}.q"], s1[f"{name}.q"]):

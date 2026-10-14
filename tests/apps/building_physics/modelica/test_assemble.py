@@ -241,7 +241,9 @@ def test_gradient_through_elements_in_series_matches_finite_differences(element)
     shaft flow downward through the junction): d T_roo / d C of the upper shaft orifice, which
     reaches the transport only through the run's flow (the run carries oriChiBot's column), and
     of the lower opening. The certified adjoint against central differences; their noise is the
-    coupling tolerance (measured 4.3e-7 and 5.0e-7 relative)."""
+    coupling tolerance (measured 4.3e-7 and 5.0e-7 relative). With the run's transport flow
+    (`"thermal.q"`) detached, oriChiTop's gradient is 2.1e-5 instead of -0.1547 (measured): the
+    path through roo's pressure alone is that small, so a dropped series path fails here."""
     model, state, drivers, names = _read_modelica(DATA / "ChimneyShaftNoVolume.json",
                                                   return_names=True)
     state = _initial_air(model, _storage(model), state, step_drivers(drivers, names.times, 0.0))
@@ -351,6 +353,31 @@ def test_a_flow_direction_that_does_not_settle_is_refused_by_name(tmp_path):
     model, state, drivers, names = _read_modelica(_write(tmp_path, doc), return_names=True)
     with pytest.raises(ConvergenceError, match="flow direction of oriChiBot does not settle"):
         simulate(model, state, drivers, names.times[:1], scheme="midpoint")
+
+
+def test_a_jump_moved_to_the_end_of_a_run_starts_the_next_step_at_it(monkeypatch):
+    """With the locator's margin at half a run, every run is too short to split, so the
+    shaft's reversal at 0.192 s is moved to the end of its run (kept in the old direction to
+    there, `_Midpoint.frozen`). The run's end flows have crossed zero by then, already in the
+    new direction; the next step must still start from the airflow of the new density: its
+    state 0 is solved again (`_start_with_directions`) from the state the run ended at."""
+    from noodl.apps.building_physics.modelica import run
+
+    monkeypatch.setattr(run, "SWITCH_MARGIN", 0.5)
+    model, state, drivers, names = _read_modelica(DATA / "ChimneyShaftNoVolume.json",
+                                                  return_names=True)
+    restarts: list[bool] = []
+    original = run._Midpoint._start_with_directions
+
+    def spy(self, s0, d0, q1):
+        restarts.append(s0 is self.jump_from)
+        return original(self, s0, d0, q1)
+
+    monkeypatch.setattr(run._Midpoint, "_start_with_directions", spy)
+    out = simulate(model, state, drivers, names.times[:2], scheme="midpoint")
+    assert any(restarts)  # the step after the moved jump started from the new direction
+    ((col, _),) = names.edges["oriChiBot"]
+    assert out["air.q"][1, col].item() > 0.02  # the shaft flows up after the reversal
 
 
 def test_a_run_in_series_advects_as_one_edge():
