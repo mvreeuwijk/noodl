@@ -77,22 +77,42 @@ VOLUME_CLASSES = ("Buildings.Fluid.MixingVolumes.MixingVolume",
 # ChimneyShaftNoVolume's shaft flow reverses at 0.192 s, where the column's density jumps
 # (`densitySelection = actual`); DASSL chatters there, and the result holds six rows at
 # 0.19198838931 s (+1.8e-12 s apart, the state at the reversal) in place of the output times
-# 7.2 to 43.2 s (the 1e-12 export, two in place of 7.2 and 14.4 s). From 50.4 s on the rows are
-# on the grid, and noodl physics' runs, reversing at 0.192 s, agree with both exports there.
+# 7.2 to 43.2 s. Its export at a DASSL tolerance of 1e-12 (SUPPLEMENT) holds two such rows, in
+# place of 7.2 and 14.4 s, and 21.6 to 43.2 s on the grid: those four rows are compared
+# against it (`_check_parity`), at PARITY_RTOL with no resolution allowance. Only 7.2 and
+# 14.4 s are compared against neither.
 OFF_GRID_ROWS = {"ChimneyShaftNoVolume": 6}
+SUPPLEMENT = {"ChimneyShaftNoVolume": ("ChimneyShaftNoVolume.tol1e-12.csv", 2)}
 
 
-def _csv(model: str) -> tuple[list[str], np.ndarray]:
-    lines = [ln for ln in (DATA / f"{model}.csv").read_text().splitlines()
+def _read_csv(model: str, name: str, off_grid: int) -> tuple[list[str], np.ndarray]:
+    """A reference CSV's header and rows, without the `off_grid` rows off the output grid."""
+    lines = [ln for ln in (DATA / name).read_text().splitlines()
              if ln and not ln.startswith("#")]
     head = [h.strip('"') for h in lines[0].split(",")]
     data = np.array([[float(x) for x in ln.split(",")] for ln in lines[1:]])
-    if model in OFF_GRID_ROWS:
+    if off_grid:
         grid = experiment_times(load(DATA / f"{model}.json")).numpy()
         on = np.abs(data[:, :1] - grid[None, :]).min(axis=1) <= 1e-9 * max(1.0, grid[-1])
-        assert int((~on).sum()) == OFF_GRID_ROWS[model], (model, int((~on).sum()))
+        assert int((~on).sum()) == off_grid, (model, name, int((~on).sum()))
         data = data[on]
     return head, data
+
+
+def _csv(model: str) -> tuple[list[str], np.ndarray]:
+    return _read_csv(model, f"{model}.csv", OFF_GRID_ROWS.get(model, 0))
+
+
+def _supplement(model: str, data: np.ndarray) -> np.ndarray:
+    """The rows of `model`'s SUPPLEMENT reference at output times `data` (its main reference
+    rows) lacks, up to the last of them; empty without one."""
+    if model not in SUPPLEMENT:
+        return np.zeros((0, data.shape[1]))
+    name, off_grid = SUPPLEMENT[model]
+    head, extra = _read_csv(model, name, off_grid)
+    assert head == _csv(model)[0], (model, name)
+    have = np.abs(extra[:, :1] - data[None, :, 0]).min(axis=1) <= 1e-9 * max(1.0, data[-1, 0])
+    return extra[~have & (extra[:, 0] <= data[-1, 0])]
 
 
 def _record(model: str, stats: dict, record: Path = RECORD) -> None:
@@ -496,8 +516,11 @@ PARITY_STORAGE: dict[str, dict[str, float]] = {}
 # before its orifices reverse (18 s), the rows that need (2, 4) substeps (PARITY_SUBSTEPS),
 # and runs at (1, 2) (DEFAULT_SUBSTEPS), a third of the cost; so does ChimneyShaftWithVolume's,
 # whose window (its room controller's start transient, through its limits within the first
-# second) ends long before its injection stops at 601 s, and ChimneyShaftNoVolume's (its
-# shaft flow reversing at 0.192 s, and the first rows on the output grid, OFF_GRID_ROWS).
+# second) ends long before its injection stops at 601 s. ChimneyShaftNoVolume's window (its
+# shaft flow reversing at 0.192 s; the supplement's rows 21.6 to 43.2 s and the reference's
+# first rows on the grid, 50.4 and 57.6 s) runs at (2, 4): at (1, 2) its con.y is 8.1e-6
+# from the supplement at 28.8 s (8.3e-7 at (2, 4)), the relaxation after the reversal not
+# yet asymptotic.
 PARITY_ROWS = {"ClosedDoors": 3, "CO2TransportStep": 2, "NaturalVentilation": 3,
                "OneEffectiveAirLeakageArea": 8, "OneOpenDoor": 4, "OneRoom": 21,
                "OpenDoorBuoyancyDynamic": 2, "OpenDoorBuoyancyPressureDynamic": 2,
@@ -505,8 +528,7 @@ PARITY_ROWS = {"ClosedDoors": 3, "CO2TransportStep": 2, "NaturalVentilation": 3,
                "ThreeRoomsContamDiscretizedDoor": 3, "ZonalFlow": 11,
                "ChimneyShaftWithVolume": 3, "ChimneyShaftNoVolume": 3}
 DEFAULT_SUBSTEPS: dict[str, tuple[int, int]] = {"ReverseBuoyancy": (1, 2),
-                                                "ChimneyShaftWithVolume": (1, 2),
-                                                "ChimneyShaftNoVolume": (1, 2)}
+                                                "ChimneyShaftWithVolume": (1, 2)}
 
 
 def _columns_of(out: dict, names, head: list[str]) -> dict[str, np.ndarray]:
@@ -557,7 +579,9 @@ def _run(model: str, rows: int | None, r: int, threads: int | None = None):
     start = time.perf_counter()
     net, state, drivers, names = read_modelica(DATA / f"{model}.json", return_names=True,
                                                substeps=r)
-    times = torch.tensor(data[:, 0], dtype=torch.float64)  # output-grid times (`_csv`)
+    # The output-grid times of the reference rows (`_csv`) and of its supplement.
+    times = torch.tensor(np.sort(np.concatenate([data[:, 0], _supplement(model, data)[:, 0]])),
+                         dtype=torch.float64)
     gap = (times.unsqueeze(1) - names.times.unsqueeze(0)).abs().min(dim=1).values
     assert bool((gap <= 1e-9 * max(1.0, float(names.times[-1]))).all())
     times = names.times[(times.unsqueeze(1) - names.times.unsqueeze(0)).abs().argmin(dim=1)]
@@ -609,7 +633,37 @@ def _check_parity(model: str, rows: int | None, substeps: tuple[int, int] | None
     cols = [_columns_of(out, nm, head) for out, nm, _ in runs]
     runs = [out for out, _, _ in runs]
     best = {h: cols[1][h] + (cols[1][h] - cols[0][h]) / 3.0 for h in head[1:]}  # extrapolate
+    # The runs hold the reference's rows and its supplement's (`_run`), in time order.
+    extra = _supplement(model, data)
+    times = runs[1]["time"].numpy()
+    main = [int(np.argmin(np.abs(times - t))) for t in data[:, 0]]
+    sup = [int(np.argmin(np.abs(times - t))) for t in extra[:, 0]]
+    runs = [{k: v[main] for k, v in out.items()} for out in runs]
+    cols = [{h: c[h][main] for h in head[1:]} for c in cols]
+    best_sup = {h: best[h][sup] for h in head[1:]}
+    best = {h: best[h][main] for h in head[1:]}
     stats = _dynamic_stats(head, data, best, REFERENCE_RESOLUTION[model])
+    supplement: dict[str, dict] = {}
+    sup_fail: list[str] = []
+    if extra.shape[0]:
+        # The supplement's rows (SUPPLEMENT), with no resolution allowance and the floors of
+        # the whole experiment (`_dynamic_stats` on every row of the reference, as a full run
+        # has them; a window's own rows would make them those of its quiet first minute).
+        _, full = _csv(model)
+        whole = _dynamic_stats(head, full, {h: full[:, j] for j, h in enumerate(head) if j})
+        floors = {h: whole[h]["floor"] for h in head[1:]}
+        for h in head[1:]:
+            j = head.index(h)
+            err = np.abs(best_sup[h] - extra[:, j])
+            rel = err / np.maximum(np.abs(extra[:, j]), floors[h])
+            k = int(np.argmax(rel))
+            print(f"{model} {h} (supplement, {extra.shape[0]} rows): max rel {rel[k]:.3e} at "
+                  f"t = {extra[k, 0]:g}")
+            if not rel[k] <= PARITY_RTOL:
+                sup_fail.append(f"{h} (supplement): max rel {rel[k]:.3e} at t = "
+                                f"{extra[k, 0]:g} > {PARITY_RTOL:.1e}")
+            supplement[h] = {"max_rel": float(rel[k]), "t_max_rel": float(extra[k, 0]),
+                             "rows": int(extra.shape[0])}
     own = _dynamic_stats(head, np.column_stack([data[:, 0]] + [best[h] for h in head[1:]]),
                          cols[1])
     worst, own_worst = _worst(stats), _worst(own)
@@ -631,12 +685,14 @@ def _check_parity(model: str, rows: int | None, substeps: tuple[int, int] | None
                         "reference_resolution": REFERENCE_RESOLUTION[model],
                         "substeps": list(substeps),
                         "reference_tolerance": _reference_tolerance(model),
-                        "seconds": seconds}, RECORD_DYNAMIC)
+                        "seconds": seconds,
+                        **({"supplement": supplement} if supplement else {})},
+                RECORD_DYNAMIC)
     bound = {kind: PARITY_STORAGE.get(model, {}).get(kind, PARITY_RTOL) for kind in worst}
     failures = [f"{kind}: max rel beyond the reference's resolution {w['beyond']:.3e} "
                 f"({w['beyond_column']} at t = {w['beyond_t']:g}; max rel {w['max_rel']:.3e}) > "
                 f"{bound[kind]:.1e}" for kind, w in worst.items()
-                if not w["beyond"] <= bound[kind]]
+                if not w["beyond"] <= bound[kind]] + sup_fail
     return [f"{model} outside its tolerance:", *failures] if failures else []
 
 
@@ -648,7 +704,7 @@ WINDOW_COST = {"ClosedDoors": 25, "CO2TransportStep": 43, "NaturalVentilation": 
                "OpenDoorBuoyancyDynamic": 46, "OpenDoorBuoyancyPressureDynamic": 44,
                "ReverseBuoyancy": 60, "ReverseBuoyancy3Zones": 56, "ThreeRoomsContam": 48,
                "ThreeRoomsContamDiscretizedDoor": 46, "ZonalFlow": 3,
-               "ChimneyShaftWithVolume": 30, "ChimneyShaftNoVolume": 60}
+               "ChimneyShaftWithVolume": 30, "ChimneyShaftNoVolume": 40}
 
 
 def _default_substeps(model: str) -> tuple[int, int]:

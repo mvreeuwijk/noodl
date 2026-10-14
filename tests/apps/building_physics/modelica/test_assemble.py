@@ -22,7 +22,15 @@ import torch
 
 from noodl.apps.building_physics import read_modelica as _read_modelica
 from noodl.apps.building_physics.modelica import ModelicaImportError
-from noodl.apps.building_physics.modelica.run import extrapolate, simulate, step_drivers
+from noodl.apps.building_physics.modelica.run import (
+    _initial_air,
+    _storage,
+    extrapolate,
+    simulate,
+    step_drivers,
+)
+from noodl.elements.media import _moist_air_buoyancy_density
+from noodl.solvers.errors import ConvergenceError
 
 FIX = Path(__file__).parent / "fixtures"
 DATA = Path(__file__).resolve().parents[3] / "data" / "modelica"
@@ -227,6 +235,45 @@ def test_gradient_of_a_zone_temperature_wrt_an_orifice_coefficient():
     assert float(g) > 0.0  # more hot inflow warms the zone faster
 
 
+@pytest.mark.parametrize("element", ["oriChiTop", "oriBot"])
+def test_gradient_through_elements_in_series_matches_finite_differences(element):
+    """ChimneyShaftNoVolume, one coupled step of 7.2 s from MBL's start (roo at p_start, the
+    shaft flow downward through the junction): d T_roo / d C of the upper shaft orifice, which
+    reaches the transport only through the run's flow (the run carries oriChiBot's column), and
+    of the lower opening. The certified adjoint against central differences; their noise is the
+    coupling tolerance (measured 4.3e-7 and 5.0e-7 relative)."""
+    model, state, drivers, names = _read_modelica(DATA / "ChimneyShaftNoVolume.json",
+                                                  return_names=True)
+    state = _initial_air(model, _storage(model), state, step_drivers(drivers, names.times, 0.0))
+    d = step_drivers(drivers, names.times, 7.2)
+    el, _ = model.potential["air"].element_for(names.kinds[element][0])
+    el.C.requires_grad_(True)
+    (g,) = torch.autograd.grad(model.step(state, d, 7.2)["thermal.x"][0], el.C)
+    h = 1e-4 * float(el.C.detach().abs())
+    with torch.no_grad():
+        c0 = el.C.detach().clone()
+        el.C.copy_(c0 + h)
+        tp = float(model.step(state, d, 7.2)["thermal.x"][0])
+        el.C.copy_(c0 - h)
+        tm = float(model.step(state, d, 7.2)["thermal.x"][0])
+        el.C.copy_(c0)
+    assert abs(float(g)) > 0.1
+    assert float(g) == pytest.approx((tp - tm) / (2 * h), rel=2e-6)
+
+
+def test_the_junction_fill_keeps_the_backward_pass_quasi_steady():
+    """The quasi-steady route (no storage): the backward pass goes through the junctions'
+    upwind fill (`_Series.fill`), which once modified a tensor its own gather had saved."""
+    model, state, drivers, names = read_modelica(DATA / "ChimneyShaftNoVolume.json",
+                                                 return_names=True)
+    d = step_drivers(drivers, names.times, 7.2)
+    el, _ = model.potential["air"].element_for(names.kinds["oriChiTop"][0])
+    el.C.requires_grad_(True)
+    new = model.step(state, d, 7.2)
+    (g,) = torch.autograd.grad(new["thermal.x"][0] + new["air.q"].sum(), el.C)
+    assert torch.isfinite(g)
+
+
 # ------------------------------------------------------------------------ refusals
 def test_steady_state_energy_balance_is_refused(tmp_path):
     doc = _doc("zone_two_orifices.json")
@@ -259,9 +306,16 @@ def test_the_actual_column_density_is_the_upwind_end_of_its_path():
     T[names.nodes["roo"]], T[names.nodes["bou0"]] = 293.15, 273.15
     up = {**base, "T": T, "air.forward": torch.ones_like(base["air.forward"])}
     down = {**up, "air.forward": torch.zeros_like(base["air.forward"])}
-    # h g rho of the 3 m shaft: air at 293.15 K going up, at 273.15 K coming down
-    assert abs(drive(down).item()) > abs(drive(up).item())
-    assert drive(up).item() * drive(down).item() > 0
+    # -h g rho of the 3 m shaft (sign -1 on oriChiBot's path): air at 293.15 K going up, at
+    # 273.15 K coming down; MBL's density_pTX(p_default, T, X_w = 0) for SimpleAir.
+    def head(T_K: float) -> float:
+        rho = _moist_air_buoyancy_density(torch.tensor(T_K, dtype=F64),
+                                          torch.tensor(0.0, dtype=F64))
+        return -3.0 * 9.80665 * float(rho)
+
+    assert drive(up).item() == pytest.approx(head(293.15), rel=1e-15)
+    assert drive(down).item() == pytest.approx(head(273.15), rel=1e-15)
+    assert abs(head(273.15)) > abs(head(293.15))
     # The junction carries the upwind end's state: bou0's while the shaft flow is downward.
     q = torch.full((3,), -1.0, dtype=F64)
     T_down = zone({**state, "air.q": q}, drivers)["T"]
@@ -281,6 +335,22 @@ def test_the_start_takes_the_flow_directions_its_own_flows_give():
     ((col, sign),) = names.edges["oriChiBot"]
     assert sign * out["air.q"][0, col].item() == pytest.approx(-0.04397898789993136,
                                                                rel=1e-12)
+
+
+def test_a_flow_direction_that_does_not_settle_is_refused_by_name(tmp_path):
+    """The room and the outside air swapped (roo at 273.15 K, bou0 at 293.15 K) and roo
+    started 36.7 Pa above bou0, between the heads of a shaft full of either air (35.5 and
+    38.0 Pa): with the room's cold air in the shaft the flow runs down, with the outside's warm
+    air it runs up. No direction is consistent, and the start says so by name."""
+    doc = json.loads((DATA / "ChimneyShaftNoVolume.json").read_text())
+    for c in doc["components"]:
+        if c["name"] == "roo":
+            c["parameters"].update(T_start=273.15, p_start=101325.0 + 36.7)
+        if c["name"] == "bou0":
+            c["parameters"]["T"] = 293.15
+    model, state, drivers, names = _read_modelica(_write(tmp_path, doc), return_names=True)
+    with pytest.raises(ConvergenceError, match="flow direction of oriChiBot does not settle"):
+        simulate(model, state, drivers, names.times[:1], scheme="midpoint")
 
 
 def test_a_run_in_series_advects_as_one_edge():

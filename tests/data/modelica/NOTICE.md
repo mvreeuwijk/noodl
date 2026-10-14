@@ -101,7 +101,10 @@ model (its controlled room's 5 s lag behind the flows is not resolved; see
 orifices in series at the ends of one shaft, joined through a junction without storage) is
 compared as a dynamic model; six rows of its CSV are off the output grid (OpenModelica's chatter
 at the shaft flow's reversal at 0.192 s, in place of 7.2 to 43.2 s) and are not compared
-(`OFF_GRID_ROWS`).
+(`OFF_GRID_ROWS`). `ChimneyShaftNoVolume.tol1e-12.csv` is the same export at a DASSL tolerance
+of 1e-12 (the one `REFERENCE_RESOLUTION` is measured against): it has two such rows, in place of
+7.2 and 14.4 s, and its rows at 21.6 to 43.2 s are compared in place of the missing ones
+(`SUPPLEMENT`); only 7.2 and 14.4 s are compared against neither.
 
 These three were re-exported on 14 Oct 2026 with `--tolerance 1e-13`, as the dynamic references
 above: the JSON now keeps the temperature sensor's `T` wired into the controller's `u_m`, and the

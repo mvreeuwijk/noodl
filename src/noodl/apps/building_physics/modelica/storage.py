@@ -402,9 +402,14 @@ class StorageClosure:
         """Per air-storage node, the coupling gain `a` (module docstring, "Coupling")."""
         T, X, p = drivers["T"], drivers["X_w"], drivers["p_abs"]
         th = self.th
+        keep = self._th_mask & self.storage
         cap = self.masses(p, T, X) * th.u_T(T, X) + self.csen
+        # 1 where it is not used: a node holding no mass (a boundary, a junction between
+        # elements in series) has cap 0, and 0/0 would put NaN into the backward pass even
+        # through the `where` below.
+        cap = torch.where(keep, cap, torch.ones_like(cap))
         a = -self.V * p * th.k_T(T, X) * (th.cp - self.lam_T) * T / cap
-        a = torch.where(self._th_mask & self.storage, a, torch.zeros_like(a))
+        a = torch.where(keep, a, torch.zeros_like(a))
         return a[..., self.air_nodes]
 
     def __call__(self, state, drivers, ctx=None):

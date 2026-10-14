@@ -1490,12 +1490,18 @@ there is 7e-9 K of room temperature (2.5e-11 relative).
 series, joined at a junction without storage. The shaft's density is that of the air entering
 it (`densitySelection = actual`): the room's while the flow goes up, the outside air's while it
 comes down, so the shaft's head jumps where its flow reverses, at 0.192 s and at 1800.25 s
-(the extraction's onset). The run locates each reversal and starts the next step from the
-airflow of the new direction. Its controller output is within 1.3e-7 of the reference beyond
-its resolution, its flows within 2.4e-7, its room temperature within 8e-12. OpenModelica
-chatters at the first reversal: its result holds six rows at 0.192 s in place of the output
-times 7.2 to 43.2 s, which are not compared; from 50.4 s on, noodl physics, reversing at
-0.192 s, agrees with both the 1e-12 and the 1e-13 exports.
+(the extraction's onset). The run locates each reversal, ends the step there and starts the
+next from the airflow of the new direction; a reversal within the locator's margin of a step's
+start or end (the larger of 1e-3 of the step and 1e-5 of the output interval) is moved to it,
+an error of that margin times the jump in the flow (the first reversal comes within the
+margin of a band switch the run has just located, the flow 6.1e-5 kg/s short of zero there at
+one substep and 3.0e-5 at two, and is taken at it). Its controller output is within
+1.3e-7 of the reference beyond its resolution, its flows within 2.4e-7, its room temperature
+within 8e-12. OpenModelica chatters at the first reversal: the 1e-13 export holds six rows at
+0.192 s in place of the output times 7.2 to 43.2 s. The 1e-12 export has two such rows, in
+place of 7.2 and 14.4 s, and holds 21.6 to 43.2 s; those four rows are compared against it
+at 1e-6 with no resolution allowance (con.y 8.3e-7 at 28.8 s, the closest). Only 7.2 and
+14.4 s are compared against neither.
 
 The metric is `|noodl - omc| / max(|omc|, floor)` at every row after `t = StartTime`. The floor
 is 1e-3 of the model's largest flow for flows, and 1e-3 of the column's largest value
@@ -1532,7 +1538,7 @@ differ and the first is above 1e-6, and the wall time of the two runs:
 | ReverseBuoyancy | 8.1e-06 (0) | 1.5e-10 | 4.7e-10 | 4.7e-10 | — | 2, 4 | 481 s |
 | OneEffectiveAirLeakageArea | 4.4e-07 | 7.4e-13 | 1.8e-13 | 3.0e-13 | — | 1, 2 | 114 s |
 | ChimneyShaftWithVolume | 1.1e-08 | 2.7e-11 | 9.1e-14 | 1.3e-12 | — | 2, 4 | 591 s |
-| ChimneyShaftNoVolume | 2.7e-07 | 8.6e-12 | 2.2e-11 | — | — | 2, 4 | 1300 s |
+| ChimneyShaftNoVolume | 2.7e-07 | 8.6e-12 | 2.2e-11 | — | — | 2, 4 | 865 s |
 
 No model needs a bound above 1e-6 (`PARITY_STORAGE` is empty). The storage-dominated models
 also assert the storage mechanism on noodl physics' own history. `ClosedDoors` and

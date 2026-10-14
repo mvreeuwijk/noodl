@@ -29,6 +29,7 @@ from noodl.apps.building_physics.modelica.feedback import FeedbackHeat
 from noodl.apps.building_physics.modelica.storage import StorageClosure, mass_change
 from noodl.elements import Element
 from noodl.model import Drivers, Model, State
+from noodl.solvers.errors import ConvergenceError
 
 Tensor = torch.Tensor
 F64 = torch.float64
@@ -134,6 +135,8 @@ def _initial_air(model: Model, store: StorageClosure, state: State, drivers: Dri
                                                       phi0=None, **solve_kwargs)
         if _same_directions(closure, before, new["air.q"]):
             break
+    else:
+        _unsettled(closure, before, new["air.q"], "the start")
     drv.update(closure(new, drv))
     new["air.storage"] = store(new, drv)["air.storage"]
     return new
@@ -141,25 +144,48 @@ def _initial_air(model: Model, store: StorageClosure, state: State, drivers: Dri
 
 # The airflow at a state whose flows decide an `actual` column's density (`assemble`, "Flow
 # elements in series") is solved again with the directions of its own flows until they agree,
-# at most this many times (a single reversal settles in two).
+# at most this many times (a single reversal settles in two); then `_unsettled` raises.
 _DIRECTION_PASSES = 4
+
+
+def _changed(closure: _ZoneStateClosure, before: Tensor | None, after: Tensor,
+             at_switch: float | None = None) -> list[str]:
+    """The elements whose flow `after` has another direction than `before` had, among those
+    whose direction an `actual` column's density reads (none without such a column). With
+    `at_switch`, only those where `|before|` is within it (a reversal at the start of a
+    step, `_Midpoint.step`)."""
+    if not closure.heads:
+        return []
+    if before is None:
+        before = torch.ones_like(after)  # the closure's directions before any solve
+    names = []
+    for head in closure.heads:
+        b, a = before[..., head.edge], after[..., head.edge]
+        changed = (b >= 0) != (a >= 0)
+        if at_switch is not None:
+            changed = changed & (b.abs() <= at_switch)
+        if bool(changed.any()):
+            names.append(head.kind.split(":", 1)[1])
+    return names
 
 
 def _same_directions(closure: _ZoneStateClosure, before: Tensor | None, after: Tensor,
                      at_switch: float | None = None) -> bool:
-    """Whether the flows `after` have the directions `before` had on the edges whose
-    direction an `actual` column's density reads (always, without such a column). With
-    `at_switch`, only the edges where `|before|` is within it count (a reversal at the
-    start of a step, `_Midpoint.step`)."""
-    if not closure.heads:
-        return True
-    if before is None:
-        before = torch.ones_like(after)  # the closure's directions before any solve
-    cols = torch.tensor([h.edge for h in closure.heads], dtype=torch.long)
-    changed = (before[..., cols] >= 0) != (after[..., cols] >= 0)
-    if at_switch is not None:
-        changed = changed & (before[..., cols].abs() <= at_switch)
-    return not bool(changed.any())
+    """Whether no direction an `actual` column reads changed (`_changed`)."""
+    return not _changed(closure, before, after, at_switch)
+
+
+def _unsettled(closure: _ZoneStateClosure, before: Tensor | None, after: Tensor,
+               where: str) -> None:
+    """Raise `ConvergenceError` naming the elements whose flow direction did not settle in
+    `_DIRECTION_PASSES` solves: each direction's density drives the flow the other way."""
+    names = _changed(closure, before, after) or [h.kind.split(":", 1)[1]
+                                                 for h in closure.heads]
+    raise ConvergenceError(
+        f"simulate: the flow direction of {', '.join(names)} does not settle at {where} "
+        f"(densitySelection = actual): with the density of the air coming from either end, "
+        f"the flow runs the other way; after {_DIRECTION_PASSES} solves it still reverses"
+    )
 
 
 # Volume mass storage (`storage` module docstring, "Initial state"): MBL starts every
@@ -417,6 +443,8 @@ def _solve_air(model: Model, state: State, drivers: Drivers, **solve_kwargs) -> 
             new[f"{name}.phi"], new[f"{name}.q"] = phi, q
         if closure is None or _same_directions(closure, before, new["air.q"]):
             break
+    else:
+        _unsettled(closure, before, new["air.q"], "the start")
     return new
 
 
@@ -715,10 +743,27 @@ def _advance_located(state: State, pts: list[float], advance, switches: _Switche
     each in as many equal steps as `pts` has, and the run is taken to it and then on from it,
     again in as many equal steps. Every step then lies on one side of every switch, where
     the element laws are smooth, and the runs `extrapolate` combines (1 and 2 substeps) split
-    alike, their steps in ratio 2."""
+    alike, their steps in ratio 2.
+
+    A JUMP (`_Switches.jumps`: a flow reversal an `actual` column's density follows) is located
+    by bisection and the run taken to the last trial before it; the step from there starts at
+    the jump (`_Midpoint.jump_from`). A jump within the margin of the run's end, or in a run too
+    short to split, is moved to the end: the run keeps its starting directions throughout
+    (`_Midpoint.frozen`) and the next run starts at the jump. One within the margin of the
+    run's start is moved to the start: the run is made with the directions it ends with. That
+    approximation moves the jump by at most the margin (`max(SWITCH_MARGIN (b - a), min_step)`,
+    `min_step` independent of the substeps), an error of the margin times the jump in the
+    flow."""
     n = len(pts) - 1
     a, b = pts[0], pts[-1]
     skip: set[int] = set()  # switches located (or within the margin): not split at again
+
+    def done(end: State) -> State:
+        if mid.frozen is not None:  # a jump moved to the end: the next run starts at it
+            mid.frozen = None
+            mid.jump_from = end
+        return end
+
     while True:
         g_a = switches(state, sd.span(pts[0], pts[1])[0])
         snap = mid.snapshot()
@@ -728,11 +773,16 @@ def _advance_located(state: State, pts: list[float], advance, switches: _Switche
         if skip:
             cross[list(skip)] = False
         if not bool(cross.any()):
-            return end
+            return done(end)
         k = _first(g_a, g_b, cross)
         margin = max(SWITCH_MARGIN * (b - a), min_step)
         if b - a <= 4 * margin:
-            return end  # a step this short is not split (SWITCH_MARGIN)
+            if k in switches.jumps and mid.frozen is None:
+                mid.restore(snap)
+                mid.frozen = state["air.q"]  # the jump to the end of this short run
+                skip.add(k)
+                continue
+            return done(end)  # a step this short is not split (SWITCH_MARGIN)
         lo, hi, g_lo, g_hi, side = a, b, float(g_a[k]), float(g_b[k]), 0
         best = before_k = None
         for _ in range(SWITCH_MAX_ITER):
@@ -786,12 +836,18 @@ def _advance_located(state: State, pts: list[float], advance, switches: _Switche
             mid.restore(snap)
             mid.jump_from = state
             continue
+        if jump and t >= b - margin * (1 + 1e-9):
+            # A jump within the margin of the end: the run keeps its directions to the end.
+            mid.restore(snap)
+            mid.frozen = state["air.q"]
+            continue
         if t <= a + margin * (1 + 1e-9) or t >= b - margin * (1 + 1e-9):
             # The switch lies within the margin of an end: the step is not split there.
             mid.restore(snap)
             continue
         state = trial
         mid.restore(post)
+        mid.frozen = None
         if jump:
             mid.jump_from = state  # the step from here starts at the jump (`_Midpoint.step`)
         a, skip = t, {k}
@@ -907,8 +963,10 @@ class _Midpoint:
         self.kw = dict(solve_kwargs, differentiable=False)
         self.last: tuple[float, Tensor, Tensor] | None = None  # (h, z at start, z at end)
         # The state a located jump was taken to (`_advance_located`): a step from it starts
-        # at the jump (`step`).
+        # at the jump (`step`). While `frozen` is set (the flows at the start of a run whose
+        # jump was moved to its end), the steps take their directions from it.
         self.jump_from: State | None = None
+        self.frozen: Tensor | None = None
 
     def restart(self) -> None:
         """Forget the storage rate's BDF2 history (at a signal event, `simulate`): the next
@@ -1044,30 +1102,35 @@ class _Midpoint:
     def _solve_air(self, drv: Drivers, sources, phi0: Tensor | None, h: float, layer=None,
                    phi_b: Tensor | None = None):
         """The air layer (`layer`, default the model's, with boundary values `phi_b`,
-        default `"air.phi_boundary"`) at state 1 (`air.solve`); with
-        storage a solve that stalls within STORAGE_STALL times its tolerance is accepted (the
-        round-off of the storage terms). A solve from `phi0` that fails is made again from
-        the layer's linear initial guess: from the pressures before a run of elements in
-        series reversed (its junction 37 Pa off, ChimneyShaftNoVolume at 0.19 s) Newton did
-        not converge, from the linear guess it does."""
+        default `"air.phi_boundary"`) at state 1 (`air.solve`, with the caller's solve
+        options). With storage a solve that stalls within STORAGE_STALL times its tolerance is
+        accepted (the round-off of the storage terms). With an `actual` column a solve from
+        `phi0` that fails is made again from the layer's linear initial guess: from the
+        pressures before a run of elements in series reversed (its junction 37 Pa off,
+        ChimneyShaftNoVolume at 0.19 s) Newton did not converge, from the linear guess it
+        does. A solve that still fails raises `ConvergenceError`, unless the caller asked
+        for `on_failure="return"`."""
         name = self.air_name
         layer = self.air if layer is None else layer
+        pb = drv[f"{name}.phi_boundary"] if phi_b is None else phi_b
+        retry = bool(self.closure.heads) and phi0 is not None
+        if self.store is None and not retry:
+            return layer.solve(pb, drv, sources, phi0=phi0, **self.kw)
         limit = 0.0 if self.store is None else STORAGE_STALL * self.kw.get("atol",
                                                                            STORAGE_AIR_ATOL)
 
         def attempt(start):
             diag: dict = {}
-            phi, q = layer.solve(drv[f"{name}.phi_boundary"] if phi_b is None else phi_b,
-                                 drv, sources, phi0=start, diagnostics=diag,
+            phi, q = layer.solve(pb, drv, sources, phi0=start, diagnostics=diag,
                                  **{**self.kw, "on_failure": "return"})
             res = float(torch.as_tensor(diag["residual_norm"]).max())
             return phi, q, bool(torch.as_tensor(diag["converged"]).all()) or res <= limit, res
 
         phi, q, ok, res = attempt(phi0)
-        if not ok and phi0 is not None:
+        if not ok and retry:
             phi, q, ok, res = attempt(None)
-        if not ok:
-            raise RuntimeError(
+        if not ok and self.kw.get("on_failure", "raise") != "return":
+            raise ConvergenceError(
                 f"simulate(scheme='midpoint'): the airflow solve of a {h!r} s step did "
                 f"not converge (residual {res:.3g} kg/s)")
         return phi, q
@@ -1079,21 +1142,28 @@ class _Midpoint:
         of the other direction at state 1), the density jumps there: state 0's algebraic
         pressures and flows are taken with the end's directions, and the step is made again
         from there. A reversal inside the step is left to `_advance_located`, which splits
-        the step at it."""
+        the step at it, or moves one within its margin of either end to that end (an error of
+        the margin times the jump in the flow; while `frozen`, the step keeps the directions
+        it starts with). Directions that do not settle raise `ConvergenceError`."""
         name = self.air_name
-        at_jump = s0 is self.jump_from
+        strict = s0 is self.jump_from  # every direction counts, not only those at a switch
         s1 = self._step(s0, d0, d1, h)
+        if self.frozen is not None:
+            return s1
         for _ in range(_DIRECTION_PASSES):
             q0, q1 = s0[f"{name}.q"], s1[f"{name}.q"]
             if _same_directions(self.closure, q0, q1,
-                                at_switch=None if at_jump else SWITCH_SKIP * SWITCH_FLOW):
-                break
+                                at_switch=None if strict else SWITCH_SKIP * SWITCH_FLOW):
+                return s1
             # The flows jump there, and with them the volumes' storage rate: the BDF2
             # history before the jump does not carry over (`restart`).
             self.restart()
             s0 = self._start_with_directions(s0, d0, q1)
             s1 = self._step(s0, d0, d1, h)
-        return s1
+            strict = True  # state 0 now has the end's directions: they must stay
+        if _same_directions(self.closure, s0[f"{name}.q"], s1[f"{name}.q"]):
+            return s1
+        _unsettled(self.closure, s0[f"{name}.q"], s1[f"{name}.q"], f"a step of {h!r} s")
 
     def _step(self, s0: State, d0: Drivers, d1: Drivers, h: float) -> State:
         air, name = self.air, self.air_name
@@ -1125,7 +1195,7 @@ class _Midpoint:
         def G(z: Tensor) -> tuple[Tensor, State]:
             s = self._unpack(z, s0)
             if self.closure.heads or self.closure.series is not None:
-                s[f"{name}.q"] = q_last[0]
+                s[f"{name}.q"] = q_last[0] if self.frozen is None else self.frozen
             drv = dict(d1)
             drv.update(self.closure(s, drv))
             if store is not None:

@@ -809,7 +809,9 @@ def _series_chains(paths: list[FlowPath], junctions: list[str],
             if node in is_junction:
                 at.setdefault(node, []).append(p)
     if any(len(v) != 2 for v in at.values()):
-        return []  # an element at the junction was refused already (named)
+        # An element at the junction was refused already (named), so `build` raises.
+        assert ctx.errors, "a junction between elements in series without its two paths"
+        return []
 
     def across(path: FlowPath, node: str) -> tuple[FlowPath, str]:
         """The other path at junction `node`, and its far end."""

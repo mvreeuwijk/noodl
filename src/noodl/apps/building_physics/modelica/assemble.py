@@ -62,7 +62,15 @@ while the path's flow is forward, its `tgt` end while it is reverse. The closure
 `"air.forward"` (one entry per edge of `"air.q"`, 1.0 where the last solved flow is
 `>= 0`) from the state's flows; the head therefore jumps where the flow reverses, by
 `h g (rho_up - rho_down)`, and `run.simulate` puts a step boundary there (a flow's sign is a
-switch).
+switch; a reversal within the locator's margin of a step's end is moved to that end, one within
+it of the start to the start, `run._advance_located`).
+
+The closure takes these flows from the state it is given. Under `Model.step` (`simulate`'s
+`"implicit"` scheme) that is the previous coupling pass's `"air.q"`: the transport flows, the
+junctions' upwind ends and `"air.forward"` lag one pass behind the airflow and converge with
+the coupling iteration (to its `iterate_tol`), and the initial state carries the airflow at
+the start, so that the first pass has flows to read. `run._Midpoint` gives it the latest
+solved flows instead.
 
 Volume mass storage
 -------------------
@@ -817,10 +825,11 @@ class _Series:
         the flows `q` (`src` without flows)."""
         up = self.src if q is None else torch.where(q[..., self.col] >= 0, self.src, self.tgt)
         batch = broadcast_shapes(values.shape[:-2], up.shape[:-1])
-        out = values.expand(batch + values.shape[-2:]).clone()
+        full = values.expand(batch + values.shape[-2:])
         idx = up.expand(batch + up.shape[-1:]).unsqueeze(-1).expand(
             batch + up.shape[-1:] + values.shape[-1:])
-        out[..., self.junctions, :] = out.gather(-2, idx)
+        out = full.clone()
+        out[..., self.junctions, :] = full.gather(-2, idx)  # from the unmodified values
         return out
 
 
@@ -1865,6 +1874,22 @@ class _Builder:
                                       const, drivers, med)
             self._equilibrium_capacities(zones, node_names, layers, air, closure, state,
                                          const, med)
+        if g.series:
+            # The closure reads the flows of the state it is given (module docstring, "Flow
+            # elements in series"): seeded with the airflow at the initial state (with
+            # storage, every storing zone at its start pressure), solved twice so that an
+            # `actual` column's density follows the flow's direction (`run` checks that it
+            # settles).
+            layer = air if store is None else store.init_layer
+            for _ in range(2):
+                drv = dict(const)
+                drv.update(closure(state, drv))
+                phi_b = (drv["air.phi_boundary"] if store is None
+                         else state["air.phi"][..., layer.bound])
+                with torch.no_grad():
+                    _, state["air.q"] = layer.solve(phi_b, drv, drv.get("air.sources"),
+                                                    phi0=None, atol=1e-13, rtol=1e-12,
+                                                    differentiable=False)
 
         # ---------------------------------------------------------- names
         edges: dict[str, tuple[tuple[int, int], ...]] = {}

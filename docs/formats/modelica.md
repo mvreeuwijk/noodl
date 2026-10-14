@@ -52,8 +52,14 @@ the stream on unchanged, so the transport of heat and species takes the whole ru
 from one end to the other; the junction's temperature and composition are those of the run's
 upwind end. `MediumColumn` takes `densitySelection = actual` too: the density of the stream
 entering the column, which is the upwind end's by the flow's direction (the driver
-`"air.forward"`). Where that flow reverses, the column's head jumps; `simulate` puts a step
-boundary there and starts the next step from the airflow of the new direction.
+`"air.forward"`). Where that flow reverses, the column's head jumps; `simulate` locates the
+reversal, ends the step there and starts the next one from the airflow of the new direction.
+A reversal closer to a step's start or end than the locator's margin (the larger of 1e-3 of
+the step and 1e-5 of the output interval) is moved to that start or end: an error of at most
+that margin times the jump in the flow. A flow whose direction does not settle (each
+direction's density drives it the other way) raises `ConvergenceError`, naming the element.
+Under `Model.step` the transport flows and directions are those of the previous coupling
+pass, converging with the coupling iteration.
 
 **Feedback control.** `LimPID` is supported as a P controller, `y = clamp(k (wp u_s - u_m),
 yMin, yMax)`, transcribed from MSL 4.1.0 (`Blocks/Continuous.mo`): its measurement from a

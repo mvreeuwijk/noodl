@@ -493,12 +493,44 @@
     },
     "reference_tolerance": 1e-13,
     "rtol": 1e-06,
-    "seconds": 1299.6690829000436,
+    "seconds": 865.2413903998677,
     "storage_bounds": {},
     "substeps": [
       2,
       4
     ],
+    "supplement": {
+      "con.y": {
+        "max_rel": 8.278519146634618e-07,
+        "rows": 4,
+        "t_max_rel": 28.8
+      },
+      "oriBot.m_flow": {
+        "max_rel": 1.8532691049545613e-08,
+        "rows": 4,
+        "t_max_rel": 21.6
+      },
+      "oriChiBot.m_flow": {
+        "max_rel": 1.591952266008487e-08,
+        "rows": 4,
+        "t_max_rel": 21.6
+      },
+      "oriChiTop.m_flow": {
+        "max_rel": 1.591951897043451e-08,
+        "rows": 4,
+        "t_max_rel": 21.6
+      },
+      "roo.T": {
+        "max_rel": 7.100810114488489e-13,
+        "rows": 4,
+        "t_max_rel": 21.6
+      },
+      "roo.p": {
+        "max_rel": 2.8875690574791747e-12,
+        "rows": 4,
+        "t_max_rel": 21.6
+      }
+    },
     "worst": {
       "T": {
         "beyond": 7.629932188518925e-12,
