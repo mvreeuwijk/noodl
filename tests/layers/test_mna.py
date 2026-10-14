@@ -270,7 +270,7 @@ def test_classic_layer_is_untouched():
     sources = torch.tensor([0.0, 1.0, -0.5])
     phi1, q1 = layer.solve(torch.zeros(1), {}, sources, differentiable=False)
     phi2, q2 = layer.solve(torch.zeros(1), {}, sources, differentiable=False,
-                           integration="backward_euler", dt=1.0, t=3.0, q0=None, history=None)
+                           integration="backward_euler", t=3.0, q0=None, history=None)
     assert torch.equal(phi1, phi2) and torch.equal(q1, q2)
 
 
@@ -483,3 +483,41 @@ def test_auto_runs_sparse_lu_on_a_batch_above_32():
     reference, _ = layer.solve(torch.zeros(1), {"g": g[0], "V": torch.tensor([3.0])},
                                differentiable=False)
     torch.testing.assert_close(phi, reference.expand(40, -1), rtol=1e-12, atol=1e-12)
+
+
+def test_unknown_law_form_is_refused_naming_the_kind():
+    class Odd(Conductance):
+        law_form = "volume"
+
+    with pytest.raises(ValueError, match=r"kind 'r'.*law_form='volume'.*'potential' or "
+                                         r"'implicit'"):
+        PotentialFlowLayer(_floating_source_net(), "e",
+                           [Odd(torch.tensor([1.0, 0.5]), kind="r"),
+                            Source(torch.tensor([3.0]))], boundary=["gnd"])
+
+
+@pytest.mark.parametrize("kwargs, match", [
+    ({"mode": "phasor"}, "mode='phasor'.*phasor=True"),
+    ({"history": (torch.zeros(3), torch.zeros(2))}, "history"),
+    ({"dt": 0.1}, "dt"),
+])
+def test_classic_layer_refuses_step_and_phasor_keywords(kwargs, match):
+    net = _net(["gnd", "a", "b"], [("gnd", "a", "r"), ("a", "b", "r")])
+    layer = PotentialFlowLayer(net, "e", [Conductance(torch.tensor([1.0, 2.0]), kind="r")],
+                               boundary=["gnd", "b"])
+    assert not layer.mna
+    with pytest.raises(ValueError, match=rf"PotentialFlowLayer 'e'.*{match}"):
+        layer.solve(torch.tensor([1.0, 0.0]), **kwargs)
+
+
+def test_classic_layer_still_accepts_the_steady_keywords():
+    net = _net(["gnd", "a", "b"], [("gnd", "a", "r"), ("a", "b", "r")])
+    layer = PotentialFlowLayer(net, "e", [Conductance(torch.tensor([1.0, 2.0]), kind="r")],
+                               boundary=["gnd", "b"])
+    pb = torch.tensor([1.0, 0.0])
+    phi, q = layer.solve(pb)
+    for kwargs in ({"mode": "dc"}, {"mode": "initial"}, {"t": 3.0}, {"q0": torch.zeros(0)},
+                   {"integration": "backward_euler"}):
+        phi_k, q_k = layer.solve(pb, **kwargs)
+        torch.testing.assert_close(phi_k, phi, rtol=0, atol=0)
+        torch.testing.assert_close(q_k, q, rtol=0, atol=0)

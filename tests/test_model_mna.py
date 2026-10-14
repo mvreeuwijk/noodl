@@ -383,3 +383,17 @@ def test_iterate_gradient_on_complex_phasor_state():
     h = 1e-6
     fd = (value(0.5 + h) - value(0.5 - h)) / (2 * h)
     torch.testing.assert_close(grad, torch.tensor([fd]), rtol=1e-6, atol=0)
+
+
+def test_model_owned_solve_keywords_are_refused_by_name():
+    net, layer = _rc()
+    model = Model(net, [layer])
+    drivers = {"e.phi_boundary": GROUND}
+    state = _initial(layer)
+    with pytest.raises(ValueError, match=r"\['history', 'q0'\].*set by the Model"):
+        model.step(state, drivers, 0.1, q0=state["e.q"][..., :1],
+                   history=(state["e.phi"], state["e.q"]))
+    with pytest.raises(ValueError, match=r"\['dt'\].*set by the Model"):
+        model.steady(state, drivers, t=0.0, dt=0.1)
+    with pytest.raises(ValueError, match=r"\['phi0'\].*set by the Model"):
+        model.steady(state, drivers, t=0.0, phi0=torch.zeros(2))

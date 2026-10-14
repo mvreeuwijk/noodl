@@ -29,7 +29,8 @@ state warns by name (`RuntimeWarning`): the pinning has nothing to pin on that s
 the closure integrates once per pass instead of once per step until the key is seeded.
 
 `**solve_kwargs` of `step`/`steady` reach the POTENTIAL solves only (`differentiable`,
-`on_failure`, `method`, Newton kwargs). Transport steps always raise on failure.
+`on_failure`, `method`, Newton kwargs). The keywords the Model sets itself (`phi0`, `q0`,
+`history`, `dt`, `t`) are refused there by name. Transport steps always raise on failure.
 
 Differentiability: ping-pong is one pass of differentiable operations; iterate carries no
 graph on its primal passes and attaches the IMPLICIT adjoint of its converged interface to
@@ -60,6 +61,9 @@ Tensor = torch.Tensor
 State = dict[str, Tensor]
 Drivers = dict[str, Tensor]
 _STATE_SUFFIXES = ("phi", "q", "x", "s")
+#: Potential-solve keywords the Model sets itself from the state, the step and `t`; refused
+#: among `**solve_kwargs` of `step`/`steady`.
+_MODEL_SOLVE_KEYS = frozenset({"phi0", "q0", "history", "dt", "t"})
 
 
 def _detached(diag):
@@ -1197,6 +1201,13 @@ class Model:
         self, state, drivers, dt, diagnostics, solve_kwargs, *, t=None,
         boundary_transfers: bool | Collection[str] = False,
     ) -> State:
+        owned = sorted(_MODEL_SOLVE_KEYS.intersection(solve_kwargs))
+        if owned:
+            raise ValueError(
+                f"Model: solve keywords {owned} are set by the Model itself, not passed "
+                f"through: phi0 and q0 (the warm starts) from the state, history from the "
+                f"step-start state, dt from step's dt and t from the t= argument"
+            )
         # The coupling seam: ping-pong is exactly ONE pass, taken with the state at the start
         # of the step; `coupling="iterate"` repeats `_pass` until the named transport states
         # stop changing, and reports the pass count it took.

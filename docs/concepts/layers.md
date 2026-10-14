@@ -122,9 +122,10 @@ such a layer; read the flows from `solve`'s `q`, and the balance from `balance(p
 | `integration` | `"trapezoidal"` (default) or `"backward_euler"`. |
 | `phi0`, `q0` | Warm start of the interior potentials and of the implicit-edge flows; zeros otherwise. |
 
-A layer solved by nodal analysis accepts `mode`, `dt`, `t`, `history`, `integration` and `q0`
-and ignores them (`phi0` is its own warm start). A phasor layer ignores `integration` and
-refuses `dt`, `history` and any mode but `"phasor"`. On the differentiable path (the default)
+A layer solved by nodal analysis has static laws: it accepts `t`, `integration`, `q0` and the
+modes `"dc"` and `"initial"` and ignores them (`phi0` is its own warm start), and refuses
+`mode="phasor"`, `dt` and `history`, since it takes no step. A phasor layer ignores
+`integration` and refuses `dt`, `history` and any mode but `"phasor"`. On the differentiable path (the default)
 gradients reach `history` too, so a chain of steps back-propagates through time.
 
 **Linear solver.** `linear_solver="auto"` on such a layer factorises: SciPy's sparse LU
@@ -383,7 +384,8 @@ unknowns. `Model` hands such a layer what its laws need:
   initial point, e.g. `layer.solve(..., mode="initial")`. The history is always the
   step-start state, so `coupling="iterate"` re-steps every pass from the same start.
 
-`integration=` (`"trapezoidal"` or `"backward_euler"`) travels through `**solve_kwargs`.
+`integration=` (`"trapezoidal"` or `"backward_euler"`) travels through `**solve_kwargs`; the
+keywords the Model sets itself (`phi0`, `q0`, `history`, `dt`, `t`) are refused there by name.
 `steady` solves such a layer at its operating point (a capacitance open, an inductance
 shorted). A layer with contextual laws but no dynamic one (a time-dependent source and
 resistors, no storage) takes no history: on a step it is solved at its operating point at the

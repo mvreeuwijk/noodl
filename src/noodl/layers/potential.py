@@ -163,6 +163,12 @@ class PotentialFlowLayer:
             if el.kind in seen_kinds:
                 raise ValueError(f"duplicate element kind {el.kind!r} in layer {name!r}")
             seen_kinds.add(el.kind)
+            if el.law_form not in ("potential", "implicit"):
+                raise ValueError(
+                    f"PotentialFlowLayer {name!r}: kind {el.kind!r} has law "
+                    f"{type(el).__name__} with law_form={el.law_form!r}; expected "
+                    f"'potential' or 'implicit'"
+                )
 
         self.net = net
         self.name = name
@@ -1003,13 +1009,26 @@ class PotentialFlowLayer:
         flow to `history` too, so a chain of steps back-propagates through time. There
         `diagnostics["method"]` is likewise the method requested and `"backend"` the one that
         ran; `method="cg"` is refused (the system is not symmetric positive definite). A
-        classic layer accepts and ignores those keywords.
+        classic layer, whose laws are static, accepts and ignores `q0`, `t`, `integration`
+        and the modes `"dc"` and `"initial"` (both its one steady solution), and refuses
+        `mode="phasor"`, `dt` and `history`: it takes no step and solves no phasors.
         """
         if self.mna:
             return self._mna.solve(
                 phi_boundary, drivers, sources, phi0, q0=q0, history=history, dt=dt, t=t,
                 integration=integration, mode=mode, differentiable=differentiable,
                 diagnostics=diagnostics, **newton_kwargs,
+            )
+        if mode == "phasor":
+            raise ValueError(
+                f"PotentialFlowLayer {self.name!r}: mode='phasor' needs a layer built with "
+                f"phasor=True"
+            )
+        stepping = [k for k, v in (("dt", dt), ("history", history)) if v is not None]
+        if stepping:
+            raise ValueError(
+                f"PotentialFlowLayer {self.name!r} is solved by nodal analysis: its laws are "
+                f"static, so it takes no step; drop {stepping}"
             )
         drivers = drivers or {}
         newton_kwargs.setdefault("method", self.linear_solver)
