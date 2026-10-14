@@ -1137,7 +1137,10 @@ def test_gradient_on_the_slope_switch_does_not_depend_on_the_wall_slope(monkeypa
     from noodl.apps.sewer.dynwave import DynamicWaveHydraulics
 
     net, _, _ = read_swmm_inp(DATA / "tree_dynwave.inp")
-    model, state0, drivers = build_model(net)
+    # pinned below the file's HEAD_TOLERANCE (1e-12 m): the on-the-switch check needs the
+    # iteration to land on the switch, and at 1e-12 m the steep-wall run (S x 5) can stop one
+    # tolerance short of it (1.2e-12 m measured on Linux, 2e-14 m on Windows)
+    model, state0, drivers = build_model(net, iterate_tol=1e-13, iterate_max=2000)
     factors = [1.0] * 60 + [0.0] * 50
     inflow = torch.stack([f * drivers["inflow"] for f in factors]).unsqueeze(1)
     state0, _ = simulate_dynamic_wave(model, state0, drivers, steps=107, inflow=inflow,
