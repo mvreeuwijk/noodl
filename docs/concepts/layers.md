@@ -125,10 +125,13 @@ refuses `dt`, `history` and any mode but `"phasor"`. On the differentiable path 
 gradients reach `history` too, so a chain of steps back-propagates through time.
 
 **Linear solver.** `linear_solver="auto"` on such a layer factorises: SciPy's sparse LU
-(`"sparse_direct"`, per instance) when SciPy is importable and the flat batch is at most 32
-instances, batched dense LU (`"direct"`) otherwise. It never picks GMRES (the system is
-indefinite and badly scaled, with potentials and flows in one vector) and refuses CG. An
-explicit `"gmres"`, `"direct"` or `"sparse_direct"` is honoured. `diagnostics["method"]` is the
+(`"sparse_direct"`, per instance) whenever SciPy is importable, at any batch size, and batched
+dense LU (`"direct"`) only when it is not. A dense batched factorisation costs memory and work
+growing with the square and cube of the system size per instance: a 64-frequency sweep of a
+1604-unknown circuit took 6.1 s and 1.3 GB dense against 0.48 s with sparse LU. A tiny circuit
+at a very large batch may be faster with an explicit `method="direct"`. `"auto"` never picks
+GMRES (the system is indefinite and badly scaled, with potentials and flows in one vector) and
+refuses CG. An explicit `"gmres"`, `"direct"` or `"sparse_direct"` is honoured. `diagnostics["method"]` is the
 method requested and `diagnostics["backend"]` the one that ran.
 
 ### Phasor layers

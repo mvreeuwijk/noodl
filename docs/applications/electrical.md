@@ -150,9 +150,9 @@ t = 3.0 ms: v = 0.950212 V, exact 0.950213 V
 ```
 
 The result holds `"time"`, `"electrical.phi"` and `"electrical.q"` with the start state as row
-0, and `"integration"`, the rule each step used. `operating_point`, `initial_state` and
-`transient` pass any further keyword (Newton's `atol` and `rtol`, `method`, ...) to every layer
-solve.
+0, and `"integration"`, the rule each step used. `operating_point`, `initial_state`,
+`transient` and `ac_sweep` pass any further keyword (Newton's `atol` and `rtol`, `method`, ...)
+to every layer solve.
 
 ### AC (phasor) analysis
 

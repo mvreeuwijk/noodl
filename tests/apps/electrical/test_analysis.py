@@ -226,3 +226,21 @@ def test_diode_transient_with_tight_newton_tolerances():
                                atol=1e-15)
     torch.testing.assert_close(values["D1"][1], 1e-6 * (torch.exp(v / 0.04) - 1.0) + v / 1e8,
                                rtol=1e-12, atol=0)
+
+
+def test_ac_sweep_of_a_resistive_circuit_returns_independent_rows():
+    circuit = Circuit([VoltageSource("V1", "a", "0", 3.0), Resistor("R1", "a", "b", 1.0),
+                       Resistor("R2", "b", "0", 2.0)])
+    out = ac_sweep(circuit, torch.tensor([1.0, 10.0]))
+    assert out[PHI].is_contiguous() and out[Q].is_contiguous()
+    before = out[PHI][1].clone()
+    out[PHI][0] += 1.0
+    torch.testing.assert_close(out[PHI][1], before, rtol=0, atol=0)
+
+
+def test_ac_sweep_forwards_solve_keywords():
+    diagnostics = {}
+    out = ac_sweep(_rc(), torch.tensor([1.0, 10.0]), method="direct", diagnostics=diagnostics)
+    assert diagnostics["layers"][LAYER]["backend"] == "direct"
+    reference = ac_sweep(_rc(), torch.tensor([1.0, 10.0]))
+    torch.testing.assert_close(out[PHI], reference[PHI], rtol=1e-12, atol=1e-12)

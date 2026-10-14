@@ -458,3 +458,28 @@ def test_dynamic_kind_may_not_carry_a_drive():
         PotentialFlowLayer(net, "e", [Conductance(torch.tensor([1.0, 0.5]), kind="r"),
                                       Store(torch.tensor([3.0]))],
                            drives=[Push()], boundary=["gnd"])
+
+
+def test_auto_factorises_sparse_whenever_scipy_is_importable(monkeypatch):
+    import noodl.layers._mna as mna_module
+
+    _, layer = _driven_layer()
+    mna = layer._mna
+    monkeypatch.setattr(mna_module, "_scipy_importable", lambda: True)
+    assert mna.method() == "sparse_direct"
+    assert mna.method("direct") == "direct"
+    monkeypatch.setattr(mna_module, "_scipy_importable", lambda: False)
+    assert mna.method() == "direct"
+    assert mna.method("sparse_direct") == "sparse_direct"
+
+
+def test_auto_runs_sparse_lu_on_a_batch_above_32():
+    _, layer = _driven_layer()
+    g = torch.tensor([1.0, 0.5]).expand(40, 2)
+    diagnostics = {}
+    phi, _ = layer.solve(torch.zeros(40, 1), {"g": g, "V": torch.tensor([3.0])},
+                         diagnostics=diagnostics, differentiable=False)
+    assert diagnostics["method"] == "auto" and diagnostics["backend"] == "sparse_direct"
+    reference, _ = layer.solve(torch.zeros(1), {"g": g[0], "V": torch.tensor([3.0])},
+                               differentiable=False)
+    torch.testing.assert_close(phi, reference.expand(40, -1), rtol=1e-12, atol=1e-12)

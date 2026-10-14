@@ -121,10 +121,11 @@ def transient(model: Model, state: Mapping[str, Tensor], drivers: Mapping[str, T
     }
 
 
-def ac_sweep(circuit: Circuit, frequencies) -> dict[str, Tensor]:
+def ac_sweep(circuit: Circuit, frequencies, **solve_kwargs) -> dict[str, Tensor]:
     """The sinusoidal steady state of `circuit` at each of `frequencies` (Hz), one batched
     phasor solve: `{"frequency": (F,), "electrical.phi": (F, n), "electrical.q": (F, b)}`,
     complex peak-amplitude, sine-referenced phasors (`x(t) = |X| sin(omega t + arg X)`).
+    `solve_kwargs`, such as `method` or Newton's `atol` and `rtol`, reach the layer solve.
 
     Sources are `Constant` (the AC magnitude, phase 0) or `Sine` (amplitude and phase; the
     sweep frequency governs, not the waveform's); other waveforms and nonlinear devices
@@ -134,11 +135,12 @@ def ac_sweep(circuit: Circuit, frequencies) -> dict[str, Tensor]:
     """
     f = torch.as_tensor(frequencies, dtype=F64).reshape(-1)
     model, _, drivers = build_model(circuit, phasor=True, frequency=f)
-    op = operating_point(model, drivers)
-    # a circuit whose laws do not read the frequency (resistive) solves unbatched
+    op = operating_point(model, drivers, **solve_kwargs)
+    # a circuit whose laws do not read the frequency (resistive) solves unbatched; its rows
+    # are copied out, so each frequency's row is its own memory
     phi, q = op[PHI], op[Q]
-    return {"frequency": f, PHI: phi.expand(*f.shape, phi.shape[-1]),
-            Q: q.expand(*f.shape, q.shape[-1])}
+    return {"frequency": f, PHI: phi.expand(*f.shape, phi.shape[-1]).contiguous(),
+            Q: q.expand(*f.shape, q.shape[-1]).contiguous()}
 
 
 def device_values(model: Model, state: Mapping[str, Tensor]) -> dict[str, tuple[Tensor, Tensor]]:

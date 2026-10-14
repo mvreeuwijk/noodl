@@ -34,14 +34,15 @@ from noodl.solvers.newton import newton
 
 Tensor = torch.Tensor
 
-#: The flat batch above which `"auto"` factorises densely instead of per instance with
-#: SuperLU (`solvers.select._SPARSE_DIRECT_MAX_BATCH`, measured for the nodal layer).
-_SPARSE_DIRECT_MAX_BATCH = 32
-
 #: The largest system whose failed solve is diagnosed by a dense rank test; above it the
 #: original solver error is re-raised unchanged (a dense SVD of a big system costs more
 #: than the diagnosis is worth).
 _RANK_TEST_MAX_UNKNOWNS = 2000
+
+
+def _scipy_importable() -> bool:
+    """True when SciPy (the optional `noodl-physics[sparse]` extra) can be imported."""
+    return importlib.util.find_spec("scipy") is not None
 
 
 _forward_mode_ready = False
@@ -128,7 +129,6 @@ class MnaSystem:
         sgn = torch.tensor([1.0, -1.0], dtype=torch.float64)
         rows, cols, srcs, signs = [], [], [], []
         offset = 0
-        self._block_sizes = []
         ar = torch.arange
         for el, (s, e) in zip(self.layer._elements, self.layer._elem_slices, strict=True):
             m = el.ports
@@ -147,7 +147,6 @@ class MnaSystem:
                 cols.append((cn * w + cl)[keep])
                 srcs.append((offset + flat)[keep])
                 signs.append((sgn[a] * sgn[bb])[keep])
-                self._block_sizes.append(size)
                 offset += size
             else:
                 rrow = (n_I + f_index[ek]) * w + ck
@@ -166,7 +165,6 @@ class MnaSystem:
                 srcs.append((offset + flat)[keep])
                 signs.append(torch.ones(int(keep.sum()), dtype=torch.float64))
                 offset += size
-                self._block_sizes += [size, size]
         # KCL x q_F: the incidence of implicit edges, a constant +-1 (slot `one`)
         self._one_slot = offset
         offset += 1
@@ -477,18 +475,21 @@ class MnaSystem:
         return MnaOperator(self.row, self.col, values, self.n)
 
     # ------------------------------------------------------------- solve
-    def method(self, batch_numel: int, requested: str | None = None) -> str:
+    def method(self, requested: str | None = None) -> str:
         """The inner linear solver for a request (default: the layer's `linear_solver`):
-        the request itself unless `"auto"`, which factorises (SuperLU per instance up to
-        `_SPARSE_DIRECT_MAX_BATCH` instances when SciPy is importable, batched dense LU
-        otherwise; the system is indefinite, so never CG)."""
+        the request itself unless `"auto"`, which factorises: SciPy's sparse LU per instance
+        (`"sparse_direct"`) whenever SciPy is importable, at any batch size, and batched
+        dense LU (`"direct"`) only when it is not. The system is indefinite, so never CG.
+
+        Sparse LU at every batch size: a dense batched factorisation costs `batch * n^2`
+        memory and `batch * n^3` work, so a frequency sweep of a mid-sized circuit (64
+        frequencies, 1604 unknowns) took 6.1 s and 1.3 GB dense against 0.48 s per
+        instance with SuperLU. A tiny circuit at a huge batch may be faster dense; ask for
+        `method="direct"` there."""
         requested = self.layer.linear_solver if requested is None else requested
         if requested != "auto":
             return requested
-        if (importlib.util.find_spec("scipy") is not None
-                and batch_numel <= _SPARSE_DIRECT_MAX_BATCH):
-            return "sparse_direct"
-        return "direct"
+        return "sparse_direct" if _scipy_importable() else "direct"
 
     def _singular(self, op: MnaOperator | None, failing: int) -> bool:
         """True when the last Jacobian is (numerically) rank deficient in the flat batch
@@ -579,7 +580,7 @@ class MnaSystem:
             if q0 is not None:
                 x0[..., n_phi:] = self._to_real(q0.detach())
 
-        newton_kwargs["method"] = self.method(math.prod(B), requested)
+        newton_kwargs["method"] = self.method(requested)
         newton_kwargs.setdefault("where", f"PotentialFlowLayer {layer.name!r} solve")
         # The last Jacobian and the first and last residuals, kept to diagnose a failure.
         last: dict = {}
