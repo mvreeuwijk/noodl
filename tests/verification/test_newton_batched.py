@@ -1,12 +1,9 @@
-"""Performance tests for PotentialFlowLayer.solve.
+"""Correctness of the batched Newton solve of PotentialFlowLayer on random ambient networks.
 
-test_newton_scaling_smoke runs unconditionally (tiny sizes); the budgeted test at the bottom
-of this file is marked slow and skipped by default (see pyproject.toml addopts).
+Nothing here is timed: how fast the solve is at 100 nodes x batch 100 is measured by
+`benchmarks/newton_scaling.py`, not asserted.
 """
 
-import time
-
-import pytest
 import torch
 
 from noodl.drives import ConstantDrive
@@ -55,30 +52,17 @@ def _random_layer_and_drivers(n_nodes: int, batch: int, seed: int):
     return layer, drivers, phi_boundary
 
 
-def _time_solve(layer, drivers, phi_boundary, sources=None) -> tuple[float, int]:
+def test_batched_newton_solve_converges_on_a_random_network():
+    layer, drivers, phi_boundary = _random_layer_and_drivers(n_nodes=5, batch=2, seed=0)
+
     def residual_fn(phi_i: torch.Tensor) -> torch.Tensor:
-        return layer.residual(phi_i, phi_boundary, drivers, sources)
+        return layer.residual(phi_i, phi_boundary, drivers, None)
 
     def jacobian_fn(phi_i: torch.Tensor) -> torch.Tensor:
         return layer.jacobian(phi_i, phi_boundary, drivers)
 
-    x0 = layer.linear_init(phi_boundary, drivers, sources)
-    newton(residual_fn, jacobian_fn, x0)  # warm-up
-    start = time.perf_counter()
+    x0 = layer.linear_init(phi_boundary, drivers, None)
     result = newton(residual_fn, jacobian_fn, x0)
-    elapsed = time.perf_counter() - start
-    return elapsed, result.iterations
-
-
-def test_newton_scaling_smoke():
-    layer, drivers, phi_boundary = _random_layer_and_drivers(n_nodes=5, batch=2, seed=0)
-    elapsed, iterations = _time_solve(layer, drivers, phi_boundary)
-    assert elapsed >= 0.0
-    assert iterations >= 1
-
-
-@pytest.mark.slow
-def test_newton_solve_within_budget_for_100_nodes_batch_100():
-    layer, drivers, phi_boundary = _random_layer_and_drivers(n_nodes=100, batch=100, seed=0)
-    elapsed, _ = _time_solve(layer, drivers, phi_boundary)
-    assert elapsed < 2.0, f"solve took {elapsed:.3f}s, budget is 2.0s"
+    assert bool(result.converged.all())
+    assert result.iterations >= 1
+    assert float(residual_fn(result.x).abs().max()) < 1e-8
