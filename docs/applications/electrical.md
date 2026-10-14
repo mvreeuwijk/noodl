@@ -120,9 +120,9 @@ currents consistent with those. `transient(model, state, drivers, times)` then t
 `Model.step` per interval of the grid `times`.
 
 At the initial point a capacitor acts as a voltage source at its `v0` and an inductor as a
-current source at its `i0`. A capacitor directly across a voltage source (or across another
-capacitor in a loop of sources), two inductors in series, or an inductor in series with a
-current source therefore make the initial point singular, and `initial_state` raises a
+current source at its `i0`. A capacitor directly across a voltage source or another
+capacitor, two inductors in series, or an inductor in series with a current source therefore
+make the initial point singular, and `initial_state` raises a
 `RuntimeError` saying so. Start such a transient from `operating_point(model, drivers)`
 instead: the operating point is a consistent state, with each capacitor at its DC voltage
 and each inductor at its DC current rather than at `v0` and `i0`.
@@ -351,12 +351,13 @@ Every check is against a closed form or a hand Modified Nodal Analysis (`tests/a
 | Series RLC, phasor layer | Complex current against `1 / (R + j w L + 1 / (j w C))` at three frequencies | 1e-12 relative |
 | RC with a `Sine` source of phase 0.3 rad, `ac_sweep` | Complex node voltage at three sweep frequencies | 1e-12 relative |
 | RC phasor model, `device_values` | Complex device voltages and currents | 1e-13 relative |
-| Constant-power load behind an impedance, phasor | Load voltage against a fixed-point iteration; drawn power | 1e-12 relative |
+| Constant-power load behind an impedance, phasor | Load voltage against a fixed-point iteration; drawn power | 1e-12 relative (voltage); 1e-12 abs (power, of magnitude 0.54) |
 | Tellegen identity, real and complex | `power_residual` | 1e-12 |
 | Diode with a resistor and capacitor, transient | KCL at the diode node; the diode current against its law | 1e-15 A abs; 1e-12 relative |
 | Diode behind a resistor, DC | The resistor and diode laws at the solution | 1e-10 and 1e-9 relative |
 | Gradients: a capacitance and a source value through three transient steps; a conductance, a source and a boundary potential at DC; a conductance and a source through a phasor magnitude | `torch.autograd.gradcheck` against finite differences | gradcheck defaults |
 | Gradients of the learnable divider resistances | Closed form | 1e-10 relative |
+| Gradients of an inductance, a mutual inductance, a controlled-source gain and four resistances through `initial_state` and three `transient` steps | Central differences | 1e-8 relative |
 
 Measured: the divider is exact, the backward Euler recurrence holds to 3.3e-16 V, the
 trapezoidal order through `transient` is 1.96 to 1.99 (RC) and 2.01 to 2.03 (RLC) over three
@@ -371,7 +372,12 @@ OpenModelica on MSL models is planned.
   is seen at the step end.
 - **No event location.** A `Switch` is a discontinuous law: it changes state only where its
   control driver is evaluated, at a step end, and the step in which it switches is not refined.
-  (The `Diode` is smooth and needs no event.)
+  (The `Diode` is continuously differentiable, its exponential continuing linearly above
+  `Maxexp`, and needs no event.)
+- **No switching inside a transient.** `transient` takes one `drivers` mapping for the whole
+  run, so a `Switch` keeps the state its control driver gives it throughout. To switch at a
+  time, step the model yourself: call `model.step(state, drivers, dt, t=t)` per step and pass a
+  new `drivers` mapping, with the changed control, from the step that should see it.
 - **No ideal diode.** The piecewise-linear ideal diode (MSL `Ideal.IdealDiode`) is not provided;
   `Diode` is the exponential junction diode with its linear continuation.
 - **One frequency per phasor model.** No harmonic balance, no small-signal linearisation of a

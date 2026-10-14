@@ -71,7 +71,7 @@ Calculations and helpers.
 
 | Name | What it does | How to call it |
 |---|---|---|
-| `ac_sweep` | The sinusoidal steady state of `circuit` at each of `frequencies` (Hz), one batched phasor solve: `{"frequency": (F,), "electrical.phi": (F, n), "electrical.q": (F, b)}`, complex peak-amplitude, sine-referenced phasors (`x(t) = \|X\| sin(omega t + arg X)`). | `ac_sweep(circuit, frequencies)` |
+| `ac_sweep` | The sinusoidal steady state of `circuit` at each of `frequencies` (Hz), one batched phasor solve: `{"frequency": (F,), "electrical.phi": (F, n), "electrical.q": (F, b)}`, complex peak-amplitude, sine-referenced phasors (`x(t) = \|X\| sin(omega t + arg X)`). `solve_kwargs`, such as `method` or Newton's `atol` and `rtol`, reach the layer solve. | `ac_sweep(circuit, frequencies, **solve_kwargs)` |
 | `device_values` | Per device name, its `(voltage, current)` (V, A) in `state`: `v = v_p - v_n` and the current entering pin `p`, each of shape `(...,)` for a one-port device and `(..., 2)` (port 1, port 2) for a two-port device. A source delivering power has a negative current. | `device_values(model, state)` |
 | `operating_point` | The DC operating point at time `t` (s): capacitors open, inductors shorted, sources at their value at `t` (`model.steady`; `solve_kwargs`, such as Newton's `atol` and `rtol`, reach the layer solve). On a phasor model, the AC steady state. | `operating_point(model, drivers, *, t=0.0, **solve_kwargs)` |
 | `transient` | March the circuit over the time grid `times` (s), from `state` at `times[0]` (usually `initial_state`), one `Model.step` per interval. | `transient(model, state, drivers, times, *, integration='trapezoidal', **solve_kwargs)` |

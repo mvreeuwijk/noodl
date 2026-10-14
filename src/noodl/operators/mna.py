@@ -6,7 +6,9 @@ neither symmetric nor definite (an ideal source's row has a zero diagonal), so i
 `"direct"` (dense batched LU of `assemble()`), `"sparse_direct"` (SuperLU of the triplet,
 per instance) and `"gmres"`. The index pattern is fixed by the layer's topology and shared
 across the batch; only the values vary per instance. Duplicate `(row, col)` pairs are summed,
-the contract of every COO consumer in use here.
+the contract of every COO consumer in use here. The values are real: a phasor (complex) layer
+is solved in its real view, each complex unknown a (real, imaginary) pair, so its operator is
+real as well.
 """
 
 from __future__ import annotations

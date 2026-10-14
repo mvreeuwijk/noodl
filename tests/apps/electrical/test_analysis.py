@@ -10,6 +10,7 @@ from noodl.apps.electrical import (
     LAYER,
     Capacitor,
     Circuit,
+    ControlledSource,
     Diode,
     Inductor,
     Pulse,
@@ -17,6 +18,7 @@ from noodl.apps.electrical import (
     Signal,
     Sine,
     Step,
+    Transformer,
     VoltageSource,
     ac_sweep,
     build_model,
@@ -261,3 +263,43 @@ def test_singular_initial_state_says_why_and_how_to_start(circuit):
     # the operating point is a valid start
     out = transient(model, operating_point(model, drivers), drivers, [0.0, 1e-6, 2e-6])
     assert bool(torch.isfinite(out[PHI]).all())
+
+
+def _coupled_run(values):
+    """A source, an inductor, coupled windings and a VCCS stepped three times; the loss is a
+    sum over the final voltages and currents, as a function of L, M, the gain and every R."""
+    circuit = Circuit([
+        VoltageSource("V1", "a", "0", 1.0, waveform=Sine(200.0)),
+        Resistor("R1", "a", "b", 2.0), Inductor("L1", "b", "c", 1e-2, i0=0.1),
+        Resistor("R2", "c", "0", 1.5), Transformer("T1", "c", "0", "d", "0", 1e-2, 2e-2, 5e-3),
+        Resistor("R3", "d", "0", 3.0),
+        ControlledSource("G1", "d", "0", "e", "0", 0.5, "voltage", "current"),
+        Resistor("R4", "e", "0", 4.0),
+    ])
+    model, _, drivers = build_model(circuit, learnable=True)
+    layer = model.potential[LAYER]
+    params = [layer.element_for("inductor")[0].L, layer.element_for("transformer")[0].M,
+              layer.element_for("vccs")[0].gain, layer.element_for("resistor")[0].R]
+    with torch.no_grad():
+        for p, v in zip(params, values, strict=True):
+            p.copy_(v)
+    out = transient(model, initial_state(model, drivers), drivers, [0.0, 1e-4, 2e-4, 3e-4])
+    assert len(out["integration"]) == 3
+    return out[Q][-1].sum() + out[PHI][-1].sum(), params
+
+
+def test_transient_gradients_of_inductance_coupling_gain_and_resistance_match_differences():
+    base = [torch.tensor([1e-2]), torch.tensor([5e-3]), torch.tensor([0.5]),
+            torch.tensor([2.0, 1.5, 3.0, 4.0])]
+    loss, params = _coupled_run(base)
+    loss.backward()
+    for i, p in enumerate(params):
+        for j in range(p.numel()):
+            h = 1e-5 * abs(float(base[i][j]))
+            up = [b.clone() for b in base]
+            down = [b.clone() for b in base]
+            up[i][j] += h
+            down[i][j] -= h
+            with torch.no_grad():
+                fd = (_coupled_run(up)[0] - _coupled_run(down)[0]) / (2 * h)
+            torch.testing.assert_close(p.grad[j], fd, rtol=1e-8, atol=0)

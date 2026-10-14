@@ -291,7 +291,9 @@ def residual(self, dp, q, drivers, ctx):
 
 A dynamic law is implicit in every mode, so the layer's unknowns are the same whatever the mode.
 A multi-port law (`ports = 2`) receives the edges of all its groups together and pairs them
-itself: `dp.unflatten(-1, (-1, 2))` gives each group's `(port 1, port 2)`.
+itself: `dp.unflatten(-1, (-1, 2))` gives each group's `(port 1, port 2)`. The Jacobian is
+assembled within groups only, so a law that couples edges across groups gets a wrong Jacobian
+and wrong gradients, not merely a slower Newton convergence.
 
 ## Drives
 

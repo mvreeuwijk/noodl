@@ -87,8 +87,8 @@ serves any domain with ideal sources, flow-controlled laws or storage on its edg
 the interior nodes, $A_I q - s_I$ (plus node sources), where $q$ is the law's flow on a
 potential-controlled edge and the unknown on an implicit one, followed by every implicit law's
 own residual. The Jacobian is assembled as a sparse, nonsymmetric matrix from each law's local
-blocks (forward-mode derivatives, one per port), so a multi-port law couples the edges of its
-group exactly. `solve` still returns `(phi, q)`, with `q` covering every edge.
+blocks (forward-mode derivatives, one per port, two on a phasor layer), so a multi-port law
+couples the edges of its group exactly. `solve` still returns `(phi, q)`, with `q` covering every edge.
 
 **Construction checks**, each raising `ValueError` naming the layer and the kind or nodes:
 
