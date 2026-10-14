@@ -1,6 +1,7 @@
 """The electrical netlist and its model builder: device validation, the circuit index, DC
 operating points of resistive circuits, and batching through drivers."""
 
+import numpy as np
 import pytest
 import torch
 
@@ -125,7 +126,64 @@ def test_builder_layer_keys_kinds_and_circuit_index():
     v, i = values["T1"]
     assert v.shape == (2,) and i.shape == (2,)
     torch.testing.assert_close(v, torch.tensor([1.0, 0.5]), rtol=0, atol=1e-12)
+    # RL draws 0.5 V / 4 ohm = 0.125 A out of s, so i2 = -0.125 and i1 = -i2 / n
+    torch.testing.assert_close(i, torch.tensor([0.0625, -0.125]), rtol=0, atol=1e-12)
     torch.testing.assert_close(values["E1"][0][1], 2.0 * values["C1"][0], rtol=0, atol=1e-12)
+
+
+def test_controlled_sources_and_coupled_windings_at_dc():
+    circuit = Circuit([
+        VoltageSource("V1", "a", "0", 4.0),
+        # F1: current-controlled current source; its control port b-0 is a short, fed by R1
+        Resistor("R1", "a", "b", 1.0),
+        ControlledSource("F1", "b", "0", "c", "0", 2.0, "current", "current"),
+        Resistor("R2", "c", "0", 1.0),
+        # H1: current-controlled voltage source, control fed through R3, output loaded by R4
+        Resistor("R3", "a", "d", 2.0),
+        ControlledSource("H1", "d", "0", "e", "0", 1.5, "current", "voltage"),
+        Resistor("R4", "e", "0", 3.0),
+        # G1: voltage-controlled current source sensing a (open), output loaded by R5
+        ControlledSource("G1", "a", "0", "f", "0", 0.25, "voltage", "current"),
+        Resistor("R5", "f", "0", 2.0),
+        # K1: coupled windings, shorts at DC, fed through R6 and R7
+        Resistor("R6", "a", "g", 4.0), Resistor("R7", "a", "h", 2.0),
+        Transformer("K1", "g", "0", "h", "0", 1e-3, 2e-3, 1e-3),
+    ])
+    model, _, drivers = build_model(circuit)
+    index = model.circuit_index
+    assert index["V1"] == ("voltage_source", slice(0, 1))
+    assert index["R1"] == ("resistor", slice(1, 2))
+    assert index["R7"] == ("resistor", slice(7, 8))
+    assert index["F1"] == ("cccs", slice(8, 10))
+    assert index["H1"] == ("ccvs", slice(10, 12))
+    assert index["G1"] == ("vccs", slice(12, 14))
+    assert index["K1"] == ("transformer", slice(14, 16))
+    values = device_values(model, operating_point(model, drivers))
+
+    def close(name, v, i):
+        got_v, got_i = values[name]
+        torch.testing.assert_close(got_v, torch.tensor(v), rtol=0, atol=1e-12)
+        torch.testing.assert_close(got_i, torch.tensor(i), rtol=0, atol=1e-12)
+
+    # F1: control current 4 V / 1 ohm = 4 A, output 2 * 4 = 8 A from c to 0, so c = -8 V
+    close("F1", [0.0, -8.0], [4.0, 8.0])
+    # H1: control current 4 / 2 = 2 A, output 1.5 * 2 = 3 V, R4 draws 1 A out of e
+    close("H1", [0.0, 3.0], [2.0, -1.0])
+    # G1: senses 4 V with no current, output 0.25 * 4 = 1 A from f to 0, so f = -2 V
+    close("G1", [4.0, -2.0], [0.0, 1.0])
+    # K1: both windings short at DC: 4 / 4 = 1 A and 4 / 2 = 2 A
+    close("K1", [0.0, 0.0], [1.0, 2.0])
+    # the source delivers R1 + R3 + R6 + R7 = 4 + 2 + 1 + 2 = 9 A
+    close("V1", 4.0, -9.0)
+    close("R2", -8.0, -8.0)
+
+
+def test_numpy_scalars_are_device_parameters():
+    circuit = Circuit([VoltageSource("V1", "a", "0", np.float32(2.0)),
+                       Resistor("R1", "a", "0", np.float64(4.0))])
+    model, _, drivers = build_model(circuit)
+    _, i = device_values(model, operating_point(model, drivers))["R1"]
+    torch.testing.assert_close(i, torch.tensor(0.5), rtol=0, atol=1e-15)
 
 
 def test_phasor_model_needs_a_frequency_and_has_complex_drivers():

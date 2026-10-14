@@ -14,7 +14,7 @@ Build the model and its starting state and inputs.
 | Name | What it does | How to call it |
 |---|---|---|
 | `build_model` | Assemble the circuit model and return `(model, state, drivers)`. | `build_model(circuit, *, phasor=False, frequency=None, temperature=None, learnable=False)` |
-| `initial_state` | The consistent initial state at time `t` (s), the start of a transient: every capacitor at its `v0`, every inductor (and transformer winding) at its `i0`, sources at their value at `t`, and the other voltages and currents consistent with those. | `initial_state(model, drivers, *, t=0.0)` |
+| `initial_state` | The consistent initial state at time `t` (s), the start of a transient: every capacitor at its `v0`, every inductor (and transformer winding) at its `i0`, sources at their value at `t`, and the other voltages and currents consistent with those (`solve_kwargs`, such as Newton's `atol` and `rtol`, reach the layer solve). | `initial_state(model, drivers, *, t=0.0, **solve_kwargs)` |
 
 ## Network components
 
@@ -23,7 +23,7 @@ Descriptions of the physical objects a network is built from.
 | Name | What it does | How to call it |
 |---|---|---|
 | `Capacitor` | A capacitor `i = C dv/dt` (`C` in F), with initial voltage `v0` (V). MSL `Basic.Capacitor`. | `Capacitor(name, p, n, C, v0=0.0)` |
-| `Circuit` | A netlist: `devices` (the dataclasses of this module) between named nodes, and the `ground` node (0 V). Construction checks the device types, unique non-empty names, node names on every pin (distinct within a port), scalar parameters, waveforms, switch controls and controlled-source modes, that `ground` is a pin, and that every node has a path through the devices to `ground`. | `Circuit(devices, ground='0')` |
+| `Circuit` | A netlist: `devices` (the dataclasses of this module) between named nodes, and the `ground` node (0 V). Construction checks the device types, unique non-empty names, node names on every pin (distinct within a port), scalar parameters, waveforms, switch controls and controlled-source modes, that `ground` is a pin, and that every node is joined to `ground` through the devices' port edges (a connectivity check only: a loop of voltage sources or a cut set of current sources passes it and is refused at the solve). | `Circuit(devices, ground='0')` |
 | `Conductor` | A linear conductance `i = G v` (`G` in S). MSL `Basic.Conductor`. | `Conductor(name, p, n, G)` |
 | `Diode` | A junction diode `i = Ids (exlin(v / Vt) - 1) + v / R` (`Ids` in A, `Vt` in V, `R` the parallel leak in ohm; exponential up to `Maxexp`, linear above). MSL `Semiconductors.Diode`. Not usable in an AC analysis. | `Diode(name, p, n, Ids=1e-06, Vt=0.04, Maxexp=15.0, R=100000000.0)` |
 | `IdealTransformer` | An ideal transformer `v1 = n v2`, `i2 = -n i1` (turns ratio `n`). MSL `Ideal.IdealTransformer` without magnetisation. | `IdealTransformer(name, p1, n1, p2, n2, n)` |
@@ -74,7 +74,7 @@ Calculations and helpers.
 | `ac_sweep` | The sinusoidal steady state of `circuit` at each of `frequencies` (Hz), one batched phasor solve: `{"frequency": (F,), "electrical.phi": (F, n), "electrical.q": (F, b)}`, complex peak-amplitude, sine-referenced phasors (`x(t) = \|X\| sin(omega t + arg X)`). | `ac_sweep(circuit, frequencies)` |
 | `device_values` | Per device name, its `(voltage, current)` (V, A) in `state`: `v = v_p - v_n` and the current entering pin `p`, each of shape `(...,)` for a one-port device and `(..., 2)` (port 1, port 2) for a two-port device. A source delivering power has a negative current. | `device_values(model, state)` |
 | `operating_point` | The DC operating point at time `t` (s): capacitors open, inductors shorted, sources at their value at `t` (`model.steady`; `solve_kwargs`, such as Newton's `atol` and `rtol`, reach the layer solve). On a phasor model, the AC steady state. | `operating_point(model, drivers, *, t=0.0, **solve_kwargs)` |
-| `transient` | March the circuit over the time grid `times` (s), from `state` at `times[0]` (usually `initial_state`), one `Model.step` per interval. | `transient(model, state, drivers, times, *, integration='trapezoidal')` |
+| `transient` | March the circuit over the time grid `times` (s), from `state` at `times[0]` (usually `initial_state`), one `Model.step` per interval. | `transient(model, state, drivers, times, *, integration='trapezoidal', **solve_kwargs)` |
 
 ## Constants and tables
 

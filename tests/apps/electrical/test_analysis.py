@@ -10,11 +10,13 @@ from noodl.apps.electrical import (
     LAYER,
     Capacitor,
     Circuit,
+    Diode,
     Inductor,
     Pulse,
     Resistor,
     Signal,
     Sine,
+    Step,
     VoltageSource,
     ac_sweep,
     build_model,
@@ -107,11 +109,15 @@ def test_transient_of_a_batched_circuit():
     model, _, drivers = build_model(circuit)
     drivers = {**drivers, "v": torch.tensor([[1.0], [2.0], [3.0], [4.0]])}
     state = initial_state(model, drivers)
-    out = transient(model, state, drivers, _grid(0.25))
+    dt = 0.25
+    out = transient(model, state, drivers, _grid(dt), integration="backward_euler")
     assert out[PHI].shape == (5, 4, model.net.n)
     b = model.net.nodes.index("b")
-    torch.testing.assert_close(out[PHI][-1, :, b], out[PHI][-1, 0, b] * torch.arange(1.0, 5.0),
-                               rtol=1e-12, atol=0)
+    V = torch.arange(1.0, 5.0)
+    v = torch.zeros(4)
+    for k in range(1, 5):                     # the backward-Euler recurrence, R C = 1
+        v = (v + dt * V) / (1.0 + dt)
+        torch.testing.assert_close(out[PHI][k, :, b], v, rtol=0, atol=1e-13)
 
 
 def test_initial_state_holds_storage_at_its_initial_values():
@@ -151,7 +157,8 @@ def test_series_rlc_resonance():
     out = ac_sweep(circuit, freqs)
     assert out[PHI].dtype == torch.complex128 and out[PHI].shape == (7, 4)
     torch.testing.assert_close(out["frequency"], freqs)
-    i = out[Q][:, 1].abs()                 # kinds: voltage_source, resistor, inductor, ...
+    _, edges = build_model(circuit)[0].circuit_index["R1"]
+    i = out[Q][:, edges][:, 0].abs()
     assert int(i.argmax()) == 3
     torch.testing.assert_close(i[3], torch.tensor(1.0 / R), rtol=1e-12, atol=0)
     w = 2.0 * math.pi * freqs
@@ -165,7 +172,7 @@ def test_ac_sweep_takes_the_sine_phase_and_the_sweep_frequency():
     circuit = Circuit([source, Resistor("R1", "a", "b", R), Capacitor("C1", "b", "0", C)])
     freqs = torch.tensor([10.0, 100.0, 1000.0])
     out = ac_sweep(circuit, freqs)
-    b = 2                                     # nodes: ground, a, b
+    b = build_model(circuit)[0].net.nodes.index("b")
     w = 2.0 * math.pi * freqs
     expected = 2.0 * torch.exp(torch.tensor(0.3j)) / (1.0 + 1j * w * R * C)
     torch.testing.assert_close(out[PHI][:, b], expected, rtol=1e-12, atol=0)
@@ -182,4 +189,40 @@ def test_device_values_in_a_phasor_model_are_complex_phasors():
     values = device_values(model, operating_point(model, drivers))
     v, i = values["R1"]
     assert v.dtype == torch.complex128 and v.shape == (2,)
-    torch.testing.assert_close(i, v / 2.0, rtol=1e-14, atol=0)
+    w = 2.0 * math.pi * torch.tensor([0.1, 1.0])
+    current = 1.0 / (2.0 + 1.0 / (1j * w * 0.5))   # 1 V across R = 2 in series with C = 0.5
+    torch.testing.assert_close(i, current, rtol=1e-13, atol=0)
+    torch.testing.assert_close(v, 2.0 * current, rtol=1e-13, atol=0)
+    torch.testing.assert_close(values["C1"][0], current / (1j * w * 0.5), rtol=1e-13, atol=0)
+
+
+def test_ac_sweep_of_a_resistive_circuit_keeps_the_frequency_dimension():
+    circuit = Circuit([VoltageSource("V1", "a", "0", 3.0), Resistor("R1", "a", "b", 1.0),
+                       Resistor("R2", "b", "0", 2.0)])
+    out = ac_sweep(circuit, torch.tensor([1.0, 10.0, 100.0]))
+    model = build_model(circuit)[0]
+    assert out[PHI].shape == (3, model.net.n) and out[Q].shape == (3, 3)
+    b = model.net.nodes.index("b")
+    torch.testing.assert_close(out[PHI][:, b], torch.full((3,), 2.0 + 0j), rtol=0, atol=1e-12)
+    _, edges = model.circuit_index["R2"]
+    torch.testing.assert_close(out[Q][:, edges][:, 0], torch.full((3,), 1.0 + 0j), rtol=0,
+                               atol=1e-12)
+
+
+def test_diode_transient_with_tight_newton_tolerances():
+    # a 2 V step through 100 ohm into a diode in parallel with 1 uF
+    circuit = Circuit([VoltageSource("V1", "a", "0", 2.0, waveform=Step(start_time=2e-5)),
+                       Resistor("R1", "a", "d", 100.0), Diode("D1", "d", "0"),
+                       Capacitor("C1", "d", "0", 1e-6)])
+    model, _, drivers = build_model(circuit)
+    tight = {"atol": 1e-15, "rtol": 0.0}
+    state = initial_state(model, drivers, **tight)
+    out = transient(model, state, drivers, _grid(1e-5, end=1e-4), **tight)
+    assert out["integration"][:3] == ["backward_euler", "backward_euler", "trapezoidal"]
+    values = device_values(model, {PHI: out[PHI][-1], Q: out[Q][-1]})
+    v = values["D1"][0]
+    # KCL at d to round-off, and the diode current on its own law
+    torch.testing.assert_close(values["R1"][1], values["D1"][1] + values["C1"][1], rtol=0,
+                               atol=1e-15)
+    torch.testing.assert_close(values["D1"][1], 1e-6 * (torch.exp(v / 0.04) - 1.0) + v / 1e8,
+                               rtol=1e-12, atol=0)

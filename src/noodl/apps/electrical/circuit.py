@@ -16,6 +16,7 @@ temperature), not of device parameters.
 
 from __future__ import annotations
 
+import numbers
 from collections.abc import Sequence
 from dataclasses import dataclass
 
@@ -248,7 +249,7 @@ def _pin_names(device) -> list[str]:
 def _is_scalar(value) -> bool:
     if isinstance(value, bool):
         return False
-    if isinstance(value, (int, float)):
+    if isinstance(value, numbers.Real):
         return True
     return (isinstance(value, Tensor) and value.dim() == 0 and not value.is_complex()
             and not value.requires_grad)
@@ -260,8 +261,9 @@ class Circuit:
     """A netlist: `devices` (the dataclasses of this module) between named nodes, and the
     `ground` node (0 V). Construction checks the device types, unique non-empty names, node
     names on every pin (distinct within a port), scalar parameters, waveforms, switch
-    controls and controlled-source modes, that `ground` is a pin, and that every node has a
-    path through the devices to `ground`."""
+    controls and controlled-source modes, that `ground` is a pin, and that every node is
+    joined to `ground` through the devices' port edges (a connectivity check only: a loop of
+    voltage sources or a cut set of current sources passes it and is refused at the solve)."""
 
     devices: Sequence
     ground: str = "0"

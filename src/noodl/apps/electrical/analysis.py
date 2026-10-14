@@ -42,15 +42,20 @@ def operating_point(model: Model, drivers: Mapping[str, Tensor], *, t: float = 0
     return model.steady({}, drivers, t=t, **solve_kwargs)
 
 
-def initial_state(model: Model, drivers: Mapping[str, Tensor], *, t: float = 0.0) -> State:
+def initial_state(model: Model, drivers: Mapping[str, Tensor], *, t: float = 0.0,
+                  **solve_kwargs) -> State:
     """The consistent initial state at time `t` (s), the start of a transient: every
     capacitor at its `v0`, every inductor (and transformer winding) at its `i0`, sources at
-    their value at `t`, and the other voltages and currents consistent with those."""
+    their value at `t`, and the other voltages and currents consistent with those
+    (`solve_kwargs`, such as Newton's `atol` and `rtol`, reach the layer solve)."""
     layer = _layer(model)
     _time_domain(layer, "initial_state")
-    phi, q = layer.solve(drivers[f"{LAYER}.phi_boundary"], drivers,
-                         drivers.get(f"{LAYER}.sources"), mode="initial", t=t)
-    return {PHI: phi, Q: q}
+    # Model has no initial-point solve; a circuit model is this one layer with no closures,
+    # so solving the layer directly, with the keys Model would read, is the same thing.
+    name = layer.name
+    phi, q = layer.solve(drivers[f"{name}.phi_boundary"], drivers,
+                         drivers.get(f"{name}.sources"), mode="initial", t=t, **solve_kwargs)
+    return {f"{name}.phi": phi, f"{name}.q": q}
 
 
 def _times(times) -> list[float]:
@@ -63,7 +68,8 @@ def _times(times) -> list[float]:
 
 
 def transient(model: Model, state: Mapping[str, Tensor], drivers: Mapping[str, Tensor],
-              times: Sequence[float] | Tensor, *, integration: str = "trapezoidal") -> dict:
+              times: Sequence[float] | Tensor, *, integration: str = "trapezoidal",
+              **solve_kwargs) -> dict:
     """March the circuit over the time grid `times` (s), from `state` at `times[0]` (usually
     `initial_state`), one `Model.step` per interval.
 
@@ -74,7 +80,9 @@ def transient(model: Model, state: Mapping[str, Tensor], drivers: Mapping[str, T
     `integration="backward_euler"` uses backward Euler throughout. The grid is fixed: a
     breakpoint inside a step is not inserted as a time point, so the step that contains it
     sees the source at the step end. A circuit without capacitors or inductors is solved at
-    each step end as a DC operating point.
+    each step end as a DC operating point. `drivers` is one mapping for the whole run, so a
+    `Signal` source holds its driver value throughout (a time-varying input is a waveform).
+    `solve_kwargs`, such as Newton's `atol` and `rtol`, reach every step's layer solve.
 
     Returns `{"time": (T,), "electrical.phi": (T, ..., n), "electrical.q": (T, ..., b),
     "integration": [rule of each step]}`, the start state as row 0 (rows broadcast to the
@@ -99,7 +107,8 @@ def transient(model: Model, state: Mapping[str, Tensor], drivers: Mapping[str, T
         jump = any(src.breakpoints(evaluated, end) for src in sources)
         rule = ("backward_euler" if integration == "backward_euler" or k == 0 or jump
                 else "trapezoidal")
-        current = model.step(current, drivers, dt, t=t0, integration=rule)
+        current = model.step(current, drivers, dt, t=t0, integration=rule,
+                             **solve_kwargs)
         evaluated = end
         phis.append(current[PHI])
         qs.append(current[Q])
@@ -126,7 +135,10 @@ def ac_sweep(circuit: Circuit, frequencies) -> dict[str, Tensor]:
     f = torch.as_tensor(frequencies, dtype=F64).reshape(-1)
     model, _, drivers = build_model(circuit, phasor=True, frequency=f)
     op = operating_point(model, drivers)
-    return {"frequency": f, PHI: op[PHI], Q: op[Q]}
+    # a circuit whose laws do not read the frequency (resistive) solves unbatched
+    phi, q = op[PHI], op[Q]
+    return {"frequency": f, PHI: phi.expand(*f.shape, phi.shape[-1]),
+            Q: q.expand(*f.shape, q.shape[-1])}
 
 
 def device_values(model: Model, state: Mapping[str, Tensor]) -> dict[str, tuple[Tensor, Tensor]]:
