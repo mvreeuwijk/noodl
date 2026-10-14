@@ -291,10 +291,12 @@ class MnaSystem:
                 f"PotentialFlowLayer {name!r}: mode={mode!r}; expected 'dc', 'initial' or "
                 f"None (transient when dt is given, dc otherwise)"
             )
-        if mode == "initial" and dt is not None:
+        if mode in ("dc", "initial") and dt is not None:
+            what = ("the consistent initial point" if mode == "initial"
+                    else "the steady operating point")
             raise ValueError(
-                f"PotentialFlowLayer {name!r}: mode='initial' is the consistent initial "
-                f"point, which takes no step; drop dt"
+                f"PotentialFlowLayer {name!r}: mode={mode!r} is {what}, which takes no step; "
+                f"drop dt"
             )
         if mode is None:
             mode = "transient" if dt is not None else "dc"
@@ -525,12 +527,22 @@ class MnaSystem:
         bad = torch.nonzero(~(norm < atol + rtol * norm0)).flatten()
         return int(bad[0]) if len(bad) else 0
 
-    def _singular_error(self) -> RuntimeError:
+    def _singular_error(self, mode: str) -> RuntimeError:
+        """The error for a singular system; at the initial point it also says that storage
+        held at its initial value is itself a source, and where else to start."""
+        initial = (
+            "; at the initial point (mode='initial') every dynamic law is held at its initial "
+            "value, so a capacitor acts as a voltage source at its v0 and an inductor as a "
+            "current source at its i0: a capacitor across a voltage source, or an inductor "
+            "in series with another or with a current source, makes it singular. Start the "
+            "transient from the operating point instead (mode='dc'; operating_point in the "
+            "electrical application)"
+        ) if mode == "initial" else ""
         return RuntimeError(
             f"PotentialFlowLayer {self.layer.name!r}: the Modified Nodal Analysis system is "
             f"singular; check for a loop of ideal potential sources or a cut set of flow "
             f"sources among kinds {self.implicit_kinds}, or a part connected to a boundary "
-            f"only through flow-prescribed edges"
+            f"only through flow-prescribed edges{initial}"
         )
 
     def solve(self, phi_boundary, drivers, sources, phi0, *, q0, history, dt, t, integration,
@@ -592,7 +604,7 @@ class MnaSystem:
 
         def diagnose(exc):
             if self._singular(last.get("op"), self._first_failing(last, newton_kwargs)):
-                raise self._singular_error() from exc
+                raise self._singular_error(ctx.mode) from exc
 
         if not differentiable:
             def residual_fn(x):

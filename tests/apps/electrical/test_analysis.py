@@ -244,3 +244,20 @@ def test_ac_sweep_forwards_solve_keywords():
     assert diagnostics["layers"][LAYER]["backend"] == "direct"
     reference = ac_sweep(_rc(), torch.tensor([1.0, 10.0]))
     torch.testing.assert_close(out[PHI], reference[PHI], rtol=1e-12, atol=1e-12)
+
+
+@pytest.mark.parametrize("circuit", [
+    Circuit([VoltageSource("V1", "a", "0", 1.0), Capacitor("C1", "a", "0", 1e-6),
+             Resistor("R1", "a", "0", 1.0)]),
+    Circuit([VoltageSource("V1", "a", "0", 1.0), Resistor("R1", "a", "b", 1.0),
+             Inductor("L1", "b", "c", 1e-3), Inductor("L2", "c", "0", 1e-3)]),
+], ids=["capacitor-across-source", "inductors-in-series"])
+def test_singular_initial_state_says_why_and_how_to_start(circuit):
+    model, _, drivers = build_model(circuit)
+    with pytest.raises(RuntimeError, match=r"(?s)singular.*capacitor acts as a voltage source "
+                                           r"at its v0.*inductor as a current source at its "
+                                           r"i0.*operating_point"):
+        initial_state(model, drivers)
+    # the operating point is a valid start
+    out = transient(model, operating_point(model, drivers), drivers, [0.0, 1e-6, 2e-6])
+    assert bool(torch.isfinite(out[PHI]).all())

@@ -101,8 +101,11 @@ group exactly. `solve` still returns `(phi, q)`, with `q` covering every edge.
 
 A system that is structurally sound but singular (a loop of ideal potential sources, a cut set
 of flow sources, a part reached only through flow-prescribed edges) raises a `RuntimeError` at
-the solve naming the layer and its implicit kinds. Under `on_failure="return"` that singularity
-shows only as `converged=False` in `diagnostics`.
+the solve naming the layer and its implicit kinds. At the initial point (`mode="initial"`) every
+storage law is held at its initial value and so acts as a source itself (a capacitance as a
+potential source, an inductance as a flow source); the error then says so and suggests starting
+from the operating point (`mode="dc"`). Under `on_failure="return"` that singularity shows only
+as `converged=False` in `diagnostics`.
 
 The nodal-only methods (`flows`, `dflows`, `residual`, `jacobian`, `linear_init`, `adjoint`)
 assume every flow is a function of its own edge's potential difference and raise `TypeError` on
@@ -112,7 +115,7 @@ such a layer; read the flows from `solve`'s `q`, and the balance from `balance(p
 
 | Keyword | Meaning |
 |---|---|
-| `mode` | `None` (default): `"transient"` when `dt` is given, `"dc"` otherwise. `"dc"`: the steady operating point. `"initial"`: the consistent initial point (each storage law at its initial value; no `dt`). A phasor layer is always `"phasor"`. |
+| `mode` | `None` (default): `"transient"` when `dt` is given, `"dc"` otherwise. `"dc"`: the steady operating point (no `dt`). `"initial"`: the consistent initial point (each storage law at its initial value; no `dt`). A phasor layer is always `"phasor"`. |
 | `dt` | One implicit step of this length (s). |
 | `t` | The evaluation time, the END of the step on a transient (a time-dependent source is evaluated there); `None` when untracked. |
 | `history` | `(phi, q)` at the step start, full-node potentials and every edge's flow, as `solve` returns them. Required on a step of a layer with a dynamic law. |

@@ -47,7 +47,12 @@ def initial_state(model: Model, drivers: Mapping[str, Tensor], *, t: float = 0.0
     """The consistent initial state at time `t` (s), the start of a transient: every
     capacitor at its `v0`, every inductor (and transformer winding) at its `i0`, sources at
     their value at `t`, and the other voltages and currents consistent with those
-    (`solve_kwargs`, such as Newton's `atol` and `rtol`, reach the layer solve)."""
+    (`solve_kwargs`, such as Newton's `atol` and `rtol`, reach the layer solve).
+
+    There a capacitor is a voltage source at its `v0` and an inductor a current source at its
+    `i0`, so a capacitor across a voltage source, two inductors in series or an inductor in
+    series with a current source make the system singular, which raises a `RuntimeError`
+    saying so; start such a transient from `operating_point` instead."""
     layer = _layer(model)
     _time_domain(layer, "initial_state")
     # Model has no initial-point solve; a circuit model is this one layer with no closures,

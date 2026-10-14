@@ -117,7 +117,17 @@ source kind.
 `initial_state(model, drivers, t=0.0)` gives the consistent initial point: every capacitor at
 its `v0`, every inductor and transformer winding at its `i0`, and the other voltages and
 currents consistent with those. `transient(model, state, drivers, times)` then takes one
-`Model.step` per interval of the grid `times`. An RC circuit charged by a step:
+`Model.step` per interval of the grid `times`.
+
+At the initial point a capacitor acts as a voltage source at its `v0` and an inductor as a
+current source at its `i0`. A capacitor directly across a voltage source (or across another
+capacitor in a loop of sources), two inductors in series, or an inductor in series with a
+current source therefore make the initial point singular, and `initial_state` raises a
+`RuntimeError` saying so. Start such a transient from `operating_point(model, drivers)`
+instead: the operating point is a consistent state, with each capacitor at its DC voltage
+and each inductor at its DC current rather than at `v0` and `i0`.
+
+An RC circuit charged by a step:
 
 ```python
 import math

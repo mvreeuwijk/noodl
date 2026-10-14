@@ -438,3 +438,16 @@ def test_batch_leading_law_output_passes_the_width_check():
                          differentiable=False)
     assert q.shape == (3, 2)
     torch.testing.assert_close(q[:, 1], torch.tensor([1.0, 2.0, 3.0]), rtol=0, atol=1e-13)
+
+
+def test_dc_mode_with_dt_is_refused():
+    _, layer = _rc()
+    phi, q = layer.solve(GROUND, mode="initial", differentiable=False)
+    with pytest.raises(ValueError, match=r"mode='dc'.*takes no step; drop dt"):
+        layer.solve(GROUND, mode="dc", dt=0.1, history=(phi, q), differentiable=False)
+
+
+def test_singular_dc_message_does_not_mention_the_initial_point():
+    with pytest.raises(RuntimeError, match="singular") as info:
+        _voltage_loop().solve(GROUND, differentiable=False)
+    assert "v0" not in str(info.value)
