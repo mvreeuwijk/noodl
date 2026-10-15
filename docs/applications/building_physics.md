@@ -13,7 +13,10 @@ effect depends on density, the airflow and heat problems are genuinely two-way c
 Schedules, weather and ambient-concentration files drive a run over time (`simulate`,
 `simulate_project`). Mechanical ventilation (simple air-handling systems and duct networks with
 fans, dampers and terminals) and measured airflow curves are read from a `.prj` or built in
-Python.
+Python. Occupants move between zones on occupancy schedules and generate contaminants where
+they are; a run reports their exposure, the local mean age of air and the building air change
+rate as ContamX does, and, as additions of noodl, the inhaled dose, the Wells-Riley infection
+probability and each zone's air change rate.
 
 **Units.** Mass flow kg/s, temperature K, heat W, mass fraction kg/kg, pressure Pa. The whole
 application works in `float64` regardless of the network's default dtype.
@@ -1099,6 +1102,39 @@ print(f"{building_air_change_rate(out, model)[-1].item():.4f}")   # 1/h
 0.1667
 ```
 
+On a `.prj` project the same functions read `simulate_project`'s result. The fixture
+`occupants_three_zone.prj` has two occupants, one of them generating on a schedule and
+moving mid-step, and its zone three is outside the building volume, so the building air
+change rate counts zones one and two (`project.building_zones`, the default). ContamX's own
+result files for this project give cumulative exposures of 0.37964 and 0.13995 kg/kg s,
+ages of 0.9044, 2.775 and 5.680 h, and an air change rate of 0.3564 /h at the end of the
+run:
+
+```python
+from noodl.apps.building_physics import (
+    building_air_change_rate,
+    cumulative_exposure,
+    local_mean_age,
+    project_to_model,
+    read_prj,
+    simulate_project,
+)
+
+project = read_prj("occupants_three_zone.prj")
+out = simulate_project(project)
+model, _, _ = project_to_model(project)
+total = cumulative_exposure(out["exposure"], out["time"])[-1, :, 0]   # kg/kg s, per occupant
+print([f"{v:.2e}" for v in total.tolist()])
+print([f"{v:.3g}" for v in (local_mean_age(out, model)[-1] / 3600).tolist()])   # h
+print(f"{building_air_change_rate(out, model)[-1].item():.3g}")                 # 1/h
+```
+
+```text
+['3.80e-01', '1.40e-01']
+['0.904', '2.77', '5.68']
+0.356
+```
+
 ### Species and reactions
 
 A `Species` holds CONTAM's species record: name, molar mass, mean diameter (0 for a gas),
@@ -1533,8 +1569,8 @@ above 0.1 % of the largest.
 | Pressure-controlled exhaust: zone three's gauge pressure above −0.5 Pa through a P controller (Kp 0.8) drives the exhaust fan; a path pressure difference and a flow ratio reported, 288 steps | rel 64 $u$, floor 64 $u$ × max (control outputs: × each output's max) | **5.3e-7** flow, control outputs 3 % of the allowance (clean air) |
 | Hysteresis window: zone one's temperature ramped through a schedule node, a window opened by hysteresis and a band switch, every logical and arithmetic node reported, 288 steps | the sensed $x = 0.1\,(T - 293.15)$ is off by an absolute $0.1\,(T + 293.15)\,u + 2u$ = 61.6 $u$ in float32 (offset cancellation); control outputs 2.67 × that, flows 1.67 × that × the window's flow per unit opening, both on top of rel 64 $u$ and the floor | **1.6e-4** flow on the window at opening 0.028 (41 % of the allowance), control outputs 38 % (clean air) |
 | The simple-AHS and duct-network projects with the outdoor-air fraction, a supply point, a fan's speed and a terminal's opening driven through schedule nodes instead of schedules | as the scheduled rows (mass fractions: the derived bound); noodl physics' runs equal the scheduled runs exactly | **7.9e-7** / **1.4e-7** flow, **3.7e-7** / **5.4e-8** mf, **1.0e-8** terminal flow |
-| Three-zone project with two occupants (one moving mid-step, out of the building for an hour, generating on a schedule), zones at 303.15 / 293.15 / 283.15 K in a 263.15 K ambient, zone three outside the building volume, 48 steps: mass fractions, exposure, age of air, building air change rate | flow rel 33 $u$, mf rel 107 $u$ (three zones in series at 35 $u$ each, the generation rate and the initial mass fraction), floor 64 $u$ × max; exposure 107 $u$ + print (5e-7); age 35 $u$ + print; air change rate 34 $u$ + print | **4.6e-8** flow, **1.3e-7** mf, **4.0e-7** exposure (ContamX's print precision; 1 % of the allowance), **1.1e-7** age, **1.5e-7** air change rate |
-| The duct-network and simple-AHS projects, each also with zone two outside the building volume, and the duct project with a return duct (zone three → junctions → zone one): age of air and building air change rate, 24 steps | the flows' rows above; mass fractions: the derived bound (≤ 8.6e-6 relative; measured 1.2–6.0 % of it); age: the first-order bound $3u\,\tau + A^{-1} r$ of the age equation $A\tau = M$ under the flow budget, evaluated each step ($r_i = \sum_{in} \lvert\delta q\rvert\,\lvert\tau_i - \tau_{up}\rvert$), 6.2e-6 – 1.0e-5 relative + print; air change rate: the entering flows' budgets over $1.2041\,V$, plus 2 $u$, + print | age **2.6e-7 – 5.0e-7** (≤ 9 % of the allowance), air change rate **5.7e-8 – 3.0e-7** (≤ 12 %) |
+| Three-zone project with two occupants (one moving mid-step, out of the building for an hour, generating on a schedule), zones at 303.15 / 293.15 / 283.15 K in a 263.15 K ambient, zone three outside the building volume, 48 steps: mass fractions, exposure, age of air, building air change rate | flow rel 33 $u$, mf rel 107 $u$ (three zones in series at 35 $u$ each, the generation rate and the initial mass fraction), floor 64 $u$ × max; exposure 107 $u$ + print (5e-7); age 35 $u$ + print (at most 2.6e-6); air change rate 34 $u$ + print (at most 2.5e-6) | **4.6e-8** flow (0.8 % of the allowance), **1.3e-7** mf (0.3 %), **4.0e-7** exposure (ContamX's print precision; 1.2 %), **1.1e-7** age (4.3 %), **1.5e-7** air change rate (5.9 %) |
+| The duct-network and simple-AHS projects, each also with zone two outside the building volume, and the duct project with a return duct (zone three → junctions → zone one): age of air and building air change rate, 24 steps | the flows' rows above; mass fractions: the derived bound (≤ 8.6e-6 relative; measured 1.2–6.0 % of it); age: the first-order bound $3u\,\tau + A^{-1} r$ of the age equation $A\tau = M$ under the flow budget, evaluated each step ($r_i = \sum_{in} \lvert\delta q\rvert\,\lvert\tau_i - \tau_{up}\rvert$), at most 6.1e-6 – 9.9e-6 relative + print; air change rate: the entering flows' budgets over $1.2041\,V$, plus 2 $u$, + print (at most 3.1e-6 – 6.1e-6) | age **2.6e-7 – 5.0e-7** (≤ 9 % of the allowance), air change rate **5.7e-8 – 3.0e-7** (≤ 12 %) |
 
 Sinks and the concentration-proportional parts of sources are implicit in ContamX's species
 step, as are kinetic reactions and filters; noodl's implicit step reproduces it to float32
@@ -1794,7 +1830,9 @@ two zones with recirculation, to 1e-12, and an air handler's zero-volume plenum,
 is that of the zone it draws from. The exposure of an occupant in a zone filling from clean
 air: the analytic integral less the implicit-Euler lag $x_s\,\Delta t / 2$, to 1e-9. The
 Wells-Riley probability in its quanta-concentration form from a simulated exposure: the
-classic steady form, to 1e-12.
+classic steady form, to 1e-12. The zone and building air change rates: inflow over air mass,
+and the flows entering a conditioned space over 1.2041 kg/m³ times its volume, on one zone,
+two zones exchanging air and three zones in series with one left out of the space, to 1e-14.
 
 ## Limitations
 
@@ -1832,6 +1870,14 @@ classic steady form, to 1e-12.
   name. `PowerLawDecaySource` and `PeakEmissionSource` count their time from the simulation
   start.
 - **A weather or ambient file must cover the whole run**; nothing is extrapolated.
+- **Occupants follow ContamX's subset.** An occupant's coordinates (for 1-D zones) are
+  ignored, generation from value files is refused, and exposure needs a transient
+  contaminant run. Exposure is a mass-fraction integral; dose and infection risk need a
+  breathing rate from the user. Occupancy and exposure sensors on control nodes are refused
+  (see the control-node bullet above).
+- **Wells-Riley risk, inhaled dose and zone air change rates are additions of noodl.** The
+  age of air and the building air change rate are ContamX outputs and are verified against
+  them, as are the occupants' exposures.
 - **The default coupling is a single pass.** `build_model`'s `coupling` defaults to
   `"pingpong"`: a `.steady()` call then solves the airflow at the *initial* temperatures and does
   not re-converge. On the linear-density single-zone case it returns

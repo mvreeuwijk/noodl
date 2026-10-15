@@ -767,9 +767,20 @@ def _mass_fraction_bound(eps_flow):
     `_mass_roundoff` x M; |deta| = 2 u on a filtered edge (the float32 efficiency, at most
     u, the 1 - efficiency rounding, u / 2, and a second filter chained on the edge, u / 2
     more), 0 on an unfiltered one (eta = 1 exactly); |dx_b| = u |x_b| (the ambient mass
-    fraction in float32)."""
+    fraction in float32). The preconditions (no species source, no generating occupant, no
+    kinetic reaction, a zero initial mass fraction) are asserted, each naming the term it
+    would need."""
 
     def bound(project, out):
+        assert not project.sources, (
+            "the bound has no source term: the project's species sources would need one")
+        assert not any(o.generation for o in project.occupants), (
+            "the bound has no source term: the occupants' generation would need one")
+        assert not project.zone_reactions, (
+            "the bound has no kinetics term: the zones' reactions would need one")
+        assert bool((out["species.x"][0] == 0).all()), (
+            "the bound starts from dx_0 = 0: a nonzero initial mass fraction would need its "
+            "float32 roundoff term")
         model, _, drivers = project_to_model(project)
         lay, net = model.transport["species"], model.net
         f = model.potential["air"].flows_of_kind(out["air.q"], lay.flow_kinds)

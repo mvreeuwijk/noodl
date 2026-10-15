@@ -80,8 +80,11 @@ attaches an `OccupantGeneration` for the occupants that generate, and
 fraction of the zone it occupies, zero while out. The occupants' coordinates (`X Y relHt`, which
 only place an occupant in a 1-D zone), the unit fields and the fifth field of an exposure
 record (ContamX needs it and ignores its value) are read and ignored. The zone flag value 16
-leaves a zone out of the building volume (`Project.building_zones`, the conditioned space of
-`building_air_change_rate`; measured on ContamX 3.4.1.7).
+leaves a zone out of the building volume (the node attribute `in_building_volume`, 0 for such a
+zone). `Project.building_zones` is ContamX's conditioned space, the default of
+`building_air_change_rate`: every zone without that flag, the air handlers' plenums and the duct
+junctions (measured on ContamX 3.4.1.7: the `.ach` header's volume includes the plenums and the
+junctions' duct volume, and a flow between a junction and a zone stays inside the space).
 
 **Refused by name**, rather than silently dropped: a control node of another type (`mod`,
 `int`, `rav`, `dls`, `dlx`, `cvf`, `dvf`, phantom nodes) when an actuator, or a named report
@@ -137,10 +140,11 @@ an interior path; `sup_afe` super elements (ContamX 3.4.1.7 cannot simulate them
 height inside a zone); a wind pressure profile with the trigonometric curve fit; a day schedule whose shape is
 neither rectangular nor trapezoidal; zone names with spaces; an occupancy schedule number
 given twice, an occupancy point line that is not `hh:mm:ss zone X Y relHt`, and an occupancy
-schedule that does not end at 24:00:00 (ContamX stops on it during the run) or that places an
-occupant in a zone the file does not define; an exposure record with four fields (ContamX
-refuses it), exposures not numbered 1, 2, ... in file order, a malformed generation line, and an
-exposure that names an occupancy or week schedule the file does not define, generates a species
+schedule that does not run from 00:00:00 to 24:00:00 (ContamX stops on one that does not end
+there during the run) or that places an occupant in a zone the file does not define; an
+exposure record with four fields (ContamX refuses it), exposures not numbered 1, 2, ... in file
+order, an exposure that does not list 12 occupancy schedules (one per day type), a malformed
+generation line, and an exposure that names an occupancy or week schedule the file does not define, generates a species
 the project does not simulate or reads its generation from a value file; an occupant in the
 ambient, a zone no airflow path reaches or a zero-volume plenum (`project_to_model`, whether it
 generates or only breathes); occupants in a run whose contaminant simulation is not transient
@@ -240,7 +244,10 @@ kg/s; `run_project`'s is empty, `(N, 0)`, without terminals. When the project's 
 them, `run_project` also returns what ContamX writes to its exposure, age-of-air and air-change
 files (`.ebw`, `.age`, `.ach`), one row per step: `"exposure"` `(N - 1, n_exposures, K)` kg/kg,
 `"age"` `(N - 1, n_zones)` in hours, `"air_change_rate"` `(N - 1,)` 1/h (the total column) and
-`"building_volume"` (m³, the conditioned volume of the `.ach` header).
+`"building_volume"` (m³, the conditioned volume of the `.ach` header). A result file that is
+empty or truncated, or whose columns disagree with its header, is refused by name; result files
+left next to the project by an earlier run are not copied into the scratch directory, so only
+this run's are read.
 
 ## CONTAM `.wth`
 
