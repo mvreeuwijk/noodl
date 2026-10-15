@@ -201,13 +201,9 @@ def test_the_preset_is_named_and_sets_the_rate_and_the_floor():
         photostationary_for_streets(("no", "no2", "o3"), no_o3_rate="arrhenius")
 
 
-def test_the_closure_keyword_is_a_deprecated_spelling_of_preset():
-    with pytest.warns(DeprecationWarning, match=r"'closure' is deprecated; use "
-                                                r"preset='munich'"):
-        old = photostationary_for_streets(("no", "no2", "o3"), closure="munich")
-    assert old.rate is k_no_o3_jpl2003 and old.floor_ppb == 0.0
-    with pytest.raises(TypeError, match=r"preset or its deprecated spelling closure"):
-        photostationary_for_streets(("no", "no2", "o3"), closure="munich", preset="sirane")
+def test_the_closure_keyword_is_refused():
+    with pytest.raises(TypeError, match="closure"):
+        photostationary_for_streets(("no", "no2", "o3"), closure="munich")
 
 
 def test_the_old_rate_names_are_the_same_functions():

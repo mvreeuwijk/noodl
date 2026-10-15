@@ -1,5 +1,5 @@
 """The two presets, the fallbacks of the default closure set, the turbulence floors and the
-deprecated spellings, on whole models."""
+refused earlier spellings, on whole models."""
 
 from __future__ import annotations
 
@@ -55,39 +55,27 @@ def test_the_default_is_the_neutral_single_direction_model_without_lmo_or_spread
                            plain.steady(state, d)["street.x"])
 
 
-def test_the_legacy_spellings_build_the_same_model():
+def test_earlier_keywords_and_values_are_refused_by_build_model():
     net = from_test_network()
-    new, _, _ = build_model(net, canyon_wind="bessel_profile",
-                            roof_exchange="turbulent_velocity",
-                            junction_routing="non_crossing_streamlines",
-                            direction_averaging="none", stability="neutral")
-    with pytest.warns(DeprecationWarning) as record:
-        old, _, _ = build_model(net, canyon_wind="soulhac", exchange="sirane",
-                                routing="sirane", direction_averaging="none",
-                                stability="neutral")
-    messages = {str(w.message) for w in record}
-    assert "build_model: the keyword 'exchange' is deprecated; use 'roof_exchange'" in messages
-    assert ("build_model: canyon_wind='soulhac' is deprecated; use "
-            "canyon_wind='bessel_profile'") in messages
-    assert all(w.filename == __file__ for w in record)
-    d = _drivers(new)
-    assert torch.equal(_q(old, d), _q(new, d))
-    assert _flows(old).options == _flows(new).options
+    with pytest.raises(TypeError, match="unexpected keyword argument 'exchange'"):
+        build_model(net, exchange="turbulent_velocity")
+    with pytest.raises(ValueError, match="canyon_wind must be one of"):
+        build_model(net, canyon_wind="soulhac")
 
 
-def test_the_munich_preset_is_the_earlier_munich_option_set():
-    """`preset="munich"` against the same closures spelt out one by one (the earlier
+def test_the_munich_preset_is_the_munich_option_set():
+    """`preset="munich"` against the same closures spelt out one by one (the physics-named
     strings), with a stable and an unstable Obukhov length: bit for bit."""
     net, _ = munich_idealised()
     preset, _, _ = build_model(net, preset="munich")
-    with pytest.warns(DeprecationWarning):
-        spelt, _, _ = build_model(
-            net, canyon_wind="exponential", exchange="schulte", routing="sirane",
-            direction_averaging="munich", roof_wind_form="sirane", stability="munich",
-            kappa=0.41, canyon_wind_min=0.1, u_d_min=0.001, sigma_w_min=0.0,
-            sigma_v_min=0.0, sigma_w_height="street_height",
-            shape_constant="grid_search",
-        )
+    spelt, _, _ = build_model(
+        net, canyon_wind="exponential_profile", roof_exchange="aspect_ratio_scaled",
+        junction_routing="non_crossing_streamlines", direction_averaging="rectangle_rule",
+        direction_spread="turbulence_intensity", roof_wind="bessel_canyon_mean",
+        stability="monin_obukhov", kappa=0.41, canyon_wind_min=0.1, u_d_min=0.001,
+        sigma_w_min=0.0, sigma_v_min=0.0, sigma_w_height="street_height",
+        shape_constant="grid_search",
+    )
     assert _flows(preset).options == _flows(spelt).options
     for lmo in (150.0, -40.0):
         d = _drivers(preset, lmo=torch.tensor(lmo, dtype=DT))

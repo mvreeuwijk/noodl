@@ -146,7 +146,7 @@ def test_soulhac_canyon_velocity_matches_the_scipy_reference(w_over_h, angle_deg
     got = canyon_velocity(
         torch.tensor([width], dtype=DT), torch.tensor([height], dtype=DT),
         torch.tensor([phi], dtype=DT), u_star=torch.tensor([u_star], dtype=DT),
-        form="bessel_profile", z0_b=Z0_B_DEFAULT, kappa=KAPPA,
+        canyon_wind="bessel_profile", z0_b=Z0_B_DEFAULT, kappa=KAPPA,
     )
     want = _scipy_canyon_velocity(width, height, Z0_B_DEFAULT, phi, u_star)
     # atol covers the 90-degree column, where cos(phi) is 1e-17 and a relative
@@ -159,11 +159,11 @@ def test_canyon_velocity_is_batched_over_streets_and_forcing_steps():
     height = torch.tensor([20.0, 20.0, 30.0], dtype=DT)
     phi = torch.tensor([[0.0, 0.5, 1.0], [2.0, 2.5, 3.0]], dtype=DT)
     u_star = torch.tensor([[0.3], [0.6]], dtype=DT)
-    out = canyon_velocity(width, height, phi, u_star=u_star, form="bessel_profile")
+    out = canyon_velocity(width, height, phi, u_star=u_star, canyon_wind="bessel_profile")
     assert out.shape == (2, 3)
     # u_star enters linearly, so doubling it doubles the velocity exactly.
     torch.testing.assert_close(out[1], 2.0 * canyon_velocity(
-        width, height, phi[1], u_star=torch.tensor([0.3], dtype=DT), form="bessel_profile"
+        width, height, phi[1], u_star=torch.tensor([0.3], dtype=DT), canyon_wind="bessel_profile"
     ), rtol=1e-12, atol=0)
 
 
@@ -172,18 +172,18 @@ def test_canyon_velocity_sign_follows_the_axis_and_the_floor_keeps_it():
     height = torch.tensor([20.0], dtype=DT)
     u_star = torch.tensor([0.4], dtype=DT)
     forward = canyon_velocity(width, height, torch.tensor([0.0], dtype=DT),
-                              u_star=u_star, form="bessel_profile")
+                              u_star=u_star, canyon_wind="bessel_profile")
     backward = canyon_velocity(width, height, torch.tensor([math.pi], dtype=DT),
-                               u_star=u_star, form="bessel_profile")
+                               u_star=u_star, canyon_wind="bessel_profile")
     assert float(forward) > 0.0 and float(backward) < 0.0
     torch.testing.assert_close(forward, -backward, rtol=1e-12, atol=0)
     # Exactly perpendicular: cos(phi) is +0.0 at pi/2 in float64 only to 6e-17, so the
     # floored speed keeps the POSITIVE sign -- MUNICH's `>` test at dangle == pi/2.
     floored = canyon_velocity(width, height, torch.tensor([0.5 * math.pi], dtype=DT),
-                              u_star=u_star, form="bessel_profile", canyon_wind_min=0.1)
+                              u_star=u_star, canyon_wind="bessel_profile", canyon_wind_min=0.1)
     torch.testing.assert_close(floored, torch.tensor([0.1], dtype=DT), rtol=1e-12, atol=0)
     unfloored = canyon_velocity(width, height, torch.tensor([0.5 * math.pi], dtype=DT),
-                                u_star=u_star, form="bessel_profile")
+                                u_star=u_star, canyon_wind="bessel_profile")
     assert abs(float(unfloored)) < 1e-15
 
 
@@ -192,7 +192,7 @@ def test_exponential_canyon_velocity_is_kim_2022_equation_b14():
     u_h = torch.tensor([5.0], dtype=DT)
     got = canyon_velocity(
         torch.tensor([7.5], dtype=DT), torch.tensor([6.9], dtype=DT),
-        torch.tensor([0.0], dtype=DT), u_h=u_h, form="exponential_profile", z0_s=0.01,
+        torch.tensor([0.0], dtype=DT), u_h=u_h, canyon_wind="exponential_profile", z0_s=0.01,
     )
     torch.testing.assert_close(got, torch.tensor([4.003210417532266], dtype=DT),
                                rtol=1e-12, atol=0)
@@ -201,8 +201,8 @@ def test_exponential_canyon_velocity_is_kim_2022_equation_b14():
 def test_exchange_velocity_sirane_and_schulte_agree_at_unit_aspect_ratio():
     sigma_w = torch.tensor([0.38569440], dtype=DT)
     one = torch.tensor([10.0], dtype=DT)
-    sirane = exchange_velocity(sigma_w, one, one, form="turbulent_velocity")
-    schulte = exchange_velocity(sigma_w, one, one, form="aspect_ratio_scaled")
+    sirane = exchange_velocity(sigma_w, one, one, roof_exchange="turbulent_velocity")
+    schulte = exchange_velocity(sigma_w, one, one, roof_exchange="aspect_ratio_scaled")
     torch.testing.assert_close(sirane, schulte, rtol=1e-14, atol=0)
     assert abs(SIRANE_EXCHANGE - 1.0 / (math.sqrt(2.0) * math.pi)) < 1e-16
     assert abs(SCHULTE_BETA - 2.0 * SIRANE_EXCHANGE) < 1e-16
@@ -214,10 +214,10 @@ def test_the_sigma_w_floor_is_the_exchange_velocity_floor_bit_for_bit():
     sigma_w = torch.linspace(0.0, 0.9, 181, dtype=DT)
     h, w = torch.tensor([20.0], dtype=DT), torch.tensor([12.0], dtype=DT)
     for form in ("turbulent_velocity", "aspect_ratio_scaled"):
-        floored = exchange_velocity(sigma_w, h, w, form=form, sigma_w_min=0.3)
-        u_d_min = float(exchange_velocity(torch.tensor([0.3], dtype=DT), h, w, form=form))
+        floored = exchange_velocity(sigma_w, h, w, roof_exchange=form, sigma_w_min=0.3)
+        u_d_min = float(exchange_velocity(torch.tensor([0.3], dtype=DT), h, w, roof_exchange=form))
         assert torch.equal(floored,
-                           exchange_velocity(sigma_w, h, w, form=form, u_d_min=u_d_min))
+                           exchange_velocity(sigma_w, h, w, roof_exchange=form, u_d_min=u_d_min))
     with pytest.raises(ValueError, match=r"exchange_velocity.*negative"):
         exchange_velocity(torch.tensor([-0.01], dtype=DT), h, w, sigma_w_min=0.3)
 
@@ -225,7 +225,7 @@ def test_the_sigma_w_floor_is_the_exchange_velocity_floor_bit_for_bit():
 def test_exchange_velocity_refuses_a_negative_sigma_w():
     with pytest.raises(ValueError, match=r"exchange_velocity.*negative.*pblh_floor"):
         exchange_velocity(torch.tensor([-0.01], dtype=DT), torch.tensor([20.0], dtype=DT),
-                          torch.tensor([10.0], dtype=DT), form="turbulent_velocity")
+                          torch.tensor([10.0], dtype=DT), roof_exchange="turbulent_velocity")
 
 
 def test_boundary_layer_matches_the_neutral_form_and_floors_the_abl_when_asked():
@@ -290,10 +290,10 @@ def test_macdonald_and_bessel_roof_wind_reproduce_the_published_geometry():
     torch.testing.assert_close(z0c, torch.tensor([0.6614635677623194], dtype=DT),
                                rtol=1e-12, atol=0)
     u_star = torch.tensor([0.3], dtype=DT)
-    macdonald = roof_wind(u_star, h, w, form="canopy_log_law", h_mean=h, w_mean=w)
+    macdonald = roof_wind(u_star, h, w, roof_wind="canopy_log_law", h_mean=h, w_mean=w)
     torch.testing.assert_close(macdonald, torch.tensor([0.9063192631810709], dtype=DT),
                                rtol=1e-12, atol=0)
-    sirane = roof_wind(u_star, h, w, form="bessel_canyon_mean", z0_s=0.01, kappa=KAPPA_MUNICH)
+    sirane = roof_wind(u_star, h, w, roof_wind="bessel_canyon_mean", z0_s=0.01, kappa=KAPPA_MUNICH)
     # u_H / u* = (u_M/u*) * f_mean = 8.611791 * 0.880654 at the continuous root.
     torch.testing.assert_close(sirane / u_star, torch.tensor([8.611791 * 0.880654],
                                                              dtype=DT), rtol=2e-6, atol=0)
@@ -303,15 +303,15 @@ def test_unknown_form_names_the_offender():
     args = (torch.tensor([10.0], dtype=DT), torch.tensor([20.0], dtype=DT))
     with pytest.raises(ValueError, match=r"canyon_velocity.*'bessel_profile'.*'lemonsu'"):
         canyon_velocity(*args, torch.tensor([0.0], dtype=DT),
-                        u_star=torch.tensor([0.4], dtype=DT), form="lemonsu")
+                        u_star=torch.tensor([0.4], dtype=DT), canyon_wind="lemonsu")
     with pytest.raises(ValueError, match=r"exchange_velocity.*'turbulent_velocity'.*'wang'"):
-        exchange_velocity(torch.tensor([0.3], dtype=DT), *args, form="wang")
+        exchange_velocity(torch.tensor([0.3], dtype=DT), *args, roof_exchange="wang")
     with pytest.raises(ValueError, match=r"roof_wind.*'bessel_canyon_mean'.*'wang'"):
-        roof_wind(torch.tensor([0.3], dtype=DT), *args, form="wang")
+        roof_wind(torch.tensor([0.3], dtype=DT), *args, roof_wind="wang")
     with pytest.raises(ValueError, match=r"canyon_velocity.*='bessel_profile'.*u_star"):
-        canyon_velocity(*args, torch.tensor([0.0], dtype=DT), form="bessel_profile")
+        canyon_velocity(*args, torch.tensor([0.0], dtype=DT), canyon_wind="bessel_profile")
     with pytest.raises(ValueError, match=r"canyon_velocity.*='exponential_profile'.*u_h"):
-        canyon_velocity(*args, torch.tensor([0.0], dtype=DT), form="exponential_profile")
+        canyon_velocity(*args, torch.tensor([0.0], dtype=DT), canyon_wind="exponential_profile")
 
 
 def test_the_bessel_second_derivative_is_real_rather_than_a_silent_zero():
