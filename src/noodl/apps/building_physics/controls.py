@@ -49,6 +49,8 @@ from noodl.apps.building_physics.inputs import scatter
 F64 = torch.float64
 State = Mapping[str, Tensor]
 Drivers = Mapping[str, Tensor]
+# `output(i, block, u, memory, y)`: what block `i` passes on in place of its output `y`.
+OutputHook = Callable[[int, "Block", Sequence[Tensor], Tensor, Tensor], Tensor]
 PRESSURE_DIFFERENCE = "air.dp"
 
 
@@ -764,9 +766,12 @@ class ControlNetwork:
         return tuple(state[k] if k in state else init[k] for k in self.state_keys)
 
     def _run(self, state: State, drivers: Drivers, memory: Tensor, dt: float | None,
-             want: str = "") -> tuple[Tensor, Tensor, Tensor | None]:
+             want: str = "", output: OutputHook | None = None,
+             ) -> tuple[Tensor, Tensor, Tensor | None]:
         """One pass over the blocks: outputs, new memory and, for `want` "rate" or
-        "switching", that quantity of every block."""
+        "switching", that quantity of every block. `output(i, block, u, memory, y)`, when
+        given, returns what block `i` passes on in place of its output `y` (see
+        `evaluate`)."""
         ev = Evaluation(state, drivers, dt)
         stored, _, evaluated = self._stored(state)
         preset = torch.tensor([b.preset_output for b in self.blocks], dtype=F64)
@@ -777,6 +782,8 @@ class ControlNetwork:
             u = [out[j] for j in block.inputs]
             m = memory[..., self._slots[i]]
             y, m_new = block.step(u, m, ev)
+            if output is not None:
+                y = output(i, block, u, m, _f64(y))
             out[i] = _f64(y)
             mem.append(m_new)
             if want == "rate":
@@ -790,10 +797,15 @@ class ControlNetwork:
             _concat(extra) if extra else None)
         return _stack(out), _concat([*mem, empty]), rest
 
-    def evaluate(self, state: State, drivers: Drivers, memory: Tensor | None = None) -> Tensor:
-        """Every block's output at `state`, advancing nothing (continuous networks)."""
+    def evaluate(self, state: State, drivers: Drivers, memory: Tensor | None = None, *,
+                 output: OutputHook | None = None) -> Tensor:
+        """Every block's output at `state`, advancing nothing (continuous networks).
+        `output(i, block, u, memory, y)`, when given, is called after block `i` with its
+        inputs `u`, its memory and its output `y`, and returns what the block passes on to
+        the blocks after it and into the result: a hook that holds a limiter on one side
+        of its corner, or offsets a sensor's reading."""
         memory = self._stored(state)[1] if memory is None else memory
-        return self._run(state, drivers, memory, None)[0]
+        return self._run(state, drivers, memory, None, output=output)[0]
 
     def rates(self, state: State, drivers: Drivers, memory: Tensor | None = None) -> Tensor:
         """d(memory)/dt at `state` (continuous networks; zero outside integrators)."""

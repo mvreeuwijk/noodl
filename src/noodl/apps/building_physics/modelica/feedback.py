@@ -42,7 +42,6 @@ from noodl.apps.building_physics.controls import (
     ControlNetwork,
     Divide,
     DriverValue,
-    Evaluation,
     FunctionReading,
     LimitedPID,
     Product,
@@ -276,31 +275,26 @@ class FeedbackHeat:
         self._y_min = torch.tensor([b.y_min for b in self._pids], dtype=F64)
 
     def _walk(self, state, drivers, pieces: Tensor | None = None,
-              bump: frozenset[int] = frozenset()) -> tuple[list[Tensor], Tensor]:
-        """Every block's output and every limiter's input `v` (`(..., n_limiters)`); on
-        `pieces` (+1 at the upper limit, -1 at the lower, 0 between) when given, else on the
-        pieces `v` lies on. The sensor blocks in `bump` read 1 K more."""
-        ev = Evaluation(state, drivers, None)
-        none = torch.zeros(0, dtype=F64)
-        out: list[Tensor] = []
+              bump: frozenset[int] = frozenset()) -> tuple[Tensor, Tensor]:
+        """Every block's output (`(..., n_blocks)`) and every limiter's input `v`
+        (`(..., n_limiters)`); on `pieces` (+1 at the upper limit, -1 at the lower, 0
+        between) when given, else on the pieces `v` lies on. The sensor blocks in `bump`
+        read 1 K more."""
         v: list[Tensor] = []
-        for i, block in enumerate(self.network.blocks):
-            u = [out[j] for j in block.inputs]
+
+        def output(i, block, u, memory, y):
             if isinstance(block, LimitedPID):
-                vi = torch.as_tensor(block.unlimited(u, none), dtype=F64)
-                if pieces is None:
-                    y = vi.clamp(block.y_min, block.y_max)
-                else:
+                vi = block.unlimited(u, memory)
+                if pieces is not None:
                     p = pieces[..., len(v)]
                     y = torch.where(p > 0, torch.full_like(vi, block.y_max),
                                     torch.where(p < 0, torch.full_like(vi, block.y_min), vi))
                 v.append(vi)
-            else:
-                y, _ = block.step(u, none, ev)
-                y = torch.as_tensor(y, dtype=F64)
-                if i in bump:
-                    y = y + 1.0
-            out.append(y)
+            elif i in bump:
+                y = y + 1.0
+            return y
+
+        out = self.network.evaluate(state, drivers, output=output)
         return out, (torch.stack(torch.broadcast_tensors(*v), dim=-1) if v
                      else torch.zeros(0, dtype=F64))
 
@@ -325,14 +319,14 @@ class FeedbackHeat:
         sensors read 1 K more, exact on a piece (the flows are affine there)."""
         T = torch.as_tensor(self.zone_temperature(state, drivers), dtype=F64)
         out, _ = self._walk(state, drivers, pieces)
-        bumped: dict[int, list[Tensor]] = {}
+        bumped: dict[int, Tensor] = {}
         parts: list[tuple[int, Tensor, Tensor]] = []
         for b, node in self.heat:
             if node not in bumped:
                 bumped[node] = self._walk(state, drivers, pieces,
                                           self._sensors.get(node, frozenset()))[0]
-            q = out[b]
-            slope = bumped[node][b] - q
+            q = out[..., b]
+            slope = bumped[node][..., b] - q
             parts.append((node, q - slope * T[..., node], slope))
         batch = broadcast_shapes(T.shape[:-1], *(a.shape for _, a, _ in parts))
         A = torch.zeros(batch + T.shape[-1:], dtype=F64)
