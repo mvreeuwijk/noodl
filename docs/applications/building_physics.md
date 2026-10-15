@@ -1083,7 +1083,7 @@ pass it as `capacity=`.
   ambient and from other zones alike over its air mass (1/h), the inverse of its nominal time
   constant, not an outdoor air change rate. It is an **addition of noodl**: ContamX writes no
   zone rate. `zones` names the last axis; a storage-free plenum, with no air to change, is
-  left out.
+  left out. `local_mean_age`, by contrast, returns every interior row, plenums included.
 
 Continuing the run above, whose three zones of 300, 600 and 900 m³ are in series:
 

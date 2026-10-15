@@ -2490,8 +2490,9 @@ def _sensor_reading(project: Project, layers: dict, drivers: tuple[str, ...],
             reading = node_temperature(name) if measure == 1 else node_pressure(name)
             reading.resolve(project.net, layers, drivers)
             return reading.resolved
-        detail = "occupancy (it needs occupants)" if measure == 5 else f"measure {measure}"
-        raise ValueError(f"{where}: a {what} sensor of {detail} is not supported")
+        if measure == 5:
+            raise ValueError(f"{where}: occupancy and exposure sensors are not supported")
+        raise ValueError(f"{where}: a {what} sensor of measure {measure} is not supported")
     if kind in _SENSED_EDGES:
         what = _SENSED_EDGES[kind]
         try:

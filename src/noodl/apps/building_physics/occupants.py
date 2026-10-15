@@ -362,8 +362,8 @@ class OccupantGeneration:
             mult = drivers.get(o.multiplier_key)
             if mult is not None:
                 rate = rate * torch.as_tensor(mult, dtype=F64)
-            per_species = torch.zeros(rate.shape[:-1] + (K,), dtype=F64).index_copy(
-                -1, cols, rate)
+            zeros = torch.zeros(rate.shape[:-1] + (K,), dtype=F64, device=rate.device)
+            per_species = zeros.index_copy(-1, cols, rate)
             g = presence.unsqueeze(-1) * per_species.unsqueeze(-2)
             total = g if total is None else total + g
         if total is None:
