@@ -50,12 +50,15 @@ PAGES = [
      ["noodl.apps.wsimod"],
      "Rule-based allocation of water between stores on capacity-limited arcs."),
     ("electrical", "Electrical circuits", "../applications/electrical.md",
-     ["noodl.apps.electrical", "noodl.apps.electrical.modelica"],
+     ["noodl.apps.electrical", "noodl.apps.electrical.modelica",
+      "noodl.apps.electrical.power"],
      "Electrical circuits by Modified Nodal Analysis: resistors, capacitors, inductors, "
      "sources and their waveforms, diodes, switches, transformers and controlled sources "
      "(Modelica Standard Library device laws); impedances, constant-power loads and power "
      "converters (Modelica Buildings Library laws); Joule heating into a thermal network; "
-     "the reader of OpenModelica circuit exports."),
+     "the reader of OpenModelica circuit exports; the constitutive laws of balanced AC "
+     "power flow in per unit (MATPOWER branch model, shunts, voltage-controlled "
+     "generators)."),
 ]
 
 ROLES = [
