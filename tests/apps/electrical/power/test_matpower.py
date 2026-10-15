@@ -141,3 +141,28 @@ def test_every_standard_case_reads(case, sizes, ignored):
     assert (len(net.buses), len(net.branches), len(net.generators)) == sizes
     assert net.name == case and net.notes["ignored_fields"] == ignored
     assert sum(b.kind == "slack" for b in net.buses) == 1
+
+
+def test_a_byte_order_mark_is_read_and_undecodable_bytes_are_refused(tmp_path):
+    p = _case(tmp_path, "")
+    p.write_bytes(p.read_text(encoding="utf-8").encode("utf-8-sig"))
+    assert read_matpower(p).name == "tiny"
+    p.write_bytes(p.read_bytes().replace(b"function", b"\xff\xfe function"))
+    with pytest.raises(ValueError, match=r"tiny\.m.*not UTF-8") as failure:
+        read_matpower(p)
+    assert isinstance(failure.value.__cause__, UnicodeDecodeError)
+
+
+def test_rows_of_different_lengths_are_refused(tmp_path):
+    p = _case(tmp_path, "")
+    # the second bus row gets a 14th column; the first keeps 13
+    p.write_text(p.read_text().replace(" 2 1 50 10 0 0 1 1 0 1 1 1.1 0.9;",
+                                       " 2 1 50 10 0 0 1 1 0 1 1 1.1 0.9 7;"))
+    with pytest.raises(ValueError, match=r"line 6: mpc.bus row has 14 columns.*13"):
+        read_matpower(p)
+
+
+def test_block_comments_are_refused(tmp_path):
+    p = _case(tmp_path, "%{\nmpc.gencost = [1];\n%}\n")
+    with pytest.raises(ValueError, match=r"line 14: block comments %\{ \.\.\. %\} are not"):
+        read_matpower(p)

@@ -85,7 +85,8 @@ class FixedShunt:
 class PowerNetwork:
     """A power-flow network: buses, branches, generators, loads and fixed shunts in file
     order, the system base `base_mva` (MVA), a `name` and free-form `notes` (a reader
-    records what it skipped there). Construction refuses duplicate bus ids, an unknown bus
+    records what it skipped there; they take no part in equality or the hash, so a network
+    is hashable). Construction refuses duplicate bus ids, an unknown bus
     kind, a nonpositive base and any element on a bus that does not exist."""
 
     buses: tuple[Bus, ...]
@@ -95,7 +96,7 @@ class PowerNetwork:
     shunts: tuple[FixedShunt, ...] = ()
     base_mva: float = 100.0
     name: str = ""
-    notes: Mapping[str, object] = field(default_factory=dict)
+    notes: Mapping[str, object] = field(default_factory=dict, compare=False, hash=False)
 
     def __post_init__(self) -> None:
         if not self.base_mva > 0:

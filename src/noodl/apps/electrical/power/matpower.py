@@ -28,13 +28,16 @@ whole-field assignment `mpc.<field> = ...`: an indexed assignment such as
 `mpc.bus(:, 8) = 1;`, `define_constants`, `return`, and so on. A field assigned twice is
 refused too.
 
-SYNTAX. `%` starts a comment except inside a single-quoted string; `...` continues a line
-(the rest of the physical line is dropped). Matrices `[ ... ]` may span lines; a row ends
-at `;` or at the end of a line; values are separated by whitespace or commas; `Inf` and
-`-Inf` are numbers. Cell arrays `{ ... }` are accepted only for ignored fields. A row
-shorter than its table needs, or a token that is not a number, is refused with the line
-number. The network's name is the function's name (`case9`), or the file's stem if the
-file has no `function` header.
+SYNTAX. The file is UTF-8 text (a byte-order mark is skipped; other bytes are refused,
+naming the file). `%` starts a comment except inside a single-quoted string; block comments
+`%{ ... %}` are not supported (a line holding only `%{` or `%}` is refused with its number).
+`...` continues a line (the rest of the physical line is dropped). Matrices `[ ... ]` may
+span lines; a row ends at `;` or at the end of a line; values are separated by whitespace or
+commas; `Inf` and `-Inf` are numbers. Cell arrays `{ ... }` are accepted only for ignored
+fields. A row shorter than its table needs, a row of a different length from the table's
+first row, or a token that is not a number, is refused with the line number. The network's
+name is the function's name (`case9`), or the file's stem if the file has no `function`
+header.
 """
 
 from __future__ import annotations
@@ -118,8 +121,10 @@ def _number(token: str, where: str) -> float:
 def _matrix(
     field: str, segments: list[tuple[int, str]], min_cols: int, path: Path
 ) -> list[tuple[int, list[float]]]:
-    """The rows of a numeric matrix as (line number, values), each at least `min_cols` long."""
+    """The rows of a numeric matrix as (line number, values), all of one length, at least
+    `min_cols`."""
     rows: list[tuple[int, list[float]]] = []
+    first: tuple[int, int] | None = None
     for number, text in segments:
         for piece in text.split(";"):
             tokens = [t for t in _SEPARATORS.split(piece.strip()) if t]
@@ -131,6 +136,13 @@ def _matrix(
                 raise ValueError(
                     f"{where} row has {len(values)} columns; at least {min_cols} columns "
                     f"are required"
+                )
+            if first is None:
+                first = (number, len(values))
+            elif len(values) != first[1]:
+                raise ValueError(
+                    f"{where} row has {len(values)} columns, the row on line {first[0]} has "
+                    f"{first[1]}; every row of a table needs the same number of columns"
                 )
             rows.append((number, values))
     return rows
@@ -202,7 +214,17 @@ def read_matpower(path) -> PowerNetwork:
     fields: dict[str, tuple[int, str, object]] = {}
     ignored: list[str] = []
     seen_statement = False
-    for number, field, opening, value in _statements(path, path.read_text(encoding="utf-8")):
+    try:
+        text = path.read_text(encoding="utf-8-sig")
+    except UnicodeDecodeError as exc:
+        raise ValueError(f"{path}: the file is not UTF-8 text ({exc.reason})") from exc
+    for number, raw in enumerate(text.splitlines(), start=1):
+        if raw.strip() in ("%{", "%}"):
+            raise ValueError(
+                f"{path}: line {number}: block comments %{{ ... %}} are not supported; "
+                f"start each comment line with %"
+            )
+    for number, field, opening, value in _statements(path, text):
         if field is None:
             if seen_statement:
                 raise _not_understood(path, number, f"function mpc = {value}")

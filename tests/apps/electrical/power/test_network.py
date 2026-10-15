@@ -62,3 +62,9 @@ def test_a_nonpositive_base_is_refused():
 def test_elements_on_unknown_buses_are_refused(field, value, match):
     with pytest.raises(ValueError, match=match):
         _net(**{field: value})
+
+
+def test_a_network_is_hashable_and_its_notes_do_not_take_part_in_equality():
+    net = _net(notes={"ignored_fields": ["gencost"]})
+    assert hash(net) == hash(_net())
+    assert net == _net() and {net: 1}[_net()] == 1

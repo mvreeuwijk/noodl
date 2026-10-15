@@ -50,10 +50,30 @@ def test_fixture_belongs_to_the_pinned_case_file(case):
     assert ref["case_sha256_lf"] == MATPOWER_CASES[case]
     assert ref["engines"]["pandapower"] == "3.5.6" and ref["engines"]["PYPOWER"] == "5.1.21"
     assert max(ref["pandapower_vs_pypower_max_abs"].values()) < 1e-10
+    # one entry per bus, per generator bus and per in-service branch, consistently
+    ac, dc = ref["ac"], ref["dc"]
+    n_bus, n_gen = len(ac["bus"]), len(ac["gen_bus"])
+    assert len(ac["vm"]) == len(ac["va_rad"]) == len(dc["va_rad"]) == n_bus
+    assert len(ac["pg_pu"]) == len(ac["qg_pu"]) == len(dc["pg_pu"]) == n_gen
+    assert dc["gen_bus"] == ac["gen_bus"]
+
+
+@pytest.mark.external
+@pytest.mark.parametrize("case", CASES)
+def test_fixture_sizes_match_the_case_file(case):
+    ref = _fixture(case)
+    net = read_matpower(power_case(case))
+    assert ref["ac"]["bus"] == list(net.bus_ids())
+    gen_buses = [b for b in net.bus_ids()
+                 if any(g.in_service and g.bus == b for g in net.generators)]
+    assert ref["ac"]["gen_bus"] == gen_buses
+    assert len(ref["dc"]["branch_pf_pu"]) == sum(br.in_service for br in net.branches)
 
 
 def _max_abs(a, b):
-    return float((torch.as_tensor(a) - torch.tensor(b)).abs().max())
+    a, b = torch.as_tensor(a), torch.tensor(b)
+    assert a.shape == b.shape, f"shape {tuple(a.shape)} against the reference's {tuple(b.shape)}"
+    return float((a - b).abs().max())
 
 
 @pytest.mark.external
@@ -77,7 +97,9 @@ def test_dc_power_flow_matches_pandapower(case):
     model, state, drivers = dc_power_flow(read_matpower(power_case(case)))
     sol = dc_power_flow_solution(model, solve_power_flow(model, state, drivers,
                                                          differentiable=False))
+    assert list(sol.bus_ids) == _fixture(case)["ac"]["bus"]
     assert list(sol.gen_buses) == ref["gen_bus"]
+    assert len(sol.branch_rows) == len(ref["branch_pf_pu"])
     assert _max_abs(sol.va, ref["va_rad"]) < 1e-8
     assert _max_abs(sol.pg, ref["pg_pu"]) < 1e-6
     assert _max_abs(sol.pf, ref["branch_pf_pu"]) < 1e-6

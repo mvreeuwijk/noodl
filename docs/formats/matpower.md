@@ -69,11 +69,14 @@ four_bus 4 4 ['gencost']
 | **Ignored**, because they do not change the power flow; recorded in file order in `notes["ignored_fields"]` | `gencost`, `bus_name`, `gen_name`, `branch_name`, `areas`, `gentype`, `genfuel` |
 | **Refused by name**, because skipping them would silently change the network | `mpc.dcline` (DC lines); isolated buses (type 4, every one named); any other bus type; any other `mpc.<field>`; any statement that is neither the `function mpc = <name>` header nor a whole-field assignment `mpc.<field> = ...` (an indexed assignment such as `mpc.bus(:, 8) = 1;`, `define_constants`, `return`, ...); a field assigned twice |
 
-**Syntax.** `%` starts a comment except inside a single-quoted string; `...` continues a line
-(the rest of the physical line is dropped). Matrices `[ ... ]` may span lines; a row ends at
+**Syntax.** The file is read as UTF-8 (a byte-order mark is skipped; a file that is not UTF-8
+is refused, naming it). `%` starts a comment except inside a single-quoted string; block
+comments `%{ ... %}` are not supported (a line holding only `%{` or `%}` is refused with its
+number). `...` continues a line (the rest of the physical line is dropped). Matrices `[ ... ]` may span lines; a row ends at
 `;` or at the end of a line; values are separated by whitespace or commas; `Inf` and `-Inf`
 are numbers. Cell arrays `{ ... }` are accepted only for ignored fields. A row shorter than its
-table needs, or a token that is not a number, is refused with the line number. Bus ids must be
+table needs, a row of a different length from the table's first row, or a token that is not a
+number, is refused with the line number. Bus ids must be
 integers, and `baseMVA` must be positive (`PowerNetwork` refuses `base_mva <= 0`). The
 network's `name` is the function's name (`case9`), or the file's stem if the file has no
 `function` header.
