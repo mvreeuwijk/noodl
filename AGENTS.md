@@ -19,7 +19,7 @@ tests/test_*.py tests/layers tests/solvers tests/operators tests/elements tests/
 Add the application you are changing:
 
 | Application | Paths |
-|---|---|
+| --- | --- |
 | building | `tests/apps/building_physics tests/verification/test_contam_parity.py tests/verification/test_modelica_parity.py tests/verification/test_airflow_closed_forms.py tests/verification/test_natural_ventilation.py` |
 | sewer | `tests/apps/sewer tests/apps/inp tests/verification/test_sewer_*.py` |
 | water | `tests/apps/water tests/apps/inp tests/verification/test_water_parity.py tests/verification/test_wsimod_*.py` |
@@ -29,15 +29,16 @@ Add the application you are changing:
 For example, for the building application:
 
 ```bash
-python -m pytest -q -n 2 --no-cov tests/test_*.py tests/layers tests/solvers tests/operators \
+NOODL_PARITY_WORKERS=4 python -m pytest -q -n 2 --no-cov tests/test_*.py tests/layers tests/solvers tests/operators \
   tests/elements tests/components tests/apps/test_*.py tests/apps/building_physics \
   tests/verification/test_contam_parity.py tests/verification/test_modelica_parity.py \
   tests/verification/test_airflow_closed_forms.py tests/verification/test_natural_ventilation.py
 ```
 
 - Pass `--no-cov` on a subset: the coverage threshold (90 %) applies to the whole suite only.
-- Keep `-n` at 2 or below (pytest-xdist); the reference-model comparisons start their own
-  worker processes. `NOODL_PARITY_WORKERS` caps those (8 is a good value on a workstation).
+- Keep the number of test processes at 8 or below. The reference-model comparisons start their
+  own worker pool inside each pytest worker, so the total is up to `-n` × `NOODL_PARITY_WORKERS`:
+  use `-n 2` with `NOODL_PARITY_WORKERS=4`.
 - Tests marked `slow` (full reference-model runs) are deselected by default; select them with
   `-m slow` when you change what they compare.
 - Before the pull request: `ruff check .`, the full `pytest`, and `python -m mkdocs build --strict`.
