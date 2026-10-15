@@ -39,6 +39,8 @@ Descriptions of the physical objects a network is built from.
 | `FixedShunt`<br><small>`noodl.apps.electrical.power`</small> | A fixed admittance from `bus` to ground, stated as the real power `g_mw` (MW) it consumes and the reactive power `b_mvar` (MVAr) it injects at a bus voltage of 1 p.u. | `FixedShunt(bus, g_mw, b_mvar)` |
 | `Generator`<br><small>`noodl.apps.electrical.power`</small> | A generator on `bus`: real output `p_mw` (MW), reactive output `q_mvar` (MVAr, a starting value), voltage magnitude setpoint `vm_set` (p.u.) and reactive limits (MVAr). | `Generator(bus, p_mw, q_mvar=0.0, vm_set=1.0, in_service=True, q_max_mvar=inf, q_min_mvar=-inf)` |
 | `Load`<br><small>`noodl.apps.electrical.power`</small> | A constant-power load on `bus`, absorbing `p_mw` (MW) and `q_mvar` (MVAr). | `Load(bus, p_mw, q_mvar)` |
+| `PowerFlowIndex`<br><small>`noodl.apps.electrical.power`</small> | How a `PowerNetwork` maps onto a power-flow model. | `PowerFlowIndex(bus_ids, slack_bus, pv_buses, gen_buses, branch_rows, base_mva, fixed_generation, load_buses, shunt_buses)` |
+| `PowerFlowSolution`<br><small>`noodl.apps.electrical.power`</small> | A solved power flow in per unit; tensors may carry leading batch dimensions. | `PowerFlowSolution(bus_ids, vm, va, gen_buses, pg, qg, branch_rows, sf, st)` |
 | `PowerNetwork`<br><small>`noodl.apps.electrical.power`</small> | A power-flow network: buses, branches, generators, loads and fixed shunts in file order, the system base `base_mva` (MVA), a `name` and free-form `notes` (a reader records what it skipped there). Construction refuses duplicate bus ids, an unknown bus kind, a nonpositive base and any element on a bus that does not exist. | `PowerNetwork(buses, branches, generators, loads=(), shunts=(), base_mva=100.0, name='', notes=<factory>)` |
 
 ## Elements (constitutive laws)
@@ -118,6 +120,10 @@ Calculations and helpers.
 | `transient`<br><small>`noodl.apps.electrical`</small> | March the circuit over the time grid `times` (s), from `state` at `times[0]` (usually `initial_state`), one `Model.step` per interval. | `transient(model, state, drivers, times, *, integration='trapezoidal', **solve_kwargs)` |
 | `extrapolate`<br><small>`noodl.apps.electrical.modelica`</small> | Richardson extrapolation of two `simulate_circuit` histories on the same times, `fine` read with twice the `substeps` of `coarse`: `fine + (fine - coarse)/(2**order - 1)` for every entry but `"time"`. The circuit steps are trapezoidal (backward Euler after each restart), so `order=2` removes the leading step-size error; raises `ValueError` when the two histories are not on the same times. | `extrapolate(coarse, fine, order=2)` |
 | `simulate_circuit`<br><small>`noodl.apps.electrical.modelica`</small> | The circuit's history at `times` (default `names.times`; each must be a time of `names.grid`, increasing; a single time may be a scalar): `"time"` `(T,)` (the grid times found, a new tensor) and every `".phi"` / `".q"` state entry the model returns, stacked on dim 0. | `simulate_circuit(model, state, drivers, names, *, times=None, **solve_kwargs)` |
+| `build_power_flow`<br><small>`noodl.apps.electrical.power`</small> | The AC power flow of `net` as `(model, state, drivers)`, by the build rules of `noodl.apps.electrical.power.build`; the network is checked first (`check_power_network`). | `build_power_flow(net, *, frequency=50.0, learnable=False, enforce_q_limits=False)` |
+| `check_power_network`<br><small>`noodl.apps.electrical.power`</small> | Check that `net` is a solvable power-flow network and return its `PowerFlowIndex`. | `check_power_network(net, *, dc=False)` |
+| `power_flow_solution`<br><small>`noodl.apps.electrical.power`</small> | Bus voltages, generation per generator bus and branch end powers of a solved AC power flow (`model` from `build_power_flow`). | `power_flow_solution(model, state)` |
+| `solve_power_flow`<br><small>`noodl.apps.electrical.power`</small> | The solved power flow: `model.steady(state, drivers, atol=atol, rtol=rtol, max_iter=max_iter, **solve_kwargs)`. Newton stops when the residual's max-norm (p.u.) is below `atol`; `state` is its starting point (the flat start `build_power_flow` returns, or an earlier solution). Non-convergence raises a `RuntimeError` naming the layer. | `solve_power_flow(model, state, drivers, *, atol=1e-11, rtol=0.0, max_iter=30, **solve_kwargs)` |
 
 ## Constants and tables
 
@@ -127,3 +133,4 @@ Named values and option tables.
 |---|---|
 | `LAYER` | `'electrical'` |
 | `BUS_KINDS` | 3 names: `pq`, `pv`, `slack` |
+| `POWER_LAYER` | `'power'` |
