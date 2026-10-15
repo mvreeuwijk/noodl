@@ -146,7 +146,9 @@ not carried in the state: a closure that sets it must write it every step.
 filter's efficiency), replacing the layer's construction-time `transmission`; a closure whose
 filters depend on the step's flows writes it (the building application's
 `FilterTransmission`, for UVGI filters). It reads the flows of the pass before, so such a model
-iterates each step (`coupling="iterate"`).
+iterates each step (`coupling="iterate"`). A closure that needs this declares
+`requires_coupling = "iterate"` and `reads_flows_of = "<potential layer>"`, and `Model`
+refuses it unless that layer is in `iterate_tol` and `iterate_flow_tol`.
 
 The names come from each layer's `quantity`, so every application has them without code
 of its own; the solver's short spellings (`.x`, `.phi`, `.s`, `.q`) work too. Each

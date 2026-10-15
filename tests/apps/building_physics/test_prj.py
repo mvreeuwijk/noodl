@@ -1122,12 +1122,41 @@ def test_a_uvgi_filter_where_noodl_physics_cannot_follow_contamx_is_refused(tmp_
                                      "1 uv1 1 0.1 100 0 0 uv\n\n" + UV_RECORD)
     with pytest.raises(ValueError, match=r"duct segment 1 carries the UVGI filter 'uv'"):
         read_prj(_variant(duct, "", "", tmp_path))
+    # Segment 1 unfiltered: terminal 6 (`T: 1 ...`) still carries filter 1.
+    with pytest.raises(ValueError, match=r"duct terminal 6 carries the UVGI filter 'uv'"):
+        read_prj(_variant(duct, "  1  0   1   2   1   1   0", "  1  0   1   2   1   0   0",
+                          tmp_path))
+    # The doorway (path 3, element `dor_pl2`) is two openings; a UVGI dose needs one flow.
+    door = _variants(MIXED.read_text(), [
+        ("1 cef 1 0.1 100 0 0 filt\n\n  1\n  sarin 0.1\n",
+         "1 uv1 1 0.1 100 0 0 filt\n\n" + UV_RECORD),
+        ("   3    0   1  -1   3   0   0", "   3    0   1  -1   3   1   0")], tmp_path)
+    with pytest.raises(ValueError, match=r"path 3 carries the UVGI filter 'filt' but is "
+                                         r"modelled as 2 openings"):
+        read_prj(door)
+
+
+def test_a_uvgi_closure_is_refused_outside_an_iterated_coupling():
+    """A hand-built one-pass model would read the step-start flows: 6 % off on the fixture
+    after its schedule's cut (measured), so it is refused by name."""
+    from noodl.model import Model
+
+    model = project_to_model(read_prj(UVGI))[0]
+    layers, closures = model.layers, model.closures
+    for kwargs in ({}, dict(coupling="iterate", iterate_tol={"species": 1e-15}),
+                   dict(coupling="iterate", iterate_tol={"air": 1e-9})):
+        with pytest.raises(ValueError, match=r"FilterTransmission reads the flows of layer "
+                                             r"'air'.*coupling='iterate'"):
+            Model(model.net, layers, closures=closures, **kwargs)
+    Model(model.net, layers, closures=closures, coupling="iterate",
+          iterate_tol={"air": 1e-9}, iterate_flow_tol={"air": 1e-12})
 
 
 def test_a_uvgi_project_iterates_each_step_on_its_own_flows():
     p = read_prj(UVGI)
     model, state, drivers = project_to_model(p)
-    assert model.coupling == "iterate" and set(model.iterate_tol) == {"species"}
+    assert model.coupling == "iterate" and set(model.iterate_tol) == {"air"}
+    assert set(model.iterate_flow_tol) == {"air"}
     (closure,) = [c for c in model.closures if isinstance(c, FilterTransmission)]
     assert model.closures[-1] is closure
     assert [type(f) for _, _, f in closure.varying] == [UVGIFilter, FilterSeries, UVGIFilter]

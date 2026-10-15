@@ -284,7 +284,9 @@ class UVGIFilter:
         k = torch.tensor([s.uv_susceptibility for s in species], dtype=F64)
         dose = self.dose(air).unsqueeze(-1)
         # exp(-k inf) = 0 for k > 0; a species with k = 0 passes untouched (k inf would be
-        # NaN), and so does the gradient.
+        # NaN), and so does the gradient. `k` is a constant here: if it ever became a tensor
+        # that carries a gradient, the +inf dose at zero flow would give d(k inf)/dk = inf
+        # times a zero upstream gradient, a NaN, and would need the same guard as the flow.
         exposed = k > 0
         exponent = torch.where(exposed, k * torch.where(exposed, dose, 0.0), 0.0)
         return 1.0 - torch.exp(-exponent)
@@ -375,13 +377,23 @@ class FilterTransmission:
     in the state yet it writes nothing (the layer's construction-time transmission stands).
 
     A closure runs before the airflow solve, so the flows it reads are the ones handed in:
-    run the model with `coupling="iterate"` (the species layer named in `iterate_tol`), where
-    each pass is fed the previous pass's flows and the converged step uses its own.
-    `project_to_model` builds a project with a UVGI filter that way.
+    the model must run with `coupling="iterate"` and the airflow layer named in
+    `iterate_tol` and `iterate_flow_tol`, so that each pass is fed the previous pass's flows
+    and a step converges only when the flows this closure read are the flows the pass
+    produced. The closure declares this (`requires_coupling`, `reads_flows_of`) and `Model`
+    refuses any other coupling by name. `project_to_model` builds a project with a UVGI
+    filter that way.
 
-    `on_reverse(filter)` is called once per flow-dependent filter the first time air
-    crosses its edge against the edge's direction (default: nothing).
+    `on_reverse(filter)` is called once per flow-dependent filter (the UVGI stage itself,
+    also inside a `FilterSeries`) the first time air crosses its edge against the edge's
+    direction (default: nothing). The check runs on every pass, and the first pass of a step
+    reads the flows the previous step ended with, so a reversal there is one the run had.
+    A missing `"rho"` driver, or a missing `"time"` driver when a filter has an age model, is
+    refused by name.
     """
+
+    #: The flows this closure reads must be the pass's own at convergence (`Model`).
+    requires_coupling = "iterate"
 
     def __init__(self, net: Network, flow_kinds: Sequence[str], species: Sequence[Species],
                  filters: Mapping[EdgeKey, object], *, airflow, layer: str = "species",
@@ -390,6 +402,9 @@ class FilterTransmission:
         self.species = list(species)
         self.airflow = airflow
         self.flow_key = f"{airflow.name}.q"
+        #: The potential layer whose flows the closure reads (`Model` requires it in
+        #: `iterate_flow_tol`).
+        self.reads_flows_of = airflow.name
         self.key = f"{layer}.transmission"
         self.outputs = (self.key,)
         self.inputs = ("T", "rho", "time")
@@ -403,6 +418,11 @@ class FilterTransmission:
             else:
                 fixed[row] = 1.0 - flt.efficiency(self.species)
         self.fixed = fixed
+        # The flow-dependent filters themselves (a series' UVGI stages), per varying row.
+        self._stages = [flt.flow_dependent_stages() if isinstance(flt, FilterSeries)
+                        else [flt] for _, _, flt in self.varying]
+        self._aged = [s.name for stages in self._stages for s in stages
+                      if getattr(s, "age_coefficients", None) is not None]
         self.on_reverse = on_reverse
         self._reversed: set[int] = set()
 
@@ -422,15 +442,26 @@ class FilterTransmission:
         if q is None:
             return {}
         f = self.airflow.flows_of_kind(q, self.flow_kinds)
+        for key in ("T", "rho"):
+            if key not in drivers:
+                raise KeyError(f"FilterTransmission: driver {key!r} is missing; the UVGI "
+                               f"filters' dose needs the air's temperature and density at "
+                               f"every node (a density closure writes 'rho' and must run "
+                               f"first)")
+        if self._aged and "time" not in drivers:
+            raise KeyError(f"FilterTransmission: driver 'time' is missing; the UVGI "
+                           f"filter(s) {self._aged} have a lamp-age model, which needs the "
+                           f"time since the start of the run")
         T, rho = drivers["T"], drivers["rho"]
         time = drivers.get("time", 0.0)
         rows = list(self.fixed)
-        for row, src, flt in self.varying:
+        for (row, src, flt), stages in zip(self.varying, self._stages, strict=True):
             F = f[..., row]
-            if (self.on_reverse is not None and id(flt) not in self._reversed
-                    and bool((F.detach() < 0).any())):
-                self._reversed.add(id(flt))
-                self.on_reverse(flt)
+            if self.on_reverse is not None and bool((F.detach() < 0).any()):
+                for stage in stages:
+                    if id(stage) not in self._reversed:
+                        self._reversed.add(id(stage))
+                        self.on_reverse(stage)
             air = AirThroughFilter(F, T[..., src], rho[..., src], time)
             rows[row] = 1.0 - flt.efficiency(self.species, air)
         shape = torch.broadcast_shapes(*(r.shape for r in rows))

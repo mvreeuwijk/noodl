@@ -617,6 +617,23 @@ class Model:
         bad = {k: v for k, v in self.iterate_flow_tol.items() if not v > 0.0}
         if bad:
             raise ValueError(f"Model: iterate_flow_tol must be positive, got {bad}")
+        # A closure that reads a potential layer's flows to write something the same pass
+        # uses (a flow-dependent filter's transmission) is right only at the coupling's fixed
+        # point, where the flows it read are the flows the pass produced: it declares
+        # `requires_coupling = "iterate"` and `reads_flows_of = "<potential layer>"`.
+        for closure in self.closures:
+            if getattr(closure, "requires_coupling", None) != "iterate":
+                continue
+            flows_of = getattr(closure, "reads_flows_of", None)
+            if coupling != "iterate" or flows_of not in self.iterate_flow_tol:
+                raise ValueError(
+                    f"Model: closure {type(closure).__name__} reads the flows of layer "
+                    f"{flows_of!r} before the pass solves them, so it needs "
+                    f"coupling='iterate' with {flows_of!r} in iterate_tol and "
+                    f"iterate_flow_tol (each pass is then fed the previous pass's flows and a "
+                    f"step converges on its own); got coupling={coupling!r}, "
+                    f"iterate_flow_tol={self.iterate_flow_tol}"
+                )
         if iterate_acceleration is not None:
             if coupling != "iterate":
                 raise ValueError(

@@ -1192,9 +1192,12 @@ residence time F<sub>design</sub> / F. Because the dose follows the flow, the fi
 fixed transmission: its `efficiency(species, air)` takes an `AirThroughFilter` (mass flow,
 temperature, density and time), and the closure `FilterTransmission` writes the species
 layer's per-step `"species.transmission"` driver from the airflow layer's flows. A closure
-runs before the airflow solve, so a model with one needs `coupling="iterate"` (with the
-species layer in `iterate_tol`): each pass is fed the previous pass's flows and the step
-converges on its own. `project_to_model` builds a project with a UVGI filter that way. Air
+runs before the airflow solve, so a model with one needs `coupling="iterate"` with the
+airflow layer in `iterate_tol` and `iterate_flow_tol`: each pass is fed the previous pass's
+flows, and the step converges when the flows the closure read are the flows the pass
+produced (two passes, as the airflow does not depend on the contaminants). `Model` refuses
+the closure, by name, under any other coupling (it declares `requires_coupling = "iterate"`
+and `reads_flows_of`). `project_to_model` builds a project with a UVGI filter that way. Air
 crossing the filter against its edge's direction gets ContamX's fixed dose of 1 J/m²
 (efficiency 1 − exp(−k)), which `project_to_model` warns about once per filter. The
 efficiency is differentiable in every parameter and in the flow; at zero flow it is 1, with a

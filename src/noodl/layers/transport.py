@@ -1147,9 +1147,10 @@ class TransportLayer:
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """The dense generator `(M, N)` of the layer at flows `q` (and optionally a per-call
         `capacity`): the interior block and the boundary coupling. It carries the layer's
-        own construction-time `removal` (plus its dilution); a per-step removal rate (the
-        `"<layer>.removal"` driver) is not part of it, because `step`, `steady`, `rate` and
-        the other entry points that take `removal=` apply that themselves."""
+        own construction-time `removal` (plus its dilution) and transmission; a per-step
+        removal rate or transmission (the `"<layer>.removal"` and `"<layer>.transmission"`
+        drivers) is not part of it, because `step`, `steady`, `rate` and the other entry
+        points that take `removal=` and `transmission=` apply those themselves."""
         net, K, n_i, n_b = self.net, self.n_species, self.n_i, self.n_b
         dtype = q.dtype
         # `cap_t` names the resolved per-step capacity, as in `rate`, `step`, `steady`,

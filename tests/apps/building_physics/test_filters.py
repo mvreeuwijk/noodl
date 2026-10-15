@@ -337,4 +337,17 @@ def test_the_filter_transmission_closure_follows_the_flows():
     assert tau[1, 0].item() == pytest.approx(0.7 * math.exp(-0.2), rel=1e-14)   # reverse
     assert tau[2].tolist() == [1.0, 1.0] and tau[:, 1].tolist() == [1.0, 1.0, 1.0]
     closure({"air.q": q}, drivers)
-    assert [f.name for f in seen] == ["both"]          # once per filter
+    assert [f.name for f in seen] == ["uv"]            # the UVGI stage, once
+    with pytest.raises(KeyError, match="driver 'rho' is missing"):
+        closure({"air.q": q}, {"T": T})
+
+
+def test_an_aged_uvgi_filter_needs_the_time():
+    net, supply, _ = _filtered_network()
+    closure = FilterTransmission(net, ("airpath",), UV_SPECIES,
+                                 {supply: _uvgi(age=(100.0, -10.0))}, airflow=_Air())
+    T = torch.tensor([293.15, 293.15, 293.15], dtype=F64)
+    q = torch.tensor([0.1, 0.1, 0.1], dtype=F64)
+    with pytest.raises(KeyError, match=r"driver 'time' is missing.*\['uv'\]"):
+        closure({"air.q": q}, {"T": T, "rho": 101325.0 / (287.055 * T)})
+    assert closure.requires_coupling == "iterate" and closure.reads_flows_of == "air"

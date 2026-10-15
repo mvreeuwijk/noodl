@@ -128,3 +128,16 @@ def test_the_model_passes_the_transmission_driver_a_closure_writes():
                                reference.rate(X0, Q, SRC, XB), rtol=1e-14, atol=0)
     field = model.refs.field("c.transmission")
     assert field.ordering == "edge order of kinds ('flow',)" and field.required == "optional"
+
+
+def test_a_closure_that_reads_the_flows_it_feeds_needs_the_iterated_coupling():
+    class FlowReader:
+        requires_coupling = "iterate"
+        reads_flows_of = "air"
+
+        def __call__(self, state, drivers):
+            return {}
+
+    layer = _layer()
+    with pytest.raises(ValueError, match=r"FlowReader reads the flows of layer 'air'"):
+        Model(layer.net, {"c": layer}, closures=[FlowReader()])

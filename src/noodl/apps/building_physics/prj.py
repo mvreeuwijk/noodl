@@ -830,11 +830,15 @@ def _warn_reverse_uvgi(flt) -> None:
         ContamCompatibilityWarning, stacklevel=2)
 
 
-#: The absolute mass-fraction change (kg/kg) between passes at which a step of a model with a
-#: UVGI filter has converged. The passes after the first are fed the same flows, so they
-#: agree to rounding; the first pass's lag would show as a change of the order of the step's
-#: own concentration change, far above this.
-UVGI_ITERATE_TOL = 1e-15
+#: A step of a model with a UVGI filter has converged when the flows its `FilterTransmission`
+#: read are the flows the pass produced: the airflow layer's flow fixed-point residual
+#: (kg/s), and its pressures (Pa), between passes. The airflow does not depend on the
+#: contaminants, so the second pass, fed the first pass's flows, returns them unchanged (its
+#: Newton solve starts converged) and the step stops there; a residual of 1e-12 kg/s moves a
+#: UVGI pass fraction by X 1e-12 / F, far below ContamX's float32 inputs for any flow above
+#: 1e-6 kg/s.
+UVGI_FLOW_TOL = 1e-12
+UVGI_PRESSURE_TOL = 1e-9
 
 
 def _warn_ignored_decay(species: list[Species]) -> None:
@@ -2259,10 +2263,11 @@ def project_to_model(project: Project, *, ambient: dict | None = None, species: 
 
     A project with a UVGI filter on a path gets a `FilterTransmission` closure, last among the
     closures, writing the species layer's transmission from each airflow solve's flows, and
-    the model iterates each step (`coupling="iterate"`, the species layer judged to
-    `UVGI_ITERATE_TOL`) so the step's transmission is at the step's own flows, as ContamX
-    computes it. Air crossing a UVGI filter against its path's direction gets ContamX's fixed
-    dose of 1 J/m2 (`UVGIFilter`), with one `ContamCompatibilityWarning` per filter.
+    the model iterates each step (`coupling="iterate"`, the airflow layer judged to
+    `UVGI_FLOW_TOL` on the flows the closure read and `UVGI_PRESSURE_TOL` on its pressures)
+    so the step's transmission is at the step's own flows, as ContamX computes it. Air
+    crossing a UVGI filter against its path's direction gets ContamX's fixed dose of 1 J/m2
+    (`UVGIFilter`), with one `ContamCompatibilityWarning` per filter.
     """
     amb = dict(project.ambient_conditions)
     if ambient:
@@ -2352,7 +2357,8 @@ def project_to_model(project: Project, *, ambient: dict | None = None, species: 
         closures.append(FilterTransmission(
             net, project.kinds, project.species_records, project.edge_filters, airflow=air,
             on_reverse=_warn_reverse_uvgi))
-        coupling = dict(coupling="iterate", iterate_tol={"species": UVGI_ITERATE_TOL})
+        coupling = dict(coupling="iterate", iterate_tol={"air": UVGI_PRESSURE_TOL},
+                        iterate_flow_tol={"air": UVGI_FLOW_TOL})
     drivers = {
         "air.phi_boundary": torch.zeros(1 + len(project.flow_balanced), dtype=F64),
         "T": T.clone(),
