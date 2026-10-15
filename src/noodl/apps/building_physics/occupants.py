@@ -67,7 +67,7 @@ class OccupancyDay:
         return self.times[1:-1]
 
 
-class Occupancy(_DayTypeCycle):
+class Occupancy(_DayTypeCycle[OccupancyDay]):
     """An occupant's movements: one `OccupancyDay` per CONTAM day type (1-12).
 
     `day_types` has 12 entries; entry k is the 1-based position in `day_schedules` used on

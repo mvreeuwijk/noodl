@@ -20,7 +20,7 @@ from __future__ import annotations
 import bisect
 import math
 from collections.abc import Mapping, Sequence
-from typing import Protocol, runtime_checkable
+from typing import Generic, Protocol, TypeVar, runtime_checkable
 
 import torch
 
@@ -53,9 +53,12 @@ def _as_f64(values) -> Tensor:
     return torch.as_tensor(values, dtype=F64)
 
 
+_Row = TypeVar("_Row")
+
+
 def _piecewise(
-    times: list[float], values: Tensor | Sequence, s: float, *, linear: bool, left: bool
-):
+    times: list[float], values: Tensor | Sequence[_Row], s: float, *, linear: bool, left: bool
+) -> Tensor | _Row:
     """`values` (rows at the increasing `times`) evaluated at `s` within [times[0], times[-1]].
 
     `linear` interpolates between rows (continuous, so `left` does not matter); otherwise each
@@ -267,7 +270,14 @@ class DaySchedule:
         return self._t[1:-1]
 
 
-class _DayTypeCycle:
+class _Day(Protocol):
+    def knots(self) -> list[float]: ...
+
+
+_DayT = TypeVar("_DayT", bound=_Day)
+
+
+class _DayTypeCycle(Generic[_DayT]):
     """One day per CONTAM day type (1-12), followed through a `Calendar`: the week schedule
     and an occupant's occupancy. A day has `knots()`, its interior times of day.
 
@@ -279,8 +289,8 @@ class _DayTypeCycle:
     _KIND = ""
     _DAY = ""
 
-    def __init__(self, day_schedules: Sequence, day_types: Sequence[int] = (1,) * N_DAY_TYPES,
-                 *, name: str = "") -> None:
+    def __init__(self, day_schedules: Sequence[_DayT],
+                 day_types: Sequence[int] = (1,) * N_DAY_TYPES, *, name: str = "") -> None:
         days = list(day_schedules)
         js = [int(j) for j in day_types]
         label = f"{self._KIND} {name!r}" if name else self._KIND
@@ -296,11 +306,11 @@ class _DayTypeCycle:
     def __repr__(self) -> str:
         return f"{self._KIND}({self.name!r}, day_types={self.day_types})"
 
-    def day(self, day_type: int):
+    def day(self, day_type: int) -> _DayT:
         """The day used on `day_type` (1-12)."""
         return self.day_schedules[self.day_types[int(day_type) - 1] - 1]
 
-    def _day_and_time(self, t: float, calendar: Calendar, *, left: bool) -> tuple[object, float]:
+    def _day_and_time(self, t: float, calendar: Calendar, *, left: bool) -> tuple[_DayT, float]:
         """(the day in use, seconds after midnight) at `t`. A time of day within
         `calendar.round_off(t)` of a knot IS that knot: a breakpoint is simulation time
         midnight + knot, which need not survive the calendar's sum exactly."""
@@ -325,7 +335,7 @@ class _DayTypeCycle:
         return sorted(p for p in out if lo < p < hi)
 
 
-class WeekSchedule(_DayTypeCycle):
+class WeekSchedule(_DayTypeCycle[DaySchedule]):
     """CONTAM's week schedule: one `DaySchedule` per day type (1-12).
 
     `day_schedules` are the distinct day schedules. `day_types` has 12 entries; entry k is
