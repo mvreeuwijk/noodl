@@ -1058,7 +1058,26 @@ class PotentialFlowLayer:
         and the modes `"dc"` and `"initial"` (both its one steady solution), and refuses
         `mode="phasor"`, `dt` and `history`: it takes no step and solves no phasors.
         """
+        for key, value in self.newton_defaults.items():
+            newton_kwargs.setdefault(key, value)
         if self.mna:
+            if newton_kwargs.get("on_failure") == "return_primal":
+                # as on the classic path: "return" where nothing differentiable reaches the
+                # solve (then its primal Newton alone), "raise" where it is differentiated
+                reaches = self._reaches_grad(drivers or {}, sources, phi_boundary) or (
+                    history is not None and torch.is_grad_enabled()
+                    and any(isinstance(h, torch.Tensor) and h.requires_grad for h in history))
+                if diagnostics is None:
+                    raise ValueError(
+                        f"PotentialFlowLayer {self.name!r}: on_failure='return_primal' "
+                        f"requires diagnostics= so the status is not silently dropped; pass "
+                        f"a dict and read its 'converged' and 'residual_norm' entries."
+                    )
+                if differentiable and not reaches:
+                    # the differentiable path's own refusal still applies to the primal one
+                    self._check_no_unreachable_differentiable_tensors()
+                    differentiable = False
+                newton_kwargs["on_failure"] = "raise" if differentiable else "return"
             return self._mna.solve(
                 phi_boundary, drivers, sources, phi0, q0=q0, history=history, dt=dt, t=t,
                 integration=integration, mode=mode, differentiable=differentiable,
@@ -1076,8 +1095,6 @@ class PotentialFlowLayer:
                 f"static, so it takes no step; drop {stepping}"
             )
         drivers = drivers or {}
-        for key, value in self.newton_defaults.items():
-            newton_kwargs.setdefault(key, value)
         newton_kwargs.setdefault("method", self.linear_solver)
         primal_only = newton_kwargs.get("on_failure") == "return_primal"
         if primal_only:

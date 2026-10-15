@@ -521,3 +521,44 @@ def test_classic_layer_still_accepts_the_steady_keywords():
         phi_k, q_k = layer.solve(pb, **kwargs)
         torch.testing.assert_close(phi_k, phi, rtol=0, atol=0)
         torch.testing.assert_close(q_k, q, rtol=0, atol=0)
+
+
+_MIXED_SOURCES = (0.0, 0.1, -0.2, 0.05, 0.0, 0.3)
+
+
+@pytest.mark.parametrize("differentiable", [False, True])
+def test_return_primal_hands_back_the_last_iterate_where_nothing_is_differentiated(
+        differentiable):
+    _, layer = _mixed_layer()
+    diagnostics = {}
+    with torch.no_grad():
+        phi, q = layer.solve(torch.tensor([0.4]), {}, torch.tensor(_MIXED_SOURCES),
+                             differentiable=differentiable, diagnostics=diagnostics,
+                             max_iter=1, atol=1e-13, rtol=0, on_failure="return_primal")
+    assert not bool(diagnostics["converged"])
+    assert bool(torch.isfinite(phi).all()) and bool(torch.isfinite(q).all())
+
+
+def test_return_primal_still_raises_where_the_solve_is_differentiated():
+    _, layer = _mixed_layer()
+    sources = torch.tensor(_MIXED_SOURCES, requires_grad=True)
+    with pytest.raises(RuntimeError, match="converge"):
+        layer.solve(torch.tensor([0.4]), {}, sources, diagnostics={}, max_iter=1,
+                    atol=1e-13, rtol=0, on_failure="return_primal")
+
+
+def test_newton_defaults_reach_an_mna_solve():
+    _, layer = _mixed_layer()
+    layer.newton_defaults = {"max_iter": 1, "on_failure": "return"}
+    diagnostics = {}
+    layer.solve(torch.tensor([0.4]), {}, torch.tensor(_MIXED_SOURCES), differentiable=False,
+                diagnostics=diagnostics, atol=1e-13, rtol=0)
+    assert diagnostics["newton_iterations"] == 1
+    assert not bool(diagnostics["converged"])
+
+
+def test_return_primal_requires_diagnostics_on_an_mna_solve():
+    _, layer = _mixed_layer()
+    sources = torch.tensor(_MIXED_SOURCES, requires_grad=True)
+    with pytest.raises(ValueError, match="diagnostics="):
+        layer.solve(torch.tensor([0.4]), {}, sources, on_failure="return_primal")
