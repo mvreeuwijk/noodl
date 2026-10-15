@@ -990,9 +990,13 @@ print([f"{x:.3e}" for x in out["species.x"][-1, :, 0].tolist()])   # zones one, 
 A `.prj` project's occupants (CONTAM's exposures) are `project.occupants` (`"occupant 1"`,
 `"occupant 2"`, ... by exposure number), their inputs are among `project.inputs`, and
 `project_to_model` attaches their `OccupantGeneration`; `simulate_project` reports their
-exposure as `"exposure"`, `(N - 1, n_occupants, K)`, on the run's own calendar
-(`project_calendar(project)`). A project with occupants needs a transient contaminant run to
-be simulated.
+exposure as `"exposure"`, `(N - 1, ..., n_occupants, K)`, on the run's own calendar.
+`project_calendar(project)` is that calendar: the run control's start, and the day types of
+the project's weather file, read next to its `.prj` (a weather file it cannot find there is
+refused by name; `weather=` overrides it). A project with occupants needs a transient
+contaminant run with at least one simulated species to be simulated, and an occupant who
+only breathes is refused by `project_to_model` in a zone where the species layer holds no
+air, as one who generates is.
 
 ### Outputs
 

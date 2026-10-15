@@ -337,14 +337,36 @@ def simulate(model: Model, state: State, drivers: Drivers, times, *,
     return out
 
 
+def _project_weather(project, where: str):
+    """The project's own weather file (`read_wth`), next to its `.prj`; None without one.
+    A file that cannot be found, or a project read from no file, is refused by name."""
+    from noodl.apps.building_physics.wth import read_wth
+
+    rc = project.run_control
+    if not rc.weather_file:
+        return None
+    if project.source_path is None:
+        raise ValueError(f"{where}: the project names weather file {rc.weather_file!r}, but "
+                         f"it has no source_path to resolve it next to; pass weather=")
+    path = Path(project.source_path).parent / rc.weather_file
+    if not path.is_file():
+        raise FileNotFoundError(f"{where}: the project's weather file {rc.weather_file!r} is "
+                                f"not at {path}")
+    return read_wth(path)
+
+
 def project_calendar(project, weather=None) -> Calendar:
     """The calendar of a project's transient run: its run control's start day, time and day
-    type, and the weather file's day types when there is one (`weather` from `read_wth`).
-    `simulate_project` runs on it; pass it where a function places times in the year
-    (`occupant_exposure`)."""
+    type, and the day types of its weather file when it has one. `weather` (from
+    `read_wth`) overrides that file; by default the project's own is read, next to its
+    `.prj`, and a weather file that cannot be found there is refused by name.
+    `simulate_project` runs on this calendar; pass it where a function places times in the
+    year (`occupant_exposure`)."""
     rc = project.run_control
     if rc is None:
         raise ValueError("project_calendar: the project carries no run control")
+    if weather is None:
+        weather = _project_weather(project, "project_calendar")
     types = weather.day_types if weather is not None and weather.day_types else None
     return Calendar(start_day=rc.start_day, start_time=rc.start_time,
                     start_day_type=rc.day_type, day_types=types)
@@ -371,8 +393,8 @@ def simulate_project(project, *, inputs: Sequence[Input] = (), diagnostics: dict
 
     A steady airflow run (with no or steady contaminants) returns the one steady state at the
     run control's steady day, time and day type. Refused by name: occupants in a run whose
-    contaminant simulation is not transient (their generation and exposure need one; checked
-    first, so the message names them), cyclic contaminant runs,
+    contaminant simulation is not transient or that simulates no species (their generation
+    and exposure need both; checked first, so the message names them), cyclic contaminant runs,
     integration other than the trapezoid method with weight 1 (short time step, CVODE, or a
     weight other than 1), steady airflow with transient contaminants, transient airflow with
     steady contaminants (ContamX solves the concentrations to steady state at every step;
@@ -392,6 +414,9 @@ def simulate_project(project, *, inputs: Sequence[Input] = (), diagnostics: dict
         raise ValueError(f"simulate_project: occupants (their generation and exposure) need a "
                          f"transient contaminant simulation; this project's is "
                          f"{rc.contaminants!r}")
+    if project.occupants and not project.species:
+        raise ValueError("simulate_project: occupants (their generation and exposure) need a "
+                         "simulated species; this project simulates none")
     if project.control_plan is not None and not rc.transient_airflow:
         raise ValueError("simulate_project: control nodes need a transient airflow "
                          "simulation; the run control's is steady")

@@ -1063,3 +1063,59 @@ def test_occupants_need_a_transient_contaminant_run(tmp_path, code, mode):
     assert p.run_control.contaminants == mode
     with pytest.raises(ValueError, match=rf"occupants.*transient.*'{mode}'"):
         simulate_project(p)
+
+
+def _occupants_with_weather(tmp_path, *, weather_file="occupants.wth", copy=True):
+    """The occupants fixture run on a weather file whose 1 January is day type 4, while the
+    run control starts on day type 1; on day type 4 occupant 1 follows schedule 2 (zone
+    three)."""
+    import shutil
+
+    text = OCCUPANTS.read_text()
+    for old, new in (("null ! weather file", f"{weather_file} ! weather file"),
+                     (" 1 1 1 1 1 1 1 1 1 1 1 1\nsarin", " 1 1 1 2 1 1 1 1 1 1 1 1\nsarin")):
+        assert old in text
+        text = text.replace(old, new, 1)
+    variant = tmp_path / "occupants_weather.prj"
+    variant.write_text(text)
+    if copy:
+        shutil.copy(DATA / "scheduled_three_zone.wth", tmp_path / "occupants.wth")
+    return read_prj(variant)
+
+
+def test_project_calendar_follows_the_projects_own_weather_file(tmp_path):
+    from noodl.apps.building_physics.simulation import project_calendar
+    from noodl.apps.building_physics.wth import read_wth
+
+    p = _occupants_with_weather(tmp_path)
+    assert p.run_control.day_type == 1
+    cal = project_calendar(p)
+    assert cal.day_types == {1: 4}
+    assert p.occupants[0].occupancy.zone_at(0.0, cal, left=False) == "three"
+    # An explicit weather overrides the project's own.
+    own = project_calendar(p, weather=read_wth(DATA / "valThreeZonesWthCtm.wth"))
+    assert own.day_types == read_wth(DATA / "valThreeZonesWthCtm.wth").day_types
+
+
+def test_project_calendar_refuses_a_weather_file_it_cannot_find(tmp_path):
+    from noodl.apps.building_physics.simulation import project_calendar
+
+    p = _occupants_with_weather(tmp_path, copy=False)
+    with pytest.raises(FileNotFoundError, match=r"project_calendar.*occupants.wth"):
+        project_calendar(p)
+    p = _occupants_with_weather(tmp_path)
+    p.source_path = None
+    with pytest.raises(ValueError, match=r"project_calendar.*occupants.wth.*source_path"):
+        project_calendar(p)
+
+
+def test_occupants_need_a_simulated_species(tmp_path):
+    from noodl.apps.building_physics.simulation import simulate_project
+
+    text = OCCUPANTS.read_text().replace("1 1 1 2 0\nvisitor", "1 0 1 2 0\nvisitor", 1)
+    variant = tmp_path / "variant.prj"
+    variant.write_text(text)
+    p = read_prj(variant)
+    p.species = []
+    with pytest.raises(ValueError, match=r"occupants.*species"):
+        simulate_project(p)

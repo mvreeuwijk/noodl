@@ -1763,3 +1763,41 @@ def test_an_occupant_that_generates_nothing_ignores_its_generation_lines(tmp_pat
     assert not any("occupant" in i.key for i in p.inputs)
     model, _state, _drivers = project_to_model(p)
     assert not any(isinstance(c, OccupantGeneration) for c in model.closures)
+
+
+def test_malformed_occupant_lines_are_refused_by_name(tmp_path):
+    cases = [
+        ((" 01:02:30 2 0 0 0", " 01:02:30"), r"occupancy schedule 1.*01:02:30"),
+        ((" 01:02:30 2 0 0 0", " 01:02 2 0 0 0"), r"occupancy schedule 1.*01:02"),
+        ((" 01:02:30 2 0 0 0", " 01:02:30 two 0 0 0"), r"occupancy schedule 1.*two"),
+        (("sarin 1 1e-06 0 0", "sarin 1"), r"exposure 1.*generation line.*sarin 1"),
+        (("sarin 1 1e-06 0 0", "sarin 1 lots 0 0"), r"exposure 1.*generation line.*lots"),
+    ]
+    for pair, pattern in cases:
+        with pytest.raises(ValueError, match=pattern):
+            read_prj(_occ_variant(tmp_path, pair))
+
+
+def test_repeated_or_misnumbered_occupant_records_are_refused(tmp_path):
+    with pytest.raises(ValueError, match=r"occupancy schedule 1 .*twice"):
+        read_prj(_occ_variant(tmp_path, ("2 2 0 Stays", "1 2 0 Stays")))
+    with pytest.raises(ValueError, match=r"exposure 3.*in order.*expected 2"):
+        read_prj(_occ_variant(tmp_path, ("2 0 0 1 0\nresident", "3 0 0 1 0\nresident")))
+    with pytest.raises(ValueError, match=r"exposure 1.*in order.*expected 2"):
+        read_prj(_occ_variant(tmp_path, ("2 0 0 1 0\nresident", "1 0 0 1 0\nresident")))
+
+
+def test_an_occupant_breathing_where_the_layer_holds_no_air_is_refused_at_build(tmp_path):
+    text = AHS.read_text()
+    old = "0 ! occupancy schedules:\n-999\n0 ! exposures:\n-999\n"
+    assert old in text
+    text = text.replace(old, "1 ! occupancy schedules:\n1 2 0 plenum\n\n"
+                             " 00:00:00 4 0 0 0\n 24:00:00 4 0 0 0\n-999\n"
+                             "1 ! exposures:\n1 0 0 1 0\nmaintenance\n"
+                             " 1 1 1 1 1 1 1 1 1 1 1 1\n-999\n")
+    variant = tmp_path / "ahs_occupant.prj"
+    variant.write_text(text)
+    p = read_prj(variant)
+    assert p.occupants[0].generation == {}
+    with pytest.raises(ValueError, match=r"occupant 'occupant 1'.*breathe"):
+        project_to_model(p)

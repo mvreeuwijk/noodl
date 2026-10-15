@@ -135,14 +135,16 @@ duct segment or terminal reaches (it would have no species state); airflow modes
 (duct balancing, the building airflow and pressurization tests); a constant wind pressure on
 an interior path; `sup_afe` super elements (ContamX 3.4.1.7 cannot simulate them); `stackD = 1` (densities varying with
 height inside a zone); a wind pressure profile with the trigonometric curve fit; a day schedule whose shape is
-neither rectangular nor trapezoidal; zone names with spaces; an occupancy schedule that does
-not end at 24:00:00 (ContamX stops on it during the run) or that places an occupant in a zone the
-file does not define; an exposure record with four fields (ContamX refuses it), one that names
-an occupancy or week schedule the file does not define, generates a species the project does
-not simulate or reads its generation from a value file; an occupant that generates in, or
-whose exposure is asked in, the ambient, a zone no airflow path reaches or a zero-volume
-plenum; occupants in a run whose contaminant simulation is not transient (`simulate_project`;
-their generation and exposure need one). A project with occupants whose run control simulates
+neither rectangular nor trapezoidal; zone names with spaces; an occupancy schedule number
+given twice, an occupancy point line that is not `hh:mm:ss zone X Y relHt`, and an occupancy
+schedule that does not end at 24:00:00 (ContamX stops on it during the run) or that places an
+occupant in a zone the file does not define; an exposure record with four fields (ContamX
+refuses it), exposures not numbered 1, 2, ... in file order, a malformed generation line, and an
+exposure that names an occupancy or week schedule the file does not define, generates a species
+the project does not simulate or reads its generation from a value file; an occupant in the
+ambient, a zone no airflow path reaches or a zero-volume plenum (`project_to_model`, whether it
+generates or only breathes); occupants in a run whose contaminant simulation is not transient
+or that simulates no species (`simulate_project`; their generation and exposure need both). A project with occupants whose run control simulates
 no contaminants still loads: `project_to_model` builds its airflow and leaves the occupants
 out.
 

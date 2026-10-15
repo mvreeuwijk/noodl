@@ -111,6 +111,7 @@ from noodl.apps.building_physics.occupants import (
     OccupancyDay,
     Occupant,
     OccupantGeneration,
+    _occupant_nodes,
     occupant_inputs,
 )
 from noodl.apps.building_physics.prj_controls import (
@@ -1006,18 +1007,31 @@ class PrjExposure:
 
 def _read_occupancy_schedules(lines: _Lines, count: int,
                               out: dict[int, list[tuple[float, int]]]) -> None:
-    """Occupancy schedules by number: (time of day in s, zone number; 0 out) per point."""
+    """Occupancy schedules by number: (time of day in s, zone number; 0 out) per point.
+    A number given twice and a point line that is not `hh:mm:ss zone ...` are refused by
+    name."""
     for _ in range(count):
         tok = lines.record()
         nr, npts = int(tok[0]), int(tok[1])
+        if nr in out:
+            raise ValueError(f"prj: occupancy schedule {nr} is defined twice")
         lines.raw()                                   # description (may be blank)
-        pts = [lines.record() for _ in range(npts)]
-        out[nr] = [(_clock(pt[0]), int(pt[1])) for pt in pts]
+        points = []
+        for _ in range(npts):
+            pt = lines.record()
+            try:
+                points.append((_clock(pt[0]), int(pt[1])))
+            except (IndexError, ValueError) as exc:
+                raise ValueError(f"prj: occupancy schedule {nr}: point line "
+                                 f"{' '.join(pt)!r} is not 'hh:mm:ss zone X Y relHt'") from exc
+        out[nr] = points
     lines.expect_end("occupancy schedules")
 
 
 def _read_exposures(lines: _Lines, count: int, out: list[PrjExposure]) -> None:
-    """Exposure records in file order; a generation read from a value file is refused."""
+    """Exposure records in file order, numbered 1, 2, ... in that order (TN 1887); a record
+    out of that order, a malformed generation line and a generation read from a value file
+    are refused by name."""
     for _ in range(count):
         tok = lines.record()
         if len(tok) < 5:
@@ -1025,6 +1039,9 @@ def _read_exposures(lines: _Lines, count: int, out: list[PrjExposure]) -> None:
                              f"ContamX reads five fields (nr gen ncg cgmlt and one more) and "
                              f"refuses this record")
         nr, gen, ncg, mult = int(tok[0]), int(tok[1]), int(tok[2]), float(tok[3])
+        if nr != len(out) + 1:
+            raise ValueError(f"prj: exposure {nr} is not numbered in order: exposures are "
+                             f"numbered 1, 2, ... in file order (expected {len(out) + 1})")
         description = lines.raw().strip()
         days = [int(v) for v in lines.record()]
         if len(days) != 12:
@@ -1033,11 +1050,16 @@ def _read_exposures(lines: _Lines, count: int, out: list[PrjExposure]) -> None:
         generation = []
         for _ in range(ncg):
             g = lines.record()
-            vf = int(g[4]) if len(g) > 4 else 0
+            try:
+                vf = int(g[4]) if len(g) > 4 else 0
+                record = (g[0], int(g[1]), float(g[2]))
+            except (IndexError, ValueError) as exc:
+                raise ValueError(f"prj: exposure {nr}: generation line {' '.join(g)!r} is not "
+                                 f"'species ps cgmax u_cg vf_type'") from exc
             if vf:
                 raise ValueError(f"prj: exposure {nr}'s generation of {g[0]!r} reads a value "
                                  f"file (vf_type {vf}); value files are unsupported")
-            generation.append((g[0], int(g[1]), float(g[2])))
+            generation.append(record)
         out.append(PrjExposure(nr, gen != 0, mult, description, days, generation))
     lines.expect_end("exposures")
 
@@ -2254,6 +2276,12 @@ def project_to_model(project: Project, *, ambient: dict | None = None, species: 
         # Added to the species sources like `SpeciesSources`; the presence and schedule
         # multipliers it reads are among the project's inputs.
         closures.append(OccupantGeneration(project.occupants, layer=layers["species"]))
+    if "species" in layers:
+        # The occupants who only breathe: their exposure needs air where they are, refused
+        # by name here rather than at the end of a run.
+        for o in project.occupants:
+            if not o.generation:
+                _occupant_nodes(o, layers["species"], "project_to_model", "breathe")
     closures.extend(project.closures)
     drivers = {
         "air.phi_boundary": torch.zeros(1 + len(project.flow_balanced), dtype=F64),
