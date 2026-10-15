@@ -263,15 +263,15 @@ def _refuse_repeated_names(occupants: Sequence[Occupant], what: str) -> None:
         raise ValueError(f"{what}: occupant names {dup} repeat; each needs its own")
 
 
-def _occupant_nodes(occupant: Occupant, layer, what: str) -> dict[Hashable, int]:
+def _occupant_nodes(occupant: Occupant, layer, what: str, use: str) -> dict[Hashable, int]:
     """{zone: its index into `layer.net.nodes`} for every zone of any of `occupant`'s day
-    schedules, each refused by name where `layer` holds no air: not a node (KeyError), the
-    boundary, a node no flow edge of the layer touches, or a storage-free node
-    (ValueError)."""
+    schedules, each refused by name where `layer` holds no air to `use` ("emit into",
+    "breathe"): not a node (KeyError), the boundary, a node no flow edge of the layer
+    touches, or a storage-free node (ValueError)."""
     who = f"{what}: occupant {occupant.name!r}"
     nodes = _zone_nodes(occupant.occupancy, layer.net, who)
     for node in nodes.values():
-        _check_emitting_node(layer, node, who)
+        _check_emitting_node(layer, node, who, use)
     return nodes
 
 
@@ -308,7 +308,7 @@ class OccupantGeneration:
                 raise KeyError(f"OccupantGeneration: occupant {o.name!r} generates {unknown}, "
                                f"which layer {layer.name!r} does not carry (species "
                                f"{self.species})")
-            _occupant_nodes(o, layer, "OccupantGeneration")
+            _occupant_nodes(o, layer, "OccupantGeneration", "emit into")
         self._columns = [torch.tensor([self.species.index(s) for s in o.generation])
                          for o in self.occupants]
         self.key = f"{layer.name}.sources"

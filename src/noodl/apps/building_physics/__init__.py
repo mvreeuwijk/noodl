@@ -110,11 +110,14 @@ from noodl.apps.building_physics.occupants import (
     occupant_inputs,
 )
 from noodl.apps.building_physics.outputs import (
+    building_air_change_rate,
     cumulative_exposure,
     infection_probability,
     inhaled_dose,
+    local_mean_age,
     occupant_exposure,
     wells_riley,
+    zone_air_change_rate,
 )
 from noodl.apps.building_physics.prj import (
     ContamCompatibilityWarning,
@@ -251,6 +254,7 @@ __all__ = [
     "assemble_sources",
     "bind_inputs",
     "build_model",
+    "building_air_change_rate",
     "crack",
     "cumulative_exposure",
     "duct_elements_from_edges",
@@ -265,6 +269,7 @@ __all__ = [
     "inhaled_dose",
     "initial_drivers",
     "initial_state",
+    "local_mean_age",
     "mass_orifice",
     "node_mass_fraction",
     "node_pressure",
@@ -293,4 +298,5 @@ __all__ = [
     "window",
     "wells_riley",
     "write_wth",
+    "zone_air_change_rate",
 ]

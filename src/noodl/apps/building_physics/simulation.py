@@ -205,8 +205,10 @@ def simulate(model: Model, state: State, drivers: Drivers, times, *,
     `"airflow_retries"`, the end time (s) of every step that was retried, once per step.
 
     Returns `"time"` `(N,)`, and per row the state's `"<layer>.q"`, `"<layer>.phi"` of every
-    potential layer, `"<layer>.x"` of every transport layer and the control network's
-    `"<network>.outputs"`, stacked on a leading axis.
+    potential layer, `"<layer>.x"` of every transport layer, `"<layer>.capacity"` of every
+    transport layer whose capacity a closure writes (the zones' air mass, which changes with
+    their temperature and pressure) and the control network's `"<network>.outputs"`, stacked
+    on a leading axis.
     """
     ts = [float(v) for v in torch.as_tensor(times, dtype=F64).reshape(-1).tolist()]
     if not ts or any(b <= a for a, b in zip(ts, ts[1:], strict=False)):
@@ -267,6 +269,9 @@ def simulate(model: Model, state: State, drivers: Drivers, times, *,
 
     keys = [f"{n}.{s}" for n in model.potential for s in ("q", "phi")]
     keys += [f"{n}.x" for n in model.transport]
+    # A transport layer's capacity changes with the temperatures and pressure when a closure
+    # writes it (a zone's air mass): its value at every row, for what is computed afterwards.
+    keys += [f"{n}.capacity" for n in model.transport if f"{n}.capacity" in state]
     if network is not None:
         keys.append(network.outputs_key)
     rows: dict[str, list[Tensor]] = {k: [state[k]] for k in keys}
@@ -400,6 +405,8 @@ def simulate_project(project, *, inputs: Sequence[Input] = (), diagnostics: dict
         out = {f"{n}.{s}": out_state[f"{n}.{s}"].unsqueeze(0)
                for n in model.potential for s in ("q", "phi")}
         out.update({f"{n}.x": out_state[f"{n}.x"].unsqueeze(0) for n in model.transport})
+        out.update({f"{n}.capacity": out_state[f"{n}.capacity"].unsqueeze(0)
+                    for n in model.transport if f"{n}.capacity" in out_state})
         out["time"] = torch.zeros(1, dtype=F64)
         if diagnostics is not None:
             diagnostics["airflow_retries"] = []

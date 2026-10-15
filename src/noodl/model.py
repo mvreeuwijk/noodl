@@ -15,7 +15,8 @@ per-node storage, full-node order; that layer also writes its realised flows to
 "<layer>.q"). Drivers: "<layer>.phi_boundary", "<layer>.x_boundary", optional
 "<layer>.sources" (FULL-node order, zeros on boundary and inactive nodes), optional
 "<layer>.capacity" (a transport layer's per-step capacity override; absent, the
-layer's construction-time capacity stands), optional "<layer>.removal" (a transport layer's
+layer's construction-time capacity stands; when given, a step or a steady solve records it
+in the state it returns), optional "<layer>.removal" (a transport layer's
 per-step first-order removal rate, 1/s, (..., n_i, K); absent, the layer's
 construction-time removal stands), "<layer>.requests" (an allocation layer's
 per-edge requested flow, required every step). Closures return driver updates; they may
@@ -954,6 +955,10 @@ class Model:
                 x = layer.steady(
                     q_kind, sources, xb, capacity=cap, removal=removal, diagnostics=layer_diag
                 )
+                if cap is not None:
+                    # The capacity this state was solved with, as a step records its own.
+                    new[f"{name}.capacity"] = cap
+                    made.append(f"{name}.capacity")
             else:
                 x = base.get(f"{name}.x")
                 if x is None:

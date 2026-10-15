@@ -234,22 +234,24 @@ class PeakEmissionSource(_NodeSource):
         return self.generation(t, x)
 
 
-def _check_emitting_node(layer, node: int, what: str) -> None:
-    """Refuse `node` (an index into `layer.net.nodes`) as a place to emit into or remove
-    from: the layer's boundary (the ambient), a node no flow edge of the layer touches, or
-    one of its storage-free nodes. `what` names the emitter in the message."""
+def _check_emitting_node(layer, node: int, what: str,
+                         use: str = "emit into or remove from") -> None:
+    """Refuse `node` (an index into `layer.net.nodes`) as a place to `use` the zone air
+    (emit into or remove from, breathe): the layer's boundary (the ambient), a node no flow
+    edge of the layer touches, or one of its storage-free nodes. `what` names the emitter or
+    the occupant in the message."""
     nodes = layer.net.nodes
     name = nodes[node]
     if node in set(layer.boundary_idx.tolist()):
         raise ValueError(f"{what} is on the boundary node {name!r}: a boundary (the "
-                         f"ambient) holds no zone air to emit into or remove from")
+                         f"ambient) holds no zone air to {use}")
     if node in set(layer.inactive_idx.tolist()):
         raise ValueError(f"{what} is on node {name!r}, which no flow edge of the layer "
                          f"{layer.name!r} touches: the layer holds no concentration there")
     if node in set(layer.interior_idx[layer.storage_free_mask].tolist()):
         raise ValueError(f"{what} is on the storage-free node {name!r} of the layer "
-                         f"{layer.name!r}: it holds no air to emit into or remove from, so "
-                         f"put it in a zone that stores air")
+                         f"{layer.name!r}: it holds no air to {use}, so put it in a zone "
+                         f"that stores air")
 
 
 def _add_sources(base, own: torch.Tensor, *, own_axis: bool, n_species: int) -> torch.Tensor:

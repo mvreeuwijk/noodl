@@ -1,4 +1,5 @@
-"""Post-processing: exposure, inhaled dose and infection risk."""
+"""Post-processing: exposure, inhaled dose, infection risk, air change rates and the local
+mean age of air."""
 
 from __future__ import annotations
 
@@ -8,6 +9,7 @@ from pathlib import Path
 import pytest
 import torch
 
+from noodl.apps.building_physics.inputs import Input
 from noodl.apps.building_physics.occupants import (
     Occupancy,
     OccupancyDay,
@@ -16,22 +18,27 @@ from noodl.apps.building_physics.occupants import (
     occupant_inputs,
 )
 from noodl.apps.building_physics.outputs import (
+    building_air_change_rate,
     cumulative_exposure,
     infection_probability,
     inhaled_dose,
+    local_mean_age,
     occupant_exposure,
     wells_riley,
+    zone_air_change_rate,
 )
-from noodl.apps.building_physics.prj import project_to_model, read_prj
-from noodl.apps.building_physics.schedules import DAY, Calendar
-from noodl.apps.building_physics.simulation import simulate
-from noodl.apps.building_physics.thermal import species_layer
+from noodl.apps.building_physics.prj import project_to_model, read_prj, steady
+from noodl.apps.building_physics.schedules import DAY, Calendar, TimeSeries
+from noodl.apps.building_physics.simulation import simulate, simulate_project
+from noodl.apps.building_physics.thermal import R_AIR, species_layer
 from noodl.layers.transport import TransportLayer
 from noodl.model import Model
 from noodl.topology import Network
 
 DATA = Path(__file__).resolve().parents[2] / "data" / "contam"
 THREE = DATA / "valThreeZonesWthCtm-UseApi.prj"
+AHS = DATA / "ahs_three_zone.prj"
+DUCTS = DATA / "duct_three_zone.prj"
 F64 = torch.float64
 CAL = Calendar()
 
@@ -58,8 +65,9 @@ def _walker():
 
 
 def test_exposure_splits_a_step_at_a_mid_step_move():
-    """ContamX's exposure file: the step mean of the linearly interpolated mass fraction of
-    the occupied zone, split at the move (measured to 4e-7, its print precision)."""
+    """ContamX's exposure file, as its rule was measured: the step mean of the linearly
+    interpolated mass fraction of the occupied zone, split at the move. Its agreement with
+    ContamX's exposure file is checked by the ContamX parity tests."""
     model, pos = _three()
     h = _history(model, pos, [0.0, 300.0, 600.0, 900.0],
                  {"one": [1e-4, 3e-4, 5e-4, 7e-4], "two": [2e-4, 4e-4, 6e-4, 8e-4]})
@@ -150,9 +158,9 @@ def _plenum_model():
 
 
 @pytest.mark.parametrize(("zone", "error", "match"), [
-    ("ambient", ValueError, r"'smoker'.*boundary node 'ambient'"),
+    ("ambient", ValueError, r"'smoker'.*boundary node 'ambient'.*no zone air to breathe"),
     ("loft", ValueError, r"'smoker'.*node 'loft'.*no flow edge"),
-    ("plenum", ValueError, r"'smoker'.*storage-free node 'plenum'"),
+    ("plenum", ValueError, r"'smoker'.*storage-free node 'plenum'.*no air to breathe"),
     ("kitchen", KeyError, r"'smoker'.*zone 'kitchen' is not a node"),
 ])
 def test_an_occupant_where_the_layer_holds_no_air_is_refused_by_name(zone, error, match):
@@ -209,3 +217,314 @@ def test_wells_riley_in_quanta_concentration_form_matches_the_classic_steady_for
     P = infection_probability(inhaled_dose(E, p, density=rho))
     classic = wells_riley(1, quanta, p, Q, hours * 3600.0)
     assert P.item() == pytest.approx(classic.item(), rel=1e-12)
+
+
+def test_cumulative_exposure_of_a_filling_zone_against_the_analytic_solution():
+    """One zone, clean at t = 0, a constant generation G and a through-flow q: x(t) = x_s (1 -
+    exp(-t / tau)), x_s = G / q, tau = M / q, so int_0^T x dt = x_s (T - tau (1 - exp(-T /
+    tau))). The run steps by implicit Euler, x_k = x_s (1 - r^k) with r = 1 / (1 + h / tau),
+    and the exposure is the trapezoid of those rows: summing the geometric series,
+    h sum (x_(k-1) + x_k) / 2 = x_s (T - tau - h / 2) + O(r^N). The first-order stepping
+    error is therefore -x_s h / 2 (the implicit-Euler lag; the trapezoid adds nothing more at
+    this order), and the terms dropped are below x_s tau r^N < 1e-11 x_s tau here: the
+    residual must be -x_s h / 2 to 1e-9 of the integral."""
+    rho, V, h, hours = 1.2041, 100.0, 300.0, 8
+    q = 0.12041                                        # kg/s: tau = rho V / q = 1000 s
+    G = 1e-6                                           # kg/s
+    net = Network(dtype=F64)
+    net.add_node("ambient", volume=0.0)
+    net.add_node("room", volume=V)
+    net.add_edge("ambient", "room", kind="airpath")
+    net.add_edge("room", "ambient", kind="airpath")
+    layer = species_layer(net, n_species=1, rho=rho, species_names=["tracer"])
+    always = Occupancy([OccupancyDay([0.0, DAY], ["room", "room"])])
+    emitter = Occupant(always, generation={"tracer": G}, name="emitter")
+    resident = Occupant(always, name="resident")
+
+    def through(state, drivers):
+        return {"species.q": torch.tensor([q, q], dtype=F64)}
+
+    model = Model(net, {"species": layer},
+                  closures=[through, OccupantGeneration([emitter], layer=layer)])
+    state = {"species.x": torch.zeros(1, 1, dtype=F64)}
+    drivers = {"species.x_boundary": torch.zeros(1, 1, dtype=F64)}
+    times = torch.arange(hours * 12 + 1, dtype=F64) * h
+    out = simulate(model, state, drivers, times, inputs=occupant_inputs([emitter], net),
+                   calendar=CAL)
+    E = cumulative_exposure(occupant_exposure(out, resident, model, calendar=CAL),
+                            out["time"])[-1, 0].item()
+    x_s, tau, T = G / q, rho * V / q, hours * 3600.0
+    exact = x_s * (T - tau * (1 - math.exp(-T / tau)))
+    assert abs(E - exact) <= x_s * h / 2 * (1 + 1e-9)
+    assert E - exact == pytest.approx(-x_s * h / 2, abs=1e-9 * exact)
+
+
+# ---------------------------------------------------------------- air change rates and age
+
+
+def _flow_model(volumes, edges, rho=1.2):
+    """Zones of `volumes` and `edges` [(src, tgt)] of one kind; the flows are given."""
+    net = Network(dtype=F64)
+    net.add_node("ambient", volume=0.0)
+    for name, v in volumes.items():
+        net.add_node(name, volume=v)
+    for s, t in edges:
+        net.add_edge(s, t, kind="airpath")
+    return Model(net, {"species": species_layer(net, n_species=1, rho=rho)})
+
+
+def _q(*v):
+    """A history of the species layer's flows (a transport-only model's "species.q")."""
+    return {"species.q": torch.tensor(v, dtype=F64)}
+
+
+def _f(*v):
+    return torch.tensor(v, dtype=F64)
+
+
+def _edges(model, layer="species"):
+    """The layer's flow edges (source, target node indices), in its flow order."""
+    lay = model.transport[layer]
+    ends = [model.net.endpoints(k) for k in lay.flow_kinds]
+    return (torch.cat([s for s, _ in ends]).tolist(), torch.cat([t for _, t in ends]).tolist())
+
+
+def _layer_q(model, q, layer="species"):
+    lay = model.transport[layer]
+    return model.potential[model.flow_layer_of[layer]].flows_of_kind(q, lay.flow_kinds)
+
+
+def _dense_age(model, f, M, layer="species"):
+    """An independent age: sum_in q tau_up - sum_out q tau + M = 0 at every interior row,
+    tau = 0 outside, assembled edge by edge from the flows `f` and masses `M` and solved
+    densely (a storage-free row has M = 0: its age is the flow-weighted mix of its inflows)."""
+    lay = model.transport[layer]
+    pos = {node: k for k, node in enumerate(lay.interior_idx.tolist())}
+    M = torch.where(lay.storage_free_mask, torch.zeros_like(M), M)
+    A = torch.zeros(lay.n_i, lay.n_i, dtype=F64)
+    for s, t, q in zip(*_edges(model, layer), f.tolist(), strict=True):
+        up, down = (s, t) if q > 0 else (t, s)
+        if up in pos:
+            A[pos[up], pos[up]] -= abs(q)
+            if down in pos:
+                A[pos[down], pos[up]] += abs(q)
+    return torch.linalg.solve(A, -M)
+
+
+def _inflow_from(model, f, node):
+    """The flow from `node` into the rest, summed over the layer's edges (inflow direction)."""
+    i = model.net.node_index(node)
+    src, tgt = _edges(model)
+    return sum(torch.relu(f[..., j]) if src[j] == i else torch.relu(-f[..., j])
+               for j in range(len(src)) if i in (src[j], tgt[j]))
+
+
+def test_one_zone_age_is_its_air_mass_over_the_flow():
+    model = _flow_model({"room": 50.0}, [("ambient", "room"), ("room", "ambient")])
+    h = _q(0.12, 0.12)
+    assert local_mean_age(h, model).item() == pytest.approx(1.2 * 50 / 0.12, rel=1e-12)
+    rate, zones = zone_air_change_rate(h, model)
+    assert zones == ["room"]
+    assert rate.item() == pytest.approx(0.12 / 60 * 3600, rel=1e-14)
+    assert building_air_change_rate(h, model).item() == pytest.approx(
+        0.12 / (1.2041 * 50) * 3600, rel=1e-14)
+    assert building_air_change_rate(h, model, density=1.2).item() == pytest.approx(7.2)
+
+
+def test_ages_add_up_along_zones_in_series():
+    model = _flow_model({"a": 100.0, "b": 200.0, "c": 300.0},
+                        [("ambient", "a"), ("a", "b"), ("b", "c"), ("c", "ambient")])
+    torch.testing.assert_close(local_mean_age(_q(0.1, 0.1, 0.1, 0.1), model),
+                               _f(1200.0, 3600.0, 7200.0), rtol=1e-12, atol=0)
+
+
+def test_age_with_recirculation_and_reversed_edges():
+    """Closed form: tau_a = (M_a + r M_b / (q + r)) / q, tau_b = tau_a + M_b / (q + r)."""
+    q, r = 0.1, 0.05
+    model = _flow_model({"a": 100.0, "b": 200.0},
+                        [("ambient", "a"), ("a", "b"), ("b", "a"), ("b", "ambient")])
+    expected = _f(2000.0, 3600.0)
+    torch.testing.assert_close(local_mean_age(_q(q, q + r, r, q), model), expected,
+                               rtol=1e-12, atol=0)
+    flipped = _flow_model({"a": 100.0, "b": 200.0},
+                          [("a", "ambient"), ("a", "b"), ("b", "a"), ("ambient", "b")])
+    torch.testing.assert_close(local_mean_age(_q(-q, q + r, r, -q), flipped), expected,
+                               rtol=1e-12, atol=0)
+
+
+def test_zone_air_change_rate_counts_air_from_other_zones_too():
+    """Each zone's inflow from any node over its air mass: all of zone b's comes from a."""
+    q, r = 0.1, 0.05
+    model = _flow_model({"a": 100.0, "b": 200.0},
+                        [("ambient", "a"), ("a", "b"), ("b", "a"), ("b", "ambient")])
+    rate, zones = zone_air_change_rate(_q(q, q + r, r, q), model)
+    assert zones == ["a", "b"]
+    torch.testing.assert_close(rate, _f((q + r) / 120 * 3600, (q + r) / 240 * 3600),
+                               rtol=1e-14, atol=0)
+
+
+def test_building_air_change_rate_counts_what_crosses_into_the_building():
+    """ContamX: every flow into the conditioned space from outside it -- the ambient or a
+    zone left out of it -- over 1.2041 kg/m3 times its volume."""
+    model = _flow_model({"a": 100.0, "b": 200.0, "c": 300.0},
+                        [("ambient", "a"), ("a", "b"), ("b", "c"), ("c", "ambient")])
+    h = _q(0.1, 0.1, 0.1, 0.1)
+    everything = building_air_change_rate(h, model)
+    assert everything.item() == pytest.approx(0.1 / (1.2041 * 600) * 3600, rel=1e-14)
+    without_b = building_air_change_rate(h, model, conditioned=["a", "c"])
+    assert without_b.item() == pytest.approx(0.2 / (1.2041 * 400) * 3600, rel=1e-14)
+    with pytest.raises(KeyError, match="'ambient'"):
+        building_air_change_rate(h, model, conditioned=["a", "ambient"])
+    with pytest.raises(KeyError, match="'kitchen'"):
+        building_air_change_rate(h, model, conditioned=["a", "kitchen"])
+    with pytest.raises(ValueError, match="no nodes"):
+        building_air_change_rate(h, model, conditioned=[])
+
+
+def test_outputs_of_batched_flows_and_their_gradient():
+    model = _flow_model({"room": 50.0}, [("ambient", "room"), ("room", "ambient")])
+    q = torch.tensor([[0.12, 0.12], [0.06, 0.06]], dtype=F64, requires_grad=True)
+    age = local_mean_age({"species.q": q}, model)
+    assert age.shape == (2, 1)
+    torch.testing.assert_close(age[:, 0], _f(500.0, 1000.0), rtol=1e-12, atol=0)
+    assert zone_air_change_rate({"species.q": q}, model)[0].shape == (2, 1)
+    assert building_air_change_rate({"species.q": q}, model).shape == (2,)
+    (g,) = torch.autograd.grad(age[0, 0], q)
+    # The balance is sum_in q tau_up - sum_out q tau + M = 0 with tau_up = 0 outside, so
+    # tau = M / q_out: d tau / d q_out = -M / q^2 = -60 / 0.0144, and the inflow edge: 0.
+    assert g[0, 1].item() == pytest.approx(-60 / 0.0144, rel=1e-9)
+    assert g[0, 0].item() == 0.0 and g[1].abs().sum().item() == 0.0
+
+
+def test_the_three_zone_projects_outputs_from_its_steady_flows():
+    project = read_prj(THREE)
+    model, state, drivers = project_to_model(project)
+    st = steady(model, state, drivers, atol=1e-14)
+    # The project's zone air masses follow its temperatures and pressure: a history without
+    # them is refused; a steady state carries the ones it was solved with.
+    with pytest.raises(ValueError, match=r"'species.capacity'.*PrescribedTemperatureDensity"):
+        local_mean_age({"air.q": st["air.q"]}, model)
+    with pytest.raises(ValueError, match=r"'species.capacity'"):
+        zone_air_change_rate({"air.q": st["air.q"]}, model)
+    cap = st["species.capacity"]
+    torch.testing.assert_close(cap, model.initial_capacities(st, drivers)["species.capacity"],
+                               rtol=0, atol=0)
+    f = project.path_flows(st["air.q"])        # ambient -> one -> two -> three -> ambient
+    lay = model.transport["species"]
+    interior = lay.interior_idx.tolist()
+    M = {z: cap[interior.index(model.net.node_index(z))].item()
+         for z in ("one", "two", "three")}
+    age = local_mean_age(st, model, capacity=cap)
+    tau1 = M["one"] / f[0].item()
+    tau2 = tau1 + M["two"] / f[1].item()
+    tau3 = tau2 + M["three"] / -f[2].item()
+    for z, tau in (("one", tau1), ("two", tau2), ("three", tau3)):
+        assert age[interior.index(model.net.node_index(z))].item() == pytest.approx(tau,
+                                                                                     rel=1e-10)
+    rate, zones = zone_air_change_rate(st, model, capacity=cap)
+    assert rate[zones.index("one")].item() == pytest.approx(f[0].item() / M["one"] * 3600,
+                                                            rel=1e-12)
+    assert building_air_change_rate(st, model).item() == pytest.approx(
+        f[0].item() / (1.2041 * 1800) * 3600, rel=1e-12)
+
+
+def test_age_and_zone_rate_use_each_rows_air_mass_when_the_temperature_varies():
+    """Zone one warms from 293.15 K to 313.15 K over the hour: its air mass P V / (R T) drops
+    by 6 %. `simulate` records the layer's capacity, and the age and the zone rate of every
+    row use that row's; the construction-time mass would be off by far more than round-off."""
+    project = read_prj(THREE)
+    model, state, drivers = project_to_model(project)
+    warming = TimeSeries([0.0, 3600.0], [[293.15], [313.15]], name="zone one")
+    times = torch.arange(7, dtype=F64) * 600.0
+    out = simulate(model, state, drivers, times, inputs=[Input(warming, "T", at=["one"])])
+    lay = model.transport["species"]
+    one = lay.interior_idx.tolist().index(model.net.node_index("one"))
+    T_one = 293.15 + 20.0 * times / 3600.0
+    mass_one = project.ambient_conditions["Pb"] * 300.0 / (R_AIR * T_one)
+    torch.testing.assert_close(out["species.capacity"][:, one], mass_one, rtol=1e-14, atol=0)
+    f = _layer_q(model, out["air.q"])
+    age = local_mean_age(out, model)
+    rate, zones = zone_air_change_rate(out, model)
+    for k in range(len(times)):
+        torch.testing.assert_close(age[k], _dense_age(model, f[k], out["species.capacity"][k]),
+                                   rtol=1e-10, atol=0)
+        fixed = _dense_age(model, f[k], lay.capacity)
+        if k > 0:
+            assert (age[k, one] - fixed[one]).abs().item() > 1e-3 * fixed[one].item()
+    assert rate[-1, zones.index("one")].item() == pytest.approx(
+        _inflow_into(model, f[-1], "one").item() / mass_one[-1].item() * 3600, rel=1e-12)
+    torch.testing.assert_close(local_mean_age(out, model, capacity=lay.capacity)[-1],
+                               _dense_age(model, f[-1], lay.capacity), rtol=1e-10, atol=0)
+
+
+def _inflow_into(model, f, node):
+    """The flow into `node` from any node, summed over the layer's edges."""
+    i = model.net.node_index(node)
+    src, tgt = _edges(model)
+    return sum(torch.relu(f[..., j]) if tgt[j] == i else torch.relu(-f[..., j])
+               for j in range(len(src)) if i in (src[j], tgt[j]))
+
+
+def test_age_on_an_air_handler_with_a_storage_free_plenum():
+    """`ahs_three_zone.prj`: the return plenum holds no air. Its row is algebraic, so its age
+    is that of what flows in -- zone three's, its only inflow -- whatever capacity is given
+    there (the layer's construction capacity holds a 1 kg stand-in at that row)."""
+    project = read_prj(AHS)
+    out = simulate_project(project)
+    model, _, _ = project_to_model(project)
+    lay = model.transport["species"]
+    interior = lay.interior_idx.tolist()
+    row = {z: interior.index(model.net.node_index(z)) for z in project.zones}
+    assert lay.storage_free_mask[row["ahs(Ret)"]].item()
+    assert out["species.capacity"][0, row["ahs(Ret)"]].item() == 0.0
+    f = _layer_q(model, out["air.q"])
+    age = local_mean_age(out, model)
+    for k in range(out["time"].numel()):
+        torch.testing.assert_close(age[k], _dense_age(model, f[k], out["species.capacity"][k]),
+                                   rtol=1e-10, atol=0)
+    torch.testing.assert_close(age[:, row["ahs(Ret)"]], age[:, row["three"]], rtol=1e-12,
+                               atol=0)
+    stand_in = local_mean_age(out, model, capacity=lay.capacity)
+    torch.testing.assert_close(stand_in[:, row["ahs(Ret)"]], stand_in[:, row["three"]],
+                               rtol=1e-12, atol=0)
+    rate, zones = zone_air_change_rate(out, model)
+    assert "ahs(Ret)" not in zones and "ahs(Sup)" in zones and rate.shape[-1] == len(zones)
+    assert bool(torch.isfinite(rate).all())
+    sup = zones.index("ahs(Sup)")
+    torch.testing.assert_close(
+        rate[:, sup], _inflow_into(model, f, "ahs(Sup)") / out["species.capacity"][:, row[
+            "ahs(Sup)"]] * 3600, rtol=1e-14, atol=0)
+
+
+def test_building_air_change_rate_counts_the_air_handler_and_its_outdoor_air():
+    """ContamX (measured on this project to its print precision): the conditioned volume
+    is the zones' plus the plenums' (1802 m3), and air enters it through the envelope (its
+    `path` column) and the air handler's outdoor-air intake (its `duct` column)."""
+    project = read_prj(AHS)
+    out = simulate_project(project)
+    model, _, _ = project_to_model(project)
+    f = _layer_q(model, out["air.q"])
+    torch.testing.assert_close(building_air_change_rate(out, model),
+                               _inflow_from(model, f, "ambient") / (1.2041 * 1802.0) * 3600,
+                               rtol=1e-12, atol=0)
+    with pytest.raises(ValueError, match=r"storage-free node.*'ahs\(Ret\)'"):
+        building_air_change_rate(out, model, conditioned=["one", "two", "three", "ahs(Sup)"])
+
+
+def test_building_air_change_rate_counts_the_duct_system_inside_the_building():
+    """ContamX (measured on this project to its print precision): the conditioned volume
+    includes every duct segment's (1800.61 m3), and the air a supply terminal delivers to
+    a zone is not counted; what enters is the outdoor air drawn in at the ambient terminal
+    (its `duct` column), here all of it."""
+    project = read_prj(DUCTS)
+    out = simulate_project(project)
+    model, _, _ = project_to_model(project)
+    net = model.net
+    ducts = 0.0314159 * (4 + 1 + 0.7 + 5 + 1 + 6) + 0.0176715 * 3
+    vol = net.node_attr("volume", default=0.0)
+    assert sum(vol[net.node_index(j)].item() for j in project.junctions) == pytest.approx(
+        ducts, rel=1e-12)
+    f = _layer_q(model, out["air.q"])
+    torch.testing.assert_close(building_air_change_rate(out, model),
+                               _inflow_from(model, f, "ambient") / (1.2041 * (1800.0 + ducts))
+                               * 3600, rtol=1e-12, atol=0)

@@ -1006,7 +1006,9 @@ node) is refused by name, as for its generation.
 The inhaled dose and the infection risk are **additions of noodl**, not CONTAM features.
 ContamX has no infection model, and CONTAM 3.2 removed the inhalation fields.
 `inhaled_dose(integrated_exposure, breathing_rate, density=1.2041)` gives
-$p \rho \int x\,dt$ from the cumulative exposure (kg, or quanta for a quanta species).
+$p \rho \int x\,dt$ from the cumulative exposure (kg, or quanta for a quanta species);
+pass as `density` the air density the species layer's mass fractions refer to (its capacity
+over the zone volume; the default is CONTAM's 1.2041 kg/m³).
 `infection_probability(dose) = 1 - exp(-dose)` is the Wells-Riley probability in its
 quanta-concentration form, $P = 1 - \exp(-p \int c_q\,dt)$, for a species that carries quanta
 (generation in quanta/s, an infector being an `Occupant` that generates it).
@@ -1030,6 +1032,56 @@ print(f"{wells_riley(1, 10 / 3600, 0.5 / 3600, 0.1, 8 * 3600.0).item():.4f}")
 ```text
 8.397e-04
 0.1052
+```
+
+The air change rates and the age of air take the history and the model, and give a value
+for every row of the run (or for one state: `prj.steady`'s result is a history of one
+instant without the leading axis). They read the airflow layer's flows (`"air.q"`) on the
+edges the species layer advects on, and the zones' air mass from `"species.capacity"`, which
+`simulate` records whenever a closure writes it: a zone's air mass changes with its
+temperature and pressure, and each row's own is used. `capacity=` (kg, the species layer's
+interior order) overrides it; a history without it, from a model whose air mass can change,
+is refused by name.
+
+- `local_mean_age(history, model)` is the local mean age of air (s) of every interior row of
+  the species layer, as ContamX writes it to its `.age` file (in hours there). noodl solves
+  the steady age equation $\sum_{in} q\,\tau_{up} - \sum_{out} q\,\tau + M = 0$ as a transport
+  problem with a uniform source of one second per second in every kilogram of air, the
+  outdoor air at age zero. A zero-volume plenum holds no air: its age is the flow-weighted
+  mix of the ages flowing in.
+- `building_air_change_rate(history, model, conditioned=...)` is the building air change
+  rate (1/h), as ContamX writes it to its `.ach` file: every flow entering the conditioned
+  space from outside it, over 1.2041 kg/m³ times the space's volume. ContamX counts in that
+  space every zone without its "outside the building volume" flag and the whole mechanical
+  system: the duct junctions (their duct segments' volume) and the air handlers' plenums. Air
+  a supply terminal or an air handler delivers to a zone then moves within the space, and what
+  enters is the outdoor air drawn in through the envelope (the `.ach` file's `path` column),
+  at an ambient duct terminal or an air handler's intake (its `duct` column); the total is
+  returned. The default space is every interior row of the species layer.
+- `zone_air_change_rate(history, model)` returns `(rate, zones)`: each zone's inflow from the
+  ambient and from other zones alike over its air mass (1/h), the inverse of its nominal time
+  constant, not an outdoor air change rate. It is an **addition of noodl**: ContamX writes no
+  zone rate. `zones` names the last axis; a storage-free plenum, with no air to change, is
+  left out.
+
+Continuing the run above, whose three zones of 300, 600 and 900 m³ are in series:
+
+```python
+from noodl.apps.building_physics import (
+    building_air_change_rate, local_mean_age, zone_air_change_rate,
+)
+
+age = local_mean_age(out, model)                          # s, (N, n_i): every row of the run
+print([f"{a / 3600:.3f}" for a in age[-1].tolist()])     # h, zones one, two, three
+rate, zones = zone_air_change_rate(out, model)            # 1/h, (N, n_z)
+print(zones, [f"{r:.3f}" for r in rate[-1].tolist()])
+print(f"{building_air_change_rate(out, model)[-1].item():.4f}")   # 1/h
+```
+
+```text
+['1.000', '3.000', '6.000']
+['one', 'two', 'three'] ['1.000', '0.500', '0.333']
+0.1667
 ```
 
 ### Species and reactions
@@ -1695,6 +1747,14 @@ coupled airflow-heat physics against the closed-form solutions of Li and Delsant
 single ventilated zone — buoyancy-only, envelope-loss, assisting-wind and opposing-wind cubics —
 plus an independent `scipy.optimize.fsolve` reference for a two-zone doorway case and a golden
 regression at rtol 1e-8.
+
+`tests/apps/building_physics/test_outputs.py` checks the outputs against closed forms. The
+local mean age of air: one zone ($\rho V / q$), three zones in series (the ages add up) and
+two zones with recirculation, to 1e-12, and an air handler's zero-volume plenum, whose age
+is that of the zone it draws from. The exposure of an occupant in a zone filling from clean
+air: the analytic integral less the implicit-Euler lag $x_s\,\Delta t / 2$, to 1e-9. The
+Wells-Riley probability in its quanta-concentration form from a simulated exposure: the
+classic steady form, to 1e-12.
 
 ## Limitations
 
