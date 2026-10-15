@@ -761,10 +761,12 @@ bus with generation) at its voltage setpoint, every other bus at 1 p.u., all at 
 angle; edge currents zero.
 
 `solve_power_flow(model, state, drivers)` runs `model.steady` with Newton to a residual
-max-norm below `atol = 1e-11` p.u. (`rtol = 0`, at most 30 iterations). Every standard case
-converges from the flat start in 4 or 5 iterations. A solve that fails, because the loading
-exceeds what the network can transfer (no solution exists) or the case is malformed, raises a
-`RuntimeError` that says so, chained to the solver's own error.
+max-norm below `atol = 1e-11` p.u. (`rtol = 0`, at most 30 iterations). The five cases of
+[Power flow against pandapower](#power-flow-against-pandapower) converge from the flat start in
+4 or 5 iterations. A solve that fails, because Newton does not
+converge or the system is singular (the loading exceeds what the network can transfer, so no
+solution exists, or the case is malformed), raises a `RuntimeError` that says so, chained to
+the solver's own error; any other error passes through unchanged.
 
 ### The DC model
 
@@ -784,6 +786,9 @@ node at its table angle (`"power_dc.phi_boundary"`). The layer solves `B theta =
 linear solve of the weighted graph Laplacian (`layer.mna` is `False`), through the same
 `solve_power_flow`. Line charging, `Bs` and reactive demand play no part. The slack bus's
 generation is the power its branches carry away plus its own demand and shunt conductance.
+Every other generator bus reports its generators' setpoints from the network, not from the
+`"power_dc.sources"` driver: with a batch of sources, the angles, branch flows and slack
+generation follow each instance, the other buses' generation does not.
 
 ### MATPOWER semantics
 
@@ -806,8 +811,11 @@ with conflicting `Vg`, other than exactly one slack bus; see below):
 `check_power_network(net, dc=False)` (called by both builders) refuses, with a `ValueError`
 naming what it found: not exactly **one slack bus**; a slack bus without an in-service
 generator; a regulated bus whose generators have different voltage setpoints (MATPOWER
-silently takes the last); a branch of zero impedance (`r = x = 0`; `x = 0` for DC), named by
-its row; and buses not connected to the slack bus through in-service branches (an **island**).
+silently takes the last), or a setpoint that is not positive; a branch of zero impedance
+(`r = x = 0`; `x = 0` for DC), named by its row; for DC (`dc=True`), a branch whose `x tau` is
+negative, such as a series-compensated line (the DC power flow on the classic layer needs
+positive branch susceptance; the AC power flow takes it); and buses not connected to the slack
+bus through in-service branches (an **island**).
 `dc_power_flow` also refuses a network without an in-service branch, and `PowerNetwork` itself
 refuses a `base_mva` that is not positive, a duplicate bus id and an element on a bus that does
 not exist. Not implemented:

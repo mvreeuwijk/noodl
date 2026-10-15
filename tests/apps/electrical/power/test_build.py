@@ -99,6 +99,45 @@ def test_infeasible_loading_raises_naming_the_layer():
     assert isinstance(failure.value.__cause__, RuntimeError)
 
 
+@pytest.mark.parametrize("bus, vm_set", [(1, 0.0), (2, -1.01)])
+def test_nonpositive_voltage_setpoint_is_refused(bus, vm_set):
+    net = four_bus()
+    gens = tuple(dataclasses.replace(g, vm_set=vm_set) if g.bus == bus else g
+                 for g in net.generators)
+    with pytest.raises(ValueError, match=rf"bus {bus}: voltage setpoint {vm_set}.*positive"):
+        build_power_flow(dataclasses.replace(net, generators=gens))
+
+
+def _failing_steady(model, error):
+    def steady(*args, **kwargs):
+        raise error
+
+    model.steady = steady
+
+
+def test_a_singular_power_flow_system_gets_the_advice():
+    model, state, drivers = build_power_flow(four_bus())
+    error = RuntimeError("PotentialFlowLayer 'power' solve: singular system at batch indices [0]")
+    _failing_steady(model, error)
+    with pytest.raises(RuntimeError, match="power flow: no solution found") as failure:
+        solve_power_flow(model, state, drivers)
+    assert failure.value.__cause__ is error
+
+
+@pytest.mark.parametrize("message", [
+    "PotentialFlowLayer 'power': element 0 of kind 'load' declares dp_independent = True",
+    "PotentialFlowLayer 'power_dc' solve: batch indices [0] failed to converge",
+    "solve: batch indices [0] failed to converge after 30 iterations",
+])
+def test_other_runtime_errors_pass_through_unchanged(message):
+    model, state, drivers = build_power_flow(four_bus())
+    error = RuntimeError(message)
+    _failing_steady(model, error)
+    with pytest.raises(RuntimeError) as failure:
+        solve_power_flow(model, state, drivers)
+    assert failure.value is error
+
+
 def test_voltage_sensitivity_to_load_matches_finite_differences():
     # d|V_k|/dP_load at bus 3 of the four-bus network for the PQ buses 3 and 4 (sensitivities
     # 1.06e-2 and 1.12e-2, far above the difference's noise ~1e-11), by the adjoint of the

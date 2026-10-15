@@ -14,6 +14,7 @@ from noodl.apps.electrical.power import (
     Generator,
     Load,
     PowerNetwork,
+    build_power_flow,
     dc_power_flow,
     dc_power_flow_solution,
     read_matpower,
@@ -109,8 +110,41 @@ def test_batched_drivers():
     single = dc_power_flow_solution(model, solve_power_flow(model, state, drivers))
     assert sol.pf.shape == (2, 4) and sol.pg.shape == (2, 2)
     assert torch.allclose(sol.pf[1], 2 * single.pf, atol=1e-12)
-    # only the slack's generation follows the injections; the others are fixed setpoints
     assert torch.allclose(sol.va[1], 2 * single.va, atol=1e-12)
+    # only the slack's generation follows the injections; the others are the network's
+    # setpoints, not read from the batched sources driver
+    assert torch.equal(sol.pg[0], single.pg)
+    assert sol.gen_buses == (1, 2) and sol.pg[1, 1] == single.pg[1] == 0.5
+    # bus 1, the slack, has no load or shunt: its generation doubles with the injections
+    assert torch.allclose(sol.pg[1, 0], 2 * single.pg[0], atol=1e-12)
+
+
+def test_a_layer_error_other_than_a_failed_solve_is_not_wrapped():
+    # a layer error that is neither a failed Newton solve nor a singular system (here: a
+    # negative conductance written into the built model) passes through unchanged
+    model, state, drivers = dc_power_flow(four_bus())
+    g = model.potential[DC_LAYER].element_for("branch")[0].g
+    with torch.no_grad():
+        g[1] = -g[1]
+    with pytest.raises(RuntimeError, match="negative slope") as failure:
+        solve_power_flow(model, state, drivers)
+    assert "power flow: no solution found" not in str(failure.value)
+
+
+@pytest.mark.parametrize("change, row", [
+    (dict(x=-0.05), 2),                      # series compensation: negative reactance
+    (dict(ratio=-1.0), 2),                   # x tau < 0 through the tap ratio
+])
+def test_nonpositive_branch_susceptance_is_refused(change, row):
+    net = four_bus()
+    br = list(net.branches)
+    br[row - 1] = dataclasses.replace(br[row - 1], **change)
+    changed = dataclasses.replace(net, branches=tuple(br))
+    with pytest.raises(ValueError, match=(
+            rf"row {row} of the branch table \(from bus 1 to bus 3\).*the DC power flow on the "
+            r"classic layer needs positive branch susceptance")):
+        dc_power_flow(changed)
+    build_power_flow(changed)               # the AC power flow takes a negative reactance
 
 
 def test_zero_reactance_and_islands_are_refused():

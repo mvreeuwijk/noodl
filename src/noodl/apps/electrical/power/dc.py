@@ -83,9 +83,12 @@ def dc_power_flow(net: PowerNetwork) -> tuple[Model, State, Drivers]:
     `noodl.apps.electrical.power.dc`; solve it with `solve_power_flow`.
 
     The network is checked first, as `check_power_network(net, dc=True)` does: exactly one
-    slack bus with an in-service generator, no in-service branch of zero reactance, every
-    bus connected to the slack bus through in-service branches (otherwise a `ValueError`
-    naming the offending branch or buses). A network without an in-service branch is
+    slack bus with an in-service generator, positive voltage setpoints at the regulated
+    buses, every in-service branch with a positive `x * tau` (zero reactance and negative
+    susceptance, such as a series-compensated line, are refused: a conductance of the
+    classic layer must be positive), every bus connected to the slack bus through
+    in-service branches (otherwise a `ValueError` naming the offending branch, bus or
+    buses). A network without an in-service branch is
     refused too. `model.power_index` is the `PowerFlowIndex`,
     `model.power_network` the network; the state is empty (the solve is linear).
     """
@@ -136,7 +139,10 @@ def dc_power_flow_solution(model: Model, state: State) -> DcPowerFlowSolution:
 
     The slack bus's generation is the power its branches carry away plus its own demand
     and shunt conductance, `Σ_out Pf - Σ_in Pf + (Σ Pd + Gs) / base_mva`; every other
-    generator bus keeps its in-service generators' summed setpoint.
+    generator bus keeps its in-service generators' summed setpoint. The slack's demand and
+    the other buses' generation are the network's (`model.power_network`), not read from
+    the `"power_dc.sources"` driver: with a batch of sources the angles, the branch flows
+    and the slack's generation follow each instance, the other generation does not.
     """
     index: PowerFlowIndex = model.power_index
     net: PowerNetwork = model.power_network

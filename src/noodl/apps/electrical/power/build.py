@@ -31,8 +31,9 @@ Build rules (MATPOWER's power-flow semantics: `makeYbus`, `bustypes`, `makeSbus`
 `check_power_network` refuses, by name, a network these rules cannot solve: not exactly one
 slack bus, a slack bus without an in-service generator, a regulated bus whose in-service
 generators disagree on the voltage setpoint, a bus not connected to the slack bus through
-in-service branches, and a branch of zero impedance (`r = x = 0`; `x = 0` for the DC power
-flow).
+in-service branches, a regulated bus whose voltage setpoint is not positive, and a branch
+of zero impedance (`r = x = 0`; `x = 0` for the DC power flow). The DC power flow also
+refuses a branch whose `x * tau` (reactance times tap ratio, 0 meaning 1) is negative.
 """
 
 from __future__ import annotations
@@ -144,6 +145,11 @@ def _analyse(net: PowerNetwork, dc: bool) -> _Analysis:
                 f"PowerNetwork {net.name!r}: bus {bus}: its in-service generators have "
                 f"different voltage setpoints {values}; give them one setpoint"
             )
+        if not values[0] > 0:
+            raise ValueError(
+                f"PowerNetwork {net.name!r}: bus {bus}: voltage setpoint {values[0]!r} p.u. "
+                f"of its in-service generators; a regulated bus needs a positive setpoint"
+            )
         setpoints[bus] = values[0]
 
     rows = tuple(k for k, br in enumerate(net.branches) if br.in_service)
@@ -155,6 +161,13 @@ def _analyse(net: PowerNetwork, dc: bool) -> _Analysis:
                 f"PowerNetwork {net.name!r}: the branch in row {k + 1} of the branch table "
                 f"(from bus {br.from_bus} to bus {br.to_bus}) has {what}; merge its buses "
                 f"or give it an impedance"
+            )
+        if dc and not br.x * (br.ratio or 1.0) > 0:
+            raise ValueError(
+                f"PowerNetwork {net.name!r}: the branch in row {k + 1} of the branch table "
+                f"(from bus {br.from_bus} to bus {br.to_bus}) has x * tau = "
+                f"{br.x * (br.ratio or 1.0)!r} (reactance x, tap ratio tau); the DC power "
+                f"flow on the classic layer needs positive branch susceptance 1 / (x tau)"
             )
 
     parent = {b.id: b.id for b in net.buses}
@@ -212,11 +225,13 @@ def check_power_network(net: PowerNetwork, *, dc: bool = False) -> PowerFlowInde
     Refused with a `ValueError`: not exactly one slack bus (the ones found are listed); a
     slack bus without an in-service generator; a regulated bus (the slack, a PV bus with
     in-service generation) whose in-service generators have different voltage setpoints
-    (bus and values named); an in-service branch of zero impedance, `r = x = 0` for the AC
-    power flow and `x = 0` for the DC one (`dc=True`; its 1-based row in the branch table
-    and its from and to bus named); buses not connected to the slack bus through
-    in-service branches (listed). A PV bus without an in-service generator is solved as
-    PQ, as MATPOWER does.
+    (bus and values named), or whose setpoint is not positive (bus named); an in-service
+    branch of zero impedance, `r = x = 0` for the AC power flow and `x = 0` for the DC one
+    (`dc=True`; its 1-based row in the branch table and its from and to bus named); for the
+    DC power flow an in-service branch of negative `x * tau` (reactance times tap ratio, 0
+    meaning 1), whose susceptance the classic layer's conductance cannot carry (named the
+    same way); buses not connected to the slack bus through in-service branches (listed). A
+    PV bus without an in-service generator is solved as PQ, as MATPOWER does.
     """
     return _analyse(net, dc).index
 
@@ -314,17 +329,19 @@ def solve_power_flow(model: Model, state: State, drivers: Drivers, *, atol: floa
     returns, or an earlier solution). The DC power flow is linear: one solve, from the empty
     state `dc_power_flow` returns.
 
-    A solve that fails (Newton does not converge, or its Jacobian is singular) raises a
-    `RuntimeError` naming the layer, chained to the solver's own error, with power-flow
-    advice: the loading may exceed what the network can transfer (no power-flow solution
-    exists), or the case is malformed.
+    A solve of the AC power-flow layer that fails (Newton does not converge, or its system
+    is singular) raises a `RuntimeError` naming the layer, chained to the solver's own
+    error, with power-flow advice: the loading may exceed what the network can transfer (no
+    power-flow solution exists), or the case is malformed. Every other `RuntimeError`
+    passes through unchanged.
     """
     try:
         return model.steady(state, drivers, atol=atol, rtol=rtol, max_iter=max_iter,
                             **solve_kwargs)
     except RuntimeError as exc:
-        layers = [f"PotentialFlowLayer {name!r}" for name in model.potential]
-        if not any(layer in str(exc) for layer in layers):
+        message = str(exc)
+        failed = "failed to converge" in message or "singular" in message
+        if f"PotentialFlowLayer {POWER_LAYER!r}" not in message or not failed:
             raise
         raise RuntimeError(
             f"power flow: no solution found ({exc}). The loading may exceed what the "
