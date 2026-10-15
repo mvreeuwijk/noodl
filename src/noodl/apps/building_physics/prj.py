@@ -106,6 +106,13 @@ from noodl.apps.building_physics.filters import (
     filter_transmission,
 )
 from noodl.apps.building_physics.inputs import Input, apply_inputs, bind_inputs
+from noodl.apps.building_physics.occupants import (
+    Occupancy,
+    OccupancyDay,
+    Occupant,
+    OccupantGeneration,
+    occupant_inputs,
+)
 from noodl.apps.building_physics.prj_controls import (
     INPUT_KEY,
     Actuation,
@@ -246,7 +253,9 @@ MU_0 = 1.81625e-5
 #                   `s#` is a week schedule of the zone's temperature (K). `f` is a bit set;
 #                   value 1 is the variable-pressure bit: without it ContamX holds the zone at
 #                   constant pressure (measured on ContamX 3.4.1.7: flags 0 and 2 give no flow
-#                   through the zone, 1 and 3 the same flows).
+#                   through the zone, 1 and 3 the same flows). Value 16 leaves the zone out
+#                   of the building volume (measured on ContamX 3.4.1.7: flags 19 leave it
+#                   out; 1, 2, 7, 11, 35 and 67 do not); the other bits are not read.
 #   path            30 fields: `# f n# m# e# f# w# a# s# c# l# X Y relHt mult wPset wPmod
 #                   wazm Fahs Xmax Xmin icn dir clr u[4] cdvf cfd`. `f` (field 1) is a bit
 #                   set whose values 8, 16, 32 and 64 mark the paths of a simple air-handling
@@ -278,6 +287,16 @@ MU_0 = 1.81625e-5
 #     sup           `n`, then a line of the n sub-element numbers
 #     bls, dvr      one data line each; refused when referenced
 #   source/sink     `# z# e# s# c# mult CC0 (X,Y,H)min (X,Y,H)max clr u[1] cdvf cfd`.
+#   occupancy schedule `# npts u_XYZ name`, a description line (may be blank), then `npts`
+#                   lines `hh:mm:ss zone X Y relHt`; zone 0 is out of the building. X, Y and
+#                   relHt only place an occupant in a 1-D zone and are ignored. The last time
+#                   must be 24:00:00: without it ContamX 3.4.1.7 stops during the run.
+#   exposure        `# gen ncg cgmlt` and one more integer: ContamX 3.4.1.7 refuses the
+#                   record without the fifth field (TN 1887 lists four), whose value has no
+#                   effect. Then a description line, a line of 12 occupancy-schedule numbers
+#                   (one per day type) and `ncg` lines `species ps cgmax u_cg vf_type
+#                   [vf_node]`: `ps` a week schedule (0 none), `cgmax` in kg/s per person,
+#                   multiplied by `cgmlt` persons. With `gen` 0 nothing is generated.
 # --------------------------------------------------------------------------------------
 
 _ZONE_FIELDS = 19
@@ -507,6 +526,8 @@ class Project:
     # `ControlNetwork` from the plan for every model.
     control_nodes: dict[int, PrjControlNode] = field(default_factory=dict)
     control_plan: ControlPlan | None = None
+    # The occupants (CONTAM's exposures), in exposure-number order: "occupant <nr>".
+    occupants: list = field(default_factory=list)
 
     @property
     def building_zones(self) -> list[str]:
@@ -520,10 +541,13 @@ class Project:
 
     def inputs_for(self, model) -> list[Input]:
         """The project's inputs that `model` can take: a model without a species layer (a run
-        control that simulates no contaminants) has no source multipliers to write."""
+        control that simulates no contaminants) has no source multipliers to write and no
+        occupants' generation (their presence and schedule multipliers) to spread."""
         if "species" in model.transport:
             return list(self.inputs)
-        return [i for i in self.inputs if not i.key.startswith("species.")]
+        occupant_keys = {k for o in self.occupants for k in (o.presence_key, o.multiplier_key)}
+        return [i for i in self.inputs
+                if not i.key.startswith("species.") and i.key not in occupant_keys]
 
     def path_flows(self, q: torch.Tensor) -> torch.Tensor:
         """Net mass flow per path in path-number order (a doorway sums its two edges).
@@ -968,6 +992,56 @@ def _read_week_schedules(lines: _Lines, count: int, days: dict[int, DaySchedule]
     lines.expect_end("week-schedules")
 
 
+@dataclass
+class PrjExposure:
+    """An exposure record: one occupant (or `multiplier` people) as the file gives it."""
+
+    nr: int
+    generates: bool
+    multiplier: float
+    description: str
+    day_schedules: list[int]                       # occupancy schedule per day type 1-12
+    generation: list[tuple[str, int, float]]       # (species, week schedule, kg/s per person)
+
+
+def _read_occupancy_schedules(lines: _Lines, count: int,
+                              out: dict[int, list[tuple[float, int]]]) -> None:
+    """Occupancy schedules by number: (time of day in s, zone number; 0 out) per point."""
+    for _ in range(count):
+        tok = lines.record()
+        nr, npts = int(tok[0]), int(tok[1])
+        lines.raw()                                   # description (may be blank)
+        pts = [lines.record() for _ in range(npts)]
+        out[nr] = [(_clock(pt[0]), int(pt[1])) for pt in pts]
+    lines.expect_end("occupancy schedules")
+
+
+def _read_exposures(lines: _Lines, count: int, out: list[PrjExposure]) -> None:
+    """Exposure records in file order; a generation read from a value file is refused."""
+    for _ in range(count):
+        tok = lines.record()
+        if len(tok) < 5:
+            raise ValueError(f"prj: exposure record {' '.join(tok)!r} has {len(tok)} fields; "
+                             f"ContamX reads five fields (nr gen ncg cgmlt and one more) and "
+                             f"refuses this record")
+        nr, gen, ncg, mult = int(tok[0]), int(tok[1]), int(tok[2]), float(tok[3])
+        description = lines.raw().strip()
+        days = [int(v) for v in lines.record()]
+        if len(days) != 12:
+            raise ValueError(f"prj: exposure {nr} lists {len(days)} occupancy schedules; "
+                             f"12 (one per day type) expected")
+        generation = []
+        for _ in range(ncg):
+            g = lines.record()
+            vf = int(g[4]) if len(g) > 4 else 0
+            if vf:
+                raise ValueError(f"prj: exposure {nr}'s generation of {g[0]!r} reads a value "
+                                 f"file (vf_type {vf}); value files are unsupported")
+            generation.append((g[0], int(g[1]), float(g[2])))
+        out.append(PrjExposure(nr, gen != 0, mult, description, days, generation))
+    lines.expect_end("exposures")
+
+
 def _read_initial_concentrations(
     lines: _Lines, count: int, x0_rows: dict[int, list[float]], *,
     what: str = "initial zone concentrations",
@@ -1283,6 +1357,8 @@ def read_prj(path) -> Project:
     segments: list = []
     handlers: list[AirHandlerRecord] = []
     control_nodes: dict[int, PrjControlNode] = {}
+    occupancy: dict[int, list[tuple[float, int]]] = {}
+    exposures: list[PrjExposure] = []
 
     while lines.i < len(lines.lines):
         line = lines.lines[lines.i].strip()
@@ -1340,6 +1416,10 @@ def read_prj(path) -> Project:
             read_air_handlers(lines, count, handlers)
         elif name == "control nodes":
             control_nodes = read_control_nodes(lines, count)
+        elif name == "occupancy schedules":
+            _read_occupancy_schedules(lines, count, occupancy)
+        elif name == "exposures":
+            _read_exposures(lines, count, exposures)
         else:
             lines.skip_section()
 
@@ -1352,13 +1432,15 @@ def read_prj(path) -> Project:
         filter_elements=filter_elements, filters=filters, schedule_units=schedule_units,
         duct_elements=duct_elements, junctions=junctions, junction_x0_rows=junction_x0_rows,
         segments=segments, handlers=handlers, control_nodes=control_nodes,
+        occupancy=occupancy, exposures=exposures,
     )
 
 
 def _build(*, ambient_conditions, g, species, levels, profiles, elements, zones, x0_rows,
            paths, sources, dens_zp, schedules, species_records, reactions, zone_reactions,
            run_control, source_path, filter_elements, filters, schedule_units, duct_elements,
-           junctions, junction_x0_rows, segments, handlers, control_nodes) -> Project:
+           junctions, junction_x0_rows, segments, handlers, control_nodes, occupancy=None,
+           exposures=None) -> Project:
     """Turn the parsed records into a `Network`, elements, drives and a `Project`.
 
     Order: the zones, the path edges and their elements, the path filters, constant wind
@@ -1371,7 +1453,8 @@ def _build(*, ambient_conditions, g, species, levels, profiles, elements, zones,
     A record's control reference becomes an `Actuation` wherever its schedule becomes an
     `Input`, with the same driver key and positions (and the same side effects: a path kind
     wrapped in `Scaled`, a fan driven by its speed); where a schedule is refused, so is a
-    control. The control plan and its schedule nodes' inputs follow the records."""
+    control. The control plan and its schedule nodes' inputs follow the records, then the
+    occupants (the exposure records, each with its occupancy schedules) and their inputs."""
     net = Network(dtype=F64)
     ambient = "ambient"
     net.add_node(ambient, z_ref=0.0, volume=0.0, T0=ambient_conditions["Ta"])
@@ -1809,6 +1892,9 @@ def _build(*, ambient_conditions, g, species, levels, profiles, elements, zones,
             inputs.append(Input(week(ps, node.label), INPUT_KEY, index=slot,
                                 name=f"{node.label} schedule {ps}"))
 
+    occupants = _occupants(exposures or [], occupancy or {}, zone_nr_to_name, species, week)
+    inputs.extend(occupant_inputs(occupants, net))
+
     kinds = [el.kind for el in built]
 
     # `PotentialFlowLayer` concatenates `q` in element-KIND blocks, in
@@ -1866,8 +1952,56 @@ def _build(*, ambient_conditions, g, species, levels, profiles, elements, zones,
         flow_balanced=flow_balanced, storage_free=storage_free, closures=ahs_closures,
         air_handler_edges=air_handler_edges,
         junction_nr_to_name=duct.junction_nr_to_name if duct else {},
-        control_nodes=control_nodes, control_plan=plan,
+        control_nodes=control_nodes, control_plan=plan, occupants=occupants,
     )
+
+
+def _occupants(exposures: list[PrjExposure], occupancy: dict[int, list[tuple[float, int]]],
+               zone_nr_to_name: dict[int, str], species: list[str], week) -> list[Occupant]:
+    """Each exposure record as an `Occupant` named "occupant <nr>": its occupancy schedules
+    (one per day type, zone numbers resolved to zone names, 0 out of the building) and,
+    when it generates, its rates (kg/s per person) and week schedules. Refused by name: an
+    occupancy schedule the file does not define, a zone it never defines, a schedule not
+    running from 00:00:00 to 24:00:00, and a generated species the project does not
+    simulate."""
+    occupants: list[Occupant] = []
+    for e in exposures:
+        missing = sorted({j for j in e.day_schedules if j not in occupancy})
+        if missing:
+            raise KeyError(f"prj: exposure {e.nr} names occupancy schedule(s) {missing}, "
+                           f"which the 'occupancy schedules' section does not define")
+        order = sorted(set(e.day_schedules))
+        days = []
+        for j in order:
+            zones: list[str | None] = []
+            for _t, z in occupancy[j]:
+                if z == 0:
+                    zones.append(None)
+                elif z in zone_nr_to_name:
+                    zones.append(zone_nr_to_name[z])
+                else:
+                    raise KeyError(f"prj: occupancy schedule {j} places an occupant in zone "
+                                   f"{z}, which the file never defines")
+            try:
+                days.append(OccupancyDay([t for t, _z in occupancy[j]], zones,
+                                         name=f"occupancy schedule {j}"))
+            except ValueError as exc:
+                raise ValueError(f"prj: occupancy schedule {j}: {exc}") from exc
+        generation, schedules = {}, {}
+        if e.generates:
+            for sname, ps, rate in e.generation:
+                if sname not in species:
+                    raise KeyError(f"prj: exposure {e.nr} generates species {sname!r}, which "
+                                   f"the project does not simulate")
+                generation[sname] = rate
+                if ps:
+                    schedules[sname] = week(ps, f"exposure {e.nr}")
+        name = f"occupant {e.nr}"
+        occupants.append(Occupant(
+            Occupancy(days, [order.index(j) + 1 for j in e.day_schedules], name=name),
+            generation=generation, multiplier=e.multiplier, schedules=schedules or None,
+            name=name, description=e.description))
+    return occupants
 
 
 class PrescribedTemperatureDensity:
@@ -2116,6 +2250,10 @@ def project_to_model(project: Project, *, ambient: dict | None = None, species: 
             sources_from_project(project, dt=dt), species=[s.species for s in project.sources],
             layer=layers["species"], names=[f"source {s.nr}" for s in project.sources],
             heights=net.node_attr("z_ref"), g=project.g))
+    if "species" in layers and any(o.generation for o in project.occupants):
+        # Added to the species sources like `SpeciesSources`; the presence and schedule
+        # multipliers it reads are among the project's inputs.
+        closures.append(OccupantGeneration(project.occupants, layer=layers["species"]))
     closures.extend(project.closures)
     drivers = {
         "air.phi_boundary": torch.zeros(1 + len(project.flow_balanced), dtype=F64),

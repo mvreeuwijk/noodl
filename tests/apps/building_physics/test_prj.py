@@ -15,6 +15,7 @@ from noodl.apps.building_physics.filters import (
     FilterSeries,
     ParticleFilter,
 )
+from noodl.apps.building_physics.occupants import OccupantGeneration
 from noodl.apps.building_physics.prj import (
     _PATH_FIELDS,
     ContamCompatibilityWarning,
@@ -1671,3 +1672,94 @@ def test_ahs_path_and_plenum_records_are_checked_by_name(tmp_path, old, new, err
                                                           message):
     with pytest.raises(error, match=message):
         read_prj(_variant(AHS.read_text(), old, new, tmp_path))
+
+
+OCCUPANTS = DATA / "occupants_three_zone.prj"
+MF_HEAD = "!sim_mf slae rs maxi   relcnvg   abscnvg relax gamma ucc\n    "
+
+
+def _occ_variant(tmp_path, *pairs):
+    text = OCCUPANTS.read_text()
+    for old, new in pairs:
+        assert old in text, old
+        text = text.replace(old, new, 1)
+    out = tmp_path / "variant.prj"
+    out.write_text(text)
+    return out
+
+
+def test_occupants_and_their_schedules_are_read():
+    p = read_prj(OCCUPANTS)
+    assert [o.name for o in p.occupants] == ["occupant 1", "occupant 2"]
+    visitor, resident = p.occupants
+    assert visitor.description == "visitor"
+    cal = Calendar()
+    assert [visitor.occupancy.zone_at(t, cal, left=False)
+            for t in (0.0, 3750.0, 7200.0, 10800.0)] == ["one", "two", None, "three"]
+    assert visitor.occupancy.zone_at(3750.0, cal, left=True) == "one"
+    assert visitor.multiplier.item() == 2.0
+    assert visitor.generation["sarin"].item() == pytest.approx(1e-6)
+    assert visitor.schedules["sarin"].value(3600.0, cal).item() == 0.5
+    assert resident.generation == {}
+    assert resident.occupancy.zone_at(5000.0, cal, left=False) == "three"
+    assert p.building_zones == ["one", "two"]
+    keys = [i.key for i in p.inputs if "occupant" in i.key]
+    assert keys == ["presence.occupant 1", "generation_multiplier.occupant 1"]
+
+
+def test_project_to_model_attaches_the_occupants_generation():
+    p = read_prj(OCCUPANTS)
+    model, state, drivers = project_to_model(p)
+    (gen,) = [c for c in model.closures if isinstance(c, OccupantGeneration)]
+    assert gen.layer is model.transport["species"]
+    assert [o.name for o in gen.occupants] == ["occupant 1"]
+    assert drivers["presence.occupant 1"][model.net.node_index("one")].item() == 1.0
+    assert drivers["generation_multiplier.occupant 1"].tolist() == [0.0]     # 00:00
+    assert model.check(state, drivers).ok
+
+
+def test_without_contaminants_the_occupants_inputs_are_left_out(tmp_path):
+    p = read_prj(_occ_variant(tmp_path, (MF_HEAD + "2", MF_HEAD + "0")))
+    assert p.run_control.contaminants == "none"
+    model, state, drivers = project_to_model(p)
+    assert "species" not in model.transport
+    assert not any(isinstance(c, OccupantGeneration) for c in model.closures)
+    keys = {i.key for i in p.inputs_for(model)}
+    assert not keys & {"presence.occupant 1", "generation_multiplier.occupant 1"}
+    assert "presence.occupant 1" not in drivers
+    assert model.check(state, drivers).ok
+
+
+def test_occupant_records_that_name_nothing_are_refused(tmp_path):
+    cases = [
+        ((" 01:02:30 2 0 0 0", " 01:02:30 9 0 0 0"), KeyError,
+         r"occupancy schedule 1.*zone 9"),
+        ((" 1 1 1 1 1 1 1 1 1 1 1 1\nsarin", " 3 1 1 1 1 1 1 1 1 1 1 1\nsarin"), KeyError,
+         r"exposure 1.*occupancy schedule.*3"),
+        (("sarin 1 1e-06 0 0", "CO2 1 1e-06 0 0"), KeyError, r"exposure 1.*'CO2'"),
+        (("sarin 1 1e-06 0 0", "sarin 5 1e-06 0 0"), KeyError, r"exposure 1.*schedule 5"),
+    ]
+    for pair, exc, pattern in cases:
+        with pytest.raises(exc, match=pattern):
+            read_prj(_occ_variant(tmp_path, pair))
+
+
+def test_unsupported_occupant_records_are_refused(tmp_path):
+    with pytest.raises(ValueError, match=r"occupancy schedule 1.*24:00:00"):
+        read_prj(_occ_variant(tmp_path, ("1 5 0 Moves", "1 4 0 Moves"),
+                              (" 03:00:00 3 0 0 0\n 24:00:00 3 0 0 0\n",
+                               " 03:00:00 3 0 0 0\n")))
+    with pytest.raises(ValueError, match=r"exposure 1.*value file"):
+        read_prj(_occ_variant(tmp_path, ("sarin 1 1e-06 0 0", "sarin 1 1e-06 0 1 node")))
+    with pytest.raises(ValueError, match=r"exposure.*five fields"):
+        read_prj(_occ_variant(tmp_path, ("1 1 1 2 0\nvisitor", "1 1 1 2\nvisitor")))
+    with pytest.raises(ValueError, match=r"exposure 1.*2 occupancy schedules.*12"):
+        read_prj(_occ_variant(tmp_path, (" 1 1 1 1 1 1 1 1 1 1 1 1\nsarin", " 1 1\nsarin")))
+
+
+def test_an_occupant_that_generates_nothing_ignores_its_generation_lines(tmp_path):
+    p = read_prj(_occ_variant(tmp_path, ("1 1 1 2 0\nvisitor", "1 0 1 2 0\nvisitor")))
+    assert p.occupants[0].generation == {}
+    assert not any("occupant" in i.key for i in p.inputs)
+    model, _state, _drivers = project_to_model(p)
+    assert not any(isinstance(c, OccupantGeneration) for c in model.closures)

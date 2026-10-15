@@ -337,6 +337,19 @@ def simulate(model: Model, state: State, drivers: Drivers, times, *,
     return out
 
 
+def project_calendar(project, weather=None) -> Calendar:
+    """The calendar of a project's transient run: its run control's start day, time and day
+    type, and the weather file's day types when there is one (`weather` from `read_wth`).
+    `simulate_project` runs on it; pass it where a function places times in the year
+    (`occupant_exposure`)."""
+    rc = project.run_control
+    if rc is None:
+        raise ValueError("project_calendar: the project carries no run control")
+    types = weather.day_types if weather is not None and weather.day_types else None
+    return Calendar(start_day=rc.start_day, start_time=rc.start_time,
+                    start_day_type=rc.day_type, day_types=types)
+
+
 def simulate_project(project, *, inputs: Sequence[Input] = (), diagnostics: dict | None = None,
                      **step_kwargs) -> dict[str, Tensor]:
     """Run a `.prj` project the way ContamX does: its run control (start, end, time step), its
@@ -347,14 +360,19 @@ def simulate_project(project, *, inputs: Sequence[Input] = (), diagnostics: dict
     for a project with a duct network, `"terminal_flow"` (N, n_terminals): the flow out of
     each duct terminal into its zone, in junction-number order, and, for a project with
     control references, `"control"` (N, n_reports): the named report nodes' values in node order
-    (ContamX's control outputs; `"controls.outputs"` holds every block's). The species
+    (ContamX's control outputs; `"controls.outputs"` holds every block's), and, for a project
+    with occupants, `"exposure"` (N - 1, ..., n_occupants, K): each occupant's exposure over each
+    step, in `project.occupants` order, as ContamX's exposure file (`occupant_exposure` on
+    the run's `project_calendar`; zero while out of the building). The species
     histories carry the zones' rows first, then the junctions' (`project.zone_mass_fractions`
     selects the zones). `diagnostics` is `simulate`'s run-level dict, not `Model.step`'s:
     `"airflow_retries"`, the steps whose airflow solve was retried from the linear initial
     guess (none for a steady run).
 
     A steady airflow run (with no or steady contaminants) returns the one steady state at the
-    run control's steady day, time and day type. Refused by name: cyclic contaminant runs,
+    run control's steady day, time and day type. Refused by name: occupants in a run whose
+    contaminant simulation is not transient (their generation and exposure need one; checked
+    first, so the message names them), cyclic contaminant runs,
     integration other than the trapezoid method with weight 1 (short time step, CVODE, or a
     weight other than 1), steady airflow with transient contaminants, transient airflow with
     steady contaminants (ContamX solves the concentrations to steady state at every step;
@@ -370,6 +388,10 @@ def simulate_project(project, *, inputs: Sequence[Input] = (), diagnostics: dict
     rc = project.run_control
     if rc is None:
         raise ValueError("simulate_project: the project carries no run control")
+    if project.occupants and rc.contaminants != "transient":
+        raise ValueError(f"simulate_project: occupants (their generation and exposure) need a "
+                         f"transient contaminant simulation; this project's is "
+                         f"{rc.contaminants!r}")
     if project.control_plan is not None and not rc.transient_airflow:
         raise ValueError("simulate_project: control nodes need a transient airflow "
                          "simulation; the run control's is steady")
@@ -420,9 +442,7 @@ def simulate_project(project, *, inputs: Sequence[Input] = (), diagnostics: dict
                   *(weather.inputs(model, ambient=project.ambient) if weather else ()),
                   *(ambient.inputs(model) if ambient and "species" in model.transport else ()),
                   *inputs]
-    calendar = Calendar(start_day=rc.start_day, start_time=rc.start_time,
-                        start_day_type=rc.day_type,
-                        day_types=weather.day_types if weather and weather.day_types else None)
+    calendar = project_calendar(project, weather)
     times = torch.arange(n + 1, dtype=F64) * rc.time_step
     out = simulate(model, state, drivers, times, inputs=all_inputs, calendar=calendar,
                    land_on_breakpoints=False, diagnostics=diagnostics,
@@ -432,4 +452,9 @@ def simulate_project(project, *, inputs: Sequence[Input] = (), diagnostics: dict
         out["terminal_flow"] = project.terminal_flows(out["air.q"])
     if project.control_plan is not None:
         out["control"] = project.control_outputs(out["controls.outputs"])
+    if project.occupants and "species" in model.transport:
+        from noodl.apps.building_physics.outputs import occupant_exposure
+
+        out["exposure"] = torch.stack([occupant_exposure(out, o, model, calendar=calendar)
+                                       for o in project.occupants], dim=-2)
     return out

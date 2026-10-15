@@ -91,3 +91,10 @@ Two of NIST's one-zone stack projects are present:
   written for this repository by editing NIST's `valThreeZonesWthCtm-UseApi.prj` (contamxpy
   0.0.9 sample) with the maker script reproduced in the controls work's plan (Task 5); loaded
   and run to their end in ContamX 3.4.1.7.
+- `occupants_three_zone.prj` is written for this repository from NIST's
+  `valThreeZonesWthCtm-UseApi.prj`, not an official sample. Cold steady weather (263.15 K)
+  and three zone temperatures; zone three left out of the building volume; the sample's
+  report-only control network removed. Two occupants: one moves between zones (once in the
+  middle of a step), leaves the building for an hour and generates sarin on a schedule, the
+  other stays in zone three. Output flags for exposure, age of air and the building air
+  change rate are set. Four hours at 300 s. Verified to load and run in ContamX 3.4.1.7.

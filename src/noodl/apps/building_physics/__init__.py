@@ -133,7 +133,7 @@ from noodl.apps.building_physics.schedules import (
     TimeSeries,
     WeekSchedule,
 )
-from noodl.apps.building_physics.simulation import simulate, simulate_project
+from noodl.apps.building_physics.simulation import project_calendar, simulate, simulate_project
 from noodl.apps.building_physics.sources import (
     BurstSource,
     ConstantSource,
@@ -277,6 +277,7 @@ __all__ = [
     "occupant_exposure",
     "occupant_inputs",
     "orifice_elements_from_edges",
+    "project_calendar",
     "project_to_model",
     "read_ctm",
     "read_epw",

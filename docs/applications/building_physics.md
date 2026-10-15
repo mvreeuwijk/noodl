@@ -987,6 +987,13 @@ print([f"{x:.3e}" for x in out["species.x"][-1, :, 0].tolist()])   # zones one, 
 ['2.014e-06', '1.401e-06', '5.376e-08']
 ```
 
+A `.prj` project's occupants (CONTAM's exposures) are `project.occupants` (`"occupant 1"`,
+`"occupant 2"`, ... by exposure number), their inputs are among `project.inputs`, and
+`project_to_model` attaches their `OccupantGeneration`; `simulate_project` reports their
+exposure as `"exposure"`, `(N - 1, n_occupants, K)`, on the run's own calendar
+(`project_calendar(project)`). A project with occupants needs a transient contaminant run to
+be simulated.
+
 ### Outputs
 
 `noodl.apps.building_physics.outputs` turns `simulate`'s histories into what a study

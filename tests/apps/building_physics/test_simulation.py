@@ -1023,3 +1023,43 @@ def test_simulate_hands_step_mean_signals_the_steps_start():
     assert last[two].item() == 1.0 and last.sum().item() == 1.0   # split at 450 s
     at_move = [p for t, p in seen if t == 450.0]      # the sub-step (300, 450] ends there
     assert at_move and all(p[one].item() == 1.0 and p.sum().item() == 1.0 for p in at_move)
+
+
+OCCUPANTS = DATA / "occupants_three_zone.prj"
+MF_HEAD = "!sim_mf slae rs maxi   relcnvg   abscnvg relax gamma ucc\n    "
+
+
+def test_simulate_project_reports_each_occupants_exposure():
+    from noodl.apps.building_physics.simulation import project_calendar, simulate_project
+
+    p = read_prj(OCCUPANTS)
+    out = simulate_project(p, atol=1e-14, rtol=1e-14)
+    assert out["exposure"].shape == (48, 2, 1)
+    assert out["exposure"][24:36, 0].abs().sum().item() == 0.0      # out 02:00-03:00
+    assert out["exposure"][:24, 0].min().item() > 0.0
+    assert out["exposure"][:, 1].min().item() > 0.0
+    cal = project_calendar(p)
+    assert (cal.start_day, cal.start_time, cal.start_day_type) == (1, 0.0, 1)
+
+
+def test_project_calendar_needs_a_run_control():
+    from noodl.apps.building_physics.simulation import project_calendar
+
+    p = read_prj(OCCUPANTS)
+    p.run_control = None
+    with pytest.raises(ValueError, match="run control"):
+        project_calendar(p)
+
+
+@pytest.mark.parametrize("code, mode", [("1", "steady"), ("0", "none")])
+def test_occupants_need_a_transient_contaminant_run(tmp_path, code, mode):
+    from noodl.apps.building_physics.simulation import simulate_project
+
+    text = OCCUPANTS.read_text()
+    assert MF_HEAD + "2" in text
+    variant = tmp_path / "variant.prj"
+    variant.write_text(text.replace(MF_HEAD + "2", MF_HEAD + code, 1))
+    p = read_prj(variant)
+    assert p.run_control.contaminants == mode
+    with pytest.raises(ValueError, match=rf"occupants.*transient.*'{mode}'"):
+        simulate_project(p)

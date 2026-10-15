@@ -68,7 +68,20 @@ ContamX reports through its API) depends on become a sampled `ControlNetwork`, f
 the model's closures; `project_to_model` builds a new one for every model, and
 `simulate_project(...)["control"]` returns the named report nodes' values in node order. A
 project whose control nodes only report (no record references one) builds no network and
-returns no `"control"`, so it loads and runs, steady runs included, as without them.
+returns no `"control"`, so it loads and runs, steady runs included, as without them. Occupancy
+schedules and exposures (`Project.occupants`, one `Occupant` named `"occupant <nr>"` per
+exposure record): the occupant's zone by day type, from the listed time exactly (a move in the
+middle of a step splits the step there), out of the building on zone 0, and its generation,
+`cgmax` (kg/s per person) times `cgmlt` (people) times its week schedule at the step's end,
+split between zones by the time spent in each and nothing while out; an exposure record whose
+generation flag is 0 generates nothing, whatever generation lines it lists. `project_to_model`
+attaches an `OccupantGeneration` for the occupants that generate, and
+`simulate_project(...)["exposure"]` is ContamX's exposure file: each occupant's step-mean mass
+fraction of the zone it occupies, zero while out. The occupants' coordinates (`X Y relHt`, which
+only place an occupant in a 1-D zone), the unit fields and the fifth field of an exposure
+record (ContamX needs it and ignores its value) are read and ignored. The zone flag value 16
+leaves a zone out of the building volume (`Project.building_zones`, the conditioned space of
+`building_air_change_rate`; measured on ContamX 3.4.1.7).
 
 **Refused by name**, rather than silently dropped: a control node of another type (`mod`,
 `int`, `rav`, `dls`, `dlx`, `cvf`, `dvf`, phantom nodes) when an actuator, or a named report
@@ -122,7 +135,16 @@ duct segment or terminal reaches (it would have no species state); airflow modes
 (duct balancing, the building airflow and pressurization tests); a constant wind pressure on
 an interior path; `sup_afe` super elements (ContamX 3.4.1.7 cannot simulate them); `stackD = 1` (densities varying with
 height inside a zone); a wind pressure profile with the trigonometric curve fit; a day schedule whose shape is
-neither rectangular nor trapezoidal; zone names with spaces.
+neither rectangular nor trapezoidal; zone names with spaces; an occupancy schedule that does
+not end at 24:00:00 (ContamX stops on it during the run) or that places an occupant in a zone the
+file does not define; an exposure record with four fields (ContamX refuses it), one that names
+an occupancy or week schedule the file does not define, generates a species the project does
+not simulate or reads its generation from a value file; an occupant that generates in, or
+whose exposure is asked in, the ambient, a zone no airflow path reaches or a zero-volume
+plenum; occupants in a run whose contaminant simulation is not transient (`simulate_project`;
+their generation and exposure need one). A project with occupants whose run control simulates
+no contaminants still loads: `project_to_model` builds its airflow and leaves the occupants
+out.
 
 Control nodes that nothing uses are read but not built: NIST's own sample projects carry dozens
 of unreferenced sensor and logger nodes (integrations among them), and those projects must
