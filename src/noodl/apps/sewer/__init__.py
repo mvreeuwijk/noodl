@@ -23,6 +23,7 @@ from noodl.apps.sewer.hydraulics import SewerHydraulics
 from noodl.apps.sewer.inp import read_swmm_inp, unit_factors
 from noodl.apps.sewer.network import (
     ROUTING_ALIASES,
+    Exfiltration,
     Manhole,
     Orifice,
     Outfall,
@@ -44,6 +45,7 @@ from noodl.apps.sewer.quality import (
     henry_h2s,
     kla_h2s,
 )
+from noodl.apps.sewer.rdii import Rdii, RdiiInflow, RdiiModel, UnitHydrograph, UnitHydrographSet
 from noodl.apps.sewer.report import pipe_table, to_mg_per_litre, to_ppm
 from noodl.apps.sewer.runoff import (
     Adjustments,
@@ -72,6 +74,8 @@ __all__ = [
     "air_geometry", "build_model", "capacity_flow", "henry_h2s", "initial_drivers", "initial_state",
     "kla_h2s", "manning_flow", "normal_depth", "pipe_table", "read_swmm_inp", "sewer_steady",
     "to_mg_per_litre", "to_ppm", "tree_steady", "unit_factors", "Transect", "Xsect",
-    "Adjustments", "CurveNumber", "Evaporation", "GreenAmpt", "Horton", "Hydrology", "RainGage",
+    "Adjustments", "CurveNumber", "Evaporation", "Exfiltration", "GreenAmpt", "Horton",
+    "Hydrology", "RainGage",
     "RunoffInflows", "RunoffModel", "Subareas", "Subcatchment",
+    "Rdii", "RdiiInflow", "RdiiModel", "UnitHydrograph", "UnitHydrographSet",
 ]

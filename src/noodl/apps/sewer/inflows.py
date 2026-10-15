@@ -143,6 +143,17 @@ class TimeSeries:
         y0, y1 = self.values[k - 1], self.values[k]
         return y0 + (y1 - y0) * (t - t0) / (t1 - t0)
 
+    def held(self, t: float) -> float:
+        """The value at `t` with the series extended on both ends: its first value before
+        its first time and its last after its last (SWMM's ``table_tseriesLookup`` with
+        ``extend`` TRUE, table.c:779, which a TIMESERIES outfall's stage uses, node.c:1457)."""
+        times = self.times
+        if t <= times[0]:
+            return self.values[0]
+        if t >= times[-1]:
+            return self.values[-1]
+        return self(t)
+
 
 @dataclasses.dataclass(frozen=True)
 class TimePattern:

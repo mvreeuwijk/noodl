@@ -6,13 +6,15 @@ divider is a plain junction there, `_divider`), `[OUTFALLS]` (FREE, NORMAL, FIXE
 TIMESERIES, with their flap gate), `[CONDUITS]` (with InitFlow and MaxFlow), `[XSECTIONS]`
 (`CIRCULAR`, and under DYNWAVE every other SWMM shape but `DUMMY` and `STREET`, with `inp_xsect`;
 barrels and the culvert code), `[TRANSECTS]` (DYNWAVE; the `IRREGULAR` sections), `[LOSSES]` (the
-flap gate and, under DYNWAVE, the entry, exit and average loss coefficients; seepage must be 0),
+flap gate and, under DYNWAVE, the entry, exit and average loss coefficients and the seepage
+rate),
 `[INFLOWS]` (`FLOW` inflows from a time series, a baseline and a baseline pattern;
 constant `CONCEN` pollutant baselines), `[TIMESERIES]` (inline and `FILE`), `[PATTERNS]`,
 `[DWF]` (flow; see Inflows below), `[POLLUTANTS]`, and under
 DYNWAVE `[STORAGE]` (FUNCTIONAL, TABULAR and the closed shapes CYLINDRICAL, CONICAL,
-PARABOLIC (also spelled PARABOLOID), PYRAMIDAL, with SurDepth; a non-zero evaporation factor and
-exfiltration are refused) with the `[CURVES]` of type STORAGE that its TABULAR units name, and
+PARABOLIC (also spelled PARABOLOID), PYRAMIDAL, with SurDepth, the evaporation factor Fevap and the
+exfiltration Ksat or suction head, Ksat and IMDmax) with the `[CURVES]` of type STORAGE that its
+TABULAR units name, and
 `[ORIFICES]`, `[WEIRS]` and `[OUTLETS]` (their `[XSECTIONS]` openings and RATING curves;
 `_regulators`), `[PUMPS]` (curves of type PUMP1-PUMP5, `inp_controls.read_pumps`) and
 `[CONTROLS]` (rule-based controls with their CONTROL curves and time series, `RULE_STEP`,
@@ -28,14 +30,19 @@ The network uses SWMM's own tabulated circular section
 (``geometry="tabulated"``, `xsect_tables.py`; the other shapes `xsect_shapes.py`) unless
 ``geometry="analytic"`` is passed (circles only).
 `[RAINGAGES]` is ignored when no `[SUBCATCHMENTS]` (or `[HYDROGRAPHS]`, `[RDII]`) uses a gage.
-A file with `[SUBCATCHMENTS]` also gets its hydrology -- `[RAINGAGES]`, `[SUBAREAS]`,
+A file with `[SUBCATCHMENTS]`, `[HYDROGRAPHS]` or `[RDII]` also gets its hydrology --
+`[RAINGAGES]`, `[SUBAREAS]`,
 `[INFILTRATION]`, `[EVAPORATION]` and `[ADJUSTMENTS]`, read by `inp_hydrology.read_hydrology`
 (SWMM's runoff, `runoff.py`) -- as `SewerNetwork.inflows`, a `runoff.RunoffInflows` that adds
-the runoff of the subcatchments to the lateral inflows below.
+the runoff of the subcatchments, and the RDII of the unit hydrographs (`rdii.py`, read by
+`inp_rdii.read_rdii`: `[HYDROGRAPHS]`, `[RDII]`), to the lateral inflows below.
 Lines before the first section header are `[TITLE]` text, as SWMM reads them (input.c:174);
 a version-control merge-conflict marker anywhere is refused (`_check_conflict_markers`).
-IGNORED because no conduit or node ever references them: `[EVAPORATION]` (unless it can be
-positive and a conduit is open: `_check_evaporation`), `[REPORT]`,
+IGNORED because no conduit or node ever references them: `[EVAPORATION]` and `[ADJUSTMENTS]`
+without `[SUBCATCHMENTS]` (read, by `inp_hydrology.read_climate`, only when a conduit seeps or is
+open, or a storage unit has an evaporation factor or an exfiltration: the climate of the
+conduit and storage losses, `losses.py`; under STEADY or KINWAVE a rate that can be positive
+over an open conduit cannot arise: only DYNWAVE reads an open section), `[REPORT]`,
 `[TAGS]`, `[MAP]`, `[COORDINATES]`.
 
 REFUSED BY NAME, because skipping them would silently change the physics:
@@ -45,7 +52,7 @@ PUMP1-PUMP5 and CONTROL, `[LID_USAGE]`,
 `IGNORE_ROUTING YES`, `FLOW_ROUTING NONE`, `SKIP_STEADY_STATE YES`, roadway weirs, weir
 coefficient curves, `[FILES]` `USE HOTSTART`, `USE INFLOWS`, `USE RDII` and `USE RUNOFF`
 (`SAVE` lines are harmless and ignored), and any other section carrying content. A conduit with a
-seepage rate is refused for every routing; one with a non-circular section, a culvert code, a
+positive seepage rate, a non-circular section, a culvert code, a
 non-zero entry, exit or average loss coefficient or more than one barrel under STEADY or
 KINWAVE.
 
@@ -59,8 +66,8 @@ a time series, a pattern or patterned dry-weather flow gets ``SewerNetwork.inflo
 `Manhole.inflow` is then its value at the start of the run. A pollutant inflow must be a
 constant `CONCEN` (or `CONCENTRATION`) baseline with Mfactor 1; a pollutant with a time series
 or pattern, a `MASS` inflow, a pollutant `[DWF]` line and a non-zero Cdwf with a `[DWF]`
-flow are refused. A `[TIMESERIES]` no inflow names is not read. A `TIMESERIES` outfall takes
-its stage from the `outfall_stage` driver.
+flow are refused. A `[TIMESERIES]` no inflow or outfall names is not read. A `TIMESERIES`
+outfall takes its stage from its series (`Outfall.stage_series`, m).
 
 DYNWAVE reads `VARIABLE_STEP` (the Courant factor; absent means SWMM's default 0.75,
 project.c:854) and `MINIMUM_STEP`, and clips `ROUTING_STEP` to `WET_STEP` (default 300 s)
@@ -70,9 +77,9 @@ reads `ALLOW_PONDING` (YES or NO, as SWMM's keyword test) for every routing: YES
 junction or divider with a non-zero Aponded pond (`Manhole.ponded_area`), under DYNWAVE only;
 with STEADY or KINWAVE and an Aponded it is refused by name, with the line. A TIDAL outfall
 reads its `[CURVES]` TIDAL curve (`Outfall.tide`, hours and stage elevations). A TIMESERIES
-outfall takes its stage from the `outfall_stage` driver (time variation belongs in the
-drivers): the reader records the series name (`Outfall.series`) and does not read that
-series; the model builder then refuses a network whose TIMESERIES outfall has no driver.
+outfall's series is read (values to m) as `Outfall.stage_series`, the default of the
+`outfall_stage` argument of the model builder, held at its ends as SWMM does (node.c:1457);
+a negative conduit offset is 0, as in SWMM (link.c:498-502, 1057-1067).
 
 A conduit the reader reverses (adverse, below) has its `InitFlow` sign flipped and its flap
 gate recorded as reversed (`Pipe.flap_gate_reversed`), as SWMM does (`conduit_reverse`,
@@ -134,9 +141,10 @@ from noodl.apps.sewer.inflows import (
     tokens,
 )
 from noodl.apps.sewer.inp_controls import read_controls, read_pumps
-from noodl.apps.sewer.inp_hydrology import HYDROLOGY_SECTIONS, read_hydrology
+from noodl.apps.sewer.inp_hydrology import HYDROLOGY_SECTIONS, read_climate, read_hydrology
 from noodl.apps.sewer.inp_xsect import read_transects, read_xsect
 from noodl.apps.sewer.network import (
+    Exfiltration,
     Manhole,
     Orifice,
     Outfall,
@@ -145,7 +153,7 @@ from noodl.apps.sewer.network import (
     SewerNetwork,
     Weir,
 )
-from noodl.apps.sewer.runoff import RunoffInflows
+from noodl.apps.sewer.runoff import UCF_RAINDEPTH, UCF_RAINFALL, RunoffInflows
 from noodl.apps.sewer.storage import validate_storage_curve
 from noodl.apps.sewer.structures import M3_PER_FT3
 from noodl.apps.sewer.xsect_spec import Xsect
@@ -254,7 +262,8 @@ def read_swmm_inp(
     path = Path(path)
     sections = read_sections(path, leading="TITLE")      # input.c:174: the pass starts in TITLE
     _check_conflict_markers(sections, path)
-    hydro = bool(sections.get("SUBCATCHMENTS"))
+    hydro = bool(sections.get("SUBCATCHMENTS") or sections.get("HYDROGRAPHS")
+                 or sections.get("RDII"))
     for name, lines in sections.items():
         if name in _READ or name in _IGNORED or not lines:
             continue
@@ -262,6 +271,8 @@ def read_swmm_inp(
             continue        # a gage feeds subcatchments (and RDII, refused as its own section)
         if hydro and name in HYDROLOGY_SECTIONS:
             continue        # read (or refused by name) by `read_hydrology`
+        if name == "ADJUSTMENTS" and not hydro:
+            continue        # read by `read_climate` under DYNWAVE, refused below otherwise
         raise ValueError(
             f"{path}: section [{name}] (line {lines[0].number}) is not part of the "
             f"documented subset and carries content; this reader models gravity conduits, "
@@ -325,6 +336,13 @@ def read_swmm_inp(
                 )
 
     dynamic = routing == "DYNWAVE"
+    if not dynamic and not hydro and sections.get("ADJUSTMENTS"):
+        raise ValueError(
+            f"{path}: section [ADJUSTMENTS] (line {sections['ADJUSTMENTS'][0].number}) is not "
+            f"part of the documented subset and carries content; this reader models gravity "
+            f"conduits, junctions, outfalls, regulators, storage and lateral inflows only "
+            f"(its evaporation and conductivity adjustments are read under dynamic-wave "
+            f"routing, for the conduit and storage losses)")
     lf, qf = unit_factors(flow_units)           # m per length unit, m3/s per flow unit
     start = _start_datetime(sections.get("OPTIONS", []), path)
     _check_files(sections.get("FILES", []), path)
@@ -386,7 +404,7 @@ def read_swmm_inp(
             f"are read under dynamic-wave routing only (FLOW_ROUTING DYNWAVE); under "
             f"{routing} SWMM routes them by their volume, which is not modelled")
     for line in sections.get("STORAGE", []):
-        manhole = _storage_unit(line, curves, path, lf)
+        manhole = _storage_unit(line, curves, path, lf, flow_units in _US_UNITS)
         invert[manhole.name] = manhole.invert
         manholes.append(manhole)
     outfalls: list[Outfall] = []
@@ -402,6 +420,7 @@ def read_swmm_inp(
     barrel_count: dict[str, int] = {}
     gated: set[str] = set()
     losses: dict[str, tuple[float, float, float]] = {}
+    seepage: dict[str, float] = {}
     culverts: dict[str, int] = {}
     conduit_names = {line.fields[0] for line in sections.get("CONDUITS", [])}
     for line in sections.get("LOSSES", []):
@@ -427,13 +446,16 @@ def read_swmm_inp(
                 )
             coefficients.append(value)
         losses[line.fields[0]] = tuple(coefficients)
-        if len(line.fields) > 5 and as_float(line, 5, "the seepage rate", path) != 0.0:
-            raise ValueError(
-                f"{path}: line {line.number}: link {line.fields[0]!r} has seepage rate "
-                f"{line.fields[5]}; seepage is not modelled (it takes volume from the "
-                f"conduit's nodes at a rate set by the conduit's own wetted width and "
-                f"volume, dwflow.c:236, dynwave.c:555-572)"
-            )
+        if len(line.fields) > 5:
+            rate = as_float(line, 5, "the seepage rate", path)
+            if rate > 0.0 and not dynamic:         # a negative rate does nothing (link.c:1366)
+                raise ValueError(
+                    f"{path}: line {line.number}: link {line.fields[0]!r} has seepage rate "
+                    f"{line.fields[5]}; conduit seepage is modelled by dynamic-wave routing "
+                    f"only (FLOW_ROUTING is {routing})")
+            if rate > 0.0:                         # in/hr or mm/hr to m/s, link.c:309
+                seepage[line.fields[0]] = rate / UCF_RAINFALL[0 if flow_units in _US_UNITS
+                                                              else 1] * LCF
         if len(line.fields) > 4:
             flap = line.fields[4].upper()
             if flap not in ("YES", "NO"):
@@ -501,7 +523,6 @@ def read_swmm_inp(
             culvert = int(code)
         culverts[line.fields[0]] = culvert
 
-    _check_evaporation(sections.get("EVAPORATION", []), xsects, conduit_names, path)
     pipes: list[Pipe] = []
     for line in sections.get("CONDUITS", []):
         require_fields(line, 5, "a conduit", path)
@@ -525,12 +546,14 @@ def read_swmm_inp(
                     f"{path}: line {line.number}: conduit {name!r} names node {end!r}, "
                     f"which is in neither [JUNCTIONS] nor [OUTFALLS]"
                 )
-        if offsets == "DEPTH":
-            z1, z2 = invert[node1] + in_offset, invert[node2] + out_offset
-        else:
-            z1, z2 = in_offset, out_offset
+        if offsets != "DEPTH":
             # `Pipe` offsets are heights above the end node's invert in either mode.
-            in_offset, out_offset = z1 - invert[node1], z2 - invert[node2]
+            in_offset, out_offset = in_offset - invert[node1], out_offset - invert[node2]
+        # A negative offset height is 0 (a warning in SWMM): link.c:498-502 `link_getOffsetHeight`
+        # for LINK_OFFSETS ELEVATION, link.c:1057-1067 `conduit_validate` for DEPTH; the
+        # slope below is taken from the clamped end elevations (link.c:1269).
+        in_offset, out_offset = max(in_offset, 0.0), max(out_offset, 0.0)
+        z1, z2 = invert[node1] + in_offset, invert[node2] + out_offset
         if name not in shapes:
             raise ValueError(
                 f"{path}: line {line.number}: conduit {name!r} has no [XSECTIONS] entry"
@@ -563,7 +586,8 @@ def read_swmm_inp(
                 initial_flow=-init_flow if reverse else init_flow,         # link.c:1190
                 flap_gate=name in gated, flap_gate_reversed=reverse, xsect=xsect,
                 loss_inlet=c_in, loss_outlet=c_out, loss_average=c_avg,
-                transect_length_factor=factor, culvert=culverts.get(name, 0)))
+                transect_length_factor=factor, culvert=culverts.get(name, 0),
+                seepage=seepage.get(name, 0.0)))
             continue
         upstream, downstream, high, low = (
             (node1, node2, z1, z2) if z1 > z2 else (node2, node1, z2, z1)
@@ -599,6 +623,7 @@ def read_swmm_inp(
                           ("outlet", regulators["OUTLETS"]), ("pump", pumps)):
         link_kinds.update({d.name: kind for d in devices})
     series_rows = _tseries(sections, path)
+    outfalls = [_with_stage_series(o, series_rows, start, lf, path) for o in outfalls]
 
     def control_series(name):
         if name not in series_rows:
@@ -649,11 +674,15 @@ def read_swmm_inp(
         schedule, dynamic_wave = _hydrology(
             sections, path, start, manholes, outfalls, flow_units in _US_UNITS, pollutants,
             full_schedule, dynamic_wave, dynamic)
+    climate = None
+    if dynamic and not hydro:
+        climate = _climate(sections, path, start, flow_units in _US_UNITS, manholes, pipes)
     network = SewerNetwork(
         manholes=tuple(manholes), pipes=tuple(pipes), outfalls=tuple(outfalls),
         routing=routing, geometry=geometry, dynamic_wave=dynamic_wave,
         orifices=regulators["ORIFICES"], weirs=regulators["WEIRS"],
         outlets=regulators["OUTLETS"], inflows=schedule, pumps=pumps, controls=controls,
+        climate=climate,
     )
     network.validate()
     return network, loads, pollutants
@@ -687,12 +716,39 @@ def _hydrology(sections, path, start, manholes, outfalls, us: bool, pollutants: 
         has_pollutants=bool(pollutants), pollutant_rain=rain)
     if schedule is not None and not (schedule.external or schedule.dry_weather):
         schedule = None
+    rdii_nodes = hydrology.rdii.nodes if hydrology.rdii is not None else ()
     inflows = RunoffInflows(
-        hydrology, schedule, nodes=[n for n in hydrology.outlet_nodes() if n in junctions])
+        hydrology, schedule, nodes=[n for n in hydrology.outlet_nodes() if n in junctions],
+        rdii_nodes=[n for n in rdii_nodes if n in junctions])
     if dynamic:
         dynamic_wave = dataclasses.replace(
             dynamic_wave, routing_step=min(dynamic_wave.routing_step, hydrology.wet_step))
     return inflows, dynamic_wave
+
+
+def _climate(sections, path, start, us: bool, manholes, pipes):
+    """The `runoff.Hydrology` (no gages or subcatchments) that holds the evaporation and
+    adjustments of a DYNWAVE file with no `[SUBCATCHMENTS]`, or ``None`` when nothing reads
+    them: only a conduit that seeps or is open, and a storage unit with an evaporation factor
+    or an exfiltration, lose water to the climate (`losses.py`). `[EVAPORATION]` is read, and
+    refused where SWMM would take the rate from temperature or a climate file, only then;
+    `[ADJUSTMENTS]` is always read."""
+    needed = (any(p.seepage > 0.0 or (p.xsect is not None and p.xsect.open) for p in pipes)
+              or any(m.evaporation_factor != 0.0 or m.exfiltration is not None
+                     for m in manholes))
+    options = {line.fields[0].upper(): (line, line.fields[1].upper() if len(line.fields) > 1
+                                        else "")
+               for line in sections.get("OPTIONS", [])}
+    rows = _tseries(sections, path)
+
+    def read_series(name: str) -> TimeSeries:
+        if name not in rows:
+            raise KeyError(name)
+        return _read_series(name, rows[name], start, path)
+
+    climate = read_climate(sections, path, options, start, us=us, read_series=read_series,
+                           evaporation=needed)
+    return climate if needed else None
 
 
 def _is_nonzero(text: str) -> bool:
@@ -789,37 +845,6 @@ def _divider(line, link_ends: dict, curve_names: set, path, lf: float) -> Manhol
                 f"and cWeir and a qMin not above cWeir * dhMax^1.5 (SWMM's ERR_WEIR_DIVIDER, "
                 f"node.c:1236-1244)")
     return _junction(line, n, path, lf)
-
-
-def _check_evaporation(lines, xsects: dict, conduit_names: set, path) -> None:
-    """Refuse an `[EVAPORATION]` that can be positive while a conduit is open.
-
-    SWMM takes water from an open conduit at ``topWidth * length * Evap.rate``
-    (`link_getLossRate`, link.c:1359-1362; the rate is `climate_setState`'s at every routing
-    step, swmm5.c:556), which dynamic-wave routing subtracts from its end nodes
-    (dynwave.c:560-572). It is not modelled, so a file whose rate is not provably zero (a
-    ``CONSTANT`` or a ``MONTHLY`` list of zeros, or none) is refused naming the first open
-    conduit; with only closed conduits (a closed section loses nothing, and a storage unit's
-    own Fevap is refused where non-zero) it changes nothing and the section is ignored."""
-    positive = None
-    for line in lines:
-        kind = line.fields[0].upper()
-        if kind in ("CONSTANT", "MONTHLY"):
-            values = [as_float(line, i, "an evaporation rate", path)
-                      for i in range(1, len(line.fields))]
-            if any(v != 0.0 for v in values):
-                positive = positive or line
-        elif kind in ("TIMESERIES", "TEMPERATURE", "FILE"):
-            positive = positive or line
-    if positive is None:
-        return
-    for name in conduit_names:
-        x = xsects.get(name)
-        if x is not None and x.open:
-            raise ValueError(
-                f"{path}: line {positive.number}: [EVAPORATION] {positive.fields[0]} can be "
-                f"positive and conduit {name!r} is open; SWMM's evaporation from open conduits "
-                f"(link.c:1359) is not modelled")
 
 
 def _check_conflict_markers(sections, path) -> None:
@@ -1056,12 +1081,14 @@ def _outlet(line, name, u, v, where, xsect, ratings, path, lf, qf) -> Outlet:
 _REGULATOR_READERS = {"ORIFICES": _orifice, "WEIRS": _weir, "OUTLETS": _outlet}
 
 
-def _storage_unit(line, curves: dict, path, lf: float = 1.0) -> Manhole:
+def _storage_unit(line, curves: dict, path, lf: float = 1.0, us: bool = True) -> Manhole:
     """A `[STORAGE]` line, ``Name Elev MaxDepth InitDepth Shape ... [SurDepth [Fevap
     [exfiltration]]]`` (node.c:654-809): TABULAR names a curve, the other shapes take three
     values (FUNCTIONAL a1 a2 a0; CYLINDRICAL L W -; CONICAL L W Z; PARABOLOID L W H;
-    PYRAMIDAL L W Z). Evaporation and exfiltration are refused by name. `lf` is the metres per
-    length unit of the file (`curves` are already in SI)."""
+    PYRAMIDAL L W Z); Fevap is the evaporation factor and the exfiltration Ksat or suction
+    head, Ksat and IMDmax (`network.Exfiltration`; a PARABOLOID with one is refused by name).
+    `lf` is the metres per length unit of the file (`curves` are already in SI) and `us`
+    whether the file's units are US."""
     require_fields(line, 6, "a storage unit", path)
     name = line.fields[0]
     where = f"{path}: line {line.number}: storage unit {name!r}"
@@ -1103,10 +1130,9 @@ def _storage_unit(line, curves: dict, path, lf: float = 1.0) -> Manhole:
                  if len(line.fields) > n else 0.0)
     if surcharge < 0.0:
         raise ValueError(f"{where} has a negative surcharge depth {surcharge} m")
-    if len(line.fields) > n + 1 and as_float(line, n + 1, "the evaporation factor",
-                                             path) != 0.0:
-        raise ValueError(f"{where} has evaporation factor {line.fields[n + 1]}; storage "
-                         f"evaporation is not modelled (set Fevap to 0)")
+    fevap = (as_float(line, n + 1, "the evaporation factor", path)
+             if len(line.fields) > n + 1 else 0.0)                            # node.c:794-798
+    exfiltration = None
     extra = len(line.fields) - (n + 2)
     if extra > 0:
         # exfil.c:48-66: one value is Ksat, else suction head, Ksat, IMDmax; Ksat 0 means
@@ -1115,15 +1141,31 @@ def _storage_unit(line, curves: dict, path, lf: float = 1.0) -> Manhole:
             raise ValueError(f"{where} has {extra} exfiltration values; SWMM takes Ksat "
                              f"alone or suction head, Ksat and IMDmax")
         at = n + 2 if extra == 1 else n + 3
-        if as_float(line, at, "the exfiltration Ksat", path) != 0.0:
-            raise ValueError(f"{where} has exfiltration Ksat {line.fields[at]}; storage "
-                             f"seepage (exfiltration) is not modelled")
+        ksat = as_float(line, at, "the exfiltration Ksat", path)
+        suction, deficit = ((0.0, 0.0) if extra == 1 else
+                            (as_float(line, n + 2, "the exfiltration suction head", path),
+                             as_float(line, n + 4, "the exfiltration IMDmax", path)))
+        if ksat != 0.0:
+            if suction < 0.0 or ksat < 0.0 or not 0.0 <= deficit <= 1.0:     # infil.c:580
+                raise ValueError(f"{where}: exfiltration needs a suction head >= 0, a Ksat > 0 "
+                                 f"and an IMDmax from 0 to 1 (SWMM's grnampt_setParams)")
+            if shape == "PARABOLOID":
+                raise ValueError(
+                    f"{where} is a PARABOLOID with an exfiltration; SWMM 5.2.4's "
+                    f"exfil_initState has no case for that shape and leaves its bottom and "
+                    f"bank areas unset (exfil.c:92-137), so there is nothing to reproduce")
+            rain = 0 if us else 1                    # in/hr, mm/hr -> m/s; in, mm -> m
+            exfiltration = Exfiltration(
+                conductivity=ksat / UCF_RAINFALL[rain] * LCF,
+                suction=suction / UCF_RAINDEPTH[rain] * LCF, initial_deficit=deficit,
+                us_units=us)
     try:
         validate_storage_curve(name, curve)
     except ValueError as err:
         raise ValueError(f"{path}: line {line.number}: {err}") from err
     return Manhole(name, elevation, ground=elevation + max_depth, surcharge_depth=surcharge,
-                   initial_depth=initial, storage=curve)
+                   initial_depth=initial, storage=curve, evaporation_factor=fevap,
+                   exfiltration=exfiltration)
 
 
 def _dynamic_wave_options(opts: dict, path) -> DynamicWaveOptions:
@@ -1225,6 +1267,19 @@ def _outfall(line, name: str, elevation: float, dynamic: bool, tides: dict,
     flap = len(line.fields) > gated_at and line.fields[gated_at].upper() == "YES"
     return Outfall(name, elevation, kind=kind.lower(), stage=stage, flap_gate=flap,
                    tide=tide, series=series)
+
+
+def _with_stage_series(outfall: Outfall, series_rows, start, lf: float, path) -> Outfall:
+    """A TIMESERIES outfall with its `[TIMESERIES]` stage series read (values converted to m
+    with `lf`), which is the default `outfall_stage` of the model; any other outfall as is."""
+    if outfall.kind != "timeseries":
+        return outfall
+    if outfall.series not in series_rows:
+        raise ValueError(f"{path}: TIMESERIES outfall {outfall.name!r} names series "
+                         f"{outfall.series!r}, which has no [TIMESERIES] entry")
+    read = _read_series(outfall.series, series_rows[outfall.series], start, path)
+    stage = TimeSeries(read.name, read.times, tuple(v * lf for v in read.values))
+    return dataclasses.replace(outfall, stage_series=stage)
 
 
 def _start_datetime(lines, path):

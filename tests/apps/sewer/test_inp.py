@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from noodl.apps.sewer.inp import read_swmm_inp
+from noodl.apps.sewer.network import Exfiltration
 
 DATA = Path(__file__).resolve().parents[2] / "data" / "sewer"
 
@@ -243,17 +244,53 @@ def test_a_tidal_outfall_is_read_with_its_curve_and_gate(tmp_path):
     assert outfall.tide == ((0.0, 8.1), (6.0, 8.4), (12.0, 8.2), (24.0, 8.1))
 
 
-def test_a_timeseries_outfall_takes_its_stage_from_a_driver(tmp_path):
-    """TIMESERIES: the reader records the series name and requires the driver; the series is
-    the driver's data, so it is not read, and neither is any series no inflow names."""
+def test_a_timeseries_outfall_takes_its_stage_from_its_series(tmp_path):
+    """TIMESERIES (node.c:1385-1389, 1454-1458): the reader reads the named series, in
+    metres, as the outfall's default stage; it is held at its ends (table_tseriesLookup with
+    extend TRUE, table.c:779) where an inflow series is 0 outside. A series no inflow or
+    outfall names is not read."""
     edits = [("Outfall          8.0        FREE                        NO",
               "Outfall          8.0        TIMESERIES Tide1            NO"),
              ("[REPORT]", "[TIMESERIES]\nTide1 0:00 8.1\nTide1 6:00 8.4\n\n[REPORT]")]
     net, _, _ = read_swmm_inp(_dyn(tmp_path, edits))
     (outfall,) = net.outfalls
     assert (outfall.kind, outfall.series, outfall.stage) == ("timeseries", "Tide1", None)
+    series = outfall.stage_series
+    assert series.times == (0.0, 21600.0) and series.values == (8.1, 8.4)
+    assert [series.held(t) for t in (-5.0, 0.0, 10800.0, 21600.0, 1e6)] == pytest.approx(
+        [8.1, 8.1, 8.25, 8.4, 8.4], abs=1e-12)
+    assert series(1e6) == 0.0                       # an inflow series is 0 beyond its end
     edits[1] = ("[REPORT]", "[TIMESERIES]\nOther 0:00 8.1\n\n[REPORT]")
-    assert read_swmm_inp(_dyn(tmp_path, edits))[0].inflows is None
+    with pytest.raises(ValueError, match=r"Tide1.*no \[TIMESERIES\] entry"):
+        read_swmm_inp(_dyn(tmp_path, edits))
+
+
+def test_a_timeseries_outfall_stage_is_converted_to_metres(tmp_path):
+    """A US-unit file gives the series in feet; `stage_series` is in metres."""
+    text = _dyn(tmp_path, [
+        ("Outfall          8.0        FREE                        NO",
+         "Outfall          8.0        TIMESERIES Tide1            NO"),
+        ("[REPORT]", "[TIMESERIES]\nTide1 0:00 8.0\nTide1 1:00 10.0\n\n[REPORT]"),
+        ("FLOW_UNITS           CMS", "FLOW_UNITS           CFS")]).read_text()
+    (tmp_path / "us.inp").write_text(text)
+    (outfall,) = read_swmm_inp(tmp_path / "us.inp")[0].outfalls
+    assert outfall.stage_series.values == pytest.approx((8.0 * 0.3048, 10.0 * 0.3048))
+
+
+def test_the_stage_series_is_the_default_outfall_stage_and_an_argument_overrides_it(tmp_path):
+    """`build_model` and `simulate_dynamic_wave` need no `outfall_stage` for a file's
+    TIMESERIES outfall; naming it replaces the series."""
+    from noodl.apps.sewer import build_model
+    path = _dyn(tmp_path, [
+        ("Outfall          8.0        FREE                        NO",
+         "Outfall          8.0        TIMESERIES Tide1            NO"),
+        ("[REPORT]", "[TIMESERIES]\nTide1 0:00 8.1\nTide1 1:00 8.5\n\n[REPORT]")])
+    net, _, _ = read_swmm_inp(path)
+    model, _, _ = build_model(net)
+    hyd = model.dynamic_wave
+    assert hyd.outfall_stage(1800.0, model.outfall_stage).tolist() == pytest.approx([8.3])
+    model, _, _ = build_model(net, outfall_stage={"Outfall": 9.0})
+    assert hyd.outfall_stage(1800.0, model.outfall_stage).tolist() == [9.0]
 
 
 def test_a_tide_curve_must_be_a_tidal_curve(tmp_path):
@@ -332,7 +369,6 @@ def test_dynwave_reads_lengthening_with_the_files_own_routing_step(tmp_path):
     ("a negative entry loss", "C1  -0.5  0  0", "negative entry loss"),
     ("a negative exit loss", "C1  0  -0.5  0", "negative exit loss"),
     ("a negative average loss", "C1  0  0  -0.5", "negative average loss"),
-    ("seepage", "C1  0  0  0  NO  0.5", "seepage"),
     ("a bad flap word", "C1  0  0  0  MAYBE", "YES or NO"),
     ("an unknown link", "Cx  0  0  0  YES", "Cx.*not a conduit"),
 ])
@@ -562,8 +598,10 @@ def test_closed_storage_shapes_are_read(tmp_path, shape, params, expected):
 
 
 @pytest.mark.parametrize("edit,match", [
-    (("FUNCTIONAL 20 1.5 5", "FUNCTIONAL 20 1.5 5 0 0.5"), "evaporation factor"),
-    (("FUNCTIONAL 20 1.5 5", "FUNCTIONAL 20 1.5 5 0 0 1.0 0.1 0.2"), "exfiltration"),
+    (("FUNCTIONAL 20 1.5 5", "FUNCTIONAL 20 1.5 5 0 0 1.0 0.1 0.2 0.3"), "exfiltration"),
+    (("FUNCTIONAL 20 1.5 5", "FUNCTIONAL 20 1.5 5 0 0 -1.0 0.5 0.2"), "exfiltration needs"),
+    (("FUNCTIONAL 20 1.5 5", "FUNCTIONAL 20 1.5 5 0 0 1.0 0.5 1.5"), "exfiltration needs"),
+    (("FUNCTIONAL 20 1.5 5", "PARABOLIC 2 1 3 0 0 0.5"), "PARABOLOID with an exfiltration"),
     (("FUNCTIONAL 20 1.5 5", "FUNCTIONAL 20 1.5"), "FUNCTIONAL needs"),
     (("FUNCTIONAL 20 1.5 5", "FUNCTIONAL 20 1.5 -5"), r"c \(area at zero depth"),
     (("FUNCTIONAL 20 1.5 5", "BOWL 1 2 3"), "shape"),
@@ -575,9 +613,10 @@ def test_closed_storage_shapes_are_read(tmp_path, shape, params, expected):
     (("0.5  0\n", "-0.5  0\n"), "negative surcharge depth"),
 ])
 def test_storage_refusals_name_the_unit_and_the_line(tmp_path, edit, match):
-    """Evaporation (Fevap != 0) and exfiltration (the Green-Ampt fields after Fevap) are
-    refused; so are SWMM's own input errors (node.c:705-738, table.c:285-329) and a curve
-    of another type (no other object that uses one is read)."""
+    """A malformed exfiltration (the Green-Ampt fields after Fevap) is refused, and an
+    exfiltrating PARABOLOID (SWMM leaves its areas unset); so are SWMM's own input errors
+    (node.c:705-738, table.c:285-329) and a curve of another type (no other object that
+    uses one is read)."""
     with pytest.raises(ValueError, match=rf"line \d+: .*{match}"):
         read_swmm_inp(_storage(tmp_path, [edit]))
 
@@ -598,18 +637,27 @@ def test_a_curve_section_without_storage_units_is_refused_unless_storage(tmp_pat
         read_swmm_inp(path)
 
 
-def test_storage_exfiltration_with_zero_ksat_is_no_exfiltration(tmp_path):
-    """exfil.c:48-66: after Fevap come Ksat alone, or suction head, Ksat and IMDmax; a Ksat
-    of 0 creates no exfiltration, so it is read; a non-zero Ksat in either form is refused,
-    and two values are SWMM's own input error."""
+def test_storage_evaporation_and_exfiltration_are_read(tmp_path):
+    """Fevap and, after it, exfil.c:48-66's Ksat alone, or suction head, Ksat and IMDmax (in or
+    mm, in/hr or mm/hr; SI here): a Ksat of 0 creates no exfiltration in either form; two
+    values are SWMM's own input error. The climate is attached (`SewerNetwork.climate`)."""
     for params in ("0 0 0", "0", "1.5 0 0.3"):
         path = _storage(tmp_path, [("FUNCTIONAL 20 1.5 5", f"FUNCTIONAL 20 1.5 5 0 0 {params}")])
+        net, _, _ = read_swmm_inp(path)
+        assert all(m.exfiltration is None for m in net.manholes)
+    path = _storage(tmp_path, [("FUNCTIONAL 20 1.5 5", "FUNCTIONAL 20 1.5 5 0.5 1.5 36")])
+    net, _, _ = read_swmm_inp(path)
+    j3 = next(m for m in net.manholes if m.name == "J3")
+    assert j3.evaporation_factor == 1.5
+    assert j3.exfiltration == Exfiltration(conductivity=1e-5, us_units=False)    # 36 mm/hr
+    assert net.climate is not None and net.hydrology is None
+    path = _storage(tmp_path, [("FUNCTIONAL 20 1.5 5", "FUNCTIONAL 20 1.5 5 0 0 60 0.25 0.3")])
+    j3 = next(m for m in read_swmm_inp(path)[0].manholes if m.name == "J3")
+    assert j3.exfiltration == Exfiltration(conductivity=0.25 / 3.6e6, suction=0.06,
+                                           initial_deficit=0.3, us_units=False)
+    path = _storage(tmp_path, [("FUNCTIONAL 20 1.5 5", "FUNCTIONAL 20 1.5 5 0 0 1.5 0.2")])
+    with pytest.raises(ValueError, match=r"line \d+: storage unit 'J3'.*2 exfiltration values"):
         read_swmm_inp(path)
-    for params, match in (("0.2", "Ksat 0.2"), ("1.5 0.2 0.3", "Ksat 0.2"),
-                          ("1.5 0.2", "2 exfiltration values")):
-        path = _storage(tmp_path, [("FUNCTIONAL 20 1.5 5", f"FUNCTIONAL 20 1.5 5 0 0 {params}")])
-        with pytest.raises(ValueError, match=rf"line \d+: storage unit 'J3'.*{match}"):
-            read_swmm_inp(path)
 
 
 STRUCTURES = "structures_dynwave.inp"
@@ -882,20 +930,64 @@ OPEN_C1 = [("C1               CIRCULAR     0.30             0          0        
             "C1               RECT_OPEN    0.30             1.0        0          0          1")]
 
 
-def test_evaporation_that_can_be_positive_is_refused_with_an_open_conduit(tmp_path):
-    """An open conduit loses ``topWidth * length * Evap.rate`` (link.c:1359-1362); that is
-    not modelled, so a rate that is not zero is refused naming the conduit, while a zero
-    rate, or only closed conduits, leave the section ignored."""
-    zero = _dyn(tmp_path, OPEN_C1)
-    read_swmm_inp(zero)
-    for row in ("CONSTANT         0.1", "MONTHLY 0 0 0 0 0 0 0 0 0 0 0 0.2",
-                "TIMESERIES       Evap", "TEMPERATURE"):
+def test_evaporation_is_read_for_open_conduits_and_refused_where_it_is_not_modelled(tmp_path):
+    """An open conduit evaporates (`losses.py`), so the file's `[EVAPORATION]` is read for it:
+    CONSTANT, MONTHLY and TIMESERIES become `SewerNetwork.climate`; a TEMPERATURE or FILE
+    source is refused naming the line, and only when an open conduit (or a storage unit with an
+    evaporation factor, or a seeping conduit) reads it. A closed network ignores the section."""
+    net, _, _ = read_swmm_inp(_dyn(tmp_path, OPEN_C1))
+    assert net.climate is not None and net.climate.evaporation.kind == "constant"
+    assert net.climate_source is net.climate and net.has_wet_losses is False  # rate 0
+    net, _, _ = read_swmm_inp(_dyn(tmp_path, [*OPEN_C1, ("CONSTANT         0.0",
+                                                         "CONSTANT         0.1")]))
+    assert net.has_wet_losses and net.climate.evaporation.monthly == (0.1,) * 12
+    net, _, _ = read_swmm_inp(_dyn(tmp_path, [*OPEN_C1, ("CONSTANT         0.0",
+                                                         "MONTHLY 0 0 0 0 0 0 0 0 0 0 0 0.2")]))
+    assert net.climate.evaporation.kind == "monthly" and net.has_wet_losses
+    for row in ("TEMPERATURE", "FILE x.txt"):
         path = _dyn(tmp_path, [*OPEN_C1, ("CONSTANT         0.0", row)])
-        with pytest.raises(ValueError, match=r"line \d+: \[EVAPORATION\] .*conduit 'C1' is open"):
+        with pytest.raises(ValueError, match=r"line \d+: \[EVAPORATION\] .*climate file"):
             read_swmm_inp(path)
-    read_swmm_inp(_dyn(tmp_path, [("CONSTANT         0.0", "CONSTANT         0.1")]))
-    read_swmm_inp(_dyn(tmp_path, [*OPEN_C1, ("CONSTANT         0.0",
-                                             "MONTHLY 0 0 0 0 0 0 0 0 0 0 0 0")]))
+        net, _, _ = read_swmm_inp(_dyn(tmp_path, [("CONSTANT         0.0", row)]))   # closed
+        assert net.climate is None
+    net, _, _ = read_swmm_inp(_dyn(tmp_path, [("CONSTANT         0.0", "CONSTANT         0.1")]))
+    assert net.climate is None and not net.has_wet_losses
+
+
+def test_adjustments_without_subcatchments_are_read_under_dynamic_wave_only(tmp_path):
+    """`[ADJUSTMENTS]` feeds the conduit and storage losses (EVAPORATION and CONDUCTIVITY); a
+    line that names a subcatchment is refused, and the section stays refused outside DYNWAVE."""
+    adj = "\n[ADJUSTMENTS]\nEVAPORATION " + " ".join(["0.1"] * 12) + "\nCONDUCTIVITY " + \
+          " ".join(["0.5"] * 12) + "\n"
+    path = _dyn(tmp_path, OPEN_C1)
+    path.write_text(path.read_text() + adj)
+    net, _, _ = read_swmm_inp(path)
+    assert net.climate.adjustments.evaporation == (0.1,) * 12
+    assert net.climate.adjustments.conductivity == (0.5,) * 12
+    assert net.has_wet_losses
+    path.write_text(path.read_text() + "N-PERV S1 Pat\n")
+    with pytest.raises(ValueError, match="not a subcatchment"):
+        read_swmm_inp(path)
+    kin = tmp_path / "k.inp"
+    kin.write_text((DATA / "tree_kinwave.inp").read_text() + adj)
+    with pytest.raises(ValueError, match=r"\[ADJUSTMENTS\].*not part of the documented subset"):
+        read_swmm_inp(kin)
+
+
+def test_seepage_is_read_in_dynamic_wave_and_refused_otherwise(tmp_path):
+    """The sixth `[LOSSES]` field is a rate in mm/hr here (SI), stored in m/s; a negative one
+    does nothing in SWMM (link.c:1366) and is stored as none; under KINWAVE a positive one is
+    refused by name."""
+    path = _dyn(tmp_path, [("[INFLOWS]", "[LOSSES]\nC1  0  0  0  NO  36\nC2 0 0 0 NO -5\n\n"
+                                           "[INFLOWS]")])
+    net, _, _ = read_swmm_inp(path)
+    seep = {p.name: p.seepage for p in net.pipes}
+    assert seep["C1"] == pytest.approx(1e-5) and seep["C2"] == 0.0
+    assert net.has_wet_losses and net.climate is not None
+    kin = tmp_path / "k.inp"
+    kin.write_text((DATA / "tree_kinwave.inp").read_text() + "\n[LOSSES]\nC1 0 0 0 NO 3.0\n")
+    with pytest.raises(ValueError, match="seepage rate 3.0; conduit seepage is modelled by dyn"):
+        read_swmm_inp(kin)
 
 
 def test_an_inflow_at_an_outfall_reaches_no_link_and_is_dropped(tmp_path):
@@ -923,3 +1015,59 @@ def test_raingages_without_subcatchments_are_ignored(tmp_path):
     path.write_text(path.read_text() + "\n[SUBCATCHMENTS]\nS1 G1 J1 1 50 100 0.5 0\n")
     with pytest.raises(ValueError, match="time series 'R1', which has no"):
         read_swmm_inp(path)         # subcatchments are read now (tests/apps/sewer/test_runoff.py)
+
+
+NEG = ("C1               J1               J3               200        0.013      0"
+       "          0")
+
+
+@pytest.mark.parametrize("dynwave", [False, True])
+@pytest.mark.parametrize("offsets", ["DEPTH", "ELEVATION"])
+def test_a_negative_conduit_offset_is_zero(tmp_path, dynwave, offsets):
+    """link.c:1057-1067 (`conduit_validate`, DEPTH) and :498-502 (`link_getOffsetHeight`,
+    ELEVATION) set a negative offset height to 0 with a warning; the slope is taken from the
+    clamped end elevations (link.c:1269), so C1 (inlet 0.3 m below J1's invert) is the same
+    conduit as with no offsets."""
+    text = (DATA / "tree_kinwave.inp").read_text()
+    if dynwave:
+        text = (text.replace("FLOW_ROUTING         KINWAVE", "FLOW_ROUTING         DYNWAVE")
+                .replace("VARIABLE_STEP        0.75", "VARIABLE_STEP        0"))
+    assert text.count(NEG) == 1
+    c1 = NEG[:-18] + ("      -0.3        0" if offsets == "DEPTH" else "      11.7       10")
+    text = text.replace(NEG, c1).replace("LINK_OFFSETS         DEPTH",
+                                         f"LINK_OFFSETS         {offsets}")
+    (tmp_path / "neg.inp").write_text(text)
+    net, _, _ = read_swmm_inp(tmp_path / "neg.inp")
+    net.validate()
+    pipe = next(p for p in net.pipes if p.name == "C1")
+    assert (pipe.inlet_offset, pipe.outlet_offset) == (0.0, 0.0)
+    assert pipe.slope == pytest.approx(2.0 / (200.0**2 - 2.0**2) ** 0.5, rel=1e-12)
+
+
+def test_a_junction_with_no_link_and_an_outfall_free_group_are_allowed_under_dynwave(tmp_path):
+    """SWMM asks for one outfall in the network (flowrout.c:325) and nothing per component:
+    the dynamic-wave reader accepts a junction no link reaches and a conduit pair draining
+    nowhere; KINWAVE keeps the tree rules, by name."""
+    from noodl.apps.sewer import build_model
+    path = _dyn(tmp_path, [
+        ("[JUNCTIONS]\n", "[JUNCTIONS]\nJX 5.0 2 0 0 0\nJA 5.0 2 0 0 0\nJB 4.0 2 0 0 0\n"),
+        ("[XSECTIONS]\n", "[XSECTIONS]\nCX CIRCULAR 0.30 0 0 0 1\n"),
+        ("[CONDUITS]\n", "[CONDUITS]\nCX JA JB 50 0.013 0 0 0\n")])
+    net, _, _ = read_swmm_inp(path)
+    net.validate()
+    model, _, _ = build_model(net)
+    assert "JX" in model.dynamic_wave.junction_names
+    kin = tmp_path / "k.inp"
+    kin.write_text(path.read_text().replace("FLOW_ROUTING         DYNWAVE",
+                                            "FLOW_ROUTING         KINWAVE"))
+    with pytest.raises(ValueError, match="'JX' has 0 outgoing"):
+        read_swmm_inp(kin)[0].validate()
+
+
+def test_a_dynwave_network_without_any_outfall_is_refused():
+    from noodl.apps.sewer.network import Manhole, Pipe, SewerNetwork
+    net = SewerNetwork((Manhole("A", 1.0), Manhole("B", 0.5)),
+                       (Pipe("AB", "A", "B", 100.0, 0.3, 0.013, 0.005),), (),
+                       routing="dynamic_wave")
+    with pytest.raises(ValueError, match="no outfall"):
+        net.validate()

@@ -230,6 +230,11 @@ class PotentialFlowLayer:
         touched = torch.zeros(net.n, dtype=torch.bool)
         touched[self._src] = True
         touched[self._tgt] = True
+        # A node a node source acts at is active too: its row is the source alone (a
+        # junction no conduit reaches still has its storage, `sewer.dynwave.JunctionStorage`).
+        for ns in node_sources:
+            if isinstance(ns, NodeSource):
+                touched[ns.nodes] = True
         all_interior = net.interior_index(boundary)
         # A node no edge of this layer's kinds touches is INACTIVE for this
         # layer -- not an unknown, and not a singular row. A wall-mass node in a building

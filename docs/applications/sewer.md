@@ -101,7 +101,7 @@ residuals = model.residuals(new, drivers)     # per-layer nodal balance
 | `Manhole(name, invert, ground=None, inflow=0.0, surface_area=None, surcharge_depth=0.0, initial_depth=0.0, storage=None)` | A junction. `surface_area` defaults to SWMM's `MIN_SURFAREA`, 1.167 m² — a 4 ft shaft. `surcharge_depth`, `initial_depth` and `storage` are dynamic-wave physics (see "Dynamic wave"). |
 | `storage_unit(name, invert, max_depth, curve, *, surcharge_depth=0.0, initial_depth=0.0, inflow=0.0)` | A SWMM storage unit: a `Manhole` whose `storage` is the surface-area `curve` (`("functional", a, b, c)` for `A = a y^b + c`, `("tabular", depths, areas)`, or `("cylindrical", L, W)`, `("conical", L, W, Z)`, `("paraboloid", L, W, H)`, `("pyramidal", L, W, Z)`; m and m²) and whose ground is `invert + max_depth`. Dynamic wave only. |
 | `Pipe(name, u, v, length, diameter, n, slope, inlet_offset=0.0, outlet_offset=0.0)` | A circular gravity conduit; offsets (m) are the invert heights above the end nodes' inverts. |
-| `Outfall(name, invert, kind="free", stage=None, flap_gate=False, tide=None, series=None)` | The root of a tree. `kind` is `"free"`, `"normal"`, `"fixed"` (`stage`, m, required), `"tidal"` (`tide`, a SWMM TIDAL curve as `(hour, stage m)` pairs, required) or `"timeseries"` (its stage comes from the `outfall_stage` driver; `series` is the SWMM series' name, for messages); only dynamic-wave routing reads them. |
+| `Outfall(name, invert, kind="free", stage=None, flap_gate=False, tide=None, series=None, stage_series=None)` | The root of a tree. `kind` is `"free"`, `"normal"`, `"fixed"` (`stage`, m, required), `"tidal"` (`tide`, a SWMM TIDAL curve as `(hour, stage m)` pairs, required) or `"timeseries"` (its stage comes from `stage_series`, the file's series as an `inflows.TimeSeries` in s and m, held at both ends, or else from the `outfall_stage` driver; `series` is the SWMM series' name); only dynamic-wave routing reads them. |
 | `Orifice(name, u, v, orientation, shape, height, crest_height, discharge_coefficient, width=None, flap_gate=False)` | A SWMM orifice from `u` to `v`: `orientation` `"side"` or `"bottom"`, `shape` `"circular"` (`height` its diameter, m) or `"rectangular"` (`height`, `width`, m), its crest `crest_height` m above `u`'s invert, Cd (-). Dynamic wave only. |
 | `Weir(name, u, v, kind, height, width, crest_height, discharge_coefficient, side_slopes=(0, 0), end_contractions=0, end_discharge_coefficient=0, can_surcharge=True, flap_gate=False)` | A SWMM weir: `kind` `"transverse"`, `"sideflow"` (opening `width` m long), `"v_notch"` (`width` the top width) or `"trapezoidal"` (`width` the bottom width, `side_slopes` horizontal per vertical); Cd in SWMM's SI units (m^0.5/s). Dynamic wave only. |
 | `Outlet(name, u, v, crest_height, rating, head_difference=False, flap_gate=False)` | A SWMM outlet: `rating` `("functional", a, b)` for `q = a h^b` or `("tabular", heads, flows)` (m, m³/s); `h` the depth above the crest, or the head across it with `head_difference`. Dynamic wave only. |
@@ -111,8 +111,11 @@ residuals = model.residuals(new, drivers)     # per-layer nodal balance
 non-positive slope, diameter, length or roughness; **a manhole with anything other than exactly
 one outgoing pipe**; an outfall with an outgoing pipe; and a manhole whose component never
 reaches an outfall — which also catches cycles. With `routing="dynamic_wave"` these tree
-rules are replaced: loops and flat pipes are allowed, every connected component needs an
-outfall, and each outfall ends exactly one link (a conduit or a regulator). Orifices, weirs
+rules are replaced: loops and flat pipes are allowed, the network needs at least one
+outfall (SWMM's `ERR_NO_OUTLETS`, flowrout.c:325; nothing is asked of each component, so a
+junction no link reaches, or a group of nodes without an outfall, is read and routed by its
+own continuity, filling from its inflow and flooding at its full depth), and each outfall
+ends exactly one link (a conduit or a regulator). Orifices, weirs
 and outlets are refused by name for the other routings, and malformed ones (an unknown
 node, a duplicate link name, a bad shape, a negative crest or coefficient, an unsorted
 rating) for every routing.
@@ -666,8 +669,104 @@ junction's in three places:
 - it keeps its own `InitDepth`, 0 included, instead of the average of its conduits
   (`flowrout.c:375`).
 
-Evaporation (`Fevap`) and exfiltration are refused by name, so a unit loses no water but
-through its links and its overflow.
+A unit evaporates (`Fevap`, `Manhole.evaporation_factor`) and exfiltrates (`Manhole.exfiltration`)
+as [Evaporation and seepage losses](#evaporation-and-seepage-losses) describes.
+
+#### Evaporation and seepage losses
+
+Water leaves the network in three places besides the outfalls and the floods, all from the
+evaporation rate and the conductivity adjustment of the file's climate
+(`noodl.apps.sewer.losses`). They are modelled for the dynamic wave only; under STEADY or
+KINWAVE routing a positive seepage rate or an evaporation rate that can be positive over an open
+conduit is refused by name.
+
+**Conduits** (`link.c::conduit_getLossRate`, link.c:1334-1399). From the mean of the step-start
+link depth and the pass's, $d = \tfrac12 (y_\text{old} + y_\text{new})$, an *open* conduit
+(`xsect_isOpen`) evaporates
+
+$$ Q_e = T(d)\, L\, E $$
+
+with $T$ the section's own top width (`xsect_getWofY`, not the crown-cut width of the momentum
+update), $L$ the true length and $E$ the evaporation rate, while $E > 0$; and any conduit with a
+`[LOSSES]` Seepage rate $s$ (in/hr or mm/hr) seeps
+
+$$ Q_s = s\, W(\min(d, y_{w\max}))\, L\, f_K $$
+
+with $W$ the same width at the depth limited to the section's first widest point $y_{w\max}$ (a
+fraction of the height for the standard shapes, `wMax` for `RECT_CLOSED`, the first maximum of
+the width table of a `CUSTOM` or `IRREGULAR` section) and $f_K$ the month's `[ADJUSTMENTS]
+CONDUCTIVITY`. Neither exists at a depth of `FUDGE` (1e-4 ft) or less or on the dry exit of the
+conduit update, and their sum is scaled down so that it does not exceed the link's volume over
+the step, $V/\Delta t$ (all barrels' volume against one barrel's rate, as SWMM compares them).
+The rate enters the momentum update as $\Delta q_6 = (Q_e + Q_s)\, 2.5\, \Delta t\, v / L$
+(`dwflow.c:236`, added to the numerator with $\Delta q_3$, $\Delta q_4$) and is taken from the
+end nodes, times the barrels, half from each, or all from the one that is not an outfall
+(`dynwave.c:555-572`). The depth, volume and velocity are those of the previous trial in SWMM and
+of the previous pass here, the same at the fixed point; the step-start depth is a new carried key,
+`"sewer.pipe_depth"` (SWMM's `Link.oldDepth`), present only in a network with conduit losses.
+
+**Storage units** (`node.c::storage_getLosses`, node.c:1052-1100; `exfil.c`). Once per routing step,
+from the step-start depth $y$, surface area $A(y)$ and volume $V$ (routing.c:363-365): evaporation
+$F_\text{evap}\, E\, A$ (just $F_\text{evap} E$, SWMM's unit slip, when $V \le$ `FUDGE`), and the
+exfiltration through the bottom and the banks. With a single Ksat, or `IMDmax` 0, the rate is Ksat
+$\times f_K$ over the bottom area plus the bank area (the surface area beyond the bottom, from the
+depth the banks start at). With a positive `IMDmax` it is SWMM's modified Green-Ampt model
+(`runoff._GreenAmptState`, with its state kept from step to step, reset at the start of every
+`simulate_dynamic_wave` call) at the depth of the water for the bottom and, for the banks,
+half the depth above their foot (or, above the last growth of a tabular curve, that depth). The
+bottom and bank areas are `exfil_initState`'s: for a `TABULAR` curve the area at depth 0 and the
+depths at which the curve is flat and then grows; for the other shapes the constant `a0` and banks
+from the floor up. SWMM reads that `a0` in the file's own length unit as ft$^2$, which for an SI
+file is the number of m$^2$ taken as ft$^2$; the reader reproduces it (`Exfiltration.us_units`).
+The total is capped at $V / \Delta t$, where $V$ is SWMM's `storage_getVolume`: the curve's volume
+in the file's unit divided by `UCF(VOLUME)`, which is 1 for US units but 0.02832 (not the true
+0.3048$^3$) for SI, so an SI file's cap is 1.1e-4 larger than the unit's true volume. While the cap
+binds (a unit filling faster than it exfiltrates, the first steps of a run) that slip moved the
+depth by 2e-7 m against SWMM until it was reproduced (`StorageLosses.volume_per_m3`).
+
+**The climate** is `climate_setState` as SWMM's routing steps see it. With subcatchments, the
+state at the start of the last runoff step taken before the routing step
+(`runoff.RunoffModel`, shared with the lateral-inflow driver); without any, the state at the start
+of the routing step (`swmm5.c:556`), where a file with no `[SUBCATCHMENTS]` still has its
+`[EVAPORATION]` (`CONSTANT`, `MONTHLY`, `TIMESERIES` with `RECOVERY`) and `[ADJUSTMENTS]` read
+(`SewerNetwork.climate`, a `Hydrology` with no gages or subcatchments; `read_climate`).
+**`DRY_ONLY` is the subcatchments' alone** (`subcatch.c:685`): a conduit or storage unit
+evaporates while it rains, and the parity tests check that against SWMM. The Green-Ampt
+model of a storage unit reads SWMM's `InfilFactor`, the last subcatchment's (its pattern or the
+month's conductivity adjustment), and the recovery factor.
+
+`simulate_dynamic_wave` sets three drivers each step from this clock: `"evap_rate"` (m/s),
+`"hydcon"` and `"storage_loss"` (m$^3$/s per junction, `DynamicWaveHydraulics.storage_loss`); a
+network with losses built by `build_model` starts them at the climate of t = 0, and a closure
+called without them raises naming the driver. Only a network that loses water pays for any of it:
+a circular, loss-free network builds none of the machinery (the speed of
+`benchmarks/sewer_dynwave_speed.py` is unchanged).
+
+**Gradients.** The conduit rates are functions of the pass's depths, volumes and velocities and the
+storage rates of the step-start depth and volume, all torch operations, so a gradient with
+respect to an inflow, a roughness or a surface runs through the loss (the head solve differentiates
+the converged pass, which contains it); the rate of a unit with a positive `IMDmax` also, through
+the depth, but not through its infiltration state. The evaporation rate, the conductivity
+adjustment and the Green-Ampt state are plain floats of the climate and carry no gradient.
+
+**Not modelled, refused by name.** Evaporation computed from temperature or read from a climate file
+(`TEMPERATURE`, `FILE`); an exfiltrating `PARABOLOID` storage unit, for which SWMM 5.2.4's
+`exfil_initState` has no case and leaves the bottom and bank areas unset; water quality with any
+of these losses; seepage under STEADY or KINWAVE routing. A conductivity adjustment applies to the
+Green-Ampt exfiltration through SWMM's `InfilFactor` (the last subcatchment's), which the clock
+reads from the runoff model.
+
+**Measured against SWMM** (`tests/verification/test_sewer_losses_parity.py`; every SWMM step
+converged, targets 1e-7 m and 1e-6 relative + 1e-9 m$^3$/s): constant and monthly evaporation of
+an open trapezoid and rectangle across a month boundary with an evaporation adjustment, `DRY_ONLY
+YES` through a rain period, seepage of a circle, trapezoid, open and closed rectangle with a
+conductivity adjustment, and storage evaporation, Ksat and Green-Ampt exfiltration of tabular,
+functional, conical and cylindrical units. SWMM does not always converge with losses (a
+free outfall conduit, or a seepage close to the inflow, leaves it oscillating between two
+branches on a few steps, as without them); those steps have no reference. A *dry* junction that
+is losing water (a net outflow, from a loss or a negative lateral inflow) sits a hair below its
+invert on the stiff bed and moves the flow of the conduit above it by up to 4e-9 m$^3$/s while
+it is dry: the same with or without a loss, and the depth is reported clamped at 0 as SWMM's is.
 
 #### Orifices, weirs and outlets
 
@@ -812,8 +911,7 @@ the element's flow against a constant, so the flow stays continuous and non-decr
 head difference, as the head solve's Newton step needs. A set `InitDepth`, `InitFlow`,
 `MaxFlow`, flap gate or barrel count is refused by name under STEADY or KINWAVE routing.
 
-The reader refuses by name, with the line number, seepage
-in `[LOSSES]`, the `DUMMY` and `STREET` sections, storage evaporation and exfiltration, roadway weirs, weir coefficient curves and regulators with `LINK_OFFSETS
+The reader refuses by name, with the line number, the `DUMMY` and `STREET` sections, roadway weirs, weir coefficient curves and regulators with `LINK_OFFSETS
 ELEVATION` (see [SWMM `.inp`](../formats/swmm.md)).
 `build_model` with `storage=True` is refused by name; `quality=True` builds
 the water-quality layer on the solved flows (see
@@ -896,7 +994,8 @@ circular-pipe correlations and are refused by name for a network with a non-circ
 **Local losses.** The `[LOSSES]` entry, exit and average coefficients enter the momentum
 update's denominator as `dq5 = (c_in q/a_1 + c_out q/a_2 + c_avg q/a_mid)/2/L dt`
 (`dwflow.c:228-239`, each term where its area exceeds `FUDGE`), with the coefficients
-swapped for a conduit the reader reverses. Seepage (the sixth field) and evaporation are refused.
+swapped for a conduit the reader reverses. Seepage (the sixth field) and evaporation are
+[losses of water](#evaporation-and-seepage-losses).
 
 **Force mains.** A `FORCE_MAIN` flows partly full as a circular conduit with the Manning n that
 gives the same full normal flow as its Hazen-Williams C or Darcy-Weisbach roughness
@@ -1046,10 +1145,9 @@ Refused by name, with the line: `[LID_USAGE]`; `[GROUNDWATER]` (unless `IGNORE_G
 subcatchment with a snow pack (unless `IGNORE_SNOWMELT YES`); `[LANDUSES]`, `[COVERAGES]`,
 `[BUILDUP]`, `[WASHOFF]`, `[LOADINGS]` and a rain concentration of a pollutant (their load is not
 modelled; `IGNORE_QUALITY YES` lets them pass); an outfall that routes onto a subcatchment;
-rain `FILE` gages; `[EVAPORATION]` `TEMPERATURE` and `FILE`; `[RDII]` and `[HYDROGRAPHS]`. The
-evaporation of **open conduits** (`link.c:1359-1362`, subtracted from the end nodes in
-`dynwave.c:560-572` from every trial's mean depth) stays refused: a file whose
-evaporation can be positive while a conduit is open still names the conduit. `[SNOWPACKS]` no
+rain `FILE` gages; `[EVAPORATION]` `TEMPERATURE` and `FILE`. The
+evaporation of **open conduits** and the storage units' is that of
+[Evaporation and seepage losses](#evaporation-and-seepage-losses). `[SNOWPACKS]` no
 subcatchment names, `[TEMPERATURE]`, `[AQUIFERS]` and `[LID_CONTROLS]` that nothing uses are
 inert, as they are in SWMM.
 
@@ -1127,6 +1225,79 @@ Curve Number, Green-Ampt and modified Green-Ampt; SI, LPS and US units; `RouteTo
 constant and time-series evaporation; the adjustments and recovery patterns; a month boundary;
 gages faster than `WET_STEP`) and of sixteen variants of them.
 
+#### RDII from a SWMM file
+
+`[HYDROGRAPHS]` and `[RDII]` give rainfall-dependent infiltration and inflow: a triangular unit
+hydrograph set (three responses, SHORT, MEDIUM and LONG, per month) convolved with the rain of a
+gage and applied to the sewershed area of a node. `read_swmm_inp` reads them into
+`net.hydrology.rdii` (`noodl.apps.sewer.rdii.Rdii`; the reader is `inp_rdii.py`) and
+`RunoffInflows` adds the RDII of each node to the lateral inflow, **whether or not the file has
+subcatchments** (a file with only RDII has `net.hydrology.subcatchments == ()`). It is SWMM 5.2.4's
+own computation (`rdii.c`, with `rain.c`, `gage.c` and `routing.c`'s `addRdiiInflows`); SWMM writes
+the RDII of the whole run to an interface file before it starts and the routing reads that file, and
+noodl computes the same records directly, in order, as the routing asks for them. The module
+docstring of `rdii.py` has every rule with its source:
+
+- **Unit hydrographs.** `Name Gage`, then `Name Month Response R T K [Dmax Drecov Dinit]` (`ALL`
+  or `JAN`..`DEC`; later lines replace earlier ones, so `ALL` then `JAN` overrides January) or
+  the older one-line `Name Month R1 T1 K1 R2 T2 K2 R3 T3 K3 [Dmax Drecov Dinit]`. The triangle has
+  area R, time to peak `T` hours and base `T (1 + K)`, both truncated to whole seconds. The
+  initial abstraction (`Dmax` depth, `Drecov` depth per day, `Dinit` used at the start) is per
+  response and month.
+- **Rainfall.** The rain interval of a set is the `WET_STEP` (already lowered to the smallest
+  gage interval, which now includes the gages of the unit hydrographs, as in SWMM) lowered to
+  the shorter limb of any of its triangles; the RDII step is the `WET_STEP`. At each record the
+  rain of every interval since the last is taken from the gage, reduced by the unused initial
+  abstraction of the interval's month, stored, and convolved with the triangle at the middle of
+  each past interval. A dry spell longer than the triangle's base begins a new event.
+- **Flow.** A node's RDII is the sets' flow times its area over the unit factor of rainfall, in
+  cfs, zero below 1e-4 cfs and stored in single precision. A record holds for its `WET_STEP`
+  and the routing reads the record in force at the step's date plus 1 ms: the flow is **constant
+  within a record, not interpolated** (unlike runoff). The area is in acres (hectares in SI units).
+  RDII at an outfall is dropped, as runoff is.
+
+SWMM quirks that are reproduced, because a parity test fails without each of them: a gage's state is
+set once per record, so a set whose rain interval is shorter than the record uses the rain of the
+first of its intervals for all of them; sets that share a gage advance its one state in turn; the
+month of the stored rain is that of the record while the abstraction takes the month of the
+interval; the dates are SWMM's double-precision days and are compared as SWMM does; and, when the
+file also has subcatchments and `[ADJUSTMENTS]` `RAINFALL`, SWMM leaves the rain factor of the month
+of the last RDII interval behind and the runoff gage reads its first records with it (the reader
+reproduces that by running the RDII to the end of the file's duration when the factors differ).
+
+Refused by name: a set a node uses with no `Name Gage` line (SWMM would read the first gage of the
+file), an unknown gage, node or set, negative ratios or times, ratios that add to more than 1.01 in
+a month (SWMM's `ERR_UNITHYD_RATIOS`), a negative area, a pollutant's RDII concentration `Crdii` (its
+load is not modelled; `IGNORE_QUALITY YES` lets it pass), and `[FILES]` `USE RDII`. `IGNORE_RDII YES`
+and `IGNORE_RAINFALL YES` give no RDII (the gages of the sets still count as used).
+
+```py
+net, _, _ = read_swmm_inp("rdii.inp")
+rdii = net.hydrology.rdii                  # sets, inflows (m2), ignore
+model = rdii.model(net.hydrology)          # SWMM's records, computed in order
+print(model.flows(1200.0))                 # {node: m3/s} of the routing step that starts at 1200 s
+```
+
+**Differentiability.** The response ratios R, the initial abstraction parameters and the sewershed
+areas carry exact gradients; the time to peak T and the recession ratio K do so straight-through: the
+value is SWMM's truncation to whole seconds, the derivative that of the untruncated product (the true
+derivative of a truncation is zero). `Rdii.with_gradients` makes leaf tensors (`"UH1.ALL.SHORT.r"`,
+`"J1.area"`; months that share a response share a leaf), and a `RunoffInflows` built from the
+resulting hydrology (`dataclasses.replace(hydrology, rdii=...)`) gives `simulate_dynamic_wave` a
+differentiable lateral inflow; tests compare the gradient of a routed depth in the area with a
+finite difference. The comparisons (rain on or off, abstraction used up, the dry period, the
+triangle's limbs), the rain interval, the number of past intervals and the single-precision rounding
+are decided on the values. Not differentiable: the rainfall and the dates.
+
+`tests/verification/test_sewer_rdii_parity.py` writes its fixtures and compares the lateral inflow
+of every node after every routing step (1e-6 relative + 1e-9 m3/s) and the routed depths (1e-7 m)
+and flows with SWMM at `HEAD_TOLERANCE` 1e-12: one set with all three responses, monthly parameters
+across a month boundary, an initial abstraction with recovery, US units with an intensity gage,
+RDII with subcatchment runoff on the same nodes, a short limb with the records off the rain grid,
+two sets on one gage and on co-gages, the older line, a gage faster than `WET_STEP`, the rain
+adjustment left behind for the runoff, RDII tails below SWMM's 1e-4 cfs, `IGNORE_RDII` and
+`IGNORE_RAINFALL`.
+
 #### Tidal and time-series outfalls
 
 A `TIDAL` outfall (`Outfall(kind="tidal", tide=...)`, the `.inp`'s `[CURVES]` TIDAL curve of
@@ -1141,7 +1312,11 @@ not added), repeats every 24 h of elapsed time, holds its first stage below and 
 stage above the curve, and interpolates linearly (`table_lookup`).
 
 A `TIMESERIES` outfall takes its stage elevation (m, relative to datum, not to the invert)
-from a driver, as time variation belongs in the drivers. Give `outfall_stage={"Outfall":
+from a driver, as time variation belongs in the drivers. A `.inp` file's TIMESERIES outfall
+needs none: the reader reads its `[TIMESERIES]` series (values in the file's length unit,
+converted to m) as the outfall's default stage, sampled at the step's END time and held at
+its first and last values outside the series (SWMM's `table_tseriesLookup` with `extend`,
+node.c:1454-1458). Give `outfall_stage={"Outfall":
 stage}` to `build_model` (it sets the initial heads at t = 0 and becomes the model's default)
 or to `simulate_dynamic_wave`: `stage` is a number, or a function of the elapsed time `t` in s
 that is called once per step with the step's END time (no 1 ms offset, unlike the inflow
@@ -1149,8 +1324,8 @@ function). The two share one code path: `simulate_dynamic_wave` fills the per-ou
 `"outfall_stage"` (m) each step, from the tide curves and the functions, and the closure
 reads it for every `TIDAL` and `TIMESERIES` outfall; a user stepping `Model.step` directly
 supplies that driver. Both work under the fixed and the variable step. A `.inp` with a
-`TIMESERIES` outfall is read (its series is not read: the driver is required, and
-`build_model` refuses a network without one by name). `tests/verification/test_sewer_dynwave_parity.py` runs the tide fixture
+`TIMESERIES` outfall is read with its series as the default stage (a network built by hand
+has no series, and `build_model` refuses it without an `outfall_stage` by name). `tests/verification/test_sewer_dynwave_parity.py` runs the tide fixture
 `tidal_dynwave.inp` (a tide that backs the outfall conduit up to 0.38 m of its 0.45 m and
 lets it fall) against SWMM 5.2.4 at every step for the `TIDAL` outfall and for the same stage
 as a `TIMESERIES` outfall, and the variable-step tree with the tide, with SWMM converging on
@@ -1624,14 +1799,14 @@ publish numbers from this application.
     - ponding together with water quality or headspace air, and for a storage unit; a junction
       with no ground (`MaxDepth` 0) and no `SurDepth` floods as soon as it fills to its crown;
     - groundwater, LID, snowmelt and the pollutant buildup and washoff of the runoff
-      (`[GROUNDWATER]`, `[LID_USAGE]`, snow packs, `[LANDUSES]`), RDII (`[RDII]`,
-      `[HYDROGRAPHS]`), rain `FILE` gages, evaporation read from a climate file or computed from
-      temperature, and the evaporation of open conduits, pollutant time-series, mass and
+      (`[GROUNDWATER]`, `[LID_USAGE]`, snow packs, `[LANDUSES]`), rain `FILE` gages, evaporation read from a climate file or computed from
+      temperature, pollutant time-series, mass and
       dry-weather inflows, and the `[FILES]` `USE HOTSTART`, `USE INFLOWS`, `USE RDII` and
       `USE RUNOFF` (a `TIMESERIES` outfall's stage is a driver); surface runoff itself is
       modelled ([Subcatchment runoff](#subcatchment-runoff-from-a-swmm-file));
-    - conduit seepage (the `[LOSSES]` sixth field), storage evaporation (`Fevap`) and
-      exfiltration, and a nonzero pollutant `Cinit`;
+    - conduit evaporation, seepage and storage losses under STEADY or KINWAVE routing, an
+      exfiltrating `PARABOLOID` storage unit and water quality with any loss of water (see
+      "Evaporation and seepage losses"), and a nonzero pollutant `Cinit`;
     - the `DUMMY` section (a link that routes its node's outflow without a section) and the
       `STREET` section, and non-circular conduits under steady or kinematic-wave routing;
     - water quality and headspace air for a network with a non-circular conduit (their

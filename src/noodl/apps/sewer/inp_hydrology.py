@@ -21,6 +21,9 @@ keyword matching are SWMM's -- a keyword matches when it is the start of the fie
   ``TEMPERATURE`` and ``FILE`` (a climate file) are refused.
 - ``[ADJUSTMENTS]``: ``EVAPORATION``, ``RAINFALL``, ``CONDUCTIVITY``, ``N-PERV``, ``DSTORE``,
   ``INFIL``; ``TEMPERATURE`` is ignored (nothing reads a temperature).
+- ``[HYDROGRAPHS]`` and ``[RDII]``, read by `inp_rdii.read_rdii` into ``Hydrology.rdii``
+  (the gages of the unit hydrographs count as used by SWMM's ``gage_validate``, so they
+  lower WET_STEP and feed the runoff steps; ``IGNORE_RDII``).
 - the options ``WET_STEP``, ``DRY_STEP``, ``START_DATE``/``START_TIME``,
   ``END_DATE``/``END_TIME`` (SWMM's total duration), ``INFILTRATION`` and ``IGNORE_RAINFALL``,
   ``IGNORE_SNOWMELT``, ``IGNORE_GROUNDWATER``, ``IGNORE_QUALITY``.
@@ -52,6 +55,7 @@ from noodl.apps.sewer.inflows import (
     patterns_from_lines,
     tokens,
 )
+from noodl.apps.sewer.inp_rdii import read_rdii
 from noodl.apps.sewer.runoff import (
     UCF_LANDAREA,
     UCF_LENGTH,
@@ -69,12 +73,12 @@ from noodl.apps.sewer.runoff import (
 )
 from noodl.apps.sewer.xsect_tables import LCF
 
-#: The sections this reader takes over when the file has `[SUBCATCHMENTS]`; any other section
-#: with content is still refused by `read_swmm_inp`.
+#: The sections this reader takes over when the file has `[SUBCATCHMENTS]`, `[HYDROGRAPHS]` or
+#: `[RDII]`; any other section with content is still refused by `read_swmm_inp`.
 HYDROLOGY_SECTIONS = frozenset({
     "RAINGAGES", "SUBCATCHMENTS", "SUBAREAS", "INFILTRATION", "ADJUSTMENTS", "SNOWPACKS",
     "TEMPERATURE", "AQUIFERS", "GROUNDWATER", "GWF", "LID_CONTROLS", "LID_USAGE", "LANDUSES",
-    "COVERAGES", "BUILDUP", "WASHOFF", "LOADINGS", "EVAPORATION",
+    "COVERAGES", "BUILDUP", "WASHOFF", "LOADINGS", "EVAPORATION", "HYDROGRAPHS", "RDII",
 })
 _INFIL_MODELS = ("HORTON", "MODIFIED_HORTON", "GREEN_AMPT", "MODIFIED_GREEN_AMPT",
                  "CURVE_NUMBER")
@@ -202,6 +206,17 @@ def read_hydrology(sections: dict, path, options: dict, start: datetime.datetime
                   next(iter(sections["SUBCATCHMENTS"])),
                   "a pollutant with a rain concentration (Crain) needs the pollutant load "
                   "of the rainfall, which is not modelled; set IGNORE_QUALITY YES")
+    rdii_read = read_rdii(
+        sections, path, nodes=nodes | outfalls, us=us, ignore=_flag(options, "IGNORE_RDII", path),
+        gages={tokens(line.raw)[0] for line in sections.get("RAINGAGES", [])
+               if tokens(line.raw)})
+    if (rdii_read is not None and rdii_read.inflows and not rdii_read.ignore and not ignore_rain
+            and has_pollutants and not ignore_quality):
+        for line in sections.get("POLLUTANTS", []):
+            if len(line.fields) > 4 and _number(path, line, line.fields, 4, "Crdii") != 0.0:
+                _fail(path, line, f"pollutant {line.fields[0]!r} has an RDII concentration "
+                                  f"(Crdii), which needs the pollutant load of the RDII and "
+                                  f"is not modelled; set IGNORE_QUALITY YES")
     for line in sections.get("OUTFALLS", []):
         kind = line.fields[2].upper() if len(line.fields) > 2 else "FREE"
         at = 4 if kind in ("FREE", "NORMAL") else 5
@@ -225,6 +240,9 @@ def read_hydrology(sections: dict, path, options: dict, start: datetime.datetime
     series_used: dict[str, TimeSeries] = {}
     named = {tokens(line.raw)[1] for line in sections.get("SUBCATCHMENTS", [])
              if len(tokens(line.raw)) > 1}
+    rdii = rdii_read
+    if rdii is not None:
+        named |= set(rdii.gage_names())         # a unit hydrograph's gage is used (gage.isUsed)
     for line in sections.get("RAINGAGES", []):
         toks = tokens(line.raw)
         if toks and toks[0] not in named:
@@ -376,7 +394,8 @@ def read_hydrology(sections: dict, path, options: dict, start: datetime.datetime
         _fail(path, options[bad][0], f"{bad} must be greater than 0")
     wet = float(math.floor(wet + 0.5))
     dry = float(math.floor(dry + 0.5))
-    used = [g for g in gages if any(s.gage == g.name for s in subs)]
+    used = [g for g in gages if any(s.gage == g.name for s in subs)
+            or (rdii is not None and g.name in rdii.gage_names())]
     if sections.get("SNOWPACKS") and not ignore_snow:
         # with snow packs defined SWMM turns precipitation below the snow temperature into
         # snowfall scaled by the gage's catch factor (gage_getPrecip); the factor 1 changes nothing
@@ -409,7 +428,35 @@ def read_hydrology(sections: dict, path, options: dict, start: datetime.datetime
     return Hydrology(
         gages=tuple(gages), subcatchments=tuple(subs), start=start, total_duration=total,
         wet_step=wet, dry_step=dry, us_units=us, evaporation=evaporation,
-        adjustments=adjustments, ignore_rainfall=ignore_rain)
+        adjustments=adjustments, ignore_rainfall=ignore_rain, rdii=rdii)
+
+
+def read_climate(sections: dict, path, options: dict, start: datetime.datetime, *,
+                 us: bool, read_series: Callable[[str], TimeSeries], evaporation: bool = True
+                 ) -> Hydrology:
+    """The climate of a file with no `[SUBCATCHMENTS]` (a `Hydrology` with no gages or
+    subcatchments): `[EVAPORATION]` (unless `evaporation` is False) and `[ADJUSTMENTS]`, read
+    as `read_hydrology` reads them. SWMM's conduit seepage, open conduits and storage units
+    read the evaporation rate and the conductivity adjustment at every routing step
+    (`losses.ClimateClock`). `options`, `start`, `us` and `read_series` are those of
+    `read_hydrology`. An ``[ADJUSTMENTS]`` line that names a subcatchment is refused: there
+    is none."""
+    patterns = patterns_from_lines(
+        [(line.number, tokens(line.raw)) for line in sections.get("PATTERNS", [])
+         if tokens(line.raw)], path)
+
+    def monthly(label: str, line: InpLine) -> tuple[float, ...] | None:
+        if label not in patterns:
+            _fail(path, line, f"names the pattern {label!r}, which has no [PATTERNS] entry")
+        p: TimePattern = patterns[label]
+        return p.factors if p.kind == "monthly" else None
+
+    lines = sections.get("EVAPORATION", []) if evaporation else []
+    evap, _ = _evaporation(lines, path, read_series, monthly)
+    adjustments, _ = _adjustments(sections.get("ADJUSTMENTS", []), path, monthly, {})
+    return Hydrology(gages=(), subcatchments=(), start=start,
+                     total_duration=_total_duration(options, start, path), us_units=us,
+                     evaporation=evap, adjustments=adjustments)
 
 
 def _infiltration(path, line: InpLine, toks: list[str], default_model: str, us: bool):
@@ -540,4 +587,4 @@ def _adjustments(lines, path, monthly, sub_lines):
     return Adjustments(tuple(evap), tuple(rain), tuple(cond)), patterned
 
 
-__all__ = ["HYDROLOGY_SECTIONS", "read_hydrology", "swmm_total_duration"]
+__all__ = ["HYDROLOGY_SECTIONS", "read_climate", "read_hydrology", "swmm_total_duration"]

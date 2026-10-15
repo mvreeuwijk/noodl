@@ -12,7 +12,8 @@ Scope of the transcription: every cross-section shape (`xsect_shapes.XsectSet`: 
 network keeps the tabulated circle's own path of `xsect_tables`, bit for bit), the local losses
 (``dq5``, `[LOSSES]` entry, exit and average coefficients) and the force-main friction slope of a
 full ``FORCE_MAIN`` (`forcmain.c`); a culvert's inlet-control limit is returned as a cap
-(``cap_flow``, `culvert.py`); no evaporation/seepage (``dq6``). Parallel barrels
+(``cap_flow``, `culvert.py`); the evaporation and seepage of a conduit (``dq6`` and the rate
+the end nodes lose, `losses.py`). Parallel barrels
 (``Conduit.barrels``)
 and Courant lengthening (``modLength``) are modelled: the momentum update is one barrel's, and
 the flow offset, conveyance, normal flow, surface areas and volume it returns are totals over the
@@ -101,7 +102,11 @@ class ConduitGeometry:
     ``fm_roughness`` (the Hazen-Williams C, or the Darcy-Weisbach roughness height in ft),
     ``fm_factor`` (``xsect.sBot``: the roughness factor `forcemain_getRoughFactor`) and
     ``fm_darcy`` (whether FORCE_MAIN_EQUATION is D-W); one with culverts ``culvert``
-    (`culvert.CulvertSet`) and ``culvert_mask`` (bool per conduit).
+    (`culvert.CulvertSet`) and ``culvert_mask`` (bool per conduit); one whose conduits lose
+    water (`losses.py`) ``loss_evap`` (bool: an open section while the evaporation rate can be
+    positive) and/or ``seep_rate`` (ft/s, `Link.seepRate`), ``seep_depth`` (ft, the section's
+    ``ywMax``: the depth of its first widest point, which caps the depth the seepage width is
+    read at) and ``seep_rect`` (bool, a RECT_CLOSED section, whose seepage width is ``wMax``).
     """
 
     y_full: Tensor
@@ -132,6 +137,10 @@ class ConduitGeometry:
     fm_darcy: bool = False
     culvert: CulvertSet | None = None
     culvert_mask: Tensor | None = None
+    loss_evap: Tensor | None = None
+    seep_rate: Tensor | None = None
+    seep_depth: Tensor | None = None
+    seep_rect: Tensor | None = None
 
     @classmethod
     def from_si(cls, diameter: Tensor, roughness: Tensor, slope: Tensor, length: Tensor,
@@ -426,6 +435,10 @@ class ConduitTerms(NamedTuple):
     flow's derivative with respect to the upstream head) and ``cap_drop`` (ft, the end-head
     difference ``H1 - H2`` it was evaluated at) are the culverts' inlet-control limit
     (`culvert.CulvertSet`); ``None`` for a network without a culvert.
+
+    ``loss_rate`` (cfs, total over the barrels) is the evaporation plus seepage the conduit
+    takes from its end nodes (`link.c::conduit_getLossRate`, times the barrels, as
+    `dynwave.c::updateNodeFlows` adds it); ``None`` for a network whose conduits lose none.
     """
 
     flow_class: Tensor
@@ -458,6 +471,58 @@ class ConduitTerms(NamedTuple):
     cap_flow: Tensor | None = None
     cap_slope: Tensor | None = None
     cap_drop: Tensor | None = None
+    loss_rate: Tensor | None = None
+
+
+class LossInputs(NamedTuple):
+    """What a pass reads to find its conduits' evaporation and seepage (`conduit_terms`):
+    ``evap`` the evaporation rate (ft/s, `Evap.rate`), ``hydcon`` the conductivity adjustment
+    (`Adjust.hydconFactor`) and ``old_depth`` each conduit's link depth at the step start
+    (ft, `Link.oldDepth`)."""
+
+    evap: Tensor
+    hydcon: Tensor
+    old_depth: Tensor
+
+
+def _raw_width(geo: ConduitGeometry, y: Tensor) -> Tensor:
+    """`xsect_getWofY` (ft) of the conduits' sections at depths `y` (ft): the section's own
+    width, without the crown cutoff of `dwflow.c::getWidth`."""
+    return width_of_depth(y, geo.y_full) if geo.xsect is None else geo.xsect.width(y)
+
+
+def _conduit_losses(geo: ConduitGeometry, loss: LossInputs, depth: Tensor, volume: Tensor,
+                    dt: float, active: Tensor) -> Tensor:
+    """`link.c::conduit_getLossRate` (link.c:1334-1399) for DW routing: the evaporation plus
+    seepage rate (cfs, one barrel's) of the conduits where `active`, at the link depth `depth`
+    (ft; the mean of the step-start depth and this pass's) and the link volume `volume` (ft3,
+    total over the barrels) that caps the rate over the step `dt` (s).
+
+    Evaporation is the top width times the true length times the rate, for an open section
+    while the rate is positive; seepage the rate times the width at the depth limited to the
+    section's widest point (``wMax`` for RECT_CLOSED) times the length times the conductivity
+    adjustment. Both are scaled together so that their sum does not exceed ``volume / dt``;
+    neither exists at a depth of FUDGE or less."""
+    d = 0.5 * (loss.old_depth + depth)                                         # link.c:1344
+    wet = active & (d > FUDGE)                                                 # link.c:1353
+    zero = torch.zeros_like(d)
+    evap = zero
+    seep = zero
+    if geo.loss_evap is not None:
+        on = wet & geo.loss_evap & (loss.evap > 0.0)                           # link.c:1359
+        evap = torch.where(on, _raw_width(geo, d) * geo.length * loss.evap, zero)  # :1361-1362
+    if geo.seep_rate is not None:
+        on = wet & (geo.seep_rate > 0.0)                                       # link.c:1366
+        width = _raw_width(geo, torch.minimum(d, geo.seep_depth))              # link.c:1373-1374
+        if geo.seep_rect is not None:
+            width = torch.where(geo.seep_rect, geo.w_max, width)               # link.c:1370
+        seep = torch.where(on, geo.seep_rate * width * geo.length * loss.hydcon, zero)  # :1377-8
+    total = evap + seep                                                        # link.c:1382
+    cap = volume / dt                                                          # link.c:1388
+    over = total > cap
+    scale = torch.where(over, cap / torch.where(over, total, torch.ones_like(total)),
+                        torch.ones_like(total))                                # link.c:1390-1392
+    return total * scale
 
 
 def _slot_width(y: Tensor, y_full: Tensor, slot: bool, w_max: Tensor | None = None,
@@ -579,7 +644,8 @@ def conduit_terms(geo: ConduitGeometry, depth1: Tensor, depth2: Tensor, q_last: 
                   normal_flow_limited: str = "both",
                   surcharge_method: str = "extran", hold1: Tensor | None = None,
                   hold2: Tensor | None = None,
-                  flow_depths: tuple[Tensor, Tensor] | None = None) -> ConduitTerms:
+                  flow_depths: tuple[Tensor, Tensor] | None = None,
+                  loss: LossInputs | None = None) -> ConduitTerms:
     """SWMM's conduit update (`dwflow.c:57-293`) for one pass, vectorised over conduits.
 
     ``depth1``, ``depth2`` are the end NODE depths above the node inverts (ft) from the
@@ -602,6 +668,9 @@ def conduit_terms(geo: ConduitGeometry, depth1: Tensor, depth2: Tensor, q_last: 
     ``flow_depths`` (optional) is ``(yN, yC)`` (ft) at one barrel's ``|q_last|``, the
     normal and critical depths the flow class reads, when the caller has them already
     (`xsect_tables.normal_depth_ft`, `critical_depth`); they are computed here otherwise.
+    ``loss`` (`LossInputs`) switches on the conduits' evaporation and seepage: the momentum
+    term ``dq6`` (dwflow.c:236) and ``loss_rate`` (the rate the end nodes lose); without it, or
+    for a geometry with no loss fields, a conduit loses nothing.
     """
     if damping not in DAMPING:
         raise ValueError(f"conduit_terms: damping must be one of {DAMPING}, got {damping!r}")
@@ -820,9 +889,22 @@ def conduit_terms(geo: ConduitGeometry, depth1: Tensor, depth2: Tensor, q_last: 
                   + torch.where(a_mid > FUDGE, geo.loss_average
                                 * (qa / torch.where(a_mid > FUDGE, a_mid, one)), zero))
         denom = 1.0 + dq1 + losses / 2.0 / length * dt                         # :232, :239
-    momentum = (q_old - dq2 + dq3 + dq4) / denom                               # :240
+    loss_rate = None
+    explicit = q_old - dq2 + dq3 + dq4
+    carry = q_old + dq3 + dq4
+    if loss is not None and (geo.loss_evap is not None or geo.seep_rate is not None):
+        # dwflow.c:236 -- dq6 = lossRate 2.5 dt v / L (the TRUE length, link_getLength); the
+        # rate is the previous trial's depth and volume (this pass's, at the fixed point)
+        a_mean = (a1 + a2) / 2.0
+        per_barrel = _conduit_losses(geo, loss, torch.minimum(y_mid, yf),
+                                     a_mean * geo.length * barrels, dt, ~dry_exit)
+        dq6 = per_barrel * 2.5 * dt * v / geo.length
+        loss_rate = per_barrel * barrels                                   # dynwave.c:560-561
+        explicit = explicit + dq6
+        carry = carry + dq6
+    momentum = explicit / denom                                                # :240
     k = GRAVITY_FT * dt * a_wtd / (length * denom)                             # :243
-    c0 = (q_old + dq3 + dq4) / denom
+    c0 = carry / denom
     # an end head that does not follow its node is folded into c0 (lagged)
     pinned = pinned1 | pinned2
     k_total = k * barrels                                                      # dwflow.c:243
@@ -918,6 +1000,7 @@ def conduit_terms(geo: ConduitGeometry, depth1: Tensor, depth2: Tensor, q_last: 
         cap_flow=cap_flow,
         cap_slope=cap_slope,
         cap_drop=cap_drop,
+        loss_rate=loss_rate,
     )
 
 
@@ -925,5 +1008,5 @@ __all__ = [
     "DAMPING", "DN_CRITICAL", "DN_DRY", "DRY", "EXTRAN_CROWN_CUTOFF", "FUDGE", "MAX_VELOCITY",
     "NORMAL_FLOW_LIMITED", "SLOT_CROWN_CUTOFF", "SUBCRITICAL", "SUPCRITICAL",
     "SURCHARGE_METHODS", "UP_CRITICAL", "UP_DRY",
-    "ConduitGeometry", "ConduitTerms", "conduit_terms", "lengthening_factor",
+    "ConduitGeometry", "ConduitTerms", "LossInputs", "conduit_terms", "lengthening_factor",
 ]

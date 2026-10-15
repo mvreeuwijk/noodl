@@ -12,8 +12,8 @@ outfall's depth from its inflow), `[POLLUTANTS]`, and under `DYNWAVE` `[DIVIDERS
 `STORAGE`, `RATING`, `TIDAL`, `SHAPE`, `DIVERSION`, `PUMP1`-`PUMP5` and `CONTROL`, the lateral inflows
 `[TIMESERIES]` (inline and `FILE`), `[PATTERNS]`,
 `[DWF]` and `[INFLOWS]` (see Lateral inflows below) and the hydrology `[RAINGAGES]`,
-`[SUBCATCHMENTS]`, `[SUBAREAS]`, `[INFILTRATION]`, `[EVAPORATION]` and `[ADJUSTMENTS]` (see
-Hydrology below).
+`[SUBCATCHMENTS]`, `[SUBAREAS]`, `[INFILTRATION]`, `[EVAPORATION]` and `[ADJUSTMENTS]`, and the
+RDII sections `[HYDROGRAPHS]` and `[RDII]` (see Hydrology below).
 
 **Before the first section.** SWMM reads a line before the first `[SECTION]` header as `[TITLE]`
 text (`input.c:174`: the second pass over the file starts in section 0, the title), so the reader
@@ -41,16 +41,16 @@ diverts flow, `[DIVIDERS]` stays refused by name.
 `[BACKDROP]`, `[PROFILES]`; `[FILES]` is read for its `USE` lines (below). Any other section that carries content is refused, and
 so are the options and fields listed below. Two are ignored only when nothing uses them:
 
-- `[RAINGAGES]`, when the file has no `[SUBCATCHMENTS]` (a gage feeds subcatchments, and RDII,
-  whose sections are refused on their own), and any gage no subcatchment names;
-- `[EVAPORATION]` for conduits, unless it can be positive while a conduit is open (the
-  subcatchments read it, below). SWMM takes
-  `topWidth * length * rate` from an open conduit (`link.c:1359-1362`, from the climate state of
-  every routing step, `swmm5.c:556`) and dynamic-wave routing subtracts it from the end nodes
-  (`dynwave.c:560-572`) from every trial's mean depth; that is not modelled, so a `TIMESERIES`,
-  `TEMPERATURE` or `FILE` source, or a non-zero `CONSTANT` or `MONTHLY` value, is refused naming
-  the first open conduit. With only closed conduits, or a zero rate, nothing is lost and the
-  section changes nothing for them.
+- `[RAINGAGES]`, when the file has no `[SUBCATCHMENTS]`, `[HYDROGRAPHS]` or `[RDII]`, and any
+  gage no subcatchment or unit hydrograph names;
+- `[EVAPORATION]` and `[ADJUSTMENTS]`, when the file has no `[SUBCATCHMENTS]` (which read them,
+  below) and nothing uses them: no open conduit, no conduit with a seepage rate, no storage unit
+  with an evaporation factor or an exfiltration. Under dynamic-wave routing those losses read them
+  (`CONSTANT`, `MONTHLY`, `TIMESERIES` with `RECOVERY`, and the `EVAPORATION` and `CONDUCTIVITY`
+  adjustments; a `TEMPERATURE` or `FILE` source is refused naming its line; see
+  [Evaporation and seepage losses](../applications/sewer.md#evaporation-and-seepage-losses));
+  under `STEADY` or `KINWAVE` a rate that can be positive over an open conduit is refused naming
+  the first open conduit.
 
 **Options that change what is routed.** `IGNORE_ROUTING YES` and `FLOW_ROUTING NONE` (SWMM does
 not route at all) and `SKIP_STEADY_STATE YES` (a step whose flows are within `SYS_FLOW_TOL` and
@@ -94,9 +94,11 @@ eighth and ninth `[CONDUITS]` fields) are `Pipe.initial_flow` (a total over the 
 reverses (adverse, as SWMM does) has its `InitFlow` negated and its gate recorded as
 reversed. The entry, exit and average loss coefficients of `[LOSSES]` are
 `Pipe.loss_inlet`, `loss_outlet` and `loss_average` (swapped, as SWMM does, for a conduit the
-reader reverses); the seepage rate must be 0 (refused with the line number otherwise: seepage
-takes volume from the nodes at a rate set by the conduit's wetted width and volume, which is
-not modelled). Under `STEADY` or `KINWAVE` a non-zero `InitDepth`, `InitFlow` or
+reader reverses); the seepage rate (the sixth field, in/hr or mm/hr, read as
+`Pipe.seepage` in m/s) is a loss of water under dynamic-wave routing (see
+[Evaporation and seepage losses](../applications/sewer.md#evaporation-and-seepage-losses)) and
+refused with the line number under `STEADY` or `KINWAVE` when positive (a negative one does
+nothing in SWMM). Under `STEADY` or `KINWAVE` a non-zero `InitDepth`, `InitFlow` or
 `MaxFlow`, a flap gate, a gated outfall and a loss coefficient are refused by name.
 
 **Cross sections (dynamic wave).** `[XSECTIONS] Link Shape Geom1 Geom2 Geom3 Geom4 [Barrels
@@ -149,10 +151,13 @@ a0)`; `a0 >= 0` and `a2 >= 0`), `TABULAR Curve` (a `[CURVES]` curve of type `STO
 m against area in m², its points over any number of lines, depths strictly increasing) and the
 closed shapes `CYLINDRICAL L W -`, `CONICAL L W Z`, `PARABOLIC L W H` (SWMM 5.2.4's keyword; `PARABOLOID` is accepted too) and
 `PYRAMIDAL L W Z`
-(m; `Z` a side slope, run over rise). A non-zero evaporation factor `Fevap` and a non-zero
-exfiltration `Ksat` (the value after `Fevap`, or the second of suction head, `Ksat`,
-`IMDmax`; a `Ksat` of 0 is no exfiltration, as in SWMM) are refused with the line number, as
-are a `[CURVES]` curve of any other type and a curve name that is not in `[CURVES]`. A
+(m; `Z` a side slope, run over rise). The evaporation factor `Fevap` is `Manhole.evaporation_factor`;
+the exfiltration after it is `Ksat` alone (in/hr or mm/hr) or the suction head (in or mm),
+`Ksat` and `IMDmax` (`Exfiltration`; a `Ksat` of 0 is no exfiltration, as in SWMM; both are
+[losses of water](../applications/sewer.md#evaporation-and-seepage-losses)), and an
+exfiltrating `PARABOLIC` unit is refused (SWMM 5.2.4 leaves its bottom and bank areas unset).
+A `[CURVES]` curve of any other type and a curve name that is not in `[CURVES]` are refused with
+the line number. A
 negative `MaxDepth`, `InitDepth` or `SurDepth` on a storage line is refused too, which goes
 beyond SWMM's own input checks for storage units. `[STORAGE]` under
 `STEADY` or `KINWAVE` is refused by name: SWMM routes a storage unit by its volume there,
@@ -207,9 +212,13 @@ and VELOCITY and a link's DEPTH, conduit actions, and everything SWMM itself rej
 
 **Outfalls.** `FREE`, `NORMAL`, `FIXED` (with its stage, m), `TIDAL` (with the name of its
 `[CURVES]` TIDAL curve, read as hours and stage elevations) and `TIMESERIES` (with the name of
-its series) are read. A `TIMESERIES` outfall takes its stage from the `outfall_stage` driver
-of `build_model` / `simulate_dynamic_wave` (time variation belongs in the drivers): that
-series is not read. An outfall may sit
+its series) are read. A `TIMESERIES` outfall takes its stage from its `[TIMESERIES]` series
+(`Outfall.stage_series`: times in seconds since the start, values converted from the file's
+length unit to m), which is the default of the `outfall_stage` argument of `build_model` /
+`simulate_dynamic_wave`; naming the outfall there overrides it. SWMM reads the series at the
+step's END time with the series held at its first value before it and its last after it
+(`table_tseriesLookup` with `extend` TRUE, node.c:1454-1458), unlike an inflow series, which
+is 0 outside its range. An outfall may sit
 at the end of a conduit or of a regulator (exactly one link, SWMM's ERR_OUTFALL).
 
 **Barrels.** A conduit with more than one barrel is read under `DYNWAVE` (1 to 127; the
@@ -309,7 +318,7 @@ refused by name; `USE RAINFALL` only feeds `FILE` rain gages, which are refused.
 `DIVERSION`, `PUMP1`-`PUMP5` and `CONTROL`, `[LID_USAGE]`, and any other section carrying
 content.
 
-**Hydrology** (a file with `[SUBCATCHMENTS]`; `apps/sewer/inp_hydrology.py`, running in
+**Hydrology** (a file with `[SUBCATCHMENTS]`, `[HYDROGRAPHS]` or `[RDII]`; `apps/sewer/inp_hydrology.py`, running in
 `apps/sewer/runoff.py`; [the runoff](../applications/sewer.md#subcatchment-runoff-from-a-swmm-file)
 is SWMM 5.2.4's own computation). SWMM reads the file in order and so does the reader.
 
@@ -326,19 +335,29 @@ is SWMM 5.2.4's own computation). SWMM reads the file in order and so does the r
   Decay DryTime [MaxInfil]``, `GREEN_AMPT` and `MODIFIED_GREEN_AMPT` ``Suction Ksat IMDmax``,
   `CURVE_NUMBER` ``CN Conductivity DryTime``; the model of `[OPTIONS]` `INFILTRATION` (default
   `HORTON`) unless the line ends with a method. SWMM's range checks are refused by name.
-- `[EVAPORATION]` `CONSTANT`, `MONTHLY`, `TIMESERIES`, `RECOVERY` and `DRY_ONLY`; `TEMPERATURE`
+- `[EVAPORATION]` `CONSTANT`, `MONTHLY`, `TIMESERIES`, `RECOVERY` and `DRY_ONLY` (the
+  subcatchments' alone: open conduits and storage units evaporate while it rains); `TEMPERATURE`
   and `FILE` (a climate file) are refused.
 - `[ADJUSTMENTS]` `EVAPORATION`, `RAINFALL`, `CONDUCTIVITY`, `N-PERV`, `DSTORE`, `INFIL`
   (the last three count only for a subcatchment defined above them); `TEMPERATURE` is ignored.
+- `[HYDROGRAPHS]` ``Name Gage`` and ``Name Month Response R T K [Dmax Drecov Dinit]`` (Month `ALL`
+  or `JAN`..`DEC`, Response `SHORT`, `MEDIUM` or `LONG`, T in hours, K the recession ratio; the older
+  nine-number line is read too) and `[RDII]` ``Node UnitHydrograph SewerArea`` (acres, or hectares in
+  SI units): the rainfall-dependent inflow of the unit hydrographs, added to the lateral inflow of
+  the node (`apps/sewer/inp_rdii.py`, `rdii.py`; [RDII](../applications/sewer.md#rdii-from-a-swmm-file)).
+  A file with only RDII has no subcatchments. A gage a unit hydrograph names counts as used.
 - `[OPTIONS]` `WET_STEP`, `DRY_STEP`, `START_*`, `END_*` (SWMM's total duration),
-  `INFILTRATION`, `IGNORE_RAINFALL`, `IGNORE_SNOWMELT`, `IGNORE_GROUNDWATER` and `IGNORE_QUALITY`.
+  `INFILTRATION`, `IGNORE_RAINFALL`, `IGNORE_RDII`, `IGNORE_SNOWMELT`, `IGNORE_GROUNDWATER` and
+  `IGNORE_QUALITY`.
   Under `DYNWAVE` the routing step is lowered to the effective `WET_STEP`, which a gage whose
   recording interval is shorter lowers first (`gage_validate`, `project_validate`).
 
 Refused by name: `[LID_USAGE]`, `[GROUNDWATER]` (without `IGNORE_GROUNDWATER YES`), a snow
 pack on a subcatchment (without `IGNORE_SNOWMELT YES`), `[LANDUSES]`, `[COVERAGES]`, `[BUILDUP]`,
 `[WASHOFF]`, `[LOADINGS]` and a rain concentration (`Crain`) while the file has pollutants
-(without `IGNORE_QUALITY YES`), an outfall's `Route To`, `[RDII]` and `[HYDROGRAPHS]`.
+(without `IGNORE_QUALITY YES`), an outfall's `Route To`, a unit hydrograph with no gage line that a
+node uses, response ratios beyond SWMM's limits, a pollutant's RDII concentration (`Crdii`) while a
+node has RDII (without `IGNORE_QUALITY YES`) and `[FILES]` `USE RDII`.
 `[SNOWPACKS]`, `[TEMPERATURE]`, `[AQUIFERS]` and `[LID_CONTROLS]` that nothing uses change
 nothing, in SWMM and here. The runoff reaches the model as `SewerNetwork.inflows`
 (`runoff.RunoffInflows`) and `SewerNetwork.hydrology`.
@@ -362,18 +381,19 @@ conservative pollutant matches SWMM's link quality at steady state (to 1e-8 rela
 tree and the loop), and in transit the two differ by their residence times. A pollutant's
 `Kdecay` is read (`pollutants[name]["decay"]`, 1/s); the model's own reactions are BOD decay
 and sulfide generation, and a tracer of any other name is conservative. A nonzero `Cinit` is refused (the model starts
-with clean water); the other pollutant fields feed only runoff quality, groundwater, RDII and
+with clean water); the other pollutant fields feed only runoff quality, groundwater, the quality of RDII and
 dry-weather inflow, which are refused or absent.
 
 **Not supported**, which rules out most published SWMM examples as they stand:
 
-- groundwater, LID, snowmelt, pollutant buildup and washoff, RDII and rain files (the surface
-  runoff itself is read: Hydrology above) and the evaporation of open conduits;
-- the `DUMMY` and `STREET` cross sections, conduit seepage and evaporation losses;
+- groundwater, LID, snowmelt, pollutant buildup and washoff and rain files (the surface
+  runoff and RDII themselves are read: Hydrology above);
+- the `DUMMY` and `STREET` cross sections, and conduit seepage and evaporation under `STEADY` or
+  `KINWAVE`;
 - dividers under `STEADY` or `KINWAVE`, roadway weirs, weir coefficient curves, named variables
   and expressions in control rules; pumps, control rules, orifices, weirs, outlets and storage
   units under `STEADY` or `KINWAVE`, and
-  storage evaporation or exfiltration;
+  water quality together with evaporation, seepage or exfiltration;
 - ponding together with water quality or headspace air, and ponding under `STEADY` or `KINWAVE`.
   Both `SURCHARGE_METHOD`s model surcharge, and a junction without a ponded area floods above
   `MaxDepth` (extended to its crown) plus `SurDepth`; the water that cannot enter is lost, as in
@@ -388,7 +408,11 @@ is a fall $\ge$ length. Under `DYNWAVE` the reader follows SWMM's `conduit_getSl
 floored at SWMM's `MIN_DELTA_Z` (0.001 ft, 0.0003048 m), `MIN_SLOPE` floors the slope, and a
 conduit is reversed only when it is adverse, so a flat conduit keeps the orientation of the
 file. Conduit offsets are kept (`Pipe.inlet_offset`, `Pipe.outlet_offset`, m above the end
-node's invert) and swap with the ends on a reversal.
+node's invert) and swap with the ends on a reversal. A negative offset is 0, as in SWMM
+(a warning there): `link_getOffsetHeight` (link.c:498-502) clamps an elevation below the node's
+invert under `LINK_OFFSETS ELEVATION`, and `conduit_validate` (link.c:1057-1067) a negative
+depth offset under `DEPTH`, for every routing; the slope comes from the clamped end
+elevations (link.c:1269). Regulators already read a negative offset as 0.
 
 ```python
 from noodl.apps.sewer import read_swmm_inp, build_model
