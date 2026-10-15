@@ -13,6 +13,10 @@ from pathlib import Path
 
 import torch
 
+# The result files `run_project` reads back (`_result_files`). ContamX writes them only when
+# the project's output flags ask for them, so `_isolated` never copies one into the scratch
+# directory.
+_RESULT_SUFFIXES = (".ebw", ".age", ".ach")
 _HELP = "contamxpy is required for ContamX parity: pip install .[contam] (Windows x86-64 only)"
 
 
@@ -77,7 +81,8 @@ def _isolated(prj_path, airflow_convergence=None):
     handed, not into the working directory. Pointing it straight at `tests/data/contam/`
     would therefore drop four untracked files into a tracked fixture directory on every run,
     and two runs of the same project could not proceed concurrently. The copy carries every
-    sibling that shares the project's stem; the `-UseApi` projects need none, because they
+    sibling that shares the project's stem, except an earlier run's `.ebw`, `.age` and `.ach`
+    (`_RESULT_SUFFIXES`); the `-UseApi` projects need none, because they
     name `null` for the weather, contaminant and values files and take ambient conditions
     from the API instead. A project whose auxiliary files are named differently will not be
     found by the engine, which then refuses the setup and is reported by `_open` -- it is
@@ -91,6 +96,8 @@ def _isolated(prj_path, airflow_convergence=None):
         raise FileNotFoundError(f"contamx: no such project file: {src}")
     with tempfile.TemporaryDirectory(prefix="noodl-contamx-") as tmp:
         for sibling in sorted(src.parent.glob(f"{src.stem}.*")):
+            if sibling.suffix.lower() in _RESULT_SUFFIXES:
+                continue                       # an earlier run's: never read back as this one's
             shutil.copy2(sibling, Path(tmp) / sibling.name)
         for name in _named_files(src):
             if (src.parent / name).is_file() and not (Path(tmp) / name).exists():
@@ -181,6 +188,46 @@ def _result(cx, flows, mf, terminals, dt=None) -> dict:
     return out
 
 
+def _data_rows(path: Path) -> list[list[str]]:
+    """The time-step rows of a ContamX result text file: tab-separated `date time ...`."""
+    rows = []
+    for line in path.read_text().splitlines():
+        tok = line.split("\t")
+        if len(tok) > 2 and "/" in tok[0] and ":" in tok[1]:
+            rows.append(tok)
+    return rows
+
+
+def _result_files(prj) -> dict:
+    """The occupant exposure (`.ebw`), age-of-air (`.age`) and building air change rate
+    (`.ach`) files ContamX writes next to a project it ran, when the project's output flags
+    ask for them (`contamxpy` has no API for these). One row per step, none at t = 0:
+    `"exposure"` (N - 1, n_exposures, K) kg/kg, each exposure's step mean in exposure
+    order; `"age"` (N - 1, n_zones) h, the local mean age of air in zone-number order;
+    `"air_change_rate"` (N - 1,) 1/h, the total column (envelope plus ducts and air
+    handlers); `"building_volume"` m3, the conditioned volume the `.ach` header gives.
+    A file that is not there gives no key. ContamX writes the exposure file one row per
+    step and species, a step's species together (TN 1887), so a step's rows form its
+    (n_exposures, K) block. The values are printed to 7 significant digits."""
+    prj = Path(prj)
+    out: dict = {}
+    ebw, age, ach = (prj.with_suffix(s) for s in _RESULT_SUFFIXES)
+    if ebw.exists():
+        head = ebw.read_text().splitlines()[0].split("\t")
+        n_exp, n_species = int(head[0]), int(head[1])
+        values = [[float(v) for v in r[3:3 + n_exp]] for r in _data_rows(ebw)]
+        table = torch.tensor(values, dtype=torch.float64).reshape(-1, n_species, n_exp)
+        out["exposure"] = table.transpose(-1, -2)
+    if age.exists():
+        out["age"] = torch.tensor([[float(v) for v in r[2:]] for r in _data_rows(age)],
+                                  dtype=torch.float64)
+    if ach.exists():
+        out["air_change_rate"] = torch.tensor([float(r[4]) for r in _data_rows(ach)],
+                                              dtype=torch.float64)
+        out["building_volume"] = float(ach.read_text().splitlines()[0].split("\t")[5])
+    return out
+
+
 def run_steady(prj_path, *, ambient: dict, airflow_convergence=None) -> dict:
     """Path net flows [kg/s], zone mass fractions and duct terminal flows (`terminal_flow`,
     kg/s, out of each terminal into its zone, in junction-number order) after the initial
@@ -227,7 +274,10 @@ def run_project(prj_path, *, airflow_convergence=None) -> dict:
     zone numbering of `run_transient`, and `control` (N, n_reports): the project's named pass
     (split) nodes, in node order, as `getOutputControlValue` reports them: the value the
     network computed for that step ((N, 0) when the project has none). `airflow_convergence`
-    as in `run_steady`.
+    as in `run_steady`. When the project's output flags ask for them, the occupants'
+    exposure, the age of air and the building air change rate ContamX writes are returned
+    too, one row per step (`_result_files`: `exposure`, `age`, `air_change_rate`,
+    `building_volume`); a key is absent when its file is.
 
     ContamX (3.4.1.7) opens the project's weather and contaminant files relative to the
     process's WORKING DIRECTORY, so the run changes into the scratch copy's directory for its
@@ -272,6 +322,7 @@ def run_project(prj_path, *, airflow_convergence=None) -> dict:
             out = _result(cx, flows, mfs, terms, dt)
             out["time"] = torch.tensor(times, dtype=torch.float64)
             out["control"] = torch.tensor(controls, dtype=torch.float64).reshape(n + 1, -1)
-            return out
         finally:
             cx.endSimulation()
+        out.update(_result_files(prj))         # complete only once the simulation ended
+    return out

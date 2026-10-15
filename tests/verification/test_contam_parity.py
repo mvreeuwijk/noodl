@@ -1022,3 +1022,243 @@ def test_controls_through_schedule_nodes_match_contamx(contamx, src, records, rt
     _project_parity(controlled, tmp_path, rtol_flow=rtol_flow, rtol_mf=72 * F32_U,
                     record_property=record_property, species_floor=True,
                     label=f"{src.stem} through controls")
+
+
+OCCUPANTS = DATA / "occupants_three_zone.prj"
+# ContamX writes its exposure, age and air-change-rate files with `%e` (7 significant
+# digits): a printed value is within half a unit of its last digit, at most 5e-7 of itself.
+PRINT = 5e-7
+AGE_FLAG = ("!vol ach -bw cbw exp -bw age -bw\n  0   1   0   0   0   0   0   0",
+            "!vol ach -bw cbw exp -bw age -bw\n  0   1   0   0   0   0   1   0")
+ZONE_TWO_OUTSIDE = ("   2  3   0   0   0   1   0.000   600 293.15 0 two",
+                    "   2 19   0   0   0   1   0.000   600 293.15 0 two")
+# The duct project's exhaust terminal (junction 9) moved from the ambient into zone one: the
+# constant-volume exhaust fan then draws air out of zone three through junctions 7, 8 and 9
+# and returns it to zone one.
+RETURN_DUCT = ("  9  0 1  -1   0   0   0   0   1", "  9  0 1  1   0   0   0   0   1")
+
+
+def _variant(src, tmp_path, name, edits):
+    """`src` with each `(old, new)` text edit made once, written with CRLF line ends as
+    `tmp_path/<name>/<src.name>`."""
+    text = src.read_bytes().decode().replace("\r\n", "\n")
+    for old, new in edits:
+        assert text.count(old) == 1, old
+        text = text.replace(old, new)
+    out = tmp_path / name / src.name
+    out.parent.mkdir(parents=True)
+    out.write_bytes(text.replace("\n", "\r\n").encode())
+    return out
+
+
+def _age_and_air_change_allowed(model, out, conditioned, eps_flow, eps_mass, eps_volume):
+    """The first-order bounds of `test_age_and_air_change_rate_match_contamx`'s docstring,
+    evaluated on noodl physics' run. Returns the local mean age (s, (N - 1, n_i)) and its
+    allowed error, the building air change rate (1/h, (N - 1,)) and its allowed error, and
+    the conditioned volume (m3); print precision not included.
+
+    Every edge's flow is allowed `eps_flow` times the largest flow that edge carries over
+    the run (the flow budget, with its floor read edge by edge). The age solves
+    A tau = M; to first order A dtau = dM - dA tau, and since both runs conserve mass at
+    every node the flow errors do too, so row i of dA tau is the sum over the edges INTO i
+    of dq (tau_i - tau_upstream) (tau = 0 outdoors). Hence
+    |dtau| <= eps_mass tau + A^-1 r, r_i = sum_in |dq| |tau_i - tau_upstream|, with
+    A^-1 >= 0 (an M-matrix). The air change rate is a sum of the flows crossing into the
+    space over 1.2041 V: its error is at most the |dq| of the edges whose flow enters the
+    space that step (to first order a flow leaving it adds nothing; a zero flow is counted
+    either way) summed, over 1.2041 V, plus `eps_volume` of the rate for 1.2041 and V."""
+    from noodl.apps.building_physics.outputs import building_air_change_rate, local_mean_age
+
+    lay, net = model.transport["species"], model.net
+    f = model.potential["air"].flows_of_kind(out["air.q"][1:], lay.flow_kinds)
+    src, tgt = zip(*(net.endpoints(k) for k in lay.flow_kinds), strict=True)
+    src, tgt = torch.cat(src).tolist(), torch.cat(tgt).tolist()
+    dq = eps_flow * f.abs().amax(0)
+    tau = local_mean_age(out, model)[1:]
+    pos = {node: i for i, node in enumerate(lay.interior_idx.tolist())}
+    allowed_tau = torch.empty_like(tau)
+    for k in range(f.shape[0]):
+        a = torch.zeros(lay.n_i, lay.n_i, dtype=F64)
+        r = torch.zeros(lay.n_i, dtype=F64)
+
+        def age(node, k=k):
+            return tau[k, pos[node]].item() if node in pos else 0.0
+
+        for e, q in enumerate(f[k].tolist()):
+            if q != 0.0:
+                up, down = (src[e], tgt[e]) if q > 0 else (tgt[e], src[e])
+                if up in pos:
+                    a[pos[up], pos[up]] += abs(q)
+                    if down in pos:
+                        a[pos[down], pos[up]] -= abs(q)
+                ends = [(up, down)]
+            else:                              # a zero flow: either way, to first order
+                ends = [(src[e], tgt[e]), (tgt[e], src[e])]
+            for up, down in ends:
+                if down in pos:
+                    r[pos[down]] += dq[e].item() * abs(age(down) - age(up))
+        allowed_tau[k] = eps_mass * tau[k] + torch.linalg.solve(a, r)
+    inside = {int(net.node_index(n)) for n in conditioned}
+    into = torch.tensor([float(t in inside) - float(s in inside)     # +1 along the edge
+                         for s, t in zip(src, tgt, strict=True)], dtype=F64)  # into it
+    entering = (f * into >= 0) & (into != 0)    # a zero flow either way, to first order
+    volume = sum(float(net.node_attr("volume", default=0.0)[i]) for i in inside)
+    ach = building_air_change_rate(out, model)[1:]
+    allowed_ach = ((dq * entering).sum(-1) / (1.2041 * volume) * 3600.0
+                   + eps_volume * ach)
+    return tau, allowed_tau, ach, allowed_ach, volume
+
+
+def _age_and_air_change_match(ref, out, project, model, *, eps_flow, eps_mass, eps_volume,
+                              record_property):
+    """noodl physics' local mean age (in ContamX's zone order) and building air change rate
+    against ContamX's `.age` and `.ach`, each within its derived first-order bound plus
+    print precision; the conditioned volume against the `.ach` header (printed to 0.01 m3).
+    Returns noodl physics' age (h) and rate (1/h)."""
+    tau, allowed_tau, ach, allowed_ach, volume = _age_and_air_change_allowed(
+        model, out, project.building_zones, eps_flow, eps_mass, eps_volume)
+    interior = model.transport["species"].interior_idx.tolist()
+    cols = [interior.index(model.net.node_index(z)) for z in project.zones]
+    age, ref_age = tau[:, cols] / 3600.0, ref["age"]
+    assert age.shape == ref_age.shape
+    age_allowed = allowed_tau[:, cols] / 3600.0 + PRINT * ref_age.abs()
+    ach_allowed = allowed_ach + PRINT * ref["air_change_rate"].abs()
+    age_err, ach_err = (age - ref_age).abs(), (ach - ref["air_change_rate"]).abs()
+    record_property("measured_rel_age", (age_err / ref_age.abs()).max().item())
+    record_property("measured_age_of_allowed", (age_err / age_allowed).max().item())
+    record_property("measured_rel_ach",
+                    (ach_err / ref["air_change_rate"].abs()).max().item())
+    record_property("measured_ach_of_allowed", (ach_err / ach_allowed).max().item())
+    record_property("age_budget_rel_max", (age_allowed / ref_age.abs()).max().item())
+    record_property("ach_budget_rel_max",
+                    (ach_allowed / ref["air_change_rate"].abs()).max().item())
+    assert bool((age_err <= age_allowed).all()), (
+        f"age: worst error {(age_err / age_allowed).max().item():.3g} of allowed")
+    assert bool((ach_err <= ach_allowed).all()), (
+        f"air change rate: worst error {(ach_err / ach_allowed).max().item():.3g} of allowed")
+    assert abs(volume - ref["building_volume"]) <= 0.005
+    return age, ach
+
+
+@pytest.mark.external
+def test_occupant_exposure_age_of_air_and_air_change_rate_match_contamx(
+        contamx, tmp_path, record_property):
+    """`occupants_three_zone.prj`: two occupants (one moving mid-step at 01:02:30, out of the
+    building from 02:00 to 03:00, generating 1e-6 kg/s of sarin on a schedule that jumps
+    0 -> 0.5 at 00:32:30), zones at 303.15 / 293.15 / 283.15 K in a 263.15 K ambient, zone
+    three left out of the building volume (flag 16), sarin 1e-4 in zone one at the start;
+    48 steps of 300 s. Exposure, age and air change rate are ContamX's `.ebw`, `.age` and
+    `.ach`.
+
+    Budgets: first order in the float32 roundoff u of each input ContamX reads, every term
+    stated; V (300, 600, 900 m3), Pb (101325 Pa), the step (300 s), the move times and the
+    schedule value 0.5 are exact in float32.
+    Flows: the four paths form ONE loop (ambient -> one -> two -> three -> ambient), every
+    opening 1.5 m above the one floor, so a single flow q runs round it, driven by the wind
+    on the two facades; each zone's (and the ambient's) hydrostatic term enters its two
+    paths with opposite signs and cancels round the loop. The wind-driven product of powers
+    is the three-zone steady budget, 16 u; the stack budget at the smallest zone-to-ambient
+    difference (zone three, 20 K: `_stack_budget(263.15, 283.15)`, 16.7 u) bounds whatever
+    the hydrostatic terms leave: 32.7 u, budgeted at 33 u as the own-file one-zone project.
+    Mass fractions: each zone's rate q / M carries 33 u + 2 u (M = Pb V / (R T): R and T);
+    three zones in series respond as the product of three rates (the three-zone transient's
+    rule): 3 x 35 u = 105 u; plus the generation rate (1e-6, 1 u) and the initial mass
+    fraction (1e-4, 1 u): 107 u, with `_project_parity`'s 64 u x max floor.
+    Exposure: per step a weighted mean of the zone's start and end mass fractions with
+    weights from the exact times (non-negative, summing to at most 1), so the mass
+    fractions' 107 u relative and their floor, plus print; zero exactly while out.
+    Age: along the loop tau_k = sum over zone k and the zones upstream of it of M_j / q, so
+    its relative error is that of M plus that of q: 2 u + 33 u = 35 u, plus print. The
+    general bound of `_age_and_air_change_allowed` gives exactly this for one flow (each
+    |tau_i - tau_upstream| is M_i / q, so r_i = 33 u M_i and A^-1 r = 33 u tau).
+    Air change rate: the loop's one flow crossing into the conditioned zones one and two
+    (900 m3), 33 u, over 1.2041 (1 u) V (exact): 34 u, plus print."""
+    project = read_prj(OCCUPANTS)
+    assert project.building_zones == ["one", "two"]
+    ref, out = _project_parity(OCCUPANTS, tmp_path, rtol_flow=33 * F32_U,
+                               rtol_mf=107 * F32_U, record_property=record_property,
+                               label="Three-zone project with two occupants, 48 steps")
+    assert ref["building_volume"] == 900.0
+    noodl_project = read_prj(tmp_path / "noodl" / OCCUPANTS.name)
+    model, _, _ = project_to_model(noodl_project)
+    ours, theirs = out["exposure"], ref["exposure"]
+    assert ours.shape == theirs.shape == (48, 2, 1)
+    assert bool((ours[theirs == 0] == 0).all())
+    assert bool((theirs[:, 0] == 0).any()) and bool((theirs[:, 0] > 0).any())
+    floor = 64 * F32_U * ref["mf"].abs().max()
+    allowed = (107 * F32_U + PRINT) * theirs.abs() + floor
+    err = (ours - theirs).abs()
+    nonzero = theirs != 0
+    record_property("measured_rel_exposure",
+                    (err[nonzero] / theirs[nonzero].abs()).max().item())
+    record_property("measured_exposure_of_allowed", (err / allowed).max().item())
+    assert bool((err <= allowed).all()), (
+        f"exposure: worst error {(err / allowed).max().item():.3g} of allowed")
+    _age_and_air_change_match(ref, out, noodl_project, model, eps_flow=33 * F32_U,
+                              eps_mass=2 * F32_U, eps_volume=F32_U,
+                              record_property=record_property)
+
+
+AGE_ACH_VARIANTS = {
+    "ducts": (DUCTS, [AGE_FLAG], 64 * F32_U),
+    "ahs": (AHS, [AGE_FLAG], 32 * F32_U),
+    "ducts, zone two outside": (DUCTS, [AGE_FLAG, ZONE_TWO_OUTSIDE], 64 * F32_U),
+    "ahs, zone two outside": (AHS, [AGE_FLAG, ZONE_TWO_OUTSIDE], 32 * F32_U),
+    "return duct": (DUCTS, [AGE_FLAG, RETURN_DUCT], 64 * F32_U),
+}
+
+
+@pytest.mark.external
+@pytest.mark.parametrize("case", list(AGE_ACH_VARIANTS))
+def test_age_and_air_change_rate_match_contamx(contamx, case, tmp_path, record_property):
+    """The duct and simple-AHS projects with ContamX's age file switched on; each also with
+    zone two flagged outside the building volume (flag 16); and the duct project with a
+    return duct (`RETURN_DUCT`: zone three -> junctions 7, 8, 9 -> zone one).
+
+    ContamX's conditioned space is every zone without flag 16 plus the whole mechanical
+    system (each duct junction, each air handler's plenums: `project.building_zones`), and
+    junction -> zone and zone -> junction flows are internal: the return duct moves about
+    0.05 kg/s from zone three to zone one and none of it enters ContamX's rate, which the
+    space without the junctions would count (checked below).
+
+    Budgets: first order in float32 input roundoff u. Flows and mass fractions: those of
+    `test_a_duct_network_matches_contamx` (64 u, 72 u) and
+    `test_a_simple_ahs_matches_contamx` (32 u, 72 u), per-species floor; neither the flags
+    nor the moved terminal changes an element law.
+    Age: tau solves A tau = M (A: each node's outflow on the diagonal, its inflows off it; M
+    the air mass, zero at a storage-free plenum). With dq the flow errors and dM the mass
+    errors, A dtau = dM - dA tau to first order. Both runs conserve mass at every node, so
+    row i of dA tau is the sum over the edges into i of dq (tau_i - tau_upstream), and
+    A^-1 >= 0 gives |dtau| <= eps_mass tau + A^-1 r, r_i = sum_in |dq| |tau_i - tau_up|
+    (`_age_and_air_change_allowed`, evaluated each step). |dq| is the flow budget times the
+    largest flow the edge carries over the run (the flows' floor, read edge by edge).
+    eps_mass = 3 u: R and T of each node, and a junction's volume from float32 duct areas
+    (zone volumes and Pb are exact). Without recirculation A^-1 r stays near eps_flow tau
+    (each |tau_i - tau_up| is what row i adds: the chain argument of the occupants test);
+    the AHS's return air raises it to about 2.7 eps_flow tau, the return duct to 1.9 (noodl
+    physics' flows; computed here, not assumed). Plus print.
+    Air change rate: the flows entering the space, each within its |dq|, summed, over
+    1.2041 V; 1.2041 (1 u) and V, ContamX's float32 sum of float32 junction volumes (1 u):
+    eps_volume = 2 u. Plus print. The volume itself is checked against the `.ach` header."""
+    from noodl.apps.building_physics.contamx import run_project
+    from noodl.apps.building_physics.outputs import building_air_change_rate
+
+    src, edits, rtol_flow = AGE_ACH_VARIANTS[case]
+    variant = _variant(src, tmp_path, "variant", edits)
+    ref = run_project(variant, airflow_convergence=PROJECT_AIRFLOW)
+    assert ref["age"].shape[0] == ref["air_change_rate"].shape[0] == len(ref["time"]) - 1
+    ref, out = _project_parity(variant, tmp_path, rtol_flow=rtol_flow, rtol_mf=72 * F32_U,
+                               record_property=record_property, species_floor=True, ref=ref,
+                               label=f"{src.stem} ({case}): age of air and air change rate")
+    project = read_prj(tmp_path / "noodl" / src.name)
+    model, _, _ = project_to_model(project)
+    assert ("two" in project.building_zones) == ("outside" not in case)
+    _age_and_air_change_match(ref, out, project, model, eps_flow=rtol_flow,
+                              eps_mass=3 * F32_U, eps_volume=2 * F32_U,
+                              record_property=record_property)
+    if case == "return duct":
+        # The space without the junctions counts the terminals' flows as entering: far
+        # off ContamX, which keeps them inside.
+        zones_only = building_air_change_rate(out, model, conditioned=project.zones)[1:]
+        assert bool(((zones_only - ref["air_change_rate"]).abs()
+                     > 0.1 * ref["air_change_rate"]).all())

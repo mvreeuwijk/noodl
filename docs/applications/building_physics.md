@@ -1533,6 +1533,8 @@ above 0.1 % of the largest.
 | Pressure-controlled exhaust: zone three's gauge pressure above −0.5 Pa through a P controller (Kp 0.8) drives the exhaust fan; a path pressure difference and a flow ratio reported, 288 steps | rel 64 $u$, floor 64 $u$ × max (control outputs: × each output's max) | **5.3e-7** flow, control outputs 3 % of the allowance (clean air) |
 | Hysteresis window: zone one's temperature ramped through a schedule node, a window opened by hysteresis and a band switch, every logical and arithmetic node reported, 288 steps | the sensed $x = 0.1\,(T - 293.15)$ is off by an absolute $0.1\,(T + 293.15)\,u + 2u$ = 61.6 $u$ in float32 (offset cancellation); control outputs 2.67 × that, flows 1.67 × that × the window's flow per unit opening, both on top of rel 64 $u$ and the floor | **1.6e-4** flow on the window at opening 0.028 (41 % of the allowance), control outputs 38 % (clean air) |
 | The simple-AHS and duct-network projects with the outdoor-air fraction, a supply point, a fan's speed and a terminal's opening driven through schedule nodes instead of schedules | as the scheduled rows; noodl physics' runs equal the scheduled runs exactly | **7.9e-7** / **1.4e-7** flow, **3.7e-7** / **5.4e-8** mf, **1.0e-8** terminal flow |
+| Three-zone project with two occupants (one moving mid-step, out of the building for an hour, generating on a schedule), zones at 303.15 / 293.15 / 283.15 K in a 263.15 K ambient, zone three outside the building volume, 48 steps: mass fractions, exposure, age of air, building air change rate | flow rel 33 $u$, mf rel 107 $u$ (three zones in series at 35 $u$ each, the generation rate and the initial mass fraction), floor 64 $u$ × max; exposure 107 $u$ + print (5e-7); age 35 $u$ + print; air change rate 34 $u$ + print | **4.6e-8** flow, **1.3e-7** mf, **4.0e-7** exposure (ContamX's print precision; 1 % of the allowance), **1.1e-7** age, **1.5e-7** air change rate |
+| The duct-network and simple-AHS projects, each also with zone two outside the building volume, and the duct project with a return duct (zone three → junctions → zone one): age of air and building air change rate, 24 steps | the flows' and mass fractions' rows above; age: the first-order bound $3u\,\tau + A^{-1} r$ of the age equation $A\tau = M$ under the flow budget, evaluated each step ($r_i = \sum_{in} \lvert\delta q\rvert\,\lvert\tau_i - \tau_{up}\rvert$), 6.2e-6 – 1.0e-5 relative + print; air change rate: the entering flows' budgets over $1.2041\,V$, plus 2 $u$, + print | age **2.6e-7 – 5.0e-7** (≤ 9 % of the allowance), air change rate **5.7e-8 – 3.0e-7** (≤ 12 %) |
 
 Sinks and the concentration-proportional parts of sources are implicit in ContamX's species
 step, as are kinetic reactions and filters; noodl's implicit step reproduces it to float32
@@ -1573,6 +1575,24 @@ weather's temperatures more precisely: with zone and weather both at 293.15 K, i
 2.9e-5 kg/s exchange flow, exactly the stack flow of a zone at float32(293.15), 6.1e-6 K colder
 (it vanishes at 293.125 K, which float32 represents exactly). The comparison gives noodl physics
 the schedule values ContamX holds; otherwise the mass fractions drift 1.4e-4 apart over that hour.
+
+ContamX writes the occupants' exposure, the age of air and the building air change rate to
+result files (`.ebw`, `.age`, `.ach`) when the project's output flags ask for them. `run_project`
+reads them, and noodl's `occupant_exposure`, `local_mean_age` and `building_air_change_rate` are
+compared with them. ContamX splits a step at an occupant's move, both for the exposure and for
+what the occupant generates, takes the occupant's presence as a step mean and the generation
+schedule at the step's end; noodl does the same (taking the schedule as a step mean instead
+was 7.2e-3 off). It computes the age with each zone's own air mass, a zero-volume plenum
+holding none, and the building rate with 1.2041 kg/m³ over the conditioned volume: every zone
+without the "outside the building volume" flag plus the duct junctions and the air handlers'
+plenums. It counts every flow that enters that space, including from zones left out of it,
+and none that moves between a zone and a junction: with a return duct carrying 0.048 kg/s
+from zone three to zone one, counting the terminals' flows as entering would more than double
+the rate. noodl does the same (measured). The age and air-change budgets are first-order
+bounds of the flows' and air masses' float32 budgets through the age equation and the sum of
+entering flows, evaluated on the run; the age is not amplified along a chain of zones (each
+zone adds its own $M_i/q$), and the AHS's recirculation raises the bound to about 2.7 times
+the flow budget.
 
 The path-flow sign convention was verified independently against two cases rather than assumed,
 since `contamxpy`'s own documentation does not pin the sign of `getPathFlow`.

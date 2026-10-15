@@ -236,7 +236,11 @@ zones. `project.terminal_flows(q)` is the flow out of each duct terminal into it
 junction-number order (the order and sign of ContamX's `getDuctTerminalFlow`), and
 `project.segment_flows(q)` the flow along each segment in segment-number order.
 `simulate_project` and `contamx.run_project` both report `"terminal_flow"`, `(N, n_terminals)`
-kg/s; `run_project`'s is empty, `(N, 0)`, without terminals.
+kg/s; `run_project`'s is empty, `(N, 0)`, without terminals. When the project's output flags ask for
+them, `run_project` also returns what ContamX writes to its exposure, age-of-air and air-change
+files (`.ebw`, `.age`, `.ach`), one row per step: `"exposure"` `(N - 1, n_exposures, K)` kg/kg,
+`"age"` `(N - 1, n_zones)` in hours, `"air_change_rate"` `(N - 1,)` 1/h (the total column) and
+`"building_volume"` (m³, the conditioned volume of the `.ach` header).
 
 ## CONTAM `.wth`
 

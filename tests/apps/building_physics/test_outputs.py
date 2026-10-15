@@ -66,8 +66,9 @@ def _walker():
 
 def test_exposure_splits_a_step_at_a_mid_step_move():
     """ContamX's exposure file, as its rule was measured: the step mean of the linearly
-    interpolated mass fraction of the occupied zone, split at the move. Its agreement with
-    ContamX's exposure file is checked by the ContamX parity tests."""
+    interpolated mass fraction of the occupied zone, split at the move. On
+    `occupants_three_zone.prj` noodl physics matches ContamX's exposure file to 4.0e-7, its
+    print precision (`test_occupant_exposure_age_of_air_and_air_change_rate_match_contamx`)."""
     model, pos = _three()
     h = _history(model, pos, [0.0, 300.0, 600.0, 900.0],
                  {"one": [1e-4, 3e-4, 5e-4, 7e-4], "two": [2e-4, 4e-4, 6e-4, 8e-4]})
