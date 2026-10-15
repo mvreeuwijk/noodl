@@ -566,7 +566,7 @@ def attach_weather_files(doc: dict, out: Path) -> list[Path]:
 
 
 def write_json(doc: dict, path: str | Path) -> None:
-    Path(path).write_text(json.dumps(doc, indent=2) + "\n")
+    Path(path).write_text(json.dumps(doc, indent=2) + "\n", encoding="utf-8", newline="\n")
 
 
 def write_csv(out: str | Path, header: dict, columns: list[str],
@@ -587,7 +587,7 @@ def write_csv(out: str | Path, header: dict, columns: list[str],
     lines = [f"# {k}: {v}" for k, v in header.items()]
     lines.append(",".join(f'"{c}"' for c in ["time", *columns]))
     lines += [",".join(repr(float(s[i])) for s in series) for i in range(len(times))]
-    Path(out).write_text("\n".join(lines) + "\n")
+    Path(out).write_text("\n".join(lines) + "\n", encoding="utf-8", newline="\n")
     return len(times)
 
 

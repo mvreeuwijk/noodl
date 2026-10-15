@@ -137,7 +137,9 @@ def _record(model: str, stats: dict, record: Path = RECORD) -> None:
         except json.JSONDecodeError:
             doc = {}
         doc[model] = stats
-        record.write_text(json.dumps(doc, indent=2, sort_keys=True) + "\n")
+        # LF on every platform, as the record is committed (a Windows text write gives CRLF).
+        record.write_text(json.dumps(doc, indent=2, sort_keys=True) + "\n", encoding="utf-8",
+                          newline="\n")
     finally:
         os.close(fd)
         os.remove(lock)
@@ -189,6 +191,16 @@ def _noodl_columns(model: str, head: list[str], data: np.ndarray,
         assert key in names.edges, f"{model}: CSV column {h!r} maps to no noodl variable"
         cols[h] = sum(s * q[:, c] for c, s in names.edges[key])
     return cols
+
+
+def test_the_record_is_written_with_lf_line_ends(tmp_path, monkeypatch):
+    monkeypatch.setenv("NOODL_RECORD_PARITY", "1")
+    record = tmp_path / "parity-dynamic.json"
+    _record("ModelA", {"seconds": 1.0}, record)
+    _record("ModelB", {"seconds": 2.0}, record)
+    raw = record.read_bytes()
+    assert b"\r\n" not in raw and raw.count(b"\n") > 4
+    assert json.loads(raw) == {"ModelA": {"seconds": 1.0}, "ModelB": {"seconds": 2.0}}
 
 
 def test_the_algebraic_set_has_no_volumes():
