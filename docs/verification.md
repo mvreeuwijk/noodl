@@ -99,7 +99,7 @@ engine.
 Only the dynamic Modelica comparison is split. By default it compares the first few rows of
 each of the 15 models (between 2 and 21 rows each). `pytest -m slow` compares every row and adds
 a check that the time-integration error falls with the order of the scheme. The full runs take
-between 75 s and 8,112 s per model; the timings are on the
+between 21 s and 1,180 s per model; the timings are on the
 [building physics page](applications/building_physics.md#against-openmodelica-modelica-buildings-library).
 The measured values for every Modelica column are committed in
 `tests/data/modelica/parity-algebraic.json` and `parity-dynamic.json`.
