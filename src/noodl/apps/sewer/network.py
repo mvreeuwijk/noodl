@@ -20,6 +20,7 @@ from noodl.apps.sewer.air import (
     add_air_edges,
     air_layer,
 )
+from noodl.apps.sewer.controls import ControlSet
 from noodl.apps.sewer.dynwave import (
     DynamicWaveHydraulics,
     DynamicWaveOptions,
@@ -28,8 +29,12 @@ from noodl.apps.sewer.dynwave import (
     quality_state,
 )
 from noodl.apps.sewer.hydraulics import GEOMETRY_ALIASES, SewerHydraulics
+from noodl.apps.sewer.inflows import InflowSchedule
+from noodl.apps.sewer.pumps import PUMP_KINDS
 from noodl.apps.sewer.quality import H2STransfer, LateralLoads, SulfideGeneration
+from noodl.apps.sewer.runoff import Hydrology, RunoffInflows, evaporation_can_be_positive
 from noodl.apps.sewer.storage import validate_storage_curve
+from noodl.apps.sewer.xsect_spec import UNMODELLED_KINDS, Xsect
 from noodl.layers.transport import TransportLayer, active_interior
 from noodl.model import Model
 from noodl.refs import initial_drivers as refs_initial_drivers
@@ -48,6 +53,23 @@ Drivers = dict[str, Tensor]
 
 
 @dataclass(frozen=True)
+class Exfiltration:
+    """The seepage of a storage unit into the soil below it (SWMM's ``[STORAGE]`` exfiltration
+    fields, `exfil.c`): the saturated hydraulic `conductivity` Ksat (m/s) and, for SWMM's
+    modified Green-Ampt model, the capillary `suction` head (m) and the maximum initial
+    moisture deficit `initial_deficit` (-, IMDmax). With ``initial_deficit == 0`` (the single
+    Ksat form always) the rate is Ksat times the monthly conductivity adjustment, whatever the
+    depth; with a positive one it follows the Green-Ampt model at the storage depth.
+    `us_units` says whether the file was in US units, which decides the one place SWMM
+    reads an area in the wrong unit (`losses.StorageLosses`)."""
+
+    conductivity: float
+    suction: float = 0.0
+    initial_deficit: float = 0.0
+    us_units: bool = True
+
+
+@dataclass(frozen=True)
 class Manhole:
     """A manhole: `invert` and `ground` elevations (m), a constant lateral `inflow`
     (m3/s), for storage its `surface_area` (m2), and SWMM's `surcharge_depth` (SurDepth,
@@ -55,7 +77,14 @@ class Manhole:
     the manhole floods (kinematic and steady routing ignore it). `initial_depth` is SWMM's
     InitDepth (m >= 0), the water depth the dynamic wave starts from (0 lets SWMM average
     the depths of the attached conduits, `DynamicWaveHydraulics.initial_state`). A
-    `storage` curve makes it a SWMM storage unit (dynamic wave only).
+    `storage` curve makes it a SWMM storage unit (dynamic wave only). `ponded_area` is
+    SWMM's Aponded (m2 >= 0): with `DynamicWaveOptions.allow_ponding` a flooded junction
+    with a positive one stores the water above its full depth over that area instead of
+    losing it (dynamic wave only; not for a storage unit). A storage unit also has SWMM's
+    `evaporation_factor` Fevap (-, >= 0: the fraction of the potential evaporation rate it
+    loses over its surface area) and an `exfiltration` (`Exfiltration`) into the soil
+    (dynamic wave only; both need `SewerNetwork.climate` or subcatchment hydrology for the
+    evaporation rate and the conductivity adjustment).
 
     The `storage` curve (`storage_unit` builds such a manhole) is its surface area,
     ``("functional", a, b, c)`` for ``A = a y^b + c``
@@ -75,16 +104,21 @@ class Manhole:
     surcharge_depth: float = 0.0
     initial_depth: float = 0.0
     storage: tuple | None = None
+    ponded_area: float = 0.0
+    evaporation_factor: float = 0.0
+    exfiltration: Exfiltration | None = None
 
 
 def storage_unit(name: str, invert: float, max_depth: float, curve: tuple, *,
                  surcharge_depth: float = 0.0, initial_depth: float = 0.0,
-                 inflow: float = 0.0) -> Manhole:
+                 inflow: float = 0.0, evaporation_factor: float = 0.0,
+                 exfiltration: Exfiltration | None = None) -> Manhole:
     """A SWMM storage unit (`[STORAGE]`) as a `Manhole` with a `storage` curve: `invert`
     (m), `max_depth` (SWMM's MaxDepth, m >= 0: the manhole's ground is ``invert +
     max_depth``), the surface-area `curve` (`Manhole.storage`), SWMM's SurDepth
     `surcharge_depth` (m) and InitDepth `initial_depth` (m), and a constant lateral `inflow`
-    (m3/s). Tabular depths and areas are stored as tuples (the manhole is hashable)."""
+    (m3/s), SWMM's Fevap `evaporation_factor` and `exfiltration` (`Manhole`). Tabular depths
+    and areas are stored as tuples (the manhole is hashable)."""
     if curve and curve[0] == "tabular" and len(curve) == 3:
         curve = ("tabular", tuple(float(v) for v in curve[1]),
                  tuple(float(v) for v in curve[2]))
@@ -92,7 +126,8 @@ def storage_unit(name: str, invert: float, max_depth: float, curve: tuple, *,
     if not max_depth >= 0.0:
         raise ValueError(f"storage unit {name!r}: max_depth must be >= 0 m, got {max_depth!r}")
     return Manhole(name, invert, ground=invert + max_depth, inflow=inflow,
-                   surcharge_depth=surcharge_depth, initial_depth=initial_depth, storage=curve)
+                   surcharge_depth=surcharge_depth, initial_depth=initial_depth, storage=curve,
+                   evaporation_factor=evaporation_factor, exfiltration=exfiltration)
 
 
 @dataclass(frozen=True)
@@ -105,9 +140,11 @@ class Outfall:
     (hour of the day, stage elevation in m, strictly increasing hours): the stage is read
     from it at the elapsed time of the run, repeating every 24 h
     (`DynamicWaveHydraulics`, `tidal_stage`). ``"timeseries"`` takes its stage elevation
-    from a driver, the `outfall_stage` function of `build_model` / `simulate_dynamic_wave`;
-    `series` is only the SWMM series' name, for messages. Only dynamic-wave routing reads
-    them.
+    from a driver, the `outfall_stage` function of `build_model` / `simulate_dynamic_wave`,
+    which defaults to `stage_series`, the file's series (`inflows.TimeSeries`, times in s
+    since the start and stage elevations in m; the stage is its value held beyond both ends,
+    as SWMM's ``table_tseriesLookup`` with ``extend``); `series` is the SWMM series' name.
+    Only dynamic-wave routing reads them.
     `flap_gate` (SWMM's Gated) blocks any flow from the outfall into its conduit
     (`link.c::link_setFlapGate`, dynamic wave only).
     """
@@ -119,6 +156,7 @@ class Outfall:
     flap_gate: bool = False
     tide: tuple[tuple[float, float], ...] | None = None
     series: str | None = None
+    stage_series: object | None = None
 
 
 @dataclass(frozen=True)
@@ -137,6 +175,19 @@ class Pipe:
     `v` to `u` unless `flap_gate_reversed`, where the gate passes `v` to `u` flow instead
     (a conduit the SWMM reader turned round because it was adverse: its file orientation is
     `v` to `u`, and SWMM's ``Link.direction`` is -1).
+
+    `xsect` (dynamic wave only; ``None`` for the circle of `diameter`) is the conduit's SWMM
+    cross section (`xsect_spec.Xsect`: a shape keyword and its geometry fields, or an
+    IRREGULAR transect, a CUSTOM shape curve); `diameter` is then its full height (m), which
+    must equal `Xsect.height`. `loss_inlet`, `loss_outlet` and `loss_average` are SWMM's
+    entry, exit and average local loss coefficients (`[LOSSES]`, -, dynamic wave only;
+    `dwflow.c::findLocalLosses`). For an IRREGULAR conduit `length` is SWMM's
+    ``conduit_getLength`` (the file's length over the transect's length factor) and `n` the
+    roughness SWMM then uses (the transect's main-channel n times the root of that factor,
+    `link.c::conduit_validate`); `transect_length_factor` is that factor (-, 1 for every other
+    conduit): it sets the momentum length when the conduit is not lengthened
+    (`link.c:1105-1118`). `culvert` is SWMM's culvert code (`[XSECTIONS]` field 8; 0 for none,
+    1 to 57 for the inlet types of FHWA HEC-5, dynamic wave only; `culvert.py`).
     """
 
     name: str
@@ -153,6 +204,13 @@ class Pipe:
     initial_flow: float = 0.0
     flap_gate: bool = False
     flap_gate_reversed: bool = False
+    xsect: Xsect | None = None
+    loss_inlet: float = 0.0
+    loss_outlet: float = 0.0
+    loss_average: float = 0.0
+    transect_length_factor: float = 1.0
+    culvert: int = 0
+    seepage: float = 0.0
 
 
 #: Orifice orientations (SWMM's SIDE, BOTTOM) and opening shapes (CIRCULAR, RECT_CLOSED).
@@ -169,8 +227,11 @@ class Orifice:
     (`height` its diameter, m) or ``"rectangular"`` (`height` and `width`, m), its crest
     `crest_height` (m above `u`'s invert, SWMM's CrestHt), discharge coefficient
     `discharge_coefficient` (-, SWMM's Cd) and a `flap_gate` (closes on flow from `v` to
-    `u`, with SWMM's ARMCO head loss on forward flow). Always fully open (no control
-    rules). Flow follows `link.c::orifice_getInflow` (`noodl.apps.sewer.structures`)."""
+    `u`, with SWMM's ARMCO head loss on forward flow). It starts fully open; control rules
+    (`ControlSet`) move it, `close_time` (hours, SWMM's CloseTime) being the time they take
+    to move it through its full opening (0: at once). `order` is the line of the input file
+    (SWMM's link index order). Flow follows `link.c::orifice_getInflow`
+    (`noodl.apps.sewer.structures`)."""
 
     name: str
     u: str
@@ -182,6 +243,8 @@ class Orifice:
     discharge_coefficient: float
     width: float | None = None
     flap_gate: bool = False
+    close_time: float = 0.0
+    order: int = 0
 
 
 @dataclass(frozen=True)
@@ -196,7 +259,8 @@ class Weir:
     `end_discharge_coefficient` a trapezoid's end triangles' Cd (SWMM's Cd2),
     `end_contractions` the number of end contractions (SWMM's EndCon), `can_surcharge` SWMM's
     CanSurcharge (above the opening the weir flows as an orifice; else its head is capped at
-    the opening height) and `flap_gate` as for `Orifice`. Always fully open. Flow follows
+    the opening height) and `flap_gate` as for `Orifice`. It starts fully open (control
+    rules set its crest). Flow follows
     `link.c::weir_getInflow` (`noodl.apps.sewer.structures`)."""
 
     name: str
@@ -212,6 +276,7 @@ class Weir:
     end_discharge_coefficient: float = 0.0
     can_surcharge: bool = True
     flap_gate: bool = False
+    order: int = 0
 
 
 @dataclass(frozen=True)
@@ -231,6 +296,42 @@ class Outlet:
     rating: tuple
     head_difference: bool = False
     flap_gate: bool = False
+    order: int = 0
+
+
+@dataclass(frozen=True)
+class Pump:
+    """A pump (SWMM `[PUMPS]`, dynamic wave only) from node `u` (its inlet, a manhole) to node
+    `v`. `kind` is SWMM's pump type: ``"type1"`` (PUMP1 curve: flow steps with the inlet
+    node's volume), ``"type2"`` (PUMP2: steps with the inlet depth), ``"type3"`` (PUMP3:
+    flow against the head delivered, `v` minus `u`), ``"type4"`` (PUMP4: continuous in the
+    inlet depth), ``"type5"`` (PUMP5: the variable-speed PUMP3, head divided by the squared
+    speed `setting`) or ``"ideal"`` (no curve: the pump takes its inlet node's inflow).
+    `curve` is ``(x values, flows)`` in SI (x in m3 for type1, m otherwise; flows m3/s;
+    x strictly increasing); an ideal pump has none. The pump starts ON (`initial_on`, SWMM's
+    Status), switches OFF when its inlet depth falls below `shutoff_depth` (m) and back ON
+    above `startup_depth` (m); 0 disables either. Control rules can switch it and set its
+    speed (`ControlSet`). `order` is the line of the input file (SWMM's link index order)."""
+
+    name: str
+    u: str
+    v: str
+    kind: str = "ideal"
+    curve: tuple = ()
+    initial_on: bool = True
+    startup_depth: float = 0.0
+    shutoff_depth: float = 0.0
+    order: int = 0
+
+    @property
+    def crest_height(self) -> float:
+        """A pump has no crest (0, for the shared regulator checks)."""
+        return 0.0
+
+    @property
+    def flap_gate(self) -> bool:
+        """A pump has no flap gate (SWMM, link.c:1469)."""
+        return False
 
 
 def _validate_rating(where: str, rating) -> None:
@@ -269,8 +370,23 @@ class SewerNetwork:
     `read_swmm_inp`, whose purpose is to reproduce SWMM). ``"tabulated"`` is a steady
     kinematic-wave geometry and is refused with ``storage=True`` by `SewerHydraulics`;
     dynamic-wave routing always uses it and refuses ``"analytic"`` by name.
-    `orifices`, `weirs` and `outlets` are flow regulators between two nodes (dynamic wave
-    only; SWMM's `[ORIFICES]`, `[WEIRS]`, `[OUTLETS]`).
+    `orifices`, `weirs` and `outlets` are flow regulators between two nodes and `pumps` pumps
+    (dynamic wave only; SWMM's `[ORIFICES]`, `[WEIRS]`, `[OUTLETS]`, `[PUMPS]`); `controls`
+    is the file's `[CONTROLS]` rule set (`ControlSet`) that switches pumps and sets the
+    openings of regulators (dynamic wave only).
+    `inflows` is the time-varying lateral inflow of a SWMM file (`InflowSchedule`: its
+    `[TIMESERIES]`, `[PATTERNS]`, `[INFLOWS]` and `[DWF]`), ``None`` for constant
+    `Manhole.inflow` only. When given, each scheduled manhole's `Manhole.inflow` is the value
+    at the start of the run, and the model carries the schedule as ``model.inflow_schedule``;
+    `simulate_dynamic_wave` uses it when it is given no ``inflow``. For a file with
+    `[SUBCATCHMENTS]` it is a `runoff.RunoffInflows`: the same schedule plus the runoff of the
+    subcatchments (`hydrology` is its `runoff.Hydrology`).
+
+    The evaporation and seepage losses of the conduits and storage units (dynamic wave only;
+    `losses.py`) read the evaporation rate and conductivity adjustment of the file's
+    `[EVAPORATION]` and `[ADJUSTMENTS]`: those of `hydrology` when there are subcatchments,
+    else `climate`, a `runoff.Hydrology` with no gages or subcatchments that holds just them
+    (``None``: no losses that need a climate).
     """
 
     manholes: tuple[Manhole, ...]
@@ -283,12 +399,45 @@ class SewerNetwork:
     orifices: tuple[Orifice, ...] = ()
     weirs: tuple[Weir, ...] = ()
     outlets: tuple[Outlet, ...] = ()
+    inflows: InflowSchedule | RunoffInflows | None = None
+    pumps: tuple[Pump, ...] = ()
+    controls: ControlSet | None = None
+    climate: Hydrology | None = None
+
+    @property
+    def climate_source(self) -> Hydrology | None:
+        """The `runoff.Hydrology` whose evaporation and adjustments drive the conduit and
+        storage losses: the subcatchment `hydrology`, else `climate`, else ``None``."""
+        return self.hydrology if self.hydrology is not None else self.climate
+
+    @property
+    def has_wet_losses(self) -> bool:
+        """Whether any conduit seeps or any storage unit evaporates or exfiltrates
+        (`Pipe.seepage`, `Manhole.evaporation_factor`, `Manhole.exfiltration`), or any open
+        conduit can evaporate under the evaporation of `climate_source`: the network then
+        needs the climate drivers of `losses.py`."""
+        if any(p.seepage > 0.0 for p in self.pipes):
+            return True
+        if any(m.exfiltration is not None for m in self.manholes):
+            return True
+        source = self.climate_source
+        if source is None or not evaporation_can_be_positive(source):
+            return False
+        return (any(m.evaporation_factor != 0.0 for m in self.manholes)
+                or any(p.xsect is not None and p.xsect.open for p in self.pipes))
+
+    @property
+    def hydrology(self) -> Hydrology | None:
+        """The subcatchment hydrology of the file (`runoff.Hydrology`: rain gages, subcatchments,
+        infiltration), or ``None`` when `inflows` carries no runoff."""
+        return getattr(self.inflows, "hydrology", None)
 
     @property
     def structures(self) -> dict[str, tuple]:
-        """The flow regulators by edge kind: ``{"orifice": ..., "weir": ..., "outlet":
-        ...}``."""
-        return {"orifice": self.orifices, "weir": self.weirs, "outlet": self.outlets}
+        """The flow regulators and pumps by edge kind: ``{"orifice": ..., "weir": ...,
+        "outlet": ..., "pump": ...}``."""
+        return {"orifice": self.orifices, "weir": self.weirs, "outlet": self.outlets,
+                "pump": self.pumps}
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "routing", ROUTING_ALIASES.get(self.routing, self.routing))
@@ -369,6 +518,15 @@ class SewerNetwork:
                     )
             outgoing.setdefault(pipe.u, []).append(pipe.name)
         self._validate_structures(names, pipe_names)
+        if self.controls is not None:
+            self.controls.validate(self)
+        if self.inflows is not None:
+            manhole_names = {m.name for m in self.manholes}
+            stray = sorted(set(self.inflows.nodes) - manhole_names)
+            if stray:
+                raise ValueError(f"SewerNetwork: inflow schedule names node(s) {stray}, "
+                                 f"which are not manholes (an outfall takes no lateral "
+                                 f"inflow)")
         outfall_names = {o.name for o in self.outfalls}
         if dynamic:
             self._validate_dynamic(outfall_names)
@@ -412,12 +570,13 @@ class SewerNetwork:
         unknown or repeated end node, an unknown kind or shape, a non-positive opening, a
         negative crest height or coefficient, or a malformed rating."""
         link_names = set(pipe_names)
+        outfall_names = {o.name for o in self.outfalls}
         for kind, devices in self.structures.items():
             for s in devices:
                 where = f"SewerNetwork: {kind} {s.name!r}"
                 if s.name in link_names:
-                    raise ValueError(f"{where}: duplicate link name (pipes, orifices, weirs "
-                                     f"and outlets share one name space)")
+                    raise ValueError(f"{where}: duplicate link name (pipes, orifices, weirs, "
+                                     f"outlets and pumps share one name space)")
                 link_names.add(s.name)
                 for end in (s.u, s.v):
                     if end not in node_names:
@@ -425,6 +584,9 @@ class SewerNetwork:
                                          f"manhole nor an outfall")
                 if s.u == s.v:
                     raise ValueError(f"{where} joins node {s.u!r} to itself")
+                if kind == "pump":
+                    self._validate_pump(where, s, outfall_names)
+                    continue
                 if not (math.isfinite(s.crest_height) and s.crest_height >= 0.0):
                     raise ValueError(f"{where}: crest_height must be >= 0 m (above its first "
                                      f"node's invert), got {s.crest_height!r}")
@@ -469,6 +631,38 @@ class SewerNetwork:
                     if not (math.isfinite(value) and value >= 0.0):          # link.c:2055-2062
                         raise ValueError(f"{where}: {what} must be >= 0, got {value!r}")
 
+    @staticmethod
+    def _validate_pump(where: str, pump: Pump, outfall_names: set[str]) -> None:
+        """Refuse, BY NAME, a malformed pump: an unknown kind, a curve that does not fit the
+        kind, an outfall as its inlet, or startup and shutoff depths out of order (SWMM's
+        ERR_PUMP_LIMITS, link.c:1518-1519)."""
+        if pump.kind not in PUMP_KINDS:
+            raise ValueError(f"{where}: kind must be one of {PUMP_KINDS}, got {pump.kind!r}")
+        if pump.u in outfall_names:
+            raise ValueError(f"{where}: its inlet {pump.u!r} is an outfall; a pump draws from "
+                             f"a junction or storage unit")
+        if pump.kind == "ideal":
+            if pump.curve:
+                raise ValueError(f"{where}: an ideal pump has no curve")
+        else:
+            curve = pump.curve
+            if (len(curve) != 2 or len(curve[0]) != len(curve[1]) or not curve[0]
+                    or not all(math.isfinite(float(x)) for x in (*curve[0], *curve[1]))):
+                raise ValueError(f"{where}: a {pump.kind} pump needs a curve (x values, flows) "
+                                 f"of equal, non-zero length and finite values, got {curve!r}")
+            xs = [float(x) for x in curve[0]]
+            if any(b <= a for a, b in zip(xs, xs[1:], strict=False)):
+                raise ValueError(f"{where}: pump curve x values must be strictly increasing "
+                                 f"(SWMM's ERR_CURVE_SEQUENCE), got {curve[0]!r}")
+        for what, value in (("startup_depth", pump.startup_depth),
+                            ("shutoff_depth", pump.shutoff_depth)):
+            if not (math.isfinite(value) and value >= 0.0):
+                raise ValueError(f"{where}: {what} must be >= 0 m, got {value!r}")
+        if pump.startup_depth > 0.0 and pump.startup_depth <= pump.shutoff_depth:
+            raise ValueError(f"{where}: startup depth {pump.startup_depth} m must exceed "
+                             f"the shutoff depth {pump.shutoff_depth} m (SWMM's "
+                             f"ERR_PUMP_LIMITS)")
+
     def _refuse_dynamic_wave_only(self) -> None:
         """Steady and kinematic-wave routing do not model initial conditions, MaxFlow, flap
         gates, barrels, storage units or flow regulators; a set value would be skipped
@@ -476,9 +670,13 @@ class SewerNetwork:
         for kind, devices in self.structures.items():
             if devices:
                 raise ValueError(
-                    f"SewerNetwork: {kind} {devices[0].name!r}: orifices, weirs and outlets "
-                    f"are modelled with dynamic-wave routing only (routing is "
+                    f"SewerNetwork: {kind} {devices[0].name!r}: orifices, weirs, outlets and "
+                    f"pumps are modelled with dynamic-wave routing only (routing is "
                     f"{self.routing!r})")
+        if self.controls is not None:
+            raise ValueError(
+                f"SewerNetwork: control rules are modelled with dynamic-wave routing only "
+                f"(routing is {self.routing!r})")
         for manhole in self.manholes:
             if manhole.storage is not None:
                 raise ValueError(
@@ -490,15 +688,32 @@ class SewerNetwork:
                     f"SewerNetwork: manhole {manhole.name!r} has initial_depth "
                     f"{manhole.initial_depth!r} m; only dynamic-wave routing models it "
                     f"(routing is {self.routing!r})")
+            if manhole.ponded_area > 0.0 and self.dynamic_wave.allow_ponding:
+                raise ValueError(
+                    f"SewerNetwork: manhole {manhole.name!r} has a ponded_area with "
+                    f"allow_ponding; only dynamic-wave routing models ponding (routing is "
+                    f"{self.routing!r})")
         for outfall in self.outfalls:
             if outfall.flap_gate:
                 raise ValueError(
                     f"SewerNetwork: outfall {outfall.name!r} has a flap gate; only "
                     f"dynamic-wave routing models it (routing is {self.routing!r})")
+        for manhole in self.manholes:
+            for what, value, default in (("evaporation_factor", manhole.evaporation_factor, 0.0),
+                                         ("exfiltration", manhole.exfiltration, None)):
+                if value != default:
+                    raise ValueError(
+                        f"SewerNetwork: manhole {manhole.name!r} has {what} {value!r}; only "
+                        f"dynamic-wave routing models it (routing is {self.routing!r})")
         for pipe in self.pipes:
             for what, value, default in (
-                ("barrels", pipe.barrels, 1), ("max_flow", pipe.max_flow, None),
+                ("seepage", pipe.seepage, 0.0), ("barrels", pipe.barrels, 1),
+                ("max_flow", pipe.max_flow, None),
                 ("initial_flow", pipe.initial_flow, 0.0), ("flap_gate", pipe.flap_gate, False),
+                ("xsect", pipe.xsect, None), ("culvert", pipe.culvert, 0),
+                ("loss_inlet", pipe.loss_inlet, 0.0),
+                ("loss_outlet", pipe.loss_outlet, 0.0),
+                ("loss_average", pipe.loss_average, 0.0),
             ):
                 if value != default:
                     raise ValueError(
@@ -526,22 +741,86 @@ class SewerNetwork:
                 f"strictly increasing, got {[x for x, _ in tide]}"
             )
 
+    def _validate_xsect(self, pipe: Pipe) -> None:
+        """Refuse, BY NAME, a cross section this package does not model, one that SWMM
+        rejects, or one that disagrees with the pipe's `diameter`."""
+        x = pipe.xsect
+        if x.kind in UNMODELLED_KINDS:
+            raise ValueError(f"SewerNetwork: pipe {pipe.name!r}: cross section {x.kind}: "
+                             f"{UNMODELLED_KINDS[x.kind]}")
+        if self.geometry != "tabulated":
+            raise ValueError(
+                f"SewerNetwork: pipe {pipe.name!r} has a {x.kind} cross section, which only "
+                f"SWMM's tabulated geometry (geometry='tabulated') models, not "
+                f"{self.geometry!r}")
+        try:
+            height = x.height
+        except ValueError as exc:
+            raise ValueError(f"SewerNetwork: pipe {pipe.name!r}: {exc}") from None
+        if not math.isclose(pipe.diameter, height, rel_tol=1e-9, abs_tol=1e-12):
+            raise ValueError(
+                f"SewerNetwork: pipe {pipe.name!r} diameter {pipe.diameter!r} m is not its "
+                f"{x.kind} cross section's full height {height!r} m")
+
+    @staticmethod
+    def _validate_storage_losses(manhole: Manhole) -> None:
+        """Refuse a malformed `evaporation_factor` or `exfiltration` of a storage unit."""
+        if not math.isfinite(manhole.evaporation_factor):
+            raise ValueError(f"SewerNetwork: storage unit {manhole.name!r} evaporation_factor "
+                             f"must be finite, got {manhole.evaporation_factor!r}")
+        x = manhole.exfiltration
+        if x is None:
+            return
+        if not (math.isfinite(x.conductivity) and x.conductivity > 0.0
+                and math.isfinite(x.suction) and x.suction >= 0.0
+                and 0.0 <= x.initial_deficit <= 1.0):
+            raise ValueError(
+                f"SewerNetwork: storage unit {manhole.name!r} exfiltration needs a conductivity "
+                f"> 0, a suction head >= 0 and an initial deficit from 0 to 1 (SWMM's "
+                f"grnampt_setParams), got {x!r}")
+        if manhole.storage[0] == "paraboloid":
+            raise ValueError(
+                f"SewerNetwork: storage unit {manhole.name!r} is a PARABOLOID with an "
+                f"exfiltration; SWMM 5.2.4's exfil_initState has no case for that shape and "
+                f"leaves its bottom and bank areas unset (exfil.c:92-137), so there is nothing "
+                f"to reproduce")
+
     def _validate_dynamic(self, outfall_names: set[str]) -> None:
-        """Dynamic-wave topology: loops and any flow direction are allowed, but every
-        connected component needs an outfall and each outfall ends exactly one conduit."""
+        """Dynamic-wave topology: loops and any flow direction are allowed, the network needs an
+        outfall (a component without one is allowed, as in SWMM) and each outfall ends exactly
+        one conduit."""
         self.dynamic_wave.validate()
         for manhole in self.manholes:
             if not manhole.initial_depth >= 0.0:
                 raise ValueError(
                     f"SewerNetwork: manhole {manhole.name!r} initial_depth must be >= 0 m, "
                     f"got {manhole.initial_depth!r}")
+            if not manhole.ponded_area >= 0.0:
+                raise ValueError(
+                    f"SewerNetwork: manhole {manhole.name!r} ponded_area must be >= 0 m2, "
+                    f"got {manhole.ponded_area!r}")
+            if manhole.ponded_area > 0.0 and manhole.storage is not None:
+                raise ValueError(
+                    f"SewerNetwork: storage unit {manhole.name!r} has a ponded_area; SWMM "
+                    f"deprecates the ponded area of a storage unit (node.c:14) and it is "
+                    f"not modelled")
+            if manhole.storage is None and (manhole.evaporation_factor != 0.0
+                                            or manhole.exfiltration is not None):
+                raise ValueError(
+                    f"SewerNetwork: manhole {manhole.name!r} is not a storage unit but has an "
+                    f"evaporation_factor or an exfiltration")
             if manhole.storage is not None:
                 validate_storage_curve(manhole.name, manhole.storage)
                 if manhole.surface_area is not None:
                     raise ValueError(
                         f"SewerNetwork: storage unit {manhole.name!r} sets surface_area; its "
                         f"area is its storage curve")
+            self._validate_storage_losses(manhole)
         for pipe in self.pipes:
+            if not (math.isfinite(pipe.seepage) and pipe.seepage >= 0.0):
+                raise ValueError(
+                    f"SewerNetwork: pipe {pipe.name!r} seepage must be a finite rate >= 0 m/s, "
+                    f"got {pipe.seepage!r}")
             if (not isinstance(pipe.barrels, int) or isinstance(pipe.barrels, bool)
                     or not 1 <= pipe.barrels <= 127):
                 raise ValueError(
@@ -556,12 +835,27 @@ class SewerNetwork:
                 raise ValueError(
                     f"SewerNetwork: pipe {pipe.name!r} initial_flow must be finite, got "
                     f"{pipe.initial_flow!r} m3/s")
-        neighbours: dict[str, list[str]] = {}
+            if not (isinstance(pipe.culvert, int) and not isinstance(pipe.culvert, bool)
+                    and pipe.culvert >= 0):
+                raise ValueError(
+                    f"SewerNetwork: pipe {pipe.name!r} culvert code must be an integer >= 0, "
+                    f"got {pipe.culvert!r}")
+            for what in ("loss_inlet", "loss_outlet", "loss_average"):
+                value = getattr(pipe, what)
+                if not (math.isfinite(value) and value >= 0.0):
+                    raise ValueError(
+                        f"SewerNetwork: pipe {pipe.name!r} {what} must be a finite "
+                        f"coefficient >= 0, got {value!r}")
+            if not (math.isfinite(pipe.transect_length_factor)
+                    and pipe.transect_length_factor > 0.0):
+                raise ValueError(
+                    f"SewerNetwork: pipe {pipe.name!r} transect_length_factor must be > 0, "
+                    f"got {pipe.transect_length_factor!r}")
+            if pipe.xsect is not None:
+                self._validate_xsect(pipe)
         touching: dict[str, list[str]] = {name: [] for name in outfall_names}
-        links = (*self.pipes, *self.orifices, *self.weirs, *self.outlets)
+        links = (*self.pipes, *self.orifices, *self.weirs, *self.outlets, *self.pumps)
         for link in links:
-            neighbours.setdefault(link.u, []).append(link.v)
-            neighbours.setdefault(link.v, []).append(link.u)
             for end in (link.u, link.v):
                 if end in outfall_names:
                     touching[end].append(link.name)
@@ -572,23 +866,12 @@ class SewerNetwork:
                     f"({found}); dynamic-wave routing takes exactly one link (a pipe, "
                     f"orifice, weir or outlet) per outfall (SWMM's ERR_OUTFALL)"
                 )
-        seen: set[str] = set()
-        for manhole in self.manholes:
-            if manhole.name in seen:
-                continue
-            component = {manhole.name}
-            frontier = [manhole.name]
-            while frontier:
-                for other in neighbours.get(frontier.pop(), ()):
-                    if other not in component:
-                        component.add(other)
-                        frontier.append(other)
-            seen |= component
-            if not component & outfall_names:
-                raise ValueError(
-                    f"SewerNetwork: manhole {manhole.name!r} and its connected pipes "
-                    f"({sorted(component)}) reach no outfall"
-                )
+        # SWMM asks for at least one outfall in the whole network (ERR_NO_OUTLETS,
+        # flowrout.c:325) and nothing per component: a junction with no link, or a group
+        # of nodes without an outfall, routes by its own continuity (its surface area is
+        # the head equation's storage row) and floods at its full depth.
+        if not outfall_names:
+            raise ValueError("SewerNetwork: the network has no outfall (SWMM's ERR_NO_OUTLETS)")
 
     def outgoing(self) -> dict[str, int]:
         """Manhole name -> the position of its outgoing pipe in `self.pipes`."""
@@ -647,6 +930,7 @@ def build_model(
     iterate_tol: float | None = None,
     iterate_max: int | None = None,
     outfall_stage: Mapping | None = None,
+    iterate_flow_tol: float | None = None,
 ) -> tuple[Model, State, Drivers]:
     """Assemble the sewer model and return `(model, state, drivers)`.
 
@@ -663,12 +947,16 @@ def build_model(
     the headspace air on the solved conduits (`f_air`, `f_i`, `c_s`, `leak_area`, `leak_cd`
     and `fans` as below; dendritic networks only, loops refused by name), `storage` is
     refused; converged to
-    `iterate_tol` (m, default 1e-11) within `iterate_max` passes (default 2000; a slowly
-    contracting outfall head at low flow can need several hundred). Those two
+    `iterate_tol` (m) and `iterate_flow_tol` (m3/s) within `iterate_max` passes, by default
+    the file's HEAD_TOLERANCE and MAX_TRIALS (SWMM's 0.005 ft and 8 where it sets none) and
+    the flow tolerance matching them (`dynwave.iterate_tolerances`). Those three
     apply to dynamic wave only and are refused for the other routings. So is `outfall_stage`,
     the stage elevation of each TIMESERIES outfall (``{name: m, or a function of t in s}``;
     `build_dynamic_wave_model`).
     """
+    if not (net.pipes or net.orifices or net.weirs or net.outlets):
+        raise ValueError("build_model: the network has no links (no conduits, orifices, "
+                         "weirs or outlets), so there is nothing to route; add at least one")
     if net.routing == "dynamic_wave":
         if storage:
             raise ValueError("build_model: storage=True is the kinematic path's storage "
@@ -682,13 +970,15 @@ def build_model(
                     f"dynamic-wave network always iterates its passes on the routing step "
                     f"(net.dynamic_wave); leave {name} at its default")
         kwargs = {k: v for k, v in (("iterate_tol", iterate_tol),
-                                    ("iterate_max", iterate_max)) if v is not None}
+                                    ("iterate_max", iterate_max),
+                                    ("iterate_flow_tol", iterate_flow_tol)) if v is not None}
         return build_dynamic_wave_model(net, outfall_stage=outfall_stage,
                                         quality=bool(quality), species=species,
                                         scheme=scheme, air=bool(air), f_air=f_air, f_i=f_i,
                                         c_s=c_s, leak_area=leak_area, leak_cd=leak_cd,
                                         fans=fans, **kwargs)
     for name, value in (("iterate_tol", iterate_tol), ("iterate_max", iterate_max),
+                        ("iterate_flow_tol", iterate_flow_tol),
                         ("outfall_stage", outfall_stage)):
         if value is not None:
             raise ValueError(
@@ -893,6 +1183,7 @@ def build_model(
     }
     model.input_specs = {k: v for k, v in specs.items() if k in drivers}
     model.driver_template = dict(drivers)
+    model.inflow_schedule = net.inflows
     return model, state, drivers
 
 

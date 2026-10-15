@@ -1,0 +1,134 @@
+[TITLE]
+;;Project Title/Notes
+Tree in MGD with an Mfactor, an Sfactor, a baseline pattern and dry-weather flow, US units, dynamic wave - noodl test fixture
+
+[OPTIONS]
+;;Option             Value
+FLOW_UNITS           MGD
+INFILTRATION         HORTON
+FLOW_ROUTING         DYNWAVE
+LINK_OFFSETS         DEPTH
+MIN_SLOPE            0
+ALLOW_PONDING        NO
+SKIP_STEADY_STATE    NO
+
+START_DATE           06/10/2026
+START_TIME           11:57:00
+REPORT_START_DATE    06/10/2026
+REPORT_START_TIME    11:57:00
+END_DATE             06/10/2026
+END_TIME             12:07:00
+SWEEP_START          01/01
+SWEEP_END            12/31
+DRY_DAYS             0
+REPORT_STEP          00:01:00
+WET_STEP             00:01:00
+DRY_STEP             00:01:00
+ROUTING_STEP         10
+
+INERTIAL_DAMPING     PARTIAL
+NORMAL_FLOW_LIMITED  BOTH
+FORCE_MAIN_EQUATION  H-W
+VARIABLE_STEP        0
+LENGTHENING_STEP     0
+MIN_SURFAREA         0
+MAX_TRIALS           500
+HEAD_TOLERANCE       1e-12
+SYS_FLOW_TOL         5
+LAT_FLOW_TOL         5
+MINIMUM_STEP         0.5
+THREADS              1
+
+[EVAPORATION]
+;;Data Source    Parameters
+;;-------------- ----------------
+CONSTANT         0.0
+DRY_ONLY         NO
+
+[JUNCTIONS]
+;;Name           Elevation  MaxDepth   InitDepth  SurDepth   Aponded
+;;-------------- ---------- ---------- ---------- ---------- ----------
+J1               40.0       16         0          0          0
+J2               40.0       16         0          0          0
+J5               36.0       16         0          0          0
+J3               33.0       16         0          0          0
+J4               30.0       16         0          0          0
+
+[OUTFALLS]
+;;Name           Elevation  Type       Stage Data       Gated    Route To
+;;-------------- ---------- ---------- ---------------- -------- ----------------
+Outfall          26.0        FREE                        NO
+
+[CONDUITS]
+;;Name           From Node        To Node          Length     Roughness  InOffset   OutOffset  InitFlow   MaxFlow
+;;-------------- ---------------- ---------------- ---------- ---------- ---------- ---------- ---------- ----------
+C1               J1               J3               650        0.013      0          0          0          0
+C2               J2               J3               650        0.013      0          0          0          0
+C3               J3               J4               650        0.013      0          0          0          0
+C4               J5               J4               650        0.013      0          0          0          0
+C5               J4               Outfall          650        0.013      0          0          0          0
+
+[XSECTIONS]
+;;Link           Shape        Geom1            Geom2      Geom3      Geom4      Barrels    Culvert
+;;-------------- ------------ ---------------- ---------- ---------- ---------- ---------- ----------
+C1               CIRCULAR     1.0              0          0          0          1
+C2               CIRCULAR     1.0              0          0          0          1
+C3               CIRCULAR     1.5              0          0          0          1
+C4               CIRCULAR     1.0              0          0          0          1
+C5               CIRCULAR     1.5              0          0          0          1
+
+[INFLOWS]
+;;Node           Constituent      Time Series      Type     Mfactor  Sfactor  Baseline Pattern
+;;-------------- ---------------- ---------------- -------- -------- -------- -------- --------
+;; Mfactor is read and ignored for a FLOW inflow (as in SWMM); Sfactor scales the series only
+J1               FLOW             Hyd1             FLOW     2.5      0.5      0.02
+J2               FLOW             Hyd1             FLOW     7.0      0.25     0
+J5               FLOW             ""               FLOW     3.0      4.0      0.03     Hr
+
+[DWF]
+;;Node           Constituent      Baseline   Patterns
+;;-------------- ---------------- ---------- ----------
+J3               FLOW             0.04       Hr
+J2               FLOW             0.05
+
+[PATTERNS]
+;;Name           Type       Multipliers
+;;-------------- ---------- ----------
+Hr               HOURLY     0.5   1.0   1.0   1.0   1.0   1.0   1.0   1.0   1.0   1.0   1.0   0.5
+Hr               2.5   1.0   1.0   1.0   1.0   1.0   1.0   1.0   1.0   1.0   1.0   1.0
+
+[TIMESERIES]
+;;Name           Date       Time       Value
+;;-------------- ---------- ---------- ----------
+;; MGD, hours since the start of the simulation (12/31/2026 11:57 here, so the hourly
+;; pattern turns over at 12:00)
+Hyd1             0     0.0
+Hyd1             0.05  0.4
+Hyd1             0.1   0.9
+Hyd1             0.13  0.2
+Hyd1             0.2   0.6
+
+
+[REPORT]
+;;Reporting Options
+INPUT      NO
+CONTROLS   NO
+SUBCATCHMENTS NONE
+NODES ALL
+LINKS ALL
+
+[TAGS]
+
+[MAP]
+DIMENSIONS 0.000 0.000 1000.000 1000.000
+Units      None
+
+[COORDINATES]
+;;Node           X-Coord            Y-Coord
+;;-------------- ------------------ ------------------
+J1               0                  200
+J2               0                  100
+J5               100                50
+J3               100                150
+J4               200                100
+Outfall          300                100

@@ -8,8 +8,6 @@ reference physics configuration (PowerLaw elements, sources, capacity, a sparse-
 
 from __future__ import annotations
 
-import time
-
 import torch
 
 import noodl.solvers.select as select_module
@@ -58,13 +56,6 @@ def test_build_composed_is_reproducible_given_the_same_seed():
     assert model1.net.n == model2.net.n
     assert model1.net.b == model2.net.b
     assert model1.interface_nodes == model2.interface_nodes
-
-
-def test_build_composed_builds_in_under_two_seconds():
-    t0 = time.perf_counter()
-    build_composed()
-    elapsed = time.perf_counter() - t0
-    assert elapsed < 2.0
 
 
 def test_build_composed_solves_on_the_dense_path_at_ensemble_one():

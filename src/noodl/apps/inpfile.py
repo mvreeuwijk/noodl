@@ -26,12 +26,16 @@ class InpLine:
     raw: str
 
 
-def read_sections(path, *, comment: str = ";") -> dict[str, list[InpLine]]:
+def read_sections(
+    path, *, comment: str = ";", leading: str | None = None
+) -> dict[str, list[InpLine]]:
     """`{SECTION: [InpLine, ...]}` for the file at `path`, comments and blanks removed.
 
     A line before the first `[SECTION]` header is REFUSED naming the line: it would
     otherwise be dropped silently, and a stray record is exactly the kind of thing a
-    hand-edited `.inp` grows.
+    hand-edited `.inp` grows. A format that defines what such a line is passes it as
+    `leading` (the section name its lines belong to): SWMM's `input.c` starts its second
+    pass in section 0, `[TITLE]`, so the SWMM reader passes ``"TITLE"``.
     """
     path = Path(path)
     sections: dict[str, list[InpLine]] = {}
@@ -56,6 +60,9 @@ def read_sections(path, *, comment: str = ";") -> dict[str, list[InpLine]]:
             current = text[1:-1].strip().upper()
             sections.setdefault(current, [])
             continue
+        if current is None and leading is not None:
+            current = leading.upper()
+            sections.setdefault(current, [])
         if current is None:
             # Punctuation after the line number, matching every other refusal in this
             # module (`require_fields`, `as_float`).

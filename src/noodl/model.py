@@ -53,6 +53,7 @@ from typing import Protocol, runtime_checkable
 
 import torch
 
+from noodl._broadcast import broadcast_shapes
 from noodl._tracking import TrackedDict
 from noodl.layers.allocation import AllocatedFlowLayer
 from noodl.layers.potential import PotentialFlowLayer
@@ -110,7 +111,7 @@ def _anderson_mix(xs: Sequence[Tensor], gs: Sequence[Tensor],
     state is `g` itself and the caller decides what to feed instead.
     """
     g, r = gs[-1], rs[-1]
-    batch = torch.broadcast_shapes(*(t.shape[:-1] for t in (*xs, *gs, *rs)))
+    batch = broadcast_shapes(*(t.shape[:-1] for t in (*xs, *gs, *rs)))
     m = min(len(xs) - 1, r.shape[-1])
     keep = torch.full(batch, m > 0, dtype=torch.bool, device=r.device)
     # Gram-Schmidt and back substitution are written out over the (at most `M`, in practice
@@ -198,7 +199,7 @@ class _AndersonHistory:
         mixed keys. `w` is the relaxation of the fallback step; `converged` (batch-shaped,
         or None before any verdict) marks the instances to hold at `fed`."""
         fed = {k: fed.get(k, out[k]) for k in self.keys}
-        batch = torch.broadcast_shapes(
+        batch = broadcast_shapes(
             *(t.shape[:-1] for k in self.keys for t in (fed[k], out[k])))
         sizes = [out[k].shape[-1] for k in self.keys]
 
@@ -307,6 +308,19 @@ class Model:
     point to differentiate, so `on_failure="return"` still raises, naming that reason, when a
     gradient was wanted).
 
+    A primal pass is one iterate: a potential solve that does not converge within a pass
+    (Newton's `max_iter`) does not end the step. It returns its last Newton iterate, the pass
+    is judged not converged, and the iteration goes on from it; only the iteration's own
+    verdict raises (or accepts, below). A potential solve that is differentiated still
+    raises (`PotentialFlowLayer.solve`'s ``on_failure="return_primal"``), and a caller's own
+    `on_failure` is passed through unchanged.
+
+    `iterate_on_limit="accept"` (default ``"raise"``) makes a batch that does not converge
+    within `iterate_max` return its last pass instead of raising, as SWMM accepts a step
+    that used up its MAX_TRIALS (`dynwave.c`, counted as non-converging), with
+    ``diagnostics["converged"]`` False for those instances. A gradient is still refused
+    there: there is no fixed point to differentiate.
+
     `iterate_flow_tol` (optional; per potential layer named in `iterate_tol`, absolute, in
     flow units) also judges that layer's flows: a pass converges only when its returned
     `.q` is within it of the `.q` it was fed. `iterate_acceleration="anderson"` (opt-in)
@@ -350,6 +364,7 @@ class Model:
         iterate_acceleration: str | None = None,
         iterate_memory: int = 5,
         iterate_flow_tol: Mapping[str, float] | None = None,
+        iterate_on_limit: str = "raise",
     ) -> None:
         if coupling not in ("pingpong", "iterate"):
             raise ValueError(
@@ -569,6 +584,11 @@ class Model:
                 f"passes Anderson mixing combines), got {iterate_memory!r}"
             )
         self.iterate_memory = iterate_memory
+        if iterate_on_limit not in ("raise", "accept"):
+            raise ValueError(
+                f"Model: iterate_on_limit must be 'raise' or 'accept', got {iterate_on_limit!r}"
+            )
+        self.iterate_on_limit = iterate_on_limit
         # The tolerance of the ONE implicit-adjoint GMRES solve at the converged interface
         # deliberately independent of the primal `iterate_tol`: that independence is
         # the whole point of differentiating the fixed point instead of the iteration.
@@ -1232,7 +1252,9 @@ class Model:
         previous pass's own output -- a closure that integrates (a sewer manhole's
         storage sweep, a tank level) would otherwise advance once per PASS instead of once
         per STEP. The returned state is the LAST pass's own output, never a relaxed one.
-        Convergence is judged per instance on detached copies.
+        Convergence is judged per instance on detached copies, and a pass whose potential
+        solve stopped short of its tolerance (``on_failure="return_primal"``, the default of
+        the primal passes) is not converged whatever its change.
 
         A potential layer named in `iterate_tol` is iterated on its own potential: it
         converges when the largest change of `phi` over its interior and boundary nodes is
@@ -1336,6 +1358,13 @@ class Model:
             _AndersonHistory(self, self.iterate_memory)
             if self.iterate_acceleration == "anderson" else None
         )
+        # A primal pass is one iterate of the outer fixed point: a potential solve that does
+        # not converge within it returns its last Newton iterate (on the primal path only,
+        # "return_primal") and the pass is judged not converged, rather than ending the
+        # step. A caller's own `on_failure` is kept as given.
+        pass_kwargs = dict(solve_kwargs)
+        pass_kwargs.setdefault("on_failure", "return_primal")
+        inner_failed: Tensor | None = None
         # A `while` rather than `for passes in range(...)`: the pass count is wanted AFTER
         # the loop (it goes into the diagnostics and into the failure message), which a loop
         # control variable unused inside the body is not (ruff B007).
@@ -1348,10 +1377,11 @@ class Model:
             # ONE differentiable pass after the loop, never from these.
             with torch.set_grad_enabled(passes == 1 and torch.is_grad_enabled()):
                 new, diag, _ = self._pass(
-                    fed, drivers, dt, solve_kwargs, step_from=state, t=t,
+                    fed, drivers, dt, pass_kwargs, step_from=state, t=t,
                     boundary_transfers=boundary_transfers, produced=produced,
                     warm_start=warm_start,
                 )
+                inner_failed = self._unsolved(diag)
                 if passes == 1:
                     needs_adjoint = any(new[k].requires_grad for k in produced)
                     new = {k: v.detach() for k, v in new.items()}
@@ -1393,6 +1423,9 @@ class Model:
                                 ok = this_q if ok is None else (ok & this_q)
                         this = change[name] <= tol
                         ok = this if ok is None else (ok & this)
+                    if inner_failed is not None:
+                        # a pass whose potential solve stopped short is not a fixed point
+                        ok = ok & ~inner_failed
                     converged = ok
                 if bool(converged.all()):
                     break
@@ -1424,6 +1457,8 @@ class Model:
                 f"passes for instances {failing}; largest change per key {worst}, "
                 f"tolerances {self.iterate_tol}"
                 + (f", flow tolerances {self.iterate_flow_tol}" if self.iterate_flow_tol else "")
+                + ("; the last pass's potential solve did not converge either"
+                   if inner_failed is not None and bool(inner_failed.any()) else "")
             )
             if needs_adjoint:
                 raise RuntimeError(
@@ -1432,7 +1467,9 @@ class Model:
                     "state here (it returns the primal state only when nothing requires a "
                     "gradient, e.g. under torch.no_grad() or with differentiable=False)"
                 )
-            if not (solve_kwargs.get("on_failure") == "return" and diagnostics is not None):
+            if self.iterate_on_limit != "accept" and not (
+                solve_kwargs.get("on_failure") == "return" and diagnostics is not None
+            ):
                 raise RuntimeError(message)
         # A key `_pass` does not write is carried through it verbatim, pass after pass, so
         # its value in the returned state is the caller's own -- and so is its graph, which
@@ -1521,6 +1558,20 @@ class Model:
                  "layers": diag, "adjoint": adjoint, "adjoint_batched": adjoint_batched}
             )
         return new
+
+    def _unsolved(self, diag: Mapping) -> Tensor | None:
+        """Per instance, whether any potential solve of a pass (its `diag`) stopped short of
+        its own tolerance (`on_failure="return_primal"`); ``None`` when every one converged."""
+        failed: Tensor | None = None
+        for name in self.potential:
+            ok = diag.get(name, {}).get("converged")
+            if ok is None:
+                continue
+            ok = torch.as_tensor(ok)
+            if bool(ok.all()):
+                continue
+            failed = ~ok if failed is None else (failed | ~ok)
+        return failed
 
     def residuals(self, state, drivers) -> dict[str, Tensor]:
         """Nodal balances at `state`: interior residual per potential layer, dx/dt per

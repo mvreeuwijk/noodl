@@ -110,7 +110,21 @@ class PotentialFlowLayer:
     `A_I g(A^T phi) = s_I` for the interior potentials by Newton's method, with the element
     laws on its edge kinds, drives added to the potential differences, and prescribed
     potentials at its boundary nodes; differentiable through the converged solution.
-    `flow_unit` is reported by `model.refs`, never used numerically."""
+    `flow_unit` is reported by `model.refs`, never used numerically.
+
+    `analytic_primal` (default ``False``): a ``differentiable=True`` solve that nothing
+    differentiable reaches (grad mode off, or no input requiring grad) runs the
+    ``differentiable=False`` branch, whose Newton Jacobian is the elements' and node
+    sources' own analytic ``dflow`` rather than autograd through ``functional_call``. The
+    result is the same root to the Newton tolerance (not bitwise: the two Jacobians may
+    differ at a kink), returned detached as it would be anyway. It is opt-in because it
+    trusts every ``dflow`` to be the derivative of its ``flow`` (the sewer dynamic wave sets
+    it: its laws' ``dflow`` are exact).
+
+    `newton_defaults` (default none) are Newton keywords (`solvers.newton.newton`) every
+    `solve` of this layer uses unless the call gives its own, for laws that need them: the
+    sewer dynamic wave sets ``line_search="convex"`` and ``step_floor`` (its kinked laws are
+    each non-decreasing, so the residual is the gradient of a convex function)."""
 
     def __init__(
         self,
@@ -125,7 +139,11 @@ class PotentialFlowLayer:
         quantity: str = "potential",
         unit: str = "",
         flow_unit: str = "",
+        analytic_primal: bool = False,
+        newton_defaults: Mapping | None = None,
     ) -> None:
+        self.analytic_primal = bool(analytic_primal)
+        self.newton_defaults = dict(newton_defaults or {})
         if linear_solver not in _LINEAR_SOLVERS:
             raise ValueError(
                 f"unknown linear_solver {linear_solver!r} in layer {name!r}; expected one "
@@ -215,6 +233,11 @@ class PotentialFlowLayer:
         touched = torch.zeros(net.n, dtype=torch.bool)
         touched[self._src] = True
         touched[self._tgt] = True
+        # A node a node source acts at is active too: its row is the source alone (a
+        # junction no conduit reaches still has its storage, `sewer.dynwave.JunctionStorage`).
+        for ns in node_sources:
+            if isinstance(ns, NodeSource):
+                touched[ns.nodes] = True
         all_interior = net.interior_index(boundary)
         # A node no edge of this layer's kinds touches is INACTIVE for this
         # layer -- not an unknown, and not a singular row. A wall-mass node in a building
@@ -764,6 +787,18 @@ class PotentialFlowLayer:
                     )
 
     # ------------------------------------------------------------------ solve
+    def _reaches_grad(self, drivers: Mapping, sources, phi_boundary) -> bool:
+        """Whether anything a differentiable solve threads through `Function.apply` requires
+        grad under the current grad mode: a driver, `sources`, `phi_boundary`, or an element
+        or node source's parameter."""
+        if not torch.is_grad_enabled():
+            return False
+        values = bulk_values(drivers, list(drivers.keys()))
+        values += [sources, phi_boundary]
+        for owner in (*self._elements, *self._node_sources):
+            values += list(owner.parameters())
+        return any(isinstance(v, torch.Tensor) and v.requires_grad for v in values)
+
     def solve(
         self,
         phi_boundary,
@@ -833,6 +868,18 @@ class PotentialFlowLayer:
           refused outright by `solvers.implicit.implicit_solve`: the adjoint linearises at
           the returned point, and at a non-converged point the gradient is silently wrong.
 
+        `on_failure="return_primal"` is `"return"` where the solve takes the primal
+        (non-differentiable) path -- `differentiable=False`, or `analytic_primal` with nothing
+        differentiable reaching it -- and `"raise"` where it is differentiated; it needs
+        `diagnostics=` too. It is for a caller that iterates the solve inside an outer
+        fixed point (`Model(coupling="iterate")`), where one unconverged pass is only an
+        iterate and the outer iteration judges it, but where a differentiated solve must
+        still converge.
+
+        `newton_defaults` (constructor) supplies Newton keywords (e.g. ``line_search``,
+        ``step_floor``, ``max_iter``) this layer's own laws call for; a keyword given here
+        overrides it.
+
         The inner linear solver for NEWTON's own iteration is this layer's `linear_solver`
         (set at construction), unless the caller overrides it with an explicit `method=`
         among `newton_kwargs`. That override does NOT reach the initial guess: when `phi0`
@@ -855,7 +902,14 @@ class PotentialFlowLayer:
         gradients from the adjoint).
         """
         drivers = drivers or {}
+        for key, value in self.newton_defaults.items():
+            newton_kwargs.setdefault(key, value)
         newton_kwargs.setdefault("method", self.linear_solver)
+        primal_only = newton_kwargs.get("on_failure") == "return_primal"
+        if primal_only:
+            # decided below, once the path is known: "return" on the primal path, "raise"
+            # on the differentiable one
+            newton_kwargs["on_failure"] = "return"
         # Name this layer on every error the Newton solve or its INNER linear solves raise.
         # Grounding is certified at phi0, but slopes change between Newton iterates, so an
         # instance can lose it mid-iteration; without this the refusal read "newton:
@@ -904,6 +958,18 @@ class PotentialFlowLayer:
             node_slopes0 = self._node_source_slopes(phi0_full, drivers)
             self._grounding_check(dq0, where="solve", node_slopes=node_slopes0)
 
+        if differentiable and self.analytic_primal and not self._reaches_grad(
+            drivers, sources, phi_boundary
+        ):
+            # Nothing differentiable reaches this solve, so the implicit path would return
+            # the same detached root through an autograd Jacobian (`analytic_primal`).
+            differentiable = False
+        # "return_primal": "return" unless something differentiable reaches the solve; a
+        # differentiable solve that nothing reaches is its forward Newton alone (below).
+        forward_only = primal_only and differentiable and not self._reaches_grad(
+            drivers, sources, phi_boundary)
+        if primal_only and differentiable and not forward_only:
+            newton_kwargs["on_failure"] = "raise"
         if not differentiable:
             # The WHOLE non-differentiable solve runs under no_grad -- the Newton iteration,
             # every inner linear solve inside it, and the final assemble/flows. Two reasons,
@@ -1162,14 +1228,35 @@ class PotentialFlowLayer:
             dq = _dflows_functional(phi, drv, rebuilt)
             return self._operator_at(dq, _node_slopes_functional(phi, drv, rebuilt))
 
-        x = implicit_solve(
-            residual_fn,
-            operator_fn,
-            phi0,
-            all_params,
-            diagnostics=diagnostics,
-            **newton_kwargs,
-        )
+        if forward_only:
+            # `implicit_solve`'s own forward (the same Newton on the same autograd Jacobian),
+            # which may return unconverged: nothing reaches a gradient, so no adjoint is
+            # ever asked of this point.
+            with torch.no_grad():
+                result = newton(
+                    lambda x: residual_fn(x, *all_params),
+                    lambda x: operator_fn(x, *all_params),
+                    phi0,
+                    **newton_kwargs,
+                )
+            x = result.x
+            if diagnostics is not None:
+                diagnostics.update(
+                    newton_iterations=result.iterations,
+                    linear_iterations=result.linear_iterations,
+                    backend=result.backend,
+                    converged=result.converged,
+                    residual_norm=result.residual_norm,
+                )
+        else:
+            x = implicit_solve(
+                residual_fn,
+                operator_fn,
+                phi0,
+                all_params,
+                diagnostics=diagnostics,
+                **newton_kwargs,
+            )
         if diagnostics is not None:
             diagnostics["method"] = newton_kwargs["method"]
         phi = self.assemble(x, phi_boundary)

@@ -460,15 +460,17 @@ def test_dynamic_wave_allows_loops_and_flat_pipes():
         dataclasses.replace(net, routing="kinematic_wave").validate()
 
 
-def test_dynamic_wave_refuses_a_component_without_an_outfall():
+def test_dynamic_wave_allows_a_component_without_an_outfall_but_the_tree_rules_do_not():
+    """SWMM asks for one outfall in the network (flowrout.c:325), not one per component."""
     net = SewerNetwork(
         (Manhole("A", 1.0), Manhole("B", 1.0), Manhole("X", 1.0), Manhole("Y", 1.0)),
         (Pipe("AB", "A", "B", 100.0, 0.3, 0.013, 0.001),
          Pipe("BO", "B", "O", 100.0, 0.3, 0.013, 0.001),
          Pipe("XY", "X", "Y", 100.0, 0.3, 0.013, 0.001)),
         (Outfall("O", 0.8),), routing="dynamic_wave")
-    with pytest.raises(ValueError, match="reach no outfall"):
-        net.validate()
+    net.validate()
+    with pytest.raises(ValueError, match="manhole 'Y' has 0 outgoing"):
+        dataclasses.replace(net, routing="kinematic_wave").validate()
 
 
 def test_dynamic_wave_refuses_an_outfall_with_two_conduits():
