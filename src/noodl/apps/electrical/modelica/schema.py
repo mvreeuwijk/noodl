@@ -11,8 +11,9 @@ vocabulary it asks it with: `ROLES` (class -> role), the exporter's class groups
 `WIRES`, `STATES`, `LINES` (equal sets, checked by the export contract test), and the
 refusals `REFUSED` / `REFUSED_PREFIXES` (class -> reason).
 
-The error class and the signal record are the building reader's
-(`noodl.apps.building_physics.modelica.schema`), so both readers raise and pass the same types.
+The signal record is the building reader's (`noodl.apps.building_physics.modelica.schema`),
+and this reader's `ModelicaImportError` is a subclass of that reader's, so an `except` of
+either error class catches the refusals of both readers' circuits.
 """
 
 from __future__ import annotations
@@ -22,7 +23,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from noodl.apps.building_physics.modelica.schema import ModelicaImportError, Signal
+from noodl.apps.building_physics.modelica import schema as _building
+from noodl.apps.building_physics.modelica.schema import Signal
 
 __all__ = [
     "FORMAT", "GROUNDS", "LINES", "REFUSED", "REFUSED_PREFIXES", "ROLES", "STATES", "WIRES",
@@ -31,6 +33,17 @@ __all__ = [
 ]
 
 FORMAT = "noodl-modelica-electrical/1"
+
+
+class ModelicaImportError(_building.ModelicaImportError):
+    """Raised for a malformed `noodl-modelica-electrical/1` document, or for circuit content
+    the electrical reader does not support.
+
+    The message names every offending field, instance, connector or class (unsupported
+    content is never silently approximated or dropped): `read_modelica_circuit` gathers every
+    refusal it finds and raises exactly one of these. A subclass of the building reader's
+    `ModelicaImportError` (`noodl.apps.building_physics.modelica`).
+    """
 
 _MSL = "Modelica.Electrical.Analog."
 _HEAT = "Modelica.Thermal.HeatTransfer."

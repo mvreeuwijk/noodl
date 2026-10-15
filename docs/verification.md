@@ -142,9 +142,11 @@ compared. Every other column of every CSV is.
 **What runs by default.** The algebraic models run in full, except MSL's `Resistor`, whose
 coupled thermal solve at each of its 501 rows takes about 48 s: by default every tenth row.
 Each dynamic model compares its first rows (6 to 100, each window holding the model's worst
-early row: Cauer's step, the first period of the transformers, the diode's first conduction);
-`pytest -m slow` compares every row, between about 1 and 42 minutes a model (each step costs 10
-to 30 ms, a coupled one about 100 ms). The record is rewritten only by a run with
+early row: Cauer's step, the first period of the transformers, the diode's first conduction;
+`SeriesResonance`'s window ends at 7 ms, well before its resonance at 0.5 s, which only the
+full run reaches); `pytest -m slow` compares every row, between about 1 and 42 minutes a model
+(73 s for `RCModel` to 2,507 s for `SeriesResonance`; each step costs 10 to 30 ms, a coupled
+one about 100 ms). The record is rewritten only by a run with
 `NOODL_RECORD_PARITY=1`.
 
 ## What runs by default

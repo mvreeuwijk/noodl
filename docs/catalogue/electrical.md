@@ -94,7 +94,7 @@ Supporting types.
 |---|---|---|
 | `CircuitNames`<br><small>`noodl.apps.electrical.modelica`</small> | What the reader built, by name. | `CircuitNames(model, times, grid, restarts, dynamic, phasor, nodes, thermal_nodes, devices, sources, columns)` |
 | `Column`<br><small>`noodl.apps.electrical.modelica`</small> | A compared value: `part(sum(c * history[key][..., i] for i, c in terms))`, with `part` `"real"` or `"imag"` (of a phasor; the real part of a real value is itself). | `Column(key, terms, part='real')` |
-| `ModelicaImportError`<br><small>`noodl.apps.electrical.modelica`</small> | Raised for malformed `noodl-modelica/1` JSON, or for unsupported model content. | `ModelicaImportError(...)` |
+| `ModelicaImportError`<br><small>`noodl.apps.electrical.modelica`</small> | Raised for a malformed `noodl-modelica-electrical/1` document, or for circuit content the electrical reader does not support. | `ModelicaImportError(...)` |
 
 ## Functions
 
@@ -106,8 +106,8 @@ Calculations and helpers.
 | `device_values`<br><small>`noodl.apps.electrical`</small> | Per device name, its `(voltage, current)` (V, A) in `state`: `v = v_p - v_n` and the current entering pin `p`, each of shape `(...,)` for a one-port device and `(..., 2)` (port 1, port 2) for a two-port device. A source delivering power has a negative current. | `device_values(model, state)` |
 | `operating_point`<br><small>`noodl.apps.electrical`</small> | The DC operating point at time `t` (s): capacitors open, inductors shorted, sources at their value at `t` (`model.steady`; `solve_kwargs`, such as Newton's `atol` and `rtol`, reach the layer solve). On a phasor model, the AC steady state. | `operating_point(model, drivers, *, t=0.0, **solve_kwargs)` |
 | `transient`<br><small>`noodl.apps.electrical`</small> | March the circuit over the time grid `times` (s), from `state` at `times[0]` (usually `initial_state`), one `Model.step` per interval. | `transient(model, state, drivers, times, *, integration='trapezoidal', **solve_kwargs)` |
-| `extrapolate`<br><small>`noodl.apps.electrical.modelica`</small> | Richardson extrapolation of two `simulate` histories on the same `times`, `fine` with half the step of `coarse`, of a method of order `order`: `fine + (fine - coarse)/(2**order - 1)`. For `scheme="midpoint"` (`order=2`, symmetric, so its error expands in even powers of the step) the result is fourth order. | `extrapolate(coarse, fine, order=2)` |
-| `simulate_circuit`<br><small>`noodl.apps.electrical.modelica`</small> | The circuit's history at `times` (default `names.times`; each must be a time of `names.grid`, increasing): `"time"` `(T,)` and every `".phi"` / `".q"` state entry the model returns, stacked on dim 0. | `simulate_circuit(model, state, drivers, names, *, times=None, **solve_kwargs)` |
+| `extrapolate`<br><small>`noodl.apps.electrical.modelica`</small> | Richardson extrapolation of two `simulate_circuit` histories on the same times, `fine` read with twice the `substeps` of `coarse`: `fine + (fine - coarse)/(2**order - 1)` for every entry but `"time"`. The circuit steps are trapezoidal (backward Euler after each restart), so `order=2` removes the leading step-size error; raises `ValueError` when the two histories are not on the same times. | `extrapolate(coarse, fine, order=2)` |
+| `simulate_circuit`<br><small>`noodl.apps.electrical.modelica`</small> | The circuit's history at `times` (default `names.times`; each must be a time of `names.grid`, increasing; a single time may be a scalar): `"time"` `(T,)` (the grid times found, a new tensor) and every `".phi"` / `".q"` state entry the model returns, stacked on dim 0. | `simulate_circuit(model, state, drivers, names, *, times=None, **solve_kwargs)` |
 
 ## Constants and tables
 

@@ -19,6 +19,7 @@ from collections.abc import Mapping, Sequence
 
 import torch
 
+from noodl.apps.building_physics.modelica.run import extrapolate as _extrapolate
 from noodl.apps.building_physics.modelica.run import step_drivers
 from noodl.apps.electrical.modelica.assemble import THERMAL, CircuitNames
 from noodl.model import Model, State
@@ -105,3 +106,13 @@ def simulate_circuit(model: Model, state: State, drivers: Mapping[str, Tensor],
     out = {key: torch.stack([row[key] for row in rows]) for key in keys}
     out["time"] = grid[want].clone()
     return out
+
+
+def extrapolate(coarse: Mapping[str, Tensor], fine: Mapping[str, Tensor],
+                order: int = 2) -> dict[str, Tensor]:
+    """Richardson extrapolation of two `simulate_circuit` histories on the same times, `fine`
+    read with twice the `substeps` of `coarse`: `fine + (fine - coarse)/(2**order - 1)` for
+    every entry but `"time"`. The circuit steps are trapezoidal (backward Euler after each
+    restart), so `order=2` removes the leading step-size error; raises `ValueError` when the
+    two histories are not on the same times."""
+    return _extrapolate(coarse, fine, order)

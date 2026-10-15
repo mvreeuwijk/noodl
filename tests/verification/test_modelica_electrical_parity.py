@@ -4,7 +4,8 @@ The reference models are `Modelica.Electrical.Analog` (MSL 4.1.0) and `Buildings
 (MBL v13.0.0, commit 55abf579) examples simulated by OpenModelica 1.27.1 at a DASSL tolerance
 of 1e-12 (`tests/data/modelica_electrical/NOTICE.md`). Each model is read with
 `read_modelica_circuit`, run with `simulate_circuit` on the reference CSV's own time grid, and
-every compared column of the CSV is checked at EVERY row.
+every compared column of the CSV is checked at EVERY row under `-m slow` (the default run
+checks a subset of the rows, below).
 
 Algebraic models (no capacitor, no inductor): the circuit is algebraic in its sources and
 signals, so noodl's steady solve at each output time is the problem the DAE solver solves, and
@@ -14,7 +15,17 @@ agreement is to round-off:
 
 The tolerance is not loosened for any model, column or row. The steady solves use the
 runner's own Newton tolerances (`run.STEADY_ATOL`, `run.STEADY_RTOL`; `THERMAL_STEADY_ATOL`
-for a circuit with a heat-port thermal network); nothing looser is passed.
+for a circuit with a heat-port thermal network); nothing looser is passed. MSL's `Resistor`
+(a coupled thermal solve at every row) is compared at every row only under `-m slow`; the
+default run compares every tenth row at the same bound (`SUBSAMPLED`).
+
+Dynamic models: two fixed-step runs at `r` and `2 r` substeps, combined by Richardson
+extrapolation, agree at every row after the start row to
+
+    |noodl - omc| <= 1e-6 max|omc column|   (`PARITY_RTOL`, of the column's range),
+
+with `r` per model in `PARITY_SUBSTEPS` (measured values in the comment above it). The
+default run compares each model's first rows (`PARITY_ROWS`); `-m slow` every row.
 
 MBL's `ACLine_RL` example is compared with its dynamic branch (`RL_3`, a `FixedZ_dynamic`
 line, and its load `load_sc_3`) omitted; the source `E` feeds that branch too, so its current
@@ -199,7 +210,10 @@ def test_parity_on_the_algebraic_models_at_subsampled_rows(stem):
 # (its coupled steps about 100 ms; its window must reach the diode's first conduction, rows 5
 # to 8). Each window holds the worst row of the model's first 50 to 200 rows (RCModel's first
 # row, Cauer's step at 1 s, SeriesResonance's 2nd and 5th rows, CompareTransformers' 2nd,
-# HeatingRectifier's 7th). `-m slow` compares every row: 2 to 60 minutes a model.
+# HeatingRectifier's 7th). SeriesResonance's default window ends at 7 ms, well before the
+# resonance at 0.5 s, which only the full run reaches. `-m slow` compares every row, about 1
+# to 42 minutes a model (measured 15 Oct 2026: RCModel 73 s, Cauer 306 s, HeatingRectifier
+# 1,609 s, CompareTransformers 2,342 s, SeriesResonance 2,507 s).
 PARITY_RTOL = 1e-6  # of each column's range; never loosened
 PARITY_SUBSTEPS: dict[str, tuple[int, int]] = {
     "Analog.Examples.SeriesResonance": (32, 64), "Analog.Examples.CauerLowPassAnalog": (8, 16),

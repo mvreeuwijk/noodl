@@ -253,7 +253,19 @@ signals, `Modelica.Blocks.Math` chains included.
   `Line` whose load mode says so), an MBL cable with `use_T`, an MBL component with
   `useHeatPort = true`, an MBL resistive part away from its reference temperature (`T` not
   `T_ref`), an `IdealTransformer` with `considerMagnetization`, an `ACDCConverter` with
-  `ground_DC = false`.
+  `ground_DC = false`, an MSL `Diode` with `useHeatPort` but without
+  `useTemperatureDependency` (its law would ignore the heat-port temperature).
+- Inputs the reader does not follow: an AC `Impedance` with `use_R_in`, `use_L_in` or
+  `use_C_in` (an impedance following a signal), an `Inductive` load with `use_pf_in` (a power
+  factor input), and a power factor `pf` inside the band of MBL's
+  `smoothMin(pf, 0.99999, 2.5e-6)`, whose blend is not transcribed (or outside `(0, 1]`).
+- Mixtures one law cannot hold, since these settings apply to every edge of a kind: diodes with
+  and without `useTemperatureDependency`, linearised and nonlinear loads, DC and AC loads in
+  one model.
+- A thermal network part (thermal nodes joined by conductors) held by no fixed temperature and
+  no heat capacitor: its temperature is undetermined, and the refusal names its nodes.
+- A non-finite (NaN or infinite) frequency `f` of an AC source or temperature `T` of a fixed
+  temperature.
 - In a phasor model: an MSL analog component other than `Ground`, a DC `TwoPortRCLine` with
   capacitance (a phasor layer would give it the admittance `j omega C`), AC sources at
   different frequencies.

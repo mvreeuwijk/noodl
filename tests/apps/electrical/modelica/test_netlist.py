@@ -485,3 +485,24 @@ def test_non_finite_frequency_and_fixed_temperature_are_refused(tmp_path):
     msg = _refusal(path)
     assert "E " in msg and "f must be a finite number, found nan" in msg
     assert "amb " in msg and "T must be a finite number, found inf" in msg
+
+
+def test_electrical_import_error_is_its_own_subclass_of_the_building_one(tmp_path, monkeypatch):
+    from noodl.apps.building_physics.modelica import ModelicaImportError as BuildingError
+    from noodl.apps.electrical.modelica import netlist as netlist_module
+    from noodl.apps.electrical.modelica import read_modelica_circuit
+
+    assert issubclass(ModelicaImportError, BuildingError)
+    assert ModelicaImportError is not BuildingError
+    assert "noodl-modelica-electrical/1" in ModelicaImportError.__doc__
+    path = _doc(tmp_path, [_c("x", "Some.Unknown.Class")], [])
+    with pytest.raises(BuildingError):  # either class catches a refusal
+        build(load(path))
+
+    def shared(*args, **kwargs):  # an error from the building reader's shared helpers
+        raise BuildingError("modelica: from a shared helper")
+
+    monkeypatch.setattr(netlist_module, "build", shared)
+    with pytest.raises(ModelicaImportError, match="from a shared helper") as exc:
+        read_modelica_circuit(path)
+    assert type(exc.value.__cause__) is BuildingError

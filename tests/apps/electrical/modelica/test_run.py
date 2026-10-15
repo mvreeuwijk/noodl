@@ -204,3 +204,14 @@ def test_returned_time_is_the_grid_time_and_never_an_input_tensor(tmp_path):
     asked = torch.tensor([0.1 + 1e-12, 0.2], dtype=torch.float64)
     part = simulate_circuit(model, state, drivers, names, times=asked)
     assert part["time"] is not asked and float(part["time"][0]) == float(names.times[1])
+
+
+def test_extrapolate_is_the_circuit_runs_richardson_step(tmp_path):
+    from noodl.apps.building_physics.modelica.run import extrapolate as building_extrapolate
+
+    assert extrapolate is not building_extrapolate and "simulate_circuit" in extrapolate.__doc__
+    coarse = {"time": torch.tensor([0.0, 1.0]), "x": torch.tensor([1.0, 4.0])}
+    fine = {"time": torch.tensor([0.0, 1.0]), "x": torch.tensor([1.0, 7.0])}
+    assert extrapolate(coarse, fine)["x"].tolist() == [1.0, 8.0]
+    with pytest.raises(ValueError, match="same times"):
+        extrapolate(coarse, {**fine, "time": torch.tensor([0.0, 2.0])})
