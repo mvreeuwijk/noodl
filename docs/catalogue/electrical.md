@@ -34,6 +34,12 @@ Descriptions of the physical objects a network is built from.
 | `Switch`<br><small>`noodl.apps.electrical`</small> | An ideal closing switch: closed `v = Ron i`, open `i = Goff v` (`Ron` in ohm, `Goff` in S); closed where its control value exceeds 0.5. `control` is a driver key (read at index 0 of its last dimension) or a `(key, index)` pair. MSL `Ideal.IdealClosingSwitch`. | `Switch(name, p, n, control, Ron=1e-05, Goff=1e-05)` |
 | `Transformer`<br><small>`noodl.apps.electrical`</small> | Two coupled windings `v1 = L1 di1/dt + M di2/dt`, `v2 = M di1/dt + L2 di2/dt` (H), with initial currents `i0 = (i1, i2)` (A). MSL `Basic.Transformer`. | `Transformer(name, p1, n1, p2, n2, L1, L2, M, i0=(0.0, 0.0))` |
 | `VoltageSource`<br><small>`noodl.apps.electrical`</small> | An ideal voltage source `v = offset + V unit(t)` (V), `unit` the waveform. In an AC analysis a `Sine` source is its steady-state phasor (amplitude `V`, the waveform's phase) at the analysis frequency, and a `Constant` source is the magnitude `V` at phase 0; other waveforms are refused there. MSL `Sources.*Voltage`. | `VoltageSource(name, p, n, V, waveform=Constant(), offset=0.0)` |
+| `Branch`<br><small>`noodl.apps.electrical.power`</small> | A line or transformer from `from_bus` to `to_bus`: series resistance `r`, reactance `x` and total line charging susceptance `b` (p.u. on `base_mva`), off-nominal turns ratio `ratio` at the from end (0 means 1) and phase shift `shift_deg` (degrees). | `Branch(from_bus, to_bus, r, x, b, ratio=0.0, shift_deg=0.0, in_service=True)` |
+| `Bus`<br><small>`noodl.apps.electrical.power`</small> | A bus: its id, kind (one of `BUS_KINDS`), voltage magnitude `vm` (p.u.) and angle `va_deg` (degrees) as stated in the file (the slack bus's angle is its setpoint), and its base voltage `base_kv` (kV, informative). | `Bus(id, kind, vm=1.0, va_deg=0.0, base_kv=0.0)` |
+| `FixedShunt`<br><small>`noodl.apps.electrical.power`</small> | A fixed admittance from `bus` to ground, stated as the real power `g_mw` (MW) it consumes and the reactive power `b_mvar` (MVAr) it injects at a bus voltage of 1 p.u. | `FixedShunt(bus, g_mw, b_mvar)` |
+| `Generator`<br><small>`noodl.apps.electrical.power`</small> | A generator on `bus`: real output `p_mw` (MW), reactive output `q_mvar` (MVAr, a starting value), voltage magnitude setpoint `vm_set` (p.u.) and reactive limits (MVAr). | `Generator(bus, p_mw, q_mvar=0.0, vm_set=1.0, in_service=True, q_max_mvar=inf, q_min_mvar=-inf)` |
+| `Load`<br><small>`noodl.apps.electrical.power`</small> | A constant-power load on `bus`, absorbing `p_mw` (MW) and `q_mvar` (MVAr). | `Load(bus, p_mw, q_mvar)` |
+| `PowerNetwork`<br><small>`noodl.apps.electrical.power`</small> | A power-flow network: buses, branches, generators, loads and fixed shunts in file order, the system base `base_mva` (MVA), a `name` and free-form `notes` (a reader records what it skipped there). Construction refuses duplicate bus ids, an unknown bus kind, a nonpositive base and any element on a bus that does not exist. | `PowerNetwork(buses, branches, generators, loads=(), shunts=(), base_mva=100.0, name='', notes=<factory>)` |
 
 ## Elements (constitutive laws)
 
@@ -88,6 +94,7 @@ Readers and writers of other tools' file formats.
 | Name | What it does | How to call it |
 |---|---|---|
 | `read_modelica_circuit`<br><small>`noodl.apps.electrical.modelica`</small> | Read a `noodl-modelica-electrical/1` file into `(model, state, drivers, names)`. | `read_modelica_circuit(path, *, substeps=1, omit=())` |
+| `read_matpower`<br><small>`noodl.apps.electrical.power`</small> | Read the documented subset of a MATPOWER version 2 case file into a `PowerNetwork`, in the file's units (MW, MVAr, degrees, p.u. impedances on `baseMVA`). | `read_matpower(path)` |
 
 ## Other classes
 
@@ -119,3 +126,4 @@ Named values and option tables.
 | Name | Value |
 |---|---|
 | `LAYER` | `'electrical'` |
+| `BUS_KINDS` | 3 names: `pq`, `pv`, `slack` |
