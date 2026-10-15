@@ -10,6 +10,7 @@ from noodl.apps.electrical.power import (
     DC_LAYER,
     Bus,
     DcPowerFlowSolution,
+    FixedShunt,
     Generator,
     Load,
     PowerNetwork,
@@ -19,7 +20,7 @@ from noodl.apps.electrical.power import (
     solve_power_flow,
 )
 from noodl.elements import Conductance
-from tests._power_cases import power_case
+from tests._power_cases import four_bus, power_case
 
 
 @pytest.fixture(autouse=True)
@@ -49,9 +50,19 @@ def test_case9_is_nodal_analysis_on_the_classic_layer():
     assert abs(sol.pg[0] - 0.67) < 1e-12
 
 
-@pytest.mark.external
+def _shifted():
+    """The four-bus network with a phase shift of -3 degrees on its transformer 3-4, a slack
+    angle of 10 degrees and a shunt conductance at bus 4."""
+    net = four_bus()
+    br = list(net.branches)
+    br[3] = dataclasses.replace(br[3], shift_deg=-3.0)
+    buses = (dataclasses.replace(net.buses[0], va_deg=10.0), *net.buses[1:])
+    return dataclasses.replace(net, buses=buses, branches=tuple(br),
+                               shunts=(FixedShunt(4, 2.0, 8.0),))
+
+
 def test_build_rules():
-    net = read_matpower(power_case("case9_features"))
+    net = _shifted()
     model, state, drivers = dc_power_flow(net)
     assert state == {}
     layer = model.potential[DC_LAYER]
@@ -64,9 +75,11 @@ def test_build_rules():
     shift = drivers[f"{DC_LAYER}.shift"]
     assert shift.dtype == torch.float64
     assert shift.tolist() == [-math.radians(br.shift_deg) for br in branches]
+    assert shift.tolist()[3] == math.radians(3.0)
     slack = model.power_index.slack_bus
     va = {b.id: b.va_deg for b in net.buses}[slack]
-    assert drivers[f"{DC_LAYER}.phi_boundary"].tolist() == [math.radians(va)]
+    assert drivers[f"{DC_LAYER}.phi_boundary"].tolist() == [math.radians(10.0)] == [
+        math.radians(va)]
     assert model.power_network is net
 
 
@@ -78,38 +91,37 @@ def test_phase_shifter_enters_as_a_drive():
     assert len(sol.pf) == 9                     # the out-of-service branch 9-4 is dropped
 
 
-@pytest.mark.external
 def test_injections_balance_the_branch_flows():
-    net = read_matpower(power_case("case14"))
+    net = _shifted()
     model, sol = _dc(net)
     # total generation equals total demand plus shunt conductance: the DC network is lossless
     demand = sum(ld.p_mw for ld in net.loads) + sum(sh.g_mw for sh in net.shunts)
     assert abs(float(sol.pg.sum()) - demand / net.base_mva) < 1e-12
+    # bus 4 is fed by the transformer alone: its flow is bus 4's demand and conductance
+    assert abs(float(sol.pf[3]) - (45.0 + 2.0) / 100) < 1e-12
 
 
-@pytest.mark.external
 def test_batched_drivers():
-    net = read_matpower(power_case("case9"))
+    net = four_bus()
     model, state, drivers = dc_power_flow(net)
     batched = {k: torch.stack([v, 2 * v]) for k, v in drivers.items()}
     sol = dc_power_flow_solution(model, solve_power_flow(model, state, batched))
     single = dc_power_flow_solution(model, solve_power_flow(model, state, drivers))
-    assert sol.pf.shape == (2, 9) and sol.pg.shape == (2, 3)
+    assert sol.pf.shape == (2, 4) and sol.pg.shape == (2, 2)
     assert torch.allclose(sol.pf[1], 2 * single.pf, atol=1e-12)
     # only the slack's generation follows the injections; the others are fixed setpoints
     assert torch.allclose(sol.va[1], 2 * single.va, atol=1e-12)
 
 
-@pytest.mark.external
 def test_zero_reactance_and_islands_are_refused():
-    net = read_matpower(power_case("case9"))
+    net = four_bus()
     br = list(net.branches)
-    br[1] = dataclasses.replace(br[1], x=0.0)   # r = 0.017 keeps the AC model valid
-    with pytest.raises(ValueError, match=r"row 2 of the branch table \(from bus 4 to bus 5\)"):
+    br[0] = dataclasses.replace(br[0], x=0.0)   # r = 0.01 keeps the AC model valid
+    with pytest.raises(ValueError, match=r"row 1 of the branch table \(from bus 1 to bus 2\)"):
         dc_power_flow(dataclasses.replace(net, branches=tuple(br)))
-    cut = [dataclasses.replace(b, in_service=False) if k in (7, 8) else b
+    cut = [dataclasses.replace(b, in_service=False) if k == 3 else b
            for k, b in enumerate(net.branches)]
-    with pytest.raises(ValueError, match=r"not connected to the slack bus.*\[9\]"):
+    with pytest.raises(ValueError, match=r"not connected to the slack bus.*\[4\]"):
         dc_power_flow(dataclasses.replace(net, branches=tuple(cut)))
 
 

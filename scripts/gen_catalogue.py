@@ -20,6 +20,7 @@ import importlib
 import inspect
 import re
 import sys
+import types
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -246,7 +247,7 @@ def _entries(modules: list[str]) -> list[dict]:
 def _constant_text(obj) -> str:
     if isinstance(obj, (int, float, str)):
         return f"`{obj!r}`"
-    if isinstance(obj, dict):
+    if isinstance(obj, (dict, types.MappingProxyType)):
         return f"table of {len(obj)} entries: " + ", ".join(f"`{k}`" for k in list(obj)[:8]) + (
             ", ..." if len(obj) > 8 else "")
     if isinstance(obj, tuple) and obj and all(isinstance(v, str) for v in obj):

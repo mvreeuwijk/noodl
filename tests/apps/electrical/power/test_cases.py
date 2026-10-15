@@ -1,7 +1,11 @@
 """Fetching the MATPOWER standard cases on first use (no network: urllib is replaced)."""
 
+import concurrent.futures
 import hashlib
+import http.client
 import io
+import threading
+from pathlib import Path
 
 import pytest
 
@@ -86,6 +90,62 @@ def test_a_manually_placed_file_is_used(tmp_path, served, table):
     target.write_bytes(b"placed by hand\r\n")
     table["case9"] = _digest(b"placed by hand\n")
     assert matpower_case("case9", cache_dir=tmp_path) == target and asked == []
+
+
+def test_concurrent_fetchers_both_get_the_verified_file(tmp_path, served, table, monkeypatch):
+    files, asked = served
+    files["case14"] = b"function mpc = case14\n"
+    table["case14"] = _digest(files["case14"])
+    both_asking = threading.Barrier(2, timeout=10)
+    serve = cases.urllib.request.urlopen
+
+    def urlopen(url, timeout):
+        both_asking.wait()          # neither writes before both have started downloading
+        return serve(url, timeout)
+
+    monkeypatch.setattr(cases.urllib.request, "urlopen", urlopen)
+    with concurrent.futures.ThreadPoolExecutor(2) as pool:
+        paths = list(pool.map(lambda _: matpower_case("case14", cache_dir=tmp_path), range(2)))
+    target = tmp_path / "matpower" / "8.1" / "case14.m"
+    assert paths == [target, target] and len(asked) == 2
+    assert target.read_bytes() == files["case14"]
+    assert list(target.parent.glob("*.partial")) == []
+
+
+def test_a_file_another_fetcher_holds_open_is_kept_when_it_verifies(tmp_path, served, table,
+                                                                   monkeypatch):
+    files, _ = served
+    files["case30"] = b"function mpc = case30\n"
+    table["case30"] = _digest(files["case30"])
+    target = tmp_path / "matpower" / "8.1" / "case30.m"
+
+    def replace_while_held(src, dst):   # Windows: the target is open in another process
+        Path(dst).write_bytes(placed)
+        raise PermissionError(13, "in use", str(dst))
+
+    monkeypatch.setattr(cases.os, "replace", replace_while_held)
+    placed = files["case30"]
+    assert matpower_case("case30", cache_dir=tmp_path) == target
+    assert list(target.parent.glob("*.partial")) == []
+    target.unlink()
+    placed = b"something else\n"
+    with pytest.raises(PermissionError):
+        matpower_case("case30", cache_dir=tmp_path)
+    assert list(target.parent.glob("*.partial")) == []
+
+
+def test_a_broken_http_response_is_unavailable(tmp_path, monkeypatch):
+    def urlopen(url, timeout):
+        raise http.client.IncompleteRead(b"func")
+
+    monkeypatch.setattr(cases.urllib.request, "urlopen", urlopen)
+    with pytest.raises(MatpowerCaseUnavailableError, match="could not download.*case118"):
+        matpower_case("case118", cache_dir=tmp_path)
+
+
+def test_the_digest_table_is_read_only():
+    with pytest.raises(TypeError):
+        MATPOWER_CASES["case9"] = "0" * 64
 
 
 def test_unknown_names_are_refused():

@@ -1,7 +1,7 @@
 {
  "format": "noodl-power-flow-reference/1",
  "case": "case9_features",
- "case_sha256_lf": "c74d01e06ebc878702db27688a47e4baa61b3fbb085d844f42644a911684fb82",
+ "case_sha256_lf": "f6abec7d6ef4c675a4214c858fc1db5db1624dcb8d6b9be3cdb0366dfded4857",
  "base_mva": 100.0,
  "engines": {
   "pandapower": "3.5.6",

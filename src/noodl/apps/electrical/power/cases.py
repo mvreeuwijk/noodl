@@ -18,7 +18,10 @@ read as LF, so a copy checked out on Windows verifies too.
 from __future__ import annotations
 
 import hashlib
+import http.client
 import os
+import tempfile
+import types
 import urllib.request
 from pathlib import Path
 
@@ -27,14 +30,14 @@ MATPOWER_COMMIT = "1a828c7af590714499284e36ee9c81273388c594"  # tag 8.1
 MATPOWER_SOURCE = ("https://raw.githubusercontent.com/MATPOWER/matpower/"
                    f"{MATPOWER_COMMIT}/data/{{name}}.m")
 
-#: SHA-256 of each known case (LF line endings).
-MATPOWER_CASES = {
+#: SHA-256 of each known case (LF line endings), read-only.
+MATPOWER_CASES = types.MappingProxyType({
     "case9": "ee50fc7bf9f6019c0f3a3bc94d20978cc667b08f695dc725d00dbd998b358623",
     "case14": "2ffc4e1b734ae6c5e92dbe68b4e36010ed695a4bbcc4d065c74c4fbc39fcf3c1",
     "case30": "3d9030311259b553be85d02336b7e1bcb24ec04775bee6671bdb62d18e4e2137",
     "case118": "bc2e6f22b4b9e776572885ee4b50e4f4ab2ee0c5577e9126e86d906f14c4b5f7",
-    "case9_features": "c74d01e06ebc878702db27688a47e4baa61b3fbb085d844f42644a911684fb82",
-}
+    "case9_features": "f6abec7d6ef4c675a4214c858fc1db5db1624dcb8d6b9be3cdb0366dfded4857",
+})
 _DERIVED = {"case9_features": "case9"}
 _TIMEOUT_S = 30.0
 
@@ -58,18 +61,29 @@ def _cache(cache_dir) -> Path:
     return Path(cache_dir) / "matpower" / MATPOWER_RELEASE
 
 
-def _write(path: Path, data: bytes) -> None:
+def _write(path: Path, data: bytes, expected: str) -> None:
+    """Write `data` to `path` through a uniquely named temporary file, so concurrent
+    fetchers of one case never share a partial file. If another fetcher's file is already
+    in place and cannot be replaced (Windows), it is kept when its digest verifies."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    partial = path.with_name(path.name + ".partial")
-    partial.write_bytes(data)
-    os.replace(partial, path)
+    handle, partial = tempfile.mkstemp(dir=path.parent, prefix=path.name + ".",
+                                       suffix=".partial")
+    try:
+        with os.fdopen(handle, "wb") as out:
+            out.write(data)
+        try:
+            os.replace(partial, path)
+        except (PermissionError, FileExistsError):
+            if not (path.exists() and _digest(path.read_bytes()) == expected):
+                raise
+    finally:
+        if os.path.exists(partial):
+            os.remove(partial)
 
 
-def _row(fields: str) -> str:
-    return "\t" + "\t".join(fields.split()) + ";"
-
-
-_GEN = " 300 -300 {vg} 100 {status} {pmax} 10" + " 0" * 11
+# case9_features: case9 with these changes. Columns are 0-based in MATPOWER's tables
+# (bus: 4 GS, 5 BS, 8 VA; gen: 0 GEN_BUS, 1 PG, 2 QG, 5 VG, 7 GEN_STATUS; branch: 2 BR_R,
+# 3 BR_X, 4 BR_B, 8 TAP, 9 SHIFT, 10 BR_STATUS). Values are the file's text.
 _FEATURES_HEADER = """\
 function mpc = case9_features
 %CASE9_FEATURES  case9 modified to exercise every branch, bus and generator
@@ -78,36 +92,54 @@ function mpc = case9_features
 %   conductance, two generators on one bus, a generator on a PQ bus, an
 %   out-of-service generator leaving a PV bus without generation (MATPOWER then
 %   treats the bus as PQ), and a nonzero slack angle.
-%   Derived from MATPOWER's case9 (see NOTICE.md in this directory).
+%   Derived from MATPOWER's case9 (see tests/data/power_flow/NOTICE.md in noodl physics).
 """
-#: case9 row -> the rows replacing it in case9_features.
-_FEATURES_ROWS = {
-    _row("1 3 0 0 0 0 1 1 0 345 1 1.1 0.9"): [_row("1 3 0 0 0 0 1 1 10 345 1 1.1 0.9")],
-    _row("5 1 90 30 0 0 1 1 0 345 1 1.1 0.9"): [_row("5 1 90 30 5 10 1 1 0 345 1 1.1 0.9")],
-    _row("2 163 6.54" + _GEN.format(vg=1.025, status=1, pmax=300)): [
-        _row("2 123 6.54" + _GEN.format(vg=1.025, status=1, pmax=300)),
-        _row("2 40 0" + _GEN.format(vg=1.025, status=1, pmax=300))],
-    _row("3 85 -10.95" + _GEN.format(vg=1.025, status=1, pmax=270)): [
-        _row("3 85 -10.95" + _GEN.format(vg=1.025, status=0, pmax=270)),
-        _row("7 60 15" + _GEN.format(vg=1, status=1, pmax=270))],
-    _row("1 4 0 0.0576 0 250 250 250 0 0 1 -360 360"): [
-        _row("1 4 0 0.0576 0 250 250 250 1.02 -3 1 -360 360")],
-    _row("3 6 0 0.0586 0 300 300 300 0 0 1 -360 360"): [
-        _row("3 6 0 0.0586 0 300 300 300 0.98 5 1 -360 360")],
-    _row("7 8 0.0085 0.072 0.149 250 250 250 0 0 1 -360 360"): [
-        _row("7 8 0.0085 0.072 0.149 250 250 250 0 0 1 -360 360"),
-        _row("7 8 0.0170 0.144 0.0745 250 250 250 0 0 1 -360 360")],
-    _row("9 4 0.01 0.085 0.176 250 250 250 0 0 1 -360 360"): [
-        _row("9 4 0.01 0.085 0.176 250 250 250 0 0 0 -360 360")],
+#: (table, row) -> {column: new text}
+_FEATURES_CHANGES = {
+    ("bus", 0): {8: "10"},                          # slack angle 10 degrees
+    ("bus", 4): {4: "5", 5: "10"},                  # shunt Gs 5 MW, Bs 10 MVAr at bus 5
+    ("gen", 1): {1: "123"},                         # bus 2's generation split in two ...
+    ("gen", 2): {7: "0"},                           # bus 3's only generator out of service
+    ("branch", 0): {8: "1.02", 9: "-3"},            # tap and phase shift on 1-4
+    ("branch", 3): {8: "0.98", 9: "5"},             # tap and phase shift on 3-6
+    ("branch", 8): {10: "0"},                       # 9-4 out of service
+}
+#: (table, row) -> rows inserted after it, each a copy of that row with {column: new text}
+_FEATURES_INSERTED = {
+    ("gen", 1): [{1: "40", 2: "0"}],                # ... the second generator on bus 2
+    ("gen", 2): [{0: "7", 1: "60", 2: "15", 5: "1"}],   # a generator on the PQ bus 7
+    ("branch", 5): [{2: "0.0170", 3: "0.144", 4: "0.0745"}],  # a second 7-8 line
 }
 
 
+def _edited(fields: list[str], change: dict[int, str]) -> str:
+    out = list(fields)
+    for column, text in change.items():
+        out[column] = text
+    return "\t" + "\t".join(out) + ";"
+
+
 def _case9_features(case9: str) -> bytes:
-    """case9's text with its header replaced, the rows above replaced and its OPF data
+    """case9's text with its header replaced, the changes above applied and its OPF data
     (generator costs) dropped."""
     lines = case9.replace("\r\n", "\n").split("\n")
     body = lines[lines.index("%   MATPOWER") + 1:lines.index("%%-----  OPF Data  -----%%") - 1]
-    out = [row for line in body for row in _FEATURES_ROWS.get(line, [line])]
+    out: list[str] = []
+    table, row = None, 0
+    for line in body:
+        if line.startswith("mpc.") and line.endswith("= ["):
+            table, row = line[4:line.index(" ")], 0
+            out.append(line)
+        elif line == "];":
+            table = None
+            out.append(line)
+        elif table is not None:
+            fields = line.strip().rstrip(";").split("\t")
+            out.append(_edited(fields, _FEATURES_CHANGES.get((table, row), {})))
+            out.extend(_edited(fields, c) for c in _FEATURES_INSERTED.get((table, row), []))
+            row += 1
+        else:
+            out.append(line)
     return (_FEATURES_HEADER + "\n".join(out) + "\n").encode("ascii")
 
 
@@ -147,7 +179,7 @@ def matpower_case(name: str, *, cache_dir=None) -> Path:
         try:
             with urllib.request.urlopen(url, timeout=_TIMEOUT_S) as response:  # noqa: S310
                 data = response.read()
-        except OSError as exc:
+        except (OSError, http.client.HTTPException) as exc:
             raise MatpowerCaseUnavailableError(
                 f"could not download MATPOWER case {name!r} from {url} ({exc}); without a "
                 f"network connection, save that file as {path} (SHA-256 of its bytes with LF "
@@ -156,7 +188,7 @@ def matpower_case(name: str, *, cache_dir=None) -> Path:
     found = _digest(data)
     if found != expected:
         raise _refuse_digest(name, what, expected, found)
-    _write(path, data)
+    _write(path, data, expected)
     return path
 
 

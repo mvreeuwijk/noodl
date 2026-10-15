@@ -259,8 +259,8 @@ The power laws below (`ConstantPowerLoad`, `PowerConverter`) are the exception: 
 complex power as `S = dp conj(q)`, without the factor 1/2, so they assume root-mean-square
 phasors. A circuit that mixes a power law with a `Sine` source must give that source its RMS
 amplitude (`V_peak / sqrt(2)`): otherwise the source's phasor is its peak value, which the power
-laws read as an RMS value, a factor `sqrt(2)` in voltage. Linear laws hold for either scaling. The [Modelica
-reader](#reading-modelica-circuits) uses MBL's RMS phasors throughout.
+laws read as an RMS value, a factor `sqrt(2)` in voltage. Linear laws hold for either scaling.
+The [Modelica reader](#reading-modelica-circuits) uses MBL's RMS phasors throughout.
 
 ## Impedances, constant-power loads and converters
 
@@ -417,8 +417,9 @@ temperature driver its law reads (`Resistance(..., temperature=key)`,
 writes the dissipated power `p = Re((phi[p] - phi[n]) conj(q[edge]))` (MSL `LossPower = v i`)
 into `"thermal.heat"`, and each temperature driver as the driver you give (or
 `base_temperatures[key]` when the drivers lack it) with the heated devices' entries replaced
-by their heat-port temperatures (devices without a heat port keep the temperature you give). Build the model with `coupling="iterate"`, so that every step (or
-steady solve) repeats circuit and thermal solves until both stop changing.
+by their heat-port temperatures (devices without a heat port keep the temperature you give).
+Build the model with `coupling="iterate"`, so that every step (or steady solve) repeats
+circuit and thermal solves until both stop changing.
 
 A resistor `R(T) = R0 (1 + alpha (T - T_ref))` on 220 V, cooled through `G = 50` W/K to
 293.15 K, settles where its Joule heat `V^2 / R(T)` equals `G (T - 293.15)`, a quadratic in
@@ -841,7 +842,7 @@ print(model.power_index.load_buses, [round(g, 4) for g in grad.tolist()])
 
 Load at bus 4 lowers its voltage most, load at bus 2, next to the voltage-controlled
 generator, hardly at all. The test suite checks the adjoint against central differences
-for the bus-5 load of MATPOWER's `case9` (the voltage magnitudes of buses 5 and 6), to 1e-6
+for the bus-3 load of this network (the voltage magnitudes of buses 3 and 4), to 1e-6
 relative.
 
 ## Checks
@@ -905,10 +906,11 @@ MATPOWER; the two agree to 1.1e-13 or better), in
 `tests/verification/test_power_flow_parity.py`. The cases are MATPOWER 8.1's `case9`,
 `case14`, `case30` and `case118`, and `case9_features`, a variant of `case9` with off-nominal
 taps, phase shifters, parallel and out-of-service branches, a shunt conductance, two generators
-on one bus, a generator on a PQ bus, a PV bus left without generation and a slack angle of 10°. The case files are not part of noodl
-physics: `matpower_case` fetches them on first use and checks each against the SHA-256 the
-stored results record (see [File formats: MATPOWER](../formats/matpower.md#matpowers-standard-cases)),
-and the comparisons skip without a network connection.
+on one bus, a generator on a PQ bus, a PV bus left without generation and a slack angle of 10°.
+The case files are not part of noodl physics: `matpower_case` fetches them on first use and
+checks each against the SHA-256 the stored results record (see
+[File formats: MATPOWER](../formats/matpower.md#matpowers-standard-cases)), and the
+comparisons skip without a network connection.
 Tolerances (absolute): |V| 1e-8 p.u., angles 1e-8 rad, generator P and Q (per bus) and DC branch
 flows 1e-6 p.u. Measured worst absolute differences:
 

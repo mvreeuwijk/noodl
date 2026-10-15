@@ -74,8 +74,9 @@ four_bus 4 4 ['gencost']
 `;` or at the end of a line; values are separated by whitespace or commas; `Inf` and `-Inf`
 are numbers. Cell arrays `{ ... }` are accepted only for ignored fields. A row shorter than its
 table needs, or a token that is not a number, is refused with the line number. Bus ids must be
-integers, and `baseMVA` must be positive (`PowerNetwork` refuses `base_mva <= 0`). The network's `name` is the function's name (`case9`), or the file's stem if the
-file has no `function` header.
+integers, and `baseMVA` must be positive (`PowerNetwork` refuses `base_mva <= 0`). The
+network's `name` is the function's name (`case9`), or the file's stem if the file has no
+`function` header.
 
 ## Columns
 
