@@ -54,14 +54,15 @@ def _as_f64(values) -> Tensor:
 
 
 def _piecewise(
-    times: list[float], values: Tensor, s: float, *, linear: bool, left: bool
-) -> Tensor:
+    times: list[float], values: Tensor | Sequence, s: float, *, linear: bool, left: bool
+):
     """`values` (rows at the increasing `times`) evaluated at `s` within [times[0], times[-1]].
 
     `linear` interpolates between rows (continuous, so `left` does not matter); otherwise each
     row is held until the next time, and at a jump `left` takes the earlier row and `not left`
-    the later one. Differentiable in `values`. Shared by `DaySchedule` and `TimeSeries`, and by
-    any other signal built from tabulated values.
+    the later one. Differentiable in `values`. Shared by `DaySchedule`, `TimeSeries` and an
+    occupancy day (whose held rows are zone names, any sequence), and by any other signal built
+    from tabulated values.
 
     `times` may repeat an instant (a file's `24:00:00` row and the next day's `00:00:00` row):
     at that instant the later row is used, and the zero-width interval between the two is never
@@ -76,6 +77,28 @@ def _piecewise(
         return values[i] * (1.0 - w) + values[i + 1] * w
     i = (bisect.bisect_left(times, s) if left else bisect.bisect_right(times, s)) - 1
     return values[min(max(i, 0), n - 1)]
+
+
+def _check_day_times(label: str, times: list[float], n_rows: int, rows: str) -> None:
+    """Refuse a day's `times` (s after midnight) that do not run strictly increasing from 0
+    (00:00:00) to 86400 (24:00:00), or that do not match the `n_rows` `rows` given with them.
+    Shared by `DaySchedule` and `OccupancyDay`."""
+    if len(times) < 2 or times[0] != 0.0:
+        raise ValueError(f"{label}: the first time must be 00:00:00 (0 s)")
+    if times[-1] != DAY:
+        raise ValueError(f"{label}: the last time must be 24:00:00 (86400 s)")
+    if any(b <= a for a, b in zip(times, times[1:], strict=False)):
+        raise ValueError(f"{label}: times must be strictly increasing, got {times}")
+    if n_rows != len(times):
+        raise ValueError(f"{label}: {len(times)} times but {n_rows} {rows}")
+
+
+def _check_time_of_day(label: str, seconds: float) -> float:
+    """`seconds` after midnight as a float, refused outside [0, 86400]."""
+    s = float(seconds)
+    if not 0.0 <= s <= DAY:
+        raise ValueError(f"{label}: {s} s is not a time of day")
+    return s
 
 
 def _seconds_into_file(
@@ -227,25 +250,16 @@ class DaySchedule:
         label = f"DaySchedule {name!r}" if name else "DaySchedule"
         if shape not in _SHAPES:
             raise ValueError(f"{label}: shape must be one of {_SHAPES}, got {shape!r}")
-        if t.numel() < 2 or float(t[0]) != 0.0:
-            raise ValueError(f"{label}: the first time must be 00:00:00 (0 s)")
-        if float(t[-1]) != DAY:
-            raise ValueError(f"{label}: the last time must be 24:00:00 (86400 s)")
-        if bool((t[1:] <= t[:-1]).any()):
-            raise ValueError(f"{label}: times must be strictly increasing, got {t.tolist()}")
-        if v.numel() != t.numel():
-            raise ValueError(f"{label}: {t.numel()} times but {v.numel()} values")
-        self.times, self.values, self.shape, self.name = t, v, shape, name
         self._t = t.tolist()
+        _check_day_times(label, self._t, v.numel(), "values")
+        self.times, self.values, self.shape, self.name = t, v, shape, name
 
     def __repr__(self) -> str:
         return f"DaySchedule({self.name!r}, {self.shape}, {len(self._t)} points)"
 
     def at(self, seconds: float, *, left: bool) -> Tensor:
         """The value at `seconds` after midnight (0..86400); `left` takes the left limit."""
-        s = float(seconds)
-        if not 0.0 <= s <= DAY:
-            raise ValueError(f"DaySchedule {self.name!r}: {s} s is not a time of day")
+        s = _check_time_of_day(f"DaySchedule {self.name!r}", seconds)
         return _piecewise(self._t, self.values, s, linear=self.shape == "trapezoidal", left=left)
 
     def knots(self) -> list[float]:
@@ -253,51 +267,53 @@ class DaySchedule:
         return self._t[1:-1]
 
 
-class WeekSchedule:
-    """CONTAM's week schedule: one `DaySchedule` per day type (1-12).
+class _DayTypeCycle:
+    """One day per CONTAM day type (1-12), followed through a `Calendar`: the week schedule
+    and an occupant's occupancy. A day has `knots()`, its interior times of day.
 
-    `day_schedules` are the distinct day schedules. `day_types` has 12 entries; entry k is
-    the 1-based position in `day_schedules` used on day type k + 1.
-    The default uses the first day schedule every day.
+    `day_schedules` are the distinct days. `day_types` has 12 entries; entry k is the 1-based
+    position in `day_schedules` used on day type k + 1. The default uses the first day every
+    day. A subclass names itself (`_KIND`) and its days (`_DAY`) in error messages.
     """
 
-    def __init__(
-        self,
-        day_schedules: Sequence[DaySchedule],
-        day_types: Sequence[int] = (1,) * N_DAY_TYPES,
-        *,
-        name: str = "",
-    ) -> None:
+    _KIND = ""
+    _DAY = ""
+
+    def __init__(self, day_schedules: Sequence, day_types: Sequence[int] = (1,) * N_DAY_TYPES,
+                 *, name: str = "") -> None:
         days = list(day_schedules)
         js = [int(j) for j in day_types]
-        label = f"WeekSchedule {name!r}" if name else "WeekSchedule"
+        label = f"{self._KIND} {name!r}" if name else self._KIND
         if len(js) != N_DAY_TYPES:
             raise ValueError(f"{label}: needs 12 day types, one per CONTAM day type, got {len(js)}")
         for k, j in enumerate(js, start=1):
             if not 1 <= j <= len(days):
                 raise ValueError(
-                    f"{label}: day type {k} names day schedule {j}, but only {len(days)} given"
+                    f"{label}: day type {k} names {self._DAY} {j}, but only {len(days)} given"
                 )
         self.day_schedules, self.day_types, self.name = days, js, name
 
     def __repr__(self) -> str:
-        return f"WeekSchedule({self.name!r}, day_types={self.day_types})"
+        return f"{self._KIND}({self.name!r}, day_types={self.day_types})"
 
-    def day(self, day_type: int) -> DaySchedule:
-        """The day schedule used on `day_type` (1-12)."""
+    def day(self, day_type: int):
+        """The day used on `day_type` (1-12)."""
         return self.day_schedules[self.day_types[int(day_type) - 1] - 1]
 
-    def value(self, t: float, calendar: Calendar) -> Tensor:
-        left = float(t) > 0.0
+    def _day_and_time(self, t: float, calendar: Calendar, *, left: bool) -> tuple[object, float]:
+        """(the day in use, seconds after midnight) at `t`. A time of day within
+        `calendar.round_off(t)` of a knot IS that knot: a breakpoint is simulation time
+        midnight + knot, which need not survive the calendar's sum exactly."""
         day, tod = calendar.day_and_time(t, left=left)
         schedule = self.day(calendar.day_type(day))
         tol = calendar.round_off(t)
         knot = min(schedule.knots(), key=lambda k: abs(k - tod), default=None)
         if knot is not None and abs(knot - tod) <= tol:
             tod = knot                      # a breakpoint, up to round-off: the knot itself
-        return schedule.at(tod, left=left)
+        return schedule, tod
 
     def breakpoints(self, lo: float, hi: float, calendar: Calendar) -> list[float]:
+        """The times in (lo, hi) (s since the start) of every knot and every midnight."""
         first = calendar.day_and_time(lo, left=False)[0]
         last = calendar.day_and_time(hi, left=True)[0]
         origin = calendar.seconds_from_new_year(0.0)
@@ -307,6 +323,32 @@ class WeekSchedule:
             out.add(midnight)
             out.update(midnight + k for k in self.day(calendar.day_type(day)).knots())
         return sorted(p for p in out if lo < p < hi)
+
+
+class WeekSchedule(_DayTypeCycle):
+    """CONTAM's week schedule: one `DaySchedule` per day type (1-12).
+
+    `day_schedules` are the distinct day schedules. `day_types` has 12 entries; entry k is
+    the 1-based position in `day_schedules` used on day type k + 1.
+    The default uses the first day schedule every day.
+    """
+
+    _KIND = "WeekSchedule"
+    _DAY = "day schedule"
+
+    def __init__(
+        self,
+        day_schedules: Sequence[DaySchedule],
+        day_types: Sequence[int] = (1,) * N_DAY_TYPES,
+        *,
+        name: str = "",
+    ) -> None:
+        super().__init__(day_schedules, day_types, name=name)
+
+    def value(self, t: float, calendar: Calendar) -> Tensor:
+        left = float(t) > 0.0
+        schedule, tod = self._day_and_time(t, calendar, left=left)
+        return schedule.at(tod, left=left)
 
 
 class TimeSeries:

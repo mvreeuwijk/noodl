@@ -117,8 +117,12 @@ def scatter(base: Tensor | None, index: Sequence[int] | None, value: Tensor) -> 
 
 
 def apply_inputs(drivers: Mapping[str, Tensor], inputs: Sequence[Input], t: float,
-                 calendar: Calendar) -> dict[str, Tensor]:
-    """New drivers with every input's value at `t` written in (inputs bound first)."""
+                 calendar: Calendar, *, t_start: float | None = None) -> dict[str, Tensor]:
+    """New drivers with every input's value at `t` written in (inputs bound first).
+
+    A signal with a `step_mean(t0, t1, calendar)` method (an occupant's `Presence`) is
+    written as its mean over the step (t_start, t] when `t_start` (s since the start) is
+    given and below `t`, and as its value at `t` otherwise."""
     out = dict(drivers)
     for inp in inputs:
         if inp.at is not None:
@@ -128,7 +132,12 @@ def apply_inputs(drivers: Mapping[str, Tensor], inputs: Sequence[Input], t: floa
                 f"Input {inp._label()!r}: driver {inp.key!r} does not exist, so positions "
                 f"{inp.index} cannot be written"
             )
-        out[inp.key] = scatter(out.get(inp.key), inp.index, inp.signal.value(t, calendar))
+        mean = getattr(inp.signal, "step_mean", None)
+        if mean is not None and t_start is not None and float(t_start) < float(t):
+            value = mean(float(t_start), float(t), calendar)
+        else:
+            value = inp.signal.value(t, calendar)
+        out[inp.key] = scatter(out.get(inp.key), inp.index, value)
     return out
 
 

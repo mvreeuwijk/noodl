@@ -23,8 +23,9 @@ from noodl.apps.building_physics.inputs import (
     bind_inputs,
     scatter,
 )
+from noodl.apps.building_physics.occupants import Occupancy, OccupancyDay, Presence
 from noodl.apps.building_physics.prj import project_to_model, read_prj, steady
-from noodl.apps.building_physics.schedules import Calendar, TimeSeries
+from noodl.apps.building_physics.schedules import DAY, Calendar, TimeSeries
 from noodl.apps.building_physics.simulation import simulate
 from noodl.apps.building_physics.thermal import R_AIR
 from noodl.elements import Conductance
@@ -979,3 +980,43 @@ def test_a_pressure_difference_sensor_needs_an_air_layer():
     with pytest.raises(ValueError, match=r"control network 'controls' reads 'air.dp'.*"
                                          r"airflow layer 'air'.*\['vent'\]"):
         simulate(model, network.initial_state(), drivers, [0.0, 300.0])
+
+
+# ------------------------------------------------------------------- step-mean inputs
+def _half_and_half():
+    return Occupancy([OccupancyDay([0.0, 450.0, DAY], ["one", "two", "two"])])
+
+
+def test_apply_inputs_writes_a_step_mean_signal_as_its_mean_over_the_step():
+    model, _, drivers = project_to_model(read_prj(THREE))
+    inp = [Input(Presence(_half_and_half(), model.net), "presence.v")]
+    one, two = model.net.node_index("one"), model.net.node_index("two")
+    at_end = apply_inputs(drivers, inp, 600.0, Calendar())["presence.v"]
+    assert at_end[two].item() == 1.0 and at_end.sum().item() == 1.0
+    mean = apply_inputs(drivers, inp, 600.0, Calendar(), t_start=300.0)["presence.v"]
+    assert (mean[one].item(), mean[two].item()) == (0.5, 0.5)
+    ramp = [Input(TimeSeries([0.0, 600.0], [0.0, 6.0]), "V_met")]    # no step_mean: unchanged
+    assert apply_inputs(drivers, ramp, 300.0, Calendar(), t_start=0.0)["V_met"].item() == 3.0
+
+
+def test_simulate_hands_step_mean_signals_the_steps_start():
+    """Each step (and each sub-step at a breakpoint) gets the mean over its own interval."""
+    model, state, drivers = project_to_model(read_prj(THREE))
+    seen = []
+
+    def spy(state, drivers):
+        seen.append(drivers["presence.v"].clone())
+        return {}
+
+    model.closures.append(spy)
+    # A driver the spy reads: `simulate` refuses an input nothing would read.
+    drivers = {**drivers, "presence.v": torch.zeros(model.net.n, dtype=F64)}
+    inp = [Input(Presence(_half_and_half(), model.net), "presence.v")]
+    one, two = model.net.node_index("one"), model.net.node_index("two")
+    simulate(model, state, drivers, [0.0, 300.0, 600.0], inputs=inp,
+             land_on_breakpoints=False, **TIGHT)
+    assert (seen[-1][one].item(), seen[-1][two].item()) == (0.5, 0.5)
+    seen.clear()
+    simulate(model, state, drivers, [0.0, 300.0, 600.0], inputs=inp, **TIGHT)
+    assert seen[-1][two].item() == 1.0 and seen[-1].sum().item() == 1.0   # split at 450 s
+    assert any(s[one].item() == 1.0 for s in seen[1:-1])

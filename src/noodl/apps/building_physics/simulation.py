@@ -171,10 +171,12 @@ def simulate(model: Model, state: State, drivers: Drivers, times, *,
     calendar places that start in the year).
 
     `inputs` are evaluated at the end of every step (`calendar` places t = 0 in the year;
-    default 1 January 00:00, day type 1). `land_on_breakpoints` splits a step at every jump or
-    kink of an input inside it (ContamX does not: `simulate_project` passes False). See the
-    module docstring for `air_mass_change` and the zone-pressure fixed point. `step_kwargs`
-    reach `Model.step` and the airflow solves (`atol`, `rtol`, ...).
+    default 1 January 00:00, day type 1). A signal with a `step_mean` (an occupant's
+    presence) is written as its mean over each step, or each sub-step. `land_on_breakpoints`
+    splits a step at every jump or kink of an input inside it (ContamX does not:
+    `simulate_project` passes False). The histories keep one row per output time either way.
+    See the module docstring for `air_mass_change` and the zone-pressure fixed point.
+    `step_kwargs` reach `Model.step` and the airflow solves (`atol`, `rtol`, ...).
 
     Each step's airflow solve starts from the previous step's pressures. When it does not
     converge from there (a fan whose iterates swing between the ends of its curve, where its
@@ -239,8 +241,10 @@ def simulate(model: Model, state: State, drivers: Drivers, times, *,
         phi = state[f"{mass_layer}.phi"][..., mass_source.nodes]
         return mass_source.mass(phi, model._apply_closures(state, d))
 
-    def drivers_at(t: float) -> Drivers:
-        d = apply_inputs(drivers, bound, t, cal)
+    def drivers_at(t: float, t_start: float | None = None) -> Drivers:
+        # A step-mean signal (an occupant's presence) is averaged over (t_start, t]; at an
+        # instant (the initial solve, the controls' evaluation) it is its value there.
+        d = apply_inputs(drivers, bound, t, cal, t_start=t_start)
         d["time"] = torch.tensor(t, dtype=F64)
         return d
 
@@ -281,7 +285,7 @@ def simulate(model: Model, state: State, drivers: Drivers, times, *,
             d_out["time_step"] = torch.tensor(t_out - t, dtype=F64)
             state = _evaluate_controls(network, state, d_out, t_out - t, t)
         for t1 in [*cuts, t_out]:
-            d, dt, t0 = drivers_at(t1), t1 - t, t
+            d, dt, t0 = drivers_at(t1, t), t1 - t, t
             d["time_step"] = torch.tensor(dt, dtype=F64)
 
             if mass is not None:

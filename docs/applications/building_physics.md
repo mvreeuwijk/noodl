@@ -510,7 +510,9 @@ pressures; when it does not converge from there (a fan curve after a large speed
 swing between the ends of its curve, where its slope is zero), the step is retried once from
 the linear initial guess, and a retry that fails too raises, naming the step.
 `simulate(..., diagnostics={})` lists the retried steps' end times under
-`"airflow_retries"`.
+`"airflow_retries"`. A signal with a step mean, an occupant's `Presence` (see
+[Occupants](#occupants)), is written as its mean over each step (or sub-step) instead of its
+value at the step's end. The histories have one row per output time either way.
 
 ```python
 import torch
@@ -918,6 +920,38 @@ print([f"{v:.4e}" for v in out["species.x"][-1, :, 0].tolist()])
 ```
 
 ContamX gives 1.568757e-05, 1.033583e-05 and 6.466919e-05.
+
+### Occupants
+
+An occupant's movements are an `Occupancy`: one `OccupancyDay(times, zones)` per CONTAM day
+type, each listing the zone (a node name, or `None` for out of the building) from each time
+of day, 00:00:00 to 24:00:00 (s after midnight). `day_types` picks the occupancy day of each
+day type, as for a `WeekSchedule`. The occupant is in a zone from the listed time exactly,
+also in the middle of a step, as in ContamX. `Presence(occupancy, net)` is the occupancy as a
+dimensionless signal over the nodes: an `Input` on it writes, for each step, the fraction of
+the step the occupant spent at each node. A zone that is not a node of the network is
+refused by name.
+
+```python
+from noodl.apps.building_physics import (
+    Calendar, Occupancy, OccupancyDay, Presence, project_to_model, read_prj,
+)
+
+model, state, drivers = project_to_model(read_prj("valThreeZonesWthCtm-UseApi.prj"))
+visit = OccupancyDay([0.0, 8 * 3600.0, 8 * 3600.0 + 120.0, 17 * 3600.0, 86400.0],
+                     [None, "one", "two", None, None])
+away = OccupancyDay([0.0, 86400.0], [None, None])
+# day type 1 Sunday, 2-6 weekdays, 7 Saturday, 8-12 holidays
+occupancy = Occupancy([visit, away], day_types=[2, 1, 1, 1, 1, 1, 2, 2, 2, 2, 2, 2])
+presence = Presence(occupancy, model.net, name="visitor")
+calendar = Calendar(start_day_type=2)                       # a Monday
+step = presence.step_mean(8 * 3600.0, 8 * 3600.0 + 300.0, calendar)
+print({n: round(v, 2) for n, v in zip(model.net.nodes, step.tolist()) if v})
+```
+
+```text
+{'one': 0.4, 'two': 0.6}
+```
 
 ### Species and reactions
 

@@ -101,6 +101,7 @@ from noodl.apps.building_physics.filters import (
 )
 from noodl.apps.building_physics.inputs import Input, apply_inputs, bind_inputs, scatter
 from noodl.apps.building_physics.modelica import read_modelica
+from noodl.apps.building_physics.occupants import Occupancy, OccupancyDay, Presence
 from noodl.apps.building_physics.prj import (
     ContamCompatibilityWarning,
     Project,
@@ -207,9 +208,12 @@ __all__ = [
     "Input",
     "KineticReaction",
     "LinearDensity",
+    "Occupancy",
+    "OccupancyDay",
     "ParticleFilter",
     "PeakEmissionSource",
     "PowerLawDecaySource",
+    "Presence",
     "PressureDrivenSource",
     "Project",
     "RunControl",
