@@ -16,6 +16,9 @@ NODE_ATTRIBUTES: dict[str, tuple[str, str]] = {
                  "for drawing only", "noodl.components"),
     "heat_capacity": ("extra lumped heat capacity of the node (J/K); a wall node's capacity",
                       "thermal_layer"),
+    "in_building_volume": ("1 if the zone counts in the building's conditioned space, 0 if "
+                           "not (CONTAM's zone flag 16, set by the CONTAM reader); absent "
+                           "means 1", "building_air_change_rate"),
 }
 
 EDGE_ATTRIBUTES: dict[str, dict[str, tuple[str, str]]] = {

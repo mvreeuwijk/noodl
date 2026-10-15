@@ -307,6 +307,7 @@ _INTEGRATION = {0: "trapezoid", 1: "short_time_step", 2: "cvode"}
 _SHAPES = {0: "rectangular", 1: "trapezoidal"}
 _VARIABLE_PRESSURE = 1                  # the zone-flags bit of a zone whose pressure is solved
 _VARIABLE_CONTAMINANTS = 2              # ... and of a zone whose concentrations are solved
+_OUTSIDE_BUILDING_VOLUME = 16           # ... and of a zone left out of the building volume
 
 @dataclass
 class PrjElement:
@@ -506,6 +507,16 @@ class Project:
     # `ControlNetwork` from the plan for every model.
     control_nodes: dict[int, PrjControlNode] = field(default_factory=dict)
     control_plan: ControlPlan | None = None
+
+    @property
+    def building_zones(self) -> list[str]:
+        """The nodes of the building's conditioned space, as ContamX counts it for its
+        building air change rate (measured): every zone without the "outside the building
+        volume" flag (air handlers' plenums included), in zone order, then every duct
+        junction."""
+        inside = [z for z in self.zones if not self.zone_flags.get(z, 0)
+                  & _OUTSIDE_BUILDING_VOLUME]
+        return inside + list(self.junctions)
 
     def inputs_for(self, model) -> list[Input]:
         """The project's inputs that `model` can take: a model without a species layer (a run
@@ -1388,7 +1399,8 @@ def _build(*, ambient_conditions, g, species, levels, profiles, elements, zones,
                 f"concentrations and ignores its sources (unsupported)")
         if pl not in levels:
             raise KeyError(f"prj: zone {nr} sits on level {pl}, which the file never defines")
-        net.add_node(zname, z_ref=levels[pl] + rel_ht, volume=vol, T0=T0, heat_capacity=0.0)
+        net.add_node(zname, z_ref=levels[pl] + rel_ht, volume=vol, T0=T0, heat_capacity=0.0,
+                     in_building_volume=float(not flags & _OUTSIDE_BUILDING_VOLUME))
         zone_names.append(zname)
         zone_nr_to_name[nr] = zname
         T_list.append(T0)

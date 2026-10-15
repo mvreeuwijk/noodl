@@ -528,3 +528,59 @@ def test_building_air_change_rate_counts_the_duct_system_inside_the_building():
     torch.testing.assert_close(building_air_change_rate(out, model),
                                _inflow_from(model, f, "ambient") / (1.2041 * (1800.0 + ducts))
                                * 3600, rtol=1e-12, atol=0)
+
+
+def _zone_two_outside(base, tmp_path):
+    """`base` with zone two left out of the building volume (zone flags 3 -> 19)."""
+    text = base.read_bytes().decode()
+    old = "   2  3   0   0   0   1   0.000   600 293.15 0 two"
+    assert text.count(old) == 1
+    variant = tmp_path / f"{base.stem}_two_outside.prj"
+    variant.write_bytes(text.replace(old, "   2 19   0   0   0   1   0.000   600 293.15 0 two")
+                        .encode())
+    return read_prj(variant)
+
+
+@pytest.mark.parametrize(("base", "volume"), [
+    pytest.param(AHS, 1202.0, id="air-handler"),
+    pytest.param(DUCTS, 1200.0 + 0.0314159 * 17.7 + 0.0176715 * 3, id="ducts"),
+])
+def test_a_zone_outside_the_building_volume_is_left_out_by_default(base, volume, tmp_path):
+    """ContamX (measured on both variants to its print precision, 8e-8): a zone whose flags
+    carry 16 is left out of the conditioned volume (1202 and 1200.61 m3), and air leaving it
+    into the space enters the building. The reader marks the zone `in_building_volume` 0,
+    and the default space is `project.building_zones`."""
+    project = _zone_two_outside(base, tmp_path)
+    assert "two" not in project.building_zones
+    assert project.building_zones == [z for z in project.zones if z != "two"] + list(
+        project.junctions)
+    out = simulate_project(project)
+    model, _, _ = project_to_model(project)
+    net = model.net
+    assert net.node_attr("in_building_volume", default=1.0)[net.node_index("two")] == 0.0
+    vol = net.node_attr("volume", default=0.0)
+    assert sum(vol[net.node_index(z)].item() for z in project.building_zones) == pytest.approx(
+        volume, rel=1e-12)
+    rate = building_air_change_rate(out, model)
+    torch.testing.assert_close(
+        rate, building_air_change_rate(out, model, conditioned=project.building_zones),
+        rtol=0, atol=0)
+    f = _layer_q(model, out["air.q"])
+    into = _inflow_from(model, f, "ambient") + _inflow_from(model, f, "two")
+    torch.testing.assert_close(rate, into / (1.2041 * volume) * 3600, rtol=1e-12, atol=0)
+
+
+def test_without_the_flag_every_zone_is_in_the_building():
+    project = read_prj(AHS)
+    assert project.building_zones == project.zones
+    model, _, _ = project_to_model(project)
+    assert bool((model.net.node_attr("in_building_volume", default=1.0) == 1.0).all())
+
+
+def test_a_capacity_of_the_wrong_shape_is_refused_by_name():
+    model = _flow_model({"a": 100.0, "b": 200.0},
+                        [("ambient", "a"), ("a", "b"), ("b", "ambient")])
+    h = _q(0.1, 0.1, 0.1)
+    for fn in (local_mean_age, zone_air_change_rate):
+        with pytest.raises(ValueError, match=r"capacity has shape \(3,\).*2 interior rows"):
+            fn(h, model, capacity=_f(1.0, 2.0, 3.0))

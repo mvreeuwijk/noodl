@@ -89,6 +89,7 @@ def test_every_documented_building_attribute_is_read_by_the_code():
         src / "apps" / "building_physics" / "components.py",
         src / "apps" / "building_physics" / "ducts.py",
         src / "apps" / "building_physics" / "air_handling.py",
+        src / "apps" / "building_physics" / "outputs.py",
         src / "components" / "_flatten.py",
     ])
     names = list(NODE_ATTRIBUTES) + [a for kind in EDGE_ATTRIBUTES.values() for a in kind]

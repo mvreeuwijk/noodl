@@ -153,10 +153,17 @@ def _air_mass(history: Mapping[str, Tensor], model, lay, capacity, where: str) -
     given `capacity`, else the history's `"<layer>.capacity"`, else the layer's own when
     nothing can change it. A model with a closure that writes (or may write: it declares no
     outputs) `"<layer>.capacity"` changes the air mass with the temperature and pressure, so
-    its construction-time value is never used for it silently."""
+    its construction-time value is never used for it silently. A capacity the caller passes
+    as a driver is not seen here: give it as `capacity=` (or use `simulate`'s history)."""
     key = f"{lay.name}.capacity"
     if capacity is not None:
         cap = torch.as_tensor(capacity, dtype=F64)
+        if cap.dim() == 0 or cap.shape[-1] != lay.n_i:
+            raise ValueError(
+                f"{where}: capacity has shape {tuple(cap.shape)}; it must end in the layer "
+                f"{lay.name!r}'s {lay.n_i} interior rows (its interior order, the "
+                f"storage-free rows included)"
+            )
     elif key in history:
         cap = torch.as_tensor(history[key], dtype=F64)
     else:
@@ -187,8 +194,10 @@ def zone_air_change_rate(history: Mapping[str, Tensor], model, *, layer: str = "
 
     The air mass is `capacity` (kg, `(..., n_i)` in the layer's interior order), else the
     history's `"<layer>.capacity"` (each row's own, as `simulate` records it); refused by
-    name when neither is there and a closure of the model writes it. The flows are those of
-    `history` (see the module docstring)."""
+    name when neither is there and a closure of the model writes it. Otherwise the layer's
+    construction-time capacity is used: a capacity given only as a driver to a hand-run
+    model is not known here, so pass it as `capacity=`. The flows are those of `history`
+    (see the module docstring)."""
     lay, f = _layer_flows(history, model, layer)
     mass = _air_mass(history, model, lay, capacity, "zone_air_change_rate")
     src, tgt = _endpoints(model, lay)
@@ -211,19 +220,26 @@ def building_air_change_rate(history: Mapping[str, Tensor], model, *, conditione
     (the nodes' `"volume"`), times 3600. Shape: the history's leading dimensions.
 
     `conditioned` names the nodes of the conditioned space; by default every interior row
-    of the layer. ContamX counts in it every zone without its "outside the building volume"
-    flag and the whole mechanical system: each duct junction (its share of the duct
-    segments' volume) and each air handler's plenums. Air a duct terminal or an air handler
+    of the layer except the nodes whose `"in_building_volume"` attribute is 0 (the CONTAM
+    reader sets it from a zone's "outside the building volume" flag), which for a `.prj`
+    project is `project.building_zones`. ContamX counts in it every zone without that flag
+    and the whole mechanical system: each duct junction (its share of the duct segments'
+    volume) and each air handler's plenums. Air a duct terminal or an air handler
     delivers to a zone then moves within the space, and what enters is the outdoor air drawn
     in at an ambient terminal or an air handler's intake (ContamX's `duct` column) and
-    through the envelope (its `path` column); the total is returned. Refused by name: a
+    through the envelope (its `path` column); only the total is returned, not that split.
+    Refused by name: a
     node that is not an interior row of the layer (KeyError), an empty space, and a space
     that leaves out a storage-free node (a zero-volume plenum: ContamX counts the air
     handler in the space, and air recirculated from it would enter as if from outside)."""
     lay, f = _layer_flows(history, model, layer)
     net = model.net
     interior = lay.interior_idx.tolist()
-    names = [net.nodes[i] for i in interior] if conditioned is None else list(conditioned)
+    if conditioned is None:
+        flagged_in = net.node_attr("in_building_volume", default=1.0)
+        names = [net.nodes[i] for i in interior if flagged_in[i] != 0]
+    else:
+        names = list(conditioned)
     if not names:
         raise ValueError("building_air_change_rate: the conditioned space has no nodes")
     inside = torch.zeros(net.n, dtype=torch.bool)

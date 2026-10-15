@@ -1041,7 +1041,8 @@ edges the species layer advects on, and the zones' air mass from `"species.capac
 `simulate` records whenever a closure writes it: a zone's air mass changes with its
 temperature and pressure, and each row's own is used. `capacity=` (kg, the species layer's
 interior order) overrides it; a history without it, from a model whose air mass can change,
-is refused by name.
+is refused by name. A capacity given only as a driver to a model run by hand is not seen:
+pass it as `capacity=`.
 
 - `local_mean_age(history, model)` is the local mean age of air (s) of every interior row of
   the species layer, as ContamX writes it to its `.age` file (in hours there). noodl solves
@@ -1056,8 +1057,11 @@ is refused by name.
   system: the duct junctions (their duct segments' volume) and the air handlers' plenums. Air
   a supply terminal or an air handler delivers to a zone then moves within the space, and what
   enters is the outdoor air drawn in through the envelope (the `.ach` file's `path` column),
-  at an ambient duct terminal or an air handler's intake (its `duct` column); the total is
-  returned. The default space is every interior row of the species layer.
+  at an ambient duct terminal or an air handler's intake (its `duct` column). Only the
+  total is returned, not the path/duct split. The default space is every interior row of
+  the species layer except the zones the CONTAM reader marks as outside the building volume
+  (the node attribute `in_building_volume`), which for a `.prj` project is
+  `project.building_zones`.
 - `zone_air_change_rate(history, model)` returns `(rate, zones)`: each zone's inflow from the
   ambient and from other zones alike over its air mass (1/h), the inverse of its nominal time
   constant, not an outdoor air change rate. It is an **addition of noodl**: ContamX writes no
