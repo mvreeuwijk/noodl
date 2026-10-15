@@ -741,6 +741,192 @@
       "max_rel": 0.0
     }
   },
+  "Analog.Examples.CauerLowPassAnalog": {
+    "C1.i": {
+      "max_abs": 1.5135400821542078e-08,
+      "max_rel_range": 1.9959400675134452e-08,
+      "own_error": 6.980162725426511e-06
+    },
+    "C1.v": {
+      "max_abs": 2.0225014218944182e-08,
+      "max_rel_range": 3.45437973294872e-08,
+      "own_error": 1.9178462681786715e-05
+    },
+    "C2.i": {
+      "max_abs": 7.874095542259596e-09,
+      "max_rel_range": 4.7575558578340603e-08,
+      "own_error": 9.820005782471884e-06
+    },
+    "C2.v": {
+      "max_abs": 2.4683959931603994e-08,
+      "max_rel_range": 5.605957977495861e-08,
+      "own_error": 2.3930857475669756e-05
+    },
+    "C3.i": {
+      "max_abs": 2.645733959694141e-08,
+      "max_rel_range": 8.404052580490628e-08,
+      "own_error": 2.2665267138997237e-05
+    },
+    "C3.v": {
+      "max_abs": 1.7612619295295784e-08,
+      "max_rel_range": 2.985893996945397e-08,
+      "own_error": 4.378612266523046e-06
+    },
+    "C4.i": {
+      "max_abs": 5.6652330743256485e-09,
+      "max_rel_range": 5.062738762771009e-08,
+      "own_error": 2.0562617846516015e-05
+    },
+    "C4.v": {
+      "max_abs": 7.487653608251321e-09,
+      "max_rel_range": 3.9373668047587064e-08,
+      "own_error": 1.5874890831474906e-05
+    },
+    "C5.i": {
+      "max_abs": 1.2798386586632127e-08,
+      "max_rel_range": 1.2343535735758435e-07,
+      "own_error": 2.4097806995531323e-05
+    },
+    "C5.v": {
+      "max_abs": 1.4272181545968432e-08,
+      "max_rel_range": 2.4332296996757357e-08,
+      "own_error": 2.70940270867387e-06
+    },
+    "L1.i": {
+      "max_abs": 3.361378929367387e-08,
+      "max_rel_range": 4.740712513396794e-08,
+      "own_error": 1.2987735077344593e-05
+    },
+    "L2.i": {
+      "max_abs": 9.753482910213052e-09,
+      "max_rel_range": 1.3667148770863726e-08,
+      "own_error": 5.444152947581708e-06
+    },
+    "R1.i": {
+      "max_abs": 2.0225014218944182e-08,
+      "max_rel_range": 2.1832898846427552e-08,
+      "own_error": 1.2121465158203869e-05
+    },
+    "R2.i": {
+      "max_abs": 1.4272181545968432e-08,
+      "max_rel_range": 2.4332296996757357e-08,
+      "own_error": 2.70940270867387e-06
+    },
+    "V.i": {
+      "max_abs": 2.0225014218944182e-08,
+      "max_rel_range": 2.1832898846427552e-08,
+      "own_error": 1.2121465158203869e-05
+    }
+  },
+  "Analog.Examples.CompareTransformers": {
+    "basicTransformer.i1": {
+      "max_abs": 3.0224030650449762e-06,
+      "max_rel_range": 3.1326391605527457e-07,
+      "own_error": 7.08390895912927e-07
+    },
+    "basicTransformer.i2": {
+      "max_abs": 9.855357884641647e-08,
+      "max_rel_range": 2.54762149665935e-07,
+      "own_error": 3.9766723224622387e-05
+    },
+    "idealTransformer.i1": {
+      "max_abs": 2.9134252316209697e-08,
+      "max_rel_range": 1.4894025138201265e-07,
+      "own_error": 3.904249009713459e-05
+    },
+    "idealTransformer.i2": {
+      "max_abs": 5.8268504632419393e-08,
+      "max_rel_range": 1.4894025138201265e-07,
+      "own_error": 3.904249009713459e-05
+    },
+    "inductor21.i": {
+      "max_abs": 2.9134252316209697e-08,
+      "max_rel_range": 1.4894025138201265e-07,
+      "own_error": 3.904249009713459e-05
+    },
+    "inductor22.i": {
+      "max_abs": 5.8268504632419393e-08,
+      "max_rel_range": 1.4894025138201265e-07,
+      "own_error": 3.904249009713459e-05
+    },
+    "load1.i": {
+      "max_abs": 9.855357885335536e-08,
+      "max_rel_range": 2.5476214968387217e-07,
+      "own_error": 3.9766723224622387e-05
+    },
+    "load2.i": {
+      "max_abs": 5.8268504632419393e-08,
+      "max_rel_range": 1.4894025138201265e-07,
+      "own_error": 3.904249009713459e-05
+    },
+    "resistor11.i": {
+      "max_abs": 3.0224030662107104e-06,
+      "max_rel_range": 3.132639161760998e-07,
+      "own_error": 7.083908959244342e-07
+    },
+    "resistor12.i": {
+      "max_abs": 9.855357838844947e-08,
+      "max_rel_range": 2.54762148482085e-07,
+      "own_error": 3.9766723225483365e-05
+    },
+    "resistor21.i": {
+      "max_abs": 2.9134252566009877e-08,
+      "max_rel_range": 1.4894025265904221e-07,
+      "own_error": 3.9042490096921755e-05
+    },
+    "resistor22.i": {
+      "max_abs": 5.8268505132019754e-08,
+      "max_rel_range": 1.4894025265904221e-07,
+      "own_error": 3.904249009933392e-05
+    },
+    "sineVoltage1.i": {
+      "max_abs": 3.0224030650449762e-06,
+      "max_rel_range": 3.1326391605527457e-07,
+      "own_error": 7.08390895912927e-07
+    },
+    "sineVoltage2.i": {
+      "max_abs": 2.9134252371720848e-08,
+      "max_rel_range": 1.4894025166579698e-07,
+      "own_error": 3.9042490097276486e-05
+    }
+  },
+  "Analog.Examples.HeatingRectifier": {
+    "Capacitor1.i": {
+      "max_abs": 7.084448667704635e-07,
+      "max_rel_range": 1.5176280723793115e-07,
+      "own_error": 8.068806250684874e-06
+    },
+    "Capacitor1.v": {
+      "max_abs": 1.5439427746705148e-08,
+      "max_rel_range": 2.4640295882545828e-08,
+      "own_error": 1.5955238983092417e-06
+    },
+    "HeatCapacitor1.T": {
+      "max_abs": 8.211657132051187e-09,
+      "max_rel_range": 2.7912475463158052e-11,
+      "own_error": 2.9653777954808266e-09
+    },
+    "HeatingDiode1.T_heatPort": {
+      "max_abs": 2.6260408958478365e-08,
+      "max_rel_range": 8.9241300517404e-11,
+      "own_error": 4.285353041099679e-09
+    },
+    "HeatingDiode1.i": {
+      "max_abs": 6.946500856752635e-07,
+      "max_rel_range": 1.4234392437349747e-07,
+      "own_error": 7.56810943572391e-06
+    },
+    "R.i": {
+      "max_abs": 1.5439427746705148e-08,
+      "max_rel_range": 2.4640295882545828e-08,
+      "own_error": 1.5955238983092417e-06
+    },
+    "SineVoltage1.i": {
+      "max_abs": 6.934758607357594e-07,
+      "max_rel_range": 1.4210330857363937e-07,
+      "own_error": 7.568244044078586e-06
+    }
+  },
   "Analog.Examples.Resistor": {
     "SineVoltage1.i": {
       "max_abs": 9.50217682316179e-12,
@@ -753,6 +939,58 @@
     "resistor.i": {
       "max_abs": 2.2160051571518125e-13,
       "max_rel": 1.5456987265380746e-06
+    }
+  },
+  "Analog.Examples.SeriesResonance": {
+    "capacitor1.i": {
+      "max_abs": 2.483500417538309e-07,
+      "max_rel_range": 1.8364759914896033e-07,
+      "own_error": 0.00021444019387928154
+    },
+    "capacitor1.v": {
+      "max_abs": 2.5055299381904206e-06,
+      "max_rel_range": 1.865873245502428e-07,
+      "own_error": 0.00020927469375749464
+    },
+    "capacitor2.i": {
+      "max_abs": 2.4973069018274785e-07,
+      "max_rel_range": 1.808691363175672e-07,
+      "own_error": 0.00020486112137902283
+    },
+    "capacitor2.v": {
+      "max_abs": 2.471766674894127e-06,
+      "max_rel_range": 1.8672370570836146e-07,
+      "own_error": 0.00021921552464968612
+    },
+    "cosineVoltage.i": {
+      "max_abs": 2.4973069018274785e-07,
+      "max_rel_range": 1.808691363175672e-07,
+      "own_error": 0.00020486112137902283
+    },
+    "inductor1.i": {
+      "max_abs": 2.483500417538309e-07,
+      "max_rel_range": 1.8364759914896033e-07,
+      "own_error": 0.00021444019387928154
+    },
+    "inductor2.i": {
+      "max_abs": 2.4973069018274785e-07,
+      "max_rel_range": 1.808691363175672e-07,
+      "own_error": 0.00020486112137902283
+    },
+    "resistor1.i": {
+      "max_abs": 2.483500417538309e-07,
+      "max_rel_range": 1.8364759914896033e-07,
+      "own_error": 0.00021444019387928154
+    },
+    "resistor2.i": {
+      "max_abs": 2.4973069018274785e-07,
+      "max_rel_range": 1.808691363175672e-07,
+      "own_error": 0.00020486112137902283
+    },
+    "sineVoltage.i": {
+      "max_abs": 2.483500417538309e-07,
+      "max_rel_range": 1.8364759914896033e-07,
+      "own_error": 0.00021444019387928154
     }
   },
   "Analog.Examples.ShowVariableResistor": {
@@ -783,6 +1021,118 @@
     "VariableResistor.i": {
       "max_abs": 1.5265566588595902e-16,
       "max_rel": 1.6680033422854008e-07
+    }
+  },
+  "DC.Lines.Examples.RCModel": {
+    "RC_dyn.Vc": {
+      "max_abs": 4.2579006986898094e-07,
+      "max_rel_range": 8.515801397379619e-09,
+      "own_error": 3.439655154409138e-06
+    },
+    "RC_dyn.terminal_n.i[1]": {
+      "max_abs": 1.0644751848032374e-07,
+      "max_rel_range": 1.7041028083216007e-08,
+      "own_error": 6.883117253281439e-06
+    },
+    "RC_dyn.terminal_n.v[1]": {
+      "max_abs": 0.0,
+      "max_rel_range": 0.0,
+      "own_error": 0.0
+    },
+    "RC_dyn.terminal_n.v[2]": {
+      "max_abs": 0.0,
+      "max_rel_range": 0.0,
+      "own_error": 0.0
+    },
+    "RC_dyn.terminal_p.i[1]": {
+      "max_abs": 1.0644751746724523e-07,
+      "max_rel_range": 8.515801397379619e-09,
+      "own_error": 3.439655154409138e-06
+    },
+    "RC_dyn.terminal_p.v[1]": {
+      "max_abs": 0.0,
+      "max_rel_range": 0.0,
+      "own_error": 0.0
+    },
+    "RC_dyn.terminal_p.v[2]": {
+      "max_abs": 0.0,
+      "max_rel_range": 0.0,
+      "own_error": 0.0
+    },
+    "RC_ss.terminal_n.i[1]": {
+      "max_abs": 0.0,
+      "max_rel_range": 0.0,
+      "own_error": 0.0
+    },
+    "RC_ss.terminal_n.v[1]": {
+      "max_abs": 0.0,
+      "max_rel_range": 0.0,
+      "own_error": 0.0
+    },
+    "RC_ss.terminal_n.v[2]": {
+      "max_abs": 0.0,
+      "max_rel_range": 0.0,
+      "own_error": 0.0
+    },
+    "RC_ss.terminal_p.i[1]": {
+      "max_abs": 0.0,
+      "max_rel_range": 0.0,
+      "own_error": 0.0
+    },
+    "RC_ss.terminal_p.v[1]": {
+      "max_abs": 0.0,
+      "max_rel_range": 0.0,
+      "own_error": 0.0
+    },
+    "RC_ss.terminal_p.v[2]": {
+      "max_abs": 0.0,
+      "max_rel_range": 0.0,
+      "own_error": 0.0
+    },
+    "constantVoltage.terminal.i[1]": {
+      "max_abs": 1.0644751835542365e-07,
+      "max_rel_range": 8.518157098230667e-09,
+      "own_error": 3.4406066272208445e-06
+    },
+    "constantVoltage.terminal.v[1]": {
+      "max_abs": 0.0,
+      "max_rel_range": 0.0,
+      "own_error": 0.0
+    },
+    "constantVoltage.terminal.v[2]": {
+      "max_abs": 0.0,
+      "max_rel_range": 0.0,
+      "own_error": 0.0
+    },
+    "sc_dyn.terminal.i[1]": {
+      "max_abs": 1.0644751746724523e-07,
+      "max_rel_range": 8.515801397379619e-09,
+      "own_error": 3.439655154409138e-06
+    },
+    "sc_dyn.terminal.v[1]": {
+      "max_abs": 0.0,
+      "max_rel_range": 0.0,
+      "own_error": 0.0
+    },
+    "sc_dyn.terminal.v[2]": {
+      "max_abs": 0.0,
+      "max_rel_range": 0.0,
+      "own_error": 0.0
+    },
+    "sc_ss.terminal.i[1]": {
+      "max_abs": 0.0,
+      "max_rel_range": 0.0,
+      "own_error": 0.0
+    },
+    "sc_ss.terminal.v[1]": {
+      "max_abs": 0.0,
+      "max_rel_range": 0.0,
+      "own_error": 0.0
+    },
+    "sc_ss.terminal.v[2]": {
+      "max_abs": 0.0,
+      "max_rel_range": 0.0,
+      "own_error": 0.0
     }
   },
   "DC.Loads.Examples.Resistor": {

@@ -38,7 +38,7 @@ import numpy as np
 import pytest
 import torch
 
-from noodl.apps.electrical.modelica import read_modelica_circuit
+from noodl.apps.electrical.modelica import extrapolate, read_modelica_circuit
 from noodl.apps.electrical.modelica.run import simulate_circuit
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -103,18 +103,26 @@ def _record(stem: str, stats: dict, record: Path = RECORD) -> None:
 SUBSAMPLED = {"Analog.Examples.Resistor": 10}
 
 
-def _check(stem: str, column: str, times: np.ndarray, mine: np.ndarray,
-           omc: np.ndarray) -> dict:
+def _check(stem: str, column: str, times: np.ndarray, mine: np.ndarray, omc: np.ndarray,
+           *, scale: float | None = None, bound: float = 0.0) -> dict:
     """Assert `mine` is within the bound of `omc` at every row (a NaN or infinity on either
-    side fails, naming the first such row); the worst absolute and relative error."""
+    side fails, naming the first such row). Without `scale`, the algebraic bound
+    `RTOL_ALGEBRAIC |omc| + ATOL_ALGEBRAIC`, and the worst absolute and relative error; with
+    it, the dynamic bound `bound * scale` (`scale` the column's range), and the worst
+    absolute error and the worst error as a fraction of the range."""
     with np.errstate(invalid="ignore"):  # inf - inf: NaN, caught as off the bound below
         err = np.abs(mine - omc)
-    within = err <= RTOL_ALGEBRAIC * np.abs(omc) + ATOL_ALGEBRAIC
+    if scale is None:
+        within = err <= RTOL_ALGEBRAIC * np.abs(omc) + ATOL_ALGEBRAIC
+    else:
+        within = err <= bound * scale
     bad = ~(np.isfinite(mine) & np.isfinite(omc) & within)
     if bad.any():
         k = int(bad.argmax())
         raise AssertionError(f"{stem}: {column} off the bound from t = {float(times[k])!r}: "
                              f"noodl {float(mine[k])!r}, omc {float(omc[k])!r}")
+    if scale is not None:
+        return {"max_abs": float(err.max()), "max_rel_range": float(err.max() / scale)}
     return {"max_abs": float(err.max()),
             "max_rel": float((err / np.maximum(np.abs(omc), ATOL_ALGEBRAIC)).max())}
 
@@ -155,6 +163,112 @@ def test_parity_on_the_algebraic_models(stem):
 @pytest.mark.parametrize("stem", sorted(SUBSAMPLED))
 def test_parity_on_the_algebraic_models_at_subsampled_rows(stem):
     _compare(stem, every=SUBSAMPLED[stem])
+
+
+# ------------------------------------------------------------------ dynamic models
+# Each dynamic model is run at two step sizes, `substeps` r and 2r per interval of its step
+# grid (PARITY_SUBSTEPS), and the two runs are combined by Richardson extrapolation
+# (`extrapolate`, order 2: the steps are trapezoidal, backward Euler after a restart). Every
+# compared column must agree with OpenModelica at every row after t0 (the start state is
+# the reference's own, not compared) to
+#
+#     |noodl - omc| <= PARITY_RTOL * max|omc column|   (the column's range over every row),
+#
+# or to the bound of PARITY_BOUNDS, each documented with its demonstrated cause.
+#
+# Measured (15 Oct 2026): worst error of the extrapolation over every row after t0, as a
+# fraction of the column's range, at the pair chosen and at the next finer pair, and the
+# largest difference between the two extrapolations (the Richardson estimate is asymptotic
+# where that difference is well below PARITY_RTOL and the error falls by 8 to 16 per
+# halving: third order after the backward Euler restarts, fourth where the trapezoidal
+# steps' even error expansion dominates). Each pair is the smallest r = 2^k that meets
+# PARITY_RTOL with that margin.
+#   RCModel              (2, 4)    1.7e-8;  (4, 8)    2.2e-9;  difference 1.5e-8
+#   CauerLowPassAnalog   (8, 16)   1.2e-7;  (16, 32)  1.6e-8;  difference 1.1e-7
+#                        C5.i at 1.1 s, just after the step at 1 s
+#   SeriesResonance      (32, 64)  1.9e-7;  (64, 128) 1.2e-8;  difference 1.7e-7
+#                        (16, 32) 3.0e-6: capacitor1.v at 0.63 s, past the resonance at
+#                        0.5 s (100 Hz, Q = 20) of the 0 to 200 Hz sweep; (8, 16) 2.1e-6
+#                        on the first 200 rows, where (16, 32) gives 1.8e-7
+#   CompareTransformers  (16, 32)  3.1e-7;  (32, 64)  3.9e-8;  difference 2.7e-7
+#                        resistor11.i at 0.1 s, the first period of the 10 Hz source
+#   HeatingRectifier     (16, 32)  1.5e-7;  (32, 64)  1.7e-8;  difference 1.6e-7
+#                        Capacitor1.i at 1.12 s; (8, 16) 1.1e-6 over the first 50 rows
+# The default run compares each model's first rows (PARITY_ROWS): 9 to 17 s each on one
+# worker of a lightly loaded machine (each step costs 10 to 30 ms), HeatingRectifier 33 s
+# (its coupled steps about 100 ms; its window must reach the diode's first conduction, rows 5
+# to 8). Each window holds the worst row of the model's first 50 to 200 rows (RCModel's first
+# row, Cauer's step at 1 s, SeriesResonance's 2nd and 5th rows, CompareTransformers' 2nd,
+# HeatingRectifier's 7th). `-m slow` compares every row: 2 to 60 minutes a model.
+PARITY_RTOL = 1e-6  # of each column's range; never loosened
+PARITY_SUBSTEPS: dict[str, tuple[int, int]] = {
+    "Analog.Examples.SeriesResonance": (32, 64), "Analog.Examples.CauerLowPassAnalog": (8, 16),
+    "Analog.Examples.CompareTransformers": (16, 32),
+    "Analog.Examples.HeatingRectifier": (16, 32), "DC.Lines.Examples.RCModel": (2, 4)}
+PARITY_ROWS: dict[str, int] = {
+    "Analog.Examples.SeriesResonance": 8, "Analog.Examples.CauerLowPassAnalog": 30,
+    "Analog.Examples.CompareTransformers": 6, "Analog.Examples.HeatingRectifier": 8,
+    "DC.Lines.Examples.RCModel": 100}
+# Bounds above PARITY_RTOL, each with its demonstrated cause: none.
+PARITY_BOUNDS: dict[str, dict[str, float]] = {}
+
+
+def _dynamic(stem: str, rows: int | None, pair: tuple[int, int]) -> dict:
+    """Run `stem` over its first `rows` CSV rows (every row: `None`) at `substeps` `pair`,
+    extrapolate, and check every column after t0 against its bound; per column the worst
+    error, absolute and as a fraction of the column's range, and the size of the
+    extrapolation's correction (`own_error`, the finer run's own error, of the range)."""
+    head, full = _csv(stem)
+    data = full if rows is None else full[:rows]
+    runs = []
+    for r in pair:
+        model, state, drivers, names = read_modelica_circuit(DATA / f"{stem}.json",
+                                                             substeps=r)
+        assert names.dynamic
+        torch.testing.assert_close(names.times[:data.shape[0]], torch.as_tensor(data[:, 0]),
+                                   rtol=0, atol=1e-12)
+        runs.append(simulate_circuit(model, state, drivers, names,
+                                     times=names.times[:data.shape[0]]))
+    best = extrapolate(*runs, order=2)
+    stats = {}
+    for j, h in enumerate(head[1:], start=1):
+        assert h in names.columns, f"{stem}: CSV column {h!r} maps to no noodl variable"
+        scale = max(float(np.abs(full[:, j]).max()), ATOL_ALGEBRAIC)
+        mine = names.value(best, h).numpy()[1:]
+        fine = names.value(runs[1], h).numpy()[1:]
+        s = _check(stem, h, data[1:, 0], mine, data[1:, j], scale=scale,
+                   bound=PARITY_BOUNDS.get(stem, {}).get(h, PARITY_RTOL))
+        s["own_error"] = float(np.abs(mine - fine).max() / scale)
+        stats[h] = s
+    return stats
+
+
+@pytest.mark.parametrize("stem", DYNAMIC)
+def test_dynamic_parity_on_the_first_rows(stem):
+    _dynamic(stem, PARITY_ROWS[stem], PARITY_SUBSTEPS[stem])
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("stem", DYNAMIC)
+def test_dynamic_parity_every_row(stem):
+    _record(stem, _dynamic(stem, None, PARITY_SUBSTEPS[stem]))
+
+
+def test_the_dynamic_bound_is_of_the_column_range_and_fails_on_a_nan():
+    t = np.array([1.0, 2.0])
+    omc = np.array([0.0, -4.0])
+    s = _check("m", "c", t, omc + 3e-6, omc, scale=4.0, bound=1e-6)
+    assert s["max_rel_range"] == pytest.approx(7.5e-7)
+    with pytest.raises(AssertionError, match=r"m: c off the bound from t = 1\.0"):
+        _check("m", "c", t, omc + 5e-6, omc, scale=4.0, bound=1e-6)
+    with pytest.raises(AssertionError, match=r"t = 2\.0"):
+        _check("m", "c", t, np.array([0.0, np.nan]), omc, scale=4.0, bound=1e-6)
+
+
+def test_the_dynamic_tables_name_every_dynamic_model():
+    assert set(PARITY_SUBSTEPS) == set(PARITY_ROWS) == set(DYNAMIC)
+    assert set(PARITY_BOUNDS) <= set(DYNAMIC)
+    assert all(b == 2 * a for a, b in PARITY_SUBSTEPS.values())
 
 
 def test_the_bound_check_fails_on_a_nan_or_an_infinity():
