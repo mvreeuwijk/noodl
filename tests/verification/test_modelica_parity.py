@@ -717,24 +717,146 @@ def default_windows() -> dict[str, list[str]]:
     per model) is made in its own worker process (most of each window's time is its graded
     start, `run` module), the longest first (WINDOW_COST), so that the default run takes
     about as long as its slowest run; the comparison is made here. `NOODL_PARITY_WORKERS`
-    sets the number of worker processes (default: the CPU count)."""
+    sets the number of worker processes (default: the CPU count). A run that brings no
+    result (its worker died, or it stalled past `_stall_limit`) is reported by its model's
+    test as a `ParityWorkerError`, not as a parity failure."""
     tasks = sorted(((m, r) for m in PARITY_ROWS for r in _default_substeps(m)),
                    key=lambda task: -task[1] * WINDOW_COST[task[0]])
     cpus = os.cpu_count() or 1
     workers = max(1, min(len(tasks), int(os.environ.get("NOODL_PARITY_WORKERS", cpus))))
     threads = max(1, cpus // workers)
     context = multiprocessing.get_context("spawn")
-    with concurrent.futures.ProcessPoolExecutor(workers, mp_context=context) as pool:
+    pool = concurrent.futures.ProcessPoolExecutor(workers, mp_context=context)
+    try:
         futures = {(m, r): pool.submit(_run_in_worker, m, PARITY_ROWS[m], r, threads)
                    for m, r in tasks}
-        results = {}
-        for m in sorted(PARITY_ROWS):
+        runs = _gather(pool, futures, {task: _stall_limit(task[0]) for task in tasks})
+    finally:
+        pool.shutdown(wait=True, cancel_futures=True)
+    results: dict[str, list[str] | ParityWorkerError] = {}
+    for m in sorted(PARITY_ROWS):
+        got = [runs[m, r] for r in _default_substeps(m)]
+        lost = [run for run in got if isinstance(run, ParityWorkerError)]
+        if lost:
+            results[m] = lost[0]
+            continue
+        try:
+            failed = [run for run in got if isinstance(run, BaseException)]
+            if failed:
+                raise failed[0]
+            results[m] = _check_parity(m, PARITY_ROWS[m], _default_substeps(m),
+                                       [_from_worker(run) for run in got])
+        except Exception as exc:  # reported by the model's own test
+            results[m] = [f"{m}: {type(exc).__name__}: {exc}"]
+    return results
+
+
+class ParityWorkerError(RuntimeError):
+    """A parity run brought no result because its worker process died or stalled: a failure
+    of the test harness (memory, a crash, a hang), not a parity result."""
+
+
+# How often `_gather` looks at the pool (s), and the stall limit of a run: STALL_FACTOR times
+# the model's recorded full-run time (`parity-dynamic.json`, "seconds"; a default window is a
+# few rows of that run), at least STALL_FLOOR. NOODL_PARITY_TIMEOUT (s) overrides it.
+GATHER_POLL = 5.0
+STALL_FACTOR, STALL_FLOOR = 3.0, 900.0
+
+
+def _stall_limit(model: str) -> float:
+    """The time (s) a run of `model` may take in the default run's pool before it counts as
+    stalled (see STALL_FACTOR)."""
+    if os.environ.get("NOODL_PARITY_TIMEOUT"):
+        return float(os.environ["NOODL_PARITY_TIMEOUT"])
+    recorded = json.loads(RECORD_DYNAMIC.read_text()).get(model, {}).get("seconds", 0.0)
+    return max(STALL_FLOOR, STALL_FACTOR * float(recorded))
+
+
+def _gather(pool: concurrent.futures.ProcessPoolExecutor, futures: dict, limits: dict,
+            poll: float = GATHER_POLL) -> dict:
+    """Each task's result, the exception its run raised, or a `ParityWorkerError` when no
+    result came: a worker died (the pool broke), or a run went past its stall limit
+    (`limits[task]`, s, counted from when it was first seen running). A stall stops the
+    pool, killing its workers, and every unfinished task is reported."""
+    out: dict = {}
+    started: dict = {}
+    pending = dict(futures)
+    while pending:
+        done, _ = concurrent.futures.wait(pending.values(), timeout=poll,
+                                          return_when=concurrent.futures.FIRST_COMPLETED)
+        for task in [t for t, f in pending.items() if f in done]:
+            future = pending.pop(task)
             try:
-                runs = [_from_worker(futures[m, r].result()) for r in _default_substeps(m)]
-                results[m] = _check_parity(m, PARITY_ROWS[m], _default_substeps(m), runs)
-            except Exception as exc:  # reported by the model's own test
-                results[m] = [f"{m}: {type(exc).__name__}: {exc}"]
-        return results
+                out[task] = future.result()
+            except concurrent.futures.process.BrokenProcessPool as exc:
+                out[task] = ParityWorkerError(
+                    f"{task[0]} at {task[1]} substeps: no result, the parity worker pool "
+                    f"broke ({exc}): a worker process died (out of memory or a crash). This "
+                    f"is not a parity failure; NOODL_PARITY_WORKERS lowers the worker count")
+            except Exception as exc:  # the run's own error: the model's failure
+                out[task] = exc
+        now = time.monotonic()
+        for task, future in pending.items():
+            if future.running():
+                started.setdefault(task, now)
+        stalled = [t for t in pending if t in started and now - started[t] > limits[t]]
+        if stalled:
+            _stop(pool)
+            names = ", ".join(f"{m} at {r} substeps (limit {limits[m, r]:.0f} s)"
+                              for m, r in stalled)
+            for task in pending:
+                out[task] = ParityWorkerError(
+                    f"{task[0]} at {task[1]} substeps: no result, the parity run of {names} "
+                    f"stalled and the pool was stopped. This is not a parity failure; "
+                    f"NOODL_PARITY_TIMEOUT (s) sets the limit")
+            break
+    return out
+
+
+def _stop(pool: concurrent.futures.ProcessPoolExecutor) -> None:
+    """Cancel the pool's queued tasks and kill its workers (a stalled run never returns)."""
+    pool.shutdown(wait=False, cancel_futures=True)
+    for process in list((getattr(pool, "_processes", None) or {}).values()):
+        process.kill()
+
+
+def _sleep_in_worker(seconds: float) -> float:
+    time.sleep(seconds)
+    return seconds
+
+
+def _die_in_worker(code: int) -> None:
+    os._exit(code)
+
+
+def test_a_dead_worker_is_reported_as_a_harness_failure():
+    pool = concurrent.futures.ProcessPoolExecutor(
+        1, mp_context=multiprocessing.get_context("spawn"))
+    try:
+        futures = {("ModelA", 1): pool.submit(_die_in_worker, 3)}
+        out = _gather(pool, futures, {("ModelA", 1): 600.0}, poll=0.2)
+    finally:
+        pool.shutdown(wait=True, cancel_futures=True)
+    error = out["ModelA", 1]
+    assert isinstance(error, ParityWorkerError)
+    assert "ModelA at 1 substeps" in str(error) and "worker process died" in str(error)
+    assert "not a parity failure" in str(error)
+
+
+def test_a_stalled_run_is_named_and_its_pool_stopped():
+    pool = concurrent.futures.ProcessPoolExecutor(
+        1, mp_context=multiprocessing.get_context("spawn"))
+    start = time.monotonic()
+    try:
+        futures = {("Slow", 2): pool.submit(_sleep_in_worker, 600.0),
+                   ("Queued", 1): pool.submit(_sleep_in_worker, 0.0)}
+        out = _gather(pool, futures, {("Slow", 2): 1.0, ("Queued", 1): 600.0}, poll=0.2)
+    finally:
+        pool.shutdown(wait=True, cancel_futures=True)
+    assert time.monotonic() - start < 120.0
+    for task in futures:
+        assert isinstance(out[task], ParityWorkerError)
+        assert "Slow at 2 substeps (limit 1 s) stalled" in str(out[task])
 
 
 @pytest.mark.parametrize("model", sorted(PARITY_ROWS))
@@ -742,6 +864,8 @@ def test_dynamic_parity_at_the_reference_precision(model, default_windows):
     """The first `PARITY_ROWS[model]` rows of every dynamic model within PARITY_RTOL
     (see the block comment above PARITY_RTOL)."""
     failures = default_windows[model]
+    if isinstance(failures, ParityWorkerError):
+        raise failures
     assert not failures, "\n".join(failures)
 
 
