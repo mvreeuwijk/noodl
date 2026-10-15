@@ -15,6 +15,8 @@ import torch
 
 from noodl.apps.electrical.power import (
     build_power_flow,
+    dc_power_flow,
+    dc_power_flow_solution,
     power_flow_solution,
     read_matpower,
     solve_power_flow,
@@ -61,3 +63,15 @@ def test_ac_power_flow_matches_pandapower(case):
     assert _max_abs(sol.va, ref["va_rad"]) < 1e-8
     assert _max_abs(sol.pg, ref["pg_pu"]) < 1e-6
     assert _max_abs(sol.qg, ref["qg_pu"]) < 1e-6
+
+
+@pytest.mark.parametrize("case", CASES)
+def test_dc_power_flow_matches_pandapower(case):
+    ref = _fixture(case)["dc"]
+    model, state, drivers = dc_power_flow(read_matpower(DATA / f"{case}.m"))
+    sol = dc_power_flow_solution(model, solve_power_flow(model, state, drivers,
+                                                         differentiable=False))
+    assert list(sol.gen_buses) == ref["gen_bus"]
+    assert _max_abs(sol.va, ref["va_rad"]) < 1e-8
+    assert _max_abs(sol.pg, ref["pg_pu"]) < 1e-6
+    assert _max_abs(sol.pf, ref["branch_pf_pu"]) < 1e-6

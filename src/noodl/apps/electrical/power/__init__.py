@@ -7,7 +7,9 @@ its powers in p.u. A `PowerNetwork` holds a network in MATPOWER's file units (MW
 degrees), and `read_matpower` reads one from a MATPOWER version 2 case file.
 `build_power_flow` turns a network into the AC power-flow model (one phasor layer
 `"power"`), `solve_power_flow` solves it from its flat start and `power_flow_solution`
-reports bus voltages, generation and branch powers.
+reports bus voltages, generation and branch powers. `dc_power_flow` builds the DC power
+flow, plain nodal analysis of the bus voltage angles on a classic layer `"power_dc"`, and
+`dc_power_flow_solution` reports its angles, generation and branch flows.
 """
 
 from noodl.apps.electrical.power.build import (
@@ -18,6 +20,12 @@ from noodl.apps.electrical.power.build import (
     check_power_network,
     power_flow_solution,
     solve_power_flow,
+)
+from noodl.apps.electrical.power.dc import (
+    DC_LAYER,
+    DcPowerFlowSolution,
+    dc_power_flow,
+    dc_power_flow_solution,
 )
 from noodl.apps.electrical.power.laws import PiBranch, Shunt, VoltageControlledGenerator
 from noodl.apps.electrical.power.matpower import read_matpower
@@ -33,9 +41,11 @@ from noodl.apps.electrical.power.network import (
 
 __all__ = [
     "BUS_KINDS",
+    "DC_LAYER",
     "POWER_LAYER",
     "Branch",
     "Bus",
+    "DcPowerFlowSolution",
     "FixedShunt",
     "Generator",
     "Load",
@@ -47,6 +57,8 @@ __all__ = [
     "VoltageControlledGenerator",
     "build_power_flow",
     "check_power_network",
+    "dc_power_flow",
+    "dc_power_flow_solution",
     "power_flow_solution",
     "read_matpower",
     "solve_power_flow",
