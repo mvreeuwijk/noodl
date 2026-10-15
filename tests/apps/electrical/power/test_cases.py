@@ -129,9 +129,54 @@ def test_a_file_another_fetcher_holds_open_is_kept_when_it_verifies(tmp_path, se
     assert list(target.parent.glob("*.partial")) == []
     target.unlink()
     placed = b"something else\n"
-    with pytest.raises(PermissionError):
+    monkeypatch.setattr(cases.time, "sleep", lambda s: None)
+    with pytest.raises(MatpowerCaseUnavailableError, match="case30"):
         matpower_case("case30", cache_dir=tmp_path)
     assert list(target.parent.glob("*.partial")) == []
+
+
+def test_a_target_mid_replace_is_retried_until_it_verifies(tmp_path, monkeypatch):
+    data = b"function mpc = case9" + bytes([10])
+    target = tmp_path / "case9.m"
+    target.write_bytes(data)
+    real_read, reads, sleeps = Path.read_bytes, [], []
+
+    def read_bytes(self):
+        reads.append(1)
+        if len(reads) <= 2:             # the other fetcher's replace is still in progress
+            raise PermissionError(13, "mid-replace", str(self))
+        return real_read(self)
+
+    def replace(src, dst):
+        raise PermissionError(5, "held", str(dst))
+
+    monkeypatch.setattr(cases.os, "replace", replace)
+    monkeypatch.setattr(Path, "read_bytes", read_bytes)
+    monkeypatch.setattr(cases.time, "sleep", sleeps.append)
+    cases._write(target, data, _digest(data))
+    assert len(reads) == 3 and len(sleeps) == 2
+    assert real_read(target) == data
+    assert list(tmp_path.glob("*.partial")) == []
+
+
+def test_a_target_that_never_verifies_is_named_after_the_wait(tmp_path, monkeypatch):
+    target = tmp_path / "case9.m"
+    target.write_bytes(b"x")
+    sleeps = []
+
+    def replace(src, dst):
+        raise PermissionError(5, "held", str(dst))
+
+    def read_bytes(self):
+        raise PermissionError(13, "mid-replace", str(self))
+
+    monkeypatch.setattr(cases.os, "replace", replace)
+    monkeypatch.setattr(Path, "read_bytes", read_bytes)
+    monkeypatch.setattr(cases.time, "sleep", sleeps.append)
+    with pytest.raises(MatpowerCaseUnavailableError, match="case9.m"):
+        cases._write(target, b"data", "0" * 64)
+    assert 0 < sum(sleeps) <= cases._REPLACE_WAIT_S + 0.25
+    assert list(tmp_path.glob("*.partial")) == []
 
 
 def test_a_broken_http_response_is_unavailable(tmp_path, monkeypatch):

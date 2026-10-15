@@ -21,6 +21,7 @@ import hashlib
 import http.client
 import os
 import tempfile
+import time
 import types
 import urllib.request
 from pathlib import Path
@@ -40,6 +41,8 @@ MATPOWER_CASES = types.MappingProxyType({
 })
 _DERIVED = {"case9_features": "case9"}
 _TIMEOUT_S = 30.0
+#: Longest total wait for another fetcher to release a cache file on Windows.
+_REPLACE_WAIT_S = 2.0
 
 
 class MatpowerCaseUnavailableError(OSError):
@@ -61,6 +64,32 @@ def _cache(cache_dir) -> Path:
     return Path(cache_dir) / "matpower" / MATPOWER_RELEASE
 
 
+def _verified(path: Path, expected: str) -> bool:
+    try:
+        return path.exists() and _digest(path.read_bytes()) == expected
+    except OSError:  # another fetcher is replacing it right now
+        return False
+
+
+def _replace_or_accept(partial: str, path: Path, expected: str) -> None:
+    """Move `partial` onto `path`. On Windows the replace fails while another fetcher holds
+    the target; retry briefly, accepting the target as soon as its digest verifies."""
+    waited, delay = 0.0, 0.005
+    while True:
+        try:
+            os.replace(partial, path)
+            return
+        except (PermissionError, FileExistsError) as error:
+            if _verified(path, expected):
+                return
+            if waited >= _REPLACE_WAIT_S:
+                raise MatpowerCaseUnavailableError(
+                    f"could not replace the cached MATPOWER case {path}: {error}") from error
+        time.sleep(delay)
+        waited += delay
+        delay = min(delay * 2, 0.25)
+
+
 def _write(path: Path, data: bytes, expected: str) -> None:
     """Write `data` to `path` through a uniquely named temporary file, so concurrent
     fetchers of one case never share a partial file. If another fetcher's file is already
@@ -71,11 +100,7 @@ def _write(path: Path, data: bytes, expected: str) -> None:
     try:
         with os.fdopen(handle, "wb") as out:
             out.write(data)
-        try:
-            os.replace(partial, path)
-        except (PermissionError, FileExistsError):
-            if not (path.exists() and _digest(path.read_bytes()) == expected):
-                raise
+        _replace_or_accept(partial, path, expected)
     finally:
         if os.path.exists(partial):
             os.remove(partial)
