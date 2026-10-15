@@ -106,12 +106,12 @@ def test_dflow_is_the_exact_elementwise_derivative_on_both_sides():
 
 
 def test_dflow_matches_the_autograd_default_including_at_zero_and_the_transition():
-    from noodl.elements.base import Element
+    from noodl.elements.base import ConstitutiveLaw
 
     el = _element(0.5)
     dp = torch.tensor([-2.0, -1e-3, -5e-4, 0.0, 5e-4, 1e-3, 2.0], dtype=F64)
     torch.testing.assert_close(
-        el.dflow(dp, _drivers()), Element.dflow(el, dp, _drivers()), atol=1e-9, rtol=1e-9
+        el.dflow(dp, _drivers()), ConstitutiveLaw.dflow(el, dp, _drivers()), atol=1e-9, rtol=1e-9
     )
 
 

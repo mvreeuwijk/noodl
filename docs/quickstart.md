@@ -42,13 +42,13 @@ Four things happened there, and they are the whole framework in miniature:
 
 1. **`Network`** holds the graph. Every edge carries a `kind` — here `"airpath"` — which is how
    one network can hold several physical systems side by side.
-2. **`PowerLaw`** is an *element*: a constitutive law relating the potential difference across
-   an edge to the flow along it, $q = C \, \Delta p^{\,n}$. Elements are the replaceable part.
-3. **`PotentialFlowLayer`** assembles nodal conservation from the elements and solves
+2. **`PowerLaw`** is a *constitutive law*, relating the potential difference across
+   an edge to the flow along it, $q = C \, \Delta p^{\,n}$. Constitutive laws are the replaceable part.
+3. **`PotentialFlowLayer`** assembles nodal conservation from the laws and solves
    $A_I \, g(A^\top \phi) = s_I$ for the interior potentials by Newton's method. `boundary`
    names the nodes whose potential is prescribed rather than solved.
 4. The flow out matches the flow in to solver tolerance — conservation is structural, not
-   something the element had to be told about.
+   something the law had to be told about.
 
 ## Batching over instances
 
@@ -78,7 +78,7 @@ leading dimension does.
 ## Gradients
 
 Drop `differentiable=False` and the solve becomes differentiable. Gradients reach the boundary
-potentials, the sources, every value in `drivers`, and any element parameter constructed with
+potentials, the sources, every value in `drivers`, and any law parameter constructed with
 `learnable=True`.
 
 ```python
@@ -92,7 +92,7 @@ phi, q = layer.solve(
 )
 phi[1].backward()
 
-print("d(room pressure)/dC =", next(layer._elements[0].parameters()).grad)
+print("d(room pressure)/dC =", next(layer._laws[0].parameters()).grad)
 ```
 
 ```text
@@ -143,7 +143,7 @@ model.check(state, drivers).raise_for_errors(strict=True)
 
 ## Where to go from here
 
-- **[Concepts](concepts/index.md)** — the framework proper: what a network, element, layer and
+- **[Concepts](concepts/index.md)** — the framework proper: what a network, law, layer and
   solver each are, and how they fit.
 - **[Applications](applications/index.md)** — six worked systems with real file readers and
   parity with the reference implementation in each field. If your problem is a building, a

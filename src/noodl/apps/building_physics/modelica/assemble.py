@@ -211,7 +211,7 @@ from noodl.elements import (
     power_law_from_points,
     regularized_orifice,
 )
-from noodl.elements.base import Element, memo
+from noodl.elements.base import ConstitutiveLaw, memo
 from noodl.elements.media import _moist_air_buoyancy_density
 from noodl.layers.potential import PotentialFlowLayer
 from noodl.layers.transport import TransportLayer, active_interior
@@ -568,8 +568,8 @@ class _ColumnHead:
         return memo(self, "head", (drivers.get("T"), drivers.get("X_w")), head)
 
 
-# ------------------------------------------------------------------------ elements
-class _ZonalFlowEdge(Element):
+# ------------------------------------------------------------------------ laws
+class _ZonalFlowEdge(ConstitutiveLaw):
     """One direction of a `ZonalFlow_ACS`/`ZonalFlow_m_flow`: a prescribed
     flow, independent of `dp` (`dp_independent`), oriented side A -> side B.
 
@@ -755,7 +755,9 @@ def _param(comp: Component, key: str, errors: list[str], default=None, *, requir
     return default
 
 
-def _one_way(comp: Component, kind: str, med: AirMedium, errors: list[str]) -> Element | None:
+def _one_way(
+    comp: Component, kind: str, med: AirMedium, errors: list[str]
+) -> ConstitutiveLaw | None:
     cls = comp.cls.rsplit(".", 1)[-1]
     p = comp.parameters
     if p.get("useDefaultProperties", True) is False:
@@ -878,7 +880,7 @@ class _Builder:
         }
         self.sig = _Signals(doc, self.times, kind_of, self.errors)
         self.by_name = {c.name: c for c in doc.components}
-        # Element inputs fed by signals (door `y`, zonal `ACS`/`mAB_flow`/`mBA_flow`), keyed
+        # Law inputs fed by signals (door `y`, zonal `ACS`/`mAB_flow`/`mBA_flow`), keyed
         # by their driver name "<instance>.<input>"; scalars or series over the grid.
         self._inputs: dict[str, Tensor] = {}
         # MediumColumn name -> (the flow element whose path holds it, its sign there).
@@ -989,7 +991,7 @@ class _Builder:
             else:
                 net.add_node(n, volume=0.0, T0=med.T_default, z_ref=0.0)
 
-        elements: list[Element] = []
+        laws: list[ConstitutiveLaw] = []
         drives: list = []
         kinds: dict[str, tuple[str, ...]] = {}
         edge_dirs: dict[str, list[tuple[str, int, int]]] = {}  # name -> (kind, j, sign)
@@ -997,12 +999,12 @@ class _Builder:
         pressure_edges: list[tuple[int, int]] = []
 
         for path in g.paths:
-            self._path(path, net, index, elements, drives, kinds, edge_dirs, pressure_edges)
+            self._path(path, net, index, laws, drives, kinds, edge_dirs, pressure_edges)
         for door in g.doors:
-            self._door(door, net, index, elements, drives, kinds, edge_dirs, extra_ports,
+            self._door(door, net, index, laws, drives, kinds, edge_dirs, extra_ports,
                        pressure_edges)
         for zf in g.zonal:
-            self._zonal(zf, net, index, elements, kinds, edge_dirs, extra_ports)
+            self._zonal(zf, net, index, laws, kinds, edge_dirs, extra_ports)
 
         # Moisture (module docstring).
         carry_water = med.has_moisture and (
@@ -1090,7 +1092,7 @@ class _Builder:
             raise ModelicaImportError(
                 f"modelica: refused {count}:\n" + "\n".join(f"  - {e}" for e in unique)
             )
-        if not elements:
+        if not laws:
             raise ModelicaImportError("modelica: the model has no flow element")
         air_boundary = list(g.boundaries) + references
 
@@ -1104,7 +1106,7 @@ class _Builder:
         else:
             p_ref = zones[g.zones[0]].p_start if g.zones else med.p_default
 
-        air = PotentialFlowLayer(net, "air", elements, drives=drives, boundary=air_boundary,
+        air = PotentialFlowLayer(net, "air", laws, drives=drives, boundary=air_boundary,
                                  quantity="pressure", unit="Pa", flow_unit="kg/s")
         th_store = storage.thermo(med) if use_storage else None
         storage_air: list[int] = []
@@ -1115,7 +1117,7 @@ class _Builder:
             if storage_air:
                 vols = torch.tensor([zones[node_names[i]].V for i in storage_air], dtype=F64)
                 air = PotentialFlowLayer(
-                    net, "air", elements, drives=drives, boundary=air_boundary,
+                    net, "air", laws, drives=drives, boundary=air_boundary,
                     node_sources=[storage.ZoneStorage(storage_air, vols, p_ref, th_store)],
                     quantity="pressure", unit="Pa", flow_unit="kg/s")
         layers: dict = {"air": air}
@@ -1275,7 +1277,7 @@ class _Builder:
                 )
             store = self._storage_closure(
                 closure, th_store, p_ref, zones, node_names, index, storage_zones,
-                storage_air, air, air_boundary, elements, drives, layers, sp_interior,
+                storage_air, air, air_boundary, laws, drives, layers, sp_interior,
                 sp_dilution if "species" in layers else None, m0, net, lam_T)
             closures.append(store)
         tol = {}
@@ -1342,7 +1344,7 @@ class _Builder:
         return model, state, drivers, names
 
     def _storage_closure(self, mbl, th, p_ref, zones, node_names, index, storage_zones,
-                         storage_air, air, air_boundary, elements, drives, layers,
+                         storage_air, air, air_boundary, laws, drives, layers,
                          sp_interior, sp_dilution, m0, net, lam_T) -> storage.StorageClosure:
         is_zone = [nm in zones for nm in node_names]
         V = torch.tensor([zones[nm].V if z else 0.0 for nm, z in zip(node_names, is_zone,
@@ -1361,7 +1363,7 @@ class _Builder:
         init_layer = None
         if free:
             fixed = [node_names[i] for i in storage_air if i not in free]
-            init_layer = PotentialFlowLayer(net, "air", elements, drives=drives,
+            init_layer = PotentialFlowLayer(net, "air", laws, drives=drives,
                                             boundary=list(air_boundary) + fixed,
                                             quantity="pressure", unit="Pa", flow_unit="kg/s")
         return storage.StorageClosure(
@@ -1483,7 +1485,7 @@ class _Builder:
                     "port_a2": edges[a2], "port_b2": neg(edges[a2])}.get(port)
         return None
 
-    def _path(self, path: FlowPath, net, index, elements, drives, kinds, edge_dirs,
+    def _path(self, path: FlowPath, net, index, laws, drives, kinds, edge_dirs,
               pressure_edges) -> None:
         comp = path.element
         kind = f"airpath:{comp.name}"
@@ -1510,14 +1512,14 @@ class _Builder:
         if el is None:
             return
         net.add_edge(path.src, path.tgt, kind=kind)
-        elements.append(el)
+        laws.append(el)
         if coeff:
             drives.append(_ColumnHead(kind, _t(coeff), torch.tensor(nodes, dtype=torch.long)))
         kinds[comp.name] = (kind,)
         edge_dirs[comp.name] = [(kind, 0, 1)]
         pressure_edges.append((index[path.src], index[path.tgt]))
 
-    def _door(self, door: TwoWayEdge, net, index, elements, drives, kinds, edge_dirs,
+    def _door(self, door: TwoWayEdge, net, index, laws, drives, kinds, edge_dirs,
               extra_ports, pressure_edges) -> None:
         comp, med = door.component, self.med
         cls = comp.cls.rsplit(".", 1)[-1]
@@ -1550,7 +1552,7 @@ class _Builder:
                 return
             for kind, el in zip((kab, kba), built, strict=True):
                 net.add_edge(door.side_a, door.side_b, kind=kind)
-                elements.append(el)
+                laws.append(el)
             kinds[comp.name] = (kab, kba)
             edge_dirs[comp.name] = [(kab, 0, 1), (kba, 0, 1)]
             extra_ports[f"{comp.name}.port_a1"] = (kab, 0, 1)
@@ -1586,14 +1588,14 @@ class _Builder:
             kab, kba = f"door_ab:{comp.name}", f"door_ba:{comp.name}"
             for k, direction in ((kab, "ab"), (kba, "ba")):
                 net.add_edge(door.side_a, door.side_b, kind=k)
-                elements.append(DoorPortStream(el, head, direction, k))
+                laws.append(DoorPortStream(el, head, direction, k))
             kinds[comp.name] = (kab, kba)
             edge_dirs[comp.name] = [(kab, 0, 1), (kba, 0, 1)]
             extra_ports[f"{comp.name}.port_a1"] = (kab, 0, 1)
             extra_ports[f"{comp.name}.port_a2"] = (kba, 0, -1)
         pressure_edges.append((iA, iB))
 
-    def _zonal(self, zf: TwoWayEdge, net, index, elements, kinds, edge_dirs,
+    def _zonal(self, zf: TwoWayEdge, net, index, laws, kinds, edge_dirs,
                extra_ports) -> None:
         comp, med = zf.component, self.med
         cls = comp.cls.rsplit(".", 1)[-1]
@@ -1620,7 +1622,7 @@ class _Builder:
             specs = [(kab, "ab", f"{comp.name}.mAB_flow"), (kba, "ba", f"{comp.name}.mBA_flow")]
         for kind, direction, key in specs:
             net.add_edge(zf.side_a, zf.side_b, kind=kind)
-            elements.append(_ZonalFlowEdge(kind=kind, direction=direction, src=iA, tgt=iB,
+            laws.append(_ZonalFlowEdge(kind=kind, direction=direction, src=iA, tgt=iB,
                                            medium=med, key=key, V=V, use_default=use_default))
         kinds[comp.name] = (kab, kba)
         edge_dirs[comp.name] = [(kab, 0, 1), (kba, 0, 1)]

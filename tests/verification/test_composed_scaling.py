@@ -129,13 +129,13 @@ def test_gradient_across_a_join_matches_central_finite_differences():
     )
     net = model.net
     loss_node = net.node_index(model.interface_nodes["sewer"]["building_1"][0])  # manhole
-    street = next(el for el in model.elements if el.kind == "street")
+    street = next(el for el in model.laws if el.kind == "street")
     C0 = street.C.detach().clone()
 
     def layer_with_street_C(C, *, learnable):
         elements = [
             PowerLaw(C, 0.65, kind="street", learnable=learnable) if el.kind == "street" else el
-            for el in model.elements
+            for el in model.laws
         ]
         return PotentialFlowLayer(net, "grad_join", elements, boundary=model.boundary), elements
 

@@ -545,7 +545,7 @@ def test_gradients_against_central_differences(tmp_path):
         return model, final
 
     model, _, drivers = build_model(net)
-    element = model.potential["water"]._elements[0]
+    element = model.potential["water"]._laws[0]
     sources = drivers["water.sources"].clone().requires_grad_(True)
     element.roughness.requires_grad_(True)
     final = water_steady(model, {"water.phi": torch.zeros(model.net.n, dtype=F64),
@@ -616,14 +616,14 @@ def test_gradient_reaches_the_pump_head_gain_h0(tmp_path):
 
     def solve_with_h0(delta: float):
         model, state, drivers = build_model(net)
-        pump = next(el for el in model.potential["water"]._elements if el.kind == "pump")
+        pump = next(el for el in model.potential["water"]._laws if el.kind == "pump")
         with torch.no_grad():
             pump.h0.add_(delta)
         final = water_steady(model, state, drivers)
         return model, final
 
     model, state, drivers = build_model(net)
-    pump = next(el for el in model.potential["water"]._elements if el.kind == "pump")
+    pump = next(el for el in model.potential["water"]._laws if el.kind == "pump")
     pump.h0.requires_grad_(True)
     final = water_steady(model, state, drivers, differentiable=True)
     layer = model.potential["water"]
@@ -689,7 +689,7 @@ def test_gradient_reaches_a_learnable_roughness(tmp_path):
     path, _ = _epanet(tmp_path, "twoloop_si.inp")
     net = read_epanet_inp(path)
     model, state, drivers = build_model(net)
-    element = model.potential["water"]._elements[0]
+    element = model.potential["water"]._laws[0]
     element.roughness.requires_grad_(True)
     final = water_steady(model, state, drivers, differentiable=True)
     layer = model.potential["water"]

@@ -18,13 +18,13 @@ Generated from the package's own docstrings. For the ideas behind these objects,
     options:
       members: [branch_flows, particular_flow, project_measured, assert_forward_oriented]
 
-## Elements and drives
+## Constitutive laws and drives
 
 ::: noodl.elements.base
     options:
-      members: [Element, ImplicitLaw, LawContext]
+      members: [ConstitutiveLaw, ImplicitLaw, LawContext]
 
-Elements are grouped below by the physics they express, as in
+Constitutive laws are grouped below by the physics they express, as in
 [Airflow elements](applications/building_physics.md#airflow-elements).
 
 ### Power-law openings

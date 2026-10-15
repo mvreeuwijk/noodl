@@ -21,7 +21,7 @@ from collections.abc import Mapping
 import torch
 
 from noodl.apps.electrical.waveforms import Constant, Signal, Sine, _Waveform
-from noodl.elements import Element, ImplicitLaw, LawContext
+from noodl.elements import ConstitutiveLaw, ImplicitLaw, LawContext
 
 Tensor = torch.Tensor
 
@@ -154,7 +154,7 @@ class PrescribedVoltage(_Source, ImplicitLaw):
         return dp - self.value(dp, drivers, ctx)
 
 
-class PrescribedCurrent(_Source, Element):
+class PrescribedCurrent(_Source, ConstitutiveLaw):
     """An ideal current source: `q = offset + amplitude * unit(t)` (A) entering pin `p`
     whatever the voltage, with the waveform and its phasor as for `PrescribedVoltage`. MSL
     `Sources.ConstantCurrent`, `StepCurrent`, `SineCurrent`, `PulseCurrent`,
@@ -175,7 +175,7 @@ class PrescribedCurrent(_Source, Element):
 
 
 # -------------------------------------------------------------------- one-port devices
-class Resistance(Element):
+class Resistance(ConstitutiveLaw):
     """A linear resistor: `q = dp / R_actual` with `R_actual = R s (1 + alpha (T - T_ref))`
     (`R` in ohm at `T_ref` in K, `alpha` in 1/K); `T` (K) is read per edge from
     `drivers[temperature]` when `temperature` names a driver, else `T = T_ref`; `s` is read
@@ -283,7 +283,7 @@ def _exlin(x: Tensor, maxexp: Tensor) -> Tensor:
                        torch.exp(torch.clamp(x, max=maxexp)))
 
 
-class JunctionDiode(Element):
+class JunctionDiode(ConstitutiveLaw):
     """A junction diode with a parallel leak: `q = Ids (exlin(dp / Vt) - 1) + dp / R`, where
     `exlin(x) = exp(x)` up to `Maxexp` and continues linearly above it,
     `exp(Maxexp) (1 + x - Maxexp)` (`Ids` saturation current in A, `Vt` voltage equivalent of
@@ -342,7 +342,7 @@ def _is_entry(control) -> bool:
             and isinstance(control[1], int))
 
 
-class SwitchedConductance(Element):
+class SwitchedConductance(ConstitutiveLaw):
     """An ideal closing switch: closed `q = dp / Ron`, open `q = Goff dp` (`Ron` in ohm,
     `Goff` in S); closed where the control value exceeds 0.5 (or is True). `control` is a
     driver key whose last dimension holds one value per switch edge (or one value for all),

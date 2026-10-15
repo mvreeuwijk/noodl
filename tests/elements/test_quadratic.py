@@ -2,7 +2,7 @@
 
 import torch
 
-from noodl.elements.base import Element
+from noodl.elements.base import ConstitutiveLaw
 from noodl.elements.quadratic import Quadratic
 
 
@@ -28,7 +28,7 @@ def test_dflow_matches_closed_form_and_autograd_default_away_from_zero():
     dp = torch.tensor([-8.0, -3.0, -0.3, 0.3, 3.0, 8.0])
     expected = 1.0 / torch.sqrt(2.0**2 + 4 * 0.5 * dp.abs())
     torch.testing.assert_close(el.dflow(dp), expected)
-    torch.testing.assert_close(el.dflow(dp), Element.dflow(el, dp), atol=1e-6, rtol=1e-6)
+    torch.testing.assert_close(el.dflow(dp), ConstitutiveLaw.dflow(el, dp), atol=1e-6, rtol=1e-6)
 
 
 def test_linear_init_matches_finite_difference_slope_at_zero():

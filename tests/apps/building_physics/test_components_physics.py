@@ -18,7 +18,7 @@ from noodl.apps.building_physics import (
     door,
     initial_drivers,
     initial_state,
-    orifice_elements_from_edges,
+    orifice_law_from_edges,
     room,
     shaft,
 )
@@ -62,8 +62,8 @@ def hand_house(T_A=288.15, T_B=285.15, walls=False, door_open=True):
 
 
 def model_of(net, coupling="iterate"):
-    el = orifice_elements_from_edges(net, "airpath")
-    return build_model(net, air_elements=[el], drives=[Stack.from_network(net, "airpath")],
+    el = orifice_law_from_edges(net, "airpath")
+    return build_model(net, air_laws=[el], drives=[Stack.from_network(net, "airpath")],
                        coupling=coupling, iterate_tol={"thermal": 0.01}, iterate_max=50)
 
 

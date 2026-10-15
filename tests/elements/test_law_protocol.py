@@ -13,7 +13,7 @@ from noodl.elements import (
     RegularizedPowerLaw,
     SplineFlowTable,
 )
-from noodl.elements.base import INTEGRATIONS, MODES, Element
+from noodl.elements.base import INTEGRATIONS, MODES, ConstitutiveLaw
 
 
 @pytest.fixture(autouse=True)
@@ -30,11 +30,11 @@ def test_defaults_declare_a_static_potential_controlled_law():
     assert (g.law_form, g.ports, g.dynamic, g.contextual) == ("potential", 1, False, False)
     assert g.phasor_capable is True
     assert FixedFlow(1.0).phasor_capable is True
-    assert Element.phasor_capable is False
+    assert ConstitutiveLaw.phasor_capable is False
 
 
 def test_forward_passes_context_only_to_contextual_laws():
-    class Seen(Element):
+    class Seen(ConstitutiveLaw):
         contextual = True
 
         def flow(self, dp, drivers=None, ctx=None):

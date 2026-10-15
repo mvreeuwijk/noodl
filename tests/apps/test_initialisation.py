@@ -189,7 +189,7 @@ def test_the_static_check_is_clean_on_a_stock_street_model():
 
 def test_the_building_builder_can_return_the_same_triple_as_the_others():
     from noodl.apps import building_physics as bp
-    from noodl.apps.building_physics.elements import orifice_elements_from_edges
+    from noodl.apps.building_physics.elements import orifice_law_from_edges
     from noodl.drives import Stack
     from noodl.topology import Network
 
@@ -202,7 +202,7 @@ def test_the_building_builder_can_return_the_same_triple_as_the_others():
         return net
 
     net = network()
-    kw = dict(air_elements=[orifice_elements_from_edges(net, "airpath")],
+    kw = dict(air_laws=[orifice_law_from_edges(net, "airpath")],
               drives=[Stack.from_network(net, "airpath")])
     model, state, drivers = bp.build_model(net, return_inputs=True, **kw)
     assert set(state) == set(bp.initial_state(model))

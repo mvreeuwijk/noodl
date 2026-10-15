@@ -10,15 +10,15 @@ from __future__ import annotations
 
 import torch
 
-from noodl.elements.base import Element
+from noodl.elements.base import ConstitutiveLaw
 
 Tensor = torch.Tensor
 
 
-class FixedFlow(Element):
+class FixedFlow(ConstitutiveLaw):
     """q = q0 regardless of dp (`q0` in the flow unit); dflow = 0; linear_init = (q0, 0).
 
-    Declares ``dp_independent = True`` (see ``Element``): the differentiable solve path
+    Declares ``dp_independent = True`` (see ``ConstitutiveLaw``): the differentiable solve path
     trusts this declaration to take the exact-zero Jacobian column shortcut for this
     element's edges, rather than inferring dp-independence from whatever autograd graph
     ``flow`` happens to produce.

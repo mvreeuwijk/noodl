@@ -4,7 +4,7 @@ the end-of-step time, warm starts, steady with a time, residuals and the iterate
 import pytest
 import torch
 
-from noodl.elements import Conductance, Element
+from noodl.elements import Conductance, ConstitutiveLaw
 from noodl.layers.potential import PotentialFlowLayer
 from noodl.layers.transport import TransportLayer
 from noodl.model import Model
@@ -34,7 +34,7 @@ def _net(nodes, edges):
     return net
 
 
-class Clock(Element):
+class Clock(ConstitutiveLaw):
     """q = g dp, recording the time every call sees."""
 
     contextual = True
@@ -273,7 +273,7 @@ def test_iterate_converges_on_complex_phasor_state():
     assert float(model.residuals(state, drivers)["e"].abs().max()) < 1e-10
 
 
-class RealCurrent(Element):
+class RealCurrent(ConstitutiveLaw):
     """A phasor-capable current source returning a real tensor (I from u to v)."""
 
     phasor_capable = True

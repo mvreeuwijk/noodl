@@ -36,7 +36,7 @@ from __future__ import annotations
 import torch
 
 from noodl._broadcast import broadcast_shapes
-from noodl.elements.base import Element
+from noodl.elements.base import ConstitutiveLaw
 from noodl.solvers.scalar import solve_monotone
 
 Tensor = torch.Tensor
@@ -47,7 +47,7 @@ def _fan_residual(q: Tensor, dp: Tensor, coeffs: Tensor) -> Tensor:
     return c0 + c1 * q + c2 * q**2 + c3 * q**3 + dp
 
 
-class FanCurve(Element):
+class FanCurve(ConstitutiveLaw):
     """Cubic pressure-flow curve inverted for q given dp on [0, q_max]: `coeffs` are
     (a0, a1, a2, a3) of P(q) = a0 + a1 q + a2 q^2 + a3 q^3 in Pa for q in the flow unit, and
     `q_max` is the largest flow the curve covers, in that unit.

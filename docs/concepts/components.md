@@ -5,7 +5,7 @@ and edges, and it can hold other components, so a building is made of floors, a 
 rooms, a room of its air and its walls. You build the tree in plain Python, in the way you
 would wire blocks in Simulink or Grasshopper, and `flatten()` turns it into one ordinary
 [`Network`](networks.md) with a `NameMap` that remembers which component each node and edge
-came from. The solver never sees components: layers, elements and drives work on the
+came from. The solver never sees components: layers, laws and drives work on the
 flattened network exactly as they do on one built by hand.
 
 Components live in `noodl.components`. The building application adds factory functions that
@@ -188,12 +188,12 @@ Continue with the house. Nothing in the model code knows about components; it ta
 
 ```python
 from noodl.apps.building_physics import (
-    build_model, initial_drivers, initial_state, orifice_elements_from_edges,
+    build_model, initial_drivers, initial_state, orifice_law_from_edges,
 )
 from noodl.drives import Stack
 
-el = orifice_elements_from_edges(net, "airpath")
-model = build_model(net, air_elements=[el], drives=[Stack.from_network(net, "airpath")],
+el = orifice_law_from_edges(net, "airpath")
+model = build_model(net, air_laws=[el], drives=[Stack.from_network(net, "airpath")],
                     coupling="iterate", iterate_tol={"thermal": 0.01}, iterate_max=50)
 air, th = model.refs.air, model.refs.thermal
 rooms = [n for p in names.select(template="room") for n in names.nodes_of(p)]

@@ -94,7 +94,7 @@ from noodl.apps.sewer.xsect_tables import (
     critical_depth,
     normal_depth_ft,
 )
-from noodl.elements.base import Element
+from noodl.elements.base import ConstitutiveLaw
 from noodl.layers.potential import PotentialFlowLayer
 from noodl.layers.reaction import Reaction
 from noodl.layers.transport import TransportLayer, active_interior
@@ -376,7 +376,7 @@ class DynamicWaveOptions:
                 f"DynamicWaveOptions: max_trials must be >= 1 or None, got {self.max_trials!r}")
 
 
-class DynamicWaveConduit(Element):
+class DynamicWaveConduit(ConstitutiveLaw):
     """SWMM's dynamic-wave conduit (`dwflow.c`) with its coefficients frozen for one pass.
 
     ``q = c0 + k dp`` (m3/s, dp = H1 - H2 in m), then ``min(q, q_norm)`` where SWMM's
@@ -486,7 +486,7 @@ class DynamicWaveConduit(Element):
         return out
 
 
-class StructureLink(Element):
+class StructureLink(ConstitutiveLaw):
     """A flow regulator (orifice, weir or outlet) or pump with its flow linearised about the
     previous pass: ``q = c0 + g (dp - dp_fed)`` (m3/s, dp = H1 - H2 in m), then the flap
     gate's clamp (a pump's, which never flows backwards).
@@ -2759,11 +2759,11 @@ def build_dynamic_wave_model(net: SewerNetwork, *, iterate_tol: float | None = N
     junction_idx = closure.junction_idx
     junction_invert = closure.node_invert[junction_idx]
 
-    def elements():
+    def laws():
         return [DynamicWaveConduit(), *(StructureLink(k) for k in closure.structures)]
 
     layer = PotentialFlowLayer(
-        graph, "water", elements(), boundary=boundary,
+        graph, "water", laws(), boundary=boundary,
         node_sources=[closure.storage],
         quantity="head", unit="m", flow_unit="m3/s", analytic_primal=True,
         linear_solver="direct" if len(net.manholes) <= DENSE_SOLVE_MAX_JUNCTIONS else "auto",

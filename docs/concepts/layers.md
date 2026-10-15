@@ -47,7 +47,7 @@ from noodl.layers.potential import PotentialFlowLayer
 layer = PotentialFlowLayer(
     net,
     name="air",
-    elements=[leak],            # one Element per edge kind
+    laws=[leak],                # one ConstitutiveLaw per edge kind
     drives=[stack],             # additive potential-difference terms
     boundary=["ambient"],       # nodes whose potential is prescribed
     linear_solver="auto",       # 'auto' | 'cg' | 'gmres' | 'direct' | 'sparse_direct'
@@ -65,7 +65,7 @@ temperature one without matching on names.
 
 Useful accessors: `flows(phi, drivers)` evaluates the branch law; `flows_of_kind(q, kinds)`
 extracts one kind's block from the concatenated flow vector; `residual(...)` and `jacobian(...)`
-expose the Newton pieces directly; `kind_slice(kind)` and `element_for(kind)` locate a kind.
+expose the Newton pieces directly; `kind_slice(kind)` and `law_for(kind)` locate a kind.
 
 `diagnostics`, when you pass a dict, is filled with `newton_iterations`, `linear_iterations`,
 `method`, `backend`, `converged` and `residual_norm`. `method` is what you asked for; `backend`

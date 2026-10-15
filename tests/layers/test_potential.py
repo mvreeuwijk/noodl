@@ -6,7 +6,7 @@ from scipy.optimize import brentq
 
 from noodl.drives import ConstantDrive
 from noodl.elements import Conductance, FixedFlow, PowerLaw
-from noodl.elements.base import Element
+from noodl.elements.base import ConstitutiveLaw
 from noodl.layers.potential import PotentialFlowLayer
 from noodl.nodesources import NodeSource
 from noodl.solvers.newton import newton
@@ -316,7 +316,7 @@ def test_wrong_width_drive_raises_value_error_naming_widths():
     # Regression: a drive tensor whose trailing width does not match its
     # kind's own edge count previously corrupted `dp` silently: torch.cat in dp() would
     # accept the wrongly-widened block, shifting every later kind's slice out from under the
-    # (still correctly-sized) `_elem_slices`, so a DIFFERENT element ends up being fed part
+    # (still correctly-sized) `_law_slices`, so a DIFFERENT element ends up being fed part
     # of the wrong kind's drive value with no exception anywhere in the call chain.
     net = Network(dtype=torch.float64)
     net.add_node("a")
@@ -512,7 +512,7 @@ def test_differentiable_false_matches_differentiable_true(two_zone_layer):
 
 
 def test_solve_raises_for_element_tensor_with_requires_grad_but_not_learnable(two_zone_layer):
-    # `Element._param` deliberately supports holding a tensor with
+    # `ConstitutiveLaw._param` deliberately supports holding a tensor with
     # `requires_grad=True` unwrapped (learnable=False) so an external graph is preserved for
     # `differentiable=False`; but such a tensor is absent from `named_parameters()`, so the
     # differentiable solve (which threads only registered parameters through
@@ -558,7 +558,7 @@ def test_solve_raises_for_drive_owning_its_own_differentiable_tensor(two_zone_la
         layer.solve(phi_b, {"wind": wind}, None, differentiable=True)
 
 
-class _DetachedLeak(Element):
+class _DetachedLeak(ConstitutiveLaw):
     """Buggy element: mathematically a PowerLaw leak, but detaches dp inside flow(), which
     silently drops the autograd graph -- the exact hazard
     `test_solve_raises_when_an_element_flow_silently_drops_the_autograd_graph` guards
@@ -566,7 +566,7 @@ class _DetachedLeak(Element):
     flow genuinely depends on dp mathematically, it just fails to say so to autograd.
 
     `linear_init` is overridden with the same closed-form tangent `PowerLaw.linear_init`
-    uses, bypassing `Element`'s own autograd-based default (which would call `dflow`, which
+    uses, bypassing `ConstitutiveLaw`'s own autograd-based default (which would call `dflow`, which
     in turn would call the buggy `flow`, and raise there instead). This matches the
     demonstrated defect precisely: the forward Newton solve converges without incident (the
     residual is exact regardless of how the Jacobian is computed), and only the
@@ -650,7 +650,7 @@ def test_solve_matches_finite_differences_for_the_all_correct_mixed_leak_layer()
     torch.testing.assert_close(grad_ad, grad_fd, atol=1e-6, rtol=1e-5)
 
 
-class _WronglyDeclaredDpIndependent(Element):
+class _WronglyDeclaredDpIndependent(ConstitutiveLaw):
     """A PowerLaw-like leak that WRONGLY declares dp_independent = True: its dflow() is not
     identically zero, so the cross-check in `_dflows_functional` (which reads dflow() for any
     element declaring dp_independent) must catch the mismatch and raise, rather than
@@ -694,7 +694,7 @@ def test_solve_raises_when_dp_independent_is_wrongly_declared():
         layer.solve(phi_b, {}, sources, differentiable=True)
 
 
-class _DetachedButLearnableLeak(Element):
+class _DetachedButLearnableLeak(ConstitutiveLaw):
     """Buggy element whose flow requires grad (through its own learnable parameter C) but
     never actually uses dp, so `_dflows_functional`'s autograd.grad call raises "not used in
     the graph" rather than "does not require grad" -- the other of the two autograd failure
@@ -747,7 +747,7 @@ class _Emitter(NodeSource):
 def _pipe_law():
     # C and n are explicit float64 tensors: a bare Python float here is silently cast to
     # torch.get_default_dtype() (float32 in this repo, see elements/duct.py) by
-    # Element._param, and the ~1e-8 relative precision loss that costs would blow the
+    # ConstitutiveLaw._param, and the ~1e-8 relative precision loss that costs would blow the
     # rel=1e-9 tolerances the node-source tests below check against an independently
     # computed root.
     return PowerLaw(
@@ -1015,7 +1015,7 @@ def test_node_source_with_an_unregistered_grad_tensor_is_named_as_a_node_source(
 
 def test_element_for_returns_the_element_and_its_q_slice():
     """The public accessor a caller outside this layer uses instead of reaching into
-    `_elements`/`_elem_slices` directly."""
+    `_elements`/`_law_slices` directly."""
     net = Network(dtype=torch.float64)
     net.add_node("a")
     net.add_node("b")
@@ -1027,16 +1027,16 @@ def test_element_for_returns_the_element_and_its_q_slice():
                       torch.tensor(0.6, dtype=torch.float64), kind="valve")
     layer = PotentialFlowLayer(net, "net", [pipe, valve], boundary=["a"])
 
-    el, sl = layer.element_for("valve")
+    el, sl = layer.law_for("valve")
     assert el is valve
     assert sl == layer.kind_slice("valve")
 
-    el0, sl0 = layer.element_for("pipe")
+    el0, sl0 = layer.law_for("pipe")
     assert el0 is pipe
     assert sl0 == slice(0, 1)
 
     with pytest.raises(KeyError, match=r"nope.*pipe.*valve"):
-        layer.element_for("nope")
+        layer.law_for("nope")
 
 
 def test_node_sources_default_to_empty_and_change_nothing():

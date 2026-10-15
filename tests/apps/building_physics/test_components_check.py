@@ -2,7 +2,7 @@
 
 import torch
 
-from noodl.apps.building_physics import build_model, orifice_elements_from_edges
+from noodl.apps.building_physics import build_model, orifice_law_from_edges
 from noodl.components import Component
 from noodl.drives import Stack
 from tests.components.conftest import leak, link, zone
@@ -24,8 +24,8 @@ def model_and_names(closed_door=False):
         d2 = b.add(link("d2", z_path=1.0, Cd=0.6, area=0.5))
         b.connect(rooms[0].ports.air, d2.ports.a)
     net, names = b.flatten(dtype=F64)
-    el = orifice_elements_from_edges(net, "airpath")
-    return build_model(net, air_elements=[el], drives=[Stack.from_network(net, "airpath")]), names
+    el = orifice_law_from_edges(net, "airpath")
+    return build_model(net, air_laws=[el], drives=[Stack.from_network(net, "airpath")]), names
 
 
 def issues(report, code):

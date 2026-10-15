@@ -44,7 +44,7 @@ import sys
 
 import torch
 
-from noodl.elements.base import Element
+from noodl.elements.base import ConstitutiveLaw
 
 Tensor = torch.Tensor
 
@@ -112,7 +112,7 @@ def _spline_derivatives(x: Tensor, y: Tensor) -> Tensor:
     return torch.stack(d)
 
 
-class SplineFlowTable(Element):
+class SplineFlowTable(ConstitutiveLaw):
     """MBL's tabulated flow law: a monotone cubic Hermite spline through ``(dp, flow)``
     knots, linearly extrapolated outside them; ``flow(dp)`` always returns MASS flow in kg/s.
 

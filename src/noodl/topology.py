@@ -13,7 +13,7 @@ as PyTorch tensors:
   potential on every edge. This is the sign convention the rest of the
   framework actually uses: ``PotentialFlowLayer.dp()`` calls this operator, a
   positive ``difference()`` at an edge's source drives a positive flow ``q``
-  from source to target under every Element law in this package, and the
+  from source to target under every constitutive law in this package, and the
   nodal Jacobian ``A_I diag(g') A_I^T`` is positive definite under exactly
   this convention;
 * the gradient ``gradient() = -incidence().T`` (b x n) -- the *opposite* sign
@@ -309,7 +309,7 @@ class Network:
         the sign convention the whole framework uses (the opposite of ``gradient()``, which
         gives ``target - source`` and is not used by the solve path). A positive value here
         at an edge's source drives a positive flow ``q`` from source to target under every
-        Element law in this package, and the nodal Jacobian ``A_I diag(g') A_I^T`` built from
+        constitutive law in this package, and the nodal Jacobian ``A_I diag(g') A_I^T`` built from
         this convention is positive definite. ``PotentialFlowLayer.dp()`` calls this operator
         (restricted to its own layer's edge columns) rather than repeating the einsum inline.
         """

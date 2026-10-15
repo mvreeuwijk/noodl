@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import torch
 
-from noodl.elements.base import Element
+from noodl.elements.base import ConstitutiveLaw
 from noodl.solvers.scalar import solve_monotone
 
 Tensor = torch.Tensor
@@ -27,7 +27,7 @@ DW_SI = 0.0826
 G = 9.80665
 
 
-class HazenWilliams(Element):
+class HazenWilliams(ConstitutiveLaw):
     """``h_L = K q^1.852 + m q^2`` with ``K = 10.666829500036 C^-1.852 d^-4.871 L``.
 
     ``m = K_minor / (2 g A^2)`` is the optional minor-loss term of the same pipe (EPANET
@@ -168,7 +168,7 @@ def three_point_curve(q_design: Tensor, h_design: Tensor) -> tuple[Tensor, Tenso
     return h0, r, 2.0
 
 
-class PumpCurve(Element):
+class PumpCurve(ConstitutiveLaw):
     """Constant-speed pump on its own edge kind: ``h_gain = w^2 (h0 - r (q/w)^n)``.
 
     The edge is oriented SUCTION -> DISCHARGE, so the layer's own
@@ -268,7 +268,7 @@ class PumpCurve(Element):
         return self.flow(zero, drivers), self.dflow(zero, drivers)
 
 
-class MinorLoss(Element):
+class MinorLoss(ConstitutiveLaw):
     """``h = m q |q|`` with ``m = K / (2 g A^2)``: a throttle control valve (TCV) or any
     pure minor-loss link. Inverted in closed form, ``q = sign(h) sqrt(|h| / m)``, with the
     same laminar blend and both-branch safe substitution as ``HazenWilliams``."""
@@ -405,7 +405,7 @@ def composite_friction_factor(q: Tensor, e: Tensor, s: Tensor) -> tuple[Tensor, 
     return torch.where(turbulent, f_sj, f_tr), torch.where(turbulent, dfdq_sj, dfdq_tr)
 
 
-class CompositeDarcyWeisbach(Element):
+class CompositeDarcyWeisbach(ConstitutiveLaw):
     """Composite Darcy-Weisbach pipe: Hagen-Poiseuille, Dunlop's cubic, then Swamee-Jain.
 
     This is EPANET 2.2's Darcy-Weisbach pipe, reproduced operation for operation

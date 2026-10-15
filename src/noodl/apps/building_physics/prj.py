@@ -183,12 +183,12 @@ class PrjSource:
 
 @dataclass
 class Project:
-    """A CONTAM project as read by `read_prj`: the network, its airflow elements and
+    """A CONTAM project as read by `read_prj`: the network, its airflow laws and
     drives, zones and their temperatures and volumes, species, initial mass fractions,
     sources and ambient conditions. `project_to_model` builds the model from it."""
 
     net: Network
-    elements: list
+    laws: list
     drives: list
     zones: list[str]
     ambient: str
@@ -213,7 +213,7 @@ class Project:
         """Net mass flow per path in path-number order (a doorway sums its two edges).
 
         `q` is the air layer's flow vector, which `PotentialFlowLayer` lays out in element-
-        KIND blocks, in `self.elements` order -- NOT in path order. Each path's
+        KIND blocks, in `self.laws` order -- NOT in path order. Each path's
         `edge_columns` already carries that translation.
         """
         cols = [torch.as_tensor(p.edge_columns, dtype=torch.long) for p in self.paths]
@@ -853,7 +853,7 @@ def _build(*, ambient_conditions, g, species, levels, profiles, elements, zones,
             x0[i, : len(row)] = torch.tensor(row, dtype=F64)
 
     return Project(
-        net=net, elements=built, drives=drives, zones=zone_names, ambient=ambient, paths=paths,
+        net=net, laws=built, drives=drives, zones=zone_names, ambient=ambient, paths=paths,
         species=species, T_zone=torch.tensor(T_list, dtype=F64),
         zone_volumes=torch.tensor(V_list, dtype=F64), g=g,
         ambient_conditions=ambient_conditions, profiles=profiles, x0=x0, sources=sources,
@@ -913,7 +913,7 @@ def project_to_model(project: Project, *, ambient: dict | None = None, species: 
     T = net.node_attr("T0")
     T[net.node_index(project.ambient)] = amb["Ta"]
     rho = amb["Pb"] / (R_AIR * T)
-    air = PotentialFlowLayer(net, "air", project.elements, drives=project.drives,
+    air = PotentialFlowLayer(net, "air", project.laws, drives=project.drives,
                              boundary=[project.ambient], quantity="pressure", unit="Pa",
                              flow_unit="kg/s")
     layers: dict = {"air": air}

@@ -3,7 +3,7 @@
 Runs 24 h at dt = 60 s with storage on, batched over 8 instances that VARY `f_i` and the
 leak area across the batch (`Drag.f_i` and the leak `PowerLaw`'s `C` accept
 a tensor carrying a leading batch dimension without any core or element change -- ordinary
-broadcasting and `Element._param`'s pass-through rule do the rest -- so `build_model`
+broadcasting and `ConstitutiveLaw._param`'s pass-through rule do the rest -- so `build_model`
 is handed `f_i`/`leak_area` shaped `(n_instances, 1)` rather than the plain floats every
 other caller uses), and prints the wall time and the peak headspace H2S per manhole in ppm.
 Budget: the run should finish in under 60 s on the CPU used; a miss is reported, never

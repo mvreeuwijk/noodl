@@ -7,7 +7,8 @@ import pytest
 import noodl.elements as elements
 
 NAMES = [
-    "Conductance", "Damper", "Duct", "Element", "FanCurve", "FixedFlow", "Orifice", "PowerLaw",
+    "Conductance", "Damper", "Duct", "ConstitutiveLaw", "FanCurve", "FixedFlow", "Orifice",
+    "PowerLaw",
     "Quadratic", "UpstreamDensityPowerLaw",
     "DoorCompartmentHead", "MBLDoorCompartment", "MBLDoorCompartmentOperable", "MBLDoorOpen",
     "MBLDoorPortStream",

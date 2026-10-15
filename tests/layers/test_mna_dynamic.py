@@ -8,7 +8,7 @@ import pytest
 import torch
 
 import noodl.layers._mna as mna_module
-from noodl.elements import Conductance, Element, ImplicitLaw
+from noodl.elements import Conductance, ConstitutiveLaw, ImplicitLaw
 from noodl.layers.potential import PotentialFlowLayer
 from noodl.topology import Network
 from tests._circuit_laws import Cap, DrivenSource, Ind, Source
@@ -190,7 +190,7 @@ def test_drive_on_dynamic_kind_is_refused():
                            drives=[Push()], boundary=["gnd"])
 
 
-class StepRecorder(Element):
+class StepRecorder(ConstitutiveLaw):
     """q = g dp for a static law that reads the context: records each mode it sees."""
 
     contextual = True
@@ -264,7 +264,7 @@ def test_rank_test_is_skipped_above_the_size_cap(monkeypatch):
 def test_rank_test_runs_once_on_the_first_failing_instance(monkeypatch):
     # gnd -g- a ==V== b -g- gnd with g = 0 in the second instance only: there a and b are
     # tied to ground through the source alone, and their common level is undetermined.
-    class DrivenConductance(Element):
+    class DrivenConductance(ConstitutiveLaw):
         def flow(self, dp, drivers=None):
             return drivers["g"] * dp
 
@@ -411,7 +411,7 @@ class _ScalarResidual(ImplicitLaw):
         return dp.sum() - 1.0        # 0-dim
 
 
-class _WrongWidthFlow(Element):
+class _WrongWidthFlow(ConstitutiveLaw):
     def flow(self, dp, drivers=None):
         return dp[..., :1]           # one value for a kind of two edges
 

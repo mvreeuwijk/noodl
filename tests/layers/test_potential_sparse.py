@@ -730,7 +730,7 @@ def test_sparse_direct_linear_solver_matches_direct_on_the_composed_model():
     sparse_layer = PotentialFlowLayer(
         net,
         "composed_sparse_direct",
-        model.elements,
+        model.laws,
         boundary=model.boundary,
         linear_solver="sparse_direct",
     )
@@ -754,7 +754,7 @@ def test_sparse_direct_adjoint_matches_direct_on_the_composed_model():
     sparse_layer = PotentialFlowLayer(
         net,
         "composed_sparse_direct",
-        model.elements,
+        model.laws,
         boundary=model.boundary,
         linear_solver="sparse_direct",
     )
@@ -948,7 +948,7 @@ def test_non_differentiable_solve_returns_detached_tensors_whatever_the_caller_d
 ):
     """The consequence of running the whole branch under `no_grad`, pinned: nothing this path
     returns carries a graph, even from inside `enable_grad` with grad-requiring inputs and a
-    learnable Element. A caller who wants gradients uses `differentiable=True`.
+    learnable ConstitutiveLaw. A caller who wants gradients uses `differentiable=True`.
     """
     net, elements, drives, boundary = two_zone_layer
     el = PowerLaw(

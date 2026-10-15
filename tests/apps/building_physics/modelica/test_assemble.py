@@ -208,7 +208,7 @@ def test_mixed_model_conserves_mass_and_accumulates_the_trace_substance():
 def test_gradient_of_a_zone_temperature_wrt_an_orifice_coefficient():
     model, state, drivers, names = _load("zone_two_orifices.json")
     kind = names.kinds["oriA"][0]
-    el, _ = model.potential["air"].element_for(kind)
+    el, _ = model.potential["air"].law_for(kind)
     d = step_drivers(drivers, names.times, 1.0)
     el.C.requires_grad_(True)
     new = model.step(state, d, 1.0)
@@ -420,7 +420,7 @@ def test_operable_and_discretised_doors_build_and_follow_their_signal(tmp_path):
     assert float(sum(s * hist["air.q"][0, c] for c, s in names.edges["el"])) > 0.0
     # The edges ARE MBL's port flows: port_a1.m_flow = mAB_flow, port_a2.m_flow = mBA_flow
     # (the element's `port_flows` at the solved compartment pressure differences).
-    el, sl = model.potential["air"].element_for("door_ab:el")
+    el, sl = model.potential["air"].law_for("door_ab:el")
     d = dict(drivers)
     d.update(step_drivers(drivers, drivers["series:time"], float(names.times[0])))
     for c in model.closures:

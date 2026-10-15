@@ -4,7 +4,7 @@ import math
 
 import torch
 
-from noodl.elements.base import Element
+from noodl.elements.base import ConstitutiveLaw
 from noodl.elements.powerlaw import Orifice, PowerLaw
 
 
@@ -49,7 +49,7 @@ def test_blend_is_continuous_in_value_at_the_transition():
 def test_blend_dflow_matches_autograd_default_around_transition_and_zero():
     el = PowerLaw(C=1.3, n=0.7, dp_transition=1e-3)
     dp = torch.tensor([-2.0, -1e-3, -5e-4, 0.0, 5e-4, 1e-3, 2.0])
-    torch.testing.assert_close(el.dflow(dp), Element.dflow(el, dp), atol=1e-6, rtol=1e-6)
+    torch.testing.assert_close(el.dflow(dp), ConstitutiveLaw.dflow(el, dp), atol=1e-6, rtol=1e-6)
 
 
 def test_blend_linear_init_matches_finite_difference_slope_at_zero():
@@ -65,7 +65,7 @@ def test_regularised_is_odd_and_matches_autograd_dflow():
     el = PowerLaw(C=1.4, n=0.55, regularised=1e-4)
     dp = torch.linspace(-3.0, 3.0, 13)
     torch.testing.assert_close(el.flow(-dp), -el.flow(dp))
-    torch.testing.assert_close(el.dflow(dp), Element.dflow(el, dp), atol=1e-6, rtol=1e-6)
+    torch.testing.assert_close(el.dflow(dp), ConstitutiveLaw.dflow(el, dp), atol=1e-6, rtol=1e-6)
 
 
 def test_regularised_linear_init_matches_finite_difference_slope_at_zero():

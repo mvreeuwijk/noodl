@@ -23,7 +23,7 @@ import numpy as np
 import pytest
 import torch
 
-from noodl.apps.building_physics.elements import add_large_opening, orifice_elements_from_edges
+from noodl.apps.building_physics.elements import add_large_opening, orifice_law_from_edges
 from noodl.apps.building_physics.thermal import (
     CP_AIR,
     RHO_0,
@@ -62,12 +62,12 @@ def _single_zone(*, A: float, h: float, E: float, UA: float = 0.0, cp_low: float
     net.add_edge("ambient", "z", kind="airpath", z_path=h, Cd=CD, area=A, Cp=cp_high, Ch=1.0)
     if UA > 0:
         net.add_edge("z", "ambient", kind="wall", ua=UA)
-    el = orifice_elements_from_edges(net, "airpath")
+    el = orifice_law_from_edges(net, "airpath")
     drives = [Stack.from_network(net, "airpath")]
     if cp_low or cp_high:
         drives.append(Wind.from_network(net, "airpath", ambient="ambient"))
     model = build_model(
-        net, air_elements=[el], drives=drives, density="linear",
+        net, air_laws=[el], drives=drives, density="linear",
         density_kwargs={"rho_0": RHO_0, "T_0": T_O},
         coupling=coupling, iterate_tol={"thermal": 1e-9}, iterate_max=300,
     )
@@ -259,9 +259,9 @@ def _two_zone_doorway():
     add_large_opening(net, "A", "B", H=2.0, W=0.9, z_mid=1.0, Cd=0.78)
     net.add_edge("ambient", "B", kind="airpath", z_path=0.2, Cd=CD, area=0.05)
     net.add_edge("ambient", "B", kind="airpath", z_path=1.8, Cd=CD, area=0.05)
-    el = orifice_elements_from_edges(net, "airpath")
+    el = orifice_law_from_edges(net, "airpath")
     model = build_model(
-        net, air_elements=[el], drives=[Stack.from_network(net, "airpath")], density="linear",
+        net, air_laws=[el], drives=[Stack.from_network(net, "airpath")], density="linear",
         density_kwargs={"rho_0": RHO_0, "T_0": T_O}, coupling="iterate",
         iterate_tol={"thermal": 1e-9}, iterate_max=300,
     )
@@ -317,9 +317,9 @@ def _three_zone_stack(coupling: str, tol: float = 0.05):
         net.add_edge("ambient", f"z{i + 1}", kind="airpath", z_path=z + 2.7, Cd=CD, area=0.02)
     add_large_opening(net, "z1", "z2", H=1.0, W=1.5, z_mid=3.0, Cd=0.78)
     add_large_opening(net, "z2", "z3", H=1.0, W=1.5, z_mid=6.0, Cd=0.78)
-    el = orifice_elements_from_edges(net, "airpath")
+    el = orifice_law_from_edges(net, "airpath")
     model = build_model(
-        net, air_elements=[el], drives=[Stack.from_network(net, "airpath")],
+        net, air_laws=[el], drives=[Stack.from_network(net, "airpath")],
         coupling=coupling, iterate_tol={"thermal": tol}, iterate_max=50,
     )
     sources = torch.zeros(net.n, dtype=F64)

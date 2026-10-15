@@ -9,7 +9,7 @@ import torch
 
 from noodl.drives import ConstantDrive
 from noodl.elements import PowerLaw
-from noodl.elements.base import Element
+from noodl.elements.base import ConstitutiveLaw
 from noodl.layers.potential import PotentialFlowLayer
 from noodl.layers.reaction import FirstOrderDecay
 from noodl.layers.transport import TransportLayer
@@ -1409,7 +1409,7 @@ def test_a_non_converged_iteration_refuses_to_return_when_a_gradient_is_wanted()
     assert "species.x" in out and not bool(diag["converged"].all())
 
 
-class _DriverConductance(Element):
+class _DriverConductance(ConstitutiveLaw):
     """q = k * dp with k per edge from the driver "toy.k" (test-local)."""
 
     def __init__(self, kind):

@@ -23,7 +23,7 @@ from collections.abc import Mapping
 import torch
 
 from noodl.apps.electrical.laws import _driver
-from noodl.elements import Element, ImplicitLaw
+from noodl.elements import ConstitutiveLaw, ImplicitLaw
 
 Tensor = torch.Tensor
 
@@ -75,7 +75,7 @@ class Impedance(ImplicitLaw):
         return dp - self.R * q
 
 
-class ConstantPowerLoad(Element):
+class ConstantPowerLoad(ConstitutiveLaw):
     """A load absorbing the complex power `S = P + jQ` (W, var; positive = consumption, the
     power-flow convention), per edge: `q = conj(S / dp)`, on a real layer `q = P / dp`.
     `scale` names a driver whose per-edge values multiply `S` (a load profile).

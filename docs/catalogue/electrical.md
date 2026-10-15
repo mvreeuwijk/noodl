@@ -46,7 +46,7 @@ Descriptions of the physical objects a network is built from.
 | `PowerFlowSolution`<br><small>`noodl.apps.electrical.power`</small> | A solved power flow in per unit; tensors may carry leading batch dimensions. | `PowerFlowSolution(bus_ids, vm, va, gen_buses, pg, qg, branch_rows, sf, st)` |
 | `PowerNetwork`<br><small>`noodl.apps.electrical.power`</small> | A power-flow network: buses, branches, generators, loads and fixed shunts in file order, the system base `base_mva` (MVA), a `name` and free-form `notes` (a reader records what it skipped there; they take no part in equality or the hash, so a network is hashable). Construction refuses duplicate bus ids, an unknown bus kind, a nonpositive base and any element on a bus that does not exist. | `PowerNetwork(buses, branches, generators, loads=(), shunts=(), base_mva=100.0, name='', notes=<factory>)` |
 
-## Elements (constitutive laws)
+## Constitutive laws
 
 The relation between the flow through an edge and the potential difference across it.
 

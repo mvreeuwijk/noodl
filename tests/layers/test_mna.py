@@ -4,7 +4,7 @@ import pytest
 import torch
 
 import noodl.solvers.select as select_module
-from noodl.elements import Conductance, Element, FixedFlow, ImplicitLaw, LawContext
+from noodl.elements import Conductance, ConstitutiveLaw, FixedFlow, ImplicitLaw, LawContext
 from noodl.layers.potential import PotentialFlowLayer
 from noodl.nodesources import NodeSource
 from noodl.solvers.implicit import TransposeOperator
@@ -39,7 +39,7 @@ class Ratio(ImplicitLaw):
         return torch.stack([r1, r2], -1).flatten(-2)
 
 
-class DrivenConductance(Element):
+class DrivenConductance(ConstitutiveLaw):
     """q = drivers["g"] dp."""
 
     def __init__(self, kind="r"):
@@ -194,7 +194,7 @@ def test_differentiable_matches_finite_difference(monkeypatch):
 
 def test_learnable_parameter_gradients_match_central_differences():
     net, layer = _transformer_layer(n=2.0, learnable=True)
-    ratio = layer.element_for("xfmr")[0]
+    ratio = layer.law_for("xfmr")[0]
     w = torch.tensor([0.3, -1.1, 0.7, 2.0, 0.4, -0.5, 1.3])
 
     def loss():
@@ -311,7 +311,7 @@ def test_fixed_flow_and_node_source_still_work_in_mna():
 
 
 # ------------------------------------------------------------------ Jacobian check
-class Cubic(Element):
+class Cubic(ConstitutiveLaw):
     """q = g dp + c dp^3, per edge."""
 
     def __init__(self, g, c, kind):
@@ -323,7 +323,7 @@ class Cubic(Element):
         return self.g * dp + self.c * dp**3
 
 
-class CoupledPair(Element):
+class CoupledPair(ConstitutiveLaw):
     """A two-port potential law: q1 = a dp1 + b dp2^2, q2 = b dp1 dp2 + a dp2."""
 
     ports = 2

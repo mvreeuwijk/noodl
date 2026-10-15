@@ -33,7 +33,7 @@ Descriptions of the physical objects a network is built from.
 | `WaterOptions` | `[OPTIONS]` keys that change the physics, with EPANET 2.2's own defaults. | `WaterOptions(demand_model='DDA', minimum_pressure=0.0, required_pressure=0.1, pressure_exponent=0.5, specific_gravity=1.0, viscosity=1.0, flow_units=None)` |
 | `WaterPipe` | A pipe from `u` to `v`: `length` and `diameter` (m), `roughness` (in the network's head-loss formula's units), a minor-loss coefficient and its `status`. | `WaterPipe(name, u, v, length, diameter, roughness, minor_loss=0.0, status='OPEN')` |
 
-## Elements (constitutive laws)
+## Constitutive laws
 
 The relation between the flow through an edge and the potential difference across it.
 

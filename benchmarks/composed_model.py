@@ -3,7 +3,7 @@ with a reference physics configuration on top.
 
 Used by the composed-model scaling gate and, as a `pytest` fixture
 (`tests/conftest.py`'s `composed_model`), by the tests that need a realistic joined
-topology and physics. `_build_topology` builds the topology ONLY -- no elements,
+topology and physics. `_build_topology` builds the topology ONLY -- no laws,
 drives or layers; `build_composed` then attaches one reference physics configuration to it (a
 `PowerLaw` per edge kind, sources, capacity, a migrated `PotentialFlowLayer`, a dense-path
 `PotentialFlowLayer` and a `TransportLayer`) and returns both as one `ComposedModel`.
@@ -17,13 +17,13 @@ import torch
 
 from benchmarks.measure import time_call
 from noodl.elements import PowerLaw
-from noodl.elements.base import Element
+from noodl.elements.base import ConstitutiveLaw
 from noodl.layers.potential import PotentialFlowLayer
 from noodl.layers.transport import TransportLayer, active_interior
 from noodl.model import Model
 from noodl.topology import Network
 
-# PowerLaw conductance scale per edge kind, and the insertion order the elements list and the
+# PowerLaw conductance scale per edge kind, and the insertion order the laws list and the
 # shared RNG draws follow (topology first, then these in this order, then sources, then
 # capacity -- see build_composed).
 _ELEMENT_SCALES: dict[str, float] = {
@@ -42,7 +42,7 @@ class ComposedModel:
     net: Network
     interface_nodes: dict[str, dict[str, tuple[str, str]]]
     boundary: list[str]
-    elements: list[Element]
+    laws: list[ConstitutiveLaw]
     phi_boundary: torch.Tensor
     drivers: dict
     sources: torch.Tensor
@@ -151,7 +151,7 @@ def build_composed(
 
     `boundary` is `["street_0", "sewer_0"]` -- one ground node each on the street and sewer
     networks. `layer` (name "composed") is the migrated, default-configured path; `dense_layer`
-    (name "composed_dense") is built from the same net/elements/boundary but with
+    (name "composed_dense") is built from the same net/laws/boundary but with
     `linear_solver="direct"`: the same operator assembled and LU-factorised, i.e. the
     dense reference numerics, retained as a genuinely separate code path so the composed-model
     parity gate compares two solvers rather than the sparse path with itself. `transport`
@@ -163,7 +163,7 @@ def build_composed(
     transport, "thermal": thermal})` that steps all three together. There are NO closures:
     the point of the configuration is the cost of a second transport layer through
     `Model.step`, not thermal feedback, for which this synthetic topology carries no
-    elevations. Everything else -- topology, RNG stream, elements, sources, the co2 layer --
+    elevations. Everything else -- topology, RNG stream, laws, sources, the co2 layer --
     is bit-identical to `thermal=False`, so the two differ in the added layer and the
     `Model.step` dispatch around it.
 
@@ -182,12 +182,12 @@ def build_composed(
     rng = torch.Generator().manual_seed(seed)
     dtype = net.dtype
 
-    elements: list[Element] = []
+    laws: list[ConstitutiveLaw] = []
     for kind, scale in _ELEMENT_SCALES.items():
         b_kind = int(net.edge_index(kind).numel())
         u = torch.rand(b_kind, generator=rng, dtype=dtype)
         C = scale * (0.5 + u)
-        elements.append(PowerLaw(C, 0.65, kind=kind))
+        laws.append(PowerLaw(C, 0.65, kind=kind))
 
     phi_boundary = torch.zeros(ensemble, len(boundary), dtype=dtype)
 
@@ -208,10 +208,10 @@ def build_composed(
     drivers: dict = {}
 
     layer = PotentialFlowLayer(
-        net, "composed", elements, boundary=boundary, linear_solver=linear_solver
+        net, "composed", laws, boundary=boundary, linear_solver=linear_solver
     )
     dense_layer = PotentialFlowLayer(
-        net, "composed_dense", elements, boundary=boundary, linear_solver="direct"
+        net, "composed_dense", laws, boundary=boundary, linear_solver="direct"
     )
     transport = TransportLayer(
         net,
@@ -246,7 +246,7 @@ def build_composed(
         net=net,
         interface_nodes=interface_nodes,
         boundary=boundary,
-        elements=elements,
+        laws=laws,
         phi_boundary=phi_boundary,
         drivers=drivers,
         sources=sources,

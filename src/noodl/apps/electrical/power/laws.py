@@ -13,12 +13,12 @@ from __future__ import annotations
 
 import torch
 
-from noodl.elements import Element, ImplicitLaw
+from noodl.elements import ConstitutiveLaw, ImplicitLaw
 
 Tensor = torch.Tensor
 
 
-class PiBranch(Element):
+class PiBranch(ConstitutiveLaw):
     """MATPOWER's branch two-port in per unit,
     `[I_f; I_t] = [[Y_ff, Y_ft], [Y_tf, Y_tt]] [V_f; V_t]` with `Y_s = 1/(r + jx)`,
     `tau = ratio e^{j shift}`, `Y_tt = Y_s + jb/2`, `Y_ff = Y_tt/(tau conj(tau))`,
@@ -59,7 +59,7 @@ class PiBranch(Element):
         return torch.stack([yff * vf + yft * vt, ytf * vf + ytt * vt], dim=-1).flatten(-2)
 
 
-class Shunt(Element):
+class Shunt(ConstitutiveLaw):
     """A constant-admittance shunt, `i = (g + jb) v` (p.u.), per edge bus -> ground: `g`
     consumes the real power `g |v|^2` and a positive `b` injects the reactive power
     `b |v|^2` (a capacitor). MATPOWER's bus `Gs`, `Bs` divided by the base power.

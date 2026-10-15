@@ -14,13 +14,13 @@ from __future__ import annotations
 
 import torch
 
-from noodl.elements.base import Element
+from noodl.elements.base import ConstitutiveLaw
 from noodl.elements.powerlaw import PowerLaw
 
 Tensor = torch.Tensor
 
 
-class Damper(Element):
+class Damper(ConstitutiveLaw):
     """Separate power-law coefficient and exponent for each flow direction: `C_pos`/`n_pos`
     for dp > 0 and `C_neg`/`n_neg` for dp < 0, each as in `PowerLaw` (`C` in the flow unit
     per Pa^n, `n` dimensionless).

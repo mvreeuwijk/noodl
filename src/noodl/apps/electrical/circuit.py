@@ -35,7 +35,7 @@ from noodl.apps.electrical.laws import (
     TransformerRatio,
 )
 from noodl.apps.electrical.waveforms import Constant, _Waveform
-from noodl.elements import Conductance, Element
+from noodl.elements import Conductance, ConstitutiveLaw
 from noodl.layers.potential import PotentialFlowLayer
 from noodl.model import Model
 from noodl.topology import Network
@@ -371,7 +371,7 @@ def _values(devices, name: str) -> Tensor:
     return torch.stack([torch.as_tensor(getattr(d, name), dtype=F64) for d in devices])
 
 
-def _law(kind: str, devices: list, temperature: str | None, learnable: bool) -> Element:
+def _law(kind: str, devices: list, temperature: str | None, learnable: bool) -> ConstitutiveLaw:
     """The constitutive law carrying every device of one kind, parameters in device order."""
     first = devices[0]
     if isinstance(first, Resistor):
@@ -430,7 +430,7 @@ def build_model(
     resistors' `alpha`; without it every resistor is at its `T_ref`. `learnable=True`
     registers the laws' principal parameters (resistance, conductance, capacitance,
     inductance, source amplitudes, turns ratio, `L1`/`L2`/`M`, gain; one entry per device)
-    as `nn.Parameter`s, reached as `model.potential["electrical"].element_for(kind)[0]`.
+    as `nn.Parameter`s, reached as `model.potential["electrical"].law_for(kind)[0]`.
 
     Drivers: `"electrical.phi_boundary"` (the ground at 0 V; complex for a phasor model) and
     `"electrical.frequency"` for a phasor model. State: `{}`; the analyses

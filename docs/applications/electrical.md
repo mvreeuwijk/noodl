@@ -650,7 +650,7 @@ implicit-function adjoint, a transient through every step. The divider's output 
 model, _, drivers = build_model(divider, learnable=True)
 op = operating_point(model, drivers)
 v_out = op["electrical.phi"][model.net.nodes.index("out")]
-resistors = model.potential["electrical"].element_for("resistor")[0]
+resistors = model.potential["electrical"].law_for("resistor")[0]
 (grad,) = torch.autograd.grad(v_out, resistors.R)
 print([round(g, 12) for g in grad.tolist()])
 ```
@@ -833,14 +833,14 @@ not exist. Not implemented:
 
 `build_power_flow(net, learnable=True)` registers every constitutive-law coefficient (branch
 `r`, `x`, `b`, taps and shifts; load `P`, `Q`; shunt `g`, `b`; generator `P`, `V`) as an
-`nn.Parameter`, reached as `model.potential["power"].element_for(kind)[0]`, and the solve is
+`nn.Parameter`, reached as `model.potential["power"].law_for(kind)[0]`, and the solve is
 differentiable through the implicit-function adjoint. The sensitivity of bus 4's voltage
 magnitude to the three loads' real power (p.u./p.u.):
 
 ```python
 model, state, drivers = build_power_flow(net, learnable=True)
 vm = power_flow_solution(model, solve_power_flow(model, state, drivers)).vm
-(grad,) = torch.autograd.grad(vm[3], model.potential["power"].element_for("load")[0].P)
+(grad,) = torch.autograd.grad(vm[3], model.potential["power"].law_for("load")[0].P)
 print(model.power_index.load_buses, [round(g, 4) for g in grad.tolist()])
 ```
 

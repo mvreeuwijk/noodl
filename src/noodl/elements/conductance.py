@@ -4,12 +4,12 @@ from __future__ import annotations
 
 import torch
 
-from noodl.elements.base import Element
+from noodl.elements.base import ConstitutiveLaw
 
 Tensor = torch.Tensor
 
 
-class Conductance(Element):
+class Conductance(ConstitutiveLaw):
     """q = g dp, the linear branch law used for thermal conduction and passive exchange; `g` is
     in the flow unit per unit of potential (W/K for heat, kg/s per Pa for air).
     """

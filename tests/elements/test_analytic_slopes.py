@@ -12,7 +12,7 @@ from __future__ import annotations
 import pytest
 import torch
 
-from noodl.elements.base import Element, memo
+from noodl.elements.base import ConstitutiveLaw, memo
 from noodl.elements.door import MBLDoorOpen
 from noodl.elements.door_discretized import (
     MBLDoorPortStream,
@@ -48,7 +48,7 @@ def test_power_law_slopes_equal_autograd_bit_for_bit(element):
     dp = _samples(element.dp_turbulent, n, 0)
     with torch.no_grad():
         exact = element.dflow(dp, drivers)
-        reference = Element.dflow(element, dp, drivers)
+        reference = ConstitutiveLaw.dflow(element, dp, drivers)
     assert torch.equal(exact, reference)
 
 

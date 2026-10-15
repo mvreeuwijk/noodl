@@ -1,7 +1,7 @@
 """PotentialFlowLayer: nodal conservation residual, Jacobian and Newton solve.
 
-Assembles r(phi_I) = A_I g(A^T phi + drive; theta) - s_I from a set of Element laws
-on typed edges (one Element per kind) and Drive terms (additive potential differences).
+Assembles r(phi_I) = A_I g(A^T phi + drive; theta) - s_I from a set of constitutive laws
+on typed edges (one ConstitutiveLaw per kind) and Drive terms (additive potential differences).
 """
 
 from __future__ import annotations
@@ -14,7 +14,7 @@ import torch
 from noodl._broadcast import broadcast_shapes
 from noodl._tracking import bulk_values, same_tracking
 from noodl.drives import Drive, check_drive_signature
-from noodl.elements.base import Element
+from noodl.elements.base import ConstitutiveLaw
 from noodl.layers._mna import MnaSystem
 from noodl.nodesources import NodeSource
 from noodl.operators.graph import GraphLaplacianOperator
@@ -108,7 +108,7 @@ class _DiagonalShifted:
 
 class PotentialFlowLayer:
     """Flows driven by a potential (pressure, head): solves nodal conservation
-    `A_I g(A^T phi) = s_I` for the interior potentials by Newton's method, with the element
+    `A_I g(A^T phi) = s_I` for the interior potentials by Newton's method, with the law
     laws on its edge kinds, drives added to the potential differences, and prescribed
     potentials at its boundary nodes; differentiable through the converged solution.
     `flow_unit` is reported by `model.refs`, never used numerically.
@@ -129,7 +129,7 @@ class PotentialFlowLayer:
 
     `analytic_primal` (default ``False``): a ``differentiable=True`` solve that nothing
     differentiable reaches (grad mode off, or no input requiring grad) runs the
-    ``differentiable=False`` branch, whose Newton Jacobian is the elements' and node
+    ``differentiable=False`` branch, whose Newton Jacobian is the laws' and node
     sources' own analytic ``dflow`` rather than autograd through ``functional_call``. The
     result is the same root to the Newton tolerance (not bitwise: the two Jacobians may
     differ at a kink), returned detached as it would be anyway. It is opt-in because it
@@ -145,7 +145,7 @@ class PotentialFlowLayer:
         self,
         net: Network,
         name: str,
-        elements: Sequence[Element],
+        laws: Sequence[ConstitutiveLaw],
         drives: Sequence[Drive] = (),
         boundary: Sequence = (),
         linear_solver: str = "auto",
@@ -177,9 +177,9 @@ class PotentialFlowLayer:
         self.flow_unit = flow_unit
 
         seen_kinds: set[str] = set()
-        for el in elements:
+        for el in laws:
             if el.kind in seen_kinds:
-                raise ValueError(f"duplicate element kind {el.kind!r} in layer {name!r}")
+                raise ValueError(f"duplicate law kind {el.kind!r} in layer {name!r}")
             seen_kinds.add(el.kind)
             if el.law_form not in ("potential", "implicit"):
                 raise ValueError(
@@ -190,39 +190,39 @@ class PotentialFlowLayer:
 
         self.net = net
         self.name = name
-        self._elements = list(elements)
+        self._laws = list(laws)
         self._drives = list(drives)
-        self.kinds = [el.kind for el in elements]
+        self.kinds = [el.kind for el in laws]
         # Modified Nodal Analysis: a law whose flow is an unknown (implicit), that couples
         # several edges (ports > 1), that stores (dynamic) or that reads the law context
         # cannot be solved by the classic nodal path; such a layer is solved by `MnaSystem`.
         self.phasor = phasor
-        self.dynamic = any(el.dynamic for el in self._elements)
+        self.dynamic = any(el.dynamic for el in self._laws)
         self.mna = self.phasor or any(
             el.law_form == "implicit" or el.ports > 1 or el.dynamic or el.contextual
-            for el in self._elements
+            for el in self._laws
         )
 
         cols_list = []
         self._kind_slices: dict[str, tuple[int, int]] = {}
-        self._elem_slices: list[tuple[int, int]] = []
+        self._law_slices: list[tuple[int, int]] = []
         offset = 0
-        for el in elements:
+        for el in laws:
             # net.edge_index raises KeyError when el.kind carries no edge at all (it never
             # returns an empty tensor for a non-None kind: a kind either has edges, in which
             # case idx is non-empty, or it appears nowhere in the network, in which case
-            # edge_index itself raises). Re-raise as ValueError so a missing element kind and
+            # edge_index itself raises). Re-raise as ValueError so a missing law kind and
             # a genuinely unknown node/kind lookup elsewhere stay distinguishable to callers.
             try:
                 idx = net.edge_index(el.kind)
             except KeyError as exc:
                 raise ValueError(
-                    f"element kind {el.kind!r} has no edges in the network"
+                    f"law kind {el.kind!r} has no edges in the network"
                 ) from exc
             cols_list.append(idx)
             n_e = idx.numel()
             self._kind_slices[el.kind] = (offset, offset + n_e)
-            self._elem_slices.append((offset, offset + n_e))
+            self._law_slices.append((offset, offset + n_e))
             offset += n_e
         self.cols = torch.cat(cols_list)
         # The node count, cached as a plain int: `assemble` (once per Newton iteration) and
@@ -248,7 +248,7 @@ class PotentialFlowLayer:
             check_drive_signature(drv, where=f"PotentialFlowLayer {name!r}")
             if drv.kind not in kind_set:
                 raise ValueError(
-                    f"drive kind {drv.kind!r} is not one of this layer's element kinds "
+                    f"drive kind {drv.kind!r} is not one of this layer's law kinds "
                     f"{sorted(kind_set)} (layer {name!r})"
                 )
 
@@ -334,7 +334,7 @@ class PotentialFlowLayer:
         """Construction checks of a Modified Nodal Analysis layer: port groups, solver,
         drives on dynamic laws, and a boundary node in every connected part."""
         name = self.name
-        for el, (s, e) in zip(self._elements, self._elem_slices, strict=True):
+        for el, (s, e) in zip(self._laws, self._law_slices, strict=True):
             if (e - s) % el.ports:
                 raise ValueError(
                     f"PotentialFlowLayer {name!r}: kind {el.kind!r} has {e - s} edges, not a "
@@ -347,7 +347,7 @@ class PotentialFlowLayer:
                 f"'auto', 'sparse_direct', 'direct' or 'gmres'"
             )
         if self.phasor:
-            for el in self._elements:
+            for el in self._laws:
                 if not el.phasor_capable:
                     raise ValueError(
                         f"PotentialFlowLayer {name!r}: kind {el.kind!r} has law "
@@ -360,7 +360,7 @@ class PotentialFlowLayer:
                     f"PotentialFlowLayer {name!r}: a phasor layer takes no node_sources; "
                     f"loads are edges to ground in a phasor layer"
                 )
-        dynamic_kinds = {el.kind for el in self._elements if el.dynamic}
+        dynamic_kinds = {el.kind for el in self._laws if el.dynamic}
         for drv in self._drives:
             if drv.kind in dynamic_kinds:
                 raise ValueError(
@@ -559,7 +559,7 @@ class PotentialFlowLayer:
                     value = drv(drivers)
                     # A width mismatch here is silent corruption, not a crash: torch.cat below
                     # would happily accept a wrong-width block, shifting every later kind's
-                    # slice out from under `_elem_slices` so a DIFFERENT element ends up being
+                    # slice out from under `_law_slices` so a DIFFERENT law ends up being
                     # fed this kind's drive value with no exception anywhere in the call chain.
                     if value.ndim > 0 and value.shape[-1] != width:
                         raise ValueError(
@@ -577,7 +577,7 @@ class PotentialFlowLayer:
         d = self.dp(phi, drivers)
         parts = [
             el.flow(d[..., s:e], drivers)
-            for el, (s, e) in zip(self._elements, self._elem_slices, strict=True)
+            for el, (s, e) in zip(self._laws, self._law_slices, strict=True)
         ]
         return torch.cat(parts, dim=-1)
 
@@ -587,28 +587,28 @@ class PotentialFlowLayer:
             start, end = self._kind_slices[kind]
         except KeyError as exc:
             raise KeyError(
-                f"PotentialFlowLayer {self.name!r} has no element of kind {kind!r}; its kinds "
+                f"PotentialFlowLayer {self.name!r} has no law of kind {kind!r}; its kinds "
                 f"are {self.kinds}"
             ) from exc
         return slice(start, end)
 
-    def element_for(self, kind: str) -> tuple[Element, slice]:
-        """This layer's own `Element` instance for `kind`, and the slice of `q`'s (and
+    def law_for(self, kind: str) -> tuple[ConstitutiveLaw, slice]:
+        """This layer's own `ConstitutiveLaw` instance for `kind`, and the slice of `q`'s (and
         `dp`'s) columns it occupies: the PUBLIC accessor a caller outside this layer
-        uses instead of reaching into its private `_elements`/`_elem_slices`. Raises
+        uses instead of reaching into its private `_laws`/`_law_slices`. Raises
         `KeyError` naming the kind and this layer's known kinds when absent, exactly as
-        `kind_slice` does (each element kind is unique within a layer, so the two agree by
+        `kind_slice` does (each law kind is unique within a layer, so the two agree by
         construction).
         """
         sl = self.kind_slice(kind)
-        return self._elements[self.kinds.index(kind)], sl
+        return self._laws[self.kinds.index(kind)], sl
 
     def flows_of_kind(self, q: torch.Tensor, kinds) -> torch.Tensor:
         """`q` restricted to `kinds` (a name or a sequence), concatenated in the given order.
 
         This is what a `TransportLayer` with `flow_kinds == kinds` expects as its `q`: the
         transport layer reads its flow edges kind by kind, in ITS OWN `flow_kinds` order,
-        which need not be this layer's element order. `Model` couples the two layers with
+        which need not be this layer's law order. `Model` couples the two layers with
         exactly this call.
         """
         if isinstance(kinds, str):
@@ -621,7 +621,7 @@ class PotentialFlowLayer:
         d = self.dp(phi, drivers)
         parts = [
             el.dflow(d[..., s:e], drivers)
-            for el, (s, e) in zip(self._elements, self._elem_slices, strict=True)
+            for el, (s, e) in zip(self._laws, self._law_slices, strict=True)
         ]
         return torch.cat(parts, dim=-1)
 
@@ -716,16 +716,16 @@ class PotentialFlowLayer:
         return dense + torch.diag_embed(node_slopes.expand(dense.shape[:-1]))
 
     def _linear_ck(self, drivers):
-        # Each element's own (c_e, k_e) covers only its own n_e = e - s edges; only the
+        # Each law's own (c_e, k_e) covers only its own n_e = e - s edges; only the
         # leading BATCH dims (everything but the trailing edge-count dim) are meant to be
-        # unified across elements before concatenating along the edge axis. Using
+        # unified across laws before concatenating along the edge axis. Using
         # torch.broadcast_tensors directly on the raw (c_e, k_e) list (as an earlier version
-        # of this method did) broadcasts the trailing edge dim too, so two elements with
+        # of this method did) broadcasts the trailing edge dim too, so two laws with
         # different edge counts silently expand to a shared (wrong) edge count instead of
         # concatenating -- e.g. a 2-edge FixedFlow and a 1-edge PowerLaw would both become
         # 2-edge before torch.cat, yielding a 4-wide result instead of the correct 3.
         cs, ks, n_es = [], [], []
-        for el, (s, e) in zip(self._elements, self._elem_slices, strict=True):
+        for el, (s, e) in zip(self._laws, self._law_slices, strict=True):
             c_e, k_e = el.linear_init(drivers)
             cs.append(c_e)
             ks.append(k_e)
@@ -838,12 +838,12 @@ class PotentialFlowLayer:
             node_slopes = self._node_source_slopes(phi0, drivers)
             rhs = rhs - w0
         self._grounding_check(k, where="linear_init", node_slopes=node_slopes)
-        # k picks up a batch dimension only if some element's linear_init(drivers) actually
+        # k picks up a batch dimension only if some law's linear_init(drivers) actually
         # depends on drivers (e.g. a driver-conditioned slope); with purely constant slopes
         # k stays unbatched (b,) even when `rhs` is batched via phi_boundary/sources.
         # Broadcasting both to their common batch shape first keeps the operator's own batch
         # shape and the right-hand side's in agreement, so the solve is one system per batch
-        # element rather than one system with several right-hand sides.
+        # law rather than one system with several right-hand sides.
         solve_batch = broadcast_shapes(k.shape[:-1], rhs.shape[:-1])
         k = k.expand(solve_batch + k.shape[-1:])
         rhs = rhs.expand(solve_batch + rhs.shape[-1:])
@@ -860,14 +860,14 @@ class PotentialFlowLayer:
     def _check_no_unreachable_differentiable_tensors(self) -> None:
         """Guard against a gradient that would be silently wrong or absent: the differentiable
         solve threads only two kinds of tensor into
-        `Function.apply` -- each Element's own registered `nn.Parameter`s (found via
+        `Function.apply` -- each ConstitutiveLaw's own registered `nn.Parameter`s (found via
         `named_parameters()`, substituted in via `functional_call`) and whatever is reachable
         through the `drivers`/`sources`/`phi_boundary` arguments to `solve()`. Any OTHER
-        tensor an Element or Drive happens to hold with `requires_grad=True` is captured only
-        by closure (the element/drive object itself, not its tensor payload) and is
-        invisible to `_Implicit.backward`: for an Element, this happens when it was
+        tensor a ConstitutiveLaw or Drive happens to hold with `requires_grad=True` is captured only
+        by closure (the law/drive object itself, not its tensor payload) and is
+        invisible to `_Implicit.backward`: for a ConstitutiveLaw, this happens when it was
         constructed with `learnable=False` on a tensor that already had `requires_grad=True`
-        (`Element._param`'s documented pass-through exception, which is still a correct
+        (`ConstitutiveLaw._param`'s documented pass-through exception, which is still a correct
         construction -- its graph is reachable through this layer's own component calls
         (`flows`, `dflows`, `residual`, `jacobian`, `linear_init`), though NOT through
         `solve(differentiable=False)`, which returns detached tensors);
@@ -877,14 +877,14 @@ class PotentialFlowLayer:
         return a gradient that is silently wrong (if some other path happens to also touch
         the same value) or silently `None` (if it doesn't).
         """
-        for el in (*self._elements, *self._node_sources):
+        for el in (*self._laws, *self._node_sources):
             for name, value in vars(el).items():
                 if isinstance(value, torch.Tensor) and value.requires_grad:
                     if isinstance(el, NodeSource):
                         # A NodeSource has no `learnable=` constructor kwarg (unlike
-                        # Element) -- its fix is to register the tensor as an nn.Parameter
+                        # ConstitutiveLaw) -- its fix is to register the tensor as an nn.Parameter
                         # directly, so it must be named and fixed as a node source, not
-                        # rendered (and told to construct itself) as if it were an Element.
+                        # rendered (and told to construct itself) as if it were a ConstitutiveLaw.
                         raise ValueError(
                             f"node source {el!r} has a tensor attribute {name!r} with "
                             f"requires_grad=True that is not a registered nn.Parameter, so "
@@ -895,11 +895,11 @@ class PotentialFlowLayer:
                             f"reachable via named_parameters(), or use differentiable=False."
                         )
                     raise ValueError(
-                        f"element {el!r} (kind {el.kind!r}) has a "
+                        f"law {el!r} (kind {el.kind!r}) has a "
                         f"tensor attribute {name!r} with requires_grad=True that is not a "
                         f"registered nn.Parameter, so the differentiable solve cannot reach "
                         f"it through Function.apply and its gradient would be silently wrong "
-                        f"or absent. Construct this element with learnable=True (so {name!r} "
+                        f"or absent. Construct this law with learnable=True (so {name!r} "
                         f"is registered and reachable via named_parameters()), or use "
                         f"differentiable=False."
                     )
@@ -919,13 +919,13 @@ class PotentialFlowLayer:
     # ------------------------------------------------------------------ solve
     def _reaches_grad(self, drivers: Mapping, sources, phi_boundary) -> bool:
         """Whether anything a differentiable solve threads through `Function.apply` requires
-        grad under the current grad mode: a driver, `sources`, `phi_boundary`, or an element
+        grad under the current grad mode: a driver, `sources`, `phi_boundary`, or a law
         or node source's parameter."""
         if not torch.is_grad_enabled():
             return False
         values = bulk_values(drivers, list(drivers.keys()))
         values += [sources, phi_boundary]
-        for owner in (*self._elements, *self._node_sources):
+        for owner in (*self._laws, *self._node_sources):
             values += list(owner.parameters())
         return any(isinstance(v, torch.Tensor) and v.requires_grad for v in values)
 
@@ -949,23 +949,23 @@ class PotentialFlowLayer:
         """Solve for interior potentials and branch flows.
 
         With `differentiable=True` (the default), gradients flow back to `phi_boundary`,
-        `sources`, every value in `drivers`, and every Element's registered `nn.Parameter`s
+        `sources`, every value in `drivers`, and every ConstitutiveLaw's registered `nn.Parameter`s
         (i.e. constructed with `learnable=True`) via the implicit-function adjoint
         (`noodl.solvers.implicit`). Only tensors reachable one of those ways are threaded
-        through `Function.apply`. Contract each Element and Drive must satisfy for
+        through `Function.apply`. Contract each ConstitutiveLaw and Drive must satisfy for
         `differentiable=True` to be safe:
 
-        - An Element's own differentiable state must be a registered parameter
+        - A ConstitutiveLaw's own differentiable state must be a registered parameter
           (`learnable=True`), never a bare tensor held with `requires_grad=True` outside
           `named_parameters()` (the latter is still a supported construction, per
-          `Element._param`, and its graph is reachable through this layer's component calls
+          `ConstitutiveLaw._param`, and its graph is reachable through this layer's component calls
           -- but it is invisible to the differentiable solve, and `differentiable=False` now
           returns detached tensors, so neither `solve` path carries a gradient to it).
         - A Drive must read every differentiable quantity from the `drivers` mapping passed
           to `solve()` (see `noodl.drives.Drive`), never hold one of its own as an
           instance attribute.
 
-        Violating either raises `ValueError` naming the offending element/drive and
+        Violating either raises `ValueError` naming the offending law/drive and
         attribute before any solve is attempted, rather than silently returning a wrong or
         absent gradient.
 
@@ -1136,13 +1136,13 @@ class PotentialFlowLayer:
             # Grounding is certified on the ACTUAL slopes at the point the Newton iteration
             # is about to start from, whatever its source. linear_init's own check sees only
             # its tangent-at-zero slopes, and is not run at all when a caller supplies phi0
-            # -- so a supplied phi0 used to bypass grounding entirely, and an element whose
+            # -- so a supplied phi0 used to bypass grounding entirely, and a law whose
             # slope is dp-dependent (a fan past its shutoff point, whose dflow is exactly
             # zero) could leave the operator singular with nothing to say about it but a
             # Newton non-convergence. Placed BEFORE the differentiable branch so both paths
             # run it unconditionally and identically. It is a CHECK: it raises or it does
             # not, and no tensor it computes reaches the result, so it runs under no_grad
-            # too (`dflows` here is each Element's own analytic `dflow`, not the autograd
+            # too (`dflows` here is each ConstitutiveLaw's own analytic `dflow`, not the autograd
             # path the differentiable branch builds below).
             phi0_full = self.assemble(phi0, phi_boundary)
             dq0 = self.dflows(phi0_full, drivers)
@@ -1230,11 +1230,11 @@ class PotentialFlowLayer:
 
         self._check_no_unreachable_differentiable_tensors()
 
-        # Node sources are threaded through 'Function.apply' exactly as elements are: their
+        # Node sources are threaded through 'Function.apply' exactly as laws are: their
         # own nn.Parameters are substituted back in with functional_call, so a learnable
         # demand exponent or required pressure gets a correct implicit-function gradient.
-        owners = [*self._elements, *self._node_sources]
-        n_el = len(self._elements)
+        owners = [*self._laws, *self._node_sources]
+        n_el = len(self._laws)
         param_dicts = [dict(owner.named_parameters()) for owner in owners]
         param_names = [list(d.keys()) for d in param_dicts]
         param_tensors = [
@@ -1285,7 +1285,7 @@ class PotentialFlowLayer:
             dp_full = _dp_functional(phi, drv)
             parts = []
             for el, d, (s, e) in zip(
-                self._elements, rebuilt[:n_el], self._elem_slices, strict=True
+                self._laws, rebuilt[:n_el], self._law_slices, strict=True
             ):
                 parts.append(torch.func.functional_call(el, d, (dp_full[..., s:e], drv)))
             return torch.cat(parts, dim=-1)
@@ -1306,9 +1306,9 @@ class PotentialFlowLayer:
 
         def _dp_dependence_error(el, i: int) -> RuntimeError:
             return RuntimeError(
-                f"element {i} of kind {el.kind!r} (type {type(el).__name__}) produced a "
+                f"law {i} of kind {el.kind!r} (type {type(el).__name__}) produced a "
                 f"flow that does not depend on dp; if that is intended, set "
-                f"dp_independent = True on this element's class, otherwise its flow() is "
+                f"dp_independent = True on this law's class, otherwise its flow() is "
                 f"dropping the autograd graph (e.g. a stray dp.detach())."
             )
 
@@ -1316,7 +1316,7 @@ class PotentialFlowLayer:
             dp_full = _dp_functional(phi, drv)
             parts = []
             for i, (el, d, (s, e)) in enumerate(
-                zip(self._elements, rebuilt[:n_el], self._elem_slices, strict=True)
+                zip(self._laws, rebuilt[:n_el], self._law_slices, strict=True)
             ):
                 dp_slice = dp_full[..., s:e].detach().requires_grad_(True)
                 # The REDUCTION `flow.sum()` must itself execute inside the enable_grad
@@ -1340,16 +1340,16 @@ class PotentialFlowLayer:
                     flow = torch.func.functional_call(el, d, (dp_slice, drv))
                     # Whether a missing/zero Jacobian contribution here is legitimate is
                     # decided ONLY by el.dp_independent -- a class-level DECLARATION (see
-                    # Element) -- never inferred from whatever autograd graph `flow` happens
+                    # ConstitutiveLaw) -- never inferred from whatever autograd graph `flow` happens
                     # to carry. A previous version of this code inferred it from
                     # `flow.requires_grad` (with allow_unused=True as a catch-all), which
-                    # meant ANY element whose flow() accidentally lost the autograd graph
+                    # meant ANY law whose flow() accidentally lost the autograd graph
                     # (e.g. a stray dp.detach() in a third-party subclass) silently got an
                     # exact-zero Jacobian column instead of an error: the forward solve still
                     # looked fine (Newton converges on the exact residual regardless), but
                     # the adjoint gradient computed from that Jacobian was silently wrong.
                     if el.dp_independent:
-                        # Cross-check the declaration against the element's own analytic
+                        # Cross-check the declaration against the law's own analytic
                         # dflow(), which for a genuinely dp-independent law (FixedFlow's,
                         # say) must be identically zero. This is called on `el` directly
                         # (not through functional_call/`d`) rather than via a second
@@ -1364,7 +1364,7 @@ class PotentialFlowLayer:
                         analytic = el.dflow(dp_slice.detach(), drv)
                         if not torch.equal(analytic, torch.zeros_like(analytic)):
                             raise RuntimeError(
-                                f"element {i} of kind {el.kind!r} (type "
+                                f"law {i} of kind {el.kind!r} (type "
                                 f"{type(el).__name__}) declares dp_independent = True but "
                                 f"its own dflow() is not identically zero; either the flag "
                                 f"is wrong or dflow() is inconsistent with a dp-independent "

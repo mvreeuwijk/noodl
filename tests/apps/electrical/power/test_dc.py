@@ -43,7 +43,7 @@ def test_case9_is_nodal_analysis_on_the_classic_layer():
     layer = model.potential[DC_LAYER]
     assert layer.mna is False
     assert list(layer.kinds) == ["branch"]
-    assert type(layer.element_for("branch")[0]) is Conductance
+    assert type(layer.law_for("branch")[0]) is Conductance
     assert isinstance(sol, DcPowerFlowSolution)
     # PYPOWER 5.1.21 rundcpf on case9: bus 2 angle and branch 1-4 flow, slack generation
     assert abs(sol.va[1] - 0.17097278260869575) < 1e-12
@@ -69,7 +69,7 @@ def test_build_rules():
     layer = model.potential[DC_LAYER]
     rows = model.power_index.branch_rows
     branches = [net.branches[k] for k in rows]
-    g = layer.element_for("branch")[0].g
+    g = layer.law_for("branch")[0].g
     assert g.dtype == torch.float64
     expected = [1.0 / (br.x * (br.ratio or 1.0)) for br in branches]
     assert torch.allclose(g, torch.tensor(expected, dtype=torch.float64), rtol=0, atol=0)
@@ -123,7 +123,7 @@ def test_a_layer_error_other_than_a_failed_solve_is_not_wrapped():
     # a layer error that is neither a failed Newton solve nor a singular system (here: a
     # negative conductance written into the built model) passes through unchanged
     model, state, drivers = dc_power_flow(four_bus())
-    g = model.potential[DC_LAYER].element_for("branch")[0].g
+    g = model.potential[DC_LAYER].law_for("branch")[0].g
     with torch.no_grad():
         g[1] = -g[1]
     with pytest.raises(RuntimeError, match="negative slope") as failure:

@@ -3,7 +3,7 @@
 import pytest
 import torch
 
-from noodl.apps.building_physics import orifice_elements_from_edges, thermal_layer
+from noodl.apps.building_physics import orifice_law_from_edges, thermal_layer
 from noodl.apps.building_physics.thermal import IdealGasDensity
 from noodl.drives import Stack
 from noodl.layers.potential import PotentialFlowLayer
@@ -27,7 +27,7 @@ def test_thermal_layer_stores_canonical_names():
 
 def test_model_refs_show_canonical_boundary_nodes():
     net = house()
-    el = orifice_elements_from_edges(net, "airpath")
+    el = orifice_law_from_edges(net, "airpath")
     air = PotentialFlowLayer(net, "air", [el], [Stack.from_network(net, "airpath")],
                              boundary=["ambient"])
     th = thermal_layer(net, fixed_temperature=["door.a"])
@@ -37,7 +37,7 @@ def test_model_refs_show_canonical_boundary_nodes():
 
 def test_potential_layer_accepts_alias_and_stores_canonical():
     net = house()
-    el = orifice_elements_from_edges(net, "airpath")
+    el = orifice_law_from_edges(net, "airpath")
     layer = PotentialFlowLayer(net, "air", [el], boundary=["ambient", "door.a"])
     assert net.nodes[int(layer.bound[1])] == "A.air"
 

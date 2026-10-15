@@ -1430,7 +1430,7 @@ each is confined to the cases named.
 
 ### Headspace air
 
-`Headspace` is an `Element` with $\Delta p = R(h)\,\lvert Q \rvert Q$ and
+`Headspace` is a `ConstitutiveLaw` with $\Delta p = R(h)\,\lvert Q \rvert Q$ and
 
 $$
 R(h) = \frac{f_{\text{air}} L \rho}{2 D_h A_{\text{air}}^2}

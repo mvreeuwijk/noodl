@@ -1,4 +1,4 @@
-"""Typed branch constitutive laws: the Element base class and the built-in laws.
+"""Typed branch constitutive laws: the ConstitutiveLaw base class and the built-in laws.
 
 Elements are named for the physics they express. Where a law is a transcription of a specific
 tool's equations, the class docstring says so (for example ``RegularizedPowerLaw``,
@@ -7,7 +7,7 @@ tool's equations, the class docstring says so (for example ``RegularizedPowerLaw
 pre-rename ``MBL*``/``mbl_*`` names remain importable as aliases.
 """
 
-from noodl.elements.base import Element, ImplicitLaw, LawContext
+from noodl.elements.base import ConstitutiveLaw, ImplicitLaw, LawContext
 from noodl.elements.conductance import Conductance
 from noodl.elements.damper import Damper
 from noodl.elements.door import (
@@ -64,7 +64,7 @@ __all__ = [
     "DoorCompartmentHead",
     "DoorPortStream",
     "Duct",
-    "Element",
+    "ConstitutiveLaw",
     "FanCurve",
     "FixedFlow",
     "ImplicitLaw",

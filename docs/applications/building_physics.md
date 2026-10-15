@@ -17,7 +17,7 @@ application works in `float64` regardless of the network's default dtype.
 ```python
 from noodl.apps.building_physics import (
     Zone, WallMass, add_zone, build_model, initial_state,
-    add_large_opening, orifice_elements_from_edges,
+    add_large_opening, orifice_law_from_edges,
 )
 ```
 
@@ -31,7 +31,7 @@ Two rooms joined by a doorway, one of them heated, with two leaks to ambient:
 
 ```python
 import torch
-from noodl.apps.building_physics import Zone, add_zone, add_large_opening, orifice_elements_from_edges
+from noodl.apps.building_physics import Zone, add_zone, add_large_opening, orifice_law_from_edges
 from noodl.apps.building_physics import build_model, initial_drivers, initial_state
 from noodl.drives import Stack
 from noodl.topology import Network
@@ -47,10 +47,10 @@ add_large_opening(net, "A", "B", H=2.0, W=0.9, z_mid=1.0, Cd=0.78)
 net.add_edge("ambient", "B", kind="airpath", z_path=0.2, Cd=0.6, area=0.05)
 net.add_edge("ambient", "B", kind="airpath", z_path=1.8, Cd=0.6, area=0.05)
 
-el = orifice_elements_from_edges(net, "airpath")
+el = orifice_law_from_edges(net, "airpath")
 model = build_model(
     net,
-    air_elements=[el],
+    air_laws=[el],
     drives=[Stack.from_network(net, "airpath")],
     coupling="iterate",
     iterate_tol={"thermal": 0.01},
@@ -159,7 +159,7 @@ conducts nothing".
 |---|---|
 | `thermal_layer(net, *, ambient, name="thermal", flow_kinds=("airpath",), conduction_kind="wall", c_p=1005.0, rho=1.2041, scheme="exact", fixed_temperature=())` | The heat `TransportLayer`. Capacity is $\rho c_p V + C_{\text{node}}$ per active interior node. Raises naming any node with zero heat capacity. |
 | `species_layer(net, *, ambient, name="species", flow_kinds=("airpath",), rho=1.2041, n_species=1, scheme="implicit", species_names=None)` | The contaminant layer, as mass fractions, capacity = zone air mass $\rho V$ (CONTAM's convention). |
-| `build_model(net, *, air_elements, drives, ambient="ambient", thermal=True, species=0 (a count or a list of names), density="ideal_gas", density_kwargs=None, coupling="pingpong", iterate_tol=None, iterate_max=20, thermal_scheme="exact", species_scheme="implicit", flow_kinds=None, return_inputs=False)` | The assembled `Model`; with `return_inputs=True`, `(model, state, drivers)` like the other applications. |
+| `build_model(net, *, air_laws, drives, ambient="ambient", thermal=True, species=0 (a count or a list of names), density="ideal_gas", density_kwargs=None, coupling="pingpong", iterate_tol=None, iterate_max=20, thermal_scheme="exact", species_scheme="implicit", flow_kinds=None, return_inputs=False)` | The assembled `Model`; with `return_inputs=True`, `(model, state, drivers)` like the other applications. |
 | `initial_state(model, *, values=None)` | Temperatures from each node's `T0`, zeros for species; then `values` by node name. |
 | `initial_drivers(model, *, values=None)` | Zero boundary pressures, boundary temperatures from `T0`, zero boundary species; then `values` by node name. See [Using noodl](../usage.md). |
 
@@ -194,7 +194,7 @@ them from a `.prj`'s own source records.
 Every edge of the air layer carries an element: a law giving the flow $F$ through the edge from
 the pressure difference $\Delta p$ (Pa) across it, together with its derivative for Newton. The
 element classes live in `noodl.elements`; two builder helpers used below, `mass_orifice` and
-`orifice_elements_from_edges`, come from this building application instead. They are grouped
+`orifice_law_from_edges`, come from this building application instead. They are grouped
 here by the physics they express. Where two
 elements describe the same physics they differ in two respects that matter in practice: how the
 law is regularised near $\Delta p = 0$, where a power law with $n < 1$ has infinite slope, and
@@ -206,12 +206,12 @@ equations come from; `RegularizedPowerLaw`, `SplineFlowTable`, the door elements
 
 Cracks, leaks, orifices and other small openings: $F = C\,\operatorname{sign}(\Delta p)\,\lvert\Delta p\rvert^{n}$.
 
-| Element | What it computes |
+| Law | What it computes |
 |---|---|
 | `PowerLaw(C, n, *, dp_transition=1e-3, regularised=None)` | The power law with flow coefficient $C$ and exponent $n$; $F$ is in whatever flow units $C$ carries. |
 | `Orifice(Cd, A, *, rho=1.2)` | `PowerLaw` with $C = C_d A \sqrt{2/\rho}$, $n = 0.5$: the sharp-edged orifice, as a volume flow in m³/s ($A$ in m²). |
 | `mass_orifice(Cd, A, *, rho=1.2041)` | `PowerLaw` with $C = C_d A \sqrt{2\rho}$, $n = 0.5$: the same orifice as a mass flow in kg/s (in `noodl.apps.building_physics`). |
-| `orifice_elements_from_edges(net, kind, *, rho=1.2041)` | One mass-flow `PowerLaw` over every edge of a kind, $C_e = C_{d,e} A_e \sqrt{2\rho}$, reading `Cd` and `area` off each edge (in `noodl.apps.building_physics`). |
+| `orifice_law_from_edges(net, kind, *, rho=1.2041)` | One mass-flow `PowerLaw` over every edge of a kind, $C_e = C_{d,e} A_e \sqrt{2\rho}$, reading `Cd` and `area` off each edge (in `noodl.apps.building_physics`). |
 | `RegularizedPowerLaw(C, m, *, dp_turbulent=0.1, form, rho_default)` | The power law with exponent $m$, always returning mass flow in kg/s. `form="volume"`: $C$ is a volume-flow coefficient and the result is multiplied by `rho_default`. `form="mass"`: $C$ is a mass-flow coefficient, used as it is. |
 | `regularized_orifice(A, CD=0.65, m=0.5, dp_turbulent=0.1, *, rho_default)` | Volume form, $C = C_D A \sqrt{2/\rho_{\text{default}}}$. |
 | `effective_leakage_area(L, dpRat=4.0, CDRat=1.0, m=0.65, dp_turbulent=0.1, *, rho_default)` | Volume form from an effective leakage area $L$ (m²) at the reference pressure difference `dpRat` (Pa): $C = L\,C_{D,\text{Rat}} \sqrt{2/\rho_{\text{default}}}\;\text{dpRat}^{\,0.5 - m}$. |
@@ -268,7 +268,7 @@ switches; only its slope jumps there. `dp_transition` stays at reference conditi
 
 ### Quadratic and tabulated laws
 
-| Element | What it computes |
+| Law | What it computes |
 |---|---|
 | `Quadratic(a, b)` | The quadratic resistance law $\Delta p = a F + b \lvert F\rvert F$, inverted in closed form: $F = \operatorname{sign}(\Delta p)\, 2\lvert\Delta p\rvert / (\sqrt{a^2 + 4 b \lvert\Delta p\rvert} + a)$. Linear, with slope $1/a$, at small $\Delta p$ and quadratic at large, so it needs no separate regularisation. Requires $a > 0$ and $b > 0$. |
 | `SplineFlowTable(dp_points, flow_points, *, form, rho_default=None)` | A measured pressure-flow curve: a monotone cubic Hermite spline through the $(\Delta p, F)$ knots, linearly extrapolated outside them, returning mass flow in kg/s. `form="volume"` scales volume-flow knots by `rho_default` before fitting; `form="mass"` takes mass-flow knots as they are. |
@@ -284,7 +284,7 @@ increasing resolution of the pressure profile over the door's height.
 
 **Two lumped orifices.** `add_large_opening(net, a, b, *, H, W, z_mid, Cd=0.78, kind="airpath")`
 adds two edges, both oriented `a → b`, each an orifice of area $WH/2$ (m²) at height
-$z_{\text{mid}} \mp 2H/9$ (m); build their element with `orifice_elements_from_edges`. The
+$z_{\text{mid}} \mp 2H/9$ (m); build their element with `orifice_law_from_edges`. The
 `Stack` drive evaluates the hydrostatic pressure difference at each opening's own height, so a
 temperature difference drives opposite flows through the low and the high opening. The
 representation is exact for a neutral plane at mid-height. It uses `PowerLaw`'s laminar blend at
@@ -343,7 +343,7 @@ only one the airflow Jacobian sees, is exact and each edge's slope stays nonnega
 
 ### Ducts, dampers, fans, fixed flows and conductances
 
-| Element | What it computes |
+| Law | What it computes |
 |---|---|
 | `Duct(L, D, eps, sum_C=0.0, *, A=None, Re_t=2000.0, rho=1.2041, mu=1.81625e-5, n_iter=4)` | Flow through a duct of length `L`, diameter `D` and roughness `eps` (m) with dynamic loss coefficients `sum_C`: $F = \sqrt{2 \rho A^2 \lvert\Delta p\rvert / (f L/D + \sum C)}$, the friction factor $f$ from the Colebrook equation iterated `n_iter` times, and a straight line through the origin below the transition Reynolds number `Re_t`. `rho` and `mu` are fixed at construction. **Source:** CONTAM TN 1887r1 section 8.3.3, eq. 50–52. |
 | `Damper(C_pos, n_pos, C_neg, n_neg, *, dp_transition=1e-3)` | A backdraught damper: a separate power law, with `PowerLaw`'s laminar blend, for each flow direction. **Source:** CONTAM's `PL_BDF`/`PL_BDQ` elements. |
@@ -355,7 +355,7 @@ only one the airflow Jacobian sees, is exact and each edge's slope stays nonnega
 
 The CONTAM-form elements carry one fixed reference density in their coefficients:
 `RHO_0 = 1.2041` kg/m³ in the building application (`mass_orifice`,
-`orifice_elements_from_edges`, the default of `Duct`, and the reference density of
+`orifice_law_from_edges`, the default of `Duct`, and the reference density of
 `UpstreamDensityPowerLaw`); the core `Orifice` defaults to 1.2 kg/m³. A temperature-dependent
 density reaches the airflow through the `density` closure of `build_model` (above), which feeds
 the `Stack` drive and `UpstreamDensityPowerLaw`.
@@ -457,7 +457,7 @@ so the steps are laid out with care:
 
 - Every signal event (a step, a pulse edge, a ramp corner) is a step boundary.
 - Every **switch** is a step boundary too. A switch is where an element's law changes piece
-  (the edges of its regularisation band, `Element.switching`) or where an edge flow changes
+  (the edges of its regularisation band, `ConstitutiveLaw.switching`) or where an edge flow changes
   sign, since the transport layers upwind on it. A step across one is split there, the
   crossing located on the step's own runs. `OneOpenDoor`'s door flows, reversing through their
   bands across a 14.4 s step, were off by 1.1e-4 of the flow floor before; with the switches

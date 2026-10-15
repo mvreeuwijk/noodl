@@ -421,12 +421,12 @@ def test_a_non_default_viscosity_and_gravity_reach_the_darcy_weisbach_elements()
         twoloop(), options=WaterOptions(specific_gravity=1.1, viscosity=1.5)
     )
     model, _, _ = build_model(net, headloss="D-W")
-    pipe = model.potential["water"]._elements[0]
+    pipe = model.potential["water"]._laws[0]
     assert pipe.nu == pytest.approx(EPANET_NU_SI * 1.5, rel=1e-15)
     assert pipe.scale == pytest.approx(998.2 * 1.1 * 9.80665, rel=1e-15)
     assert pipe.cfs_per_m3s == pytest.approx(1.0 / 0.3048**3, rel=1e-15)
     model, _, _ = build_model(net, headloss="D-W", friction="colebrook")
-    duct = model.potential["water"]._elements[0]
+    duct = model.potential["water"]._laws[0]
     assert duct.rho == pytest.approx(1.0 / (998.2 * 1.1), rel=1e-15)
     assert duct.mu == pytest.approx(1.002e-3 / 998.2 * 1.5, rel=1e-15)
     assert model.head_scale == pytest.approx(998.2 * 1.1 * 9.80665, rel=1e-15)
@@ -443,7 +443,7 @@ def test_a_files_flow_units_select_epanets_rounded_cfs_factor(tmp_path):
         twoloop(), headloss="D-W", options=WaterOptions(flow_units="LPS")
     )
     model, _, _ = build_model(net)
-    pipe = model.potential["water"]._elements[0]
+    pipe = model.potential["water"]._laws[0]
     assert pipe.cfs_per_m3s == pytest.approx(1000.0 / 28.317, rel=1e-15)
 
 

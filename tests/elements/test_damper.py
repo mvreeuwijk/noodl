@@ -1,6 +1,6 @@
 """Damper: CONTAM's backdraft damper (PL_BDF) -- separate (C, n) per sign of dp.
 
-Dtype: ``Element._param`` casts a non-tensor value with
+Dtype: ``ConstitutiveLaw._param`` casts a non-tensor value with
 ``torch.get_default_dtype()``, which is float32 in this repo. ``_damper()`` below builds its
 (C, n) as float64 tensors, and the reference ``PowerLaw`` instances each test checks against
 reuse those same float64 tensors, so ``Damper`` and its references share identical float64

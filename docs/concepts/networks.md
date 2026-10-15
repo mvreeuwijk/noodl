@@ -17,7 +17,7 @@ net.add_edge("room", "ambient", kind="airpath", area=0.05, Cd=0.6)
 ```
 
 Nodes and edges carry arbitrary attributes. Those attributes are how an application passes
-geometry to its elements: `orifice_elements_from_edges` reads `Cd` and `area` off every edge of
+geometry to its elements: `orifice_law_from_edges` reads `Cd` and `area` off every edge of
 a kind, and `thermal_layer` reads `volume` off every node. Attributes are retrieved in bulk and
 as tensors, never one at a time:
 

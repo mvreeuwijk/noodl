@@ -107,7 +107,7 @@ class MnaSystem:
         self.w = 2 if layer.phasor else 1
         b = len(layer.cols)
         f_parts = [torch.arange(s, e) for el, (s, e) in
-                   zip(layer._elements, layer._elem_slices, strict=True)
+                   zip(layer._laws, layer._law_slices, strict=True)
                    if el.law_form == "implicit"]
         self.f_edges = torch.cat(f_parts) if f_parts else torch.zeros(0, dtype=torch.long)
         self.n_I = len(layer.interior)
@@ -116,7 +116,7 @@ class MnaSystem:
         f_index = torch.full((b,), -1, dtype=torch.long)
         f_index[self.f_edges] = torch.arange(self.n_F)
         self._f_index = f_index
-        self.implicit_kinds = [el.kind for el in layer._elements if el.law_form == "implicit"]
+        self.implicit_kinds = [el.kind for el in layer._laws if el.law_form == "implicit"]
         node = torch.stack([layer._interior_of_node[layer._src],
                             layer._interior_of_node[layer._tgt]], dim=-1)   # (b, 2), -1 bound
         self._build_structure(node, f_index)
@@ -130,7 +130,7 @@ class MnaSystem:
         rows, cols, srcs, signs = [], [], [], []
         offset = 0
         ar = torch.arange
-        for el, (s, e) in zip(self.layer._elements, self.layer._elem_slices, strict=True):
+        for el, (s, e) in zip(self.layer._laws, self.layer._law_slices, strict=True):
             m = el.ports
             G = (e - s) // m
             g, k, l_, ck, cl, a, bb = torch.meshgrid(
@@ -348,7 +348,7 @@ class MnaSystem:
         return dataclasses.replace(ctx, **changes) if changes else ctx
 
     def _owners(self) -> list:
-        return [*self.layer._elements, *self.layer._node_sources]
+        return [*self.layer._laws, *self.layer._node_sources]
 
     def _plain_call(self, i: int, args: tuple):
         """Law (or, past the laws, node source) `i` with its own parameters."""
@@ -378,7 +378,7 @@ class MnaSystem:
         dp = layer.dp(phi, drivers)
         q_parts, r_parts = [], []
         for i, (el, (s, e)) in enumerate(
-                zip(layer._elements, layer._elem_slices, strict=True)):
+                zip(layer._laws, layer._law_slices, strict=True)):
             lctx = self._law_ctx(ctx, s, e)
             dp_s = dp[..., s:e]
             if el.law_form == "implicit":
@@ -395,14 +395,14 @@ class MnaSystem:
 
     def _withdrawal(self, phi, drivers, call) -> Tensor | None:
         """The node sources' withdrawal per interior row, or `None` without node sources."""
-        n_el = len(self.layer._elements)
+        n_el = len(self.layer._laws)
         return self.layer._scatter_node_sources(
             lambda j, ns: call(n_el + j, (phi[..., ns.nodes], drivers)))
 
     def _node_slopes(self, phi, drivers, call) -> Tensor | None:
         """`d w / d phi` per interior row (a node source reads its own node's potential
         only, so one forward-mode derivative gives the whole diagonal)."""
-        n_el = len(self.layer._elements)
+        n_el = len(self.layer._laws)
 
         def slope(j, ns):
             phi_n = phi[..., ns.nodes]
@@ -445,7 +445,7 @@ class MnaSystem:
         dp = layer.dp(phi, drivers)
         blocks = []
         for i, (el, (s, e)) in enumerate(
-                zip(layer._elements, layer._elem_slices, strict=True)):
+                zip(layer._laws, layer._law_slices, strict=True)):
             lctx = self._law_ctx(ctx, s, e)
             dp_s = dp[..., s:e]
             if el.law_form == "implicit":

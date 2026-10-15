@@ -6,7 +6,7 @@ import math
 import pytest
 import torch
 
-from noodl.elements import Conductance, Element, ImplicitLaw, LawContext, PowerLaw
+from noodl.elements import Conductance, ConstitutiveLaw, ImplicitLaw, LawContext, PowerLaw
 from noodl.layers._mna import MnaSystem
 from noodl.layers.potential import PotentialFlowLayer
 from noodl.nodesources import NodeSource
@@ -37,7 +37,7 @@ def _net(nodes, edges):
     return net
 
 
-class ConstantPower(Element):
+class ConstantPower(ConstitutiveLaw):
     """A constant-power load: q = conj(S / dp), so dp conj(q) = S (not holomorphic in dp)."""
 
     phasor_capable = True

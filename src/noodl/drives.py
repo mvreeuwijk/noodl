@@ -24,7 +24,7 @@ class Drive(Protocol):
 
     `PotentialFlowLayer.solve(differentiable=True)` only threads gradients through
     `Function.apply` for values reachable via `phi_boundary`, `sources`, `drivers`, and each
-    Element's own registered `nn.Parameter`s. A Drive instance is captured by closure inside
+    ConstitutiveLaw's own registered `nn.Parameter`s. A Drive instance is captured by closure inside
     the differentiable solve, so any tensor it holds with `requires_grad=True` is invisible to
     the backward pass; `PotentialFlowLayer._check_no_unreachable_differentiable_tensors`
     raises on that. Geometry and index tensors (no grad) may be held as attributes.

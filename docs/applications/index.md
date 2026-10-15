@@ -1,7 +1,7 @@
 # Applications
 
 noodl physics is one solver. The applications below are physical systems modelled with it, each a thin
-layer of domain physics (its elements, drives and closures) over the shared core. Any of them can
+layer of domain physics (its constitutive laws, drives and closures) over the shared core. Any of them can
 be built directly in Python, as each page shows, or, where a reader exists, read from a model
 file; see [File formats](../formats/index.md). Every application is initialised the same way,
 with `initial_state(model, values=...)` and `initial_drivers(model, values=...)` by name; see
@@ -90,7 +90,7 @@ The seven are also a template. A new application is:
 
 1. A **network builder** — domain dataclasses plus a function that turns them into a `Network`
    with the right edge kinds and attributes.
-2. **Elements and drives** for whatever constitutive laws are not already in the core.
+2. **Constitutive laws and drives** for whatever laws are not already in the core.
 3. **Closures** for anything that is a function of solved state.
 4. A **file reader**, if your field has a standard exchange format.
 5. A **`build_*_model`** function returning `(model, state, drivers)`, and a `*_steady` helper if

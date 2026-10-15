@@ -24,8 +24,8 @@ every call, since `dp_t` depends on `rho`. The water application's Darcy-Weisbac
 Dtype: every quantity this element derives internally (`A` when not given explicitly, the
 Colebrook constants `a`/`b`, and the transition values from `_transition()`) is built from
 the already-registered `L`/`D`/`eps`/`sum_C` parameters (or, for `A`, cast with
-`Element._dtype()`, which reports those parameters' dtype), never with
-`torch.get_default_dtype()`. This matters because `Element._param` casts a plain Python
+`ConstitutiveLaw._dtype()`, which reports those parameters' dtype), never with
+`torch.get_default_dtype()`. This matters because `ConstitutiveLaw._param` casts a plain Python
 float with `torch.get_default_dtype()` (float32 in this repo): a caller who wants float64
 precision passes float64 tensors for `L`/`D`/`eps`/`sum_C`, and every derived quantity then
 naturally inherits that float64 dtype instead of silently downgrading to float32.
@@ -37,13 +37,13 @@ import math
 
 import torch
 
-from noodl.elements.base import Element
+from noodl.elements.base import ConstitutiveLaw
 
 Tensor = torch.Tensor
 _C = 2.0 * math.log10(math.e)
 
 
-class Duct(Element):
+class Duct(ConstitutiveLaw):
     """Colebrook duct: F(dp) with friction from the Colebrook equation, laminar below Re_t.
     Length `L`, diameter `D` and roughness `eps` (m); `sum_C` the dimensionless sum of dynamic
     loss coefficients; `A` (m2) defaults to the circular area; `rho` (kg/m3) and `mu` (Pa s);
@@ -151,7 +151,7 @@ class Duct(Element):
         dp_t = F_t**2 * (f_t * self.L / self.D + self.sum_C) / (2.0 * self.rho * self.A**2)
         return F_t, dp_t
 
-    # ------------------------------------------------------------------ Element
+    # ------------------------------------------------------------------ ConstitutiveLaw
     def flow(self, dp: Tensor, drivers=None) -> Tensor:
         F_t, dp_t = self._transition()
         mask = dp.abs() < dp_t

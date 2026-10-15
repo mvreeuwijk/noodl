@@ -282,7 +282,7 @@ def test_the_leak_element_is_built_float64_not_the_default_dtype():
     with `torch.get_default_dtype()` -- float32 in this repository -- regardless of its
     inputs' own dtype); both `C` and `n` must be float64."""
     model, _, _ = build_model(tree_steady())
-    leak = next(el for el in model.potential["air"]._elements if el.kind == "leak")
+    leak = next(el for el in model.potential["air"]._laws if el.kind == "leak")
     assert leak.C.dtype == torch.float64
     assert leak.n.dtype == torch.float64
 

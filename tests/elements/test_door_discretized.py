@@ -749,7 +749,7 @@ def test_head_drive_is_wired_by_kind_in_a_two_boundary_layer():
         dp = layer.dp(phi, drv)[..., sl]
         np.testing.assert_allclose(dp.numpy(), ref["dp"], rtol=1e-12, atol=1e-13)
         q = layer.flows(phi, drv)[..., sl]
-        el, sl2 = layer.element_for("door")
+        el, sl2 = layer.law_for("door")
         assert el is comp and sl2 == sl
         np.testing.assert_allclose(q.numpy(), ref["m_com"], rtol=RTOL, atol=ATOL)
 

@@ -64,7 +64,7 @@ def test_network_edges_follow_the_paths_with_ambient_as_minus_one():
 
 def test_element_coefficients_follow_contam_conventions():
     p = read_prj(THREE)
-    (el,) = p.elements
+    (el,) = p.laws
     # `plr_orfc` is the sqrt(rho) CONTAM family: the reader must build the UPSTREAM-density
     # correction, not a plain `PowerLaw` (which `UpstreamDensityPowerLaw` satisfies too, so
     # `isinstance(el, PowerLaw)` alone would not catch a revert to the uncorrected element).
@@ -88,7 +88,7 @@ def test_a_mass_flow_family_kind_gets_exponent_zero(tmp_path):
     text = THREE.read_text()
     variant = _variant(text, "3 23 plr_orfc orfcPt01", "3 23 plr_fcn orfcPt01", tmp_path)
     p = read_prj(variant)
-    (el,) = p.elements
+    (el,) = p.laws
     assert isinstance(el, UpstreamDensityPowerLaw)
     torch.testing.assert_close(el.m, torch.full((4,), 0.0, dtype=F64))
 
@@ -99,7 +99,7 @@ def test_a_volumetric_family_kind_gets_exponent_one(tmp_path):
     text = THREE.read_text()
     variant = _variant(text, "3 23 plr_orfc orfcPt01", "3 23 plr_qcn orfcPt01", tmp_path)
     p = read_prj(variant)
-    (el,) = p.elements
+    (el,) = p.laws
     assert isinstance(el, UpstreamDensityPowerLaw)
     torch.testing.assert_close(el.m, torch.full((4,), 1.0, dtype=F64))
 
@@ -109,7 +109,7 @@ def test_the_reader_builds_a_float64_application():
     p = read_prj(THREE)
     assert p.net.dtype is F64
     assert p.T_zone.dtype is F64 and p.zone_volumes.dtype is F64 and p.x0.dtype is F64
-    (el,) = p.elements
+    (el,) = p.laws
     assert el.C.dtype is F64 and el.n.dtype is F64
     assert p.profiles[2].angles.dtype is F64
 
@@ -135,7 +135,7 @@ def test_project_to_model_solves_the_wind_driven_case_and_conserves_species():
 
 def test_reads_the_hand_written_doorway_damper_fan_project():
     p = read_prj(MIXED)
-    kinds = {el.kind: el for el in p.elements}
+    kinds = {el.kind: el for el in p.laws}
     # Two DIFFERENT power-law kinds from this one file: a single-edge orifice (`pl_2`, from
     # `plr_orfc`) and a two-edge doorway (`door_3`, from `dor_pl2`). `isinstance(el, PowerLaw)`
     # alone would not catch a revert to the uncorrected element, since
@@ -157,7 +157,7 @@ def test_reads_the_hand_written_doorway_damper_fan_project():
     assert isinstance(kinds["bd_4"], Damper)
     assert kinds["bd_4"].pos.C.item() == pytest.approx(0.02)
     assert kinds["bd_4"].neg.n.item() == pytest.approx(0.65)
-    fans = [el for el in p.elements if isinstance(el, FixedFlow)]
+    fans = [el for el in p.laws if isinstance(el, FixedFlow)]
     assert len(fans) <= 1
 
 
@@ -171,7 +171,7 @@ def test_a_doorway_reads_ht_wd_and_cd_from_fields_4_5_and_6():
     under swapping `wd` and `cd`.
     """
     p = read_prj(MIXED)
-    (door,) = [el for el in p.elements if el.kind == "door_5"]
+    (door,) = [el for el in p.laws if el.kind == "door_5"]
     ht, wd, cd, turb, rho = 2.0, 0.9, 1.0, 2.54558, 1.2041
 
     # field 4 (ht): dor_door derives its half-separation as 2 ht / 9, nothing else.
@@ -221,7 +221,7 @@ def test_the_round_trip_keeps_levels_zone_numbers_and_sources():
     assert src.params == pytest.approx([0.0001, 0.0, 5.0, 0.0])
     assert src.mult == pytest.approx(1.0)
     # Every duct section of this project is PRESENT and empty; a project like that loads.
-    assert "duct" not in {el.kind for el in p.elements}
+    assert "duct" not in {el.kind for el in p.laws}
 
 
 def test_path_flows_index_q_in_the_layers_kind_block_layout():
@@ -229,11 +229,11 @@ def test_path_flows_index_q_in_the_layers_kind_block_layout():
 
     `doorway_damper_fan.prj` has five kinds. Network edge order is path order --
     pl_2, pl_2, door_3, door_3, bd_4, fan_1, door_5, door_5 -- but `PotentialFlowLayer`
-    concatenates per element, in `project.elements` order, so the two layouts differ.
+    concatenates per element, in `project.laws` order, so the two layouts differ.
     """
     p = read_prj(MIXED)
     offsets, offset = {}, 0
-    for el in p.elements:
+    for el in p.laws:
         offsets[el.kind] = offset
         offset += p.net.edge_index(el.kind).numel()
     assert offset == p.net.b == 8

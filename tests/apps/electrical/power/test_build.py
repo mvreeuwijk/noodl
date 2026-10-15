@@ -125,7 +125,7 @@ def test_a_singular_power_flow_system_gets_the_advice():
 
 
 @pytest.mark.parametrize("message", [
-    "PotentialFlowLayer 'power': element 0 of kind 'load' declares dp_independent = True",
+    "PotentialFlowLayer 'power': law 0 of kind 'load' declares dp_independent = True",
     "PotentialFlowLayer 'power_dc' solve: batch indices [0] failed to converge",
     "solve: batch indices [0] failed to converge after 30 iterations",
 ])
@@ -144,7 +144,7 @@ def test_voltage_sensitivity_to_load_matches_finite_differences():
     # converged solve, against a central difference of two plain solves (h = 1e-5 p.u.).
     net = four_bus()
     model, state, drivers = build_power_flow(net, learnable=True)
-    load, _ = model.potential[POWER_LAYER].element_for("load")
+    load, _ = model.potential[POWER_LAYER].law_for("load")
     sol = power_flow_solution(model, solve_power_flow(model, state, drivers))
     grads = [torch.autograd.grad(sol.vm[k], load.P, retain_graph=True)[0][1] for k in (2, 3)]
 
@@ -211,7 +211,7 @@ def test_branch_end_powers_close_the_power_balance():
 def test_coefficients_are_float64_whatever_the_default_dtype():
     torch.set_default_dtype(torch.float32)      # the autouse fixture restores it
     model, sol = _solve(four_bus())
-    branch, _ = model.potential[POWER_LAYER].element_for("branch")
+    branch, _ = model.potential[POWER_LAYER].law_for("branch")
     assert branch.r.dtype == torch.float64 and sol.vm.dtype == torch.float64
     assert abs(sol.vm[3] - 1.0129223498697453) < 1e-9      # its value under float64
 

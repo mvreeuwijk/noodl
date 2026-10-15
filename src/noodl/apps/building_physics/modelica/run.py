@@ -22,7 +22,7 @@ import torch
 
 from noodl.apps.building_physics.modelica.assemble import _ZoneStateClosure
 from noodl.apps.building_physics.modelica.storage import StorageClosure, mass_change
-from noodl.elements import Element
+from noodl.elements import ConstitutiveLaw
 from noodl.model import Drivers, Model, State
 
 Tensor = torch.Tensor
@@ -370,7 +370,7 @@ def simulate(model: Model, state: State, drivers: Drivers, times, *,
 
     `scheme="midpoint"` also puts a step boundary on every switch (`_Switches`): where an
     element's law changes piece (the edges of its regularisation band,
-    `Element.switching`) or an edge flow changes sign (the transport layers upwind on it). A
+    `ConstitutiveLaw.switching`) or an edge flow changes sign (the transport layers upwind on it). A
     step across one is split there, the crossing located on the step's own runs
     (`_advance_located`), so that the right-hand side is smooth within every step: a door's
     flows reversing through its bands across a 14.4 s step were off by 1.1e-4 of the flow
@@ -537,7 +537,7 @@ def _same(a, b) -> bool:
 class _Switches:
     """The switching values at a state: every value changes sign where the step's right-hand
     side stops being smooth. These are the air layer's elements' own switches
-    (`Element.switching`: a regularisation band's edge, where the law changes piece) and
+    (`ConstitutiveLaw.switching`: a regularisation band's edge, where the law changes piece) and
     every edge flow's sign, in units of `q_scale` (the transport layers upwind on it: the
     advected state switches from one end's to the other's where a flow reverses). `parts`
     are the elements that have switches."""
@@ -549,8 +549,8 @@ class _Switches:
         self._last: tuple | None = None  # (state, point drivers, values) of the last call
         self.parts = []
         for kind in self.air.kinds:
-            el, sl = self.air.element_for(kind)
-            if type(el).switching is not Element.switching:
+            el, sl = self.air.law_for(kind)
+            if type(el).switching is not ConstitutiveLaw.switching:
                 self.parts.append((el, sl))
 
     def __call__(self, state: State, d: Drivers) -> Tensor:
@@ -581,7 +581,7 @@ class _Switches:
 # State-event location (`_advance_located`): a switch is crossed in a step when its value
 # changes sign between the step's ends and was not within SWITCH_SKIP of zero at the start
 # (a switch just located stays there); it is located to |value| <= SWITCH_TOL (in units of
-# the band's width, `Element.switching`) in at most SWITCH_MAX_ITER trial steps.
+# the band's width, `ConstitutiveLaw.switching`) in at most SWITCH_MAX_ITER trial steps.
 SWITCH_TOL = 1e-7
 SWITCH_SKIP = 1e-5
 SWITCH_MAX_ITER = 40

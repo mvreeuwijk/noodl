@@ -199,7 +199,7 @@ def test_gradient_reaches_a_learnable_leak_area():
     model, state, drivers = build_model(
         tree_steady(), quality=False, leak_area=base, leak_cd=leak_cd,
     )
-    leak = next(el for el in model.potential["air"]._elements if el.kind == "leak")
+    leak = next(el for el in model.potential["air"]._laws if el.kind == "leak")
     leak.C.requires_grad_(True)
     new = model.step(state, drivers, 60.0)
     new["air.q"].abs().sum().backward()
@@ -218,7 +218,7 @@ def test_gradient_reaches_a_learnable_leak_area():
 def test_gradient_reaches_a_learnable_headspace_friction():
     model, state, drivers = build_model(tree_steady(), quality=False)
     element = next(
-        el for el in model.potential["air"]._elements if el.kind == "headspace"
+        el for el in model.potential["air"]._laws if el.kind == "headspace"
     )
     element.f_air.requires_grad_(True)
     new = model.step(state, drivers, 60.0)

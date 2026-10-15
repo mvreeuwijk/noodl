@@ -251,7 +251,7 @@ def build_power_flow(
     `learnable=True` registers every constitutive-law coefficient (branch impedances,
     charging, taps and shifts, load powers, shunt admittances, generator powers and
     setpoints) as an `nn.Parameter`, reached as
-    `model.potential["power"].element_for(kind)[0]`. `model.power_index` is the
+    `model.potential["power"].law_for(kind)[0]`. `model.power_index` is the
     `PowerFlowIndex`, `model.power_network` the network. `enforce_q_limits=True` (switching
     a PV bus to PQ at a reactive-power limit) is refused: it is not implemented.
     """

@@ -1,7 +1,7 @@
 """Generate the component catalogue (`docs/catalogue/*.md`) from the code itself.
 
 One page per application plus one for the core library. Every public name (the module's
-`__all__`) is listed under its role -- set-up, network components, elements, drives,
+`__all__`) is listed under its role -- set-up, network components, constitutive laws, drives,
 closures, reactions, sources, waveforms, files, functions, constants -- with the first line of its
 docstring and its call signature. A name exported twice for one object (the old,
 model-named spelling kept as an alias of the physical name) is listed once, with its
@@ -32,11 +32,11 @@ PAGES = [
      ["noodl.topology", "noodl.model", "noodl.refs", "noodl.validation", "noodl.layers",
       "noodl.elements", "noodl.drives", "noodl.nodesources", "noodl.couple"],
      "The framework every application builds on: the network, the layers, the model, the "
-     "set-up helpers, and the general-purpose elements and drives."),
+     "set-up helpers, and the general-purpose constitutive laws and drives."),
     ("building_physics", "Building physics", "../applications/building_physics.md",
      ["noodl.apps.building_physics", "noodl.elements", "noodl.drives"],
      "Multi-zone airflow, heat and contaminants (CONTAM's physics; CONTAM `.prj`/`.wth`, "
-     "EPW and Modelica Buildings Library readers). The airflow elements and drives a "
+     "EPW and Modelica Buildings Library readers). The airflow constitutive laws and drives a "
      "building uses come from the core library and are listed here too."),
     ("street_aq", "Street air quality", "../applications/street_aq.md",
      ["noodl.apps.street_aq"],
@@ -67,7 +67,7 @@ ROLES = [
     ("component", "Network components",
      "Descriptions of the physical objects a network is built from."),
     ("layer", "Layers and model", "The conservation layers and the model that steps them."),
-    ("element", "Elements (constitutive laws)",
+    ("law", "Constitutive laws",
      "The relation between the flow through an edge and the potential difference across it."),
     ("drive", "Drives", "Terms added to an edge's potential difference (stack, wind, fans)."),
     ("closure", "Closures",
@@ -80,10 +80,10 @@ ROLES = [
     ("function", "Functions", "Calculations and helpers."),
     ("constant", "Constants and tables", "Named values and option tables."),
     ("base", "Base classes (for extending)",
-     "Subclass these to add an element, drive, closure, reaction or node source; see "
+     "Subclass these to add a constitutive law, drive, closure, reaction or node source; see "
      "[Extending noodl](../development/extending.md)."),
 ]
-BASE_CLASSES = {"Element", "ImplicitLaw", "Drive", "Closure", "Reaction", "NodeSource"}
+BASE_CLASSES = {"ConstitutiveLaw", "ImplicitLaw", "Drive", "Closure", "Reaction", "NodeSource"}
 CONSTANT_ALIASES = {
     "KAPPA": "KAPPA_040", "KAPPA_MUNICH": "KAPPA_041",
     "GAMMA_E": "EULER_GAMMA_TRUNCATED", "SIRANE_EXCHANGE": "EXCHANGE_SIGMA_W_RATIO",
@@ -160,7 +160,7 @@ def _signature(name: str, obj) -> str:
 
 
 def _role(name: str, obj) -> str:
-    from noodl.elements.base import Element
+    from noodl.elements.base import ConstitutiveLaw
     from noodl.layers.reaction import Reaction
     from noodl.model import Model
     from noodl.nodesources import NodeSource
@@ -174,8 +174,8 @@ def _role(name: str, obj) -> str:
     if inspect.isclass(obj):
         if name in BASE_CLASSES:
             return "base"
-        if issubclass(obj, Element):
-            return "element"
+        if issubclass(obj, ConstitutiveLaw):
+            return "law"
         if issubclass(obj, Reaction):
             return "reaction"
         if issubclass(obj, NodeSource) or name.endswith("Source"):
@@ -312,7 +312,7 @@ def _attributes_section(modname: str) -> list[str]:
     mod = importlib.import_module(modname)
     lines = [
         "## Network attributes", "",
-        "What the builders, elements and drives read off `net.add_node(...)` and "
+        "What the builders, constitutive laws and drives read off `net.add_node(...)` and "
         "`net.add_edge(...)`, by name. Defined in `" + modname + "`.", "",
         "**Nodes**", "", "| Attribute | Meaning | Read by |", "|---|---|---|",
     ]

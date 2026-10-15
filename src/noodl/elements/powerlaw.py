@@ -16,7 +16,7 @@ Without this, ``torch.where``'s backward would multiply an infinite gradient (fr
 what keeps ``flow`` gradcheck-clean at dp = 0 itself (and at dp = +-dp_transition, the
 boundary where the branch selection flips).
 
-Shape convention: C and n follow ``Element._param``'s pass-through rule (no implicit
+Shape convention: C and n follow ``ConstitutiveLaw._param``'s pass-through rule (no implicit
 reshaping). A single-edge instance of this element should be constructed with C, n already
 carrying trailing shape ``(..., 1)`` (e.g. ``torch.tensor([2.0])`` rather than a bare Python
 float, when the caller cares about broadcasting against a batched ``(..., b_kind)`` potential
@@ -32,12 +32,12 @@ import math
 
 import torch
 
-from noodl.elements.base import Element
+from noodl.elements.base import ConstitutiveLaw
 
 Tensor = torch.Tensor
 
 
-class PowerLaw(Element):
+class PowerLaw(ConstitutiveLaw):
     """q = C sign(dp) |dp|^n, laminar-blended or smoothly regularised near dp = 0. `dp` is in
     Pa; `C` is in the flow unit per Pa^n (kg/s for a mass-flow coefficient, m3/s for a
     volume-flow one), so the flow comes out in whatever unit `C` carries; `n` is

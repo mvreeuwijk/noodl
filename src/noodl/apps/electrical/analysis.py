@@ -98,7 +98,7 @@ def transient(model: Model, state: Mapping[str, Tensor], drivers: Mapping[str, T
     if integration not in _RULES:
         raise ValueError(f"transient: integration={integration!r}; expected one of {_RULES}")
     grid = _times(times)
-    sources = [el for el in (layer.element_for(k)[0] for k in layer.kinds)
+    sources = [el for el in (layer.law_for(k)[0] for k in layer.kinds)
                if hasattr(el, "breakpoints")]
     phis, qs, rules = [state[PHI]], [state[Q]], []
     current = dict(state)

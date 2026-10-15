@@ -293,7 +293,7 @@ def _fan_curve_layer(
     coeffs = torch.stack([a0, a1, a2, a3], dim=-1)
     # FanCurve's own default kind is "airpath" (same as PowerLaw's); without an explicit
     # kind="fan" here it collides with `leak`'s "airpath" kind and PotentialFlowLayer raises
-    # "duplicate element kind 'airpath'".
+    # "duplicate law kind 'airpath'".
     fan = FanCurve(coeffs, q_max, kind="fan")
     leak = PowerLaw(C, n, dp_transition=1e-6)
     layer = PotentialFlowLayer(net, "fan_curve", [fan, leak], boundary=["ambient"])

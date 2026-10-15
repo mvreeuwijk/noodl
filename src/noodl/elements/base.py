@@ -1,6 +1,6 @@
 """Branch constitutive laws: q = flow(dp, drivers) mapping potential difference to flow.
 
-Every :class:`Element` is a ``torch.nn.Module`` so its numeric parameters register as
+Every :class:`ConstitutiveLaw` is a ``torch.nn.Module`` so its numeric parameters register as
 ``nn.Parameter`` and participate in gradient-based calibration whenever ``learnable=True``.
 
 Elementwise assumption: ``flow`` maps each entry of ``dp`` independently of every other
@@ -93,14 +93,14 @@ def memo(owner, name: str, deps: tuple, fn):
 def band_edges(x: Tensor, width) -> Tensor:
     """``((x - w)/w, (x + w)/w)`` side by side on the last dimension: the two edges
     ``x = -w`` and ``x = +w`` of a regularisation band ``|x| < w`` as switching values
-    (:meth:`Element.switching`), in units of the band's width."""
+    (:meth:`ConstitutiveLaw.switching`), in units of the band's width."""
     w = torch.as_tensor(width, dtype=x.dtype)
     shape = broadcast_shapes(x.shape, w.shape)
     return torch.cat([torch.broadcast_to((x - w) / w, shape),
                       torch.broadcast_to((x + w) / w, shape)], dim=-1)
 
 
-class Element(torch.nn.Module):
+class ConstitutiveLaw(torch.nn.Module):
     """Abstract branch law: flow as a function of potential difference.
 
     Subclasses implement :meth:`flow`. :meth:`dflow` and :meth:`linear_init` have working
@@ -116,7 +116,7 @@ class Element(torch.nn.Module):
     decide whether a missing gradient of ``flow`` with respect to ``dp`` is legitimate (this
     element declares it does not depend on ``dp``) or a bug (some other element's ``flow``
     silently dropped the autograd graph, e.g. via a stray ``dp.detach()``). Declaring instead
-    of inferring keeps that distinction loud: a third-party ``Element`` subclass that
+    of inferring keeps that distinction loud: a third-party ``ConstitutiveLaw`` subclass that
     accidentally detaches ``dp`` now raises a clear error instead of silently receiving a
     zero Jacobian column (which leaves the forward solve looking fine -- Newton still
     converges on the exact residual -- while the adjoint gradient computed from that Jacobian
@@ -192,7 +192,7 @@ class Element(torch.nn.Module):
                 raise RuntimeError(
                     f"{type(self).__name__} (kind {self.kind!r}) produced a flow that does "
                     f"not depend on dp (flow.requires_grad is False), so the default "
-                    f"autograd-based dflow() cannot differentiate it. If this element's flow "
+                    f"autograd-based dflow() cannot differentiate it. If this law's flow "
                     f"is genuinely independent of dp, override dflow() (and linear_init()) "
                     f"with the analytic zero, as FixedFlow does, and set "
                     f"dp_independent = True. Otherwise flow() is dropping the autograd "
@@ -204,7 +204,7 @@ class Element(torch.nn.Module):
                 raise RuntimeError(
                     f"{type(self).__name__} (kind {self.kind!r}) produced a flow that does "
                     f"not use its dp input anywhere in the computation, so the default "
-                    f"autograd-based dflow() cannot differentiate it. If this element's flow "
+                    f"autograd-based dflow() cannot differentiate it. If this law's flow "
                     f"is genuinely independent of dp, override dflow() (and linear_init()) "
                     f"with the analytic zero, as FixedFlow does, and set "
                     f"dp_independent = True. Otherwise flow() is dropping the autograd "
@@ -262,7 +262,7 @@ class Element(torch.nn.Module):
         return torch.get_default_dtype()
 
 
-class ImplicitLaw(Element):
+class ImplicitLaw(ConstitutiveLaw):
     """A constitutive law written as a relation `residual(dp, q, drivers, ctx) = 0`.
 
     The flow of an implicit law's edges is an unknown of the layer, alongside the nodal

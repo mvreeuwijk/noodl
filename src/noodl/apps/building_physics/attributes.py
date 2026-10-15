@@ -21,8 +21,8 @@ NODE_ATTRIBUTES: dict[str, tuple[str, str]] = {
 EDGE_ATTRIBUTES: dict[str, dict[str, tuple[str, str]]] = {
     "airpath": {
         "z_path": ("height of the opening (m)", "Stack.from_network"),
-        "Cd": ("discharge coefficient (dimensionless)", "orifice_elements_from_edges"),
-        "area": ("opening area (m2)", "orifice_elements_from_edges"),
+        "Cd": ("discharge coefficient (dimensionless)", "orifice_law_from_edges"),
+        "area": ("opening area (m2)", "orifice_law_from_edges"),
         "name": ("label of the edge in model.refs and in named results (optional)",
                  "noodl.refs"),
     },

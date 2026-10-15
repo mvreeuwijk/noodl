@@ -215,7 +215,7 @@ class LinearDensity(_DensityClosure):
         return self.rho_0 * (1.0 - (T - self.T_0) / self.T_0)
 
 
-def build_model(net: Network, *, air_elements, drives, ambient="ambient", thermal: bool = True,
+def build_model(net: Network, *, air_laws, drives, ambient="ambient", thermal: bool = True,
                 species: int | Sequence[str] = 0, density: str = "ideal_gas",
                 density_kwargs=None,
                 coupling: str = "pingpong", iterate_tol=None, iterate_max: int = 20,
@@ -248,22 +248,22 @@ def build_model(net: Network, *, air_elements, drives, ambient="ambient", therma
        tight `iterate_tol` requires a matching `atol`/`rtol` on the `steady`/`step` call.
 
     `flow_kinds` NARROWS which edge kinds advect heat and species; it defaults to every air
-    element's kind, which is what a building network wants. Naming a subset is deliberate
+    law's kind, which is what a building network wants. Naming a subset is deliberate
     (a duct kind that carries mass but whose heat is modelled elsewhere), so it is allowed --
     but every kind named must be one the air layer actually provides, or the narrowing is a
     typo that silently drops advection. Unknown kinds raise `KeyError` naming them. The same
     value governs BOTH the thermal and the species layer.
     """
-    element_kinds = tuple(el.kind for el in air_elements)
-    kinds = tuple(flow_kinds) if flow_kinds else element_kinds
-    unknown = [k for k in kinds if k not in element_kinds]
+    law_kinds = tuple(el.kind for el in air_laws)
+    kinds = tuple(flow_kinds) if flow_kinds else law_kinds
+    unknown = [k for k in kinds if k not in law_kinds]
     if unknown:
         raise KeyError(
-            f"build_model: flow_kinds names {unknown}, which no air element provides "
-            f"(the air elements' kinds are {list(element_kinds)}); a kind the air layer does "
+            f"build_model: flow_kinds names {unknown}, which no air law provides "
+            f"(the air laws' kinds are {list(law_kinds)}); a kind the air layer does "
             f"not solve carries no flow, so heat and species would silently not advect on it"
         )
-    air = PotentialFlowLayer(net, "air", list(air_elements), drives=list(drives),
+    air = PotentialFlowLayer(net, "air", list(air_laws), drives=list(drives),
                              boundary=[ambient], quantity="pressure", unit="Pa",
                              flow_unit="kg/s")
     layers: dict = {"air": air}

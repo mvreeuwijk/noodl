@@ -278,8 +278,8 @@ def _coupled_run(values):
     ])
     model, _, drivers = build_model(circuit, learnable=True)
     layer = model.potential[LAYER]
-    params = [layer.element_for("inductor")[0].L, layer.element_for("transformer")[0].M,
-              layer.element_for("vccs")[0].gain, layer.element_for("resistor")[0].R]
+    params = [layer.law_for("inductor")[0].L, layer.law_for("transformer")[0].M,
+              layer.law_for("vccs")[0].gain, layer.law_for("resistor")[0].R]
     with torch.no_grad():
         for p, v in zip(params, values, strict=True):
             p.copy_(v)
