@@ -3,26 +3,69 @@
 Reading a MATPOWER case file produces a `PowerNetwork` for the
 [power flow](../applications/electrical.md#power-flow) of the electrical application.
 `noodl.apps.electrical.power.read_matpower(path)` reads the case format of MATPOWER version 2
-(`mpc.version = '2'`), the format of every case MATPOWER 8.1 distributes. A case file is a
-MATLAB function that fills a struct `mpc`; the reader parses its text and never runs MATLAB or
-Octave. The network keeps the file's units (MW, MVAr, degrees, p.u. impedances on `baseMVA`);
-the power-flow builders convert to per unit.
+(`mpc.version = '2'`), the format of MATPOWER's standard cases, within the limits listed
+[below](#what-is-read-ignored-and-refused) (no DC lines, no indexed assignments, no
+`define_constants`). A case file is a MATLAB function that fills a struct `mpc`; the reader
+parses its text and never runs MATLAB or Octave. The network keeps the file's units (MW, MVAr,
+degrees, p.u. impedances on `baseMVA`); the power-flow builders convert to per unit.
+
+A four-bus case written for this page (the network of the
+[power-flow example](../applications/electrical.md#power-flow)), saved and read back:
 
 ```python
+from pathlib import Path
+
 from noodl.apps.electrical.power import build_power_flow, read_matpower, solve_power_flow
 
-net = read_matpower("tests/data/power_flow/case9.m")
+Path("four_bus.m").write_text("""function mpc = four_bus
+%FOUR_BUS  A 132 kV triangle feeding a 33 kV bus through a tap-changing transformer.
+mpc.version = '2';
+mpc.baseMVA = 100;
+%	bus_i	type	Pd	Qd	Gs	Bs	area	Vm	Va	baseKV	zone	Vmax	Vmin
+mpc.bus = [
+	1	3	0	0	0	0	1	1	0	132	1	1.1	0.9;
+	2	2	20	5	0	0	1	1	0	132	1	1.1	0.9;
+	3	1	60	20	0	0	1	1	0	132	1	1.1	0.9;
+	4	1	45	15	0	8	1	1	0	33	1	1.1	0.9;
+];
+%	bus	Pg	Qg	Qmax	Qmin	Vg	mBase	status	Pmax	Pmin
+mpc.gen = [
+	1	0	0	100	-100	1.02	100	1	200	0;
+	2	50	0	60	-60	1.01	100	1	80	0;
+];
+%	fbus	tbus	r	x	b	rateA	rateB	rateC	ratio	angle	status	angmin	angmax
+mpc.branch = [
+	1	2	0.01	0.06	0.03	0	0	0	0	0	1	-360	360;
+	1	3	0.02	0.08	0.04	0	0	0	0	0	1	-360	360;
+	2	3	0.015	0.07	0.02	0	0	0	0	0	1	-360	360;
+	3	4	0	0.1	0	0	0	0	0.975	0	1	-360	360;
+];
+%	2	startup	shutdown	n	c2	c1	c0
+mpc.gencost = [
+	2	0	0	3	0.01	20	0;
+	2	0	0	3	0.02	25	0;
+];
+""", encoding="utf-8")
+
+net = read_matpower("four_bus.m")
+print(net.name, len(net.buses), len(net.branches), net.notes["ignored_fields"])
+print([(s.bus, s.g_mw, s.b_mvar) for s in net.shunts], net.branches[3].ratio)
 model, state, drivers = build_power_flow(net)
 solved = solve_power_flow(model, state, drivers)
+print(model.power_index.bus_ids)
+```
 
-# net.notes["ignored_fields"] lists the fields skipped, here ['gencost']
+```text
+four_bus 4 4 ['gencost']
+[(4, 0.0, 8.0)] 0.975
+(1, 2, 3, 4)
 ```
 
 ## What is read, ignored and refused
 
 | | Fields and statements |
 |---|---|
-| **Read** | `mpc.version` (must be `'2'`), `mpc.baseMVA`, `mpc.bus` (at least 13 columns), `mpc.gen` (at least 10 columns), `mpc.branch` (at least 11 columns). Extra columns (solved-case or optimal-power-flow results) are ignored. |
+| **Read** | `mpc.version` (must be exactly `'2'`; any other version is refused), `mpc.baseMVA`, `mpc.bus` (at least 13 columns), `mpc.gen` (at least 10 columns), `mpc.branch` (at least 11 columns). Extra columns (solved-case or optimal-power-flow results) are ignored. |
 | **Ignored**, because they do not change the power flow; recorded in file order in `notes["ignored_fields"]` | `gencost`, `bus_name`, `gen_name`, `branch_name`, `areas`, `gentype`, `genfuel` |
 | **Refused by name**, because skipping them would silently change the network | `mpc.dcline` (DC lines); isolated buses (type 4, every one named); any other bus type; any other `mpc.<field>`; any statement that is neither the `function mpc = <name>` header nor a whole-field assignment `mpc.<field> = ...` (an indexed assignment such as `mpc.bus(:, 8) = 1;`, `define_constants`, `return`, ...); a field assigned twice |
 
@@ -31,7 +74,7 @@ solved = solve_power_flow(model, state, drivers)
 `;` or at the end of a line; values are separated by whitespace or commas; `Inf` and `-Inf`
 are numbers. Cell arrays `{ ... }` are accepted only for ignored fields. A row shorter than its
 table needs, or a token that is not a number, is refused with the line number. Bus ids must be
-integers. The network's `name` is the function's name (`case9`), or the file's stem if the
+integers, and `baseMVA` must be positive (`PowerNetwork` refuses `base_mva <= 0`). The network's `name` is the function's name (`case9`), or the file's stem if the
 file has no `function` header.
 
 ## Columns
@@ -95,14 +138,29 @@ Buses not connected to the slack through in-service branches, and branches of ze
 are refused at build time (see
 [Refusals and limitations](../applications/electrical.md#refusals-and-limitations)).
 
-## Case files in this repository
+## MATPOWER's standard cases
 
-`tests/data/power_flow/` holds MATPOWER 8.1's `case9.m`, `case14.m`, `case30.m` and
-`case118.m`, copied unchanged, with `case9_features.m`, a variant of `case9` written for noodl
-physics, and the stored reference results (`*.json`) the
-[verification](../verification.md) compares against. MATPOWER's code is BSD-licensed, but its
-licence states that the case files distributed with it are not covered by that licence. The
-four MATPOWER files are therefore covered by neither MATPOWER's nor noodl physics' BSD-3
-licence: they are redistributed as test data, with their headers naming their sources intact.
-`tests/data/power_flow/NOTICE.md` gives their provenance, sources and SHA-256 digests;
-`case9_features.m` and the `.json` results are part of noodl physics.
+MATPOWER's code is BSD-licensed, but its licence states that the case files distributed with
+it are not covered by that licence, so noodl physics does not redistribute them.
+`matpower_case(name, *, cache_dir=None)` returns the path of one of MATPOWER 8.1's `case9`,
+`case14`, `case30` and `case118`, downloading it on first use from MATPOWER's GitHub
+repository at the commit of the 8.1 release (`MATPOWER_COMMIT`), and checks its SHA-256
+(`MATPOWER_CASES`, of the bytes with LF line endings) on every call. The file is only ever
+parsed as text by `read_matpower`. It is cached in `$NOODL_CACHE_DIR/matpower/8.1/`, by
+default `~/.cache/noodl/matpower/8.1/`, or under `cache_dir` when given:
+
+```py
+from noodl.apps.electrical.power import matpower_case, read_matpower
+
+net = read_matpower(matpower_case("case118"))
+```
+
+Without a network connection `matpower_case` raises `MatpowerCaseUnavailableError` (an
+`OSError`) naming the URL, the path to save the file at by hand and its expected SHA-256; a
+downloaded or cached file with another digest raises `MatpowerCaseDigestError` (a
+`ValueError`) and a download that fails the check is not cached. Any other name is refused.
+`matpower_case("case9_features")` is the variant of `case9` the
+[verification](../verification.md#power-flow-against-pandapower) uses, derived from the
+fetched `case9` and checked the same way. `tests/data/power_flow/` holds only the stored
+reference results (`*.json`, part of noodl physics), each recording the SHA-256 of its case,
+and `tests/data/power_flow/NOTICE.md` the cases' sources.

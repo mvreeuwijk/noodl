@@ -154,9 +154,17 @@ one about 100 ms). The record is rewritten only by a run with
 
 The AC and DC power flows of the electrical application are compared with pandapower 3.5.6
 results stored under `tests/data/power_flow/` (`tests/verification/test_power_flow_parity.py`).
-`scripts/power_flow_reference.py` produced them once, from the committed MATPOWER `.m` files
-through pandapower's `from_ppc`, and cross-checked every case against PYPOWER 5.1.21; the
-script is never run by the test suite, and neither package is a dependency of noodl physics.
+The cases are MATPOWER 8.1's `case9`, `case14`, `case30` and `case118`, and
+`case9_features`, a variant of `case9` with off-nominal
+taps, phase shifters, parallel and out-of-service branches, a shunt conductance, two generators
+on one bus, a generator on a PQ bus, a PV bus left without generation and a slack angle of 10°. MATPOWER's case files are not redistributed: `matpower_case` downloads each on first
+use from MATPOWER's repository at release 8.1, checks it against the SHA-256 recorded with its
+reference result and caches it (`$NOODL_CACHE_DIR/matpower/8.1/`, by default
+`~/.cache/noodl/matpower/8.1/`); `case9_features` is derived from the fetched `case9` and
+checked the same way. `scripts/power_flow_reference.py` produced the results once, from the
+same files through pandapower's `from_ppc`, and cross-checked every case against PYPOWER
+5.1.21; the script is never run by the test suite, and neither package is a dependency of
+noodl physics.
 pandapower's own `pandapower.networks.case9` and `case118` are not MATPOWER's files: their
 generator setpoints differ and `case118` loses its 30° slack angle, which moves voltages by up
 to 0.04 p.u. and angles by up to 0.52 rad. They are not used. The per-case agreement is on the
@@ -167,7 +175,9 @@ to 0.04 p.u. and angles by up to 0.52 rad. They are not used. The per-case agree
 The default `pytest` run (`addopts` deselects `slow`) runs every comparison above. The
 live-engine rows skip themselves when their engine is not installed. `wntr`, `pyswmm` and
 `wsimod` come with the `dev` extra. `contamxpy` comes with the `contam` extra, which exists
-only on Windows x86-64, so the ContamX rows are marked `external` and do not run on Linux CI.
+only on Windows x86-64, so the ContamX rows are marked `external` and do not run on Linux CI. The
+power-flow comparisons are marked `external` too: they need MATPOWER's case files, fetched on
+first use, and skip, naming the file to place by hand, when there is no network connection.
 The stored-output rows, the WSIMOD demo replay and every closed-form row need no external
 engine.
 

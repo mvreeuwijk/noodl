@@ -2,7 +2,6 @@
 
 import dataclasses
 import math
-from pathlib import Path
 
 import pytest
 import torch
@@ -15,8 +14,7 @@ from noodl.apps.electrical.power import (
     read_matpower,
     solve_power_flow,
 )
-
-DATA = Path(__file__).resolve().parents[3] / "data" / "power_flow"
+from tests._power_cases import power_case
 
 
 @pytest.fixture(autouse=True)
@@ -32,10 +30,11 @@ def _solve(net, **kw):
     return model, power_flow_solution(model, solve_power_flow(model, state, drivers))
 
 
+@pytest.mark.external
 def test_case9_spot_values():
     # PYPOWER 5.1.21 on MATPOWER 8.1's case9 (flat start): the slack magnitude is its
     # generator's Vg (1.04), not the bus table's Vm (1.0).
-    _, sol = _solve(read_matpower(DATA / "case9.m"))
+    _, sol = _solve(read_matpower(power_case("case9")))
     assert abs(sol.vm[0] - 1.04) < 1e-12
     assert abs(sol.vm[8] - 0.9956308580482949) < 1e-9
     assert abs(sol.va[1] - 0.161966650257789) < 1e-9
@@ -43,8 +42,9 @@ def test_case9_spot_values():
     assert abs(sol.qg[2] - (-0.10859709070988515)) < 1e-8
 
 
+@pytest.mark.external
 def test_layer_layout_flat_start_and_complex_tellegen():
-    model, state, drivers = build_power_flow(read_matpower(DATA / "case9.m"))
+    model, state, drivers = build_power_flow(read_matpower(power_case("case9")))
     layer = model.potential[POWER_LAYER]
     assert layer.phasor and layer.kinds == ["branch", "load", "generator"]
     q0 = state["power.q"]
@@ -57,13 +57,15 @@ def test_layer_layout_flat_start_and_complex_tellegen():
     assert abs(layer.power_residual(phi, q, {})) < 1e-10
 
 
+@pytest.mark.external
 def test_enforce_q_limits_is_refused():
     with pytest.raises(ValueError, match="reactive-power limits"):
-        build_power_flow(read_matpower(DATA / "case9.m"), enforce_q_limits=True)
+        build_power_flow(read_matpower(power_case("case9")), enforce_q_limits=True)
 
 
+@pytest.mark.external
 def test_island_is_refused_naming_its_buses():
-    net = read_matpower(DATA / "case9.m")
+    net = read_matpower(power_case("case9"))
     # bus 9 hangs on branches 8-9 (row 7) and 9-4 (row 8); switch both out
     cut = [dataclasses.replace(b, in_service=False) if k in (7, 8) else b
            for k, b in enumerate(net.branches)]
@@ -71,24 +73,27 @@ def test_island_is_refused_naming_its_buses():
         build_power_flow(dataclasses.replace(net, branches=tuple(cut)))
 
 
+@pytest.mark.external
 def test_conflicting_voltage_setpoints_are_refused():
-    net = read_matpower(DATA / "case9_features.m")
+    net = read_matpower(power_case("case9_features"))
     gens = list(net.generators)
     gens[2] = dataclasses.replace(gens[2], vm_set=1.03)     # second generator on bus 2
     with pytest.raises(ValueError, match=r"bus 2.*1\.025.*1\.03"):
         build_power_flow(dataclasses.replace(net, generators=tuple(gens)))
 
 
+@pytest.mark.external
 def test_zero_impedance_branch_is_refused():
-    net = read_matpower(DATA / "case9.m")
+    net = read_matpower(power_case("case9"))
     br = list(net.branches)
     br[0] = dataclasses.replace(br[0], x=0.0)               # r is already 0 on 1-4
     with pytest.raises(ValueError, match=r"row 1 of the branch table \(from bus 1 to bus 4\)"):
         build_power_flow(dataclasses.replace(net, branches=tuple(br)))
 
 
+@pytest.mark.external
 def test_infeasible_loading_raises_naming_the_layer():
-    net = read_matpower(DATA / "case9.m")
+    net = read_matpower(power_case("case9"))
     heavy = tuple(dataclasses.replace(ld, p_mw=10 * ld.p_mw, q_mvar=10 * ld.q_mvar)
                   for ld in net.loads)
     model, state, drivers = build_power_flow(dataclasses.replace(net, loads=heavy))
@@ -99,11 +104,12 @@ def test_infeasible_loading_raises_naming_the_layer():
     assert isinstance(failure.value.__cause__, RuntimeError)
 
 
+@pytest.mark.external
 def test_voltage_sensitivity_to_load_matches_finite_differences():
     # d|V_k|/dP_load at bus 5 of case9 for the PQ buses 5 and 6 (sensitivities 1.6e-2 and
     # 3.4e-3, far above the difference's noise ~1e-11), by the adjoint of the converged
     # solve, against a central difference of two plain solves (h = 1e-5 p.u.).
-    net = read_matpower(DATA / "case9.m")
+    net = read_matpower(power_case("case9"))
     model, state, drivers = build_power_flow(net, learnable=True)
     load, _ = model.potential[POWER_LAYER].element_for("load")
     sol = power_flow_solution(model, solve_power_flow(model, state, drivers))
@@ -124,8 +130,9 @@ def test_voltage_sensitivity_to_load_matches_finite_differences():
         assert math.isclose(float(g), float(f), rel_tol=1e-6)
 
 
+@pytest.mark.external
 def test_one_slack_bus_with_a_generator_is_required():
-    net = read_matpower(DATA / "case9.m")
+    net = read_matpower(power_case("case9"))
     two = tuple(dataclasses.replace(b, kind="slack") if b.id == 2 else b for b in net.buses)
     with pytest.raises(ValueError, match=r"exactly one slack bus, found 2: \[1, 2\]"):
         build_power_flow(dataclasses.replace(net, buses=two))
@@ -135,8 +142,9 @@ def test_one_slack_bus_with_a_generator_is_required():
         build_power_flow(dataclasses.replace(net, generators=off))
 
 
+@pytest.mark.external
 def test_zero_reactance_is_refused_only_by_the_dc_check():
-    net = read_matpower(DATA / "case9.m")
+    net = read_matpower(power_case("case9"))
     br = list(net.branches)
     br[1] = dataclasses.replace(br[1], x=0.0)               # 4-5 keeps r = 0.017
     net = dataclasses.replace(net, branches=tuple(br))
@@ -147,8 +155,9 @@ def test_zero_reactance_is_refused_only_by_the_dc_check():
         check_power_network(net, dc=True)
 
 
+@pytest.mark.external
 def test_feature_case_index_follows_matpower_bus_types():
-    index = check_power_network(read_matpower(DATA / "case9_features.m"))
+    index = check_power_network(read_matpower(power_case("case9_features")))
     # bus 3's only generator is out of service: solved as PQ; bus 7's generator is fixed
     assert index.pv_buses == (2,) and index.gen_buses == (1, 2, 7)
     assert index.fixed_generation == {7: complex(0.6, 0.15)}
@@ -156,8 +165,9 @@ def test_feature_case_index_follows_matpower_bus_types():
     assert index.load_buses == (5, 7, 9)
 
 
+@pytest.mark.external
 def test_branch_end_powers_close_the_power_balance():
-    net = read_matpower(DATA / "case9_features.m")
+    net = read_matpower(power_case("case9_features"))
     _, sol = _solve(net)
     losses = (sol.sf + sol.st).sum()
     shunt = complex(0.05, -0.10) * sol.vm[4] ** 2           # Gs = 5 MW, Bs = 10 MVAr at bus 5
@@ -167,16 +177,18 @@ def test_branch_end_powers_close_the_power_balance():
     assert float(losses.real) > 0
 
 
+@pytest.mark.external
 def test_coefficients_are_float64_whatever_the_default_dtype():
     torch.set_default_dtype(torch.float32)      # the autouse fixture restores it
-    model, sol = _solve(read_matpower(DATA / "case9.m"))
+    model, sol = _solve(read_matpower(power_case("case9")))
     branch, _ = model.potential[POWER_LAYER].element_for("branch")
     assert branch.r.dtype == torch.float64 and sol.vm.dtype == torch.float64
     assert abs(sol.vm[8] - 0.9956308580482949) < 1e-9
 
 
+@pytest.mark.external
 def test_cut_off_slack_bus_leaves_the_rest_as_an_island():
-    net = read_matpower(DATA / "case9.m")
+    net = read_matpower(power_case("case9"))
     # the slack bus 1 hangs on its transformer 1-4 (row 0) alone
     cut = [dataclasses.replace(b, in_service=False) if k == 0 else b
            for k, b in enumerate(net.branches)]
@@ -184,13 +196,14 @@ def test_cut_off_slack_bus_leaves_the_rest_as_an_island():
         build_power_flow(dataclasses.replace(net, branches=tuple(cut)))
 
 
+@pytest.mark.external
 def test_solution_keeps_leading_batch_dimensions():
-    model, state, drivers = build_power_flow(read_matpower(DATA / "case9.m"))
+    model, state, drivers = build_power_flow(read_matpower(power_case("case9")))
     slack = drivers["power.phi_boundary"]
     batched = dict(drivers, **{"power.phi_boundary": torch.stack([slack, 1.01 * slack])})
     sol = power_flow_solution(model, solve_power_flow(model, state, batched))
     assert sol.vm.shape == (2, 9) and sol.pg.shape == (2, 3) and sol.sf.shape == (2, 9)
-    _, single = _solve(read_matpower(DATA / "case9.m"))
+    _, single = _solve(read_matpower(power_case("case9")))
     assert torch.allclose(sol.vm[0], single.vm, atol=1e-12, rtol=0)
     assert torch.allclose(sol.qg[0], single.qg, atol=1e-12, rtol=0)
     assert abs(float(sol.vm[1, 0]) - 1.01 * 1.04) < 1e-12

@@ -2,7 +2,6 @@
 
 import dataclasses
 import math
-from pathlib import Path
 
 import pytest
 import torch
@@ -20,8 +19,7 @@ from noodl.apps.electrical.power import (
     solve_power_flow,
 )
 from noodl.elements import Conductance
-
-DATA = Path(__file__).resolve().parents[3] / "data" / "power_flow"
+from tests._power_cases import power_case
 
 
 @pytest.fixture(autouse=True)
@@ -37,8 +35,9 @@ def _dc(net):
     return model, dc_power_flow_solution(model, solve_power_flow(model, state, drivers))
 
 
+@pytest.mark.external
 def test_case9_is_nodal_analysis_on_the_classic_layer():
-    model, sol = _dc(read_matpower(DATA / "case9.m"))
+    model, sol = _dc(read_matpower(power_case("case9")))
     layer = model.potential[DC_LAYER]
     assert layer.mna is False
     assert list(layer.kinds) == ["branch"]
@@ -50,8 +49,9 @@ def test_case9_is_nodal_analysis_on_the_classic_layer():
     assert abs(sol.pg[0] - 0.67) < 1e-12
 
 
+@pytest.mark.external
 def test_build_rules():
-    net = read_matpower(DATA / "case9_features.m")
+    net = read_matpower(power_case("case9_features"))
     model, state, drivers = dc_power_flow(net)
     assert state == {}
     layer = model.potential[DC_LAYER]
@@ -70,23 +70,26 @@ def test_build_rules():
     assert model.power_network is net
 
 
+@pytest.mark.external
 def test_phase_shifter_enters_as_a_drive():
     # case9_features: branch 1-4 has ratio 1.02 and shift -3 deg; its DC flow is 0.97 p.u.
-    model, sol = _dc(read_matpower(DATA / "case9_features.m"))
+    model, sol = _dc(read_matpower(power_case("case9_features")))
     assert abs(sol.pf[0] - 0.9699999999999992) < 1e-12
     assert len(sol.pf) == 9                     # the out-of-service branch 9-4 is dropped
 
 
+@pytest.mark.external
 def test_injections_balance_the_branch_flows():
-    net = read_matpower(DATA / "case14.m")
+    net = read_matpower(power_case("case14"))
     model, sol = _dc(net)
     # total generation equals total demand plus shunt conductance: the DC network is lossless
     demand = sum(ld.p_mw for ld in net.loads) + sum(sh.g_mw for sh in net.shunts)
     assert abs(float(sol.pg.sum()) - demand / net.base_mva) < 1e-12
 
 
+@pytest.mark.external
 def test_batched_drivers():
-    net = read_matpower(DATA / "case9.m")
+    net = read_matpower(power_case("case9"))
     model, state, drivers = dc_power_flow(net)
     batched = {k: torch.stack([v, 2 * v]) for k, v in drivers.items()}
     sol = dc_power_flow_solution(model, solve_power_flow(model, state, batched))
@@ -97,8 +100,9 @@ def test_batched_drivers():
     assert torch.allclose(sol.va[1], 2 * single.va, atol=1e-12)
 
 
+@pytest.mark.external
 def test_zero_reactance_and_islands_are_refused():
-    net = read_matpower(DATA / "case9.m")
+    net = read_matpower(power_case("case9"))
     br = list(net.branches)
     br[1] = dataclasses.replace(br[1], x=0.0)   # r = 0.017 keeps the AC model valid
     with pytest.raises(ValueError, match=r"row 2 of the branch table \(from bus 4 to bus 5\)"):

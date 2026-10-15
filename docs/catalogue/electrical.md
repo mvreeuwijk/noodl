@@ -110,6 +110,8 @@ Supporting types.
 | `CircuitNames`<br><small>`noodl.apps.electrical.modelica`</small> | What the reader built, by name. | `CircuitNames(model, times, grid, restarts, dynamic, phasor, nodes, thermal_nodes, devices, sources, columns)` |
 | `Column`<br><small>`noodl.apps.electrical.modelica`</small> | A compared value: `part(sum(c * history[key][..., i] for i, c in terms))`, with `part` `"real"` or `"imag"` (of a phasor; the real part of a real value is itself). | `Column(key, terms, part='real')` |
 | `ModelicaImportError`<br><small>`noodl.apps.electrical.modelica`</small> | Raised for a malformed `noodl-modelica-electrical/1` document, or for circuit content the electrical reader does not support. | `ModelicaImportError(...)` |
+| `MatpowerCaseDigestError`<br><small>`noodl.apps.electrical.power`</small> | A downloaded or cached MATPOWER case is not the file whose SHA-256 is recorded. | `MatpowerCaseDigestError(...)` |
+| `MatpowerCaseUnavailableError`<br><small>`noodl.apps.electrical.power`</small> | A MATPOWER case could not be downloaded (no network, or the server refused). | `MatpowerCaseUnavailableError(...)` |
 
 ## Functions
 
@@ -125,6 +127,7 @@ Calculations and helpers.
 | `simulate_circuit`<br><small>`noodl.apps.electrical.modelica`</small> | The circuit's history at `times` (default `names.times`; each must be a time of `names.grid`, increasing; a single time may be a scalar): `"time"` `(T,)` (the grid times found, a new tensor) and every `".phi"` / `".q"` state entry the model returns, stacked on dim 0. | `simulate_circuit(model, state, drivers, names, *, times=None, **solve_kwargs)` |
 | `check_power_network`<br><small>`noodl.apps.electrical.power`</small> | Check that `net` is a solvable power-flow network and return its `PowerFlowIndex`. | `check_power_network(net, *, dc=False)` |
 | `dc_power_flow_solution`<br><small>`noodl.apps.electrical.power`</small> | Bus angles, generation per generator bus and branch flows of a solved DC power flow (`model` from `dc_power_flow`). | `dc_power_flow_solution(model, state)` |
+| `matpower_case`<br><small>`noodl.apps.electrical.power`</small> | The path of MATPOWER 8.1's case `name` (one of `MATPOWER_CASES`), downloaded on first use and verified by SHA-256 on every call. | `matpower_case(name, *, cache_dir=None)` |
 | `power_flow_solution`<br><small>`noodl.apps.electrical.power`</small> | Bus voltages, generation per generator bus and branch end powers of a solved AC power flow (`model` from `build_power_flow`). | `power_flow_solution(model, state)` |
 | `solve_power_flow`<br><small>`noodl.apps.electrical.power`</small> | The solved power flow, AC or DC: `model.steady(state, drivers, atol=atol, rtol=rtol, max_iter=max_iter, **solve_kwargs)`, for a model from `build_power_flow` or `dc_power_flow`. For the AC power flow Newton stops when the residual's max-norm (p.u.) is below `atol`; `state` is its starting point (the flat start `build_power_flow` returns, or an earlier solution). The DC power flow is linear: one solve, from the empty state `dc_power_flow` returns. | `solve_power_flow(model, state, drivers, *, atol=1e-11, rtol=0.0, max_iter=30, **solve_kwargs)` |
 
@@ -137,4 +140,7 @@ Named values and option tables.
 | `LAYER` | `'electrical'` |
 | `BUS_KINDS` | 3 names: `pq`, `pv`, `slack` |
 | `DC_LAYER` | `'power_dc'` |
+| `MATPOWER_CASES` | table of 5 entries: `case9`, `case14`, `case30`, `case118`, `case9_features` |
+| `MATPOWER_COMMIT` | `'1a828c7af590714499284e36ee9c81273388c594'` |
+| `MATPOWER_RELEASE` | `'8.1'` |
 | `POWER_LAYER` | `'power'` |

@@ -1,4 +1,4 @@
-"""Reference AC and DC power-flow results for the MATPOWER cases in tests/data/power_flow.
+"""Reference AC and DC power-flow results for MATPOWER's standard cases (tests/data/power_flow).
 
 Run ONCE, in a scratch virtual environment that is not noodl's (pandapower and PYPOWER are
 never noodl dependencies):
@@ -8,7 +8,11 @@ never noodl dependencies):
         matpowercaseframes==2.1.1 numpy==2.4.6 scipy==1.18.1 pandas==2.3.3
     pfvenv/Scripts/python -I scripts/power_flow_reference.py tests/data/power_flow
 
-For each `<case>.m` it writes `<case>.json` next to it (format
+The case files are not in the repository: the script reads each through noodl's
+`matpower_case` (MATPOWER 8.1 fetched on first use, SHA-256 checked, cached under
+`$NOODL_CACHE_DIR/matpower/8.1/`), loading `src/noodl/apps/electrical/power/cases.py` on its
+own (standard library only), so the scratch environment needs no noodl installation. For
+each case it writes `<case>.json` into the given folder (format
 `noodl-power-flow-reference/1`). The stored bus and generator values are pandapower's
 (`runpp(init="flat", enforce_q_lims=False, trafo_model="pi")` and `rundcpp`), on the case
 converted by `from_ppc`; the stored DC branch flows are PYPOWER's `rundcpf` (pandapower splits
@@ -21,6 +25,7 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import importlib.util
 import json
 import logging
 import sys
@@ -30,6 +35,7 @@ from pathlib import Path
 
 import numpy as np
 
+CASES_MODULE = Path(__file__).resolve().parents[1] / "src/noodl/apps/electrical/power/cases.py"
 CASES = ["case9", "case14", "case30", "case118", "case9_features"]
 AGREE = 1e-10
 # Column indices (0-based) of MATPOWER's idx_bus / idx_gen / idx_brch.
@@ -137,11 +143,19 @@ def _agree(name, a, b):
     return worst
 
 
+def _matpower_case():
+    spec = importlib.util.spec_from_file_location("noodl_matpower_cases", CASES_MODULE)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.matpower_case
+
+
 def main(folder: str) -> None:
     logging.disable(logging.WARNING)
     warnings.filterwarnings("ignore")
+    matpower_case = _matpower_case()
     for case in CASES:
-        path = Path(folder) / f"{case}.m"
+        path = matpower_case(case)
         ppc = _parse(path)
         base = ppc["baseMVA"]
         (vm, va, gids, pg, qg), (dva, dgids, dpg) = _pandapower(ppc)
@@ -172,7 +186,7 @@ def main(folder: str) -> None:
             "dc": {"va_rad": dva.tolist(), "gen_bus": [b + 1 for b in dgids],
                    "pg_pu": (dpg / base).tolist(), "branch_pf_pu": (dpf / base).tolist()},
         }
-        target = path.with_suffix(".json")
+        target = Path(folder) / f"{case}.json"
         target.write_text(json.dumps(out, indent=1) + "\n", encoding="utf-8")
         print(f"{case}: wrote {target.name}; pandapower vs PYPOWER max abs "
               + ", ".join(f"{k} {v:.1e}" for k, v in check.items()))

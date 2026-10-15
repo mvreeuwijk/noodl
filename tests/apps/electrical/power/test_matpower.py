@@ -1,17 +1,16 @@
 """The MATPOWER v2 case-file reader."""
 
 import math
-from pathlib import Path
 
 import pytest
 
 from noodl.apps.electrical.power import read_matpower
+from tests._power_cases import power_case
 
-DATA = Path(__file__).resolve().parents[3] / "data" / "power_flow"
 
-
+@pytest.mark.external
 def test_case9_tables_in_file_units():
-    net = read_matpower(DATA / "case9.m")
+    net = read_matpower(power_case("case9"))
     assert net.name == "case9" and net.base_mva == 100.0
     assert net.bus_ids() == tuple(range(1, 10))
     assert [b.kind for b in net.buses[:4]] == ["slack", "pv", "pv", "pq"]
@@ -26,22 +25,25 @@ def test_case9_tables_in_file_units():
     assert net.notes["ignored_fields"] == ["gencost"]
 
 
+@pytest.mark.external
 def test_case118_ignores_names_and_keeps_its_slack_angle():
-    net = read_matpower(DATA / "case118.m")
+    net = read_matpower(power_case("case118"))
     assert len(net.buses) == 118 and len(net.branches) == 186 and len(net.generators) == 54
     slack = [b for b in net.buses if b.kind == "slack"]
     assert [(b.id, b.va_deg) for b in slack] == [(69, 30.0)]
     assert net.notes["ignored_fields"] == ["gencost", "bus_name"]
 
 
+@pytest.mark.external
 def test_case14_shunt_and_taps():
-    net = read_matpower(DATA / "case14.m")
+    net = read_matpower(power_case("case14"))
     assert [(s.bus, s.g_mw, s.b_mvar) for s in net.shunts] == [(9, 0.0, 19.0)]
     assert sum(1 for br in net.branches if br.ratio != 0) == 3
 
 
+@pytest.mark.external
 def test_features_case_keeps_out_of_service_elements():
-    net = read_matpower(DATA / "case9_features.m")
+    net = read_matpower(power_case("case9_features"))
     assert [g.in_service for g in net.generators] == [True, True, True, False, True]
     assert [br.in_service for br in net.branches][-1] is False
     assert (net.branches[0].ratio, net.branches[0].shift_deg) == (1.02, -3.0)
@@ -127,14 +129,15 @@ def test_a_missing_table_and_a_cell_array_for_a_table_are_refused(tmp_path):
         read_matpower(p)
 
 
+@pytest.mark.external
 @pytest.mark.parametrize("case, sizes, ignored", [
     ("case9", (9, 9, 3), ["gencost"]),
     ("case14", (14, 20, 5), ["gencost", "bus_name"]),
     ("case30", (30, 41, 6), ["gencost"]),
     ("case9_features", (9, 10, 5), []),
 ])
-def test_every_committed_case_reads(case, sizes, ignored):
-    net = read_matpower(DATA / f"{case}.m")
+def test_every_standard_case_reads(case, sizes, ignored):
+    net = read_matpower(power_case(case))
     assert (len(net.buses), len(net.branches), len(net.generators)) == sizes
     assert net.name == case and net.notes["ignored_fields"] == ignored
     assert sum(b.kind == "slack" for b in net.buses) == 1

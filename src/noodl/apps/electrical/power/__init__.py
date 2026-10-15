@@ -10,6 +10,7 @@ degrees), and `read_matpower` reads one from a MATPOWER version 2 case file.
 reports bus voltages, generation and branch powers. `dc_power_flow` builds the DC power
 flow, plain nodal analysis of the bus voltage angles on a classic layer `"power_dc"`, and
 `dc_power_flow_solution` reports its angles, generation and branch flows.
+`matpower_case` fetches MATPOWER's standard cases on first use into a local cache.
 """
 
 from noodl.apps.electrical.power.build import (
@@ -20,6 +21,14 @@ from noodl.apps.electrical.power.build import (
     check_power_network,
     power_flow_solution,
     solve_power_flow,
+)
+from noodl.apps.electrical.power.cases import (
+    MATPOWER_CASES,
+    MATPOWER_COMMIT,
+    MATPOWER_RELEASE,
+    MatpowerCaseDigestError,
+    MatpowerCaseUnavailableError,
+    matpower_case,
 )
 from noodl.apps.electrical.power.dc import (
     DC_LAYER,
@@ -42,6 +51,9 @@ from noodl.apps.electrical.power.network import (
 __all__ = [
     "BUS_KINDS",
     "DC_LAYER",
+    "MATPOWER_CASES",
+    "MATPOWER_COMMIT",
+    "MATPOWER_RELEASE",
     "POWER_LAYER",
     "Branch",
     "Bus",
@@ -49,6 +61,8 @@ __all__ = [
     "FixedShunt",
     "Generator",
     "Load",
+    "MatpowerCaseDigestError",
+    "MatpowerCaseUnavailableError",
     "PiBranch",
     "PowerFlowIndex",
     "PowerFlowSolution",
@@ -59,6 +73,7 @@ __all__ = [
     "check_power_network",
     "dc_power_flow",
     "dc_power_flow_solution",
+    "matpower_case",
     "power_flow_solution",
     "read_matpower",
     "solve_power_flow",
