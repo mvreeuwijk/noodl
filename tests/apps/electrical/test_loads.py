@@ -211,3 +211,27 @@ def test_gradients_of_impedance_and_load_match_finite_differences():
     fd_P = (float(_load_voltage(50.0 + h)[0]) - float(_load_voltage(50.0 - h)[0])) / (2 * h)
     assert float(dR) == pytest.approx(fd_R, rel=1e-6)
     assert float(dP) == pytest.approx(fd_P, rel=1e-6)
+
+
+def _impedance_current(f, *, differentiable=False):
+    # an inductive edge (C = inf) and a capacitive edge in parallel: the gradient through the
+    # C = inf edge must not be inf * 0 = NaN
+    edges = [("s", "0", "voltage_source"), ("s", "0", "impedance"), ("s", "0", "impedance")]
+    net = _net(edges)
+    laws = [PrescribedVoltage(120.0),
+            Impedance(torch.tensor([1.0, 2.0]), L=torch.tensor([1e-2, 0.0]),
+                      C=torch.tensor([math.inf, 1e-3]))]
+    layer = PotentialFlowLayer(net, "electrical", laws, boundary=["0"], phasor=True)
+    _, q = layer.solve(torch.zeros(1, dtype=C128), {"electrical.frequency": f},
+                       differentiable=differentiable)
+    return q[1:].abs().sum()
+
+
+def test_impedance_gradient_with_respect_to_frequency_matches_finite_differences():
+    f = torch.tensor(60.0, requires_grad=True)
+    (g,) = torch.autograd.grad(_impedance_current(f, differentiable=True), f)
+    assert torch.isfinite(g)
+    h = 1e-4
+    fd = (float(_impedance_current(torch.tensor(60.0 + h)))
+          - float(_impedance_current(torch.tensor(60.0 - h)))) / (2 * h)
+    assert float(g) == pytest.approx(fd, rel=1e-6)

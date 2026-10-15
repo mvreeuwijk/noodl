@@ -65,7 +65,8 @@ class Impedance(ImplicitLaw):
             # 1/(omega C) only where C is finite and omega nonzero, from a safe denominator
             # so neither branch (nor its derivative) holds an inf or a NaN
             live = capacitive & ~at_rest
-            wC = torch.where(live, ctx.omega * self.C, torch.ones_like(self.C))
+            Cs = torch.where(live, self.C, torch.ones_like(self.C))
+            wC = torch.where(live, ctx.omega * Cs, torch.ones_like(Cs))
             x = ctx.omega * self.L - torch.where(live, 1.0 / wC, torch.zeros_like(wC))
             return dp - (self.R + 1j * x) * q
         reactive = (self.L != 0) | torch.isfinite(self.C)

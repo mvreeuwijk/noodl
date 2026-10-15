@@ -414,9 +414,9 @@ the circuit layer's `q`, its end nodes, the thermal node of its heat port, and t
 temperature driver its law reads (`Resistance(..., temperature=key)`,
 `JunctionDiode(..., temperature=key)`) with its position in it. From the state the closure
 writes the dissipated power `p = Re((phi[p] - phi[n]) conj(q[edge]))` (MSL `LossPower = v i`)
-into `"thermal.heat"`, and each temperature driver as `base_temperatures[key]` with the heated
-devices' entries replaced by their heat-port temperatures (devices without a heat port keep
-their fixed temperature). Build the model with `coupling="iterate"`, so that every step (or
+into `"thermal.heat"`, and each temperature driver as the driver you give (or
+`base_temperatures[key]` when the drivers lack it) with the heated devices' entries replaced
+by their heat-port temperatures (devices without a heat port keep the temperature you give). Build the model with `coupling="iterate"`, so that every step (or
 steady solve) repeats circuit and thermal solves until both stop changing.
 
 A resistor `R(T) = R0 (1 + alpha (T - T_ref))` on 220 V, cooled through `G = 50` W/K to

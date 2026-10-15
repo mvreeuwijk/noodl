@@ -54,9 +54,10 @@ class JouleHeating:
     `{heat_key: p (..., n_heated), <temperature_key>: T (..., n_slots)}` where
     `p_k = Re((phi[p] - phi[n]) conj(q[edge]))` (W) is the power device k dissipates (MSL
     `LossPower = v i`; on a phasor layer the product of the phasors as given), and each
-    temperature driver is `base_temperatures[key]` with the heated devices' slots replaced by
-    their heat-port temperatures `thermal phi[heat_node]` (K): the devices without a heat
-    port keep their fixed temperature. Batch dimensions lead (`[..., index]`); nothing is
+    temperature driver is the caller's `drivers[key]` (`base_temperatures[key]` where the
+    drivers do not hold it) with the heated devices' slots replaced by their heat-port
+    temperatures `thermal phi[heat_node]` (K): the devices without a heat port keep the
+    temperature the drivers give them. Batch dimensions lead (`[..., index]`); nothing is
     modified in place.
     """
 
@@ -100,7 +101,8 @@ class JouleHeating:
         out: dict[str, Tensor] = {self.heat_key: power}
         for key, (slots, nodes) in self._slots.items():
             heated = temperature[..., nodes].real
-            base = self.base_temperatures[key].to(dtype=heated.dtype, device=heated.device)
+            base = drivers.get(key, self.base_temperatures[key])
+            base = torch.as_tensor(base).to(dtype=heated.dtype, device=heated.device)
             base = base.expand(*heated.shape[:-1], base.shape[-1])
             out[key] = base.index_copy(-1, slots.to(heated.device), heated)
         return out

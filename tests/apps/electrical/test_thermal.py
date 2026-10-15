@@ -157,3 +157,15 @@ def test_joule_heating_refuses_an_inconsistent_description():
         JouleHeating([edge], base_temperatures={"other": torch.zeros(3)})
     with pytest.raises(ValueError, match="slot 2 lies outside"):
         JouleHeating([edge], base_temperatures={"T": torch.zeros(2)})
+
+
+def test_joule_heating_keeps_the_callers_temperature_of_an_unheated_device():
+    # slot 0 has no heat port: the caller's 400 K driver wins over the 300 K base
+    heated = [HeatedEdge(edge=1, p=1, n=0, heat_node=1, temperature_key="T", slot=1)]
+    close = JouleHeating(heated, base_temperatures={"T": torch.tensor([300.0, 300.0])})
+    state = {"electrical.phi": torch.tensor([0.0, 10.0]),
+             "electrical.q": torch.tensor([0.0, 2.0]),
+             "thermal.phi": torch.tensor([0.0, 310.0])}
+    d = close(state, {"T": torch.tensor([400.0, 350.0])})
+    assert d["T"].tolist() == [400.0, 310.0]
+    assert close(state, {})["T"].tolist() == [300.0, 310.0]
