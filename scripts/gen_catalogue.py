@@ -50,11 +50,12 @@ PAGES = [
      ["noodl.apps.wsimod"],
      "Rule-based allocation of water between stores on capacity-limited arcs."),
     ("electrical", "Electrical circuits", "../applications/electrical.md",
-     ["noodl.apps.electrical"],
+     ["noodl.apps.electrical", "noodl.apps.electrical.modelica"],
      "Electrical circuits by Modified Nodal Analysis: resistors, capacitors, inductors, "
      "sources and their waveforms, diodes, switches, transformers and controlled sources "
      "(Modelica Standard Library device laws); impedances, constant-power loads and power "
-     "converters (Modelica Buildings Library laws)."),
+     "converters (Modelica Buildings Library laws); Joule heating into a thermal network; "
+     "the reader of OpenModelica circuit exports."),
 ]
 
 ROLES = [
@@ -99,10 +100,14 @@ ATTRIBUTE_TABLE_NAMES = {"NODE_ATTRIBUTES", "EDGE_ATTRIBUTES"}
 MODULE_ROLES = {
     "noodl.apps.electrical.circuit": "component",
     "noodl.apps.electrical.waveforms": "waveform",
+    "noodl.apps.electrical.thermal": "closure",
+    "noodl.apps.electrical.modelica.assemble": "class",
 }
 """Modules whose public classes all take one role, whatever their names: a circuit's devices
-(`VoltageSource`, `ControlledSource`) are network components, not nodal sources, and its
-waveforms are a role of their own."""
+(`VoltageSource`, `ControlledSource`) are network components, not nodal sources, its
+waveforms are a role of their own, and the electro-thermal module's `HeatedEdge` describes a
+device to the `JouleHeating` closure (a coupling description, not a network component); the
+Modelica circuit reader's `CircuitNames` and `Column` describe its result (supporting types)."""
 
 SETUP_NAMES = {"build_model", "initial_state", "initial_drivers", "project_to_model",
                "drivers_from", "state_from", "check_setup"}

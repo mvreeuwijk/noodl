@@ -235,6 +235,9 @@ Elements are grouped below by the physics they express, as in
 ::: noodl.apps.electrical.converters
 ::: noodl.apps.electrical.thermal
 ::: noodl.apps.electrical.waveforms
+::: noodl.apps.electrical.modelica
+    options:
+      members: [read_modelica_circuit, simulate_circuit, CircuitNames, Column, extrapolate, ModelicaImportError]
 
 ### Shared
 

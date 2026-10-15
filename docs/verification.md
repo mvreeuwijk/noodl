@@ -44,7 +44,8 @@ ventilation measurements on the [sewer page](applications/sewer.md#verification)
 | [Street air quality](applications/street_aq.md#munich-formulas), formulas (**under revision**) | MUNICH source code | Transcribed input/output pairs | 13 formula pairs: exchange constant and velocity, `bessel_shape_parameter` root, Macdonald $d_c$, $z_{0c}$, quadrature weight sums | Scalar outputs | At the precision MUNICH's source publishes: < 1e-15 to 1e-6 | All exact to the published precision | **Intentional:** MUNICH's weights are not normalised to 1, and noodl physics reproduces that. MUNICH's root is quantised to 0.01; `bessel_shape_parameter` solves it continuously (4e-4 in $u_M$, up to 2 % in $u_H$), and `preset="munich"` reproduces the grid with `shape_constant="grid_search"` |
 | [Street air quality](applications/street_aq.md#munich-idealised-12-street-case), idealised network (**under revision**) | MUNICH, as published by Kim et al. (2022), Fig. 1 | Values transcribed from the paper | 12-street idealised network | Linearity in wind speed; 270° canyon-wind ratio; concentrations relative to one street (19 ratios) | < 1e-9 (linearity); the paper's value (ratio); 5 % target (pattern) | Linearity holds; ratio 1.99451, as in the paper; pattern **not met**: worst ratio 51 % off, 7 of 19 within 15 % | The paper does not give the street geometry, so the pattern is compared under a fitted uniform geometry. Open discrepancy |
 | [Street air quality](applications/street_aq.md#sirane) (**under revision**) | SIRANE v2.1 rev 128 | Stored output (archived results for its South Kensington network) | 46 streets, 36 junctions, hours 00 and 01 of 7 January 2014; 10 single-street kernel probes | Roof exchange velocity; in-canyon wind; above-roof concentration from SIRANE's own fluxes; street concentration | Exchange velocity: SIRANE's printed half-step, 0.005 m/s abs. Wind: every street inside SIRANE's printing envelope (half-step + 3.6 %), plus median and 90th-percentile regression guards. Above-roof: regression guards | Exchange velocity worst 0.0025 m/s; wind median 4.5 %, 90th percentile 12.8 %; above-roof median 0.3 %, 90th percentile 1.4 %; street concentration not comparable (residual 0.888 recorded) | SIRANE prints two decimals. The above-roof check uses a fitted $u_*$ and $\theta_*$. The archive's emission field is not the deck's. The exchange's $\sigma_w$ is evaluated at SIRANE's canopy height `H_R` for every street, not at each street's height: SIRANE's backed-out $u_d$ follows `H_R` (10, 20, 30 m) and not the street heights, to within its printed digits |
-| [Electrical circuits](applications/electrical.md#verification) | Closed forms and hand Modified Nodal Analysis (no circuit simulator yet) | Computed in the test | Divider, Wheatstone bridges, floating source, the four controlled sources, ideal transformer and coupled windings at DC; RC, RL and series RLC transients; series RLC and a constant-power load in phasor form; a diode circuit | Node voltages, device currents, phasor currents, power balance (Tellegen), gradients | 1e-12 abs at DC; 1e-13 abs against the exact backward Euler recurrence; trapezoidal order 2 within 0.1; phasors 1e-12 relative (series RLC modulus at seven frequencies, complex currents and voltages), 1e-13 relative (`device_values`); diode law 1e-12 relative, KCL 1e-15 A; Tellegen 1e-12; `gradcheck` on gradients | Divider exact; backward Euler recurrence 3.3e-16 V; trapezoidal order 1.96 to 1.99 (RC) and 2.01 to 2.03 (RLC) over three halvings of the step, with a backward Euler first step; series RLC phasor 4.9e-14 relative | None beyond round-off and the integrator's own order. These check the solver and the device laws, not a reference simulator |
+| [Electrical circuits](applications/electrical.md#verification), closed forms | Closed forms and hand Modified Nodal Analysis | Computed in the test | Divider, Wheatstone bridges, floating source, the four controlled sources, ideal transformer and coupled windings at DC; RC, RL and series RLC transients; series RLC and a constant-power load in phasor form; a diode circuit | Node voltages, device currents, phasor currents, power balance (Tellegen), gradients | 1e-12 abs at DC; 1e-13 abs against the exact backward Euler recurrence; trapezoidal order 2 within 0.1; phasors 1e-12 relative (series RLC modulus at seven frequencies, complex currents and voltages), 1e-13 relative (`device_values`); diode law 1e-12 relative, KCL 1e-15 A; Tellegen 1e-12; `gradcheck` on gradients | Divider exact; backward Euler recurrence 3.3e-16 V; trapezoidal order 1.96 to 1.99 (RC) and 2.01 to 2.03 (RLC) over three halvings of the step, with a backward Euler first step; series RLC phasor 4.9e-14 relative | None beyond round-off and the integrator's own order. These check the solver and the device laws, not a reference simulator |
+| [Electrical circuits](#modelica-electrical-circuits-model-by-model), Modelica | Modelica Standard Library 4.1.0 and Modelica Buildings Library v13.0.0, simulated by OpenModelica 1.27.1, DASSL at 1e-12 | Stored output (OpenModelica CSV, committed) | 14 models: 9 algebraic (MSL resistor with heat port, variable resistor; MBL DC loads, AC impedances, lines, converter, transformer, balanced three-phase line), 5 dynamic (series resonance sweep, Cauer low-pass filter, transformers, heating rectifier, DC RC line) | Device currents, capacitor voltages, heat-port and heat-capacitor temperatures; every MBL terminal's potentials and currents (phasor parts for AC), every row | Algebraic: 1e-9 relative + 1e-12 abs, round-off, as both codes solve the same algebraic equations. Dynamic: 1e-6 of each column's range after the start row, Richardson extrapolation of two fixed-step runs, the step chosen so the remaining fixed-step error is below it | Algebraic: worst 9.5e-12 A (MSL `Resistor`, solved with its thermal network), at most 6.2e-13 on the other models, 1.0e-10 K on a heat-port temperature; dynamic: 1.7e-8 to 3.1e-7 of the range | Round-off (algebraic). Dynamic: noodl's remaining time-step error after extrapolation; a single run at the finer step is 6.9e-6 to 2.2e-4 of the range off |
 
 ## Sewer dynamic wave, fixture by fixture
 
@@ -87,6 +88,65 @@ run under `pytest -m slow`; each has a short fast case for the default run.
 Not compared live (implemented and checked against closed forms): the cases listed under
 [Limitations](applications/sewer.md#limitations).
 
+## Modelica electrical circuits, model by model
+
+Fourteen example models of the Modelica Standard Library 4.1.0 (`Modelica.Electrical.Analog`)
+and the Modelica Buildings Library v13.0.0 (`Buildings.Electrical`), simulated by OpenModelica
+1.27.1 with DASSL at a relative tolerance of 1e-12 and committed as CSV
+(`tests/data/modelica_electrical/`), are read with `read_modelica_circuit` and compared column
+by column (`tests/verification/test_modelica_electrical_parity.py`). The columns are the
+currents of the MSL devices (with capacitor voltages, heat-port and heat-capacitor
+temperatures) and the conductor potentials and currents of every MBL terminal, real and
+imaginary parts for AC; see [the reader's page](formats/modelica.md#electrical-circuits).
+
+- **Algebraic models** (no capacitor or inductor, so each output time is the same algebraic
+  problem for both codes): every column at every row within `|noodl - omc| <= 1e-9 |omc| +
+  1e-12` (in V, A or K). The steady solves run at Newton `atol = 1e-12`, `rtol = 1e-14`
+  (`atol = 1e-11` with a thermal network).
+- **Dynamic models**: every column at every row after the start time within `1e-6` of the
+  column's range (its largest magnitude over the run), from two runs at `r` and `2 r` steps per
+  interval of the step grid combined by Richardson extrapolation (order 2). The start row is
+  the reference's own initial state and is not compared. `r` is the smallest power of 2 that
+  meets the bound with margin, checked against the next finer pair (the two extrapolations
+  agree to 1.5e-8 to 2.7e-7 of the range, and the error falls by 8 to 16 per halving). No
+  model needed a bound of its own.
+
+Measured, from the committed record `tests/data/modelica_electrical/parity-electrical.json`
+(every row of every model): the worst absolute error over all columns, and the worst relative
+error (algebraic: of the reference value; dynamic: of the column's range). For the dynamic
+models the last column is the Richardson correction, the finer run's own distance from the
+extrapolated result, as a fraction of the range: the error a single run at `2 r` would have.
+
+| Model | Kind | Columns | Rows | `(r, 2r)` | Worst absolute error | Worst relative error | Correction |
+|---|---|---|---|---|---|---|---|
+| MSL `Analog.Examples.Resistor` (heat port, `R(T)`) | algebraic | 3 | 501 | | 1.0e-10 K (`resistor.T_heatPort`); 9.5e-12 A on the currents | 5.7e-6 (`SineVoltage1.i`, near a zero crossing) | |
+| MSL `ShowVariableResistor` | algebraic | 7 | 501 | | 4.4e-16 A | 4.3e-7 (near a zero crossing) | |
+| MBL `DC.Loads.Examples.Resistor` | algebraic | 15 | 101 | | 0 | 0 | |
+| MBL `DC.Loads.Examples.VariableLoad` | algebraic | 18 | 101 | | 2.7e-15 A | 1.2e-13 | |
+| MBL `AC.OnePhase.Loads.Examples.TestImpedance` | algebraic | 24 | 101 | | 0 | 0 | |
+| MBL `AC.OnePhase.Lines.Examples.ACLine_RL` (dynamic branch omitted) | algebraic | 34 | 101 | | 7.1e-15 V | 1.2e-16 | |
+| MBL `AC.OnePhase.Conversion.Examples.ACDCConverter` | algebraic | 17 | 101 | | 2.8e-14 A | 1.8e-14 | |
+| MBL `AC.OnePhase.Conversion.Examples.ACACTransformer` | algebraic | 40 | 101 | | 4.5e-13 A | 1.2e-9 (`shortCircuit.terminal.v[1]`, a value near zero) | |
+| MBL `AC.ThreePhasesBalanced.Lines.Examples.ACLine` | algebraic | 68 | 101 | | 6.2e-13 A | 2.1e-13 | |
+| MSL `SeriesResonance` (0 to 200 Hz sweep, resonance at 100 Hz) | dynamic | 10 | 1001 | (32, 64) | 2.5e-6 V | 1.9e-7 (`capacitor2.v`, past the resonance) | 2.2e-4 |
+| MSL `CauerLowPassAnalog` (step at 1 s) | dynamic | 15 | 601 | (8, 16) | 3.4e-8 A | 1.2e-7 (`C5.i`, just after the step) | 2.4e-5 |
+| MSL `CompareTransformers` (10 Hz) | dynamic | 14 | 1004 | (16, 32) | 3.0e-6 A | 3.1e-7 (`resistor11.i`, first period) | 4.0e-5 |
+| MSL `HeatingRectifier` (diode with heat port, heat capacitor) | dynamic | 7 | 501 | (16, 32) | 7.1e-7 A | 1.5e-7 (`Capacitor1.i`) | 8.1e-6 |
+| MBL `DC.Lines.Examples.RCModel` | dynamic | 22 | 501 | (2, 4) | 4.3e-7 V | 1.7e-8 (`RC_dyn.terminal_n.i[1]`, first row after the start) | 6.9e-6 |
+
+A relative error above 1e-9 on an algebraic model is at a value close to zero, where the
+absolute part (1e-12) of the bound governs; the bound holds at every row. In `ACLine_RL` the
+source `E` also feeds the omitted dynamic branch, so its two current columns are not
+compared. Every other column of every CSV is.
+
+**What runs by default.** The algebraic models run in full, except MSL's `Resistor`, whose
+coupled thermal solve at each of its 501 rows takes about 48 s: by default every tenth row.
+Each dynamic model compares its first rows (6 to 100, each window holding the model's worst
+early row: Cauer's step, the first period of the transformers, the diode's first conduction);
+`pytest -m slow` compares every row, between about 1 and 42 minutes a model (each step costs 10
+to 30 ms, a coupled one about 100 ms). The record is rewritten only by a run with
+`NOODL_RECORD_PARITY=1`.
+
 ## What runs by default
 
 The default `pytest` run (`addopts` deselects `slow`) runs every comparison above. The
@@ -96,13 +156,16 @@ only on Windows x86-64, so the ContamX rows are marked `external` and do not run
 The stored-output rows, the WSIMOD demo replay and every closed-form row need no external
 engine.
 
-Only the dynamic Modelica comparison is split. By default it compares the first few rows of
-each of the 13 models (between 2 and 21 rows each). `pytest -m slow` compares every row and adds
-a check that the time-integration error falls with the order of the scheme. The full runs take
-between 75 s and 8,112 s per model; the timings are on the
+Only the dynamic Modelica comparisons are split (the electrical one is described
+[above](#modelica-electrical-circuits-model-by-model)). For building physics, the default run
+compares the first few rows of each of the 13 models (between 2 and 21 rows each).
+`pytest -m slow` compares every row and adds a check that the time-integration error falls
+with the order of the scheme. The full runs take between 75 s and 8,112 s per model; the
+timings are on the
 [building physics page](applications/building_physics.md#against-openmodelica-modelica-buildings-library).
 The measured values for every Modelica column are committed in
-`tests/data/modelica/parity-algebraic.json` and `parity-dynamic.json`.
+`tests/data/modelica/parity-algebraic.json` and `parity-dynamic.json` (building physics) and
+`tests/data/modelica_electrical/parity-electrical.json` (electrical circuits).
 
 ## Golden files are not verification
 

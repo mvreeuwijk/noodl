@@ -4,8 +4,8 @@ order, in one namespace per page, and each prints exactly the `text` block that 
 Illustrative code that is not meant to run on its own (a signature, a loop outline) is
 marked `py` instead of `python` and is not executed. Each page runs in a temporary
 directory holding the fixture files its examples name (`tree_steady.inp`,
-`twoloop_si.inp`, `quickstart_topology.json`, ...), so an example may read or write files
-by bare name, as a user would.
+`twoloop_si.inp`, `quickstart_topology.json`, `DC.Loads.Examples.Resistor.json`, ...), so
+an example may read or write files by bare name, as a user would.
 """
 
 from __future__ import annotations
@@ -30,7 +30,8 @@ PAGES = [
     "applications/allocation.md",
     "applications/electrical.md",
 ]
-FIXTURES = ["sewer/*.inp", "water/*.inp", "wsimod/*.json"]
+FIXTURES = ["sewer/*.inp", "water/*.inp", "wsimod/*.json",
+            "modelica_electrical/DC.Loads.Examples.Resistor.json"]
 BLOCK = re.compile(r"```(python|text)\n(.*?)```", re.S)
 
 

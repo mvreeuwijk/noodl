@@ -13,6 +13,14 @@ Library (MSL, `Modelica.Electrical.Analog`).
 **Units.** Voltage V, current A, resistance ohm, conductance S, capacitance F, inductance H,
 time s, frequency Hz, temperature K.
 
+**Precision.** A constitutive law stores a parameter given as a Python float in torch's default
+dtype, which is float32 unless changed. `build_model` passes float64 values, but a circuit
+assembled by hand from laws (as in the examples from
+[Impedances, constant-power loads and converters](#impedances-constant-power-loads-and-converters)
+on) should pass float64 tensors, `torch.tensor(x, dtype=torch.float64)`, or call
+`torch.set_default_dtype(torch.float64)` first: a float32 parameter next to float64 drivers
+limits the result to about 7 significant digits.
+
 ```py
 from noodl.apps.electrical import (
     Circuit, Resistor, Conductor, Capacitor, Inductor, VoltageSource, CurrentSource, Diode,
@@ -246,6 +254,13 @@ phase, its waveform's: a `Sine(frequency, phase, start_time)` source is the phas
 `offset` has no phasor). Other waveforms are refused in an AC analysis, by name, as are
 nonlinear devices (`Diode`).
 
+The power laws below (`ConstantPowerLoad`, `PowerConverter`) are the exception: they define
+complex power as `S = dp conj(q)`, without the factor 1/2, so they assume root-mean-square
+phasors. A circuit that mixes a power law with a `Sine` source must give that source its RMS
+amplitude (`V_peak / sqrt(2)`): otherwise the source's phasor is its peak value, which the power
+laws read as an RMS value, a factor `sqrt(2)` in voltage. Linear laws hold for either scaling. The [Modelica
+reader](#reading-modelica-circuits) uses MBL's RMS phasors throughout.
+
 ## Impedances, constant-power loads and converters
 
 Four further constitutive laws transcribe the building-scale electrical models of the
@@ -320,6 +335,60 @@ junction temperature read from a driver (MSL `Semiconductors.Diode` with
 `useTemperatureDependency = true`: `Vt = k T / e`, saturation current scaled by
 `(T/TNOM)^(XTI/N) exp((T/TNOM - 1) EG / (N Vt))`).
 
+## Reading Modelica circuits
+
+`noodl.apps.electrical.modelica.read_modelica_circuit` reads an OpenModelica export of an
+electrical example model, from the Modelica Standard Library (`Modelica.Electrical.Analog`,
+with its heat ports) or from the Modelica Buildings Library (`Buildings.Electrical`, DC, one-phase
+AC and balanced three-phase AC), into a model of the laws above. The export format, the
+supported and refused classes, how connectors become nodes and how the start state is chosen
+are described under [File formats: Modelica](../formats/modelica.md#electrical-circuits).
+
+MBL's `DC.Loads.Examples.Resistor` feeds two 2 ohm loads from a 12 V source, `res1` directly
+and `res2` through a 2 ohm line `res`:
+
+```python
+from noodl.apps.electrical.modelica import read_modelica_circuit, simulate_circuit
+
+model, state, drivers, names = read_modelica_circuit("DC.Loads.Examples.Resistor.json")
+history = simulate_circuit(model, state, drivers, names)
+
+print(f"{names.model}: {len(names.times)} output times, "
+      f"dynamic {names.dynamic}, phasor {names.phasor}")
+for load in ("res1", "res2"):
+    v = float(names.value(history, f"{load}.terminal.v[1]")[-1])
+    i = float(names.value(history, f"{load}.terminal.i[1]")[-1])
+    print(f"{load}: v = {v:.6f} V, i = {i:.6f} A")
+print(f"res: i = {float(names.value(history, 'res.terminal_n.i[1]')[-1]):.6f} A")
+```
+
+```text
+Buildings.Electrical.DC.Loads.Examples.Resistor: 101 output times, dynamic False, phasor False
+res1: v = 12.000000 V, i = 6.000000 A
+res2: v = 6.000000 V, i = 3.000000 A
+res: i = 3.000000 A
+```
+
+OpenModelica's own values for these columns are the same to the last digit.
+`read_modelica_circuit` returns, besides the model, its start state and drivers, a
+`CircuitNames`: `times` (the reference's output times), `grid` (the step grid), `nodes` and
+`devices` (where each node and device sits in `"electrical.phi"` and `"electrical.q"`), and
+`value(history, column)`, which reads any column of the reference CSV from a history. A
+column of an MBL terminal is a conductor potential or current (`v[1]`, `v[2]`, `i[1]`) or, in
+an AC model, the real or imaginary part of a phasor.
+
+`simulate_circuit(model, state, drivers, names, *, times=None)` solves a model without
+storage at each output time and steps a dynamic one over `names.grid`. Unlike
+[`transient`](#time-integration-and-breakpoints), the reader's step grid contains every jump
+and kink of the sources and signals as well as the output times, so no edge falls inside a
+step: the step ending at a jump uses the signal's value just before it, and the step starting
+there is backward Euler (as is the first). `read_modelica_circuit(path, substeps=r)` splits each
+interval into `r` steps; two runs at `r` and `2 r` combined by
+`noodl.apps.electrical.modelica.extrapolate(coarse, fine, order=2)` remove the leading
+time-step error, which is how the comparison with OpenModelica reaches `1e-6` of each
+quantity's range. A model with heat ports gets the thermal layer and the coupling of the next
+section; its heat-port and heat-capacitor temperatures are in `"thermal.phi"`.
+
 ## Electro-thermal coupling
 
 A device that heats up and whose resistance follows its temperature couples the circuit to a
@@ -348,18 +417,165 @@ writes the dissipated power `p = Re((phi[p] - phi[n]) conj(q[edge]))` (MSL `Loss
 into `"thermal.heat"`, and each temperature driver as `base_temperatures[key]` with the heated
 devices' entries replaced by their heat-port temperatures (devices without a heat port keep
 their fixed temperature). Build the model with `coupling="iterate"`, so that every step (or
-steady solve) repeats circuit and thermal solves until both stop changing:
+steady solve) repeats circuit and thermal solves until both stop changing.
 
-```py
-Model(net, [electrical, thermal], closures=[JouleHeating(heated, base_temperatures=base)],
-      coupling="iterate", iterate_tol={"electrical": 1e-10, "thermal": 1e-10},
-      iterate_flow_tol={"electrical": 1e-10, "thermal": 1e-8},
-      iterate_acceleration="anderson", iterate_max=100)
+A resistor `R(T) = R0 (1 + alpha (T - T_ref))` on 220 V, cooled through `G = 50` W/K to
+293.15 K, settles where its Joule heat `V^2 / R(T)` equals `G (T - 293.15)`, a quadratic in
+the temperature rise `x`: `alpha x^2 + x - V^2 / (G R0) = 0`.
+
+```python
+from noodl.apps.electrical import (
+    HeatedEdge, JouleHeating, PrescribedCurrent, PrescribedVoltage, Resistance, Signal,
+)
+from noodl.elements import Conductance
+from noodl.layers.potential import PotentialFlowLayer
+from noodl.model import Model
+from noodl.topology import Network
+
+
+def f64(x):
+    """A float64 parameter or driver (a Python float would be stored as float32)."""
+    return torch.tensor(x, dtype=torch.float64)
+
+
+V, R0, alpha, T_ref, G, T_amb = 220.0, 100.0, 1e-3, 293.15, 50.0, 293.15
+net = Network(dtype=torch.float64)
+for name in ("0", "s", "thermal.reference", "h", "ambient"):
+    net.add_node(name)
+net.add_edge("s", "0", kind="voltage_source")
+net.add_edge("s", "0", kind="resistor")
+net.add_edge("h", "ambient", kind="conductor")
+net.add_edge("thermal.reference", "h", kind="heat_source")
+node = {name: k for k, name in enumerate(net.nodes)}
+
+electrical = PotentialFlowLayer(
+    net, "electrical",
+    [PrescribedVoltage(f64(V)),
+     Resistance(f64(R0), alpha=f64(alpha), T_ref=f64(T_ref),
+                temperature="electrical.resistor.T")],
+    boundary=["0"])
+thermal = PotentialFlowLayer(
+    net, "thermal",
+    [Conductance(f64(G), kind="conductor"),
+     PrescribedCurrent(f64(1.0), waveforms=[Signal("thermal.heat", 0)], kind="heat_source")],
+    boundary=["thermal.reference", "ambient"])
+joule = JouleHeating(
+    [HeatedEdge(edge=1, p=node["s"], n=node["0"], heat_node=node["h"],
+                temperature_key="electrical.resistor.T", slot=0)],
+    base_temperatures={"electrical.resistor.T": f64([T_ref])})
+model = Model(net, [electrical, thermal], closures=[joule], coupling="iterate",
+              iterate_tol={"electrical": 1e-10, "thermal": 1e-10},
+              iterate_flow_tol={"electrical": 1e-10, "thermal": 1e-8},
+              iterate_acceleration="anderson", iterate_max=100)
+
+zeros = torch.zeros(len(net.nodes), dtype=torch.float64)
+state = {"electrical.phi": zeros, "electrical.q": torch.zeros(2, dtype=torch.float64),
+         "thermal.phi": zeros, "thermal.q": torch.zeros(2, dtype=torch.float64)}
+drivers = {"electrical.phi_boundary": f64([0.0]), "thermal.phi_boundary": f64([0.0, T_amb]),
+           "thermal.heat": f64([0.0]), "electrical.resistor.T": f64([T_ref])}
+out = model.steady(state, drivers)
+
+rise = (-1.0 + math.sqrt(1.0 + 4.0 * alpha * V**2 / (G * R0))) / (2.0 * alpha)
+print(f"resistor at {float(out['thermal.phi'][node['h']]):.9f} K "
+      f"(closed form {T_amb + rise:.9f} K)")
+print(f"current {float(out['electrical.q'][1]):.9f} A")
 ```
 
-The Modelica reader builds exactly this for MSL models whose resistors or diodes have an
-enabled heat port (`Analog.Examples.Resistor`, `HeatingRectifier`); their heat-port and
-heat-capacitor temperatures are read from `"thermal.phi"`.
+```text
+resistor at 302.738068934 K (closed form 302.738068934 K)
+current 2.179106576 A
+```
+
+`"thermal.phi_boundary"` holds the boundary temperatures in the order of `boundary=`, the 0 K
+reference first. The Modelica reader builds the same structure for MSL models whose resistors
+or diodes have an enabled heat port (`Analog.Examples.Resistor`, `HeatingRectifier`).
+
+## Example: a heat pump's electrical load
+
+The coupling closure need not be `JouleHeating`: any function of the state that writes
+drivers couples the two layers. A heat pump delivers a fixed 6 kW of heat to a zone (heat
+capacity 1e7 J/K, loss 150 W/K to 273.15 K outdoors) and draws the electrical power
+`P = Q_th / COP` from a 400 V DC bus through a 0.2 ohm feeder, with a coefficient of
+performance `COP = 0.45 T_zone / (T_zone - T_out)` (45 % of the Carnot value) that falls as
+the zone warms. The heat pump is a `ConstantPowerLoad` of 1 W whose `scale` driver the closure
+sets to `P`; the heat input is a `PrescribedCurrent` reading the driver `"thermal.heat"`. One
+`Network` holds both layers; the model steps a day in hours, backward Euler first:
+
+```python
+from noodl.apps.electrical import Capacitance, ConstantPowerLoad, Impedance
+
+net = Network(dtype=torch.float64)
+for name in ("0", "bus", "hp", "thermal.reference", "zone", "outdoor"):
+    net.add_node(name)
+net.add_edge("bus", "0", kind="voltage_source")
+net.add_edge("bus", "hp", kind="impedance")
+net.add_edge("hp", "0", kind="load")
+net.add_edge("zone", "outdoor", kind="conductor")
+net.add_edge("thermal.reference", "zone", kind="heat_source")
+net.add_edge("zone", "thermal.reference", kind="heat_capacitor")
+node = {name: k for k, name in enumerate(net.nodes)}
+zone = node["zone"]
+
+electrical = PotentialFlowLayer(
+    net, "electrical",
+    [PrescribedVoltage(f64(400.0)), Impedance(f64(0.2)),
+     ConstantPowerLoad(f64(1.0), V_nominal=f64(400.0), direct_current=True,
+                       scale="electrical.load.scale")],
+    boundary=["0"])
+thermal = PotentialFlowLayer(
+    net, "thermal",
+    [Conductance(f64(150.0), kind="conductor"),
+     PrescribedCurrent(f64(1.0), waveforms=[Signal("thermal.heat", 0)], kind="heat_source"),
+     Capacitance(f64(1e7), v0=f64(293.15), kind="heat_capacitor")],
+    boundary=["thermal.reference", "outdoor"])
+
+
+class HeatPumpLoad:
+    """Delivers Q_th to the zone; draws P = Q_th / COP from the bus, COP = 0.45 T_zone/(T_zone - T_out)."""
+
+    def __init__(self, q_th, t_out, zone):
+        self.q_th, self.t_out, self.zone = q_th, t_out, zone
+
+    def __call__(self, state, drivers):
+        t_zone = state["thermal.phi"][..., self.zone]
+        cop = 0.45 * t_zone / (t_zone - self.t_out)
+        return {"thermal.heat": self.q_th.expand(t_zone.shape + (1,)),
+                "electrical.load.scale": (self.q_th / cop).unsqueeze(-1)}
+
+
+model = Model(net, [thermal, electrical],
+              closures=[HeatPumpLoad(f64(6000.0), 273.15, zone)], coupling="iterate",
+              iterate_tol={"thermal": 1e-9, "electrical": 1e-9})
+
+phi = torch.zeros(len(net.nodes), dtype=torch.float64)
+phi[[node["bus"], node["hp"]]] = 400.0
+phi[[node["zone"], node["outdoor"]]] = f64([293.15, 273.15])
+state = {"electrical.phi": phi, "electrical.q": torch.zeros(3, dtype=torch.float64),
+         "thermal.phi": phi.clone(), "thermal.q": torch.zeros(3, dtype=torch.float64)}
+drivers = {"electrical.phi_boundary": f64([0.0]),
+           "thermal.phi_boundary": f64([0.0, 273.15]),
+           "thermal.heat": f64([6000.0]), "electrical.load.scale": f64([1.0])}
+
+for hour in range(24):
+    state = model.step(state, drivers, dt=3600.0, t=3600.0 * hour,
+                       integration="backward_euler" if hour == 0 else "trapezoidal")
+
+v = state["electrical.phi"]
+print(f"zone after 24 h: {float(state['thermal.phi'][zone]):.2f} K")
+print(f"heat pump draws {float(v[node['hp']] * state['electrical.q'][2]):.1f} W")
+print(f"bus to heat pump drop: {float(v[node['bus']] - v[node['hp']]):.3f} V")
+```
+
+```text
+zone after 24 h: 307.67 K
+heat pump draws 1496.0 W
+bus to heat pump drop: 0.749 V
+```
+
+The zone approaches its steady 313.15 K with the time constant `C / G` = 18.5 h; at 307.67 K
+the COP is 4.01, so the 6 kW of heat cost 1.50 kW, carried as 3.75 A through the feeder. The
+same closure on a phasor layer would set an AC load's power, with source amplitudes given as
+RMS values (see [Phasors](#sign-conventions)).
 
 ## Time integration and breakpoints
 
@@ -478,13 +694,26 @@ Measured: the divider is exact, the backward Euler recurrence holds to 3.3e-16 V
 trapezoidal order through `transient` is 1.96 to 1.99 (RC) and 2.01 to 2.03 (RLC) over three
 halvings of the step, and the series RLC phasor current agrees to 4.9e-14 relative.
 
-No reference circuit simulator has been run against this application; the comparison with
-OpenModelica on MSL models is planned.
+### Against OpenModelica
+
+Fourteen example models of the Modelica Standard Library 4.1.0 and the Modelica Buildings Library
+v13.0.0, read with [`read_modelica_circuit`](#reading-modelica-circuits), are compared with
+OpenModelica 1.27.1 (DASSL at 1e-12) at every row and every column of the reference
+(`tests/verification/test_modelica_electrical_parity.py`):
+
+| Models | Bound | Measured (every row) |
+|---|---|---|
+| 9 algebraic: MSL `Resistor` (heat port, temperature-dependent resistance), `ShowVariableResistor`; MBL DC `Resistor`, `VariableLoad`, AC `TestImpedance`, `ACLine_RL` (dynamic branch omitted), `ACDCConverter`, `ACACTransformer`, balanced three-phase `ACLine` | `1e-9 \|omc\| + 1e-12` | at most 6.2e-13 A or V; 9.5e-12 A and 1.0e-10 K on the thermally coupled `Resistor` |
+| 5 dynamic: MSL `SeriesResonance`, `CauerLowPassAnalog`, `CompareTransformers`, `HeatingRectifier`; MBL `RCModel` | `1e-6` of each column's range after the start row, Richardson extrapolation of runs at `r` and `2 r` substeps | 1.7e-8 to 3.1e-7 of the range |
+
+Model by model, with the step counts and the worst columns, on the [verification
+page](../verification.md#modelica-electrical-circuits-model-by-model).
 
 ## Limitations
 
-- **Fixed time grid.** No adaptive step and no inserted breakpoints: a source edge inside a step
-  is seen at the step end.
+- **Fixed time grid.** No adaptive step, and `transient` inserts no breakpoints: a source edge
+  inside a step is seen at the step end (the Modelica reader's step grid holds every source
+  event).
 - **No event location.** A `Switch` is a discontinuous law: it changes state only where its
   control driver is evaluated, at a step end, and the step in which it switches is not refined.
   (The `Diode` is continuously differentiable, its exponential continuing linearly above
@@ -496,5 +725,10 @@ OpenModelica on MSL models is planned.
 - **No ideal diode.** The piecewise-linear ideal diode (MSL `Ideal.IdealDiode`) is not provided;
   `Diode` is the exponential junction diode with its linear continuation.
 - **One frequency per phasor model.** No harmonic balance, no small-signal linearisation of a
-  nonlinear operating point: an AC analysis takes linear devices only.
-- **Lumped, single-phase.** No transmission lines, no three-phase power flow.
+  nonlinear operating point: `ac_sweep` takes linear devices only. The nonlinear phasor laws
+  (constant-power loads, converters) are solved by Newton at one frequency.
+- **No dynamic phasors.** A phasor model is quasi-static; MBL's `FixedZ_dynamic` models are
+  refused.
+- **Lumped, balanced.** No distributed transmission lines; balanced three-phase models are
+  read as their one-phase equivalent, and unbalanced three-phase systems are not supported.
+- **No batteries, photovoltaics or grid sources** from MBL (refused by name).
