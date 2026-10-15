@@ -184,6 +184,18 @@ def test_an_occupant_carries_its_generation_and_keys():
         _visitor(schedules={"CO2": TimeSeries([0.0, 1.0], [1.0, 1.0])})
 
 
+@pytest.mark.parametrize(("kw", "match"), [
+    (dict(generation={"sarin": [1e-6, 2e-6]}), r"'visitor'.*generation of 'sarin'.*scalar"),
+    (dict(generation={"sarin": float("nan")}), r"'visitor'.*generation of 'sarin'.*finite"),
+    (dict(multiplier=[1.0, 2.0]), r"'visitor'.*multiplier.*scalar"),
+    (dict(multiplier=float("inf")), r"'visitor'.*multiplier.*finite"),
+])
+def test_an_occupant_refuses_a_rate_that_is_not_one_finite_number(kw, match):
+    day = OccupancyDay([0.0, DAY], ["one", "one"])
+    with pytest.raises(ValueError, match=match):
+        Occupant(Occupancy([day]), name="visitor", **{"generation": {"sarin": 1e-6}, **kw})
+
+
 def test_the_generation_lands_on_the_presence_times_rate_and_schedule():
     layer = _layer()
     net = layer.net
@@ -310,6 +322,8 @@ def test_occupant_inputs_write_the_presence_and_the_schedules():
     cal = Calendar()
     assert inputs[1].signal.value(600.0, cal).tolist() == [1.0]
     assert inputs[1].signal.breakpoints(0.0, 900.0, cal) == [450.0]
+    with pytest.raises(ValueError, match=r"occupant_inputs.*\['visitor'\].*repeat"):
+        occupant_inputs([v, _visitor()], net)
 
 
 def test_a_mid_step_move_splits_the_generation_by_time():

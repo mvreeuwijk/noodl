@@ -109,6 +109,13 @@ from noodl.apps.building_physics.occupants import (
     Presence,
     occupant_inputs,
 )
+from noodl.apps.building_physics.outputs import (
+    cumulative_exposure,
+    infection_probability,
+    inhaled_dose,
+    occupant_exposure,
+    wells_riley,
+)
 from noodl.apps.building_physics.prj import (
     ContamCompatibilityWarning,
     Project,
@@ -245,6 +252,7 @@ __all__ = [
     "bind_inputs",
     "build_model",
     "crack",
+    "cumulative_exposure",
     "duct_elements_from_edges",
     "door",
     "duct",
@@ -253,12 +261,15 @@ __all__ = [
     "fan",
     "fan_elements_from_edges",
     "filter_transmission",
+    "infection_probability",
+    "inhaled_dose",
     "initial_drivers",
     "initial_state",
     "mass_orifice",
     "node_mass_fraction",
     "node_pressure",
     "node_temperature",
+    "occupant_exposure",
     "occupant_inputs",
     "orifice_elements_from_edges",
     "project_to_model",
@@ -280,5 +291,6 @@ __all__ = [
     "species_layer",
     "thermal_layer",
     "window",
+    "wells_riley",
     "write_wth",
 ]

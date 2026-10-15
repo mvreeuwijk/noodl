@@ -967,8 +967,11 @@ the closure is built: the ambient, a zone no airflow path reaches, or a storage-
 as a zero-volume plenum. Add the closure before the model's first run.
 
 ```python
+import torch
+
 from noodl.apps.building_physics import (
-    Occupant, OccupantGeneration, occupant_inputs, project_to_model, read_prj, simulate,
+    Occupancy, OccupancyDay, Occupant, OccupantGeneration, occupant_inputs, project_to_model,
+    read_prj, simulate,
 )
 
 model, state, drivers = project_to_model(read_prj("valThreeZonesWthCtm-UseApi.prj"))
@@ -982,6 +985,51 @@ print([f"{x:.3e}" for x in out["species.x"][-1, :, 0].tolist()])   # zones one, 
 
 ```text
 ['2.014e-06', '1.401e-06', '5.376e-08']
+```
+
+### Outputs
+
+`noodl.apps.building_physics.outputs` turns `simulate`'s histories into what a study
+reports. Exposure follows CONTAM's exposure file: `occupant_exposure(history, occupant,
+model, calendar=...)` is, for every step, the mean over the step of the mass fraction where
+the occupant is, interpolated linearly between the step's start and end values, split at a
+mid-step move and zero out of the building; shape `(N - 1, ..., K)`, in kg/kg.
+`calendar` is required: it places t = 0 in the year and so decides the day's occupancy and
+the time of every move; pass the run's own. The interpolation is between output rows, so the
+result is exact for steps the solver takes whole, as `simulate_project` does; a run with
+`land_on_breakpoints=True` splits steps internally at input breakpoints, which its history
+does not show. `cumulative_exposure(exposure, times)` is the time integral from the start
+(kg/kg s), over the actual step lengths. An occupant whose day schedules name a zone where
+the species layer holds no air (the ambient, a zone no airflow path reaches, a storage-free
+node) is refused by name, as for its generation.
+
+The inhaled dose and the infection risk are **additions of noodl**, not CONTAM features.
+ContamX has no infection model, and CONTAM 3.2 removed the inhalation fields.
+`inhaled_dose(integrated_exposure, breathing_rate, density=1.2041)` gives
+$p \rho \int x\,dt$ from the cumulative exposure (kg, or quanta for a quanta species).
+`infection_probability(dose) = 1 - exp(-dose)` is the Wells-Riley probability in its
+quanta-concentration form, $P = 1 - \exp(-p \int c_q\,dt)$, for a species that carries quanta
+(generation in quanta/s, an infector being an `Occupant` that generates it).
+`wells_riley(I, q, p, Q, t)` is the classic steady single-zone form
+$P = 1 - \exp(-I q p t / Q)$. The two agree in a well-mixed zone at steady state, which a
+test checks. Continuing the run of the previous example, a visitor who follows the staff
+member and generates nothing:
+
+```python
+from noodl.apps.building_physics import (
+    Calendar, Occupancy, Occupant, cumulative_exposure, occupant_exposure, wells_riley,
+)
+
+calendar = Calendar()                       # the run above starts 1 January 00:00
+visitor = Occupant(Occupancy([day]), name="visitor")
+e = occupant_exposure(out, visitor, model, calendar=calendar)
+print(f"{cumulative_exposure(e, out['time'])[-1, 0].item():.3e}")    # kg/kg s
+print(f"{wells_riley(1, 10 / 3600, 0.5 / 3600, 0.1, 8 * 3600.0).item():.4f}")
+```
+
+```text
+8.397e-04
+0.1052
 ```
 
 ### Species and reactions

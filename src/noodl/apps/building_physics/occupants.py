@@ -84,7 +84,8 @@ class Occupancy(_DayTypeCycle):
 
     @property
     def zones(self) -> set[Hashable]:
-        """Every zone the occupant ever enters (None, out of the building, excluded)."""
+        """Every zone of any of its day schedules, also of a day type a run does not reach
+        (None, out of the building, excluded)."""
         return {z for d in self.day_schedules for z in d.zones if z is not None}
 
     def zone_at(self, t: float, calendar: Calendar, *, left: bool) -> Hashable | None:
@@ -108,6 +109,28 @@ class Occupancy(_DayTypeCycle):
                 for a, b in zip(cuts, cuts[1:], strict=False)]
 
 
+def _zone_nodes(occupancy: Occupancy, net, what: str) -> dict[Hashable, int]:
+    """{zone: its index into `net.nodes`} for every zone of any of `occupancy`'s day
+    schedules; a zone that is not a node is refused (KeyError, `what` names the owner)."""
+    out: dict[Hashable, int] = {}
+    for zone in sorted(occupancy.zones, key=str):
+        try:
+            out[zone] = int(net.node_index(zone))
+        except KeyError as exc:
+            raise KeyError(f"{what}: zone {zone!r} is not a node of the network") from exc
+    return out
+
+
+def _scalar_rate(value, what: str) -> Tensor:
+    """`value` as a finite float64 scalar tensor (gradients kept), else ValueError."""
+    t = torch.as_tensor(value, dtype=F64)
+    if t.dim() != 0:
+        raise ValueError(f"{what} must be a scalar, got shape {tuple(t.shape)}")
+    if not bool(torch.isfinite(t)):
+        raise ValueError(f"{what} must be finite, got {t.item()}")
+    return t
+
+
 class Presence:
     """An occupant's location as a signal over `net`'s nodes (full node order, float64,
     dimensionless).
@@ -126,13 +149,7 @@ class Presence:
 
     def __init__(self, occupancy: Occupancy, net, *, name: str = "") -> None:
         self.occupancy, self.name, self.n = occupancy, name, int(net.n)
-        self.index: dict[Hashable, int] = {}
-        for zone in sorted(occupancy.zones, key=str):
-            try:
-                self.index[zone] = int(net.node_index(zone))
-            except KeyError as exc:
-                raise KeyError(f"Presence {name!r}: zone {zone!r} is not a node of the "
-                               f"network") from exc
+        self.index = _zone_nodes(occupancy, net, f"Presence {name!r}")
 
     def __repr__(self) -> str:
         return f"Presence({self.name!r})"
@@ -168,15 +185,17 @@ class Occupant:
     multiplying its rate, taken at the end of each step as every schedule. The generation
     goes to the zone the occupant is in, split by the time spent in each zone over the step
     (measured on ContamX). `name` keys the occupant's drivers: `"presence.<name>"` and
-    `"generation_multiplier.<name>"`; `description` is free text.
+    `"generation_multiplier.<name>"`; `description` is free text. A generation rate or a
+    multiplier that is not one finite number is refused, naming the occupant.
     """
 
     def __init__(self, occupancy: Occupancy, *, generation=None, multiplier=1.0,
                  schedules=None, name: str = "occupant", description: str = "") -> None:
         self.occupancy, self.name, self.description = occupancy, str(name), str(description)
-        self.generation = {str(k): torch.as_tensor(v, dtype=F64)
-                           for k, v in dict(generation or {}).items()}
-        self.multiplier = torch.as_tensor(multiplier, dtype=F64)
+        self.generation = {
+            str(k): _scalar_rate(v, f"Occupant {self.name!r}: the generation of {str(k)!r}")
+            for k, v in dict(generation or {}).items()}
+        self.multiplier = _scalar_rate(multiplier, f"Occupant {self.name!r}: the multiplier")
         self.schedules = dict(schedules or {})
         extra = sorted(set(self.schedules) - set(self.generation))
         if extra:
@@ -221,7 +240,9 @@ def occupant_inputs(occupants: Sequence[Occupant], net) -> list[Input]:
     """The inputs `simulate` needs for the occupants that generate something: each one's
     presence on `"presence.<name>"` (a step mean, the fraction of the step at each node of
     `net`) and, when it has schedules, the schedule values (1 for an unscheduled species,
-    in the order of its `generation`) on `"generation_multiplier.<name>"`."""
+    in the order of its `generation`) on `"generation_multiplier.<name>"`. Occupants whose
+    names repeat are refused: their drivers would collide."""
+    _refuse_repeated_names(occupants, "occupant_inputs")
     out: list[Input] = []
     for occ in occupants:
         if not occ.generation:
@@ -235,19 +256,22 @@ def occupant_inputs(occupants: Sequence[Occupant], net) -> list[Input]:
     return out
 
 
-def _occupant_nodes(occupant: Occupant, layer, what: str) -> list[int]:
-    """The nodes (indices into `layer.net.nodes`) of every zone `occupant` enters, each
-    refused by name where `layer` holds no air: not a node (KeyError), the boundary, a node
-    no flow edge of the layer touches, or a storage-free node (ValueError)."""
-    nodes = []
-    for zone in sorted(occupant.occupancy.zones, key=str):
-        try:
-            node = int(layer.net.node_index(zone))
-        except KeyError as exc:
-            raise KeyError(f"{what}: occupant {occupant.name!r}: zone {zone!r} is not a node "
-                           f"of the network") from exc
-        _check_emitting_node(layer, node, f"{what}: occupant {occupant.name!r}")
-        nodes.append(node)
+def _refuse_repeated_names(occupants: Sequence[Occupant], what: str) -> None:
+    names = [o.name for o in occupants]
+    dup = sorted({n for n in names if names.count(n) > 1})
+    if dup:
+        raise ValueError(f"{what}: occupant names {dup} repeat; each needs its own")
+
+
+def _occupant_nodes(occupant: Occupant, layer, what: str) -> dict[Hashable, int]:
+    """{zone: its index into `layer.net.nodes`} for every zone of any of `occupant`'s day
+    schedules, each refused by name where `layer` holds no air: not a node (KeyError), the
+    boundary, a node no flow edge of the layer touches, or a storage-free node
+    (ValueError)."""
+    who = f"{what}: occupant {occupant.name!r}"
+    nodes = _zone_nodes(occupant.occupancy, layer.net, who)
+    for node in nodes.values():
+        _check_emitting_node(layer, node, who)
     return nodes
 
 
@@ -265,19 +289,16 @@ class OccupantGeneration:
 
     `species` are the layer's species names, in its order: `layer.species_names`, or given
     for a layer that names none. Refused by name at construction: occupants whose names
-    repeat, a generated species the layer does not carry (KeyError), and a zone of a
-    generating occupant that is not a node (KeyError), is the layer's boundary (the
-    ambient), is a node no flow edge of the layer touches, or is a storage-free node: the
-    layer holds no air there to generate into. Occupants who generate nothing are ignored.
+    repeat, a generated species the layer does not carry (KeyError), and any zone of any of
+    a generating occupant's day schedules (also of a day type the run does not reach) that
+    is not a node (KeyError), is the layer's boundary (the ambient), is a node no flow edge
+    of the layer touches, or is a storage-free node: the layer holds no air there to
+    generate into. Occupants who generate nothing are ignored.
     """
 
     def __init__(self, occupants: Sequence[Occupant], *, layer,
                  species: Sequence[str] | None = None) -> None:
-        names = [o.name for o in occupants]
-        dup = sorted({n for n in names if names.count(n) > 1})
-        if dup:
-            raise ValueError(f"OccupantGeneration: occupant names {dup} repeat; each needs "
-                             f"its own")
+        _refuse_repeated_names(occupants, "OccupantGeneration")
         self.layer = layer
         self.species = self._species(layer, species)
         self.occupants = [o for o in occupants if o.generation]
