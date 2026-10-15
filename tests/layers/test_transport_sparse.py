@@ -98,17 +98,16 @@ def test_steady_singular_system_raises_naming_instance():
     net.add_node("B")
     net.add_edge("A", "B", kind="airpath")
     net.add_edge("B", "A", kind="airpath")
+    # No flow, no boundary and a removal rate below float64's normal range: the nodes have
+    # a way out (a structurally zero operator is refused before the solve, see
+    # test_transport_steady_undefined.py), but numerically M is singular, and the solve must
+    # fail by name. A nonzero source makes the system inconsistent as well (x = 0 does not
+    # solve it), which is what genuinely fails to converge.
     layer = TransportLayer(
-        net, "co2", capacity=torch.tensor([100.0, 100.0]), flow_kind="airpath", boundary=[]
+        net, "co2", capacity=torch.tensor([100.0, 100.0]), flow_kind="airpath", boundary=[],
+        removal=torch.full((2, 1), 5e-324, dtype=torch.float64),
     )
-    q = torch.zeros(2, dtype=torch.float64)  # no flow, no boundary: M is exactly the zero matrix
-    # A nonzero source is required: with source == 0 too, the system 0 = 0 is trivially (if
-    # non-uniquely) satisfied by x = 0, which GMRES correctly reports as CONVERGED -- unlike
-    # torch.linalg.solve, an iterative solver has no obligation to detect that M itself is
-    # singular when the particular right-hand side it was asked to solve happens to be
-    # consistent with it. A nonzero source makes the system exactly singular AND
-    # inconsistent (no x solves M x = b when M = 0 and b != 0), which is what genuinely
-    # fails to converge.
+    q = torch.zeros(2, dtype=torch.float64)
     source = torch.ones(2, dtype=torch.float64)
     x_b = torch.zeros(0, dtype=torch.float64)
     with pytest.raises(RuntimeError, match="co2"):
@@ -121,11 +120,12 @@ def test_steady_on_failure_return_gives_failing_status_instead_of_raising():
     net.add_node("B")
     net.add_edge("A", "B", kind="airpath")
     net.add_edge("B", "A", kind="airpath")
-    layer = TransportLayer(
-        net, "co2", capacity=torch.tensor([100.0, 100.0]), flow_kind="airpath", boundary=[]
+    layer = TransportLayer(  # numerically singular, as in the test above
+        net, "co2", capacity=torch.tensor([100.0, 100.0]), flow_kind="airpath", boundary=[],
+        removal=torch.full((2, 1), 5e-324, dtype=torch.float64),
     )
     q = torch.zeros(2, dtype=torch.float64)
-    source = torch.ones(2, dtype=torch.float64)  # see the fixture note above: must be nonzero
+    source = torch.ones(2, dtype=torch.float64)  # see the note above: must be nonzero
     x_b = torch.zeros(0, dtype=torch.float64)
     result = layer.steady(q, _full(layer, source), x_b, on_failure="return")
     assert bool(torch.any(result.status != SolverStatus.CONVERGED))

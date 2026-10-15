@@ -1063,7 +1063,8 @@ pass it as `capacity=`.
   the steady age equation $\sum_{in} q\,\tau_{up} - \sum_{out} q\,\tau + M = 0$ as a transport
   problem with a uniform source of one second per second in every kilogram of air, the
   outdoor air at age zero. A zero-volume plenum holds no air: its age is the flow-weighted
-  mix of the ages flowing in.
+  mix of the ages flowing in. A zone without airflow, or zones that exchange air only among
+  themselves, have no age: refused by name with `UndefinedSteadyState`.
 - `building_air_change_rate(history, model, conditioned=...)` is the building air change
   rate (1/h), as ContamX writes it to its `.ach` file: every flow entering the conditioned
   space from outside it, over 1.2041 kg/m³ times the space's volume. ContamX counts in that
@@ -1894,6 +1895,14 @@ two zones exchanging air and three zones in series with one left out of the spac
   0.5 relaxation) cannot hold the wind-driven, upward-flow state: it moves away from it even when
   started on it. Time stepping with the default `"pingpong"` coupling resolves all three states
   correctly, so for a case like this, step to steady state instead of calling `.steady()`.
+- **A zone without airflow has no steady contaminant state.** At a `.prj` file's steady instant
+  the ambient may sit at the zone temperature with no wind (the one-zone stack test projects
+  do): no air moves, the zone keeps whatever enters it, and its steady mass fraction is undefined
+  without a source and unbounded with one. `prj.steady` refuses it with `UndefinedSteadyState`,
+  naming the zone and giving the ambient temperature, zone temperatures and wind speed at that
+  instant (ContamX returns the initial value there). Simulate the run instead, or set an
+  ambient that drives a flow. A group of zones that exchange air only with each other is
+  refused the same way.
 - **Wall conductance is not learnable** through this application's API: `WallMass` takes plain
   floats for `ua_zone` and `ua_ambient`, so gradients do not reach them.
 - **Doorway laminar transition is approximated.** Doorway openings use the generic laminar

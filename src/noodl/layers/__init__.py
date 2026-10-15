@@ -6,7 +6,7 @@ from .allocation import AllocatedFlowLayer, CapacitatedTransferLayer  # alias, p
 from .constitutive import ConstitutiveLayer
 from .potential import PotentialFlowLayer
 from .reaction import FirstOrderDecay, Reaction
-from .transport import TransportLayer, active_interior
+from .transport import TransportLayer, UndefinedSteadyState, active_interior
 
 __all__ = [
     "AllocatedFlowLayer",
@@ -16,5 +16,6 @@ __all__ = [
     "PotentialFlowLayer",
     "Reaction",
     "TransportLayer",
+    "UndefinedSteadyState",
     "active_interior",
 ]

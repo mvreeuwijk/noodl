@@ -154,7 +154,7 @@ from noodl.elements import (
     UpstreamDensityPowerLaw,
 )
 from noodl.layers.potential import PotentialFlowLayer
-from noodl.layers.transport import active_interior
+from noodl.layers.transport import UndefinedSteadyState, active_interior
 from noodl.model import Model
 from noodl.nodesources import NodeSource
 from noodl.topology import Network
@@ -2470,6 +2470,37 @@ def _refuse_idle_air_handlers(model: Model, state, drivers) -> None:
                     f"has no value for that plenum (unsupported)")
 
 
+def _model_steady(model: Model, state, drivers, **solve_kwargs):
+    """`model.steady`, with the steady instant's weather added to a transport layer's
+    refusal of an undefined steady state: at the steady instant a building whose zones sit
+    at the ambient temperature with no wind and no fan has no airflow at all."""
+    try:
+        return model.steady(state, drivers, **solve_kwargs)
+    except UndefinedSteadyState as exc:
+        context = []
+        T = drivers.get("T")
+        if T is not None:
+            T = torch.as_tensor(T).detach()
+            layer = model.transport[exc.layer]
+            ambient = T[..., layer.boundary_idx].flatten().unique().tolist()
+            zones = T[..., layer.interior_idx]
+            context.append(f"ambient temperature Ta = {_values(ambient)} K, zone "
+                           f"temperatures {zones.min().item():g} to {zones.max().item():g} K")
+        if drivers.get("V_met") is not None:
+            ws = torch.as_tensor(drivers["V_met"]).detach().flatten().unique().tolist()
+            context.append(f"wind speed Ws = {_values(ws)} m/s")
+        if not context:
+            raise
+        raise UndefinedSteadyState(
+            f"{exc}. prj.steady: at the steady instant the {', '.join(context)}",
+            layer=exc.layer, nodes=exc.nodes,
+        ) from exc
+
+
+def _values(values: list[float]) -> str:
+    return " ".join(f"{v:g}" for v in values)
+
+
 def steady(model: Model, state, drivers, *, rtol: float = 1e-12, max_iter: int = 10,
            **solve_kwargs):
     """`model.steady`, repeated to a fixed point when the model carries a
@@ -2487,6 +2518,10 @@ def steady(model: Model, state, drivers, *, rtol: float = 1e-12, max_iter: int =
     contracts by about `g dz rho / Pb` per pass (~1e-4 for a storey-high opening), so two or
     three passes reach float64 precision. The passes are left on the autograd graph: the
     returned state is differentiable, through the unrolled iteration.
+
+    A zone (or a group of zones) that no air leaves at the steady instant has no steady
+    contaminant state: `UndefinedSteadyState`, naming it and giving the instant's ambient
+    temperature, zone temperatures and wind speed.
     """
     if max_iter < 1:
         raise ValueError(f"prj.steady: max_iter must be at least 1, got {max_iter!r}")
@@ -2494,12 +2529,12 @@ def steady(model: Model, state, drivers, *, rtol: float = 1e-12, max_iter: int =
         _refuse_idle_air_handlers(model, state, drivers)
     zp = [c for c in model.closures if isinstance(c, ZonePressureDensity)]
     key, cause = _pressure_coupling(model, "prj.steady")
-    out = model.steady(state, drivers, **solve_kwargs)
+    out = _model_steady(model, state, drivers, **solve_kwargs)
     if key is None:
         return out
     Pb = zp[0].Pb if zp else 101325.0
     for _ in range(max_iter):
-        new = model.steady({**state, key: out[key]}, drivers, **solve_kwargs)
+        new = _model_steady(model, {**state, key: out[key]}, drivers, **solve_kwargs)
         change = (new[key] - out[key]).abs().max().item()
         out = new
         if change <= rtol * Pb:

@@ -167,6 +167,14 @@ with nothing passing through it, and refuses it, naming the node. Whether such a
 carries no gradient: a held node's value has zero gradient with respect to the flows, although
 any flow through it would switch it to mixing. `layer.storage_free_mask` is the `(n_i,)` boolean mask of these nodes.
 
+**Undefined steady states.** A stored node that nothing leaves (no outflow, no conduction, no
+removal) keeps everything that enters it, and so does a closed group of stored nodes whose
+contents only circulate among themselves, never reaching a boundary outflow, a removal, a filter
+loss or a reaction. Their steady state is undefined without a source and unbounded with one, and
+the operator is singular. `steady` checks for this on every batch instance before it solves and
+raises `UndefinedSteadyState` (a `ValueError`), naming the nodes; its `layer` and `nodes`
+attributes say which. Step such a model through time instead, or give the nodes an exchange.
+
 **Linear solver.** The `"implicit"` and `"trapezoidal"` schemes each need one linear solve per
 step (`"exact"` has none). `linear_solver` names it: `"auto"` (the default), `"gmres"`,
 `"gmres_jacobi"`, `"gmres_ilu"`, `"sparse_direct"` or `"direct"`, resolved fresh on every solve

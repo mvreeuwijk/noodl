@@ -524,6 +524,39 @@ def test_prj_steady_is_one_model_steady_without_dens_zp():
     )
 
 
+def test_a_steady_contaminant_solve_with_no_airflow_is_refused_with_the_weather():
+    """At its own steady instant the one-zone stack project has Ta equal to the zone
+    temperature and no wind: no air moves, so the zone keeps whatever enters it and the
+    steady contaminant state is undefined. Refused naming the zone and the weather; a
+    colder ambient drives a stack flow and the same project solves."""
+    from noodl.layers import UndefinedSteadyState
+
+    p = read_prj(DATA / "test_OneZoneWthCtmStack.prj")
+    model, state, drivers = project_to_model(p)
+    with pytest.raises(UndefinedSteadyState, match=r"\['singleZone'\]") as err:
+        prj_steady(model, state, drivers)
+    message = str(err.value)
+    assert "Ta = 293.15 K" in message and "Ws = 0 m/s" in message
+    assert err.value.layer == "species" and err.value.nodes == ["singleZone"]
+
+    model, state, drivers = project_to_model(p, ambient=dict(p.ambient_conditions, Ta=273.15))
+    out = prj_steady(model, state, drivers)
+    assert bool(torch.isfinite(out["species.x"]).all())
+
+
+def test_local_mean_age_of_a_zone_without_airflow_is_refused_by_name():
+    from noodl.apps.building_physics.outputs import local_mean_age
+    from noodl.layers import UndefinedSteadyState
+
+    p = read_prj(DATA / "test_OneZoneWthCtmStack.prj")
+    air, state, drivers = project_to_model(p, species=False)
+    q = air.steady(state, drivers)["air.q"]
+    assert bool((q == 0).all())
+    model, _, _ = project_to_model(p)
+    with pytest.raises(UndefinedSteadyState, match=r"\['singleZone'\]"):
+        local_mean_age({"air.q": q}, model, capacity=model.transport["species"].capacity)
+
+
 def test_species_capacity_is_the_zone_air_mass_at_its_own_density(tmp_path):
     """ContamX's zone air mass is Pb / (R T) V, not RHO_0 V: 1.2041 is that density only to
     five figures at 293.15 K, and 3.4 % off per 10 K away from it."""

@@ -130,6 +130,18 @@ def _scipy_sparse_linalg_importable() -> bool:
     return True
 
 
+class UndefinedSteadyState(ValueError):
+    """A steady transport solve has no answer: a stored node keeps everything that enters
+    it (nothing leaves it, or it belongs to a closed group whose contents never reach a
+    boundary outflow, a removal or a filter loss). A `ValueError`, raised before the solve
+    and naming the nodes; `layer` is the layer's name and `nodes` the nodes refused."""
+
+    def __init__(self, message: str, *, layer: str, nodes: Sequence[Node]) -> None:
+        super().__init__(message)
+        self.layer = layer
+        self.nodes = list(nodes)
+
+
 class _LinearSolve(torch.autograd.Function):
     """Differentiate a linear solve `A(params) x = rhs(params)` via the IMPLICIT ADJOINT,
     never by unrolling the forward solver's iteration: unrolling would differentiate the
@@ -748,6 +760,66 @@ class TransportLayer:
             f"TransportLayer '{self.name}' steady: nothing passes through storage-free "
             f"node(s) {names} (no flow, no conduction); they hold no amount, so a steady "
             f"solve has no value for them"
+        )
+
+    def _refuse_undefined_steady(self, q: torch.Tensor, cap: torch.Tensor,
+                                 coefficients: Mapping[str, torch.Tensor]) -> None:
+        """Refuse a steady solve whose operator is singular because a stored row has no way
+        out. The operator's entries, times the row's capacity, are amount rates: entry
+        (i, j) off the diagonal moves amount from row j into row i, and a column that does
+        not sum to zero gains or loses amount (a boundary outflow, a removal, a filter loss,
+        a reaction). A stored row that cannot reach such a column through the off-diagonal
+        entries keeps everything that enters it: its steady state is undefined without a
+        source and unbounded with one. A row nothing leaves at all (a zero diagonal: no
+        outflow, no conduction, no removal) is the one-row case, named separately.
+        Checked on every batch instance; a 0/1 decision on the flows, so no gradient."""
+        with torch.no_grad():
+            op = self._advection_operator(
+                q.detach(), cap.detach(), {k: v.detach() for k, v in coefficients.items()})
+            row, col, values = op.assemble_sparse()
+            m = self.n_species * self.n_i
+            amount = values * cap.detach().to(values.dtype).index_select(-1, row % self.n_i)
+            batch = torch.broadcast_shapes(amount.shape[:-1], op.diagonal().shape[:-1])
+            amount = amount.expand(batch + amount.shape[-1:]).reshape(-1, amount.shape[-1])
+            diag = op.diagonal().expand(batch + (m,)).reshape(-1, m)
+            zeros = amount.new_zeros(amount.shape[0], m)
+            column = zeros.index_add(-1, col, amount)
+            scale = zeros.index_add(-1, col, amount.abs())
+            # Exact conservation cancels to rounding, a loss or a gain does not.
+            exits = column.abs() > 1e-12 * scale
+            linked = (row != col) & (amount != 0)
+            reach = exits
+            for _ in range(m):
+                hit = zeros.index_add(-1, col, (reach[:, row] & linked).to(amount.dtype))
+                grown = reach | (hit > 0)
+                if bool((grown == reach).all()):
+                    break
+                reach = grown
+            stored = ~self._storage_free_stacked(reach.device)
+            closed = (~reach & stored).any(0)
+            if not bool(closed.any()):
+                return
+            idle = (diag == 0).any(0) & closed
+
+        def nodes(rows: torch.Tensor) -> list[Node]:
+            hit = rows.reshape(self.n_species, self.n_i).any(0)
+            return [self.net.nodes[int(self.interior_idx[i])]
+                    for i in hit.nonzero().flatten().tolist()]
+
+        parts = []
+        if bool(idle.any()):
+            parts.append(f"nothing leaves stored node(s) {nodes(idle)} (no outflow, no "
+                         f"conduction, no removal)")
+        if bool((closed & ~idle).any()):
+            parts.append(f"stored node(s) {nodes(closed & ~idle)} form a closed group: what "
+                         f"enters them never reaches a boundary outflow, a removal or a "
+                         f"filter loss")
+        raise UndefinedSteadyState(
+            f"TransportLayer '{self.name}' steady: {'; '.join(parts)}. The steady state "
+            f"there is undefined without a source and unbounded with one; solve it with "
+            f"transient steps instead, or give the node(s) an exchange (a flow or "
+            f"conduction to a boundary, or a removal)",
+            layer=self.name, nodes=nodes(closed),
         )
 
     def _held_sources_dropped(self, q: torch.Tensor, sources: torch.Tensor,
@@ -1536,6 +1608,7 @@ class TransportLayer:
         if self._has_storage_free:
             self._refuse_idle_storage_free(
                 q, dict(zip(names, coef, strict=True)).get("conductance"))
+        self._refuse_undefined_steady(q, cap_t, dict(zip(names, coef, strict=True)))
 
         def build_system(q_, sources_, xb_, cap_, *coef_):
             op = self._advection_operator(q_, cap_, dict(zip(names, coef_, strict=True)))
