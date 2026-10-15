@@ -98,6 +98,8 @@ from noodl.apps.building_physics.controls import (
     DriverReading,
     StateReading,
     node_mass_fraction,
+    node_pressure,
+    node_temperature,
 )
 from noodl.apps.building_physics.filters import (
     ConstantEfficiencyFilter,
@@ -2470,7 +2472,6 @@ def _sensor_reading(project: Project, layers: dict, drivers: tuple[str, ...],
         if name is None:
             raise ValueError(f"{where} senses {what} {source}, which the project does not "
                              f"have")
-        idx = project.net.node_index(name)
         if measure == 0:
             if "species" not in layers or species not in project.species:
                 raise ValueError(f"{where} senses species {species!r}, which the model does "
@@ -2485,10 +2486,10 @@ def _sensor_reading(project: Project, layers: dict, drivers: tuple[str, ...],
                 raise ValueError(f"{where} senses the mass fraction at {what} {source}: "
                                  f"{exc.args[0]}") from exc
             return reading.resolved
-        if measure == 1:
-            return DriverReading("T", (idx,))
-        if measure == 4:
-            return StateReading("air.phi", (idx,))
+        if measure in (1, 4):
+            reading = node_temperature(name) if measure == 1 else node_pressure(name)
+            reading.resolve(project.net, layers, drivers)
+            return reading.resolved
         detail = "occupancy (it needs occupants)" if measure == 5 else f"measure {measure}"
         raise ValueError(f"{where}: a {what} sensor of {detail} is not supported")
     if kind in _SENSED_EDGES:
