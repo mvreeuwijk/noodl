@@ -102,7 +102,9 @@ from noodl.apps.building_physics.controls import (
 from noodl.apps.building_physics.filters import (
     ConstantEfficiencyFilter,
     FilterSeries,
+    FilterTransmission,
     ParticleFilter,
+    UVGIFilter,
     filter_transmission,
 )
 from noodl.apps.building_physics.inputs import Input, apply_inputs, bind_inputs
@@ -819,6 +821,22 @@ class ContamCompatibilityWarning(UserWarning):
     """
 
 
+def _warn_reverse_uvgi(flt) -> None:
+    """One warning per UVGI filter the air crosses against its path's direction."""
+    warnings.warn(
+        f"UVGI filter {flt.name!r}: air crosses it against its path's direction, where "
+        f"ContamX applies a fixed UV dose of 1 J/m2 (efficiency 1 - exp(-k) for a species of "
+        f"UV susceptibility k), not the Penn State model; noodl physics follows ContamX",
+        ContamCompatibilityWarning, stacklevel=2)
+
+
+#: The absolute mass-fraction change (kg/kg) between passes at which a step of a model with a
+#: UVGI filter has converged. The passes after the first are fed the same flows, so they
+#: agree to rounding; the first pass's lag would show as a change of the order of the step's
+#: own concentration change, far above this.
+UVGI_ITERATE_TOL = 1e-15
+
+
 def _warn_ignored_decay(species: list[Species]) -> None:
     """One warning per simulated species whose record carries a nonzero decay constant."""
     for sp in species:
@@ -889,8 +907,11 @@ def _read_reactions(lines: _Lines, count: int, out: dict[int, KineticReaction]) 
 
 _REFUSED_FILTERS = {
     "gf0": "a gaseous filter whose efficiency depends on its loading",
-    "uv1": "an ultraviolet germicidal irradiation (UVGI) filter",
 }
+# A `uv1` element's data: 14 values, which ContamX reads as one stream whatever the line
+# breaks (measured): S_design u_design F_design k_design age_flag C0 C1 C2 C3 C4 K0 K1 u_u u_F
+# (the last two the display units).
+_UVGI_VALUES = 14
 
 
 def _read_filter_elements(lines: _Lines, count: int,
@@ -905,6 +926,20 @@ def _read_filter_elements(lines: _Lines, count: int,
             data = ([(r[0], float(r[1])) for r in rows] if ftype == "cef"
                     else [(float(r[0]), float(r[1])) for r in rows])
             out[nr] = (ftype, name, data)
+        elif ftype == "uv1":
+            values: list[str] = []
+            while len(values) < _UVGI_VALUES:
+                values += lines.record()
+            if len(values) != _UVGI_VALUES:
+                raise ValueError(f"prj: UVGI filter element {nr} ({name!r}) needs "
+                                 f"{_UVGI_VALUES} values, got {len(values)} before the next "
+                                 f"line")
+            for i in (4, 12, 13):
+                if not values[i].lstrip("+-").isdigit():
+                    raise ValueError(f"prj: UVGI filter element {nr} ({name!r}): value "
+                                     f"{i + 1} must be an integer (ContamX refuses "
+                                     f"{values[i]!r})")
+            out[nr] = (ftype, name, values)
         elif ftype == "spf":
             n = int(lines.record()[0])
             subs: list[int] = []
@@ -953,6 +988,19 @@ def _filter_object(nr: int, elements: dict[int, tuple[str, str, list]],
     if ftype == "pf0":
         try:
             return ParticleFilter([d for d, _ in data], [e for _, e in data], name=name)
+        except ValueError as exc:
+            raise ValueError(f"prj: filter element {nr}: {exc}") from exc
+    if ftype == "uv1":
+        v = [float(x) for x in data]
+        age = int(data[4])
+        if age not in (0, 1):
+            raise ValueError(f"prj: UVGI filter element {nr} ({name!r}): the age-model flag "
+                             f"must be 0 or 1, got {age}")
+        try:
+            return UVGIFilter(design_survival=v[0], design_velocity=v[1],
+                              design_mass_flow=v[2], design_rate_constant=v[3],
+                              output_coefficients=v[5:10],
+                              age_coefficients=v[10:12] if age else None, name=name)
         except ValueError as exc:
             raise ValueError(f"prj: filter element {nr}: {exc}") from exc
     if nr in chain:
@@ -1779,6 +1827,10 @@ def _build(*, ambient_conditions, g, species, levels, profiles, elements, zones,
         if not p.filter_nr:
             continue
         flt = filter_of(p.filter_nr, f"path {p.nr}")
+        if flt.depends_on_flow and len(cols) != 1:
+            raise ValueError(f"prj: path {p.nr} carries the UVGI filter {flt.name!r} but is "
+                             f"modelled as {len(cols)} openings; a UVGI filter's dose depends "
+                             f"on the path's one flow (unsupported)")
         for c in cols:
             edge_filters[net.edges[c]] = flt
 
@@ -2204,6 +2256,13 @@ def project_to_model(project: Project, *, ambient: dict | None = None, species: 
     A project with a control plan gets a new sampled `ControlNetwork` (`prj_controls`),
     first among the closures, its sensors read from this model's layers; it writes nothing
     until `simulate` evaluates it.
+
+    A project with a UVGI filter on a path gets a `FilterTransmission` closure, last among the
+    closures, writing the species layer's transmission from each airflow solve's flows, and
+    the model iterates each step (`coupling="iterate"`, the species layer judged to
+    `UVGI_ITERATE_TOL`) so the step's transmission is at the step's own flows, as ContamX
+    computes it. Air crossing a UVGI filter against its path's direction gets ContamX's fixed
+    dose of 1 J/m2 (`UVGIFilter`), with one `ContamCompatibilityWarning` per filter.
     """
     amb = dict(project.ambient_conditions)
     if ambient:
@@ -2231,6 +2290,8 @@ def project_to_model(project: Project, *, ambient: dict | None = None, species: 
                              quantity="pressure", unit="Pa", flow_unit="kg/s",
                              node_sources=node_sources)
     layers: dict = {"air": air}
+    # UVGI filters: their transmission follows every airflow solve (`FilterTransmission`).
+    flow_filters = [f for f in project.edge_filters.values() if f.depends_on_flow]
     no_contaminants = project.run_control is not None and project.run_control.contaminants == "none"
     if species and project.species and not no_contaminants:
         kinetics = None
@@ -2239,7 +2300,7 @@ def project_to_model(project: Project, *, ambient: dict | None = None, species: 
                                          reactions=project.zone_reactions,
                                          ambient=project.ambient, flow_kinds=project.kinds)
         transmission = None
-        if project.edge_filters:
+        if project.edge_filters and not flow_filters:
             transmission = filter_transmission(net, project.kinds, project.species_records,
                                                project.edge_filters)
         x_initial = _initial_mass_fractions(project)
@@ -2283,6 +2344,15 @@ def project_to_model(project: Project, *, ambient: dict | None = None, species: 
             if not o.generation:
                 _occupant_nodes(o, layers["species"], "project_to_model", "breathe")
     closures.extend(project.closures)
+    coupling: dict = {}
+    if "species" in layers and flow_filters:
+        # Last among the closures: it reads the densities and temperatures the others write.
+        # Each pass of the iterated coupling is fed the previous pass's flows, so the step
+        # converges on the transmission at its own flows.
+        closures.append(FilterTransmission(
+            net, project.kinds, project.species_records, project.edge_filters, airflow=air,
+            on_reverse=_warn_reverse_uvgi))
+        coupling = dict(coupling="iterate", iterate_tol={"species": UVGI_ITERATE_TOL})
     drivers = {
         "air.phi_boundary": torch.zeros(1 + len(project.flow_balanced), dtype=F64),
         "T": T.clone(),
@@ -2311,7 +2381,7 @@ def project_to_model(project: Project, *, ambient: dict | None = None, species: 
     for closure in closures:
         if isinstance(closure, ControlNetwork):
             closure.resolve(net, layers, tuple(drivers))
-    model = Model(net, layers, closures=closures)
+    model = Model(net, layers, closures=closures, **coupling)
     state: dict = {}
     if "species" in layers:
         K = len(project.species)

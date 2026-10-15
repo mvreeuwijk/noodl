@@ -582,6 +582,19 @@ class LayerRef:
                             "construction-time one",
                 unit="1/s", **common,
             )
+            t_cols: list[int] = []
+            for k in layer.flow_kinds:
+                t_cols += net.edge_index(k).tolist()
+            t_labels, t_alias = _edge_labels(net, t_cols)
+            inputs["transmission"] = Field(
+                f"{name}.transmission", role="driver", axis="edge", labels=t_labels,
+                aliases=t_alias, ordering=f"edge order of kinds {tuple(layer.flow_kinds)}",
+                required="optional", default=None, n_species=K, species=species,
+                column=True,
+                description="per-step pass fraction of each flow edge overriding the "
+                            "construction-time transmission",
+                unit="1", **common,
+            )
             if flow_owner is None:
                 cols: list[int] = []
                 for k in layer.flow_kinds:

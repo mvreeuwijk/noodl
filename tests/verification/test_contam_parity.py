@@ -17,6 +17,7 @@ ContamX's airflow iteration is run at `TIGHT_AIRFLOW` rather than the sample pro
 from __future__ import annotations
 
 import dataclasses
+import math
 import re
 import shutil
 from pathlib import Path
@@ -25,6 +26,7 @@ import pytest
 import torch
 
 from noodl.apps.building_physics.prj import project_to_model, read_prj, steady
+from noodl.apps.building_physics.thermal import R_AIR
 
 DATA = Path(__file__).resolve().parents[1] / "data" / "contam"
 THREE = DATA / "valThreeZonesWthCtm-UseApi.prj"
@@ -744,7 +746,7 @@ def _mass_roundoff(project, model):
                         dtype=F64)
 
 
-def _mass_fraction_bound(eps_flow):
+def _mass_fraction_bound(eps_flow, pass_fractions=None):
     """`_project_parity`'s `mf_bound` for a project whose air mass is constant and whose only
     species input is the ambient mass fraction (no source, clean start): the first-order
     bound of the mass-fraction error of noodl physics' implicit step against ContamX's, run
@@ -769,7 +771,10 @@ def _mass_fraction_bound(eps_flow):
     more), 0 on an unfiltered one (eta = 1 exactly); |dx_b| = u |x_b| (the ambient mass
     fraction in float32). The preconditions (no species source, no generating occupant, no
     kinetic reaction, a zero initial mass fraction) are asserted, each naming the term it
-    would need."""
+    would need. `pass_fractions(project, model, drivers, out)`, when given, returns the pass
+    fractions and their errors per step, two `(N, K, E)` tensors in the species layer's flow
+    order, for filters whose pass fraction changes with the flows (`_uvgi_pass_fractions`);
+    by default they are the layer's fixed transmission and the 2 u above."""
 
     def bound(project, out):
         assert not project.sources, (
@@ -786,8 +791,13 @@ def _mass_fraction_bound(eps_flow):
         f = model.potential["air"].flows_of_kind(out["air.q"], lay.flow_kinds)
         src, tgt = zip(*(net.endpoints(k) for k in lay.flow_kinds), strict=True)
         src, tgt = torch.cat(src).tolist(), torch.cat(tgt).tolist()
-        eta = lay.transmission.to(F64).expand(lay.n_species, len(src))       # (K, E)
-        deta = torch.where(eta < 1, 2 * F32_U, 0.0)
+        n_rows = out["species.x"].shape[0]
+        if pass_fractions is None:
+            eta = lay.transmission.to(F64).expand(lay.n_species, len(src))   # (K, E)
+            deta = torch.where(eta < 1, 2 * F32_U, 0.0)
+            eta, deta = eta.expand(n_rows, -1, -1), deta.expand(n_rows, -1, -1)
+        else:
+            eta, deta = pass_fractions(project, model, drivers, out)        # (N, K, E)
         dq = eps_flow * f.abs().amax(0)
         x = out["species.x"]                                                 # (N, n_i, K)
         cap = out["species.capacity"]
@@ -808,6 +818,8 @@ def _mass_fraction_bound(eps_flow):
             def upstream(node, k=k):
                 return x[k, pos[node]] if node in pos else xb[bpos[node]]
 
+            eta_k, deta_k = eta[k], deta[k]
+
             for e, q in enumerate(f[k].tolist()):
                 ends = ([(src[e], tgt[e])] if q > 0 else [(tgt[e], src[e])] if q < 0
                         else [(src[e], tgt[e]), (tgt[e], src[e])])   # zero: either way
@@ -815,14 +827,14 @@ def _mass_fraction_bound(eps_flow):
                     if q != 0 and up in pos:
                         b[:, pos[up], pos[up]] += abs(q)
                         if down in pos:
-                            b[:, pos[down], pos[up]] -= eta[:, e] * abs(q)
+                            b[:, pos[down], pos[up]] -= eta_k[:, e] * abs(q)
                     if down not in pos:
                         continue
                     x_up = upstream(up)
-                    term = dq[e] * (x[k, pos[down]] - eta[:, e] * x_up).abs()
-                    term = term + deta[:, e] * abs(q) * x_up.abs()
+                    term = dq[e] * (x[k, pos[down]] - eta_k[:, e] * x_up).abs()
+                    term = term + deta_k[:, e] * abs(q) * x_up.abs()
                     if up not in pos:
-                        term = term + eta[:, e] * abs(q) * F32_U * x_up.abs()
+                        term = term + eta_k[:, e] * abs(q) * F32_U * x_up.abs()
                     rhs[pos[down]] += term
             dx[k] = torch.linalg.solve(b, rhs.T.unsqueeze(-1)).squeeze(-1).T
         return dx
@@ -847,6 +859,128 @@ def test_a_duct_network_matches_contamx(contamx, tmp_path, record_property):
                     mf_bound=_mass_fraction_bound(64 * F32_U),
                     record_property=record_property, species_floor=True,
                     label="Three-zone project with a duct network, 24 steps")
+
+UVGI = DATA / "uvgi_three_zone.prj"
+
+
+def _pass_fraction_error(flt, species, air, eps_flow):
+    """`(tau, dtau)`, each `(K,)`: a filter's pass fraction for the air passing and its
+    first-order error under ContamX's float32 inputs and the flows' budget `eps_flow`.
+
+    A fixed filter: 2 u (as in `_mass_fraction_bound`). Filters in series: the product rule.
+    A UVGI filter, tau = exp(-X), X = k I_t: dtau = tau X eps_X, with eps_X the relative
+    error of X, the sum of its factors' (`UVGIFilter`'s formulae):
+    k, k_design, F_design, rho_std: 1 u each; ln(S_design): u / |ln S_design|; rho = Pb / (R T)
+    (Pb exact in float32): 1 u through T; 1 / F: `eps_flow`; and OUT. OUT_TU = v / 100 off
+    its clamps, v = C0 + C1 T + C2 U + C3 T^2 + C4 U^2 (T in deg C): each term's coefficient
+    1 u, T through T_K (the kelvin value is the float32 input: |dv/dT| u T_K) and U through
+    eps_U = `eps_flow` + 4 u (F_design, u_design, rho, rho_std), |dv/dU| U eps_U, over v; 0 on
+    a clamp. OUT_age = a off its clamp, a = (K0 + K1 ln t) / 100: u (|K0| + |K1 ln t|) / |100 a|
+    (t exact); 0 on the clamp or the 0.1 fallback. Against the path's direction X = k (dose
+    1 J/m2): eps_X = u."""
+    from noodl.apps.building_physics.filters import FilterSeries, UVGIFilter
+
+    u = F32_U
+    if isinstance(flt, FilterSeries):
+        parts = [_pass_fraction_error(s, species, air, eps_flow) for s in flt.stages]
+        tau = torch.stack([p[0] for p in parts]).prod(0)
+        dtau = torch.zeros_like(tau)
+        for i, (_, d) in enumerate(parts):
+            others = torch.ones_like(tau)
+            for j, (tj, _) in enumerate(parts):
+                if j != i:
+                    others = others * tj
+            dtau = dtau + d * others
+        return tau, dtau
+    tau = 1.0 - flt.efficiency(species, air)
+    if not isinstance(flt, UVGIFilter):
+        return tau, torch.where(tau < 1, 2 * u, 0.0)
+    X = -torch.log(tau)
+    F = float(air.mass_flow)
+    if F < 0:
+        return tau, tau * X * u
+    T_K = float(air.temperature)
+    Tc = T_K - 273.15
+    rho = float(air.density)
+    U = F * 1.2041 * flt.design_velocity.item() / (rho * flt.design_mass_flow.item())
+    c0, c1, c2, c3, c4 = flt.output_coefficients.tolist()
+    v = c0 + c1 * Tc + c2 * U + c3 * Tc * Tc + c4 * U * U
+    eps_out = 0.0
+    if 0 < v < 100:
+        eps_u = eps_flow + 4 * u
+        dv = u * (abs(c0) + abs(c1 * Tc) + abs(c2 * U) + abs(c3) * Tc * Tc + abs(c4) * U * U)
+        dv += abs(c1 + 2 * c3 * Tc) * u * T_K + abs(c2 + 2 * c4 * U) * U * eps_u
+        eps_out = dv / v
+    if flt.age_coefficients is not None:
+        k0, k1 = flt.age_coefficients.tolist()
+        hours = float(air.time) / 3600.0
+        a = (k0 + k1 * math.log(hours)) / 100.0 if hours > 0 else None
+        if a is not None and 0 < a < 1:
+            eps_out += u * (abs(k0) + abs(k1 * math.log(hours))) / abs(100 * a)
+    S = flt.design_survival.item()
+    eps_x = u * (4 + 1 / abs(math.log(S))) + u + eps_flow + eps_out
+    return tau, tau * X * eps_x
+
+
+def _uvgi_pass_fractions(eps_flow):
+    """`_mass_fraction_bound`'s `pass_fractions` for a project with UVGI filters: each
+    step's pass fractions from the run's own flows, at the drivers' temperatures and
+    densities and the step's time, and their errors (`_pass_fraction_error`). The project's
+    temperatures and pressure must be constant (asserted: no input writes them)."""
+    from noodl.apps.building_physics.filters import AirThroughFilter, FilterTransmission
+
+    def pass_fractions(project, model, drivers, out):
+        assert not any(i.key in ("T", "P_ref") for i in project.inputs), (
+            "the pass fractions are taken at the drivers' constant temperatures and pressure")
+        (closure,) = [c for c in model.closures if isinstance(c, FilterTransmission)]
+        air = model.potential["air"]
+        species = closure.species
+        rho = drivers["P_ref"] / (R_AIR * drivers["T"])
+        taus, dtaus = [], []
+        for k, t in enumerate(out["time"].tolist()):
+            f = air.flows_of_kind(out["air.q"][k], closure.flow_kinds)
+            rows = [(r, torch.where(r < 1, 2 * F32_U, 0.0)) for r in closure.fixed]
+            for row, src, flt in closure.varying:
+                passing = AirThroughFilter(f[row], drivers["T"][src], rho[src], t)
+                rows[row] = _pass_fraction_error(flt, species, passing, eps_flow)
+            taus.append(torch.stack([r[0] for r in rows], dim=-1))          # (K, E)
+            dtaus.append(torch.stack([r[1] for r in rows], dim=-1))
+        return torch.stack(taus), torch.stack(dtaus)
+
+    return pass_fractions
+
+
+@pytest.mark.external
+def test_uvgi_filters_match_contamx(contamx, tmp_path, record_property):
+    """`uvgi_three_zone.prj` (fixture NOTICE): two species with UV susceptibilities 1e-3 and
+    2e-2 m2/J entering a wind-driven three-zone building through a UVGI filter with an age
+    model on a path whose flow a schedule cuts to 0.4 for 45 minutes, a UVGI filter in series
+    with a constant-efficiency filter, and a UVGI filter crossed against its path's direction
+    (ContamX's fixed 1 J/m2 dose, warned once); 24 steps of 300 s. The filters' pass fractions
+    change with every airflow solve; the iterated coupling gives each step its own flows (with
+    one pass, the transmission lags the flows by a step: 6 % in the mass fractions after the
+    schedule's cut, measured).
+
+    Budget, flows: the three-zone steady flows' 16 u (`test_three_filters_match_contamx`;
+    the schedule's 0.4 is given to noodl physics as ContamX holds it). Mass fractions:
+    `_mass_fraction_bound` with those flows, derived on the run, its pass fractions and their
+    errors taken per step from the run's flows (`_uvgi_pass_fractions`): a UVGI pass
+    fraction exp(-X) moves by exp(-X) X eps_X, eps_X the first-order float32 roundoff of the
+    dose's inputs plus the flows' 16 u (`_pass_fraction_error`)."""
+    import warnings
+
+    from noodl.apps.building_physics.prj import ContamCompatibilityWarning
+
+    eps_flow = 16 * F32_U
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        _project_parity(UVGI, tmp_path, rtol_flow=eps_flow,
+                        mf_bound=_mass_fraction_bound(eps_flow, _uvgi_pass_fractions(eps_flow)),
+                        record_property=record_property, species_floor=True,
+                        label="Three-zone project with UVGI filters, 24 steps")
+    reverse = [str(w.message) for w in caught
+               if issubclass(w.category, ContamCompatibilityWarning)]
+    assert len(reverse) == 1 and "'uvDesign'" in reverse[0], reverse
 
 
 AHS = DATA / "ahs_three_zone.prj"

@@ -341,7 +341,12 @@ def build_ducts(ctx: BuildContext, elements: dict[int, DuctElementRecord],
         edge = net.add_edge(names[s.from_junction], names[s.to_junction], kind=kind)
         by_kind.setdefault(kind, []).append(s)
         if s.filter_nr:
-            ctx.edge_filters[edge] = ctx.filter_of(s.filter_nr, f"segment {s.nr}")
+            flt = ctx.filter_of(s.filter_nr, f"segment {s.nr}")
+            if flt.depends_on_flow:
+                raise ValueError(f"prj: duct segment {s.nr} carries the UVGI filter "
+                                 f"{flt.name!r}; a UVGI filter in a duct network is not "
+                                 f"verified against ContamX (unsupported)")
+            ctx.edge_filters[edge] = flt
     for kind, members in by_kind.items():
         el = elements[members[0].element_nr]
         _check_edge_order(net, kind, columns[kind])
@@ -406,7 +411,12 @@ def _build_terminals(ctx: BuildContext, junctions: list[JunctionRecord],
         # junction -> ambient: dp = P_j - (P_amb + wPset)
         wind_pressure.append(-t.wPset if not t.profile_nr else 0.0)
         if t.filter_nr:
-            ctx.edge_filters[edge] = ctx.filter_of(t.filter_nr, f"terminal {j.nr}")
+            flt = ctx.filter_of(t.filter_nr, f"terminal {j.nr}")
+            if flt.depends_on_flow:
+                raise ValueError(f"prj: duct terminal {j.nr} carries the UVGI filter "
+                                 f"{flt.name!r}; a UVGI filter in a duct network is not "
+                                 f"verified against ContamX (unsupported)")
+            ctx.edge_filters[edge] = flt
     order = [j.nr for j in terminals]
     for j in terminals:
         if j.control_nr:

@@ -401,7 +401,8 @@ class TransportLayer:
     )
 
     def _coefficients(
-        self, *, removal: torch.Tensor | None = None
+        self, *, removal: torch.Tensor | None = None,
+        transmission: torch.Tensor | None = None,
     ) -> tuple[tuple[str, ...], list[torch.Tensor]]:
         """`(names, tensors)`: every coefficient tensor that must cross `_LinearSolve`'s
         boundary explicitly. `_LinearSolve.backward` only sees what `apply` was given, so a
@@ -410,7 +411,7 @@ class TransportLayer:
         given, is a per-call rate that replaces the layer's own (see `_removal_arg`)."""
         values = {
             "carrier": self.carrier,
-            "transmission": self.transmission,
+            "transmission": self.transmission if transmission is None else transmission,
             "kinetics": self.kinetics,
             "removal": self.removal if removal is None else removal,
             "conductance": None if self._conduction_edges is None else self._conduction_edges[2],
@@ -419,9 +420,11 @@ class TransportLayer:
         names = tuple(n for n in self._COEFFICIENT_NAMES if values[n] is not None)
         return names, [values[n] for n in names]
 
-    def _coefficient_map(self, removal: torch.Tensor | None = None) -> dict[str, torch.Tensor]:
+    def _coefficient_map(
+        self, removal: torch.Tensor | None = None, transmission: torch.Tensor | None = None
+    ) -> dict[str, torch.Tensor]:
         """`_coefficients` as a name -> tensor map, for `_advection_operator`."""
-        names, values = self._coefficients(removal=removal)
+        names, values = self._coefficients(removal=removal, transmission=transmission)
         return dict(zip(names, values, strict=True))
 
     def _removal_arg(self, removal: torch.Tensor | None) -> torch.Tensor | None:
@@ -448,6 +451,30 @@ class TransportLayer:
                     f"({self.n_i}, {K}) (active interior order, 1/s), got {tuple(r.shape)}"
                 )
         return r
+
+    def _transmission_arg(self, transmission: torch.Tensor | None) -> torch.Tensor:
+        """Validate an optional PER-STEP transmission, else the layer's.
+
+        A closure whose filters depend on the flows or the conditions of the step (a UVGI
+        filter, `apps.building_physics.FilterTransmission`) hands the layer a fresh pass
+        fraction every step through the driver `"<layer>.transmission"`, passed in by
+        `Model._pass` the way `"<layer>.removal"` is. Shape `(..., b_flow)` or
+        `(..., b_flow, K)` in the layer's flow order, as the construction-time
+        `transmission`; leading batch dimensions are allowed. It REPLACES the
+        construction-time transmission for this call.
+        """
+        if transmission is None:
+            return self.transmission
+        t = torch.as_tensor(transmission, dtype=self.net.dtype)
+        K, b_flow = self.n_species, self._flow_src.numel()
+        if t.dim() >= 2 and tuple(t.shape[-2:]) == (b_flow, K):
+            return t.transpose(-1, -2)
+        if t.dim() >= 1 and t.shape[-1] == b_flow:
+            return t.unsqueeze(-2).expand(*t.shape[:-1], K, b_flow)
+        raise ValueError(
+            f"TransportLayer '{self.name}': transmission must have trailing shape "
+            f"({b_flow},) or ({b_flow}, {K}) (the layer's flow order), got {tuple(t.shape)}"
+        )
 
     def __init__(
         self,
@@ -1240,7 +1267,8 @@ class TransportLayer:
                 f"nonzero at {bad}"
             )
 
-    def rate(self, x, q, sources, x_boundary, *, capacity=None, removal=None) -> torch.Tensor:
+    def rate(self, x, q, sources, x_boundary, *, capacity=None, removal=None,
+             transmission=None) -> torch.Tensor:
         """dx/dt = M x + N x_b + sources / capacity at (x, q); x's layout and dtype.
 
         The balance `Model.residuals` reports for a transport layer, and the reference the
@@ -1248,13 +1276,15 @@ class TransportLayer:
         `capacity` (keyword-only) overrides the construction-time capacity for
         this call only; see `_capacity_arg`. `removal` (keyword-only) is a per-call
         first-order removal rate (1/s) replacing the construction-time one; see
-        `_removal_arg`.
+        `_removal_arg`. `transmission` (keyword-only) is a per-call transmission replacing
+        the construction-time one; see `_transmission_arg`.
         """
         dtype = torch.float64
         cap = self._capacity_arg(capacity)
         x_s, reduced = self._to_stacked(x.to(dtype), self.n_i, "x")
         op = self._advection_operator(
-            q.to(dtype), cap, self._coefficient_map(self._removal_arg(removal))
+            q.to(dtype), cap, self._coefficient_map(self._removal_arg(removal),
+                                                    self._transmission_arg(transmission))
         )
         xb_s, _ = self._to_stacked(x_boundary.to(dtype), self.n_b, "x_boundary")
         src_s, _ = self._to_stacked(
@@ -1280,6 +1310,7 @@ class TransportLayer:
         capacity: torch.Tensor | None = None,
         capacity_prev: torch.Tensor | None = None,
         removal: torch.Tensor | None = None,
+        transmission: torch.Tensor | None = None,
         diagnostics: dict | None = None,
         x_boundary_end: torch.Tensor | None = None,
         x_boundary_rates: tuple[torch.Tensor, torch.Tensor] | None = None,
@@ -1324,7 +1355,8 @@ class TransportLayer:
         drops (see the class docstring).
 
         `removal` (keyword-only) is a per-call first-order removal rate (1/s) replacing the
-        construction-time one; see `_removal_arg`.
+        construction-time one; see `_removal_arg`. `transmission` (keyword-only) is a
+        per-call transmission replacing the construction-time one; see `_transmission_arg`.
 
         `x_boundary_end` (keyword-only, `scheme="exact"` only, default `None`): the boundary
         values at the END of the step. Given, `x_boundary` is their value at the start and
@@ -1345,7 +1377,8 @@ class TransportLayer:
         return self._step(
             x, q, sources, x_boundary, dt,
             on_failure=on_failure, capacity=capacity, capacity_prev=capacity_prev,
-            removal=removal, want_transfer=False, diagnostics=diagnostics,
+            removal=removal, transmission=transmission, want_transfer=False,
+            diagnostics=diagnostics,
             x_boundary_end=x_boundary_end, x_boundary_rates=x_boundary_rates,
         )[0]
 
@@ -1361,6 +1394,7 @@ class TransportLayer:
         capacity: torch.Tensor | None = None,
         capacity_prev: torch.Tensor | None = None,
         removal: torch.Tensor | None = None,
+        transmission: torch.Tensor | None = None,
         diagnostics: dict | None = None,
     ) -> TransportStep:
         """Advance one timestep under `self.scheme`, like `step`, and also report the
@@ -1394,7 +1428,8 @@ class TransportLayer:
         status alongside. `capacity`/`capacity_prev` behave exactly as in `step`.
         `diagnostics` (keyword-only) behaves exactly as in `step`. `removal` (keyword-only)
         is a per-call first-order removal rate (1/s) replacing the construction-time one;
-        see `_removal_arg`.
+        see `_removal_arg`. `transmission` (keyword-only) likewise replaces the
+        construction-time transmission; see `_transmission_arg`.
         """
         if on_failure == "return":
             raise ValueError(
@@ -1405,7 +1440,8 @@ class TransportLayer:
         result, transfer = self._step(
             x, q, sources, x_boundary, dt,
             on_failure=on_failure, capacity=capacity, capacity_prev=capacity_prev,
-            removal=removal, want_transfer=True, diagnostics=diagnostics,
+            removal=removal, transmission=transmission, want_transfer=True,
+            diagnostics=diagnostics,
         )
         return TransportStep(result, transfer)
 
@@ -1421,6 +1457,7 @@ class TransportLayer:
         capacity: torch.Tensor | None = None,
         capacity_prev: torch.Tensor | None = None,
         removal: torch.Tensor | None = None,
+        transmission: torch.Tensor | None = None,
         want_transfer: bool = False,
         diagnostics: dict | None = None,
         x_boundary_end: torch.Tensor | None = None,
@@ -1469,7 +1506,8 @@ class TransportLayer:
         cap_t = self._capacity_arg(capacity)
         cap_prev_t = cap_t if capacity_prev is None else self._capacity_arg(capacity_prev)
         rem = self._removal_arg(removal)
-        coef_map = self._coefficient_map(rem)
+        trans = self._transmission_arg(transmission)
+        coef_map = self._coefficient_map(rem, trans)
         if self.scheme == "exact" and not torch.equal(cap_prev_t, cap_t):
             raise ValueError(
                 f"TransportLayer '{self.name}': scheme='exact' has no changing-capacity "
@@ -1531,14 +1569,14 @@ class TransportLayer:
         elif self.scheme == "implicit":
             result, reduced = self._implicit_step_sparse(
                 x, q, sources, x_boundary, dt, on_failure, cap_t, cap_prev_t,
-                diagnostics=diagnostics, removal=rem,
+                diagnostics=diagnostics, removal=rem, transmission=trans,
             )
             if on_failure == "return":
                 return result, None
         elif self.scheme == "trapezoidal":
             result, reduced = self._trapezoidal_step_sparse(
                 x, q, sources, x_boundary, dt, on_failure, cap_t, cap_prev_t,
-                diagnostics=diagnostics, removal=rem,
+                diagnostics=diagnostics, removal=rem, transmission=trans,
             )
             if on_failure == "return":
                 return result, None
@@ -1572,7 +1610,8 @@ class TransportLayer:
     def steady(
         self, q: torch.Tensor, sources: torch.Tensor, x_boundary: torch.Tensor,
         *, on_failure: str = "raise", capacity: torch.Tensor | None = None,
-        removal: torch.Tensor | None = None, diagnostics: dict | None = None,
+        removal: torch.Tensor | None = None, transmission: torch.Tensor | None = None,
+        diagnostics: dict | None = None,
     ) -> torch.Tensor:
         """Solve `0 = M x + N x_b + sources / capacity` for the steady-state `x`.
 
@@ -1591,7 +1630,8 @@ class TransportLayer:
         docstring; the `on_failure="return"` path already gives the caller the full
         `SolveResult` directly and leaves `diagnostics` untouched. `removal` (keyword-only)
         is a per-call first-order removal rate (1/s) replacing the construction-time one;
-        see `_removal_arg`.
+        see `_removal_arg`. `transmission` (keyword-only) likewise replaces the
+        construction-time transmission; see `_transmission_arg`.
         """
         if on_failure not in ("raise", "return"):
             raise ValueError(
@@ -1604,7 +1644,8 @@ class TransportLayer:
         sources = sources.to(dtype)
         x_boundary = x_boundary.to(dtype)
         _, reduced = self._to_stacked(self._sources_interior(sources), self.n_i, "sources")
-        names, coef = self._coefficients(removal=self._removal_arg(removal))
+        names, coef = self._coefficients(removal=self._removal_arg(removal),
+                                         transmission=self._transmission_arg(transmission))
         if self._has_storage_free:
             self._refuse_idle_storage_free(
                 q, dict(zip(names, coef, strict=True)).get("conductance"))
@@ -1640,6 +1681,7 @@ class TransportLayer:
         capacity_prev: torch.Tensor | None = None,
         diagnostics: dict | None = None,
         removal: torch.Tensor | None = None,
+        transmission: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Backward Euler on the AMOUNT `V x`: `V_new x_{n+1} - V_old x_n = dt F(x_{n+1})`,
         with `F(x) = G x + N_raw x_b + s` the capacity-FREE amount rate (`G`, `N_raw` the
@@ -1668,7 +1710,7 @@ class TransportLayer:
         cap_t = self._capacity_arg(capacity).to(dtype)
         cap_prev_t = cap_t if capacity_prev is None else self._capacity_arg(capacity_prev).to(dtype)
         _, reduced = self._to_stacked(x, self.n_i, "x")
-        names, coef = self._coefficients(removal=removal)
+        names, coef = self._coefficients(removal=removal, transmission=transmission)
         if self._has_storage_free and diagnostics is not None:
             diagnostics["held_sources_dropped"] = self._held_sources_dropped(
                 q, sources, dict(zip(names, coef, strict=True)).get("conductance"))
@@ -1716,6 +1758,7 @@ class TransportLayer:
         capacity_prev: torch.Tensor | None = None,
         diagnostics: dict | None = None,
         removal: torch.Tensor | None = None,
+        transmission: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Crank-Nicolson on the AMOUNT `V x`: `V_new x_{n+1} - V_old x_n =
         dt/2 (F(x_{n+1}) + F(x_n))`, with `F(x) = G x + N_raw x_b + s` the capacity-FREE
@@ -1740,7 +1783,7 @@ class TransportLayer:
         cap_t = self._capacity_arg(capacity).to(dtype)
         cap_prev_t = cap_t if capacity_prev is None else self._capacity_arg(capacity_prev).to(dtype)
         _, reduced = self._to_stacked(x, self.n_i, "x")
-        names, coef = self._coefficients(removal=removal)
+        names, coef = self._coefficients(removal=removal, transmission=transmission)
 
         def build_system(x_, q_, sources_, xb_, cap_, cap_prev_, *coef_):
             coef_map = dict(zip(names, coef_, strict=True))

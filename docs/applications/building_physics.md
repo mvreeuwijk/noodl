@@ -1178,10 +1178,41 @@ removes by particle size, interpolating its curve at each species' mean diameter
 ContamX does (a cubic spline in log-diameter, flat at both ends; a gas passes);
 `FilterSeries(stages)` chains filters. `filter_transmission(net, flow_kinds, species,
 {edge: filter})` gives the species layer's `transmission` (1 − efficiency per edge and
-species). `read_prj` reads a project's constant-efficiency, particle and super filters and
-the filter on each path (`Project.edge_filters`), and `project_to_model` builds the
-`transmission` from them; gaseous filters whose efficiency depends on their loading, and UVGI
-filters, are refused by name.
+species). `read_prj` reads a project's constant-efficiency, particle, super and UVGI filters
+and the filter on each path (`Project.edge_filters`), and `project_to_model` builds the
+`transmission` from them; gaseous filters whose efficiency depends on their loading are
+refused by name.
+
+`UVGIFilter` is CONTAM's Penn State ultraviolet germicidal irradiation filter: it inactivates
+each species with the efficiency 1 − exp(−k I<sub>t</sub>), k the species'
+`uv_susceptibility` (m²/J) and I<sub>t</sub> the UV dose, the design dose
+ln(S<sub>design</sub>) / −k<sub>design</sub> scaled by the lamp's output (a polynomial in the
+air temperature and velocity, C0..C4 in percent, and optionally a lamp-age factor) and by the
+residence time F<sub>design</sub> / F. Because the dose follows the flow, the filter has no
+fixed transmission: its `efficiency(species, air)` takes an `AirThroughFilter` (mass flow,
+temperature, density and time), and the closure `FilterTransmission` writes the species
+layer's per-step `"species.transmission"` driver from the airflow layer's flows. A closure
+runs before the airflow solve, so a model with one needs `coupling="iterate"` (with the
+species layer in `iterate_tol`): each pass is fed the previous pass's flows and the step
+converges on its own. `project_to_model` builds a project with a UVGI filter that way. Air
+crossing the filter against its edge's direction gets ContamX's fixed dose of 1 J/m²
+(efficiency 1 − exp(−k)), which `project_to_model` warns about once per filter. The
+efficiency is differentiable in every parameter and in the flow; at zero flow it is 1, with a
+finite gradient.
+
+```python
+from noodl.apps.building_physics import AirThroughFilter, Species, UVGIFilter
+
+lamp = UVGIFilter(design_survival=0.1, design_velocity=2.5, design_mass_flow=0.1,
+                  design_rate_constant=0.5, output_coefficients=[50, 0, 1, 0, 0])
+bug = Species("bug", uv_susceptibility=0.2)
+air = AirThroughFilter(mass_flow=0.1, temperature=293.15, density=1.2041)
+print(round(lamp.efficiency([bug], air).item(), 4))
+```
+
+```text
+0.3834
+```
 
 ```python
 from noodl.apps.building_physics import (
@@ -1561,6 +1592,7 @@ above 0.1 % of the largest.
 | Three-zone project with kinetic reactions in two zones, 24 steps | flow rel 16 $u$, mf rel 80 $u$, floor 64 $u$ × each species' max | **9.1e-8** flow, **2.6e-7** mf |
 | One-zone stack with a filtered path, steady, Ta = 273.15 / 313.15 K | rel stack budget + 3 $u$ (20.2 / 21.2 $u$) | **6.6e-8 / 5.6e-8** |
 | Three-zone project with constant-efficiency, particle and series filters, 24 steps | flow rel 16 $u$, mf rel 72 $u$, floor 64 $u$ × each species' max | **9.1e-8** flow, **3.7e-7** mf |
+| Three-zone project with UVGI filters (one with a lamp-age model on a path whose flow a schedule cuts to 0.4 for 45 minutes, one in series with a constant-efficiency filter, one crossed against its path's direction), 24 steps | flow rel 16 $u$, floor 64 $u$ × max; mf: the implicit step's first-order error bound, derived on the run with each step's UVGI pass fractions and their float32 errors (at most 7.4e-6 relative) | **8.0e-8** flow (1.4 % of the allowance), **5.2e-7** mf (12 %) |
 | Three-zone project with deposition sinks, removal terms and NRCC emissions, 24 steps | flow rel 16 $u$, mf rel 80 $u$, floor 64 $u$ × each species' max | **9.1e-8** flow, **1.3e-7** mf |
 | One-zone stack with a pressure-driven source, 288 steps | flow rel 64 $u$, mf rel 88 $u$, floor 64 $u$ × each species' max | **4.5e-8** flow, **7.4e-8** mf |
 | Three-zone project with a fan curve (mult 1.5) on a speed schedule 1, 0.8, off (its shut-off orifice) and 1.2, 24 steps | flow rel 32 $u$, mf rel 64 $u$, floor 64 $u$ × each species' max | **1.6e-7** flow, **5.8e-8** mf |
@@ -1863,8 +1895,9 @@ two zones exchanging air and three zones in series with one left out of the spac
   `learnable=True` an optimiser can later push the roughness past that bound unchecked, so
   keep it inside the bound (a parametrisation such as a sigmoid of the diameter does so).
 - **Contaminant physics follows ContamX's subset.** Boundary-layer diffusion and
-  deposition-with-resuspension sinks, super source elements, loading-dependent gaseous filters
-  and UVGI filters, and non-trace species (which change the air density) are refused by name. A
+  deposition-with-resuspension sinks, super source elements, loading-dependent gaseous filters,
+  UVGI filters in duct networks, and non-trace species (which change the air density) are
+  refused by name. A
   species' decay constant is kept as data and not applied, as in ContamX, with a
   `ContamCompatibilityWarning` (filter it by category to silence it); use a kinetic reaction
   for a decay.

@@ -18,7 +18,9 @@ per-node storage, full-node order; that layer also writes its realised flows to
 layer's construction-time capacity stands; when given, a step or a steady solve records it
 in the state it returns), optional "<layer>.removal" (a transport layer's
 per-step first-order removal rate, 1/s, (..., n_i, K); absent, the layer's
-construction-time removal stands), "<layer>.requests" (an allocation layer's
+construction-time removal stands), optional "<layer>.transmission" (a transport layer's
+per-step transmission, (..., b_flow) or (..., b_flow, K) in its flow order; absent, the
+layer's construction-time transmission stands), "<layer>.requests" (an allocation layer's
 per-edge requested flow, required every step). Closures return driver updates; they may
 not write state keys. A transport layer whose kinds no
 potential layer provides reads its branch flows from the driver "<layer>.q", in the layer's
@@ -934,6 +936,9 @@ class Model:
             # A per-step first-order removal rate (1/s), written by a closure that owns the
             # sinks (deposition, a scheduled removal). Absent, the layer's own stands.
             removal = drv.get(f"{name}.removal")
+            # A per-step transmission, written by a closure whose filters depend on the
+            # step's flows or conditions (a UVGI filter). Absent, the layer's own stands.
+            transmission = drv.get(f"{name}.transmission")
             transfer_total = None
             # A fresh dict per layer, threaded into `steady`/`step`/
             # `step_with_transfer` as an out-parameter and read back below into
@@ -953,7 +958,8 @@ class Model:
                         else self._zero_sources(layer, like, layer.n_i)
                     )
                 x = layer.steady(
-                    q_kind, sources, xb, capacity=cap, removal=removal, diagnostics=layer_diag
+                    q_kind, sources, xb, capacity=cap, removal=removal,
+                    transmission=transmission, diagnostics=layer_diag
                 )
                 if cap is not None:
                     # The capacity this state was solved with, as a step records its own.
@@ -996,7 +1002,7 @@ class Model:
                         stepped = layer.step_with_transfer(
                             x, q_kind, sources, xb, dt / k,
                             capacity=cap_j, capacity_prev=cap_prev_j, removal=removal,
-                            diagnostics=layer_diag,
+                            transmission=transmission, diagnostics=layer_diag,
                         )
                         x = stepped.x
                         transfer_total = (
@@ -1006,7 +1012,7 @@ class Model:
                     else:
                         x = layer.step(x, q_kind, sources, xb, dt / k, capacity=cap_j,
                                        capacity_prev=cap_prev_j, removal=removal,
-                                       diagnostics=layer_diag)
+                                       transmission=transmission, diagnostics=layer_diag)
                 if cap is not None:
                     new[f"{name}.capacity"] = cap
                     made.append(f"{name}.capacity")
@@ -1541,6 +1547,7 @@ class Model:
                 x, self._kind_flows(name, state, drv), sources, xb,
                 capacity=drv.get(f"{name}.capacity"),
                 removal=drv.get(f"{name}.removal"),
+                transmission=drv.get(f"{name}.transmission"),
             )
         return out
 

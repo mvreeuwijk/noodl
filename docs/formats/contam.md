@@ -35,8 +35,15 @@ family
 `brs`, `prs`, `dvs`, `drs`, `plm` and `pkm`, attached by `project_to_model` (scaled by the record's multiplier,
 which enters the element's first coefficient, and a `ccf` record's removal coefficient too); filters on airflow paths (`Project.edge_filters`, the species layer's `transmission`):
 constant-efficiency (`cef`), particle (`pf0`, interpolated at each species' mean diameter as
-ContamX does) and super (`spf`) filter elements; a filter acts on the air crossing its path in
-either direction; duct networks: duct elements `dct_dwc` (ContamX's friction law; its `lam`
+ContamX does), super (`spf`) and Penn State UVGI (`uv1`) filter elements; a filter acts on the
+air crossing its path in either direction; a UVGI filter (`UVGIFilter`, on a path; its 14
+values, which ContamX reads as one stream whatever the line breaks, are the design
+survivability, velocity, mass flow and rate constant, the age-model flag, C0..C4, K0, K1 and
+two display units) acts on each species by its UV susceptibility (the species record's `Kuv`),
+with a dose that follows each airflow solve's flow and the upstream temperature and density
+and, with the age model, the time, so `project_to_model` writes the species layer's
+transmission with a `FilterTransmission` closure and iterates each step (`coupling="iterate"`)
+on that step's own flows; duct networks: duct elements `dct_dwc` (ContamX's friction law; its `lam`
 field has no effect, as in ContamX), `dct_plr`, `dct_fcn`, `dct_qcn`, `dct_cmf`, `dct_cvf`,
 `dct_fan`, `dct_bdq`, `dct_bdf`, `dct_fsp`, `dct_qsp`, `dct_psf`, `dct_psq`; junctions with
 their temperatures and initial concentrations and ContamX's volumes (half the length times
@@ -97,8 +104,11 @@ duct junction that is not a terminal, on a triggered (`eds`, `brs`, `plm`, `pkm`
 Darcy-Colebrook segment or on an AHS outdoor-air or exhaust path; control references in a
 steady airflow run (`simulate_project`); boundary-layer diffusion (`bls`), resuspension (`dvr`)
 and super (`sup`) source/sink elements, when a source/sink record references one; a source/sink
-record whose element or zone the file does not define; gaseous (`gf0`) and UVGI (`uv1`) filter elements,
-referenced or not; a filter that names a species the project does not simulate (when a path
+record whose element or zone the file does not define; gaseous (`gf0`) filter elements,
+referenced or not; a UVGI filter element whose age-model flag is not 0 or 1 or whose record does
+not hold exactly 14 values, and a UVGI filter on a duct segment or terminal (not measured
+against ContamX) or on a path modelled as more than one opening (a doorway: the dose needs the
+path's one flow); a filter that names a species the project does not simulate (when a path
 references it: an unreferenced filter element is read and unused), a super filter
 that contains itself, and a path whose filter number the file does not define; non-trace species; a contaminant list that is not the
 simulated species in file order; a source or kinetic reaction that names a species the project
@@ -168,6 +178,18 @@ takes its schedule's value at the step's end, as a schedule on a record does, so
 through a schedule node is the same schedule attached directly. A control value on a path is
 not clipped: 2 doubles the flow, -0.5 reverses it. A division by zero stops ContamX, and
 noodl raises naming the node.
+
+**How ContamX evaluates a UVGI filter** (measured against ContamX 3.4.1.7), and so noodl: the
+efficiency is 1 - exp(-k I_t) with the dose I_t of TN 1887r1 (equations uv-1 to uv-9), the
+temperature and density those of the path's from-zone, the velocity the path's mass flow over
+that density and the area F_design / (1.2041 u_design), and the age t in hours since the start
+of the run. The lamp output OUT_TU is clamped to 0..100 % (a negative one inactivates nothing).
+The age factor (K0 + K1 ln t) / 100 is capped at 1, which holds it at 1 until t_100 when K1 < 0
+and makes it K0 / 100 from the first step when K1 = 0; a negative age factor becomes 0.1.
+**Air crossing a UVGI filter against its path's direction** gets a fixed dose of 1 J/m2,
+whatever the filter's data (even with no lamp output): efficiency 1 - exp(-k). That is ContamX's
+fallback, not the Penn State model; noodl follows it, with one `ContamCompatibilityWarning` per
+filter the first time it happens.
 
 **`project_to_model` never builds a thermal layer**, because a `.prj` carries no thermal data. A run control that simulates no contaminants (`none`) builds no species layer and binds no source inputs.
 

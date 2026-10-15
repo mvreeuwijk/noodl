@@ -130,6 +130,7 @@ named for the physics it carries:
 | `.sources` | `"<layer>.sources"` | driver | full node order |
 | `.capacity` | `"<layer>.capacity"` | driver | the layer's active interior order |
 | `.removal` | `"<layer>.removal"` | driver | the layer's active interior order, `(n_i, K)` |
+| `.transmission` | `"<layer>.transmission"` | driver | edge order of the layer's flow kinds, `(b_flow, K)` |
 | `.storage` (allocation layers) | `"<layer>.s"` | state | full node order |
 | `.requests` (allocation layers) | `"<layer>.requests"` | driver | edge order of the layer's kind |
 
@@ -141,6 +142,11 @@ capacity, so `describe()` shows `thermal.sources` in W and `air.q` in kg/s.
 that owns sinks. It matters for species layers, where it removes a species from the air (a
 deposition); the layer's `dilution`, if it has one, adds its own rate to it. The driver is
 not carried in the state: a closure that sets it must write it every step.
+`"<layer>.transmission"` is likewise a per-step pass fraction of each flow edge (1 − a
+filter's efficiency), replacing the layer's construction-time `transmission`; a closure whose
+filters depend on the step's flows writes it (the building application's
+`FilterTransmission`, for UVGI filters). It reads the flows of the pass before, so such a model
+iterates each step (`coupling="iterate"`).
 
 The names come from each layer's `quantity`, so every application has them without code
 of its own; the solver's short spellings (`.x`, `.phi`, `.s`, `.q`) work too. Each
@@ -278,7 +284,7 @@ for issue in model.check(state, drivers_typo).issues:
 ```
 
 ```text
-[warning] unknown-layer-key: 'thermal.source' is not a driver key of layer 'thermal' (its driver keys: ['thermal.capacity', 'thermal.removal', 'thermal.sources', 'thermal.x_boundary']); did you mean 'thermal.sources'?
+[warning] unknown-layer-key: 'thermal.source' is not a driver key of layer 'thermal' (its driver keys: ['thermal.capacity', 'thermal.removal', 'thermal.sources', 'thermal.transmission', 'thermal.x_boundary']); did you mean 'thermal.sources'?
 ```
 
 ## Finding what is available

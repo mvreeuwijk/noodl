@@ -94,9 +94,12 @@ from noodl.apps.building_physics.elements import (
 )
 from noodl.apps.building_physics.epw import read_epw, write_wth
 from noodl.apps.building_physics.filters import (
+    AirThroughFilter,
     ConstantEfficiencyFilter,
     FilterSeries,
+    FilterTransmission,
     ParticleFilter,
+    UVGIFilter,
     filter_transmission,
 )
 from noodl.apps.building_physics.inputs import Input, apply_inputs, bind_inputs, scatter
@@ -166,6 +169,7 @@ from noodl.apps.building_physics.wth import Weather, read_wth
 __all__ = [
     "ContamCompatibilityWarning",
     "AirHandlerFlows",
+    "AirThroughFilter",
     "AmbientConcentrations",
     "AboveLimit",
     "Absolute",
@@ -221,6 +225,7 @@ __all__ = [
     "DepositionVelocitySink",
     "DuctNetwork",
     "FilterSeries",
+    "FilterTransmission",
     "IdealGasDensity",
     "Input",
     "KineticReaction",
@@ -230,6 +235,7 @@ __all__ = [
     "Occupant",
     "OccupantGeneration",
     "ParticleFilter",
+    "UVGIFilter",
     "PeakEmissionSource",
     "PowerLawDecaySource",
     "Presence",

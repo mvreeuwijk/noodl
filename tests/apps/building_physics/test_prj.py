@@ -13,7 +13,9 @@ from noodl.apps.building_physics.air_handling import AirHandlerFlows
 from noodl.apps.building_physics.filters import (
     ConstantEfficiencyFilter,
     FilterSeries,
+    FilterTransmission,
     ParticleFilter,
+    UVGIFilter,
 )
 from noodl.apps.building_physics.occupants import OccupantGeneration
 from noodl.apps.building_physics.prj import (
@@ -1069,14 +1071,77 @@ def test_an_unreferenced_filter_element_is_read_and_unused():
     assert project_to_model(p)[0].transport["species"].transmission.eq(1.0).all()
 
 
-def test_gaseous_and_uvgi_filter_elements_are_refused(tmp_path):
+def test_a_gaseous_filter_element_is_refused(tmp_path):
     text = SS_STACK.read_text()
     with pytest.raises(ValueError, match=r"filter element 1.*'gf0'.*loading"):
         read_prj(_variant(text, "1 cef 1 0.1 100 0 0 filt", "1 gf0 1 0.1 100 0 0 filt",
                           tmp_path))
-    with pytest.raises(ValueError, match=r"filter element 1.*'uv1'.*UVGI"):
-        read_prj(_variant(text, "1 cef 1 0.1 100 0 0 filt", "1 uv1 1 0.1 100 0 0 filt",
-                          tmp_path))
+
+
+UVGI = DATA / "uvgi_three_zone.prj"
+UV_RECORD = "  0.1 0.25 0.01 0.002 1\n  40 1 2 -0.01 -0.02\n  100 -10 0 0\n"
+
+
+def test_uvgi_filter_elements_are_read_as_one_stream_of_values(tmp_path):
+    """ContamX reads a `uv1` element's 14 values whatever the line breaks (measured): S, u,
+    F and k of the design, the age-model flag, C0..C4, K0, K1 and two display units."""
+    p = read_prj(UVGI)
+    assert [s.uv_susceptibility for s in p.species_records] == [1e-3, 2e-2]
+    by_path = {q.nr: q.filter_nr for q in p.paths}
+    assert by_path == {1: 1, 2: 3, 3: 2, 4: 0}
+    flt = {type(f).__name__ for f in p.edge_filters.values()}
+    assert flt == {"UVGIFilter", "FilterSeries"}
+    (aged,) = [f for f in p.edge_filters.values() if f.name == "uvAged"]
+    assert [aged.design_survival.item(), aged.design_velocity.item(),
+            aged.design_mass_flow.item(), aged.design_rate_constant.item()] == [
+        0.1, 0.25, 0.01, 0.002]
+    assert aged.output_coefficients.tolist() == [40.0, 1.0, 2.0, -0.01, -0.02]
+    assert aged.age_coefficients.tolist() == [100.0, -10.0]
+    (series,) = [f for f in p.edge_filters.values() if isinstance(f, FilterSeries)]
+    assert series.stages[1].age_coefficients is None             # flag 0: no age model
+    one_line = UV_RECORD.replace("\n  ", " ")
+    q = read_prj(_variant(UVGI.read_text(), UV_RECORD, one_line, tmp_path))
+    (same,) = [f for f in q.edge_filters.values() if f.name == "uvAged"]
+    assert same.output_coefficients.tolist() == aged.output_coefficients.tolist()
+
+
+def test_malformed_uvgi_records_are_refused(tmp_path):
+    text = UVGI.read_text()
+    with pytest.raises(ValueError, match=r"element 1 \('uvAged'\): value 5 must be an integer"):
+        read_prj(_variant(text, "0.002 1\n", "0.002 1.5\n", tmp_path))
+    with pytest.raises(ValueError, match=r"element 1 \('uvAged'\): the age-model flag"):
+        read_prj(_variant(text, "0.002 1\n", "0.002 2\n", tmp_path))
+    with pytest.raises(ValueError, match=r"element 1 \('uvAged'\) needs 14 values, got 15"):
+        read_prj(_variant(text, "100 -10 0 0\n", "100 -10 0 0 0\n", tmp_path))
+    with pytest.raises(ValueError, match=r"filter element 1:.*design_survival must be"):
+        read_prj(_variant(text, "  0.1 0.25 0.01", "  1.5 0.25 0.01", tmp_path))
+
+
+def test_a_uvgi_filter_where_noodl_physics_cannot_follow_contamx_is_refused(tmp_path):
+    duct = DUCTS.read_text().replace("1 cef 1 0.1 100 0 0 sarin30\n\n  1\n  sarin 0.3\n",
+                                     "1 uv1 1 0.1 100 0 0 uv\n\n" + UV_RECORD)
+    with pytest.raises(ValueError, match=r"duct segment 1 carries the UVGI filter 'uv'"):
+        read_prj(_variant(duct, "", "", tmp_path))
+
+
+def test_a_uvgi_project_iterates_each_step_on_its_own_flows():
+    p = read_prj(UVGI)
+    model, state, drivers = project_to_model(p)
+    assert model.coupling == "iterate" and set(model.iterate_tol) == {"species"}
+    (closure,) = [c for c in model.closures if isinstance(c, FilterTransmission)]
+    assert model.closures[-1] is closure
+    assert [type(f) for _, _, f in closure.varying] == [UVGIFilter, FilterSeries, UVGIFilter]
+    plain = project_to_model(read_prj(FILTERS))[0]
+    assert plain.coupling == "pingpong"
+
+
+def test_air_crossing_a_uvgi_filter_backwards_is_warned_once_per_filter():
+    from noodl.apps.building_physics.simulation import simulate_project
+
+    p = read_prj(UVGI)
+    with pytest.warns(ContamCompatibilityWarning, match=r"'uvDesign'.*1 J/m2") as caught:
+        simulate_project(p)
+    assert len([w for w in caught if issubclass(w.category, ContamCompatibilityWarning)]) == 1
 
 
 def test_a_particle_filter_element_without_flat_ends_is_refused_by_number(tmp_path):
@@ -1834,3 +1899,19 @@ def test_an_occupant_breathing_where_the_layer_holds_no_air_is_refused_at_build(
     assert p.occupants[0].generation == {}
     with pytest.raises(ValueError, match=r"occupant 'occupant 1'.*breathe"):
         project_to_model(p)
+
+
+def test_a_steady_uvgi_project_uses_the_transmission_at_its_own_flows():
+    p = read_prj(UVGI)
+    model, state, drivers = project_to_model(p)
+    with pytest.warns(ContamCompatibilityWarning):
+        out = prj_steady(model, state, drivers)
+    (closure,) = [c for c in model.closures if isinstance(c, FilterTransmission)]
+    rho = drivers["P_ref"] / (R_AIR * drivers["T"])
+    tau = closure(out, {**drivers, "rho": rho})["species.transmission"]
+    layer = model.transport["species"]
+    q = model.potential["air"].flows_of_kind(out["air.q"], layer.flow_kinds)
+    sources = torch.zeros(model.net.n, 2, dtype=F64)
+    expected = layer.steady(q, sources, drivers["species.x_boundary"], transmission=tau)
+    torch.testing.assert_close(out["species.x"], expected, rtol=1e-12, atol=0)
+    assert bool((tau < 1).any())

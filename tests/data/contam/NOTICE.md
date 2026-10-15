@@ -42,6 +42,13 @@ Two of NIST's one-zone stack projects are present:
   a constant-efficiency filter (sarin 0.3) on path 1, a particle filter (a six-point curve)
   on path 3, which the air crosses against the path's declared direction, and both in
   series on path 2. Two hours at 300 s. Verified to load and run in ContamX 3.4.1.7.
+- `uvgi_three_zone.prj` is written for this repository from `filters_three_zone.prj`, not an
+  official sample. Its species carry UV susceptibilities (sarin 1e-3 m2/J, `pm` 2e-2 m2/J) and
+  zone one is at 298.15 K. Three filters: a Penn State UVGI filter with a lamp-age model
+  (`uvAged`) on path 1, whose flow a day schedule cuts to 0.4 from 00:45 to 01:30; a
+  constant-efficiency filter (sarin 0.3) in series with a second UVGI filter (`uvDesign`, no
+  age model) on path 2; and `uvDesign` alone on path 3, which the air crosses against the
+  path's declared direction. Two hours at 300 s. Verified to load and run in ContamX 3.4.1.7.
 - `sinks_three_zone.prj` is written for this repository from NIST's
   `valThreeZonesWthCtm-UseApi.prj`, not an official sample. Zones start at 1e-4 kg/kg sarin
   with clean outside air; zone one has a deposition velocity sink (1e-3 m/s on 10 m2,
