@@ -101,7 +101,14 @@ from noodl.apps.building_physics.filters import (
 )
 from noodl.apps.building_physics.inputs import Input, apply_inputs, bind_inputs, scatter
 from noodl.apps.building_physics.modelica import read_modelica
-from noodl.apps.building_physics.occupants import Occupancy, OccupancyDay, Presence
+from noodl.apps.building_physics.occupants import (
+    Occupancy,
+    OccupancyDay,
+    Occupant,
+    OccupantGeneration,
+    Presence,
+    occupant_inputs,
+)
 from noodl.apps.building_physics.prj import (
     ContamCompatibilityWarning,
     Project,
@@ -210,6 +217,8 @@ __all__ = [
     "LinearDensity",
     "Occupancy",
     "OccupancyDay",
+    "Occupant",
+    "OccupantGeneration",
     "ParticleFilter",
     "PeakEmissionSource",
     "PowerLawDecaySource",
@@ -250,6 +259,7 @@ __all__ = [
     "node_mass_fraction",
     "node_pressure",
     "node_temperature",
+    "occupant_inputs",
     "orifice_elements_from_edges",
     "project_to_model",
     "read_ctm",

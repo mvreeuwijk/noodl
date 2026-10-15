@@ -12,6 +12,11 @@ exposure it reports and in the contaminants an occupant generates (measured on C
 1 at the occupied node at an instant (the left limit at a move, as every schedule), and
 over a step (t0, t1] the fraction of the step spent at each node (`step_mean`), which
 `apply_inputs` writes when it is given the step's start.
+
+An `Occupant` follows an occupancy and generates contaminants at fixed rates (kg/s per
+person, times `multiplier` persons, times an optional schedule). `occupant_inputs` gives the
+inputs that write its presence and schedules for `simulate`, and the `OccupantGeneration`
+closure adds the generation to the species sources.
 """
 
 from __future__ import annotations
@@ -20,6 +25,7 @@ from collections.abc import Hashable, Sequence
 
 import torch
 
+from noodl.apps.building_physics.inputs import Input
 from noodl.apps.building_physics.schedules import (
     N_DAY_TYPES,
     Calendar,
@@ -28,6 +34,7 @@ from noodl.apps.building_physics.schedules import (
     _DayTypeCycle,
     _piecewise,
 )
+from noodl.apps.building_physics.sources import _add_sources, _check_emitting_node
 
 Tensor = torch.Tensor
 F64 = torch.float64
@@ -151,3 +158,194 @@ class Presence:
     def breakpoints(self, lo: float, hi: float, calendar: Calendar) -> list[float]:
         """The times in (lo, hi) (s since the start) where the occupant may move."""
         return self.occupancy.breakpoints(lo, hi, calendar)
+
+
+class Occupant:
+    """A person (or `multiplier` people) following an `Occupancy`, generating each species in
+    `generation` (kg/s per person; quanta/s for a quanta species) while in the building.
+
+    `schedules` maps a generated species to a signal (a `WeekSchedule`, a `TimeSeries`)
+    multiplying its rate, taken at the end of each step as every schedule. The generation
+    goes to the zone the occupant is in, split by the time spent in each zone over the step
+    (measured on ContamX). `name` keys the occupant's drivers: `"presence.<name>"` and
+    `"generation_multiplier.<name>"`; `description` is free text.
+    """
+
+    def __init__(self, occupancy: Occupancy, *, generation=None, multiplier=1.0,
+                 schedules=None, name: str = "occupant", description: str = "") -> None:
+        self.occupancy, self.name, self.description = occupancy, str(name), str(description)
+        self.generation = {str(k): torch.as_tensor(v, dtype=F64)
+                           for k, v in dict(generation or {}).items()}
+        self.multiplier = torch.as_tensor(multiplier, dtype=F64)
+        self.schedules = dict(schedules or {})
+        extra = sorted(set(self.schedules) - set(self.generation))
+        if extra:
+            raise ValueError(f"Occupant {self.name!r}: schedules for {extra}, which it does "
+                             f"not generate")
+
+    def __repr__(self) -> str:
+        return f"Occupant({self.name!r}, generation={sorted(self.generation)})"
+
+    @property
+    def presence_key(self) -> str:
+        """The driver of the fraction of each step the occupant spends at each node."""
+        return f"presence.{self.name}"
+
+    @property
+    def multiplier_key(self) -> str:
+        """The driver of the schedule multiplier of each species the occupant generates."""
+        return f"generation_multiplier.{self.name}"
+
+
+class _Stacked:
+    """Scalar signals (None: always 1) as one vector signal."""
+
+    def __init__(self, signals) -> None:
+        self.signals = list(signals)
+
+    def value(self, t: float, calendar: Calendar) -> Tensor:
+        one = torch.ones((), dtype=F64)
+        return torch.stack([one if s is None else
+                            torch.as_tensor(s.value(t, calendar), dtype=F64).reshape(())
+                            for s in self.signals])
+
+    def breakpoints(self, lo: float, hi: float, calendar: Calendar) -> list[float]:
+        pts: set[float] = set()
+        for s in self.signals:
+            if s is not None:
+                pts.update(s.breakpoints(lo, hi, calendar))
+        return sorted(pts)
+
+
+def occupant_inputs(occupants: Sequence[Occupant], net) -> list[Input]:
+    """The inputs `simulate` needs for the occupants that generate something: each one's
+    presence on `"presence.<name>"` (a step mean, the fraction of the step at each node of
+    `net`) and, when it has schedules, the schedule values (1 for an unscheduled species,
+    in the order of its `generation`) on `"generation_multiplier.<name>"`."""
+    out: list[Input] = []
+    for occ in occupants:
+        if not occ.generation:
+            continue
+        out.append(Input(Presence(occ.occupancy, net, name=occ.name), occ.presence_key,
+                         name=f"{occ.name} location"))
+        if occ.schedules:
+            signals = [occ.schedules.get(s) for s in occ.generation]
+            out.append(Input(_Stacked(signals), occ.multiplier_key,
+                             name=f"{occ.name} generation schedules"))
+    return out
+
+
+def _occupant_nodes(occupant: Occupant, layer, what: str) -> list[int]:
+    """The nodes (indices into `layer.net.nodes`) of every zone `occupant` enters, each
+    refused by name where `layer` holds no air: not a node (KeyError), the boundary, a node
+    no flow edge of the layer touches, or a storage-free node (ValueError)."""
+    nodes = []
+    for zone in sorted(occupant.occupancy.zones, key=str):
+        try:
+            node = int(layer.net.node_index(zone))
+        except KeyError as exc:
+            raise KeyError(f"{what}: occupant {occupant.name!r}: zone {zone!r} is not a node "
+                           f"of the network") from exc
+        _check_emitting_node(layer, node, f"{what}: occupant {occupant.name!r}")
+        nodes.append(node)
+    return nodes
+
+
+class OccupantGeneration:
+    """Closure: the occupants' generation added to `"<layer>.sources"` (kg/s, full node
+    order) of the species `layer` (a `TransportLayer`).
+
+    An occupant's rate per species (generation x multiplier x its entry of
+    `"generation_multiplier.<name>"`, 1 when that driver is absent) is spread over the nodes
+    by `"presence.<name>"`, the fraction of the step spent at each node, which
+    `occupant_inputs` writes. The result is added to what the sources already hold (a
+    driver, `SpeciesSources`), so the order of the two closures does not matter. With one
+    species the sum keeps the layout of what was there (with or without the species axis);
+    alone it is `(..., n, K)`.
+
+    `species` are the layer's species names, in its order: `layer.species_names`, or given
+    for a layer that names none. Refused by name at construction: occupants whose names
+    repeat, a generated species the layer does not carry (KeyError), and a zone of a
+    generating occupant that is not a node (KeyError), is the layer's boundary (the
+    ambient), is a node no flow edge of the layer touches, or is a storage-free node: the
+    layer holds no air there to generate into. Occupants who generate nothing are ignored.
+    """
+
+    def __init__(self, occupants: Sequence[Occupant], *, layer,
+                 species: Sequence[str] | None = None) -> None:
+        names = [o.name for o in occupants]
+        dup = sorted({n for n in names if names.count(n) > 1})
+        if dup:
+            raise ValueError(f"OccupantGeneration: occupant names {dup} repeat; each needs "
+                             f"its own")
+        self.layer = layer
+        self.species = self._species(layer, species)
+        self.occupants = [o for o in occupants if o.generation]
+        for o in self.occupants:
+            unknown = sorted(set(o.generation) - set(self.species))
+            if unknown:
+                raise KeyError(f"OccupantGeneration: occupant {o.name!r} generates {unknown}, "
+                               f"which layer {layer.name!r} does not carry (species "
+                               f"{self.species})")
+            _occupant_nodes(o, layer, "OccupantGeneration")
+        self._columns = [torch.tensor([self.species.index(s) for s in o.generation])
+                         for o in self.occupants]
+        self.key = f"{layer.name}.sources"
+        self.inputs = tuple(k for o in self.occupants
+                            for k in (o.presence_key, o.multiplier_key)) + (self.key,)
+        self.outputs = (self.key,)
+
+    @staticmethod
+    def _species(layer, species) -> list[str]:
+        named = None if layer.species_names is None else list(layer.species_names)
+        if species is None:
+            if named is None:
+                raise ValueError(f"OccupantGeneration: layer {layer.name!r} names no species; "
+                                 f"give them with species=[...], in the layer's order")
+            return named
+        given = [str(s) for s in species]
+        if named is not None and given != named:
+            raise ValueError(f"OccupantGeneration: species {given} differ from layer "
+                             f"{layer.name!r}'s {named}")
+        if len(given) != layer.n_species:
+            raise ValueError(f"OccupantGeneration: layer {layer.name!r} carries "
+                             f"{layer.n_species} species, got the names {given}")
+        return given
+
+    def __repr__(self) -> str:
+        return f"OccupantGeneration({[o.name for o in self.occupants]})"
+
+    @property
+    def input_specs(self) -> dict[str, dict]:
+        """Each generating occupant's presence and schedule multipliers."""
+        specs: dict[str, dict] = {}
+        for o in self.occupants:
+            specs[o.presence_key] = dict(
+                description=f"fraction of the step occupant {o.name!r} spends at each node",
+                unit="-", over="nodes")
+            specs[o.multiplier_key] = dict(
+                description=f"schedule multiplier of each species occupant {o.name!r} "
+                            f"generates", unit="-", over=list(o.generation), required=False)
+        return specs
+
+    def __call__(self, state, drivers):
+        K = len(self.species)
+        total = None
+        for o, cols in zip(self.occupants, self._columns, strict=True):
+            try:
+                presence = torch.as_tensor(drivers[o.presence_key], dtype=F64)
+            except KeyError as exc:
+                raise KeyError(f"OccupantGeneration: driver {o.presence_key!r} is missing; "
+                               f"simulate writes it from occupant_inputs(...)") from exc
+            rate = torch.stack(list(o.generation.values())) * o.multiplier
+            mult = drivers.get(o.multiplier_key)
+            if mult is not None:
+                rate = rate * torch.as_tensor(mult, dtype=F64)
+            per_species = torch.zeros(rate.shape[:-1] + (K,), dtype=F64).index_copy(
+                -1, cols, rate)
+            g = presence.unsqueeze(-1) * per_species.unsqueeze(-2)
+            total = g if total is None else total + g
+        if total is None:
+            return {}
+        return {self.key: _add_sources(drivers.get(self.key), total, own_axis=True,
+                                       n_species=K)}

@@ -1005,7 +1005,7 @@ def test_simulate_hands_step_mean_signals_the_steps_start():
     seen = []
 
     def spy(state, drivers):
-        seen.append(drivers["presence.v"].clone())
+        seen.append((float(drivers["time"]), drivers["presence.v"].clone()))
         return {}
 
     model.closures.append(spy)
@@ -1015,8 +1015,11 @@ def test_simulate_hands_step_mean_signals_the_steps_start():
     one, two = model.net.node_index("one"), model.net.node_index("two")
     simulate(model, state, drivers, [0.0, 300.0, 600.0], inputs=inp,
              land_on_breakpoints=False, **TIGHT)
-    assert (seen[-1][one].item(), seen[-1][two].item()) == (0.5, 0.5)
+    last = seen[-1][1]
+    assert (last[one].item(), last[two].item()) == (0.5, 0.5)
     seen.clear()
     simulate(model, state, drivers, [0.0, 300.0, 600.0], inputs=inp, **TIGHT)
-    assert seen[-1][two].item() == 1.0 and seen[-1].sum().item() == 1.0   # split at 450 s
-    assert any(s[one].item() == 1.0 for s in seen[1:-1])
+    last = seen[-1][1]
+    assert last[two].item() == 1.0 and last.sum().item() == 1.0   # split at 450 s
+    at_move = [p for t, p in seen if t == 450.0]      # the sub-step (300, 450] ends there
+    assert at_move and all(p[one].item() == 1.0 and p.sum().item() == 1.0 for p in at_move)

@@ -884,8 +884,9 @@ Place `SpeciesSources` after the closures that write the density and the capacit
 `"species.capacity"` and `"rho_amb"` as they stand when it runs, and a hand-built model that
 lists it earlier uses stale values.
 
-`SpeciesSources(sources, species=..., layer=...)` is the closure that sums the sources into the
-species layer's `"species.sources"` each step, each on its own species. It evaluates them at
+`SpeciesSources(sources, species=..., layer=...)` is the closure that adds the sources to the
+species layer's `"species.sources"` each step, each on its own species, keeping what a driver
+or another closure (an occupant's generation) put there. It evaluates them at
 `drivers["time"]` (set by `simulate` to the step's end) and multiplies each by its entry of
 `"species.source_multiplier"`, one per source, which is where a schedule or a control acts. A
 `BurstSource` releases its mass over the steps that overlap its burst (it reads the step length
@@ -951,6 +952,36 @@ print({n: round(v, 2) for n, v in zip(model.net.nodes, step.tolist()) if v})
 
 ```text
 {'one': 0.4, 'two': 0.6}
+```
+
+An `Occupant(occupancy, generation={"CO2": 5.2e-6}, multiplier=2.0, schedules=...,
+name="staff")` generates each species at the given rate (kg/s per person, times `multiplier`
+persons, times its optional schedule, a signal per species) in the zone it is in. A move in
+the middle of a step splits that step's generation by the time spent in each zone, as ContamX
+does. Generation reaches the model through the `OccupantGeneration(occupants, layer=...)`
+closure on the species layer, which adds it to `"species.sources"` (before or after
+`SpeciesSources`, which adds too), and the inputs `occupant_inputs(occupants, net)` gives
+`simulate`: each occupant's presence on `"presence.<name>"` and its schedules on
+`"generation_multiplier.<name>"`. A zone where the layer holds no air is refused by name when
+the closure is built: the ambient, a zone no airflow path reaches, or a storage-free node such
+as a zero-volume plenum. Add the closure before the model's first run.
+
+```python
+from noodl.apps.building_physics import (
+    Occupant, OccupantGeneration, occupant_inputs, project_to_model, read_prj, simulate,
+)
+
+model, state, drivers = project_to_model(read_prj("valThreeZonesWthCtm-UseApi.prj"))
+day = OccupancyDay([0.0, 450.0, 86400.0], ["one", "two", "two"])    # moves at 00:07:30
+staff = Occupant(Occupancy([day]), generation={"sarin": 1e-6}, multiplier=2.0, name="staff")
+model.closures.append(OccupantGeneration([staff], layer=model.transport["species"]))
+out = simulate(model, state, drivers, torch.arange(4, dtype=torch.float64) * 300.0,
+               inputs=occupant_inputs([staff], model.net), land_on_breakpoints=False)
+print([f"{x:.3e}" for x in out["species.x"][-1, :, 0].tolist()])   # zones one, two, three
+```
+
+```text
+['2.014e-06', '1.401e-06', '5.376e-08']
 ```
 
 ### Species and reactions

@@ -234,10 +234,45 @@ class PeakEmissionSource(_NodeSource):
         return self.generation(t, x)
 
 
+def _check_emitting_node(layer, node: int, what: str) -> None:
+    """Refuse `node` (an index into `layer.net.nodes`) as a place to emit into or remove
+    from: the layer's boundary (the ambient), a node no flow edge of the layer touches, or
+    one of its storage-free nodes. `what` names the emitter in the message."""
+    nodes = layer.net.nodes
+    name = nodes[node]
+    if node in set(layer.boundary_idx.tolist()):
+        raise ValueError(f"{what} is on the boundary node {name!r}: a boundary (the "
+                         f"ambient) holds no zone air to emit into or remove from")
+    if node in set(layer.inactive_idx.tolist()):
+        raise ValueError(f"{what} is on node {name!r}, which no flow edge of the layer "
+                         f"{layer.name!r} touches: the layer holds no concentration there")
+    if node in set(layer.interior_idx[layer.storage_free_mask].tolist()):
+        raise ValueError(f"{what} is on the storage-free node {name!r} of the layer "
+                         f"{layer.name!r}: it holds no air to emit into or remove from, so "
+                         f"put it in a zone that stores air")
+
+
+def _add_sources(base, own: torch.Tensor, *, own_axis: bool, n_species: int) -> torch.Tensor:
+    """`own` (kg/s, full node order) added to `base`, what `"<layer>.sources"` already
+    holds (None: nothing). With one species either may lack the species axis; the sum keeps
+    `base`'s layout."""
+    if base is None:
+        return own
+    base = torch.as_tensor(base, dtype=own.dtype)
+    if n_species == 1:
+        base_axis = base.shape[-1] == 1         # a network has at least two nodes
+        if base_axis and not own_axis:
+            own = own.unsqueeze(-1)
+        elif own_axis and not base_axis:
+            own = own[..., 0]
+    return base + own
+
+
 class SpeciesSources:
     """Closure: every source's generation summed into `"<layer>.sources"` (kg/s, full node
-    order) and every removal coefficient into `"<layer>.removal"` (1/s, active interior
-    order), each times its entry of `"<layer>.source_multiplier"`, on its own species.
+    order), added to what an earlier closure or a driver put there, and every removal
+    coefficient into `"<layer>.removal"` (1/s, active interior order), each times its entry
+    of `"<layer>.source_multiplier"`, on its own species.
 
     `sources` follow the protocol of this module: plain callables `source(t, x_full)`, or
     objects with `generation` and optionally `removal`; a source with `step_integrated = True`
@@ -253,12 +288,14 @@ class SpeciesSources:
     multiplier (one per source, batched like any driver) is where a schedule or a control
     acts: CONTAM's S = mult ctrl (G - R C), a sink included.
 
-    The per-step `"<layer>.removal"` replaces the layer's construction-time `removal`, so a
-    layer with a nonzero one is refused when a source has a removal part. Refused by name
-    at construction too: an object that is neither a plain callable nor has `generation`;
-    a source on a boundary node (the ambient holds no zone air), on a node no flow edge
-    of the layer touches, or on a storage-free node of the layer (a zero-volume plenum holds
-    no air); a deposition velocity sink on a node without a positive volume.
+    The generation is added, not written over: an `OccupantGeneration` on the same layer
+    may run before or after this closure. The per-step `"<layer>.removal"` replaces the
+    layer's construction-time `removal`, so a layer with a nonzero one is refused when a
+    source has a removal part. Refused by name at construction too: an object that is
+    neither a plain callable nor has `generation`; a source on a boundary node (the ambient
+    holds no zone air), on a node no flow edge of the layer touches, or on a storage-free
+    node of the layer (a zero-volume plenum holds no air); a deposition velocity sink on a
+    node without a positive volume.
 
     A source with `needs_pressure_difference = True` (the pressure-driven source) gets
     P_ambient - P at each node's reference height (Pa), from `state[pressure_key]` with
@@ -296,7 +333,7 @@ class SpeciesSources:
             self._check_pressure_reading()
         self.volumes = torch.as_tensor(layer.net.node_attr("volume", default=0.0), dtype=F64)
         self._check_sources()
-        self.inputs = ("time", self.key, self.capacity_key) + (
+        self.inputs = ("time", self.key, self.capacity_key, f"{layer.name}.sources") + (
             ("rho_amb",) if self.reads_solved_pressure else ())
         self.outputs = (f"{layer.name}.sources",) + (
             (f"{layer.name}.removal",) if self.removes else ())
@@ -325,9 +362,6 @@ class SpeciesSources:
     def _check_sources(self) -> None:
         lay = self.layer
         nodes = lay.net.nodes
-        boundary = set(lay.boundary_idx.tolist())
-        inactive = set(lay.inactive_idx.tolist())
-        storage_free = set(lay.interior_idx[lay.storage_free_mask].tolist())
         for label, src in zip(self.names, self.sources, strict=True):
             what = f"SpeciesSources: {label} ({type(src).__name__})"
             if not (hasattr(src, "generation") or callable(src)):
@@ -338,18 +372,8 @@ class SpeciesSources:
             node = int(src.node)
             if not 0 <= node < len(nodes):
                 raise ValueError(f"{what}: node {node} is not in the network")
+            _check_emitting_node(lay, node, what)
             name = nodes[node]
-            if node in boundary:
-                raise ValueError(f"{what} is on the boundary node {name!r}: a boundary (the "
-                                 f"ambient) holds no zone air to emit into or remove from")
-            if node in inactive:
-                raise ValueError(f"{what} is on node {name!r}, which no flow edge of the "
-                                 f"layer {lay.name!r} touches: the layer holds no "
-                                 f"concentration there")
-            if node in storage_free:
-                raise ValueError(f"{what} is on the storage-free node {name!r} of the layer "
-                                 f"{lay.name!r}: it holds no air to emit into or remove from, "
-                                 f"so put the source in a zone that stores air")
             if getattr(src, "needs_volume", False) and not self.volumes[node] > 0:
                 raise ValueError(f"{what} is on node {name!r}, which has no positive volume: "
                                  f"the density the sink needs is the air mass over it")
@@ -438,7 +462,9 @@ class SpeciesSources:
             if hasattr(src, "removal"):
                 rem[k] = rem[k] + m * src.removal(t, xk, mass, density)
         sources = torch.stack(gen, dim=-1)
-        out = {f"{name}.sources": sources if axis else sources[..., 0]}
+        own = sources if axis else sources[..., 0]
+        out = {f"{name}.sources": _add_sources(drivers.get(f"{name}.sources"), own,
+                                               own_axis=axis, n_species=K)}
         if self.removes:
             R = torch.stack(rem, dim=-1).index_select(-2, lay.interior_idx)
             # A storage-free node may have zero capacity, and no source sits on one (refused

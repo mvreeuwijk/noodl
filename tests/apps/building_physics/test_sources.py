@@ -205,6 +205,20 @@ def test_a_single_species_state_without_a_species_axis_and_a_batched_multiplier(
     assert out[0, 1].item() == 1e-6 and out[1].abs().sum().item() == 0.0
 
 
+def test_the_sources_add_to_what_the_drivers_already_hold_in_their_layout():
+    """Another closure (an occupant's generation) or a driver may have put sources there
+    first: they are kept, in their own layout with or without the species axis."""
+    srcs = SpeciesSources([ConstantSource(1, 1e-6)], species=[0], layer=_layer(1))
+    for x, base in ((torch.zeros(2, 1, dtype=F64), torch.tensor([0.0, 0.0, 3e-6], dtype=F64)),
+                    (torch.zeros(2, dtype=F64), torch.tensor([[0.0], [0.0], [3e-6]],
+                                                             dtype=F64))):
+        out = srcs({"species.x": x}, {**_drivers([1.0], 1),
+                                      "species.sources": base})["species.sources"]
+        assert out.shape == base.shape
+        assert out.flatten().tolist() == [0.0, 1e-6, 3e-6]
+    assert "species.sources" in srcs.inputs
+
+
 def test_a_hand_driven_model_without_time_gets_a_named_error():
     srcs = SpeciesSources([ConstantSource(1, 1e-6)], species=[0], layer=_layer(1))
     d = _drivers([1.0], 1)
