@@ -540,6 +540,12 @@ class MnaSystem:
             self._check_frequency(drivers, [
                 v.shape[:-1] for v in (phi_boundary, sources, phi0, q0) if v is not None])
         ctx = self._context(mode, dt, t, integration, history, drivers)
+        if newton_kwargs.get("line_search") == "convex":
+            raise ValueError(
+                f"PotentialFlowLayer {layer.name!r}: line_search='convex' needs a residual "
+                f"that is the gradient of a convex function, which a Modified Nodal Analysis "
+                f"residual is not; use the default line search"
+            )
         requested = newton_kwargs.pop("method", layer.linear_solver)
         if requested == "cg":
             raise ValueError(

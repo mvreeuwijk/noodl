@@ -69,7 +69,7 @@ pythonpath = ["src", "."]
 addopts = "--cov=noodl --cov-report=term-missing --cov-fail-under=90 -m \"not slow\""
 markers = [
     "slow: marks tests as slow (excluded by default; run with -m slow to include them)",
-    "external: needs an external engine or package (contamxpy); skipped when unavailable",
+    "external: needs an external engine or package (contamxpy), or MATPOWER case files fetched over the network; skipped when unavailable",
 ]
 filterwarnings = [
     "error::DeprecationWarning:noodl.apps.street_aq",

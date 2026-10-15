@@ -411,7 +411,7 @@ def input_field(
     model: Model, key: str, *, description: str, unit: str = "", over=None,
     required: bool = True, ordering: str | None = None,
 ) -> Field:
-    """A `Field` for an input a closure, reaction, element or drive reads itself (a wind
+    """A `Field` for an input a closure, reaction, law or drive reads itself (a wind
     speed, an inflow), as a closure's `input_specs` or a builder's `model.input_specs`
     declares it.
 
@@ -697,7 +697,7 @@ class LayerRefs(Mapping[str, LayerRef]):
     Item access works for every name; attribute access for names that are identifiers.
     `closure_state` maps each closure-carried state key to a `Field` when its closure
     declares the labels (a `key_labels` attribute, `{key: labels}`), else to the plain key.
-    `inputs` maps each input a closure, reaction, element or drive reads itself -- a wind
+    `inputs` maps each input a closure, reaction, law or drive reads itself -- a wind
     speed, an inflow, a photolysis rate -- to its `Field`, as the closure's or reaction's
     `input_specs`, or the builder's `model.input_specs`, declares it (`input_field`).
     """
@@ -761,7 +761,7 @@ class LayerRefs(Mapping[str, LayerRef]):
 
     def fields(self) -> dict[str, Field | str]:
         """Every key this model knows the layout of: layer keys, closure-carried keys and
-        the declared inputs of its closures, reactions, elements and drives."""
+        the declared inputs of its closures, reactions, laws and drives."""
         out: dict[str, Field | str] = {}
         for ref in self._refs.values():
             for f in ref.fields.values():
@@ -782,7 +782,7 @@ class LayerRefs(Mapping[str, LayerRef]):
         for key, f in self.closure_state.items():
             parts.append(f.describe() if isinstance(f, Field) else f"{key!r} (closure state)")
         if self.inputs:
-            parts.append("Inputs read by the closures, reactions, elements and drives:\n"
+            parts.append("Inputs read by the closures, reactions, laws and drives:\n"
                          + "\n".join(f.describe() for f in self.inputs.values()))
         return "\n\n".join(parts)
 

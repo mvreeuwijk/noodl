@@ -108,7 +108,7 @@ class _DiagonalShifted:
 
 class PotentialFlowLayer:
     """Flows driven by a potential (pressure, head): solves nodal conservation
-    `A_I g(A^T phi) = s_I` for the interior potentials by Newton's method, with the law
+    `A_I g(A^T phi) = s_I` for the interior potentials by Newton's method, with the constitutive
     laws on its edge kinds, drives added to the potential differences, and prescribed
     potentials at its boundary nodes; differentiable through the converged solution.
     `flow_unit` is reported by `model.refs`, never used numerically.
@@ -134,12 +134,15 @@ class PotentialFlowLayer:
     result is the same root to the Newton tolerance (not bitwise: the two Jacobians may
     differ at a kink), returned detached as it would be anyway. It is opt-in because it
     trusts every ``dflow`` to be the derivative of its ``flow`` (the sewer dynamic wave sets
-    it: its laws' ``dflow`` are exact).
+    it: its laws' ``dflow`` are exact). It has no effect on a layer solved by Modified Nodal
+    Analysis, whose solve already assembles the analytic Jacobian.
 
     `newton_defaults` (default none) are Newton keywords (`solvers.newton.newton`) every
     `solve` of this layer uses unless the call gives its own, for laws that need them: the
     sewer dynamic wave sets ``line_search="convex"`` and ``step_floor`` (its kinked laws are
-    each non-decreasing, so the residual is the gradient of a convex function)."""
+    each non-decreasing, so the residual is the gradient of a convex function). A layer
+    solved by Modified Nodal Analysis refuses ``line_search="convex"``, by keyword or here: its
+    residual is not the gradient of a convex function."""
 
     def __init__(
         self,
@@ -843,7 +846,7 @@ class PotentialFlowLayer:
         # k stays unbatched (b,) even when `rhs` is batched via phi_boundary/sources.
         # Broadcasting both to their common batch shape first keeps the operator's own batch
         # shape and the right-hand side's in agreement, so the solve is one system per batch
-        # law rather than one system with several right-hand sides.
+        # instance rather than one system with several right-hand sides.
         solve_batch = broadcast_shapes(k.shape[:-1], rhs.shape[:-1])
         k = k.expand(solve_batch + k.shape[-1:])
         rhs = rhs.expand(solve_batch + rhs.shape[-1:])
@@ -1087,6 +1090,11 @@ class PotentialFlowLayer:
             raise ValueError(
                 f"PotentialFlowLayer {self.name!r}: mode='phasor' needs a layer built with "
                 f"phasor=True"
+            )
+        if mode is not None and mode not in ("dc", "initial"):
+            raise ValueError(
+                f"PotentialFlowLayer {self.name!r}: mode={mode!r}; expected 'dc', 'initial' or "
+                f"None (transient when dt is given, dc otherwise)"
             )
         stepping = [k for k, v in (("dt", dt), ("history", history)) if v is not None]
         if stepping:

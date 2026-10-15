@@ -1,6 +1,6 @@
 """Typed branch constitutive laws: the ConstitutiveLaw base class and the built-in laws.
 
-Elements are named for the physics they express. Where a law is a transcription of a specific
+Laws are named for the physics they express. Where a law is a transcription of a specific
 tool's equations, the class docstring says so (for example ``RegularizedPowerLaw``,
 ``SplineFlowTable`` and the door elements follow the Modelica Buildings Library, and
 ``PowerLaw``/``Quadratic``/``Duct``/``FanCurve`` follow CONTAM's element library). The

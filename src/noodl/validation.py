@@ -16,7 +16,7 @@ expected, and what was given; plus the problems found, as errors and warnings:
 Keys the model does not know the layout of -- a custom closure's inputs such as a density
 or a weather variable -- are NOT rejected. With `probe=True` the check runs one step (under
 `torch.no_grad()`, on the given dictionaries, which it does not modify) while recording
-which driver and state keys the closures, layers, elements and drives actually read; a key
+which driver and state keys the closures, layers, laws and drives actually read; a key
 read by nothing is then reported as unused. A key read only through a copy a closure made
 of its drivers is invisible to the probe, so "unused" is a warning, never an error.
 """

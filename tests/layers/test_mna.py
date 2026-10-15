@@ -562,3 +562,26 @@ def test_return_primal_requires_diagnostics_on_an_mna_solve():
     sources = torch.tensor(_MIXED_SOURCES, requires_grad=True)
     with pytest.raises(ValueError, match="diagnostics="):
         layer.solve(torch.tensor([0.4]), {}, sources, on_failure="return_primal")
+
+
+def test_convex_line_search_refused_on_mna_layer_by_keyword():
+    _, layer = _transformer_layer()
+    with pytest.raises(ValueError, match=r"'e'.*line_search='convex'.*gradient of a convex"):
+        layer.solve(torch.zeros(1), differentiable=False, line_search="convex")
+
+
+def test_convex_line_search_refused_on_mna_layer_by_newton_defaults():
+    net = _floating_source_net()
+    layer = PotentialFlowLayer(net, "e", [DrivenConductance(kind="r"), DrivenSource()],
+                               boundary=["gnd"], newton_defaults={"line_search": "convex"})
+    with pytest.raises(ValueError, match=r"'e'.*line_search='convex'.*gradient of a convex"):
+        layer.solve(torch.zeros(1), {"g": torch.tensor([1.0, 0.5]), "V": torch.tensor([3.0])},
+                    differentiable=False)
+
+
+def test_classic_layer_refuses_unknown_mode():
+    net = _net(["gnd", "a"], [("gnd", "a", "r")])
+    layer = PotentialFlowLayer(net, "e", [Conductance(torch.tensor([1.0]), kind="r")],
+                               boundary=["gnd"])
+    with pytest.raises(ValueError, match=r"'e': mode='bogus'; expected 'dc', 'initial' or None"):
+        layer.solve(torch.zeros(1), {}, torch.zeros(2), differentiable=False, mode="bogus")

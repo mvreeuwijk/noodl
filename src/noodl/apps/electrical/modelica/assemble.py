@@ -1022,4 +1022,3 @@ def build(netlist: Netlist, doc: CircuitDoc, *, substeps: int = 1
         thermal_nodes={name: n_e + k for k, name in enumerate(netlist.thermal_names)},
         devices=positions, sources=sources, columns=columns)
     return model, state, drivers, circuit_names
-
