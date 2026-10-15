@@ -708,6 +708,41 @@ def test_a_stiff_zone_follows_a_curved_boundary_with_its_own_lag(tmp_path):
     assert float((hist["T"][:, i] - exact).abs().max()) <= 5e-5
 
 
+@pytest.mark.parametrize("scheme", ["implicit", "midpoint"])
+def test_a_thermal_removal_driver_acts_in_every_scheme(tmp_path, scheme):
+    # A 1 m3 zone exchanging a prescribed F = 0.02 kg/s each way with a boundary at its own
+    # 293.15 K, and a first-order heat removal r given as the driver "thermal.removal": the
+    # zone is T = T_inf + (T_0 - T_inf) exp(-(k + r) t), k = F/(rho V), T_inf = k T_b/(k + r).
+    # Exact on frozen flows for the midpoint scheme's exact step; first order for "implicit".
+    doc = _doc("zonal_flow.json")
+    doc["experiment"].update({"StopTime": 600.0, "Interval": 60.0})
+    doc["components"] = [
+        {"name": "bou", "class": "Buildings.Fluid.Sources.Boundary_pT",
+         "parameters": {"p": P_DEFAULT, "T": 293.15, "nPorts": 2}},
+        {"name": "vol", "class": "Buildings.Fluid.MixingVolumes.MixingVolume",
+         "parameters": {"V": 1.0, "T_start": 293.15, "nPorts": 2, "m_flow_nominal": 0.001,
+                        "energyDynamics": "Modelica.Fluid.Types.Dynamics.FixedInitial"}},
+        {"name": "floExc", "class": _M + "ZonalFlow_m_flow", "parameters": {}},
+    ]
+    doc["connections"] = [["floExc.port_a1", "bou.ports[1]"], ["floExc.port_b1", "vol.ports[1]"],
+                          ["floExc.port_a2", "vol.ports[2]"], ["floExc.port_b2", "bou.ports[2]"]]
+    doc["signals"] = [
+        {"name": "F", "class": "Modelica.Blocks.Sources.Constant", "parameters": {"k": 0.02},
+         "drives": ["floExc.mAB_flow", "floExc.mBA_flow"]},
+    ]
+    model, state, drivers, names = read_modelica(_write(tmp_path, doc), return_names=True)
+    r = 1e-3
+    drivers = {**drivers, "thermal.removal": torch.full((1,), r, dtype=F64)}
+    t = names.times
+    hist = simulate(model, state, drivers, t, scheme=scheme)
+    k = 0.02 / 1.2
+    T_inf = k * 293.15 / (k + r)
+    exact = T_inf + (293.15 - T_inf) * torch.exp(-(k + r) * t)
+    err = float((hist["T"][:, names.nodes["vol"]] - exact).abs().max())
+    assert err <= (1e-9 if scheme == "midpoint" else 0.5)
+    assert float(exact[-1]) < 293.15 - 15.0  # the removal is not a negligible effect
+
+
 # ------------------------------------------------ transport time course
 def test_heat_and_moisture_relax_with_the_moist_air_heat_carrier():
     # Two rooms exchanging F = V ACS rho + m_flow each way (balanced), no boundary. The

@@ -887,6 +887,13 @@ _ANDERSON_DEPTH = 5
 STORAGE_ORDER = 2
 
 
+def _plus(a: Tensor | None, b: Tensor | None) -> Tensor | None:
+    """`a + b`, either of which may be absent (`None`)."""
+    if a is None:
+        return b
+    return a if b is None else a + b
+
+
 def _bdf_weights(nodes: list[float]) -> list[float]:
     """The weights `l_i'(t)` at `t = nodes[0]` of the Lagrange polynomials on `nodes`: the
     derivative at `nodes[0]` of the polynomial through values at `nodes` is their weighted
@@ -950,7 +957,8 @@ class _Midpoint:
     `_Switches`), each with `A` and `B` at its own end, `A` as a source and `-B/C` as the
     removal rate of the half's exact transport step: implicit in the zone temperature, so
     that a controller far faster than the step (`k gain/C` of 0.2 1/s against 7.2 s steps)
-    stays exact."""
+    stays exact. A removal rate given as the driver `"<layer>.removal"` adds to it, each half
+    taking the driver's value at its own end."""
 
     def __init__(self, model: Model, closure: _ZoneStateClosure, solve_kwargs: dict,
                  store: StorageClosure | None = None) -> None:
@@ -1257,6 +1265,10 @@ class _Midpoint:
                     src = self._zero_sources(n, x0)
                 xb0, xb1 = d0[f"{n}.x_boundary"], d1[f"{n}.x_boundary"]
                 rem0, rem1 = (removal0, removal1) if n == "thermal" else (None, None)
+                # A removal rate given as the driver "<layer>.removal" adds to the feedback
+                # network's, as `FeedbackHeat` adds its own to it in a `Model.step`.
+                rem0 = _plus(d0.get(f"{n}.removal"), rem0)
+                rem1 = _plus(d1.get(f"{n}.removal"), rem1)
                 if layer.scheme == "exact":
                     # Two halves, the first with state 0's flows, capacity and sources,
                     # the second with state 1's; the boundary values through both ends,

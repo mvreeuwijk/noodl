@@ -783,7 +783,9 @@ the closure `FeedbackHeat` hands it to the thermal layer as the source `A` and t
 rate `-B/C`, so that each transport step treats it implicitly: the MBL examples' loop, 15000
 W/K on a 75 kJ/K room, settles in 5 s, shorter than their steps. `simulate(...,
 scheme="midpoint")` takes both halves of a step on the step's piece and splits a step where the
-limiter reaches a limit. `names.controls` maps each block to its column of `simulate`'s
+limiter reaches a limit. A removal rate you pass as the driver `"thermal.removal"` (1/s) adds to
+the network's in either scheme, each half of a midpoint step taking the driver's value at its own
+end. `names.controls` maps each block to its column of `simulate`'s
 `"controls.outputs"` (the block outputs, under the same key as the Python `simulate`). MBL's
 `ChimneyShaftWithVolume` holds its room at 293.15 K while its volumes release their start
 imbalance:
