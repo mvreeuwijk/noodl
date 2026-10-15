@@ -91,34 +91,88 @@ _Y = _table(Y_CIRC)
 _S = _table(S_CIRC)
 
 
+#: Per table tuple (by identity): `_segments`' per-segment rows, built once.
+_SEGMENTS: dict[tuple[int, ...], tuple[tuple[Tensor, ...], Tensor, Tensor]] = {}
+
+
+def _segments(tables: tuple[Tensor, ...]) -> tuple[Tensor, Tensor]:
+    """`lookup_many`'s per-segment constants of `tables` (k tables of n entries each, n - 1
+    segments): rows ``(x0, x1, t0..., t1 - t0..., c...)`` with ``x0 = j delta``, ``x1 =
+    (j + 1) delta`` and SWMM's quadratic coefficient ``c = t0/2 - t1 + t2/2`` on the first
+    two segments (0 on the others, where the correction is not applied), each computed as
+    `xsect.c::lookup` does at segment j, so the result is bit for bit the per-call
+    arithmetic's; and the tables' last entries ``(k,)``."""
+    key = tuple(id(t) for t in tables)
+    hit = _SEGMENTS.get(key)
+    if hit is not None and all(a is b for a, b in zip(hit[0], tables, strict=True)):
+        return hit[1], hit[2]
+    n = tables[0].shape[0]
+    delta = 1.0 / (float(n) - 1.0)
+    j = torch.arange(n - 1)
+    cols = [j.to(F64) * delta, (j.to(F64) + 1.0) * delta]
+    t0s, ds, cs = [], [], []
+    for table in tables:
+        t0, t1 = table[j], table[j + 1]
+        t2 = table[torch.clamp(j + 2, max=n - 1)]
+        t0s.append(t0)
+        ds.append(t1 - t0)
+        cs.append(torch.where(j < 2, t0 / 2.0 - t1 + t2 / 2.0, torch.zeros_like(t0)))
+    rows = torch.stack(cols + t0s + ds + cs, -1)
+    last = torch.stack([t[n - 1] for t in tables])
+    _SEGMENTS[key] = (tables, rows, last)
+    return rows, last
+
+
+def lookup_many(x: Tensor, *tables: Tensor) -> tuple[Tensor, ...]:
+    """`xsect.c::lookup` of `x` in each of `tables` (equally spaced on ``[0, 1]``, all of
+    one length), sharing the segment search: per table SWMM's ``t0 + (x - x0)(t1 -
+    t0)/delta``, then ``+ (x - x0)(x - x1)/delta^2 c`` (`_segments`; kept only if positive,
+    and only on the first two segments, where ``c`` is not 0), floored at 0, the last entry
+    at and beyond the end. Bit for bit `lookup` on each table."""
+    rows, last = _segments(tables)
+    k = len(tables)
+    n = tables[0].shape[0]
+    delta = 1.0 / (float(n) - 1.0)
+    i = torch.floor(x / delta)
+    top = (i >= n - 1).unsqueeze(-1)
+    r = rows[torch.clamp(i, 0, n - 2).to(torch.long)]
+    x0, x1 = r[..., 0:1], r[..., 1:2]
+    t0, dt, c = r[..., 2:2 + k], r[..., 2 + k:2 + 2 * k], r[..., 2 + 2 * k:]
+    xk = x.unsqueeze(-1)
+    dx = xk - x0
+    y = t0 + dx * dt / delta
+    y2 = y + dx * (xk - x1) / (delta * delta) * c
+    y = torch.clamp(torch.where(y2 > 0.0, y2, y), min=0.0)
+    return torch.where(top, last, y).unbind(-1)
+
+
 def lookup(x: Tensor, table: Tensor) -> Tensor:
     """`xsect.c::lookup`: linear interpolation in an equally spaced table on ``[0, 1]``,
-    with SWMM's quadratic correction on the first two segments (kept only if positive)."""
+    with SWMM's quadratic correction on the first two segments (kept only if positive)
+    (`lookup_many` of the one table, without its table dimension)."""
+    rows, last = _segments((table,))
     n = table.shape[0]
     delta = 1.0 / (float(n) - 1.0)
-    i = torch.clamp(torch.floor(x / delta), min=0).to(torch.long)
+    i = torch.floor(x / delta)
     top = i >= n - 1
-    i_safe = torch.clamp(i, max=n - 2)
-    x0 = i_safe.to(F64) * delta
-    x1 = (i_safe.to(F64) + 1.0) * delta
-    t0, t1 = table[i_safe], table[i_safe + 1]
-    t2 = table[torch.clamp(i_safe + 2, max=n - 1)]
-    y = t0 + (x - x0) * (t1 - t0) / delta
-    y2 = y + (x - x0) * (x - x1) / (delta * delta) * (t0 / 2.0 - t1 + t2 / 2.0)
-    y = torch.where((i_safe < 2) & (y2 > 0.0), y2, y)
-    y = torch.clamp(y, min=0.0)
-    return torch.where(top, table[n - 1].expand_as(y), y)
+    x0, x1, t0, dt, c = rows[torch.clamp(i, 0, n - 2).to(torch.long)].unbind(-1)
+    dx = x - x0
+    y = t0 + dx * dt / delta
+    y2 = y + dx * (x - x1) / (delta * delta) * c
+    y = torch.clamp(torch.where(y2 > 0.0, y2, y), min=0.0)
+    return torch.where(top, last[0], y)
 
 
 def inv_lookup(y: Tensor, table: Tensor) -> Tensor:
-    """`xsect.c::invLookup` restricted to a table's INCREASING part (every call here has
-    ``y <= 1`` on ``S_Circ``, whose maximum sits third from last, so SWMM's
-    decreasing-tail branch is never taken): ``locate`` by bisection, then linear inverse."""
+    """`xsect.c::invLookup`: ``locate`` by bisection in the table's increasing part, then
+    linear inverse. A table whose last two entries decrease (every section-factor table: its
+    maximum sits third from last) is searched only up to that maximum, and a `y` above its
+    last entry -- ambiguous between the two sides of the maximum -- returns the maximum's
+    position, as SWMM's decreasing-tail branch does (every path of it ends there,
+    xsect.c:1546-1555)."""
     n_items = table.shape[0]
     dx = 1.0 / (float(n_items) - 1.0)
     n = n_items - 2 if float(table[n_items - 3]) > float(table[n_items - 1]) else n_items
-    if bool(torch.any(y > table[n_items - 1])) and n < n_items:
-        raise ValueError("xsect_tables.inv_lookup: the decreasing table tail is not modelled")
     inc = table[:n]
     # `locate(y, table, n-1)`: the highest j with table[j] <= y, clamped to [0, n-1].
     i = torch.searchsorted(inc, y.contiguous(), right=True) - 1
@@ -131,6 +185,8 @@ def inv_lookup(y: Tensor, table: Tensor) -> Tensor:
     x0 = i_safe.to(F64) * dx
     x = torch.where(dy == 0.0, x0, x0 + (y - t0) * dx / dy_safe)
     x = torch.clamp(x, 0.0, 1.0)
+    if n < n_items:                          # xsect.c:1546-1548 (and 1549-1555, same result)
+        top = top | (y > table[n_items - 1])
     return torch.where(top, torch.full_like(x, (n - 1) * dx), x)
 
 
@@ -245,35 +301,32 @@ def a_circular(psi: Tensor) -> Tensor:
     return torch.where(above, torch.ones_like(a), a)
 
 
+def _near_invert(x: Tensor, small: Tensor, closed_form, table: Tensor) -> Tensor:
+    """``closed_form(x)`` where `small`, ``table`` elsewhere. The closed forms (SWMM's Newton
+    iterations) are 0, with a zero gradient, at ``x <= 0``, so where no entry is small and
+    positive (a dry or table-only call: no flow is near the invert) they are not run."""
+    if bool((small & (x > 0.0)).any()):
+        return torch.where(small, closed_form(torch.where(small, x, torch.zeros_like(x))),
+                           table)
+    return torch.where(small, torch.zeros_like(table), table)
+
+
 def y_of_a(alpha: Tensor) -> Tensor:
     """`circ_getYofA` / ``yFull``: table ``Y_Circ`` above ``alpha = 0.04``."""
-    small = alpha < 0.04
-    return torch.where(
-        small,
-        y_circular(torch.where(small, alpha, torch.zeros_like(alpha))),
-        lookup(alpha, _Y),
-    )
+    return _near_invert(alpha, alpha < 0.04, y_circular, lookup(alpha, _Y))
 
 
 def s_of_a(alpha: Tensor) -> Tensor:
     """`circ_getSofA` / ``sFull``: table ``S_Circ`` above ``alpha = 0.04``."""
-    small = alpha < 0.04
-    return torch.where(
-        small,
-        s_circular(torch.where(small, alpha, torch.zeros_like(alpha))),
-        lookup(alpha, _S),
-    )
+    return _near_invert(alpha, alpha < 0.04, s_circular, lookup(alpha, _S))
 
 
 def a_of_s(psi: Tensor) -> Tensor:
     """`circ_getAofS` / ``aFull``: ``getAcircular`` up to ``psi = 0.015``, else the
     inverse of ``S_Circ``; ``0`` at ``0`` and ``1`` at ``psi >= 1``."""
     small = psi <= 0.015
-    a = torch.where(
-        small,
-        a_circular(torch.where(small, psi, torch.zeros_like(psi))),
-        inv_lookup(torch.where(small, torch.full_like(psi, 0.5), psi), _S),
-    )
+    a = _near_invert(psi, small, a_circular,
+                     inv_lookup(torch.where(small, torch.full_like(psi, 0.5), psi), _S))
     a = torch.where(psi == 0.0, torch.zeros_like(a), a)
     return torch.where(psi >= 1.0, torch.ones_like(a), a)
 
@@ -396,22 +449,36 @@ GRAVITY_FT = 32.2
 def area_of_depth(y: Tensor, y_full: Tensor, a_full: Tensor) -> Tensor:
     """`xsect.c::xsect_getAofY` (xsect.c:857) for CIRCULAR: flow area (ft2) at depth ``y`` (ft)."""
     y_safe = torch.clamp(y, min=0.0)
-    return torch.where(y <= 0.0, torch.zeros_like(y_safe),
-                       a_full * lookup(y_safe / y_full, _A))
+    return torch.where(y <= 0.0, 0.0, a_full * lookup(y_safe / y_full, _A))
 
 
 def width_of_depth(y: Tensor, y_full: Tensor) -> Tensor:
     """`xsect.c::xsect_getWofY` (xsect.c:943) for CIRCULAR (``wMax = yFull``): top width (ft)."""
     y_safe = torch.clamp(y, min=0.0)
-    return torch.where(y <= 0.0, torch.zeros_like(y_safe), y_full * lookup(y_safe / y_full, _W))
+    return torch.where(y <= 0.0, 0.0, y_full * lookup(y_safe / y_full, _W))
 
 
 def radius_of_depth(y: Tensor, y_full: Tensor) -> Tensor:
     """`xsect.c::xsect_getRofY` (xsect.c:1031) for CIRCULAR (``rFull = yFull/4``):
     hydraulic radius (ft)."""
     y_safe = torch.clamp(y, min=0.0)
-    return torch.where(y <= 0.0, torch.zeros_like(y_safe),
-                       0.25 * y_full * lookup(y_safe / y_full, _R))
+    return torch.where(y <= 0.0, 0.0, 0.25 * y_full * lookup(y_safe / y_full, _R))
+
+
+def area_width_of_depth(y: Tensor, y_full: Tensor, a_full: Tensor) -> tuple[Tensor, Tensor]:
+    """`area_of_depth` and `width_of_depth` at one depth ``y`` (ft), sharing the table
+    search (bit for bit the two calls')."""
+    dry = y <= 0.0
+    a, w = lookup_many(torch.clamp(y, min=0.0) / y_full, _A, _W)
+    return torch.where(dry, 0.0, a_full * a), torch.where(dry, 0.0, y_full * w)
+
+
+def area_radius_of_depth(y: Tensor, y_full: Tensor, a_full: Tensor) -> tuple[Tensor, Tensor]:
+    """`area_of_depth` and `radius_of_depth` at one depth ``y`` (ft), sharing the table
+    search (bit for bit the two calls')."""
+    dry = y <= 0.0
+    a, r = lookup_many(torch.clamp(y, min=0.0) / y_full, _A, _R)
+    return torch.where(dry, 0.0, a_full * a), torch.where(dry, 0.0, 0.25 * y_full * r)
 
 
 _FUDGE = 1.0e-4   # consts.h:72
@@ -424,22 +491,36 @@ def froude_number(v: Tensor, y: Tensor, y_full: Tensor, a_full: Tensor) -> Tenso
     dead = (y <= _FUDGE) | (y_full - y <= _FUDGE)
     y_safe = torch.where(dead, 0.5 * y_full, y)
     # link.c:866-869: hydraulic depth A/W, Fr = |v| / sqrt(g A/W)
-    hd = area_of_depth(y_safe, y_full, a_full) / width_of_depth(y_safe, y_full)
-    return torch.where(dead, torch.zeros_like(v), torch.abs(v) / torch.sqrt(GRAVITY_FT * hd))
+    area, width = area_width_of_depth(y_safe, y_full, a_full)
+    return torch.where(dead, 0.0, torch.abs(v) / torch.sqrt(GRAVITY_FT * (area / width)))
 
 
 def _critical_flow(y: Tensor, y_full: Tensor, a_full: Tensor) -> Tensor:
     """`xsect.c::getQcritical` (xsect.c:1612-1630): A sqrt(g A / W), 0 where W <= 0."""
-    a = area_of_depth(y, y_full, a_full)
-    w = width_of_depth(y, y_full)
-    w_safe = torch.where(w > 0.0, w, torch.ones_like(w))
-    return torch.where(w > 0.0, a * torch.sqrt(GRAVITY_FT * a / w_safe), torch.zeros_like(a))
+    a, w = area_width_of_depth(y, y_full, a_full)
+    wet = w > 0.0
+    w_safe = torch.where(wet, w, 1.0)
+    return torch.where(wet, a * torch.sqrt(GRAVITY_FT * a / w_safe), 0.0)
 
 
-def critical_depth(q: Tensor, y_full: Tensor, a_full: Tensor) -> Tensor:
+def critical_flow_stations(y_full: Tensor, a_full: Tensor) -> Tensor:
+    """`critical_depth`'s enumeration stations: the critical flow `getQcritical` (cfs) at
+    the 26 depths ``i yFull / 25`` (xsect.c:1660-1666), shape ``(..., 26)``. They depend on
+    the section only, so a caller evaluating many flows on one section passes them to
+    `critical_depth` once computed."""
+    y_full, a_full = torch.broadcast_tensors(y_full, a_full)
+    dy = y_full / 25.0                                      # xsect.c:1660
+    stations = torch.arange(26, dtype=y_full.dtype)         # i = 0..25
+    return _critical_flow(stations * dy.unsqueeze(-1), y_full.unsqueeze(-1),
+                          a_full.unsqueeze(-1))
+
+
+def critical_depth(q: Tensor, y_full: Tensor, a_full: Tensor,
+                   q_stations: Tensor | None = None) -> Tensor:
     """`xsect.c::xsect_getYcrit` (xsect.c:1257-1319) -> `getYcritEnum` (xsect.c:1634-1696)
     for CIRCULAR: SWMM's 25-interval enumeration with linear interpolation (ft, from
-    ``q >= 0`` in cfs)."""
+    ``q >= 0`` in cfs). `q_stations` is `critical_flow_stations` of the section, computed
+    here when not given."""
     q, y_full, a_full = torch.broadcast_tensors(q, y_full, a_full)
     q2g = q * q / GRAVITY_FT                                # xsect.c:1267
     zero = q2g == 0.0
@@ -449,8 +530,8 @@ def critical_depth(q: Tensor, y_full: Tensor, a_full: Tensor) -> Tensor:
     dy = y_full / 25.0                                      # xsect.c:1660
     i1 = torch.floor(y0 / dy)                               # (int)(y0/dy)
     stations = torch.arange(26, dtype=q.dtype)              # i = 0..25
-    qc = _critical_flow(stations * dy.unsqueeze(-1), y_full.unsqueeze(-1),
-                        a_full.unsqueeze(-1))               # (..., 26)
+    qc = (critical_flow_stations(y_full, a_full) if q_stations is None
+          else q_stations.expand(q.shape + (26,)))          # (..., 26)
     q_i1 = torch.gather(qc, -1, i1.long().unsqueeze(-1)).squeeze(-1)
     # xsect.c:1670-1686: scan UP from i1+1 when Qc(i1) < q, first i with qc[i] >= q;
     # SWMM's q0 is the previous station's Qc, i.e. qc[i-1]; none found -> yFull.
@@ -480,12 +561,13 @@ def critical_depth(q: Tensor, y_full: Tensor, a_full: Tensor) -> Tensor:
 
 
 def normal_depth_ft(q: Tensor, y_full: Tensor, a_full: Tensor, s_full: Tensor,
-                    beta: Tensor) -> Tensor:
+                    beta: Tensor, s_max_ratio: float | Tensor = 1.08) -> Tensor:
     """`link.c::link_getYnorm` (link.c:783-804) for CIRCULAR: q clamped to
     ``qMax = 1.08 sFull beta``, ``A(S)`` by `circ_getAofS` (``aFull`` for ``psi >= 1``),
-    ``Y(A)`` by `circ_getYofA`."""
+    ``Y(A)`` by `circ_getYofA`. `s_max_ratio` is ``sMax / sFull`` (1.08 for the circle,
+    1.06949 for a FORCE_MAIN, which routes on the circle's tables)."""
     # link.c:797-798 (qMax = sMax beta, sMax = 1.08 sFull: xsect.c:248, link.c:1136)
-    q = torch.minimum(torch.abs(q), 1.08 * s_full * beta)
+    q = torch.minimum(torch.abs(q), s_max_ratio * s_full * beta)
     # link.c:800-802 (circ_getAofS: aFull for psi >= 1)
     psi = q / beta / s_full
     alpha = torch.where(psi >= 1.0, torch.ones_like(psi),
@@ -497,6 +579,7 @@ def normal_depth_ft(q: Tensor, y_full: Tensor, a_full: Tensor, s_full: Tensor,
 __all__ = [
     "A_CIRC", "GRAVITY_FT", "LCF", "PHI", "QCF", "R_CIRC", "S_CIRC", "W_CIRC", "Y_CIRC",
     "a_of_s", "a_of_y", "area_of_depth", "conduit_constants", "critical_depth", "froude_number",
-    "full_flow", "inv_lookup", "kinwave_steady", "lookup", "normal_depth_ft", "psi_of_flow",
+    "area_radius_of_depth", "area_width_of_depth", "critical_flow_stations", "full_flow",
+    "inv_lookup", "kinwave_steady", "lookup", "lookup_many", "normal_depth_ft", "psi_of_flow",
     "radius_of_depth", "s_of_a", "width_of_depth", "y_of_a",
 ]

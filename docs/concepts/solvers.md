@@ -152,6 +152,22 @@ stand-in for an unknown count.
 Convergence is per batch instance, and the mask is computed on detached copies so it never enters
 the autograd graph.
 
+**Kinked monotone laws: `line_search="convex"`.** When every branch flow is non-decreasing in its
+own potential difference and every nodal withdrawal in its own potential, the residual is the
+gradient of a convex function $E$ and the Newton direction is a descent direction of $E$. A
+law with kinks (a flat-steep-flat S-curve, a stiff bed meeting a soft storage line) can still
+send the damped Newton into a cycle it never leaves, because the step crosses a kink and lands
+past the minimum of $E$ along it. With `line_search="convex"` such a step, recognised by the
+directional derivative $\phi'(t) = r(x + t d)\cdot d$ at its end, is cut back to that minimum by
+a regula falsi on the monotone $\phi'$; a step that does not overshoot is taken unchanged, so a
+smooth solve is bitwise the same.
+
+**Round-off floor: `step_floor`.** An `atol` below the round-off of the residual's own terms (a
+stiff law at a large potential) cannot be met: the iterate stands still and the solve fails.
+`step_floor=k` ends an instance as converged once its Newton step is within `k` ULPs of the
+iterate in every component, i.e. at the floor. Both options are off by default; a layer that
+needs them sets them as its `newton_defaults` (the sewer's dynamic wave does).
+
 ## Monotone scalar solves
 
 `noodl.solvers.scalar.solve_monotone` is a batched bracketed root-finder for a scalar equation

@@ -22,9 +22,13 @@ DATA = Path(__file__).resolve().parents[2] / "data" / "sewer"
 
 
 def _tree(tmp_path, scale=1.0):
+    """The kinematic tree routed by dynamic wave, converged tightly as the dynwave fixtures
+    are (HEAD_TOLERANCE 1e-12 m, 2000 trials: the iteration's defaults follow the file)."""
     text = (DATA / "tree_kinwave.inp").read_text()
     text = text.replace("FLOW_ROUTING         KINWAVE", "FLOW_ROUTING         DYNWAVE")
     text = text.replace("VARIABLE_STEP        0.75", "VARIABLE_STEP        0")
+    text = text.replace("MAX_TRIALS           8", "MAX_TRIALS           2000")
+    text = text.replace("HEAD_TOLERANCE       0.0015", "HEAD_TOLERANCE       1e-12")
     path = tmp_path / "tree_dyn.inp"
     path.write_text(text)
     net, _, _ = read_swmm_inp(path)
@@ -127,10 +131,11 @@ def test_a_junction_on_its_bed_converges_at_the_default_min_surface_area():
 def test_default_pass_budget_covers_a_slow_outfall_head():
     """The loop fixture's outfall head contracts by ~0.92 per pass at low flow and needs 327
     passes at t = 500 s (tests/verification/test_sewer_dynwave_parity.py); the default
-    budget must cover that, so a plain build_model + simulate_dynamic_wave does not fail."""
+    budget, the file's MAX_TRIALS 500, covers that, so a plain build_model +
+    simulate_dynamic_wave does not run out of passes there."""
     net, _, _ = read_swmm_inp(DATA / "loop_dynwave.inp")
     model, _, _ = build_model(net)
-    assert model.iterate_max == 2000
+    assert model.iterate_max == 500
 
 
 def test_build_model_dispatches_and_refuses_storage(tmp_path):
@@ -913,7 +918,8 @@ def test_flood_releases_when_inflow_stops():
     thereafter, it passes back down through its crown and drains, and no step chatters
     (at most 30 passes). (Stopping EVERY inflow drains the tree onto C5's normal-flow
     slope switch: `test_inflow_stop_converges`.)"""
-    model, state, drivers = build_model(_flooding_tree())
+    # the pass budget below was measured at a 1e-11 m head tolerance (the file's is 1e-12)
+    model, state, drivers = build_model(_flooding_tree(), iterate_tol=1e-11)
     hyd = model.dynamic_wave
     j2 = hyd.junction_names.index("J2")
     node = int(model.junction_idx[j2])
@@ -1067,21 +1073,58 @@ def test_inflow_stop_converges():
     assert set(sides[104:]) == {0}, sides
 
 
-def test_a_heads_only_convergence_test_is_refused():
-    """`iterate_flow_tol=None` (the heads judged alone) is refused by name by
-    `build_dynamic_wave_model` (`build_model` exposes no flow tolerance and always passes
-    the builder's default): on the normal-flow slope switch the heads bound the flows'
-    residual only through the wall slope over the junction's grounding, and a heads-only
-    plain run was measured stopping 2.9e-5 m3/s short of the fixed point (the tree's
-    drain-down, step 105). Plain relaxation with a flow tolerance stays allowed."""
-    from noodl.apps.sewer.dynwave import build_dynamic_wave_model
+def test_iteration_controls_follow_the_file():
+    """`build_dynamic_wave_model`'s iteration controls follow [OPTIONS]
+    (`iterate_tolerances`): HEAD_TOLERANCE is the head tolerance, MAX_TRIALS the pass limit
+    (a step that uses it up is accepted, as SWMM's), and the flow tolerance is the flow
+    residual that moves the smallest junction's head by the head tolerance over a routing
+    step, ``2 A_min tol / dt``, floored at `FLOW_TOL_FLOOR`. SWMM's own defaults (0.005 ft,
+    8) where the file sets none; an explicit argument wins, and an explicit `iterate_max`
+    keeps the refusal of a step that does not converge. The heads are never judged alone:
+    on the normal-flow slope switch they bound the flows' residual only through the wall
+    slope over the junction's grounding (a heads-only plain run was measured stopping
+    2.9e-5 m3/s short of the fixed point on the tree's drain-down)."""
+    from noodl.apps.sewer.dynwave import (
+        DEFAULT_HEAD_TOLERANCE,
+        FLOW_TOL_FLOOR,
+        build_dynamic_wave_model,
+        iterate_tolerances,
+    )
 
-    net, _, _ = read_swmm_inp(DATA / "tree_dynwave.inp")
-    with pytest.raises(ValueError, match=r"iterate_flow_tol \(m3/s\) is required"):
-        build_dynamic_wave_model(net, acceleration=None, iterate_flow_tol=None)
+    net, _, _ = read_swmm_inp(DATA / "tree_dynwave.inp")   # HEAD_TOLERANCE 1e-12, 500 trials
     model = build_dynamic_wave_model(net, acceleration=None)[0]
-    assert model.iterate_acceleration is None and model.iterate_flow_tol == {"water": 1e-10}
-    assert build_model(net)[0].iterate_flow_tol == {"water": 1e-10}
+    assert model.iterate_tol == {"water": 1e-12} and model.iterate_max == 500
+    assert model.iterate_flow_tol == {"water": FLOW_TOL_FLOOR}
+    assert model.iterate_on_limit == "accept" and model.iterate_acceleration is None
+    assert build_model(net)[0].iterate_flow_tol == {"water": FLOW_TOL_FLOOR}
+    explicit = build_model(net, iterate_tol=1e-11, iterate_max=2000, iterate_flow_tol=3e-9)[0]
+    assert explicit.iterate_tol == {"water": 1e-11} and explicit.iterate_max == 2000
+    assert explicit.iterate_flow_tol == {"water": 3e-9}
+    assert explicit.iterate_on_limit == "raise"
+    swmm = dataclasses.replace(net.dynamic_wave, head_tolerance=None, max_trials=None)
+    controls = iterate_tolerances(swmm)
+    assert DEFAULT_HEAD_TOLERANCE == pytest.approx(0.005 * 0.3048, rel=1e-15)
+    assert controls["iterate_tol"] == DEFAULT_HEAD_TOLERANCE
+    assert controls["iterate_max"] == 8 and controls["on_limit"] == "accept"
+    a_min = 12.566 * QCF / LCF                                  # MIN_SURFAREA, m2
+    assert controls["iterate_flow_tol"] == pytest.approx(
+        2.0 * a_min * DEFAULT_HEAD_TOLERANCE / 5.0, rel=1e-12)
+
+
+def test_a_step_that_uses_up_the_files_trials_is_accepted():
+    """As SWMM (`dynwave.c::dynwave_execute`), a step that uses up MAX_TRIALS is taken with
+    its last pass and counted (`simulate_dynamic_wave`'s ``"converged"``); with an explicit
+    `iterate_max` it is refused by name, as before."""
+    net, _, _ = read_swmm_inp(DATA / "tree_dynwave.inp")
+    net = dataclasses.replace(net, dynamic_wave=dataclasses.replace(net.dynamic_wave,
+                                                                    max_trials=2))
+    model, state, drivers = build_model(net)
+    _, out = simulate_dynamic_wave(model, state, drivers, steps=6)
+    assert out["converged"].dtype == torch.bool and out["converged"].shape == (6,)
+    assert not bool(out["converged"].all())
+    model, state, drivers = build_model(net, iterate_max=2)
+    with pytest.raises(RuntimeError, match="did not converge within 2 passes"):
+        simulate_dynamic_wave(model, state, drivers, steps=6)
 
 
 def test_gradient_on_the_slope_switch_does_not_depend_on_the_wall_slope(monkeypatch):
@@ -1094,7 +1137,10 @@ def test_gradient_on_the_slope_switch_does_not_depend_on_the_wall_slope(monkeypa
     from noodl.apps.sewer.dynwave import DynamicWaveHydraulics
 
     net, _, _ = read_swmm_inp(DATA / "tree_dynwave.inp")
-    model, state0, drivers = build_model(net)
+    # pinned below the file's HEAD_TOLERANCE (1e-12 m): the on-the-switch check needs the
+    # iteration to land on the switch, and at 1e-12 m the steep-wall run (S x 5) can stop one
+    # tolerance short of it (1.2e-12 m measured on Linux, 2e-14 m on Windows)
+    model, state0, drivers = build_model(net, iterate_tol=1e-13, iterate_max=2000)
     factors = [1.0] * 60 + [0.0] * 50
     inflow = torch.stack([f * drivers["inflow"] for f in factors]).unsqueeze(1)
     state0, _ = simulate_dynamic_wave(model, state0, drivers, steps=107, inflow=inflow,
@@ -1117,7 +1163,8 @@ def test_gradient_on_the_slope_switch_does_not_depend_on_the_wall_slope(monkeypa
     grads = []
     for scale in (1.0, 0.2, 5.0):
         monkeypatch.setattr(DynamicWaveHydraulics, "_switch_slope",
-                            lambda self, *a, scale=scale: scale * original(self, *a))
+                            lambda self, *a, scale=scale: (scale * original(self, *a)[0],
+                                                           original(self, *a)[1]))
         n = torch.tensor(0.013, dtype=F64, requires_grad=True)
         loss(n).backward()
         grads.append(n.grad.item())
@@ -1388,7 +1435,8 @@ def _chain_net(*, barrels=1, max_flow=None, initial_flow=0.0, flap=False, flap_r
         routing="dynamic_wave", geometry="tabulated",
         dynamic_wave=DynamicWaveOptions(
             routing_step=routing_step, variable_step=variable_step,
-            lengthening_step=lengthening_step, min_surface_area=min_surface_area))
+            lengthening_step=lengthening_step, min_surface_area=min_surface_area,
+            head_tolerance=1e-12, max_trials=2000))
 
 
 def test_two_barrels_carry_twice_one_barrels_flow_at_equal_heads():
@@ -2042,7 +2090,8 @@ def _regulated(kind="orifice", *, storage_at=None, outfall_kind="free", stage=No
         outfalls=(Outfall("Out", 9.5 if v == "J3" else 10.0, kind=outfall_kind,
                           stage=stage),),
         routing="dynamic_wave", geometry="tabulated",
-        dynamic_wave=DynamicWaveOptions(routing_step=5.0),
+        dynamic_wave=DynamicWaveOptions(routing_step=5.0, head_tolerance=1e-12,
+                                        max_trials=2000),
         orifices=orifices, weirs=weirs, outlets=outlets)
 
 
@@ -2075,7 +2124,7 @@ def test_structure_element_is_swmms_flow_linearised_about_the_fed_heads():
     assert el.flow(torch.tensor([0.5, 0.5, -1.0], dtype=F64), drv)[1].item() == (
         pytest.approx(0.13))
     with pytest.raises(ValueError, match="kind must be one of"):
-        StructureLink("pump")
+        StructureLink("gate")
 
 
 @pytest.mark.parametrize("kind", ["orifice", "weir", "outlet"])
@@ -2838,7 +2887,7 @@ def test_air_refuses_loops_branches_and_regulator_drains_by_name():
 
 def test_air_refuses_a_cycle_that_never_reaches_an_outfall():
     """Every junction with one outgoing conduit is not enough: J1 -> J2 -> J1 is a loop with
-    no outfall (`SewerNetwork.validate` refuses it before the air builder sees it)."""
+    no outfall (dynamic-wave routing allows it, as SWMM does; the air builder refuses it)."""
     from noodl.apps.sewer import SewerNetwork
     from noodl.apps.sewer.network import Manhole, Outfall, Pipe
     net = SewerNetwork(
@@ -2847,8 +2896,9 @@ def test_air_refuses_a_cycle_that_never_reaches_an_outfall():
         pipes=(Pipe("C1", "J1", "J2", 100.0, 0.3, 0.013, 0.01),
                Pipe("C2", "J2", "J1", 100.0, 0.3, 0.013, 0.01),
                Pipe("C3", "J3", "Out", 100.0, 0.3, 0.013, 0.005)),
-        outfalls=(Outfall("Out", 10.0),), routing="dynamic_wave")
-    with pytest.raises(ValueError, match="reach no outfall"):
+        outfalls=(Outfall("Out", 10.0),), routing="dynamic_wave", geometry="tabulated")
+    build_model(net)                                  # the water alone routes it
+    with pytest.raises(ValueError, match=r"junction 'J1' reaches none"):
         build_model(net, air=True)
 
 
@@ -2887,3 +2937,94 @@ def test_build_dynamic_wave_model_is_exported():
 
     assert sewer.build_dynamic_wave_model is build_dynamic_wave_model
     assert "build_dynamic_wave_model" in sewer.__all__
+
+
+# ------------------------------------------------------------------------------- ponding
+def _pond_run(net, steps=30):
+    model, state, drivers = build_model(net, iterate_tol=1e-12, iterate_max=500)
+    _, hist = simulate_dynamic_wave(model, state, drivers, steps=steps, atol=1e-12,
+                                    record=("water.phi", "sewer.overflow"))
+    return model, hist
+
+
+def test_ponding_keeps_the_water_a_flooding_junction_would_lose():
+    """J2 (MaxDepth 0.3 m, its crown, Aponded 0.5 m2) of `ponding_dynwave.inp` rises barely
+    above its rim, over the ponded area plus its conduits', and its overflow is the ponded
+    volume's growth; SurDepth plays no part. With `allow_ponding` off the same network is the
+    one that has the junction surcharge on (EXTRAN) up to rim + SurDepth = 2 m before it
+    floods, so it is far deeper."""
+    net, _, _ = read_swmm_inp(DATA / "ponding_dynwave.inp")
+    assert net.dynamic_wave.allow_ponding
+    model, hist = _pond_run(net)
+    hyd = model.dynamic_wave
+    j2 = list(hyd.junction_names).index("J2")
+    node = model.junction_idx[j2]
+    depth = hist["water.phi"][:, node] - hyd.node_invert[node]
+    rim = float(hyd.full_depth[j2])
+    assert rim == pytest.approx(0.3) and bool(hyd.can_pond[j2])
+    assert rim + 0.05 < depth[-1] < rim + 0.2 and depth.max() == depth[-1]
+    assert hist["sewer.overflow"][-1, j2] > 0.0
+    off = dataclasses.replace(
+        net, dynamic_wave=dataclasses.replace(net.dynamic_wave, allow_ponding=False))
+    model_off, hist_off = _pond_run(off)
+    assert not bool(model_off.dynamic_wave.can_pond.any())
+    depth_off = hist_off["water.phi"][:, node] - hyd.node_invert[node]
+    assert depth_off[-1] > 1.0 > depth[-1]
+
+
+def test_ponding_is_refused_with_quality_and_for_bad_areas():
+    net, _, _ = read_swmm_inp(DATA / "ponding_dynwave.inp")
+    with pytest.raises(ValueError, match="not modelled together with water quality"):
+        build_model(net, quality=True)
+    manholes = tuple(
+        dataclasses.replace(m, ponded_area=-1.0) if m.name == "J2" else m for m in net.manholes)
+    with pytest.raises(ValueError, match="ponded_area must be >= 0"):
+        dataclasses.replace(net, manholes=manholes).validate()
+    stor, _, _ = read_swmm_inp(DATA / "storage_dynwave.inp")
+    manholes = tuple(
+        dataclasses.replace(m, ponded_area=1.0) if m.storage is not None else m
+        for m in stor.manholes)
+    with pytest.raises(ValueError, match="storage unit .* ponded_area"):
+        dataclasses.replace(stor, manholes=manholes).validate()
+
+
+def _one(value, n=2):
+    return torch.full((n,), value, dtype=F64)
+
+
+def _pond_drivers(n_start, n_last, head_start):
+    return {"water.storage_area": _one(4.0), "water.pond_area": _one(4.5),
+            "water.storage_rate": torch.tensor(1.0 / 5.0, dtype=F64),
+            "water.head_start": _one(head_start), "water.net_inflow_start": _one(n_start),
+            "water.net_inflow_last": _one(n_last), "water.head_last": _one(head_start),
+            "water.pond_switch_slope": _one(40.0), "water.ponded": _one(0.0),
+            "water.surcharged": _one(0.0), "water.surcharge_slope": _one(0.01),
+            "water.flood_excess": _one(0.0)}
+
+
+@pytest.mark.parametrize("n_start,n_last,head_start", [
+    (0.02, 0.03, 0.46), (0.02, 0.03, 0.2), (0.0, 0.0, 0.1)])
+def test_a_ponding_junction_rising_through_its_full_head_is_monotone_and_unwalled(
+        n_start, n_last, head_start):
+    """`JunctionStorage` with a `pond_head` H* = 0.5 m beside a plain junction with the same top:
+    from a step start below H* the ponding junction's withdrawal never decreases (the lower line,
+    the hold at H*, then the larger-area line) with a positive slope throughout, and it has no
+    flood wall above H* while the plain junction's wall is far steeper than its storage."""
+    heads = torch.linspace(0.0, 1.0, 2001, dtype=F64)
+    store = JunctionStorage(torch.arange(2), torch.zeros(2, dtype=F64),
+                            bed_area=12.566 * 0.0929, crown=_one(0.3), top=_one(0.5),
+                            surchargeable=torch.tensor([False, False]),
+                            pond_head=torch.tensor([0.5, torch.inf], dtype=F64))
+    assert store.ponds
+    drv = _pond_drivers(n_start, n_last, head_start)
+    flow = torch.stack([store.flow(h.expand(2), drv) for h in heads])
+    slope = torch.stack([store.dflow(h.expand(2), drv) for h in heads])
+    assert bool((slope > 0.0).all())
+    pond, plain = flow[:, 0], flow[:, 1]
+    assert bool((pond[1:] >= pond[:-1] - 1e-12).all())
+    top = int(torch.searchsorted(heads, torch.tensor(0.5, dtype=F64)))
+    wall = float((plain[-1] - plain[top]) / (heads[-1] - heads[top]))
+    storage = float((plain[top - 1] - plain[top - 100]) / (heads[top - 1] - heads[top - 100]))
+    assert wall > 5.0 * storage
+    # the ponded line above H* carries the larger area: slope 2 A_hi / dt = 2 * 4.5 / 5
+    assert float(slope[-1, 0]) == pytest.approx(2.0 * 4.5 / 5.0)

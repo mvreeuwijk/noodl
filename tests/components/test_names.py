@@ -167,16 +167,27 @@ def test_nodes_and_edges_of_follow_the_network_order_in_a_nested_tree():
     assert names.edges_of("") == [edge_label(e) for e in net.edges]
 
 
-def test_select_then_nodes_of_is_fast_on_a_large_tree():
-    import time
-
+def test_nodes_of_a_leaf_reads_only_that_leafs_own_nodes_on_a_large_tree():
+    """A query costs its answer, not the tree: `nodes_of` on a leaf component reads that
+    component's own-node list once and nothing else, however many components the tree has.
+    Counted rather than timed, so the check holds on any machine."""
     b = Component("tower")
     for f in range(20):
         floor = b.add(Component(f"f{f}", template="floor"))
         for r in range(50):
             floor.add(zone(f"r{r}", volume=1.0))
     _, names = b.flatten(dtype=F64)
-    t0 = time.perf_counter()
-    nodes = [n for p in names.select(template="zone") for n in names.nodes_of(p)]
-    assert time.perf_counter() - t0 < 0.5
+
+    class Counting(dict):
+        reads = 0
+
+        def __getitem__(self, key):
+            Counting.reads += 1
+            return super().__getitem__(key)
+
+    names._own_nodes = Counting(names._own_nodes)
+    zones = names.select(template="zone")
+    nodes = [n for p in zones for n in names.nodes_of(p)]
+    assert len(zones) == 1000
     assert len(nodes) == 1000
+    assert Counting.reads == len(zones)      # one read per query: linear in the queries made

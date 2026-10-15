@@ -86,6 +86,13 @@ page](applications/sewer.md#dynamic-wave-against-swmm)). The slow rows run under
 | the tide on the variable-step tree | 33 | 8.4e-10 m | Step sequence equal to the millisecond |
 | Conservative tracer on the tree (J1 ramps 0 to 100 mg/L), noodl driven with SWMM's J1 concentration | 3 h | steady 4.2e-11 relative | **By design** in transit: the reactors are junctions, SWMM's are conduits. Areas under the curves match the delay difference to 1.5e-11 / 5.7e-11 / 2.6e-10; the pointwise difference stays within the bound (25 % / 18 % / 9 % of the plateau against 57 % / 49 % / 61 %). SWMM's concentrations equal `qualrout.c` ported on SWMM's flows to 4.7e-16 kg/m3 |
 | Conservative tracer on the loop, 100 mg/L at J1 and 40 mg/L at J3 | 3.5 h | steady 2.5e-10 relative | Slow test, about 11 min |
+| `shapes_dynwave`, `shapes_drop_dynwave` (offsets at both ends): 25 chains (every modelled SWMM shape: the `xsect.dat` tables, the closed forms, `CUSTOM`, `FILLED_CIRCULAR`, `FORCE_MAIN`), one chain each | 40 | 3.0e-9 / 1.2e-9 m | Flows within target at every step; `RECT_ROUND` omitted from the offset fixture (see the [sewer page](applications/sewer.md#cross-sections-losses-transects-and-culverts)) |
+| `shapes_surcharge_dynwave` (EXTRAN), `shapes_slot_dynwave` (SLOT): the closed shapes past their crowns under a `FIXED` stage | 60 | 7.2e-8 / 2.1e-8 m | |
+| `shapes_us_dynwave`: CFS, standard ellipse and arch sizes by code, a rectangular and a trapezoidal channel | 40 | 1.6e-9 m | |
+| `force_main_hw_dynwave`, `force_main_dw_dynwave`: full force mains, Hazen-Williams and Darcy-Weisbach | 60 | 1.8e-8 / 2.7e-8 m | |
+| `losses_dynwave`: entry, exit and average loss coefficients | 60 | 5.6e-9 m | |
+| `irregular_dynwave`: three `[TRANSECTS]` channels (overbank n, `Lfactor`, `Xfactor`, `Yfactor`) | 40 | 5.8e-10 m | |
+| `culvert_dynwave`: six inlet-control types from unsubmerged to submerged | 60 | 1.1e-8 m | `tests/verification/test_sewer_shapes_parity.py` for these rows |
 
 Not compared live (implemented and checked against closed forms): the cases listed under
 [Limitations](applications/sewer.md#limitations).
