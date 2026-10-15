@@ -31,7 +31,7 @@ PAGES = [
     "applications/electrical.md",
 ]
 FIXTURES = ["sewer/*.inp", "water/*.inp", "wsimod/*.json",
-            "modelica_electrical/DC.Loads.Examples.Resistor.json"]
+            "modelica_electrical/DC.Loads.Examples.Resistor.json", "power_flow/*.m"]
 BLOCK = re.compile(r"```(python|text)\n(.*?)```", re.S)
 
 

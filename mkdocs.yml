@@ -83,6 +83,7 @@ nav:
       - Modelica Buildings Library: formats/modelica.md
       - SWMM (.inp): formats/swmm.md
       - EPANET (.inp): formats/epanet.md
+      - MATPOWER (.m): formats/matpower.md
   - Development:
       - Extending noodl: development/extending.md
   - API reference: api.md

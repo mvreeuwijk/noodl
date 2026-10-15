@@ -56,9 +56,9 @@ PAGES = [
      "sources and their waveforms, diodes, switches, transformers and controlled sources "
      "(Modelica Standard Library device laws); impedances, constant-power loads and power "
      "converters (Modelica Buildings Library laws); Joule heating into a thermal network; "
-     "the reader of OpenModelica circuit exports; the constitutive laws of balanced AC "
-     "power flow in per unit (MATPOWER branch model, shunts, voltage-controlled "
-     "generators)."),
+     "the reader of OpenModelica circuit exports; balanced AC and DC power flow in per "
+     "unit (MATPOWER branch model, shunts, voltage-controlled generators) and the "
+     "MATPOWER case-file reader."),
 ]
 
 ROLES = [
@@ -113,7 +113,8 @@ device to the `JouleHeating` closure (a coupling description, not a network comp
 Modelica circuit reader's `CircuitNames` and `Column` describe its result (supporting types)."""
 
 SETUP_NAMES = {"build_model", "initial_state", "initial_drivers", "project_to_model",
-               "drivers_from", "state_from", "check_setup"}
+               "drivers_from", "state_from", "check_setup", "build_power_flow",
+               "dc_power_flow"}
 
 
 def _summary(obj) -> str:

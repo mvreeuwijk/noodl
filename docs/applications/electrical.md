@@ -8,10 +8,11 @@ node voltages (see
 [Modified Nodal Analysis](../concepts/layers.md#modified-nodal-analysis-implicit-coupled-and-dynamic-laws)).
 A circuit is analysed at its DC operating point, as a transient on a fixed time grid, or in the
 sinusoidal steady state (AC, by phasors). The device laws transcribe the Modelica Standard
-Library (MSL, `Modelica.Electrical.Analog`).
+Library (MSL, `Modelica.Electrical.Analog`). The same phasor layer also solves the
+[power flow](#power-flow) of a balanced power network read from a MATPOWER case file.
 
 **Units.** Voltage V, current A, resistance ohm, conductance S, capacitance F, inductance H,
-time s, frequency Hz, temperature K.
+time s, frequency Hz, temperature K. The power flow is in per unit (see [Power flow](#power-flow)).
 
 **Precision.** A constitutive law stores a parameter given as a Python float in torch's default
 dtype, which is float32 unless changed. `build_model` passes float64 values, but a circuit
@@ -657,6 +658,177 @@ print([round(g, 12) for g in grad.tolist()])
 [-0.7, 0.3]
 ```
 
+## Power flow
+
+`noodl.apps.electrical.power` solves the **power flow** (load flow) of a transmission or
+distribution network: the balanced, positive-sequence, sinusoidal steady state of buses joined
+by lines and transformers, with constant-power loads, fixed shunts and generators that hold
+their bus voltage. Everything is in **per unit**: powers on the network's base `base_mva`
+(MW / `base_mva`, MVAr / `base_mva`), voltages in p.u. as root-mean-square phasors, angles in
+radians. The network is a `PowerNetwork` of `Bus`, `Branch`, `Generator`, `Load` and
+`FixedShunt` records in MATPOWER's file units (MW, MVAr, degrees), read from a MATPOWER case
+file by `read_matpower` (see [File formats: MATPOWER](../formats/matpower.md)) or built by hand.
+
+```py
+from noodl.apps.electrical.power import (
+    PowerNetwork, Bus, Branch, Generator, Load, FixedShunt, read_matpower,
+    build_power_flow, dc_power_flow, solve_power_flow, power_flow_solution,
+    dc_power_flow_solution, check_power_network,
+    PiBranch, Shunt, VoltageControlledGenerator,
+)
+```
+
+The WSCC 9-bus case (MATPOWER's `case9`), solved in full and in the DC approximation:
+
+```python
+from noodl.apps.electrical.power import (
+    build_power_flow, dc_power_flow, dc_power_flow_solution, power_flow_solution,
+    read_matpower, solve_power_flow,
+)
+
+net = read_matpower("case9.m")
+model, state, drivers = build_power_flow(net)
+sol = power_flow_solution(model, solve_power_flow(model, state, drivers))
+print(" ".join(f"{v:.4f}" for v in sol.vm.tolist()))
+print([round(100 * p, 3) for p in sol.pg.tolist()])
+dc_model, dc_state, dc_drivers = dc_power_flow(net)
+dc = dc_power_flow_solution(dc_model, solve_power_flow(dc_model, dc_state, dc_drivers))
+print(" ".join(f"{100 * p:.2f}" for p in dc.pf.tolist()))
+```
+
+```text
+1.0400 1.0250 1.0250 1.0258 1.0127 1.0324 1.0159 1.0258 0.9956
+[71.641, 163.0, 85.0]
+67.00 28.97 -61.03 85.00 23.97 -76.03 -163.00 86.97 -38.03
+```
+
+The first line is the voltage magnitude of each bus (p.u.), the second the generation at the
+three generator buses (MW: the slack bus 1 takes up the losses, buses 2 and 3 produce their
+setpoints), the third the DC real power entering each branch at its from end (MW). A
+`PowerFlowSolution` holds `vm`, `va` per bus of `bus_ids`, `pg`, `qg` per bus of `gen_buses`
+(the sum of the bus's generators) and the complex powers `sf`, `st` entering each in-service
+branch (`branch_rows`) at its two ends; a `DcPowerFlowSolution` holds `va`, `pg` and `pf`.
+
+### The AC model
+
+`build_power_flow(net)` returns `(model, state, drivers)` for one phasor
+`PotentialFlowLayer` named `"power"`, solved by
+[Modified Nodal Analysis](../concepts/layers.md#modified-nodal-analysis-implicit-coupled-and-dynamic-laws).
+Its nodes are the buses (`str(bus.id)`, in table order) and one more node, `"ground"`, the
+common reference at 0. Every device is an edge **to ground**: the edge's potential difference
+is then the bus voltage phasor `v` itself, and its flow is the current `i` leaving the bus
+through the device into ground, so Kirchhoff's current law at a bus is the power-flow balance
+of that bus. A load, a shunt or a generator connects one bus to the reference, so it is one
+edge bus `->` ground. A branch is a two-port: MATPOWER's branch model, a series impedance with
+line charging behind a phase-shifting transformer, is not a two-terminal element (with a phase
+shift its from and to admittances differ), so it is a pair of edges, from bus `->` ground and
+to bus `->` ground, and its constitutive law relates both currents to both voltages. Four
+constitutive laws describe the network (`v` the bus voltage, `i` the edge current into ground,
+absorbed power `v conj(i)`):
+
+| Constitutive law (kind) | Edges | Relation |
+|---|---|---|
+| `PiBranch(r, x, b, ratio, shift)` (`branch`) | from bus `->` ground, to bus `->` ground | `[i_f; i_t] = [[Y_ff, Y_ft], [Y_tf, Y_tt]] [v_f; v_t]`, `Y_s = 1/(r + jx)`, `tau = ratio e^{j shift}` (ratio 0 means 1), `Y_tt = Y_s + jb/2`, `Y_ff = Y_tt / \|tau\|^2`, `Y_ft = -Y_s / conj(tau)`, `Y_tf = -Y_s / tau` |
+| `ConstantPowerLoad(P, Q)` (`load`) | bus `->` ground | `v conj(i) = P + jQ`, the power absorbed |
+| `Shunt(g, b)` (`shunt`) | bus `->` ground | `i = (g + jb) v`: `g` consumes `g \|v\|^2`, a positive `b` injects `b \|v\|^2` |
+| `VoltageControlledGenerator(P, V)` (`generator`) | bus `->` ground | `\|v\| = V` and `Re(v conj(i)) = -P`: injects the real power `P` and whatever reactive power holds the magnitude (implicit: its current is an unknown) |
+
+`ConstantPowerLoad` is the law of [the section above](#impedances-constant-power-loads-and-converters),
+with `P`, `Q` in p.u.; its edge carries the bus's net fixed demand, the loads less the
+generation of any generator on a bus solved as PQ. Sign convention: every law absorbs
+`v conj(i)`, so a load's `P` is positive and a generator absorbs `-P`. Like the other power
+laws, these assume root-mean-square phasors.
+
+The **slack bus** is a second boundary node of the layer, held at `V_set e^{j theta}` (its
+generators' voltage setpoint and the bus's angle from the bus table). Its Kirchhoff residual
+is not imposed, so it takes up whatever power balances the network, and
+`power_flow_solution` reports its generation as `v conj(I)` with `I` the total current its
+edges carry away. The boundary voltages are the driver `"power.phi_boundary"` (ground first,
+then the slack); `"power.frequency"` is required by every phasor layer and read by no
+power-flow law. The state is the **flat start**: every regulated bus (the slack and each PV
+bus with generation) at its voltage setpoint, every other bus at 1 p.u., all at the slack
+angle; edge currents zero.
+
+`solve_power_flow(model, state, drivers)` runs `model.steady` with Newton to a residual
+max-norm below `atol = 1e-11` p.u. (`rtol = 0`, at most 30 iterations). Every standard case
+converges from the flat start in 4 or 5 iterations. A solve that fails, because the loading
+exceeds what the network can transfer (no solution exists) or the case is malformed, raises a
+`RuntimeError` that says so, chained to the solver's own error.
+
+### The DC model
+
+`dc_power_flow(net)` builds the DC approximation (all voltage magnitudes 1 p.u., no branch
+resistance or charging, small angle differences) as plain nodal analysis on a classic real
+`PotentialFlowLayer` named `"power_dc"`. The potential is the voltage angle `theta` (rad) at
+the buses; there is no ground node. Each in-service branch is one edge from bus `->` to bus with
+a `Conductance(1 / (x tau))` (`tau` the tap ratio, 0 meaning 1), and the phase shifts `sigma`
+are a `ConstantDrive` on that kind, the driver `"power_dc.shift"` holding `-sigma`, so the
+branch flow is
+
+`Pf = (theta_f - theta_t - sigma) / (x tau)`,
+
+MATPOWER's `Bf theta + Pfinj`. The node sources (`"power_dc.sources"`) are each bus's net
+injection `(sum Pg - sum Pd - Gs) / base_mva`, and the slack bus is the layer's one boundary
+node at its table angle (`"power_dc.phi_boundary"`). The layer solves `B theta = P` with one
+linear solve of the weighted graph Laplacian (`layer.mna` is `False`), through the same
+`solve_power_flow`. Line charging, `Bs` and reactive demand play no part. The slack bus's
+generation is the power its branches carry away plus its own demand and shunt conductance.
+
+### MATPOWER semantics
+
+The builders follow MATPOWER 8.1 (`makeYbus`, `makeBdc`, `bustypes`, `makeSbus`, `dcpf`)
+exactly:
+
+- a branch tap ratio of 0 means 1; the phase shift is in degrees in the network and in
+  radians in the laws;
+- a bus shunt's `Gs`, `Bs` are the MW consumed and MVAr injected at 1 p.u.;
+- generators and branches of status `<= 0` are dropped;
+- generators on one bus are summed;
+- a PV bus with no in-service generator is solved as PQ;
+- the slack voltage magnitude is its generators' `Vg` and its angle the bus `Va` column; a PV
+  bus's magnitude is its generators' `Vg`;
+- the start is flat, as described above, with the slack keeping its file angle.
+
+### Refusals and limitations
+
+`check_power_network(net, dc=False)` (called by both builders) refuses, with a `ValueError`
+naming what it found: not exactly **one slack bus**; a slack bus without an in-service
+generator; a regulated bus whose generators have different voltage setpoints (MATPOWER
+silently takes the last); a branch of zero impedance (`r = x = 0`; `x = 0` for DC), named by
+its row; and buses not connected to the slack bus through in-service branches (an **island**).
+Not implemented:
+
+- **No reactive-power limits.** A PV bus never switches to PQ at a limit;
+  `build_power_flow(..., enforce_q_limits=True)` is refused.
+- **No DC lines** (`mpc.dcline` is refused by name) and **no isolated buses** (MATPOWER bus
+  type 4, refused by name).
+- **Balanced only.** One positive-sequence phase; no unbalanced three-phase power flow.
+- **One slack bus**, no distributed slack.
+- Load and generator setpoints are law parameters, not drivers: a batch of operating points is
+  a batch of drivers (the slack voltage), or of separately built models.
+
+### Gradients
+
+`build_power_flow(net, learnable=True)` registers every constitutive-law coefficient (branch
+`r`, `x`, `b`, taps and shifts; load `P`, `Q`; shunt `g`, `b`; generator `P`, `V`) as an
+`nn.Parameter`, reached as `model.potential["power"].element_for(kind)[0]`, and the solve is
+differentiable through the implicit-function adjoint. The sensitivity of bus 5's voltage
+magnitude to the three loads' real power (p.u./p.u.):
+
+```python
+model, state, drivers = build_power_flow(net, learnable=True)
+vm = power_flow_solution(model, solve_power_flow(model, state, drivers)).vm
+(grad,) = torch.autograd.grad(vm[4], model.potential["power"].element_for("load")[0].P)
+print(model.power_index.load_buses, [round(g, 4) for g in grad.tolist()])
+```
+
+```text
+(5, 7, 9) [-0.0164, 0.0076, -0.0015]
+```
+
+More load at bus 5 lowers its own voltage; the adjoint agrees with central differences to
+1e-6 relative.
+
 ## Checks
 
 `Circuit` refuses, naming the device: an unknown device type, a duplicate or empty name, a port
@@ -709,6 +881,31 @@ OpenModelica 1.27.1 (DASSL at 1e-12) at every row and every column of the refere
 Model by model, with the step counts and the worst columns, on the [verification
 page](../verification.md#modelica-electrical-circuits-model-by-model).
 
+### Power flow against pandapower
+
+The AC and DC power flows of five MATPOWER cases are compared with stored results of
+pandapower 3.5.6 (`tests/data/power_flow/*.json`, generated by
+`scripts/power_flow_reference.py` from the committed `.m` files and cross-checked there against
+PYPOWER 5.1.21, a port of MATPOWER; the two agree to 1.1e-13 or better), in
+`tests/verification/test_power_flow_parity.py`. The cases are MATPOWER 8.1's `case9`,
+`case14`, `case30` and `case118`, and `case9_features`, a variant of `case9` with off-nominal
+taps, phase shifters, parallel and out-of-service branches, a shunt conductance, two generators
+on one bus, a generator on a PQ bus, a PV bus left without generation and a slack angle of 10°.
+Tolerances (absolute): |V| 1e-8 p.u., angles 1e-8 rad, generator P and Q (per bus) and DC branch
+flows 1e-6 p.u. Measured worst absolute differences:
+
+| Case | Newton iterations | \|V\| (p.u.) | Angle (rad) | Pg (p.u.) | Qg (p.u.) | DC angle (rad) | DC Pg (p.u.) | DC branch flow (p.u.) |
+|---|---|---|---|---|---|---|---|---|
+| `case9` | 4 | 7.1e-15 | 1.9e-14 | 1.1e-13 | 4.8e-14 | 5.6e-17 | 0 | 6.7e-16 |
+| `case14` | 5 | 8.9e-16 | 4.4e-16 | 2.2e-15 | 9.3e-15 | 1.1e-16 | 8.9e-16 | 1.1e-15 |
+| `case30` | 4 | 1.6e-15 | 6.7e-15 | 3.4e-14 | 8.4e-15 | 3.5e-17 | 3.9e-16 | 3.9e-16 |
+| `case118` | 5 | 2.9e-15 | 2.8e-15 | 4.6e-14 | 5.1e-14 | 2.8e-15 | 6.7e-15 | 1.4e-14 |
+| `case9_features` | 5 | 2.3e-14 | 2.7e-14 | 2.1e-14 | 1.2e-13 | 8.3e-17 | 5.6e-16 | 6.7e-16 |
+
+Every difference is at round-off, five or more orders inside the tolerance: both codes solve
+the same equations, noodl to a Newton residual of 1e-11 p.u. The pandapower networks of the same
+names (`pandapower.networks.case9`, `case118`) are not MATPOWER's files and are not used.
+
 ## Limitations
 
 - **Fixed time grid.** No adaptive step, and `transient` inserts no breakpoints: a source edge
@@ -731,4 +928,6 @@ page](../verification.md#modelica-electrical-circuits-model-by-model).
   refused.
 - **Lumped, balanced.** No distributed transmission lines; balanced three-phase models are
   read as their one-phase equivalent, and unbalanced three-phase systems are not supported.
+  The power flow's own limits (no reactive-power limits, DC lines or isolated buses, one slack
+  bus) are listed under [Refusals and limitations](#refusals-and-limitations).
 - **No batteries, photovoltaics or grid sources** from MBL (refused by name).

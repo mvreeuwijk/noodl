@@ -238,6 +238,7 @@ Elements are grouped below by the physics they express, as in
 ::: noodl.apps.electrical.modelica
     options:
       members: [read_modelica_circuit, simulate_circuit, CircuitNames, Column, extrapolate, ModelicaImportError]
+::: noodl.apps.electrical.power
 
 ### Shared
 

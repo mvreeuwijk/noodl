@@ -307,10 +307,12 @@ def build_power_flow(
 
 def solve_power_flow(model: Model, state: State, drivers: Drivers, *, atol: float = 1e-11,
                      rtol: float = 0.0, max_iter: int = 30, **solve_kwargs) -> State:
-    """The solved power flow: `model.steady(state, drivers, atol=atol, rtol=rtol,
-    max_iter=max_iter, **solve_kwargs)`. Newton stops when the residual's max-norm (p.u.)
+    """The solved power flow, AC or DC: `model.steady(state, drivers, atol=atol, rtol=rtol,
+    max_iter=max_iter, **solve_kwargs)`, for a model from `build_power_flow` or
+    `dc_power_flow`. For the AC power flow Newton stops when the residual's max-norm (p.u.)
     is below `atol`; `state` is its starting point (the flat start `build_power_flow`
-    returns, or an earlier solution).
+    returns, or an earlier solution). The DC power flow is linear: one solve, from the empty
+    state `dc_power_flow` returns.
 
     A solve that fails (Newton does not converge, or its Jacobian is singular) raises a
     `RuntimeError` naming the layer, chained to the solver's own error, with power-flow
