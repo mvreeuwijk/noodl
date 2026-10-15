@@ -401,10 +401,10 @@ def test_missing_or_malformed_deciding_parameters_are_refused(tmp_path):
         _c("amb", HEAT + "Sources.FixedTemperature", T="warm"),
     ], [])
     msg = _refusal(path)
-    assert "E " in msg and "f must be a number" in msg
+    assert "E " in msg and "f must be a finite number" in msg
     assert "ln " in msg and "use_T must be true or false" in msg
     assert "t " in msg and "considerMagnetization must be true or false" in msg
-    assert "amb " in msg and "T must be a number" in msg
+    assert "amb " in msg and "T must be a finite number" in msg
 
 
 def test_rc_line_capacitor_off_the_reference_is_refused(tmp_path):
@@ -440,3 +440,48 @@ def test_load_reads_utf8(tmp_path):
     raw["model"] = "Modèle"
     path.write_bytes(json.dumps(raw, ensure_ascii=False).encode("utf-8"))
     assert load(path).model == "Modèle"
+
+
+def test_diode_heat_port_without_temperature_dependency_is_refused(tmp_path):
+    # the heat would flow, but the diode law would ignore the heat-port temperature
+    path = _doc(tmp_path, [
+        _c("g", MSL + "Basic.Ground"),
+        _c("v", MSL + "Sources.ConstantVoltage", V=1.0),
+        _c("d", MSL + "Semiconductors.Diode", useHeatPort=True,
+           useTemperatureDependency=False),
+        _c("amb", HEAT + "Sources.FixedTemperature", T=300.0),
+    ], [["v.p", "d.p"], ["v.n", "g.p"], ["d.n", "g.p"], ["d.heatPort", "amb.port"]])
+    msg = _refusal(path)
+    assert "d (" in msg and "useHeatPort = true" in msg
+    assert "useTemperatureDependency = false" in msg
+
+
+def test_floating_thermal_network_is_refused_naming_its_nodes(tmp_path):
+    # r1's heat port reaches only a conductor (no fixed temperature, no heat capacitor);
+    # r2's is held by a heat capacitor, r3's by a fixed temperature through a conductor
+    path = _doc(tmp_path, [
+        _c("g", MSL + "Basic.Ground"),
+        _c("v", MSL + "Sources.ConstantVoltage", V=1.0),
+        _c("r1", MSL + "Basic.Resistor", R=1.0, useHeatPort=True),
+        _c("r2", MSL + "Basic.Resistor", R=1.0, useHeatPort=True),
+        _c("r3", MSL + "Basic.Resistor", R=1.0, useHeatPort=True),
+        _c("k1", HEAT + "Components.ThermalConductor", G=1.0),
+        _c("cap", HEAT + "Components.HeatCapacitor", C=1.0),
+        _c("k3", HEAT + "Components.ThermalConductor", G=1.0),
+        _c("amb", HEAT + "Sources.FixedTemperature", T=300.0),
+    ], [["v.p", "r1.p"], ["v.p", "r2.p"], ["v.p", "r3.p"], ["v.n", "g.p"], ["r1.n", "g.p"],
+        ["r2.n", "g.p"], ["r3.n", "g.p"], ["r1.heatPort", "k1.port_a"],
+        ["r2.heatPort", "cap.port"], ["r3.heatPort", "k3.port_a"], ["k3.port_b", "amb.port"]])
+    msg = _refusal(path)
+    assert "floating" in msg and "r1.heatPort" in msg and "k1.port_b" in msg
+    assert "r2.heatPort" not in msg and "r3.heatPort" not in msg
+
+
+def test_non_finite_frequency_and_fixed_temperature_are_refused(tmp_path):
+    path = _doc(tmp_path, [
+        _c("E", AC + "Sources.FixedVoltage", f=float("nan"), V=120.0),
+        _c("amb", HEAT + "Sources.FixedTemperature", T=float("inf")),
+    ], [])
+    msg = _refusal(path)
+    assert "E " in msg and "f must be a finite number, found nan" in msg
+    assert "amb " in msg and "T must be a finite number, found inf" in msg

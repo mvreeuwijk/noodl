@@ -63,10 +63,13 @@ MBL line classes are checked against the simulated values of their inner line (`
 the one-phase `Line` uses `R/3` and `L/3`, the balanced three-phase `Line` `R`, `L`, `C`.
 The parameters that decide a refusal or a node must be exported: `use_T` of the MBL lines and
 `considerMagnetization` of `IdealTransformer` as booleans, the temperature `T` of a fixed
-temperature and the frequency `f` of an AC source as numbers. An MBL resistive part without
-heat port must sit at its reference temperature (`T`, or a `Line`'s `TCable`, equal to
-`T_ref`), and a `TwoPortRCLine` with `use_C` must have its conductor 2 on node 0 (its
-capacitor is the edge `mid -> c2`).
+temperature and the frequency `f` of an AC source as finite numbers. An MBL resistive part
+without heat port must sit at its reference temperature (`T`, or a `Line`'s `TCable`, equal
+to `T_ref`), and a `TwoPortRCLine` with `use_C` must have its conductor 2 on node 0 (its
+capacitor is the edge `mid -> c2`). A `Diode` with `useHeatPort` but without
+`useTemperatureDependency` is refused (its law would ignore the heat-port temperature), as is
+a thermal network part (thermal nodes joined by conductors) that no fixed temperature and no
+heat capacitor holds: its temperature is undetermined; the refusal names those nodes.
 
 Connections follow Modelica's rules for what is not a physical connector: a `connect` to a
 DISABLED conditional heat port is removed (legal Modelica: the connection disappears with the
@@ -77,6 +80,7 @@ carried by the signals' `drives`).
 from __future__ import annotations
 
 import dataclasses
+import math
 from collections.abc import Iterable
 from dataclasses import dataclass
 
@@ -291,8 +295,16 @@ def _line_problems(comp: CircuitComponent) -> list[str]:
     return problems
 
 
-def _is_number(value) -> bool:
-    return isinstance(value, (int, float)) and not isinstance(value, bool)
+def _finite(value) -> float | None:
+    """`value` as a finite float, or `None` (a bool, a non-number, or a number that is not
+    finite or does not fit a float, such as a 400-digit integer)."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    try:
+        number = float(value)
+    except (OverflowError, TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) else None
 
 
 def _declared_problems(comp: CircuitComponent, role: str) -> list[str]:
@@ -307,8 +319,8 @@ def _declared_problems(comp: CircuitComponent, role: str) -> list[str]:
         if not isinstance(p.get(key), bool):
             problems.append(f"{where}: {key} must be true or false, found {p.get(key)!r}")
     key = {"fixed_temperature": "T", "ac_source": "f"}.get(role)
-    if key is not None and not _is_number(p.get(key)):
-        problems.append(f"{where}: {key} must be a number, found {p.get(key)!r}")
+    if key is not None and _finite(p.get(key)) is None:
+        problems.append(f"{where}: {key} must be a finite number, found {p.get(key)!r}")
     return problems
 
 
@@ -348,6 +360,11 @@ def _component_problems(comp: CircuitComponent, role: str | None) -> list[str]:
                             f"(useHeatPort = true)")
         else:
             problems += _temperature_problems(comp)
+    if (role == "diode" and _flag(p, "useHeatPort")
+            and not _flag(p, "useTemperatureDependency")):
+        problems.append(f"{where}: a heat port on a diode without temperature dependency "
+                        f"(useHeatPort = true, useTemperatureDependency = false) is not "
+                        f"supported")
     if role == "ideal_transformer" and _flag(p, "considerMagnetization"):
         problems.append(f"{where}: considerMagnetization = true is not supported")
     if role == "ac_dc_converter" and not _flag(p, "ground_DC"):
@@ -356,6 +373,34 @@ def _component_problems(comp: CircuitComponent, role: str | None) -> list[str]:
     if not problems and comp.cls in schema.LINES:
         problems += _line_problems(comp)
     return problems
+
+
+def _floating_thermal_nodes(devices: list[Device], fixed: dict, thermal_names: list[str]
+                            ) -> list[str]:
+    """The thermal nodes whose part of the thermal network (joined by thermal conductors)
+    holds neither a fixed temperature nor a heat capacitor: their temperature is not
+    determined (in a steady solve a heat capacitor alone would not fix it either, but a
+    circuit with one is always stepped)."""
+    parent = list(range(len(thermal_names)))
+
+    def find(k: int) -> int:
+        while parent[k] != k:
+            parent[k] = parent[parent[k]]
+            k = parent[k]
+        return k
+
+    for d in devices:
+        if d.role == "thermal_conductor":
+            parent[find(d.nodes["port_a"])] = find(d.nodes["port_b"])
+    held = {find(node) for node in fixed}
+    held |= {find(d.nodes["port"]) for d in devices if d.role == "heat_capacitor"}
+    held.add(find(0))       # the reference, and whatever a conductor joins to it
+    floating = [thermal_names[k] for k in range(1, len(thermal_names))
+                if find(k) not in held]
+    if not floating:
+        return []
+    return [f"the thermal network is floating at {', '.join(floating)}: no fixed temperature "
+            f"and no heat capacitor holds the temperature there; add a FixedTemperature"]
 
 
 def raise_problems(problems: Iterable[str]) -> None:
@@ -553,6 +598,7 @@ def build(doc: CircuitDoc, *, omit: Iterable[str] = ()) -> Netlist:
             else:
                 fixed[node] = (comp.name, t)
 
+    problems += _floating_thermal_nodes(devices, fixed, thermal_names)
     raise_problems(problems)
 
     def lookup(table: dict) -> dict[str, int]:

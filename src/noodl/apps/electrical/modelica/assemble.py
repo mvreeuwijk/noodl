@@ -139,7 +139,7 @@ from noodl.apps.electrical.laws import (
     TransformerRatio,
 )
 from noodl.apps.electrical.loads import ConstantPowerLoad, Impedance
-from noodl.apps.electrical.modelica.netlist import Device, Netlist, raise_problems
+from noodl.apps.electrical.modelica.netlist import Device, Netlist, _finite, raise_problems
 from noodl.apps.electrical.modelica.schema import CircuitDoc, ModelicaImportError, Signal
 from noodl.apps.electrical.thermal import HeatedEdge, JouleHeating
 from noodl.apps.electrical.waveforms import Constant
@@ -359,18 +359,6 @@ class _Inputs:
 
 
 # ------------------------------------------------------------------------------ helpers
-def _finite(value) -> float | None:
-    """`value` as a finite float, or `None` (a bool, a non-number, or a number that is not
-    finite or does not fit a float, such as a 400-digit integer)."""
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        return None
-    try:
-        number = float(value)
-    except (OverflowError, TypeError, ValueError):
-        return None
-    return number if math.isfinite(number) else None
-
-
 def _shown(value) -> str:
     """`repr(value)`, shortened for the message (a huge integer has a very long one)."""
     try:
@@ -1018,6 +1006,8 @@ def build(netlist: Netlist, doc: CircuitDoc, *, substeps: int = 1
                       iterate_acceleration="anderson", iterate_max=_ITERATE_MAX)
     else:
         model = Model(net, [layer])
+    # with only the thermal side dynamic the circuit has no capacitor or inductor, so its
+    # start is zero potentials (no source warm start) and the first step's Newton solves it
     state = b.start(dynamic, len(names), drivers)
     if heated:
         state.update(thermal_state)

@@ -20,7 +20,7 @@ from collections.abc import Mapping, Sequence
 import torch
 
 from noodl.apps.building_physics.modelica.run import step_drivers
-from noodl.apps.electrical.modelica.assemble import CircuitNames
+from noodl.apps.electrical.modelica.assemble import THERMAL, CircuitNames
 from noodl.model import Model, State
 
 Tensor = torch.Tensor
@@ -64,8 +64,9 @@ def simulate_circuit(model: Model, state: State, drivers: Mapping[str, Tensor],
                      names: CircuitNames, *, times: Sequence[float] | Tensor | None = None,
                      **solve_kwargs) -> dict[str, Tensor]:
     """The circuit's history at `times` (default `names.times`; each must be a time of
-    `names.grid`, increasing): `"time"` `(T,)` and every `".phi"` / `".q"` state entry the
-    model returns, stacked on dim 0.
+    `names.grid`, increasing; a single time may be a scalar): `"time"` `(T,)` (the grid times
+    found, a new tensor) and every `".phi"` / `".q"` state entry the model returns, stacked
+    on dim 0.
 
     `solve_kwargs` (Newton's `atol`, `rtol`, `max_iter`, ...) are passed to every
     `model.steady` / `model.step`. The steady solves of an algebraic circuit default to
@@ -74,13 +75,16 @@ def simulate_circuit(model: Model, state: State, drivers: Mapping[str, Tensor],
     tolerances.
     """
     grid = names.grid
-    times = names.times if times is None else torch.as_tensor(times, dtype=F64)
+    if times is None:
+        times = names.times
+    else:
+        times = torch.atleast_1d(torch.as_tensor(times, dtype=F64))
     if times.numel() == 0:
         raise ValueError("simulate_circuit: no times asked for")
     want = _grid_index(grid, times)
     rows: list[State] = []
     if not names.dynamic:
-        atol = THERMAL_STEADY_ATOL if "thermal.phi" in state else STEADY_ATOL
+        atol = THERMAL_STEADY_ATOL if f"{THERMAL}.phi" in state else STEADY_ATOL
         kwargs = {"atol": atol, "rtol": STEADY_RTOL, **solve_kwargs}
         for k in want:
             t = float(grid[k])
@@ -99,5 +103,5 @@ def simulate_circuit(model: Model, state: State, drivers: Mapping[str, Tensor],
                 rows.append(state)
     keys = [key for key in rows[0] if key.endswith((".phi", ".q"))]
     out = {key: torch.stack([row[key] for row in rows]) for key in keys}
-    out["time"] = times
+    out["time"] = grid[want].clone()
     return out

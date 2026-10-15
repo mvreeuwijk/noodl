@@ -186,3 +186,21 @@ def test_a_heat_port_circuit_is_solved_at_the_thermal_round_off_tolerance():
     T = names.value(out, "resistor.T_heatPort")
     assert float(T[0]) == pytest.approx(293.15, abs=1e-9)
     assert abs(float(T[1]) - 302.73806893411466) <= 1e-9
+
+
+def test_a_single_time_may_be_a_zero_dimensional_tensor(tmp_path):
+    model, state, drivers, names = read_modelica_circuit(_rc_fixture(tmp_path))
+    out = simulate_circuit(model, state, drivers, names, 
+                           times=torch.tensor(0.3, dtype=torch.float64))
+    assert out["time"].tolist() == pytest.approx([0.3]) and out["electrical.q"].shape[0] == 1
+
+
+def test_returned_time_is_the_grid_time_and_never_an_input_tensor(tmp_path):
+    model, state, drivers, names = read_modelica_circuit(_rc_fixture(tmp_path))
+    out = simulate_circuit(model, state, drivers, names)
+    assert out["time"] is not names.times
+    out["time"][0] = -1.0
+    assert float(names.times[0]) == 0.0 and float(names.grid[0]) == 0.0
+    asked = torch.tensor([0.1 + 1e-12, 0.2], dtype=torch.float64)
+    part = simulate_circuit(model, state, drivers, names, times=asked)
+    assert part["time"] is not asked and float(part["time"][0]) == float(names.times[1])
