@@ -83,7 +83,7 @@ def test_zero_impedance_branch_is_refused():
     net = read_matpower(DATA / "case9.m")
     br = list(net.branches)
     br[0] = dataclasses.replace(br[0], x=0.0)               # r is already 0 on 1-4
-    with pytest.raises(ValueError, match=r"branch 0 \(1-4\)"):
+    with pytest.raises(ValueError, match=r"row 1 of the branch table \(from bus 1 to bus 4\)"):
         build_power_flow(dataclasses.replace(net, branches=tuple(br)))
 
 
@@ -92,29 +92,35 @@ def test_infeasible_loading_raises_naming_the_layer():
     heavy = tuple(dataclasses.replace(ld, p_mw=10 * ld.p_mw, q_mvar=10 * ld.q_mvar)
                   for ld in net.loads)
     model, state, drivers = build_power_flow(dataclasses.replace(net, loads=heavy))
-    with pytest.raises(RuntimeError, match="PotentialFlowLayer 'power'"):
+    with pytest.raises(RuntimeError, match="PotentialFlowLayer 'power'") as failure:
         solve_power_flow(model, state, drivers)
+    assert "power flow: no solution found" in str(failure.value)
+    assert "exceed what the network can transfer" in str(failure.value)
+    assert isinstance(failure.value.__cause__, RuntimeError)
 
 
 def test_voltage_sensitivity_to_load_matches_finite_differences():
-    # d|V_k|/dP_load at bus 5 of case9, by the adjoint of the converged solve, against a
-    # central difference of two plain solves (h = 1e-5 p.u.; truncation ~1e-10).
+    # d|V_k|/dP_load at bus 5 of case9 for the PQ buses 5 and 6 (sensitivities 1.6e-2 and
+    # 3.4e-3, far above the difference's noise ~1e-11), by the adjoint of the converged
+    # solve, against a central difference of two plain solves (h = 1e-5 p.u.).
     net = read_matpower(DATA / "case9.m")
     model, state, drivers = build_power_flow(net, learnable=True)
     load, _ = model.potential[POWER_LAYER].element_for("load")
     sol = power_flow_solution(model, solve_power_flow(model, state, drivers))
-    grads = [torch.autograd.grad(sol.vm[k], load.P, retain_graph=True)[0][0] for k in (4, 8)]
+    grads = [torch.autograd.grad(sol.vm[k], load.P, retain_graph=True)[0][0] for k in (4, 5)]
 
     def vm_at(dp):
-        loads = tuple(dataclasses.replace(ld, p_mw=ld.p_mw + (dp * 100 if ld.bus == 5 else 0))
+        extra = dp * net.base_mva
+        loads = tuple(dataclasses.replace(ld, p_mw=ld.p_mw + (extra if ld.bus == 5 else 0))
                       for ld in net.loads)
         m, s, d = build_power_flow(dataclasses.replace(net, loads=loads))
         out = power_flow_solution(m, solve_power_flow(m, s, d, differentiable=False))
-        return out.vm[[4, 8]]
+        return out.vm[[4, 5]]
 
     h = 1e-5
     fd = (vm_at(h) - vm_at(-h)) / (2 * h)
     for g, f in zip(grads, fd, strict=True):
+        assert abs(float(g)) > 1e-3
         assert math.isclose(float(g), float(f), rel_tol=1e-6)
 
 
@@ -135,7 +141,9 @@ def test_zero_reactance_is_refused_only_by_the_dc_check():
     br[1] = dataclasses.replace(br[1], x=0.0)               # 4-5 keeps r = 0.017
     net = dataclasses.replace(net, branches=tuple(br))
     assert check_power_network(net).branch_rows == tuple(range(9))
-    with pytest.raises(ValueError, match=r"branch 1 \(4-5\) has zero reactance"):
+    with pytest.raises(ValueError,
+                       match=r"row 2 of the branch table \(from bus 4 to bus 5\) "
+                             r"has zero reactance"):
         check_power_network(net, dc=True)
 
 
@@ -165,3 +173,24 @@ def test_coefficients_are_float64_whatever_the_default_dtype():
     branch, _ = model.potential[POWER_LAYER].element_for("branch")
     assert branch.r.dtype == torch.float64 and sol.vm.dtype == torch.float64
     assert abs(sol.vm[8] - 0.9956308580482949) < 1e-9
+
+
+def test_cut_off_slack_bus_leaves_the_rest_as_an_island():
+    net = read_matpower(DATA / "case9.m")
+    # the slack bus 1 hangs on its transformer 1-4 (row 0) alone
+    cut = [dataclasses.replace(b, in_service=False) if k == 0 else b
+           for k, b in enumerate(net.branches)]
+    with pytest.raises(ValueError, match=r"slack bus 1 .*\[2, 3, 4, 5, 6, 7, 8, 9\]"):
+        build_power_flow(dataclasses.replace(net, branches=tuple(cut)))
+
+
+def test_solution_keeps_leading_batch_dimensions():
+    model, state, drivers = build_power_flow(read_matpower(DATA / "case9.m"))
+    slack = drivers["power.phi_boundary"]
+    batched = dict(drivers, **{"power.phi_boundary": torch.stack([slack, 1.01 * slack])})
+    sol = power_flow_solution(model, solve_power_flow(model, state, batched))
+    assert sol.vm.shape == (2, 9) and sol.pg.shape == (2, 3) and sol.sf.shape == (2, 9)
+    _, single = _solve(read_matpower(DATA / "case9.m"))
+    assert torch.allclose(sol.vm[0], single.vm, atol=1e-12, rtol=0)
+    assert torch.allclose(sol.qg[0], single.qg, atol=1e-12, rtol=0)
+    assert abs(float(sol.vm[1, 0]) - 1.01 * 1.04) < 1e-12

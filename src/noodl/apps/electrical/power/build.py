@@ -107,30 +107,19 @@ class PowerFlowSolution:
     st: Tensor
 
 
-def _regulated_setpoints(net: PowerNetwork, gens_at: dict[int, list], regulated) -> dict:
-    setpoints = {}
-    for bus in regulated:
-        values = sorted({g.vm_set for g in gens_at[bus]})
-        if len(values) > 1:
-            raise ValueError(
-                f"PowerNetwork {net.name!r}: bus {bus}: its in-service generators have "
-                f"different voltage setpoints {values}; give them one setpoint"
-            )
-        setpoints[bus] = values[0]
-    return setpoints
+@dataclass(frozen=True)
+class _Analysis:
+    """A checked network: its index and the per-bus values the builder needs (p.u.)."""
+
+    index: PowerFlowIndex
+    setpoints: dict[int, float]          # regulated bus -> voltage setpoint
+    generation: dict[int, float]         # PV bus -> summed real generation
+    demand: dict[int, complex]           # load bus -> net fixed demand
+    shunts: dict[int, complex]           # shunt bus -> g + jb
 
 
-def check_power_network(net: PowerNetwork, *, dc: bool = False) -> PowerFlowIndex:
-    """Check that `net` is a solvable power-flow network and return its `PowerFlowIndex`.
-
-    Refused with a `ValueError`: not exactly one slack bus (the ones found are listed); a
-    slack bus without an in-service generator; a regulated bus (the slack, a PV bus with
-    in-service generation) whose in-service generators have different voltage setpoints
-    (bus and values named); an in-service branch of zero impedance, `r = x = 0` for the AC
-    power flow and `x = 0` for the DC one (`dc=True`; row, from and to bus named); buses not
-    connected to the slack bus through in-service branches (listed). A PV bus without an
-    in-service generator is solved as PQ, as MATPOWER does.
-    """
+def _analyse(net: PowerNetwork, dc: bool) -> _Analysis:
+    """Check `net` (see `check_power_network`) and collect its per-bus values."""
     slacks = [b.id for b in net.buses if b.kind == "slack"]
     if len(slacks) != 1:
         raise ValueError(
@@ -147,17 +136,25 @@ def check_power_network(net: PowerNetwork, *, dc: bool = False) -> PowerFlowInde
             f"PowerNetwork {net.name!r}: the slack bus {slack} has no in-service generator"
         )
     pv = tuple(b.id for b in net.buses if b.kind == "pv" and gens_at[b.id])
-    _regulated_setpoints(net, gens_at, (slack, *pv))
+    setpoints: dict[int, float] = {}
+    for bus in (slack, *pv):
+        values = sorted({g.vm_set for g in gens_at[bus]})
+        if len(values) > 1:
+            raise ValueError(
+                f"PowerNetwork {net.name!r}: bus {bus}: its in-service generators have "
+                f"different voltage setpoints {values}; give them one setpoint"
+            )
+        setpoints[bus] = values[0]
 
     rows = tuple(k for k, br in enumerate(net.branches) if br.in_service)
     for k in rows:
         br = net.branches[k]
-        zero = br.x == 0 if dc else (br.r == 0 and br.x == 0)
-        if zero:
+        if br.x == 0 and (dc or br.r == 0):
             what = "zero reactance (x = 0)" if dc else "zero impedance (r = x = 0)"
             raise ValueError(
-                f"PowerNetwork {net.name!r}: branch {k} ({br.from_bus}-{br.to_bus}) has "
-                f"{what}; merge its buses or give it an impedance"
+                f"PowerNetwork {net.name!r}: the branch in row {k + 1} of the branch table "
+                f"(from bus {br.from_bus} to bus {br.to_bus}) has {what}; merge its buses "
+                f"or give it an impedance"
             )
 
     parent = {b.id: b.id for b in net.buses}
@@ -179,43 +176,49 @@ def check_power_network(net: PowerNetwork, *, dc: bool = False) -> PowerFlowInde
             f"through in-service branches: {island}"
         )
 
-    regulated = {slack, *pv}
     base = net.base_mva
-    fixed: dict[int, complex] = {}
-    for b in net.buses:
-        if b.id not in regulated and gens_at[b.id]:
-            fixed[b.id] = complex(sum(g.p_mw for g in gens_at[b.id]),
-                                  sum(g.q_mvar for g in gens_at[b.id])) / base
-    demand = _net_demand(net, fixed)
-    shunts = _shunt_admittance(net)
-    return PowerFlowIndex(
+    fixed = {bus: complex(sum(g.p_mw for g in gens), sum(g.q_mvar for g in gens)) / base
+             for bus, gens in gens_at.items() if gens and bus not in setpoints}
+    load_mw = {b.id: 0j for b in net.buses}
+    for ld in net.loads:
+        load_mw[ld.bus] += complex(ld.p_mw, ld.q_mvar)
+    demand = {bus: s / base - fixed.get(bus, 0j) for bus, s in load_mw.items()}
+    shunt_mw = {b.id: 0j for b in net.buses}
+    for sh in net.shunts:
+        shunt_mw[sh.bus] += complex(sh.g_mw, sh.b_mvar)
+    index = PowerFlowIndex(
         bus_ids=net.bus_ids(),
         slack_bus=slack,
         pv_buses=pv,
-        gen_buses=tuple(b.id for b in net.buses if gens_at[b.id]),
+        gen_buses=tuple(bus for bus, gens in gens_at.items() if gens),
         branch_rows=rows,
         base_mva=float(base),
         fixed_generation=fixed,
         load_buses=tuple(bus for bus, s in demand.items() if s != 0),
-        shunt_buses=tuple(bus for bus, y in shunts.items() if y != 0),
+        shunt_buses=tuple(bus for bus, y in shunt_mw.items() if y != 0),
+    )
+    return _Analysis(
+        index=index,
+        setpoints=setpoints,
+        generation={bus: sum(g.p_mw for g in gens_at[bus]) / base for bus in pv},
+        demand={bus: demand[bus] for bus in index.load_buses},
+        shunts={bus: shunt_mw[bus] / base for bus in index.shunt_buses},
     )
 
 
-def _net_demand(net: PowerNetwork, fixed: Mapping[int, complex]) -> dict[int, complex]:
-    """Per bus (table order): the absorbed power of its loads less its fixed generation,
-    p.u."""
-    mw = {b.id: 0j for b in net.buses}
-    for ld in net.loads:
-        mw[ld.bus] += complex(ld.p_mw, ld.q_mvar)
-    return {bus: s / net.base_mva - fixed.get(bus, 0j) for bus, s in mw.items()}
+def check_power_network(net: PowerNetwork, *, dc: bool = False) -> PowerFlowIndex:
+    """Check that `net` is a solvable power-flow network and return its `PowerFlowIndex`.
 
-
-def _shunt_admittance(net: PowerNetwork) -> dict[int, complex]:
-    """Per bus (table order): `g + jb` of its fixed shunts, p.u."""
-    mw = {b.id: 0j for b in net.buses}
-    for sh in net.shunts:
-        mw[sh.bus] += complex(sh.g_mw, sh.b_mvar)
-    return {bus: y / net.base_mva for bus, y in mw.items()}
+    Refused with a `ValueError`: not exactly one slack bus (the ones found are listed); a
+    slack bus without an in-service generator; a regulated bus (the slack, a PV bus with
+    in-service generation) whose in-service generators have different voltage setpoints
+    (bus and values named); an in-service branch of zero impedance, `r = x = 0` for the AC
+    power flow and `x = 0` for the DC one (`dc=True`; its 1-based row in the branch table
+    and its from and to bus named); buses not connected to the slack bus through
+    in-service branches (listed). A PV bus without an in-service generator is solved as
+    PQ, as MATPOWER does.
+    """
+    return _analyse(net, dc).index
 
 
 def _f64(values) -> Tensor:
@@ -241,8 +244,8 @@ def build_power_flow(
         raise ValueError(
             "reactive-power limits (switching a PV bus to PQ at its limit) are not implemented"
         )
-    index = check_power_network(net)
-    base = net.base_mva
+    found = _analyse(net, dc=False)
+    index = found.index
     buses = {b.id: b for b in net.buses}
 
     graph = Network(dtype=F64)
@@ -259,31 +262,24 @@ def build_power_flow(
             _f64(br.r for br in branches), _f64(br.x for br in branches),
             _f64(br.b for br in branches), _f64(br.ratio for br in branches),
             _f64(math.radians(br.shift_deg) for br in branches), learnable=learnable))
-    demand = _net_demand(net, index.fixed_generation)
-    if index.load_buses:
-        for bus in index.load_buses:
+    if found.demand:
+        for bus in found.demand:
             graph.add_edge(str(bus), _GROUND, kind="load")
         laws.append(ConstantPowerLoad(
-            _f64(demand[b].real for b in index.load_buses),
-            _f64(demand[b].imag for b in index.load_buses), kind="load", learnable=learnable))
-    shunts = _shunt_admittance(net)
-    if index.shunt_buses:
-        for bus in index.shunt_buses:
+            _f64(s.real for s in found.demand.values()),
+            _f64(s.imag for s in found.demand.values()), kind="load", learnable=learnable))
+    if found.shunts:
+        for bus in found.shunts:
             graph.add_edge(str(bus), _GROUND, kind="shunt")
-        laws.append(Shunt(_f64(shunts[b].real for b in index.shunt_buses),
-                          _f64(shunts[b].imag for b in index.shunt_buses),
-                          learnable=learnable))
-    gens_at: dict[int, list] = {b.id: [] for b in net.buses}
-    for g in net.generators:
-        if g.in_service:
-            gens_at[g.bus].append(g)
-    setpoint = {bus: gens_at[bus][0].vm_set for bus in (index.slack_bus, *index.pv_buses)}
-    if index.pv_buses:
-        for bus in index.pv_buses:
+        laws.append(Shunt(_f64(y.real for y in found.shunts.values()),
+                          _f64(y.imag for y in found.shunts.values()), learnable=learnable))
+    setpoint = found.setpoints
+    if found.generation:
+        for bus in found.generation:
             graph.add_edge(str(bus), _GROUND, kind="generator")
         laws.append(VoltageControlledGenerator(
-            _f64(sum(g.p_mw for g in gens_at[b]) / base for b in index.pv_buses),
-            _f64(setpoint[b] for b in index.pv_buses), learnable=learnable))
+            _f64(found.generation.values()),
+            _f64(setpoint[b] for b in found.generation), learnable=learnable))
 
     slack = str(index.slack_bus)
     layer = PotentialFlowLayer(graph, POWER_LAYER, laws, boundary=[_GROUND, slack],
@@ -314,10 +310,26 @@ def solve_power_flow(model: Model, state: State, drivers: Drivers, *, atol: floa
     """The solved power flow: `model.steady(state, drivers, atol=atol, rtol=rtol,
     max_iter=max_iter, **solve_kwargs)`. Newton stops when the residual's max-norm (p.u.)
     is below `atol`; `state` is its starting point (the flat start `build_power_flow`
-    returns, or an earlier solution). Non-convergence raises a `RuntimeError` naming the
-    layer."""
-    return model.steady(state, drivers, atol=atol, rtol=rtol, max_iter=max_iter,
-                        **solve_kwargs)
+    returns, or an earlier solution).
+
+    A solve that fails (Newton does not converge, or its Jacobian is singular) raises a
+    `RuntimeError` naming the layer, chained to the solver's own error, with power-flow
+    advice: the loading may exceed what the network can transfer (no power-flow solution
+    exists), or the case is malformed.
+    """
+    try:
+        return model.steady(state, drivers, atol=atol, rtol=rtol, max_iter=max_iter,
+                            **solve_kwargs)
+    except RuntimeError as exc:
+        layers = [f"PotentialFlowLayer {name!r}" for name in model.potential]
+        if not any(layer in str(exc) for layer in layers):
+            raise
+        raise RuntimeError(
+            f"power flow: no solution found ({exc}). The loading may exceed what the "
+            f"network can transfer, in which case no power-flow solution exists: reduce "
+            f"the loads or strengthen the network. Otherwise check the case for "
+            f"implausible data (impedances, setpoints, loads or units)."
+        ) from exc
 
 
 def power_flow_solution(model: Model, state: State) -> PowerFlowSolution:
