@@ -50,3 +50,23 @@ def test_result_files_left_from_an_earlier_run_are_not_copied(tmp_path):
         prj.with_suffix(suffix).write_text("stale\n")
     with _isolated(prj) as copy:
         assert sorted(p.name for p in copy.parent.iterdir()) == ["x.prj", "x.wth"]
+
+
+def test_malformed_result_files_are_refused_by_name(tmp_path):
+    """An empty file, a header without step rows, and an `.age` header whose zone count
+    disagrees with its columns are refused with the file's name, not an IndexError."""
+    import pytest
+
+    cases = {
+        "empty.age": "",
+        "rows.ach": "1/1\t1/1\t300\t1\t0\t900.00\nday\ttime\tpath\tduct\ttotal\n",
+        "zones.age": "3\t1/1\t1/1\t300\t1\t0\nday\ttime\t1\t2\n1/1\t00:05:00\t1.0\t3.0\n",
+        "species.ebw": "2\t1\t1/1\t1/1\t300\t1\t0\nday\ttime\tctm\t1\t2\n"
+                       "1/1\t00:05:00\t1\t1.0e-04\n",
+    }
+    for name, text in cases.items():
+        path = tmp_path / name
+        path.write_text(text)
+        with pytest.raises(ValueError, match=name.replace(".", r"\.")):
+            _result_files(path.with_suffix(".prj"))
+        path.unlink()

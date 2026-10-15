@@ -367,8 +367,9 @@ def _schedules_as_contamx_holds(prj: Path, dest: Path) -> Path:
     return dest / prj.name
 
 
-def _project_parity(prj, tmp_path, *, rtol_flow, rtol_mf, record_property, label,
-                    species_floor=False, atol=NOODL_ATOL, atol_flow=0.0, ref=None):
+def _project_parity(prj, tmp_path, *, rtol_flow, rtol_mf=None, record_property, label,
+                    species_floor=False, atol=NOODL_ATOL, atol_flow=0.0, ref=None,
+                    mf_bound=None):
     """ContamX's `run_project` (at `PROJECT_AIRFLOW`, its airflow tolerances tightened so its
     own iteration stays below the budgets) against `simulate_project` on the same project,
     with the schedule values ContamX holds (`_schedules_as_contamx_holds`).
@@ -380,7 +381,9 @@ def _project_parity(prj, tmp_path, *, rtol_flow, rtol_mf, record_property, label
     state), and the duct terminal flows when the project has any. `atol` is noodl physics'
     airflow residual tolerance (kg/s). `atol_flow` (kg/s) is added to the flows' floor (a
     budget that is absolute, not relative); `ref` is ContamX's run when the caller already
-    made it."""
+    made it. `mf_bound(project, out)`, when given, replaces `rtol_mf` and the floor: it
+    returns each interior row's allowed absolute mass-fraction error, (N, n_i, K), derived
+    on the run (`_mass_fraction_bound`)."""
     from noodl.apps.building_physics.contamx import run_project
     from noodl.apps.building_physics.simulation import simulate_project
 
@@ -389,6 +392,7 @@ def _project_parity(prj, tmp_path, *, rtol_flow, rtol_mf, record_property, label
     noodl_prj = _schedules_as_contamx_holds(prj, tmp_path / "noodl")
     project = read_prj(noodl_prj)
     out = simulate_project(project, atol=atol, rtol=1e-14)
+    bound = None if mf_bound is None else project.zone_mass_fractions(mf_bound(project, out))
     out["species.x"] = project.zone_mass_fractions(out["species.x"])
     torch.testing.assert_close(out["time"], ref["time"], rtol=0, atol=1e-9)
     scale = ref["flow"].abs().max()
@@ -400,23 +404,29 @@ def _project_parity(prj, tmp_path, *, rtol_flow, rtol_mf, record_property, label
     assert out["species.x"].dtype == ref["mf"].dtype == F64
     assert out["species.x"].shape == ref["mf"].shape
     mf_err = (out["species.x"] - ref["mf"]).abs()
-    mf_allowed = 64 * F32_U * mf_scale + rtol_mf * ref["mf"].abs()
+    if bound is None:
+        mf_allowed = 64 * F32_U * mf_scale + rtol_mf * ref["mf"].abs()
+    else:
+        mf_allowed = bound
+        record_property("mf_budget_rel_max",
+                        (bound[ref["mf"] != 0] / ref["mf"][ref["mf"] != 0].abs()).max().item())
     assert bool((mf_err <= mf_allowed).all()), (
         f"mass fractions: worst error {(mf_err / mf_allowed).max().item():.3g} of allowed")
-    compared = [("flow", out["path_flow"], ref["flow"], scale, rtol_flow, atol_flow),
-                ("mf", out["species.x"], ref["mf"], mf_scale, rtol_mf, 0.0)]
+    compared = [("flow", out["path_flow"], ref["flow"], scale, rtol_flow, atol_flow, None),
+                ("mf", out["species.x"], ref["mf"], mf_scale, rtol_mf, 0.0, bound)]
     if ref["terminal_flow"].numel():
         t_scale = ref["terminal_flow"].abs().max()
         torch.testing.assert_close(out["terminal_flow"], ref["terminal_flow"],
                                    rtol=rtol_flow,
                                    atol=(64 * F32_U * t_scale).item() + atol_flow)
         compared.append(("terminal_flow", out["terminal_flow"], ref["terminal_flow"],
-                         t_scale, rtol_flow, atol_flow))
+                         t_scale, rtol_flow, atol_flow, None))
     record_property("check", label)
-    record_property("tolerance", f"flow rel {rtol_flow:.2e}, mf rel {rtol_mf:.2e}, "
+    mf_text = "mf derived on the run" if bound is not None else f"mf rel {rtol_mf:.2e}"
+    record_property("tolerance", f"flow rel {rtol_flow:.2e}, {mf_text}, "
                                  f"atol 64 u x max" + (" per species" if species_floor else "")
                                  + (f" + {atol_flow:.2e} kg/s on flows" if atol_flow else ""))
-    for name, ours, theirs, top, rtol, extra in compared:
+    for name, ours, theirs, top, rtol, extra, allowed in compared:
         # The relative error of the entries carrying at least 0.1 % of the largest (below
         # that the floor governs: the isothermal hours' exchange flow is a float32 roundoff
         # of the zone temperature), and the largest error of any entry as a fraction of what
@@ -428,8 +438,10 @@ def _project_parity(prj, tmp_path, *, rtol_flow, rtol_mf, record_property, label
             record_property(f"measured_rel_{name}", "all zero")
             continue
         record_property(f"measured_rel_{name}", (err[big] / theirs[big].abs()).max().item())
-        record_property(f"measured_{name}_of_allowed",
-                        (err / (floor + rtol * theirs.abs())).max().item())
+        if allowed is None:
+            allowed = floor + rtol * theirs.abs()
+        share = torch.where(allowed > 0, err / allowed.clamp_min(1e-300), 0.0)
+        record_property(f"measured_{name}_of_allowed", share.max().item())   # 0 of 0: exact
     return ref, out
 
 
@@ -716,6 +728,95 @@ def test_the_four_spline_elements_match_contamx(contamx, tmp_path, record_proper
 
 
 DUCTS = DATA / "duct_three_zone.prj"
+# A duct junction's air mass is Pb V / (R T) with V its share of the segments' length x area:
+# the float32 area (1 u) and length (1 u; 0.7 m is not exact), their product and the sum of
+# the halves (u / 2 each): 3 u in V; R and T 2 u more. A zone's (and a plenum's) volume and
+# Pb are exact: R and T, 2 u.
+JUNCTION_MASS_U, ZONE_MASS_U = 5, 2
+
+
+def _mass_roundoff(project, model):
+    """Each interior row's relative air-mass error in ContamX's float32 inputs, (n_i,)."""
+    lay = model.transport["species"]
+    junctions = set(project.junctions)
+    return torch.tensor([(JUNCTION_MASS_U if model.net.nodes[i] in junctions
+                          else ZONE_MASS_U) * F32_U for i in lay.interior_idx.tolist()],
+                        dtype=F64)
+
+
+def _mass_fraction_bound(eps_flow):
+    """`_project_parity`'s `mf_bound` for a project whose air mass is constant and whose only
+    species input is the ambient mass fraction (no source, clean start): the first-order
+    bound of the mass-fraction error of noodl physics' implicit step against ContamX's, run
+    through every step on noodl physics' own run.
+
+    Each step solves B x_k = (M / dt) x_(k-1) + N x_b with B = M / dt + A, A holding each
+    node's outflow on its diagonal and the transmitted inflows -eta q off it (eta: the
+    filters' pass fraction on the edge). With dq, deta, dM, dx_b the input errors, to first
+    order B dx_k = (M / dt) dx_(k-1) - dM / dt (x_k - x_(k-1)) - dA x_k + N dx_b. Both runs
+    conserve mass at every interior node, so the flow errors do too, and row i of dA x_k is
+    sum over the edges into i of dq (x_i - eta x_up) - deta q x_up. B is an M-matrix (a
+    Z-matrix whose columns are diagonally dominant: what leaves a node arrives at most whole
+    at the others), so B^-1 >= 0 and, step by step from dx_0 = 0 (a clean start),
+    |dx_k| <= B^-1 [(M / dt) |dx_(k-1)| + |dM| / dt |x_k - x_(k-1)|
+                    + sum_in |dq| |x_i - eta x_up| + sum_in |deta| q x_up
+                    + sum_in from outdoors eta q |dx_b|].
+    The bound follows a closed loop (the AHS's return air, a return duct) through B^-1
+    rather than assuming a chain. Its terms: |dq| = `eps_flow` x the largest flow the edge
+    carries over the run (the flow budget, its floor read edge by edge); |dM| =
+    `_mass_roundoff` x M; |deta| = 2 u on a filtered edge (the float32 efficiency, at most
+    u, the 1 - efficiency rounding, u / 2, and a second filter chained on the edge, u / 2
+    more), 0 on an unfiltered one (eta = 1 exactly); |dx_b| = u |x_b| (the ambient mass
+    fraction in float32)."""
+
+    def bound(project, out):
+        model, _, drivers = project_to_model(project)
+        lay, net = model.transport["species"], model.net
+        f = model.potential["air"].flows_of_kind(out["air.q"], lay.flow_kinds)
+        src, tgt = zip(*(net.endpoints(k) for k in lay.flow_kinds), strict=True)
+        src, tgt = torch.cat(src).tolist(), torch.cat(tgt).tolist()
+        eta = lay.transmission.to(F64).expand(lay.n_species, len(src))       # (K, E)
+        deta = torch.where(eta < 1, 2 * F32_U, 0.0)
+        dq = eps_flow * f.abs().amax(0)
+        x = out["species.x"]                                                 # (N, n_i, K)
+        cap = out["species.capacity"]
+        assert bool((cap == cap[0]).all()), "the bound assumes a constant air mass"
+        mass = torch.where(lay.storage_free_mask, 0.0, cap[0])
+        dmass = _mass_roundoff(project, model) * mass
+        xb = drivers["species.x_boundary"].to(F64).reshape(lay.n_b, lay.n_species)
+        bpos = {int(b): j for j, b in enumerate(lay.boundary_idx.tolist())}
+        pos = {node: i for i, node in enumerate(lay.interior_idx.tolist())}
+        times = out["time"].tolist()
+        dx = torch.zeros_like(x)
+        for k in range(1, x.shape[0]):
+            dt = times[k] - times[k - 1]
+            b = torch.diag(mass / dt).expand(lay.n_species, -1, -1).clone()   # (K, n, n)
+            rhs = (mass / dt)[:, None] * dx[k - 1] + (dmass / dt)[:, None] * (
+                x[k] - x[k - 1]).abs()
+
+            def upstream(node, k=k):
+                return x[k, pos[node]] if node in pos else xb[bpos[node]]
+
+            for e, q in enumerate(f[k].tolist()):
+                ends = ([(src[e], tgt[e])] if q > 0 else [(tgt[e], src[e])] if q < 0
+                        else [(src[e], tgt[e]), (tgt[e], src[e])])   # zero: either way
+                for up, down in ends:
+                    if q != 0 and up in pos:
+                        b[:, pos[up], pos[up]] += abs(q)
+                        if down in pos:
+                            b[:, pos[down], pos[up]] -= eta[:, e] * abs(q)
+                    if down not in pos:
+                        continue
+                    x_up = upstream(up)
+                    term = dq[e] * (x[k, pos[down]] - eta[:, e] * x_up).abs()
+                    term = term + deta[:, e] * abs(q) * x_up.abs()
+                    if up not in pos:
+                        term = term + eta[:, e] * abs(q) * F32_U * x_up.abs()
+                    rhs[pos[down]] += term
+            dx[k] = torch.linalg.solve(b, rhs.T.unsqueeze(-1)).squeeze(-1).T
+        return dx
+
+    return bound
 
 
 @pytest.mark.external
@@ -728,10 +829,11 @@ def test_a_duct_network_matches_contamx(contamx, tmp_path, record_property):
     a pressure drop at a fixed flow (the element tests derive it); each duct flow is set by a
     balance of several such drops and the zone pressures, which at most doubles it: 64 u.
     (An independent model built from the measured rules agreed with ContamX's first step to
-    32 u.) Mass fractions: the three-zone transient's 64 u, the filter's pass fraction 0.7
-    (0.43 u) and the junction volumes from float32 element areas (1 u each along the
-    chain): 72 u. The absolute floor is per species."""
-    _project_parity(DUCTS, tmp_path, rtol_flow=64 * F32_U, rtol_mf=72 * F32_U,
+    32 u.) Mass fractions: `_mass_fraction_bound` with these flows' 64 u, derived on the
+    run (the implicit step's first-order error under the flows', filters', air masses' and
+    ambient mass fraction's float32 roundoff, through B^-1 >= 0)."""
+    _project_parity(DUCTS, tmp_path, rtol_flow=64 * F32_U,
+                    mf_bound=_mass_fraction_bound(64 * F32_U),
                     record_property=record_property, species_floor=True,
                     label="Three-zone project with a duct network, 24 steps")
 
@@ -746,10 +848,11 @@ SARIN_LINE = ("  1 1 0 140.0900  0.0000e+00  0.0000e+00  0.0000e+00  2.0000e-05 
 def test_a_simple_ahs_matches_contamx(contamx, tmp_path, record_property):
     """`ahs_three_zone.prj` (fixture NOTICE). Budget: the AHS flows are sums and minima of
     float32 design flows and a float32 fraction (4 u); the envelope flows the three-zone
-    steady 16 u: 32 u. Mass fractions: the three-zone transient's 64 u plus the filters'
-    pass fractions (0.43 u for 0.3, 1 u for 0.5, chained over two): 72 u. The absolute
-    floor is per species."""
-    _project_parity(AHS, tmp_path, rtol_flow=32 * F32_U, rtol_mf=72 * F32_U,
+    steady 16 u: 32 u. Mass fractions: `_mass_fraction_bound` with these flows' 32 u,
+    derived on the run; it follows the return air's closed loop through B^-1 >= 0 and
+    counts the filters' pass fractions (2 u each filtered edge)."""
+    _project_parity(AHS, tmp_path, rtol_flow=32 * F32_U,
+                    mf_bound=_mass_fraction_bound(32 * F32_U),
                     record_property=record_property, species_floor=True,
                     label="Three-zone project with a simple AHS, 24 steps")
 
@@ -758,7 +861,11 @@ def test_a_simple_ahs_matches_contamx(contamx, tmp_path, record_property):
 def test_nist_s_ahs_and_duct_sample_matches_contamx(contamx, tmp_path, record_property):
     """NIST's `test_GetPrjInfo.prj` with zone 1's and segment 4's control references and the
     duct leakage removed, one hour, sarin outdoors at 1e-3: two simple AHS with zero-volume
-    plenums (100 % outdoor air) and two fan-driven duct systems. Budget as the duct test.
+    plenums (100 % outdoor air) and two fan-driven duct systems. Budget as the duct test:
+    flows 64 u, mass fractions `_mass_fraction_bound` of that. All outdoor air, the zones
+    approach the ambient 1e-3, where the bound is the ambient value's own float32 roundoff
+    (u |x_b|) and ContamX's float32(1e-3) is 0.797 u off it: this row uses 80 % of the
+    bound, by that one term.
 
     The airflow residual tolerance is 1e-12 kg/s, not 1e-14: each duct terminal carries
     3.3e-4 kg/s across a 5.8e-6 Pa drop (conductance 28 kg/(s Pa)) between junction and zone
@@ -784,7 +891,8 @@ def test_nist_s_ahs_and_duct_sample_matches_contamx(contamx, tmp_path, record_pr
     variant = tmp_path / "variant" / NIST_AHS.name
     variant.parent.mkdir()
     variant.write_text(text)
-    _project_parity(variant, tmp_path, rtol_flow=64 * F32_U, rtol_mf=72 * F32_U,
+    _project_parity(variant, tmp_path, rtol_flow=64 * F32_U,
+                    mf_bound=_mass_fraction_bound(64 * F32_U),
                     record_property=record_property, species_floor=True,
                     label="NIST test_GetPrjInfo (two AHS, two duct systems), 12 steps",
                     atol=1e-12)
@@ -1015,11 +1123,12 @@ def test_a_control_through_a_schedule_node_equals_the_schedule(src, records, tmp
 def test_controls_through_schedule_nodes_match_contamx(contamx, src, records, rtol_flow,
                                                        tmp_path, record_property):
     """The same variants against ContamX, at the budgets of the scheduled originals' parity
-    tests (`test_a_simple_ahs_matches_contamx`: 32 u on flows, 72 u on mass fractions;
-    `test_a_duct_network_matches_contamx`: 64 u and 72 u), since the variants change
-    nothing ContamX computes."""
+    tests (`test_a_simple_ahs_matches_contamx`: 32 u on flows;
+    `test_a_duct_network_matches_contamx`: 64 u; mass fractions `_mass_fraction_bound` of
+    those), since the variants change nothing ContamX computes."""
     controlled = _through_schedule_nodes(src, records, tmp_path)
-    _project_parity(controlled, tmp_path, rtol_flow=rtol_flow, rtol_mf=72 * F32_U,
+    _project_parity(controlled, tmp_path, rtol_flow=rtol_flow,
+                    mf_bound=_mass_fraction_bound(rtol_flow),
                     record_property=record_property, species_floor=True,
                     label=f"{src.stem} through controls")
 
@@ -1066,7 +1175,9 @@ def _age_and_air_change_allowed(model, out, conditioned, eps_flow, eps_mass, eps
     A^-1 >= 0 (an M-matrix). The air change rate is a sum of the flows crossing into the
     space over 1.2041 V: its error is at most the |dq| of the edges whose flow enters the
     space that step (to first order a flow leaving it adds nothing; a zero flow is counted
-    either way) summed, over 1.2041 V, plus `eps_volume` of the rate for 1.2041 and V."""
+    either way) summed, over 1.2041 V, plus `eps_volume` of the rate for 1.2041 and V. An
+    edge leaving the space on noodl physics' run with |q| <= |dq| may enter it on ContamX's
+    (a reversal within the flow's own error): it is counted too, with its |dq|."""
     from noodl.apps.building_physics.outputs import building_air_change_rate, local_mean_age
 
     lay, net = model.transport["species"], model.net
@@ -1101,7 +1212,8 @@ def _age_and_air_change_allowed(model, out, conditioned, eps_flow, eps_mass, eps
     inside = {int(net.node_index(n)) for n in conditioned}
     into = torch.tensor([float(t in inside) - float(s in inside)     # +1 along the edge
                          for s, t in zip(src, tgt, strict=True)], dtype=F64)  # into it
-    entering = (f * into >= 0) & (into != 0)    # a zero flow either way, to first order
+    # Entering on noodl physics' run, or within its own error of zero (either way).
+    entering = ((f * into >= 0) | (f.abs() <= dq)) & (into != 0)
     volume = sum(float(net.node_attr("volume", default=0.0)[i]) for i in inside)
     ach = building_air_change_rate(out, model)[1:]
     allowed_ach = ((dq * entering).sum(-1) / (1.2041 * volume) * 3600.0
@@ -1221,10 +1333,11 @@ def test_age_and_air_change_rate_match_contamx(contamx, case, tmp_path, record_p
     0.05 kg/s from zone three to zone one and none of it enters ContamX's rate, which the
     space without the junctions would count (checked below).
 
-    Budgets: first order in float32 input roundoff u. Flows and mass fractions: those of
-    `test_a_duct_network_matches_contamx` (64 u, 72 u) and
-    `test_a_simple_ahs_matches_contamx` (32 u, 72 u), per-species floor; neither the flags
-    nor the moved terminal changes an element law.
+    Budgets: first order in float32 input roundoff u. Flows: those of
+    `test_a_duct_network_matches_contamx` (64 u) and `test_a_simple_ahs_matches_contamx`
+    (32 u); neither the flags nor the moved terminal changes an element law. Mass
+    fractions: `_mass_fraction_bound` of those flow budgets, derived on each variant's run
+    (it follows the AHS's return air and the return duct round their loops).
     Age: tau solves A tau = M (A: each node's outflow on the diagonal, its inflows off it; M
     the air mass, zero at a storage-free plenum). With dq the flow errors and dM the mass
     errors, A dtau = dM - dA tau to first order. Both runs conserve mass at every node, so
@@ -1232,11 +1345,12 @@ def test_age_and_air_change_rate_match_contamx(contamx, case, tmp_path, record_p
     A^-1 >= 0 gives |dtau| <= eps_mass tau + A^-1 r, r_i = sum_in |dq| |tau_i - tau_up|
     (`_age_and_air_change_allowed`, evaluated each step). |dq| is the flow budget times the
     largest flow the edge carries over the run (the flows' floor, read edge by edge).
-    eps_mass = 3 u: R and T of each node, and a junction's volume from float32 duct areas
-    (zone volumes and Pb are exact). Without recirculation A^-1 r stays near eps_flow tau
-    (each |tau_i - tau_up| is what row i adds: the chain argument of the occupants test);
-    the AHS's return air raises it to about 2.7 eps_flow tau, the return duct to 1.9 (noodl
-    physics' flows; computed here, not assumed). Plus print.
+    eps_mass: R and T of each node (2 u), and a junction's volume from float32 duct areas
+    and lengths (3 u more: `_mass_roundoff`); zone volumes and Pb are exact. Without
+    recirculation A^-1 r stays near eps_flow tau (each |tau_i - tau_up| is what row i
+    adds: the chain argument of the occupants test); the AHS's return air raises it to
+    about 2.7 eps_flow tau, the return duct to 1.9 (noodl physics' flows; computed here,
+    not assumed). Plus print.
     Air change rate: the flows entering the space, each within its |dq|, summed, over
     1.2041 V; 1.2041 (1 u) and V, ContamX's float32 sum of float32 junction volumes (1 u):
     eps_volume = 2 u. Plus print. The volume itself is checked against the `.ach` header."""
@@ -1247,14 +1361,16 @@ def test_age_and_air_change_rate_match_contamx(contamx, case, tmp_path, record_p
     variant = _variant(src, tmp_path, "variant", edits)
     ref = run_project(variant, airflow_convergence=PROJECT_AIRFLOW)
     assert ref["age"].shape[0] == ref["air_change_rate"].shape[0] == len(ref["time"]) - 1
-    ref, out = _project_parity(variant, tmp_path, rtol_flow=rtol_flow, rtol_mf=72 * F32_U,
+    ref, out = _project_parity(variant, tmp_path, rtol_flow=rtol_flow,
+                               mf_bound=_mass_fraction_bound(rtol_flow),
                                record_property=record_property, species_floor=True, ref=ref,
                                label=f"{src.stem} ({case}): age of air and air change rate")
     project = read_prj(tmp_path / "noodl" / src.name)
     model, _, _ = project_to_model(project)
     assert ("two" in project.building_zones) == ("outside" not in case)
     _age_and_air_change_match(ref, out, project, model, eps_flow=rtol_flow,
-                              eps_mass=3 * F32_U, eps_volume=2 * F32_U,
+                              eps_mass=_mass_roundoff(project, model),
+                              eps_volume=2 * F32_U,
                               record_property=record_property)
     if case == "return duct":
         # The space without the junctions counts the terminals' flows as entering: far

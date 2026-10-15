@@ -208,24 +208,52 @@ def _result_files(prj) -> dict:
     handlers); `"building_volume"` m3, the conditioned volume the `.ach` header gives.
     A file that is not there gives no key. ContamX writes the exposure file one row per
     step and species, a step's species together (TN 1887), so a step's rows form its
-    (n_exposures, K) block. The values are printed to 7 significant digits."""
+    (n_exposures, K) block. The values are printed to 7 significant digits.
+
+    Refused by name (ValueError): a file without its header line or without step rows, and
+    a header whose counts (exposures and species, zones) disagree with the rows."""
     prj = Path(prj)
     out: dict = {}
     ebw, age, ach = (prj.with_suffix(s) for s in _RESULT_SUFFIXES)
     if ebw.exists():
-        head = ebw.read_text().splitlines()[0].split("\t")
+        head, rows = _header_and_rows(ebw, 2)
         n_exp, n_species = int(head[0]), int(head[1])
-        values = [[float(v) for v in r[3:3 + n_exp]] for r in _data_rows(ebw)]
+        if any(len(r) != 3 + n_exp for r in rows) or len(rows) % n_species:
+            raise ValueError(f"contamx: {ebw.name} declares {n_exp} exposures and "
+                             f"{n_species} species, which its rows do not match")
+        values = [[float(v) for v in r[3:]] for r in rows]
         table = torch.tensor(values, dtype=torch.float64).reshape(-1, n_species, n_exp)
         out["exposure"] = table.transpose(-1, -2)
     if age.exists():
-        out["age"] = torch.tensor([[float(v) for v in r[2:]] for r in _data_rows(age)],
+        head, rows = _header_and_rows(age, 1)
+        n_zones = int(head[0])
+        if any(len(r) != 2 + n_zones for r in rows):
+            raise ValueError(f"contamx: {age.name} declares {n_zones} zones, which its rows "
+                             f"do not match")
+        out["age"] = torch.tensor([[float(v) for v in r[2:]] for r in rows],
                                   dtype=torch.float64)
     if ach.exists():
-        out["air_change_rate"] = torch.tensor([float(r[4]) for r in _data_rows(ach)],
+        head, rows = _header_and_rows(ach, 6)
+        if any(len(r) != 5 for r in rows):
+            raise ValueError(f"contamx: {ach.name} rows are not date, time, path, duct, "
+                             f"total")
+        out["air_change_rate"] = torch.tensor([float(r[4]) for r in rows],
                                               dtype=torch.float64)
-        out["building_volume"] = float(ach.read_text().splitlines()[0].split("\t")[5])
+        out["building_volume"] = float(head[5])
     return out
+
+
+def _header_and_rows(path: Path, n_head: int) -> tuple[list[str], list[list[str]]]:
+    """A result file's header fields (at least `n_head`) and its step rows; refused by name
+    when either is missing (an empty or truncated file)."""
+    lines = path.read_text().splitlines()
+    head = lines[0].split("\t") if lines else []
+    rows = _data_rows(path)
+    if len(head) < n_head or not rows:
+        missing = "header" if len(head) < n_head else "step rows"
+        raise ValueError(f"contamx: {path.name} has no {missing} (an empty or truncated "
+                         f"result file)")
+    return head, rows
 
 
 def run_steady(prj_path, *, ambient: dict, airflow_convergence=None) -> dict:
