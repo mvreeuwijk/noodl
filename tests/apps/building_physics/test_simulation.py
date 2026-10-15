@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 from pathlib import Path
 
 import pytest
@@ -1107,6 +1108,24 @@ def test_project_calendar_refuses_a_weather_file_it_cannot_find(tmp_path):
     p.source_path = None
     with pytest.raises(ValueError, match=r"project_calendar.*occupants.wth.*source_path"):
         project_calendar(p)
+
+
+def test_simulate_project_refuses_input_files_it_cannot_place(tmp_path):
+    from noodl.apps.building_physics.simulation import simulate_project
+
+    p = _occupants_with_weather(tmp_path)
+    p.source_path = None
+    with pytest.raises(ValueError, match=r"simulate_project.*weather.*occupants.wth.*source_path"):
+        simulate_project(p)
+    (tmp_path / "bare").mkdir()
+    p = _occupants_with_weather(tmp_path / "bare", copy=False)
+    with pytest.raises(FileNotFoundError, match=r"simulate_project.*weather.*occupants.wth"):
+        simulate_project(p)
+    p = _occupants_with_weather(tmp_path / "bare", weather_file="null")
+    p.run_control = dataclasses.replace(p.run_control, ambient_file="outside.ctm")
+    p.source_path = None
+    with pytest.raises(ValueError, match=r"simulate_project.*ambient.*outside.ctm.*source_path"):
+        simulate_project(p)
 
 
 def test_occupants_need_a_simulated_species(tmp_path):

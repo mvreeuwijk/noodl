@@ -337,6 +337,20 @@ def simulate(model: Model, state: State, drivers: Drivers, times, *,
     return out
 
 
+def _project_file(project, filename: str, what: str, where: str) -> Path:
+    """The path of a file a project's run control names (`what`: "weather" or "ambient"), next
+    to its `.prj`. A file that cannot be found, or a project read from no file, is refused by
+    name."""
+    if project.source_path is None:
+        raise ValueError(f"{where}: the project names {what} file {filename!r}, but "
+                         f"it has no source_path to resolve it next to")
+    path = Path(project.source_path).parent / filename
+    if not path.is_file():
+        raise FileNotFoundError(f"{where}: the project's {what} file {filename!r} is "
+                                f"not at {path}")
+    return path
+
+
 def _project_weather(project, where: str):
     """The project's own weather file (`read_wth`), next to its `.prj`; None without one.
     A file that cannot be found, or a project read from no file, is refused by name."""
@@ -345,14 +359,7 @@ def _project_weather(project, where: str):
     rc = project.run_control
     if not rc.weather_file:
         return None
-    if project.source_path is None:
-        raise ValueError(f"{where}: the project names weather file {rc.weather_file!r}, but "
-                         f"it has no source_path to resolve it next to; pass weather=")
-    path = Path(project.source_path).parent / rc.weather_file
-    if not path.is_file():
-        raise FileNotFoundError(f"{where}: the project's weather file {rc.weather_file!r} is "
-                                f"not at {path}")
-    return read_wth(path)
+    return read_wth(_project_file(project, rc.weather_file, "weather", where))
 
 
 def project_calendar(project, weather=None) -> Calendar:
@@ -405,7 +412,6 @@ def simulate_project(project, *, inputs: Sequence[Input] = (), diagnostics: dict
     """
     from noodl.apps.building_physics.ctm import read_ctm
     from noodl.apps.building_physics.prj import project_to_model, steady
-    from noodl.apps.building_physics.wth import read_wth
 
     rc = project.run_control
     if rc is None:
@@ -443,7 +449,6 @@ def simulate_project(project, *, inputs: Sequence[Input] = (), diagnostics: dict
             f"{rc.time_step} s time steps"
         )
     model, state, drivers = project_to_model(project)
-    base = project.source_path.parent if project.source_path else Path.cwd()
     if not rc.transient_airflow:
         _refuse_unread_inputs(model, drivers, inputs, "simulate_project")
         bound = bind_inputs(model, [*project.inputs_for(model), *inputs])
@@ -461,8 +466,9 @@ def simulate_project(project, *, inputs: Sequence[Input] = (), diagnostics: dict
         if project.terminals:
             out["terminal_flow"] = project.terminal_flows(out["air.q"])
         return out
-    weather = read_wth(base / rc.weather_file) if rc.weather_file else None
-    ambient = read_ctm(base / rc.ambient_file) if rc.ambient_file else None
+    weather = _project_weather(project, "simulate_project")
+    ambient = (read_ctm(_project_file(project, rc.ambient_file, "ambient", "simulate_project"))
+               if rc.ambient_file else None)
     all_inputs = [*project.inputs_for(model),
                   *(weather.inputs(model, ambient=project.ambient) if weather else ()),
                   *(ambient.inputs(model) if ambient and "species" in model.transport else ()),
