@@ -340,3 +340,52 @@ def test_math_blocks_between_the_controller_and_the_heat_flow(block, tmp_path):
     node, room = _room(model, names)
     heat = fb.heat_flows(_cooled(state, room, 0.1), drivers)
     assert heat[node].item() == pytest.approx(3000.0 * factor(0.5), abs=1e-6)  # A + B T
+
+
+def test_the_controller_gain_and_limit_carry_gradients_into_the_room_heat():
+    """The LimitedPID's gain and upper limit set as tensors: 0.1 K below the set point the
+    heat is 3000 k 0.1 W (dQ/dk = 300 W), its conductance 3000 k W/K (d/dk = 3000 W/K); 1 K
+    below it the limit holds, Q = 3000 y_max (dQ/dy_max = 3000 W, dQ/dk = 0)."""
+    model, state, drivers, names = read_modelica(WITH_VOLUME, return_names=True)
+    fb = _control(model)
+    node, room = _room(model, names)
+    pid = fb.network.blocks[2]
+    k = torch.tensor(5.0, dtype=F64, requires_grad=True)
+    y_max = torch.tensor(1.0, dtype=F64, requires_grad=True)
+    pid.gain, pid.y_max = k, y_max
+    cold = _cooled(state, room, 0.1)
+    heat = fb.heat_flows(cold, drivers)[node]
+    assert heat.item() == pytest.approx(1500.0, rel=1e-12)
+    assert torch.autograd.grad(heat, k)[0].item() == pytest.approx(300.0, rel=1e-10)
+    removal = fb(cold, drivers)["thermal.removal"][room]
+    cap = float(model.transport["thermal"].capacity[room])
+    assert torch.autograd.grad(removal, k)[0].item() == pytest.approx(3000.0 / cap, rel=1e-12)
+    colder = _cooled(state, room, 1.0)
+    heat = fb.heat_flows(colder, drivers)[node]
+    assert heat.item() == pytest.approx(3000.0, rel=1e-12)
+    grads = torch.autograd.grad(heat, (k, y_max), allow_unused=True)
+    assert grads[0] is None or grads[0].item() == 0.0
+    assert grads[1].item() == pytest.approx(3000.0, rel=1e-12)
+
+
+def _room_after_one_step(gain):
+    """The room 0.1 K below its set point, one 1 s `Model.step` with the controller's gain
+    `gain`: the room temperature (K) at its end."""
+    model, state, drivers, names = read_modelica(WITH_VOLUME, return_names=True)
+    _control(model).network.blocks[2].gain = gain
+    _, room = _room(model, names)
+    new = model.step(_cooled(state, room, 0.1), drivers, 1.0, t=0.0)
+    return new["thermal.x"][room]
+
+
+def test_the_controller_gain_has_the_finite_difference_gradient_through_a_step():
+    """d(room temperature after a step)/d(gain) by autograd through the implicit heat
+    balance against a central difference: they agree to 7e-8, measured; 2e-6 is FD noise
+    room. A step, not a run: `simulate` on this route is slow under autograd."""
+    k = torch.tensor(5.0, dtype=F64, requires_grad=True)
+    (grad,) = torch.autograd.grad(_room_after_one_step(k), k)
+    h = 1e-4
+    with torch.no_grad():
+        fd = (_room_after_one_step(5.0 + h) - _room_after_one_step(5.0 - h)) / (2 * h)
+    assert grad.item() > 0.0             # a stronger controller warms the cold room faster
+    assert grad.item() == pytest.approx(fd.item(), rel=2e-6)

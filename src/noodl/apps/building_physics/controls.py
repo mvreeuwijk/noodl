@@ -31,6 +31,11 @@ memory the step starts from.
 
 Units are those of what is read (kg/kg, K, Pa, kg/s). Blocks are dimensionless unless a gain
 or an offset says otherwise.
+
+A block's parameters (gains, offsets, limits, weights, bands, a constant's value) are floats
+or float64 tensors. A tensor is kept as given, so the outputs carry its gradient; a band or a
+switch's threshold moves where a switch flips, and the gradient through it is zero wherever
+it does not flip.
 """
 
 from __future__ import annotations
@@ -56,6 +61,24 @@ PRESSURE_DIFFERENCE = "air.dp"
 
 def _f64(value) -> Tensor:
     return torch.as_tensor(value, dtype=F64)
+
+
+def _parameter(value) -> float | Tensor:
+    """A block parameter: a float, or a tensor (as float64, on its own device) whose
+    gradient the outputs carry."""
+    return value.to(F64) if isinstance(value, Tensor) else float(value)
+
+
+def _all(condition) -> bool:
+    """Whether `condition` holds for every entry of a batched parameter."""
+    return bool(torch.as_tensor(condition).all())
+
+
+def _clip(x: Tensor, low, high) -> Tensor:
+    """`x` clipped to `[low, high]`, the bounds floats or tensors."""
+    if isinstance(low, Tensor) or isinstance(high, Tensor):
+        return torch.clamp(x, _f64(low), _f64(high))
+    return x.clamp(low, high)
 
 
 def _stack(values: Sequence[Tensor]) -> Tensor:
@@ -175,8 +198,8 @@ class Constant(Block):
     """A constant value; a block earlier in the order reads it before its first evaluation
     too (ContamX presets its constant nodes, measured)."""
 
-    def __init__(self, value: float, *, name: str = "") -> None:
-        self.value, self.name = float(value), name
+    def __init__(self, value: float | Tensor, *, name: str = "") -> None:
+        self.value, self.name = _parameter(value), name
         self.preset_output = self.value
 
     def step(self, u, memory, ev):
@@ -214,13 +237,13 @@ class Sensor(Block):
     evaluation. A reading with `previous_step` gives, in a sampled network, the value the
     previous evaluation's step used (`after` stores it once the actuators have written)."""
 
-    def __init__(self, reading, *, offset: float = 0.0, scale: float = 1.0,
+    def __init__(self, reading, *, offset: float | Tensor = 0.0, scale: float | Tensor = 1.0,
                  time_constant: float = 0.0, name: str = "") -> None:
         if time_constant < 0.0:
             raise ValueError(f"Sensor {name!r}: time_constant must be >= 0 s, got "
                              f"{time_constant}")
         self.reading, self.name = reading, name
-        self.offset, self.scale = float(offset), float(scale)
+        self.offset, self.scale = _parameter(offset), _parameter(scale)
         self.time_constant = float(time_constant)
         self._lag = self.time_constant > 0.0
         self.sampled_only = self._lag
@@ -273,11 +296,11 @@ class Sum(_Many):
     """`sum_i w_i u_i` (`weights` default 1): CONTAM's add, subtract and sum nodes, and
     Modelica's Add, Add3, Sum, MultiSum and Feedback."""
 
-    def __init__(self, *inputs: int, weights: Sequence[float] | None = None,
+    def __init__(self, *inputs: int, weights: Sequence[float | Tensor] | None = None,
                  name: str = "") -> None:
         super().__init__(*inputs, name=name)
         self.weights = ((1.0,) * len(self.inputs) if weights is None
-                        else tuple(float(w) for w in weights))
+                        else tuple(_parameter(w) for w in weights))
         if len(self.weights) != len(self.inputs):
             raise ValueError(f"Sum {name!r}: {len(self.weights)} weights for "
                              f"{len(self.inputs)} inputs")
@@ -357,10 +380,10 @@ class Complement(_Unary):
 class Affine(Block):
     """`(u - offset) * gain`: a unit conversion or a gain."""
 
-    def __init__(self, a: int, *, offset: float = 0.0, gain: float = 1.0,
+    def __init__(self, a: int, *, offset: float | Tensor = 0.0, gain: float | Tensor = 1.0,
                  name: str = "") -> None:
         self.inputs, self.name = (int(a),), name
-        self.offset, self.gain = float(offset), float(gain)
+        self.offset, self.gain = _parameter(offset), _parameter(gain)
 
     def step(self, u, memory, ev):
         return (_f64(u[0]) - self.offset) * self.gain, memory
@@ -432,8 +455,8 @@ class LowerBandSwitch(Block):
     memory_size = 1
     sampled_only = True
 
-    def __init__(self, a: int, limit: int, *, band: float, name: str = "") -> None:
-        self.inputs, self.band, self.name = (int(a), int(limit)), float(band), name
+    def __init__(self, a: int, limit: int, *, band: float | Tensor, name: str = "") -> None:
+        self.inputs, self.band, self.name = (int(a), int(limit)), _parameter(band), name
 
     def initial_memory(self) -> list[float]:
         return [0.0]
@@ -453,8 +476,8 @@ class UpperBandSwitch(Block):
     memory_size = 1
     sampled_only = True
 
-    def __init__(self, a: int, limit: int, *, band: float, name: str = "") -> None:
-        self.inputs, self.band, self.name = (int(a), int(limit)), float(band), name
+    def __init__(self, a: int, limit: int, *, band: float | Tensor, name: str = "") -> None:
+        self.inputs, self.band, self.name = (int(a), int(limit)), _parameter(band), name
 
     def initial_memory(self) -> list[float]:
         return [0.0]
@@ -478,14 +501,16 @@ class Hysteresis(Block):
     memory_size = 1
     sampled_only = True
 
-    def __init__(self, a: int, *, slack: float, slope: float | None = None,
-                 initial: float = 0.0, name: str = "") -> None:
-        if not 0.0 <= slack < 1.0:
+    def __init__(self, a: int, *, slack: float | Tensor, slope: float | Tensor | None = None,
+                 initial: float | Tensor = 0.0, name: str = "") -> None:
+        slack = _parameter(slack)
+        if not (_all((slack >= 0.0) & (slack < 1.0)) if isinstance(slack, Tensor)
+                else 0.0 <= slack < 1.0):
             raise ValueError(f"Hysteresis {name!r}: slack must be in [0, 1), got {slack}")
         self.inputs, self.name = (int(a),), name
-        self.slack = float(slack)
-        self.slope = 1.0 / (1.0 - self.slack) if slope is None else float(slope)
-        self.initial = float(initial)
+        self.slack = slack
+        self.slope = 1.0 / (1.0 - self.slack) if slope is None else _parameter(slope)
+        self.initial = _parameter(initial)
 
     def initial_memory(self) -> list[float]:
         return [self.initial * self.slope]
@@ -501,8 +526,8 @@ class Hysteresis(Block):
 class ProportionalControl(Block):
     """`clip(gain u, 0, 1)` (CONTAM's proportional controller: the input is an error)."""
 
-    def __init__(self, a: int, *, gain: float, name: str = "") -> None:
-        self.inputs, self.gain, self.name = (int(a),), float(gain), name
+    def __init__(self, a: int, *, gain: float | Tensor, name: str = "") -> None:
+        self.inputs, self.gain, self.name = (int(a),), _parameter(gain), name
 
     def step(self, u, memory, ev):
         return (self.gain * _f64(u[0])).clamp(0.0, 1.0), memory
@@ -519,10 +544,11 @@ class IncrementalPI(Block):
     memory_size = 2
     sampled_only = True
 
-    def __init__(self, a: int, *, kp: float, ki: float, initial_output: float = 0.0,
-                 initial_error: float = 0.0, name: str = "") -> None:
+    def __init__(self, a: int, *, kp: float | Tensor, ki: float | Tensor,
+                 initial_output: float = 0.0, initial_error: float = 0.0,
+                 name: str = "") -> None:
         self.inputs, self.name = (int(a),), name
-        self.kp, self.ki = float(kp), float(ki)
+        self.kp, self.ki = _parameter(kp), _parameter(ki)
         self.initial_output, self.initial_error = float(initial_output), float(initial_error)
 
     def initial_memory(self) -> list[float]:
@@ -547,14 +573,17 @@ class LimitedPID(Block):
 
     continuous_only = True
 
-    def __init__(self, setpoint: int, measurement: int, *, gain: float, y_max: float,
-                 y_min: float | None = None, integral_time: float | None = None,
-                 setpoint_weight: float = 1.0, windup_ratio: float = 0.9,
+    def __init__(self, setpoint: int, measurement: int, *, gain: float | Tensor,
+                 y_max: float | Tensor, y_min: float | Tensor | None = None,
+                 integral_time: float | None = None,
+                 setpoint_weight: float | Tensor = 1.0, windup_ratio: float = 0.9,
                  initial_integral: float = 0.0, name: str = "") -> None:
-        y_min = -float(y_max) if y_min is None else float(y_min)
-        if not float(y_max) >= y_min:
+        y_max = _parameter(y_max)
+        y_min = -y_max if y_min is None else _parameter(y_min)
+        gain, setpoint_weight = _parameter(gain), _parameter(setpoint_weight)
+        if not _all(y_max >= y_min):
             raise ValueError(f"LimitedPID {name!r}: y_max {y_max} is below y_min {y_min}")
-        if gain == 0.0:
+        if not _all(gain != 0.0):
             raise ValueError(f"LimitedPID {name!r}: the gain must be nonzero")
         if integral_time is not None and not integral_time > 0.0:
             raise ValueError(f"LimitedPID {name!r}: integral_time must be > 0 s, got "
@@ -562,13 +591,13 @@ class LimitedPID(Block):
         if not windup_ratio > 0.0:
             raise ValueError(f"LimitedPID {name!r}: windup_ratio must be > 0, got "
                              f"{windup_ratio}")
-        if not setpoint_weight >= 0.0:
+        if not _all(setpoint_weight >= 0.0):
             raise ValueError(f"LimitedPID {name!r}: setpoint_weight must be >= 0, got "
                              f"{setpoint_weight}")
         self.inputs, self.name = (int(setpoint), int(measurement)), name
-        self.gain, self.y_max, self.y_min = float(gain), float(y_max), y_min
+        self.gain, self.y_max, self.y_min = gain, y_max, y_min
         self.integral_time = None if integral_time is None else float(integral_time)
-        self.setpoint_weight, self.windup_ratio = float(setpoint_weight), float(windup_ratio)
+        self.setpoint_weight, self.windup_ratio = setpoint_weight, float(windup_ratio)
         self.initial_integral = float(initial_integral)
         self.memory_size = 0 if self.integral_time is None else 1
 
@@ -581,19 +610,23 @@ class LimitedPID(Block):
         return self.gain * (self.setpoint_weight * _f64(u[0]) - _f64(u[1]) + xi)
 
     def step(self, u, memory, ev):
-        return self.unlimited(u, memory).clamp(self.y_min, self.y_max), memory
+        return _clip(self.unlimited(u, memory), self.y_min, self.y_max), memory
 
     def rate(self, u, memory, ev):
         if not self.memory_size:
             return memory
         v = self.unlimited(u, memory)
-        y = v.clamp(self.y_min, self.y_max)
+        y = _clip(v, self.y_min, self.y_max)
         track = (y - v) / (self.gain * self.windup_ratio)
         return ((_f64(u[0]) - _f64(u[1]) + track) / self.integral_time).unsqueeze(-1)
 
     def switching(self, u, memory, ev):
         v = self.unlimited(u, memory)
-        width = self.y_max - self.y_min if self.y_max > self.y_min else 1.0
+        width = self.y_max - self.y_min
+        if isinstance(width, Tensor):
+            width = torch.where(width > 0, width, torch.ones_like(width))
+        elif not width > 0:
+            width = 1.0
         return _stack([(v - self.y_max) / width, (v - self.y_min) / width])
 
 
@@ -748,7 +781,7 @@ class ControlNetwork:
         every block's initial memory."""
         memory = [v for b in self.blocks for v in b.initial_memory()]
         return {self.outputs_key: torch.full((len(self.blocks),), math.nan, dtype=F64),
-                self.memory_key: torch.tensor(memory, dtype=F64),
+                self.memory_key: _stack(memory) if memory else torch.zeros(0, dtype=F64),
                 self.evaluated_key: torch.tensor(0.0, dtype=F64)}
 
     def initial_drivers(self) -> dict[str, Tensor]:
@@ -774,7 +807,7 @@ class ControlNetwork:
         `evaluate`)."""
         ev = Evaluation(state, drivers, dt)
         stored, _, evaluated = self._stored(state)
-        preset = torch.tensor([b.preset_output for b in self.blocks], dtype=F64)
+        preset = _stack([b.preset_output for b in self.blocks])
         seen = torch.where((evaluated > 0).unsqueeze(-1), stored, preset)
         out = list(seen.unbind(-1))
         mem, extra = [], []

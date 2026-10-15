@@ -894,3 +894,99 @@ def test_only_a_constant_is_preset_not_a_pi_controllers_initial_output():
                           Constant(0.0)])
     out, _ = advance(net, net.initial_state(), {})
     assert out[net.outputs_key].tolist() == [0.0, 0.7, 0.0]
+
+
+def _parameter(value):
+    return torch.tensor(value, dtype=F64, requires_grad=True)
+
+
+def test_parameters_given_as_floats_stay_floats():
+    assert type(IncrementalPI(0, kp=2, ki=1).kp) is float
+    pid = LimitedPID(0, 1, gain=5, y_max=1)
+    assert (type(pid.gain), type(pid.y_max), type(pid.y_min)) == (float, float, float)
+    assert type(Affine(0, gain=3).gain) is float
+
+
+def test_block_parameters_given_as_tensors_carry_gradients():
+    """Each output's gradient with respect to a tensor parameter is the closed form's. A
+    band only moves where the switch flips: its gradient is zero."""
+    gain, offset, weight, value = (_parameter(v) for v in (3.0, 0.5, -2.0, 0.7))
+    pgain, y_max, band, slope = (_parameter(v) for v in (4.0, 0.8, 0.1, 2.0))
+    blocks = [DriverValue("controls.input", 0), Constant(value),
+              Affine(0, offset=offset, gain=gain), Sum(0, 1, weights=(1.0, weight)),
+              ProportionalControl(0, gain=pgain),
+              LowerBandSwitch(0, 1, band=band), Hysteresis(0, slack=0.2, slope=slope)]
+    net = ControlNetwork(blocks)
+    out, _ = advance(net, net.initial_state(), values(0.15))
+    y = out[net.outputs_key]
+    # Affine: (u - offset) gain; Sum: u + weight value; clip(pgain u, 0, 1);
+    # hysteresis from 0: max(0, (u - slack) slope) = 0 (u below the slack)
+    assert y.tolist() == pytest.approx([0.15, 0.7, -1.05, -1.25, 0.6, 0.0, 0.0])
+    grads = torch.autograd.grad(y[2] + y[3] + y[4] + y[5], (gain, offset, weight, value, pgain,
+                                                           band), allow_unused=True)
+    assert [g.item() for g in grads[:5]] == pytest.approx([-0.35, -3.0, 0.7, -2.0, 0.15])
+    assert grads[5] is None                                # the switch's output: no gradient
+    pid = LimitedPID(0, 1, gain=pgain, y_max=y_max)
+    pid_net = ControlNetwork([Constant(1.0), Constant(0.9), pid], sampled=False)
+    y = pid_net.evaluate(pid_net.initial_state(), {})
+    assert y[2].item() == pytest.approx(0.4)             # 4 (1 - 0.9), inside the limits
+    assert torch.autograd.grad(y[2], pgain)[0].item() == pytest.approx(0.1)
+    y_max.data.fill_(0.3)                                 # now the upper limit holds
+    y = pid_net.evaluate(pid_net.initial_state(), {})
+    assert y[2].item() == pytest.approx(0.3)
+    grads = torch.autograd.grad(y[2], (pgain, y_max))
+    assert [g.item() for g in grads] == pytest.approx([0.0, 1.0])
+    rising = ControlNetwork([DriverValue("controls.input", 0), Hysteresis(0, slack=0.2,
+                                                                          slope=slope)])
+    y = advance(rising, rising.initial_state(), values(0.5))[0][rising.outputs_key]
+    assert y[1].item() == pytest.approx(0.6)              # (0.5 - 0.2) 2 on the rising line
+    assert torch.autograd.grad(y[1], slope)[0].item() == pytest.approx(0.3)
+
+
+def _co2_fan_loop(kp, ki, steps: int = 8):
+    """The Controls section's room: a PI controller on the CO2 above 1.2 g/kg sets the
+    exhaust fan's multiplier, from 1.0 g/kg; the CO2 at the end (kg/kg)."""
+    from noodl.apps.building_physics import (
+        Zone,
+        add_zone,
+        build_model,
+        orifice_elements_from_edges,
+        simulate,
+    )
+    from noodl.drives import Stack
+    from noodl.elements import FixedFlow, Scaled
+    from noodl.topology import Network
+
+    net = Network(dtype=F64)
+    net.add_node("ambient", z_ref=0.0)
+    add_zone(net, Zone("room", volume=60.0, T0=293.15))
+    net.add_edge("ambient", "room", kind="airpath", z_path=1.0, Cd=0.6, area=0.05)
+    net.add_edge("room", "ambient", kind="fan")
+    fan = Scaled(FixedFlow(torch.tensor([0.1], dtype=F64), kind="fan"), "flow_multiplier.fan")
+    network = ControlNetwork(
+        [Sensor(node_mass_fraction("room", "CO2"), offset=1.2e-3, scale=1e3),
+         IncrementalPI(0, kp=kp, ki=ki)],
+        [Actuator(1, "flow_multiplier.fan")])
+    model, state, drivers = build_model(
+        net, air_elements=[orifice_elements_from_edges(net, "airpath"), fan],
+        drives=[Stack.from_network(net, "airpath")], species=("CO2",),
+        controls=network, return_inputs=True)
+    state["species.x"] = torch.tensor([1.0e-3], dtype=F64)
+    drivers["species.x_boundary"] = torch.tensor([6e-4], dtype=F64)
+    drivers["species.sources"] = torch.tensor([0.0, 4e-5], dtype=F64)
+    out = simulate(model, state, drivers, torch.arange(steps + 1, dtype=F64) * 300.0)
+    assert 0.0 < float(out["controls.outputs"][-1, 1].detach()) < 1.0  # the PI is not clipped
+    return out["species.x"][-1, 0]
+
+
+@pytest.mark.parametrize(("which", "value", "h"), [("kp", 2.0, 1e-4), ("ki", 2e-3, 1e-7)])
+def test_a_pi_gain_driving_a_fan_has_the_finite_difference_gradient(which, value, h):
+    """d(CO2 after 40 min)/d(gain) by autograd through `simulate` against a central
+    difference; they agree to 2.5e-7 (kp) and 6e-8 (ki), measured; 2e-6 is FD noise room."""
+    gains = {"kp": 2.0, "ki": 2e-3}
+    p = _parameter(value)
+    (grad,) = torch.autograd.grad(_co2_fan_loop(**{**gains, which: p}), p)
+    fd = (_co2_fan_loop(**{**gains, which: value + h})
+          - _co2_fan_loop(**{**gains, which: value - h})) / (2 * h)
+    assert grad.item() < 0.0           # a stronger controller leaves less CO2
+    assert grad.item() == pytest.approx(fd.item(), rel=2e-6)

@@ -634,8 +634,14 @@ one. That step holds the controller's output over the whole model step, so a sti
 (a large gain on a fast zone) run with long steps can overshoot or oscillate where the
 continuous controller would not: take steps short against the loop's time constant.
 
-A block's gains, limits, offsets and bands are plain floats and are not differentiable;
-gradients flow through what the network reads, the state and the drivers.
+A block's parameters are differentiable: a gain, a limit, an offset, a weight, a band or a
+constant's value may be a float64 tensor, and the outputs carry its gradient as they carry
+those of the state and the drivers (`IncrementalPI(0, kp=torch.tensor(2.0,
+requires_grad=True), ki=2e-3)` in the example below gives d(CO2)/d(kp) through `simulate`).
+A float stays a float. A band or a switch's threshold only moves where the switch flips, so
+the gradient through a switch is zero wherever it does not flip; a hysteresis's slope and
+slack and a controller's limits enter its output directly and have gradients on the pieces
+where they act.
 
 The network is a closure of the model, the first one: `build_model(..., controls=network)`
 puts it ahead of the density closure, so its writes reach every other closure. Its block
@@ -786,7 +792,10 @@ scheme="midpoint")` takes both halves of a step on the step's piece and splits a
 limiter reaches a limit. A removal rate you pass as the driver `"thermal.removal"` (1/s) adds to
 the network's in either scheme, each half of a midpoint step taking the driver's value at its own
 end. `names.controls` maps each block to its column of `simulate`'s
-`"controls.outputs"` (the block outputs, under the same key as the Python `simulate`). MBL's
+`"controls.outputs"` (the block outputs, under the same key as the Python `simulate`). The
+blocks are the network's (`FeedbackHeat.network.blocks`, the closure among
+`model.closures`): a `LimitedPID`'s `gain` or limits set to a tensor carry their gradient
+into the heat flows and the zone's energy balance. MBL's
 `ChimneyShaftWithVolume` holds its room at 293.15 K while its volumes release their start
 imbalance:
 

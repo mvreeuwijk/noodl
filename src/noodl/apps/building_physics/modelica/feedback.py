@@ -269,10 +269,7 @@ class FeedbackHeat:
         self.zone_temperature = zone_temperature
         self.layer = layer
         self._sensors = {int(zone_index[z]): frozenset(v) for z, v in fb.sensors.items()}
-        blocks = self.network.blocks
-        self._pids = [b for b in blocks if isinstance(b, LimitedPID)]
-        self._y_max = torch.tensor([b.y_max for b in self._pids], dtype=F64)
-        self._y_min = torch.tensor([b.y_min for b in self._pids], dtype=F64)
+        self._pids = [b for b in self.network.blocks if isinstance(b, LimitedPID)]
 
     def _walk(self, state, drivers, pieces: Tensor | None = None,
               bump: frozenset[int] = frozenset()) -> tuple[Tensor, Tensor]:
@@ -287,8 +284,9 @@ class FeedbackHeat:
                 vi = block.unlimited(u, memory)
                 if pieces is not None:
                     p = pieces[..., len(v)]
-                    y = torch.where(p > 0, torch.full_like(vi, block.y_max),
-                                    torch.where(p < 0, torch.full_like(vi, block.y_min), vi))
+                    y = torch.where(p > 0, torch.as_tensor(block.y_max, dtype=F64),
+                                    torch.where(p < 0, torch.as_tensor(block.y_min, dtype=F64),
+                                                vi))
                 v.append(vi)
             elif i in bump:
                 y = y + 1.0
@@ -298,9 +296,18 @@ class FeedbackHeat:
         return out, (torch.stack(torch.broadcast_tensors(*v), dim=-1) if v
                      else torch.zeros(0, dtype=F64))
 
+    def _limits(self, side: str) -> Tensor:
+        """Every limiter's `y_max` or `y_min` on the last axis (floats or tensors, as the
+        blocks hold them now)."""
+        values = [torch.as_tensor(getattr(b, side), dtype=F64) for b in self._pids]
+        if not values:
+            return torch.zeros(0, dtype=F64)
+        return torch.stack(torch.broadcast_tensors(*values), dim=-1)
+
     def _piece(self, v: Tensor) -> Tensor:
         one = torch.ones_like(v)
-        return torch.where(v > self._y_max, one, torch.where(v < self._y_min, -one, 0 * one))
+        return torch.where(v > self._limits("y_max"), one,
+                           torch.where(v < self._limits("y_min"), -one, 0 * one))
 
     def pieces(self, state, drivers) -> Tensor:
         """Each limiter's piece at `state` (+1 at its upper limit, -1 at its lower, 0
