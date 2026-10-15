@@ -540,7 +540,7 @@ def _columns_of(out: dict, names, head: list[str]) -> dict[str, np.ndarray]:
             continue
         inst, var = h.rsplit(".", 1)
         if var == "y" and inst in names.controls:
-            cols[h] = out["controls"][:, names.controls[inst]].numpy()
+            cols[h] = out["controls.outputs"][:, names.controls[inst]].numpy()
             continue
         if inst in names.nodes and (var in _NODE_VARS or var.startswith("C[")):
             i = names.nodes[inst]

@@ -457,7 +457,8 @@ def simulate(model: Model, state: State, drivers: Drivers, times, *,
     `ModelicaNames.p_ref`), `"p"` `(N, n)` absolute
     pressure (Pa), `"T"` `(N, n)` (K), `"X_w"` `(N, n)`, `"C"` `(N, n, K)` for the species
     layer's mass fractions (water last when carried) when the model has one, and
-    `"controls"` `(N, n_blocks)`, every feedback block's output (`ModelicaNames.controls`),
+    `"controls.outputs"` `(N, n_blocks)` (the network's `outputs_key`, the key
+    `simulation.simulate` uses too), every feedback block's output (`ModelicaNames.controls`),
     when it has a feedback network (`feedback.FeedbackHeat`). `step_kwargs`
     reach `Model.step`/`Model.steady` (and so the airflow solves); the airflow Newton
     tolerances default to `atol=AIR_ATOL` (`STORAGE_AIR_ATOL` with volume mass storage),
@@ -507,7 +508,7 @@ def simulate(model: Model, state: State, drivers: Drivers, times, *,
     if closure.sp_interior is not None:
         rows["C"] = []
     if control is not None:
-        rows["controls"] = []
+        rows[control.network.outputs_key] = []
 
     def record(state: State, d: Drivers) -> None:
         extra = closure(state, d)
@@ -519,7 +520,7 @@ def simulate(model: Model, state: State, drivers: Drivers, times, *,
         if "C" in rows:
             rows["C"].append(closure.species(state, d))
         if control is not None:
-            rows["controls"].append(control.network.evaluate(state, d))
+            rows[control.network.outputs_key].append(control.network.evaluate(state, d))
 
     if not dynamic:  # algebraic: the steady solve at each time asked for
         for k in idx:

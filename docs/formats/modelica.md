@@ -72,7 +72,8 @@ The heat flow is affine in the zone temperature on each piece of the limiter, an
 zone's energy balance in that form, so that the transport step treats it implicitly: MBL's
 examples heat a 75 kJ/K room with `k gain` = 15000 W/K, a loop that settles in 5 s. The
 limiter's corners are switches, located on step boundaries like an element's. `names.controls`
-maps each block of the loop (`con`, `gain`) to its column of `simulate`'s `"controls"`,
+maps each block of the loop (`con`, `gain`) to its column of `simulate`'s `"controls.outputs"` (the key
+`simulate` uses for a control network's outputs),
 which holds the blocks' outputs `y`.
 
 **Imported, not yet compared.** `PressurizationData` and `TrickleVent` import (`read_modelica`
@@ -276,8 +277,9 @@ export can be inspected); a batch script over every model should check the exit 
 than assume success. The dynamic parity tests compare a window of rows of every dynamic model
 in the repository's default `pytest` run; every row of every model runs under
 `@pytest.mark.slow` (`pytest -m slow`). `--tolerance` simulates at a solver tolerance other than the model's
-declared one; the thirteen dynamic parity references (and `PressurizationData`'s) were regenerated with
-`--tolerance 1e-13` (`tests/data/modelica/NOTICE.md`). At 1e-14 OpenModelica's DASSL returns
+declared one; all fifteen dynamic parity references (and those of `PressurizationData` and
+`TrickleVent`, imported but not compared) were exported with `--tolerance 1e-13`
+(`tests/data/modelica/NOTICE.md`; the two chimney models and `TrickleVent` as described below). At 1e-14 OpenModelica's DASSL returns
 no trajectory for these models, so 1e-13 is the finest reference available.
 
 A model with a `ReaderTMY3` also gets its weather file: the exporter copies the `.mos` file

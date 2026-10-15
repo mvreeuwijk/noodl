@@ -93,6 +93,20 @@ def test_the_room_heat_is_an_affine_source_on_the_controllers_piece():
         assert heat[node].item() == pytest.approx(3000.0 * y, rel=1e-12)
 
 
+def test_the_room_heat_removal_adds_to_a_removal_already_in_the_drivers():
+    """A removal rate another closure wrote before this one is kept: the feedback's is added
+    to it, as its source is added to `"thermal.sources"`."""
+    model, state, drivers, names = read_modelica(WITH_VOLUME, return_names=True)
+    fb = _control(model)
+    _, room = _room(model, names)
+    cold = _cooled(state, room, 0.1)
+    alone = fb(cold, drivers)["thermal.removal"]
+    before = torch.linspace(1e-4, 2e-4, model.transport["thermal"].n_i, dtype=F64)
+    both = fb(cold, {**drivers, "thermal.removal": before})["thermal.removal"]
+    torch.testing.assert_close(both, before + alone, rtol=0.0, atol=0.0)
+    assert alone[room].item() > 0.0
+
+
 def test_the_piece_of_a_step_is_the_one_its_clear_end_lies_on():
     """A step starting at the limiter's corner (located there) takes the piece of the end
     that is clear of it, whichever end that is."""
@@ -132,12 +146,15 @@ def test_simulate_records_the_controller_outputs(scheme):
     model, state, drivers, names = read_modelica(WITH_VOLUME, return_names=True,
                                                  mass_storage=False)
     out = simulate(model, state, drivers, names.times[:4], scheme=scheme)
-    assert out["controls"].shape == (4, 4)
-    assert out["controls"][0, 2].item() == pytest.approx(0.0, abs=1e-12)
-    assert out["controls"][1:, 2].abs().max().item() < 0.2
-    torch.testing.assert_close(out["controls"][:, 3], 3000.0 * out["controls"][:, 2])
+    key = _control(model).network.outputs_key  # the key the Python `simulate` uses too
+    assert key == "controls.outputs" and "controls" not in out
+    y = out[key]
+    assert y.shape == (4, 4)
+    assert y[0, 2].item() == pytest.approx(0.0, abs=1e-12)
+    assert y[1:, 2].abs().max().item() < 0.2
+    torch.testing.assert_close(y[:, 3], 3000.0 * y[:, 2])
     T = out["T"][:, names.nodes["roo"]]
-    torch.testing.assert_close(out["controls"][:, 2], 5.0 * (293.15 - T))
+    torch.testing.assert_close(y[:, 2], 5.0 * (293.15 - T))
 
 
 def _edited(tmp_path, edit):

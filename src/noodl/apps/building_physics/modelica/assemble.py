@@ -255,7 +255,7 @@ unpinned zone, from that zone's own temperature: the heat flow is affine in that
 on each piece of the limiters, and `feedback.FeedbackHeat` (the last closure) puts it into
 the zone's energy balance as a source and a removal rate, so that the transport step treats
 it implicitly. `ModelicaNames.controls` names each block's output column of
-`run.simulate`'s `"controls"`.
+`run.simulate`'s `"controls.outputs"`.
 """
 
 from __future__ import annotations
@@ -346,7 +346,7 @@ class ModelicaNames:
     (Pa) to their values on the output grid `times` (module docstring, "Weather and wind").
     `controls` maps each feedback block (`LimPID` and the Math blocks it drives, module
     docstring, "Feedback control") to its position in the feedback network's outputs: the
-    column of `run.simulate`'s `"controls"` holding its output `y`.
+    column of `run.simulate`'s `"controls.outputs"` holding its output `y`.
     `junctions` names the nodes where one-way elements in series meet (module docstring,
     "Flow elements in series"); each is in `nodes` too.
     """

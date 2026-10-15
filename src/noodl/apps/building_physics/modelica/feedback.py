@@ -256,8 +256,8 @@ def feedback_network(doc: ModelicaDoc, graph: ComponentGraph, *,
 class FeedbackHeat:
     """The closure that puts a feedback network's heat flows into the zone energy balance
     (module docstring): on the limiters' pieces at the state, it adds each heat flow's
-    `A` to `"thermal.sources"` (full node, W) and writes `"thermal.removal"` (thermal
-    interior order, 1/s) `-B / C`, with `C` the zone heat capacity (`"thermal.capacity"`
+    `A` to `"thermal.sources"` (full node, W) and adds `-B / C` to `"thermal.removal"`
+    (thermal interior order, 1/s), with `C` the zone heat capacity (`"thermal.capacity"`
     from the drivers or the state, else the thermal layer's, `layer`). `heat` lists
     `(block, node)` per heat flow (none: the closure writes nothing, and `run.simulate` still
     records the network's outputs); `run._Midpoint` evaluates `affine` itself, on the piece of
@@ -359,5 +359,7 @@ class FeedbackHeat:
         A, B = self.affine(state, drivers, self.pieces(state, drivers))
         cap = drivers.get("thermal.capacity", state.get("thermal.capacity"))
         base = drivers.get("thermal.sources")
+        removal = self.removal(B, cap)
+        base_removal = drivers.get("thermal.removal")
         return {"thermal.sources": A if base is None else base + A,
-                "thermal.removal": self.removal(B, cap)}
+                "thermal.removal": removal if base_removal is None else base_removal + removal}

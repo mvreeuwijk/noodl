@@ -629,6 +629,9 @@ one. That step holds the controller's output over the whole model step, so a sti
 (a large gain on a fast zone) run with long steps can overshoot or oscillate where the
 continuous controller would not: take steps short against the loop's time constant.
 
+A block's gains, limits, offsets and bands are plain floats and are not differentiable;
+gradients flow through what the network reads, the state and the drivers.
+
 The network is a closure of the model, the first one: `build_model(..., controls=network)`
 puts it ahead of the density closure, so its writes reach every other closure. Its block
 outputs, its blocks' memory and whether it has been evaluated travel in the state as
@@ -776,8 +779,9 @@ rate `-B/C`, so that each transport step treats it implicitly: the MBL examples'
 W/K on a 75 kJ/K room, settles in 5 s, shorter than their steps. `simulate(...,
 scheme="midpoint")` takes both halves of a step on the step's piece and splits a step where the
 limiter reaches a limit. `names.controls` maps each block to its column of `simulate`'s
-`"controls"` (the block outputs). MBL's `ChimneyShaftWithVolume` holds its room at 293.15 K
-while its volumes release their start imbalance:
+`"controls.outputs"` (the block outputs, under the same key as the Python `simulate`). MBL's
+`ChimneyShaftWithVolume` holds its room at 293.15 K while its volumes release their start
+imbalance:
 
 ```python
 from noodl.apps.building_physics import read_modelica
@@ -786,7 +790,7 @@ from noodl.apps.building_physics.modelica import simulate
 model, state, drivers, names = read_modelica("ChimneyShaftWithVolume.json", return_names=True)
 out = simulate(model, state, drivers, names.times[:3])
 print(names.controls)
-heat = out["controls"][:, names.controls["gain"]]       # the heat into the room, W
+heat = out["controls.outputs"][:, names.controls["gain"]]  # the heat into the room, W
 room = out["T"][:, names.nodes["roo"]]
 for k in range(3):
     print(f"{float(names.times[k]):4.1f} s  room {float(room[k]):.4f} K  heat {float(heat[k]):6.1f} W")
@@ -1345,7 +1349,7 @@ above 0.1 % of the largest.
 | Three-zone project with a simple air-handling system (zero-volume return and 2 m³ supply plenum, two supply points, one halved from 00:30, a filtered return point, outdoor-air fraction 0.3 then 0.6 from 01:00, minimum outdoor air 0.02 kg/s, filtered recirculation and outdoor air), 24 steps | flow rel 32 $u$, mf rel 72 $u$, floor 64 $u$ × each species' max | **7.9e-7** flow (2 % of the allowance), **3.7e-7** mf |
 | NIST's `test_GetPrjInfo.prj` without its controls and duct leakage: two air-handling systems with zero-volume plenums (all outdoor air) and two fan-driven duct systems, 12 steps (noodl physics' Newton at 1e-12 kg/s, the float64 floor of its 28 kg/(s Pa) terminals) | flow rel 64 $u$, mf rel 72 $u$, floor 64 $u$ × each species' max | **1.1e-7** flow, **3.6e-8** terminal flow, **1.0e-7** mf |
 | Three-zone project with the four cubic-spline elements (one crossed against its declared direction, zone two at 303.15 K, a 0.02 kg/s supply), 24 steps | flow rel 32 $u$, mf rel 64 $u$, floor 64 $u$ × each species' max | **1.1e-8** flow, **2.7e-8** mf |
-| Demand-controlled ventilation: a PI controller on zone one's CO2 drives an exhaust fan (never below 0.2), occupants 08:00–18:00 through a schedule node, 288 steps; the named control outputs (CO2 reading, PI output, fan signal, excess) too | float32 control arithmetic and noodl's own CO2 reading propagated through the linearised loop, its response sums maximised over the visited operating range (including the open loop while the fan holds its 0.2 floor): PI output and fan signal absolute 38 500 $u$; flow rel 64 $u$ + 38 500 $u$ × the fan rating; mf rel 64 $u$ + 222 $u$ | **5.4e-6** flow (0.1 % of the allowance), **4.8e-8** mf, control outputs 0.7 % of the allowance |
+| Demand-controlled ventilation: a PI controller on zone one's CO2 drives an exhaust fan (never below 0.2), occupants 08:00–18:00 through a schedule node, 288 steps; the named control outputs (CO2 reading, PI output, fan signal, excess) too | float32 control arithmetic and noodl's own CO2 reading propagated through the linearised loop, its response sums maximised over the visited operating range (including the open loop while the fan holds its 0.2 floor): PI output and fan signal absolute 38 539 $u$; flow rel 64 $u$ + 38 539 $u$ × the fan rating; mf rel 64 $u$ + 222 $u$ (1.71e-5) | **5.4e-6** flow (0.1 % of the allowance), **4.8e-8** mf, control outputs 0.7 % of the allowance |
 | Pressure-controlled exhaust: zone three's gauge pressure above −0.5 Pa through a P controller (Kp 0.8) drives the exhaust fan; a path pressure difference and a flow ratio reported, 288 steps | rel 64 $u$, floor 64 $u$ × max (control outputs: × each output's max) | **5.3e-7** flow, control outputs 3 % of the allowance (clean air) |
 | Hysteresis window: zone one's temperature ramped through a schedule node, a window opened by hysteresis and a band switch, every logical and arithmetic node reported, 288 steps | the sensed $x = 0.1\,(T - 293.15)$ is off by an absolute $0.1\,(T + 293.15)\,u + 2u$ = 61.6 $u$ in float32 (offset cancellation); control outputs 2.67 × that, flows 1.67 × that × the window's flow per unit opening, both on top of rel 64 $u$ and the floor | **1.6e-4** flow on the window at opening 0.028 (41 % of the allowance), control outputs 38 % (clean air) |
 | The simple-AHS and duct-network projects with the outdoor-air fraction, a supply point, a fan's speed and a terminal's opening driven through schedule nodes instead of schedules | as the scheduled rows; noodl physics' runs equal the scheduled runs exactly | **7.9e-7** / **1.4e-7** flow, **3.7e-7** / **5.4e-8** mf, **1.0e-8** terminal flow |

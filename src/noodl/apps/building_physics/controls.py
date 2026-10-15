@@ -636,7 +636,8 @@ def _kept(written: Tensor, base: Tensor | None, evaluated: Tensor, a: Actuator) 
 # ------------------------------------------------------------------------------- network
 class ControlNetwork:
     """Blocks evaluated in order and the actuators that write their outputs into drivers:
-    a model closure (module docstring). Blocks without a name are named `"block <i>"`."""
+    a model closure that keeps the block outputs in the state. Blocks without a name are
+    named `"block <i>"`."""
 
     integrates = True
 
