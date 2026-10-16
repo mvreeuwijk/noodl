@@ -245,3 +245,10 @@ Constitutive laws are grouped below by the physics they express, as in
 ::: noodl.apps.inpfile
     options:
       members: [read_sections, require_fields, as_float, InpLine]
+::: noodl.modelica
+::: noodl.modelica.timeline
+    options:
+      members: [experiment_times, driver_grid, grid_events, signal_events, step_drivers, grid_index, extrapolate]
+::: noodl.modelica.inputs
+    options:
+      members: [SignalResolver]

@@ -28,6 +28,7 @@ from pathlib import Path
 from typing import Any
 
 from noodl.modelica.errors import ModelicaImportError
+from noodl.modelica.schema import CONTROLLERS as CONTROLLERS  # the class vocabulary below
 from noodl.modelica.schema import Signal, require_dict, require_str, signal_from
 
 FORMAT = "noodl-modelica/1"
@@ -102,7 +103,6 @@ HEAT_SENSORS = frozenset({"Modelica.Thermal.HeatTransfer.Sensors.TemperatureSens
 # Feedback controllers: MSL 4.1.0's `LimPID` (`Blocks/Continuous.mo`). They sit in the JSON's
 # `signals`, like the Math blocks; `feedback` reads them (a P controller; the other settings
 # are refused by name there).
-CONTROLLERS = frozenset({"Modelica.Blocks.Continuous.LimPID"})
 # Composite classes `expand.expand` rewrites into supported ones before `graph.build`
 # (`MediumColumnDynamic`: a mixing volume between two half columns).
 DYNAMIC_COLUMNS = frozenset({"Buildings.Airflow.Multizone.MediumColumnDynamic"})

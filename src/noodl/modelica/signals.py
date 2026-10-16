@@ -73,11 +73,8 @@ import math
 import numpy as np
 import torch
 
-from noodl.apps.building_physics.modelica.schema import (
-    CONTROLLERS,
-    ModelicaImportError,
-    Signal,
-)
+from noodl.modelica.errors import ModelicaImportError
+from noodl.modelica.schema import CONTROLLERS, Signal
 
 Tensor = torch.Tensor
 F64 = torch.float64

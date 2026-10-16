@@ -15,8 +15,12 @@ from typing import Any
 
 from noodl.modelica.errors import ModelicaImportError
 
-__all__ = ["Signal", "fail", "flag", "require_dict", "require_list", "require_str",
+__all__ = ["CONTROLLERS", "Signal", "fail", "flag", "require_dict", "require_list", "require_str",
            "signal_from"]
+
+# The feedback blocks a signal may feed (MSL 4.1.0); the building reader evaluates them
+# (`noodl.apps.building_physics.modelica.feedback`).
+CONTROLLERS = frozenset({"Modelica.Blocks.Continuous.LimPID"})
 
 
 @dataclass(frozen=True)

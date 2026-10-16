@@ -155,13 +155,14 @@ import re
 from dataclasses import dataclass, field
 
 from noodl._unionfind import UnionFind
-from noodl.apps.building_physics.modelica import schema, signals
+from noodl.apps.building_physics.modelica import schema
 from noodl.apps.building_physics.modelica.schema import (
     Component,
     ModelicaDoc,
     ModelicaImportError,
     Signal,
 )
+from noodl.modelica import signals
 
 _FIXED_TEMPERATURE = "Buildings.HeatTransfer.Sources.FixedTemperature"
 _THERMAL_CONDUCTOR = "Modelica.Thermal.HeatTransfer.Components.ThermalConductor"
