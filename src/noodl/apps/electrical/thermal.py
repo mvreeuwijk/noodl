@@ -103,6 +103,8 @@ class JouleHeating:
             heated = temperature[..., nodes].real
             base = drivers.get(key, self.base_temperatures[key])
             base = torch.as_tensor(base).to(dtype=heated.dtype, device=heated.device)
-            base = base.expand(*heated.shape[:-1], base.shape[-1])
+            batch = torch.broadcast_shapes(heated.shape[:-1], base.shape[:-1])
+            base = base.expand(*batch, base.shape[-1])
+            heated = heated.expand(*batch, heated.shape[-1])
             out[key] = base.index_copy(-1, slots.to(heated.device), heated)
         return out

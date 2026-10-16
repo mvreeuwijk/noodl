@@ -102,6 +102,19 @@ def test_generator_is_an_implicit_phasor_law():
         gen.flow(torch.ones(1, dtype=C128))
 
 
+def test_pi_branch_tap_zero_and_one_give_identical_values_and_gradients():
+    v = torch.tensor([1.0 + 0j, 0.97 * cmath.exp(-0.05j)], dtype=C128)
+    results = []
+    for tap in (0.0, 1.0):
+        law = PiBranch(0.01, 0.1, 0.02, tap, 0.1, learnable=True)
+        i = law(v, {})
+        i.abs().sum().backward()
+        results.append((i.detach(), law.ratio.grad.clone()))
+    torch.testing.assert_close(results[0][0], results[1][0], rtol=0, atol=0)
+    torch.testing.assert_close(results[0][1], results[1][1], rtol=0, atol=0)
+    assert results[0][1].abs().max() > 0
+
+
 def test_learnable_coefficients_carry_gradients():
     branch = PiBranch(0.01, 0.1, 0.02, 0.95, 0.1, learnable=True)
     gen = VoltageControlledGenerator(0.5, 1.0, learnable=True)
