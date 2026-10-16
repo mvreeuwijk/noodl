@@ -28,9 +28,9 @@ Two densities matter, and MBL keeps them structurally separate:
   (``door_discretized.py``) each evaluate ``density_pTX`` with their own inlined copy of the
   formula instead of this method -- the column at ``p_default`` (matching
   ``MediumColumn.mo:62-76``), the door at the ACTUAL port pressure (matching
-  ``TwoWayFlowElement.mo:72-81``) -- and no element reads the ``"rho"`` full-node driver this
-  method used to feed (dropped: nothing in the Modelica route read it). It is
-  kept as the medium's own general-purpose buoyancy-density law, for a caller that wants it.
+  ``TwoWayFlowElement.mo:72-81``) -- and no element reads a ``"rho"`` full-node driver from
+  it. It is kept as the medium's own general-purpose buoyancy-density law, for a caller
+  that wants it.
 
 For ``Buildings.Media.Air`` ``buoyancy_density`` and ``density`` are NOT the same function:
 ``Medium.density`` (this module's ``density``) is pressure-only (``Air.mo``'s own banner:
