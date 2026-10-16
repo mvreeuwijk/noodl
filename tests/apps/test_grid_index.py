@@ -1,13 +1,20 @@
-"""`_grid_index`: the sorted-grid lookup equals the old all-pairs algorithm."""
+"""`_grid_index` (building and electrical Modelica runners): the sorted-grid lookup equals
+the old all-pairs algorithm."""
 
 from __future__ import annotations
 
 import pytest
 import torch
 
-from noodl.apps.building_physics.modelica.run import _grid_index
+from noodl.apps.building_physics.modelica import run as building_run
+from noodl.apps.electrical.modelica import run as electrical_run
 
 F64 = torch.float64
+
+
+@pytest.fixture(params=[building_run, electrical_run], ids=["building", "electrical"])
+def grid_index(request):
+    return request.param._grid_index
 
 
 def _reference(grid, times):
@@ -24,9 +31,9 @@ def _reference(grid, times):
     return ("ok", out)
 
 
-def _new(grid, times):
+def _new(grid_index, grid, times):
     try:
-        return ("ok", _grid_index(grid, times))
+        return ("ok", grid_index(grid, times))
     except ValueError as exc:
         msg = str(exc)
         if "not a grid time" in msg:
@@ -39,14 +46,14 @@ def _t(*v):
     return torch.tensor(v, dtype=F64)
 
 
-def test_exact_grid_times_and_a_subset():
+def test_exact_grid_times_and_a_subset(grid_index):
     grid = torch.arange(0.0, 101.0, dtype=F64) * 0.5
-    assert _grid_index(grid, grid) == list(range(101))
-    assert _grid_index(grid, _t(0.0, 5.0, 50.0)) == [0, 10, 100]
-    assert _grid_index(grid, _t()) == []
+    assert grid_index(grid, grid) == list(range(101))
+    assert grid_index(grid, _t(0.0, 5.0, 50.0)) == [0, 10, 100]
+    assert grid_index(grid, _t()) == []
 
 
-def test_tolerance_edges_match_the_reference():
+def test_tolerance_edges_match_the_reference(grid_index):
     grid = _t(0.0, 1.0, 2.0, 1e6)
     tol_small, tol_big = 1e-9 * 1e6, 1e-9 * 1e6                  # the grid's max sets tol
     cases = [
@@ -55,32 +62,32 @@ def test_tolerance_edges_match_the_reference():
         _t(1e6 + 0.5 * tol_small), _t(1e6 + 2 * tol_small), _t(-1.0), _t(2e6),
     ]
     for times in cases:
-        assert _new(grid, times) == _reference(grid, times), times.tolist()
+        assert _new(grid_index, grid, times) == _reference(grid, times), times.tolist()
 
 
-def test_a_time_off_the_grid_names_the_first_offender():
+def test_a_time_off_the_grid_names_the_first_offender(grid_index):
     grid = _t(0.0, 1.0, 2.0, 3.0)
     with pytest.raises(ValueError, match=r"times\[1\] = 1\.5 is not a grid time"):
-        _grid_index(grid, _t(0.0, 1.5, 2.5))
+        grid_index(grid, _t(0.0, 1.5, 2.5))
     with pytest.raises(ValueError, match=r"times\[0\] = 7\.0 is not a grid time"):
-        _grid_index(grid, _t(7.0))
+        grid_index(grid, _t(7.0))
 
 
-def test_times_must_increase():
+def test_times_must_increase(grid_index):
     grid = _t(0.0, 1.0, 2.0)
     for times in (_t(1.0, 0.0), _t(1.0, 1.0), _t(0.0, 2.0, 1.0)):
         with pytest.raises(ValueError, match="times must be increasing"):
-            _grid_index(grid, times)
+            grid_index(grid, times)
 
 
-def test_unsorted_and_duplicate_grids_follow_the_reference():
+def test_unsorted_and_duplicate_grids_follow_the_reference(grid_index):
     for grid in (_t(3.0, 0.0, 2.0, 1.0), _t(0.0, 1.0, 1.0, 2.0), _t(2.0, 2.0, 2.0)):
         for times in (_t(0.0, 2.0), _t(2.0), _t(1.0), _t(0.0, 1.0, 3.0), _t(3.0, 0.0)):
-            assert _new(grid, times) == _reference(grid, times), (grid.tolist(),
+            assert _new(grid_index, grid, times) == _reference(grid, times), (grid.tolist(),
                                                                   times.tolist())
 
 
-def test_random_small_grids_agree_with_the_reference():
+def test_random_small_grids_agree_with_the_reference(grid_index):
     gen = torch.Generator().manual_seed(7)
     for _ in range(300):
         m = int(torch.randint(1, 9, (1,), generator=gen))
@@ -89,6 +96,7 @@ def test_random_small_grids_agree_with_the_reference():
         # times near grid points, half a step away (a tie between two entries) or exact
         times = (torch.randint(-5, 14, (n,), generator=gen).to(F64) * 0.25
                  + torch.randint(0, 2, (n,), generator=gen).to(F64) * 1e-10)
-        assert _new(grid, times) == _reference(grid, times), (grid.tolist(), times.tolist())
+        assert _new(grid_index, grid, times) == _reference(grid, times), (
+            grid.tolist(), times.tolist())
         sorted_times = torch.sort(times).values
-        assert _new(grid, sorted_times) == _reference(grid, sorted_times)
+        assert _new(grid_index, grid, sorted_times) == _reference(grid, sorted_times)

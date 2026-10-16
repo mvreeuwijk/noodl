@@ -46,9 +46,22 @@ def _grid_index(grid: Tensor, times: Tensor) -> list[int]:
     """The position of every entry of `times` on the step grid; raises `ValueError` for a
     time off the grid or a non-increasing one."""
     tol = 1e-9 * max(1.0, float(grid.abs().max()))
-    diff = (times.unsqueeze(1) - grid.unsqueeze(0)).abs()
-    idx = diff.argmin(dim=1)
-    off = diff.gather(1, idx.unsqueeze(1)).squeeze(1) > tol
+    # The nearest grid entry of every time, found by binary search in the sorted grid and
+    # a comparison of the two entries around the insertion point: O(n log m) time and O(n)
+    # memory, where all pairwise differences would be O(n m). Ties go to the lower index
+    # (of equal grid entries, the first), as `argmin` would. Same algorithm as the
+    # building application's `modelica.run._grid_index`.
+    sorted_grid, order = torch.sort(grid, stable=True)
+    m = grid.numel()
+    pos = torch.searchsorted(sorted_grid, times.contiguous())
+    hi = pos.clamp(max=m - 1)
+    lo = (pos - 1).clamp(min=0)
+    lo = torch.searchsorted(sorted_grid, sorted_grid[lo])          # first of equal entries
+    d_hi = (times - sorted_grid[hi]).abs()
+    d_lo = (times - sorted_grid[lo]).abs()
+    pick_lo = (d_lo < d_hi) | ((d_lo == d_hi) & (order[lo] < order[hi]))
+    idx = order[torch.where(pick_lo, lo, hi)]
+    off = torch.where(pick_lo, d_lo, d_hi) > tol
     if bool(off.any()):
         k = int(torch.nonzero(off)[0])
         raise ValueError(
