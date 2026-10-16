@@ -1170,7 +1170,7 @@ class KirchhoffLayer(TopologyGuard):
         this method computes for itself when `phi0 is None` is computed under `no_grad`),
         because the implicit adjoint linearises at the converged point and never returns a
         gradient w.r.t. the starting guess -- `solvers.implicit._Implicit.backward` returns
-        `None` for it. See the comment at the top of the body for what tracing it cost.
+        `None` for it. See `_starting_point` for what tracing it cost.
 
         With `differentiable=False`, the returned `(phi, q)` are ALWAYS DETACHED: the whole
         branch -- the initial guess, the grounding check, the Newton iteration, every inner
