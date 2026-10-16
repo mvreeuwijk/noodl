@@ -28,5 +28,22 @@ pytest
 python -m mkdocs build --strict
 ```
 
+## Continuous integration
+
+| Workflow / job | Runs on | What it runs |
+| --- | --- | --- |
+| `tests` / `test` | every push and pull request; Linux, Python 3.12 | `ruff check .` and the full default suite (`-m "not slow"`) with coverage |
+| `tests` / `minimum-versions` | Linux, Python 3.11, torch 2.2, numpy 1.26 | the core subset from `AGENTS.md` |
+| `tests` / `wheel-smoke` | Linux | builds the wheel, installs it in a clean venv and imports every application outside the source tree |
+| `tests` / `windows` | Windows, Python 3.12 | the core subset plus `tests/verification/test_contam_parity.py` with `pip install .[contam]` (the `contamxpy` wheel exists for Windows only, so this is where the CONTAM parity tests actually run) |
+| `tests` / `macos` | macOS, Python 3.12 | the core subset |
+| `slow-reference` / `slow` | weekly (Monday 03:00 UTC), manual `workflow_dispatch`, and pull requests labelled `run-slow` | `pytest -m slow` over `tests/verification` and `tests/benchmarks` (the full reference-model comparisons) |
+
+Skips are visible: every job runs pytest with `-rs`, writes a pass/fail/skip table with the skip
+reasons to the job summary (`.github/scripts/junit_summary.py`), and the `slow-reference` job
+uploads its junit XML and skip list as the `slow-reference-report` artifact. MATPOWER cases are
+cached in `~/.cache/noodl`. To run the slow comparisons for your pull request, add the
+`run-slow` label.
+
 A new application also follows the checklist in
 [Extending noodl](docs/development/extending.md#what-a-real-application-must-ship).
