@@ -16,6 +16,7 @@ from noodl._tracking import bulk_values, same_tracking
 from noodl.drives import Drive, check_drive_signature
 from noodl.elements.base import ConstitutiveLaw
 from noodl.layers._mna import MnaSystem
+from noodl.layers._solve_policy import resolve_classic, resolve_mna
 from noodl.layers._topology import TopologyGuard
 from noodl.nodesources import NodeSource
 from noodl.operators.graph import GraphLaplacianOperator
@@ -1125,23 +1126,10 @@ class KirchhoffLayer(TopologyGuard):
         for key, value in self.newton_defaults.items():
             newton_kwargs.setdefault(key, value)
         if self.mna:
-            if newton_kwargs.get("on_failure") == "return_primal":
-                # as on the classic path: "return" where nothing differentiable reaches the
-                # solve (then its primal Newton alone), "raise" where it is differentiated
-                reaches = self._reaches_grad(drivers or {}, sources, phi_boundary) or (
-                    history is not None and torch.is_grad_enabled()
-                    and any(isinstance(h, torch.Tensor) and h.requires_grad for h in history))
-                if diagnostics is None:
-                    raise ValueError(
-                        f"KirchhoffLayer {self.name!r}: on_failure='return_primal' "
-                        f"requires diagnostics= so the status is not silently dropped; pass "
-                        f"a dict and read its 'converged' and 'residual_norm' entries."
-                    )
-                if differentiable and not reaches:
-                    # the differentiable path's own refusal still applies to the primal one
-                    self._check_no_unreachable_differentiable_tensors()
-                    differentiable = False
-                newton_kwargs["on_failure"] = "raise" if differentiable else "return"
+            differentiable = resolve_mna(
+                self, newton_kwargs, diagnostics, differentiable, drivers, sources,
+                phi_boundary, history,
+            )
             return self._mna.solve(
                 phi_boundary, drivers, sources, phi0, q0=q0, history=history, dt=dt, t=t,
                 integration=integration, mode=mode, differentiable=differentiable,
@@ -1164,28 +1152,11 @@ class KirchhoffLayer(TopologyGuard):
                 f"static, so it takes no step; drop {stepping}"
             )
         drivers = drivers or {}
-        newton_kwargs.setdefault("method", self.linear_solver)
-        primal_only = newton_kwargs.get("on_failure") == "return_primal"
-        if primal_only:
-            # decided below, once the path is known: "return" on the primal path, "raise"
-            # on the differentiable one
-            newton_kwargs["on_failure"] = "return"
-        # Name this layer on every error the Newton solve or its INNER linear solves raise.
-        # Grounding is certified at phi0, but slopes change between Newton iterates, so an
-        # instance can lose it mid-iteration; without this the refusal read "newton:
-        # method='auto' refuses to split the batch ..." with no way to tell which layer of a
-        # composed model over one network produced it.
-        newton_kwargs.setdefault("where", f"KirchhoffLayer {self.name!r} solve")
-        if newton_kwargs.get("on_failure") == "return" and diagnostics is None:
-            # `solve` returns (phi, q) tensors; without a diagnostics dict there is nowhere
-            # for `converged`/`residual_norm` to go, and a non-converged phi would be
-            # indistinguishable from a converged one. The escape hatch is never silent: the
-            # result carries the status.
-            raise ValueError(
-                f"KirchhoffLayer {self.name!r}: on_failure='return' requires "
-                f"diagnostics= so the status is not silently dropped; pass a dict and read "
-                f"its 'converged' and 'residual_norm' entries."
-            )
+        policy = resolve_classic(
+            self, newton_kwargs, diagnostics, differentiable, drivers, sources, phi_boundary
+        )
+        differentiable = policy.differentiable
+        forward_only = policy.forward_only
 
         # The initial guess is NOT a differentiable quantity, and neither is the grounding
         # check below. Both are computed under no_grad (and a caller-supplied phi0 is
@@ -1218,18 +1189,6 @@ class KirchhoffLayer(TopologyGuard):
             node_slopes0 = self._node_source_slopes(phi0_full, drivers)
             self._grounding_check(dq0, where="solve", node_slopes=node_slopes0)
 
-        if differentiable and self.analytic_primal and not self._reaches_grad(
-            drivers, sources, phi_boundary
-        ):
-            # Nothing differentiable reaches this solve, so the implicit path would return
-            # the same detached root through an autograd Jacobian (`analytic_primal`).
-            differentiable = False
-        # "return_primal": "return" unless something differentiable reaches the solve; a
-        # differentiable solve that nothing reaches is its forward Newton alone (below).
-        forward_only = primal_only and differentiable and not self._reaches_grad(
-            drivers, sources, phi_boundary)
-        if primal_only and differentiable and not forward_only:
-            newton_kwargs["on_failure"] = "raise"
         if not differentiable:
             # The WHOLE non-differentiable solve runs under no_grad -- the Newton iteration,
             # every inner linear solve inside it, and the final assemble/flows. Two reasons,

@@ -33,6 +33,7 @@ from torch.func import functional_call
 from noodl._broadcast import broadcast_shapes
 from noodl._tracking import bulk_values, same_tracking
 from noodl.elements.base import INTEGRATIONS, LawContext
+from noodl.layers._solve_policy import require_diagnostics
 from noodl.operators.mna import MnaOperator
 from noodl.solvers.implicit import implicit_solve
 from noodl.solvers.newton import newton, newton_tolerances
@@ -584,12 +585,8 @@ class MnaSystem:
                 f"definite Jacobian, which a Modified Nodal Analysis system is not; use "
                 f"'auto', 'sparse_direct', 'direct' or 'gmres'"
             )
-        if newton_kwargs.get("on_failure") == "return" and diagnostics is None:
-            raise ValueError(
-                f"KirchhoffLayer {layer.name!r}: on_failure='return' requires "
-                f"diagnostics= so the status is not silently dropped; pass a dict and read "
-                f"its 'converged' and 'residual_norm' entries."
-            )
+        if newton_kwargs.get("on_failure") == "return":
+            require_diagnostics(layer.name, "return", diagnostics)
         plain = self._plain_call
         real_dtype = phi_boundary.real.dtype if phi_boundary.is_complex() else phi_boundary.dtype
 
