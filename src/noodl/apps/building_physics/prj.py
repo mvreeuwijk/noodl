@@ -1128,8 +1128,7 @@ def _read_initial_concentrations(
     Every other section's header count is a record count, but this one's is zones times
     species: `test_OneFloorWpcAddMf.prj:171` heads TWO zone rows with `6` (2 zones, 3
     species). So read rows to the terminator and use the count as the integrity check it
-    is. A single-species project hides the difference, which is why this was invisible on
-    the shipped fixtures.
+    is.
     """
     values = 0
     while True:
