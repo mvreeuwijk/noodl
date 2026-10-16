@@ -39,6 +39,26 @@ Tensor = torch.Tensor
 F64 = torch.float64
 
 
+def species_history(x, layer: TransportLayer, name: str = "x") -> tuple[Tensor, bool]:
+    """`x` (a history `"<layer>.x"` from `simulate`) in the stacked layout `(N, ..., n_i, K)`,
+    and whether it came in reduced.
+
+    The layouts are those of `TransportLayer`: stacked `(N, ..., n_i, K)` (checked first),
+    or, for a single-species layer (`K = 1`), the reduced `(N, ..., n_i)` that the standard
+    builder's `initial_state` starts from and `simulate` preserves. Anything else raises
+    `ValueError`.
+    """
+    x = torch.as_tensor(x, dtype=F64)
+    n_i, K = layer.n_i, layer.n_species
+    if x.dim() >= 3 and tuple(x.shape[-2:]) == (n_i, K):
+        return x, False
+    if K == 1 and x.dim() >= 2 and x.shape[-1] == n_i:
+        return x.unsqueeze(-1), True
+    also = f" or, for one species, (N, ..., {n_i})" if K == 1 else ""
+    raise ValueError(f"occupant_exposure: {name!r} must be (N, ..., {n_i}, {K}), the layer's "
+                     f"interior rows and species{also}, got {tuple(x.shape)}")
+
+
 def occupant_exposure(history: Mapping[str, Tensor], occupant: Occupant, model, *,
                       calendar: Calendar, layer: str = "species") -> Tensor:
     """The occupant's exposure over each step of `history` (from `simulate`): the step mean
@@ -48,8 +68,10 @@ def occupant_exposure(history: Mapping[str, Tensor], occupant: Occupant, model, 
 
     `calendar` places t = 0 in the year, so it picks each day's occupancy day and the time
     of every move: pass the run's own (`simulate`'s `calendar=`). `"<layer>.x"` is
-    `(N, ..., n_i, K)`, the layer's interior rows with the species axis, as `simulate`
-    records it.
+    `(N, ..., n_i, K)`, the layer's interior rows with the species axis, or, for a
+    single-species layer, the reduced `(N, ..., n_i)` the standard builder's `initial_state`
+    starts from (`species_history` normalises both); a reduced history gives a reduced
+    result `(N - 1, ...)` without the species axis, as `TransportLayer` does.
 
     The interpolation is between output rows: a run that splits its steps at input
     breakpoints (`simulate`'s `land_on_breakpoints=True`) keeps one row per output time, so
@@ -67,11 +89,7 @@ def occupant_exposure(history: Mapping[str, Tensor], occupant: Occupant, model, 
     interior = lay.interior_idx.tolist()
     pos = {zone: interior.index(node) for zone, node in nodes.items()}
     key = f"{layer}.x"
-    x = torch.as_tensor(history[key], dtype=F64)
-    if x.dim() < 3 or tuple(x.shape[-2:]) != (lay.n_i, lay.n_species):
-        raise ValueError(f"occupant_exposure: {key!r} must be (N, ..., {lay.n_i}, "
-                         f"{lay.n_species}), the layer's interior rows and species, got "
-                         f"{tuple(x.shape)}")
+    x, reduced = species_history(history[key], lay, key)
     times = [float(v) for v in torch.as_tensor(history["time"], dtype=F64).tolist()]
     n = len(times)
     if x.shape[0] != n:
@@ -89,7 +107,8 @@ def occupant_exposure(history: Mapping[str, Tensor], occupant: Occupant, model, 
             w0[k - 1, pos[zone]] += frac * (1.0 - s)
             w1[k - 1, pos[zone]] += frac * s
     shape = (n - 1,) + (1,) * (x.dim() - 3) + (lay.n_i, 1)
-    return (w0.reshape(shape) * x[:-1] + w1.reshape(shape) * x[1:]).sum(-2)
+    e = (w0.reshape(shape) * x[:-1] + w1.reshape(shape) * x[1:]).sum(-2)
+    return e[..., 0] if reduced else e
 
 
 def cumulative_exposure(exposure: Tensor, times) -> Tensor:
