@@ -486,11 +486,14 @@ class KirchhoffLayer(TopologyGuard):
         return tuple(self._node_sources)
 
     # ------------------------------------------------------- dense references (lazy)
-    @functools.cached_property
+    @property
     def A(self) -> torch.Tensor:
         """This layer's (n, b_layer) incidence matrix, built on FIRST ACCESS only.
 
-        Held as a `cached_property` rather than an `__init__` attribute: it grows 4x per node
+        Refused (`_require_current_topology`) once the network has changed, even when it
+        was already built: the cached matrix describes the old graph.
+
+        Held in a `cached_property` rather than an `__init__` attribute: it grows 4x per node
         doubling and would break the composed model's memory-scaling budget (numbers:
         docs/design/orchestration.md#dense-incidence-matrix). Nothing inside this class reads
         it except `jacobian()`, the retained dense reference -- every hot-path site gathers or
@@ -500,6 +503,12 @@ class KirchhoffLayer(TopologyGuard):
         order), because callers outside the layer legitimately want the matrix: the
         composed-model conservation tests form `A @ q` with it.
         """
+        self._require_current_topology()
+        return self._dense_incidence
+
+    @functools.cached_property
+    def _dense_incidence(self) -> torch.Tensor:
+        """The cache behind `A`."""
         return self.net.incidence()[:, self.cols]
 
     @functools.cached_property
@@ -517,7 +526,8 @@ class KirchhoffLayer(TopologyGuard):
         caller who mutated `net` afterwards (adding a node or edge) would get a layer whose
         `A`/`_diff` (if already accessed) or `_src`/`_tgt`/`cols` (fixed at `__init__`) no
         longer agree with the network's current topology; `solve`, `dp`, `assemble` and
-        `residual` raise (`_require_current_topology`) once the network has changed.
+        `residual`, `A`, `balance` and `net_outflow` raise (`_require_current_topology`)
+        once the network has changed.
         """
         return self.net.difference()[self.cols]
 
@@ -556,7 +566,12 @@ class KirchhoffLayer(TopologyGuard):
         `index_add` is out of place, on a zero tensor this call itself allocates, so it is
         exactly as differentiable w.r.t. `w` as the matrix product is and cannot corrupt a
         tensor some earlier op still needs for its own backward pass.
+
+        Refused once the network has changed (`_require_current_topology`, one integer
+        comparison): the endpoints and node count are construction-time ones. Every
+        flow-balance site goes through here (`net_outflow`, `balance`, `residual`).
         """
+        self._require_current_topology()
         out = torch.zeros(
             w.shape[:-1] + (self._n_nodes,), dtype=w.dtype, device=w.device
         )
@@ -763,6 +778,7 @@ class KirchhoffLayer(TopologyGuard):
         layer, including one solved by Modified Nodal Analysis, whose implicit-law flows are
         not functions of `phi`.
         """
+        self._require_current_topology()
         phi_i = phi[..., self.interior]
         lhs = self._accumulate_interior(q) - self._source_interior(sources, phi_i)
         w = self._node_source_withdrawal(phi, drivers or {})
