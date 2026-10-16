@@ -7,12 +7,18 @@ the implicit-law edges, in layer edge order. Residual rows are Kirchhoff's curre
 the interior nodes (`A_I q - s_I + w(phi)`, with `q` the law flow on potential-controlled
 edges and the unknown on implicit ones), then the implicit laws' own residuals. The Jacobian
 is assembled as COO (`MnaOperator`) from per-law local blocks: for a law of `ports` m whose
-edges form G groups, the block `d out[g, k] / d in[g, l]` is obtained from m forward-mode
-derivatives (`torch.func.jvp`), tangent l setting slot l of every group at once.
+edges form G groups, the block `d out[g, k] / d in[g, l]` is obtained from ONE evaluation of
+the law and m reverse-mode derivatives (`torch.autograd.grad`), cotangent k seeding slot k of
+every group at once (the groups are independent, so each gradient holds row k of every
+group's block). An implicit law's blocks with respect to `dp` and to `q` come from the same
+evaluation. Reverse mode, not forward mode: PyTorch's forward-mode rules for elementwise ops
+run through its Python reference implementations (`torch._refs`), about 80 times the cost of
+the op itself, which made the Jacobian most of an MNA step.
 
 Phasor layers (complex potentials and flows) are solved in the real view: each complex
 unknown is a (Re, Im) pair, `w = 2`, and each local block entry becomes the real 2x2 block of
-the (possibly non-holomorphic) law, from the two tangents 1 and 1j.
+the (possibly non-holomorphic) law, differentiated through the real views of its input and
+output.
 """
 
 from __future__ import annotations
@@ -20,10 +26,9 @@ from __future__ import annotations
 import dataclasses
 import importlib.util
 import math
-import warnings
 
 import torch
-from torch.func import functional_call, jvp
+from torch.func import functional_call
 
 from noodl._broadcast import broadcast_shapes
 from noodl._tracking import bulk_values, same_tracking
@@ -45,27 +50,6 @@ def _scipy_importable() -> bool:
     return importlib.util.find_spec("scipy") is not None
 
 
-_forward_mode_ready = False
-
-
-def _prepare_forward_mode() -> None:
-    """Load PyTorch's forward-mode derivative rules once, quietly.
-
-    The first `torch.func.jvp` of a process compiles them with `torch.jit.script`, which
-    PyTorch 2.x reports as a deprecation (`FutureWarning`) that no caller can act on. Doing
-    that one load here, under a filter for exactly that message, keeps it from surfacing in
-    the first circuit solve of every program.
-    """
-    global _forward_mode_ready
-    if _forward_mode_ready:
-        return
-    with warnings.catch_warnings():
-        warnings.filterwarnings(
-            "ignore", message=r".torch\.jit\.script. is deprecated", category=FutureWarning)
-        jvp(torch.sin, (torch.zeros(1),), (torch.ones(1),))
-    _forward_mode_ready = True
-
-
 def _complex(z: Tensor) -> Tensor:
     """`z` as a complex128 tensor that `view_as_real` accepts: a phasor-capable law may
     return a real tensor (a constant current) or a lazily conjugated one (a law written with
@@ -73,20 +57,59 @@ def _complex(z: Tensor) -> Tensor:
     return z.to(torch.complex128).resolve_conj()
 
 
-def _colour_jacobian(fn, z: Tensor, m: int, w: int) -> Tensor:
-    """`(..., G, m, m, w, w)`: d fn(z)[g, k, ck] / d z[g, l, cl] for a groupwise `fn`."""
-    shape = z.shape
-    G = shape[-1] // m
-    cols = []
-    for l_ in range(m):
-        for cl in range(w):
-            t = torch.zeros(shape[:-1] + (G, m), dtype=z.dtype, device=z.device)
-            t[..., l_] = 1.0 if cl == 0 else 1j
-            _, d = jvp(fn, (z,), (t.reshape(shape),))
-            d = d.reshape(d.shape[:-1] + (G, m))
-            cols.append(torch.view_as_real(_complex(d)) if w == 2 else d.unsqueeze(-1))
-    J = torch.stack(cols, dim=-1).unflatten(-1, (m, w))  # (..., G, k, ck, l, cl)
-    return J.transpose(-3, -2)                            # (..., G, k, l, ck, cl)
+def _colour_blocks(fn, zs: tuple[Tensor, ...], m: int, w: int) -> list[Tensor]:
+    """`(..., G, m, m, w, w)` per input: `d fn(*zs)[g, k, ck] / d zs[i][g, l, cl]` for a
+    groupwise `fn`, from one evaluation of `fn` and `m * w` reverse-mode gradients.
+
+    Each input is a fresh leaf (in its real view when `w == 2`), so the gradients are with
+    respect to it alone; the values carry no graph (the operator is only ever used under
+    `no_grad`). An output that does not depend on an input gives a zero block. An output
+    whose batch shape is wider than an input's (a batched driver) is evaluated again with
+    the inputs expanded to it, so the gradient is per instance, not summed over the batch.
+    """
+    with torch.enable_grad():
+        leaves, out = _evaluate(fn, zs, w)
+        batch = _batch(out, w)
+        if any(_batch(leaf, w) != batch for leaf in leaves):
+            zs = tuple(z.expand(batch + z.shape[-1:]) for z in zs)
+            leaves, out = _evaluate(fn, zs, w)
+        live = list(range(len(leaves))) if out.requires_grad else []
+        G = (out.shape[-2] if w == 2 else out.shape[-1]) // m
+        rows: list[list[Tensor]] = [[] for _ in leaves]
+        n_seeds = m * w
+        for seed in range(n_seeds):
+            k, ck = divmod(seed, w)
+            cot = torch.zeros(batch + (G, m, w), dtype=out.dtype, device=out.device)
+            cot[..., k, ck] = 1.0
+            cot = cot.reshape(out.shape)
+            grads = (torch.autograd.grad(out, [leaves[i] for i in live], cot,
+                                         retain_graph=seed < n_seeds - 1, allow_unused=True)
+                     if live else ())
+            by_input = dict(zip(live, grads, strict=True))
+            for i, leaf in enumerate(leaves):
+                g = by_input.get(i)
+                g = torch.zeros_like(leaf) if g is None else g
+                rows[i].append(g.reshape(batch + (G, m, w)))   # [g, l, cl] for this (k, ck)
+    # (..., G, k*w + ck, l, cl) -> (..., G, k, l, ck, cl)
+    return [torch.stack(r, dim=-3).unflatten(-3, (m, w)).transpose(-3, -2).detach()
+            for r in rows]
+
+
+def _batch(x: Tensor, w: int) -> tuple[int, ...]:
+    """The batch shape of a value per edge (in its real view when `w == 2`)."""
+    return tuple(x.shape[:-2] if w == 2 else x.shape[:-1])
+
+
+def _evaluate(fn, zs: tuple[Tensor, ...], w: int) -> tuple[list[Tensor], Tensor]:
+    """`fn` at fresh leaves for `zs` (real views when `w == 2`), and its output (real view
+    when `w == 2`)."""
+    if w == 2:
+        leaves = [torch.view_as_real(_complex(z).detach()).clone().requires_grad_(True)
+                  for z in zs]
+        out = fn(*(torch.view_as_complex(leaf) for leaf in leaves))
+        return leaves, torch.view_as_real(_complex(out))
+    leaves = [z.detach().clone().requires_grad_(True) for z in zs]
+    return leaves, fn(*leaves)
 
 
 def _cat(parts: list[Tensor], like: Tensor) -> Tensor:
@@ -103,7 +126,6 @@ class MnaSystem:
 
     def __init__(self, layer) -> None:
         self.layer = layer
-        _prepare_forward_mode()
         self.w = 2 if layer.phasor else 1
         b = len(layer.cols)
         f_parts = [torch.arange(s, e) for el, (s, e) in
@@ -406,9 +428,8 @@ class MnaSystem:
 
         def slope(j, ns):
             phi_n = phi[..., ns.nodes]
-            _, d = jvp(lambda v: call(n_el + j, (v, drivers)), (phi_n,),
-                       (torch.ones_like(phi_n),))
-            return d
+            block, = _colour_blocks(lambda v: call(n_el + j, (v, drivers)), (phi_n,), 1, 1)
+            return block[..., 0, 0, 0, 0]
 
         return self.layer._scatter_node_sources(slope)
 
@@ -427,14 +448,12 @@ class MnaSystem:
 
     @staticmethod
     def _potential_block(call, i, drivers, lctx, dp_s, m, w):
-        return _colour_jacobian(lambda d: call(i, (d, drivers, lctx)), dp_s, m, w)
+        block, = _colour_blocks(lambda d: call(i, (d, drivers, lctx)), (dp_s,), m, w)
+        return block
 
     @staticmethod
     def _implicit_blocks(call, i, drivers, lctx, dp_s, q_s, m, w):
-        return (
-            _colour_jacobian(lambda d: call(i, (d, q_s, drivers, lctx)), dp_s, m, w),
-            _colour_jacobian(lambda qq: call(i, (dp_s, qq, drivers, lctx)), q_s, m, w),
-        )
+        return _colour_blocks(lambda d, qq: call(i, (d, qq, drivers, lctx)), (dp_s, q_s), m, w)
 
     def operator(self, x, phi_boundary, drivers, ctx, call, node_slope_fn) -> MnaOperator:
         """The Jacobian of `residual` at `x`, as COO triplets on the fixed pattern."""
