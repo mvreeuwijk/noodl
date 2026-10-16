@@ -13,7 +13,7 @@ from noodl.elements.base import ConstitutiveLaw
 from noodl.layers.kirchhoff import KirchhoffLayer
 from noodl.layers.reaction import FirstOrderDecay
 from noodl.layers.transport import TransportLayer
-from noodl.model import Model, Ports
+from noodl.model import Model, Ports, StepContext
 from noodl.nodesources import NodeSource
 from noodl.topology import Network
 
@@ -1787,3 +1787,110 @@ def test_iterate_pays_the_confirming_pass_when_a_parameter_is_unused_on_pass_one
     model.steady({"c.x": torch.tensor([0.0], dtype=F64)}, drivers, diagnostics=diag)
     assert diag["adjoint"] == "implicit"
     assert len(calls) == diag["passes"] + 2
+
+
+# ---- S01: closure declarations are read once, at construction, and malformed ones refused ---
+
+
+def _closure_with(**attrs):
+    def closure(state, drivers):
+        return {}
+
+    for k, v in attrs.items():
+        setattr(closure, k, v)
+    return closure
+
+
+@pytest.mark.parametrize("attr", ["inputs", "outputs", "state_keys", "edge_kinds"])
+def test_a_bare_string_declaration_is_refused_at_construction(attr):
+    extra = {"integrates": False} if attr == "state_keys" else {}
+    with pytest.raises(TypeError, match=f"declares {attr} as the string 'rho_amb'"):
+        _build(closures=(_closure_with(**{attr: "rho_amb"}, **extra),))
+
+
+def test_a_non_bool_integrates_is_refused_at_construction():
+    with pytest.raises(TypeError, match="integrates='yes'; it must be True or False"):
+        _build(closures=(_closure_with(integrates="yes"),))
+
+
+def test_a_declared_output_that_is_a_layer_state_key_is_refused_at_construction():
+    with pytest.raises(ValueError, match="declares output 'air.phi', which is a state key"):
+        _build(closures=(_closure_with(outputs=("air.phi",)),))
+    # the unowned transport "<layer>.q" carve-out stays allowed (no Kirchhoff layer owns it)
+
+
+def test_species_columns_that_disagree_with_the_layer_are_refused_at_construction():
+    net = _net()
+    air = KirchhoffLayer(
+        net, "air", [PowerLaw(torch.tensor([0.01, 0.02, 0.01], dtype=F64), 0.65)],
+        drives=[ConstantDrive("airpath", "wind")], boundary=["ambient"],
+    )
+    gas = TransportLayer(
+        net, "gas", capacity=torch.tensor([50.0, 80.0], dtype=F64), flow_kind="airpath",
+        boundary=["ambient"], n_species=2, species_names=("bod", "sulfide"), scheme="implicit",
+    )
+    good = _closure_with(species_columns={"gas": {"bod": 0, "sulfide": 1}})
+    Model(net, {"air": air, "gas": gas}, closures=[good])
+    bad = _closure_with(species_columns={"gas": {"bod": 1, "sulfide": 0}})
+    with pytest.raises(ValueError, match=r"species_columns\['gas'\]\['bod'\] = 1"):
+        Model(net, {"air": air, "gas": gas}, closures=[bad])
+
+
+def test_a_closure_added_after_construction_is_dispatched_by_its_own_declarations():
+    _, model, state, drivers, _, _ = _build()
+
+    class Late:
+        integrates = True
+
+        def __call__(self, state, drivers, ctx):
+            return {"late_dt": torch.tensor(ctx.dt, dtype=F64)}
+
+    model.closures.append(Late())
+    assert model._apply_closures(state, drivers, ctx=StepContext(dt=3.0))["late_dt"] == 3.0
+    assert id(model.closures[0]) in model._integrating
+
+
+def test_ownership_lists_writers_and_readers_of_declared_keys():
+    class Writer:
+        outputs = ("wind",)
+        inputs = ("species.x",)
+
+        def __call__(self, state, drivers):
+            return {"wind": drivers["wind"]}
+
+    _, model, *_ = _build(closures=(Writer(),))
+    own = model.refs.ownership()
+    assert own["species.x"].writers == ("layer species",)
+    assert any(r.startswith("closure ") for r in own["species.x"].readers)
+    assert any(w.startswith("closure ") for w in own["wind"].writers)
+    assert own["species.sources"].readers == ("layer species",)
+    assert own["species.sources"].writers == ("caller",)
+    assert own["species.sources"].field.role == "driver"
+
+
+def test_field_batch_shape_is_the_shape_without_the_fields_layout():
+    _, model, *_ = _build()
+    f = model.refs.species.x
+    assert f.batch_shape(torch.zeros(4, 2, dtype=F64)) == (4,)
+    assert f.batch_shape(torch.zeros(2, dtype=F64)) == ()
+
+
+def test_check_reports_overwritten_undeclared_and_probed_outputs():
+    class A:
+        outputs = ("wind",)
+
+        def __call__(self, state, drivers):
+            return {"wind": drivers["wind"], "extra": drivers["wind"]}
+
+    class B:
+        outputs = ("wind",)
+
+        def __call__(self, state, drivers):
+            return {"wind": drivers["wind"]}
+
+    def undeclared(state, drivers):
+        return {}
+
+    _, model, state, drivers, *_ = _build(closures=(A(), B(), undeclared))
+    codes = {i.code for i in model.check(state, drivers, dt=10.0, probe=True).issues}
+    assert {"overwritten-output", "undeclared-closure", "declared-vs-probed"} <= codes

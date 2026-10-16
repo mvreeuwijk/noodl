@@ -128,6 +128,8 @@ class _Probe:
         # The value each closure output last took, and the closure that wrote it.
         self.closure_values: dict[str, object] = {}
         self.closure_writers: dict[str, str] = {}
+        # The keys each closure (by `ClosureSpec.label`) returned, over the whole probe.
+        self.closure_returned: dict[str, set[str]] = {}
 
 
 def _check_value(f: Field, key: str, value, origin: str, add, batches) -> str:
@@ -166,10 +168,16 @@ def _both_roles(key: str) -> bool:
     return key.endswith(".capacity")
 
 
+def _specs(model) -> list:
+    return [model._closure_spec(c) for c in model.closures]
+
+
 def _declared(model, attr: str) -> set[str]:
+    """What the closures declare: `attr` is `"outputs"`, `"inputs"` or `"edge_kinds"`."""
     out: set[str] = set()
-    for closure in model.closures:
-        out.update(str(k) for k in (getattr(closure, attr, ()) or ()))
+    for spec in _specs(model):
+        out.update({"outputs": spec.writes, "inputs": spec.reads,
+                    "edge_kinds": spec.edge_kinds}[attr] or ())
     return out
 
 
@@ -230,6 +238,35 @@ def check_setup(
                 + (f"; did a layer mean {hint[0]!r}?" if hint else ""),
             ))
 
+    # --------------------------------------------------------------- closure ownership
+    specs = _specs(model)
+    last_writer: dict[str, str] = {}
+    for spec in specs:
+        if spec.writes is None and spec.reads is None:
+            add(Issue("info", "undeclared-closure",
+                      f"closure {spec.label} declares neither `inputs` nor `outputs`, so "
+                      f"the checks that need them (missing inputs, overwritten outputs) "
+                      f"cannot see it"))
+        for key in sorted(spec.writes or ()):
+            if key in last_writer and key not in (spec.reads or ()):
+                add(Issue("warning", "overwritten-output",
+                          f"closure {spec.label} declares output {key!r} and replaces what "
+                          f"closure {last_writer[key]} wrote, without declaring it among "
+                          f"its `inputs`", key))
+            last_writer[key] = spec.label
+            head, dot, tail = key.rpartition(".")
+            if dot and head in model.layers:
+                ref = model.refs[head]
+                suffixes = {str(ref.fields[o]).rpartition(".")[2] for o in ref.inputs}
+                if tail not in suffixes:
+                    hint = difflib.get_close_matches(tail, sorted(suffixes), 1, 0.6)
+                    add(Issue("warning", "unknown-layer-key",
+                              f"closure {spec.label} declares output {key!r}, which is not a "
+                              f"driver key of layer {head!r} (its driver keys: "
+                              f"{sorted(str(ref.fields[o]) for o in ref.inputs)})"
+                              + (f"; did you mean {head + '.' + hint[0]!r}?" if hint else ""),
+                              key))
+
     # ------------------------------------------------------------------- probe step
     probe_obj = None
     closure_values: dict = {}
@@ -260,6 +297,15 @@ def check_setup(
             report.state_reads = frozenset(map(str, probe_obj.state_reads))
             report.closure_outputs = frozenset(map(str, probe_obj.closure_outputs))
             closure_values, closure_writers = probe_obj.closure_values, probe_obj.closure_writers
+            for spec in specs:
+                undeclared = sorted(
+                    probe_obj.closure_returned.get(spec.label, set())
+                    - set(spec.writes or ()) - set(spec.state_keys)
+                ) if spec.writes is not None else []
+                if undeclared:
+                    add(Issue("warning", "declared-vs-probed",
+                              f"closure {spec.label} returned {undeclared} during the probe "
+                              f"step, which it does not declare among its `outputs`"))
     # Without a probe, learn what the closures write by evaluating them once as a QUERY --
     # the no-integration call `Model.initial_capacities` makes: no solve, no time step, and
     # an integrating closure evaluates its algebraic outputs without advancing.
@@ -282,7 +328,7 @@ def check_setup(
     produced = _declared(model, "outputs") | set(report.closure_outputs)
     # When the closures' outputs are known -- evaluated, or every closure declares them --
     # a required driver none of them writes is missing for certain.
-    all_declared = queried or all(hasattr(c, "outputs") for c in model.closures)
+    all_declared = queried or all(spec.writes is not None for spec in specs)
     consumed = _declared(model, "inputs")
 
     # --------------------------------------------------------------------- inputs

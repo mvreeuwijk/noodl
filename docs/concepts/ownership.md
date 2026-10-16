@@ -42,7 +42,8 @@ changes the next step. Learnable parameters are registered on the law, so
   is neither seen nor refused.
 - Replacing or editing `model.layers`, `model.closures` or `model.reactions` after
   construction. `Model.__init__` validates names, keys and drivers once; an appended closure
-  runs without that validation.
+  runs without that validation (its declarations are read on first use, so its call
+  signature, `integrates` and `species_columns` are not checked against the layers).
 - Changing a layer's private tensors (`cols`, the law slices) or its list of laws.
 
 **Frozen dataclasses are shallow.** The application records (`Resistor`, `Circuit`,
@@ -76,6 +77,11 @@ operators derived afterwards; whole-model device moves are untested.
 - **`pickle` and `torch.save` of a whole model work** when every part is picklable. The
   built-in layers, laws, drives and reactions are. A closure is an arbitrary callable: a
   module-level function pickles, a `lambda` or a locally defined function does not.
+- **A copy keeps integrating closures integrating.** The model reads each closure's
+  declarations once into a `ClosureSpec` that holds the closure object, so `deepcopy` and
+  `pickle` carry the closure and its declarations together and the copy's `step` advances the
+  closure's state exactly as the original does
+  (`tests/test_ownership.py::test_a_copied_model_still_advances_an_integrating_closure`).
 - **`state_dict()` exists only on laws and node sources** (they are modules). It holds
   parameters and buffers, nothing else: not the law kind, the layer, the network or any
   attribute. A `Model` has no `state_dict`; there is no one-call way to save and restore a

@@ -14,8 +14,10 @@ from typing import NamedTuple
 
 import torch
 
+from noodl import layout
 from noodl._broadcast import broadcast_shapes
 from noodl._grad_reach import any_requires_grad
+from noodl.contracts import call_closure
 from noodl.model import Drivers, Model, State
 from noodl.solvers.fixed_point import differentiate_fixed_point
 from noodl.topology import Network
@@ -80,47 +82,25 @@ def _registered_conversions() -> list[str]:
 
 
 def _reduced(x: Tensor, n_last: int) -> Tensor:
-    """A single-species tensor in REDUCED layout `(..., n_last)`. `TransportLayer` accepts a
-    single-species state either reduced or stacked `(..., n_last, 1)` (the CONTAM reader's
-    `x0` and `x_boundary` are stacked, the street app's are reduced); the
-    glue works in the reduced form. A batched reduced `(1, 1)` and a stacked `(1, 1)` hold
-    the same single number, so the ambiguity when `n_last == 1` is harmless."""
-    if _is_stacked(x, n_last):
-        return x.squeeze(-1)
-    if x.shape[-1] != n_last:
-        raise ValueError(
-            f"couple: expected a tensor with {n_last} entries on its node axis, got shape "
-            f"{tuple(x.shape)}"
-        )
-    return x
+    """A single-species tensor in REDUCED layout `(..., n_last)`: the glue works in the
+    reduced form whatever layout the layer's state came in (`noodl.layout.reduced_single`)."""
+    return layout.reduced_single(x, n_last, where="couple")
 
 
 def _write_at(
     target: Tensor, n_last: int, position: int, value: Tensor, *, add: bool = False,
 ) -> Tensor:
     """`target` with `value` written (`add=True`: ADDED) at `position` on its node axis, in
-    the caller's own LAYOUT (reduced `(..., n_last)` or stacked `(..., n_last, 1)`) -- but not
-    necessarily its own SHAPE: a batched `value` written into an unbatched `target`
-    broadcasts the target up to the value's batch. That is the ensemble case: the street
-    model runs a batch of `B` forcings while the CONTAM reader's `x_boundary` stays `(1, 1)`.
-    Never writes into `target` itself.
-
-    `add=True` is what a two-way link's feedback term needs: the caller's own entry at
-    `position` (another source of pollutant at that node) must survive, with the coupling's
-    contribution added to it, never overwritten.
-    """
-    reduced = _reduced(target, n_last)
-    batch = broadcast_shapes(reduced.shape[:-1], value.shape)
-    reduced = reduced.expand(*batch, n_last).clone()
-    reduced[..., position] = reduced[..., position] + value if add else value
-    stacked = _is_stacked(target, n_last)
-    return reduced.reshape(*batch, n_last, 1) if stacked else reduced.reshape(*batch, n_last)
+    the caller's own layout and, for a batched `value`, broadcast up to its batch
+    (`noodl.layout.write_at`). `add=True` is what a two-way link's feedback term needs: the
+    caller's own entry at `position` survives, with the coupling's contribution added."""
+    return layout.write_at(target, n_last, position, value, add=add, where="couple")
 
 
 def _is_stacked(x: Tensor, n_last: int) -> bool:
     """True when a single-species tensor is in STACKED layout `(..., n_last, 1)` rather than
-    reduced `(..., n_last)` -- the one rule `_reduced` and `_write_at` both decide by."""
-    return x.dim() >= 2 and x.shape[-1] == 1 and x.shape[-2] == n_last
+    reduced `(..., n_last)` (`noodl.layout.is_stacked`)."""
+    return layout.is_stacked(x, n_last)
 
 
 def apply_conversion(name: str | None, value: Tensor, drivers: Mapping[str, Tensor]) -> Tensor:
@@ -475,14 +455,13 @@ class CoupledModel:
         state: the same value the step's own closures then compute.
         """
         drv = None
-        for closure in self.models[tag].closures:
-            if "rho_amb" not in getattr(closure, "outputs", ()):
+        model = self.models[tag]
+        for closure in model.closures:
+            spec = model._closure_spec(closure)
+            if "rho_amb" not in (spec.writes or ()):
                 continue
             drv = dict(drivers) if drv is None else drv
-            if getattr(closure, "integrates", False):
-                drv.update(closure(state, drv, None))
-            else:
-                drv.update(closure(state, drv))
+            drv.update(call_closure(spec, state, drv))
         if drv is not None:
             drivers["rho_amb"] = drv["rho_amb"]
 

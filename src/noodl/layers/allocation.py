@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import torch
 
+from noodl import layout
 from noodl.layers._topology import TopologyGuard
 from noodl.solvers.scalar import solve_monotone
 from noodl.topology import Network
@@ -507,15 +508,9 @@ class AllocatedFlowLayer(TopologyGuard):
         # One common leading batch shape for state, requests and every parameter, so an
         # unbatched initial state with batched requests (or a batched capacity with
         # unbatched requests) allocates correctly; the scatter buffers below take it.
-        batch = torch.broadcast_shapes(
-            s.shape[:-1], r.shape[:-1], self.s_max.shape[:-1], self.c_arc.shape[:-1],
-            self.preference.shape[:-1],
+        _, (s, r, s_max, c_arc, preference) = layout.broadcast_batch(
+            (s, 1), (r, 1), (self.s_max, 1), (self.c_arc, 1), (self.preference, 1),
         )
-        s = s.expand(batch + s.shape[-1:])
-        r = r.expand(batch + r.shape[-1:])
-        s_max = self.s_max.expand(batch + self.s_max.shape[-1:])
-        c_arc = self.c_arc.expand(batch + self.c_arc.shape[-1:])
-        preference = self.preference.expand(batch + self.preference.shape[-1:])
         headroom = (s_max - s) / dt
         remaining = r.clone()
         f = torch.zeros_like(r)
