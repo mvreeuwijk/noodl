@@ -6,7 +6,8 @@ and then drops that pass's graph, runs every later pass with no graph, asks for 
 detached values, and stops on convergence, on the caller's early-stop rule or at the pass
 budget. `confirm_gradient_dependence` is the gradient-dependence rule (#22), in one place:
 when pass 1 saw nothing differentiable, ask again with one probe pass at the certified
-point. Each caller keeps its own convergence measure, relaxation, messages and adjoint behind `PassProblem`.
+point. Each caller keeps its own convergence measure, relaxation, messages and adjoint
+behind `PassProblem`.
 
 `detached` and `unsolved_mask` are the two diagnostics helpers both loops need.
 """
