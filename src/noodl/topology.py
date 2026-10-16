@@ -55,12 +55,28 @@ class Network:
         # Branch order is insertion order (networkx iterates edges by adjacency).
         self._edges: list[EdgeKey] = []
         self._cache: dict[tuple, torch.Tensor] = {}
+        # Topology version: bumped whenever a node or edge is added. Layers record it at
+        # construction and refuse to run once it differs (`topology_version`).
+        self._version = 0
         # Alternative names of nodes (alias -> node name), set by `Component.flatten` for
         # the ports merged into each node; every name-based lookup accepts them.
         self.aliases: dict[Hashable, Hashable] = {}
 
     # ------------------------------------------------------------------ building
+    @property
+    def topology_version(self) -> int:
+        """Counter that increases each time a node or edge is added.
+
+        A layer built over this network records it and raises when it no longer matches:
+        layers keep construction-time edge indices and node counts, so they are not valid
+        for a network that has since gained a node or edge. Build the layers after the
+        network is complete; re-adding an existing node (to set attributes) does not count.
+        """
+        return self._version
+
     def add_node(self, name: Node, **attrs) -> None:
+        if name not in self.graph:
+            self._version += 1
         self.graph.add_node(name, **attrs)
         self._cache.clear()
 
@@ -72,6 +88,7 @@ class Network:
         key = self.graph.add_edge(source, target, kind=kind, **attrs)
         edge = (source, target, key)
         self._edges.append(edge)
+        self._version += 1
         self._cache.clear()
         return edge
 
@@ -82,6 +99,7 @@ class Network:
         other.graph = self.graph.copy()
         other._edges = list(self._edges)
         other.aliases = dict(self.aliases)
+        other._version = self._version
         other.add_node(name)
         for node in self.nodes:
             other.add_edge(node, name, kind=kind)

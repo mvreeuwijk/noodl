@@ -68,7 +68,10 @@ leak = PowerLaw(C=torch.tensor(0.01), n=torch.tensor(0.65), learnable=True)   # 
 A bare tensor held with `requires_grad=True` outside `named_parameters()` is a supported
 construction, and its graph is reachable through the law's own component calls — but it is
 invisible to the differentiable solve. Since `differentiable=False` returns detached tensors,
-*neither* path would carry a gradient to it.
+*neither* path would carry a gradient to it. The check covers every tensor a law (or any
+module inside it) holds: plain attributes, registered buffers, and tensors nested in lists,
+tuples, dicts and sets. Only a registered parameter is reachable, so a gradient-carrying tensor
+anywhere else is refused with a `ValueError`.
 
 **2. A drive must read every differentiable quantity from the `drivers` mapping**, never hold
 one as an instance attribute. See [Constitutive laws and drives](elements.md#the-rule-a-drive-must-obey)
