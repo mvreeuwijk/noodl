@@ -117,7 +117,8 @@ def _cat(parts: list[Tensor], like: Tensor) -> Tensor:
     if not parts:
         return torch.zeros(like.shape[:-1] + (0,), dtype=like.dtype, device=like.device)
     batch = broadcast_shapes(*(p.shape[:-1] for p in parts))
-    return torch.cat([p.expand(batch + p.shape[-1:]) for p in parts], dim=-1)
+    return torch.cat([p if p.shape[:-1] == batch else p.expand(batch + p.shape[-1:])
+                      for p in parts], dim=-1)
 
 
 class MnaSystem:
@@ -126,6 +127,7 @@ class MnaSystem:
 
     def __init__(self, layer) -> None:
         self.layer = layer
+        self._law_ctxs: tuple[LawContext | None, dict] = (None, {})
         self.w = 2 if layer.phasor else 1
         b = len(layer.cols)
         f_parts = [torch.arange(s, e) for el, (s, e) in
@@ -359,15 +361,25 @@ class MnaSystem:
         return dataclasses.replace(
             ctx, dp_prev=self.layer._difference(phi_prev), q_prev=q_prev)
 
-    @staticmethod
-    def _law_ctx(ctx: LawContext, s: int, e: int) -> LawContext:
-        """`ctx` with the step-start values restricted to one law's edges `[s, e)`."""
-        changes = {}
-        if ctx.dp_prev is not None:
-            changes["dp_prev"] = ctx.dp_prev[..., s:e]
-        if ctx.q_prev is not None:
-            changes["q_prev"] = ctx.q_prev[..., s:e]
-        return dataclasses.replace(ctx, **changes) if changes else ctx
+    def _law_ctx(self, ctx: LawContext, s: int, e: int) -> LawContext:
+        """`ctx` with the step-start values restricted to one law's edges `[s, e)`. The
+        restrictions of the last context seen are kept: a Newton solve calls this with the
+        same context on every iteration."""
+        if ctx.dp_prev is None and ctx.q_prev is None:
+            return ctx
+        cached_ctx, by_slice = self._law_ctxs
+        if cached_ctx is not ctx:
+            by_slice = {}
+            self._law_ctxs = (ctx, by_slice)
+        lctx = by_slice.get((s, e))
+        if lctx is None:
+            changes = {}
+            if ctx.dp_prev is not None:
+                changes["dp_prev"] = ctx.dp_prev[..., s:e]
+            if ctx.q_prev is not None:
+                changes["q_prev"] = ctx.q_prev[..., s:e]
+            lctx = by_slice[(s, e)] = dataclasses.replace(ctx, **changes)
+        return lctx
 
     def _owners(self) -> list:
         return [*self.layer._laws, *self.layer._node_sources]
