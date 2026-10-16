@@ -687,12 +687,16 @@ class CoupledModel:
         worst exactly where the primal is cheapest. Where the interface equations are LINEAR
         in the interface the adjoint is exact whatever the residual, which is why the
         linear-interface test fixtures return 1/3 and 2/3 to one ulp both at `iterate_rtol=1e-12`
-        and at 1e-3. Pass 1 runs on the
-        graph only to learn whether anything differentiable reaches the state -- a structural
-        question no inspection of `start` and `drivers` can answer, since a differentiable
-        parameter may be captured inside a model's own closure and never appear in either --
-        and its graph is dropped at once; if nothing does, no extra pass runs and a
-        forward-only simulation costs exactly the passes it always did.
+        and at 1e-3. Whether anything differentiable reaches the state is a question no
+        inspection of `start` and `drivers` can answer, since a differentiable parameter may
+        be captured inside a model's own closure and never appear in either; it is asked by
+        running a pass on the graph and dropping that graph at once. Pass 1 asks first; when
+        it finds nothing, the question is asked again at the certified interface, because a
+        closure may take a parameter-dependent branch only once the coupled values have
+        moved, and the answer that matters is the one at the point whose derivative is
+        returned. A grad-enabled run with nothing differentiable therefore pays one pass more
+        than its primal count (not counted in `passes`); one under `torch.no_grad()` pays
+        nothing.
 
         The INTERFACE is every link's forward value, one-way links included, because that is
         what a pass actually reads from the previous pass's output. A one-way value kept out
@@ -719,9 +723,10 @@ class CoupledModel:
         needs_adjoint = False
         while passes < self.iterate_max:
             passes += 1
-            # Pass 1 runs with grad ENABLED only to learn whether anything differentiable
+            # Pass 1 runs with grad ENABLED to learn early whether anything differentiable
             # reaches the state (its graph is dropped a few lines below); every later primal
-            # pass runs without a graph at all. The derivative comes from the ONE
+            # pass runs without a graph at all. A pass-1 "no" is asked again at the
+            # certified interface after the loop. The derivative comes from the ONE
             # differentiable pass after the loop, never from these.
             with torch.set_grad_enabled(passes == 1 and torch.is_grad_enabled()):
                 scratch = {tag: dict(d) for tag, d in drivers.items()}
@@ -774,6 +779,18 @@ class CoupledModel:
                 f"passes for instances {failing}; largest change per link {worst}, tolerance "
                 f"atol={self.iterate_atol} rtol={self.iterate_rtol}"
             )
+        if not needs_adjoint and torch.is_grad_enabled():
+            # Pass 1 saw nothing differentiable, but it ran from the START interface: a
+            # closure that takes a parameter-dependent branch only once the coupled values
+            # have moved would have the returned state silently detached. Ask again, once,
+            # under grad at the certified interface `values` -- the point whose derivative is
+            # returned -- and drop that pass's output and graph.
+            with torch.enable_grad():
+                probe, _, _ = self._one_pass(start, drivers, dt, values)
+                needs_adjoint = any(
+                    t.requires_grad for s in probe.values() for t in s.values()
+                )
+            del probe
         # `values` are the relaxed forward values the CERTIFIED pass -- the one whose output
         # was just judged converged -- was stepped with, so running `_one_pass` on them once
         # more reproduces that pass TO SOLVER ACCURACY. Not bitwise by construction:

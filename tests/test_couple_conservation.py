@@ -473,3 +473,49 @@ def test_the_adjoint_solves_a_batched_interface_per_instance():
     h = 1e-6
     fd = (run(torch.tensor(0.3 + h, dtype=F64)) - run(torch.tensor(0.3 - h, dtype=F64))) / (2 * h)
     assert grad.item() == pytest.approx(fd.item(), rel=1e-6)
+
+
+def _branching_coupled(theta):
+    """A (start 0) --two-way--> B (start 1), B's source reading its own coupled boundary
+    value: the constant 1 while `b.x_boundary <= 0.1`, `theta` above. Pass 1 sees the
+    boundary at A's start, 0, so it takes the constant branch and reads no parameter; the
+    fixed point a = (1 + theta)/3, b = 2 (1 + theta)/3 lies on the parameter branch."""
+    a = compartment("a", scheme="implicit", initial=0.0)
+    b_model, b_state, b_drivers = compartment("b", scheme="implicit", circulation=True,
+                                              initial=1.0)
+    plain = b_model.closures[0]
+
+    def closure(state, drivers):
+        zero = torch.zeros((), dtype=F64)
+        boundary = float(drivers["b.x_boundary"].detach().sum())
+        source = 1.0 + zero if boundary <= 0.1 else theta + zero
+        return {**plain(state, drivers), "b.sources": torch.stack([zero, source])}
+
+    b_model.closures[0] = closure
+    model, state, drivers = union(
+        {"A": a, "B": (b_model, b_state, b_drivers)},
+        [ValueLink("A", "a.x", 0, "B", "b.x_boundary", two_way=True)],
+        iterate_rtol=1e-12, iterate_atol=1e-14, iterate_max=200,
+    )
+    out = model.step(state, drivers, 1.0)
+    return out["A"]["a.x"].sum(), out["B"]["b.x"].sum()
+
+
+def test_gradient_does_not_depend_on_the_branch_the_first_pass_took():
+    """Whether an adjoint is attached is decided at the converged interface, not by the
+    branch a closure happened to take on pass 1."""
+    theta = torch.tensor(1.0, dtype=F64, requires_grad=True)
+    a, b = _branching_coupled(theta)
+    assert a.item() == pytest.approx(2.0 / 3.0, rel=1e-9)
+    assert b.item() == pytest.approx(4.0 / 3.0, rel=1e-9)
+    assert a.requires_grad and b.requires_grad
+    (da,) = torch.autograd.grad(a, (theta,), retain_graph=True)
+    (db,) = torch.autograd.grad(b, (theta,))
+    assert da.item() == pytest.approx(1.0 / 3.0, rel=1e-8)
+    assert db.item() == pytest.approx(2.0 / 3.0, rel=1e-8)
+    h = 1e-6
+    with torch.no_grad():
+        hi = _branching_coupled(torch.tensor(1.0 + h, dtype=F64))
+        lo = _branching_coupled(torch.tensor(1.0 - h, dtype=F64))
+    assert da.item() == pytest.approx(((hi[0] - lo[0]) / (2 * h)).item(), rel=1e-6)
+    assert db.item() == pytest.approx(((hi[1] - lo[1]) / (2 * h)).item(), rel=1e-6)

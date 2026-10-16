@@ -1346,12 +1346,17 @@ class Model:
         truncated iteration's. What remains of the pass count and of `iterate_tol` in
         it is only that the landing point is a fixed point to within `iterate_tol`: the error
         is O(primal residual) rather than the unrolled O(contraction^passes), and it is
-        exactly zero where the interface is linear. Backward memory is one pass. Pass 1 runs
-        on the graph only to learn whether anything differentiable reaches the state -- a
-        structural question no inspection of `state` and `drivers` can answer, since a
-        differentiable parameter may be captured inside an element, a drive or a closure and
-        never appear in either -- and its graph is dropped at once; if nothing does, no extra
-        pass runs and a forward-only simulation costs exactly the passes it always did. A run
+        exactly zero where the interface is linear. Backward memory is one pass. Whether
+        anything differentiable reaches the state is a question no inspection of `state` and
+        `drivers` can answer, since a differentiable parameter may be captured inside an
+        element, a drive or a closure and never appear in either; it is asked by running a
+        pass on the graph and dropping that graph at once. Pass 1 asks first; when it finds
+        nothing, the question is asked again at the certified fed state, because a closure
+        may take a parameter-dependent branch only once the state has moved away from the
+        step start, and the answer that matters is the one at the point whose derivative
+        is returned. So a grad-enabled run with nothing differentiable pays exactly one pass
+        more than the primal count (not counted in `passes`), and one under
+        `torch.no_grad()` pays nothing. A run
         that does NOT converge attaches no adjoint either: there is no fixed point to
         differentiate, and handing back the last pass's graph would be exactly the truncated
         derivative this replaced.
@@ -1442,10 +1447,12 @@ class Model:
         while passes < self.iterate_max:
             passes += 1
             certified_fed = fed
-            # Pass 1 runs with grad ENABLED only to learn whether anything differentiable
+            # Pass 1 runs with grad ENABLED to learn early whether anything differentiable
             # reaches the state -- its graph is dropped three lines later -- and every other
-            # primal pass runs with no graph at all. The returned derivative comes from the
-            # ONE differentiable pass after the loop, never from these.
+            # primal pass runs with no graph at all. A pass-1 "no" is not final: a closure
+            # may take another branch once the state moves, so it is asked again at the
+            # certified point after the loop. The returned derivative
+            # comes from the ONE differentiable pass after the loop, never from these.
             with torch.set_grad_enabled(passes == 1 and torch.is_grad_enabled()):
                 new, diag, _ = self._pass(
                     fed, drivers, dt, pass_kwargs, step_from=state, t=t,
@@ -1529,6 +1536,22 @@ class Model:
                     fed.update(anderson.mix(certified_fed, new, w,
                                             converged if prev is not None else None))
             prev = new
+        if (not needs_adjoint and torch.is_grad_enabled()
+                and (bool(converged.all()) or not raises_on_limit)):
+            # Pass 1 saw nothing differentiable, but it ran at the START state: a closure
+            # that takes a parameter-dependent branch only once the state has moved would
+            # have the returned state silently detached. Ask again, once, under grad at the
+            # state the certified (or, without convergence, the last) pass was fed -- the
+            # point whose derivative is returned -- and drop that pass's output and graph.
+            # A run about to raise for non-convergence anyway skips it.
+            with torch.enable_grad():
+                probe, _, _ = self._pass(
+                    certified_fed, drivers, dt, pass_kwargs, step_from=state, t=t,
+                    boundary_transfers=boundary_transfers, produced=produced,
+                    warm_start=warm_start,
+                )
+                needs_adjoint = any(probe[k].requires_grad for k in produced)
+            del probe
         if not bool(converged.all()):
             failing = (
                 (~converged).nonzero().flatten().tolist() if converged.dim() else "all"

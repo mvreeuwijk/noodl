@@ -1297,9 +1297,11 @@ def test_iterate_gradient_from_a_near_fixed_point_start_matches_central_differen
 
 
 def test_iterate_pays_for_the_adjoint_pass_only_when_a_gradient_is_wanted():
-    """`passes` counts PRIMAL passes. A run nothing differentiable reaches costs exactly
-    those and reports `adjoint is None`; a differentiable one costs ONE more -- the single
-    pass the implicit adjoint is attached to -- and never one per pass."""
+    """`passes` counts PRIMAL passes. A run under `no_grad` costs exactly those and reports
+    `adjoint is None`; a grad-enabled run nothing differentiable reaches costs ONE more --
+    the pass that confirms, at the certified point, that nothing does -- and so does a
+    differentiable one -- the single pass the implicit adjoint is attached to -- never one
+    per pass."""
     tight = {"atol": 1e-14, "rtol": 1e-14}
     _, model, state, drivers, el, _ = _build(
         learnable=True, closures=[_Feedback(2e3)], coupling="iterate",
@@ -1313,16 +1315,16 @@ def test_iterate_pays_for_the_adjoint_pass_only_when_a_gradient_is_wanted():
         return real(*args, **kwargs)
 
     model._pass = counting                      # shadows the bound method on this instance
-    for kwargs, expect in (
-        ({}, None),                             # under no_grad below: nothing to attach
-        ({"differentiable": False}, None),      # detached solves: nothing reaches the state
+    for kwargs, expect, extra in (
+        ({}, None, 0),                          # under no_grad below: nothing to attach
+        ({"differentiable": False}, None, 1),   # detached solves: nothing reaches the state
     ):
         calls.clear()
         diag: dict = {}
         with torch.no_grad() if not kwargs else torch.enable_grad():
             model.steady(state, drivers, diagnostics=diag, **kwargs, **tight)
         assert diag["adjoint"] is expect
-        assert len(calls) == diag["passes"]
+        assert len(calls) == diag["passes"] + extra
     calls.clear()
     diag = {}
     out = model.steady(state, drivers, diagnostics=diag, **tight)
@@ -1686,3 +1688,52 @@ def test_anderson_keeps_the_fixed_point_the_relaxed_iteration_is_attracted_to():
                    "toy.sources": torch.tensor([1.0, 0.0], dtype=F64)}
         out = model.steady(state, drivers, atol=1e-14, rtol=1e-14)
         assert abs(out["toy.phi"][0].item() - root) < 1e-10, acceleration
+
+
+class _BranchingSource:
+    """Closure on a one-node transport layer with unit removal and no flow: the source is
+    the constant 2 for x <= 1 and `theta + 0.1 x` above, so the steady state is
+    x = theta / 0.9 (10/3 at theta = 3, on the parameter branch) with dx/dtheta = 10/9."""
+
+    def __init__(self, theta):
+        self.theta = theta
+
+    def __call__(self, state, drivers):
+        x = state["c.x"].reshape(-1)[0]
+        zero = torch.zeros((), dtype=F64)
+        source = 2.0 + zero if float(x.detach()) <= 1.0 else self.theta + 0.1 * x
+        return {"c.sources": torch.stack([zero, source]), "c.q": torch.zeros(1, dtype=F64)}
+
+
+def _branching_steady(theta, x0):
+    net = Network(dtype=F64)
+    net.add_node("b")
+    net.add_node("a")
+    net.add_edge("a", "b", kind="flow")
+    layer = TransportLayer(net, "c", capacity=torch.tensor([1.0], dtype=F64),
+                           flow_kind="flow", boundary=["b"],
+                           removal=torch.tensor([1.0], dtype=F64))
+    model = Model(net, {"c": layer}, closures=[_BranchingSource(theta)], coupling="iterate",
+                  iterate_tol={"c": 1e-13}, iterate_max=200)
+    drivers = {"c.x_boundary": torch.zeros(1, dtype=F64),
+               "c.sources": torch.zeros(2, dtype=F64)}
+    return model.steady({"c.x": torch.tensor([x0], dtype=F64)}, drivers)["c.x"].sum()
+
+
+@pytest.mark.parametrize("x0", [0.0, 2.0])
+def test_iterate_gradient_does_not_depend_on_the_branch_the_first_pass_took(x0):
+    """Whether the returned state carries a gradient is decided at the converged point, not
+    by the branch a closure took on pass 1: from x0 = 0 the first pass takes the constant
+    branch and reads no parameter at all, yet the fixed point lies on the parameter branch.
+    Both initial guesses must return the same value and the same derivative."""
+    theta = torch.tensor(3.0, dtype=F64, requires_grad=True)
+    x = _branching_steady(theta, x0)
+    assert x.item() == pytest.approx(10.0 / 3.0, rel=1e-10)
+    assert x.requires_grad
+    (g,) = torch.autograd.grad(x, (theta,))
+    assert g.item() == pytest.approx(10.0 / 9.0, rel=1e-8)
+    h = 1e-6
+    with torch.no_grad():
+        fd = (_branching_steady(torch.tensor(3.0 + h, dtype=F64), x0)
+              - _branching_steady(torch.tensor(3.0 - h, dtype=F64), x0)) / (2 * h)
+    assert g.item() == pytest.approx(fd.item(), rel=1e-6)
