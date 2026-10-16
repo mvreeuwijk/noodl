@@ -42,7 +42,7 @@ from noodl.apps.water.tanks import Control, TankLevels, TankStorageControls
 from noodl.elements.duct import Duct
 from noodl.elements.fixed import FixedFlow
 from noodl.layers.kirchhoff import KirchhoffLayer
-from noodl.layers.transport import TransportLayer
+from noodl.layers.transport import TransportLayer, UndefinedSteadyState
 from noodl.model import Model
 from noodl.refs import drivers_from, state_from
 from noodl.refs import initial_drivers as refs_initial_drivers
@@ -968,7 +968,20 @@ def water_steady(model: Model, state: State, drivers: Drivers, **solve_kwargs) -
     solve_kwargs.setdefault("atol", 1e-11)
     solve_kwargs.setdefault("rtol", 1e-11)
     solve_kwargs.setdefault("max_iter", 200)
-    result = model.steady(state, drivers, **solve_kwargs)
+    try:
+        result = model.steady(state, drivers, **solve_kwargs)
+    except UndefinedSteadyState as exc:
+        if exc.layer != "quality":
+            raise
+        raise UndefinedSteadyState(
+            f"water_steady: the steady quality of node(s) {exc.nodes} is undefined: they "
+            f"are STAGNANT (no inflow, no outflow, no decay; e.g. a dead end whose delivered "
+            f"demand is zero because the pressure is below the minimum, or whose demand is "
+            f"zero) so the tracer has nowhere to go. Give the water quality a bulk decay "
+            f"(quality > 0, which reads such a node as 0), or step the quality in time "
+            f"from an initial concentration. Underlying error: {exc}",
+            layer=exc.layer, nodes=exc.nodes,
+        ) from exc
     _refuse_pump_overflow(model, result)
     return result
 
