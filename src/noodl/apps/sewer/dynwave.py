@@ -2318,7 +2318,9 @@ class DynamicWaveHydraulics:
         out.update({"water.flood_excess": excess, "water.flooded": flooded.to(F64),
                     "sewer.overflow": overflow})
         if self.quality_layer is not None:
-            out.update(self._quality_volume(state, out["sewer.net_inflow"], overflow, dt))
+            withdrawal = torch.clamp(-inflow[..., self.junction_idx], min=0.0)
+            out.update(self._quality_volume(state, out["sewer.net_inflow"], overflow, dt,
+                                            withdrawal))
         return out
 
     def _hydraulic_radius_depth(self, depth_ft: Tensor) -> dict[str, Tensor]:
@@ -2392,17 +2394,23 @@ class DynamicWaveHydraulics:
         return torch.where(self.is_storage, stored, plain)
 
     def _quality_volume(self, state: Mapping, net_inflow: Tensor, overflow: Tensor,
-                        dt: float) -> dict[str, Tensor]:
+                        dt: float, withdrawal: Tensor | None = None) -> dict[str, Tensor]:
         """The transport control volumes at the end of the step and the flooded fraction
         (class docstring, "Quality"): ``V_end = max(V_start + dt (N - overflow),
         CAPACITY_FLOOR)`` from the pinned step-start ``"sewer.quality_volume"``, and
         ``dt overflow / V_start`` capped at 1. The cap binds only where one step's overflow
         exceeds the junction's whole step-start contents: all of them leave, and the excess
         overflow is taken from the step's inflow without its mass, so the water balance (and
-        a uniform concentration) holds there only to that excess."""
+        a uniform concentration) holds there only to that excess.
+
+        `withdrawal` (m3/s, >= 0, per junction: a negative lateral inflow) is already in
+        `net_inflow`; it leaves like the overflow, at the junction's own concentration, so
+        it joins the lost fraction (``dt (overflow + withdrawal) / V_start``) rather than
+        being a source at the external concentration."""
         start = state["sewer.quality_volume"]
         end = torch.clamp(start + dt * (net_inflow - overflow), min=CAPACITY_FLOOR)
-        lost = torch.clamp(dt * overflow / start, max=1.0)
+        leaving = overflow if withdrawal is None else overflow + withdrawal
+        lost = torch.clamp(dt * leaving / start, max=1.0)
         return {"sewer.quality_volume": end, f"{self.quality_layer}.capacity": end,
                 f"{self.quality_layer}.overflow_loss": lost}
 

@@ -1046,7 +1046,15 @@ def build_model(
         )
         drivers["air.phi_boundary"] = torch.zeros(1, dtype=F64)
 
+    sulfide_col = None
     if quality:
+        if not species or len(set(species)) != len(species):
+            raise ValueError(f"build_model: species must be distinct names, got {species!r}")
+        if "sulfide" in species and "bod" not in species:
+            raise ValueError(
+                f"build_model: species 'sulfide' needs 'bod' (Pomeroy-Parkhurst generation "
+                f"reads the BOD), got {species!r}")
+        sulfide_col = species.index("sulfide") if "sulfide" in species else None
         water_cap = torch.ones(len(net.manholes), dtype=F64)
         layers["water_quality"] = TransportLayer(
             graph, "water_quality", capacity=water_cap, flow_kind="pipe",
@@ -1080,7 +1088,7 @@ def build_model(
         closures.append(
             LateralLoads(graph.n, columns=columns, n_species=len(species))
         )
-        if air:
+        if air and sulfide_col is not None:
             # `active_interior` calls `Network.endpoints` on every kind named, which raises
             # if the network carries no edge of that kind at all -- not merely an empty
             # interior. `fan` edges exist only when `fans` is non-empty, so the kind tuple
@@ -1114,14 +1122,21 @@ def build_model(
                     f"reads 'air_quality.x' as a per-manhole array and assumes they agree"
                 )
             drivers["air_quality.x_boundary"] = torch.zeros(len(air_boundary), dtype=F64)
-            closures.append(H2STransfer(graph.n, manhole_idx, out_pipe=out_pipe))
+            closures.append(H2STransfer(graph.n, manhole_idx, sulfide=sulfide_col,
+                                        out_pipe=out_pipe))
 
+    # Chemistry is attached by species NAME, never by position: "bod" decays and, with
+    # "sulfide" also present, generates sulfide; any other name is a passive tracer. A
+    # selection without "bod" has no reaction (sulfide alone is refused above).
     reactions = (
         [(
             "water_quality",
-            SulfideGeneration(out_pipe=out_pipe, manhole_idx=manhole_idx, n_nodes=graph.n),
+            SulfideGeneration(
+                bod=species.index("bod"), sulfide=sulfide_col, out_pipe=out_pipe,
+                manhole_idx=manhole_idx, n_nodes=graph.n,
+            ),
         )]
-        if quality else []
+        if quality and "bod" in species else []
     )
     # `reaction_order="before_transport"`: SWMM's `qualrout.c::findLinkQual` reacts a
     # conduit's step-start concentration (`getReactedQual`) and then mixes it with the
@@ -1133,7 +1148,7 @@ def build_model(
         graph, layers, closures=closures, reactions=reactions, coupling=coupling,
         reaction_order="before_transport",
         iterate_tol=(
-            {"water_quality": 1e-12, "air_quality": 1e-12}
+            {name: 1e-12 for name in ("water_quality", "air_quality") if name in layers}
             if coupling == "iterate" and quality
             else None
         ),

@@ -153,7 +153,10 @@ class LateralLoads:
 
     `bod_in`/`sulfide_in` (kg/m3, full-node) times `inflow` (m3/s, full-node)
     gives the load `s_j C_in,j` in kg/s per species (the water_quality source term),
-    written to `"<water_layer>.sources"` in FULL node order.
+    written to `"<water_layer>.sources"` in FULL node order. Only a POSITIVE `inflow` loads:
+    a negative one (a dynamic-wave withdrawal) carries no external concentration, it removes
+    mass at the node's own concentration, which the hydraulics closure applies as an outflow
+    loss fraction (`DynamicWaveHydraulics._quality_volume`).
 
     Registered BEFORE `H2STransfer` in `build_model`'s closure list: `H2STransfer`
     reads `drivers.get("<water_layer>.sources")` and ADDS its own transfer term to it
@@ -198,7 +201,11 @@ class LateralLoads:
                     f"LateralLoads: driver {key!r} must be full-node, trailing shape "
                     f"({self.n_nodes},), got {tuple(c_in.shape)}"
                 )
-            parts.append(inflow * c_in)
+            # a withdrawal (negative inflow) is NOT loaded at the external concentration: it
+            # leaves at the node's own concentration, which the dynamic-wave hydraulics
+            # takes out of the layer as a loss fraction (`DynamicWaveHydraulics`,
+            # "Quality"), so only the inflow side is a source here
+            parts.append(torch.clamp(inflow, min=0.0) * c_in)
         sources = parts[0] if self.n_species == 1 else torch.stack(parts, dim=-1)
         return {f"{self.water_layer}.sources": sources}
 

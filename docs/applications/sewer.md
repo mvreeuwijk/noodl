@@ -138,6 +138,13 @@ model, state, drivers = build_model(
 )
 ```
 
+`species` are matched by name, never by position, so their order does not matter: `"bod"`
+decays and, when `"sulfide"` is also present, sulfide is generated from it; any other name is
+a passive tracer without reactions. `"sulfide"` without `"bod"` and repeated names are
+refused. The air-quality layer and the water-to-air transfer exist only when `"sulfide"` is
+among the species (the air-flow layer is built by `air=True` regardless); a selection
+without `"bod"` has no reaction at all.
+
 `air=False` gives the water-only model the SWMM parity rows use. `fans` names manholes carrying
 a prescribed extraction (m³/s, positive out).
 
@@ -1344,7 +1351,9 @@ holds none, as in SWMM, which gives a non-conduit link its upstream node's quali
 its concentrations follow the flows of each pass, which costs 1-5 % more passes.
 
 Each species `s` enters with the lateral inflow at the concentration of the driver
-`"<s>_in"` (kg/m³, one per node). `"bod"` decays and `"sulfide"` is generated
+`"<s>_in"` (kg/m³, one per node); only a positive inflow loads. A negative lateral inflow (a
+withdrawal) takes water and mass out at the junction's own concentration, whatever `"<s>_in"`
+is, so a uniform tracer stays uniform. `"bod"` decays and `"sulfide"` is generated
 (Pomeroy–Parkhurst, see [Quality](#quality)); a species of any other name is a conservative
 tracer. Sulfide needs `"bod"`, and it needs a single outgoing conduit at every junction,
 whose hydraulic radius `sewer.R_h`, speed `sewer.v` and mean depth `sewer.d_m` (exact circle

@@ -2570,6 +2570,34 @@ def test_a_uniform_concentration_stays_uniform_while_the_tree_fills(tmp_path):
                                    rtol=1e-8, atol=0.0)
 
 
+def test_a_withdrawal_removes_the_tracer_at_the_local_concentration(tmp_path):
+    """A negative lateral inflow (withdrawal) is an outflow: it takes water AND mass at the
+    junction's own concentration, whatever the external concentration driver says (here 0,
+    the default). A uniform tracer therefore stays uniform, and the stored amount changes
+    by the loads less the outfall flux less what the withdrawal carries off."""
+    model, drivers, states = _uniform_run(_tree(tmp_path, scale=0.5), 24)
+    state = states[-1]                                    # wet, uniform at 0.1
+    j1 = model.net.nodes.index("J1")
+    inflow = drivers["inflow"].clone()
+    inflow[j1] = -0.5 * float(inflow[j1])
+    tracer_in = torch.full((model.net.n,), 0.1, dtype=F64)
+    tracer_in[j1] = 0.0                                   # the external value must not matter
+    drivers = dict(drivers, inflow=inflow, tracer_in=tracer_in)
+    dt = model.routing_step
+    j1_col = list(model.dynamic_wave.junction_names).index("J1")
+    for _ in range(8):
+        before = state
+        state, _ = simulate_dynamic_wave(model, state, drivers, steps=1)
+        torch.testing.assert_close(state["water_quality.x"],
+                                   torch.full_like(state["water_quality.x"], 0.1),
+                                   rtol=1e-8, atol=0.0)
+        load = 0.1 * float(inflow.clamp(min=0.0).sum())
+        taken = -dt * float(inflow[j1]) * float(state["water_quality.x"][j1_col])
+        stored = float(_amount(state).sum() - _amount(before).sum())
+        assert stored == pytest.approx(
+            dt * (load - _outfall_flux(model, state)) - taken, rel=1e-6, abs=1e-12)
+
+
 def test_a_flooded_junction_loses_its_contents_with_the_overflow():
     """The flooding tree (J2 held at y_max from step 21, its overflow lost, no ponding): a
     uniform concentration stays uniform through the flood, and the tracer amount changes by
