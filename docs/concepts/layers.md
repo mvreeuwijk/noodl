@@ -61,7 +61,13 @@ phi, q = layer.solve(phi_boundary, drivers, sources=sources, differentiable=True
 
 `quantity` and `unit` are metadata only — nothing numerical reads them. They exist so that a
 model composing several Kirchhoff layers over one network can tell a pressure layer from a
-temperature one without matching on names.
+temperature one without matching on names. They are still checked for consistency: every key
+of a layer is a `Field` carrying its `unit` (a transport layer's `unit`, `source_unit`,
+`capacity_unit` and `flow_unit` give the units of its state, sources, capacity and flows), and
+`Model.check()` warns (`unit-mismatch`) when a closure declares a different unit for a key it
+reads (`input_specs`) or writes (`output_units`), and notes (`unit-undeclared`) a field with
+no unit. Units are compared as strings after trivial respelling (`m3` and `m^3`, `1` and `-`);
+nothing is converted. See [The closure contract](../development/extending.md#the-closure-contract).
 
 Useful accessors: `flows(phi, drivers)` evaluates the branch law; `flows_of_kind(q, kinds)`
 extracts one kind's block from the concatenated flow vector; `residual(...)` and `jacobian(...)`
@@ -490,8 +496,9 @@ at construction by name:
 
 `model.refs.ownership()` lists, for every key, who writes it and who reads it (layers,
 closures by their declarations, the caller); `model.check` reports closures that overwrite
-each other's declared outputs (`overwritten-output`), declare nothing (`undeclared-closure`)
-or return keys they did not declare when probed (`declared-vs-probed`).
+each other's declared outputs (`overwritten-output`), declare nothing (`undeclared-closure`),
+return keys they did not declare when probed (`declared-vs-probed`), or declare a unit that
+differs from the field's (`unit-mismatch`, with `unit-undeclared` for a field with no unit).
 
 ### The two couplings, and the trap in the default
 

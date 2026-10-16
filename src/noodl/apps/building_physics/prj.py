@@ -2106,6 +2106,9 @@ class PrescribedTemperatureDensity:
         self.capacity_key = f"{layer}.capacity"
         self.outputs = ("rho", "rho_amb") + (
             (self.capacity_key,) if capacity_nodes is not None else ())
+        self.output_units = {"rho": "kg/m3", "rho_amb": "kg/m3"}
+        if capacity_nodes is not None:
+            self.output_units[self.capacity_key] = "kg"
 
     @property
     def input_specs(self) -> dict[str, dict]:

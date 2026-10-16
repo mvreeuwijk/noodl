@@ -315,6 +315,7 @@ class OccupantGeneration:
         self.inputs = tuple(k for o in self.occupants
                             for k in (o.presence_key, o.multiplier_key)) + (self.key,)
         self.outputs = (self.key,)
+        self.output_units = {self.key: layer.source_unit}
 
     @staticmethod
     def _species(layer, species) -> list[str]:

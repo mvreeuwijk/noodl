@@ -336,7 +336,7 @@ def test_closure_attributes_table_is_complete():
     assert len(names) == len(set(names))
     assert set(names) == {
         "integrates", "state_keys", "key_labels", "inputs", "outputs", "input_specs",
-        "edge_kinds", "requires_coupling", "reads_flows_of", "species_columns"}
+        "output_units", "edge_kinds", "requires_coupling", "reads_flows_of", "species_columns"}
     assert all(a.meaning and a.consumer and a.type for a in CLOSURE_ATTRIBUTES)
 
 

@@ -186,6 +186,7 @@ class _DensityClosure:
     # Declared driver keys (`noodl.validation`): read optionally, and written.
     inputs = ("P_ref",)
     outputs = ("rho", "rho_amb")
+    output_units = {"rho": "kg/m3", "rho_amb": "kg/m3"}
 
     def __init__(self, thermal: TransportLayer, *, ambient_index: int) -> None:
         self.thermal = thermal
