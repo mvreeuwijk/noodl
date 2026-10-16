@@ -144,6 +144,52 @@ applications, as above — a new `ConstitutiveLaw` and a new builder composing e
 solver or layer class is a framework change, not an extension: it needs the same design,
 testing and review as any other change under `src/noodl/layers` or `src/noodl/solvers`.
 
+## The closure contract
+
+A closure is any callable that adds or replaces drivers. `noodl.contracts` is where the
+contract is written down; `Model` reads every closure through it, once, at construction.
+
+- **Algebraic closure**: `closure(state, drivers) -> {key: tensor}`. It sees the state and the
+  drivers and returns driver entries. It never writes a layer's own state key.
+- **Integrating closure**: declares `integrates = True` and is called
+  `closure(state, drivers, ctx)` with a `StepContext` (`ctx.dt`, `ctx.t`). `ctx` is `None` for a
+  query (`residuals`, `current_flows`): evaluate the algebraic outputs without advancing. Under
+  `steady()` (`ctx.dt is None`) an integrating closure is refused by name.
+- **State it carries**: `state_keys = ("tank.h",)` with `integrates` declared (`True` if the
+  closure advances it, `False` if something else does).
+
+```py
+class Tank:
+    integrates = True
+    state_keys = ("tank.h",)
+    inputs = ("tank.h", "inflow")
+    outputs = ("outflow",)
+
+    def __call__(self, state, drivers, ctx):
+        ...
+```
+
+Everything else a closure may say about itself is one of the optional attributes in
+`noodl.contracts.CLOSURE_ATTRIBUTES` (`integrates`, `state_keys`, `key_labels`, `inputs`,
+`outputs`, `input_specs`, `edge_kinds`, `requires_coupling`, `reads_flows_of`,
+`species_columns`), each with its meaning and its consumer. Declare them as tuples of names:
+a bare string (`outputs = "rho_amb"`) or a non-bool `integrates` is refused with a
+`TypeError`. `closure_spec` is the only code that reads these attributes; do not `getattr` them
+elsewhere.
+
+**Species by column.** A closure or reaction that addresses species by column index declares
+`species_columns = {"layer": {"bod": 0, "sulfide": 1}}`; `check_species_columns` verifies it
+against the layer's `species_names`, so a default column order over a layer that orders its
+species differently is refused at construction rather than mixing the species up. Build the
+columns with `noodl.layout.species_columns(layer.species_names, ["bod", "sulfide"],
+where="...")`.
+
+**Layout.** Per-node tensors are `(..., n)` or `(..., n, K)`; the batch axes come first. Do not
+re-derive that rule: `noodl.layout` has `as_stacked` (stacked `(..., n, K)` first, reduced
+`(..., n)` also for one species), `broadcast_batch` (batch axes of several tensors, expanded
+as views), `per_instance` (a value per instance that cannot broadcast against a node axis)
+and `write_at`.
+
 ## Checking it
 
 The test itself does two things with `build_two_zone`, both cheap sanity checks a new law and
