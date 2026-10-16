@@ -7,7 +7,7 @@ import pytest
 import torch
 
 from noodl.elements import Conductance
-from noodl.elements.base import ConstitutiveLaw
+from noodl.elements.base import ConstitutiveLaw, ImplicitLaw
 from noodl.layers.kirchhoff import KirchhoffLayer
 from noodl.topology import Network
 
@@ -260,6 +260,96 @@ def test_threaded_tensors_are_not_refused():
     assert torch.allclose(g_grad, torch.tensor([-0.25], dtype=F64))
     assert torch.allclose(s_grad, torch.tensor([-0.5], dtype=F64))
     assert torch.allclose(pb_grad, torch.tensor([1.0], dtype=F64))
+
+
+class _BranchLaw(ConstitutiveLaw):
+    """Unit slope for |dp| <= 1, `sign(dp) (1 + g (|dp| - 1))` beyond: `g` is read only on a
+    branch the starting guess dp = 0 does not reach. `g` is held as `hold` says: a plain
+    attribute, a closure, or a registered parameter."""
+
+    def __init__(self, g, hold):
+        super().__init__("conduction")
+        if hold == "attribute":
+            self.g = g
+            self._g = lambda: self.g
+        elif hold == "closure":
+            self._g = lambda: g
+        else:
+            self.g = torch.nn.Parameter(g)
+            self._g = lambda: self.g
+
+    def flow(self, dp, drivers=None):
+        if bool((dp.abs() > 1).any()):
+            return dp.sign() * (1 + self._g() * (dp.abs() - 1))
+        return dp
+
+    def dflow(self, dp, drivers=None):
+        return torch.where(dp.abs() > 1, self._g().detach(), torch.ones_like(dp))
+
+    def linear_init(self, drivers=None):
+        g = self._g().detach()
+        return torch.zeros_like(g), torch.ones_like(g)
+
+
+def _solve_from_zero(law):
+    layer = KirchhoffLayer(_net(), "heat", [law], boundary=["a"])
+    return layer.solve(
+        torch.zeros(1, dtype=F64),
+        sources=torch.tensor([0.0, 3.0], dtype=F64),
+        phi0=torch.zeros(1, dtype=F64),
+    )
+
+
+def test_a_plain_gradient_attribute_is_refused_before_solving():
+    """The review's reproduction: an unregistered `g` gave dq/dg = -1 (truth 0)."""
+    g = torch.tensor([2.0], dtype=F64, requires_grad=True)
+    with pytest.raises(ValueError, match=r"tensor attribute 'g'.*not a registered nn.Parameter"):
+        _solve_from_zero(_BranchLaw(g, "attribute"))
+
+
+def test_a_closure_read_only_at_the_root_is_refused():
+    """The starting guess never reaches `g`; the root does, so the solve is refused there."""
+    g = torch.tensor([2.0], dtype=F64, requires_grad=True)
+    with pytest.raises(ValueError, match="residual depends on a tensor"):
+        _solve_from_zero(_BranchLaw(g, "closure"))
+
+
+def test_a_registered_parameter_read_only_at_the_root_is_threaded():
+    """No false positive, and the gradient is right: the source fixes the flow (dq/dg = 0)
+    and phi_b = 1 + (3 - 1) / g (dphi_b/dg = -2 / g**2 = -0.5)."""
+    law = _BranchLaw(torch.tensor([2.0], dtype=F64), "parameter")
+    phi, q = _solve_from_zero(law)
+    torch.testing.assert_close(phi, torch.tensor([0.0, 2.0], dtype=F64))
+    dq, = torch.autograd.grad(q.sum(), law.g, retain_graph=True)
+    dphi, = torch.autograd.grad(phi[1], law.g)
+    torch.testing.assert_close(dq, torch.tensor([0.0], dtype=F64), rtol=0, atol=1e-12)
+    torch.testing.assert_close(dphi, torch.tensor([-0.5], dtype=F64))
+
+
+class _ImplicitBranchLaw(ImplicitLaw):
+    """`_BranchLaw` as an implicit law, so the layer is solved by MNA: q = f(dp)."""
+
+    def __init__(self, g):
+        super().__init__("conduction")
+        self._g = lambda: g
+
+    def residual(self, dp, q, drivers, ctx):
+        f = dp
+        if bool((dp.abs() > 1).any()):
+            f = dp.sign() * (1 + self._g() * (dp.abs() - 1))
+        return q - f
+
+
+def test_a_closure_read_only_at_the_root_is_refused_on_the_mna_path():
+    g = torch.tensor([2.0], dtype=F64, requires_grad=True)
+    layer = KirchhoffLayer(_net(), "heat", [_ImplicitBranchLaw(g)], boundary=["a"])
+    assert layer.mna
+    sources = torch.tensor([0.0, 3.0], dtype=F64)
+    # the primal solve reaches the branch that reads g
+    phi, _ = layer.solve(torch.zeros(1, dtype=F64), sources=sources, differentiable=False)
+    assert float(phi[1].abs()) > 1
+    with pytest.raises(ValueError, match="residual depends on a tensor"):
+        layer.solve(torch.zeros(1, dtype=F64), sources=sources)
 
 
 # ------------------------------------------------------------------ R08: old pickles

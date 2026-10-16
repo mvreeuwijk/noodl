@@ -112,7 +112,8 @@ class _DiagonalShifted:
 
 #: Containers longer than this are not entered by `_held_tensors`: a long list or dict on a
 #: law is a numeric table, not a parameter holder, and walking it item by item would cost
-#: more than the solve (the exact check, `KirchhoffLayer._require_threaded`, needs no walk).
+#: more than the solve (`KirchhoffLayer._require_threaded`, which evaluates the residual,
+#: needs no walk).
 _SCAN_MAX_ITEMS = 1024
 _ATOMS = (str, bytes, int, float, complex, bool, type(None))
 _OPAQUE = (type, types.ModuleType, types.FunctionType, types.BuiltinFunctionType,
@@ -1053,26 +1054,29 @@ class KirchhoffLayer(TopologyGuard):
     def _require_threaded(self, residual, params) -> None:
         """Refuse a differentiable solve whose residual depends on a tensor that is not threaded.
 
-        `residual(*params)` is the residual at the starting point as a function of exactly
-        the tensors handed to `Function.apply`. Evaluated once, under `enable_grad`, with
-        every one of them detached: if the result still requires grad, some tensor that
-        requires grad reaches the residual by another route (held by a law, a node source or
-        a drive in an attribute, a plain object, a module in a plain list, or captured by a
-        closure), and the implicit adjoint would return a gradient for it that is silently
-        wrong or absent. This is exact where an attribute scan is not, and costs one
-        residual evaluation. The Jacobian operator is not checked separately: it is the
-        autograd derivative of the same laws' flows (`FunctionalLaws.dflows`), so it reads
-        nothing the residual does not.
+        `residual(*params)` is the residual at one point (the starting guess before the
+        solve, the converged root after it) as a function of exactly the tensors handed to
+        `Function.apply`. It is evaluated once, under `enable_grad`, with every one of them
+        detached: if the result still requires grad, some tensor that requires grad reaches
+        the residual by another route (held by a law, a node source or a drive in a plain
+        object, a module in a plain list, or captured by a closure), and the implicit
+        adjoint would return a gradient for it that is silently wrong or absent.
 
-        The error names the attribute when `_check_no_unreachable_differentiable_tensors`
-        finds it, and describes the layer otherwise (a closure capture).
+        What this establishes is structural and holds AT THAT POINT only: a law that reads
+        an un-threaded tensor on a branch inactive there is not seen. The solve therefore
+        runs it at the root too, which is the point the adjoint linearises at (its residual
+        VJP and Jacobian operator are both evaluated there); the Jacobian operator is not
+        checked separately, being the autograd derivative of the same laws' flows
+        (`FunctionalLaws.dflows`). Tensors held as attributes, buffers or in containers are
+        refused before solving by `_check_no_unreachable_differentiable_tensors`, which
+        also names them; this check catches the rest (a closure capture) and describes the
+        layer.
         """
         detached = [p.detach() if isinstance(p, torch.Tensor) else p for p in params]
         with torch.enable_grad():
             r = residual(*detached)
         if not (isinstance(r, torch.Tensor) and r.requires_grad):
             return
-        self._check_no_unreachable_differentiable_tensors()
         raise ValueError(
             f"KirchhoffLayer {self.name!r}: the residual depends on a tensor with "
             f"requires_grad=True that is not a registered nn.Parameter of a law or node "
@@ -1244,6 +1248,10 @@ class KirchhoffLayer(TopologyGuard):
                 phi0, dq0, node_slopes0, phi_boundary, drivers, sources, diagnostics,
                 newton_kwargs,
             )
+        # A tensor held where the solve does not thread it is refused before solving, by
+        # name; one reached only through a closure, by evaluating the residual at the
+        # starting guess here and at the root in `_solve_implicit`.
+        self._check_no_unreachable_differentiable_tensors()
         fn = FunctionalLaws(self, drivers, sources, phi_boundary)
         self._require_threaded(
             lambda *params: fn.residual_fn(phi0, *params), fn.all_params
@@ -1429,6 +1437,10 @@ class KirchhoffLayer(TopologyGuard):
                 diagnostics=diagnostics,
                 **newton_kwargs,
             )
+        # The adjoint linearises at the root, so the threading check must hold there: a law
+        # may read an un-threaded tensor only on a branch the starting guess did not reach.
+        root = x.detach()
+        self._require_threaded(lambda *params: residual_fn(root, *params), all_params)
         if diagnostics is not None:
             diagnostics["method"] = newton_kwargs["method"]
         phi = self.assemble(x, phi_boundary)

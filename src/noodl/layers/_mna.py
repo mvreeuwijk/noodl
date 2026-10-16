@@ -683,6 +683,7 @@ class MnaSystem:
                     diagnostics["residual_norm"] = result.residual_norm
                 return self._output(result.x, phi_boundary, drivers, ctx)
 
+        layer._check_no_unreachable_differentiable_tensors()
         # Threaded through `Function.apply` exactly as on the classic path: every law's and
         # node source's own parameters (substituted back in with `functional_call`), every
         # driver, the sources (zero-filled when absent) and the boundary potentials; on a
@@ -731,11 +732,13 @@ class MnaSystem:
             call, drv, src, pb, step = _rebuild(params)
             return remember(self.residual(x, pb, drv, src, step, call))
 
-        def residual_at_start(*params):
-            call, drv, src, pb, step = _rebuild(params)
-            return self.residual(x0, pb, drv, src, step, call)
+        def residual_at(point):
+            def at(*params):
+                call, drv, src, pb, step = _rebuild(params)
+                return self.residual(point, pb, drv, src, step, call)
+            return at
 
-        layer._require_threaded(residual_at_start, all_params)
+        layer._require_threaded(residual_at(x0), all_params)
 
         def operator_fn(x, *params):
             call, drv, src, pb, step = _rebuild(params)
@@ -749,6 +752,8 @@ class MnaSystem:
         except RuntimeError as exc:
             diagnose(exc)
             raise
+        # checked again at the root, where the adjoint linearises (see `_require_threaded`)
+        layer._require_threaded(residual_at(x.detach()), all_params)
         if diagnostics is not None:
             diagnostics["method"] = requested
         return self._output(x, phi_boundary, drivers, ctx)

@@ -55,18 +55,30 @@ decision itself is still made on detached copies and never enters the graph.
 
 ## The contract
 
-For `differentiable=True` to be *safe*, two rules must hold. Both are checked before any solve
-is attempted, and a violation raises a `ValueError` — naming the offending law or drive and the
-attribute where it can — rather than silently returning a wrong or absent gradient.
+For `differentiable=True` to be *safe*, two rules must hold. A violation raises a `ValueError`
+— naming the offending law or drive and the attribute where it can — rather than silently
+returning a wrong or absent gradient.
 
-The check is exact. The differentiable solve threads a fixed set of tensors through
-`Function.apply`: each law's and node source's registered parameters, the driver values,
-`sources` and the boundary potentials. Before solving, the layer evaluates its residual once at
-the starting point with every one of those tensors detached; if the result still requires
-grad, some other tensor that requires grad reaches the residual, and the solve is refused. It
-costs one residual evaluation per differentiable solve, and it catches what no attribute scan
-can, such as a tensor captured by a closure. (The Jacobian is the autograd derivative of the
-same flows, so it reads nothing the residual does not.)
+The differentiable solve threads a fixed set of tensors through `Function.apply`: each law's and
+node source's registered parameters, the driver values, `sources` and the boundary potentials
+(and, on a transient step, the step-start state). Any other tensor that requires grad and reaches
+the residual is invisible to the implicit adjoint. Two checks look for one:
+
+- **Before solving, by attribute.** Every tensor a law, node source or drive holds — plain
+  attributes, registered buffers, and tensors nested in lists, tuples, dicts, sets and plain
+  objects — is scanned, and one that requires grad without being threaded is refused by name.
+- **At the starting guess and again at the root, by evaluation.** The layer evaluates its
+  residual with every threaded tensor detached; if the result still requires grad, some other
+  tensor reaches it (a tensor captured by a closure, which no scan can see), and the solve is
+  refused. The root is the point the adjoint linearises at, so a law that reads such a tensor
+  only on a branch the solve reaches after leaving the starting guess is caught there. Each
+  evaluation costs one residual evaluation.
+
+What the evaluation establishes is structural and pointwise: the residual's autograd graph at
+those two points reaches no un-threaded tensor. It does not prove that no such tensor could be
+read elsewhere in the state space, and it does not inspect a tensor that requires grad but is
+not used at the root; neither affects the gradient at the returned solution. (The Jacobian is
+the autograd derivative of the same flows, so it reads nothing the residual does not.)
 
 **1. A law's differentiable state must be a registered parameter.**
 
@@ -80,8 +92,9 @@ invisible to the differentiable solve. Since `differentiable=False` returns deta
 *neither* path would carry a gradient to it. Only a registered parameter is reachable, so a
 gradient-carrying tensor anywhere else — a plain attribute, a registered buffer, a tensor in a
 list, dict or plain object, the parameter of a module kept in a plain Python list — is refused.
-To name it, the error scans what the law holds (attributes, buffers, and containers and plain
-objects nested up to eight levels, skipping containers of more than 1024 items).
+The attribute scan walks what the law holds (attributes, buffers, and containers and plain
+objects nested up to eight levels, skipping containers of more than 1024 items); a tensor it
+does not reach is caught by the residual evaluation where the residual reads it.
 
 **2. A drive must read every differentiable quantity from the `drivers` mapping**, never hold
 one as an instance attribute. See [Constitutive laws and drives](elements.md#the-rule-a-drive-must-obey)
