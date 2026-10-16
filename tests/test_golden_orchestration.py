@@ -13,11 +13,28 @@ compared with `==`, so a reordered floating-point operation fails it). A refacto
 code must not change one number; if a difference appears, find the operation-order cause
 instead of loosening the comparison. Regenerate the file only for a deliberate change of
 behaviour, and say so in the commit.
+
+Exactness is a property of the recording platform, not of the code. Set `NOODL_GOLDEN_EXACT=1`
+(on the recording machine, to prove a refactor changed no number) and floats are compared with
+`==`. Without it (the default: GitHub's Linux, Windows and macOS/ARM runners all differ from the
+recording in the last ulp or two, and run to run on Windows) the discrete content stays
+exact -- keys, shapes, dtypes, ints, booleans, strings, error types and messages, pass counts --
+and floats are compared with `|a - b| <= RTOL * |b| + RTOL * max|tensor|`, RTOL = 1e-12. Why
+1e-12: a different BLAS or vectorised reduction reassociates sums, which moves a result by a few
+ulp (1e-16 relative) per operation; a short chain of solves and reductions accumulates 1e-15 to
+1e-14, with a few orders of margin below 1e-12. A real behaviour change moves values by more
+than ~1e-10 relative, which this still rejects. The `max|tensor|` term (the largest golden
+entry of the same tensor) keeps entries that are zero or cancel to rounding from being compared
+against a bare relative tolerance. Convergence figures (`residual_norm`, `residual`,
+`max_change`) are rounding noise once a solve has converged (1e-16 .. 1e-12) and differ by
+order-one factors between platforms: they are compared with an absolute floor of `NOISE_ATOL`
+= 1e-8 as well, which still tells "converged" from "not converged".
 """
 
 from __future__ import annotations
 
 import math
+import os
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -60,15 +77,53 @@ def ser(x: Any) -> Any:
     raise TypeError(f"cannot record {type(x).__name__}: {x!r}")
 
 
-def _same(a: Any, b: Any) -> bool:
-    """Exact equality; NaN equals NaN."""
+#: Exact float comparison (the recording environment); see the module docstring.
+EXACT = os.environ.get("NOODL_GOLDEN_EXACT", "") not in ("", "0")
+RTOL = 1e-12
+NOISE_ATOL = 1e-8
+_NOISE_KEYS = frozenset({"residual_norm", "residual", "max_change"})
+
+
+def _close(a: float, b: float, scale: float, noise: bool) -> bool:
+    """`a` (actual) against `b` (golden) within the documented platform tolerance."""
+    if a == b or (math.isnan(a) and math.isnan(b)):
+        return True
+    if math.isnan(a) or math.isnan(b) or math.isinf(a) or math.isinf(b):
+        return False
+    atol = RTOL * scale + (NOISE_ATOL if noise else 0.0)
+    return abs(a - b) <= RTOL * abs(b) + atol
+
+
+def _flat_floats(x: Any):
+    if isinstance(x, list):
+        for v in x:
+            yield from _flat_floats(v)
+    elif isinstance(x, float) and math.isfinite(x):
+        yield abs(x)
+
+
+def _same(a: Any, b: Any, scale: float = 0.0, noise: bool = False) -> bool:
+    """Equality: exact, or (floats only, unless EXACT) within the platform tolerance.
+
+    `scale` is the largest golden magnitude of the tensor being compared; `noise` marks a
+    convergence figure."""
     if isinstance(a, dict):
-        return (isinstance(b, dict) and set(a) == set(b)
-                and all(_same(a[k], b[k]) for k in a))
+        if not (isinstance(b, dict) and set(a) == set(b)):
+            return False
+        if EXACT:
+            return all(_same(a[k], b[k]) for k in a)
+        if set(a) == {"dtype", "shape", "data"}:  # a recorded tensor
+            return (a["dtype"] == b["dtype"] and a["shape"] == b["shape"]
+                    and _same(a["data"], b["data"], max(_flat_floats(b["data"]), default=0.0),
+                              noise))
+        return all(_same(a[k], b[k], scale, k in _NOISE_KEYS or noise) for k in a)
     if isinstance(a, list):
-        return isinstance(b, list) and len(a) == len(b) and all(map(_same, a, b))
+        return isinstance(b, list) and len(a) == len(b) and all(
+            _same(x, y, scale, noise) for x, y in zip(a, b, strict=True))
     if isinstance(a, float) and isinstance(b, float):
-        return a == b or (math.isnan(a) and math.isnan(b))
+        if EXACT:
+            return a == b or (math.isnan(a) and math.isnan(b))
+        return _close(a, b, max(scale, abs(b) if scale == 0.0 else 0.0), noise)
     return type(a) is type(b) and a == b
 
 
@@ -77,8 +132,12 @@ def first_difference(a: Any, b: Any, path: str = "") -> str | None:
     if isinstance(a, dict) and isinstance(b, dict):
         if set(a) != set(b):
             return f"{path}: keys {sorted(a)} != {sorted(b)}"
+        if not EXACT and set(a) == {"dtype", "shape", "data"}:
+            return None if _same(a, b) else f"{path}: {a!r} != {b!r}"
         for k in a:
-            d = first_difference(a[k], b[k], f"{path}/{k}")
+            d = first_difference(a[k], b[k], f"{path}/{k}") if not (
+                not EXACT and k in _NOISE_KEYS) else (
+                None if _same(a[k], b[k], 0.0, True) else f"{path}/{k}: {a[k]!r} != {b[k]!r}")
             if d:
                 return d
         return None
