@@ -326,6 +326,70 @@ def test_coupled_model_to_moves_every_model():
         _assert_float32_matches(out[tag], ref[tag], rtol=1e-5, atol=1e-6)
 
 
+class _Copying(_Offset):
+    """A closure whose `to` hook returns a moved copy and leaves itself alone."""
+
+    def to(self, device=None, dtype=None):
+        import copy
+
+        moved = copy.copy(self)
+        moved.extra = self.extra.to(device=device, dtype=dtype)
+        return moved
+
+
+def test_a_closure_shared_by_two_coupled_models_stays_one_object_when_its_hook_copies():
+    from noodl.couple import union
+
+    closure = _Copying()
+    _, a, sa, da, *_ = _build(closures=(closure,))
+    _, b, sb, db, *_ = _build(closures=(closure,))
+    coupled, _, _ = union({"a": (a, sa, da), "b": (b, sb, db)}, [])
+    assert a.closures[0] is b.closures[0]
+    coupled.to(dtype=F32)
+    assert a.closures[0] is b.closures[0]
+    assert a.closures[0].extra.dtype == F32
+
+
+def test_a_copying_hook_is_called_once_and_every_reference_gets_the_replacement():
+    from noodl.layers._device import Mover
+
+    closure = _Copying()
+    holder = {"one": closure, "two": [closure, (closure,)]}
+    out = Mover(dtype=F32).visit(holder)
+    new = out["one"]
+    assert new is not closure and new.extra.dtype == F32
+    assert out["two"][0] is new and out["two"][1][0] is new
+    assert closure.extra.dtype == F64          # the original is left alone
+
+
+def test_a_hook_that_moves_in_place_and_returns_none_keeps_the_original_shared():
+    from noodl.layers._device import Mover
+
+    class InPlace:
+        def __init__(self):
+            self.extra = torch.zeros(2, dtype=F64)
+
+        def to(self, device=None, dtype=None):
+            self.extra = self.extra.to(device=device, dtype=dtype)
+
+    closure = InPlace()
+    holder = {"one": closure, "two": [closure]}
+    out = Mover(dtype=F32).visit(holder)
+    assert out["one"] is closure and out["two"][0] is closure
+    assert closure.extra.dtype == F32
+
+
+def test_a_noodl_object_shared_by_two_holders_is_one_object_after_to():
+    from noodl.elements import PowerLaw
+    from noodl.layers._device import Mover
+
+    law = PowerLaw(torch.tensor([0.01, 0.02], dtype=F64), 0.65)
+    holder = {"one": law, "two": [law]}
+    out = Mover(dtype=F32).visit(holder)
+    assert out["one"] is law and out["two"][0] is law
+    assert law.C.dtype == F32
+
+
 # ---- Direct graph and attribute edits ----------------------------------------------------
 
 

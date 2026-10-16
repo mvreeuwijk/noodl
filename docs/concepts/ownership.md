@@ -93,6 +93,11 @@ one layer with its network). One walk over the model moves:
   tuples and noodl records reached from it. Dicts and lists are updated in place, so a dict
   shared between a closure and the model stays one dict.
 
+A part reached twice (a closure shared by two models of a `CoupledModel`, or twice in one
+model) is moved once. If its `to` hook returns a replacement object rather than `self` (or
+`None`, meaning it moved in place), every reference receives that same replacement, so shared
+parts stay shared.
+
 `dtype` sets the precision. A floating tensor takes `dtype`; a complex tensor stays complex at
 that precision (`float32 <-> complex64`, `float64 <-> complex128`), so a phasor layer on a
 float32 network solves in complex64; an integer or boolean tensor (an index, a mask) keeps its
