@@ -134,8 +134,8 @@ class FunctionalLaws:
             # from an earlier, enable_grad-wrapped computation. Writing
             # `torch.autograd.grad(flow.sum(), dp_slice)` with the `with
             # torch.enable_grad():` block closed before that line evaluates `flow.sum()`
-            # under the outer no_grad, so the tensor actually handed to `autograd.grad` as `outputs` has
-            # no grad_fn of its own -- even though `flow` printed `requires_grad=True`
+            # under the outer no_grad, so the tensor actually handed to `autograd.grad` as
+            # `outputs` has no grad_fn of its own -- even though `flow` printed `requires_grad=True`
             # right before the call. `torch.autograd.grad` itself does not consult the
             # ambient grad mode at its own call site (confirmed: calling it under no_grad
             # against an output already fully built under enable_grad, or with an explicit

@@ -777,7 +777,8 @@ class KirchhoffLayer(TopologyGuard):
         # unified across laws before concatenating along the edge axis. Using
         # torch.broadcast_tensors directly on the raw (c_e, k_e) list would broadcast the
         # trailing edge dim too, so two laws with different edge counts silently expand to
-        # a shared (wrong) edge count instead of concatenating -- e.g. a 2-edge FixedFlow and a 1-edge PowerLaw would both become
+        # a shared (wrong) edge count instead of concatenating -- e.g. a 2-edge FixedFlow and
+        # a 1-edge PowerLaw would both become
         # 2-edge before torch.cat, yielding a 4-wide result instead of the correct 3.
         cs, ks, n_es = [], [], []
         for el, (s, e) in zip(self._laws, self._law_slices, strict=True):
