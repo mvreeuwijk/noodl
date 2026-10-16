@@ -1094,6 +1094,9 @@ class DynamicWaveHydraulics:
     on the tree's filling a uniform load of 1 came out between 0 and 5.) The driver
     ``"<quality_layer>.overflow_loss"`` (per junction, 0..1) is the fraction
     ``dt overflow / V_start`` of the step-start contents that floods out (`OverflowLoss`).
+    A withdrawal (a negative lateral inflow) is the transport step's own outflow, the
+    driver ``"<quality_layer>.removal"`` (`_quality_volume`), at the end-of-step
+    concentration and without a cap.
     The closure also writes the reporting keys ``"sewer.R_h"`` (hydraulic radius, m) and
     ``"sewer.d_m"`` (hydraulic mean depth A/T, m; 0 for a conduit flowing full) of one
     barrel at the link depth, on the exact circle (as the kinematic path does at SWMM's
@@ -1134,6 +1137,10 @@ class DynamicWaveHydraulics:
         self.net = graph
         self.layer = layer
         self.quality_layer = quality_layer
+        # the quality layer's species count and time scheme (`_quality_parts` sets them):
+        # the withdrawal's removal rate is written in its layout and for its scheme
+        self.quality_species = 1
+        self.quality_scheme = "implicit"
         self.air = air
         self.air_quality_layer = air_quality_layer
         if quality_layer is not None:
@@ -2408,15 +2415,28 @@ class DynamicWaveHydraulics:
         a uniform concentration) holds there only to that excess.
 
         `withdrawal` (m3/s, >= 0, per junction: a negative lateral inflow) is already in
-        `net_inflow`; it leaves like the overflow, at the junction's own concentration, so
-        it joins the lost fraction (``dt (overflow + withdrawal) / V_start``) rather than
-        being a source at the external concentration."""
+        `net_inflow`. It is an outflow of the transport step itself, at the junction's own
+        concentration, not a source at the external one: the driver
+        ``"<quality_layer>.removal"`` (1/s) is the rate whose amount loss over the step is
+        ``dt withdrawal x``, i.e. ``withdrawal / V_end`` for the implicit scheme
+        (``V_end x_end`` removed at the new level) and ``2 withdrawal / (V_start + V_end)``
+        for the trapezoidal one (half the step at each level). It has no cap: water that
+        enters during the step and is withdrawn again takes its mass with it, so a uniform
+        concentration stays uniform however many control volumes the step withdraws. (The
+        rate is one per step; `Model` substeps of the quality layer would interpolate the
+        capacity under it and so would not keep this exactly.)"""
         start = state["sewer.quality_volume"]
         end = torch.clamp(start + dt * (net_inflow - overflow), min=CAPACITY_FLOOR)
-        leaving = overflow if withdrawal is None else overflow + withdrawal
-        lost = torch.clamp(dt * leaving / start, max=1.0)
-        return {"sewer.quality_volume": end, f"{self.quality_layer}.capacity": end,
-                f"{self.quality_layer}.overflow_loss": lost}
+        lost = torch.clamp(dt * overflow / start, max=1.0)
+        out = {"sewer.quality_volume": end, f"{self.quality_layer}.capacity": end,
+               f"{self.quality_layer}.overflow_loss": lost}
+        if withdrawal is not None:
+            held = 0.5 * (start + end) if self.quality_scheme == "trapezoidal" else end
+            rate = withdrawal / held
+            if self.quality_species > 1:
+                rate = rate.unsqueeze(-1).expand(*rate.shape, self.quality_species)
+            out[f"{self.quality_layer}.removal"] = rate
+        return out
 
     def quality_capacity(self, wetted: Tensor, stored: Tensor) -> Tensor:
         """The geometric quality capacity (m3, per junction) from the conduits'
@@ -2960,6 +2980,8 @@ def _quality_parts(net: SewerNetwork, graph: Network, closure: DynamicWaveHydrau
             f"the BOD), got {species!r}")
     junctions = list(closure.junction_names)
     k = len(species)
+    closure.quality_species = k
+    closure.quality_scheme = scheme
     layer = TransportLayer(
         graph, "water_quality", capacity=torch.ones(len(junctions), dtype=F64),
         flow_kind=closure.edge_kinds, boundary=list(closure.outfall_names),

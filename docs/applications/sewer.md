@@ -1354,7 +1354,10 @@ its concentrations follow the flows of each pass, which costs 1-5 % more passes.
 Each species `s` enters with the lateral inflow at the concentration of the driver
 `"<s>_in"` (kg/m³, one per node); only a positive inflow loads. A negative lateral inflow (a
 withdrawal) takes water and mass out at the junction's own concentration, whatever `"<s>_in"`
-is, so a uniform tracer stays uniform. `"bod"` decays and `"sulfide"` is generated
+is, so a uniform tracer stays uniform. It is an outflow of the transport step itself (the
+removal rate `"water_quality.removal"`, $w / V_{	ext{end}}$ for the implicit scheme), so the
+water that enters during the step and is withdrawn again carries its mass out too, even
+when one step withdraws several times what the junction held at its start. `"bod"` decays and `"sulfide"` is generated
 (Pomeroy–Parkhurst, see [Quality](#quality)); a species of any other name is a conservative
 tracer. Sulfide needs `"bod"`, and it needs a single outgoing conduit at every junction,
 whose hydraulic radius `sewer.R_h`, speed `sewer.v` and mean depth `sewer.d_m` (exact circle

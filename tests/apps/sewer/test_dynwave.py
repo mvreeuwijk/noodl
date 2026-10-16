@@ -2598,6 +2598,95 @@ def test_a_withdrawal_removes_the_tracer_at_the_local_concentration(tmp_path):
             dt * (load - _outfall_flux(model, state)) - taken, rel=1e-6, abs=1e-12)
 
 
+def _backwater_junction():
+    """One junction (0.1 m deep) fed back from an outfall held at 0.8 m through one 1 m
+    conduit, 20 s steps: it fills by several control volumes a step, so a withdrawal of
+    0.3 m3/s takes more water in one step than the junction holds at its start."""
+    from noodl.apps.sewer import DynamicWaveOptions, Manhole, Outfall, Pipe, SewerNetwork
+    return SewerNetwork(
+        manholes=(Manhole("J", 0, ground=4, initial_depth=0.1),),
+        pipes=(Pipe("C", "J", "O", 10, 1, 0.013, 0.001),),
+        outfalls=(Outfall("O", -0.01, kind="fixed", stage=0.8),),
+        routing="dynamic_wave", geometry="tabulated",
+        dynamic_wave=DynamicWaveOptions(routing_step=20, max_trials=500,
+                                        head_tolerance=1e-10))
+
+
+def _withdrawn(x0, xb, *, steps=1, withdrawal=0.3, scheme="implicit"):
+    """`_backwater_junction` started at `x0` with boundary concentration `xb` (kg/m3) and
+    `withdrawal` (m3/s) at J: the model, drivers and states (the initial one first)."""
+    model, state, drivers = build_model(_backwater_junction(), quality=True,
+                                        species=("tracer",), scheme=scheme)
+    state = dict(state, **{"water_quality.x": torch.full_like(state["water_quality.x"], x0)})
+    drivers["water_quality.x_boundary"].fill_(xb)
+    drivers["inflow"][model.junction_idx[0]] = -withdrawal
+    states = [state]
+    for _ in range(steps):
+        state, _ = simulate_dynamic_wave(model, state, drivers, steps=1)
+        states.append(state)
+    return model, drivers, states
+
+
+@pytest.mark.parametrize("scheme", ["implicit", "trapezoidal"])
+def test_a_withdrawal_beyond_one_turnover_keeps_a_uniform_tracer_uniform(scheme):
+    """A step that withdraws more water than the junction holds at its start (``dt w >
+    V_start``) still takes the water that entered during the step with its mass: the
+    withdrawal is an outflow of the transport step (``"water_quality.removal"``), not a
+    fraction of the step-start contents capped at all of them. Capped, the reviewed
+    example came out at 0.156858553 from 0.1 everywhere."""
+    model, _, states = _withdrawn(0.1, 0.1, steps=4, scheme=scheme)
+    dt = model.routing_step
+    assert dt * 0.3 > 3.0 * float(states[0]["sewer.quality_volume"][0])
+    for after in states[1:]:
+        torch.testing.assert_close(after["water_quality.x"],
+                                   torch.full_like(after["water_quality.x"], 0.1),
+                                   rtol=1e-10, atol=0.0)
+
+
+def test_a_withdrawal_beyond_one_turnover_balances_the_tracer_mass():
+    """Started at 0.1 against a boundary at 0.2, the stored amount changes every step by
+    what the conduit brings in from the outfall less what the withdrawal takes at the
+    junction's end-of-step concentration (the implicit step's outflow), and the
+    concentration stays between the two."""
+    model, drivers, states = _withdrawn(0.1, 0.2, steps=5)
+    dt = model.routing_step
+    col = int(model.outfall_link_idx[0])
+    assert dt * 0.3 > float(states[0]["sewer.quality_volume"][0])
+    for before, after in zip(states[:-1], states[1:], strict=True):
+        q = float(after["water.q"][col])                  # J -> O positive
+        x = float(after["water_quality.x"][0])
+        moved = dt * (max(-q, 0.0) * 0.2 - max(q, 0.0) * x - 0.3 * x)
+        stored = float(_amount(after).sum() - _amount(before).sum())
+        assert stored == pytest.approx(moved, rel=1e-9, abs=1e-15)
+        assert 0.1 < x < 0.2
+
+
+def test_quality_gradient_wrt_a_withdrawal_beyond_one_turnover_matches_finite_differences():
+    """d(x)/d(inflow) at the withdrawing junction, through the removal rate, agrees with
+    the central difference."""
+    model, state, drivers = build_model(_backwater_junction(), quality=True,
+                                        species=("tracer",))
+    state = dict(state, **{"water_quality.x": torch.full_like(state["water_quality.x"], 0.1)})
+    drivers["water_quality.x_boundary"].fill_(0.2)
+    k = int(model.junction_idx[0])
+
+    def run(infl):
+        out, _ = simulate_dynamic_wave(model, state, dict(drivers, inflow=infl), steps=2)
+        return out["water_quality.x"].sum()
+
+    inflow = drivers["inflow"].clone()
+    inflow[k] = -0.3
+    a = inflow.clone().requires_grad_(True)
+    run(a).backward()
+    h = 1e-6
+    e = torch.zeros_like(inflow)
+    e[k] = h
+    with torch.no_grad():
+        fd = float(run(inflow + e) - run(inflow - e)) / (2 * h)
+    assert abs(fd) > 1e-6
+    assert float(a.grad[k]) == pytest.approx(fd, rel=1e-4, abs=1e-9)
+
+
 def test_a_flooded_junction_loses_its_contents_with_the_overflow():
     """The flooding tree (J2 held at y_max from step 21, its overflow lost, no ponding): a
     uniform concentration stays uniform through the flood, and the tracer amount changes by
