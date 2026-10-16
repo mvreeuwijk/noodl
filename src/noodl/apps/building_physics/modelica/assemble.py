@@ -72,6 +72,17 @@ the coupling iteration (to its `iterate_tol`), and the initial state carries the
 the start, so that the first pass has flows to read. `run._Midpoint` gives it the latest
 solved flows instead.
 
+Movers
+------
+A `FlowControlled_dp` (`graph.FlowPath` of a mover) is the edge kind `"airpath:<name>"` with the
+implicit law `_MoverHead`, `(phi_a - phi_b) + dp = 0` (MBL: `port_b.p - port_a.p = dp`), `dp`
+its `constantHead` or the signal driving `dp_in` (a driver `"<name>.dp_in"`). The air layer
+then holds an implicit law and is solved by Modified Nodal Analysis; every MBL feature the law
+does not reproduce (`use_riseTime`, `addPowerToMedium`, a dynamic `energyDynamics`,
+`prescribeSystemPressure`, `inputType = Stages`) is refused by name, and so is volume mass
+storage with a mover (the storage closure uses `KirchhoffLayer.flows`, which an MNA layer does
+not define). A mover passes the stream on unchanged, so its flow joins the transport flows.
+
 Volume mass storage
 -------------------
 By default (`build(..., mass_storage=None)`) every volume whose `massDynamics` is not
@@ -297,7 +308,7 @@ from noodl.elements import (
     power_law_from_points,
     regularized_orifice,
 )
-from noodl.elements.base import ConstitutiveLaw, memo
+from noodl.elements.base import ConstitutiveLaw, ImplicitLaw, memo
 from noodl.elements.media import _moist_air_buoyancy_density
 from noodl.layers.kirchhoff import KirchhoffLayer
 from noodl.layers.transport import TransportLayer, active_interior
@@ -636,6 +647,73 @@ class _ZonalFlowEdge(ConstitutiveLaw):
     def linear_init(self, drivers=None) -> tuple[Tensor, Tensor]:
         v = self._value(drivers)
         return v, torch.zeros_like(v)
+
+
+class _MoverHead(ImplicitLaw):
+    """A `Buildings.Fluid.Movers.FlowControlled_dp` with its pressure rise prescribed: the
+    relation `dp_mover = port_b.p - port_a.p` (`FlowControlled_dp.mo`: `dp_internal = dp_in`
+    for `inputType = Continuous`, `constantHead` for `Constant`), the mass flow an unknown of
+    the layer (`m_flow` follows from the rest of the network, the mover's own flow
+    characteristic is not used). The edge runs from `port_a` to `port_b`, so the layer's
+    `dp = phi[a] - phi[b]` is `-dp_mover` and the residual is `dp + dp_mover`; linear in
+    `(dp, q)` given the driver. `key` names the driver that holds `dp_in` (Pa), or `None`
+    when the rise is the constant `head`.
+    """
+
+    linear = True
+
+    def __init__(self, *, kind: str, head: float | None = None, key: str | None = None) -> None:
+        super().__init__(kind)
+        self.head, self.key = head, key
+
+    def residual(self, dp, q, drivers, ctx):
+        if self.key is None:
+            return dp + self.head
+        u = torch.as_tensor(drivers[self.key])
+        return dp + (u.unsqueeze(-1) if u.ndim else u.reshape(1))
+
+
+def _mover(comp: Component, kind: str, sig: _Signals, inputs: dict[str, Tensor],
+           errors: list[str]) -> ConstitutiveLaw | None:
+    """The law of a `FlowControlled_dp` (`_MoverHead`); every MBL feature the law does not
+    reproduce is refused by name, each against its MBL default (`FlowControlled_dp.mo`,
+    `PartialFlowMachine.mo`)."""
+    p = comp.parameters
+    bad = len(errors)
+
+    def refuse(why: str) -> None:
+        errors.append(f"{comp.name} ({comp.cls}): {why}")
+
+    if p.get("use_riseTime", True) is not False:  # default true: a 30 s rate limiter on dp
+        refuse("use_riseTime must be false (MBL's default, true, passes the pressure rise "
+               "through a rate limiter)")
+    if p.get("addPowerToMedium", True) is not False:  # default true: heat added to the air
+        refuse("addPowerToMedium must be false (MBL's default, true, heats the air by the "
+               "fan power)")
+    dyn = _short(p.get("energyDynamics"), "DynamicFreeInitial")
+    if dyn != "SteadyState":
+        refuse(f"energyDynamics = {dyn} is not supported (the mover then holds a mixing "
+               f"volume; only SteadyState)")
+    if p.get("prescribeSystemPressure", False) is not False:
+        refuse("prescribeSystemPressure = true is not supported")
+    mode = _short(p.get("inputType"), "Continuous")
+    head, key = None, None
+    if mode == "Constant":
+        head = p.get("constantHead", p.get("dp_nominal"))
+        if head is None:
+            refuse("inputType = Constant needs constantHead (or dp_nominal); neither exported")
+        else:
+            head = float(head)
+    elif mode == "Continuous":
+        dp_in = sig.require(comp, "dp_in")
+        if dp_in is not None:
+            key = f"{comp.name}.dp_in"
+            inputs[key] = dp_in
+    else:
+        refuse(f"inputType = {mode} is not supported (Constant and Continuous are)")
+    if len(errors) > bad or (head is None and key is None):
+        return None
+    return _MoverHead(kind=kind, head=head, key=key)
 
 
 # ------------------------------------------------------------------------- closure
@@ -1304,6 +1382,15 @@ class _Builder:
             errors.append("mass_storage=True: no volume has a dynamic mass balance "
                           "(massDynamics is SteadyState everywhere)")
         use_storage = bool(storage_zones)
+        if use_storage:
+            for path in g.paths:
+                if path.element.cls in schema.MOVERS:
+                    errors.append(
+                        f"{path.element.name} ({path.element.cls}): a prescribed-pressure "
+                        f"mover with volume mass storage is not supported (its air layer is "
+                        f"solved by Modified Nodal Analysis, which the storage closure's "
+                        f"flow evaluations cannot use); set massDynamics = SteadyState or "
+                        f"read with mass_storage=False")
 
         node_names = [n for n in g.zones] + [n for n in g.boundaries] + list(g.junctions)
         index = {n: i for i, n in enumerate(node_names)}
@@ -1947,7 +2034,10 @@ class _Builder:
               pressure_edges) -> None:
         comp = path.element
         kind = f"airpath:{comp.name}"
-        el = _one_way(comp, kind, self.med, self.errors)
+        if comp.cls in schema.MOVERS:
+            el = _mover(comp, kind, self.sig, self._inputs, self.errors)
+        else:
+            el = _one_way(comp, kind, self.med, self.errors)
         coeff, nodes, nodes_reverse = [], [], []
         # The stream arriving from each side: across a junction, the run's end there.
         src, tgt = self._ends.get(comp.name, (path.src, path.tgt))
