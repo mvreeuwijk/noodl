@@ -143,8 +143,8 @@ def test_friction_epanet_is_friction_composite():
     out = []
     for friction in ("epanet", "composite"):
         model, state, drivers = water.build_model(net, friction=friction)
-        (pipe,) = [e for e in model.kirchhoff["water"]._laws
-                   if isinstance(e, water.CompositeDarcyWeisbach)]
+        (pipe,) = [getattr(e, "pipe", e) for e in model.kirchhoff["water"]._laws
+                   if isinstance(getattr(e, "pipe", e), water.CompositeDarcyWeisbach)]
         out.append((pipe.nu, pipe.cfs_per_m3s, pipe.scale, model.notes["headloss"]))
     assert out[0] == out[1]
 

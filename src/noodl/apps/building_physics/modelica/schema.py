@@ -70,6 +70,10 @@ ONE_WAY = frozenset({
     "Buildings.Airflow.Multizone.Table_V_flow",
     "Buildings.Airflow.Multizone.Table_m_flow",
 })
+# A mover with a prescribed pressure rise (`Buildings/Fluid/Movers/FlowControlled_dp.mo`): the
+# one MBL mover whose airflow follows from its pressure alone, an IMPLICIT law (`graph`,
+# `assemble`: the flow is an unknown of the air layer, Modified Nodal Analysis).
+MOVERS = frozenset({"Buildings.Fluid.Movers.FlowControlled_dp"})
 TWO_WAY = frozenset({
     "Buildings.Airflow.Multizone.DoorOpen",
     "Buildings.Airflow.Multizone.DoorOperable",
@@ -135,6 +139,15 @@ MATH = frozenset({
 # caller can map it to the flow it carries. `RelativePressure` is NOT one of these: its two
 # ports sit on different nodes and carry no flow (`RelativePressure.mo`), so it stays a plain
 # observer, as do the one-port sensors (`TraceSubstances`, `Temperature`, ...).
+# Zero-resistance connections: no pressure drop, no storage, properties passed through
+# (`FixedResistances/LosslessPipe.mo`: `dp = 0`; `FixedResistances/PressureDrop.mo:79`:
+# `dp = 0` when `dp_nominal` is 0, `computeFlowResistance` false). `graph` joins their two
+# ports into one node as it does an in-line sensor's, and refuses a PressureDrop with a
+# nonzero `dp_nominal`.
+SHORTS = frozenset({
+    "Buildings.Fluid.FixedResistances.PressureDrop",
+    "Buildings.Fluid.FixedResistances.LosslessPipe",
+})
 INLINE_SENSORS = frozenset({
     "Buildings.Fluid.Sensors." + name for name in (
         "DensityTwoPort", "EnthalpyFlowRate", "EntropyFlowRate", "HeatMeter",
@@ -162,8 +175,9 @@ OBSERVERS = frozenset({
 })
 
 SUPPORTED = (
-    ZONES | BOUNDARIES | ONE_WAY | TWO_WAY | COLUMNS | ZONAL | THERMAL_PIN | HEAT_SOURCES
-    | HEAT_SENSORS | SOURCES | SIGNALS | MATH | INLINE_SENSORS | OBSERVERS | WEATHER_READERS
+    ZONES | BOUNDARIES | ONE_WAY | MOVERS | TWO_WAY | COLUMNS | ZONAL | THERMAL_PIN | HEAT_SOURCES
+    | HEAT_SENSORS | SOURCES | SIGNALS | MATH | INLINE_SENSORS | SHORTS | OBSERVERS
+    | WEATHER_READERS
 )
 
 # Refused classes, each with the short reason `graph.build` reports

@@ -11,7 +11,7 @@ the water-quality sections `[QUALITY] [SOURCES] [REACTIONS] [MIXING]` (this read
 hydraulics; a quality run is configured through `build_model(quality=...)`).
 
 REFUSED BY NAME, because skipping them would silently change the network: `[RULES]`,
-`[EMITTERS]` and `[STATUS]` with content, a time-based `[CONTROLS]` line, a PRV/PSV/PBV/GPV
+`[EMITTERS]` and `[STATUS]` with content, a time-based `[CONTROLS]` line, a PRV or PSV
 valve, a constant-POWER pump, a pump with a SPEED PATTERN, a `[TANKS]` row with a volume
 curve, a `HEADLOSS` that is not `H-W` or `D-W`, and any other section carrying content.
 
@@ -403,16 +403,21 @@ def read_epanet_inp(path) -> WaterNetwork:
     for line in sections.get("VALVES", []):
         require_fields(line, 6, "a valve", path)
         kind = line.fields[4].upper()
-        setting = as_float(line, 5, "the setting", path)
-        # TCV's setting is a unitless loss coefficient; FCV's is a FLOW (Appendix C.2.9).
+        # A GPV's setting is the id of its head-loss curve; the others are numbers: TCV's a
+        # unitless loss coefficient, FCV's a FLOW, PBV's a PRESSURE (Appendix C.2.9).
+        curve = line.fields[5] if kind == "GPV" else None
+        setting = 0.0 if kind == "GPV" else as_float(line, 5, "the setting", path)
         if kind == "FCV":
             setting = setting * flow
+        elif kind == "PBV":
+            setting = setting * pressure_scale
         valves.append(
             Valve(
                 line.fields[0], line.fields[1], line.fields[2],
                 as_float(line, 3, "the diameter", path) * diameter_scale,
                 kind, setting,
                 as_float(line, 6, "the minor loss", path) if len(line.fields) > 6 else 0.0,
+                curve=curve,
             )
         )
 
@@ -471,9 +476,9 @@ def read_epanet_inp(path) -> WaterNetwork:
         pipes=tuple(pipes),
         pumps=tuple(pumps),
         valves=tuple(valves),
-        # A pump's HEAD curve is (flow, head): x in the file's flow units, y in its length
-        # units. `[CURVES]` carries no type tag of its own, so the conversion is applied
-        # here, where the only curves this reader keeps are pump curves.
+        # A pump's HEAD curve and a GPV's head-loss curve are both (flow, head): x in the
+        # file's flow units, y in its length units. `[CURVES]` carries no type tag of its
+        # own, so the conversion is applied here, where those are the only curves kept.
         curves={
             name: tuple((x * flow, y * length_scale) for x, y in points)
             for name, points in curves.items()

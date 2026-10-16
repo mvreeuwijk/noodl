@@ -233,6 +233,7 @@ def test_compared_variables(exporter) -> None:
 def test_script_class_sets_match_the_reader(exporter) -> None:
     assert exporter.VOLUMES == schema.ZONES
     assert exporter.ONE_WAY == schema.ONE_WAY
+    assert exporter.MOVERS == schema.MOVERS
     assert exporter.FOUR_PORT == schema.TWO_WAY | schema.ZONAL
 
 

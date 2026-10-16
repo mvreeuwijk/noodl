@@ -127,6 +127,22 @@ class TankLevels:
             )
         with torch.no_grad():
             status = self._apply_controls(level, status)
+        self._refuse_outside(level)
+        heads = (self.bottom + level) * self.head_scale
+        boundary = torch.cat(
+            [self.reservoir_heads.expand(heads.shape[:-1] + self.reservoir_heads.shape),
+             heads],
+            dim=-1,
+        )
+        return {
+            "water.phi_boundary": boundary,
+            "water.status": status,
+            "water.tank_level": level,
+            "water.link_status": status,
+        }
+
+    def _refuse_outside(self, level: Tensor) -> None:
+        """Refuse, by name, a tank outside its `[min, max]` levels."""
         outside = (level < self.y_min - 1e-9) | (level > self.y_max + 1e-9)
         if bool(outside.any()):
             bad = [
@@ -141,18 +157,6 @@ class TankLevels:
                 f"closes the attached links instead, which this model does not do -- widen "
                 f"the levels or shorten the run"
             )
-        heads = (self.bottom + level) * self.head_scale
-        boundary = torch.cat(
-            [self.reservoir_heads.expand(heads.shape[:-1] + self.reservoir_heads.shape),
-             heads],
-            dim=-1,
-        )
-        return {
-            "water.phi_boundary": boundary,
-            "water.status": status,
-            "water.tank_level": level,
-            "water.link_status": status,
-        }
 
     def advance(self, level: Tensor, inflow: Tensor, dt: float) -> Tensor:
         """Explicit Euler on the level, from the net inflow (m3/s) at each tank node."""
@@ -192,3 +196,53 @@ class TankLevels:
             new = 1.0 if control.status == "OPEN" else 0.0
             out[..., j] = torch.where(fires, torch.full_like(out[..., j], new), out[..., j])
         return out
+
+
+class TankStorageControls(TankLevels):
+    """`TankLevels` for tanks held as storage in the layer (`build_model(tank_mode=
+    "storage")`, `elements.TankStorage`): a tank's level is its solved head less its
+    bottom, read from the state's `"water.phi"` at `tank_nodes`, not a carried
+    `"water.tank_level"`. Per call it applies the controls to those levels, refuses a level
+    outside `[min, max]` by name as `TankLevels` does, and writes the reservoir heads and the
+    datum's head 0 into `"water.phi_boundary"`. Only the link status is carried.
+    """
+
+    state_keys = ("water.link_status",)
+
+    def __init__(self, net, tanks, controls, pump_names, *, tank_nodes, **kwargs) -> None:
+        super().__init__(net, tanks, controls, pump_names, **kwargs)
+        self.key_labels = {"water.link_status": list(self.pump_names)}
+        self.tank_nodes = torch.as_tensor(tank_nodes, dtype=torch.long)
+
+    def levels(self, state) -> Tensor:
+        """Every tank's level (m above its bottom) in `state`."""
+        return state["water.phi"][..., self.tank_nodes] / self.head_scale - self.bottom
+
+    def __call__(self, state, drivers) -> dict[str, Tensor]:
+        status = state.get("water.link_status")
+        if status is None or "water.phi" not in state:
+            raise KeyError(
+                "TankStorageControls: states 'water.phi' and 'water.link_status' are both "
+                "required; build them with initial_state(model)"
+            )
+        level = self.levels(state)
+        with torch.no_grad():
+            status = self._apply_controls(level, status)
+        self._refuse_outside(level)
+        datum = torch.zeros(level.shape[:-1] + (1,), dtype=F64)
+        boundary = torch.cat(
+            [self.reservoir_heads.expand(level.shape[:-1] + self.reservoir_heads.shape), datum],
+            dim=-1,
+        )
+        return {"water.phi_boundary": boundary, "water.status": status,
+                "water.link_status": status}
+
+    def event_step(self, level: Tensor, rate: Tensor, dt: float,
+                   min_step: float = 1.0) -> float:
+        """`TankLevels.event_step`, never below `min_step` (s). The implicit step lands a
+        little short of the projected crossing (its rate is the step's end rate, not the
+        start's), and the next projection is then a fraction of a second away: a step that
+        short makes the storage equation's `A / dt` large enough to stall Newton, while
+        `min_step` carries the level past the trigger, so the control acts at the next
+        step."""
+        return max(super().event_step(level, rate, dt), min(min_step, dt))

@@ -132,12 +132,28 @@ def test_a_multi_point_pump_curve_is_refused():
         ).validate()
 
 
-@pytest.mark.parametrize("kind", ["PRV", "PSV", "PBV", "GPV"])
+@pytest.mark.parametrize("kind", ["PRV", "PSV"])
 def test_the_status_switching_valves_are_refused(kind):
     with pytest.raises(ValueError, match="out of scope"):
         _minimal(
             valves=(Valve("V1", "R1", "J1", 0.2, kind, 30.0),)
         ).validate()
+
+
+def test_a_pbv_needs_a_non_negative_setting():
+    with pytest.raises(ValueError, match="PBV 'V1' needs a head drop"):
+        _minimal(valves=(Valve("V1", "R1", "J1", 0.2, "PBV", -1.0),)).validate()
+
+
+@pytest.mark.parametrize("curves, match", [
+    ({}, "has no \[CURVES\] entry"),
+    ({"HL": ((0.0, 0.0),)}, "at least two points"),
+    ({"HL": ((0.0, 0.0), (0.0, 1.0))}, "increasing flows"),
+])
+def test_a_gpv_needs_a_head_loss_curve(curves, match):
+    with pytest.raises(ValueError, match=match):
+        _minimal(valves=(Valve("V1", "R1", "J1", 0.2, "GPV", 0.0, curve="HL"),),
+                 curves=curves).validate()
 
 
 def test_an_unknown_valve_type_is_refused():
@@ -198,7 +214,7 @@ def test_the_two_loop_solves_to_the_measured_heads():
 
 
 def test_the_solved_residual_is_at_the_newton_tolerance():
-    model, state, drivers = build_model(twoloop())
+    model, state, drivers = build_model(twoloop(), pipe_form="potential")
     final = water_steady(model, state, drivers)
     layer = model.kirchhoff["water"]
     residual = layer.residual(
@@ -206,6 +222,27 @@ def test_the_solved_residual_is_at_the_newton_tolerance():
         drivers["water.sources"],
     )
     assert float(residual.abs().max()) < 1e-11
+
+
+def test_the_two_pipe_forms_give_the_same_solution():
+    potential = build_model(twoloop(), pipe_form="potential")
+    flow = build_model(twoloop())
+    assert flow[0].kirchhoff["water"].mna and not potential[0].kirchhoff["water"].mna
+    a, b = water_steady(*potential), water_steady(*flow)
+    torch.testing.assert_close(a["water.phi"], b["water.phi"], rtol=0, atol=1e-12)
+    torch.testing.assert_close(a["water.q"], b["water.q"], rtol=0, atol=1e-14)
+    layer = flow[0].kirchhoff["water"]
+    kcl = layer.net_outflow(b["water.q"])[layer.interior] - flow[2]["water.sources"][
+        layer.interior]
+    assert float(kcl.abs().max()) < 1e-11
+
+
+def test_the_flow_form_starts_from_epanets_one_foot_per_second():
+    model, state, _ = build_model(twoloop())
+    pipes = state["water.q"][model.kirchhoff["water"].kind_slice("pipe")]
+    d = torch.tensor([p.diameter for p in twoloop().pipes], dtype=torch.float64)
+    torch.testing.assert_close(pipes, torch.pi * d**2 / 4.0 * 0.3048, rtol=1e-15, atol=0)
+    assert torch.equal(initial_state(model)["water.q"], state["water.q"])
 
 
 def test_darcy_weisbach_switches_the_layer_to_pressure():
@@ -421,7 +458,7 @@ def test_a_non_default_viscosity_and_gravity_reach_the_darcy_weisbach_elements()
         twoloop(), options=WaterOptions(specific_gravity=1.1, viscosity=1.5)
     )
     model, _, _ = build_model(net, headloss="D-W")
-    pipe = model.kirchhoff["water"]._laws[0]
+    pipe = model.kirchhoff["water"]._laws[0].pipe   # the resistance form wraps it
     assert pipe.nu == pytest.approx(EPANET_NU_SI * 1.5, rel=1e-15)
     assert pipe.scale == pytest.approx(998.2 * 1.1 * 9.80665, rel=1e-15)
     assert pipe.cfs_per_m3s == pytest.approx(1.0 / 0.3048**3, rel=1e-15)
@@ -443,7 +480,7 @@ def test_a_files_flow_units_select_epanets_rounded_cfs_factor(tmp_path):
         twoloop(), headloss="D-W", options=WaterOptions(flow_units="LPS")
     )
     model, _, _ = build_model(net)
-    pipe = model.kirchhoff["water"]._laws[0]
+    pipe = model.kirchhoff["water"]._laws[0].pipe   # the resistance form wraps it
     assert pipe.cfs_per_m3s == pytest.approx(1000.0 / 28.317, rel=1e-15)
 
 

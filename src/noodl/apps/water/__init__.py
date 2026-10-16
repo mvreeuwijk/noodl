@@ -6,12 +6,16 @@ from noodl.apps.water.elements import (
     DW_SI,
     EPANET_QCF,
     HW_SI,
+    BreakerValve,
     CompositeDarcyWeisbach,
     EpanetDarcyWeisbach,
+    FlowControlledPipe,
     G,
+    GeneralPurposeValve,
     HazenWilliams,
     MinorLoss,
     PumpCurve,
+    TankStorage,
     composite_friction_factor,
     epanet_friction_factor,
     three_point_curve,
@@ -30,20 +34,24 @@ from noodl.apps.water.network import (
     initial_drivers,
     initial_state,
     tank_inflow,
+    tank_levels,
     twoloop,
     water_steady,
+    water_step,
 )
 from noodl.apps.water.report import link_table, pressure_head, to_kilopascal
 from noodl.apps.water.tanks import Control, TankLevels
 
 __all__ = [
-    "DW_SI", "EPANET_QCF", "FLOW_UNITS", "G", "HW_SI", "Control", "CompositeDarcyWeisbach",
-    "HazenWilliams", "Junction",
-    "MinorLoss", "PressureDrivenDemand", "Pump", "PumpCurve", "Reservoir", "Tank",
+    "DW_SI", "EPANET_QCF", "FLOW_UNITS", "G", "HW_SI", "BreakerValve", "Control",
+    "CompositeDarcyWeisbach", "FlowControlledPipe", "GeneralPurposeValve", "HazenWilliams",
+    "Junction",
+    "MinorLoss", "PressureDrivenDemand", "Pump", "PumpCurve", "Reservoir", "Tank", "TankStorage",
     "TankLevels", "Valve", "WaterNetwork", "WaterOptions", "WaterPipe",
     "build_model", "initial_drivers", "initial_state", "link_table", "pressure_head",
-    "composite_friction_factor", "read_epanet_inp", "tank_inflow", "three_point_curve",
-    "to_kilopascal", "twoloop", "water_steady",
+    "composite_friction_factor", "read_epanet_inp", "tank_inflow", "tank_levels",
+    "three_point_curve",
+    "to_kilopascal", "twoloop", "water_step", "water_steady",
     # aliases, the pre-rename names
     "EpanetDarcyWeisbach", "epanet_friction_factor",
 ]

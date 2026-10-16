@@ -223,3 +223,34 @@ def test_pressure_driven_demand_is_exactly_zero_at_and_below_p_min():
     assert torch.isfinite(heads.grad).all()
     assert float(heads.grad[0]) == 0.0
     assert float(heads.grad[1]) == 0.0
+
+
+# ------------------------------------------------------------------ PBV and GPV
+def test_a_breaker_valve_holds_its_setting_until_its_minor_loss_exceeds_it():
+    from noodl.apps.water.elements import BreakerValve
+
+    valve = BreakerValve(torch.tensor([5.0, 5.0, 5.0, 0.0]), torch.tensor([100.0] * 4))
+    q = torch.tensor([0.1, -0.1, 0.3, 0.1], dtype=torch.float64)
+    dp = torch.zeros(4, dtype=torch.float64)
+    # active (m q^2 = 1 <= 5) either way the water flows; open (9 > 5); open (setting 0)
+    expected = torch.tensor([5.0, 5.0, 9.0, 1.0], dtype=torch.float64)
+    torch.testing.assert_close(-valve.residual(dp, q, {}, None), expected)
+
+
+def test_a_general_purpose_valve_follows_its_bracketing_curve_segment():
+    from noodl.apps.water.elements import GeneralPurposeValve
+
+    inf = float("inf")
+    flows = torch.tensor([[0.0, 10.0, 30.0], [0.0, 1.0, inf]], dtype=torch.float64)
+    heads = torch.tensor([[0.0, 1.0, 6.0], [2.0, 4.0, 0.0]], dtype=torch.float64)
+    valve = GeneralPurposeValve(flows, heads, [3, 2])
+    q = torch.tensor([[5.0, 0.5], [40.0, 3.0], [-20.0, -0.5], [0.0, 0.0]],
+                     dtype=torch.float64)
+    head = -valve.residual(torch.zeros_like(q), q, {}, None)
+    expected = torch.tensor([
+        [0.5, 3.0],      # inside the first segment
+        [8.5, 8.0],      # past the last point: its segment extended (`curvecoeff`)
+        [-3.5, -3.0],    # reversed flow: the loss at |q|, with the flow's sign
+        [0.0, 2.0],      # zero flow: sgn(0) = +1, the curve's own intercept
+    ], dtype=torch.float64)
+    torch.testing.assert_close(head, expected)

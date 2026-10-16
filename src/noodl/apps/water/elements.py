@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import torch
 
-from noodl.elements.base import ConstitutiveLaw
+from noodl.elements.base import ConstitutiveLaw, ImplicitLaw
 from noodl.solvers.scalar import solve_monotone
 
 Tensor = torch.Tensor
@@ -89,6 +89,24 @@ class HazenWilliams(ConstitutiveLaw):
         """``m`` in ``h_m = m q^2``: ``K_minor / (2 g A^2)``."""
         area = torch.pi * self.diameter**2 / 4.0
         return self.minor_loss / (2.0 * G * area**2)
+
+    def head_loss(self, q: Tensor, gradient_floor: float = 0.0) -> Tensor:
+        """Signed head loss (m) at signed flow ``q`` (m^3/s): ``sgn(q) (K |q|^1.852 + m q^2)``.
+
+        Where the friction gradient ``1.852 K |q|^0.852`` is below ``gradient_floor`` (m per
+        m^3/s) the friction loss is linear instead, as in EPANET's low-flow linearisation
+        (`hydcoeffs.c`, `pipecoeff`, ``hgrad < RQtol``), which keeps the gradient positive at
+        zero flow. EPANET's line, ``RQtol |q|``, is 1.852 times the formula's loss where they
+        meet, a jump on which Newton can cycle; this one is ``(gradient_floor / 1.852) |q|``,
+        continuous there. The two differ only below that flow (about 1e-12 m^3/s on Net1)."""
+        k = self.resistance()
+        a = q.abs()
+        live = a > 0
+        a_safe = torch.where(live, a, torch.ones_like(a))   # no 0^(negative) in either branch
+        friction = torch.where(live, k * a_safe**1.852, torch.zeros_like(a))
+        gradient = torch.where(live, 1.852 * k * a_safe**0.852, torch.zeros_like(a))
+        friction = torch.where(gradient < gradient_floor, gradient_floor / 1.852 * a, friction)
+        return torch.sign(q) * (friction + self._minor() * a * a)
 
     def flow(self, dp: Tensor, drivers=None) -> Tensor:
         k = self.resistance()
@@ -587,3 +605,139 @@ EPANET_G_FT = G_FT_S2  # alias, the pre-rename name
 EPANET_KM = MINOR_LOSS_K_FT  # alias, the pre-rename name
 EPANET_VISCOS_FT2 = NU_WATER_FT2  # alias, the pre-rename name
 EPANET_NU = NU_WATER_REF  # alias, the pre-rename name
+
+
+def epanet_minor_coefficient(minor_loss: Tensor, diameter: Tensor,
+                             cfs_per_m3s: float | None = None) -> Tensor:
+    """EPANET's minor-loss coefficient as a head (m) per (m3/s)^2: ``Km = 0.02517 K / d^4``
+    in ft per cfs^2 (`input1.c`, `convertunits`, with EPANET's rounded constant), converted
+    with ``cfs_per_m3s`` (EPANET's own rounded flow factor; None: the exact
+    ``1 / 0.3048^3``)."""
+    cfs = 1.0 / M_PER_FT**3 if cfs_per_m3s is None else float(cfs_per_m3s)
+    d_ft = diameter / M_PER_FT
+    return M_PER_FT * MINOR_LOSS_K_FT * minor_loss / d_ft**4 * cfs**2
+
+
+class BreakerValve(ImplicitLaw):
+    """A pressure breaker valve (PBV): EPANET 2.2's `pbvcoeff` (`hydcoeffs.c`).
+
+    Active, it holds the head drop from its start node to its end node at ``setting``,
+    whichever way the water flows: ``dp = setting``. It is an open valve, ``dp = m q |q|``
+    with ``m`` its minor-loss coefficient (`epanet_minor_coefficient`), where that loss
+    exceeds the setting (``m q^2 > setting``) or the setting is 0. Implicit: the flow is
+    an unknown of the layer. ``setting`` and ``m`` are in the layer's potential unit (head,
+    or pressure on a Darcy-Weisbach pressure layer: both scaled by ``rho g``).
+    """
+
+    def __init__(self, setting, minor, *, kind: str = "pbv") -> None:
+        super().__init__(kind)
+        self.setting = self._param(setting, False)
+        self.minor = self._param(minor, False)
+
+    def residual(self, dp, q, drivers, ctx):
+        loss = self.minor * q * q.abs()
+        open_ = (self.setting == 0) | (self.minor * q * q > self.setting)
+        return dp - torch.where(open_, loss, self.setting)
+
+
+class GeneralPurposeValve(ImplicitLaw):
+    """A general purpose valve (GPV): EPANET 2.2's `gpvcoeff` (`hydcoeffs.c`).
+
+    The head loss follows the valve's head-loss curve, ``dp = sgn(q) (h0 + r |q|)``, with
+    ``h0`` and ``r`` the intercept and slope of the curve segment that brackets ``|q|``
+    (`curvecoeff`: the first or last segment, extended, outside the curve) and
+    ``sgn(0) = +1``. ``flows`` (m3/s) and ``heads`` (the layer's potential unit) are
+    ``(n_valves, n_points)``, each row increasing in flow and padded at the end with
+    ``inf`` flows to the longest curve; ``n_points`` gives each row's own length (at least
+    2). Implicit: the flow is an unknown of the layer.
+    """
+
+    def __init__(self, flows, heads, n_points, *, kind: str = "gpv") -> None:
+        super().__init__(kind)
+        self.flows = self._param(flows, False)
+        self.heads = self._param(heads, False)
+        self.register_buffer("n_points", torch.as_tensor(n_points, dtype=torch.long))
+
+    def residual(self, dp, q, drivers, ctx):
+        a = q.abs()
+        # The bracketing segment: k2 = number of points below |q|, kept within the curve.
+        k2 = (self.flows < a.unsqueeze(-1)).sum(-1).clamp(min=1)
+        k2 = torch.minimum(k2, self.n_points - 1)
+        k1 = k2 - 1
+        x1 = self.flows.expand(a.shape + self.flows.shape[-1:]).gather(-1, k1.unsqueeze(-1))
+        x2 = self.flows.expand(a.shape + self.flows.shape[-1:]).gather(-1, k2.unsqueeze(-1))
+        y1 = self.heads.expand(a.shape + self.heads.shape[-1:]).gather(-1, k1.unsqueeze(-1))
+        y2 = self.heads.expand(a.shape + self.heads.shape[-1:]).gather(-1, k2.unsqueeze(-1))
+        r = ((y2 - y1) / (x2 - x1)).squeeze(-1)
+        h0 = y1.squeeze(-1) - r * x1.squeeze(-1)
+        sign = torch.where(q < 0, -torch.ones_like(q), torch.ones_like(q))
+        return dp - sign * (h0 + r * a)
+
+
+#: EPANET's floor on a head-loss gradient, ``RQTOL = 1e-7`` ft per cfs (`hydraul.c`,
+#: `RQtol` default, Manual Appendix C ``[OPTIONS]``).
+RQTOL_FT_PER_CFS = 1e-7
+
+
+class FlowControlledPipe(ImplicitLaw):
+    """A pipe in its resistance form, ``dp = scale h(q)``, with the flow an unknown of the
+    layer (`build_model`'s ``pipe_form="flow"``): ``pipe`` is the pipe's potential-form law
+    (`HazenWilliams` or `CompositeDarcyWeisbach`), whose ``head_loss`` gives ``h``.
+
+    The potential form inverts ``h`` (``q = g(dp)``), whose slope grows without bound as the
+    flow goes to zero; the resistance form's slope goes to zero there instead, which the
+    Modified Nodal Analysis system carries as a small diagonal entry. A Hazen-Williams pipe
+    keeps EPANET's ``RQtol`` floor on that slope (``gradient_floor``, m per m^3/s), so a
+    loop of pipes at zero flow still has a nonsingular Jacobian.
+    """
+
+    def __init__(self, pipe, *, gradient_floor: float = 0.0, kind: str = "pipe") -> None:
+        super().__init__(kind)
+        self.pipe = pipe
+        self.gradient_floor = float(gradient_floor)
+        self.scale = float(getattr(pipe, "scale", 1.0))
+
+    def residual(self, dp, q, drivers, ctx):
+        if isinstance(self.pipe, HazenWilliams):
+            h = self.pipe.head_loss(q, self.gradient_floor)
+        else:
+            h = self.pipe.head_loss(q)
+        return dp - self.scale * h
+
+
+class TankStorage(ImplicitLaw):
+    """A cylindrical tank as storage (`build_model(tank_mode="storage")`): an edge from the
+    tank's node to a datum at head 0, so that ``dp`` is the tank's head times ``scale`` and
+    the edge's flow is the net inflow into the tank. The volume above the datum changes by
+    ``A dH``, so in a step of ``dt``:
+
+    - backward Euler: ``q = A (H - H_prev) / dt``;
+    - trapezoidal: ``q + q_prev = 2 A (H - H_prev) / dt``;
+
+    with ``H = dp / scale``. ``mode="initial"`` holds the head at ``head0`` (the tank's
+    bottom plus its initial level, m); ``mode="dc"`` is a closed tank (no inflow). EPANET
+    itself steps the level explicitly (`build_model`'s default ``tank_mode="explicit"``);
+    this implicit form differs from it by the step's own discretisation error and is
+    differentiable through time.
+    """
+
+    dynamic = True
+    linear = True
+
+    def __init__(self, area, head0, *, scale: float = 1.0, kind: str = "tank") -> None:
+        super().__init__(kind)
+        self.area = self._param(area, False)
+        self.head0 = self._param(head0, False)
+        self.scale = float(scale)
+
+    def residual(self, dp, q, drivers, ctx):
+        if ctx.mode == "dc":
+            return q
+        if ctx.mode == "initial":
+            return dp - self.scale * self.head0
+        if ctx.mode != "transient":
+            raise ValueError(f"tank kind {self.kind!r}: mode {ctx.mode!r} is not supported")
+        rise = self.area / self.scale * (dp - ctx.dp_prev) / ctx.dt
+        if ctx.integration == "backward_euler":
+            return q - rise
+        return q + ctx.q_prev - 2.0 * rise

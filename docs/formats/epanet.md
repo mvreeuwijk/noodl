@@ -18,7 +18,7 @@ per junction is modelled. `[TIMES]` values take an optional unit (SECONDS, MINUT
 their abbreviations; a bare number is hours, `HH:MM[:SS]` is a clock time); other units are refused.
 
 **Refused by name:** `[RULES]`; `[EMITTERS]`; `[STATUS]` with content; time-based controls (only
-`LINK <id> OPEN|CLOSED IF NODE <tank> BELOW|ABOVE <level>` is read); PRV, PSV, PBV and GPV valves;
+`LINK <id> OPEN|CLOSED IF NODE <tank> BELOW|ABOVE <level>` is read); PRV and PSV valves;
 a constant-**power** pump; a pump with a speed pattern; a tank with a volume curve; a `HEADLOSS`
 other than H-W or D-W; a closed pipe or check valve.
 
