@@ -122,7 +122,7 @@ def _held_tensors(obj):
                 yield from walk(f"{label}[{i}]", v, depth + 1)
 
     for name, value in vars(obj).items():
-        if name in ("_parameters", "_buffers", "_modules"):
+        if name in ("_parameters", "_buffers", "_modules", "_memo_cache"):
             continue
         yield from walk(name, value, 0)
     if isinstance(obj, torch.nn.Module):
