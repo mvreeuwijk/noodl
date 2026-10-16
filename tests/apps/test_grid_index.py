@@ -1,20 +1,20 @@
-"""`_grid_index` (building and electrical Modelica runners): the sorted-grid lookup equals
-the old all-pairs algorithm."""
+"""`noodl.modelica.timeline.grid_index` (shared by the building and electrical Modelica
+runners): the sorted-grid lookup equals the old all-pairs algorithm."""
 
 from __future__ import annotations
 
 import pytest
 import torch
 
-from noodl.apps.building_physics.modelica import run as building_run
-from noodl.apps.electrical.modelica import run as electrical_run
+from noodl.modelica.timeline import grid_index as _shared_grid_index
 
 F64 = torch.float64
 
 
-@pytest.fixture(params=[building_run, electrical_run], ids=["building", "electrical"])
+@pytest.fixture(params=["simulate", "simulate_circuit"])
 def grid_index(request):
-    return request.param._grid_index
+    """The shared helper, as each runner calls it."""
+    return lambda grid, times: _shared_grid_index(grid, times, caller=request.param)
 
 
 def _reference(grid, times):

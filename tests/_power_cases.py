@@ -1,11 +1,14 @@
 """Power-flow networks for tests.
 
 `power_case` returns one of MATPOWER's standard cases, fetched on first use; the calling test
-is skipped without a network connection and carries the `external` marker. `four_bus` is the
-small network of the power-flow docs, written for noodl physics, for tests that need some
+is skipped without a network connection and carries the `external` marker. On CI (the `CI`
+environment variable is set, as GitHub Actions does) an unavailable case fails the test
+instead: the workflow caches the downloads, so a missing case there is a fault. `four_bus` is
+the small network of the power-flow docs, written for noodl physics, for tests that need some
 network rather than a MATPOWER case.
 """
 
+import os
 from pathlib import Path
 
 import pytest
@@ -22,12 +25,16 @@ from noodl.apps.electrical.power import (
 )
 
 
-def power_case(name: str) -> Path:
-    """The cached, verified MATPOWER case `name`; skips the calling test without a network."""
+def power_case(name: str, **kwargs) -> Path:
+    """The cached, verified MATPOWER case `name`; skips the calling test without a network
+    (fails it on CI). `kwargs` go to `matpower_case`."""
     try:
-        return matpower_case(name)
+        return matpower_case(name, **kwargs)
     except MatpowerCaseUnavailableError as exc:
-        pytest.skip(f"MATPOWER case not available: {exc}")
+        message = f"MATPOWER case not available: {exc}"
+        if os.environ.get("CI"):
+            pytest.fail(message)
+        pytest.skip(message)
 
 
 def four_bus() -> PowerNetwork:

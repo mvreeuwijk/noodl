@@ -84,7 +84,7 @@ come from the document's signals, `Modelica.Blocks.Math` chains included; an ena
 nothing drives, and a signal driving an input the reader does not read, are refused.
 
 The step grid is the output grid plus every jump and kink of those signals and of the source
-blocks (building `assemble.driver_grid`), each interval split into `substeps` steps, so the
+blocks (`noodl.modelica.timeline.driver_grid`), each interval split into `substeps` steps, so the
 grid at `2 r` substeps is the grid at `r` halved. A step starting at a jump (and the first
 step) is backward Euler: `CircuitNames.restarts`.
 
@@ -117,19 +117,9 @@ import math
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
-from types import SimpleNamespace
 
 import torch
 
-from noodl.apps.building_physics.modelica import signals
-from noodl.apps.building_physics.modelica.assemble import (
-    driver_grid,
-    experiment_times,
-    grid_events,
-)
-from noodl.apps.building_physics.modelica.schema import (
-    ModelicaImportError as _SharedImportError,
-)
 from noodl.apps.electrical.converters import ImpedanceTransformer, PowerConverter
 from noodl.apps.electrical.laws import (
     Capacitance,
@@ -143,13 +133,17 @@ from noodl.apps.electrical.laws import (
 )
 from noodl.apps.electrical.loads import ConstantPowerLoad, Impedance
 from noodl.apps.electrical.modelica.netlist import Device, Netlist, _finite, raise_problems
-from noodl.apps.electrical.modelica.schema import CircuitDoc, Signal
+from noodl.apps.electrical.modelica.schema import FLAG_DEFAULTS, CircuitDoc, Signal
 from noodl.apps.electrical.thermal import HeatedEdge, JouleHeating
 from noodl.apps.electrical.waveforms import Constant
 from noodl.apps.electrical.waveforms import Signal as SignalWaveform
 from noodl.elements import Conductance
 from noodl.layers.kirchhoff import KirchhoffLayer
 from noodl.model import Model
+from noodl.modelica import signals, timeline
+from noodl.modelica.inputs import EVALUATION_ERRORS, SignalResolver, evaluation_problem
+from noodl.modelica.schema import flag
+from noodl.modelica.timeline import SERIES as _SERIES
 from noodl.topology import Network
 
 Tensor = torch.Tensor
@@ -174,7 +168,6 @@ _THERMAL_ROLES = ("thermal_conductor", "heat_capacitor", "fixed_temperature")
 _ITERATE_TOL = {LAYER: 1e-10, THERMAL: 1e-10}
 _ITERATE_FLOW_TOL = {LAYER: 1e-10, THERMAL: 1e-8}
 _ITERATE_MAX = 100
-_SERIES = "series:"
 _KINDS = ("voltage_source", "resistor", "diode", "capacitor", "inductor", "transformer",
           "ideal_transformer", "impedance", "load", "impedance_transformer",
           "power_converter")
@@ -252,115 +245,6 @@ class CircuitNames:
         return torch.zeros_like(total) if col.part == "imag" else total
 
 
-# ------------------------------------------------------------------------------ inputs
-# What evaluating a signal block can raise: the evaluator's own refusals, and the errors a
-# malformed parameter (a table column out of range, a non-numeric value) produces in it.
-_EVALUATION_ERRORS = (_SharedImportError, ValueError, TypeError, IndexError, KeyError,
-                      ArithmeticError)
-
-
-def _evaluation_problem(sig: Signal, exc: Exception) -> str:
-    """The problem text for a signal that could not be evaluated, naming the signal."""
-    if isinstance(exc, _SharedImportError):    # the building reader's evaluator refusing
-        return str(exc).removeprefix("modelica: ")
-    return f"{sig.name} ({sig.cls}): cannot be evaluated ({type(exc).__name__}: {exc})"
-
-
-class _Inputs:
-    """The devices' signal inputs (`"<device>.<input>"`) from the document's signals.
-
-    A `Modelica.Blocks.Math` block takes each input's value from the signal that drives
-    `"<block>.<input>"`, recursively, so a chain is evaluated from its sources outwards; a
-    block input nothing drives and a loop of blocks are refused by name (the building
-    reader's rules).
-    """
-
-    def __init__(self, sigs: tuple[Signal, ...], grid: Tensor, problems: list[str]) -> None:
-        self.grid = grid
-        self.problems = problems
-        self.by_target: dict[str, Signal] = {}
-        self.used: set[str] = set()
-        self.names = {s.name for s in sigs}
-        self._values: dict[str, Tensor | None] = {}
-        for s in sigs:
-            for target in s.drives:
-                if target in self.by_target:
-                    problems.append(f"{s.name} ({s.cls}): drives {target}, which "
-                                    f"{self.by_target[target].name} already drives")
-                    continue
-                self.by_target[target] = s
-
-    def series(self, device: Device, port: str) -> Tensor | None:
-        """The input's value at every grid time `(n_grid,)`; `None` (with a problem) when
-        nothing drives it or it cannot be evaluated."""
-        target = f"{device.name}.{port}"
-        s = self.by_target.get(target)
-        if s is None:
-            self.problems.append(f"{device.name} ({device.cls}): input {port} is enabled but "
-                                 f"no supported signal drives it")
-            return None
-        self.used.add(target)
-        return self._series(s, ())
-
-    def _series(self, s: Signal, chain: tuple[str, ...]) -> Tensor | None:
-        if s.name in self._values:
-            return self._values[s.name]
-        if s.name in chain:
-            loop = " -> ".join((*chain[chain.index(s.name):], s.name))
-            self.problems.append(f"{s.name} ({s.cls}): signal loop {loop} (feedback is not "
-                                 f"supported)")
-            return None
-        y: Tensor | None = None
-        try:
-            if signals.is_math(s):
-                values: dict[str, Tensor] = {}
-                for port in signals.math_inputs(s):
-                    src = self.by_target.get(f"{s.name}.{port}")
-                    if src is None:
-                        self.problems.append(f"{s.name} ({s.cls}): input {port} is not driven "
-                                             f"by any supported signal")
-                        continue
-                    self.used.add(f"{s.name}.{port}")
-                    value = self._series(src, (*chain, s.name))
-                    if value is not None:
-                        values[port] = value
-                if len(values) == len(signals.math_inputs(s)):
-                    y = signals.combine(s, values).expand(self.grid.shape).clone()
-            else:
-                y = signals.evaluate(s, self.grid, t_start=float(self.grid[0]))
-        except _EVALUATION_ERRORS as exc:
-            self.problems.append(_evaluation_problem(s, exc))
-            y = None
-        self._values[s.name] = y
-        return y
-
-    def values_at(self, target: str, t: Tensor) -> Tensor:
-        """The input's value at arbitrary times `t` (after `series` evaluated it)."""
-        s = self.by_target[target]
-        if signals.is_math(s):
-            values = {port: self.values_at(f"{s.name}.{port}", t)
-                      for port in signals.math_inputs(s)}
-            return signals.combine(s, values).expand(t.shape)
-        return signals.evaluate(s, t)
-
-    def breaks(self, target: str) -> set[float]:
-        """The breakpoints of the input's value inside the grid (`signals.breakpoints`)."""
-        s = self.by_target[target]
-        if signals.is_math(s):
-            out: set[float] = set()
-            for port in signals.math_inputs(s):
-                out |= self.breaks(f"{s.name}.{port}")
-            return out
-        return set(signals.breakpoints(s, float(self.grid[0]), float(self.grid[-1])))
-
-    def check_unused(self) -> None:
-        for target, s in self.by_target.items():
-            if target in self.used or target.split(".", 1)[0] in self.names:
-                continue    # read, or feeding a Math block (reported for that block)
-            self.problems.append(f"{s.name} ({s.cls}): drives {target}, which this reader "
-                                 f"does not read (the input is disabled or not supported)")
-
-
 # ------------------------------------------------------------------------------ helpers
 def _shown(value) -> str:
     """`repr(value)`, shortened for the message (a huge integer has a very long one)."""
@@ -397,12 +281,9 @@ def _positive(device: Device, key: str, problems: list[str]) -> float | None:
 
 
 def _flag(device: Device, key: str, problems: list[str]) -> bool:
-    value = device.parameters.get(key)
-    if not isinstance(value, bool):
-        problems.append(f"{device.name} ({device.cls}): parameter {key} must be true or "
-                        f"false, found {value!r}")
-        return False
-    return value
+    """A Boolean parameter of `device`, its Modelica default when not exported."""
+    return flag(device.parameters, key, default=FLAG_DEFAULTS.get(key, False),
+                problems=problems, where=f"{device.name} ({device.cls})")
 
 
 def _initial(device: Device, key: str, problems: list[str]) -> float:
@@ -441,16 +322,17 @@ class _Builder:
                 block = self._equivalent(device)
                 if block is not None:
                     self.source_blocks.append(block)
-        # A circuit has no weather reader: the grid takes no weather breaks.
-        timing = SimpleNamespace(experiment=doc.experiment,
-                                 signals=(*netlist.signals, *self.source_blocks),
-                                 components=())
-        self.times = experiment_times(doc)
-        self.grid = driver_grid(timing, substeps)
-        jumps, _ = grid_events(timing, self.grid)
+        timed = (*netlist.signals, *self.source_blocks)
+
+        def events(lo: float, hi: float) -> tuple[set[float], set[float], set[float]]:
+            return (*timeline.signal_events(timed, lo, hi), set())
+
+        self.times = timeline.experiment_times(doc.experiment)
+        self.grid = timeline.driver_grid(doc.experiment, events, substeps)
+        jumps, _ = timeline.grid_events(self.grid, events)
         self.restarts = frozenset({0} | {int(k) for k in
                                          torch.nonzero(torch.isin(self.grid, jumps)).flatten()})
-        self.inputs = _Inputs(netlist.signals, self.grid, self.problems)
+        self.inputs = SignalResolver(netlist.signals, self.grid, self.problems)
         self.n_grid = self.grid.numel()
 
     # ---------------------------------------------------------------- sources
@@ -476,11 +358,11 @@ class _Builder:
                 return None
             try:
                 return signals.evaluate(block, self.grid, t_start=float(self.grid[0]))
-            except _EVALUATION_ERRORS as exc:
-                self.problems.append(_evaluation_problem(block, exc))
+            except EVALUATION_ERRORS as exc:
+                self.problems.append(evaluation_problem(block, exc))
                 return None
         if short == "SignalVoltage":
-            return self.inputs.series(device, "v")
+            return self.inputs.require(device, "v")
         if short in _VARIABLE_FREQUENCY:
             return self._variable_frequency(device, cosine=short.startswith("Cosine"))
         self.problems.append(f"{device.name} ({device.cls}): voltage source is not "
@@ -495,7 +377,7 @@ class _Builder:
         if _flag(device, "useConstantFrequency", p):
             means = torch.full_like(dt, _number(device, "constantFrequency", p))
         else:
-            if self.inputs.series(device, "f") is None:
+            if self.inputs.require(device, "f") is None:
                 return None
             target = f"{device.name}.f"
             means = signals.interval_means(lambda t: self.inputs.values_at(target, t),
@@ -504,7 +386,7 @@ class _Builder:
         if _flag(device, "useConstantAmplitude", p):
             amplitude = _number(device, "constantAmplitude", p)
         else:
-            amplitude = self.inputs.series(device, "V")
+            amplitude = self.inputs.require(device, "V")
             if amplitude is None:
                 return None
         return offset + amplitude * (torch.cos(phi) if cosine else torch.sin(phi))
@@ -588,7 +470,7 @@ class _Builder:
         values = {k: _number(d, k, p) for k in ("alpha", "T_ref")}
         values["T"] = _number(d, "T", p)
         if _short(d) == "VariableResistor":
-            values.update(R=1.0, scale=self.inputs.series(d, "R"))
+            values.update(R=1.0, scale=self.inputs.require(d, "R"))
         else:
             values.update(R=_number(d, "R", p), scale=None)
         self.add("resistor", d, d.nodes["p"], d.nodes["n"], **values)
@@ -638,10 +520,10 @@ class _Builder:
         if mode == _MODE + "FixedZ_steady_state":
             P, scale = P_nominal, torch.ones(self.n_grid, dtype=F64)
         elif mode == _MODE + "VariableZ_y_input":
-            y = self.inputs.series(d, "y")
+            y = self.inputs.require(d, "y")
             P, scale = P_nominal, None if y is None else _LOAD_EPS + (1.0 - _LOAD_EPS) * y
         elif mode == _MODE + "VariableZ_P_input":
-            P, scale = 1.0, self.inputs.series(d, "Pow")
+            P, scale = 1.0, self.inputs.require(d, "Pow")
         else:
             p.append(f"{d.name} ({d.cls}): load mode {mode!r} is not supported")
             return

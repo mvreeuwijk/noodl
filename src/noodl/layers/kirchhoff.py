@@ -492,6 +492,23 @@ class KirchhoffLayer(TopologyGuard):
         """
         return self.net.difference()[self.cols]
 
+    @property
+    def linear(self) -> bool:
+        """True when every law and node source is affine (`ConstitutiveLaw.linear`): an MNA
+        solve then takes the full Newton step from the start and converges in one
+        iteration."""
+        return (all(el.linear for el in self._laws)
+                and all(ns.linear for ns in self._node_sources))
+
+    def net_outflow(self, q: torch.Tensor) -> torch.Tensor:
+        """The net flow OUT of the network at every node, `(..., n_nodes)`, from the edge
+        flows `q` (`(..., b)`, in this layer's edge order): each edge's flow leaves its
+        source node and enters its target node. Interior rows are the KCL imbalance (zero
+        at a converged solve without sources); boundary rows are what the boundary
+        supplies, negated (the inflow from the network is `-net_outflow(q)[..., bound]`).
+        Differentiable in `q`."""
+        return self._accumulate(q)
+
     # ------------------------------------------------------- sparse topology primitives
     def _difference(self, phi: torch.Tensor) -> torch.Tensor:
         """`self._diff @ phi` without the matrix: `phi[..., src] - phi[..., tgt]`.

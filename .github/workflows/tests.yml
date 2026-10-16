@@ -16,6 +16,12 @@ jobs:
       - run: python -m pip install --upgrade pip
       - run: pip install torch --index-url https://download.pytorch.org/whl/cpu
       - run: pip install -e ".[dev]"
+      # The MATPOWER cases the power-flow tests fetch (`matpower_case`); the key changes with the
+      # pinned release and digests in cases.py.
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/noodl
+          key: noodl-cache-${{ hashFiles('src/noodl/apps/electrical/power/cases.py') }}
       - run: ruff check .
       # -rs lists every skipped test with its reason, so a reference comparison that
       # silently stopped running (missing engine, missing cache) is visible in the log.

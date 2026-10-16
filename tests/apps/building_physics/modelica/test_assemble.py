@@ -198,7 +198,7 @@ def test_mixed_model_conserves_mass_and_accumulates_the_trace_substance():
     air = model.kirchhoff["air"]
     q = hist["air.q"]
     s = drivers["air.sources"]
-    net_out = torch.stack([air._accumulate(q[k]) for k in range(q.shape[0])])
+    net_out = torch.stack([air.net_outflow(q[k]) for k in range(q.shape[0])])
     for zone in ("volA", "volB", "volTop"):
         i = names.nodes[zone]
         # Quasi-steady mass balance at every zone: outflow = injected mass (the CO2 source).
@@ -486,7 +486,7 @@ def test_mass_flow_source_injects_mass_and_enthalpy(tmp_path):
     assert float(drivers["thermal.sources"][i]) == pytest.approx(cp * 0.01 * 310.0)
     hist = simulate(model, state, drivers, names.times[:3])
     air = model.kirchhoff["air"]
-    assert float(air._accumulate(hist["air.q"][-1])[i]) == pytest.approx(0.01, abs=1e-10)
+    assert float(air.net_outflow(hist["air.q"][-1])[i]) == pytest.approx(0.01, abs=1e-10)
 
 
 def test_an_extracting_mass_flow_source_draws_the_zones_own_air(tmp_path):
@@ -506,7 +506,7 @@ def test_an_extracting_mass_flow_source_draws_the_zones_own_air(tmp_path):
     assert float(written["thermal.sources"].abs().sum()) == pytest.approx(cp * 0.01 * T)
     hist = simulate(model, state, drivers, names.times[:3])
     air = model.kirchhoff["air"]
-    assert float(air._accumulate(hist["air.q"][-1])[i]) == pytest.approx(-0.01, abs=1e-10)
+    assert float(air.net_outflow(hist["air.q"][-1])[i]) == pytest.approx(-0.01, abs=1e-10)
 
 
 def test_an_extracting_trace_substance_source_is_refused(tmp_path):

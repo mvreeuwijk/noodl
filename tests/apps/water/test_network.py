@@ -497,7 +497,7 @@ def test_tank_inflow_is_the_net_inflow_at_the_tank():
     model, state, drivers = build_model(twoloop())
     final = water_steady(model, state, drivers)
     layer = model.kirchhoff["water"]
-    inflow = -layer._accumulate(final["water.q"])[..., layer.bound]
+    inflow = -layer.net_outflow(final["water.q"])[..., layer.bound]
     # the reservoir supplies the whole demand
     assert float(inflow[0]) == pytest.approx(-0.045, abs=1e-12)
     assert model.tank_closure is None

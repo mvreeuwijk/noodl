@@ -845,10 +845,10 @@ def _refuse_pump_overflow(model: Model, state: State) -> None:
 def tank_inflow(model: Model, state: State) -> Tensor:
     """Net inflow (m3/s) at every tank node, from the layer's solved branch flows.
 
-    `KirchhoffLayer._accumulate(q)` is `A q`, the net OUTflow at every node, so the
-    inflow is its negation restricted to the tank rows -- the same identity
-    `Model.ports` uses for `boundary_flows`.
+    `KirchhoffLayer.net_outflow(q)` is the net OUTflow at every node, so the inflow is
+    its negation restricted to the tank rows -- the same identity `Model.ports` uses for
+    `boundary_flows`.
     """
     layer = model.kirchhoff["water"]
     first = model.tank_closure.tank_first_index
-    return -layer._accumulate(state["water.q"])[..., layer.bound[first:]]
+    return -layer.net_outflow(state["water.q"])[..., layer.bound[first:]]

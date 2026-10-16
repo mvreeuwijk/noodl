@@ -4,7 +4,6 @@ import math
 
 import pytest
 import torch
-from torch.func import jvp
 
 from noodl.apps.electrical import (
     Capacitance,
@@ -333,7 +332,8 @@ def test_diode_no_overflow_at_large_forward_voltage():
     d = JunctionDiode()
     dp = T([100.0])
     i = d.flow(dp)
-    _, di = jvp(lambda x: d.flow(x), (dp,), (torch.ones_like(dp),))
+    x = dp.clone().requires_grad_(True)
+    di, = torch.autograd.grad(d.flow(x), x, torch.ones_like(dp))   # as the MNA Jacobian takes it
     assert torch.isfinite(i).all() and torch.isfinite(di).all()
     _close(i, [_diode_current(100.0)], tol=1e-6)
     _close(di, [1e-6 * math.exp(15.0) / 0.04 + 1e-8], tol=1e-9)

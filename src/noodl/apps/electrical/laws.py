@@ -144,6 +144,7 @@ class PrescribedVoltage(_Source, ImplicitLaw):
     """
 
     phasor_capable = True
+    linear = True
 
     def __init__(self, amplitude, *, waveforms=None, offset=0.0,
                  kind: str = "voltage_source", learnable: bool = False) -> None:
@@ -164,6 +165,7 @@ class PrescribedCurrent(_Source, ConstitutiveLaw):
     dp_independent = True
     contextual = True
     phasor_capable = True
+    linear = True
 
     def __init__(self, amplitude, *, waveforms=None, offset=0.0,
                  kind: str = "current_source", learnable: bool = False) -> None:
@@ -185,6 +187,7 @@ class Resistance(ConstitutiveLaw):
     """
 
     phasor_capable = True
+    linear = True
 
     def __init__(self, R, *, alpha=0.0, T_ref=300.15, temperature: str | None = None,
                  scale: str | None = None, kind: str = "resistor",
@@ -224,6 +227,7 @@ class Capacitance(ImplicitLaw):
 
     dynamic = True
     phasor_capable = True
+    linear = True
 
     def __init__(self, C, *, v0=0.0, kind: str = "capacitor", learnable: bool = False) -> None:
         super().__init__(kind)
@@ -251,6 +255,7 @@ class Inductance(ImplicitLaw):
 
     dynamic = True
     phasor_capable = True
+    linear = True
 
     def __init__(self, L, *, i0=0.0, kind: str = "inductor", learnable: bool = False) -> None:
         super().__init__(kind)
@@ -351,6 +356,7 @@ class SwitchedConductance(ConstitutiveLaw):
     """
 
     phasor_capable = True
+    linear = True
 
     def __init__(self, control, *, Ron=1e-5, Goff=1e-5, kind: str = "switch") -> None:
         super().__init__(kind)
@@ -400,6 +406,7 @@ class TransformerRatio(ImplicitLaw):
 
     ports = 2
     phasor_capable = True
+    linear = True
 
     def __init__(self, n, *, kind: str = "ideal_transformer", learnable: bool = False) -> None:
         super().__init__(kind)
@@ -421,6 +428,7 @@ class MutualInductance(ImplicitLaw):
     ports = 2
     dynamic = True
     phasor_capable = True
+    linear = True
 
     def __init__(self, L1, L2, M, *, i0=(0.0, 0.0), kind: str = "transformer",
                  learnable: bool = False) -> None:
@@ -461,6 +469,7 @@ class DependentSource(ImplicitLaw):
 
     ports = 2
     phasor_capable = True
+    linear = True
 
     def __init__(self, gain, *, control: str, output: str, kind: str | None = None,
                  learnable: bool = False) -> None:

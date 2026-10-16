@@ -170,19 +170,19 @@ def test_steady_default_tolerances_and_step_keywords_reach_the_model(tmp_path):
 def test_a_heat_port_circuit_is_solved_at_the_thermal_round_off_tolerance():
     # MSL Resistor: 220 V sine heating R(T) through G = 50 W/K to 293.15 K. The electrical
     # absolute tolerance would stall the heat balance (round-off ~ eps G T, W), so the
-    # runner's steady default is THERMAL_STEADY_ATOL there; the coupled state is the hand
-    # fixed point at the 220 V peak (t = 0.25 s).
+    # runner gives the thermal layer THERMAL_STEADY_ATOL (and the electrical one keeps
+    # STEADY_ATOL); the coupled state is the hand fixed point at the 220 V peak (t = 0.25 s).
     model, state, drivers, names = read_modelica_circuit(DATA / "Analog.Examples.Resistor.json")
     calls = []
     steady = model.steady
 
     def recording(*args, **kwargs):
-        calls.append((kwargs["atol"], kwargs["rtol"]))
+        calls.append((kwargs["atol"], kwargs["rtol"], kwargs["layer_options"]))
         return steady(*args, **kwargs)
 
     model.steady = recording
     out = simulate_circuit(model, state, drivers, names, times=[0.0, 0.25])
-    assert calls == [(THERMAL_STEADY_ATOL, STEADY_RTOL)] * 2
+    assert calls == [(STEADY_ATOL, STEADY_RTOL, {"thermal": {"atol": THERMAL_STEADY_ATOL}})] * 2
     T = names.value(out, "resistor.T_heatPort")
     assert float(T[0]) == pytest.approx(293.15, abs=1e-9)
     assert abs(float(T[1]) - 302.73806893411466) <= 1e-9
@@ -206,10 +206,11 @@ def test_returned_time_is_the_grid_time_and_never_an_input_tensor(tmp_path):
     assert part["time"] is not asked and float(part["time"][0]) == float(names.times[1])
 
 
-def test_extrapolate_is_the_circuit_runs_richardson_step(tmp_path):
-    from noodl.apps.building_physics.modelica.run import extrapolate as building_extrapolate
+def test_extrapolate_is_the_shared_richardson_step(tmp_path):
+    from noodl.apps.building_physics.modelica import extrapolate as building_extrapolate
+    from noodl.modelica.timeline import extrapolate as shared
 
-    assert extrapolate is not building_extrapolate and "simulate_circuit" in extrapolate.__doc__
+    assert extrapolate is shared is building_extrapolate
     coarse = {"time": torch.tensor([0.0, 1.0]), "x": torch.tensor([1.0, 4.0])}
     fine = {"time": torch.tensor([0.0, 1.0]), "x": torch.tensor([1.0, 7.0])}
     assert extrapolate(coarse, fine)["x"].tolist() == [1.0, 8.0]

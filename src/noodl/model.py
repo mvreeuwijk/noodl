@@ -35,7 +35,9 @@ the closure integrates once per pass instead of once per step until the key is s
 
 `**solve_kwargs` of `step`/`steady` reach the POTENTIAL solves only (`differentiable`,
 `on_failure`, `method`, Newton kwargs). The keywords the Model sets itself (`phi0`, `q0`,
-`history`, `dt`, `t`) are refused there by name. Transport steps always raise on failure.
+`history`, `dt`, `t`) are refused there by name. `layer_options` gives one Kirchhoff layer
+its own keywords on top of them (`{"thermal": {"atol": 1e-11}}`: a heat balance whose
+round-off floor is above the electrical layer's tolerance). Transport steps always raise on failure.
 
 Differentiability: ping-pong is one pass of differentiable operations; iterate carries no
 graph on its primal passes and attaches the IMPLICIT adjoint of its converged interface to
@@ -72,6 +74,8 @@ _STATE_SUFFIXES = ("phi", "q", "x", "s")
 #: Potential-solve keywords the Model sets itself from the state, the step and `t`; refused
 #: among `**solve_kwargs` of `step`/`steady`.
 _MODEL_SOLVE_KEYS = frozenset({"phi0", "q0", "history", "dt", "t"})
+# The key `layer_options` travels under inside `solve_kwargs`, to `_pass`'s layer solves.
+_LAYER_OPTIONS = "layer_options"
 
 
 def _detached(diag):
@@ -278,6 +282,22 @@ class Ports:
     # construction of `Ports` keeps working.
     flow_keys: dict[str, str] = field(default_factory=dict)
 
+
+
+def _with_layer_options(solve_kwargs: dict, layer_options) -> dict:
+    """`solve_kwargs` carrying `layer_options` (a plain dict per layer) to `_pass`."""
+    if not layer_options:
+        return solve_kwargs
+    return {**solve_kwargs, _LAYER_OPTIONS: {k: dict(v) for k, v in layer_options.items()}}
+
+
+def _layer_kwargs(solve_kwargs: dict, name: str) -> dict:
+    """The keywords of Kirchhoff layer `name`'s solve: `solve_kwargs` with that layer's
+    `layer_options` applied over them."""
+    if _LAYER_OPTIONS not in solve_kwargs:
+        return solve_kwargs
+    shared = {k: v for k, v in solve_kwargs.items() if k != _LAYER_OPTIONS}
+    return {**shared, **solve_kwargs[_LAYER_OPTIONS].get(name, {})}
 
 class Model:
     """Layers on one `Network`, stepped together. See the module docstring for the keys.
@@ -969,7 +989,7 @@ class Model:
                 # The implicit-law flows' warm start goes with the potentials' (`phi0`).
                 circuit.pop("q0", None)
             phi, q = layer.solve(pb, drv, sources, phi0=phi0, diagnostics=d, **circuit,
-                                 **solve_kwargs)
+                                 **_layer_kwargs(solve_kwargs, name))
             new[f"{name}.phi"], new[f"{name}.q"] = phi, q
             made += [f"{name}.phi", f"{name}.q"]
             diag[name] = d
@@ -1198,6 +1218,7 @@ class Model:
         self, state, drivers, dt: float, *, t: float | None = None,
         diagnostics: dict | None = None,
         boundary_transfers: bool | Collection[str] = False, warm_start: bool = True,
+        layer_options: Mapping[str, Mapping] | None = None,
         **solve_kwargs,
     ):
         """Advance one step (ping-pong or iterated coupling, per `self.coupling`).
@@ -1228,6 +1249,11 @@ class Model:
         initial guess instead, while closures and node sources still read `"<layer>.phi"`
         as an input (a retry after a warm start failed to converge, without losing that
         input).
+
+        `layer_options` maps a Kirchhoff layer's name to keywords for that layer's solve
+        only, applied over `**solve_kwargs` (and so over the layer's own `newton_defaults`):
+        `{"thermal": {"atol": 1e-11}}`. A name that is not a Kirchhoff layer of this model,
+        or a keyword the Model sets itself, is refused by name.
         """
         if not dt > 0:
             raise ValueError(f"Model: dt must be positive, got {dt!r}")
@@ -1249,12 +1275,14 @@ class Model:
                     f"model (has {sorted(self.transport)})"
                 )
         return self._advance(
-            state, drivers, float(dt), diagnostics, solve_kwargs, t=t,
+            state, drivers, float(dt), diagnostics,
+            _with_layer_options(solve_kwargs, layer_options), t=t,
             boundary_transfers=boundary_transfers, warm_start=warm_start,
         )
 
     def steady(self, state, drivers, *, t: float | None = None,
-               diagnostics: dict | None = None, warm_start: bool = True, **solve_kwargs):
+               diagnostics: dict | None = None, warm_start: bool = True,
+               layer_options: Mapping[str, Mapping] | None = None, **solve_kwargs):
         """The quasi-steady state of every layer at `drivers` (transport layers solved to
         `rate == 0` rather than advanced).
 
@@ -1272,22 +1300,31 @@ class Model:
         `dt=None` here means the `StepContext` an INTEGRATING closure receives carries
         `dt=None` too, and `_apply_closures` refuses that by the closure's own name: a
         closure that integrates some state over an interval has no interval to integrate over
-        at a quasi-steady state. `warm_start` is `step`'s.
+        at a quasi-steady state. `warm_start` and `layer_options` are `step`'s.
         """
-        return self._advance(state, drivers, None, diagnostics, solve_kwargs, t=t,
+        return self._advance(state, drivers, None, diagnostics,
+                             _with_layer_options(solve_kwargs, layer_options), t=t,
                              warm_start=warm_start)
 
     def _advance(
         self, state, drivers, dt, diagnostics, solve_kwargs, *, t=None,
         boundary_transfers: bool | Collection[str] = False, warm_start: bool = True,
     ) -> State:
-        owned = sorted(_MODEL_SOLVE_KEYS.intersection(solve_kwargs))
-        if owned:
+        options = solve_kwargs.get(_LAYER_OPTIONS, {})
+        unknown = sorted(set(options) - set(self.kirchhoff))
+        if unknown:
             raise ValueError(
-                f"Model: solve keywords {owned} are set by the Model itself, not passed "
-                f"through: phi0 and q0 (the warm starts) from the state, history from the "
-                f"step-start state, dt from step's dt and t from the t= argument"
+                f"Model: layer_options names {unknown}, not Kirchhoff layer(s) of this model "
+                f"(has {sorted(self.kirchhoff)})"
             )
+        for keys in (solve_kwargs, *options.values()):
+            owned = sorted(_MODEL_SOLVE_KEYS.intersection(keys))
+            if owned:
+                raise ValueError(
+                    f"Model: solve keywords {owned} are set by the Model itself, not passed "
+                    f"through: phi0 and q0 (the warm starts) from the state, history from the "
+                    f"step-start state, dt from step's dt and t from the t= argument"
+                )
         # The coupling seam: ping-pong is exactly ONE pass, taken with the state at the start
         # of the step; `coupling="iterate"` repeats `_pass` until the named transport states
         # stop changing, and reports the pass count it took.
@@ -1822,8 +1859,7 @@ class Model:
         for name, layer in self.kirchhoff.items():
             nodes[name] = [layer.net.nodes[i] for i in layer.bound.tolist()]
             keys[name] = f"{name}.phi_boundary"
-            # _accumulate(q) is A q: net OUTflow at every node; negate for the inflow.
-            flows[name] = -layer._accumulate(state[f"{name}.q"])[..., layer.bound]
+            flows[name] = -layer.net_outflow(state[f"{name}.q"])[..., layer.bound]
         flow_keys: dict[str, str] = {}
         for name, layer in self.transport.items():
             nodes[name] = list(layer.boundary)

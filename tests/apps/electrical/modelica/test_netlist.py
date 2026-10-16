@@ -226,6 +226,19 @@ def test_converter_without_dc_ground_is_refused(tmp_path):
     assert "conv" in msg and "ground_DC" in msg and "1 problem" in msg
 
 
+def test_a_missing_flag_takes_its_modelica_default(tmp_path):
+    # ground_DC defaults to true in MBL: the converter is accepted without it, and refused
+    # once the export says false.
+    components = [
+        _c("sou", AC + "Sources.FixedVoltage", f=60.0, V=120.0),
+        _c("conv", AC + "Conversion.ACDCConverter", conversionFactor=0.5, eta=0.9),
+        _c("res", DC + "Loads.Resistor", R=1.0),
+    ]
+    connections = [["sou.terminal", "conv.terminal_n"], ["conv.terminal_p", "res.terminal"]]
+    nl = build(load(_doc(tmp_path, components, connections)))
+    assert next(d for d in nl.devices if d.name == "conv").nodes["p2"] == 0
+
+
 def test_every_fixture_builds():
     for path in sorted(p for p in DATA.glob("*.json") if p.name != "parity-electrical.json"):
         omit = ("RL_3", "load_sc_3") if "ACLine_RL" in path.name else ()
@@ -393,11 +406,11 @@ def test_connection_with_a_signal_block_end_is_skipped(tmp_path):
     assert {d.name for d in nl.devices} == {"v", "r"}
 
 
-def test_missing_or_malformed_deciding_parameters_are_refused(tmp_path):
+def test_malformed_deciding_parameters_are_refused(tmp_path):
     path = _doc(tmp_path, [
         _c("E", AC + "Sources.FixedVoltage", f="sixty", V=120.0),
-        _c("ln", AC3 + "Lines.Line", R=1.0, L=0.0, C=0.0),
-        _c("t", MSL + "Ideal.IdealTransformer", n=2.0),
+        _c("ln", AC3 + "Lines.Line", R=1.0, L=0.0, C=0.0, use_T="no"),
+        _c("t", MSL + "Ideal.IdealTransformer", n=2.0, considerMagnetization=0),
         _c("amb", HEAT + "Sources.FixedTemperature", T="warm"),
     ], [])
     msg = _refusal(path)
@@ -487,22 +500,13 @@ def test_non_finite_frequency_and_fixed_temperature_are_refused(tmp_path):
     assert "amb " in msg and "T must be a finite number, found inf" in msg
 
 
-def test_electrical_import_error_is_its_own_subclass_of_the_building_one(tmp_path, monkeypatch):
+def test_both_readers_raise_the_one_shared_import_error(tmp_path):
     from noodl.apps.building_physics.modelica import ModelicaImportError as BuildingError
-    from noodl.apps.electrical.modelica import netlist as netlist_module
-    from noodl.apps.electrical.modelica import read_modelica_circuit
+    from noodl.modelica import ModelicaImportError as SharedError
 
-    assert issubclass(ModelicaImportError, BuildingError)
-    assert ModelicaImportError is not BuildingError
-    assert "noodl-modelica-electrical/1" in ModelicaImportError.__doc__
+    assert ModelicaImportError is BuildingError is SharedError
+    doc = SharedError.__doc__
+    assert "noodl-modelica/1" in doc and "noodl-modelica-electrical/1" in doc
     path = _doc(tmp_path, [_c("x", "Some.Unknown.Class")], [])
-    with pytest.raises(BuildingError):  # either class catches a refusal
+    with pytest.raises(BuildingError):
         build(load(path))
-
-    def shared(*args, **kwargs):  # an error from the building reader's shared helpers
-        raise BuildingError("modelica: from a shared helper")
-
-    monkeypatch.setattr(netlist_module, "build", shared)
-    with pytest.raises(ModelicaImportError, match="from a shared helper") as exc:
-        read_modelica_circuit(path)
-    assert type(exc.value.__cause__) is BuildingError

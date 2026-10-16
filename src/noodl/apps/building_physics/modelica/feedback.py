@@ -48,9 +48,10 @@ from noodl.apps.building_physics.controls import (
     Sensor,
     Sum,
 )
-from noodl.apps.building_physics.modelica import expand, schema, signals
+from noodl.apps.building_physics.modelica import expand, schema
 from noodl.apps.building_physics.modelica.graph import ComponentGraph
 from noodl.apps.building_physics.modelica.schema import ModelicaDoc, Signal
+from noodl.modelica import signals
 
 Tensor = torch.Tensor
 F64 = torch.float64

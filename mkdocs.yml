@@ -81,7 +81,7 @@ nav:
   - File formats:
       - formats/index.md
       - CONTAM (.prj, .wth, .ctm): formats/contam.md
-      - Modelica Buildings Library: formats/modelica.md
+      - Modelica: formats/modelica.md
       - SWMM (.inp): formats/swmm.md
       - EPANET (.inp): formats/epanet.md
       - MATPOWER (.m): formats/matpower.md
