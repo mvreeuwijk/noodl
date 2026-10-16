@@ -32,10 +32,12 @@ from __future__ import annotations
 import difflib
 import functools
 from collections.abc import Hashable, Iterator, Mapping, Sequence
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 import torch
 
+from noodl import layout
 from noodl._broadcast import broadcast_shapes
 
 if TYPE_CHECKING:
@@ -370,15 +372,16 @@ class Field(str):
     def trailing_dims(self, tensor: Tensor) -> int:
         """How many trailing dimensions of `tensor` are this field's layout; the rest are
         batch. 1 for `(n,)`, 2 for `(n, K)`, and 2 for a single-species `(n, 1)` column
-        where the layer accepts one -- tested first, in the order
-        `TransportLayer._to_stacked` tests them; 0 for a per-instance value, whose whole
+        where the layer accepts one -- tested first, in the order `noodl.layout` tests them; 0
+        for a per-instance value, whose whole
         shape is batch. Raises `ValueError` otherwise."""
         if self.scalar and isinstance(tensor, Tensor):
             return 0
         n = len(self.labels)
         if isinstance(tensor, Tensor):
             shape = tuple(tensor.shape)
-            if (self.n_species > 1 or self.column) and shape[-2:] == (n, self.n_species):
+            if (self.n_species > 1 or self.column) and layout.is_stacked(
+                    tensor, n, self.n_species):
                 return 2
             if self.n_species == 1 and len(shape) >= 1 and shape[-1] == n:
                 return 1
@@ -388,6 +391,12 @@ class Field(str):
             f"{str(self)!r} must have trailing shape {self.trailing}{extra} "
             f"({self.ordering}), got {got}"
         )
+
+    def batch_shape(self, tensor: Tensor) -> torch.Size:
+        """The batch shape of `tensor`: its shape without this field's trailing layout
+        (`()` for an unbatched value, and the whole shape for a per-instance one). Raises
+        `ValueError` unless the trailing shape is this field's."""
+        return layout.batch_shape(tensor, self.trailing_dims(tensor))
 
     def check(self, tensor: Tensor) -> None:
         """Raise `ValueError` unless `tensor`'s trailing shape is this field's."""
@@ -444,7 +453,7 @@ def _declared_inputs(model: Model) -> dict[str, Field]:
     declare, as Fields. A spec is `{key: {"description", "unit", "over", "required",
     "ordering"}}` (all but `description` optional), or `{key: Field}` already built."""
     sources = [getattr(model, "input_specs", None) or {}]
-    sources += [getattr(c, "input_specs", None) or {} for c in model.closures]
+    sources += [model._closure_spec(c).input_specs for c in model.closures]
     sources += [getattr(r, "input_specs", None) or {} for _, r in model.reactions]
     out: dict[str, Field] = {}
     for specs in sources:
@@ -713,6 +722,20 @@ class LayerRef:
         return "\n".join([head] + [f.describe() for f in self.fields.values()])
 
 
+@dataclass(frozen=True)
+class KeyOwnership:
+    """Who writes and who reads one key of a model: `writers` and `readers` are tuples of
+    `"layer <name>"`, `"closure <label>"` or `"caller"` (the dictionary the caller gives).
+    `field` is the key's `Field` when the model knows its layout. Closure entries come from
+    the closure's DECLARATIONS (`inputs`, `outputs`, `state_keys`), so a closure that
+    declares nothing is absent."""
+
+    key: str
+    field: Field | None
+    writers: tuple[str, ...]
+    readers: tuple[str, ...]
+
+
 class LayerRefs(Mapping[str, LayerRef]):
     """Registered layer name -> `LayerRef`, plus the model's closure-carried keys.
 
@@ -737,7 +760,7 @@ class LayerRefs(Mapping[str, LayerRef]):
         net = model.net
         closure_state: dict[str, str] = {}
         for key, closure in model.closure_state_keys.items():
-            labels = dict(getattr(closure, "key_labels", {}) or {}).get(key)
+            labels = model._closure_spec(closure).key_labels.get(key)
             if labels is None:
                 closure_state[key] = key
             else:
@@ -749,6 +772,7 @@ class LayerRefs(Mapping[str, LayerRef]):
                 )
         self.closure_state = closure_state
         self.inputs = _declared_inputs(model)
+        self._model = model
 
     def __getitem__(self, name: str) -> LayerRef:
         try:
@@ -797,6 +821,46 @@ class LayerRefs(Mapping[str, LayerRef]):
         """The `Field` for `key`, or `None` when the model does not know its layout."""
         f = self.fields().get(str(key))
         return f if isinstance(f, Field) else None
+
+    def ownership(self) -> dict[str, KeyOwnership]:
+        """For every key the model knows or a closure declares: who writes it and who reads
+        it. A layer writes its state keys and reads its driver keys (the caller, or a closure
+        that declares the key among its `outputs`, writes them); a closure writes its declared
+        `outputs` and `state_keys` and reads its declared `inputs` and `state_keys`."""
+        model = self._model
+        writers: dict[str, list[str]] = {}
+        readers: dict[str, list[str]] = {}
+
+        def add(table: dict[str, list[str]], key: str, who: str) -> None:
+            if who not in table.setdefault(key, []):
+                table[key].append(who)
+
+        fields = self.fields()
+        for name, ref in self._refs.items():
+            for f in ref.fields.values():
+                if f.role == "state":
+                    add(writers, str(f), f"layer {name}")
+                else:
+                    add(readers, str(f), f"layer {name}")
+        for closure in model.closures:
+            spec = model._closure_spec(closure)
+            who = f"closure {spec.label}"
+            for key in sorted(spec.writes or ()):
+                add(writers, key, who)
+            for key in spec.state_keys:
+                add(writers, key, who)
+                add(readers, key, who)
+            for key in sorted(spec.reads or ()):
+                add(readers, key, who)
+        out: dict[str, KeyOwnership] = {}
+        for key in dict.fromkeys([*fields, *writers, *readers]):
+            w = list(writers.get(key, ()))
+            f = fields.get(key)
+            if not w or (isinstance(f, Field) and f.role == "driver"):
+                w.insert(0, "caller")
+            out[key] = KeyOwnership(
+                key, f if isinstance(f, Field) else None, tuple(w), tuple(readers.get(key, ())))
+        return out
 
     def describe(self) -> str:
         """Every layer and key: what to give, in which order, in which unit."""
