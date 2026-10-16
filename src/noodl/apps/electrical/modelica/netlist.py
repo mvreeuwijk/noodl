@@ -84,6 +84,7 @@ import math
 from collections.abc import Iterable
 from dataclasses import dataclass
 
+from noodl._unionfind import UnionFind
 from noodl.apps.electrical.modelica import schema
 from noodl.apps.electrical.modelica.schema import (
     CircuitComponent,
@@ -170,32 +171,6 @@ class Netlist:
     signals: tuple[Signal, ...]
     fixed_temperatures: dict[int, float]
     omitted: frozenset[str] = frozenset()
-
-
-# ------------------------------------------------------------------------------ union-find
-class _UnionFind:
-    def __init__(self) -> None:
-        self.parent: dict[tuple, tuple] = {}
-
-    def add(self, element: tuple) -> None:
-        self.parent.setdefault(element, element)
-
-    def find(self, element: tuple) -> tuple:
-        self.add(element)
-        root = element
-        while self.parent[root] != root:
-            root = self.parent[root]
-        while self.parent[element] != root:
-            self.parent[element], element = root, self.parent[element]
-        return root
-
-    def union(self, a: tuple, b: tuple) -> None:
-        ra, rb = self.find(a), self.find(b)
-        if ra != rb:
-            # the fixed references stay their own class's root
-            if rb in (REFERENCE, THERMAL_REFERENCE):
-                ra, rb = rb, ra
-            self.parent[rb] = ra
 
 
 def _text(element: tuple) -> str:
@@ -477,7 +452,8 @@ def build(doc: CircuitDoc, *, omit: Iterable[str] = ()) -> Netlist:
             frequency = distinct.pop()
 
     # union-find over every active component's elements
-    uf = _UnionFind()
+    # the fixed references stay their own class's root
+    uf = UnionFind(keep_root=lambda e: e in (REFERENCE, THERMAL_REFERENCE))
     uf.add(REFERENCE)
     uf.add(THERMAL_REFERENCE)
     device_elements: dict[str, dict[str, tuple]] = {}

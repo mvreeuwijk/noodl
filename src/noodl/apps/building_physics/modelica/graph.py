@@ -154,6 +154,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 
+from noodl._unionfind import UnionFind
 from noodl.apps.building_physics.modelica import schema, signals
 from noodl.apps.building_physics.modelica.schema import (
     Component,
@@ -255,32 +256,6 @@ class ComponentGraph:
     series: tuple[SeriesChain, ...] = ()
 
 
-class _UnionFind:
-    def __init__(self) -> None:
-        self._parent: dict[str, str] = {}
-
-    def __contains__(self, x: str) -> bool:
-        return x in self._parent
-
-    def find(self, x: str) -> str:
-        self._parent.setdefault(x, x)
-        root = x
-        while self._parent[root] != root:
-            root = self._parent[root]
-        while self._parent[x] != root:
-            self._parent[x], x = root, self._parent[x]
-        return root
-
-    def union(self, a: str, b: str) -> None:
-        ra, rb = self.find(a), self.find(b)
-        if ra != rb:
-            self._parent[ra] = rb
-
-    def groups(self) -> dict[str, set[str]]:
-        out: dict[str, set[str]] = {}
-        for x in self._parent:
-            out.setdefault(self.find(x), set()).add(x)
-        return out
 
 
 class _ChainRefused(Exception):
@@ -395,7 +370,7 @@ class _Ctx:
     by_name: dict[str, Component]
     kind_of: dict[str, str]
     errors: list[str]
-    uf: _UnionFind = field(default_factory=_UnionFind)
+    uf: UnionFind = field(default_factory=UnionFind)
     fluid_refs_by_instance: dict[str, list[str]] = field(default_factory=dict)
     # Fluid ports of supported components wired to a refused ("unknown") component: their
     # "not connected" follow-on is suppressed, the refused component being the root cause.

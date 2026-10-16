@@ -36,10 +36,12 @@ and ``torch``.
 
 from __future__ import annotations
 
-from collections.abc import Hashable, Iterable, Sequence
+from collections.abc import Hashable, Sequence
 
 import networkx as nx
 import torch
+
+from noodl._unionfind import UnionFind
 
 Node = Hashable
 EdgeKey = tuple[Hashable, Hashable, int]
@@ -413,7 +415,7 @@ class Network:
             return self._cache[key]
         cols = self.edge_index(kind).tolist()
         edges = [self.edges[c] for c in cols]
-        uf = _UnionFind(self.graph.nodes)
+        uf = UnionFind(self.graph.nodes)
         tree: list[int] = []
         chord: list[int] = []
         for j, (u, v, _) in enumerate(edges):
@@ -530,21 +532,3 @@ class Network:
     # ------------------------------------------------------------------ misc
     def __repr__(self) -> str:
         return f"Network(n={self.n}, b={self.b}, kinds={sorted(set(self.edge_kinds()))})"
-
-
-class _UnionFind:
-    def __init__(self, items: Iterable[Node]) -> None:
-        self.parent = {item: item for item in items}
-
-    def find(self, x: Node) -> Node:
-        while self.parent[x] != x:
-            self.parent[x] = self.parent[self.parent[x]]
-            x = self.parent[x]
-        return x
-
-    def union(self, a: Node, b: Node) -> bool:
-        ra, rb = self.find(a), self.find(b)
-        if ra == rb:
-            return False
-        self.parent[rb] = ra
-        return True
