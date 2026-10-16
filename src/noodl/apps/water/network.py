@@ -648,6 +648,12 @@ def build_model(
             )
         demand = torch.tensor([j.demand for j in net.junctions], dtype=F64)
         removal = (demand / cap_i + quality / 86400.0).unsqueeze(-1)
+        # Under PDA the junctions withdraw the DELIVERED demand, not the requested one. The
+        # layer's `dilution = 1` adds `net_inflow(q) / capacity` to the removal, and at a
+        # junction the net inflow of the pass's own flows IS the delivered demand (continuity),
+        # so the sink follows the current hydraulic solution with no closure and no lag.
+        if pda:
+            removal = (quality / 86400.0) * torch.ones(len(interior), 1, dtype=F64)
         notes["quality_capacity"] = (
             "on a looped network a junction's capacity is HALF the volume of every "
             "incident pipe; a single outgoing pipe is a tree property"
@@ -657,10 +663,14 @@ def build_model(
             "it the advective generator has non-zero row sums and the steady system is "
             "singular (measured on twoloop_si.inp)"
         )
+        # Every hydraulic edge kind carries water, so every one advects the tracer:
+        # pipes, pumps and valves alike (a device is a zero-volume edge).
+        transport_kinds = tuple(layer.kinds)
         layers["quality"] = TransportLayer(
-            graph, "quality", capacity=cap_i, flow_kind="pipe",
+            graph, "quality", capacity=cap_i, flow_kind=transport_kinds,
             boundary=boundary, n_species=1, removal=removal, scheme="implicit",
             quantity="concentration", unit="kg/m3",
+            dilution=1.0 if pda else None,
             source_unit="kg/s", capacity_unit="m3", flow_unit="m3/s",
         )
         drivers["quality.x_boundary"] = torch.zeros(len(boundary), dtype=F64)
