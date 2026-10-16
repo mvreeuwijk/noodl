@@ -95,11 +95,19 @@ def write_network_concentration(
             time_np=time_np, feature_np=feature_np, osmid_np=osmid_np,
             background_np=background_np, canyon_np=canyon_np,
             concentration_np=concentration_np))
+        os.chmod(tmp_name, 0o666 & ~_umask())   # mkstemp's 0600 is not an export's mode
         os.replace(tmp_name, path)
     except BaseException:
         Path(tmp_name).unlink(missing_ok=True)
         raise
     return path
+
+
+def _umask() -> int:
+    """The process umask, read without changing it (`os.umask` can only set-and-return)."""
+    mask = os.umask(0)
+    os.umask(mask)
+    return mask
 
 
 def _write_netcdf(netcdf_file, target, v) -> None:

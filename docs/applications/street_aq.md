@@ -98,7 +98,7 @@ street-network cases](street_aq_cases.md).
 
 | Object | Purpose |
 |---|---|
-| `Street(name, u, v, length, width, height, z0_b=0.15, emission_scale=1.0)` | One canyon segment between two junctions. `emission_scale` multiplies the street's emissions in `drivers_at`. |
+| `Street(name, u, v, length, width, height, z0_b=0.15, emission_scale=1.0)` | One canyon segment between two junctions. `emission_scale` multiplies the street's `street.sources` inside the model (so also for hand-supplied sources and `initial_drivers(values=...)`) and its emissions in `write_case`'s decks; matched by street name, applied once. |
 | `StreetNetwork(streets, x, y, street_direction="planar", lon=None, lat=None)` | The network plus junction coordinates. `azimuth` gives each street's direction in radians CCW from east, computed as `street_direction` says (see below); `junctions` and `degree(node)` describe the topology. |
 | `from_test_network()` | A 4-junction, 3-street test network. |
 | `twelve_street_grid(L=100.0, W=20.0, H=20.0)` | The 12-street network of Kim et al. 2022 Fig. 1 (MUNICH's idealised case). `L`, `W`, `H` are arguments because the paper never published them. |

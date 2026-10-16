@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import os
+import stat
+
 import numpy as np
 import pytest
 import torch
@@ -149,3 +152,35 @@ def test_a_failed_export_leaves_an_existing_destination_untouched(tmp_path):
         write_network_concentration(dest, **kw)
     assert dest.read_bytes() == b"previous product"
     assert [p.name for p in tmp_path.iterdir()] == ["out.nc"]
+
+
+def test_a_failure_after_the_temp_file_exists_cleans_up(tmp_path, monkeypatch):
+    from noodl.apps.street_aq import report
+
+    dest = tmp_path / "out.nc"
+    dest.write_bytes(b"previous product")
+    seen = []
+
+    def boom(netcdf_file, target, values):
+        seen.append(target)
+        with open(target, "wb") as handle:    # the temp file exists, partly written
+            handle.write(b"partial")
+        raise RuntimeError("disk full")
+
+    monkeypatch.setattr(report, "_write_netcdf", boom)
+    with pytest.raises(RuntimeError, match="disk full"):
+        write_network_concentration(dest, **_kwargs(torch.zeros(2, 3, dtype=DT), tmp_path))
+    assert seen and seen[0] != str(dest)
+    assert dest.read_bytes() == b"previous product"
+    assert [p.name for p in tmp_path.iterdir()] == ["out.nc"]
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX permission bits")
+def test_the_product_has_the_umask_mode_not_mkstemps_0600(tmp_path):
+    old = os.umask(0o027)
+    try:
+        dest = write_network_concentration(
+            tmp_path / "out.nc", **_kwargs(torch.zeros(2, 3, dtype=DT), tmp_path))
+    finally:
+        os.umask(old)
+    assert stat.S_IMODE(dest.stat().st_mode) == 0o640

@@ -20,6 +20,7 @@ from noodl.apps.street_aq.closures import resolve
 from noodl.apps.street_aq.routing import StreetFlows, StreetGeometry
 from noodl.layers.reaction import Reaction
 from noodl.layers.transport import TransportLayer, active_interior
+from noodl.layout import as_stacked
 from noodl.model import Drivers, Model, State
 from noodl.refs import initial_drivers as refs_initial_drivers
 from noodl.refs import state_from
@@ -36,6 +37,13 @@ class Street:
     `length`, `width` and building `height` (m), the roughness length of its building walls
     `z0_b` (m, 0.15 by default) and `emission_scale`, a dimensionless factor applied to its
     emissions.
+
+    `emission_scale` multiplies the street's `"street.sources"` driver INSIDE the model
+    (`build_model`'s transport layer), so it holds on every route that supplies sources --
+    `drivers_at`, `initial_drivers(values=...)`, a hand-built driver -- and the driver itself
+    stays the unscaled inventory. `write_case` applies the same factor to the emissions it
+    writes into a MUNICH or SIRANE deck, so a noodl run and its exported deck agree. It is
+    looked up by street name, never by position, and applied exactly once on each route.
     """
 
     name: str
@@ -258,6 +266,36 @@ munich_idealised = twelve_street_grid
 """Earlier name of `twelve_street_grid`."""
 
 
+class _ScaledSourcesTransport(TransportLayer):
+    """A `TransportLayer` whose interior sources are multiplied by per-street factors.
+
+    The factors are `Street.emission_scale`, matched to rows by street NAME (the layer's
+    interior node names), and the one place they are applied: every path that consumes the
+    `sources` driver (`rate`, `step`, `steady`) reads it through `_sources_interior`.
+    """
+
+    emission_scale: torch.Tensor | None = None
+
+    def set_emission_scale(self, scales: Mapping[str, float]) -> None:
+        names = [self.net.nodes[i] for i in self.interior_idx.tolist()]
+        values = [float(scales[name]) for name in names]
+        if all(v == 1.0 for v in values):
+            self.emission_scale = None
+        else:
+            self.emission_scale = torch.tensor(values, dtype=_DTYPE)
+
+    def _sources_interior(self, sources: torch.Tensor) -> torch.Tensor:
+        rows = super()._sources_interior(sources)
+        if self.emission_scale is None:
+            return rows
+        _, reduced = as_stacked(sources, self.net.n, self.n_species, name="sources",
+                                where="sources")
+        node_dim = rows.dim() - (1 if reduced else 2)
+        shape = [1] * rows.dim()
+        shape[node_dim] = self.n_i
+        return rows * self.emission_scale.to(rows.dtype).reshape(shape)
+
+
 def build_model(
     net: StreetNetwork,
     *,
@@ -414,11 +452,12 @@ def build_model(
         [s.length * s.width * s.height for s in net.streets], dtype=_DTYPE
     )
     n_species = len(tuple(species))
-    layer = TransportLayer(
+    layer = _ScaledSourcesTransport(
         graph, layer_name, capacity=capacity, flow_kind=kinds, boundary=boundary,
         n_species=n_species, scheme=scheme, quantity="concentration", unit="kg/m3",
         species_names=tuple(species), source_unit="kg/s", capacity_unit="m3", flow_unit="m3/s",
     )
+    layer.set_emission_scale({s.name: s.emission_scale for s in net.streets})
     closure = StreetFlows(
         graph, layer, street_geometry(net), preset=preset, n_theta=n_theta,
         sigma_theta=sigma_theta, z0_s=z0_s, z_ref=z_ref, pblh_floor=pblh_floor,

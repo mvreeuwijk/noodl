@@ -137,8 +137,7 @@ network-wide mean. Species are matched by name: `species` defaults to the model'
 `species_names`, so a case ordered `NO, NO2` correctly drives a model ordered `NO2, NO` (or a
 model of a subset of the case's species), for emissions and background alike. An explicit
 `species` must equal the model's species in the model's order, otherwise `drivers_at` raises.
-Each street's `Street.emission_scale` multiplies its emissions here, once, when the sources
-driver is assembled (the case's emissions and the background are not otherwise modified). The model's own street order
+The sources driver is the case's unscaled emissions: each street's `Street.emission_scale` is applied inside the model (`build_model`), once, by street name, and `write_case` applies it to the emissions it writes into a MUNICH or SIRANE deck, so a noodl run and its deck agree. It is not applied in `drivers_at`; the background is never scaled. The model's own street order
 (`street_index(model)`) must equal `case.street_ids` -- build the model on `case.network`
 itself.
 
