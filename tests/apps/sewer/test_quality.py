@@ -279,6 +279,16 @@ def test_lateral_loads_writes_only_the_named_columns_at_the_named_nodes():
     assert torch.equal(sources, expected)
 
 
+def test_lateral_loads_does_not_load_a_withdrawal_at_the_external_concentration():
+    """A negative inflow is an outflow at the local concentration (applied by the dynamic-wave
+    hydraulics' loss fraction), so it contributes no source whatever `c_in` is."""
+    closure = q.LateralLoads(2, columns={0: "bod_in"}, n_species=1)
+    out = closure({}, {"inflow": torch.tensor([-0.01, 0.02], dtype=F64),
+                       "bod_in": torch.tensor([0.5, 0.5], dtype=F64)})
+    torch.testing.assert_close(out["water_quality.sources"],
+                               torch.tensor([0.0, 0.01], dtype=F64))
+
+
 def test_lateral_loads_refuses_a_wrong_shaped_driver_by_name():
     closure = q.LateralLoads(5, columns={0: "bod_in"}, n_species=1)
     with pytest.raises(ValueError, match="'inflow'"):
