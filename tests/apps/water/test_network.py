@@ -535,3 +535,50 @@ def test_net1_pump_stays_below_q_max_and_is_not_refused():
     model, state, drivers = build_model(net)
     final = water_steady(model, state, drivers)
     assert torch.isfinite(final["water.phi"]).all()
+
+
+# ---------------------------------------------------------- quality: constant-tracer invariants
+def _device_network(device):
+    """R - pipe - A - DEVICE - B - pipe - C, demands at A and C."""
+    junctions = (Junction("A", 0.0, 0.005), Junction("B", 0.0, 0.0),
+                 Junction("C", 0.0, 0.004))
+    pipes = (WaterPipe("P1", "R", "A", 500.0, 0.3, 130.0),
+             WaterPipe("P2", "B", "C", 500.0, 0.3, 130.0))
+    kwargs = {}
+    if device == "tcv":
+        kwargs["valves"] = (Valve("V", "A", "B", 0.2, "TCV", 5.0),)
+    elif device == "fcv":
+        # a flow-control valve is dp-independent: the nodes behind it need another
+        # connection to the reservoir for the head solve, and carry its flow regardless
+        kwargs["valves"] = (Valve("V", "A", "B", 0.2, "FCV", 0.002),)
+        pipes += (WaterPipe("P3", "R", "C", 500.0, 0.3, 130.0),)
+    else:
+        kwargs["pumps"] = (Pump("PU", "A", "B", "C1"),)
+        kwargs["curves"] = {"C1": ((0.004, 10.0),)}
+    return WaterNetwork(junctions=junctions, reservoirs=(Reservoir("R", 50.0),),
+                        pipes=pipes, **kwargs)
+
+
+# pda=True with a pump does not converge in the HYDRAULIC solve (quality off) on any small
+# network tried, an existing limit unrelated to quality, so that pair is not exercised.
+@pytest.mark.parametrize(
+    ("device", "pda"),
+    [("tcv", False), ("tcv", True), ("fcv", False), ("fcv", True), ("pump", False)],
+)
+def test_a_constant_tracer_is_preserved_through_every_device(device, pda):
+    kwargs = {"pda": True, "p_req": 60.0} if pda else {}
+    model, state, drivers = build_model(_device_network(device), quality=0.0, **kwargs)
+    drivers["quality.x_boundary"] = torch.tensor([100.0], dtype=F64)
+    out = water_steady(model, state, drivers)
+    assert out["quality.x"].tolist() == pytest.approx([100.0] * 3, rel=1e-8)
+
+
+def test_a_constant_tracer_is_preserved_under_pressure_driven_demand():
+    model, state, drivers = build_model(twoloop(), quality=0.0, pda=True, p_req=100.0)
+    drivers["quality.x_boundary"] = torch.tensor([100.0], dtype=F64)
+    out = water_steady(model, state, drivers)
+    # the hydraulics really are demand-limited, so the test discriminates
+    source = model.kirchhoff["water"].node_sources[0]
+    flow = source.flow(out["water.phi"][:6])
+    assert bool((flow < source.q_required.detach() * 0.999).any())
+    assert out["quality.x"].tolist() == pytest.approx([100.0] * 6, rel=1e-8)
