@@ -16,9 +16,6 @@ from __future__ import annotations
 from collections.abc import Iterable
 from pathlib import Path
 
-from noodl.apps.building_physics.modelica.schema import (
-    ModelicaImportError as _SharedImportError,
-)
 from noodl.apps.electrical.modelica import assemble, netlist, schema
 from noodl.apps.electrical.modelica.assemble import CircuitNames, Column
 from noodl.apps.electrical.modelica.run import extrapolate, simulate_circuit
@@ -43,10 +40,5 @@ def read_modelica_circuit(path: str | Path, *, substeps: int = 1, omit: Iterable
     `atol=1e-11`, `run.THERMAL_STEADY_ATOL`, with a heat-port thermal network); pass the
     same to `model.steady` when solving by hand.
     """
-    try:
-        doc = schema.load(path)
-        return assemble.build(netlist.build(doc, omit=omit), doc, substeps=substeps)
-    except ModelicaImportError:
-        raise
-    except _SharedImportError as exc:   # from the building reader's shared helpers
-        raise ModelicaImportError(str(exc)) from exc
+    doc = schema.load(path)
+    return assemble.build(netlist.build(doc, omit=omit), doc, substeps=substeps)

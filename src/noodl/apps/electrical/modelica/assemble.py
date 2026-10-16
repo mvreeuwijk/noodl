@@ -127,9 +127,6 @@ from noodl.apps.building_physics.modelica.assemble import (
     experiment_times,
     grid_events,
 )
-from noodl.apps.building_physics.modelica.schema import (
-    ModelicaImportError as _SharedImportError,
-)
 from noodl.apps.electrical.converters import ImpedanceTransformer, PowerConverter
 from noodl.apps.electrical.laws import (
     Capacitance,
@@ -143,13 +140,15 @@ from noodl.apps.electrical.laws import (
 )
 from noodl.apps.electrical.loads import ConstantPowerLoad, Impedance
 from noodl.apps.electrical.modelica.netlist import Device, Netlist, _finite, raise_problems
-from noodl.apps.electrical.modelica.schema import CircuitDoc, Signal
+from noodl.apps.electrical.modelica.schema import FLAG_DEFAULTS, CircuitDoc, Signal
 from noodl.apps.electrical.thermal import HeatedEdge, JouleHeating
 from noodl.apps.electrical.waveforms import Constant
 from noodl.apps.electrical.waveforms import Signal as SignalWaveform
 from noodl.elements import Conductance
 from noodl.layers.kirchhoff import KirchhoffLayer
 from noodl.model import Model
+from noodl.modelica.errors import ModelicaImportError
+from noodl.modelica.schema import flag
 from noodl.topology import Network
 
 Tensor = torch.Tensor
@@ -255,13 +254,13 @@ class CircuitNames:
 # ------------------------------------------------------------------------------ inputs
 # What evaluating a signal block can raise: the evaluator's own refusals, and the errors a
 # malformed parameter (a table column out of range, a non-numeric value) produces in it.
-_EVALUATION_ERRORS = (_SharedImportError, ValueError, TypeError, IndexError, KeyError,
+_EVALUATION_ERRORS = (ModelicaImportError, ValueError, TypeError, IndexError, KeyError,
                       ArithmeticError)
 
 
 def _evaluation_problem(sig: Signal, exc: Exception) -> str:
     """The problem text for a signal that could not be evaluated, naming the signal."""
-    if isinstance(exc, _SharedImportError):    # the building reader's evaluator refusing
+    if isinstance(exc, ModelicaImportError):    # the evaluator refusing
         return str(exc).removeprefix("modelica: ")
     return f"{sig.name} ({sig.cls}): cannot be evaluated ({type(exc).__name__}: {exc})"
 
@@ -397,12 +396,9 @@ def _positive(device: Device, key: str, problems: list[str]) -> float | None:
 
 
 def _flag(device: Device, key: str, problems: list[str]) -> bool:
-    value = device.parameters.get(key)
-    if not isinstance(value, bool):
-        problems.append(f"{device.name} ({device.cls}): parameter {key} must be true or "
-                        f"false, found {value!r}")
-        return False
-    return value
+    """A Boolean parameter of `device`, its Modelica default when not exported."""
+    return flag(device.parameters, key, default=FLAG_DEFAULTS.get(key, False),
+                problems=problems, where=f"{device.name} ({device.cls})")
 
 
 def _initial(device: Device, key: str, problems: list[str]) -> float:

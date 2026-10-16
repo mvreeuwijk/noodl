@@ -27,16 +27,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from noodl.modelica.errors import ModelicaImportError
+from noodl.modelica.schema import Signal, require_dict, require_str, signal_from
+
 FORMAT = "noodl-modelica/1"
-
-
-class ModelicaImportError(ValueError):
-    """Raised for malformed `noodl-modelica/1` JSON, or for unsupported model content.
-
-    The message names every offending field, instance or class (unsupported content is
-    never silently approximated or dropped). `graph.build` gathers every
-    refusal it finds and raises exactly one of these, rather than stopping at the first one.
-    """
 
 
 # --------------------------------------------------------------------------------------
@@ -211,21 +205,6 @@ class Component:
 
 
 @dataclass(frozen=True)
-class Signal:
-    """One instance from the JSON's `signals` array: a driver plus the input(s) it feeds.
-
-    `drives` is written in the JSON as one `"<instance>.<input>"` string or a list of them
-    (one block output may feed several inputs: `Examples/ZonalFlow.mo` connects one
-    `Constant` to both `floExc.mAB_flow` and `floExc.mBA_flow`); it is always a tuple here.
-    """
-
-    name: str
-    cls: str
-    parameters: dict
-    drives: tuple[str, ...]
-
-
-@dataclass(frozen=True)
 class ModelicaDoc:
     """The parsed, structurally validated contents of one `noodl-modelica/1` JSON file;
     `source` is the file it was read from (files named in `Component.files` sit next to it)."""
@@ -239,18 +218,6 @@ class ModelicaDoc:
     connections: tuple[tuple[str, str], ...]
     signals: tuple[Signal, ...]
     source: Path | None = None
-
-
-def _require_dict(value: Any, where: str) -> dict:
-    if not isinstance(value, dict):
-        raise ModelicaImportError(f"modelica: {where} must be an object, found {value!r}")
-    return value
-
-
-def _require_str(value: Any, where: str) -> str:
-    if not isinstance(value, str):
-        raise ModelicaImportError(f"modelica: {where} must be a string, found {value!r}")
-    return value
 
 
 def _parameters_of(obj: dict, where: str) -> dict:
@@ -269,9 +236,9 @@ def _files_of(obj: dict, where: str) -> dict:
         raise ModelicaImportError(f"modelica: {where}.files must be an object")
     out = {}
     for key, entry in raw.items():
-        e = _require_dict(entry, f"{where}.files.{key}")
-        path = _require_str(e.get("path"), f"{where}.files.{key}.path")
-        digest = _require_str(e.get("sha256"), f"{where}.files.{key}.sha256")
+        e = require_dict(entry, f"{where}.files.{key}")
+        path = require_str(e.get("path"), f"{where}.files.{key}.path")
+        digest = require_str(e.get("sha256"), f"{where}.files.{key}.sha256")
         if not _SHA256.fullmatch(digest):
             raise ModelicaImportError(
                 f"modelica: {where}.files.{key}.sha256 must be 64 lowercase hex digits"
@@ -282,9 +249,9 @@ def _files_of(obj: dict, where: str) -> dict:
 
 def _component_from(raw: Any, index: int) -> Component:
     where = f"components[{index}]"
-    obj = _require_dict(raw, where)
-    name = _require_str(obj.get("name"), f"{where}.name")
-    cls = _require_str(obj.get("class"), f"{where} ({name}).class")
+    obj = require_dict(raw, where)
+    name = require_str(obj.get("name"), f"{where}.name")
+    cls = require_str(obj.get("class"), f"{where} ({name}).class")
     parameters = _parameters_of(obj, f"{where} ({name})")
     role = obj.get("role")
     if role is not None and not isinstance(role, str):
@@ -297,29 +264,9 @@ def _connection_from(raw: Any, index: int) -> tuple[str, str]:
     where = f"connections[{index}]"
     if not isinstance(raw, list) or len(raw) != 2:
         raise ModelicaImportError(f"modelica: {where} must be a 2-element array, found {raw!r}")
-    a = _require_str(raw[0], f"{where}[0]")
-    b = _require_str(raw[1], f"{where}[1]")
+    a = require_str(raw[0], f"{where}[0]")
+    b = require_str(raw[1], f"{where}[1]")
     return (a, b)
-
-
-def _signal_from(raw: Any, index: int) -> Signal:
-    where = f"signals[{index}]"
-    obj = _require_dict(raw, where)
-    name = _require_str(obj.get("name"), f"{where}.name")
-    cls = _require_str(obj.get("class"), f"{where} ({name}).class")
-    parameters = _parameters_of(obj, f"{where} ({name})")
-    raw_drives = obj.get("drives")
-    if isinstance(raw_drives, str):
-        drives = (raw_drives,)
-    elif (isinstance(raw_drives, list) and raw_drives
-          and all(isinstance(d, str) for d in raw_drives)):
-        drives = tuple(raw_drives)
-    else:
-        raise ModelicaImportError(
-            f"modelica: {where} ({name}).drives must be a string or a non-empty list of "
-            f"strings, found {raw_drives!r}"
-        )
-    return Signal(name=name, cls=cls, parameters=parameters, drives=drives)
 
 
 def load(path: str | Path) -> ModelicaDoc:
@@ -334,17 +281,17 @@ def load(path: str | Path) -> ModelicaDoc:
         raw = json.loads(text)
     except json.JSONDecodeError as exc:
         raise ModelicaImportError(f"modelica: {path}: not valid JSON ({exc})") from exc
-    obj = _require_dict(raw, str(path))
+    obj = require_dict(raw, str(path))
 
     fmt = obj.get("format")
     if fmt != FORMAT:
         raise ModelicaImportError(f"modelica: {path}: format is {fmt!r}, expected {FORMAT!r}")
 
-    model = _require_str(obj.get("model"), "model")
-    mbl_commit = _require_str(obj.get("mbl_commit"), "mbl_commit")
-    openmodelica = _require_str(obj.get("openmodelica"), "openmodelica")
-    experiment = _require_dict(obj.get("experiment", {}), "experiment")
-    medium = _require_dict(obj.get("medium", {}), "medium")
+    model = require_str(obj.get("model"), "model")
+    mbl_commit = require_str(obj.get("mbl_commit"), "mbl_commit")
+    openmodelica = require_str(obj.get("openmodelica"), "openmodelica")
+    experiment = require_dict(obj.get("experiment", {}), "experiment")
+    medium = require_dict(obj.get("medium", {}), "medium")
 
     components_raw = obj.get("components")
     if not isinstance(components_raw, list):
@@ -359,7 +306,7 @@ def load(path: str | Path) -> ModelicaDoc:
     signals_raw = obj.get("signals", [])
     if not isinstance(signals_raw, list):
         raise ModelicaImportError("modelica: 'signals' must be an array")
-    signals = tuple(_signal_from(s, i) for i, s in enumerate(signals_raw))
+    signals = tuple(signal_from(s, i) for i, s in enumerate(signals_raw))
 
     names = [c.name for c in components]
     if len(names) != len(set(names)):
