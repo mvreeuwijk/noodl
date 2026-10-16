@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import torch
 
+from noodl.layers._topology import TopologyGuard
 from noodl.solvers.scalar import solve_monotone
 from noodl.topology import Network
 
@@ -37,7 +38,7 @@ _PROJECTION_ITERS = 3
 _OVERSUBSCRIBED_FLOOR = 1e-9
 
 
-class AllocatedFlowLayer:
+class AllocatedFlowLayer(TopologyGuard):
     """Flows allocated by rule, not by a potential: each edge's requested flow is clipped
     to the arc's capacity and the receiving node's free storage, one explicit step at a
     time, conserving storage exactly (WSIMOD's push/pull semantics). `quantity`, `unit` and
@@ -126,6 +127,7 @@ class AllocatedFlowLayer:
                     f"non-positive weight there is a silent NaN gradient)"
                 )
         self.net = net
+        self._record_topology(net)
         self.name = name
         self.kinds = [kind]
         self.kind = kind
@@ -478,6 +480,7 @@ class AllocatedFlowLayer:
         non-expansive so a fixed cap is a safe over-approximation, never an
         approximation of a different algorithm).
         """
+        self._require_current_topology()
         key = f"{self.name}.requests"
         r = drivers.get(key)
         if r is None:

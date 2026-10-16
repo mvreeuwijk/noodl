@@ -16,6 +16,7 @@ from noodl._tracking import bulk_values, same_tracking
 from noodl.drives import Drive, check_drive_signature
 from noodl.elements.base import ConstitutiveLaw
 from noodl.layers._mna import MnaSystem
+from noodl.layers._topology import TopologyGuard
 from noodl.nodesources import NodeSource
 from noodl.operators.graph import GraphLaplacianOperator
 from noodl.solvers.grounding import spd_certificate, spd_diagnosis
@@ -131,7 +132,7 @@ def _held_tensors(obj):
                 yield from walk(name, value, 0)
 
 
-class KirchhoffLayer:
+class KirchhoffLayer(TopologyGuard):
     """Flows driven by a potential (pressure, head): solves nodal conservation
     `A_I g(A^T phi) = s_I` for the interior potentials by Newton's method, with the constitutive
     laws on its edge kinds, drives added to the potential differences, and prescribed
@@ -217,7 +218,7 @@ class KirchhoffLayer:
                 )
 
         self.net = net
-        self._topology_version = net.topology_version
+        self._record_topology(net)
         self.name = name
         self._laws = list(laws)
         self._drives = list(drives)
@@ -490,22 +491,6 @@ class KirchhoffLayer:
         `residual` raise (`_require_current_topology`) once the network has changed.
         """
         return self.net.difference()[self.cols]
-
-    def _require_current_topology(self) -> None:
-        """Raise when the network gained a node or edge after this layer was built.
-
-        The layer keeps the edge indices, endpoints and node count of construction time, so
-        on a changed network it would silently solve the old graph. Rebuilding is explicit:
-        construct the layer (and the model around it) again.
-        """
-        if self.net.topology_version != self._topology_version:
-            raise RuntimeError(
-                f"KirchhoffLayer {self.name!r}: the network topology has changed since this "
-                f"layer was constructed (topology version {self._topology_version} -> "
-                f"{self.net.topology_version}); the layer still describes the old graph. "
-                f"Add all nodes and edges before constructing layers, or construct the "
-                f"layer and model again."
-            )
 
     # ------------------------------------------------------- sparse topology primitives
     def _difference(self, phi: torch.Tensor) -> torch.Tensor:
