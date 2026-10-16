@@ -132,11 +132,11 @@ def test_exposure_is_differentiable_in_the_history():
                                torch.tensor([150.0, 262.5, 37.5], dtype=F64))
 
 
-def test_a_history_without_the_species_axis_is_refused():
+def test_a_history_of_the_wrong_row_count_is_refused():
     model, pos = _three()
     h = _history(model, pos, [0.0, 300.0], {"one": [1.0, 1.0]})
     with pytest.raises(ValueError, match=r"'species.x'.*\(N, \.\.\., 3, 1\)"):
-        occupant_exposure({"time": h["time"], "species.x": h["species.x"][..., 0]},
+        occupant_exposure({"time": h["time"], "species.x": h["species.x"][:, :2, 0]},
                           _walker(), model, calendar=CAL)
 
 
@@ -585,3 +585,63 @@ def test_a_capacity_of_the_wrong_shape_is_refused_by_name():
     for fn in (local_mean_age, zone_air_change_rate):
         with pytest.raises(ValueError, match=r"capacity has shape \(3,\).*2 interior rows"):
             fn(h, model, capacity=_f(1.0, 2.0, 3.0))
+
+
+def _two_rooms_one_species(layout):
+    """Two rooms in series with the ambient, one species, state in `layout`: "reduced"
+    `(n_i,)` as `initial_state` builds it, or "stacked" `(n_i, 1)`."""
+    net = Network(dtype=F64)
+    net.add_node("ambient", volume=0.0)
+    net.add_node("a", volume=30.0)
+    net.add_node("b", volume=40.0)
+    for s, t in (("ambient", "a"), ("a", "b"), ("b", "ambient")):
+        net.add_edge(s, t, kind="airpath")
+    layer = species_layer(net, n_species=1, rho=1.2)
+    q = torch.full((3,), 0.01, dtype=F64)
+    model = Model(net, {"species": layer},
+                  closures=[lambda state, drivers: {"species.q": q}])
+    x0 = torch.tensor([1e-4, 0.0], dtype=F64)
+    state = {"species.x": x0 if layout == "reduced" else x0.unsqueeze(-1)}
+    boundary = torch.zeros(1, dtype=F64)
+    drivers = {"species.x_boundary": boundary if layout == "reduced" else boundary[:, None]}
+    times = torch.tensor([0.0, 300.0, 600.0, 900.0], dtype=F64)
+    out = simulate(model, state, drivers, times, calendar=CAL)
+    return model, out
+
+
+def _walker_ab():
+    day = OccupancyDay([0.0, 450.0, DAY], ["a", "b", "b"])
+    return Occupant(Occupancy([day]), name="walker")
+
+
+def test_exposure_accepts_the_reduced_single_species_layout_of_the_standard_builder():
+    occ = _walker_ab()
+    model_r, out_r = _two_rooms_one_species("reduced")
+    model_s, out_s = _two_rooms_one_species("stacked")
+    assert out_r["species.x"].shape == (4, 2) and out_s["species.x"].shape == (4, 2, 1)
+    e_r = occupant_exposure(out_r, occ, model_r, calendar=CAL)
+    e_s = occupant_exposure(out_s, occ, model_s, calendar=CAL)
+    assert e_s.shape == (3, 1)
+    assert e_r.shape == (3,)                      # the layer's convention: no species axis
+    torch.testing.assert_close(e_r, e_s[:, 0], rtol=1e-13, atol=0.0)
+    torch.testing.assert_close(cumulative_exposure(e_r, out_r["time"])[-1],
+                               cumulative_exposure(e_s, out_s["time"])[-1, 0])
+
+
+def test_exposure_of_a_batched_reduced_history_matches_row_by_row():
+    occ = _walker_ab()
+    model, out = _two_rooms_one_species("reduced")
+    x = out["species.x"]                                       # (N, 2)
+    batched = {"time": out["time"], "species.x": torch.stack([x, 3 * x, 5 * x], dim=1)}
+    e = occupant_exposure(batched, occ, model, calendar=CAL)   # (N, B=3, n_i=2) reduced
+    assert e.shape == (3, 3)
+    single = occupant_exposure(out, occ, model, calendar=CAL)
+    for j, f in enumerate((1.0, 3.0, 5.0)):
+        torch.testing.assert_close(e[:, j], f * single)
+
+
+def test_exposure_refuses_a_layout_that_is_neither_reduced_nor_stacked():
+    model, out = _two_rooms_one_species("reduced")
+    with pytest.raises(ValueError, match=r"'species.x'.*\(N, \.\.\., 2, 1\).*\(N, \.\.\., 2\)"):
+        occupant_exposure({"time": out["time"], "species.x": out["species.x"][:, :1]},
+                          _walker_ab(), model, calendar=CAL)

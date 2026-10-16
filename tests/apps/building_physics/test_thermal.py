@@ -284,3 +284,22 @@ def test_species_layer_uses_zone_air_mass_as_capacity():
     assert sp.capacity.item() == pytest.approx(RHO_0 * 50.0)
     st = initial_state(model)
     assert st["species.x"].shape == (1,) and st["species.x"].item() == 0.0
+
+
+def test_ideal_gas_density_of_batched_reference_pressures_matches_independent_calls():
+    """A batch of pressures `(B,)` gets a node axis: `(B, n)`, whatever B is -- including
+    B == n, where it used to pair each pressure with a different node."""
+    net, model, state, drivers, _ = _single_zone()
+    th = model.layers["thermal"]
+    ideal = IdealGasDensity(th, ambient_index=net.node_index("ambient"))
+    for B in (1, 2, 3, net.n):                      # net.n == 2 here
+        P = torch.linspace(95000.0, 101325.0, B, dtype=F64)
+        out = ideal(state, dict(drivers, P_ref=P))
+        assert out["rho"].shape == (B, net.n) and out["rho_amb"].shape == (B,)
+        for i in range(B):
+            one = ideal(state, dict(drivers, P_ref=P[i]))
+            torch.testing.assert_close(out["rho"][i], one["rho"], rtol=1e-14, atol=0.0)
+            torch.testing.assert_close(out["rho_amb"][i], one["rho_amb"], rtol=1e-14, atol=0.0)
+    # a scalar tensor pressure still gives the unbatched `(n,)`
+    one = ideal(state, dict(drivers, P_ref=torch.tensor(101325.0, dtype=F64)))
+    assert one["rho"].shape == (net.n,)

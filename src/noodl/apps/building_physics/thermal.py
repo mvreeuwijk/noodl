@@ -218,8 +218,10 @@ class IdealGasDensity(_DensityClosure):
         self.P_ref, self.R = float(P_ref), float(R)
 
     def _rho(self, T, drivers):
-        P = drivers.get("P_ref", self.P_ref)
-        return P / (self.R * T)
+        P = torch.as_tensor(drivers.get("P_ref", self.P_ref), dtype=T.dtype, device=T.device)
+        # A batched pressure `(B, ...)` is one per instance: add the node axis, as the CONTAM
+        # closure does, so B == n cannot pair a pressure with a node.
+        return P.unsqueeze(-1) / (self.R * T) if P.dim() else P / (self.R * T)
 
     @property
     def input_specs(self) -> dict[str, dict]:
