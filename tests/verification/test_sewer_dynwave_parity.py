@@ -54,7 +54,7 @@ import torch
 
 from noodl.apps.sewer import build_model, read_swmm_inp, simulate_dynamic_wave
 from noodl.apps.sewer.xsect_tables import QCF
-from noodl.model import StepContext
+from noodl.contracts import StepContext
 
 pyswmm = pytest.importorskip("pyswmm")
 

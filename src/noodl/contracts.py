@@ -50,7 +50,11 @@ class StepContext:
 @runtime_checkable
 class AlgebraicClosure(Protocol):
     """A closure that only computes drivers from the state and the drivers: called as
-    `closure(state, drivers)`, it returns the driver entries it adds or replaces."""
+    `closure(state, drivers)`, it returns the driver entries it adds or replaces.
+
+    As a runtime check, `isinstance(obj, AlgebraicClosure)` is true of ANY callable (a
+    runtime-checkable Protocol checks that members exist, not their signatures);
+    `closure_spec` is what checks the arity against the declaration."""
 
     def __call__(
         self, state: Mapping[str, Tensor], drivers: Mapping[str, Tensor]
@@ -65,6 +69,11 @@ class IntegratingClosure(Protocol):
     `None` for a query (`residuals`, `current_flows`, ...), where it evaluates its algebraic
     outputs at the given state without advancing. Under `steady()` (`ctx.dt is None`) it is
     refused by name: there is no interval to integrate over.
+
+    As a runtime check, `isinstance(obj, IntegratingClosure)` is true of a callable that HAS
+    an `integrates` attribute, whatever its value: it tells a closure that declares
+    `integrates` (True or False) from a plain `AlgebraicClosure`, which does not. Whether it
+    is called with a `StepContext` is decided by the value (`ClosureSpec.integrates`).
     """
 
     integrates: bool
@@ -217,6 +226,20 @@ def _species_columns(
     return {layer: dict(cols) for layer, cols in value.items()}
 
 
+def _positional_arity(closure: Callable) -> tuple[int, int, bool] | None:
+    """`(positional, required positional, has *args)` of `closure`'s call signature, or
+    `None` when it cannot be inspected (some builtins and extension callables), in which
+    case the closure is accepted as declared."""
+    try:
+        params = inspect.signature(closure).parameters.values()
+    except (ValueError, TypeError):
+        return None
+    positional = [p for p in params if p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD)]
+    required = [p for p in positional if p.default is p.empty]
+    var_positional = any(p.kind is p.VAR_POSITIONAL for p in params)
+    return len(positional), len(required), var_positional
+
+
 def closure_spec(closure: Callable, *, index: int, owner: str = "Model") -> ClosureSpec:
     """Read `closure`'s declarations into a `ClosureSpec`: the only reader of the closure
     attributes (`CLOSURE_ATTRIBUTES`). `index` is the closure's position, for the message
@@ -224,9 +247,11 @@ def closure_spec(closure: Callable, *, index: int, owner: str = "Model") -> Clos
 
     Raises `TypeError` for a closure that is not callable, a `str` given for `inputs`,
     `outputs`, `state_keys` or `edge_kinds`, a non-bool `integrates`, or a malformed
-    `species_columns`; `ValueError` for `state_keys` without `integrates`, and for
-    `integrates = True` on a call signature with fewer than three positional parameters
-    (and no `*args`).
+    `species_columns`, or a closure that does not declare `integrates = True` but whose
+    call signature REQUIRES three or more positional arguments (it would be called with
+    two); `ValueError` for `state_keys` without `integrates`, and for `integrates = True` on
+    a call signature with fewer than three positional parameters (and no `*args`). A
+    callable whose signature cannot be inspected is accepted as declared.
     """
     if not callable(closure):
         raise TypeError(
@@ -253,17 +278,22 @@ def closure_spec(closure: Callable, *, index: int, owner: str = "Model") -> Clos
             f"the step (it then receives a StepContext), or `integrates = False` if "
             f"something else advances it"
         )
-    if declared:
-        params = inspect.signature(closure).parameters
-        positional = [
-            p for p in params.values()
-            if p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD)
-        ]
-        if len(positional) < 3 and not any(p.kind is p.VAR_POSITIONAL for p in params.values()):
+    arity = _positional_arity(closure)
+    if arity is not None:
+        n_positional, n_required, var_positional = arity
+        if declared and n_positional < 3 and not var_positional:
             raise ValueError(
                 f"{owner}: closure {label} declares integrates=True but its call "
-                f"signature takes {len(positional)} positional arguments; an "
+                f"signature takes {n_positional} positional arguments; an "
                 f"integrating closure is called as closure(state, drivers, ctx)"
+            )
+        if not declared and n_required >= 3:
+            raise TypeError(
+                f"{owner}: closure {label} requires {n_required} positional arguments but "
+                f"does not declare integrates=True, so it would be called as "
+                f"closure(state, drivers); declare `integrates = True` if it advances state "
+                f"over the step (it is then called closure(state, drivers, ctx)), or give "
+                f"its extra parameters defaults"
             )
     key_labels = getattr(closure, "key_labels", None) or {}
     species = getattr(closure, "species_columns", None) or {}

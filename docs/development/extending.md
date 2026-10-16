@@ -130,7 +130,8 @@ real application adds more of the same kind of thing, in a fixed place:
 - **Closures with `integrates` declared.** A closure that only reads the current state and
   drivers to produce new driver values needs no declaration. One that instead **integrates**
   some state over the step's own interval — advances a counter, a controller, a stored level —
-  must declare `integrates = True` (see `noodl.model.Closure`, `StepContext`) so
+  must declare `integrates = True` (see `noodl.contracts.IntegratingClosure` and
+  `noodl.contracts.StepContext`) so
   `Model` calls it as `closure(state, drivers, ctx)` with the interval to advance by, and so
   `Model.steady()` (which has no interval) refuses it by name instead of silently either
   skipping it or integrating over an undefined `dt`.

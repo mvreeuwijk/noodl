@@ -49,9 +49,8 @@ Newton's mask is). Failure follows the layers: raise by default, naming the offe
 from __future__ import annotations
 
 import warnings
-from collections.abc import Collection, Mapping, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Protocol, runtime_checkable
 
 import torch
 
@@ -79,7 +78,7 @@ from noodl._pass import (
     run_pass,
     zero_sources,
 )
-from noodl.contracts import ClosureSpec, StepContext
+from noodl.contracts import AlgebraicClosure, ClosureSpec, IntegratingClosure, StepContext
 from noodl.layers.allocation import AllocatedFlowLayer
 from noodl.layers.kirchhoff import KirchhoffLayer
 from noodl.layers.reaction import Reaction
@@ -106,19 +105,8 @@ _LAYER_OPTIONS = LAYER_OPTIONS
 _detached = detached
 
 
-@runtime_checkable
-class Closure(Protocol):
-    """state, drivers -> driver updates (a mapping of NEW driver values, merged in order).
-
-    A closure that INTEGRATES some state over the step declares a class or instance
-    attribute `integrates = True` and is instead called as `closure(state, drivers, ctx)`,
-    receiving the `StepContext` it must advance by; see `noodl.contracts` and
-    `Model._apply_closures`.
-    """
-
-    def __call__(
-        self, state: Mapping[str, Tensor], drivers: Mapping[str, Tensor]
-    ) -> Mapping[str, Tensor]: ...
+#: Kept for import compatibility: the closure Protocols live in `noodl.contracts`.
+Closure = AlgebraicClosure
 
 
 @dataclass(frozen=True)
@@ -234,7 +222,7 @@ class Model:
         net: Network,
         layers: Mapping[str, KirchhoffLayer | TransportLayer | AllocatedFlowLayer]
         | Sequence[KirchhoffLayer | TransportLayer | AllocatedFlowLayer],
-        closures: Sequence[Closure] = (),
+        closures: Sequence[AlgebraicClosure | IntegratingClosure] = (),
         reactions: Sequence[tuple[str, Reaction]] = (),
         coupling: str = "pingpong",
         iterate_tol: Mapping[str, float] | None = None,
@@ -272,7 +260,7 @@ class Model:
             self.closures, layers=self.layers, transport=self.transport,
             flow_layer_of=self.flow_layer_of,
         )
-        self.closure_state_keys: dict[str, Closure] = self._schedule.closure_state_keys
+        self.closure_state_keys: dict[str, Callable] = self._schedule.closure_state_keys
         self.reactions = validate_reactions(self.transport, reactions)
         self._schedule.check_species_columns(self.transport, self.reactions)
         options = CouplingOptions.validate(

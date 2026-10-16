@@ -118,7 +118,7 @@ Constitutive laws are grouped below by the physics they express, as in
 
 ::: noodl.model
     options:
-      members: [Model, Closure, Ports]
+      members: [Model, Ports]
 
 ::: noodl.contracts
     options:

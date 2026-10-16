@@ -47,7 +47,7 @@ from noodl.cycles import particular_flow
 from noodl.solvers.scalar import solve_monotone
 
 if TYPE_CHECKING:
-    from noodl.model import StepContext
+    from noodl.contracts import StepContext
 
 Tensor = torch.Tensor
 F64 = torch.float64
