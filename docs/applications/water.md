@@ -233,6 +233,21 @@ for _ in range(steps):
     level = model.tank_closure.advance(level, inflow, dt_eff)
 ```
 
+**Tanks as storage.** `build_model(net, tank_mode="storage")` makes every tank an interior
+node with a `TankStorage` edge to a datum node `"_datum"` at head 0, its level stepped
+implicitly inside the solve: backward Euler, $q = A\,(H - H_{\text{prev}})/\Delta t$, or
+trapezoidal. `water_step(model, state, drivers, dt)` takes one step (`Model.step`, with
+`water_steady`'s Newton defaults); `tank_levels(model, state)` reads the levels from the solved
+heads; the level-triggered controls stay a closure (`TankStorageControls`), acting on the
+step-start levels. The step is differentiable through time (the gradient of a level after
+several steps matches central differences). It is **not** the EPANET comparison mode: the
+implicit step differs from EPANET's explicit one by the step's own discretisation error. Both
+converge to the same trajectory, at first order: on Net1, halving the storage step halves its
+distance from a fine explicit run. Its `event_step` never shortens a step below 1 s (the
+implicit step lands just short of a projected crossing, and a far shorter step stalls Newton),
+and with steps as long as an hour a switch can land up to a step late, so sub-steps of a few
+minutes are the useful range. Not with `quality`.
+
 ### Pressure-driven demand
 
 EPANET's Wagner function (Manual eq. 13.6), with $p = H - z$:

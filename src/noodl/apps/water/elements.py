@@ -94,16 +94,18 @@ class HazenWilliams(ConstitutiveLaw):
         """Signed head loss (m) at signed flow ``q`` (m^3/s): ``sgn(q) (K |q|^1.852 + m q^2)``.
 
         Where the friction gradient ``1.852 K |q|^0.852`` is below ``gradient_floor`` (m per
-        m^3/s) the friction loss is ``gradient_floor |q|`` instead: EPANET's own low-flow
-        linearisation (`hydcoeffs.c`, `pipecoeff`, ``hgrad < RQtol``), which keeps the
-        gradient positive at zero flow."""
+        m^3/s) the friction loss is linear instead, as in EPANET's low-flow linearisation
+        (`hydcoeffs.c`, `pipecoeff`, ``hgrad < RQtol``), which keeps the gradient positive at
+        zero flow. EPANET's line, ``RQtol |q|``, is 1.852 times the formula's loss where they
+        meet, a jump on which Newton can cycle; this one is ``(gradient_floor / 1.852) |q|``,
+        continuous there. The two differ only below that flow (about 1e-12 m^3/s on Net1)."""
         k = self.resistance()
         a = q.abs()
         live = a > 0
         a_safe = torch.where(live, a, torch.ones_like(a))   # no 0^(negative) in either branch
         friction = torch.where(live, k * a_safe**1.852, torch.zeros_like(a))
         gradient = torch.where(live, 1.852 * k * a_safe**0.852, torch.zeros_like(a))
-        friction = torch.where(gradient < gradient_floor, gradient_floor * a, friction)
+        friction = torch.where(gradient < gradient_floor, gradient_floor / 1.852 * a, friction)
         return torch.sign(q) * (friction + self._minor() * a * a)
 
     def flow(self, dp: Tensor, drivers=None) -> Tensor:
@@ -700,3 +702,41 @@ class FlowControlledPipe(ImplicitLaw):
         else:
             h = self.pipe.head_loss(q)
         return dp - self.scale * h
+
+
+class TankStorage(ImplicitLaw):
+    """A cylindrical tank as storage (`build_model(tank_mode="storage")`): an edge from the
+    tank's node to a datum at head 0, so that ``dp`` is the tank's head times ``scale`` and
+    the edge's flow is the net inflow into the tank. The volume above the datum changes by
+    ``A dH``, so in a step of ``dt``:
+
+    - backward Euler: ``q = A (H - H_prev) / dt``;
+    - trapezoidal: ``q + q_prev = 2 A (H - H_prev) / dt``;
+
+    with ``H = dp / scale``. ``mode="initial"`` holds the head at ``head0`` (the tank's
+    bottom plus its initial level, m); ``mode="dc"`` is a closed tank (no inflow). EPANET
+    itself steps the level explicitly (`build_model`'s default ``tank_mode="explicit"``);
+    this implicit form differs from it by the step's own discretisation error and is
+    differentiable through time.
+    """
+
+    dynamic = True
+    linear = True
+
+    def __init__(self, area, head0, *, scale: float = 1.0, kind: str = "tank") -> None:
+        super().__init__(kind)
+        self.area = self._param(area, False)
+        self.head0 = self._param(head0, False)
+        self.scale = float(scale)
+
+    def residual(self, dp, q, drivers, ctx):
+        if ctx.mode == "dc":
+            return q
+        if ctx.mode == "initial":
+            return dp - self.scale * self.head0
+        if ctx.mode != "transient":
+            raise ValueError(f"tank kind {self.kind!r}: mode {ctx.mode!r} is not supported")
+        rise = self.area / self.scale * (dp - ctx.dp_prev) / ctx.dt
+        if ctx.integration == "backward_euler":
+            return q - rise
+        return q + ctx.q_prev - 2.0 * rise
