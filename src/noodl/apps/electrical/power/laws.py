@@ -34,6 +34,7 @@ class PiBranch(ConstitutiveLaw):
 
     ports = 2
     phasor_capable = True
+    linear = True
 
     def __init__(self, r, x, b, ratio, shift, *, kind: str = "branch",
                  learnable: bool = False) -> None:
@@ -67,6 +68,7 @@ class Shunt(ConstitutiveLaw):
     """
 
     phasor_capable = True
+    linear = True
 
     def __init__(self, g, b, *, kind: str = "shunt", learnable: bool = False) -> None:
         super().__init__(kind)

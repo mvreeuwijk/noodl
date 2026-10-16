@@ -367,7 +367,7 @@ def power_flow_solution(model: Model, state: State) -> PowerFlowSolution:
     position = {bus: k for k, bus in enumerate(index.bus_ids)}
     v = phi[..., : len(index.bus_ids)]
 
-    outflow = layer._accumulate(q)
+    outflow = layer.net_outflow(q)
     gen_slot = {}
     if index.pv_buses:
         gen_q = q[..., layer.kind_slice("generator")]
