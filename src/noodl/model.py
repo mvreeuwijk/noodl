@@ -59,6 +59,7 @@ from noodl.layers.allocation import AllocatedFlowLayer
 from noodl.layers.potential import PotentialFlowLayer
 from noodl.layers.reaction import Reaction
 from noodl.layers.transport import TransportLayer
+from noodl.solvers.errors import ConvergenceError
 from noodl.solvers.fixed_point import differentiate_fixed_point
 from noodl.topology import Network
 
@@ -311,9 +312,15 @@ class Model:
     A primal pass is one iterate: a potential solve that does not converge within a pass
     (Newton's `max_iter`) does not end the step. It returns its last Newton iterate, the pass
     is judged not converged, and the iteration goes on from it; only the iteration's own
-    verdict raises (or accepts, below). A potential solve that is differentiated still
-    raises (`PotentialFlowLayer.solve`'s ``on_failure="return_primal"``), and a caller's own
-    `on_failure` is passed through unchanged.
+    verdict raises (or accepts, below). When the last pass's potential solve also stopped
+    short, the error is `noodl.solvers.ConvergenceError` (a `RuntimeError`), so a caller can
+    retry the step from another starting point (`warm_start=False`) and let every other
+    failure through. A step that is going to raise stops early, before `iterate_max`, once
+    every unconverged instance's potential solve has failed again from a fed state within
+    the tolerances of the previous pass's: the next pass would only repeat it. A potential
+    solve that is differentiated still raises (`PotentialFlowLayer.solve`'s
+    ``on_failure="return_primal"``), and a caller's own `on_failure` is passed through
+    unchanged.
 
     `iterate_on_limit="accept"` (default ``"raise"``) makes a batch that does not converge
     within `iterate_max` return its last pass instead of raising, as SWMM accepts a step
@@ -1365,6 +1372,10 @@ class Model:
         pass_kwargs = dict(solve_kwargs)
         pass_kwargs.setdefault("on_failure", "return_primal")
         inner_failed: Tensor | None = None
+        raises_on_limit = self.iterate_on_limit != "accept" and not (
+            solve_kwargs.get("on_failure") == "return" and diagnostics is not None
+        )
+        stopped_early = False
         # A `while` rather than `for passes in range(...)`: the pass count is wanted AFTER
         # the loop (it goes into the diagnostics and into the failure message), which a loop
         # control variable unused inside the body is not (ruff B007).
@@ -1423,11 +1434,22 @@ class Model:
                                 ok = this_q if ok is None else (ok & this_q)
                         this = change[name] <= tol
                         ok = this if ok is None else (ok & this)
+                    stalled = None
                     if inner_failed is not None:
                         # a pass whose potential solve stopped short is not a fixed point
+                        stalled = ok & inner_failed
                         ok = ok & ~inner_failed
                     converged = ok
                 if bool(converged.all()):
+                    break
+                if (stalled is not None and bool(stalled.any())
+                        and bool((converged | stalled).all())
+                        and (needs_adjoint or raises_on_limit)):
+                    # Every instance not converged was fed a state within the tolerances of
+                    # the previous pass's and its potential solve failed again: the next
+                    # pass would repeat it. The step is going to raise anyway, so it raises
+                    # now rather than after `iterate_max` passes of `max_iter` iterations.
+                    stopped_early = True
                     break
             fed = dict(new)
             w = self.iterate_relaxation
@@ -1452,25 +1474,32 @@ class Model:
                 (~converged).nonzero().flatten().tolist() if converged.dim() else "all"
             )
             worst = {name: float(c.max()) for name, c in change.items()}
+            unsolved = inner_failed is not None and bool(inner_failed.any())
             message = (
-                f"Model: coupling='iterate' did not converge within {self.iterate_max} "
-                f"passes for instances {failing}; largest change per key {worst}, "
+                "Model: coupling='iterate' did not converge within "
+                + (f"{passes} passes (of at most {self.iterate_max}; stopped there, as the "
+                   f"potential solve failed again from a state within the tolerances of the "
+                   f"previous pass's)" if stopped_early else f"{self.iterate_max} passes")
+                + f" for instances {failing}; largest change per key {worst}, "
                 f"tolerances {self.iterate_tol}"
                 + (f", flow tolerances {self.iterate_flow_tol}" if self.iterate_flow_tol else "")
                 + ("; the last pass's potential solve did not converge either"
-                   if inner_failed is not None and bool(inner_failed.any()) else "")
+                   if unsolved else "")
             )
+            # A potential solve that stopped at its iteration limit is non-convergence, which
+            # a caller may retry from another starting point (`simulate` retries the airflow
+            # solve from the linear initial guess); `ConvergenceError` is a `RuntimeError`,
+            # so a caller catching that is unaffected.
+            error = ConvergenceError if unsolved else RuntimeError
             if needs_adjoint:
-                raise RuntimeError(
+                raise error(
                     message + "; a gradient was requested and a non-converged iteration has "
                     "no fixed point to differentiate, so on_failure='return' cannot return a "
                     "state here (it returns the primal state only when nothing requires a "
                     "gradient, e.g. under torch.no_grad() or with differentiable=False)"
                 )
-            if self.iterate_on_limit != "accept" and not (
-                solve_kwargs.get("on_failure") == "return" and diagnostics is not None
-            ):
-                raise RuntimeError(message)
+            if raises_on_limit:
+                raise error(message)
         # A key `_pass` does not write is carried through it verbatim, pass after pass, so
         # its value in the returned state is the caller's own -- and so is its graph, which
         # the detached primal passes above replaced with a graph-free copy of the same

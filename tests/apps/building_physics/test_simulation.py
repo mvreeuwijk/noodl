@@ -741,6 +741,74 @@ def test_a_step_whose_airflow_fails_from_the_previous_pressures_is_retried_cold(
         rtol=0, atol=5e-7)
 
 
+def test_an_iterate_coupled_step_whose_warm_airflow_fails_is_retried_cold(monkeypatch):
+    """`coupling="iterate"` (as a project with UVGI filters builds): the airflow solve of
+    the second step is made to fail whenever it starts from given pressures. The passes stop
+    once a failed solve repeats from the same fed state, the step raises `ConvergenceError`,
+    and `simulate` retries it from the linear initial guess, landing where the unforced run
+    does."""
+    from noodl.solvers import ConvergenceError
+
+    def run():
+        spy = _VentSpy()
+        model, drivers, fan = _vent_model(spy)
+        model = Model(model.net, model.potential, closures=[spy], coupling="iterate",
+                      iterate_tol={"vent": 1e-12}, iterate_flow_tol={"vent": 1e-12})
+        diagnostics: dict = {}
+        out = simulate(model, {}, drivers, [0.0, 300.0, 600.0], inputs=[fan],
+                       diagnostics=diagnostics, **TIGHT)
+        return model, drivers, out, diagnostics["airflow_retries"]
+
+    _, _, reference, none = run()
+    real_solve = PotentialFlowLayer.solve
+    forced = []
+
+    def warm_fails_late(self, pb, drivers=None, sources=None, phi0=None, *, diagnostics=None,
+                        **kwargs):
+        phi, q = real_solve(self, pb, drivers, sources, phi0, diagnostics=diagnostics,
+                            **kwargs)
+        if phi0 is not None and float(sources[..., 1]) > 0.015:     # the step ending 600 s
+            forced.append(1)
+            if kwargs.get("on_failure", "raise") == "raise":
+                raise ConvergenceError("forced")
+            diagnostics["converged"] = torch.tensor(False)
+        return phi, q
+
+    monkeypatch.setattr(PotentialFlowLayer, "solve", warm_fails_late)
+    model, drivers, out, retries = run()
+    assert none == [] and retries == [600.0]
+    for key in ("vent.phi", "vent.q"):
+        torch.testing.assert_close(out[key], reference[key], rtol=1e-10, atol=1e-12)
+    # Model.step itself: two passes, not iterate_max, then ConvergenceError, naming the stop.
+    forced.clear()
+    state = {"vent.phi": out["vent.phi"][1], "vent.q": out["vent.q"][1]}
+    with pytest.raises(ConvergenceError, match=r"within 2 passes \(of at most 20; stopped"):
+        model.step(state, {**drivers, "vent.sources": _f(0.0, 0.02)}, 300.0, t=300.0)
+    assert len(forced) == 2
+
+
+@pytest.mark.slow
+def test_an_iterate_coupled_duct_project_whose_airflow_fails_is_retried_cold(monkeypatch):
+    """`duct_three_zone.prj` built with `coupling="iterate"`: the fan's airflow solve fails
+    from the previous pressures in the step ending 00:35 (as without the iteration), the step
+    raises `ConvergenceError`, and `simulate` retries it from the linear initial guess,
+    landing on ContamX's flows."""
+    import functools
+
+    from noodl.apps.building_physics import prj
+    from noodl.apps.building_physics.simulation import simulate_project
+
+    monkeypatch.setattr(prj, "Model", functools.partial(
+        Model, coupling="iterate", iterate_tol={"air": prj.UVGI_PRESSURE_TOL},
+        iterate_flow_tol={"air": prj.UVGI_FLOW_TOL}))
+    diagnostics: dict = {}
+    out = simulate_project(read_prj(DUCTS), diagnostics=diagnostics, **TIGHT)
+    assert diagnostics["airflow_retries"] == [2100.0]
+    torch.testing.assert_close(
+        out["terminal_flow"][7], _f(-0.221193, 0.145004, 0.076189, -0.048164, 0.048164),
+        rtol=0, atol=5e-7)
+
+
 def test_a_step_whose_retry_fails_too_raises_naming_the_step(monkeypatch):
     from noodl.solvers import ConvergenceError
 
