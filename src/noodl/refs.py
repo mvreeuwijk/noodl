@@ -102,7 +102,7 @@ class Field(str):
         # the whole tensor is batch shape. Built as a plain tensor, never by label.
         self.scalar = bool(scalar)
         # Whether the layer also accepts a single-species tensor as an `(n, 1)` column
-        # (`TransportLayer._to_stacked`); `build` still returns the `(n,)` layout.
+        # (`noodl.layout.as_stacked`); `build` still returns the `(n,)` layout.
         self.column = bool(column) and int(n_species) == 1
         self.role = role
         self.layer = layer
