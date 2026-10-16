@@ -533,8 +533,18 @@ class CoupledModel:
     # ------------------------------------------------------------------- step
     def step(
         self, state: Mapping[str, State], drivers: Mapping[str, Drivers], dt: float,
-        *, diagnostics: dict | None = None,
+        *, t: float | None = None, diagnostics: dict | None = None,
     ) -> dict[str, State]:
+        """Advance every model over one outer step `dt` (s) from `state`, exchanging the
+        `links` values (iterated to a fixed point when any link is two-way).
+
+        `t` (s, optional) is the simulation time at the start of the step, as `Model.step`
+        takes it: each model is stepped with `t`, or, when named in `substeps` with `k`
+        sub-steps, with `t + i dt/k` for its `i`-th sub-step of `dt/k`. Every pass of the
+        two-way iteration re-steps the SAME interval `[t, t + dt]` from the step-start
+        state. Without `t` a model's time-dependent law or integrating closure sees no clock
+        (`None`), exactly as `Model.step` without one.
+        """
         start = {tag: dict(s) for tag, s in state.items()}
         drivers = {tag: dict(d) for tag, d in drivers.items()}
         self._apply_aliases(drivers)
@@ -549,7 +559,7 @@ class CoupledModel:
             new = {}
             for tag in self.models:
                 new[tag], _ = self._step_model(tag, start[tag], pass_drivers[tag], dt,
-                                                 want_transfers=set())
+                                                 t=t, want_transfers=set())
             if diagnostics is not None:
                 # One pass, nothing iterated: `converged` is true for every instance by
                 # construction, and `max_change` is EMPTY rather than 0.0 -- no change was
@@ -568,11 +578,11 @@ class CoupledModel:
                     "adjoint_batched": False,
                 })
             return new
-        return self._iterate(start, drivers, dt, diagnostics)
+        return self._iterate(start, drivers, dt, diagnostics, t=t)
 
     def _step_model(
         self, tag: str, start: State, drivers: Drivers, dt: float,
-        *, want_transfers: Collection[str],
+        *, t: float | None = None, want_transfers: Collection[str],
     ) -> tuple[State, dict[str, Tensor]]:
         """Step model `tag` ONCE over `dt` -- in `k` sub-steps of `dt/k` when named in
         `substeps`, its glue-derived drivers held constant across them. `want_transfers` names the
@@ -581,14 +591,17 @@ class CoupledModel:
         the model -- a recipient with an unlinked layer must not pay `step_with_transfer`'s extra
         cost on a layer nothing reads a transfer from. The returned dict sums each named layer's
         transfer over these `k` outer sub-steps too -- the total amount that crossed each
-        boundary node during THIS model's whole `dt`, in the layer's own boundary layout."""
+        boundary node during THIS model's whole `dt`, in the layer's own boundary layout.
+        `t` is the outer step's start time; sub-step `i` starts at `t + i dt/k` (`None`
+        throughout without one)."""
         k = self.substeps.get(tag, 1)
         s = start
         totals: dict[str, Tensor] = {}
-        for _ in range(k):
+        for i in range(k):
             d: dict = {}
             s = self.models[tag].step(
-                s, drivers, dt / k, diagnostics=d, boundary_transfers=want_transfers
+                s, drivers, dt / k, t=None if t is None else t + i * (dt / k),
+                diagnostics=d, boundary_transfers=want_transfers,
             )
             if want_transfers:
                 for name, layer_diag in d["layers"].items():
@@ -607,7 +620,7 @@ class CoupledModel:
 
     def _one_pass(
         self, start: Mapping[str, State], drivers: Mapping[str, Drivers], dt: float,
-        values: Sequence[Tensor],
+        values: Sequence[Tensor], t: float | None = None,
     ) -> tuple[dict[str, State], dict[str, Tensor], dict[str, Drivers]]:
         """ONE recipient-first pass with EVERY link's forward value taken from `values` (one
         entry per link in `self.links` order, one-way and two-way alike, already relaxed by
@@ -638,7 +651,7 @@ class CoupledModel:
         for tag in self._recipients:                      # recipients first
             layers = {link.to_layer for link in self._two_way if link.to_model == tag}
             new[tag], totals = self._step_model(
-                tag, start[tag], pass_drivers[tag], dt, want_transfers=layers
+                tag, start[tag], pass_drivers[tag], dt, t=t, want_transfers=layers
             )
             for link in self._two_way:
                 if link.to_model == tag:
@@ -647,11 +660,11 @@ class CoupledModel:
                     )
         for tag in self._others:                          # donors and uncoupled models
             new[tag], _ = self._step_model(
-                tag, start[tag], pass_drivers[tag], dt, want_transfers=set()
+                tag, start[tag], pass_drivers[tag], dt, t=t, want_transfers=set()
             )
         return new, transfers, pass_drivers
 
-    def _iterate(self, start, drivers, dt, diagnostics) -> dict[str, State]:
+    def _iterate(self, start, drivers, dt, diagnostics, *, t=None) -> dict[str, State]:
         """Successive substitution on every two-way link's FORWARD value, damped by
         `relaxation` (0.5 mirrors `Model._iterate`, `model.py:540-611`), on a RECIPIENT-FIRST
         schedule: each pass steps every recipient (`self._recipients`) from `start` first,
@@ -735,11 +748,11 @@ class CoupledModel:
                 if prev is not None:
                     for i in two_way_pos:
                         values[i] = prev[i] + self.relaxation * (raw[i] - prev[i])
-                new, transfers, pass_drivers = self._one_pass(start, drivers, dt, values)
+                new, transfers, pass_drivers = self._one_pass(start, drivers, dt, values, t)
                 last_transfers = {k: v.detach() for k, v in transfers.items()}
                 if passes == 1:
                     needs_adjoint = any(
-                        t.requires_grad for s in new.values() for t in s.values()
+                        v.requires_grad for s in new.values() for v in s.values()
                     )
                     # Drop pass 1's graph here, and drop ALL of it: `values`, `new`, the pass
                     # drivers (whose boundary writes and donor source terms were built from
@@ -786,9 +799,9 @@ class CoupledModel:
             # under grad at the certified interface `values` -- the point whose derivative is
             # returned -- and drop that pass's output and graph.
             with torch.enable_grad():
-                probe, _, _ = self._one_pass(start, drivers, dt, values)
+                probe, _, _ = self._one_pass(start, drivers, dt, values, t)
                 needs_adjoint = any(
-                    t.requires_grad for s in probe.values() for t in s.values()
+                    v.requires_grad for s in probe.values() for v in s.values()
                 )
             del probe
         # `values` are the relaxed forward values the CERTIFIED pass -- the one whose output
@@ -811,7 +824,7 @@ class CoupledModel:
             final_transfers: dict[str, Tensor] = {}
 
             def pass_fn(z: list[Tensor]) -> tuple[list[Tensor], list[Tensor]]:
-                out, tr, pd = self._one_pass(start, drivers, dt, z)
+                out, tr, pd = self._one_pass(start, drivers, dt, z, t)
                 final_transfers.update(tr)
                 # `out` is only READ here: `differentiate_fixed_point` hands its outputs back
                 # as VIEWS of these tensors, and writing into one would mutate the retained

@@ -475,6 +475,49 @@ def test_the_adjoint_solves_a_batched_interface_per_instance():
     assert grad.item() == pytest.approx(fd.item(), rel=1e-6)
 
 
+class _ClockedSource:
+    """An integrating closure on B whose source is the start time of the interval it is
+    asked to integrate over, recording every `(t, dt)` it is handed."""
+
+    integrates = True
+
+    def __init__(self, plain):
+        self.plain = plain
+        self.calls: list[tuple[float, float]] = []
+
+    def __call__(self, state, drivers, ctx):
+        out = dict(self.plain(state, drivers))
+        if ctx is not None and ctx.dt is not None:
+            self.calls.append((ctx.t, ctx.dt))
+            zero = torch.zeros((), dtype=F64)
+            out["b.sources"] = torch.stack([zero, zero + ctx.t])
+        return out
+
+
+@pytest.mark.parametrize("substeps", [1, 3])
+def test_every_pass_of_a_two_way_step_integrates_over_the_same_clocked_interval(substeps):
+    """The outer start time reaches the recipient's sub-steps at their own offsets, and
+    every fixed-point pass re-steps over the SAME interval: the clock never advances with
+    the pass count."""
+    a = compartment("a", scheme="implicit")
+    b_model, b_state, b_drivers = compartment("b", scheme="implicit", circulation=True)
+    clocked = _ClockedSource(b_model.closures[0])
+    b_model = Model(b_model.net, dict(b_model.transport), closures=[clocked])
+    model, state, drivers = union(
+        {"A": a, "B": (b_model, b_state, b_drivers)},
+        [ValueLink("A", "a.x", 0, "B", "b.x_boundary", two_way=True)],
+        substeps={"B": substeps}, iterate_rtol=1e-12, iterate_atol=1e-14, iterate_max=200,
+    )
+    diagnostics: dict = {}
+    with torch.no_grad():
+        model.step(state, drivers, 3.0, t=10.0, diagnostics=diagnostics)
+    sub = 3.0 / substeps
+    one_pass = [(10.0 + i * sub, sub) for i in range(substeps)]
+    assert diagnostics["passes"] >= 2
+    assert len(clocked.calls) == diagnostics["passes"] * substeps
+    assert clocked.calls == pytest.approx(one_pass * diagnostics["passes"])
+
+
 def _branching_coupled(theta):
     """A (start 0) --two-way--> B (start 1), B's source reading its own coupled boundary
     value: the constant 1 while `b.x_boundary <= 0.1`, `theta` above. Pass 1 sees the
