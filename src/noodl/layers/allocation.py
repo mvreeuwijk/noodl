@@ -508,9 +508,15 @@ class AllocatedFlowLayer(TopologyGuard):
         # One common leading batch shape for state, requests and every parameter, so an
         # unbatched initial state with batched requests (or a batched capacity with
         # unbatched requests) allocates correctly; the scatter buffers below take it.
-        _, (s, r, s_max, c_arc, preference) = layout.broadcast_batch(
-            (s, 1), (r, 1), (self.s_max, 1), (self.c_arc, 1), (self.preference, 1),
-        )
+        try:
+            _, (s, r, s_max, c_arc, preference) = layout.broadcast_batch(
+                (s, 1), (r, 1), (self.s_max, 1), (self.c_arc, 1), (self.preference, 1),
+            )
+        except RuntimeError as exc:
+            raise RuntimeError(
+                f"AllocatedFlowLayer {self.name!r}: state, {key!r}, s_max, c_arc and "
+                f"preference: {exc}"
+            ) from None
         headroom = (s_max - s) / dt
         remaining = r.clone()
         f = torch.zeros_like(r)
