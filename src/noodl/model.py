@@ -48,7 +48,6 @@ Newton's mask is). Failure follows the layers: raise by default, naming the offe
 
 from __future__ import annotations
 
-import inspect
 import warnings
 from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -56,9 +55,17 @@ from typing import Protocol, runtime_checkable
 
 import torch
 
+from noodl import layout
 from noodl._broadcast import broadcast_shapes
 from noodl._grad_reach import any_requires_grad
 from noodl._tracking import TrackedDict
+from noodl.contracts import (
+    ClosureSpec,
+    StepContext,
+    check_species_columns,
+    closure_spec,
+    reaction_species_columns,
+)
 from noodl.layers.allocation import AllocatedFlowLayer
 from noodl.layers.kirchhoff import KirchhoffLayer
 from noodl.layers.reaction import Reaction
@@ -249,23 +256,13 @@ class Closure(Protocol):
 
     A closure that INTEGRATES some state over the step declares a class or instance
     attribute `integrates = True` and is instead called as `closure(state, drivers, ctx)`,
-    receiving the `StepContext` it must advance by; see `StepContext` and
+    receiving the `StepContext` it must advance by; see `noodl.contracts` and
     `Model._apply_closures`.
     """
 
     def __call__(
         self, state: Mapping[str, Tensor], drivers: Mapping[str, Tensor]
     ) -> Mapping[str, Tensor]: ...
-
-
-@dataclass(frozen=True)
-class StepContext:
-    """What a state transition needs from the model: the interval it must integrate over
-    (`None` under `steady()`, which an integrating closure refuses) and, when the caller
-    tracks it, the time at the start of the step."""
-
-    dt: float | None
-    t: float | None = None
 
 
 @dataclass(frozen=True)
@@ -496,49 +493,24 @@ class Model:
             self.flow_layer_of[tname] = owners[0] if owners else None
             self.flow_driver_of[tname] = f"{tname}.q"
         self.closures = list(closures)
-        # Both callability checks are made HERE, not at the first `step`: a non-callable
-        # closure or a reaction without `apply` would otherwise surface a bare
-        # "'X' object is not callable" from inside `_pass`, naming neither the model nor
-        # which of the closures it was.
-        for i, closure in enumerate(self.closures):
-            if not isinstance(closure, Closure):
-                raise TypeError(
-                    f"Model: closure {i} is a {type(closure).__name__}, which is not "
-                    f"callable; a closure is called as closure(state, drivers) and returns "
-                    f"driver updates"
-                )
-        # A closure that INTEGRATES some state over the step (rather than merely
-        # carrying it, unchanged, across steps) declares `integrates = True` and is called
-        # with a third argument, the `StepContext` it must advance by -- see
-        # `_apply_closures`. A closure declaring `state_keys` without declaring `integrates`
-        # is refused HERE, by name, rather than left to silently integrate with whatever
-        # interval its own constructor happened to be given.
-        self._integrating: set[int] = set()
-        for closure in self.closures:
-            declared = getattr(closure, "integrates", None)
-            carries = tuple(getattr(closure, "state_keys", ()))
-            if carries and declared is None:
-                raise ValueError(
-                    f"Model: closure {closure!r} declares state_keys {carries} but not "
-                    f"`integrates`; set `integrates = True` if it advances that state over "
-                    f"the step (it then receives a StepContext), or `integrates = False` if "
-                    f"something else advances it"
-                )
-            if declared:
-                params = inspect.signature(closure).parameters
-                positional = [
-                    p for p in params.values()
-                    if p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD)
-                ]
-                if len(positional) < 3 and not any(
-                    p.kind is p.VAR_POSITIONAL for p in params.values()
-                ):
+        # Every closure's declarations are read ONCE, here, by `noodl.contracts.closure_spec`
+        # (callability, `integrates`, `state_keys`, the declared inputs/outputs, ...): a
+        # malformed one is refused by name now, not as a bare "'X' object is not callable"
+        # from inside `_pass`. The specs hold the closure OBJECTS, so a deepcopy or a pickle
+        # carries each closure with its spec; nothing is keyed by `id()` across a copy.
+        self._specs: list[ClosureSpec] = [
+            closure_spec(closure, index=i) for i, closure in enumerate(self.closures)
+        ]
+        self._spec_ids: dict[int, ClosureSpec] | None = None
+        for spec in self._specs:
+            for key in sorted(spec.writes or ()):
+                if self._is_layer_state_key(key):
                     raise ValueError(
-                        f"Model: closure {closure!r} declares integrates=True but its call "
-                        f"signature takes {len(positional)} positional arguments; an "
-                        f"integrating closure is called as closure(state, drivers, ctx)"
+                        f"Model: closure {spec.label} declares output {key!r}, which is a "
+                        f"state key; closures write drivers only (the one exception is "
+                        f"'<layer>.q' for a transport layer whose flows no Kirchhoff layer "
+                        f"provides)"
                     )
-                self._integrating.add(id(closure))
         # CLOSURE-CARRIED STATE. A closure may declare
         # `state_keys: tuple[str, ...]`: keys it both READS from the state and WRITES back
         # every call, which `_pass` copies from its return into the returned state. They are
@@ -548,8 +520,9 @@ class Model:
         # claiming one key is refused HERE, naming both, rather than resolved by whichever
         # ran last.
         self.closure_state_keys: dict[str, Closure] = {}
-        for closure in self.closures:
-            for key in getattr(closure, "state_keys", ()):
+        for spec in self._specs:
+            closure = spec.closure
+            for key in spec.state_keys:
                 head, _, tail = str(key).rpartition(".")
                 if head in self.layers and tail in _STATE_SUFFIXES:
                     # Mirror `_apply_closures`' own ownerless-"<layer>.q" carve-out --
@@ -589,6 +562,12 @@ class Model:
                     f"Model: reaction for layer {lname!r} is a {type(reaction).__name__}, "
                     f"not a Reaction; it must provide apply(x, dt, drivers)"
                 )
+        for spec in self._specs:
+            check_species_columns(f"Model: closure {spec.label}", spec.species_columns,
+                                  self.transport)
+        for lname, reaction in self.reactions:
+            check_species_columns(f"Model: reaction {reaction!r} for layer {lname!r}",
+                                  reaction_species_columns(reaction), self.transport)
         self.coupling = coupling
         self.iterate_tol = dict(iterate_tol or {})
         self.iterate_max = int(iterate_max)
@@ -673,10 +652,11 @@ class Model:
         # uses (a flow-dependent filter's transmission) is right only at the coupling's fixed
         # point, where the flows it read are the flows the pass produced: it declares
         # `requires_coupling = "iterate"` and `reads_flows_of = "<Kirchhoff layer>"`.
-        for closure in self.closures:
-            if getattr(closure, "requires_coupling", None) != "iterate":
+        for spec in self._specs:
+            if spec.requires_coupling != "iterate":
                 continue
-            flows_of = getattr(closure, "reads_flows_of", None)
+            closure = spec.closure
+            flows_of = spec.reads_flows_of
             if coupling != "iterate" or flows_of not in self.iterate_flow_tol:
                 raise ValueError(
                     f"Model: closure {type(closure).__name__} reads the flows of layer "
@@ -745,6 +725,42 @@ class Model:
         except KeyError as exc:
             raise KeyError(f"Model: driver {key!r} is required and was not given") from exc
 
+    def _is_layer_state_key(self, key: str) -> bool:
+        """True for a layer's own state key `"<layer>.phi/q/x/s"` a closure may not write:
+        all of them but `"<layer>.q"` of a transport layer no Kirchhoff layer owns, which is
+        the flow DRIVER a flow closure writes."""
+        head, _, tail = key.rpartition(".")
+        if head in self.layers and tail in _STATE_SUFFIXES:
+            return not (
+                tail == "q" and head in self.transport and self.flow_layer_of.get(head) is None
+            )
+        return False
+
+    def _closure_spec(self, closure) -> ClosureSpec:
+        """The `ClosureSpec` of one of `self.closures`, found by identity. A closure added to
+        `closures` after construction is read (and cached) on first use."""
+        lookup = self._spec_ids
+        if lookup is None:
+            lookup = self._spec_ids = {id(s.closure): s for s in self._specs}
+        spec = lookup.get(id(closure))
+        if spec is None or spec.closure is not closure:
+            spec = closure_spec(closure, index=self.closures.index(closure))
+            self._specs.append(spec)
+            lookup[id(closure)] = spec
+        return spec
+
+    @property
+    def _integrating(self) -> set[int]:
+        """`id()`s of the integrating closures (read-only; for tests and diagnostics)."""
+        return {id(c) for c in self.closures if self._closure_spec(c).integrates}
+
+    def __getstate__(self) -> dict:
+        # The identity lookup is keyed by `id()`, which a copy or a pickle does not keep;
+        # `_specs` holds the closures themselves and the lookup is rebuilt on first use.
+        state = self.__dict__.copy()
+        state["_spec_ids"] = None
+        return state
+
     def _apply_closures(
         self,
         state: Mapping[str, Tensor],
@@ -780,19 +796,13 @@ class Model:
             drv = TrackedDict(drivers, probe.driver_reads)
             state = TrackedDict(state, probe.state_reads)
         for closure in self.closures:
-            if id(closure) in self._integrating:
-                if ctx is not None and ctx.dt is None:
-                    raise ValueError(
-                        f"Model: closure {closure!r} declares integrates=True and cannot be "
-                        f"evaluated by steady(), which has no interval to integrate over"
-                    )
-                result = closure(state, drv, ctx)
-            else:
-                result = closure(state, drv)
+            spec = self._closure_spec(closure)
+            result = spec(state, drv, ctx)
             if probe is not None:
                 probe.closure_outputs.update(result)
                 probe.closure_values.update(result)
                 probe.closure_writers.update(dict.fromkeys(result, type(closure).__name__))
+                probe.closure_returned.setdefault(spec.label, set()).update(result)
             for key, value in result.items():
                 head, _, tail = key.rpartition(".")
                 if head in self.layers and tail in _STATE_SUFFIXES:
@@ -830,7 +840,9 @@ class Model:
         `x_boundary` used as `like` would flip the returned state to `(..., n_i, K)` for a
         single-species layer; only fall back to it when there is no `x` at all.
         """
-        _, reduced = layer._to_stacked(like, n_like, "state")
+        _, reduced = layout.as_stacked(
+            like, n_like, layer.n_species, name="state", where=f"TransportLayer '{layer.name}'",
+        )
         batch = like.shape[:-1] if reduced else like.shape[:-2]
         tail = (self.net.n,) if reduced else (self.net.n, layer.n_species)
         return torch.zeros(batch + tail, dtype=like.dtype, device=like.device)
