@@ -13,7 +13,7 @@ Build the model and its starting state and inputs.
 
 | Name | What it does | How to call it |
 |---|---|---|
-| `build_model` | Assemble the water model and return `(model, state, drivers)`. | `build_model(net, *, headloss=None, pda=None, p_min=None, p_req=None, exponent=None, quality=None, coupling='pingpong', dt=None, friction='composite')` |
+| `build_model` | Assemble the water model and return `(model, state, drivers)`. | `build_model(net, *, headloss=None, pda=None, p_min=None, p_req=None, exponent=None, quality=None, coupling='pingpong', dt=None, friction='composite', pipe_form=None)` |
 | `initial_drivers` | `build_model`'s driver template (copied), then `values` by name (see `noodl.refs.drivers_from`), then `demand`: `{junction: m3/s withdrawn}`, positive, stored as the negative nodal source the head solve takes. | `initial_drivers(model, *, values=None, demand=None)` |
 | `initial_state` | All-zero state, dispatching on each layer's `quantity` (the app convention), tank levels from the network file; then `values` by node, tank or pump name (see `noodl.refs.state_from`): `initial_state(model, values={"water.tank_level": {"T1": 4.0}})`. | `initial_state(model, *, values=None)` |
 
@@ -28,7 +28,7 @@ Descriptions of the physical objects a network is built from.
 | `Pump` | A pump from `u` to `v` on a head-flow `curve` (by name), at relative `speed`. | `Pump(name, u, v, curve, power=None, speed=1.0)` |
 | `Reservoir` | A fixed-head node: total `head` (m), optionally varied by a time `pattern`. | `Reservoir(name, head, pattern=None)` |
 | `Tank` | A cylindrical tank: bottom `elevation`, initial, minimum and maximum water levels and `diameter` (all m); its level is carried across steps by `TankLevels`. | `Tank(name, elevation, init_level, min_level, max_level, diameter)` |
-| `Valve` | A valve from `u` to `v`: `diameter` (m), EPANET `kind` (for example `TCV`) and its `setting`, with a minor-loss coefficient. | `Valve(name, u, v, diameter, kind, setting, minor_loss=0.0)` |
+| `Valve` | A valve from `u` to `v`: `diameter` (m), EPANET `kind` (for example `TCV`) and its `setting` (TCV: a loss coefficient; FCV: a flow, m3/s; PBV: a head drop, m), with a minor-loss coefficient. A GPV's setting is its head-loss `curve` (a `curves` key). | `Valve(name, u, v, diameter, kind, setting, minor_loss=0.0, curve=None)` |
 | `WaterNetwork` | A pressurised distribution network, in SI, with everything the builder needs. | `WaterNetwork(junctions, reservoirs=(), tanks=(), pipes=(), pumps=(), valves=(), curves=<factory>, patterns=<factory>, controls=(), demand_pattern=None, pattern_timestep=3600.0, hydraulic_timestep=3600.0, report_timestep=3600.0, duration=0.0, headloss='H-W', options=<factory>, notes=<factory>)` |
 | `WaterOptions` | `[OPTIONS]` keys that change the physics, with EPANET 2.2's own defaults. | `WaterOptions(demand_model='DDA', minimum_pressure=0.0, required_pressure=0.1, pressure_exponent=0.5, specific_gravity=1.0, viscosity=1.0, flow_units=None)` |
 | `WaterPipe` | A pipe from `u` to `v`: `length` and `diameter` (m), `roughness` (in the network's head-loss formula's units), a minor-loss coefficient and its `status`. | `WaterPipe(name, u, v, length, diameter, roughness, minor_loss=0.0, status='OPEN')` |
@@ -39,7 +39,10 @@ The relation between the flow through an edge and the potential difference acros
 
 | Name | What it does | How to call it |
 |---|---|---|
+| `BreakerValve` | A pressure breaker valve (PBV): EPANET 2.2's `pbvcoeff` (`hydcoeffs.c`). | `BreakerValve(setting, minor, *, kind='pbv')` |
 | `CompositeDarcyWeisbach`<br><small>also `EpanetDarcyWeisbach`</small> | Composite Darcy-Weisbach pipe: Hagen-Poiseuille, Dunlop's cubic, then Swamee-Jain. | `CompositeDarcyWeisbach(length, diameter, roughness, *, minor_loss=0.0, nu=1.02193344e-06, cfs_per_m3s=None, scale=1.0, rtol=1e-15, max_iter=100, kind='pipe', learnable=False)` |
+| `FlowControlledPipe` | A pipe in its resistance form, ``dp = scale h(q)``, with the flow an unknown of the layer (`build_model`'s ``pipe_form="flow"``): ``pipe`` is the pipe's potential-form law (`HazenWilliams` or `CompositeDarcyWeisbach`), whose ``head_loss`` gives ``h``. | `FlowControlledPipe(pipe, *, gradient_floor=0.0, kind='pipe')` |
+| `GeneralPurposeValve` | A general purpose valve (GPV): EPANET 2.2's `gpvcoeff` (`hydcoeffs.c`). | `GeneralPurposeValve(flows, heads, n_points, *, kind='gpv')` |
 | `HazenWilliams` | ``h_L = K q^1.852 + m q^2`` with ``K = 10.666829500036 C^-1.852 d^-4.871 L``. | `HazenWilliams(length, diameter, roughness, *, minor_loss=0.0, dp_transition=1e-09, kind='pipe', learnable=False)` |
 | `MinorLoss` | ``h = m q \|q\|`` with ``m = K / (2 g A^2)``: a throttle control valve (TCV) or any pure minor-loss link. Inverted in closed form, ``q = sign(h) sqrt(\|h\| / m)``, with the same laminar blend and both-branch safe substitution as ``HazenWilliams``. | `MinorLoss(setting, diameter, *, dp_transition=1e-09, kind='valve', learnable=False)` |
 | `PumpCurve` | Constant-speed pump on its own edge kind: ``h_gain = w^2 (h0 - r (q/w)^n)``. | `PumpCurve(h0, r, n=2.0, *, speed=1.0, dp_transition=1e-06, status_key=None, kind='pump', learnable=False)` |

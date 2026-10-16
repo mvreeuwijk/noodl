@@ -10,13 +10,18 @@ different report times mid-run; a genuinely batched rollout would need a per-ins
 global-minimum step shared by all eight, which oversamples the seven instances that did not
 need shortening on that particular sub-step -- undesirable either way, so the multipliers run
 sequentially. Prints the wall time, the tank-level trajectory of instance 0 and
-the number of hydraulic sub-steps the event shortening cost.
+the number of hydraulic sub-steps the event shortening cost, and the Newton iterations of the
+hardest sub-step (the step where a control closes the pump and leaves pipe 10 dead-ended).
 
-Run: `.venv/Scripts/python benchmarks/water_eps.py`
+`--pipe-form flow` runs the pipes in their resistance form (`build_model(pipe_form="flow")`,
+solved by Modified Nodal Analysis) instead of the default potential form.
+
+Run: `.venv/Scripts/python benchmarks/water_eps.py [--pipe-form potential|flow]`
 """
 
 from __future__ import annotations
 
+import argparse
 import time
 from pathlib import Path
 
@@ -37,20 +42,23 @@ def _pattern_factor(net, seconds: float) -> float:
     return values[int(seconds // net.pattern_timestep) % len(values)]
 
 
-def _run(net, multiplier: float) -> tuple[list[float], int]:
-    """One instance's 24 h trajectory and its sub-step count."""
-    model, state, drivers = build_model(net)
+def _run(net, multiplier: float, pipe_form: str = "potential") -> tuple[list[float], int, int]:
+    """One instance's 24 h trajectory, its sub-step count and its most Newton iterations."""
+    model, state, drivers = build_model(net, pipe_form=pipe_form)
     closure = model.tank_closure
     base = drivers["water.sources"].clone() * multiplier
     levels = [float(state["water.tank_level"][0])]
     moment = 0.0
     sub_steps = 0
+    most = 0
     while moment < net.duration - 1e-9:
         report_end = moment + net.report_timestep
         while moment < report_end - 1e-9:
             step_drivers = dict(drivers)
             step_drivers["water.sources"] = base * _pattern_factor(net, moment)
-            solved = water_steady(model, state, step_drivers)
+            diagnostics: dict = {}
+            solved = water_steady(model, state, step_drivers, diagnostics=diagnostics)
+            most = max(most, diagnostics["layers"]["water"]["newton_iterations"])
             inflow = tank_inflow(model, solved)
             rate = inflow / closure.area
             step = closure.event_step(
@@ -63,23 +71,28 @@ def _run(net, multiplier: float) -> tuple[list[float], int]:
             moment += step
             sub_steps += 1
         levels.append(float(state["water.tank_level"][0]))
-    return levels, sub_steps
+    return levels, sub_steps, most
 
 
-def main() -> None:
+def main(argv: list[str] | None = None) -> None:
+    parser = argparse.ArgumentParser(description="Net1's 24 h extended period")
+    parser.add_argument("--pipe-form", choices=("potential", "flow"), default="potential")
+    args = parser.parse_args(argv)
     net = read_epanet_inp(DATA / "Net1.inp")
     started = time.perf_counter()
     trajectories = []
     total_sub_steps = 0
+    most = 0
     for multiplier in MULTIPLIERS:
-        levels, sub_steps = _run(net, multiplier)
+        levels, sub_steps, worst = _run(net, multiplier, args.pipe_form)
         trajectories.append(levels)
         total_sub_steps += sub_steps
+        most = max(most, worst)
     elapsed = time.perf_counter() - started
     print(
-        f"water_eps: Net1, {int(net.duration / 3600)} h, "
+        f"water_eps: Net1, {int(net.duration / 3600)} h, pipe_form={args.pipe_form}, "
         f"{len(MULTIPLIERS)} sequential demand multipliers, {total_sub_steps} hydraulic "
-        f"sub-steps in {elapsed:.2f} s"
+        f"sub-steps in {elapsed:.2f} s; at most {most} Newton iterations in one sub-step"
     )
     print("tank 2 level (m) at each report step, demand multiplier 1.0:")
     baseline = trajectories[MULTIPLIERS.index(1.0)]

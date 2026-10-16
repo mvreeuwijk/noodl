@@ -90,6 +90,22 @@ class HazenWilliams(ConstitutiveLaw):
         area = torch.pi * self.diameter**2 / 4.0
         return self.minor_loss / (2.0 * G * area**2)
 
+    def head_loss(self, q: Tensor, gradient_floor: float = 0.0) -> Tensor:
+        """Signed head loss (m) at signed flow ``q`` (m^3/s): ``sgn(q) (K |q|^1.852 + m q^2)``.
+
+        Where the friction gradient ``1.852 K |q|^0.852`` is below ``gradient_floor`` (m per
+        m^3/s) the friction loss is ``gradient_floor |q|`` instead: EPANET's own low-flow
+        linearisation (`hydcoeffs.c`, `pipecoeff`, ``hgrad < RQtol``), which keeps the
+        gradient positive at zero flow."""
+        k = self.resistance()
+        a = q.abs()
+        live = a > 0
+        a_safe = torch.where(live, a, torch.ones_like(a))   # no 0^(negative) in either branch
+        friction = torch.where(live, k * a_safe**1.852, torch.zeros_like(a))
+        gradient = torch.where(live, 1.852 * k * a_safe**0.852, torch.zeros_like(a))
+        friction = torch.where(gradient < gradient_floor, gradient_floor * a, friction)
+        return torch.sign(q) * (friction + self._minor() * a * a)
+
     def flow(self, dp: Tensor, drivers=None) -> Tensor:
         k = self.resistance()
         dpt = self.dp_transition
@@ -653,3 +669,34 @@ class GeneralPurposeValve(ImplicitLaw):
         h0 = y1.squeeze(-1) - r * x1.squeeze(-1)
         sign = torch.where(q < 0, -torch.ones_like(q), torch.ones_like(q))
         return dp - sign * (h0 + r * a)
+
+
+#: EPANET's floor on a head-loss gradient, ``RQTOL = 1e-7`` ft per cfs (`hydraul.c`,
+#: `RQtol` default, Manual Appendix C ``[OPTIONS]``).
+RQTOL_FT_PER_CFS = 1e-7
+
+
+class FlowControlledPipe(ImplicitLaw):
+    """A pipe in its resistance form, ``dp = scale h(q)``, with the flow an unknown of the
+    layer (`build_model`'s ``pipe_form="flow"``): ``pipe`` is the pipe's potential-form law
+    (`HazenWilliams` or `CompositeDarcyWeisbach`), whose ``head_loss`` gives ``h``.
+
+    The potential form inverts ``h`` (``q = g(dp)``), whose slope grows without bound as the
+    flow goes to zero; the resistance form's slope goes to zero there instead, which the
+    Modified Nodal Analysis system carries as a small diagonal entry. A Hazen-Williams pipe
+    keeps EPANET's ``RQtol`` floor on that slope (``gradient_floor``, m per m^3/s), so a
+    loop of pipes at zero flow still has a nonsingular Jacobian.
+    """
+
+    def __init__(self, pipe, *, gradient_floor: float = 0.0, kind: str = "pipe") -> None:
+        super().__init__(kind)
+        self.pipe = pipe
+        self.gradient_floor = float(gradient_floor)
+        self.scale = float(getattr(pipe, "scale", 1.0))
+
+    def residual(self, dp, q, drivers, ctx):
+        if isinstance(self.pipe, HazenWilliams):
+            h = self.pipe.head_loss(q, self.gradient_floor)
+        else:
+            h = self.pipe.head_loss(q)
+        return dp - self.scale * h

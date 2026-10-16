@@ -109,13 +109,11 @@ def test_nodal_continuity_is_exact(tmp_path):
     model, state, drivers = build_model(net)
     final = water_steady(model, state, drivers)
     layer = model.kirchhoff["water"]
-    residual = layer.residual(
-        final["water.phi"][..., layer.interior], drivers["water.phi_boundary"],
-        {}, drivers["water.sources"],
-    )
-    # MEASURED 2.093e-14, at J1 (the 0.045 m3/s pipe next to the reservoir); Newton's own
-    # atol here is 1e-11, so this is as converged as the solve was asked to be.
-    assert float(residual.abs().max()) < 1e-13
+    imbalance = (layer.net_outflow(final["water.q"]) - drivers["water.sources"])[layer.interior]
+    # MEASURED 2.093e-14 on the potential form, at J1 (the 0.045 m3/s pipe next to the
+    # reservoir); Newton's own atol here is 1e-11, so this is as converged as the solve was
+    # asked to be.
+    assert float(imbalance.abs().max()) < 1e-13
 
 
 # --------------------------------------------------------------------------- Net1 single period
@@ -545,7 +543,7 @@ def test_gradients_against_central_differences(tmp_path):
         return model, final
 
     model, _, drivers = build_model(net)
-    element = model.kirchhoff["water"]._laws[0]
+    element = model.kirchhoff["water"]._laws[0].pipe   # the resistance form wraps it
     sources = drivers["water.sources"].clone().requires_grad_(True)
     element.roughness.requires_grad_(True)
     final = water_steady(model, {"water.phi": torch.zeros(model.net.n, dtype=F64),
@@ -689,7 +687,7 @@ def test_gradient_reaches_a_learnable_roughness(tmp_path):
     path, _ = _epanet(tmp_path, "twoloop_si.inp")
     net = read_epanet_inp(path)
     model, state, drivers = build_model(net)
-    element = model.kirchhoff["water"]._laws[0]
+    element = model.kirchhoff["water"]._laws[0].pipe   # the resistance form wraps it
     element.roughness.requires_grad_(True)
     final = water_steady(model, state, drivers, differentiable=True)
     layer = model.kirchhoff["water"]
