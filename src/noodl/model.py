@@ -83,11 +83,7 @@ from noodl.layers.allocation import AllocatedFlowLayer
 from noodl.layers.kirchhoff import KirchhoffLayer
 from noodl.layers.reaction import Reaction
 from noodl.layers.transport import TransportLayer
-from noodl.solvers.anderson import (  # noqa: F401 -- `_anderson_mix` re-exported
-    _ANDERSON_COND_MAX,
-    _anderson_mix,
-    _AndersonHistory,
-)
+from noodl.solvers.anderson import _AndersonHistory
 from noodl.solvers.errors import ConvergenceError
 from noodl.solvers.fixed_point import differentiate_fixed_point
 from noodl.topology import Network
@@ -101,8 +97,6 @@ _STATE_SUFFIXES = ("phi", "q", "x", "s")
 _MODEL_SOLVE_KEYS = frozenset({"phi0", "q0", "history", "dt", "t"})
 # The key `layer_options` travels under inside `solve_kwargs`, to `_pass`'s layer solves.
 _LAYER_OPTIONS = LAYER_OPTIONS
-# `_detached` is the shared diagnostics helper, under its pre-move name.
-_detached = detached
 
 
 #: Kept for import compatibility: the closure Protocols live in `noodl.contracts`.

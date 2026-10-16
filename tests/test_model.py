@@ -1641,7 +1641,7 @@ def test_anderson_mix_drops_a_collinear_history_and_solves_a_linear_map():
     """An ill-conditioned least-squares problem (here: identical residual differences)
     keeps no column and says so, leaving the fallback to the caller; a well-conditioned
     history of a linear map is solved exactly once it spans the map."""
-    from noodl.model import _anderson_mix
+    from noodl.solvers.anderson import _anderson_mix
 
     x = [torch.tensor([0.0, 0.0], dtype=F64), torch.tensor([1.0, 1.0], dtype=F64)]
     g = [torch.tensor([1.0, 1.0], dtype=F64), torch.tensor([1.0, 1.0], dtype=F64)]

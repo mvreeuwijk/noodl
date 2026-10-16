@@ -97,12 +97,6 @@ def _write_at(
     return layout.write_at(target, n_last, position, value, add=add, where="couple")
 
 
-def _is_stacked(x: Tensor, n_last: int) -> bool:
-    """True when a single-species tensor is in STACKED layout `(..., n_last, 1)` rather than
-    reduced `(..., n_last)` (`noodl.layout.is_stacked`)."""
-    return layout.is_stacked(x, n_last)
-
-
 def apply_conversion(name: str | None, value: Tensor, drivers: Mapping[str, Tensor]) -> Tensor:
     """`value` unchanged if `name` is None; the registered conversion otherwise.
 
