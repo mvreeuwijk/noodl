@@ -98,11 +98,6 @@ def test_dynamic_wave_uniform_conservative_tracer_stays_uniform(tmp_path):
                                rtol=1e-8, atol=0.0)
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "kinematic build_model maps only 'bod' and 'sulfide' to a lateral-concentration driver "
-    "(network.py `species_drivers`); a passive tracer's `<name>_in` is not a declared driver "
-    "and is silently ignored, so the lateral water enters at 0 and dilutes a uniform tracer. "
-    "The dynamic-wave builder gives every species a `<name>_in` driver."))
 def test_kinematic_uniform_tracer_fed_laterally_stays_uniform():
     c = 0.37
     model, _, drivers = _kinematic(("tracer",), {"tracer": c}, steps=0)

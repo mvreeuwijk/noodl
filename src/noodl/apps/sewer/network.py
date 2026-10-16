@@ -1076,15 +1076,11 @@ def build_model(
         drivers["water_quality.x_boundary"] = torch.zeros(
             len(net.outfalls), len(species), dtype=F64
         )
-        # The lateral inflow-concentration loads (`bod_in`/`sulfide_in`) are read by
-        # `LateralLoads`, which is registered
+        # The lateral inflow-concentration loads (`<species>_in`, one driver per species, as
+        # in the dynamic-wave builder) are read by `LateralLoads`, which is registered
         # whenever quality is built at all (with or without `air`), and BEFORE `H2STransfer`
         # below (which adds its own transfer term on top rather than overwriting).
-        species_drivers = {"bod": "bod_in", "sulfide": "sulfide_in"}
-        columns = {
-            i: species_drivers[name] for i, name in enumerate(species)
-            if name in species_drivers
-        }
+        columns = {i: f"{name}_in" for i, name in enumerate(species)}
         closures.append(
             LateralLoads(graph.n, columns=columns, n_species=len(species))
         )
@@ -1175,6 +1171,11 @@ def build_model(
             "sewer.q_slope": slope_per_manhole,
         }
     )
+    if quality:
+        # every species' lateral concentration is a driver (default 0), not only BOD's and
+        # sulfide's: a passive tracer's `<name>_in` must be read, not silently dropped
+        for name in species:
+            drivers.setdefault(f"{name}_in", torch.zeros(graph.n, dtype=F64))
     state.update(initial_state(model, drivers))
     model.out_pipe = out_pipe
     model.manhole_idx = manhole_idx
@@ -1196,6 +1197,11 @@ def build_model(
                               unit="m/m", over=manhole_names,
                               ordering="manhole order"),
     }
+    if quality:
+        for name in species:
+            specs.setdefault(f"{name}_in", dict(
+                description=f"{name} concentration of the lateral inflow", unit="kg/m3",
+                over="nodes"))
     model.input_specs = {k: v for k, v in specs.items() if k in drivers}
     model.driver_template = dict(drivers)
     model.inflow_schedule = net.inflows
