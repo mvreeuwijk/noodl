@@ -144,7 +144,10 @@ a passive tracer without reactions. `"sulfide"` without `"bod"` and repeated nam
 refused. The air-quality layer and the water-to-air transfer exist only when `"sulfide"` is
 among the species (the air-flow layer is built by `air=True` regardless); a selection
 without `"bod"` has no reaction at all. Every species `s` has a lateral-inflow
-concentration driver `"<s>_in"` (kg/m3, default 0), as in the dynamic-wave builder.
+concentration driver `"<s>_in"` (kg/m3, default 0), as in the dynamic-wave builder. A
+single species (`species=("bod",)` or `("tracer",)`) is held with no species axis,
+`"water_quality.x"` of shape `(manholes,)`, as `TransportLayer` holds any one-species
+layer; BOD decays on it as it does beside other species, in both builders.
 
 `air=False` gives the water-only model the SWMM parity rows use. `fans` names manholes carrying
 a prescribed extraction (m³/s, positive out).
@@ -1354,7 +1357,10 @@ its concentrations follow the flows of each pass, which costs 1-5 % more passes.
 Each species `s` enters with the lateral inflow at the concentration of the driver
 `"<s>_in"` (kg/m³, one per node); only a positive inflow loads. A negative lateral inflow (a
 withdrawal) takes water and mass out at the junction's own concentration, whatever `"<s>_in"`
-is, so a uniform tracer stays uniform. `"bod"` decays and `"sulfide"` is generated
+is, so a uniform tracer stays uniform. It is an outflow of the transport step itself (the
+removal rate `"water_quality.removal"`, $w / V_{	ext{end}}$ for the implicit scheme), so the
+water that enters during the step and is withdrawn again carries its mass out too, even
+when one step withdraws several times what the junction held at its start. `"bod"` decays and `"sulfide"` is generated
 (Pomeroy–Parkhurst, see [Quality](#quality)); a species of any other name is a conservative
 tracer. Sulfide needs `"bod"`, and it needs a single outgoing conduit at every junction,
 whose hydraulic radius `sewer.R_h`, speed `sewer.v` and mean depth `sewer.d_m` (exact circle
