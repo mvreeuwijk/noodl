@@ -182,6 +182,14 @@ class LateralLoads:
         self.n_species = int(n_species)
         self.water_layer = water_layer
 
+    @property
+    def species_columns(self) -> dict[str, dict[str, int]]:
+        """`{water layer: {species: column}}`, the species named by the `<species>_in` key
+        each column reads; checked against the layer's `species_names` at construction."""
+        return {self.water_layer: {
+            key[: -len("_in")]: col for col, key in self.columns.items()
+            if key.endswith("_in") and len(key) > len("_in")}}
+
     def __call__(self, state, drivers) -> dict[str, Tensor]:
         inflow = _need(drivers, "inflow")
         if inflow.shape[-1] != self.n_nodes:
@@ -257,6 +265,16 @@ class SulfideGeneration(Reaction):
             None if manhole_idx is None else torch.as_tensor(manhole_idx, dtype=torch.long)
         )
         self.n_nodes = None if n_nodes is None else int(n_nodes)
+
+    @property
+    def species_columns(self) -> dict[str, dict[str, int]]:
+        """`{"water_quality": {"bod": column, "sulfide": column}}` the reaction addresses
+        by index (`sulfide` only when it generates sulfide); checked against the layer's
+        `species_names` at construction."""
+        cols = {"bod": self.bod}
+        if self.sulfide is not None:
+            cols["sulfide"] = self.sulfide
+        return {"water_quality": cols}
 
     def apply(self, x: Tensor, dt: float | None, drivers=None) -> Tensor:
         if dt is None:
@@ -341,6 +359,9 @@ class H2STransfer:
         self.out_pipe = (
             None if out_pipe is None else torch.as_tensor(out_pipe, dtype=torch.long)
         )
+        # the columns this closure addresses by index, checked against the layer's
+        # species_names at construction (`contracts.check_species_columns`)
+        self.species_columns = {self.water_layer: {"sulfide": self.sulfide}}
         self.notes: dict[str, str] = {
             "pka": "pKa = 7.0 is held constant; its temperature dependence is approximated",
             "species": "dissolved sulfide is carried as S and headspace H2S as H2S; the "

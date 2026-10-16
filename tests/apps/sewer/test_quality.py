@@ -400,3 +400,31 @@ def test_bod_decay_alone_reads_no_hydraulic_driver():
     out = reaction.apply(x, 60.0, {"T_water": torch.tensor(18.0, dtype=F64)})
     rate = q.bod_rate(x[:, 0], torch.tensor(18.0, dtype=F64))
     torch.testing.assert_close(out[:, 0], x[:, 0] + 60.0 * rate, rtol=1e-14, atol=0.0)
+
+
+def test_declared_species_columns_agree_with_the_builder_layer():
+    """The R05 class, §1.6: the columns each sewer quality component addresses by index are
+    declared and checked against the layer's `species_names`, in any species order."""
+    from noodl.apps.sewer.quality import H2STransfer, LateralLoads, SulfideGeneration
+    from noodl.contracts import check_species_columns, closure_spec, reaction_species_columns
+    from noodl.layers.transport import TransportLayer  # noqa: F401
+
+    class _Layer:
+        n_species = 2
+        species_names = ("sulfide", "bod")
+
+    transport = {"water_quality": _Layer()}
+    idx = torch.tensor([0])
+    gen = SulfideGeneration(bod=1, sulfide=0)
+    xfer = H2STransfer(1, idx, sulfide=0)
+    loads = LateralLoads(1, columns={0: "sulfide_in", 1: "bod_in"}, n_species=2)
+    check_species_columns("gen", reaction_species_columns(gen), transport)
+    check_species_columns("xfer", closure_spec(xfer, index=0).species_columns, transport)
+    check_species_columns("loads", closure_spec(loads, index=0).species_columns, transport)
+    # the defaults (bod=0, sulfide=1) over species ("sulfide", "bod") are refused by name
+    for bad in (SulfideGeneration(), H2STransfer(1, idx), LateralLoads(
+            1, columns={0: "bod_in", 1: "sulfide_in"}, n_species=2)):
+        declared = (reaction_species_columns(bad) if isinstance(bad, SulfideGeneration)
+                    else closure_spec(bad, index=0).species_columns)
+        with pytest.raises(ValueError, match="species_names"):
+            check_species_columns("bad", declared, transport)

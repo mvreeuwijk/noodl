@@ -17,6 +17,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
+from noodl import layout
 from noodl.apps.street_aq import _munich_files, _sirane_files
 from noodl.apps.street_aq.network import StreetNetwork, street_index
 from noodl.apps.street_aq.routing import StreetFlows
@@ -713,12 +714,16 @@ def drivers_at(
         raise ValueError(
             f"drivers_at: species {unknown} are not in the case's species {case.species}"
         )
-    if model_species is not None and species_names != list(model_species):
-        raise ValueError(
-            f"drivers_at: species {species_names} are not the model's species "
-            f"{list(model_species)} in the model's order; the columns of the sources and "
-            f"background are placed by that order (omit `species` to follow the model)"
-        )
+    if model_species is not None:
+        try:
+            layout.species_columns(model_species, species_names, where="drivers_at",
+                                   order="exact")
+        except ValueError:
+            raise ValueError(
+                f"drivers_at: species {species_names} are not the model's species "
+                f"{list(model_species)} in the model's order; the columns of the sources and "
+                f"background are placed by that order (omit `species` to follow the model)"
+            ) from None
     if len(species_names) != layer.n_species:
         raise ValueError(
             f"drivers_at: {len(species_names)} species {species_names} for a model with "

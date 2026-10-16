@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 
 import torch
 
+from noodl import layout
 from noodl.apps.sewer.air import (
     F_AIR_DEFAULT,
     F_I_DEFAULT,
@@ -35,6 +36,7 @@ from noodl.apps.sewer.quality import H2STransfer, LateralLoads, SulfideGeneratio
 from noodl.apps.sewer.runoff import Hydrology, RunoffInflows, evaporation_can_be_positive
 from noodl.apps.sewer.storage import validate_storage_curve
 from noodl.apps.sewer.xsect_spec import UNMODELLED_KINDS, Xsect
+from noodl.contracts import closure_spec
 from noodl.layers.transport import TransportLayer, active_interior
 from noodl.model import Model
 from noodl.refs import initial_drivers as refs_initial_drivers
@@ -1054,7 +1056,8 @@ def build_model(
             raise ValueError(
                 f"build_model: species 'sulfide' needs 'bod' (Pomeroy-Parkhurst generation "
                 f"reads the BOD), got {species!r}")
-        sulfide_col = species.index("sulfide") if "sulfide" in species else None
+        sulfide_col = (layout.species_columns(species, ["sulfide"], where="build_model")[0]
+                       if "sulfide" in species else None)
         water_cap = torch.ones(len(net.manholes), dtype=F64)
         layers["water_quality"] = TransportLayer(
             graph, "water_quality", capacity=water_cap, flow_kind="pipe",
@@ -1128,7 +1131,8 @@ def build_model(
         [(
             "water_quality",
             SulfideGeneration(
-                bod=species.index("bod"), sulfide=sulfide_col, out_pipe=out_pipe,
+                bod=layout.species_columns(species, ["bod"], where="build_model")[0],
+                sulfide=sulfide_col, out_pipe=out_pipe,
                 manhole_idx=manhole_idx, n_nodes=graph.n,
             ),
         )]
@@ -1253,7 +1257,7 @@ def initial_state(
         return state_from(model, values, base=state) if values else state
     state: State = {}
     for closure in model.closures:
-        if "sewer.H" in getattr(closure, "state_keys", ()):
+        if "sewer.H" in closure_spec(closure, index=0, owner="initial_state").state_keys:
             state["sewer.H"] = torch.zeros(len(closure.manhole_names), dtype=F64)
     for name, layer in model.kirchhoff.items():
         if layer.quantity != "pressure":
