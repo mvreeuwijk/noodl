@@ -681,3 +681,17 @@ def test_write_case_writes_the_scaled_emissions(tmp_path, fmt):
     want[case.street_ids.index(zeroed)] = 0.0
     np.testing.assert_allclose(back.emissions[0, :, 0], want, rtol=1e-6, atol=1e-18)
     assert np.all(case.emissions == 5e-6)    # the case itself keeps the unscaled inventory
+
+
+def test_the_models_network_scales_are_applied_whatever_the_cases_network_says():
+    net, _ = munich_idealised()            # the case's network: every scale 1
+    case = _case(net, 1)
+    zero = _scaled(net, {s.name: 0.0 for s in net.streets})
+    model, state, _ = build_model(zero, species=("NO2",), **MUNICH)
+    d = drivers_at(case, model, 0)
+    assert float(d["street.sources"].sum()) > 0.0       # the driver is the inventory
+    got = model.steady(state, d)["street.x"]
+    quiet = dict(d, **{"street.sources": torch.zeros_like(d["street.sources"])})
+    torch.testing.assert_close(got, model.steady(state, quiet)["street.x"])
+    plain, plain_state, _ = build_model(net, species=("NO2",), **MUNICH)
+    assert not torch.equal(got, plain.steady(plain_state, drivers_at(case, plain, 0))["street.x"])
