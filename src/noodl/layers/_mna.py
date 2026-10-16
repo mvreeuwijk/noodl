@@ -653,7 +653,6 @@ class MnaSystem:
                     diagnostics["residual_norm"] = result.residual_norm
                 return self._output(result.x, phi_boundary, drivers, ctx)
 
-        layer._check_no_unreachable_differentiable_tensors()
         # Threaded through `Function.apply` exactly as on the classic path: every law's and
         # node source's own parameters (substituted back in with `functional_call`), every
         # driver, the sources (zero-filled when absent) and the boundary potentials; on a
@@ -701,6 +700,12 @@ class MnaSystem:
         def residual_fn(x, *params):
             call, drv, src, pb, step = _rebuild(params)
             return remember(self.residual(x, pb, drv, src, step, call))
+
+        def residual_at_start(*params):
+            call, drv, src, pb, step = _rebuild(params)
+            return self.residual(x0, pb, drv, src, step, call)
+
+        layer._require_threaded(residual_at_start, all_params)
 
         def operator_fn(x, *params):
             call, drv, src, pb, step = _rebuild(params)

@@ -26,7 +26,7 @@ class Drive(Protocol):
     `Function.apply` for values reachable via `phi_boundary`, `sources`, `drivers`, and each
     ConstitutiveLaw's own registered `nn.Parameter`s. A Drive instance is captured by closure inside
     the differentiable solve, so any tensor it holds with `requires_grad=True` is invisible to
-    the backward pass; `KirchhoffLayer._check_no_unreachable_differentiable_tensors`
+    the backward pass; `KirchhoffLayer._require_threaded`
     raises on that. Geometry and index tensors (no grad) may be held as attributes.
     """
 
