@@ -295,14 +295,19 @@ def test_closure_spec_reads_every_attribute_in_the_table():
 
 
 @pytest.mark.xfail(
-    reason="until the S01 adopters (model.py, couple.py, refs.py, validation.py, sewer "
-           "network.py, building outputs.py) read declarations through closure_spec",
+    reason="until the remaining S01 adopters (sewer network.py, building outputs.py) read "
+           "declarations through closure_spec",
     strict=False)
 def test_no_code_outside_contracts_reads_a_closure_attribute_directly():
     root = Path(contracts.__file__).parent
     names = "|".join(a.name for a in CLOSURE_ATTRIBUTES)
     pattern = re.compile(rf"""(?:getattr|hasattr)\(\s*[^,()]+,\s*["'](?:{names})["']""")
-    allowed: set[tuple[str, str]] = set()      # (relative path, attribute): app-only protocol
+    # (relative path, matched text): `input_specs` of the model and of a reaction are read by
+    # refs.py itself -- they are not closures, which closure_spec reads.
+    allowed: set[tuple[str, str]] = {
+        ("refs.py", 'getattr(model, "input_specs"'),
+        ("refs.py", 'getattr(r, "input_specs"'),
+    }
     offenders = []
     for path in sorted(root.rglob("*.py")):
         if path.name == "contracts.py" and path.parent == root:

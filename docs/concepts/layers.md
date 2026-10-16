@@ -472,6 +472,27 @@ integrating closure evaluates its outputs at the given state without advancing i
 must also declare `integrates` (True or False) so the model knows whether its carried state changes step to step;
 omitting it is refused by name.
 
+### What a closure may declare
+
+Everything a closure says about itself is an optional attribute, listed in
+`noodl.contracts.CLOSURE_ATTRIBUTES` and read once, at construction, into a `ClosureSpec`
+(`integrates`, `state_keys`, `inputs`, `outputs`, `input_specs`, `key_labels`, `edge_kinds`,
+`requires_coupling`, `reads_flows_of`, `species_columns`). A malformed declaration is refused
+at construction by name:
+
+- `inputs`, `outputs`, `state_keys` and `edge_kinds` must be tuples of names; a bare string
+  (`outputs = "rho"`) is a `TypeError`;
+- `integrates` must be `True` or `False`;
+- a declared output may not be a layer's state key (`"<layer>.phi"`, `.q`, `.x`, `.s`), apart
+  from `"<layer>.q"` of a transport layer no Kirchhoff layer owns;
+- `species_columns = {layer: {species: column}}`, for a closure or reaction that addresses
+  species by column index, must agree with the layer's `species_names` and `n_species`.
+
+`model.refs.ownership()` lists, for every key, who writes it and who reads it (layers,
+closures by their declarations, the caller); `model.check` reports closures that overwrite
+each other's declared outputs (`overwritten-output`), declare nothing (`undeclared-closure`)
+or return keys they did not declare when probed (`declared-vs-probed`).
+
 ### The two couplings, and the trap in the default
 
 ![Ping-pong takes one pass per step; iterate repeats the pass until the named states stop changing](../assets/coupling-modes.svg)

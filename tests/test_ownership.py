@@ -195,3 +195,25 @@ def test_deepcopy_keeps_a_shared_notes_dict_shared():
     model.layers["air"].node_hints = shared
     twin = copy.deepcopy(model)
     assert twin.notes is twin.layers["air"].node_hints and twin.notes is not shared
+
+
+class _ClockClosure:
+    """An integrating closure (module level, so it pickles) that adds the step's dt."""
+
+    integrates = True
+    state_keys = ("clock",)
+
+    def __call__(self, state, drivers, ctx=None):
+        dt = 0.0 if ctx is None or ctx.dt is None else ctx.dt
+        return {"clock": state["clock"] + dt}
+
+
+@pytest.mark.parametrize("copier", [copy.deepcopy, lambda m: pickle.loads(pickle.dumps(m))],
+                         ids=["deepcopy", "pickle"])
+def test_a_copied_model_still_advances_an_integrating_closure(copier):
+    _, model, state, drivers, _, _ = _build(closures=(_ClockClosure(),))
+    state = {**state, "clock": torch.zeros((), dtype=F64)}
+    clone = copier(model)
+    assert model.step(state, drivers, 2.0)["clock"].item() == 2.0
+    assert clone.step(state, drivers, 2.0)["clock"].item() == 2.0
+    assert clone._integrating == {id(c) for c in clone.closures}
