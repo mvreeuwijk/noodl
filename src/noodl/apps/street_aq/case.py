@@ -669,8 +669,11 @@ def drivers_at(
     is per-street or a single network-wide mean.
 
     The model's street order (`street_index(model)`) must be `case.street_ids`: the
-    per-street arrays are placed by position. `species` (default `case.species`) selects
-    and orders the species.
+    per-street arrays are placed by position. The species are matched BY NAME: `species`
+    defaults to the model's own `species_names` (so a case ordered `NO, NO2` drives a model
+    ordered `NO2, NO` correctly, and a case with more species drives a subset model); an
+    explicit `species` must equal the model's species in the model's order, else it raises.
+    Each street's `Street.emission_scale` multiplies its emissions here, exactly once.
 
     `u_star` is supplied whenever `case` has it; `U_ref` is `case`'s own wind speed (not
     derived through noodl's log law -- `u_star`, when present, is what actually sets the
@@ -700,11 +703,26 @@ def drivers_at(
             f"{list(_REQUIRED_METEO)}"
         )
 
-    species_names = list(species) if species is not None else list(case.species)
+    model_species = layer.species_names
+    if species is None:
+        species_names = list(model_species) if model_species is not None else list(case.species)
+    else:
+        species_names = list(species)
     unknown = [s for s in species_names if s not in case.species]
     if unknown:
         raise ValueError(
             f"drivers_at: species {unknown} are not in the case's species {case.species}"
+        )
+    if model_species is not None and species_names != list(model_species):
+        raise ValueError(
+            f"drivers_at: species {species_names} are not the model's species "
+            f"{list(model_species)} in the model's order; the columns of the sources and "
+            f"background are placed by that order (omit `species` to follow the model)"
+        )
+    if len(species_names) != layer.n_species:
+        raise ValueError(
+            f"drivers_at: {len(species_names)} species {species_names} for a model with "
+            f"{layer.n_species}"
         )
     s_idx = [case.species.index(s) for s in species_names]
     n_species = len(species_names)
@@ -719,8 +737,12 @@ def drivers_at(
     sources = torch.zeros(
         (model.net.n,) if n_species == 1 else (model.net.n, n_species), dtype=F64
     )
-    for i, street_id in enumerate(case.street_ids):
-        sources[model.net.node_index(street_id)] = torch.as_tensor(emissions_row[i], dtype=F64)
+    # `Street.emission_scale` is applied here, once, and nowhere else: the case's emissions
+    # are the inventory, the scaled value is what the model's sources are.
+    for i, (street_id, street) in enumerate(zip(case.street_ids, case.network.streets, strict=True)):
+        sources[model.net.node_index(street_id)] = (
+            torch.as_tensor(emissions_row[i], dtype=F64) * street.emission_scale
+        )
 
     n_b = layer.n_b
     if n_b == n_streets:
