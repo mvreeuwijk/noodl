@@ -1,0 +1,11 @@
+SpeciesFile ContamW 2.0
+CTM file for scheduled_three_zone.prj
+1/1	1/1	1
+sarin
+!Date	Time	sarin
+1/1	00:00:00	0.0
+1/1	10:00:00	0.0
+1/1	10:30:00	5.0e-4
+1/1	16:00:00	5.0e-4
+1/1	16:05:00	0.0
+1/1	24:00:00	0.0

@@ -128,6 +128,22 @@ def test_substeps_interpolate_the_capacity_and_conserve_the_amount():
     assert new["c.capacity"].item() == 2.0
 
 
+def test_a_steady_solve_records_the_capacity_it_was_solved_with():
+    """The state a steady solve returns carries the capacity of its drivers, not the one
+    the state it started from carried (a zone's air mass at other temperatures)."""
+    net = Network(dtype=F64)
+    net.add_node("ambient")
+    net.add_node("zone")
+    net.add_edge("zone", "ambient", kind="flow")
+    layer = TransportLayer(net, "c", capacity=_t([1.0]), flow_kind="flow",
+                           boundary=["ambient"], scheme="implicit")
+    model = Model(net, {"c": layer}, closures=[lambda s, d: {"c.q": _t([1.0]),
+                                                             "c.capacity": _t([2.0])}])
+    out = model.steady({"c.x": _t([1.0]), "c.capacity": _t([3.0])},
+                       {"c.x_boundary": _t([0.0]), "c.sources": _t([0.0, 0.0])})
+    assert torch.equal(out["c.capacity"], _t([2.0]))
+
+
 def test_a_written_capacity_driver_requires_the_capacity_in_the_start_state():
     net = Network(dtype=F64)
     net.add_node("ambient")

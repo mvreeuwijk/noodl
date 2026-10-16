@@ -864,3 +864,41 @@ def test_gradient_flows_across_the_join_and_matches_central_differences():
     ) / (2 * h)
     assert grad.item() == pytest.approx(fd.item(), rel=1e-5)
     assert abs(grad.item()) > 0.0
+
+
+def test_the_ambient_density_of_a_conversion_follows_a_changed_ambient_temperature():
+    """A building model whose densities come from the node temperatures (`"T"`, as a schedule
+    or a weather file sets them) must convert at THAT ambient density, not at the `rho_amb`
+    its drivers were built with: the conversion reads the density closure's own output."""
+    from pathlib import Path
+
+    from noodl.apps.building_physics.prj import project_to_model, read_prj
+    from noodl.apps.building_physics.thermal import R_AIR
+
+    prj = Path(__file__).resolve().parent / "data" / "contam" / "valThreeZonesWthCtm-UseApi.prj"
+    project = read_prj(prj)
+    building, b_state, b_drivers = project_to_model(project)
+    T = b_drivers["T"].clone()
+    T[project.net.node_index(project.ambient)] = 263.15
+    b_drivers = {**b_drivers, "T": T}                  # rho_amb left at its initial value
+    street, s_state, s_drivers = _tiny_street_model()
+    link = ValueLink(
+        from_model="street", from_key="street.x", from_index=0,
+        to_model="building", to_key="species.x_boundary", to_index=0,
+        convert="concentration_to_mass_fraction",
+    )
+    coupled, state, drivers = union(
+        {"street": (street, s_state, s_drivers), "building": (building, b_state, b_drivers)},
+        shared=[link],
+    )
+    new = coupled.step(state, drivers, dt=300.0)
+    rho_amb = float(b_drivers["P_ref"]) / (R_AIR * 263.15)
+    expected = building.step(
+        b_state, {**b_drivers, "species.x_boundary": torch.tensor([[3.0 / rho_amb]], dtype=F64)},
+        dt=300.0)
+    torch.testing.assert_close(new["building"]["species.x"], expected["species.x"],
+                               rtol=1e-12, atol=1e-18)
+    stale = building.step(
+        b_state, {**b_drivers, "species.x_boundary": 3.0 / b_drivers["rho_amb"].reshape(1, 1)},
+        dt=300.0)
+    assert not torch.allclose(stale["species.x"], expected["species.x"], rtol=1e-6)

@@ -107,3 +107,13 @@ def test_read_epw_rejects_epw_missing_value_sentinels(tmp_path, col, value):
     p.write_text(HEADER + "\n" + ",".join(cols) + "\n", encoding="utf-8")
     with pytest.raises(ValueError, match="missing-value sentinel"):
         read_epw(p)
+
+
+def test_write_wth_day_types_follow_the_weather_start_day(tmp_path):
+    p = _write(tmp_path, [_row(1, 1, h, 10.0, 101325, 0, 2.0) for h in range(1, 25)])
+    w = read_epw(p)
+    w.start_day, w.day_types = 40, {40: 5}
+    text = write_wth(w, tmp_path / "d.wth", start_date="2/9").read_text()
+    day_row = text.splitlines()[4]
+    assert day_row == "2/9\t5\t5\t0\t273.15"
+    assert read_wth(tmp_path / "d.wth").day_types == {40: 5}

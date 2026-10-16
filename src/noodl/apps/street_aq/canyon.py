@@ -24,7 +24,7 @@ from dataclasses import dataclass
 
 import torch
 
-from noodl.apps.street_aq.closures import KAPPA_040, KAPPA_041, keyword_alias, normalise
+from noodl.apps.street_aq.closures import KAPPA_040, KAPPA_041, normalise
 from noodl.solvers.scalar import solve_monotone
 
 Tensor = torch.Tensor
@@ -481,7 +481,6 @@ def roof_wind(
     w_mean: Tensor | None = None,
     n_levels: int = _N_ROOF_LEVELS,
     shape_constant: str = "exact_root",
-    form: str | None = None,
 ) -> Tensor:
     """Wind speed at roof level `u_H`, from the friction velocity.
 
@@ -489,7 +488,7 @@ def roof_wind(
     `C` is evaluated (`shape_parameter`), the exact root or MUNICH's 0.01-grid search.
 
     `roof_wind` is the closure option of that name (`closures.OPTIONS`), default
-    `"bessel_canyon_mean"`; `form=` is its earlier, deprecated keyword.
+    `"bessel_canyon_mean"`.
 
     `roof_wind="bessel_canyon_mean"` is K22 Eq. (B12), p. 7387
     (ATM `MeteorologyStreet.cxx:114-201`):
@@ -505,9 +504,8 @@ def roof_wind(
     `d_c` and `z0c` from `canopy_displacement_roughness(h_mean, w_mean)`. MUNICH returns 0 when
     `H < d_c + z0c` (SRC `:3334`); that guard is reproduced here.
     """
-    form = normalise("roof_wind", keyword_alias(
-        "roof_wind", "roof_wind", roof_wind, "form", form, "bessel_canyon_mean"),
-        "roof_wind")
+    form = normalise("roof_wind", "bessel_canyon_mean" if roof_wind is None else roof_wind,
+                     "roof_wind")
     u_star = torch.as_tensor(u_star, dtype=torch.float64)
     H = torch.as_tensor(H, dtype=torch.float64)
     W = torch.as_tensor(W, dtype=torch.float64)
@@ -550,7 +548,6 @@ def canyon_velocity(
     kappa: float = KAPPA,
     canyon_wind_min: float = 0.0,
     shape_constant: str = "exact_root",
-    form: str | None = None,
 ) -> Tensor:
     """The SIGNED along-canyon velocity, m/s. Positive means from `u` to `v`.
 
@@ -561,7 +558,7 @@ def canyon_velocity(
     `H` and any leading forcing batch.
 
     `canyon_wind` is the closure option of that name (`closures.OPTIONS`), default
-    `"bessel_profile"`; `form=` is its earlier, deprecated keyword.
+    `"bessel_profile"`.
 
     `canyon_wind="bessel_profile"` (needs `u_star`) is the Soulhac-Perkins-Salizzoni (2008)
     closed form,
@@ -595,9 +592,8 @@ def canyon_velocity(
     unfloored value is `+0` and MUNICH's own `>` classification makes the street an
     OUTFLOW; that is what produces the 270-degree panel of K22 Fig. 1.
     """
-    form = normalise("canyon_wind", keyword_alias(
-        "canyon_velocity", "canyon_wind", canyon_wind, "form", form, "bessel_profile"),
-        "canyon_velocity")
+    form = normalise("canyon_wind", "bessel_profile" if canyon_wind is None else canyon_wind,
+                     "canyon_velocity")
     W = torch.as_tensor(W, dtype=torch.float64)
     H = torch.as_tensor(H, dtype=torch.float64)
     phi = torch.as_tensor(phi, dtype=torch.float64)
@@ -664,12 +660,11 @@ def exchange_velocity(
     roof_exchange: str | None = None,
     u_d_min: float = 0.0,
     sigma_w_min: float = 0.0,
-    form: str | None = None,
 ) -> Tensor:
     """The roof exchange velocity `u_d`, m/s.
 
     `roof_exchange` is the closure option of that name (`closures.OPTIONS`), default
-    `"turbulent_velocity"`; `form=` is its earlier, deprecated keyword.
+    `"turbulent_velocity"`.
 
     `roof_exchange="turbulent_velocity"`: `u_d = sigma_w / (sqrt(2) pi)`, independent of
     the aspect ratio.
@@ -692,9 +687,9 @@ def exchange_velocity(
     `u_d = u_d(max(sigma_w, sigma_w_min))`: SIRANE's `SIGMA_W_MIN`, 0.30 m/s by default
     there and 0.0 here.
     """
-    form = normalise("roof_exchange", keyword_alias(
-        "exchange_velocity", "roof_exchange", roof_exchange, "form", form,
-        "turbulent_velocity"), "exchange_velocity")
+    form = normalise("roof_exchange",
+                     "turbulent_velocity" if roof_exchange is None else roof_exchange,
+                     "exchange_velocity")
     sigma_w = torch.as_tensor(sigma_w, dtype=torch.float64)
     H = torch.as_tensor(H, dtype=torch.float64)
     W = torch.as_tensor(W, dtype=torch.float64)

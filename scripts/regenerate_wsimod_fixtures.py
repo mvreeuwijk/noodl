@@ -157,7 +157,8 @@ def _build_and_capture_quickstart(
         quickstart_model.run(verbose=False)
 
     FIXTURE_DIR.mkdir(parents=True, exist_ok=True)
-    (FIXTURE_DIR / f"{prefix}_topology.json").write_text(json.dumps(topology, indent=2))
+    (FIXTURE_DIR / f"{prefix}_topology.json").write_text(
+        json.dumps(topology, indent=2), encoding="utf-8", newline="\n")
     raw = pd.DataFrame(events)
     aggregated = raw.groupby(["arc", "direction", "t"], as_index=False)[
         ["requested", "realised"]
@@ -192,7 +193,8 @@ def _build_and_capture_oxford(data_folder: str) -> None:
         oxford_model.run(verbose=False)
 
     FIXTURE_DIR.mkdir(parents=True, exist_ok=True)
-    (FIXTURE_DIR / "oxford_topology.json").write_text(json.dumps(oxford_topology, indent=2))
+    (FIXTURE_DIR / "oxford_topology.json").write_text(
+        json.dumps(oxford_topology, indent=2), encoding="utf-8", newline="\n")
     oxford_raw = pd.DataFrame(oxford_events_raw)
     oxford_aggregated = oxford_raw.groupby(
         ["arc", "direction", "t"], as_index=False

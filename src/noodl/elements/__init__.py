@@ -7,8 +7,10 @@ tool's equations, the class docstring says so (for example ``RegularizedPowerLaw
 pre-rename ``MBL*``/``mbl_*`` names remain importable as aliases.
 """
 
+from noodl.elements.air_duct import AirDuct, DuctTerminal, air_viscosity
 from noodl.elements.base import ConstitutiveLaw, ImplicitLaw, LawContext
 from noodl.elements.conductance import Conductance
+from noodl.elements.curve import CubicSplineFlow, SplineCurve
 from noodl.elements.damper import Damper
 from noodl.elements.door import (
     MBLDoorOpen,
@@ -34,8 +36,8 @@ from noodl.elements.door_discretized import (
     mbl_discretized_operable_door,
 )
 from noodl.elements.duct import Duct
-from noodl.elements.fan import FanCurve
-from noodl.elements.fixed import FixedFlow
+from noodl.elements.fan import AffinityFan, FanCurve
+from noodl.elements.fixed import FixedFlow, FixedVolumeFlow, PrescribedFlow
 from noodl.elements.media import AirMedium, MBLMedium, medium
 from noodl.elements.powerlaw import Orifice, PowerLaw
 from noodl.elements.powerlaw_regularized import (
@@ -53,20 +55,26 @@ from noodl.elements.powerlaw_regularized import (
     regularized_orifice,
 )
 from noodl.elements.quadratic import Quadratic
+from noodl.elements.scaled import Scaled
 from noodl.elements.table import MBLTable, SplineFlowTable
 from noodl.elements.upstream import UpstreamDensityPowerLaw
 
 __all__ = [
+    "AffinityFan",
+    "AirDuct",
     "AirMedium",
     "Conductance",
+    "CubicSplineFlow",
     "Damper",
     "DoorCompartment",
     "DoorCompartmentHead",
     "DoorPortStream",
     "Duct",
     "ConstitutiveLaw",
+    "DuctTerminal",
     "FanCurve",
     "FixedFlow",
+    "FixedVolumeFlow",
     "ImplicitLaw",
     "LawContext",
     "OpenDoor",
@@ -74,10 +82,14 @@ __all__ = [
     "OperableDoorCompartment",
     "Orifice",
     "PowerLaw",
+    "PrescribedFlow",
     "Quadratic",
     "RegularizedPowerLaw",
+    "Scaled",
+    "SplineCurve",
     "SplineFlowTable",
     "UpstreamDensityPowerLaw",
+    "air_viscosity",
     "discretized_door",
     "discretized_operable_door",
     "effective_leakage_area",

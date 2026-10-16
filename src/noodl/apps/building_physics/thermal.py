@@ -12,16 +12,21 @@ from __future__ import annotations
 import numbers
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 import torch
 
 from noodl._broadcast import broadcast_shapes
 from noodl.components import Component
+from noodl.elements import PrescribedFlow
 from noodl.layers.potential import PotentialFlowLayer
 from noodl.layers.transport import TransportLayer, active_interior
 from noodl.model import Drivers, Model, State
 from noodl.refs import drivers_from, state_from
 from noodl.topology import Network
+
+if TYPE_CHECKING:
+    from noodl.apps.building_physics.controls import ControlNetwork
 
 R_AIR = 287.055
 RHO_0 = 1.2041
@@ -95,10 +100,19 @@ def add_zone(net: Network | Component, zone: Zone, *, ambient="ambient") -> None
 
 def thermal_layer(net: Network, *, ambient="ambient", name: str = "thermal",
                   flow_kinds=("airpath",), conduction_kind: str = "wall", c_p: float = CP_AIR,
-                  rho: float = RHO_0, scheme: str = "exact",
-                  fixed_temperature=()) -> TransportLayer:
+                  rho: float = RHO_0, scheme: str | None = None,
+                  fixed_temperature=(), storage_free: Sequence = ()) -> TransportLayer:
     """The heat layer: capacity rho c_p V + heat_capacity per active interior node, carrier
-    c_p on the flow kinds, conduction UA on `conduction_kind` edges (if any exist)."""
+    c_p on the flow kinds, conduction UA on `conduction_kind` edges (if any exist).
+
+    `storage_free` names nodes that hold no heat (a zero-volume air-handler plenum): their
+    capacity may be zero, and they need the implicit scheme. `scheme` defaults to "exact",
+    or to "implicit" when `storage_free` names any node; an explicit other scheme with
+    storage-free nodes is refused by name.
+    """
+    storage_free = tuple(storage_free)
+    if scheme is None:
+        scheme = "implicit" if len(storage_free) else "exact"
     boundary = [ambient, *fixed_temperature]
     kinds = tuple(flow_kinds)
     has_walls = conduction_kind in net.edge_kinds()
@@ -111,15 +125,16 @@ def thermal_layer(net: Network, *, ambient="ambient", name: str = "thermal",
     )
     capacity = (rho * c_p * net.node_attr("volume", default=0.0)
                 + net.node_attr("heat_capacity", default=0.0))[interior]
+    free = set(net.canonical(list(storage_free))) if storage_free else set()
     bad = [
         net.nodes[i]
         for i, c in zip(interior.tolist(), capacity.tolist(), strict=True)
-        if c <= 0
+        if c <= 0 and net.nodes[i] not in free
     ]
     if bad:
         raise ValueError(
             f"thermal layer {name!r}: nodes {bad} have no heat capacity (zero volume and no "
-            f"wall capacity)"
+            f"wall capacity){_STORAGE_FREE_HINT}"
         )
     return TransportLayer(
         net, name, capacity=capacity, flow_kind=kinds, boundary=boundary, carrier=float(c_p),
@@ -127,32 +142,43 @@ def thermal_layer(net: Network, *, ambient="ambient", name: str = "thermal",
         conductance=net.edge_attr("ua", conduction_kind) if has_walls else None,
         scheme=scheme, quantity="temperature", unit="K",
         source_unit="W", capacity_unit="J/K", flow_unit="kg/s",
+        storage_free=tuple(storage_free),
     )
 
 
 def species_layer(net: Network, *, ambient="ambient", name: str = "species",
                   flow_kinds=("airpath",), rho: float | torch.Tensor = RHO_0,
                   n_species: int = 1, scheme: str = "implicit",
-                  species_names=None) -> TransportLayer:
+                  species_names=None, transmission=None, kinetics=None,
+                  storage_free: Sequence = ()) -> TransportLayer:
     """Species as mass fractions with zone air mass rho V as capacity (CONTAM convention).
 
     `rho` is one density for every node or a full-node `(n,)` tensor of per-node densities
     (`prj.project_to_model` passes each zone's `Pb / (R T)`, as ContamX holds it).
+    `transmission` (`(b_flow, K)`, the pass fraction 1 - efficiency of each flow edge's
+    filter; `filter_transmission` builds it) and `kinetics` (`(n_i, K, K)`, each zone's
+    first-order reactions; `reaction_kinetics` builds it) go to the `TransportLayer`
+    unchanged. `storage_free` names nodes that hold no air (a zero-volume air-handler
+    plenum): their volume may be zero, and the layer must use `scheme="implicit"`.
     """
+    storage_free = tuple(storage_free)
     kinds = tuple(flow_kinds)
     interior, _ = active_interior(net, kinds, [ambient])
     capacity = (rho * net.node_attr("volume", default=0.0))[interior]
+    free = set(net.canonical(list(storage_free))) if storage_free else set()
     bad = [
         net.nodes[i]
         for i, c in zip(interior.tolist(), capacity.tolist(), strict=True)
-        if c <= 0
+        if c <= 0 and net.nodes[i] not in free
     ]
     if bad:
-        raise ValueError(f"species layer {name!r}: nodes {bad} have zero volume")
+        raise ValueError(f"species layer {name!r}: nodes {bad} have zero volume"
+                         f"{_STORAGE_FREE_HINT}")
     return TransportLayer(
         net, name, capacity=capacity, flow_kind=kinds, boundary=[ambient], n_species=n_species,
         scheme=scheme, quantity="mass_fraction", unit="kg/kg", species_names=species_names,
         source_unit="kg/s", capacity_unit="kg", flow_unit="kg/s",
+        transmission=transmission, kinetics=kinetics, storage_free=tuple(storage_free),
     )
 
 
@@ -215,12 +241,55 @@ class LinearDensity(_DensityClosure):
         return self.rho_0 * (1.0 - (T - self.T_0) / self.T_0)
 
 
+#: Appended to a zero-capacity refusal: the usual cause is an air handler's plenum.
+_STORAGE_FREE_HINT = " (an air-handler plenum? pass storage_free= to build_model)"
+
+
+def _prescribed_only_nodes(net: Network, air_laws, air) -> list:
+    """The airflow layer's interior nodes that only `PrescribedFlow` edges touch (an air
+    handler's plenums left out of `flow_balanced`): their pressure is undetermined."""
+    other: set = set()
+    prescribed: set = set()
+    for el in air_laws:
+        src, tgt = net.endpoints(el.kind)
+        touched = {net.nodes[i] for i in src.tolist() + tgt.tolist()}
+        (prescribed if isinstance(el, PrescribedFlow) else other).update(touched)
+    interior = {net.nodes[i] for i in air.interior.tolist()}
+    return [n for n in net.nodes if n in prescribed and n not in other and n in interior]
+
+
+def check_flow_balanced(net: Network, air_laws, flow_balanced, *,
+                        where: str = "build_model") -> None:
+    """Refuse a flow-balanced node that an edge touches whose law is not a
+    `PrescribedFlow` (an air handler's): the airflow solve pins such a node at zero gauge
+    pressure, so a pressure-dependent edge would let it absorb an imbalance silently, and a
+    fixed flow is outside the handler's balance."""
+    balanced = set(net.canonical(list(flow_balanced))) if flow_balanced else set()
+    if not balanced:
+        return
+    for el in air_laws:
+        if isinstance(el, PrescribedFlow):
+            continue
+        src, tgt = net.endpoints(el.kind)
+        for s, t in zip(src.tolist(), tgt.tolist(), strict=True):
+            for node in (net.nodes[s], net.nodes[t]):
+                if node in balanced:
+                    raise ValueError(
+                        f"{where}: flow_balanced node {node!r} is an end of the edge "
+                        f"{net.nodes[s]!r} -> {net.nodes[t]!r} of kind {el.kind!r}, whose "
+                        f"law is a {type(el).__name__}; the airflow solve pins a "
+                        f"flow-balanced node at zero gauge pressure, so only an air "
+                        f"handler's prescribed flows (PrescribedFlow) may touch it")
+
+
 def build_model(net: Network, *, air_laws, drives, ambient="ambient", thermal: bool = True,
                 species: int | Sequence[str] = 0, density: str = "ideal_gas",
                 density_kwargs=None,
                 coupling: str = "pingpong", iterate_tol=None, iterate_max: int = 20,
-                thermal_scheme: str = "exact", species_scheme: str = "implicit",
-                flow_kinds=None, return_inputs: bool = False):
+                thermal_scheme: str | None = None, species_scheme: str = "implicit",
+                flow_kinds=None, closures: Sequence = (), flow_balanced: Sequence = (),
+                storage_free: Sequence = (), controls: ControlNetwork | None = None,
+                return_inputs: bool = False):
     """Layers "air" (+ "thermal", + "species"), the density closure, one Model.
 
     Returns the `Model`; with `return_inputs=True`, `(model, state, drivers)` -- its
@@ -253,7 +322,28 @@ def build_model(net: Network, *, air_laws, drives, ambient="ambient", thermal: b
     but every kind named must be one the air layer actually provides, or the narrowing is a
     typo that silently drops advection. Unknown kinds raise `KeyError` naming them. The same
     value governs BOTH the thermal and the species layer.
+
+    `thermal_scheme` defaults to `thermal_layer`'s own default ("exact", or "implicit" when
+    the layer has storage-free nodes).
+
+    `controls`: a `ControlNetwork`, put first among the closures (its actuators write the
+    drivers the other closures read). Its sensors' named readings (`node_mass_fraction`,
+    `edge_flow`, ...) are resolved against this model's layers. `return_inputs=True` then
+    also seeds its outputs, memory and `"controls.input"`.
+
+    `closures` are appended after the density closure (an air handler's
+    `AirHandlerFlows`). `flow_balanced` names nodes whose pressure the airflow solve does
+    not need, because only prescribed, balanced flows touch them (an air handler's
+    plenums): they join the air layer's boundary at zero gauge pressure, while staying
+    ordinary nodes of the heat and species layers. Only edges whose law is a
+    `PrescribedFlow` may touch them: a pressure-dependent edge would let the plenum, pinned
+    at zero gauge pressure, absorb an imbalance silently, and a fixed flow is outside the
+    handler's balance, so either is refused, naming the node and the edge. `storage_free`
+    names nodes that hold no air (a zero-volume plenum); their layers must use the implicit
+    scheme.
     """
+    storage_free = tuple(storage_free)
+    check_flow_balanced(net, air_laws, flow_balanced)
     law_kinds = tuple(el.kind for el in air_laws)
     kinds = tuple(flow_kinds) if flow_kinds else law_kinds
     unknown = [k for k in kinds if k not in law_kinds]
@@ -264,19 +354,23 @@ def build_model(net: Network, *, air_laws, drives, ambient="ambient", thermal: b
             f"not solve carries no flow, so heat and species would silently not advect on it"
         )
     air = PotentialFlowLayer(net, "air", list(air_laws), drives=list(drives),
-                             boundary=[ambient], quantity="pressure", unit="Pa",
+                             boundary=[ambient, *flow_balanced], quantity="pressure", unit="Pa",
                              flow_unit="kg/s")
+    air.node_hints.update(dict.fromkeys(_prescribed_only_nodes(net, air_laws, air),
+                                        "an air-handler plenum? pass flow_balanced= to "
+                                        "build_model"))
     layers: dict = {"air": air}
-    closures: list = []
+    model_closures: list = [] if controls is None else [controls]
     if thermal:
-        th = thermal_layer(net, ambient=ambient, flow_kinds=kinds, scheme=thermal_scheme)
+        th = thermal_layer(net, ambient=ambient, flow_kinds=kinds, scheme=thermal_scheme,
+                           storage_free=storage_free)
         layers["thermal"] = th
         amb = net.node_index(ambient)
         kw = dict(density_kwargs or {})
         if density == "ideal_gas":
-            closures.append(IdealGasDensity(th, ambient_index=amb, **kw))
+            model_closures.append(IdealGasDensity(th, ambient_index=amb, **kw))
         elif density == "linear":
-            closures.append(LinearDensity(th, ambient_index=amb, **kw))
+            model_closures.append(LinearDensity(th, ambient_index=amb, **kw))
         else:
             raise ValueError(
                 f"build_model: density must be 'ideal_gas' or 'linear', got {density!r}"
@@ -292,11 +386,19 @@ def build_model(net: Network, *, air_laws, drives, ambient="ambient", thermal: b
         layers["species"] = species_layer(
             net, ambient=ambient, flow_kinds=kinds, scheme=species_scheme,
             n_species=int(species) if names is None else len(names), species_names=names,
+            storage_free=storage_free,
         )
-    model = Model(net, layers, closures=closures, coupling=coupling, iterate_tol=iterate_tol,
+    model_closures.extend(closures)
+    if controls is not None:
+        controls.resolve(net, layers)
+    model = Model(net, layers, closures=model_closures, coupling=coupling, iterate_tol=iterate_tol,
                   iterate_max=iterate_max)
     if return_inputs:
-        return model, initial_state(model), initial_drivers(model)
+        state, drivers = initial_state(model), initial_drivers(model)
+        if controls is not None:
+            state.update(controls.initial_state())
+            drivers.update(controls.initial_drivers())
+        return model, state, drivers
     return model
 
 

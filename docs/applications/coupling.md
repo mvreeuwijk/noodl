@@ -279,7 +279,10 @@ way** — that is a property of the pass itself, not of which solver ran inside 
 ## The canonical pairing: street ↔ building
 
 - **Forward, converted:** the street's segment concentration `street.x[i]` becomes the building's
-  `species.x_boundary`, divided by the building's own `rho_amb`.
+  `species.x_boundary`, divided by the building's own `rho_amb`. When a closure of the building
+  model computes `rho_amb` (its density closure, from the node temperatures a schedule or a
+  weather file sets), the coupler takes that closure's value at the start of each step, not
+  the value the drivers were built with.
 - **Backward, two-way, unconverted:** the building is the **recipient**, so it is stepped first,
   from that boundary value; its own species boundary transfer, integrated over its whole outer
   step, divided by `dt`, is added into `street.sources` at the shared segment — already a mass

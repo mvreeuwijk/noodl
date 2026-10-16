@@ -7,8 +7,6 @@ full closure sets are the presets `"sirane"` (the default everywhere) and `"muni
 - `OPTIONS`: option name -> its allowed values.
 - `PRESETS`: preset name -> every option, the von Karman constant, the floors and the
   chemistry settings `photostationary_for_streets` takes.
-- `LEGACY`: the earlier option names and values, which are still accepted with a
-  `DeprecationWarning` naming the replacement.
 
 `resolve` merges a preset with explicit choices and is what `build_model` and
 `StreetFlows` call; `normalise` checks one value and is what the lower-level functions
@@ -17,8 +15,6 @@ full closure sets are the presets `"sirane"` (the default everywhere) and `"muni
 
 from __future__ import annotations
 
-import sys
-import warnings
 from collections.abc import Mapping
 
 __all__ = [
@@ -26,19 +22,14 @@ __all__ = [
     "H_CANOPY",
     "KAPPA_040",
     "KAPPA_041",
-    "LEGACY",
-    "LEGACY_NAMES",
-    "LEGACY_VALUES",
     "OPTIONS",
     "PRESETS",
     "SIGMA_V_MIN",
     "SIGMA_W_MIN",
     "infer_kappa",
-    "keyword_alias",
     "normalise",
     "preset_options",
     "resolve",
-    "warn_deprecated",
 ]
 
 OPTIONS: dict[str, tuple[str, ...]] = {
@@ -175,28 +166,6 @@ and a 0.001 m/s floor on the exchange velocity, no turbulence floors, and the JP
 NO + O3 rate with no floor.
 """
 
-LEGACY_NAMES: dict[str, str] = {
-    "roof_wind_form": "roof_wind",
-    "exchange": "roof_exchange",
-    "routing": "junction_routing",
-}
-"""Deprecated keyword -> its current name."""
-
-LEGACY_VALUES: dict[str, dict[str, str]] = {
-    "canyon_wind": {"soulhac": "bessel_profile", "exponential": "exponential_profile"},
-    "roof_wind": {"sirane": "bessel_canyon_mean", "macdonald": "canopy_log_law"},
-    "roof_exchange": {"sirane": "turbulent_velocity", "schulte": "aspect_ratio_scaled"},
-    "junction_routing": {"sirane": "non_crossing_streamlines", "mixing": "perfect_mixing"},
-    "direction_averaging": {"sirane": "exact_gaussian", "munich": "rectangle_rule",
-                            "gauss": "gauss_hermite"},
-    "stability": {"munich": "monin_obukhov"},
-}
-"""Per option, deprecated value -> its current value. `direction_averaging="munich"` also
-implies `direction_spread="turbulence_intensity"` (see `resolve`)."""
-
-LEGACY = {"names": LEGACY_NAMES, "values": LEGACY_VALUES}
-"""Both deprecation maps together."""
-
 _KAPPA_041_CHOICES = {
     "canyon_wind": "exponential_profile",
     "roof_exchange": "aspect_ratio_scaled",
@@ -204,23 +173,6 @@ _KAPPA_041_CHOICES = {
 }
 """The choices whose formulas are written with `kappa = 0.41`, `KAPPA_041` (see
 `infer_kappa`)."""
-
-
-_PACKAGE = __name__.rpartition(".")[0]
-
-
-def warn_deprecated(message: str) -> None:
-    """A `DeprecationWarning` attributed to the line that used the deprecated spelling:
-    the caller of the street application's function that called into this module (or the
-    direct caller of this module's own functions)."""
-    frame = sys._getframe(1)
-    level = 2
-    while frame is not None and frame.f_globals.get("__name__") == __name__:
-        frame = frame.f_back
-        level += 1
-    if frame is not None and str(frame.f_globals.get("__name__", "")).startswith(_PACKAGE):
-        level += 1
-    warnings.warn(message, DeprecationWarning, stacklevel=level)
 
 
 def preset_options(name: str) -> dict:
@@ -233,21 +185,12 @@ def preset_options(name: str) -> dict:
 
 
 def normalise(option: str, value: str, where: str) -> str:
-    """`value` as a current value of `option`.
-
-    A current value is returned unchanged; a deprecated one (`LEGACY_VALUES`) is mapped to
-    its replacement with a `DeprecationWarning`; anything else raises `ValueError` naming
-    `where`, the option and its allowed values."""
+    """`value` if it is an allowed value of `option`; otherwise `ValueError` naming `where`,
+    the option and its allowed values."""
     allowed = OPTIONS[option]
-    if value in allowed:
-        return value
-    replacement = LEGACY_VALUES.get(option, {}).get(value)
-    if replacement is not None:
-        warn_deprecated(
-            f"{where}: {option}={value!r} is deprecated; use {option}={replacement!r}"
-        )
-        return replacement
-    raise ValueError(f"{where}: {option} must be one of {allowed}, got {value!r}")
+    if value not in allowed:
+        raise ValueError(f"{where}: {option} must be one of {allowed}, got {value!r}")
+    return value
 
 
 def infer_kappa(options: Mapping[str, str]) -> float:
@@ -260,58 +203,25 @@ def infer_kappa(options: Mapping[str, str]) -> float:
     return KAPPA_041 if written_with_041 else KAPPA_040
 
 
-def keyword_alias(where: str, name: str, value, old_name: str, old_value, default):
-    """The value of keyword `name`, which earlier releases called `old_name`.
-
-    `old_value` (not `None`) is taken with a `DeprecationWarning` naming `name`; given
-    together with a `value` other than `None` it raises `TypeError`. With neither, the
-    result is `default`."""
-    if old_value is None:
-        return default if value is None else value
-    if value is not None:
-        raise TypeError(
-            f"{where}: {old_name!r} and {name!r} both set {name!r}; give only one"
-        )
-    warn_deprecated(f"{where}: the keyword {old_name!r} is deprecated; use {name!r}")
-    return old_value
-
-
 def resolve(preset: str, options: Mapping[str, object], where: str) -> dict:
     """The full option set: preset `preset` with every non-`None` entry of `options` on top.
 
-    `options` may use deprecated names and values (`LEGACY`); each is translated with a
-    `DeprecationWarning`, and a deprecated name given together with its current one raises
-    `TypeError`. `direction_averaging="munich"` (deprecated) also sets
-    `direction_spread="turbulence_intensity"` unless `direction_spread` is given.
+    An option name that is neither a closure option nor a numeric setting raises
+    `TypeError`; a value outside `OPTIONS` raises `ValueError`.
 
     The von Karman constant: an explicit `kappa` wins; otherwise, when any string option is
     given explicitly, it is `infer_kappa` of the merged set; otherwise the preset's.
     """
     merged = preset_options(preset)
     explicit: dict[str, object] = {}
-    given_as: dict[str, str] = {}
-    implied_spread = False
     for key, value in options.items():
         if value is None:
             continue
-        name = key
-        if key in LEGACY_NAMES:
-            name = LEGACY_NAMES[key]
-            warn_deprecated(f"{where}: the keyword {key!r} is deprecated; use {name!r}")
-        if name in explicit:
-            raise TypeError(
-                f"{where}: {given_as[name]!r} and {key!r} both set {name!r}; give only one"
-            )
-        given_as[name] = key
-        if name in OPTIONS:
-            if name == "direction_averaging" and value == "munich":
-                implied_spread = True
-            value = normalise(name, value, where)
-        elif name not in _NUMERIC:
+        if key in OPTIONS:
+            value = normalise(key, value, where)
+        elif key not in _NUMERIC:
             raise TypeError(f"{where}: unexpected keyword argument {key!r}")
-        explicit[name] = value
-    if implied_spread and "direction_spread" not in explicit:
-        explicit["direction_spread"] = "turbulence_intensity"
+        explicit[key] = value
     merged.update(explicit)
     if "kappa" not in explicit and any(key in OPTIONS for key in explicit):
         merged["kappa"] = infer_kappa(merged)

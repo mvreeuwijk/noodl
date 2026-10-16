@@ -94,7 +94,7 @@ exactly like one built by hand.
 
 | Format | Reader | What it describes | Produces a model for |
 |---|---|---|---|
-| CONTAM `.prj` / `.wth` | `read_prj`, `project_to_model`, `read_wth` | Multi-zone building airflow and contaminants; weather | Building physics |
+| CONTAM `.prj` / `.wth` | `read_prj`, `project_to_model`, `simulate_project`, `read_wth`, `read_ctm` | Multi-zone building airflow, contaminants and occupants; weather; ambient concentrations | Building physics |
 | Modelica Buildings Library (JSON + CSV export) | `read_modelica` | Multi-zone airflow models built from MBL components | Building physics |
 | SWMM `.inp` | `read_swmm_inp` | Gravity sewer and drainage networks | Sewers |
 | EPANET `.inp` | `read_epanet_inp` | Pressurised water distribution | Water distribution |

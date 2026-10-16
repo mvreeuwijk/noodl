@@ -15,7 +15,12 @@ per-node storage, full-node order; that layer also writes its realised flows to
 "<layer>.q"). Drivers: "<layer>.phi_boundary", "<layer>.x_boundary", optional
 "<layer>.sources" (FULL-node order, zeros on boundary and inactive nodes), optional
 "<layer>.capacity" (a transport layer's per-step capacity override; absent, the
-layer's construction-time capacity stands), "<layer>.requests" (an allocation layer's
+layer's construction-time capacity stands; when given, a step or a steady solve records it
+in the state it returns), optional "<layer>.removal" (a transport layer's
+per-step first-order removal rate, 1/s, (..., n_i, K); absent, the layer's
+construction-time removal stands), optional "<layer>.transmission" (a transport layer's
+per-step transmission, (..., b_flow) or (..., b_flow, K) in its flow order; absent, the
+layer's construction-time transmission stands), "<layer>.requests" (an allocation layer's
 per-edge requested flow, required every step). Closures return driver updates; they may
 not write state keys. A transport layer whose kinds no
 potential layer provides reads its branch flows from the driver "<layer>.q", in the layer's
@@ -55,6 +60,7 @@ from noodl.layers.allocation import AllocatedFlowLayer
 from noodl.layers.potential import PotentialFlowLayer
 from noodl.layers.reaction import Reaction
 from noodl.layers.transport import TransportLayer
+from noodl.solvers.errors import ConvergenceError
 from noodl.solvers.fixed_point import differentiate_fixed_point
 from noodl.topology import Network
 
@@ -310,9 +316,15 @@ class Model:
     A primal pass is one iterate: a potential solve that does not converge within a pass
     (Newton's `max_iter`) does not end the step. It returns its last Newton iterate, the pass
     is judged not converged, and the iteration goes on from it; only the iteration's own
-    verdict raises (or accepts, below). A potential solve that is differentiated still
-    raises (`PotentialFlowLayer.solve`'s ``on_failure="return_primal"``), and a caller's own
-    `on_failure` is passed through unchanged.
+    verdict raises (or accepts, below). When the last pass's potential solve also stopped
+    short, the error is `noodl.solvers.ConvergenceError` (a `RuntimeError`), so a caller can
+    retry the step from another starting point (`warm_start=False`) and let every other
+    failure through. A step that is going to raise stops early, before `iterate_max`, once
+    every unconverged instance's potential solve has failed again from a fed state within
+    the tolerances of the previous pass's: the next pass would only repeat it. A potential
+    solve that is differentiated still raises (`PotentialFlowLayer.solve`'s
+    ``on_failure="return_primal"``), and a caller's own `on_failure` is passed through
+    unchanged.
 
     `iterate_on_limit="accept"` (default ``"raise"``) makes a batch that does not converge
     within `iterate_max` return its last pass instead of raising, as SWMM accepts a step
@@ -636,6 +648,23 @@ class Model:
         bad = {k: v for k, v in self.iterate_flow_tol.items() if not v > 0.0}
         if bad:
             raise ValueError(f"Model: iterate_flow_tol must be positive, got {bad}")
+        # A closure that reads a potential layer's flows to write something the same pass
+        # uses (a flow-dependent filter's transmission) is right only at the coupling's fixed
+        # point, where the flows it read are the flows the pass produced: it declares
+        # `requires_coupling = "iterate"` and `reads_flows_of = "<potential layer>"`.
+        for closure in self.closures:
+            if getattr(closure, "requires_coupling", None) != "iterate":
+                continue
+            flows_of = getattr(closure, "reads_flows_of", None)
+            if coupling != "iterate" or flows_of not in self.iterate_flow_tol:
+                raise ValueError(
+                    f"Model: closure {type(closure).__name__} reads the flows of layer "
+                    f"{flows_of!r} before the pass solves them, so it needs "
+                    f"coupling='iterate' with {flows_of!r} in iterate_tol and "
+                    f"iterate_flow_tol (each pass is then fed the previous pass's flows and a "
+                    f"step converges on its own); got coupling={coupling!r}, "
+                    f"iterate_flow_tol={self.iterate_flow_tol}"
+                )
         if iterate_acceleration is not None:
             if coupling != "iterate":
                 raise ValueError(
@@ -866,7 +895,7 @@ class Model:
     def _pass(
         self, state, drivers, dt, solve_kwargs, *, step_from: State | None = None,
         t: float | None = None, boundary_transfers: bool | Collection[str] = False,
-        produced: list[str] | None = None,
+        produced: list[str] | None = None, warm_start: bool = True,
     ) -> tuple[State, dict, Drivers]:
         """One closures -> potential -> allocation -> transport -> reactions pass (reactions
         before transport under `reaction_order="before_transport"`);
@@ -877,7 +906,9 @@ class Model:
         carried to every closure as a `StepContext`, so an INTEGRATING closure reads the
         model's own clock rather than an interval fixed at its own construction.
 
-        `state` is what the closures read and what the potential solves warm-start from.
+        `state` is what the closures read and what the potential solves warm-start from
+        (`warm_start=False`: they start from their layer's linear initial guess instead,
+        while the closures still read `state`'s potentials).
         `step_from` is the state a transport STEP starts at, which is a different thing
         inside an iterated coupling: pass k there re-advances the SAME time step from the
         state at the start of it, with only the closures' view of the new state updated.
@@ -929,10 +960,13 @@ class Model:
         for name, layer in self.potential.items():
             pb = self._require(drv, f"{name}.phi_boundary")
             sources = drv.get(f"{name}.sources")
-            phi_prev = state.get(f"{name}.phi")
+            phi_prev = state.get(f"{name}.phi") if warm_start else None
             phi0 = None if phi_prev is None else phi_prev[..., layer.interior]
             d: dict = {}
             circuit = self._circuit_kwargs(name, layer, state, base, dt, t) if layer.mna else {}
+            if not warm_start:
+                # The implicit-law flows' warm start goes with the potentials' (`phi0`).
+                circuit.pop("q0", None)
             phi, q = layer.solve(pb, drv, sources, phi0=phi0, diagnostics=d, **circuit,
                                  **solve_kwargs)
             new[f"{name}.phi"], new[f"{name}.q"] = phi, q
@@ -989,6 +1023,12 @@ class Model:
             # construction-time capacity stands, so nothing changes for a fixed-storage
             # layer. Shape and positivity are checked by the layer, naming the nodes.
             cap = drv.get(f"{name}.capacity")
+            # A per-step first-order removal rate (1/s), written by a closure that owns the
+            # sinks (deposition, a scheduled removal). Absent, the layer's own stands.
+            removal = drv.get(f"{name}.removal")
+            # A per-step transmission, written by a closure whose filters depend on the
+            # step's flows or conditions (a UVGI filter). Absent, the layer's own stands.
+            transmission = drv.get(f"{name}.transmission")
             transfer_total = None
             # A fresh dict per layer, threaded into `steady`/`step`/
             # `step_with_transfer` as an out-parameter and read back below into
@@ -1007,7 +1047,14 @@ class Model:
                         if like is None
                         else self._zero_sources(layer, like, layer.n_i)
                     )
-                x = layer.steady(q_kind, sources, xb, capacity=cap, diagnostics=layer_diag)
+                x = layer.steady(
+                    q_kind, sources, xb, capacity=cap, removal=removal,
+                    transmission=transmission, diagnostics=layer_diag
+                )
+                if cap is not None:
+                    # The capacity this state was solved with, as a step records its own.
+                    new[f"{name}.capacity"] = cap
+                    made.append(f"{name}.capacity")
             else:
                 x = base.get(f"{name}.x")
                 if x is None:
@@ -1044,8 +1091,8 @@ class Model:
                     if want_transfer:
                         stepped = layer.step_with_transfer(
                             x, q_kind, sources, xb, dt / k,
-                            capacity=cap_j, capacity_prev=cap_prev_j,
-                            diagnostics=layer_diag,
+                            capacity=cap_j, capacity_prev=cap_prev_j, removal=removal,
+                            transmission=transmission, diagnostics=layer_diag,
                         )
                         x = stepped.x
                         transfer_total = (
@@ -1054,7 +1101,8 @@ class Model:
                         )
                     else:
                         x = layer.step(x, q_kind, sources, xb, dt / k, capacity=cap_j,
-                                       capacity_prev=cap_prev_j, diagnostics=layer_diag)
+                                       capacity_prev=cap_prev_j, removal=removal,
+                                       transmission=transmission, diagnostics=layer_diag)
                 if cap is not None:
                     new[f"{name}.capacity"] = cap
                     made.append(f"{name}.capacity")
@@ -1067,6 +1115,8 @@ class Model:
             diag[name] = {"substeps": self.substeps[name]}
             if "linear" in layer_diag:
                 diag[name]["linear"] = layer_diag["linear"]
+            if "held_sources_dropped" in layer_diag:
+                diag[name]["held_sources_dropped"] = layer_diag["held_sources_dropped"]
             if want_transfer:
                 diag[name]["boundary_transfer"] = transfer_total
         # Closure-carried state: a declared key is copied OUT of the closure's
@@ -1146,7 +1196,8 @@ class Model:
     def step(
         self, state, drivers, dt: float, *, t: float | None = None,
         diagnostics: dict | None = None,
-        boundary_transfers: bool | Collection[str] = False, **solve_kwargs,
+        boundary_transfers: bool | Collection[str] = False, warm_start: bool = True,
+        **solve_kwargs,
     ):
         """Advance one step (ping-pong or iterated coupling, per `self.coupling`).
 
@@ -1169,6 +1220,13 @@ class Model:
         accumulator) on every transport layer of the model, including ones nothing reads a
         transfer from -- a coupled recipient with an unlinked `exact`-scheme thermal layer
         pays that cost on every one of its substeps for no benefit.
+
+        `warm_start` (default True) starts each potential layer's nonlinear solve from the
+        state's `"<layer>.phi"` (and, on a layer solved by Modified Nodal Analysis, its
+        implicit-law flows from `"<layer>.q"`). `False` starts it from the layer's linear
+        initial guess instead, while closures and node sources still read `"<layer>.phi"`
+        as an input (a retry after a warm start failed to converge, without losing that
+        input).
         """
         if not dt > 0:
             raise ValueError(f"Model: dt must be positive, got {dt!r}")
@@ -1191,11 +1249,11 @@ class Model:
                 )
         return self._advance(
             state, drivers, float(dt), diagnostics, solve_kwargs, t=t,
-            boundary_transfers=boundary_transfers,
+            boundary_transfers=boundary_transfers, warm_start=warm_start,
         )
 
     def steady(self, state, drivers, *, t: float | None = None,
-               diagnostics: dict | None = None, **solve_kwargs):
+               diagnostics: dict | None = None, warm_start: bool = True, **solve_kwargs):
         """The quasi-steady state of every layer at `drivers` (transport layers solved to
         `rate == 0` rather than advanced).
 
@@ -1213,13 +1271,14 @@ class Model:
         `dt=None` here means the `StepContext` an INTEGRATING closure receives carries
         `dt=None` too, and `_apply_closures` refuses that by the closure's own name: a
         closure that integrates some state over an interval has no interval to integrate over
-        at a quasi-steady state.
+        at a quasi-steady state. `warm_start` is `step`'s.
         """
-        return self._advance(state, drivers, None, diagnostics, solve_kwargs, t=t)
+        return self._advance(state, drivers, None, diagnostics, solve_kwargs, t=t,
+                             warm_start=warm_start)
 
     def _advance(
         self, state, drivers, dt, diagnostics, solve_kwargs, *, t=None,
-        boundary_transfers: bool | Collection[str] = False,
+        boundary_transfers: bool | Collection[str] = False, warm_start: bool = True,
     ) -> State:
         owned = sorted(_MODEL_SOLVE_KEYS.intersection(solve_kwargs))
         if owned:
@@ -1234,18 +1293,19 @@ class Model:
         if self.coupling == "pingpong":
             new, diag, _ = self._pass(
                 state, drivers, dt, solve_kwargs, t=t, boundary_transfers=boundary_transfers,
+                warm_start=warm_start,
             )
             if diagnostics is not None:
                 diagnostics.update({"passes": 1, "layers": diag})
             return new
         return self._iterate(
             state, drivers, dt, diagnostics, solve_kwargs, t=t,
-            boundary_transfers=boundary_transfers,
+            boundary_transfers=boundary_transfers, warm_start=warm_start,
         )
 
     def _iterate(
         self, state, drivers, dt, diagnostics, solve_kwargs, *, t=None,
-        boundary_transfers: bool | Collection[str] = False,
+        boundary_transfers: bool | Collection[str] = False, warm_start: bool = True,
     ) -> State:
         """Hensen's onion: repeat the pass until the named transport states stop changing.
 
@@ -1372,6 +1432,10 @@ class Model:
         pass_kwargs = dict(solve_kwargs)
         pass_kwargs.setdefault("on_failure", "return_primal")
         inner_failed: Tensor | None = None
+        raises_on_limit = self.iterate_on_limit != "accept" and not (
+            solve_kwargs.get("on_failure") == "return" and diagnostics is not None
+        )
+        stopped_early = False
         # A `while` rather than `for passes in range(...)`: the pass count is wanted AFTER
         # the loop (it goes into the diagnostics and into the failure message), which a loop
         # control variable unused inside the body is not (ruff B007).
@@ -1386,6 +1450,7 @@ class Model:
                 new, diag, _ = self._pass(
                     fed, drivers, dt, pass_kwargs, step_from=state, t=t,
                     boundary_transfers=boundary_transfers, produced=produced,
+                    warm_start=warm_start,
                 )
                 inner_failed = self._unsolved(diag)
                 if passes == 1:
@@ -1429,11 +1494,22 @@ class Model:
                                 ok = this_q if ok is None else (ok & this_q)
                         this = change[name] <= tol
                         ok = this if ok is None else (ok & this)
+                    stalled = None
                     if inner_failed is not None:
                         # a pass whose potential solve stopped short is not a fixed point
+                        stalled = ok & inner_failed
                         ok = ok & ~inner_failed
                     converged = ok
                 if bool(converged.all()):
+                    break
+                if (stalled is not None and bool(stalled.any())
+                        and bool((converged | stalled).all())
+                        and (needs_adjoint or raises_on_limit)):
+                    # Every instance not converged was fed a state within the tolerances of
+                    # the previous pass's and its potential solve failed again: the next
+                    # pass would repeat it. The step is going to raise anyway, so it raises
+                    # now rather than after `iterate_max` passes of `max_iter` iterations.
+                    stopped_early = True
                     break
             fed = dict(new)
             w = self.iterate_relaxation
@@ -1458,25 +1534,32 @@ class Model:
                 (~converged).nonzero().flatten().tolist() if converged.dim() else "all"
             )
             worst = {name: float(c.max()) for name, c in change.items()}
+            unsolved = inner_failed is not None and bool(inner_failed.any())
             message = (
-                f"Model: coupling='iterate' did not converge within {self.iterate_max} "
-                f"passes for instances {failing}; largest change per key {worst}, "
+                "Model: coupling='iterate' did not converge within "
+                + (f"{passes} passes (of at most {self.iterate_max}; stopped there, as the "
+                   f"potential solve failed again from a state within the tolerances of the "
+                   f"previous pass's)" if stopped_early else f"{self.iterate_max} passes")
+                + f" for instances {failing}; largest change per key {worst}, "
                 f"tolerances {self.iterate_tol}"
                 + (f", flow tolerances {self.iterate_flow_tol}" if self.iterate_flow_tol else "")
                 + ("; the last pass's potential solve did not converge either"
-                   if inner_failed is not None and bool(inner_failed.any()) else "")
+                   if unsolved else "")
             )
+            # A potential solve that stopped at its iteration limit is non-convergence, which
+            # a caller may retry from another starting point (`simulate` retries the airflow
+            # solve from the linear initial guess); `ConvergenceError` is a `RuntimeError`,
+            # so a caller catching that is unaffected.
+            error = ConvergenceError if unsolved else RuntimeError
             if needs_adjoint:
-                raise RuntimeError(
+                raise error(
                     message + "; a gradient was requested and a non-converged iteration has "
                     "no fixed point to differentiate, so on_failure='return' cannot return a "
                     "state here (it returns the primal state only when nothing requires a "
                     "gradient, e.g. under torch.no_grad() or with differentiable=False)"
                 )
-            if self.iterate_on_limit != "accept" and not (
-                solve_kwargs.get("on_failure") == "return" and diagnostics is not None
-            ):
-                raise RuntimeError(message)
+            if raises_on_limit:
+                raise error(message)
         # A key `_pass` does not write is carried through it verbatim, pass after pass, so
         # its value in the returned state is the caller's own -- and so is its graph, which
         # the detached primal passes above replaced with a graph-free copy of the same
@@ -1509,7 +1592,7 @@ class Model:
                 f.update(zip(keys, z, strict=True))
                 out, d, _ = self._pass(
                     f, drivers, dt, solve_kwargs, step_from=state, t=t,
-                    boundary_transfers=boundary_transfers,
+                    boundary_transfers=boundary_transfers, warm_start=warm_start,
                 )
                 adjoint_diag.clear()
                 adjoint_diag.update(d)
@@ -1634,6 +1717,8 @@ class Model:
             out[name] = layer.rate(
                 x, self._kind_flows(name, state, drv), sources, xb,
                 capacity=drv.get(f"{name}.capacity"),
+                removal=drv.get(f"{name}.removal"),
+                transmission=drv.get(f"{name}.transmission"),
             )
         return out
 

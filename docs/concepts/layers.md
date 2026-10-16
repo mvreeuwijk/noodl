@@ -208,6 +208,23 @@ forcing) costs the exact scheme thousands of matvecs per step by nature; `scheme
 the documented choice there, not a larger budget. All coefficients the layer owns—carrier,
 transmission, kinetics, removal, and conductance—are differentiable under every scheme.
 
+**Boundary values linear in time.** By default, the boundary values stay constant over a step.
+In the exact scheme, `step(..., x_boundary_end=...)` instead makes them vary linearly over the
+step, from `x_boundary` at its start to `x_boundary_end` at its end (a first-order hold). The
+step is then exact for a boundary value that ramps linearly while the flows are held fixed. This
+matters for a zone that flushes much faster than the step. With a boundary value held at the
+step mean of a ramp, such a zone relaxes to that mean and ends about half a step behind the
+boundary. With the linear boundary, it ends behind by its own flushing time, as it should. The
+Modelica importer's `scheme="midpoint"` runner uses this. The implicit and trapezoidal schemes
+do not accept the argument and raise `ValueError` if it is given. So does `step_with_transfer`, which returns the boundary transfer: the transfer is defined for a boundary held constant over the step.
+
+`x_boundary_rates=(start, end)`, given together with `x_boundary_end`, adds the boundary's rates
+of change at both ends of the step. The boundary then follows the cubic Hermite through both
+ends' values and rates instead of the straight line. A fast-flushing zone ends behind its
+boundary by its flushing time times the boundary's rate at the step's end. On a curved boundary
+the straight line gets that rate wrong: it uses the chord's slope, which is off by about half a
+step times the curvature. The Hermite uses the end's own rate.
+
 **Changing storage.** A transport layer's capacity may change over a step: a sewer pipe's wetted
 volume, or a headspace volume as the water level changes. The step conserves the stored amount
 `V x` in amount form: `V_new x_new - V_old x_old = dt F(x_new)` (implicit) or `= dt/2 (F(x_new) + F(x_old))`
@@ -220,6 +237,31 @@ When a closure writes that driver, the step-start state must carry the key `"<la
 the storage at the state's own time, which `Model.initial_capacities(state, drivers)` builds by
 querying the closures. The `"exact"` scheme has no changing-capacity form and raises by name if
 `capacity_prev` differs from `capacity`.
+
+**Storage-free nodes.** `storage_free=[...]` names interior nodes that hold no amount, such as a
+zero-volume air-handler plenum. Their balance is algebraic in every step: what flows in flows out
+within the step, so their value is the flow-weighted mix of what enters. A storage-free node with
+nothing passing through it (no flow and no conduction) keeps its value, as ContamX holds the
+plenum of a switched-off air handler. A source at such a node (a heating coil in a plenum) is
+carried on by the flow through it within the step. At a node nothing passes through the source
+has nowhere to go, and the step drops it (no airflow through a plenum: its coil delivers
+nothing); `step`'s `diagnostics` reports the number of nonzero source entries dropped under
+`"held_sources_dropped"` (in `Model.step`, at `diagnostics["layers"][name]`). Their capacity, at construction or per step, may be 0
+(a negative one is refused everywhere, and a zero one at any other node). Removal and kinetics act
+on a stored amount, so they do not act on these nodes. Only `scheme="implicit"` and `steady` can
+hold them: the exponential and trapezoidal steps have no algebraic form, so a layer with either
+scheme refuses storage-free nodes at construction. A `steady` solve has no value for such a node
+with nothing passing through it, and refuses it, naming the node. Whether such a node mixes or holds is a 0/1 choice on the flows and
+carries no gradient: a held node's value has zero gradient with respect to the flows, although
+any flow through it would switch it to mixing. `layer.storage_free_mask` is the `(n_i,)` boolean mask of these nodes.
+
+**Undefined steady states.** A stored node that nothing leaves (no outflow, no conduction, no
+removal) keeps everything that enters it, and so does a closed group of stored nodes whose
+contents only circulate among themselves, never reaching a boundary outflow, a removal, a filter
+loss or a reaction. Their steady state is undefined without a source and unbounded with one, and
+the operator is singular. `steady` checks for this on every batch instance before it solves and
+raises `UndefinedSteadyState` (a `ValueError`), naming the nodes; its `layer` and `nodes`
+attributes say which. Step such a model through time instead, or give the nodes an exchange.
 
 **Linear solver.** The `"implicit"` and `"trapezoidal"` schemes each need one linear solve per
 step (`"exact"` has none). `linear_solver` names it: `"auto"` (the default), `"gmres"`,
@@ -357,6 +399,8 @@ State and driver keys are namespaced by layer name:
 | `"<layer>.x_boundary"` | Prescribed boundary transport state (driver) |
 | `"<layer>.sources"` | Nodal sources, **full node order** (driver, optional) |
 | `"<layer>.capacity"` | Per-step capacity override (driver, optional) |
+| `"<layer>.removal"` | Per-step first-order removal rate, 1/s, `(n_i, K)`, replacing the layer's construction-time `removal` (driver, optional; not carried in the state, so a closure that sets it must write it every step) |
+| `"<layer>.transmission"` | Per-step pass fraction of each flow edge, `(b_flow,)` or `(b_flow, K)` in the layer's flow order, replacing the layer's construction-time `transmission` (driver, optional; not carried in the state, so a closure that sets it must write it every step) |
 | `"<layer>.requests"` | An allocation layer's per-edge request (driver, required) |
 | `"<layer>.frequency"` | A phasor layer's frequency in Hz, one per instance (driver, required) |
 

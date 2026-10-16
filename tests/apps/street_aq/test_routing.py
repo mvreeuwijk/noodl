@@ -36,11 +36,11 @@ def test_sirane_routing_is_munich_s_worked_two_in_two_out_example():
     # outflows [6, 8] clockwise, already balanced, give the greedy non-crossing fill.
     flux_in = torch.tensor([10.0, 4.0], dtype=DT)
     flux_out = torch.tensor([6.0, 8.0], dtype=DT)
-    sirane = routing_matrix(flux_in, flux_out, model="non_crossing_streamlines")
+    sirane = routing_matrix(flux_in, flux_out, junction_routing="non_crossing_streamlines")
     torch.testing.assert_close(
         sirane, torch.tensor([[6.0, 4.0], [0.0, 4.0]], dtype=DT), rtol=0, atol=1e-14
     )
-    mixing = routing_matrix(flux_in, flux_out, model="perfect_mixing")
+    mixing = routing_matrix(flux_in, flux_out, junction_routing="perfect_mixing")
     torch.testing.assert_close(
         mixing, torch.tensor([[30.0 / 7.0, 40.0 / 7.0], [12.0 / 7.0, 16.0 / 7.0]], dtype=DT),
         rtol=1e-14, atol=0,
@@ -53,7 +53,7 @@ def test_sirane_routing_is_munich_s_worked_two_in_two_out_example():
 def test_routing_matrix_reproduces_both_marginals_exactly(model):
     flux_in = torch.tensor([[3.0, 0.0, 5.0, 2.0], [1.0, 1.0, 1.0, 1.0]], dtype=DT)
     flux_out = torch.tensor([[4.0, 6.0, 0.0, 0.0], [2.0, 0.0, 2.0, 0.0]], dtype=DT)
-    f = routing_matrix(flux_in, flux_out, model=model)
+    f = routing_matrix(flux_in, flux_out, junction_routing=model)
     torch.testing.assert_close(f.sum(-1), flux_in, rtol=1e-14, atol=1e-15)
     torch.testing.assert_close(f.sum(-2), flux_out, rtol=1e-14, atol=1e-15)
     assert bool((f >= 0).all())
@@ -62,9 +62,11 @@ def test_routing_matrix_reproduces_both_marginals_exactly(model):
 def test_zero_rows_do_not_move_the_other_entries():
     """A zero entry anywhere in either ordered marginal leaves the rest of F alone."""
     a = routing_matrix(torch.tensor([10.0, 4.0], dtype=DT),
-                       torch.tensor([6.0, 8.0], dtype=DT), model="non_crossing_streamlines")
+                       torch.tensor([6.0, 8.0], dtype=DT),
+                       junction_routing="non_crossing_streamlines")
     b = routing_matrix(torch.tensor([10.0, 0.0, 4.0], dtype=DT),
-                       torch.tensor([6.0, 0.0, 8.0], dtype=DT), model="non_crossing_streamlines")
+                       torch.tensor([6.0, 0.0, 8.0], dtype=DT),
+                       junction_routing="non_crossing_streamlines")
     torch.testing.assert_close(b[[0, 2]][:, [0, 2]], a, rtol=0, atol=1e-14)
 
 
@@ -76,11 +78,11 @@ def test_routing_matrix_is_differentiable_in_the_fluxes():
     # for one with each inflow and not at all with the outflows.
     flux_in = torch.tensor([10.0, 4.0], dtype=DT, requires_grad=True)
     flux_out = torch.tensor([6.0, 9.0], dtype=DT, requires_grad=True)
-    f = routing_matrix(flux_in, flux_out, model="non_crossing_streamlines")
+    f = routing_matrix(flux_in, flux_out, junction_routing="non_crossing_streamlines")
     gi, go = torch.autograd.grad(f.sum(), (flux_in, flux_out))
     torch.testing.assert_close(gi, torch.ones(2, dtype=DT), rtol=0, atol=1e-12)
     torch.testing.assert_close(go, torch.zeros(2, dtype=DT), rtol=0, atol=1e-12)
-    entry = routing_matrix(flux_in, flux_out, model="non_crossing_streamlines")[0, 1]
+    entry = routing_matrix(flux_in, flux_out, junction_routing="non_crossing_streamlines")[0, 1]
     (grad,) = torch.autograd.grad(entry, flux_in)
     step = 1e-7
     for i in range(2):
@@ -89,8 +91,10 @@ def test_routing_matrix_is_differentiable_in_the_fluxes():
         plus[i] += step
         minus[i] -= step
         central = (
-            routing_matrix(plus, flux_out.detach(), model="non_crossing_streamlines")[0, 1]
-            - routing_matrix(minus, flux_out.detach(), model="non_crossing_streamlines")[0, 1]
+            routing_matrix(plus, flux_out.detach(),
+                           junction_routing="non_crossing_streamlines")[0, 1]
+            - routing_matrix(minus, flux_out.detach(),
+                             junction_routing="non_crossing_streamlines")[0, 1]
         ) / (2.0 * step)
         assert abs(float(grad[i]) - float(central)) < 1e-6
 
@@ -278,7 +282,7 @@ def test_routing_matrix_names_an_unknown_model():
     with pytest.raises(ValueError, match=r"routing_matrix: junction_routing must be one of "
                                          r"\('non_crossing_streamlines', 'perfect_mixing'\), "
                                          r"got 'soulhac'"):
-        routing_matrix(torch.ones(2, dtype=DT), torch.ones(2, dtype=DT), model="soulhac")
+        routing_matrix(torch.ones(2, dtype=DT), torch.ones(2, dtype=DT), junction_routing="soulhac")
 
 
 def _flows_fixture() -> tuple[Network, StreetGeometry]:
@@ -384,7 +388,7 @@ def test_street_flows_refuses_an_unknown_option_at_construction():
         StreetFlows(net, None, geometry, sigma_w_min=-0.1)
     with pytest.raises(ValueError, match=r"preset must be one of \('sirane', 'munich'\)"):
         StreetFlows(net, None, geometry, preset="impaq")
-    with pytest.raises(TypeError, match=r"StreetFlows: unexpected keyword argument 'wind'"):
+    with pytest.raises(TypeError, match=r"unexpected keyword argument 'wind'"):
         StreetFlows(net, None, geometry, wind="x")
 
 

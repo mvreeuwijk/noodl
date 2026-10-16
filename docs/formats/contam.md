@@ -1,10 +1,10 @@
-# CONTAM (`.prj`, `.wth`)
+# CONTAM (`.prj`, `.wth`, `.ctm`)
 
-Reading a CONTAM project and weather file produces a model for [building
+Reading a CONTAM project, weather file and ambient-concentration file produces a model for [building
 physics](../applications/building_physics.md). Each `.prj` airflow-path component becomes one of
 the [`noodl.elements`](../applications/building_physics.md#airflow-elements) objects the building
-application assembles into a network by hand; a source record becomes one of the four source
-models in `noodl.apps.building_physics.sources`.
+application assembles into a network by hand; a source/sink record becomes one of the source
+and sink models in `noodl.apps.building_physics.sources`.
 
 ## CONTAM `.prj`
 
@@ -12,41 +12,219 @@ models in `noodl.apps.building_physics.sources`.
 building a float64 `Network`, its elements and its drives. `project_to_model(project, *,
 ambient=None, species=True, scheme="implicit")` returns `(model, state, drivers)`.
 
-**Supported:** run control and ambient conditions; species; wind pressure profiles; zones and
-initial concentrations; airflow paths; the power-law element family
+**Supported:** run control (`Project.run_control`, a `RunControl`: the steady simulation's
+date and time, the transient run's start and end date and time, time step and output step, day
+type, the weather and contaminant file names, and `dodMdt`) and ambient conditions; the simulated species'
+records (`Project.species_records`: molar mass, mean diameter, effective density,
+diffusivity, default concentration; the decay constant is read but, as in ContamX, not applied; a nonzero one raises a
+`ContamCompatibilityWarning`, which `warnings.filterwarnings("ignore",
+category=ContamCompatibilityWarning)` silences)
+and each species' default ambient concentration (`Project.ambient_mass_fractions`); kinetic
+reactions on zones (`Project.zone_reactions`, the species layer's `kinetics`); day and week
+schedules referenced by zones (the zone temperature, on `"T"`) and by paths (a flow multiplier,
+through `Scaled` on `"flow_multiplier.<kind>"`) and by sources and sinks (a multiplier of the whole source or sink, on
+`"species.source_multiplier"`; for `ccf`, `cut`, `prs`, `dvs` and `drs` records); wind pressure profiles with the
+linear or cubic-spline curve fit (`WindProfile(..., curve="linear" | "spline")`; the spline is
+periodic in the wind angle, as ContamX evaluates it), and a constant wind pressure on an
+envelope path (`"wind_pressure.<kind>"`, positive pushing air from ambient into the zone, as
+ContamX); zones and initial concentrations; airflow paths; the power-law element
+family
 (`plr_orfc/leak1/leak2/leak3/crack/fcn/test1/test2/conn/stair/shaft/qcn`), the quadratic family
 (`qfr_*`), doorways (`dor_door`, `dor_pl2`), dampers (`plr_bdq`, `plr_bdf`), constant-flow fans
-(`fan_cmf`, `fan_cvf`) and the cubic fan curve (`fan_fan`); source elements `ccf`, `cut`, `eds`,
-`brs`.
+(`fan_cmf`, `fan_cvf`), the cubic-spline elements (`csf_fsp`, `csf_qsp`, `csf_psf`, `csf_psq`; a curve whose fitted spline overshoots and so is not increasing is refused, though ContamX may accept it, because the inversion of the pressure-against-flow forms would be ambiguous), and the cubic fan (`fan_fan`) with its speed schedule (the speed ratio, by the fan laws), its path `mult` (fans in parallel), the rating density and the shut-off orifice below its off ratio; source/sink elements `ccf`, `cut`, `eds`,
+`brs`, `prs`, `dvs`, `drs`, `plm` and `pkm`, attached by `project_to_model` (scaled by the record's multiplier,
+which enters the element's first coefficient, and a `ccf` record's removal coefficient too); filters on airflow paths (`Project.edge_filters`, the species layer's `transmission`):
+constant-efficiency (`cef`), particle (`pf0`, interpolated at each species' mean diameter as
+ContamX does), super (`spf`) and Penn State UVGI (`uv1`) filter elements; a filter acts on the
+air crossing its path in either direction; a UVGI filter (`UVGIFilter`, on a path; its 14
+values, which ContamX reads as one stream whatever the line breaks, are the design
+survivability, velocity, mass flow and rate constant, the age-model flag, C0..C4, K0, K1 and
+two display units) acts on each species by its UV susceptibility (the species record's `Kuv`),
+with a dose that follows each airflow solve's flow and the upstream temperature and density
+and, with the age model, the time, so `project_to_model` writes the species layer's
+transmission with a `FilterTransmission` closure and iterates each step (`coupling="iterate"`)
+on that step's own flows; duct networks: duct elements `dct_dwc` (ContamX's friction law; its `lam`
+field has no effect, as in ContamX), `dct_plr`, `dct_fcn`, `dct_qcn`, `dct_cmf`, `dct_cvf`,
+`dct_fan`, `dct_bdq`, `dct_bdf`, `dct_fsp`, `dct_qsp`, `dct_psf`, `dct_psq`; junctions with
+their temperatures and initial concentrations and ContamX's volumes (half the length times
+the element area of every segment that meets them; a junction without volume, whose segments
+all have zero length, holds no air and carries the mix of what flows through it); terminals with their loss and balance
+coefficients (the duct-balancing data `bal`, `Fdes` and `Cbmax` is read and, as in ContamX,
+has no effect), filters, schedules (the opening, or the junction temperature when the week
+schedule's unit type is a temperature) and wind (an ambient terminal whose flags carry the value 1, from
+its profile or a constant wind pressure); segments with their dynamic losses, filters and
+schedules (a flow multiplier, or a fan's speed ratio); simple air-handling systems
+(`Project.closures`, one `AirHandlerFlows` per system, on the edge kind `ahs_<nr>`): their
+plenum zones (zero gauge pressure in the airflow solve, `Project.flow_balanced`; storage-free
+when their volume is 0, `Project.storage_free`), supply and return points with their design
+flows, schedules (on `"flow_multiplier.ahs_<nr>"`) and filters, the recirculation,
+outdoor-air and exhaust paths with their filters, the outdoor-air fraction schedule (on
+`"outdoor_air_fraction.ahs_<nr>"`) and the minimum outdoor-air flow (both read from the
+recirculation path, as ContamX reads them; ContamX finds the implicit paths by their flags,
+not by the numbers in the AHS record, which noodl checks against them); control nodes:
+sensors (`sns`: zone and junction mass fraction, temperature and gauge pressure; path, duct
+segment and terminal flow and pressure difference; with their offset, scale and time
+constant), schedule (`sch`), constant (`set`), pass and report (`pas`, `log`), arithmetic
+(`add`, `sub`, `mul`, `div`, `sum`, `avg`, `max`, `min`, `abs`), logic (`bin`, `inv`, `and`,
+`or`, `xor`), limit switches and limit controls (`lls`, `uls`, `lbs`, `ubs`, `llc`, `ulc`),
+hysteresis (`hys`), proportional and PI control (`pc1`, `pi1`); control references on zones
+(temperature), paths, sources, duct segments, terminals and AHS paths, acting on what a
+schedule there acts on and taking precedence over it. When some record references a control
+node, the nodes that an actuator or a named report node (a `pas` node with a name, which
+ContamX reports through its API) depends on become a sampled `ControlNetwork`, first among
+the model's closures; `project_to_model` builds a new one for every model, and
+`simulate_project(...)["control"]` returns the named report nodes' values in node order. A
+project whose control nodes only report (no record references one) builds no network and
+returns no `"control"`, so it loads and runs, steady runs included, as without them. Occupancy
+schedules and exposures (`Project.occupants`, one `Occupant` named `"occupant <nr>"` per
+exposure record): the occupant's zone by day type, from the listed time exactly (a move in the
+middle of a step splits the step there), out of the building on zone 0, and its generation,
+`cgmax` (kg/s per person) times `cgmlt` (people) times its week schedule at the step's end,
+split between zones by the time spent in each and nothing while out; an exposure record whose
+generation flag is 0 generates nothing, whatever generation lines it lists. `project_to_model`
+attaches an `OccupantGeneration` for the occupants that generate, and
+`simulate_project(...)["exposure"]` is ContamX's exposure file: each occupant's step-mean mass
+fraction of the zone it occupies, zero while out. The occupants' coordinates (`X Y relHt`, which
+only place an occupant in a 1-D zone), the unit fields and the fifth field of an exposure
+record (ContamX needs it and ignores its value) are read and ignored. The zone flag value 16
+leaves a zone out of the building volume (the node attribute `in_building_volume`, 0 for such a
+zone). `Project.building_zones` is ContamX's conditioned space, the default of
+`building_air_change_rate`: every zone without that flag, the air handlers' plenums and the duct
+junctions (measured on ContamX 3.4.1.7: the `.ach` header's volume includes the plenums and the
+junctions' duct volume, and a flow between a junction and a zone stays inside the space).
 
-**Refused by name**, rather than silently dropped: schedules, control nodes, filters, kinetic
-reactions and air-handling systems referenced by nonzero index; CFD and 1-D convection/diffusion
-zones; continuous-values-file zones and paths; duct networks; a constant wind pressure with no
-profile; a fan curve on a path with `mult != 1`; `csf_*` and `sup_afe` elements; `stackD = 1`
-(densities varying with height inside a zone).
+**Refused by name**, rather than silently dropped: a control node of another type (`mod`,
+`int`, `rav`, `dls`, `dlx`, `cvf`, `dvf`, phantom nodes) when an actuator, or a named report
+node of a project with actuators, depends on it (unused nodes of any known type are
+ignored); a super node (`sup`, whose sub-nodes the reader cannot lay out) and a control node
+type the reader does not know at all (its data layout is unknown), wherever they are; a reference to a node the
+file does not define; occupancy and exposure sensors, and a sensor of a species the model does
+not carry; a flow or pressure-difference sensor on a doorway (two-way path); a control on a
+duct junction that is not a terminal, on a triggered (`eds`, `brs`, `plm`, `pkm`) source, on a
+Darcy-Colebrook segment or on an AHS outdoor-air or exhaust path; control references in a
+steady airflow run (`simulate_project`); boundary-layer diffusion (`bls`), resuspension (`dvr`)
+and super (`sup`) source/sink elements, when a source/sink record references one; a source/sink
+record whose element or zone the file does not define; gaseous (`gf0`) filter elements,
+referenced or not; a UVGI filter element whose age-model flag is not 0 or 1 or whose record does
+not hold exactly 14 values, and a UVGI filter on a duct segment or terminal (not measured
+against ContamX) or on a path modelled as more than one opening (a doorway: the dose needs the
+path's one flow); a filter that names a species the project does not simulate (when a path
+references it: an unreferenced filter element is read and unused), a super filter
+that contains itself, and a path whose filter number the file does not define; non-trace species; a contaminant list that is not the
+simulated species in file order; a source or kinetic reaction that names a species the project
+does not simulate (a species the file defines but marks as not simulated included), a kinetic
+reaction that gives one product-reactant pair twice, and a zone whose kinetic reaction number the
+file does not define; a schedule
+number that no week schedule carries; a week schedule that names a day schedule the file
+does not define; a schedule on an `eds`,
+`brs`, `plm` or `pkm` source (CONTAM triggers these once, at the schedule's first nonzero
+value); a zone without the variable-pressure flag (which
+ContamX holds at constant pressure), unless an air-handling system names it as a plenum, or,
+in a project with species, without the
+variable-contaminants flag (ContamX then holds the zone's concentrations at their initial values
+and ignores its sources); CFD and 1-D convection/diffusion zones; continuous-values-file
+zones and paths; duct elements of any type not listed above; duct leakage (a duct element's
+leakage rate); a schedule on a Darcy-Colebrook segment (ContamX ignores it); kinetic
+reactions or value files on junctions, and value files on segments; a
+segment, junction or terminal that references a junction, duct element, level or zone the file
+never defines; wind data on a terminal that is not
+an ambient terminal whose flags carry the value 1; a junction type other than 0 (junction),
+1 or 3 (terminal); a non-temperature schedule on a junction that is not a terminal; a junction
+that no segment or terminal reaches; initial-concentration rows for a zone or junction the
+file does not define; a duct network with `densZP = 1` or `dodMdt = 1` (the junctions' air mass under
+either is unmeasured); an air-handling system record that disagrees with its paths' flags and
+endpoints, implicit air-handling paths that are not the last paths or not in the order of the
+air-handling records (ContamX gives the k-th record the k-th recirculation, outdoor-air and
+exhaust path, and mis-assigns them otherwise; this also refuses an implicit path named by two
+records), a path that is both an implicit air-handling path and a supply or return point, a
+supply or return point without an air-handling system or naming one the file does not
+define, or whose path neither leaves that system's supply zone nor enters its return zone, a schedule or a flow on an outdoor-air or exhaust
+path or a `mult` on a supply or return point (ContamX ignores them), a flow element or a wind
+pressure on an air-handling path, a kinetic reaction in a zero-volume plenum, any other path
+or duct terminal joined to a plenum (only the air handler's own flows may touch it), an
+air-handling system with `densZP = 1`, and a steady contaminant run with an air handler off
+(nothing passing through a plenum); a zone or junction with species rows that no airflow path,
+duct segment or terminal reaches (it would have no species state); airflow modes other than steady and transient
+(duct balancing, the building airflow and pressurization tests); a constant wind pressure on
+an interior path; `sup_afe` super elements (ContamX 3.4.1.7 cannot simulate them); `stackD = 1` (densities varying with
+height inside a zone); a wind pressure profile with the trigonometric curve fit; a day schedule whose shape is
+neither rectangular nor trapezoidal; zone names with spaces; an occupancy schedule number
+given twice, an occupancy point line that is not `hh:mm:ss zone X Y relHt`, and an occupancy
+schedule that does not run from 00:00:00 to 24:00:00 (ContamX stops on one that does not end
+there during the run) or that places an occupant in a zone the file does not define; an
+exposure record with four fields (ContamX refuses it), exposures not numbered 1, 2, ... in file
+order, an exposure that does not list 12 occupancy schedules (one per day type), a malformed
+generation line, and an exposure that names an occupancy or week schedule the file does not define, generates a species
+the project does not simulate or reads its generation from a value file; an occupant in the
+ambient, a zone no airflow path reaches or a zero-volume plenum (`project_to_model`, whether it
+generates or only breathes); occupants in a run whose contaminant simulation is not transient
+or that simulates no species (`simulate_project`; their generation and exposure need both). A project with occupants whose run control simulates
+no contaminants still loads: `project_to_model` builds its airflow and leaves the occupants
+out.
 
-A **filter** is refused emphatically, because a filter is invisible to airflow but *not* to the
-species layer — loading one would silently corrupt contaminant results while the airflow looked
-perfect.
-
-Control nodes that no zone and no path references are silently skipped rather than refused: NIST's
-own sample projects carry dozens of unreferenced sensor and logger nodes, and those projects must
+Control nodes that nothing uses are read but not built: NIST's own sample projects carry dozens
+of unreferenced sensor and logger nodes (integrations among them), and those projects must
 load.
 
-**`project_to_model` never builds a thermal layer**, because a `.prj` carries no thermal data.
+**How ContamX evaluates controls** (measured against ContamX 3.4.1.7), and so noodl: once per
+time step, before the step's airflow, from the state the step starts from (and once before
+the initial airflow). Flow, pressure-difference and gauge-pressure sensors read 0 at that
+first evaluation, then the last airflow solve; a mass-fraction sensor reads the initial mass
+fraction. A temperature sensor sees a scheduled or controlled temperature one step late (the
+value the previous step used). The nodes are evaluated in the file's sequence order (`seq`);
+a node whose input comes later in that order reads the input's previous value, 0 before the
+first evaluation, except a constant (`set`), whose value ContamX presets. A schedule node
+takes its schedule's value at the step's end, as a schedule on a record does, so a control
+through a schedule node is the same schedule attached directly. A control value on a path is
+not clipped: 2 doubles the flow, -0.5 reverses it. A division by zero stops ContamX, and
+noodl raises naming the node.
+
+**How ContamX evaluates a UVGI filter** (measured against ContamX 3.4.1.7), and so noodl: the
+efficiency is 1 - exp(-k I_t) with the dose I_t of TN 1887r1 (equations uv-1 to uv-9), the
+temperature and density those of the path's from-zone, the velocity the path's mass flow over
+that density and the area F_design / (1.2041 u_design), and the age t in hours since the start
+of the run. The lamp output OUT_TU is clamped to 0..100 % (a negative one inactivates nothing).
+The age factor (K0 + K1 ln t) / 100 is capped at 1, which holds it at 1 until t_100 when K1 < 0
+and makes it K0 / 100 from the first step when K1 = 0; a negative age factor becomes 0.1.
+**Air crossing a UVGI filter against its path's direction** gets a fixed dose of 1 J/m2,
+whatever the filter's data (even with no lamp output): efficiency 1 - exp(-k). That is ContamX's
+fallback, not the Penn State model; noodl follows it, with one `ContamCompatibilityWarning` per
+filter the first time it happens.
+
+**`project_to_model` never builds a thermal layer**, because a `.prj` carries no thermal data. A run control that simulates no contaminants (`none`) builds no species layer and binds no source inputs.
+
+`project_to_model` returns drivers at the **steady-simulation instant** of the run control (its
+day, time and day type), so a `steady()` on them is CONTAM's steady simulation, schedules
+included. `Project.inputs` holds the schedules as `Input`s for `simulate`.
 
 Every power-law element is built as `UpstreamDensityPowerLaw` — re-evaluating the density of the
-air *entering* the path, per direction, matching ContamX section 3.2. The quadratic, damper and
-fan families keep reference-density coefficients, because they are not part of this application's
-parity evidence.
+air *entering* the path, per direction, matching ContamX section 3.2. The cubic fan (`fan_fan`) runs at the
+ratio of its upstream density to its rating density by the fan laws, and its shut-off orifice
+takes the upstream density too. The quadratic, damper and constant-flow fan families keep
+reference-density coefficients, because they are not part of this application's parity evidence.
 
-Node densities are `Pb / (R T)`, and the species layer's capacity is each zone's air mass at that
-density, `rho V`, as ContamX holds it. When the run control sets **`densZP = 1`**, ContamX
-evaluates each zone's density at its absolute pressure `Pb + P_zone`; `project_to_model` then
-adds a `ZonePressureDensity` closure that does the same from the previous solve's pressures,
-and `prj.steady(model, state, drivers)` repeats `model.steady` to that fixed point (a single call
-when `densZP = 0`). The term is small in the density (|P_zone| / Pb, ~1e-5) but a stack flow is
-driven by a density *difference*, which amplifies it: on a 20 K stack it is 4e-5 of the flow.
+Node densities are computed every step by the `PrescribedTemperatureDensity` closure from two
+drivers: `"T"` (K, every node's temperature, the ambient's included) and `"P_ref"` (Pa, the
+barometric pressure). The species layer's capacity is each zone's air mass at that density,
+`rho V`, as ContamX holds it. A scheduled zone temperature or a weather file therefore changes
+both from step to step. When the run control sets **`densZP = 1`**, ContamX evaluates each zone's
+density at its absolute pressure `Pb + P_zone`. `project_to_model` then adds a
+`ZonePressureDensity` closure that does the same from the previous solve's pressures, zone air
+masses included. When the run control sets **`dodMdt = 1`**, each zone's air-mass change over a
+step enters its airflow balance (`simulate` switches the term on by default for such a model),
+and ContamX
+takes that mass at the zone's absolute pressure even with `densZP = 0`. `project_to_model`
+therefore attaches a `ZoneAirMassChange` node source to the air layer (only when the run
+control sets `dodMdt` and a zone has volume), which acts only when `simulate` supplies the
+step's start mass. For a `dodMdt` project with species it also adds
+a `ZonePressureDensity(densities=False)` closure, which scales the species layer's capacity (the
+zone air mass) and leaves the densities at `Pb`. Whenever the model carries a
+`ZonePressureDensity` closure, `prj.steady(model, state, drivers)` repeats `model.steady` to the
+pressure fixed point, and so does each step of `simulate`; they do the same for a closure that
+reads the solved pressure (a pressure-driven source); otherwise it is a single call. The
+zone-pressure density term is small in the density (|P_zone| / Pb,
+~1e-5) but a stack flow is driven by a density *difference*, which amplifies it: on a 20 K stack
+it is 4e-5 of the flow.
 
 ```python
 from noodl.apps.building_physics import read_prj, project_to_model
@@ -59,11 +237,47 @@ solved = steady(model, state, drivers)
 flows = project.path_flows(solved["air.q"])   # in CONTAM path-number order
 ```
 
+`simulate_project(project)` runs the project the way ContamX does: its run control (start, end
+and time step), its schedules, and the weather and ambient-concentration files it names
+(resolved next to the `.prj`). Every input is evaluated at the end of each step, with no step
+split at a schedule's jump, and the zone air-mass change enters the airflow balance when the
+run control sets `dodMdt = 1`. A step whose airflow solve does not converge from the previous
+step's pressures is retried once from the linear initial guess (`diagnostics={}` lists such
+steps under `"airflow_retries"`). A steady-airflow run returns the one steady state at the run
+control's steady instant. Cyclic contaminant runs, integration other than the trapezoid
+method with weight 1 (implicit Euler), steady airflow with transient contaminants, transient
+airflow with steady contaminants (ContamX solves those to steady state at every step), and a run
+that is not a whole number of time steps are refused by name.
+
+```py
+project = read_prj("test_OneZoneWthCtmStack.prj")
+out = simulate_project(project)          # the project's run control, schedules, .wth and .ctm
+out["path_flow"]                         # (289, 2) kg/s, path-number order
+```
+
+A project with a duct network adds its junctions to the network as nodes named
+`"junction <nr>"` (`Project.junctions`), after the zones: the species state carries the zones'
+rows first and the junctions' after them, and `project.zone_mass_fractions(x)` selects the
+zones. `project.terminal_flows(q)` is the flow out of each duct terminal into its zone, in
+junction-number order (the order and sign of ContamX's `getDuctTerminalFlow`), and
+`project.segment_flows(q)` the flow along each segment in segment-number order.
+`simulate_project` and `contamx.run_project` both report `"terminal_flow"`, `(N, n_terminals)`
+kg/s; `run_project`'s is empty, `(N, 0)`, without terminals. When the project's output flags ask for
+them, `run_project` also returns what ContamX writes to its exposure, age-of-air and air-change
+files (`.ebw`, `.age`, `.ach`), one row per step: `"exposure"` `(N - 1, n_exposures, K)` kg/kg,
+`"age"` `(N - 1, n_zones)` in hours, `"air_change_rate"` `(N - 1,)` 1/h (the total column) and
+`"building_volume"` (m³, the conditioned volume of the `.ach` header). A result file that is
+empty or truncated, or whose columns disagree with its header, is refused by name; result files
+left next to the project by an earlier run are not copied into the scratch directory, so only
+this run's are read.
+
 ## CONTAM `.wth`
 
-`read_wth(path) -> Weather` reads the `WeatherFile ContamW 2.0` format. Only `Date, Time, Ta, Pb,
-Ws, Wd` are used; humidity, radiation and ground-temperature columns are ignored, as is the
-per-day header block.
+`read_wth(path) -> Weather` reads the `WeatherFile ContamW 2.0` format. `Date, Time, Ta, Pb, Ws,
+Wd` drive the model, and `Hr` (g/kg) is stored as `humidity_ratio` in kg/kg. The per-day rows
+give each day's **day type**, which selects the day schedules of the week schedules;
+`Weather.day_types` maps the day of the year to it, and a `Calendar(day_types=...)` uses it.
+Radiation and ground-temperature columns are ignored.
 
 ```python
 weather = read_wth("year.wth")
@@ -74,3 +288,33 @@ drivers.update(weather.drivers_at(t, thermal="thermal"))
 shortest arc. `drivers_at(t)` returns the driver keys a `build_model`-built model reads:
 `"<thermal>.x_boundary"`, `"P_ref"`, `"V_met"`, `"theta_w"`. It handles the single-boundary-node
 case; a model with several prescribed temperatures must build its own boundary vector.
+
+`Weather.inputs(model)` writes the weather into a model's drivers at every step of `simulate`:
+the ambient entry of `"T"` on the CONTAM route, or every boundary temperature of a thermal
+model, plus `P_ref`, `V_met` and `theta_w`. `Weather.signal("Ta")` is one column as a signal.
+A run outside the file's rows raises.
+
+## CONTAM `.ctm`
+
+`read_ctm(path) -> AmbientConcentrations` reads the `SpeciesFile ContamW 2.0` ambient
+(outdoor) concentration file:
+
+```text
+SpeciesFile ContamW 2.0
+free-text description
+1/1<TAB>1/2<TAB>1                 start date, end date, number of species
+sarin                             one species name per line
+!Date<TAB>Time<TAB>sarin
+1/1<TAB> 0:00:00<TAB>0.0023254    rows: date, time, one mass fraction (kg/kg) per species
+1/1<TAB>24:00:00<TAB>0.0
+```
+
+Values are interpolated linearly between rows, and a day's `24:00:00` is the next day's
+`00:00:00`. ContamX uses the file only when its species match the project's; this reader
+refuses a mismatch and names both lists.
+
+```py
+outdoor = read_ctm("outdoor.ctm")
+inputs = outdoor.inputs(model)      # writes "species.x_boundary" at every step of simulate
+```
+

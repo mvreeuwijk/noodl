@@ -70,7 +70,13 @@ gradient. See [Differentiability](differentiability.md#the-contract).
 | `Conductance(g)` | $q = g\,\Delta p$ | Linear conduction — thermal walls, passive exchange. |
 | `FixedFlow(q0)` | $q = q_0$, independent of $\Delta p$ | Constant-flow fans. Declares `dp_independent = True`, which lets the solve take an exact-zero Jacobian column. |
 | `FanCurve(coeffs, q_max)` | Cubic pressure-flow curve inverted for $q$ on $[0, q_{\max}]$ | Fans specified by a performance curve. |
+| `AffinityFan(curve, ...)` | A `FanCurve` at another speed and air density by the fan laws, $q = s\,r\,q_0(\Delta p/(s^2 r))$ | Scheduled or controlled fans; CONTAM's performance-curve fan with its speed schedule. |
 | `Duct(...)` | Colebrook friction, laminar below a transition Reynolds number | Ducts, and Darcy-Weisbach pipes with the water application's `friction="colebrook"`. |
+| `AirDuct(length, diameter, roughness, ...)` | Darcy-Weisbach with ContamX's friction factor (laminar, Colebrook, linear between), inverted for $q$ at the entering air's density and viscosity | Duct segments of a building's duct network; CONTAM's Darcy-Colebrook duct element. |
+| `DuctTerminal(area, loss, ...)` | $\Delta p = C_e q^2/(2\rho A^2)$, linear below a small flow; $C_e$ grows as the opening closes | The zero-length duct between a junction and its zone; CONTAM's duct terminal with its balancing schedule. |
+| `FixedVolumeFlow(volume_flow, ...)` | $q = Q\,\rho_{\text{up}}$, independent of $\Delta p$ | Constant-volume fans: a volume flow delivered at the density of the air drawn in. |
+| `PrescribedFlow(key, *, kind)` | $q$ = `drivers[key]`, independent of $\Delta p$ | Flows a closure or an input sets each step, such as an air handler's. |
+| `CubicSplineFlow(x, y, ...)` | A measured curve fitted as ContamX fits it (straight ends, clamped cubic between), as $q(\Delta p)$ or inverted from $\Delta p(q)$ | Measured airflow elements; CONTAM's cubic-spline elements. |
 | `Damper(...)` | Separate power-law coefficient and exponent per flow direction | Backdraught dampers, one-way devices. |
 | `UpstreamDensityPowerLaw(...)` | `PowerLaw` with $C$ scaled by $(\rho_{\text{up}}/\rho_{\text{ref}})^{m}$ | The upstream-density correction on CONTAM power-law elements. |
 
@@ -309,6 +315,7 @@ $$
 |---|---|
 | `ConstantDrive(value)` | A fixed potential difference per edge. |
 | `Stack(...)` | Buoyancy: the hydrostatic pressure difference from a density difference over the height between an edge's endpoints. `Stack.from_network(net, kind)` builds it from the nodes' own `z_ref` attributes. |
+| `DuctStack(kind, ...)` | The air column of a duct segment between its two junctions, at the density of their mean temperature. `DuctStack.from_network(net, kind)` builds it from the junctions' `z_ref`. |
 | `Wind(...)` | Wind pressure on a façade, from wind speed, direction and a pressure coefficient. `Wind.from_network(net, kind, ambient=...)`. |
 | `WindProfile(...)` | A vertical wind profile, identified by CONTAM's profile number. |
 

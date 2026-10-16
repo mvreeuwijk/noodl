@@ -16,6 +16,9 @@ NODE_ATTRIBUTES: dict[str, tuple[str, str]] = {
                  "for drawing only", "noodl.components"),
     "heat_capacity": ("extra lumped heat capacity of the node (J/K); a wall node's capacity",
                       "thermal_layer"),
+    "in_building_volume": ("1 if the zone counts in the building's conditioned space, 0 if "
+                           "not (CONTAM's zone flag 16, set by the CONTAM reader); absent "
+                           "means 1", "building_air_change_rate"),
 }
 
 EDGE_ATTRIBUTES: dict[str, dict[str, tuple[str, str]]] = {
@@ -36,6 +39,43 @@ EDGE_ATTRIBUTES: dict[str, dict[str, tuple[str, str]]] = {
         "Ch": ("wind speed modifier (dimensionless, 1 by default)", "Wind.from_network"),
         "profile": ("number of the WindProfile to use; 0 means the constant Cp",
                     "Wind.from_network"),
+    },
+    "duct, a segment between two junctions (made by DuctNetwork)": {
+        "length": ("length of the segment (m)", "duct_laws_from_edges"),
+        "diameter": ("hydraulic diameter of the duct (m)", "duct_laws_from_edges"),
+        "roughness": ("roughness of the duct wall (m)", "duct_laws_from_edges"),
+        "loss": ("sum of the segment's dynamic loss coefficients (dimensionless)",
+                 "duct_laws_from_edges"),
+        "area": ("cross-section of the duct (m2); the circle of the diameter by default",
+                 "duct_laws_from_edges"),
+    },
+    "duct_terminal, a junction to a zone (made by DuctNetwork)": {
+        "area": ("area of the duct at the terminal (m2)", "duct_laws_from_edges"),
+        "loss": ("loss coefficient of the terminal (dimensionless)",
+                 "duct_laws_from_edges"),
+        "z_path": ("height of the terminal, the junction's height (m)", "Stack.from_network"),
+        "profile": ("number of the WindProfile on a terminal in the ambient; absent or 0 "
+                    "for none", "duct_laws_from_edges, Wind.from_network"),
+        "Cp": ("constant wind pressure coefficient of a terminal in the ambient without a "
+               "profile", "duct_laws_from_edges, Wind.from_network"),
+        "Ch": ("wind speed modifier (dimensionless, 1 by default)", "Wind.from_network"),
+        "azimuth": ("wall direction of a terminal with a profile (degrees from CONTAM)",
+                    "Wind.from_network"),
+    },
+    "air_handler, an air handler's edges (made by add_air_handler)": {
+        "role": ("what the edge is: 0 supply point (plenum -> zone), 1 return point (zone -> "
+                 "plenum), 2 recirculation, 3 outdoor air, 4 exhaust", "air_handler_from_edges"),
+        "design_flow": ("design mass flow of a supply or return point (kg/s); 0 on the other "
+                        "edges", "air_handler_from_edges"),
+        "outdoor_air_fraction": ("on the recirculation edge: the outdoor-air fraction of the "
+                                 "supply when no input sets it (dimensionless, 1 by default)",
+                                 "air_handler_from_edges"),
+        "min_outdoor_air": ("on the recirculation edge: the minimum outdoor-air flow (kg/s, 0 "
+                            "by default)", "air_handler_from_edges"),
+    },
+    "fan, a constant-mass-flow fan (made by the fan component)": {
+        "flow": ("mass flow delivered from source to target whatever the pressures (kg/s)",
+                 "fan_law_from_edges"),
     },
     "wall": {
         "ua": ("conductance zone -> wall or wall -> ambient (W/K)", "thermal_layer"),

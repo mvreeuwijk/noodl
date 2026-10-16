@@ -1,14 +1,11 @@
-"""The closure option names, the two presets and the deprecated spellings."""
+"""The closure option names, the two presets and the refusal of earlier spellings."""
 
 from __future__ import annotations
 
 import pytest
 
-from noodl.apps.street_aq import closures
 from noodl.apps.street_aq.canyon import KAPPA, KAPPA_MUNICH
 from noodl.apps.street_aq.closures import (
-    LEGACY_NAMES,
-    LEGACY_VALUES,
     OPTIONS,
     PRESETS,
     normalise,
@@ -49,39 +46,11 @@ def test_preset_options_is_a_copy_and_refuses_an_unknown_preset():
         preset_options("impaq")
 
 
-def test_every_legacy_value_maps_to_an_allowed_value_and_warns():
-    for option, mapping in LEGACY_VALUES.items():
-        for old, new in mapping.items():
-            assert new in OPTIONS[option]
-            with pytest.warns(DeprecationWarning,
-                              match=rf"where: {option}='{old}' is deprecated; use "
-                                    rf"{option}='{new}'"):
-                assert normalise(option, old, "where") == new
-
-
-def test_a_current_value_passes_silently_and_an_unknown_one_is_named():
+def test_a_current_value_passes_and_an_unknown_one_is_named():
     assert normalise("canyon_wind", "bessel_profile", "f") == "bessel_profile"
     with pytest.raises(ValueError, match=r"f: stability must be one of \('neutral', "
                                          r"'monin_obukhov'\), got 'impaq'"):
         normalise("stability", "impaq", "f")
-
-
-def test_every_legacy_keyword_maps_and_warns():
-    for old, new in LEGACY_NAMES.items():
-        value = OPTIONS[new][1]
-        with pytest.warns(DeprecationWarning, match=rf"the keyword '{old}' is deprecated; "
-                                                    rf"use '{new}'"):
-            options = resolve("sirane", {old: value}, "build_model")
-        assert options[new] == value
-
-
-def test_a_legacy_keyword_together_with_its_current_name_is_refused():
-    with pytest.raises(TypeError, match=r"f: 'junction_routing' and 'routing' both set "
-                                        r"'junction_routing'; give only one"), \
-            pytest.warns(DeprecationWarning):
-        resolve("sirane", {"junction_routing": "perfect_mixing", "routing": "mixing"}, "f")
-    with pytest.raises(TypeError, match=r"unexpected keyword argument 'wind'"):
-        resolve("sirane", {"wind": "x"}, "f")
 
 
 def test_resolve_takes_the_preset_and_lets_explicit_values_win():
@@ -90,17 +59,6 @@ def test_resolve_takes_the_preset_and_lets_explicit_values_win():
     options = resolve("munich", {"stability": "neutral", "sigma_w_min": 0.2}, "f")
     assert options["stability"] == "neutral" and options["sigma_w_min"] == 0.2
     assert options["kappa"] == 0.41
-
-
-def test_the_old_munich_averaging_implies_the_turbulence_intensity_spread():
-    with pytest.warns(DeprecationWarning):
-        options = resolve("sirane", {"direction_averaging": "munich"}, "f")
-    assert options["direction_averaging"] == "rectangle_rule"
-    assert options["direction_spread"] == "turbulence_intensity"
-    with pytest.warns(DeprecationWarning):
-        options = resolve("sirane", {"direction_averaging": "munich",
-                                     "direction_spread": "driver"}, "f")
-    assert options["direction_spread"] == "driver"
 
 
 def test_kappa_follows_the_preset_or_the_explicit_mix():
@@ -115,8 +73,14 @@ def test_kappa_follows_the_preset_or_the_explicit_mix():
     assert resolve("sirane", {"sigma_w_min": 0.0}, "f")["kappa"] == 0.40
 
 
-def test_a_deprecation_warning_names_the_calling_line():
-    with pytest.warns(DeprecationWarning) as record:
-        normalise("stability", "munich", "f")
-    assert record[0].filename == __file__
-    assert closures.__name__ == "noodl.apps.street_aq.closures"
+def test_earlier_option_names_and_values_are_refused():
+    for old in ("roof_wind_form", "exchange", "routing"):
+        with pytest.raises(TypeError, match=rf"f: unexpected keyword argument '{old}'"):
+            resolve("sirane", {old: "x"}, "f")
+    with pytest.raises(TypeError, match=r"unexpected keyword argument 'wind'"):
+        resolve("sirane", {"wind": "x"}, "f")
+    for option, old in (("canyon_wind", "soulhac"), ("roof_exchange", "schulte"),
+                        ("junction_routing", "mixing"), ("direction_averaging", "munich"),
+                        ("stability", "munich")):
+        with pytest.raises(ValueError, match=rf"f: {option} must be one of"):
+            resolve("sirane", {option: old}, "f")

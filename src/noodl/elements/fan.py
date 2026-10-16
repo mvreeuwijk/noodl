@@ -33,6 +33,8 @@ discarded branch's *input* before taking the reciprocal, not just masking the ou
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+
 import torch
 
 from noodl._broadcast import broadcast_shapes
@@ -104,3 +106,86 @@ class FanCurve(ConstitutiveLaw):
         q_safe = torch.where(clipped, midpoint, q)
         raw = -1.0 / self._dpressure(q_safe)
         return torch.where(clipped, torch.zeros_like(raw), raw)
+
+
+class AffinityFan(ConstitutiveLaw):
+    """A fan curve run at another speed and air density, by the fan laws (ContamX's
+    performance-curve fan, measured against ContamX 3.4.1.7):
+
+        F = multiplier * s * r * F0(dp / (s^2 r)),    r = rho_up / rho_ref
+
+    `curve` is the fan's `FanCurve` at its rating density `rho_ref` (kg/m3) and rated
+    speed, F0 its inverted curve. The speed ratio s is `drivers[speed_key]`, one value per
+    edge (1 when `speed_key` is None); s > 1 is allowed. Below `off` the fan is stopped and
+    the air passes `shutoff` instead (CONTAM's shut-off orifice: the curve element's own
+    power law), times `multiplier`; with no `shutoff` a stopped fan passes nothing. rho_up
+    is `drivers[rho_key]` at the edge's source, since a fan pushes from source to target.
+    `multiplier` (one per edge, or one for all) is fans in parallel: CONTAM's path mult.
+
+    The flow jumps at s = `off` (and at s = 0), from the running fan to the stopped one, as
+    in ContamX; the slope and the gradients are finite on either side of the jump. A
+    negative speed ratio is refused.
+    """
+
+    def __init__(self, curve: FanCurve, *, src, tgt, rho_ref: float,
+                 speed_key: str | None = None, off: float = 0.0, multiplier=1.0,
+                 shutoff: ConstitutiveLaw | None = None, rho_key: str = "rho",
+                 kind: str | None = None) -> None:
+        super().__init__(curve.kind if kind is None else kind)
+        if shutoff is not None and shutoff.kind != self.kind:
+            raise ValueError(f"AffinityFan (kind {self.kind!r}): shutoff has kind "
+                             f"{shutoff.kind!r}; it must be the fan's own kind")
+        if float(rho_ref) <= 0.0:
+            raise ValueError(f"AffinityFan (kind {self.kind!r}): rho_ref must be positive, "
+                             f"got {rho_ref!r}")
+        self.curve = curve
+        self.shutoff = shutoff
+        self.register_buffer("src", torch.as_tensor(src).to(torch.long).reshape(-1))
+        self.register_buffer("tgt", torch.as_tensor(tgt).to(torch.long).reshape(-1))
+        self.register_buffer("multiplier", torch.as_tensor(multiplier, dtype=torch.float64))
+        self.rho_ref = float(rho_ref)
+        self.speed_key = speed_key
+        self.off = float(off)
+        self.rho_key = str(rho_key)
+
+    def _state(self, dp: Tensor, drivers: Mapping[str, Tensor] | None):
+        name = f"AffinityFan (kind {self.kind!r})"
+        if drivers is None or self.rho_key not in drivers:
+            raise KeyError(f"{name}: driver {self.rho_key!r} not found")
+        r = torch.as_tensor(drivers[self.rho_key]).to(dp.dtype)[..., self.src] / self.rho_ref
+        if self.speed_key is None:
+            s = torch.ones_like(r)
+        elif self.speed_key not in drivers:
+            raise KeyError(f"{name}: driver {self.speed_key!r} not found; it carries the "
+                           f"fan's speed ratio")
+        else:
+            s = torch.as_tensor(drivers[self.speed_key]).to(dp.dtype)
+            negative = s < 0
+            if bool(negative.any()):
+                raise ValueError(
+                    f"{name}: driver {self.speed_key!r} gives a negative speed ratio "
+                    f"{s.detach()[negative].flatten()[0].item()!r}; a fan's speed ratio is 0 "
+                    f"(stopped) or more")
+        # A speed of exactly 0 is stopped whatever `off` is (the fan laws divide by s), and
+        # stopped edges evaluate the curve at s = 1, so the discarded branch stays finite.
+        running = (s >= self.off) & (s > 0)
+        s = torch.where(running, s, torch.ones_like(s))
+        return r, s, self.multiplier.to(dp.dtype), running
+
+    def flow(self, dp: Tensor, drivers: Mapping[str, Tensor] | None = None) -> Tensor:
+        r, s, mult, running = self._state(dp, drivers)
+        on = mult * s * r * self.curve.flow(dp / (s * s * r), drivers)
+        off = (mult * self.shutoff.flow(dp, drivers) if self.shutoff is not None
+               else torch.zeros_like(on))
+        return torch.where(running, on, off)
+
+    def dflow(self, dp: Tensor, drivers: Mapping[str, Tensor] | None = None) -> Tensor:
+        r, s, mult, running = self._state(dp, drivers)
+        on = mult * self.curve.dflow(dp / (s * s * r), drivers) / s
+        off = (mult * self.shutoff.dflow(dp, drivers) if self.shutoff is not None
+               else torch.zeros_like(on))
+        return torch.where(running, on, off)
+
+    def linear_init(self, drivers: Mapping[str, Tensor] | None = None) -> tuple[Tensor, Tensor]:
+        zero = torch.zeros(self.src.numel(), dtype=torch.float64)
+        return self.flow(zero, drivers), self.dflow(zero, drivers)

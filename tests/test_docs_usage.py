@@ -31,7 +31,8 @@ PAGES = [
     "applications/electrical.md",
     "formats/matpower.md",
 ]
-FIXTURES = ["sewer/*.inp", "water/*.inp", "wsimod/*.json",
+FIXTURES = ["sewer/*.inp", "water/*.inp", "wsimod/*.json", "contam/*",
+            "modelica/ChimneyShaftWithVolume.json",
             "modelica_electrical/DC.Loads.Examples.Resistor.json"]
 BLOCK = re.compile(r"```(python|text)\n(.*?)```", re.S)
 

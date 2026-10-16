@@ -114,9 +114,11 @@ def test_a_model_built_without_quality_declares_only_what_it_reads():
 
 
 # ------------------------------------------------------------------------------- CONTAM
-def test_contam_densities_and_wind_are_declared():
+def test_contam_temperatures_pressure_and_wind_are_declared():
     model, state, drivers = project_to_model(read_prj(DATA / "contam" / "valThreeZonesWthCtm.prj"))
     inputs = model.refs.inputs
-    assert inputs["rho"].ordering == "full node order" and inputs["rho"].unit == "kg/m3"
+    assert inputs["T"].ordering == "full node order" and inputs["T"].unit == "K"
+    assert inputs["P_ref"].scalar and inputs["P_ref"].unit == "Pa"
     assert inputs["V_met"].scalar and inputs["theta_w"].unit == "deg"
+    assert "rho" not in inputs                       # a closure output now, not an input
     assert model.check(state, drivers).ok

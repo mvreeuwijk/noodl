@@ -9,7 +9,7 @@ came from. The solver never sees components: layers, laws and drives work on the
 flattened network exactly as they do on one built by hand.
 
 Components live in `noodl.components`. The building application adds factory functions that
-return components (`room`, `door`, `crack`, `window`, `shaft`); see
+return components (`room`, `door`, `crack`, `window`, `shaft`, `fan`, `duct`, `air_handler`); see
 [Building physics](../applications/building_physics.md#building-from-components).
 
 ## A house from rooms and a door

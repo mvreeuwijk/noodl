@@ -19,6 +19,6 @@ def load_golden(name: str) -> dict[str, Any]:
 
 def save_golden(name: str, data: dict[str, Any]) -> None:
     """Overwrite the golden data stored under `name` with `data`."""
-    with _path(name).open("w", encoding="utf-8") as fh:
+    with _path(name).open("w", encoding="utf-8", newline="\n") as fh:
         json.dump(data, fh, indent=2, sort_keys=True)
         fh.write("\n")
