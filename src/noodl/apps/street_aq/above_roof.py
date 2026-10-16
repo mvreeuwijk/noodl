@@ -31,7 +31,8 @@ stay at `C_bg`. The roof flux is neutral by construction (`C - C_ext = 0`). A ju
 source of `sum_out q C_street` is not: it re-emits background air that the plume sum then
 adds on top of the background it already contains (a lattice with nothing emitted then
 gives `max C_ext / C_bg > 1`; see `docs/design/water_street.md#junction-source`). The
-background is already in `C_bg`; only what the canopy adds to it may enter the plume sum. The subtraction uses the background of the street the air leaves,
+background is already in `C_bg`; only what the canopy adds to it may enter the plume sum.
+The subtraction uses the background of the street the air leaves,
 which is what that street would hold with no emissions under a uniform background.
 
 - The downward flow through the INCOMING vents carries the `C_ext` of the street it enters
