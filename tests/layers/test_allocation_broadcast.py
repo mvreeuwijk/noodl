@@ -98,3 +98,48 @@ def test_a_batch_that_does_not_broadcast_is_refused_naming_the_layer():
     with pytest.raises(RuntimeError, match=r"AllocatedFlowLayer 'cap'.*batch shapes do not"):
         layer.step(torch.zeros(2, 4, dtype=F64), {"cap.requests": torch.ones(3, 3, dtype=F64)},
                    1.0)
+
+
+def test_projection_bracket_is_per_instance_for_a_batch_mixing_scales(monkeypatch):
+    """Each instance of a batch is bracketed (and bisected) as it would be alone: a request
+    four orders of magnitude larger in one instance neither widens the others' bracket nor
+    changes their result."""
+    import noodl.layers.allocation as allocation
+
+    seen = []
+    real = allocation.solve_monotone
+
+    def spy(f, lo, hi, *params, **kwargs):
+        calls = [0]
+
+        def counted(*args):
+            calls[0] += 1
+            return f(*args)
+
+        out = real(counted, lo, hi, *params, **kwargs)
+        seen.append((hi.clone(), calls[0]))
+        return out
+
+    monkeypatch.setattr(allocation, "solve_monotone", spy)
+    layer = AllocatedFlowLayer(
+        _merge_net(), "cap", "link", mode="projection",
+        s_max=torch.tensor([1e5, 1e5, 1e4, 1e5], dtype=F64),
+        c_arc=torch.tensor([1e5, 1e5, 1e4], dtype=F64),
+    )
+    s = torch.tensor([1e4, 1e4, 0.2, 0.0], dtype=F64)
+    r = torch.tensor([[0.8, 0.9, 5.0], [8000.0, 9000.0, 1e4]], dtype=F64)
+    _, f = layer.step(s, {"cap.requests": r}, 1.0)
+    batch = list(seen)
+    assert batch
+    alone = []
+    for i in range(2):
+        seen.clear()
+        _, f_i = layer.step(s, {"cap.requests": r[i]}, 1.0)
+        alone.append(list(seen))
+        assert len(seen) == len(batch)
+        torch.testing.assert_close(f[i], f_i, rtol=1e-10, atol=1e-12)
+    for k, (hi_b, n_b) in enumerate(batch):
+        for i in range(2):
+            torch.testing.assert_close(hi_b[i], alone[i][k][0])
+        assert n_b <= max(alone[0][k][1], alone[1][k][1])
+    assert any(hb[0].max() < hb[1].max() for hb, _ in batch)
