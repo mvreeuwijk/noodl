@@ -15,7 +15,8 @@ agreement is to round-off:
 
 The tolerance is not loosened for any model, column or row. The steady solves use the
 runner's own Newton tolerances (`run.STEADY_ATOL`, `run.STEADY_RTOL`; `THERMAL_STEADY_ATOL`
-for a circuit with a heat-port thermal network); nothing looser is passed. MSL's `Resistor`
+on the thermal layer of a circuit with a heat-port thermal network); nothing looser is
+passed. MSL's `Resistor`
 (a coupled thermal solve at every row) is compared at every row only under `-m slow`; the
 default run compares every tenth row at the same bound (`SUBSAMPLED`).
 

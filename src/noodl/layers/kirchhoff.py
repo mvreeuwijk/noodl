@@ -465,6 +465,15 @@ class KirchhoffLayer:
         """
         return self.net.difference()[self.cols]
 
+    def net_outflow(self, q: torch.Tensor) -> torch.Tensor:
+        """The net flow OUT of the network at every node, `(..., n_nodes)`, from the edge
+        flows `q` (`(..., b)`, in this layer's edge order): each edge's flow leaves its
+        source node and enters its target node. Interior rows are the KCL imbalance (zero
+        at a converged solve without sources); boundary rows are what the boundary
+        supplies, negated (the inflow from the network is `-net_outflow(q)[..., bound]`).
+        Differentiable in `q`."""
+        return self._accumulate(q)
+
     # ------------------------------------------------------- sparse topology primitives
     def _difference(self, phi: torch.Tensor) -> torch.Tensor:
         """`self._diff @ phi` without the matrix: `phi[..., src] - phi[..., tgt]`.
