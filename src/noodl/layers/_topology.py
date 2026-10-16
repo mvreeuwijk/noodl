@@ -15,6 +15,8 @@ class TopologyGuard(Movable):
     * `Network.topology_version`, so a network that has since gained a node or edge is
       refused at every public entry point (`_require_current_topology`, a cheap integer
       comparison);
+    * the network's `(device, dtype)`, refused there too once `Network.to` has moved the
+      network alone (move the whole model with `Model.to`, or the layer with `to`);
     * `Network.attribute_fingerprint`, compared by `_attributes_changed`, which `Model.check`
       and `Model.to` call (one pass over the attributes: not on every step).
 
@@ -27,6 +29,7 @@ class TopologyGuard(Movable):
 
     def _record_topology(self, net) -> None:
         self._topology_version = net.topology_version
+        self._placement = (net.device, net.dtype)
         self._attribute_fingerprint = net.attribute_fingerprint()
         net.freeze()
 
@@ -34,7 +37,8 @@ class TopologyGuard(Movable):
         return f"{type(self).__name__} {getattr(self, 'name', '?')!r}"
 
     def _require_current_topology(self) -> None:
-        """Raise `RuntimeError` when the network gained a node or edge after construction."""
+        """Raise `RuntimeError` when the network gained a node or edge after construction,
+        or was moved to another device or dtype on its own."""
         current = self.net.topology_version
         # A layer pickled before the guard existed has no recorded version: it reads as 0,
         # which is also what its network, pickled with it and equally old, loads at
@@ -48,6 +52,15 @@ class TopologyGuard(Movable):
                 f"{recorded} -> {current}); the layer still describes the "
                 f"old graph. Add all nodes and edges before constructing layers, or "
                 f"construct the layer and model again."
+            )
+        placement = getattr(self, "_placement", None)   # None: pickled before it existed
+        if placement is not None and (self.net.device, self.net.dtype) != placement:
+            raise RuntimeError(
+                f"{self._layer_label()}: the network was moved to device "
+                f"{self.net.device}, dtype {self.net.dtype} after this layer was built on "
+                f"device {placement[0]}, dtype {placement[1]}; the layer's own tensors "
+                f"were not moved. Move the whole model with Model.to(device, dtype) "
+                f"rather than Network.to."
             )
 
     def _attributes_changed(self) -> bool:
@@ -65,7 +78,8 @@ class TopologyGuard(Movable):
             )
 
     def _require_current(self) -> None:
-        """Topology and attributes unchanged since construction."""
+        """Topology and attributes unchanged since construction (device and dtype may
+        differ: that is what a move repairs)."""
         recorded = getattr(self, "_topology_version", 0)
         if self.net.topology_version != recorded:
             self._require_current_topology()
@@ -81,3 +95,4 @@ class TopologyGuard(Movable):
 
     def _move_with(self, mover: Mover) -> None:
         mover.attributes(self)
+        self._placement = (self.net.device, self.net.dtype)
