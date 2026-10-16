@@ -55,7 +55,6 @@ from typing import Protocol, runtime_checkable
 
 import torch
 
-from noodl import layout
 from noodl._closures import ClosureSchedule
 from noodl._fixed_point_loop import detached, unsolved_mask
 from noodl._grad_reach import any_requires_grad
@@ -66,6 +65,14 @@ from noodl._model_setup import (
     validate_modes,
     validate_reactions,
     validate_substeps,
+)
+from noodl._pass import (
+    LAYER_OPTIONS,
+    circuit_kwargs,
+    kind_flows,
+    require,
+    run_pass,
+    zero_sources,
 )
 from noodl.contracts import ClosureSpec, StepContext
 from noodl.layers.allocation import AllocatedFlowLayer
@@ -89,7 +96,7 @@ _STATE_SUFFIXES = ("phi", "q", "x", "s")
 #: among `**solve_kwargs` of `step`/`steady`.
 _MODEL_SOLVE_KEYS = frozenset({"phi0", "q0", "history", "dt", "t"})
 # The key `layer_options` travels under inside `solve_kwargs`, to `_pass`'s layer solves.
-_LAYER_OPTIONS = "layer_options"
+_LAYER_OPTIONS = LAYER_OPTIONS
 # `_detached` is the shared diagnostics helper, under its pre-move name.
 _detached = detached
 
@@ -131,14 +138,6 @@ def _with_layer_options(solve_kwargs: dict, layer_options) -> dict:
         return solve_kwargs
     return {**solve_kwargs, _LAYER_OPTIONS: {k: dict(v) for k, v in layer_options.items()}}
 
-
-def _layer_kwargs(solve_kwargs: dict, name: str) -> dict:
-    """The keywords of Kirchhoff layer `name`'s solve: `solve_kwargs` with that layer's
-    `layer_options` applied over them."""
-    if _LAYER_OPTIONS not in solve_kwargs:
-        return solve_kwargs
-    shared = {k: v for k, v in solve_kwargs.items() if k != _LAYER_OPTIONS}
-    return {**shared, **solve_kwargs[_LAYER_OPTIONS].get(name, {})}
 
 class Model:
     """Layers on one `Network`, stepped together. See the module docstring for the keys.
@@ -289,10 +288,8 @@ class Model:
     # ----------------------------------------------------------------- helpers
     @staticmethod
     def _require(drivers: Mapping[str, Tensor], key: str) -> Tensor:
-        try:
-            return drivers[key]
-        except KeyError as exc:
-            raise KeyError(f"Model: driver {key!r} is required and was not given") from exc
+        """`drivers[key]`, refused by name when it is missing (`noodl._pass.require`)."""
+        return require(drivers, key)
 
     def _is_layer_state_key(self, key: str) -> bool:
         """True for a layer's own state key `"<layer>.phi/q/x/s"` a closure may not write:
@@ -348,12 +345,7 @@ class Model:
         `x_boundary` used as `like` would flip the returned state to `(..., n_i, K)` for a
         single-species layer; only fall back to it when there is no `x` at all.
         """
-        _, reduced = layout.as_stacked(
-            like, n_like, layer.n_species, name="state", where=f"TransportLayer '{layer.name}'",
-        )
-        batch = like.shape[:-1] if reduced else like.shape[:-2]
-        tail = (self.net.n,) if reduced else (self.net.n, layer.n_species)
-        return torch.zeros(batch + tail, dtype=like.dtype, device=like.device)
+        return zero_sources(layer, like, n_like, self.net.n)
 
     def _kind_flows(self, name: str, state: Mapping[str, Tensor],
                     drivers: Mapping[str, Tensor]) -> Tensor:
@@ -371,37 +363,7 @@ class Model:
         refused here by name rather than left to raise a bare `KeyError` off
         `self.kirchhoff[owner]`.
         """
-        layer = self.transport[name]
-        owner = self.flow_layer_of[name]
-        key = self.flow_driver_of[name]
-        if owner is not None:
-            # Checked BEFORE the both-sources refusal below, whose message says "Kirchhoff
-            # layer" and would be factually wrong about an allocation owner.
-            if owner in self.allocation:
-                raise NotImplementedError(
-                    f"Model: transport layer {name!r} advects on kinds {layer.flow_kinds}, "
-                    f"which allocation layer {owner!r} provides; reading an allocation "
-                    f"layer's flows into a transport layer is not implemented. "
-                    f"Drive {name!r} from the "
-                    f"driver {key!r} instead, or give its kinds to a Kirchhoff layer"
-                )
-            if key in drivers:
-                raise ValueError(
-                    f"Model: transport layer {name!r} takes its flows from Kirchhoff layer "
-                    f"{owner!r}, and the driver {key!r} was also given; a layer may have "
-                    f"one source of flows, not two -- drop {key!r} or remove {owner!r}"
-                )
-            return self.kirchhoff[owner].flows_of_kind(state[f"{owner}.q"], layer.flow_kinds)
-        q = self._require(drivers, key)
-        b = int(layer._flow_src.shape[0])
-        if q.dim() == 0 or q.shape[-1] != b:
-            got = q.shape[-1] if q.dim() >= 1 else 0
-            raise ValueError(
-                f"Model: driver {key!r} must have trailing shape ({b},) -- transport layer "
-                f"{name!r} advects on {b} flow edges of kinds {layer.flow_kinds}, in that "
-                f"order -- got {got} (shape {tuple(q.shape)})"
-            )
-        return q
+        return kind_flows(self, name, state, drivers)
 
     @staticmethod
     def _circuit_kwargs(name: str, layer: KirchhoffLayer, state: Mapping[str, Tensor],
@@ -416,21 +378,7 @@ class Model:
         `history` is the STEP-START state's `(phi, q)` -- `base`, never the fed state, so an
         iterated coupling re-steps every pass from the same start -- and `dt` the step.
         """
-        out: dict = {"t": t if dt is None or t is None else t + dt}
-        q_prev = state.get(f"{name}.q")
-        if q_prev is not None:
-            out["q0"] = q_prev[..., layer.implicit_edges]
-        if layer.dynamic and not layer.phasor and dt is not None:
-            missing = [k for k in (f"{name}.phi", f"{name}.q") if k not in base]
-            if missing:
-                raise KeyError(
-                    f"Model: state {missing} is required to step Kirchhoff layer {name!r}, "
-                    f"whose dynamic laws start each step from the potentials and flows at "
-                    f"the step start (an initial point: layer.solve(..., mode='initial'))"
-                )
-            out["history"] = (base[f"{name}.phi"], base[f"{name}.q"])
-            out["dt"] = dt
-        return out
+        return circuit_kwargs(name, layer, state, base, dt, t)
 
     # -------------------------------------------------------------------- pass
     def _pass(
@@ -479,204 +427,10 @@ class Model:
         `I - G_z` exactly singular (`solvers.fixed_point`). Asking the pass itself is the
         only answer that cannot drift from what the pass does.
         """
-        base: State = state if step_from is None else step_from
-        # Closure-carried state must be evaluated from the STEP-START state
-        # on every pass, never from the previous pass's own output -- a closure that
-        # integrates (adds dt each call) would otherwise integrate once per PASS instead of
-        # once per STEP, because `_iterate` feeds pass k-1's output into pass k. Every other
-        # key a closure reads still sees `state` (pass k-1's relaxed transport `.x`, which is
-        # exactly what the relaxed coupling wants); only the keys this model's closures
-        # themselves carry are pinned to `base`.
-        closure_state: State = dict(state)
-        for key in self.closure_state_keys:
-            if key in base:
-                closure_state[key] = base[key]
-        written: set[str] = set()
-        ctx = StepContext(dt=dt, t=t)
-        drv = self._apply_closures(closure_state, drivers, written, ctx)
-        new: State = dict(state)
-        made: list[str] = [] if produced is None else produced
-        made.clear()
-        diag: dict = {}
-        for name, layer in self.kirchhoff.items():
-            pb = self._require(drv, f"{name}.phi_boundary")
-            sources = drv.get(f"{name}.sources")
-            phi_prev = state.get(f"{name}.phi") if warm_start else None
-            phi0 = None if phi_prev is None else phi_prev[..., layer.interior]
-            d: dict = {}
-            circuit = self._circuit_kwargs(name, layer, state, base, dt, t) if layer.mna else {}
-            if not warm_start:
-                # The implicit-law flows' warm start goes with the potentials' (`phi0`).
-                circuit.pop("q0", None)
-            phi, q = layer.solve(pb, drv, sources, phi0=phi0, diagnostics=d, **circuit,
-                                 **_layer_kwargs(solve_kwargs, name))
-            new[f"{name}.phi"], new[f"{name}.q"] = phi, q
-            made += [f"{name}.phi", f"{name}.q"]
-            diag[name] = d
-        if self.allocation and dt is None:
-            raise ValueError(
-                "Model: a steady (dt=None) pass has no defined meaning for a "
-                "AllocatedFlowLayer, which is inherently discrete-time"
-            )
-        for name, layer in self.allocation.items():
-            # `base`, not `state` -- the same step-start rule the comment above states for
-            # closure-carried state and the transport loop below follows for `"<layer>.x"`:
-            # a layer that INTEGRATES its own state must advance from the STEP-START state
-            # on every pass, never from the previous pass's output, or `coupling="iterate"`
-            # integrates it once per PASS instead of once per STEP.
-            s_prev = base.get(f"{name}.s")
-            if s_prev is None:
-                raise KeyError(
-                    f"Model: state {name + '.s'!r} is required to step allocation "
-                    f"layer {name!r}"
-                )
-            cd: dict = {}
-            s_new, f = layer.step(s_prev, drv, dt, diagnostics=cd)
-            new[f"{name}.s"], new[f"{name}.q"] = s_new, f
-            made += [f"{name}.s", f"{name}.q"]
-            diag[name] = cd
-        if isinstance(boundary_transfers, str):
-            # Defensive: `step()` already refuses a bare string before reaching here, but
-            # `_pass` is not otherwise unreachable except through it -- see that check for
-            # why a bare `str` (itself a `Collection[str]`) must never reach the ternary
-            # below, which would silently iterate its characters instead.
-            raise TypeError(
-                f"Model.step: boundary_transfers must be a bool or a collection of layer "
-                f"names, not a bare string; pass {boundary_transfers!r} in a set"
-            )
-        transfer_layers: set[str] = (
-            set(self.transport) if boundary_transfers is True
-            else set(boundary_transfers) if boundary_transfers
-            else set()
+        return run_pass(
+            self, state, drivers, dt, solve_kwargs, step_from=step_from, t=t,
+            boundary_transfers=boundary_transfers, produced=produced, warm_start=warm_start,
         )
-        if dt is None and transfer_layers:
-            raise ValueError(
-                "Model: boundary_transfers has no meaning for a steady solve, which "
-                "integrates nothing"
-            )
-        for name, layer in self.transport.items():
-            want_transfer = name in transfer_layers
-            q_kind = self._kind_flows(name, new, drv)
-            xb = self._require(drv, f"{name}.x_boundary")
-            sources = drv.get(f"{name}.sources")
-            # A per-step capacity, written by a closure that owns the geometry
-            # (a sewer conduit's wetted volume, a headspace volume). Absent, the layer's
-            # construction-time capacity stands, so nothing changes for a fixed-storage
-            # layer. Shape and positivity are checked by the layer, naming the nodes.
-            cap = drv.get(f"{name}.capacity")
-            # A per-step first-order removal rate (1/s), written by a closure that owns the
-            # sinks (deposition, a scheduled removal). Absent, the layer's own stands.
-            removal = drv.get(f"{name}.removal")
-            # A per-step transmission, written by a closure whose filters depend on the
-            # step's flows or conditions (a UVGI filter). Absent, the layer's own stands.
-            transmission = drv.get(f"{name}.transmission")
-            transfer_total = None
-            # A fresh dict per layer, threaded into `steady`/`step`/
-            # `step_with_transfer` as an out-parameter and read back below into
-            # `diag[name]["linear"]`. Only the LAST substep's entry survives (each substep
-            # overwrites it), matching how `diag[name]["substeps"]` already reports a count
-            # rather than a per-substep history. A scheme with no linear solve (`"exact"`)
-            # leaves this dict empty, so no `"linear"` key is added.
-            layer_diag: dict = {}
-            if dt is None:
-                if sources is None:
-                    # The state's own `x` is the layout authority when it is there; `x_b`
-                    # is the fallback for a steady solve started without one.
-                    like = base.get(f"{name}.x")
-                    sources = (
-                        self._zero_sources(layer, xb, layer.n_b)
-                        if like is None
-                        else self._zero_sources(layer, like, layer.n_i)
-                    )
-                x = layer.steady(
-                    q_kind, sources, xb, capacity=cap, removal=removal,
-                    transmission=transmission, diagnostics=layer_diag
-                )
-                if cap is not None:
-                    # The capacity this state was solved with, as a step records its own.
-                    new[f"{name}.capacity"] = cap
-                    made.append(f"{name}.capacity")
-            else:
-                x = base.get(f"{name}.x")
-                if x is None:
-                    raise KeyError(
-                        f"Model: state {name + '.x'!r} is required to step transport layer "
-                        f"{name!r}"
-                    )
-                if sources is None:
-                    sources = self._zero_sources(layer, x, layer.n_i)
-                if self.reaction_order == "before_transport":
-                    # R then T: react the step-start state over the whole step, then
-                    # transport it (over the step-start storage `cap_prev` in the amount
-                    # form below, exactly like SWMM's reaction over the old volume).
-                    for lname, reaction in self.reactions:
-                        if lname == name:
-                            x = reaction.apply(x, dt, drv)
-                cap_prev = None
-                if cap is not None:
-                    cap_prev = base.get(f"{name}.capacity")
-                    if cap_prev is None:
-                        raise KeyError(
-                            f"Model: a closure writes the driver {name + '.capacity'!r}, so "
-                            f"the step-start state must carry {name + '.capacity'!r} (the "
-                            f"storage at the state's own time); build it with "
-                            f"Model.initial_capacities(state, drivers)"
-                        )
-                k = self.substeps[name]
-                for j in range(1, k + 1):
-                    if cap is None:
-                        cap_j = cap_prev_j = None
-                    else:
-                        cap_prev_j = cap_prev + (j - 1) / k * (cap - cap_prev)
-                        cap_j = cap_prev + j / k * (cap - cap_prev)
-                    if want_transfer:
-                        stepped = layer.step_with_transfer(
-                            x, q_kind, sources, xb, dt / k,
-                            capacity=cap_j, capacity_prev=cap_prev_j, removal=removal,
-                            transmission=transmission, diagnostics=layer_diag,
-                        )
-                        x = stepped.x
-                        transfer_total = (
-                            stepped.boundary_transfer if transfer_total is None
-                            else transfer_total + stepped.boundary_transfer
-                        )
-                    else:
-                        x = layer.step(x, q_kind, sources, xb, dt / k, capacity=cap_j,
-                                       capacity_prev=cap_prev_j, removal=removal,
-                                       transmission=transmission, diagnostics=layer_diag)
-                if cap is not None:
-                    new[f"{name}.capacity"] = cap
-                    made.append(f"{name}.capacity")
-                if self.reaction_order == "after_transport":
-                    for lname, reaction in self.reactions:
-                        if lname == name:
-                            x = reaction.apply(x, dt, drv)
-            new[f"{name}.x"] = x
-            made.append(f"{name}.x")
-            diag[name] = {"substeps": self.substeps[name]}
-            if "linear" in layer_diag:
-                diag[name]["linear"] = layer_diag["linear"]
-            if "held_sources_dropped" in layer_diag:
-                diag[name]["held_sources_dropped"] = layer_diag["held_sources_dropped"]
-            if want_transfer:
-                diag[name]["boundary_transfer"] = transfer_total
-        # Closure-carried state: a declared key is copied OUT of the closure's
-        # return into the state, so the next step's closures read it back. A closure that
-        # declares a key and does not write it every call would freeze that state silently,
-        # so the omission is refused by name instead. The check is on `written` (which
-        # closure ACTUALLY returned it this call), not on `key in drv` -- a same-named
-        # DRIVER the caller passed in would otherwise already be sitting in `drv` and defeat
-        # this check, freezing the closure's state at the caller's value with no error.
-        for key, closure in self.closure_state_keys.items():
-            if key not in written:
-                raise KeyError(
-                    f"Model: closure {closure!r} declares the state key {key!r} but did "
-                    f"not return it; a closure must write every key it declares on every "
-                    f"call"
-                )
-            new[key] = drv[key]
-            made.append(key)
-        return new, diag, drv
 
     # ------------------------------------------------------------------- setup
     @property
