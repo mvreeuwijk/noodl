@@ -55,6 +55,7 @@ from typing import Protocol, runtime_checkable
 import torch
 
 from noodl._broadcast import broadcast_shapes
+from noodl._grad_reach import any_requires_grad
 from noodl._tracking import TrackedDict
 from noodl.layers.allocation import AllocatedFlowLayer
 from noodl.layers.kirchhoff import KirchhoffLayer
@@ -1354,9 +1355,10 @@ class Model:
         nothing, the question is asked again at the certified fed state, because a closure
         may take a parameter-dependent branch only once the state has moved away from the
         step start, and the answer that matters is the one at the point whose derivative
-        is returned. So a grad-enabled run with nothing differentiable pays exactly one pass
-        more than the primal count (not counted in `passes`), and one under
-        `torch.no_grad()` pays nothing. A run
+        is returned. That extra pass (not counted in `passes`) runs only when some tensor
+        requiring grad is reachable from the model or its inputs at all
+        (`noodl._grad_reach.any_requires_grad`), so a forward simulation with nothing
+        requiring grad pays nothing for it, even in grad mode. A run
         that does NOT converge attaches no adjoint either: there is no fixed point to
         differentiate, and handing back the last pass's graph would be exactly the truncated
         derivative this replaced.
@@ -1537,13 +1539,16 @@ class Model:
                                             converged if prev is not None else None))
             prev = new
         if (not needs_adjoint and torch.is_grad_enabled()
-                and (bool(converged.all()) or not raises_on_limit)):
+                and (bool(converged.all()) or not raises_on_limit)
+                and any_requires_grad(self, state, drivers, solve_kwargs)):
             # Pass 1 saw nothing differentiable, but it ran at the START state: a closure
             # that takes a parameter-dependent branch only once the state has moved would
             # have the returned state silently detached. Ask again, once, under grad at the
             # state the certified (or, without convergence, the last) pass was fed -- the
             # point whose derivative is returned -- and drop that pass's output and graph.
-            # A run about to raise for non-convergence anyway skips it.
+            # Skipped by a run about to raise for non-convergence anyway, and by one where no
+            # tensor requiring grad is reachable from the model or its inputs at all
+            # (`any_requires_grad`), where no pass can produce a dependency.
             with torch.enable_grad():
                 probe, _, _ = self._pass(
                     certified_fed, drivers, dt, pass_kwargs, step_from=state, t=t,

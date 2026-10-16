@@ -280,9 +280,11 @@ pass. Three consequences:
   the graph and dropping that graph. Pass 1 asks first; when it finds nothing, the question is
   asked once more at the **certified interface**, because a closure may take a
   parameter-dependent branch only after the coupled values have moved — the answer that counts
-  is the one at the point whose derivative is returned. A grad-enabled run with nothing to
-  differentiate therefore costs one pass more than `passes` reports; under `torch.no_grad()`
-  it costs nothing extra.
+  is the one at the point whose derivative is returned. That extra pass (not counted in
+  `passes`) is paid only when some tensor requiring grad is reachable at all, from the models
+  (layers, laws, closures and the tensors they hold) or their states and drivers. A forward
+  simulation where nothing requires grad, which is the common case even with PyTorch's default
+  grad mode on, does not pay it.
 
 The **interface** is every link's forward value, one-way links included, because that is what a
 pass reads from the previous pass's output. Only the two-way entries are measured for

@@ -518,6 +518,62 @@ def test_every_pass_of_a_two_way_step_integrates_over_the_same_clocked_interval(
     assert clocked.calls == pytest.approx(one_pass * diagnostics["passes"])
 
 
+def _counting_union(b, **kwargs):
+    """A (start 0) --two-way--> B, counting B's steps (one per pass, no substeps)."""
+    a = compartment("a", scheme="implicit", initial=0.0)
+    b_model, b_state, b_drivers = b
+    calls: list[int] = []
+    real = b_model.step
+
+    def spy(*args, **kw):
+        calls.append(1)
+        return real(*args, **kw)
+
+    b_model.step = spy
+    model, state, drivers = union(
+        {"A": a, "B": (b_model, b_state, b_drivers)},
+        [ValueLink("A", "a.x", 0, "B", "b.x_boundary", two_way=True)],
+        iterate_rtol=1e-12, iterate_atol=1e-14, iterate_max=200,
+    )
+    diagnostics: dict = {}
+    model.step(state, drivers, 1.0, diagnostics=diagnostics)
+    return calls, diagnostics
+
+
+def test_a_coupled_step_skips_the_confirming_pass_when_nothing_requires_grad():
+    assert torch.is_grad_enabled()
+    b = compartment("b", scheme="implicit", circulation=True, initial=1.0, source=0.3)
+    calls, diagnostics = _counting_union(b)
+    assert diagnostics["adjoint"] is None and diagnostics["passes"] >= 2
+    assert len(calls) == diagnostics["passes"]
+
+
+def test_a_coupled_step_pays_the_confirming_pass_when_a_parameter_is_unused_on_pass_one():
+    """`theta` requires grad but B's pass-1 branch never reads it: one pass at the
+    certified interface finds it, then one more carries the adjoint."""
+    theta = torch.tensor(1.0, dtype=F64, requires_grad=True)
+    calls, diagnostics = _counting_union(_branching_recipient(theta))
+    assert diagnostics["adjoint"] == "implicit"
+    assert len(calls) == diagnostics["passes"] + 2
+
+
+def _branching_recipient(theta):
+    """B (start 1) whose source reads its own coupled boundary value: the constant 1 while
+    `b.x_boundary <= 0.1`, `theta` above."""
+    b_model, b_state, b_drivers = compartment("b", scheme="implicit", circulation=True,
+                                              initial=1.0)
+    plain = b_model.closures[0]
+
+    def closure(state, drivers):
+        zero = torch.zeros((), dtype=F64)
+        boundary = float(drivers["b.x_boundary"].detach().sum())
+        source = 1.0 + zero if boundary <= 0.1 else theta + zero
+        return {**plain(state, drivers), "b.sources": torch.stack([zero, source])}
+
+    b_model.closures[0] = closure
+    return b_model, b_state, b_drivers
+
+
 def _branching_coupled(theta):
     """A (start 0) --two-way--> B (start 1), B's source reading its own coupled boundary
     value: the constant 1 while `b.x_boundary <= 0.1`, `theta` above. Pass 1 sees the

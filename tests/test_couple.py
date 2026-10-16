@@ -739,9 +739,7 @@ def test_substeps_calls_the_fast_model_k_times_with_the_glue_held_constant():
         coupled_model.step(state, drivers, dt=60.0, diagnostics=diag)
     finally:
         building_model.step = real_step
-    # Grad is enabled and nothing requires it, so after the primal passes one more pass at
-    # the certified interface confirms there is nothing to differentiate.
-    passes = diag["passes"] + 1
+    passes = diag["passes"]
     assert len(calls) == 6 * passes
     for p in range(passes):
         chunk = calls[6 * p:6 * (p + 1)]

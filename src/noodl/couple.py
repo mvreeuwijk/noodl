@@ -15,6 +15,7 @@ from typing import NamedTuple
 import torch
 
 from noodl._broadcast import broadcast_shapes
+from noodl._grad_reach import any_requires_grad
 from noodl.model import Drivers, Model, State
 from noodl.solvers.fixed_point import differentiate_fixed_point
 from noodl.topology import Network
@@ -707,9 +708,10 @@ class CoupledModel:
         it finds nothing, the question is asked again at the certified interface, because a
         closure may take a parameter-dependent branch only once the coupled values have
         moved, and the answer that matters is the one at the point whose derivative is
-        returned. A grad-enabled run with nothing differentiable therefore pays one pass more
-        than its primal count (not counted in `passes`); one under `torch.no_grad()` pays
-        nothing.
+        returned. That extra pass (not counted in `passes`) runs only when some tensor
+        requiring grad is reachable from the models or their inputs at all
+        (`noodl._grad_reach.any_requires_grad`), so a forward simulation with nothing
+        requiring grad pays nothing for it, even in grad mode.
 
         The INTERFACE is every link's forward value, one-way links included, because that is
         what a pass actually reads from the previous pass's output. A one-way value kept out
@@ -792,12 +794,15 @@ class CoupledModel:
                 f"passes for instances {failing}; largest change per link {worst}, tolerance "
                 f"atol={self.iterate_atol} rtol={self.iterate_rtol}"
             )
-        if not needs_adjoint and torch.is_grad_enabled():
+        if (not needs_adjoint and torch.is_grad_enabled()
+                and any_requires_grad(self, start, drivers)):
             # Pass 1 saw nothing differentiable, but it ran from the START interface: a
             # closure that takes a parameter-dependent branch only once the coupled values
             # have moved would have the returned state silently detached. Ask again, once,
             # under grad at the certified interface `values` -- the point whose derivative is
-            # returned -- and drop that pass's output and graph.
+            # returned -- and drop that pass's output and graph. Skipped when no tensor
+            # requiring grad is reachable from the models or their inputs at all
+            # (`any_requires_grad`): no pass can then produce a dependency.
             with torch.enable_grad():
                 probe, _, _ = self._one_pass(start, drivers, dt, values, t)
                 needs_adjoint = any(
