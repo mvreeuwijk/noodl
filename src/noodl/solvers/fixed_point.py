@@ -369,8 +369,7 @@ def differentiate_fixed_point(
         return list(outputs)
     if not torch.is_grad_enabled() or not any(o.requires_grad for o in outputs):
         # `any(o.requires_grad for o in outputs)` is False on this branch whenever grad is
-        # enabled, so no `o` here ever has `requires_grad=True` -- the `.detach()` arm of the
-        # old `[o.detach() if o.requires_grad else o for o in outputs]` was dead.
+        # enabled, so no `o` here has `requires_grad=True` and no `.detach()` is needed.
         return list(outputs)
     effective_batch_shape: tuple[int, ...] | None = None
     if batch_shape is not None:

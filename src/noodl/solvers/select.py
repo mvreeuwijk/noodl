@@ -27,25 +27,14 @@ per-instance Python loop has lost to PCG's batched arithmetic). Every one of tho
 FALL-BACK to pcg when it fails, never a refusal: `auto` is a promise to choose a backend that
 works.
 
-WHY sparse-direct is the certified-SPD default (selected on evidence, per platform; the
-platform here is CPU + SciPy). Measured in process on the reference composed
-model -- 1028 unknowns, ~5300 nonzeros, float64, 14 threads -- median of 3 warm runs via
-`benchmarks.profile_forward --compare-solvers`:
-
-  forward  ensemble 1     pcg 128.4 ms    sparse_direct   28.0 ms    4.59x faster
-  forward  ensemble 100   pcg 2399 ms     sparse_direct   2182 ms    1.10x (a tie: repeated,
-                                                                     interleaved, pcg ranged
-                                                                     2068-2434 ms against
-                                                                     2113-2182 ms)
-  forward  ensemble 1000  pcg 29489 ms    sparse_direct   19263 ms   1.53x faster
-  backward ensemble 1     pcg  44.9 ms    sparse_direct   13.8 ms    3.25x faster
-  backward ensemble 100   pcg 1741 ms     sparse_direct    476 ms    3.66x faster
-
-PCG needed 168-180 iterations per Newton step at this conditioning; the factorisation needs
-one. The per-instance Python loop is its real cost (see `_sparse_direct`), which is why the
-ensemble-100 forward is only a tie, why the rule DOES carry an ensemble threshold
-(`_SPARSE_DIRECT_MAX_BATCH`, measured below) and why a batched vendor backend stays
-admissible: it would replace the loop, not the algorithm.
+WHY sparse-direct is the certified-SPD default: it was selected on evidence, per platform
+(CPU + SciPy). On the reference composed model (1028 unknowns) PCG needs 168-180 iterations
+per Newton step where the factorisation needs one, and sparse-direct is 1.1x to 4.6x faster
+forward and 3.3x to 3.7x faster backward. The per-instance Python loop is its real cost (see
+`_sparse_direct`), which is why the rule DOES carry an ensemble threshold
+(`_SPARSE_DIRECT_MAX_BATCH`) and why a batched vendor backend stays admissible: it would
+replace the loop, not the algorithm. Measurements and how to reproduce them:
+see docs/design/solvers.md#sparse-direct-versus-pcg.
 """
 
 from __future__ import annotations
@@ -65,22 +54,11 @@ Tensor = torch.Tensor
 #
 # WHY THERE IS A THRESHOLD AT ALL. `_sparse_direct` factorises instance by instance in a
 # PYTHON LOOP (SuperLU has no batched entry point), so its cost is linear in the ensemble
-# size at ~21 ms/instance on the reference model; PCG's cost is sub-linear, because its
-# arithmetic is batched torch. The two therefore cross. Measured in process on the reference
-# composed model -- 1028 unknowns, float64, 14 threads, median of 3, forward solve -- as the
-# ratio sparse_direct/cg (below 1.0 sparse-direct wins):
-#
-#   batch      1      2      4      8     16     32     64
-#   ratio   0.24   0.14   0.26   0.30   0.54   0.68   1.00
-#
-# and in the child-process acceptance gate (`benchmarks/composed_scaling_report.json`, whole
-# forward pass) cg is already AHEAD of an unthresholded auto at ensemble 100 (1.593 s vs
-# 1.686 s), 100x24 (39.4 s vs 48.5 s) and 1000 (12.9 s vs 15.2 s), while auto wins 2.2x at
-# ensemble 1 (0.097 s vs 0.210 s). 32 is the last measured point at which the factorisation
-# is still clearly ahead (0.68) and 64 is the tie; the whole 32-64 band is within 1.0-1.5x,
-# so the cost of choosing 32 rather than 64 is small either way. Like the rest of this rule
-# (selected on evidence, per platform) it is a CPU + SciPy measurement at
-# one problem size, and is the thing to re-measure when either changes.
+# size; PCG's cost is sub-linear, because its arithmetic is batched torch. The two therefore
+# cross. 32 is the last measured batch at which the factorisation is clearly ahead and 64 is
+# the tie; the whole 32-64 band is within 1.0-1.5x, so choosing 32 rather than 64 costs
+# little. It is a CPU + SciPy measurement at one problem size, and is the thing to re-measure
+# when either changes. Data: see docs/design/solvers.md#the-ensemble-threshold.
 _SPARSE_DIRECT_MAX_BATCH = 32
 
 # Set once, the first time `auto` falls back to PCG for the ONE reason that is an environment
@@ -88,7 +66,7 @@ _SPARSE_DIRECT_MAX_BATCH = 32
 # batch was within the threshold, the solve was grad-safe, and SciPy -- the `noodl-physics[sparse]`
 # extra -- was the only thing missing. Warning on EVERY such solve would be unusable noise on
 # a machine that simply has not installed the extra, and PCG is a correct answer; warning
-# never at all leaves a user silently on the 4.6x-slower path with `diagnostics["backend"]`
+# never at all leaves a user silently on the slower path with `diagnostics["backend"]`
 # as the only signal. Once per process is the compromise. It is module state rather than a
 # `warnings`-module filter because `warnings.warn`'s own "once" registry is keyed on the
 # message and can be reset out from under us by `catch_warnings`.
@@ -120,8 +98,8 @@ def _direct(A: Tensor, b: Tensor) -> SolveResult:
     """LU solve of the assembled operator with PER-INSTANCE singularity status.
 
     torch.linalg.solve raises for the whole batch if any one instance is singular, which is
-    the very behaviour an earlier Newton implementation had to work around with an identity
-    substitution. lu_factor_ex reports singularity per instance through `info` instead.
+    a failure that cannot be attributed to an instance. lu_factor_ex reports singularity per
+    instance through `info` instead, so no identity substitution is needed.
 
     `converged` HERE MAKES NO RESIDUAL CLAIM: it is `finite & ~singular`, so a factorisation
     that returns a finite answer is reported CONVERGED whatever its residual, and `residual`
@@ -177,8 +155,8 @@ def _auto_sparse_triplet(op, b: Tensor):
     return None and leaves `solve` on the Krylov path it had before:
 
     1. the flat batch exceeds `_SPARSE_DIRECT_MAX_BATCH` -- a PERFORMANCE fall-back rather
-       than a capability one (sparse-direct would answer correctly, just slower), measured
-       and justified at that constant. It is checked first because it is the cheapest of the
+       than a capability one (sparse-direct would answer correctly, just slower), justified
+       at that constant. It is checked first because it is the cheapest of the
        five and, unlike the others, it is a property of this call rather than of the
        environment;
     2. the operator does not declare `assemble_sparse` (the member is OPTIONAL);

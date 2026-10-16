@@ -12,7 +12,7 @@ def solve(A: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
         return torch.linalg.solve(A, b)
     except (RuntimeError, torch._C._LinAlgError) as exc:
         # Re-solve each batch element on its own to find which one(s) triggered the
-        # failure above. A determinant-threshold heuristic was tried first but is
+        # failure above. A determinant-threshold heuristic is
         # dtype-unsafe: comparing against a fixed constant like 1e-300 silently
         # underflows to 0.0 when A is float32 (this project's default; float64 is
         # avoided elsewhere in the package as too costly on GPU), so `det < 1e-300`
