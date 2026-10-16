@@ -294,10 +294,6 @@ def test_closure_spec_reads_every_attribute_in_the_table():
             attr.name
 
 
-@pytest.mark.xfail(
-    reason="until the remaining S01 adopters (sewer network.py, building outputs.py) read "
-           "declarations through closure_spec",
-    strict=False)
 def test_no_code_outside_contracts_reads_a_closure_attribute_directly():
     root = Path(contracts.__file__).parent
     names = "|".join(a.name for a in CLOSURE_ATTRIBUTES)

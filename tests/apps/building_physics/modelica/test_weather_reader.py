@@ -390,7 +390,7 @@ def test_a_refusal_at_the_boundary_rates_stencil_is_raised(tmp_path, monkeypatch
 
 
 def _warnings(report):
-    return [i for i in report.issues if i.severity == "warning"]
+    return [i for i in report.issues if i.level == "warning"]
 
 
 def test_time_varying_boundaries_leave_model_check_clean(tmp_path):
