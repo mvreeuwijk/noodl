@@ -79,8 +79,8 @@ def _clip(x: Tensor, low, high) -> Tensor:
     """`x` clipped to `[low, high]`, the bounds floats or tensors. A bound replaces `x` only
     where `x` is strictly beyond it, so at the corner (`x` equal to a bound) the output is
     `x` itself: d/dx = 1 and the bound gets no gradient, whichever type it is
-    (`torch.clamp` gives d/dx = 0 there for a float bound and splits the gradient in
-    halves for a tensor one)."""
+    (`torch.clamp`'s gradient there depends on the torch version: d/dx = 1 in torch 2.2,
+    0 in current versions for a float bound, and split in halves for a tensor one)."""
     low, high = _f64(low), _f64(high)
     y = torch.where(x < low, low, x)
     return torch.where(y > high, high, y)
