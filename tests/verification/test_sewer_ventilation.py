@@ -7,7 +7,7 @@ from noodl.apps.sewer import geometry as g
 from noodl.apps.sewer.air import RHO_AIR_REF, Drag, Headspace
 from noodl.elements.fixed import FixedFlow
 from noodl.elements.powerlaw import Orifice
-from noodl.layers.potential import PotentialFlowLayer
+from noodl.layers.kirchhoff import KirchhoffLayer
 from noodl.topology import Network
 
 F64 = torch.float64
@@ -20,7 +20,7 @@ def _open_reach(diameter, length, h_over_d, v_w):
     net.add_edge("A1", "M", kind="headspace")
     net.add_edge("M", "A2", kind="headspace")
     half = torch.tensor([length / 2.0] * 2, dtype=F64)
-    layer = PotentialFlowLayer(
+    layer = KirchhoffLayer(
         net, "air", [Headspace(half, torch.tensor([0, 1]))],
         drives=[Drag(half, torch.tensor([0, 1]))], boundary=["A1", "A2"],
         linear_solver="direct",
@@ -50,7 +50,7 @@ def _vented_reach(diameter, length, h_over_d, v_w, leak_area, fan=None):
     if fan is not None:
         net.add_edge("M2", "ambient", kind="fan")
         elements.append(FixedFlow(torch.tensor([fan], dtype=F64), kind="fan"))
-    layer = PotentialFlowLayer(
+    layer = KirchhoffLayer(
         net, "air", elements,
         drives=[Drag(torch.tensor([length], dtype=F64), torch.tensor([0]))],
         boundary=["ambient"], linear_solver="direct",
@@ -115,7 +115,7 @@ def test_transfer_dominated_steady_state_is_henry_equilibrium():
     as leak/outfall losses shrink relative to the two-film transfer rate -- exactly the
     caveat this test anticipates. The single CLOSED manhole model here has zero flow
     on both `water`/`air` kinds (no boundary exchange at all, `"...q"` supplied as zero
-    drivers rather than solved by a potential layer), so the only thing that can happen is
+    drivers rather than solved by a Kirchhoff layer), so the only thing that can happen is
     mass moving between the two phases until the two-film flux itself is zero -- which is
     exactly the Henry partition `C_G = H f C_S (M_H2S / M_S)` this test is about.
 

@@ -1,6 +1,6 @@
-"""Typed branch constitutive laws: the Element base class and the built-in laws.
+"""Typed branch constitutive laws: the ConstitutiveLaw base class and the built-in laws.
 
-Elements are named for the physics they express. Where a law is a transcription of a specific
+Laws are named for the physics they express. Where a law is a transcription of a specific
 tool's equations, the class docstring says so (for example ``RegularizedPowerLaw``,
 ``SplineFlowTable`` and the door elements follow the Modelica Buildings Library, and
 ``PowerLaw``/``Quadratic``/``Duct``/``FanCurve`` follow CONTAM's element library). The
@@ -8,7 +8,7 @@ pre-rename ``MBL*``/``mbl_*`` names remain importable as aliases.
 """
 
 from noodl.elements.air_duct import AirDuct, DuctTerminal, air_viscosity
-from noodl.elements.base import Element
+from noodl.elements.base import ConstitutiveLaw, ImplicitLaw, LawContext
 from noodl.elements.conductance import Conductance
 from noodl.elements.curve import CubicSplineFlow, SplineCurve
 from noodl.elements.damper import Damper
@@ -70,11 +70,13 @@ __all__ = [
     "DoorCompartmentHead",
     "DoorPortStream",
     "Duct",
+    "ConstitutiveLaw",
     "DuctTerminal",
-    "Element",
     "FanCurve",
     "FixedFlow",
     "FixedVolumeFlow",
+    "ImplicitLaw",
+    "LawContext",
     "OpenDoor",
     "OperableDoor",
     "OperableDoorCompartment",

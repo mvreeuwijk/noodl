@@ -18,7 +18,7 @@ from noodl.apps.building_physics import (
     build_model,
     initial_drivers,
     initial_state,
-    orifice_elements_from_edges,
+    orifice_law_from_edges,
 )
 from noodl.drives import Stack
 from noodl.topology import Network
@@ -95,7 +95,7 @@ def _house(fo=0.3, supply=0.1, plenum_volume=0.0, *, balanced=True, free=None,
     plenums = air_handler_plenums(net, "air_handler")
     if free is None:
         free = plenums if plenum_volume == 0.0 else ()
-    model = build_model(net, air_elements=[orifice_elements_from_edges(net, "airpath"),
+    model = build_model(net, air_laws=[orifice_law_from_edges(net, "airpath"),
                                            element],
                         drives=[Stack.from_network(net, "airpath")], thermal=thermal,
                         species=1, closures=[closure],
@@ -176,7 +176,7 @@ def test_zero_volume_plenums_carry_heat_algebraically():
                     outdoor_air_fraction=0.3)
     element, closure = air_handler_from_edges(net, "air_handler")
     plenums = air_handler_plenums(net, "air_handler")
-    model = build_model(net, air_elements=[orifice_elements_from_edges(net, "airpath"),
+    model = build_model(net, air_laws=[orifice_law_from_edges(net, "airpath"),
                                            element],
                         drives=[Stack.from_network(net, "airpath")], closures=[closure],
                         flow_balanced=plenums, storage_free=plenums)
@@ -251,7 +251,7 @@ def test_a_pressure_dependent_edge_on_a_flow_balanced_plenum_is_refused():
     plenums = air_handler_plenums(net, "air_handler")
     with pytest.raises(ValueError, match=r"flow_balanced node 'ahs_supply' is an end of the "
                                          r"edge 'room' -> 'ahs_supply' of kind 'airpath'"):
-        build_model(net, air_elements=[orifice_elements_from_edges(net, "airpath"), element],
+        build_model(net, air_laws=[orifice_law_from_edges(net, "airpath"), element],
                     drives=[Stack.from_network(net, "airpath")], thermal=False, species=1,
                     closures=[closure], flow_balanced=plenums, storage_free=plenums)
 
@@ -272,7 +272,7 @@ def test_a_fixed_flow_on_a_flow_balanced_plenum_is_refused():
     with pytest.raises(ValueError, match=r"flow_balanced node 'ahs_supply' is an end of the "
                                          r"edge 'ambient' -> 'ahs_supply' of kind 'fan'.*"
                                          r"FixedFlow"):
-        build_model(net, air_elements=[orifice_elements_from_edges(net, "airpath"),
+        build_model(net, air_laws=[orifice_law_from_edges(net, "airpath"),
                                        FixedFlow(torch.tensor(0.01, dtype=F64), kind="fan"),
                                        element],
                     drives=[Stack.from_network(net, "airpath")], thermal=False, species=1,

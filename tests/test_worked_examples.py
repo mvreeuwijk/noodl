@@ -2,10 +2,11 @@
 
 ``tests/golden/worked_examples.json`` holds numeric results for three worked examples -- a
 quadratic-drag loop, a spring-mass-damper stepped implicitly, and a three-zone contaminant
-exchange -- computed independently of this codebase. Each test here reproduces one of the
-examples with today's public layer API and checks the result against the captured reference,
-not against a value re-derived from today's code -- that is what makes this a PARITY test
-rather than an ordinary regression test.
+exchange -- computed independently of this codebase. This module reproduces two of them (the
+loop and the exchange) with today's public layer API; the spring-mass-damper, a dynamic law,
+lives in ``tests/layers/test_mna_dynamic.py`` beside the loop's Jacobians. Each test checks the
+result against the captured reference, not against a value re-derived from today's code --
+that is what makes this a PARITY test rather than an ordinary regression test.
 """
 
 import json
@@ -14,8 +15,7 @@ from pathlib import Path
 import torch
 
 from noodl.elements.quadratic import Quadratic
-from noodl.layers.constitutive import ConstitutiveLayer
-from noodl.layers.potential import PotentialFlowLayer
+from noodl.layers.kirchhoff import KirchhoffLayer
 from noodl.layers.transport import TransportLayer
 from noodl.topology import Network
 
@@ -96,7 +96,7 @@ def test_quadratic_loop_matches_the_series_resistance_solution():
     one series quadratic resistor of coefficient a1 + a2 (their potential drops add:
     (a1 + a2) |q| q = a1 |q1| q1 + a2 |q2| q2 when q1 == q2 == q). This is reproduced here as
     the SERIES-REDUCED form of the worked example -- same physics, one branch -- rather than
-    the full three-edge mesh, which ``PotentialFlowLayer`` (a nodal-potential solver, not a
+    the full three-edge mesh, which ``KirchhoffLayer`` (a nodal-potential solver, not a
     mesh-current one) would otherwise need a third, purely-topological node for.
 
     Network: two nodes, both boundary (``n0`` at the prescribed drive a0, ``n1`` at 0), one
@@ -110,7 +110,7 @@ def test_quadratic_loop_matches_the_series_resistance_solution():
     With both endpoints boundary there is no interior unknown at all (the network is fully
     determined by the two prescribed potentials), so this drives ``layer.dp``/``layer.flows``
     directly instead of ``layer.solve`` -- there is nothing for Newton to solve, and
-    ``PotentialFlowLayer.solve``'s own docs note ``phi0`` (and hence ``linear_init``, which
+    ``KirchhoffLayer.solve``'s own docs note ``phi0`` (and hence ``linear_init``, which
     divides by the element's linear coefficient a and would divide by zero here) is only ever
     a starting guess, never required. Differentiating d|q|/da0 through ``layer.flows`` is
     therefore ordinary reverse-mode autograd on the assembled potential, not the implicit
@@ -126,7 +126,7 @@ def test_quadratic_loop_matches_the_series_resistance_solution():
     element = Quadratic(
         a=torch.tensor(0.0, dtype=F64), b=torch.tensor(a1_plus_a2, dtype=F64), kind="pipe"
     )
-    layer = PotentialFlowLayer(net, "loop", [element], boundary=["n0", "n1"])
+    layer = KirchhoffLayer(net, "loop", [element], boundary=["n0", "n1"])
     assert layer.interior.numel() == 0  # fully determined by the two boundary potentials
 
     a0 = torch.tensor(1.0, dtype=F64, requires_grad=True)
@@ -147,51 +147,4 @@ def test_quadratic_loop_matches_the_series_resistance_solution():
     )
     torch.testing.assert_close(
         dq_da0.item(), want_dq_da0, rtol=1e-6, atol=0.0,
-    )
-
-
-def test_spring_mass_damper_matches_the_worked_example():
-    """The spring-mass-damper worked example (``GOLD["spring_mass_damper_displacement"]``):
-    a single mesh (edges (0, 1), (1, 2), (2, 0), kind "pipe") carrying an inductor, a
-    resistor and a capacitor, stepped implicitly (``ConstitutiveLayer``).
-
-    ``theta = [L, R, C, q0_prev, p2_prev, dt]``; the worked example's own branch law does
-    not use ``L`` explicitly, folding ``dt / L = dt`` into the inductor term since ``L = 1``
-    for this example.
-    """
-    net = Network(dtype=F64)
-    net.add_node(0)
-    net.add_node(1)
-    net.add_node(2)
-    net.add_edge(0, 1, kind="pipe")
-    net.add_edge(1, 2, kind="pipe")
-    net.add_edge(2, 0, kind="pipe")
-
-    def spring_mass_damper(p, q, theta):
-        _l, r, _c, q0_prev, p2_prev, dt = theta
-        return torch.stack(
-            [
-                q[0] - q0_prev - dt * p[0],
-                p[1] - r * q[1],
-                p[2] - p2_prev - dt * q[2],
-            ]
-        )
-
-    layer = ConstitutiveLayer(net, "smd", kind="pipe", law=spring_mass_damper)
-
-    theta = torch.tensor([1.0, 0.2, 1.0, 0.0, 1.0, 0.2], dtype=F64)
-    displacement = [1.0]  # p2(t0) / C, prepended -- the worked example's own initial xs = [p2/C]
-    z0 = None
-    for _ in range(50):
-        p, q = layer.solve(theta, z0=z0)
-        theta = torch.stack([theta[0], theta[1], theta[2], q[0], p[2], theta[5]])
-        displacement.append((p[2] / theta[2]).item())
-
-    want = GOLD["spring_mass_damper_displacement"]
-    assert len(displacement) == len(want) == 51
-    torch.testing.assert_close(
-        torch.tensor(displacement, dtype=F64),
-        torch.tensor(want, dtype=F64),
-        rtol=1e-8,
-        atol=0.0,
     )

@@ -1,13 +1,13 @@
-"""Tests for the Element base class: abstract flow, autograd dflow default, linear_init."""
+"""Tests for the ConstitutiveLaw base class: abstract flow, autograd dflow default, linear_init."""
 
 import pytest
 import torch
 
-from noodl.elements.base import Element
+from noodl.elements.base import ConstitutiveLaw
 
 
-class _Linear(Element):
-    """q = k * dp, the minimal concrete Element used to test the base-class defaults."""
+class _Linear(ConstitutiveLaw):
+    """q = k * dp, the minimal concrete ConstitutiveLaw used to test the base-class defaults."""
 
     def __init__(self, k, *, learnable=False):
         super().__init__(kind="test")
@@ -17,7 +17,7 @@ class _Linear(Element):
         return self.k * dp
 
 
-class _Cubic(Element):
+class _Cubic(ConstitutiveLaw):
     """q = a * dp**3, used because its derivative is not constant."""
 
     def __init__(self, a, *, learnable=False):
@@ -34,7 +34,7 @@ def test_element_kind_is_stored():
 
 def test_abstract_flow_raises_not_implemented():
     with pytest.raises(NotImplementedError):
-        Element(kind="airpath").flow(torch.tensor([1.0]))
+        ConstitutiveLaw(kind="airpath").flow(torch.tensor([1.0]))
 
 
 def test_dflow_default_matches_known_derivative_of_linear_element():
@@ -94,7 +94,7 @@ def test_param_learnable_true_yields_a_registered_parameter_even_for_a_grad_trac
     assert "k" in el.state_dict()
 
 
-class _ConstantIgnoringDp(Element):
+class _ConstantIgnoringDp(ConstitutiveLaw):
     """Buggy element: flow does not depend on dp at all (no learnable state either), so
     the returned tensor never requires grad."""
 
@@ -107,8 +107,8 @@ class _ConstantIgnoringDp(Element):
 
 
 def test_dflow_default_raises_a_clear_error_naming_the_element_when_flow_ignores_dp():
-    # Same hazard as `_dflows_functional`'s guard, one call earlier: `Element.linear_init`'s
-    # default reaches this default `dflow` (via `PotentialFlowLayer.linear_init`, called
+    # Same hazard as `_dflows_functional`'s guard, one call earlier: `ConstitutiveLaw.linear_init`'s
+    # default reaches this default `dflow` (via `KirchhoffLayer.linear_init`, called
     # before every solve()), and a `flow()` that silently drops the autograd graph must
     # raise a clear, element-naming error here too rather than a raw, unattributed one.
     el = _ConstantIgnoringDp(torch.tensor(1.0))
@@ -116,7 +116,7 @@ def test_dflow_default_raises_a_clear_error_naming_the_element_when_flow_ignores
         el.dflow(torch.tensor([0.0, 1.0]))
 
 
-class _DetachedButLearnable(Element):
+class _DetachedButLearnable(ConstitutiveLaw):
     """Buggy element: flow requires grad (through its own learnable parameter `k`), but
     never actually uses its dp input, so autograd.grad(flow.sum(), dp) raises "not used in
     the graph" rather than "does not require grad"."""
@@ -148,7 +148,7 @@ def test_forward_delegates_to_the_subclass_flow_override_not_the_base_class():
     torch.testing.assert_close(el(dp), el.flow(dp))
     torch.testing.assert_close(el.forward(dp), el.flow(dp))
     with pytest.raises(NotImplementedError):
-        Element(kind="airpath").forward(torch.tensor([1.0]))
+        ConstitutiveLaw(kind="airpath").forward(torch.tensor([1.0]))
 
 
 def test_a_smooth_element_has_no_switching_values():

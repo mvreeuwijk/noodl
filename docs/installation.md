@@ -48,7 +48,7 @@ pip install "noodl-physics[dev]"           # everything needed to run the test s
 `method="auto"`, prefers the SciPy SuperLU backend for a certified-SPD operator at a batch of
 at most 32 instances. Without SciPy installed, that path silently never fires and every such
 solve falls back to preconditioned conjugate gradients — correct, but measured at roughly 4.6x
-slower at ensemble size 1. It remains optional rather than mandatory because the evidence for
+slower at ensemble size 1. A layer solved by Modified Nodal Analysis (a circuit) factorises with SuperLU at any batch size and, without SciPy, with batched dense LU, which grows quickly in time and memory with the circuit size. It remains optional rather than mandatory because the evidence for
 that default is one platform at one problem size, and PCG is a complete answer on its own. If
 you care about single-instance solve latency, install it.
 

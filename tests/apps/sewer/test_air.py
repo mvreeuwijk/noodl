@@ -12,7 +12,7 @@ from noodl.apps.sewer.air import (
     Headspace,
     air_density,
 )
-from noodl.layers.potential import PotentialFlowLayer
+from noodl.layers.kirchhoff import KirchhoffLayer
 from noodl.topology import Network
 
 F64 = torch.float64
@@ -150,7 +150,7 @@ def test_pescod_and_price_air_to_water_velocity_ratio(h_over_d, v_w, measured):
     net.add_edge("A1", "M", kind="headspace")
     net.add_edge("M", "A2", kind="headspace")
     half = torch.tensor([7.5, 7.5], dtype=F64)
-    layer = PotentialFlowLayer(
+    layer = KirchhoffLayer(
         net, "air", [Headspace(half, torch.tensor([0, 1]))],
         drives=[Drag(half, torch.tensor([0, 1]))], boundary=["A1", "A2"],
         linear_solver="direct",

@@ -14,7 +14,7 @@ import torch
 
 from noodl.drives import ConstantDrive
 from noodl.elements.powerlaw import PowerLaw
-from noodl.layers.potential import PotentialFlowLayer
+from noodl.layers.kirchhoff import KirchhoffLayer
 from noodl.solvers.newton import newton
 from noodl.topology import Network
 
@@ -51,7 +51,7 @@ def build_layer(n_nodes: int, batch: int, seed: int, device: torch.device):
     n = torch.full((batch, b), 0.65, dtype=DTYPE, device=device)
     element = PowerLaw(C, n, dp_transition=1e-6)
     drive = ConstantDrive(kind="airpath", key="wind")
-    layer = PotentialFlowLayer(net, "scaling", [element], [drive], boundary=["ambient"])
+    layer = KirchhoffLayer(net, "scaling", [element], [drive], boundary=["ambient"])
     wind = (5.0 * torch.rand(batch, b, generator=gen)).to(device=device, dtype=DTYPE)
     drivers = {"wind": wind}
     phi_boundary = torch.zeros(batch, 1, dtype=DTYPE, device=device)

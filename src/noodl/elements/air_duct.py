@@ -13,7 +13,7 @@ from collections.abc import Mapping
 
 import torch
 
-from noodl.elements.base import Element
+from noodl.elements.base import ConstitutiveLaw
 from noodl.solvers.scalar import solve_monotone
 
 Tensor = torch.Tensor
@@ -128,7 +128,7 @@ def _f64(value):
     return torch.as_tensor(value, dtype=torch.float64)
 
 
-class _UpstreamAir(Element):
+class _UpstreamAir(ConstitutiveLaw):
     """Shared by the duct laws: per-edge upstream density and viscosity from the drivers."""
 
     def _set_endpoints(self, src, tgt, rho_key: str, temperature_key: str | None) -> None:

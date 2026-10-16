@@ -104,7 +104,7 @@ def test_network_edges_follow_the_paths_with_ambient_as_minus_one():
 
 def test_element_coefficients_follow_contam_conventions():
     p = read_prj(THREE)
-    (el,) = p.elements
+    (el,) = p.laws
     # `plr_orfc` is the sqrt(rho) CONTAM family: the reader must build the UPSTREAM-density
     # correction, not a plain `PowerLaw` (which `UpstreamDensityPowerLaw` satisfies too, so
     # `isinstance(el, PowerLaw)` alone would not catch a revert to the uncorrected element).
@@ -128,7 +128,7 @@ def test_a_mass_flow_family_kind_gets_exponent_zero(tmp_path):
     text = THREE.read_text()
     variant = _variant(text, "3 23 plr_orfc orfcPt01", "3 23 plr_fcn orfcPt01", tmp_path)
     p = read_prj(variant)
-    (el,) = p.elements
+    (el,) = p.laws
     assert isinstance(el, UpstreamDensityPowerLaw)
     torch.testing.assert_close(el.m, torch.full((4,), 0.0, dtype=F64))
 
@@ -139,7 +139,7 @@ def test_a_volumetric_family_kind_gets_exponent_one(tmp_path):
     text = THREE.read_text()
     variant = _variant(text, "3 23 plr_orfc orfcPt01", "3 23 plr_qcn orfcPt01", tmp_path)
     p = read_prj(variant)
-    (el,) = p.elements
+    (el,) = p.laws
     assert isinstance(el, UpstreamDensityPowerLaw)
     torch.testing.assert_close(el.m, torch.full((4,), 1.0, dtype=F64))
 
@@ -149,7 +149,7 @@ def test_the_reader_builds_a_float64_application():
     p = read_prj(THREE)
     assert p.net.dtype is F64
     assert p.T_zone.dtype is F64 and p.zone_volumes.dtype is F64 and p.x0.dtype is F64
-    (el,) = p.elements
+    (el,) = p.laws
     assert el.C.dtype is F64 and el.n.dtype is F64
     assert p.profiles[2].angles.dtype is F64
 
@@ -175,7 +175,7 @@ def test_project_to_model_solves_the_wind_driven_case_and_conserves_species():
 
 def test_reads_the_hand_written_doorway_damper_fan_project():
     p = read_prj(MIXED)
-    kinds = {el.kind: el for el in p.elements}
+    kinds = {el.kind: el for el in p.laws}
     # Two DIFFERENT power-law kinds from this one file: a single-edge orifice (`pl_2`, from
     # `plr_orfc`) and a two-edge doorway (`door_3`, from `dor_pl2`). `isinstance(el, PowerLaw)`
     # alone would not catch a revert to the uncorrected element, since
@@ -197,7 +197,7 @@ def test_reads_the_hand_written_doorway_damper_fan_project():
     assert isinstance(kinds["bd_4"], Damper)
     assert kinds["bd_4"].pos.C.item() == pytest.approx(0.02)
     assert kinds["bd_4"].neg.n.item() == pytest.approx(0.65)
-    fans = [el for el in p.elements if isinstance(el, FixedFlow)]
+    fans = [el for el in p.laws if isinstance(el, FixedFlow)]
     assert len(fans) <= 1
 
 
@@ -211,7 +211,7 @@ def test_a_doorway_reads_ht_wd_and_cd_from_fields_4_5_and_6():
     under swapping `wd` and `cd`.
     """
     p = read_prj(MIXED)
-    (door,) = [el for el in p.elements if el.kind == "door_5"]
+    (door,) = [el for el in p.laws if el.kind == "door_5"]
     ht, wd, cd, turb, rho = 2.0, 0.9, 1.0, 2.54558, 1.2041
 
     # field 4 (ht): dor_door derives its half-separation as 2 ht / 9, nothing else.
@@ -261,19 +261,19 @@ def test_the_round_trip_keeps_levels_zone_numbers_and_sources():
     assert src.params == pytest.approx([0.0001, 0.0, 5.0, 0.0])
     assert src.mult == pytest.approx(1.0)
     # Every duct section of this project is PRESENT and empty; a project like that loads.
-    assert "duct" not in {el.kind for el in p.elements}
+    assert "duct" not in {el.kind for el in p.laws}
 
 
 def test_path_flows_index_q_in_the_layers_kind_block_layout():
     """`q` is laid out in element-KIND blocks, not in path order.
 
     `doorway_damper_fan.prj` has five kinds. Network edge order is path order --
-    pl_2, pl_2, door_3, door_3, bd_4, fan_1, door_5, door_5 -- but `PotentialFlowLayer`
-    concatenates per element, in `project.elements` order, so the two layouts differ.
+    pl_2, pl_2, door_3, door_3, bd_4, fan_1, door_5, door_5 -- but `KirchhoffLayer`
+    concatenates per element, in `project.laws` order, so the two layouts differ.
     """
     p = read_prj(MIXED)
     offsets, offset = {}, 0
-    for el in p.elements:
+    for el in p.laws:
         offsets[el.kind] = offset
         offset += p.net.edge_index(el.kind).numel()
     assert offset == p.net.b == 8
@@ -751,7 +751,7 @@ def _three_with_path_schedule(tmp_path) -> Path:
 
 def test_a_path_schedule_wraps_the_kind_in_scaled_and_writes_its_edge(tmp_path):
     p = read_prj(_three_with_path_schedule(tmp_path))
-    (el,) = [e for e in p.elements if e.kind == "pl_3"]
+    (el,) = [e for e in p.laws if e.kind == "pl_3"]
     assert isinstance(el, Scaled) and el.key == "flow_multiplier.pl_3"
     assert p.multiplier_edges == {"pl_3": 4}
     (inp,) = p.inputs
@@ -781,7 +781,7 @@ def test_a_scheduled_fixed_flow_fan_gets_no_stack_drive(tmp_path):
     text = MIXED.read_text().replace(_NO_SCHEDULES, _HALF_SCHEDULE, 1)
     path5 = "   5    0   1  -1   1   0   0   0   0   0   1"
     p = read_prj(_variant(text, path5, "   5    0   1  -1   1   0   0   0   1   0   1", tmp_path))
-    (fan,) = [e for e in p.elements if e.kind == "fan_1"]
+    (fan,) = [e for e in p.laws if e.kind == "fan_1"]
     assert isinstance(fan, Scaled) and isinstance(fan.inner, FixedFlow)
     assert "fan_1" not in [d.kind for d in p.drives]
 
@@ -1291,7 +1291,7 @@ FAN_CURVE = DATA / "fan_curve_three_zone.prj"
 
 def test_a_fan_curve_path_is_an_affinity_fan_on_its_speed_schedule():
     p = read_prj(FAN_CURVE)
-    (fan,) = [e for e in p.elements if isinstance(e, AffinityFan)]
+    (fan,) = [e for e in p.laws if isinstance(e, AffinityFan)]
     assert fan.kind == "fan_4" and fan.rho_ref == pytest.approx(1.2041)
     assert fan.off == pytest.approx(0.1) and fan.multiplier.tolist() == [1.5]
     assert fan.speed_key == "fan_speed.fan_4" and fan.shutoff is not None
@@ -1309,7 +1309,7 @@ def test_an_unscheduled_fan_curve_runs_at_its_rated_speed(tmp_path):
     text = FAN_CURVE.read_text()
     p5 = "   5    0   3  -1   4   0   0   0   1   0   1"
     p = read_prj(_variant(text, p5, "   5    0   3  -1   4   0   0   0   0   0   1", tmp_path))
-    (fan,) = [e for e in p.elements if isinstance(e, AffinityFan)]
+    (fan,) = [e for e in p.laws if isinstance(e, AffinityFan)]
     assert fan.speed_key is None and p.speed_edges == {}
 
 
@@ -1335,7 +1335,7 @@ SPLINES = DATA / "spline_three_zone.prj"
 
 def test_the_four_spline_elements_are_read():
     p = read_prj(SPLINES)
-    forms = {e.kind: (e.independent, e.volume) for e in p.elements
+    forms = {e.kind: (e.independent, e.volume) for e in p.laws
              if isinstance(e, CubicSplineFlow)}
     assert forms == {"sp_4": ("pressure", False), "sp_5": ("pressure", True),
                      "sp_6": ("flow", False), "sp_7": ("flow", True)}
@@ -1382,7 +1382,7 @@ def test_junctions_become_nodes_with_contamx_s_volumes():
 
 def test_segments_and_terminals_become_their_elements():
     p = read_prj(DUCTS)
-    by_kind = {e.kind: e for e in p.elements}
+    by_kind = {e.kind: e for e in p.laws}
     assert isinstance(by_kind["duct_1"], AirDuct)
     assert by_kind["duct_1"].length.tolist() == [4.0, 0.7]
     assert by_kind["duct_1"].loss.tolist() == [0.0, 0.5]
@@ -1481,7 +1481,7 @@ def test_a_steady_solve_with_an_idle_junction_without_volume_is_refused_by_name(
         ("  7  0   8   9   6   0   0   0   4 6 ", "  7  0   8   9   6   0   0   0   4 0 "),
     ], tmp_path))
     model, state, drivers = project_to_model(p)
-    (fan,) = [el for el in model.potential["air"]._elements if isinstance(el, FixedVolumeFlow)]
+    (fan,) = [el for el in model.kirchhoff["air"]._laws if isinstance(el, FixedVolumeFlow)]
     with torch.no_grad():
         fan.volume_flow.zero_()
     with pytest.raises(ValueError, match=r"TransportLayer 'species' steady: nothing passes "
@@ -1532,7 +1532,7 @@ def test_every_duct_element_type_builds_its_element(dtype, data, tmp_path):
         variants.append(("  5  0   4   6   4   0   0   0   4 5",
                          "  5  0   4   6   4   0   1   0   4 5"))
     p = read_prj(_variants(DUCTS.read_text(), variants, tmp_path))
-    el = {e.kind: e for e in p.elements}["duct_4"]
+    el = {e.kind: e for e in p.laws}["duct_4"]
     rho0 = 1.2041
     if dtype in ("dct_fcn", "dct_qcn"):
         assert isinstance(el, UpstreamDensityPowerLaw)
@@ -1587,7 +1587,7 @@ NIST_AHS = DATA / "test_GetPrjInfo.prj"
 
 def test_a_simple_ahs_becomes_plenums_prescribed_flows_and_its_closure():
     p = read_prj(AHS)
-    (element,) = [e for e in p.elements if isinstance(e, PrescribedFlow)]
+    (element,) = [e for e in p.laws if isinstance(e, PrescribedFlow)]
     assert element.kind == "ahs_1"
     (closure,) = p.closures
     assert isinstance(closure, AirHandlerFlows)
@@ -1721,7 +1721,7 @@ def test_the_plenums_carry_no_zone_air_mass_change(tmp_path):
     p = read_prj(_variant(AHS.read_text(), _DENSITY_OPTIONS,
                           "   0    0.75    20     1      0      0      1", tmp_path))
     model, state, drivers = project_to_model(p)
-    (source,) = [s for s in model.potential["air"].node_sources
+    (source,) = [s for s in model.kirchhoff["air"].node_sources
                  if isinstance(s, ZoneAirMassChange)]
     assert sorted(p.net.nodes[i] for i in source.nodes.tolist()) == ["one", "three", "two"]
 
@@ -1956,7 +1956,7 @@ def test_a_steady_uvgi_project_uses_the_transmission_at_its_own_flows():
     rho = drivers["P_ref"] / (R_AIR * drivers["T"])
     tau = closure(out, {**drivers, "rho": rho})["species.transmission"]
     layer = model.transport["species"]
-    q = model.potential["air"].flows_of_kind(out["air.q"], layer.flow_kinds)
+    q = model.kirchhoff["air"].flows_of_kind(out["air.q"], layer.flow_kinds)
     sources = torch.zeros(model.net.n, 2, dtype=F64)
     expected = layer.steady(q, sources, drivers["species.x_boundary"], transmission=tau)
     torch.testing.assert_close(out["species.x"], expected, rtol=1e-12, atol=0)

@@ -23,7 +23,7 @@ import numpy as np
 import pytest
 import torch
 
-from noodl.apps.building_physics.elements import add_large_opening, orifice_elements_from_edges
+from noodl.apps.building_physics.elements import add_large_opening, orifice_law_from_edges
 from noodl.apps.building_physics.thermal import (
     CP_AIR,
     RHO_0,
@@ -62,12 +62,12 @@ def _single_zone(*, A: float, h: float, E: float, UA: float = 0.0, cp_low: float
     net.add_edge("ambient", "z", kind="airpath", z_path=h, Cd=CD, area=A, Cp=cp_high, Ch=1.0)
     if UA > 0:
         net.add_edge("z", "ambient", kind="wall", ua=UA)
-    el = orifice_elements_from_edges(net, "airpath")
+    el = orifice_law_from_edges(net, "airpath")
     drives = [Stack.from_network(net, "airpath")]
     if cp_low or cp_high:
         drives.append(Wind.from_network(net, "airpath", ambient="ambient"))
     model = build_model(
-        net, air_elements=[el], drives=drives, density="linear",
+        net, air_laws=[el], drives=drives, density="linear",
         density_kwargs={"rho_0": RHO_0, "T_0": T_O},
         coupling=coupling, iterate_tol={"thermal": 1e-9}, iterate_max=300,
     )
@@ -93,7 +93,7 @@ def _params(A, h, E, UA=0.0, dPw=0.0):
 
 
 def _volumetric_inflow(model, ss) -> float:
-    q = model.potential["air"].flows_of_kind(ss["air.q"], "airpath")
+    q = model.kirchhoff["air"].flows_of_kind(ss["air.q"], "airpath")
     return q[0].item() / RHO_0
 
 
@@ -116,7 +116,7 @@ def test_buoyancy_only_matches_li_delsante_closed_form(record_property):
     assert dT == pytest.approx(E / (RHO_0 * CP_AIR * q), rel=1e-8)
     record_property("check", "Buoyancy-only zone vs the Li and Delsante closed form")
     record_property("tolerance", "rel 1e-6")
-    record_property("measured_rel", abs(q / q_ref - 1.0))
+    record_property("measured_rel", float(abs(q / q_ref - 1.0)))
 
 
 def test_envelope_loss_matches_the_cubic_root(record_property):
@@ -129,7 +129,7 @@ def test_envelope_loss_matches_the_cubic_root(record_property):
     assert q == pytest.approx(root, rel=1e-6)
     record_property("check", "Envelope-loss zone vs the cubic root")
     record_property("tolerance", "rel 1e-6")
-    record_property("measured_rel", abs(q / root - 1.0))
+    record_property("measured_rel", float(abs(q / root - 1.0)))
 
 
 def test_assisting_wind_matches_the_cubic_root(record_property):
@@ -147,7 +147,7 @@ def test_assisting_wind_matches_the_cubic_root(record_property):
     assert q == pytest.approx(root, rel=1e-6)
     record_property("check", "Assisting-wind zone vs the cubic root")
     record_property("tolerance", "rel 1e-6")
-    record_property("measured_rel", abs(q / root - 1.0))
+    record_property("measured_rel", float(abs(q / root - 1.0)))
 
 
 def _opposing_wind_case(coupling: str = "iterate"):
@@ -205,7 +205,7 @@ def test_opposing_wind_three_root_case_converges_per_instance_to_a_stable_root()
     diag: dict = {}
     ss = model.steady(starts, drivers, diagnostics=diag, **TIGHT)
     assert bool(diag["converged"].all()), diag
-    q = model.potential["air"].flows_of_kind(ss["air.q"], "airpath")[..., 0] / RHO_0
+    q = model.kirchhoff["air"].flows_of_kind(ss["air.q"], "airpath")[..., 0] / RHO_0
     up = _positive_real_roots([1.0, 0.0, 3.0, -2.0 * alpha**3])          # one root ~0.45
     down = _positive_real_roots([1.0, 0.0, -3.0, 2.0 * alpha**3])        # ~0.54, ~1.40
     assert up[0] == pytest.approx(0.4547, abs=2e-3)
@@ -242,7 +242,7 @@ def test_opposing_wind_multiplicity_resolves_per_instance_under_time_stepping():
     for _ in range(steps):
         state = model.step(state, drivers, dt, diagnostics=diag, **TIGHT)
     assert bool(diag["layers"]["air"]["converged"].all()), diag   # per instance, every one
-    q = model.potential["air"].flows_of_kind(state["air.q"], "airpath")[..., 0] / RHO_0
+    q = model.kirchhoff["air"].flows_of_kind(state["air.q"], "airpath")[..., 0] / RHO_0
     assert q[0].item() == pytest.approx(-down[1], rel=1e-6)       # cold: wind wins, downward
     assert q[1].item() == pytest.approx(up[0], rel=1e-6)          # hot: buoyancy wins, upward
     assert q[2].item() == pytest.approx(up[0], rel=1e-6)          # +0.5 K off the middle root
@@ -259,9 +259,9 @@ def _two_zone_doorway():
     add_large_opening(net, "A", "B", H=2.0, W=0.9, z_mid=1.0, Cd=0.78)
     net.add_edge("ambient", "B", kind="airpath", z_path=0.2, Cd=CD, area=0.05)
     net.add_edge("ambient", "B", kind="airpath", z_path=1.8, Cd=CD, area=0.05)
-    el = orifice_elements_from_edges(net, "airpath")
+    el = orifice_law_from_edges(net, "airpath")
     model = build_model(
-        net, air_elements=[el], drives=[Stack.from_network(net, "airpath")], density="linear",
+        net, air_laws=[el], drives=[Stack.from_network(net, "airpath")], density="linear",
         density_kwargs={"rho_0": RHO_0, "T_0": T_O}, coupling="iterate",
         iterate_tol={"thermal": 1e-9}, iterate_max=300,
     )
@@ -300,12 +300,12 @@ def test_two_zone_doorway_matches_an_independent_root_finding_reference(record_p
     assert max(abs(v) for v in balances([TA_ref, TB_ref])) < 1e-8
     assert T["A"] == pytest.approx(TA_ref, abs=1e-5)
     assert T["B"] == pytest.approx(TB_ref, abs=1e-5)
-    q = model.potential["air"].flows_of_kind(ss["air.q"], "airpath")
+    q = model.kirchhoff["air"].flows_of_kind(ss["air.q"], "airpath")
     assert (q[0] + q[1]).abs().item() < 1e-10          # doorway: no net flow
     worst_abs = max(abs(T["A"] - TA_ref), abs(T["B"] - TB_ref))
     record_property("check", "Two-zone doorway vs an independent scipy.optimize.fsolve reference")
     record_property("tolerance", "abs 1e-5 K")
-    record_property("measured_abs_K", worst_abs)
+    record_property("measured_abs_K", float(worst_abs))
 
 
 def _three_zone_stack(coupling: str, tol: float = 0.05):
@@ -317,9 +317,9 @@ def _three_zone_stack(coupling: str, tol: float = 0.05):
         net.add_edge("ambient", f"z{i + 1}", kind="airpath", z_path=z + 2.7, Cd=CD, area=0.02)
     add_large_opening(net, "z1", "z2", H=1.0, W=1.5, z_mid=3.0, Cd=0.78)
     add_large_opening(net, "z2", "z3", H=1.0, W=1.5, z_mid=6.0, Cd=0.78)
-    el = orifice_elements_from_edges(net, "airpath")
+    el = orifice_law_from_edges(net, "airpath")
     model = build_model(
-        net, air_elements=[el], drives=[Stack.from_network(net, "airpath")],
+        net, air_laws=[el], drives=[Stack.from_network(net, "airpath")],
         coupling=coupling, iterate_tol={"thermal": tol}, iterate_max=50,
     )
     sources = torch.zeros(net.n, dtype=F64)
@@ -330,7 +330,7 @@ def _three_zone_stack(coupling: str, tol: float = 0.05):
 
 def _run_stack(coupling: str, dt: float, hours: float = 6.0) -> dict:
     net, model, state, sources = _three_zone_stack(coupling)
-    lo = model.potential["air"].kind_slice("airpath").start
+    lo = model.kirchhoff["air"].kind_slice("airpath").start
     door_index = 6                                                   # z1 -> z2 low opening
     flows, T3 = [], []
     steps = int(round(hours * 3600.0 / dt))
@@ -395,4 +395,4 @@ def test_golden_matches_stored_reference(record_property):
         )
     record_property("check", "Natural-ventilation demo golden regression")
     record_property("tolerance", "rel 1e-8")
-    record_property("measured_rel", worst_rel)
+    record_property("measured_rel", float(worst_rel))

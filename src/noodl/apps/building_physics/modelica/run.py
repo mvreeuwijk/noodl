@@ -27,7 +27,7 @@ from noodl.apps.building_physics.modelica.assemble import (
 )
 from noodl.apps.building_physics.modelica.feedback import FeedbackHeat
 from noodl.apps.building_physics.modelica.storage import StorageClosure, mass_change
-from noodl.elements import Element
+from noodl.elements import ConstitutiveLaw
 from noodl.model import Drivers, Model, State
 from noodl.solvers.errors import ConvergenceError
 
@@ -120,7 +120,7 @@ def _initial_air(model: Model, store: StorageClosure, state: State, drivers: Dri
     equation is `der(p) = 0`, the air layer solved with the others held at their start
     pressures. The carried `"air.storage"` is re-evaluated at the result."""
     closure = _closure(model)
-    air = model.potential["air"]
+    air = model.kirchhoff["air"]
     new = dict(state)
     for _ in range(_DIRECTION_PASSES):
         drv = dict(drivers)
@@ -422,11 +422,11 @@ def _resync_storage(model: Model, store: StorageClosure, state: State,
 
 
 def _solve_air(model: Model, state: State, drivers: Drivers, **solve_kwargs) -> State:
-    """The potential layers alone at `state` (closures first): the quasi-steady flows of the
+    """The Kirchhoff layers alone at `state` (closures first): the quasi-steady flows of the
     initial state, without advancing any transport layer.
 
     Newton starts from the layer's own linear initial guess (`phi0=None`,
-    `PotentialFlowLayer.linear_init`), not from the state's `p_start` seed: every zone at
+    `KirchhoffLayer.linear_init`), not from the state's `p_start` seed: every zone at
     `p_start` is far from a stack's hydrostatic solution, and from there Newton cycles on
     MBL's discretised doors (`Validation/ThreeRoomsContamDiscretizedDoor.mo`: residual
     0.084 kg/s after 50 iterations), while the linear guess converges in three."""
@@ -437,7 +437,7 @@ def _solve_air(model: Model, state: State, drivers: Drivers, **solve_kwargs) -> 
         for c in model.closures:
             drv.update(c(new, drv))
         before = new.get("air.q")
-        for name, layer in model.potential.items():
+        for name, layer in model.kirchhoff.items():
             phi, q = layer.solve(drv[f"{name}.phi_boundary"], drv, drv.get(f"{name}.sources"),
                                  phi0=None, **solve_kwargs)
             new[f"{name}.phi"], new[f"{name}.q"] = phi, q
@@ -475,10 +475,9 @@ def simulate(model: Model, state: State, drivers: Drivers, times, *,
 
     `scheme="midpoint"` also puts a step boundary on every switch (`_Switches`): where an
     element's law changes piece (the edges of its regularisation band,
-    `Element.switching`), a feedback controller's limiter reaches a limit
-    (`ControlNetwork.switching`) or an edge flow changes sign (the transport layers upwind on
-    it). A
-    step across one is split there, the crossing located on the step's own runs
+    `ConstitutiveLaw.switching`), a feedback controller's limiter reaches a limit
+    (`ControlNetwork.switching`) or an edge flow changes sign (the transport layers upwind
+    on it). A step across one is split there, the crossing located on the step's own runs
     (`_advance_located`), so that the right-hand side is smooth within every step: a door's
     flows reversing through its bands across a 14.4 s step were off by 1.1e-4 of the flow
     floor at OneOpenDoor's reversals (2131 s), 8.3e-6 with the switches located (measured,
@@ -650,18 +649,18 @@ def _same(a, b) -> bool:
 
 class _Switches:
     """The switching values at a state: every value changes sign where the step's right-hand
-    side stops being smooth. These are the air layer's elements' own switches
-    (`Element.switching`: a regularisation band's edge, where the law changes piece), every
-    edge flow's sign, in units of `q_scale` (the transport layers upwind on it: the
-    advected state switches from one end's to the other's where a flow reverses) and, with a
-    feedback network, its limiters' corners (`ControlNetwork.switching`, in units of each
-    limiter's range), last. `parts` are the elements that have switches. `jumps` holds the
-    positions of the switches where the right-hand side jumps rather than changes piece:
-    the signs of the flows an `actual` column's density reads, and of the flows in series
-    with them (`assemble`, "Flow elements in series")."""
+    side stops being smooth. These are the air layer's laws' own switches
+    (`ConstitutiveLaw.switching`: a regularisation band's edge, where the law changes
+    piece), every edge flow's sign, in units of `q_scale` (the transport layers upwind on
+    it: the advected state switches from one end's to the other's where a flow reverses)
+    and, with a feedback network, its limiters' corners (`ControlNetwork.switching`, in
+    units of each limiter's range), last. `parts` are the laws that have switches. `jumps`
+    holds the positions of the switches where the right-hand side jumps rather than
+    changes piece: the signs of the flows an `actual` column's density reads, and of the
+    flows in series with them (`assemble`, "Flow elements in series")."""
 
     def __init__(self, model: Model, closure: _ZoneStateClosure, q_scale: float) -> None:
-        ((self.name, self.air),) = model.potential.items()
+        ((self.name, self.air),) = model.kirchhoff.items()
         self.closure = closure
         self.control = _feedback(model)
         self.q_scale = q_scale
@@ -670,8 +669,8 @@ class _Switches:
         self.jump_edges = list(closure.jump_edges)
         self.jumps: set[int] = set()
         for kind in self.air.kinds:
-            el, sl = self.air.element_for(kind)
-            if type(el).switching is not Element.switching:
+            el, sl = self.air.law_for(kind)
+            if type(el).switching is not ConstitutiveLaw.switching:
                 self.parts.append((el, sl))
 
     def __call__(self, state: State, d: Drivers) -> Tensor:
@@ -706,7 +705,7 @@ class _Switches:
 # State-event location (`_advance_located`): a switch is crossed in a step when its value
 # changes sign between the step's ends and was not within SWITCH_SKIP of zero at the start
 # (a switch just located stays there); it is located to |value| <= SWITCH_TOL (in units of
-# the band's width, `Element.switching`) in at most SWITCH_MAX_ITER trial steps.
+# the band's width, `ConstitutiveLaw.switching`) in at most SWITCH_MAX_ITER trial steps.
 SWITCH_TOL = 1e-7
 SWITCH_SKIP = 1e-5
 SWITCH_MAX_ITER = 40
@@ -962,9 +961,9 @@ class _Midpoint:
 
     def __init__(self, model: Model, closure: _ZoneStateClosure, solve_kwargs: dict,
                  store: StorageClosure | None = None) -> None:
-        if len(model.potential) != 1:
-            raise ValueError("simulate(scheme='midpoint'): one potential layer expected")
-        ((self.air_name, self.air),) = model.potential.items()
+        if len(model.kirchhoff) != 1:
+            raise ValueError("simulate(scheme='midpoint'): one Kirchhoff layer expected")
+        ((self.air_name, self.air),) = model.kirchhoff.items()
         self.layers = dict(model.transport)
         self.closure = closure
         self.store = store

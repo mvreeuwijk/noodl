@@ -1,7 +1,7 @@
 """Model: several physics layers on one typed graph, stepped together.
 
 Per step: closures update the drivers
-from the current state; every potential layer is solved quasi-steadily; every allocation
+from the current state; every Kirchhoff layer is solved quasi-steadily; every allocation
 layer takes its one explicit clip/allocate step; every transport layer is
 advanced (sub-stepped if asked) on the flows of its kinds; reactions are applied, after
 the transport step by default or before it with `reaction_order="before_transport"`.
@@ -23,8 +23,8 @@ per-step transmission, (..., b_flow) or (..., b_flow, K) in its flow order; abse
 layer's construction-time transmission stands), "<layer>.requests" (an allocation layer's
 per-edge requested flow, required every step). Closures return driver updates; they may
 not write state keys. A transport layer whose kinds no
-potential layer provides reads its branch flows from the driver "<layer>.q", in the layer's
-own flow_kinds order; a layer with both a potential owner and that driver raises. A closure
+Kirchhoff layer provides reads its branch flows from the driver "<layer>.q", in the layer's
+own flow_kinds order; a layer with both a Kirchhoff-layer owner and that driver raises. A closure
 may also declare `state_keys`, keys it carries across steps itself; those are
 copied from its return into the returned state, evaluated from the step-start state in
 every pass of a coupling that takes more than one -- never fed forward from an earlier
@@ -34,7 +34,8 @@ state warns by name (`RuntimeWarning`): the pinning has nothing to pin on that s
 the closure integrates once per pass instead of once per step until the key is seeded.
 
 `**solve_kwargs` of `step`/`steady` reach the POTENTIAL solves only (`differentiable`,
-`on_failure`, `method`, Newton kwargs). Transport steps always raise on failure.
+`on_failure`, `method`, Newton kwargs). The keywords the Model sets itself (`phi0`, `q0`,
+`history`, `dt`, `t`) are refused there by name. Transport steps always raise on failure.
 
 Differentiability: ping-pong is one pass of differentiable operations; iterate carries no
 graph on its primal passes and attaches the IMPLICIT adjoint of its converged interface to
@@ -56,7 +57,7 @@ import torch
 from noodl._broadcast import broadcast_shapes
 from noodl._tracking import TrackedDict
 from noodl.layers.allocation import AllocatedFlowLayer
-from noodl.layers.potential import PotentialFlowLayer
+from noodl.layers.kirchhoff import KirchhoffLayer
 from noodl.layers.reaction import Reaction
 from noodl.layers.transport import TransportLayer
 from noodl.solvers.errors import ConvergenceError
@@ -67,6 +68,9 @@ Tensor = torch.Tensor
 State = dict[str, Tensor]
 Drivers = dict[str, Tensor]
 _STATE_SUFFIXES = ("phi", "q", "x", "s")
+#: Potential-solve keywords the Model sets itself from the state, the step and `t`; refused
+#: among `**solve_kwargs` of `step`/`steady`.
+_MODEL_SOLVE_KEYS = frozenset({"phi0", "q0", "history", "dt", "t"})
 
 
 def _detached(diag):
@@ -156,7 +160,7 @@ class _AndersonHistory:
     """The pass history `Model._iterate` mixes with `_anderson_mix` (``iterate_acceleration=
     "anderson"``), for one step.
 
-    The mixed state is ``"<layer>.phi"`` and ``"<layer>.q"`` of every potential layer named
+    The mixed state is ``"<layer>.phi"`` and ``"<layer>.q"`` of every Kirchhoff layer named
     in `iterate_tol`, stacked per instance. The least-squares residual is each pass's output
     minus its fed state: `phi` over the nodes convergence is judged on (interior and
     boundary) divided by the layer's `iterate_tol`, and `q` divided by its
@@ -184,9 +188,9 @@ class _AndersonHistory:
 
     def __init__(self, model: Model, memory: int) -> None:
         self.layers = [
-            (name, torch.cat((model.potential[name].interior, model.potential[name].bound)),
+            (name, torch.cat((model.kirchhoff[name].interior, model.kirchhoff[name].bound)),
              float(tol), model.iterate_flow_tol[name])
-            for name, tol in model.iterate_tol.items() if name in model.potential
+            for name, tol in model.iterate_tol.items() if name in model.kirchhoff
         ]
         self.keys = [f"{name}.{s}" for name, *_ in self.layers for s in ("phi", "q")]
         self.memory = memory
@@ -267,7 +271,7 @@ class Ports:
     prescribed_keys: dict[str, str]
     boundary_flows: dict[str, Tensor]
     # Transport layer -> the driver key its branch flows are read from. Present for EVERY
-    # transport layer, whether or not a potential layer owns its kinds: a coupled model that
+    # transport layer, whether or not a Kirchhoff layer owns its kinds: a coupled model that
     # wants to drive a layer's flows needs the key, and a model that wants to know whether
     # it MAY do so reads `Model.flow_layer_of[name] is None`. Defaulted so that any existing
     # construction of `Ports` keeps working.
@@ -318,7 +322,7 @@ class Model:
     failure through. A step that is going to raise stops early, before `iterate_max`, once
     every unconverged instance's potential solve has failed again from a fed state within
     the tolerances of the previous pass's: the next pass would only repeat it. A potential
-    solve that is differentiated still raises (`PotentialFlowLayer.solve`'s
+    solve that is differentiated still raises (`KirchhoffLayer.solve`'s
     ``on_failure="return_primal"``), and a caller's own `on_failure` is passed through
     unchanged.
 
@@ -328,7 +332,7 @@ class Model:
     ``diagnostics["converged"]`` False for those instances. A gradient is still refused
     there: there is no fixed point to differentiate.
 
-    `iterate_flow_tol` (optional; per potential layer named in `iterate_tol`, absolute, in
+    `iterate_flow_tol` (optional; per Kirchhoff layer named in `iterate_tol`, absolute, in
     flow units) also judges that layer's flows: a pass converges only when its returned
     `.q` is within it of the `.q` it was fed. `iterate_acceleration="anderson"` (opt-in)
     replaces the relaxation of those layers' `.phi` and `.q` by Anderson mixing over the last
@@ -357,8 +361,8 @@ class Model:
     def __init__(
         self,
         net: Network,
-        layers: Mapping[str, PotentialFlowLayer | TransportLayer | AllocatedFlowLayer]
-        | Sequence[PotentialFlowLayer | TransportLayer | AllocatedFlowLayer],
+        layers: Mapping[str, KirchhoffLayer | TransportLayer | AllocatedFlowLayer]
+        | Sequence[KirchhoffLayer | TransportLayer | AllocatedFlowLayer],
         closures: Sequence[Closure] = (),
         reactions: Sequence[tuple[str, Reaction]] = (),
         coupling: str = "pingpong",
@@ -423,12 +427,12 @@ class Model:
         # Set only while `noodl.validation.check_setup` probes a step (read tracking).
         self._probe = None
         self._refs = None
-        self.potential: dict[str, PotentialFlowLayer] = {}
+        self.kirchhoff: dict[str, KirchhoffLayer] = {}
         self.transport: dict[str, TransportLayer] = {}
         self.allocation: dict[str, AllocatedFlowLayer] = {}
         for name, layer in self.layers.items():
-            if isinstance(layer, PotentialFlowLayer):
-                self.potential[name] = layer
+            if isinstance(layer, KirchhoffLayer):
+                self.kirchhoff[name] = layer
             elif isinstance(layer, TransportLayer):
                 self.transport[name] = layer
             elif isinstance(layer, AllocatedFlowLayer):
@@ -436,26 +440,26 @@ class Model:
             else:
                 raise TypeError(
                     f"Model: layer {name!r} is a {type(layer).__name__}, not a "
-                    f"PotentialFlowLayer, TransportLayer or AllocatedFlowLayer"
+                    f"KirchhoffLayer, TransportLayer or AllocatedFlowLayer"
                 )
             if layer.net is not net:
                 raise ValueError(
                     f"Model: layer {name!r} is built on a different Network than the model"
                 )
         # Computed here, before the closure_state_keys check below, which consults
-        # `self.flow_layer_of`; both only need `self.potential`/`self.transport`, already
+        # `self.flow_layer_of`; both only need `self.kirchhoff`/`self.transport`, already
         # built above.
         self.flow_layer_of: dict[str, str | None] = {}
         self.flow_driver_of: dict[str, str] = {}
         for tname, tl in self.transport.items():
             owners = [
-                pn for pn, pl in self.potential.items()
+                pn for pn, pl in self.kirchhoff.items()
                 if all(k in pl.kinds for k in tl.flow_kinds)
             ] + [
                 cn for cn, cl in self.allocation.items()
                 if all(k in cl.kinds for k in tl.flow_kinds)
             ]
-            # Driver-prescribed flows. Two potential layers both
+            # Driver-prescribed flows. Two Kirchhoff layers both
             # providing a transport layer's kinds is ambiguous and refused here.
             # ZERO owners is not an error: the flows are then read from the driver
             # "<layer>.q", which a closure writes -- the street application's whole
@@ -465,7 +469,7 @@ class Model:
             if len(owners) > 1:
                 raise ValueError(
                     f"Model: transport layer {tname!r} advects on kinds {tl.flow_kinds}, "
-                    f"which {len(owners)} potential layers of this model provide "
+                    f"which {len(owners)} Kirchhoff layers of this model provide "
                     f"({owners}); at most one may"
                 )
             self.flow_layer_of[tname] = owners[0] if owners else None
@@ -528,12 +532,12 @@ class Model:
                 head, _, tail = str(key).rpartition(".")
                 if head in self.layers and tail in _STATE_SUFFIXES:
                     # Mirror `_apply_closures`' own ownerless-"<layer>.q" carve-out --
-                    # for a transport layer no potential layer owns, "<layer>.q" is the
+                    # for a transport layer no Kirchhoff layer owns, "<layer>.q" is the
                     # DRIVER a flow closure writes, not that layer's state, so a closure may
                     # declare it as state_keys (a flow closure that also remembers its own
                     # last-written flow across steps is exactly this shape). Every other
                     # "<layer>.phi/q/x" stays refused, including "<layer>.q" for a layer a
-                    # potential layer DOES own.
+                    # Kirchhoff layer DOES own.
                     prescribed = (
                         tail == "q"
                         and head in self.transport
@@ -575,7 +579,7 @@ class Model:
             raise ValueError(
                 f"Model: iterate_relaxation must lie in (0, 1], got {iterate_relaxation!r}"
             )
-        # How the fed state of the potential layers named in `iterate_tol` is formed from
+        # How the fed state of the Kirchhoff layers named in `iterate_tol` is formed from
         # the passes so far (`_iterate`): None is the relaxation above, "anderson" Anderson
         # type-II mixing over the last `iterate_memory` passes, falling back to it.
         if iterate_acceleration not in (None, "anderson"):
@@ -612,12 +616,12 @@ class Model:
                     "layer name: absolute tolerance on that layer's state (`.x`) or "
                     "potential (`.phi`)}"
                 )
-            unknown = sorted(set(self.iterate_tol) - set(self.transport) - set(self.potential))
+            unknown = sorted(set(self.iterate_tol) - set(self.transport) - set(self.kirchhoff))
             if unknown:
                 raise KeyError(
                     f"Model: iterate_tol names {unknown}, neither transport layers "
-                    f"({sorted(self.transport)}) nor potential layers "
-                    f"({sorted(self.potential)}) of this model"
+                    f"({sorted(self.transport)}) nor Kirchhoff layers "
+                    f"({sorted(self.kirchhoff)}) of this model"
                 )
             # Refused HERE rather than left to fail at the first `step`: one pass has no
             # second pass to compare against, so it can never report convergence -- a budget
@@ -631,23 +635,23 @@ class Model:
                     f"{iterate_max!r}; a single pass has no predecessor to compare against, "
                     f"so it can never be reported as converged"
                 )
-        # The flows' fixed-point tolerance per potential layer named in `iterate_tol`
+        # The flows' fixed-point tolerance per Kirchhoff layer named in `iterate_tol`
         # (absolute, in that layer's flow units): |q returned - q fed| of the certified pass.
         self.iterate_flow_tol = {k: float(v) for k, v in (iterate_flow_tol or {}).items()}
         stray = sorted(k for k in self.iterate_flow_tol
-                       if k not in self.potential or k not in self.iterate_tol)
+                       if k not in self.kirchhoff or k not in self.iterate_tol)
         if stray:
             raise KeyError(
-                f"Model: iterate_flow_tol names {stray}, which are not potential layers named "
-                f"in iterate_tol ({sorted(k for k in self.iterate_tol if k in self.potential)})"
+                f"Model: iterate_flow_tol names {stray}, which are not Kirchhoff layers named "
+                f"in iterate_tol ({sorted(k for k in self.iterate_tol if k in self.kirchhoff)})"
             )
         bad = {k: v for k, v in self.iterate_flow_tol.items() if not v > 0.0}
         if bad:
             raise ValueError(f"Model: iterate_flow_tol must be positive, got {bad}")
-        # A closure that reads a potential layer's flows to write something the same pass
+        # A closure that reads a Kirchhoff layer's flows to write something the same pass
         # uses (a flow-dependent filter's transmission) is right only at the coupling's fixed
         # point, where the flows it read are the flows the pass produced: it declares
-        # `requires_coupling = "iterate"` and `reads_flows_of = "<potential layer>"`.
+        # `requires_coupling = "iterate"` and `reads_flows_of = "<Kirchhoff layer>"`.
         for closure in self.closures:
             if getattr(closure, "requires_coupling", None) != "iterate":
                 continue
@@ -667,18 +671,26 @@ class Model:
                     f"Model: iterate_acceleration={iterate_acceleration!r} needs "
                     f"coupling='iterate', got coupling={coupling!r}"
                 )
-            if not any(name in self.potential for name in self.iterate_tol):
+            if not any(name in self.kirchhoff for name in self.iterate_tol):
                 raise ValueError(
                     f"Model: iterate_acceleration={iterate_acceleration!r} mixes the potential "
-                    f"of a potential layer named in iterate_tol, and iterate_tol names none "
-                    f"({sorted(self.iterate_tol)}; potential layers: {sorted(self.potential)})"
+                    f"of a Kirchhoff layer named in iterate_tol, and iterate_tol names none "
+                    f"({sorted(self.iterate_tol)}; Kirchhoff layers: {sorted(self.kirchhoff)})"
+                )
+            phasor = sorted(k for k in self.iterate_tol
+                            if k in self.kirchhoff and self.kirchhoff[k].phasor)
+            if phasor:
+                raise ValueError(
+                    f"Model: iterate_acceleration={iterate_acceleration!r} cannot mix the "
+                    f"complex potentials of the phasor layer(s) {phasor}; Anderson mixing is "
+                    f"real-valued -- use the relaxation (iterate_acceleration=None)"
                 )
             unset = sorted(k for k in self.iterate_tol
-                           if k in self.potential and k not in self.iterate_flow_tol)
+                           if k in self.kirchhoff and k not in self.iterate_flow_tol)
             if unset:
                 raise ValueError(
                     f"Model: iterate_acceleration={iterate_acceleration!r} needs "
-                    f"iterate_flow_tol for the potential layer(s) {unset}: the tolerance on "
+                    f"iterate_flow_tol for the Kirchhoff layer(s) {unset}: the tolerance on "
                     f"their flows' fixed-point residual, which the mixing minimises and the "
                     f"convergence test judges alongside the potential"
                 )
@@ -764,11 +776,11 @@ class Model:
                 head, _, tail = key.rpartition(".")
                 if head in self.layers and tail in _STATE_SUFFIXES:
                     # ONE exception to "closures write drivers only": "<layer>.q" for a
-                    # transport layer no potential layer owns is a DRIVER, not a state --
+                    # transport layer no Kirchhoff layer owns is a DRIVER, not a state --
                     # it is the key `_kind_flows` reads that layer's branch flows from, and
                     # writing it is exactly what a flow closure is for. Every other
                     # "<layer>.phi/q/x" stays refused, including "<layer>.q" for a layer a
-                    # potential layer DOES own, where it would silently contradict the
+                    # Kirchhoff layer DOES own, where it would silently contradict the
                     # solve.
                     prescribed = (
                         tail == "q"
@@ -780,7 +792,7 @@ class Model:
                             f"Model: closure {closure!r} returned {key!r}, which is a "
                             f"state key; closures write drivers only (the one exception "
                             f"is '<layer>.q' for a transport layer whose flows no "
-                            f"potential layer provides)"
+                            f"Kirchhoff layer provides)"
                         )
                 drv[key] = value
                 if written is not None and key in self.closure_state_keys:
@@ -806,7 +818,7 @@ class Model:
                     drivers: Mapping[str, Tensor]) -> Tensor:
         """This transport layer's branch flows, in its own `flow_kinds` order.
 
-        From the owning potential layer's solved `q` when there is one, otherwise from the
+        From the owning Kirchhoff layer's solved `q` when there is one, otherwise from the
         driver `"<layer>.q"`. A layer with BOTH is a contradiction -- two different answers
         for the same flows -- and is refused by name rather than resolved by a precedence
         rule nobody would remember.
@@ -816,13 +828,13 @@ class Model:
         Reading those flows would need `AllocatedFlowLayer.flows_of_kind`, which is
         not built (species/quality transport on allocated flows):
         refused here by name rather than left to raise a bare `KeyError` off
-        `self.potential[owner]`.
+        `self.kirchhoff[owner]`.
         """
         layer = self.transport[name]
         owner = self.flow_layer_of[name]
         key = self.flow_driver_of[name]
         if owner is not None:
-            # Checked BEFORE the both-sources refusal below, whose message says "potential
+            # Checked BEFORE the both-sources refusal below, whose message says "Kirchhoff
             # layer" and would be factually wrong about an allocation owner.
             if owner in self.allocation:
                 raise NotImplementedError(
@@ -830,15 +842,15 @@ class Model:
                     f"which allocation layer {owner!r} provides; reading an allocation "
                     f"layer's flows into a transport layer is not implemented. "
                     f"Drive {name!r} from the "
-                    f"driver {key!r} instead, or give its kinds to a potential layer"
+                    f"driver {key!r} instead, or give its kinds to a Kirchhoff layer"
                 )
             if key in drivers:
                 raise ValueError(
-                    f"Model: transport layer {name!r} takes its flows from potential layer "
+                    f"Model: transport layer {name!r} takes its flows from Kirchhoff layer "
                     f"{owner!r}, and the driver {key!r} was also given; a layer may have "
                     f"one source of flows, not two -- drop {key!r} or remove {owner!r}"
                 )
-            return self.potential[owner].flows_of_kind(state[f"{owner}.q"], layer.flow_kinds)
+            return self.kirchhoff[owner].flows_of_kind(state[f"{owner}.q"], layer.flow_kinds)
         q = self._require(drivers, key)
         b = int(layer._flow_src.shape[0])
         if q.dim() == 0 or q.shape[-1] != b:
@@ -849,6 +861,35 @@ class Model:
                 f"order -- got {got} (shape {tuple(q.shape)})"
             )
         return q
+
+    @staticmethod
+    def _circuit_kwargs(name: str, layer: KirchhoffLayer, state: Mapping[str, Tensor],
+                        base: Mapping[str, Tensor], dt: float | None,
+                        t: float | None) -> dict:
+        """The solve keywords of a layer solved by Modified Nodal Analysis.
+
+        `q0`: the warm start of its implicit-law flows, from the fed state's `"<name>.q"`.
+        `t`: the time its laws are evaluated at -- the END of a step (`t + dt`, the time
+        the solved state belongs to), the given time of a steady solve, `None` without one.
+        On a step of a layer with dynamic laws (not a phasor layer, which takes no step),
+        `history` is the STEP-START state's `(phi, q)` -- `base`, never the fed state, so an
+        iterated coupling re-steps every pass from the same start -- and `dt` the step.
+        """
+        out: dict = {"t": t if dt is None or t is None else t + dt}
+        q_prev = state.get(f"{name}.q")
+        if q_prev is not None:
+            out["q0"] = q_prev[..., layer.implicit_edges]
+        if layer.dynamic and not layer.phasor and dt is not None:
+            missing = [k for k in (f"{name}.phi", f"{name}.q") if k not in base]
+            if missing:
+                raise KeyError(
+                    f"Model: state {missing} is required to step Kirchhoff layer {name!r}, "
+                    f"whose dynamic laws start each step from the potentials and flows at "
+                    f"the step start (an initial point: layer.solve(..., mode='initial'))"
+                )
+            out["history"] = (base[f"{name}.phi"], base[f"{name}.q"])
+            out["dt"] = dt
+        return out
 
     # -------------------------------------------------------------------- pass
     def _pass(
@@ -916,13 +957,18 @@ class Model:
         made: list[str] = [] if produced is None else produced
         made.clear()
         diag: dict = {}
-        for name, layer in self.potential.items():
+        for name, layer in self.kirchhoff.items():
             pb = self._require(drv, f"{name}.phi_boundary")
             sources = drv.get(f"{name}.sources")
             phi_prev = state.get(f"{name}.phi") if warm_start else None
             phi0 = None if phi_prev is None else phi_prev[..., layer.interior]
             d: dict = {}
-            phi, q = layer.solve(pb, drv, sources, phi0=phi0, diagnostics=d, **solve_kwargs)
+            circuit = self._circuit_kwargs(name, layer, state, base, dt, t) if layer.mna else {}
+            if not warm_start:
+                # The implicit-law flows' warm start goes with the potentials' (`phi0`).
+                circuit.pop("q0", None)
+            phi, q = layer.solve(pb, drv, sources, phi0=phi0, diagnostics=d, **circuit,
+                                 **solve_kwargs)
             new[f"{name}.phi"], new[f"{name}.q"] = phi, q
             made += [f"{name}.phi", f"{name}.q"]
             diag[name] = d
@@ -1175,10 +1221,12 @@ class Model:
         transfer from -- a coupled recipient with an unlinked `exact`-scheme thermal layer
         pays that cost on every one of its substeps for no benefit.
 
-        `warm_start` (default True) starts each potential layer's nonlinear solve from the
-        state's `"<layer>.phi"`. `False` starts it from the layer's linear initial guess
-        instead, while closures and node sources still read `"<layer>.phi"` as an input (a
-        retry after a warm start failed to converge, without losing that input).
+        `warm_start` (default True) starts each Kirchhoff layer's nonlinear solve from the
+        state's `"<layer>.phi"` (and, on a layer solved by Modified Nodal Analysis, its
+        implicit-law flows from `"<layer>.q"`). `False` starts it from the layer's linear
+        initial guess instead, while closures and node sources still read `"<layer>.phi"`
+        as an input (a retry after a warm start failed to converge, without losing that
+        input).
         """
         if not dt > 0:
             raise ValueError(f"Model: dt must be positive, got {dt!r}")
@@ -1204,10 +1252,15 @@ class Model:
             boundary_transfers=boundary_transfers, warm_start=warm_start,
         )
 
-    def steady(self, state, drivers, *, diagnostics: dict | None = None,
-               warm_start: bool = True, **solve_kwargs):
+    def steady(self, state, drivers, *, t: float | None = None,
+               diagnostics: dict | None = None, warm_start: bool = True, **solve_kwargs):
         """The quasi-steady state of every layer at `drivers` (transport layers solved to
         `rate == 0` rather than advanced).
+
+        `t` (optional) is the time of that state: closures receive it in their
+        `StepContext`, and the constitutive laws of a layer solved by Modified Nodal
+        Analysis are evaluated at it (a time-dependent source). A layer with dynamic laws is
+        solved at its operating point: a capacitance open, an inductance shorted.
 
         REACTIONS ARE NOT APPLIED. They are an operator splitting applied around a transport
         step (after it, or before it under `reaction_order="before_transport"`), so they
@@ -1220,13 +1273,20 @@ class Model:
         closure that integrates some state over an interval has no interval to integrate over
         at a quasi-steady state. `warm_start` is `step`'s.
         """
-        return self._advance(state, drivers, None, diagnostics, solve_kwargs,
+        return self._advance(state, drivers, None, diagnostics, solve_kwargs, t=t,
                              warm_start=warm_start)
 
     def _advance(
         self, state, drivers, dt, diagnostics, solve_kwargs, *, t=None,
         boundary_transfers: bool | Collection[str] = False, warm_start: bool = True,
     ) -> State:
+        owned = sorted(_MODEL_SOLVE_KEYS.intersection(solve_kwargs))
+        if owned:
+            raise ValueError(
+                f"Model: solve keywords {owned} are set by the Model itself, not passed "
+                f"through: phi0 and q0 (the warm starts) from the state, history from the "
+                f"step-start state, dt from step's dt and t from the t= argument"
+            )
         # The coupling seam: ping-pong is exactly ONE pass, taken with the state at the start
         # of the step; `coupling="iterate"` repeats `_pass` until the named transport states
         # stop changing, and reports the pass count it took.
@@ -1263,7 +1323,7 @@ class Model:
         solve stopped short of its tolerance (``on_failure="return_primal"``, the default of
         the primal passes) is not converged whatever its change.
 
-        A potential layer named in `iterate_tol` is iterated on its own potential: it
+        A Kirchhoff layer named in `iterate_tol` is iterated on its own potential: it
         converges when the largest change of `phi` over its interior and boundary nodes is
         within the tolerance (in `phi` units). This is for closures that compute a layer's
         element coefficients, or its boundary potentials, from that layer's previous
@@ -1407,7 +1467,7 @@ class Model:
                             d_s, _ = layer._to_stacked(d, layer.n_i, "x")
                             change[name] = d_s.amax(-1)
                         else:
-                            layer = self.potential[name]
+                            layer = self.kirchhoff[name]
                             d = (new[f"{name}.phi"] - prev[f"{name}.phi"]).abs()
                             # Boundary entries too: a closure may write `phi_boundary`
                             # from the previous pass (the sewer's outfall heads).
@@ -1458,12 +1518,12 @@ class Model:
                     key = f"{name}.x"
                     fed[key] = prev[key] + w * (new[key] - prev[key])
                 if anderson is None:
-                    for name in self.potential:
+                    for name in self.kirchhoff:
                         if name in self.iterate_tol:
                             for key in (f"{name}.phi", f"{name}.q"):
                                 fed[key] = prev[key] + w * (new[key] - prev[key])
             if anderson is not None:
-                # The named potential layers' `phi` and `q` are Anderson-mixed instead
+                # The named Kirchhoff layers' `phi` and `q` are Anderson-mixed instead
                 # (`_AndersonHistory`), from pass 1 on; transport states stay relaxed.
                 with torch.no_grad():
                     fed.update(anderson.mix(certified_fed, new, w,
@@ -1520,10 +1580,15 @@ class Model:
             ]
             out_keys: list[str] = []
             adjoint_diag: dict = {}
+            # A phasor layer's complex `.phi`/`.q` enter the adjoint in their real view
+            # (real and imaginary parts as a trailing pair): its GMRES solve is real-valued.
+            complex_keys = {k for k in keys if certified_fed[k].is_complex()}
 
             def pass_fn(z: list[Tensor]) -> tuple[list[Tensor], list[Tensor]]:
                 f = dict(certified_fed)
                 f.update(carried)
+                z = [torch.view_as_complex(v.contiguous()) if k in complex_keys else v
+                     for k, v in zip(keys, z, strict=True)]
                 f.update(zip(keys, z, strict=True))
                 out, d, _ = self._pass(
                     f, drivers, dt, solve_kwargs, step_from=state, t=t,
@@ -1557,6 +1622,8 @@ class Model:
                         f"singular; a closure writing such a key must compute it rather "
                         f"than echo the state it was given"
                     )
+                z_next = [torch.view_as_real(n.resolve_conj()) if k in complex_keys else n
+                          for k, n in zip(keys, z_next, strict=True)]
                 return [out[k] for k in out_keys], z_next
 
             # `converged`'s shape IS the batch shape (it is judged per instance over every
@@ -1570,7 +1637,8 @@ class Model:
             # into another's.
             adjoint_report: dict = {}
             flat = differentiate_fixed_point(
-                [certified_fed[k] for k in keys], pass_fn, rtol=self.adjoint_rtol,
+                [torch.view_as_real(certified_fed[k].resolve_conj()) if k in complex_keys
+                 else certified_fed[k] for k in keys], pass_fn, rtol=self.adjoint_rtol,
                 where="Model coupling='iterate'",
                 batch_shape=tuple(converged.shape), report=adjoint_report,
             )
@@ -1592,7 +1660,7 @@ class Model:
         """Per instance, whether any potential solve of a pass (its `diag`) stopped short of
         its own tolerance (`on_failure="return_primal"`); ``None`` when every one converged."""
         failed: Tensor | None = None
-        for name in self.potential:
+        for name in self.kirchhoff:
             ok = diag.get(name, {}).get("converged")
             if ok is None:
                 continue
@@ -1603,7 +1671,7 @@ class Model:
         return failed
 
     def residuals(self, state, drivers) -> dict[str, Tensor]:
-        """Nodal balances at `state`: interior residual per potential layer, dx/dt per
+        """Nodal balances at `state`: interior residual per Kirchhoff layer, dx/dt per
         transport layer. Zero (to solver tolerance) at a steady state.
 
         The transport balance is TRANSPORT ONLY: reactions are an operator splitting applied
@@ -1628,8 +1696,14 @@ class Model:
             )
         drv = self._apply_closures(state, drivers)
         out: dict[str, Tensor] = {}
-        for name, layer in self.potential.items():
+        for name, layer in self.kirchhoff.items():
             phi = state[f"{name}.phi"]
+            if layer.mna:
+                # Implicit-law flows are unknowns, not functions of `phi`: balance the
+                # state's own flows.
+                out[name] = layer.balance(phi, state[f"{name}.q"], drv.get(f"{name}.sources"),
+                                          drv)
+                continue
             out[name] = layer.residual(
                 phi[..., layer.interior], self._require(drv, f"{name}.phi_boundary"), drv,
                 drv.get(f"{name}.sources"),
@@ -1652,7 +1726,7 @@ class Model:
         """Transport layer `name`'s branch flows for THIS `state`/`drivers` -- what `step`
         would use just before advancing `name`, exposed for a caller (a coupling
         orchestrator) that needs them WITHOUT stepping the model. Closures run first, so a
-        driver-prescribed layer's flow is available. A potential-owned layer's flows are the
+        driver-prescribed layer's flow is available. A Kirchhoff-owned layer's flows are the
         owner's solved `q`: read from `state["<owner>.q"]` when an earlier pass or step left
         one there, otherwise SOLVED here for these drivers, exactly as `_pass` would (the
         first pass of a step starts from a state that carries no `q` yet).
@@ -1668,19 +1742,26 @@ class Model:
         """
         drv = self._apply_closures(state, drivers)
         owner = self.flow_layer_of[name]
-        if owner in self.potential and f"{owner}.q" not in state:
+        if owner in self.kirchhoff and self.kirchhoff[owner].mna and f"{owner}.q" not in state:
+            raise KeyError(
+                f"Model: transport layer {name!r} takes its flows from Kirchhoff layer "
+                f"{owner!r}, which is solved by Modified Nodal Analysis and cannot be solved "
+                f"here without its step history; give the state {owner + '.q'!r} (step the "
+                f"model first)"
+            )
+        if owner in self.kirchhoff and f"{owner}.q" not in state:
             key = self.flow_driver_of[name]
             if key in drv:
                 # The same refusal `_kind_flows` makes on the read path, made here too: the
-                # solve branch would otherwise silently prefer the potential layer and never
+                # solve branch would otherwise silently prefer the Kirchhoff layer and never
                 # notice the contradicting driver, so whether a two-sourced layer is caught
                 # would depend on whether the state happened to carry a `q` yet.
                 raise ValueError(
-                    f"Model: transport layer {name!r} takes its flows from potential layer "
+                    f"Model: transport layer {name!r} takes its flows from Kirchhoff layer "
                     f"{owner!r}, and the driver {key!r} was also given; a layer may have "
                     f"one source of flows, not two -- drop {key!r} or remove {owner!r}"
                 )
-            layer = self.potential[owner]
+            layer = self.kirchhoff[owner]
             phi_prev = state.get(f"{owner}.phi")
             phi0 = None if phi_prev is None else phi_prev[..., layer.interior]
             _phi, q = layer.solve(
@@ -1691,7 +1772,7 @@ class Model:
         return self._kind_flows(name, state, drv)
 
     def ports(self, state) -> Ports:
-        """Boundary nodes, the driver keys that prescribe them, and (potential layers) the net
+        """Boundary nodes, the driver keys that prescribe them, and (Kirchhoff layers) the net
         flow INTO each boundary node at `state`.
 
         Allocation layers contribute NOTHING here, and that is deliberate rather than the
@@ -1710,7 +1791,7 @@ class Model:
         nodes: dict[str, list] = {}
         keys: dict[str, str] = {}
         flows: dict[str, Tensor] = {}
-        for name, layer in self.potential.items():
+        for name, layer in self.kirchhoff.items():
             nodes[name] = [layer.net.nodes[i] for i in layer.bound.tolist()]
             keys[name] = f"{name}.phi_boundary"
             # _accumulate(q) is A q: net OUTflow at every node; negate for the inflow.

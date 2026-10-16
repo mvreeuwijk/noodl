@@ -6,7 +6,7 @@ import pytest
 import torch
 
 from noodl.elements import AffinityFan, UpstreamDensityPowerLaw
-from noodl.elements.base import Element
+from noodl.elements.base import ConstitutiveLaw
 from noodl.elements.fan import FanCurve
 
 
@@ -55,7 +55,7 @@ def test_dflow_matches_autograd_default_in_the_smooth_region_and_is_zero_when_cl
 
     q_true = torch.tensor([0.5, 2.0, 4.0, 5.5])
     dp = -_p(coeffs, q_true)
-    torch.testing.assert_close(fan.dflow(dp), Element.dflow(fan, dp), atol=1e-4, rtol=1e-4)
+    torch.testing.assert_close(fan.dflow(dp), ConstitutiveLaw.dflow(fan, dp), atol=1e-4, rtol=1e-4)
 
     p_max_flow = _p(coeffs, q_max)
     # Same stalled-side sign correction as above: need dp > -p_max_flow.

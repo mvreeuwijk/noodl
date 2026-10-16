@@ -7,7 +7,7 @@ import math
 import pytest
 import torch
 
-from noodl.apps.building_physics.elements import orifice_elements_from_edges
+from noodl.apps.building_physics.elements import orifice_law_from_edges
 from noodl.apps.building_physics.thermal import (
     CP_AIR,
     P_REF,
@@ -38,9 +38,9 @@ def _single_zone(*, wall: bool = False, source: float = 500.0, coupling="iterate
     add_zone(net, Zone("z", volume=50.0, T0=293.15, wall=w))
     net.add_edge("ambient", "z", kind="airpath", z_path=0.0, Cd=0.6, area=0.01)
     net.add_edge("ambient", "z", kind="airpath", z_path=2.0, Cd=0.6, area=0.01)
-    el = orifice_elements_from_edges(net, "airpath")
+    el = orifice_law_from_edges(net, "airpath")
     model = build_model(
-        net, air_elements=[el], drives=[Stack.from_network(net, "airpath")],
+        net, air_laws=[el], drives=[Stack.from_network(net, "airpath")],
         coupling=coupling, iterate_tol={"thermal": 1e-9}, iterate_max=200,
     )
     sources = torch.zeros(net.n, dtype=F64)
@@ -73,7 +73,7 @@ def test_energy_balance_closes_at_steady_state():
     # per-pass thermal change of ~1e-4 K, well above its own 1e-9 K tolerance.
     ss = model.steady(state, drivers, atol=1e-14, rtol=1e-14)
     T_z = ss["thermal.x"][0].item()
-    q = model.potential["air"].flows_of_kind(ss["air.q"], "airpath")
+    q = model.kirchhoff["air"].flows_of_kind(ss["air.q"], "airpath")
     assert q[0] > 0 and q[1] < 0                              # in low, out high
     assert CP_AIR * q[0].item() * (T_z - T_OUT) == pytest.approx(500.0, rel=1e-7)
     res = model.residuals(ss, drivers)
@@ -87,7 +87,7 @@ def test_ventilated_zone_with_a_wall_matches_the_algebraic_balance():
     th = model.layers["thermal"]
     names = [net.nodes[i] for i in th.interior_idx.tolist()]
     T = dict(zip(names, ss["thermal.x"].tolist(), strict=True))
-    q = model.potential["air"].flows_of_kind(ss["air.q"], "airpath")
+    q = model.kirchhoff["air"].flows_of_kind(ss["air.q"], "airpath")
     F_in = q[0].item()
     # wall: 100 (T_z - T_w) = 20 (T_w - T_o); zone: E = c_p F (T_z - T_o) + 100 (T_z - T_w)
     assert 100.0 * (T["z"] - T["z_wall"]) == pytest.approx(20.0 * (T["z_wall"] - T_OUT), rel=1e-8)
@@ -141,8 +141,8 @@ def test_gradients_flow_through_the_application_built_model():
     driver, to the boundary temperature driver and to the leakage coefficient, against
     central differences."""
     net, _, _, drivers, _ = _single_zone()
-    el_learn = orifice_elements_from_edges(net, "airpath", learnable=True)
-    model = build_model(net, air_elements=[el_learn], drives=[Stack.from_network(net, "airpath")])
+    el_learn = orifice_law_from_edges(net, "airpath", learnable=True)
+    model = build_model(net, air_laws=[el_learn], drives=[Stack.from_network(net, "airpath")])
     state = initial_state(model)
     src = drivers["thermal.sources"].clone().requires_grad_(True)
     drv = dict(drivers, **{"thermal.sources": src})
@@ -258,7 +258,7 @@ def test_build_model_refuses_a_flow_kind_no_air_element_provides():
     (and species) advecting on it; it is named, not dropped."""
     net, _, _, _, el = _single_zone()
     with pytest.raises(KeyError, match=r"flow_kinds.*'duct'.*airpath"):
-        build_model(net, air_elements=[el], drives=[Stack.from_network(net, "airpath")],
+        build_model(net, air_laws=[el], drives=[Stack.from_network(net, "airpath")],
                     flow_kinds=("airpath", "duct"))
 
 
@@ -277,7 +277,7 @@ def test_initial_state_keys_transport_layers_by_their_own_name():
 
 def test_species_layer_uses_zone_air_mass_as_capacity():
     net, _, _, _, el = _single_zone()
-    model = build_model(net, air_elements=[el], drives=[Stack.from_network(net, "airpath")],
+    model = build_model(net, air_laws=[el], drives=[Stack.from_network(net, "airpath")],
                         species=1)
     sp = model.layers["species"]
     assert (sp.quantity, sp.unit) == ("mass_fraction", "kg/kg")

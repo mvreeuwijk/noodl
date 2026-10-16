@@ -157,7 +157,7 @@ from noodl.elements import (
     Scaled,
     UpstreamDensityPowerLaw,
 )
-from noodl.layers.potential import PotentialFlowLayer
+from noodl.layers.kirchhoff import KirchhoffLayer
 from noodl.layers.transport import UndefinedSteadyState, active_interior
 from noodl.model import Model
 from noodl.nodesources import NodeSource
@@ -458,13 +458,13 @@ def _date(token: str) -> int:
 
 @dataclass
 class Project:
-    """A CONTAM project as read by `read_prj`: the network, its airflow elements and
+    """A CONTAM project as read by `read_prj`: the network, its airflow laws and
     drives, zones and their temperatures and volumes, species, initial mass fractions,
     sources and ambient conditions, the run control, and the schedules as `inputs`.
     `project_to_model` builds the model from it."""
 
     net: Network
-    elements: list
+    laws: list
     drives: list
     zones: list[str]
     ambient: str
@@ -492,7 +492,7 @@ class Project:
     inputs: list[Input] = field(default_factory=list)
     # Each species' default ambient mass fraction (K,), kg/kg.
     ambient_mass_fractions: Tensor | None = None
-    # Element kinds wrapped in `Scaled` (a scheduled path among their edges): kind -> edges.
+    # Law kinds wrapped in `Scaled` (a scheduled path among their edges): kind -> edges.
     multiplier_edges: dict[str, int] = field(default_factory=dict)
     # Fan-curve kinds with a speed schedule ("fan_speed.<kind>"): kind -> edges.
     speed_edges: dict[str, int] = field(default_factory=dict)
@@ -557,8 +557,8 @@ class Project:
     def path_flows(self, q: torch.Tensor) -> torch.Tensor:
         """Net mass flow per path in path-number order (a doorway sums its two edges).
 
-        `q` is the air layer's flow vector, which `PotentialFlowLayer` lays out in element-
-        KIND blocks, in `self.elements` order -- NOT in path order. Each path's
+        `q` is the air layer's flow vector, which `KirchhoffLayer` lays out in element-
+        KIND blocks, in `self.laws` order -- NOT in path order. Each path's
         `edge_columns` already carries that translation.
         """
         cols = [torch.as_tensor(p.edge_columns, dtype=torch.long) for p in self.paths]
@@ -1776,7 +1776,7 @@ def _build(*, ambient_conditions, g, species, levels, profiles, elements, zones,
         ms = per_kind_m[kind]
         dpt = per_kind_dpt.get(kind, [1e-3])[0]
         # `endpoints(kind)` returns (src, tgt) in `edge_index(kind)` order, which is also the
-        # order `PotentialFlowLayer` slices this element's dp block in. The per-edge C/n/m
+        # order `KirchhoffLayer` slices this element's dp block in. The per-edge C/n/m
         # lists above were appended in PATH order, and a doorway contributes TWO edges per
         # path -- so the two orders agree only because every edge of a kind is added to the
         # network at the moment its coefficient is appended. Assert it: a silent mismatch
@@ -1977,7 +1977,7 @@ def _build(*, ambient_conditions, g, species, levels, profiles, elements, zones,
 
     kinds = [el.kind for el in built]
 
-    # `PotentialFlowLayer` concatenates `q` in element-KIND blocks, in
+    # `KirchhoffLayer` concatenates `q` in element-KIND blocks, in
     # `built` order -- NOT in path order, which is the network's own edge order. The two
     # coincide only for a project with a single element kind, so translate here, once.
     layout: dict[int, int] = {}
@@ -2014,7 +2014,7 @@ def _build(*, ambient_conditions, g, species, levels, profiles, elements, zones,
             junction_x0[i, : len(row)] = torch.tensor(row, dtype=F64)
 
     return Project(
-        net=net, elements=built, drives=drives, zones=zone_names, ambient=ambient, paths=paths,
+        net=net, laws=built, drives=drives, zones=zone_names, ambient=ambient, paths=paths,
         species=species, T_zone=torch.tensor(T_list, dtype=F64),
         zone_volumes=torch.tensor(V_list, dtype=F64), g=g,
         ambient_conditions=ambient_conditions, profiles=profiles, x0=x0, sources=sources,
@@ -2279,7 +2279,7 @@ def project_to_model(project: Project, *, ambient: dict | None = None, species: 
     T[net.node_index(project.ambient)] = amb["Ta"]
     rho = amb["Pb"] / (R_AIR * T)
     volumes = net.node_attr("volume", default=0.0)
-    check_flow_balanced(net, project.elements, project.flow_balanced, where="prj")
+    check_flow_balanced(net, project.laws, project.flow_balanced, where="prj")
     # The zones only: a duct junction's air-mass change is not part of the option, and an
     # air handler's plenum is not a node of the airflow solve.
     zones = set(project.zones) - set(project.flow_balanced)
@@ -2292,10 +2292,10 @@ def project_to_model(project: Project, *, ambient: dict | None = None, species: 
         [ZoneAirMassChange(zone_nodes, volumes[zone_nodes])]
         if zone_mass_change and zone_nodes else []
     )
-    air = PotentialFlowLayer(net, "air", project.elements, drives=project.drives,
-                             boundary=[project.ambient, *project.flow_balanced],
-                             quantity="pressure", unit="Pa", flow_unit="kg/s",
-                             node_sources=node_sources)
+    air = KirchhoffLayer(net, "air", project.laws, drives=project.drives,
+                         boundary=[project.ambient, *project.flow_balanced],
+                         quantity="pressure", unit="Pa", flow_unit="kg/s",
+                         node_sources=node_sources)
     layers: dict = {"air": air}
     # UVGI filters: their transmission follows every airflow solve (`FilterTransmission`).
     flow_filters = [f for f in project.edge_filters.values() if f.depends_on_flow]

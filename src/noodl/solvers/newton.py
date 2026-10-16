@@ -72,7 +72,7 @@ def inner_solve_rtol(dtype: torch.dtype) -> float:
     This is the same "the dtype cannot be asked for precision it does not have" argument
     ``newton``'s own dtype-derived ``atol``/``rtol`` default makes, applied to the linear
     solve instead of to the Newton convergence test. It lives here, next to that default,
-    rather than in any one caller: ``PotentialFlowLayer.linear_init`` needs the identical
+    rather than in any one caller: ``KirchhoffLayer.linear_init`` needs the identical
     floor for the identical reason.
     """
     return max(_INNER_RTOL, _INNER_RTOL_ULPS * float(torch.finfo(dtype).eps))
@@ -160,6 +160,16 @@ class NewtonResult:
     backend: str | None = None
 
 
+def newton_tolerances(
+    dtype: torch.dtype, atol: float | None, rtol: float | None
+) -> tuple[float, float]:
+    """``newton``'s ``(atol, rtol)``: each given value, or ``sqrt(finfo(dtype).eps)`` for
+    one left ``None``, ``dtype`` being the residual's. An instance has converged when its
+    residual's max-norm is below ``atol + rtol`` times its first residual's."""
+    default_tol = math.sqrt(torch.finfo(dtype).eps)
+    return (default_tol if atol is None else atol, default_tol if rtol is None else rtol)
+
+
 def newton(
     residual: Callable[[torch.Tensor], torch.Tensor],
     operator: Callable[[torch.Tensor], LinearOperator | torch.Tensor],
@@ -200,7 +210,7 @@ def newton(
     ``where`` is the caller's own name for this solve, used to prefix BOTH Newton's own
     final-convergence error and every inner ``solvers.select.solve`` refusal or failure it
     triggers. It defaults to ``"newton"``, which is all a standalone call can say; a layer
-    passes something like ``"PotentialFlowLayer 'air' solve"``, because slopes change
+    passes something like ``"KirchhoffLayer 'air' solve"``, because slopes change
     between Newton iterates and an instance can lose grounding mid-iteration (a fan reaching
     shutoff, a damper closing) -- and in a composed model over one network, "newton:
     method='auto' refuses to split the batch" does not say WHICH layer failed.
@@ -241,12 +251,7 @@ def newton(
     """
     x = x0
     r = residual(x)
-    if atol is None or rtol is None:
-        default_tol = math.sqrt(torch.finfo(r.dtype).eps)
-        if atol is None:
-            atol = default_tol
-        if rtol is None:
-            rtol = default_tol
+    atol, rtol = newton_tolerances(r.dtype, atol, rtol)
     if r.shape[-1] == 0:
         # Zero interior unknowns (every node is a boundary node): there is nothing to
         # iterate on, and `r.abs().amax(dim=-1)` below would raise IndexError ("Expected

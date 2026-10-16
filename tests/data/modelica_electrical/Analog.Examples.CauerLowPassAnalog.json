@@ -1,0 +1,209 @@
+{
+  "format": "noodl-modelica-electrical/1",
+  "model": "Modelica.Electrical.Analog.Examples.CauerLowPassAnalog",
+  "mbl_commit": "55abf579598ca81cae0a82f337350375958e6722",
+  "openmodelica": "OpenModelica 1.27.1~2-g6db4671",
+  "msl": "4.1.0",
+  "experiment": {
+    "StartTime": 0.0,
+    "StopTime": 60.0,
+    "Interval": 0.1,
+    "Tolerance": 1e-12
+  },
+  "experiment_declared": {
+    "StopTime": 60.0
+  },
+  "components": [
+    {
+      "name": "G",
+      "class": "Modelica.Electrical.Analog.Basic.Ground",
+      "parameters": {}
+    },
+    {
+      "name": "C1",
+      "class": "Modelica.Electrical.Analog.Basic.Capacitor",
+      "parameters": {
+        "C": 1.072
+      },
+      "initial": {
+        "v": 0.0
+      }
+    },
+    {
+      "name": "C2",
+      "class": "Modelica.Electrical.Analog.Basic.Capacitor",
+      "parameters": {
+        "C": 0.26380177746657757
+      },
+      "initial": {
+        "v": 0.0
+      }
+    },
+    {
+      "name": "C3",
+      "class": "Modelica.Electrical.Analog.Basic.Capacitor",
+      "parameters": {
+        "C": 1.682
+      },
+      "initial": {
+        "v": 0.0
+      }
+    },
+    {
+      "name": "C4",
+      "class": "Modelica.Electrical.Analog.Basic.Capacitor",
+      "parameters": {
+        "C": 0.8365378334947966
+      },
+      "initial": {
+        "v": 0.0
+      }
+    },
+    {
+      "name": "C5",
+      "class": "Modelica.Electrical.Analog.Basic.Capacitor",
+      "parameters": {
+        "C": 0.7262
+      },
+      "initial": {
+        "v": 0.0
+      }
+    },
+    {
+      "name": "L1",
+      "class": "Modelica.Electrical.Analog.Basic.Inductor",
+      "parameters": {
+        "L": 1.304
+      },
+      "initial": {
+        "i": 0.0
+      }
+    },
+    {
+      "name": "L2",
+      "class": "Modelica.Electrical.Analog.Basic.Inductor",
+      "parameters": {
+        "L": 0.8586
+      },
+      "initial": {
+        "i": 0.0
+      }
+    },
+    {
+      "name": "R1",
+      "class": "Modelica.Electrical.Analog.Basic.Resistor",
+      "parameters": {
+        "R": 1.0,
+        "T_ref": 300.15,
+        "alpha": 0.0,
+        "useHeatPort": false,
+        "T": 300.15
+      }
+    },
+    {
+      "name": "R2",
+      "class": "Modelica.Electrical.Analog.Basic.Resistor",
+      "parameters": {
+        "R": 1.0,
+        "T_ref": 300.15,
+        "alpha": 0.0,
+        "useHeatPort": false,
+        "T": 300.15
+      }
+    },
+    {
+      "name": "V",
+      "class": "Modelica.Electrical.Analog.Sources.StepVoltage",
+      "parameters": {
+        "V": 1.0,
+        "offset": 0.0,
+        "startTime": 1.0
+      }
+    }
+  ],
+  "connections": [
+    [
+      "R1.n",
+      "C1.p"
+    ],
+    [
+      "C1.n",
+      "G.p"
+    ],
+    [
+      "L1.p",
+      "C2.p"
+    ],
+    [
+      "L1.p",
+      "C1.p"
+    ],
+    [
+      "L1.n",
+      "C2.n"
+    ],
+    [
+      "C2.n",
+      "C3.p"
+    ],
+    [
+      "C2.n",
+      "C4.p"
+    ],
+    [
+      "C2.n",
+      "L2.p"
+    ],
+    [
+      "L2.n",
+      "C4.n"
+    ],
+    [
+      "C4.n",
+      "C5.p"
+    ],
+    [
+      "C4.n",
+      "R2.p"
+    ],
+    [
+      "C1.n",
+      "C3.n"
+    ],
+    [
+      "C1.n",
+      "C5.n"
+    ],
+    [
+      "R2.n",
+      "C1.n"
+    ],
+    [
+      "R1.p",
+      "V.p"
+    ],
+    [
+      "V.n",
+      "G.p"
+    ]
+  ],
+  "signals": [],
+  "compared": [
+    "C1.i",
+    "C1.v",
+    "C2.i",
+    "C2.v",
+    "C3.i",
+    "C3.v",
+    "C4.i",
+    "C4.v",
+    "C5.i",
+    "C5.v",
+    "L1.i",
+    "L2.i",
+    "R1.i",
+    "R2.i",
+    "V.i"
+  ],
+  "parameter_precision": "Reals from the simulation result (full double precision)"
+}

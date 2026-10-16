@@ -16,12 +16,12 @@ from noodl.apps.building_physics import (
     build_model,
     crack,
     duct,
-    duct_elements_from_edges,
+    duct_laws_from_edges,
     fan,
-    fan_elements_from_edges,
+    fan_law_from_edges,
     initial_drivers,
     initial_state,
-    orifice_elements_from_edges,
+    orifice_law_from_edges,
     room,
 )
 from noodl.components import Component, ComponentError
@@ -52,10 +52,10 @@ def _building():
 def _model(net):
     element, closure = air_handler_from_edges(net, "air_handler")
     plenums = air_handler_plenums(net, "air_handler")
-    ducts, drives = duct_elements_from_edges(net)
-    elements = [orifice_elements_from_edges(net, "airpath"), *ducts,
-                fan_elements_from_edges(net), element]
-    model = build_model(net, air_elements=elements,
+    ducts, drives = duct_laws_from_edges(net)
+    elements = [orifice_law_from_edges(net, "airpath"), *ducts,
+                fan_law_from_edges(net), element]
+    model = build_model(net, air_laws=elements,
                         drives=[Stack.from_network(net, "airpath"), *drives],
                         thermal=False, species=1, closures=[closure], flow_balanced=plenums,
                         storage_free=plenums)
@@ -81,7 +81,7 @@ def test_the_building_moves_the_air_its_components_prescribe():
     net, _ = _building().flatten(dtype=F64)
     model, state, drivers = _model(net)
     out = model.steady(state, drivers, atol=1e-14, rtol=1e-14)
-    air = model.potential["air"]
+    air = model.kirchhoff["air"]
     torch.testing.assert_close(air.flows_of_kind(out["air.q"], "duct_terminal"),
                                torch.tensor([-0.02, 0.02], dtype=F64), rtol=1e-10, atol=0)
     torch.testing.assert_close(air.flows_of_kind(out["air.q"], "air_handler"),
@@ -180,8 +180,8 @@ def test_a_pressure_dependent_edge_on_a_plenum_is_refused_by_name():
     element, closure = air_handler_from_edges(net, "air_handler")
     plenums = air_handler_plenums(net, "air_handler")
     with pytest.raises(ValueError, match="ahu.supply"):
-        build_model(net, air_elements=[orifice_elements_from_edges(net, "airpath"),
-                                       fan_elements_from_edges(net), element],
+        build_model(net, air_laws=[orifice_law_from_edges(net, "airpath"),
+                                       fan_law_from_edges(net), element],
                     drives=[Stack.from_network(net, "airpath")], thermal=False, species=1,
                     closures=[closure], flow_balanced=plenums, storage_free=plenums)
 

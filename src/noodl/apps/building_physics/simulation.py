@@ -97,21 +97,21 @@ def _evaluate_controls(network: ControlNetwork, state: State, drivers: Drivers, 
 def _with_pressure_differences(model: Model, state: State, drivers: Drivers,
                                network: ControlNetwork | None) -> State:
     """`state` with every air-layer edge's driving pressure difference at it (Pa,
-    `PotentialFlowLayer.dp`) under `"air.dp"`, when a sensor of the network reads it."""
+    `KirchhoffLayer.dp`) under `"air.dp"`, when a sensor of the network reads it."""
     if network is None or not network.reads_state(PRESSURE_DIFFERENCE):
         return state
-    if "air" not in model.potential:
+    if "air" not in model.kirchhoff:
         raise ValueError(f"simulate: a sensor of control network {network.name!r} reads "
                          f"{PRESSURE_DIFFERENCE!r}, the pressure differences across the "
                          f"airflow layer 'air', which the model does not have (its potential "
-                         f"layers are {sorted(model.potential)})")
+                         f"layers are {sorted(model.kirchhoff)})")
     drv = model._apply_closures(state, drivers)
-    return {**state, PRESSURE_DIFFERENCE: model.potential["air"].dp(state["air.phi"], drv)}
+    return {**state, PRESSURE_DIFFERENCE: model.kirchhoff["air"].dp(state["air.phi"], drv)}
 
 
 def _air_mass_source(model: Model) -> tuple[str, ZoneAirMassChange] | None:
     """The airflow layer carrying a `ZoneAirMassChange` node source, and the source."""
-    for name, layer in model.potential.items():
+    for name, layer in model.kirchhoff.items():
         for ns in layer.node_sources:
             if isinstance(ns, ZoneAirMassChange):
                 return name, ns
@@ -119,11 +119,11 @@ def _air_mass_source(model: Model) -> tuple[str, ZoneAirMassChange] | None:
 
 
 def _airflow(model: Model, state: State, drivers: Drivers, **kw) -> State:
-    """Every closure, then the potential layers alone at `state`: the quasi-steady flows,
+    """Every closure, then the Kirchhoff layers alone at `state`: the quasi-steady flows,
     no transport layer advanced."""
     drv = model._apply_closures(state, drivers)
     new = dict(state)
-    for name, layer in model.potential.items():
+    for name, layer in model.kirchhoff.items():
         phi, q = layer.solve(drv[f"{name}.phi_boundary"], drv, drv.get(f"{name}.sources"), **kw)
         new[f"{name}.phi"], new[f"{name}.q"] = phi, q
     return new
@@ -205,7 +205,7 @@ def simulate(model: Model, state: State, drivers: Drivers, times, *,
     `"airflow_retries"`, the end time (s) of every step that was retried, once per step.
 
     Returns `"time"` `(N,)`, and per row the state's `"<layer>.q"`, `"<layer>.phi"` of every
-    potential layer, `"<layer>.x"` of every transport layer, `"<layer>.capacity"` of every
+    Kirchhoff layer, `"<layer>.x"` of every transport layer, `"<layer>.capacity"` of every
     transport layer whose capacity a closure writes (the zones' air mass, which changes with
     their temperature and pressure) and the control network's `"<network>.outputs"`, stacked
     on a leading axis.
@@ -267,7 +267,7 @@ def simulate(model: Model, state: State, drivers: Drivers, times, *,
     state = {**state, **model.initial_capacities(state, d)}
     mass = start_mass(state, d) if found else None
 
-    keys = [f"{n}.{s}" for n in model.potential for s in ("q", "phi")]
+    keys = [f"{n}.{s}" for n in model.kirchhoff for s in ("q", "phi")]
     keys += [f"{n}.x" for n in model.transport]
     # A transport layer's capacity changes with the temperatures and pressure when a closure
     # writes it (a zone's air mass): its value at every row, for what is computed afterwards.
@@ -455,7 +455,7 @@ def simulate_project(project, *, inputs: Sequence[Input] = (), diagnostics: dict
         d = apply_inputs(drivers, bound, 0.0, rc.steady_calendar())
         out_state = steady(model, state, d, **step_kwargs)
         out = {f"{n}.{s}": out_state[f"{n}.{s}"].unsqueeze(0)
-               for n in model.potential for s in ("q", "phi")}
+               for n in model.kirchhoff for s in ("q", "phi")}
         out.update({f"{n}.x": out_state[f"{n}.x"].unsqueeze(0) for n in model.transport})
         out.update({f"{n}.capacity": out_state[f"{n}.capacity"].unsqueeze(0)
                     for n in model.transport if f"{n}.capacity" in out_state})

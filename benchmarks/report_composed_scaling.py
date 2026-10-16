@@ -99,7 +99,7 @@ def measure_budget_row(
     budget is a budget for the configuration, and a backward pass that needs more than the
     forward pass is still this row's peak.
 
-    `solver` is the layer's inner linear solver (`PotentialFlowLayer(linear_solver=...)`),
+    `solver` is the layer's inner linear solver (`KirchhoffLayer(linear_solver=...)`),
     carried into the child process and recorded in the row. It defaults to `"auto"`, the
     shipped default, so the gate keeps measuring what ships; the report additionally measures
     every entry of `SOLVERS`, which is the evidence the `"auto"` default is

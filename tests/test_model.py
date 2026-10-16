@@ -9,8 +9,8 @@ import torch
 
 from noodl.drives import ConstantDrive
 from noodl.elements import PowerLaw
-from noodl.elements.base import Element
-from noodl.layers.potential import PotentialFlowLayer
+from noodl.elements.base import ConstitutiveLaw
+from noodl.layers.kirchhoff import KirchhoffLayer
 from noodl.layers.reaction import FirstOrderDecay
 from noodl.layers.transport import TransportLayer
 from noodl.model import Model, Ports
@@ -34,7 +34,7 @@ def _net():
 def _build(*, learnable=False, closures=(), reactions=(), substeps=None, **model_kw):
     net = _net()
     el = PowerLaw(torch.tensor([0.01, 0.02, 0.01], dtype=F64), 0.65, learnable=learnable)
-    air = PotentialFlowLayer(
+    air = KirchhoffLayer(
         net, "air", [el], drives=[ConstantDrive("airpath", "wind")], boundary=["ambient"],
         quantity="pressure", unit="Pa",
     )
@@ -59,7 +59,7 @@ def _build(*, learnable=False, closures=(), reactions=(), substeps=None, **model
 def _build_multi():
     """The same network with a TWO-species transport layer: stacked (n_i, K) state layout."""
     net = _net()
-    air = PotentialFlowLayer(
+    air = KirchhoffLayer(
         net, "air", [PowerLaw(torch.tensor([0.01, 0.02, 0.01], dtype=F64), 0.65)],
         drives=[ConstantDrive("airpath", "wind")], boundary=["ambient"],
     )
@@ -82,7 +82,7 @@ def test_step_produces_every_state_key_and_the_implicit_step_satisfies_the_balan
     new = model.step(state, drivers, 600.0)
     assert set(new) == {"air.phi", "air.q", "species.x"}
     assert new["air.phi"].shape == (3,) and new["air.q"].shape == (3,)
-    q = model.potential["air"].flows_of_kind(new["air.q"], "airpath")
+    q = model.kirchhoff["air"].flows_of_kind(new["air.q"], "airpath")
     rate = species.rate(new["species.x"], q, drivers["species.sources"],
                         drivers["species.x_boundary"])
     # backward Euler: (x_new - x_old) / dt == rate(x_new)
@@ -152,12 +152,12 @@ def test_a_missing_required_driver_is_named():
         model.step(state, drivers, 60.0)
 
 
-def test_a_transport_layer_whose_kinds_no_potential_layer_provides_reads_a_driver():
+def test_a_transport_layer_whose_kinds_no_kirchhoff_layer_provides_reads_a_driver():
     """The rule this replaces refused the model outright. A transport layer advecting on a
-    kind the potential layer does not provide is now driver-prescribed."""
+    kind the Kirchhoff layer does not provide is now driver-prescribed."""
     net = _net()
     net.add_edge("z1", "z2", kind="duct")
-    air = PotentialFlowLayer(
+    air = KirchhoffLayer(
         net, "air", [PowerLaw(torch.tensor([0.01, 0.02, 0.01], dtype=F64), 0.65)],
         boundary=["ambient"],
     )
@@ -176,7 +176,7 @@ def test_a_transport_layer_whose_kinds_no_potential_layer_provides_reads_a_drive
 
 def test_layer_dict_is_validated():
     net = _net()
-    air = PotentialFlowLayer(
+    air = KirchhoffLayer(
         net, "air", [PowerLaw(torch.tensor([0.01, 0.02, 0.01], dtype=F64), 0.65)],
         boundary=["ambient"],
     )
@@ -376,7 +376,7 @@ def test_a_two_species_layer_steps_to_a_steady_state_in_the_stacked_layout():
     zero = torch.zeros(3, 2, dtype=F64)
     new = model.step(state, drivers, 600.0)
     assert new["gas.x"].shape == (2, 2)
-    q = model.potential["air"].flows_of_kind(new["air.q"], "airpath")
+    q = model.kirchhoff["air"].flows_of_kind(new["air.q"], "airpath")
     torch.testing.assert_close(
         gas.rate(new["gas.x"], q, zero, drivers["gas.x_boundary"]),
         (new["gas.x"] - state["gas.x"]) / 600.0, rtol=1e-9, atol=1e-15,
@@ -413,7 +413,7 @@ def test_closures_and_reactions_are_checked_for_callability_at_construction():
 
 def test_gradient_of_a_steady_species_loss_wrt_leakage_matches_finite_differences():
     # `steady` is the other differentiable entry point (the transport steady solve on the
-    # potential layer's adjoint); the tests above cover `step` only. Tight Newton
+    # Kirchhoff layer's adjoint); the tests above cover `step` only. Tight Newton
     # tolerances so the finite difference is not comparing solver noise.
     tight = {"atol": 1e-14, "rtol": 1e-14}
     _, model, state, drivers, el, _ = _build(learnable=True)
@@ -641,7 +641,7 @@ def test_iterate_steps_every_transport_layer_but_tests_only_the_named_ones():
     """
     tight = {"atol": 1e-14, "rtol": 1e-14}
     net = _net()
-    air = PotentialFlowLayer(
+    air = KirchhoffLayer(
         net, "air", [PowerLaw(torch.tensor([0.01, 0.02, 0.01], dtype=F64), 0.65)],
         drives=[ConstantDrive("airpath", "wind")], boundary=["ambient"],
     )
@@ -692,7 +692,7 @@ def test_iterate_steps_every_transport_layer_but_tests_only_the_named_ones():
 def _prescribed_flow_network():
     """Two interior nodes and one boundary node, joined by 'link' edges only.
 
-    No potential layer can own 'link' (no element is built for it), so the flows must
+    No Kirchhoff layer can own 'link' (no element is built for it), so the flows must
     come from the driver "conc.q". Edge order is the insertion order: a->b, b->amb.
     """
     net = Network(dtype=torch.float64)
@@ -708,7 +708,7 @@ def _prescribed_flow_network():
     return net, layer
 
 
-def test_model_reads_transport_flows_from_a_driver_when_no_potential_layer_owns_them():
+def test_model_reads_transport_flows_from_a_driver_when_no_kirchhoff_layer_owns_them():
     net, layer = _prescribed_flow_network()
     model = Model(net, {"conc": layer})
     assert model.flow_layer_of["conc"] is None
@@ -791,9 +791,9 @@ def test_a_closure_still_may_not_write_a_state_key():
                         "conc.q": torch.ones(2, dtype=torch.float64)})
 
 
-def test_model_raises_when_a_layer_has_both_a_potential_owner_and_a_flow_driver():
-    """Uses `_build()`, this module's own fixture for a Model with one potential layer
-    ("air") and one transport layer ("species") the potential layer owns."""
+def test_model_raises_when_a_layer_has_both_a_kirchhoff_owner_and_a_flow_driver():
+    """Uses `_build()`, this module's own fixture for a Model with one Kirchhoff layer
+    ("air") and one transport layer ("species") the Kirchhoff layer owns."""
     net, model, state, drivers, _, layer = _build()
     drivers = dict(drivers)
     name = next(iter(model.transport))
@@ -810,9 +810,9 @@ class _WritesSpeciesQ:
         return {"species.q": torch.zeros(3, dtype=F64)}
 
 
-def test_a_closure_may_not_write_the_flow_driver_of_a_layer_a_potential_layer_owns():
+def test_a_closure_may_not_write_the_flow_driver_of_a_layer_a_kirchhoff_layer_owns():
     """The `_apply_closures` carve-out has three conjuncts, and the third -- that NO
-    potential layer owns the transport layer's kinds -- is what keeps a closure from
+    Kirchhoff layer owns the transport layer's kinds -- is what keeps a closure from
     quietly overwriting flows the solve produced. "air" owns "species" here, so
     `"species.q"` is refused as a state key rather than accepted as a driver, and the
     layer goes on seeing the solved flows."""
@@ -928,7 +928,7 @@ def test_a_same_named_driver_does_not_satisfy_a_silent_closures_state_key():
 def test_a_closure_may_declare_the_flow_driver_of_an_ownerless_layer_as_state():
     """The construction-time state_keys/layer-state collision check must mirror
     `_apply_closures`' own ownerless-"<layer>.q" carve-out -- "<layer>.q" for a transport
-    layer no potential layer owns is a DRIVER (what a flow closure writes), not that
+    layer no Kirchhoff layer owns is a DRIVER (what a flow closure writes), not that
     layer's state, so a closure may legitimately declare it as state it carries across
     steps (a flow closure that also remembers its own last-written flow)."""
 
@@ -1149,7 +1149,7 @@ def test_iterate_does_not_warn_when_the_key_is_seeded():
 
 
 def test_current_flows_returns_closure_written_driver_prescribed_flow():
-    """A transport layer with no owning potential layer: its flow is written by a closure,
+    """A transport layer with no owning Kirchhoff layer: its flow is written by a closure,
     only visible after closures run -- `current_flows` must run them and return it."""
     net = Network(dtype=torch.float64)
     net.add_node("b")
@@ -1170,8 +1170,8 @@ def test_current_flows_returns_closure_written_driver_prescribed_flow():
     assert torch.equal(flows, torch.tensor([2.5], dtype=torch.float64))
 
 
-def test_current_flows_returns_potential_owned_flow():
-    """A transport layer whose flow kind is owned by a potential layer: `current_flows`
+def test_current_flows_returns_kirchhoff_owned_flow():
+    """A transport layer whose flow kind is owned by a Kirchhoff layer: `current_flows`
     must read it from the SOLVED state, not require a driver."""
     net = Network(dtype=torch.float64)
     net.add_node("b")
@@ -1179,7 +1179,7 @@ def test_current_flows_returns_potential_owned_flow():
     net.add_edge("i", "b", kind="link")
     from noodl.elements.conductance import Conductance
 
-    air = PotentialFlowLayer(net, "air", [Conductance(kind="link", g=1.0)], boundary=["b"])
+    air = KirchhoffLayer(net, "air", [Conductance(kind="link", g=1.0)], boundary=["b"])
     species = TransportLayer(
         net, "x", capacity=torch.tensor([1.0], dtype=torch.float64), flow_kind="link",
         boundary=["b"],
@@ -1193,7 +1193,7 @@ def test_current_flows_returns_potential_owned_flow():
     assert torch.equal(flows, air.flows_of_kind(solved_q, species.flow_kinds))
 
 
-def test_current_flows_solves_a_potential_owner_when_the_state_has_no_q_yet():
+def test_current_flows_solves_a_kirchhoff_owner_when_the_state_has_no_q_yet():
     """The first pass of a step: the start state carries no "<owner>.q" (project_to_model's
     initial state has only "species.x"), so current_flows must SOLVE the owner for these
     drivers, and agree with what a step would have solved."""
@@ -1203,7 +1203,7 @@ def test_current_flows_solves_a_potential_owner_when_the_state_has_no_q_yet():
     net.add_node("b")
     net.add_node("i")
     net.add_edge("i", "b", kind="link")
-    air = PotentialFlowLayer(net, "air", [Conductance(kind="link", g=1.0)], boundary=["b"])
+    air = KirchhoffLayer(net, "air", [Conductance(kind="link", g=1.0)], boundary=["b"])
     species = TransportLayer(
         net, "x", capacity=torch.tensor([1.0], dtype=torch.float64), flow_kind="link",
         boundary=["b"],
@@ -1221,7 +1221,7 @@ def test_current_flows_solves_a_potential_owner_when_the_state_has_no_q_yet():
     assert flows.item() == pytest.approx(0.3)  # the injected 0.3 must leave through the edge
 
 
-def test_current_flows_refuses_a_flow_driver_beside_a_potential_owner_on_the_solve_path():
+def test_current_flows_refuses_a_flow_driver_beside_a_kirchhoff_owner_on_the_solve_path():
     """The two-sources-of-flows refusal must not depend on whether the state happens to carry
     a solved q yet: `_kind_flows` makes it on the read path, and the solve path makes it too."""
     from noodl.elements.conductance import Conductance
@@ -1230,7 +1230,7 @@ def test_current_flows_refuses_a_flow_driver_beside_a_potential_owner_on_the_sol
     net.add_node("b")
     net.add_node("i")
     net.add_edge("i", "b", kind="link")
-    air = PotentialFlowLayer(net, "air", [Conductance(kind="link", g=1.0)], boundary=["b"])
+    air = KirchhoffLayer(net, "air", [Conductance(kind="link", g=1.0)], boundary=["b"])
     species = TransportLayer(
         net, "x", capacity=torch.tensor([1.0], dtype=torch.float64), flow_kind="link",
         boundary=["b"],
@@ -1240,7 +1240,7 @@ def test_current_flows_refuses_a_flow_driver_beside_a_potential_owner_on_the_sol
     drivers = {
         "air.phi_boundary": torch.zeros(1, dtype=torch.float64),
         "x.x_boundary": torch.zeros(1, dtype=torch.float64),
-        "x.q": torch.tensor([0.9], dtype=torch.float64),  # contradicts the potential layer
+        "x.q": torch.tensor([0.9], dtype=torch.float64),  # contradicts the Kirchhoff layer
     }
     with pytest.raises(ValueError, match="one source of flows, not two"):
         model.current_flows("x", state, drivers)
@@ -1385,7 +1385,7 @@ def test_a_non_converged_iteration_refuses_to_return_when_a_gradient_is_wanted()
     Why not the obvious fixture: `model.steady(..., on_failure="return")` with a
     `learnable=True` element cannot reach `_iterate`'s own non-convergence branch with
     `needs_adjoint` True, because `solve_kwargs` (including `on_failure`) is forwarded to
-    every potential-layer solve too (module docstring), and `PotentialFlowLayer.solve`'s
+    every Kirchhoff-layer solve too (module docstring), and `KirchhoffLayer.solve`'s
     differentiable path (the default) refuses `on_failure="return"` UNCONDITIONALLY
     (`solvers.implicit.implicit_solve`, not only on the potential solve's own
     non-convergence) -- verified by running: it raises `ValueError` from `implicit_solve`
@@ -1409,7 +1409,7 @@ def test_a_non_converged_iteration_refuses_to_return_when_a_gradient_is_wanted()
     assert "species.x" in out and not bool(diag["converged"].all())
 
 
-class _DriverConductance(Element):
+class _DriverConductance(ConstitutiveLaw):
     """q = k * dp with k per edge from the driver "toy.k" (test-local)."""
 
     def __init__(self, kind):
@@ -1424,7 +1424,7 @@ class _DriverConductance(Element):
 
 class _HeadDependentConductance:
     """Closure: k = k0 * (1 + phi_upstream / 10), read from the FED state -- a Picard
-    coupling between a potential layer and its own coefficients."""
+    coupling between a Kirchhoff layer and its own coefficients."""
 
     def __init__(self, src, k0):
         self.src, self.k0 = src, k0
@@ -1440,7 +1440,7 @@ def _toy(k0=1.0, **model_kwargs):
         net.add_node(n)
     net.add_edge("a", "b", kind="link")
     net.add_edge("b", "c", kind="link")
-    layer = PotentialFlowLayer(net, "toy", [_DriverConductance("link")], boundary=["c"])
+    layer = KirchhoffLayer(net, "toy", [_DriverConductance("link")], boundary=["c"])
     src, _ = net.endpoints("link")
     k0 = torch.as_tensor(k0, dtype=torch.float64)
     closure = _HeadDependentConductance(src, k0)
@@ -1452,7 +1452,7 @@ def _toy(k0=1.0, **model_kwargs):
     return model, state, drivers, closure
 
 
-def test_iterate_tol_may_name_a_potential_layer():
+def test_iterate_tol_may_name_a_kirchhoff_layer():
     model, state, drivers, closure = _toy(
         coupling="iterate", iterate_tol={"toy": 1e-12}, iterate_max=200)
     diag: dict = {}
@@ -1470,11 +1470,11 @@ def test_iterate_tol_may_name_a_potential_layer():
 
 
 def test_iterate_tol_naming_an_unknown_layer_lists_both_kinds():
-    with pytest.raises(KeyError, match="potential"):
+    with pytest.raises(KeyError, match="Kirchhoff"):
         _toy(coupling="iterate", iterate_tol={"nope": 1e-9})
 
 
-def test_iterate_on_a_potential_layer_differentiates_the_fixed_point():
+def test_iterate_on_a_kirchhoff_layer_differentiates_the_fixed_point():
     k0 = torch.tensor(1.0, dtype=torch.float64, requires_grad=True)
     model, state, drivers, _ = _toy(k0=k0, coupling="iterate",
                                     iterate_tol={"toy": 1e-13}, iterate_max=300)
@@ -1490,7 +1490,7 @@ def test_iterate_on_a_potential_layer_differentiates_the_fixed_point():
     assert k0.grad.item() == pytest.approx(fd.item(), rel=1e-6)
 
 
-def test_unnamed_potential_layers_are_not_relaxed():
+def test_unnamed_kirchhoff_layers_are_not_relaxed():
     """A model naming only a transport layer must behave exactly as before."""
     _, it, state, drivers, _, _ = _build(coupling="iterate", iterate_tol={"species": 1e-11})
     diag: dict = {}
@@ -1522,7 +1522,7 @@ class _BoundaryFromState:
         return {"toy.phi_boundary": 1.0 + 0.5 * state["toy.phi"][..., self.b:self.b + 1]}
 
 
-def test_iterate_on_a_potential_layer_converges_its_boundary_too():
+def test_iterate_on_a_kirchhoff_layer_converges_its_boundary_too():
     """A closure may write the boundary potentials from the previous pass (the sewer's
     outfall heads). The interior here barely sees the boundary (a stiff tie to zero), so a
     test on the interior alone would stop with the boundary still ~1e-6 from its fixed
@@ -1531,10 +1531,10 @@ def test_iterate_on_a_potential_layer_converges_its_boundary_too():
     net.add_node("a")
     net.add_node("b")
     net.add_edge("a", "b", kind="link")
-    layer = PotentialFlowLayer(net, "toy", [PowerLaw(C=torch.tensor(1.0, dtype=torch.float64),
+    layer = KirchhoffLayer(net, "toy", [PowerLaw(C=torch.tensor(1.0, dtype=torch.float64),
                                                      n=torch.tensor(1.0, dtype=torch.float64),
                                                      kind="link")],
-                               boundary=["b"], node_sources=[_Ground([0], 1e6)])
+                           boundary=["b"], node_sources=[_Ground([0], 1e6)])
     model = Model(net, {"toy": layer}, closures=[_BoundaryFromState(1)], coupling="iterate",
                   iterate_tol={"toy": 1e-12}, iterate_max=500)
     state = {"toy.phi": torch.zeros(2, dtype=torch.float64),
@@ -1569,8 +1569,8 @@ def test_iterate_acceleration_arguments_are_refused_by_name():
     # acceleration belongs to the iterated coupling only
     with pytest.raises(ValueError, match="coupling='iterate'"):
         _toy(iterate_acceleration="anderson")
-    # ... and to a potential layer named in iterate_tol
-    with pytest.raises(ValueError, match="potential layer"):
+    # ... and to a Kirchhoff layer named in iterate_tol
+    with pytest.raises(ValueError, match="Kirchhoff layer"):
         _build(coupling="iterate", iterate_tol={"species": 1e-11},
                iterate_acceleration="anderson")
     # ... whose flow tolerance it needs
@@ -1676,7 +1676,7 @@ def test_anderson_keeps_the_fixed_point_the_relaxed_iteration_is_attracted_to():
     net.add_edge("a", "c", kind="link")
     root = (1.0 - 0.2 ** 0.5) / 2.0
     for acceleration in (None, "anderson"):
-        layer = PotentialFlowLayer(net, "toy", [_DriverConductance("link")], boundary=["c"])
+        layer = KirchhoffLayer(net, "toy", [_DriverConductance("link")], boundary=["c"])
         model = Model(net, {"toy": layer}, closures=[_RootPair()], coupling="iterate",
                       iterate_tol={"toy": 1e-13}, iterate_max=400,
                       iterate_acceleration=acceleration, iterate_flow_tol={"toy": 1e-12})

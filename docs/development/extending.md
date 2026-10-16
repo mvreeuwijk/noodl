@@ -9,24 +9,24 @@ with no core change required.
 
 ## Level 1: a new branch law
 
-Every branch law is a `torch.nn.Module` subclass of `noodl.elements.base.Element`. See
-[Elements and drives](../concepts/elements.md#the-element-contract) for the full contract;
-in short, an element owns one edge `kind` and provides `flow`, `dflow` and `linear_init`.
+Every branch law is a `torch.nn.Module` subclass of `noodl.elements.base.ConstitutiveLaw`. See
+[Constitutive laws and drives](../concepts/elements.md#the-constitutivelaw-contract) for the full contract;
+in short, a law owns one edge `kind` and provides `flow`, `dflow` and `linear_init`.
 
 Here is a new one, `Sigmoid`, with a single learnable coefficient (a "steepness") — verbatim
 from `tests/test_extension_recipe.py`:
 
 ```python
-from noodl.elements.base import Element
+from noodl.elements.base import ConstitutiveLaw
 import torch
 
 
-class Sigmoid(Element):
+class Sigmoid(ConstitutiveLaw):
     """q = tanh(k * dp): a smooth, bounded, odd branch law with a learnable steepness `k`.
 
     Follows `Conductance`'s contract exactly: `__init__` wraps its one coefficient with
-    `Element._param` (so `learnable=True` registers it as a real `nn.Parameter`, reachable
-    by `torch.func.functional_call` the same way every built-in element is), and `flow`,
+    `ConstitutiveLaw._param` (so `learnable=True` registers it as a real `nn.Parameter`, reachable
+    by `torch.func.functional_call` the same way every built-in law is), and `flow`,
     `dflow` and `linear_init` are all overridden with closed forms rather than left to the
     base class's autograd default -- exact and cheap, exactly the reason `Conductance` does
     the same.
@@ -49,7 +49,7 @@ class Sigmoid(Element):
 
 This follows `noodl.elements.conductance.Conductance`'s contract exactly:
 
-- `__init__` wraps its one coefficient with `Element._param(value, learnable)`, never with a
+- `__init__` wraps its one coefficient with `ConstitutiveLaw._param(value, learnable)`, never with a
   bare `nn.Parameter(...)` or a plain tensor held on `self`. `_param` is what makes
   `learnable=True` produce a real, module-registered parameter — visible to
   `.named_parameters()`, `state_dict()`, and the `torch.func.functional_call` substitution the
@@ -64,16 +64,22 @@ This follows `noodl.elements.conductance.Conductance`'s contract exactly:
 No other file changes. The law lives entirely in the test module (or, in a real project, in
 your own package) and needs no change to `noodl.elements`, `noodl.layers` or `noodl.model`.
 
+A law that is not a function of the potential difference (an ideal source, a flow-controlled
+law, a law with storage or one coupling several edges) subclasses `noodl.elements.ImplicitLaw`
+instead and implements `residual(dp, q, drivers, ctx)`; the layer then solves it by Modified
+Nodal Analysis. See
+[Implicit, coupled and dynamic constitutive laws](../concepts/elements.md#implicit-coupled-and-dynamic-constitutive-laws).
+
 ## Level 2: a new application
 
 A "new application" is nothing but a builder function returning `(model, state, drivers)` from
-existing layers and elements, plus (if the application steps forward in time) an
+existing layers and laws, plus (if the application steps forward in time) an
 `initial_state` function and any closures it needs. Here is the smallest one that exercises
 `Sigmoid`: an ambient boundary and two zones, joined by three `airpath` edges, one
-`PotentialFlowLayer`, one `Model`. Verbatim from `tests/test_extension_recipe.py`:
+`KirchhoffLayer`, one `Model`. Verbatim from `tests/test_extension_recipe.py`:
 
 ```python
-from noodl.layers.potential import PotentialFlowLayer
+from noodl.layers.kirchhoff import KirchhoffLayer
 from noodl.model import Model
 from noodl.topology import Network
 import torch
@@ -84,8 +90,8 @@ F64 = torch.float64
 def build_two_zone(*, learnable: bool = True):
     """(model, state, drivers) for the smallest network the new law can be checked on.
 
-    ambient (boundary) -> z1 -> z2 -> ambient, three `airpath` edges, one `Sigmoid` element
-    covering all three (steepness `k`, shape (3,)). One `PotentialFlowLayer`, one `Model`.
+    ambient (boundary) -> z1 -> z2 -> ambient, three `airpath` edges, one `Sigmoid` law
+    covering all three (steepness `k`, shape (3,)). One `KirchhoffLayer`, one `Model`.
     No `TransportLayer`, no closures: nothing here needs one, and the guide's point is the
     smallest network that exercises the new law, not a full application.
     """
@@ -98,9 +104,9 @@ def build_two_zone(*, learnable: bool = True):
     net.add_edge("z2", "ambient", kind="airpath")
 
     k = torch.tensor([1.0, 0.8, 1.2], dtype=F64)
-    element = Sigmoid(k, learnable=learnable)
-    layer = PotentialFlowLayer(
-        net, "air", [element], boundary=["ambient"], quantity="pressure", unit="Pa",
+    law = Sigmoid(k, learnable=learnable)
+    layer = KirchhoffLayer(
+        net, "air", [law], boundary=["ambient"], quantity="pressure", unit="Pa",
     )
     model = Model(net, {"air": layer})
 
@@ -109,14 +115,14 @@ def build_two_zone(*, learnable: bool = True):
     return model, state, drivers
 ```
 
-This is deliberately the minimum: one potential layer and no transport layer, no closures. A
+This is deliberately the minimum: one Kirchhoff layer and no transport layer, no closures. A
 real application adds more of the same kind of thing, in a fixed place:
 
 - **`src/noodl/apps/<name>/network.py`** — the module a real application lives in. It defines
   the domain objects (see `Street`/`StreetNetwork` in
   `src/noodl/apps/street_aq/network.py` for a worked example: frozen dataclasses that validate
   their own inputs), a **builder** (`build_model` there, `build_two_zone` here) that
-  turns them into `(Model, State, Drivers)` by constructing a `Network`, one `Element` per
+  turns them into `(Model, State, Drivers)` by constructing a `Network`, one `ConstitutiveLaw` per
   edge kind, one layer per physical quantity, any closures, and the `Model` itself, and an
   **`initial_state(model)`** function that returns a state dict of the right shape for every
   layer the model owns (zeros, for `initial_state` in `network.py`, keyed by each transport
@@ -134,11 +140,9 @@ real application adds more of the same kind of thing, in a fixed place:
   the [Layers and models](../concepts/layers.md) page for the full key vocabulary.
 
 **Numerical blocks are not extension points (yet).** The tested extension path is laws and
-applications, as above — a new `Element` and a new builder composing existing layers. A new
+applications, as above — a new `ConstitutiveLaw` and a new builder composing existing layers. A new
 solver or layer class is a framework change, not an extension: it needs the same design,
-testing and review as any other change under `src/noodl/layers` or `src/noodl/solvers`. `ConstitutiveLayer` is the worked example of a
-standalone numerical block that was added this way rather than adapted into an existing
-extension point — see [Layers and models](../concepts/layers.md#constitutivelayer).
+testing and review as any other change under `src/noodl/layers` or `src/noodl/solvers`.
 
 ## Checking it
 
@@ -158,20 +162,20 @@ def test_interior_flow_balance_and_gradcheck_through_the_new_law():
         residual, torch.zeros_like(residual), atol=1e-10, rtol=0.0
     )
 
-    layer = model.potential["air"]
-    element = layer._elements[0]
+    layer = model.kirchhoff["air"]
+    law = layer._laws[0]
     phi_b = torch.zeros(1, dtype=F64)
 
     def f(k_):
         phi, _ = layer.solve(phi_b, {}, None, differentiable=True, atol=1e-12, rtol=1e-12)
         return phi[1:]
 
-    assert torch.autograd.gradcheck(f, (element.k,), eps=1e-6, atol=1e-5)
+    assert torch.autograd.gradcheck(f, (law.k,), eps=1e-6, atol=1e-5)
 ```
 
 `model.residuals` reports the interior nodal balance at a state — zero, to solver tolerance, at
 a steady state — and `gradcheck` confirms `Sigmoid`'s analytic `dflow` agrees with its `flow`
-through the whole implicit-adjoint solve, not just element-by-element.
+through the whole implicit-adjoint solve, not just law by law.
 
 ## What a real application must ship
 
@@ -202,7 +206,7 @@ It also ships its documentation, in the same change as the code:
   `initial_drivers(model, *, values=None)`, exported in `__all__` like every other
   application, and layers built with a physical `quantity`, `unit`, `flow_unit`, `source_unit` and
   `capacity_unit` (and `species_names`), so that `model.refs` names and units their keys.
-- **Units in every docstring.** A component field, element coefficient or drive parameter
+- **Units in every docstring.** A component field, law coefficient or drive parameter
   with a physical unit states it (`length` (m), `C` in the flow unit per Pa^n), and an
   application that reads network attributes declares them in an `attributes.py` like
   `noodl.apps.building_physics.attributes`.
@@ -220,14 +224,14 @@ place, and whenever a later change leaves them behind the code.
 ## A file-format reader
 
 Reading a model from a file is not a third extension point on top of the two above: a reader
-builds the same kind of network, elements and layers `build_two_zone` builds by hand, just
+builds the same kind of network, laws and layers `build_two_zone` builds by hand, just
 driven by a parsed file. It lives next to the application it feeds — `apps/sewer/inp.py`,
 `apps/water/inp.py`, `apps/building_physics/prj.py` — rather than in a shared location, because
 each format's own section names, column layouts and units are specific to it. The reader parses
 the file into the network and domain objects the application needs (`read_swmm_inp` and
 `read_epanet_inp` return a network the caller then passes to the application's own
 `build_model`; `project_to_model` in `apps/building_physics/prj.py` takes the extra step of
-assembling `(model, state, drivers)` itself, from the elements and drives `read_prj` already
+assembling `(model, state, drivers)` itself, from the laws and drives `read_prj` already
 built).
 
 For an `.inp`-style format, reuse `noodl.apps.inpfile` for the shared lexical layer —

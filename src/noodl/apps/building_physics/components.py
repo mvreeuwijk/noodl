@@ -125,7 +125,7 @@ def fan(name: str, *, flow: float, exterior: str | None = None) -> Component:
     pressures and the height (CONTAM's constant-mass-flow fan): from terminal `a` to `b`, or
     with `exterior="supply"` from the shared ambient into `a`, or with `exterior="exhaust"`
     from `a` to the ambient. Edge: `fan`, kind "fan"; build it with
-    `fan_elements_from_edges`. Ports: `a`, `b` (only `a` when exterior)."""
+    `fan_law_from_edges`. Ports: `a`, `b` (only `a` when exterior)."""
     if exterior not in (None, "supply", "exhaust"):
         raise ComponentError(f"{name}: exterior must be None, 'supply' or 'exhaust', got "
                              f"{exterior!r}")
@@ -162,7 +162,7 @@ def duct(name: str, *, length: float, diameter: float, roughness: float = DEFAUL
     `azimuth` or `facade`, and `Ch`); `azimuth`, `facade` or `Ch` without a `profile` are
     refused (a constant `Cp` is offered by `DuctNetwork.terminal`). Invalid lengths,
     diameters or losses are refused naming the duct. Build it with
-    `duct_elements_from_edges`. Ports: `a`, `b` (only `b` when exterior)."""
+    `duct_laws_from_edges`. Ports: `a`, `b` (only `b` when exterior)."""
     given = {k: v for k, v in dict(azimuth=azimuth, facade=facade, Ch=Ch,
                                    profile=profile).items() if v is not None}
     if given and not exterior:
@@ -212,7 +212,7 @@ def air_handler(name: str, *, supplies: Sequence[float], returns: Sequence[float
     `returns[j]` (design flows in kg/s), the recirculation, and the outdoor air and exhaust
     to the shared ambient; `outdoor_air_fraction` and `min_outdoor_air` (kg/s) as in
     `add_air_handler`. After `flatten`, `air_handler_from_edges(net, kind)` gives its
-    element and closure, and `air_handler_plenums(net, kind)` the nodes for
+    law and closure, and `air_handler_plenums(net, kind)` the nodes for
     `build_model(flow_balanced=...)`. Zero plenum volumes (CONTAM's default) also need
     `storage_free=...` and an implicit heat layer; the 1 m3 default here needs neither. Give
     each air handler of a building its own `kind`. Ports: `supplies[i]`, `returns[j]`."""

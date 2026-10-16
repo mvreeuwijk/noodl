@@ -22,7 +22,7 @@ This is push/pull semantics. An edge pushes a request at its target; the
 target accepts up to its own headroom; the difference is left unmet at the source. Conservation
 is exact by construction.
 
-It is a genuinely different mode, not a variant of the potential layer. Water-resources
+It is a genuinely different mode, not a variant of the Kirchhoff layer. Water-resources
 networks — abstraction licences, reservoir operating rules, treatment-works throughput — are
 governed by *rules*, and the rule is the physics.
 

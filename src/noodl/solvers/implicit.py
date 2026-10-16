@@ -104,7 +104,7 @@ class TransposeOperator:
         """The wrapped operator's certificate, but only when it declares itself SYMMETRIC.
 
         A symmetric operator is its own transpose, so an SPD certificate for it certifies
-        this view verbatim -- which is what keeps `PotentialFlowLayer.adjoint`'s
+        this view verbatim -- which is what keeps `KirchhoffLayer.adjoint`'s
         GraphLaplacianOperator on the certified-SPD branch of the eligibility table
         (sparse-direct, or PCG where no sparse form is available) rather than dropping it to
         GMRES, so the backward pass costs what the forward pass costs. For a
@@ -138,7 +138,7 @@ def adjoint(
 
     Always raises on failure (``on_failure="raise"``, not exposed as a parameter): every
     caller of this function -- ``_Implicit.backward`` unconditionally, and
-    ``PotentialFlowLayer.adjoint`` as a diagnostic entry point -- wants a wrong gradient to
+    ``KirchhoffLayer.adjoint`` as a diagnostic entry point -- wants a wrong gradient to
     be impossible rather than silently returned.
     """
     step_method = "direct" if method == "auto" and isinstance(op, torch.Tensor) else method
@@ -208,7 +208,7 @@ class _Implicit(torch.autograd.Function):
             r = ctx.residual(x.detach(), *p)
             needs_grad = [t for t in p if t.requires_grad]
             # `r.requires_grad` can be False even when `needs_grad` is non-empty: a caller
-            # (e.g. `PotentialFlowLayer.solve`) may thread every entry of a shared `drivers`
+            # (e.g. `KirchhoffLayer.solve`) may thread every entry of a shared `drivers`
             # mapping into `params` positionally, including keys this particular layer's
             # residual never reads (a coupled model's OTHER layer's own driver, sitting in
             # the same dict). When the only requires_grad=True entries are among those unused
@@ -231,7 +231,7 @@ class _Implicit(torch.autograd.Function):
             # all-`None` case can return without solving anything: `lambda` is only ever used
             # as `grad_outputs` for the `torch.autograd.grad` call below, so a solve on this
             # path would be pure waste -- and not a cheap one, since this is exactly the path
-            # a coupled model takes on every backward pass through its potential layer.
+            # a coupled model takes on every backward pass through its Kirchhoff layer.
             if not needs_grad or not r.requires_grad:
                 return (None, None, None, None, None, *[None] * len(p))
         with torch.no_grad():

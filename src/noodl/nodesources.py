@@ -34,7 +34,7 @@ class NodeSource(torch.nn.Module):
     index space, registered as a buffer by `__init__`) and implement
     `flow(phi_nodes, drivers) -> Tensor` with trailing shape `(len(nodes),)`.
 
-    `dflow` defaults to autograd on `flow`, exactly as `Element.dflow` does; override it
+    `dflow` defaults to autograd on `flow`, exactly as `ConstitutiveLaw.dflow` does; override it
     with the analytic derivative where one is available and cheaper.
     """
 
@@ -53,8 +53,8 @@ class NodeSource(torch.nn.Module):
 
     def forward(self, phi_nodes: Tensor, drivers: Mapping | None = None) -> Tensor:
         # `torch.func.functional_call` always invokes `forward`, so the differentiable path
-        # in `PotentialFlowLayer.solve` reaches `flow` through here (the same arrangement
-        # `Element` uses).
+        # in `KirchhoffLayer.solve` reaches `flow` through here (the same arrangement
+        # `ConstitutiveLaw` uses).
         return self.flow(phi_nodes, drivers)
 
     def dflow(self, phi_nodes: Tensor, drivers: Mapping | None = None) -> Tensor:

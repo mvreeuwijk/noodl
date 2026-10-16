@@ -234,7 +234,7 @@ def _auto_sparse_triplet(op, b: Tensor):
                 "to preconditioned CG. The answer is correct; it is roughly 4.6x slower at "
                 "small ensembles. Install the extra to get the documented default: "
                 "pip install noodl-physics[sparse]. This warning is issued once per process; "
-                "PotentialFlowLayer.solve's diagnostics['backend'] reports the backend that "
+                "KirchhoffLayer.solve's diagnostics['backend'] reports the backend that "
                 "actually ran on every solve.",
                 RuntimeWarning,
                 stacklevel=2,
@@ -269,7 +269,7 @@ def _sparse_direct(op, b: Tensor, where: str, triplet=None) -> SolveResult:
     Rather than return a silently detached tensor, this refuses when grad mode is on AND some
     input actually requires grad. Both layer paths reach it under `torch.no_grad`
     (`layers.transport._LinearSolve.forward` and `solvers.implicit._Implicit.forward`/
-    `.backward`), so a differentiable `PotentialFlowLayer.solve` configured with
+    `.backward`), so a differentiable `KirchhoffLayer.solve` configured with
     `linear_solver="sparse_direct"` is unaffected: its gradients come from the implicit
     adjoint, which never differentiates through the linear solver's own arithmetic.
 

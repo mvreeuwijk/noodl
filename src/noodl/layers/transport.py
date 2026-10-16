@@ -7,7 +7,7 @@ it from the driver ``"<layer>.capacity"`` when a closure writes one.
 For interior capacity ``V`` (volume, or heat capacity), signed branch flow ``q``
 on the edges of ``flow_kind`` (one edge kind, or several: ``q`` then carries the
 kinds' flows concatenated in ``flow_kinds`` order, which is what
-``PotentialFlowLayer.flows_of_kind(q, layer.flow_kinds)`` returns), a carrier
+``KirchhoffLayer.flows_of_kind(q, layer.flow_kinds)`` returns), a carrier
 factor and a transmission fraction per edge:
 
     V dx/dt = (In(q) - Out(q)) x + N x_b + sources
@@ -88,7 +88,7 @@ def active_interior(
 
 
 # Inner linear solvers a TransportLayer may be configured with; resolved PER SOLVE (never
-# fixed for the layer's whole lifetime the way `PotentialFlowLayer._LINEAR_SOLVERS` is used)
+# fixed for the layer's whole lifetime the way `KirchhoffLayer._LINEAR_SOLVERS` is used)
 # by `TransportLayer._resolve_solver` into the kwargs `solvers.select.solve` actually reads.
 # "gmres" resolves to `method="gmres"` with no preconditioner.
 # "gmres_jacobi"/"gmres_ilu" resolve to `method="gmres"` with a real preconditioner.
@@ -543,7 +543,7 @@ class TransportLayer:
         # One or several advecting edge kinds. `flow_kinds` is the tuple form every internal
         # site uses; `flow_kind` keeps the caller's own spelling. `q` is then the kinds'
         # flows CONCATENATED in this order (`_flow_slices` holds the block boundaries), which
-        # is exactly what `PotentialFlowLayer.flows_of_kind(q, layer.flow_kinds)` produces:
+        # is exactly what `KirchhoffLayer.flows_of_kind(q, layer.flow_kinds)` produces:
         # a thermal layer advected by both "airpath" and "door" edges needs no new operator,
         # only both kinds' endpoints in one array.
         self.flow_kinds = (flow_kind,) if isinstance(flow_kind, str) else tuple(flow_kind)

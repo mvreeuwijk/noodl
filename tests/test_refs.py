@@ -18,10 +18,10 @@ from noodl.apps.building_physics import (
     initial_state,
     thermal_layer,
 )
-from noodl.apps.building_physics.elements import orifice_elements_from_edges
+from noodl.apps.building_physics.elements import orifice_law_from_edges
 from noodl.drives import Stack
 from noodl.elements.powerlaw import PowerLaw
-from noodl.layers.potential import PotentialFlowLayer
+from noodl.layers.kirchhoff import KirchhoffLayer
 from noodl.model import Model
 from noodl.refs import Field
 from noodl.topology import Network
@@ -40,8 +40,8 @@ def _two_zone_with_wall():
     net.add_edge("ambient", "A", kind="airpath", z_path=0.5, Cd=0.6, area=0.02)
     net.add_edge("A", "B", kind="airpath", z_path=1.0, Cd=0.6, area=0.05)
     net.add_edge("B", "ambient", kind="airpath", z_path=2.0, Cd=0.6, area=0.02)
-    el = orifice_elements_from_edges(net, "airpath")
-    model = build_model(net, air_elements=[el], drives=[Stack.from_network(net, "airpath")],
+    el = orifice_law_from_edges(net, "airpath")
+    model = build_model(net, air_laws=[el], drives=[Stack.from_network(net, "airpath")],
                         species=("co2", "pm25"))
     return net, model
 
@@ -51,12 +51,12 @@ def test_a_layer_registered_under_another_name_is_refused():
     net, model = _two_zone_with_wall()
     th = model.transport["thermal"]
     with pytest.raises(ValueError, match="registered as 'heat'.*named 'thermal'"):
-        Model(net, {"air": model.potential["air"], "heat": th})
+        Model(net, {"air": model.kirchhoff["air"], "heat": th})
 
 
 def test_layers_may_be_given_as_a_sequence_keyed_by_their_own_names():
     net, model = _two_zone_with_wall()
-    seq = Model(net, [model.potential["air"], model.transport["thermal"]],
+    seq = Model(net, [model.kirchhoff["air"], model.transport["thermal"]],
                 closures=model.closures)
     assert list(seq.layers) == ["air", "thermal"]
 
@@ -67,8 +67,8 @@ def test_two_layers_with_one_name_are_refused():
     net.add_node("b")
     net.add_edge("a", "b", kind="k")
     leak = PowerLaw(C=torch.tensor(0.01), n=torch.tensor(0.65), kind="k")
-    one = PotentialFlowLayer(net, "air", [leak], boundary=["a"])
-    two = PotentialFlowLayer(net, "air", [leak], boundary=["a"])
+    one = KirchhoffLayer(net, "air", [leak], boundary=["a"])
+    two = KirchhoffLayer(net, "air", [leak], boundary=["a"])
     with pytest.raises(ValueError, match="two layers named 'air'"):
         Model(net, [one, two])
 
@@ -78,8 +78,8 @@ def test_a_renamed_thermal_layer_drives_the_density_closure_under_its_own_name()
     registered key and that name cannot drift apart."""
     net, _ = _two_zone_with_wall()
     th = thermal_layer(net, name="heat")
-    air = PotentialFlowLayer(net, "air", [orifice_elements_from_edges(net, "airpath")],
-                             drives=[Stack.from_network(net, "airpath")], boundary=["ambient"])
+    air = KirchhoffLayer(net, "air", [orifice_law_from_edges(net, "airpath")],
+                         drives=[Stack.from_network(net, "airpath")], boundary=["ambient"])
     from noodl.apps.building_physics import IdealGasDensity
 
     model = Model(net, [air, th], closures=[IdealGasDensity(th, ambient_index=0)])
@@ -243,7 +243,7 @@ def test_named_inputs_carry_a_gradient_through_a_step():
 # ---------------------------------------------------------------- review regressions
 def test_a_single_species_column_layout_is_accepted_as_the_layer_accepts_it():
     net = _two_zone_with_wall()[0]
-    model = build_model(net, air_elements=[orifice_elements_from_edges(net, "airpath")],
+    model = build_model(net, air_laws=[orifice_law_from_edges(net, "airpath")],
                         drives=[Stack.from_network(net, "airpath")], species=1)
     state = initial_state(model)
     state["species.x"] = state["species.x"].unsqueeze(-1)            # (n_i, 1)
@@ -260,7 +260,7 @@ def test_a_single_species_column_layout_is_accepted_as_the_layer_accepts_it():
 def test_a_species_count_may_be_any_integer_but_not_a_string():
     np = pytest.importorskip("numpy")
     net = _two_zone_with_wall()[0]
-    kw = dict(air_elements=[orifice_elements_from_edges(net, "airpath")],
+    kw = dict(air_laws=[orifice_law_from_edges(net, "airpath")],
               drives=[Stack.from_network(net, "airpath")])
     assert build_model(net, species=np.int64(2), **kw).transport["species"].n_species == 2
     with pytest.raises(TypeError, match=r"pass \('co2',\)"):

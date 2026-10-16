@@ -24,8 +24,8 @@ NODE_ATTRIBUTES: dict[str, tuple[str, str]] = {
 EDGE_ATTRIBUTES: dict[str, dict[str, tuple[str, str]]] = {
     "airpath": {
         "z_path": ("height of the opening (m)", "Stack.from_network"),
-        "Cd": ("discharge coefficient (dimensionless)", "orifice_elements_from_edges"),
-        "area": ("opening area (m2)", "orifice_elements_from_edges"),
+        "Cd": ("discharge coefficient (dimensionless)", "orifice_law_from_edges"),
+        "area": ("opening area (m2)", "orifice_law_from_edges"),
         "name": ("label of the edge in model.refs and in named results (optional)",
                  "noodl.refs"),
     },
@@ -41,23 +41,23 @@ EDGE_ATTRIBUTES: dict[str, dict[str, tuple[str, str]]] = {
                     "Wind.from_network"),
     },
     "duct, a segment between two junctions (made by DuctNetwork)": {
-        "length": ("length of the segment (m)", "duct_elements_from_edges"),
-        "diameter": ("hydraulic diameter of the duct (m)", "duct_elements_from_edges"),
-        "roughness": ("roughness of the duct wall (m)", "duct_elements_from_edges"),
+        "length": ("length of the segment (m)", "duct_laws_from_edges"),
+        "diameter": ("hydraulic diameter of the duct (m)", "duct_laws_from_edges"),
+        "roughness": ("roughness of the duct wall (m)", "duct_laws_from_edges"),
         "loss": ("sum of the segment's dynamic loss coefficients (dimensionless)",
-                 "duct_elements_from_edges"),
+                 "duct_laws_from_edges"),
         "area": ("cross-section of the duct (m2); the circle of the diameter by default",
-                 "duct_elements_from_edges"),
+                 "duct_laws_from_edges"),
     },
     "duct_terminal, a junction to a zone (made by DuctNetwork)": {
-        "area": ("area of the duct at the terminal (m2)", "duct_elements_from_edges"),
+        "area": ("area of the duct at the terminal (m2)", "duct_laws_from_edges"),
         "loss": ("loss coefficient of the terminal (dimensionless)",
-                 "duct_elements_from_edges"),
+                 "duct_laws_from_edges"),
         "z_path": ("height of the terminal, the junction's height (m)", "Stack.from_network"),
         "profile": ("number of the WindProfile on a terminal in the ambient; absent or 0 "
-                    "for none", "duct_elements_from_edges, Wind.from_network"),
+                    "for none", "duct_laws_from_edges, Wind.from_network"),
         "Cp": ("constant wind pressure coefficient of a terminal in the ambient without a "
-               "profile", "duct_elements_from_edges, Wind.from_network"),
+               "profile", "duct_laws_from_edges, Wind.from_network"),
         "Ch": ("wind speed modifier (dimensionless, 1 by default)", "Wind.from_network"),
         "azimuth": ("wall direction of a terminal with a profile (degrees from CONTAM)",
                     "Wind.from_network"),
@@ -75,7 +75,7 @@ EDGE_ATTRIBUTES: dict[str, dict[str, tuple[str, str]]] = {
     },
     "fan, a constant-mass-flow fan (made by the fan component)": {
         "flow": ("mass flow delivered from source to target whatever the pressures (kg/s)",
-                 "fan_elements_from_edges"),
+                 "fan_law_from_edges"),
     },
     "wall": {
         "ua": ("conductance zone -> wall or wall -> ambient (W/K)", "thermal_layer"),

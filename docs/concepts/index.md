@@ -7,11 +7,11 @@ first time.
 |---|---|
 | [Networks](networks.md) | `Network`: the typed multigraph, its incidence and cycle operators, boundary and interior, batching. |
 | [Components](components.md) | Subnetworks with ports, `connect`, `flatten()` to one network, dotted names, placement, shared nodes, and reading results by component. |
-| [Elements and drives](elements.md) | The constitutive laws on edges, and the driving terms added to potential differences. |
+| [Constitutive laws and drives](elements.md) | The constitutive laws on edges, and the driving terms added to potential differences. |
 | [Layers and models](layers.md) | The four ways a flow is determined, the layer types that implement them, and `Model`, which steps several together. |
 | [Using noodl](../usage.md) | The one way every model is used: configure, initialise by name, check, run; the parts every model shares; node orders and the setup report. |
 | [Solvers](solvers.md) | The matvec-free linear-operator contract, Newton, and how `method="auto"` chooses a backend. |
-| [Differentiability](differentiability.md) | What gradients flow through, the adjoint, and the contract your elements must satisfy. |
+| [Differentiability](differentiability.md) | What gradients flow through, the adjoint, and the contract your laws must satisfy. |
 
 ## The shape of a model
 
@@ -20,18 +20,18 @@ Every noodl physics model is the same four-part object, whatever the physics:
 ```
 Network            a typed multigraph: nodes hold storage, edges carry flow
   |
-  +-- Elements     the constitutive law on each edge kind
+  +-- Laws         the constitutive law on each edge kind
   +-- Drives       terms added to the potential difference (stack, wind, drag)
   +-- Closures     arbitrary functions of state that produce driver values
   |
-Layers             potential flow, transport, reaction, flow allocation
+Layers             Kirchhoff, transport, reaction, flow allocation
   |
 Model              several layers on one network, stepped together
 ```
 
 Read it bottom-up and it is a simulator. Read it top-down and it is a factorisation: the
-framework owns the graph, the conservation law and the solve; your problem owns the element
-laws, the drives and the closures. Everything domain-specific in the six
+framework owns the graph, the conservation law and the solve; your problem owns the constitutive
+laws, the drives and the closures. Everything domain-specific in the seven
 [applications](../applications/index.md) lives in those last three boxes.
 
 ![The noodl physics model stack](../assets/framework-overview.svg)
@@ -41,7 +41,7 @@ laws, the drives and the closures. Everything domain-specific in the six
 A node conserves. An edge constitutes. That separation is what lets one piece of machinery
 carry a building's pressure network and a sewer's headspace air.
 
-Concretely, a potential-flow layer assembles and solves
+Concretely, a Kirchhoff layer assembles and solves
 
 $$
 A_I \, g\!\left(A^{\top}\phi + \text{drive};\ \theta\right) - s_I = 0
@@ -59,7 +59,7 @@ only the flows of the kinds it advects on.
 
 Three choices are deliberately left in your hands, and each has bitten someone:
 
-- **How a flow is determined.** A potential solve is one of four options, not the default
+- **How a flow is determined.** A Kirchhoff solve is one of four options, not the default
   answer. A sewer's tree flow comes from continuity, a street's from a closure, a
   water-resources arc's from a clipped request. See [Layers and models](layers.md).
 - **How tightly coupled layers must agree.** `coupling="pingpong"` takes one pass and is

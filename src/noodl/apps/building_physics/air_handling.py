@@ -175,7 +175,7 @@ def add_air_handler(target, *, supplies: Mapping, returns: Mapping, kind: str = 
 
 
 def air_handler_from_edges(net, kind: str) -> tuple[PrescribedFlow, AirHandlerFlows]:
-    """The element and the closure of the air handler whose edges are of `kind` (as
+    """The law and the closure of the air handler whose edges are of `kind` (as
     `add_air_handler`, or the `.prj` reader, made them)."""
     roles = _role_codes(net.edge_attr("role", kind), f"air handler {kind!r}")
     recirculation = roles == RECIRCULATION

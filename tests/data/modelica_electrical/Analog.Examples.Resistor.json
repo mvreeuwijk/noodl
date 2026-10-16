@@ -1,0 +1,88 @@
+{
+  "format": "noodl-modelica-electrical/1",
+  "model": "Modelica.Electrical.Analog.Examples.Resistor",
+  "mbl_commit": "55abf579598ca81cae0a82f337350375958e6722",
+  "openmodelica": "OpenModelica 1.27.1~2-g6db4671",
+  "msl": "4.1.0",
+  "experiment": {
+    "StartTime": 0.0,
+    "StopTime": 5.0,
+    "Interval": 0.01,
+    "Tolerance": 1e-12
+  },
+  "experiment_declared": {
+    "StopTime": 5.0
+  },
+  "components": [
+    {
+      "name": "resistor",
+      "class": "Modelica.Electrical.Analog.Basic.Resistor",
+      "parameters": {
+        "R": 100.0,
+        "T_ref": 293.15,
+        "alpha": 0.001,
+        "useHeatPort": true,
+        "T": 293.15
+      }
+    },
+    {
+      "name": "G",
+      "class": "Modelica.Electrical.Analog.Basic.Ground",
+      "parameters": {}
+    },
+    {
+      "name": "SineVoltage1",
+      "class": "Modelica.Electrical.Analog.Sources.SineVoltage",
+      "parameters": {
+        "V": 220.0,
+        "phase": 0.0,
+        "f": 1.0,
+        "offset": 0.0,
+        "startTime": 0.0
+      }
+    },
+    {
+      "name": "thermalConductor",
+      "class": "Modelica.Thermal.HeatTransfer.Components.ThermalConductor",
+      "parameters": {
+        "G": 50.0
+      }
+    },
+    {
+      "name": "fixedTemperature",
+      "class": "Modelica.Thermal.HeatTransfer.Celsius.FixedTemperature",
+      "parameters": {
+        "T": 20.0
+      }
+    }
+  ],
+  "connections": [
+    [
+      "SineVoltage1.n",
+      "G.p"
+    ],
+    [
+      "resistor.heatPort",
+      "thermalConductor.port_a"
+    ],
+    [
+      "SineVoltage1.p",
+      "resistor.p"
+    ],
+    [
+      "G.p",
+      "resistor.n"
+    ],
+    [
+      "thermalConductor.port_b",
+      "fixedTemperature.port"
+    ]
+  ],
+  "signals": [],
+  "compared": [
+    "resistor.i",
+    "resistor.T_heatPort",
+    "SineVoltage1.i"
+  ],
+  "parameter_precision": "Reals from the simulation result (full double precision)"
+}

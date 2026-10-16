@@ -441,8 +441,8 @@ def test_one_fan_or_damper_element_on_several_paths_is_one_kind_per_edge(tmp_pat
     two = _replace(text, ("6 ! flow paths:", "8 ! flow paths:"), (p6, p6 + extra))
     one, both = read_prj(DOORWAY), read_prj(_write(tmp_path, two))
     assert both.kinds == one.kinds                     # same kinds, same order
-    (fan,) = [e for e in both.elements if isinstance(e, FixedFlow)]
-    (damper,) = [e for e in both.elements if isinstance(e, Damper)]
+    (fan,) = [e for e in both.laws if isinstance(e, FixedFlow)]
+    (damper,) = [e for e in both.laws if isinstance(e, Damper)]
     assert fan.q0.tolist() == pytest.approx([0.200683, 0.401366])
     assert damper.pos.C.tolist() == pytest.approx([0.02, 0.06])
     model, state, drivers = project_to_model(both, ambient={"Ws": 0.0})

@@ -1,8 +1,8 @@
 """Generate the component catalogue (`docs/catalogue/*.md`) from the code itself.
 
 One page per application plus one for the core library. Every public name (the module's
-`__all__`) is listed under its role -- set-up, network components, elements, drives,
-closures, reactions, sources, files, functions, constants -- with the first line of its
+`__all__`) is listed under its role -- set-up, network components, constitutive laws, drives,
+closures, reactions, sources, waveforms, files, functions, constants -- with the first line of its
 docstring and its call signature. A name exported twice for one object (the old,
 model-named spelling kept as an alias of the physical name) is listed once, with its
 aliases.
@@ -20,6 +20,7 @@ import importlib
 import inspect
 import re
 import sys
+import types
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -31,11 +32,11 @@ PAGES = [
      ["noodl.topology", "noodl.model", "noodl.refs", "noodl.validation", "noodl.layers",
       "noodl.elements", "noodl.drives", "noodl.nodesources", "noodl.couple"],
      "The framework every application builds on: the network, the layers, the model, the "
-     "set-up helpers, and the general-purpose elements and drives."),
+     "set-up helpers, and the general-purpose constitutive laws and drives."),
     ("building_physics", "Building physics", "../applications/building_physics.md",
      ["noodl.apps.building_physics", "noodl.elements", "noodl.drives"],
      "Multi-zone airflow, heat and contaminants (CONTAM's physics; CONTAM `.prj`/`.wth`, "
-     "EPW and Modelica Buildings Library readers). The airflow elements and drives a "
+     "EPW and Modelica Buildings Library readers). The airflow constitutive laws and drives a "
      "building uses come from the core library and are listed here too."),
     ("street_aq", "Street air quality", "../applications/street_aq.md",
      ["noodl.apps.street_aq"],
@@ -49,6 +50,16 @@ PAGES = [
     ("wsimod", "Flow allocation (WSIMOD)", "../applications/allocation.md",
      ["noodl.apps.wsimod"],
      "Rule-based allocation of water between stores on capacity-limited arcs."),
+    ("electrical", "Electrical circuits", "../applications/electrical.md",
+     ["noodl.apps.electrical", "noodl.apps.electrical.modelica",
+      "noodl.apps.electrical.power"],
+     "Electrical circuits by Modified Nodal Analysis: resistors, capacitors, inductors, "
+     "sources and their waveforms, diodes, switches, transformers and controlled sources "
+     "(Modelica Standard Library device laws); impedances, constant-power loads and power "
+     "converters (Modelica Buildings Library laws); Joule heating into a thermal network; "
+     "the reader of OpenModelica circuit exports; balanced AC and DC power flow in per "
+     "unit (MATPOWER branch model, shunts, voltage-controlled generators) and the "
+     "MATPOWER case-file reader."),
 ]
 
 ROLES = [
@@ -56,22 +67,23 @@ ROLES = [
     ("component", "Network components",
      "Descriptions of the physical objects a network is built from."),
     ("layer", "Layers and model", "The conservation layers and the model that steps them."),
-    ("element", "Elements (branch laws)",
-     "Flow through an edge as a function of the potential difference across it."),
+    ("law", "Constitutive laws",
+     "The relation between the flow through an edge and the potential difference across it."),
     ("drive", "Drives", "Terms added to an edge's potential difference (stack, wind, fans)."),
     ("closure", "Closures",
      "Functions of the state that compute drivers each step (densities, flows, levels)."),
     ("reaction", "Reactions", "Transformations applied to transported species each step."),
     ("source", "Sources", "Nodal sources and withdrawals."),
+    ("waveform", "Waveforms", "Time signals a source follows."),
     ("file", "Files", "Readers and writers of other tools' file formats."),
     ("class", "Other classes", "Supporting types."),
     ("function", "Functions", "Calculations and helpers."),
     ("constant", "Constants and tables", "Named values and option tables."),
     ("base", "Base classes (for extending)",
-     "Subclass these to add an element, drive, closure, reaction or node source; see "
+     "Subclass these to add a constitutive law, drive, closure, reaction or node source; see "
      "[Extending noodl](../development/extending.md)."),
 ]
-BASE_CLASSES = {"Element", "Drive", "Closure", "Reaction", "NodeSource"}
+BASE_CLASSES = {"ConstitutiveLaw", "ImplicitLaw", "Drive", "Closure", "Reaction", "NodeSource"}
 CONSTANT_ALIASES = {
     "KAPPA": "KAPPA_040", "KAPPA_MUNICH": "KAPPA_041",
     "GAMMA_E": "EULER_GAMMA_TRUNCATED", "SIRANE_EXCHANGE": "EXCHANGE_SIGMA_W_RATIO",
@@ -89,8 +101,21 @@ ATTRIBUTE_MODULES = {"building_physics": "noodl.apps.building_physics.attributes
 defining `NODE_ATTRIBUTES` and `EDGE_ATTRIBUTES`."""
 ATTRIBUTE_TABLE_NAMES = {"NODE_ATTRIBUTES", "EDGE_ATTRIBUTES"}
 
+MODULE_ROLES = {
+    "noodl.apps.electrical.circuit": "component",
+    "noodl.apps.electrical.waveforms": "waveform",
+    "noodl.apps.electrical.thermal": "closure",
+    "noodl.apps.electrical.modelica.assemble": "class",
+}
+"""Modules whose public classes all take one role, whatever their names: a circuit's devices
+(`VoltageSource`, `ControlledSource`) are network components, not nodal sources, its
+waveforms are a role of their own, and the electro-thermal module's `HeatedEdge` describes a
+device to the `JouleHeating` closure (a coupling description, not a network component); the
+Modelica circuit reader's `CircuitNames` and `Column` describe its result (supporting types)."""
+
 SETUP_NAMES = {"build_model", "initial_state", "initial_drivers", "project_to_model",
-               "drivers_from", "state_from", "check_setup"}
+               "drivers_from", "state_from", "check_setup", "build_power_flow",
+               "dc_power_flow"}
 
 
 def _summary(obj) -> str:
@@ -135,20 +160,22 @@ def _signature(name: str, obj) -> str:
 
 
 def _role(name: str, obj) -> str:
-    from noodl.elements.base import Element
+    from noodl.elements.base import ConstitutiveLaw
     from noodl.layers.reaction import Reaction
     from noodl.model import Model
     from noodl.nodesources import NodeSource
 
     if name in SETUP_NAMES:
         return "setup"
+    if inspect.isclass(obj) and obj.__module__ in MODULE_ROLES:
+        return MODULE_ROLES[obj.__module__]
     if not (inspect.isclass(obj) or inspect.isfunction(obj) or inspect.isbuiltin(obj)):
         return "constant"
     if inspect.isclass(obj):
         if name in BASE_CLASSES:
             return "base"
-        if issubclass(obj, Element):
-            return "element"
+        if issubclass(obj, ConstitutiveLaw):
+            return "law"
         if issubclass(obj, Reaction):
             return "reaction"
         if issubclass(obj, NodeSource) or name.endswith(("Source", "Sink")):
@@ -220,7 +247,7 @@ def _entries(modules: list[str]) -> list[dict]:
 def _constant_text(obj) -> str:
     if isinstance(obj, (int, float, str)):
         return f"`{obj!r}`"
-    if isinstance(obj, dict):
+    if isinstance(obj, (dict, types.MappingProxyType)):
         return f"table of {len(obj)} entries: " + ", ".join(f"`{k}`" for k in list(obj)[:8]) + (
             ", ..." if len(obj) > 8 else "")
     if isinstance(obj, tuple) and obj and all(isinstance(v, str) for v in obj):
@@ -285,7 +312,7 @@ def _attributes_section(modname: str) -> list[str]:
     mod = importlib.import_module(modname)
     lines = [
         "## Network attributes", "",
-        "What the builders, elements and drives read off `net.add_node(...)` and "
+        "What the builders, constitutive laws and drives read off `net.add_node(...)` and "
         "`net.add_edge(...)`, by name. Defined in `" + modname + "`.", "",
         "**Nodes**", "", "| Attribute | Meaning | Read by |", "|---|---|---|",
     ]

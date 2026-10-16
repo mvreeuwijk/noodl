@@ -1,0 +1,416 @@
+{
+  "format": "noodl-modelica-electrical/1",
+  "model": "Buildings.Electrical.AC.ThreePhasesBalanced.Lines.Examples.ACLine",
+  "mbl_commit": "55abf579598ca81cae0a82f337350375958e6722",
+  "openmodelica": "OpenModelica 1.27.1~2-g6db4671",
+  "msl": "4.1.0",
+  "experiment": {
+    "StartTime": 0.0,
+    "StopTime": 1.0,
+    "Interval": 0.01,
+    "Tolerance": 1e-12
+  },
+  "experiment_declared": {
+    "StopTime": 1.0,
+    "Tolerance": 1e-06
+  },
+  "components": [
+    {
+      "name": "E",
+      "class": "Buildings.Electrical.AC.ThreePhasesBalanced.Sources.FixedVoltage",
+      "parameters": {
+        "potentialReference": true,
+        "definiteReference": true,
+        "f": 60.0,
+        "V": 480.0,
+        "phiSou": 0.0
+      }
+    },
+    {
+      "name": "R1",
+      "class": "Buildings.Electrical.AC.ThreePhasesBalanced.Loads.Impedance",
+      "parameters": {
+        "linearized": false,
+        "mode": "Buildings.Electrical.Types.Load.FixedZ_steady_state",
+        "P_nominal": 0.0,
+        "V_nominal": 1.0,
+        "initMode": "Buildings.Electrical.Types.InitMode.linearized",
+        "inductive": true,
+        "R": 10.0,
+        "L": 0.0,
+        "C": 0.0,
+        "use_R_in": false,
+        "RMin": 0.0001,
+        "RMax": 100.0,
+        "use_C_in": false,
+        "CMin": 0.0001,
+        "CMax": 100.0,
+        "use_L_in": false,
+        "LMin": 0.0001,
+        "LMax": 100.0,
+        "star": true
+      }
+    },
+    {
+      "name": "line_1",
+      "class": "Buildings.Electrical.AC.ThreePhasesBalanced.Lines.Line",
+      "parameters": {
+        "l": 2000.0,
+        "P_nominal": 5000.0,
+        "V_nominal": 480.0,
+        "f_n": 50.0,
+        "use_C": false,
+        "modelMode": "Buildings.Electrical.Types.Load.FixedZ_steady_state",
+        "use_T": false,
+        "TCable": 298.15,
+        "mode": "Buildings.Electrical.Types.CableMode.commercial",
+        "T_ref": 298.15,
+        "M": 507.65,
+        "R": 0.7240000000000001,
+        "L": 0.00046473243382833435,
+        "C": 0.0
+      },
+      "unevaluated": [
+        "commercialCable"
+      ],
+      "derived": {
+        "line.R": 0.7240000000000001,
+        "line.L": 0.00046473243382833435,
+        "line.C": 0.0
+      }
+    },
+    {
+      "name": "line_2a",
+      "class": "Buildings.Electrical.AC.ThreePhasesBalanced.Lines.Line",
+      "parameters": {
+        "l": 1000.0,
+        "P_nominal": 5000.0,
+        "V_nominal": 480.0,
+        "f_n": 50.0,
+        "use_C": false,
+        "modelMode": "Buildings.Electrical.Types.Load.FixedZ_steady_state",
+        "use_T": false,
+        "TCable": 298.15,
+        "mode": "Buildings.Electrical.Types.CableMode.commercial",
+        "T_ref": 298.15,
+        "M": 507.65,
+        "R": 0.36200000000000004,
+        "L": 0.00023236621691416717,
+        "C": 0.0
+      },
+      "unevaluated": [
+        "commercialCable"
+      ],
+      "derived": {
+        "line.R": 0.36200000000000004,
+        "line.L": 0.00023236621691416717,
+        "line.C": 0.0
+      }
+    },
+    {
+      "name": "R2",
+      "class": "Buildings.Electrical.AC.ThreePhasesBalanced.Loads.Impedance",
+      "parameters": {
+        "linearized": false,
+        "mode": "Buildings.Electrical.Types.Load.FixedZ_steady_state",
+        "P_nominal": 0.0,
+        "V_nominal": 1.0,
+        "initMode": "Buildings.Electrical.Types.InitMode.linearized",
+        "inductive": true,
+        "R": 10.0,
+        "L": 0.0,
+        "C": 0.0,
+        "use_R_in": false,
+        "RMin": 0.0001,
+        "RMax": 100.0,
+        "use_C_in": false,
+        "CMin": 0.0001,
+        "CMax": 100.0,
+        "use_L_in": false,
+        "LMin": 0.0001,
+        "LMax": 100.0,
+        "star": true
+      }
+    },
+    {
+      "name": "line_2b",
+      "class": "Buildings.Electrical.AC.ThreePhasesBalanced.Lines.Line",
+      "parameters": {
+        "l": 1000.0,
+        "P_nominal": 5000.0,
+        "V_nominal": 480.0,
+        "f_n": 50.0,
+        "use_C": false,
+        "modelMode": "Buildings.Electrical.Types.Load.FixedZ_steady_state",
+        "use_T": false,
+        "TCable": 298.15,
+        "mode": "Buildings.Electrical.Types.CableMode.commercial",
+        "T_ref": 298.15,
+        "M": 507.65,
+        "R": 0.36200000000000004,
+        "L": 0.00023236621691416717,
+        "C": 0.0
+      },
+      "unevaluated": [
+        "commercialCable"
+      ],
+      "derived": {
+        "line.R": 0.36200000000000004,
+        "line.L": 0.00023236621691416717,
+        "line.C": 0.0
+      }
+    },
+    {
+      "name": "line_3a",
+      "class": "Buildings.Electrical.AC.ThreePhasesBalanced.Lines.Line",
+      "parameters": {
+        "l": 4000.0,
+        "P_nominal": 5000.0,
+        "V_nominal": 480.0,
+        "f_n": 50.0,
+        "use_C": false,
+        "modelMode": "Buildings.Electrical.Types.Load.FixedZ_steady_state",
+        "use_T": false,
+        "TCable": 298.15,
+        "mode": "Buildings.Electrical.Types.CableMode.commercial",
+        "T_ref": 298.15,
+        "M": 507.65,
+        "R": 1.4480000000000002,
+        "L": 0.0009294648676566687,
+        "C": 0.0
+      },
+      "unevaluated": [
+        "commercialCable"
+      ],
+      "derived": {
+        "line.R": 1.4480000000000002,
+        "line.L": 0.0009294648676566687,
+        "line.C": 0.0
+      }
+    },
+    {
+      "name": "line_3b",
+      "class": "Buildings.Electrical.AC.ThreePhasesBalanced.Lines.Line",
+      "parameters": {
+        "l": 4000.0,
+        "P_nominal": 5000.0,
+        "V_nominal": 480.0,
+        "f_n": 50.0,
+        "use_C": false,
+        "modelMode": "Buildings.Electrical.Types.Load.FixedZ_steady_state",
+        "use_T": false,
+        "TCable": 298.15,
+        "mode": "Buildings.Electrical.Types.CableMode.commercial",
+        "T_ref": 298.15,
+        "M": 507.65,
+        "R": 1.4480000000000002,
+        "L": 0.0009294648676566687,
+        "C": 0.0
+      },
+      "unevaluated": [
+        "commercialCable"
+      ],
+      "derived": {
+        "line.R": 1.4480000000000002,
+        "line.L": 0.0009294648676566687,
+        "line.C": 0.0
+      }
+    },
+    {
+      "name": "R3",
+      "class": "Buildings.Electrical.AC.ThreePhasesBalanced.Loads.Impedance",
+      "parameters": {
+        "linearized": false,
+        "mode": "Buildings.Electrical.Types.Load.FixedZ_steady_state",
+        "P_nominal": 0.0,
+        "V_nominal": 1.0,
+        "initMode": "Buildings.Electrical.Types.InitMode.linearized",
+        "inductive": true,
+        "R": 10.0,
+        "L": 0.0,
+        "C": 0.0,
+        "use_R_in": false,
+        "RMin": 0.0001,
+        "RMax": 100.0,
+        "use_C_in": false,
+        "CMin": 0.0001,
+        "CMax": 100.0,
+        "use_L_in": false,
+        "LMin": 0.0001,
+        "LMax": 100.0,
+        "star": true
+      }
+    },
+    {
+      "name": "line_sc",
+      "class": "Buildings.Electrical.AC.ThreePhasesBalanced.Lines.Line",
+      "parameters": {
+        "l": 2000.0,
+        "P_nominal": 5000.0,
+        "V_nominal": 480.0,
+        "f_n": 50.0,
+        "use_C": false,
+        "modelMode": "Buildings.Electrical.Types.Load.FixedZ_steady_state",
+        "use_T": false,
+        "TCable": 298.15,
+        "mode": "Buildings.Electrical.Types.CableMode.commercial",
+        "T_ref": 298.15,
+        "M": 507.65,
+        "R": 0.7240000000000001,
+        "L": 0.00046473243382833435,
+        "C": 0.0
+      },
+      "unevaluated": [
+        "commercialCable"
+      ],
+      "derived": {
+        "line.R": 0.7240000000000001,
+        "line.L": 0.00046473243382833435,
+        "line.C": 0.0
+      }
+    },
+    {
+      "name": "load_sc",
+      "class": "Buildings.Electrical.AC.ThreePhasesBalanced.Loads.Impedance",
+      "parameters": {
+        "linearized": false,
+        "mode": "Buildings.Electrical.Types.Load.FixedZ_steady_state",
+        "P_nominal": 0.0,
+        "V_nominal": 1.0,
+        "initMode": "Buildings.Electrical.Types.InitMode.linearized",
+        "inductive": true,
+        "R": 0.0,
+        "L": 0.0,
+        "C": 0.0,
+        "use_R_in": false,
+        "RMin": 0.0001,
+        "RMax": 100.0,
+        "use_C_in": false,
+        "CMin": 0.0001,
+        "CMax": 100.0,
+        "use_L_in": false,
+        "LMin": 0.0001,
+        "LMax": 100.0,
+        "star": true
+      }
+    }
+  ],
+  "connections": [
+    [
+      "line_1.terminal_p",
+      "R1.terminal"
+    ],
+    [
+      "E.terminal",
+      "line_1.terminal_n"
+    ],
+    [
+      "E.terminal",
+      "line_2a.terminal_n"
+    ],
+    [
+      "line_2a.terminal_p",
+      "line_2b.terminal_n"
+    ],
+    [
+      "line_2b.terminal_p",
+      "R2.terminal"
+    ],
+    [
+      "line_3a.terminal_p",
+      "R3.terminal"
+    ],
+    [
+      "line_3b.terminal_p",
+      "R3.terminal"
+    ],
+    [
+      "E.terminal",
+      "line_3a.terminal_n"
+    ],
+    [
+      "E.terminal",
+      "line_3b.terminal_n"
+    ],
+    [
+      "line_sc.terminal_p",
+      "load_sc.terminal"
+    ],
+    [
+      "E.terminal",
+      "line_sc.terminal_n"
+    ]
+  ],
+  "signals": [],
+  "compared": [
+    "E.terminal.v[1]",
+    "E.terminal.v[2]",
+    "E.terminal.i[1]",
+    "E.terminal.i[2]",
+    "R1.terminal.v[1]",
+    "R1.terminal.v[2]",
+    "R1.terminal.i[1]",
+    "R1.terminal.i[2]",
+    "line_1.terminal_n.v[1]",
+    "line_1.terminal_n.v[2]",
+    "line_1.terminal_n.i[1]",
+    "line_1.terminal_n.i[2]",
+    "line_1.terminal_p.v[1]",
+    "line_1.terminal_p.v[2]",
+    "line_1.terminal_p.i[1]",
+    "line_1.terminal_p.i[2]",
+    "line_2a.terminal_n.v[1]",
+    "line_2a.terminal_n.v[2]",
+    "line_2a.terminal_n.i[1]",
+    "line_2a.terminal_n.i[2]",
+    "line_2a.terminal_p.v[1]",
+    "line_2a.terminal_p.v[2]",
+    "line_2a.terminal_p.i[1]",
+    "line_2a.terminal_p.i[2]",
+    "R2.terminal.v[1]",
+    "R2.terminal.v[2]",
+    "R2.terminal.i[1]",
+    "R2.terminal.i[2]",
+    "line_2b.terminal_n.v[1]",
+    "line_2b.terminal_n.v[2]",
+    "line_2b.terminal_n.i[1]",
+    "line_2b.terminal_n.i[2]",
+    "line_2b.terminal_p.v[1]",
+    "line_2b.terminal_p.v[2]",
+    "line_2b.terminal_p.i[1]",
+    "line_2b.terminal_p.i[2]",
+    "line_3a.terminal_n.v[1]",
+    "line_3a.terminal_n.v[2]",
+    "line_3a.terminal_n.i[1]",
+    "line_3a.terminal_n.i[2]",
+    "line_3a.terminal_p.v[1]",
+    "line_3a.terminal_p.v[2]",
+    "line_3a.terminal_p.i[1]",
+    "line_3a.terminal_p.i[2]",
+    "line_3b.terminal_n.v[1]",
+    "line_3b.terminal_n.v[2]",
+    "line_3b.terminal_n.i[1]",
+    "line_3b.terminal_n.i[2]",
+    "line_3b.terminal_p.v[1]",
+    "line_3b.terminal_p.v[2]",
+    "line_3b.terminal_p.i[1]",
+    "line_3b.terminal_p.i[2]",
+    "R3.terminal.v[1]",
+    "R3.terminal.v[2]",
+    "R3.terminal.i[1]",
+    "R3.terminal.i[2]",
+    "line_sc.terminal_n.v[1]",
+    "line_sc.terminal_n.v[2]",
+    "line_sc.terminal_n.i[1]",
+    "line_sc.terminal_n.i[2]",
+    "line_sc.terminal_p.v[1]",
+    "line_sc.terminal_p.v[2]",
+    "line_sc.terminal_p.i[1]",
+    "line_sc.terminal_p.i[2]",
+    "load_sc.terminal.v[1]",
+    "load_sc.terminal.v[2]",
+    "load_sc.terminal.i[1]",
+    "load_sc.terminal.i[2]"
+  ],
+  "parameter_precision": "Reals from the simulation result (full double precision)"
+}

@@ -322,7 +322,7 @@ def test_a_pda_file_reads_the_demand_model_and_the_three_pressures(tmp_path):
     from noodl.apps.water.network import build_model
 
     model, _, _ = build_model(net)
-    assert len(model.potential["water"]._node_sources) == 1
+    assert len(model.kirchhoff["water"]._node_sources) == 1
 
 
 def test_an_unknown_demand_model_is_refused(tmp_path):

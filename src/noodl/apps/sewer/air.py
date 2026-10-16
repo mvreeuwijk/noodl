@@ -28,10 +28,10 @@ from dataclasses import dataclass
 import torch
 
 from noodl.drives import Stack
-from noodl.elements.base import Element
+from noodl.elements.base import ConstitutiveLaw
 from noodl.elements.fixed import FixedFlow
 from noodl.elements.powerlaw import PowerLaw
-from noodl.layers.potential import PotentialFlowLayer
+from noodl.layers.kirchhoff import KirchhoffLayer
 from noodl.topology import Network
 
 Tensor = torch.Tensor
@@ -61,7 +61,7 @@ F_AIR_DEFAULT = 0.02
 F_I_DEFAULT = 7.49e-4
 
 
-class Headspace(Element):
+class Headspace(ConstitutiveLaw):
     """``dp = R |Q| Q`` on a headspace edge, with ``R`` read from per-edge drivers.
 
     ``R(h) = f_air L rho / (2 D_h A_air^2)``; the inversion is the closed form
@@ -90,7 +90,7 @@ class Headspace(Element):
     ) -> None:
         super().__init__(kind)
         self.length = self._param(length, False)
-        # `Element._param` casts a plain Python float with `torch.get_default_dtype()`
+        # `ConstitutiveLaw._param` casts a plain Python float with `torch.get_default_dtype()`
         # (float32 in this repo, per `elements/duct.py`'s documented gotcha); casting
         # explicitly to `self.length`'s dtype first keeps a float64-constructed element
         # float64 throughout instead of silently losing precision on the default `f_air`.
@@ -317,8 +317,8 @@ def add_air_edges(graph: Network, net, fans: tuple = ()) -> AirPlan:
 
 def air_layer(graph: Network, net, plan: AirPlan, *, f_air=F_AIR_DEFAULT, f_i=F_I_DEFAULT,
               c_s: float = 1.0, leak_area=8e-4, leak_cd=0.6,
-              fans: tuple = ()) -> PotentialFlowLayer:
-    """The ``"air"`` `PotentialFlowLayer` (Pa; m3/s) over the edges `add_air_edges` added:
+              fans: tuple = ()) -> KirchhoffLayer:
+    """The ``"air"`` `KirchhoffLayer` (Pa; m3/s) over the edges `add_air_edges` added:
     `Headspace` and the leak `PowerLaw` (and `FixedFlow` fans), the `Drag` and `Stack`
     drives. It reads the per-pipe drivers ``sewer.A_air`` (total over barrels, m2),
     ``sewer.D_h`` (one barrel's, m), ``sewer.T`` (total top width, m), ``sewer.v`` (m/s) and
@@ -345,12 +345,12 @@ def air_layer(graph: Network, net, plan: AirPlan, *, f_air=F_AIR_DEFAULT, f_i=F_
         * torch.ones(len(net.manholes), dtype=F64)
     )
     leak_n = torch.full((len(net.manholes),), 0.5, dtype=F64)
-    elements = [
+    laws = [
         Headspace(air_lengths, positions, f_air=f_air, kind="headspace"),
         PowerLaw(C=leak_c, n=leak_n, kind="leak", dp_transition=1e-8),
     ]
     if fans:
-        elements.append(FixedFlow(torch.zeros(len(fans), dtype=F64), kind="fan"))
+        laws.append(FixedFlow(torch.zeros(len(fans), dtype=F64), kind="fan"))
     crown = torch.cat([diameter, diameter.index_select(-1, plan.outfall_pipe_idx)])
     drives = [
         Drag(
@@ -361,8 +361,8 @@ def air_layer(graph: Network, net, plan: AirPlan, *, f_air=F_AIR_DEFAULT, f_i=F_
         _stack_for("headspace", graph, net, crown=crown),
         _stack_for("leak", graph, net),
     ]
-    return PotentialFlowLayer(
-        graph, "air", elements, drives=drives, boundary=["ambient"],
+    return KirchhoffLayer(
+        graph, "air", laws, drives=drives, boundary=["ambient"],
         quantity="pressure", unit="Pa", flow_unit="m3/s",
     )
 

@@ -2,7 +2,7 @@
 
 Determines edge flows by clipping requests against arc capacity and receiver headroom
 rather than solving for a potential -- the fourth way of determining flows the framework
-identifies (alongside potential-flow Newton solves, driver-prescribed flows and
+identifies (alongside Kirchhoff Newton solves, driver-prescribed flows and
 closure-computed flows). Conservation is exact by construction: every clipped unit of
 flow is either realised on the edge or left unmet at the source; overflow at a full node
 is a separate, reported quantity, never silently dropped.

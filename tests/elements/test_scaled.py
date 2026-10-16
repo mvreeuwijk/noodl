@@ -6,7 +6,7 @@ import pytest
 import torch
 
 from noodl.elements import FixedFlow, PowerLaw, Scaled
-from noodl.layers.potential import PotentialFlowLayer
+from noodl.layers.kirchhoff import KirchhoffLayer
 from noodl.topology import Network
 
 F64 = torch.float64
@@ -62,7 +62,7 @@ def _one_zone(multiplier):
     net.add_node("z")
     net.add_edge("ambient", "z", kind="leak")
     net.add_edge("z", "ambient", kind="fan")
-    layer = PotentialFlowLayer(
+    layer = KirchhoffLayer(
         net, "air",
         [Scaled(PowerLaw(torch.tensor(0.02, dtype=F64), torch.tensor(0.5, dtype=F64),
                          kind="leak"), "m"),
@@ -100,7 +100,7 @@ def test_a_gradient_carrying_inner_tensor_that_is_not_a_parameter_is_refused():
     net.add_edge("ambient", "z", kind="leak")
     C = torch.tensor(0.02, dtype=F64, requires_grad=True)
     inner = PowerLaw(C, torch.tensor(0.5, dtype=F64), kind="leak", learnable=False)
-    layer = PotentialFlowLayer(net, "air", [Scaled(inner, "m")], boundary=["ambient"])
+    layer = KirchhoffLayer(net, "air", [Scaled(inner, "m")], boundary=["ambient"])
     with pytest.raises(ValueError, match="not a registered nn.Parameter"):
         layer.solve(torch.zeros(1, dtype=F64), {"m": torch.tensor(1.0, dtype=F64)},
                     torch.tensor([0.0, 0.01], dtype=F64), differentiable=True)
@@ -112,7 +112,7 @@ def test_a_scaled_fixed_flow_has_the_analytic_gradient_in_a_differentiable_solve
     net.add_node("z")
     net.add_edge("ambient", "z", kind="leak")
     net.add_edge("z", "ambient", kind="fan")
-    layer = PotentialFlowLayer(
+    layer = KirchhoffLayer(
         net, "air",
         [PowerLaw(torch.tensor(0.02, dtype=F64), torch.tensor(0.5, dtype=F64), kind="leak"),
          Scaled(FixedFlow(torch.tensor(0.01, dtype=F64), kind="fan"), "m")],
@@ -142,3 +142,16 @@ def test_a_list_or_scalar_multiplier_is_float64(multiplier):
     q = el.flow(torch.tensor([4.0, -9.0], dtype=F64), {KEY: multiplier})
     assert q.dtype == F64
     assert el._s(2, {KEY: multiplier}).dtype == F64
+
+
+def test_a_law_that_is_not_an_explicit_single_edge_flow_is_refused():
+    """Scaling multiplies an explicit flow F(dp); a law solved by Modified Nodal Analysis
+    (implicit flow, several ports, storage or a law context) has none to multiply."""
+    from noodl.elements import ImplicitLaw
+
+    class _Source(ImplicitLaw):
+        def residual(self, dp, q, drivers, ctx):
+            return dp - 1.0
+
+    with pytest.raises(ValueError, match="not an explicit single-edge law"):
+        Scaled(_Source("src"), KEY)

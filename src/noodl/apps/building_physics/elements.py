@@ -13,7 +13,7 @@ RHO_0 = 1.2041
 
 # The building application is float64 THROUGHOUT: a stack head is a
 # difference of two ~1e5 Pa hydrostatic terms, so a float32 element coefficient would cost
-# the very digits the natural-ventilation cases are asserted on. `Element._param` converts a
+# the very digits the natural-ventilation cases are asserted on. `ConstitutiveLaw._param` converts a
 # bare Python float at `torch.get_default_dtype()` (float32 in this project), so every float
 # that becomes an element parameter is converted HERE, explicitly, before it gets there.
 # Coefficients derived from a `Network` instead take that network's own dtype.
@@ -47,7 +47,7 @@ def add_large_opening(net: Network, a, b, *, H: float, W: float, z_mid: float,
     return lo, hi
 
 
-def orifice_elements_from_edges(net: Network, kind: str, *, rho: float = RHO_0,
+def orifice_law_from_edges(net: Network, kind: str, *, rho: float = RHO_0,
                                 dp_transition: float = 1e-3, learnable: bool = False) -> PowerLaw:
     """One `PowerLaw` over every edge of `kind`, C_e = Cd_e A_e sqrt(2 rho), from the edge
     attributes `Cd` and `area` (KeyError names a missing one)."""
@@ -56,7 +56,7 @@ def orifice_elements_from_edges(net: Network, kind: str, *, rho: float = RHO_0,
     return PowerLaw(C, n, dp_transition=dp_transition, kind=kind, learnable=learnable)
 
 
-def fan_elements_from_edges(net: Network, kind: str = "fan") -> FixedFlow:
+def fan_law_from_edges(net: Network, kind: str = "fan") -> FixedFlow:
     """One `FixedFlow` over every edge of `kind`, each edge's mass flow from its `flow`
     attribute (kg/s), as the `fan` component sets it."""
     return FixedFlow(net.edge_attr("flow", kind), kind=kind)

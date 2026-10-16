@@ -1811,7 +1811,7 @@ def test_tracer_on_the_loop_matches_swmm_at_steady_state(tmp_path):
 # ------------------------------------------------------------------ head-solve robustness
 #
 # Before the convex line search and the step floor of the head solve
-# (`dynwave.HEAD_SOLVE_NEWTON`), both fixtures ended the run with "PotentialFlowLayer 'water'
+# (`dynwave.HEAD_SOLVE_NEWTON`), both fixtures ended the run with "KirchhoffLayer 'water'
 # solve: ... failed to converge": the orifice fixture on its first step (a residual stuck at
 # 1.2e-12 m3/s, the round-off floor of a junction flooding 17 m above its outfall behind a
 # 0.1 m3/s cap, above the 1e-12 m3/s atol), the drop fixture at t = 65 s (a 2-cycle of the

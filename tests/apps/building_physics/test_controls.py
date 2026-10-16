@@ -621,7 +621,7 @@ def _two_rooms(**kwargs):
         Zone,
         add_zone,
         build_model,
-        orifice_elements_from_edges,
+        orifice_law_from_edges,
     )
     from noodl.drives import Stack
     from noodl.topology import Network
@@ -633,9 +633,9 @@ def _two_rooms(**kwargs):
     net.add_edge("ambient", "A", kind="airpath", z_path=0.5, Cd=0.6, area=0.05)
     net.add_edge("A", "B", kind="airpath", z_path=1.0, Cd=0.6, area=0.05)
     net.add_edge("B", "ambient", kind="airpath", z_path=1.5, Cd=0.6, area=0.05)
-    el = orifice_elements_from_edges(net, "airpath")
+    el = orifice_law_from_edges(net, "airpath")
     kwargs.setdefault("species", ("CO2",))
-    return build_model(net, air_elements=[el], drives=[Stack.from_network(net, "airpath")],
+    return build_model(net, air_laws=[el], drives=[Stack.from_network(net, "airpath")],
                        return_inputs=True, **kwargs)
 
 
@@ -666,7 +666,7 @@ def test_sensors_by_name_resolve_against_the_model_they_are_built_into():
     assert (temperature.key, temperature.index) == ("thermal.x",
                                                     (_interior(model, "thermal", "A"),))
     assert (pressure.key, pressure.index) == ("air.phi", (model.net.node_index("A"),))
-    column = model.potential["air"].kind_slice("airpath").start + 1
+    column = model.kirchhoff["air"].kind_slice("airpath").start + 1
     assert (flow.key, flow.index) == ("air.q", (column,))
     assert (dp.key, dp.index) == ("air.dp", (column,))
     assert isinstance(outdoor, DriverReading)
@@ -683,7 +683,7 @@ def test_sensors_by_name_resolve_against_the_model_they_are_built_into():
     (node_mass_fraction("B", 2), IndexError, "1 species, not position 2"),
     (node_mass_fraction("ambient"), KeyError, "'ambient' is not an interior node"),
     (edge_flow("airpath", 3), IndexError, "3 edges, not position 3"),
-    (edge_pressure_difference("door"), KeyError, "no element of kind 'door'"),
+    (edge_pressure_difference("door"), KeyError, "no law of kind 'door'"),
 ])
 def test_a_sensor_that_names_what_the_model_lacks_is_refused_when_the_model_is_built(
         reading, error, match):
@@ -708,7 +708,7 @@ def test_a_sensor_finds_its_row_and_column_whatever_the_layer_order():
         Zone,
         add_zone,
         build_model,
-        orifice_elements_from_edges,
+        orifice_law_from_edges,
     )
     from noodl.drives import Stack
     from noodl.topology import Network
@@ -721,12 +721,12 @@ def test_a_sensor_finds_its_row_and_column_whatever_the_layer_order():
     net.add_edge("ambient", "A", kind="airpath", z_path=0.5, Cd=0.6, area=0.05)
     net.add_edge("A", "B", kind="airpath", z_path=1.0, Cd=0.6, area=0.05)
     net.add_edge("B", "ambient", kind="airpath", z_path=1.5, Cd=0.6, area=0.05)
-    elements = [orifice_elements_from_edges(net, "crack"),
-                orifice_elements_from_edges(net, "airpath")]
+    elements = [orifice_law_from_edges(net, "crack"),
+                orifice_law_from_edges(net, "airpath")]
     drives = [Stack.from_network(net, "crack"), Stack.from_network(net, "airpath")]
     network = ControlNetwork([Sensor(node_mass_fraction("A")), Sensor(node_temperature("A")),
                               Sensor(edge_flow("airpath", 1))])
-    model, state, drivers = build_model(net, air_elements=elements, drives=drives,
+    model, state, drivers = build_model(net, air_laws=elements, drives=drives,
                                         flow_kinds=("airpath",), species=1,
                                         controls=network, return_inputs=True)
     assert model.transport["species"].interior_idx.tolist() == [2, 3]   # B, A; not C
@@ -968,7 +968,7 @@ def _co2_fan_loop(kp, ki, steps: int = 8):
         Zone,
         add_zone,
         build_model,
-        orifice_elements_from_edges,
+        orifice_law_from_edges,
         simulate,
     )
     from noodl.drives import Stack
@@ -986,7 +986,7 @@ def _co2_fan_loop(kp, ki, steps: int = 8):
          IncrementalPI(0, kp=kp, ki=ki)],
         [Actuator(1, "flow_multiplier.fan")])
     model, state, drivers = build_model(
-        net, air_elements=[orifice_elements_from_edges(net, "airpath"), fan],
+        net, air_laws=[orifice_law_from_edges(net, "airpath"), fan],
         drives=[Stack.from_network(net, "airpath")], species=("CO2",),
         controls=network, return_inputs=True)
     state["species.x"] = torch.tensor([1.0e-3], dtype=F64)

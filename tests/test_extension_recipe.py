@@ -3,27 +3,27 @@
 This module is the worked example the guide walks through: a new branch law defined
 entirely outside `src/` (import nothing from `noodl.apps`, touch nothing under `src/`) and a
 small two-zone "application" built from it. It exists to prove the extension recipe works
-through noodl's own public surface -- `noodl.elements.base.Element`, `noodl.topology`,
-`noodl.layers.potential`, `noodl.model` -- not to add a feature.
+through noodl's own public surface -- `noodl.elements.base.ConstitutiveLaw`, `noodl.topology`,
+`noodl.layers.kirchhoff`, `noodl.model` -- not to add a feature.
 """
 
 from __future__ import annotations
 
 import torch
 
-from noodl.elements.base import Element
-from noodl.layers.potential import PotentialFlowLayer
+from noodl.elements.base import ConstitutiveLaw
+from noodl.layers.kirchhoff import KirchhoffLayer
 from noodl.model import Model
 from noodl.topology import Network
 
 F64 = torch.float64
 
 
-class Sigmoid(Element):
+class Sigmoid(ConstitutiveLaw):
     """q = tanh(k * dp): a smooth, bounded, odd branch law with a learnable steepness `k`.
 
     Follows `Conductance`'s contract exactly: `__init__` wraps its one coefficient with
-    `Element._param` (so `learnable=True` registers it as a real `nn.Parameter`, reachable
+    `ConstitutiveLaw._param` (so `learnable=True` registers it as a real `nn.Parameter`, reachable
     by `torch.func.functional_call` the same way every built-in element is), and `flow`,
     `dflow` and `linear_init` are all overridden with closed forms rather than left to the
     base class's autograd default -- exact and cheap, exactly the reason `Conductance` does
@@ -49,7 +49,7 @@ def build_two_zone(*, learnable: bool = True):
     """(model, state, drivers) for the smallest network the new law can be checked on.
 
     ambient (boundary) -> z1 -> z2 -> ambient, three `airpath` edges, one `Sigmoid` element
-    covering all three (steepness `k`, shape (3,)). One `PotentialFlowLayer`, one `Model`.
+    covering all three (steepness `k`, shape (3,)). One `KirchhoffLayer`, one `Model`.
     No `TransportLayer`, no closures: nothing here needs one, and the guide's point is the
     smallest network that exercises the new law, not a full application.
     """
@@ -63,7 +63,7 @@ def build_two_zone(*, learnable: bool = True):
 
     k = torch.tensor([1.0, 0.8, 1.2], dtype=F64)
     element = Sigmoid(k, learnable=learnable)
-    layer = PotentialFlowLayer(
+    layer = KirchhoffLayer(
         net, "air", [element], boundary=["ambient"], quantity="pressure", unit="Pa",
     )
     model = Model(net, {"air": layer})
@@ -84,8 +84,8 @@ def test_interior_flow_balance_and_gradcheck_through_the_new_law():
         residual, torch.zeros_like(residual), atol=1e-10, rtol=0.0
     )
 
-    layer = model.potential["air"]
-    element = layer._elements[0]
+    layer = model.kirchhoff["air"]
+    element = layer._laws[0]
     phi_b = torch.zeros(1, dtype=F64)
 
     def f(k_):

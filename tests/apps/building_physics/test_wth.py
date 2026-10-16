@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 import torch
 
-from noodl.apps.building_physics.elements import orifice_elements_from_edges
+from noodl.apps.building_physics.elements import orifice_law_from_edges
 from noodl.apps.building_physics.thermal import (
     R_AIR,
     Zone,
@@ -71,8 +71,8 @@ def test_drivers_at_emits_the_keys_a_built_model_actually_consumes(tmp_path):
     net.add_node("ambient", z_ref=0.0)
     add_zone(net, Zone("z", volume=50.0, T0=293.15))
     net.add_edge("ambient", "z", kind="airpath", z_path=0.0, Cd=0.6, area=0.01)
-    el = orifice_elements_from_edges(net, "airpath")
-    model = build_model(net, air_elements=[el], drives=[Stack.from_network(net, "airpath")])
+    el = orifice_law_from_edges(net, "airpath")
+    model = build_model(net, air_laws=[el], drives=[Stack.from_network(net, "airpath")])
     state = initial_state(model)
     drivers = {
         "air.phi_boundary": torch.zeros(1, dtype=torch.float64),
@@ -215,8 +215,8 @@ def test_weather_inputs_write_the_thermal_boundary_when_the_model_has_no_node_te
     net.add_node("ambient", z_ref=0.0)
     add_zone(net, Zone("z", volume=50.0, T0=293.15))
     net.add_edge("ambient", "z", kind="airpath", z_path=0.0, Cd=0.6, area=0.01)
-    el = orifice_elements_from_edges(net, "airpath")
-    model = build_model(net, air_elements=[el], drives=[Stack.from_network(net, "airpath")])
+    el = orifice_law_from_edges(net, "airpath")
+    model = build_model(net, air_laws=[el], drives=[Stack.from_network(net, "airpath")])
     assert "T" not in model.refs.inputs
     inputs = w.inputs(model)
     assert inputs[0].key == "thermal.x_boundary" and inputs[0].index is None

@@ -3,7 +3,7 @@
 `TrackedDict` records which keys are READ. The two helpers let a site that handles every
 driver in bulk -- the differentiable potential solve threads all of them through autograd
 -- do so without marking them all as read, and keep tracking the dictionary it rebuilds,
-so that the reads its elements and drives make are still recorded. Outside a probe both
+so that the reads its laws and drives make are still recorded. Outside a probe both
 helpers are exactly `[m[k] for k in keys]` and the identity.
 """
 

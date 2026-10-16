@@ -10,10 +10,10 @@ Per pass, from the state at the START of the pass:
 4. every derived per-pipe quantity the air side and the quality side read;
 5. the two transport layers' capacities and the full-node air density.
 
-Because the closure computes the flow ITSELF (rather than reading a potential layer's
+Because the closure computes the flow ITSELF (rather than reading a Kirchhoff layer's
 solved ``q``), the air layer sees THIS pass's water state, not the previous one's: closures
 run before every potential solve inside one `Model._pass`. That is the whole reason the
-water side is continuity-first rather than a Newton potential layer.
+water side is continuity-first rather than a Newton Kirchhoff layer.
 
 Loops. The construction builds the pipe index, each manhole's outgoing pipe, the
 leaf-to-root LEVEL order, and, per level, the FLAT index tensors the storage sweep gathers

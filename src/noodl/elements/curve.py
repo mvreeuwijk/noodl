@@ -15,7 +15,7 @@ from collections.abc import Mapping
 
 import torch
 
-from noodl.elements.base import Element
+from noodl.elements.base import ConstitutiveLaw
 from noodl.solvers.scalar import solve_monotone
 
 Tensor = torch.Tensor
@@ -135,7 +135,7 @@ def _fit_is_increasing(curve: SplineCurve) -> bool:
     return not bool((inside & (low <= 0)).any())
 
 
-class CubicSplineFlow(Element):
+class CubicSplineFlow(ConstitutiveLaw):
     """An airflow element given by measured points, fitted as ContamX fits them
     (`SplineCurve`): CONTAM's cubic-spline elements.
 

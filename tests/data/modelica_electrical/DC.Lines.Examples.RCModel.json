@@ -1,0 +1,166 @@
+{
+  "format": "noodl-modelica-electrical/1",
+  "model": "Buildings.Electrical.DC.Lines.Examples.RCModel",
+  "mbl_commit": "55abf579598ca81cae0a82f337350375958e6722",
+  "openmodelica": "OpenModelica 1.27.1~2-g6db4671",
+  "msl": "4.1.0",
+  "experiment": {
+    "StartTime": 0.0,
+    "StopTime": 15.0,
+    "Interval": 0.03,
+    "Tolerance": 1e-12
+  },
+  "experiment_declared": {
+    "StopTime": 15.0,
+    "Tolerance": 1e-06
+  },
+  "components": [
+    {
+      "name": "RC_ss",
+      "class": "Buildings.Electrical.DC.Lines.TwoPortRCLine",
+      "parameters": {
+        "useHeatPort": false,
+        "T": 298.15,
+        "R": 8.0,
+        "T_ref": 298.15,
+        "M": 507.65,
+        "C": 1.0,
+        "L": 0.0,
+        "V_nominal": 50.0,
+        "use_C": false,
+        "Vc_start": 50.0
+      }
+    },
+    {
+      "name": "constantVoltage",
+      "class": "Buildings.Electrical.DC.Sources.ConstantVoltage",
+      "parameters": {
+        "potentialReference": true,
+        "definiteReference": false,
+        "V": 50.0
+      }
+    },
+    {
+      "name": "ground",
+      "class": "Modelica.Electrical.Analog.Basic.Ground",
+      "parameters": {}
+    },
+    {
+      "name": "sc_ss",
+      "class": "Buildings.Electrical.DC.Loads.Resistor",
+      "parameters": {
+        "linearized": false,
+        "mode": "Buildings.Electrical.Types.Load.FixedZ_steady_state",
+        "P_nominal": 1.6759759912428246e+157,
+        "V_nominal": 50.0,
+        "initMode": "Buildings.Electrical.Types.InitMode.linearized",
+        "useHeatPort": false,
+        "T": 300.15,
+        "R": 0.0,
+        "T_ref": 300.15,
+        "alpha": 0.0
+      }
+    },
+    {
+      "name": "sen_ss",
+      "class": "Buildings.Electrical.DC.Sensors.GeneralizedSensor",
+      "parameters": {}
+    },
+    {
+      "name": "RC_dyn",
+      "class": "Buildings.Electrical.DC.Lines.TwoPortRCLine",
+      "parameters": {
+        "useHeatPort": false,
+        "T": 298.15,
+        "R": 8.0,
+        "T_ref": 298.15,
+        "M": 507.65,
+        "C": 1.0,
+        "L": 0.0,
+        "V_nominal": 50.0,
+        "use_C": true,
+        "Vc_start": 50.0
+      },
+      "initial": {
+        "Vc": 50.0
+      }
+    },
+    {
+      "name": "sc_dyn",
+      "class": "Buildings.Electrical.DC.Loads.Resistor",
+      "parameters": {
+        "linearized": false,
+        "mode": "Buildings.Electrical.Types.Load.FixedZ_steady_state",
+        "P_nominal": 1.6759759912428246e+157,
+        "V_nominal": 50.0,
+        "initMode": "Buildings.Electrical.Types.InitMode.linearized",
+        "useHeatPort": false,
+        "T": 300.15,
+        "R": 0.0,
+        "T_ref": 300.15,
+        "alpha": 0.0
+      }
+    },
+    {
+      "name": "sen_dyn",
+      "class": "Buildings.Electrical.DC.Sensors.GeneralizedSensor",
+      "parameters": {}
+    }
+  ],
+  "connections": [
+    [
+      "ground.p",
+      "constantVoltage.n"
+    ],
+    [
+      "constantVoltage.terminal",
+      "RC_ss.terminal_n"
+    ],
+    [
+      "RC_ss.terminal_p",
+      "sen_ss.terminal_n"
+    ],
+    [
+      "sen_ss.terminal_p",
+      "sc_ss.terminal"
+    ],
+    [
+      "RC_dyn.terminal_p",
+      "sen_dyn.terminal_n"
+    ],
+    [
+      "sen_dyn.terminal_p",
+      "sc_dyn.terminal"
+    ],
+    [
+      "constantVoltage.terminal",
+      "RC_dyn.terminal_n"
+    ]
+  ],
+  "signals": [],
+  "compared": [
+    "RC_ss.terminal_n.v[1]",
+    "RC_ss.terminal_n.v[2]",
+    "RC_ss.terminal_n.i[1]",
+    "RC_ss.terminal_p.v[1]",
+    "RC_ss.terminal_p.v[2]",
+    "RC_ss.terminal_p.i[1]",
+    "constantVoltage.terminal.v[1]",
+    "constantVoltage.terminal.v[2]",
+    "constantVoltage.terminal.i[1]",
+    "sc_ss.terminal.v[1]",
+    "sc_ss.terminal.v[2]",
+    "sc_ss.terminal.i[1]",
+    "RC_dyn.terminal_n.v[1]",
+    "RC_dyn.terminal_n.v[2]",
+    "RC_dyn.terminal_n.i[1]",
+    "RC_dyn.terminal_p.v[1]",
+    "RC_dyn.terminal_p.v[2]",
+    "RC_dyn.terminal_p.i[1]",
+    "RC_dyn.Vc",
+    "sc_dyn.terminal.v[1]",
+    "sc_dyn.terminal.v[2]",
+    "sc_dyn.terminal.i[1]"
+  ],
+  "parameter_precision": "Reals from the simulation result (full double precision)"
+}

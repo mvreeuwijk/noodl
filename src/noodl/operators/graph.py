@@ -6,7 +6,7 @@ matrix in the hot (matvec) path.
 operator's own compact interior domain (size `n_interior`, what `matvec`/`rmatvec` actually
 operate on) and the boundary nodes, which this operator always treats as held at potential 0
 (a nonzero boundary potential is folded into the right-hand side by the caller, exactly as
-`PotentialFlowLayer.residual` folds `phi_boundary` into `lhs - s_I` today).
+`KirchhoffLayer.residual` folds `phi_boundary` into `lhs - s_I` today).
 
 Every method below is built from two primitives, both O(edges) and loop-free: a GATHER at the
 edge endpoints (`torch.gather`) and a SCATTER-ADD back to nodes (`Tensor.scatter_add_`), which
@@ -142,7 +142,7 @@ class GraphLaplacianOperator:
         #
         # UNBOUNDED BY TYPE, BOUNDED IN FACT, and the lifetime argument is the load-bearing
         # one: a GraphLaplacianOperator is rebuilt at every Newton iterate (see
-        # `PotentialFlowLayer.solve`'s `operator_fn`), so one instance sees a handful of
+        # `KirchhoffLayer.solve`'s `operator_fn`), so one instance sees a handful of
         # solves with one or two distinct (batch shape, device) keys and is then discarded.
         # The entries are stride-0 views of two (edges,) arrays, so even a pathological key
         # set would cost almost nothing; there is deliberately no eviction policy.

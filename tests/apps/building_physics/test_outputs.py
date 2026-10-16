@@ -292,7 +292,7 @@ def _edges(model, layer="species"):
 
 def _layer_q(model, q, layer="species"):
     lay = model.transport[layer]
-    return model.potential[model.flow_layer_of[layer]].flows_of_kind(q, lay.flow_kinds)
+    return model.kirchhoff[model.flow_layer_of[layer]].flows_of_kind(q, lay.flow_kinds)
 
 
 def _dense_age(model, f, M, layer="species"):

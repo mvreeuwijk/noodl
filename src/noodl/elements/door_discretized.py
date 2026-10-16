@@ -90,7 +90,7 @@ from collections.abc import Mapping
 
 import torch
 
-from noodl.elements.base import Element, band_edges, memo
+from noodl.elements.base import ConstitutiveLaw, band_edges, memo
 from noodl.elements.door import (
     _power_law_at,
     _power_law_coeffs,
@@ -232,7 +232,7 @@ class DoorCompartmentHead(_InflowDensities):
         return memo(self, "head", self._densities(drivers), head)
 
 
-class _DoorCompartmentBase(_InflowDensities, Element):
+class _DoorCompartmentBase(_InflowDensities, ConstitutiveLaw):
     """Endpoints, drivers and the smoothed density weighting shared by both doors."""
 
     def __init__(
@@ -248,7 +248,7 @@ class _DoorCompartmentBase(_InflowDensities, Element):
         p_key: str,
         kind: str,
     ) -> None:
-        Element.__init__(self, kind)
+        ConstitutiveLaw.__init__(self, kind)
         name = type(self).__name__
         src_t, tgt_t = _endpoints(src, tgt, where=f"{name} (kind {kind!r})")
         if not float(dp_turbulent) > 0.0:
@@ -272,7 +272,7 @@ class _DoorCompartmentBase(_InflowDensities, Element):
         if n_edges > 1 and width != n_edges:
             raise ValueError(
                 f"{type(self).__name__} (kind {self.kind!r}): dp has {width} columns but "
-                f"this element covers {n_edges} compartment edges"
+                f"this law covers {n_edges} compartment edges"
             )
 
     def _volume_flow(self, dp: Tensor, drivers) -> tuple[Tensor, Tensor]:
@@ -693,7 +693,7 @@ def discretized_operable_door(
     return comp, head
 
 
-class DoorPortStream(Element):
+class DoorPortStream(ConstitutiveLaw):
     """One of the two port streams of a whole discretised door, as ONE edge from side A to
     side B: ``direction="ab"`` returns ``port_a1.m_flow = mAB_flow``, ``"ba"`` returns
     ``port_b2.m_flow = -port_a2.m_flow = -mBA_flow`` (kg/s, both positive from A to B), from
@@ -717,7 +717,7 @@ class DoorPortStream(Element):
 
     def __init__(self, comp: _DoorCompartmentBase, head: DoorCompartmentHead,
                  direction: str, kind: str) -> None:
-        Element.__init__(self, kind)
+        ConstitutiveLaw.__init__(self, kind)
         if direction not in ("ab", "ba"):
             raise ValueError(
                 f"DoorPortStream (kind {kind!r}): direction must be 'ab' or 'ba', got "
@@ -777,7 +777,7 @@ class DoorPortStream(Element):
         gaiFlo'`` dips below 0 for a compartment just below zero inside the
         ``smoothHeaviside`` band (``ClosedDoors``: -5e-5 kg/(s Pa)). The two stream edges join
         the same two nodes at the same ``dp``, so the airflow Jacobian (and every per-edge
-        slope a potential layer sums into its Laplacian) only ever sees the SUM of their
+        slope a Kirchhoff layer sums into its Laplacian) only ever sees the SUM of their
         slopes, which is the net flow's, positive; reporting it split evenly keeps that sum
         exact and each edge's slope nonnegative for the layer's grounding certificate."""
         grad_enabled = torch.is_grad_enabled()

@@ -1062,7 +1062,7 @@ def edge_flow(kind: str, position: int = 0) -> NamedReading:
 
 def edge_pressure_difference(kind: str, position: int = 0) -> NamedReading:
     """The driving pressure difference (Pa) of an edge, from-node minus to-node with the
-    edge's drives (`PotentialFlowLayer.dp`), which `simulate` records as `"air.dp"`."""
+    edge's drives (`KirchhoffLayer.dp`), which `simulate` records as `"air.dp"`."""
     label = f"edge_pressure_difference({kind!r}, {position})"
 
     def resolve(net, layers, drivers):

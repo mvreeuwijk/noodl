@@ -179,37 +179,37 @@ class DuctNetwork:
                             **t.wind, **named)
 
 
-def duct_elements_from_edges(net, *, kind: str = "duct", terminal_kind: str = "duct_terminal",
-                             temperature_key: str | None = None,
-                             opening_key: str | None = None, g: float = 9.80665,
-                             ambient="ambient", profiles: Sequence = ()):
-    """The elements and drives of the duct edges `DuctNetwork.add_to` made: an `AirDuct`
+def duct_laws_from_edges(net, *, kind: str = "duct", terminal_kind: str = "duct_terminal",
+                         temperature_key: str | None = None,
+                         opening_key: str | None = None, g: float = 9.80665,
+                         ambient="ambient", profiles: Sequence = ()):
+    """The laws and drives of the duct edges `DuctNetwork.add_to` made: an `AirDuct`
     and a `DuctStack` for the segments, a `DuctTerminal`, a `Stack` (at the junction's
     height) and, when a terminal has a wind profile or a nonzero `Cp`, a `Wind` for the
     terminals (`profiles` numbers the `WindProfile`s from 1, as for `Wind.from_network`;
     an edge with neither feels no wind). Returns
-    `(elements, drives)`; a kind the network lacks contributes nothing.
+    `(laws, drives)`; a kind the network lacks contributes nothing.
     `temperature_key` names the full-node temperature driver for the viscosity (the
     viscosity at 293.15 K when None); `opening_key` the terminals' opening driver."""
-    elements, drives = [], []
+    laws, drives = [], []
     kinds = set(net.edge_kinds())
     if kind in kinds:
         src, tgt = net.endpoints(kind)
-        elements.append(AirDuct(net.edge_attr("length", kind), net.edge_attr("diameter", kind),
-                                net.edge_attr("roughness", kind), net.edge_attr("loss", kind),
-                                area=net.edge_attr("area", kind), src=src, tgt=tgt,
-                                temperature_key=temperature_key, kind=kind))
+        laws.append(AirDuct(net.edge_attr("length", kind), net.edge_attr("diameter", kind),
+                            net.edge_attr("roughness", kind), net.edge_attr("loss", kind),
+                            area=net.edge_attr("area", kind), src=src, tgt=tgt,
+                            temperature_key=temperature_key, kind=kind))
         drives.append(DuctStack.from_network(net, kind, g=g))
     if terminal_kind in kinds:
         src, tgt = net.endpoints(terminal_kind)
-        elements.append(DuctTerminal(net.edge_attr("area", terminal_kind),
-                                     net.edge_attr("loss", terminal_kind), src=src, tgt=tgt,
-                                     temperature_key=temperature_key, opening_key=opening_key,
-                                     kind=terminal_kind))
+        laws.append(DuctTerminal(net.edge_attr("area", terminal_kind),
+                                 net.edge_attr("loss", terminal_kind), src=src, tgt=tgt,
+                                 temperature_key=temperature_key, opening_key=opening_key,
+                                 kind=terminal_kind))
         drives.append(Stack.from_network(net, terminal_kind, g=g))
         windy = ((net.edge_attr("profile", terminal_kind, default=0.0) > 0)
                  | (net.edge_attr("Cp", terminal_kind, default=0.0) != 0))
         if bool(windy.any()):
             drives.append(Wind.from_network(net, terminal_kind, ambient=ambient,
                                             profiles=profiles))
-    return elements, drives
+    return laws, drives

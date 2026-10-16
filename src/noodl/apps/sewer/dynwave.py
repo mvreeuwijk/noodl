@@ -1,7 +1,7 @@
 """SWMM 5.2.4 dynamic-wave routing for the sewer application.
 
 `DynamicWaveOptions` holds the `[OPTIONS]` that change the physics. The model is a
-`PotentialFlowLayer` ``"water"`` (quantity ``"head"``, m) whose unknowns are the junction
+`KirchhoffLayer` ``"water"`` (quantity ``"head"``, m) whose unknowns are the junction
 heads: every conduit is a `DynamicWaveConduit`, q = c0 + k (H1 - H2) with the coefficients of
 SWMM's momentum update (`dynwave_terms.conduit_terms`) frozen for one pass, and every junction
 carries a `JunctionStorage`, SWMM's trapezoidal continuity
@@ -94,8 +94,8 @@ from noodl.apps.sewer.xsect_tables import (
     critical_depth,
     normal_depth_ft,
 )
-from noodl.elements.base import Element
-from noodl.layers.potential import PotentialFlowLayer
+from noodl.elements.base import ConstitutiveLaw
+from noodl.layers.kirchhoff import KirchhoffLayer
 from noodl.layers.reaction import Reaction
 from noodl.layers.transport import TransportLayer, active_interior
 from noodl.model import Model, StepContext
@@ -167,7 +167,7 @@ K_SWITCH = 1.0
 SOLVE_ATOL = 1.0e-12
 #: `solve_atol`'s margin over the bed's round-off floor (see there).
 _BED_FLOOR_MARGIN = 4.0
-#: The head solve's Newton keywords (`PotentialFlowLayer(newton_defaults=...)`; docs:
+#: The head solve's Newton keywords (`KirchhoffLayer(newton_defaults=...)`; docs:
 #: "Iteration and convergence"). Every law of the pass is non-decreasing in its own head
 #: difference (conduits, regulators) or head (junction withdrawals), so the head solve's
 #: residual is the gradient of a convex function, and ``line_search="convex"`` cuts a step
@@ -376,7 +376,7 @@ class DynamicWaveOptions:
                 f"DynamicWaveOptions: max_trials must be >= 1 or None, got {self.max_trials!r}")
 
 
-class DynamicWaveConduit(Element):
+class DynamicWaveConduit(ConstitutiveLaw):
     """SWMM's dynamic-wave conduit (`dwflow.c`) with its coefficients frozen for one pass.
 
     ``q = c0 + k dp`` (m3/s, dp = H1 - H2 in m), then ``min(q, q_norm)`` where SWMM's
@@ -486,7 +486,7 @@ class DynamicWaveConduit(Element):
         return out
 
 
-class StructureLink(Element):
+class StructureLink(ConstitutiveLaw):
     """A flow regulator (orifice, weir or outlet) or pump with its flow linearised about the
     previous pass: ``q = c0 + g (dp - dp_fed)`` (m3/s, dp = H1 - H2 in m), then the flap
     gate's clamp (a pump's, which never flows backwards).
@@ -2659,7 +2659,7 @@ def build_dynamic_wave_model(net: SewerNetwork, *, iterate_tol: float | None = N
                              ) -> tuple[Model, State, Drivers]:
     """Assemble a dynamic-wave sewer and return ``(model, state, drivers)``.
 
-    One `PotentialFlowLayer` ``"water"`` (quantity ``"head"``, m; flows m3/s) over the pipes,
+    One `KirchhoffLayer` ``"water"`` (quantity ``"head"``, m; flows m3/s) over the pipes,
     with the outfalls as its boundary and a `JunctionStorage` at every junction, and the
     `DynamicWaveHydraulics` closure; ``coupling="iterate"`` converges on the junction heads
     to `iterate_tol` (m) and the conduit flows to `iterate_flow_tol` (m3/s) within
@@ -2759,11 +2759,11 @@ def build_dynamic_wave_model(net: SewerNetwork, *, iterate_tol: float | None = N
     junction_idx = closure.junction_idx
     junction_invert = closure.node_invert[junction_idx]
 
-    def elements():
+    def laws():
         return [DynamicWaveConduit(), *(StructureLink(k) for k in closure.structures)]
 
-    layer = PotentialFlowLayer(
-        graph, "water", elements(), boundary=boundary,
+    layer = KirchhoffLayer(
+        graph, "water", laws(), boundary=boundary,
         node_sources=[closure.storage],
         quantity="head", unit="m", flow_unit="m3/s", analytic_primal=True,
         linear_solver="direct" if len(net.manholes) <= DENSE_SOLVE_MAX_JUNCTIONS else "auto",
@@ -3040,7 +3040,7 @@ def _air_parts(graph: Network, closure: DynamicWaveHydraulics, scheme: str, fans
 
 def air_state(model: Model) -> State:
     """The air layer's initial state: zero pressures and flows (the quiescent headspace)."""
-    layer = model.potential["air"]
+    layer = model.kirchhoff["air"]
     return {"air.phi": torch.zeros(model.net.n, dtype=F64),
             "air.q": torch.zeros(len(layer.cols), dtype=F64)}
 

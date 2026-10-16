@@ -19,7 +19,7 @@ power of density folded into the coefficient:
 
 `m` may be a scalar or one value per edge.
 
-Why this lives in the ELEMENT and not in a `Closure`-written per-edge multiplier
+Why this lives in the LAW and not in a `Closure`-written per-edge multiplier
 --------------------------------------------------------------------------------
 The obvious alternative is a `ReferenceCorrection` closure supplying a
 multiplicative driver on `C`. That cannot work: the multiplier is FLOW-DIRECTION dependent,
@@ -28,7 +28,7 @@ under the default ping-pong coupling do not exist at all on the first (and, for 
 only) pass. A static per-edge factor taken from the nominal from-zone would carry the full
 1.8 % error with the WRONG SIGN on every path that reverses. Selecting on `sign(dp)` inside
 the element is the only place the information exists. Elements already receive the whole
-`drivers` mapping (`PotentialFlowLayer` passes it to `flow`, `dflow` and `linear_init`, and
+`drivers` mapping (`KirchhoffLayer` passes it to `flow`, `dflow` and `linear_init`, and
 rebuilds it before `torch.func.functional_call` on the differentiable path), so the density
 a `Stack` drive already reads is available here with no new capability; `Damper` is the
 existing precedent for a power law switched on `sign(dp)`.
@@ -147,7 +147,7 @@ class UpstreamDensityPowerLaw(PowerLaw):
         if n_nodes < needed:
             raise ValueError(
                 f"UpstreamDensityPowerLaw (kind {self.kind!r}): driver "
-                f"{self.rho_key!r} has {n_nodes} node values but this element's endpoints "
+                f"{self.rho_key!r} has {n_nodes} node values but this law's endpoints "
                 f"reach node index {needed - 1}"
             )
         self._check_positive(rho)
@@ -198,12 +198,12 @@ class UpstreamDensityPowerLaw(PowerLaw):
         if n_edges > 1 and width != n_edges:
             raise ValueError(
                 f"UpstreamDensityPowerLaw (kind {self.kind!r}): dp has {width} columns but "
-                f"this element covers {n_edges} edges"
+                f"this law covers {n_edges} edges"
             )
         rho = self._rho(drivers)
         return torch.where(dp >= 0, self._ratio(rho, self.src), self._ratio(rho, self.tgt))
 
-    # ------------------------------------------------------------------ Element
+    # ------------------------------------------------------------------ ConstitutiveLaw
     def flow(self, dp: Tensor, drivers=None) -> Tensor:
         return self._scale(dp, drivers) * super().flow(dp, drivers)
 

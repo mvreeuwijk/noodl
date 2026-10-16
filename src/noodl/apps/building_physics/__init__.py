@@ -84,13 +84,13 @@ from noodl.apps.building_physics.ducts import (
     DEFAULT_ROUGHNESS,
     DEFAULT_TERMINAL_LOSS,
     DuctNetwork,
-    duct_elements_from_edges,
+    duct_laws_from_edges,
 )
 from noodl.apps.building_physics.elements import (
     add_large_opening,
-    fan_elements_from_edges,
+    fan_law_from_edges,
     mass_orifice,
-    orifice_elements_from_edges,
+    orifice_law_from_edges,
 )
 from noodl.apps.building_physics.epw import read_epw, write_wth
 from noodl.apps.building_physics.filters import (
@@ -263,13 +263,13 @@ __all__ = [
     "building_air_change_rate",
     "crack",
     "cumulative_exposure",
-    "duct_elements_from_edges",
+    "duct_laws_from_edges",
     "door",
     "duct",
     "edge_flow",
     "edge_pressure_difference",
     "fan",
-    "fan_elements_from_edges",
+    "fan_law_from_edges",
     "filter_transmission",
     "infection_probability",
     "inhaled_dose",
@@ -282,7 +282,7 @@ __all__ = [
     "node_temperature",
     "occupant_exposure",
     "occupant_inputs",
-    "orifice_elements_from_edges",
+    "orifice_law_from_edges",
     "project_calendar",
     "project_to_model",
     "read_ctm",

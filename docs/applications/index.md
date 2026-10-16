@@ -1,24 +1,27 @@
 # Applications
 
 noodl physics is one solver. The applications below are physical systems modelled with it, each a thin
-layer of domain physics (its elements, drives and closures) over the shared core. Any of them can
+layer of domain physics (its constitutive laws, drives and closures) over the shared core. Any of them can
 be built directly in Python, as each page shows, or, where a reader exists, read from a model
 file; see [File formats](../formats/index.md). Every application is initialised the same way,
 with `initial_state(model, values=...)` and `initial_drivers(model, values=...)` by name; see
-[Using noodl](../usage.md).
+[Using noodl](../usage.md). The electrical application has no `initial_drivers`: its
+`build_model` returns every driver, and `initial_state(model, drivers)` solves the consistent
+initial point of the circuit.
 
 | Application | Physical system | Flow determination | Entry point |
 |---|---|---|---|
-| [Building physics](building_physics.md) | Multi-zone airflow, heat, contaminants | Potential: Newton on zone pressure | `build_model` |
+| [Building physics](building_physics.md) | Multi-zone airflow, heat, contaminants | Kirchhoff: Newton on zone pressure | `build_model` |
 | [Street air quality](street_aq.md) | Urban air quality, canyon exchange, routing | Closure: flows computed from the wind aloft | `build_model`, `StreetNetwork` |
-| [Sewers](sewer.md) | Gravity hydraulics, headspace air, sulfide | Continuity on a tree for the water (kinematic wave), or Newton potential on head (dynamic wave); Newton potential for the headspace air | `build_model` |
-| [Water distribution](water.md) | Pressurised mains, pumps, tanks, demand | Potential: Newton on hydraulic head | `build_model` |
+| [Sewers](sewer.md) | Gravity hydraulics, headspace air, sulfide | Continuity on a tree for the water (kinematic wave), or Kirchhoff solve on head (dynamic wave); Kirchhoff solve for the headspace air | `build_model` |
+| [Water distribution](water.md) | Pressurised mains, pumps, tanks, demand | Kirchhoff: Newton on hydraulic head | `build_model` |
 | [Flow allocation](allocation.md) | Requested flows clipped to arc capacity and free storage at the receiving node | Clip and allocate | `AllocatedFlowLayer`, `wsimod.build_model` |
+| [Electrical circuits](electrical.md) | Lumped circuits: DC, transient and AC | Kirchhoff: Modified Nodal Analysis on node voltage | `build_model`, `Circuit` |
 | [Coupling](coupling.md) | Two models meeting at a shared boundary | Two models exchanging values, iterated to a fixed point | `union` |
 
 ![The four flow-determination modes](../assets/four-modes.svg)
 
-## Why these six
+## Why these seven
 
 They are not a feature list. They are the argument that the factorisation works.
 
@@ -31,11 +34,14 @@ all four:
   a closed-form function of the wind aloft, so a closure computes every flow directly.
 - The **sewer** application's kinematic-wave water side exploits the fact that a tree has an
   empty cycle space: continuity alone fixes every discharge, in closed form, with no solve. Its
-  dynamic-wave water side is a potential layer on head, iterated to SWMM's fixed point, and
+  dynamic-wave water side is a Kirchhoff layer on head, iterated to SWMM's fixed point, and
   admits loops and backwater. Its *headspace air* side, on the same graph, is a full Newton
-  potential solve.
+  Kirchhoff solve.
 - The **flow allocation** application has no potential and no continuity solve — a
   request, clipped against capacity and headroom.
+- The **electrical circuits** application solves for a potential, the node voltage, with the
+  currents of ideal sources, inductors and transformers as extra unknowns: Modified Nodal
+  Analysis, the full form of the nodal solve the building and water applications use.
 
 And they share machinery in ways that would be coincidence if the abstraction were wrong. The
 sewer's headspace air layer drives its Newton solve with the *same* `Stack` buoyancy term the
@@ -80,11 +86,11 @@ why. Several of the remaining discrepancies are the *reference*'s approximation 
 
 ## Starting a new application
 
-The six are also a template. A new application is:
+The seven are also a template. A new application is:
 
 1. A **network builder** — domain dataclasses plus a function that turns them into a `Network`
    with the right edge kinds and attributes.
-2. **Elements and drives** for whatever constitutive laws are not already in the core.
+2. **Constitutive laws and drives** for whatever laws are not already in the core.
 3. **Closures** for anything that is a function of solved state.
 4. A **file reader**, if your field has a standard exchange format.
 5. A **`build_*_model`** function returning `(model, state, drivers)`, and a `*_steady` helper if

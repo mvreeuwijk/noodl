@@ -30,7 +30,7 @@ from noodl.apps.building_physics.schedules import DAY, Calendar, TimeSeries
 from noodl.apps.building_physics.simulation import simulate
 from noodl.apps.building_physics.thermal import R_AIR
 from noodl.elements import Conductance
-from noodl.layers.potential import PotentialFlowLayer
+from noodl.layers.kirchhoff import KirchhoffLayer
 from noodl.model import Model
 from noodl.topology import Network
 
@@ -241,7 +241,7 @@ def test_air_mass_change_needs_the_zone_air_mass_term_on_the_airflow_layer():
     project = read_prj(THREE)
     _set_dod_mdt(project, True)
     model, state, drivers = project_to_model(project)
-    model.potential["air"]._node_sources = []
+    model.kirchhoff["air"]._node_sources = []
     with pytest.raises(ValueError, match="ZoneAirMassChange"):
         simulate(model, state, drivers, [0.0, 60.0], air_mass_change=True)
 
@@ -269,7 +269,7 @@ def test_air_mass_change_needs_prescribed_temperatures():
     from noodl.elements import PowerLaw
 
     model, state, drivers = build_model(
-        net, air_elements=[PowerLaw(_f(0.01)[0], _f(0.5)[0], kind="airpath")], drives=[],
+        net, air_laws=[PowerLaw(_f(0.01)[0], _f(0.5)[0], kind="airpath")], drives=[],
         return_inputs=True)
     with pytest.raises(ValueError, match="air_mass_change"):
         simulate(model, state, drivers, [0.0, 60.0], air_mass_change=True)
@@ -671,7 +671,7 @@ def test_an_unconverged_pressure_fixed_point_names_every_coupling():
 
 
 class _VentSpy(_PressureSpy):
-    """A pressure reader on a potential layer named "vent"."""
+    """A pressure reader on a Kirchhoff layer named "vent"."""
 
     pressure_key = "vent.phi"
 
@@ -688,8 +688,8 @@ def _vent_model(spy):
     net.add_node("out")
     net.add_node("z")
     net.add_edge("out", "z", kind="c")
-    layer = PotentialFlowLayer(net, "vent", [Conductance(_f(1e-3), kind="c")],
-                               boundary=["out"])
+    layer = KirchhoffLayer(net, "vent", [Conductance(_f(1e-3), kind="c")],
+                           boundary=["out"])
     model = Model(net, {"vent": layer}, closures=[spy])
     drivers = {"vent.phi_boundary": _f(0.0), "vent.sources": _f(0.0, 0.0)}
     fan = Input(TimeSeries([0.0, 600.0], [0.0, 0.02]), "vent.sources", index=1)
@@ -752,7 +752,7 @@ def test_an_iterate_coupled_step_whose_warm_airflow_fails_is_retried_cold(monkey
     def run():
         spy = _VentSpy()
         model, drivers, fan = _vent_model(spy)
-        model = Model(model.net, model.potential, closures=[spy], coupling="iterate",
+        model = Model(model.net, model.kirchhoff, closures=[spy], coupling="iterate",
                       iterate_tol={"vent": 1e-12}, iterate_flow_tol={"vent": 1e-12})
         diagnostics: dict = {}
         out = simulate(model, {}, drivers, [0.0, 300.0, 600.0], inputs=[fan],
@@ -760,7 +760,7 @@ def test_an_iterate_coupled_step_whose_warm_airflow_fails_is_retried_cold(monkey
         return model, drivers, out, diagnostics["airflow_retries"]
 
     _, _, reference, none = run()
-    real_solve = PotentialFlowLayer.solve
+    real_solve = KirchhoffLayer.solve
     forced = []
 
     def warm_fails_late(self, pb, drivers=None, sources=None, phi0=None, *, diagnostics=None,
@@ -774,7 +774,7 @@ def test_an_iterate_coupled_step_whose_warm_airflow_fails_is_retried_cold(monkey
             diagnostics["converged"] = torch.tensor(False)
         return phi, q
 
-    monkeypatch.setattr(PotentialFlowLayer, "solve", warm_fails_late)
+    monkeypatch.setattr(KirchhoffLayer, "solve", warm_fails_late)
     model, drivers, out, retries = run()
     assert none == [] and retries == [600.0]
     for key in ("vent.phi", "vent.q"):
@@ -915,7 +915,7 @@ def test_flow_and_pressure_difference_sensors_read_zero_first_then_the_last_solv
     assert sensed[0].tolist() == [0.0, 0.0]
     torch.testing.assert_close(sensed[1, 0], out["air.q"][0, col], rtol=0, atol=0)
     torch.testing.assert_close(sensed[2, 0], out["air.q"][1, col], rtol=0, atol=0)
-    air = model.potential["air"]
+    air = model.kirchhoff["air"]
     for row in (0, 1):
         s = {k: v[row] for k, v in out.items() if k in ("air.phi", "air.q")}
         drv = model._apply_closures({**state, **s}, drivers)
@@ -1041,8 +1041,8 @@ def test_a_pressure_difference_sensor_needs_an_air_layer():
     net.add_node("out")
     net.add_node("z")
     net.add_edge("out", "z", kind="c")
-    layer = PotentialFlowLayer(net, "vent", [Conductance(_f(1e-3), kind="c")],
-                               boundary=["out"])
+    layer = KirchhoffLayer(net, "vent", [Conductance(_f(1e-3), kind="c")],
+                           boundary=["out"])
     network = ControlNetwork([Sensor(StateReading("air.dp", 0))])
     model = Model(net, {"vent": layer}, closures=[network])
     drivers = {"vent.phi_boundary": _f(0.0), "vent.sources": _f(0.0, 0.0)}

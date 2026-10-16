@@ -128,7 +128,7 @@ def test_the_limiter_corners_are_switches():
 
     closure = _closure(model)
     plain = _Switches(model, closure, 1e-3)
-    air = model.potential["air"]
+    air = model.kirchhoff["air"]
     state = {**state, "air.q": air.flows(state["air.phi"], {**drivers, **closure(state, drivers)})}
     vals = plain(state, drivers)
     _, room = _room(model, names)

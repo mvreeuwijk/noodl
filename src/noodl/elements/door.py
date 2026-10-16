@@ -76,7 +76,7 @@ from collections.abc import Mapping
 import torch
 
 from noodl._broadcast import broadcast_shapes
-from noodl.elements.base import Element, band_edges, memo
+from noodl.elements.base import ConstitutiveLaw, band_edges, memo
 from noodl.elements.media import _R_AIR, AirMedium
 
 Tensor = torch.Tensor
@@ -192,7 +192,7 @@ def _basic_flow_function_dp(dp: Tensor, k: Tensor, m_flow_turbulent: Tensor) -> 
     return torch.where(sharp_mask, sharp, inner)
 
 
-class _Door(Element):
+class _Door(ConstitutiveLaw):
     """Shared plumbing of the two door laws: endpoints, the temperature driver, direction."""
 
     def __init__(
@@ -245,7 +245,7 @@ class _Door(Element):
         if n_edges > 1 and width != n_edges:
             raise ValueError(
                 f"{type(self).__name__} (kind {self.kind!r}): dp has {width} columns but "
-                f"this element covers {n_edges} edges"
+                f"this law covers {n_edges} edges"
             )
 
     def _delta_T(self, drivers: Mapping[str, Tensor] | None) -> Tensor:
@@ -262,7 +262,7 @@ class _Door(Element):
         if n_nodes < needed:
             raise ValueError(
                 f"{type(self).__name__} (kind {self.kind!r}): driver {self.T_key!r} has "
-                f"{n_nodes} node values but this element's endpoints reach node index "
+                f"{n_nodes} node values but this law's endpoints reach node index "
                 f"{needed - 1}"
             )
         return T[..., self.src] - T[..., self.tgt]

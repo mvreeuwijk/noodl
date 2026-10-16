@@ -38,7 +38,7 @@ from collections.abc import Mapping
 import torch
 
 from noodl._broadcast import broadcast_shapes
-from noodl.elements.base import Element
+from noodl.elements.base import ConstitutiveLaw
 from noodl.solvers.scalar import solve_monotone
 
 Tensor = torch.Tensor
@@ -49,7 +49,7 @@ def _fan_residual(q: Tensor, dp: Tensor, coeffs: Tensor) -> Tensor:
     return c0 + c1 * q + c2 * q**2 + c3 * q**3 + dp
 
 
-class FanCurve(Element):
+class FanCurve(ConstitutiveLaw):
     """Cubic pressure-flow curve inverted for q given dp on [0, q_max]: `coeffs` are
     (a0, a1, a2, a3) of P(q) = a0 + a1 q + a2 q^2 + a3 q^3 in Pa for q in the flow unit, and
     `q_max` is the largest flow the curve covers, in that unit.
@@ -108,7 +108,7 @@ class FanCurve(Element):
         return torch.where(clipped, torch.zeros_like(raw), raw)
 
 
-class AffinityFan(Element):
+class AffinityFan(ConstitutiveLaw):
     """A fan curve run at another speed and air density, by the fan laws (ContamX's
     performance-curve fan, measured against ContamX 3.4.1.7):
 
@@ -129,7 +129,7 @@ class AffinityFan(Element):
 
     def __init__(self, curve: FanCurve, *, src, tgt, rho_ref: float,
                  speed_key: str | None = None, off: float = 0.0, multiplier=1.0,
-                 shutoff: Element | None = None, rho_key: str = "rho",
+                 shutoff: ConstitutiveLaw | None = None, rho_key: str = "rho",
                  kind: str | None = None) -> None:
         super().__init__(curve.kind if kind is None else kind)
         if shutoff is not None and shutoff.kind != self.kind:

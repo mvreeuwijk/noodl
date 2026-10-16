@@ -21,7 +21,7 @@ from noodl.apps.building_physics.modelica import storage
 from noodl.apps.building_physics.modelica.run import simulate
 from noodl.elements import medium
 from noodl.elements.conductance import Conductance
-from noodl.layers.potential import PotentialFlowLayer
+from noodl.layers.kirchhoff import KirchhoffLayer
 from noodl.topology import Network
 
 F64 = torch.float64
@@ -45,8 +45,8 @@ def _one_zone(med_name: str, g: float, V: float, p_ref: float = 101325.0):
     net.add_node("out")
     net.add_edge("z", "out", kind="c")
     th = storage.thermo(medium(med_name))
-    layer = PotentialFlowLayer(net, "air", [Conductance(_t([g]), kind="c")], boundary=["out"],
-                               node_sources=[storage.ZoneStorage([0], _t([V]), p_ref, th)])
+    layer = KirchhoffLayer(net, "air", [Conductance(_t([g]), kind="c")], boundary=["out"],
+                           node_sources=[storage.ZoneStorage([0], _t([V]), p_ref, th)])
     return layer, th
 
 
@@ -172,4 +172,4 @@ def test_mass_storage_false_is_the_quasi_steady_route():
                                            mass_storage=False)
     assert names.storage == () and "air.storage" not in state
     assert names.air_references == ("volA",)
-    assert model.potential["air"]._node_sources == []
+    assert model.kirchhoff["air"]._node_sources == []

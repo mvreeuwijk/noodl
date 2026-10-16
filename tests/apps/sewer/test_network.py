@@ -90,7 +90,7 @@ def test_a_duplicate_name_is_refused():
 
 def test_builder_returns_a_model_a_state_and_drivers():
     model, state, drivers = build_model(tree_steady())
-    assert set(model.potential) == {"air"}
+    assert set(model.kirchhoff) == {"air"}
     assert set(model.transport) == {"water_quality", "air_quality"}
     assert model.net.nodes == ["J1", "J2", "J5", "J3", "J4", "Outfall", "ambient"]
     for key in ("air.phi", "air.q", "water_quality.x", "air_quality.x"):
@@ -103,7 +103,7 @@ def test_builder_returns_a_model_a_state_and_drivers():
 
 def test_the_air_layer_carries_every_kind():
     model, _, _ = build_model(tree_steady(), fans=("J3",))
-    assert set(model.potential["air"].kinds) == {"headspace", "leak", "fan"}
+    assert set(model.kirchhoff["air"].kinds) == {"headspace", "leak", "fan"}
     # one headspace edge per pipe, plus the outfall edge
     assert model.net.edge_index("headspace").numel() == 6
     assert model.net.edge_index("leak").numel() == 5
@@ -112,7 +112,7 @@ def test_the_air_layer_carries_every_kind():
 
 def test_air_false_builds_the_water_only_model():
     model, state, drivers = build_model(tree_steady(), air=False)
-    assert model.potential == {}
+    assert model.kirchhoff == {}
     assert set(model.transport) == {"water_quality"}
     assert "ambient" not in model.net.nodes
     assert "air.phi_boundary" not in drivers
@@ -247,7 +247,7 @@ def test_the_headspace_stack_drive_uses_the_pipe_crown_not_the_mean_invert():
     resolved = model._apply_closures(state, drivers)
 
     stack = next(
-        d for d in model.potential["air"]._drives
+        d for d in model.kirchhoff["air"]._drives
         if isinstance(d, Stack) and d.kind == "headspace"
     )
     value = stack(resolved)
@@ -282,7 +282,7 @@ def test_the_leak_element_is_built_float64_not_the_default_dtype():
     with `torch.get_default_dtype()` -- float32 in this repository -- regardless of its
     inputs' own dtype); both `C` and `n` must be float64."""
     model, _, _ = build_model(tree_steady())
-    leak = next(el for el in model.potential["air"]._elements if el.kind == "leak")
+    leak = next(el for el in model.kirchhoff["air"]._laws if el.kind == "leak")
     assert leak.C.dtype == torch.float64
     assert leak.n.dtype == torch.float64
 
@@ -348,7 +348,7 @@ def test_a_ground_level_of_exactly_zero_is_not_dropped():
     )
     model, state, drivers = build_model(net, quality=False)
     leak_stack = next(
-        d for d in model.potential["air"]._drives
+        d for d in model.kirchhoff["air"]._drives
         if isinstance(d, Stack) and d.kind == "leak"
     )
     src, _ = model.net.endpoints("leak")

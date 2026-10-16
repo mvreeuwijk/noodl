@@ -1,17 +1,17 @@
-"""An element whose flow is another element's times a per-edge multiplier read from the drivers.
+"""A law whose flow is another law's times a per-edge multiplier read from the drivers.
 
     F = s F_inner(dp),   dF/ddp = s dF_inner/ddp,   s = drivers[key]
 
 This is how a schedule or a control signal acts on an airflow path. CONTAM's path schedule
 multiplies the path's flow (TN 1887 section 3.17). The multiplier is a driver, so a run can
-change it every step without rebuilding the element, and gradients reach it like any other
+change it every step without rebuilding the law, and gradients reach it like any other
 driver. `s` is one value per edge of the kind, or one for all of them, with leading batch
 dimensions like every driver.
 
 A zero multiplier closes the edge. A node whose every edge is closed has no path to a boundary
 potential, and the airflow solve's grounding check raises naming it instead of returning a
 `nan`. Scaling does not move the inner law's switching points, so `switching` is the inner
-element's.
+law's.
 """
 
 from __future__ import annotations
@@ -20,24 +20,34 @@ from collections.abc import Mapping
 
 import torch
 
-from noodl.elements.base import Element
+from noodl.elements.base import ConstitutiveLaw
 
 Tensor = torch.Tensor
 
 
-class Scaled(Element):
-    """F = s F_element: `element`'s flow times the dimensionless multiplier `drivers[key]`.
+class Scaled(ConstitutiveLaw):
+    """F = s F_law: `law`'s flow times the dimensionless multiplier `drivers[key]`.
 
-    `drivers[key]` holds one value per edge of the element's kind, or a scalar for all of
-    them, with leading batch dimensions like any driver. The kind is `element`'s own. Use it
+    `drivers[key]` holds one value per edge of the law's kind, or a scalar for all of
+    them, with leading batch dimensions like any driver. The kind is `law`'s own. Use it
     for a scheduled or controlled path, fan or damper: the schedule writes `drivers[key]`.
+    `law` is an explicit single-edge law, `q = F(dp)`: a law with an implicit flow, several
+    ports, storage or a law context is refused.
     """
 
-    def __init__(self, element: Element, key: str) -> None:
-        super().__init__(element.kind)
-        self.inner = element
+    def __init__(self, law: ConstitutiveLaw, key: str) -> None:
+        if (law.law_form != "potential" or law.ports != 1 or law.dynamic
+                or law.contextual):
+            raise ValueError(
+                f"Scaled (kind {law.kind!r}): {type(law).__name__} is not an explicit "
+                f"single-edge law q = F(dp) (law_form={law.law_form!r}, ports={law.ports}, "
+                f"dynamic={law.dynamic}, contextual={law.contextual}); only such a law's "
+                f"flow can be scaled"
+            )
+        super().__init__(law.kind)
+        self.inner = law
         self.key = str(key)
-        self.dp_independent = bool(element.dp_independent)
+        self.dp_independent = bool(law.dp_independent)
 
     def _s(self, width: int | None, drivers: Mapping[str, Tensor] | None) -> Tensor:
         """The multiplier; `width` is the number of edges of the kind, when known."""

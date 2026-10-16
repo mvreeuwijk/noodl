@@ -38,11 +38,15 @@ for t in times:
 | [Sewers (SWMM)](applications/sewer.md) | `model, state, drivers = build_model(sewer_net, ...)`; a `routing="dynamic_wave"` network is run with `simulate_dynamic_wave(model, state, drivers, steps=...)` | `air`: `pressure`; `water_quality`, `air_quality`: `concentration`; dynamic wave: `water`: `head`, `flow` | inflows and temperatures are in the returned drivers |
 | [Water (EPANET)](applications/water.md) | `model, state, drivers = build_model(water_net, ...)` | `water`: `head`, `flow`; `quality`: `concentration` | tank levels and pump status are state, by tank and pump name |
 | [Allocation (WSIMOD)](applications/allocation.md) | `model, state, drivers = build_model(topology)` | `wsimod`: `storage`, `requests`, `flow` | nothing else |
+| [Electrical circuits](applications/electrical.md) | `model, state, drivers = build_model(circuit, ...)` | `electrical`: `voltage`, `flow` (current) | a transient starts from `initial_state(model, drivers)`; per-device values from `device_values` |
 
 Every application exports `build_model`, `initial_state` and `initial_drivers`, and
 `initial_state(model)`/`initial_drivers(model)` without `values` return its defaults.
 (The sewer's `initial_state` also takes the drivers, `initial_state(model, drivers=drivers,
 values=...)`, because its storage depends on them.)
+The electrical application is the exception, with no `initial_drivers`: a circuit has no state
+to set by name, so its `initial_state(model, drivers)` solves the consistent initial point from
+the devices' own initial values, and `build_model` returns every driver it needs.
 
 ## A complete example
 
@@ -54,7 +58,7 @@ import torch
 from noodl.apps.building_physics import (
     Zone, add_zone, build_model, initial_drivers, initial_state,
 )
-from noodl.apps.building_physics.elements import add_large_opening, orifice_elements_from_edges
+from noodl.apps.building_physics.elements import add_large_opening, orifice_law_from_edges
 from noodl.drives import Stack
 from noodl.topology import Network
 
@@ -67,7 +71,7 @@ add_large_opening(net, "A", "B", H=2.0, W=0.9, z_mid=1.0, Cd=0.78)
 net.add_edge("ambient", "B", kind="airpath", z_path=0.2, Cd=0.6, area=0.05)
 net.add_edge("ambient", "B", kind="airpath", z_path=1.8, Cd=0.6, area=0.05)
 model = build_model(
-    net, air_elements=[orifice_elements_from_edges(net, "airpath")],
+    net, air_laws=[orifice_law_from_edges(net, "airpath")],
     drives=[Stack.from_network(net, "airpath")], species=("co2",),
     coupling="iterate", iterate_tol={"thermal": 0.01}, iterate_max=50,
 )
@@ -102,7 +106,7 @@ print({room: round(float(value), 2) for room, value in T.items()})
   potential (pressure, head) and the flows it drives; a *transport* layer carries a
   quantity (temperature, mass fraction, concentration) on those flows; an *allocation*
   layer moves requested amounts between stores within capacity limits.
-- **Elements and drives.** The law on each kind of edge (an orifice, a pipe, a pump) and
+- **Constitutive laws and drives.** The law on each kind of edge (an orifice, a pipe, a pump) and
   the terms added to its potential difference (stack effect, wind, fans).
 - **Closures.** Functions of the state that compute inputs each step: the air density from
   the temperature, the street flows from the wind, the sewer flows from the inflows. Their
@@ -122,7 +126,7 @@ named for the physics it carries:
 
 | Attribute | Key | Role | Order of the tensor |
 |---|---|---|---|
-| `.pressure`, `.head` (potential layers) | `"<layer>.phi"` | state | full node order |
+| `.pressure`, `.head` (Kirchhoff layers) | `"<layer>.phi"` | state | full node order |
 | `.flow` | `"<layer>.q"` | state (driver for a transport layer whose flows nothing solves) | edge order of the layer's kinds |
 | `.boundary_pressure`, `.boundary_head` | `"<layer>.phi_boundary"` | driver | the layer's boundary order |
 | `.temperature`, `.mass_fraction`, `.concentration` | `"<layer>.x"` | state | the layer's active interior order |
@@ -147,7 +151,7 @@ filter's efficiency), replacing the layer's construction-time `transmission`; a 
 filters depend on the step's flows writes it (the building application's
 `FilterTransmission`, for UVGI filters). It reads the flows of the pass before, so such a model
 iterates each step (`coupling="iterate"`). A closure that needs this declares
-`requires_coupling = "iterate"` and `reads_flows_of = "<potential layer>"`, and `Model`
+`requires_coupling = "iterate"` and `reads_flows_of = "<Kirchhoff layer>"`, and `Model`
 refuses it unless that layer is in `iterate_tol` and `iterate_flow_tol`.
 
 The names come from each layer's `quantity`, so every application has them without code
@@ -173,7 +177,8 @@ shape and its unit.
 `model.step(state, drivers, dt)` returns the new state; call it in a loop, changing the
 drivers between steps as the inputs change. `model.steady(state, drivers)` returns the
 quasi-steady state instead (an allocation layer, which is a time-stepping rule, has none).
-Each potential solve starts from the state's last potentials; `warm_start=False` starts it
+Each potential solve starts from the state's last potentials (and a layer solved by Modified
+Nodal Analysis from its last implicit-law flows too); `warm_start=False` starts it
 from the layer's linear initial guess instead, while closures still read those potentials
 (a retry when a warm start does not converge). Non-convergence raises
 `noodl.solvers.ConvergenceError`, under either coupling (with `coupling="iterate"`, when the
@@ -247,7 +252,7 @@ reports:
 
 - **Errors**: a required input or state missing, a value that is not a tensor, a trailing
   shape that does not match the key's order, batch shapes that do not broadcast, a nonzero
-  source on a boundary or inactive node (which a potential layer would otherwise drop
+  source on a boundary or inactive node (which a Kirchhoff layer would otherwise drop
   silently), a state key put in the drivers, a closure output of the wrong shape.
 - **Warnings**: a key with a layer's prefix but no such input (`"thermal.source"` — *did
   you mean `"thermal.sources"`?*), a near-miss of a layer name (`"therml.sources"`), an
@@ -256,7 +261,7 @@ reports:
 - A table of every key the model knows: role, required or optional, order, expected
   shape, unit, and what was given.
 
-The inputs the closures, reactions, elements and drives read themselves are declared too,
+The inputs the closures, reactions, laws and drives read themselves are declared too,
 in `model.refs.inputs`: the street model's wind speed, direction and boundary-layer depth
 (one value per instance, or one per street with `meteo="per_street"`), the sewer's inflow
 per manhole and its temperatures, CONTAM's node densities and wind, the chemistry's
@@ -275,7 +280,7 @@ print(model.refs.inputs["P_ref"].describe())
 
 A key the model knows nothing about — a custom closure's own input — is **not** rejected.
 `model.check(state, drivers, dt=600.0, probe=True)` runs one step on copies, recording
-which keys the closures, layers, elements and drives read, and reports any key nothing
+which keys the closures, layers, laws and drives read, and reports any key nothing
 read. Without a probe the check evaluates the closures once (no solve, no time step) to
 learn what they write, so an input a closure provides is not reported missing. A custom
 closure can declare its own inputs with an `input_specs` attribute,
@@ -295,7 +300,7 @@ for issue in model.check(state, drivers_typo).issues:
 ## Finding what is available
 
 The [catalogue](catalogue/core.md) lists, for the core library and for every application,
-each type it offers — builders, network components, elements, drives, closures,
+each type it offers — builders, network components, constitutive laws, drives, closures,
 reactions, sources, file readers and writers, functions and model options — with what it
 does and how to call it. It is generated from the code, so it is always complete.
 

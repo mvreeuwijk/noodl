@@ -10,21 +10,22 @@ from __future__ import annotations
 
 import torch
 
-from noodl.elements.base import Element
+from noodl.elements.base import ConstitutiveLaw
 
 Tensor = torch.Tensor
 
 
-class FixedFlow(Element):
+class FixedFlow(ConstitutiveLaw):
     """q = q0 regardless of dp (`q0` in the flow unit); dflow = 0; linear_init = (q0, 0).
 
-    Declares ``dp_independent = True`` (see ``Element``): the differentiable solve path
+    Declares ``dp_independent = True`` (see ``ConstitutiveLaw``): the differentiable solve path
     trusts this declaration to take the exact-zero Jacobian column shortcut for this
     element's edges, rather than inferring dp-independence from whatever autograd graph
     ``flow`` happens to produce.
     """
 
     dp_independent = True
+    phasor_capable = True
 
     def __init__(self, q0, *, kind: str = "airpath", learnable: bool = False) -> None:
         super().__init__(kind)
@@ -40,7 +41,7 @@ class FixedFlow(Element):
         return self.q0, torch.zeros_like(self.q0)
 
 
-class FixedVolumeFlow(Element):
+class FixedVolumeFlow(ConstitutiveLaw):
     """F = Q rho_up whatever dp: a constant volume flow `volume_flow` Q (m3/s, one per edge)
     delivered as mass flow at the density of the node it draws from (`src` when Q >= 0,
     `tgt` otherwise), read from `drivers[rho_key]` (full node order). ContamX's
@@ -83,7 +84,7 @@ class FixedVolumeFlow(Element):
         return q, torch.zeros_like(q)
 
 
-class PrescribedFlow(Element):
+class PrescribedFlow(ConstitutiveLaw):
     """F = drivers[key] whatever dp: a flow (kg/s, one value per edge of the kind) that a
     closure or an input prescribes every step, e.g. an air handler's supply flows.
     `dtype` is the layer's: `linear_init`, which has no dp to take it from, returns it."""

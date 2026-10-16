@@ -10,10 +10,10 @@ import torch
 from noodl.apps.building_physics.elements import (
     add_large_opening,
     mass_orifice,
-    orifice_elements_from_edges,
+    orifice_law_from_edges,
 )
 from noodl.drives import Stack
-from noodl.layers.potential import PotentialFlowLayer
+from noodl.layers.kirchhoff import KirchhoffLayer
 from noodl.topology import Network
 
 F64 = torch.float64
@@ -38,8 +38,8 @@ def test_two_orifice_doorway_reproduces_brown_solvason_with_the_neutral_plane_at
     assert net.graph.edges[lo]["z_path"] == pytest.approx(1.0 - 4.0 / 9.0)
     assert net.graph.edges[hi]["z_path"] == pytest.approx(1.0 + 4.0 / 9.0)
     rho = 1.2
-    el = orifice_elements_from_edges(net, "airpath", rho=rho)
-    layer = PotentialFlowLayer(
+    el = orifice_law_from_edges(net, "airpath", rho=rho)
+    layer = KirchhoffLayer(
         net, "air", [el], drives=[Stack.from_network(net, "airpath")],
         boundary=["cold", "warm"],
     )

@@ -234,7 +234,7 @@ def test_spd_diagnosis_is_empty_when_every_instance_certifies():
 # slopes) would be wrong: a NEGATIVE slope merely makes an edge inactive for propagation,
 # so an instance grounded through other positive edges would certify True while its
 # assembled operator is indefinite -- and `method="auto"` would then dispatch PCG to it.
-# Element slopes are non-negative by construction, but a learnable conductance driven
+# Law slopes are non-negative by construction, but a learnable conductance driven
 # negative by an optimiser (the calibration use case) reaches it.
 
 

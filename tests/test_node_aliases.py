@@ -11,7 +11,7 @@ from noodl.apps.building_physics import (
     build_model,
     initial_drivers,
     initial_state,
-    orifice_elements_from_edges,
+    orifice_law_from_edges,
 )
 from noodl.drives import Stack
 from noodl.topology import Network
@@ -27,8 +27,8 @@ def two_zone(aliases=None):
     add_large_opening(net, "A", "B", H=2.0, W=0.9, z_mid=1.0, Cd=0.78)
     net.add_edge("ambient", "B", kind="airpath", z_path=0.2, Cd=0.6, area=0.05)
     net.aliases = dict(aliases or {})
-    el = orifice_elements_from_edges(net, "airpath")
-    model = build_model(net, air_elements=[el], drives=[Stack.from_network(net, "airpath")])
+    el = orifice_law_from_edges(net, "airpath")
+    model = build_model(net, air_laws=[el], drives=[Stack.from_network(net, "airpath")])
     return net, model
 
 

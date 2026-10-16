@@ -402,7 +402,7 @@ class FilterTransmission:
         self.species = list(species)
         self.airflow = airflow
         self.flow_key = f"{airflow.name}.q"
-        #: The potential layer whose flows the closure reads (`Model` requires it in
+        #: The Kirchhoff layer whose flows the closure reads (`Model` requires it in
         #: `iterate_flow_tol`).
         self.reads_flows_of = airflow.name
         self.key = f"{layer}.transmission"

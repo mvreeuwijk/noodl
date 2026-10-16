@@ -14,12 +14,12 @@ one graph.
 
 | # | Mode | The flow comes from | Implemented by |
 |---|---|---|---|
-| 1 | **Potential solve** | Newton's method on a nodal conservation residual: $A_I\,g(A^\top\phi) = s_I$ | `PotentialFlowLayer` |
-| 2 | **Driver-prescribed** | Handed in directly as a driver value | any `TransportLayer` with no potential owner |
+| 1 | **Kirchhoff solve** | Both Kirchhoff laws plus the constitutive laws on the edges, solved together. Newton's method on a nodal conservation residual: $A_I\,g(A^\top\phi) = s_I$ (with the flows of implicit constitutive laws as extra unknowns: Modified Nodal Analysis) | `KirchhoffLayer` |
+| 2 | **Driver-prescribed** | Handed in directly as a driver value | any `TransportLayer` with no Kirchhoff-layer owner |
 | 3 | **Closure-computed** | Computed from other state by an arbitrary function | a closure writing `"<layer>.q"` |
 | 4 | **Clip-and-allocate** | A *request*, clipped against arc capacity and receiver headroom — no potential variable anywhere | `AllocatedFlowLayer` |
 
-![The four flow-determination modes: potential solve, driver-prescribed, closure-computed, clip-and-allocate](../assets/four-modes.svg)
+![The four flow-determination modes: Kirchhoff solve, driver-prescribed, closure-computed, clip-and-allocate](../assets/four-modes.svg)
 
 Worked examples of each, from the applications:
 
@@ -37,38 +37,126 @@ Getting this wrong is expensive. Modelling a gravity sewer as a potential proble
 water-allocation rule as a pressure network, produces a model that converges to a confidently
 wrong answer.
 
-## `PotentialFlowLayer`
+## `KirchhoffLayer`
 
 Solves for nodal potentials such that flow is conserved at every interior node.
 
 ```python
-from noodl.layers.potential import PotentialFlowLayer
+from noodl.layers.kirchhoff import KirchhoffLayer
 
-layer = PotentialFlowLayer(
+layer = KirchhoffLayer(
     net,
     name="air",
-    elements=[leak],            # one Element per edge kind
+    laws=[leak],                # one ConstitutiveLaw per edge kind
     drives=[stack],             # additive potential-difference terms
     boundary=["ambient"],       # nodes whose potential is prescribed
     linear_solver="auto",       # 'auto' | 'cg' | 'gmres' | 'direct' | 'sparse_direct'
     quantity="pressure",        # metadata a Model reports
     unit="Pa",
+    phasor=False,               # True: complex sinusoidal steady state (see below)
 )
 
 phi, q = layer.solve(phi_boundary, drivers, sources=sources, differentiable=True)
 ```
 
 `quantity` and `unit` are metadata only — nothing numerical reads them. They exist so that a
-model composing several potential layers over one network can tell a pressure layer from a
+model composing several Kirchhoff layers over one network can tell a pressure layer from a
 temperature one without matching on names.
 
 Useful accessors: `flows(phi, drivers)` evaluates the branch law; `flows_of_kind(q, kinds)`
 extracts one kind's block from the concatenated flow vector; `residual(...)` and `jacobian(...)`
-expose the Newton pieces directly; `kind_slice(kind)` and `element_for(kind)` locate a kind.
+expose the Newton pieces directly; `kind_slice(kind)` and `law_for(kind)` locate a kind.
 
 `diagnostics`, when you pass a dict, is filled with `newton_iterations`, `linear_iterations`,
 `method`, `backend`, `converged` and `residual_norm`. `method` is what you asked for; `backend`
 is what actually ran. They are deliberately separate — see [Solvers](solvers.md#solve-the-auto-table).
+
+## Modified Nodal Analysis: implicit, coupled and dynamic laws
+
+A `KirchhoffLayer` whose constitutive laws are all potential-controlled, single-edge and
+static is solved by nodal analysis, as above. A layer with any law that is implicit
+(`law_form = "implicit"`), multi-port (`ports > 1`), dynamic or contextual, or a layer built with
+`phasor=True`, is solved by **Modified Nodal Analysis** instead (`layer.mna` is True); the
+declarations are described under
+[Implicit, coupled and dynamic constitutive laws](elements.md#implicit-coupled-and-dynamic-constitutive-laws).
+The [electrical application](../applications/electrical.md) is built on it; the same machinery
+serves any domain with ideal sources, flow-controlled laws or storage on its edges.
+
+**The system.** The unknowns are the interior potentials and the flows of the implicit-law edges
+(`layer.implicit_edges`, in layer edge order). The residual rows are the conservation balance at
+the interior nodes, $A_I q - s_I$ (plus node sources), where $q$ is the law's flow on a
+potential-controlled edge and the unknown on an implicit one, followed by every implicit law's
+own residual. The Jacobian is assembled as a sparse, nonsymmetric matrix from each law's local
+blocks (forward-mode derivatives, one per port, two on a phasor layer), so a multi-port law
+couples the edges of its group exactly. `solve` still returns `(phi, q)`, with `q` covering every edge.
+
+**Construction checks**, each raising `ValueError` naming the layer and the kind or nodes:
+
+- every kind's edge count is a multiple of its law's `ports`;
+- every connected part of the layer's edges contains a boundary node (a ground): a part with
+  none (a transformer secondary left floating) has undetermined potentials;
+- a dynamic kind carries no drive (its step-start potential differences are taken without one);
+- `linear_solver="cg"` is refused (the system is not symmetric positive definite);
+- on a phasor layer, every law is `phasor_capable` and there are no node sources.
+
+A system that is structurally sound but singular (a loop of ideal potential sources, a cut set
+of flow sources, a part reached only through flow-prescribed edges) raises a `RuntimeError` at
+the solve naming the layer and its implicit kinds. At the initial point (`mode="initial"`) every
+storage law is held at its initial value and so acts as a source itself (a capacitance as a
+potential source, an inductance as a flow source); the error then says so and suggests starting
+from the operating point (`mode="dc"`). Under `on_failure="return"` that singularity shows only
+as `converged=False` in `diagnostics`.
+
+The nodal-only methods (`flows`, `dflows`, `residual`, `jacobian`, `linear_init`, `adjoint`)
+assume every flow is a function of its own edge's potential difference and raise `TypeError` on
+such a layer; read the flows from `solve`'s `q`, and the balance from `balance(phi, q, sources)`.
+
+### The solve keywords
+
+| Keyword | Meaning |
+|---|---|
+| `mode` | `None` (default): `"transient"` when `dt` is given, `"dc"` otherwise. `"dc"`: the steady operating point (no `dt`). `"initial"`: the consistent initial point (each storage law at its initial value; no `dt`). A phasor layer is always `"phasor"`. |
+| `dt` | One implicit step of this length (s). |
+| `t` | The evaluation time, the END of the step on a transient (a time-dependent source is evaluated there); `None` when untracked. |
+| `history` | `(phi, q)` at the step start, full-node potentials and every edge's flow, as `solve` returns them. Required on a step of a layer with a dynamic law. |
+| `integration` | `"trapezoidal"` (default) or `"backward_euler"`. |
+| `phi0`, `q0` | Warm start of the interior potentials and of the implicit-edge flows; zeros otherwise. |
+
+A layer solved by nodal analysis has static laws: it accepts `t`, `integration`, `q0` and the
+modes `"dc"` and `"initial"` and ignores them (`phi0` is its own warm start), and refuses
+`mode="phasor"`, `dt` and `history`, since it takes no step. A phasor layer ignores
+`integration` and refuses `dt`, `history` and any mode but `"phasor"`. On the differentiable path (the default)
+gradients reach `history` too, so a chain of steps back-propagates through time.
+
+**Linear solver.** `linear_solver="auto"` on such a layer factorises: SciPy's sparse LU
+(`"sparse_direct"`, per instance) whenever SciPy is importable, at any batch size, and batched
+dense LU (`"direct"`) only when it is not. A dense batched factorisation costs memory and work
+growing with the square and cube of the system size per instance: a 64-frequency sweep of a
+1604-unknown circuit took 6.1 s and 1.3 GB dense against 0.48 s with sparse LU. A tiny circuit
+at a very large batch may be faster with an explicit `method="direct"`. `"auto"` never picks
+GMRES (the system is indefinite and badly scaled, with potentials and flows in one vector) and
+refuses CG. An explicit `"gmres"`, `"direct"` or `"sparse_direct"` is honoured. `diagnostics["method"]` is the
+method requested and `diagnostics["backend"]` the one that ran.
+
+### Phasor layers
+
+`KirchhoffLayer(..., phasor=True)` solves the sinusoidal steady state: `phi`, `q`, the
+boundary potentials and the warm starts are complex (complex128). The frequency in Hz comes from
+the driver `layer.frequency_key` (`"<name>.frequency"`, one value per instance) and reaches the
+laws as `ctx.omega = 2 pi f`. Each complex unknown is solved as its (real, imaginary) pair, so a
+law that is not holomorphic in `dp` (a constant-power load, `q = conj(S / dp)`) is solved
+exactly, and the real solver machinery serves unchanged. A load is an edge to ground (node
+sources are refused). `power_residual` is then the complex power balance, real and imaginary
+parts both zero at a solution: Tellegen's theorem for phasors.
+
+The initial guess is zero. A law that is singular or flat at `dp = 0`, such as a constant-power
+load, needs a warm start: pass `phi0` (for example every interior potential at the nominal
+source voltage).
+
+### On a `Model`
+
+`Model` gives such a layer its history, time and warm start; see
+[Layers solved by Modified Nodal Analysis](#layers-solved-by-modified-nodal-analysis) below.
 
 ## `TransportLayer`
 
@@ -105,7 +193,7 @@ Three things catch people:
   This differs from `capacity` on purpose: sources are an application-level quantity, capacity a
   layer-level one.
 - **`flow_kind` may be several kinds**, and `q` is then their flows *concatenated in that order*.
-  That is exactly what `PotentialFlowLayer.flows_of_kind(q, layer.flow_kinds)` produces, so heat
+  That is exactly what `KirchhoffLayer.flows_of_kind(q, layer.flow_kinds)` produces, so heat
   advected by both `"airpath"` and `"door"` edges needs no new operator.
 
 The three schemes: `"exact"` uses an augmented matrix exponential and controls its own error by
@@ -178,7 +266,7 @@ attributes say which. Step such a model through time instead, or give the nodes 
 **Linear solver.** The `"implicit"` and `"trapezoidal"` schemes each need one linear solve per
 step (`"exact"` has none). `linear_solver` names it: `"auto"` (the default), `"gmres"`,
 `"gmres_jacobi"`, `"gmres_ilu"`, `"sparse_direct"` or `"direct"`, resolved fresh on every solve
-(unlike `PotentialFlowLayer.linear_solver`, which is fixed for the layer's lifetime). `"auto"`
+(unlike `KirchhoffLayer.linear_solver`, which is fixed for the layer's lifetime). `"auto"`
 picks `"sparse_direct"` (SciPy's sparse LU, one exact factor-and-solve, no outer iteration) at or
 under a batch cap of 32 instances, and plain `"gmres"` above it — chosen on an interleaved
 forward/backward benchmark across the whole family (`gmres`, `gmres_jacobi`, `gmres_ilu`,
@@ -195,39 +283,6 @@ on the `on_failure="return"` early-return path (which runs outside the different
 `no_grad`, unlike `step`'s ordinary forward/backward) falls back to `gmres` silently, since an
 explicit `sparse_direct` there would otherwise raise for a reason the caller did not ask for.
 `diagnostics["linear"]["backend"]` reports which backend actually ran on every solve.
-
-## `ConstitutiveLayer`
-
-The loop formulation, for the one case `PotentialFlowLayer` cannot express: a branch law
-that is flow-controlled, mixes potential- and flow-controlled edges, or is a dynamic element
-(inductor, capacitor) stepped implicitly. Instead of solving for nodal potentials directly,
-it solves for cycle amplitudes and reduced nodal potentials so both Kirchhoff laws hold by
-construction, leaving only `law(p, q, theta) = 0` to solve — `b` equations in `b` unknowns
-for a connected network of `b` branches. It is a dense solve, for small networks by nature
-(the Jacobian is a plain `torch.func.jacrev` tensor, no sparse path); use `PotentialFlowLayer`
-for nodal balances over a network of any size.
-
-```python
-from noodl.layers.constitutive import ConstitutiveLayer
-
-def spring_mass_damper(p, q, theta):
-    L, R, C, q0_prev, p2_prev, dt = theta
-    return torch.stack([
-        q[0] - q0_prev - dt / L * p[0],   # inductor, implicit
-        p[1] - R * q[1],                   # resistor
-        p[2] - p2_prev - dt * q[2],        # capacitor, implicit
-    ])
-
-layer = ConstitutiveLayer(net, "smd", kind="pipe", law=spring_mass_damper)
-p, q = layer.solve(theta, z0=z0)   # z0: the previous step's own z, for a dynamic law
-```
-
-**A standalone block.** `ConstitutiveLayer` is not one of the three layer kinds `Model` steps
-(`PotentialFlowLayer`, `TransportLayer`, `AllocatedFlowLayer`); `Model` refuses it by name
-at construction. It is used directly through `solve()`, as the worked-example parity tests do,
-and a dynamic law carries its own previous state in `theta`. Making it steppable inside `Model` would
-need a declared state key and a step contract; nothing needs that yet, so the boundary is
-explicit rather than adapted.
 
 ## `Reaction`
 
@@ -294,7 +349,7 @@ model = Model(
     closures=[density],
     reactions=[("species", decay)],
     coupling="pingpong",            # or "iterate"
-    iterate_tol={"thermal": 0.01},  # REQUIRED when coupling="iterate"; transport or potential layers
+    iterate_tol={"thermal": 0.01},  # REQUIRED when coupling="iterate"; transport or Kirchhoff layers
     iterate_max=20,
     substeps={"species": 4},
 )
@@ -303,14 +358,14 @@ state = model.step(state, drivers, dt=60.0)
 state = model.steady(state, drivers)
 ```
 
-`iterate_tol` may name a transport layer (converged on its state `.x`) or a potential layer
+`iterate_tol` may name a transport layer (converged on its state `.x`) or a Kirchhoff layer
 (converged on the largest change of its potential `.phi` over its interior and boundary nodes, in
-the potential's units, per instance). A potential layer is named when a closure computes that
+the potential's units, per instance). A Kirchhoff layer is named when a closure computes that
 layer's element coefficients, or its boundary potentials, from its own previous solution, as the
 sewer dynamic wave does with its conduit coefficients and outfall heads: for example
 `iterate_tol={"water": 1e-6}` (the sewer's head layer) repeats the pass until no head moves by
 more than 1 micrometre.
-Its `.phi` and `.q` are relaxed with `iterate_relaxation` like a transport `.x`. Potential layers not
+Its `.phi` and `.q` are relaxed with `iterate_relaxation` like a transport `.x`. Kirchhoff layers not
 named in `iterate_tol` are not iterated.
 
 `iterate_flow_tol={"water": 1e-9}` (optional, flow units) also judges such a layer's flows: a pass
@@ -319,7 +374,7 @@ potential solve stops on its warm start (its residual already within `atol`), wh
 potential back unchanged while the flows the closures read are still moving.
 
 `iterate_acceleration="anderson"` (opt-in; default `None`) replaces the relaxation of those
-potential layers' `.phi` and `.q` by Anderson mixing (type II, Walker & Ni 2011) over the last
+Kirchhoff layers' `.phi` and `.q` by Anderson mixing (type II, Walker & Ni 2011) over the last
 `iterate_memory` passes (default 5), and needs an `iterate_flow_tol` for each of them: the mixing
 minimises the fixed-point residual of `.phi` and `.q`, each divided by its tolerance, and the
 convergence test then also asks that residual of `.phi` to be within `iterate_tol`. Transport
@@ -347,6 +402,7 @@ State and driver keys are namespaced by layer name:
 | `"<layer>.removal"` | Per-step first-order removal rate, 1/s, `(n_i, K)`, replacing the layer's construction-time `removal` (driver, optional; not carried in the state, so a closure that sets it must write it every step) |
 | `"<layer>.transmission"` | Per-step pass fraction of each flow edge, `(b_flow,)` or `(b_flow, K)` in the layer's flow order, replacing the layer's construction-time `transmission` (driver, optional; not carried in the state, so a closure that sets it must write it every step) |
 | `"<layer>.requests"` | An allocation layer's per-edge request (driver, required) |
+| `"<layer>.frequency"` | A phasor layer's frequency in Hz, one per instance (driver, required) |
 
 ### The order within a pass
 
@@ -356,6 +412,36 @@ the transport steps under `reaction_order="before_transport"`).
 The allocation step sits between the potential solves and the transport steps so that a
 transport layer reading `"<layer>.q"` sees a freshly written flow, whichever kind of layer wrote
 it.
+
+### Layers solved by Modified Nodal Analysis
+
+A Kirchhoff layer whose constitutive laws include implicit, multi-port, dynamic or
+context-reading ones (`layer.mna`) is solved with the flows of its implicit-law edges as
+unknowns. `Model` hands such a layer what its laws need:
+
+- the warm start of those flows from `"<layer>.q"` in the state, when it is there;
+- the time the laws are evaluated at: the **end** of a step (`t + dt` for `step(..., t=t)`),
+  the `t` of `steady(..., t=t)`, or `None` when no time is given;
+- on a step of a layer with dynamic laws (`layer.dynamic`: a capacitance, an inductance), the
+  step-start `"<layer>.phi"` and `"<layer>.q"` as its history, and `dt`. Both keys are then
+  required in the state (`state_from` and `check` say so); give the first step a consistent
+  initial point, e.g. `layer.solve(..., mode="initial")`. The history is always the
+  step-start state, so `coupling="iterate"` re-steps every pass from the same start.
+
+`integration=` (`"trapezoidal"` or `"backward_euler"`) travels through `**solve_kwargs`; the
+keywords the Model sets itself (`phi0`, `q0`, `history`, `dt`, `t`) are refused there by name.
+`steady` solves such a layer at its operating point (a capacitance open, an inductance
+shorted). A layer with contextual laws but no dynamic one (a time-dependent source and
+resistors, no storage) takes no history: on a step it is solved at its operating point at the
+step end, `t + dt`, with `ctx.mode == "dc"` and `ctx.dt` `None`, which is exact for a layer that
+stores nothing. `residuals` reports `layer.balance(phi, q, sources)`, the interior balance of the
+state's own flows. A phasor layer (`phasor=True`) has complex `"<layer>.phi"` and
+`"<layer>.q"` and reads the driver `layer.frequency_key`; the iterated coupling judges its
+convergence on the modulus of the change and differentiates its fixed point in the real view.
+Anderson mixing (`iterate_acceleration="anderson"`) is refused on a phasor layer.
+`line_search="convex"` (by keyword or through `newton_defaults`) is refused on such a layer: its
+residual is not the gradient of a convex function. `analytic_primal` has no effect on it,
+because its solve already assembles the analytic operator.
 
 ### Closures
 

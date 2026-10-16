@@ -56,7 +56,7 @@ import math
 
 import torch
 
-from noodl.elements.base import Element, band_edges, memo
+from noodl.elements.base import ConstitutiveLaw, band_edges, memo
 from noodl.elements.door import _power_law_slope_at, _slope_is_exact
 
 Tensor = torch.Tensor
@@ -75,7 +75,7 @@ def _f64(value) -> Tensor:
     return torch.as_tensor(value, dtype=torch.float64)
 
 
-class RegularizedPowerLaw(Element):
+class RegularizedPowerLaw(ConstitutiveLaw):
     """MBL's regularised power law, ``q = C sign(dp) |dp|^m``, volume or mass form.
 
     ``flow(dp)`` always returns MASS flow in kg/s: ``form="volume"`` multiplies the volumetric

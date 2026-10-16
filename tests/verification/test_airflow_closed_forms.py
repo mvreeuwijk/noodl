@@ -1,4 +1,4 @@
-"""Closed-form airflow verification for PotentialFlowLayer (CONTAM's element laws).
+"""Closed-form airflow verification for KirchhoffLayer (CONTAM's element laws).
 
 The element laws are CONTAM's (power law, fixed flow, fan curve), but NO case here runs
 CONTAM: each is checked against an independent closed-form or scipy.optimize.brentq
@@ -19,7 +19,7 @@ from noodl.drives import ConstantDrive
 from noodl.elements.fan import FanCurve
 from noodl.elements.fixed import FixedFlow
 from noodl.elements.powerlaw import PowerLaw
-from noodl.layers.potential import PotentialFlowLayer
+from noodl.layers.kirchhoff import KirchhoffLayer
 from noodl.solvers.newton import newton
 from noodl.topology import Network
 
@@ -42,7 +42,7 @@ RESIDUAL = {"atol": 1e-11, "rtol": 0.0}
 
 def _series_layer(
     C: torch.Tensor, n: torch.Tensor, dtype: torch.dtype = DTYPE
-) -> tuple[Network, PotentialFlowLayer]:
+) -> tuple[Network, KirchhoffLayer]:
     """ambient_w -> z1 -> z2 -> ambient_l, one PowerLaw per edge, wind drive on edge 0.
 
     `dtype` defaults to the module's DTYPE (float64, used by every other case in this file);
@@ -57,7 +57,7 @@ def _series_layer(
     net.add_edge("z2", "ambient_l", kind="airpath")
     element = PowerLaw(C, n, dp_transition=1e-6)
     drive = ConstantDrive(kind="airpath", key="wind")
-    layer = PotentialFlowLayer(
+    layer = KirchhoffLayer(
         net, "series", [element], [drive], boundary=["ambient_w", "ambient_l"]
     )
     return net, layer
@@ -147,7 +147,7 @@ def test_series_closed_form_batched(record_property):
 
 def _parallel_layer(
     C1: torch.Tensor, C2: torch.Tensor, n: torch.Tensor
-) -> tuple[Network, PotentialFlowLayer]:
+) -> tuple[Network, KirchhoffLayer]:
     """Two parallel airpath edges a -> c (a multigraph), same exponent n."""
     net = Network(dtype=DTYPE)
     net.add_node("a")
@@ -156,7 +156,7 @@ def _parallel_layer(
     net.add_edge("a", "c", kind="airpath")
     C = torch.stack([C1, C2], dim=-1)
     element = PowerLaw(C, n, dp_transition=1e-6)
-    layer = PotentialFlowLayer(net, "parallel", [element], boundary=["a", "c"])
+    layer = KirchhoffLayer(net, "parallel", [element], boundary=["a", "c"])
     return net, layer
 
 
@@ -217,7 +217,7 @@ def test_parallel_combination_batched(record_property):
 
 def _fan_driven_layer(
     C1: torch.Tensor, C2: torch.Tensor, n: torch.Tensor, q_fan: torch.Tensor
-) -> tuple[Network, PotentialFlowLayer]:
+) -> tuple[Network, KirchhoffLayer]:
     """Zone with two leakage paths to ambient plus a FixedFlow exhaust to ambient."""
     net = Network(dtype=DTYPE)
     net.add_node("zone")
@@ -227,7 +227,7 @@ def _fan_driven_layer(
     net.add_edge("zone", "ambient", kind="fan")
     leak = PowerLaw(torch.stack([C1, C2], dim=-1), n, dp_transition=1e-6)
     fan = FixedFlow(q_fan, kind="fan")
-    layer = PotentialFlowLayer(net, "fan_driven", [leak, fan], boundary=["ambient"])
+    layer = KirchhoffLayer(net, "fan_driven", [leak, fan], boundary=["ambient"])
     return net, layer
 
 
@@ -283,7 +283,7 @@ def _fan_curve_layer(
     q_max: torch.Tensor,
     C: torch.Tensor,
     n: torch.Tensor,
-) -> tuple[Network, PotentialFlowLayer]:
+) -> tuple[Network, KirchhoffLayer]:
     """Loop ambient -> z (FanCurve supply) -> ambient (PowerLaw return)."""
     net = Network(dtype=DTYPE)
     net.add_node("ambient")
@@ -292,11 +292,11 @@ def _fan_curve_layer(
     net.add_edge("z", "ambient", kind="airpath")
     coeffs = torch.stack([a0, a1, a2, a3], dim=-1)
     # FanCurve's own default kind is "airpath" (same as PowerLaw's); without an explicit
-    # kind="fan" here it collides with `leak`'s "airpath" kind and PotentialFlowLayer raises
-    # "duplicate element kind 'airpath'".
+    # kind="fan" here it collides with `leak`'s "airpath" kind and KirchhoffLayer raises
+    # "duplicate law kind 'airpath'".
     fan = FanCurve(coeffs, q_max, kind="fan")
     leak = PowerLaw(C, n, dp_transition=1e-6)
-    layer = PotentialFlowLayer(net, "fan_curve", [fan, leak], boundary=["ambient"])
+    layer = KirchhoffLayer(net, "fan_curve", [fan, leak], boundary=["ambient"])
     return net, layer
 
 
@@ -380,7 +380,7 @@ def test_fan_curve_loop_batched(record_property):
 
 def _stack_layer(
     C: torch.Tensor, n: torch.Tensor
-) -> tuple[Network, PotentialFlowLayer]:
+) -> tuple[Network, KirchhoffLayer]:
     """Three zones in a vertical stack: out_low -> z1 -> z2 -> z3 -> out_high."""
     net = Network(dtype=DTYPE)
     for name in ("out_low", "z1", "z2", "z3", "out_high"):
@@ -391,7 +391,7 @@ def _stack_layer(
     net.add_edge("z3", "out_high", kind="airpath")
     element = PowerLaw(C, n, dp_transition=1e-6)
     drive = ConstantDrive(kind="airpath", key="stack")
-    layer = PotentialFlowLayer(
+    layer = KirchhoffLayer(
         net, "stack", [element], [drive], boundary=["out_low", "out_high"]
     )
     return net, layer
@@ -772,7 +772,7 @@ def test_fan_driven_zone_differentiable_and_nondifferentiable_paths_agree(learna
     net.add_edge("zone", "ambient", kind="fan")
     leak = PowerLaw(torch.stack([C1, C2], dim=-1), n, dp_transition=1e-6)
     fan = FixedFlow(q_fan, kind="fan", learnable=learnable)
-    layer = PotentialFlowLayer(net, "fan_driven", [leak, fan], boundary=["ambient"])
+    layer = KirchhoffLayer(net, "fan_driven", [leak, fan], boundary=["ambient"])
 
     phi_boundary = torch.zeros(1, dtype=DTYPE)
     phi_d, q_d = layer.solve(phi_boundary, differentiable=True)

@@ -49,9 +49,9 @@ Descriptions of the physical objects a network is built from.
 | `UnitHydrograph` | One triangular unit hydrograph (SHORT, MEDIUM or LONG) of a month: response ratio `r` (the fraction of the rainfall that becomes RDII), time to peak `t` and recession ratio `k` (hours; the base is ``t * (1 + k)``) and the initial abstraction `ia_max` (rain depth, in or mm), `ia_recovery` (depth per day) and `ia_initial` (the depth used at the start of the run). Any number may be a torch scalar. | `UnitHydrograph(r=0.0, t=0.0, k=0.0, ia_max=0.0, ia_recovery=0.0, ia_initial=0.0)` |
 | `UnitHydrographSet` | A `[HYDROGRAPHS]` set: the rain `gage` it reads (``None`` when the file gives none) and `responses`, twelve months (January first) of three `UnitHydrograph` (short, medium, long). | `UnitHydrographSet(name, gage, responses)` |
 
-## Elements (branch laws)
+## Constitutive laws
 
-Flow through an edge as a function of the potential difference across it.
+The relation between the flow through an edge and the potential difference across it.
 
 | Name | What it does | How to call it |
 |---|---|---|

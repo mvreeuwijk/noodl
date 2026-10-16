@@ -18,13 +18,13 @@ Generated from the package's own docstrings. For the ideas behind these objects,
     options:
       members: [branch_flows, particular_flow, project_measured, assert_forward_oriented]
 
-## Elements and drives
+## Constitutive laws and drives
 
 ::: noodl.elements.base
     options:
-      members: [Element]
+      members: [ConstitutiveLaw, ImplicitLaw, LawContext]
 
-Elements are grouped below by the physics they express, as in
+Constitutive laws are grouped below by the physics they express, as in
 [Airflow elements](applications/building_physics.md#airflow-elements).
 
 ### Power-law openings
@@ -98,9 +98,9 @@ Elements are grouped below by the physics they express, as in
 
 ## Layers
 
-::: noodl.layers.potential
+::: noodl.layers.kirchhoff
     options:
-      members: [PotentialFlowLayer]
+      members: [KirchhoffLayer]
 
 ::: noodl.layers.transport
     options:
@@ -141,6 +141,7 @@ Elements are grouped below by the physics they express, as in
 ::: noodl.operators.dense
 ::: noodl.operators.graph
 ::: noodl.operators.advection
+::: noodl.operators.mna
 
 ## Solvers
 
@@ -224,6 +225,20 @@ Elements are grouped below by the physics they express, as in
 ### Allocation (WSIMOD)
 
 ::: noodl.apps.wsimod.network
+
+### Electrical circuits
+
+::: noodl.apps.electrical.circuit
+::: noodl.apps.electrical.analysis
+::: noodl.apps.electrical.laws
+::: noodl.apps.electrical.loads
+::: noodl.apps.electrical.converters
+::: noodl.apps.electrical.thermal
+::: noodl.apps.electrical.waveforms
+::: noodl.apps.electrical.modelica
+    options:
+      members: [read_modelica_circuit, simulate_circuit, CircuitNames, Column, extrapolate, ModelicaImportError]
+::: noodl.apps.electrical.power
 
 ### Shared
 

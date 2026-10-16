@@ -13,10 +13,10 @@ framework:
 - **Water hydraulics** — partially full circular pipes under gravity. Under kinematic-wave
   routing, Manning's equation on a dendritic network: the cycle space is empty, so continuity
   alone fixes every discharge in closed form, with no potential solve at all. Under
-  dynamic-wave routing, SWMM's momentum equation as a potential layer on head (see
+  dynamic-wave routing, SWMM's momentum equation as a Kirchhoff layer on head (see
   [Dynamic wave](#dynamic-wave)), which admits backwater, flat conduits and loops.
 - **Headspace air** — the air above the water surface is its own flow network, a full
-  `PotentialFlowLayer` driven by wall friction, the drag of the moving water surface, and
+  `KirchhoffLayer` driven by wall friction, the drag of the moving water surface, and
   buoyancy from the sewer-to-ambient temperature difference, vented through manhole leaks and
   optional fans.
 - **Water quality** — BOD decay and Pomeroy–Parkhurst sulfide generation in the wastewater, with
@@ -256,11 +256,11 @@ root-find.
 
 ### Dynamic wave
 
-With `routing="dynamic_wave"` (SWMM's `DYNWAVE`) the network is a potential layer on **head**.
+With `routing="dynamic_wave"` (SWMM's `DYNWAVE`) the network is a Kirchhoff layer on **head**.
 Where a conduit's flow follows from continuity alone, as on a dendritic kinematic-wave
 network, nothing else is needed; where backwater, a flat conduit or a loop makes the flow depend
 on the heads at both ends, the heads are the unknowns and the flows follow from the head
-differences. The water side then has one `PotentialFlowLayer` named `"water"` (quantity `head`
+differences. The water side then has one `KirchhoffLayer` named `"water"` (quantity `head`
 in m, flow in m³/s) over the conduits, with the outfalls as its boundary, and a
 `JunctionStorage` node source at every junction.
 
@@ -311,7 +311,7 @@ a stage that varies in time (see "Tidal and time-series outfalls").
 #### What is solved
 
 For frozen coefficients the conduit and junction equations are linear in the heads apart from
-the min-clamps, so one pass is a single `PotentialFlowLayer` solve. The model then refreshes the
+the min-clamps, so one pass is a single `KirchhoffLayer` solve. The model then refreshes the
 coefficients and repeats until the heads change by less than `iterate_tol` (m) and the flows
 by less than `iterate_flow_tol` (m³/s), or `iterate_max` passes are used
 (`Model(coupling="iterate")`, converging on the layer's own interior head; the defaults follow
@@ -403,7 +403,7 @@ from 55 ms (`benchmarks/sewer_dynwave_speed.py`, which also times SWMM). With SW
 tolerances the tree's 30 minutes take 11.5 s (123 s before), about 850 times SWMM; the
 2,047-conduit tree is about 40 times SWMM. Most of it is the conduit update (`dynwave_terms.conduit_terms`), SWMM's
 normal and critical depths, and the head solve, whose Newton Jacobian is the elements' own
-analytic `dflow` on the primal passes (`PotentialFlowLayer(analytic_primal=True)`; the implicit
+analytic `dflow` on the primal passes (`KirchhoffLayer(analytic_primal=True)`; the implicit
 adjoint still differentiates the converged pass). A batch of B scenarios (`simulate_dynamic_wave`
 with a `(B, n)` inflow) costs about the same per pass, so an ensemble amortises it.
 
@@ -1430,7 +1430,7 @@ each is confined to the cases named.
 
 ### Headspace air
 
-`Headspace` is an `Element` with $\Delta p = R(h)\,\lvert Q \rvert Q$ and
+`Headspace` is a `ConstitutiveLaw` with $\Delta p = R(h)\,\lvert Q \rvert Q$ and
 
 $$
 R(h) = \frac{f_{\text{air}} L \rho}{2 D_h A_{\text{air}}^2}

@@ -26,7 +26,7 @@ def test_the_air_layer_balances_at_its_solution():
     new = model.step(state, drivers, 60.0)
     residuals = model.residuals(new, drivers)
     assert float(residuals["air"].abs().max()) < 1e-11
-    layer = model.potential["air"]
+    layer = model.kirchhoff["air"]
     resolved = model._apply_closures(new, drivers)
     power = layer.power_residual(new["air.phi"], new["air.q"], resolved)
     assert float(power.abs().max()) < 1e-10
@@ -88,7 +88,7 @@ def test_gradients_against_central_differences():
       element parameter reached the SAME way `leak_area` now is).
 
     `f_i` is NOT one of them: it is a `Drag` DRIVE's plain attribute (never a registered
-    `nn.Parameter`), and `PotentialFlowLayer`'s own differentiable-solve safety check
+    `nn.Parameter`), and `KirchhoffLayer`'s own differentiable-solve safety check
     refuses `requires_grad=True` on a Drive's own tensor attribute by name (a Drive is
     captured by closure inside the differentiable solve, not threaded through
     `Function.apply`, so its gradient would otherwise be silently absent) --
@@ -173,7 +173,7 @@ def test_gradient_reaches_a_learnable_leak_area():
     `test_gradient_reaches_a_learnable_headspace_friction` reaches `f_air` -- a
     non-learnable element's already-registered `nn.Parameter` with `requires_grad_(True)`
     set on it afterward, never a fresh tensor built with `requires_grad=True` and passed
-    into a NEW `build_model` call (which `PotentialFlowLayer`'s own safety check
+    into a NEW `build_model` call (which `KirchhoffLayer`'s own safety check
     would refuse: an unregistered grad-tracked element attribute).
 
     `C = leak_cd * leak_area * sqrt(2 / rho_air)`, uniform over the manholes, so
@@ -199,7 +199,7 @@ def test_gradient_reaches_a_learnable_leak_area():
     model, state, drivers = build_model(
         tree_steady(), quality=False, leak_area=base, leak_cd=leak_cd,
     )
-    leak = next(el for el in model.potential["air"]._elements if el.kind == "leak")
+    leak = next(el for el in model.kirchhoff["air"]._laws if el.kind == "leak")
     leak.C.requires_grad_(True)
     new = model.step(state, drivers, 60.0)
     new["air.q"].abs().sum().backward()
@@ -218,7 +218,7 @@ def test_gradient_reaches_a_learnable_leak_area():
 def test_gradient_reaches_a_learnable_headspace_friction():
     model, state, drivers = build_model(tree_steady(), quality=False)
     element = next(
-        el for el in model.potential["air"]._elements if el.kind == "headspace"
+        el for el in model.kirchhoff["air"]._laws if el.kind == "headspace"
     )
     element.f_air.requires_grad_(True)
     new = model.step(state, drivers, 60.0)

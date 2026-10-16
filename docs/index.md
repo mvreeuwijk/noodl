@@ -28,7 +28,7 @@ differentiable. The same model that simulates forward will also tell you the der
 output with respect to any parameter, which is what turns a simulator into a tool for
 calibration, sensitivity analysis and design optimisation.
 
-![The noodl physics model stack: a network, then elements drives and closures, then layers, then a Model that steps them together](assets/framework-overview.svg)
+![The noodl physics model stack: a network, then constitutive laws, drives and closures, then layers, then a Model that steps them together](assets/framework-overview.svg)
 
 ## What it gives you
 
@@ -36,7 +36,7 @@ calibration, sensitivity analysis and design optimisation.
 |---|---|
 | **One topology layer** | A typed multigraph with incidence, gradient and cycle-basis operators, boundary/interior selectors, spanning forests and sign-aware upwind/downwind indexing. Edges carry a `kind`, so one network holds several physical systems at once. |
 | **Four ways to determine an edge flow** | Solve for a potential (Newton on a nodal conservation residual); prescribe the flow from a driver; compute it from a closure; or clip a requested flow against arc capacity and receiver headroom. Most network tools support exactly one of these. |
-| **Composable physics layers** | Potential flow, multi-species and heat transport, reactions, and capacity-limited allocation — several of them on one network, stepped together under either of two coupling schemes. |
+| **Composable physics layers** | Kirchhoff solves, multi-species and heat transport, reactions, and capacity-limited allocation — several of them on one network, stepped together under either of two coupling schemes. |
 | **Matvec-free solvers** | A `LinearOperator` contract with dense, graph-Laplacian and advection implementations; Newton with per-instance convergence; an implicit-function adjoint so gradients cost one linear solve rather than an unrolled tape. |
 | **Batching over instances** | Every solve is batched. A thousand building variants, or one network under a thousand weather realisations, is one call. |
 | **Verified by code-to-code comparison** | Each application is compared against a reference implementation for its domain — CONTAM, MUNICH, SWMM, EPANET, WSIMOD — with the tolerances and measured errors written down. |
@@ -49,10 +49,10 @@ physics over the shared core:
 
 | Application | Physical system | Flow determination | Entry point |
 |---|---|---|---|
-| [Building physics](applications/building_physics.md) | Multi-zone airflow, heat and contaminant transport | Potential: Newton on zone pressure | `build_model` |
+| [Building physics](applications/building_physics.md) | Multi-zone airflow, heat and contaminant transport | Kirchhoff: Newton on zone pressure | `build_model` |
 | [Street air quality](applications/street_aq.md) | Urban air quality, canyon exchange and routing | Closure: flows computed from the wind aloft | `build_model`, `StreetNetwork` |
-| [Sewers](applications/sewer.md) | Gravity sewer hydraulics, headspace air, sulfide | Continuity on a tree for the water; Newton potential for the headspace air | `build_model` |
-| [Water distribution](applications/water.md) | Pressurised mains, pumps, tanks, demand | Potential: Newton on hydraulic head | `build_model` |
+| [Sewers](applications/sewer.md) | Gravity sewer hydraulics, headspace air, sulfide | Continuity on a tree for the water; Kirchhoff solve for the headspace air | `build_model` |
+| [Water distribution](applications/water.md) | Pressurised mains, pumps, tanks, demand | Kirchhoff: Newton on hydraulic head | `build_model` |
 | [Flow allocation](applications/allocation.md) | Requested flows clipped to arc capacity and free storage at the receiving node | Clip and allocate | `AllocatedFlowLayer` |
 | [Coupling](applications/coupling.md) | Two models meeting at a shared boundary | Two models exchanging values, iterated to a fixed point | `union` |
 
@@ -75,9 +75,9 @@ See [File formats](formats/index.md) for what each reader accepts and refuses.
 
 - **[Installation](installation.md)** — pip, the optional extras, and what each one buys you.
 - **[Quick start](quickstart.md)** — a working two-node model in fifteen lines, then a batched one.
-- **[Concepts](concepts/index.md)** — how the framework fits together: networks, elements, layers, solvers, differentiability.
+- **[Concepts](concepts/index.md)** — how the framework fits together: networks, constitutive laws, layers, solvers, differentiability.
 - **[Using noodl](usage.md)** — the one way every model is set up, checked, run and read, whatever its physics.
-- **[Applications](applications/index.md)** — the six worked systems.
+- **[Applications](applications/index.md)** — the seven worked systems.
 - **[Catalogue](catalogue/core.md)** — every type each application offers: what it does and how to call it.
 - **[API reference](api.md)** — generated from the docstrings.
 - **[Theory](theory.md)** — the background: Tellegen's theorem, port-Hamiltonian systems, differentiable physics, and the literature each application builds on.

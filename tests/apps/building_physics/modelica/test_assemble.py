@@ -104,7 +104,7 @@ def test_ramp_on_a_boundary_pressure_becomes_the_driver_series():
     model, state, drivers, names = _load("ramp_boundary.json")
     t = names.times
     series = drivers["series:air.phi_boundary"]
-    air = model.potential["air"]
+    air = model.kirchhoff["air"]
     j = air.bound.tolist().index(names.nodes["bouA"])
     # Sources.mo:244-252 with height 10, duration 30, offset 101325, startTime 10, as gauge
     # pressure relative to p_default.
@@ -126,7 +126,7 @@ def test_ramp_on_a_boundary_pressure_becomes_the_driver_series():
 def test_step_drivers_slices_the_series_and_keeps_constants():
     model, state, drivers, names = _load("ramp_boundary.json")
     d = step_drivers(drivers, names.times, 25.0)
-    air = model.potential["air"]
+    air = model.kirchhoff["air"]
     j = air.bound.tolist().index(names.nodes["bouA"])
     assert float(d["air.phi_boundary"][j]) == pytest.approx(5.0)
     assert not any(key.startswith("series:") for key in d)
@@ -195,7 +195,7 @@ def test_mixed_model_conserves_mass_and_accumulates_the_trace_substance():
     assert names.kinds["dooDis"] == ("door_ab:dooDis", "door_ba:dooDis")
     assert len(names.edges["dooDis"]) == 2
     hist = simulate(model, state, drivers, names.times)
-    air = model.potential["air"]
+    air = model.kirchhoff["air"]
     q = hist["air.q"]
     s = drivers["air.sources"]
     net_out = torch.stack([air._accumulate(q[k]) for k in range(q.shape[0])])
@@ -217,7 +217,7 @@ def test_mixed_model_conserves_mass_and_accumulates_the_trace_substance():
 def test_gradient_of_a_zone_temperature_wrt_an_orifice_coefficient():
     model, state, drivers, names = _load("zone_two_orifices.json")
     kind = names.kinds["oriA"][0]
-    el, _ = model.potential["air"].element_for(kind)
+    el, _ = model.kirchhoff["air"].law_for(kind)
     d = step_drivers(drivers, names.times, 1.0)
     el.C.requires_grad_(True)
     new = model.step(state, d, 1.0)
@@ -248,7 +248,7 @@ def test_gradient_through_elements_in_series_matches_finite_differences(element)
                                                   return_names=True)
     state = _initial_air(model, _storage(model), state, step_drivers(drivers, names.times, 0.0))
     d = step_drivers(drivers, names.times, 7.2)
-    el, _ = model.potential["air"].element_for(names.kinds[element][0])
+    el, _ = model.kirchhoff["air"].law_for(names.kinds[element][0])
     el.C.requires_grad_(True)
     (g,) = torch.autograd.grad(model.step(state, d, 7.2)["thermal.x"][0], el.C)
     h = 1e-4 * float(el.C.detach().abs())
@@ -269,7 +269,7 @@ def test_the_junction_fill_keeps_the_backward_pass_quasi_steady():
     model, state, drivers, names = read_modelica(DATA / "ChimneyShaftNoVolume.json",
                                                  return_names=True)
     d = step_drivers(drivers, names.times, 7.2)
-    el, _ = model.potential["air"].element_for(names.kinds["oriChiTop"][0])
+    el, _ = model.kirchhoff["air"].law_for(names.kinds["oriChiTop"][0])
     el.C.requires_grad_(True)
     new = model.step(state, d, 7.2)
     (g,) = torch.autograd.grad(new["thermal.x"][0] + new["air.q"].sum(), el.C)
@@ -485,7 +485,7 @@ def test_mass_flow_source_injects_mass_and_enthalpy(tmp_path):
     assert float(drivers["air.sources"][i]) == pytest.approx(0.01)
     assert float(drivers["thermal.sources"][i]) == pytest.approx(cp * 0.01 * 310.0)
     hist = simulate(model, state, drivers, names.times[:3])
-    air = model.potential["air"]
+    air = model.kirchhoff["air"]
     assert float(air._accumulate(hist["air.q"][-1])[i]) == pytest.approx(0.01, abs=1e-10)
 
 
@@ -505,7 +505,7 @@ def test_an_extracting_mass_flow_source_draws_the_zones_own_air(tmp_path):
     assert float(written["thermal.sources"][i]) == pytest.approx(-cp * 0.01 * T, rel=1e-14)
     assert float(written["thermal.sources"].abs().sum()) == pytest.approx(cp * 0.01 * T)
     hist = simulate(model, state, drivers, names.times[:3])
-    air = model.potential["air"]
+    air = model.kirchhoff["air"]
     assert float(air._accumulate(hist["air.q"][-1])[i]) == pytest.approx(-0.01, abs=1e-10)
 
 
@@ -597,12 +597,12 @@ def test_operable_and_discretised_doors_build_and_follow_their_signal(tmp_path):
     assert float(sum(s * hist["air.q"][0, c] for c, s in names.edges["el"])) > 0.0
     # The edges ARE MBL's port flows: port_a1.m_flow = mAB_flow, port_a2.m_flow = mBA_flow
     # (the element's `port_flows` at the solved compartment pressure differences).
-    el, sl = model.potential["air"].element_for("door_ab:el")
+    el, sl = model.kirchhoff["air"].law_for("door_ab:el")
     d = dict(drivers)
     d.update(step_drivers(drivers, drivers["series:time"], float(names.times[0])))
     for c in model.closures:
         d.update(c({**state, "air.phi": hist["air.phi"][0]}, d))
-    dpi = model.potential["air"].dp(hist["air.phi"][0], d)[..., sl] + el.head(d)
+    dpi = model.kirchhoff["air"].dp(hist["air.phi"][0], d)[..., sl] + el.head(d)
     mAB, mBA = el.comp.port_flows(dpi, d)
     a1 = sum(s * hist["air.q"][0, c] for c, s in names.edges["el.port_a1"])
     a2 = sum(s * hist["air.q"][0, c] for c, s in names.edges["el.port_a2"])
@@ -1107,7 +1107,7 @@ def test_gauge_reference_is_the_first_boundary_pressure(tmp_path):
     hist = simulate(model, state, drivers, names.times[:3])  # converges to AIR_ATOL
     assert float(hist["p"][0, names.nodes["bouOut"]]) == 100000.0
     # The layer's own linear initial guess converges at the same tolerances too.
-    layer = model.potential["air"]
+    layer = model.kirchhoff["air"]
     d = step_drivers(drivers, names.times, 0.0)
     for c in model.closures:
         d.update(c(state, d))

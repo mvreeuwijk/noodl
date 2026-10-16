@@ -10,7 +10,7 @@ For a converged solve, gradients flow back to:
 - `phi_boundary` and `x_boundary` — the prescribed boundary values,
 - `sources` — the nodal source terms,
 - every value in the `drivers` mapping,
-- every element parameter registered with `learnable=True`,
+- every law parameter registered with `learnable=True`,
 - and, across a [coupled model](../applications/coupling.md), through the join into the *other*
   model's parameters.
 
@@ -38,7 +38,7 @@ $$
 
 so the backward pass is **one transposed linear solve**, whatever the forward took. The Jacobian
 is the one Newton already assembled, and the transposed solve reuses the same operator through
-`TransposeOperator`. For a symmetric operator — which a potential-flow layer's is — `rmatvec` is
+`TransposeOperator`. For a symmetric operator — which a Kirchhoff layer's is — `rmatvec` is
 the forward action, so nothing extra is built.
 
 The practical consequence: a model that takes 12 Newton iterations to converge costs the same to
@@ -56,22 +56,22 @@ decision itself is still made on detached copies and never enters the graph.
 ## The contract
 
 For `differentiable=True` to be *safe*, two rules must hold. Both are checked before any solve
-is attempted, and a violation raises naming the offending element or drive and the attribute —
+is attempted, and a violation raises naming the offending law or drive and the attribute —
 rather than silently returning a wrong or absent gradient.
 
-**1. An element's differentiable state must be a registered parameter.**
+**1. A law's differentiable state must be a registered parameter.**
 
 ```python
 leak = PowerLaw(C=torch.tensor(0.01), n=torch.tensor(0.65), learnable=True)   # correct
 ```
 
 A bare tensor held with `requires_grad=True` outside `named_parameters()` is a supported
-construction, and its graph is reachable through the element's own component calls — but it is
+construction, and its graph is reachable through the law's own component calls — but it is
 invisible to the differentiable solve. Since `differentiable=False` returns detached tensors,
 *neither* path would carry a gradient to it.
 
 **2. A drive must read every differentiable quantity from the `drivers` mapping**, never hold
-one as an instance attribute. See [Elements and drives](elements.md#the-rule-a-drive-must-obey)
+one as an instance attribute. See [Constitutive laws and drives](elements.md#the-rule-a-drive-must-obey)
 for why this is structural rather than stylistic.
 
 ## What is guaranteed
@@ -197,7 +197,7 @@ exactly (rtol $10^{-10}$).
 
 ### Design optimisation
 
-Anything the forward model computes can be an objective, and any element parameter can be a
+Anything the forward model computes can be an objective, and any law parameter can be a
 design variable.
 
 ## Where gradients are zero, and why
@@ -233,7 +233,7 @@ Every application checks its gradients against finite differences, and the numbe
 | Allocation | `torch.autograd.gradcheck` through smooth and projection modes | analytic | holds |
 | Coupling | gradient across the join vs central differences | rel $10^{-5}$ | holds |
 
-If you write your own element, do the same: `torch.autograd.gradcheck` in float64 against a
+If you write your own law, do the same: `torch.autograd.gradcheck` in float64 against a
 finite-difference reference is cheap insurance against a `dflow` that disagrees with its `flow`.
 
 ## Performance notes

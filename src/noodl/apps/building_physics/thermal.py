@@ -19,7 +19,7 @@ import torch
 from noodl._broadcast import broadcast_shapes
 from noodl.components import Component
 from noodl.elements import PrescribedFlow
-from noodl.layers.potential import PotentialFlowLayer
+from noodl.layers.kirchhoff import KirchhoffLayer
 from noodl.layers.transport import TransportLayer, active_interior
 from noodl.model import Drivers, Model, State
 from noodl.refs import drivers_from, state_from
@@ -245,12 +245,12 @@ class LinearDensity(_DensityClosure):
 _STORAGE_FREE_HINT = " (an air-handler plenum? pass storage_free= to build_model)"
 
 
-def _prescribed_only_nodes(net: Network, air_elements, air) -> list:
+def _prescribed_only_nodes(net: Network, air_laws, air) -> list:
     """The airflow layer's interior nodes that only `PrescribedFlow` edges touch (an air
     handler's plenums left out of `flow_balanced`): their pressure is undetermined."""
     other: set = set()
     prescribed: set = set()
-    for el in air_elements:
+    for el in air_laws:
         src, tgt = net.endpoints(el.kind)
         touched = {net.nodes[i] for i in src.tolist() + tgt.tolist()}
         (prescribed if isinstance(el, PrescribedFlow) else other).update(touched)
@@ -258,16 +258,16 @@ def _prescribed_only_nodes(net: Network, air_elements, air) -> list:
     return [n for n in net.nodes if n in prescribed and n not in other and n in interior]
 
 
-def check_flow_balanced(net: Network, air_elements, flow_balanced, *,
+def check_flow_balanced(net: Network, air_laws, flow_balanced, *,
                         where: str = "build_model") -> None:
-    """Refuse a flow-balanced node that an edge touches whose element is not a
+    """Refuse a flow-balanced node that an edge touches whose law is not a
     `PrescribedFlow` (an air handler's): the airflow solve pins such a node at zero gauge
     pressure, so a pressure-dependent edge would let it absorb an imbalance silently, and a
     fixed flow is outside the handler's balance."""
     balanced = set(net.canonical(list(flow_balanced))) if flow_balanced else set()
     if not balanced:
         return
-    for el in air_elements:
+    for el in air_laws:
         if isinstance(el, PrescribedFlow):
             continue
         src, tgt = net.endpoints(el.kind)
@@ -277,12 +277,12 @@ def check_flow_balanced(net: Network, air_elements, flow_balanced, *,
                     raise ValueError(
                         f"{where}: flow_balanced node {node!r} is an end of the edge "
                         f"{net.nodes[s]!r} -> {net.nodes[t]!r} of kind {el.kind!r}, whose "
-                        f"element is a {type(el).__name__}; the airflow solve pins a "
+                        f"law is a {type(el).__name__}; the airflow solve pins a "
                         f"flow-balanced node at zero gauge pressure, so only an air "
                         f"handler's prescribed flows (PrescribedFlow) may touch it")
 
 
-def build_model(net: Network, *, air_elements, drives, ambient="ambient", thermal: bool = True,
+def build_model(net: Network, *, air_laws, drives, ambient="ambient", thermal: bool = True,
                 species: int | Sequence[str] = 0, density: str = "ideal_gas",
                 density_kwargs=None,
                 coupling: str = "pingpong", iterate_tol=None, iterate_max: int = 20,
@@ -317,7 +317,7 @@ def build_model(net: Network, *, air_elements, drives, ambient="ambient", therma
        tight `iterate_tol` requires a matching `atol`/`rtol` on the `steady`/`step` call.
 
     `flow_kinds` NARROWS which edge kinds advect heat and species; it defaults to every air
-    element's kind, which is what a building network wants. Naming a subset is deliberate
+    law's kind, which is what a building network wants. Naming a subset is deliberate
     (a duct kind that carries mass but whose heat is modelled elsewhere), so it is allowed --
     but every kind named must be one the air layer actually provides, or the narrowing is a
     typo that silently drops advection. Unknown kinds raise `KeyError` naming them. The same
@@ -335,7 +335,7 @@ def build_model(net: Network, *, air_elements, drives, ambient="ambient", therma
     `AirHandlerFlows`). `flow_balanced` names nodes whose pressure the airflow solve does
     not need, because only prescribed, balanced flows touch them (an air handler's
     plenums): they join the air layer's boundary at zero gauge pressure, while staying
-    ordinary nodes of the heat and species layers. Only edges whose element is a
+    ordinary nodes of the heat and species layers. Only edges whose law is a
     `PrescribedFlow` may touch them: a pressure-dependent edge would let the plenum, pinned
     at zero gauge pressure, absorb an imbalance silently, and a fixed flow is outside the
     handler's balance, so either is refused, naming the node and the edge. `storage_free`
@@ -343,20 +343,20 @@ def build_model(net: Network, *, air_elements, drives, ambient="ambient", therma
     scheme.
     """
     storage_free = tuple(storage_free)
-    check_flow_balanced(net, air_elements, flow_balanced)
-    element_kinds = tuple(el.kind for el in air_elements)
-    kinds = tuple(flow_kinds) if flow_kinds else element_kinds
-    unknown = [k for k in kinds if k not in element_kinds]
+    check_flow_balanced(net, air_laws, flow_balanced)
+    law_kinds = tuple(el.kind for el in air_laws)
+    kinds = tuple(flow_kinds) if flow_kinds else law_kinds
+    unknown = [k for k in kinds if k not in law_kinds]
     if unknown:
         raise KeyError(
-            f"build_model: flow_kinds names {unknown}, which no air element provides "
-            f"(the air elements' kinds are {list(element_kinds)}); a kind the air layer does "
+            f"build_model: flow_kinds names {unknown}, which no air law provides "
+            f"(the air laws' kinds are {list(law_kinds)}); a kind the air layer does "
             f"not solve carries no flow, so heat and species would silently not advect on it"
         )
-    air = PotentialFlowLayer(net, "air", list(air_elements), drives=list(drives),
-                             boundary=[ambient, *flow_balanced], quantity="pressure", unit="Pa",
-                             flow_unit="kg/s")
-    air.node_hints.update(dict.fromkeys(_prescribed_only_nodes(net, air_elements, air),
+    air = KirchhoffLayer(net, "air", list(air_laws), drives=list(drives),
+                         boundary=[ambient, *flow_balanced], quantity="pressure", unit="Pa",
+                         flow_unit="kg/s")
+    air.node_hints.update(dict.fromkeys(_prescribed_only_nodes(net, air_laws, air),
                                         "an air-handler plenum? pass flow_balanced= to "
                                         "build_model"))
     layers: dict = {"air": air}
@@ -453,7 +453,7 @@ def initial_drivers(model: Model, *, values: Mapping | None = None) -> Drivers:
     """
     drivers: Drivers = {}
     T0 = model.net.node_attr("T0", default=T_REF)
-    for name, layer in model.potential.items():
+    for name, layer in model.kirchhoff.items():
         drivers[f"{name}.phi_boundary"] = torch.zeros(len(layer.bound), dtype=model.net.dtype)
     for name, layer in model.transport.items():
         if layer.quantity == "temperature":

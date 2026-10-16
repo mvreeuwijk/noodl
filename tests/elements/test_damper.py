@@ -1,6 +1,6 @@
 """Damper: CONTAM's backdraft damper (PL_BDF) -- separate (C, n) per sign of dp.
 
-Dtype: ``Element._param`` casts a non-tensor value with
+Dtype: ``ConstitutiveLaw._param`` casts a non-tensor value with
 ``torch.get_default_dtype()``, which is float32 in this repo. ``_damper()`` below builds its
 (C, n) as float64 tensors, and the reference ``PowerLaw`` instances each test checks against
 reuse those same float64 tensors, so ``Damper`` and its references share identical float64
@@ -19,7 +19,7 @@ import pytest
 import torch
 
 from noodl.elements import Damper, FixedFlow, PowerLaw, UpstreamDensityPowerLaw
-from noodl.layers.potential import PotentialFlowLayer
+from noodl.layers.kirchhoff import KirchhoffLayer
 from noodl.topology import Network
 
 F64 = torch.float64
@@ -84,7 +84,7 @@ def test_damper_in_a_layer_lets_a_fan_exhaust_through_the_easy_direction():
     net.add_node("z")
     net.add_edge("ambient", "z", kind="damper")
     net.add_edge("z", "ambient", kind="airpath")
-    layer = PotentialFlowLayer(
+    layer = KirchhoffLayer(
         net,
         "air",
         [_damper(), FixedFlow(torch.tensor(0.05, dtype=F64), kind="airpath")],

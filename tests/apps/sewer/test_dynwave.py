@@ -141,8 +141,8 @@ def test_default_pass_budget_covers_a_slow_outfall_head():
 def test_build_model_dispatches_and_refuses_storage(tmp_path):
     net = _tree(tmp_path)
     model, state, drivers = build_model(net)
-    assert "water" in model.potential and model.potential["water"].quantity == "head"
-    assert not model.transport and "air" not in model.potential
+    assert "water" in model.kirchhoff and model.kirchhoff["water"].quantity == "head"
+    assert not model.transport and "air" not in model.kirchhoff
     with pytest.raises(ValueError, match="storage"):
         build_model(net, storage=True)
 
@@ -2744,12 +2744,12 @@ def test_air_is_built_on_the_dynamic_wave_tree_and_balances(tmp_path):
     the Newton tolerance (the leak edges carry the rest to ambient)."""
     net = _tree(tmp_path)
     model, state, drivers = build_model(net, air=True, quality=False)
-    assert set(model.potential) == {"water", "air"} and not model.transport
+    assert set(model.kirchhoff) == {"water", "air"} and not model.transport
     assert state["air.phi"].shape == (model.net.n,) and float(state["air.q"].abs().max()) == 0.0
     state, _ = simulate_dynamic_wave(model, state, drivers, steps=30)
     assert float(state["air.q"].abs().max()) > 1e-6          # the water drags the air
     resolved = model._apply_closures(state, drivers)
-    layer = model.potential["air"]
+    layer = model.kirchhoff["air"]
     # the air at the final state's drivers (the stored pass lags them by the head tolerance,
     # which the headspace law's square root amplifies where a flow is near zero)
     phi, q = layer.solve(drivers["air.phi_boundary"], resolved, differentiable=False,
@@ -2780,8 +2780,8 @@ def test_air_flows_equal_the_kinematic_model_at_the_same_depths(tmp_path):
     kin, _, kin_drivers = build_model(kin_net, air=True, quality=False)
     assert [p.name for p in net.pipes] == [p.name for p in kin_net.pipes]
     boundary = drivers["air.phi_boundary"]
-    _, q_dyn = model.potential["air"].solve(boundary, resolved, differentiable=False)
-    _, q_kin = kin.potential["air"].solve(boundary, resolved, differentiable=False)
+    _, q_dyn = model.kirchhoff["air"].solve(boundary, resolved, differentiable=False)
+    _, q_kin = kin.kirchhoff["air"].solve(boundary, resolved, differentiable=False)
     torch.testing.assert_close(q_dyn, q_kin, rtol=0.0, atol=1e-9)
     assert float(q_kin.abs().max()) > 1e-6
     # the stored flows are those at the pass's own drivers: equal to the head tolerance

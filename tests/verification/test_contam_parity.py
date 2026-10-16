@@ -788,7 +788,7 @@ def _mass_fraction_bound(eps_flow, pass_fractions=None):
             "float32 roundoff term")
         model, _, drivers = project_to_model(project)
         lay, net = model.transport["species"], model.net
-        f = model.potential["air"].flows_of_kind(out["air.q"], lay.flow_kinds)
+        f = model.kirchhoff["air"].flows_of_kind(out["air.q"], lay.flow_kinds)
         src, tgt = zip(*(net.endpoints(k) for k in lay.flow_kinds), strict=True)
         src, tgt = torch.cat(src).tolist(), torch.cat(tgt).tolist()
         n_rows = out["species.x"].shape[0]
@@ -933,7 +933,7 @@ def _uvgi_pass_fractions(eps_flow):
         assert not any(i.key in ("T", "P_ref") for i in project.inputs), (
             "the pass fractions are taken at the drivers' constant temperatures and pressure")
         (closure,) = [c for c in model.closures if isinstance(c, FilterTransmission)]
-        air = model.potential["air"]
+        air = model.kirchhoff["air"]
         species = closure.species
         rho = drivers["P_ref"] / (R_AIR * drivers["T"])
         taus, dtaus = [], []
@@ -1326,7 +1326,7 @@ def _age_and_air_change_allowed(model, out, conditioned, eps_flow, eps_mass, eps
     from noodl.apps.building_physics.outputs import building_air_change_rate, local_mean_age
 
     lay, net = model.transport["species"], model.net
-    f = model.potential["air"].flows_of_kind(out["air.q"][1:], lay.flow_kinds)
+    f = model.kirchhoff["air"].flows_of_kind(out["air.q"][1:], lay.flow_kinds)
     src, tgt = zip(*(net.endpoints(k) for k in lay.flow_kinds), strict=True)
     src, tgt = torch.cat(src).tolist(), torch.cat(tgt).tolist()
     dq = eps_flow * f.abs().amax(0)
