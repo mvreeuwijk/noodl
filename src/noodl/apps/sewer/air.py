@@ -166,8 +166,7 @@ class Drag:
     means the
     drive returns ``+D``: with both ends at ambient the drag alone then produces
     ``R|Q|Q = D``, i.e. flow from the upstream manhole towards the downstream one, which is
-    the direction the wastewater drags the air. (Returning ``-D`` reverses the airflow and
-    was caught by the A1 measurement.)
+    the direction the wastewater drags the air (``-D`` would reverse it).
 
     A `Drive` reads DRIVERS ONLY -- never `phi`, never another layer's state -- which is
     what keeps the Newton Jacobian exactly ``A_I diag(g') A_I^T``. The relative-velocity
@@ -332,8 +331,8 @@ def air_layer(graph: Network, net, plan: AirPlan, *, f_air=F_AIR_DEFAULT, f_i=F_
     # Leak law: `PowerLaw(C = Cd A sqrt(2/rho), n = 0.5, kind="leak")` built DIRECTLY, never
     # through `Orifice`: `Orifice` casts with `torch.get_default_dtype()` (float32 in this
     # repository) regardless of its inputs' own dtype, which would downcast the leak's `C` and
-    # floor check C1's residual on the float32 arithmetic of the leak branch alone (measured
-    # 1.352e-12 / 1.855e-11 in float32; 4.518e-13 / 6.141e-12 in float64). `leak_cd` and
+    # floor check C1's residual on the float32 arithmetic of the leak branch alone (numbers:
+    # docs/design/sewer.md#leak-law-precision). `leak_cd` and
     # `leak_area` are ordinary floats by default but may also be tensors carrying a leading
     # batch (instance) dimension (`benchmarks/sewer_diurnal.py` varies them per instance
     # without any core or element change, since `PowerLaw._param`'s pass-through rule and
