@@ -58,6 +58,14 @@ import torch
 from noodl import layout
 from noodl._fixed_point_loop import detached, unsolved_mask
 from noodl._grad_reach import any_requires_grad
+from noodl._model_setup import (
+    CouplingOptions,
+    flow_owners,
+    register_layers,
+    validate_modes,
+    validate_reactions,
+    validate_substeps,
+)
 from noodl._tracking import TrackedDict
 from noodl.contracts import (
     ClosureSpec,
@@ -237,103 +245,23 @@ class Model:
         iterate_flow_tol: Mapping[str, float] | None = None,
         iterate_on_limit: str = "raise",
     ) -> None:
-        if coupling not in ("pingpong", "iterate"):
-            raise ValueError(
-                f"Model: coupling must be 'pingpong' or 'iterate', got {coupling!r}"
-            )
-        # WHERE in the operator split the reactions sit, and so where the returned state is
-        # SAMPLED. Both orders take the same `... R T R T ...` sequence; they differ only in
-        # which half-step the returned `"<layer>.x"` follows. `"after_transport"` (T then R,
-        # the default) returns the reacted state; `"before_transport"` (R then T) reacts the
-        # step-start state and returns the transported one -- the order of SWMM's
-        # `qualrout.c::findLinkQual` (`getReactedQual`, then `getMixedQual`), which reports
-        # the concentration after mixing. The sewer application builds with it.
-        if reaction_order not in ("after_transport", "before_transport"):
-            raise ValueError(
-                f"Model: reaction_order must be 'after_transport' or 'before_transport', "
-                f"got {reaction_order!r}"
-            )
+        validate_modes(coupling, reaction_order)
         self.reaction_order = reaction_order
         self.net = net
-        # ONE layer identity. Every key a layer reads or writes is "<name>.<suffix>", and
-        # two different parties build those names: this model, from the name a layer is
-        # REGISTERED under, and the layer and its helpers, from the layer's OWN `.name` (a
-        # allocation layer reads "<name>.requests" itself; the building density closure
-        # reads "<thermal.name>.x"). A layer registered under any other name would split
-        # its keys between the two, so the registered name must BE the layer's name.
-        # Layers may therefore also be given as a plain sequence, keyed by their names.
-        if isinstance(layers, Mapping):
-            registered = dict(layers)
-        else:
-            registered = {}
-            for layer in layers:
-                lname = getattr(layer, "name", None)
-                if lname in registered:
-                    raise ValueError(
-                        f"Model: two layers named {lname!r}; layer names are the prefix of "
-                        f"every state and driver key and must be unique"
-                    )
-                registered[lname] = layer
-        for name, layer in registered.items():
-            own = getattr(layer, "name", name)
-            if own != name:
-                raise ValueError(
-                    f"Model: a layer is registered as {name!r} but is named {own!r}; the "
-                    f"model and the layer would then build its keys under different names "
-                    f"({name!r}.x vs {own!r}.x). Register it under its own name, or build "
-                    f"it with name={name!r}"
-                )
-        self.layers = registered
+        registered = register_layers(net, layers)
+        self.layers = registered.layers
         # Set only while `noodl.validation.check_setup` probes a step (read tracking).
         self._probe = None
         self._refs = None
-        self.kirchhoff: dict[str, KirchhoffLayer] = {}
-        self.transport: dict[str, TransportLayer] = {}
-        self.allocation: dict[str, AllocatedFlowLayer] = {}
-        for name, layer in self.layers.items():
-            if isinstance(layer, KirchhoffLayer):
-                self.kirchhoff[name] = layer
-            elif isinstance(layer, TransportLayer):
-                self.transport[name] = layer
-            elif isinstance(layer, AllocatedFlowLayer):
-                self.allocation[name] = layer
-            else:
-                raise TypeError(
-                    f"Model: layer {name!r} is a {type(layer).__name__}, not a "
-                    f"KirchhoffLayer, TransportLayer or AllocatedFlowLayer"
-                )
-            if layer.net is not net:
-                raise ValueError(
-                    f"Model: layer {name!r} is built on a different Network than the model"
-                )
+        self.kirchhoff: dict[str, KirchhoffLayer] = registered.kirchhoff
+        self.transport: dict[str, TransportLayer] = registered.transport
+        self.allocation: dict[str, AllocatedFlowLayer] = registered.allocation
         # Computed here, before the closure_state_keys check below, which consults
-        # `self.flow_layer_of`; both only need `self.kirchhoff`/`self.transport`, already
-        # built above.
-        self.flow_layer_of: dict[str, str | None] = {}
-        self.flow_driver_of: dict[str, str] = {}
-        for tname, tl in self.transport.items():
-            owners = [
-                pn for pn, pl in self.kirchhoff.items()
-                if all(k in pl.kinds for k in tl.flow_kinds)
-            ] + [
-                cn for cn, cl in self.allocation.items()
-                if all(k in cl.kinds for k in tl.flow_kinds)
-            ]
-            # Driver-prescribed flows. Two Kirchhoff layers both
-            # providing a transport layer's kinds is ambiguous and refused here.
-            # ZERO owners is not an error: the flows are then read from the driver
-            # "<layer>.q", which a closure writes -- the street application's whole
-            # architecture (prescribed canyon fluxes, routed at intersections) depends on
-            # it. The driver's PRESENCE cannot be checked here, because drivers arrive per
-            # call; `_kind_flows` does that, and refuses a layer that has both sources.
-            if len(owners) > 1:
-                raise ValueError(
-                    f"Model: transport layer {tname!r} advects on kinds {tl.flow_kinds}, "
-                    f"which {len(owners)} Kirchhoff layers of this model provide "
-                    f"({owners}); at most one may"
-                )
-            self.flow_layer_of[tname] = owners[0] if owners else None
-            self.flow_driver_of[tname] = f"{tname}.q"
+        # `self.flow_layer_of`.
+        self.flow_layer_of: dict[str, str | None]
+        self.flow_driver_of: dict[str, str]
+        self.flow_layer_of, self.flow_driver_of = flow_owners(
+            self.kirchhoff, self.transport, self.allocation)
         self.closures = list(closures)
         # Every closure's declarations are read ONCE, here, by `noodl.contracts.closure_spec`
         # (callability, `integrates`, `state_keys`, the declared inputs/outputs, ...): a
@@ -392,104 +320,29 @@ class Model:
                         f"closure may own a state key"
                     )
                 self.closure_state_keys[key] = closure
-        self.reactions = list(reactions)
-        for lname, reaction in self.reactions:
-            if lname not in self.transport:
-                raise KeyError(
-                    f"Model: reaction targets {lname!r}, not a transport layer of this "
-                    f"model ({sorted(self.transport)})"
-                )
-            if not callable(getattr(reaction, "apply", None)):
-                raise TypeError(
-                    f"Model: reaction for layer {lname!r} is a {type(reaction).__name__}, "
-                    f"not a Reaction; it must provide apply(x, dt, drivers)"
-                )
+        self.reactions = validate_reactions(self.transport, reactions)
         for spec in self._specs:
             check_species_columns(f"Model: closure {spec.label}", spec.species_columns,
                                   self.transport)
         for lname, reaction in self.reactions:
             check_species_columns(f"Model: reaction {reaction!r} for layer {lname!r}",
                                   reaction_species_columns(reaction), self.transport)
-        self.coupling = coupling
-        self.iterate_tol = dict(iterate_tol or {})
-        self.iterate_max = int(iterate_max)
-        # The weight of the newest pass in the transport state fed to the next one (`_iterate`):
-        # 0.5 is Hensen's (1995) mean of the last two passes, 1 plain successive substitution.
-        # It moves no fixed point, only how fast (or whether) the passes reach it.
-        self.iterate_relaxation = float(iterate_relaxation)
-        if not 0.0 < self.iterate_relaxation <= 1.0:
-            raise ValueError(
-                f"Model: iterate_relaxation must lie in (0, 1], got {iterate_relaxation!r}"
-            )
-        # How the fed state of the Kirchhoff layers named in `iterate_tol` is formed from
-        # the passes so far (`_iterate`): None is the relaxation above, "anderson" Anderson
-        # type-II mixing over the last `iterate_memory` passes, falling back to it.
-        if iterate_acceleration not in (None, "anderson"):
-            raise ValueError(
-                f"Model: iterate_acceleration must be None or 'anderson', got "
-                f"{iterate_acceleration!r}"
-            )
-        self.iterate_acceleration = iterate_acceleration
-        if (isinstance(iterate_memory, bool) or not isinstance(iterate_memory, int)
-                or iterate_memory < 1):
-            raise ValueError(
-                f"Model: iterate_memory must be an integer >= 1 (the number of previous "
-                f"passes Anderson mixing combines), got {iterate_memory!r}"
-            )
-        self.iterate_memory = iterate_memory
-        if iterate_on_limit not in ("raise", "accept"):
-            raise ValueError(
-                f"Model: iterate_on_limit must be 'raise' or 'accept', got {iterate_on_limit!r}"
-            )
-        self.iterate_on_limit = iterate_on_limit
-        # The tolerance of the ONE implicit-adjoint GMRES solve at the converged interface
-        # deliberately independent of the primal `iterate_tol`: that independence is
-        # the whole point of differentiating the fixed point instead of the iteration.
-        self.adjoint_rtol = float(adjoint_rtol)
-        if not self.adjoint_rtol > 0.0:
-            raise ValueError(
-                f"Model: adjoint_rtol must be positive, got {adjoint_rtol!r}; it is the "
-                f"relative tolerance of the fixed-point adjoint's GMRES solve"
-            )
-        if coupling == "iterate":
-            if not self.iterate_tol:
-                raise ValueError(
-                    "Model: coupling='iterate' requires iterate_tol={transport or potential "
-                    "layer name: absolute tolerance on that layer's state (`.x`) or "
-                    "potential (`.phi`)}"
-                )
-            unknown = sorted(set(self.iterate_tol) - set(self.transport) - set(self.kirchhoff))
-            if unknown:
-                raise KeyError(
-                    f"Model: iterate_tol names {unknown}, neither transport layers "
-                    f"({sorted(self.transport)}) nor Kirchhoff layers "
-                    f"({sorted(self.kirchhoff)}) of this model"
-                )
-            # Refused HERE rather than left to fail at the first `step`: one pass has no
-            # second pass to compare against, so it can never report convergence -- a budget
-            # below two is a configuration that always raises, and a `iterate_max=0` would
-            # return the input state untouched before doing so. Enforcing it also keeps the
-            # diagnostics one shape: `converged` and `max_change` are always the ones a real
-            # comparison produced, never a degenerate 0-dim placeholder and an empty dict.
-            if self.iterate_max < 2:
-                raise ValueError(
-                    f"Model: coupling='iterate' requires iterate_max >= 2, got "
-                    f"{iterate_max!r}; a single pass has no predecessor to compare against, "
-                    f"so it can never be reported as converged"
-                )
-        # The flows' fixed-point tolerance per Kirchhoff layer named in `iterate_tol`
-        # (absolute, in that layer's flow units): |q returned - q fed| of the certified pass.
-        self.iterate_flow_tol = {k: float(v) for k, v in (iterate_flow_tol or {}).items()}
-        stray = sorted(k for k in self.iterate_flow_tol
-                       if k not in self.kirchhoff or k not in self.iterate_tol)
-        if stray:
-            raise KeyError(
-                f"Model: iterate_flow_tol names {stray}, which are not Kirchhoff layers named "
-                f"in iterate_tol ({sorted(k for k in self.iterate_tol if k in self.kirchhoff)})"
-            )
-        bad = {k: v for k, v in self.iterate_flow_tol.items() if not v > 0.0}
-        if bad:
-            raise ValueError(f"Model: iterate_flow_tol must be positive, got {bad}")
+        options = CouplingOptions.validate(
+            coupling=coupling, iterate_tol=iterate_tol, iterate_max=iterate_max,
+            iterate_relaxation=iterate_relaxation, iterate_acceleration=iterate_acceleration,
+            iterate_memory=iterate_memory, iterate_on_limit=iterate_on_limit,
+            adjoint_rtol=adjoint_rtol, iterate_flow_tol=iterate_flow_tol,
+            kirchhoff=self.kirchhoff, transport=self.transport,
+        )
+        self.coupling = options.coupling
+        self.iterate_tol = options.iterate_tol
+        self.iterate_max = options.iterate_max
+        self.iterate_relaxation = options.iterate_relaxation
+        self.iterate_acceleration = options.iterate_acceleration
+        self.iterate_memory = options.iterate_memory
+        self.iterate_on_limit = options.iterate_on_limit
+        self.adjoint_rtol = options.adjoint_rtol
+        self.iterate_flow_tol = options.iterate_flow_tol
         # A closure that reads a Kirchhoff layer's flows to write something the same pass
         # uses (a flow-dependent filter's transmission) is right only at the coupling's fixed
         # point, where the flows it read are the flows the pass produced: it declares
@@ -499,65 +352,17 @@ class Model:
                 continue
             closure = spec.closure
             flows_of = spec.reads_flows_of
-            if coupling != "iterate" or flows_of not in self.iterate_flow_tol:
+            if coupling != "iterate" or flows_of not in options.iterate_flow_tol:
                 raise ValueError(
                     f"Model: closure {type(closure).__name__} reads the flows of layer "
                     f"{flows_of!r} before the pass solves them, so it needs "
                     f"coupling='iterate' with {flows_of!r} in iterate_tol and "
                     f"iterate_flow_tol (each pass is then fed the previous pass's flows and a "
                     f"step converges on its own); got coupling={coupling!r}, "
-                    f"iterate_flow_tol={self.iterate_flow_tol}"
+                    f"iterate_flow_tol={options.iterate_flow_tol}"
                 )
-        if iterate_acceleration is not None:
-            if coupling != "iterate":
-                raise ValueError(
-                    f"Model: iterate_acceleration={iterate_acceleration!r} needs "
-                    f"coupling='iterate', got coupling={coupling!r}"
-                )
-            if not any(name in self.kirchhoff for name in self.iterate_tol):
-                raise ValueError(
-                    f"Model: iterate_acceleration={iterate_acceleration!r} mixes the potential "
-                    f"of a Kirchhoff layer named in iterate_tol, and iterate_tol names none "
-                    f"({sorted(self.iterate_tol)}; Kirchhoff layers: {sorted(self.kirchhoff)})"
-                )
-            phasor = sorted(k for k in self.iterate_tol
-                            if k in self.kirchhoff and self.kirchhoff[k].phasor)
-            if phasor:
-                raise ValueError(
-                    f"Model: iterate_acceleration={iterate_acceleration!r} cannot mix the "
-                    f"complex potentials of the phasor layer(s) {phasor}; Anderson mixing is "
-                    f"real-valued -- use the relaxation (iterate_acceleration=None)"
-                )
-            unset = sorted(k for k in self.iterate_tol
-                           if k in self.kirchhoff and k not in self.iterate_flow_tol)
-            if unset:
-                raise ValueError(
-                    f"Model: iterate_acceleration={iterate_acceleration!r} needs "
-                    f"iterate_flow_tol for the Kirchhoff layer(s) {unset}: the tolerance on "
-                    f"their flows' fixed-point residual, which the mixing minimises and the "
-                    f"convergence test judges alongside the potential"
-                )
-        self.substeps = {name: 1 for name in self.transport}
-        for name, k in (substeps or {}).items():
-            if name not in self.transport:
-                raise KeyError(
-                    f"Model: substeps names {name!r}, not a transport layer of this model "
-                    f"({sorted(self.transport)})"
-                )
-            try:
-                k_int = int(k)
-            except (TypeError, ValueError) as exc:
-                # Without this, a substeps value that is not a number at all fails as a bare
-                # "invalid literal for int()" naming neither the model nor the layer.
-                raise TypeError(
-                    f"Model: substeps[{name!r}] must be an integer, got {k!r} "
-                    f"({type(k).__name__})"
-                ) from exc
-            if k_int < 1:
-                raise ValueError(
-                    f"Model: substeps[{name!r}] must be >= 1, got {k!r}"
-                )
-            self.substeps[name] = k_int
+        options.check_acceleration(self.kirchhoff)
+        self.substeps = validate_substeps(self.transport, substeps)
 
     # ----------------------------------------------------------------- helpers
     @staticmethod
