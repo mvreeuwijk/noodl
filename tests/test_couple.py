@@ -902,3 +902,54 @@ def test_the_ambient_density_of_a_conversion_follows_a_changed_ambient_temperatu
         b_state, {**b_drivers, "species.x_boundary": 3.0 / b_drivers["rho_amb"].reshape(1, 1)},
         dt=300.0)
     assert not torch.allclose(stale["species.x"], expected["species.x"], rtol=1e-6)
+
+
+def _ramp_circuit():
+    """A 1 V ramp over 1 s across a 1 ohm resistor: the node voltage IS the ramp, 0 at t = 0
+    and `t` volts for t <= 1 s, evaluated at the end of each step."""
+    from noodl.apps.electrical import Ramp
+    from noodl.apps.electrical.analysis import initial_state
+    from noodl.apps.electrical.circuit import Circuit, Resistor, VoltageSource, build_model
+
+    circuit = Circuit([VoltageSource("V1", "a", "0", 1.0, Ramp(1.0)),
+                       Resistor("R1", "a", "0", 1.0)])
+    model, _, drivers = build_model(circuit)
+    return model, initial_state(model, drivers, t=0.0), drivers
+
+
+def test_the_coupled_step_forwards_the_simulation_clock_to_a_time_dependent_law():
+    """`CoupledModel.step(..., t=...)` hands its start time to every model, as `Model.step`
+    takes it: the ramp source is evaluated at the end of the step, the same as uncoupled."""
+    model, state, drivers = _ramp_circuit()
+    alone = model.step(state, drivers, 0.1, t=0.2)["electrical.phi"][1]
+    coupled, c_state, c_drivers = union({"c": (model, state, drivers)}, [])
+    out = coupled.step(c_state, c_drivers, 0.1, t=0.2)["c"]["electrical.phi"][1]
+    assert alone.item() == pytest.approx(0.3, abs=1e-12)
+    assert out.item() == pytest.approx(alone.item(), abs=1e-12)
+
+
+def test_coupled_substeps_advance_the_clock_by_their_own_offsets():
+    """With `substeps={"c": 4}` an outer step of 0.4 s from t = 0.2 runs the model at
+    t = 0.2, 0.3, 0.4, 0.5 over 0.1 s each, so it ends on the ramp at 0.6 V."""
+    model, state, drivers = _ramp_circuit()
+    seen: list[tuple[float, float]] = []
+    real = model.step
+
+    def spy(state, drivers, dt, *, t=None, **kw):
+        seen.append((t, dt))
+        return real(state, drivers, dt, t=t, **kw)
+
+    model.step = spy
+    coupled, c_state, c_drivers = union({"c": (model, state, drivers)}, [], substeps={"c": 4})
+    out = coupled.step(c_state, c_drivers, 0.4, t=0.2)["c"]["electrical.phi"][1]
+    assert out.item() == pytest.approx(0.6, abs=1e-12)
+    assert [dt for _, dt in seen] == pytest.approx([0.1] * 4)
+    assert [t for t, _ in seen] == pytest.approx([0.2, 0.3, 0.4, 0.5])
+
+
+def test_a_coupled_step_without_a_clock_still_refuses_a_time_dependent_law():
+    """No `t`, no evaluation time: the law's own refusal reaches the caller unchanged."""
+    model, state, drivers = _ramp_circuit()
+    coupled, c_state, c_drivers = union({"c": (model, state, drivers)}, [])
+    with pytest.raises(ValueError, match="pass t"):
+        coupled.step(c_state, c_drivers, 0.1)

@@ -473,3 +473,148 @@ def test_the_adjoint_solves_a_batched_interface_per_instance():
     h = 1e-6
     fd = (run(torch.tensor(0.3 + h, dtype=F64)) - run(torch.tensor(0.3 - h, dtype=F64))) / (2 * h)
     assert grad.item() == pytest.approx(fd.item(), rel=1e-6)
+
+
+class _ClockedSource:
+    """An integrating closure on B whose source is the start time of the interval it is
+    asked to integrate over, recording every `(t, dt)` it is handed."""
+
+    integrates = True
+
+    def __init__(self, plain):
+        self.plain = plain
+        self.calls: list[tuple[float, float]] = []
+
+    def __call__(self, state, drivers, ctx):
+        out = dict(self.plain(state, drivers))
+        if ctx is not None and ctx.dt is not None:
+            self.calls.append((ctx.t, ctx.dt))
+            zero = torch.zeros((), dtype=F64)
+            out["b.sources"] = torch.stack([zero, zero + ctx.t])
+        return out
+
+
+@pytest.mark.parametrize("substeps", [1, 3])
+def test_every_pass_of_a_two_way_step_integrates_over_the_same_clocked_interval(substeps):
+    """The outer start time reaches the recipient's sub-steps at their own offsets, and
+    every fixed-point pass re-steps over the SAME interval: the clock never advances with
+    the pass count."""
+    a = compartment("a", scheme="implicit")
+    b_model, b_state, b_drivers = compartment("b", scheme="implicit", circulation=True)
+    clocked = _ClockedSource(b_model.closures[0])
+    b_model = Model(b_model.net, dict(b_model.transport), closures=[clocked])
+    model, state, drivers = union(
+        {"A": a, "B": (b_model, b_state, b_drivers)},
+        [ValueLink("A", "a.x", 0, "B", "b.x_boundary", two_way=True)],
+        substeps={"B": substeps}, iterate_rtol=1e-12, iterate_atol=1e-14, iterate_max=200,
+    )
+    diagnostics: dict = {}
+    with torch.no_grad():
+        model.step(state, drivers, 3.0, t=10.0, diagnostics=diagnostics)
+    sub = 3.0 / substeps
+    one_pass = [(10.0 + i * sub, sub) for i in range(substeps)]
+    assert diagnostics["passes"] >= 2
+    assert len(clocked.calls) == diagnostics["passes"] * substeps
+    assert clocked.calls == pytest.approx(one_pass * diagnostics["passes"])
+
+
+def _counting_union(b, **kwargs):
+    """A (start 0) --two-way--> B, counting B's steps (one per pass, no substeps)."""
+    a = compartment("a", scheme="implicit", initial=0.0)
+    b_model, b_state, b_drivers = b
+    calls: list[int] = []
+    real = b_model.step
+
+    def spy(*args, **kw):
+        calls.append(1)
+        return real(*args, **kw)
+
+    b_model.step = spy
+    model, state, drivers = union(
+        {"A": a, "B": (b_model, b_state, b_drivers)},
+        [ValueLink("A", "a.x", 0, "B", "b.x_boundary", two_way=True)],
+        iterate_rtol=1e-12, iterate_atol=1e-14, iterate_max=200,
+    )
+    diagnostics: dict = {}
+    model.step(state, drivers, 1.0, diagnostics=diagnostics)
+    return calls, diagnostics
+
+
+def test_a_coupled_step_skips_the_confirming_pass_when_nothing_requires_grad():
+    assert torch.is_grad_enabled()
+    b = compartment("b", scheme="implicit", circulation=True, initial=1.0, source=0.3)
+    calls, diagnostics = _counting_union(b)
+    assert diagnostics["adjoint"] is None and diagnostics["passes"] >= 2
+    assert len(calls) == diagnostics["passes"]
+
+
+def test_a_coupled_step_pays_the_confirming_pass_when_a_parameter_is_unused_on_pass_one():
+    """`theta` requires grad but B's pass-1 branch never reads it: one pass at the
+    certified interface finds it, then one more carries the adjoint."""
+    theta = torch.tensor(1.0, dtype=F64, requires_grad=True)
+    calls, diagnostics = _counting_union(_branching_recipient(theta))
+    assert diagnostics["adjoint"] == "implicit"
+    assert len(calls) == diagnostics["passes"] + 2
+
+
+def _branching_recipient(theta):
+    """B (start 1) whose source reads its own coupled boundary value: the constant 1 while
+    `b.x_boundary <= 0.1`, `theta` above."""
+    b_model, b_state, b_drivers = compartment("b", scheme="implicit", circulation=True,
+                                              initial=1.0)
+    plain = b_model.closures[0]
+
+    def closure(state, drivers):
+        zero = torch.zeros((), dtype=F64)
+        boundary = float(drivers["b.x_boundary"].detach().sum())
+        source = 1.0 + zero if boundary <= 0.1 else theta + zero
+        return {**plain(state, drivers), "b.sources": torch.stack([zero, source])}
+
+    b_model.closures[0] = closure
+    return b_model, b_state, b_drivers
+
+
+def _branching_coupled(theta):
+    """A (start 0) --two-way--> B (start 1), B's source reading its own coupled boundary
+    value: the constant 1 while `b.x_boundary <= 0.1`, `theta` above. Pass 1 sees the
+    boundary at A's start, 0, so it takes the constant branch and reads no parameter; the
+    fixed point a = (1 + theta)/3, b = 2 (1 + theta)/3 lies on the parameter branch."""
+    a = compartment("a", scheme="implicit", initial=0.0)
+    b_model, b_state, b_drivers = compartment("b", scheme="implicit", circulation=True,
+                                              initial=1.0)
+    plain = b_model.closures[0]
+
+    def closure(state, drivers):
+        zero = torch.zeros((), dtype=F64)
+        boundary = float(drivers["b.x_boundary"].detach().sum())
+        source = 1.0 + zero if boundary <= 0.1 else theta + zero
+        return {**plain(state, drivers), "b.sources": torch.stack([zero, source])}
+
+    b_model.closures[0] = closure
+    model, state, drivers = union(
+        {"A": a, "B": (b_model, b_state, b_drivers)},
+        [ValueLink("A", "a.x", 0, "B", "b.x_boundary", two_way=True)],
+        iterate_rtol=1e-12, iterate_atol=1e-14, iterate_max=200,
+    )
+    out = model.step(state, drivers, 1.0)
+    return out["A"]["a.x"].sum(), out["B"]["b.x"].sum()
+
+
+def test_gradient_does_not_depend_on_the_branch_the_first_pass_took():
+    """Whether an adjoint is attached is decided at the converged interface, not by the
+    branch a closure happened to take on pass 1."""
+    theta = torch.tensor(1.0, dtype=F64, requires_grad=True)
+    a, b = _branching_coupled(theta)
+    assert a.item() == pytest.approx(2.0 / 3.0, rel=1e-9)
+    assert b.item() == pytest.approx(4.0 / 3.0, rel=1e-9)
+    assert a.requires_grad and b.requires_grad
+    (da,) = torch.autograd.grad(a, (theta,), retain_graph=True)
+    (db,) = torch.autograd.grad(b, (theta,))
+    assert da.item() == pytest.approx(1.0 / 3.0, rel=1e-8)
+    assert db.item() == pytest.approx(2.0 / 3.0, rel=1e-8)
+    h = 1e-6
+    with torch.no_grad():
+        hi = _branching_coupled(torch.tensor(1.0 + h, dtype=F64))
+        lo = _branching_coupled(torch.tensor(1.0 - h, dtype=F64))
+    assert da.item() == pytest.approx(((hi[0] - lo[0]) / (2 * h)).item(), rel=1e-6)
+    assert db.item() == pytest.approx(((hi[1] - lo[1]) / (2 * h)).item(), rel=1e-6)

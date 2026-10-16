@@ -110,6 +110,20 @@ mutates its inputs.
 
 Two-wayness is set **per link** through `ValueLink.two_way`, not by an argument to `union`.
 
+### `CoupledModel.step`
+
+```py
+coupled_model.step(state, drivers, dt, *, t=None, diagnostics=None)  # -> {tag: State}
+```
+
+`t` (s) is the simulation time at the start of the step, exactly as `Model.step` takes it, and
+is forwarded to every model: a time-dependent law (a ramp or pulse source) and an integrating
+closure see the coupled model's clock. A model with `substeps={tag: k}` runs its `i`-th
+sub-step of `dt/k` from `t + i·dt/k`. Every pass of the two-way iteration re-steps the same
+interval `[t, t + dt]` from the step-start state, so the clock never advances with the pass
+count. Without `t`, a model sees no clock, as with `Model.step`, and a time-dependent law
+refuses to evaluate.
+
 ### `ValueLink`
 
 ```python
@@ -261,10 +275,16 @@ pass. Three consequences:
   adjoint is exact whatever the residual, which is why the linear two-model test fixtures return $1/3$ and $2/3$
   to one ulp at `iterate_rtol` $10^{-12}$ and $10^{-3}$ alike;
 - backward **memory is one pass**, not all of them;
-- a forward-only run pays nothing: pass 1 runs on the graph only to learn whether anything
-  differentiable reaches the state at all (a structural question that inspecting the states and
-  drivers cannot answer, because a parameter may be captured inside a model's own closure), and
-  when nothing does, the extra pass is skipped entirely and the pass count is unchanged.
+- whether anything differentiable reaches the state cannot be read off the states and drivers
+  (a parameter may be captured inside a model's own closure), so it is asked by running a pass on
+  the graph and dropping that graph. Pass 1 asks first; when it finds nothing, the question is
+  asked once more at the **certified interface**, because a closure may take a
+  parameter-dependent branch only after the coupled values have moved — the answer that counts
+  is the one at the point whose derivative is returned. That extra pass (not counted in
+  `passes`) is paid only when some tensor requiring grad is reachable at all, from the models
+  (layers, laws, closures and the tensors they hold) or their states and drivers. A forward
+  simulation where nothing requires grad, which is the common case even with PyTorch's default
+  grad mode on, does not pay it.
 
 The **interface** is every link's forward value, one-way links included, because that is what a
 pass reads from the previous pass's output. Only the two-way entries are measured for
