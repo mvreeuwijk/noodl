@@ -478,6 +478,28 @@ class Model:
                     f"model again"))
         return report
 
+    def to(self, device=None, dtype: torch.dtype | None = None) -> Model:
+        """Move the whole model to `device` and the precision of `dtype`, in place; return it.
+
+        Moves, together: the network (its cached operators), every layer's cached index,
+        capacity and law-slice tensors, the laws, node sources, drives and reactions, every
+        closure of a class defined in noodl, a user closure that defines
+        `to(device=, dtype=)`, and the tensors attached to the model by an application
+        builder (`model.junction_idx`, a `notes` dict...). Floating tensors take the
+        precision of `dtype`, complex ones the complex dtype of that precision
+        (`float32 <-> complex64`), integer ones keep their dtype. A closure that is a plain
+        function or a lambda is left as it is: the tensors it closes over do not move (give
+        it a `to` method). State and drivers are the caller's: pass them on the new device
+        and dtype. Refused when the network's topology or attributes changed since the
+        layers were built (rebuild instead). See `docs/concepts/ownership.md`.
+        """
+        from noodl.layers._device import Mover
+
+        for layer in self.layers.values():
+            layer._require_current()
+        Mover(device, dtype).visit(self)
+        return self
+
     # ------------------------------------------------------------------ public
     def initial_capacities(self, state: State, drivers: Drivers) -> dict[str, Tensor]:
         """`{"<layer>.capacity": tensor}` for every transport layer whose closures write that

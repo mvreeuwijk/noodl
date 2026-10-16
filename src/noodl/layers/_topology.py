@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+from noodl.layers._device import Movable, Mover
 
-class TopologyGuard:
+
+class TopologyGuard(Movable):
     """Mixin: record the network a layer was built on and refuse one that has changed.
 
     A layer keeps the edge indices, endpoints, node count and attribute values of
@@ -61,3 +63,21 @@ class TopologyGuard:
                 f"attributes when they were built and do not see the edit. Build the laws, "
                 f"layers and model again."
             )
+
+    def _require_current(self) -> None:
+        """Topology and attributes unchanged since construction."""
+        recorded = getattr(self, "_topology_version", 0)
+        if self.net.topology_version != recorded:
+            self._require_current_topology()
+        self._require_current_attributes()
+
+    def to(self, device=None, dtype=None):
+        """Move this layer, its network, laws, drives and node sources to `device` and the
+        precision of `dtype`, in place; return the layer. Other layers on the same network
+        then refuse to run until they are moved too: move a model with `Model.to`."""
+        self._require_current()
+        Mover(device, dtype).visit(self)
+        return self
+
+    def _move_with(self, mover: Mover) -> None:
+        mover.attributes(self)

@@ -187,5 +187,6 @@ class AffinityFan(ConstitutiveLaw):
         return torch.where(running, on, off)
 
     def linear_init(self, drivers: Mapping[str, Tensor] | None = None) -> tuple[Tensor, Tensor]:
-        zero = torch.zeros(self.src.numel(), dtype=torch.float64)
+        zero = torch.zeros(self.src.numel(), dtype=self.multiplier.dtype,
+                           device=self.multiplier.device)
         return self.flow(zero, drivers), self.dflow(zero, drivers)

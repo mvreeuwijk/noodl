@@ -189,5 +189,6 @@ class CubicSplineFlow(ConstitutiveLaw):
         return self.multiplier.to(dp.dtype) * q
 
     def linear_init(self, drivers: Mapping[str, Tensor] | None = None) -> tuple[Tensor, Tensor]:
-        zero = torch.zeros(self.src.numel(), dtype=F64)
+        zero = torch.zeros(self.src.numel(), dtype=self.multiplier.dtype,
+                           device=self.multiplier.device)
         return self.flow(zero, drivers), self.dflow(zero, drivers)

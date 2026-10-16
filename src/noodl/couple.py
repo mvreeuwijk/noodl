@@ -362,6 +362,18 @@ class CoupledModel:
                 f"is well-defined from the very first pass"
             )
 
+    def to(self, device=None, dtype: torch.dtype | None = None) -> CoupledModel:
+        """Move every model of the union to `device` and the precision of `dtype`, in
+        place, and return the union: `Model.to` on each (one walk, so a part two models
+        share moves once), and the links' own tensors. State and drivers are the caller's."""
+        from noodl.layers._device import Mover
+
+        for model in self.models.values():
+            for layer in model.layers.values():
+                layer._require_current()
+        Mover(device, dtype).visit(self)
+        return self
+
     def _layer(self, tag: str, name: str):
         try:
             return self.models[tag].transport[name]
