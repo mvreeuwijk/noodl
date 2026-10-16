@@ -85,6 +85,14 @@ nav:
       - SWMM (.inp): formats/swmm.md
       - EPANET (.inp): formats/epanet.md
       - MATPOWER (.m): formats/matpower.md
+  - Design notes:
+      - design/index.md
+      - Building physics and electrical: design/building_electrical.md
+      - Elements: design/elements.md
+      - Core orchestration: design/orchestration.md
+      - Sewers: design/sewer.md
+      - Solver selection: design/solvers.md
+      - Water and street air quality: design/water_street.md
   - Development:
       - Extending noodl: development/extending.md
   - API reference: api.md

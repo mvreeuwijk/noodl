@@ -646,7 +646,7 @@ class CoupledModel:
 
     def _iterate(self, start, drivers, dt, diagnostics, *, t=None) -> dict[str, State]:
         """Successive substitution on every two-way link's FORWARD value, damped by
-        `relaxation` (0.5 mirrors `Model._iterate`, `model.py:540-611`), on a RECIPIENT-FIRST
+        `relaxation` (0.5 mirrors `Model._iterate`), on a RECIPIENT-FIRST
         schedule: each pass steps every recipient (`self._recipients`) from `start` first,
         with the pass's relaxed forward values written into its boundary drivers, then applies
         each two-way link's donor transfer -- the recipient's own integrated boundary
