@@ -1,6 +1,7 @@
 """Refusals a KirchhoffLayer owes its caller: a stale topology and unreachable gradients."""
 
 import dataclasses
+import pickle
 
 import pytest
 import torch
@@ -260,3 +261,25 @@ def test_threaded_tensors_are_not_refused():
     assert torch.allclose(s_grad, torch.tensor([-0.5], dtype=F64))
     assert torch.allclose(pb_grad, torch.tensor([1.0], dtype=F64))
 
+
+# ------------------------------------------------------------------ R08: old pickles
+def _as_if_pickled_before_the_guard(layer: KirchhoffLayer) -> KirchhoffLayer:
+    """Round-trip `layer` through pickle with the attributes older versions lacked removed."""
+    del layer.net.__dict__["_version"]
+    del layer.__dict__["_topology_version"]
+    return pickle.loads(pickle.dumps(layer))
+
+
+def test_an_old_pickle_without_topology_versions_still_solves():
+    layer = _as_if_pickled_before_the_guard(_layer(_net()))
+    assert layer.net.topology_version == 0
+    phi, q = layer.solve(torch.ones(1, dtype=F64), differentiable=False)
+    assert torch.allclose(q, torch.zeros(1, dtype=F64))
+
+
+def test_an_old_pickled_network_counts_changes_and_its_layer_refuses_them():
+    layer = _as_if_pickled_before_the_guard(_layer(_net()))
+    layer.net.add_node("c")
+    assert layer.net.topology_version == 1
+    with pytest.raises(RuntimeError, match="topology.*changed"):
+        layer.solve(torch.ones(1, dtype=F64), differentiable=False)
