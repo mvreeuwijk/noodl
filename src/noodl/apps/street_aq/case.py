@@ -739,7 +739,8 @@ def drivers_at(
     )
     # `Street.emission_scale` is applied here, once, and nowhere else: the case's emissions
     # are the inventory, the scaled value is what the model's sources are.
-    for i, (street_id, street) in enumerate(zip(case.street_ids, case.network.streets, strict=True)):
+    streets = zip(case.street_ids, case.network.streets, strict=True)
+    for i, (street_id, street) in enumerate(streets):
         sources[model.net.node_index(street_id)] = (
             torch.as_tensor(emissions_row[i], dtype=F64) * street.emission_scale
         )
