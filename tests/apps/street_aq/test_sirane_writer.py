@@ -344,6 +344,21 @@ def test_a_sweep_writes_one_deck_per_run_and_a_manifest_row_for_each(tmp_path):
     assert row.split(",")[1:6] == ["225", "5", "10", "11", "plume_off"]
 
 
+def test_a_sweep_ignores_emission_scale(tmp_path):
+    import dataclasses
+    case = _synthetic()
+    streets = [dataclasses.replace(st, emission_scale=0.0 if i % 2 else 3.0)
+               for i, st in enumerate(case.network.streets)]
+    case = dataclasses.replace(case, network=dataclasses.replace(case.network, streets=streets))
+    out = write_sweep(tmp_path / "sweep", case, directions_deg=[0], speeds=[5],
+                      sources=["1", "11"])
+    for deck in (out / "decks").iterdir():
+        back = read_case(deck / "Donnees.dat")
+        total = back.emissions[0, :, 0]
+        assert np.count_nonzero(total) == 1
+        assert total.max() == pytest.approx(1e-3, rel=1e-12)
+
+
 def test_a_base_case_sirane_cannot_take_leaves_no_files(tmp_path):
     net = StreetNetwork(streets=[Street("a", "p", "q", 150.0, 20.0, 20.0)],
                         x={"p": 0.0, "q": 100.0}, y={"p": 0.0, "q": 0.0})

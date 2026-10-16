@@ -288,7 +288,10 @@ class _DoorCompartmentBase(_InflowDensities, ConstitutiveLaw):
         """``d(mAB_flow - mBA_flow)/d dpAB[i]`` per compartment (:meth:`port_flows`), by the
         chain rule in the order of operations reverse-mode autograd applies to
         ``port_flows`` (``door._power_law_slope_at``), so that it equals the autograd
-        derivative bit for bit (checked in the tests). ``None`` where that is not assured
+        derivative bit for bit (checked in the tests). At a smoothHeaviside argument exactly on
+        its clamp (``u`` exactly 0 or 1) the slope is 0, the one-sided derivative of the flat
+        side, whatever torch version: torch's own clamp gradient there changed (1 in torch 2.2,
+        0 in current versions). ``None`` where that is not assured
         (grad mode on, or broadcasting beyond ``dp``'s shape): the caller takes autograd."""
         rho_A, rho_B = self._densities(drivers)
         CVal, m, VZerCom, *coeffs = self._law(drivers)

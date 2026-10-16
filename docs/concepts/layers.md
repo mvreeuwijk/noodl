@@ -61,7 +61,13 @@ phi, q = layer.solve(phi_boundary, drivers, sources=sources, differentiable=True
 
 `quantity` and `unit` are metadata only — nothing numerical reads them. They exist so that a
 model composing several Kirchhoff layers over one network can tell a pressure layer from a
-temperature one without matching on names.
+temperature one without matching on names. They are still checked for consistency: every key
+of a layer is a `Field` carrying its `unit` (a transport layer's `unit`, `source_unit`,
+`capacity_unit` and `flow_unit` give the units of its state, sources, capacity and flows), and
+`Model.check()` warns (`unit-mismatch`) when a closure declares a different unit for a key it
+reads (`input_specs`) or writes (`output_units`), and notes (`unit-undeclared`) a field with
+no unit. Units are compared as strings after trivial respelling (`m3` and `m^3`, `1` and `-`);
+nothing is converted. See [The closure contract](../development/extending.md#the-closure-contract).
 
 Useful accessors: `flows(phi, drivers)` evaluates the branch law; `flows_of_kind(q, kinds)`
 extracts one kind's block from the concatenated flow vector; `residual(...)` and `jacobian(...)`
@@ -89,6 +95,14 @@ potential-controlled edge and the unknown on an implicit one, followed by every 
 own residual. The Jacobian is assembled as a sparse, nonsymmetric matrix from each law's local
 blocks (forward-mode derivatives, one per port, two on a phasor layer), so a multi-port law
 couples the edges of its group exactly. `solve` still returns `(phi, q)`, with `q` covering every edge.
+
+**`flows` on an MNA layer.** `flows(phi, drivers)` is a function of the potentials only on a classic
+layer. An implicit law's flow is not: a fan with a prescribed rise has a residual that does not
+contain $q$, and conservation at the nodes fixes its flow. So an MNA layer takes the flows as input,
+`flows(phi, drivers, q)`, with `q` as `solve` returned it (every edge). The implicit edges' columns
+are returned as given and the potential-controlled edges' columns are evaluated from `phi` (steady
+context), differentiably. At `solve`'s own `(phi, q)` the result is `q`. Without `q` it raises
+`TypeError`; a phasor layer has no such accessor.
 
 **Construction checks**, each raising `ValueError` naming the layer and the kind or nodes:
 
@@ -237,6 +251,18 @@ When a closure writes that driver, the step-start state must carry the key `"<la
 the storage at the state's own time, which `Model.initial_capacities(state, drivers)` builds by
 querying the closures. The `"exact"` scheme has no changing-capacity form and raises by name if
 `capacity_prev` differs from `capacity`.
+
+**Dilution.** `dilution=` (per species, `None` by default) adds `dilution * net(q) / capacity`
+to the removal, `net(q)` the signed net inflow of the flow edges into each node. Where the flows
+do not balance because the stored volume changes, `dilution = carrier` is the advective form
+`V dx/dt = sum_in carrier q (x_in - x)` and `dilution = 0` the conservative flux form; the
+capacity is then a rate coefficient at the end of the step. `dilution_mode="withdrawal"` instead
+reads only `max(net(q), 0)`: a FIXED volume whose flow imbalance is a nodal sink or source of
+the carrier. A surplus of inflow is a withdrawal that leaves at the node's own value; a deficit
+is an injection of carrier with no content of its own, which the outflow carries away, and
+whatever content it brings is the caller's `sources`, never a negative removal. The water
+application's quality layer uses this mode. The sink goes through `torch.where`, so at
+`net(q) = 0` its derivative is the withdrawal side's. The default `"signed"` mode is unchanged.
 
 **Storage-free nodes.** `storage_free=[...]` names interior nodes that hold no amount, such as a
 zero-volume air-handler plenum. Their balance is algebraic in every step: what flows in flows out
@@ -471,6 +497,28 @@ Queries (`residuals`, `current_flows`, and the sewer report) call closures with 
 integrating closure evaluates its outputs at the given state without advancing it. A closure declaring `state_keys`
 must also declare `integrates` (True or False) so the model knows whether its carried state changes step to step;
 omitting it is refused by name.
+
+### What a closure may declare
+
+Everything a closure says about itself is an optional attribute, listed in
+`noodl.contracts.CLOSURE_ATTRIBUTES` and read once, at construction, into a `ClosureSpec`
+(`integrates`, `state_keys`, `inputs`, `outputs`, `input_specs`, `key_labels`, `edge_kinds`,
+`requires_coupling`, `reads_flows_of`, `species_columns`). A malformed declaration is refused
+at construction by name:
+
+- `inputs`, `outputs`, `state_keys` and `edge_kinds` must be tuples of names; a bare string
+  (`outputs = "rho"`) is a `TypeError`;
+- `integrates` must be `True` or `False`;
+- a declared output may not be a layer's state key (`"<layer>.phi"`, `.q`, `.x`, `.s`), apart
+  from `"<layer>.q"` of a transport layer no Kirchhoff layer owns;
+- `species_columns = {layer: {species: column}}`, for a closure or reaction that addresses
+  species by column index, must agree with the layer's `species_names` and `n_species`.
+
+`model.refs.ownership()` lists, for every key, who writes it and who reads it (layers,
+closures by their declarations, the caller); `model.check` reports closures that overwrite
+each other's declared outputs (`overwritten-output`), declare nothing (`undeclared-closure`),
+return keys they did not declare when probed (`declared-vs-probed`), or declare a unit that
+differs from the field's (`unit-mismatch`, with `unit-undeclared` for a field with no unit).
 
 ### The two couplings, and the trap in the default
 

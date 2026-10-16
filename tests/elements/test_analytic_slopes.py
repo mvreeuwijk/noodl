@@ -12,6 +12,7 @@ from __future__ import annotations
 import pytest
 import torch
 
+from noodl.elements import door_discretized
 from noodl.elements.base import ConstitutiveLaw, memo
 from noodl.elements.door import MBLDoorOpen
 from noodl.elements.door_discretized import (
@@ -74,11 +75,29 @@ def test_discretised_door_stream_slope_equals_autograd_bit_for_bit(operable, y):
         assert torch.equal(exact, 0.5 * grad)
 
 
+def _heaviside_zero_slope_at_bounds(x: torch.Tensor, delta: torch.Tensor) -> torch.Tensor:
+    """`door_discretized._smooth_heaviside`, the same value bit for bit, with its slope at the
+    clamp's bounds (`u` exactly 0 or 1) fixed at 0 by `torch.where`, whose gradient is the
+    same in every torch version. `torch.clamp`'s is not: 0 at a bound in current torch, 1 (the
+    inside branch) in torch 2.2."""
+    dx = 0.5 * x / delta
+    xpow2 = dx * dx
+    u = 0.5 + dx * (1.875 + xpow2 * (-5 + 6 * xpow2))
+    return torch.where(u <= 0.0, torch.zeros_like(u), torch.where(u >= 1.0, torch.ones_like(u), u))
+
+
 @pytest.mark.parametrize("operable", [False, True])
-def test_stream_slope_at_the_smooth_heaviside_band_edges(operable):
-    """Compartments whose `smoothHeaviside` argument sits on its clamp (u exactly 0 or 1:
-    autograd's clamp gradient is 0 there), found by scanning `dp` finely
-    across the band edges `dV = +-VZerCom_flow`, with the two sides at different densities."""
+def test_stream_slope_at_the_smooth_heaviside_band_edges(operable, monkeypatch):
+    """Compartments whose `smoothHeaviside` argument sits on its clamp (u exactly 0 or 1),
+    found by scanning `dp` finely across the band edges `dV = +-VZerCom_flow`, with the two
+    sides at different densities.
+
+    At the bounds `stream_slope` takes the clamp's slope as 0: the one-sided slope of the
+    clamped (flat) side, and the exact derivative of the polynomial at the band edge itself,
+    `1.875 (1 - 4 dx^2)^2 = 0` at `dx = +-1/2`. Autograd's `torch.clamp` agrees in current
+    torch and passes the inside slope (~1e-10 there) in torch 2.2, so the slope is compared
+    bit for bit with autograd off the bounds, and everywhere with autograd of the same law
+    whose clamp has that convention by construction (`_heaviside_zero_slope_at_bounds`)."""
     if operable:
         comp, _ = mbl_discretized_operable_door(src=0, tgt=1, medium=MED, y_key="y",
                                                 LClo=0.01)
@@ -87,11 +106,18 @@ def test_stream_slope_at_the_smooth_heaviside_band_edges(operable):
     drivers = {"T": torch.tensor([293.15, 297.0], dtype=F64),
                "p_abs": torch.tensor([101325.0, 101325.0], dtype=F64),
                "X_w": torch.full((2,), 0.01, dtype=F64), "y": torch.tensor(1.0, dtype=F64)}
-    VZ = float(comp._law(drivers)[2].reshape(-1)[0])
+    VZerCom = comp._law(drivers)[2]
+    VZ = float(VZerCom.reshape(-1)[0])
     n = comp.src.numel()
 
     def dV_at(dp: float) -> float:
         return float(comp._volume_flow(torch.full((n,), dp, dtype=F64), drivers)[0][0])
+
+    def autograd_slope(dpi: torch.Tensor) -> torch.Tensor:
+        x = dpi.clone().requires_grad_(True)
+        mAB, mBA = comp.port_flows(x, drivers)
+        (grad,) = torch.autograd.grad((mAB - mBA).sum(), x)
+        return grad
 
     lo, hi = 0.0, 10.0
     for _ in range(200):  # dV = VZerCom_flow (u = 1) by bisection; dV is increasing in dp
@@ -101,16 +127,22 @@ def test_stream_slope_at_the_smooth_heaviside_band_edges(operable):
     steps = torch.linspace(-3e-5, 3e-5, 8001, dtype=F64)  # 1 - u ~ (dx - 1/2)^3: u = 1 over ~1e-5
     hits = 0
     for sign in (1.0, -1.0):
-        dpi = (sign * dp_edge * (1.0 + steps)).unsqueeze(-1).expand(-1, comp.src.numel())
+        dpi = (sign * dp_edge * (1.0 + steps)).unsqueeze(-1).expand(-1, n).contiguous()
         with torch.no_grad():
-            exact = comp.stream_slope(dpi.contiguous(), drivers)
-        x = dpi.contiguous().clone().requires_grad_(True)
-        mAB, mBA = comp.port_flows(x, drivers)
-        (grad,) = torch.autograd.grad((mAB - mBA).sum(), x)
-        assert torch.equal(exact, grad)
-        dV = comp._volume_flow(dpi, drivers)[0]
-        u = 0.5 + 0.5 * dV / VZ * (1.875 + (0.5 * dV / VZ) ** 2 * (-5 + 6 * (0.5 * dV / VZ) ** 2))
-        hits += int(((u == 0.0) | (u == 1.0)).sum())
+            exact = comp.stream_slope(dpi, drivers)
+            dx = 0.5 * comp._volume_flow(dpi, drivers)[0] / VZerCom  # u as `stream_slope` has it
+            xpow2 = dx * dx
+            u = 0.5 + dx * (1.875 + xpow2 * (-5 + 6 * xpow2))
+        on_bound = (u == 0.0) | (u == 1.0)
+        grad = autograd_slope(dpi)
+        assert torch.equal(exact[~on_bound], grad[~on_bound])
+        # On the bounds the two conventions differ by rounding only.
+        torch.testing.assert_close(exact[on_bound], grad[on_bound], rtol=1e-10, atol=0.0)
+        with monkeypatch.context() as mp:
+            mp.setattr(door_discretized, "_smooth_heaviside", _heaviside_zero_slope_at_bounds)
+            reference = autograd_slope(dpi)
+        assert torch.equal(exact, reference)
+        hits += int(on_bound.sum())
     assert hits > 0  # the scan reaches the clamp's bounds
 
 

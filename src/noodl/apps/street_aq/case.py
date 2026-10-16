@@ -7,6 +7,7 @@ vocabulary and the `StreetNetwork` they describe.
 """
 from __future__ import annotations
 
+import dataclasses
 import re
 import tempfile
 from collections.abc import Mapping, Sequence
@@ -17,6 +18,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
+from noodl import layout
 from noodl.apps.street_aq import _munich_files, _sirane_files
 from noodl.apps.street_aq.network import StreetNetwork, street_index
 from noodl.apps.street_aq.routing import StreetFlows
@@ -459,7 +461,7 @@ def write_case(
         _sirane_files.write_sirane_case(
             out_dir, network=case.network, times=case.times, start=case.start,
             junction_ids=case.junction_ids, species=case.species, meteo=case.meteo,
-            emissions=case.emissions, background=case.background,
+            emissions=_scaled_emissions(case), background=case.background,
             native=case.native if case.source == "sirane" else None,
             options=dict(options or {}),
         )
@@ -468,9 +470,20 @@ def write_case(
         out_dir, network=case.network, times=case.times, start=case.start,
         junction_ids=case.junction_ids,
         species=case.species, meteo=case.meteo, meteo_junction=case.meteo_junction,
-        emissions=case.emissions, background=case.background,
+        emissions=_scaled_emissions(case), background=case.background,
         native=case.native if case.source == "munich" else None, options=options,
     )
+
+
+def _scaled_emissions(case: StreetCase) -> np.ndarray:
+    """`case.emissions` times each street's `Street.emission_scale`, looked up by street
+    name (`case.street_ids`), as the model sees them: what a deck must contain for a noodl
+    run and the deck to agree."""
+    scale_of = {s.name: s.emission_scale for s in case.network.streets}
+    scale = np.array([scale_of[name] for name in case.street_ids], dtype=np.float64)
+    if np.all(scale == 1.0):
+        return case.emissions
+    return case.emissions * scale[None, :, None]
 
 
 _SWEEP_START = datetime(2014, 1, 7)
@@ -502,6 +515,8 @@ def write_sweep(
     `speed` (m/s at the meteo site's height, a multiple of 0.1), the
     temperature of `base_case`'s first hour when it has one, zero background, and a unit
     emission (1 g/s, i.e. 1e-3 kg/s) of `species` on the source street only.
+    `Street.emission_scale` does not apply to sweeps: the decks measure the transport
+    response to a unit emission, so every street is written with a unit scale.
     `sources="unit_impulse"` takes every street in turn; a sequence of street ids
     (`base_case.street_ids`) takes those. With `chapman=0` (default) the case has
     `species` alone -- a passive tracer written as that SIRANE species, chemistry off; with
@@ -625,6 +640,9 @@ def write_sweep(
     s_index = case_species.index(species)
     zeros = np.zeros((2, n_streets, len(case_species)), dtype=np.float64)
 
+    unit_network = dataclasses.replace(base_case.network, streets=[
+        dataclasses.replace(st, emission_scale=1.0) for st in base_case.network.streets])
+
     def write_run(root: Path, run: dict) -> None:
         emissions = zeros.copy()
         emissions[:, run["source_index"], s_index] = 1e-3
@@ -632,7 +650,7 @@ def write_sweep(
                  for key, value in dict(meteo_base, wind_dir_from_deg=run["direction_deg"],
                                         wind_speed=run["speed"]).items()}
         case = StreetCase(
-            source="sirane" if native else "synthetic", network=base_case.network,
+            source="sirane" if native else "synthetic", network=unit_network,
             times=[0.0, 3600.0], street_ids=street_ids,
             junction_ids=list(base_case.junction_ids), species=case_species, meteo=meteo,
             meteo_junction={}, emissions=emissions, background=zeros.copy(),
@@ -669,8 +687,12 @@ def drivers_at(
     is per-street or a single network-wide mean.
 
     The model's street order (`street_index(model)`) must be `case.street_ids`: the
-    per-street arrays are placed by position. `species` (default `case.species`) selects
-    and orders the species.
+    per-street arrays are placed by position. The species are matched BY NAME: `species`
+    defaults to the model's own `species_names` (so a case ordered `NO, NO2` drives a model
+    ordered `NO2, NO` correctly, and a case with more species drives a subset model); an
+    explicit `species` must equal the model's species in the model's order, else it raises.
+    The sources are the case's unscaled emissions: each street's `Street.emission_scale`
+    is applied inside the model (`build_model`), exactly once, not here.
 
     `u_star` is supplied whenever `case` has it; `U_ref` is `case`'s own wind speed (not
     derived through noodl's log law -- `u_star`, when present, is what actually sets the
@@ -700,11 +722,30 @@ def drivers_at(
             f"{list(_REQUIRED_METEO)}"
         )
 
-    species_names = list(species) if species is not None else list(case.species)
+    model_species = layer.species_names
+    if species is None:
+        species_names = list(model_species) if model_species is not None else list(case.species)
+    else:
+        species_names = list(species)
     unknown = [s for s in species_names if s not in case.species]
     if unknown:
         raise ValueError(
             f"drivers_at: species {unknown} are not in the case's species {case.species}"
+        )
+    if model_species is not None:
+        try:
+            layout.species_columns(model_species, species_names, where="drivers_at",
+                                   order="exact")
+        except ValueError:
+            raise ValueError(
+                f"drivers_at: species {species_names} are not the model's species "
+                f"{list(model_species)} in the model's order; the columns of the sources and "
+                f"background are placed by that order (omit `species` to follow the model)"
+            ) from None
+    if len(species_names) != layer.n_species:
+        raise ValueError(
+            f"drivers_at: {len(species_names)} species {species_names} for a model with "
+            f"{layer.n_species}"
         )
     s_idx = [case.species.index(s) for s in species_names]
     n_species = len(species_names)
@@ -719,6 +760,8 @@ def drivers_at(
     sources = torch.zeros(
         (model.net.n,) if n_species == 1 else (model.net.n, n_species), dtype=F64
     )
+    # The driver is the unscaled inventory: `Street.emission_scale` is applied inside the
+    # model's transport layer (see `build_model`), once, so it is NOT applied here.
     for i, street_id in enumerate(case.street_ids):
         sources[model.net.node_index(street_id)] = torch.as_tensor(emissions_row[i], dtype=F64)
 

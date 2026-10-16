@@ -12,6 +12,11 @@ units are read by `apps/water/inp.py`.
 `[COORDINATES]`, `[VERTICES]`, `[LABELS]`, `[BACKDROP]`, `[TAGS]`, `[ENERGY]`, `[END]`, and the
 quality sections (a quality run is configured through `build_model(quality=...)` instead).
 
+**Aggregated / interpreted:** several `[DEMANDS]` categories of one junction add up (they replace
+the `[JUNCTIONS]` demand); categories with different patterns are refused, since one demand pattern
+per junction is modelled. `[TIMES]` values take an optional unit (any token beginning SEC, MIN, HOU or DAY,
+case-insensitive, as EPANET reads it: MINS, SECS, HOU; a bare number is hours, `HH:MM[:SS]` is a clock time); other units are refused.
+
 **Refused by name:** `[RULES]`; `[EMITTERS]`; `[STATUS]` with content; time-based controls (only
 `LINK <id> OPEN|CLOSED IF NODE <tank> BELOW|ABOVE <level>` is read); PRV and PSV valves;
 a constant-**power** pump; a pump with a speed pattern; a tank with a volume curve; a `HEADLOSS`

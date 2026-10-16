@@ -47,7 +47,7 @@ from noodl.cycles import particular_flow
 from noodl.solvers.scalar import solve_monotone
 
 if TYPE_CHECKING:
-    from noodl.model import StepContext
+    from noodl.contracts import StepContext
 
 Tensor = torch.Tensor
 F64 = torch.float64
@@ -155,8 +155,7 @@ class SewerHydraulics:
         )
         # Multi-outfall forests. `_tree_flow` must subtract each COMPONENT's own
         # lateral total at its OWN outfall, not the whole network's total at every outfall
-        # (which silently gave the wrong per-component balance, and an unnamed
-        # `index_add_` shape error, for a forest of more than one component). Each
+        # (otherwise the per-component balance is wrong for a forest). Each
         # manhole's own outfall is found ONCE here by walking `outgoing` forward until a
         # name that is not a manhole -- a tree guarantees this terminates, and
         # `SewerNetwork.validate()` has already refused a cycle -- then mapped to that
@@ -423,7 +422,7 @@ class SewerHydraulics:
         would otherwise raise an unnamed batch-index error. Under constant inflow the fixed
         point IS the quasi-steady solution (checked in
         `tests/apps/sewer/test_hydraulics.py::test_storage_reaches_the_quasi_steady_fixed_point`;
-        measured 5.7e-15 relative after 200 steps of 60 s).
+        agreement figure: docs/design/sewer.md#storage-quasi-steady-agreement).
 
         Per level, this uses ONLY the flat `level_idx`/`level_src`/`level_tgt` index tensors
         `__init__` precomputed: one gather (`index_select`) plus one scatter (`index_add`)

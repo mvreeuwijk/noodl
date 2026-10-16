@@ -105,6 +105,24 @@ def driver_grid(experiment: Mapping, events: Events, substeps: int = 1) -> Tenso
     return torch.cat([inner, base[-1:]])
 
 
+def _nearest(grid: Tensor, times: Tensor) -> tuple[Tensor, Tensor]:
+    """`(index, distance)` of the grid entry nearest each of `times`: a binary search in the
+    sorted grid and a comparison of the two entries around the insertion point, O(n log m)
+    time and O(n) memory where all pairwise differences would be O(n m) (86,401 x 86,401
+    float64 is about 60 GB). Ties go to the lower index (of equal grid entries, the first),
+    as `argmin` over the pairwise differences would."""
+    sorted_grid, order = torch.sort(grid, stable=True)
+    m = grid.numel()
+    pos = torch.searchsorted(sorted_grid, times.contiguous())
+    hi = pos.clamp(max=m - 1)
+    lo = (pos - 1).clamp(min=0)
+    lo = torch.searchsorted(sorted_grid, sorted_grid[lo])          # first of equal entries
+    d_hi = (times - sorted_grid[hi]).abs()
+    d_lo = (times - sorted_grid[lo]).abs()
+    pick_lo = (d_lo < d_hi) | ((d_lo == d_hi) & (order[lo] < order[hi]))
+    return order[torch.where(pick_lo, lo, hi)], torch.where(pick_lo, d_lo, d_hi)
+
+
 def grid_events(grid: Tensor, events: Events) -> tuple[Tensor, Tensor]:
     """`(jumps, kinks)`: the times of `grid` (a `driver_grid`) at which `events` jumps, and
     those at which it only kinks, each moved to the grid time it was merged into. Breaks
@@ -116,8 +134,7 @@ def grid_events(grid: Tensor, events: Events) -> tuple[Tensor, Tensor]:
         if not ts:
             return torch.zeros(0, dtype=F64)
         t = torch.tensor(sorted(ts), dtype=F64)
-        k = (t.unsqueeze(1) - grid.unsqueeze(0)).abs().argmin(dim=1)
-        return torch.unique(grid[k])
+        return torch.unique(grid[_nearest(grid, t)[0]])
 
     j, k = on_grid(jumps), on_grid(kinks)
     return j, k[~torch.isin(k, j)]
@@ -149,9 +166,8 @@ def grid_index(grid: Tensor, times: Tensor, *, caller: str) -> list[int]:
     """The position of every entry of `times` on the driver grid; raises `ValueError`, its
     message starting with `caller`, for a time off the grid or a non-increasing one."""
     tol = 1e-9 * max(1.0, float(grid.abs().max()))
-    diff = (times.unsqueeze(1) - grid.unsqueeze(0)).abs()
-    idx = diff.argmin(dim=1)
-    off = diff.gather(1, idx.unsqueeze(1)).squeeze(1) > tol
+    idx, dist = _nearest(grid, times)
+    off = dist > tol
     if bool(off.any()):
         k = int(torch.nonzero(off)[0])
         raise ValueError(

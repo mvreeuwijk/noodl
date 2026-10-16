@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 
 import torch
 
+from noodl import layout
 from noodl.apps.sewer.air import (
     F_AIR_DEFAULT,
     F_I_DEFAULT,
@@ -35,6 +36,7 @@ from noodl.apps.sewer.quality import H2STransfer, LateralLoads, SulfideGeneratio
 from noodl.apps.sewer.runoff import Hydrology, RunoffInflows, evaporation_can_be_positive
 from noodl.apps.sewer.storage import validate_storage_curve
 from noodl.apps.sewer.xsect_spec import UNMODELLED_KINDS, Xsect
+from noodl.contracts import closure_spec
 from noodl.layers.transport import TransportLayer, active_interior
 from noodl.model import Model
 from noodl.refs import initial_drivers as refs_initial_drivers
@@ -1046,7 +1048,16 @@ def build_model(
         )
         drivers["air.phi_boundary"] = torch.zeros(1, dtype=F64)
 
+    sulfide_col = None
     if quality:
+        if not species or len(set(species)) != len(species):
+            raise ValueError(f"build_model: species must be distinct names, got {species!r}")
+        if "sulfide" in species and "bod" not in species:
+            raise ValueError(
+                f"build_model: species 'sulfide' needs 'bod' (Pomeroy-Parkhurst generation "
+                f"reads the BOD), got {species!r}")
+        sulfide_col = (layout.species_columns(species, ["sulfide"], where="build_model")[0]
+                       if "sulfide" in species else None)
         water_cap = torch.ones(len(net.manholes), dtype=F64)
         layers["water_quality"] = TransportLayer(
             graph, "water_quality", capacity=water_cap, flow_kind="pipe",
@@ -1068,19 +1079,15 @@ def build_model(
         drivers["water_quality.x_boundary"] = torch.zeros(
             len(net.outfalls), len(species), dtype=F64
         )
-        # The lateral inflow-concentration loads (`bod_in`/`sulfide_in`) are read by
-        # `LateralLoads`, which is registered
+        # The lateral inflow-concentration loads (`<species>_in`, one driver per species, as
+        # in the dynamic-wave builder) are read by `LateralLoads`, which is registered
         # whenever quality is built at all (with or without `air`), and BEFORE `H2STransfer`
         # below (which adds its own transfer term on top rather than overwriting).
-        species_drivers = {"bod": "bod_in", "sulfide": "sulfide_in"}
-        columns = {
-            i: species_drivers[name] for i, name in enumerate(species)
-            if name in species_drivers
-        }
+        columns = {i: f"{name}_in" for i, name in enumerate(species)}
         closures.append(
             LateralLoads(graph.n, columns=columns, n_species=len(species))
         )
-        if air:
+        if air and sulfide_col is not None:
             # `active_interior` calls `Network.endpoints` on every kind named, which raises
             # if the network carries no edge of that kind at all -- not merely an empty
             # interior. `fan` edges exist only when `fans` is non-empty, so the kind tuple
@@ -1114,14 +1121,22 @@ def build_model(
                     f"reads 'air_quality.x' as a per-manhole array and assumes they agree"
                 )
             drivers["air_quality.x_boundary"] = torch.zeros(len(air_boundary), dtype=F64)
-            closures.append(H2STransfer(graph.n, manhole_idx, out_pipe=out_pipe))
+            closures.append(H2STransfer(graph.n, manhole_idx, sulfide=sulfide_col,
+                                        out_pipe=out_pipe))
 
+    # Chemistry is attached by species NAME, never by position: "bod" decays and, with
+    # "sulfide" also present, generates sulfide; any other name is a passive tracer. A
+    # selection without "bod" has no reaction (sulfide alone is refused above).
     reactions = (
         [(
             "water_quality",
-            SulfideGeneration(out_pipe=out_pipe, manhole_idx=manhole_idx, n_nodes=graph.n),
+            SulfideGeneration(
+                bod=layout.species_columns(species, ["bod"], where="build_model")[0],
+                sulfide=sulfide_col, out_pipe=out_pipe,
+                manhole_idx=manhole_idx, n_nodes=graph.n, n_species=len(species),
+            ),
         )]
-        if quality else []
+        if quality and "bod" in species else []
     )
     # `reaction_order="before_transport"`: SWMM's `qualrout.c::findLinkQual` reacts a
     # conduit's step-start concentration (`getReactedQual`) and then mixes it with the
@@ -1133,7 +1148,7 @@ def build_model(
         graph, layers, closures=closures, reactions=reactions, coupling=coupling,
         reaction_order="before_transport",
         iterate_tol=(
-            {"water_quality": 1e-12, "air_quality": 1e-12}
+            {name: 1e-12 for name in ("water_quality", "air_quality") if name in layers}
             if coupling == "iterate" and quality
             else None
         ),
@@ -1160,6 +1175,11 @@ def build_model(
             "sewer.q_slope": slope_per_manhole,
         }
     )
+    if quality:
+        # every species' lateral concentration is a driver (default 0), not only BOD's and
+        # sulfide's: a passive tracer's `<name>_in` must be read, not silently dropped
+        for name in species:
+            drivers.setdefault(f"{name}_in", torch.zeros(graph.n, dtype=F64))
     state.update(initial_state(model, drivers))
     model.out_pipe = out_pipe
     model.manhole_idx = manhole_idx
@@ -1181,6 +1201,11 @@ def build_model(
                               unit="m/m", over=manhole_names,
                               ordering="manhole order"),
     }
+    if quality:
+        for name in species:
+            specs.setdefault(f"{name}_in", dict(
+                description=f"{name} concentration of the lateral inflow", unit="kg/m3",
+                over="nodes"))
     model.input_specs = {k: v for k, v in specs.items() if k in drivers}
     model.driver_template = dict(drivers)
     model.inflow_schedule = net.inflows
@@ -1232,7 +1257,7 @@ def initial_state(
         return state_from(model, values, base=state) if values else state
     state: State = {}
     for closure in model.closures:
-        if "sewer.H" in getattr(closure, "state_keys", ()):
+        if "sewer.H" in closure_spec(closure, index=0, owner="initial_state").state_keys:
             state["sewer.H"] = torch.zeros(len(closure.manhole_names), dtype=F64)
     for name, layer in model.kirchhoff.items():
         if layer.quantity != "pressure":

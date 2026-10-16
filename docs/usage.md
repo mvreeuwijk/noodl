@@ -97,6 +97,11 @@ print({room: round(float(value), 2) for room, value in T.items()})
 {'A': 304.13, 'B': 300.93}
 ```
 
+Build the network completely before constructing layers or models over it. A layer keeps the
+edge indices and node count of construction time, so adding a node or edge afterwards makes it
+raise `RuntimeError` (the network's `topology_version` no longer matches) instead of silently
+solving the old graph; construct the layers and model again.
+
 ## What every model is made of
 
 - **A network.** Nodes (rooms, streets, manholes, junctions, stores) and directed edges,

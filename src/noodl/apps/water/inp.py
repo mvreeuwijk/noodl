@@ -117,6 +117,52 @@ def _time(text: str, path, line) -> float:
         ) from exc
 
 
+# EPANET (input3.c `hour`, `match`) takes a unit token whose FIRST characters are SEC, MIN, HOU
+# or DAY, case-insensitively: MINS, SECS, HOUR, HOURS, HOU and DAYSX all match.
+_TIME_UNITS = (("SEC", 1.0), ("MIN", 60.0), ("HOU", 3600.0), ("DAY", 86400.0))
+
+
+def _time_unit_scale(token: str) -> float | None:
+    """Seconds per unit for `token`, by EPANET's leading-characters rule, else None."""
+    upper = token.upper()
+    for prefix, scale in _TIME_UNITS:
+        if upper.startswith(prefix):
+            return scale
+    return None
+
+
+def _time_with_unit(fields, index: int, path, line) -> float:
+    """A `[TIMES]` value `fields[index]` with its optional unit token `fields[index + 1]`.
+
+    A bare number without a unit is HOURS (Appendix C.2.24); a unit token starting SEC, MIN,
+    HOU or DAY (EPANET's rule, any case: MINS, SECS, HOU) scales it. A clock time
+    (`HH:MM[:SS]`) carries no unit. Any other trailing
+    token is refused rather than read as a different duration.
+    """
+    if index >= len(fields):
+        raise ValueError(f"{path}: line {line.number}: [TIMES] entry has no value")
+    value, extra = fields[index], list(fields[index + 1:])
+    if not extra:
+        return _time(value, path, line)
+    if len(extra) > 1 or ":" in value:
+        raise ValueError(
+            f"{path}: line {line.number}: cannot read {' '.join(fields[index:])!r} as a "
+            f"time: expected HH:MM[:SS] or a number with an optional unit"
+        )
+    scale = _time_unit_scale(extra[0])
+    if scale is None:
+        raise ValueError(
+            f"{path}: line {line.number}: unknown time unit {extra[0]!r}; use SECONDS, "
+            f"MINUTES, HOURS or DAYS"
+        )
+    try:
+        return float(value) * scale
+    except ValueError as exc:
+        raise ValueError(
+            f"{path}: line {line.number}: {value!r} is not a duration"
+        ) from exc
+
+
 def read_epanet_inp(path) -> WaterNetwork:
     """Read the documented subset of an EPANET 2.2 `.inp` into a `WaterNetwork`, in SI."""
     path = Path(path)
@@ -237,14 +283,26 @@ def read_epanet_inp(path) -> WaterNetwork:
         )
     # `[DEMANDS]` OVERRIDES a junction's single `[JUNCTIONS]` demand (Appendix C.2.6:
     # "supplemental demands ... override the demand given in [JUNCTIONS]").
+    # Several categories of one junction add up; the model carries one demand and one pattern
+    # per junction, so categories whose patterns differ are refused rather than merged.
     overrides: dict[str, tuple[float, str | None]] = {}
     for line in sections.get("DEMANDS", []):
         require_fields(line, 2, "a demand", path)
         pattern = line.fields[2] if len(line.fields) > 2 else None
-        overrides[line.fields[0]] = (
-            as_float(line, 1, "the demand", path) * flow * demand_multiplier,
-            pattern,
-        )
+        value = as_float(line, 1, "the demand", path) * flow * demand_multiplier
+        name = line.fields[0]
+        if name in overrides:
+            total, first = overrides[name]
+            if pattern != first:
+                raise ValueError(
+                    f"{path}: line {line.number}: junction {name!r} has [DEMANDS] "
+                    f"categories with different patterns ({first!r} and {pattern!r}); "
+                    f"one demand pattern per junction is modelled, so they cannot be "
+                    f"aggregated"
+                )
+            overrides[name] = (total + value, first)
+        else:
+            overrides[name] = (value, pattern)
     known = {j.name for j in junctions}
     unknown = sorted(set(overrides) - known)
     if unknown:
@@ -410,13 +468,13 @@ def read_epanet_inp(path) -> WaterNetwork:
     for line in sections.get("TIMES", []):
         key = " ".join(f.upper() for f in line.fields[:2])
         if key.startswith("DURATION"):
-            duration = _time(line.fields[1], path, line)
+            duration = _time_with_unit(line.fields, 1, path, line)
         elif key == "HYDRAULIC TIMESTEP":
-            hydraulic = _time(line.fields[2], path, line)
+            hydraulic = _time_with_unit(line.fields, 2, path, line)
         elif key == "PATTERN TIMESTEP":
-            pattern_step = _time(line.fields[2], path, line)
+            pattern_step = _time_with_unit(line.fields, 2, path, line)
         elif key == "REPORT TIMESTEP":
-            report_step = _time(line.fields[2], path, line)
+            report_step = _time_with_unit(line.fields, 2, path, line)
 
     network = WaterNetwork(
         junctions=tuple(junctions),

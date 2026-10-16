@@ -1206,3 +1206,12 @@ def test_occupants_need_a_simulated_species(tmp_path):
     p.species = []
     with pytest.raises(ValueError, match=r"occupants.*species"):
         simulate_project(p)
+
+
+def test_scatter_keeps_the_floating_dtype_of_the_driver_it_writes_into():
+    """A model moved to float32 by `Model.to` keeps float32 drivers through the controls."""
+    base = torch.zeros(3, dtype=torch.float32)
+    out = scatter(base, (1,), torch.tensor([2.0], dtype=F64))
+    assert out.dtype == torch.float32 and out.tolist() == [0.0, 2.0, 0.0]
+    assert scatter(base, None, torch.tensor(1.0, dtype=F64)).dtype == torch.float32
+    assert scatter(None, None, torch.tensor(1.0, dtype=torch.float32)).dtype == F64

@@ -51,7 +51,7 @@ from noodl.apps.building_physics.controls import (
     node_pressure,
     node_temperature,
 )
-from noodl.model import StepContext
+from noodl.contracts import StepContext
 
 F64 = torch.float64
 STEP = StepContext(dt=300.0, t=0.0)

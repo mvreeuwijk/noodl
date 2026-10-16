@@ -58,7 +58,8 @@ from noodl.apps.building_physics.prj import (
     _pressure_coupling,
 )
 from noodl.apps.building_physics.schedules import Calendar
-from noodl.model import Drivers, Model, State, StepContext
+from noodl.contracts import StepContext
+from noodl.model import Drivers, Model, State
 from noodl.solvers import ConvergenceError
 
 Tensor = torch.Tensor

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import sys
+import types
 import warnings
 
 import pytest
@@ -13,7 +15,7 @@ from noodl.elements.base import ConstitutiveLaw
 from noodl.layers.kirchhoff import KirchhoffLayer
 from noodl.layers.reaction import FirstOrderDecay
 from noodl.layers.transport import TransportLayer
-from noodl.model import Model, Ports
+from noodl.model import Model, Ports, StepContext
 from noodl.nodesources import NodeSource
 from noodl.topology import Network
 
@@ -1313,16 +1315,19 @@ def test_iterate_pays_for_the_adjoint_pass_only_when_a_gradient_is_wanted():
         return real(*args, **kwargs)
 
     model._pass = counting                      # shadows the bound method on this instance
-    for kwargs, expect in (
-        ({}, None),                             # under no_grad below: nothing to attach
-        ({"differentiable": False}, None),      # detached solves: nothing reaches the state
+    for kwargs, expect, extra in (
+        ({}, None, 0),                          # under no_grad below: nothing to attach
+        # Detached solves: nothing reaches the state on pass 1, but the learnable law IS a
+        # tensor requiring grad, so one pass at the certified point confirms that nothing
+        # reaches it there either.
+        ({"differentiable": False}, None, 1),
     ):
         calls.clear()
         diag: dict = {}
         with torch.no_grad() if not kwargs else torch.enable_grad():
             model.steady(state, drivers, diagnostics=diag, **kwargs, **tight)
         assert diag["adjoint"] is expect
-        assert len(calls) == diag["passes"]
+        assert len(calls) == diag["passes"] + extra
     calls.clear()
     diag = {}
     out = model.steady(state, drivers, diagnostics=diag, **tight)
@@ -1450,6 +1455,56 @@ def _toy(k0=1.0, **model_kwargs):
     drivers = {"toy.phi_boundary": torch.zeros(1, dtype=torch.float64),
                "toy.sources": torch.tensor([2.0, 0.0, 0.0], dtype=torch.float64)}
     return model, state, drivers, closure
+
+
+@pytest.mark.parametrize("acceleration", [None, "anderson"])
+def test_accepting_a_non_converged_iterate_refuses_a_gradient_alike_for_every_scheme(
+        acceleration):
+    """`iterate_on_limit="accept"` returns the last pass of a run that did not converge, but
+    a gradient there is refused by name, with plain relaxation and Anderson mixing alike:
+    the derivative returned is the implicit one at a fixed point, which a non-converged
+    pass is not. Without a gradient, the same run returns its last pass."""
+    def run(k0):
+        model, state, drivers, _ = _toy(
+            k0, coupling="iterate", iterate_tol={"toy": 1e-13}, iterate_max=3,
+            iterate_acceleration=acceleration, iterate_memory=1,
+            iterate_flow_tol={"toy": 1e-12}, iterate_on_limit="accept")
+        drivers["toy.sources"] = torch.tensor([20.0, 0.0, 0.0], dtype=torch.float64)
+        diag: dict = {}
+        return model.steady(state, drivers, diagnostics=diag, atol=1e-14, rtol=1e-14), diag
+
+    k0 = torch.tensor(1.0, dtype=torch.float64, requires_grad=True)
+    with pytest.raises(RuntimeError, match=(
+            r"did not converge within 3 passes.*no fixed point to differentiate, so "
+            r"iterate_on_limit='accept' cannot return a state here")):
+        run(k0)
+    out, diag = run(torch.tensor(1.0, dtype=torch.float64))
+    assert diag["passes"] == 3 and not bool(diag["converged"].all())
+    assert diag["adjoint"] is None and not out["toy.phi"].requires_grad
+
+
+def test_a_step_about_to_raise_stops_early_once_the_potential_solve_stalls():
+    """The stall rule: one Newton iteration per pass (`max_iter=1`) fails the air solve on
+    every pass, and with a tolerance loose enough that the second pass is fed a state within
+    it of the first's, the next pass would only repeat the failure -- so a step that is going
+    to raise does so after 2 passes, not `iterate_max`. A step that returns instead
+    (`on_failure="return"` with diagnostics) is not cut short: it runs to the limit."""
+    from noodl.solvers.errors import ConvergenceError
+
+    def build():
+        return _build(closures=[_Feedback(2e3)], coupling="iterate",
+                      iterate_tol={"species": 1.0}, iterate_max=10)
+
+    _, model, state, drivers, _, _ = build()
+    with pytest.raises(ConvergenceError, match=(
+            r"within 2 passes \(of at most 10; stopped there, as the potential solve failed "
+            r"again")):
+        model.steady(state, drivers, differentiable=False, max_iter=1)
+    _, model, state, drivers, _, _ = build()
+    diag: dict = {}
+    model.steady(state, drivers, diagnostics=diag, differentiable=False, max_iter=1,
+                 on_failure="return")
+    assert diag["passes"] == 10 and not bool(diag["converged"].all())
 
 
 def test_iterate_tol_may_name_a_kirchhoff_layer():
@@ -1636,7 +1691,7 @@ def test_anderson_mix_drops_a_collinear_history_and_solves_a_linear_map():
     """An ill-conditioned least-squares problem (here: identical residual differences)
     keeps no column and says so, leaving the fallback to the caller; a well-conditioned
     history of a linear map is solved exactly once it spans the map."""
-    from noodl.model import _anderson_mix
+    from noodl.solvers.anderson import _anderson_mix
 
     x = [torch.tensor([0.0, 0.0], dtype=F64), torch.tensor([1.0, 1.0], dtype=F64)]
     g = [torch.tensor([1.0, 1.0], dtype=F64), torch.tensor([1.0, 1.0], dtype=F64)]
@@ -1686,3 +1741,280 @@ def test_anderson_keeps_the_fixed_point_the_relaxed_iteration_is_attracted_to():
                    "toy.sources": torch.tensor([1.0, 0.0], dtype=F64)}
         out = model.steady(state, drivers, atol=1e-14, rtol=1e-14)
         assert abs(out["toy.phi"][0].item() - root) < 1e-10, acceleration
+
+
+class _BranchingSource:
+    """Closure on a one-node transport layer with unit removal and no flow: the source is
+    the constant 2 for x <= 1 and `theta + 0.1 x` above, so the steady state is
+    x = theta / 0.9 (10/3 at theta = 3, on the parameter branch) with dx/dtheta = 10/9."""
+
+    def __init__(self, theta):
+        self.theta = theta
+
+    def __call__(self, state, drivers):
+        x = state["c.x"].reshape(-1)[0]
+        zero = torch.zeros((), dtype=F64)
+        source = 2.0 + zero if float(x.detach()) <= 1.0 else self.theta + 0.1 * x
+        return {"c.sources": torch.stack([zero, source]), "c.q": torch.zeros(1, dtype=F64)}
+
+
+def _branching_steady(theta, x0):
+    net = Network(dtype=F64)
+    net.add_node("b")
+    net.add_node("a")
+    net.add_edge("a", "b", kind="flow")
+    layer = TransportLayer(net, "c", capacity=torch.tensor([1.0], dtype=F64),
+                           flow_kind="flow", boundary=["b"],
+                           removal=torch.tensor([1.0], dtype=F64))
+    model = Model(net, {"c": layer}, closures=[_BranchingSource(theta)], coupling="iterate",
+                  iterate_tol={"c": 1e-13}, iterate_max=200)
+    drivers = {"c.x_boundary": torch.zeros(1, dtype=F64),
+               "c.sources": torch.zeros(2, dtype=F64)}
+    return model.steady({"c.x": torch.tensor([x0], dtype=F64)}, drivers)["c.x"].sum()
+
+
+@pytest.mark.parametrize("x0", [0.0, 2.0])
+def test_iterate_gradient_does_not_depend_on_the_branch_the_first_pass_took(x0):
+    """Whether the returned state carries a gradient is decided at the converged point, not
+    by the branch a closure took on pass 1: from x0 = 0 the first pass takes the constant
+    branch and reads no parameter at all, yet the fixed point lies on the parameter branch.
+    Both initial guesses must return the same value and the same derivative."""
+    theta = torch.tensor(3.0, dtype=F64, requires_grad=True)
+    x = _branching_steady(theta, x0)
+    assert x.item() == pytest.approx(10.0 / 3.0, rel=1e-10)
+    assert x.requires_grad
+    (g,) = torch.autograd.grad(x, (theta,))
+    assert g.item() == pytest.approx(10.0 / 9.0, rel=1e-8)
+    h = 1e-6
+    with torch.no_grad():
+        fd = (_branching_steady(torch.tensor(3.0 + h, dtype=F64), x0)
+              - _branching_steady(torch.tensor(3.0 - h, dtype=F64), x0)) / (2 * h)
+    assert g.item() == pytest.approx(fd.item(), rel=1e-6)
+
+
+def _counting(model):
+    calls: list[int] = []
+    real = model._pass
+
+    def counting(*args, **kwargs):
+        calls.append(1)
+        return real(*args, **kwargs)
+
+    model._pass = counting                      # shadows the bound method on this instance
+    return calls
+
+
+def test_iterate_pays_one_confirming_pass_in_grad_mode_and_none_under_no_grad():
+    """Grad mode on (PyTorch's default) but nothing requires grad: pass 1 finds no
+    dependency, so one uncounted probe pass at the certified point confirms it (no
+    inspection can prove that nothing a pass reads requires grad). Under `torch.no_grad()`
+    the run costs exactly its primal passes."""
+    _, model, state, drivers, _, _ = _build(
+        closures=[_Feedback(2e3)], coupling="iterate", iterate_tol={"species": 1e-13},
+        iterate_max=80,
+    )
+    calls = _counting(model)
+    diag: dict = {}
+    assert torch.is_grad_enabled()
+    model.steady(state, drivers, diagnostics=diag, atol=1e-14, rtol=1e-14)
+    assert diag["adjoint"] is None and diag["passes"] >= 2
+    assert len(calls) == diag["passes"] + 1
+    calls.clear()
+    diag = {}
+    with torch.no_grad():
+        model.steady(state, drivers, diagnostics=diag, atol=1e-14, rtol=1e-14)
+    assert diag["adjoint"] is None and len(calls) == diag["passes"]
+
+
+_BRANCH_SOURCE = """
+import torch
+F64 = torch.float64
+def closure(state, drivers):
+    x = state["c.x"].reshape(-1)[0]
+    zero = torch.zeros((), dtype=F64)
+    source = 2.0 + zero if float(x.detach()) <= 1.0 else {theta} + 0.1 * x
+    return {{"c.sources": torch.stack([zero, source]), "c.q": torch.zeros(1, dtype=F64)}}
+"""
+
+
+def _closure_in_a_fresh_module(monkeypatch, name, theta_expr, **globals_):
+    """`closure` defined by exec in a module with no `__file__`, registered in
+    `sys.modules` for the test (as `__main__` is in a REPL, Jupyter or `python -c`), its
+    globals seeded with `globals_`."""
+    module = types.ModuleType(name)
+    module.__dict__.update(globals_)
+    monkeypatch.setitem(sys.modules, name, module)
+    exec(_BRANCH_SOURCE.format(theta=theta_expr), module.__dict__)
+    return module.closure
+
+
+def _steady_with(closure, x0):
+    net = Network(dtype=F64)
+    net.add_node("b")
+    net.add_node("a")
+    net.add_edge("a", "b", kind="flow")
+    layer = TransportLayer(net, "c", capacity=torch.tensor([1.0], dtype=F64),
+                           flow_kind="flow", boundary=["b"],
+                           removal=torch.tensor([1.0], dtype=F64))
+    model = Model(net, {"c": layer}, closures=[closure], coupling="iterate",
+                  iterate_tol={"c": 1e-13}, iterate_max=200)
+    drivers = {"c.x_boundary": torch.zeros(1, dtype=F64),
+               "c.sources": torch.zeros(2, dtype=F64)}
+    return model.steady({"c.x": torch.tensor([x0], dtype=F64)}, drivers)["c.x"].sum()
+
+
+@pytest.mark.parametrize("x0", [0.0, 2.0])
+def test_r01_a_closure_defined_where_its_module_has_no_file_keeps_its_gradient(x0,
+                                                                                 monkeypatch):
+    """Regression: a closure exec'd in a module without `__file__` (REPL/Jupyter) reading a
+    global parameter only on the branch the fixed point lies on."""
+    theta = torch.tensor(3.0, dtype=F64, requires_grad=True)
+    closure = _closure_in_a_fresh_module(monkeypatch, "noodl_r01_repl", "theta", theta=theta)
+    x = _steady_with(closure, x0)
+    assert x.item() == pytest.approx(10.0 / 3.0, rel=1e-10) and x.requires_grad
+    (g,) = torch.autograd.grad(x, (theta,))
+    assert g.item() == pytest.approx(10.0 / 9.0, rel=1e-8)
+
+
+@pytest.mark.parametrize("x0", [0.0, 2.0])
+def test_r01_a_closure_reading_a_parameter_from_a_user_module_keeps_its_gradient(
+        x0, monkeypatch):
+    """Regression: the parameter lives on a user module (`params.theta`), which the closure
+    reads through a module attribute only on the branch the fixed point lies on."""
+    params = types.ModuleType("noodl_r01_params")
+    params.theta = torch.tensor(3.0, dtype=F64, requires_grad=True)
+    closure = _closure_in_a_fresh_module(monkeypatch, "noodl_r01_user", "params.theta",
+                                         params=params)
+    x = _steady_with(closure, x0)
+    assert x.item() == pytest.approx(10.0 / 3.0, rel=1e-10) and x.requires_grad
+    (g,) = torch.autograd.grad(x, (params.theta,))
+    assert g.item() == pytest.approx(10.0 / 9.0, rel=1e-8)
+
+
+def test_iterate_pays_the_confirming_pass_when_a_parameter_is_unused_on_pass_one():
+    """`theta` requires grad but pass 1 (x0 = 0, the constant branch) never reads it: one
+    pass at the certified point finds it, then one more carries the adjoint."""
+    theta = torch.tensor(3.0, dtype=F64, requires_grad=True)
+    net = Network(dtype=F64)
+    net.add_node("b")
+    net.add_node("a")
+    net.add_edge("a", "b", kind="flow")
+    layer = TransportLayer(net, "c", capacity=torch.tensor([1.0], dtype=F64),
+                           flow_kind="flow", boundary=["b"],
+                           removal=torch.tensor([1.0], dtype=F64))
+    model = Model(net, {"c": layer}, closures=[_BranchingSource(theta)], coupling="iterate",
+                  iterate_tol={"c": 1e-13}, iterate_max=200)
+    calls = _counting(model)
+    diag: dict = {}
+    drivers = {"c.x_boundary": torch.zeros(1, dtype=F64),
+               "c.sources": torch.zeros(2, dtype=F64)}
+    model.steady({"c.x": torch.tensor([0.0], dtype=F64)}, drivers, diagnostics=diag)
+    assert diag["adjoint"] == "implicit"
+    assert len(calls) == diag["passes"] + 2
+
+
+# ---- S01: closure declarations are read once, at construction, and malformed ones refused ---
+
+
+def _closure_with(**attrs):
+    def closure(state, drivers):
+        return {}
+
+    for k, v in attrs.items():
+        setattr(closure, k, v)
+    return closure
+
+
+@pytest.mark.parametrize("attr", ["inputs", "outputs", "state_keys", "edge_kinds"])
+def test_a_bare_string_declaration_is_refused_at_construction(attr):
+    extra = {"integrates": False} if attr == "state_keys" else {}
+    with pytest.raises(TypeError, match=f"declares {attr} as the string 'rho_amb'"):
+        _build(closures=(_closure_with(**{attr: "rho_amb"}, **extra),))
+
+
+def test_a_non_bool_integrates_is_refused_at_construction():
+    with pytest.raises(TypeError, match="integrates='yes'; it must be True or False"):
+        _build(closures=(_closure_with(integrates="yes"),))
+
+
+def test_a_declared_output_that_is_a_layer_state_key_is_refused_at_construction():
+    with pytest.raises(ValueError, match="declares output 'air.phi', which is a state key"):
+        _build(closures=(_closure_with(outputs=("air.phi",)),))
+    # the unowned transport "<layer>.q" carve-out stays allowed (no Kirchhoff layer owns it)
+
+
+def test_species_columns_that_disagree_with_the_layer_are_refused_at_construction():
+    net = _net()
+    air = KirchhoffLayer(
+        net, "air", [PowerLaw(torch.tensor([0.01, 0.02, 0.01], dtype=F64), 0.65)],
+        drives=[ConstantDrive("airpath", "wind")], boundary=["ambient"],
+    )
+    gas = TransportLayer(
+        net, "gas", capacity=torch.tensor([50.0, 80.0], dtype=F64), flow_kind="airpath",
+        boundary=["ambient"], n_species=2, species_names=("bod", "sulfide"), scheme="implicit",
+    )
+    good = _closure_with(species_columns={"gas": {"bod": 0, "sulfide": 1}})
+    Model(net, {"air": air, "gas": gas}, closures=[good])
+    bad = _closure_with(species_columns={"gas": {"bod": 1, "sulfide": 0}})
+    with pytest.raises(ValueError, match=r"species_columns\['gas'\]\['bod'\] = 1"):
+        Model(net, {"air": air, "gas": gas}, closures=[bad])
+
+
+def test_a_closure_added_after_construction_is_dispatched_by_its_own_declarations():
+    _, model, state, drivers, _, _ = _build()
+
+    class Late:
+        integrates = True
+
+        def __call__(self, state, drivers, ctx):
+            return {"late_dt": torch.tensor(ctx.dt, dtype=F64)}
+
+    model.closures.append(Late())
+    assert model._apply_closures(state, drivers, ctx=StepContext(dt=3.0))["late_dt"] == 3.0
+    assert id(model.closures[0]) in model._integrating
+
+
+def test_ownership_lists_writers_and_readers_of_declared_keys():
+    class Writer:
+        outputs = ("wind",)
+        inputs = ("species.x",)
+
+        def __call__(self, state, drivers):
+            return {"wind": drivers["wind"]}
+
+    _, model, *_ = _build(closures=(Writer(),))
+    own = model.refs.ownership()
+    assert own["species.x"].writers == ("layer species",)
+    assert any(r.startswith("closure ") for r in own["species.x"].readers)
+    assert any(w.startswith("closure ") for w in own["wind"].writers)
+    assert own["species.sources"].readers == ("layer species",)
+    assert own["species.sources"].writers == ("caller",)
+    assert own["species.sources"].field.role == "driver"
+
+
+def test_field_batch_shape_is_the_shape_without_the_fields_layout():
+    _, model, *_ = _build()
+    f = model.refs.species.x
+    assert f.batch_shape(torch.zeros(4, 2, dtype=F64)) == (4,)
+    assert f.batch_shape(torch.zeros(2, dtype=F64)) == ()
+
+
+def test_check_reports_overwritten_undeclared_and_probed_outputs():
+    class A:
+        outputs = ("wind",)
+
+        def __call__(self, state, drivers):
+            return {"wind": drivers["wind"], "extra": drivers["wind"]}
+
+    class B:
+        outputs = ("wind",)
+
+        def __call__(self, state, drivers):
+            return {"wind": drivers["wind"]}
+
+    def undeclared(state, drivers):
+        return {}
+
+    _, model, state, drivers, *_ = _build(closures=(A(), B(), undeclared))
+    codes = {i.code for i in model.check(state, drivers, dt=10.0, probe=True).issues}
+    assert {"overwritten-output", "undeclared-closure", "declared-vs-probed"} <= codes

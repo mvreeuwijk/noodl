@@ -33,6 +33,8 @@ from torch.func import functional_call
 from noodl._broadcast import broadcast_shapes
 from noodl._tracking import bulk_values, same_tracking
 from noodl.elements.base import INTEGRATIONS, LawContext
+from noodl.layers._device import complex_of
+from noodl.layers._solve_policy import require_diagnostics
 from noodl.operators.mna import MnaOperator
 from noodl.solvers.implicit import implicit_solve
 from noodl.solvers.newton import newton, newton_tolerances
@@ -50,14 +52,16 @@ def _scipy_importable() -> bool:
     return importlib.util.find_spec("scipy") is not None
 
 
-def _complex(z: Tensor) -> Tensor:
-    """`z` as a complex128 tensor that `view_as_real` accepts: a phasor-capable law may
-    return a real tensor (a constant current) or a lazily conjugated one (a law written with
-    `torch.conj`). Both conversions are differentiable."""
-    return z.to(torch.complex128).resolve_conj()
+def _complex(z: Tensor, cdtype: torch.dtype = torch.complex128) -> Tensor:
+    """`z` as a `cdtype` tensor (the layer's complex dtype: complex128 on a float64
+    network, complex64 on a float32 one) that `view_as_real` accepts: a phasor-capable law
+    may return a real tensor (a constant current) or a lazily conjugated one (a law written
+    with `torch.conj`). Both conversions are differentiable."""
+    return z.to(cdtype).resolve_conj()
 
 
-def _colour_blocks(fn, zs: tuple[Tensor, ...], m: int, w: int) -> list[Tensor]:
+def _colour_blocks(fn, zs: tuple[Tensor, ...], m: int, w: int,
+                   cdtype: torch.dtype = torch.complex128) -> list[Tensor]:
     """`(..., G, m, m, w, w)` per input: `d fn(*zs)[g, k, ck] / d zs[i][g, l, cl]` for a
     groupwise `fn`, from one evaluation of `fn` and `m * w` reverse-mode gradients.
 
@@ -68,11 +72,11 @@ def _colour_blocks(fn, zs: tuple[Tensor, ...], m: int, w: int) -> list[Tensor]:
     the inputs expanded to it, so the gradient is per instance, not summed over the batch.
     """
     with torch.enable_grad():
-        leaves, out = _evaluate(fn, zs, w)
+        leaves, out = _evaluate(fn, zs, w, cdtype)
         batch = _batch(out, w)
         if any(_batch(leaf, w) != batch for leaf in leaves):
             zs = tuple(z.expand(batch + z.shape[-1:]) for z in zs)
-            leaves, out = _evaluate(fn, zs, w)
+            leaves, out = _evaluate(fn, zs, w, cdtype)
         live = list(range(len(leaves))) if out.requires_grad else []
         G = (out.shape[-2] if w == 2 else out.shape[-1]) // m
         rows: list[list[Tensor]] = [[] for _ in leaves]
@@ -100,14 +104,15 @@ def _batch(x: Tensor, w: int) -> tuple[int, ...]:
     return tuple(x.shape[:-2] if w == 2 else x.shape[:-1])
 
 
-def _evaluate(fn, zs: tuple[Tensor, ...], w: int) -> tuple[list[Tensor], Tensor]:
+def _evaluate(fn, zs: tuple[Tensor, ...], w: int,
+              cdtype: torch.dtype = torch.complex128) -> tuple[list[Tensor], Tensor]:
     """`fn` at fresh leaves for `zs` (real views when `w == 2`), and its output (real view
     when `w == 2`)."""
     if w == 2:
-        leaves = [torch.view_as_real(_complex(z).detach()).clone().requires_grad_(True)
+        leaves = [torch.view_as_real(_complex(z, cdtype).detach()).clone().requires_grad_(True)
                   for z in zs]
         out = fn(*(torch.view_as_complex(leaf) for leaf in leaves))
-        return leaves, torch.view_as_real(_complex(out))
+        return leaves, torch.view_as_real(_complex(out, cdtype))
     leaves = [z.detach().clone().requires_grad_(True) for z in zs]
     return leaves, fn(*leaves)
 
@@ -216,10 +221,16 @@ class MnaSystem:
 
     # ------------------------------------------------------------- views
     def _to_real(self, z: Tensor) -> Tensor:
-        return torch.view_as_real(_complex(z)).flatten(-2) if self.w == 2 else z
+        return torch.view_as_real(_complex(z, self.cdtype)).flatten(-2) if self.w == 2 else z
 
     def _to_complex(self, x: Tensor) -> Tensor:
         return torch.view_as_complex(x.unflatten(-1, (-1, 2)).contiguous())
+
+    @property
+    def cdtype(self) -> torch.dtype:
+        """The complex dtype of a phasor layer: that of its network's precision (read at
+        each use, so `Model.to` changes it)."""
+        return complex_of(self.layer.net.dtype)
 
     def _split(self, z: Tensor) -> tuple[Tensor, Tensor]:
         """`(phi_I, q_F)` of the unknown vector, in the complex view on a phasor layer."""
@@ -427,6 +438,23 @@ class MnaSystem:
             q_parts.append(q_s)
         return _cat(q_parts, dp), _cat(r_parts, dp)
 
+    def flows(self, phi, drivers, q) -> Tensor:
+        """`KirchhoffLayer.flows` of an MNA layer: `q`'s implicit-edge columns as given, the
+        other edges' flows from their laws at `phi` (steady context)."""
+        layer = self.layer
+        if self.w == 2:
+            raise TypeError(
+                f"KirchhoffLayer {layer.name!r} is a phasor layer (Modified Nodal Analysis): "
+                f"flows() is not defined on it; read the flows from solve()'s q")
+        n_edges = len(layer.cols)
+        if q.shape[-1] != n_edges:
+            raise ValueError(
+                f"KirchhoffLayer {layer.name!r}: q must hold every edge's flow "
+                f"({n_edges}) as solve() returns it; got last dimension {q.shape[-1]}")
+        out, _ = self._flows_and_residuals(phi, q[..., self.f_edges], drivers,
+                                           LawContext(mode="dc"), self._plain_call)
+        return out
+
     def _withdrawal(self, phi, drivers, call) -> Tensor | None:
         """The node sources' withdrawal per interior row, or `None` without node sources."""
         n_el = len(self.layer._laws)
@@ -460,12 +488,14 @@ class MnaSystem:
 
     @staticmethod
     def _potential_block(call, i, drivers, lctx, dp_s, m, w):
-        block, = _colour_blocks(lambda d: call(i, (d, drivers, lctx)), (dp_s,), m, w)
+        block, = _colour_blocks(lambda d: call(i, (d, drivers, lctx)), (dp_s,), m, w,
+                                complex_of(dp_s.dtype))
         return block
 
     @staticmethod
     def _implicit_blocks(call, i, drivers, lctx, dp_s, q_s, m, w):
-        return _colour_blocks(lambda d, qq: call(i, (d, qq, drivers, lctx)), (dp_s, q_s), m, w)
+        return _colour_blocks(lambda d, qq: call(i, (d, qq, drivers, lctx)), (dp_s, q_s), m, w,
+                              complex_of(dp_s.dtype))
 
     def operator(self, x, phi_boundary, drivers, ctx, call, node_slope_fn) -> MnaOperator:
         """The Jacobian of `residual` at `x`, as COO triplets on the fixed pattern."""
@@ -564,9 +594,10 @@ class MnaSystem:
         layer = self.layer
         drivers = drivers or {}
         if self.w == 2:
-            # Real or complex inputs; the phasor layer works in complex128.
+            # Real or complex inputs; the phasor layer works in the complex dtype of its
+            # network's precision (complex128 on a float64 network).
             phi_boundary, sources, phi0, q0 = (
-                None if v is None else torch.as_tensor(v).to(torch.complex128)
+                None if v is None else torch.as_tensor(v).to(self.cdtype)
                 for v in (phi_boundary, sources, phi0, q0))
             self._check_frequency(drivers, [
                 v.shape[:-1] for v in (phi_boundary, sources, phi0, q0) if v is not None])
@@ -584,12 +615,8 @@ class MnaSystem:
                 f"definite Jacobian, which a Modified Nodal Analysis system is not; use "
                 f"'auto', 'sparse_direct', 'direct' or 'gmres'"
             )
-        if newton_kwargs.get("on_failure") == "return" and diagnostics is None:
-            raise ValueError(
-                f"KirchhoffLayer {layer.name!r}: on_failure='return' requires "
-                f"diagnostics= so the status is not silently dropped; pass a dict and read "
-                f"its 'converged' and 'residual_norm' entries."
-            )
+        if newton_kwargs.get("on_failure") == "return":
+            require_diagnostics(layer.name, "return", diagnostics)
         plain = self._plain_call
         real_dtype = phi_boundary.real.dtype if phi_boundary.is_complex() else phi_boundary.dtype
 
@@ -705,6 +732,14 @@ class MnaSystem:
             call, drv, src, pb, step = _rebuild(params)
             return remember(self.residual(x, pb, drv, src, step, call))
 
+        def residual_at(point):
+            def at(*params):
+                call, drv, src, pb, step = _rebuild(params)
+                return self.residual(point, pb, drv, src, step, call)
+            return at
+
+        layer._require_threaded(residual_at(x0), all_params)
+
         def operator_fn(x, *params):
             call, drv, src, pb, step = _rebuild(params)
             last["op"] = self.operator(
@@ -717,6 +752,8 @@ class MnaSystem:
         except RuntimeError as exc:
             diagnose(exc)
             raise
+        # checked again at the root, where the adjoint linearises (see `_require_threaded`)
+        layer._require_threaded(residual_at(x.detach()), all_params)
         if diagnostics is not None:
             diagnostics["method"] = requested
         return self._output(x, phi_boundary, drivers, ctx)

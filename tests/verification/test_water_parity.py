@@ -725,7 +725,7 @@ def test_trace_quality_on_the_two_loop(tmp_path):
     assert worst < 1e-3, worst
 
 
-def test_without_the_demand_removal_the_system_is_singular(tmp_path):
+def test_the_withdrawal_sink_is_the_layers_dilution_not_a_build_time_removal(tmp_path):
     """The measurement behind the demand-as-removal formulation (`build_model`'s docstring),
     pinned so a future edit cannot undo it."""
     path, _ = _epanet(tmp_path, "twoloop_trace.inp")
@@ -733,10 +733,11 @@ def test_without_the_demand_removal_the_system_is_singular(tmp_path):
     model, _, _ = build_model(net, quality=0.0)
     layer = model.transport["quality"]
     assert layer.removal is not None
-    assert float(layer.removal.abs().min()) > 0.0
-    # the removal rate IS the demand divided by the junction's own capacity
-    expected = torch.tensor([j.demand for j in net.junctions], dtype=F64) / layer.capacity
-    assert torch.allclose(layer.removal.squeeze(-1), expected, rtol=1e-14)
+    # the withdrawal is the layer's dilution = 1 (net inflow / capacity from the current
+    # flows); `removal` is only the bulk decay (zero here)
+    assert layer.dilution == 1.0
+    assert layer.dilution_mode == "withdrawal"
+    assert float(layer.removal.abs().max()) == 0.0
 
 
 def test_a_junction_capacity_is_half_of_every_incident_pipe(tmp_path):

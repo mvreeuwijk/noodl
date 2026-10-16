@@ -1020,7 +1020,10 @@ air, as one who generates is.
 reports. Exposure follows CONTAM's exposure file: `occupant_exposure(history, occupant,
 model, calendar=...)` is, for every step, the mean over the step of the mass fraction where
 the occupant is, interpolated linearly between the step's start and end values, split at a
-mid-step move and zero out of the building; shape `(N - 1, ..., K)`, in kg/kg.
+mid-step move and zero out of the building; shape `(N - 1, ..., K)`, in kg/kg. The
+history may be stacked `(N, ..., n_i, K)` or, for one species, the reduced `(N, ..., n_i)`
+that the standard builder's `initial_state` starts from and `simulate` preserves (the result
+is then reduced too, `(N - 1, ...)`); `species_history(x, layer)` normalises both.
 `calendar` is required: it places t = 0 in the year and so decides the day's occupancy and
 the time of every move; pass the run's own. The interpolation is between output rows, so the
 result is exact for steps the solver takes whole, as `simulate_project` does; a run with

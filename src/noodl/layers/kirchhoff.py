@@ -7,15 +7,19 @@ on typed edges (one ConstitutiveLaw per kind) and Drive terms (additive potentia
 from __future__ import annotations
 
 import functools
+import types
 from collections.abc import Mapping, Sequence
 
 import torch
 
 from noodl._broadcast import broadcast_shapes
-from noodl._tracking import bulk_values, same_tracking
+from noodl._tracking import bulk_values
 from noodl.drives import Drive, check_drive_signature
 from noodl.elements.base import ConstitutiveLaw
+from noodl.layers._functional import FunctionalLaws
 from noodl.layers._mna import MnaSystem
+from noodl.layers._solve_policy import resolve_classic, resolve_mna
+from noodl.layers._topology import TopologyGuard
 from noodl.nodesources import NodeSource
 from noodl.operators.graph import GraphLaplacianOperator
 from noodl.solvers.grounding import spd_certificate, spd_diagnosis
@@ -36,7 +40,7 @@ from noodl.topology import Network
 # that declares `assemble_sparse`) is sparse-direct up to an ensemble of
 # `select._SPARSE_DIRECT_MAX_BATCH` = 32 instances and Jacobi-preconditioned CG above it,
 # because SuperLU is driven by a per-instance Python loop whose cost is linear in the
-# ensemble while PCG's is sub-linear; the measured crossover sweep is at that constant. An
+# ensemble while PCG's is sub-linear (crossover sweep: docs/design/solvers.md). An
 # explicit `linear_solver=` is honoured verbatim at every ensemble size. `diagnostics`
 # reports which backend actually ran (see `solve`).
 _LINEAR_SOLVERS = ("auto", "cg", "gmres", "direct", "sparse_direct")
@@ -106,7 +110,61 @@ class _DiagonalShifted:
                                extra_grounded=extra)
 
 
-class KirchhoffLayer:
+#: Containers longer than this are not entered by `_held_tensors`: a long list or dict on a
+#: law is a numeric table, not a parameter holder, and walking it item by item would cost
+#: more than the solve (`KirchhoffLayer._require_threaded`, which evaluates the residual,
+#: needs no walk).
+_SCAN_MAX_ITEMS = 1024
+_ATOMS = (str, bytes, int, float, complex, bool, type(None))
+_OPAQUE = (type, types.ModuleType, types.FunctionType, types.BuiltinFunctionType,
+           types.MethodType)
+
+
+def _held_tensors(obj, *, registered_threaded: bool = True):
+    """Yield `(name, tensor)` for every tensor `obj` holds: its attributes, its registered
+    buffers (when a module), and tensors nested at any depth (up to 8) in lists, tuples,
+    dicts, sets and the attributes of plain objects and modules held there.
+
+    With `registered_threaded`, `obj`'s own registered parameters (`_parameters`) and
+    submodules (`_modules`, scanned as holders of their own) are not yielded: the
+    differentiable solve threads them. A module reached through a container or a plain
+    attribute is not registered, so its parameters ARE yielded. Each object is visited once
+    (cycles end), and a container longer than `_SCAN_MAX_ITEMS` is not entered."""
+    seen: set[int] = set()
+
+    def walk(label, value, depth):
+        if isinstance(value, torch.Tensor):
+            yield label, value
+            return
+        if depth >= 8 or isinstance(value, _ATOMS + _OPAQUE) or id(value) in seen:
+            return
+        seen.add(id(value))
+        if isinstance(value, dict):
+            if len(value) <= _SCAN_MAX_ITEMS:
+                for k, v in value.items():
+                    yield from walk(f"{label}[{k!r}]", v, depth + 1)
+        elif isinstance(value, (list, tuple, set, frozenset)):
+            if len(value) <= _SCAN_MAX_ITEMS:
+                for i, v in enumerate(value):
+                    yield from walk(f"{label}[{i}]", v, depth + 1)
+        elif hasattr(value, "__dict__"):
+            for k, v in vars(value).items():
+                if k != "_memo_cache":
+                    yield from walk(f"{label}.{k}", v, depth + 1)
+
+    skip = {"_memo_cache"}
+    if registered_threaded:
+        skip |= {"_parameters", "_buffers", "_modules"}
+    for name, value in vars(obj).items():
+        if name not in skip:
+            yield from walk(name, value, 0)
+    if registered_threaded and isinstance(obj, torch.nn.Module):
+        for name, value in obj._buffers.items():
+            if value is not None:
+                yield name, value
+
+
+class KirchhoffLayer(TopologyGuard):
     """Flows driven by a potential (pressure, head): solves nodal conservation
     `A_I g(A^T phi) = s_I` for the interior potentials by Newton's method, with the constitutive
     laws on its edge kinds, drives added to the potential differences, and prescribed
@@ -192,6 +250,7 @@ class KirchhoffLayer:
                 )
 
         self.net = net
+        self._record_topology(net)
         self.name = name
         self._laws = list(laws)
         self._drives = list(drives)
@@ -231,9 +290,8 @@ class KirchhoffLayer:
             self._law_slices.append((offset, offset + n_e))
             offset += n_e
         self.cols = torch.cat(cols_list)
-        # The node count, cached as a plain int: `assemble` (once per Newton iteration) and
-        # solve's zero-source default used to read it off self.A.shape[0], which is exactly
-        # the kind of incidental dense-matrix access that keeps an (n, b) tensor alive.
+        # The node count, cached as a plain int: reading it off self.A.shape[0] would be an
+        # incidental dense-matrix access that keeps an (n, b) tensor alive.
         self._n_nodes = net.n
 
         # This layer's own edge endpoints (restricted to self.cols, in the same order as
@@ -429,14 +487,16 @@ class KirchhoffLayer:
         return tuple(self._node_sources)
 
     # ------------------------------------------------------- dense references (lazy)
-    @functools.cached_property
+    @property
     def A(self) -> torch.Tensor:
         """This layer's (n, b_layer) incidence matrix, built on FIRST ACCESS only.
 
-        Held as a `cached_property` rather than an `__init__` attribute: at
-        the composed model's reference size this matrix is 18.1 MB per layer and grows 4x
-        per node doubling, which on its own broke the composed model's memory-scaling budget
-        (measured 3.16x against a 2.5x budget). Nothing inside this class reads
+        Refused (`_require_current_topology`) once the network has changed, even when it
+        was already built: the cached matrix describes the old graph.
+
+        Held in a `cached_property` rather than an `__init__` attribute: it grows 4x per node
+        doubling and would break the composed model's memory-scaling budget (numbers:
+        docs/design/orchestration.md#dense-incidence-matrix). Nothing inside this class reads
         it except `jacobian()`, the retained dense reference -- every hot-path site gathers or
         scatter-adds with `_src`/`_tgt` instead (`dp`, `residual`, `linear_init`,
         `power_residual`). It stays public, with exactly its old value
@@ -444,6 +504,12 @@ class KirchhoffLayer:
         order), because callers outside the layer legitimately want the matrix: the
         composed-model conservation tests form `A @ q` with it.
         """
+        self._require_current_topology()
+        return self._dense_incidence
+
+    @functools.cached_property
+    def _dense_incidence(self) -> torch.Tensor:
+        """The cache behind `A`."""
         return self.net.incidence()[:, self.cols]
 
     @functools.cached_property
@@ -455,13 +521,14 @@ class KirchhoffLayer:
         layer's own edge columns. Kept for callers and for symmetry with `A`; `dp()` gathers
         `phi[..., _src] - phi[..., _tgt]` instead of contracting against it.
 
-        Like `A`, cached on first access and never invalidated: both assume `net` is not
+        Like `A`, cached on first access: both assume `net` is not
         mutated after this layer is constructed. Nothing in this codebase does that -- a
         `Network` is built, then layers are constructed over it, then it is solved -- but a
         caller who mutated `net` afterwards (adding a node or edge) would get a layer whose
         `A`/`_diff` (if already accessed) or `_src`/`_tgt`/`cols` (fixed at `__init__`) no
-        longer agree with the network's current topology, with no check anywhere that
-        catches it.
+        longer agree with the network's current topology; `solve`, `dp`, `assemble` and
+        `residual`, `A`, `balance` and `net_outflow` raise (`_require_current_topology`)
+        once the network has changed.
         """
         return self.net.difference()[self.cols]
 
@@ -500,7 +567,12 @@ class KirchhoffLayer:
         `index_add` is out of place, on a zero tensor this call itself allocates, so it is
         exactly as differentiable w.r.t. `w` as the matrix product is and cannot corrupt a
         tensor some earlier op still needs for its own backward pass.
+
+        Refused once the network has changed (`_require_current_topology`, one integer
+        comparison): the endpoints and node count are construction-time ones. Every
+        flow-balance site goes through here (`net_outflow`, `balance`, `residual`).
         """
+        self._require_current_topology()
         out = torch.zeros(
             w.shape[:-1] + (self._n_nodes,), dtype=w.dtype, device=w.device
         )
@@ -571,6 +643,7 @@ class KirchhoffLayer:
 
     # ------------------------------------------------------------------ assembly
     def dp(self, phi: torch.Tensor, drivers: Mapping) -> torch.Tensor:
+        self._require_current_topology()
         drivers = drivers or {}
         d = self._difference(phi)
         parts = []
@@ -597,8 +670,32 @@ class KirchhoffLayer:
         batch = broadcast_shapes(*(b.shape[:-1] for _, b in parts))
         return torch.cat([b.expand(batch + b.shape[-1:]) for _, b in parts], dim=-1)
 
-    def flows(self, phi: torch.Tensor, drivers: Mapping) -> torch.Tensor:
-        self._refuse_on_mna("flows")
+    def flows(
+        self, phi: torch.Tensor, drivers: Mapping, q: torch.Tensor | None = None
+    ) -> torch.Tensor:
+        """Every edge's flow at the full-node potentials `phi`, in layer edge order.
+
+        A classic layer's flow is a function of its own edge's potential difference, so `phi`
+        and `drivers` determine it; `q` is ignored.
+
+        A layer solved by Modified Nodal Analysis (`mna`) has edges whose flow is NOT a
+        function of `phi`: an implicit law (an ideal pressure or voltage source, a fan with
+        a prescribed rise) is a relation `residual(dp, q) = 0` that may not involve `q` at
+        all, and the flow is then fixed by conservation at the nodes, which depends on what
+        else is attached (a storing node's rate, the other edges). The flows of those edges
+        are therefore an INPUT here: pass `q`, the flows returned by `solve` (or by a
+        previous state), with every edge's column, shape `(..., n_edges)`. Their columns
+        (`implicit_edges`) are returned as given, and the potential-controlled edges'
+        columns are evaluated from `phi` and `drivers` by their laws, in the steady context
+        (`mode="dc"`). The result is differentiable in `phi`, `drivers` and the laws'
+        parameters on the potential edges, and carries `q`'s graph on the implicit edges.
+        At `solve`'s own `(phi, q)` it returns `q`. A phasor layer has no such accessor.
+        Without `q` an MNA layer raises `TypeError`.
+        """
+        if self.mna:
+            if q is None:
+                self._refuse_on_mna("flows without q")
+            return self._mna.flows(phi, drivers or {}, q)
         drivers = drivers or {}
         d = self.dp(phi, drivers)
         parts = [
@@ -652,6 +749,7 @@ class KirchhoffLayer:
         return torch.cat(parts, dim=-1)
 
     def assemble(self, phi_interior: torch.Tensor, phi_boundary: torch.Tensor) -> torch.Tensor:
+        self._require_current_topology()
         batch_shape = broadcast_shapes(
             phi_interior.shape[:-1], phi_boundary.shape[:-1]
         )
@@ -692,6 +790,7 @@ class KirchhoffLayer:
 
     def residual(self, phi_interior, phi_boundary, drivers, sources):
         self._refuse_on_mna("residual")
+        self._require_current_topology()
         return self._residual_parts(phi_interior, phi_boundary, drivers or {}, sources)[0]
 
     def balance(self, phi, q, sources=None, drivers=None):
@@ -704,6 +803,7 @@ class KirchhoffLayer:
         layer, including one solved by Modified Nodal Analysis, whose implicit-law flows are
         not functions of `phi`.
         """
+        self._require_current_topology()
         phi_i = phi[..., self.interior]
         lhs = self._accumulate_interior(q) - self._source_interior(sources, phi_i)
         w = self._node_source_withdrawal(phi, drivers or {})
@@ -716,8 +816,8 @@ class KirchhoffLayer:
         q = self.flows(phi, drivers)
         # (A_I q), by scatter-add over this layer's edges then a select of the interior
         # rows, rather than einsum against the (n_I, b) slice of the dense incidence: this
-        # is once per Newton residual evaluation, and at ensemble 100 the einsum form alone
-        # cost 14.2 ms of a 41.8 ms residual (profiled on the composed model).
+        # is once per Newton residual evaluation, where the einsum form dominates the cost
+        # (numbers: docs/design/orchestration.md#residual-incidence-product).
         lhs = self._accumulate_interior(q)
         s_I = self._source_interior(sources, phi_interior)
         w = self._node_source_withdrawal(phi, drivers)
@@ -745,10 +845,10 @@ class KirchhoffLayer:
         # Each law's own (c_e, k_e) covers only its own n_e = e - s edges; only the
         # leading BATCH dims (everything but the trailing edge-count dim) are meant to be
         # unified across laws before concatenating along the edge axis. Using
-        # torch.broadcast_tensors directly on the raw (c_e, k_e) list (as an earlier version
-        # of this method did) broadcasts the trailing edge dim too, so two laws with
-        # different edge counts silently expand to a shared (wrong) edge count instead of
-        # concatenating -- e.g. a 2-edge FixedFlow and a 1-edge PowerLaw would both become
+        # torch.broadcast_tensors directly on the raw (c_e, k_e) list would broadcast the
+        # trailing edge dim too, so two laws with different edge counts silently expand to
+        # a shared (wrong) edge count instead of concatenating -- e.g. a 2-edge FixedFlow and
+        # a 1-edge PowerLaw would both become
         # 2-edge before torch.cat, yielding a 4-wide result instead of the correct 3.
         cs, ks, n_es = [], [], []
         for el, (s, e) in zip(self._laws, self._law_slices, strict=True):
@@ -906,10 +1006,11 @@ class KirchhoffLayer:
         the same value) or silently `None` (if it doesn't).
         """
         for el in (*self._laws, *self._node_sources):
-            # A law may wrap another (`Scaled`): scan every submodule's own attributes.
+            # A law may wrap another (`Scaled`): scan every submodule's own attributes,
+            # its registered buffers, and tensors nested in lists, tuples, dicts and sets.
             holders = el.modules() if isinstance(el, torch.nn.Module) else (el,)
-            for name, value in (kv for h in holders for kv in vars(h).items()):
-                if isinstance(value, torch.Tensor) and value.requires_grad:
+            for name, value in (kv for h in holders for kv in _held_tensors(h)):
+                if value.requires_grad:
                     if isinstance(el, NodeSource):
                         # A NodeSource has no `learnable=` constructor kwarg (unlike
                         # ConstitutiveLaw) -- its fix is to register the tensor as an nn.Parameter
@@ -920,22 +1021,26 @@ class KirchhoffLayer:
                             f"requires_grad=True that is not a registered nn.Parameter, so "
                             f"the differentiable solve cannot reach it through "
                             f"Function.apply and its gradient would be silently wrong or "
-                            f"absent. Register {name!r} as an nn.Parameter "
-                            f"(self.{name} = torch.nn.Parameter(...)) in __init__ so it is "
-                            f"reachable via named_parameters(), or use differentiable=False."
+                            f"absent. Register it as an nn.Parameter "
+                            f"(self.<name> = torch.nn.Parameter(...)) in __init__ so it is "
+                            f"reachable via named_parameters() (buffers and tensors inside "
+                            f"containers are not), or use differentiable=False."
                         )
                     raise ValueError(
                         f"law {el!r} (kind {el.kind!r}) has a "
                         f"tensor attribute {name!r} with requires_grad=True that is not a "
-                        f"registered nn.Parameter, so the differentiable solve cannot reach "
+                        f"registered nn.Parameter (a buffer or a tensor inside a container "
+                        f"is not one either), so the differentiable solve cannot reach "
                         f"it through Function.apply and its gradient would be silently wrong "
-                        f"or absent. Construct this law with learnable=True (so {name!r} "
+                        f"or absent. Construct this law with learnable=True (so the tensor "
                         f"is registered and reachable via named_parameters()), or use "
                         f"differentiable=False."
                     )
         for drv in self._drives:
-            for name, value in vars(drv).items():
-                if isinstance(value, torch.Tensor) and value.requires_grad:
+            # A drive's own parameters are not threaded either (only laws' and node
+            # sources' are), so they are reported too.
+            for name, value in _held_tensors(drv, registered_threaded=False):
+                if value.requires_grad:
                     raise ValueError(
                         f"drive {drv!r} (kind {drv.kind!r}) has a tensor attribute {name!r} "
                         f"with requires_grad=True; a Drive is captured by closure inside the "
@@ -945,6 +1050,42 @@ class KirchhoffLayer:
                         f"solve() rather than owning it directly, or use "
                         f"differentiable=False."
                     )
+
+    def _require_threaded(self, residual, params) -> None:
+        """Refuse a differentiable solve whose residual depends on a tensor that is not threaded.
+
+        `residual(*params)` is the residual at one point (the starting guess before the
+        solve, the converged root after it) as a function of exactly the tensors handed to
+        `Function.apply`. It is evaluated once, under `enable_grad`, with every one of them
+        detached: if the result still requires grad, some tensor that requires grad reaches
+        the residual by another route (held by a law, a node source or a drive in a plain
+        object, a module in a plain list, or captured by a closure), and the implicit
+        adjoint would return a gradient for it that is silently wrong or absent.
+
+        What this establishes is structural and holds AT THAT POINT only: a law that reads
+        an un-threaded tensor on a branch inactive there is not seen. The solve therefore
+        runs it at the root too, which is the point the adjoint linearises at (its residual
+        VJP and Jacobian operator are both evaluated there); the Jacobian operator is not
+        checked separately, being the autograd derivative of the same laws' flows
+        (`FunctionalLaws.dflows`). Tensors held as attributes, buffers or in containers are
+        refused before solving by `_check_no_unreachable_differentiable_tensors`, which
+        also names them; this check catches the rest (a closure capture) and describes the
+        layer.
+        """
+        detached = [p.detach() if isinstance(p, torch.Tensor) else p for p in params]
+        with torch.enable_grad():
+            r = residual(*detached)
+        if not (isinstance(r, torch.Tensor) and r.requires_grad):
+            return
+        raise ValueError(
+            f"KirchhoffLayer {self.name!r}: the residual depends on a tensor with "
+            f"requires_grad=True that is not a registered nn.Parameter of a law or node "
+            f"source, a driver, the sources or the boundary potentials (it is captured by "
+            f"closure or held where no attribute scan reaches), so the differentiable solve "
+            f"cannot reach it through Function.apply and its gradient would be silently "
+            f"wrong or absent. Register it as an nn.Parameter of the law, pass it through "
+            f"the `drivers` mapping, or use differentiable=False."
+        )
 
     # ------------------------------------------------------------------ solve
     def _reaches_grad(self, drivers: Mapping, sources, phi_boundary) -> bool:
@@ -1015,7 +1156,7 @@ class KirchhoffLayer:
         caller has no other way to observe (the ensemble size against
         `select._SPARSE_DIRECT_MAX_BATCH`, and whether SciPy is importable at all -- it is
         an optional extra, `pip install noodl-physics[sparse]`). Without it, an installation
-        missing that extra takes the ~4.6x-slower PCG path with nothing saying so; the
+        missing that extra takes the much slower PCG path with nothing saying so; the
         indirect signal is `"linear_iterations"` (1 for a factorisation, ~170 for PCG).
         It is `None` only when no linear solve happened at all.
 
@@ -1057,7 +1198,7 @@ class KirchhoffLayer:
         this method computes for itself when `phi0 is None` is computed under `no_grad`),
         because the implicit adjoint linearises at the converged point and never returns a
         gradient w.r.t. the starting guess -- `solvers.implicit._Implicit.backward` returns
-        `None` for it. See the comment at the top of the body for what tracing it cost.
+        `None` for it. See `_starting_point` for what tracing it cost.
 
         With `differentiable=False`, the returned `(phi, q)` are ALWAYS DETACHED: the whole
         branch -- the initial guess, the grounding check, the Newton iteration, every inner
@@ -1088,31 +1229,54 @@ class KirchhoffLayer:
         and the modes `"dc"` and `"initial"` (both its one steady solution), and refuses
         `mode="phasor"`, `dt` and `history`: it takes no step and solves no phasors.
         """
+        self._require_current_topology()
         for key, value in self.newton_defaults.items():
             newton_kwargs.setdefault(key, value)
         if self.mna:
-            if newton_kwargs.get("on_failure") == "return_primal":
-                # as on the classic path: "return" where nothing differentiable reaches the
-                # solve (then its primal Newton alone), "raise" where it is differentiated
-                reaches = self._reaches_grad(drivers or {}, sources, phi_boundary) or (
-                    history is not None and torch.is_grad_enabled()
-                    and any(isinstance(h, torch.Tensor) and h.requires_grad for h in history))
-                if diagnostics is None:
-                    raise ValueError(
-                        f"KirchhoffLayer {self.name!r}: on_failure='return_primal' "
-                        f"requires diagnostics= so the status is not silently dropped; pass "
-                        f"a dict and read its 'converged' and 'residual_norm' entries."
-                    )
-                if differentiable and not reaches:
-                    # the differentiable path's own refusal still applies to the primal one
-                    self._check_no_unreachable_differentiable_tensors()
-                    differentiable = False
-                newton_kwargs["on_failure"] = "raise" if differentiable else "return"
-            return self._mna.solve(
-                phi_boundary, drivers, sources, phi0, q0=q0, history=history, dt=dt, t=t,
-                integration=integration, mode=mode, differentiable=differentiable,
-                diagnostics=diagnostics, **newton_kwargs,
+            return self._solve_mna(
+                phi_boundary, drivers, sources, phi0, q0, history, dt, t, integration, mode,
+                differentiable, diagnostics, newton_kwargs,
             )
+        self._check_classic_arguments(mode, dt, history)
+        drivers = drivers or {}
+        policy = resolve_classic(
+            self, newton_kwargs, diagnostics, differentiable, drivers, sources, phi_boundary
+        )
+        phi0, dq0, node_slopes0 = self._starting_point(phi0, phi_boundary, drivers, sources)
+        if not policy.differentiable:
+            return self._solve_primal(
+                phi0, dq0, node_slopes0, phi_boundary, drivers, sources, diagnostics,
+                newton_kwargs,
+            )
+        # A tensor held where the solve does not thread it is refused before solving, by
+        # name; one reached only through a closure, by evaluating the residual at the
+        # starting guess here and at the root in `_solve_implicit`.
+        self._check_no_unreachable_differentiable_tensors()
+        fn = FunctionalLaws(self, drivers, sources, phi_boundary)
+        self._require_threaded(
+            lambda *params: fn.residual_fn(phi0, *params), fn.all_params
+        )
+        return self._solve_implicit(
+            fn, phi0, phi_boundary, drivers, policy, diagnostics, newton_kwargs
+        )
+
+    def _solve_mna(
+        self, phi_boundary, drivers, sources, phi0, q0, history, dt, t, integration, mode,
+        differentiable, diagnostics, newton_kwargs,
+    ):
+        """`solve` of a layer solved by Modified Nodal Analysis (`noodl.layers._mna`)."""
+        differentiable = resolve_mna(
+            self, newton_kwargs, diagnostics, differentiable, drivers, sources, phi_boundary,
+            history,
+        )
+        return self._mna.solve(
+            phi_boundary, drivers, sources, phi0, q0=q0, history=history, dt=dt, t=t,
+            integration=integration, mode=mode, differentiable=differentiable,
+            diagnostics=diagnostics, **newton_kwargs,
+        )
+
+    def _check_classic_arguments(self, mode, dt, history) -> None:
+        """Refuse the keywords a classic (static-law) layer cannot honour."""
         if mode == "phasor":
             raise ValueError(
                 f"KirchhoffLayer {self.name!r}: mode='phasor' needs a layer built with "
@@ -1129,30 +1293,12 @@ class KirchhoffLayer:
                 f"KirchhoffLayer {self.name!r} is solved by nodal analysis: its laws are "
                 f"static, so it takes no step; drop {stepping}"
             )
-        drivers = drivers or {}
-        newton_kwargs.setdefault("method", self.linear_solver)
-        primal_only = newton_kwargs.get("on_failure") == "return_primal"
-        if primal_only:
-            # decided below, once the path is known: "return" on the primal path, "raise"
-            # on the differentiable one
-            newton_kwargs["on_failure"] = "return"
-        # Name this layer on every error the Newton solve or its INNER linear solves raise.
-        # Grounding is certified at phi0, but slopes change between Newton iterates, so an
-        # instance can lose it mid-iteration; without this the refusal read "newton:
-        # method='auto' refuses to split the batch ..." with no way to tell which layer of a
-        # composed model over one network produced it.
-        newton_kwargs.setdefault("where", f"KirchhoffLayer {self.name!r} solve")
-        if newton_kwargs.get("on_failure") == "return" and diagnostics is None:
-            # `solve` returns (phi, q) tensors; without a diagnostics dict there is nowhere
-            # for `converged`/`residual_norm` to go, and a non-converged phi would be
-            # indistinguishable from a converged one. The escape hatch is never silent: the
-            # result carries the status.
-            raise ValueError(
-                f"KirchhoffLayer {self.name!r}: on_failure='return' requires "
-                f"diagnostics= so the status is not silently dropped; pass a dict and read "
-                f"its 'converged' and 'residual_norm' entries."
-            )
 
+    def _starting_point(self, phi0, phi_boundary, drivers, sources):
+        """The Newton starting guess, certified grounded: `(phi0, dq0, node_slopes0)`.
+
+        `dq0` and `node_slopes0` are the slopes at that point; the first operator reuses them.
+        """
         # The initial guess is NOT a differentiable quantity, and neither is the grounding
         # check below. Both are computed under no_grad (and a caller-supplied phi0 is
         # detached) so nothing that produced them is traced into the autograd graph.
@@ -1171,7 +1317,7 @@ class KirchhoffLayer:
             # Grounding is certified on the ACTUAL slopes at the point the Newton iteration
             # is about to start from, whatever its source. linear_init's own check sees only
             # its tangent-at-zero slopes, and is not run at all when a caller supplies phi0
-            # -- so a supplied phi0 used to bypass grounding entirely, and a law whose
+            # -- so a supplied phi0 must not bypass grounding, and a law whose
             # slope is dp-dependent (a fan past its shutoff point, whose dflow is exactly
             # zero) could leave the operator singular with nothing to say about it but a
             # Newton non-convergence. Placed BEFORE the differentiable branch so both paths
@@ -1183,257 +1329,86 @@ class KirchhoffLayer:
             dq0 = self.dflows(phi0_full, drivers)
             node_slopes0 = self._node_source_slopes(phi0_full, drivers)
             self._grounding_check(dq0, where="solve", node_slopes=node_slopes0)
+        return phi0, dq0, node_slopes0
 
-        if differentiable and self.analytic_primal and not self._reaches_grad(
-            drivers, sources, phi_boundary
-        ):
-            # Nothing differentiable reaches this solve, so the implicit path would return
-            # the same detached root through an autograd Jacobian (`analytic_primal`).
-            differentiable = False
-        # "return_primal": "return" unless something differentiable reaches the solve; a
-        # differentiable solve that nothing reaches is its forward Newton alone (below).
-        forward_only = primal_only and differentiable and not self._reaches_grad(
-            drivers, sources, phi_boundary)
-        if primal_only and differentiable and not forward_only:
-            newton_kwargs["on_failure"] = "raise"
-        if not differentiable:
-            # The WHOLE non-differentiable solve runs under no_grad -- the Newton iteration,
-            # every inner linear solve inside it, and the final assemble/flows. Two reasons,
-            # the second of which is the one that made this mandatory rather than tidy:
-            #
-            # 1. There is no legitimate graph to build here. This branch does not use the
-            #    implicit adjoint, so any graph it leaves behind is an UNROLLED trace through
-            #    the converged Newton iterate -- real gradients, but not the ones
-            #    `differentiable=True` computes, retained for a caller who asked for the
-            #    non-differentiable path.
-            # 2. It made the inner solver's choice depend on the CALLER's ambient grad mode.
-            #    `solvers.select.solve`'s "auto" refuses the non-differentiable sparse-direct
-            #    backend when grad mode is on and an input requires grad (correctly: it would
-            #    silently detach). With the iteration running under whatever mode the caller
-            #    happened to be in, the same `solve(differentiable=False)` factorised through
-            #    SuperLU from a plain call and fell back to PCG -- 4.6x slower, and a
-            #    different code path -- from inside `torch.enable_grad()` with a
-            #    grad-requiring `sources`. A solver choice must not be a function of the
-            #    caller's context. The guard in `select.solve` stays as the last line of
-            #    defence; this removes the condition that was tripping it.
-            #
-            # `diagnostics` is filled exactly as before (no_grad does not touch it), and the
-            # returned `(phi, q)` are now unconditionally detached -- see the docstring.
-            with torch.no_grad():
-                # The last residual's point, potentials and flows: Newton returns the iterate
-                # it last evaluated the residual at, whose flows are then the result's.
-                last: dict = {}
+    def _solve_primal(
+        self, phi0, dq0, node_slopes0, phi_boundary, drivers, sources, diagnostics,
+        newton_kwargs,
+    ):
+        """The non-differentiable classic solve: Newton alone, detached `(phi, q)`."""
+        # The WHOLE non-differentiable solve runs under no_grad -- the Newton iteration,
+        # every inner linear solve inside it, and the final assemble/flows. Two reasons,
+        # the second of which is the one that made this mandatory rather than tidy:
+        #
+        # 1. There is no legitimate graph to build here. This branch does not use the
+        #    implicit adjoint, so any graph it leaves behind is an UNROLLED trace through
+        #    the converged Newton iterate -- real gradients, but not the ones
+        #    `differentiable=True` computes, retained for a caller who asked for the
+        #    non-differentiable path.
+        # 2. It made the inner solver's choice depend on the CALLER's ambient grad mode.
+        #    `solvers.select.solve`'s "auto" refuses the non-differentiable sparse-direct
+        #    backend when grad mode is on and an input requires grad (correctly: it would
+        #    silently detach). With the iteration running under whatever mode the caller
+        #    happened to be in, the same `solve(differentiable=False)` factorised through
+        #    SuperLU from a plain call and fell back to PCG -- a much slower, different
+        #    code path (docs/design/solvers.md) -- from inside `torch.enable_grad()` with a
+        #    grad-requiring `sources`. A solver choice must not be a function of the
+        #    caller's context. The guard in `select.solve` stays as the last line of
+        #    defence; this removes the condition that was tripping it.
+        #
+        # `diagnostics` is unaffected by no_grad; the returned `(phi, q)` are
+        # unconditionally detached -- see the docstring.
+        with torch.no_grad():
+            # The last residual's point, potentials and flows: Newton returns the iterate
+            # it last evaluated the residual at, whose flows are then the result's.
+            last: dict = {}
 
-                def residual_fn(x):
-                    r, phi, q = self._residual_parts(x, phi_boundary, drivers, sources)
-                    last.update(x=x, phi=phi, q=q)
-                    return r
+            def residual_fn(x):
+                r, phi, q = self._residual_parts(x, phi_boundary, drivers, sources)
+                last.update(x=x, phi=phi, q=q)
+                return r
 
-                def operator_fn(x):
-                    # A matvec-free A_I diag(dq) A_I^T at the current iterate, instead of the
-                    # dense (n_interior, n_interior) einsum layer.jacobian() assembles.
-                    # Rebuilt each iteration because dq is what changes; the endpoint/index
-                    # tensors it closes over are cached on the layer at construction. At the
-                    # starting point the grounding check's slopes above are those slopes.
-                    if x is phi0:
-                        return self._operator_at(dq0, node_slopes0)
-                    phi = self.assemble(x, phi_boundary)
-                    dq = self.dflows(phi, drivers)
-                    return self._operator_at(dq, self._node_source_slopes(phi, drivers))
+            def operator_fn(x):
+                # A matvec-free A_I diag(dq) A_I^T at the current iterate, instead of the
+                # dense (n_interior, n_interior) einsum layer.jacobian() assembles.
+                # Rebuilt each iteration because dq is what changes; the endpoint/index
+                # tensors it closes over are cached on the layer at construction. At the
+                # starting point the grounding check's slopes above are those slopes.
+                if x is phi0:
+                    return self._operator_at(dq0, node_slopes0)
+                phi = self.assemble(x, phi_boundary)
+                dq = self.dflows(phi, drivers)
+                return self._operator_at(dq, self._node_source_slopes(phi, drivers))
 
-                result = newton(residual_fn, operator_fn, phi0, **newton_kwargs)
-                if diagnostics is not None:
-                    diagnostics["newton_iterations"] = result.iterations
-                    diagnostics["linear_iterations"] = result.linear_iterations
-                    diagnostics["method"] = newton_kwargs["method"]
-                    # `method` is what was REQUESTED, `backend` what RAN. Under "auto" the
-                    # two differ: the batch threshold and SciPy's presence decide which
-                    # side of `select`'s eligibility table this solve landed on, and
-                    # nothing else reports it.
-                    diagnostics["backend"] = result.backend
-                    # The per-instance STATUS, not only the cost. Without these two,
-                    # `on_failure="return"` returned a non-converged phi with nothing
-                    # anywhere reporting it.
-                    diagnostics["converged"] = result.converged
-                    diagnostics["residual_norm"] = result.residual_norm
-                if last.get("x") is result.x:
-                    phi, q = last["phi"], last["q"]
-                else:
-                    phi = self.assemble(result.x, phi_boundary)
-                    q = self.flows(phi, drivers)
-            return phi, q
+            result = newton(residual_fn, operator_fn, phi0, **newton_kwargs)
+            if diagnostics is not None:
+                diagnostics["newton_iterations"] = result.iterations
+                diagnostics["linear_iterations"] = result.linear_iterations
+                diagnostics["method"] = newton_kwargs["method"]
+                # `method` is what was REQUESTED, `backend` what RAN. Under "auto" the
+                # two differ: the batch threshold and SciPy's presence decide which
+                # side of `select`'s eligibility table this solve landed on, and
+                # nothing else reports it.
+                diagnostics["backend"] = result.backend
+                # The per-instance STATUS, not only the cost. Without these two,
+                # `on_failure="return"` returned a non-converged phi with nothing
+                # anywhere reporting it.
+                diagnostics["converged"] = result.converged
+                diagnostics["residual_norm"] = result.residual_norm
+            if last.get("x") is result.x:
+                phi, q = last["phi"], last["q"]
+            else:
+                phi = self.assemble(result.x, phi_boundary)
+                q = self.flows(phi, drivers)
+        return phi, q
 
-        self._check_no_unreachable_differentiable_tensors()
-
-        # Node sources are threaded through 'Function.apply' exactly as laws are: their
-        # own nn.Parameters are substituted back in with functional_call, so a learnable
-        # demand exponent or required pressure gets a correct implicit-function gradient.
-        owners = [*self._laws, *self._node_sources]
-        n_el = len(self._laws)
-        param_dicts = [dict(owner.named_parameters()) for owner in owners]
-        param_names = [list(d.keys()) for d in param_dicts]
-        param_tensors = [
-            d[name] for d, names in zip(param_dicts, param_names, strict=True) for name in names
-        ]
-        driver_keys = sorted(drivers.keys())
-        driver_tensors = bulk_values(drivers, driver_keys)
-        sources_tensor = (
-            sources
-            if sources is not None
-            else torch.zeros(
-                phi_boundary.shape[:-1] + (self._n_nodes,),
-                dtype=phi_boundary.dtype,
-                device=phi_boundary.device,
-            )
-        )
-        all_params = (*param_tensors, *driver_tensors, sources_tensor, phi_boundary)
-
-        def _rebuild(params):
-            offset = 0
-            rebuilt = []
-            for names in param_names:
-                d = {name: params[offset + j] for j, name in enumerate(names)}
-                rebuilt.append(d)
-                offset += len(names)
-            drv = same_tracking(
-                drivers,
-                dict(zip(driver_keys, params[offset : offset + len(driver_keys)], strict=True)),
-            )
-            offset += len(driver_keys)
-            src = params[offset]
-            pb = params[offset + 1]
-            return rebuilt, drv, src, pb
-
-        def _dp_functional(phi, drv):
-            d = self._difference(phi)
-            parts = []
-            for kind, (start, end) in self._kind_slices.items():
-                block = d[..., start:end]
-                for driven in self._drives:
-                    if driven.kind == kind:
-                        block = block + driven(drv)
-                parts.append((start, block))
-            parts.sort(key=lambda p: p[0])
-            return torch.cat([p[1] for p in parts], dim=-1)
-
-        def _flows_functional(phi, drv, rebuilt):
-            dp_full = _dp_functional(phi, drv)
-            parts = []
-            for el, d, (s, e) in zip(
-                self._laws, rebuilt[:n_el], self._law_slices, strict=True
-            ):
-                parts.append(torch.func.functional_call(el, d, (dp_full[..., s:e], drv)))
-            return torch.cat(parts, dim=-1)
-
-        def _node_withdrawal_functional(phi, drv, rebuilt):
-            return self._scatter_node_sources(lambda j, ns: torch.func.functional_call(
-                ns, rebuilt[n_el + j], (phi[..., ns.nodes], drv)))
-
-        def _node_slopes_functional(phi, drv, rebuilt):
-            def slope(j, ns):
-                leaf = phi[..., ns.nodes].detach().requires_grad_(True)
-                with torch.enable_grad():
-                    w = torch.func.functional_call(ns, rebuilt[n_el + j], (leaf, drv))
-                    (grad,) = torch.autograd.grad(w.sum(), leaf)
-                return grad
-
-            return self._scatter_node_sources(slope)
-
-        def _dp_dependence_error(el, i: int) -> RuntimeError:
-            return RuntimeError(
-                f"law {i} of kind {el.kind!r} (type {type(el).__name__}) produced a "
-                f"flow that does not depend on dp; if that is intended, set "
-                f"dp_independent = True on this law's class, otherwise its flow() is "
-                f"dropping the autograd graph (e.g. a stray dp.detach())."
-            )
-
-        def _dflows_functional(phi, drv, rebuilt):
-            dp_full = _dp_functional(phi, drv)
-            parts = []
-            for i, (el, d, (s, e)) in enumerate(
-                zip(self._laws, rebuilt[:n_el], self._law_slices, strict=True)
-            ):
-                dp_slice = dp_full[..., s:e].detach().requires_grad_(True)
-                # The REDUCTION `flow.sum()` must itself execute inside the enable_grad
-                # block, not just the `functional_call` that produces `flow`: this whole
-                # method runs under the outer no_grad of Newton's forward solve (which is
-                # what keeps the forward's memory flat), and `.sum()` is an ordinary tensor op like
-                # any other -- performed under the ambient grad mode at the point it actually
-                # runs, regardless of whether its input (`flow`) already carries a grad_fn
-                # from an earlier, enable_grad-wrapped computation. Writing
-                # `torch.autograd.grad(flow.sum(), dp_slice)` with the `with
-                # torch.enable_grad():` block closed before that line (as an earlier,
-                # incorrect version of this code did) evaluates `flow.sum()` under the outer
-                # no_grad, so the tensor actually handed to `autograd.grad` as `outputs` has
-                # no grad_fn of its own -- even though `flow` printed `requires_grad=True`
-                # right before the call. `torch.autograd.grad` itself does not consult the
-                # ambient grad mode at its own call site (confirmed: calling it under no_grad
-                # against an output already fully built under enable_grad, or with an explicit
-                # `grad_outputs=` and no further reduction, both work); the reduction is what
-                # must be inside the block.
-                with torch.enable_grad():
-                    flow = torch.func.functional_call(el, d, (dp_slice, drv))
-                    # Whether a missing/zero Jacobian contribution here is legitimate is
-                    # decided ONLY by el.dp_independent -- a class-level DECLARATION (see
-                    # ConstitutiveLaw) -- never inferred from whatever autograd graph `flow` happens
-                    # to carry. A previous version of this code inferred it from
-                    # `flow.requires_grad` (with allow_unused=True as a catch-all), which
-                    # meant ANY law whose flow() accidentally lost the autograd graph
-                    # (e.g. a stray dp.detach() in a third-party subclass) silently got an
-                    # exact-zero Jacobian column instead of an error: the forward solve still
-                    # looked fine (Newton converges on the exact residual regardless), but
-                    # the adjoint gradient computed from that Jacobian was silently wrong.
-                    if el.dp_independent:
-                        # Cross-check the declaration against the law's own analytic
-                        # dflow(), which for a genuinely dp-independent law (FixedFlow's,
-                        # say) must be identically zero. This is called on `el` directly
-                        # (not through functional_call/`d`) rather than via a second
-                        # functional_call: torch.func.functional_call always invokes the
-                        # module's forward()/flow(), with no way to redirect it to dflow(),
-                        # and `d`'s tensors are the very same objects as el's own current
-                        # parameters (both trace back to el.named_parameters() at the start
-                        # of solve()), so reading el's own attributes here gives the same
-                        # values a substituted call would. This catches a wrongly-declared
-                        # dp_independent = True (or a dflow() inconsistent with it) instead
-                        # of silently trusting a possibly-wrong flag.
-                        analytic = el.dflow(dp_slice.detach(), drv)
-                        if not torch.equal(analytic, torch.zeros_like(analytic)):
-                            raise RuntimeError(
-                                f"law {i} of kind {el.kind!r} (type "
-                                f"{type(el).__name__}) declares dp_independent = True but "
-                                f"its own dflow() is not identically zero; either the flag "
-                                f"is wrong or dflow() is inconsistent with a dp-independent "
-                                f"flow law."
-                            )
-                        grad = torch.zeros_like(dp_slice)
-                    elif not flow.requires_grad:
-                        raise _dp_dependence_error(el, i)
-                    else:
-                        try:
-                            (grad,) = torch.autograd.grad(
-                                flow.sum(), dp_slice, create_graph=False
-                            )
-                        except RuntimeError as exc:
-                            raise _dp_dependence_error(el, i) from exc
-                parts.append(grad)
-            return torch.cat(parts, dim=-1)
-
-        def residual_fn(x, *params):
-            rebuilt, drv, src, pb = _rebuild(params)
-            phi = self.assemble(x, pb)
-            q = _flows_functional(phi, drv, rebuilt)
-            lhs = self._accumulate_interior(q)
-            s_I = src[..., self.interior]
-            w = _node_withdrawal_functional(phi, drv, rebuilt)
-            return lhs - s_I if w is None else lhs - s_I + w
-
-        def operator_fn(x, *params):
-            rebuilt, drv, src, pb = _rebuild(params)
-            phi = self.assemble(x, pb)
-            dq = _dflows_functional(phi, drv, rebuilt)
-            return self._operator_at(dq, _node_slopes_functional(phi, drv, rebuilt))
-
-        if forward_only:
+    def _solve_implicit(
+        self, fn, phi0, phi_boundary, drivers, policy, diagnostics, newton_kwargs
+    ):
+        """The differentiable classic solve through the implicit-function adjoint."""
+        all_params = fn.all_params
+        residual_fn, operator_fn = fn.residual_fn, fn.operator_fn
+        if policy.forward_only:
             # `implicit_solve`'s own forward (the same Newton on the same autograd Jacobian),
             # which may return unconverged: nothing reaches a gradient, so no adjoint is
             # ever asked of this point.
@@ -1462,6 +1437,10 @@ class KirchhoffLayer:
                 diagnostics=diagnostics,
                 **newton_kwargs,
             )
+        # The adjoint linearises at the root, so the threading check must hold there: a law
+        # may read an un-threaded tensor only on a branch the starting guess did not reach.
+        root = x.detach()
+        self._require_threaded(lambda *params: residual_fn(root, *params), all_params)
         if diagnostics is not None:
             diagnostics["method"] = newton_kwargs["method"]
         phi = self.assemble(x, phi_boundary)

@@ -119,6 +119,7 @@ from noodl.apps.building_physics.outputs import (
     inhaled_dose,
     local_mean_age,
     occupant_exposure,
+    species_history,
     wells_riley,
     zone_air_change_rate,
 )
@@ -281,6 +282,7 @@ __all__ = [
     "node_pressure",
     "node_temperature",
     "occupant_exposure",
+    "species_history",
     "occupant_inputs",
     "orifice_law_from_edges",
     "project_calendar",

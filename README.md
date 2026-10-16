@@ -33,7 +33,8 @@ pip install noodl-physics
 Python 3.11 or newer; PyTorch, NetworkX and NumPy are the only hard dependencies. The optional
 extras are genuinely optional — `[sparse]` (sparse-direct linear solver), `[street_aq]` (the
 street air quality application's NetCDF I/O), `[contam]` (ContamX parity, Windows
-x86-64 only) and `[dev]` (everything the test suite needs). For a checkout:
+x86-64 only), `[test]` (the core test suite), `[reference]` (SWMM, EPANET and WSIMOD for the parity
+tests) and `[dev]` (both: everything the full test suite needs). For a checkout:
 
 ```
 git clone https://github.com/mvreeuwijk/noodl.git

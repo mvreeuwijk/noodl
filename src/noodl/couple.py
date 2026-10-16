@@ -14,7 +14,10 @@ from typing import NamedTuple
 
 import torch
 
+from noodl import layout
 from noodl._broadcast import broadcast_shapes
+from noodl._fixed_point_loop import Verdict, confirm_gradient_dependence, run_passes
+from noodl.contracts import StepContext, call_closure
 from noodl.model import Drivers, Model, State
 from noodl.solvers.fixed_point import differentiate_fixed_point
 from noodl.topology import Network
@@ -79,47 +82,19 @@ def _registered_conversions() -> list[str]:
 
 
 def _reduced(x: Tensor, n_last: int) -> Tensor:
-    """A single-species tensor in REDUCED layout `(..., n_last)`. `TransportLayer` accepts a
-    single-species state either reduced or stacked `(..., n_last, 1)` (the CONTAM reader's
-    `x0` and `x_boundary` are stacked, the street app's are reduced); the
-    glue works in the reduced form. A batched reduced `(1, 1)` and a stacked `(1, 1)` hold
-    the same single number, so the ambiguity when `n_last == 1` is harmless."""
-    if _is_stacked(x, n_last):
-        return x.squeeze(-1)
-    if x.shape[-1] != n_last:
-        raise ValueError(
-            f"couple: expected a tensor with {n_last} entries on its node axis, got shape "
-            f"{tuple(x.shape)}"
-        )
-    return x
+    """A single-species tensor in REDUCED layout `(..., n_last)`: the glue works in the
+    reduced form whatever layout the layer's state came in (`noodl.layout.reduced_single`)."""
+    return layout.reduced_single(x, n_last, where="couple")
 
 
 def _write_at(
     target: Tensor, n_last: int, position: int, value: Tensor, *, add: bool = False,
 ) -> Tensor:
     """`target` with `value` written (`add=True`: ADDED) at `position` on its node axis, in
-    the caller's own LAYOUT (reduced `(..., n_last)` or stacked `(..., n_last, 1)`) -- but not
-    necessarily its own SHAPE: a batched `value` written into an unbatched `target`
-    broadcasts the target up to the value's batch. That is the ensemble case: the street
-    model runs a batch of `B` forcings while the CONTAM reader's `x_boundary` stays `(1, 1)`.
-    Never writes into `target` itself.
-
-    `add=True` is what a two-way link's feedback term needs: the caller's own entry at
-    `position` (another source of pollutant at that node) must survive, with the coupling's
-    contribution added to it, never overwritten.
-    """
-    reduced = _reduced(target, n_last)
-    batch = broadcast_shapes(reduced.shape[:-1], value.shape)
-    reduced = reduced.expand(*batch, n_last).clone()
-    reduced[..., position] = reduced[..., position] + value if add else value
-    stacked = _is_stacked(target, n_last)
-    return reduced.reshape(*batch, n_last, 1) if stacked else reduced.reshape(*batch, n_last)
-
-
-def _is_stacked(x: Tensor, n_last: int) -> bool:
-    """True when a single-species tensor is in STACKED layout `(..., n_last, 1)` rather than
-    reduced `(..., n_last)` -- the one rule `_reduced` and `_write_at` both decide by."""
-    return x.dim() >= 2 and x.shape[-1] == 1 and x.shape[-2] == n_last
+    the caller's own layout and, for a batched `value`, broadcast up to its batch
+    (`noodl.layout.write_at`). `add=True` is what a two-way link's feedback term needs: the
+    caller's own entry at `position` survives, with the coupling's contribution added."""
+    return layout.write_at(target, n_last, position, value, add=add, where="couple")
 
 
 def apply_conversion(name: str | None, value: Tensor, drivers: Mapping[str, Tensor]) -> Tensor:
@@ -283,6 +258,11 @@ class CoupledModel:
     forward value carrying the batch as its leading dims) or, when some link's value is
     shared across instances, as today's single system flattened over the whole interface;
     `False` when `"adjoint"` is `None` too.
+
+    In grad mode, a step whose first pass finds nothing differentiable pays one more,
+    uncounted pass at the certified point to confirm it (a closure may read a parameter only
+    on the branch the fixed point lies on, and no inspection can rule that out). A
+    forward-only run should therefore use `torch.no_grad()`, which skips that pass.
     """
 
     def __init__(
@@ -382,6 +362,18 @@ class CoupledModel:
                 f"is well-defined from the very first pass"
             )
 
+    def to(self, device=None, dtype: torch.dtype | None = None) -> CoupledModel:
+        """Move every model of the union to `device` and the precision of `dtype`, in
+        place, and return the union: `Model.to` on each (one walk, so a part two models
+        share moves once), and the links' own tensors. State and drivers are the caller's."""
+        from noodl.layers._device import Mover
+
+        for model in self.models.values():
+            for layer in model.layers.values():
+                layer._require_current()
+        Mover(device, dtype).visit(self)
+        return self
+
     def _layer(self, tag: str, name: str):
         try:
             return self.models[tag].transport[name]
@@ -463,7 +455,10 @@ class CoupledModel:
             for model, key, name in alias.targets:
                 drivers[model][key] = apply_conversion(name, value, drivers[model])
 
-    def _refresh_ambient_density(self, tag: str, state: State, drivers: dict) -> None:
+    def _refresh_ambient_density(
+        self, tag: str, state: State, drivers: dict,
+        *, dt: float | None = None, t: float | None = None,
+    ) -> None:
         """Set `drivers["rho_amb"]` to what model `tag`'s own closures compute at the start of
         this step, when a closure declares it among its `outputs`.
 
@@ -472,16 +467,24 @@ class CoupledModel:
         schedule or a weather file) would otherwise convert at the density its drivers were
         BUILT with. Only the declaring closures run, in model order, with the step's start
         state: the same value the step's own closures then compute.
+
+        `dt` and `t` are the outer step's interval and start time. An integrating closure
+        receives the `StepContext` that model `tag`'s FIRST (sub)step hands its closures --
+        `dt / k` for a model named in `substeps` with `k`, and the start time `t` -- so a
+        density that follows the clock is the one at the step's start. Without `dt` (no
+        step) it is called as a query (`ctx=None`), at no time.
         """
+        ctx = None
+        if dt is not None:
+            ctx = StepContext(dt=dt / self.substeps.get(tag, 1), t=t)
         drv = None
-        for closure in self.models[tag].closures:
-            if "rho_amb" not in getattr(closure, "outputs", ()):
+        model = self.models[tag]
+        for closure in model.closures:
+            spec = model._closure_spec(closure)
+            if "rho_amb" not in (spec.writes or ()):
                 continue
             drv = dict(drivers) if drv is None else drv
-            if getattr(closure, "integrates", False):
-                drv.update(closure(state, drv, None))
-            else:
-                drv.update(closure(state, drv))
+            drv.update(call_closure(spec, state, drv, ctx))
         if drv is not None:
             drivers["rho_amb"] = drv["rho_amb"]
 
@@ -533,13 +536,23 @@ class CoupledModel:
     # ------------------------------------------------------------------- step
     def step(
         self, state: Mapping[str, State], drivers: Mapping[str, Drivers], dt: float,
-        *, diagnostics: dict | None = None,
+        *, t: float | None = None, diagnostics: dict | None = None,
     ) -> dict[str, State]:
+        """Advance every model over one outer step `dt` (s) from `state`, exchanging the
+        `links` values (iterated to a fixed point when any link is two-way).
+
+        `t` (s, optional) is the simulation time at the start of the step, as `Model.step`
+        takes it: each model is stepped with `t`, or, when named in `substeps` with `k`
+        sub-steps, with `t + i dt/k` for its `i`-th sub-step of `dt/k`. Every pass of the
+        two-way iteration re-steps the SAME interval `[t, t + dt]` from the step-start
+        state. Without `t` a model's time-dependent law or integrating closure sees no clock
+        (`None`), exactly as `Model.step` without one.
+        """
         start = {tag: dict(s) for tag, s in state.items()}
         drivers = {tag: dict(d) for tag, d in drivers.items()}
         self._apply_aliases(drivers)
         for tag in self.models:
-            self._refresh_ambient_density(tag, start[tag], drivers[tag])
+            self._refresh_ambient_density(tag, start[tag], drivers[tag], dt=dt, t=t)
         if not self._two_way:
             pass_drivers = {tag: dict(d) for tag, d in drivers.items()}
             for link in self._one_way:
@@ -549,7 +562,7 @@ class CoupledModel:
             new = {}
             for tag in self.models:
                 new[tag], _ = self._step_model(tag, start[tag], pass_drivers[tag], dt,
-                                                 want_transfers=set())
+                                                 t=t, want_transfers=set())
             if diagnostics is not None:
                 # One pass, nothing iterated: `converged` is true for every instance by
                 # construction, and `max_change` is EMPTY rather than 0.0 -- no change was
@@ -568,11 +581,11 @@ class CoupledModel:
                     "adjoint_batched": False,
                 })
             return new
-        return self._iterate(start, drivers, dt, diagnostics)
+        return self._iterate(start, drivers, dt, diagnostics, t=t)
 
     def _step_model(
         self, tag: str, start: State, drivers: Drivers, dt: float,
-        *, want_transfers: Collection[str],
+        *, t: float | None = None, want_transfers: Collection[str],
     ) -> tuple[State, dict[str, Tensor]]:
         """Step model `tag` ONCE over `dt` -- in `k` sub-steps of `dt/k` when named in
         `substeps`, its glue-derived drivers held constant across them. `want_transfers` names the
@@ -581,14 +594,17 @@ class CoupledModel:
         the model -- a recipient with an unlinked layer must not pay `step_with_transfer`'s extra
         cost on a layer nothing reads a transfer from. The returned dict sums each named layer's
         transfer over these `k` outer sub-steps too -- the total amount that crossed each
-        boundary node during THIS model's whole `dt`, in the layer's own boundary layout."""
+        boundary node during THIS model's whole `dt`, in the layer's own boundary layout.
+        `t` is the outer step's start time; sub-step `i` starts at `t + i dt/k` (`None`
+        throughout without one)."""
         k = self.substeps.get(tag, 1)
         s = start
         totals: dict[str, Tensor] = {}
-        for _ in range(k):
+        for i in range(k):
             d: dict = {}
             s = self.models[tag].step(
-                s, drivers, dt / k, diagnostics=d, boundary_transfers=want_transfers
+                s, drivers, dt / k, t=None if t is None else t + i * (dt / k),
+                diagnostics=d, boundary_transfers=want_transfers,
             )
             if want_transfers:
                 for name, layer_diag in d["layers"].items():
@@ -607,7 +623,7 @@ class CoupledModel:
 
     def _one_pass(
         self, start: Mapping[str, State], drivers: Mapping[str, Drivers], dt: float,
-        values: Sequence[Tensor],
+        values: Sequence[Tensor], t: float | None = None,
     ) -> tuple[dict[str, State], dict[str, Tensor], dict[str, Drivers]]:
         """ONE recipient-first pass with EVERY link's forward value taken from `values` (one
         entry per link in `self.links` order, one-way and two-way alike, already relaxed by
@@ -638,7 +654,7 @@ class CoupledModel:
         for tag in self._recipients:                      # recipients first
             layers = {link.to_layer for link in self._two_way if link.to_model == tag}
             new[tag], totals = self._step_model(
-                tag, start[tag], pass_drivers[tag], dt, want_transfers=layers
+                tag, start[tag], pass_drivers[tag], dt, t=t, want_transfers=layers
             )
             for link in self._two_way:
                 if link.to_model == tag:
@@ -647,13 +663,13 @@ class CoupledModel:
                     )
         for tag in self._others:                          # donors and uncoupled models
             new[tag], _ = self._step_model(
-                tag, start[tag], pass_drivers[tag], dt, want_transfers=set()
+                tag, start[tag], pass_drivers[tag], dt, t=t, want_transfers=set()
             )
         return new, transfers, pass_drivers
 
-    def _iterate(self, start, drivers, dt, diagnostics) -> dict[str, State]:
+    def _iterate(self, start, drivers, dt, diagnostics, *, t=None) -> dict[str, State]:
         """Successive substitution on every two-way link's FORWARD value, damped by
-        `relaxation` (0.5 mirrors `Model._iterate`, `model.py:540-611`), on a RECIPIENT-FIRST
+        `relaxation` (0.5 mirrors `Model._iterate`), on a RECIPIENT-FIRST
         schedule: each pass steps every recipient (`self._recipients`) from `start` first,
         with the pass's relaxed forward values written into its boundary drivers, then applies
         each two-way link's donor transfer -- the recipient's own integrated boundary
@@ -687,12 +703,16 @@ class CoupledModel:
         worst exactly where the primal is cheapest. Where the interface equations are LINEAR
         in the interface the adjoint is exact whatever the residual, which is why the
         linear-interface test fixtures return 1/3 and 2/3 to one ulp both at `iterate_rtol=1e-12`
-        and at 1e-3. Pass 1 runs on the
-        graph only to learn whether anything differentiable reaches the state -- a structural
-        question no inspection of `start` and `drivers` can answer, since a differentiable
-        parameter may be captured inside a model's own closure and never appear in either --
-        and its graph is dropped at once; if nothing does, no extra pass runs and a
-        forward-only simulation costs exactly the passes it always did.
+        and at 1e-3. Whether anything differentiable reaches the state is a question no
+        inspection of `start` and `drivers` can answer, since a differentiable parameter may
+        be captured inside a model's own closure and never appear in either; it is asked by
+        running a pass on the graph and dropping that graph at once. Pass 1 asks first; when
+        it finds nothing, the question is asked again at the certified interface, because a
+        closure may take a parameter-dependent branch only once the coupled values have
+        moved, and the answer that matters is the one at the point whose derivative is
+        returned. That extra pass (not counted in `passes`) runs whenever grad mode is on,
+        since no inspection can prove that nothing a pass reads requires grad: a
+        forward-only simulation should run under `torch.no_grad()`, which skips it.
 
         The INTERFACE is every link's forward value, one-way links included, because that is
         what a pass actually reads from the previous pass's output. A one-way value kept out
@@ -703,69 +723,23 @@ class CoupledModel:
         state it reads has settled -- exactly as true of the returned primal state itself,
         which is read from that very same pass.
         """
-        two_way_pos = [i for i, link in enumerate(self.links) if link.two_way]
-        latest: Mapping[str, State] = start
-        prev: list[Tensor] | None = None
-        change: dict[str, Tensor] = {}
-        # A placeholder the FIRST pass always replaces: convergence is judged on every pass
-        # including the first (see the docstring above), so the loop's own body always
-        # computes a real per-instance verdict before this initial value could ever be read.
-        # It exists only to give `converged` a well-typed shape/dtype/device up front.
-        converged: Tensor = torch.zeros((), dtype=torch.bool)
-        passes = 0
-        values: list[Tensor] = []
-        new: dict[str, State] = dict(start)
-        last_transfers: dict[str, Tensor] = {}
-        needs_adjoint = False
-        while passes < self.iterate_max:
-            passes += 1
-            # Pass 1 runs with grad ENABLED only to learn whether anything differentiable
-            # reaches the state (its graph is dropped a few lines below); every later primal
-            # pass runs without a graph at all. The derivative comes from the ONE
-            # differentiable pass after the loop, never from these.
-            with torch.set_grad_enabled(passes == 1 and torch.is_grad_enabled()):
-                scratch = {tag: dict(d) for tag, d in drivers.items()}
-                raw = [self._forward_value(link, latest, scratch) for link in self.links]
-                values = list(raw)
-                if prev is not None:
-                    for i in two_way_pos:
-                        values[i] = prev[i] + self.relaxation * (raw[i] - prev[i])
-                new, transfers, pass_drivers = self._one_pass(start, drivers, dt, values)
-                last_transfers = {k: v.detach() for k, v in transfers.items()}
-                if passes == 1:
-                    needs_adjoint = any(
-                        t.requires_grad for s in new.values() for t in s.values()
-                    )
-                    # Drop pass 1's graph here, and drop ALL of it: `values`, `new`, the pass
-                    # drivers (whose boundary writes and donor source terms were built from
-                    # the grad-carrying values and transfers) and the transfers themselves
-                    # each anchor it, and each stays bound until the next pass overwrites it
-                    # -- or until this method returns, if the loop breaks on this pass.
-                    # Nothing downstream wants it: the convergence check below runs under
-                    # `no_grad` and reads the pass drivers only for the conversions, and the
-                    # derivative comes from the one pass after the loop.
-                    values = [v.detach() for v in values]
-                    new = {tag: {k: t.detach() for k, t in s.items()}
-                           for tag, s in new.items()}
-                    pass_drivers = {tag: {k: t.detach() for k, t in d.items()}
-                                    for tag, d in pass_drivers.items()}
-                    del transfers
-            with torch.no_grad():
-                ok: Tensor | None = None
-                for i in two_way_pos:
-                    link = self.links[i]
-                    # A forward value is ONE number per instance (one node, one species), so
-                    # its own shape IS the batch shape and nothing is reduced away.
-                    returned = self._forward_value(link, new, pass_drivers)
-                    d = (returned - values[i]).abs()
-                    change[self._link_key(link)] = d
-                    this = d <= self.iterate_atol + self.iterate_rtol * returned.abs()
-                    ok = this if ok is None else (ok & this)
-                converged = ok
-            if bool(converged.all()):
-                break
-            prev = values
-            latest = new
+        problem = _CoupledPasses(self, start, drivers, dt, t)
+        # The shared primal loop (`noodl._fixed_point_loop.run_passes`). Pass 1 runs with
+        # grad ENABLED to learn early whether anything differentiable reaches the state (its
+        # graph is dropped right after, all of it); every later primal pass runs without a
+        # graph at all. The derivative comes from the ONE differentiable pass after the
+        # loop, never from these. Pass 1's forward values are read from `start` here, under
+        # the same grad mode as pass 1 itself, and are detached with it.
+        outcome = run_passes(problem, problem.forward_values(start), max_passes=self.iterate_max)
+        passes = outcome.passes
+        # The relaxed forward values the last (when converged: the certified) pass was
+        # stepped with, and that pass's output.
+        values: list[Tensor] = outcome.certified
+        new: dict[str, State] = outcome.out[0]
+        change = problem.change
+        last_transfers = problem.last_transfers
+        # Convergence is judged on every pass including the first, so a verdict exists.
+        converged: Tensor = outcome.verdict.converged
         if not bool(converged.all()):
             failing = (~converged).nonzero().flatten().tolist() if converged.dim() else "all"
             worst = {name: float(c.max()) for name, c in change.items()}
@@ -774,6 +748,13 @@ class CoupledModel:
                 f"passes for instances {failing}; largest change per link {worst}, tolerance "
                 f"atol={self.iterate_atol} rtol={self.iterate_rtol}"
             )
+        # Pass 1 saw nothing differentiable, but it ran from the START interface: a
+        # closure that takes a parameter-dependent branch only once the coupled values
+        # have moved would have the returned state silently detached. Ask again, once,
+        # under grad at the certified interface `values` -- the point whose derivative is
+        # returned -- and drop that pass's output and graph. Skipped under
+        # `torch.no_grad()`.
+        needs_adjoint = confirm_gradient_dependence(problem, outcome)
         # `values` are the relaxed forward values the CERTIFIED pass -- the one whose output
         # was just judged converged -- was stepped with, so running `_one_pass` on them once
         # more reproduces that pass TO SOLVER ACCURACY. Not bitwise by construction:
@@ -794,7 +775,7 @@ class CoupledModel:
             final_transfers: dict[str, Tensor] = {}
 
             def pass_fn(z: list[Tensor]) -> tuple[list[Tensor], list[Tensor]]:
-                out, tr, pd = self._one_pass(start, drivers, dt, z)
+                out, tr, pd = self._one_pass(start, drivers, dt, z, t)
                 final_transfers.update(tr)
                 # `out` is only READ here: `differentiate_fixed_point` hands its outputs back
                 # as VIEWS of these tensors, and writing into one would mutate the retained
@@ -842,6 +823,77 @@ class CoupledModel:
                  "transfers": reported, "adjoint": adjoint, "adjoint_batched": adjoint_batched}
             )
         return result
+
+
+class _CoupledPasses:
+    """`CoupledModel._iterate`'s side of `noodl._fixed_point_loop.PassProblem`.
+
+    `z` is the list of every link's forward value (one-way and two-way, relaxed); a pass's
+    output is `_one_pass`'s `(new, transfers, pass_drivers)`. `judge` runs on every pass,
+    the donor's RETURNED forward value against the value the recipient was stepped with;
+    `advance` relaxes the two-way entries from `z` toward the forward values of the pass's
+    output. `change` and `last_transfers` are read by `_iterate` after the loop.
+    """
+
+    def __init__(self, coupled: CoupledModel, start, drivers, dt: float, t) -> None:
+        self.coupled = coupled
+        self.start = start
+        self.drivers = drivers
+        self.dt = dt
+        self.t = t
+        self.two_way_pos = [i for i, link in enumerate(coupled.links) if link.two_way]
+        self.change: dict[str, Tensor] = {}
+        self.last_transfers: dict[str, Tensor] = {}
+
+    def forward_values(self, latest: Mapping[str, State]) -> list[Tensor]:
+        """Every link's forward value read from `latest`, unrelaxed."""
+        scratch = {tag: dict(d) for tag, d in self.drivers.items()}
+        return [self.coupled._forward_value(link, latest, scratch)
+                for link in self.coupled.links]
+
+    def run(self, z: list[Tensor]):
+        return self.coupled._one_pass(self.start, self.drivers, self.dt, z, self.t)
+
+    def depends_on_grad(self, out) -> bool:
+        new = out[0]
+        return any(v.requires_grad for s in new.values() for v in s.values())
+
+    def detach(self, z: list[Tensor], out):
+        # Drop pass 1's graph here, and drop ALL of it: `values`, `new`, the pass
+        # drivers (whose boundary writes and donor source terms were built from
+        # the grad-carrying values and transfers) and the transfers themselves
+        # each anchor it. Nothing downstream wants it: the convergence check runs under
+        # `no_grad` and reads the pass drivers only for the conversions, and the
+        # derivative comes from the one pass after the loop.
+        new, transfers, pass_drivers = out
+        return [v.detach() for v in z], (
+            {tag: {k: t.detach() for k, t in s.items()} for tag, s in new.items()},
+            {k: v.detach() for k, v in transfers.items()},
+            {tag: {k: t.detach() for k, t in d.items()} for tag, d in pass_drivers.items()},
+        )
+
+    def judge(self, z: list[Tensor], out, *, needs_adjoint: bool) -> Verdict:
+        coupled = self.coupled
+        new, transfers, pass_drivers = out
+        self.last_transfers = {k: v.detach() for k, v in transfers.items()}
+        ok: Tensor | None = None
+        for i in self.two_way_pos:
+            link = coupled.links[i]
+            # A forward value is ONE number per instance (one node, one species), so
+            # its own shape IS the batch shape and nothing is reduced away.
+            returned = coupled._forward_value(link, new, pass_drivers)
+            d = (returned - z[i]).abs()
+            self.change[coupled._link_key(link)] = d
+            this = d <= coupled.iterate_atol + coupled.iterate_rtol * returned.abs()
+            ok = this if ok is None else (ok & this)
+        return Verdict(converged=ok, change=self.change)
+
+    def advance(self, z: list[Tensor], out, verdict: Verdict | None) -> list[Tensor]:
+        raw = self.forward_values(out[0])
+        values = list(raw)
+        for i in self.two_way_pos:
+            values[i] = z[i] + self.coupled.relaxation * (raw[i] - z[i])
+        return values
 
 
 def union(

@@ -110,6 +110,20 @@ mutates its inputs.
 
 Two-wayness is set **per link** through `ValueLink.two_way`, not by an argument to `union`.
 
+### `CoupledModel.step`
+
+```py
+coupled_model.step(state, drivers, dt, *, t=None, diagnostics=None)  # -> {tag: State}
+```
+
+`t` (s) is the simulation time at the start of the step, exactly as `Model.step` takes it, and
+is forwarded to every model: a time-dependent law (a ramp or pulse source) and an integrating
+closure see the coupled model's clock. A model with `substeps={tag: k}` runs its `i`-th
+sub-step of `dt/k` from `t + i·dt/k`. Every pass of the two-way iteration re-steps the same
+interval `[t, t + dt]` from the step-start state, so the clock never advances with the pass
+count. Without `t`, a model sees no clock, as with `Model.step`, and a time-dependent law
+refuses to evaluate.
+
 ### `ValueLink`
 
 ```python
@@ -261,10 +275,17 @@ pass. Three consequences:
   adjoint is exact whatever the residual, which is why the linear two-model test fixtures return $1/3$ and $2/3$
   to one ulp at `iterate_rtol` $10^{-12}$ and $10^{-3}$ alike;
 - backward **memory is one pass**, not all of them;
-- a forward-only run pays nothing: pass 1 runs on the graph only to learn whether anything
-  differentiable reaches the state at all (a structural question that inspecting the states and
-  drivers cannot answer, because a parameter may be captured inside a model's own closure), and
-  when nothing does, the extra pass is skipped entirely and the pass count is unchanged.
+- whether anything differentiable reaches the state cannot be read off the states and drivers
+  (a parameter may be captured inside a model's own closure), so it is asked by running a pass on
+  the graph and dropping that graph. Pass 1 asks first; when it finds nothing, the question is
+  asked once more at the **certified interface**, because a closure may take a
+  parameter-dependent branch only after the coupled values have moved — the answer that counts
+  is the one at the point whose derivative is returned. That extra pass (not counted in
+  `passes`) is paid on every converged step run with grad mode on, because no inspection of the
+  models can prove that nothing a pass reads requires grad (a closure may read a tensor through a
+  module attribute, a global or a captured cell). It is skipped under `torch.no_grad()`, so a
+  **forward-only simulation should run under `torch.no_grad()`**: it then pays neither the
+  probe pass nor pass 1's graph.
 
 The **interface** is every link's forward value, one-way links included, because that is what a
 pass reads from the previous pass's output. Only the two-way entries are measured for
@@ -282,7 +303,9 @@ way** — that is a property of the pass itself, not of which solver ran inside 
   `species.x_boundary`, divided by the building's own `rho_amb`. When a closure of the building
   model computes `rho_amb` (its density closure, from the node temperatures a schedule or a
   weather file sets), the coupler takes that closure's value at the start of each step, not
-  the value the drivers were built with.
+  the value the drivers were built with. An integrating density closure is called there with
+  the step's clock (start time `t`, and the building's own step `dt / k` under `substeps`), so
+  a density that follows `t` converts at the step-start time.
 - **Backward, two-way, unconverted:** the building is the **recipient**, so it is stepped first,
   from that boundary value; its own species boundary transfer, integrated over its whole outer
   step, divided by `dt`, is added into `street.sources` at the shared segment — already a mass

@@ -351,3 +351,57 @@ def test_required_pressure_in_a_us_units_file_is_converted_from_psi(tmp_path):
     )
     net = read_epanet_inp(path)
     assert net.options.required_pressure == pytest.approx(20 * FOOT / 0.4333, rel=1e-15)
+
+
+# ------------------------------------------------------- [DEMANDS] categories, [TIMES] units
+def test_demand_categories_of_one_junction_add_up(tmp_path):
+    path = _edit(tmp_path, "twoloop_si.inp",
+                 ("[CURVES]", "[DEMANDS]\n J1   5\n J1   7\n\n[CURVES]"))
+    junction = next(j for j in read_epanet_inp(path).junctions if j.name == "J1")
+    assert junction.demand == pytest.approx(12e-3, rel=1e-14)
+
+
+def test_demand_categories_with_different_patterns_are_refused(tmp_path):
+    path = _edit(tmp_path, "twoloop_si.inp",
+                 ("[CURVES]", "[DEMANDS]\n J1   5   Pat1\n J1   7   Pat2\n\n[CURVES]"))
+    with pytest.raises(ValueError, match="different patterns"):
+        read_epanet_inp(path)
+
+
+def test_demand_categories_sharing_a_pattern_add_up(tmp_path):
+    path = _edit(tmp_path, "twoloop_si.inp",
+                 ("[CURVES]", "[DEMANDS]\n J1   5   Pat1\n J1   7   Pat1\n\n[CURVES]"))
+    junction = next(j for j in read_epanet_inp(path).junctions if j.name == "J1")
+    assert junction.demand == pytest.approx(12e-3, rel=1e-14)
+    assert junction.pattern == "Pat1"
+
+
+def _times(tmp_path, body):
+    text = (DATA / "twoloop_si.inp").read_text()
+    assert "[TIMES]" in text
+    head, tail = text.split("[TIMES]", 1)
+    rest = tail.split("[", 1)[1] if "[" in tail else ""
+    path = tmp_path / "times.inp"
+    path.write_text(head + "[TIMES]\n" + body + "\n\n[" + rest)
+    return read_epanet_inp(path)
+
+
+@pytest.mark.parametrize(
+    ("text", "seconds"),
+    [("30 MINUTES", 1800.0), ("30 min", 1800.0), ("90 SECONDS", 90.0),
+     ("2 HOURS", 7200.0), ("2", 7200.0), ("1 DAYS", 86400.0), ("1:30", 5400.0),
+     ("30 MINS", 1800.0), ("90 secs", 90.0), ("2 hou", 7200.0), ("1 Dayx", 86400.0)],
+)
+def test_explicit_time_units_are_honoured(tmp_path, text, seconds):
+    net = _times(tmp_path, f"Duration {text}\nHydraulic Timestep {text}\n"
+                           f"Pattern Timestep {text}\nReport Timestep {text}")
+    assert net.duration == seconds
+    assert net.hydraulic_timestep == seconds
+    assert net.pattern_timestep == seconds
+    assert net.report_timestep == seconds
+
+
+@pytest.mark.parametrize("unit", ["FORTNIGHTS", "HRS", "M", "SE"])
+def test_an_unknown_time_unit_is_refused(tmp_path, unit):
+    with pytest.raises(ValueError, match="unknown time unit"):
+        _times(tmp_path, f"Duration 30 {unit}")

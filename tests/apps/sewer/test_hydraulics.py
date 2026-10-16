@@ -6,7 +6,7 @@ import pytest
 import torch
 
 from noodl.apps.sewer.hydraulics import CAPACITY_FLOOR, SewerHydraulics
-from noodl.model import StepContext
+from noodl.contracts import StepContext
 from noodl.topology import Network
 
 F64 = torch.float64

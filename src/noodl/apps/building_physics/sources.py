@@ -15,6 +15,8 @@ import math
 
 import torch
 
+from noodl.layout import is_stacked
+
 F64 = torch.float64
 
 
@@ -339,6 +341,9 @@ class SpeciesSources:
             ("rho_amb",) if self.reads_solved_pressure else ())
         self.outputs = (f"{layer.name}.sources",) + (
             (f"{layer.name}.removal",) if self.removes else ())
+        self.output_units = {f"{layer.name}.sources": layer.source_unit}
+        if self.removes:
+            self.output_units[f"{layer.name}.removal"] = "1/s"
 
     @staticmethod
     def _can_remove(src) -> bool:
@@ -432,9 +437,13 @@ class SpeciesSources:
         step = None if step is None else float(step)
         K, n = lay.n_species, lay.net.n
         x_i = state[f"{name}.x"]
-        axis = x_i.dim() >= 2 and x_i.shape[-2] == lay.n_i and x_i.shape[-1] == K
+        axis = is_stacked(x_i, lay.n_i, K)
         x_i = x_i if axis else x_i.unsqueeze(-1)
         xb = torch.as_tensor(drivers[f"{name}.x_boundary"], dtype=x_i.dtype)
+        # Deliberately NOT `is_stacked`/`as_stacked`: this tests only the species axis (the
+        # node axis `n_b` is not checked here; `index_copy` below refuses a wrong one), so a
+        # boundary driver with any leading shape is taken as `(..., n_b, K)` once its last
+        # axis is K, else `(..., n_b)`.
         xb = xb if xb.dim() >= 2 and xb.shape[-1] == K else xb.unsqueeze(-1)
         mult = torch.as_tensor(drivers[self.key], dtype=x_i.dtype)
         cap = torch.as_tensor(drivers.get(self.capacity_key, lay.capacity), dtype=x_i.dtype)

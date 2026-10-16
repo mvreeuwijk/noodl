@@ -36,7 +36,10 @@ and ``torch``.
 
 from __future__ import annotations
 
+import hashlib
 from collections.abc import Hashable, Sequence
+from contextlib import contextmanager
+from dataclasses import fields, is_dataclass
 
 import networkx as nx
 import torch
@@ -45,6 +48,68 @@ from noodl._unionfind import UnionFind
 
 Node = Hashable
 EdgeKey = tuple[Hashable, Hashable, int]
+
+# The `networkx` graph methods that change its structure; `networkx.freeze` replaces the
+# same set (`Network.freeze`).
+_GRAPH_MUTATORS = (
+    "add_node", "add_nodes_from", "remove_node", "remove_nodes_from", "add_edge",
+    "add_edges_from", "add_weighted_edges_from", "remove_edge", "remove_edges_from",
+    "clear", "clear_edges",
+)
+
+
+def _frozen_graph(*args, **kwargs):
+    """What a structural method of a frozen `Network.graph` does: refuse."""
+    raise nx.NetworkXError(
+        "this Network's graph is frozen: a layer has been built on it, and a direct change "
+        "to `net.graph` would be invisible to that layer. Add nodes and edges with "
+        "Network.add_node / Network.add_edge (the layers built so far then refuse to run "
+        "and must be built again)"
+    )
+
+
+_PLAIN = frozenset({bool, int, float, complex, str, type(None)})
+
+
+def _feed(h, value) -> None:
+    """Feed a stable description of an attribute value to the hash `h` (see
+    `Network.attribute_fingerprint`). Stable across processes, copies and pickles: no `id`,
+    no salted `hash`."""
+    if isinstance(value, dict):
+        if all(type(v) in _PLAIN for v in value.values()) and all(
+                type(k) is str for k in value):
+            # The common case, a dict of numbers and strings: one update.
+            h.update(f"{type(value).__name__}{sorted(value.items())!r}".encode())
+            return
+        h.update(b"{")
+        for k in sorted(value, key=repr):
+            _feed(h, k)
+            _feed(h, value[k])
+        h.update(b"}")
+    elif isinstance(value, (list, tuple)):
+        h.update(b"(" if isinstance(value, tuple) else b"[")
+        for v in value:
+            _feed(h, v)
+        h.update(b")")
+    elif isinstance(value, torch.Tensor):
+        t = value.detach().cpu().contiguous().reshape(-1)
+        h.update(f"T{t.dtype}{tuple(value.shape)}".encode())
+        h.update(t.view(torch.uint8).numpy().tobytes())
+    elif hasattr(value, "tobytes") and hasattr(value, "dtype"):    # a NumPy array
+        h.update(f"A{value.dtype}{getattr(value, 'shape', ())}".encode())
+        h.update(value.tobytes())
+    elif value is None or isinstance(value, (bool, int, float, complex, str, bytes)):
+        h.update(f"{type(value).__name__}:{value!r};".encode())
+    elif is_dataclass(value) and not isinstance(value, type):
+        h.update(type(value).__qualname__.encode())
+        _feed(h, {f.name: getattr(value, f.name) for f in fields(value)})
+    else:
+        # Anything else by its type and, when it has a value-like repr, that repr (a repr
+        # with an address in it would change with every copy).
+        text = repr(value) if type(value).__repr__ is not object.__repr__ else ""
+        if " at 0x" in text:
+            text = ""
+        h.update(f"{type(value).__module__}.{type(value).__qualname__}:{text};".encode())
 
 
 class Network:
@@ -57,13 +122,88 @@ class Network:
         # Branch order is insertion order (networkx iterates edges by adjacency).
         self._edges: list[EdgeKey] = []
         self._cache: dict[tuple, torch.Tensor] = {}
+        # Topology version: bumped whenever a node or edge is added. Layers record it at
+        # construction and refuse to run once it differs (`topology_version`).
+        self._version = 0
         # Alternative names of nodes (alias -> node name), set by `Component.flatten` for
         # the ports merged into each node; every name-based lookup accepts them.
         self.aliases: dict[Hashable, Hashable] = {}
 
     # ------------------------------------------------------------------ building
+    @property
+    def topology_version(self) -> int:
+        """Counter that increases each time a node or edge is added.
+
+        A layer built over this network records it and raises when it no longer matches:
+        layers keep construction-time edge indices and node counts, so they are not valid
+        for a network that has since gained a node or edge. Build the layers after the
+        network is complete; re-adding an existing node (to set attributes) does not count.
+        A network pickled before this counter existed loads at version 0.
+        """
+        return getattr(self, "_version", 0)
+
+    def __setstate__(self, state: dict) -> None:
+        # A network pickled before the topology counter existed has no `_version`.
+        state.setdefault("_version", 0)
+        self.__dict__.update(state)
+
+    # ------------------------------------------------------------------ freezing
+    @property
+    def frozen(self) -> bool:
+        """True once a layer has been built on this network (`freeze`)."""
+        return nx.is_frozen(self.graph)
+
+    def freeze(self) -> None:
+        """Make `net.graph` refuse direct structural change (`add_node`, `remove_edge`, ...).
+
+        Called by every layer at construction: the layer caches indices into the graph, so a
+        change made behind the network's back would be neither seen nor refused.
+        `Network.add_node` and `Network.add_edge` keep working (they bump
+        `topology_version`, which the layers then refuse). Attribute dictionaries are not
+        frozen; a layer detects their edits by `attribute_fingerprint` instead.
+        """
+        if not self.frozen:
+            for name in _GRAPH_MUTATORS:
+                setattr(self.graph, name, _frozen_graph)
+            self.graph.frozen = True
+
+    @contextmanager
+    def _mutable(self):
+        """The graph's own methods, for `add_node`/`add_edge` on a frozen network."""
+        frozen = self.frozen
+        if frozen:
+            for name in (*_GRAPH_MUTATORS, "frozen"):
+                self.graph.__dict__.pop(name, None)
+        try:
+            yield self.graph
+        finally:
+            if frozen:
+                self.freeze()
+
+    def attribute_fingerprint(self) -> str:
+        """A digest of every node and edge attribute (names and values, in graph order).
+
+        A layer records it at construction and `Model.check` and `Model.to` compare it: the
+        layers and laws copy attributes into tensors when they are built, so an attribute
+        edited afterwards (`net.graph.nodes[n]["volume"] = ...`) is silently ignored by
+        them. It costs one pass over the attributes, so it is not checked on every step.
+        Tensors and arrays count by their values; an object without a value-like `repr` by
+        its type only (its in-place edits are not seen).
+        """
+        h = hashlib.blake2b(digest_size=16)
+        for node, data in self.graph.nodes(data=True):
+            _feed(h, node)
+            _feed(h, data)
+        for u, v, k in self._edges:
+            _feed(h, (u, v, k))
+            _feed(h, self.graph.edges[u, v, k])
+        return h.hexdigest()
+
     def add_node(self, name: Node, **attrs) -> None:
-        self.graph.add_node(name, **attrs)
+        if name not in self.graph:
+            self._version += 1
+        with self._mutable() as graph:
+            graph.add_node(name, **attrs)
         self._cache.clear()
 
     def add_edge(self, source: Node, target: Node, *, kind: str, **attrs) -> EdgeKey:
@@ -71,9 +211,11 @@ class Network:
         for node in (source, target):
             if node not in self.graph:
                 raise KeyError(f"unknown node {node!r}; add nodes before edges")
-        key = self.graph.add_edge(source, target, kind=kind, **attrs)
+        with self._mutable() as graph:
+            key = graph.add_edge(source, target, kind=kind, **attrs)
         edge = (source, target, key)
         self._edges.append(edge)
+        self._version += 1
         self._cache.clear()
         return edge
 
@@ -84,6 +226,7 @@ class Network:
         other.graph = self.graph.copy()
         other._edges = list(self._edges)
         other.aliases = dict(self.aliases)
+        other._version = self._version
         other.add_node(name)
         for node in self.nodes:
             other.add_edge(node, name, kind=kind)
@@ -517,7 +660,12 @@ class Network:
         return torch.where(positive, T, S)
 
     def to(self, device=None, dtype=None) -> Network:
-        """Move cached and future tensors to `device`/`dtype`, in place; clears the cache."""
+        """Move cached and future tensors to `device`/`dtype`, in place; clears the cache.
+
+        Only the network: a layer built on it keeps its own tensors and refuses to run on a
+        network moved after it was built. Move a built model with `Model.to`, which moves
+        the network, its layers, laws and closures together.
+        """
         if device is not None:
             self.device = torch.device(device)
         if dtype is not None:

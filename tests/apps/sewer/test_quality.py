@@ -279,6 +279,16 @@ def test_lateral_loads_writes_only_the_named_columns_at_the_named_nodes():
     assert torch.equal(sources, expected)
 
 
+def test_lateral_loads_does_not_load_a_withdrawal_at_the_external_concentration():
+    """A negative inflow is an outflow at the local concentration (applied by the dynamic-wave
+    hydraulics' loss fraction), so it contributes no source whatever `c_in` is."""
+    closure = q.LateralLoads(2, columns={0: "bod_in"}, n_species=1)
+    out = closure({}, {"inflow": torch.tensor([-0.01, 0.02], dtype=F64),
+                       "bod_in": torch.tensor([0.5, 0.5], dtype=F64)})
+    torch.testing.assert_close(out["water_quality.sources"],
+                               torch.tensor([0.0, 0.01], dtype=F64))
+
+
 def test_lateral_loads_refuses_a_wrong_shaped_driver_by_name():
     closure = q.LateralLoads(5, columns={0: "bod_in"}, n_species=1)
     with pytest.raises(ValueError, match="'inflow'"):
@@ -390,3 +400,83 @@ def test_bod_decay_alone_reads_no_hydraulic_driver():
     out = reaction.apply(x, 60.0, {"T_water": torch.tensor(18.0, dtype=F64)})
     rate = q.bod_rate(x[:, 0], torch.tensor(18.0, dtype=F64))
     torch.testing.assert_close(out[:, 0], x[:, 0] + 60.0 * rate, rtol=1e-14, atol=0.0)
+
+
+def test_bod_decay_on_a_one_species_layer_keeps_the_layout_it_was_given():
+    """A one-species layer (``species=("bod",)``) holds its state REDUCED, ``(manholes,)``
+    or batched ``(B, manholes)``, with no species axis; with `n_species=1` the reaction
+    reads it through `noodl.layout` and returns it in the same layout, as it does a stacked
+    ``(manholes, 1)`` column."""
+    reaction = q.SulfideGeneration(bod=0, sulfide=None, n_species=1,
+                                   manhole_idx=torch.tensor([0, 1, 2]), n_nodes=4)
+    t = {"T_water": torch.tensor(18.0, dtype=F64)}
+    reduced = torch.tensor([0.3, 0.1, 0.2], dtype=F64)
+    want = reduced + 60.0 * q.bod_rate(reduced, torch.tensor(18.0, dtype=F64))
+    torch.testing.assert_close(reaction.apply(reduced, 60.0, t), want, rtol=1e-14, atol=0.0)
+    batched = torch.stack([reduced, 2.0 * reduced])
+    out = reaction.apply(batched, 60.0, t)
+    assert out.shape == (2, 3)
+    torch.testing.assert_close(out[0], want, rtol=1e-14, atol=0.0)
+    stacked = reaction.apply(reduced.unsqueeze(-1), 60.0, t)
+    assert stacked.shape == (3, 1)
+    torch.testing.assert_close(stacked[:, 0], want, rtol=1e-14, atol=0.0)
+
+
+def test_declared_species_columns_agree_with_the_builder_layer():
+    """The R05 class, §1.6: the columns each sewer quality component addresses by index are
+    declared and checked against the layer's `species_names`, in any species order."""
+    from noodl.apps.sewer.quality import H2STransfer, LateralLoads, SulfideGeneration
+    from noodl.contracts import check_species_columns, closure_spec, reaction_species_columns
+    from noodl.layers.transport import TransportLayer  # noqa: F401
+
+    class _Layer:
+        n_species = 2
+        species_names = ("sulfide", "bod")
+
+    transport = {"water_quality": _Layer()}
+    idx = torch.tensor([0])
+    gen = SulfideGeneration(bod=1, sulfide=0)
+    xfer = H2STransfer(1, idx, sulfide=0)
+    loads = LateralLoads(1, columns={0: "sulfide_in", 1: "bod_in"}, n_species=2)
+    check_species_columns("gen", reaction_species_columns(gen), transport)
+    check_species_columns("xfer", closure_spec(xfer, index=0).species_columns, transport)
+    check_species_columns("loads", closure_spec(loads, index=0).species_columns, transport)
+    # the defaults (bod=0, sulfide=1) over species ("sulfide", "bod") are refused by name
+    for bad in (SulfideGeneration(), H2STransfer(1, idx), LateralLoads(
+            1, columns={0: "bod_in", 1: "sulfide_in"}, n_species=2)):
+        declared = (reaction_species_columns(bad) if isinstance(bad, SulfideGeneration)
+                    else closure_spec(bad, index=0).species_columns)
+        with pytest.raises(ValueError, match="species_names"):
+            check_species_columns("bad", declared, transport)
+
+
+def test_kinematic_quality_gradient_wrt_inflow_at_a_zero_inflow_manhole():
+    """d(sum concentration)/d(inflow) at a manhole whose inflow is exactly 0 matches the
+    forward finite difference (`clamp(inflow, min=0)` had a zero gradient there)."""
+    from noodl.apps.sewer import build_model, tree_steady
+
+    model, state, drivers = build_model(tree_steady(), air=False, quality=True)
+    n = model.net.n
+    inflow = drivers["inflow"].clone()
+    k = 3
+    inflow[k] = 0.0
+    cin = {key: torch.full((n,), 0.2, dtype=torch.float64)
+           for key in drivers if key.endswith("_in")}
+
+    def run(infl):
+        st = dict(state)
+        d = dict(drivers, inflow=infl, **cin)
+        st.update(model.initial_capacities(st, d))
+        for _ in range(3):
+            st = model.step(st, d, 60.0)
+        return st["water_quality.x"].sum()
+
+    a = inflow.clone().requires_grad_(True)
+    run(a).backward()
+    h = 1e-6
+    e = torch.zeros_like(inflow)
+    e[k] = h
+    with torch.no_grad():
+        fd = float(run(inflow + e) - run(inflow)) / h
+    assert abs(fd) > 1e-3
+    assert float(a.grad[k]) == pytest.approx(fd, rel=1e-3)

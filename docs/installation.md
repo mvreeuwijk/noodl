@@ -34,7 +34,9 @@ network, solve it, or differentiate through it.
 pip install "noodl-physics[sparse]"        # sparse-direct linear solver
 pip install "noodl-physics[street_aq]"     # the street air quality application's file I/O
 pip install "noodl-physics[contam]"        # ContamX parity, Windows x86-64 only
-pip install "noodl-physics[dev]"           # everything needed to run the test suite
+pip install "noodl-physics[test]"          # pytest, hypothesis, ruff, scipy: the core test suite
+pip install "noodl-physics[reference]"     # pyswmm, wntr, wsimod: the reference-engine comparisons
+pip install "noodl-physics[dev]"           # test + reference: everything the full suite needs
 ```
 
 | Extra | Adds | Why you might want it |
@@ -42,7 +44,9 @@ pip install "noodl-physics[dev]"           # everything needed to run the test s
 | `sparse` | `scipy>=1.11` | The SciPy SuperLU backend. This is a **runtime** extra, not a developer convenience — see the note below. |
 | `street_aq` | `scipy>=1.11` | The [street air quality application](applications/street_aq.md) writes its per-street NetCDF product (`write_network_concentration`) through `scipy.io.netcdf_file`. The modelling API itself needs only the base dependencies. |
 | `contam` | `contamxpy>=0.0.9` (Windows x86-64 only) | Runs NIST's ContamX engine directly for the [building physics application's](applications/building_physics.md) parity tests. The wheel bundles ContamX 3.4.1.7, so no separate CONTAM installation is needed. There is no wheel for any other platform, hence the marker. |
-| `dev` | pytest, ruff, hypothesis, pytest-cov, plus the reference engines | The full test suite, including parity against SWMM (`pyswmm`), EPANET (`wntr`) and WSIMOD. |
+| `test` | pytest, pytest-xdist, pytest-cov, hypothesis, ruff, `scipy>=1.11` | The core test suite. Nothing here requires NumPy 2, so it installs against the NumPy 1.26 minimum (the `minimum-versions` CI job). |
+| `reference` | `pyswmm`, `wntr`, `wsimod` | The reference engines for the parity tests against SWMM, EPANET and WSIMOD. `wntr>=1.5` requires NumPy 2.2.6 or newer. |
+| `dev` | `test` + `reference` | The full test suite. `pip install -e ".[dev]"` is the usual choice for a checkout. |
 
 **The `sparse` extra deserves a moment.** The default linear-solver selection,
 `method="auto"`, prefers the SciPy SuperLU backend for a certified-SPD operator at a batch of

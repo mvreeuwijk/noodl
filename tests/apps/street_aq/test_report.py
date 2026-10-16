@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import os
+import stat
+
+import numpy as np
 import pytest
 import torch
 
@@ -86,3 +90,97 @@ def test_a_shape_mismatch_is_named(tmp_path):
             background=torch.zeros(4, dtype=DT),
             canyon_velocity=torch.zeros(4, 3, dtype=DT), concentration=concentration,
         )
+
+
+def _kwargs(concentration, tmp_path):
+    n_time, n_edge = concentration.shape
+    return dict(
+        time_hours=torch.zeros(n_time, dtype=DT), feature_index=list(range(n_edge)),
+        osmid=list(range(n_edge)), background=torch.zeros(n_time, dtype=DT),
+        canyon_velocity=torch.zeros(n_time, n_edge, dtype=DT), concentration=concentration,
+    )
+
+
+def test_a_differentiable_solve_result_exports(tmp_path):
+    from scipy.io import netcdf_file
+
+    from noodl.apps.street_aq import build_model, munich_idealised
+
+    net, _ = munich_idealised()
+    model, state, _ = build_model(net, species=("NO2",), preset="munich",
+                                  canyon_wind_min=0.0, u_d_min=0.0)
+    from noodl.apps.street_aq.case import StreetCase, drivers_at
+
+    scale = torch.tensor(1.0, dtype=DT, requires_grad=True)
+    case = StreetCase.synthetic(
+        net, species=("NO2",), times=[0.0], emissions=5e-6, background=2e-8,
+        meteo=dict(wind_dir_from_deg=200.0, wind_speed=5.0, h_abl=1000.0, u_star=0.5,
+                   lmo=1e6))
+    d = drivers_at(case, model, 0)
+    d["street.sources"] = d["street.sources"] * scale
+    x = model.steady(state, d)["street.x"]
+    assert x.requires_grad
+    conc = x[None]
+    path = write_network_concentration(
+        tmp_path / "out.nc",
+        time_hours=torch.zeros(1, dtype=DT), feature_index=list(range(conc.shape[-1])),
+        osmid=list(range(conc.shape[-1])), background=torch.zeros(1, dtype=DT, requires_grad=True),
+        canyon_velocity=torch.zeros(1, conc.shape[-1], dtype=DT, requires_grad=True),
+        concentration=conc,
+    )
+    handle = netcdf_file(str(path), "r", mmap=False)
+    try:
+        got = handle.variables["concentration_increment"].data.astype("float64")
+    finally:
+        handle.close()
+    np.testing.assert_array_equal(got, conc.detach().numpy())
+
+
+def test_a_failed_export_leaves_an_existing_destination_untouched(tmp_path):
+    dest = tmp_path / "out.nc"
+    dest.write_bytes(b"previous product")
+    bad = torch.zeros(2, 3, dtype=DT)
+    kw = _kwargs(bad, tmp_path)
+    kw["feature_index"] = [0, 1]          # wrong length: validation fails
+    with pytest.raises(ValueError):
+        write_network_concentration(dest, **kw)
+    assert dest.read_bytes() == b"previous product"
+    # A failure while writing (after the temp file exists) also keeps it, and cleans up.
+    kw = _kwargs(bad, tmp_path)
+    kw["osmid"] = ["x", "y", "z"]
+    with pytest.raises((ValueError, TypeError)):
+        write_network_concentration(dest, **kw)
+    assert dest.read_bytes() == b"previous product"
+    assert [p.name for p in tmp_path.iterdir()] == ["out.nc"]
+
+
+def test_a_failure_after_the_temp_file_exists_cleans_up(tmp_path, monkeypatch):
+    from noodl.apps.street_aq import report
+
+    dest = tmp_path / "out.nc"
+    dest.write_bytes(b"previous product")
+    seen = []
+
+    def boom(netcdf_file, target, values):
+        seen.append(target)
+        with open(target, "wb") as handle:    # the temp file exists, partly written
+            handle.write(b"partial")
+        raise RuntimeError("disk full")
+
+    monkeypatch.setattr(report, "_write_netcdf", boom)
+    with pytest.raises(RuntimeError, match="disk full"):
+        write_network_concentration(dest, **_kwargs(torch.zeros(2, 3, dtype=DT), tmp_path))
+    assert seen and seen[0] != str(dest)
+    assert dest.read_bytes() == b"previous product"
+    assert [p.name for p in tmp_path.iterdir()] == ["out.nc"]
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX permission bits")
+def test_the_product_has_the_umask_mode_not_mkstemps_0600(tmp_path):
+    old = os.umask(0o027)
+    try:
+        dest = write_network_concentration(
+            tmp_path / "out.nc", **_kwargs(torch.zeros(2, 3, dtype=DT), tmp_path))
+    finally:
+        os.umask(old)
+    assert stat.S_IMODE(dest.stat().st_mode) == 0o640

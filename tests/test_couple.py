@@ -739,7 +739,10 @@ def test_substeps_calls_the_fast_model_k_times_with_the_glue_held_constant():
         coupled_model.step(state, drivers, dt=60.0, diagnostics=diag)
     finally:
         building_model.step = real_step
-    passes = diag["passes"]
+    # Every primal pass, plus the one uncounted grad-mode probe pass at the certified
+    # interface (nothing here requires grad, so no adjoint pass follows).
+    assert diag["adjoint"] is None
+    passes = diag["passes"] + 1
     assert len(calls) == 6 * passes
     for p in range(passes):
         chunk = calls[6 * p:6 * (p + 1)]
@@ -901,4 +904,107 @@ def test_the_ambient_density_of_a_conversion_follows_a_changed_ambient_temperatu
     stale = building.step(
         b_state, {**b_drivers, "species.x_boundary": 3.0 / b_drivers["rho_amb"].reshape(1, 1)},
         dt=300.0)
+    assert not torch.allclose(stale["species.x"], expected["species.x"], rtol=1e-6)
+
+
+def _ramp_circuit():
+    """A 1 V ramp over 1 s across a 1 ohm resistor: the node voltage IS the ramp, 0 at t = 0
+    and `t` volts for t <= 1 s, evaluated at the end of each step."""
+    from noodl.apps.electrical import Ramp
+    from noodl.apps.electrical.analysis import initial_state
+    from noodl.apps.electrical.circuit import Circuit, Resistor, VoltageSource, build_model
+
+    circuit = Circuit([VoltageSource("V1", "a", "0", 1.0, Ramp(1.0)),
+                       Resistor("R1", "a", "0", 1.0)])
+    model, _, drivers = build_model(circuit)
+    return model, initial_state(model, drivers, t=0.0), drivers
+
+
+def test_the_coupled_step_forwards_the_simulation_clock_to_a_time_dependent_law():
+    """`CoupledModel.step(..., t=...)` hands its start time to every model, as `Model.step`
+    takes it: the ramp source is evaluated at the end of the step, the same as uncoupled."""
+    model, state, drivers = _ramp_circuit()
+    alone = model.step(state, drivers, 0.1, t=0.2)["electrical.phi"][1]
+    coupled, c_state, c_drivers = union({"c": (model, state, drivers)}, [])
+    out = coupled.step(c_state, c_drivers, 0.1, t=0.2)["c"]["electrical.phi"][1]
+    assert alone.item() == pytest.approx(0.3, abs=1e-12)
+    assert out.item() == pytest.approx(alone.item(), abs=1e-12)
+
+
+def test_coupled_substeps_advance_the_clock_by_their_own_offsets():
+    """With `substeps={"c": 4}` an outer step of 0.4 s from t = 0.2 runs the model at
+    t = 0.2, 0.3, 0.4, 0.5 over 0.1 s each, so it ends on the ramp at 0.6 V."""
+    model, state, drivers = _ramp_circuit()
+    seen: list[tuple[float, float]] = []
+    real = model.step
+
+    def spy(state, drivers, dt, *, t=None, **kw):
+        seen.append((t, dt))
+        return real(state, drivers, dt, t=t, **kw)
+
+    model.step = spy
+    coupled, c_state, c_drivers = union({"c": (model, state, drivers)}, [], substeps={"c": 4})
+    out = coupled.step(c_state, c_drivers, 0.4, t=0.2)["c"]["electrical.phi"][1]
+    assert out.item() == pytest.approx(0.6, abs=1e-12)
+    assert [dt for _, dt in seen] == pytest.approx([0.1] * 4)
+    assert [t for t, _ in seen] == pytest.approx([0.2, 0.3, 0.4, 0.5])
+
+
+def test_a_coupled_step_without_a_clock_still_refuses_a_time_dependent_law():
+    """No `t`, no evaluation time: the law's own refusal reaches the caller unchanged."""
+    model, state, drivers = _ramp_circuit()
+    coupled, c_state, c_drivers = union({"c": (model, state, drivers)}, [])
+    with pytest.raises(ValueError, match="pass t"):
+        coupled.step(c_state, c_drivers, 0.1)
+
+
+class _ClockDensity:
+    """An ambient density that follows the simulation clock: 1 + t/100 kg/m3, read off the
+    `StepContext` an integrating closure receives (and the 1.2 of the drivers without one)."""
+
+    integrates = True
+    outputs = ("rho_amb",)
+
+    def __init__(self):
+        self.seen: list = []
+
+    def __call__(self, state, drivers, ctx):
+        self.seen.append(None if ctx is None else (ctx.t, ctx.dt))
+        if ctx is None or ctx.t is None:
+            return {"rho_amb": drivers["rho_amb"]}
+        return {"rho_amb": torch.tensor(1.0 + ctx.t / 100.0, dtype=F64)}
+
+
+@pytest.mark.parametrize("k", [1, 4])
+def test_the_ambient_density_of_a_conversion_is_evaluated_at_the_step_clock(k):
+    """A time-dependent ambient-density closure is evaluated, for the conversions outside
+    `Model.step`, with the coupled step's own clock: start time `t` and the model's own
+    (sub)step `dt / k`, the same context its first (sub)step's closures then receive."""
+    from noodl.model import Model
+
+    street, s_state, s_drivers = _tiny_street_model()
+    building, b_state, b_drivers = _tiny_building_model()
+    density = _ClockDensity()
+    building = Model(building.net, building.transport, closures=[*building.closures, density])
+    link = ValueLink(
+        from_model="street", from_key="street.x", from_index=0,
+        to_model="building", to_key="species.x_boundary", to_index=0,
+        convert="concentration_to_mass_fraction",
+    )
+    coupled, state, drivers = union(
+        {"street": (street, s_state, s_drivers), "building": (building, b_state, b_drivers)},
+        shared=[link], substeps={"building": k},
+    )
+    t, dt = 30.0, 2.0
+    new = coupled.step(state, drivers, dt=dt, t=t)
+    assert density.seen[0] == pytest.approx((t, dt / k))
+    rho_amb = 1.0 + t / 100.0
+    expected = dict(b_state)
+    b_drv = {**b_drivers, "species.x_boundary": torch.tensor([3.0 / rho_amb], dtype=F64)}
+    for i in range(k):
+        expected = building.step(expected, b_drv, dt / k, t=t + i * dt / k)
+    torch.testing.assert_close(new["building"]["species.x"], expected["species.x"],
+                               rtol=1e-12, atol=1e-18)
+    stale = building.step(b_state, {**b_drivers, "species.x_boundary": torch.tensor(
+        [3.0 / 1.2], dtype=F64)}, dt, t=t)
     assert not torch.allclose(stale["species.x"], expected["species.x"], rtol=1e-6)

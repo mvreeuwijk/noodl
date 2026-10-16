@@ -266,14 +266,14 @@ def test_pda_replaces_the_nodal_sources_with_a_node_source():
     assert "demand_model" in model.notes
 
 
-def test_a_quality_layer_carries_the_demand_as_a_removal_rate():
+def test_a_quality_layer_carries_the_withdrawal_as_dilution_and_only_decay_as_removal():
     model, _, _ = build_model(twoloop(), quality=0.5)
     layer = model.transport["quality"]
-    demand = torch.tensor([j.demand for j in twoloop().junctions], dtype=F64)
-    expected = demand / layer.capacity + 0.5 / 86400.0
-    assert layer.removal.squeeze(-1).tolist() == pytest.approx(
-        expected.tolist(), rel=1e-14
-    )
+    # only the bulk decay is a build-time removal; the withdrawal enters through dilution = 1,
+    # withdrawals only (an injection is no negative removal)
+    assert layer.removal.squeeze(-1).tolist() == pytest.approx([0.5 / 86400.0] * 6, rel=1e-14)
+    assert layer.dilution == 1.0
+    assert layer.dilution_mode == "withdrawal"
     assert "quality_removal" in model.notes
     assert "quality_capacity" in model.notes
 
@@ -572,3 +572,96 @@ def test_net1_pump_stays_below_q_max_and_is_not_refused():
     model, state, drivers = build_model(net)
     final = water_steady(model, state, drivers)
     assert torch.isfinite(final["water.phi"]).all()
+
+
+# ---------------------------------------------------------- quality: constant-tracer invariants
+def _device_network(device):
+    """R - pipe - A - DEVICE - B - pipe - C, demands at A and C."""
+    junctions = (Junction("A", 0.0, 0.005), Junction("B", 0.0, 0.0),
+                 Junction("C", 0.0, 0.004))
+    pipes = (WaterPipe("P1", "R", "A", 500.0, 0.3, 130.0),
+             WaterPipe("P2", "B", "C", 500.0, 0.3, 130.0))
+    kwargs = {}
+    if device == "tcv":
+        kwargs["valves"] = (Valve("V", "A", "B", 0.2, "TCV", 5.0),)
+    elif device == "fcv":
+        # a flow-control valve is dp-independent: the nodes behind it need another
+        # connection to the reservoir for the head solve, and carry its flow regardless
+        kwargs["valves"] = (Valve("V", "A", "B", 0.2, "FCV", 0.002),)
+        pipes += (WaterPipe("P3", "R", "C", 500.0, 0.3, 130.0),)
+    else:
+        kwargs["pumps"] = (Pump("PU", "A", "B", "C1"),)
+        kwargs["curves"] = {"C1": ((0.004, 10.0),)}
+    return WaterNetwork(junctions=junctions, reservoirs=(Reservoir("R", 50.0),),
+                        pipes=pipes, **kwargs)
+
+
+# pda=True with a pump does not converge in the HYDRAULIC solve (quality off) on any small
+# network tried, an existing limit unrelated to quality, so that pair is not exercised.
+@pytest.mark.parametrize(
+    ("device", "pda"),
+    [("tcv", False), ("tcv", True), ("fcv", False), ("fcv", True), ("pump", False)],
+)
+def test_a_constant_tracer_is_preserved_through_every_device(device, pda):
+    kwargs = {"pda": True, "p_req": 60.0} if pda else {}
+    model, state, drivers = build_model(_device_network(device), quality=0.0, **kwargs)
+    drivers["quality.x_boundary"] = torch.tensor([100.0], dtype=F64)
+    out = water_steady(model, state, drivers)
+    assert out["quality.x"].tolist() == pytest.approx([100.0] * 3, rel=1e-8)
+
+
+def test_a_constant_tracer_is_preserved_under_pressure_driven_demand():
+    model, state, drivers = build_model(twoloop(), quality=0.0, pda=True, p_req=100.0)
+    drivers["quality.x_boundary"] = torch.tensor([100.0], dtype=F64)
+    out = water_steady(model, state, drivers)
+    # the hydraulics really are demand-limited, so the test discriminates
+    source = model.kirchhoff["water"].node_sources[0]
+    flow = source.flow(out["water.phi"][:6])
+    assert bool((flow < source.q_required.detach() * 0.999).any())
+    assert out["quality.x"].tolist() == pytest.approx([100.0] * 6, rel=1e-8)
+
+
+# The interplay of quality with the pipe form, the PBV/GPV valves, tanks and PDA. A reservoir
+# and an explicit tank (a quality boundary) both hold the tracer at 100; every junction must
+# stay at 100 in steady state, however the hydraulics are written.
+def _tank_device_network(device):
+    """R - pipe - A - DEVICE - B - pipe - C - pipe - T (tank), demands at A and C."""
+    junctions = (Junction("A", 0.0, 0.003), Junction("B", 0.0, 0.0),
+                 Junction("C", 0.0, 0.002))
+    pipes = (WaterPipe("P1", "R", "A", 500.0, 0.3, 130.0),
+             WaterPipe("P2", "B", "C", 500.0, 0.3, 130.0),
+             WaterPipe("P3", "C", "T", 300.0, 0.3, 130.0))
+    kwargs = {}
+    if device == "pbv":
+        kwargs["valves"] = (Valve("V", "A", "B", 0.2, "PBV", 3.0),)
+    elif device == "gpv":
+        kwargs["valves"] = (Valve("V", "A", "B", 0.2, "GPV", 0.0, curve="G"),)
+        kwargs["curves"] = {"G": ((0.001, 1.0), (0.01, 5.0))}
+    else:
+        kwargs["valves"] = (Valve("V", "A", "B", 0.2, "TCV", 5.0),)
+    tank = Tank("T", elevation=40.0, init_level=5.0, min_level=0.0, max_level=10.0,
+                diameter=10.0)
+    return WaterNetwork(junctions=junctions, reservoirs=(Reservoir("R", 60.0),),
+                        tanks=(tank,), pipes=pipes, **kwargs)
+
+
+@pytest.mark.parametrize("pda", [False, True])
+@pytest.mark.parametrize("pipe_form", [None, "potential", "flow"])
+@pytest.mark.parametrize("device", ["tcv", "pbv", "gpv"])
+def test_a_constant_tracer_is_preserved_with_a_tank_every_pipe_form_and_valve(
+    device, pipe_form, pda
+):
+    kwargs = {"pda": True, "p_req": 15.0} if pda else {}
+    model, state, drivers = build_model(
+        _tank_device_network(device), quality=0.0, pipe_form=pipe_form, **kwargs
+    )
+    drivers["quality.x_boundary"] = torch.full_like(drivers["quality.x_boundary"], 100.0)
+    out = water_steady(model, state, drivers)
+    assert out["quality.x"].tolist() == pytest.approx([100.0] * 3, rel=1e-8)
+
+
+@pytest.mark.parametrize("pda", [False, True])
+def test_storage_tanks_with_quality_are_refused_explicitly(pda):
+    kwargs = {"pda": True, "p_req": 15.0} if pda else {}
+    with pytest.raises(ValueError, match="tank_mode='storage' with quality"):
+        build_model(_tank_device_network("tcv"), quality=0.0, tank_mode="storage", **kwargs)

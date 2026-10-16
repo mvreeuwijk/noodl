@@ -992,7 +992,7 @@ def _drain(factors, conduits=("C5",)):
 
     So every step is SWMM's own fixed point, or sits on the switch. y1 - y2 is ``h1 - h2 -
     dz``, dz the drop between the conduit-end inverts; C5 joins J4 to the outfall."""
-    from noodl.model import StepContext
+    from noodl.contracts import StepContext
 
     net, _, _ = read_swmm_inp(DATA / "tree_dynwave.inp")
     model, state, drivers = build_model(net)
@@ -1444,7 +1444,7 @@ def test_two_barrels_carry_twice_one_barrels_flow_at_equal_heads():
     state: the pass's flow of the pair is exactly twice (offset, conveyance and flow all
     total over the barrels), the per-barrel stored area is the same, and the limits and
     surface areas the closure writes are the barrel-scaled ones."""
-    from noodl.model import StepContext
+    from noodl.contracts import StepContext
     one, state1, drivers1 = build_model(_chain_net(barrels=1))
     two, state2, drivers2 = build_model(_chain_net(barrels=2))
     # fed state: junction 0.2 m, per-barrel flow 0.01 m3/s (so 0.02 for two barrels)
@@ -1712,7 +1712,7 @@ def _drop_sides(tmp_path, name, steps, **build_kwargs):
     net inflow at most the lower storage line there, or above it with at least the upper
     one -- from the drivers of a pass fed the step's result."""
     from noodl.apps.sewer.dynwave import build_dynamic_wave_model
-    from noodl.model import StepContext
+    from noodl.contracts import StepContext
 
     path = tmp_path / f"{name}.inp"
     path.write_text(_drop_variant(name))
@@ -1829,7 +1829,7 @@ def test_gradient_on_a_held_threshold_does_not_depend_on_the_wall_slope(tmp_path
     and 5 (to 1e-10 relative; 5e-13 measured) and matches central differences (1.6e-8
     relative measured)."""
     from noodl.apps.sewer.dynwave import build_dynamic_wave_model
-    from noodl.model import StepContext
+    from noodl.contracts import StepContext
 
     path = tmp_path / "c3_offset_0.1.inp"
     path.write_text(_drop_variant("c3_offset_0.1"))
@@ -1904,7 +1904,7 @@ def test_a_storage_units_area_adds_to_its_conduit_areas_at_the_fed_depth():
     curve's at the previous trial's depth plus the attached conduit ends' (which SWMM does
     NOT zero at a storage node: only regulator ends are, dynwave.c:520-523), before the
     MIN_SURFAREA floor; in SI area (ft2 x QCF/LCF, `_AREA_SI`)."""
-    from noodl.model import StepContext
+    from noodl.contracts import StepContext
     curve = ("functional", 20.0, 1.5, 5.0)
     plain, s0, _ = build_model(_chain_net())
     unit, s1, d1 = build_model(_storage_chain(curve))
@@ -1937,7 +1937,7 @@ def test_storage_surcharges_above_its_full_depth_and_only_with_a_surcharge_depth
     (``sewer.surcharged``) agree on fed depths clear of the hold band. A unit draining at
     its full depth (net inflow -0.2 m3/s at the step start, at rest) is used, so that the
     band is positive wherever the depth is above the full depth."""
-    from noodl.model import StepContext
+    from noodl.contracts import StepContext
 
     def flags(net, depth):
         model, state, drivers = build_model(net)
@@ -2133,7 +2133,7 @@ def test_the_closure_feeds_swmms_regulator_flow_at_the_fed_heads(kind):
     node heads (m3/s = cfs x QCF), its slope SWMM's dqdh (an outlet's a central
     difference; m2/s = cfs/ft x QCF/LCF), its dp_fed the fed head difference."""
     from noodl.apps.sewer import structures as st
-    from noodl.model import StepContext
+    from noodl.contracts import StepContext
     model, state, drivers = build_model(_regulated(kind))
     hyd = model.dynamic_wave
     s = hyd.structures[kind]
@@ -2157,7 +2157,7 @@ def test_orifice_end_areas_join_their_junctions_zeroed_at_a_critical_end():
     """dynwave.c:503-524: an orifice gives each end node half its surfArea (a side
     orifice's ``W(f yFull) L``, L >= 200 ft), but none to its downstream end while it is
     DN_CRITICAL (crest above the downstream head); weirs give none."""
-    from noodl.model import StepContext
+    from noodl.contracts import StepContext
     plain, s0, d0 = build_model(_regulated("weir"))
     model, state, drivers = build_model(_regulated("orifice"))
     hyd = model.dynamic_wave
@@ -2180,7 +2180,7 @@ def test_orifice_end_areas_join_their_junctions_zeroed_at_a_critical_end():
 def test_regulator_end_areas_are_zeroed_at_a_storage_unit():
     """dynwave.c:520-523: at a storage node SWMM zeroes a regulator's end area
     (never a conduit's): J2 a storage unit, its orifice end gives it nothing."""
-    from noodl.model import StepContext
+    from noodl.contracts import StepContext
     model, state, drivers = build_model(_regulated("orifice", storage_at="J2"))
     hyd = model.dynamic_wave
     fed = _fed_heads(model, state, [0.1, 0.2, 0.65])
@@ -2570,6 +2570,123 @@ def test_a_uniform_concentration_stays_uniform_while_the_tree_fills(tmp_path):
                                    rtol=1e-8, atol=0.0)
 
 
+def test_a_withdrawal_removes_the_tracer_at_the_local_concentration(tmp_path):
+    """A negative lateral inflow (withdrawal) is an outflow: it takes water AND mass at the
+    junction's own concentration, whatever the external concentration driver says (here 0,
+    the default). A uniform tracer therefore stays uniform, and the stored amount changes
+    by the loads less the outfall flux less what the withdrawal carries off."""
+    model, drivers, states = _uniform_run(_tree(tmp_path, scale=0.5), 24)
+    state = states[-1]                                    # wet, uniform at 0.1
+    j1 = model.net.nodes.index("J1")
+    inflow = drivers["inflow"].clone()
+    inflow[j1] = -0.5 * float(inflow[j1])
+    tracer_in = torch.full((model.net.n,), 0.1, dtype=F64)
+    tracer_in[j1] = 0.0                                   # the external value must not matter
+    drivers = dict(drivers, inflow=inflow, tracer_in=tracer_in)
+    dt = model.routing_step
+    j1_col = list(model.dynamic_wave.junction_names).index("J1")
+    for _ in range(8):
+        before = state
+        state, _ = simulate_dynamic_wave(model, state, drivers, steps=1)
+        torch.testing.assert_close(state["water_quality.x"],
+                                   torch.full_like(state["water_quality.x"], 0.1),
+                                   rtol=1e-8, atol=0.0)
+        load = 0.1 * float(inflow.clamp(min=0.0).sum())
+        taken = -dt * float(inflow[j1]) * float(state["water_quality.x"][j1_col])
+        stored = float(_amount(state).sum() - _amount(before).sum())
+        assert stored == pytest.approx(
+            dt * (load - _outfall_flux(model, state)) - taken, rel=1e-6, abs=1e-12)
+
+
+def _backwater_junction():
+    """One junction (0.1 m deep) fed back from an outfall held at 0.8 m through one 1 m
+    conduit, 20 s steps: it fills by several control volumes a step, so a withdrawal of
+    0.3 m3/s takes more water in one step than the junction holds at its start."""
+    from noodl.apps.sewer import DynamicWaveOptions, Manhole, Outfall, Pipe, SewerNetwork
+    return SewerNetwork(
+        manholes=(Manhole("J", 0, ground=4, initial_depth=0.1),),
+        pipes=(Pipe("C", "J", "O", 10, 1, 0.013, 0.001),),
+        outfalls=(Outfall("O", -0.01, kind="fixed", stage=0.8),),
+        routing="dynamic_wave", geometry="tabulated",
+        dynamic_wave=DynamicWaveOptions(routing_step=20, max_trials=500,
+                                        head_tolerance=1e-10))
+
+
+def _withdrawn(x0, xb, *, steps=1, withdrawal=0.3, scheme="implicit"):
+    """`_backwater_junction` started at `x0` with boundary concentration `xb` (kg/m3) and
+    `withdrawal` (m3/s) at J: the model, drivers and states (the initial one first)."""
+    model, state, drivers = build_model(_backwater_junction(), quality=True,
+                                        species=("tracer",), scheme=scheme)
+    state = dict(state, **{"water_quality.x": torch.full_like(state["water_quality.x"], x0)})
+    drivers["water_quality.x_boundary"].fill_(xb)
+    drivers["inflow"][model.junction_idx[0]] = -withdrawal
+    states = [state]
+    for _ in range(steps):
+        state, _ = simulate_dynamic_wave(model, state, drivers, steps=1)
+        states.append(state)
+    return model, drivers, states
+
+
+@pytest.mark.parametrize("scheme", ["implicit", "trapezoidal"])
+def test_a_withdrawal_beyond_one_turnover_keeps_a_uniform_tracer_uniform(scheme):
+    """A step that withdraws more water than the junction holds at its start (``dt w >
+    V_start``) still takes the water that entered during the step with its mass: the
+    withdrawal is an outflow of the transport step (``"water_quality.removal"``), not a
+    fraction of the step-start contents capped at all of them. Capped, the reviewed
+    example came out at 0.156858553 from 0.1 everywhere."""
+    model, _, states = _withdrawn(0.1, 0.1, steps=4, scheme=scheme)
+    dt = model.routing_step
+    assert dt * 0.3 > 3.0 * float(states[0]["sewer.quality_volume"][0])
+    for after in states[1:]:
+        torch.testing.assert_close(after["water_quality.x"],
+                                   torch.full_like(after["water_quality.x"], 0.1),
+                                   rtol=1e-10, atol=0.0)
+
+
+def test_a_withdrawal_beyond_one_turnover_balances_the_tracer_mass():
+    """Started at 0.1 against a boundary at 0.2, the stored amount changes every step by
+    what the conduit brings in from the outfall less what the withdrawal takes at the
+    junction's end-of-step concentration (the implicit step's outflow), and the
+    concentration stays between the two."""
+    model, drivers, states = _withdrawn(0.1, 0.2, steps=5)
+    dt = model.routing_step
+    col = int(model.outfall_link_idx[0])
+    assert dt * 0.3 > float(states[0]["sewer.quality_volume"][0])
+    for before, after in zip(states[:-1], states[1:], strict=True):
+        q = float(after["water.q"][col])                  # J -> O positive
+        x = float(after["water_quality.x"][0])
+        moved = dt * (max(-q, 0.0) * 0.2 - max(q, 0.0) * x - 0.3 * x)
+        stored = float(_amount(after).sum() - _amount(before).sum())
+        assert stored == pytest.approx(moved, rel=1e-9, abs=1e-15)
+        assert 0.1 < x < 0.2
+
+
+def test_quality_gradient_wrt_a_withdrawal_beyond_one_turnover_matches_finite_differences():
+    """d(x)/d(inflow) at the withdrawing junction, through the removal rate, agrees with
+    the central difference."""
+    model, state, drivers = build_model(_backwater_junction(), quality=True,
+                                        species=("tracer",))
+    state = dict(state, **{"water_quality.x": torch.full_like(state["water_quality.x"], 0.1)})
+    drivers["water_quality.x_boundary"].fill_(0.2)
+    k = int(model.junction_idx[0])
+
+    def run(infl):
+        out, _ = simulate_dynamic_wave(model, state, dict(drivers, inflow=infl), steps=2)
+        return out["water_quality.x"].sum()
+
+    inflow = drivers["inflow"].clone()
+    inflow[k] = -0.3
+    a = inflow.clone().requires_grad_(True)
+    run(a).backward()
+    h = 1e-6
+    e = torch.zeros_like(inflow)
+    e[k] = h
+    with torch.no_grad():
+        fd = float(run(inflow + e) - run(inflow - e)) / (2 * h)
+    assert abs(fd) > 1e-6
+    assert float(a.grad[k]) == pytest.approx(fd, rel=1e-4, abs=1e-9)
+
+
 def test_a_flooded_junction_loses_its_contents_with_the_overflow():
     """The flooding tree (J2 held at y_max from step 21, its overflow lost, no ponding): a
     uniform concentration stays uniform through the flood, and the tracer amount changes by
@@ -2712,6 +2829,32 @@ def test_sulfide_is_generated_on_the_dynamic_wave_tree(tmp_path):
     assert 0.0 < float(x[j1, 0]) < float(x[j1, 2])
 
 
+def test_every_partial_species_selection_steps_on_the_dynamic_wave(tmp_path):
+    """Each documented selection steps on the dynamic wave, and each species evolves as in
+    the full ``("bod", "sulfide", "tracer")`` run (BOD and the tracer loaded at J1): BOD
+    alone (a state with no species axis) decays as beside the others, a tracer alone is
+    conservative, and the order of the names does not change the chemistry."""
+    net = _tree(tmp_path, scale=0.5)
+
+    def run(species):
+        loaded = tuple(s for s in species if s != "sulfide")
+        model, _, states = _tracer_run(net, 6, {"J1": 0.3}, species=species,
+                                       loaded=loaded)
+        x = states[-1]["water_quality.x"]
+        return {name: (x if x.dim() == 1 else x[..., i]) for i, name in enumerate(species)}
+
+    full = run(("bod", "sulfide", "tracer"))
+    assert float(full["bod"].sum()) < float(full["tracer"].sum())      # BOD decays
+    assert float(full["sulfide"].max()) > 0.0                           # sulfide generated
+    for species in [("bod",), ("tracer",), ("bod", "tracer"), ("bod", "sulfide"),
+                    ("sulfide", "bod")]:
+        got = run(species)
+        assert set(got) == set(species)
+        for name, x in got.items():
+            assert x.shape == full[name].shape
+            torch.testing.assert_close(x, full[name], rtol=1e-9, atol=1e-15)
+
+
 def test_quality_runs_batched(tmp_path):
     """A batched inflow expands the multi-species state ``(junctions, species)`` too, and
     each member is its own run."""
@@ -2795,7 +2938,7 @@ def test_air_geometry_is_the_circle_at_the_link_depth_per_barrel():
     a quarter of the resistance of one at the same depth."""
     from noodl.apps.sewer import geometry as geom
     from noodl.apps.sewer.air import Headspace
-    from noodl.model import StepContext
+    from noodl.contracts import StepContext
     published = {}
     diameter = torch.tensor([0.45], dtype=F64)
     for barrels in (1, 2):
@@ -3028,3 +3171,31 @@ def test_a_ponding_junction_rising_through_its_full_head_is_monotone_and_unwalle
     assert wall > 5.0 * storage
     # the ponded line above H* carries the larger area: slope 2 A_hi / dt = 2 * 4.5 / 5
     assert float(slope[-1, 0]) == pytest.approx(2.0 * 4.5 / 5.0)
+
+
+def test_quality_gradient_wrt_inflow_at_a_zero_inflow_junction_matches_finite_differences(
+        tmp_path):
+    """At inflow == 0 (the default at most manholes) the inflow-side and withdrawal-side
+    splits must keep the derivative on the correct side: d(sum x)/d(inflow) at a junction
+    with no lateral flow agrees with the forward difference (a `clamp` gave zero or the
+    wrong sign there)."""
+    model, state, drivers = build_model(_tree(tmp_path), quality=True,
+                                        species=("tracer",))
+    inflow = drivers["inflow"].clone()
+    k = model.junction_idx.tolist()[3]      # J4 of the tree has no lateral inflow
+    assert float(inflow[k]) == 0.0
+    drivers = dict(drivers, tracer_in=torch.full((model.net.n,), 0.2, dtype=F64))
+
+    def run(infl):
+        out, _ = simulate_dynamic_wave(model, state, dict(drivers, inflow=infl), steps=3)
+        return out["water_quality.x"].sum()
+
+    a = inflow.clone().requires_grad_(True)
+    run(a).backward()
+    h = 1e-6
+    e = torch.zeros_like(inflow)
+    e[k] = h
+    with torch.no_grad():
+        fd = float(run(inflow + e) - run(inflow)) / h
+    assert float(a.grad[k]) == pytest.approx(fd, rel=1e-3, abs=1e-8)
+    assert abs(fd) > 1e-6

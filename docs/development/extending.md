@@ -130,7 +130,8 @@ real application adds more of the same kind of thing, in a fixed place:
 - **Closures with `integrates` declared.** A closure that only reads the current state and
   drivers to produce new driver values needs no declaration. One that instead **integrates**
   some state over the step's own interval — advances a counter, a controller, a stored level —
-  must declare `integrates = True` (see `noodl.model.Closure`, `StepContext`) so
+  must declare `integrates = True` (see `noodl.contracts.IntegratingClosure` and
+  `noodl.contracts.StepContext`) so
   `Model` calls it as `closure(state, drivers, ctx)` with the interval to advance by, and so
   `Model.steady()` (which has no interval) refuses it by name instead of silently either
   skipping it or integrating over an undefined `dt`.
@@ -143,6 +144,69 @@ real application adds more of the same kind of thing, in a fixed place:
 applications, as above — a new `ConstitutiveLaw` and a new builder composing existing layers. A new
 solver or layer class is a framework change, not an extension: it needs the same design,
 testing and review as any other change under `src/noodl/layers` or `src/noodl/solvers`.
+
+## The closure contract
+
+A closure is any callable that adds or replaces drivers. `noodl.contracts` is where the
+contract is written down; `Model` reads every closure through it, once, at construction.
+
+**What the contract covers, and what it does not.** It fixes how a closure is called (two
+arguments, or three with a `StepContext` when it declares `integrates = True`; the arity is
+checked against that declaration in both directions) and which optional attributes it may
+declare. **Units** are checked, as strings and not as dimensions: they live with the keys, in
+`noodl.refs.Field.unit` (a layer's own keys, through `model.refs`), in the closure's
+`input_specs` (the `unit` of each key it reads) and in its `output_units`
+(`{key: unit}` of the driver keys it writes and the state it carries), which the model reads
+through `ClosureSpec.input_specs` and `ClosureSpec.output_units`. `Model.check()` reports
+`unit-mismatch` (a warning) when a closure declares a unit that differs from the unit of the
+layer field or declared input the key refers to, and `unit-undeclared` (info) for a field with
+no unit. Trivially equivalent spellings agree (`m3`, `m^3`, `m**3`, `m³`; `1`, `-`, an empty
+unit, `dimensionless`; `°C`, `degC`; see `noodl.refs.normalize_unit`); nothing is converted and
+there is no unit algebra, so `kg/s` and `kg/h` are different. A closure that declares no unit
+is not checked. Nor does it govern **lifecycle and mutation** (what may change after construction, devices,
+copying and pickling): that is [Mutation, devices and serialization](../concepts/ownership.md).
+
+- **Algebraic closure**: `closure(state, drivers) -> {key: tensor}`. It sees the state and the
+  drivers and returns driver entries. It never writes a layer's own state key.
+- **Integrating closure**: declares `integrates = True` and is called
+  `closure(state, drivers, ctx)` with a `StepContext` (`ctx.dt`, `ctx.t`). `ctx` is `None` for a
+  query (`residuals`, `current_flows`): evaluate the algebraic outputs without advancing. Under
+  `steady()` (`ctx.dt is None`) an integrating closure is refused by name.
+- **State it carries**: `state_keys = ("tank.h",)` with `integrates` declared (`True` if the
+  closure advances it, `False` if something else does).
+
+```py
+class Tank:
+    integrates = True
+    state_keys = ("tank.h",)
+    inputs = ("tank.h", "inflow")
+    outputs = ("outflow",)
+    output_units = {"tank.h": "m", "outflow": "m3/s"}
+
+    def __call__(self, state, drivers, ctx):
+        ...
+```
+
+Everything else a closure may say about itself is one of the optional attributes in
+`noodl.contracts.CLOSURE_ATTRIBUTES` (`integrates`, `state_keys`, `key_labels`, `inputs`,
+`outputs`, `input_specs`, `output_units`, `edge_kinds`, `requires_coupling`, `reads_flows_of`,
+`species_columns`), each with its meaning and its consumer. Declare them as tuples of names:
+a bare string (`outputs = "rho_amb"`) or a non-bool `integrates` is refused with a
+`TypeError`. `closure_spec` is the only code that reads these attributes; do not `getattr` them
+elsewhere.
+
+**Species by column.** A closure or reaction that addresses species by column index declares
+`species_columns = {"layer": {"bod": 0, "sulfide": 1}}`; `check_species_columns` verifies it
+against the layer's `species_names`, so a default column order over a layer that orders its
+species differently is refused at construction rather than mixing the species up. Build the
+columns with `noodl.layout.species_columns(layer.species_names, ["bod", "sulfide"],
+where="...")`.
+
+**Layout.** Per-node tensors are `(..., n)` or `(..., n, K)`; the batch axes come first. Do not
+re-derive that rule: `noodl.layout` has `as_stacked` (stacked `(..., n, K)` first, reduced
+`(..., n)` also for one species), `broadcast_batch` (batch axes of several tensors, expanded
+as views), `per_instance` (a value per instance that cannot broadcast against a node axis)
+and `write_at`.
 
 ## Checking it
 

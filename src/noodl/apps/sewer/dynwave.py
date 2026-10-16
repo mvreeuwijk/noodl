@@ -26,6 +26,7 @@ from typing import TYPE_CHECKING
 
 import torch
 
+from noodl import layout
 from noodl._broadcast import broadcast_shapes
 from noodl.apps.sewer import geometry as geom
 from noodl.apps.sewer.air import (
@@ -94,11 +95,12 @@ from noodl.apps.sewer.xsect_tables import (
     critical_depth,
     normal_depth_ft,
 )
+from noodl.contracts import StepContext
 from noodl.elements.base import ConstitutiveLaw
 from noodl.layers.kirchhoff import KirchhoffLayer
 from noodl.layers.reaction import Reaction
 from noodl.layers.transport import TransportLayer, active_interior
-from noodl.model import Model, StepContext
+from noodl.model import Model
 from noodl.nodesources import NodeSource
 from noodl.topology import Network
 
@@ -152,14 +154,13 @@ K_ANCHOR = 1.0e-6
 #: Cap on the slope of the normal-flow slope switch's wall (`DynamicWaveConduit`), as a
 #: multiple of the smaller end junction's grounding (its storage slope ``2 A_s/dt`` plus its
 #: conduits' conveyance, m2/s). The wall's fixed points do not depend on its slope. A wall
-#: steeper than the junction it acts on makes the conduit's flow an S-curve in the head
-#: (flat at q_norm, the wall, the momentum line) that the damped Newton head solve cycles
-#: on: at 10 x the grounding the tree's drain-down failed the head solve (50 iterations at t
-#: = 520 s); at 1 x the slopes a Newton step sees differ by at most 2, which its 0.75
-#: damping contracts, and a conduit between two junctions settles on its switch by about
-#: half per pass. Its round-off floor, ``S eps |H| / 2``, is then that of the junction's own
-#: storage slope. The drop-end area switch's wall (`JunctionStorage`) uses the same factor on
-#: its own junction's grounding above the threshold, for the same reason.
+#: steeper than the junction it acts on makes the conduit's flow an S-curve in the head (flat at
+#: q_norm, the wall, the momentum line) that the damped Newton head solve cycles on (drain-down
+#: evidence: docs/design/sewer.md#wall-slope-k_switch); at 1 x the slopes a Newton step sees differ
+#: by at most 2, which its 0.75 damping contracts, and a conduit between two junctions settles on
+#: its switch by about half per pass. Its round-off floor, ``S eps |H| / 2``, is then that of the
+#: junction's own storage slope. The drop-end area switch's wall (`JunctionStorage`) uses the same
+#: factor on its own junction's grounding above the threshold, for the same reason.
 K_SWITCH = 1.0
 #: Newton's absolute residual tolerance for the head solve (m3/s): a junction balance error
 #: of `SOLVE_ATOL` dt m3 at most, far below the head tolerance times any surface area. It is
@@ -181,9 +182,7 @@ HEAD_SOLVE_NEWTON = {"line_search": "convex", "step_floor": 16.0}
 #: The head solve's inner linear solver is the dense LU (``linear_solver="direct"``) up to
 #: this many junctions, and the layer's ``"auto"`` (SciPy's sparse LU) above it: on a small
 #: network the dense factorisation costs a handful of tensor operations against SuperLU's
-#: per-call conversion (measured on `benchmarks/sewer_dynwave_speed.py`'s binary trees, ms
-#: per pass dense / sparse: 17.6 / 18.3 at 63 junctions, 18.5 / 19.3 at 127, 21.4 / 20.2 at
-#: 255).
+#: per-call conversion (measurements: docs/design/sewer.md#dense-versus-sparse-head-solve).
 DENSE_SOLVE_MAX_JUNCTIONS = 128
 #: SWMM's default HEAD_TOLERANCE, 0.005 ft (`dynwave.c:63`, ``DEFAULT_HEADTOL``), in m.
 DEFAULT_HEAD_TOLERANCE = 0.005 * LCF
@@ -1095,6 +1094,9 @@ class DynamicWaveHydraulics:
     on the tree's filling a uniform load of 1 came out between 0 and 5.) The driver
     ``"<quality_layer>.overflow_loss"`` (per junction, 0..1) is the fraction
     ``dt overflow / V_start`` of the step-start contents that floods out (`OverflowLoss`).
+    A withdrawal (a negative lateral inflow) is the transport step's own outflow, the
+    driver ``"<quality_layer>.removal"`` (`_quality_volume`), at the end-of-step
+    concentration and without a cap.
     The closure also writes the reporting keys ``"sewer.R_h"`` (hydraulic radius, m) and
     ``"sewer.d_m"`` (hydraulic mean depth A/T, m; 0 for a conduit flowing full) of one
     barrel at the link depth, on the exact circle (as the kinematic path does at SWMM's
@@ -1125,6 +1127,9 @@ class DynamicWaveHydraulics:
     integrates = True
     state_keys = ("sewer.junction_depth", "sewer.pipe_flow", "sewer.mid_area",
                   "sewer.net_inflow")
+    output_units = {"sewer.junction_depth": "m", "sewer.pipe_flow": "m3/s",
+                    "sewer.mid_area": "m2", "sewer.net_inflow": "m3/s",
+                    "sewer.quality_volume": "m3"}
 
     def __init__(self, graph: Network, net: SewerNetwork, *, layer: str = "water",
                  quality_layer: str | None = None, air: bool = False,
@@ -1132,6 +1137,10 @@ class DynamicWaveHydraulics:
         self.net = graph
         self.layer = layer
         self.quality_layer = quality_layer
+        # the quality layer's species count and time scheme (`_quality_parts` sets them):
+        # the withdrawal's removal rate is written in its layout and for its scheme
+        self.quality_species = 1
+        self.quality_scheme = "implicit"
         self.air = air
         self.air_quality_layer = air_quality_layer
         if quality_layer is not None:
@@ -2318,7 +2327,11 @@ class DynamicWaveHydraulics:
         out.update({"water.flood_excess": excess, "water.flooded": flooded.to(F64),
                     "sewer.overflow": overflow})
         if self.quality_layer is not None:
-            out.update(self._quality_volume(state, out["sewer.net_inflow"], overflow, dt))
+            # `where`, not `clamp`: the derivative stays on the withdrawal side at zero inflow
+            lateral = inflow[..., self.junction_idx]
+            withdrawal = torch.where(lateral < 0, -lateral, 0.0 * lateral)
+            out.update(self._quality_volume(state, out["sewer.net_inflow"], overflow, dt,
+                                            withdrawal))
         return out
 
     def _hydraulic_radius_depth(self, depth_ft: Tensor) -> dict[str, Tensor]:
@@ -2392,19 +2405,38 @@ class DynamicWaveHydraulics:
         return torch.where(self.is_storage, stored, plain)
 
     def _quality_volume(self, state: Mapping, net_inflow: Tensor, overflow: Tensor,
-                        dt: float) -> dict[str, Tensor]:
+                        dt: float, withdrawal: Tensor | None = None) -> dict[str, Tensor]:
         """The transport control volumes at the end of the step and the flooded fraction
         (class docstring, "Quality"): ``V_end = max(V_start + dt (N - overflow),
         CAPACITY_FLOOR)`` from the pinned step-start ``"sewer.quality_volume"``, and
         ``dt overflow / V_start`` capped at 1. The cap binds only where one step's overflow
         exceeds the junction's whole step-start contents: all of them leave, and the excess
         overflow is taken from the step's inflow without its mass, so the water balance (and
-        a uniform concentration) holds there only to that excess."""
+        a uniform concentration) holds there only to that excess.
+
+        `withdrawal` (m3/s, >= 0, per junction: a negative lateral inflow) is already in
+        `net_inflow`. It is an outflow of the transport step itself, at the junction's own
+        concentration, not a source at the external one: the driver
+        ``"<quality_layer>.removal"`` (1/s) is the rate whose amount loss over the step is
+        ``dt withdrawal x``, i.e. ``withdrawal / V_end`` for the implicit scheme
+        (``V_end x_end`` removed at the new level) and ``2 withdrawal / (V_start + V_end)``
+        for the trapezoidal one (half the step at each level). It has no cap: water that
+        enters during the step and is withdrawn again takes its mass with it, so a uniform
+        concentration stays uniform however many control volumes the step withdraws. (The
+        rate is one per step; `Model` substeps of the quality layer would interpolate the
+        capacity under it and so would not keep this exactly.)"""
         start = state["sewer.quality_volume"]
         end = torch.clamp(start + dt * (net_inflow - overflow), min=CAPACITY_FLOOR)
         lost = torch.clamp(dt * overflow / start, max=1.0)
-        return {"sewer.quality_volume": end, f"{self.quality_layer}.capacity": end,
-                f"{self.quality_layer}.overflow_loss": lost}
+        out = {"sewer.quality_volume": end, f"{self.quality_layer}.capacity": end,
+               f"{self.quality_layer}.overflow_loss": lost}
+        if withdrawal is not None:
+            held = 0.5 * (start + end) if self.quality_scheme == "trapezoidal" else end
+            rate = withdrawal / held
+            if self.quality_species > 1:
+                rate = rate.unsqueeze(-1).expand(*rate.shape, self.quality_species)
+            out[f"{self.quality_layer}.removal"] = rate
+        return out
 
     def quality_capacity(self, wetted: Tensor, stored: Tensor) -> Tensor:
         """The geometric quality capacity (m3, per junction) from the conduits'
@@ -2681,8 +2713,8 @@ def build_dynamic_wave_model(net: SewerNetwork, *, iterate_tol: float | None = N
     `iterate_flow_tol`); the heads are never judged alone. On the normal-flow slope switch
     (`DynamicWaveConduit`) the heads
     bound the flow residual only through the wall slope S over the junction's grounding,
-    so a heads-only test can stop a pass short of the fixed point (a flow residual of
-    3e-5 m3/s was measured on the tree's drain-down). The state is
+    so a heads-only test can stop a pass short of the fixed point (an example residual:
+    docs/design/sewer.md#wall-slope-k_switch). The state is
     SWMM's initial state (`DynamicWaveHydraulics.initial_state`: cold and dry, or its
     InitDepth and InitFlow). Attached to the model: `junction_idx`, `junction_invert` (m),
     `outfall_link_idx` (each outfall's link's ``"water.q"`` column), `outfall_stage` (the
@@ -2790,7 +2822,8 @@ def build_dynamic_wave_model(net: SewerNetwork, *, iterate_tol: float | None = N
             layers["air_quality"] = air_parts["layer"]
             tolerances["air_quality"] = QUALITY_ITERATE_TOL
             closures.append(H2STransfer(graph.n, closure.junction_idx,
-                                        sulfide=tuple(species).index("sulfide"),
+                                        sulfide=layout.species_columns(
+                                            species, ["sulfide"], where="build_model")[0],
                                         out_pipe=parts["out_pipe"]))
     # "before_transport": SWMM reacts a conduit's step-start concentration, then mixes it
     # with the inflow (qualrout.c:337-341), as the kinematic path does
@@ -2947,6 +2980,8 @@ def _quality_parts(net: SewerNetwork, graph: Network, closure: DynamicWaveHydrau
             f"the BOD), got {species!r}")
     junctions = list(closure.junction_names)
     k = len(species)
+    closure.quality_species = k
+    closure.quality_scheme = scheme
     layer = TransportLayer(
         graph, "water_quality", capacity=torch.ones(len(junctions), dtype=F64),
         flow_kind=closure.edge_kinds, boundary=list(closure.outfall_names),
@@ -2973,7 +3008,8 @@ def _quality_parts(net: SewerNetwork, graph: Network, closure: DynamicWaveHydrau
                               n_species=k)}
     if "bod" not in species:
         return parts
-    sulfide = species.index("sulfide") if "sulfide" in species else None
+    sulfide = (layout.species_columns(species, ["sulfide"], where="build_model")[0]
+               if "sulfide" in species else None)
     out_pipe = None
     if sulfide is not None:
         outgoing: dict[str, list[int]] = {name: [] for name in junctions}
@@ -2996,8 +3032,9 @@ def _quality_parts(net: SewerNetwork, graph: Network, closure: DynamicWaveHydrau
     drivers["T_water"] = torch.tensor(18.0, dtype=F64)
     specs["T_water"] = dict(description="wastewater temperature", unit="degC")
     parts["reactions"].insert(0, ("water_quality", SulfideGeneration(
-        bod=species.index("bod"), sulfide=sulfide, out_pipe=out_pipe,
-        manhole_idx=closure.junction_idx, n_nodes=graph.n)))
+        bod=layout.species_columns(species, ["bod"], where="build_model")[0],
+        sulfide=sulfide, out_pipe=out_pipe,
+        manhole_idx=closure.junction_idx, n_nodes=graph.n, n_species=k)))
     return parts
 
 

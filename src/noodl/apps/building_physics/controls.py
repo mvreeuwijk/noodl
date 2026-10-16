@@ -50,6 +50,7 @@ from torch import Tensor
 
 from noodl._broadcast import broadcast_shapes
 from noodl.apps.building_physics.inputs import scatter
+from noodl.layout import as_stacked, species_columns
 
 F64 = torch.float64
 State = Mapping[str, Tensor]
@@ -78,8 +79,8 @@ def _clip(x: Tensor, low, high) -> Tensor:
     """`x` clipped to `[low, high]`, the bounds floats or tensors. A bound replaces `x` only
     where `x` is strictly beyond it, so at the corner (`x` equal to a bound) the output is
     `x` itself: d/dx = 1 and the bound gets no gradient, whichever type it is
-    (`torch.clamp` gives d/dx = 0 there for a float bound and splits the gradient in
-    halves for a tensor one)."""
+    (`torch.clamp`'s gradient there depends on the torch version: d/dx = 1 in torch 2.2,
+    0 in current versions for a float bound, and split in halves for a tensor one)."""
     low, high = _f64(low), _f64(high)
     y = torch.where(x < low, low, x)
     return torch.where(y > high, high, y)
@@ -992,16 +993,24 @@ def node_mass_fraction(node, species: int | str = 0) -> NamedReading:
             if layer.species_names is None or species not in layer.species_names:
                 raise KeyError(f"controls: {label}: the species layer has no species "
                                f"{species!r} (its species are {layer.species_names})")
-            k = layer.species_names.index(species)
+            k = species_columns(layer.species_names, [species], where=f"controls: {label}")[0]
         k = int(k)
         if not 0 <= k < layer.n_species:
             raise IndexError(f"controls: {label}: the species layer has {layer.n_species} "
                              f"species, not position {k}")
-        column = k * layer.n_i + i
 
         def read(state: State, drivers: Drivers) -> Tensor:
-            stacked, _ = layer._to_stacked(state["species.x"], layer.n_i, "species.x")
-            return stacked[..., column]
+            x = state["species.x"]
+            try:
+                stacked, _ = as_stacked(x, layer.n_i, layer.n_species, name="species.x",
+                                        where="controls")
+            except ValueError:
+                raise ValueError(
+                    f"TransportLayer '{layer.name}': species.x must have trailing shape "
+                    f"({layer.n_i}, {layer.n_species}) or, for n_species=1, ({layer.n_i},); "
+                    f"got {tuple(x.shape)}"
+                ) from None
+            return stacked[..., i, k]
 
         return FunctionReading(read, key="species.x")
 

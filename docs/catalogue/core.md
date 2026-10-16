@@ -29,7 +29,7 @@ The conservation layers and the model that steps them.
 | `Model`<br><small>`noodl.model`</small> | Layers on one `Network`, stepped together. See the module docstring for the keys. | `Model(net, layers, closures=(), reactions=(), coupling='pingpong', iterate_tol=None, iterate_max=20, substeps=None, adjoint_rtol=1e-10, iterate_relaxation=0.5, reaction_order='after_transport', iterate_acceleration=None, iterate_memory=5, iterate_flow_tol=None, iterate_on_limit='raise')` |
 | `AllocatedFlowLayer`<br><small>also `CapacitatedTransferLayer`</small><br><small>`noodl.layers`</small> | Flows allocated by rule, not by a potential: each edge's requested flow is clipped to the arc's capacity and the receiving node's free storage, one explicit step at a time, conserving storage exactly (WSIMOD's push/pull semantics). `quantity`, `unit` and `flow_unit` are reported by `model.refs`, never used numerically. | `AllocatedFlowLayer(net, name, kind, *, s_max, c_arc, preference=None, mode='hard', tau=None, n_passes=5, quantity='storage', unit='', flow_unit='')` |
 | `KirchhoffLayer`<br><small>`noodl.layers`</small> | Flows driven by a potential (pressure, head): solves nodal conservation `A_I g(A^T phi) = s_I` for the interior potentials by Newton's method, with the constitutive laws on its edge kinds, drives added to the potential differences, and prescribed potentials at its boundary nodes; differentiable through the converged solution. `flow_unit` is reported by `model.refs`, never used numerically. | `KirchhoffLayer(net, name, laws, drives=(), boundary=(), linear_solver='auto', *, node_sources=(), quantity='potential', unit='', flow_unit='', phasor=False, analytic_primal=False, newton_defaults=None)` |
-| `TransportLayer`<br><small>`noodl.layers`</small> | dx/dt = M x + N x_b + sources / capacity on this layer's ACTIVE interior nodes. | `TransportLayer(net, name, *, capacity, flow_kind, boundary, n_species=1, carrier=1.0, transmission=None, kinetics=None, removal=None, conduction_kind=None, conductance=None, dilution=None, storage_free=(), scheme='exact', linear_solver='auto', quantity='scalar', unit='', species_names=None, source_unit='', capacity_unit='', flow_unit='')` |
+| `TransportLayer`<br><small>`noodl.layers`</small> | dx/dt = M x + N x_b + sources / capacity on this layer's ACTIVE interior nodes. | `TransportLayer(net, name, *, capacity, flow_kind, boundary, n_species=1, carrier=1.0, transmission=None, kinetics=None, removal=None, conduction_kind=None, conductance=None, dilution=None, dilution_mode='signed', storage_free=(), scheme='exact', linear_solver='auto', quantity='scalar', unit='', species_names=None, source_unit='', capacity_unit='', flow_unit='')` |
 | `CoupledModel`<br><small>`noodl.couple`</small> | Returned by `union`. `.step` takes and returns `{model_tag: State}` / `{model_tag: Drivers}` -- each model keeps its own dicts; nothing is merged. | `CoupledModel(models, links, aliases, substeps, *, relaxation=0.5, iterate_rtol=1e-08, iterate_atol=0.0, iterate_max=50, adjoint_rtol=1e-10)` |
 
 ## Constitutive laws
@@ -74,6 +74,16 @@ Terms added to an edge's potential difference (stack, wind, fans).
 | `WindProfile`<br><small>`noodl.drives`</small> | CONTAM wind pressure profile: Cp versus relative wind angle, periodic in the angle. | `WindProfile(angles_deg, cp, *, curve='linear')` |
 | `Wind`<br><small>`noodl.drives`</small> | Wind pressure on envelope paths (CONTAM TN 1887r1 section 3.15). Drivers: `rho_amb` in kg/m3, `V_met` in m/s and `theta_w` in the unit the `azimuth` edge attribute uses (degrees for networks read from CONTAM). | `Wind(kind, *, sign, envelope, azimuth, ch, cp_const, profile_index, profiles=(), rho_key='rho_amb', speed_key='V_met', direction_key='theta_w')` |
 
+## Closures
+
+Functions of the state that compute drivers each step (densities, flows, levels).
+
+| Name | What it does | How to call it |
+|---|---|---|
+| `AlgebraicClosure`<br><small>`noodl.contracts`</small> | A closure that only computes drivers from the state and the drivers: called as `closure(state, drivers)`, it returns the driver entries it adds or replaces. | `AlgebraicClosure(...)` |
+| `IntegratingClosure`<br><small>`noodl.contracts`</small> | A closure that advances state of its own over the step (`integrates = True`). | `IntegratingClosure(...)` |
+| `ClosureSpec`<br><small>`noodl.contracts`</small> | A closure and its declarations, read once by `closure_spec`. | `ClosureSpec(closure, label, integrates, declares_integrates, state_keys, key_labels, reads, writes, edge_kinds, requires_coupling, reads_flows_of, species_columns, output_units=<factory>, owner='Model')` |
+
 ## Reactions
 
 Transformations applied to transported species each step.
@@ -82,15 +92,25 @@ Transformations applied to transported species each step.
 |---|---|---|
 | `FirstOrderDecay`<br><small>`noodl.layers`</small> | ``x <- x * exp(-rate * dt)``; ``rate`` broadcasts against ``x``. | `FirstOrderDecay(rate)` |
 
+## Files
+
+Readers and writers of other tools' file formats.
+
+| Name | What it does | How to call it |
+|---|---|---|
+| `write_at`<br><small>`noodl.layout`</small> | `target` with `value` written (`add=True`: ADDED) at node `position`, in the caller's own layout (reduced `(..., n)` or stacked `(..., n, 1)`) but not necessarily its own shape: a batched `value` written into an unbatched `target` broadcasts the target up to the value's batch. Never writes into `target` itself. `where` prefixes the layout error. | `write_at(target, n, position, value, *, add=False, where='layout.write_at')` |
+
 ## Other classes
 
 Supporting types.
 
 | Name | What it does | How to call it |
 |---|---|---|
-| `StepContext`<br><small>`noodl.model`</small> | What a state transition needs from the model: the interval it must integrate over (`None` under `steady()`, which an integrating closure refuses) and, when the caller tracks it, the time at the start of the step. | `StepContext(dt, t=None)` |
+| `StepContext`<br><small>`noodl.contracts`</small> | What a state transition needs from the model: the interval it must integrate over (`None` under `steady()`, which an integrating closure refuses) and, when the caller tracks it, the time at the start of the step. | `StepContext(dt, t=None)` |
+| `ClosureAttribute`<br><small>`noodl.contracts`</small> | One optional attribute of a closure: its name, the type it must have, what it defaults to when absent, what it means and which code consumes it. | `ClosureAttribute(name, type, default, meaning, consumer)` |
 | `Field`<br><small>`noodl.refs`</small> | A state or driver key that also knows the layout of the tensor stored under it. | `Field(key, *, role, layer, axis, labels, ordering, settable=None, n_species=1, species=None, quantity='', unit='', required='optional', default=0.0, description='', dtype=torch.float64, device='cpu', aliases=None, column=False, scalar=False)` |
 | `LayerRef`<br><small>`noodl.refs`</small> | One registered layer of a model, with its keys as discoverable `Field` attributes. | `LayerRef(name, layer, kind, *, flow_owner=None)` |
+| `KeyOwnership`<br><small>`noodl.refs`</small> | Who writes and who reads one key of a model: `writers` and `readers` are tuples of `"layer <name>"`, `"closure <label>"` or `"caller"` (the dictionary the caller gives). `field` is the key's `Field` when the model knows its layout. Closure entries come from the closure's DECLARATIONS (`inputs`, `outputs`, `state_keys`), so a closure that declares nothing is absent. | `KeyOwnership(key, field, writers, readers)` |
 | `LayerRefs`<br><small>`noodl.refs`</small> | Registered layer name -> `LayerRef`, plus the model's closure-carried keys. | `LayerRefs(model)` |
 | `Issue`<br><small>`noodl.validation`</small> | One finding: `level` is `"error"`, `"warning"` or `"info"`; `key` the key concerned, if any. | `Issue(level, code, message, key=None)` |
 | `InputRow`<br><small>`noodl.validation`</small> | One known key: what is expected and what was given. | `InputRow(key, role, layer, required, ordering, expected, unit, given, status)` |
@@ -109,7 +129,22 @@ Calculations and helpers.
 
 | Name | What it does | How to call it |
 |---|---|---|
+| `closure_spec`<br><small>`noodl.contracts`</small> | Read `closure`'s declarations into a `ClosureSpec`: the only reader of the closure attributes (`CLOSURE_ATTRIBUTES`). `index` is the closure's position, for the message about a non-callable; `owner` prefixes every message. | `closure_spec(closure, *, index, owner='Model')` |
+| `call_closure`<br><small>`noodl.contracts`</small> | Call a closure (or its `ClosureSpec`) by the one dispatch rule: three arguments for an integrating closure, two otherwise. For callers outside `Model` that run a closure themselves; a bare closure is read with `closure_spec` first. | `call_closure(closure_or_spec, state, drivers, ctx=None)` |
+| `reaction_species_columns`<br><small>`noodl.contracts`</small> | A `Reaction`'s optional `species_columns` (the same member as a closure's), `{}` when it declares none. `TypeError` if malformed. | `reaction_species_columns(reaction)` |
+| `check_species_columns`<br><small>`noodl.contracts`</small> | Raise `ValueError` unless every `{layer: {name: column}}` in `declared` names a transport layer of `transport`, has `column < n_species`, and, when the layer has `species_names`, `species_names[column] == name`. A layer without `species_names` cannot verify names, so it accepts only declarations that give distinct columns. `label` names the closure or reaction in the message. | `check_species_columns(label, declared, transport)` |
+| `batch_shape`<br><small>`noodl.layout`</small> | The batch shape of `x`: its shape without its last `n_trailing` physical dimensions. `ValueError` if `x` has fewer dimensions than that. | `batch_shape(x, n_trailing)` |
+| `broadcast_batch`<br><small>`noodl.layout`</small> | Broadcast the batch shapes of `items`, each `(tensor, number of trailing physical dims)`. Returns the common batch shape and every tensor `.expand()`-ed to that batch plus its own trailing shape (views, no copies). The batch is aligned on the LEFT of the physical axes, never against them, so a batch of size `n` cannot be mistaken for a node axis. `RuntimeError` naming the shapes if the batches do not broadcast. | `broadcast_batch(*items)` |
+| `per_instance`<br><small>`noodl.layout`</small> | A float, or a tensor with one value per instance `(B...)`, as `(B..., 1, ...)` with `n_trailing` trailing singleton axes, in `like`'s dtype and device. It then broadcasts against `like` `(B..., physical...)` over the batch only, never against a physical axis (a batch of size `n` is not a node axis). `RuntimeError` if its batch does not broadcast with `like`'s. | `per_instance(value, like, n_trailing)` |
+| `is_stacked`<br><small>`noodl.layout`</small> | True when `x` is in STACKED layout `(..., n, K)`: at least `min_dim` dimensions (never fewer than 2) and trailing shape `(n, K)`. With `K == 1` this is the `(..., n, 1)` column, as opposed to the reduced `(..., n)`. | `is_stacked(x, n, K=1, *, min_dim=2)` |
+| `as_stacked`<br><small>`noodl.layout`</small> | `(x as (..., n, K), reduced?)` by the one rule: stacked `(..., n, K)` first; for `K == 1` also reduced `(..., n)`, returned with a trailing axis and `reduced=True`. `min_dim` is the fewest dimensions of the stacked form (the reduced form needs one fewer): 3 where the leading axis is time. `ValueError("{where}: {name!r} must be ...")` otherwise. | `as_stacked(x, n, K, *, name, where, min_dim=2)` |
+| `as_layout`<br><small>`noodl.layout`</small> | `x_stacked` `(..., n, 1)` back in the caller's layout: `(..., n)` if `reduced`, unchanged otherwise (the inverse of `as_stacked` for one species). | `as_layout(x_stacked, reduced)` |
+| `reduced_single`<br><small>`noodl.layout`</small> | A single-species tensor in REDUCED layout `(..., n)`, whether it came stacked `(..., n, 1)` or reduced. A batched `(1, 1)` is both and holds one number, so the ambiguity at `n == 1` is harmless. `ValueError("{where}: ...")` if its last axis is not `n` entries. | `reduced_single(x, n, *, where)` |
+| `species_columns`<br><small>`noodl.layout`</small> | The column of each `wanted` species name in the `declared` order (a layer's `species_names`). `order="any"` allows a subset in any order; `order="exact"` requires `wanted == declared`. Unknown and repeated names raise `ValueError`, naming them, with `where` as prefix. With `declared=None` (the layer names no species) the names cannot be resolved: the identity `[0, 1, ...]` is returned, only when `len(wanted) == n_species`. | `species_columns(declared, wanted, *, where, n_species=None, order='any')` |
+| `normalize_unit`<br><small>`noodl.refs`</small> | A unit string in one canonical spelling, for comparison only (this is not a units library: nothing is converted, and two different units never compare equal). | `normalize_unit(unit)` |
+| `units_agree`<br><small>`noodl.refs`</small> | Whether two unit strings are the same unit up to `normalize_unit`'s spellings. | `units_agree(a, b)` |
 | `input_field`<br><small>`noodl.refs`</small> | A `Field` for an input a closure, reaction, law or drive reads itself (a wind speed, an inflow), as a closure's `input_specs` or a builder's `model.input_specs` declares it. | `input_field(model, key, *, description, unit='', over=None, required=True, ordering=None)` |
+| `input_unit_declarations`<br><small>`noodl.refs`</small> | `(origin, key, unit)` for every input a model, closure or reaction declares in `input_specs`, in declaration order; `unit` is `""` when the spec gives none. `origin` names the declarer (`"model"`, a closure's or reaction's `repr`). | `input_unit_declarations(model)` |
 | `required_state_keys`<br><small>`noodl.refs`</small> | The state keys `Model.step` reads from the step-start state. | `required_state_keys(model)` |
 | `active_interior`<br><small>`noodl.layers`</small> | Split the non-boundary nodes of `net` into the ones `kinds` touch and the ones it does not: `(interior_idx, inactive_idx)`, both in NODE order, both excluding `boundary`. | `active_interior(net, kinds, boundary)` |
 | `Orifice`<br><small>`noodl.elements`</small> | PowerLaw(C = Cd * A * sqrt(2 / rho), n = 0.5): the sharp-edged orifice equation, as a VOLUME flow in m3/s from `Cd` (dimensionless discharge coefficient), `A` (m2) and `rho` (kg/m3). | `Orifice(Cd, A, *, rho=1.2, dp_transition=0.001, regularised=None, kind='airpath', learnable=False)` |
@@ -129,13 +164,20 @@ Calculations and helpers.
 | `transport_boundary_inflow`<br><small>`noodl.couple`</small> | Net mass INFLOW, `(...,)`, at the boundary node `boundary_idx[node_position]`, in a transport layer's own units, for a SINGLE-SPECIES layer (`x_interior`/`x_boundary` are `(..., n_i)`/`(..., n_b)`, never `(..., n_i, K)`). | `transport_boundary_inflow(net, q, flow_kinds, x_interior, x_boundary, interior_idx, boundary_idx, node_position)` |
 | `union`<br><small>`noodl.couple`</small> | Couple `models` by exchanging the driver/state values `shared` names, WITHOUT merging any model's `Network`, layers, or closures. Never modifies the `Model`/`State`/`Drivers` objects passed in -- returns fresh dict copies. | `union(models, shared, *, substeps=None, relaxation=0.5, iterate_rtol=1e-08, iterate_atol=0.0, iterate_max=50, adjoint_rtol=1e-10)` |
 
+## Constants and tables
+
+Named values and option tables.
+
+| Name | Value |
+|---|---|
+| `CLOSURE_ATTRIBUTES` | `tuple` |
+
 ## Base classes (for extending)
 
 Subclass these to add a constitutive law, drive, closure, reaction or node source; see [Extending noodl](../development/extending.md).
 
 | Name | What it does | How to call it |
 |---|---|---|
-| `Closure`<br><small>`noodl.model`</small> | state, drivers -> driver updates (a mapping of NEW driver values, merged in order). | `Closure(...)` |
 | `Reaction`<br><small>`noodl.layers`</small> | A local, per-node nonlinear map applied to the state after a transport step (or before it, under `Model(reaction_order="before_transport")`). | `Reaction(...)` |
 | `ConstitutiveLaw`<br><small>`noodl.elements`</small> | Abstract branch law: flow as a function of potential difference. | `ConstitutiveLaw(kind)` |
 | `ImplicitLaw`<br><small>`noodl.elements`</small> | A constitutive law written as a relation `residual(dp, q, drivers, ctx) = 0`. | `ImplicitLaw(kind)` |

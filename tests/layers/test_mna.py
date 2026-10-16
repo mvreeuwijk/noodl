@@ -585,3 +585,86 @@ def test_classic_layer_refuses_unknown_mode():
                            boundary=["gnd"])
     with pytest.raises(ValueError, match=r"'e': mode='bogus'; expected 'dc', 'initial' or None"):
         layer.solve(torch.zeros(1), {}, torch.zeros(2), differentiable=False, mode="bogus")
+
+
+# ------------------------------------------------------------------ flows() on an MNA layer
+class Head(ImplicitLaw):
+    """A fan with a prescribed rise: dp + head = 0, the flow not in the residual at all."""
+
+    linear = True
+
+    def __init__(self, kind="fan"):
+        super().__init__(kind)
+
+    def residual(self, dp, q, drivers, ctx):
+        return dp + drivers["head"]
+
+
+class Orifice(ConstitutiveLaw):
+    """q = c sign(dp) sqrt(|dp|) (smoothed at zero), c from the drivers."""
+
+    def __init__(self, kind="ori"):
+        super().__init__(kind)
+
+    def flow(self, dp, drivers=None):
+        return drivers["c"] * dp / torch.sqrt(dp * dp + 1e-6) ** 0.5
+
+    def dflow(self, dp, drivers=None):
+        return torch.autograd.functional.jacobian(
+            lambda d: self.flow(d, drivers).sum(), dp, create_graph=True)
+
+
+def _fan_layer():
+    # gnd =fan=> a -ori-> b -ori-> gnd: the fan's flow is fixed by the orifice chain.
+    net = _net(["gnd", "a", "b"], [("gnd", "a", "fan"), ("a", "b", "ori"),
+                                   ("b", "gnd", "ori")])
+    return KirchhoffLayer(net, "air", [Head(), Orifice()], boundary=["gnd"])
+
+
+def test_flows_of_mna_layer_return_the_solved_q_and_need_q():
+    layer = _fan_layer()
+    assert layer.mna
+    drivers = {"head": torch.tensor([5.0]), "c": torch.tensor([0.7])}
+    phi, q = layer.solve(torch.zeros(1), drivers, torch.zeros(3), differentiable=False)
+    torch.testing.assert_close(layer.flows(phi, drivers, q), q, rtol=1e-10, atol=1e-12)
+    with pytest.raises(TypeError, match="Modified Nodal Analysis"):
+        layer.flows(phi, drivers)
+    with pytest.raises(ValueError, match="every edge"):
+        layer.flows(phi, drivers, q[..., :2])
+
+
+def test_flows_of_mna_layer_are_the_potential_laws_at_phi_and_q_on_implicit_edges():
+    layer = _fan_layer()
+    drivers = {"head": torch.tensor(5.0), "c": torch.tensor(0.7)}
+    _, q = layer.solve(torch.zeros(1), drivers, torch.zeros(3), differentiable=False)
+    phi = torch.tensor([0.0, 3.0, 1.0])            # not the solution: a storing zone's state
+    out = layer.flows(phi, drivers, q)
+    ori = Orifice()
+    assert out[..., 0] == q[..., 0]
+    torch.testing.assert_close(out[..., 1], ori.flow(phi[1] - phi[2], drivers))
+    torch.testing.assert_close(out[..., 2], ori.flow(phi[2] - phi[0], drivers))
+
+
+def test_flows_of_mna_layer_gradients_match_central_differences():
+    layer = _fan_layer()
+    _, q = layer.solve(torch.zeros(1), {"head": torch.tensor(5.0), "c": torch.tensor(0.7)},
+                       torch.zeros(3), differentiable=False)
+    w = torch.tensor([0.3, -1.1, 0.8])
+
+    def f(phi, c, qq):
+        return (layer.flows(phi, {"head": torch.tensor(5.0), "c": c}, qq) * w).sum()
+
+    phi = torch.tensor([0.0, 3.0, 1.0], requires_grad=True)
+    c = torch.tensor(0.7, requires_grad=True)
+    qq = q.detach().clone().requires_grad_(True)
+    g = torch.autograd.grad(f(phi, c, qq), (phi, c, qq))
+    h = 1e-6
+    for i in (1, 2):
+        e = torch.zeros(3)
+        e[i] = h
+        fd = (f(phi.detach() + e, c.detach(), q) - f(phi.detach() - e, c.detach(), q)) / (2 * h)
+        torch.testing.assert_close(g[0][i], fd, rtol=1e-6, atol=1e-8)
+    fd_c = (f(phi.detach(), c.detach() + h, q) - f(phi.detach(), c.detach() - h, q)) / (2 * h)
+    torch.testing.assert_close(g[1], fd_c, rtol=1e-6, atol=1e-8)
+    torch.testing.assert_close(g[2][..., 0], w[0])     # the implicit edge passes q
+    assert torch.all(g[2][..., 1:] == 0)

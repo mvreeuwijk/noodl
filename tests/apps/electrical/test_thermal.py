@@ -169,3 +169,19 @@ def test_joule_heating_keeps_the_callers_temperature_of_an_unheated_device():
     d = close(state, {"T": torch.tensor([400.0, 350.0])})
     assert d["T"].tolist() == [400.0, 310.0]
     assert close(state, {})["T"].tolist() == [300.0, 310.0]
+
+
+def test_batched_temperature_driver_with_unbatched_state_matches_independent_runs():
+    heated = [HeatedEdge(edge=1, p=1, n=0, heat_node=1, temperature_key="T", slot=1)]
+    close = JouleHeating(heated, base_temperatures={"T": torch.tensor([300.0, 300.0, 300.0])})
+    state = {"electrical.phi": torch.tensor([0.0, 10.0]), "electrical.q": torch.tensor([0.0, 2.0]),
+             "thermal.phi": torch.tensor([0.0, 310.0])}
+    drivers = torch.tensor([[293.15, 1.0, 5.0], [300.0, 2.0, 6.0]])
+    batched = close(state, {"T": drivers})
+    assert batched["T"].shape == (2, 3)
+    for k in range(2):
+        single = close(state, {"T": drivers[k]})
+        torch.testing.assert_close(batched["T"][k], single["T"])
+    # unheated devices keep their temperatures, the heated slot takes the heat port
+    torch.testing.assert_close(batched["T"][:, 1], torch.full((2,), 310.0))
+    torch.testing.assert_close(batched["T"][:, [0, 2]], drivers[:, [0, 2]])

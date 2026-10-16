@@ -1,9 +1,9 @@
 """`broadcast_shapes`: `torch.broadcast_shapes` for plain integer shapes, in pure Python.
 
-`torch.broadcast_shapes` goes through `torch._refs` (symbolic-shape checks) and costs
-~150-190 us a call on CPU, more than most of the small tensor operations it sizes. The
-airflow and transport steps call it about a hundred times per step (the Modelica parity
-runs: ~12 % of a step, profiled). The rules are the same: shapes are aligned on the right,
+`torch.broadcast_shapes` goes through `torch._refs` (symbolic-shape checks) and costs more
+than most of the small tensor operations it sizes; the airflow and transport steps call it
+about a hundred times per step (numbers: docs/design/orchestration.md#shape-broadcasting).
+The rules are the same: shapes are aligned on the right,
 a dimension of 1 stretches, any other mismatch raises `RuntimeError` (as torch does).
 """
 

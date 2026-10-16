@@ -527,3 +527,94 @@ def test_unknown_outfall_kind_and_negative_offset_are_refused_by_name():
 def test_dynamic_wave_options_are_validated(kwargs, match):
     with pytest.raises(ValueError, match=match):
         DynamicWaveOptions(**kwargs).validate()
+
+
+# ----------------------------------------------------- species by name (kinematic wave)
+
+
+def _quality_step(species, concentrations, steps=3):
+    """`tree_steady()` with a quality layer of `species` started at `concentrations`
+    ({name: kg/m3}), stepped `steps` times; returns the model and the final state."""
+    model, state, drivers = build_model(tree_steady(), species=species)
+    x = state["water_quality.x"].clone()
+    for i, name in enumerate(species):
+        if x.dim() == 1:                       # a single species has no species axis
+            x[:] = concentrations[name]
+        else:
+            x[..., i] = concentrations[name]
+    state = dict(state, **{"water_quality.x": x})
+    for _ in range(steps):
+        state = model.step(state, drivers, 60.0)
+    return model, state
+
+
+def test_species_order_does_not_change_the_chemistry():
+    start = {"bod": 0.2, "sulfide": 0.001}
+    _, a = _quality_step(("bod", "sulfide"), start)
+    _, b = _quality_step(("sulfide", "bod"), start)
+    xa, xb = a["water_quality.x"], b["water_quality.x"]
+    torch.testing.assert_close(xa[..., 0], xb[..., 1], rtol=1e-12, atol=0.0)
+    torch.testing.assert_close(xa[..., 1], xb[..., 0], rtol=1e-12, atol=0.0)
+    torch.testing.assert_close(a["air_quality.x"], b["air_quality.x"], rtol=1e-12, atol=0.0)
+    assert float(xa[..., 1].max()) != 0.001            # the chemistry did act
+
+
+def test_passive_tracers_get_no_reactions_and_the_chemistry_follows_the_names():
+    model, state = _quality_step(("tracer", "other"), {"tracer": 0.3, "other": 0.1})
+    assert len(model.reactions) == 0
+    assert "air_quality" not in model.transport          # no sulfide: nothing to exchange
+    # passive: each tracer evolves as it would alone (pure transport, no decay/generation)
+    x = state["water_quality.x"]
+    _, alone = _quality_step(("tracer",), {"tracer": 0.3})
+    torch.testing.assert_close(x[..., 0], alone["water_quality.x"], rtol=1e-12, atol=0.0)
+    _, flipped = _quality_step(("other", "tracer"), {"tracer": 0.3, "other": 0.1})
+    torch.testing.assert_close(x, flipped["water_quality.x"].flip(-1), rtol=1e-12, atol=0.0)
+    # a tracer riding with bod is not decayed or generated; bod alone decays
+    _, ref = _quality_step(("bod", "sulfide"), {"bod": 0.2, "sulfide": 0.0})
+    _, mixed = _quality_step(("tracer", "bod"), {"tracer": 0.3, "bod": 0.2})
+    torch.testing.assert_close(mixed["water_quality.x"][..., 1], ref["water_quality.x"][..., 0],
+                               rtol=1e-12, atol=0.0)
+    torch.testing.assert_close(mixed["water_quality.x"][..., 0], alone["water_quality.x"],
+                               rtol=1e-12, atol=0.0)
+
+
+@pytest.mark.parametrize("air", [False, True])
+def test_every_partial_species_selection_steps_with_its_own_chemistry(air):
+    """Each documented selection steps, and each species evolves as in the full
+    ``("bod", "sulfide", "tracer")`` run: a one-species layer holds its state with no
+    species axis, which `SulfideGeneration` reads through `noodl.layout` (BOD alone raised
+    in `expand` here), BOD decays, sulfide is generated only beside BOD, and a tracer is
+    conservative."""
+    start = {"bod": 0.2, "sulfide": 0.001, "tracer": 0.2}
+
+    def run(species):
+        model, state, drivers = build_model(tree_steady(), air=air, species=species)
+        x = state["water_quality.x"].clone()
+        for i, name in enumerate(species):
+            if x.dim() == 1:
+                x[:] = start[name]
+            else:
+                x[..., i] = start[name]
+        state = dict(state, **{"water_quality.x": x})
+        for _ in range(3):
+            state = model.step(state, drivers, 60.0)
+        x = state["water_quality.x"]
+        return {name: (x if x.dim() == 1 else x[..., i]) for i, name in enumerate(species)}
+
+    full = run(("bod", "sulfide", "tracer"))
+    assert float(full["bod"].sum()) < float(full["tracer"].sum())      # BOD decays
+    assert float(full["sulfide"].max()) != 0.001                        # sulfide generated
+    for species in [("bod",), ("tracer",), ("bod", "tracer"), ("bod", "sulfide"),
+                    ("sulfide", "bod")]:
+        got = run(species)
+        assert set(got) == set(species)
+        for name, x in got.items():
+            assert x.shape == full[name].shape
+            torch.testing.assert_close(x, full[name], rtol=1e-12, atol=0.0)
+
+
+def test_sulfide_without_bod_and_duplicate_species_are_refused_by_name():
+    with pytest.raises(ValueError, match="'sulfide' needs 'bod'"):
+        build_model(tree_steady(), species=("sulfide", "tracer"))
+    with pytest.raises(ValueError, match="distinct"):
+        build_model(tree_steady(), species=("bod", "bod"))

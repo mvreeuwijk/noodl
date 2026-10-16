@@ -41,6 +41,8 @@ from typing import Literal, NamedTuple
 
 import torch
 
+from noodl.layers._topology import TopologyGuard
+from noodl.layout import as_stacked, is_stacked
 from noodl.operators.advection import AdvectionOperator
 from noodl.solvers.implicit import TransposeOperator as _TransposeView
 from noodl.solvers.select import _SPARSE_DIRECT_MAX_BATCH
@@ -94,15 +96,13 @@ def active_interior(
 # "gmres_jacobi"/"gmres_ilu" resolve to `method="gmres"` with a real preconditioner.
 # "sparse_direct" (SuperLU, on the operators' COO forms) and "direct" (the dense LU reference)
 # pass straight through. `select.solve`'s OWN "auto" policy (the certified-SPD potential path)
-# is a different policy -- this is a SEPARATE "auto", scoped to this layer, chosen on the
-# interleaved benchmark in `benchmarks/transport_solver_bench.py`: "auto" resolves to
-# `sparse_direct` at or under `_SPARSE_DIRECT_MAX_BATCH` instances (the e=1 and e=32 rows:
-# sparse_direct wins both by a wide, spread-clear margin) and to plain `gmres` above it
-# (e=100: sparse_direct is not applicable at all, and the gmres family's own internal ordering
-# is not clean enough to prefer a preconditioner over plain gmres); `gmres_jacobi`/`gmres_ilu`
-# are never chosen by `auto` (gmres_ilu's per-instance ILU factorisation cost dominates at
-# every ensemble size measured, and jacobi vs plain gmres is ambiguous within the measured
-# spread). See `_resolve_solver` for the two hazards this default must handle: SciPy absent,
+# is a different policy -- this is a SEPARATE "auto", scoped to this layer: it resolves to
+# `sparse_direct` at or under `_SPARSE_DIRECT_MAX_BATCH` instances and to plain `gmres` above
+# it (sparse_direct is not applicable there, and the gmres family's own ordering is not clean
+# enough to prefer a preconditioner over plain gmres); `gmres_jacobi`/`gmres_ilu` are never
+# chosen by `auto`. The choice rests on an interleaved benchmark, see
+# docs/design/solvers.md#transport-solver-choice. See `_resolve_solver` for the two hazards
+# this default must handle: SciPy absent,
 # and a grad-requiring `on_failure="return"` solve (which runs outside `_LinearSolve`'s
 # `no_grad`, unlike the differentiable forward/backward path).
 _TRANSPORT_SOLVERS = ("auto", "gmres", "gmres_jacobi", "gmres_ilu", "sparse_direct", "direct")
@@ -387,7 +387,7 @@ class _AffineSystemOperator:
         return None
 
 
-class TransportLayer:
+class TransportLayer(TopologyGuard):
     """dx/dt = M x + N x_b + sources / capacity on this layer's ACTIVE interior nodes.
 
     The interior is the non-boundary nodes an edge of ``flow_kind`` (or of
@@ -404,8 +404,7 @@ class TransportLayer:
     construction otherwise, and is resolved PER SOLVE by ``_resolve_solver`` into the kwargs
     every linear solve of this layer runs with (``steady``'s and the two implicit schemes'
     forward, backward adjoint and ``on_failure="return"`` paths alike). ``"auto"`` (the
-    default, chosen on the interleaved benchmark in ``benchmarks/transport_solver_bench.py``)
-    resolves to
+    default, see docs/design/solvers.md#transport-solver-choice) resolves to
     ``method="sparse_direct"`` at or under ``_SPARSE_DIRECT_MAX_BATCH`` instances and to plain
     ``method="gmres"`` above it, falling back to ``gmres`` (never raising) when SciPy is
     absent or when a grad-requiring ``on_failure="return"`` solve would otherwise refuse; see
@@ -421,6 +420,14 @@ class TransportLayer:
     (and ``steady``) can hold them; a ``steady`` with nothing passing through such a node
     is refused by name (it has no value there). ``storage_free_mask`` is ``(n_i,)`` bool,
     True at those nodes.
+
+    DILUTION (``dilution``, ``None`` by default): adds ``dilution * net(q) / capacity`` to
+    the removal, ``net(q)`` the signed net inflow of the flow edges into each node (see
+    ``__init__`` for the changing-volume balance it is). ``dilution_mode="withdrawal"`` adds
+    only ``dilution * max(net(q), 0) / capacity``: a fixed volume whose flow imbalance is a
+    nodal sink (a withdrawal at the node's own value) or a nodal injection of carrier with
+    no content (whose content, if any, is the caller's ``sources``). The default
+    ``"signed"`` is unchanged.
     """
 
     #: The differentiable operator coefficients a layer owns, in the fixed order the
@@ -471,14 +478,13 @@ class TransportLayer:
             return self.removal
         r = torch.as_tensor(removal, dtype=self.net.dtype)
         K = self.n_species
-        if not (r.dim() >= 2 and tuple(r.shape[-2:]) == (self.n_i, K)):
-            if K == 1 and r.dim() >= 1 and r.shape[-1] == self.n_i:
-                r = r.unsqueeze(-1)
-            else:
-                raise ValueError(
-                    f"TransportLayer '{self.name}': removal must have trailing shape "
-                    f"({self.n_i}, {K}) (active interior order, 1/s), got {tuple(r.shape)}"
-                )
+        try:
+            r, _ = as_stacked(r, self.n_i, K, name="removal", where="removal")
+        except ValueError:
+            raise ValueError(
+                f"TransportLayer '{self.name}': removal must have trailing shape "
+                f"({self.n_i}, {K}) (active interior order, 1/s), got {tuple(r.shape)}"
+            ) from None
         return r
 
     def _transmission_arg(self, transmission: torch.Tensor | None) -> torch.Tensor:
@@ -496,8 +502,10 @@ class TransportLayer:
             return self.transmission
         t = torch.as_tensor(transmission, dtype=self.net.dtype)
         K, b_flow = self.n_species, self._flow_src.numel()
-        if t.dim() >= 2 and tuple(t.shape[-2:]) == (b_flow, K):
+        if is_stacked(t, b_flow, K):
             return t.transpose(-1, -2)
+        # Not the K == 1 reduced form: a per-edge `(b_flow,)` is BROADCAST over all K species
+        # (a pass fraction common to the species), so `as_stacked` does not apply.
         if t.dim() >= 1 and t.shape[-1] == b_flow:
             return t.unsqueeze(-2).expand(*t.shape[:-1], K, b_flow)
         raise ValueError(
@@ -521,6 +529,7 @@ class TransportLayer:
         conduction_kind: str | None = None,
         conductance: torch.Tensor | None = None,
         dilution: torch.Tensor | float | None = None,
+        dilution_mode: Literal["signed", "withdrawal"] = "signed",
         storage_free: Sequence[Node] = (),
         scheme: Literal["exact", "implicit", "trapezoidal"] = "exact",
         linear_solver: str = "auto",
@@ -538,6 +547,7 @@ class TransportLayer:
             )
         self.linear_solver = linear_solver
         self.net = net
+        self._record_topology(net)
         self.name = name
         self.flow_kind = flow_kind
         # One or several advecting edge kinds. `flow_kinds` is the tuple form every internal
@@ -621,9 +631,9 @@ class TransportLayer:
         if transmission is None:
             transmission = torch.ones(b_flow, dtype=net.dtype)
         transmission = torch.as_tensor(transmission, dtype=net.dtype)
-        if transmission.dim() >= 2 and transmission.shape[-2:] == (b_flow, K):
+        if is_stacked(transmission, b_flow, K):
             transmission = transmission.transpose(-1, -2)
-        elif transmission.shape[-1] == b_flow:
+        elif transmission.shape[-1] == b_flow:      # broadcast over the K species, any K
             transmission = transmission.unsqueeze(-2).expand(*transmission.shape[:-1], K, b_flow)
         else:
             raise ValueError(
@@ -687,6 +697,25 @@ class TransportLayer:
                     f"({K},), got {tuple(dilution.shape)}"
                 )
         self.dilution = dilution
+        # `dilution_mode="withdrawal"` reads only the POSITIVE part of `net(q)`: the balance
+        #     V dx/dt = (In(q) - Out(q)) x - dilution * max(net(q), 0) x + N x_b + sources
+        # of a fixed volume whose flows are balanced by nodal sources and sinks of the
+        # CARRIER. Where the flow edges deliver more than they take away (`net > 0`) the
+        # surplus is a withdrawal that leaves at the node's own value; where they take away
+        # more (`net < 0`) the deficit is an injection of carrier with no content of its own,
+        # which the outflow carries away and so dilutes the node: whatever content it brings
+        # is the caller's `sources`, never a negative removal. The default "signed" mode is
+        # the changing-volume balance above, unchanged.
+        if dilution_mode not in ("signed", "withdrawal"):
+            raise ValueError(
+                f"TransportLayer '{name}': unknown dilution_mode {dilution_mode!r}; "
+                f"expected 'signed' or 'withdrawal'"
+            )
+        if dilution_mode != "signed" and dilution is None:
+            raise ValueError(
+                f"TransportLayer '{name}': dilution_mode={dilution_mode!r} needs a dilution"
+            )
+        self.dilution_mode = dilution_mode
 
         self.conduction_kind = conduction_kind
         if conduction_kind is not None:
@@ -703,10 +732,9 @@ class TransportLayer:
             b_c = len(csrc)
             g = torch.as_tensor(conductance, dtype=net.dtype)
             # Validate explicitly rather than let a mismatched length reach the assembly:
-            # with a single conduction_kind edge (b_c == 1), the einsum that used to build L
-            # broadcast the repeated "e" subscript, so a wrongly-shaped g (e.g. length 2)
-            # was silently summed in instead of raising, giving a silently wrong conductance
-            # matrix rather than a ValueError naming the offender.
+            # with a single conduction_kind edge (b_c == 1), an einsum over the repeated "e"
+            # subscript would broadcast a wrongly-shaped g (e.g. length 2) and sum it in,
+            # giving a silently wrong conductance matrix rather than a ValueError.
             if g.dim() == 0 or g.shape[-1] != b_c:
                 raise ValueError(
                     f"TransportLayer '{name}': conductance must have shape ({b_c},), "
@@ -899,15 +927,15 @@ class TransportLayer:
         below), are the just-built operator and right-hand side, used ONLY to decide whether
         `"auto"` may pick `sparse_direct` under grad (hazard 2 below); no solve reads them.
 
-        `"auto"` (decided on the interleaved benchmark in
-        `benchmarks/transport_solver_bench.json`): resolves to `method="sparse_direct"` when
+        `"auto"` (see docs/design/solvers.md#transport-solver-choice): resolves to
+        `method="sparse_direct"` when
         `batch_size <= _SPARSE_DIRECT_MAX_BATCH` (the SAME constant `solvers.select` uses for
         its own, separate "auto" -- imported, never re-hard-coded) and to plain `gmres`
         above it. `gmres_jacobi`/`gmres_ilu` are never chosen by `auto`: the benchmark found
         `gmres_ilu` the clear loser at every ensemble measured (its per-instance ILU
         factorisation cost dominates, see the COST note below) and the gmres-vs-gmres_jacobi
-        ordering ambiguous within the measured spread, so there is no evidence to prefer
-        either preconditioner over plain gmres as the fallback. `"gmres"` (explicit) resolves
+        ordering ambiguous, so there is no evidence to prefer either preconditioner over
+        plain gmres as the fallback. `"gmres"` (explicit) resolves
         to plain gmres unconditionally, regardless of `batch_size`.
 
         TWO HAZARDS `"auto"` must handle before it can hand back `sparse_direct`, both
@@ -1127,6 +1155,7 @@ class TransportLayer:
         """`(..., n_i)`: the signed net inflow of the layer's flow edges into each ACTIVE
         interior node (`sum` over edges INTO the node of `q` minus `sum` over edges OUT of
         it; `q` positive from an edge's source to its target), un-weighted by the carrier."""
+        self._require_current_topology()
         full = torch.zeros(q.shape[:-1] + (self.net.n,), dtype=q.dtype, device=q.device)
         full = full.index_add(-1, self._flow_tgt, q).index_add(-1, self._flow_src, -q)
         return full.index_select(-1, self.interior_idx)
@@ -1136,10 +1165,16 @@ class TransportLayer:
         q: torch.Tensor, cap: torch.Tensor,
     ) -> torch.Tensor | None:
         """`removal` plus the dilution rate `dilution * net_inflow(q) / capacity`
-        (`(..., n_i, K)`), or `removal` itself when the layer has no dilution."""
+        (`(..., n_i, K)`), or `removal` itself when the layer has no dilution. Under
+        `dilution_mode="withdrawal"` only the withdrawal part `max(net_inflow, 0)` enters,
+        through `torch.where` so that the derivative at `net_inflow = 0` is the withdrawal
+        side's (1), as in the signed form, rather than a clamp's."""
         if dilution is None:
             return None if removal is None else removal.to(q.dtype)
-        rate = (self.net_inflow(q) / cap).unsqueeze(-1) * dilution.to(q.dtype)
+        net = self.net_inflow(q)
+        if self.dilution_mode == "withdrawal":
+            net = torch.where(net >= 0, net, torch.zeros_like(net))
+        rate = (net / cap).unsqueeze(-1) * dilution.to(q.dtype)
         return rate if removal is None else removal.to(q.dtype) + rate
 
     # ------------------------------------------------------------ assembly
@@ -1174,6 +1209,7 @@ class TransportLayer:
         removal rate or transmission (the `"<layer>.removal"` and `"<layer>.transmission"`
         drivers) is not part of it, because `step`, `steady`, `rate` and the other entry
         points that take `removal=` and `transmission=` apply those themselves."""
+        self._require_current_topology()
         net, K, n_i, n_b = self.net, self.n_species, self.n_i, self.n_b
         dtype = q.dtype
         # `cap_t` names the resolved per-step capacity, as in `rate`, `step`, `steady`,
@@ -1232,15 +1268,19 @@ class TransportLayer:
     def _to_stacked(
         self, x: torch.Tensor, n_nodes: int, arg_name: str
     ) -> tuple[torch.Tensor, bool]:
+        """`x` as the flat species-major `(..., K * n_nodes)` the solver uses, and whether it
+        came in reduced `(..., n_nodes)`. The layout rule is `noodl.layout.as_stacked`."""
         K = self.n_species
-        if x.dim() >= 2 and x.shape[-2] == n_nodes and x.shape[-1] == K:
-            return x.transpose(-1, -2).reshape(*x.shape[:-2], K * n_nodes), False
-        if K == 1 and x.shape[-1] == n_nodes:
+        try:
+            s, reduced = as_stacked(x, n_nodes, K, name=arg_name, where="to_stacked")
+        except ValueError:
+            raise ValueError(
+                f"TransportLayer '{self.name}': {arg_name} must have trailing shape "
+                f"({n_nodes}, {K}) or, for n_species=1, ({n_nodes},); got {tuple(x.shape)}"
+            ) from None
+        if reduced:
             return x, True
-        raise ValueError(
-            f"TransportLayer '{self.name}': {arg_name} must have trailing shape "
-            f"({n_nodes}, {K}) or, for n_species=1, ({n_nodes},); got {tuple(x.shape)}"
-        )
+        return s.transpose(-1, -2).reshape(*s.shape[:-2], K * n_nodes), False
 
     def _from_stacked(self, x: torch.Tensor, n_nodes: int, reduced: bool) -> torch.Tensor:
         if reduced:
@@ -1260,16 +1300,15 @@ class TransportLayer:
         wall-mass node is a wiring mistake, and is named rather than silently discarded.
         """
         n, K = self.net.n, self.n_species
-        if sources.dim() >= 2 and sources.shape[-2] == n and sources.shape[-1] == K:
-            node_dim = sources.dim() - 2
-        elif K == 1 and sources.shape[-1] == n:
-            node_dim = sources.dim() - 1
-        else:
+        try:
+            _, reduced = as_stacked(sources, n, K, name="sources", where="sources")
+        except ValueError:
             raise ValueError(
                 f"TransportLayer '{self.name}': sources must be in FULL node order with "
                 f"trailing shape ({n}, {K}) or, for n_species=1, ({n},); got "
                 f"{tuple(sources.shape)}. Boundary rows must be zero."
-            )
+            ) from None
+        node_dim = sources.dim() - (1 if reduced else 2)
         self._refuse_nonzero_rows(sources, node_dim, self.boundary_idx, self.boundary, "boundary")
         self._refuse_nonzero_rows(
             sources, node_dim, self.inactive_idx, self._inactive_names, "inactive"
@@ -1303,6 +1342,7 @@ class TransportLayer:
         `_removal_arg`. `transmission` (keyword-only) is a per-call transmission replacing
         the construction-time one; see `_transmission_arg`.
         """
+        self._require_current_topology()
         dtype = torch.float64
         cap = self._capacity_arg(capacity)
         x_s, reduced = self._to_stacked(x.to(dtype), self.n_i, "x")
@@ -1398,6 +1438,7 @@ class TransportLayer:
         time times the boundary's rate at the step's END, which the straight line's chord
         misses by about `h/2` times its curvature.
         """
+        self._require_current_topology()
         return self._step(
             x, q, sources, x_boundary, dt,
             on_failure=on_failure, capacity=capacity, capacity_prev=capacity_prev,
@@ -1455,6 +1496,7 @@ class TransportLayer:
         see `_removal_arg`. `transmission` (keyword-only) likewise replaces the
         construction-time transmission; see `_transmission_arg`.
         """
+        self._require_current_topology()
         if on_failure == "return":
             raise ValueError(
                 f"TransportLayer '{self.name}': on_failure='return' has no effect for "
@@ -1661,6 +1703,7 @@ class TransportLayer:
         see `_removal_arg`. `transmission` (keyword-only) likewise replaces the
         construction-time transmission; see `_transmission_arg`.
         """
+        self._require_current_topology()
         if on_failure not in ("raise", "return"):
             raise ValueError(
                 f"TransportLayer '{self.name}': unknown on_failure {on_failure!r}; "
