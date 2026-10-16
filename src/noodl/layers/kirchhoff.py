@@ -465,6 +465,14 @@ class KirchhoffLayer:
         """
         return self.net.difference()[self.cols]
 
+    @property
+    def linear(self) -> bool:
+        """True when every law and node source is affine (`ConstitutiveLaw.linear`): an MNA
+        solve then takes the full Newton step from the start and converges in one
+        iteration."""
+        return (all(el.linear for el in self._laws)
+                and all(ns.linear for ns in self._node_sources))
+
     def net_outflow(self, q: torch.Tensor) -> torch.Tensor:
         """The net flow OUT of the network at every node, `(..., n_nodes)`, from the edge
         flows `q` (`(..., b)`, in this layer's edge order): each edge's flow leaves its

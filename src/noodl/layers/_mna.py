@@ -582,6 +582,10 @@ class MnaSystem:
                 x0[..., n_phi:] = self._to_real(q0.detach())
 
         newton_kwargs["method"] = self.method(requested)
+        if layer.linear:
+            # The residual is affine: the full Newton step lands on the solution, so the
+            # damped first step (`newton`'s omega=0.75) would only cost a second iteration.
+            newton_kwargs.setdefault("omega", 1.0)
         newton_kwargs.setdefault("where", f"KirchhoffLayer {layer.name!r} solve")
         # The last Jacobian and the first and last residuals, kept to diagnose a failure.
         last: dict = {}

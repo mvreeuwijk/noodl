@@ -59,6 +59,7 @@ class ImpedanceTransformer(ImplicitLaw):
 
     ports = 2
     phasor_capable = True
+    linear = True
 
     def __init__(self, n, impedance, *, kind: str = "impedance_transformer") -> None:
         super().__init__(kind)

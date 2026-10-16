@@ -38,6 +38,10 @@ class NodeSource(torch.nn.Module):
     with the analytic derivative where one is available and cheaper.
     """
 
+    #: True when the withdrawal is affine in the node potentials once the drivers are fixed
+    #: (`ConstitutiveLaw.linear`).
+    linear: bool = False
+
     def __init__(self, nodes) -> None:
         super().__init__()
         idx = torch.as_tensor(nodes, dtype=torch.long)

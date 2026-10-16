@@ -45,6 +45,7 @@ class Impedance(ImplicitLaw):
     """
 
     phasor_capable = True
+    linear = True
 
     def __init__(self, R, *, L=0.0, C=math.inf, kind: str = "impedance",
                  learnable: bool = False) -> None:
