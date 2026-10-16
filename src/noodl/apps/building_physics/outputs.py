@@ -33,7 +33,9 @@ import torch
 from noodl.apps.building_physics.occupants import Occupant, _occupant_nodes
 from noodl.apps.building_physics.schedules import Calendar
 from noodl.apps.building_physics.thermal import RHO_0
+from noodl.contracts import closure_spec
 from noodl.layers.transport import TransportLayer
+from noodl.layout import as_stacked
 
 Tensor = torch.Tensor
 F64 = torch.float64
@@ -50,13 +52,13 @@ def species_history(x, layer: TransportLayer, name: str = "x") -> tuple[Tensor, 
     """
     x = torch.as_tensor(x, dtype=F64)
     n_i, K = layer.n_i, layer.n_species
-    if x.dim() >= 3 and tuple(x.shape[-2:]) == (n_i, K):
-        return x, False
-    if K == 1 and x.dim() >= 2 and x.shape[-1] == n_i:
-        return x.unsqueeze(-1), True
-    also = f" or, for one species, (N, ..., {n_i})" if K == 1 else ""
-    raise ValueError(f"occupant_exposure: {name!r} must be (N, ..., {n_i}, {K}), the layer's "
-                     f"interior rows and species{also}, got {tuple(x.shape)}")
+    try:
+        return as_stacked(x, n_i, K, name=name, where="occupant_exposure", min_dim=3)
+    except ValueError:
+        also = f" or, for one species, (N, ..., {n_i})" if K == 1 else ""
+        raise ValueError(f"occupant_exposure: {name!r} must be (N, ..., {n_i}, {K}), the "
+                         f"layer's interior rows and species{also}, got {tuple(x.shape)}"
+                         ) from None
 
 
 def occupant_exposure(history: Mapping[str, Tensor], occupant: Occupant, model, *,
@@ -186,8 +188,8 @@ def _air_mass(history: Mapping[str, Tensor], model, lay, capacity, where: str) -
     elif key in history:
         cap = torch.as_tensor(history[key], dtype=F64)
     else:
-        varying = [c for c in model.closures
-                   if not hasattr(c, "outputs") or key in tuple(c.outputs)]
+        specs = [closure_spec(c, index=i, owner=where) for i, c in enumerate(model.closures)]
+        varying = [sp.closure for sp in specs if sp.writes is None or key in sp.writes]
         if varying:
             raise ValueError(
                 f"{where}: the history has no {key!r}, and the model's closures write it (or "
