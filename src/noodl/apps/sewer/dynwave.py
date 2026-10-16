@@ -26,6 +26,7 @@ from typing import TYPE_CHECKING
 
 import torch
 
+from noodl import layout
 from noodl._broadcast import broadcast_shapes
 from noodl.apps.sewer import geometry as geom
 from noodl.apps.sewer.air import (
@@ -2798,7 +2799,8 @@ def build_dynamic_wave_model(net: SewerNetwork, *, iterate_tol: float | None = N
             layers["air_quality"] = air_parts["layer"]
             tolerances["air_quality"] = QUALITY_ITERATE_TOL
             closures.append(H2STransfer(graph.n, closure.junction_idx,
-                                        sulfide=tuple(species).index("sulfide"),
+                                        sulfide=layout.species_columns(
+                                            species, ["sulfide"], where="build_model")[0],
                                         out_pipe=parts["out_pipe"]))
     # "before_transport": SWMM reacts a conduit's step-start concentration, then mixes it
     # with the inflow (qualrout.c:337-341), as the kinematic path does
@@ -2981,7 +2983,8 @@ def _quality_parts(net: SewerNetwork, graph: Network, closure: DynamicWaveHydrau
                               n_species=k)}
     if "bod" not in species:
         return parts
-    sulfide = species.index("sulfide") if "sulfide" in species else None
+    sulfide = (layout.species_columns(species, ["sulfide"], where="build_model")[0]
+               if "sulfide" in species else None)
     out_pipe = None
     if sulfide is not None:
         outgoing: dict[str, list[int]] = {name: [] for name in junctions}
@@ -3004,7 +3007,8 @@ def _quality_parts(net: SewerNetwork, graph: Network, closure: DynamicWaveHydrau
     drivers["T_water"] = torch.tensor(18.0, dtype=F64)
     specs["T_water"] = dict(description="wastewater temperature", unit="degC")
     parts["reactions"].insert(0, ("water_quality", SulfideGeneration(
-        bod=species.index("bod"), sulfide=sulfide, out_pipe=out_pipe,
+        bod=layout.species_columns(species, ["bod"], where="build_model")[0],
+        sulfide=sulfide, out_pipe=out_pipe,
         manhole_idx=closure.junction_idx, n_nodes=graph.n)))
     return parts
 
