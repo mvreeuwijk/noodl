@@ -780,10 +780,13 @@ def build_model(
             )
         # The junctions withdraw whatever the CURRENT hydraulic solution delivers (the
         # requested demand, a scaled or patterned `water.sources`, or the PDA-delivered
-        # demand). The layer's `dilution = 1` adds `net_inflow(q) / capacity` to the removal,
-        # and at a junction the net inflow of the pass's own flows IS the withdrawal
-        # (continuity), so the sink follows the current flows with no closure and no lag.
-        # Only the bulk decay is a build-time removal.
+        # demand). The layer's `dilution = 1` in "withdrawal" mode adds
+        # `max(net_inflow(q), 0) / capacity` to the removal, and at a junction the net inflow
+        # of the pass's own flows IS the withdrawal (continuity), so the sink follows the
+        # current flows with no closure and no lag. A junction with a net INJECTION
+        # (`water.sources > 0`, net pipe inflow < 0) gets no sink: the injected water
+        # carries no tracer, so the outflow dilutes it, and any injected tracer is
+        # `quality.sources`. Only the bulk decay is a build-time removal.
         removal = (quality / 86400.0) * torch.ones(len(interior), 1, dtype=F64)
         notes["quality_capacity"] = (
             "on a looped network a junction's capacity is HALF the volume of every "
@@ -791,7 +794,9 @@ def build_model(
         )
         notes["quality_removal"] = (
             "the nodal withdrawal enters as a first-order removal rate q_withdrawn / V "
-            "through the transport layer's dilution = 1, read from the CURRENT flows (so a "
+            "through the transport layer's dilution = 1 in 'withdrawal' mode (a nodal water "
+            "injection carries no tracer and is no sink: injected tracer is "
+            "quality.sources), read from the CURRENT flows (so a "
             "scaled or patterned water.sources, or a PDA delivery, is followed exactly); "
             "without it the advective generator has non-zero row sums and the steady "
             "system is singular (measured on twoloop_si.inp). `removal` holds only the "
@@ -804,7 +809,7 @@ def build_model(
             graph, "quality", capacity=cap_i, flow_kind=transport_kinds,
             boundary=boundary, n_species=1, removal=removal, scheme="implicit",
             quantity="concentration", unit="kg/m3",
-            dilution=1.0,
+            dilution=1.0, dilution_mode="withdrawal",
             source_unit="kg/s", capacity_unit="m3", flow_unit="m3/s",
         )
         drivers["quality.x_boundary"] = torch.zeros(len(boundary), dtype=F64)

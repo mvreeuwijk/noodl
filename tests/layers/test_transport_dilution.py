@@ -138,3 +138,86 @@ def test_step_gradcheck_through_the_flows(scheme):
 
     q0 = _t([0.6, 0.2, 0.3]).requires_grad_(True)
     assert torch.autograd.gradcheck(f, (q0,), eps=1e-6, atol=1e-8)
+
+
+def _injected(**kw):
+    """in -> a -> out with more leaving `a` than entering it: a takes an injection of
+    carrier (net(q) < 0 there)."""
+    net = Network(dtype=F64)
+    for nm in ("in", "a", "out"):
+        net.add_node(nm)
+    net.add_edge("in", "a", kind="flow")
+    net.add_edge("a", "out", kind="flow")
+    return TransportLayer(net, "c", capacity=_t([2.0]), flow_kind="flow",
+                          boundary=["in", "out"], **kw)
+
+
+def test_withdrawal_mode_is_no_sink_where_the_flows_take_more_than_they_bring():
+    """dilution_mode='withdrawal' at an injection (net < 0): the plain flux form, whose
+    steady value is the mix (q_in x_b + s) / q_out; the signed form would instead remove a
+    negative amount and read (q_in x_b + s) / q_in."""
+    q, xb, src = _t([0.5, 1.0]), _t([100.0, 0.0]), _t([0.0, 20.0, 0.0])
+    withdrawal = _injected(dilution=1.0, dilution_mode="withdrawal", scheme="implicit")
+    plain = _injected(scheme="implicit")
+    signed = _injected(dilution=1.0, scheme="implicit")
+    x = withdrawal.steady(q, src, xb)
+    assert float(x) == pytest.approx((0.5 * 100.0 + 20.0) / 1.0, rel=1e-12)
+    assert torch.equal(x, plain.steady(q, src, xb))
+    assert float(signed.steady(q, src, xb)) == pytest.approx((0.5 * 100.0 + 20.0) / 0.5,
+                                                             rel=1e-12)
+    step = withdrawal.step(_t([1.0]), q, src, xb, 0.7)
+    assert torch.equal(step, plain.step(_t([1.0]), q, src, xb, 0.7))
+
+
+@pytest.mark.parametrize("scheme", ["exact", "implicit"])
+def test_withdrawal_mode_equals_the_signed_form_where_the_flows_bring_more(scheme):
+    """Where net(q) >= 0 everywhere the two modes are the same operator, bit for bit."""
+    args = (_t([1.0]), _t([0.5]), _t([0.0, 0.0]), _t([4.0]), 1.3)
+    signed = _tank(dilution=1.0, scheme=scheme).step(*args)
+    net = Network(dtype=F64)
+    net.add_node("ambient")
+    net.add_node("zone")
+    net.add_edge("ambient", "zone", kind="flow")
+    layer = TransportLayer(net, "c", capacity=_t([2.0]), flow_kind="flow",
+                           boundary=["ambient"], dilution=1.0, dilution_mode="withdrawal",
+                           scheme=scheme)
+    assert torch.equal(layer.step(*args), signed)
+
+
+def test_withdrawal_mode_keeps_the_withdrawal_side_derivative_at_zero_net_inflow():
+    """At net(q) = 0 the sink's derivative is the withdrawal side's: the same gradient as
+    the signed form."""
+    def grad(mode):
+        layer = _injected(dilution=1.0, dilution_mode=mode, scheme="implicit")
+        q = _t([0.5, 0.5]).requires_grad_(True)
+        layer.steady(q, _t([0.0, 0.3, 0.0]), _t([100.0, 0.0])).sum().backward()
+        return q.grad
+
+    assert torch.allclose(grad("withdrawal"), grad("signed"), rtol=1e-12, atol=0)
+
+
+def test_withdrawal_mode_gradcheck_across_an_injection_and_a_withdrawal():
+    """Differentiable in `q` with one node withdrawing (net > 0) and one injected
+    (net < 0)."""
+    net = Network(dtype=F64)
+    for nm in ("b", "z1", "z2", "o"):
+        net.add_node(nm)
+    net.add_edge("b", "z1", kind="flow")
+    net.add_edge("z1", "z2", kind="flow")
+    net.add_edge("z2", "o", kind="flow")
+    layer = TransportLayer(net, "c", capacity=_t([1.5, 0.7]), flow_kind="flow",
+                           boundary=["b", "o"], dilution=1.0, dilution_mode="withdrawal",
+                           scheme="implicit")
+
+    def f(q):
+        return layer.steady(q, _t([0.0, 0.1, 0.0, 0.0]), _t([3.0, 0.0]))
+
+    q0 = _t([0.6, 0.4, 0.7]).requires_grad_(True)  # net(z1) = 0.2, net(z2) = -0.3
+    assert torch.autograd.gradcheck(f, (q0,), eps=1e-6, atol=1e-8)
+
+
+def test_dilution_mode_is_validated():
+    with pytest.raises(ValueError, match="unknown dilution_mode"):
+        _injected(dilution=1.0, dilution_mode="positive")
+    with pytest.raises(ValueError, match="needs a dilution"):
+        _injected(dilution_mode="withdrawal")
