@@ -98,7 +98,7 @@ street-network cases](street_aq_cases.md).
 
 | Object | Purpose |
 |---|---|
-| `Street(name, u, v, length, width, height, z0_b=0.15, emission_scale=1.0)` | One canyon segment between two junctions. |
+| `Street(name, u, v, length, width, height, z0_b=0.15, emission_scale=1.0)` | One canyon segment between two junctions. `emission_scale` multiplies the street's emissions in `drivers_at`. |
 | `StreetNetwork(streets, x, y, street_direction="planar", lon=None, lat=None)` | The network plus junction coordinates. `azimuth` gives each street's direction in radians CCW from east, computed as `street_direction` says (see below); `junctions` and `degree(node)` describe the topology. |
 | `from_test_network()` | A 4-junction, 3-street test network. |
 | `twelve_street_grid(L=100.0, W=20.0, H=20.0)` | The 12-street network of Kim et al. 2022 Fig. 1 (MUNICH's idealised case). `L`, `W`, `H` are arguments because the paper never published them. |
@@ -398,7 +398,9 @@ equilibrium depends on nothing else.
 `write_network_concentration(path, ...)` writes a `network_concentration_<year>.nc` with one
 record per (time, street): the time axis, each street's feature index and OSM id, the background,
 the signed canyon velocity and the concentration increment. The file is classic CDF (so `scipy`
-can read it back) in float64 throughout. Needs the
+can read it back) in float64 throughout. Inputs may be tensors that require grad (they are
+detached to CPU first), and the file is written beside the destination and moved into place
+only when complete, so a failed export never truncates an existing file. Needs the
 [`street_aq` extra](../installation.md#optional-extras).
 
 ## Above-roof concentration

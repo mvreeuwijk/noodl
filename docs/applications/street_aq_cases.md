@@ -133,8 +133,12 @@ from `case.meteo_junction` when the source has it, otherwise the same street-to-
 reduction. `u_star` is supplied whenever `case.meteo` has it, and drives the friction
 velocity directly rather than through noodl physics' log law. `background` follows the
 model's own boundary count the same way: one `"<layer>.x_boundary"` row per street, or one
-network-wide mean. `species` (default `case.species`) selects and orders which of the case's
-species end up on the emissions and background drivers. The model's own street order
+network-wide mean. Species are matched by name: `species` defaults to the model's own
+`species_names`, so a case ordered `NO, NO2` correctly drives a model ordered `NO2, NO` (or a
+model of a subset of the case's species), for emissions and background alike. An explicit
+`species` must equal the model's species in the model's order, otherwise `drivers_at` raises.
+Each street's `Street.emission_scale` multiplies its emissions here, once, when the sources
+driver is assembled (the case's emissions and the background are not otherwise modified). The model's own street order
 (`street_index(model)`) must equal `case.street_ids` -- build the model on `case.network`
 itself.
 

@@ -1,11 +1,13 @@
 """Street cases: the format-neutral `StreetCase`, and MUNICH's files read into and written
 from it."""
+import dataclasses
 import math
 from datetime import datetime
 from pathlib import Path
 
 import numpy as np
 import pytest
+import torch
 
 from noodl.apps.street_aq import build_model, munich_idealised
 from noodl.apps.street_aq._munich_files import (
@@ -529,3 +531,73 @@ def test_direction_exactly_on_the_wrap(tmp_path):
     junction = drivers_at(case, per, 0)["theta_w_junction"]
     assert max(abs(math.remainder(float(t) - math.pi / 2, 2 * math.pi)) for t in junction) \
         < 1e-6
+
+
+def _two_species_case(net):
+    n = len(net.streets)
+    emissions = np.zeros((1, n, 2))
+    emissions[..., 0], emissions[..., 1] = 1e-6, 2e-6          # NO, NO2
+    background = np.zeros((1, n, 2))
+    background[..., 0], background[..., 1] = 1e-8, 3e-8
+    base = dict(wind_dir_from_deg=200.0, wind_speed=5.0, h_abl=1000.0, u_star=0.5, lmo=1e6)
+    return StreetCase.synthetic(net, species=("NO", "NO2"), times=[0.0], meteo=base,
+                                emissions=emissions, background=background, start=START)
+
+
+def test_drivers_follow_the_models_species_order_by_name():
+    net, _ = munich_idealised()
+    case = _two_species_case(net)
+    n = len(net.streets)
+    for order, first in ((("NO", "NO2"), (1e-6, 1e-8)), (("NO2", "NO"), (2e-6, 3e-8))):
+        model, _, _ = build_model(net, species=order, **MUNICH)
+        d = drivers_at(case, model, 0)
+        rows = [model.net.node_index(s) for s in case.street_ids]
+        assert d["street.sources"][rows[0], 0].item() == first[0]
+        assert d["street.x_boundary"][0, 0].item() == pytest.approx(first[1])
+        assert d["street.sources"].shape == (model.net.n, 2) and n == len(rows)
+    # Same physical inputs through the whole case-to-model path: reversing the model order
+    # only reverses the columns of the result.
+    fwd, s_f, _ = build_model(net, species=("NO", "NO2"), **MUNICH)
+    rev, s_r, _ = build_model(net, species=("NO2", "NO"), **MUNICH)
+    x_f = fwd.steady(s_f, drivers_at(case, fwd, 0))["street.x"]
+    x_r = rev.steady(s_r, drivers_at(case, rev, 0))["street.x"]
+    torch.testing.assert_close(x_r, x_f.flip(-1), rtol=1e-12, atol=0)
+
+
+def test_drivers_select_a_subset_of_species_by_name_and_validate_explicit_choices():
+    net, _ = munich_idealised()
+    case = _two_species_case(net)
+    sub, _, _ = build_model(net, species=("NO2",), **MUNICH)
+    d = drivers_at(case, sub, 0)
+    row = sub.net.node_index(case.street_ids[0])
+    assert d["street.sources"][row].item() == 2e-6
+    assert d["street.x_boundary"][0].item() == pytest.approx(3e-8)
+    both, _, _ = build_model(net, species=("NO2", "NO"), **MUNICH)
+    with pytest.raises(ValueError, match="model's order"):
+        drivers_at(case, both, 0, species=("NO", "NO2"))
+    with pytest.raises(ValueError, match="not the model's species"):
+        drivers_at(case, sub, 0, species=("NO",))
+    assert drivers_at(case, both, 0, species=("NO2", "NO"))["street.sources"].shape[-1] == 2
+
+
+def test_emission_scale_is_applied_once_end_to_end():
+    net, _ = munich_idealised()
+
+    def solve(scale):
+        scaled = StreetNetwork(
+            streets=[dataclasses.replace(s, emission_scale=scale) for s in net.streets],
+            x=net.x, y=net.y)
+        case = _case(scaled, 1)
+        model, state, _ = build_model(scaled, species=("NO2",), **MUNICH)
+        d = drivers_at(case, model, 0)
+        return d, model.steady(state, d)["street.x"]
+
+    d1, x1 = solve(1.0)
+    d2, x2 = solve(2.0)
+    d0, x0 = solve(0.0)
+    torch.testing.assert_close(d2["street.sources"], 2.0 * d1["street.sources"])
+    assert float(d1["street.sources"].sum()) > 0.0
+    assert float(d0["street.sources"].abs().sum()) == 0.0
+    assert not torch.equal(x1, x0) and not torch.equal(x1, x2)
+    # background is not scaled
+    torch.testing.assert_close(d2["street.x_boundary"], d1["street.x_boundary"])
