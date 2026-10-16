@@ -248,7 +248,12 @@ converge to the same trajectory, at first order: on Net1, halving the storage st
 distance from a fine explicit run. Its `event_step` never shortens a step below 1 s (the
 implicit step lands just short of a projected crossing, and a far shorter step stalls Newton),
 and with steps as long as an hour a switch can land up to a step late, so sub-steps of a few
-minutes are the useful range. Not with `quality`.
+minutes are the useful range. Not with `quality`: the combination is refused with a
+`ValueError` (a storage tank is an interior node joined to the datum by a storage edge, which
+the quality layer does not model as a well-mixed volume); use the default `tank_mode` for
+water quality, where a tank is a quality boundary whose concentration the caller sets.
+A constant tracer is preserved (every junction stays at the source concentration) across both
+`pipe_form`s, TCV, PBV and GPV valves, tanks and `pda`, tested in `tests/apps/water`.
 
 ### Pressure-driven demand
 

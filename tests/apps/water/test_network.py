@@ -619,3 +619,49 @@ def test_a_constant_tracer_is_preserved_under_pressure_driven_demand():
     flow = source.flow(out["water.phi"][:6])
     assert bool((flow < source.q_required.detach() * 0.999).any())
     assert out["quality.x"].tolist() == pytest.approx([100.0] * 6, rel=1e-8)
+
+
+# The interplay of quality with the pipe form, the PBV/GPV valves, tanks and PDA. A reservoir
+# and an explicit tank (a quality boundary) both hold the tracer at 100; every junction must
+# stay at 100 in steady state, however the hydraulics are written.
+def _tank_device_network(device):
+    """R - pipe - A - DEVICE - B - pipe - C - pipe - T (tank), demands at A and C."""
+    junctions = (Junction("A", 0.0, 0.003), Junction("B", 0.0, 0.0),
+                 Junction("C", 0.0, 0.002))
+    pipes = (WaterPipe("P1", "R", "A", 500.0, 0.3, 130.0),
+             WaterPipe("P2", "B", "C", 500.0, 0.3, 130.0),
+             WaterPipe("P3", "C", "T", 300.0, 0.3, 130.0))
+    kwargs = {}
+    if device == "pbv":
+        kwargs["valves"] = (Valve("V", "A", "B", 0.2, "PBV", 3.0),)
+    elif device == "gpv":
+        kwargs["valves"] = (Valve("V", "A", "B", 0.2, "GPV", 0.0, curve="G"),)
+        kwargs["curves"] = {"G": ((0.001, 1.0), (0.01, 5.0))}
+    else:
+        kwargs["valves"] = (Valve("V", "A", "B", 0.2, "TCV", 5.0),)
+    tank = Tank("T", elevation=40.0, init_level=5.0, min_level=0.0, max_level=10.0,
+                diameter=10.0)
+    return WaterNetwork(junctions=junctions, reservoirs=(Reservoir("R", 60.0),),
+                        tanks=(tank,), pipes=pipes, **kwargs)
+
+
+@pytest.mark.parametrize("pda", [False, True])
+@pytest.mark.parametrize("pipe_form", [None, "potential", "flow"])
+@pytest.mark.parametrize("device", ["tcv", "pbv", "gpv"])
+def test_a_constant_tracer_is_preserved_with_a_tank_every_pipe_form_and_valve(
+    device, pipe_form, pda
+):
+    kwargs = {"pda": True, "p_req": 15.0} if pda else {}
+    model, state, drivers = build_model(
+        _tank_device_network(device), quality=0.0, pipe_form=pipe_form, **kwargs
+    )
+    drivers["quality.x_boundary"] = torch.full_like(drivers["quality.x_boundary"], 100.0)
+    out = water_steady(model, state, drivers)
+    assert out["quality.x"].tolist() == pytest.approx([100.0] * 3, rel=1e-8)
+
+
+@pytest.mark.parametrize("pda", [False, True])
+def test_storage_tanks_with_quality_are_refused_explicitly(pda):
+    kwargs = {"pda": True, "p_req": 15.0} if pda else {}
+    with pytest.raises(ValueError, match="tank_mode='storage' with quality"):
+        build_model(_tank_device_network("tcv"), quality=0.0, tank_mode="storage", **kwargs)
