@@ -14,8 +14,8 @@ quality sections (a quality run is configured through `build_model(quality=...)`
 
 **Aggregated / interpreted:** several `[DEMANDS]` categories of one junction add up (they replace
 the `[JUNCTIONS]` demand); categories with different patterns are refused, since one demand pattern
-per junction is modelled. `[TIMES]` values take an optional unit (SECONDS, MINUTES, HOURS, DAYS and
-their abbreviations; a bare number is hours, `HH:MM[:SS]` is a clock time); other units are refused.
+per junction is modelled. `[TIMES]` values take an optional unit (any token beginning SEC, MIN, HOU or DAY,
+case-insensitive, as EPANET reads it: MINS, SECS, HOU; a bare number is hours, `HH:MM[:SS]` is a clock time); other units are refused.
 
 **Refused by name:** `[RULES]`; `[EMITTERS]`; `[STATUS]` with content; time-based controls (only
 `LINK <id> OPEN|CLOSED IF NODE <tank> BELOW|ABOVE <level>` is read); PRV and PSV valves;

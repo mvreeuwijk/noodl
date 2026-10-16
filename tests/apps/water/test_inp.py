@@ -389,7 +389,8 @@ def _times(tmp_path, body):
 @pytest.mark.parametrize(
     ("text", "seconds"),
     [("30 MINUTES", 1800.0), ("30 min", 1800.0), ("90 SECONDS", 90.0),
-     ("2 HOURS", 7200.0), ("2", 7200.0), ("1 DAYS", 86400.0), ("1:30", 5400.0)],
+     ("2 HOURS", 7200.0), ("2", 7200.0), ("1 DAYS", 86400.0), ("1:30", 5400.0),
+     ("30 MINS", 1800.0), ("90 secs", 90.0), ("2 hou", 7200.0), ("1 Dayx", 86400.0)],
 )
 def test_explicit_time_units_are_honoured(tmp_path, text, seconds):
     net = _times(tmp_path, f"Duration {text}\nHydraulic Timestep {text}\n"
@@ -400,6 +401,7 @@ def test_explicit_time_units_are_honoured(tmp_path, text, seconds):
     assert net.report_timestep == seconds
 
 
-def test_an_unknown_time_unit_is_refused(tmp_path):
+@pytest.mark.parametrize("unit", ["FORTNIGHTS", "HRS", "M", "SE"])
+def test_an_unknown_time_unit_is_refused(tmp_path, unit):
     with pytest.raises(ValueError, match="unknown time unit"):
-        _times(tmp_path, "Duration 30 FORTNIGHTS")
+        _times(tmp_path, f"Duration 30 {unit}")
