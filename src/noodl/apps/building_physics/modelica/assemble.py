@@ -445,8 +445,9 @@ def grid_events(doc: ModelicaDoc, grid: Tensor) -> tuple[Tensor, Tensor]:
 
 
 def _rows(grid: Tensor, times: Tensor) -> Tensor:
-    """The position of each of `times` on `grid` (`driver_grid` holds every output time)."""
-    return (grid.unsqueeze(0) - times.unsqueeze(1)).abs().argmin(dim=1)
+    """The position of each of `times` on `grid` (`driver_grid` holds every output time),
+    by the sorted-grid search of `timeline._nearest` (O(n) memory, not all pairs)."""
+    return timeline._nearest(grid, times)[0]
 
 
 def _component_kinds(doc: ModelicaDoc) -> dict[str, str]:

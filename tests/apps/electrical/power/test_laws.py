@@ -127,3 +127,16 @@ def test_learnable_coefficients_carry_gradients():
     loss.backward()
     for law in (branch, gen, shunt):
         assert all(p.grad is not None for p in law.parameters())
+
+
+@pytest.mark.parametrize("ratio", [0, [0.0], [0], 0.0])
+def test_pi_branch_accepts_python_and_integer_ratios_as_parameters_do(ratio):
+    """A non-tensor ratio (Python or integer, as the other parameters accept) is converted
+    with the parameters' own dtype rule before the zero-tap sentinel is normalised."""
+    import numpy as np
+
+    for value in (ratio, np.asarray(ratio)):
+        law = PiBranch([0.01], [0.1], [0.0], value, [0.0], learnable=True)
+        assert law.ratio.dtype == torch.get_default_dtype()
+        assert float(law.ratio.reshape(-1)[0]) == 1.0
+        law.admittances()
