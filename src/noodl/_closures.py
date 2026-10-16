@@ -152,15 +152,19 @@ class ClosureSchedule:
     # ------------------------------------------------------------------ lookup
     def spec(self, closure: Callable, closures: Sequence[Callable]) -> ClosureSpec:
         """The `ClosureSpec` of `closure`, one of `closures` (the model's live list), found
-        by identity. A closure added to the list after construction is read (and cached) on
-        first use."""
+        by identity. A closure added to the list after construction is read on first use
+        and cached in the identity lookup only; `specs` keeps the construction-time ones.
+        On every such miss the lookup drops the closures no longer in the live list, so it
+        stays bounded by the live list however often closures are swapped in and out."""
         lookup = self._ids
         if lookup is None:
             lookup = self._ids = {id(s.closure): s for s in self.specs}
         spec = lookup.get(id(closure))
         if spec is None or spec.closure is not closure:
+            live = {id(c) for c in closures}
+            for key in [k for k in lookup if k not in live]:
+                del lookup[key]
             spec = closure_spec(closure, index=closures.index(closure))
-            self.specs.append(spec)
             lookup[id(closure)] = spec
         return spec
 
@@ -192,7 +196,9 @@ class ClosureSchedule:
                 probe.closure_outputs.update(result)
                 probe.closure_values.update(result)
                 probe.closure_writers.update(dict.fromkeys(result, type(closure).__name__))
-                probe.closure_returned.setdefault(spec.label, set()).update(result)
+                # Keyed by IDENTITY: two closures may share a `repr` (the label is for
+                # display only).
+                probe.closure_returned.setdefault(id(closure), set()).update(result)
             for key, value in result.items():
                 head, _, tail = key.rpartition(".")
                 if head in self.layers and tail in _STATE_SUFFIXES:

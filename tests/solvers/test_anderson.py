@@ -12,13 +12,8 @@ def _linear_history(a, b, xs):
     return gs, [g - x for g, x in zip(gs, xs, strict=True)]
 
 
-def test_model_re_exports_the_moved_names():
-    import noodl.model
-    import noodl.solvers.anderson
-
-    assert noodl.model._anderson_mix is noodl.solvers.anderson._anderson_mix
-    assert noodl.model._AndersonHistory is noodl.solvers.anderson._AndersonHistory
-    assert noodl.model._ANDERSON_COND_MAX == _ANDERSON_COND_MAX == 1.0e8
+def test_the_conditioning_bound():
+    assert _ANDERSON_COND_MAX == 1.0e8
 
 
 def test_recorded_two_entry_history_of_a_linear_map():

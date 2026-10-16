@@ -992,7 +992,7 @@ def _drain(factors, conduits=("C5",)):
 
     So every step is SWMM's own fixed point, or sits on the switch. y1 - y2 is ``h1 - h2 -
     dz``, dz the drop between the conduit-end inverts; C5 joins J4 to the outfall."""
-    from noodl.model import StepContext
+    from noodl.contracts import StepContext
 
     net, _, _ = read_swmm_inp(DATA / "tree_dynwave.inp")
     model, state, drivers = build_model(net)
@@ -1444,7 +1444,7 @@ def test_two_barrels_carry_twice_one_barrels_flow_at_equal_heads():
     state: the pass's flow of the pair is exactly twice (offset, conveyance and flow all
     total over the barrels), the per-barrel stored area is the same, and the limits and
     surface areas the closure writes are the barrel-scaled ones."""
-    from noodl.model import StepContext
+    from noodl.contracts import StepContext
     one, state1, drivers1 = build_model(_chain_net(barrels=1))
     two, state2, drivers2 = build_model(_chain_net(barrels=2))
     # fed state: junction 0.2 m, per-barrel flow 0.01 m3/s (so 0.02 for two barrels)
@@ -1712,7 +1712,7 @@ def _drop_sides(tmp_path, name, steps, **build_kwargs):
     net inflow at most the lower storage line there, or above it with at least the upper
     one -- from the drivers of a pass fed the step's result."""
     from noodl.apps.sewer.dynwave import build_dynamic_wave_model
-    from noodl.model import StepContext
+    from noodl.contracts import StepContext
 
     path = tmp_path / f"{name}.inp"
     path.write_text(_drop_variant(name))
@@ -1829,7 +1829,7 @@ def test_gradient_on_a_held_threshold_does_not_depend_on_the_wall_slope(tmp_path
     and 5 (to 1e-10 relative; 5e-13 measured) and matches central differences (1.6e-8
     relative measured)."""
     from noodl.apps.sewer.dynwave import build_dynamic_wave_model
-    from noodl.model import StepContext
+    from noodl.contracts import StepContext
 
     path = tmp_path / "c3_offset_0.1.inp"
     path.write_text(_drop_variant("c3_offset_0.1"))
@@ -1904,7 +1904,7 @@ def test_a_storage_units_area_adds_to_its_conduit_areas_at_the_fed_depth():
     curve's at the previous trial's depth plus the attached conduit ends' (which SWMM does
     NOT zero at a storage node: only regulator ends are, dynwave.c:520-523), before the
     MIN_SURFAREA floor; in SI area (ft2 x QCF/LCF, `_AREA_SI`)."""
-    from noodl.model import StepContext
+    from noodl.contracts import StepContext
     curve = ("functional", 20.0, 1.5, 5.0)
     plain, s0, _ = build_model(_chain_net())
     unit, s1, d1 = build_model(_storage_chain(curve))
@@ -1937,7 +1937,7 @@ def test_storage_surcharges_above_its_full_depth_and_only_with_a_surcharge_depth
     (``sewer.surcharged``) agree on fed depths clear of the hold band. A unit draining at
     its full depth (net inflow -0.2 m3/s at the step start, at rest) is used, so that the
     band is positive wherever the depth is above the full depth."""
-    from noodl.model import StepContext
+    from noodl.contracts import StepContext
 
     def flags(net, depth):
         model, state, drivers = build_model(net)
@@ -2133,7 +2133,7 @@ def test_the_closure_feeds_swmms_regulator_flow_at_the_fed_heads(kind):
     node heads (m3/s = cfs x QCF), its slope SWMM's dqdh (an outlet's a central
     difference; m2/s = cfs/ft x QCF/LCF), its dp_fed the fed head difference."""
     from noodl.apps.sewer import structures as st
-    from noodl.model import StepContext
+    from noodl.contracts import StepContext
     model, state, drivers = build_model(_regulated(kind))
     hyd = model.dynamic_wave
     s = hyd.structures[kind]
@@ -2157,7 +2157,7 @@ def test_orifice_end_areas_join_their_junctions_zeroed_at_a_critical_end():
     """dynwave.c:503-524: an orifice gives each end node half its surfArea (a side
     orifice's ``W(f yFull) L``, L >= 200 ft), but none to its downstream end while it is
     DN_CRITICAL (crest above the downstream head); weirs give none."""
-    from noodl.model import StepContext
+    from noodl.contracts import StepContext
     plain, s0, d0 = build_model(_regulated("weir"))
     model, state, drivers = build_model(_regulated("orifice"))
     hyd = model.dynamic_wave
@@ -2180,7 +2180,7 @@ def test_orifice_end_areas_join_their_junctions_zeroed_at_a_critical_end():
 def test_regulator_end_areas_are_zeroed_at_a_storage_unit():
     """dynwave.c:520-523: at a storage node SWMM zeroes a regulator's end area
     (never a conduit's): J2 a storage unit, its orifice end gives it nothing."""
-    from noodl.model import StepContext
+    from noodl.contracts import StepContext
     model, state, drivers = build_model(_regulated("orifice", storage_at="J2"))
     hyd = model.dynamic_wave
     fed = _fed_heads(model, state, [0.1, 0.2, 0.65])
@@ -2823,7 +2823,7 @@ def test_air_geometry_is_the_circle_at_the_link_depth_per_barrel():
     a quarter of the resistance of one at the same depth."""
     from noodl.apps.sewer import geometry as geom
     from noodl.apps.sewer.air import Headspace
-    from noodl.model import StepContext
+    from noodl.contracts import StepContext
     published = {}
     diameter = torch.tensor([0.45], dtype=F64)
     for barrels in (1, 2):

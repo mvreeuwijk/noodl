@@ -83,6 +83,40 @@ def test_custom_closure_keys_are_accepted_and_unread_ones_flagged_by_the_probe()
     assert "thermal.sources" in probed.closure_outputs
 
 
+def test_closures_sharing_a_repr_are_told_apart_by_identity():
+    """The probe records each closure's returns by identity, not by `repr`: two closures
+    with the same `repr` but different outputs, each declaring exactly what it returns,
+    raise no `declared-vs-probed`; and an overwrite between them names their positions."""
+    net, base, _, _ = build_ventilation("pingpong")
+
+    class Note:
+        def __init__(self, key, value):
+            self.outputs = (key,)
+            self.key, self.value = key, value
+
+        def __repr__(self):
+            return "Note()"
+
+        def __call__(self, state, drivers):
+            return {self.key: torch.tensor(self.value, dtype=F64)}
+
+    first, second = Note("note_a", 1.0), Note("note_b", 2.0)
+    model = Model(net, base.layers, closures=[*base.closures, first, second])
+    state = initial_state(model)
+    drivers = initial_drivers(model, values={"thermal.x_boundary": {"ambient": 285.0}})
+    probed = model.check(state, drivers, dt=600.0, probe=True)
+    assert not [i for i in probed.issues if i.code == "declared-vs-probed"], str(probed)
+    assert {"note_a", "note_b"} <= probed.closure_outputs
+
+    n = len(base.closures)
+    clash = Model(net, base.layers,
+                  closures=[*base.closures, Note("note_a", 1.0), Note("note_a", 2.0)])
+    (issue,) = [i for i in clash.check(state, drivers).issues
+                if i.code == "overwritten-output"]
+    assert f"Note() (closure #{n + 1})" in issue.message
+    assert f"Note() (closure #{n})" in issue.message
+
+
 def test_a_missing_required_input_and_a_failing_probe_are_errors():
     _, model, state, drivers = _setup()
     del drivers["thermal.x_boundary"]

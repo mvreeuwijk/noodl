@@ -281,10 +281,11 @@ pass. Three consequences:
   asked once more at the **certified interface**, because a closure may take a
   parameter-dependent branch only after the coupled values have moved — the answer that counts
   is the one at the point whose derivative is returned. That extra pass (not counted in
-  `passes`) is paid only when some tensor requiring grad is reachable at all, from the models
-  (layers, laws, closures and the tensors they hold) or their states and drivers. A forward
-  simulation where nothing requires grad, which is the common case even with PyTorch's default
-  grad mode on, does not pay it.
+  `passes`) is paid on every converged step run with grad mode on, because no inspection of the
+  models can prove that nothing a pass reads requires grad (a closure may read a tensor through a
+  module attribute, a global or a captured cell). It is skipped under `torch.no_grad()`, so a
+  **forward-only simulation should run under `torch.no_grad()`**: it then pays neither the
+  probe pass nor pass 1's graph.
 
 The **interface** is every link's forward value, one-way links included, because that is what a
 pass reads from the previous pass's output. Only the two-way entries are measured for

@@ -98,7 +98,7 @@ def test_probe_records_reads_and_returns():
     assert probe.state_reads == {"s"} and "d" in probe.driver_reads
     assert probe.closure_outputs == {"out": 3.0} == probe.closure_values
     assert probe.closure_writers == {"out": "function"}
-    assert probe.closure_returned == {repr(reader): {"out"}}
+    assert probe.closure_returned == {id(reader): {"out"}}
 
 
 @pytest.mark.parametrize("key", ["heat.phi", "heat.q", "species.x", "species.q", "street.x"])
@@ -167,6 +167,28 @@ def test_a_closure_added_to_the_live_list_is_read_on_first_use():
     assert sched.integrating(closures) == {id(closures[2])}
     closures[:] = [closures[0]]
     assert sched.apply(closures, {}, {}) == {"z": 0.0}
+
+
+def test_swapping_closures_in_and_out_does_not_grow_the_cache():
+    closures = [Writes(a=1.0)]
+    sched = _schedule(closures)
+    for i in range(50):
+        closures[:] = [closures[0], Writes(b=float(i))]
+        assert sched.apply(closures, {}, {}) == {"a": 1.0, "b": float(i)}
+    assert len(sched.specs) == 1
+    assert len(sched._ids) <= len(closures)
+
+
+@pytest.mark.parametrize("clone", [copy.deepcopy, lambda s: pickle.loads(pickle.dumps(s))])
+def test_a_copy_reads_a_closure_added_after_construction_again(clone):
+    closures = [Writes(a=1.0)]
+    sched = _schedule(closures)
+    closures.append(Clock())
+    sched.apply(closures, {}, {}, ctx=StepContext(dt=1.0))
+    copied_sched, copied_closures = clone((sched, closures))
+    out = copied_sched.apply(copied_closures, {"clock.t": 1.0}, {}, ctx=StepContext(dt=2.0))
+    assert out == {"a": 1.0, "clock.t": 3.0}
+    assert copied_sched.integrating(copied_closures) == {id(copied_closures[1])}
 
 
 @pytest.mark.parametrize("clone", [copy.deepcopy, lambda s: pickle.loads(pickle.dumps(s))])

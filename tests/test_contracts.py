@@ -225,6 +225,60 @@ def test_integrates_true_with_two_positional_parameters_message():
         closure_spec(f, index=0)
 
 
+def test_a_closure_requiring_a_third_argument_without_integrates_is_refused():
+    """The other direction of the arity check: called with two arguments, a closure that
+    REQUIRES a third would fail on its first call; it is refused at construction."""
+    def f(s, d, ctx):
+        return {}
+
+    with pytest.raises(TypeError, match=r"requires 3 positional arguments but does not "
+                                        r"declare integrates=True"):
+        closure_spec(f, index=0)
+    f.integrates = False
+    with pytest.raises(TypeError, match=r"requires 3 positional arguments"):
+        closure_spec(f, index=0)
+
+
+def test_an_optional_third_argument_without_integrates_is_accepted():
+    def f(s, d, ctx=None):
+        return {"x": torch.tensor(1.0 if ctx is None else 2.0)}
+
+    assert closure_spec(f, index=0)(S, D, StepContext(dt=1.0))["x"] == 1.0
+
+
+def test_an_uninspectable_callable_is_accepted_as_declared(monkeypatch):
+    def f(s, d):
+        return {"x": s["s"]}
+
+    def refuse(obj, *a, **k):
+        raise ValueError("no signature found")
+
+    monkeypatch.setattr(contracts.inspect, "signature", refuse)
+    assert closure_spec(f, index=0)(S, D)["x"] == 1.0
+    f.integrates = True                       # cannot be checked either way: accepted
+    assert closure_spec(f, index=0).integrates
+    monkeypatch.setattr(contracts.inspect, "signature",
+                        lambda *a, **k: (_ for _ in ()).throw(TypeError("not supported")))
+    assert not closure_spec(lambda s, d: {}, index=0).integrates
+
+
+def test_the_two_protocols_are_distinct_at_runtime():
+    """`IntegratingClosure` needs the `integrates` attribute; `AlgebraicClosure` is any
+    callable. `noodl.model.Closure` is kept as an alias of `AlgebraicClosure`."""
+    from noodl.model import Closure
+
+    def plain(s, d):
+        return {}
+
+    @_mark(integrates=True)
+    def clocked(s, d, ctx):
+        return {}
+
+    assert isinstance(plain, AlgebraicClosure) and not isinstance(plain, IntegratingClosure)
+    assert isinstance(clocked, IntegratingClosure)
+    assert Closure is AlgebraicClosure
+
+
 @pytest.mark.parametrize("attr", ["inputs", "outputs", "state_keys", "edge_kinds"])
 def test_a_bare_string_declaration_is_refused(attr):
     def f(s, d, ctx=None):

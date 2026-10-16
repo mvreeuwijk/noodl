@@ -97,12 +97,6 @@ def _write_at(
     return layout.write_at(target, n_last, position, value, add=add, where="couple")
 
 
-def _is_stacked(x: Tensor, n_last: int) -> bool:
-    """True when a single-species tensor is in STACKED layout `(..., n_last, 1)` rather than
-    reduced `(..., n_last)` (`noodl.layout.is_stacked`)."""
-    return layout.is_stacked(x, n_last)
-
-
 def apply_conversion(name: str | None, value: Tensor, drivers: Mapping[str, Tensor]) -> Tensor:
     """`value` unchanged if `name` is None; the registered conversion otherwise.
 
@@ -264,6 +258,11 @@ class CoupledModel:
     forward value carrying the batch as its leading dims) or, when some link's value is
     shared across instances, as today's single system flattened over the whole interface;
     `False` when `"adjoint"` is `None` too.
+
+    In grad mode, a step whose first pass finds nothing differentiable pays one more,
+    uncounted pass at the certified point to confirm it (a closure may read a parameter only
+    on the branch the fixed point lies on, and no inspection can rule that out). A
+    forward-only run should therefore use `torch.no_grad()`, which skips that pass.
     """
 
     def __init__(
@@ -687,10 +686,9 @@ class CoupledModel:
         it finds nothing, the question is asked again at the certified interface, because a
         closure may take a parameter-dependent branch only once the coupled values have
         moved, and the answer that matters is the one at the point whose derivative is
-        returned. That extra pass (not counted in `passes`) runs only when some tensor
-        requiring grad is reachable from the models or their inputs at all
-        (`noodl._grad_reach.any_requires_grad`), so a forward simulation with nothing
-        requiring grad pays nothing for it, even in grad mode.
+        returned. That extra pass (not counted in `passes`) runs whenever grad mode is on,
+        since no inspection can prove that nothing a pass reads requires grad: a
+        forward-only simulation should run under `torch.no_grad()`, which skips it.
 
         The INTERFACE is every link's forward value, one-way links included, because that is
         what a pass actually reads from the previous pass's output. A one-way value kept out
@@ -730,11 +728,9 @@ class CoupledModel:
         # closure that takes a parameter-dependent branch only once the coupled values
         # have moved would have the returned state silently detached. Ask again, once,
         # under grad at the certified interface `values` -- the point whose derivative is
-        # returned -- and drop that pass's output and graph. Skipped when no tensor
-        # requiring grad is reachable from the models or their inputs at all
-        # (`any_requires_grad`): no pass can then produce a dependency.
-        needs_adjoint = confirm_gradient_dependence(
-            problem, outcome, roots=(self, start, drivers))
+        # returned -- and drop that pass's output and graph. Skipped under
+        # `torch.no_grad()`.
+        needs_adjoint = confirm_gradient_dependence(problem, outcome)
         # `values` are the relaxed forward values the CERTIFIED pass -- the one whose output
         # was just judged converged -- was stepped with, so running `_one_pass` on them once
         # more reproduces that pass TO SOLVER ACCURACY. Not bitwise by construction:

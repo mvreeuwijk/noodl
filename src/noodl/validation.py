@@ -24,6 +24,7 @@ of its drivers is invisible to the probe, so "unused" is a warning, never an err
 from __future__ import annotations
 
 import difflib
+from collections import Counter
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 
@@ -128,8 +129,9 @@ class _Probe:
         # The value each closure output last took, and the closure that wrote it.
         self.closure_values: dict[str, object] = {}
         self.closure_writers: dict[str, str] = {}
-        # The keys each closure (by `ClosureSpec.label`) returned, over the whole probe.
-        self.closure_returned: dict[str, set[str]] = {}
+        # The keys each closure returned over the whole probe, keyed by the closure's
+        # `id()` (not its label: two closures may share a `repr`).
+        self.closure_returned: dict[int, set[str]] = {}
 
 
 def _check_value(f: Field, key: str, value, origin: str, add, batches) -> str:
@@ -240,8 +242,16 @@ def check_setup(
 
     # --------------------------------------------------------------- closure ownership
     specs = _specs(model)
-    last_writer: dict[str, str] = {}
-    for spec in specs:
+    # A closure's label names it in messages only; two closures may share a `repr`, so a
+    # repeated label is told apart by the closure's position in `model.closures`.
+    label_counts = Counter(spec.label for spec in specs)
+
+    def who(i: int) -> str:
+        label = specs[i].label
+        return label if label_counts[label] == 1 else f"{label} (closure #{i})"
+
+    last_writer: dict[str, int] = {}
+    for i, spec in enumerate(specs):
         if spec.writes is None and spec.reads is None:
             add(Issue("info", "undeclared-closure",
                       f"closure {spec.label} declares neither `inputs` nor `outputs`, so "
@@ -250,10 +260,10 @@ def check_setup(
         for key in sorted(spec.writes or ()):
             if key in last_writer and key not in (spec.reads or ()):
                 add(Issue("warning", "overwritten-output",
-                          f"closure {spec.label} declares output {key!r} and replaces what "
-                          f"closure {last_writer[key]} wrote, without declaring it among "
-                          f"its `inputs`", key))
-            last_writer[key] = spec.label
+                          f"closure {who(i)} declares output {key!r} and replaces what "
+                          f"closure {who(last_writer[key])} wrote, without declaring it "
+                          f"among its `inputs`", key))
+            last_writer[key] = i
             head, dot, tail = key.rpartition(".")
             if dot and head in model.layers:
                 ref = model.refs[head]
@@ -297,14 +307,14 @@ def check_setup(
             report.state_reads = frozenset(map(str, probe_obj.state_reads))
             report.closure_outputs = frozenset(map(str, probe_obj.closure_outputs))
             closure_values, closure_writers = probe_obj.closure_values, probe_obj.closure_writers
-            for spec in specs:
+            for i, spec in enumerate(specs):
                 undeclared = sorted(
-                    probe_obj.closure_returned.get(spec.label, set())
+                    probe_obj.closure_returned.get(id(spec.closure), set())
                     - set(spec.writes or ()) - set(spec.state_keys)
                 ) if spec.writes is not None else []
                 if undeclared:
                     add(Issue("warning", "declared-vs-probed",
-                              f"closure {spec.label} returned {undeclared} during the probe "
+                              f"closure {who(i)} returned {undeclared} during the probe "
                               f"step, which it does not declare among its `outputs`"))
     # Without a probe, learn what the closures write by evaluating them once as a QUERY --
     # the no-integration call `Model.initial_capacities` makes: no solve, no time step, and

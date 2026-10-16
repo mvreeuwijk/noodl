@@ -49,9 +49,8 @@ Newton's mask is). Failure follows the layers: raise by default, naming the offe
 from __future__ import annotations
 
 import warnings
-from collections.abc import Collection, Mapping, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Protocol, runtime_checkable
 
 import torch
 
@@ -79,16 +78,12 @@ from noodl._pass import (
     run_pass,
     zero_sources,
 )
-from noodl.contracts import ClosureSpec, StepContext
+from noodl.contracts import AlgebraicClosure, ClosureSpec, IntegratingClosure, StepContext
 from noodl.layers.allocation import AllocatedFlowLayer
 from noodl.layers.kirchhoff import KirchhoffLayer
 from noodl.layers.reaction import Reaction
 from noodl.layers.transport import TransportLayer
-from noodl.solvers.anderson import (  # noqa: F401 -- `_anderson_mix` re-exported
-    _ANDERSON_COND_MAX,
-    _anderson_mix,
-    _AndersonHistory,
-)
+from noodl.solvers.anderson import _AndersonHistory
 from noodl.solvers.errors import ConvergenceError
 from noodl.solvers.fixed_point import differentiate_fixed_point
 from noodl.topology import Network
@@ -102,23 +97,10 @@ _STATE_SUFFIXES = ("phi", "q", "x", "s")
 _MODEL_SOLVE_KEYS = frozenset({"phi0", "q0", "history", "dt", "t"})
 # The key `layer_options` travels under inside `solve_kwargs`, to `_pass`'s layer solves.
 _LAYER_OPTIONS = LAYER_OPTIONS
-# `_detached` is the shared diagnostics helper, under its pre-move name.
-_detached = detached
 
 
-@runtime_checkable
-class Closure(Protocol):
-    """state, drivers -> driver updates (a mapping of NEW driver values, merged in order).
-
-    A closure that INTEGRATES some state over the step declares a class or instance
-    attribute `integrates = True` and is instead called as `closure(state, drivers, ctx)`,
-    receiving the `StepContext` it must advance by; see `noodl.contracts` and
-    `Model._apply_closures`.
-    """
-
-    def __call__(
-        self, state: Mapping[str, Tensor], drivers: Mapping[str, Tensor]
-    ) -> Mapping[str, Tensor]: ...
+#: Kept for import compatibility: the closure Protocols live in `noodl.contracts`.
+Closure = AlgebraicClosure
 
 
 @dataclass(frozen=True)
@@ -222,6 +204,11 @@ class Model:
     the batch as its leading dims) or, when some key does not (a value shared across
     instances), as today's single system flattened over the whole interface; `False` when
     `"adjoint"` is `None` too.
+
+    In grad mode, a step whose first pass finds nothing differentiable pays one more,
+    uncounted pass at the certified point to confirm it (a closure may read a parameter only
+    on the branch the fixed point lies on, and no inspection can rule that out). A
+    forward-only run should therefore use `torch.no_grad()`, which skips that pass.
     """
 
     def __init__(
@@ -229,7 +216,7 @@ class Model:
         net: Network,
         layers: Mapping[str, KirchhoffLayer | TransportLayer | AllocatedFlowLayer]
         | Sequence[KirchhoffLayer | TransportLayer | AllocatedFlowLayer],
-        closures: Sequence[Closure] = (),
+        closures: Sequence[AlgebraicClosure | IntegratingClosure] = (),
         reactions: Sequence[tuple[str, Reaction]] = (),
         coupling: str = "pingpong",
         iterate_tol: Mapping[str, float] | None = None,
@@ -267,7 +254,7 @@ class Model:
             self.closures, layers=self.layers, transport=self.transport,
             flow_layer_of=self.flow_layer_of,
         )
-        self.closure_state_keys: dict[str, Closure] = self._schedule.closure_state_keys
+        self.closure_state_keys: dict[str, Callable] = self._schedule.closure_state_keys
         self.reactions = validate_reactions(self.transport, reactions)
         self._schedule.check_species_columns(self.transport, self.reactions)
         options = CouplingOptions.validate(
@@ -671,10 +658,9 @@ class Model:
         nothing, the question is asked again at the certified fed state, because a closure
         may take a parameter-dependent branch only once the state has moved away from the
         step start, and the answer that matters is the one at the point whose derivative
-        is returned. That extra pass (not counted in `passes`) runs only when some tensor
-        requiring grad is reachable from the model or its inputs at all
-        (`noodl._grad_reach.any_requires_grad`), so a forward simulation with nothing
-        requiring grad pays nothing for it, even in grad mode. A run
+        is returned. That extra pass (not counted in `passes`) runs whenever grad mode is
+        on, since no inspection can prove that nothing a pass reads requires grad: a
+        forward-only simulation should run under `torch.no_grad()`, which skips it. A run
         that does NOT converge attaches no adjoint either: there is no fixed point to
         differentiate, and handing back the last pass's graph would be exactly the truncated
         derivative this replaced.
@@ -767,11 +753,9 @@ class Model:
             # have the returned state silently detached. Ask again, once, under grad at the
             # state the certified (or, without convergence, the last) pass was fed -- the
             # point whose derivative is returned -- and drop that pass's output and graph.
-            # Skipped by a run about to raise for non-convergence anyway, and by one where no
-            # tensor requiring grad is reachable from the model or its inputs at all
-            # (`any_requires_grad`), where no pass can produce a dependency.
-            needs_adjoint = confirm_gradient_dependence(
-                problem, outcome, roots=(self, state, drivers, solve_kwargs))
+            # Skipped by a run about to raise for non-convergence anyway, and under
+            # `torch.no_grad()`.
+            needs_adjoint = confirm_gradient_dependence(problem, outcome)
         if not bool(converged.all()):
             failing = (
                 (~converged).nonzero().flatten().tolist() if converged.dim() else "all"

@@ -95,11 +95,12 @@ from noodl.apps.sewer.xsect_tables import (
     critical_depth,
     normal_depth_ft,
 )
+from noodl.contracts import StepContext
 from noodl.elements.base import ConstitutiveLaw
 from noodl.layers.kirchhoff import KirchhoffLayer
 from noodl.layers.reaction import Reaction
 from noodl.layers.transport import TransportLayer, active_interior
-from noodl.model import Model, StepContext
+from noodl.model import Model
 from noodl.nodesources import NodeSource
 from noodl.topology import Network
 

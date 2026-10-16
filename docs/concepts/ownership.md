@@ -42,8 +42,12 @@ changes the next step. Learnable parameters are registered on the law, so
   is neither seen nor refused.
 - Replacing or editing `model.layers`, `model.closures` or `model.reactions` after
   construction. `Model.__init__` validates names, keys and drivers once; an appended closure
-  runs without that validation (its declarations are read on first use, so its call
-  signature, `integrates` and `species_columns` are not checked against the layers).
+  runs without the checks against the layers (its declarations are read on first use, which
+  checks its call signature against `integrates`, but its `outputs`, `state_keys` and
+  `species_columns` are not checked against the layers). This page, not the closure contract
+  in [Extending](../development/extending.md#the-closure-contract), is what governs a
+  closure's lifecycle; units live with the keys (`noodl.refs.Field`, a closure's
+  `input_specs`).
 - Changing a layer's private tensors (`cols`, the law slices) or its list of laws.
 
 **Frozen dataclasses are shallow.** The application records (`Resistor`, `Circuit`,

@@ -175,7 +175,6 @@ Subclass these to add a constitutive law, drive, closure, reaction or node sourc
 
 | Name | What it does | How to call it |
 |---|---|---|
-| `Closure`<br><small>`noodl.model`</small> | state, drivers -> driver updates (a mapping of NEW driver values, merged in order). | `Closure(...)` |
 | `Reaction`<br><small>`noodl.layers`</small> | A local, per-node nonlinear map applied to the state after a transport step (or before it, under `Model(reaction_order="before_transport")`). | `Reaction(...)` |
 | `ConstitutiveLaw`<br><small>`noodl.elements`</small> | Abstract branch law: flow as a function of potential difference. | `ConstitutiveLaw(kind)` |
 | `ImplicitLaw`<br><small>`noodl.elements`</small> | A constitutive law written as a relation `residual(dp, q, drivers, ctx) = 0`. | `ImplicitLaw(kind)` |

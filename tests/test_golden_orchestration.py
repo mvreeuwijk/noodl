@@ -282,7 +282,8 @@ def case_iterate_branch_closure_distant_warm_start():
 
 
 def case_iterate_no_grad_reaches():
-    """No learnable parameter and no grad-carrying input: the primal passes only."""
+    """No learnable parameter and no grad-carrying input, in grad mode: the primal passes
+    plus the one uncounted probe pass, which finds nothing."""
     model, state, drivers, _ = _air_gas(closures=[_gain], learnable=False, **_iterate_kw())
     diag: dict = {}
     out = model.step(state, drivers, 600.0, diagnostics=diag)

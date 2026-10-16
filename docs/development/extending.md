@@ -130,7 +130,8 @@ real application adds more of the same kind of thing, in a fixed place:
 - **Closures with `integrates` declared.** A closure that only reads the current state and
   drivers to produce new driver values needs no declaration. One that instead **integrates**
   some state over the step's own interval — advances a counter, a controller, a stored level —
-  must declare `integrates = True` (see `noodl.model.Closure`, `StepContext`) so
+  must declare `integrates = True` (see `noodl.contracts.IntegratingClosure` and
+  `noodl.contracts.StepContext`) so
   `Model` calls it as `closure(state, drivers, ctx)` with the interval to advance by, and so
   `Model.steady()` (which has no interval) refuses it by name instead of silently either
   skipping it or integrating over an undefined `dt`.
@@ -148,6 +149,15 @@ testing and review as any other change under `src/noodl/layers` or `src/noodl/so
 
 A closure is any callable that adds or replaces drivers. `noodl.contracts` is where the
 contract is written down; `Model` reads every closure through it, once, at construction.
+
+**What the contract covers, and what it does not.** It fixes how a closure is called (two
+arguments, or three with a `StepContext` when it declares `integrates = True`; the arity is
+checked against that declaration in both directions) and which optional attributes it may
+declare. It says nothing about **units**: those live with the keys, in `noodl.refs.Field`
+(a layer's own keys, through `model.refs`) and in the closure's own `input_specs` (the
+`Field` of each key it reads), which the model reads through `ClosureSpec.input_specs`.
+Nor does it govern **lifecycle and mutation** (what may change after construction, devices,
+copying and pickling): that is [Mutation, devices and serialization](../concepts/ownership.md).
 
 - **Algebraic closure**: `closure(state, drivers) -> {key: tensor}`. It sees the state and the
   drivers and returns driver entries. It never writes a layer's own state key.
