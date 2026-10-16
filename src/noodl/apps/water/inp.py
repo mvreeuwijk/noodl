@@ -285,6 +285,14 @@ def read_epanet_inp(path) -> WaterNetwork:
     # "supplemental demands ... override the demand given in [JUNCTIONS]").
     # Several categories of one junction add up; the model carries one demand and one pattern
     # per junction, so categories whose patterns differ are refused rather than merged.
+    # A demand with no pattern uses the default pattern (`[OPTIONS] PATTERN`, else a pattern
+    # named "1" if one exists, else a constant 1.0), so categories are compared by EFFECTIVE
+    # pattern: "no pattern" and an explicit naming of the default are the same.
+    default_pattern = demand_pattern or ("1" if "1" in patterns else None)
+
+    def effective(name: str | None) -> str | None:
+        return name if name is not None else default_pattern
+
     overrides: dict[str, tuple[float, str | None]] = {}
     for line in sections.get("DEMANDS", []):
         require_fields(line, 2, "a demand", path)
@@ -293,14 +301,14 @@ def read_epanet_inp(path) -> WaterNetwork:
         name = line.fields[0]
         if name in overrides:
             total, first = overrides[name]
-            if pattern != first:
+            if effective(pattern) != effective(first):
                 raise ValueError(
                     f"{path}: line {line.number}: junction {name!r} has [DEMANDS] "
                     f"categories with different patterns ({first!r} and {pattern!r}); "
                     f"one demand pattern per junction is modelled, so they cannot be "
                     f"aggregated"
                 )
-            overrides[name] = (total + value, first)
+            overrides[name] = (total + value, first if first is not None else pattern)
         else:
             overrides[name] = (value, pattern)
     known = {j.name for j in junctions}

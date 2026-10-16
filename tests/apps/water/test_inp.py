@@ -368,6 +368,36 @@ def test_demand_categories_with_different_patterns_are_refused(tmp_path):
         read_epanet_inp(path)
 
 
+def _with_default_pattern(tmp_path, demands, option="Pat1"):
+    pairs = [("[CURVES]", f"[PATTERNS]\n Pat1 1 2\n Pat2 2 1\n\n[DEMANDS]\n{demands}\n\n[CURVES]"),
+             (" Pattern            	1", f" Pattern            	{option}")]
+    return _edit(tmp_path, "twoloop_si.inp", *pairs)
+
+
+@pytest.mark.parametrize("demands", [" J1   5\n J1   7   Pat1", " J1   5   Pat1\n J1   7"])
+def test_no_pattern_equals_an_explicit_default_pattern_either_way_round(tmp_path, demands):
+    """A demand with no pattern uses the [OPTIONS] default pattern, so it is the SAME pattern
+    as one naming that default explicitly."""
+    junction = next(j for j in read_epanet_inp(_with_default_pattern(tmp_path, demands)).junctions
+                    if j.name == "J1")
+    assert junction.demand == pytest.approx(12e-3, rel=1e-14)
+    assert junction.pattern in ("Pat1", None)
+
+
+def test_no_pattern_equals_pattern_1_when_no_default_option_is_given(tmp_path):
+    path = _edit(tmp_path, "twoloop_si.inp",
+                 (" Pattern            	1", ""),
+                 ("[CURVES]", "[PATTERNS]\n 1 1 2\n\n[DEMANDS]\n J1 5\n J1 7 1\n\n[CURVES]"))
+    junction = next(j for j in read_epanet_inp(path).junctions if j.name == "J1")
+    assert junction.demand == pytest.approx(12e-3, rel=1e-14)
+
+
+def test_no_pattern_differs_from_a_non_default_pattern(tmp_path):
+    path = _with_default_pattern(tmp_path, " J1   5\n J1   7   Pat2")
+    with pytest.raises(ValueError, match="different patterns"):
+        read_epanet_inp(path)
+
+
 def test_demand_categories_sharing_a_pattern_add_up(tmp_path):
     path = _edit(tmp_path, "twoloop_si.inp",
                  ("[CURVES]", "[DEMANDS]\n J1   5   Pat1\n J1   7   Pat1\n\n[CURVES]"))
