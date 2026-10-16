@@ -21,13 +21,14 @@ from collections.abc import Mapping
 import torch
 
 from noodl.apps.building_physics.modelica.assemble import (
+    _HeldMover,
     _ZoneStateClosure,
     boundary_rate_key,
     is_boundary_rate_key,
 )
 from noodl.apps.building_physics.modelica.feedback import FeedbackHeat
 from noodl.apps.building_physics.modelica.storage import StorageClosure, mass_change
-from noodl.elements import ConstitutiveLaw
+from noodl.elements import ConstitutiveLaw, LawContext
 from noodl.model import Drivers, Model, State
 from noodl.modelica.timeline import extrapolate as extrapolate  # this reader's public API
 from noodl.modelica.timeline import grid_index
@@ -70,6 +71,88 @@ def _feedback(model: Model) -> FeedbackHeat | None:
     return next((c for c in model.closures if isinstance(c, FeedbackHeat)), None)
 
 
+# Movers with volume mass storage. A `FlowControlled_dp` (`assemble._MoverHead`, SteadyState
+# energy dynamics) has no inertia and no volume of its own: its mass flow is an ALGEBRAIC
+# variable, not a state. Within a step the airflow solve fixes it (MNA unknown); the value
+# carried in `"air.q"` is only the last solve's, read where noodl evaluates the flows WITHOUT
+# solving: the t = StartTime row (`_initial_air`) and state 0 taken again with other flow
+# directions (`_Midpoint._start_with_directions`, which passes state 0's own solved `q`).
+# At t = StartTime every storing zone is held at its start pressure, so the rise relation
+# `phi_b - phi_a = dp` does not involve the flow, and "the element laws at the start
+# pressures" leave it undetermined. MBL's DAE fixes it by index reduction: the rise ties the
+# pressures of its two ends, so their derivatives are tied too, `der(p_b) = der(p_a)` at a
+# held rise, and the mover's flow is the one that makes the two volumes' storage rates
+# agree (`_start_mover_flows`). For two volumes between orifices that is
+# `m_fan = (V_b q_a + V_a q_b) / (V_a + V_b)`. This is what OpenModelica reports at
+# t = StartTime from a start that satisfies the rise, the only start it accepts (one that
+# violates it is an inconsistent over-determined initialisation there); neither zero nor
+# the storage-free steady flow is. From a start that violates the rise the first step
+# projects the pressures onto it (mass-conserving, an impulse through the mover), and
+# `_balanced` reports that start as out of balance so that the step is graded.
+
+
+def _start_mover_flows(air, store: StorageClosure, phi: Tensor, drv: Drivers) -> Tensor:
+    """Every air-layer edge's flow at t = StartTime with volume mass storage, the zones at
+    the pressures `phi` (full node): the element laws at `phi` on the potential-controlled
+    edges and, on the implicit (mover) edges, the flows of the index-reduced balance
+    (comment above): unknowns the interior nodes' pressure rates `v` and the mover flows
+    `q_F`, with `C v = net(q) + s` at every storing zone and every node a mover touches
+    (`C = V k / (1 + a)`, the storage's own pressure capacity, `ZoneStorage.dflow` per unit
+    rate; 0 at a junction, a zone without a mass balance or one whose initial equation is
+    `der(p) = 0`) and `v_a = v_b` across every mover (the rise held over the instant: a
+    rising `dp_in` signal's own rate is not added; a boundary's `v` is 0). Without implicit
+    edges this is `air.flows(phi, drv)`."""
+    if not air.mna:
+        return air.flows(phi, drv)
+    F = air.implicit_edges
+    n_e = len(store.air_src)
+    q_p = air.flows(phi, drv, torch.zeros(phi.shape[:-1] + (n_e,), dtype=F64))
+    s = drv.get("air.sources")
+    b = store.net(q_p, store.V) + (0.0 if s is None else s.to(F64))
+    # The rows: every storing zone, and every other interior node a mover touches (there
+    # `C = 0`, its KCL fixes the mover's flow, and its rate follows the mover's other end);
+    # the rest of the interior is algebraic in `phi` and does not enter.
+    ends = {int(n) for e in F.tolist() for n in (store.air_src[e], store.air_tgt[e])}
+    storing = set(store.air_nodes.tolist())
+    interior = [n for n in air.interior.tolist() if n in storing or n in ends]
+    pos = {node: i for i, node in enumerate(interior)}
+    n_i, n_f = len(interior), int(F.numel())
+    # A zone whose initial equation is der(p) = 0 (solved by `init_layer`) has no storage
+    # rate at t = StartTime: like a junction, C = 0 there.
+    free = (set(store.init_layer.interior.tolist()) if store.init_layer is not None
+            else set())
+    k = store.th.k(drv["T"], drv["X_w"]).expand(store.V.shape)
+    a = store.gain(drv)
+    a = torch.zeros(a.shape[:-1] + store.V.shape, dtype=F64).index_copy(-1, store.air_nodes, a)
+    c_s = store.V * k / (1.0 + a)
+    cap = torch.stack([c_s[..., n] if n in storing and n not in free
+                       else torch.zeros_like(c_s[..., n]) for n in interior], dim=-1)
+    M = torch.zeros(cap.shape[:-1] + (n_i + n_f, n_i + n_f), dtype=F64)
+    M[..., range(n_i), range(n_i)] = cap
+    for j, e in enumerate(F.tolist()):
+        a, t = int(store.air_src[e]), int(store.air_tgt[e])
+        if a in pos:  # the mover's flow leaves port_a ...
+            M[..., pos[a], n_i + j] = 1.0
+            M[..., n_i + j, pos[a]] = 1.0
+        if t in pos:  # ... and enters port_b
+            M[..., pos[t], n_i + j] = -1.0
+            M[..., n_i + j, pos[t]] = -1.0
+    rhs = torch.cat([b[..., interior], torch.zeros(b.shape[:-1] + (n_f,), dtype=F64)],
+                    dim=-1)
+    x = torch.linalg.solve(M, rhs.expand(M.shape[:-1]))
+    return q_p.index_copy(-1, F, x[..., n_i:])
+
+
+def _carry_held_movers(layer, q: Tensor, carried: Tensor) -> Tensor:
+    """`q` with the columns of every mover `layer` holds at both ends (`assemble._HeldMover`,
+    a placeholder zero there) taken from `carried`, the state's own solved flows."""
+    for kind in dict.fromkeys(layer.kinds):
+        law, sl = layer.law_for(kind)
+        if isinstance(law, _HeldMover):
+            q = torch.cat([q[..., :sl.start], carried[..., sl], q[..., sl.stop:]], dim=-1)
+    return q
+
+
 def _initial_air(model: Model, store: StorageClosure, state: State, drivers: Drivers,
                  **solve_kwargs) -> State:
     """The t = StartTime airflow of a model with volume mass storage (`storage` module
@@ -85,12 +168,14 @@ def _initial_air(model: Model, store: StorageClosure, state: State, drivers: Dri
         drv.update(closure(new, drv))
         before = new.get("air.q")
         if store.init_layer is None:
-            new["air.q"] = air.flows(state["air.phi"], drv)
+            new["air.q"] = _start_mover_flows(air, store, state["air.phi"], drv)
         else:
             init = store.init_layer
             phi_b = state["air.phi"][..., init.bound]
             new["air.phi"], new["air.q"] = init.solve(phi_b, drv, drv.get("air.sources"),
                                                       phi0=None, **solve_kwargs)
+            if air.mna:  # the movers' flows of the whole layer, at the solved pressures
+                new["air.q"] = _start_mover_flows(air, store, new["air.phi"], drv)
         if _same_directions(closure, before, new["air.q"]):
             break
     else:
@@ -583,13 +668,29 @@ def _balanced(model: Model, store: StorageClosure, state: State, d: Drivers) -> 
     state (the flows at the start pressures, `_initial_air`, plus the air sources) is zero to
     `BALANCE_RTOL` of the largest edge flow. Then there is no start imbalance to release
     (`GRADING_WINDOW`) and `simulate` starts with steps doubling up from `GRADING_H0`
-    instead."""
+    instead. A start whose pressures violate a mover's rise (run module, "Movers with
+    volume mass storage") is out of balance too: the first step moves them onto it."""
     q = state["air.q"]
     s_air = d.get("air.sources")
     s_air = torch.zeros(store.V.shape, dtype=F64) if s_air is None else s_air.to(F64)
     net = store.net(q, s_air)[..., store.air_nodes]
     scale = max(float(q.abs().max()) if q.numel() else 0.0, 1e-5)
-    return bool((net.abs() <= BALANCE_RTOL * scale).all())
+    if not bool((net.abs() <= BALANCE_RTOL * scale).all()):
+        return False
+    air = model.kirchhoff["air"]
+    if not air.mna:
+        return True
+    drv = dict(d)
+    drv.update(_closure(model)(state, drv))
+    dp = air.dp(state["air.phi"], drv)
+    ctx = LawContext(mode="dc")
+    for kind in air.kinds:
+        law, sl = air.law_for(kind)
+        if law.law_form == "implicit":
+            r = law.residual(dp[..., sl], q[..., sl], drv, ctx)
+            if not bool((r.abs() <= BALANCE_RTOL * (dp[..., sl].abs() + 1.0)).all()):
+                return False
+    return True
 
 
 def _version(v) -> int | None:
@@ -995,11 +1096,15 @@ class _Midpoint:
             phi, q = self._solve_air(drv, drv.get(f"{name}.sources"),
                                      s0[f"{name}.phi"][..., self.air.interior], 0.0)
         elif layer is None:
-            phi, q = s0[f"{name}.phi"], self.air.flows(s0[f"{name}.phi"], drv)
+            # A mover's flow (an implicit edge) is not a function of the pressures: state 0's
+            # own solved flow is carried (run module, "Movers with volume mass storage").
+            phi, q = s0[f"{name}.phi"], self.air.flows(s0[f"{name}.phi"], drv,
+                                                       s0[f"{name}.q"])
         else:
             phi, q = self._solve_air(drv, drv.get(f"{name}.sources"),
                                      s0[f"{name}.phi"][..., layer.interior], 0.0, layer,
                                      s0[f"{name}.phi"][..., layer.bound])
+            q = _carry_held_movers(layer, q, s0[f"{name}.q"])
         s[f"{name}.phi"], s[f"{name}.q"] = phi, q
         return s
 

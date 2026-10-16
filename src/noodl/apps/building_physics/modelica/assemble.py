@@ -79,9 +79,10 @@ implicit law `_MoverHead`, `(phi_a - phi_b) + dp = 0` (MBL: `port_b.p - port_a.p
 its `constantHead` or the signal driving `dp_in` (a driver `"<name>.dp_in"`). The air layer
 then holds an implicit law and is solved by Modified Nodal Analysis; every MBL feature the law
 does not reproduce (`use_riseTime`, `addPowerToMedium`, a dynamic `energyDynamics`,
-`prescribeSystemPressure`, `inputType = Stages`) is refused by name, and so is volume mass
-storage with a mover (the storage closure uses `KirchhoffLayer.flows`, which an MNA layer does
-not define). A mover passes the stream on unchanged, so its flow joins the transport flows.
+`prescribeSystemPressure`, `inputType = Stages`) is refused by name. With volume mass storage
+the mover's flow stays algebraic (solved in every step); at t = StartTime it is the
+index-reduced flow that keeps the rise held (`run`, "Movers with volume mass storage"). A
+mover passes the stream on unchanged, so its flow joins the transport flows.
 
 Volume mass storage
 -------------------
@@ -309,6 +310,7 @@ from noodl.elements import (
     regularized_orifice,
 )
 from noodl.elements.base import ConstitutiveLaw, ImplicitLaw, memo
+from noodl.elements.fixed import FixedFlow
 from noodl.elements.media import _moist_air_buoyancy_density
 from noodl.layers.kirchhoff import KirchhoffLayer
 from noodl.layers.transport import TransportLayer, active_interior
@@ -672,6 +674,32 @@ class _MoverHead(ImplicitLaw):
             return dp + self.head
         u = torch.as_tensor(drivers[self.key])
         return dp + (u.unsqueeze(-1) if u.ndim else u.reshape(1))
+
+
+class _HeldMover(FixedFlow):
+    """A mover in a layer that holds both of its ends at given pressures (the t = StartTime
+    and step-start layers of volume mass storage, `init_layer`, `state0_layer`): its rise
+    relation has no unknown there, and its flow is not that layer's to fix (`run`, "Movers
+    with volume mass storage"), so the edge carries a placeholder zero flow, which `run`
+    replaces."""
+
+    def __init__(self, kind: str) -> None:
+        super().__init__(0.0, kind=kind)
+
+
+def _hold_movers(net: Network, laws: list, held: Collection[str]) -> list:
+    """`laws` with every mover whose two ends are both in `held` (node names) a
+    `_HeldMover`: a layer with those nodes as boundaries would otherwise be singular."""
+    names = set(held)
+    out = []
+    for law in laws:
+        if isinstance(law, _MoverHead):
+            src, tgt = net.endpoints(law.kind)
+            ends = {net.nodes[int(i)] for i in (*src.tolist(), *tgt.tolist())}
+            if ends <= names:
+                law = _HeldMover(law.kind)
+        out.append(law)
+    return out
 
 
 def _mover(comp: Component, kind: str, sig: _Signals, inputs: dict[str, Tensor],
@@ -1383,15 +1411,6 @@ class _Builder:
             errors.append("mass_storage=True: no volume has a dynamic mass balance "
                           "(massDynamics is SteadyState everywhere)")
         use_storage = bool(storage_zones)
-        if use_storage:
-            for path in g.paths:
-                if path.element.cls in schema.MOVERS:
-                    errors.append(
-                        f"{path.element.name} ({path.element.cls}): a prescribed-pressure "
-                        f"mover with volume mass storage is not supported (its air layer is "
-                        f"solved by Modified Nodal Analysis, which the storage closure's "
-                        f"flow evaluations cannot use); set massDynamics = SteadyState or "
-                        f"read with mass_storage=False")
 
         node_names = [n for n in g.zones] + [n for n in g.boundaries] + list(g.junctions)
         index = {n: i for i, n in enumerate(node_names)}
@@ -1862,8 +1881,9 @@ class _Builder:
         # t = StartTime too.
         if free or self.graph.junctions:
             fixed = [node_names[i] for i in storage_air if i not in free]
-            init_layer = KirchhoffLayer(net, "air", laws, drives=drives,
-                                        boundary=list(air_boundary) + fixed,
+            held = list(air_boundary) + fixed
+            init_layer = KirchhoffLayer(net, "air", _hold_movers(net, laws, held),
+                                        drives=drives, boundary=held,
                                         quantity="pressure", unit="Pa", flow_unit="kg/s")
         return storage.StorageClosure(
             mbl=mbl, th=th, p_ref=p_ref, volumes=V, storage=stores, m_fixed=m_fixed,
@@ -1990,7 +2010,8 @@ class _Builder:
         if not set(air.interior.tolist()) - set(storage_air):
             return None
         fixed = list(air_boundary) + [net.nodes[i] for i in storage_air]
-        return KirchhoffLayer(net, "air", laws, drives=drives, boundary=fixed,
+        return KirchhoffLayer(net, "air", _hold_movers(net, laws, fixed), drives=drives,
+                              boundary=fixed,
                               quantity="pressure", unit="Pa", flow_unit="kg/s")
 
     @staticmethod
