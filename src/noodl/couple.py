@@ -16,7 +16,7 @@ import torch
 
 from noodl import layout
 from noodl._broadcast import broadcast_shapes
-from noodl._grad_reach import any_requires_grad
+from noodl._fixed_point_loop import Verdict, confirm_gradient_dependence, run_passes
 from noodl.contracts import call_closure
 from noodl.model import Drivers, Model, State
 from noodl.solvers.fixed_point import differentiate_fixed_point
@@ -701,70 +701,23 @@ class CoupledModel:
         state it reads has settled -- exactly as true of the returned primal state itself,
         which is read from that very same pass.
         """
-        two_way_pos = [i for i, link in enumerate(self.links) if link.two_way]
-        latest: Mapping[str, State] = start
-        prev: list[Tensor] | None = None
-        change: dict[str, Tensor] = {}
-        # A placeholder the FIRST pass always replaces: convergence is judged on every pass
-        # including the first (see the docstring above), so the loop's own body always
-        # computes a real per-instance verdict before this initial value could ever be read.
-        # It exists only to give `converged` a well-typed shape/dtype/device up front.
-        converged: Tensor = torch.zeros((), dtype=torch.bool)
-        passes = 0
-        values: list[Tensor] = []
-        new: dict[str, State] = dict(start)
-        last_transfers: dict[str, Tensor] = {}
-        needs_adjoint = False
-        while passes < self.iterate_max:
-            passes += 1
-            # Pass 1 runs with grad ENABLED to learn early whether anything differentiable
-            # reaches the state (its graph is dropped a few lines below); every later primal
-            # pass runs without a graph at all. A pass-1 "no" is asked again at the
-            # certified interface after the loop. The derivative comes from the ONE
-            # differentiable pass after the loop, never from these.
-            with torch.set_grad_enabled(passes == 1 and torch.is_grad_enabled()):
-                scratch = {tag: dict(d) for tag, d in drivers.items()}
-                raw = [self._forward_value(link, latest, scratch) for link in self.links]
-                values = list(raw)
-                if prev is not None:
-                    for i in two_way_pos:
-                        values[i] = prev[i] + self.relaxation * (raw[i] - prev[i])
-                new, transfers, pass_drivers = self._one_pass(start, drivers, dt, values, t)
-                last_transfers = {k: v.detach() for k, v in transfers.items()}
-                if passes == 1:
-                    needs_adjoint = any(
-                        v.requires_grad for s in new.values() for v in s.values()
-                    )
-                    # Drop pass 1's graph here, and drop ALL of it: `values`, `new`, the pass
-                    # drivers (whose boundary writes and donor source terms were built from
-                    # the grad-carrying values and transfers) and the transfers themselves
-                    # each anchor it, and each stays bound until the next pass overwrites it
-                    # -- or until this method returns, if the loop breaks on this pass.
-                    # Nothing downstream wants it: the convergence check below runs under
-                    # `no_grad` and reads the pass drivers only for the conversions, and the
-                    # derivative comes from the one pass after the loop.
-                    values = [v.detach() for v in values]
-                    new = {tag: {k: t.detach() for k, t in s.items()}
-                           for tag, s in new.items()}
-                    pass_drivers = {tag: {k: t.detach() for k, t in d.items()}
-                                    for tag, d in pass_drivers.items()}
-                    del transfers
-            with torch.no_grad():
-                ok: Tensor | None = None
-                for i in two_way_pos:
-                    link = self.links[i]
-                    # A forward value is ONE number per instance (one node, one species), so
-                    # its own shape IS the batch shape and nothing is reduced away.
-                    returned = self._forward_value(link, new, pass_drivers)
-                    d = (returned - values[i]).abs()
-                    change[self._link_key(link)] = d
-                    this = d <= self.iterate_atol + self.iterate_rtol * returned.abs()
-                    ok = this if ok is None else (ok & this)
-                converged = ok
-            if bool(converged.all()):
-                break
-            prev = values
-            latest = new
+        problem = _CoupledPasses(self, start, drivers, dt, t)
+        # The shared primal loop (`noodl._fixed_point_loop.run_passes`). Pass 1 runs with
+        # grad ENABLED to learn early whether anything differentiable reaches the state (its
+        # graph is dropped right after, all of it); every later primal pass runs without a
+        # graph at all. The derivative comes from the ONE differentiable pass after the
+        # loop, never from these. Pass 1's forward values are read from `start` here, under
+        # the same grad mode as pass 1 itself, and are detached with it.
+        outcome = run_passes(problem, problem.forward_values(start), max_passes=self.iterate_max)
+        passes = outcome.passes
+        # The relaxed forward values the last (when converged: the certified) pass was
+        # stepped with, and that pass's output.
+        values: list[Tensor] = outcome.certified
+        new: dict[str, State] = outcome.out[0]
+        change = problem.change
+        last_transfers = problem.last_transfers
+        # Convergence is judged on every pass including the first, so a verdict exists.
+        converged: Tensor = outcome.verdict.converged
         if not bool(converged.all()):
             failing = (~converged).nonzero().flatten().tolist() if converged.dim() else "all"
             worst = {name: float(c.max()) for name, c in change.items()}
@@ -773,21 +726,15 @@ class CoupledModel:
                 f"passes for instances {failing}; largest change per link {worst}, tolerance "
                 f"atol={self.iterate_atol} rtol={self.iterate_rtol}"
             )
-        if (not needs_adjoint and torch.is_grad_enabled()
-                and any_requires_grad(self, start, drivers)):
-            # Pass 1 saw nothing differentiable, but it ran from the START interface: a
-            # closure that takes a parameter-dependent branch only once the coupled values
-            # have moved would have the returned state silently detached. Ask again, once,
-            # under grad at the certified interface `values` -- the point whose derivative is
-            # returned -- and drop that pass's output and graph. Skipped when no tensor
-            # requiring grad is reachable from the models or their inputs at all
-            # (`any_requires_grad`): no pass can then produce a dependency.
-            with torch.enable_grad():
-                probe, _, _ = self._one_pass(start, drivers, dt, values, t)
-                needs_adjoint = any(
-                    v.requires_grad for s in probe.values() for v in s.values()
-                )
-            del probe
+        # Pass 1 saw nothing differentiable, but it ran from the START interface: a
+        # closure that takes a parameter-dependent branch only once the coupled values
+        # have moved would have the returned state silently detached. Ask again, once,
+        # under grad at the certified interface `values` -- the point whose derivative is
+        # returned -- and drop that pass's output and graph. Skipped when no tensor
+        # requiring grad is reachable from the models or their inputs at all
+        # (`any_requires_grad`): no pass can then produce a dependency.
+        needs_adjoint = confirm_gradient_dependence(
+            problem, outcome, roots=(self, start, drivers))
         # `values` are the relaxed forward values the CERTIFIED pass -- the one whose output
         # was just judged converged -- was stepped with, so running `_one_pass` on them once
         # more reproduces that pass TO SOLVER ACCURACY. Not bitwise by construction:
@@ -856,6 +803,77 @@ class CoupledModel:
                  "transfers": reported, "adjoint": adjoint, "adjoint_batched": adjoint_batched}
             )
         return result
+
+
+class _CoupledPasses:
+    """`CoupledModel._iterate`'s side of `noodl._fixed_point_loop.PassProblem`.
+
+    `z` is the list of every link's forward value (one-way and two-way, relaxed); a pass's
+    output is `_one_pass`'s `(new, transfers, pass_drivers)`. `judge` runs on every pass,
+    the donor's RETURNED forward value against the value the recipient was stepped with;
+    `advance` relaxes the two-way entries from `z` toward the forward values of the pass's
+    output. `change` and `last_transfers` are read by `_iterate` after the loop.
+    """
+
+    def __init__(self, coupled: CoupledModel, start, drivers, dt: float, t) -> None:
+        self.coupled = coupled
+        self.start = start
+        self.drivers = drivers
+        self.dt = dt
+        self.t = t
+        self.two_way_pos = [i for i, link in enumerate(coupled.links) if link.two_way]
+        self.change: dict[str, Tensor] = {}
+        self.last_transfers: dict[str, Tensor] = {}
+
+    def forward_values(self, latest: Mapping[str, State]) -> list[Tensor]:
+        """Every link's forward value read from `latest`, unrelaxed."""
+        scratch = {tag: dict(d) for tag, d in self.drivers.items()}
+        return [self.coupled._forward_value(link, latest, scratch)
+                for link in self.coupled.links]
+
+    def run(self, z: list[Tensor]):
+        return self.coupled._one_pass(self.start, self.drivers, self.dt, z, self.t)
+
+    def depends_on_grad(self, out) -> bool:
+        new = out[0]
+        return any(v.requires_grad for s in new.values() for v in s.values())
+
+    def detach(self, z: list[Tensor], out):
+        # Drop pass 1's graph here, and drop ALL of it: `values`, `new`, the pass
+        # drivers (whose boundary writes and donor source terms were built from
+        # the grad-carrying values and transfers) and the transfers themselves
+        # each anchor it. Nothing downstream wants it: the convergence check runs under
+        # `no_grad` and reads the pass drivers only for the conversions, and the
+        # derivative comes from the one pass after the loop.
+        new, transfers, pass_drivers = out
+        return [v.detach() for v in z], (
+            {tag: {k: t.detach() for k, t in s.items()} for tag, s in new.items()},
+            {k: v.detach() for k, v in transfers.items()},
+            {tag: {k: t.detach() for k, t in d.items()} for tag, d in pass_drivers.items()},
+        )
+
+    def judge(self, z: list[Tensor], out, *, needs_adjoint: bool) -> Verdict:
+        coupled = self.coupled
+        new, transfers, pass_drivers = out
+        self.last_transfers = {k: v.detach() for k, v in transfers.items()}
+        ok: Tensor | None = None
+        for i in self.two_way_pos:
+            link = coupled.links[i]
+            # A forward value is ONE number per instance (one node, one species), so
+            # its own shape IS the batch shape and nothing is reduced away.
+            returned = coupled._forward_value(link, new, pass_drivers)
+            d = (returned - z[i]).abs()
+            self.change[coupled._link_key(link)] = d
+            this = d <= coupled.iterate_atol + coupled.iterate_rtol * returned.abs()
+            ok = this if ok is None else (ok & this)
+        return Verdict(converged=ok, change=self.change)
+
+    def advance(self, z: list[Tensor], out, verdict: Verdict | None) -> list[Tensor]:
+        raw = self.forward_values(out[0])
+        values = list(raw)
+        for i in self.two_way_pos:
+            values[i] = z[i] + self.coupled.relaxation * (raw[i] - z[i])
+        return values
 
 
 def union(
