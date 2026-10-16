@@ -56,6 +56,7 @@ from typing import Protocol, runtime_checkable
 import torch
 
 from noodl import layout
+from noodl._closures import ClosureSchedule
 from noodl._fixed_point_loop import detached, unsolved_mask
 from noodl._grad_reach import any_requires_grad
 from noodl._model_setup import (
@@ -66,14 +67,7 @@ from noodl._model_setup import (
     validate_reactions,
     validate_substeps,
 )
-from noodl._tracking import TrackedDict
-from noodl.contracts import (
-    ClosureSpec,
-    StepContext,
-    check_species_columns,
-    closure_spec,
-    reaction_species_columns,
-)
+from noodl.contracts import ClosureSpec, StepContext
 from noodl.layers.allocation import AllocatedFlowLayer
 from noodl.layers.kirchhoff import KirchhoffLayer
 from noodl.layers.reaction import Reaction
@@ -263,70 +257,15 @@ class Model:
         self.flow_layer_of, self.flow_driver_of = flow_owners(
             self.kirchhoff, self.transport, self.allocation)
         self.closures = list(closures)
-        # Every closure's declarations are read ONCE, here, by `noodl.contracts.closure_spec`
-        # (callability, `integrates`, `state_keys`, the declared inputs/outputs, ...): a
-        # malformed one is refused by name now, not as a bare "'X' object is not callable"
-        # from inside `_pass`. The specs hold the closure OBJECTS, so a deepcopy or a pickle
-        # carries each closure with its spec; nothing is keyed by `id()` across a copy.
-        self._specs: list[ClosureSpec] = [
-            closure_spec(closure, index=i) for i, closure in enumerate(self.closures)
-        ]
-        self._spec_ids: dict[int, ClosureSpec] | None = None
-        for spec in self._specs:
-            for key in sorted(spec.writes or ()):
-                if self._is_layer_state_key(key):
-                    raise ValueError(
-                        f"Model: closure {spec.label} declares output {key!r}, which is a "
-                        f"state key; closures write drivers only (the one exception is "
-                        f"'<layer>.q' for a transport layer whose flows no Kirchhoff layer "
-                        f"provides)"
-                    )
-        # CLOSURE-CARRIED STATE. A closure may declare
-        # `state_keys: tuple[str, ...]`: keys it both READS from the state and WRITES back
-        # every call, which `_pass` copies from its return into the returned state. They are
-        # neither drivers (they persist across steps) nor layer state (no layer owns them);
-        # a sewer manhole level under `storage=True`, or a tank level and the controlled
-        # links' status in the water application, are the motivating cases. Two closures
-        # claiming one key is refused HERE, naming both, rather than resolved by whichever
-        # ran last.
-        self.closure_state_keys: dict[str, Closure] = {}
-        for spec in self._specs:
-            closure = spec.closure
-            for key in spec.state_keys:
-                head, _, tail = str(key).rpartition(".")
-                if head in self.layers and tail in _STATE_SUFFIXES:
-                    # Mirror `_apply_closures`' own ownerless-"<layer>.q" carve-out --
-                    # for a transport layer no Kirchhoff layer owns, "<layer>.q" is the
-                    # DRIVER a flow closure writes, not that layer's state, so a closure may
-                    # declare it as state_keys (a flow closure that also remembers its own
-                    # last-written flow across steps is exactly this shape). Every other
-                    # "<layer>.phi/q/x" stays refused, including "<layer>.q" for a layer a
-                    # Kirchhoff layer DOES own.
-                    prescribed = (
-                        tail == "q"
-                        and head in self.transport
-                        and self.flow_layer_of.get(head) is None
-                    )
-                    if not prescribed:
-                        raise ValueError(
-                            f"Model: closure {closure!r} declares state_keys entry {key!r}, "
-                            f"which is layer {head!r}'s own state key; a closure may carry "
-                            f"its OWN state, never a layer's"
-                        )
-                if key in self.closure_state_keys:
-                    raise ValueError(
-                        f"Model: closures {self.closure_state_keys[key]!r} and "
-                        f"{closure!r} both declare the state key {key!r}; exactly one "
-                        f"closure may own a state key"
-                    )
-                self.closure_state_keys[key] = closure
+        # The closures' specs, their construction checks and `closure_state_keys`
+        # (`noodl._closures.ClosureSchedule`); `_apply_closures` runs them.
+        self._schedule = ClosureSchedule(
+            self.closures, layers=self.layers, transport=self.transport,
+            flow_layer_of=self.flow_layer_of,
+        )
+        self.closure_state_keys: dict[str, Closure] = self._schedule.closure_state_keys
         self.reactions = validate_reactions(self.transport, reactions)
-        for spec in self._specs:
-            check_species_columns(f"Model: closure {spec.label}", spec.species_columns,
-                                  self.transport)
-        for lname, reaction in self.reactions:
-            check_species_columns(f"Model: reaction {reaction!r} for layer {lname!r}",
-                                  reaction_species_columns(reaction), self.transport)
+        self._schedule.check_species_columns(self.transport, self.reactions)
         options = CouplingOptions.validate(
             coupling=coupling, iterate_tol=iterate_tol, iterate_max=iterate_max,
             iterate_relaxation=iterate_relaxation, iterate_acceleration=iterate_acceleration,
@@ -343,24 +282,7 @@ class Model:
         self.iterate_on_limit = options.iterate_on_limit
         self.adjoint_rtol = options.adjoint_rtol
         self.iterate_flow_tol = options.iterate_flow_tol
-        # A closure that reads a Kirchhoff layer's flows to write something the same pass
-        # uses (a flow-dependent filter's transmission) is right only at the coupling's fixed
-        # point, where the flows it read are the flows the pass produced: it declares
-        # `requires_coupling = "iterate"` and `reads_flows_of = "<Kirchhoff layer>"`.
-        for spec in self._specs:
-            if spec.requires_coupling != "iterate":
-                continue
-            closure = spec.closure
-            flows_of = spec.reads_flows_of
-            if coupling != "iterate" or flows_of not in options.iterate_flow_tol:
-                raise ValueError(
-                    f"Model: closure {type(closure).__name__} reads the flows of layer "
-                    f"{flows_of!r} before the pass solves them, so it needs "
-                    f"coupling='iterate' with {flows_of!r} in iterate_tol and "
-                    f"iterate_flow_tol (each pass is then fed the previous pass's flows and a "
-                    f"step converges on its own); got coupling={coupling!r}, "
-                    f"iterate_flow_tol={options.iterate_flow_tol}"
-                )
+        self._schedule.check_coupling(coupling, options.iterate_flow_tol)
         options.check_acceleration(self.kirchhoff)
         self.substeps = validate_substeps(self.transport, substeps)
 
@@ -376,37 +298,17 @@ class Model:
         """True for a layer's own state key `"<layer>.phi/q/x/s"` a closure may not write:
         all of them but `"<layer>.q"` of a transport layer no Kirchhoff layer owns, which is
         the flow DRIVER a flow closure writes."""
-        head, _, tail = key.rpartition(".")
-        if head in self.layers and tail in _STATE_SUFFIXES:
-            return not (
-                tail == "q" and head in self.transport and self.flow_layer_of.get(head) is None
-            )
-        return False
+        return self._schedule.is_layer_state_key(key)
 
     def _closure_spec(self, closure) -> ClosureSpec:
         """The `ClosureSpec` of one of `self.closures`, found by identity. A closure added to
         `closures` after construction is read (and cached) on first use."""
-        lookup = self._spec_ids
-        if lookup is None:
-            lookup = self._spec_ids = {id(s.closure): s for s in self._specs}
-        spec = lookup.get(id(closure))
-        if spec is None or spec.closure is not closure:
-            spec = closure_spec(closure, index=self.closures.index(closure))
-            self._specs.append(spec)
-            lookup[id(closure)] = spec
-        return spec
+        return self._schedule.spec(closure, self.closures)
 
     @property
     def _integrating(self) -> set[int]:
         """`id()`s of the integrating closures (read-only; for tests and diagnostics)."""
-        return {id(c) for c in self.closures if self._closure_spec(c).integrates}
-
-    def __getstate__(self) -> dict:
-        # The identity lookup is keyed by `id()`, which a copy or a pickle does not keep;
-        # `_specs` holds the closures themselves and the lookup is rebuilt on first use.
-        state = self.__dict__.copy()
-        state["_spec_ids"] = None
-        return state
+        return self._schedule.integrating(self.closures)
 
     def _apply_closures(
         self,
@@ -433,49 +335,8 @@ class Model:
         without advancing. A non-integrating closure never sees `ctx` at all, so its call
         signature and behaviour are unaffected.
         """
-        probe = self._probe
-        if probe is None:
-            drv: Drivers = dict(drivers)
-        else:
-            # `Model.check(..., probe=True)`: record which keys are read (see
-            # `noodl.validation`). The returned drivers stay tracked, so the layers',
-            # elements' and drives' reads are recorded too.
-            drv = TrackedDict(drivers, probe.driver_reads)
-            state = TrackedDict(state, probe.state_reads)
-        for closure in self.closures:
-            spec = self._closure_spec(closure)
-            result = spec(state, drv, ctx)
-            if probe is not None:
-                probe.closure_outputs.update(result)
-                probe.closure_values.update(result)
-                probe.closure_writers.update(dict.fromkeys(result, type(closure).__name__))
-                probe.closure_returned.setdefault(spec.label, set()).update(result)
-            for key, value in result.items():
-                head, _, tail = key.rpartition(".")
-                if head in self.layers and tail in _STATE_SUFFIXES:
-                    # ONE exception to "closures write drivers only": "<layer>.q" for a
-                    # transport layer no Kirchhoff layer owns is a DRIVER, not a state --
-                    # it is the key `_kind_flows` reads that layer's branch flows from, and
-                    # writing it is exactly what a flow closure is for. Every other
-                    # "<layer>.phi/q/x" stays refused, including "<layer>.q" for a layer a
-                    # Kirchhoff layer DOES own, where it would silently contradict the
-                    # solve.
-                    prescribed = (
-                        tail == "q"
-                        and head in self.transport
-                        and self.flow_layer_of.get(head) is None
-                    )
-                    if not prescribed:
-                        raise ValueError(
-                            f"Model: closure {closure!r} returned {key!r}, which is a "
-                            f"state key; closures write drivers only (the one exception "
-                            f"is '<layer>.q' for a transport layer whose flows no "
-                            f"Kirchhoff layer provides)"
-                        )
-                drv[key] = value
-                if written is not None and key in self.closure_state_keys:
-                    written.add(key)
-        return drv
+        return self._schedule.apply(self.closures, state, drivers, written=written, ctx=ctx,
+                                    probe=self._probe)
 
     def _zero_sources(self, layer: TransportLayer, like: Tensor, n_like: int) -> Tensor:
         """Full-node zeros in `like`'s LAYOUT (reduced `(n,)` or stacked `(n, K)`).
