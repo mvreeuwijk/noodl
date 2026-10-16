@@ -90,6 +90,8 @@ class AirHandlerFlows:
         f_o = drivers.get(self.fraction_key)
         f_o = (torch.tensor(self.outdoor_air_fraction, dtype=design.dtype) if f_o is None
                else torch.as_tensor(f_o).to(design.dtype))
+        # A per-instance `(B, 1)` column, not the species layout (no node axis here), so
+        # `noodl.layout` does not apply.
         if f_o.dim() == 2 and f_o.shape[-1] == 1:
             f_o = f_o.squeeze(-1)                   # (B, 1), a column of instances: (B,)
         if f_o.dim() > 1:

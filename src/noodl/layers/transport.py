@@ -42,6 +42,7 @@ from typing import Literal, NamedTuple
 import torch
 
 from noodl.layers._topology import TopologyGuard
+from noodl.layout import as_stacked, is_stacked
 from noodl.operators.advection import AdvectionOperator
 from noodl.solvers.implicit import TransposeOperator as _TransposeView
 from noodl.solvers.select import _SPARSE_DIRECT_MAX_BATCH
@@ -469,14 +470,13 @@ class TransportLayer(TopologyGuard):
             return self.removal
         r = torch.as_tensor(removal, dtype=self.net.dtype)
         K = self.n_species
-        if not (r.dim() >= 2 and tuple(r.shape[-2:]) == (self.n_i, K)):
-            if K == 1 and r.dim() >= 1 and r.shape[-1] == self.n_i:
-                r = r.unsqueeze(-1)
-            else:
-                raise ValueError(
-                    f"TransportLayer '{self.name}': removal must have trailing shape "
-                    f"({self.n_i}, {K}) (active interior order, 1/s), got {tuple(r.shape)}"
-                )
+        try:
+            r, _ = as_stacked(r, self.n_i, K, name="removal", where="removal")
+        except ValueError:
+            raise ValueError(
+                f"TransportLayer '{self.name}': removal must have trailing shape "
+                f"({self.n_i}, {K}) (active interior order, 1/s), got {tuple(r.shape)}"
+            ) from None
         return r
 
     def _transmission_arg(self, transmission: torch.Tensor | None) -> torch.Tensor:
@@ -494,8 +494,10 @@ class TransportLayer(TopologyGuard):
             return self.transmission
         t = torch.as_tensor(transmission, dtype=self.net.dtype)
         K, b_flow = self.n_species, self._flow_src.numel()
-        if t.dim() >= 2 and tuple(t.shape[-2:]) == (b_flow, K):
+        if is_stacked(t, b_flow, K):
             return t.transpose(-1, -2)
+        # Not the K == 1 reduced form: a per-edge `(b_flow,)` is BROADCAST over all K species
+        # (a pass fraction common to the species), so `as_stacked` does not apply.
         if t.dim() >= 1 and t.shape[-1] == b_flow:
             return t.unsqueeze(-2).expand(*t.shape[:-1], K, b_flow)
         raise ValueError(
@@ -620,9 +622,9 @@ class TransportLayer(TopologyGuard):
         if transmission is None:
             transmission = torch.ones(b_flow, dtype=net.dtype)
         transmission = torch.as_tensor(transmission, dtype=net.dtype)
-        if transmission.dim() >= 2 and transmission.shape[-2:] == (b_flow, K):
+        if is_stacked(transmission, b_flow, K):
             transmission = transmission.transpose(-1, -2)
-        elif transmission.shape[-1] == b_flow:
+        elif transmission.shape[-1] == b_flow:      # broadcast over the K species, any K
             transmission = transmission.unsqueeze(-2).expand(*transmission.shape[:-1], K, b_flow)
         else:
             raise ValueError(
@@ -1232,15 +1234,19 @@ class TransportLayer(TopologyGuard):
     def _to_stacked(
         self, x: torch.Tensor, n_nodes: int, arg_name: str
     ) -> tuple[torch.Tensor, bool]:
+        """`x` as the flat species-major `(..., K * n_nodes)` the solver uses, and whether it
+        came in reduced `(..., n_nodes)`. The layout rule is `noodl.layout.as_stacked`."""
         K = self.n_species
-        if x.dim() >= 2 and x.shape[-2] == n_nodes and x.shape[-1] == K:
-            return x.transpose(-1, -2).reshape(*x.shape[:-2], K * n_nodes), False
-        if K == 1 and x.shape[-1] == n_nodes:
+        try:
+            s, reduced = as_stacked(x, n_nodes, K, name=arg_name, where="to_stacked")
+        except ValueError:
+            raise ValueError(
+                f"TransportLayer '{self.name}': {arg_name} must have trailing shape "
+                f"({n_nodes}, {K}) or, for n_species=1, ({n_nodes},); got {tuple(x.shape)}"
+            ) from None
+        if reduced:
             return x, True
-        raise ValueError(
-            f"TransportLayer '{self.name}': {arg_name} must have trailing shape "
-            f"({n_nodes}, {K}) or, for n_species=1, ({n_nodes},); got {tuple(x.shape)}"
-        )
+        return s.transpose(-1, -2).reshape(*s.shape[:-2], K * n_nodes), False
 
     def _from_stacked(self, x: torch.Tensor, n_nodes: int, reduced: bool) -> torch.Tensor:
         if reduced:
@@ -1260,16 +1266,15 @@ class TransportLayer(TopologyGuard):
         wall-mass node is a wiring mistake, and is named rather than silently discarded.
         """
         n, K = self.net.n, self.n_species
-        if sources.dim() >= 2 and sources.shape[-2] == n and sources.shape[-1] == K:
-            node_dim = sources.dim() - 2
-        elif K == 1 and sources.shape[-1] == n:
-            node_dim = sources.dim() - 1
-        else:
+        try:
+            _, reduced = as_stacked(sources, n, K, name="sources", where="sources")
+        except ValueError:
             raise ValueError(
                 f"TransportLayer '{self.name}': sources must be in FULL node order with "
                 f"trailing shape ({n}, {K}) or, for n_species=1, ({n},); got "
                 f"{tuple(sources.shape)}. Boundary rows must be zero."
-            )
+            ) from None
+        node_dim = sources.dim() - (1 if reduced else 2)
         self._refuse_nonzero_rows(sources, node_dim, self.boundary_idx, self.boundary, "boundary")
         self._refuse_nonzero_rows(
             sources, node_dim, self.inactive_idx, self._inactive_names, "inactive"
