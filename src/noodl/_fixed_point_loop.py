@@ -4,8 +4,8 @@
 enabled (when grad mode is on) to learn whether anything differentiable reaches the state
 and then drops that pass's graph, runs every later pass with no graph, asks for a verdict on
 detached values, and stops on convergence, on the caller's early-stop rule or at the pass
-budget. `confirm_gradient_dependence` is the R01 rule, in one place: when pass 1 saw
-nothing differentiable, ask again with one probe pass at the certified point. Each caller
+budget. `confirm_gradient_dependence` is the gradient-dependence rule (#22), in one place:
+when pass 1 saw nothing differentiable, ask again with one probe pass at the certified point. Each caller
 keeps its own convergence measure, relaxation, messages and adjoint behind `PassProblem`.
 
 `detached` and `unsolved_mask` are the two diagnostics helpers both loops need.
@@ -125,7 +125,7 @@ def run_passes(problem: PassProblem, z0, *, max_passes: int) -> LoopOutcome:
 
 def confirm_gradient_dependence(problem: PassProblem, outcome: LoopOutcome, *,
                                 roots: tuple) -> bool:
-    """Whether the returned state depends on something differentiable (R01).
+    """Whether the returned state depends on something differentiable.
 
     Pass 1's answer when it was yes. Otherwise -- pass 1 ran at the START point, and a
     closure may take a parameter-dependent branch only once the state has moved -- ask

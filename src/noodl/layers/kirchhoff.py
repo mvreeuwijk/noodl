@@ -39,7 +39,7 @@ from noodl.topology import Network
 # that declares `assemble_sparse`) is sparse-direct up to an ensemble of
 # `select._SPARSE_DIRECT_MAX_BATCH` = 32 instances and Jacobi-preconditioned CG above it,
 # because SuperLU is driven by a per-instance Python loop whose cost is linear in the
-# ensemble while PCG's is sub-linear; the measured crossover sweep is at that constant. An
+# ensemble while PCG's is sub-linear (crossover sweep: docs/design/solvers.md). An
 # explicit `linear_solver=` is honoured verbatim at every ensemble size. `diagnostics`
 # reports which backend actually ran (see `solve`).
 _LINEAR_SOLVERS = ("auto", "cg", "gmres", "direct", "sparse_direct")
@@ -260,9 +260,8 @@ class KirchhoffLayer(TopologyGuard):
             self._law_slices.append((offset, offset + n_e))
             offset += n_e
         self.cols = torch.cat(cols_list)
-        # The node count, cached as a plain int: `assemble` (once per Newton iteration) and
-        # solve's zero-source default used to read it off self.A.shape[0], which is exactly
-        # the kind of incidental dense-matrix access that keeps an (n, b) tensor alive.
+        # The node count, cached as a plain int: reading it off self.A.shape[0] would be an
+        # incidental dense-matrix access that keeps an (n, b) tensor alive.
         self._n_nodes = net.n
 
         # This layer's own edge endpoints (restricted to self.cols, in the same order as
@@ -462,10 +461,9 @@ class KirchhoffLayer(TopologyGuard):
     def A(self) -> torch.Tensor:
         """This layer's (n, b_layer) incidence matrix, built on FIRST ACCESS only.
 
-        Held as a `cached_property` rather than an `__init__` attribute: at
-        the composed model's reference size this matrix is 18.1 MB per layer and grows 4x
-        per node doubling, which on its own broke the composed model's memory-scaling budget
-        (measured 3.16x against a 2.5x budget). Nothing inside this class reads
+        Held as a `cached_property` rather than an `__init__` attribute: it grows 4x per node
+        doubling and would break the composed model's memory-scaling budget (numbers:
+        docs/design/orchestration.md#dense-incidence-matrix). Nothing inside this class reads
         it except `jacobian()`, the retained dense reference -- every hot-path site gathers or
         scatter-adds with `_src`/`_tgt` instead (`dp`, `residual`, `linear_init`,
         `power_residual`). It stays public, with exactly its old value
@@ -748,8 +746,8 @@ class KirchhoffLayer(TopologyGuard):
         q = self.flows(phi, drivers)
         # (A_I q), by scatter-add over this layer's edges then a select of the interior
         # rows, rather than einsum against the (n_I, b) slice of the dense incidence: this
-        # is once per Newton residual evaluation, and at ensemble 100 the einsum form alone
-        # cost 14.2 ms of a 41.8 ms residual (profiled on the composed model).
+        # is once per Newton residual evaluation, where the einsum form dominates the cost
+        # (numbers: docs/design/orchestration.md#residual-incidence-product).
         lhs = self._accumulate_interior(q)
         s_I = self._source_interior(sources, phi_interior)
         w = self._node_source_withdrawal(phi, drivers)
@@ -777,10 +775,9 @@ class KirchhoffLayer(TopologyGuard):
         # Each law's own (c_e, k_e) covers only its own n_e = e - s edges; only the
         # leading BATCH dims (everything but the trailing edge-count dim) are meant to be
         # unified across laws before concatenating along the edge axis. Using
-        # torch.broadcast_tensors directly on the raw (c_e, k_e) list (as an earlier version
-        # of this method did) broadcasts the trailing edge dim too, so two laws with
-        # different edge counts silently expand to a shared (wrong) edge count instead of
-        # concatenating -- e.g. a 2-edge FixedFlow and a 1-edge PowerLaw would both become
+        # torch.broadcast_tensors directly on the raw (c_e, k_e) list would broadcast the
+        # trailing edge dim too, so two laws with different edge counts silently expand to
+        # a shared (wrong) edge count instead of concatenating -- e.g. a 2-edge FixedFlow and a 1-edge PowerLaw would both become
         # 2-edge before torch.cat, yielding a 4-wide result instead of the correct 3.
         cs, ks, n_es = [], [], []
         for el, (s, e) in zip(self._laws, self._law_slices, strict=True):
@@ -1050,7 +1047,7 @@ class KirchhoffLayer(TopologyGuard):
         caller has no other way to observe (the ensemble size against
         `select._SPARSE_DIRECT_MAX_BATCH`, and whether SciPy is importable at all -- it is
         an optional extra, `pip install noodl-physics[sparse]`). Without it, an installation
-        missing that extra takes the ~4.6x-slower PCG path with nothing saying so; the
+        missing that extra takes the much slower PCG path with nothing saying so; the
         indirect signal is `"linear_iterations"` (1 for a factorisation, ~170 for PCG).
         It is `None` only when no linear solve happened at all.
 
@@ -1205,7 +1202,7 @@ class KirchhoffLayer(TopologyGuard):
             # Grounding is certified on the ACTUAL slopes at the point the Newton iteration
             # is about to start from, whatever its source. linear_init's own check sees only
             # its tangent-at-zero slopes, and is not run at all when a caller supplies phi0
-            # -- so a supplied phi0 used to bypass grounding entirely, and a law whose
+            # -- so a supplied phi0 must not bypass grounding, and a law whose
             # slope is dp-dependent (a fan past its shutoff point, whose dflow is exactly
             # zero) could leave the operator singular with nothing to say about it but a
             # Newton non-convergence. Placed BEFORE the differentiable branch so both paths
@@ -1238,14 +1235,14 @@ class KirchhoffLayer(TopologyGuard):
         #    backend when grad mode is on and an input requires grad (correctly: it would
         #    silently detach). With the iteration running under whatever mode the caller
         #    happened to be in, the same `solve(differentiable=False)` factorised through
-        #    SuperLU from a plain call and fell back to PCG -- 4.6x slower, and a
-        #    different code path -- from inside `torch.enable_grad()` with a
+        #    SuperLU from a plain call and fell back to PCG -- a much slower, different
+        #    code path (docs/design/solvers.md) -- from inside `torch.enable_grad()` with a
         #    grad-requiring `sources`. A solver choice must not be a function of the
         #    caller's context. The guard in `select.solve` stays as the last line of
         #    defence; this removes the condition that was tripping it.
         #
-        # `diagnostics` is filled exactly as before (no_grad does not touch it), and the
-        # returned `(phi, q)` are now unconditionally detached -- see the docstring.
+        # `diagnostics` is unaffected by no_grad; the returned `(phi, q)` are
+        # unconditionally detached -- see the docstring.
         with torch.no_grad():
             # The last residual's point, potentials and flows: Newton returns the iterate
             # it last evaluated the residual at, whose flows are then the result's.

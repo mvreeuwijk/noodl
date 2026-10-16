@@ -133,9 +133,8 @@ class FunctionalLaws:
             # runs, regardless of whether its input (`flow`) already carries a grad_fn
             # from an earlier, enable_grad-wrapped computation. Writing
             # `torch.autograd.grad(flow.sum(), dp_slice)` with the `with
-            # torch.enable_grad():` block closed before that line (as an earlier,
-            # incorrect version of this code did) evaluates `flow.sum()` under the outer
-            # no_grad, so the tensor actually handed to `autograd.grad` as `outputs` has
+            # torch.enable_grad():` block closed before that line evaluates `flow.sum()`
+            # under the outer no_grad, so the tensor actually handed to `autograd.grad` as `outputs` has
             # no grad_fn of its own -- even though `flow` printed `requires_grad=True`
             # right before the call. `torch.autograd.grad` itself does not consult the
             # ambient grad mode at its own call site (confirmed: calling it under no_grad
@@ -147,9 +146,8 @@ class FunctionalLaws:
                 # Whether a missing/zero Jacobian contribution here is legitimate is
                 # decided ONLY by el.dp_independent -- a class-level DECLARATION (see
                 # ConstitutiveLaw) -- never inferred from whatever autograd graph `flow` happens
-                # to carry. A previous version of this code inferred it from
-                # `flow.requires_grad` (with allow_unused=True as a catch-all), which
-                # meant ANY law whose flow() accidentally lost the autograd graph
+                # to carry (e.g. `flow.requires_grad` with allow_unused=True): that would let
+                # ANY law whose flow() accidentally lost the autograd graph
                 # (e.g. a stray dp.detach() in a third-party subclass) silently got an
                 # exact-zero Jacobian column instead of an error: the forward solve still
                 # looked fine (Newton converges on the exact residual regardless), but
