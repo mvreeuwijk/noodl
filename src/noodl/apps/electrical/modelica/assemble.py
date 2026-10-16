@@ -441,8 +441,10 @@ class _Builder:
                 block = self._equivalent(device)
                 if block is not None:
                     self.source_blocks.append(block)
+        # A circuit has no weather reader: the grid takes no weather breaks.
         timing = SimpleNamespace(experiment=doc.experiment,
-                                 signals=(*netlist.signals, *self.source_blocks))
+                                 signals=(*netlist.signals, *self.source_blocks),
+                                 components=())
         self.times = experiment_times(doc)
         self.grid = driver_grid(timing, substeps)
         jumps, _ = grid_events(timing, self.grid)
