@@ -13,7 +13,7 @@ before opening a pull request.
 Core (always include):
 
 ```bash
-tests/test_*.py tests/layers tests/solvers tests/operators tests/elements tests/components tests/apps/test_*.py
+tests/test_*.py tests/layers tests/solvers tests/operators tests/elements tests/components tests/apps/test_*.py tests/verification/test_newton_batched.py
 ```
 
 Add the application you are changing:
@@ -21,7 +21,7 @@ Add the application you are changing:
 | Application | Paths |
 | --- | --- |
 | building | `tests/apps/building_physics tests/verification/test_contam_parity.py tests/verification/test_modelica_parity.py tests/verification/test_airflow_closed_forms.py tests/verification/test_natural_ventilation.py` |
-| sewer | `tests/apps/sewer tests/apps/inp tests/verification/test_sewer_*.py` |
+| sewer | `tests/apps/sewer tests/apps/inp tests/verification/test_sewer_*.py tests/benchmarks/test_swmm_corpus.py` |
 | water | `tests/apps/water tests/apps/inp tests/verification/test_water_parity.py tests/verification/test_wsimod_*.py` |
 | street air quality | `tests/apps/street_aq tests/verification/test_munich.py tests/verification/test_sirane*.py` |
 | coupling | `tests/verification/test_coupling_*.py tests/verification/test_composed_*.py` |

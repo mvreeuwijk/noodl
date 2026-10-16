@@ -2557,9 +2557,11 @@ def _model_steady(model: Model, state, drivers, **solve_kwargs):
     except UndefinedSteadyState as exc:
         context = []
         T = drivers.get("T")
-        if T is not None:
+        # `.get`: a layer this model does not name (a refusal raised elsewhere) loses only
+        # the temperatures from the message, never the refusal itself.
+        layer = model.transport.get(exc.layer)
+        if T is not None and layer is not None:
             T = torch.as_tensor(T).detach()
-            layer = model.transport[exc.layer]
             ambient = T[..., layer.boundary_idx].flatten().unique().tolist()
             zones = T[..., layer.interior_idx]
             context.append(f"ambient temperature Ta = {_values(ambient)} K, zone "

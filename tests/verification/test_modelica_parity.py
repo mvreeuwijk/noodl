@@ -738,13 +738,17 @@ def default_windows() -> dict[str, list[str]]:
     workers = max(1, min(len(tasks), int(os.environ.get("NOODL_PARITY_WORKERS", cpus))))
     threads = max(1, cpus // workers)
     context = multiprocessing.get_context("spawn")
-    pool = concurrent.futures.ProcessPoolExecutor(workers, mp_context=context)
-    try:
-        futures = {(m, r): pool.submit(_run_in_worker, m, PARITY_ROWS[m], r, threads)
-                   for m, r in tasks}
-        runs = _gather(pool, futures, {task: _stall_limit(task[0]) for task in tasks})
-    finally:
-        pool.shutdown(wait=True, cancel_futures=True)
+    with context.Manager() as manager:
+        started = manager.dict()
+        pool = concurrent.futures.ProcessPoolExecutor(workers, mp_context=context)
+        try:
+            futures = {(m, r): pool.submit(_started_in_worker, (m, r), started, _run_in_worker,
+                                           m, PARITY_ROWS[m], r, threads)
+                       for m, r in tasks}
+            runs = _gather(pool, futures, {task: _stall_limit(task[0]) for task in tasks},
+                           started)
+        finally:
+            pool.shutdown(wait=True, cancel_futures=True)
     results: dict[str, list[str] | ParityWorkerError] = {}
     for m in sorted(PARITY_ROWS):
         got = [runs[m, r] for r in _default_substeps(m)]
@@ -784,14 +788,22 @@ def _stall_limit(model: str) -> float:
     return max(STALL_FLOOR, STALL_FACTOR * float(recorded))
 
 
+def _started_in_worker(task, started, run, *args):
+    """`run(*args)` in a worker process, recording in `started[task]` (a manager dict shared
+    with the parent) the wall-clock time at which a worker really began it."""
+    started[task] = time.time()
+    return run(*args)
+
+
 def _gather(pool: concurrent.futures.ProcessPoolExecutor, futures: dict, limits: dict,
-            poll: float = GATHER_POLL) -> dict:
+            started, poll: float = GATHER_POLL) -> dict:
     """Each task's result, the exception its run raised, or a `ParityWorkerError` when no
     result came: a worker died (the pool broke), or a run went past its stall limit
-    (`limits[task]`, s, counted from when it was first seen running). A stall stops the
-    pool, killing its workers, and every unfinished task is reported."""
+    (`limits[task]`, s, counted from `started[task]`, the wall-clock time its worker began
+    it, `_started_in_worker`). Not from `future.running()`: the pool marks a task running
+    once it enters the queue feeding the workers, before any worker has taken it. A stall
+    stops the pool, killing its workers, and every unfinished task is reported."""
     out: dict = {}
-    started: dict = {}
     pending = dict(futures)
     while pending:
         done, _ = concurrent.futures.wait(pending.values(), timeout=poll,
@@ -807,11 +819,9 @@ def _gather(pool: concurrent.futures.ProcessPoolExecutor, futures: dict, limits:
                     f"is not a parity failure; NOODL_PARITY_WORKERS lowers the worker count")
             except Exception as exc:  # the run's own error: the model's failure
                 out[task] = exc
-        now = time.monotonic()
-        for task, future in pending.items():
-            if future.running():
-                started.setdefault(task, now)
-        stalled = [t for t in pending if t in started and now - started[t] > limits[t]]
+        now = time.time()
+        begun = dict(started)
+        stalled = [t for t in pending if t in begun and now - begun[t] > limits[t]]
         if stalled:
             _stop(pool)
             names = ", ".join(f"{m} at {r} substeps (limit {limits[m, r]:.0f} s)"
@@ -826,9 +836,11 @@ def _gather(pool: concurrent.futures.ProcessPoolExecutor, futures: dict, limits:
 
 
 def _stop(pool: concurrent.futures.ProcessPoolExecutor) -> None:
-    """Cancel the pool's queued tasks and kill its workers (a stalled run never returns)."""
+    """Cancel the pool's queued tasks and kill its workers (a stalled run never returns).
+    The workers are listed before the shutdown, which drops the pool's reference to them."""
+    processes = list((getattr(pool, "_processes", None) or {}).values())
     pool.shutdown(wait=False, cancel_futures=True)
-    for process in list((getattr(pool, "_processes", None) or {}).values()):
+    for process in processes:
         process.kill()
 
 
@@ -841,12 +853,18 @@ def _die_in_worker(code: int) -> None:
     os._exit(code)
 
 
+def _submit(pool, started, tasks: dict) -> dict:
+    """`{task: (function, *args)}` submitted through `_started_in_worker`."""
+    return {task: pool.submit(_started_in_worker, task, started, *call)
+            for task, call in tasks.items()}
+
+
 def test_a_dead_worker_is_reported_as_a_harness_failure():
     pool = concurrent.futures.ProcessPoolExecutor(
         1, mp_context=multiprocessing.get_context("spawn"))
     try:
-        futures = {("ModelA", 1): pool.submit(_die_in_worker, 3)}
-        out = _gather(pool, futures, {("ModelA", 1): 600.0}, poll=0.2)
+        futures = _submit(pool, {}, {("ModelA", 1): (_die_in_worker, 3)})
+        out = _gather(pool, futures, {("ModelA", 1): 600.0}, {}, poll=0.2)
     finally:
         pool.shutdown(wait=True, cancel_futures=True)
     error = out["ModelA", 1]
@@ -856,19 +874,45 @@ def test_a_dead_worker_is_reported_as_a_harness_failure():
 
 
 def test_a_stalled_run_is_named_and_its_pool_stopped():
-    pool = concurrent.futures.ProcessPoolExecutor(
-        1, mp_context=multiprocessing.get_context("spawn"))
+    context = multiprocessing.get_context("spawn")
+    pool = concurrent.futures.ProcessPoolExecutor(1, mp_context=context)
     start = time.monotonic()
     try:
-        futures = {("Slow", 2): pool.submit(_sleep_in_worker, 600.0),
-                   ("Queued", 1): pool.submit(_sleep_in_worker, 0.0)}
-        out = _gather(pool, futures, {("Slow", 2): 1.0, ("Queued", 1): 600.0}, poll=0.2)
+        with context.Manager() as manager:
+            started = manager.dict()
+            futures = _submit(pool, started, {("Slow", 2): (_sleep_in_worker, 600.0),
+                                              ("Queued", 1): (_sleep_in_worker, 0.0)})
+            workers = list(pool._processes.values())
+            out = _gather(pool, futures, {("Slow", 2): 1.0, ("Queued", 1): 600.0}, started,
+                          poll=0.2)
     finally:
         pool.shutdown(wait=True, cancel_futures=True)
+    assert workers
+    for worker in workers:                       # the stalled run's worker was killed
+        worker.join(timeout=30.0)
+        assert not worker.is_alive()
     assert time.monotonic() - start < 120.0
     for task in futures:
         assert isinstance(out[task], ParityWorkerError)
         assert "Slow at 2 substeps (limit 1 s) stalled" in str(out[task])
+
+
+def test_a_queued_run_is_timed_from_when_a_worker_starts_it():
+    """One worker: the second run waits in the queue (which the pool already counts as
+    running) while the first takes 3 s. Its 1 s limit starts when the worker takes it, so
+    it finishes in time."""
+    context = multiprocessing.get_context("spawn")
+    pool = concurrent.futures.ProcessPoolExecutor(1, mp_context=context)
+    try:
+        with context.Manager() as manager:
+            started = manager.dict()
+            futures = _submit(pool, started, {("First", 1): (_sleep_in_worker, 3.0),
+                                              ("Queued", 1): (_sleep_in_worker, 0.0)})
+            out = _gather(pool, futures, {("First", 1): 600.0, ("Queued", 1): 1.0},
+                          started, poll=0.2)
+    finally:
+        pool.shutdown(wait=True, cancel_futures=True)
+    assert out == {("First", 1): 3.0, ("Queued", 1): 0.0}
 
 
 @pytest.mark.parametrize("model", sorted(PARITY_ROWS))

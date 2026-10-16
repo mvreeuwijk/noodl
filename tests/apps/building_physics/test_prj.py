@@ -546,6 +546,23 @@ def test_a_steady_contaminant_solve_with_no_airflow_is_refused_with_the_weather(
     assert bool(torch.isfinite(out["species.x"]).all())
 
 
+def test_a_refusal_naming_a_layer_the_model_does_not_have_still_reaches_the_caller(
+        monkeypatch):
+    """The weather is added from the refused layer's nodes; a refusal naming another layer
+    keeps the wind in its message and is never replaced by a lookup error."""
+    from noodl.layers import UndefinedSteadyState
+    from noodl.model import Model
+
+    def refuse(self, state, drivers, **kwargs):
+        raise UndefinedSteadyState("refused", layer="elsewhere", nodes=["a"])
+
+    model, state, drivers = project_to_model(read_prj(DATA / "test_OneZoneWthCtmStack.prj"))
+    monkeypatch.setattr(Model, "steady", refuse)
+    with pytest.raises(UndefinedSteadyState, match=r"^refused\. .*Ws = 0 m/s$") as err:
+        prj_steady(model, state, drivers)
+    assert "Ta =" not in str(err.value) and err.value.layer == "elsewhere"
+
+
 def test_local_mean_age_of_a_zone_without_airflow_is_refused_by_name():
     from noodl.apps.building_physics.outputs import local_mean_age
     from noodl.layers import UndefinedSteadyState

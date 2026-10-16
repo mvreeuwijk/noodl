@@ -1647,7 +1647,11 @@ class TransportLayer:
         `solvers.select.solve` directly (not reshaped by `_from_stacked`): a `SolveResult`
         is not a plain `Tensor`, so it cannot be a single `torch.autograd.Function`'s output
         the way the default `Tensor` return is. Return type on that path is therefore
-        `torch.Tensor | SolveResult`. `capacity` (keyword-only)
+        `torch.Tensor | SolveResult`. `on_failure` governs only a linear solve that does not
+        converge: a steady state that is undefined (a stored node or a closed group of them
+        that nothing leaves, `UndefinedSteadyState`) or a storage-free node nothing passes
+        through is refused before any solve, and raises whichever `on_failure` is given.
+        `capacity` (keyword-only)
         overrides the construction-time capacity for this call only. `diagnostics`
         (keyword-only), when a dict is passed, is filled with this solve's
         `"linear"` entry on the `on_failure="raise"` path only -- see `_LinearSolve`'s
