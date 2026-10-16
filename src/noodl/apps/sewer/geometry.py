@@ -56,16 +56,15 @@ def _theta(h: Tensor, diameter: Tensor) -> Tensor:
     ``arccos`` has an infinite derivative at both ends of its domain, so the naive
     composition back-propagates ``inf`` at exactly ``h = 0`` or ``h = D``, which then
     multiplies the ``0`` from ``dA/dtheta`` (etc.) into ``nan``. Clamping the argument to
-    ``[-1 + _EPS, 1 - _EPS]`` (an offset clamp) was tried first and REJECTED: any
+    ``[-1 + _EPS, 1 - _EPS]`` (an offset clamp) is NOT used: any
     float64-representable ``_EPS`` shifts the boundary VALUE by ``O(sqrt(_EPS))`` (e.g.
     ``_EPS = 1e-12`` moves ``theta(h=0)`` to ``~4e-6``), which is far outside the exact
-    endpoint tolerances the tests demand (measured: fails both the full-pipe and
-    zero-depth cases). Clamping to the true domain ``[-1, 1]`` instead is exact at the
-    endpoints AND finite-gradient there for a different reason: ``torch.clamp``'s own
-    backward is exactly ``0`` for an input at (or past) its bound -- not merely "small" --
-    so it hard-zeroes even an ``inf``/``nan`` seed arriving from further downstream, not
-    only a well-behaved one. The ``arccos`` derivative singularity is never reached by the
-    gradient at all: it is gated shut one step upstream, unconditionally.
+    endpoint tolerances the tests demand (full-pipe and zero-depth cases). Clamping to the true
+    domain ``[-1, 1]`` instead is exact at the endpoints AND finite-gradient there for a different
+    reason: ``torch.clamp``'s own backward is exactly ``0`` for an input at (or past) its bound --
+    not merely "small" -- so it hard-zeroes even an ``inf``/``nan`` seed arriving from further
+    downstream, not only a well-behaved one. The ``arccos`` derivative singularity is never reached
+    by the gradient at all: it is gated shut one step upstream, unconditionally.
     """
     u = 1.0 - 2.0 * h / diameter
     return 2.0 * torch.arccos(torch.clamp(u, -1.0, 1.0))
