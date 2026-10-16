@@ -101,14 +101,15 @@ compared variable, every number in Python's shortest round-trip form of OpenMode
 keeps the declared experiment; the CSV header records the tolerance actually used): the
 dynamic parity references are regenerated tighter than declared, so that their own
 integration error is well below the tolerance the parity test asserts.
-Columns: each one-way flow element's `m_flow`, each four-port element's `m1_flow`/`m2_flow`
-(and `mAB_flow`/`mBA_flow` when the class declares them as variables), each volume's `T`,
-`p`, `Xi[1]` (when the medium has moisture) and `C[k]` (one per trace substance), the same for
-the volume `<column>.vol` inside a `MediumColumnDynamic`; each feedback controller's output
-`<controller>.y`; then, for a weather reader, `<reader>.weaBus.<output>` for `TDryBul`,
-`pAtm`, `relHum` and `winSpe`, and for a wind boundary (`Outside_Cp`, `Outside_CpLowRise`,
-`Outside_CpData`) its `pWin`. If the simulation fails (a refused model may not simulate), the
-JSON is still written, with Reals flagged approximate, and no CSV.
+Columns: each one-way flow element's and mover's `m_flow`, each four-port element's
+`m1_flow`/`m2_flow` (and `mAB_flow`/`mBA_flow` when the class declares them as variables),
+each volume's `T`, `p`, `Xi[1]` (when the medium has moisture) and `C[k]` (one per trace
+substance), the same for the volume `<column>.vol` inside a `MediumColumnDynamic`; each
+feedback controller's output `<controller>.y`; then, for a weather reader,
+`<reader>.weaBus.<output>` for `TDryBul`, `pAtm`, `relHum` and `winSpe`, and for a wind
+boundary (`Outside_Cp`, `Outside_CpLowRise`, `Outside_CpData`) its `pWin`. If the simulation
+fails (a refused model may not simulate), the JSON is still written,
+with Reals flagged approximate, and no CSV.
 """
 
 from __future__ import annotations
@@ -133,6 +134,7 @@ VOLUMES = frozenset({
     "Buildings.Fluid.MixingVolumes.MixingVolume",
     "Buildings.Fluid.Delays.DelayFirstOrder",
 })
+MOVERS = frozenset({"Buildings.Fluid.Movers.FlowControlled_dp"})
 ONE_WAY = frozenset({
     "Buildings.Airflow.Multizone.Orifice",
     "Buildings.Airflow.Multizone.EffectiveAirLeakageArea",
@@ -429,7 +431,7 @@ def compared_variables(instance: dict, doc: dict) -> list[str]:
         if comp.get("role") == "observer":
             continue
         variables = _variables_of(by_name[name]["type"])
-        if cls in ONE_WAY:
+        if cls in ONE_WAY or cls in MOVERS:
             flows.append(f"{name}.m_flow")
         elif cls in FOUR_PORT:
             for v in ("m1_flow", "m2_flow", "mAB_flow", "mBA_flow"):

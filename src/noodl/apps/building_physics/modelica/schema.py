@@ -70,6 +70,10 @@ ONE_WAY = frozenset({
     "Buildings.Airflow.Multizone.Table_V_flow",
     "Buildings.Airflow.Multizone.Table_m_flow",
 })
+# A mover with a prescribed pressure rise (`Buildings/Fluid/Movers/FlowControlled_dp.mo`): the
+# one MBL mover whose airflow follows from its pressure alone, an IMPLICIT law (`graph`,
+# `assemble`: the flow is an unknown of the air layer, Modified Nodal Analysis).
+MOVERS = frozenset({"Buildings.Fluid.Movers.FlowControlled_dp"})
 TWO_WAY = frozenset({
     "Buildings.Airflow.Multizone.DoorOpen",
     "Buildings.Airflow.Multizone.DoorOperable",
@@ -171,7 +175,7 @@ OBSERVERS = frozenset({
 })
 
 SUPPORTED = (
-    ZONES | BOUNDARIES | ONE_WAY | TWO_WAY | COLUMNS | ZONAL | THERMAL_PIN | HEAT_SOURCES
+    ZONES | BOUNDARIES | ONE_WAY | MOVERS | TWO_WAY | COLUMNS | ZONAL | THERMAL_PIN | HEAT_SOURCES
     | HEAT_SENSORS | SOURCES | SIGNALS | MATH | INLINE_SENSORS | SHORTS | OBSERVERS
     | WEATHER_READERS
 )
