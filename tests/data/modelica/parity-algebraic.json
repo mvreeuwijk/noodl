@@ -31,6 +31,68 @@
       "rows": 501
     }
   },
+  "FanAdverse": {
+    "fan.m_flow": {
+      "max_abs": 0.0,
+      "max_err_over_tol": 0.0,
+      "max_rel": 0.0,
+      "rows": 61
+    },
+    "ori.m_flow": {
+      "max_abs": 0.0,
+      "max_err_over_tol": 0.0,
+      "max_rel": 0.0,
+      "rows": 61
+    }
+  },
+  "FanOrifice": {
+    "fan.m_flow": {
+      "max_abs": 0.0,
+      "max_err_over_tol": 0.0,
+      "max_rel": 0.0,
+      "rows": 61
+    },
+    "ori.m_flow": {
+      "max_abs": 0.0,
+      "max_err_over_tol": 0.0,
+      "max_rel": 0.0,
+      "rows": 61
+    }
+  },
+  "FanRamp": {
+    "fan.m_flow": {
+      "max_abs": 0.0,
+      "max_err_over_tol": 0.0,
+      "max_rel": 0.0,
+      "rows": 61
+    },
+    "ori.m_flow": {
+      "max_abs": 0.0,
+      "max_err_over_tol": 0.0,
+      "max_rel": 0.0,
+      "rows": 61
+    }
+  },
+  "FanShortParallel": {
+    "fan.m_flow": {
+      "max_abs": 0.0,
+      "max_err_over_tol": 0.0,
+      "max_rel": 0.0,
+      "rows": 61
+    },
+    "oriFan.m_flow": {
+      "max_abs": 0.0,
+      "max_err_over_tol": 0.0,
+      "max_rel": 0.0,
+      "rows": 61
+    },
+    "oriLeak.m_flow": {
+      "max_abs": 3.469446951953614e-18,
+      "max_err_over_tol": 3.338054055852783e-10,
+      "max_rel": 3.6934073293384102e-16,
+      "rows": 61
+    }
+  },
   "OneWayFlow": {
     "ela.m_flow": {
       "max_abs": 0.0,
@@ -478,6 +540,14 @@
       "max_abs": 7.105427357601002e-15,
       "max_rel": 9.08829905985056e-16,
       "rows": 501
+    }
+  },
+  "ShortConnections": {
+    "ori.m_flow": {
+      "max_abs": 0.0,
+      "max_err_over_tol": 0.0,
+      "max_rel": 0.0,
+      "rows": 61
     }
   }
 }

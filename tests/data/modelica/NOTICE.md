@@ -26,6 +26,15 @@ the references still moved by up to 1.1e-4 of the flow floor (`ClosedDoors`' cra
 4.7e-5 (`OneOpenDoor`'s door at 28.8 s, 7.9e-9 kg/s) and 1.2e-6 in `CO2TransportStep`'s
 trace substance (6e-14 kg/kg); at 1e-14 DASSL returns no trajectory for these models.
 
+`FanOrifice`, `FanRamp`, `FanAdverse`, `ShortConnections` and `FanShortParallel` are not MBL
+models: they are the repository's own `NoodlFanShort` package (`sources/NoodlFanShort.mo`), built
+from MBL components, as references for `Movers.FlowControlled_dp` and for the zero-resistance
+connections (`LosslessPipe`, `PressureDrop` at `dp_nominal = 0`). They were exported with the
+same MBL commit and OpenModelica 1.27.1 by
+`python scripts/modelica_export.py NoodlFanShort.<Model> --package tests/data/modelica/sources/NoodlFanShort.mo --mbl <mbl> --tolerance 1e-13`.
+OpenModelica ran from the Windows 1.27.1 installer unpacked (not installed) with 7-Zip, with
+`MODELICAPATH` pointing at MSL 4.1.0 (tag v4.1.0).
+
 `USA_CA_San.Francisco.Intl.AP.724940_TMY3.mos` is MBL's
 `Buildings/Resources/weatherdata/USA_CA_San.Francisco.Intl.AP.724940_TMY3.mos`, copied byte for
 byte by `scripts/modelica_export.py` (sha256 recorded in every JSON that reads it; `.gitattributes`

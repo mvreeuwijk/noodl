@@ -365,6 +365,14 @@ holds its output `<controller>.y`, and that of a model with a `MediumColumnDynam
 of its volume, `<column>.vol.T`, `.p`, `.Xi[1]` and `.C[k]`. `ChimneyShaftNoVolume`,
 `ChimneyShaftWithVolume` and `TrickleVent` were re-exported this way at `--tolerance 1e-13`.
 
+The fan and zero-resistance paths are compared with OpenModelica on five models of the repository's
+own package `tests/data/modelica/sources/NoodlFanShort.mo` (`FanOrifice`, `FanRamp`, `FanAdverse`,
+`ShortConnections`, `FanShortParallel`: a `FlowControlled_dp` with a constant head, a ramped `dp_in`
+and a back pressure that reverses the flow; a `LosslessPipe` and a `PressureDrop` at
+`dp_nominal = 0` in series; a fan through a lossless pipe beside a leak). They are exported with
+`scripts/modelica_export.py NoodlFanShort.<Model> --package <the .mo file> --mbl <mbl>`, and are
+algebraic models in `test_modelica_parity.py`, at the same tolerance as the others.
+
 Regenerating the committed parity records (`tests/data/modelica/parity-{algebraic,dynamic}.json`,
 in [the building physics parity tables](../applications/building_physics.md#against-openmodelica-modelica-buildings-library))
 needs no OpenModelica — they are written by `tests/verification/test_modelica_parity.py`

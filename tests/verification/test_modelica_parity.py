@@ -65,7 +65,8 @@ RECORD = DATA / "parity-algebraic.json"
 
 RTOL, ATOL = 1e-6, 1e-9  # never loosened
 ALGEBRAIC = ("OneWayFlow", "DoorOpenClosed", "OpenDoorPressure", "OpenDoorTemperature",
-             "Orifice", "PowerLaw", "Outside_Cp")
+             "Orifice", "PowerLaw", "Outside_Cp",
+             "FanOrifice", "FanRamp", "FanAdverse", "ShortConnections", "FanShortParallel")
 VOLUME_CLASSES = ("Buildings.Fluid.MixingVolumes.MixingVolume",
                   "Buildings.Fluid.Delays.DelayFirstOrder")
 

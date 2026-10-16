@@ -620,7 +620,17 @@ def _run_omc(script: str, workdir: Path, name: str, timeout: float = 3600) -> st
     return out
 
 
+# Extra Modelica files (`--package`) loaded after the libraries: this repository's own
+# reference models (`tests/data/modelica/sources`), whose `within ;` makes them top-level.
+EXTRA_PACKAGES: list[Path] = []
+
+
 def _load_libs(mbl: Path) -> str:
+    extra = "".join(
+        f"""if not loadFile({_mos_str(Path(p).resolve().as_posix())}) then
+  print("@@FAIL loadFile(extra): " + getErrorString() + "\\n"); exit(1);
+end if;
+""" for p in EXTRA_PACKAGES)
     return f"""echo(false);
 if not loadModel(Modelica, {{{_mos_str(MSL_VERSION)}}}) then
   print("@@FAIL loadModel(Modelica): " + getErrorString() + "\\n"); exit(1);
@@ -628,7 +638,7 @@ end if;
 if not loadFile({_mos_str(str(mbl / "Buildings" / "package.mo"))}) then
   print("@@FAIL loadFile(Buildings): " + getErrorString() + "\\n"); exit(1);
 end if;
-getErrorString();
+{extra}getErrorString();
 """
 
 
@@ -989,11 +999,14 @@ def main(argv: list[str] | None = None) -> int:
                     type=Path)
     ap.add_argument("--no-simulate", action="store_true",
                     help="write the JSON only (Reals keep six significant digits)")
+    ap.add_argument("--package", type=Path, action="append", default=[],
+                    help="an extra .mo file to load after the libraries (repeatable)")
     ap.add_argument("--keep", type=Path, default=None,
                     help="copy the omc working directory here (debugging)")
     ap.add_argument("--tolerance", type=float, default=None,
                     help="solver tolerance for the simulation (default: the model's own)")
     args = ap.parse_args(argv)
+    EXTRA_PACKAGES[:] = args.package
     summary = export(args.model, args.out, args.mbl.expanduser(),
                      run_simulation=not args.no_simulate, keep=args.keep,
                      tolerance=args.tolerance)
