@@ -7,6 +7,7 @@ on typed edges (one ConstitutiveLaw per kind) and Drive terms (additive potentia
 from __future__ import annotations
 
 import functools
+import types
 from collections.abc import Mapping, Sequence
 
 import torch
@@ -109,29 +110,57 @@ class _DiagonalShifted:
                                extra_grounded=extra)
 
 
-def _held_tensors(obj):
+#: Containers longer than this are not entered by `_held_tensors`: a long list or dict on a
+#: law is a numeric table, not a parameter holder, and walking it item by item would cost
+#: more than the solve (the exact check, `KirchhoffLayer._require_threaded`, needs no walk).
+_SCAN_MAX_ITEMS = 1024
+_ATOMS = (str, bytes, int, float, complex, bool, type(None))
+_OPAQUE = (type, types.ModuleType, types.FunctionType, types.BuiltinFunctionType,
+           types.MethodType)
+
+
+def _held_tensors(obj, *, registered_threaded: bool = True):
     """Yield `(name, tensor)` for every tensor `obj` holds: its attributes, its registered
-    buffers (when a module) and tensors nested at any depth in lists, tuples, dicts and sets.
-    A module's registered parameters live in `_parameters` and are not yielded; a parameter
-    held in a container or a plain attribute is, since the solve cannot reach it."""
+    buffers (when a module), and tensors nested at any depth (up to 8) in lists, tuples,
+    dicts, sets and the attributes of plain objects and modules held there.
+
+    With `registered_threaded`, `obj`'s own registered parameters (`_parameters`) and
+    submodules (`_modules`, scanned as holders of their own) are not yielded: the
+    differentiable solve threads them. A module reached through a container or a plain
+    attribute is not registered, so its parameters ARE yielded. Each object is visited once
+    (cycles end), and a container longer than `_SCAN_MAX_ITEMS` is not entered."""
+    seen: set[int] = set()
+
     def walk(label, value, depth):
         if isinstance(value, torch.Tensor):
             yield label, value
-        elif depth < 8 and isinstance(value, dict):
-            for k, v in value.items():
-                yield from walk(f"{label}[{k!r}]", v, depth + 1)
-        elif depth < 8 and isinstance(value, (list, tuple, set, frozenset)):
-            for i, v in enumerate(value):
-                yield from walk(f"{label}[{i}]", v, depth + 1)
+            return
+        if depth >= 8 or isinstance(value, _ATOMS + _OPAQUE) or id(value) in seen:
+            return
+        seen.add(id(value))
+        if isinstance(value, dict):
+            if len(value) <= _SCAN_MAX_ITEMS:
+                for k, v in value.items():
+                    yield from walk(f"{label}[{k!r}]", v, depth + 1)
+        elif isinstance(value, (list, tuple, set, frozenset)):
+            if len(value) <= _SCAN_MAX_ITEMS:
+                for i, v in enumerate(value):
+                    yield from walk(f"{label}[{i}]", v, depth + 1)
+        elif hasattr(value, "__dict__"):
+            for k, v in vars(value).items():
+                if k != "_memo_cache":
+                    yield from walk(f"{label}.{k}", v, depth + 1)
 
+    skip = {"_memo_cache"}
+    if registered_threaded:
+        skip |= {"_parameters", "_buffers", "_modules"}
     for name, value in vars(obj).items():
-        if name in ("_parameters", "_buffers", "_modules", "_memo_cache"):
-            continue
-        yield from walk(name, value, 0)
-    if isinstance(obj, torch.nn.Module):
+        if name not in skip:
+            yield from walk(name, value, 0)
+    if registered_threaded and isinstance(obj, torch.nn.Module):
         for name, value in obj._buffers.items():
             if value is not None:
-                yield from walk(name, value, 0)
+                yield name, value
 
 
 class KirchhoffLayer(TopologyGuard):
@@ -457,11 +486,14 @@ class KirchhoffLayer(TopologyGuard):
         return tuple(self._node_sources)
 
     # ------------------------------------------------------- dense references (lazy)
-    @functools.cached_property
+    @property
     def A(self) -> torch.Tensor:
         """This layer's (n, b_layer) incidence matrix, built on FIRST ACCESS only.
 
-        Held as a `cached_property` rather than an `__init__` attribute: it grows 4x per node
+        Refused (`_require_current_topology`) once the network has changed, even when it
+        was already built: the cached matrix describes the old graph.
+
+        Held in a `cached_property` rather than an `__init__` attribute: it grows 4x per node
         doubling and would break the composed model's memory-scaling budget (numbers:
         docs/design/orchestration.md#dense-incidence-matrix). Nothing inside this class reads
         it except `jacobian()`, the retained dense reference -- every hot-path site gathers or
@@ -471,6 +503,12 @@ class KirchhoffLayer(TopologyGuard):
         order), because callers outside the layer legitimately want the matrix: the
         composed-model conservation tests form `A @ q` with it.
         """
+        self._require_current_topology()
+        return self._dense_incidence
+
+    @functools.cached_property
+    def _dense_incidence(self) -> torch.Tensor:
+        """The cache behind `A`."""
         return self.net.incidence()[:, self.cols]
 
     @functools.cached_property
@@ -488,7 +526,8 @@ class KirchhoffLayer(TopologyGuard):
         caller who mutated `net` afterwards (adding a node or edge) would get a layer whose
         `A`/`_diff` (if already accessed) or `_src`/`_tgt`/`cols` (fixed at `__init__`) no
         longer agree with the network's current topology; `solve`, `dp`, `assemble` and
-        `residual` raise (`_require_current_topology`) once the network has changed.
+        `residual`, `A`, `balance` and `net_outflow` raise (`_require_current_topology`)
+        once the network has changed.
         """
         return self.net.difference()[self.cols]
 
@@ -527,7 +566,12 @@ class KirchhoffLayer(TopologyGuard):
         `index_add` is out of place, on a zero tensor this call itself allocates, so it is
         exactly as differentiable w.r.t. `w` as the matrix product is and cannot corrupt a
         tensor some earlier op still needs for its own backward pass.
+
+        Refused once the network has changed (`_require_current_topology`, one integer
+        comparison): the endpoints and node count are construction-time ones. Every
+        flow-balance site goes through here (`net_outflow`, `balance`, `residual`).
         """
+        self._require_current_topology()
         out = torch.zeros(
             w.shape[:-1] + (self._n_nodes,), dtype=w.dtype, device=w.device
         )
@@ -734,6 +778,7 @@ class KirchhoffLayer(TopologyGuard):
         layer, including one solved by Modified Nodal Analysis, whose implicit-law flows are
         not functions of `phi`.
         """
+        self._require_current_topology()
         phi_i = phi[..., self.interior]
         lhs = self._accumulate_interior(q) - self._source_interior(sources, phi_i)
         w = self._node_source_withdrawal(phi, drivers or {})
@@ -967,7 +1012,9 @@ class KirchhoffLayer(TopologyGuard):
                         f"differentiable=False."
                     )
         for drv in self._drives:
-            for name, value in _held_tensors(drv):
+            # A drive's own parameters are not threaded either (only laws' and node
+            # sources' are), so they are reported too.
+            for name, value in _held_tensors(drv, registered_threaded=False):
                 if value.requires_grad:
                     raise ValueError(
                         f"drive {drv!r} (kind {drv.kind!r}) has a tensor attribute {name!r} "
@@ -978,6 +1025,39 @@ class KirchhoffLayer(TopologyGuard):
                         f"solve() rather than owning it directly, or use "
                         f"differentiable=False."
                     )
+
+    def _require_threaded(self, residual, params) -> None:
+        """Refuse a differentiable solve whose residual depends on a tensor that is not threaded.
+
+        `residual(*params)` is the residual at the starting point as a function of exactly
+        the tensors handed to `Function.apply`. Evaluated once, under `enable_grad`, with
+        every one of them detached: if the result still requires grad, some tensor that
+        requires grad reaches the residual by another route (held by a law, a node source or
+        a drive in an attribute, a plain object, a module in a plain list, or captured by a
+        closure), and the implicit adjoint would return a gradient for it that is silently
+        wrong or absent. This is exact where an attribute scan is not, and costs one
+        residual evaluation. The Jacobian operator is not checked separately: it is the
+        autograd derivative of the same laws' flows (`FunctionalLaws.dflows`), so it reads
+        nothing the residual does not.
+
+        The error names the attribute when `_check_no_unreachable_differentiable_tensors`
+        finds it, and describes the layer otherwise (a closure capture).
+        """
+        detached = [p.detach() if isinstance(p, torch.Tensor) else p for p in params]
+        with torch.enable_grad():
+            r = residual(*detached)
+        if not (isinstance(r, torch.Tensor) and r.requires_grad):
+            return
+        self._check_no_unreachable_differentiable_tensors()
+        raise ValueError(
+            f"KirchhoffLayer {self.name!r}: the residual depends on a tensor with "
+            f"requires_grad=True that is not a registered nn.Parameter of a law or node "
+            f"source, a driver, the sources or the boundary potentials (it is captured by "
+            f"closure or held where no attribute scan reaches), so the differentiable solve "
+            f"cannot reach it through Function.apply and its gradient would be silently "
+            f"wrong or absent. Register it as an nn.Parameter of the law, pass it through "
+            f"the `drivers` mapping, or use differentiable=False."
+        )
 
     # ------------------------------------------------------------------ solve
     def _reaches_grad(self, drivers: Mapping, sources, phi_boundary) -> bool:
@@ -1090,7 +1170,7 @@ class KirchhoffLayer(TopologyGuard):
         this method computes for itself when `phi0 is None` is computed under `no_grad`),
         because the implicit adjoint linearises at the converged point and never returns a
         gradient w.r.t. the starting guess -- `solvers.implicit._Implicit.backward` returns
-        `None` for it. See the comment at the top of the body for what tracing it cost.
+        `None` for it. See `_starting_point` for what tracing it cost.
 
         With `differentiable=False`, the returned `(phi, q)` are ALWAYS DETACHED: the whole
         branch -- the initial guess, the grounding check, the Newton iteration, every inner
@@ -1140,8 +1220,10 @@ class KirchhoffLayer(TopologyGuard):
                 phi0, dq0, node_slopes0, phi_boundary, drivers, sources, diagnostics,
                 newton_kwargs,
             )
-        self._check_no_unreachable_differentiable_tensors()
         fn = FunctionalLaws(self, drivers, sources, phi_boundary)
+        self._require_threaded(
+            lambda *params: fn.residual_fn(phi0, *params), fn.all_params
+        )
         return self._solve_implicit(
             fn, phi0, phi_boundary, drivers, policy, diagnostics, newton_kwargs
         )

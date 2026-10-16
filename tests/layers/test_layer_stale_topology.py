@@ -3,7 +3,9 @@
 import pytest
 import torch
 
+from noodl.elements import Conductance
 from noodl.layers.allocation import AllocatedFlowLayer
+from noodl.layers.kirchhoff import KirchhoffLayer
 from noodl.layers.transport import TransportLayer
 from noodl.topology import Network
 
@@ -78,3 +80,25 @@ def test_an_allocation_layer_refuses_a_changed_network():
         layer.step(
             torch.zeros(2, dtype=F64), {"cap.requests": torch.ones(1, dtype=F64)}, 1.0
         )
+
+
+_KIRCHHOFF_CALLS = {
+    "net_outflow": lambda L, phi, q: L.net_outflow(q),
+    "balance": lambda L, phi, q: L.balance(phi, q),
+    "A": lambda L, phi, q: L.A,
+}
+
+
+@pytest.mark.parametrize("entry", sorted(_KIRCHHOFF_CALLS))
+def test_a_kirchhoff_layer_refuses_flow_balances_on_a_changed_network(entry):
+    net = _net()
+    layer = KirchhoffLayer(
+        net, "air", [Conductance(torch.tensor([1.0, 1.0], dtype=F64), kind="airpath")],
+        boundary=["ambient"],
+    )
+    phi, q = layer.solve(torch.zeros(1, dtype=F64), differentiable=False)
+    assert layer.A.shape == (2, 2)  # built before the change: the cache must not bypass the refusal
+    _KIRCHHOFF_CALLS[entry](layer, phi, q)
+    _grow(net)
+    with pytest.raises(RuntimeError, match=MATCH):
+        _KIRCHHOFF_CALLS[entry](layer, phi, q)

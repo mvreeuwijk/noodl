@@ -56,8 +56,17 @@ decision itself is still made on detached copies and never enters the graph.
 ## The contract
 
 For `differentiable=True` to be *safe*, two rules must hold. Both are checked before any solve
-is attempted, and a violation raises naming the offending law or drive and the attribute —
-rather than silently returning a wrong or absent gradient.
+is attempted, and a violation raises a `ValueError` — naming the offending law or drive and the
+attribute where it can — rather than silently returning a wrong or absent gradient.
+
+The check is exact. The differentiable solve threads a fixed set of tensors through
+`Function.apply`: each law's and node source's registered parameters, the driver values,
+`sources` and the boundary potentials. Before solving, the layer evaluates its residual once at
+the starting point with every one of those tensors detached; if the result still requires
+grad, some other tensor that requires grad reaches the residual, and the solve is refused. It
+costs one residual evaluation per differentiable solve, and it catches what no attribute scan
+can, such as a tensor captured by a closure. (The Jacobian is the autograd derivative of the
+same flows, so it reads nothing the residual does not.)
 
 **1. A law's differentiable state must be a registered parameter.**
 
@@ -68,10 +77,11 @@ leak = PowerLaw(C=torch.tensor(0.01), n=torch.tensor(0.65), learnable=True)   # 
 A bare tensor held with `requires_grad=True` outside `named_parameters()` is a supported
 construction, and its graph is reachable through the law's own component calls — but it is
 invisible to the differentiable solve. Since `differentiable=False` returns detached tensors,
-*neither* path would carry a gradient to it. The check covers every tensor a law (or any
-module inside it) holds: plain attributes, registered buffers, and tensors nested in lists,
-tuples, dicts and sets. Only a registered parameter is reachable, so a gradient-carrying tensor
-anywhere else is refused with a `ValueError`.
+*neither* path would carry a gradient to it. Only a registered parameter is reachable, so a
+gradient-carrying tensor anywhere else — a plain attribute, a registered buffer, a tensor in a
+list, dict or plain object, the parameter of a module kept in a plain Python list — is refused.
+To name it, the error scans what the law holds (attributes, buffers, and containers and plain
+objects nested up to eight levels, skipping containers of more than 1024 items).
 
 **2. A drive must read every differentiable quantity from the `drivers` mapping**, never hold
 one as an instance attribute. See [Constitutive laws and drives](elements.md#the-rule-a-drive-must-obey)

@@ -21,11 +21,16 @@ class TopologyGuard:
     def _require_current_topology(self) -> None:
         """Raise `RuntimeError` when the network gained a node or edge after construction."""
         current = self.net.topology_version
-        if current != self._topology_version:
+        # A layer pickled before the guard existed has no recorded version: it reads as 0,
+        # which is also what its network, pickled with it and equally old, loads at
+        # (`Network.topology_version`), so an unchanged old pickle matches and a network
+        # changed after loading is still refused.
+        recorded = getattr(self, "_topology_version", 0)
+        if current != recorded:
             raise RuntimeError(
                 f"{type(self).__name__} {self.name!r}: the network topology has changed "
                 f"since this layer was constructed (topology version "
-                f"{self._topology_version} -> {current}); the layer still describes the "
+                f"{recorded} -> {current}); the layer still describes the "
                 f"old graph. Add all nodes and edges before constructing layers, or "
                 f"construct the layer and model again."
             )

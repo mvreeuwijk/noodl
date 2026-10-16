@@ -73,8 +73,14 @@ class Network:
         layers keep construction-time edge indices and node counts, so they are not valid
         for a network that has since gained a node or edge. Build the layers after the
         network is complete; re-adding an existing node (to set attributes) does not count.
+        A network pickled before this counter existed loads at version 0.
         """
-        return self._version
+        return getattr(self, "_version", 0)
+
+    def __setstate__(self, state: dict) -> None:
+        # A network pickled before the topology counter existed has no `_version`.
+        state.setdefault("_version", 0)
+        self.__dict__.update(state)
 
     def add_node(self, name: Node, **attrs) -> None:
         if name not in self.graph:

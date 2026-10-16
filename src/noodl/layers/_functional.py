@@ -146,12 +146,12 @@ class FunctionalLaws:
                 # Whether a missing/zero Jacobian contribution here is legitimate is
                 # decided ONLY by el.dp_independent -- a class-level DECLARATION (see
                 # ConstitutiveLaw) -- never inferred from whatever autograd graph `flow` happens
-                # to carry (e.g. `flow.requires_grad` with allow_unused=True): that would let
-                # ANY law whose flow() accidentally lost the autograd graph
-                # (e.g. a stray dp.detach() in a third-party subclass) silently got an
-                # exact-zero Jacobian column instead of an error: the forward solve still
-                # looked fine (Newton converges on the exact residual regardless), but
-                # the adjoint gradient computed from that Jacobian was silently wrong.
+                # to carry (e.g. `flow.requires_grad` with allow_unused=True): that would give
+                # ANY law whose flow() accidentally lost the autograd graph (e.g. a stray
+                # dp.detach() in a third-party subclass) an exact-zero Jacobian column
+                # instead of an error. The forward solve would still look fine (Newton
+                # converges on the exact residual regardless), but the adjoint gradient
+                # computed from that Jacobian would be silently wrong.
                 if el.dp_independent:
                     # Cross-check the declaration against the law's own analytic
                     # dflow(), which for a genuinely dp-independent law (FixedFlow's,
