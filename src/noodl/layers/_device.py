@@ -153,7 +153,14 @@ class Mover:
         if callable(to):
             # A foreign object's declared hook (a user closure holding tensors).
             moved = obj.to(device=self.device, dtype=self.precision)
-            return obj if moved is None else moved
+            if moved is None or moved is obj:      # moved in place
+                return obj
+            # A replacement: every later reference to `obj` gets this same object (`obj`
+            # stays alive in `_keep`, so its id is not reused during the walk).
+            self._seen[key] = moved
+            self._seen[id(moved)] = moved
+            self._keep.append(moved)
+            return moved
         return obj
 
     def attributes(self, obj, skip: frozenset = frozenset()) -> None:
