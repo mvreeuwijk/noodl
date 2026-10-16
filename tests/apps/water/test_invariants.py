@@ -145,3 +145,78 @@ def test_a_stagnant_dead_end_without_decay_is_refused_by_name_and_with_decay_rea
     out = water_steady(model, state, drivers)["quality.x"]
     assert float(out[1]) == pytest.approx(0.0, abs=1e-9)
     assert float(out[0]) > 50.0
+
+
+def _injected_line():
+    """R -> A -> B: A has no demand and takes a water injection, B withdraws 0.01 m3/s."""
+    from noodl.apps.water.network import Junction, Reservoir, WaterNetwork, WaterPipe
+
+    return WaterNetwork(
+        junctions=(Junction("A", 0.0, 0.0), Junction("B", 0.0, 0.01)),
+        reservoirs=(Reservoir("R", 50.0),),
+        pipes=(WaterPipe("P1", "R", "A", 100.0, 0.3, 130.0),
+               WaterPipe("P2", "A", "B", 100.0, 0.3, 130.0)))
+
+
+def _tracer_balance(model, drivers, out):
+    """`(withdrawn, supplied)` tracer mass rates (kg/s): the withdrawals times their
+    concentrations against the reservoir's outflow at its concentration plus the injected
+    tracer."""
+    names = model.node_names
+    junctions = [names.index(j.name) for j in model.water_network.junctions]
+    sources = drivers["water.sources"]
+    withdrawal = torch.where(sources < 0, -sources, torch.zeros_like(sources))[..., junctions]
+    withdrawn = (withdrawal * out["quality.x"]).sum(-1)
+    supplied = out["water.q"][..., 0] * drivers["quality.x_boundary"][..., 0]
+    supplied = supplied + drivers["quality.sources"].sum(-1)
+    return withdrawn, supplied
+
+
+@pytest.mark.parametrize(("tracer", "expected"), [(0.1, 60.0), (0.0, 50.0)])
+def test_a_water_injection_dilutes_and_the_injected_tracer_is_conserved(tracer, expected):
+    """A water injection is not a negative withdrawal: it carries no tracer of its own (only
+    `quality.sources` does) and so dilutes. R at 100 supplies 0.005 m3/s, A injects 0.005
+    m3/s and `tracer` kg/s, B withdraws 0.01: both read (0.005 * 100 + tracer) / 0.01, and
+    the tracer withdrawn equals the tracer supplied."""
+    from noodl.apps.water.network import initial_drivers
+
+    model, state, _ = build_model(_injected_line(), quality=0.0)
+    drivers = initial_drivers(model, values={
+        "water.sources": {"A": 0.005},
+        "quality.x_boundary": {"R": 100.0},
+        "quality.sources": {"A": tracer},
+    })
+    out = water_steady(model, state, drivers)
+    assert torch.allclose(out["water.q"], torch.tensor([0.005, 0.01], dtype=F64), atol=1e-9)
+    assert torch.allclose(out["quality.x"], torch.full((2,), expected, dtype=F64), atol=1e-6)
+    withdrawn, supplied = _tracer_balance(model, drivers, out)
+    assert float(withdrawn) == pytest.approx(float(supplied), rel=1e-9)
+    assert float(supplied) == pytest.approx(0.01 * expected, rel=1e-9)
+
+
+def test_a_batch_of_mixed_injections_conserves_the_tracer_member_by_member():
+    """The same balance over a batch of water injections (some of them withdrawals) and
+    injected tracers, each member equal to its own single solve."""
+    from noodl.apps.water.network import initial_drivers
+
+    model, state, _ = build_model(_injected_line(), quality=0.0)
+    base = initial_drivers(model, values={
+        "quality.x_boundary": {"R": 100.0}, "quality.sources": {"A": 0.0}})
+    names = model.node_names
+    a = names.index("A")
+    inject = torch.tensor([0.005, 0.0, -0.002, 0.008], dtype=F64)
+    tracer = torch.tensor([0.1, 0.0, 0.05, 0.2], dtype=F64)
+    d = dict(base)
+    d["water.sources"] = base["water.sources"].repeat(4, 1)
+    d["water.sources"][:, a] = inject
+    d["quality.sources"] = base["quality.sources"].repeat(4, 1)
+    d["quality.sources"][:, a] = tracer
+    d["quality.x_boundary"] = base["quality.x_boundary"].repeat(4, 1)
+    out = water_steady(model, state, d)
+    withdrawn, supplied = _tracer_balance(model, d, out)
+    assert torch.allclose(withdrawn, supplied, rtol=1e-9, atol=1e-12)
+    for k in range(4):
+        dk = {key: (v[k] if key in ("water.sources", "quality.sources", "quality.x_boundary")
+                    else v) for key, v in d.items()}
+        single = water_steady(model, state, dk)
+        assert torch.allclose(out["quality.x"][k], single["quality.x"], atol=1e-9)

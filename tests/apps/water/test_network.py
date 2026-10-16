@@ -269,9 +269,11 @@ def test_pda_replaces_the_nodal_sources_with_a_node_source():
 def test_a_quality_layer_carries_the_withdrawal_as_dilution_and_only_decay_as_removal():
     model, _, _ = build_model(twoloop(), quality=0.5)
     layer = model.transport["quality"]
-    # only the bulk decay is a build-time removal; the withdrawal enters through dilution = 1
+    # only the bulk decay is a build-time removal; the withdrawal enters through dilution = 1,
+    # withdrawals only (an injection is no negative removal)
     assert layer.removal.squeeze(-1).tolist() == pytest.approx([0.5 / 86400.0] * 6, rel=1e-14)
     assert layer.dilution == 1.0
+    assert layer.dilution_mode == "withdrawal"
     assert "quality_removal" in model.notes
     assert "quality_capacity" in model.notes
 

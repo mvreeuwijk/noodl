@@ -47,7 +47,12 @@ negative source (m³/s withdrawn; `demand=` does the sign for you), and junction
 keep their demand. On a model built with `quality=` the quality sink is the
 withdrawal of the current hydraulic solution (a scaled or patterned `water.sources`, or the
 delivered demand under `pda=True`), so a tracer entering at the reservoir stays at its
-concentration at every demand level. A STAGNANT node (no inflow and no outflow, e.g. a dead end whose delivered demand is zero under `pda=True` because the pressure is below the minimum) has no steady concentration without decay: `water_steady` raises `UndefinedSteadyState` naming the node and the cause, as the transport layer does for any stagnant node (a steady solve never invents a value). With a bulk decay (`quality > 0`) the node reads 0; or step the quality in time from an initial concentration. Quality advects through every hydraulic edge kind: pipes, pumps and valves. A pressure-driven model (`pda=True`)
+concentration at every demand level. A junction with a positive `water.sources` (an injection
+of water) is no sink: the injected water carries no tracer of its own and dilutes what arrives
+through the pipes, and any tracer injected with it is `quality.sources` (kg/s). On R → A → B
+with the reservoir at 100, an injection of 0.005 m³/s and 0.1 kg/s at A and a withdrawal of
+0.01 m³/s at B, both junctions read (0.005 × 100 + 0.1) / 0.01 = 60, and the tracer withdrawn
+equals the tracer supplied. A STAGNANT node (no inflow and no outflow, e.g. a dead end whose delivered demand is zero under `pda=True` because the pressure is below the minimum) has no steady concentration without decay: `water_steady` raises `UndefinedSteadyState` naming the node and the cause, as the transport layer does for any stagnant node (a steady solve never invents a value). With a bulk decay (`quality > 0`) the node reads 0; or step the quality in time from an initial concentration. Quality advects through every hydraulic edge kind: pipes, pumps and valves. A pressure-driven model (`pda=True`)
 refuses both `demand=` and a `water.sources` value, since its demands are node sources set
 at build time:
 

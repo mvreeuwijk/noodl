@@ -252,6 +252,18 @@ the storage at the state's own time, which `Model.initial_capacities(state, driv
 querying the closures. The `"exact"` scheme has no changing-capacity form and raises by name if
 `capacity_prev` differs from `capacity`.
 
+**Dilution.** `dilution=` (per species, `None` by default) adds `dilution * net(q) / capacity`
+to the removal, `net(q)` the signed net inflow of the flow edges into each node. Where the flows
+do not balance because the stored volume changes, `dilution = carrier` is the advective form
+`V dx/dt = sum_in carrier q (x_in - x)` and `dilution = 0` the conservative flux form; the
+capacity is then a rate coefficient at the end of the step. `dilution_mode="withdrawal"` instead
+reads only `max(net(q), 0)`: a FIXED volume whose flow imbalance is a nodal sink or source of
+the carrier. A surplus of inflow is a withdrawal that leaves at the node's own value; a deficit
+is an injection of carrier with no content of its own, which the outflow carries away, and
+whatever content it brings is the caller's `sources`, never a negative removal. The water
+application's quality layer uses this mode. The sink goes through `torch.where`, so at
+`net(q) = 0` its derivative is the withdrawal side's. The default `"signed"` mode is unchanged.
+
 **Storage-free nodes.** `storage_free=[...]` names interior nodes that hold no amount, such as a
 zero-volume air-handler plenum. Their balance is algebraic in every step: what flows in flows out
 within the step, so their value is the flow-weighted mix of what enters. A storage-free node with

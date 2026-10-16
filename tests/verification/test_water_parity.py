@@ -736,6 +736,7 @@ def test_the_withdrawal_sink_is_the_layers_dilution_not_a_build_time_removal(tmp
     # the withdrawal is the layer's dilution = 1 (net inflow / capacity from the current
     # flows); `removal` is only the bulk decay (zero here)
     assert layer.dilution == 1.0
+    assert layer.dilution_mode == "withdrawal"
     assert float(layer.removal.abs().max()) == 0.0
 
 

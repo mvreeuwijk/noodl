@@ -420,6 +420,14 @@ class TransportLayer(TopologyGuard):
     (and ``steady``) can hold them; a ``steady`` with nothing passing through such a node
     is refused by name (it has no value there). ``storage_free_mask`` is ``(n_i,)`` bool,
     True at those nodes.
+
+    DILUTION (``dilution``, ``None`` by default): adds ``dilution * net(q) / capacity`` to
+    the removal, ``net(q)`` the signed net inflow of the flow edges into each node (see
+    ``__init__`` for the changing-volume balance it is). ``dilution_mode="withdrawal"`` adds
+    only ``dilution * max(net(q), 0) / capacity``: a fixed volume whose flow imbalance is a
+    nodal sink (a withdrawal at the node's own value) or a nodal injection of carrier with
+    no content (whose content, if any, is the caller's ``sources``). The default
+    ``"signed"`` is unchanged.
     """
 
     #: The differentiable operator coefficients a layer owns, in the fixed order the
@@ -521,6 +529,7 @@ class TransportLayer(TopologyGuard):
         conduction_kind: str | None = None,
         conductance: torch.Tensor | None = None,
         dilution: torch.Tensor | float | None = None,
+        dilution_mode: Literal["signed", "withdrawal"] = "signed",
         storage_free: Sequence[Node] = (),
         scheme: Literal["exact", "implicit", "trapezoidal"] = "exact",
         linear_solver: str = "auto",
@@ -688,6 +697,25 @@ class TransportLayer(TopologyGuard):
                     f"({K},), got {tuple(dilution.shape)}"
                 )
         self.dilution = dilution
+        # `dilution_mode="withdrawal"` reads only the POSITIVE part of `net(q)`: the balance
+        #     V dx/dt = (In(q) - Out(q)) x - dilution * max(net(q), 0) x + N x_b + sources
+        # of a fixed volume whose flows are balanced by nodal sources and sinks of the
+        # CARRIER. Where the flow edges deliver more than they take away (`net > 0`) the
+        # surplus is a withdrawal that leaves at the node's own value; where they take away
+        # more (`net < 0`) the deficit is an injection of carrier with no content of its own,
+        # which the outflow carries away and so dilutes the node: whatever content it brings
+        # is the caller's `sources`, never a negative removal. The default "signed" mode is
+        # the changing-volume balance above, unchanged.
+        if dilution_mode not in ("signed", "withdrawal"):
+            raise ValueError(
+                f"TransportLayer '{name}': unknown dilution_mode {dilution_mode!r}; "
+                f"expected 'signed' or 'withdrawal'"
+            )
+        if dilution_mode != "signed" and dilution is None:
+            raise ValueError(
+                f"TransportLayer '{name}': dilution_mode={dilution_mode!r} needs a dilution"
+            )
+        self.dilution_mode = dilution_mode
 
         self.conduction_kind = conduction_kind
         if conduction_kind is not None:
@@ -1137,10 +1165,16 @@ class TransportLayer(TopologyGuard):
         q: torch.Tensor, cap: torch.Tensor,
     ) -> torch.Tensor | None:
         """`removal` plus the dilution rate `dilution * net_inflow(q) / capacity`
-        (`(..., n_i, K)`), or `removal` itself when the layer has no dilution."""
+        (`(..., n_i, K)`), or `removal` itself when the layer has no dilution. Under
+        `dilution_mode="withdrawal"` only the withdrawal part `max(net_inflow, 0)` enters,
+        through `torch.where` so that the derivative at `net_inflow = 0` is the withdrawal
+        side's (1), as in the signed form, rather than a clamp's."""
         if dilution is None:
             return None if removal is None else removal.to(q.dtype)
-        rate = (self.net_inflow(q) / cap).unsqueeze(-1) * dilution.to(q.dtype)
+        net = self.net_inflow(q)
+        if self.dilution_mode == "withdrawal":
+            net = torch.where(net >= 0, net, torch.zeros_like(net))
+        rate = (net / cap).unsqueeze(-1) * dilution.to(q.dtype)
         return rate if removal is None else removal.to(q.dtype) + rate
 
     # ------------------------------------------------------------ assembly
