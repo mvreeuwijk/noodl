@@ -29,7 +29,8 @@ OUT = ROOT / "docs" / "catalogue"
 PAGES = [
     # (file stem, title, page link for the application, modules, intro)
     ("core", "Core library", None,
-     ["noodl.topology", "noodl.model", "noodl.refs", "noodl.validation", "noodl.layers",
+     ["noodl.topology", "noodl.model", "noodl.contracts", "noodl.layout", "noodl.refs",
+      "noodl.validation", "noodl.layers",
       "noodl.elements", "noodl.drives", "noodl.nodesources", "noodl.couple"],
      "The framework every application builds on: the network, the layers, the model, the "
      "set-up helpers, and the general-purpose constitutive laws and drives."),
