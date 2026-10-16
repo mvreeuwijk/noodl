@@ -126,7 +126,7 @@ def test_pass_one_observes_a_gradient_and_drops_its_graph():
     assert outcome.needs_adjoint and outcome.converged
     assert not outcome.out.requires_grad and not outcome.certified.requires_grad
     calls = len(toy.runs)
-    assert confirm_gradient_dependence(toy, outcome, roots=(p,)) is True
+    assert confirm_gradient_dependence(toy, outcome) is True
     assert len(toy.runs) == calls                    # pass 1's answer: no probe pass
 
 
@@ -143,17 +143,19 @@ def test_the_gradient_found_only_at_the_certified_point_is_confirmed_there():
     outcome = run_passes(toy, torch.tensor(0.0, dtype=F64), max_passes=200)
     assert outcome.converged and not outcome.needs_adjoint
     passes = outcome.passes
-    assert confirm_gradient_dependence(toy, outcome, roots=(p,)) is True
+    assert confirm_gradient_dependence(toy, outcome) is True
     assert len(toy.runs) == passes + 1 and toy.runs[-1] is True   # one probe, under grad
     assert outcome.passes == passes                                # not counted
 
 
-def test_nothing_requiring_grad_reachable_skips_the_probe():
+def test_grad_mode_on_always_probes_even_with_nothing_requiring_grad():
+    """No inspection can prove a pass reads nothing requiring grad, so in grad mode the
+    probe runs whenever pass 1 found nothing: one extra pass, under grad, not counted."""
     toy = _Toy(lambda z: 0.5 * z + 1.0)
     outcome = run_passes(toy, torch.tensor(0.0, dtype=F64), max_passes=200)
     calls = len(toy.runs)
-    assert confirm_gradient_dependence(toy, outcome, roots=(toy, 1.0)) is False
-    assert len(toy.runs) == calls
+    assert confirm_gradient_dependence(toy, outcome) is False
+    assert len(toy.runs) == calls + 1 and toy.runs[-1] is True
 
 
 def test_grad_mode_off_runs_every_pass_without_a_graph_and_never_probes():
@@ -163,5 +165,5 @@ def test_grad_mode_off_runs_every_pass_without_a_graph_and_never_probes():
         outcome = run_passes(toy, torch.tensor(0.0, dtype=F64), max_passes=200)
         assert not outcome.needs_adjoint and not any(toy.runs)
         calls = len(toy.runs)
-        assert confirm_gradient_dependence(toy, outcome, roots=(p,)) is False
+        assert confirm_gradient_dependence(toy, outcome) is False
     assert len(toy.runs) == calls

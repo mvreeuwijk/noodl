@@ -20,8 +20,6 @@ from typing import Any, Generic, Protocol, TypeVar
 
 import torch
 
-from noodl._grad_reach import any_requires_grad
-
 Tensor = torch.Tensor
 Z = TypeVar("Z")
 Out = TypeVar("Out")
@@ -124,21 +122,21 @@ def run_passes(problem: PassProblem, z0, *, max_passes: int) -> LoopOutcome:
                        needs_adjoint=needs_adjoint, stopped_early=stopped_early)
 
 
-def confirm_gradient_dependence(problem: PassProblem, outcome: LoopOutcome, *,
-                                roots: tuple) -> bool:
+def confirm_gradient_dependence(problem: PassProblem, outcome: LoopOutcome) -> bool:
     """Whether the returned state depends on something differentiable.
 
     Pass 1's answer when it was yes. Otherwise -- pass 1 ran at the START point, and a
     closure may take a parameter-dependent branch only once the state has moved -- ask
     again, once, under grad at `outcome.certified`, the point whose derivative is returned,
-    and drop that probe pass's output and graph. Skipped (no) when grad mode is off or when
-    no tensor requiring grad is reachable from `roots` at all
-    (`noodl._grad_reach.any_requires_grad`), where no pass can produce a dependency. The
-    probe pass is not counted in `outcome.passes`.
+    and drop that probe pass's output and graph. Skipped (no) only when grad mode is off:
+    no inspection of the model can prove that nothing a pass reads requires grad (a closure
+    may read a tensor through a module attribute, a global, a cell ...), so in grad mode the
+    probe always runs. A forward-only run avoids it with `torch.no_grad()`. The probe pass
+    is not counted in `outcome.passes`.
     """
     if outcome.needs_adjoint:
         return True
-    if not torch.is_grad_enabled() or not any_requires_grad(*roots):
+    if not torch.is_grad_enabled():
         return False
     with torch.enable_grad():
         probe = problem.run(outcome.certified)

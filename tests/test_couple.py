@@ -739,7 +739,10 @@ def test_substeps_calls_the_fast_model_k_times_with_the_glue_held_constant():
         coupled_model.step(state, drivers, dt=60.0, diagnostics=diag)
     finally:
         building_model.step = real_step
-    passes = diag["passes"]
+    # Every primal pass, plus the one uncounted grad-mode probe pass at the certified
+    # interface (nothing here requires grad, so no adjoint pass follows).
+    assert diag["adjoint"] is None
+    passes = diag["passes"] + 1
     assert len(calls) == 6 * passes
     for p in range(passes):
         chunk = calls[6 * p:6 * (p + 1)]

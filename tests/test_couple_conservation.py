@@ -540,12 +540,18 @@ def _counting_union(b, **kwargs):
     return calls, diagnostics
 
 
-def test_a_coupled_step_skips_the_confirming_pass_when_nothing_requires_grad():
+def test_a_coupled_step_pays_one_confirming_pass_in_grad_mode_and_none_under_no_grad():
+    """Nothing requires grad: in grad mode one uncounted probe pass at the certified
+    interface confirms it; under `torch.no_grad()` only the primal passes run."""
     assert torch.is_grad_enabled()
     b = compartment("b", scheme="implicit", circulation=True, initial=1.0, source=0.3)
     calls, diagnostics = _counting_union(b)
     assert diagnostics["adjoint"] is None and diagnostics["passes"] >= 2
-    assert len(calls) == diagnostics["passes"]
+    assert len(calls) == diagnostics["passes"] + 1
+    b = compartment("b", scheme="implicit", circulation=True, initial=1.0, source=0.3)
+    with torch.no_grad():
+        calls, diagnostics = _counting_union(b)
+    assert diagnostics["adjoint"] is None and len(calls) == diagnostics["passes"]
 
 
 def test_a_coupled_step_pays_the_confirming_pass_when_a_parameter_is_unused_on_pass_one():

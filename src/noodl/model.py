@@ -222,6 +222,11 @@ class Model:
     the batch as its leading dims) or, when some key does not (a value shared across
     instances), as today's single system flattened over the whole interface; `False` when
     `"adjoint"` is `None` too.
+
+    In grad mode, a step whose first pass finds nothing differentiable pays one more,
+    uncounted pass at the certified point to confirm it (a closure may read a parameter only
+    on the branch the fixed point lies on, and no inspection can rule that out). A
+    forward-only run should therefore use `torch.no_grad()`, which skips that pass.
     """
 
     def __init__(
@@ -671,10 +676,9 @@ class Model:
         nothing, the question is asked again at the certified fed state, because a closure
         may take a parameter-dependent branch only once the state has moved away from the
         step start, and the answer that matters is the one at the point whose derivative
-        is returned. That extra pass (not counted in `passes`) runs only when some tensor
-        requiring grad is reachable from the model or its inputs at all
-        (`noodl._grad_reach.any_requires_grad`), so a forward simulation with nothing
-        requiring grad pays nothing for it, even in grad mode. A run
+        is returned. That extra pass (not counted in `passes`) runs whenever grad mode is
+        on, since no inspection can prove that nothing a pass reads requires grad: a
+        forward-only simulation should run under `torch.no_grad()`, which skips it. A run
         that does NOT converge attaches no adjoint either: there is no fixed point to
         differentiate, and handing back the last pass's graph would be exactly the truncated
         derivative this replaced.
@@ -767,11 +771,9 @@ class Model:
             # have the returned state silently detached. Ask again, once, under grad at the
             # state the certified (or, without convergence, the last) pass was fed -- the
             # point whose derivative is returned -- and drop that pass's output and graph.
-            # Skipped by a run about to raise for non-convergence anyway, and by one where no
-            # tensor requiring grad is reachable from the model or its inputs at all
-            # (`any_requires_grad`), where no pass can produce a dependency.
-            needs_adjoint = confirm_gradient_dependence(
-                problem, outcome, roots=(self, state, drivers, solve_kwargs))
+            # Skipped by a run about to raise for non-convergence anyway, and under
+            # `torch.no_grad()`.
+            needs_adjoint = confirm_gradient_dependence(problem, outcome)
         if not bool(converged.all()):
             failing = (
                 (~converged).nonzero().flatten().tolist() if converged.dim() else "all"

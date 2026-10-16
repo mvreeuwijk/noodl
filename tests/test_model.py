@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import sys
+import types
 import warnings
 
 import pytest
@@ -1752,9 +1754,11 @@ def _counting(model):
     return calls
 
 
-def test_iterate_skips_the_confirming_pass_when_nothing_requires_grad():
-    """Grad mode on (PyTorch's default) but no tensor anywhere requires grad: no pass can
-    produce a dependency, so the run costs exactly its primal passes."""
+def test_iterate_pays_one_confirming_pass_in_grad_mode_and_none_under_no_grad():
+    """Grad mode on (PyTorch's default) but nothing requires grad: pass 1 finds no
+    dependency, so one uncounted probe pass at the certified point confirms it (no
+    inspection can prove that nothing a pass reads requires grad). Under `torch.no_grad()`
+    the run costs exactly its primal passes."""
     _, model, state, drivers, _, _ = _build(
         closures=[_Feedback(2e3)], coupling="iterate", iterate_tol={"species": 1e-13},
         iterate_max=80,
@@ -1764,7 +1768,77 @@ def test_iterate_skips_the_confirming_pass_when_nothing_requires_grad():
     assert torch.is_grad_enabled()
     model.steady(state, drivers, diagnostics=diag, atol=1e-14, rtol=1e-14)
     assert diag["adjoint"] is None and diag["passes"] >= 2
-    assert len(calls) == diag["passes"]
+    assert len(calls) == diag["passes"] + 1
+    calls.clear()
+    diag = {}
+    with torch.no_grad():
+        model.steady(state, drivers, diagnostics=diag, atol=1e-14, rtol=1e-14)
+    assert diag["adjoint"] is None and len(calls) == diag["passes"]
+
+
+_BRANCH_SOURCE = """
+import torch
+F64 = torch.float64
+def closure(state, drivers):
+    x = state["c.x"].reshape(-1)[0]
+    zero = torch.zeros((), dtype=F64)
+    source = 2.0 + zero if float(x.detach()) <= 1.0 else {theta} + 0.1 * x
+    return {{"c.sources": torch.stack([zero, source]), "c.q": torch.zeros(1, dtype=F64)}}
+"""
+
+
+def _closure_in_a_fresh_module(monkeypatch, name, theta_expr, **globals_):
+    """`closure` defined by exec in a module with no `__file__`, registered in
+    `sys.modules` for the test (as `__main__` is in a REPL, Jupyter or `python -c`), its
+    globals seeded with `globals_`."""
+    module = types.ModuleType(name)
+    module.__dict__.update(globals_)
+    monkeypatch.setitem(sys.modules, name, module)
+    exec(_BRANCH_SOURCE.format(theta=theta_expr), module.__dict__)
+    return module.closure
+
+
+def _steady_with(closure, x0):
+    net = Network(dtype=F64)
+    net.add_node("b")
+    net.add_node("a")
+    net.add_edge("a", "b", kind="flow")
+    layer = TransportLayer(net, "c", capacity=torch.tensor([1.0], dtype=F64),
+                           flow_kind="flow", boundary=["b"],
+                           removal=torch.tensor([1.0], dtype=F64))
+    model = Model(net, {"c": layer}, closures=[closure], coupling="iterate",
+                  iterate_tol={"c": 1e-13}, iterate_max=200)
+    drivers = {"c.x_boundary": torch.zeros(1, dtype=F64),
+               "c.sources": torch.zeros(2, dtype=F64)}
+    return model.steady({"c.x": torch.tensor([x0], dtype=F64)}, drivers)["c.x"].sum()
+
+
+@pytest.mark.parametrize("x0", [0.0, 2.0])
+def test_r01_a_closure_defined_where_its_module_has_no_file_keeps_its_gradient(x0,
+                                                                                 monkeypatch):
+    """Regression: a closure exec'd in a module without `__file__` (REPL/Jupyter) reading a
+    global parameter only on the branch the fixed point lies on."""
+    theta = torch.tensor(3.0, dtype=F64, requires_grad=True)
+    closure = _closure_in_a_fresh_module(monkeypatch, "noodl_r01_repl", "theta", theta=theta)
+    x = _steady_with(closure, x0)
+    assert x.item() == pytest.approx(10.0 / 3.0, rel=1e-10) and x.requires_grad
+    (g,) = torch.autograd.grad(x, (theta,))
+    assert g.item() == pytest.approx(10.0 / 9.0, rel=1e-8)
+
+
+@pytest.mark.parametrize("x0", [0.0, 2.0])
+def test_r01_a_closure_reading_a_parameter_from_a_user_module_keeps_its_gradient(
+        x0, monkeypatch):
+    """Regression: the parameter lives on a user module (`params.theta`), which the closure
+    reads through a module attribute only on the branch the fixed point lies on."""
+    params = types.ModuleType("noodl_r01_params")
+    params.theta = torch.tensor(3.0, dtype=F64, requires_grad=True)
+    closure = _closure_in_a_fresh_module(monkeypatch, "noodl_r01_user", "params.theta",
+                                         params=params)
+    x = _steady_with(closure, x0)
+    assert x.item() == pytest.approx(10.0 / 3.0, rel=1e-10) and x.requires_grad
+    (g,) = torch.autograd.grad(x, (params.theta,))
+    assert g.item() == pytest.approx(10.0 / 9.0, rel=1e-8)
 
 
 def test_iterate_pays_the_confirming_pass_when_a_parameter_is_unused_on_pass_one():
