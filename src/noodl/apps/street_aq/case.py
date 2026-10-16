@@ -7,6 +7,7 @@ vocabulary and the `StreetNetwork` they describe.
 """
 from __future__ import annotations
 
+import dataclasses
 import re
 import tempfile
 from collections.abc import Mapping, Sequence
@@ -514,6 +515,8 @@ def write_sweep(
     `speed` (m/s at the meteo site's height, a multiple of 0.1), the
     temperature of `base_case`'s first hour when it has one, zero background, and a unit
     emission (1 g/s, i.e. 1e-3 kg/s) of `species` on the source street only.
+    `Street.emission_scale` does not apply to sweeps: the decks measure the transport
+    response to a unit emission, so every street is written with a unit scale.
     `sources="unit_impulse"` takes every street in turn; a sequence of street ids
     (`base_case.street_ids`) takes those. With `chapman=0` (default) the case has
     `species` alone -- a passive tracer written as that SIRANE species, chemistry off; with
@@ -637,6 +640,9 @@ def write_sweep(
     s_index = case_species.index(species)
     zeros = np.zeros((2, n_streets, len(case_species)), dtype=np.float64)
 
+    unit_network = dataclasses.replace(base_case.network, streets=[
+        dataclasses.replace(st, emission_scale=1.0) for st in base_case.network.streets])
+
     def write_run(root: Path, run: dict) -> None:
         emissions = zeros.copy()
         emissions[:, run["source_index"], s_index] = 1e-3
@@ -644,7 +650,7 @@ def write_sweep(
                  for key, value in dict(meteo_base, wind_dir_from_deg=run["direction_deg"],
                                         wind_speed=run["speed"]).items()}
         case = StreetCase(
-            source="sirane" if native else "synthetic", network=base_case.network,
+            source="sirane" if native else "synthetic", network=unit_network,
             times=[0.0, 3600.0], street_ids=street_ids,
             junction_ids=list(base_case.junction_ids), species=case_species, meteo=meteo,
             meteo_junction={}, emissions=emissions, background=zeros.copy(),
