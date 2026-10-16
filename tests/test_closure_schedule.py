@@ -98,7 +98,7 @@ def test_probe_records_reads_and_returns():
     assert probe.state_reads == {"s"} and "d" in probe.driver_reads
     assert probe.closure_outputs == {"out": 3.0} == probe.closure_values
     assert probe.closure_writers == {"out": "function"}
-    assert probe.closure_returned == {repr(reader): {"out"}}
+    assert probe.closure_returned == {id(reader): {"out"}}
 
 
 @pytest.mark.parametrize("key", ["heat.phi", "heat.q", "species.x", "species.q", "street.x"])

@@ -192,7 +192,9 @@ class ClosureSchedule:
                 probe.closure_outputs.update(result)
                 probe.closure_values.update(result)
                 probe.closure_writers.update(dict.fromkeys(result, type(closure).__name__))
-                probe.closure_returned.setdefault(spec.label, set()).update(result)
+                # Keyed by IDENTITY: two closures may share a `repr` (the label is for
+                # display only).
+                probe.closure_returned.setdefault(id(closure), set()).update(result)
             for key, value in result.items():
                 head, _, tail = key.rpartition(".")
                 if head in self.layers and tail in _STATE_SUFFIXES:
