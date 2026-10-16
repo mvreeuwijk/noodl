@@ -26,7 +26,7 @@
   <text x="40" y="276" font-size="11.5" fill="#A3AFBC" text-anchor="start" font-weight="400" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif">stack + wind drive the flow; heat and species ride on it</text>
   <rect x="510" y="78" width="270" height="48" rx="8" fill="#2E333D" stroke="#2EC4B6" stroke-width="2"/>
   <text x="528" y="99" font-size="13" fill="#2EC4B6" text-anchor="start" font-weight="600" font-family="ui-monospace, 'JetBrains Mono', 'SF Mono', Menlo, monospace">air</text>
-  <text x="528" y="117" font-size="11" fill="#A3AFBC" text-anchor="start" font-weight="400" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif">PotentialFlowLayer · Pa</text>
+  <text x="528" y="117" font-size="11" fill="#A3AFBC" text-anchor="start" font-weight="400" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif">KirchhoffLayer · Pa</text>
   <rect x="510" y="140" width="270" height="48" rx="8" fill="#2E333D" stroke="#E3EAF0" stroke-width="2"/>
   <text x="528" y="161" font-size="13" fill="#E3EAF0" text-anchor="start" font-weight="600" font-family="ui-monospace, 'JetBrains Mono', 'SF Mono', Menlo, monospace">thermal</text>
   <text x="528" y="179" font-size="11" fill="#A3AFBC" text-anchor="start" font-weight="400" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif">TransportLayer · K</text>
