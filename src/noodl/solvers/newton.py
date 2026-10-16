@@ -32,12 +32,11 @@ matrix, per instance) rather than to the iterative default, because that is the
 whole point of the shim: a caller who hands Newton an explicit dense Jacobian is
 asking for the dense numerics it has always had, bit-for-bit. Routing it to GMRES
 instead would silently change every such caller's answer by the iterative
-solver's own floor -- measured at 3e-8 on the 2x2 float32 system in
-``tests/solvers/test_newton.py``, against assertions written to 1e-9 -- which is
-a migration regression, not a convergence question. ``_direct`` still gives the
-per-instance singularity handling the identity substitution used to fake, since
-``lu_factor_ex`` reports a zero pivot through ``info`` instead of raising for
-the whole batch.
+solver's own floor (3e-8 on the 2x2 float32 system in
+``tests/solvers/test_newton.py``, against assertions written to 1e-9), which is
+a migration regression, not a convergence question. ``_direct`` gives per-instance
+singularity handling, since ``lu_factor_ex`` reports a zero pivot through ``info``
+instead of raising for the whole batch.
 """
 
 from __future__ import annotations
@@ -194,9 +193,9 @@ def newton(
     or from any fixed convention), giving about 1.2e-4 for float32 and 1.5e-8 for float64.
     This is the standard "half the significant digits" heuristic for a first-order
     convergence test: tighter than that asks the dtype for precision it does not have and
-    the residual floors below the target before ``converged`` ever becomes true (observed,
-    pre-fix, for every network size in ``benchmarks/newton_scaling.py`` under float32, whose
-    Jacobian evaluation and linear solve both round to float32 ULP). Passing an explicit
+    the residual floors below the target before ``converged`` ever becomes true (as seen for
+    every network size in ``benchmarks/newton_scaling.py`` under float32, whose Jacobian
+    evaluation and linear solve both round to float32 ULP). Passing an explicit
     ``atol`` and/or ``rtol`` always overrides this default for that argument; the two are
     independent, so an explicit ``atol=1e-6`` with ``rtol`` left as ``None`` still gets the
     dtype-derived default for ``rtol``.

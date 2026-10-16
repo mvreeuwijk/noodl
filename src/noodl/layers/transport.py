@@ -95,15 +95,13 @@ def active_interior(
 # "gmres_jacobi"/"gmres_ilu" resolve to `method="gmres"` with a real preconditioner.
 # "sparse_direct" (SuperLU, on the operators' COO forms) and "direct" (the dense LU reference)
 # pass straight through. `select.solve`'s OWN "auto" policy (the certified-SPD potential path)
-# is a different policy -- this is a SEPARATE "auto", scoped to this layer, chosen on the
-# interleaved benchmark in `benchmarks/transport_solver_bench.py`: "auto" resolves to
-# `sparse_direct` at or under `_SPARSE_DIRECT_MAX_BATCH` instances (the e=1 and e=32 rows:
-# sparse_direct wins both by a wide, spread-clear margin) and to plain `gmres` above it
-# (e=100: sparse_direct is not applicable at all, and the gmres family's own internal ordering
-# is not clean enough to prefer a preconditioner over plain gmres); `gmres_jacobi`/`gmres_ilu`
-# are never chosen by `auto` (gmres_ilu's per-instance ILU factorisation cost dominates at
-# every ensemble size measured, and jacobi vs plain gmres is ambiguous within the measured
-# spread). See `_resolve_solver` for the two hazards this default must handle: SciPy absent,
+# is a different policy -- this is a SEPARATE "auto", scoped to this layer: it resolves to
+# `sparse_direct` at or under `_SPARSE_DIRECT_MAX_BATCH` instances and to plain `gmres` above
+# it (sparse_direct is not applicable there, and the gmres family's own ordering is not clean
+# enough to prefer a preconditioner over plain gmres); `gmres_jacobi`/`gmres_ilu` are never
+# chosen by `auto`. The choice rests on an interleaved benchmark, see
+# docs/design/solvers.md#transport-solver-choice. See `_resolve_solver` for the two hazards
+# this default must handle: SciPy absent,
 # and a grad-requiring `on_failure="return"` solve (which runs outside `_LinearSolve`'s
 # `no_grad`, unlike the differentiable forward/backward path).
 _TRANSPORT_SOLVERS = ("auto", "gmres", "gmres_jacobi", "gmres_ilu", "sparse_direct", "direct")
@@ -405,8 +403,7 @@ class TransportLayer(TopologyGuard):
     construction otherwise, and is resolved PER SOLVE by ``_resolve_solver`` into the kwargs
     every linear solve of this layer runs with (``steady``'s and the two implicit schemes'
     forward, backward adjoint and ``on_failure="return"`` paths alike). ``"auto"`` (the
-    default, chosen on the interleaved benchmark in ``benchmarks/transport_solver_bench.py``)
-    resolves to
+    default, see docs/design/solvers.md#transport-solver-choice) resolves to
     ``method="sparse_direct"`` at or under ``_SPARSE_DIRECT_MAX_BATCH`` instances and to plain
     ``method="gmres"`` above it, falling back to ``gmres`` (never raising) when SciPy is
     absent or when a grad-requiring ``on_failure="return"`` solve would otherwise refuse; see
@@ -705,10 +702,9 @@ class TransportLayer(TopologyGuard):
             b_c = len(csrc)
             g = torch.as_tensor(conductance, dtype=net.dtype)
             # Validate explicitly rather than let a mismatched length reach the assembly:
-            # with a single conduction_kind edge (b_c == 1), the einsum that used to build L
-            # broadcast the repeated "e" subscript, so a wrongly-shaped g (e.g. length 2)
-            # was silently summed in instead of raising, giving a silently wrong conductance
-            # matrix rather than a ValueError naming the offender.
+            # with a single conduction_kind edge (b_c == 1), an einsum over the repeated "e"
+            # subscript would broadcast a wrongly-shaped g (e.g. length 2) and sum it in,
+            # giving a silently wrong conductance matrix rather than a ValueError.
             if g.dim() == 0 or g.shape[-1] != b_c:
                 raise ValueError(
                     f"TransportLayer '{name}': conductance must have shape ({b_c},), "
@@ -901,15 +897,15 @@ class TransportLayer(TopologyGuard):
         below), are the just-built operator and right-hand side, used ONLY to decide whether
         `"auto"` may pick `sparse_direct` under grad (hazard 2 below); no solve reads them.
 
-        `"auto"` (decided on the interleaved benchmark in
-        `benchmarks/transport_solver_bench.json`): resolves to `method="sparse_direct"` when
+        `"auto"` (see docs/design/solvers.md#transport-solver-choice): resolves to
+        `method="sparse_direct"` when
         `batch_size <= _SPARSE_DIRECT_MAX_BATCH` (the SAME constant `solvers.select` uses for
         its own, separate "auto" -- imported, never re-hard-coded) and to plain `gmres`
         above it. `gmres_jacobi`/`gmres_ilu` are never chosen by `auto`: the benchmark found
         `gmres_ilu` the clear loser at every ensemble measured (its per-instance ILU
         factorisation cost dominates, see the COST note below) and the gmres-vs-gmres_jacobi
-        ordering ambiguous within the measured spread, so there is no evidence to prefer
-        either preconditioner over plain gmres as the fallback. `"gmres"` (explicit) resolves
+        ordering ambiguous, so there is no evidence to prefer either preconditioner over
+        plain gmres as the fallback. `"gmres"` (explicit) resolves
         to plain gmres unconditionally, regardless of `batch_size`.
 
         TWO HAZARDS `"auto"` must handle before it can hand back `sparse_direct`, both

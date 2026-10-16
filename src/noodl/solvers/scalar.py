@@ -75,9 +75,9 @@ class _SolveMonotone(torch.autograd.Function):
                 # of the root regardless of how f behaves near it. |f(x)| < tol is NOT a safe
                 # alternative on its own: at a root of multiplicity > 1 (f'(root) == 0, e.g.
                 # f(x) = x**3 - c at c = 0), f flattens out near the root, so |f(x)| can already
-                # be tiny while x is still far from the root in absolute terms -- this was
-                # verified to produce a spurious early exit (x ~ 1e-4 reported as converged at
-                # tol 1e-12) before this was pinned to the bracket width instead.
+                # be tiny while x is still far from the root in absolute terms -- testing
+                # |f| would give a spurious early exit (x ~ 1e-4 reported as converged at
+                # tol 1e-12), so the test is on the bracket width.
                 done = (hi_c - lo_c).abs() < tol
 
                 mid = 0.5 * (lo_c + hi_c)

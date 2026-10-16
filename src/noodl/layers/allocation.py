@@ -31,8 +31,8 @@ _PROJECTION_ITERS = 3
 # in a LATER `n_passes` round once its headroom is already fully consumed, comparable to the
 # `1e-12` epsilon `step` itself uses for the oversubscription test -- occasionally
 # misclassifying pure numerical noise as genuine oversubscription and routing a near-zero-
-# scale problem through `solve_monotone`'s real Newton solve, where it was observed (a
-# 1-in-2000 randomised trial) to produce a NaN gradient. This floor is many orders of
+# scale problem through `solve_monotone`'s real Newton solve, where it produced a NaN
+# gradient (about 1 randomised trial in 2000). This floor is many orders of
 # magnitude above float64's accumulated noise over the loop's own few arithmetic passes, and
 # many orders below any physically meaningful headroom value in this class's own fixtures.
 _OVERSUBSCRIBED_FLOOR = 1e-9
@@ -332,7 +332,7 @@ class AllocatedFlowLayer(TopologyGuard):
         bracket-validity contract needs BOTH branches to share one call rather than a plain
         two-value choice.
 
-        A SECOND, more GENERAL degeneracy (found only by a 200-trial randomised sweep -- no
+        A SECOND, more GENERAL degeneracy (found only by a randomised sweep -- no
         hand-written fixture in this suite reaches it, which is why
         `test_projection_mode_sharing_is_nan_free_under_random_fixtures` exists as a seeded
         sweep rather than another named case): whenever a node is NOT oversubscribed,
@@ -345,7 +345,7 @@ class AllocatedFlowLayer(TopologyGuard):
         node's demand was already met in pass 1 -- or `remaining_i >= avail_i`, arc-capacity-
         saturated). If EVERY edge into that node is at a bound simultaneously (both the
         single-edge case above, AND a genuinely multi-edge, `in_degree >= 2` node where every
-        competitor happens to be boundary-pinned -- observed directly: with `c_arc` large
+        competitor happens to be boundary-pinned -- with `c_arc` large
         enough not to bind, `avail_i` is IDENTICAL across every edge sharing one node, so once
         one edge's demand is satisfied and its `remaining` drops to exactly 0 in a later pass,
         EVERY other still-active edge sharing that SAME node can independently also land at a
@@ -362,8 +362,8 @@ class AllocatedFlowLayer(TopologyGuard):
         fix below gates on OVERSUBSCRIPTION, not in-degree. A narrower `in_degree <= 1` gate
         is NOT sufficient and should not be substituted back in: it catches the single-edge
         chain-fixture case but misses this later-pass,
-        genuinely-competing-but-currently-satisfied case entirely -- measured directly, that
-        gate still produced NaN gradients in 101 of the same 200 trials.
+        genuinely-competing-but-currently-satisfied case entirely -- that gate still
+        produced NaN gradients in about half of the 200 randomised trials.
 
         Fix: for every edge whose TARGET node is NOT oversubscribed (`node_oversubscribed`
         broadcast to edges), the values fed into `solve_monotone`'s OWN internal residual are
@@ -382,13 +382,13 @@ class AllocatedFlowLayer(TopologyGuard):
         exactly what "share = tentative regardless of any other edge" means for a node with no
         ACTIVE competition pressure this pass, whatever its in-degree.
 
-        A THIRD degeneracy (found by the SAME 200-trial randomised sweep, 1 trial in 2000 on
-        a wider re-run): once a node's headroom is fully consumed in an early pass,
+        A THIRD degeneracy (found by the same randomised sweep; about 1 trial in 2000):
+        once a node's headroom is fully consumed in an early pass,
         `free_headroom` and `avail_e` do not always settle to EXACTLY 0 in later passes --
         floating-point cancellation across the subtraction chain (`headroom - committed_in`,
         `c_arc - f`, ...) can leave a residual of order `1e-12`, comparable to the SAME
         `1e-12` epsilon `step` uses for `node_oversubscribed` -- so a purely numerical-noise
-        residual was occasionally misclassified as genuine oversubscription (observed: `demand
+        residual was occasionally misclassified as genuine oversubscription (e.g. `demand
         ~2.6e-12 > free_headroom(~1.3e-12) + 1e-12`), routing an essentially-zero-scale
         problem through the REAL (non-dummy) branch, where `solve_monotone`'s Newton step
         divides by a derivative that is ITSELF subject to the same cancellation -- a second,
@@ -407,9 +407,8 @@ class AllocatedFlowLayer(TopologyGuard):
         on a PLATEAU of the (piecewise-linear) residual -- every competing edge simultaneously
         boundary-pinned across a whole RANGE of `lambda`, not just at a single point -- which
         would require an exact coincidence between `free_headroom` and a specific combination
-        of `avail_i` values. This was not observed in either randomised sweep (2200 trials
-        total) or any fixture in this test suite; it is flagged here rather than silently
-        assumed away.
+        of `avail_i` values. It has not been observed in the randomised sweeps or any fixture
+        in this test suite; it is flagged here rather than silently assumed away.
         """
         in_degree = torch.zeros_like(free_headroom).index_add(
             -1, self._tgt, torch.ones_like(remaining)

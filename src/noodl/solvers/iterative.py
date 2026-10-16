@@ -61,8 +61,8 @@ def pcg(
 
     Convergence: ||r|| <= max(rtol * ||b||, atol), per instance. An instance whose search
     direction sees non-positive curvature (p.Ap <= 0) is marked BREAKDOWN rather than
-    clamped -- clamping (as an earlier benchmark in this codebase did) would silently hide a
-    loss of definiteness instead of reporting it. CONVERGED and BREAKDOWN instances FREEZE:
+    clamped -- clamping would silently hide a loss of definiteness instead of reporting it.
+    CONVERGED and BREAKDOWN instances FREEZE:
     once either fires, that instance's x/r/p are never updated again, matching newton()'s own
     per-instance freezing convention exactly.
     """
@@ -309,10 +309,10 @@ def gmres(
     true-scale residual there. PRECONDITIONED,
     the Givens estimate is in `M^-1`-weighted units while `tol` is built from `||b||`, so
     the two scales generally disagree and the in-cycle estimate cannot be trusted to report
-    the true convergence step -- measured on this module's own stiff fixture
+    the true convergence step -- on this module's own stiff fixture
     (`tests/solvers/test_iterative.py::_stiff_diag_spread_system`, Jacobi, `restart=15`),
-    the estimate crossed `tol` at step 13 while the TRUE residual, recomputed at cycle end,
-    first did at step 14. `iterations` is therefore CYCLE-GRANULAR under a preconditioner:
+    the estimate crosses `tol` at step 13 while the TRUE residual, recomputed at cycle end,
+    first does at step 14. `iterations` is therefore CYCLE-GRANULAR under a preconditioner:
     the matvec count through the end of whichever cycle's TRUE recompute first satisfied
     `tol` (`total_matvecs + cycle_len` for that cycle), never the in-cycle estimate. This
     can overshoot the true step (by up to `restart - 1`) but is guaranteed to never

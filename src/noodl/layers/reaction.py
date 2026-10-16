@@ -248,7 +248,7 @@ class Photostationary(Reaction):
         disc = (k * (p - q)) ** 2 + 2.0 * j * k * (p + q) + j * j
         # disc == 0 exactly when p == q bitwise AND j == 0 -- the exactly titrated cell
         # with no photolysis. sqrt has infinite slope there, so the raw sqrt puts NaN into
-        # the gradient w.r.t. every input (measured: [nan, nan, nan] at the point,
+        # the gradient w.r.t. every input (the gradient is [nan, nan, nan] at the point,
         # [1, 1, 1/3] one ulp away). The guard substitutes a safe 1.0 under the sqrt on the
         # degenerate branch and returns a hard 0 there, which is the forward value already.
         positive = disc > 0
