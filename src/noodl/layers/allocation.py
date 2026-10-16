@@ -260,7 +260,7 @@ class AllocatedFlowLayer:
             f = torch.clamp(f - grad, zero, bound)
         return f
 
-    def _share_via_qp(self, remaining, avail_e, free_headroom, node_oversubscribed):
+    def _share_via_qp(self, remaining, avail_e, free_headroom, node_oversubscribed, preference):
         """The REAL coupled per-node QP at the sharing site --
         minimise `sum_i preference_i * (f_i - remaining_i)**2` subject to
         `0 <= f_i <= avail_i` for every edge `i` targeting an oversubscribed node, AND
@@ -423,7 +423,7 @@ class AllocatedFlowLayer:
         # level property shared by every edge into it), each contributing min(1.0, 2.0) = 1.0.
         target = torch.where(node_oversubscribed, free_headroom, in_degree)
         lo = torch.zeros_like(free_headroom)
-        hi_value = (self.preference * torch.clamp(remaining, min=0.0)).max().item() + 1.0
+        hi_value = (preference * torch.clamp(remaining, min=0.0)).max().item() + 1.0
         hi = torch.full_like(free_headroom, hi_value)
 
         def _residual(lam, remaining_e, avail_e, preference_e, target):
@@ -434,11 +434,11 @@ class AllocatedFlowLayer:
             return torch.zeros_like(target).index_add(-1, self._tgt, f_e) - target
 
         lam = solve_monotone(
-            _residual, lo, hi, remaining_safe, avail_safe, self.preference, target
+            _residual, lo, hi, remaining_safe, avail_safe, preference, target
         )
         lam_e = lam.index_select(-1, self._tgt)
         return torch.clamp(
-            remaining - lam_e / self.preference, torch.zeros_like(remaining), avail_e
+            remaining - lam_e / preference, torch.zeros_like(remaining), avail_e
         )
 
     def step(self, s, drivers, dt, *, diagnostics=None):
@@ -502,7 +502,19 @@ class AllocatedFlowLayer:
         # what makes the receiver-headroom clip actually bound the storage INCREASE --
         # `dt * sum_in(f) <= dt * (s_max - s)/dt == s_max - s` -- at any `dt`, not only
         # at `dt == 1`, where the two conventions happen to coincide.
-        headroom = (self.s_max - s) / dt
+        # One common leading batch shape for state, requests and every parameter, so an
+        # unbatched initial state with batched requests (or a batched capacity with
+        # unbatched requests) allocates correctly; the scatter buffers below take it.
+        batch = torch.broadcast_shapes(
+            s.shape[:-1], r.shape[:-1], self.s_max.shape[:-1], self.c_arc.shape[:-1],
+            self.preference.shape[:-1],
+        )
+        s = s.expand(batch + s.shape[-1:])
+        r = r.expand(batch + r.shape[-1:])
+        s_max = self.s_max.expand(batch + self.s_max.shape[-1:])
+        c_arc = self.c_arc.expand(batch + self.c_arc.shape[-1:])
+        preference = self.preference.expand(batch + self.preference.shape[-1:])
+        headroom = (s_max - s) / dt
         remaining = r.clone()
         f = torch.zeros_like(r)
         for _ in range(self.n_passes):
@@ -520,7 +532,7 @@ class AllocatedFlowLayer:
                 # bound: a fused `bound = min(c_arc - f, free_headroom_e)` would take the min
                 # BEFORE flooring, so a slightly-negative `c_arc - f` from floating-point
                 # overshoot could feed a NEGATIVE bound into the box projection.
-                avail_e = self._clip_projection(self.c_arc - f, free_headroom_e)
+                avail_e = self._clip_projection(c_arc - f, free_headroom_e)
                 tentative = self._clip_projection(remaining, avail_e)
                 # QP site 2: every edge targeting the SAME oversubscribed node shares one
                 # scalar Lagrange multiplier solved via `solve_monotone`, so `d(share_i)/
@@ -530,9 +542,11 @@ class AllocatedFlowLayer:
                 # docstring derives why any such form has a provably zero cross-gradient.
                 demand_at_tgt = torch.zeros_like(headroom).index_add(-1, self._tgt, tentative)
                 node_oversubscribed = demand_at_tgt > free_headroom + 1e-12
-                share = self._share_via_qp(remaining, avail_e, free_headroom, node_oversubscribed)
+                share = self._share_via_qp(
+                    remaining, avail_e, free_headroom, node_oversubscribed, preference
+                )
             else:
-                avail = self._nonneg(self._clip(self.c_arc - f, free_headroom_e))
+                avail = self._nonneg(self._clip(c_arc - f, free_headroom_e))
                 tentative = self._clip(remaining, avail)
                 # `active` gates which edges compete for `pref_sum` below; this is a hard
                 # boolean threshold in EVERY mode, including smooth. Scope decision: the
@@ -550,10 +564,10 @@ class AllocatedFlowLayer:
                 # safe even where `proportional_share` blows up as `pref_sum_e` hits its
                 # `1e-30` floor: the `_select` sigmoid weight on that branch is ~0 there, so
                 # the extreme value never propagates into `f`.
-                active = (tentative > 0).to(self.preference.dtype)
+                active = (tentative > 0).to(preference.dtype)
                 demand_at_tgt = torch.zeros_like(headroom).index_add(-1, self._tgt, tentative)
                 pref_sum_at_tgt = torch.zeros_like(headroom).index_add(
-                    -1, self._tgt, self.preference * active
+                    -1, self._tgt, preference * active
                 )
                 # `hard_cond` is hard mode's own oversubscription boolean (unused in smooth
                 # mode, computed unconditionally so hard mode's arithmetic is untouched).
@@ -561,7 +575,7 @@ class AllocatedFlowLayer:
                 soft_margin = (demand_at_tgt - free_headroom).index_select(-1, self._tgt)
                 pref_sum_e = pref_sum_at_tgt.index_select(-1, self._tgt)
                 proportional_share = (
-                    free_headroom_e * self.preference / torch.clamp(pref_sum_e, min=1e-30)
+                    free_headroom_e * preference / torch.clamp(pref_sum_e, min=1e-30)
                 )
                 bounded_share = self._clip(proportional_share, tentative)
                 share = self._select(hard_cond, soft_margin, bounded_share, tentative)
@@ -586,9 +600,9 @@ class AllocatedFlowLayer:
         # so a source node may be drawn below zero -- that is a modelling
         # choice upstream of this layer (e.g. a closure sizing requests off available
         # storage), not something this layer silently papers over by floors here.
-        s_new = self._clip(s_unclamped, self.s_max)
+        s_new = self._clip(s_unclamped, s_max)
         if diagnostics is not None:
-            diagnostics["overflow"] = self._nonneg(s_unclamped - self.s_max) / dt
+            diagnostics["overflow"] = self._nonneg(s_unclamped - s_max) / dt
         return s_new, f
 
 

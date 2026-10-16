@@ -106,6 +106,31 @@ class _DiagonalShifted:
                                extra_grounded=extra)
 
 
+def _held_tensors(obj):
+    """Yield `(name, tensor)` for every tensor `obj` holds: its attributes, its registered
+    buffers (when a module) and tensors nested at any depth in lists, tuples, dicts and sets.
+    A module's registered parameters live in `_parameters` and are not yielded; a parameter
+    held in a container or a plain attribute is, since the solve cannot reach it."""
+    def walk(label, value, depth):
+        if isinstance(value, torch.Tensor):
+            yield label, value
+        elif depth < 8 and isinstance(value, dict):
+            for k, v in value.items():
+                yield from walk(f"{label}[{k!r}]", v, depth + 1)
+        elif depth < 8 and isinstance(value, (list, tuple, set, frozenset)):
+            for i, v in enumerate(value):
+                yield from walk(f"{label}[{i}]", v, depth + 1)
+
+    for name, value in vars(obj).items():
+        if name in ("_parameters", "_buffers", "_modules"):
+            continue
+        yield from walk(name, value, 0)
+    if isinstance(obj, torch.nn.Module):
+        for name, value in obj._buffers.items():
+            if value is not None:
+                yield from walk(name, value, 0)
+
+
 class KirchhoffLayer:
     """Flows driven by a potential (pressure, head): solves nodal conservation
     `A_I g(A^T phi) = s_I` for the interior potentials by Newton's method, with the constitutive
@@ -192,6 +217,7 @@ class KirchhoffLayer:
                 )
 
         self.net = net
+        self._topology_version = net.topology_version
         self.name = name
         self._laws = list(laws)
         self._drives = list(drives)
@@ -455,15 +481,31 @@ class KirchhoffLayer:
         layer's own edge columns. Kept for callers and for symmetry with `A`; `dp()` gathers
         `phi[..., _src] - phi[..., _tgt]` instead of contracting against it.
 
-        Like `A`, cached on first access and never invalidated: both assume `net` is not
+        Like `A`, cached on first access: both assume `net` is not
         mutated after this layer is constructed. Nothing in this codebase does that -- a
         `Network` is built, then layers are constructed over it, then it is solved -- but a
         caller who mutated `net` afterwards (adding a node or edge) would get a layer whose
         `A`/`_diff` (if already accessed) or `_src`/`_tgt`/`cols` (fixed at `__init__`) no
-        longer agree with the network's current topology, with no check anywhere that
-        catches it.
+        longer agree with the network's current topology; `solve`, `dp`, `assemble` and
+        `residual` raise (`_require_current_topology`) once the network has changed.
         """
         return self.net.difference()[self.cols]
+
+    def _require_current_topology(self) -> None:
+        """Raise when the network gained a node or edge after this layer was built.
+
+        The layer keeps the edge indices, endpoints and node count of construction time, so
+        on a changed network it would silently solve the old graph. Rebuilding is explicit:
+        construct the layer (and the model around it) again.
+        """
+        if self.net.topology_version != self._topology_version:
+            raise RuntimeError(
+                f"KirchhoffLayer {self.name!r}: the network topology has changed since this "
+                f"layer was constructed (topology version {self._topology_version} -> "
+                f"{self.net.topology_version}); the layer still describes the old graph. "
+                f"Add all nodes and edges before constructing layers, or construct the "
+                f"layer and model again."
+            )
 
     # ------------------------------------------------------- sparse topology primitives
     def _difference(self, phi: torch.Tensor) -> torch.Tensor:
@@ -554,6 +596,7 @@ class KirchhoffLayer:
 
     # ------------------------------------------------------------------ assembly
     def dp(self, phi: torch.Tensor, drivers: Mapping) -> torch.Tensor:
+        self._require_current_topology()
         drivers = drivers or {}
         d = self._difference(phi)
         parts = []
@@ -635,6 +678,7 @@ class KirchhoffLayer:
         return torch.cat(parts, dim=-1)
 
     def assemble(self, phi_interior: torch.Tensor, phi_boundary: torch.Tensor) -> torch.Tensor:
+        self._require_current_topology()
         batch_shape = broadcast_shapes(
             phi_interior.shape[:-1], phi_boundary.shape[:-1]
         )
@@ -675,6 +719,7 @@ class KirchhoffLayer:
 
     def residual(self, phi_interior, phi_boundary, drivers, sources):
         self._refuse_on_mna("residual")
+        self._require_current_topology()
         return self._residual_parts(phi_interior, phi_boundary, drivers or {}, sources)[0]
 
     def balance(self, phi, q, sources=None, drivers=None):
@@ -889,10 +934,11 @@ class KirchhoffLayer:
         the same value) or silently `None` (if it doesn't).
         """
         for el in (*self._laws, *self._node_sources):
-            # A law may wrap another (`Scaled`): scan every submodule's own attributes.
+            # A law may wrap another (`Scaled`): scan every submodule's own attributes,
+            # its registered buffers, and tensors nested in lists, tuples, dicts and sets.
             holders = el.modules() if isinstance(el, torch.nn.Module) else (el,)
-            for name, value in (kv for h in holders for kv in vars(h).items()):
-                if isinstance(value, torch.Tensor) and value.requires_grad:
+            for name, value in (kv for h in holders for kv in _held_tensors(h)):
+                if value.requires_grad:
                     if isinstance(el, NodeSource):
                         # A NodeSource has no `learnable=` constructor kwarg (unlike
                         # ConstitutiveLaw) -- its fix is to register the tensor as an nn.Parameter
@@ -903,22 +949,24 @@ class KirchhoffLayer:
                             f"requires_grad=True that is not a registered nn.Parameter, so "
                             f"the differentiable solve cannot reach it through "
                             f"Function.apply and its gradient would be silently wrong or "
-                            f"absent. Register {name!r} as an nn.Parameter "
-                            f"(self.{name} = torch.nn.Parameter(...)) in __init__ so it is "
-                            f"reachable via named_parameters(), or use differentiable=False."
+                            f"absent. Register it as an nn.Parameter "
+                            f"(self.<name> = torch.nn.Parameter(...)) in __init__ so it is "
+                            f"reachable via named_parameters() (buffers and tensors inside "
+                            f"containers are not), or use differentiable=False."
                         )
                     raise ValueError(
                         f"law {el!r} (kind {el.kind!r}) has a "
                         f"tensor attribute {name!r} with requires_grad=True that is not a "
-                        f"registered nn.Parameter, so the differentiable solve cannot reach "
+                        f"registered nn.Parameter (a buffer or a tensor inside a container "
+                        f"is not one either), so the differentiable solve cannot reach "
                         f"it through Function.apply and its gradient would be silently wrong "
-                        f"or absent. Construct this law with learnable=True (so {name!r} "
+                        f"or absent. Construct this law with learnable=True (so the tensor "
                         f"is registered and reachable via named_parameters()), or use "
                         f"differentiable=False."
                     )
         for drv in self._drives:
-            for name, value in vars(drv).items():
-                if isinstance(value, torch.Tensor) and value.requires_grad:
+            for name, value in _held_tensors(drv):
+                if value.requires_grad:
                     raise ValueError(
                         f"drive {drv!r} (kind {drv.kind!r}) has a tensor attribute {name!r} "
                         f"with requires_grad=True; a Drive is captured by closure inside the "
@@ -1071,6 +1119,7 @@ class KirchhoffLayer:
         and the modes `"dc"` and `"initial"` (both its one steady solution), and refuses
         `mode="phasor"`, `dt` and `history`: it takes no step and solves no phasors.
         """
+        self._require_current_topology()
         for key, value in self.newton_defaults.items():
             newton_kwargs.setdefault(key, value)
         if self.mna:

@@ -226,6 +226,10 @@ to the true max-min-fair split and never past it. The default of 5 matches WSIMO
 batched differentiability — each round is strictly non-expansive, so a fixed cap is a safe
 over-approximation rather than a different algorithm.
 
+Storage, requests, capacities and preferences may each carry their own leading batch
+dimensions: `step` broadcasts them to one common batch shape, so a batch of requests runs
+from a single unbatched initial storage (or a batched capacity from unbatched requests).
+
 ## Verification
 
 Against WSIMOD 0.8.1 (Dobson, Liu and Mijic), pinned **exactly** rather than with `>=`, because
