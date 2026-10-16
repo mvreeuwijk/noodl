@@ -16,11 +16,11 @@ from typing import TYPE_CHECKING
 
 import torch
 
-from noodl._broadcast import broadcast_shapes
 from noodl.components import Component
 from noodl.elements import PrescribedFlow
 from noodl.layers.kirchhoff import KirchhoffLayer
 from noodl.layers.transport import TransportLayer, active_interior
+from noodl.layout import broadcast_batch, per_instance
 from noodl.model import Drivers, Model, State
 from noodl.refs import drivers_from, state_from
 from noodl.topology import Network
@@ -195,11 +195,11 @@ class _DensityClosure:
         name = self.thermal.name
         T_i = state[f"{name}.x"]
         T_b = drivers[f"{name}.x_boundary"]
-        batch = broadcast_shapes(T_i.shape[:-1], T_b.shape[:-1])
+        batch, (T_i, T_b) = broadcast_batch((T_i, 1), (T_b, 1))
         n = self.thermal.net.n
         T = torch.full(batch + (n,), T_REF, dtype=T_i.dtype, device=T_i.device)
-        T[..., self.thermal.interior_idx] = T_i.expand(batch + (self.thermal.n_i,))
-        T[..., self.thermal.boundary_idx] = T_b.expand(batch + (self.thermal.n_b,))
+        T[..., self.thermal.interior_idx] = T_i
+        T[..., self.thermal.boundary_idx] = T_b
         return T
 
     def _rho(self, T: torch.Tensor, drivers) -> torch.Tensor:
@@ -218,10 +218,10 @@ class IdealGasDensity(_DensityClosure):
         self.P_ref, self.R = float(P_ref), float(R)
 
     def _rho(self, T, drivers):
-        P = torch.as_tensor(drivers.get("P_ref", self.P_ref), dtype=T.dtype, device=T.device)
-        # A batched pressure `(B, ...)` is one per instance: add the node axis, as the CONTAM
-        # closure does, so B == n cannot pair a pressure with a node.
-        return P.unsqueeze(-1) / (self.R * T) if P.dim() else P / (self.R * T)
+        # A batched pressure `(B, ...)` is one per instance: it gets the node axis, as the
+        # CONTAM closure does, so B == n cannot pair a pressure with a node.
+        P = per_instance(drivers.get("P_ref", self.P_ref), T, 1)
+        return P / (self.R * T)
 
     @property
     def input_specs(self) -> dict[str, dict]:
