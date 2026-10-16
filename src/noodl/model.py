@@ -56,8 +56,13 @@ from typing import Protocol, runtime_checkable
 import torch
 
 from noodl._closures import ClosureSchedule
-from noodl._fixed_point_loop import detached, unsolved_mask
-from noodl._grad_reach import any_requires_grad
+from noodl._fixed_point_loop import (
+    Verdict,
+    confirm_gradient_dependence,
+    detached,
+    run_passes,
+    unsolved_mask,
+)
 from noodl._model_setup import (
     CouplingOptions,
     flow_owners,
@@ -722,136 +727,41 @@ class Model:
                 RuntimeWarning,
                 stacklevel=4,
             )
-        fed: State = dict(state)
-        # The fed state of the pass being run RIGHT NOW. Equal to `fed` on the converged
-        # exit, which breaks before `fed` is rebuilt, but named separately so that a later
-        # edit to the loop's tail cannot silently hand the adjoint the wrong linearisation
-        # point.
-        certified_fed: State = fed
-        prev: State | None = None
-        change: dict[str, Tensor] = {}
-        # A placeholder the second pass always replaces: `iterate_max >= 2` and a non-empty
-        # `iterate_tol` are both refused at construction, so the loop below cannot end
-        # without a real per-instance verdict of the right shape, dtype and device.
-        converged: Tensor = torch.zeros((), dtype=torch.bool)
-        passes = 0
-        diag: dict = {}
-        new: State = dict(state)
-        produced: list[str] = []
-        needs_adjoint = False
-        anderson = (
-            _AndersonHistory(self, self.iterate_memory)
-            if self.iterate_acceleration == "anderson" else None
-        )
         # A primal pass is one iterate of the outer fixed point: a potential solve that does
         # not converge within it returns its last Newton iterate (on the primal path only,
         # "return_primal") and the pass is judged not converged, rather than ending the
         # step. A caller's own `on_failure` is kept as given.
         pass_kwargs = dict(solve_kwargs)
         pass_kwargs.setdefault("on_failure", "return_primal")
-        inner_failed: Tensor | None = None
         raises_on_limit = self.iterate_on_limit != "accept" and not (
             solve_kwargs.get("on_failure") == "return" and diagnostics is not None
         )
-        stopped_early = False
-        # A `while` rather than `for passes in range(...)`: the pass count is wanted AFTER
-        # the loop (it goes into the diagnostics and into the failure message), which a loop
-        # control variable unused inside the body is not (ruff B007).
-        while passes < self.iterate_max:
-            passes += 1
-            certified_fed = fed
-            # Pass 1 runs with grad ENABLED to learn early whether anything differentiable
-            # reaches the state -- its graph is dropped three lines later -- and every other
-            # primal pass runs with no graph at all. A pass-1 "no" is not final: a closure
-            # may take another branch once the state moves, so it is asked again at the
-            # certified point after the loop. The returned derivative
-            # comes from the ONE differentiable pass after the loop, never from these.
-            with torch.set_grad_enabled(passes == 1 and torch.is_grad_enabled()):
-                new, diag, _ = self._pass(
-                    fed, drivers, dt, pass_kwargs, step_from=state, t=t,
-                    boundary_transfers=boundary_transfers, produced=produced,
-                    warm_start=warm_start,
-                )
-                inner_failed = self._unsolved(diag)
-                if passes == 1:
-                    needs_adjoint = any(new[k].requires_grad for k in produced)
-                    new = {k: v.detach() for k, v in new.items()}
-                    diag = detached(diag)
-            if prev is not None:
-                with torch.no_grad():
-                    ok: Tensor | None = None
-                    for name, tol in self.iterate_tol.items():
-                        if name in self.transport:
-                            layer = self.transport[name]
-                            d = (new[f"{name}.x"] - prev[f"{name}.x"]).abs()
-                            d_s, _ = layer._to_stacked(d, layer.n_i, "x")
-                            change[name] = d_s.amax(-1)
-                        else:
-                            layer = self.kirchhoff[name]
-                            d = (new[f"{name}.phi"] - prev[f"{name}.phi"]).abs()
-                            # Boundary entries too: a closure may write `phi_boundary`
-                            # from the previous pass (the sewer's outfall heads).
-                            nodes = torch.cat((layer.interior, layer.bound))
-                            change[name] = d[..., nodes].amax(-1)
-                            if anderson is not None:
-                                # Mixing can stall: two passes fed nearly the same mixed
-                                # state agree with each other while neither is a fixed
-                                # point. The fixed-point residual (this pass's output
-                                # against its own fed potential) must be within `tol` too.
-                                key = f"{name}.phi"
-                                res = (new[key] - certified_fed.get(key, prev[key])).abs()
-                                change[name] = torch.maximum(
-                                    change[name], res[..., nodes].amax(-1))
-                            if name in self.iterate_flow_tol:
-                                # The flows' own fixed-point residual: a head solve whose
-                                # warm start already meets its residual tolerance returns
-                                # the fed potential unchanged, so `phi` alone can stop
-                                # while the flows the closures read are still moving.
-                                key = f"{name}.q"
-                                res = (new[key] - certified_fed.get(key, prev[key])).abs()
-                                change[key] = res.amax(-1)
-                                this_q = change[key] <= self.iterate_flow_tol[name]
-                                ok = this_q if ok is None else (ok & this_q)
-                        this = change[name] <= tol
-                        ok = this if ok is None else (ok & this)
-                    stalled = None
-                    if inner_failed is not None:
-                        # a pass whose potential solve stopped short is not a fixed point
-                        stalled = ok & inner_failed
-                        ok = ok & ~inner_failed
-                    converged = ok
-                if bool(converged.all()):
-                    break
-                if (stalled is not None and bool(stalled.any())
-                        and bool((converged | stalled).all())
-                        and (needs_adjoint or raises_on_limit)):
-                    # Every instance not converged was fed a state within the tolerances of
-                    # the previous pass's and its potential solve failed again: the next
-                    # pass would repeat it. The step is going to raise anyway, so it raises
-                    # now rather than after `iterate_max` passes of `max_iter` iterations.
-                    stopped_early = True
-                    break
-            fed = dict(new)
-            w = self.iterate_relaxation
-            if prev is not None:
-                for name in self.transport:
-                    key = f"{name}.x"
-                    fed[key] = prev[key] + w * (new[key] - prev[key])
-                if anderson is None:
-                    for name in self.kirchhoff:
-                        if name in self.iterate_tol:
-                            for key in (f"{name}.phi", f"{name}.q"):
-                                fed[key] = prev[key] + w * (new[key] - prev[key])
-            if anderson is not None:
-                # The named Kirchhoff layers' `phi` and `q` are Anderson-mixed instead
-                # (`_AndersonHistory`), from pass 1 on; transport states stay relaxed.
-                with torch.no_grad():
-                    fed.update(anderson.mix(certified_fed, new, w,
-                                            converged if prev is not None else None))
-            prev = new
-        if (not needs_adjoint and torch.is_grad_enabled()
-                and (bool(converged.all()) or not raises_on_limit)
-                and any_requires_grad(self, state, drivers, solve_kwargs)):
+        problem = _ModelPasses(
+            self, state, drivers, dt, pass_kwargs, t=t, boundary_transfers=boundary_transfers,
+            warm_start=warm_start, raises_on_limit=raises_on_limit,
+        )
+        # The shared primal loop (`noodl._fixed_point_loop.run_passes`). Pass 1 runs with
+        # grad ENABLED to learn early whether anything differentiable reaches the state --
+        # its graph is dropped right after -- and every other primal pass runs with no graph
+        # at all. The returned derivative comes from the ONE differentiable pass below,
+        # never from these.
+        outcome = run_passes(problem, dict(state), max_passes=self.iterate_max)
+        passes, stopped_early = outcome.passes, outcome.stopped_early
+        # The fed state of the last pass run: the certified one on the converged exit.
+        certified_fed: State = outcome.certified
+        new, diag = outcome.out
+        produced = problem.produced
+        change = problem.change
+        inner_failed = problem.inner_failed
+        # `iterate_max >= 2` and a non-empty `iterate_tol` are both refused at construction,
+        # so the loop cannot end without a real per-instance verdict of the right shape,
+        # dtype and device; the 0-dim placeholder is never what is returned.
+        converged: Tensor = (
+            outcome.verdict.converged if outcome.verdict is not None
+            else torch.zeros((), dtype=torch.bool)
+        )
+        needs_adjoint = outcome.needs_adjoint
+        if bool(converged.all()) or not raises_on_limit:
             # Pass 1 saw nothing differentiable, but it ran at the START state: a closure
             # that takes a parameter-dependent branch only once the state has moved would
             # have the returned state silently detached. Ask again, once, under grad at the
@@ -860,14 +770,8 @@ class Model:
             # Skipped by a run about to raise for non-convergence anyway, and by one where no
             # tensor requiring grad is reachable from the model or its inputs at all
             # (`any_requires_grad`), where no pass can produce a dependency.
-            with torch.enable_grad():
-                probe, _, _ = self._pass(
-                    certified_fed, drivers, dt, pass_kwargs, step_from=state, t=t,
-                    boundary_transfers=boundary_transfers, produced=produced,
-                    warm_start=warm_start,
-                )
-                needs_adjoint = any(probe[k].requires_grad for k in produced)
-            del probe
+            needs_adjoint = confirm_gradient_dependence(
+                problem, outcome, roots=(self, state, drivers, solve_kwargs))
         if not bool(converged.all()):
             failing = (
                 (~converged).nonzero().flatten().tolist() if converged.dim() else "all"
@@ -1132,3 +1036,133 @@ class Model:
             flow_keys[name] = self.flow_driver_of[name]
         return Ports(boundary_nodes=nodes, prescribed_keys=keys, boundary_flows=flows,
                      flow_keys=flow_keys)
+
+
+class _ModelPasses:
+    """`Model._iterate`'s side of `noodl._fixed_point_loop.PassProblem`.
+
+    `z` is the fed state; a pass's output is `(new, diag)`. `judge` gives no verdict on
+    pass 1 (it has no predecessor) and from pass 2 on applies the change, Anderson-residual,
+    flow-tolerance and stall rules; `advance` relaxes (or Anderson-mixes) toward the pass's
+    output. `produced`, `change` and `inner_failed` are read by `_iterate` after the loop.
+    """
+
+    def __init__(self, model: Model, state: State, drivers: Drivers, dt, pass_kwargs: dict,
+                 *, t, boundary_transfers, warm_start: bool, raises_on_limit: bool) -> None:
+        self.model = model
+        self.state = state
+        self.drivers = drivers
+        self.dt = dt
+        self.pass_kwargs = pass_kwargs
+        self.t = t
+        self.boundary_transfers = boundary_transfers
+        self.warm_start = warm_start
+        self.raises_on_limit = raises_on_limit
+        self.produced: list[str] = []
+        self.change: dict[str, Tensor] = {}
+        self.prev: State | None = None
+        self.inner_failed: Tensor | None = None
+        self.anderson = (
+            _AndersonHistory(model, model.iterate_memory)
+            if model.iterate_acceleration == "anderson" else None
+        )
+
+    def run(self, z: State) -> tuple[State, dict]:
+        new, diag, _ = self.model._pass(
+            z, self.drivers, self.dt, self.pass_kwargs, step_from=self.state, t=self.t,
+            boundary_transfers=self.boundary_transfers, produced=self.produced,
+            warm_start=self.warm_start,
+        )
+        return new, diag
+
+    def depends_on_grad(self, out: tuple[State, dict]) -> bool:
+        new, _ = out
+        return any(new[k].requires_grad for k in self.produced)
+
+    def detach(self, z: State, out: tuple[State, dict]) -> tuple[State, tuple[State, dict]]:
+        new, diag = out
+        return z, ({k: v.detach() for k, v in new.items()}, detached(diag))
+
+    def judge(self, z: State, out: tuple[State, dict], *,
+              needs_adjoint: bool) -> Verdict | None:
+        model = self.model
+        new, diag = out
+        self.inner_failed = inner_failed = model._unsolved(diag)
+        prev = self.prev
+        if prev is None:
+            return None
+        change = self.change
+        ok: Tensor | None = None
+        for name, tol in model.iterate_tol.items():
+            if name in model.transport:
+                layer = model.transport[name]
+                d = (new[f"{name}.x"] - prev[f"{name}.x"]).abs()
+                d_s, _ = layer._to_stacked(d, layer.n_i, "x")
+                change[name] = d_s.amax(-1)
+            else:
+                layer = model.kirchhoff[name]
+                d = (new[f"{name}.phi"] - prev[f"{name}.phi"]).abs()
+                # Boundary entries too: a closure may write `phi_boundary`
+                # from the previous pass (the sewer's outfall heads).
+                nodes = torch.cat((layer.interior, layer.bound))
+                change[name] = d[..., nodes].amax(-1)
+                if self.anderson is not None:
+                    # Mixing can stall: two passes fed nearly the same mixed
+                    # state agree with each other while neither is a fixed
+                    # point. The fixed-point residual (this pass's output
+                    # against its own fed potential) must be within `tol` too.
+                    key = f"{name}.phi"
+                    res = (new[key] - z.get(key, prev[key])).abs()
+                    change[name] = torch.maximum(
+                        change[name], res[..., nodes].amax(-1))
+                if name in model.iterate_flow_tol:
+                    # The flows' own fixed-point residual: a head solve whose
+                    # warm start already meets its residual tolerance returns
+                    # the fed potential unchanged, so `phi` alone can stop
+                    # while the flows the closures read are still moving.
+                    key = f"{name}.q"
+                    res = (new[key] - z.get(key, prev[key])).abs()
+                    change[key] = res.amax(-1)
+                    this_q = change[key] <= model.iterate_flow_tol[name]
+                    ok = this_q if ok is None else (ok & this_q)
+            this = change[name] <= tol
+            ok = this if ok is None else (ok & this)
+        stalled = None
+        if inner_failed is not None:
+            # a pass whose potential solve stopped short is not a fixed point
+            stalled = ok & inner_failed
+            ok = ok & ~inner_failed
+        converged = ok
+        # Every instance not converged was fed a state within the tolerances of the
+        # previous pass's and its potential solve failed again: the next pass would repeat
+        # it. The step is going to raise anyway, so it raises now rather than after
+        # `iterate_max` passes of `max_iter` iterations.
+        stop_early = bool(
+            stalled is not None and bool(stalled.any())
+            and bool((converged | stalled).all())
+            and (needs_adjoint or self.raises_on_limit)
+        )
+        return Verdict(converged=converged, change=change, stop_early=stop_early)
+
+    def advance(self, z: State, out: tuple[State, dict], verdict: Verdict | None) -> State:
+        model = self.model
+        new, _ = out
+        prev = self.prev
+        fed = dict(new)
+        w = model.iterate_relaxation
+        if prev is not None:
+            for name in model.transport:
+                key = f"{name}.x"
+                fed[key] = prev[key] + w * (new[key] - prev[key])
+            if self.anderson is None:
+                for name in model.kirchhoff:
+                    if name in model.iterate_tol:
+                        for key in (f"{name}.phi", f"{name}.q"):
+                            fed[key] = prev[key] + w * (new[key] - prev[key])
+        if self.anderson is not None:
+            # The named Kirchhoff layers' `phi` and `q` are Anderson-mixed instead
+            # (`_AndersonHistory`), from pass 1 on; transport states stay relaxed.
+            fed.update(self.anderson.mix(
+                z, new, w, verdict.converged if verdict is not None else None))
+        self.prev = new
+        return fed
