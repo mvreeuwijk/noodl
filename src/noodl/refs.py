@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import difflib
 import functools
+import re
 from collections.abc import Hashable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
@@ -60,6 +61,35 @@ def _node_aliases(net, labels: Sequence[Hashable]) -> dict[Hashable, int]:
         return {}
     position = {label: i for i, label in enumerate(labels)}
     return {a: position[c] for a, c in aliases.items() if c in position}
+
+
+_DIMENSIONLESS = frozenset({"", "-", "1", "\u2013", "[-]", "[1]", "dimensionless"})
+# Trivially equivalent spellings, applied in order (case is kept: "mPa" is not "MPa").
+_UNIT_SPELLINGS = (
+    ("\u00b3", "^3"), ("\u00b2", "^2"), ("**", "^"), ("\u00b7", "*"), ("\u00b5", "u"),
+    ("\u03bc", "u"), ("\u00b0C", "degC"), ("\u2103", "degC"),
+)
+
+
+def normalize_unit(unit: str | None) -> str:
+    """A unit string in one canonical spelling, for comparison only (this is not a units
+    library: nothing is converted, and two different units never compare equal).
+
+    Whitespace is dropped; `"m3"`, `"m^3"`, `"m**3"` and `"m\u00b3"` are one spelling, so are
+    `"\u00b0C"` and `"degC"`, and the dimensionless spellings `""`, `"-"`, `"1"`, `"[-]"` and
+    `"dimensionless"` all normalise to `"1"`.
+    """
+    text = "".join(str(unit or "").split())
+    for old, new in _UNIT_SPELLINGS:
+        text = text.replace(old, new)
+    if text in _DIMENSIONLESS:
+        return "1"
+    return re.sub(r"(?<=[A-Za-z])(\d)", r"^\1", text)
+
+
+def units_agree(a: str | None, b: str | None) -> bool:
+    """Whether two unit strings are the same unit up to `normalize_unit`'s spellings."""
+    return normalize_unit(a) == normalize_unit(b)
 
 
 class Field(str):
@@ -448,6 +478,23 @@ def input_field(
                  ordering=ordering or f"order of its {len(labels)} labels", **common)
 
 
+def input_unit_declarations(model: Model) -> list[tuple[str, str, str]]:
+    """`(origin, key, unit)` for every input a model, closure or reaction declares in
+    `input_specs`, in declaration order; `unit` is `""` when the spec gives none. `origin`
+    names the declarer (`"model"`, a closure's or reaction's `repr`)."""
+    sources = [("model", getattr(model, "input_specs", None) or {})]
+    sources += [(f"closure {s.label}", s.input_specs)
+                for s in (model._closure_spec(c) for c in model.closures)]
+    sources += [(f"reaction {r!r}", getattr(r, "input_specs", None) or {})
+                for _, r in model.reactions]
+    out: list[tuple[str, str, str]] = []
+    for origin, specs in sources:
+        for key, spec in dict(specs).items():
+            unit = spec.unit if isinstance(spec, Field) else dict(spec).get("unit", "")
+            out.append((origin, str(key), str(unit or "")))
+    return out
+
+
 def _declared_inputs(model: Model) -> dict[str, Field]:
     """The inputs `model.input_specs` and its closures' and reactions' `input_specs`
     declare, as Fields. A spec is `{key: {"description", "unit", "over", "required",
@@ -767,6 +814,7 @@ class LayerRefs(Mapping[str, LayerRef]):
                 closure_state[key] = Field(
                     key, role="state", layer=None, axis="label", labels=labels,
                     ordering=f"order of {type(closure).__name__}", required="step",
+                    unit=model._closure_spec(closure).output_units.get(key, ""),
                     default=None, description=f"state carried by closure {type(closure).__name__}",
                     dtype=net.dtype, device=net.device,
                 )

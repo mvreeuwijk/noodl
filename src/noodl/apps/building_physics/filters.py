@@ -407,6 +407,7 @@ class FilterTransmission:
         self.reads_flows_of = airflow.name
         self.key = f"{layer}.transmission"
         self.outputs = (self.key,)
+        self.output_units = {self.key: "1"}     # transmission: a fraction of the amount
         self.inputs = ("T", "rho", "time")
         n, found = _filtered_rows(net, flow_kinds, filters, "FilterTransmission")
         K = len(self.species)

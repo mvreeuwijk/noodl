@@ -69,6 +69,7 @@ class AirHandlerFlows:
         self.flow_key = f"prescribed_flow.{kind}"
         self.inputs = (self.multiplier_key, self.fraction_key)
         self.outputs = (self.flow_key,)
+        self.output_units = {self.flow_key: "kg/s"}
 
     @property
     def input_specs(self) -> dict[str, dict]:

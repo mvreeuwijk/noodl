@@ -153,10 +153,17 @@ contract is written down; `Model` reads every closure through it, once, at const
 **What the contract covers, and what it does not.** It fixes how a closure is called (two
 arguments, or three with a `StepContext` when it declares `integrates = True`; the arity is
 checked against that declaration in both directions) and which optional attributes it may
-declare. It says nothing about **units**: those live with the keys, in `noodl.refs.Field`
-(a layer's own keys, through `model.refs`) and in the closure's own `input_specs` (the
-`Field` of each key it reads), which the model reads through `ClosureSpec.input_specs`.
-Nor does it govern **lifecycle and mutation** (what may change after construction, devices,
+declare. **Units** are checked, as strings and not as dimensions: they live with the keys, in
+`noodl.refs.Field.unit` (a layer's own keys, through `model.refs`), in the closure's
+`input_specs` (the `unit` of each key it reads) and in its `output_units`
+(`{key: unit}` of the driver keys it writes and the state it carries), which the model reads
+through `ClosureSpec.input_specs` and `ClosureSpec.output_units`. `Model.check()` reports
+`unit-mismatch` (a warning) when a closure declares a unit that differs from the unit of the
+layer field or declared input the key refers to, and `unit-undeclared` (info) for a field with
+no unit. Trivially equivalent spellings agree (`m3`, `m^3`, `m**3`, `m³`; `1`, `-`, an empty
+unit, `dimensionless`; `°C`, `degC`; see `noodl.refs.normalize_unit`); nothing is converted and
+there is no unit algebra, so `kg/s` and `kg/h` are different. A closure that declares no unit
+is not checked. Nor does it govern **lifecycle and mutation** (what may change after construction, devices,
 copying and pickling): that is [Mutation, devices and serialization](../concepts/ownership.md).
 
 - **Algebraic closure**: `closure(state, drivers) -> {key: tensor}`. It sees the state and the
@@ -174,6 +181,7 @@ class Tank:
     state_keys = ("tank.h",)
     inputs = ("tank.h", "inflow")
     outputs = ("outflow",)
+    output_units = {"tank.h": "m", "outflow": "m3/s"}
 
     def __call__(self, state, drivers, ctx):
         ...
@@ -181,7 +189,7 @@ class Tank:
 
 Everything else a closure may say about itself is one of the optional attributes in
 `noodl.contracts.CLOSURE_ATTRIBUTES` (`integrates`, `state_keys`, `key_labels`, `inputs`,
-`outputs`, `input_specs`, `edge_kinds`, `requires_coupling`, `reads_flows_of`,
+`outputs`, `input_specs`, `output_units`, `edge_kinds`, `requires_coupling`, `reads_flows_of`,
 `species_columns`), each with its meaning and its consumer. Declare them as tuples of names:
 a bare string (`outputs = "rho_amb"`) or a non-bool `integrates` is refused with a
 `TypeError`. `closure_spec` is the only code that reads these attributes; do not `getattr` them

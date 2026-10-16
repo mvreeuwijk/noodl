@@ -31,7 +31,12 @@ from dataclasses import dataclass, field
 import torch
 
 from noodl._broadcast import broadcast_shapes
-from noodl.refs import Field, required_state_keys
+from noodl.refs import (
+    Field,
+    input_unit_declarations,
+    normalize_unit,
+    required_state_keys,
+)
 
 Tensor = torch.Tensor
 
@@ -183,6 +188,44 @@ def _declared(model, attr: str) -> set[str]:
     return out
 
 
+def _check_units(model, specs, who, add) -> None:
+    """`unit-mismatch` (warning): a closure declares a unit, for an input in `input_specs` or
+    an output in `output_units`, that differs (after `normalize_unit`) from the unit of the
+    layer field or earlier declared input the key refers to. `unit-undeclared` (info): a
+    field the model knows has no unit. Units are compared as strings; nothing is converted."""
+    refs = model.refs
+    fields = refs.fields()
+    reference: dict[str, tuple[str, str]] = {}      # key -> (unit, where it was declared)
+    for key, f in fields.items():
+        if isinstance(f, Field) and f.unit and f.layer is not None:
+            reference[key] = (f.unit, f"layer {f.layer!r}'s field")
+    for key, f in refs.closure_state.items():
+        if isinstance(f, Field) and f.unit:
+            reference.setdefault(key, (f.unit, "the closure-carried state"))
+
+    def compare(who_, key: str, unit: str, kind: str) -> None:
+        if not unit:
+            return
+        if key not in reference and kind == "input":
+            reference[key] = (unit, who_)
+        ref = reference.get(key)
+        if ref is None or normalize_unit(ref[0]) == normalize_unit(unit):
+            return
+        add(Issue("warning", "unit-mismatch",
+                  f"{who_} declares {kind} {key!r} in [{unit}], but {ref[1]} {key!r} has "
+                  f"unit [{ref[0]}]", key))
+
+    for origin, key, unit in input_unit_declarations(model):
+        compare(origin, key, unit, "input")
+    for i, spec in enumerate(specs):
+        for key, unit in sorted(spec.output_units.items()):
+            compare(f"closure {who(i)}", key, unit, "output")
+    for key, f in fields.items():
+        if isinstance(f, Field) and not f.unit:
+            add(Issue("info", "unit-undeclared",
+                      f"{f.role} field {key!r} has no unit", key))
+
+
 def _near_layer(model, prefix: str) -> list[str]:
     return difflib.get_close_matches(prefix, list(model.layers), 1, 0.75)
 
@@ -276,6 +319,9 @@ def check_setup(
                               f"{sorted(str(ref.fields[o]) for o in ref.inputs)})"
                               + (f"; did you mean {head + '.' + hint[0]!r}?" if hint else ""),
                               key))
+
+    # ------------------------------------------------------------------------ units
+    _check_units(model, specs, who, add)
 
     # ------------------------------------------------------------------- probe step
     probe_obj = None

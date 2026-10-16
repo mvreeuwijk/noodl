@@ -1124,6 +1124,9 @@ class DynamicWaveHydraulics:
     integrates = True
     state_keys = ("sewer.junction_depth", "sewer.pipe_flow", "sewer.mid_area",
                   "sewer.net_inflow")
+    output_units = {"sewer.junction_depth": "m", "sewer.pipe_flow": "m3/s",
+                    "sewer.mid_area": "m2", "sewer.net_inflow": "m3/s",
+                    "sewer.quality_volume": "m3"}
 
     def __init__(self, graph: Network, net: SewerNetwork, *, layer: str = "water",
                  quality_layer: str | None = None, air: bool = False,

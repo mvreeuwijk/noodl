@@ -341,6 +341,9 @@ class SpeciesSources:
             ("rho_amb",) if self.reads_solved_pressure else ())
         self.outputs = (f"{layer.name}.sources",) + (
             (f"{layer.name}.removal",) if self.removes else ())
+        self.output_units = {f"{layer.name}.sources": layer.source_unit}
+        if self.removes:
+            self.output_units[f"{layer.name}.removal"] = "1/s"
 
     @staticmethod
     def _can_remove(src) -> bool:

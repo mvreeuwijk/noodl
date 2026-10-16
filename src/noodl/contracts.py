@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import inspect
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Protocol, runtime_checkable
 
 from torch import Tensor
@@ -123,9 +123,16 @@ CLOSURE_ATTRIBUTES: tuple[ClosureAttribute, ...] = (
         "noodl.validation (Model.check); noodl.couple"),
     ClosureAttribute(
         "input_specs", "Mapping[str, Field]", {},
-        "Field specifications of the keys the closure reads. Read lazily: a closure may "
-        "compute it in a property.",
-        "noodl.refs (LayerRefs)"),
+        "Field specifications of the keys the closure reads, each with its `unit`. Read "
+        "lazily: a closure may compute it in a property.",
+        "noodl.refs (LayerRefs); noodl.validation (Model.check: unit-mismatch)"),
+    ClosureAttribute(
+        "output_units", "Mapping[str, str]", {},
+        "{key: unit string} of the driver keys the closure writes (`outputs`) and of the state "
+        "it carries (`state_keys`; the unit of the Field `key_labels` makes). Compared, "
+        "after trivial respelling (`m3`, `m^3`, `m³`; `1`, `-`), with the unit of the "
+        "layer field or declared input the key refers to; nothing is converted.",
+        "noodl.validation (Model.check: unit-mismatch)"),
     ClosureAttribute(
         "edge_kinds", "tuple[str, ...]", (),
         "Edge kinds of the network the closure works on itself, so that no layer uses them.",
@@ -170,6 +177,7 @@ class ClosureSpec:
     requires_coupling: str | None
     reads_flows_of: str | None
     species_columns: Mapping[str, Mapping[str, int]]
+    output_units: Mapping[str, str] = field(default_factory=dict)
     owner: str = "Model"
 
     @property
@@ -226,6 +234,17 @@ def _species_columns(
     return {layer: dict(cols) for layer, cols in value.items()}
 
 
+def _output_units(owner: str, label: str, value: Any) -> dict[str, str]:
+    ok = isinstance(value, Mapping) and all(
+        isinstance(k, str) and isinstance(u, str) for k, u in value.items())
+    if not ok:
+        raise TypeError(
+            f"{owner}: closure {label} declares output_units that is not {{key: unit}} with "
+            f"str keys and str units; got {value!r}"
+        )
+    return dict(value)
+
+
 def _positional_arity(closure: Callable) -> tuple[int, int, bool] | None:
     """`(positional, required positional, has *args)` of `closure`'s call signature, or
     `None` when it cannot be inspected (some builtins and extension callables), in which
@@ -247,11 +266,12 @@ def closure_spec(closure: Callable, *, index: int, owner: str = "Model") -> Clos
 
     Raises `TypeError` for a closure that is not callable, a `str` given for `inputs`,
     `outputs`, `state_keys` or `edge_kinds`, a non-bool `integrates`, or a malformed
-    `species_columns`, or a closure that does not declare `integrates = True` but whose
-    call signature REQUIRES three or more positional arguments (it would be called with
-    two); `ValueError` for `state_keys` without `integrates`, and for `integrates = True` on
-    a call signature with fewer than three positional parameters (and no `*args`). A
-    callable whose signature cannot be inspected is accepted as declared.
+    `species_columns` or `output_units`, or a closure that does not declare
+    `integrates = True` but whose call signature REQUIRES three or more positional
+    arguments (it would be called with two); `ValueError` for `state_keys` without
+    `integrates`, and for `integrates = True` on a call signature with fewer than three
+    positional parameters (and no `*args`). A callable whose signature cannot be inspected
+    is accepted as declared.
     """
     if not callable(closure):
         raise TypeError(
@@ -310,6 +330,7 @@ def closure_spec(closure: Callable, *, index: int, owner: str = "Model") -> Clos
         requires_coupling=getattr(closure, "requires_coupling", None),
         reads_flows_of=getattr(closure, "reads_flows_of", None),
         species_columns=_species_columns(owner, label, species),
+        output_units=_output_units(owner, label, getattr(closure, "output_units", None) or {}),
         owner=owner,
     )
 
