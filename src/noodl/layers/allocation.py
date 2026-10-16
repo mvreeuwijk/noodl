@@ -426,7 +426,8 @@ class AllocatedFlowLayer(TopologyGuard):
         lo = torch.zeros_like(free_headroom)
         # Per instance: the max runs over the edges of one instance only, so a batch mixing
         # scales brackets (and bisects) each instance as it would be alone.
-        hi_value = (preference * torch.clamp(remaining, min=0.0)).detach().amax(-1, keepdim=True) + 1.0
+        scale = (preference * torch.clamp(remaining, min=0.0)).detach()
+        hi_value = scale.amax(-1, keepdim=True) + 1.0
         hi = torch.zeros_like(free_headroom) + hi_value.to(free_headroom.dtype)
 
         def _residual(lam, remaining_e, avail_e, preference_e, target):
