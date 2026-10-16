@@ -97,10 +97,13 @@ def bind_inputs(model, inputs: Sequence[Input]) -> list[Input]:
 def scatter(base: Tensor | None, index: Sequence[int] | None, value: Tensor) -> Tensor:
     """A new tensor: `base` with `value` written at `index` on the last axis (all of it when
     `index` is None), batch dimensions broadcast. Differentiable in `value`; `base` is never
-    modified. With `base` None, `index` must be None and `value` is returned as float64."""
+    modified. The result has `base`'s floating dtype (so a model moved to float32 by
+    `Model.to` stays float32); with `base` None, `index` must be None and `value` is
+    returned as float64."""
     value = torch.as_tensor(value)
-    if value.dtype != F64:
-        value = value.to(F64)
+    dtype = base.dtype if base is not None and base.is_floating_point() else F64
+    if value.dtype != dtype:
+        value = value.to(dtype)
     if base is None:
         if index is not None:
             raise KeyError("scatter: positions given for a driver that does not exist")

@@ -123,9 +123,9 @@ present.
 - An object from outside noodl without a `to` method, a NumPy array, and the node and edge
   attributes of the graph (source data, copied into tensors when the layers were built).
 - Tensors an application creates at run time with a fixed dtype. The transport layer computes
-  its step in float64 whatever its storage dtype and returns the state's dtype, by design. The
-  building application's controls (`apps.building_physics.inputs.scatter`) write their
-  actuator values in float64, so a building model with controls does not run in float32.
+  its step in float64 whatever its storage dtype and returns the state's dtype, by design.
+  The building application's controls and inputs write their values in the dtype of the
+  driver they write into, so a moved model with controls keeps its precision.
 
 ## Copying and serialization
 
