@@ -25,13 +25,17 @@ jobs:
       - run: ruff check .
       # -rs lists every skipped test with its reason, so a reference comparison that
       # silently stopped running (missing engine, missing cache) is visible in the log.
+      # NOODL_GOLDEN_EXACT is deliberately NOT set here: the golden file was recorded on another
+      # machine and the Linux runner differs from it in the last ulp (PR #24 CI run), so every
+      # job compares golden floats to rtol 1e-12 (see tests/test_golden_orchestration.py).
       - run: pytest -q -rs --junitxml=junit.xml
       - name: Skip summary
         if: always()
         run: python .github/scripts/junit_summary.py junit.xml "tests (ubuntu, Python 3.12)" >> "$GITHUB_STEP_SUMMARY"
 
   # The oldest versions pyproject.toml admits: Python 3.11, torch 2.2, numpy 1.26.
-  # Core tests only; the reference-model comparisons stay in the main job.
+  # Core tests only; the reference-model comparisons stay in the main job, so it installs the
+  # `test` extra (the `reference` extra's wntr needs numpy>=2.2.6, which cannot resolve here).
   minimum-versions:
     runs-on: ubuntu-latest
     steps:
@@ -41,7 +45,7 @@ jobs:
           python-version: "3.11"
       - run: python -m pip install --upgrade pip
       - run: pip install "numpy==1.26.*" "torch==2.2.*" --index-url https://download.pytorch.org/whl/cpu --extra-index-url https://pypi.org/simple
-      - run: pip install -e ".[dev]" "numpy==1.26.*" "torch==2.2.*"
+      - run: pip install -e ".[test]" "numpy==1.26.*" "torch==2.2.*"
       - run: >
           pytest -q -rs --no-cov -n 2
           tests/test_*.py tests/layers tests/solvers tests/operators tests/elements

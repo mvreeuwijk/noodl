@@ -33,11 +33,18 @@ python -m mkdocs build --strict
 | Workflow / job | Runs on | What it runs |
 | --- | --- | --- |
 | `tests` / `test` | every push and pull request; Linux, Python 3.12 | `ruff check .` and the full default suite (`-m "not slow"`) with coverage |
-| `tests` / `minimum-versions` | Linux, Python 3.11, torch 2.2, numpy 1.26 | the core subset from `AGENTS.md` |
+| `tests` / `minimum-versions` | Linux, Python 3.11, torch 2.2, numpy 1.26 | the core subset from `AGENTS.md`, installed with `.[test]` (not `.[dev]`: the `reference` extra's `wntr` needs numpy>=2.2.6) |
 | `tests` / `wheel-smoke` | Linux | builds the wheel, installs it in a clean venv and imports every application outside the source tree |
 | `tests` / `windows` | Windows, Python 3.12 | the core subset plus `tests/verification/test_contam_parity.py` with `pip install .[contam]` (the `contamxpy` wheel exists for Windows only, so this is where the CONTAM parity tests actually run) |
 | `tests` / `macos` | macOS, Python 3.12 | the core subset |
 | `slow-reference` / `slow` | weekly (Monday 03:00 UTC), manual `workflow_dispatch`, and pull requests labelled `run-slow` | `pytest -m slow` over `tests/verification` and `tests/benchmarks` (the full reference-model comparisons) |
+
+Test extras: `pip install -e ".[dev]"` installs everything (`test` plus `reference`). Floats in the
+golden and pinned-value tests (`tests/test_golden_orchestration.py`, `test_pcg_results_are_pinned`)
+are compared bit-exactly when `NOODL_GOLDEN_EXACT=1` and to rtol 1e-12 otherwise, because BLAS and
+vectorised reductions reassociate sums differently per platform (the golden file was recorded on a
+machine that none of the CI runners reproduces bit for bit). CI leaves it unset; set it locally, on
+the recording machine, to check that a refactor changed no number.
 
 Skips are visible: every job runs pytest with `-rs`, writes a pass/fail/skip table with the skip
 reasons to the job summary (`.github/scripts/junit_summary.py`), and the `slow-reference` job

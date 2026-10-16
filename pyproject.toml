@@ -30,9 +30,17 @@ Issues = "https://github.com/mvreeuwijk/noodl/issues"
 # slower at ensemble 1. It stays OPTIONAL rather than becoming a hard dependency because the
 # evidence for the default is one platform at one problem size, and PCG remains a complete answer without it.
 sparse = ["scipy>=1.11"]
-# `dev` restates `sparse`'s requirement rather than referencing the extra recursively: the
-# test suite exercises the sparse-direct backend directly, and a plain pin is one fewer
-# resolver feature for `pip install -e ".[dev]"` to depend on. Keep the two in step.
+# `test` is what the core test suite needs and nothing that pins a newer numpy: the
+# `minimum-versions` CI job installs it against numpy 1.26 / torch 2.2 / Python 3.11. It
+# restates `sparse`'s requirement (scipy) rather than referencing the extra recursively, because
+# the suite exercises the sparse-direct backend directly and a plain pin is one fewer resolver
+# feature to depend on. Keep the two in step.
+test = [
+    "pytest>=8", "pytest-xdist>=3", "ruff>=0.5", "hypothesis>=6", "pytest-cov", "scipy>=1.11",
+]
+# `reference` holds the third-party engines the comparison tests run against. It is separate
+# from `test` because wntr>=1.5 requires numpy>=2.2.6, which cannot resolve against the
+# minimum-versions numpy 1.26 pin.
 # pyswmm (SWMM comparison tests): BSD-2-Clause, wrapping SWMM 5, whose engine is public domain
 # (US-government work) / CC0. Test-only (`importorskip`); the sewer application itself needs
 # nothing beyond torch and the existing `sparse` extra.
@@ -46,6 +54,9 @@ sparse = ["scipy>=1.11"]
 # specific wsimod run -- a newer release could
 # silently change quickstart_demo/oxford_demo's forcing or node parameters, which an `>=` pin
 # would not catch. Test-only (`importorskip`); never a runtime dependency of noodl itself.
+reference = ["pyswmm>=2.1", "wntr>=1.5", "wsimod==0.8.1"]
+# `dev` = `test` + `reference` (restated for the same reason as above): everything the full
+# suite needs, and what `pip install -e ".[dev]"` installs.
 dev = [
     "pytest>=8", "pytest-xdist>=3", "ruff>=0.5", "hypothesis>=6", "pytest-cov", "scipy>=1.11",
     "pyswmm>=2.1", "wntr>=1.5", "wsimod==0.8.1",
