@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import torch
 
-from noodl.elements.base import ConstitutiveLaw
+from noodl.elements.base import ConstitutiveLaw, ImplicitLaw
 from noodl.solvers.scalar import solve_monotone
 
 Tensor = torch.Tensor
@@ -586,3 +586,70 @@ EPANET_G_FT = G_FT_S2  # alias, the pre-rename name
 EPANET_KM = MINOR_LOSS_K_FT  # alias, the pre-rename name
 EPANET_VISCOS_FT2 = NU_WATER_FT2  # alias, the pre-rename name
 EPANET_NU = NU_WATER_REF  # alias, the pre-rename name
+
+
+def epanet_minor_coefficient(minor_loss: Tensor, diameter: Tensor,
+                             cfs_per_m3s: float | None = None) -> Tensor:
+    """EPANET's minor-loss coefficient as a head (m) per (m3/s)^2: ``Km = 0.02517 K / d^4``
+    in ft per cfs^2 (`input1.c`, `convertunits`, with EPANET's rounded constant), converted
+    with ``cfs_per_m3s`` (EPANET's own rounded flow factor; None: the exact
+    ``1 / 0.3048^3``)."""
+    cfs = 1.0 / M_PER_FT**3 if cfs_per_m3s is None else float(cfs_per_m3s)
+    d_ft = diameter / M_PER_FT
+    return M_PER_FT * MINOR_LOSS_K_FT * minor_loss / d_ft**4 * cfs**2
+
+
+class BreakerValve(ImplicitLaw):
+    """A pressure breaker valve (PBV): EPANET 2.2's `pbvcoeff` (`hydcoeffs.c`).
+
+    Active, it holds the head drop from its start node to its end node at ``setting``,
+    whichever way the water flows: ``dp = setting``. It is an open valve, ``dp = m q |q|``
+    with ``m`` its minor-loss coefficient (`epanet_minor_coefficient`), where that loss
+    exceeds the setting (``m q^2 > setting``) or the setting is 0. Implicit: the flow is
+    an unknown of the layer. ``setting`` and ``m`` are in the layer's potential unit (head,
+    or pressure on a Darcy-Weisbach pressure layer: both scaled by ``rho g``).
+    """
+
+    def __init__(self, setting, minor, *, kind: str = "pbv") -> None:
+        super().__init__(kind)
+        self.setting = self._param(setting, False)
+        self.minor = self._param(minor, False)
+
+    def residual(self, dp, q, drivers, ctx):
+        loss = self.minor * q * q.abs()
+        open_ = (self.setting == 0) | (self.minor * q * q > self.setting)
+        return dp - torch.where(open_, loss, self.setting)
+
+
+class GeneralPurposeValve(ImplicitLaw):
+    """A general purpose valve (GPV): EPANET 2.2's `gpvcoeff` (`hydcoeffs.c`).
+
+    The head loss follows the valve's head-loss curve, ``dp = sgn(q) (h0 + r |q|)``, with
+    ``h0`` and ``r`` the intercept and slope of the curve segment that brackets ``|q|``
+    (`curvecoeff`: the first or last segment, extended, outside the curve) and
+    ``sgn(0) = +1``. ``flows`` (m3/s) and ``heads`` (the layer's potential unit) are
+    ``(n_valves, n_points)``, each row increasing in flow and padded at the end with
+    ``inf`` flows to the longest curve; ``n_points`` gives each row's own length (at least
+    2). Implicit: the flow is an unknown of the layer.
+    """
+
+    def __init__(self, flows, heads, n_points, *, kind: str = "gpv") -> None:
+        super().__init__(kind)
+        self.flows = self._param(flows, False)
+        self.heads = self._param(heads, False)
+        self.register_buffer("n_points", torch.as_tensor(n_points, dtype=torch.long))
+
+    def residual(self, dp, q, drivers, ctx):
+        a = q.abs()
+        # The bracketing segment: k2 = number of points below |q|, kept within the curve.
+        k2 = (self.flows < a.unsqueeze(-1)).sum(-1).clamp(min=1)
+        k2 = torch.minimum(k2, self.n_points - 1)
+        k1 = k2 - 1
+        x1 = self.flows.expand(a.shape + self.flows.shape[-1:]).gather(-1, k1.unsqueeze(-1))
+        x2 = self.flows.expand(a.shape + self.flows.shape[-1:]).gather(-1, k2.unsqueeze(-1))
+        y1 = self.heads.expand(a.shape + self.heads.shape[-1:]).gather(-1, k1.unsqueeze(-1))
+        y2 = self.heads.expand(a.shape + self.heads.shape[-1:]).gather(-1, k2.unsqueeze(-1))
+        r = ((y2 - y1) / (x2 - x1)).squeeze(-1)
+        h0 = y1.squeeze(-1) - r * x1.squeeze(-1)
+        sign = torch.where(q < 0, -torch.ones_like(q), torch.ones_like(q))
+        return dp - sign * (h0 + r * a)

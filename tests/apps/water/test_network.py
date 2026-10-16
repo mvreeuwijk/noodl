@@ -132,12 +132,28 @@ def test_a_multi_point_pump_curve_is_refused():
         ).validate()
 
 
-@pytest.mark.parametrize("kind", ["PRV", "PSV", "PBV", "GPV"])
+@pytest.mark.parametrize("kind", ["PRV", "PSV"])
 def test_the_status_switching_valves_are_refused(kind):
     with pytest.raises(ValueError, match="out of scope"):
         _minimal(
             valves=(Valve("V1", "R1", "J1", 0.2, kind, 30.0),)
         ).validate()
+
+
+def test_a_pbv_needs_a_non_negative_setting():
+    with pytest.raises(ValueError, match="PBV 'V1' needs a head drop"):
+        _minimal(valves=(Valve("V1", "R1", "J1", 0.2, "PBV", -1.0),)).validate()
+
+
+@pytest.mark.parametrize("curves, match", [
+    ({}, "has no \[CURVES\] entry"),
+    ({"HL": ((0.0, 0.0),)}, "at least two points"),
+    ({"HL": ((0.0, 0.0), (0.0, 1.0))}, "increasing flows"),
+])
+def test_a_gpv_needs_a_head_loss_curve(curves, match):
+    with pytest.raises(ValueError, match=match):
+        _minimal(valves=(Valve("V1", "R1", "J1", 0.2, "GPV", 0.0, curve="HL"),),
+                 curves=curves).validate()
 
 
 def test_an_unknown_valve_type_is_refused():

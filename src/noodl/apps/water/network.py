@@ -9,7 +9,9 @@ inflow rather than by head difference.
 Node order: junctions in file order, then reservoirs, then tanks. Boundary = every reservoir
 then every tank, in that order, which is the order `"water.phi_boundary"` is written in.
 Edge kinds partition by device type: `pipe`, `pump`, `valve` (a TCV, i.e. a settable minor
-loss) and `fcv` (a `FixedFlow`).
+loss), `fcv` (a `FixedFlow`), `pbv` (a `BreakerValve`) and `gpv` (a `GeneralPurposeValve`).
+The two last are implicit laws (their flow is an unknown), so a network holding either is
+solved by Modified Nodal Analysis; every other network stays on the nodal path.
 """
 
 from __future__ import annotations
@@ -23,10 +25,13 @@ from noodl.apps.water.demand import PressureDrivenDemand
 from noodl.apps.water.elements import (
     EPANET_QCF,
     NU_WATER_REF,
+    BreakerValve,
     CompositeDarcyWeisbach,
+    GeneralPurposeValve,
     HazenWilliams,
     MinorLoss,
     PumpCurve,
+    epanet_minor_coefficient,
     three_point_curve,
 )
 from noodl.apps.water.tanks import Control, TankLevels
@@ -50,12 +55,11 @@ RHO_W = 998.2
 MU_W = 1.002e-3
 G = 9.80665
 
-#: Valve types this application models, and the ones it refuses. PRV, PSV and PBV
-#: switch status (open / closed / active) with the explicit if/else logic the EPANET 2.2
-#: Manual states on p.113, which is not differentiable without a smoothed relaxation; GPV
-#: needs a tabulated head-loss curve. None of the four is implemented.
-_VALVES_MODELLED = ("TCV", "FCV")
-_VALVES_REFUSED = ("PRV", "PSV", "PBV", "GPV")
+#: Valve types this application models, and the ones it refuses. PRV and PSV switch status
+#: (open / closed / active) on the ABSOLUTE head at one end, with the if/else logic and
+#: hysteresis of the EPANET 2.2 Manual p.113; neither is implemented.
+_VALVES_MODELLED = ("TCV", "FCV", "PBV", "GPV")
+_VALVES_REFUSED = ("PRV", "PSV")
 
 
 @dataclass(frozen=True)
@@ -149,7 +153,8 @@ class Pump:
 @dataclass(frozen=True)
 class Valve:
     """A valve from `u` to `v`: `diameter` (m), EPANET `kind` (for example `TCV`) and
-    its `setting`, with a minor-loss coefficient."""
+    its `setting` (TCV: a loss coefficient; FCV: a flow, m3/s; PBV: a head drop, m), with a
+    minor-loss coefficient. A GPV's setting is its head-loss `curve` (a `curves` key)."""
 
     name: str
     u: str
@@ -158,6 +163,7 @@ class Valve:
     kind: str
     setting: float
     minor_loss: float = 0.0
+    curve: str | None = None
 
 
 @dataclass(frozen=True)
@@ -192,9 +198,12 @@ class WaterNetwork:
 
     def links(self) -> list:
         """Every link, in the kind order the layer's law list uses."""
-        tcv = [v for v in self.valves if v.kind.upper() == "TCV"]
-        fcv = [v for v in self.valves if v.kind.upper() == "FCV"]
-        return [*self.pipes, *self.pumps, *tcv, *fcv]
+        return [*self.pipes, *self.pumps,
+                *(v for kind in _VALVES_MODELLED for v in self.valves_of(kind))]
+
+    def valves_of(self, kind: str) -> list:
+        """The valves of EPANET type `kind`, in file order."""
+        return [v for v in self.valves if v.kind.upper() == kind]
 
     def validate(self) -> None:
         """Refuse, BY NAME, everything this application does not model."""
@@ -275,10 +284,9 @@ class WaterNetwork:
             kind = valve.kind.upper()
             if kind in _VALVES_REFUSED:
                 raise ValueError(
-                    f"WaterNetwork: valve {valve.name!r} is a {kind}; PRV, PSV and PBV "
-                    f"switch status with the if/else logic of EPANET 2.2 Manual p.113 and "
-                    f"GPV needs a tabulated curve -- none is differentiable without a "
-                    f"smoothed relaxation, and all four are out of scope"
+                    f"WaterNetwork: valve {valve.name!r} is a {kind}; PRV and PSV switch "
+                    f"status on the absolute head at one end, with the if/else logic and "
+                    f"hysteresis of EPANET 2.2 Manual p.113, and are out of scope"
                 )
             if kind not in _VALVES_MODELLED:
                 raise ValueError(
@@ -290,6 +298,24 @@ class WaterNetwork:
                     f"WaterNetwork: TCV {valve.name!r} has a negative loss coefficient "
                     f"{valve.setting!r}"
                 )
+            if kind == "PBV" and not (valve.setting >= 0 and valve.minor_loss >= 0):
+                raise ValueError(
+                    f"WaterNetwork: PBV {valve.name!r} needs a head drop and a minor loss "
+                    f">= 0, got {valve.setting!r} and {valve.minor_loss!r}"
+                )
+            if kind == "GPV":
+                points = self.curves.get(valve.curve)
+                if points is None:
+                    raise ValueError(
+                        f"WaterNetwork: GPV {valve.name!r} names head-loss curve "
+                        f"{valve.curve!r}, which has no [CURVES] entry"
+                    )
+                flows = [x for x, _ in points]
+                if len(points) < 2 or any(b <= a for a, b in zip(flows, flows[1:], strict=False)):
+                    raise ValueError(
+                        f"WaterNetwork: GPV {valve.name!r} uses curve {valve.curve!r}, "
+                        f"which needs at least two points with increasing flows"
+                    )
         if self.headloss not in ("H-W", "D-W"):
             raise ValueError(
                 f"WaterNetwork: headloss {self.headloss!r}; only H-W and D-W are modelled "
@@ -465,12 +491,10 @@ def build_model(
         graph.add_edge(pipe.u, pipe.v, kind="pipe", name=pipe.name)
     for pump in net.pumps:
         graph.add_edge(pump.u, pump.v, kind="pump", name=pump.name)
-    tcv = [v for v in net.valves if v.kind.upper() == "TCV"]
-    fcv = [v for v in net.valves if v.kind.upper() == "FCV"]
-    for valve in tcv:
-        graph.add_edge(valve.u, valve.v, kind="valve", name=valve.name)
-    for valve in fcv:
-        graph.add_edge(valve.u, valve.v, kind="fcv", name=valve.name)
+    tcv, fcv, pbv, gpv = (net.valves_of(kind) for kind in _VALVES_MODELLED)
+    for valves, kind in ((tcv, "valve"), (fcv, "fcv"), (pbv, "pbv"), (gpv, "gpv")):
+        for valve in valves:
+            graph.add_edge(valve.u, valve.v, kind=kind, name=valve.name)
 
     notes: dict[str, str] = dict(net.notes)
     scale = rho * G if headloss == "D-W" else 1.0
@@ -564,6 +588,24 @@ def build_model(
         laws.append(
             FixedFlow(torch.tensor([v.setting for v in fcv], dtype=F64), kind="fcv")
         )
+    if pbv:
+        minor = epanet_minor_coefficient(
+            torch.tensor([v.minor_loss for v in pbv], dtype=F64),
+            torch.tensor([v.diameter for v in pbv], dtype=F64),
+            _rounded_cfs_per_m3s(options.flow_units),
+        )
+        laws.append(BreakerValve(
+            torch.tensor([v.setting * scale for v in pbv], dtype=F64), minor * scale,
+            kind="pbv"))
+    if gpv:
+        curves = [net.curves[v.curve] for v in gpv]
+        width = max(len(c) for c in curves)
+        flows = torch.full((len(gpv), width), torch.inf, dtype=F64)
+        heads = torch.zeros((len(gpv), width), dtype=F64)
+        for i, points in enumerate(curves):
+            flows[i, : len(points)] = torch.tensor([x for x, _ in points], dtype=F64)
+            heads[i, : len(points)] = torch.tensor([y * scale for _, y in points], dtype=F64)
+        laws.append(GeneralPurposeValve(flows, heads, [len(c) for c in curves], kind="gpv"))
 
     boundary = [r.name for r in net.reservoirs] + [t.name for t in net.tanks]
     node_sources: list = []
