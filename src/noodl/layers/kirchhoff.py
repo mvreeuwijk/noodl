@@ -12,10 +12,12 @@ from collections.abc import Mapping, Sequence
 import torch
 
 from noodl._broadcast import broadcast_shapes
-from noodl._tracking import bulk_values, same_tracking
+from noodl._tracking import bulk_values
 from noodl.drives import Drive, check_drive_signature
 from noodl.elements.base import ConstitutiveLaw
+from noodl.layers._functional import FunctionalLaws
 from noodl.layers._mna import MnaSystem
+from noodl.layers._solve_policy import resolve_classic, resolve_mna
 from noodl.layers._topology import TopologyGuard
 from noodl.nodesources import NodeSource
 from noodl.operators.graph import GraphLaplacianOperator
@@ -1125,28 +1127,44 @@ class KirchhoffLayer(TopologyGuard):
         for key, value in self.newton_defaults.items():
             newton_kwargs.setdefault(key, value)
         if self.mna:
-            if newton_kwargs.get("on_failure") == "return_primal":
-                # as on the classic path: "return" where nothing differentiable reaches the
-                # solve (then its primal Newton alone), "raise" where it is differentiated
-                reaches = self._reaches_grad(drivers or {}, sources, phi_boundary) or (
-                    history is not None and torch.is_grad_enabled()
-                    and any(isinstance(h, torch.Tensor) and h.requires_grad for h in history))
-                if diagnostics is None:
-                    raise ValueError(
-                        f"KirchhoffLayer {self.name!r}: on_failure='return_primal' "
-                        f"requires diagnostics= so the status is not silently dropped; pass "
-                        f"a dict and read its 'converged' and 'residual_norm' entries."
-                    )
-                if differentiable and not reaches:
-                    # the differentiable path's own refusal still applies to the primal one
-                    self._check_no_unreachable_differentiable_tensors()
-                    differentiable = False
-                newton_kwargs["on_failure"] = "raise" if differentiable else "return"
-            return self._mna.solve(
-                phi_boundary, drivers, sources, phi0, q0=q0, history=history, dt=dt, t=t,
-                integration=integration, mode=mode, differentiable=differentiable,
-                diagnostics=diagnostics, **newton_kwargs,
+            return self._solve_mna(
+                phi_boundary, drivers, sources, phi0, q0, history, dt, t, integration, mode,
+                differentiable, diagnostics, newton_kwargs,
             )
+        self._check_classic_arguments(mode, dt, history)
+        drivers = drivers or {}
+        policy = resolve_classic(
+            self, newton_kwargs, diagnostics, differentiable, drivers, sources, phi_boundary
+        )
+        phi0, dq0, node_slopes0 = self._starting_point(phi0, phi_boundary, drivers, sources)
+        if not policy.differentiable:
+            return self._solve_primal(
+                phi0, dq0, node_slopes0, phi_boundary, drivers, sources, diagnostics,
+                newton_kwargs,
+            )
+        self._check_no_unreachable_differentiable_tensors()
+        fn = FunctionalLaws(self, drivers, sources, phi_boundary)
+        return self._solve_implicit(
+            fn, phi0, phi_boundary, drivers, policy, diagnostics, newton_kwargs
+        )
+
+    def _solve_mna(
+        self, phi_boundary, drivers, sources, phi0, q0, history, dt, t, integration, mode,
+        differentiable, diagnostics, newton_kwargs,
+    ):
+        """`solve` of a layer solved by Modified Nodal Analysis (`noodl.layers._mna`)."""
+        differentiable = resolve_mna(
+            self, newton_kwargs, diagnostics, differentiable, drivers, sources, phi_boundary,
+            history,
+        )
+        return self._mna.solve(
+            phi_boundary, drivers, sources, phi0, q0=q0, history=history, dt=dt, t=t,
+            integration=integration, mode=mode, differentiable=differentiable,
+            diagnostics=diagnostics, **newton_kwargs,
+        )
+
+    def _check_classic_arguments(self, mode, dt, history) -> None:
+        """Refuse the keywords a classic (static-law) layer cannot honour."""
         if mode == "phasor":
             raise ValueError(
                 f"KirchhoffLayer {self.name!r}: mode='phasor' needs a layer built with "
@@ -1163,30 +1181,12 @@ class KirchhoffLayer(TopologyGuard):
                 f"KirchhoffLayer {self.name!r} is solved by nodal analysis: its laws are "
                 f"static, so it takes no step; drop {stepping}"
             )
-        drivers = drivers or {}
-        newton_kwargs.setdefault("method", self.linear_solver)
-        primal_only = newton_kwargs.get("on_failure") == "return_primal"
-        if primal_only:
-            # decided below, once the path is known: "return" on the primal path, "raise"
-            # on the differentiable one
-            newton_kwargs["on_failure"] = "return"
-        # Name this layer on every error the Newton solve or its INNER linear solves raise.
-        # Grounding is certified at phi0, but slopes change between Newton iterates, so an
-        # instance can lose it mid-iteration; without this the refusal read "newton:
-        # method='auto' refuses to split the batch ..." with no way to tell which layer of a
-        # composed model over one network produced it.
-        newton_kwargs.setdefault("where", f"KirchhoffLayer {self.name!r} solve")
-        if newton_kwargs.get("on_failure") == "return" and diagnostics is None:
-            # `solve` returns (phi, q) tensors; without a diagnostics dict there is nowhere
-            # for `converged`/`residual_norm` to go, and a non-converged phi would be
-            # indistinguishable from a converged one. The escape hatch is never silent: the
-            # result carries the status.
-            raise ValueError(
-                f"KirchhoffLayer {self.name!r}: on_failure='return' requires "
-                f"diagnostics= so the status is not silently dropped; pass a dict and read "
-                f"its 'converged' and 'residual_norm' entries."
-            )
 
+    def _starting_point(self, phi0, phi_boundary, drivers, sources):
+        """The Newton starting guess, certified grounded: `(phi0, dq0, node_slopes0)`.
+
+        `dq0` and `node_slopes0` are the slopes at that point; the first operator reuses them.
+        """
         # The initial guess is NOT a differentiable quantity, and neither is the grounding
         # check below. Both are computed under no_grad (and a caller-supplied phi0 is
         # detached) so nothing that produced them is traced into the autograd graph.
@@ -1217,257 +1217,86 @@ class KirchhoffLayer(TopologyGuard):
             dq0 = self.dflows(phi0_full, drivers)
             node_slopes0 = self._node_source_slopes(phi0_full, drivers)
             self._grounding_check(dq0, where="solve", node_slopes=node_slopes0)
+        return phi0, dq0, node_slopes0
 
-        if differentiable and self.analytic_primal and not self._reaches_grad(
-            drivers, sources, phi_boundary
-        ):
-            # Nothing differentiable reaches this solve, so the implicit path would return
-            # the same detached root through an autograd Jacobian (`analytic_primal`).
-            differentiable = False
-        # "return_primal": "return" unless something differentiable reaches the solve; a
-        # differentiable solve that nothing reaches is its forward Newton alone (below).
-        forward_only = primal_only and differentiable and not self._reaches_grad(
-            drivers, sources, phi_boundary)
-        if primal_only and differentiable and not forward_only:
-            newton_kwargs["on_failure"] = "raise"
-        if not differentiable:
-            # The WHOLE non-differentiable solve runs under no_grad -- the Newton iteration,
-            # every inner linear solve inside it, and the final assemble/flows. Two reasons,
-            # the second of which is the one that made this mandatory rather than tidy:
-            #
-            # 1. There is no legitimate graph to build here. This branch does not use the
-            #    implicit adjoint, so any graph it leaves behind is an UNROLLED trace through
-            #    the converged Newton iterate -- real gradients, but not the ones
-            #    `differentiable=True` computes, retained for a caller who asked for the
-            #    non-differentiable path.
-            # 2. It made the inner solver's choice depend on the CALLER's ambient grad mode.
-            #    `solvers.select.solve`'s "auto" refuses the non-differentiable sparse-direct
-            #    backend when grad mode is on and an input requires grad (correctly: it would
-            #    silently detach). With the iteration running under whatever mode the caller
-            #    happened to be in, the same `solve(differentiable=False)` factorised through
-            #    SuperLU from a plain call and fell back to PCG -- 4.6x slower, and a
-            #    different code path -- from inside `torch.enable_grad()` with a
-            #    grad-requiring `sources`. A solver choice must not be a function of the
-            #    caller's context. The guard in `select.solve` stays as the last line of
-            #    defence; this removes the condition that was tripping it.
-            #
-            # `diagnostics` is filled exactly as before (no_grad does not touch it), and the
-            # returned `(phi, q)` are now unconditionally detached -- see the docstring.
-            with torch.no_grad():
-                # The last residual's point, potentials and flows: Newton returns the iterate
-                # it last evaluated the residual at, whose flows are then the result's.
-                last: dict = {}
+    def _solve_primal(
+        self, phi0, dq0, node_slopes0, phi_boundary, drivers, sources, diagnostics,
+        newton_kwargs,
+    ):
+        """The non-differentiable classic solve: Newton alone, detached `(phi, q)`."""
+        # The WHOLE non-differentiable solve runs under no_grad -- the Newton iteration,
+        # every inner linear solve inside it, and the final assemble/flows. Two reasons,
+        # the second of which is the one that made this mandatory rather than tidy:
+        #
+        # 1. There is no legitimate graph to build here. This branch does not use the
+        #    implicit adjoint, so any graph it leaves behind is an UNROLLED trace through
+        #    the converged Newton iterate -- real gradients, but not the ones
+        #    `differentiable=True` computes, retained for a caller who asked for the
+        #    non-differentiable path.
+        # 2. It made the inner solver's choice depend on the CALLER's ambient grad mode.
+        #    `solvers.select.solve`'s "auto" refuses the non-differentiable sparse-direct
+        #    backend when grad mode is on and an input requires grad (correctly: it would
+        #    silently detach). With the iteration running under whatever mode the caller
+        #    happened to be in, the same `solve(differentiable=False)` factorised through
+        #    SuperLU from a plain call and fell back to PCG -- 4.6x slower, and a
+        #    different code path -- from inside `torch.enable_grad()` with a
+        #    grad-requiring `sources`. A solver choice must not be a function of the
+        #    caller's context. The guard in `select.solve` stays as the last line of
+        #    defence; this removes the condition that was tripping it.
+        #
+        # `diagnostics` is filled exactly as before (no_grad does not touch it), and the
+        # returned `(phi, q)` are now unconditionally detached -- see the docstring.
+        with torch.no_grad():
+            # The last residual's point, potentials and flows: Newton returns the iterate
+            # it last evaluated the residual at, whose flows are then the result's.
+            last: dict = {}
 
-                def residual_fn(x):
-                    r, phi, q = self._residual_parts(x, phi_boundary, drivers, sources)
-                    last.update(x=x, phi=phi, q=q)
-                    return r
+            def residual_fn(x):
+                r, phi, q = self._residual_parts(x, phi_boundary, drivers, sources)
+                last.update(x=x, phi=phi, q=q)
+                return r
 
-                def operator_fn(x):
-                    # A matvec-free A_I diag(dq) A_I^T at the current iterate, instead of the
-                    # dense (n_interior, n_interior) einsum layer.jacobian() assembles.
-                    # Rebuilt each iteration because dq is what changes; the endpoint/index
-                    # tensors it closes over are cached on the layer at construction. At the
-                    # starting point the grounding check's slopes above are those slopes.
-                    if x is phi0:
-                        return self._operator_at(dq0, node_slopes0)
-                    phi = self.assemble(x, phi_boundary)
-                    dq = self.dflows(phi, drivers)
-                    return self._operator_at(dq, self._node_source_slopes(phi, drivers))
+            def operator_fn(x):
+                # A matvec-free A_I diag(dq) A_I^T at the current iterate, instead of the
+                # dense (n_interior, n_interior) einsum layer.jacobian() assembles.
+                # Rebuilt each iteration because dq is what changes; the endpoint/index
+                # tensors it closes over are cached on the layer at construction. At the
+                # starting point the grounding check's slopes above are those slopes.
+                if x is phi0:
+                    return self._operator_at(dq0, node_slopes0)
+                phi = self.assemble(x, phi_boundary)
+                dq = self.dflows(phi, drivers)
+                return self._operator_at(dq, self._node_source_slopes(phi, drivers))
 
-                result = newton(residual_fn, operator_fn, phi0, **newton_kwargs)
-                if diagnostics is not None:
-                    diagnostics["newton_iterations"] = result.iterations
-                    diagnostics["linear_iterations"] = result.linear_iterations
-                    diagnostics["method"] = newton_kwargs["method"]
-                    # `method` is what was REQUESTED, `backend` what RAN. Under "auto" the
-                    # two differ: the batch threshold and SciPy's presence decide which
-                    # side of `select`'s eligibility table this solve landed on, and
-                    # nothing else reports it.
-                    diagnostics["backend"] = result.backend
-                    # The per-instance STATUS, not only the cost. Without these two,
-                    # `on_failure="return"` returned a non-converged phi with nothing
-                    # anywhere reporting it.
-                    diagnostics["converged"] = result.converged
-                    diagnostics["residual_norm"] = result.residual_norm
-                if last.get("x") is result.x:
-                    phi, q = last["phi"], last["q"]
-                else:
-                    phi = self.assemble(result.x, phi_boundary)
-                    q = self.flows(phi, drivers)
-            return phi, q
+            result = newton(residual_fn, operator_fn, phi0, **newton_kwargs)
+            if diagnostics is not None:
+                diagnostics["newton_iterations"] = result.iterations
+                diagnostics["linear_iterations"] = result.linear_iterations
+                diagnostics["method"] = newton_kwargs["method"]
+                # `method` is what was REQUESTED, `backend` what RAN. Under "auto" the
+                # two differ: the batch threshold and SciPy's presence decide which
+                # side of `select`'s eligibility table this solve landed on, and
+                # nothing else reports it.
+                diagnostics["backend"] = result.backend
+                # The per-instance STATUS, not only the cost. Without these two,
+                # `on_failure="return"` returned a non-converged phi with nothing
+                # anywhere reporting it.
+                diagnostics["converged"] = result.converged
+                diagnostics["residual_norm"] = result.residual_norm
+            if last.get("x") is result.x:
+                phi, q = last["phi"], last["q"]
+            else:
+                phi = self.assemble(result.x, phi_boundary)
+                q = self.flows(phi, drivers)
+        return phi, q
 
-        self._check_no_unreachable_differentiable_tensors()
-
-        # Node sources are threaded through 'Function.apply' exactly as laws are: their
-        # own nn.Parameters are substituted back in with functional_call, so a learnable
-        # demand exponent or required pressure gets a correct implicit-function gradient.
-        owners = [*self._laws, *self._node_sources]
-        n_el = len(self._laws)
-        param_dicts = [dict(owner.named_parameters()) for owner in owners]
-        param_names = [list(d.keys()) for d in param_dicts]
-        param_tensors = [
-            d[name] for d, names in zip(param_dicts, param_names, strict=True) for name in names
-        ]
-        driver_keys = sorted(drivers.keys())
-        driver_tensors = bulk_values(drivers, driver_keys)
-        sources_tensor = (
-            sources
-            if sources is not None
-            else torch.zeros(
-                phi_boundary.shape[:-1] + (self._n_nodes,),
-                dtype=phi_boundary.dtype,
-                device=phi_boundary.device,
-            )
-        )
-        all_params = (*param_tensors, *driver_tensors, sources_tensor, phi_boundary)
-
-        def _rebuild(params):
-            offset = 0
-            rebuilt = []
-            for names in param_names:
-                d = {name: params[offset + j] for j, name in enumerate(names)}
-                rebuilt.append(d)
-                offset += len(names)
-            drv = same_tracking(
-                drivers,
-                dict(zip(driver_keys, params[offset : offset + len(driver_keys)], strict=True)),
-            )
-            offset += len(driver_keys)
-            src = params[offset]
-            pb = params[offset + 1]
-            return rebuilt, drv, src, pb
-
-        def _dp_functional(phi, drv):
-            d = self._difference(phi)
-            parts = []
-            for kind, (start, end) in self._kind_slices.items():
-                block = d[..., start:end]
-                for driven in self._drives:
-                    if driven.kind == kind:
-                        block = block + driven(drv)
-                parts.append((start, block))
-            parts.sort(key=lambda p: p[0])
-            return torch.cat([p[1] for p in parts], dim=-1)
-
-        def _flows_functional(phi, drv, rebuilt):
-            dp_full = _dp_functional(phi, drv)
-            parts = []
-            for el, d, (s, e) in zip(
-                self._laws, rebuilt[:n_el], self._law_slices, strict=True
-            ):
-                parts.append(torch.func.functional_call(el, d, (dp_full[..., s:e], drv)))
-            return torch.cat(parts, dim=-1)
-
-        def _node_withdrawal_functional(phi, drv, rebuilt):
-            return self._scatter_node_sources(lambda j, ns: torch.func.functional_call(
-                ns, rebuilt[n_el + j], (phi[..., ns.nodes], drv)))
-
-        def _node_slopes_functional(phi, drv, rebuilt):
-            def slope(j, ns):
-                leaf = phi[..., ns.nodes].detach().requires_grad_(True)
-                with torch.enable_grad():
-                    w = torch.func.functional_call(ns, rebuilt[n_el + j], (leaf, drv))
-                    (grad,) = torch.autograd.grad(w.sum(), leaf)
-                return grad
-
-            return self._scatter_node_sources(slope)
-
-        def _dp_dependence_error(el, i: int) -> RuntimeError:
-            return RuntimeError(
-                f"law {i} of kind {el.kind!r} (type {type(el).__name__}) produced a "
-                f"flow that does not depend on dp; if that is intended, set "
-                f"dp_independent = True on this law's class, otherwise its flow() is "
-                f"dropping the autograd graph (e.g. a stray dp.detach())."
-            )
-
-        def _dflows_functional(phi, drv, rebuilt):
-            dp_full = _dp_functional(phi, drv)
-            parts = []
-            for i, (el, d, (s, e)) in enumerate(
-                zip(self._laws, rebuilt[:n_el], self._law_slices, strict=True)
-            ):
-                dp_slice = dp_full[..., s:e].detach().requires_grad_(True)
-                # The REDUCTION `flow.sum()` must itself execute inside the enable_grad
-                # block, not just the `functional_call` that produces `flow`: this whole
-                # method runs under the outer no_grad of Newton's forward solve (which is
-                # what keeps the forward's memory flat), and `.sum()` is an ordinary tensor op like
-                # any other -- performed under the ambient grad mode at the point it actually
-                # runs, regardless of whether its input (`flow`) already carries a grad_fn
-                # from an earlier, enable_grad-wrapped computation. Writing
-                # `torch.autograd.grad(flow.sum(), dp_slice)` with the `with
-                # torch.enable_grad():` block closed before that line (as an earlier,
-                # incorrect version of this code did) evaluates `flow.sum()` under the outer
-                # no_grad, so the tensor actually handed to `autograd.grad` as `outputs` has
-                # no grad_fn of its own -- even though `flow` printed `requires_grad=True`
-                # right before the call. `torch.autograd.grad` itself does not consult the
-                # ambient grad mode at its own call site (confirmed: calling it under no_grad
-                # against an output already fully built under enable_grad, or with an explicit
-                # `grad_outputs=` and no further reduction, both work); the reduction is what
-                # must be inside the block.
-                with torch.enable_grad():
-                    flow = torch.func.functional_call(el, d, (dp_slice, drv))
-                    # Whether a missing/zero Jacobian contribution here is legitimate is
-                    # decided ONLY by el.dp_independent -- a class-level DECLARATION (see
-                    # ConstitutiveLaw) -- never inferred from whatever autograd graph `flow` happens
-                    # to carry. A previous version of this code inferred it from
-                    # `flow.requires_grad` (with allow_unused=True as a catch-all), which
-                    # meant ANY law whose flow() accidentally lost the autograd graph
-                    # (e.g. a stray dp.detach() in a third-party subclass) silently got an
-                    # exact-zero Jacobian column instead of an error: the forward solve still
-                    # looked fine (Newton converges on the exact residual regardless), but
-                    # the adjoint gradient computed from that Jacobian was silently wrong.
-                    if el.dp_independent:
-                        # Cross-check the declaration against the law's own analytic
-                        # dflow(), which for a genuinely dp-independent law (FixedFlow's,
-                        # say) must be identically zero. This is called on `el` directly
-                        # (not through functional_call/`d`) rather than via a second
-                        # functional_call: torch.func.functional_call always invokes the
-                        # module's forward()/flow(), with no way to redirect it to dflow(),
-                        # and `d`'s tensors are the very same objects as el's own current
-                        # parameters (both trace back to el.named_parameters() at the start
-                        # of solve()), so reading el's own attributes here gives the same
-                        # values a substituted call would. This catches a wrongly-declared
-                        # dp_independent = True (or a dflow() inconsistent with it) instead
-                        # of silently trusting a possibly-wrong flag.
-                        analytic = el.dflow(dp_slice.detach(), drv)
-                        if not torch.equal(analytic, torch.zeros_like(analytic)):
-                            raise RuntimeError(
-                                f"law {i} of kind {el.kind!r} (type "
-                                f"{type(el).__name__}) declares dp_independent = True but "
-                                f"its own dflow() is not identically zero; either the flag "
-                                f"is wrong or dflow() is inconsistent with a dp-independent "
-                                f"flow law."
-                            )
-                        grad = torch.zeros_like(dp_slice)
-                    elif not flow.requires_grad:
-                        raise _dp_dependence_error(el, i)
-                    else:
-                        try:
-                            (grad,) = torch.autograd.grad(
-                                flow.sum(), dp_slice, create_graph=False
-                            )
-                        except RuntimeError as exc:
-                            raise _dp_dependence_error(el, i) from exc
-                parts.append(grad)
-            return torch.cat(parts, dim=-1)
-
-        def residual_fn(x, *params):
-            rebuilt, drv, src, pb = _rebuild(params)
-            phi = self.assemble(x, pb)
-            q = _flows_functional(phi, drv, rebuilt)
-            lhs = self._accumulate_interior(q)
-            s_I = src[..., self.interior]
-            w = _node_withdrawal_functional(phi, drv, rebuilt)
-            return lhs - s_I if w is None else lhs - s_I + w
-
-        def operator_fn(x, *params):
-            rebuilt, drv, src, pb = _rebuild(params)
-            phi = self.assemble(x, pb)
-            dq = _dflows_functional(phi, drv, rebuilt)
-            return self._operator_at(dq, _node_slopes_functional(phi, drv, rebuilt))
-
-        if forward_only:
+    def _solve_implicit(
+        self, fn, phi0, phi_boundary, drivers, policy, diagnostics, newton_kwargs
+    ):
+        """The differentiable classic solve through the implicit-function adjoint."""
+        all_params = fn.all_params
+        residual_fn, operator_fn = fn.residual_fn, fn.operator_fn
+        if policy.forward_only:
             # `implicit_solve`'s own forward (the same Newton on the same autograd Jacobian),
             # which may return unconverged: nothing reaches a gradient, so no adjoint is
             # ever asked of this point.
