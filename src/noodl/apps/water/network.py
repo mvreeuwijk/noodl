@@ -34,10 +34,11 @@ from noodl.apps.water.elements import (
     HazenWilliams,
     MinorLoss,
     PumpCurve,
+    TankStorage,
     epanet_minor_coefficient,
     three_point_curve,
 )
-from noodl.apps.water.tanks import Control, TankLevels
+from noodl.apps.water.tanks import Control, TankLevels, TankStorageControls
 from noodl.elements.duct import Duct
 from noodl.elements.fixed import FixedFlow
 from noodl.layers.kirchhoff import KirchhoffLayer
@@ -57,6 +58,9 @@ Drivers = dict[str, Tensor]
 RHO_W = 998.2
 MU_W = 1.002e-3
 G = 9.80665
+
+#: The datum node of `tank_mode="storage"`: head 0, the far end of every tank's storage edge.
+DATUM = "_datum"
 
 #: Valve types this application models, and the ones it refuses. PRV and PSV switch status
 #: (open / closed / active) on the ABSOLUTE head at one end, with the if/else logic and
@@ -403,6 +407,7 @@ def build_model(
     dt: float | None = None,
     friction: str = "composite",
     pipe_form: str | None = None,
+    tank_mode: str = "explicit",
 ) -> tuple[Model, State, Drivers]:
     """Assemble the water model and return `(model, state, drivers)`.
 
@@ -459,8 +464,29 @@ def build_model(
     (`benchmarks/water_eps.py`, which also runs 2.5 times faster). `None` (the default)
     takes `"flow"`, or `"potential"` with `friction="colebrook"`, which gives no head loss
     as a function of the flow.
+
+    `tank_mode` is how a tank's level moves. `"explicit"` (the default) is EPANET's: every
+    tank is a fixed-head boundary for the solve, and `TankLevels.advance` steps its level
+    explicitly from the solved inflow. `"storage"` makes every tank an interior node with a
+    `TankStorage` edge to a datum node `"_datum"` at head 0 (`model.node_names[-1]`), its
+    level stepped implicitly inside the solve (`water_step`, backward Euler by default) and
+    differentiable through time; the levels are read from the solved heads
+    (`tank_levels`), and the level-triggered controls stay closures
+    (`TankStorageControls`). The implicit step differs from EPANET's explicit one by the
+    step's own discretisation error, so it is not the EPANET comparison mode. Not with
+    `quality`.
     """
     net.validate()
+    if tank_mode not in ("explicit", "storage"):
+        raise ValueError(
+            f"build_model: tank_mode must be 'explicit' or 'storage', got {tank_mode!r}"
+        )
+    storage = tank_mode == "storage" and bool(net.tanks)
+    if storage and quality is not None:
+        raise ValueError(
+            "build_model: tank_mode='storage' with quality is not implemented (the quality "
+            "layer treats tanks as boundaries)"
+        )
     if pipe_form not in (None, "potential", "flow"):
         raise ValueError(
             f"build_model: pipe_form must be 'potential' or 'flow', got {pipe_form!r}"
@@ -509,6 +535,9 @@ def build_model(
         graph.add_node(reservoir.name, elevation=reservoir.head)
     for tank in net.tanks:
         graph.add_node(tank.name, elevation=tank.elevation)
+    if storage:
+        graph.add_node(DATUM, elevation=0.0)
+        node_names = [*node_names, DATUM]
     for pipe in net.pipes:
         graph.add_edge(pipe.u, pipe.v, kind="pipe", name=pipe.name)
     for pump in net.pumps:
@@ -640,7 +669,16 @@ def build_model(
             heads[i, : len(points)] = torch.tensor([y * scale for _, y in points], dtype=F64)
         laws.append(GeneralPurposeValve(flows, heads, [len(c) for c in curves], kind="gpv"))
 
-    boundary = [r.name for r in net.reservoirs] + [t.name for t in net.tanks]
+    if storage:
+        for tank in net.tanks:
+            graph.add_edge(tank.name, DATUM, kind="tank", name=tank.name)
+        laws.append(TankStorage(
+            torch.tensor([torch.pi * t.diameter**2 / 4.0 for t in net.tanks], dtype=F64),
+            torch.tensor([t.elevation + t.init_level for t in net.tanks], dtype=F64),
+            scale=scale, kind="tank"))
+        boundary = [r.name for r in net.reservoirs] + [DATUM]
+    else:
+        boundary = [r.name for r in net.reservoirs] + [t.name for t in net.tanks]
     node_sources: list = []
     if pda:
         if not net.junctions:
@@ -681,7 +719,20 @@ def build_model(
 
     reservoir_heads = torch.tensor([r.head * scale for r in net.reservoirs], dtype=F64)
     tank_closure = None
-    if net.tanks:
+    if storage:
+        tank_closure = TankStorageControls(
+            graph, list(net.tanks), list(net.controls), [p.name for p in net.pumps],
+            tank_nodes=[node_names.index(t.name) for t in net.tanks],
+            dt=net.hydraulic_timestep if dt is None else dt,
+            reservoir_heads=reservoir_heads,
+            tank_first_index=len(net.reservoirs),
+            head_scale=scale,
+        )
+        closures.append(tank_closure)
+        for t in net.tanks:
+            state["water.phi"][node_names.index(t.name)] = (t.elevation + t.init_level) * scale
+        state["water.link_status"] = torch.ones(len(net.pumps), dtype=F64)
+    elif net.tanks:
         tank_closure = TankLevels(
             graph, list(net.tanks), list(net.controls), [p.name for p in net.pumps],
             dt=net.hydraulic_timestep if dt is None else dt,
@@ -754,6 +805,7 @@ def build_model(
     # `initial_state` starts from these flows (resistance-form pipes need a first iterate).
     model.initial_flows = state["water.q"].clone()
     model.tank_closure = tank_closure
+    model.tank_mode = "storage" if storage else "explicit"
     model.head_scale = scale
     model.water_network = net
     model.driver_template = dict(drivers)
@@ -809,7 +861,13 @@ def initial_state(model: Model, *, values: Mapping | None = None) -> State:
                 f"{layer.quantity!r}; this application builds concentration layers only"
             )
         state[f"{name}.x"] = torch.zeros(layer.n_i, dtype=F64)
-    if model.tank_closure is not None:
+    if getattr(model, "tank_mode", "explicit") == "storage":
+        closure = model.tank_closure
+        state["water.phi"][..., closure.tank_nodes] = (
+            closure.bottom + torch.tensor([t.init_level for t in closure.tanks], dtype=F64)
+        ) * closure.head_scale
+        state["water.link_status"] = torch.ones(len(closure.pump_names), dtype=F64)
+    elif model.tank_closure is not None:
         state["water.tank_level"] = torch.tensor(
             [t.init_level for t in model.tank_closure.tanks], dtype=F64
         )
@@ -931,6 +989,33 @@ def _refuse_pump_overflow(model: Model, state: State) -> None:
     raise RuntimeError("water_steady: " + "; ".join(bad))
 
 
+def water_step(model: Model, state: State, drivers: Drivers, dt: float, *,
+               integration: str = "backward_euler", **solve_kwargs) -> State:
+    """One step of `dt` (s) of a model built with `tank_mode="storage"`: `Model.step` with
+    `water_steady`'s Newton defaults and pump check, the tank levels stepped implicitly
+    (`TankStorage`, `integration` `"backward_euler"` or `"trapezoidal"`; trapezoidal needs
+    a step-start state whose tank flows are solved, not the build's zeros). The level
+    controls act on the step-start levels, as EPANET's do."""
+    if getattr(model, "tank_mode", "explicit") != "storage":
+        raise ValueError(
+            "water_step: the model's tanks are not storage (build_model(tank_mode="
+            "'storage')); step an explicit model with water_steady and TankLevels.advance"
+        )
+    solve_kwargs.setdefault("atol", 1e-11)
+    solve_kwargs.setdefault("rtol", 1e-11)
+    solve_kwargs.setdefault("max_iter", 200)
+    result = model.step(state, drivers, dt, integration=integration, **solve_kwargs)
+    _refuse_pump_overflow(model, result)
+    return result
+
+
+def tank_levels(model: Model, state: State) -> Tensor:
+    """Every tank's level (m above its bottom) in `state`, in either `tank_mode`."""
+    if getattr(model, "tank_mode", "explicit") == "storage":
+        return model.tank_closure.levels(state)
+    return state["water.tank_level"]
+
+
 def tank_inflow(model: Model, state: State) -> Tensor:
     """Net inflow (m3/s) at every tank node, from the layer's solved branch flows.
 
@@ -939,5 +1024,7 @@ def tank_inflow(model: Model, state: State) -> Tensor:
     `boundary_flows`.
     """
     layer = model.kirchhoff["water"]
+    if getattr(model, "tank_mode", "explicit") == "storage":
+        return state["water.q"][..., layer.kind_slice("tank")]   # the storage edges' flows
     first = model.tank_closure.tank_first_index
     return -layer.net_outflow(state["water.q"])[..., layer.bound[first:]]

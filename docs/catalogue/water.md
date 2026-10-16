@@ -13,7 +13,7 @@ Build the model and its starting state and inputs.
 
 | Name | What it does | How to call it |
 |---|---|---|
-| `build_model` | Assemble the water model and return `(model, state, drivers)`. | `build_model(net, *, headloss=None, pda=None, p_min=None, p_req=None, exponent=None, quality=None, coupling='pingpong', dt=None, friction='composite', pipe_form=None)` |
+| `build_model` | Assemble the water model and return `(model, state, drivers)`. | `build_model(net, *, headloss=None, pda=None, p_min=None, p_req=None, exponent=None, quality=None, coupling='pingpong', dt=None, friction='composite', pipe_form=None, tank_mode='explicit')` |
 | `initial_drivers` | `build_model`'s driver template (copied), then `values` by name (see `noodl.refs.drivers_from`), then `demand`: `{junction: m3/s withdrawn}`, positive, stored as the negative nodal source the head solve takes. | `initial_drivers(model, *, values=None, demand=None)` |
 | `initial_state` | All-zero state, dispatching on each layer's `quantity` (the app convention), tank levels from the network file; then `values` by node, tank or pump name (see `noodl.refs.state_from`): `initial_state(model, values={"water.tank_level": {"T1": 4.0}})`. | `initial_state(model, *, values=None)` |
 
@@ -46,6 +46,7 @@ The relation between the flow through an edge and the potential difference acros
 | `HazenWilliams` | ``h_L = K q^1.852 + m q^2`` with ``K = 10.666829500036 C^-1.852 d^-4.871 L``. | `HazenWilliams(length, diameter, roughness, *, minor_loss=0.0, dp_transition=1e-09, kind='pipe', learnable=False)` |
 | `MinorLoss` | ``h = m q \|q\|`` with ``m = K / (2 g A^2)``: a throttle control valve (TCV) or any pure minor-loss link. Inverted in closed form, ``q = sign(h) sqrt(\|h\| / m)``, with the same laminar blend and both-branch safe substitution as ``HazenWilliams``. | `MinorLoss(setting, diameter, *, dp_transition=1e-09, kind='valve', learnable=False)` |
 | `PumpCurve` | Constant-speed pump on its own edge kind: ``h_gain = w^2 (h0 - r (q/w)^n)``. | `PumpCurve(h0, r, n=2.0, *, speed=1.0, dp_transition=1e-06, status_key=None, kind='pump', learnable=False)` |
+| `TankStorage` | A cylindrical tank as storage (`build_model(tank_mode="storage")`): an edge from the tank's node to a datum at head 0, so that ``dp`` is the tank's head times ``scale`` and the edge's flow is the net inflow into the tank. The volume above the datum changes by ``A dH``, so in a step of ``dt``. | `TankStorage(area, head0, *, scale=1.0, kind='tank')` |
 
 ## Closures
 
@@ -81,9 +82,11 @@ Calculations and helpers.
 | `pressure_head` | Pressure head (m) at every node: the solved head minus the node's elevation. | `pressure_head(model, state, elevations=None)` |
 | `composite_friction_factor`<br><small>also `epanet_friction_factor`</small> | Composite friction factor for ``Re > 2000``: ``(f, df/dq)``. | `composite_friction_factor(q, e, s)` |
 | `tank_inflow` | Net inflow (m3/s) at every tank node, from the layer's solved branch flows. | `tank_inflow(model, state)` |
+| `tank_levels` | Every tank's level (m above its bottom) in `state`, in either `tank_mode`. | `tank_levels(model, state)` |
 | `three_point_curve` | EPANET's single-point pump-curve fit: ``(h0, r, n)`` for ``h = h0 - r q^n``. | `three_point_curve(q_design, h_design)` |
 | `to_kilopascal` | Metres of head -> kPa, at `rho = 998.2 kg/m3` and `g = 9.80665 m/s2`. | `to_kilopascal(head)` |
 | `twoloop` | The committed hand-made SI fixture (`tests/data/water/twoloop_si.inp`). | `twoloop()` |
+| `water_step` | One step of `dt` (s) of a model built with `tank_mode="storage"`: `Model.step` with `water_steady`'s Newton defaults and pump check, the tank levels stepped implicitly (`TankStorage`, `integration` `"backward_euler"` or `"trapezoidal"`; trapezoidal needs a step-start state whose tank flows are solved, not the build's zeros). The level controls act on the step-start levels, as EPANET's do. | `water_step(model, state, drivers, dt, *, integration='backward_euler', **solve_kwargs)` |
 | `water_steady` | The quasi-steady state: one `Model.steady` with tight Newton tolerances. | `water_steady(model, state, drivers, **solve_kwargs)` |
 
 ## Constants and tables
