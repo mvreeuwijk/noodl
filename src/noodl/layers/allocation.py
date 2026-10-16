@@ -304,16 +304,15 @@ class AllocatedFlowLayer(TopologyGuard):
 
         Bracket: `lo=0` always brackets the root from below -- `g(0, target=free_headroom) =
         demand_at_tgt - free_headroom >= 0` exactly when the node IS oversubscribed, by that
-        condition's own definition. `hi` is a single GLOBAL scalar (not a tight per-node
-        bound -- `solve_monotone` only needs a VALID bracket, not a tight one, and a global
+        condition's own definition. `hi` is one scalar PER INSTANCE (not a tight per-node
+        bound -- `solve_monotone` only needs a VALID bracket, not a tight one, and a per-instance
         scalar avoids a per-node scatter-max op): `max(preference * clamp(remaining, min=0))
-        + 1` over EVERY edge in the whole call. At that `lambda`, `remaining_i -
-        lambda/preference_i <= 0` for every edge everywhere (not just this node's), so `g(hi)
-        <= -free_headroom <= 0` for every node -- loose but always safe. `hi` is built with
-        `.item()` (a plain Python float), deliberately detached: `solve_monotone` never
-        returns a gradient for `lo`/`hi` (only for `*params`), so building it from a
-        `requires_grad` tensor would be silently discarded anyway, and `.item()` makes that
-        explicit rather than relying on the library's own (correct, but non-obvious) behaviour.
+        + 1` over every edge of THAT instance (the max is over the edge axis only, so a batch
+        mixing scales brackets each instance as it would be alone). At that `lambda`,
+        `remaining_i - lambda/preference_i <= 0` for every edge of the instance, so `g(hi)
+        <= -free_headroom <= 0` for every node -- loose but always safe. `hi` is detached:
+        `solve_monotone` never returns a gradient for `lo`/`hi` (only for `*params`), so
+        building it from a `requires_grad` tensor would be silently discarded anyway.
 
         NON-OVERSUBSCRIBED nodes (or nodes with no incoming edges at all) still need a VALID
         bracket -- `solve_monotone` raises if `g(lo)` and `g(hi)` share a sign, which they
@@ -425,8 +424,11 @@ class AllocatedFlowLayer(TopologyGuard):
         # level property shared by every edge into it), each contributing min(1.0, 2.0) = 1.0.
         target = torch.where(node_oversubscribed, free_headroom, in_degree)
         lo = torch.zeros_like(free_headroom)
-        hi_value = (preference * torch.clamp(remaining, min=0.0)).max().item() + 1.0
-        hi = torch.full_like(free_headroom, hi_value)
+        # Per instance: the max runs over the edges of one instance only, so a batch mixing
+        # scales brackets (and bisects) each instance as it would be alone.
+        scale = (preference * torch.clamp(remaining, min=0.0)).detach()
+        hi_value = scale.amax(-1, keepdim=True) + 1.0
+        hi = torch.zeros_like(free_headroom) + hi_value.to(free_headroom.dtype)
 
         def _residual(lam, remaining_e, avail_e, preference_e, target):
             lam_e = lam.index_select(-1, self._tgt)

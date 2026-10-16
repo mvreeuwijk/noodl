@@ -438,6 +438,23 @@ class MnaSystem:
             q_parts.append(q_s)
         return _cat(q_parts, dp), _cat(r_parts, dp)
 
+    def flows(self, phi, drivers, q) -> Tensor:
+        """`KirchhoffLayer.flows` of an MNA layer: `q`'s implicit-edge columns as given, the
+        other edges' flows from their laws at `phi` (steady context)."""
+        layer = self.layer
+        if self.w == 2:
+            raise TypeError(
+                f"KirchhoffLayer {layer.name!r} is a phasor layer (Modified Nodal Analysis): "
+                f"flows() is not defined on it; read the flows from solve()'s q")
+        n_edges = len(layer.cols)
+        if q.shape[-1] != n_edges:
+            raise ValueError(
+                f"KirchhoffLayer {layer.name!r}: q must hold every edge's flow "
+                f"({n_edges}) as solve() returns it; got last dimension {q.shape[-1]}")
+        out, _ = self._flows_and_residuals(phi, q[..., self.f_edges], drivers,
+                                           LawContext(mode="dc"), self._plain_call)
+        return out
+
     def _withdrawal(self, phi, drivers, call) -> Tensor | None:
         """The node sources' withdrawal per interior row, or `None` without node sources."""
         n_el = len(self.layer._laws)
