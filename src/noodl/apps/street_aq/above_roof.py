@@ -29,30 +29,27 @@ Why excess over background. `C_ext = C_bg + K F` must be NEUTRAL to the backgrou
 no emission anywhere and a uniform `C_bg`, every street sits at `C_bg` and `C_ext` must
 stay at `C_bg`. The roof flux is neutral by construction (`C - C_ext = 0`). A junction
 source of `sum_out q C_street` is not: it re-emits background air that the plume sum then
-adds on top of the background it already contains -- measured on a 7 x 7 lattice
-(L = 100 m, W = H = 20 m, u* = 0.5 m/s, 0.3 rad) as `max C_ext / C_bg = 1.095` with
-nothing emitted. The background is already in `C_bg`; only what the canopy adds to it may
-enter the plume sum. The subtraction uses the background of the street the air leaves,
+adds on top of the background it already contains (a lattice with nothing emitted then
+gives `max C_ext / C_bg > 1`; see `docs/design/water_street.md#junction-source`). The
+background is already in `C_bg`; only what the canopy adds to it may enter the plume sum. The subtraction uses the background of the street the air leaves,
 which is what that street would hold with no emissions under a uniform background.
 
 - The downward flow through the INCOMING vents carries the `C_ext` of the street it enters
   -- exactly what the per-street background model already transports -- and by default is
   NOT subtracted from the plume sum (`junction_source="upward"`, which therefore has no
-  direct `C_ext` self-sink). The reason is measured, not aesthetic: noodl physics has no
+  direct `C_ext` self-sink). The reason is physical, not aesthetic: noodl physics has no
   above-intersection concentration (SIRANE's `C_ext-int,j`, Eq. 8), so the air drawn down
   at junction `j` into street `i` is taken at `C_ext,i`, and a sink of that air at the
   junction, half a street upwind of street `i`'s own midpoint, feeds straight back into
   `C_ext,i`: `G[i, i] = -K_j[i, j] q_in`, a loop that exists only because `C_ext-int` is
-  missing. On `twelve_street_grid` (L = 100 m, W = H = 20 m, u* = 0.5 m/s) the spectral
-  radius of the coupling is 0.20 at a 0.3 rad wind and 0.31 at 0 rad (the junction
-  plume's vertical profile is capped at `1/H`, which keeps that loop gain below one),
-  while without the sink it is exactly 0 in both.
+  missing. With the sink the junction plume's vertical profile is capped at `1/H`, which
+  keeps that loop gain below one; without it the spectral radius of the coupling is exactly 0
+  (`docs/design/water_street.md#junction-source`).
   `junction_source="net"` keeps the sink, again as an excess over background,
   `F_j = F_up - F_down` with `F_down,j = sum_in q (C_ext,street - C_bg,street)` (the
   street the air enters), for comparison -- on SIRANE's archived `C_ext` the two modes are
-  close, median error 0.32 % (upward) and 0.29 % (net) at the deck's downwind cut-off
-  (`tests/verification/test_sirane.py`). The street roof flux keeps its sign in both
-  modes: its sink term never reaches its own street
+  close (`tests/verification/test_sirane.py`; figures in the design note). The
+  street roof flux keeps its sign in both modes: its sink term never reaches its own street
   (`street_kernel(self_contribution=False)`).
 
 Canopy mass balance: with a UNIFORM `C_bg` the network's vent and exchange flows to and

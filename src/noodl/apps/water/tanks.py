@@ -14,10 +14,10 @@ extended-period driver (e.g. `benchmarks/water_eps.py`) with the net inflow from
 closure's own boundary values just fed into -- it is not called from `__call__`, which only ever
 reads the CURRENT level.
 
-`event_step` is EPANET's ADAPTIVE shortening, and it is not optional: measured on Net1 over
-24 h, a fixed 1 h step diverges from EPANET by 2.07 m because the pump switches a whole
-hour late, while shortening the step to the linearly-projected trigger crossing costs 2
-extra sub-steps and brings the worst reported-step difference to 8.181e-5 m (checked in
+`event_step` is EPANET's ADAPTIVE shortening, and it is not optional: with a fixed step
+the pump switches up to a whole step late and the tank level diverges from EPANET; the step
+is shortened to the linearly-projected trigger crossing instead (numbers in
+`docs/design/water_street.md#event-step`; checked in
 `tests/verification/test_water_parity.py::test_net1_extended_period_tank_level`). It
 implements only the CONTROL-CROSSING half of EPANET's rule
 (Manual section 13.1 item 17, p.113: the next step is the minimum of the nominal step and

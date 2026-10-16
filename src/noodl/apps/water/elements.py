@@ -439,8 +439,9 @@ class CompositeDarcyWeisbach(ConstitutiveLaw):
     in ``dp`` and in every parameter is the implicit-function one, ``-(dh/dtheta) / h'(q)``.
     It is taken on the SIGNED flow, so the derivative at ``q = 0`` is the finite laminar
     ``1 / h'(0)`` rather than the zero a ``sign(dp)`` factor would give. (A generic
-    ``solve_monotone`` inversion was measured 5x slower, since it needs an autograd
-    derivative per iteration and a collapsed bracket to stop.)
+    ``solve_monotone`` inversion is deliberately not used: it needs an autograd
+    derivative per iteration and a collapsed bracket to stop; see
+    ``docs/design/water_street.md#headloss-inversion``.)
     """
 
     def __init__(
