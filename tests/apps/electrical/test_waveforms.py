@@ -113,11 +113,6 @@ def test_invalid_parameters_are_refused(make, match):
         make()
 
 
-def test_waveforms_are_frozen():
-    with pytest.raises(AttributeError):
-        Step().start_time = 2.0
-
-
 def test_pulse_period_count_follows_the_event_times_not_the_quotient():
     # 1.7 / 0.1 floors to 17 although 17 * 0.1 > 1.7 (period 17 has not begun: off);
     # 4.3 / 0.1 floors to 42 although 43 * 0.1 == 4.3 (period 43 has begun: on)

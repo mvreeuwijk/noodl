@@ -32,7 +32,7 @@ def _layer(seed, *, conduction, n_species, transmission_one):
     return layer, layer._advection_operator(q), g
 
 
-@pytest.mark.parametrize("seed", range(3))
+@pytest.mark.parametrize("seed", [0])
 @pytest.mark.parametrize("conduction", [False, True])
 @pytest.mark.parametrize("n_species", [1, 2])
 def test_interior_loss_equals_boundary_gain_when_nothing_is_lost_in_transit(

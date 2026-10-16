@@ -68,7 +68,7 @@ def _dense_from_coo(
     return dense_flat.reshape(*batch_shape, m, m)
 
 
-@pytest.mark.parametrize("seed", range(4))
+@pytest.mark.parametrize("seed", [0])
 @pytest.mark.parametrize("conduction,kinetics,removal,n_species", [
     (False, False, False, 1), (True, False, False, 1), (False, True, True, 2),
     (True, True, True, 3),

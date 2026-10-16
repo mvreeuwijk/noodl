@@ -184,13 +184,6 @@ def test_scale_driver_multiplies_the_power():
         law(torch.tensor([12.0, 12.0]), {})
 
 
-def test_laws_declare_their_forms():
-    assert Impedance(1.0).law_form == "implicit" and Impedance(1.0).phasor_capable
-    assert not Impedance(1.0).dynamic
-    load = ConstantPowerLoad(1.0)
-    assert load.law_form == "potential" and load.phasor_capable and not load.contextual
-
-
 def _load_voltage(P, R=0.1, *, differentiable=False):
     edges = [("s", "0", "voltage_source"), ("s", "a", "impedance"), ("a", "0", "load")]
     net = _net(edges)

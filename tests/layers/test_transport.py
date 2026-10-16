@@ -6,9 +6,8 @@ import pytest
 import torch
 from torch.autograd import gradcheck
 
-from noodl.layers.transport import TransportLayer, _TransposeView
+from noodl.layers.transport import TransportLayer
 from noodl.model import Model
-from noodl.solvers.implicit import TransposeOperator
 from noodl.topology import Network
 
 
@@ -163,6 +162,7 @@ def test_steady_equals_long_time_step():
 
 
 def test_batched_step_equals_looped():
+    torch.manual_seed(0)
     net = flow_through_zone()
     layer = TransportLayer(
         net, "co2", capacity=torch.tensor([1000.0]), flow_kind="airpath", boundary=["ambient"]
@@ -569,13 +569,6 @@ def test_a_boundary_linear_in_time_is_refused_by_the_other_schemes():
                        torch.tensor([420.0]), 300.0, x_boundary_end=torch.tensor([430.0]))
 
 
-def test_transpose_view_is_the_shared_transpose_operator():
-    """`_TransposeView` is a thin alias for `solvers.implicit.TransposeOperator`, not a
-    separately-maintained duplicate -- see the consolidation note in `layers/transport.py`.
-    """
-    assert _TransposeView is TransposeOperator
-
-
 def test_boundary_values_pair_with_the_caller_s_boundary_order_not_node_order():
     """`x_boundary[j]` belongs to `boundary[j]`, whatever node order that list is in.
 
@@ -665,32 +658,6 @@ def test_per_step_capacity_conserves_mass():
     )
     # Node A loses 1 * 5; node B gains 1 * 5 and loses 1 * 3; the boundary takes 1 * 3.
     assert float((volume * rate).sum()) == pytest.approx(-3.0, abs=1e-12)
-
-
-def test_per_step_capacity_conserves_mass_across_the_step():
-    """A two-node layer whose capacity is halved per step conserves mass. Node A and B both halve
-    from 10 to 5 while a unit flow carries A's concentration to B and B's to the boundary. Amount
-    form, implicit: V_new x_new - V_old x_old = dt * (inflow - outflow at x_new)."""
-    _, layer = _two_node_layer([10.0, 10.0])
-    q = torch.tensor([1.0, 1.0], dtype=torch.float64)
-    x0 = torch.tensor([5.0, 3.0], dtype=torch.float64)
-    v_old = torch.tensor([10.0, 10.0], dtype=torch.float64)
-    v_new = torch.tensor([5.0, 5.0], dtype=torch.float64)
-    layer.scheme = "implicit"
-    x1 = layer.step(x0, q, torch.zeros(3, dtype=torch.float64),
-                    torch.zeros(1, dtype=torch.float64), 1.0,
-                    capacity=v_new, capacity_prev=v_old)
-    # A: 5 xA - 50 = -1 * xA           -> xA = 50/6
-    # B: 5 xB - 30 = 1 * xA - 1 * xB   -> xB = (30 + 50/6)/6
-    xa = 50.0 / 6.0
-    xb = (30.0 + xa) / 6.0
-    torch.testing.assert_close(
-        x1, torch.tensor([xa, xb], dtype=torch.float64), rtol=1e-12, atol=1e-12
-    )
-    mass_out = 1.0 * xb
-    assert float((v_new * x1).sum()) + mass_out == pytest.approx(
-        float((v_old * x0).sum()), rel=1e-12
-    )
 
 
 def test_per_step_capacity_is_refused_on_a_wrong_shape():

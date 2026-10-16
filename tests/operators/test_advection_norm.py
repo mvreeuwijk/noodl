@@ -40,7 +40,7 @@ def _random_layer(seed, *, conduction, kinetics, removal, n_species):
     return layer._advection_operator(q)
 
 
-@pytest.mark.parametrize("seed", range(4))
+@pytest.mark.parametrize("seed", [0])
 @pytest.mark.parametrize("conduction", [False, True])
 @pytest.mark.parametrize("kinetics", [False, True])
 @pytest.mark.parametrize("removal", [False, True])

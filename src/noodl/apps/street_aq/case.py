@@ -22,7 +22,7 @@ from noodl import layout
 from noodl.apps.street_aq import _munich_files, _sirane_files
 from noodl.apps.street_aq.network import StreetNetwork, street_index
 from noodl.apps.street_aq.routing import StreetFlows
-from noodl.couple import CONTAM_DEG_TO_STREET_RAD, apply_conversion
+from noodl.couple import COMPASS_DEG_TO_MATH_RAD, apply_conversion
 from noodl.model import Model
 
 F64 = torch.float64
@@ -794,7 +794,7 @@ def drivers_at(
     spread_junction = (case.meteo_junction["sigma_theta"][k]
                        if spread_driven and "sigma_theta" in case.meteo_junction else None)
     theta_w_all = apply_conversion(
-        CONTAM_DEG_TO_STREET_RAD, torch.as_tensor(theta_deg, dtype=F64), {}
+        COMPASS_DEG_TO_MATH_RAD, torch.as_tensor(theta_deg, dtype=F64), {}
     )
 
     if flows.meteo == "per_street":
@@ -817,7 +817,7 @@ def drivers_at(
             values = case.meteo_junction[case_key][k]
             if key == "theta_w":
                 junction_drivers[f"{key}_junction"] = apply_conversion(
-                    CONTAM_DEG_TO_STREET_RAD, torch.as_tensor(values, dtype=F64), {}
+                    COMPASS_DEG_TO_MATH_RAD, torch.as_tensor(values, dtype=F64), {}
                 )
             else:
                 junction_drivers[f"{key}_junction"] = torch.as_tensor(values, dtype=F64)

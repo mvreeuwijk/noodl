@@ -447,7 +447,7 @@ def test_driver_alias_writes_every_target_through_its_own_conversion():
     """The source is authoritative and each target is written from it through that target's
     registered conversion: the street's theta_w, radians counter-clockwise
     from east, reaches the building as CONTAM's Wd, degrees clockwise from north."""
-    from noodl.couple import STREET_RAD_TO_CONTAM_DEG, DriverAlias, ValueLink, union
+    from noodl.couple import MATH_RAD_TO_COMPASS_DEG, DriverAlias, ValueLink, union
 
     street_model, street_state, street_drivers = _tiny_street_model()
     building_model, building_state, building_drivers = _tiny_building_model()
@@ -469,7 +469,7 @@ def test_driver_alias_writes_every_target_through_its_own_conversion():
                       to_model="building", to_key="species.x_boundary", to_index=0,
                       convert="concentration_to_mass_fraction"),
             DriverAlias(source=("street", "theta_w"),
-                        targets=(("building", "theta_w", STREET_RAD_TO_CONTAM_DEG),)),
+                        targets=(("building", "theta_w", MATH_RAD_TO_COMPASS_DEG),)),
         ],
     )
     coupled_model.step(state, drivers, dt=1.0)
@@ -514,14 +514,14 @@ def test_an_unconverted_link_between_unequal_units_is_refused_at_construction():
 
 
 def test_a_conversion_whose_units_do_not_match_the_layers_is_refused_at_construction():
-    from noodl.couple import STREET_RAD_TO_CONTAM_DEG, ValueLink, union
+    from noodl.couple import MATH_RAD_TO_COMPASS_DEG, ValueLink, union
 
     street_model, street_state, street_drivers = _tiny_street_model()
     building_model, building_state, building_drivers = _tiny_building_model()
     bad = ValueLink(  # an ANGLE conversion on a species link: rad -> deg, not kg/m3 -> kg/kg
         from_model="street", from_key="street.x", from_index=0,
         to_model="building", to_key="species.x_boundary", to_index=0,
-        convert=STREET_RAD_TO_CONTAM_DEG,
+        convert=MATH_RAD_TO_COMPASS_DEG,
     )
     with pytest.raises(ValueError) as excinfo:
         union({"street": (street_model, street_state, street_drivers),
@@ -677,13 +677,13 @@ def test_write_at_broadcasts_a_batched_value_into_an_unbatched_target():
 @pytest.mark.parametrize("wd, theta", [(270.0, 0.0), (0.0, 1.5 * math.pi),
                                        (90.0, math.pi), (180.0, 0.5 * math.pi)])
 def test_wind_direction_conversions_on_the_cardinal_points(wd, theta):
-    from noodl.couple import CONTAM_DEG_TO_STREET_RAD, STREET_RAD_TO_CONTAM_DEG
+    from noodl.couple import COMPASS_DEG_TO_MATH_RAD, MATH_RAD_TO_COMPASS_DEG
 
     wd_t = torch.tensor(wd, dtype=F64)
     theta_t = torch.tensor(theta, dtype=F64)
-    assert apply_conversion(CONTAM_DEG_TO_STREET_RAD, wd_t, {}).item() == pytest.approx(
+    assert apply_conversion(COMPASS_DEG_TO_MATH_RAD, wd_t, {}).item() == pytest.approx(
         theta, abs=1e-12)
-    assert apply_conversion(STREET_RAD_TO_CONTAM_DEG, theta_t, {}).item() == pytest.approx(
+    assert apply_conversion(MATH_RAD_TO_COMPASS_DEG, theta_t, {}).item() == pytest.approx(
         wd, abs=1e-9)
 
 

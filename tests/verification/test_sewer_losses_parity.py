@@ -204,6 +204,7 @@ def constant(rate, dry_only="NO"):
     return f"CONSTANT         {rate}\nDRY_ONLY         {dry_only}\n"
 
 
+@pytest.mark.slow
 def test_conduit_evaporation_matches_swmm(tmp_path):
     """A constant 4000 mm/day (4.6e-8 m/s) over an open trapezoid and rectangle (the circle
     and the closed rectangle lose nothing): depths, flows against SWMM, and the loss is real
@@ -215,6 +216,7 @@ def test_conduit_evaporation_matches_swmm(tmp_path):
     assert lost_water(result[3], lossless[3]) > 1e-3
 
 
+@pytest.mark.slow
 def test_a_closed_network_loses_nothing_to_evaporation(tmp_path):
     """The same rate over circular conduits only: SWMM evaporates open sections only
     (link.c:1359), and so does noodl (no climate is even attached)."""
@@ -227,6 +229,7 @@ def test_a_closed_network_loses_nothing_to_evaporation(tmp_path):
     assert result[5].climate is None
 
 
+@pytest.mark.slow
 def test_a_monthly_rate_and_its_adjustment_change_at_the_month_boundary(tmp_path):
     """MONTHLY evaporation (January 800, every other month 3500 mm/day) plus an
     ``[ADJUSTMENTS] EVAPORATION`` of 400 mm/day from February, across midnight of 1 February
@@ -243,6 +246,7 @@ def test_a_monthly_rate_and_its_adjustment_change_at_the_month_boundary(tmp_path
     assert lost_water(result[3], compare(tmp_path, flat, "monthly_lossless")[3]) > 2e-3
 
 
+@pytest.mark.slow
 def test_seepage_matches_swmm_in_every_section_kind(tmp_path):
     """Seepage of 40 (open trapezoid), 25 (closed rectangle, in place of the open one) and 60
     (circle) mm/hr, with the monthly conductivity adjustment at 0.6 (`Adjust.hydconFactor`): the
@@ -262,6 +266,7 @@ def test_seepage_matches_swmm_in_every_section_kind(tmp_path):
     assert result[5].climate.adjustments.conductivity == (0.6,) * 12
 
 
+@pytest.mark.slow
 def test_a_dry_junction_with_a_net_outflow_is_the_stiff_beds_alone(tmp_path):
     """Why `CHANNELS` feeds every junction. A lateral outflow of 4.2e-3 m3/s at J3, which is
     dry through the front's arrival, moves the flow of C2 above it by 4e-9 m3/s -- 1e-6 of
@@ -300,6 +305,7 @@ R1                          00:20      0.0
 """
 
 
+@pytest.mark.slow
 def test_dry_only_does_not_stop_conduit_evaporation_while_it_rains(tmp_path):
     """``DRY_ONLY YES`` with a rain period (00:03 to 00:08) over a subcatchment: SWMM zeroes
     only the subcatchments' evaporation while it rains (subcatch.c:685); a conduit's
@@ -374,6 +380,7 @@ def test_storage_evaporation_matches_swmm(tmp_path):
                                                             strict=True)) > 0.01
 
 
+@pytest.mark.slow
 def test_storage_exfiltration_through_ksat_matches_swmm(tmp_path):
     """A single Ksat (3000 mm/hr) on a TABULAR unit (a bottom of 8 m2, a bank from 0.3 m
     to 1.2 m) and 1500 mm/hr on a CONICAL one (banks from the floor): ``Ksat hydconFactor``
@@ -387,6 +394,7 @@ def test_storage_exfiltration_through_ksat_matches_swmm(tmp_path):
                                                             strict=True)) > 0.01
 
 
+@pytest.mark.slow
 def test_storage_exfiltration_through_green_ampt_matches_swmm(tmp_path):
     """Suction head, Ksat and IMDmax (modified Green-Ampt at the depth of the water above the
     bottom and half the depth above the banks' foot, exfil.c:163-194) on a TABULAR unit
@@ -398,6 +406,7 @@ def test_storage_exfiltration_through_green_ampt_matches_swmm(tmp_path):
     assert_parity(result)
 
 
+@pytest.mark.slow
 def test_a_cylinder_has_only_a_bottom_to_exfiltrate_through(tmp_path):
     """A CYLINDRICAL unit's surface area is its bottom (exfil.c:119-135): no banks. Its
     Green-Ampt rate is the bottom's alone."""

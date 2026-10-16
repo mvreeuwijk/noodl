@@ -92,10 +92,3 @@ def test_multi_species_full_node_sources_have_trailing_shape_n_by_K():
     s[2, 1] = 4.0
     x = layer.steady(torch.ones(3, dtype=F64), s, torch.zeros(1, 2, dtype=F64))
     torch.testing.assert_close(x, torch.tensor([[3.0, 0.0], [3.0, 4.0]], dtype=F64))
-
-
-def test_forcing_is_dead_code_and_has_been_removed():
-    """`_forcing` (a helper that silently ignored a per-step `capacity=` override by calling
-    `_capacity_stacked` without it) must not exist; pins its removal against a future
-    accidental re-add."""
-    assert not hasattr(TransportLayer, "_forcing")

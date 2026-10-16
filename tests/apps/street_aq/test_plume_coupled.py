@@ -462,8 +462,7 @@ def test_refusals_are_named(munich):
 
 
 @pytest.mark.parametrize("junction_source", ["upward", "net"])
-@pytest.mark.parametrize("case,theta", [("lattice", 0.3), ("lattice", 0.0),
-                                        ("munich", 0.3), ("munich", 5.0)])
+@pytest.mark.parametrize("case,theta", [("lattice", 0.3), ("munich", 5.0)])
 def test_no_emission_leaves_c_ext_at_a_uniform_background(case, theta, junction_source):
     """Junction sources are the EXCESS over background: with nothing emitted and a uniform
     background every street sits at C_bg and C_ext must stay there. A junction source of

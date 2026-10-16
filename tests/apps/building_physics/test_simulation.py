@@ -725,6 +725,7 @@ def test_pressure_readers_of_different_potentials_are_refused_by_name():
 DUCTS = DATA / "duct_three_zone.prj"
 
 
+@pytest.mark.slow
 def test_a_step_whose_airflow_fails_from_the_previous_pressures_is_retried_cold():
     """`duct_three_zone.prj`: the supply fan slows from speed 1 to 0.7 in the step ending
     00:35. From the previous pressures the fan's iterates swing between the ends of its curve

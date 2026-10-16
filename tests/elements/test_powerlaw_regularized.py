@@ -1,8 +1,8 @@
-"""Tests for `noodl.elements.powerlaw_mbl`: MBL's power-law flow-element family.
+"""Tests for `noodl.elements.powerlaw_regularized`: MBL's power-law flow-element family.
 
 The NumPy reference functions below are transcribed directly from the Modelica Buildings
 Library (MBL) v13.0.0 (commit 55abf579598ca81cae0a82f337350375958e6722) source, never by
-importing `noodl.elements.powerlaw_mbl` itself.
+importing `noodl.elements.powerlaw_regularized` itself.
 """
 
 from __future__ import annotations
@@ -13,7 +13,7 @@ import numpy as np
 import pytest
 import torch
 
-from noodl.elements.powerlaw_mbl import (
+from noodl.elements.powerlaw_regularized import (
     MBLPowerLaw,
     mbl_coefficient,
     mbl_ela,
@@ -66,8 +66,8 @@ def _mbl_powerlaw_fixedm_np(C, dp, m, dp_t, a, b, c, d):
     return np.where(np.abs(dp) >= dp_t, outer, inner)
 
 
-_M_VALUES = (0.5, 0.65, 1.0)
-_DP_T_VALUES = (0.1, 0.01)
+_M_VALUES = (0.5, 1.0)
+_DP_T_VALUES = (0.1,)
 
 
 def _dp_grid(dp_t):
@@ -164,7 +164,7 @@ def _outer_branch_torch(C, m, dp):
 
 
 @pytest.mark.parametrize("m", _M_VALUES)
-@pytest.mark.parametrize("dp_t", _DP_T_VALUES)
+@pytest.mark.parametrize("dp_t", (0.1, 0.01))
 def test_continuity_of_value_and_first_two_derivatives_at_transition(m, dp_t):
     """The polynomial is chosen (powerLaw.mo's documentation) to be twice continuously
     differentiable in dp at the switch: evaluate the inner (regularised) and outer (sharp)

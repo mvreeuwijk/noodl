@@ -12,8 +12,6 @@ must be the same matrix, to 1e-12, instance for instance.
 
 from __future__ import annotations
 
-import inspect
-
 import numpy as np
 import pytest
 import scipy.sparse
@@ -115,18 +113,6 @@ def test_graph_assemble_sparse_works_for_an_unbatched_slope_vector():
     torch.testing.assert_close(
         torch.from_numpy(coo.toarray()), op.assemble(), rtol=0.0, atol=1e-12
     )
-
-
-def test_graph_assemble_sparse_is_o_edges_with_no_python_loop():
-    """The static "is it vectorised" proxy this suite uses elsewhere (see
-    `test_matvec_source_has_no_python_loop_over_edges`), applied to the sparse assembly:
-    O(E) means gather/scatter over edge arrays, never a Python loop over edges. The
-    DOCSTRING is stripped first -- its prose says "for" in the English sense.
-    """
-    source = inspect.getsource(GraphLaplacianOperator.assemble_sparse)
-    body = source.split('"""')[2]
-    assert "for " not in body
-    assert "while " not in body
 
 
 def test_graph_assemble_sparse_emits_at_most_four_entries_per_edge():

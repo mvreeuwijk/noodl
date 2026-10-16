@@ -11,7 +11,7 @@ from benchmarks.measure import saved_tensor_bytes
 from noodl.drives import ConstantDrive
 from noodl.elements import Conductance, FixedFlow, PowerLaw
 from noodl.elements.fan import FanCurve
-from noodl.layers.kirchhoff import _LINEAR_SOLVERS, KirchhoffLayer
+from noodl.layers.kirchhoff import KirchhoffLayer
 from noodl.topology import Network
 
 
@@ -696,36 +696,21 @@ def test_sparse_direct_linear_solver_matches_direct_on_the_two_zone_layer(two_zo
     torch.testing.assert_close(q_sparse, q_direct, rtol=1e-9, atol=1e-12)
 
 
-def test_sparse_direct_adjoint_matches_direct_on_the_two_zone_layer(two_zone_layer):
-    net, elements, drives, boundary = two_zone_layer
-    drivers = {"wind": torch.tensor([5.0, 0.0, 0.0], dtype=torch.float64)}
-    phi_b = torch.zeros(1, 1, dtype=torch.float64)
-    sources = torch.zeros(1, net.n, dtype=torch.float64)
-    sources[..., net.node_index("z1")] = 0.01
+@pytest.fixture(scope="module")
+def small_composed_model():
+    """2 buildings x 12 nodes plus the street and sewer networks, ensemble 2 (read-only)."""
+    from benchmarks.composed_model import build_composed
 
-    lam = {}
-    for linear_solver in ("direct", "sparse_direct"):
-        layer = KirchhoffLayer(
-            net, "two_zone", elements, drives, boundary=boundary, linear_solver=linear_solver
-        )
-        phi, _q = layer.solve(phi_b, drivers, sources, differentiable=False)
-        phi_i = phi[..., layer.interior]
-        grad_phi_i = torch.ones_like(phi_i)
-        lam[linear_solver] = layer.adjoint(phi_i, phi_b, drivers, grad_phi_i)
-    torch.testing.assert_close(
-        lam["sparse_direct"], lam["direct"], rtol=1e-9, atol=1e-12
+    return build_composed(
+        n_buildings=2, building_nodes=12, street_nodes=8, sewer_nodes=6, ensemble=2
     )
 
 
-def test_sparse_direct_linear_solver_matches_direct_on_the_composed_model():
+def test_sparse_direct_linear_solver_matches_direct_on_the_composed_model(small_composed_model):
     """The same parity at a size where the sparse form actually matters: 2 buildings x 12
     nodes plus the street and sewer networks, i.e. a few hundred unknowns rather than two.
     """
-    from benchmarks.composed_model import build_composed
-
-    model = build_composed(
-        n_buildings=2, building_nodes=12, street_nodes=8, sewer_nodes=6, ensemble=2
-    )
+    model = small_composed_model
     net = model.net
     sparse_layer = KirchhoffLayer(
         net,
@@ -744,12 +729,8 @@ def test_sparse_direct_linear_solver_matches_direct_on_the_composed_model():
     torch.testing.assert_close(q_sparse, q_direct, rtol=1e-9, atol=1e-12)
 
 
-def test_sparse_direct_adjoint_matches_direct_on_the_composed_model():
-    from benchmarks.composed_model import build_composed
-
-    model = build_composed(
-        n_buildings=2, building_nodes=12, street_nodes=8, sewer_nodes=6, ensemble=2
-    )
+def test_sparse_direct_adjoint_matches_direct_on_the_composed_model(small_composed_model):
+    model = small_composed_model
     net = model.net
     sparse_layer = KirchhoffLayer(
         net,
@@ -818,10 +799,6 @@ def test_sparse_direct_layer_actually_factorises_through_scipy_splu(monkeypatch,
     layer.adjoint(phi_i, phi_b, drivers, torch.ones_like(phi_i))
     assert len(splu_calls) > splu_after_solve, "the adjoint must factorise through splu too"
     assert not lu_calls and not pcg_calls
-
-
-def test_sparse_direct_is_an_accepted_linear_solver_value():
-    assert "sparse_direct" in _LINEAR_SOLVERS
 
 
 def test_unknown_linear_solver_error_message_lists_sparse_direct():

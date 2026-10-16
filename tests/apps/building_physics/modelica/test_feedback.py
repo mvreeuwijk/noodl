@@ -228,6 +228,7 @@ def test_a_heat_flow_driven_by_another_zones_temperature_is_refused():
                "zone roo, from the temperature of zone sha.vol" in e for e in errors), errors
 
 
+@pytest.mark.slow
 def test_the_midpoint_run_converges_across_the_extraction_onset():
     """Quasi-steady airflow, the 0.05 kg/s extraction starting at 1800-1801 s: room T at
     1807.2 s from 1785.6 s at 1, 2 and 4 substeps. The drawn air's sink at a step's start

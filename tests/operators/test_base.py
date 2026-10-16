@@ -82,22 +82,6 @@ def test_a_plain_object_missing_every_member_does_not_satisfy_the_protocol():
     assert not isinstance(NotAnOperator(), LinearOperator)
 
 
-def test_solver_status_and_solve_result_and_linear_operator_are_reexported_from_the_package():
-    from noodl.operators import LinearOperator as PackageLinearOperator
-    from noodl.operators import SolveResult as PackageSolveResult
-    from noodl.operators import SolverStatus as PackageSolverStatus
-
-    assert PackageSolverStatus is SolverStatus
-    assert PackageSolveResult is SolveResult
-    assert PackageLinearOperator is LinearOperator
-
-
-def test_dense_operator_is_reexported_from_the_operators_package():
-    from noodl.operators import DenseOperator as PackageDenseOperator
-
-    assert PackageDenseOperator is DenseOperator
-
-
 def test_dense_operator_rejects_a_non_square_tensor():
     with pytest.raises(ValueError, match=r"square"):
         DenseOperator(torch.randn(3, 4, dtype=torch.float64), symmetric=False)
@@ -132,13 +116,6 @@ def test_dense_operator_assemble_returns_the_underlying_tensor():
     A = torch.randn(3, 3, dtype=torch.float64)
     op = DenseOperator(A, symmetric=False)
     assert op.assemble() is A
-
-
-def test_dense_operator_spd_certificate_is_always_none():
-    A = torch.eye(3, dtype=torch.float64)
-    assert DenseOperator(A, symmetric=True).spd_certificate() is None
-    B = 2 * torch.eye(3, dtype=torch.float64)
-    assert DenseOperator(B, symmetric=False).spd_certificate() is None
 
 
 def test_dense_operator_matvec_and_rmatvec_broadcast_over_arbitrary_leading_batch_dims():
@@ -204,12 +181,6 @@ def test_matvec_does_not_equal_rmatvec_on_the_same_x_for_a_nonsymmetric_operator
     assert not torch.allclose(op.matvec(x), op.rmatvec(x))
 
 
-def test_dense_operator_symmetric_defaults_to_false():
-    A = torch.tensor([[4.0, 1.0], [1.0, 3.0]], dtype=torch.float64)  # symmetric matrix, but
-    op = DenseOperator(A)                                             # NOT declared: default wins
-    assert op.symmetric is False
-
-
 def test_as_operator_wraps_a_bare_tensor_in_dense_operator():
     A = torch.randn(3, 3, dtype=torch.float64)
     op = as_operator(A)
@@ -242,12 +213,6 @@ def test_as_operator_passes_a_linear_operator_through_unchanged():
 
     op = _Op()
     assert as_operator(op) is op
-
-
-def test_as_operator_is_reexported_from_the_operators_package():
-    from noodl.operators import as_operator as package_as_operator
-
-    assert package_as_operator is as_operator
 
 
 def test_dense_operator_reports_shape_dtype_and_device():

@@ -9,7 +9,6 @@ Python loop over the 10 s nodes and `numpy.interp` for both resamplings), pinned
 from __future__ import annotations
 
 import math
-import time
 
 import pytest
 import torch
@@ -614,7 +613,7 @@ def _paris_size_network(n_target: int = 577, block: float = 90.0) -> StreetNetwo
     return StreetNetwork(streets=streets, x=x, y=y)
 
 
-def test_paris_size_kernel_builds_in_chunks_under_the_cap():
+def test_paris_size_network_is_chunked_under_the_cap():
     net = _paris_size_network()
     assert len(net.streets) == 577
     n_src = source_points(net, theta_w=0.6).xy.shape[0]
@@ -622,13 +621,14 @@ def test_paris_size_kernel_builds_in_chunks_under_the_cap():
     assert rows * n_src * 8 * plume._LIVE_TEMPORARIES <= KERNEL_BYTES_CAP
     assert rows < 577  # really chunked
     assert rows_per_chunk(n_src, 1, backward=True) < rows
-    start = time.perf_counter()
+
+
+@pytest.mark.slow
+def test_paris_size_kernel_builds_in_chunks_under_the_cap():
+    net = _paris_size_network()
     t = plume_table(**NEUTRAL)
     k = street_kernel(net, t, theta_w=0.6)
     kj = junction_kernel(net, t, theta_w=0.6)
-    elapsed = time.perf_counter() - start
-    print(f"\nParis-size kernels: 577 streets, {n_src} sub-sources, "
-          f"{len(net.junctions)} junctions, {rows} rows/chunk, {elapsed:.3f} s")
     assert k.shape == (577, 577) and kj.shape == (577, len(net.junctions))
     assert bool(torch.isfinite(k).all()) and bool((k >= 0).all())
     assert int((k > 0).sum()) > 577

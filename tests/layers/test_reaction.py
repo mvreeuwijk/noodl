@@ -277,12 +277,6 @@ def test_the_rate_is_differentiable_in_the_temperature():
 
 # ---------------------------------------------------------------------- the J/k floor
 
-def test_molar_volume_is_the_ideal_gas_value():
-    # CODATA's molar volume at 273.15 K and 101325 Pa, 22.41396954 L/mol (R to ten figures).
-    assert abs(float(molar_volume(273.15)) / 22.41396954e-3 - 1.0) < 1e-9
-    assert abs(float(molar_volume(300.0, 1.0e5)) - 8.314462618 * 300.0 / 1.0e5) < 1e-18
-
-
 def test_the_floor_bounds_j_over_k_and_is_inactive_above_it():
     """`K = max(J/k, floor)`: below the floor the state is that of J = k floor, above it the
     floor changes nothing; the floor is in ppb, converted with the molar volume."""

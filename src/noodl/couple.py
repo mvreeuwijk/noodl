@@ -31,13 +31,6 @@ MASS_FRACTION_TO_CONCENTRATION = "mass_fraction_to_concentration"
 #: direction it blows FROM), and back.
 MATH_RAD_TO_COMPASS_DEG = "math_rad_to_compass_deg"
 COMPASS_DEG_TO_MATH_RAD = "compass_deg_to_math_rad"
-STREET_RAD_TO_CONTAM_DEG = MATH_RAD_TO_COMPASS_DEG  # alias, the pre-rename name
-CONTAM_DEG_TO_STREET_RAD = COMPASS_DEG_TO_MATH_RAD  # alias, the pre-rename name
-#: Pre-rename conversion names, accepted wherever a conversion is named.
-_CONVERSION_ALIASES = {
-    "street_rad_to_contam_deg": MATH_RAD_TO_COMPASS_DEG,
-    "contam_deg_to_street_rad": COMPASS_DEG_TO_MATH_RAD,
-}
 
 
 class Conversion(NamedTuple):
@@ -73,12 +66,11 @@ _CONVERSIONS: dict[str, Conversion] = {
         "deg", "rad",
         lambda value, drivers: torch.remainder(torch.deg2rad(270.0 - value), 2.0 * math.pi)),
 }
-_CONVERSIONS.update({old: _CONVERSIONS[new] for old, new in _CONVERSION_ALIASES.items()})
 
 
 def _registered_conversions() -> list[str]:
-    """The registered conversion names for an error message, without the pre-rename aliases."""
-    return sorted(set(_CONVERSIONS) - set(_CONVERSION_ALIASES))
+    """The registered conversion names, for an error message."""
+    return sorted(_CONVERSIONS)
 
 
 def _reduced(x: Tensor, n_last: int) -> Tensor:

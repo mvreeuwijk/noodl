@@ -276,14 +276,16 @@ _FUNCTIONAL_OUTLET = ("TABULAR/DEPTH   Rate1                       NO",
                       "FUNCTIONAL/HEAD 0.5              1.5        NO")
 _SHAPE = "FUNCTIONAL 20         1.5        5"
 _CASES = [
-    ("structures_dynwave.inp", "CFS", ()), ("structures_dynwave.inp", "MLD", ()),
-    ("structures_dynwave.inp", "GPM", (_FUNCTIONAL_OUTLET,)),
-    ("structures_dynwave.inp", "LPS", (_FUNCTIONAL_OUTLET,)),
-    ("storage_dynwave.inp", "CFS", ()), ("tidal_dynwave.inp", "LPS", ()),
-    ("tree_dynwave.inp", "GPM", ()), ("tree_dynwave.inp", "MGD", ()),
-    *[("storage_dynwave.inp", "CFS", ((_SHAPE, f"{shape} {params}"),))
-      for shape, params in (("CYLINDRICAL", "4 2 0"), ("PARABOLIC", "4 2 3"),
-                            ("PYRAMIDAL", "4 2 0.5"))],
+    ("structures_dynwave.inp", "CFS", ()), ("tidal_dynwave.inp", "LPS", ()),
+    *[pytest.param(*case, marks=pytest.mark.slow) for case in (
+        ("structures_dynwave.inp", "MLD", ()),
+        ("structures_dynwave.inp", "GPM", (_FUNCTIONAL_OUTLET,)),
+        ("structures_dynwave.inp", "LPS", (_FUNCTIONAL_OUTLET,)),
+        ("storage_dynwave.inp", "CFS", ()),
+        ("tree_dynwave.inp", "GPM", ()), ("tree_dynwave.inp", "MGD", ()),
+        *[("storage_dynwave.inp", "CFS", ((_SHAPE, f"{shape} {params}"),))
+          for shape, params in (("CYLINDRICAL", "4 2 0"), ("PARABOLIC", "4 2 3"),
+                                ("PYRAMIDAL", "4 2 0.5"))])],
 ]
 
 

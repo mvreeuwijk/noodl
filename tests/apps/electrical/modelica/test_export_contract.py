@@ -261,14 +261,3 @@ def test_reader_and_exporter_agree_on_class_sets(exporter):
     assert schema.WIRES == exporter.WIRES
     assert schema.STATES == exporter.STATES
     assert schema.LINES == exporter.LINES
-
-
-def test_every_fixture_loads():
-    from noodl.apps.electrical.modelica import schema
-
-    data = Path(__file__).resolve().parents[3] / "data" / "modelica_electrical"
-    paths = sorted(p for p in data.glob("*.json") if p.name != "parity-electrical.json")
-    assert len(paths) == 14
-    for path in paths:
-        doc = schema.load(path)
-        assert doc.compared and doc.components, path.name

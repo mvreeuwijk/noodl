@@ -27,6 +27,7 @@ def _dense(row, col, values, n):
 
 @pytest.mark.parametrize("batch", [(), (3,)])
 def test_actions_match_the_dense_matrix_with_duplicates_summed(batch):
+    torch.manual_seed(0)
     row, col, values = _random(batch)
     op = MnaOperator(row, col, values, 5)
     dense = _dense(row, col, values, 5)
@@ -45,6 +46,7 @@ def test_actions_match_the_dense_matrix_with_duplicates_summed(batch):
 
 @pytest.mark.parametrize("method", ["direct", "sparse_direct"])
 def test_select_solve_handles_it(method):
+    torch.manual_seed(0)
     row, col, values = _random((2,))
     op = MnaOperator(row, col, values, 5)
     b = torch.randn(2, 5, dtype=F64)
@@ -53,6 +55,7 @@ def test_select_solve_handles_it(method):
 
 
 def test_unbatched_values_act_on_a_batched_vector():
+    torch.manual_seed(0)
     row, col, values = _random(())
     op = MnaOperator(row, col, values, 5)
     x = torch.randn(4, 5, dtype=F64)

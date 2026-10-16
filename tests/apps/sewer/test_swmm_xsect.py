@@ -1,15 +1,17 @@
-"""SWMM 5.2's circular cross-section (`swmm_xsect`) and its `geometry="swmm"` wiring.
+"""SWMM 5.2's tabulated circular cross-section (`xsect_tables`) and its `geometry="tabulated"`
+wiring.
 
 Parity against the engine itself is in `tests/verification/test_sewer_parity.py`; these
 tests pin the transcription's own properties without pyswmm.
 """
 
+import math
 from pathlib import Path
 
 import pytest
 import torch
 
-from noodl.apps.sewer import swmm_xsect as sx
+from noodl.apps.sewer import xsect_tables as sx
 from noodl.apps.sewer.inp import read_swmm_inp
 from noodl.apps.sewer.network import build_model, tree_steady
 
@@ -24,6 +26,20 @@ def test_tables_are_swmm_5_2_verbatim():
     # Spot values from `xsect.dat`, including the section-factor maximum third from last.
     assert sx.A_CIRC[25] == 0.5 and sx.Y_CIRC[25] == 0.5
     assert sx.S_CIRC[48] == 1.08208 and max(sx.S_CIRC) == sx.S_CIRC[48]
+    assert len(sx.W_CIRC) == 51 and len(sx.R_CIRC) == 51
+    assert sx.W_CIRC[25] == 1.0 and sx.W_CIRC[-1] == 0.0
+    assert sx.R_CIRC[0] == 0.01 and sx.R_CIRC[-1] == 1.0 and max(sx.R_CIRC) == 1.2172
+
+
+def test_geometry_at_a_table_node_is_the_table():
+    d = torch.tensor(1.5, dtype=F64)                   # 1.5 ft pipe
+    a_full = torch.tensor(math.pi / 4 * 1.5**2, dtype=F64)
+    y = 0.5 * d                                        # node 25 exactly
+    assert sx.width_of_depth(y, d).item() == pytest.approx(1.5, rel=1e-15)
+    assert sx.radius_of_depth(y, d).item() == pytest.approx(1.5 / 4, rel=1e-15)
+    assert sx.area_of_depth(y, d, a_full).item() == pytest.approx(0.5 * a_full.item(), rel=1e-15)
+    assert sx.area_of_depth(torch.tensor(0.0, dtype=F64), d, a_full).item() == 0.0
+    assert sx.area_of_depth(torch.tensor(-1.0, dtype=F64), d, a_full).item() == 0.0
 
 
 def test_lookup_hits_the_nodes_and_inverts_on_the_increasing_range():
@@ -103,7 +119,7 @@ def test_velocity_is_zero_at_or_below_a_hundredth_of_a_foot():
     assert torch.all(v[shallow] == 0.0) and torch.all(v[~shallow] > 0.0)
 
 
-def test_read_swmm_inp_defaults_to_swmm_geometry():
+def test_read_swmm_inp_defaults_to_tabulated_geometry():
     assert read_swmm_inp(DATA / "tree_kinwave.inp")[0].geometry == "tabulated"
     assert read_swmm_inp(DATA / "tree_kinwave.inp", geometry="analytic")[0].geometry == (
         "analytic"
@@ -111,25 +127,29 @@ def test_read_swmm_inp_defaults_to_swmm_geometry():
     assert tree_steady().geometry == "analytic"
 
 
-def test_swmm_geometry_changes_depth_by_the_table_difference_only():
+def test_tabulated_geometry_changes_depth_by_the_table_difference_only():
     """The two geometries share the flows exactly and differ in depth by SWMM's table
     error, which is below 1e-2 relative (Ref. Man. Vol. II section 5.1.3)."""
     out = {}
-    for g in ("analytic", "swmm"):
+    for g in ("analytic", "tabulated"):
         net, _, _ = read_swmm_inp(DATA / "tree_kinwave.inp", geometry=g)
         model, state, drivers = build_model(net, air=False, quality=False)
         out[g] = model._apply_closures(state, drivers)
-    assert torch.equal(out["analytic"]["sewer.q"], out["swmm"]["sewer.q"])
-    rel = (out["swmm"]["sewer.h"] - out["analytic"]["sewer.h"]).abs() / out["analytic"][
+    assert torch.equal(out["analytic"]["sewer.q"], out["tabulated"]["sewer.q"])
+    rel = (out["tabulated"]["sewer.h"] - out["analytic"]["sewer.h"]).abs() / out["analytic"][
         "sewer.h"
     ]
     assert float(rel.max()) < 1e-2
 
 
-def test_swmm_geometry_refuses_storage_by_name():
+def test_tabulated_geometry_refuses_storage_by_name():
     net, _, _ = read_swmm_inp(DATA / "tree_kinwave.inp")
     with pytest.raises(ValueError, match="geometry='tabulated'.*storage"):
         build_model(net, storage=True, air=False, quality=False)
+
+
+def test_swmm_names_the_tabulated_geometry():
+    assert read_swmm_inp(DATA / "tree_kinwave.inp", geometry="swmm")[0].geometry == "tabulated"
 
 
 def test_unknown_geometry_is_refused_by_name():
@@ -137,7 +157,7 @@ def test_unknown_geometry_is_refused_by_name():
         read_swmm_inp(DATA / "tree_kinwave.inp", geometry="circle")
 
 
-def test_swmm_geometry_refuses_flow_above_qfull_by_name():
+def test_tabulated_geometry_refuses_flow_above_qfull_by_name():
     net, _, _ = read_swmm_inp(DATA / "tree_kinwave.inp")
     model, state, drivers = build_model(net, air=False, quality=False)
     drivers = dict(drivers)
@@ -146,7 +166,7 @@ def test_swmm_geometry_refuses_flow_above_qfull_by_name():
         model._apply_closures(state, drivers)
 
 
-def test_swmm_geometry_is_batched():
+def test_tabulated_geometry_is_batched():
     net, _, _ = read_swmm_inp(DATA / "tree_kinwave.inp")
     model, state, drivers = build_model(net, air=False, quality=False)
     single = model._apply_closures(state, drivers)
@@ -155,3 +175,49 @@ def test_swmm_geometry_is_batched():
     batched = model._apply_closures(state, drivers)
     assert torch.equal(batched["sewer.h"][0], single["sewer.h"])
     assert torch.all(batched["sewer.h"][1] < batched["sewer.h"][0])
+
+
+D_FT = torch.tensor(1.5, dtype=F64)          # 1.5 ft pipe
+A_FULL = math.pi / 4 * 1.5**2
+
+
+def t(x):
+    return torch.as_tensor(x, dtype=F64)
+
+
+def test_froude_is_zero_when_dry_or_full():
+    v = t(3.0)
+    assert sx.froude_number(v, t(1e-5), D_FT, t(A_FULL)).item() == 0.0
+    assert sx.froude_number(v, D_FT - 5e-5, D_FT, t(A_FULL)).item() == 0.0
+    y = t(0.75)
+    hd = (sx.area_of_depth(y, D_FT, t(A_FULL)) / sx.width_of_depth(y, D_FT)).item()
+    assert sx.froude_number(v, y, D_FT, t(A_FULL)).item() == pytest.approx(
+        3.0 / math.sqrt(32.2 * hd), rel=1e-14)
+
+
+def test_critical_depth_brackets_and_inverts_the_critical_flow():
+    q = t([0.0, 0.05, 1.0, 4.0])
+    yc = sx.critical_depth(q, D_FT, t(A_FULL))
+    assert yc[0].item() == 0.0
+    assert torch.all(yc[1:] > 0) and torch.all(yc <= D_FT)
+    assert torch.all(yc[1:].diff() > 0)                # monotone in q
+    # SWMM interpolates Qc linearly between 25 depth stations. Qc ~ y^2.5 is strongly convex
+    # in the first interval (y < 0.04 D), where linear interpolation puts Qc(yc) 8.8 % below q
+    # (q = 0.05 cfs); above it the error is below 0.3 %. Hence 10 % for the first interval,
+    # 2 % elsewhere (the python scalar transcription of getYcritEnum gives identical yc).
+    for qi, yi in zip(q[1:], yc[1:], strict=True):
+        a = sx.area_of_depth(yi, D_FT, t(A_FULL))
+        w = sx.width_of_depth(yi, D_FT)
+        qc = a * torch.sqrt(32.2 * a / w)
+        assert qc.item() == pytest.approx(qi.item(), rel=0.1 if qi.item() < 0.1 else 2e-2)
+
+
+def test_normal_depth_saturates_at_full():
+    y_full, a_full, s_full, beta = sx.conduit_constants(t(0.4572), t(0.013), t(0.005))
+    q_full = (s_full * beta).item()
+    yn = sx.normal_depth_ft(t([0.0, 0.5 * q_full, q_full, 2 * q_full]),
+                            y_full, a_full, s_full, beta)
+    assert yn[0].item() == 0.0
+    assert 0 < yn[1].item() < y_full.item()
+    assert yn[2].item() == pytest.approx(y_full.item()) and yn[3].item() == pytest.approx(
+        y_full.item())

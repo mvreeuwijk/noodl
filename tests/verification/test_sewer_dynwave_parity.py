@@ -262,6 +262,7 @@ EXTRAN_FAST_STEPS = 150
 EXTRAN_ATOL = 1e-12
 
 
+@pytest.mark.slow
 def test_extran_surcharge_matches_swmm_through_two_crossings(tmp_path):
     """`SURCHARGE_METHOD EXTRAN` on the tree at 3x the dynwave inflows: J2 and J4 jump
     above their crowns (steps 21 and 139) and hold instantaneous continuity there. SWMM
@@ -458,6 +459,7 @@ POND_FLOODED_STEPS = {POND_NAME: {"J2": list(range(21, 360))},
 POND_TIE_STEP = 270
 
 
+@pytest.mark.slow
 def test_ponding_matches_swmm_through_the_first_ponded_steps(tmp_path):
     """`ALLOW_PONDING YES` with J2 (MaxDepth 0.3 m, its crown, Aponded 0.5 m2): J2 ponds from
     step 21 instead of flooding and its depth keeps rising above 0.3 m. Depths, flows and
@@ -1396,6 +1398,7 @@ def _structure_parity(tmp_path, variant, steps=None):
     return worst, rows
 
 
+@pytest.mark.slow
 def test_regulators_match_swmm_while_they_open(tmp_path):
     """The side orifice, both weirs and the rating-curve outlet from the dry start, at the
     free-surface targets over the first `STRUCTURE_FAST_STEPS` steps."""
@@ -1514,7 +1517,7 @@ def _tide_parity(tmp_path, kind, steps=None):
     return _worst(_differences(None, rows, conn, len(rows), run=run)), rows, run
 
 
-@pytest.mark.parametrize("kind", ["tidal", "timeseries"])
+@pytest.mark.parametrize("kind", ["tidal", pytest.param("timeseries", marks=pytest.mark.slow)])
 def test_a_tidal_outfall_matches_swmm_while_the_tide_rises(tmp_path, kind):
     """The tide fixture's first `TIDAL_FAST_STEPS` steps at the free-surface targets, for the
     TIDAL outfall and for the same stage given as a TIMESERIES outfall (the series driven

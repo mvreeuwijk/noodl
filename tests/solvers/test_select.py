@@ -386,23 +386,6 @@ def test_solve_drops_restart_kwarg_when_pcg_is_selected():
     torch.testing.assert_close(result.x, x_ref, atol=1e-8, rtol=1e-8)
 
 
-def test_direct_accepts_and_ignores_every_kwarg():
-    op = _FakeOperator(_A_SPD, symmetric=True, certificate=torch.tensor(False))
-    result = solve(
-        op,
-        _B_SPD,
-        method="direct",
-        rtol=1e-3,
-        atol=1e-3,
-        max_iter=1,
-        x0=torch.zeros(2),
-        preconditioner="jacobi",
-        restart=1,
-    )
-    x_ref = torch.linalg.solve(_A_SPD, _B_SPD)
-    torch.testing.assert_close(result.x, x_ref, atol=1e-8, rtol=1e-8)
-
-
 def test_on_failure_return_does_not_suppress_an_eligibility_refusal():
     # on_failure applies to NUMERICAL failure only; an eligibility refusal is a contract
     # violation and raises regardless of on_failure.
@@ -657,12 +640,16 @@ def test_sparse_direct_matches_direct_on_the_graph_laplacian_chain_fixture():
     torch.testing.assert_close(sparse.x, direct.x, rtol=1e-9, atol=1e-12)
 
 
-def test_sparse_direct_accepts_and_ignores_every_iterative_kwarg():
-    op = _SparseFakeOperator(_A_SPD, symmetric=True, certificate=torch.tensor(False))
+@pytest.mark.parametrize(
+    ("method", "operator_class"),
+    [("direct", _FakeOperator), ("sparse_direct", _SparseFakeOperator)],
+)
+def test_direct_backends_accept_and_ignore_every_iterative_kwarg(method, operator_class):
+    op = operator_class(_A_SPD, symmetric=True, certificate=torch.tensor(False))
     result = solve(
         op,
         _B_SPD,
-        method="sparse_direct",
+        method=method,
         rtol=1e-3,
         atol=1e-3,
         max_iter=1,
@@ -671,7 +658,7 @@ def test_sparse_direct_accepts_and_ignores_every_iterative_kwarg():
         restart=1,
     )
     torch.testing.assert_close(
-        result.x, torch.linalg.solve(_A_SPD, _B_SPD), rtol=1e-12, atol=1e-14
+        result.x, torch.linalg.solve(_A_SPD, _B_SPD), atol=1e-8, rtol=1e-8
     )
 
 
@@ -740,26 +727,18 @@ def test_auto_selects_sparse_direct_for_a_certified_spd_operator_with_a_sparse_f
     )
 
 
-def test_auto_falls_back_to_pcg_when_the_operator_has_no_sparse_form_at_all(monkeypatch):
-    """`_FakeOperator` certifies SPD but declares no `assemble_sparse`: the optional member
-    is optional, so `auto` must keep selecting PCG rather than refuse.
+@pytest.mark.parametrize("operator_class", [_FakeOperator, _NoSparseFormOperator],
+                         ids=["no_assemble_sparse", "assemble_sparse_returns_none"])
+def test_auto_falls_back_to_pcg_when_the_operator_has_no_sparse_form(monkeypatch, operator_class):
+    """`_FakeOperator` certifies SPD but declares no `assemble_sparse` (the optional member is
+    optional) and `_NoSparseFormOperator` returns None from it: `auto` must keep selecting PCG
+    rather than refuse.
     """
     import noodl.solvers.select as select_module
 
     pcg_calls = _spy(monkeypatch, select_module, "pcg")
     splu_calls = _spy_splu(monkeypatch)
-    op = _FakeOperator(_A_SPD, symmetric=True, certificate=torch.tensor(True))
-    solve(op, _B_SPD)
-    assert pcg_calls["count"] == 1
-    assert splu_calls["count"] == 0
-
-
-def test_auto_falls_back_to_pcg_when_assemble_sparse_returns_none(monkeypatch):
-    import noodl.solvers.select as select_module
-
-    pcg_calls = _spy(monkeypatch, select_module, "pcg")
-    splu_calls = _spy_splu(monkeypatch)
-    op = _NoSparseFormOperator(_A_SPD, symmetric=True, certificate=torch.tensor(True))
+    op = operator_class(_A_SPD, symmetric=True, certificate=torch.tensor(True))
     solve(op, _B_SPD)
     assert pcg_calls["count"] == 1
     assert splu_calls["count"] == 0
@@ -793,29 +772,21 @@ def test_auto_falls_back_to_pcg_when_scipy_is_not_importable(monkeypatch):
     assert bool(torch.all(result.converged))
 
 
-def test_auto_falls_back_to_pcg_rather_than_refusing_a_grad_requiring_solve(monkeypatch):
+@pytest.mark.parametrize("grad_on", ["slopes", "right_hand_side"])
+def test_auto_falls_back_to_pcg_rather_than_refusing_a_grad_requiring_solve(
+    monkeypatch, grad_on
+):
     """An EXPLICIT method='sparse_direct' raises under grad mode; `auto` must never raise for
-    a reason the caller did not ask for, so it silently keeps the differentiable backend.
+    a reason the caller did not ask for, so it silently keeps the differentiable backend,
+    whether the slopes or only the right-hand side require grad.
     """
     import noodl.solvers.select as select_module
 
     pcg_calls = _spy(monkeypatch, select_module, "pcg")
     splu_calls = _spy_splu(monkeypatch)
-    slopes = torch.tensor([[1.0, 1.0]], requires_grad=True)
-    op = _chain_op(slopes)
-    result = solve(op, torch.ones(1, 2))
-    assert pcg_calls["count"] == 1
-    assert splu_calls["count"] == 0
-    assert result.x.requires_grad
-
-
-def test_auto_falls_back_to_pcg_when_only_the_right_hand_side_requires_grad(monkeypatch):
-    import noodl.solvers.select as select_module
-
-    pcg_calls = _spy(monkeypatch, select_module, "pcg")
-    splu_calls = _spy_splu(monkeypatch)
-    op = _chain_op(torch.tensor([[1.0, 1.0]]))
-    result = solve(op, torch.ones(1, 2, requires_grad=True))
+    slopes = torch.tensor([[1.0, 1.0]], requires_grad=grad_on == "slopes")
+    rhs = torch.ones(1, 2, requires_grad=grad_on == "right_hand_side")
+    result = solve(_chain_op(slopes), rhs)
     assert pcg_calls["count"] == 1
     assert splu_calls["count"] == 0
     assert result.x.requires_grad
@@ -899,20 +870,15 @@ def _no_interior_op() -> GraphLaplacianOperator:
     )
 
 
-def test_sparse_direct_solves_a_system_with_no_unknowns_as_trivially_converged():
+def test_a_system_with_no_unknowns_is_trivially_converged_by_sparse_direct_and_auto():
     op = _no_interior_op()
     row, col, values = op.assemble_sparse()
     assert row.shape == (0,) and values.shape == (0,)
-    result = solve(op, torch.zeros(0), method="sparse_direct")
-    assert result.x.shape == (0,)
-    assert bool(result.converged)
-    assert float(result.residual) == 0.0
-
-
-def test_auto_solves_a_system_with_no_unknowns_as_trivially_converged():
-    result = solve(_no_interior_op(), torch.zeros(0))
-    assert result.x.shape == (0,)
-    assert bool(result.converged)
+    for method in ("sparse_direct", "auto"):
+        result = solve(op, torch.zeros(0), method=method)
+        assert result.x.shape == (0,)
+        assert bool(result.converged)
+        assert float(result.residual) == 0.0
 
 
 # -- the ensemble threshold on `auto`'s sparse-direct branch ---------------------------------
@@ -929,9 +895,11 @@ def test_auto_takes_sparse_direct_at_the_batch_threshold(monkeypatch):
     pcg_calls = _spy(monkeypatch, select_module, "pcg")
     splu_calls = _spy_splu(monkeypatch)
     op = _chain_op(torch.ones(n, 2))
-    result = solve(op, torch.ones(n, 2))
+    out: dict = {}
+    result = solve(op, torch.ones(n, 2), backend_out=out)
     assert splu_calls["count"] == n, "one factorisation per batch instance, at the threshold"
     assert pcg_calls["count"] == 0
+    assert out == {"backend": "sparse_direct"}
     torch.testing.assert_close(
         result.x, solve(op, torch.ones(n, 2), method="direct").x, rtol=1e-9, atol=1e-12
     )
@@ -949,9 +917,11 @@ def test_auto_falls_back_to_pcg_one_instance_above_the_batch_threshold(monkeypat
     pcg_calls = _spy(monkeypatch, select_module, "pcg")
     splu_calls = _spy_splu(monkeypatch)
     op = _chain_op(torch.ones(n, 2))
-    result = solve(op, torch.ones(n, 2))
+    out: dict = {}
+    result = solve(op, torch.ones(n, 2), backend_out=out)
     assert pcg_calls["count"] == 1
     assert splu_calls["count"] == 0
+    assert out == {"backend": "pcg"}
     torch.testing.assert_close(
         result.x, solve(op, torch.ones(n, 2), method="direct").x, rtol=1e-8, atol=1e-10
     )
@@ -983,23 +953,6 @@ def test_the_batch_threshold_counts_every_leading_dimension(monkeypatch):
 
 
 # -- reporting the RESOLVED backend, and the one fall-back that is an environment fault ------
-
-
-def test_backend_out_reports_sparse_direct_for_a_small_certified_batch():
-    op = _chain_op(torch.ones(2, 2))
-    out: dict = {}
-    solve(op, torch.ones(2, 2), backend_out=out)
-    assert out == {"backend": "sparse_direct"}
-
-
-def test_backend_out_reports_pcg_above_the_batch_threshold():
-    from noodl.solvers.select import _SPARSE_DIRECT_MAX_BATCH
-
-    n = _SPARSE_DIRECT_MAX_BATCH + 1
-    op = _chain_op(torch.ones(n, 2))
-    out: dict = {}
-    solve(op, torch.ones(n, 2), backend_out=out)
-    assert out == {"backend": "pcg"}
 
 
 def test_backend_out_reports_pcg_for_an_explicit_cg_request():

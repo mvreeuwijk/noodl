@@ -1448,6 +1448,7 @@ def test_a_duct_network_with_the_zone_air_mass_change_is_refused(tmp_path):
                           "   0    0.75    20     1      0      0      1", tmp_path))
 
 
+@pytest.mark.slow
 def test_a_junction_without_volume_is_a_storage_free_node(tmp_path):
     """Zero-length damper and exhaust-fan segments leave junctions 7, 8 and 9 without volume:
     they hold no sarin, so each carries exactly the mass fraction of the zone-three air

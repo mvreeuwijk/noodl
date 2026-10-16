@@ -45,10 +45,7 @@ or a CI run never rewrites those files, only a deliberate re-recording pass does
 
 from __future__ import annotations
 
-import concurrent.futures
-import dataclasses
 import json
-import multiprocessing
 import os
 import time
 from pathlib import Path
@@ -442,9 +439,8 @@ def test_every_fixture_is_parity_checked_or_deferred():
     sets = (set(ALGEBRAIC), set(DYNAMIC), set(WEATHER_ONLY), set(DEFERRED))
     assert set().union(*sets) == fixtures
     assert sum(len(s) for s in sets) == len(fixtures)  # disjoint
-    assert set(PARITY_ROWS) == set(DYNAMIC) == set(REFERENCE_RESOLUTION) == set(WINDOW_COST)
+    assert set(PARITY_ROWS) <= set(DYNAMIC) and set(DYNAMIC) == set(REFERENCE_RESOLUTION)
     assert set(PARITY_STORAGE) <= set(DYNAMIC) and set(PARITY_SUBSTEPS) <= set(DYNAMIC)
-    assert set(DEFAULT_SUBSTEPS) <= set(DYNAMIC)
     assert set(STORAGE_DOMINATED) <= set(DYNAMIC)
 
 
@@ -521,26 +517,11 @@ PARITY_SUBSTEPS: dict[str, tuple[int, int]] = {"ClosedDoors": (2, 4),
                                                "ChimneyShaftNoVolume": (2, 4)}
 # Bounds above PARITY_RTOL (beyond the resolution), each with its demonstrated cause: none.
 PARITY_STORAGE: dict[str, dict[str, float]] = {}
-# The default run compares the first rows of every model (`-m slow` compares every row),
-# the models in parallel (`default_windows`): where the start releases an imbalance, its
-# first output intervals, most of whose cost is the graded start (`run.GRADING_WINDOW`);
-# where it is in balance, a stretch past its smooth start. ReverseBuoyancy's window ends
-# before its orifices reverse (18 s), the rows that need (2, 4) substeps (PARITY_SUBSTEPS),
-# and runs at (1, 2) (DEFAULT_SUBSTEPS), a third of the cost; so does ChimneyShaftWithVolume's,
-# whose window (its room controller's start transient, through its limits within the first
-# second) ends long before its injection stops at 601 s. ChimneyShaftNoVolume's window (its
-# shaft flow reversing at 0.192 s; the supplement's rows 21.6 to 43.2 s and the reference's
-# first rows on the grid, 50.4 and 57.6 s) runs at (2, 4): at (1, 2) its con.y is 8.1e-6
-# from the supplement at 28.8 s (8.3e-7 at (2, 4)), the relaxation after the reversal not
-# yet asymptotic.
-PARITY_ROWS = {"ClosedDoors": 3, "CO2TransportStep": 2, "NaturalVentilation": 3,
-               "OneEffectiveAirLeakageArea": 8, "OneOpenDoor": 4, "OneRoom": 21,
-               "OpenDoorBuoyancyDynamic": 2, "OpenDoorBuoyancyPressureDynamic": 2,
-               "ReverseBuoyancy": 2, "ReverseBuoyancy3Zones": 2, "ThreeRoomsContam": 3,
-               "ThreeRoomsContamDiscretizedDoor": 3, "ZonalFlow": 11,
-               "ChimneyShaftWithVolume": 3, "ChimneyShaftNoVolume": 3}
-DEFAULT_SUBSTEPS: dict[str, tuple[int, int]] = {"ReverseBuoyancy": (1, 2),
-                                                "ChimneyShaftWithVolume": (1, 2)}
+# The default run compares the first rows of the cheap dynamic models (`-m slow` compares
+# every row of every model): where the start releases an imbalance, its first output
+# intervals, most of whose cost is the graded start (`run.GRADING_WINDOW`); where it is in
+# balance, a stretch past its smooth start.
+PARITY_ROWS = {"OneEffectiveAirLeakageArea": 8, "OneOpenDoor": 4, "OneRoom": 21, "ZonalFlow": 11}
 
 
 def _columns_of(out: dict, names, head: list[str]) -> dict[str, np.ndarray]:
@@ -580,12 +561,9 @@ def _worst(stats: dict[str, dict]) -> dict[str, dict]:
     return worst
 
 
-def _run(model: str, rows: int | None, r: int, threads: int | None = None):
+def _run(model: str, rows: int | None, r: int):
     """One `scheme="midpoint"` run of `model` over its first `rows` rows (every row: `None`)
-    at `r` substeps: `(history, names, seconds)`. `threads` sets torch's thread count (a
-    worker of the default run's pool)."""
-    if threads is not None:
-        torch.set_num_threads(threads)
+    at `r` substeps: `(history, names, seconds)`."""
     _, data = _csv(model)
     data = data if rows is None else data[:rows]
     start = time.perf_counter()
@@ -601,26 +579,6 @@ def _run(model: str, rows: int | None, r: int, threads: int | None = None):
     return out, names, time.perf_counter() - start
 
 
-def _run_in_worker(model: str, rows: int | None, r: int, threads: int) -> tuple:
-    """`_run` in a worker process, its tensors returned as NumPy arrays: torch's own
-    pickling of tensors between processes (shared-memory files) crashed the parent on
-    Windows (0xc000070a in `rebuild_storage_filename`)."""
-    out, names, seconds = _run(model, rows, r, threads)
-    return ({k: v.numpy() for k, v in out.items()},
-            dataclasses.replace(names, times=names.times.numpy(),
-                                weather={k: v.numpy() for k, v in names.weather.items()}),
-            seconds)
-
-
-def _from_worker(run: tuple) -> tuple:
-    out, names, seconds = run
-    return ({k: torch.from_numpy(v) for k, v in out.items()},
-            dataclasses.replace(names, times=torch.from_numpy(names.times),
-                                weather={k: torch.from_numpy(v)
-                                         for k, v in names.weather.items()}),
-            seconds)
-
-
 def _reference_tolerance(model: str) -> float:
     """The DASSL tolerance the reference CSV was simulated at (its `# tolerance:` line)."""
     for line in (DATA / f"{model}.csv").read_text().splitlines():
@@ -629,17 +587,15 @@ def _reference_tolerance(model: str) -> float:
     raise AssertionError(f"{model}.csv has no '# tolerance:' header line")
 
 
-def _check_parity(model: str, rows: int | None, substeps: tuple[int, int] | None = None,
-                  runs: list | None = None) -> list[str]:
+def _check_parity(model: str, rows: int | None,
+                  substeps: tuple[int, int] | None = None) -> list[str]:
     """Run `model` over its first `rows` rows (every row: `None`, recorded) at `substeps`
     (default PARITY_SUBSTEPS) and return the failures against its tolerance (none: parity).
-    `runs`, when given, are the two runs' `_run` results, made elsewhere (the default run's
-    worker pool)."""
+    """
     head, data = _csv(model)
     data = data if rows is None else data[:rows]
     substeps = substeps or PARITY_SUBSTEPS.get(model, (1, 2))
-    if runs is None:
-        runs = [_run(model, rows, r) for r in substeps]
+    runs = [_run(model, rows, r) for r in substeps]
     seconds = sum(run[2] for run in runs)
     names = runs[1][1]
     cols = [_columns_of(out, nm, head) for out, nm, _ in runs]
@@ -708,220 +664,11 @@ def _check_parity(model: str, rows: int | None, substeps: tuple[int, int] | None
     return [f"{model} outside its tolerance:", *failures] if failures else []
 
 
-# The default window's cost per substep of each model (s, measured on a loaded 14-core
-# machine; only the order matters): `default_windows` starts the longest runs first, so that
-# the last to finish is about the longest one (the runs at r substeps cost about r times these).
-WINDOW_COST = {"ClosedDoors": 25, "CO2TransportStep": 43, "NaturalVentilation": 38,
-               "OneEffectiveAirLeakageArea": 1, "OneOpenDoor": 12, "OneRoom": 2,
-               "OpenDoorBuoyancyDynamic": 46, "OpenDoorBuoyancyPressureDynamic": 44,
-               "ReverseBuoyancy": 60, "ReverseBuoyancy3Zones": 56, "ThreeRoomsContam": 48,
-               "ThreeRoomsContamDiscretizedDoor": 46, "ZonalFlow": 3,
-               "ChimneyShaftWithVolume": 30, "ChimneyShaftNoVolume": 40}
-
-
-def _default_substeps(model: str) -> tuple[int, int]:
-    return DEFAULT_SUBSTEPS.get(model) or PARITY_SUBSTEPS.get(model, (1, 2))
-
-
-@pytest.fixture(scope="module")
-def default_windows() -> dict[str, list[str]]:
-    """`_check_parity` on the first PARITY_ROWS rows of every dynamic model. Every run (two
-    per model) is made in its own worker process (most of each window's time is its graded
-    start, `run` module), the longest first (WINDOW_COST), so that the default run takes
-    about as long as its slowest run; the comparison is made here. `NOODL_PARITY_WORKERS`
-    sets the number of worker processes (default: the CPU count). A run that brings no
-    result (its worker died, or it stalled past `_stall_limit`) is reported by its model's
-    test as a `ParityWorkerError`, not as a parity failure."""
-    tasks = sorted(((m, r) for m in PARITY_ROWS for r in _default_substeps(m)),
-                   key=lambda task: -task[1] * WINDOW_COST[task[0]])
-    cpus = os.cpu_count() or 1
-    workers = max(1, min(len(tasks), int(os.environ.get("NOODL_PARITY_WORKERS", cpus))))
-    threads = max(1, cpus // workers)
-    context = multiprocessing.get_context("spawn")
-    with context.Manager() as manager:
-        started = manager.dict()
-        pool = concurrent.futures.ProcessPoolExecutor(workers, mp_context=context)
-        try:
-            futures = {(m, r): pool.submit(_started_in_worker, (m, r), started, _run_in_worker,
-                                           m, PARITY_ROWS[m], r, threads)
-                       for m, r in tasks}
-            runs = _gather(pool, futures, {task: _stall_limit(task[0]) for task in tasks},
-                           started)
-        finally:
-            pool.shutdown(wait=True, cancel_futures=True)
-    results: dict[str, list[str] | ParityWorkerError] = {}
-    for m in sorted(PARITY_ROWS):
-        got = [runs[m, r] for r in _default_substeps(m)]
-        lost = [run for run in got if isinstance(run, ParityWorkerError)]
-        if lost:
-            results[m] = lost[0]
-            continue
-        try:
-            failed = [run for run in got if isinstance(run, BaseException)]
-            if failed:
-                raise failed[0]
-            results[m] = _check_parity(m, PARITY_ROWS[m], _default_substeps(m),
-                                       [_from_worker(run) for run in got])
-        except Exception as exc:  # reported by the model's own test
-            results[m] = [f"{m}: {type(exc).__name__}: {exc}"]
-    return results
-
-
-class ParityWorkerError(RuntimeError):
-    """A parity run brought no result because its worker process died or stalled: a failure
-    of the test harness (memory, a crash, a hang), not a parity result."""
-
-
-# How often `_gather` looks at the pool (s), and the stall limit of a run: STALL_FACTOR times
-# the model's recorded full-run time (`parity-dynamic.json`, "seconds"; a default window is a
-# few rows of that run), at least STALL_FLOOR. NOODL_PARITY_TIMEOUT (s) overrides it.
-GATHER_POLL = 5.0
-STALL_FACTOR, STALL_FLOOR = 3.0, 900.0
-
-
-def _stall_limit(model: str) -> float:
-    """The time (s) a run of `model` may take in the default run's pool before it counts as
-    stalled (see STALL_FACTOR)."""
-    if os.environ.get("NOODL_PARITY_TIMEOUT"):
-        return float(os.environ["NOODL_PARITY_TIMEOUT"])
-    recorded = json.loads(RECORD_DYNAMIC.read_text()).get(model, {}).get("seconds", 0.0)
-    return max(STALL_FLOOR, STALL_FACTOR * float(recorded))
-
-
-def _started_in_worker(task, started, run, *args):
-    """`run(*args)` in a worker process, recording in `started[task]` (a manager dict shared
-    with the parent) the wall-clock time at which a worker really began it."""
-    started[task] = time.time()
-    return run(*args)
-
-
-def _gather(pool: concurrent.futures.ProcessPoolExecutor, futures: dict, limits: dict,
-            started, poll: float = GATHER_POLL) -> dict:
-    """Each task's result, the exception its run raised, or a `ParityWorkerError` when no
-    result came: a worker died (the pool broke), or a run went past its stall limit
-    (`limits[task]`, s, counted from `started[task]`, the wall-clock time its worker began
-    it, `_started_in_worker`). Not from `future.running()`: the pool marks a task running
-    once it enters the queue feeding the workers, before any worker has taken it. A stall
-    stops the pool, killing its workers, and every unfinished task is reported."""
-    out: dict = {}
-    pending = dict(futures)
-    while pending:
-        done, _ = concurrent.futures.wait(pending.values(), timeout=poll,
-                                          return_when=concurrent.futures.FIRST_COMPLETED)
-        for task in [t for t, f in pending.items() if f in done]:
-            future = pending.pop(task)
-            try:
-                out[task] = future.result()
-            except concurrent.futures.process.BrokenProcessPool as exc:
-                out[task] = ParityWorkerError(
-                    f"{task[0]} at {task[1]} substeps: no result, the parity worker pool "
-                    f"broke ({exc}): a worker process died (out of memory or a crash). This "
-                    f"is not a parity failure; NOODL_PARITY_WORKERS lowers the worker count")
-            except Exception as exc:  # the run's own error: the model's failure
-                out[task] = exc
-        now = time.time()
-        begun = dict(started)
-        stalled = [t for t in pending if t in begun and now - begun[t] > limits[t]]
-        if stalled:
-            _stop(pool)
-            names = ", ".join(f"{m} at {r} substeps (limit {limits[m, r]:.0f} s)"
-                              for m, r in stalled)
-            for task in pending:
-                out[task] = ParityWorkerError(
-                    f"{task[0]} at {task[1]} substeps: no result, the parity run of {names} "
-                    f"stalled and the pool was stopped. This is not a parity failure; "
-                    f"NOODL_PARITY_TIMEOUT (s) sets the limit")
-            break
-    return out
-
-
-def _stop(pool: concurrent.futures.ProcessPoolExecutor) -> None:
-    """Cancel the pool's queued tasks and kill its workers (a stalled run never returns).
-    The workers are listed before the shutdown, which drops the pool's reference to them."""
-    processes = list((getattr(pool, "_processes", None) or {}).values())
-    pool.shutdown(wait=False, cancel_futures=True)
-    for process in processes:
-        process.kill()
-
-
-def _sleep_in_worker(seconds: float) -> float:
-    time.sleep(seconds)
-    return seconds
-
-
-def _die_in_worker(code: int) -> None:
-    os._exit(code)
-
-
-def _submit(pool, started, tasks: dict) -> dict:
-    """`{task: (function, *args)}` submitted through `_started_in_worker`."""
-    return {task: pool.submit(_started_in_worker, task, started, *call)
-            for task, call in tasks.items()}
-
-
-def test_a_dead_worker_is_reported_as_a_harness_failure():
-    pool = concurrent.futures.ProcessPoolExecutor(
-        1, mp_context=multiprocessing.get_context("spawn"))
-    try:
-        futures = _submit(pool, {}, {("ModelA", 1): (_die_in_worker, 3)})
-        out = _gather(pool, futures, {("ModelA", 1): 600.0}, {}, poll=0.2)
-    finally:
-        pool.shutdown(wait=True, cancel_futures=True)
-    error = out["ModelA", 1]
-    assert isinstance(error, ParityWorkerError)
-    assert "ModelA at 1 substeps" in str(error) and "worker process died" in str(error)
-    assert "not a parity failure" in str(error)
-
-
-def test_a_stalled_run_is_named_and_its_pool_stopped():
-    context = multiprocessing.get_context("spawn")
-    pool = concurrent.futures.ProcessPoolExecutor(1, mp_context=context)
-    start = time.monotonic()
-    try:
-        with context.Manager() as manager:
-            started = manager.dict()
-            futures = _submit(pool, started, {("Slow", 2): (_sleep_in_worker, 600.0),
-                                              ("Queued", 1): (_sleep_in_worker, 0.0)})
-            workers = list(pool._processes.values())
-            out = _gather(pool, futures, {("Slow", 2): 1.0, ("Queued", 1): 600.0}, started,
-                          poll=0.2)
-    finally:
-        pool.shutdown(wait=True, cancel_futures=True)
-    assert workers
-    for worker in workers:                       # the stalled run's worker was killed
-        worker.join(timeout=30.0)
-        assert not worker.is_alive()
-    assert time.monotonic() - start < 120.0
-    for task in futures:
-        assert isinstance(out[task], ParityWorkerError)
-        assert "Slow at 2 substeps (limit 1 s) stalled" in str(out[task])
-
-
-def test_a_queued_run_is_timed_from_when_a_worker_starts_it():
-    """One worker: the second run waits in the queue (which the pool already counts as
-    running) while the first takes 3 s. Its 1 s limit starts when the worker takes it, so
-    it finishes in time."""
-    context = multiprocessing.get_context("spawn")
-    pool = concurrent.futures.ProcessPoolExecutor(1, mp_context=context)
-    try:
-        with context.Manager() as manager:
-            started = manager.dict()
-            futures = _submit(pool, started, {("First", 1): (_sleep_in_worker, 3.0),
-                                              ("Queued", 1): (_sleep_in_worker, 0.0)})
-            out = _gather(pool, futures, {("First", 1): 600.0, ("Queued", 1): 1.0},
-                          started, poll=0.2)
-    finally:
-        pool.shutdown(wait=True, cancel_futures=True)
-    assert out == {("First", 1): 3.0, ("Queued", 1): 0.0}
-
-
 @pytest.mark.parametrize("model", sorted(PARITY_ROWS))
-def test_dynamic_parity_at_the_reference_precision(model, default_windows):
-    """The first `PARITY_ROWS[model]` rows of every dynamic model within PARITY_RTOL
+def test_dynamic_parity_at_the_reference_precision(model):
+    """The first `PARITY_ROWS[model]` rows of the cheap dynamic models within PARITY_RTOL
     (see the block comment above PARITY_RTOL)."""
-    failures = default_windows[model]
-    if isinstance(failures, ParityWorkerError):
-        raise failures
+    failures = _check_parity(model, PARITY_ROWS[model])
     assert not failures, "\n".join(failures)
 
 

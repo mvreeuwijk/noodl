@@ -116,11 +116,9 @@ comes from. The earlier names still import, as aliases of the same objects:
 | `MBLDoorPortStream` | `DoorPortStream` |
 | `mbl_discretized_door`, `mbl_discretized_operable_door` | `discretized_door`, `discretized_operable_door` |
 | `MBLMedium` | `AirMedium` |
-| module `noodl.elements.powerlaw_mbl` | `noodl.elements.powerlaw_regularized` |
 | `EpanetDarcyWeisbach`, `epanet_friction_factor` (water) | `CompositeDarcyWeisbach`, `composite_friction_factor` |
 | `friction="epanet"` (water `build_model`) | `friction="composite"` |
-| `geometry="swmm"`, module `swmm_xsect` (sewer) | `geometry="tabulated"`, `xsect_tables` |
-| `STREET_RAD_TO_CONTAM_DEG`, `CONTAM_DEG_TO_STREET_RAD` (`noodl.couple`) | `MATH_RAD_TO_COMPASS_DEG`, `COMPASS_DEG_TO_MATH_RAD` |
+| `geometry="swmm"` (sewer) | `geometry="tabulated"` |
 | `soulhac_shape`, `macdonald_profile`, `munich_idealised`, `SIRANE_EXCHANGE`, `KAPPA_MUNICH`, ... (street air quality) | `bessel_shape_parameter`, `canopy_displacement_roughness`, `twelve_street_grid`, `EXCHANGE_SIGMA_W_RATIO`, `KAPPA_041`, ...: the full table is under [Earlier option names](../applications/street_aq.md#earlier-option-names) |
 
 ### A note on `Duct`

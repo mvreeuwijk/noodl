@@ -1,9 +1,5 @@
 """Every element, whichever tool its equations come from, is importable from noodl.elements."""
 
-import importlib
-
-import pytest
-
 import noodl.elements as elements
 
 NAMES = [
@@ -18,12 +14,7 @@ NAMES = [
 ]
 
 
-@pytest.mark.parametrize("name", NAMES)
-def test_element_is_exported(name):
-    assert name in elements.__all__
-    assert getattr(elements, name) is not None
-
-
-def test_no_tool_named_subpackage():
-    with pytest.raises(ModuleNotFoundError):
-        importlib.import_module("noodl.elements.mbl")
+def test_every_element_is_exported():
+    for name in NAMES:
+        assert name in elements.__all__, name
+        assert getattr(elements, name) is not None, name

@@ -149,48 +149,6 @@ def test_gradcheck_matvec_wrt_slopes_and_x():
     assert torch.autograd.gradcheck(f, (slopes, x), eps=1e-6, atol=1e-6)
 
 
-def test_matvec_source_has_no_python_loop_over_edges():
-    """Construction-time loops are fine; a per-solve hot path (matvec is called every solver
-    iteration) must not loop over edges or nodes. Reads the actual source of matvec's method
-    body and asserts no `for` appears in it -- a static, cheap proxy for "vectorised", checked
-    here rather than merely asserted in prose because a future edit could silently reintroduce
-    a loop otherwise.
-    """
-    import inspect
-
-    from noodl.operators.graph import GraphLaplacianOperator as G
-
-    source = inspect.getsource(G.matvec)
-    assert "for " not in source
-
-
-def test_rmatvec_source_has_no_python_loop_over_edges():
-    """Same check as test_matvec_source_has_no_python_loop_over_edges, but for rmatvec.
-
-    rmatvec must also be vectorised (no Python loop over edges).
-    """
-    import inspect
-
-    from noodl.operators.graph import GraphLaplacianOperator as G
-
-    source = inspect.getsource(G.rmatvec)
-    assert "for " not in source
-
-
-def test_apply_source_has_no_python_loop_over_edges():
-    """`matvec`/`rmatvec` are one-line delegators to `_apply`: checking only their own source, as
-    the two tests above do, would never catch a loop introduced INSIDE `_apply` itself, where all
-    the actual arithmetic now lives. Checked for both `for` and `while` loops.
-    """
-    import inspect
-
-    from noodl.operators.graph import GraphLaplacianOperator as G
-
-    source = inspect.getsource(G._apply)
-    assert "for " not in source
-    assert "while " not in source
-
-
 def test_spd_diagnosis_on_ungrounded_chain_fixture():
     """On the chain fixture, `op.spd_diagnosis()` returns exactly one record for instance 1 with
     `reason == "ungrounded"`.

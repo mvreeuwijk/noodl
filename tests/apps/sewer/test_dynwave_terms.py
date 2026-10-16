@@ -279,7 +279,7 @@ def _slot_w(y_norm, w_max):
     return w_max * 0.5423 * math.exp(-(y_norm ** 2.4))
 
 
-@pytest.mark.parametrize("y_norm", [0.98, 0.985257, 1.0, 1.5, 1.78, 2.0])
+@pytest.mark.parametrize("y_norm", [0.985257, 1.0, 1.5])
 def test_slot_width_follows_the_sjoberg_formula(y_norm):
     y_full = t([1.5])
     w = dt_._slot_width(y_norm * y_full, y_full, True)

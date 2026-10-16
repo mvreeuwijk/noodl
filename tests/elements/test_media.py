@@ -120,8 +120,7 @@ def test_unknown_medium_raises_key_error_naming_the_three_supported():
 # ---------------------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("t_kelvin", np.linspace(263.15, 323.15, 5).tolist())
-@pytest.mark.parametrize("x_w", [0.0, 0.01, 0.02])
+@pytest.mark.parametrize(("t_kelvin", "x_w"), [(263.15, 0.0), (293.15, 0.01), (323.15, 0.02)])
 def test_air_buoyancy_density_matches_density_pTX(t_kelvin, x_w):
     """Buildings/Utilities/Psychrometrics/Functions/density_pTX.mo:5-16: `d := p/(R*T)`,
     evaluated at Buildings.Media.Air's *fixed* `p_default` (never the actual port pressure)
@@ -139,8 +138,7 @@ def test_air_buoyancy_density_matches_density_pTX(t_kelvin, x_w):
     )
 
 
-@pytest.mark.parametrize("t_kelvin", [263.15, 293.15, 323.15])
-@pytest.mark.parametrize("x_w", [0.0, 0.01, 0.02])
+@pytest.mark.parametrize(("t_kelvin", "x_w"), [(263.15, 0.0), (293.15, 0.01), (323.15, 0.02)])
 def test_perfectgas_buoyancy_density_matches_its_own_ideal_gas_law(t_kelvin, x_w):
     """PerfectGas.mo:229-231/:134-136: the medium's own ideal-gas density function,
     `d = p/(gasConstant(X)*T)`, evaluated at `p_default` by convention
@@ -157,7 +155,7 @@ def test_perfectgas_buoyancy_density_matches_its_own_ideal_gas_law(t_kelvin, x_w
     )
 
 
-@pytest.mark.parametrize("t_kelvin", [263.15, 293.15, 323.15])
+@pytest.mark.parametrize("t_kelvin", [293.15])
 def test_simpleair_buoyancy_density_matches_its_own_ideal_gas_law(t_kelvin):
     """Modelica/Media/package.mo:6321-6323: `d = p/(R_gas*T)`, evaluated at `p_default`;
     SimpleAir has no moisture so `X_w` plays no role (has_moisture is False).

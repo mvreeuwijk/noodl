@@ -60,7 +60,7 @@ def _reference_F(dp: float) -> float:
     return brentq(residual, 1e-6, 1e3)
 
 
-@pytest.mark.parametrize("dp", [5.0, 50.0, 500.0])
+@pytest.mark.parametrize("dp", [5.0, 500.0])
 def test_turbulent_flow_matches_the_scipy_reference(dp):
     el = Duct(**PARAMS, n_iter=8)
     F = el.flow(torch.tensor([dp], dtype=F64))

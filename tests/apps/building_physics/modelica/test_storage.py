@@ -136,6 +136,7 @@ def _perfectgas_mass_energy(doc, names, out):
     return mass, energy
 
 
+@pytest.mark.slow
 def test_closed_heated_rooms_keep_their_mass_and_gain_the_heat():
     """ClosedDoors: three sealed rooms (doors closed) of PerfectGas heated by
     `Q = 100 sin(2 pi t/3600)` W. The total mass is constant and the total internal energy

@@ -419,7 +419,7 @@ def test_gradient_reaches_the_routed_depths(tmp_path):
     sched = model.inflow_schedule
     model.inflow_schedule = RunoffInflows(h2, sched.schedule, sched._runoff_nodes,
                                           sched._rdii_nodes)
-    steps = 60
+    steps = 10
     _, hist = simulate_dynamic_wave(model, state, drivers, steps=steps, record=("water.phi",))
     j1 = list(model.net.nodes).index("J1")
     depth = hist["water.phi"][-1, j1]

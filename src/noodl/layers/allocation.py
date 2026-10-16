@@ -610,6 +610,3 @@ class AllocatedFlowLayer(TopologyGuard):
             diagnostics["overflow"] = self._nonneg(s_unclamped - s_max) / dt
         return s_new, f
 
-
-# Pre-rename name, kept as an alias so existing code keeps working.
-CapacitatedTransferLayer = AllocatedFlowLayer  # alias, the pre-rename name

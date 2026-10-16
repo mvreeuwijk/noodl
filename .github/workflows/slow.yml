@@ -1,4 +1,5 @@
-# The expensive `slow`-marked reference-model comparisons, kept out of the per-push workflow.
+# Every `slow`-marked test (long reference-model comparisons and long simulations, in any
+# folder), kept out of the per-push workflow.
 # Runs weekly, on demand, and on pull requests labelled `run-slow`. Skips are reported in the
 # job summary and in the uploaded artifact so a comparison that stopped running is visible.
 name: slow-reference
@@ -29,11 +30,8 @@ jobs:
       # threshold applies to the whole default suite only.
       - name: Run slow tests
         shell: bash   # bash -eo pipefail: a pytest failure is not masked by tee
-        env:
-          NOODL_PARITY_WORKERS: "2"
         run: >
-          python -m pytest -m slow -rs --no-cov -n 2 --junitxml=junit-slow.xml
-          tests/verification tests/benchmarks
+          python -m pytest -m slow -rs --no-cov -n 4 --junitxml=junit-slow.xml
           | tee slow-output.txt
       - name: Summary
         if: always()

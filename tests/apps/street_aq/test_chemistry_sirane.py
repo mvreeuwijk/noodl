@@ -201,18 +201,12 @@ def test_the_preset_is_named_and_sets_the_rate_and_the_floor():
         photostationary_for_streets(("no", "no2", "o3"), no_o3_rate="arrhenius")
 
 
-def test_the_closure_keyword_is_refused():
-    with pytest.raises(TypeError, match="closure"):
-        photostationary_for_streets(("no", "no2", "o3"), closure="munich")
-
-
-def test_the_old_rate_names_are_the_same_functions():
+def test_the_reference_model_rate_names_are_the_same_functions():
     from noodl.apps.street_aq import chemistry
     from noodl.layers import reaction
 
     assert chemistry.k_no_o3_sirane is chemistry.k_no_o3_soulhac2011
     assert chemistry.j_no2_sirane is chemistry.j_no2_elevation_cloud
-    assert chemistry.j_no2 is chemistry.j_no2_zenith_table
     assert reaction.k_no_o3_munich is reaction.k_no_o3_jpl2003
     assert chemistry.NO_O3_RATES == {"soulhac_2011": k_no_o3_soulhac2011,
                                      "jpl_2003": k_no_o3_jpl2003}

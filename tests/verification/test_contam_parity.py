@@ -494,6 +494,7 @@ def test_a_scheduled_zone_temperature_run_matches_contamx(contamx, tmp_path,
 
 
 @pytest.mark.external
+@pytest.mark.slow
 def test_a_two_day_run_across_midnight_matches_contamx(contamx, tmp_path, record_property):
     """The scheduled stack project run to the end of 1/2 (its `.wth`/`.ctm` cover both days):
     the calendar, the weather's day 2 and the left limit at midnight (the previous day's
@@ -547,6 +548,7 @@ SCHEDULED = DATA / "scheduled_three_zone.prj"
 
 
 @pytest.mark.external
+@pytest.mark.slow
 def test_the_scheduled_three_zone_project_matches_contamx(contamx, tmp_path, record_property):
     """`scheduled_three_zone.prj`: a scheduled exhaust fan, sarin source, zone-2 temperature
     and window over 24 h, with diurnal weather (Ta, Pb, Ws, Wd) and an ambient sarin pulse,
@@ -682,6 +684,7 @@ def test_a_constant_coefficient_source_scales_with_its_multiplier(contamx, tmp_p
 
 
 @pytest.mark.external
+@pytest.mark.slow
 def test_a_pressure_driven_source_matches_contamx(contamx, tmp_path, record_property):
     """`pressure_source_stack.prj`: NIST's scheduled one-zone stack (weather and ambient
     files, zone schedule, densZP, dodMdt) with a pressure-driven source, 288 steps; the
@@ -700,6 +703,7 @@ FAN_CURVE = DATA / "fan_curve_three_zone.prj"
 
 
 @pytest.mark.external
+@pytest.mark.slow
 def test_a_scheduled_fan_curve_matches_contamx(contamx, tmp_path, record_property):
     """`fan_curve_three_zone.prj`: an exhaust fan curve (mult 1.5) from zone three at 303.15
     K on a speed schedule 1, 0.8, 0.05 (below its 0.1 off ratio: the shut-off orifice) and
@@ -843,6 +847,7 @@ def _mass_fraction_bound(eps_flow, pass_fractions=None):
 
 
 @pytest.mark.external
+@pytest.mark.slow
 def test_a_duct_network_matches_contamx(contamx, tmp_path, record_property):
     """`duct_three_zone.prj` (fixture NOTICE): wind terminal, filtered Colebrook duct, fan
     curve on a speed schedule, vertical rise, split to two terminals (one half closed from
@@ -1003,6 +1008,7 @@ def test_a_simple_ahs_matches_contamx(contamx, tmp_path, record_property):
 
 
 @pytest.mark.external
+@pytest.mark.slow
 def test_nist_s_ahs_and_duct_sample_matches_contamx(contamx, tmp_path, record_property):
     """NIST's `test_GetPrjInfo.prj` with zone 1's and segment 4's control references and the
     duct leakage removed, one hour, sarin outdoors at 1e-3: two simple AHS with zero-volume
@@ -1088,6 +1094,7 @@ def _pi_loop_response_sums(a, b, kp, ki_dt, steps):
 
 
 @pytest.mark.external
+@pytest.mark.slow
 def test_demand_controlled_ventilation_matches_contamx(contamx, tmp_path, record_property):
     """`dcv_three_zone.prj`: CO2 from occupants (08:00-18:00, a schedule node on the
     source), a PI controller (Kp 0.01, Ki 1e-5 /s, 300 s steps) on zone one's CO2 above
@@ -1161,6 +1168,7 @@ def test_demand_controlled_ventilation_matches_contamx(contamx, tmp_path, record
 
 
 @pytest.mark.external
+@pytest.mark.slow
 def test_a_pressure_controlled_exhaust_matches_contamx(contamx, tmp_path, record_property):
     """`pressure_exhaust_three_zone.prj`: a scheduled supply fan; zone three's gauge
     pressure above -0.5 Pa (a limit control) through a P controller (Kp 0.8) drives the
@@ -1183,6 +1191,7 @@ def test_a_pressure_controlled_exhaust_matches_contamx(contamx, tmp_path, record
 
 
 @pytest.mark.external
+@pytest.mark.slow
 def test_a_hysteresis_window_matches_contamx(contamx, tmp_path, record_property):
     """`hysteresis_window_three_zone.prj`: zone one's temperature ramps 293.15 -> 303.15 ->
     293.15 K through a schedule node; a window (path 5, an orifice) opens by hysteresis
@@ -1248,7 +1257,9 @@ DUCT_RECORDS = [("  2  0   2   3   3   0   1   0", "  2  0   2   3   3   0   0  
                 ("  6  0 1  2   0   0   2   0", "  6  0 1  2   0   0   0   2", 2)]
 
 
-@pytest.mark.parametrize(("src", "records"), [(AHS, AHS_RECORDS), (DUCTS, DUCT_RECORDS)])
+@pytest.mark.parametrize(("src", "records"),
+                         [(AHS, AHS_RECORDS),
+                          pytest.param(DUCTS, DUCT_RECORDS, marks=pytest.mark.slow)])
 def test_a_control_through_a_schedule_node_equals_the_schedule(src, records, tmp_path):
     """The AHS outdoor-air fraction and supply point, a duct fan's speed and a terminal's
     opening driven through schedule nodes: noodl's run is the scheduled run exactly, as
@@ -1264,7 +1275,9 @@ def test_a_control_through_a_schedule_node_equals_the_schedule(src, records, tmp
 
 @pytest.mark.external
 @pytest.mark.parametrize(("src", "records", "rtol_flow"),
-                         [(AHS, AHS_RECORDS, 32 * F32_U), (DUCTS, DUCT_RECORDS, 64 * F32_U)])
+                         [(AHS, AHS_RECORDS, 32 * F32_U),
+                          pytest.param(DUCTS, DUCT_RECORDS, 64 * F32_U,
+                                       marks=pytest.mark.slow)])
 def test_controls_through_schedule_nodes_match_contamx(contamx, src, records, rtol_flow,
                                                        tmp_path, record_property):
     """The same variants against ContamX, at the budgets of the scheduled originals' parity
@@ -1466,7 +1479,9 @@ AGE_ACH_VARIANTS = {
 
 
 @pytest.mark.external
-@pytest.mark.parametrize("case", list(AGE_ACH_VARIANTS))
+@pytest.mark.parametrize("case", [
+    pytest.param(c, marks=pytest.mark.slow) if "ducts" in c or "return" in c else c
+    for c in AGE_ACH_VARIANTS])
 def test_age_and_air_change_rate_match_contamx(contamx, case, tmp_path, record_property):
     """The duct and simple-AHS projects with ContamX's age file switched on; each also with
     zone two flagged outside the building volume (flag 16); and the duct project with a

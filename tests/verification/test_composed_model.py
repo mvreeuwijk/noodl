@@ -11,7 +11,7 @@ from __future__ import annotations
 import torch
 
 import noodl.solvers.select as select_module
-from benchmarks.composed_model import ComposedModel, build_composed
+from benchmarks.composed_model import build_composed
 
 
 def _full(layer, s_interior, node_dim=-1):
@@ -22,8 +22,8 @@ def _full(layer, s_interior, node_dim=-1):
     return full.index_copy(node_dim % full.dim(), layer.interior_idx, s_interior)
 
 
-def test_build_composed_produces_expected_node_and_edge_counts():
-    model = build_composed()
+def test_build_composed_produces_expected_node_and_edge_counts(composed_model):
+    model = composed_model
     # Node count is exact and seed-independent: 8 * 120 + 40 + 30.
     assert model.net.n == 1030
     # Edge count is seed-dependent (random extra edges beyond each spanning tree) but tightly
@@ -31,13 +31,13 @@ def test_build_composed_produces_expected_node_and_edge_counts():
     assert 2100 <= model.net.b <= 2300
 
 
-def test_build_composed_graph_is_connected():
-    model = build_composed()
+def test_build_composed_graph_is_connected(composed_model):
+    model = composed_model
     assert model.net.n_islands == 1
 
 
-def test_build_composed_every_interface_node_exists_in_the_network():
-    model = build_composed()
+def test_build_composed_every_interface_node_exists_in_the_network(composed_model):
+    model = composed_model
     node_set = set(model.net.nodes)
     assert set(model.interface_nodes.keys()) == {"street", "sewer"}
     for i in range(8):
@@ -58,8 +58,8 @@ def test_build_composed_is_reproducible_given_the_same_seed():
     assert model1.interface_nodes == model2.interface_nodes
 
 
-def test_build_composed_solves_on_the_dense_path_at_ensemble_one():
-    model = build_composed()
+def test_build_composed_solves_with_conserved_flows_at_ensemble_one(composed_model):
+    model = composed_model
     phi, q = model.layer.solve(
         model.phi_boundary, model.drivers, model.sources, differentiable=False
     )
@@ -72,8 +72,8 @@ def test_build_composed_solves_on_the_dense_path_at_ensemble_one():
     assert float(imbalance[..., model.layer.interior].abs().max()) < 1e-8
 
 
-def test_build_composed_transport_steps_on_the_dense_path():
-    model = build_composed()
+def test_build_composed_transport_steps_on_the_dense_path(composed_model):
+    model = composed_model
     phi, q = model.layer.solve(
         model.phi_boundary, model.drivers, model.sources, differentiable=False
     )
@@ -92,16 +92,6 @@ def test_build_composed_transport_steps_on_the_dense_path():
         dt=60.0,
     )
     assert x1.shape == x0.shape and torch.isfinite(x1).all()
-
-
-def test_composed_model_fixture_matches_a_direct_call(composed_model):
-    model = composed_model
-    ref = build_composed()
-    assert isinstance(model, ComposedModel)
-    assert model.ensemble == 1
-    assert model.net.n == ref.net.n
-    assert model.net.b == ref.net.b
-    assert model.interface_nodes == ref.interface_nodes
 
 
 def test_composed_layer_and_dense_layer_agree_and_take_different_paths(monkeypatch):

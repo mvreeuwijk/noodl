@@ -49,7 +49,7 @@ jobs:
       - run: >
           pytest -q -rs --no-cov -n 2
           tests/test_*.py tests/layers tests/solvers tests/operators tests/elements
-          tests/components tests/apps/test_*.py tests/verification/test_newton_batched.py
+          tests/components tests/apps/test_*.py
 
   # Build the wheel and import it from a clean environment, outside the source tree,
   # so a missing package file or undeclared dependency fails here rather than for users.
@@ -85,13 +85,19 @@ jobs:
       # the CONTAM parity tests run rather than skip.
       - run: pip install -e ".[dev,contam]"
       - run: >
-          NOODL_PARITY_WORKERS=2 python -m pytest -q -rs --no-cov -n 2 --junitxml=junit.xml
+          python -m pytest -q -rs --no-cov -n 2 --junitxml=junit.xml
           tests/test_*.py tests/layers tests/solvers tests/operators tests/elements
-          tests/components tests/apps/test_*.py tests/verification/test_newton_batched.py
+          tests/components tests/apps/test_*.py
+      # Every CONTAM comparison, `slow` ones included (`-m ""`): the weekly slow workflow runs
+      # on Linux, where contamxpy is not installable, so this is the only place they run.
+      - run: >
+          python -m pytest -q -rs --no-cov -n 2 -m "" --junitxml=junit-contam.xml
           tests/verification/test_contam_parity.py
       - name: Skip summary
         if: always()
-        run: python .github/scripts/junit_summary.py junit.xml "tests (windows, Python 3.12)" >> "$GITHUB_STEP_SUMMARY"
+        run: |
+          python .github/scripts/junit_summary.py junit.xml "tests (windows, Python 3.12)" >> "$GITHUB_STEP_SUMMARY"
+          python .github/scripts/junit_summary.py junit-contam.xml "CONTAM comparisons (windows)" >> "$GITHUB_STEP_SUMMARY"
 
   macos:
     runs-on: macos-latest
@@ -107,7 +113,7 @@ jobs:
       - run: >
           python -m pytest -q -rs --no-cov -n 2 --junitxml=junit.xml
           tests/test_*.py tests/layers tests/solvers tests/operators tests/elements
-          tests/components tests/apps/test_*.py tests/verification/test_newton_batched.py
+          tests/components tests/apps/test_*.py
       - name: Skip summary
         if: always()
         run: python .github/scripts/junit_summary.py junit.xml "tests (macos, Python 3.12)" >> "$GITHUB_STEP_SUMMARY"

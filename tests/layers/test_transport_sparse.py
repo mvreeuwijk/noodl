@@ -553,11 +553,12 @@ def test_exact_scheme_preserves_positivity_sparse_path():
         assert torch.all(c >= 0.0)
 
 
-def test_error_control_triggers_substepping_on_a_stiff_case():
+@pytest.mark.parametrize("dt", [0.1, pytest.param(50.0, marks=pytest.mark.slow)])
+def test_error_control_triggers_substepping_on_a_stiff_case(dt):
     net = flow_through_zone()
     layer = TransportLayer(
         net, "co2", capacity=torch.tensor([1.0]), flow_kind="airpath", boundary=["ambient"],
-        removal=torch.tensor([500.0], dtype=torch.float64),  # dt * rate will be huge
+        removal=torch.tensor([500.0], dtype=torch.float64),  # a stiff removal rate
     )
     q = torch.zeros(2, dtype=torch.float64)
     x0 = torch.tensor([10.0], dtype=torch.float64)
@@ -569,7 +570,6 @@ def test_error_control_triggers_substepping_on_a_stiff_case():
     # substep case (the shift is correct and intentional, not a bug to work
     # around; this test's own intent -- exercising real substepping -- needs forcing now).
     sources = torch.tensor([50.0], dtype=torch.float64)
-    dt = 50.0  # dt * rate = 25000: far past the Taylor series' single-step radius
 
     op = layer._advection_operator(q)
     M, N = layer.operator(q)
@@ -577,7 +577,7 @@ def test_error_control_triggers_substepping_on_a_stiff_case():
     out = _expm_action(op, x0, b0, dt)
     assert out.substeps > 1
 
-    # dx/dt = -500 x + 50: steady state 50/500 = 0.1, and exp(-500*50) underflows to 0.
+    # dx/dt = -500 x + 50: steady state 50/500 = 0.1.
     expected = x0 * math.exp(-500.0 * dt) + (50.0 / 500.0) * (1.0 - math.exp(-500.0 * dt))
     torch.testing.assert_close(out.x, expected, rtol=1e-6, atol=1e-9)
 
@@ -662,7 +662,7 @@ def test_step_records_shift_false_when_sources_require_grad(monkeypatch):
         return real_expm_action(*args, **kwargs)
 
     monkeypatch.setattr(transport_module, "_expm_action", spy)
-    layer.step(x0, q, full_source, xb, 50.0)
+    layer.step(x0, q, full_source, xb, 0.1)
 
     assert recorded["shift"] is False
 
@@ -685,7 +685,8 @@ def test_gradcheck_expm_action_wrt_x_flow_sources_boundary():
     assert gradcheck(f, (x0, q, sources, x_b), eps=1e-6, atol=1e-5)
 
 
-def test_expm_action_backward_memory_scales_with_substep_count():
+@pytest.mark.parametrize("dt", [0.1, pytest.param(50.0, marks=pytest.mark.slow)])
+def test_expm_action_backward_memory_scales_with_substep_count(dt):
     """Measures (does not gate) how backward memory through _expm_action's own unrolled
     iteration grows from a non-stiff case (1 substep) to a genuinely stiff one (several
     substeps). Both `run_and_measure` calls below build `b0` from `xb`/`sources` with
@@ -733,7 +734,7 @@ def test_expm_action_backward_memory_scales_with_substep_count():
         return substeps_holder["substeps"], peak
 
     substeps_mild, peak_mild = run_and_measure(layer_mild, 30.0)
-    substeps_stiff, peak_stiff = run_and_measure(layer_stiff, 50.0)
+    substeps_stiff, peak_stiff = run_and_measure(layer_stiff, dt)
     print(
         f"_expm_action backward memory (saved_tensor_bytes): "
         f"mild(substeps={substeps_mild})={peak_mild}, "
@@ -743,7 +744,8 @@ def test_expm_action_backward_memory_scales_with_substep_count():
     assert peak_stiff > peak_mild  # more sub-steps genuinely save more for backward
 
 
-def test_expm_action_mixed_stiffness_batch_matches_standalone_within_tolerance():
+@pytest.mark.parametrize("dt", [0.1, pytest.param(50.0, marks=pytest.mark.slow)])
+def test_expm_action_mixed_stiffness_batch_matches_standalone_within_tolerance(dt):
     """ONE `_expm_action` call on a batch of two instances -- instance 0 (removal rate
     0.01) converges in a handful of Taylor terms, instance 1 (removal rate 500.0, the
     same rate/dt as test_error_control_triggers_substepping_on_a_stiff_case above) needs
@@ -766,7 +768,6 @@ def test_expm_action_mixed_stiffness_batch_matches_standalone_within_tolerance()
         for r in rates
     ]
     q = torch.zeros(2, dtype=torch.float64)
-    dt = 50.0
     xb = torch.tensor([0.0], dtype=torch.float64)
     # Nonzero source disables the b0 == 0 diagonal shift for both instances (see
     # test_error_control_triggers_substepping_on_a_stiff_case above), keeping the removal=500

@@ -76,6 +76,7 @@ def test_low_rise_walls_set_their_boundary_pressures_from_the_wind(tmp_path):
     assert bool((sign * hist["air.q"][:, col] > 0).all())  # west -> east
 
 
+@pytest.mark.slow
 def test_outside_humidity_comes_from_the_relative_humidity(tmp_path):
     """BaseClasses/Outside.mo:49-53: X = X_pTphi(p, T, relHum) at the boundary's own
     pressure; 10 degC is above the triple point, so pSat is over liquid water."""
