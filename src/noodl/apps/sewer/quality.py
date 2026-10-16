@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import torch
 
+from noodl import layout
 from noodl.apps.sewer.hydraulics import resolve_nodal_driver
 from noodl.layers.reaction import Reaction
 
@@ -155,8 +156,10 @@ class LateralLoads:
     gives the load `s_j C_in,j` in kg/s per species (the water_quality source term),
     written to `"<water_layer>.sources"` in FULL node order. Only a POSITIVE `inflow` loads:
     a negative one (a dynamic-wave withdrawal) carries no external concentration, it removes
-    mass at the node's own concentration, which the hydraulics closure applies as an outflow
-    loss fraction (`DynamicWaveHydraulics._quality_volume`).
+    mass at the node's own concentration, which the hydraulics closure applies as the
+    transport step's own outflow (`DynamicWaveHydraulics._quality_volume`, the removal
+    rate ``"<water_layer>.removal"``). A one-species layer gets its sources REDUCED,
+    ``(..., nodes)``, as `TransportLayer` holds that layer's state.
 
     Registered BEFORE `H2STransfer` in `build_model`'s closure list: `H2STransfer`
     reads `drivers.get("<water_layer>.sources")` and ADDS its own transfer term to it
@@ -211,8 +214,8 @@ class LateralLoads:
                 )
             # a withdrawal (negative inflow) is NOT loaded at the external concentration: it
             # leaves at the node's own concentration, which the dynamic-wave hydraulics
-            # takes out of the layer as a loss fraction (`DynamicWaveHydraulics`,
-            # "Quality"), so only the inflow side is a source here
+            # takes out of the layer as an outflow of the transport step
+            # (`DynamicWaveHydraulics`, "Quality"), so only the inflow side is a source here
             parts.append(torch.where(inflow >= 0, inflow, 0.0 * inflow) * c_in)
         sources = parts[0] if self.n_species == 1 else torch.stack(parts, dim=-1)
         return {f"{self.water_layer}.sources": sources}
@@ -235,6 +238,13 @@ class SulfideGeneration(Reaction):
 
     ``sulfide=None`` is BOD decay alone: it reads `T_water` only, never the hydraulic drivers
     or ``out_pipe`` (a dynamic-wave junction need not have a unique outgoing conduit).
+
+    `n_species` is the layer's species count, which the builders pass. A one-species layer
+    (``species=("bod",)``) holds its state REDUCED, ``(..., manholes)`` with no species
+    axis; it is read through `noodl.layout.as_stacked` (with the manhole count from
+    `manhole_idx`, else the state's last axis) and returned in the layout it came in.
+    Without `n_species` the state is stacked ``(..., manholes, species)``, its last axis
+    the species.
     """
 
     def __init__(
@@ -248,8 +258,10 @@ class SulfideGeneration(Reaction):
         out_pipe: Tensor | None = None,
         manhole_idx: Tensor | None = None,
         n_nodes: int | None = None,
+        n_species: int | None = None,
     ) -> None:
         self.bod = int(bod)
+        self.n_species = None if n_species is None else int(n_species)
         self.sulfide = None if sulfide is None else int(sulfide)
         self.m_prime = float(m_prime)
         self.m_loss = float(m_loss)
@@ -280,6 +292,12 @@ class SulfideGeneration(Reaction):
         if dt is None:
             return x
         drivers = drivers or {}
+        reduced = False
+        if self.n_species is not None:
+            n = (int(self.manhole_idx.numel()) if self.manhole_idx is not None
+                 else x.shape[-2] if self.n_species > 1 else x.shape[-1])
+            x, reduced = layout.as_stacked(x, n, self.n_species, name="water_quality.x",
+                                           where="SulfideGeneration")
         n_species = x.shape[-1]
         if not (0 <= self.bod < n_species) or not (
             self.sulfide is None or 0 <= self.sulfide < n_species
@@ -310,7 +328,7 @@ class SulfideGeneration(Reaction):
             out[..., self.sulfide] = torch.clamp(sulfide + dt * d_sulfide, min=0.0)
         d_bod = bod_rate(bod, t_water, k_bod=self.k_bod)
         out[..., self.bod] = torch.clamp(bod + dt * d_bod, min=0.0)
-        return out
+        return layout.as_layout(out, reduced)
 
 
 class H2STransfer:

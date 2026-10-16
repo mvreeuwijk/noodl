@@ -1133,7 +1133,7 @@ def build_model(
             SulfideGeneration(
                 bod=layout.species_columns(species, ["bod"], where="build_model")[0],
                 sulfide=sulfide_col, out_pipe=out_pipe,
-                manhole_idx=manhole_idx, n_nodes=graph.n,
+                manhole_idx=manhole_idx, n_nodes=graph.n, n_species=len(species),
             ),
         )]
         if quality and "bod" in species else []

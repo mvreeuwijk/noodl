@@ -144,7 +144,10 @@ a passive tracer without reactions. `"sulfide"` without `"bod"` and repeated nam
 refused. The air-quality layer and the water-to-air transfer exist only when `"sulfide"` is
 among the species (the air-flow layer is built by `air=True` regardless); a selection
 without `"bod"` has no reaction at all. Every species `s` has a lateral-inflow
-concentration driver `"<s>_in"` (kg/m3, default 0), as in the dynamic-wave builder.
+concentration driver `"<s>_in"` (kg/m3, default 0), as in the dynamic-wave builder. A
+single species (`species=("bod",)` or `("tracer",)`) is held with no species axis,
+`"water_quality.x"` of shape `(manholes,)`, as `TransportLayer` holds any one-species
+layer; BOD decays on it as it does beside other species, in both builders.
 
 `air=False` gives the water-only model the SWMM parity rows use. `fans` names manholes carrying
 a prescribed extraction (m³/s, positive out).

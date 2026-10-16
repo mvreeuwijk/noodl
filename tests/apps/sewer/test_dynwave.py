@@ -2829,6 +2829,32 @@ def test_sulfide_is_generated_on_the_dynamic_wave_tree(tmp_path):
     assert 0.0 < float(x[j1, 0]) < float(x[j1, 2])
 
 
+def test_every_partial_species_selection_steps_on_the_dynamic_wave(tmp_path):
+    """Each documented selection steps on the dynamic wave, and each species evolves as in
+    the full ``("bod", "sulfide", "tracer")`` run (BOD and the tracer loaded at J1): BOD
+    alone (a state with no species axis) decays as beside the others, a tracer alone is
+    conservative, and the order of the names does not change the chemistry."""
+    net = _tree(tmp_path, scale=0.5)
+
+    def run(species):
+        loaded = tuple(s for s in species if s != "sulfide")
+        model, _, states = _tracer_run(net, 6, {"J1": 0.3}, species=species,
+                                       loaded=loaded)
+        x = states[-1]["water_quality.x"]
+        return {name: (x if x.dim() == 1 else x[..., i]) for i, name in enumerate(species)}
+
+    full = run(("bod", "sulfide", "tracer"))
+    assert float(full["bod"].sum()) < float(full["tracer"].sum())      # BOD decays
+    assert float(full["sulfide"].max()) > 0.0                           # sulfide generated
+    for species in [("bod",), ("tracer",), ("bod", "tracer"), ("bod", "sulfide"),
+                    ("sulfide", "bod")]:
+        got = run(species)
+        assert set(got) == set(species)
+        for name, x in got.items():
+            assert x.shape == full[name].shape
+            torch.testing.assert_close(x, full[name], rtol=1e-9, atol=1e-15)
+
+
 def test_quality_runs_batched(tmp_path):
     """A batched inflow expands the multi-species state ``(junctions, species)`` too, and
     each member is its own run."""

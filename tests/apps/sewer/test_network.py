@@ -578,6 +578,41 @@ def test_passive_tracers_get_no_reactions_and_the_chemistry_follows_the_names():
                                rtol=1e-12, atol=0.0)
 
 
+@pytest.mark.parametrize("air", [False, True])
+def test_every_partial_species_selection_steps_with_its_own_chemistry(air):
+    """Each documented selection steps, and each species evolves as in the full
+    ``("bod", "sulfide", "tracer")`` run: a one-species layer holds its state with no
+    species axis, which `SulfideGeneration` reads through `noodl.layout` (BOD alone raised
+    in `expand` here), BOD decays, sulfide is generated only beside BOD, and a tracer is
+    conservative."""
+    start = {"bod": 0.2, "sulfide": 0.001, "tracer": 0.2}
+
+    def run(species):
+        model, state, drivers = build_model(tree_steady(), air=air, species=species)
+        x = state["water_quality.x"].clone()
+        for i, name in enumerate(species):
+            if x.dim() == 1:
+                x[:] = start[name]
+            else:
+                x[..., i] = start[name]
+        state = dict(state, **{"water_quality.x": x})
+        for _ in range(3):
+            state = model.step(state, drivers, 60.0)
+        x = state["water_quality.x"]
+        return {name: (x if x.dim() == 1 else x[..., i]) for i, name in enumerate(species)}
+
+    full = run(("bod", "sulfide", "tracer"))
+    assert float(full["bod"].sum()) < float(full["tracer"].sum())      # BOD decays
+    assert float(full["sulfide"].max()) != 0.001                        # sulfide generated
+    for species in [("bod",), ("tracer",), ("bod", "tracer"), ("bod", "sulfide"),
+                    ("sulfide", "bod")]:
+        got = run(species)
+        assert set(got) == set(species)
+        for name, x in got.items():
+            assert x.shape == full[name].shape
+            torch.testing.assert_close(x, full[name], rtol=1e-12, atol=0.0)
+
+
 def test_sulfide_without_bod_and_duplicate_species_are_refused_by_name():
     with pytest.raises(ValueError, match="'sulfide' needs 'bod'"):
         build_model(tree_steady(), species=("sulfide", "tracer"))

@@ -3034,7 +3034,7 @@ def _quality_parts(net: SewerNetwork, graph: Network, closure: DynamicWaveHydrau
     parts["reactions"].insert(0, ("water_quality", SulfideGeneration(
         bod=layout.species_columns(species, ["bod"], where="build_model")[0],
         sulfide=sulfide, out_pipe=out_pipe,
-        manhole_idx=closure.junction_idx, n_nodes=graph.n)))
+        manhole_idx=closure.junction_idx, n_nodes=graph.n, n_species=k)))
     return parts
 
 

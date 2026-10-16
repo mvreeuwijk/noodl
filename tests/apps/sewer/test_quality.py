@@ -402,6 +402,26 @@ def test_bod_decay_alone_reads_no_hydraulic_driver():
     torch.testing.assert_close(out[:, 0], x[:, 0] + 60.0 * rate, rtol=1e-14, atol=0.0)
 
 
+def test_bod_decay_on_a_one_species_layer_keeps_the_layout_it_was_given():
+    """A one-species layer (``species=("bod",)``) holds its state REDUCED, ``(manholes,)``
+    or batched ``(B, manholes)``, with no species axis; with `n_species=1` the reaction
+    reads it through `noodl.layout` and returns it in the same layout, as it does a stacked
+    ``(manholes, 1)`` column."""
+    reaction = q.SulfideGeneration(bod=0, sulfide=None, n_species=1,
+                                   manhole_idx=torch.tensor([0, 1, 2]), n_nodes=4)
+    t = {"T_water": torch.tensor(18.0, dtype=F64)}
+    reduced = torch.tensor([0.3, 0.1, 0.2], dtype=F64)
+    want = reduced + 60.0 * q.bod_rate(reduced, torch.tensor(18.0, dtype=F64))
+    torch.testing.assert_close(reaction.apply(reduced, 60.0, t), want, rtol=1e-14, atol=0.0)
+    batched = torch.stack([reduced, 2.0 * reduced])
+    out = reaction.apply(batched, 60.0, t)
+    assert out.shape == (2, 3)
+    torch.testing.assert_close(out[0], want, rtol=1e-14, atol=0.0)
+    stacked = reaction.apply(reduced.unsqueeze(-1), 60.0, t)
+    assert stacked.shape == (3, 1)
+    torch.testing.assert_close(stacked[:, 0], want, rtol=1e-14, atol=0.0)
+
+
 def test_declared_species_columns_agree_with_the_builder_layer():
     """The R05 class, §1.6: the columns each sewer quality component addresses by index are
     declared and checked against the layer's `species_names`, in any species order."""
