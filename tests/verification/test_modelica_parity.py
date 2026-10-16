@@ -423,7 +423,8 @@ DYNAMIC = ("OpenDoorBuoyancyDynamic", "OpenDoorBuoyancyPressureDynamic", "ThreeR
            "ThreeRoomsContamDiscretizedDoor", "CO2TransportStep", "ClosedDoors",
            "NaturalVentilation", "OneOpenDoor", "OneRoom", "ReverseBuoyancy",
            "ReverseBuoyancy3Zones", "ZonalFlow", "OneEffectiveAirLeakageArea",
-           "ChimneyShaftWithVolume", "ChimneyShaftNoVolume")
+           "ChimneyShaftWithVolume", "ChimneyShaftNoVolume",
+           "FanVolumes", "FanRampVolumes", "FanLosslessVolumes")
 # The models whose dynamics MBL's volume mass storage dominates (a closed heated building, a
 # start far from the airflow's balance, a source into sealed volumes): besides parity, each
 # asserts that noodl reproduces the storage mechanism (`_check_storage_mechanism`).
@@ -497,6 +498,11 @@ REFERENCE_RESOLUTION: dict[str, dict[str, float]] = {
     "ZonalFlow": {"T": 3.2e-10, "Xi": 1.6e-13, "flow": 0.0, "p": 0.0},
     "ChimneyShaftWithVolume": {"T": 1.4e-09, "Xi": 3.3e-14, "flow": 6.8e-10, "p": 8.6e-08,
                                "y": 1.2e-09},
+    # The fan models (`NoodlFanShort`): no allowance; the full runs agree with the references
+    # to 2.5e-7 at (1, 2) substeps, 5.4e-8 at (2, 4), with no resolution allowance at all.
+    "FanVolumes": {"T": 0.0, "Xi": 0.0, "flow": 0.0, "p": 0.0},
+    "FanRampVolumes": {"T": 0.0, "Xi": 0.0, "flow": 0.0, "p": 0.0},
+    "FanLosslessVolumes": {"T": 0.0, "Xi": 0.0, "flow": 0.0, "p": 0.0},
     # Over the output-grid rows both exports hold (OFF_GRID_ROWS).
     "ChimneyShaftNoVolume": {"T": 2.7e-10, "flow": 2.5e-10, "p": 3.2e-08, "y": 1.4e-09},
 }
@@ -522,7 +528,8 @@ PARITY_STORAGE: dict[str, dict[str, float]] = {}
 # every row of every model): where the start releases an imbalance, its first output
 # intervals, most of whose cost is the graded start (`run.GRADING_WINDOW`); where it is in
 # balance, a stretch past its smooth start.
-PARITY_ROWS = {"OneEffectiveAirLeakageArea": 8, "OneOpenDoor": 4, "OneRoom": 21, "ZonalFlow": 11}
+PARITY_ROWS = {"OneEffectiveAirLeakageArea": 8, "OneOpenDoor": 4, "OneRoom": 21, "ZonalFlow": 11,
+               "FanVolumes": 21, "FanRampVolumes": 21, "FanLosslessVolumes": 21}
 
 
 def _columns_of(out: dict, names, head: list[str]) -> dict[str, np.ndarray]:

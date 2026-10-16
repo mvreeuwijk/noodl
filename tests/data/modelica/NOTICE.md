@@ -26,7 +26,8 @@ the references still moved by up to 1.1e-4 of the flow floor (`ClosedDoors`' cra
 4.7e-5 (`OneOpenDoor`'s door at 28.8 s, 7.9e-9 kg/s) and 1.2e-6 in `CO2TransportStep`'s
 trace substance (6e-14 kg/kg); at 1e-14 DASSL returns no trajectory for these models.
 
-`FanOrifice`, `FanRamp`, `FanAdverse`, `ShortConnections` and `FanShortParallel` are not MBL
+`FanOrifice`, `FanRamp`, `FanAdverse`, `ShortConnections`, `FanShortParallel` (algebraic) and
+`FanVolumes`, `FanRampVolumes`, `FanLosslessVolumes` (dynamic) are not MBL
 models: they are the repository's own `NoodlFanShort` package (`sources/NoodlFanShort.mo`), built
 from MBL components, as references for `Movers.FlowControlled_dp` and for the zero-resistance
 connections (`LosslessPipe`, `PressureDrop` at `dp_nominal = 0`). They were exported with the

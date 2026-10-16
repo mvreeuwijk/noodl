@@ -372,6 +372,13 @@ and a back pressure that reverses the flow; a `LosslessPipe` and a `PressureDrop
 `dp_nominal = 0` in series; a fan through a lossless pipe beside a leak). They are exported with
 `scripts/modelica_export.py NoodlFanShort.<Model> --package <the .mo file> --mbl <mbl>`, and are
 algebraic models in `test_modelica_parity.py`, at the same tolerance as the others.
+Three dynamic models cover a fan with volume mass storage (`FanVolumes`, `FanRampVolumes`,
+`FanLosslessVolumes`: two `MixingVolume`s of different size joined by a fan and each leaking to an
+ambient, with a constant head and a start that meets the rise; the same with `dp_in` ramped from
+0 to 20 Pa; a fan into one volume through a `LosslessPipe`). They are in the dynamic set, at the
+reference tolerance of 1e-13, with no resolution allowance: the full runs agree with
+OpenModelica to 2.5e-7 relative at (1, 2) substeps (the t = 0 row, where the fan flow is set
+by the reader, to 3.6e-8).
 
 Regenerating the committed parity records (`tests/data/modelica/parity-{algebraic,dynamic}.json`,
 in [the building physics parity tables](../applications/building_physics.md#against-openmodelica-modelica-buildings-library))

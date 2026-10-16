@@ -151,4 +151,139 @@ package NoodlFanShort
     connect(senLeak.port_b, bouB.ports[2]);
     annotation (experiment(StopTime=60, Interval=1, Tolerance=1e-6));
   end FanShortParallel;
+
+  model FanVolumes
+    "Two volumes joined by a constant-head fan, each leaking to an ambient; the start meets the rise"
+    extends Modelica.Icons.Example;
+    package Medium = Buildings.Media.Air;
+    Buildings.Fluid.Sources.Boundary_pT bouA(redeclare package Medium = Medium,
+      p=101325, T=293.15, nPorts=1) "Ambient at zone A";
+    Buildings.Fluid.Sources.Boundary_pT bouB(redeclare package Medium = Medium,
+      p=101325, T=293.15, nPorts=1) "Ambient at zone B";
+    Buildings.Fluid.MixingVolumes.MixingVolume volA(redeclare package Medium = Medium,
+      energyDynamics=Modelica.Fluid.Types.Dynamics.FixedInitial,
+      massDynamics=Modelica.Fluid.Types.Dynamics.FixedInitial,
+      T_start=293.15, p_start=101325, V=50, nPorts=2, m_flow_nominal=0.05) "Zone";
+    Buildings.Fluid.MixingVolumes.MixingVolume volB(redeclare package Medium = Medium,
+      energyDynamics=Modelica.Fluid.Types.Dynamics.FixedInitial,
+      massDynamics=Modelica.Fluid.Types.Dynamics.FixedInitial,
+      T_start=293.15, p_start=101330, V=20, nPorts=2, m_flow_nominal=0.05) "Zone";
+    Buildings.Fluid.Movers.FlowControlled_dp fan(redeclare package Medium = Medium,
+      m_flow_nominal=0.05, inputType=Buildings.Fluid.Types.InputType.Constant, constantHead=5,
+      use_riseTime=false, addPowerToMedium=false,
+      energyDynamics=Modelica.Fluid.Types.Dynamics.SteadyState) "Fan from A to B";
+    Buildings.Airflow.Multizone.Orifice oriA(redeclare package Medium = Medium,
+      A=0.01, CD=0.6) "Leak between ambient and zone A";
+    Buildings.Airflow.Multizone.Orifice oriB(redeclare package Medium = Medium,
+      A=0.01, CD=0.6) "Leak between zone B and ambient";
+    Buildings.Fluid.Sensors.MassFlowRate senFan(redeclare package Medium = Medium)
+      "Flow leaving the fan";
+    Buildings.Fluid.Sensors.MassFlowRate senA(redeclare package Medium = Medium)
+      "Flow leaving leak A";
+    Buildings.Fluid.Sensors.MassFlowRate senB(redeclare package Medium = Medium)
+      "Flow leaving leak B";
+  equation
+    connect(bouA.ports[1], oriA.port_a);
+    connect(oriA.port_b, senA.port_a);
+    connect(senA.port_b, volA.ports[1]);
+    connect(volA.ports[2], fan.port_a);
+    connect(fan.port_b, senFan.port_a);
+    connect(senFan.port_b, volB.ports[1]);
+    connect(volB.ports[2], oriB.port_a);
+    connect(oriB.port_b, senB.port_a);
+    connect(senB.port_b, bouB.ports[1]);
+    annotation (experiment(StopTime=10, Interval=0.1, Tolerance=1e-6));
+  end FanVolumes;
+
+  model FanRampVolumes
+    "The same with the rise ramped from 0 to 20 Pa (dp_in); the start has no rise"
+    extends Modelica.Icons.Example;
+    package Medium = Buildings.Media.Air;
+    Buildings.Fluid.Sources.Boundary_pT bouA(redeclare package Medium = Medium,
+      p=101325, T=293.15, nPorts=1) "Ambient at zone A";
+    Buildings.Fluid.Sources.Boundary_pT bouB(redeclare package Medium = Medium,
+      p=101325, T=293.15, nPorts=1) "Ambient at zone B";
+    Buildings.Fluid.MixingVolumes.MixingVolume volA(redeclare package Medium = Medium,
+      energyDynamics=Modelica.Fluid.Types.Dynamics.FixedInitial,
+      massDynamics=Modelica.Fluid.Types.Dynamics.FixedInitial,
+      T_start=293.15, p_start=101325, V=50, nPorts=2, m_flow_nominal=0.05) "Zone";
+    Buildings.Fluid.MixingVolumes.MixingVolume volB(redeclare package Medium = Medium,
+      energyDynamics=Modelica.Fluid.Types.Dynamics.FixedInitial,
+      massDynamics=Modelica.Fluid.Types.Dynamics.FixedInitial,
+      T_start=293.15, p_start=101325, V=20, nPorts=2, m_flow_nominal=0.05) "Zone";
+    Buildings.Fluid.Movers.FlowControlled_dp fan(redeclare package Medium = Medium,
+      m_flow_nominal=0.05, inputType=Buildings.Fluid.Types.InputType.Continuous,
+      use_riseTime=false, addPowerToMedium=false,
+      energyDynamics=Modelica.Fluid.Types.Dynamics.SteadyState) "Fan from A to B";
+    Buildings.Airflow.Multizone.Orifice oriA(redeclare package Medium = Medium,
+      A=0.01, CD=0.6) "Leak between ambient and zone A";
+    Buildings.Airflow.Multizone.Orifice oriB(redeclare package Medium = Medium,
+      A=0.01, CD=0.6) "Leak between zone B and ambient";
+    Buildings.Fluid.Sensors.MassFlowRate senFan(redeclare package Medium = Medium)
+      "Flow leaving the fan";
+    Buildings.Fluid.Sensors.MassFlowRate senA(redeclare package Medium = Medium)
+      "Flow leaving leak A";
+    Buildings.Fluid.Sensors.MassFlowRate senB(redeclare package Medium = Medium)
+      "Flow leaving leak B";
+    Modelica.Blocks.Sources.Ramp ramp(height=20, duration=4, offset=0, startTime=1)
+      "Pressure rise";
+  equation
+    connect(bouA.ports[1], oriA.port_a);
+    connect(oriA.port_b, senA.port_a);
+    connect(senA.port_b, volA.ports[1]);
+    connect(volA.ports[2], fan.port_a);
+    connect(fan.port_b, senFan.port_a);
+    connect(ramp.y, fan.dp_in);
+    connect(senFan.port_b, volB.ports[1]);
+    connect(volB.ports[2], oriB.port_a);
+    connect(oriB.port_b, senB.port_a);
+    connect(senB.port_b, bouB.ports[1]);
+    annotation (experiment(StopTime=10, Interval=0.1, Tolerance=1e-6));
+  end FanRampVolumes;
+
+  model FanLosslessVolumes
+    "A fan into zone B through a LosslessPipe (junction), constant head 8 Pa"
+    extends Modelica.Icons.Example;
+    package Medium = Buildings.Media.Air;
+    Buildings.Fluid.Sources.Boundary_pT bouA(redeclare package Medium = Medium,
+      p=101325, T=293.15, nPorts=1) "Ambient at zone A";
+    Buildings.Fluid.Sources.Boundary_pT bouB(redeclare package Medium = Medium,
+      p=101325, T=293.15, nPorts=1) "Ambient at zone B";
+    Buildings.Fluid.MixingVolumes.MixingVolume volA(redeclare package Medium = Medium,
+      energyDynamics=Modelica.Fluid.Types.Dynamics.FixedInitial,
+      massDynamics=Modelica.Fluid.Types.Dynamics.FixedInitial,
+      T_start=293.15, p_start=101325, V=30, nPorts=2, m_flow_nominal=0.05) "Zone";
+    Buildings.Fluid.MixingVolumes.MixingVolume volB(redeclare package Medium = Medium,
+      energyDynamics=Modelica.Fluid.Types.Dynamics.FixedInitial,
+      massDynamics=Modelica.Fluid.Types.Dynamics.FixedInitial,
+      T_start=293.15, p_start=101333, V=10, nPorts=2, m_flow_nominal=0.05) "Zone";
+    Buildings.Fluid.Movers.FlowControlled_dp fan(redeclare package Medium = Medium,
+      m_flow_nominal=0.05, inputType=Buildings.Fluid.Types.InputType.Constant, constantHead=8,
+      use_riseTime=false, addPowerToMedium=false,
+      energyDynamics=Modelica.Fluid.Types.Dynamics.SteadyState) "Fan from A to B";
+    Buildings.Airflow.Multizone.Orifice oriA(redeclare package Medium = Medium,
+      A=0.01, CD=0.6) "Leak between ambient and zone A";
+    Buildings.Airflow.Multizone.Orifice oriB(redeclare package Medium = Medium,
+      A=0.01, CD=0.6) "Leak between zone B and ambient";
+    Buildings.Fluid.FixedResistances.LosslessPipe pip(redeclare package Medium = Medium,
+      m_flow_nominal=0.05) "Zero-resistance pipe between the fan and zone B";
+    Buildings.Fluid.Sensors.MassFlowRate senFan(redeclare package Medium = Medium)
+      "Flow leaving the fan";
+    Buildings.Fluid.Sensors.MassFlowRate senA(redeclare package Medium = Medium)
+      "Flow leaving leak A";
+    Buildings.Fluid.Sensors.MassFlowRate senB(redeclare package Medium = Medium)
+      "Flow leaving leak B";
+  equation
+    connect(bouA.ports[1], oriA.port_a);
+    connect(oriA.port_b, senA.port_a);
+    connect(senA.port_b, volA.ports[1]);
+    connect(volA.ports[2], fan.port_a);
+    connect(fan.port_b, pip.port_a);
+    connect(pip.port_b, senFan.port_a);
+    connect(senFan.port_b, volB.ports[1]);
+    connect(volB.ports[2], oriB.port_a);
+    connect(oriB.port_b, senB.port_a);
+    connect(senB.port_b, bouB.ports[1]);
+    annotation (experiment(StopTime=10, Interval=0.1, Tolerance=1e-6));
+  end FanLosslessVolumes;
 end NoodlFanShort;
