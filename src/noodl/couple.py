@@ -17,7 +17,7 @@ import torch
 from noodl import layout
 from noodl._broadcast import broadcast_shapes
 from noodl._fixed_point_loop import Verdict, confirm_gradient_dependence, run_passes
-from noodl.contracts import call_closure
+from noodl.contracts import StepContext, call_closure
 from noodl.model import Drivers, Model, State
 from noodl.solvers.fixed_point import differentiate_fixed_point
 from noodl.topology import Network
@@ -455,7 +455,10 @@ class CoupledModel:
             for model, key, name in alias.targets:
                 drivers[model][key] = apply_conversion(name, value, drivers[model])
 
-    def _refresh_ambient_density(self, tag: str, state: State, drivers: dict) -> None:
+    def _refresh_ambient_density(
+        self, tag: str, state: State, drivers: dict,
+        *, dt: float | None = None, t: float | None = None,
+    ) -> None:
         """Set `drivers["rho_amb"]` to what model `tag`'s own closures compute at the start of
         this step, when a closure declares it among its `outputs`.
 
@@ -464,7 +467,16 @@ class CoupledModel:
         schedule or a weather file) would otherwise convert at the density its drivers were
         BUILT with. Only the declaring closures run, in model order, with the step's start
         state: the same value the step's own closures then compute.
+
+        `dt` and `t` are the outer step's interval and start time. An integrating closure
+        receives the `StepContext` that model `tag`'s FIRST (sub)step hands its closures --
+        `dt / k` for a model named in `substeps` with `k`, and the start time `t` -- so a
+        density that follows the clock is the one at the step's start. Without `dt` (no
+        step) it is called as a query (`ctx=None`), at no time.
         """
+        ctx = None
+        if dt is not None:
+            ctx = StepContext(dt=dt / self.substeps.get(tag, 1), t=t)
         drv = None
         model = self.models[tag]
         for closure in model.closures:
@@ -472,7 +484,7 @@ class CoupledModel:
             if "rho_amb" not in (spec.writes or ()):
                 continue
             drv = dict(drivers) if drv is None else drv
-            drv.update(call_closure(spec, state, drv))
+            drv.update(call_closure(spec, state, drv, ctx))
         if drv is not None:
             drivers["rho_amb"] = drv["rho_amb"]
 
@@ -540,7 +552,7 @@ class CoupledModel:
         drivers = {tag: dict(d) for tag, d in drivers.items()}
         self._apply_aliases(drivers)
         for tag in self.models:
-            self._refresh_ambient_density(tag, start[tag], drivers[tag])
+            self._refresh_ambient_density(tag, start[tag], drivers[tag], dt=dt, t=t)
         if not self._two_way:
             pass_drivers = {tag: dict(d) for tag, d in drivers.items()}
             for link in self._one_way:
