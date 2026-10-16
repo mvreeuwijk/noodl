@@ -683,7 +683,7 @@ def test_sensors_by_name_resolve_against_the_model_they_are_built_into():
     (node_mass_fraction("B", 2), IndexError, "1 species, not position 2"),
     (node_mass_fraction("ambient"), KeyError, "'ambient' is not an interior node"),
     (edge_flow("airpath", 3), IndexError, "3 edges, not position 3"),
-    (edge_pressure_difference("door"), KeyError, "no element of kind 'door'"),
+    (edge_pressure_difference("door"), KeyError, "no law of kind 'door'"),
 ])
 def test_a_sensor_that_names_what_the_model_lacks_is_refused_when_the_model_is_built(
         reading, error, match):
