@@ -106,11 +106,11 @@ Supporting types.
 
 | Name | What it does | How to call it |
 |---|---|---|
-| `StepContext`<br><small>`noodl.model`</small> | What a state transition needs from the model: the interval it must integrate over (`None` under `steady()`, which an integrating closure refuses) and, when the caller tracks it, the time at the start of the step. | `StepContext(dt, t=None)` |
 | `StepContext`<br><small>`noodl.contracts`</small> | What a state transition needs from the model: the interval it must integrate over (`None` under `steady()`, which an integrating closure refuses) and, when the caller tracks it, the time at the start of the step. | `StepContext(dt, t=None)` |
 | `ClosureAttribute`<br><small>`noodl.contracts`</small> | One optional attribute of a closure: its name, the type it must have, what it defaults to when absent, what it means and which code consumes it. | `ClosureAttribute(name, type, default, meaning, consumer)` |
 | `Field`<br><small>`noodl.refs`</small> | A state or driver key that also knows the layout of the tensor stored under it. | `Field(key, *, role, layer, axis, labels, ordering, settable=None, n_species=1, species=None, quantity='', unit='', required='optional', default=0.0, description='', dtype=torch.float64, device='cpu', aliases=None, column=False, scalar=False)` |
 | `LayerRef`<br><small>`noodl.refs`</small> | One registered layer of a model, with its keys as discoverable `Field` attributes. | `LayerRef(name, layer, kind, *, flow_owner=None)` |
+| `KeyOwnership`<br><small>`noodl.refs`</small> | Who writes and who reads one key of a model: `writers` and `readers` are tuples of `"layer <name>"`, `"closure <label>"` or `"caller"` (the dictionary the caller gives). `field` is the key's `Field` when the model knows its layout. Closure entries come from the closure's DECLARATIONS (`inputs`, `outputs`, `state_keys`), so a closure that declares nothing is absent. | `KeyOwnership(key, field, writers, readers)` |
 | `LayerRefs`<br><small>`noodl.refs`</small> | Registered layer name -> `LayerRef`, plus the model's closure-carried keys. | `LayerRefs(model)` |
 | `Issue`<br><small>`noodl.validation`</small> | One finding: `level` is `"error"`, `"warning"` or `"info"`; `key` the key concerned, if any. | `Issue(level, code, message, key=None)` |
 | `InputRow`<br><small>`noodl.validation`</small> | One known key: what is expected and what was given. | `InputRow(key, role, layer, required, ordering, expected, unit, given, status)` |
