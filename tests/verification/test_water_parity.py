@@ -768,3 +768,84 @@ def test_the_water_golden_case_is_reproduced(tmp_path):
         assert final[key].flatten().tolist() == pytest.approx(
             expected, rel=1e-10, abs=1e-18
         )
+
+
+# --------------------------------------------------------------------------- PBV and GPV
+# The two-loop network with pipe P2 ending at a new demand-free junction J7, and a valve
+# V1 from J7 to J2 closing the loop again.
+_J7 = (" J6              \t0           \t9           \t                \t;\n",
+       " J6              \t0           \t9           \t                \t;\n"
+       " J7              \t0           \t0           \t                \t;\n")
+_P2_TO_J7 = (" P2              \tJ1              \tJ2  ",
+             " P2              \tJ1              \tJ7  ")
+_VALVES = ("[VALVES]\n;ID              \tNode1           \tNode2           \tDiameter    "
+           "\tType\tSetting     \tMinorLoss\n")
+_CURVES = "[CURVES]\n;ID              \tX-Value     \tY-Value\n"
+
+
+def _valve_edits(valve, curve=""):
+    return (_J7, _P2_TO_J7, (_VALVES, _VALVES + valve), (_CURVES, _CURVES + curve))
+
+
+_PBV_ACTIVE = _valve_edits(" V1  J7  J2  250  PBV  5  0\n")
+# A 0.05 m setting below the open valve's minor loss at this flow: EPANET treats it as an
+# open valve (pbvcoeff's `Km q^2 > setting` branch).
+_PBV_OPEN = _valve_edits(" V1  J7  J2  80  PBV  0.05  10\n")
+_GPV = _valve_edits(" V1  J7  J2  250  GPV  HL1  0\n",
+                    " HL1 0 0\n HL1 10 1\n HL1 30 6\n HL1 60 20\n")
+
+
+@pytest.mark.parametrize("edits", [_PBV_ACTIVE, _PBV_OPEN, _GPV],
+                         ids=["pbv-active", "pbv-open", "gpv"])
+def test_pressure_breaker_and_general_purpose_valves(tmp_path, edits):
+    """Heads 1e-6 relative; flows 1e-6 m3/s absolute; the valve's head loss 1e-5 relative.
+
+    Flows are compared absolutely because EPANET's own are not continuous through an
+    active PBV (its `pbvcoeff` holds the head drop by a 1e8 penalty, `CBIG`): P2 and V1 are
+    in series through the demand-free J7, yet EPANET reports them 1.6e-7 m3/s apart, and
+    its head loss across the active valve is 4.999997 m for a 5 m setting (MEASURED); this
+    model's flows agree to round-off and its head drop is the setting. MEASURED: PBV active
+    heads 3.2e-7, flows 2.6e-7 m3/s, loss 5.7e-7; PBV open loss 6.8e-6 (an open valve's
+    `m q^2` doubles the flows' relative difference); GPV heads 5.5e-7, loss 3.9e-6.
+    """
+    path, results = _epanet(tmp_path, "twoloop_si.inp", edits=edits)
+    model, state, drivers = build_model(read_epanet_inp(path))
+    assert model.kirchhoff["water"].mna
+    final = water_steady(model, state, drivers)
+    heads = results.node["head"].loc[0]
+    flows = results.link["flowrate"].loc[0]
+    assert _worst_heads(model, final, heads, skip=("R1",)) < 1e-6
+    worst_q = max(abs(float(final["water.q"][i]) - float(flows[name]))
+                  for i, name in enumerate(model.link_names))
+    assert worst_q < 1e-6, worst_q
+    names = model.node_names
+    phi = final["water.phi"]
+    loss = float(phi[names.index("J7")] - phi[names.index("J2")])
+    reference = float(results.link["headloss"].loc[0]["V1"])
+    assert abs(loss - reference) <= 1e-5 * abs(reference), (loss, reference)
+    i, k = model.link_names.index("P2"), model.link_names.index("V1")
+    assert abs(float(final["water.q"][i] - final["water.q"][k])) < 1e-15   # continuity at J7
+
+
+def test_gradient_through_a_valve_network_against_central_differences(tmp_path):
+    """d(sum of junction heads)/d(demands) on the GPV network: the MNA layer's implicit
+    adjoint against central differences, `max|analytic - fd| <= 1e-6 max|fd|`."""
+    path, _ = _epanet(tmp_path, "twoloop_si.inp", edits=_GPV)
+    model, state, drivers = build_model(read_epanet_inp(path))
+    junctions = [model.node_names.index(f"J{k}") for k in range(1, 8)]
+
+    def total(sources):
+        final = water_steady(model, state, {**drivers, "water.sources": sources})
+        return final["water.phi"][junctions].sum()
+
+    sources = drivers["water.sources"].clone().requires_grad_(True)
+    analytic, = torch.autograd.grad(total(sources), sources)
+    h = 1e-6
+    fd = torch.zeros_like(sources)
+    for i in junctions:
+        e = torch.zeros_like(sources)
+        e[i] = h
+        with torch.no_grad():
+            fd[i] = (total(sources + e) - total(sources - e)) / (2 * h)
+    scale = float(fd.abs().max())
+    assert float((analytic - fd)[junctions].abs().max()) <= 1e-6 * scale

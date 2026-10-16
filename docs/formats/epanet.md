@@ -13,7 +13,7 @@ units are read by `apps/water/inp.py`.
 quality sections (a quality run is configured through `build_model(quality=...)` instead).
 
 **Refused by name:** `[RULES]`; `[EMITTERS]`; `[STATUS]` with content; time-based controls (only
-`LINK <id> OPEN|CLOSED IF NODE <tank> BELOW|ABOVE <level>` is read); PRV, PSV, PBV and GPV valves;
+`LINK <id> OPEN|CLOSED IF NODE <tank> BELOW|ABOVE <level>` is read); PRV and PSV valves;
 a constant-**power** pump; a pump with a speed pattern; a tank with a volume curve; a `HEADLOSS`
 other than H-W or D-W; a closed pipe or check valve.
 
