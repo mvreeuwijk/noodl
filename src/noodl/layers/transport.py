@@ -130,6 +130,47 @@ def _scipy_sparse_linalg_importable() -> bool:
     return True
 
 
+def _reached_from(start: torch.Tensor, row: torch.Tensor, col: torch.Tensor,
+                  linked: torch.Tensor) -> torch.Tensor:
+    """`(B, m)` bool: per batch row, the indices reachable from `start` `(B, m)` along the
+    edges `row[e] -> col[e]` that `linked[b, e]` keeps (`(B, nnz)`). One depth-first search
+    per distinct `(start, linked)` pattern, on the host: O(m + nnz) each, whatever the depth
+    of the graph, and a batch whose instances share a pattern searches it once."""
+    m = start.shape[-1]
+    key = torch.cat((start, linked), -1).to(torch.uint8).cpu()
+    patterns, inverse = torch.unique(key, dim=0, return_inverse=True)
+    rows, cols = row.cpu(), col.cpu()
+    out = torch.zeros(patterns.shape[0], m, dtype=torch.bool)
+    for p, pattern in enumerate(patterns.bool()):
+        keep = pattern[m:]
+        r, c = rows[keep], cols[keep]
+        order = torch.argsort(r, stable=True)
+        targets = c[order].tolist()
+        bounds = torch.searchsorted(r[order], torch.arange(m + 1)).tolist()
+        seen = pattern[:m].tolist()
+        stack = pattern[:m].nonzero().flatten().tolist()
+        while stack:
+            i = stack.pop()
+            for j in targets[bounds[i]:bounds[i + 1]]:
+                if not seen[j]:
+                    seen[j] = True
+                    stack.append(j)
+        out[p] = torch.tensor(seen, dtype=torch.bool)
+    return out[inverse].to(start.device)
+
+
+class UndefinedSteadyState(ValueError):
+    """A steady transport solve has no answer: a stored node keeps everything that enters
+    it (nothing leaves it, or it belongs to a closed group whose contents never reach a
+    boundary outflow, a removal or a filter loss). A `ValueError`, raised before the solve
+    and naming the nodes; `layer` is the layer's name and `nodes` the nodes refused."""
+
+    def __init__(self, message: str, *, layer: str, nodes: Sequence[Node]) -> None:
+        super().__init__(message)
+        self.layer = layer
+        self.nodes = list(nodes)
+
+
 class _LinearSolve(torch.autograd.Function):
     """Differentiate a linear solve `A(params) x = rhs(params)` via the IMPLICIT ADJOINT,
     never by unrolling the forward solver's iteration: unrolling would differentiate the
@@ -259,20 +300,28 @@ def _linear_solve(
 
 
 class _AffineSystemOperator:
-    """(I - alpha * M): built from an AdvectionOperator, satisfying the LinearOperator
+    """(S - alpha * M): built from an AdvectionOperator, satisfying the LinearOperator
     duck type solvers.select.solve reads (matvec, rmatvec, diagonal, shape, dtype,
     device, symmetric, assemble, spd_certificate). Used for both the implicit scheme
     (alpha = dt) and the trapezoidal scheme (alpha = dt / 2), and passed to
     _linear_solve exactly like a bare AdvectionOperator is for steady() -- the adjoint
     derivation does not care what concrete operator "A" is, only that it exposes
     matvec/rmatvec/diagonal/assemble/spd_certificate.
+
+    `S` is the diagonal of per-row storage weights: the identity unless the layer has
+    storage-free nodes, whose rows are algebraic balances (weight 0) while flow passes
+    through them (see `TransportLayer._storage_stacked`).
     """
 
     symmetric = False
 
-    def __init__(self, M: AdvectionOperator, alpha: float) -> None:
+    def __init__(self, M: AdvectionOperator, alpha: float,
+                 storage: torch.Tensor | None = None) -> None:
         self.M = M
         self.alpha = alpha
+        # (..., m) weights of the identity: 1 where a row stores, 0 on a storage-free
+        # node's algebraic row. None is the plain identity.
+        self.storage = storage
         self.shape = M.shape
         self.dtype = M.dtype
         self.device = M.device
@@ -283,23 +332,30 @@ class _AffineSystemOperator:
         self._eye_idx: torch.Tensor | None = None
 
     def matvec(self, x: torch.Tensor) -> torch.Tensor:
-        return x - self.alpha * self.M.matvec(x)
+        own = x if self.storage is None else self.storage * x
+        return own - self.alpha * self.M.matvec(x)
 
     def rmatvec(self, y: torch.Tensor) -> torch.Tensor:
-        return y - self.alpha * self.M.rmatvec(y)
+        own = y if self.storage is None else self.storage * y
+        return own - self.alpha * self.M.rmatvec(y)
 
     def diagonal(self) -> torch.Tensor:
-        return 1.0 - self.alpha * self.M.diagonal()
+        own = 1.0 if self.storage is None else self.storage
+        return own - self.alpha * self.M.diagonal()
 
     def assemble(self):
         dense = self.M.assemble()
         m = dense.shape[-1]
-        eye = torch.eye(m, dtype=dense.dtype, device=dense.device)
+        if self.storage is None:
+            eye = torch.eye(m, dtype=dense.dtype, device=dense.device)
+        else:
+            eye = torch.diag_embed(torch.broadcast_to(self.storage, dense.shape[:-1]))
         return eye - self.alpha * dense
 
     def assemble_sparse(self):
-        """COO `(row, col, values)` for `I - alpha * M`: `M`'s own sparse form with
-        an identity diagonal added, `None` propagating unchanged if `M` has none to give.
+        """COO `(row, col, values)` for `S - alpha * M`: `M`'s own sparse form with
+        the storage diagonal (the identity unless the layer has storage-free nodes) added,
+        `None` propagating unchanged if `M` has none to give.
 
         DUPLICATES are how the identity and `M`'s diagonal entries combine: `M`'s own COO
         form already carries duplicate (row, col) pairs at a diagonal position (e.g. an Out
@@ -315,7 +371,12 @@ class _AffineSystemOperator:
         if self._eye_idx is None or self._eye_idx.device != row.device:
             self._eye_idx = torch.arange(m, dtype=torch.int64, device=row.device)
         eye_idx = self._eye_idx
-        ones = torch.ones(*values.shape[:-1], m, dtype=values.dtype, device=values.device)
+        if self.storage is None:
+            ones = torch.ones(*values.shape[:-1], m, dtype=values.dtype, device=values.device)
+        else:
+            batch = torch.broadcast_shapes(values.shape[:-1], self.storage.shape[:-1])
+            ones = torch.broadcast_to(self.storage, batch + (m,)).to(values.dtype)
+            values = values.expand(batch + values.shape[-1:])
         return (
             torch.cat([eye_idx, row]),
             torch.cat([eye_idx, col]),
@@ -349,6 +410,17 @@ class TransportLayer:
     ``method="gmres"`` above it, falling back to ``gmres`` (never raising) when SciPy is
     absent or when a grad-requiring ``on_failure="return"`` solve would otherwise refuse; see
     ``_resolve_solver`` for the full rule and both hazards.
+
+    STORAGE-FREE NODES (``storage_free``): interior nodes that hold no amount, e.g. a
+    zero-volume air-handler plenum. Their balance is algebraic in every step (inflow equals
+    outflow, so their value is the flow-weighted mix of what enters), and a storage-free
+    node with nothing passing through it (no flow, no conduction) keeps its value, and a
+    source there is dropped for that step (it has nowhere to go); `step`'s `diagnostics`
+    then carries ``"held_sources_dropped"``, the number of nonzero entries dropped. Their
+    capacity may be 0; removal and kinetics do not act on them. Only ``scheme="implicit"``
+    (and ``steady``) can hold them; a ``steady`` with nothing passing through such a node
+    is refused by name (it has no value there). ``storage_free_mask`` is ``(n_i,)`` bool,
+    True at those nodes.
     """
 
     #: The differentiable operator coefficients a layer owns, in the fixed order the
@@ -357,21 +429,81 @@ class TransportLayer:
         "carrier", "transmission", "kinetics", "removal", "conductance", "dilution",
     )
 
-    def _coefficients(self) -> tuple[tuple[str, ...], list[torch.Tensor]]:
+    def _coefficients(
+        self, *, removal: torch.Tensor | None = None,
+        transmission: torch.Tensor | None = None,
+    ) -> tuple[tuple[str, ...], list[torch.Tensor]]:
         """`(names, tensors)`: every coefficient tensor that must cross `_LinearSolve`'s
         boundary explicitly. `_LinearSolve.backward` only sees what `apply` was given, so a
-        coefficient read from `self` inside `build_system` silently gets no gradient
-        Topology and index tensors are not coefficients and stay on `self`."""
+        coefficient read from `self` inside `build_system` silently gets no gradient.
+        Topology and index tensors are not coefficients and stay on `self`. `removal`, when
+        given, is a per-call rate that replaces the layer's own (see `_removal_arg`)."""
         values = {
             "carrier": self.carrier,
-            "transmission": self.transmission,
+            "transmission": self.transmission if transmission is None else transmission,
             "kinetics": self.kinetics,
-            "removal": self.removal,
+            "removal": self.removal if removal is None else removal,
             "conductance": None if self._conduction_edges is None else self._conduction_edges[2],
             "dilution": self.dilution,
         }
         names = tuple(n for n in self._COEFFICIENT_NAMES if values[n] is not None)
         return names, [values[n] for n in names]
+
+    def _coefficient_map(
+        self, removal: torch.Tensor | None = None, transmission: torch.Tensor | None = None
+    ) -> dict[str, torch.Tensor]:
+        """`_coefficients` as a name -> tensor map, for `_advection_operator`."""
+        names, values = self._coefficients(removal=removal, transmission=transmission)
+        return dict(zip(names, values, strict=True))
+
+    def _removal_arg(self, removal: torch.Tensor | None) -> torch.Tensor | None:
+        """Validate an optional PER-STEP first-order removal rate (1/s), else the layer's.
+
+        A closure that owns a sink (a deposition, a scheduled removal) hands the layer a
+        fresh rate every step through the driver `"<layer>.removal"`, passed in by
+        `Model._pass` the way `"<layer>.capacity"` is. Trailing shape `(n_i, K)` in active
+        interior order, or `(n_i,)` for a one-species layer; leading batch dimensions are
+        allowed. It REPLACES the construction-time `removal` for this call, it is not added
+        to it, and like it it acts on the state itself (it is not divided by capacity). The
+        trapezoidal step uses this one per-step rate at both the old and the new time level.
+        """
+        if removal is None:
+            return self.removal
+        r = torch.as_tensor(removal, dtype=self.net.dtype)
+        K = self.n_species
+        if not (r.dim() >= 2 and tuple(r.shape[-2:]) == (self.n_i, K)):
+            if K == 1 and r.dim() >= 1 and r.shape[-1] == self.n_i:
+                r = r.unsqueeze(-1)
+            else:
+                raise ValueError(
+                    f"TransportLayer '{self.name}': removal must have trailing shape "
+                    f"({self.n_i}, {K}) (active interior order, 1/s), got {tuple(r.shape)}"
+                )
+        return r
+
+    def _transmission_arg(self, transmission: torch.Tensor | None) -> torch.Tensor:
+        """Validate an optional PER-STEP transmission, else the layer's.
+
+        A closure whose filters depend on the flows or the conditions of the step (a UVGI
+        filter, `apps.building_physics.FilterTransmission`) hands the layer a fresh pass
+        fraction every step through the driver `"<layer>.transmission"`, passed in by
+        `Model._pass` the way `"<layer>.removal"` is. Shape `(..., b_flow)` or
+        `(..., b_flow, K)` in the layer's flow order, as the construction-time
+        `transmission`; leading batch dimensions are allowed. It REPLACES the
+        construction-time transmission for this call.
+        """
+        if transmission is None:
+            return self.transmission
+        t = torch.as_tensor(transmission, dtype=self.net.dtype)
+        K, b_flow = self.n_species, self._flow_src.numel()
+        if t.dim() >= 2 and tuple(t.shape[-2:]) == (b_flow, K):
+            return t.transpose(-1, -2)
+        if t.dim() >= 1 and t.shape[-1] == b_flow:
+            return t.unsqueeze(-2).expand(*t.shape[:-1], K, b_flow)
+        raise ValueError(
+            f"TransportLayer '{self.name}': transmission must have trailing shape "
+            f"({b_flow},) or ({b_flow}, {K}) (the layer's flow order), got {tuple(t.shape)}"
+        )
 
     def __init__(
         self,
@@ -389,6 +521,7 @@ class TransportLayer:
         conduction_kind: str | None = None,
         conductance: torch.Tensor | None = None,
         dilution: torch.Tensor | float | None = None,
+        storage_free: Sequence[Node] = (),
         scheme: Literal["exact", "implicit", "trapezoidal"] = "exact",
         linear_solver: str = "auto",
         quantity: str = "scalar",
@@ -447,14 +580,27 @@ class TransportLayer:
         self.n_i = int(self.interior_idx.shape[0])
         self.n_b = int(self.boundary_idx.shape[0])
         self._inactive_names = [net.nodes[i] for i in self.inactive_idx.tolist()]
+        self.storage_free_mask = self._storage_free_mask(net, name, storage_free, scheme)
+        # Fixed at construction; read on every step, so kept as a Python bool rather than a
+        # device-synchronising `.any()` each time.
+        self._has_storage_free = bool(self.storage_free_mask.any())
 
-        self.capacity = torch.as_tensor(capacity, dtype=net.dtype)
-        if self.capacity.dim() == 0 or self.capacity.shape[-1] != self.n_i:
-            cap_len = self.capacity.shape[-1] if self.capacity.dim() >= 1 else 0
+        capacity = torch.as_tensor(capacity, dtype=net.dtype)
+        if capacity.dim() == 0 or capacity.shape[-1] != self.n_i:
+            cap_len = capacity.shape[-1] if capacity.dim() >= 1 else 0
             raise ValueError(
                 f"TransportLayer '{name}': capacity has {cap_len} entries, "
                 f"expected {self.n_i} active interior nodes"
             )
+        negative = capacity < 0
+        if bool(negative.any()):
+            flat = negative.reshape(-1, self.n_i).any(0)
+            names = [net.nodes[int(self.interior_idx[i])]
+                     for i in flat.nonzero().flatten().tolist()]
+            raise ValueError(
+                f"TransportLayer '{name}': capacity must not be negative; negative at {names}"
+            )
+        self.capacity = self._effective(capacity)
         self.carrier = torch.as_tensor(carrier, dtype=net.dtype)
 
         b_flow = 0
@@ -583,6 +729,159 @@ class TransportLayer:
             )
         self._interior_of_node = torch.full((net.n,), -1, dtype=torch.long)
         self._interior_of_node[self.interior_idx] = torch.arange(self.n_i, dtype=torch.long)
+
+    def _storage_free_mask(self, net: Network, name: str, storage_free: Sequence[Node],
+                           scheme: str) -> torch.Tensor:
+        """`(n_i,)` bool: True at the interior nodes that hold no amount."""
+        mask = torch.zeros(self.n_i, dtype=torch.bool, device=self.interior_idx.device)
+        nodes = net.canonical(list(storage_free)) if storage_free else []
+        if not nodes:
+            return mask
+        position = {int(i): k for k, i in enumerate(self.interior_idx.tolist())}
+        outside = [n for n in nodes if net.node_index(n) not in position]
+        if outside:
+            raise ValueError(
+                f"TransportLayer '{name}': storage_free nodes {outside} are not active "
+                f"interior nodes of this layer"
+            )
+        if scheme != "implicit":
+            raise ValueError(
+                f"TransportLayer '{name}': storage-free nodes {nodes} hold no amount, so "
+                f"their balance is algebraic in every step; that needs scheme='implicit', "
+                f"got {scheme!r}"
+            )
+        for n in nodes:
+            mask[position[net.node_index(n)]] = True
+        return mask
+
+    def _effective(self, cap: torch.Tensor) -> torch.Tensor:
+        """`cap` with 1 at the storage-free nodes: their rows are balances of amount rates,
+        which a unit capacity leaves unchanged."""
+        if not self._has_storage_free:
+            return cap
+        free = self.storage_free_mask.to(cap.device)
+        return torch.where(free, torch.ones_like(cap), cap)
+
+    def _stored_only(self, rates: torch.Tensor | None, trailing: int) -> torch.Tensor | None:
+        """`rates` (node rows, then `trailing` species axes) with the storage-free rows set
+        to 0: removal and reactions act on a stored amount, and these nodes hold none.
+        Replaced with `torch.where`, not multiplied by a mask, so that a rate a caller
+        computed as 0 / 0 at a zero capacity never reaches the solve as NaN."""
+        if rates is None or not self._has_storage_free:
+            return rates
+        free = self.storage_free_mask.to(rates.device).reshape((-1,) + (1,) * trailing)
+        return torch.where(free, torch.zeros_like(rates), rates)
+
+    def _storage_stacked(
+        self, q: torch.Tensor, dtype: torch.dtype, conductance: torch.Tensor | None = None,
+    ) -> torch.Tensor | None:
+        """`(..., K * n_i)`, stacked like the state: 0 on the row of a storage-free node
+        that flow or conduction passes through this step (its algebraic balance), 1
+        elsewhere. A storage-free node with nothing passing through it keeps its value: its
+        row is `x_new = x_old`. `None` when the layer has no storage-free nodes. A 0/1
+        switch on the flows, so it carries no gradient."""
+        if not self._has_storage_free:
+            return None
+        with torch.no_grad():
+            a = q.abs().to(dtype)
+            full = torch.zeros(a.shape[:-1] + (self.net.n,), dtype=dtype, device=a.device)
+            full = full.index_add(-1, self._flow_tgt, a).index_add(-1, self._flow_src, a)
+            if conductance is not None:
+                csrc, ctgt, _ = self._conduction_edges
+                g = conductance.abs().to(dtype)
+                cond = torch.zeros(g.shape[:-1] + (self.net.n,), dtype=dtype, device=g.device)
+                full = full + cond.index_add(-1, ctgt, g).index_add(-1, csrc, g)
+            through = full.index_select(-1, self.interior_idx)
+            algebraic = self.storage_free_mask.to(through.device) & (through > 0)
+            s = torch.where(algebraic, torch.zeros_like(through), torch.ones_like(through))
+        s = s.unsqueeze(-2).expand(*s.shape[:-1], self.n_species, self.n_i)
+        return s.reshape(*s.shape[:-2], self.n_species * self.n_i)
+
+    def _storage_free_stacked(self, device: torch.device) -> torch.Tensor:
+        """`storage_free_mask` stacked like the state, `(K * n_i,)`."""
+        return self.storage_free_mask.to(device).repeat(self.n_species)
+
+    def _refuse_idle_storage_free(self, q: torch.Tensor,
+                                  conductance: torch.Tensor | None) -> None:
+        """A steady solve has no value for a storage-free node that nothing passes through
+        (its row is empty): refuse it, naming the nodes, instead of a singular solve."""
+        storage = self._storage_stacked(q, torch.float64, conductance)
+        idle = self._storage_free_stacked(storage.device) & (storage > 0)
+        if not bool(idle.any()):
+            return
+        rows = idle.reshape(-1, idle.shape[-1]).any(0).reshape(self.n_species, self.n_i).any(0)
+        names = [self.net.nodes[int(self.interior_idx[i])]
+                 for i in rows.nonzero().flatten().tolist()]
+        raise ValueError(
+            f"TransportLayer '{self.name}' steady: nothing passes through storage-free "
+            f"node(s) {names} (no flow, no conduction); they hold no amount, so a steady "
+            f"solve has no value for them"
+        )
+
+    def _refuse_undefined_steady(self, q: torch.Tensor, cap: torch.Tensor,
+                                 coefficients: Mapping[str, torch.Tensor]) -> None:
+        """Refuse a steady solve whose operator is singular because a stored row has no way
+        out. The operator's entries, times the row's capacity, are amount rates: entry
+        (i, j) off the diagonal moves amount from row j into row i, and a column that does
+        not sum to zero gains or loses amount (a boundary outflow, a removal, a filter loss,
+        a reaction). A stored row that cannot reach such a column through the off-diagonal
+        entries keeps everything that enters it: its steady state is undefined without a
+        source and unbounded with one. A row nothing leaves at all (a zero diagonal: no
+        outflow, no conduction, no removal) is the one-row case, named separately.
+        Checked on every batch instance; a 0/1 decision on the flows, so no gradient."""
+        with torch.no_grad():
+            op = self._advection_operator(
+                q.detach(), cap.detach(), {k: v.detach() for k, v in coefficients.items()})
+            row, col, values = op.assemble_sparse()
+            m = self.n_species * self.n_i
+            amount = values * cap.detach().to(values.dtype).index_select(-1, row % self.n_i)
+            batch = torch.broadcast_shapes(amount.shape[:-1], op.diagonal().shape[:-1])
+            amount = amount.expand(batch + amount.shape[-1:]).reshape(-1, amount.shape[-1])
+            diag = op.diagonal().expand(batch + (m,)).reshape(-1, m)
+            zeros = amount.new_zeros(amount.shape[0], m)
+            column = zeros.index_add(-1, col, amount)
+            scale = zeros.index_add(-1, col, amount.abs())
+            # Exact conservation cancels to rounding, a loss or a gain does not.
+            exits = column.abs() > 1e-12 * scale
+            linked = (row != col) & (amount != 0)
+            reach = _reached_from(exits, row, col, linked)
+            stored = ~self._storage_free_stacked(reach.device)
+            closed = (~reach & stored).any(0)
+            if not bool(closed.any()):
+                return
+            idle = (diag == 0).any(0) & closed
+
+        def nodes(rows: torch.Tensor) -> list[Node]:
+            hit = rows.reshape(self.n_species, self.n_i).any(0)
+            return [self.net.nodes[int(self.interior_idx[i])]
+                    for i in hit.nonzero().flatten().tolist()]
+
+        parts = []
+        if bool(idle.any()):
+            parts.append(f"nothing leaves stored node(s) {nodes(idle)} (no outflow, no "
+                         f"conduction, no removal)")
+        if bool((closed & ~idle).any()):
+            parts.append(f"stored node(s) {nodes(closed & ~idle)} form a closed group: what "
+                         f"enters them never reaches a boundary outflow, a removal or a "
+                         f"filter loss")
+        raise UndefinedSteadyState(
+            f"TransportLayer '{self.name}' steady: {'; '.join(parts)}. The steady state "
+            f"there is undefined without a source and unbounded with one; solve it with "
+            f"transient steps instead, or give the node(s) an exchange (a flow or "
+            f"conduction to a boundary, or a removal)",
+            layer=self.name, nodes=nodes(closed),
+        )
+
+    def _held_sources_dropped(self, q: torch.Tensor, sources: torch.Tensor,
+                              conductance: torch.Tensor | None) -> int:
+        """The number of nonzero source entries (instance, species, node) at storage-free
+        nodes that nothing passes through this step. Such a node holds no amount and keeps
+        its value, so the step drops the source there (no airflow through a plenum: its coil
+        delivers nothing)."""
+        storage = self._storage_stacked(q, torch.float64, conductance)
+        held = self._storage_free_stacked(storage.device) & (storage > 0)
+        src, _ = self._to_stacked(self._sources_interior(sources), self.n_i, "sources")
+        return int((held & (src.detach() != 0)).sum())
 
     def _resolve_solver(
         self, batch_size: int, *, op=None, rhs: torch.Tensor | None = None,
@@ -750,7 +1049,10 @@ class TransportLayer:
         passed in by `Model._pass` from the driver `"<layer>.capacity"`. It must be strictly
         POSITIVE on every active interior node: a node with zero capacity cannot hold a
         concentration at all (its `dx/dt = .../V` is infinite), which is a modelling error
-        to name, not a division to let through.
+        to name, not a division to let through. The one exception is a storage-free node
+        (`storage_free`), which holds nothing and may have zero capacity; it is given the
+        unit stand-in capacity its algebraic row is written with. A negative capacity is
+        refused everywhere.
         """
         if capacity is None:
             return self.capacity
@@ -761,7 +1063,8 @@ class TransportLayer:
                 f"TransportLayer '{self.name}': capacity has {got} entries "
                 f"(shape {tuple(cap.shape)}), expected {self.n_i} active interior nodes"
             )
-        nonpositive = cap <= 0
+        free = self.storage_free_mask.to(cap.device)
+        nonpositive = (cap < 0) | ((cap <= 0) & ~free)
         if bool(nonpositive.any()):
             flat = nonpositive.reshape(-1, nonpositive.shape[-1]).any(0)
             names = [
@@ -772,7 +1075,7 @@ class TransportLayer:
                 f"TransportLayer '{self.name}': capacity must be strictly positive on "
                 f"every active interior node; non-positive at {names}"
             )
-        return cap
+        return self._effective(cap)
 
     def _advection_operator(
         self,
@@ -794,9 +1097,14 @@ class TransportLayer:
             csrc, ctgt, _ = self._conduction_edges
             conduction = (csrc, ctgt, coefficients["conductance"].to(dtype))
         cap = self.capacity if capacity is None else capacity
-        kinetics = coefficients.get("kinetics")
-        removal = self._with_dilution(
-            coefficients.get("removal"), coefficients.get("dilution"), q, cap.to(dtype)
+        # Removal, kinetics and the dilution rate act on a stored amount; a storage-free
+        # node holds none, so its rows carry none of them.
+        kinetics = self._stored_only(coefficients.get("kinetics"), 2)
+        removal = self._stored_only(
+            self._with_dilution(
+                coefficients.get("removal"), coefficients.get("dilution"), q, cap.to(dtype)
+            ),
+            1,
         )
         return AdvectionOperator(
             src, tgt,
@@ -860,11 +1168,17 @@ class TransportLayer:
     def operator(
         self, q: torch.Tensor, capacity: torch.Tensor | None = None
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        """The dense generator `(M, N)` of the layer at flows `q` (and optionally a per-call
+        `capacity`): the interior block and the boundary coupling. It carries the layer's
+        own construction-time `removal` (plus its dilution) and transmission; a per-step
+        removal rate or transmission (the `"<layer>.removal"` and `"<layer>.transmission"`
+        drivers) is not part of it, because `step`, `steady`, `rate` and the other entry
+        points that take `removal=` and `transmission=` apply those themselves."""
         net, K, n_i, n_b = self.net, self.n_species, self.n_i, self.n_b
         dtype = q.dtype
         # `cap_t` names the resolved per-step capacity, as in `rate`, `step`, `steady`,
         # `_implicit_step_sparse` and `_trapezoidal_step_sparse`.
-        cap_t = self.capacity if capacity is None else capacity
+        cap_t = self._effective(self.capacity if capacity is None else capacity)
         Up = self._selectors(net.upwind, q).to(dtype)    # (..., b_flow, n)
         Dn = self._selectors(net.downwind, q).to(dtype)  # (..., b_flow, n)
         w = self.carrier.to(dtype) * q.abs()            # (..., b_flow)
@@ -894,7 +1208,9 @@ class TransportLayer:
         Gii = Gii / cap
         Gib = Gib / cap
 
-        removal = self._with_dilution(self.removal, self.dilution, q, cap_t.to(dtype))
+        removal = self._stored_only(
+            self._with_dilution(self.removal, self.dilution, q, cap_t.to(dtype)), 1
+        )
         if removal is not None:
             Gii = Gii - torch.diag_embed(removal.transpose(-1, -2))
 
@@ -902,9 +1218,10 @@ class TransportLayer:
         M_block = torch.einsum("kl,...kij->...kilj", eyeK, Gii)   # (..., K, n_i, K, n_i)
         N_block = torch.einsum("kl,...kij->...kilj", eyeK, Gib)   # (..., K, n_i, K, n_b)
 
-        if self.kinetics is not None:
+        kinetics = self._stored_only(self.kinetics, 2)
+        if kinetics is not None:
             eye_i = torch.eye(n_i, dtype=dtype)
-            M_block = M_block + torch.einsum("ikl,ij->kilj", self.kinetics.to(dtype), eye_i)
+            M_block = M_block + torch.einsum("ikl,ij->kilj", kinetics.to(dtype), eye_i)
 
         batch = M_block.shape[:-4]
         M = M_block.reshape(*batch, K * n_i, K * n_i)
@@ -974,18 +1291,25 @@ class TransportLayer:
                 f"nonzero at {bad}"
             )
 
-    def rate(self, x, q, sources, x_boundary, *, capacity=None) -> torch.Tensor:
+    def rate(self, x, q, sources, x_boundary, *, capacity=None, removal=None,
+             transmission=None) -> torch.Tensor:
         """dx/dt = M x + N x_b + sources / capacity at (x, q); x's layout and dtype.
 
         The balance `Model.residuals` reports for a transport layer, and the reference the
         energy-balance tests check against. Zero at the fixed point of `steady`.
         `capacity` (keyword-only) overrides the construction-time capacity for
-        this call only; see `_capacity_arg`.
+        this call only; see `_capacity_arg`. `removal` (keyword-only) is a per-call
+        first-order removal rate (1/s) replacing the construction-time one; see
+        `_removal_arg`. `transmission` (keyword-only) is a per-call transmission replacing
+        the construction-time one; see `_transmission_arg`.
         """
         dtype = torch.float64
         cap = self._capacity_arg(capacity)
         x_s, reduced = self._to_stacked(x.to(dtype), self.n_i, "x")
-        op = self._advection_operator(q.to(dtype), cap)
+        op = self._advection_operator(
+            q.to(dtype), cap, self._coefficient_map(self._removal_arg(removal),
+                                                    self._transmission_arg(transmission))
+        )
         xb_s, _ = self._to_stacked(x_boundary.to(dtype), self.n_b, "x_boundary")
         src_s, _ = self._to_stacked(
             self._sources_interior(sources).to(dtype), self.n_i, "sources"
@@ -1009,7 +1333,11 @@ class TransportLayer:
         on_failure: str = "raise",
         capacity: torch.Tensor | None = None,
         capacity_prev: torch.Tensor | None = None,
+        removal: torch.Tensor | None = None,
+        transmission: torch.Tensor | None = None,
         diagnostics: dict | None = None,
+        x_boundary_end: torch.Tensor | None = None,
+        x_boundary_rates: tuple[torch.Tensor, torch.Tensor] | None = None,
     ) -> torch.Tensor:
         """Advance one timestep under `self.scheme`.
 
@@ -1046,11 +1374,36 @@ class TransportLayer:
         step's `"linear"` entry (`{"backend", "iterations", "residual"}`) for `"implicit"`
         and `"trapezoidal"` -- see `_LinearSolve`'s docstring for exactly what it holds and
         when. `scheme="exact"` has no linear solve, so it leaves `diagnostics` untouched.
+        A layer with storage-free nodes also gets `"held_sources_dropped"`: the number of
+        nonzero source entries at storage-free nodes nothing passes through, which the step
+        drops (see the class docstring).
+
+        `removal` (keyword-only) is a per-call first-order removal rate (1/s) replacing the
+        construction-time one; see `_removal_arg`. `transmission` (keyword-only) is a
+        per-call transmission replacing the construction-time one; see `_transmission_arg`.
+
+        `x_boundary_end` (keyword-only, `scheme="exact"` only, default `None`): the boundary
+        values at the END of the step. Given, `x_boundary` is their value at the start and
+        the boundary values are linear in time over the step (a first-order hold,
+        `_expm_action`'s `forcing_poly`), so the step is exact for a boundary ramping linearly on
+        frozen flows. Without it the boundary values are held constant over the step, and
+        a zone whose flushing time is much shorter than the step relaxes to that constant:
+        given the step mean of a ramp, it lags the boundary by about half the step instead
+        of by its flushing time. Any other scheme refuses it (`ValueError`).
+
+        `x_boundary_rates` (keyword-only, with `x_boundary_end` only): the boundary values'
+        rates of change `(at the start, at the end)` of the step. Given, the boundary values
+        are the cubic Hermite through both ends' values and rates instead of the straight
+        line: a zone flushing much faster than the step lags its boundary by its flushing
+        time times the boundary's rate at the step's END, which the straight line's chord
+        misses by about `h/2` times its curvature.
         """
         return self._step(
             x, q, sources, x_boundary, dt,
             on_failure=on_failure, capacity=capacity, capacity_prev=capacity_prev,
-            want_transfer=False, diagnostics=diagnostics,
+            removal=removal, transmission=transmission, want_transfer=False,
+            diagnostics=diagnostics,
+            x_boundary_end=x_boundary_end, x_boundary_rates=x_boundary_rates,
         )[0]
 
     def step_with_transfer(
@@ -1064,6 +1417,8 @@ class TransportLayer:
         on_failure: str = "raise",
         capacity: torch.Tensor | None = None,
         capacity_prev: torch.Tensor | None = None,
+        removal: torch.Tensor | None = None,
+        transmission: torch.Tensor | None = None,
         diagnostics: dict | None = None,
     ) -> TransportStep:
         """Advance one timestep under `self.scheme`, like `step`, and also report the
@@ -1095,7 +1450,10 @@ class TransportLayer:
         `on_failure="return"` is refused (`ValueError` naming the layer): no `SolveResult`
         carries a boundary transfer, so there is nothing sensible to return the raw solver
         status alongside. `capacity`/`capacity_prev` behave exactly as in `step`.
-        `diagnostics` (keyword-only) behaves exactly as in `step`.
+        `diagnostics` (keyword-only) behaves exactly as in `step`. `removal` (keyword-only)
+        is a per-call first-order removal rate (1/s) replacing the construction-time one;
+        see `_removal_arg`. `transmission` (keyword-only) likewise replaces the
+        construction-time transmission; see `_transmission_arg`.
         """
         if on_failure == "return":
             raise ValueError(
@@ -1106,7 +1464,8 @@ class TransportLayer:
         result, transfer = self._step(
             x, q, sources, x_boundary, dt,
             on_failure=on_failure, capacity=capacity, capacity_prev=capacity_prev,
-            want_transfer=True, diagnostics=diagnostics,
+            removal=removal, transmission=transmission, want_transfer=True,
+            diagnostics=diagnostics,
         )
         return TransportStep(result, transfer)
 
@@ -1121,8 +1480,12 @@ class TransportLayer:
         on_failure: str = "raise",
         capacity: torch.Tensor | None = None,
         capacity_prev: torch.Tensor | None = None,
+        removal: torch.Tensor | None = None,
+        transmission: torch.Tensor | None = None,
         want_transfer: bool = False,
         diagnostics: dict | None = None,
+        x_boundary_end: torch.Tensor | None = None,
+        x_boundary_rates: tuple[torch.Tensor, torch.Tensor] | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         """Shared body of `step` and `step_with_transfer`; see both for the public contract.
 
@@ -1146,6 +1509,18 @@ class TransportLayer:
                 f"on_failure='raise', or a scheme with a linear solve ('implicit', "
                 f"'trapezoidal')."
             )
+        if x_boundary_end is not None and (self.scheme != "exact" or want_transfer):
+            raise ValueError(
+                f"TransportLayer '{self.name}': x_boundary_end (a boundary linear in time "
+                f"over the step) is supported by step() with scheme='exact' only, not by "
+                f"scheme={self.scheme!r}" + (" with the boundary transfer" if want_transfer
+                                             else "")
+            )
+        if x_boundary_rates is not None and x_boundary_end is None:
+            raise ValueError(
+                f"TransportLayer '{self.name}': x_boundary_rates needs x_boundary_end (the "
+                f"boundary's values at both ends of the step)"
+            )
         out_dtype = x.dtype
         dtype = torch.float64
         if self.dilution is not None:
@@ -1154,6 +1529,9 @@ class TransportLayer:
             capacity_prev = None
         cap_t = self._capacity_arg(capacity)
         cap_prev_t = cap_t if capacity_prev is None else self._capacity_arg(capacity_prev)
+        rem = self._removal_arg(removal)
+        trans = self._transmission_arg(transmission)
+        coef_map = self._coefficient_map(rem, trans)
         if self.scheme == "exact" and not torch.equal(cap_prev_t, cap_t):
             raise ValueError(
                 f"TransportLayer '{self.name}': scheme='exact' has no changing-capacity "
@@ -1163,7 +1541,7 @@ class TransportLayer:
         x_s, reduced = self._to_stacked(x, self.n_i, "x")
         x_s = x_s.to(dtype)
         if self.scheme == "exact":
-            op = self._advection_operator(q.to(dtype), cap_t)
+            op = self._advection_operator(q.to(dtype), cap_t, coef_map)
             xb_s, _ = self._to_stacked(x_boundary.to(dtype), self.n_b, "x_boundary")
             src_s, _ = self._to_stacked(
                 self._sources_interior(sources.to(dtype)), self.n_i, "sources"
@@ -1186,6 +1564,20 @@ class TransportLayer:
                 and bool((x_boundary == 0).all())
                 and bool((sources == 0).all())
             )
+            poly: list[torch.Tensor] = []
+            if x_boundary_end is not None:
+                xb_end_s, _ = self._to_stacked(x_boundary_end.to(dtype), self.n_b,
+                                               "x_boundary_end")
+                if x_boundary_rates is None:  # linear in time
+                    poly = [op.boundary_forcing(xb_end_s - xb_s) / dt]
+                else:  # the cubic Hermite through both ends' values and rates
+                    r0, r1 = (self._to_stacked(r.to(dtype), self.n_b, "x_boundary_rates")[0]
+                              for r in x_boundary_rates)
+                    chord = (xb_end_s - xb_s) / dt
+                    poly = [op.boundary_forcing(r0),
+                            op.boundary_forcing((3 * chord - 2 * r0 - r1) / dt),
+                            op.boundary_forcing((r0 + r1 - 2 * chord) / dt ** 2)]
+                homogeneous = False
             expm = _expm_action(
                 op, x_s, b0, dt, where=f"TransportLayer '{self.name}' exact step",
                 # `step` never requests the integral, so the shift stays whatever
@@ -1195,19 +1587,20 @@ class TransportLayer:
                 # stays true by construction, not by relying on the inferred default).
                 shift=False if want_transfer else homogeneous,
                 integrate=want_transfer,
+                forcing_poly=poly,
             )
             result = expm.x
         elif self.scheme == "implicit":
             result, reduced = self._implicit_step_sparse(
                 x, q, sources, x_boundary, dt, on_failure, cap_t, cap_prev_t,
-                diagnostics=diagnostics,
+                diagnostics=diagnostics, removal=rem, transmission=trans,
             )
             if on_failure == "return":
                 return result, None
         elif self.scheme == "trapezoidal":
             result, reduced = self._trapezoidal_step_sparse(
                 x, q, sources, x_boundary, dt, on_failure, cap_t, cap_prev_t,
-                diagnostics=diagnostics,
+                diagnostics=diagnostics, removal=rem, transmission=trans,
             )
             if on_failure == "return":
                 return result, None
@@ -1220,7 +1613,10 @@ class TransportLayer:
         transfer_s = None
         if want_transfer:
             xb_s_full, _ = self._to_stacked(x_boundary.to(dtype), self.n_b, "x_boundary")
-            op_t = op if self.scheme == "exact" else self._advection_operator(q.to(dtype), cap_t)
+            op_t = (
+                op if self.scheme == "exact"
+                else self._advection_operator(q.to(dtype), cap_t, coef_map)
+            )
             if self.scheme == "implicit":
                 x_int = dt * result
             elif self.scheme == "trapezoidal":
@@ -1238,6 +1634,7 @@ class TransportLayer:
     def steady(
         self, q: torch.Tensor, sources: torch.Tensor, x_boundary: torch.Tensor,
         *, on_failure: str = "raise", capacity: torch.Tensor | None = None,
+        removal: torch.Tensor | None = None, transmission: torch.Tensor | None = None,
         diagnostics: dict | None = None,
     ) -> torch.Tensor:
         """Solve `0 = M x + N x_b + sources / capacity` for the steady-state `x`.
@@ -1250,12 +1647,19 @@ class TransportLayer:
         `solvers.select.solve` directly (not reshaped by `_from_stacked`): a `SolveResult`
         is not a plain `Tensor`, so it cannot be a single `torch.autograd.Function`'s output
         the way the default `Tensor` return is. Return type on that path is therefore
-        `torch.Tensor | SolveResult`. `capacity` (keyword-only)
+        `torch.Tensor | SolveResult`. `on_failure` governs only a linear solve that does not
+        converge: a steady state that is undefined (a stored node or a closed group of them
+        that nothing leaves, `UndefinedSteadyState`) or a storage-free node nothing passes
+        through is refused before any solve, and raises whichever `on_failure` is given.
+        `capacity` (keyword-only)
         overrides the construction-time capacity for this call only. `diagnostics`
         (keyword-only), when a dict is passed, is filled with this solve's
         `"linear"` entry on the `on_failure="raise"` path only -- see `_LinearSolve`'s
         docstring; the `on_failure="return"` path already gives the caller the full
-        `SolveResult` directly and leaves `diagnostics` untouched.
+        `SolveResult` directly and leaves `diagnostics` untouched. `removal` (keyword-only)
+        is a per-call first-order removal rate (1/s) replacing the construction-time one;
+        see `_removal_arg`. `transmission` (keyword-only) likewise replaces the
+        construction-time transmission; see `_transmission_arg`.
         """
         if on_failure not in ("raise", "return"):
             raise ValueError(
@@ -1268,7 +1672,12 @@ class TransportLayer:
         sources = sources.to(dtype)
         x_boundary = x_boundary.to(dtype)
         _, reduced = self._to_stacked(self._sources_interior(sources), self.n_i, "sources")
-        names, coef = self._coefficients()
+        names, coef = self._coefficients(removal=self._removal_arg(removal),
+                                         transmission=self._transmission_arg(transmission))
+        if self._has_storage_free:
+            self._refuse_idle_storage_free(
+                q, dict(zip(names, coef, strict=True)).get("conductance"))
+        self._refuse_undefined_steady(q, cap_t, dict(zip(names, coef, strict=True)))
 
         def build_system(q_, sources_, xb_, cap_, *coef_):
             op = self._advection_operator(q_, cap_, dict(zip(names, coef_, strict=True)))
@@ -1299,6 +1708,8 @@ class TransportLayer:
         capacity: torch.Tensor | None = None,
         capacity_prev: torch.Tensor | None = None,
         diagnostics: dict | None = None,
+        removal: torch.Tensor | None = None,
+        transmission: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Backward Euler on the AMOUNT `V x`: `V_new x_{n+1} - V_old x_n = dt F(x_{n+1})`,
         with `F(x) = G x + N_raw x_b + s` the capacity-FREE amount rate (`G`, `N_raw` the
@@ -1312,7 +1723,13 @@ class TransportLayer:
         because `F(x_n) / V_new = M_new x_n + N_new x_b + s / V_new` already IS `b0` plus the
         capacity-divided `M_new x_n` -- there is no separate old-capacity operator to build.
         `capacity_prev` defaults to `capacity` (fixed storage), which recovers the classic
-        `x_{n+1} - x_n = dt b0` step bit for bit (ratio == 1)."""
+        `x_{n+1} - x_n = dt b0` step bit for bit (ratio == 1).
+
+        Storage-free nodes weight the identity and the old state by `S`
+        (`_storage_stacked`): `(S - dt M_new) x_{n+1} = S (V_old / V_new) x_n + dt b0`, so a
+        row that flow passes through is the algebraic balance `0 = M x + b0`, and a row
+        nothing passes through stays `x_{n+1} = x_n`. Without such nodes `S` is `None` and
+        the code path is the one above."""
         dtype = torch.float64
         x = x.to(dtype)
         q = q.to(dtype)
@@ -1321,7 +1738,10 @@ class TransportLayer:
         cap_t = self._capacity_arg(capacity).to(dtype)
         cap_prev_t = cap_t if capacity_prev is None else self._capacity_arg(capacity_prev).to(dtype)
         _, reduced = self._to_stacked(x, self.n_i, "x")
-        names, coef = self._coefficients()
+        names, coef = self._coefficients(removal=removal, transmission=transmission)
+        if self._has_storage_free and diagnostics is not None:
+            diagnostics["held_sources_dropped"] = self._held_sources_dropped(
+                q, sources, dict(zip(names, coef, strict=True)).get("conductance"))
 
         def build_system(x_, q_, sources_, xb_, cap_, cap_prev_, *coef_):
             op = self._advection_operator(q_, cap_, dict(zip(names, coef_, strict=True)))
@@ -1331,8 +1751,16 @@ class TransportLayer:
             cap = self._capacity_stacked(dtype, cap_)
             b0 = op.boundary_forcing(xb_s) + src_s / cap
             ratio = self._capacity_stacked(dtype, cap_prev_) / cap        # V_old / V_new
-            rhs = ratio * x_s + dt * b0
-            system = _AffineSystemOperator(op, dt)
+            coef_map = dict(zip(names, coef_, strict=True))
+            storage = self._storage_stacked(q_, dtype, coef_map.get("conductance"))
+            if storage is None:
+                rhs = ratio * x_s + dt * b0
+            else:
+                # A storage-free row nothing passes through is `x_new = x_old` exactly: its
+                # operator row is empty, and a source there is dropped (counted above).
+                held = self._storage_free_stacked(storage.device) & (storage > 0)
+                rhs = torch.where(held, x_s, storage * ratio * x_s + dt * b0)
+            system = _AffineSystemOperator(op, dt, storage=storage)
             return system, rhs
 
         if on_failure == "return":
@@ -1357,6 +1785,8 @@ class TransportLayer:
         capacity: torch.Tensor | None = None,
         capacity_prev: torch.Tensor | None = None,
         diagnostics: dict | None = None,
+        removal: torch.Tensor | None = None,
+        transmission: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Crank-Nicolson on the AMOUNT `V x`: `V_new x_{n+1} - V_old x_n =
         dt/2 (F(x_{n+1}) + F(x_n))`, with `F(x) = G x + N_raw x_b + s` the capacity-FREE
@@ -1381,7 +1811,7 @@ class TransportLayer:
         cap_t = self._capacity_arg(capacity).to(dtype)
         cap_prev_t = cap_t if capacity_prev is None else self._capacity_arg(capacity_prev).to(dtype)
         _, reduced = self._to_stacked(x, self.n_i, "x")
-        names, coef = self._coefficients()
+        names, coef = self._coefficients(removal=removal, transmission=transmission)
 
         def build_system(x_, q_, sources_, xb_, cap_, cap_prev_, *coef_):
             coef_map = dict(zip(names, coef_, strict=True))
@@ -1628,6 +2058,7 @@ def _expm_action(
     integrate: bool = False,
     shift: bool | None = None,
     where: str = "TransportLayer exact step",
+    forcing_poly: Sequence[torch.Tensor] = (),
 ) -> ExpmResult:
     """expm(dt [[M, b0], [0, 0]]) [x; 1] by a scaled Taylor action whose work (s substeps of m
     terms) is fixed from ||dt M||_1 before any arithmetic on x or b0.
@@ -1672,13 +2103,27 @@ def _expm_action(
       `sources` directly (constant, all-zero, and not themselves grad-tracked), which is
       unaffected by whether `q`/`capacity` require grad.
 
+    `forcing_poly` (keyword-only, default empty): the forcing's higher coefficients in time,
+    so that the forcing is `b0 + c1 tau + c2 tau^2 + ...` over the step (`tau` in [0, dt],
+    `forcing_poly = (c1, c2, ...)`): with `(c1,)` a first-order hold, `e^{dt M} x + dt
+    phi1(dt M) b0 + dt^2 phi2(dt M) c1`, exact for a forcing linear in time. The Taylor terms
+    of a substep starting at `t_k` are the derivatives of `x` there: `x' = M x + b(t_k)`, then
+    `x^(j) = M x^(j-1) + b^(j-1)(t_k)`. Not combined with `integrate` or `shift`
+    (`ValueError`).
+
     Raises `RuntimeError` naming `where`, the norm and the predicted s * m when that exceeds
     `max_matvecs`: the exact scheme is O(||dt M||) matvecs by nature; a stiff problem belongs
     to scheme='implicit'.
     """
     if shift and integrate:
         raise ValueError("_expm_action: shift=True is incompatible with integrate=True")
+    poly = list(forcing_poly)
+    if poly and (integrate or shift):
+        raise ValueError("_expm_action: a forcing polynomial is incompatible with integrate=True "
+                         "and shift=True")
     dtype = x.dtype
+    if poly:
+        shift = False
     if shift is None:
         shift = (not integrate) and (not b0.requires_grad) and (not bool(torch.any(b0 != 0)))
     with torch.no_grad():
@@ -1693,6 +2138,9 @@ def _expm_action(
     # that also covers the forcing polynomial's coefficient derivative; when shifted,
     # it selects the bound covering the state polynomial's own coefficient derivative.
     s, m = _taylor_schedule(norm, tol, forcing=not shift)
+    # A forcing polynomial of degree d enters the first d + 1 terms: keep them all, so that
+    # it is integrated exactly however small the operator (a zero operator takes m = 1).
+    m = max(m, len(poly) + 1)
     if s * m > max_matvecs:
         raise RuntimeError(
             f"{where}: the exponential action needs about {s * m} matvecs (||dt M||_1 = "
@@ -1709,13 +2157,27 @@ def _expm_action(
         return y - mu * v if shift else y
 
     integral = torch.zeros_like(x) if integrate else None
-    for _ in range(s):
+    # b^(i)(t) of the forcing polynomial b0 + sum_j poly[j-1] t^j, i >= 1, at time t.
+    def forcing_derivative(i: int, t: float):
+        out = None
+        for j in range(i, len(poly) + 1):
+            c = math.perm(j, i) * t ** (j - i)
+            piece = c * poly[j - 1]
+            out = piece if out is None else out + piece
+        return out
+
+    for k in range(s):
+        tk = k * h
         term = apply(x) + b0
+        for j, c in enumerate(poly, start=1):
+            term = term + tk ** j * c
         result = x + h * term
         piece = h * x + (0.5 * h * h) * term if integrate else None
         coef = h
         for j in range(2, m + 1):
             term = apply(term)
+            if j - 1 <= len(poly):
+                term = term + forcing_derivative(j - 1, tk)
             coef = coef * h / j
             result = result + coef * term
             if integrate:

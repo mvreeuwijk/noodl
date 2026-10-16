@@ -49,6 +49,7 @@ from dataclasses import dataclass
 import torch
 
 from noodl.operators.base import LinearOperator, as_operator
+from noodl.solvers.errors import ConvergenceError
 from noodl.solvers.select import solve as select_solve
 
 # The relative residual an inner linear solve is asked for, matching `solvers.select.solve`'s
@@ -204,8 +205,9 @@ def newton(
     shutoff, a damper closing) -- and in a composed model over one network, "newton:
     method='auto' refuses to split the batch" does not say WHICH layer failed.
 
-    ``on_failure="raise"`` (default) raises ``RuntimeError`` naming the batch indices that
-    failed to converge after ``max_iter`` iterations, exactly as before. ``on_failure="return"``
+    ``on_failure="raise"`` (default) raises ``ConvergenceError`` (a ``RuntimeError``,
+    ``noodl.solvers.ConvergenceError``) naming the batch indices that failed to converge after
+    ``max_iter`` iterations. ``on_failure="return"``
     is the explicit, non-default escape hatch: it returns the
     ``NewtonResult`` with ``converged`` reflecting the true per-instance state instead of
     raising, for a caller (e.g. a calibration loop, or a differentiable forward pass that
@@ -339,7 +341,7 @@ def newton(
         flat_converged = converged.reshape(-1)
         bad = torch.nonzero(~flat_converged, as_tuple=False).flatten()
         norms = norm.reshape(-1)[bad]
-        raise RuntimeError(
+        raise ConvergenceError(
             f"{where}: batch indices {bad.tolist()} failed to converge after "
             f"{iterations} iterations, residual norms {norms.tolist()}"
         )

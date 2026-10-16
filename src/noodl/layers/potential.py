@@ -171,6 +171,9 @@ class PotentialFlowLayer:
         self._elements = list(elements)
         self._drives = list(drives)
         self.kinds = [el.kind for el in elements]
+        # Node name -> a likely cause, appended when that node is reported floating (an
+        # application's builder fills it, e.g. for a node only prescribed flows touch).
+        self.node_hints: dict = {}
 
         cols_list = []
         self._kind_slices: dict[str, tuple[int, int]] = {}
@@ -449,7 +452,10 @@ class PotentialFlowLayer:
                     block = block + value
             parts.append((start, block))
         parts.sort(key=lambda p: p[0])
-        return torch.cat([p[1] for p in parts], dim=-1)
+        # A batched drive on one kind batches that kind's block only; every block is
+        # broadcast to the common batch shape before they are joined.
+        batch = broadcast_shapes(*(b.shape[:-1] for _, b in parts))
+        return torch.cat([b.expand(batch + b.shape[-1:]) for _, b in parts], dim=-1)
 
     def flows(self, phi: torch.Tensor, drivers: Mapping) -> torch.Tensor:
         drivers = drivers or {}
@@ -672,9 +678,11 @@ class PotentialFlowLayer:
         if record["reason"] == "negative_slope":
             return f"negative slope on edges {record['edges']}"
         names = [self.net.nodes[i] for i in record["nodes"]]
+        hints = sorted({self.node_hints[n] for n in names if n in self.node_hints})
         return (
             f"floating nodes with no path to a boundary potential: "
             f"ungrounded interior nodes {names}"
+            + "".join(f" ({h})" for h in hints)
         )
 
     def linear_init(self, phi_boundary, drivers, sources):
@@ -738,7 +746,9 @@ class PotentialFlowLayer:
         the same value) or silently `None` (if it doesn't).
         """
         for el in (*self._elements, *self._node_sources):
-            for name, value in vars(el).items():
+            # An element may wrap another (`Scaled`): scan every submodule's own attributes.
+            holders = el.modules() if isinstance(el, torch.nn.Module) else (el,)
+            for name, value in (kv for h in holders for kv in vars(h).items()):
                 if isinstance(value, torch.Tensor) and value.requires_grad:
                     if isinstance(el, NodeSource):
                         # A NodeSource has no `learnable=` constructor kwarg (unlike

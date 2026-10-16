@@ -6,7 +6,7 @@ from collections.abc import Callable, Sequence
 
 import torch
 
-from noodl.apps.street_aq.closures import PRESETS, preset_options, warn_deprecated
+from noodl.apps.street_aq.closures import PRESETS, preset_options
 from noodl.layers.reaction import (
     Photostationary,
     Reaction,
@@ -55,7 +55,6 @@ def photostationary_for_streets(
     j_key: str = "J_NO2",
     temperature_key: str = "temperature",
     molar_volume_key: str = "molar_volume",
-    closure: str | None = None,
 ) -> Photostationary:
     """The Leighton reaction wired to the `"no"`, `"no2"` and `"o3"` columns of `species`.
 
@@ -85,17 +84,8 @@ def photostationary_for_streets(
     `floor_ppb` overrides the preset's floor (0 means none). With any rate the
     equilibrium conserves molar NOx and Ox, so background NO, NO2 and O3 enter through
     those two totals and the NO2 share of the transported NOx plays the role of SIRANE's
-    emitted NO2/NOx ratio. `closure=` is the deprecated spelling of `preset`.
+    emitted NO2/NOx ratio.
     """
-    if closure is not None:
-        if preset is not None:
-            raise TypeError(
-                "photostationary_for_streets: give preset or its deprecated spelling "
-                "closure, not both"
-            )
-        warn_deprecated(f"photostationary_for_streets: the keyword 'closure' is deprecated; "
-                        f"use preset={closure!r}")
-        preset = closure
     preset = "sirane" if preset is None else preset
     if preset not in PRESETS:
         raise ValueError(

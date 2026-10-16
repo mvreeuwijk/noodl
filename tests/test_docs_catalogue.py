@@ -45,8 +45,19 @@ def test_components_elements_and_drives_state_their_units():
     import inspect
 
     from noodl.apps.street_aq import Street
-    from noodl.drives import Stack, Wind
-    from noodl.elements import Conductance, Damper, Duct, FanCurve, Orifice, PowerLaw, Quadratic
+    from noodl.drives import DuctStack, Stack, Wind
+    from noodl.elements import (
+        AirDuct,
+        Conductance,
+        Damper,
+        Duct,
+        DuctTerminal,
+        FanCurve,
+        FixedVolumeFlow,
+        Orifice,
+        PowerLaw,
+        Quadratic,
+    )
 
     first = lambda o: (inspect.getdoc(o) or "").split("\n\n")[0]  # noqa: E731
     assert "(m)" in first(Street) and "z0_b" in first(Street)
@@ -57,6 +68,10 @@ def test_components_elements_and_drives_state_their_units():
     assert "Pa" in first(Quadratic)
     assert "Pa" in first(Damper)
     assert "(m)" in first(Duct)
+    assert "Pa" in first(AirDuct) and "kg/s" in first(AirDuct)
+    assert "Pa" in first(DuctTerminal) and "kg/s" in first(DuctTerminal)
+    assert "m3/s" in first(FixedVolumeFlow)
+    assert "(m," in inspect.getdoc(DuctStack.from_network)
     assert inspect.getdoc(Stack.from_network) and "z_path" in inspect.getdoc(Stack.from_network)
     assert "m/s" in first(Wind)
 
@@ -72,6 +87,9 @@ def test_every_documented_building_attribute_is_read_by_the_code():
         src / "apps" / "building_physics" / "elements.py",
         src / "apps" / "building_physics" / "prj.py",
         src / "apps" / "building_physics" / "components.py",
+        src / "apps" / "building_physics" / "ducts.py",
+        src / "apps" / "building_physics" / "air_handling.py",
+        src / "apps" / "building_physics" / "outputs.py",
         src / "components" / "_flatten.py",
     ])
     names = list(NODE_ATTRIBUTES) + [a for kind in EDGE_ATTRIBUTES.values() for a in kind]

@@ -5,7 +5,8 @@ This package reads the intermediate JSON an OpenModelica export script writes
 Modelica source and never evaluates a Modelica expression: every parameter it reads was
 already evaluated by OpenModelica.
 
-`schema.load` parses and structurally validates the JSON; `graph.build` resolves it into a
+`schema.load` parses and structurally validates the JSON; `expand.expand` rewrites composite
+classes (`MediumColumnDynamic`) into their parts; `graph.build` resolves the result into a
 `ComponentGraph` (nodes, fused hydrostatic-column paths, two-way edges, heat pins, sources),
 refusing unsupported content; `assemble.build` turns that graph into the model, its initial
 state and its drivers (`signals` evaluates the signal blocks on the experiment grid);
@@ -18,7 +19,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from noodl.apps.building_physics.modelica import assemble, graph, schema
+from noodl.apps.building_physics.modelica import assemble, expand, graph, schema
 from noodl.apps.building_physics.modelica.assemble import ModelicaNames
 from noodl.apps.building_physics.modelica.run import extrapolate, simulate, step_drivers
 from noodl.apps.building_physics.modelica.schema import ModelicaImportError
@@ -41,7 +42,7 @@ def read_modelica(path: str | Path, *, return_names: bool = False, substeps: int
     the model's edge columns and node positions (and carrying the experiment grid), is
     returned too. Raises `ModelicaImportError` naming every unsupported instance.
     """
-    doc = schema.load(path)
+    doc = expand.expand(schema.load(path))
     model, state, drivers, names = assemble.build(graph.build(doc), doc, substeps=substeps,
                                                   mass_storage=mass_storage)
     if return_names:

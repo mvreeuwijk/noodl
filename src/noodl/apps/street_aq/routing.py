@@ -25,7 +25,7 @@ from noodl.apps.street_aq.canyon import (
     exchange_velocity,
     roof_wind,
 )
-from noodl.apps.street_aq.closures import keyword_alias, normalise, resolve
+from noodl.apps.street_aq.closures import normalise, resolve
 
 Tensor = torch.Tensor
 TWO_PI = 2.0 * math.pi
@@ -115,13 +115,11 @@ def direction_offsets(
     sigma_theta: Tensor | None = None,
     *,
     n_theta: int | None = None,
-    scheme: str | None = None,
 ) -> tuple[Tensor, Tensor]:
     """Wind-direction samples and their weights, `(offsets (..., m), weights (..., m))`.
 
     `direction_averaging` is the closure option of that name (`closures.OPTIONS`) and
-    `sigma_theta` the spread, radians; both are required. `scheme=` is the earlier,
-    deprecated keyword for `direction_averaging`.
+    `sigma_theta` the spread, radians; both are required.
 
     `"none"`: one sample at offset 0 with weight 1 -- no direction averaging at all.
 
@@ -141,13 +139,11 @@ def direction_offsets(
     which needs the junction geometry and so is not a scheme of this function) is the
     exact average. Used in no parity test.
     """
-    scheme = keyword_alias("direction_offsets", "direction_averaging", direction_averaging,
-                           "scheme", scheme, None)
-    if scheme is None or sigma_theta is None:
+    if direction_averaging is None or sigma_theta is None:
         raise TypeError(
             "direction_offsets: direction_averaging and sigma_theta are both required"
         )
-    scheme = normalise("direction_averaging", scheme, "direction_offsets")
+    scheme = normalise("direction_averaging", direction_averaging, "direction_offsets")
     if scheme == "exact_gaussian":
         raise ValueError(
             "direction_offsets: direction_averaging='exact_gaussian' needs the junction "
@@ -317,12 +313,10 @@ def routing_matrix(
     flux_out: Tensor,
     *,
     junction_routing: str | None = None,
-    model: str | None = None,
 ) -> Tensor:
     """The street-to-street flux matrix `F[..., p, r]` from ORDERED, closed marginals.
 
-    `junction_routing` (required) is the closure option of that name (`closures.OPTIONS`);
-    `model=` is its earlier, deprecated keyword.
+    `junction_routing` (required) is the closure option of that name (`closures.OPTIONS`).
 
     `"perfect_mixing"`: `F = P_in outer (P_out / sum P_out)`.
 
@@ -341,11 +335,9 @@ def routing_matrix(
     `[10, 4]` against outflows `[6, 8]` give `[[6, 4], [0, 4]]`, where perfect mixing would
     give `[[4.286, 5.714], [1.714, 2.286]]`.
     """
-    model = keyword_alias("routing_matrix", "junction_routing", junction_routing, "model",
-                          model, None)
-    if model is None:
+    if junction_routing is None:
         raise TypeError("routing_matrix: the keyword junction_routing is required")
-    model = normalise("junction_routing", model, "routing_matrix")
+    model = normalise("junction_routing", junction_routing, "routing_matrix")
     if model == "perfect_mixing":
         total = flux_out.sum(-1, keepdim=True)
         safe = torch.where(total > 0, total, torch.ones_like(total))
@@ -426,9 +418,7 @@ class StreetFlows:
 
     The closure options (`noodl.apps.street_aq.closures.OPTIONS`) default to preset
     `preset` (`"sirane"` or `"munich"`, `closures.PRESETS`); any option given explicitly
-    overrides the preset's value. The earlier option names and values (`exchange=`,
-    `routing=`, `roof_wind_form=`, `"soulhac"`, `"munich"`, ...) are still accepted with a
-    `DeprecationWarning` (`closures.LEGACY`).
+    overrides the preset's value.
 
     `"u_star"`, when present, is the friction velocity itself and replaces the log law
     `u* = kappa U_ref / ln((z_ref - d)/z0)` (MUNICH takes it as an input on its
@@ -521,14 +511,13 @@ class StreetFlows:
         pblh_floor: bool = True,
         meteo: str = "uniform",
         layer_name: str = "street",
-        **deprecated,
     ) -> None:
         if meteo not in ("uniform", "per_street"):
             raise ValueError(
                 f"StreetFlows: meteo must be 'uniform' or 'per_street', got {meteo!r}"
             )
         options = resolve(preset, dict(
-            deprecated, canyon_wind=canyon_wind, roof_wind=roof_wind,
+            canyon_wind=canyon_wind, roof_wind=roof_wind,
             roof_exchange=roof_exchange, junction_routing=junction_routing,
             direction_averaging=direction_averaging, direction_spread=direction_spread,
             stability=stability, shape_constant=shape_constant, kappa=kappa,

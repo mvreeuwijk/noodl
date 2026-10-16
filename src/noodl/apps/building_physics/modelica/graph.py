@@ -15,7 +15,7 @@ just that one piece of work rather than crashing.
 
 Node identity
 -------------
-A `MixingVolume`/`DelayFirstOrder` ("zone") or `Boundary_pT`/`Outside` ("boundary") component
+A `MixingVolume`/`DelayFirstOrder` ("zone") or `Boundary_pT`/`Outside*` ("boundary") component
 owns exactly one node, named after the component: every one of its own fluid ports (all of
 its declared `ports[i]`) is the SAME node, because a lumped volume or boundary is a single
 pressure state that happens to expose several connection points. A `TraceSubstancesFlowSource`
@@ -70,7 +70,21 @@ matching the formula above; at zero flow (`dp_oriWesTop = 0`) this is the ordina
 balance `p(volWes) - p(volTop) = 2*h*rho*g` (`test_graph.py`'s `test_stack_chain_...` checks
 this exact identity, and a second fixture/test checks a column wired the other way along its
 path, which gets sign -1). A chain with zero flow elements (a run of columns alone between two
-zones/boundaries) or more than one is refused, naming every element found in it.
+zones/boundaries) is refused, naming the columns.
+
+Flow elements in series
+-----------------------
+A chain may hold several one-way elements, wired to each other directly or through columns
+(`Examples/ChimneyShaftNoVolume.mo`: `roo - oriChiBot - sha - oriChiTop - bou0`). Each element
+still gets its own `FlowPath`; two neighbouring elements meet at a JUNCTION node with no
+storage, and the columns between them go with the element whose name sorts first: its path
+holds them and ends at the junction next to the other element, whose path starts there
+(`ComponentGraph.junctions`). Every element, column and junction of such a run passes the
+stream on unchanged, and the junction holds no mass, so the run carries one flow from one
+end to the other: `ComponentGraph.series` lists each run (`SeriesChain`) with its two
+zone/boundary ends, oriented along its first element in name order. A run that closes on
+itself with no zone or boundary (a ring of flow elements) is refused, naming its elements,
+and so is a door or zonal flow inside a column chain.
 
 Two-way elements
 ----------------
@@ -112,6 +126,27 @@ heat-port wiring -- a bare `FixedTemperature` with no conductor, a conductor who
 not a zone, and so on -- is refused. A `PrescribedHeatFlow` whose `port` is wired to a zone's
 `heatPort` is recorded in `ComponentGraph.heat_sources` as `(component, zone)`; wired to
 anything else it is refused.
+
+A `TemperatureSensor` (`schema.HEAT_SENSORS`) whose `port` is wired to a zone's `heatPort` reads
+that zone's temperature and draws no heat; it is recorded in `ComponentGraph.heat_sensors` as
+`(component, zone)`, and wired to anything else it is refused. A connection from a component's
+output to an input of a signal block (`doc.signals`) is accepted only from such a sensor's `T`
+and recorded in `ComponentGraph.signal_wires` as `("<sensor>.T", "<block>.<input>")`; any
+other component output wired into a signal block, and a sensor wired to anything but one of the
+block's inputs (`signals.block_inputs`), is refused, naming the connection.
+
+Weather bus
+-----------
+A `ReaderTMY3` ("weather") is no node. A `connect()` of its `weaBus` to the `weaBus` of an
+`Outside`, `Outside_Cp`, `Outside_CpLowRise` or `Outside_CpData` boundary links that boundary
+to it (`ComponentGraph.weather`; `assemble` evaluates the reader's outputs for it). Every other
+connection touching a `weaBus` is refused by name: a bus wired to anything but an Outside
+boundary, a bus VARIABLE (`weaDat.weaBus.HDirNor`) wired anywhere (the exporter keeps such a
+connection into a signal block's input for this), and a boundary wired to two readers. So is a
+connection reaching a reader through any port but its `weaBus` and the `<output>_in` inputs of
+the outputs the boundaries read (`TDryBul`, `pAtm`, `relHum`, `winSpe`, `winDir`). One whose
+other end is an unsupported class (named already) or an observer is left alone. A boundary with
+no reader takes its weather-bus inputs from the signals driving `"<boundary>.weaBus.<output>"`.
 """
 
 from __future__ import annotations
@@ -119,11 +154,12 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 
-from noodl.apps.building_physics.modelica import schema
+from noodl.apps.building_physics.modelica import schema, signals
 from noodl.apps.building_physics.modelica.schema import (
     Component,
     ModelicaDoc,
     ModelicaImportError,
+    Signal,
 )
 
 _FIXED_TEMPERATURE = "Buildings.HeatTransfer.Sources.FixedTemperature"
@@ -144,6 +180,22 @@ class FlowPath:
     src: str
     tgt: str
     columns: tuple[tuple[Component, int], ...]
+
+
+@dataclass(frozen=True)
+class SeriesChain:
+    """One-way flow paths in series through junctions (module docstring, "Flow elements in
+    series"): `paths` in order from the zone/boundary `src` to the zone/boundary `tgt`,
+    `signs[k]` +1 where `paths[k]` is oriented along the chain (its `src` toward the
+    chain's `src`) and -1 where against it, `junctions[k]` the node between `paths[k]` and
+    `paths[k + 1]`. The chain is oriented along its first element in name order, whose sign
+    is +1: its flow is that element's."""
+
+    paths: tuple[FlowPath, ...]
+    signs: tuple[int, ...]
+    src: str
+    tgt: str
+    junctions: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -191,6 +243,16 @@ class ComponentGraph:
     heat_sources: tuple[tuple[Component, str], ...] = ()
     # (zone, boundary component) for a boundary wired straight to a zone (module docstring).
     attached: tuple[tuple[str, Component], ...] = ()
+    # (Outside boundary, the ReaderTMY3 its weaBus is wired to) (module docstring).
+    weather: tuple[tuple[str, Component], ...] = ()
+    # (temperature sensor, the zone whose heatPort it reads) (module docstring, "Heat ports").
+    heat_sensors: tuple[tuple[Component, str], ...] = ()
+    # ("<sensor>.T", "<signal block>.<input>"): a sensor output wired into a signal input.
+    signal_wires: tuple[tuple[str, str], ...] = ()
+    # The junctions where one-way elements in series meet, and the runs they join (module
+    # docstring, "Flow elements in series").
+    junctions: tuple[str, ...] = ()
+    series: tuple[SeriesChain, ...] = ()
 
 
 class _UnionFind:
@@ -256,8 +318,12 @@ def _split(ref: str, errors: list[str] | None = None) -> tuple[str, str] | None:
 def _kind_of(cls: str, role: str | None) -> str:
     if cls in schema.INLINE_SENSORS:
         return "inline"  # before the role check: the exporter marks sensors as observers
+    if cls in schema.HEAT_SENSORS:
+        return "heat_sensor"
     if role == "observer":
         return "observer"
+    if cls in schema.WEATHER_READERS:
+        return "weather"
     if cls in schema.ZONES:
         return "zone"
     if cls in schema.BOUNDARIES:
@@ -296,7 +362,7 @@ def _is_fluid_port(kind: str, port: str) -> bool:
 def _is_heat_port(kind: str, cls: str, port: str) -> bool:
     if kind == "zone":
         return port == "heatPort"
-    if kind == "heat_source":
+    if kind in ("heat_source", "heat_sensor"):
         return port == "port"
     if kind == "pin":
         if cls == _FIXED_TEMPERATURE:
@@ -338,6 +404,7 @@ class _Ctx:
     root_to_name: dict[str, str] = field(default_factory=dict)
     root_to_kind: dict[str, str] = field(default_factory=dict)
     attached: dict[str, str] = field(default_factory=dict)  # zone -> boundary wired to it
+    signal_wires: list[tuple[str, str]] = field(default_factory=list)
 
     def node_of(self, ref: str) -> str:
         return self.root_to_name[self.uf.find(ref)]
@@ -364,21 +431,60 @@ def _classify_components(doc: ModelicaDoc) -> _Ctx:
             errors.append(f"{c.name} ({c.cls}): {reason}")
 
     for s in doc.signals:
-        if s.cls not in schema.SIGNALS and s.cls not in schema.MATH:
-            reason = schema.refusal_reason(s.cls) or "signal source is not supported"
+        reason = schema.refusal_reason(s.cls)
+        if reason is None and s.cls not in schema.SIGNALS | schema.MATH | schema.CONTROLLERS:
+            reason = "signal source is not supported"
+        if reason is not None:
             errors.append(f"{s.name} ({s.cls}): {reason}")
 
     return _Ctx(by_name=by_name, kind_of=kind_of, errors=errors)
 
 
+def _sensor_wire(ctx: _Ctx, ref_a: str, ref_b: str,
+                 signal_of: dict[str, Signal]) -> tuple[str, str] | None:
+    """`(sensor output, signal input)` when one end is a signal block's input and the other a
+    component's output, or None when neither end is a signal block. Only a temperature
+    sensor's `T` may feed a signal, and only into one of the block's inputs
+    (`signals.block_inputs`); anything else is reported by name (and `("", "")`
+    returned)."""
+    for src, dst in ((ref_a, ref_b), (ref_b, ref_a)):
+        s_inst, _, s_port = src.partition(".")
+        d_inst, _, d_port = dst.partition(".")
+        if d_inst in signal_of and s_inst in ctx.by_name:
+            if ctx.kind_of[s_inst] != "heat_sensor" or s_port != "T":
+                ctx.errors.append(f"{src} -> {dst}: a component output wired into a signal "
+                                  f"is supported only from a temperature sensor's T "
+                                  f"({', '.join(sorted(schema.HEAT_SENSORS))})")
+                return "", ""
+            sig = signal_of[d_inst]
+            inputs = signals.block_inputs(sig)
+            if d_port not in inputs:
+                has = f"its inputs are {', '.join(inputs)}" if inputs else "it has no inputs"
+                ctx.errors.append(f"{src} -> {dst}: {d_port} is not an input of {d_inst} "
+                                  f"({sig.cls}); {has}")
+                return "", ""
+            return src, dst
+    return None
+
+
 def _process_fluid_connections(doc: ModelicaDoc, ctx: _Ctx) -> None:
-    """Union every fluid `connect()` pair; note a signal-style connection's refusal, if any."""
+    """Union every fluid `connect()` pair; record a temperature sensor wired into a signal;
+    note a signal-style connection's refusal, if any."""
+    signal_of = {s.name: s for s in doc.signals}
     for a, b in doc.connections:
+        if _bus_end(a) is not None or _bus_end(b) is not None:
+            continue  # weather-bus wiring: `_resolve_weather`
         split_a, split_b = _split(a, ctx.errors), _split(b, ctx.errors)
         if split_a is None or split_b is None:
             continue
         ia, pa = split_a
         ib, pb = split_b
+        if ia not in ctx.by_name or ib not in ctx.by_name:
+            wire = _sensor_wire(ctx, a, b, signal_of)
+            if wire is not None:
+                if wire != ("", ""):
+                    ctx.signal_wires.append(wire)
+                continue
         if ia not in ctx.by_name:
             ctx.errors.append(f"{a}: connection references unknown instance {ia!r}")
             continue
@@ -583,14 +689,28 @@ def _resolve_sensors(doc: ModelicaDoc, ctx: _Ctx) -> list[InlineSensor]:
     return sensors
 
 
-def _fuse_paths(ctx: _Ctx) -> list[FlowPath]:
-    """One walk per one-way flow element; see the module docstring for sign and orientation."""
+@dataclass
+class _End:
+    """Where a walk out of a flow element's port ended: at a zone or boundary `node`, or at
+    another one-way `element` (`node` None), with the junction roots it passed (walk order)
+    and the `(column, sign)` it collected."""
+
+    node: str | None
+    element: str | None = None
+    roots: list[str] = field(default_factory=list)
+    columns: list[tuple[Component, int]] = field(default_factory=list)
+
+
+def _fuse_paths(ctx: _Ctx) -> tuple[list[FlowPath], list[str]]:
+    """One walk per one-way flow element (module docstring for sign and orientation, and
+    "Flow elements in series"): the paths and the junctions where elements in series meet."""
     visited_columns: set[str] = set()
     visited_junction_roots: set[str] = set()
 
-    def walk(own_ref: str, reversed_walk: bool) -> tuple[str, list[tuple[Component, int]]]:
+    def walk(own_ref: str, reversed_walk: bool) -> _End:
         """Walk outward from `own_ref` (a flow element's own `port_a` or `port_b`) to the
-        zone/boundary it terminates at, collecting `(column, sign)` in WALK order.
+        zone/boundary, or the next one-way element, it reaches, collecting `(column, sign)`
+        in WALK order.
 
         `reversed_walk` is true for the `port_a` side: that walk proceeds from the element
         toward the path's `src` end, i.e. backwards along the `src`-to-`tgt` convention the
@@ -598,17 +718,19 @@ def _fuse_paths(ctx: _Ctx) -> list[FlowPath]:
         list order (handled by the caller) are flipped relative to a plain forward walk.
         """
         ref = own_ref
-        columns: list[tuple[Component, int]] = []
+        end = _End(None)
         while True:
             if ref not in ctx.uf:
                 raise _ChainRefused(f"{ref}: not connected", quiet=ref in ctx.beside_refused)
             root = ctx.uf.find(ref)
             kind = ctx.root_to_kind[root]
             if kind in ("zone", "boundary"):
-                return ctx.root_to_name[root], columns
+                end.node = ctx.root_to_name[root]
+                return end
             if kind == "conflict":
                 raise _ChainRefused("touches a node that was already refused", quiet=True)
             visited_junction_roots.add(root)
+            end.roots.append(root)
             members = ctx.members_of_root[root]
             if len(members) != 2:
                 raise _ChainRefused(
@@ -621,23 +743,38 @@ def _fuse_paths(ctx: _Ctx) -> list[FlowPath]:
                 visited_columns.add(other_inst)
                 raw_sign = 1 if other_port == "port_a" else -1
                 sign = -raw_sign if reversed_walk else raw_sign
-                columns.append((ctx.by_name[other_inst], sign))
+                end.columns.append((ctx.by_name[other_inst], sign))
                 exit_port = "port_b" if other_port == "port_a" else "port_a"
                 ref = f"{other_inst}.{exit_port}"
                 continue
-            if other_kind in ("one_way", "door", "zonal"):
-                raise _ChainRefused(
-                    f"chain has more than one flow element: also found {other_inst}"
-                )
+            if other_kind == "one_way":
+                end.element = other_inst
+                return end
+            if other_kind in ("door", "zonal"):
+                raise _ChainRefused("a door or zonal flow in a hydrostatic-column chain")
             raise _ChainRefused(f"{other_inst}: unsupported in a hydrostatic-column chain")
+
+    junctions: set[str] = set()
+
+    def side(name: str, end: _End) -> tuple[str, list[tuple[Component, int]]]:
+        """This element's end node and its columns on this side: up to the next element, the
+        columns go with the one whose name sorts first, and the junction is the one next to
+        the other (module docstring, "Flow elements in series")."""
+        if end.element is None:
+            return end.node, end.columns
+        owner = min(name, end.element)
+        root = end.roots[-1] if name == owner else end.roots[0]
+        junction = ctx.root_to_name[root]
+        junctions.add(junction)
+        return junction, end.columns if name == owner else []
 
     paths: list[FlowPath] = []
     for name, comp in ctx.by_name.items():
         if ctx.kind_of[name] != "one_way":
             continue
         try:
-            src, cols_a = walk(f"{name}.port_a", reversed_walk=True)
-            tgt, cols_b = walk(f"{name}.port_b", reversed_walk=False)
+            src, cols_a = side(name, walk(f"{name}.port_a", reversed_walk=True))
+            tgt, cols_b = side(name, walk(f"{name}.port_b", reversed_walk=False))
         except _ChainRefused as exc:
             if not exc.quiet:
                 ctx.errors.append(f"{name} ({comp.cls}): {exc.message}")
@@ -649,7 +786,7 @@ def _fuse_paths(ctx: _Ctx) -> list[FlowPath]:
     for leftover in sorted(all_columns - visited_columns):
         ctx.errors.append(
             f"{leftover} ({ctx.by_name[leftover].cls}): not part of any flow-element chain "
-            f"(a hydrostatic-column chain needs exactly one flow element)"
+            f"(a hydrostatic-column chain needs a flow element)"
         )
     all_junction_roots = {root for root, kind in ctx.root_to_kind.items() if kind == "junction"}
     for root in sorted(all_junction_roots - visited_junction_roots,
@@ -658,12 +795,85 @@ def _fuse_paths(ctx: _Ctx) -> list[FlowPath]:
             f"{sorted(ctx.members_of_root[root])}: connects components with no flow element"
         )
 
-    return paths
+    return paths, sorted(junctions)
 
 
-def _resolve_pins(doc: ModelicaDoc, ctx: _Ctx) -> tuple[list[Pin], list[tuple[Component, str]]]:
-    """`FixedTemperature.port` -> `ThermalConductor.port_a`/`port_b` -> zone `heatPort`, and
-    `PrescribedHeatFlow.port` -> zone `heatPort`."""
+def _series_chains(paths: list[FlowPath], junctions: list[str],
+                   ctx: _Ctx) -> list[SeriesChain]:
+    """The runs of paths in series through `junctions` (`SeriesChain`); a run that closes
+    on itself is refused, naming its elements."""
+    is_junction = set(junctions)
+    at: dict[str, list[FlowPath]] = {}
+    for p in paths:
+        for node in (p.src, p.tgt):
+            if node in is_junction:
+                at.setdefault(node, []).append(p)
+    if any(len(v) != 2 for v in at.values()):
+        # An element at the junction was refused already (named), so `build` raises.
+        assert ctx.errors, "a junction between elements in series without its two paths"
+        return []
+
+    def across(path: FlowPath, node: str) -> tuple[FlowPath, str]:
+        """The other path at junction `node`, and its far end."""
+        other = next(q for q in at[node] if q is not path)
+        return other, other.tgt if other.src == node else other.src
+
+    seen: set[str] = set()
+    chains: list[SeriesChain] = []
+    for start in sorted((p for p in paths if p.src in is_junction or p.tgt in is_junction),
+                        key=lambda p: p.element.name):
+        if start.element.name in seen:
+            continue
+        # Walk to one end of the run, through the junctions on `start`'s src side.
+        path, node = start, start.src
+        while node in is_junction:
+            path, node = across(path, node)
+            if path is start:
+                break
+        if path is start and node in is_junction:  # back at `start`: a ring
+            members, (path, node) = [start.element.name], across(start, start.tgt)
+            while path is not start:
+                members.append(path.element.name)
+                path, node = across(path, node)
+            seen.update(members)
+            for nm in members:
+                ctx.errors.append(
+                    f"{nm} ({ctx.by_name[nm].cls}): a ring of flow elements in series "
+                    f"({', '.join(sorted(members))}) with no volume or boundary"
+                )
+            continue
+        # From that end (`node`, reached through `path`), along the run to the other.
+        ordered, signs, joints = [], [], []
+        left = node
+        while True:
+            ordered.append(path)
+            signs.append(1 if path.src == left else -1)
+            right = path.tgt if path.src == left else path.src
+            if right not in is_junction:
+                break
+            joints.append(right)
+            path, _ = across(path, right)
+            left = right
+        first, last = node, right
+        owner = min(range(len(ordered)), key=lambda k: ordered[k].element.name)
+        if signs[owner] < 0:
+            ordered.reverse()
+            signs = [-s for s in reversed(signs)]
+            joints.reverse()
+            first, last = last, first
+        seen.update(p.element.name for p in ordered)
+        chains.append(SeriesChain(paths=tuple(ordered), signs=tuple(signs), src=first,
+                                  tgt=last, junctions=tuple(joints)))
+    return chains
+
+
+def _resolve_pins(doc: ModelicaDoc, ctx: _Ctx) -> tuple[
+    list[Pin], list[tuple[Component, str]], list[tuple[Component, str]]
+]:
+    """`FixedTemperature.port` -> `ThermalConductor.port_a`/`port_b` -> zone `heatPort`,
+    `PrescribedHeatFlow.port` -> zone `heatPort` and `TemperatureSensor.port` -> zone
+    `heatPort`: `(pins, heat sources, heat sensors)`. A zone's `heatPort` may carry several
+    connections; each one-port partner looks up its own end."""
     heat_partner: dict[tuple[str, str], tuple[str, str]] = {}
     for a, b in doc.connections:
         split_a, split_b = _split(a, ctx.errors), _split(b, ctx.errors)
@@ -722,11 +932,102 @@ def _resolve_pins(doc: ModelicaDoc, ctx: _Ctx) -> tuple[list[Pin], list[tuple[Co
                               f"must connect to a volume's heatPort)")
             continue
         heat_sources.append((comp, partner[0]))
-    return pins, heat_sources
+
+    heat_sensors: list[tuple[Component, str]] = []
+    for name, comp in ctx.by_name.items():
+        if ctx.kind_of[name] != "heat_sensor":
+            continue
+        partner = heat_partner.get((name, "port"))
+        if partner is None or ctx.kind_of[partner[0]] != "zone":
+            ctx.errors.append(f"{name} ({comp.cls}): unsupported heat-port wiring (its port "
+                              f"must connect to a volume's heatPort)")
+            continue
+        heat_sensors.append((comp, partner[0]))
+    return pins, heat_sources, heat_sensors
+
+
+def _bus_end(ref: str) -> tuple[str, str | None] | None:
+    """`(instance, output)` of a weather-bus reference, `<inst>.weaBus` (output `None`) or
+    `<inst>.weaBus.<output>`; `None` for any other reference."""
+    parts = ref.split(".")
+    if len(parts) < 2 or parts[1] != "weaBus":
+        return None
+    return parts[0], ".".join(parts[2:]) or None
+
+
+# The reader's inputs a connection may reach: `<output>_in` of an output the Outside boundaries
+# read (ReaderTMY3.mo, `<output>Sou = Input`).
+_READER_INPUTS = frozenset(f"{q}_in" for q in schema.WEATHER_BUS_OUTPUTS)
+
+
+def _check_reader_port(a: str, b: str, ctx: _Ctx) -> None:
+    """Refuse a connection reaching a ReaderTMY3 through a port that is neither its `weaBus`
+    nor one of `_READER_INPUTS` (module docstring, "Weather bus")."""
+    for ref, other in ((a, b), (b, a)):
+        inst, _, port = ref.partition(".")
+        if ctx.kind_of.get(inst) != "weather" or port in _READER_INPUTS:
+            continue
+        if ctx.kind_of.get(other.split(".", 1)[0]) in ("unknown", "observer"):
+            continue  # an unsupported class is named already; an observer is ignored
+        ctx.errors.append(
+            f"{inst} ({ctx.by_name[inst].cls}): port {port}, wired to {other}, is not supported "
+            f"(only its weaBus and the inputs {', '.join(sorted(_READER_INPUTS))} are read)"
+        )
+
+
+def _resolve_weather(doc: ModelicaDoc, ctx: _Ctx) -> list[tuple[str, Component]]:
+    """Weather-bus wiring (module docstring, "Weather bus")."""
+    readers_of: dict[str, list[str]] = {}
+    for a, b in doc.connections:
+        ends = {a: _bus_end(a), b: _bus_end(b)}
+        if all(e is None for e in ends.values()):
+            _check_reader_port(a, b, ctx)
+            continue
+        named = [(ref, e) for ref, e in ends.items() if e is not None and e[0] in ctx.by_name]
+        if not named:
+            ctx.errors.append(f"{a}: connection references unknown instance(s) ({a}, {b})")
+            continue
+        kinds = {ref.split(".", 1)[0]: ctx.kind_of.get(ref.split(".", 1)[0])
+                 for ref in (a, b)}
+        if "unknown" in kinds.values() or "observer" in kinds.values():
+            continue  # an unsupported class is named already; an observer is ignored
+        ea, eb = ends[a], ends[b]
+        if (ea is not None and eb is not None and ea[1] is None and eb[1] is None
+                and {ctx.kind_of.get(ea[0]), ctx.kind_of.get(eb[0])} == {"weather", "boundary"}):
+            reader, bnd = ((ea[0], eb[0]) if ctx.kind_of[ea[0]] == "weather"
+                           else (eb[0], ea[0]))
+            if ctx.by_name[bnd].cls in schema.OUTSIDE_FAMILY:
+                readers_of.setdefault(bnd, []).append(reader)
+                continue
+        ref, (inst, output) = named[0]
+        other = b if ref == a else a
+        comp = ctx.by_name[inst]
+        if output is not None and output not in schema.WEATHER_BUS_OUTPUTS:
+            ctx.errors.append(
+                f"{inst} ({comp.cls}): weather-bus output {output}, wired to {other}, is not "
+                f"supported (only {', '.join(schema.WEATHER_BUS_OUTPUTS)} are read, by Outside "
+                f"boundaries)"
+            )
+        else:
+            ctx.errors.append(
+                f"{inst} ({comp.cls}): its weather bus is wired to {other}; only a ReaderTMY3's "
+                f"weaBus wired to an Outside boundary's weaBus is supported"
+            )
+    links: list[tuple[str, Component]] = []
+    for bnd, readers in readers_of.items():
+        if len(set(readers)) > 1:
+            ctx.errors.append(
+                f"{bnd} ({ctx.by_name[bnd].cls}): its weaBus is wired to more than one weather "
+                f"reader ({', '.join(sorted(set(readers)))})"
+            )
+            continue
+        links.append((bnd, ctx.by_name[readers[0]]))
+    return links
 
 
 def build(doc: ModelicaDoc) -> ComponentGraph:
     ctx = _classify_components(doc)
+    weather = tuple(_resolve_weather(doc, ctx))
     _process_fluid_connections(doc, ctx)
     _assign_nodes(ctx)
 
@@ -744,9 +1045,11 @@ def build(doc: ModelicaDoc) -> ComponentGraph:
     doors = tuple(_two_way_edges(ctx, "door"))
     zonal = tuple(_two_way_edges(ctx, "zonal"))
     sources = tuple(_resolve_sources(ctx))
-    paths = tuple(_fuse_paths(ctx))
-    pin_list, heat_list = _resolve_pins(doc, ctx)
-    pins, heat_sources = tuple(pin_list), tuple(heat_list)
+    path_list, junction_list = _fuse_paths(ctx)
+    paths = tuple(path_list)
+    series = tuple(_series_chains(path_list, junction_list, ctx))
+    pin_list, heat_list, sensor_list = _resolve_pins(doc, ctx)
+    pins, heat_sources, heat_sensors = tuple(pin_list), tuple(heat_list), tuple(sensor_list)
     sensors = tuple(_resolve_sensors(doc, ctx))
 
     _raise(ctx.errors)
@@ -754,5 +1057,7 @@ def build(doc: ModelicaDoc) -> ComponentGraph:
     return ComponentGraph(
         nodes=nodes, zones=zones, boundaries=boundaries, paths=paths, doors=doors,
         zonal=zonal, pins=pins, sources=sources, sensors=sensors, heat_sources=heat_sources,
-        attached=attached,
+        attached=attached, weather=weather, heat_sensors=heat_sensors,
+        signal_wires=tuple(ctx.signal_wires), junctions=tuple(junction_list),
+        series=series,
     )

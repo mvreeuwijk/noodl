@@ -1,0 +1,225 @@
+{
+  "format": "noodl-modelica/1",
+  "model": "Buildings.Fluid.Sources.Examples.Outside_CpData",
+  "mbl_commit": "55abf579598ca81cae0a82f337350375958e6722",
+  "openmodelica": "OpenModelica 1.27.1~2-g6db4671",
+  "experiment": {
+    "StartTime": 17280000.0,
+    "StopTime": 17884800.0,
+    "Interval": 1209.6,
+    "Tolerance": 1e-06
+  },
+  "medium": {
+    "class": "Buildings.Media.Air",
+    "p_default": 101325.0,
+    "T_default": 293.15,
+    "X_default": [
+      0.01,
+      0.99
+    ],
+    "nXi": 1,
+    "extraPropertiesNames": [],
+    "dStp": 1.2,
+    "pStp": 101325.0
+  },
+  "components": [
+    {
+      "name": "weaDat",
+      "class": "Buildings.BoundaryConditions.WeatherData.ReaderTMY3",
+      "parameters": {
+        "filNam": "modelica://Buildings/Resources/weatherdata/USA_CA_San.Francisco.Intl.AP.724940_TMY3.mos",
+        "computeWetBulbTemperature": true,
+        "pAtmSou": "Buildings.BoundaryConditions.Types.DataSource.Parameter",
+        "pAtm": 101325.0,
+        "TDryBulSou": "Buildings.BoundaryConditions.Types.DataSource.File",
+        "TDryBul": 293.15,
+        "TDewPoiSou": "Buildings.BoundaryConditions.Types.DataSource.File",
+        "TDewPoi": 283.15,
+        "TBlaSkySou": "Buildings.BoundaryConditions.Types.DataSource.File",
+        "TBlaSky": 273.15,
+        "relHumSou": "Buildings.BoundaryConditions.Types.DataSource.File",
+        "relHum": 0.5,
+        "winSpeSou": "Buildings.BoundaryConditions.Types.DataSource.File",
+        "winSpe": 1.0,
+        "winDirSou": "Buildings.BoundaryConditions.Types.DataSource.File",
+        "winDir": 1.0,
+        "HInfHorSou": "Buildings.BoundaryConditions.Types.DataSource.File",
+        "HInfHor": 0.0,
+        "HSou": "Buildings.BoundaryConditions.Types.RadiationDataSource.File",
+        "ceiHeiSou": "Buildings.BoundaryConditions.Types.DataSource.File",
+        "ceiHei": 20000.0,
+        "totSkyCovSou": "Buildings.BoundaryConditions.Types.DataSource.File",
+        "totSkyCov": 0.5,
+        "opaSkyCovSou": "Buildings.BoundaryConditions.Types.DataSource.File",
+        "opaSkyCov": 0.5,
+        "calTSky": "Buildings.BoundaryConditions.Types.SkyTemperatureCalculation.TemperaturesAndSkyCover"
+      },
+      "unevaluated": [
+        "lon",
+        "lat",
+        "timZon",
+        "alt"
+      ],
+      "files": {
+        "filNam": {
+          "path": "USA_CA_San.Francisco.Intl.AP.724940_TMY3.mos",
+          "sha256": "a6333b8202e6563460b2afdaf726315337b4058adf8dc16a365879693850ec4f"
+        }
+      }
+    },
+    {
+      "name": "west",
+      "class": "Buildings.Fluid.Sources.Outside_CpData",
+      "parameters": {
+        "nPorts": 0,
+        "verifyInputs": true,
+        "use_C_in": false,
+        "C": [],
+        "azi": 1.5707963267948966,
+        "incAngSurNor": [
+          0.0,
+          0.7853981633974483,
+          1.5707963267948966,
+          2.356194490192345,
+          3.141592653589793,
+          3.9269908169872414,
+          4.71238898038469,
+          5.497787143782138
+        ],
+        "Cp": [
+          0.4,
+          0.1,
+          -0.3,
+          -0.35,
+          -0.2,
+          -0.35,
+          -0.3,
+          0.1
+        ],
+        "Cs": 1.0
+      }
+    },
+    {
+      "name": "north",
+      "class": "Buildings.Fluid.Sources.Outside_CpData",
+      "parameters": {
+        "nPorts": 0,
+        "verifyInputs": true,
+        "use_C_in": false,
+        "C": [],
+        "azi": 3.141592653589793,
+        "incAngSurNor": [
+          0.0,
+          0.7853981633974483,
+          1.5707963267948966,
+          2.356194490192345,
+          3.141592653589793,
+          3.9269908169872414,
+          4.71238898038469,
+          5.497787143782138
+        ],
+        "Cp": [
+          0.4,
+          0.1,
+          -0.3,
+          -0.35,
+          -0.2,
+          -0.35,
+          -0.3,
+          0.1
+        ],
+        "Cs": 1.0
+      }
+    },
+    {
+      "name": "south",
+      "class": "Buildings.Fluid.Sources.Outside_CpData",
+      "parameters": {
+        "nPorts": 0,
+        "verifyInputs": true,
+        "use_C_in": false,
+        "C": [],
+        "azi": 0.0,
+        "incAngSurNor": [
+          0.0,
+          0.7853981633974483,
+          1.5707963267948966,
+          2.356194490192345,
+          3.141592653589793,
+          3.9269908169872414,
+          4.71238898038469,
+          5.497787143782138
+        ],
+        "Cp": [
+          0.4,
+          0.1,
+          -0.3,
+          -0.35,
+          -0.2,
+          -0.35,
+          -0.3,
+          0.1
+        ],
+        "Cs": 1.0
+      }
+    },
+    {
+      "name": "east",
+      "class": "Buildings.Fluid.Sources.Outside_CpData",
+      "parameters": {
+        "nPorts": 0,
+        "verifyInputs": true,
+        "use_C_in": false,
+        "C": [],
+        "azi": -1.5707963267948966,
+        "incAngSurNor": [
+          0.0,
+          0.7853981633974483,
+          1.5707963267948966,
+          2.356194490192345,
+          3.141592653589793,
+          3.9269908169872414,
+          4.71238898038469,
+          5.497787143782138
+        ],
+        "Cp": [
+          0.4,
+          0.1,
+          -0.3,
+          -0.35,
+          -0.2,
+          -0.35,
+          -0.3,
+          0.1
+        ],
+        "Cs": 1.0
+      }
+    }
+  ],
+  "connections": [
+    [
+      "weaDat.weaBus",
+      "west.weaBus"
+    ],
+    [
+      "weaDat.weaBus",
+      "north.weaBus"
+    ],
+    [
+      "weaDat.weaBus",
+      "south.weaBus"
+    ],
+    [
+      "weaDat.weaBus",
+      "east.weaBus"
+    ]
+  ],
+  "signals": [],
+  "modelica_standard_library": "4.1.0",
+  "experiment_declared": [
+    "StartTime",
+    "StopTime",
+    "Tolerance"
+  ],
+  "parameter_precision": "Reals from the simulation result (full double precision)"
+}

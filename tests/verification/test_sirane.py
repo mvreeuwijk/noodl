@@ -11,8 +11,9 @@ and the direction spread -- never with the deck's.
 
 Five comparisons, each by case:
 
-- the roof exchange velocity: noodl physics' `exchange_velocity(form="turbulent_velocity")` at
-  SIRANE's own `Sigma_wH` against SIRANE's printed `u_d`, street by street and hour by hour;
+- the roof exchange velocity: noodl physics'
+  `exchange_velocity(roof_exchange="turbulent_velocity")` at SIRANE's own `Sigma_wH`
+  against SIRANE's printed `u_d`, street by street and hour by hour;
 - the in-canyon wind: noodl physics' Soulhac canyon velocity under SIRANE's u* and
   direction against SIRANE's `U_moy`, with the one-sided streets reported separately;
 - the in-canyon concentration with SIRANE's above-roof field imposed. The archived results
@@ -100,17 +101,17 @@ def _drivers(model, k):
 
 
 def test_the_exchange_velocity_of_every_street_and_hour_is_sirane_own(record_property):
-    """noodl physics' `exchange_velocity(form="turbulent_velocity")`, evaluated at SIRANE's printed
-    `Sigma_wH` with each street's own height and width, reproduces SIRANE's printed `u_d`
-    on all 46 streets in both hours, to the printed two decimals -- and the reading
-    `sigma_w / sqrt(2 pi)` does not (Soulhac et al. 2011, Eq. 5)."""
+    """noodl physics' `exchange_velocity(roof_exchange="turbulent_velocity")`, evaluated at
+    SIRANE's printed `Sigma_wH` with each street's own height and width, reproduces
+    SIRANE's printed `u_d` on all 46 streets in both hours, to the printed two decimals --
+    and the reading `sigma_w / sqrt(2 pi)` does not (Soulhac et al. 2011, Eq. 5)."""
     case, res = _case(), _results()
     height = torch.tensor([s.height for s in case.network.streets], dtype=DT)
     width = torch.tensor([s.width for s in case.network.streets], dtype=DT)
     worst = 0.0
     for k in range(len(res.times)):
         sigma_w = torch.as_tensor(res.sigma_w_roof[k], dtype=DT)
-        ours = exchange_velocity(sigma_w, height, width, form="turbulent_velocity").numpy()
+        ours = exchange_velocity(sigma_w, height, width, roof_exchange="turbulent_velocity").numpy()
         miss = np.abs(ours - res.u_exchange[k])
         worst = max(worst, float(miss.max()))
         # The rejected reading misses by far more than the printing can explain: measured

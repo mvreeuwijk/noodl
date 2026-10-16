@@ -11,15 +11,19 @@ and signal's required fields. It raises `ModelicaImportError` naming the first m
 that is `graph.build`'s job (`noodl.apps.building_physics.modelica.graph`), once every
 connection has been resolved to a port and a node. This module only supplies the vocabulary
 `graph.build` checks classes against: `SUPPORTED` groups the fully qualified MBL/MSL class
-names the reader recognises, and `REFUSED` (plus `REFUSED_PREFIXES` for the
-weather-data package) maps a class this importer explicitly declines to convert to the short
-reason `graph.build` reports against every offending instance.
+names the reader recognises, and `REFUSED` maps a class this importer explicitly declines to
+convert to the short reason `graph.build` reports against every offending instance;
+`REFUSED_PREFIXES` refuses every class of the weather-data package but `ReaderTMY3`.
+`DYNAMIC_COLUMNS` are composite classes no graph sees: `expand.expand` rewrites each into
+supported parts first. `HEAT_SENSORS` read a volume's temperature, which may feed a signal
+block's input; `CONTROLLERS` are the feedback blocks such a sensor feeds.
 """
 
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+import re
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -46,10 +50,21 @@ ZONES = frozenset({
     "Buildings.Fluid.MixingVolumes.MixingVolume",
     "Buildings.Fluid.Delays.DelayFirstOrder",
 })
-BOUNDARIES = frozenset({
-    "Buildings.Fluid.Sources.Boundary_pT",
-    "Buildings.Fluid.Sources.Outside",
+# Weather and wind (`weather.py`, `outside.py`). The outside boundaries that read a weather bus
+# (`Fluid/Sources/BaseClasses/Outside.mo`), the three of them that add a wind pressure, and the
+# one weather reader. `WEATHER_BUS_OUTPUTS` are the weather-bus variables those boundaries read
+# (`Outside.mo:7-8`, `Outside_Cp.mo:39-42`, `Outside_CpLowRise.mo:47-51`,
+# `Outside_CpData.mo:85-89`, `BaseClasses/Outside.mo:51`): the only reader outputs evaluated.
+WEATHER_READERS = frozenset({"Buildings.BoundaryConditions.WeatherData.ReaderTMY3"})
+WEATHER_BUS_OUTPUTS = ("TDryBul", "pAtm", "relHum", "winSpe", "winDir")
+OUTSIDE_WIND = frozenset({
+    "Buildings.Fluid.Sources.Outside_Cp",
+    "Buildings.Fluid.Sources.Outside_CpLowRise",
+    "Buildings.Fluid.Sources.Outside_CpData",
 })
+OUTSIDE_FAMILY = frozenset({"Buildings.Fluid.Sources.Outside"}) | OUTSIDE_WIND
+
+BOUNDARIES = frozenset({"Buildings.Fluid.Sources.Boundary_pT"}) | OUTSIDE_FAMILY
 ONE_WAY = frozenset({
     "Buildings.Airflow.Multizone.Orifice",
     "Buildings.Airflow.Multizone.EffectiveAirLeakageArea",
@@ -86,6 +101,17 @@ THERMAL_PIN = frozenset({
 # A prescribed heat flow into a volume's `heatPort` (MSL `Thermal/HeatTransfer/Sources/
 # PrescribedHeatFlow.mo:15`): a heat source of the zone's energy balance (`assemble`).
 HEAT_SOURCES = frozenset({"Modelica.Thermal.HeatTransfer.Sources.PrescribedHeatFlow"})
+# A sensor on a volume's heat port whose output `T` is the volume's temperature (MSL 4.1.0
+# `Thermal/HeatTransfer/Sensors/TemperatureSensor.mo`: `T = port.T`, `port.Q_flow = 0`);
+# `graph.build` records which zone it reads and which signal inputs its `T` is wired into.
+HEAT_SENSORS = frozenset({"Modelica.Thermal.HeatTransfer.Sensors.TemperatureSensor"})
+# Feedback controllers: MSL 4.1.0's `LimPID` (`Blocks/Continuous.mo`). They sit in the JSON's
+# `signals`, like the Math blocks; `feedback` reads them (a P controller; the other settings
+# are refused by name there).
+CONTROLLERS = frozenset({"Modelica.Blocks.Continuous.LimPID"})
+# Composite classes `expand.expand` rewrites into supported ones before `graph.build`
+# (`MediumColumnDynamic`: a mixing volume between two half columns).
+DYNAMIC_COLUMNS = frozenset({"Buildings.Airflow.Multizone.MediumColumnDynamic"})
 SOURCES = frozenset({
     "Buildings.Fluid.Sources.TraceSubstancesFlowSource",
     "Buildings.Fluid.Sources.MassFlowSource_T",
@@ -143,27 +169,26 @@ OBSERVERS = frozenset({
 
 SUPPORTED = (
     ZONES | BOUNDARIES | ONE_WAY | TWO_WAY | COLUMNS | ZONAL | THERMAL_PIN | HEAT_SOURCES
-    | SOURCES | SIGNALS | MATH | INLINE_SENSORS | OBSERVERS
+    | HEAT_SENSORS | SOURCES | SIGNALS | MATH | INLINE_SENSORS | OBSERVERS | WEATHER_READERS
 )
 
 # Refused classes, each with the short reason `graph.build` reports
 # against every instance of it.
-REFUSED: dict[str, str] = {
-    "Buildings.Fluid.Sources.Outside_CpLowRise": "wind pressure is not supported",
-    "Modelica.Blocks.Continuous.LimPID": "feedback controllers are not supported",
-    "Buildings.Airflow.Multizone.MediumColumnDynamic": (
-        "a dynamic (mass- and heat-storing) hydrostatic column is not supported"
-    ),
-}
-# `BoundaryConditions.WeatherData.*`: any class under this package, whichever
-# reader the model uses (`ReaderTMY3` and friends), not just one named class.
+REFUSED: dict[str, str] = {}
+# `BoundaryConditions.WeatherData.*`: every class under this package but the supported
+# `ReaderTMY3` (`WEATHER_READERS`).
 REFUSED_PREFIXES: dict[str, str] = {
-    "Buildings.BoundaryConditions.WeatherData.": "weather data is not supported",
+    "Buildings.BoundaryConditions.WeatherData.": (
+        "weather data other than a ReaderTMY3 is not supported"
+    ),
 }
 
 
 def refusal_reason(cls: str) -> str | None:
-    """The reason `cls` is refused, or `None` if this module does not (yet) know it is."""
+    """The reason `cls` is refused, or `None` if this module does not (yet) know it is. A
+    supported class is never refused, also when it matches a refused prefix."""
+    if cls in SUPPORTED:
+        return None
     if cls in REFUSED:
         return REFUSED[cls]
     for prefix, reason in REFUSED_PREFIXES.items():
@@ -174,12 +199,15 @@ def refusal_reason(cls: str) -> str | None:
 
 @dataclass(frozen=True)
 class Component:
-    """One instance from the JSON's `components` array."""
+    """One instance from the JSON's `components` array. `files` names the files that travel
+    with the export (`scripts/modelica_export.py`): parameter -> `{"path": <bare file name
+    next to the JSON>, "sha256": <hex digest>}` (a weather reader's `filNam`)."""
 
     name: str
     cls: str
     parameters: dict
     role: str | None = None
+    files: dict = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -199,7 +227,8 @@ class Signal:
 
 @dataclass(frozen=True)
 class ModelicaDoc:
-    """The parsed, structurally validated contents of one `noodl-modelica/1` JSON file."""
+    """The parsed, structurally validated contents of one `noodl-modelica/1` JSON file;
+    `source` is the file it was read from (files named in `Component.files` sit next to it)."""
 
     model: str
     mbl_commit: str
@@ -209,6 +238,7 @@ class ModelicaDoc:
     components: tuple[Component, ...]
     connections: tuple[tuple[str, str], ...]
     signals: tuple[Signal, ...]
+    source: Path | None = None
 
 
 def _require_dict(value: Any, where: str) -> dict:
@@ -230,6 +260,26 @@ def _parameters_of(obj: dict, where: str) -> dict:
     return dict(parameters)
 
 
+_SHA256 = re.compile(r"[0-9a-f]{64}")
+
+
+def _files_of(obj: dict, where: str) -> dict:
+    raw = obj.get("files", {})
+    if not isinstance(raw, dict):
+        raise ModelicaImportError(f"modelica: {where}.files must be an object")
+    out = {}
+    for key, entry in raw.items():
+        e = _require_dict(entry, f"{where}.files.{key}")
+        path = _require_str(e.get("path"), f"{where}.files.{key}.path")
+        digest = _require_str(e.get("sha256"), f"{where}.files.{key}.sha256")
+        if not _SHA256.fullmatch(digest):
+            raise ModelicaImportError(
+                f"modelica: {where}.files.{key}.sha256 must be 64 lowercase hex digits"
+            )
+        out[key] = {"path": path, "sha256": digest}
+    return out
+
+
 def _component_from(raw: Any, index: int) -> Component:
     where = f"components[{index}]"
     obj = _require_dict(raw, where)
@@ -239,7 +289,8 @@ def _component_from(raw: Any, index: int) -> Component:
     role = obj.get("role")
     if role is not None and not isinstance(role, str):
         raise ModelicaImportError(f"modelica: {where} ({name}).role must be a string")
-    return Component(name=name, cls=cls, parameters=parameters, role=role)
+    files = _files_of(obj, f"{where} ({name})")
+    return Component(name=name, cls=cls, parameters=parameters, role=role, files=files)
 
 
 def _connection_from(raw: Any, index: int) -> tuple[str, str]:
@@ -318,4 +369,5 @@ def load(path: str | Path) -> ModelicaDoc:
     return ModelicaDoc(
         model=model, mbl_commit=mbl_commit, openmodelica=openmodelica, experiment=experiment,
         medium=medium, components=components, connections=connections, signals=signals,
+        source=Path(path),
     )

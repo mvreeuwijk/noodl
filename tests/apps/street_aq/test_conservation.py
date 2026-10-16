@@ -137,10 +137,10 @@ def _hand_reference(sn, *, emission, background, u_ref=U_REF, theta_w=THETA_W,
     layer = boundary_layer(height.mean(), torch.tensor(u_ref, dtype=DT),
                            torch.tensor(h_abl, dtype=DT), z_ref=30.0, kappa=KAPPA)
     u = canyon_velocity(width, height, torch.tensor(theta_w, dtype=DT) - azimuth,
-                        u_star=layer.u_star, form="bessel_profile", kappa=KAPPA)
+                        u_star=layer.u_star, canyon_wind="bessel_profile", kappa=KAPPA)
     # The sirane preset evaluates the exchange's sigma_w at the canopy height H_R.
     sigma_w = 1.3 * layer.u_star * (1.0 - 0.8 * H_CANOPY / layer.h_abl) * torch.ones_like(height)
-    u_d = exchange_velocity(sigma_w, height, width, form="turbulent_velocity")
+    u_d = exchange_velocity(sigma_w, height, width, roof_exchange="turbulent_velocity")
     flux = u * width * height
     a = torch.zeros(n, n, dtype=DT)
     b = torch.zeros(n, dtype=DT)

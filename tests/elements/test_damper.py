@@ -18,7 +18,7 @@ from __future__ import annotations
 import pytest
 import torch
 
-from noodl.elements import Damper, FixedFlow, PowerLaw
+from noodl.elements import Damper, FixedFlow, PowerLaw, UpstreamDensityPowerLaw
 from noodl.layers.potential import PotentialFlowLayer
 from noodl.topology import Network
 
@@ -106,3 +106,24 @@ def test_damper_in_a_layer_lets_a_fan_exhaust_through_the_easy_direction():
     assert diagnostics["newton_iterations"] < 50
     assert q[0].item() == pytest.approx(0.05, rel=1e-8)
     assert -phi[1].item() == pytest.approx((0.05 / 0.02) ** 2, rel=1e-6)
+
+
+def test_an_upstream_density_damper_is_two_upstream_power_laws():
+    """ContamX's duct dampers (dct_bdq m = 1, dct_bdf m = 0) use the entering air's density."""
+    rho = {"rho": torch.tensor([1.29, 1.13], dtype=torch.float64)}
+    kw = dict(src=[0], tgt=[1], m=1.0, rho_ref=1.2041)
+    d = Damper(torch.tensor(0.017, dtype=torch.float64), torch.tensor(0.5, dtype=torch.float64),
+               torch.tensor(0.0017, dtype=torch.float64), torch.tensor(0.5, dtype=torch.float64),
+               **kw)
+    pos = UpstreamDensityPowerLaw(torch.tensor(0.017, dtype=torch.float64),
+                                  torch.tensor(0.5, dtype=torch.float64), **kw)
+    neg = UpstreamDensityPowerLaw(torch.tensor(0.0017, dtype=torch.float64),
+                                  torch.tensor(0.5, dtype=torch.float64), **kw)
+    dp = torch.tensor([4.0], dtype=torch.float64)
+    torch.testing.assert_close(d.flow(dp, rho), pos.flow(dp, rho))
+    torch.testing.assert_close(d.flow(-dp, rho), neg.flow(-dp, rho))
+
+
+def test_a_damper_given_only_one_endpoint_is_refused():
+    with pytest.raises(ValueError, match="both src and tgt"):
+        Damper(C_POS, N_POS, C_NEG, N_NEG, src=[0])

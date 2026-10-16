@@ -253,31 +253,10 @@ the preset's 0.41, because no choice written with 0.41 is left.
 
 #### Earlier option names
 
-The earlier spellings are still accepted, with a `DeprecationWarning` naming the replacement
-(`noodl.apps.street_aq.closures.LEGACY`):
-
-| Earlier | Current |
-|---|---|
-| `exchange=`, `routing=`, `roof_wind_form=` | `roof_exchange=`, `junction_routing=`, `roof_wind=` |
-| `canyon_wind="soulhac"` / `"exponential"` | `"bessel_profile"` / `"exponential_profile"` |
-| `roof_wind_form="sirane"` / `"macdonald"` | `roof_wind="bessel_canyon_mean"` / `"canopy_log_law"` |
-| `exchange="sirane"` / `"schulte"` | `roof_exchange="turbulent_velocity"` / `"aspect_ratio_scaled"` |
-| `routing="sirane"` / `"mixing"` | `junction_routing="non_crossing_streamlines"` / `"perfect_mixing"` |
-| `direction_averaging="sirane"` / `"gauss"` | `"exact_gaussian"` / `"gauss_hermite"` |
-| `direction_averaging="munich"` | `"rectangle_rule"` with `direction_spread="turbulence_intensity"` |
-| `stability="munich"` | `"monin_obukhov"` |
-| `photostationary_for_streets(closure=...)` | `preset=...` |
-
-The lower-level functions take the same keyword as the option they implement; their earlier
-keywords are accepted with a `DeprecationWarning` too:
-
-| Earlier | Current |
-|---|---|
-| `canyon_velocity(form=...)` | `canyon_velocity(canyon_wind=...)` |
-| `roof_wind(form=...)` | `roof_wind(roof_wind=...)` |
-| `exchange_velocity(form=...)` | `exchange_velocity(roof_exchange=...)` |
-| `routing_matrix(model=...)` | `routing_matrix(junction_routing=...)` |
-| `direction_offsets(scheme=...)` | `direction_offsets(direction_averaging=...)` |
+The earlier keywords (`exchange=`, `routing=`, `roof_wind_form=`, `closure=`, and `form=`,
+`model=`, `scheme=` on the lower-level functions) and the earlier option values (`"soulhac"`,
+`"schulte"`, `"mixing"`, `"munich"`, ...) are no longer accepted: use the option names and
+values of the sections above.
 
 The earlier, model-named functions and constants are kept as aliases of the same objects,
 without a warning:

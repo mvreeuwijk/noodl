@@ -129,12 +129,26 @@ named for the physics it carries:
 | `.boundary_temperature`, ... | `"<layer>.x_boundary"` | driver | the layer's boundary order |
 | `.sources` | `"<layer>.sources"` | driver | full node order |
 | `.capacity` | `"<layer>.capacity"` | driver | the layer's active interior order |
+| `.removal` | `"<layer>.removal"` | driver | the layer's active interior order, `(n_i, K)` |
+| `.transmission` | `"<layer>.transmission"` | driver | edge order of the layer's flow kinds, `(b_flow, K)` |
 | `.storage` (allocation layers) | `"<layer>.s"` | state | full node order |
 | `.requests` (allocation layers) | `"<layer>.requests"` | driver | edge order of the layer's kind |
 
 Every key reports its unit: the layer's own for state and boundary values, and the
 application's `flow_unit`, `source_unit` and `capacity_unit` for flows, sources and
 capacity, so `describe()` shows `thermal.sources` in W and `air.q` in kg/s.
+`"<layer>.removal"` is a per-step first-order removal rate (1/s, active interior order,
+`(n_i, K)`), replacing the layer's construction-time `removal`; it is written by a closure
+that owns sinks. It matters for species layers, where it removes a species from the air (a
+deposition); the layer's `dilution`, if it has one, adds its own rate to it. The driver is
+not carried in the state: a closure that sets it must write it every step.
+`"<layer>.transmission"` is likewise a per-step pass fraction of each flow edge (1 − a
+filter's efficiency), replacing the layer's construction-time `transmission`; a closure whose
+filters depend on the step's flows writes it (the building application's
+`FilterTransmission`, for UVGI filters). It reads the flows of the pass before, so such a model
+iterates each step (`coupling="iterate"`). A closure that needs this declares
+`requires_coupling = "iterate"` and `reads_flows_of = "<potential layer>"`, and `Model`
+refuses it unless that layer is in `iterate_tol` and `iterate_flow_tol`.
 
 The names come from each layer's `quantity`, so every application has them without code
 of its own; the solver's short spellings (`.x`, `.phi`, `.s`, `.q`) work too. Each
@@ -159,6 +173,12 @@ shape and its unit.
 `model.step(state, drivers, dt)` returns the new state; call it in a loop, changing the
 drivers between steps as the inputs change. `model.steady(state, drivers)` returns the
 quasi-steady state instead (an allocation layer, which is a time-stepping rule, has none).
+Each potential solve starts from the state's last potentials; `warm_start=False` starts it
+from the layer's linear initial guess instead, while closures still read those potentials
+(a retry when a warm start does not converge). Non-convergence raises
+`noodl.solvers.ConvergenceError`, under either coupling (with `coupling="iterate"`, when the
+last pass's potential solve did not converge), so a retry can catch it alone and let every
+other error through.
 
 When the layers feed back on each other — airflow carries heat, and temperature drives the
 airflow — build the model with `coupling="iterate"` and an `iterate_tol`, which repeats
@@ -269,7 +289,7 @@ for issue in model.check(state, drivers_typo).issues:
 ```
 
 ```text
-[warning] unknown-layer-key: 'thermal.source' is not a driver key of layer 'thermal' (its driver keys: ['thermal.capacity', 'thermal.sources', 'thermal.x_boundary']); did you mean 'thermal.sources'?
+[warning] unknown-layer-key: 'thermal.source' is not a driver key of layer 'thermal' (its driver keys: ['thermal.capacity', 'thermal.removal', 'thermal.sources', 'thermal.transmission', 'thermal.x_boundary']); did you mean 'thermal.sources'?
 ```
 
 ## Finding what is available

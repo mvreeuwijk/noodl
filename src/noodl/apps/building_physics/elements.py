@@ -6,7 +6,7 @@ import math
 
 import torch
 
-from noodl.elements import PowerLaw
+from noodl.elements import FixedFlow, PowerLaw
 from noodl.topology import Network
 
 RHO_0 = 1.2041
@@ -54,3 +54,9 @@ def orifice_elements_from_edges(net: Network, kind: str, *, rho: float = RHO_0,
     C = net.edge_attr("Cd", kind) * net.edge_attr("area", kind) * math.sqrt(2.0 * rho)
     n = torch.as_tensor(0.5, dtype=C.dtype)
     return PowerLaw(C, n, dp_transition=dp_transition, kind=kind, learnable=learnable)
+
+
+def fan_elements_from_edges(net: Network, kind: str = "fan") -> FixedFlow:
+    """One `FixedFlow` over every edge of `kind`, each edge's mass flow from its `flow`
+    attribute (kg/s), as the `fan` component sets it."""
+    return FixedFlow(net.edge_attr("flow", kind), kind=kind)

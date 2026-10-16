@@ -289,7 +289,6 @@ def build_model(
     background: str = "uniform",
     atmosphere: str = "atmosphere",
     layer_name: str = "street",
-    **deprecated,
 ) -> tuple[Model, State, Drivers]:
     """`(Model, initial state, driver template)` for one street network.
 
@@ -298,10 +297,8 @@ def build_model(
     preset's value and any other value overrides it: `canyon_wind`, `roof_wind`,
     `roof_exchange`, `junction_routing`, `direction_averaging`, `direction_spread`,
     `stability`, `sigma_w_height`, `shape_constant`, `kappa`, the canopy height `h_canopy`
-    and the floors `canyon_wind_min`, `u_d_min`, `sigma_w_min`, `sigma_v_min`. The earlier keywords
-    `exchange`, `routing` and `roof_wind_form`, and the earlier values (`"soulhac"`,
-    `"schulte"`, `"munich"`, ...), are accepted with a `DeprecationWarning` naming the
-    replacement. `StreetFlows` documents what each option computes.
+    and the floors `canyon_wind_min`, `u_d_min`, `sigma_w_min`, `sigma_v_min`.
+    `StreetFlows` documents what each option computes.
 
     With the default `preset="sirane"`, `sigma_w` is floored at 0.30 m/s before the roof
     exchange velocity (`sigma_w_min=0.30`, SIRANE's default); pass `sigma_w_min=0.0` for no
@@ -350,7 +347,7 @@ def build_model(
             f"build_model: meteo must be 'uniform' or 'per_street', got {meteo!r}"
         )
     options = resolve(preset, dict(
-        deprecated, canyon_wind=canyon_wind, roof_wind=roof_wind,
+        canyon_wind=canyon_wind, roof_wind=roof_wind,
         roof_exchange=roof_exchange, junction_routing=junction_routing,
         direction_averaging=direction_averaging, direction_spread=direction_spread,
         stability=stability, shape_constant=shape_constant, kappa=kappa,

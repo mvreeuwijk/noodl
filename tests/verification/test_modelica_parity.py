@@ -20,6 +20,10 @@ JSON by `test_the_algebraic_set_has_no_volumes`): between two or more pressure b
 flows are algebraic in the boundary signals, so noodl's steady solve at each grid time is the
 same problem the DAE solver solves, and parity is to round-off, not to the solver tolerance.
 `OneEffectiveAirLeakageArea` has two volumes and a mass source, so it is a dynamic model.
+`Outside_Cp` (MBL's `Buildings.Fluid.Sources.Examples`) joins them: two wind boundaries and an
+`Outside` driven by a `ReaderTMY3`, each through an orifice; its weather-bus and `pWin` columns
+are compared too (here at the same tolerance, and to round-off in
+`test_weather_and_wind_pressure_parity`).
 
 At an output time exactly on a signal event (`DoorOpenClosed`: the `Step` at 0.5 s;
 `OpenDoorPressure`/`OpenDoorTemperature`: the `TimeTable` knots every 3600 s) OpenModelica's
@@ -46,7 +50,6 @@ import dataclasses
 import json
 import multiprocessing
 import os
-import re
 import time
 from pathlib import Path
 
@@ -55,8 +58,9 @@ import pytest
 import torch
 
 from noodl.apps.building_physics import read_modelica
+from noodl.apps.building_physics.modelica.assemble import experiment_times, weather_columns
 from noodl.apps.building_physics.modelica.run import extrapolate, simulate
-from noodl.apps.building_physics.modelica.schema import ModelicaImportError
+from noodl.apps.building_physics.modelica.schema import load
 
 ROOT = Path(__file__).resolve().parents[2]
 DATA = ROOT / "tests" / "data" / "modelica"
@@ -64,17 +68,51 @@ RECORD = DATA / "parity-algebraic.json"
 
 RTOL, ATOL = 1e-6, 1e-9  # never loosened
 ALGEBRAIC = ("OneWayFlow", "DoorOpenClosed", "OpenDoorPressure", "OpenDoorTemperature",
-             "Orifice", "PowerLaw")
+             "Orifice", "PowerLaw", "Outside_Cp")
 VOLUME_CLASSES = ("Buildings.Fluid.MixingVolumes.MixingVolume",
                   "Buildings.Fluid.Delays.DelayFirstOrder")
 
 
-def _csv(model: str) -> tuple[list[str], np.ndarray]:
-    lines = [ln for ln in (DATA / f"{model}.csv").read_text().splitlines()
+# Reference rows OpenModelica wrote off the output grid, per model: they are not compared.
+# ChimneyShaftNoVolume's shaft flow reverses at 0.192 s, where the column's density jumps
+# (`densitySelection = actual`); DASSL chatters there, and the result holds six rows at
+# 0.19198838931 s (+1.8e-12 s apart, the state at the reversal) in place of the output times
+# 7.2 to 43.2 s. Its export at a DASSL tolerance of 1e-12 (SUPPLEMENT) holds two such rows, in
+# place of 7.2 and 14.4 s, and 21.6 to 43.2 s on the grid: those four rows are compared
+# against it (`_check_parity`), at PARITY_RTOL with no resolution allowance. Only 7.2 and
+# 14.4 s are compared against neither.
+OFF_GRID_ROWS = {"ChimneyShaftNoVolume": 6}
+SUPPLEMENT = {"ChimneyShaftNoVolume": ("ChimneyShaftNoVolume.tol1e-12.csv", 2)}
+
+
+def _read_csv(model: str, name: str, off_grid: int) -> tuple[list[str], np.ndarray]:
+    """A reference CSV's header and rows, without the `off_grid` rows off the output grid."""
+    lines = [ln for ln in (DATA / name).read_text().splitlines()
              if ln and not ln.startswith("#")]
     head = [h.strip('"') for h in lines[0].split(",")]
     data = np.array([[float(x) for x in ln.split(",")] for ln in lines[1:]])
+    if off_grid:
+        grid = experiment_times(load(DATA / f"{model}.json")).numpy()
+        on = np.abs(data[:, :1] - grid[None, :]).min(axis=1) <= 1e-9 * max(1.0, grid[-1])
+        assert int((~on).sum()) == off_grid, (model, name, int((~on).sum()))
+        data = data[on]
     return head, data
+
+
+def _csv(model: str) -> tuple[list[str], np.ndarray]:
+    return _read_csv(model, f"{model}.csv", OFF_GRID_ROWS.get(model, 0))
+
+
+def _supplement(model: str, data: np.ndarray) -> np.ndarray:
+    """The rows of `model`'s SUPPLEMENT reference at output times `data` (its main reference
+    rows) lacks, up to the last of them; empty without one."""
+    if model not in SUPPLEMENT:
+        return np.zeros((0, data.shape[1]))
+    name, off_grid = SUPPLEMENT[model]
+    head, extra = _read_csv(model, name, off_grid)
+    assert head == _csv(model)[0], (model, name)
+    have = np.abs(extra[:, :1] - data[None, :, 0]).min(axis=1) <= 1e-9 * max(1.0, data[-1, 0])
+    return extra[~have & (extra[:, 0] <= data[-1, 0])]
 
 
 def _record(model: str, stats: dict, record: Path = RECORD) -> None:
@@ -99,7 +137,9 @@ def _record(model: str, stats: dict, record: Path = RECORD) -> None:
         except json.JSONDecodeError:
             doc = {}
         doc[model] = stats
-        record.write_text(json.dumps(doc, indent=2, sort_keys=True) + "\n")
+        # LF on every platform, as the record is committed (a Windows text write gives CRLF).
+        record.write_text(json.dumps(doc, indent=2, sort_keys=True) + "\n", encoding="utf-8",
+                          newline="\n")
     finally:
         os.close(fd)
         os.remove(lock)
@@ -107,6 +147,14 @@ def _record(model: str, stats: dict, record: Path = RECORD) -> None:
 
 # Node columns `<zone or boundary>.<var>` -> the `simulate` history holding them.
 _NODE_VARS = {"T": "T", "p": "p", "Xi[1]": "X_w"}
+
+
+def _weather_column(names, h: str, n: int) -> np.ndarray | None:
+    """The first `n` output rows of column `h` when it is a weather-bus output or a wind
+    pressure (`ModelicaNames.weather`), else `None`."""
+    if h not in names.weather:
+        return None
+    return names.weather[h][:n].numpy()
 
 
 def _noodl_columns(model: str, head: list[str], data: np.ndarray,
@@ -123,6 +171,9 @@ def _noodl_columns(model: str, head: list[str], data: np.ndarray,
     q = out["air.q"].numpy()
     cols: dict[str, np.ndarray] = {}
     for h in head[1:]:
+        if (col := _weather_column(names, h, data.shape[0])) is not None:
+            cols[h] = col
+            continue
         inst, var = h.rsplit(".", 1)
         if inst in names.nodes and (var in _NODE_VARS or var.startswith("C[")):
             # A volume's or boundary's T (K), p (Pa), Xi[1] (water, kg/kg) and C[k] (trace
@@ -140,6 +191,16 @@ def _noodl_columns(model: str, head: list[str], data: np.ndarray,
         assert key in names.edges, f"{model}: CSV column {h!r} maps to no noodl variable"
         cols[h] = sum(s * q[:, c] for c, s in names.edges[key])
     return cols
+
+
+def test_the_record_is_written_with_lf_line_ends(tmp_path, monkeypatch):
+    monkeypatch.setenv("NOODL_RECORD_PARITY", "1")
+    record = tmp_path / "parity-dynamic.json"
+    _record("ModelA", {"seconds": 1.0}, record)
+    _record("ModelB", {"seconds": 2.0}, record)
+    raw = record.read_bytes()
+    assert b"\r\n" not in raw and raw.count(b"\n") > 4
+    assert json.loads(raw) == {"ModelA": {"seconds": 1.0}, "ModelB": {"seconds": 2.0}}
 
 
 def test_the_algebraic_set_has_no_volumes():
@@ -163,7 +224,8 @@ def test_parity_on_the_algebraic_models(model):
         rel = float((err[nonzero] / np.abs(omc[nonzero])).max()) if nonzero.any() else 0.0
         stats[h] = {"max_rel": rel, "max_abs": float(err.max()),
                     "max_err_over_tol": float((err / tol).max()), "rows": int(omc.size)}
-        print(f"{model} {h}: max rel {rel:.3e}, max abs {err.max():.3e} kg/s "
+        unit = " kg/s" if h.endswith("_flow") else ""
+        print(f"{model} {h}: max rel {rel:.3e}, max abs {err.max():.3e}{unit} "
               f"({omc.size} rows)")
         bad = np.nonzero(err > tol)[0]
         if bad.size:
@@ -226,26 +288,90 @@ def test_one_way_flow_against_the_embedded_contam_table():
     assert total == 13 * 8
 
 
-REFUSED = {
-    # Wind pressure and weather data (Outside_CpLowRise, ReaderTMY3).
-    "PressurizationData": {"east", "weaDat", "west"},
-    # A feedback controller and its temperature sensor, besides the wind boundaries.
-    "TrickleVent": {"con", "east", "temSen", "weaDat", "west"},
-    # Two orifices in one column chain (no junction node), plus the controller.
-    "ChimneyShaftNoVolume": {"con", "oriChiBot", "oriChiTop", "temSen"},
-    # A mass- and heat-storing MediumColumnDynamic, plus the controller.
-    "ChimneyShaftWithVolume": {"con", "sha", "temSen"},
+# Models `read_modelica` imports but the dynamic parity set refuses, each with the reason.
+DEFERRED = {
+    # A 62.5 m3 room between two Outside_CpLowRise walls over 30 days of San Francisco
+    # weather. Its flushing time (about 10 s) is far below the steps (50-3000 s). Where the flow
+    # fades (a calm, or the wind parallel to both walls) it falls by orders of magnitude within
+    # one step, and the room freezes at the state it held when its flushing stopped. The run
+    # sees the flows only at the steps' ends, so it freezes the room at the wrong state: a
+    # first-order error that stays through the calm. Measured over every row at (1, 2)
+    # substeps: T 2.9e-3 (0.82 K at 25920 s) and Xi 3.4e-2 (93312 s) relative; flows within
+    # 1e-6 beyond the resolution, p 2e-11. Refining the grid where the boundary pressures
+    # fade reduced it to T 1.6e-4 and Xi 2.0e-3 (experiment): that, with a transport step
+    # treating the flows' change within a step implicitly, is the follow-up. Its weather and
+    # wind pressure are compared (WEATHER).
+    "PressurizationData": "unresolved calm-onset freeze (T 2.9e-3, Xi 3.4e-2 at (1, 2) "
+                          "substeps over every row)",
+    # The same room between two trickle vents, held at 293.15 K by a P controller (k gain =
+    # 15000 W/K on 75 kJ/K: a 5 s loop) against 600 s output intervals. The room tracks the
+    # controller's quasi-steady balance against the outside air's heat, `q cp (T_out - T)`,
+    # 5 s behind it. Within a step the transport sees the flows at its two ends only, so the
+    # room settles on the balance at the end flows and misses that lag: an error of 5 s times
+    # the rate of the deviation, the same at every step length (measured over the first 7200
+    # s: room T -4.3e-5 K at 5400 s at (1, 2) and at (2, 4) substeps alike; con.y, five times
+    # the deviation, 2.2e-4, 1.1e-2 relative). The follow-up is PressurizationData's: a
+    # transport step following the flows' change within a step. Over every row
+    # the run at 1 substep stops at 959400-960000 s (day 11), its airflow solve at a
+    # 0.142 kg/s residual (not diagnosed).
+    "TrickleVent": "the controlled room misses its 5 s lag behind the flows within a step "
+                   "(con.y 1.1e-2 relative over the first 7200 s, at (1, 2) and (2, 4))",
 }
 
 
-@pytest.mark.parametrize("model", sorted(REFUSED))
-def test_refused_models_name_their_offending_instances(model):
-    with pytest.raises(ModelicaImportError) as exc:
-        read_modelica(DATA / f"{model}.json")
-    message = str(exc.value)
-    named = set(re.findall(r"^\s+- (\S+) \(", message, flags=re.MULTILINE))
-    assert named == REFUSED[model], message
-    assert f"refused {len(REFUSED[model])} item" in message
+def test_deferred_models_import():
+    """Each deferred model imports, with every weather and wind-pressure column of its
+    reference among `names.weather` (those are compared, WEATHER)."""
+    for model in DEFERRED:
+        _, _, _, names = read_modelica(DATA / f"{model}.json", return_names=True)
+        head, _ = _csv(model)
+        columns = {h for h in head[1:] if ".weaBus." in h or h.endswith(".pWin")}
+        assert columns and columns <= set(names.weather), (model, columns)
+
+
+
+
+# ------------------------------------------------------- weather and wind pressure
+# The weather a model's Outside boundaries read and their wind pressure are algebraic in time
+# (`assemble.weather_columns`): every row of OpenModelica's `<reader>.weaBus.<output>` and
+# `<boundary>.pWin` columns is compared. They are the same arithmetic as MBL's, so they are held
+# to round-off, WEATHER_RTOL relative with no absolute floor (an exact zero, a calm hour's wind
+# speed and wind pressure, must come out exactly zero), well inside the algebraic tolerance.
+# WEATHER_ONLY are MBL's Fluid.Sources examples, boundaries with no flow element (which
+# `read_modelica` refuses).
+WEATHER_RTOL = 1e-12
+WEATHER_ONLY = ("Outside_CpData", "Outside_CpData_Angles", "Outside_CpData_Directions",
+                "Outside_CpLowRise")
+WEATHER = (*WEATHER_ONLY, "Outside_Cp", "PressurizationData", "TrickleVent")
+
+
+@pytest.mark.parametrize("model", WEATHER)
+def test_weather_and_wind_pressure_parity(model):
+    head, data = _csv(model)
+    got = weather_columns(load(DATA / f"{model}.json"),
+                          torch.tensor(data[:, 0], dtype=torch.float64))
+    columns = [h for h in head[1:] if ".weaBus." in h or h.endswith(".pWin")]
+    assert columns, f"{model}: no weather or wind-pressure column"
+    if model in WEATHER_ONLY:
+        assert columns == head[1:]
+    stats, failures = {}, []
+    for h in columns:
+        assert h in got, f"{model}: CSV column {h!r} maps to no noodl variable"
+        omc, val = data[:, head.index(h)], got[h].numpy()
+        err = np.abs(val - omc)
+        tol = WEATHER_RTOL * np.abs(omc)
+        nonzero = omc != 0.0
+        rel = float((err[nonzero] / np.abs(omc[nonzero])).max()) if nonzero.any() else 0.0
+        stats[h] = {"max_rel": rel, "max_abs": float(err.max()), "rows": int(omc.size)}
+        print(f"{model} {h}: max rel {rel:.3e}, max abs {err.max():.3e} ({omc.size} rows)")
+        bad = np.nonzero(err > tol)[0]
+        if bad.size:
+            k = int(bad[0])
+            failures.append(f"{h}: {bad.size} rows, first t = {data[k, 0]!r}: noodl "
+                            f"{val[k]!r} vs omc {omc[k]!r}")
+    _record(f"{model}:weather", stats)
+    assert not failures, (f"{model} outside |d| <= {WEATHER_RTOL:g} |omc|:\n"
+                          + "\n".join(failures))
 
 
 # ===================================================================== dynamic models
@@ -298,20 +424,22 @@ def _dynamic_stats(head: list[str], data: np.ndarray, cols: dict[str, np.ndarray
 DYNAMIC = ("OpenDoorBuoyancyDynamic", "OpenDoorBuoyancyPressureDynamic", "ThreeRoomsContam",
            "ThreeRoomsContamDiscretizedDoor", "CO2TransportStep", "ClosedDoors",
            "NaturalVentilation", "OneOpenDoor", "OneRoom", "ReverseBuoyancy",
-           "ReverseBuoyancy3Zones", "ZonalFlow", "OneEffectiveAirLeakageArea")
+           "ReverseBuoyancy3Zones", "ZonalFlow", "OneEffectiveAirLeakageArea",
+           "ChimneyShaftWithVolume", "ChimneyShaftNoVolume")
 # The models whose dynamics MBL's volume mass storage dominates (a closed heated building, a
 # start far from the airflow's balance, a source into sealed volumes): besides parity, each
 # asserts that noodl reproduces the storage mechanism (`_check_storage_mechanism`).
 STORAGE_DOMINATED = ("ClosedDoors", "OneOpenDoor", "ReverseBuoyancy",
                      "OneEffectiveAirLeakageArea")
-UNITS = {"flow": "kg/s", "T": "K", "p": "Pa", "Xi": "kg/kg", "C": "kg/kg"}
+UNITS = {"flow": "kg/s", "T": "K", "p": "Pa", "Xi": "kg/kg", "C": "kg/kg", "pWin": "Pa",
+         "TDryBul": "K", "pAtm": "Pa", "relHum": "1", "winSpe": "m/s", "y": "-"}
 
 
-def test_every_fixture_is_parity_checked_or_refused():
+def test_every_fixture_is_parity_checked_or_deferred():
     # "parity-algebraic"/"parity-dynamic" are the committed recorded-error files this
     # module writes (see RECORD/RECORD_DYNAMIC, NOODL_RECORD_PARITY), not model fixtures.
     fixtures = {p.stem for p in DATA.glob("*.json")} - {"parity-algebraic", "parity-dynamic"}
-    sets = (set(ALGEBRAIC), set(DYNAMIC), set(REFUSED))
+    sets = (set(ALGEBRAIC), set(DYNAMIC), set(WEATHER_ONLY), set(DEFERRED))
     assert set().union(*sets) == fixtures
     assert sum(len(s) for s in sets) == len(fixtures)  # disjoint
     assert set(PARITY_ROWS) == set(DYNAMIC) == set(REFERENCE_RESOLUTION) == set(WINDOW_COST)
@@ -370,15 +498,27 @@ REFERENCE_RESOLUTION: dict[str, dict[str, float]] = {
     "ThreeRoomsContamDiscretizedDoor": {"C": 0.0, "T": 2.3e-13, "Xi": 1.1e-13,
                                         "flow": 2.9e-10, "p": 1.2e-10},
     "ZonalFlow": {"T": 3.2e-10, "Xi": 1.6e-13, "flow": 0.0, "p": 0.0},
+    "ChimneyShaftWithVolume": {"T": 1.4e-09, "Xi": 3.3e-14, "flow": 6.8e-10, "p": 8.6e-08,
+                               "y": 1.2e-09},
+    # Over the output-grid rows both exports hold (OFF_GRID_ROWS).
+    "ChimneyShaftNoVolume": {"T": 2.7e-10, "flow": 2.5e-10, "p": 3.2e-08, "y": 1.4e-09},
 }
 # The substeps per output interval of the two runs `run.extrapolate` combines: (1, 2), or
 # (2, 4) where one step per output interval is too long for the extrapolation to be
 # asymptotic (measured, worst flow error at (1, 2) and (2, 4) substeps): ClosedDoors'
 # 14.4 s steps across its crack flows switching on (3.5e-10 and 1.2e-12 kg/s at 993.6 s,
 # against a 1.3e-11 kg/s resolution), ReverseBuoyancy's 7.2 s steps across its orifices'
-# reversal at 18 s (8.4e-8 and 1.6e-8 kg/s at 21.6 s).
+# reversal at 18 s (8.4e-8 and 1.6e-8 kg/s at 21.6 s), ChimneyShaftWithVolume's 7.2 s steps
+# across the end of its injection (the source's ramp to zero over 600-601 s), which its room
+# controller answers within a few seconds (con.y 3.5e-7 and 2.5e-8 at 604.8 s, where it is
+# 0.034; the extrapolation's own correction at (1, 2) was 4e-8, an eighth of the error).
+# ChimneyShaftNoVolume likewise: con.y 8.2e-6 and 1.3e-7 relative at 604.8 s beyond the
+# resolution, its bottom orifice 3.4e-6 and 2.4e-7 at 2412 s, after the extraction stops
+# (the extrapolation's own correction at (1, 2) 2.1e-5 and 6.9e-6: not asymptotic).
 PARITY_SUBSTEPS: dict[str, tuple[int, int]] = {"ClosedDoors": (2, 4),
-                                               "ReverseBuoyancy": (2, 4)}
+                                               "ReverseBuoyancy": (2, 4),
+                                               "ChimneyShaftWithVolume": (2, 4),
+                                               "ChimneyShaftNoVolume": (2, 4)}
 # Bounds above PARITY_RTOL (beyond the resolution), each with its demonstrated cause: none.
 PARITY_STORAGE: dict[str, dict[str, float]] = {}
 # The default run compares the first rows of every model (`-m slow` compares every row),
@@ -386,20 +526,34 @@ PARITY_STORAGE: dict[str, dict[str, float]] = {}
 # first output intervals, most of whose cost is the graded start (`run.GRADING_WINDOW`);
 # where it is in balance, a stretch past its smooth start. ReverseBuoyancy's window ends
 # before its orifices reverse (18 s), the rows that need (2, 4) substeps (PARITY_SUBSTEPS),
-# and runs at (1, 2) (DEFAULT_SUBSTEPS), a third of the cost.
+# and runs at (1, 2) (DEFAULT_SUBSTEPS), a third of the cost; so does ChimneyShaftWithVolume's,
+# whose window (its room controller's start transient, through its limits within the first
+# second) ends long before its injection stops at 601 s. ChimneyShaftNoVolume's window (its
+# shaft flow reversing at 0.192 s; the supplement's rows 21.6 to 43.2 s and the reference's
+# first rows on the grid, 50.4 and 57.6 s) runs at (2, 4): at (1, 2) its con.y is 8.1e-6
+# from the supplement at 28.8 s (8.3e-7 at (2, 4)), the relaxation after the reversal not
+# yet asymptotic.
 PARITY_ROWS = {"ClosedDoors": 3, "CO2TransportStep": 2, "NaturalVentilation": 3,
                "OneEffectiveAirLeakageArea": 8, "OneOpenDoor": 4, "OneRoom": 21,
                "OpenDoorBuoyancyDynamic": 2, "OpenDoorBuoyancyPressureDynamic": 2,
                "ReverseBuoyancy": 2, "ReverseBuoyancy3Zones": 2, "ThreeRoomsContam": 3,
-               "ThreeRoomsContamDiscretizedDoor": 3, "ZonalFlow": 11}
-DEFAULT_SUBSTEPS: dict[str, tuple[int, int]] = {"ReverseBuoyancy": (1, 2)}
+               "ThreeRoomsContamDiscretizedDoor": 3, "ZonalFlow": 11,
+               "ChimneyShaftWithVolume": 3, "ChimneyShaftNoVolume": 3}
+DEFAULT_SUBSTEPS: dict[str, tuple[int, int]] = {"ReverseBuoyancy": (1, 2),
+                                                "ChimneyShaftWithVolume": (1, 2)}
 
 
 def _columns_of(out: dict, names, head: list[str]) -> dict[str, np.ndarray]:
     q = out["air.q"].numpy()
     cols: dict[str, np.ndarray] = {}
     for h in head[1:]:
+        if (col := _weather_column(names, h, q.shape[0])) is not None:
+            cols[h] = col
+            continue
         inst, var = h.rsplit(".", 1)
+        if var == "y" and inst in names.controls:
+            cols[h] = out["controls.outputs"][:, names.controls[inst]].numpy()
+            continue
         if inst in names.nodes and (var in _NODE_VARS or var.startswith("C[")):
             i = names.nodes[inst]
             cols[h] = (out["C"][:, i, int(var[2:-1]) - 1].numpy() if var.startswith("C[")
@@ -437,9 +591,12 @@ def _run(model: str, rows: int | None, r: int, threads: int | None = None):
     start = time.perf_counter()
     net, state, drivers, names = read_modelica(DATA / f"{model}.json", return_names=True,
                                                substeps=r)
-    times = names.times[:data.shape[0]]
-    assert torch.allclose(times, torch.tensor(data[:, 0], dtype=torch.float64),
-                          rtol=0.0, atol=1e-9)
+    # The output-grid times of the reference rows (`_csv`) and of its supplement.
+    times = torch.tensor(np.sort(np.concatenate([data[:, 0], _supplement(model, data)[:, 0]])),
+                         dtype=torch.float64)
+    gap = (times.unsqueeze(1) - names.times.unsqueeze(0)).abs().min(dim=1).values
+    assert bool((gap <= 1e-9 * max(1.0, float(names.times[-1]))).all())
+    times = names.times[(times.unsqueeze(1) - names.times.unsqueeze(0)).abs().argmin(dim=1)]
     out = simulate(net, state, drivers, times, scheme="midpoint")
     return out, names, time.perf_counter() - start
 
@@ -450,13 +607,26 @@ def _run_in_worker(model: str, rows: int | None, r: int, threads: int) -> tuple:
     Windows (0xc000070a in `rebuild_storage_filename`)."""
     out, names, seconds = _run(model, rows, r, threads)
     return ({k: v.numpy() for k, v in out.items()},
-            dataclasses.replace(names, times=names.times.numpy()), seconds)
+            dataclasses.replace(names, times=names.times.numpy(),
+                                weather={k: v.numpy() for k, v in names.weather.items()}),
+            seconds)
 
 
 def _from_worker(run: tuple) -> tuple:
     out, names, seconds = run
     return ({k: torch.from_numpy(v) for k, v in out.items()},
-            dataclasses.replace(names, times=torch.from_numpy(names.times)), seconds)
+            dataclasses.replace(names, times=torch.from_numpy(names.times),
+                                weather={k: torch.from_numpy(v)
+                                         for k, v in names.weather.items()}),
+            seconds)
+
+
+def _reference_tolerance(model: str) -> float:
+    """The DASSL tolerance the reference CSV was simulated at (its `# tolerance:` line)."""
+    for line in (DATA / f"{model}.csv").read_text().splitlines():
+        if line.startswith("# tolerance:"):
+            return float(line.split(":", 1)[1])
+    raise AssertionError(f"{model}.csv has no '# tolerance:' header line")
 
 
 def _check_parity(model: str, rows: int | None, substeps: tuple[int, int] | None = None,
@@ -475,7 +645,37 @@ def _check_parity(model: str, rows: int | None, substeps: tuple[int, int] | None
     cols = [_columns_of(out, nm, head) for out, nm, _ in runs]
     runs = [out for out, _, _ in runs]
     best = {h: cols[1][h] + (cols[1][h] - cols[0][h]) / 3.0 for h in head[1:]}  # extrapolate
+    # The runs hold the reference's rows and its supplement's (`_run`), in time order.
+    extra = _supplement(model, data)
+    times = runs[1]["time"].numpy()
+    main = [int(np.argmin(np.abs(times - t))) for t in data[:, 0]]
+    sup = [int(np.argmin(np.abs(times - t))) for t in extra[:, 0]]
+    runs = [{k: v[main] for k, v in out.items()} for out in runs]
+    cols = [{h: c[h][main] for h in head[1:]} for c in cols]
+    best_sup = {h: best[h][sup] for h in head[1:]}
+    best = {h: best[h][main] for h in head[1:]}
     stats = _dynamic_stats(head, data, best, REFERENCE_RESOLUTION[model])
+    supplement: dict[str, dict] = {}
+    sup_fail: list[str] = []
+    if extra.shape[0]:
+        # The supplement's rows (SUPPLEMENT), with no resolution allowance and the floors of
+        # the whole experiment (`_dynamic_stats` on every row of the reference, as a full run
+        # has them; a window's own rows would make them those of its quiet first minute).
+        _, full = _csv(model)
+        whole = _dynamic_stats(head, full, {h: full[:, j] for j, h in enumerate(head) if j})
+        floors = {h: whole[h]["floor"] for h in head[1:]}
+        for h in head[1:]:
+            j = head.index(h)
+            err = np.abs(best_sup[h] - extra[:, j])
+            rel = err / np.maximum(np.abs(extra[:, j]), floors[h])
+            k = int(np.argmax(rel))
+            print(f"{model} {h} (supplement, {extra.shape[0]} rows): max rel {rel[k]:.3e} at "
+                  f"t = {extra[k, 0]:g}")
+            if not rel[k] <= PARITY_RTOL:
+                sup_fail.append(f"{h} (supplement): max rel {rel[k]:.3e} at t = "
+                                f"{extra[k, 0]:g} > {PARITY_RTOL:.1e}")
+            supplement[h] = {"max_rel": float(rel[k]), "t_max_rel": float(extra[k, 0]),
+                             "rows": int(extra.shape[0])}
     own = _dynamic_stats(head, np.column_stack([data[:, 0]] + [best[h] for h in head[1:]]),
                          cols[1])
     worst, own_worst = _worst(stats), _worst(own)
@@ -496,12 +696,15 @@ def _check_parity(model: str, rows: int | None, substeps: tuple[int, int] | None
                         "floor_frac": FLOOR_FRAC, "mechanism": mechanism,
                         "reference_resolution": REFERENCE_RESOLUTION[model],
                         "substeps": list(substeps),
-                        "reference_tolerance": 1e-13, "seconds": seconds}, RECORD_DYNAMIC)
+                        "reference_tolerance": _reference_tolerance(model),
+                        "seconds": seconds,
+                        **({"supplement": supplement} if supplement else {})},
+                RECORD_DYNAMIC)
     bound = {kind: PARITY_STORAGE.get(model, {}).get(kind, PARITY_RTOL) for kind in worst}
     failures = [f"{kind}: max rel beyond the reference's resolution {w['beyond']:.3e} "
                 f"({w['beyond_column']} at t = {w['beyond_t']:g}; max rel {w['max_rel']:.3e}) > "
                 f"{bound[kind]:.1e}" for kind, w in worst.items()
-                if not w["beyond"] <= bound[kind]]
+                if not w["beyond"] <= bound[kind]] + sup_fail
     return [f"{model} outside its tolerance:", *failures] if failures else []
 
 
@@ -512,7 +715,8 @@ WINDOW_COST = {"ClosedDoors": 25, "CO2TransportStep": 43, "NaturalVentilation": 
                "OneEffectiveAirLeakageArea": 1, "OneOpenDoor": 12, "OneRoom": 2,
                "OpenDoorBuoyancyDynamic": 46, "OpenDoorBuoyancyPressureDynamic": 44,
                "ReverseBuoyancy": 60, "ReverseBuoyancy3Zones": 56, "ThreeRoomsContam": 48,
-               "ThreeRoomsContamDiscretizedDoor": 46, "ZonalFlow": 3}
+               "ThreeRoomsContamDiscretizedDoor": 46, "ZonalFlow": 3,
+               "ChimneyShaftWithVolume": 30, "ChimneyShaftNoVolume": 40}
 
 
 def _default_substeps(model: str) -> tuple[int, int]:
@@ -525,24 +729,190 @@ def default_windows() -> dict[str, list[str]]:
     per model) is made in its own worker process (most of each window's time is its graded
     start, `run` module), the longest first (WINDOW_COST), so that the default run takes
     about as long as its slowest run; the comparison is made here. `NOODL_PARITY_WORKERS`
-    sets the number of worker processes (default: the CPU count)."""
+    sets the number of worker processes (default: the CPU count). A run that brings no
+    result (its worker died, or it stalled past `_stall_limit`) is reported by its model's
+    test as a `ParityWorkerError`, not as a parity failure."""
     tasks = sorted(((m, r) for m in PARITY_ROWS for r in _default_substeps(m)),
                    key=lambda task: -task[1] * WINDOW_COST[task[0]])
     cpus = os.cpu_count() or 1
     workers = max(1, min(len(tasks), int(os.environ.get("NOODL_PARITY_WORKERS", cpus))))
     threads = max(1, cpus // workers)
     context = multiprocessing.get_context("spawn")
-    with concurrent.futures.ProcessPoolExecutor(workers, mp_context=context) as pool:
-        futures = {(m, r): pool.submit(_run_in_worker, m, PARITY_ROWS[m], r, threads)
-                   for m, r in tasks}
-        results = {}
-        for m in sorted(PARITY_ROWS):
+    with context.Manager() as manager:
+        started = manager.dict()
+        pool = concurrent.futures.ProcessPoolExecutor(workers, mp_context=context)
+        try:
+            futures = {(m, r): pool.submit(_started_in_worker, (m, r), started, _run_in_worker,
+                                           m, PARITY_ROWS[m], r, threads)
+                       for m, r in tasks}
+            runs = _gather(pool, futures, {task: _stall_limit(task[0]) for task in tasks},
+                           started)
+        finally:
+            pool.shutdown(wait=True, cancel_futures=True)
+    results: dict[str, list[str] | ParityWorkerError] = {}
+    for m in sorted(PARITY_ROWS):
+        got = [runs[m, r] for r in _default_substeps(m)]
+        lost = [run for run in got if isinstance(run, ParityWorkerError)]
+        if lost:
+            results[m] = lost[0]
+            continue
+        try:
+            failed = [run for run in got if isinstance(run, BaseException)]
+            if failed:
+                raise failed[0]
+            results[m] = _check_parity(m, PARITY_ROWS[m], _default_substeps(m),
+                                       [_from_worker(run) for run in got])
+        except Exception as exc:  # reported by the model's own test
+            results[m] = [f"{m}: {type(exc).__name__}: {exc}"]
+    return results
+
+
+class ParityWorkerError(RuntimeError):
+    """A parity run brought no result because its worker process died or stalled: a failure
+    of the test harness (memory, a crash, a hang), not a parity result."""
+
+
+# How often `_gather` looks at the pool (s), and the stall limit of a run: STALL_FACTOR times
+# the model's recorded full-run time (`parity-dynamic.json`, "seconds"; a default window is a
+# few rows of that run), at least STALL_FLOOR. NOODL_PARITY_TIMEOUT (s) overrides it.
+GATHER_POLL = 5.0
+STALL_FACTOR, STALL_FLOOR = 3.0, 900.0
+
+
+def _stall_limit(model: str) -> float:
+    """The time (s) a run of `model` may take in the default run's pool before it counts as
+    stalled (see STALL_FACTOR)."""
+    if os.environ.get("NOODL_PARITY_TIMEOUT"):
+        return float(os.environ["NOODL_PARITY_TIMEOUT"])
+    recorded = json.loads(RECORD_DYNAMIC.read_text()).get(model, {}).get("seconds", 0.0)
+    return max(STALL_FLOOR, STALL_FACTOR * float(recorded))
+
+
+def _started_in_worker(task, started, run, *args):
+    """`run(*args)` in a worker process, recording in `started[task]` (a manager dict shared
+    with the parent) the wall-clock time at which a worker really began it."""
+    started[task] = time.time()
+    return run(*args)
+
+
+def _gather(pool: concurrent.futures.ProcessPoolExecutor, futures: dict, limits: dict,
+            started, poll: float = GATHER_POLL) -> dict:
+    """Each task's result, the exception its run raised, or a `ParityWorkerError` when no
+    result came: a worker died (the pool broke), or a run went past its stall limit
+    (`limits[task]`, s, counted from `started[task]`, the wall-clock time its worker began
+    it, `_started_in_worker`). Not from `future.running()`: the pool marks a task running
+    once it enters the queue feeding the workers, before any worker has taken it. A stall
+    stops the pool, killing its workers, and every unfinished task is reported."""
+    out: dict = {}
+    pending = dict(futures)
+    while pending:
+        done, _ = concurrent.futures.wait(pending.values(), timeout=poll,
+                                          return_when=concurrent.futures.FIRST_COMPLETED)
+        for task in [t for t, f in pending.items() if f in done]:
+            future = pending.pop(task)
             try:
-                runs = [_from_worker(futures[m, r].result()) for r in _default_substeps(m)]
-                results[m] = _check_parity(m, PARITY_ROWS[m], _default_substeps(m), runs)
-            except Exception as exc:  # reported by the model's own test
-                results[m] = [f"{m}: {type(exc).__name__}: {exc}"]
-        return results
+                out[task] = future.result()
+            except concurrent.futures.process.BrokenProcessPool as exc:
+                out[task] = ParityWorkerError(
+                    f"{task[0]} at {task[1]} substeps: no result, the parity worker pool "
+                    f"broke ({exc}): a worker process died (out of memory or a crash). This "
+                    f"is not a parity failure; NOODL_PARITY_WORKERS lowers the worker count")
+            except Exception as exc:  # the run's own error: the model's failure
+                out[task] = exc
+        now = time.time()
+        begun = dict(started)
+        stalled = [t for t in pending if t in begun and now - begun[t] > limits[t]]
+        if stalled:
+            _stop(pool)
+            names = ", ".join(f"{m} at {r} substeps (limit {limits[m, r]:.0f} s)"
+                              for m, r in stalled)
+            for task in pending:
+                out[task] = ParityWorkerError(
+                    f"{task[0]} at {task[1]} substeps: no result, the parity run of {names} "
+                    f"stalled and the pool was stopped. This is not a parity failure; "
+                    f"NOODL_PARITY_TIMEOUT (s) sets the limit")
+            break
+    return out
+
+
+def _stop(pool: concurrent.futures.ProcessPoolExecutor) -> None:
+    """Cancel the pool's queued tasks and kill its workers (a stalled run never returns).
+    The workers are listed before the shutdown, which drops the pool's reference to them."""
+    processes = list((getattr(pool, "_processes", None) or {}).values())
+    pool.shutdown(wait=False, cancel_futures=True)
+    for process in processes:
+        process.kill()
+
+
+def _sleep_in_worker(seconds: float) -> float:
+    time.sleep(seconds)
+    return seconds
+
+
+def _die_in_worker(code: int) -> None:
+    os._exit(code)
+
+
+def _submit(pool, started, tasks: dict) -> dict:
+    """`{task: (function, *args)}` submitted through `_started_in_worker`."""
+    return {task: pool.submit(_started_in_worker, task, started, *call)
+            for task, call in tasks.items()}
+
+
+def test_a_dead_worker_is_reported_as_a_harness_failure():
+    pool = concurrent.futures.ProcessPoolExecutor(
+        1, mp_context=multiprocessing.get_context("spawn"))
+    try:
+        futures = _submit(pool, {}, {("ModelA", 1): (_die_in_worker, 3)})
+        out = _gather(pool, futures, {("ModelA", 1): 600.0}, {}, poll=0.2)
+    finally:
+        pool.shutdown(wait=True, cancel_futures=True)
+    error = out["ModelA", 1]
+    assert isinstance(error, ParityWorkerError)
+    assert "ModelA at 1 substeps" in str(error) and "worker process died" in str(error)
+    assert "not a parity failure" in str(error)
+
+
+def test_a_stalled_run_is_named_and_its_pool_stopped():
+    context = multiprocessing.get_context("spawn")
+    pool = concurrent.futures.ProcessPoolExecutor(1, mp_context=context)
+    start = time.monotonic()
+    try:
+        with context.Manager() as manager:
+            started = manager.dict()
+            futures = _submit(pool, started, {("Slow", 2): (_sleep_in_worker, 600.0),
+                                              ("Queued", 1): (_sleep_in_worker, 0.0)})
+            workers = list(pool._processes.values())
+            out = _gather(pool, futures, {("Slow", 2): 1.0, ("Queued", 1): 600.0}, started,
+                          poll=0.2)
+    finally:
+        pool.shutdown(wait=True, cancel_futures=True)
+    assert workers
+    for worker in workers:                       # the stalled run's worker was killed
+        worker.join(timeout=30.0)
+        assert not worker.is_alive()
+    assert time.monotonic() - start < 120.0
+    for task in futures:
+        assert isinstance(out[task], ParityWorkerError)
+        assert "Slow at 2 substeps (limit 1 s) stalled" in str(out[task])
+
+
+def test_a_queued_run_is_timed_from_when_a_worker_starts_it():
+    """One worker: the second run waits in the queue (which the pool already counts as
+    running) while the first takes 3 s. Its 1 s limit starts when the worker takes it, so
+    it finishes in time."""
+    context = multiprocessing.get_context("spawn")
+    pool = concurrent.futures.ProcessPoolExecutor(1, mp_context=context)
+    try:
+        with context.Manager() as manager:
+            started = manager.dict()
+            futures = _submit(pool, started, {("First", 1): (_sleep_in_worker, 3.0),
+                                              ("Queued", 1): (_sleep_in_worker, 0.0)})
+            out = _gather(pool, futures, {("First", 1): 600.0, ("Queued", 1): 1.0},
+                          started, poll=0.2)
+    finally:
+        pool.shutdown(wait=True, cancel_futures=True)
+    assert out == {("First", 1): 3.0, ("Queued", 1): 0.0}
 
 
 @pytest.mark.parametrize("model", sorted(PARITY_ROWS))
@@ -550,6 +920,8 @@ def test_dynamic_parity_at_the_reference_precision(model, default_windows):
     """The first `PARITY_ROWS[model]` rows of every dynamic model within PARITY_RTOL
     (see the block comment above PARITY_RTOL)."""
     failures = default_windows[model]
+    if isinstance(failures, ParityWorkerError):
+        raise failures
     assert not failures, "\n".join(failures)
 
 
