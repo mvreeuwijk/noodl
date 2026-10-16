@@ -41,6 +41,7 @@ from typing import Literal, NamedTuple
 
 import torch
 
+from noodl.layers._topology import TopologyGuard
 from noodl.operators.advection import AdvectionOperator
 from noodl.solvers.implicit import TransposeOperator as _TransposeView
 from noodl.solvers.select import _SPARSE_DIRECT_MAX_BATCH
@@ -387,7 +388,7 @@ class _AffineSystemOperator:
         return None
 
 
-class TransportLayer:
+class TransportLayer(TopologyGuard):
     """dx/dt = M x + N x_b + sources / capacity on this layer's ACTIVE interior nodes.
 
     The interior is the non-boundary nodes an edge of ``flow_kind`` (or of
@@ -538,6 +539,7 @@ class TransportLayer:
             )
         self.linear_solver = linear_solver
         self.net = net
+        self._record_topology(net)
         self.name = name
         self.flow_kind = flow_kind
         # One or several advecting edge kinds. `flow_kinds` is the tuple form every internal
@@ -1127,6 +1129,7 @@ class TransportLayer:
         """`(..., n_i)`: the signed net inflow of the layer's flow edges into each ACTIVE
         interior node (`sum` over edges INTO the node of `q` minus `sum` over edges OUT of
         it; `q` positive from an edge's source to its target), un-weighted by the carrier."""
+        self._require_current_topology()
         full = torch.zeros(q.shape[:-1] + (self.net.n,), dtype=q.dtype, device=q.device)
         full = full.index_add(-1, self._flow_tgt, q).index_add(-1, self._flow_src, -q)
         return full.index_select(-1, self.interior_idx)
@@ -1174,6 +1177,7 @@ class TransportLayer:
         removal rate or transmission (the `"<layer>.removal"` and `"<layer>.transmission"`
         drivers) is not part of it, because `step`, `steady`, `rate` and the other entry
         points that take `removal=` and `transmission=` apply those themselves."""
+        self._require_current_topology()
         net, K, n_i, n_b = self.net, self.n_species, self.n_i, self.n_b
         dtype = q.dtype
         # `cap_t` names the resolved per-step capacity, as in `rate`, `step`, `steady`,
@@ -1303,6 +1307,7 @@ class TransportLayer:
         `_removal_arg`. `transmission` (keyword-only) is a per-call transmission replacing
         the construction-time one; see `_transmission_arg`.
         """
+        self._require_current_topology()
         dtype = torch.float64
         cap = self._capacity_arg(capacity)
         x_s, reduced = self._to_stacked(x.to(dtype), self.n_i, "x")
@@ -1398,6 +1403,7 @@ class TransportLayer:
         time times the boundary's rate at the step's END, which the straight line's chord
         misses by about `h/2` times its curvature.
         """
+        self._require_current_topology()
         return self._step(
             x, q, sources, x_boundary, dt,
             on_failure=on_failure, capacity=capacity, capacity_prev=capacity_prev,
@@ -1455,6 +1461,7 @@ class TransportLayer:
         see `_removal_arg`. `transmission` (keyword-only) likewise replaces the
         construction-time transmission; see `_transmission_arg`.
         """
+        self._require_current_topology()
         if on_failure == "return":
             raise ValueError(
                 f"TransportLayer '{self.name}': on_failure='return' has no effect for "
@@ -1661,6 +1668,7 @@ class TransportLayer:
         see `_removal_arg`. `transmission` (keyword-only) likewise replaces the
         construction-time transmission; see `_transmission_arg`.
         """
+        self._require_current_topology()
         if on_failure not in ("raise", "return"):
             raise ValueError(
                 f"TransportLayer '{self.name}': unknown on_failure {on_failure!r}; "
