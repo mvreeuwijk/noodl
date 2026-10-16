@@ -1457,6 +1457,56 @@ def _toy(k0=1.0, **model_kwargs):
     return model, state, drivers, closure
 
 
+@pytest.mark.parametrize("acceleration", [None, "anderson"])
+def test_accepting_a_non_converged_iterate_refuses_a_gradient_alike_for_every_scheme(
+        acceleration):
+    """`iterate_on_limit="accept"` returns the last pass of a run that did not converge, but
+    a gradient there is refused by name, with plain relaxation and Anderson mixing alike:
+    the derivative returned is the implicit one at a fixed point, which a non-converged
+    pass is not. Without a gradient, the same run returns its last pass."""
+    def run(k0):
+        model, state, drivers, _ = _toy(
+            k0, coupling="iterate", iterate_tol={"toy": 1e-13}, iterate_max=3,
+            iterate_acceleration=acceleration, iterate_memory=1,
+            iterate_flow_tol={"toy": 1e-12}, iterate_on_limit="accept")
+        drivers["toy.sources"] = torch.tensor([20.0, 0.0, 0.0], dtype=torch.float64)
+        diag: dict = {}
+        return model.steady(state, drivers, diagnostics=diag, atol=1e-14, rtol=1e-14), diag
+
+    k0 = torch.tensor(1.0, dtype=torch.float64, requires_grad=True)
+    with pytest.raises(RuntimeError, match=(
+            r"did not converge within 3 passes.*no fixed point to differentiate, so "
+            r"iterate_on_limit='accept' cannot return a state here")):
+        run(k0)
+    out, diag = run(torch.tensor(1.0, dtype=torch.float64))
+    assert diag["passes"] == 3 and not bool(diag["converged"].all())
+    assert diag["adjoint"] is None and not out["toy.phi"].requires_grad
+
+
+def test_a_step_about_to_raise_stops_early_once_the_potential_solve_stalls():
+    """The stall rule: one Newton iteration per pass (`max_iter=1`) fails the air solve on
+    every pass, and with a tolerance loose enough that the second pass is fed a state within
+    it of the first's, the next pass would only repeat the failure -- so a step that is going
+    to raise does so after 2 passes, not `iterate_max`. A step that returns instead
+    (`on_failure="return"` with diagnostics) is not cut short: it runs to the limit."""
+    from noodl.solvers.errors import ConvergenceError
+
+    def build():
+        return _build(closures=[_Feedback(2e3)], coupling="iterate",
+                      iterate_tol={"species": 1.0}, iterate_max=10)
+
+    _, model, state, drivers, _, _ = build()
+    with pytest.raises(ConvergenceError, match=(
+            r"within 2 passes \(of at most 10; stopped there, as the potential solve failed "
+            r"again")):
+        model.steady(state, drivers, differentiable=False, max_iter=1)
+    _, model, state, drivers, _, _ = build()
+    diag: dict = {}
+    model.steady(state, drivers, diagnostics=diag, differentiable=False, max_iter=1,
+                 on_failure="return")
+    assert diag["passes"] == 10 and not bool(diag["converged"].all())
+
+
 def test_iterate_tol_may_name_a_kirchhoff_layer():
     model, state, drivers, closure = _toy(
         coupling="iterate", iterate_tol={"toy": 1e-12}, iterate_max=200)
