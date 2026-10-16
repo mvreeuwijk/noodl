@@ -178,7 +178,10 @@ class Model:
     within `iterate_max` return its last pass instead of raising, as SWMM accepts a step
     that used up its MAX_TRIALS (`dynwave.c`, counted as non-converging), with
     ``diagnostics["converged"]`` False for those instances. A gradient is still refused
-    there: there is no fixed point to differentiate.
+    there, with plain relaxation and Anderson mixing alike: the derivative returned is the
+    implicit one at a fixed point, and a non-converged last pass is not one. The step then
+    raises `RuntimeError` (naming `iterate_on_limit='accept'`); under `torch.no_grad()` or
+    with `differentiable=False` it returns the last pass.
 
     `iterate_flow_tol` (optional; per Kirchhoff layer named in `iterate_tol`, absolute, in
     flow units) also judges that layer's flows: a pass converges only when its returned
@@ -810,11 +813,20 @@ class Model:
             # so a caller catching that is unaffected.
             error = ConvergenceError if unsolved else RuntimeError
             if needs_adjoint:
+                # Deliberate, and the same for every scheme (plain relaxation or Anderson
+                # mixing): the returned derivative is the implicit one AT a fixed point, and
+                # a non-converged last pass is not one -- differentiating it would return the
+                # derivative of an arbitrary iterate. Only the option that asked for the
+                # non-converged state differs, and the message names it.
+                asked = (
+                    "iterate_on_limit='accept'" if self.iterate_on_limit == "accept"
+                    else "on_failure='return'"
+                )
                 raise error(
                     message + "; a gradient was requested and a non-converged iteration has "
-                    "no fixed point to differentiate, so on_failure='return' cannot return a "
-                    "state here (it returns the primal state only when nothing requires a "
-                    "gradient, e.g. under torch.no_grad() or with differentiable=False)"
+                    f"no fixed point to differentiate, so {asked} cannot return a state here "
+                    "(it returns the last pass only when nothing requires a gradient, e.g. "
+                    "under torch.no_grad() or with differentiable=False)"
                 )
             if raises_on_limit:
                 raise error(message)

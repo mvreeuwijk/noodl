@@ -956,3 +956,55 @@ def test_a_coupled_step_without_a_clock_still_refuses_a_time_dependent_law():
     coupled, c_state, c_drivers = union({"c": (model, state, drivers)}, [])
     with pytest.raises(ValueError, match="pass t"):
         coupled.step(c_state, c_drivers, 0.1)
+
+
+class _ClockDensity:
+    """An ambient density that follows the simulation clock: 1 + t/100 kg/m3, read off the
+    `StepContext` an integrating closure receives (and the 1.2 of the drivers without one)."""
+
+    integrates = True
+    outputs = ("rho_amb",)
+
+    def __init__(self):
+        self.seen: list = []
+
+    def __call__(self, state, drivers, ctx):
+        self.seen.append(None if ctx is None else (ctx.t, ctx.dt))
+        if ctx is None or ctx.t is None:
+            return {"rho_amb": drivers["rho_amb"]}
+        return {"rho_amb": torch.tensor(1.0 + ctx.t / 100.0, dtype=F64)}
+
+
+@pytest.mark.parametrize("k", [1, 4])
+def test_the_ambient_density_of_a_conversion_is_evaluated_at_the_step_clock(k):
+    """A time-dependent ambient-density closure is evaluated, for the conversions outside
+    `Model.step`, with the coupled step's own clock: start time `t` and the model's own
+    (sub)step `dt / k`, the same context its first (sub)step's closures then receive."""
+    from noodl.model import Model
+
+    street, s_state, s_drivers = _tiny_street_model()
+    building, b_state, b_drivers = _tiny_building_model()
+    density = _ClockDensity()
+    building = Model(building.net, building.transport, closures=[*building.closures, density])
+    link = ValueLink(
+        from_model="street", from_key="street.x", from_index=0,
+        to_model="building", to_key="species.x_boundary", to_index=0,
+        convert="concentration_to_mass_fraction",
+    )
+    coupled, state, drivers = union(
+        {"street": (street, s_state, s_drivers), "building": (building, b_state, b_drivers)},
+        shared=[link], substeps={"building": k},
+    )
+    t, dt = 30.0, 2.0
+    new = coupled.step(state, drivers, dt=dt, t=t)
+    assert density.seen[0] == pytest.approx((t, dt / k))
+    rho_amb = 1.0 + t / 100.0
+    expected = dict(b_state)
+    b_drv = {**b_drivers, "species.x_boundary": torch.tensor([3.0 / rho_amb], dtype=F64)}
+    for i in range(k):
+        expected = building.step(expected, b_drv, dt / k, t=t + i * dt / k)
+    torch.testing.assert_close(new["building"]["species.x"], expected["species.x"],
+                               rtol=1e-12, atol=1e-18)
+    stale = building.step(b_state, {**b_drivers, "species.x_boundary": torch.tensor(
+        [3.0 / 1.2], dtype=F64)}, dt, t=t)
+    assert not torch.allclose(stale["species.x"], expected["species.x"], rtol=1e-6)
