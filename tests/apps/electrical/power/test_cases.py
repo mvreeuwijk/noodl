@@ -16,6 +16,7 @@ from noodl.apps.electrical.power.cases import (
     MatpowerCaseUnavailableError,
     matpower_case,
 )
+from tests._power_cases import power_case
 
 
 def _digest(data: bytes) -> str:
@@ -220,11 +221,20 @@ def test_a_derived_case_reports_its_base_case_unavailable(tmp_path, monkeypatch)
 
 @pytest.mark.external
 def test_the_feature_case_is_derived_from_the_fetched_case9(tmp_path):
-    try:
-        path = matpower_case("case9_features", cache_dir=tmp_path)
-    except MatpowerCaseUnavailableError as exc:
-        pytest.skip(str(exc))
+    path = power_case("case9_features", cache_dir=tmp_path)
     assert path == tmp_path / "matpower" / "8.1" / "case9_features.m"
     assert (tmp_path / "matpower" / "8.1" / "case9.m").exists()
     assert _digest(path.read_bytes()) == MATPOWER_CASES["case9_features"]
     assert path.read_text(encoding="utf-8").startswith("function mpc = case9_features\n")
+
+
+@pytest.mark.parametrize("ci, outcome",
+                         [(None, pytest.skip.Exception), ("true", pytest.fail.Exception)])
+def test_an_unavailable_case_skips_locally_and_fails_on_ci(tmp_path, monkeypatch, ci, outcome):
+    monkeypatch.setattr(cases, "MATPOWER_SOURCE", "http://127.0.0.1:9/{name}.m")
+    if ci is None:
+        monkeypatch.delenv("CI", raising=False)
+    else:
+        monkeypatch.setenv("CI", ci)
+    with pytest.raises(outcome, match="MATPOWER case not available"):
+        power_case("case9", cache_dir=tmp_path)
