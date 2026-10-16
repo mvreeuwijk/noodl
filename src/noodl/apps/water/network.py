@@ -24,9 +24,12 @@ import torch
 from noodl.apps.water.demand import PressureDrivenDemand
 from noodl.apps.water.elements import (
     EPANET_QCF,
+    M_PER_FT,
     NU_WATER_REF,
+    RQTOL_FT_PER_CFS,
     BreakerValve,
     CompositeDarcyWeisbach,
+    FlowControlledPipe,
     GeneralPurposeValve,
     HazenWilliams,
     MinorLoss,
@@ -399,6 +402,7 @@ def build_model(
     coupling: str = "pingpong",
     dt: float | None = None,
     friction: str = "composite",
+    pipe_form: str | None = None,
 ) -> tuple[Model, State, Drivers]:
     """Assemble the water model and return `(model, state, drivers)`.
 
@@ -443,14 +447,32 @@ def build_model(
     layer does: heads are multiplied by `rho g` on the way in and `model.head_scale`
     carries the factor back out. Hazen-Williams (the default) works directly in metres of
     head and `head_scale` is 1.
+
+    `pipe_form` is how the pipes enter the solve. `"flow"` writes them in their resistance
+    form, `dp = h(q)` (`FlowControlledPipe`), with every pipe's flow an unknown, solved by
+    Modified Nodal Analysis from EPANET's own first iterate (every pipe at 1 ft/s,
+    `model.initial_flows`): one more unknown per pipe, and a pipe slope that goes to
+    EPANET's `RQtol` floor at zero flow. `"potential"` gives each pipe's flow as a function
+    of its head loss, `q = g(dp)`, on the nodal path, whose slope grows without bound as a
+    pipe's flow goes to zero: on Net1's 24 h run the step where a control closes the pump
+    and leaves pipe 10 dead-ended needs 136 Newton iterations there and 6 in the flow form
+    (`benchmarks/water_eps.py`, which also runs 2.5 times faster). `None` (the default)
+    takes `"flow"`, or `"potential"` with `friction="colebrook"`, which gives no head loss
+    as a function of the flow.
     """
     net.validate()
+    if pipe_form not in (None, "potential", "flow"):
+        raise ValueError(
+            f"build_model: pipe_form must be 'potential' or 'flow', got {pipe_form!r}"
+        )
     headloss = headloss or net.headloss
     if headloss not in ("H-W", "D-W"):
         raise ValueError(
             f"build_model: headloss must be 'H-W' or 'D-W', got {headloss!r}"
         )
     friction = _FRICTION_ALIASES.get(friction, friction)
+    if pipe_form is None:
+        pipe_form = "potential" if headloss == "D-W" and friction == "colebrook" else "flow"
     if friction not in ("composite", "colebrook"):
         raise ValueError(
             f"build_model: friction must be 'composite' or 'colebrook', got {friction!r}"
@@ -552,6 +574,17 @@ def build_model(
                         sum_C=minor, rho=1.0 / rho, mu=nu, n_iter=12, kind="pipe",
                     )
                 )
+    if net.pipes and pipe_form == "flow":
+        if headloss == "D-W" and friction != "composite":
+            raise ValueError(
+                "build_model: pipe_form='flow' needs the pipes' head loss as a function of "
+                "the flow, which friction='colebrook' (the generic Duct) does not give; use "
+                "friction='composite'"
+            )
+        cfs = _rounded_cfs_per_m3s(options.flow_units)
+        cfs = 1.0 / M_PER_FT**3 if cfs is None else cfs
+        laws[0] = FlowControlledPipe(
+            laws[0], gradient_floor=RQTOL_FT_PER_CFS * M_PER_FT * cfs, kind="pipe")
     if net.pumps:
         h0_list, r_list = [], []
         for pump in net.pumps:
@@ -639,6 +672,12 @@ def build_model(
         "water.phi": torch.zeros(graph.n, dtype=F64),
         "water.q": torch.zeros(len(layer.cols), dtype=F64),
     }
+    if net.pipes and pipe_form == "flow":
+        # The first Newton iterate of the resistance form: EPANET's own, every pipe at 1 ft/s
+        # (`hydraul.c`, `initlinkflow`). From zero flow every pipe sits on the RQtol floor of
+        # its slope and the first Newton step overshoots without bound.
+        area = torch.tensor([torch.pi * p.diameter**2 / 4.0 for p in net.pipes], dtype=F64)
+        state["water.q"][layer.kind_slice("pipe")] = area * M_PER_FT
 
     reservoir_heads = torch.tensor([r.head * scale for r in net.reservoirs], dtype=F64)
     tank_closure = None
@@ -712,6 +751,8 @@ def build_model(
     model.notes = notes
     model.node_names = node_names
     model.link_names = [link.name for link in net.links()]
+    # `initial_state` starts from these flows (resistance-form pipes need a first iterate).
+    model.initial_flows = state["water.q"].clone()
     model.tank_closure = tank_closure
     model.head_scale = scale
     model.water_network = net
@@ -759,6 +800,8 @@ def initial_state(model: Model, *, values: Mapping | None = None) -> State:
             )
         state[f"{name}.phi"] = torch.zeros(model.net.n, dtype=F64)
         state[f"{name}.q"] = torch.zeros(len(layer.cols), dtype=F64)
+    if getattr(model, "initial_flows", None) is not None:
+        state["water.q"] = model.initial_flows.clone()   # `build_model`'s first iterate
     for name, layer in model.transport.items():
         if layer.quantity != "concentration":
             raise ValueError(
@@ -819,7 +862,9 @@ def water_steady(model: Model, state: State, drivers: Drivers, **solve_kwargs) -
     own float32-limited residuals, so it does not move the two-loop, Net1 single-period,
     Net1 extended-period or pressure-driven-demand comparisons.
 
-    `max_iter` defaults to 200, NOT Newton's own 50. When a `[CONTROLS]` line CLOSES a
+    `max_iter` defaults to 200, NOT Newton's own 50. It is the POTENTIAL pipe form that
+    needs it (`build_model(pipe_form="potential")`; the default resistance form needs at most
+    6 iterations on the same duty cycle). When a `[CONTROLS]` line CLOSES a
     pump, the pipe immediately downstream of it is left carrying exactly zero flow, and
     Hazen-Williams' laminar blend gives that one edge a tangent slope of order
     `(dp_transition / K)^(1/1.852) / dp_transition` -- about 630 on Net1's pipe 10 against
@@ -837,7 +882,19 @@ def water_steady(model: Model, state: State, drivers: Drivers, **solve_kwargs) -
     mid-solve; this is where that extrapolation is finally held to account, once there is a
     converged answer to check. No clamp, no warning: an exceedance raises `RuntimeError` naming the
     pump, the batch instance and the flow against `q_max`.
+
+    A state whose pipe flows are all exactly zero (a cold start) is solved from
+    `model.initial_flows` when the pipes are in their resistance form: from zero flow every
+    pipe's slope sits on its `RQtol` floor and Newton's first step overshoots without bound.
     """
+    seed = getattr(model, "initial_flows", None)
+    layer = model.kirchhoff["water"]
+    if seed is not None and "pipe" in layer.kinds and layer.mna:
+        pipes = layer.kind_slice("pipe")
+        if not bool(state["water.q"][..., pipes].any()):
+            q = state["water.q"].clone()
+            q[..., pipes] = seed[pipes]
+            state = {**state, "water.q": q}
     solve_kwargs.setdefault("atol", 1e-11)
     solve_kwargs.setdefault("rtol", 1e-11)
     solve_kwargs.setdefault("max_iter", 200)

@@ -109,11 +109,25 @@ model, state, drivers = build_model(
     coupling="pingpong",
     dt=None,            # overrides net.hydraulic_timestep for the tank closure
     friction="composite",  # D-W friction law: 'composite' (default) or 'colebrook'
+    pipe_form=None,     # 'flow' (resistance form; the default) or 'potential'
 )
 ```
 
+`pipe_form` is how the pipes enter the solve. In the **resistance form** (`"flow"`, the default
+except with `friction="colebrook"`) each pipe is `dp = h(q)` (`FlowControlledPipe`) with its
+flow an unknown, solved by Modified Nodal Analysis from EPANET's own first iterate (every pipe
+at 1 ft/s). In the **potential form** (`"potential"`) each pipe's flow is the inverted law
+$q = g(dp)$ on the nodal path. Both give the same solution to round-off; they differ in how
+Newton gets there. The potential form's slope grows without bound as a pipe's flow goes to
+zero, so on Net1's 24 h run the step where a control closes the pump and leaves pipe 10
+dead-ended needs 136 Newton iterations; the resistance form's slope goes to EPANET's `RQtol`
+floor instead, and no step needs more than 6. The whole 24 h run over eight demand
+multipliers (`benchmarks/water_eps.py`) takes 2.5 times less time.
+
 `water_steady(model, state, drivers, **solve_kwargs)` wraps `model.steady` with defaults
-`atol=rtol=1e-11`, `max_iter=200` (both empirically tuned; caller overrides win), then checks
+`atol=rtol=1e-11`, `max_iter=200` (both empirically tuned, the iteration cap for the
+potential form; caller overrides win), starts a cold start of the resistance form (every pipe
+flow exactly zero) from `model.initial_flows`, then checks
 every converged pump's flow against its own `q_max()` and raises naming the pump and batch
 instance if it is exceeded — rather than silently accepting an extrapolated point off the end of
 the curve.

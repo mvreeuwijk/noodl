@@ -6,9 +6,12 @@ from noodl.apps.water.elements import (
     DW_SI,
     EPANET_QCF,
     HW_SI,
+    BreakerValve,
     CompositeDarcyWeisbach,
     EpanetDarcyWeisbach,
+    FlowControlledPipe,
     G,
+    GeneralPurposeValve,
     HazenWilliams,
     MinorLoss,
     PumpCurve,
@@ -37,8 +40,9 @@ from noodl.apps.water.report import link_table, pressure_head, to_kilopascal
 from noodl.apps.water.tanks import Control, TankLevels
 
 __all__ = [
-    "DW_SI", "EPANET_QCF", "FLOW_UNITS", "G", "HW_SI", "Control", "CompositeDarcyWeisbach",
-    "HazenWilliams", "Junction",
+    "DW_SI", "EPANET_QCF", "FLOW_UNITS", "G", "HW_SI", "BreakerValve", "Control",
+    "CompositeDarcyWeisbach", "FlowControlledPipe", "GeneralPurposeValve", "HazenWilliams",
+    "Junction",
     "MinorLoss", "PressureDrivenDemand", "Pump", "PumpCurve", "Reservoir", "Tank",
     "TankLevels", "Valve", "WaterNetwork", "WaterOptions", "WaterPipe",
     "build_model", "initial_drivers", "initial_state", "link_table", "pressure_head",
