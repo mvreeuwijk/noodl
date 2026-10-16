@@ -29,6 +29,18 @@ against a bare relative tolerance. Convergence figures (`residual_norm`, `residu
 `max_change`) are rounding noise once a solve has converged (1e-16 .. 1e-12) and differ by
 order-one factors between platforms: they are compared with an absolute floor of `NOISE_ATOL`
 = 1e-8 as well, which still tells "converged" from "not converged".
+
+STOPPING MARGINS. Pass counts and `converged` stay exact, so every fixed-point tolerance here is
+chosen to decide its stopping pass far from rounding: the tolerance is at least ~1e4 ulps of
+the judged state, and the changes of the pass that stops and of the pass before it are clear
+of it (Anderson cases: 10x either side where the iteration allows it; a relaxed iteration
+contracting by `rho` per pass cannot beat `1 / sqrt(rho)` either side, so it gets the balanced
+position, e.g. 0.69 and 1.43 for `rho` = 0.5). A tolerance within a few hundred ulps of the
+state is decided by rounding. An Anderson iteration is worse still: near convergence its
+least-squares columns approach the residuals' own rounding floor (`eps |g| / tol` in its scaled
+units) and the step they give moves with the last ulp; `anderson_batch2` at 1e-13 took 11 to 16
+passes under input perturbations of a few ulp, and 12 or 13 between platforms. Such a case is
+stopped before then.
 """
 
 from __future__ import annotations
@@ -443,12 +455,14 @@ def _toy(k0, **kw):
     return model, state, drivers
 
 
-def _toy_record(acceleration, *, flow_tol=True, sources=None, **kw):
+def _toy_record(acceleration, *, tol, flow_tol=True, sources=None, **kw):
+    """`tol` is the head tolerance (the flow tolerance is ten times it). Each case's is
+    chosen so that its stopping pass is decided with a clear margin (`STOPPING MARGINS`)."""
     k0 = torch.tensor(1.0, dtype=F64, requires_grad=True)
     model, state, drivers = _toy(
-        k0, coupling="iterate", iterate_tol={"toy": 1e-13}, iterate_max=400,
+        k0, coupling="iterate", iterate_tol={"toy": tol}, iterate_max=400,
         iterate_acceleration=acceleration,
-        iterate_flow_tol={"toy": 1e-12} if flow_tol else None, **kw)
+        iterate_flow_tol={"toy": 10 * tol} if flow_tol else None, **kw)
     if sources is not None:
         drivers["toy.sources"] = torch.tensor(sources, dtype=F64)
         batch = drivers["toy.sources"].shape[:1]
@@ -459,19 +473,19 @@ def _toy_record(acceleration, *, flow_tol=True, sources=None, **kw):
 
 
 def case_anderson_flow_tol():
-    return _toy_record("anderson")
+    return _toy_record("anderson", tol=1e-6)
 
 
 def case_plain_flow_tol():
-    return _toy_record(None)
+    return _toy_record(None, tol=6e-11)
 
 
 def case_plain_no_flow_tol():
-    return _toy_record(None, flow_tol=False)
+    return _toy_record(None, tol=6e-11, flow_tol=False)
 
 
 def case_anderson_batch2():
-    return _toy_record("anderson", sources=[[0.5, 0.0, 0.0], [40.0, 0.0, 0.0]])
+    return _toy_record("anderson", tol=1e-8, sources=[[0.5, 0.0, 0.0], [40.0, 0.0, 0.0]])
 
 
 def case_anderson_memory_one_accept_non_converged():
@@ -514,7 +528,9 @@ def case_sewer_dynwave_tree_anderson():
 
     data = Path(__file__).resolve().parent / "data" / "sewer"
     net, _, _ = read_swmm_inp(data / "tree_dynwave.inp")
-    model, state, drivers = build_dynamic_wave_model(net)
+    # the file's HEAD_TOLERANCE (1e-12 m) sits a few hundred ulps of the heads above
+    # rounding; 1e-9 m decides every step's stopping pass far from it (`STOPPING MARGINS`)
+    model, state, drivers = build_dynamic_wave_model(net, iterate_tol=1e-9)
     diags: list = []
     final, hist = simulate_dynamic_wave(model, state, drivers, steps=4, diagnostics=diags)
     return {"acceleration": model.iterate_acceleration, "final": record(final),
@@ -627,7 +643,7 @@ def case_mna_dynamic_iterate_feedback():
                                       Conductance(torch.tensor([1.0], dtype=F64), kind="r"),
                                       cap], boundary=["gnd"])
     model = Model(net, [layer], closures=[feedback], coupling="iterate",
-                  iterate_tol={"e": 1e-13}, iterate_max=60)
+                  iterate_tol={"e": 1e-10}, iterate_max=60)
     drivers = {"e.phi_boundary": ground, "e.sources": torch.zeros(3, dtype=F64)}
     phi, q = layer.solve(ground, drivers, mode="initial", differentiable=False)
     state = {"e.phi": phi, "e.q": q}
@@ -757,7 +773,7 @@ def case_coupled_one_way():
 
 
 def case_coupled_two_way():
-    return _coupled_record(*_coupled(True, grad=True, iterate_rtol=1e-12, iterate_max=100))
+    return _coupled_record(*_coupled(True, grad=True, iterate_rtol=3e-11, iterate_max=100))
 
 
 def case_coupled_two_way_substeps_and_clock():
@@ -772,7 +788,7 @@ def case_coupled_two_way_batch():
     ss = {"street.x": torch.tensor([[3.0, 4.0], [30.0, 4.0]], dtype=F64)}
     coupled, state, drivers = union(
         {"street": (sm, ss, sd), "building": (bm, bs, bd)}, [_link(True)],
-        iterate_rtol=1e-12, iterate_max=100)
+        iterate_rtol=3e-11, iterate_max=100)
     return _coupled_record(coupled, state, drivers, None)
 
 
