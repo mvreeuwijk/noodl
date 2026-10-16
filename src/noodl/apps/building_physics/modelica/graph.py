@@ -98,13 +98,16 @@ and `port_a2` (`Validation/ThreeRoomsContam.mo:149-179` wires `dooOpeClo` this w
 pairing -- `port_a1` and `port_b2` resolving to different nodes, or the two sides coinciding --
 is refused, naming the instance.
 
-In-line flow sensors
---------------------
+In-line flow sensors and zero-resistance connections
+----------------------------------------------------
 A two-port flow-through sensor (`schema.INLINE_SENSORS`: `MassFlowRate`, `DensityTwoPort`,
 `TemperatureTwoPort` and every other `Buildings.Fluid.Sensors` class extending
 `Sensors/BaseClasses/PartialFlowSensor.mo`) has no pressure drop and no storage
 (`PartialFlowSensor.mo:13-24`: `port_b.m_flow = -port_a.m_flow`, `port_a.p = port_b.p`, and
-enthalpy, water and trace substances passed through unchanged). Its two ports are joined into
+enthalpy, water and trace substances passed through unchanged). So has a zero-resistance
+connection (`schema.SHORTS`: a `FixedResistances.LosslessPipe`, or a
+`FixedResistances.PressureDrop` with `dp_nominal = 0`, which is `dp = 0`; any other
+`dp_nominal` is refused), and it is read the same way. Its two ports are joined into
 one node -- the sensor is a transparent wire -- and its ports do not count towards a junction's
 degree, so `ori.port_b - sen.port_a`, `sen.port_b - col.port_a` is the same degree-two junction
 as `ori.port_b - col.port_a`. Each such sensor is recorded as an `InlineSensor`: the node it
@@ -291,8 +294,10 @@ def _split(ref: str, errors: list[str] | None = None) -> tuple[str, str] | None:
     return instance, port
 
 
+_PRESSURE_DROP = "Buildings.Fluid.FixedResistances.PressureDrop"
+
 def _kind_of(cls: str, role: str | None) -> str:
-    if cls in schema.INLINE_SENSORS:
+    if cls in schema.INLINE_SENSORS or cls in schema.SHORTS:
         return "inline"  # before the role check: the exporter marks sensors as observers
     if cls in schema.HEAT_SENSORS:
         return "heat_sensor"
@@ -401,6 +406,11 @@ def _classify_components(doc: ModelicaDoc) -> _Ctx:
             errors.append(
                 f"{c.name} ({c.cls}): allowFlowReversal = false is not supported (MBL then "
                 f"passes default properties backwards through the sensor)"
+            )
+        if c.cls == _PRESSURE_DROP and c.parameters.get("dp_nominal") != 0:
+            errors.append(
+                f"{c.name} ({c.cls}): dp_nominal = {c.parameters.get('dp_nominal')!r}; only "
+                f"a zero-resistance connection (dp_nominal = 0) is supported"
             )
         if kind == "unknown":
             reason = schema.refusal_reason(c.cls) or "component class is not supported"

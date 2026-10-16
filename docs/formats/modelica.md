@@ -188,7 +188,10 @@ ModelicaImportError: modelica: refused 1 item:
 - Zonal flows are four-port, like doors (not the two-port shape a one-way element has), and
   become two directional edges the same way.
 - An in-line flow sensor (`Buildings.Fluid.Sensors`, flow-through) is a transparent wire: it adds
-  no node and no pressure drop.
+  no node and no pressure drop. So is a zero-resistance connection: a
+  `Fluid.FixedResistances.LosslessPipe`, or a `Fluid.FixedResistances.PressureDrop` with
+  `dp_nominal = 0` (MBL then computes no resistance, `dp = 0`). A `PressureDrop` with any
+  other `dp_nominal` is refused, and so is a short between two volumes or boundaries.
 - `PrescribedHeatFlow` is supported only at `alpha = 0` (MSL's default: no temperature
   dependence); a nonzero `alpha` is refused.
 - A `MassFlowSource_T` with a negative `m_flow` draws air out of its volume. By Modelica's
