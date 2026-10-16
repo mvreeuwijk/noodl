@@ -23,6 +23,7 @@ import torch
 
 from noodl.apps.water.demand import PressureDrivenDemand
 from noodl.apps.water.elements import (
+    CBIG_FT_PER_CFS,
     EPANET_QCF,
     M_PER_FT,
     NU_WATER_REF,
@@ -30,6 +31,7 @@ from noodl.apps.water.elements import (
     BreakerValve,
     CompositeDarcyWeisbach,
     FlowControlledPipe,
+    FlowControlledPump,
     GeneralPurposeValve,
     HazenWilliams,
     MinorLoss,
@@ -465,6 +467,13 @@ def build_model(
     takes `"flow"`, or `"potential"` with `friction="colebrook"`, which gives no head loss
     as a function of the flow.
 
+    Pumps enter in their head-gain form whatever the `pipe_form`: `FlowControlledPump`,
+    `phi_discharge - phi_suction = gain(q)` with the pump's flow an unknown, as EPANET writes
+    them, with EPANET's `RQtol` floor on the curve's slope and its closed-link `CBIG` below
+    zero flow (a pump held beyond shut-off converges to EPANET's closed-link leak). The
+    inverted curve, `q = g(dp)`, has a zero slope beyond shut-off that leaves a pump with a
+    pressure-driven demand downstream singular (`FlowControlledPump`'s docstring).
+
     `tank_mode` is how a tank's level moves. `"explicit"` (the default) is EPANET's: every
     tank is a fixed-head boundary for the solve, and `TankLevels.advance` steps its level
     explicitly from the solved inflow. `"storage"` makes every tank an interior node with a
@@ -615,9 +624,12 @@ def build_model(
         laws[0] = FlowControlledPipe(
             laws[0], gradient_floor=RQTOL_FT_PER_CFS * M_PER_FT * cfs, kind="pipe")
     if net.pumps:
-        h0_list, r_list = [], []
+        h0_list, r_list, q_design_list = [], [], []
         for pump in net.pumps:
             points = net.curves[pump.curve]
+            # EPANET's design flow `Q0` (`initlinkflow`'s first iterate): the single point,
+            # or the middle one of three
+            q_design_list.append(sorted(points)[len(points) // 2][0] * pump.speed)
             if len(points) == 1:
                 q_design, h_design = points[0]
                 h0, r, _ = three_point_curve(
@@ -628,16 +640,19 @@ def build_model(
                 h0, r = _fit_three_points(points, pump.name)
             h0_list.append(float(h0) * scale)
             r_list.append(float(r) * scale)
-        laws.append(
-            PumpCurve(
-                torch.tensor(h0_list, dtype=F64),
-                torch.tensor(r_list, dtype=F64),
-                2.0,
-                speed=torch.tensor([p.speed for p in net.pumps], dtype=F64),
-                status_key="water.status",
-                kind="pump",
-            )
+        pump_law = PumpCurve(
+            torch.tensor(h0_list, dtype=F64),
+            torch.tensor(r_list, dtype=F64),
+            2.0,
+            speed=torch.tensor([p.speed for p in net.pumps], dtype=F64),
+            status_key="water.status",
+            kind="pump",
         )
+        cfs = _rounded_cfs_per_m3s(options.flow_units)
+        cfs = 1.0 / M_PER_FT**3 if cfs is None else cfs
+        laws.append(FlowControlledPump(
+            pump_law, gradient_floor=RQTOL_FT_PER_CFS * M_PER_FT * cfs * scale,
+            closed_slope=CBIG_FT_PER_CFS * M_PER_FT * cfs * scale, kind="pump"))
     if tcv:
         laws.append(
             MinorLoss(
@@ -716,6 +731,10 @@ def build_model(
         # its slope and the first Newton step overshoots without bound.
         area = torch.tensor([torch.pi * p.diameter**2 / 4.0 for p in net.pipes], dtype=F64)
         state["water.q"][layer.kind_slice("pipe")] = area * M_PER_FT
+    if net.pumps:
+        # A pump's first iterate is EPANET's too, its design flow. From zero flow it sits on
+        # the `RQtol` tangent of its curve, where it is a near-ideal head source of h0.
+        state["water.q"][layer.kind_slice("pump")] = torch.tensor(q_design_list, dtype=F64)
 
     reservoir_heads = torch.tensor([r.head * scale for r in net.reservoirs], dtype=F64)
     tank_closure = None
@@ -952,24 +971,29 @@ def water_steady(model: Model, state: State, drivers: Drivers, **solve_kwargs) -
     are spent rather than the fidelity.
 
     After the solve, every `pump` edge's CONVERGED flow is checked against its own
-    `q_max`: a demand for more than `q_max` is refused by name. `PumpCurve.flow`/`dflow` extrapolate
-    the fitted curve indefinitely so that Newton's intermediate iterates are never aborted
-    mid-solve; this is where that extrapolation is finally held to account, once there is a
-    converged answer to check. No clamp, no warning: an exceedance raises `RuntimeError` naming the
-    pump, the batch instance and the flow against `q_max`.
+    `q_max`: a demand for more than `q_max` is refused by name. The pump's head gain
+    (`PumpCurve.head_gain`) extrapolates the fitted curve indefinitely so that Newton's
+    intermediate iterates are never aborted mid-solve; this is where that extrapolation is
+    finally held to account, once there is a converged answer to check. No clamp, no
+    warning: an exceedance raises `RuntimeError` naming the pump, the batch instance and the
+    flow against `q_max`.
 
     A state whose pipe flows are all exactly zero (a cold start) is solved from
     `model.initial_flows` when the pipes are in their resistance form: from zero flow every
     pipe's slope sits on its `RQtol` floor and Newton's first step overshoots without bound.
+    The pumps' flows, likewise, start from their design flows when they are all zero.
     """
     seed = getattr(model, "initial_flows", None)
     layer = model.kirchhoff["water"]
-    if seed is not None and "pipe" in layer.kinds and layer.mna:
-        pipes = layer.kind_slice("pipe")
-        if not bool(state["water.q"][..., pipes].any()):
-            q = state["water.q"].clone()
-            q[..., pipes] = seed[pipes]
-            state = {**state, "water.q": q}
+    if seed is not None and layer.mna:
+        q = state["water.q"]
+        for kind in ("pipe", "pump"):
+            if kind in layer.kinds:
+                cols = layer.kind_slice(kind)
+                if not bool(q[..., cols].any()):
+                    q = q.clone()
+                    q[..., cols] = seed[cols]
+        state = {**state, "water.q": q}
     solve_kwargs.setdefault("atol", 1e-11)
     solve_kwargs.setdefault("rtol", 1e-11)
     solve_kwargs.setdefault("max_iter", 200)

@@ -6,6 +6,7 @@ import torch
 from noodl.apps.water.demand import PressureDrivenDemand
 from noodl.apps.water.elements import (
     HW_SI,
+    FlowControlledPump,
     HazenWilliams,
     MinorLoss,
     PumpCurve,
@@ -163,6 +164,57 @@ def test_a_missing_status_driver_is_refused():
     )
     with pytest.raises(KeyError, match="'water.status'"):
         pump.flow(torch.tensor([-50.0], dtype=F64), {})
+
+
+def _net1_pump():
+    return PumpCurve(
+        torch.tensor([101.6], dtype=F64), torch.tensor([2836.1385287628063], dtype=F64),
+        status_key="water.status",
+    )
+
+
+FLOOR, CBIG = 1e-6, 1e9
+
+
+def test_the_head_gain_is_the_fitted_curve_above_the_floor_flow():
+    pump = _net1_pump()
+    q = torch.tensor([0.05, 0.11773740500211716], dtype=F64)
+    gain = pump.head_gain(q, FLOOR, CBIG)
+    assert gain.tolist() == pytest.approx((101.6 - 2836.1385287628063 * q**2).tolist(),
+                                          rel=1e-14)
+    # and it agrees with the inverted curve `flow`
+    on = {"water.status": torch.ones(1, dtype=F64)}
+    assert float(pump.flow(-gain[1:], on)) == pytest.approx(float(q[1]), rel=1e-12)
+
+
+def test_the_head_gain_is_strictly_decreasing_and_continuous_through_zero_flow():
+    pump = _net1_pump()
+    q_bar = FLOOR / (2.0 * 2836.1385287628063)
+    q = torch.tensor([-1e-3, -1e-9, 0.0, 0.5 * q_bar, q_bar, 2.0 * q_bar, 1e-3],
+                     dtype=F64, requires_grad=True)
+    gain = pump.head_gain(q, FLOOR, CBIG)
+    # (near q_bar the steps are below a float64 spacing of the gain, hence <=)
+    assert bool((gain[1:] <= gain[:-1]).all())
+    (slope,) = torch.autograd.grad(gain.sum(), q)
+    assert bool((slope < 0).all())
+    # the tangent below q_bar has EPANET's RQtol slope; the shut side has CBIG
+    assert float(slope[3]) == pytest.approx(-FLOOR, rel=1e-12)
+    assert float(slope[0]) == pytest.approx(-CBIG, rel=1e-12)
+    for x in (0.0, q_bar):
+        lo, hi = (torch.tensor([x - 1e-15], dtype=F64), torch.tensor([x + 1e-15], dtype=F64))
+        jump = pump.head_gain(hi, FLOOR, CBIG) - pump.head_gain(lo, FLOOR, CBIG)
+        assert abs(float(jump)) <= 1e-5   # CBIG times the 2e-15 m^3/s step, no more
+
+
+def test_the_head_gain_form_residual_follows_the_status_driver():
+    law = FlowControlledPump(_net1_pump(), gradient_floor=FLOOR, closed_slope=CBIG)
+    dp, q = torch.tensor([-62.0], dtype=F64), torch.tensor([0.1], dtype=F64)
+    gain = float(law.pump.head_gain(q, FLOOR, CBIG))
+    open_ = {"water.status": torch.ones(1, dtype=F64)}
+    closed = {"water.status": torch.zeros(1, dtype=F64)}
+    assert float(law.residual(dp, q, open_, None)) == pytest.approx(-62.0 + gain, rel=1e-14)
+    assert float(law.residual(dp, q, closed, None)) == 0.1
+    assert float(law.q_max()) == pytest.approx((101.6 / 2836.1385287628063) ** 0.5, rel=1e-14)
 
 
 def test_minor_loss_valve_inverts_its_quadratic():

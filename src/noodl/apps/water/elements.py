@@ -205,7 +205,9 @@ class PumpCurve(ConstitutiveLaw):
     Flow is monotone increasing in ``dp`` (``dq/ddp > 0``), so the Newton Jacobian stays
     SPD-certifiable. At shut-off the slope of the sharp branch diverges, so the law is
     laminar-blended over ``h0 + dp/w^2 < dp_transition`` with a safe input substituted on
-    BOTH branches of the ``where``.
+    BOTH branches of the ``where``. Beyond shut-off the slope is exactly zero, which is why
+    `build_model` enters every pump through `FlowControlledPump` (the head-gain form,
+    ``head_gain``) instead of this inversion; ``flow`` remains the pump's closed form.
 
     ``q_max`` is the flow at zero head gain,
     ``w (h0/r)^(1/n)`` -- EPANET's own curve is only DEFINED up to this point (its own
@@ -279,6 +281,33 @@ class PumpCurve(ConstitutiveLaw):
         q_t = w * (torch.full_like(head, dpt) / self.r) ** (1.0 / self.n)
         laminar = torch.where(head > 0.0, q_t / (dpt * w**2), torch.zeros_like(head))
         return self._status(dp, drivers) * torch.where(shut, laminar, sharp)
+
+    def head_gain(self, q: Tensor, gradient_floor: float, closed_slope: float) -> Tensor:
+        """The head gain ``w^2 h0 - r w^(2-n) q^n`` at flow ``q``, for `FlowControlledPump`.
+
+        The curve's slope ``n r w^(2-n) q^(n-1)`` vanishes at zero flow. Below the flow
+        ``q_bar`` where it falls to ``gradient_floor`` the gain is the curve's TANGENT there
+        instead (continuous in value and slope): wntr's own construction
+        (`get_pump_line_params`) with EPANET's ``RQtol`` as the slope, so the gain never has
+        a zero gradient.
+
+        Below zero flow the pump is shut: a pump does not run backwards, and EPANET closes
+        one whose head gain would exceed the shut-off head. The gain there rises with slope
+        ``closed_slope``, EPANET's resistance of a CLOSED link (``CBIG``), so a pump held
+        beyond shut-off converges to EPANET's closed-link leak of ``excess / CBIG`` (about
+        3e-8 m^3/s for 50 m) rather than to a reverse flow. The gain is strictly decreasing
+        in ``q`` everywhere, which makes the head-gain form well posed for every head.
+        """
+        w = self.speed
+        coeff = self.r * w ** (2.0 - self.n)
+        q_bar = (gradient_floor / (self.n * coeff)) ** (1.0 / (self.n - 1.0))
+        on_curve = q > q_bar
+        q_safe = torch.where(on_curve, q, q_bar.expand_as(q))   # no negative base below
+        curve = w**2 * self.h0 - coeff * q_safe**self.n
+        h_bar = w**2 * self.h0 - coeff * q_bar**self.n
+        tangent = h_bar - gradient_floor * (q - q_bar)
+        shut = h_bar + gradient_floor * q_bar - closed_slope * q
+        return torch.where(on_curve, curve, torch.where(q < 0, shut, tangent))
 
     def linear_init(self, drivers=None) -> tuple[Tensor, Tensor]:
         # Tangent at dp = 0 (the pump running on its own curve at zero head difference).
@@ -678,6 +707,9 @@ class GeneralPurposeValve(ImplicitLaw):
 #: `RQtol` default, Manual Appendix C ``[OPTIONS]``).
 RQTOL_FT_PER_CFS = 1e-7
 
+#: EPANET's head-loss gradient of a CLOSED link, ``CBIG = 1e8`` ft per cfs (`hydcoeffs.c`).
+CBIG_FT_PER_CFS = 1e8
+
 
 class FlowControlledPipe(ImplicitLaw):
     """A pipe in its resistance form, ``dp = scale h(q)``, with the flow an unknown of the
@@ -703,6 +735,55 @@ class FlowControlledPipe(ImplicitLaw):
         else:
             h = self.pipe.head_loss(q)
         return dp - self.scale * h
+
+
+class FlowControlledPump(ImplicitLaw):
+    """A pump in its head-gain form, ``phi_discharge - phi_suction = gain(q)``, with the flow
+    an unknown of the layer, as EPANET's and wntr's own solvers write it. ``pump`` is the
+    pump's `PumpCurve`, whose ``head_gain`` gives the gain (with ``gradient_floor``, EPANET's
+    ``RQtol``, and ``closed_slope``, its ``CBIG``, both in the layer's potential per m^3/s).
+    `build_model` writes every pump in this form, whatever the ``pipe_form``.
+
+    The potential form, ``PumpCurve.flow``, inverts the curve: its slope is infinite at the
+    shut-off head and EXACTLY zero beyond it, where the pump delivers nothing whatever the
+    heads. A Newton iterate that lands beyond shut-off then has no Jacobian entry at all
+    between the pump's two sides. With fixed demands the next iterate recovers; with a
+    pressure-driven demand downstream, the only thing left tying those heads to a boundary
+    is the demand curve's own slope, which is small (and zero above the required pressure),
+    so the next step throws the heads far outside the curve and the system turns singular
+    (measured: a reservoir, a pump and a pipe feeding a PDA junction, singular from the
+    fifth iterate on). In this form the pump's row ties its two heads together on every
+    iterate, as a head source with the curve's slope in series, and the same network
+    converges quadratically, in 5 Newton iterations (19 with `pipe_form="potential"`).
+
+    ``status`` (0 closed, 1 open) is read per edge from the driver ``status_key`` when given:
+    an open pump's residual is ``dp + gain(q)``, a closed one's is ``q``.
+    """
+
+    def __init__(self, pump: PumpCurve, *, gradient_floor: float, closed_slope: float,
+                 kind: str = "pump") -> None:
+        super().__init__(kind)
+        self.pump = pump
+        self.gradient_floor = float(gradient_floor)
+        self.closed_slope = float(closed_slope)
+        self.status_key = pump.status_key
+
+    @property
+    def h0(self) -> Tensor:
+        return self.pump.h0
+
+    @property
+    def r(self) -> Tensor:
+        return self.pump.r
+
+    def q_max(self) -> Tensor:
+        """The flow at zero head gain; see `PumpCurve.q_max`."""
+        return self.pump.q_max()
+
+    def residual(self, dp, q, drivers, ctx):
+        status = self.pump._status(dp, drivers)
+        gain = self.pump.head_gain(q, self.gradient_floor, self.closed_slope)
+        return status * (dp + gain) + (1.0 - status) * q
 
 
 class TankStorage(ImplicitLaw):
