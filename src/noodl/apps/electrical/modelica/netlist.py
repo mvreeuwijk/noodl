@@ -84,13 +84,16 @@ import math
 from collections.abc import Iterable
 from dataclasses import dataclass
 
+from noodl._unionfind import UnionFind
 from noodl.apps.electrical.modelica import schema
 from noodl.apps.electrical.modelica.schema import (
+    FLAG_DEFAULTS,
     CircuitComponent,
     CircuitDoc,
     ModelicaImportError,
     Signal,
 )
+from noodl.modelica.schema import flag
 
 REFERENCE = ("reference", "0")
 THERMAL_REFERENCE = ("thermal_reference", "thermal.reference")
@@ -111,6 +114,10 @@ _ANALOG_PINS = {
     "diode": _TWO_PIN, "voltage_source": _TWO_PIN, "mutual_inductance": _FOUR_PIN,
     "ideal_transformer": _FOUR_PIN,
 }
+# The Boolean parameters the netlist reads; a value other than true or false refuses the
+# component (`_declared_problems`), a missing one takes its Modelica default.
+_FLAGS = ("useHeatPort", "useTemperatureDependency", "use_T", "use_C", "considerMagnetization",
+          "ground_DC")
 _THERMAL_PORTS = {"thermal_conductor": ("port_a", "port_b"), "heat_capacitor": ("port",),
                   "fixed_temperature": ("port",)}
 _TWO_TERMINALS = ("terminal_n", "terminal_p")
@@ -172,32 +179,6 @@ class Netlist:
     omitted: frozenset[str] = frozenset()
 
 
-# ------------------------------------------------------------------------------ union-find
-class _UnionFind:
-    def __init__(self) -> None:
-        self.parent: dict[tuple, tuple] = {}
-
-    def add(self, element: tuple) -> None:
-        self.parent.setdefault(element, element)
-
-    def find(self, element: tuple) -> tuple:
-        self.add(element)
-        root = element
-        while self.parent[root] != root:
-            root = self.parent[root]
-        while self.parent[element] != root:
-            self.parent[element], element = root, self.parent[element]
-        return root
-
-    def union(self, a: tuple, b: tuple) -> None:
-        ra, rb = self.find(a), self.find(b)
-        if ra != rb:
-            # the fixed references stay their own class's root
-            if rb in (REFERENCE, THERMAL_REFERENCE):
-                ra, rb = rb, ra
-            self.parent[rb] = ra
-
-
 def _text(element: tuple) -> str:
     if element[0] == "dc":
         return f"{element[1]}[{element[2]}]"
@@ -210,7 +191,9 @@ def _dc(end: str) -> tuple[tuple, tuple]:
 
 # ------------------------------------------------------------------------------ per class
 def _flag(parameters: dict, name: str) -> bool:
-    return parameters.get(name) is True
+    """A Boolean parameter, its Modelica default when not exported; `_declared_problems`
+    has refused a component whose value is anything but true or false."""
+    return flag(parameters, name, default=FLAG_DEFAULTS.get(name, False))
 
 
 def _heat_enabled(comp: CircuitComponent, role: str) -> str | None:
@@ -310,14 +293,8 @@ def _finite(value) -> float | None:
 def _declared_problems(comp: CircuitComponent, role: str) -> list[str]:
     """Refusal-deciding flags (booleans) and numbers that must have been exported."""
     p, where, problems = comp.parameters, f"{comp.name} ({comp.cls})", []
-    flags = []
-    if comp.cls in schema.LINES:
-        flags.append("use_T")
-    if role == "ideal_transformer":
-        flags.append("considerMagnetization")
-    for key in flags:
-        if not isinstance(p.get(key), bool):
-            problems.append(f"{where}: {key} must be true or false, found {p.get(key)!r}")
+    for key in _FLAGS:
+        flag(p, key, problems=problems, where=where)
     key = {"fixed_temperature": "T", "ac_source": "f"}.get(role)
     if key is not None and _finite(p.get(key)) is None:
         problems.append(f"{where}: {key} must be a finite number, found {p.get(key)!r}")
@@ -477,7 +454,8 @@ def build(doc: CircuitDoc, *, omit: Iterable[str] = ()) -> Netlist:
             frequency = distinct.pop()
 
     # union-find over every active component's elements
-    uf = _UnionFind()
+    # the fixed references stay their own class's root
+    uf = UnionFind(keep_root=lambda e: e in (REFERENCE, THERMAL_REFERENCE))
     uf.add(REFERENCE)
     uf.add(THERMAL_REFERENCE)
     device_elements: dict[str, dict[str, tuple]] = {}

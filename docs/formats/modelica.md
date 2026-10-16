@@ -1,4 +1,39 @@
-# Modelica Buildings Library
+# Modelica
+
+Two readers turn Modelica example models into noodl models: multizone airflow models of the
+Modelica Buildings Library (MBL) into a [building physics](../applications/building_physics.md)
+model (`read_modelica`, [below](#buildings-library-airflow)), and electrical circuits of the
+Modelica Standard Library (MSL) and of MBL's `Buildings.Electrical` into an [electrical
+circuit](../applications/electrical.md) (`read_modelica_circuit`, [Electrical
+circuits](#electrical-circuits)).
+
+## One pipeline
+
+Neither reader parses Modelica source. Both follow the same steps, and share every step that
+is not about their own components (`noodl.modelica`):
+
+1. **Export.** A script run next to OpenModelica (`scripts/modelica_export.py`,
+   `scripts/modelica_export_electrical.py`) writes one JSON document per model from
+   OpenModelica's evaluated instance tree, every parameter already a number, and the
+   reference trajectories as a CSV.
+2. **Load.** The reader's `schema.load` checks the document's shape. The signal record, the
+   structural checks and the reading of Boolean parameters are shared: a Boolean parameter
+   the export does not hold takes its Modelica default, and any value other than `true` or
+   `false` is refused.
+3. **Resolve.** The components are joined into nodes by their `connect()` pairs (one
+   union-find, `noodl._unionfind`), and each class is supported or refused by name.
+4. **Signals.** The `Modelica.Blocks.Sources` and `Modelica.Blocks.Math` blocks are
+   evaluated on the time grid as MSL 4.1.0 defines them (`noodl.modelica.signals`), and each
+   input takes its value from the signal that drives it (`noodl.modelica.inputs`).
+5. **Time grid.** The output grid of the document's `experiment`, plus every event of the
+   signals strictly inside the run, each interval split into `substeps` equal steps
+   (`noodl.modelica.timeline`); `extrapolate` combines two runs at `substeps` `r` and `2r`.
+6. **Refuse or build.** Every problem found is gathered and raised as one
+   `ModelicaImportError`, never a partial model; otherwise the reader returns the model, its
+   start state, its drivers on the grid and the names that map the reference's columns to
+   noodl quantities.
+
+## Buildings Library airflow
 
 Reading a Modelica export produces a model for [building
 physics](../applications/building_physics.md). Power-law, tabulated and door components become
@@ -11,8 +46,6 @@ importer itself as prescribed-flow edge pairs, as set out below.
 Modelica Buildings Library (MBL) v13.0.0 (commit `55abf579598ca81cae0a82f337350375958e6722`)
 through an OpenModelica JSON export. The reader never parses Modelica source and never evaluates
 a Modelica expression: every number in the JSON was already evaluated by OpenModelica.
-Electrical circuits of the Modelica Standard Library and of MBL's `Buildings.Electrical` have
-a reader of their own: see [Electrical circuits](#electrical-circuits) below.
 
 ```python
 from noodl.apps.building_physics import read_modelica
@@ -27,7 +60,7 @@ print(result["air.q"][-1])   # edge flows (kg/s); names.edges maps an MBL instan
 
 **Supported (22 models: 8 `Validation` + 13 `Examples` of `Buildings.Airflow.Multizone`, and
 `Buildings.Fluid.Sources.Examples.Outside_Cp`).** `Buildings.Airflow.Multizone`
-elements, `MixingVolume` zones, pressure/temperature boundaries, trace substances, the outside
+elements, `FlowControlled_dp` movers ("Movers" below), `MixingVolume` zones, pressure/temperature boundaries, trace substances, the outside
 boundaries `Outside`, `Outside_Cp`, `Outside_CpLowRise` and `Outside_CpData` and the weather
 reader `ReaderTMY3` (see "Weather and wind" below) — not `Buildings.ThermalZones`, HVAC or
 district networks. `Validation`: `OneWayFlow`,
@@ -62,6 +95,27 @@ that margin times the jump in the flow. A flow whose direction does not settle (
 direction's density drives it the other way) raises `ConvergenceError`, naming the element.
 Under `Model.step` the transport flows and directions are those of the previous coupling
 pass, converging with the coupling iteration.
+
+**Movers.** `Buildings.Fluid.Movers.FlowControlled_dp` is a fan with a prescribed pressure
+rise, `port_b.p - port_a.p = dp` (`FlowControlled_dp.mo`), whatever the flow: an implicit law,
+the flow an unknown of the air layer, so a model with a mover is solved by Modified Nodal
+Analysis (as are the electrical networks). `inputType = Constant` takes `constantHead` (default
+`dp_nominal`); `Continuous` (MBL's default) takes the signal driving `<mover>.dp_in`, evaluated
+on the driver grid like any other input. The mover is an edge between its two nodes with no
+buoyancy head of its own; it may be wired to a zone or boundary directly, or to a one-way
+element through a junction, where it is one of the elements in series (it passes the stream on
+unchanged), but a hydrostatic column wired to a mover with no flow element between them is
+refused. Only the configuration the law reproduces exactly is accepted, each parameter against
+its MBL default, so an export that omits one is read as MBL would:
+`use_riseTime = false` (the default, true, is a 30 s rate limiter on `dp`),
+`addPowerToMedium = false` (the default, true, heats the air by the fan power),
+`energyDynamics = SteadyState` (the default, `DynamicFreeInitial`, adds a mixing volume of
+1 s time constant), `prescribeSystemPressure = false` and `inputType` `Constant` or
+`Continuous` (`Stages` is refused). Each violation is refused naming the instance and the
+parameter. A mover with volume mass storage is refused too (set `massDynamics = SteadyState`
+or read with `mass_storage=False`): the storage closure evaluates the airflow with
+`KirchhoffLayer.flows`, which an air layer solved by Modified Nodal Analysis does not have.
+`names.edges["<mover>"]` is its `m_flow` column, like a one-way element's.
 
 **Feedback control.** `LimPID` is supported as a P controller, `y = clamp(k (wp u_s - u_m),
 yMin, yMax)`, transcribed from MSL 4.1.0 (`Blocks/Continuous.mo`): its measurement from a
@@ -126,6 +180,9 @@ its class):
   sensor's `T` wired to anything but one of a block's inputs, naming the connection; a
   temperature sensor whose `port` is not wired to a volume's `heatPort`.
 - A `TraceSubstancesFlowSource` with a negative (extracting) flow.
+- A `FlowControlled_dp` with `use_riseTime`, `addPowerToMedium` or `prescribeSystemPressure`
+  true, with `energyDynamics` other than `SteadyState`, with `inputType = Stages`, or with
+  volume mass storage ("Movers" above).
 - Every class outside the supported list above ("component class is not supported", or
   "signal source is not supported" for a signal block), the CDL blocks
   (`Buildings.Controls.OBC.CDL`, their PID and hysteresis included) among them.
@@ -155,7 +212,10 @@ ModelicaImportError: modelica: refused 1 item:
 - Zonal flows are four-port, like doors (not the two-port shape a one-way element has), and
   become two directional edges the same way.
 - An in-line flow sensor (`Buildings.Fluid.Sensors`, flow-through) is a transparent wire: it adds
-  no node and no pressure drop.
+  no node and no pressure drop. So is a zero-resistance connection: a
+  `Fluid.FixedResistances.LosslessPipe`, or a `Fluid.FixedResistances.PressureDrop` with
+  `dp_nominal = 0` (MBL then computes no resistance, `dp = 0`). A `PressureDrop` with any
+  other `dp_nominal` is refused, and so is a short between two volumes or boundaries.
 - `PrescribedHeatFlow` is supported only at `alpha = 0` (MSL's default: no temperature
   dependence); a nonzero `alpha` is refused.
 - A `MassFlowSource_T` with a negative `m_flow` draws air out of its volume. By Modelica's

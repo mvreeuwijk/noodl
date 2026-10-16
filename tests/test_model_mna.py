@@ -419,3 +419,37 @@ def test_model_owned_solve_keywords_are_refused_by_name():
         model.steady(state, drivers, t=0.0, dt=0.1)
     with pytest.raises(ValueError, match=r"\['phi0'\].*set by the Model"):
         model.steady(state, drivers, t=0.0, phi0=torch.zeros(2))
+
+
+def _two_layers():
+    net = _net(["g", "a", "b"], [("a", "g", "r"), ("b", "g", "s")])
+    layers = [KirchhoffLayer(net, name, [Conductance(torch.tensor([1.0]), kind=kind)],
+                             boundary=["g"]) for name, kind in (("c", "r"), ("d", "s"))]
+    state = {f"{n}.{k}": torch.zeros(3 if k == "phi" else 1)
+             for n in ("c", "d") for k in ("phi", "q")}
+    drivers = {"c.phi_boundary": torch.ones(1), "d.phi_boundary": torch.ones(1)}
+    return net, layers, state, drivers
+
+
+def test_layer_options_give_one_layer_its_own_solve_keywords(monkeypatch):
+    net, layers, state, drivers = _two_layers()
+    seen = {}
+    for layer in layers:
+        def spy(*args, _solve=layer.solve, _name=layer.name, **kwargs):
+            seen[_name] = (kwargs.get("atol"), kwargs.get("rtol"))
+            return _solve(*args, **kwargs)
+        monkeypatch.setattr(layer, "solve", spy)
+    model = Model(net, layers)
+    model.steady(state, drivers, atol=1e-12, rtol=1e-14, layer_options={"d": {"atol": 1e-11}})
+    assert seen == {"c": (1e-12, 1e-14), "d": (1e-11, 1e-14)}
+    model.step(state, drivers, 0.1, layer_options={"c": {"rtol": 1e-9}})
+    assert seen == {"c": (None, 1e-9), "d": (None, None)}
+
+
+def test_layer_options_refuse_unknown_layers_and_model_owned_keywords():
+    net, layers, state, drivers = _two_layers()
+    model = Model(net, layers)
+    with pytest.raises(ValueError, match=r"layer_options names \['x'\].*has \['c', 'd'\]"):
+        model.steady(state, drivers, layer_options={"x": {"atol": 1.0}})
+    with pytest.raises(ValueError, match=r"\['phi0'\].*set by the Model"):
+        model.steady(state, drivers, layer_options={"c": {"phi0": torch.zeros(2)}})

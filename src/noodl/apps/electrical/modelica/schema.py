@@ -9,11 +9,11 @@ connection's and signal's fields) and raises `ModelicaImportError` naming the fi
 field. Whether a class is supported is `netlist.build`'s question; this module supplies the
 vocabulary it asks it with: `ROLES` (class -> role), the exporter's class groups `GROUNDS`,
 `WIRES`, `STATES`, `LINES` (equal sets, checked by the export contract test), and the
-refusals `REFUSED` / `REFUSED_PREFIXES` (class -> reason).
+refusals `REFUSED` / `REFUSED_PREFIXES` (class -> reason), and `FLAG_DEFAULTS`, the
+Modelica defaults of the Boolean parameters the reader reads that are not `false`.
 
-The signal record is the building reader's (`noodl.apps.building_physics.modelica.schema`),
-and this reader's `ModelicaImportError` is a subclass of that reader's, so an `except` of
-either error class catches the refusals of both readers' circuits.
+The signal record, the structural checks and `ModelicaImportError` are shared with the
+building reader (`noodl.modelica`).
 """
 
 from __future__ import annotations
@@ -23,27 +23,22 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from noodl.apps.building_physics.modelica import schema as _building
-from noodl.apps.building_physics.modelica.schema import Signal
+from noodl.modelica.errors import ModelicaImportError
+from noodl.modelica.schema import Signal, fail, require_dict, require_list, require_str, signal_from
 
 __all__ = [
     "FORMAT", "GROUNDS", "LINES", "REFUSED", "REFUSED_PREFIXES", "ROLES", "STATES", "WIRES",
-    "CircuitComponent", "CircuitDoc", "ModelicaImportError", "Signal", "domain", "load",
-    "refusal_reason",
+    "CircuitComponent", "CircuitDoc", "FLAG_DEFAULTS", "ModelicaImportError", "Signal",
+    "domain", "load", "refusal_reason",
 ]
 
 FORMAT = "noodl-modelica-electrical/1"
 
 
-class ModelicaImportError(_building.ModelicaImportError):
-    """Raised for a malformed `noodl-modelica-electrical/1` document, or for circuit content
-    the electrical reader does not support.
-
-    The message names every offending field, instance, connector or class (unsupported
-    content is never silently approximated or dropped): `read_modelica_circuit` gathers every
-    refusal it finds and raises exactly one of these. A subclass of the building reader's
-    `ModelicaImportError` (`noodl.apps.building_physics.modelica`).
-    """
+# The Boolean parameters the reader reads whose Modelica default is `true`; every other one
+# it reads defaults to `false` (MBL commit 55abf579: `AC/OnePhase/Conversion/ACDCConverter.mo`,
+# `Interfaces/Impedance.mo`).
+FLAG_DEFAULTS = {"ground_DC": True, "inductive": True}
 
 _MSL = "Modelica.Electrical.Analog."
 _HEAT = "Modelica.Thermal.HeatTransfer."
@@ -196,46 +191,24 @@ class CircuitDoc:
     compared: tuple[str, ...]
 
 
-def _fail(message: str) -> ModelicaImportError:
-    return ModelicaImportError(f"modelica: {message}")
-
-
-def _require_dict(value: Any, where: str) -> dict:
-    if not isinstance(value, dict):
-        raise _fail(f"{where} must be an object, found {value!r}")
-    return dict(value)
-
-
-def _require_str(value: Any, where: str) -> str:
-    if not isinstance(value, str):
-        raise _fail(f"{where} must be a string, found {value!r}")
-    return value
-
-
-def _require_list(value: Any, where: str) -> list:
-    if not isinstance(value, list):
-        raise _fail(f"{where} must be an array, found {value!r}")
-    return value
-
-
 def _numbers(value: Any, where: str) -> dict:
-    obj = _require_dict(value, where)
+    obj = require_dict(value, where)
     for key, v in obj.items():
         if isinstance(v, bool) or not isinstance(v, (int, float)):
-            raise _fail(f"{where}.{key} must be a number, found {v!r}")
+            raise fail(f"{where}.{key} must be a number, found {v!r}")
     return {k: float(v) for k, v in obj.items()}
 
 
 def _component_from(raw: Any, index: int) -> CircuitComponent:
     where = f"components[{index}]"
-    obj = _require_dict(raw, where)
-    name = _require_str(obj.get("name"), f"{where}.name")
+    obj = require_dict(raw, where)
+    name = require_str(obj.get("name"), f"{where}.name")
     where = f"{where} ({name})"
-    cls = _require_str(obj.get("class"), f"{where}.class")
-    parameters = _require_dict(obj.get("parameters", {}), f"{where}.parameters")
+    cls = require_str(obj.get("class"), f"{where}.class")
+    parameters = require_dict(obj.get("parameters", {}), f"{where}.parameters")
     role = obj.get("role")
     if role is not None:
-        _require_str(role, f"{where}.role")
+        require_str(role, f"{where}.role")
     initial = _numbers(obj.get("initial", {}), f"{where}.initial")
     derived = _numbers(obj.get("derived", {}), f"{where}.derived")
     return CircuitComponent(name=name, cls=cls, parameters=parameters, role=role,
@@ -245,24 +218,8 @@ def _component_from(raw: Any, index: int) -> CircuitComponent:
 def _connection_from(raw: Any, index: int) -> tuple[str, str]:
     where = f"connections[{index}]"
     if not isinstance(raw, list) or len(raw) != 2:
-        raise _fail(f"{where} must be a 2-element array, found {raw!r}")
-    return (_require_str(raw[0], f"{where}[0]"), _require_str(raw[1], f"{where}[1]"))
-
-
-def _signal_from(raw: Any, index: int) -> Signal:
-    where = f"signals[{index}]"
-    obj = _require_dict(raw, where)
-    name = _require_str(obj.get("name"), f"{where}.name")
-    where = f"{where} ({name})"
-    cls = _require_str(obj.get("class"), f"{where}.class")
-    parameters = _require_dict(obj.get("parameters", {}), f"{where}.parameters")
-    drives = obj.get("drives")
-    if isinstance(drives, str):
-        drives = [drives]
-    if not (isinstance(drives, list) and drives and all(isinstance(d, str) for d in drives)):
-        raise _fail(f"{where}.drives must be a string or a non-empty list of strings, "
-                    f"found {obj.get('drives')!r}")
-    return Signal(name=name, cls=cls, parameters=parameters, drives=tuple(drives))
+        raise fail(f"{where} must be a 2-element array, found {raw!r}")
+    return (require_str(raw[0], f"{where}[0]"), require_str(raw[1], f"{where}[1]"))
 
 
 def load(path: str | Path) -> CircuitDoc:
@@ -275,26 +232,26 @@ def load(path: str | Path) -> CircuitDoc:
     try:
         raw = json.loads(Path(path).read_text(encoding="utf-8"))
     except json.JSONDecodeError as exc:
-        raise _fail(f"{path}: not valid JSON ({exc})") from exc
-    obj = _require_dict(raw, str(path))
+        raise fail(f"{path}: not valid JSON ({exc})") from exc
+    obj = require_dict(raw, str(path))
     fmt = obj.get("format")
     if fmt != FORMAT:
-        raise _fail(f"{path}: format is {fmt!r}, expected {FORMAT!r}")
-    strings = {key: _require_str(obj.get(key), key)
+        raise fail(f"{path}: format is {fmt!r}, expected {FORMAT!r}")
+    strings = {key: require_str(obj.get(key), key)
                for key in ("model", "mbl_commit", "openmodelica", "msl")}
-    experiment = _require_dict(obj.get("experiment"), "experiment")
+    experiment = require_dict(obj.get("experiment"), "experiment")
     components = tuple(_component_from(c, i) for i, c in
-                       enumerate(_require_list(obj.get("components"), "components")))
+                       enumerate(require_list(obj.get("components"), "components")))
     connections = tuple(_connection_from(c, i) for i, c in
-                        enumerate(_require_list(obj.get("connections", []), "connections")))
-    signals = tuple(_signal_from(s, i) for i, s in
-                    enumerate(_require_list(obj.get("signals", []), "signals")))
-    compared = _require_list(obj.get("compared"), "compared")
+                        enumerate(require_list(obj.get("connections", []), "connections")))
+    signals = tuple(signal_from(s, i) for i, s in
+                    enumerate(require_list(obj.get("signals", []), "signals")))
+    compared = require_list(obj.get("compared"), "compared")
     for i, column in enumerate(compared):
-        _require_str(column, f"compared[{i}]")
+        require_str(column, f"compared[{i}]")
     names = [c.name for c in components]
     dupes = sorted({n for n in names if names.count(n) > 1})
     if dupes:
-        raise _fail(f"duplicate component name(s): {', '.join(dupes)}")
+        raise fail(f"duplicate component name(s): {', '.join(dupes)}")
     return CircuitDoc(experiment=experiment, components=components, connections=connections,
                       signals=signals, compared=tuple(compared), **strings)

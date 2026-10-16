@@ -15,6 +15,7 @@ class Conductance(ConstitutiveLaw):
     """
 
     phasor_capable = True
+    linear = True
 
     def __init__(self, g, *, kind: str = "conduction", learnable: bool = False) -> None:
         super().__init__(kind)

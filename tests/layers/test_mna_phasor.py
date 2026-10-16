@@ -322,7 +322,7 @@ def test_classic_power_residual_bit_for_bit():
     d = layer.dp(phi, {})
     drive_only = d - layer._difference(phi)
     old = ((d * q).sum(-1) - (drive_only * q).sum(-1)
-           - (phi[..., layer.bound] * layer._accumulate_bound(q)).sum(-1)
+           - (phi[..., layer.bound] * layer.net_outflow(q)[..., layer.bound]).sum(-1)
            - (phi[..., layer.interior] * sources[..., layer.interior]).sum(-1))
     assert torch.equal(layer.power_residual(phi, q, {}, sources), old)
 

@@ -301,7 +301,7 @@ def test_fixed_flow_and_node_source_still_work_in_mna():
     phi, q = layer.solve(torch.zeros(1), {}, sources, differentiable=False)
     withdrawal = torch.zeros(net.n)
     withdrawal[nodes] = 0.2 * phi[nodes]
-    torch.testing.assert_close(layer._accumulate_interior(q),
+    torch.testing.assert_close(layer.net_outflow(q)[..., layer.interior],
                                (sources - withdrawal)[layer.interior], rtol=0, atol=1e-12)
     # Hand values: a = 2; KCL b: the inflow a - b equals 0.3 (f) + 0.2 b - 0.1 (source),
     # so b = 1.8 / 1.2 = 1.5; KCL c: 0.5 c + 0.2 c = 0.3 (f inflow), so c = 3/7.

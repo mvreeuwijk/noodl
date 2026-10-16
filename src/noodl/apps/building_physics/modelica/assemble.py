@@ -72,6 +72,17 @@ the coupling iteration (to its `iterate_tol`), and the initial state carries the
 the start, so that the first pass has flows to read. `run._Midpoint` gives it the latest
 solved flows instead.
 
+Movers
+------
+A `FlowControlled_dp` (`graph.FlowPath` of a mover) is the edge kind `"airpath:<name>"` with the
+implicit law `_MoverHead`, `(phi_a - phi_b) + dp = 0` (MBL: `port_b.p - port_a.p = dp`), `dp`
+its `constantHead` or the signal driving `dp_in` (a driver `"<name>.dp_in"`). The air layer
+then holds an implicit law and is solved by Modified Nodal Analysis; every MBL feature the law
+does not reproduce (`use_riseTime`, `addPowerToMedium`, a dynamic `energyDynamics`,
+`prescribeSystemPressure`, `inputType = Stages`) is refused by name, and so is volume mass
+storage with a mover (the storage closure uses `KirchhoffLayer.flows`, which an MNA layer does
+not define). A mover passes the stream on unchanged, so its flow joins the transport flows.
+
 Volume mass storage
 -------------------
 By default (`build(..., mass_storage=None)`) every volume whose `massDynamics` is not
@@ -260,7 +271,6 @@ it implicitly. `ModelicaNames.controls` names each block's output column of
 
 from __future__ import annotations
 
-import bisect
 from collections.abc import Collection, Mapping
 from dataclasses import dataclass, field
 
@@ -272,7 +282,6 @@ from noodl.apps.building_physics.modelica import (
     feedback,
     outside,
     schema,
-    signals,
     storage,
     weather,
 )
@@ -299,11 +308,13 @@ from noodl.elements import (
     power_law_from_points,
     regularized_orifice,
 )
-from noodl.elements.base import ConstitutiveLaw, memo
+from noodl.elements.base import ConstitutiveLaw, ImplicitLaw, memo
 from noodl.elements.media import _moist_air_buoyancy_density
 from noodl.layers.kirchhoff import KirchhoffLayer
 from noodl.layers.transport import TransportLayer, active_interior
 from noodl.model import Drivers, Model, State
+from noodl.modelica import signals, timeline
+from noodl.modelica.inputs import SignalResolver
 from noodl.topology import Network
 
 Tensor = torch.Tensor
@@ -374,18 +385,8 @@ def _t(value) -> Tensor:
 
 
 def experiment_times(doc: ModelicaDoc) -> Tensor:
-    """The output grid `StartTime + k Interval`, `k = 0..N` (Modelica's default `Interval`
-    is `(StopTime - StartTime)/500`)."""
-    start = float(doc.experiment.get("StartTime", 0.0))
-    stop = float(doc.experiment.get("StopTime", 1.0))
-    interval = float(doc.experiment.get("Interval", (stop - start) / 500.0))
-    if not interval > 0.0 or stop < start:
-        raise ModelicaImportError(
-            f"modelica: experiment needs StopTime >= StartTime and Interval > 0, got "
-            f"{doc.experiment}"
-        )
-    n = int(round((stop - start) / interval))
-    return start + interval * torch.arange(n + 1, dtype=F64)
+    """The output grid of `doc` (`noodl.modelica.timeline.experiment_times`)."""
+    return timeline.experiment_times(doc.experiment)
 
 
 # Signal events (`signals.events`): the times where a signal's output jumps and where it
@@ -393,21 +394,6 @@ def experiment_times(doc: ModelicaDoc) -> Tensor:
 # grid, so that no step straddles one (`driver_grid`), and `run.simulate` restarts its
 # step sequence at each (`grid_events`). A Sine's quarter periods are smooth and are left
 # alone.
-
-
-def _signal_events(doc: ModelicaDoc, lo: float, hi: float) -> tuple[set[float], set[float]]:
-    jumps: set[float] = set()
-    kinks: set[float] = set()
-    for sig in doc.signals:
-        if signals.is_math(sig):
-            continue
-        try:
-            j, k = signals.events(sig, lo, hi)
-        except ModelicaImportError:
-            continue  # reported by name when the signal is evaluated
-        jumps |= set(j)
-        kinks |= set(k)
-    return jumps, kinks - jumps
 
 
 def _weather_events(doc: ModelicaDoc, lo: float, hi: float) -> tuple[set[float], set[float]]:
@@ -431,49 +417,23 @@ def _events(doc: ModelicaDoc, lo: float, hi: float) -> tuple[set[float], set[flo
     """`(jumps, kinks, breaks)` in `(lo, hi)`: the signals' jumps and a weather file's year
     wraps, the signals' kinks, and the weather breaks (`weather.reader_events`), which are step
     boundaries but not events (module docstring, "Weather and wind")."""
-    jumps, kinks = _signal_events(doc, lo, hi)
+    jumps, kinks = timeline.signal_events(doc.signals, lo, hi)
     year_wraps, breaks = _weather_events(doc, lo, hi)
     jumps |= year_wraps
     return jumps, kinks - jumps, breaks
 
 
 def driver_grid(doc: ModelicaDoc, substeps: int = 1) -> Tensor:
-    """The time grid the drivers are evaluated on and `run.simulate` steps over: the BASE
-    grid, the output grid (`experiment_times`) plus every event time strictly inside the run
-    (`signals.events`: where a signal's output jumps, a `Step`'s start, a `Pulse`'s edges, or
-    kinks, a `Ramp`'s corners, a table's knots), plus the weather breaks
+    """The time grid the drivers are evaluated on and `run.simulate` steps over
+    (`noodl.modelica.timeline.driver_grid`): the output grid plus every event time strictly
+    inside the run (`signals.events`: where a signal's output jumps, a `Step`'s start, a
+    `Pulse`'s edges, or kinks, a `Ramp`'s corners, a table's knots), plus the weather breaks
     (`weather.reader_events`: the table's knots and limiter crossings), which are step
-    boundaries but not events, with each of its intervals split into
-    `substeps` equal steps. With the source drivers step means (module docstring,
-    "Sources"), a step then never straddles an event: the drivers are smooth within every
-    step (`Examples/CO2TransportStep.mo`'s 3.6 s pulse starts and ends on step boundaries
-    instead of being spread over a 172.8 s step). Splitting the base intervals, not the
-    output intervals, makes the grid at `2 r` substeps the grid at `r` with every step
-    halved, which `run.extrapolate` relies on."""
-    if int(substeps) != substeps or substeps < 1:
-        raise ValueError(f"modelica: substeps must be a positive integer, got {substeps!r}")
-    out = experiment_times(doc)
-    lo, hi = float(out[0]), float(out[-1])
-    jumps, kinks, breaks = _events(doc, lo, hi)
-    # An event within round-off of an output time is that time.
-    tol = 1e-9 * max(1.0, abs(hi))
-    outs = out.tolist()
-    kept: list[float] = []
-    for t in sorted(set(outs) | jumps | kinks | breaks):
-        k = bisect.bisect_left(outs, t)
-        near = [outs[i] for i in (k - 1, k) if 0 <= i < len(outs)]
-        if near and min(abs(o - t) for o in near) <= tol:
-            t = min(near, key=lambda o: abs(o - t))
-        if kept and t - kept[-1] <= tol:
-            continue
-        kept.append(t)
-    base = torch.tensor(sorted(set(kept)), dtype=F64)
-    if substeps == 1:
-        return base
-    frac = torch.arange(substeps, dtype=F64) / substeps
-    a, b = base[:-1], base[1:]
-    inner = (a.unsqueeze(1) + (b - a).unsqueeze(1) * frac).reshape(-1)
-    return torch.cat([inner, base[-1:]])
+    boundaries but not events, with each interval split into `substeps` equal steps. With the
+    source drivers step means (module docstring, "Sources"), a step then never straddles an
+    event: the drivers are smooth within every step (`Examples/CO2TransportStep.mo`'s 3.6 s
+    pulse starts and ends on step boundaries instead of being spread over a 172.8 s step)."""
+    return timeline.driver_grid(doc.experiment, lambda lo, hi: _events(doc, lo, hi), substeps)
 
 
 def grid_events(doc: ModelicaDoc, grid: Tensor) -> tuple[Tensor, Tensor]:
@@ -481,19 +441,7 @@ def grid_events(doc: ModelicaDoc, grid: Tensor) -> tuple[Tensor, Tensor]:
     jumps, and those at which it only kinks (`signals.events`), each event moved to the
     grid time it was merged into. A repeating weather file's year wrap is a jump; its knots
     and limiter crossings are neither (module docstring, "Weather and wind")."""
-    grid = torch.as_tensor(grid, dtype=F64)
-    lo, hi = float(grid[0]), float(grid[-1])
-    jumps, kinks, _ = _events(doc, lo, hi)
-
-    def on_grid(ts: set[float]) -> Tensor:
-        if not ts:
-            return torch.zeros(0, dtype=F64)
-        t = torch.tensor(sorted(ts), dtype=F64)
-        k = (t.unsqueeze(1) - grid.unsqueeze(0)).abs().argmin(dim=1)
-        return torch.unique(grid[k])
-
-    j, k = on_grid(jumps), on_grid(kinks)
-    return j, k[~torch.isin(k, j)]
+    return timeline.grid_events(grid, lambda lo, hi: _events(doc, lo, hi))
 
 
 def _rows(grid: Tensor, times: Tensor) -> Tensor:
@@ -533,114 +481,26 @@ def _stack_nested(rows: list[list[Tensor]], K: int, n_t: int) -> tuple[Tensor, b
     return torch.stack([torch.stack(r) for r in rows]), False
 
 
-class _Signals:
-    """The document's signals keyed by the input they drive, evaluated on the time grid.
+class _Signals(SignalResolver):
+    """The document's signals keyed by the input they drive, evaluated on the time grid
+    (`noodl.modelica.inputs.SignalResolver`).
 
-    A `Modelica.Blocks.Math` block (`signals.combine`) takes the value of each of its inputs
-    `"<block>.<input>"` from the signal that drives it, recursively, so a chain such as
-    `ramp -> add.u1`, `add -> bouA.p_in` is evaluated from its sources outwards. A block
-    input nothing drives, and a loop of blocks with no sensor in it, are refused by name. The
-    closed-loop blocks (`closed`, `feedback.closed_loop`) are left to the feedback network.
+    A constant signal stays a 0-d constant driver (`get`, `require`, `mean`, `point`). The
+    closed-loop blocks (`closed`, `feedback.closed_loop`) are left to the feedback network,
+    and an input of an observer the reader ignores is never refused as unread.
     """
 
     def __init__(self, doc: ModelicaDoc, times: Tensor, kind_of: Mapping[str, str],
                  errors: list[str]) -> None:
+        super().__init__(doc.signals, times, errors)
         self.times = times
-        self.errors = errors
-        self.by_target: dict[str, schema.Signal] = {}
-        self.used: set[str] = set()
         self.kind_of = kind_of
-        self.signal_names = {s.name for s in doc.signals}
-        # The closed-loop blocks (`feedback.closed_loop`): never evaluated here (their inputs
-        # are the state's), and their inputs and outputs are read by the feedback network.
-        self.closed: set[str] = set()
-        self._values: dict[str, Tensor | None] = {}
-        for s in doc.signals:
-            for target in s.drives:  # one block output may feed several inputs
-                if target in self.by_target:
-                    errors.append(
-                        f"{s.name} ({s.cls}): drives {target}, which "
-                        f"{self.by_target[target].name} already drives"
-                    )
-                    continue
-                self.by_target[target] = s
 
     def get(self, target: str) -> Tensor | None:
-        s = self.by_target.get(target)
-        if s is None:
-            return None
-        self.used.add(target)
-        y = self._series(s, ())
-        if y is None:
-            return None
-        if bool((y == y[0]).all()):
-            return y[0].clone()  # a constant signal stays a constant driver
-        return y.clone()
-
-    def _series(self, s: schema.Signal, chain: tuple[str, ...]) -> Tensor | None:
-        """`s`'s output over the whole grid, `(n_t,)`; `None` (with an error) if it cannot
-        be evaluated. Evaluated once, however many inputs it feeds."""
-        if s.name in self._values:
-            return self._values[s.name]
-        if s.name in self.closed:
-            return None  # read by the feedback network (`feedback`), not over the grid
-        if s.name in chain:
-            loop = " -> ".join((*chain[chain.index(s.name):], s.name))
-            self.errors.append(f"{s.name} ({s.cls}): signal loop {loop} (feedback is not "
-                               f"supported)")
-            return None
-        y: Tensor | None = None
-        try:
-            if signals.is_math(s):
-                inputs: dict[str, Tensor] = {}
-                for port in signals.math_inputs(s):
-                    target = f"{s.name}.{port}"
-                    src = self.by_target.get(target)
-                    if src is None:
-                        self.errors.append(f"{s.name} ({s.cls}): input {port} is not driven "
-                                           f"by any supported signal")
-                        continue
-                    self.used.add(target)
-                    value = self._series(src, (*chain, s.name))
-                    if value is not None:
-                        inputs[port] = value
-                if len(inputs) == len(signals.math_inputs(s)):
-                    y = signals.combine(s, inputs).expand(self.times.shape).clone()
-            else:
-                y = signals.evaluate(s, self.times, t_start=float(self.times[0]))
-        except ModelicaImportError as exc:
-            self.errors.append(str(exc).removeprefix("modelica: "))
-            y = None
-        self._values[s.name] = y
-        return y
+        return _constant(self.series(target))
 
     def require(self, comp: Component, port: str) -> Tensor | None:
-        y = self.get(f"{comp.name}.{port}")
-        if y is None and f"{comp.name}.{port}" not in self.by_target:
-            self.errors.append(
-                f"{comp.name} ({comp.cls}): input {port} is enabled but no supported signal "
-                f"drives it"
-            )
-        return y
-
-    # --------------------------------------------------------- interval means
-    def _at(self, s: schema.Signal, t: Tensor) -> Tensor:
-        """`s`'s output at arbitrary times `t` (interior quadrature nodes; `get`/`require`
-        have already evaluated `s` on the grid and recorded any error, so this cannot
-        fail on a signal they returned)."""
-        if signals.is_math(s):
-            inputs = {port: self._at(self.by_target[f"{s.name}.{port}"], t)
-                      for port in signals.math_inputs(s)}
-            return signals.combine(s, inputs).expand(t.shape)
-        return signals.evaluate(s, t)
-
-    def _breaks(self, s: schema.Signal, lo: float, hi: float) -> set[float]:
-        if signals.is_math(s):
-            out: set[float] = set()
-            for port in signals.math_inputs(s):
-                out |= self._breaks(self.by_target[f"{s.name}.{port}"], lo, hi)
-            return out
-        return set(signals.breakpoints(s, lo, hi))
+        return _constant(super().require(comp, port))
 
     def mean(self, fn, *terms) -> Tensor:
         """`fn(*values)` averaged over every step (`signals.interval_means`): entry `k >= 1`
@@ -654,22 +514,18 @@ class _Signals:
         an event inside it (`Examples/CO2TransportStep.mo`: a 3.6 s pulse between two
         172.8 s output times would inject nothing). The mean makes the injected amount
         per step exact."""
-        driven = [self.by_target[x] for x in terms if isinstance(x, str)]
+        driven = [x for x in terms if isinstance(x, str)]
         if not driven:
             return torch.as_tensor(fn(*terms), dtype=F64)
-        lo, hi = float(self.times[0]), float(self.times[-1])
         breaks: set[float] = set()
-        for s in driven:
-            breaks |= self._breaks(s, lo, hi)
+        for x in driven:
+            breaks |= self.breaks(x)
 
         def values(t: Tensor) -> Tensor:
-            return fn(*(self._at(self.by_target[x], t) if isinstance(x, str)
+            return fn(*(self.values_at(x, t) if isinstance(x, str)
                         else torch.as_tensor(x, dtype=F64) for x in terms))
 
-        y = signals.interval_means(values, self.times, breaks)
-        if bool((y == y[0]).all()):
-            return y[0].clone()
-        return y
+        return _constant(signals.interval_means(values, self.times, breaks))
 
     def point(self, fn, *terms) -> Tensor:
         """`fn(*values)` at every grid time (the left limit at an event, `signals`
@@ -677,29 +533,22 @@ class _Signals:
         values = [self.get(x) if isinstance(x, str) else torch.as_tensor(x, dtype=F64)
                   for x in terms]
         y = torch.as_tensor(fn(*values), dtype=F64)
-        if y.ndim and bool((y == y[0]).all()):
-            return y[0].clone()
-        return y
+        return _constant(y) if y.ndim else y
 
     def check_unused(self, instances: Collection[str] | None = None) -> None:
         """Refuse every signal driving an input nothing read; only the inputs of `instances`
-        when given."""
-        for target, s in self.by_target.items():
-            if target in self.used:
-                continue
-            inst = target.split(".", 1)[0]
-            if instances is not None and inst not in instances:
-                continue
-            if self.kind_of.get(inst) == "observer":
-                continue  # feeds a block the reader ignores
-            if inst in self.closed or s.name in self.closed:
-                continue  # read, or refused by name, by the feedback network
-            if inst in self.signal_names:
-                continue  # feeds a Math block that is itself unused: reported for that block
-            self.errors.append(
-                f"{s.name} ({s.cls}): drives {target}, which this reader does not read "
-                f"(the input is disabled or not supported)"
-            )
+        when given. An observer's inputs feed a block the reader ignores."""
+        super().check_unused(instances,
+                             ignore=lambda inst, s: self.kind_of.get(inst) == "observer")
+
+
+def _constant(y: Tensor | None) -> Tensor | None:
+    """A series that holds one value throughout as that 0-d value; otherwise a copy."""
+    if y is None:
+        return None
+    if bool((y == y[0]).all()):
+        return y[0].clone()
+    return y.clone()
 
 
 # ------------------------------------------------------------------------- drives
@@ -798,6 +647,73 @@ class _ZonalFlowEdge(ConstitutiveLaw):
     def linear_init(self, drivers=None) -> tuple[Tensor, Tensor]:
         v = self._value(drivers)
         return v, torch.zeros_like(v)
+
+
+class _MoverHead(ImplicitLaw):
+    """A `Buildings.Fluid.Movers.FlowControlled_dp` with its pressure rise prescribed: the
+    relation `dp_mover = port_b.p - port_a.p` (`FlowControlled_dp.mo`: `dp_internal = dp_in`
+    for `inputType = Continuous`, `constantHead` for `Constant`), the mass flow an unknown of
+    the layer (`m_flow` follows from the rest of the network, the mover's own flow
+    characteristic is not used). The edge runs from `port_a` to `port_b`, so the layer's
+    `dp = phi[a] - phi[b]` is `-dp_mover` and the residual is `dp + dp_mover`; linear in
+    `(dp, q)` given the driver. `key` names the driver that holds `dp_in` (Pa), or `None`
+    when the rise is the constant `head`.
+    """
+
+    linear = True
+
+    def __init__(self, *, kind: str, head: float | None = None, key: str | None = None) -> None:
+        super().__init__(kind)
+        self.head, self.key = head, key
+
+    def residual(self, dp, q, drivers, ctx):
+        if self.key is None:
+            return dp + self.head
+        u = torch.as_tensor(drivers[self.key])
+        return dp + (u.unsqueeze(-1) if u.ndim else u.reshape(1))
+
+
+def _mover(comp: Component, kind: str, sig: _Signals, inputs: dict[str, Tensor],
+           errors: list[str]) -> ConstitutiveLaw | None:
+    """The law of a `FlowControlled_dp` (`_MoverHead`); every MBL feature the law does not
+    reproduce is refused by name, each against its MBL default (`FlowControlled_dp.mo`,
+    `PartialFlowMachine.mo`)."""
+    p = comp.parameters
+    bad = len(errors)
+
+    def refuse(why: str) -> None:
+        errors.append(f"{comp.name} ({comp.cls}): {why}")
+
+    if p.get("use_riseTime", True) is not False:  # default true: a 30 s rate limiter on dp
+        refuse("use_riseTime must be false (MBL's default, true, passes the pressure rise "
+               "through a rate limiter)")
+    if p.get("addPowerToMedium", True) is not False:  # default true: heat added to the air
+        refuse("addPowerToMedium must be false (MBL's default, true, heats the air by the "
+               "fan power)")
+    dyn = _short(p.get("energyDynamics"), "DynamicFreeInitial")
+    if dyn != "SteadyState":
+        refuse(f"energyDynamics = {dyn} is not supported (the mover then holds a mixing "
+               f"volume; only SteadyState)")
+    if p.get("prescribeSystemPressure", False) is not False:
+        refuse("prescribeSystemPressure = true is not supported")
+    mode = _short(p.get("inputType"), "Continuous")
+    head, key = None, None
+    if mode == "Constant":
+        head = p.get("constantHead", p.get("dp_nominal"))
+        if head is None:
+            refuse("inputType = Constant needs constantHead (or dp_nominal); neither exported")
+        else:
+            head = float(head)
+    elif mode == "Continuous":
+        dp_in = sig.require(comp, "dp_in")
+        if dp_in is not None:
+            key = f"{comp.name}.dp_in"
+            inputs[key] = dp_in
+    else:
+        refuse(f"inputType = {mode} is not supported (Constant and Continuous are)")
+    if len(errors) > bad or (head is None and key is None):
+        return None
+    return _MoverHead(kind=kind, head=head, key=key)
 
 
 # ------------------------------------------------------------------------- closure
@@ -1466,6 +1382,15 @@ class _Builder:
             errors.append("mass_storage=True: no volume has a dynamic mass balance "
                           "(massDynamics is SteadyState everywhere)")
         use_storage = bool(storage_zones)
+        if use_storage:
+            for path in g.paths:
+                if path.element.cls in schema.MOVERS:
+                    errors.append(
+                        f"{path.element.name} ({path.element.cls}): a prescribed-pressure "
+                        f"mover with volume mass storage is not supported (its air layer is "
+                        f"solved by Modified Nodal Analysis, which the storage closure's "
+                        f"flow evaluations cannot use); set massDynamics = SteadyState or "
+                        f"read with mass_storage=False")
 
         node_names = [n for n in g.zones] + [n for n in g.boundaries] + list(g.junctions)
         index = {n: i for i, n in enumerate(node_names)}
@@ -2109,7 +2034,10 @@ class _Builder:
               pressure_edges) -> None:
         comp = path.element
         kind = f"airpath:{comp.name}"
-        el = _one_way(comp, kind, self.med, self.errors)
+        if comp.cls in schema.MOVERS:
+            el = _mover(comp, kind, self.sig, self._inputs, self.errors)
+        else:
+            el = _one_way(comp, kind, self.med, self.errors)
         coeff, nodes, nodes_reverse = [], [], []
         # The stream arriving from each side: across a junction, the run's end there.
         src, tgt = self._ends.get(comp.name, (path.src, path.tgt))

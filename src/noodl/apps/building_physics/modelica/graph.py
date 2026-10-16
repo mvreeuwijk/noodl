@@ -86,6 +86,14 @@ zone/boundary ends, oriented along its first element in name order. A run that c
 itself with no zone or boundary (a ring of flow elements) is refused, naming its elements,
 and so is a door or zonal flow inside a column chain.
 
+Movers
+------
+A `FlowControlled_dp` (`schema.MOVERS`) is a two-port element like a one-way one and is read
+like it: a `FlowPath` from its `port_a` side to its `port_b` side, in a run of elements in
+series when it meets a one-way element at a junction. A mover owns no columns (the columns
+between it and a one-way element go with the one-way element) and a column wired to a mover
+with no flow element between them is refused.
+
 Two-way elements
 ----------------
 A door (`DoorOpen`, `DoorOperable`, `DoorDiscretizedOpen`, `DoorDiscretizedOperable`) and a
@@ -98,13 +106,16 @@ and `port_a2` (`Validation/ThreeRoomsContam.mo:149-179` wires `dooOpeClo` this w
 pairing -- `port_a1` and `port_b2` resolving to different nodes, or the two sides coinciding --
 is refused, naming the instance.
 
-In-line flow sensors
---------------------
+In-line flow sensors and zero-resistance connections
+----------------------------------------------------
 A two-port flow-through sensor (`schema.INLINE_SENSORS`: `MassFlowRate`, `DensityTwoPort`,
 `TemperatureTwoPort` and every other `Buildings.Fluid.Sensors` class extending
 `Sensors/BaseClasses/PartialFlowSensor.mo`) has no pressure drop and no storage
 (`PartialFlowSensor.mo:13-24`: `port_b.m_flow = -port_a.m_flow`, `port_a.p = port_b.p`, and
-enthalpy, water and trace substances passed through unchanged). Its two ports are joined into
+enthalpy, water and trace substances passed through unchanged). So has a zero-resistance
+connection (`schema.SHORTS`: a `FixedResistances.LosslessPipe`, or a
+`FixedResistances.PressureDrop` with `dp_nominal = 0`, which is `dp = 0`; any other
+`dp_nominal` is refused), and it is read the same way. Its two ports are joined into
 one node -- the sensor is a transparent wire -- and its ports do not count towards a junction's
 degree, so `ori.port_b - sen.port_a`, `sen.port_b - col.port_a` is the same degree-two junction
 as `ori.port_b - col.port_a`. Each such sensor is recorded as an `InlineSensor`: the node it
@@ -154,13 +165,15 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 
-from noodl.apps.building_physics.modelica import schema, signals
+from noodl._unionfind import UnionFind
+from noodl.apps.building_physics.modelica import schema
 from noodl.apps.building_physics.modelica.schema import (
     Component,
     ModelicaDoc,
     ModelicaImportError,
     Signal,
 )
+from noodl.modelica import signals
 
 _FIXED_TEMPERATURE = "Buildings.HeatTransfer.Sources.FixedTemperature"
 _THERMAL_CONDUCTOR = "Modelica.Thermal.HeatTransfer.Components.ThermalConductor"
@@ -255,32 +268,6 @@ class ComponentGraph:
     series: tuple[SeriesChain, ...] = ()
 
 
-class _UnionFind:
-    def __init__(self) -> None:
-        self._parent: dict[str, str] = {}
-
-    def __contains__(self, x: str) -> bool:
-        return x in self._parent
-
-    def find(self, x: str) -> str:
-        self._parent.setdefault(x, x)
-        root = x
-        while self._parent[root] != root:
-            root = self._parent[root]
-        while self._parent[x] != root:
-            self._parent[x], x = root, self._parent[x]
-        return root
-
-    def union(self, a: str, b: str) -> None:
-        ra, rb = self.find(a), self.find(b)
-        if ra != rb:
-            self._parent[ra] = rb
-
-    def groups(self) -> dict[str, set[str]]:
-        out: dict[str, set[str]] = {}
-        for x in self._parent:
-            out.setdefault(self.find(x), set()).add(x)
-        return out
 
 
 class _ChainRefused(Exception):
@@ -315,8 +302,10 @@ def _split(ref: str, errors: list[str] | None = None) -> tuple[str, str] | None:
     return instance, port
 
 
+_PRESSURE_DROP = "Buildings.Fluid.FixedResistances.PressureDrop"
+
 def _kind_of(cls: str, role: str | None) -> str:
-    if cls in schema.INLINE_SENSORS:
+    if cls in schema.INLINE_SENSORS or cls in schema.SHORTS:
         return "inline"  # before the role check: the exporter marks sensors as observers
     if cls in schema.HEAT_SENSORS:
         return "heat_sensor"
@@ -330,6 +319,8 @@ def _kind_of(cls: str, role: str | None) -> str:
         return "boundary"
     if cls in schema.ONE_WAY:
         return "one_way"
+    if cls in schema.MOVERS:
+        return "mover"
     if cls in schema.TWO_WAY:
         return "door"
     if cls in schema.COLUMNS:
@@ -352,7 +343,7 @@ def _kind_of(cls: str, role: str | None) -> str:
 def _is_fluid_port(kind: str, port: str) -> bool:
     if kind in ("zone", "boundary", "source"):
         return bool(_ARRAY_PORT.match(port))
-    if kind in ("one_way", "column", "inline"):
+    if kind in ("one_way", "mover", "column", "inline"):
         return port in _TWO_PORT
     if kind in ("door", "zonal"):
         return port in _FOUR_PORT
@@ -395,7 +386,7 @@ class _Ctx:
     by_name: dict[str, Component]
     kind_of: dict[str, str]
     errors: list[str]
-    uf: _UnionFind = field(default_factory=_UnionFind)
+    uf: UnionFind = field(default_factory=UnionFind)
     fluid_refs_by_instance: dict[str, list[str]] = field(default_factory=dict)
     # Fluid ports of supported components wired to a refused ("unknown") component: their
     # "not connected" follow-on is suppressed, the refused component being the root cause.
@@ -425,6 +416,11 @@ def _classify_components(doc: ModelicaDoc) -> _Ctx:
             errors.append(
                 f"{c.name} ({c.cls}): allowFlowReversal = false is not supported (MBL then "
                 f"passes default properties backwards through the sensor)"
+            )
+        if c.cls == _PRESSURE_DROP and c.parameters.get("dp_nominal") != 0:
+            errors.append(
+                f"{c.name} ({c.cls}): dp_nominal = {c.parameters.get('dp_nominal')!r}; only "
+                f"a zero-resistance connection (dp_nominal = 0) is supported"
             )
         if kind == "unknown":
             reason = schema.refusal_reason(c.cls) or "component class is not supported"
@@ -680,7 +676,7 @@ def _resolve_sensors(doc: ModelicaDoc, ctx: _Ctx) -> list[InlineSensor]:
         for side, s in (("port_a", -1), ("port_b", 1)):
             found = beyond(f"{name}.{side}")
             if len(found) == 1 and ctx.kind_of[_split(found[0])[0]] in (
-                "one_way", "door", "zonal", "column"
+                "one_way", "mover", "door", "zonal", "column"
             ):
                 port, sign = found[0], s
                 break
@@ -747,7 +743,7 @@ def _fuse_paths(ctx: _Ctx) -> tuple[list[FlowPath], list[str]]:
                 exit_port = "port_b" if other_port == "port_a" else "port_a"
                 ref = f"{other_inst}.{exit_port}"
                 continue
-            if other_kind == "one_way":
+            if other_kind in ("one_way", "mover"):
                 end.element = other_inst
                 return end
             if other_kind in ("door", "zonal"):
@@ -762,7 +758,8 @@ def _fuse_paths(ctx: _Ctx) -> tuple[list[FlowPath], list[str]]:
         the other (module docstring, "Flow elements in series")."""
         if end.element is None:
             return end.node, end.columns
-        owner = min(name, end.element)
+        # A mover never owns columns (it has no `dp_nominal` head to add them to).
+        owner = min(name, end.element, key=lambda n: (ctx.kind_of[n] == "mover", n))
         root = end.roots[-1] if name == owner else end.roots[0]
         junction = ctx.root_to_name[root]
         junctions.add(junction)
@@ -770,7 +767,7 @@ def _fuse_paths(ctx: _Ctx) -> tuple[list[FlowPath], list[str]]:
 
     paths: list[FlowPath] = []
     for name, comp in ctx.by_name.items():
-        if ctx.kind_of[name] != "one_way":
+        if ctx.kind_of[name] not in ("one_way", "mover"):
             continue
         try:
             src, cols_a = side(name, walk(f"{name}.port_a", reversed_walk=True))
@@ -780,6 +777,11 @@ def _fuse_paths(ctx: _Ctx) -> tuple[list[FlowPath], list[str]]:
                 ctx.errors.append(f"{name} ({comp.cls}): {exc.message}")
             continue
         columns = tuple(reversed(cols_a)) + tuple(cols_b)
+        if columns and ctx.kind_of[name] == "mover":
+            ctx.errors.append(
+                f"{name} ({comp.cls}): a hydrostatic column wired to a mover with no flow "
+                f"element between them is not supported")
+            continue
         paths.append(FlowPath(element=comp, src=src, tgt=tgt, columns=columns))
 
     all_columns = {name for name, k in ctx.kind_of.items() if k == "column"}

@@ -26,6 +26,7 @@ class FixedFlow(ConstitutiveLaw):
 
     dp_independent = True
     phasor_capable = True
+    linear = True
 
     def __init__(self, q0, *, kind: str = "airpath", learnable: bool = False) -> None:
         super().__init__(kind)

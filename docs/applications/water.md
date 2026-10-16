@@ -90,12 +90,12 @@ final = water_steady(model, state, drivers)
 | `Tank(name, elevation, init_level, min_level, max_level, diameter)` | Cylindrical tank. |
 | `WaterPipe(name, u, v, length, diameter, roughness, minor_loss=0.0, status="OPEN")` | A full pipe. |
 | `Pump(name, u, v, curve, power=None, speed=1.0)` | Edge oriented **suction → discharge**. |
-| `Valve(name, u, v, diameter, kind, setting, minor_loss=0.0)` | TCV or FCV only. |
+| `Valve(name, u, v, diameter, kind, setting, minor_loss=0.0, curve=None)` | TCV, FCV, PBV or GPV (`curve`: a GPV's head-loss curve). |
 | `WaterOptions(demand_model="DDA", minimum_pressure=0.0, required_pressure=0.1, pressure_exponent=0.5, ...)` | Carried from the file's `[OPTIONS]`. |
 
 `WaterNetwork` collects them plus `curves`, `patterns`, `controls` and the timing options.
 `nodes()` returns junctions, then reservoirs, then tanks; `links()` returns pipes, pumps, TCVs,
-FCVs in that order; `validate()` refuses anything out of scope by name.
+FCVs, PBVs, GPVs in that order; `validate()` refuses anything out of scope by name.
 
 ## `build_model`
 
@@ -109,11 +109,25 @@ model, state, drivers = build_model(
     coupling="pingpong",
     dt=None,            # overrides net.hydraulic_timestep for the tank closure
     friction="composite",  # D-W friction law: 'composite' (default) or 'colebrook'
+    pipe_form=None,     # 'flow' (resistance form; the default) or 'potential'
 )
 ```
 
+`pipe_form` is how the pipes enter the solve. In the **resistance form** (`"flow"`, the default
+except with `friction="colebrook"`) each pipe is `dp = h(q)` (`FlowControlledPipe`) with its
+flow an unknown, solved by Modified Nodal Analysis from EPANET's own first iterate (every pipe
+at 1 ft/s). In the **potential form** (`"potential"`) each pipe's flow is the inverted law
+$q = g(dp)$ on the nodal path. Both give the same solution to round-off; they differ in how
+Newton gets there. The potential form's slope grows without bound as a pipe's flow goes to
+zero, so on Net1's 24 h run the step where a control closes the pump and leaves pipe 10
+dead-ended needs 136 Newton iterations; the resistance form's slope goes to EPANET's `RQtol`
+floor instead, and no step needs more than 6. The whole 24 h run over eight demand
+multipliers (`benchmarks/water_eps.py`) takes 2.5 times less time.
+
 `water_steady(model, state, drivers, **solve_kwargs)` wraps `model.steady` with defaults
-`atol=rtol=1e-11`, `max_iter=200` (both empirically tuned; caller overrides win), then checks
+`atol=rtol=1e-11`, `max_iter=200` (both empirically tuned, the iteration cap for the
+potential form; caller overrides win), starts a cold start of the resistance form (every pipe
+flow exactly zero) from `model.initial_flows`, then checks
 every converged pump's flow against its own `q_max()` and raises naming the pump and batch
 instance if it is exceeded — rather than silently accepting an extrapolated point off the end of
 the curve.
@@ -177,6 +191,25 @@ $r = (H/3)/q_d^2$ and forcing $n = 2$ exactly. `PumpCurve` inverts
 $h_{\text{gain}} = w^2 (h_0 - r (q/w)^n)$ in closed form, with the same laminar blend near
 shutoff. `q_max = w (h_0/r)^{1/n}` is the flow at zero head gain.
 
+### Valves
+
+A **TCV** is a settable minor loss and an **FCV** a fixed flow. A **PBV** (pressure breaker)
+and a **GPV** (general purpose valve) follow EPANET 2.2's own coefficient routines
+(`hydcoeffs.c`, `pbvcoeff` and `gpvcoeff`) as implicit laws, `BreakerValve` and
+`GeneralPurposeValve`, whose flow is an unknown of the layer:
+
+- **PBV:** the head drop from the valve's start node to its end node is its setting,
+  whichever way the water flows. Where the open valve's minor loss $m q^2$ exceeds the setting,
+  or the setting is 0, it is an open valve instead, $h = m q |q|$, with EPANET's minor-loss
+  coefficient $0.02517 K / d^4$ (ft, cfs) and its rounded flow-unit factor.
+- **GPV:** $h = \operatorname{sgn}(q)\,(h_0 + r |q|)$ on the segment of its head-loss curve
+  that brackets $|q|$ (the first or last segment, extended, outside the curve), with
+  $\operatorname{sgn}(0) = +1$.
+
+A network with either valve is solved by Modified Nodal Analysis (sparse LU); every other
+network stays on the nodal path. PRV and PSV, which switch status on the absolute head at
+one end, are not modelled.
+
 ### Tanks and controls
 
 `TankLevels` is a `Model` closure declaring `state_keys = ("water.tank_level",
@@ -199,6 +232,21 @@ for _ in range(steps):
     dt_eff = model.tank_closure.event_step(level, rate, dt)
     level = model.tank_closure.advance(level, inflow, dt_eff)
 ```
+
+**Tanks as storage.** `build_model(net, tank_mode="storage")` makes every tank an interior
+node with a `TankStorage` edge to a datum node `"_datum"` at head 0, its level stepped
+implicitly inside the solve: backward Euler, $q = A\,(H - H_{\text{prev}})/\Delta t$, or
+trapezoidal. `water_step(model, state, drivers, dt)` takes one step (`Model.step`, with
+`water_steady`'s Newton defaults); `tank_levels(model, state)` reads the levels from the solved
+heads; the level-triggered controls stay a closure (`TankStorageControls`), acting on the
+step-start levels. The step is differentiable through time (the gradient of a level after
+several steps matches central differences). It is **not** the EPANET comparison mode: the
+implicit step differs from EPANET's explicit one by the step's own discretisation error. Both
+converge to the same trajectory, at first order: on Net1, halving the storage step halves its
+distance from a fine explicit run. Its `event_step` never shortens a step below 1 s (the
+implicit step lands just short of a projected crossing, and a far shorter step stalls Newton),
+and with steps as long as an hour a switch can land up to a step late, so sub-steps of a few
+minutes are the useful range. Not with `quality`.
 
 ### Pressure-driven demand
 
@@ -231,12 +279,13 @@ on-disk reals are **float32**, so roughly 1e-7 relative is EPANET's own precisio
 | Darcy-Weisbach, Net1 single period: heads, flows | 1e-6 / 1e-5 | 7.009e-8, 3.986e-6 |
 | Darcy-Weisbach, laminar + transitional + turbulent pipes (`lowflow_dw_si.inp`): heads, flows, per-pipe head loss | 1e-6 / 1e-6 / 2.65e-7 m | 3.5e-8, 9.4e-8, 9.6e-8 m |
 | Pressure-driven demand vs EPANET's `DEMAND MODEL PDA` | 1e-5 | 3.521e-7 heads, 2.184e-7 demands |
+| PBV (active and open) and GPV on the two-loop: heads, flows, the valve's head loss | 1e-6 / 1e-6 m³/s / 1e-5 | 5.5e-7, 2.6e-7 m³/s, 6.8e-6 |
 | Head loss sums to zero around every cycle-basis loop | 1e-12 | **exactly 0.0** |
 | Autodiff vs central differences | 1e-6 × scale | 3.212e-6 / 2.505e-10 / 1.007e-6 / 2.753e-9 |
 | TRACE water quality, single source | 1e-3 | 6.438e-12 percentage points |
 | Golden regression | 1e-10 | **0.0** |
 
-Three rows deserve comment.
+Four rows deserve comment.
 
 **Continuity** is machine-precision exact for noodl physics (2.093e-14), while EPANET itself misses
 continuity at Net1 node 13 by 4.5e-10 m³/s. The ~1e-7 residuals on `twoloop_si.inp` and the
@@ -252,12 +301,18 @@ matter at this level: the rounded flow-unit factor (with the exact one the two-l
 by 4.3e-7 instead of 5.8e-8) and, for the low-flow network, `ACCURACY 1e-8` in the fixture,
 since at EPANET's default 1e-3 its own loop flows stop 5e-7 short of converged.
 
+**The valve row compares flows absolutely.** EPANET holds an active PBV's head drop with a
+penalty ($10^8$, `CBIG`), so its own flows are not continuous through the valve: P2 and the
+valve are in series through a demand-free junction, yet EPANET reports them 1.6e-7 m³/s apart,
+and the drop across the valve as 4.999997 m for a 5 m setting. noodl physics' flows agree to
+round-off and its drop is the setting.
+
 **The loop head-loss row is a formulation identity, not a comparison** — head loss summing to zero around every
 independent loop is a property of the cycle-space formulation, and it holds exactly.
 
 ## Limitations
 
-- **Not modelled, refused by name:** PRV/PSV/PBV/GPV valves; time-based controls and `[RULES]`;
+- **Not modelled, refused by name:** PRV and PSV valves; time-based controls and `[RULES]`;
   variable-speed pumps; non-cylindrical tanks; emitters; leakage; energy and cost reports;
   Chezy-Manning head loss; pipe-status controls and check valves. A file using any of these
   raises an error naming the feature.

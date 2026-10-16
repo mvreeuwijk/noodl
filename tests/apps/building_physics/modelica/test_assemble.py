@@ -198,7 +198,7 @@ def test_mixed_model_conserves_mass_and_accumulates_the_trace_substance():
     air = model.kirchhoff["air"]
     q = hist["air.q"]
     s = drivers["air.sources"]
-    net_out = torch.stack([air._accumulate(q[k]) for k in range(q.shape[0])])
+    net_out = torch.stack([air.net_outflow(q[k]) for k in range(q.shape[0])])
     for zone in ("volA", "volB", "volTop"):
         i = names.nodes[zone]
         # Quasi-steady mass balance at every zone: outflow = injected mass (the CO2 source).
@@ -486,7 +486,7 @@ def test_mass_flow_source_injects_mass_and_enthalpy(tmp_path):
     assert float(drivers["thermal.sources"][i]) == pytest.approx(cp * 0.01 * 310.0)
     hist = simulate(model, state, drivers, names.times[:3])
     air = model.kirchhoff["air"]
-    assert float(air._accumulate(hist["air.q"][-1])[i]) == pytest.approx(0.01, abs=1e-10)
+    assert float(air.net_outflow(hist["air.q"][-1])[i]) == pytest.approx(0.01, abs=1e-10)
 
 
 def test_an_extracting_mass_flow_source_draws_the_zones_own_air(tmp_path):
@@ -506,7 +506,7 @@ def test_an_extracting_mass_flow_source_draws_the_zones_own_air(tmp_path):
     assert float(written["thermal.sources"].abs().sum()) == pytest.approx(cp * 0.01 * T)
     hist = simulate(model, state, drivers, names.times[:3])
     air = model.kirchhoff["air"]
-    assert float(air._accumulate(hist["air.q"][-1])[i]) == pytest.approx(-0.01, abs=1e-10)
+    assert float(air.net_outflow(hist["air.q"][-1])[i]) == pytest.approx(-0.01, abs=1e-10)
 
 
 def test_an_extracting_trace_substance_source_is_refused(tmp_path):
@@ -1232,3 +1232,47 @@ def test_a_sub_interval_takes_the_hermite_value_and_slope_of_a_boundary():
                 df(time), rel=1e-12)
         assert float(d[boundary_rate_key("thermal.x_boundary", "left")]) != pytest.approx(
             float(df(20.0)), rel=1e-6)
+
+
+# --------------------------------------------------------------- zero-resistance connections
+_FIXED = "Buildings.Fluid.FixedResistances."
+_SHORT = {"PressureDrop": {"dp_nominal": 0.0, "m_flow_nominal": 0.1},
+          "LosslessPipe": {"m_flow_nominal": 0.1}}
+
+
+@pytest.mark.parametrize("short", sorted(_SHORT))
+def test_a_zero_resistance_connection_is_a_wire(tmp_path, short):
+    # bouA -> ori -> res -> bouB: the same flows as bouA -> ori -> bouB.
+    doc = _doc("two_zones_orifice.json")
+    doc["components"].append({"name": "res", "class": _FIXED + short,
+                              "parameters": _SHORT[short]})
+    doc["connections"] = [["bouA.ports[1]", "ori.port_a"], ["ori.port_b", "res.port_a"],
+                          ["res.port_b", "bouB.ports[1]"]]
+    model, state, drivers, names = read_modelica(_write(tmp_path, doc), return_names=True)
+    hist = simulate(model, state, drivers, names.times[:3])
+    ref_model, ref_state, ref_drivers, ref_names = _load("two_zones_orifice.json")
+    ref = simulate(ref_model, ref_state, ref_drivers, ref_names.times[:3])
+    ((col, sign),) = names.edges["ori"]
+    ((ref_col, ref_sign),) = ref_names.edges["ori"]
+    assert torch.equal(sign * hist["air.q"][:, col], ref_sign * ref["air.q"][:, ref_col])
+
+
+def test_a_pressure_drop_with_a_resistance_is_refused(tmp_path):
+    doc = _doc("two_zones_orifice.json")
+    doc["components"].append({"name": "res", "class": _FIXED + "PressureDrop",
+                              "parameters": {"dp_nominal": 10.0, "m_flow_nominal": 0.1}})
+    doc["connections"] = [["bouA.ports[1]", "ori.port_a"], ["ori.port_b", "res.port_a"],
+                          ["res.port_b", "bouB.ports[1]"]]
+    with pytest.raises(ModelicaImportError, match=r"res \(.*PressureDrop\): dp_nominal = 10.0; "
+                                                  r"only a zero-resistance connection"):
+        read_modelica(_write(tmp_path, doc))
+
+
+def test_a_short_between_two_boundaries_is_refused(tmp_path):
+    doc = _doc("two_zones_orifice.json")
+    doc["components"].append({"name": "res", "class": _FIXED + "LosslessPipe",
+                              "parameters": {"m_flow_nominal": 0.1}})
+    doc["connections"].append(["bouA.ports[1]", "res.port_a"])
+    doc["connections"].append(["res.port_b", "bouB.ports[1]"])
+    with pytest.raises(ModelicaImportError, match="connected directly to each other"):
+        read_modelica(_write(tmp_path, doc))

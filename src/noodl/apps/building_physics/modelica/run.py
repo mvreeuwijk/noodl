@@ -29,14 +29,13 @@ from noodl.apps.building_physics.modelica.feedback import FeedbackHeat
 from noodl.apps.building_physics.modelica.storage import StorageClosure, mass_change
 from noodl.elements import ConstitutiveLaw
 from noodl.model import Drivers, Model, State
+from noodl.modelica.timeline import extrapolate as extrapolate  # this reader's public API
+from noodl.modelica.timeline import grid_index
+from noodl.modelica.timeline import step_drivers as step_drivers
 from noodl.solvers.errors import ConvergenceError
 
 Tensor = torch.Tensor
 F64 = torch.float64
-_SERIES = "series:"
-# Driver-grid metadata, not per-time drivers: the grid, its signal events
-# (`assemble.grid_events`) and its base grid (`assemble.driver_grid` at one substep).
-_GRID_KEYS = ("series:time", "series:jumps", "series:kinks", "series:base")
 # Newton tolerances for the airflow solves (kg/s). The layer default, sqrt(eps) = 1.5e-8 in
 # absolute and relative terms, is 1e-4 of a small crack flow; the reference simulation's
 # declared tolerance is 1e-6 relative, so the airflow is solved to round-off instead.
@@ -54,47 +53,6 @@ STORAGE_AIR_ATOL = 1e-11
 # kg/s. `_Midpoint` accepts a Newton solve that stalls within STORAGE_STALL times its
 # tolerance (1e-9 kg/s, 1e-7 of the smallest reported crack flows).
 STORAGE_STALL = 100.0
-
-
-def step_drivers(drivers: Mapping[str, Tensor], grid: Tensor, t: float) -> Drivers:
-    """`drivers` at grid time `t`: every `"series:<key>"` entry sliced into `<key>`, and the
-    series entries themselves dropped. Raises `ValueError` if `t` is not on the grid."""
-    out: Drivers = {k: v for k, v in drivers.items() if not k.startswith(_SERIES)}
-    series = {k[len(_SERIES):]: v for k, v in drivers.items()
-              if k.startswith(_SERIES) and k not in _GRID_KEYS}
-    if not series:
-        return out
-    grid = torch.as_tensor(grid, dtype=F64)
-    match = torch.isclose(grid, torch.tensor(float(t), dtype=F64), rtol=0.0,
-                          atol=1e-9 * max(1.0, abs(float(t))))
-    if not bool(match.any()):
-        raise ValueError(
-            f"simulate: time {t!r} is not on the experiment grid the driver series were "
-            f"evaluated on ({float(grid[0])} to {float(grid[-1])}, {grid.numel()} points)"
-        )
-    k = int(match.nonzero()[0])
-    for key, value in series.items():
-        out[key] = value[k]
-    return out
-
-
-def _grid_index(grid: Tensor, times: Tensor) -> list[int]:
-    """The position of every entry of `times` on the driver grid; raises `ValueError` for a
-    time off the grid or a non-increasing one."""
-    tol = 1e-9 * max(1.0, float(grid.abs().max()))
-    diff = (times.unsqueeze(1) - grid.unsqueeze(0)).abs()
-    idx = diff.argmin(dim=1)
-    off = diff.gather(1, idx.unsqueeze(1)).squeeze(1) > tol
-    if bool(off.any()):
-        k = int(torch.nonzero(off)[0])
-        raise ValueError(
-            f"simulate: times[{k}] = {float(times[k])!r} is not a grid time of the drivers "
-            f"({float(grid[0])} to {float(grid[-1])}, {grid.numel()} points)"
-        )
-    out = idx.tolist()
-    if any(b <= a for a, b in zip(out, out[1:], strict=False)):
-        raise ValueError("simulate: times must be increasing")
-    return out
 
 
 def _closure(model: Model) -> _ZoneStateClosure:
@@ -405,7 +363,7 @@ def _event_indices(drivers: Drivers, grid: Tensor) -> tuple[set[int] | None, set
         ts = torch.as_tensor(ts, dtype=F64)
         if ts.numel() == 0:
             return set()
-        return set(_grid_index(grid, ts))
+        return set(grid_index(grid, ts, caller="simulate"))
 
     return where(drivers["series:jumps"]), where(drivers.get("series:kinks", ()))
 
@@ -498,7 +456,7 @@ def simulate(model: Model, state: State, drivers: Drivers, times, *,
     step_kwargs = {"atol": atol, "rtol": AIR_RTOL, **step_kwargs}
     times = torch.as_tensor(times, dtype=F64)
     grid = torch.as_tensor(drivers.get("series:time", times), dtype=F64)
-    idx = _grid_index(grid, times)
+    idx = grid_index(grid, times, caller="simulate")
     closure = _closure(model)
     store = _storage(model)
     control = _feedback(model)
@@ -856,18 +814,6 @@ def _advance_located(state: State, pts: list[float], advance, switches: _Switche
             mid.jump_from, mid.jump_directions = state, None
         a, skip = t, {k}
         pts = _split(a, b, n)
-
-
-def extrapolate(coarse: Mapping[str, Tensor], fine: Mapping[str, Tensor],
-                order: int = 2) -> dict[str, Tensor]:
-    """Richardson extrapolation of two `simulate` histories on the same `times`, `fine`
-    with half the step of `coarse`, of a method of order `order`:
-    `fine + (fine - coarse)/(2**order - 1)`. For `scheme="midpoint"` (`order=2`, symmetric,
-    so its error expands in even powers of the step) the result is fourth order."""
-    if not torch.equal(coarse["time"], fine["time"]):
-        raise ValueError("extrapolate: the two histories are not on the same times")
-    f = 1.0 / (2 ** order - 1)
-    return {k: v if k == "time" else v + (v - coarse[k]) * f for k, v in fine.items()}
 
 
 # Convergence of `_Midpoint`'s step iteration, per unknown: |change| <= ATOL + RTOL |value|.

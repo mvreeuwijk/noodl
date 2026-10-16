@@ -26,8 +26,8 @@ import math
 import pytest
 import torch
 
-from noodl.apps.building_physics.modelica import signals
 from noodl.apps.building_physics.modelica.schema import ModelicaImportError, Signal
+from noodl.modelica import signals
 
 F64 = torch.float64
 
