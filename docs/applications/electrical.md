@@ -739,7 +739,7 @@ absorbed power `v conj(i)`):
 
 | Constitutive law (kind) | Edges | Relation |
 |---|---|---|
-| `PiBranch(r, x, b, ratio, shift)` (`branch`) | from bus `->` ground, to bus `->` ground | `[i_f; i_t] = [[Y_ff, Y_ft], [Y_tf, Y_tt]] [v_f; v_t]`, `Y_s = 1/(r + jx)`, `tau = ratio e^{j shift}` (ratio 0 means 1), `Y_tt = Y_s + jb/2`, `Y_ff = Y_tt / \|tau\|^2`, `Y_ft = -Y_s / conj(tau)`, `Y_tf = -Y_s / tau` |
+| `PiBranch(r, x, b, ratio, shift)` (`branch`) | from bus `->` ground, to bus `->` ground | `[i_f; i_t] = [[Y_ff, Y_ft], [Y_tf, Y_tt]] [v_f; v_t]`, `Y_s = 1/(r + jx)`, `tau = ratio e^{j shift}` (ratio 0 means 1; normalised to 1 on construction, so a learnable `ratio` starts from, and has the gradient of, 1), `Y_tt = Y_s + jb/2`, `Y_ff = Y_tt / \|tau\|^2`, `Y_ft = -Y_s / conj(tau)`, `Y_tf = -Y_s / tau` |
 | `ConstantPowerLoad(P, Q)` (`load`) | bus `->` ground | `v conj(i) = P + jQ`, the power absorbed |
 | `Shunt(g, b)` (`shunt`) | bus `->` ground | `i = (g + jb) v`: `g` consumes `g \|v\|^2`, a positive `b` injects `b \|v\|^2` |
 | `VoltageControlledGenerator(P, V)` (`generator`) | bus `->` ground | `\|v\| = V` and `Re(v conj(i)) = -P`: injects the real power `P` and whatever reactive power holds the magnitude (implicit: its current is an unknown) |

@@ -41,13 +41,17 @@ class PiBranch(ConstitutiveLaw):
         self.r = self._param(r, learnable)
         self.x = self._param(x, learnable)
         self.b = self._param(b, learnable)
-        self.ratio = self._param(ratio, learnable)
+        # the file format's 0 means unity: normalise before registering the parameter, so
+        # equivalent encodings (0 and 1) have the same values and gradients
+        ratio = torch.as_tensor(ratio)
+        self.ratio = self._param(torch.where(ratio == 0, torch.ones_like(ratio), ratio),
+                                 learnable)
         self.shift = self._param(shift, learnable)
 
     def admittances(self) -> tuple[Tensor, Tensor, Tensor, Tensor]:
         """`(Y_ff, Y_ft, Y_tf, Y_tt)` in p.u., one entry per branch."""
         ys = 1.0 / torch.complex(self.r, self.x)
-        ratio = torch.where(self.ratio == 0, torch.ones_like(self.ratio), self.ratio)
+        ratio = self.ratio
         tau = torch.polar(ratio, self.shift)
         ytt = ys + torch.complex(torch.zeros_like(self.b), self.b / 2)
         return ytt / (ratio * ratio), -ys / tau.conj(), -ys / tau, ytt
