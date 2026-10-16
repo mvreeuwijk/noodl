@@ -126,6 +126,28 @@ def test_step_hands_the_layer_warm_start_history_and_end_time(monkeypatch):
     assert kw["dt"] == 0.1 and kw["t"] == pytest.approx(2.1)
 
 
+def test_step_without_warm_start_drops_the_flow_warm_start_but_keeps_the_history(monkeypatch):
+    net, layer = _rc()
+    model = Model(net, [layer])
+    drivers = {"e.phi_boundary": GROUND}
+    start = _initial(layer)
+    fed = {"e.phi": start["e.phi"] + 0.25, "e.q": start["e.q"] + 0.5}
+    seen = []
+    solve = layer.solve
+
+    def spy(*args, **kwargs):
+        seen.append(kwargs)
+        return solve(*args, **kwargs)
+
+    monkeypatch.setattr(layer, "solve", spy)
+    model._pass(fed, drivers, 0.1, {}, step_from=start, t=2.0, warm_start=False)
+    (kw,) = seen
+    assert "q0" not in kw
+    assert kw["phi0"] is None
+    assert kw["history"][0] is start["e.phi"] and kw["history"][1] is start["e.q"]
+    assert kw["dt"] == 0.1 and kw["t"] == pytest.approx(2.1)
+
+
 def test_classic_layer_gets_no_circuit_keywords(monkeypatch):
     net = _net(["g", "a"], [("a", "g", "r")])
     layer = KirchhoffLayer(net, "c", [Conductance(torch.tensor([1.0]), kind="r")],
