@@ -16,7 +16,8 @@ Core (always include):
 tests/test_*.py tests/layers tests/solvers tests/operators tests/elements tests/components tests/apps/test_*.py
 ```
 
-Add the application you are changing:
+Add the application you are changing. CI's `branch` job uses the same table
+(`.github/scripts/select_tests.py`): keep the two in step.
 
 | Application | Paths |
 | --- | --- |
