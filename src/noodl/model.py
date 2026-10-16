@@ -464,10 +464,19 @@ class Model:
         keys. `probe=True` runs one step of `dt` (or a steady solve) to learn which custom
         keys are read. `names=` (from `Component.flatten`) also lists unconnected ports.
         Nothing is raised; call `.raise_for_errors()` on the report."""
-        from noodl.validation import check_setup
+        from noodl.validation import Issue, check_setup
 
-        return check_setup(self, state, drivers, dt=dt, probe=probe, steady=steady,
-                           names=names)
+        report = check_setup(self, state, drivers, dt=dt, probe=probe, steady=steady,
+                             names=names)
+        for name, layer in self.layers.items():
+            if layer._attributes_changed():
+                report.issues.append(Issue(
+                    "error", "attributes-changed",
+                    f"layer {name!r}: a node or edge attribute of the network was edited "
+                    f"after the layer was built; the layer and its laws copied the "
+                    f"attributes then and do not see the edit. Build the laws, layers and "
+                    f"model again"))
+        return report
 
     # ------------------------------------------------------------------ public
     def initial_capacities(self, state: State, drivers: Drivers) -> dict[str, Tensor]:
