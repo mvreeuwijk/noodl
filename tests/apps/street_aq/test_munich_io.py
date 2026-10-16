@@ -14,7 +14,13 @@ from noodl.apps.street_aq._munich_files import (
     deg_from_to_munich_rad,
     munich_rad_to_deg_from,
 )
-from noodl.apps.street_aq.case import StreetCase, drivers_at, read_case, write_case
+from noodl.apps.street_aq.case import (
+    StreetCase,
+    _scaled_emissions,
+    drivers_at,
+    read_case,
+    write_case,
+)
 from noodl.apps.street_aq.network import StreetNetwork
 
 DATA = Path(__file__).resolve().parents[2] / "data" / "street"
@@ -595,9 +601,83 @@ def test_emission_scale_is_applied_once_end_to_end():
     d1, x1 = solve(1.0)
     d2, x2 = solve(2.0)
     d0, x0 = solve(0.0)
-    torch.testing.assert_close(d2["street.sources"], 2.0 * d1["street.sources"])
+    # the driver is the unscaled inventory; the model scales it, once
+    torch.testing.assert_close(d2["street.sources"], d1["street.sources"])
     assert float(d1["street.sources"].sum()) > 0.0
-    assert float(d0["street.sources"].abs().sum()) == 0.0
-    assert not torch.equal(x1, x0) and not torch.equal(x1, x2)
+    torch.testing.assert_close(d0["street.sources"], d1["street.sources"])
+    # linear in the sources: the increment over the background-only solve (scale 0) doubles
+    torch.testing.assert_close(x2 - x0, 2.0 * (x1 - x0), rtol=1e-9, atol=1e-18)
+    assert float((x1 - x0).abs().max()) > 0.0
     # background is not scaled
     torch.testing.assert_close(d2["street.x_boundary"], d1["street.x_boundary"])
+
+
+def _scaled(net, scales):
+    """`net` with `scales` (street name -> factor; others 1) as `emission_scale`."""
+    return StreetNetwork(
+        streets=[dataclasses.replace(s, emission_scale=scales.get(s.name, 1.0))
+                 for s in net.streets], x=net.x, y=net.y)
+
+
+def _met(model):
+    from noodl.apps.street_aq.network import initial_drivers
+    d = initial_drivers(model)
+    d.update({k: torch.tensor(v, dtype=torch.float64) for k, v in
+              dict(theta_w=1.0, U_ref=5.0, u_star=0.5, h_abl=1000.0, lmo=1e6).items()})
+    return d
+
+
+@pytest.mark.parametrize("scale", [0.0, 2.0])
+def test_emission_scale_applies_once_to_hand_supplied_sources(scale):
+    from noodl.apps.street_aq.network import initial_drivers
+    net, _ = munich_idealised()
+    name = net.streets[0].name
+    x = {}
+    for tag, n in (("one", net), ("scaled", _scaled(net, {s.name: scale for s in net.streets}))):
+        model, state, _ = build_model(n, species=("NO2",), **MUNICH)
+        d = _met(model)
+        d["street.sources"] = initial_drivers(
+            model, values={"street.sources": {name: 1e-6}})["street.sources"]
+        assert d["street.sources"].max().item() == 1e-6   # the driver stays unscaled
+        x[tag] = model.steady(state, d)["street.x"]
+    assert float(x["one"].abs().max()) > 0.0
+    torch.testing.assert_close(x["scaled"], scale * x["one"], rtol=1e-9, atol=0)
+
+
+def test_emission_scale_is_paired_by_street_name_not_position():
+    net, _ = munich_idealised()
+    names = [s.name for s in net.streets]
+    target = names[3]
+    scaled = _scaled(net, {target: 3.0})
+    case = _case(scaled, 1)
+    order = list(reversed(names))             # a street axis not in network order
+    reordered = dataclasses.replace(
+        case, street_ids=order,
+        emissions=np.arange(1, len(order) + 1, dtype=np.float64)[None, :, None] * 1e-6)
+    want = {n: (i + 1) * 1e-6 * (3.0 if n == target else 1.0) for i, n in enumerate(order)}
+    got = _scaled_emissions(reordered)[0, :, 0]
+    for i, n in enumerate(order):
+        assert got[i] == pytest.approx(want[n], rel=1e-12)
+
+
+@pytest.mark.parametrize("fmt", ["munich", "sirane"])
+def test_write_case_writes_the_scaled_emissions(tmp_path, fmt):
+    net, _ = munich_idealised()
+    target, zeroed = net.streets[2].name, net.streets[1].name
+    scaled = _scaled(net, {target: 2.0, zeroed: 0.0})
+    if fmt == "sirane":
+        case = StreetCase.synthetic(
+            scaled, species=("NO2",), times=[0.0, 3600.0],
+            meteo=dict(wind_dir_from_deg=45.0, wind_speed=5.0),
+            emissions=5e-6, background=2e-8, start=START)
+        write_case(tmp_path / "deck", case, format="sirane")
+        back = read_case(tmp_path / "deck" / "Donnees.dat")
+    else:
+        case = _case(scaled, 2)
+        write_case(tmp_path, case)
+        back = read_case(tmp_path)
+    want = np.full(len(case.street_ids), 5e-6)
+    want[case.street_ids.index(target)] = 1e-5
+    want[case.street_ids.index(zeroed)] = 0.0
+    np.testing.assert_allclose(back.emissions[0, :, 0], want, rtol=1e-6, atol=1e-18)
+    assert np.all(case.emissions == 5e-6)    # the case itself keeps the unscaled inventory
