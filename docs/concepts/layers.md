@@ -96,6 +96,14 @@ own residual. The Jacobian is assembled as a sparse, nonsymmetric matrix from ea
 blocks (forward-mode derivatives, one per port, two on a phasor layer), so a multi-port law
 couples the edges of its group exactly. `solve` still returns `(phi, q)`, with `q` covering every edge.
 
+**`flows` on an MNA layer.** `flows(phi, drivers)` is a function of the potentials only on a classic
+layer. An implicit law's flow is not: a fan with a prescribed rise has a residual that does not
+contain $q$, and conservation at the nodes fixes its flow. So an MNA layer takes the flows as input,
+`flows(phi, drivers, q)`, with `q` as `solve` returned it (every edge). The implicit edges' columns
+are returned as given and the potential-controlled edges' columns are evaluated from `phi` (steady
+context), differentiably. At `solve`'s own `(phi, q)` the result is `q`. Without `q` it raises
+`TypeError`; a phasor layer has no such accessor.
+
 **Construction checks**, each raising `ValueError` naming the layer and the kind or nodes:
 
 - every kind's edge count is a multiple of its law's `ports`;

@@ -669,8 +669,32 @@ class KirchhoffLayer(TopologyGuard):
         batch = broadcast_shapes(*(b.shape[:-1] for _, b in parts))
         return torch.cat([b.expand(batch + b.shape[-1:]) for _, b in parts], dim=-1)
 
-    def flows(self, phi: torch.Tensor, drivers: Mapping) -> torch.Tensor:
-        self._refuse_on_mna("flows")
+    def flows(
+        self, phi: torch.Tensor, drivers: Mapping, q: torch.Tensor | None = None
+    ) -> torch.Tensor:
+        """Every edge's flow at the full-node potentials `phi`, in layer edge order.
+
+        A classic layer's flow is a function of its own edge's potential difference, so `phi`
+        and `drivers` determine it; `q` is ignored.
+
+        A layer solved by Modified Nodal Analysis (`mna`) has edges whose flow is NOT a
+        function of `phi`: an implicit law (an ideal pressure or voltage source, a fan with
+        a prescribed rise) is a relation `residual(dp, q) = 0` that may not involve `q` at
+        all, and the flow is then fixed by conservation at the nodes, which depends on what
+        else is attached (a storing node's rate, the other edges). The flows of those edges
+        are therefore an INPUT here: pass `q`, the flows returned by `solve` (or by a
+        previous state), with every edge's column, shape `(..., n_edges)`. Their columns
+        (`implicit_edges`) are returned as given, and the potential-controlled edges'
+        columns are evaluated from `phi` and `drivers` by their laws, in the steady context
+        (`mode="dc"`). The result is differentiable in `phi`, `drivers` and the laws'
+        parameters on the potential edges, and carries `q`'s graph on the implicit edges.
+        At `solve`'s own `(phi, q)` it returns `q`. A phasor layer has no such accessor.
+        Without `q` an MNA layer raises `TypeError`.
+        """
+        if self.mna:
+            if q is None:
+                self._refuse_on_mna("flows without q")
+            return self._mna.flows(phi, drivers or {}, q)
         drivers = drivers or {}
         d = self.dp(phi, drivers)
         parts = [
