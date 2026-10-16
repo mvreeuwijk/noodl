@@ -12,6 +12,7 @@ first time.
 | [Using noodl](../usage.md) | The one way every model is used: configure, initialise by name, check, run; the parts every model shares; node orders and the setup report. |
 | [Solvers](solvers.md) | The matvec-free linear-operator contract, Newton, and how `method="auto"` chooses a backend. |
 | [Differentiability](differentiability.md) | What gradients flow through, the adjoint, and the contract your laws must satisfy. |
+| [Mutation, devices and serialization](ownership.md) | What may change after construction, how a model is moved, and what copying and saving keep. |
 
 ## The shape of a model
 

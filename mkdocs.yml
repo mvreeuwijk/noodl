@@ -57,6 +57,7 @@ nav:
       - Layers and models: concepts/layers.md
       - Solvers: concepts/solvers.md
       - Differentiability: concepts/differentiability.md
+      - Mutation, devices and serialization: concepts/ownership.md
   - Applications:
       - applications/index.md
       - Building physics: applications/building_physics.md
