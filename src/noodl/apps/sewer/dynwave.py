@@ -2316,7 +2316,9 @@ class DynamicWaveHydraulics:
         out.update({"water.flood_excess": excess, "water.flooded": flooded.to(F64),
                     "sewer.overflow": overflow})
         if self.quality_layer is not None:
-            withdrawal = torch.clamp(-inflow[..., self.junction_idx], min=0.0)
+            # `where`, not `clamp`: the derivative stays on the withdrawal side at zero inflow
+            lateral = inflow[..., self.junction_idx]
+            withdrawal = torch.where(lateral < 0, -lateral, 0.0 * lateral)
             out.update(self._quality_volume(state, out["sewer.net_inflow"], overflow, dt,
                                             withdrawal))
         return out

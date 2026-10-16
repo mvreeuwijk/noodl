@@ -428,3 +428,35 @@ def test_declared_species_columns_agree_with_the_builder_layer():
                     else closure_spec(bad, index=0).species_columns)
         with pytest.raises(ValueError, match="species_names"):
             check_species_columns("bad", declared, transport)
+
+
+def test_kinematic_quality_gradient_wrt_inflow_at_a_zero_inflow_manhole():
+    """d(sum concentration)/d(inflow) at a manhole whose inflow is exactly 0 matches the
+    forward finite difference (`clamp(inflow, min=0)` had a zero gradient there)."""
+    from noodl.apps.sewer import build_model, tree_steady
+
+    model, state, drivers = build_model(tree_steady(), air=False, quality=True)
+    n = model.net.n
+    inflow = drivers["inflow"].clone()
+    k = 3
+    inflow[k] = 0.0
+    cin = {key: torch.full((n,), 0.2, dtype=torch.float64)
+           for key in drivers if key.endswith("_in")}
+
+    def run(infl):
+        st = dict(state)
+        d = dict(drivers, inflow=infl, **cin)
+        st.update(model.initial_capacities(st, d))
+        for _ in range(3):
+            st = model.step(st, d, 60.0)
+        return st["water_quality.x"].sum()
+
+    a = inflow.clone().requires_grad_(True)
+    run(a).backward()
+    h = 1e-6
+    e = torch.zeros_like(inflow)
+    e[k] = h
+    with torch.no_grad():
+        fd = float(run(inflow + e) - run(inflow)) / h
+    assert abs(fd) > 1e-3
+    assert float(a.grad[k]) == pytest.approx(fd, rel=1e-3)

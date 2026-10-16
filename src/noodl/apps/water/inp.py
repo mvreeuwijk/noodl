@@ -117,19 +117,26 @@ def _time(text: str, path, line) -> float:
         ) from exc
 
 
-_TIME_UNITS = {
-    "SEC": 1.0, "SECOND": 1.0, "SECONDS": 1.0,
-    "MIN": 60.0, "MINUTE": 60.0, "MINUTES": 60.0,
-    "HOUR": 3600.0, "HOURS": 3600.0,
-    "DAY": 86400.0, "DAYS": 86400.0,
-}
+# EPANET (input3.c `hour`, `match`) takes a unit token whose FIRST characters are SEC, MIN, HOU
+# or DAY, case-insensitively: MINS, SECS, HOUR, HOURS, HOU and DAYSX all match.
+_TIME_UNITS = (("SEC", 1.0), ("MIN", 60.0), ("HOU", 3600.0), ("DAY", 86400.0))
+
+
+def _time_unit_scale(token: str) -> float | None:
+    """Seconds per unit for `token`, by EPANET's leading-characters rule, else None."""
+    upper = token.upper()
+    for prefix, scale in _TIME_UNITS:
+        if upper.startswith(prefix):
+            return scale
+    return None
 
 
 def _time_with_unit(fields, index: int, path, line) -> float:
     """A `[TIMES]` value `fields[index]` with its optional unit token `fields[index + 1]`.
 
-    A bare number without a unit is HOURS (Appendix C.2.24); with SECONDS/MIN/MINUTES/HOURS/
-    DAYS it is in that unit. A clock time (`HH:MM[:SS]`) carries no unit. Any other trailing
+    A bare number without a unit is HOURS (Appendix C.2.24); a unit token starting SEC, MIN,
+    HOU or DAY (EPANET's rule, any case: MINS, SECS, HOU) scales it. A clock time
+    (`HH:MM[:SS]`) carries no unit. Any other trailing
     token is refused rather than read as a different duration.
     """
     if index >= len(fields):
@@ -142,14 +149,14 @@ def _time_with_unit(fields, index: int, path, line) -> float:
             f"{path}: line {line.number}: cannot read {' '.join(fields[index:])!r} as a "
             f"time: expected HH:MM[:SS] or a number with an optional unit"
         )
-    unit = extra[0].upper()
-    if unit not in _TIME_UNITS:
+    scale = _time_unit_scale(extra[0])
+    if scale is None:
         raise ValueError(
             f"{path}: line {line.number}: unknown time unit {extra[0]!r}; use SECONDS, "
             f"MINUTES, HOURS or DAYS"
         )
     try:
-        return float(value) * _TIME_UNITS[unit]
+        return float(value) * scale
     except ValueError as exc:
         raise ValueError(
             f"{path}: line {line.number}: {value!r} is not a duration"

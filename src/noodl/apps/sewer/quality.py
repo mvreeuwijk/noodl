@@ -213,7 +213,7 @@ class LateralLoads:
             # leaves at the node's own concentration, which the dynamic-wave hydraulics
             # takes out of the layer as a loss fraction (`DynamicWaveHydraulics`,
             # "Quality"), so only the inflow side is a source here
-            parts.append(torch.clamp(inflow, min=0.0) * c_in)
+            parts.append(torch.where(inflow >= 0, inflow, 0.0 * inflow) * c_in)
         sources = parts[0] if self.n_species == 1 else torch.stack(parts, dim=-1)
         return {f"{self.water_layer}.sources": sources}
 

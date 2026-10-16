@@ -3056,3 +3056,31 @@ def test_a_ponding_junction_rising_through_its_full_head_is_monotone_and_unwalle
     assert wall > 5.0 * storage
     # the ponded line above H* carries the larger area: slope 2 A_hi / dt = 2 * 4.5 / 5
     assert float(slope[-1, 0]) == pytest.approx(2.0 * 4.5 / 5.0)
+
+
+def test_quality_gradient_wrt_inflow_at_a_zero_inflow_junction_matches_finite_differences(
+        tmp_path):
+    """At inflow == 0 (the default at most manholes) the inflow-side and withdrawal-side
+    splits must keep the derivative on the correct side: d(sum x)/d(inflow) at a junction
+    with no lateral flow agrees with the forward difference (a `clamp` gave zero or the
+    wrong sign there)."""
+    model, state, drivers = build_model(_tree(tmp_path), quality=True,
+                                        species=("tracer",))
+    inflow = drivers["inflow"].clone()
+    k = model.junction_idx.tolist()[3]      # J4 of the tree has no lateral inflow
+    assert float(inflow[k]) == 0.0
+    drivers = dict(drivers, tracer_in=torch.full((model.net.n,), 0.2, dtype=F64))
+
+    def run(infl):
+        out, _ = simulate_dynamic_wave(model, state, dict(drivers, inflow=infl), steps=3)
+        return out["water_quality.x"].sum()
+
+    a = inflow.clone().requires_grad_(True)
+    run(a).backward()
+    h = 1e-6
+    e = torch.zeros_like(inflow)
+    e[k] = h
+    with torch.no_grad():
+        fd = float(run(inflow + e) - run(inflow)) / h
+    assert float(a.grad[k]) == pytest.approx(fd, rel=1e-3, abs=1e-8)
+    assert abs(fd) > 1e-6
