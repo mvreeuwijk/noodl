@@ -91,3 +91,27 @@ def test_head_gradient_wrt_a_demand_matches_central_differences():
             fd = (head(torch.tensor(1 + h, dtype=F64), st)
                   - head(torch.tensor(1 - h, dtype=F64), st)) / (2 * h)
         assert s.grad.item() == pytest.approx(fd.item(), rel=1e-5)
+
+
+@pytest.mark.parametrize("pda", [False, True])
+def test_constant_tracer_stays_constant_when_the_withdrawals_change(pda):
+    """A conserved tracer fed at 100 reads 100 everywhere whatever the demands are: the
+    quality sink follows the CURRENT withdrawals, not the build-time ones (including a
+    scaled `water.sources` and a batch of different demand patterns)."""
+    kw = {"pda": True, "p_req": 100.0} if pda else {}
+    model, state, drivers = build_model(twoloop(), quality=0.0, **kw)
+    drivers["quality.x_boundary"] = torch.tensor([100.0], dtype=torch.float64)
+    if pda:
+        out = water_steady(model, state, drivers)["quality.x"]
+        assert torch.allclose(out, torch.full_like(out, 100.0), atol=1e-6)
+        return
+    for scale in (0.5, 1.0, 1.7):
+        d = dict(drivers)
+        d["water.sources"] = drivers["water.sources"] * scale
+        out = water_steady(model, state, d)["quality.x"]
+        assert torch.allclose(out, torch.full_like(out, 100.0), atol=1e-6), (scale, out)
+    pattern = torch.tensor([0.3, 1.0, 1.4], dtype=torch.float64)
+    d = dict(drivers)
+    d["water.sources"] = pattern[:, None] * drivers["water.sources"][None, :]
+    out = water_steady(model, state, d)["quality.x"]
+    assert torch.allclose(out, torch.full_like(out, 100.0), atol=1e-6)

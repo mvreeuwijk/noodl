@@ -44,10 +44,10 @@ print(round(float(heads["J1"]), 6), round(float(flows["P1"]), 6))
 
 To change an input, give it by name over the builder's own values. A demand is a
 negative source (m³/s withdrawn; `demand=` does the sign for you), and junctions not named
-keep their demand. A model built with `quality=` keeps the removal rate of its
-build-time demands; rebuild the model to change both. (Under `pda=True` the quality sink is
-the delivered, pressure-dependent demand of the current hydraulic solution, not the requested
-one.) Quality advects through every hydraulic edge kind: pipes, pumps and valves. A pressure-driven model (`pda=True`)
+keep their demand. On a model built with `quality=` the quality sink is the
+withdrawal of the current hydraulic solution (a scaled or patterned `water.sources`, or the
+delivered demand under `pda=True`), so a tracer entering at the reservoir stays at its
+concentration at every demand level. Quality advects through every hydraulic edge kind: pipes, pumps and valves. A pressure-driven model (`pda=True`)
 refuses both `demand=` and a `water.sources` value, since its demands are node sources set
 at build time:
 

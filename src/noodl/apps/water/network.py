@@ -778,22 +778,24 @@ def build_model(
                 f"build_model: junction(s) {bad} touch no pipe, so their quality "
                 f"capacity is zero; a node with no volume cannot hold a concentration"
             )
-        demand = torch.tensor([j.demand for j in net.junctions], dtype=F64)
-        removal = (demand / cap_i + quality / 86400.0).unsqueeze(-1)
-        # Under PDA the junctions withdraw the DELIVERED demand, not the requested one. The
-        # layer's `dilution = 1` adds `net_inflow(q) / capacity` to the removal, and at a
-        # junction the net inflow of the pass's own flows IS the delivered demand (continuity),
-        # so the sink follows the current hydraulic solution with no closure and no lag.
-        if pda:
-            removal = (quality / 86400.0) * torch.ones(len(interior), 1, dtype=F64)
+        # The junctions withdraw whatever the CURRENT hydraulic solution delivers (the
+        # requested demand, a scaled or patterned `water.sources`, or the PDA-delivered
+        # demand). The layer's `dilution = 1` adds `net_inflow(q) / capacity` to the removal,
+        # and at a junction the net inflow of the pass's own flows IS the withdrawal
+        # (continuity), so the sink follows the current flows with no closure and no lag.
+        # Only the bulk decay is a build-time removal.
+        removal = (quality / 86400.0) * torch.ones(len(interior), 1, dtype=F64)
         notes["quality_capacity"] = (
             "on a looped network a junction's capacity is HALF the volume of every "
             "incident pipe; a single outgoing pipe is a tree property"
         )
         notes["quality_removal"] = (
-            "the nodal demand enters as a first-order removal rate q_demand / V; without "
-            "it the advective generator has non-zero row sums and the steady system is "
-            "singular (measured on twoloop_si.inp)"
+            "the nodal withdrawal enters as a first-order removal rate q_withdrawn / V "
+            "through the transport layer's dilution = 1, read from the CURRENT flows (so a "
+            "scaled or patterned water.sources, or a PDA delivery, is followed exactly); "
+            "without it the advective generator has non-zero row sums and the steady "
+            "system is singular (measured on twoloop_si.inp). `removal` holds only the "
+            "bulk decay"
         )
         # Every hydraulic edge kind carries water, so every one advects the tracer:
         # pipes, pumps and valves alike (a device is a zero-volume edge).
@@ -802,7 +804,7 @@ def build_model(
             graph, "quality", capacity=cap_i, flow_kind=transport_kinds,
             boundary=boundary, n_species=1, removal=removal, scheme="implicit",
             quantity="concentration", unit="kg/m3",
-            dilution=1.0 if pda else None,
+            dilution=1.0,
             source_unit="kg/s", capacity_unit="m3", flow_unit="m3/s",
         )
         drivers["quality.x_boundary"] = torch.zeros(len(boundary), dtype=F64)
@@ -900,9 +902,9 @@ def initial_drivers(
         initial_drivers(model, values={"water.sources": {"J1": -0.005}})   # the same
 
     A pressure-driven model (`pda=True`) refuses `demand=` and a `water.sources` value: its
-    demands are node sources the network set at build time. A model built with `quality=`
-    keeps the removal rate of its build-time demands, so `demand=` (like `values=`) changes
-    the hydraulics but not the quality sink; rebuild the model to change both.
+    demands are node sources the network set at build time. On a model built with `quality=`,
+    the quality sink follows the withdrawals of the current hydraulic solution, so a changed
+    `demand=` or `water.sources` changes the hydraulics and the quality together.
     """
     drivers = refs_initial_drivers(model, values=values)
     if demand or (values and "water.sources" in values):
