@@ -13,7 +13,7 @@ escapes.
 import torch
 
 from noodl.elements.powerlaw import PowerLaw
-from noodl.layers.potential import PotentialFlowLayer
+from noodl.layers.kirchhoff import KirchhoffLayer
 from noodl.topology import Network
 
 net = Network(dtype=torch.float64)
@@ -22,7 +22,7 @@ net.add_node("room")
 net.add_edge("room", "ambient", kind="airpath")
 
 leak = PowerLaw(C=torch.tensor(0.01), n=torch.tensor(0.65))
-layer = PotentialFlowLayer(net, "air", [leak], boundary=["ambient"])
+layer = KirchhoffLayer(net, "air", [leak], boundary=["ambient"])
 
 phi_boundary = torch.zeros(1, dtype=torch.float64)
 # sources is indexed in full node order (ambient, room); 0.05 injected into "room"
@@ -44,7 +44,7 @@ Four things happened there, and they are the whole framework in miniature:
    one network can hold several physical systems side by side.
 2. **`PowerLaw`** is a *constitutive law*, relating the potential difference across
    an edge to the flow along it, $q = C \, \Delta p^{\,n}$. Constitutive laws are the replaceable part.
-3. **`PotentialFlowLayer`** assembles nodal conservation from the laws and solves
+3. **`KirchhoffLayer`** assembles nodal conservation from the laws and solves
    $A_I \, g(A^\top \phi) = s_I$ for the interior potentials by Newton's method. `boundary`
    names the nodes whose potential is prescribed rather than solved.
 4. The flow out matches the flow in to solver tolerance — conservation is structural, not
@@ -84,7 +84,7 @@ potentials, the sources, every value in `drivers`, and any law parameter constru
 ```python
 C = torch.tensor(0.01, requires_grad=True)
 leak = PowerLaw(C=C, n=torch.tensor(0.65), learnable=True)
-layer = PotentialFlowLayer(net, "air", [leak], boundary=["ambient"])
+layer = KirchhoffLayer(net, "air", [leak], boundary=["ambient"])
 
 phi, q = layer.solve(
     torch.zeros(1, dtype=torch.float64),

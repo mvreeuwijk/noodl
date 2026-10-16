@@ -17,7 +17,7 @@ import torch
 from benchmarks.composed_model import build_composed, run_steps
 from benchmarks.measure import isolated_peak_rss, time_call
 from noodl.elements import PowerLaw
-from noodl.layers.potential import PotentialFlowLayer
+from noodl.layers.kirchhoff import KirchhoffLayer
 
 
 def test_time_call_returns_a_nonnegative_elapsed_seconds_and_the_callables_result():
@@ -137,7 +137,7 @@ def test_gradient_across_a_join_matches_central_finite_differences():
             PowerLaw(C, 0.65, kind="street", learnable=learnable) if el.kind == "street" else el
             for el in model.laws
         ]
-        return PotentialFlowLayer(net, "grad_join", elements, boundary=model.boundary), elements
+        return KirchhoffLayer(net, "grad_join", elements, boundary=model.boundary), elements
 
     def loss_at(C):
         layer, _ = layer_with_street_C(C, learnable=False)

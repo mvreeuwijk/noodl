@@ -2,7 +2,7 @@
 
 A pressurised distribution network is exactly the framework's own case: every pipe is full,
 the head loss is a monotone function of the head difference, and the whole thing is ONE
-`PotentialFlowLayer` whose potential is hydraulic HEAD in metres. That is the difference
+`KirchhoffLayer` whose potential is hydraulic HEAD in metres. That is the difference
 from the free-surface sewer of `apps.sewer`, whose normal flow is set by slope and upstream
 inflow rather than by head difference.
 
@@ -32,7 +32,7 @@ from noodl.apps.water.elements import (
 from noodl.apps.water.tanks import Control, TankLevels
 from noodl.elements.duct import Duct
 from noodl.elements.fixed import FixedFlow
-from noodl.layers.potential import PotentialFlowLayer
+from noodl.layers.kirchhoff import KirchhoffLayer
 from noodl.layers.transport import TransportLayer
 from noodl.model import Model
 from noodl.refs import drivers_from, state_from
@@ -376,7 +376,7 @@ def build_model(
 ) -> tuple[Model, State, Drivers]:
     """Assemble the water model and return `(model, state, drivers)`.
 
-    ONE `PotentialFlowLayer("water", ...)` on a network whose edge kinds partition by device
+    ONE `KirchhoffLayer("water", ...)` on a network whose edge kinds partition by device
     type, plus the tank/controls closure when the network has tanks, plus an optional
     quality layer.
 
@@ -584,7 +584,7 @@ def build_model(
             f"pressure-driven demand (EPANET's PDA) with MINIMUM PRESSURE {p_min} m, "
             f"REQUIRED PRESSURE {p_req} m and PRESSURE EXPONENT {exponent}"
         )
-    layer = PotentialFlowLayer(
+    layer = KirchhoffLayer(
         graph, "water", laws, boundary=boundary, node_sources=node_sources,
         quantity="head" if headloss == "H-W" else "pressure",
         unit="m" if headloss == "H-W" else "Pa", flow_unit="m3/s",
@@ -709,10 +709,10 @@ def initial_state(model: Model, *, values: Mapping | None = None) -> State:
     `noodl.refs.state_from`): `initial_state(model, values={"water.tank_level": {"T1": 4.0}})`.
     """
     state: State = {}
-    for name, layer in model.potential.items():
+    for name, layer in model.kirchhoff.items():
         if layer.quantity not in ("head", "pressure"):
             raise ValueError(
-                f"apps.water.initial_state: potential layer {name!r} has quantity "
+                f"apps.water.initial_state: Kirchhoff layer {name!r} has quantity "
                 f"{layer.quantity!r}; this application builds head or pressure layers only"
             )
         state[f"{name}.phi"] = torch.zeros(model.net.n, dtype=F64)
@@ -753,7 +753,7 @@ def initial_drivers(
     """
     drivers = refs_initial_drivers(model, values=values)
     if demand or (values and "water.sources" in values):
-        layer = model.potential["water"]
+        layer = model.kirchhoff["water"]
         if any(isinstance(s, PressureDrivenDemand) for s in layer.node_sources):
             raise ValueError(
                 "initial_drivers: the demands of this model are pressure-driven and were "
@@ -809,7 +809,7 @@ def _refuse_pump_overflow(model: Model, state: State) -> None:
 
     Reads the layer through its public `law_for` (kind -> `(element, slice)`).
     """
-    layer = model.potential.get("water")
+    layer = model.kirchhoff.get("water")
     if layer is None or "pump" not in layer.kinds:
         return
     pump, sl = layer.law_for("pump")
@@ -835,10 +835,10 @@ def _refuse_pump_overflow(model: Model, state: State) -> None:
 def tank_inflow(model: Model, state: State) -> Tensor:
     """Net inflow (m3/s) at every tank node, from the layer's solved branch flows.
 
-    `PotentialFlowLayer._accumulate(q)` is `A q`, the net OUTflow at every node, so the
+    `KirchhoffLayer._accumulate(q)` is `A q`, the net OUTflow at every node, so the
     inflow is its negation restricted to the tank rows -- the same identity
     `Model.ports` uses for `boundary_flows`.
     """
-    layer = model.potential["water"]
+    layer = model.kirchhoff["water"]
     first = model.tank_closure.tank_first_index
     return -layer._accumulate(state["water.q"])[..., layer.bound[first:]]

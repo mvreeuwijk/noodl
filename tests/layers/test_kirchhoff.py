@@ -1,4 +1,4 @@
-"""Tests for PotentialFlowLayer: assembly, non-differentiable solve, power residual."""
+"""Tests for KirchhoffLayer: assembly, non-differentiable solve, power residual."""
 
 import pytest
 import torch
@@ -7,7 +7,7 @@ from scipy.optimize import brentq
 from noodl.drives import ConstantDrive
 from noodl.elements import Conductance, FixedFlow, PowerLaw
 from noodl.elements.base import ConstitutiveLaw
-from noodl.layers.potential import PotentialFlowLayer
+from noodl.layers.kirchhoff import KirchhoffLayer
 from noodl.nodesources import NodeSource
 from noodl.solvers.newton import newton
 from noodl.topology import Network
@@ -26,7 +26,7 @@ def test_duplicate_element_kind_raises_value_error():
     net.add_node("b")
     net.add_edge("a", "b", kind="airpath")
     with pytest.raises(ValueError, match="airpath"):
-        PotentialFlowLayer(
+        KirchhoffLayer(
             net,
             "dup",
             [
@@ -42,7 +42,7 @@ def test_element_kind_with_no_edges_raises_value_error():
     net.add_node("b")
     net.add_edge("a", "b", kind="airpath")
     with pytest.raises(ValueError, match="conduction"):
-        PotentialFlowLayer(
+        KirchhoffLayer(
             net,
             "missing",
             [Conductance(torch.tensor([1.0], dtype=torch.float64), kind="conduction")],
@@ -56,7 +56,7 @@ def test_unknown_boundary_node_raises_key_error():
     net.add_edge("a", "b", kind="airpath")
     element = PowerLaw(torch.tensor([1.0], dtype=torch.float64), 0.5, kind="airpath")
     with pytest.raises(KeyError, match="zzz"):
-        PotentialFlowLayer(net, "bad", [element], boundary=["zzz"])
+        KirchhoffLayer(net, "bad", [element], boundary=["zzz"])
 
 
 def test_dp_flows_dflows_and_assemble_on_a_single_conductance_edge():
@@ -65,7 +65,7 @@ def test_dp_flows_dflows_and_assemble_on_a_single_conductance_edge():
     net.add_node("z")
     net.add_edge("ambient", "z", kind="conduction")
     g = torch.tensor([2.0], dtype=torch.float64)
-    layer = PotentialFlowLayer(
+    layer = KirchhoffLayer(
         net, "cond", [Conductance(g, kind="conduction")], boundary=["ambient"]
     )
 
@@ -91,7 +91,7 @@ def test_residual_and_jacobian_on_single_conductance_edge():
     net.add_node("z")
     net.add_edge("ambient", "z", kind="conduction")
     g = torch.tensor([2.0], dtype=torch.float64)
-    layer = PotentialFlowLayer(
+    layer = KirchhoffLayer(
         net, "cond", [Conductance(g, kind="conduction")], boundary=["ambient"]
     )
 
@@ -114,7 +114,7 @@ def test_linear_init_solves_the_linear_system_exactly_for_conductance_network():
     net.add_node("z")
     net.add_edge("ambient", "z", kind="conduction")
     g = torch.tensor([2.0], dtype=torch.float64)
-    layer = PotentialFlowLayer(
+    layer = KirchhoffLayer(
         net, "cond", [Conductance(g, kind="conduction")], boundary=["ambient"]
     )
 
@@ -134,7 +134,7 @@ def test_zone_connected_only_by_fixed_flow_edges_raises_runtime_error():
     net.add_edge("ambient", "z1", kind="duct")
     net.add_edge("z1", "z2", kind="duct")
     net.add_edge("z2", "ambient", kind="airpath")
-    layer = PotentialFlowLayer(
+    layer = KirchhoffLayer(
         net,
         "mixed",
         [
@@ -154,7 +154,7 @@ def test_conductance_only_network_converges_in_one_newton_iteration():
     net.add_node("z1")
     net.add_edge("ambient", "z1", kind="conduction")
     net.add_edge("z1", "ambient", kind="conduction")
-    layer = PotentialFlowLayer(
+    layer = KirchhoffLayer(
         net,
         "cond",
         [Conductance(torch.tensor([0.5, 0.3], dtype=torch.float64), kind="conduction")],
@@ -176,7 +176,7 @@ def test_conductance_only_network_converges_in_one_newton_iteration():
 
 def test_two_zone_series_flow_matches_closed_form(two_zone_layer):
     net, elements, drives, boundary = two_zone_layer
-    layer = PotentialFlowLayer(net, "zones", elements, drives=drives, boundary=boundary)
+    layer = KirchhoffLayer(net, "zones", elements, drives=drives, boundary=boundary)
     phi_b = torch.zeros(1, dtype=torch.float64)
     wind = torch.tensor([10.0, 0.0, 0.0], dtype=torch.float64)
 
@@ -199,7 +199,7 @@ def test_two_zone_series_flow_matches_closed_form(two_zone_layer):
 
 def test_batched_wind_driver_matches_looped_solves(two_zone_layer):
     net, elements, drives, boundary = two_zone_layer
-    layer = PotentialFlowLayer(net, "zones", elements, drives=drives, boundary=boundary)
+    layer = KirchhoffLayer(net, "zones", elements, drives=drives, boundary=boundary)
     torch.manual_seed(3)
     magnitude = 5.0 + 10.0 * torch.rand(50, 1, dtype=torch.float64)
     wind = torch.cat([magnitude, torch.zeros(50, 2, dtype=torch.float64)], dim=-1)
@@ -225,7 +225,7 @@ def test_power_residual_is_zero_at_solution_and_nonzero_when_perturbed(two_zone_
     # Perturbing q instead genuinely breaks conservation (A_interior @ q_perturbed != 0) and
     # is what actually exercises "nonzero for an inconsistent (phi, q) pair".
     net, elements, drives, boundary = two_zone_layer
-    layer = PotentialFlowLayer(net, "zones", elements, drives=drives, boundary=boundary)
+    layer = KirchhoffLayer(net, "zones", elements, drives=drives, boundary=boundary)
     phi_b = torch.zeros(1, dtype=torch.float64)
     wind = torch.tensor([10.0, 0.0, 0.0], dtype=torch.float64)
 
@@ -251,7 +251,7 @@ def test_power_residual_is_zero_at_solution_with_interior_sources():
     net.add_node("z")
     net.add_edge("ambient", "z", kind="conduction")
     g = torch.tensor([2.0], dtype=torch.float64)
-    layer = PotentialFlowLayer(
+    layer = KirchhoffLayer(
         net, "cond", [Conductance(g, kind="conduction")], boundary=["ambient"]
     )
 
@@ -282,7 +282,7 @@ def test_floating_group_with_no_path_to_boundary_raises_runtime_error():
     net.add_edge("ambient", "z0", kind="conduction")
     net.add_edge("f1", "f2", kind="conduction")
     net.add_edge("z0", "f1", kind="duct")
-    layer = PotentialFlowLayer(
+    layer = KirchhoffLayer(
         net,
         "grp",
         [
@@ -307,7 +307,7 @@ def test_drive_kind_not_in_layer_raises_value_error_naming_it():
     net.add_edge("a", "b", kind="airpath")
     element = PowerLaw(torch.tensor([1.0], dtype=torch.float64), 0.5, kind="airpath")
     with pytest.raises(ValueError, match="hydronic"):
-        PotentialFlowLayer(
+        KirchhoffLayer(
             net, "bad", [element], drives=[ConstantDrive("hydronic", "x")], boundary=["a"]
         )
 
@@ -324,7 +324,7 @@ def test_wrong_width_drive_raises_value_error_naming_widths():
     net.add_node("c")
     net.add_edge("a", "b", kind="conduction")
     net.add_edge("b", "c", kind="airpath")
-    layer = PotentialFlowLayer(
+    layer = KirchhoffLayer(
         net,
         "widths",
         [
@@ -354,7 +354,7 @@ def test_floating_group_with_mixed_slope_same_kind_edges_raises_runtime_error():
     net.add_node("z2")
     net.add_edge("ambient", "z1", kind="conduction")
     net.add_edge("z1", "z2", kind="conduction")
-    layer = PotentialFlowLayer(
+    layer = KirchhoffLayer(
         net,
         "mix",
         [Conductance(torch.tensor([0.0, 1.0], dtype=torch.float64), kind="conduction")],
@@ -374,7 +374,7 @@ def test_gradcheck_solve_wrt_powerlaw_conductance(two_zone_layer):
     el = PowerLaw(
         elements[0].C.detach().clone().requires_grad_(True), elements[0].n, learnable=True
     )
-    layer = PotentialFlowLayer(net, "zones", [el], drives=drives, boundary=boundary)
+    layer = KirchhoffLayer(net, "zones", [el], drives=drives, boundary=boundary)
     phi_b = torch.zeros(1, dtype=torch.float64)
     wind = torch.tensor([10.0, 0.0, 0.0], dtype=torch.float64)
 
@@ -389,7 +389,7 @@ def test_gradcheck_solve_wrt_powerlaw_conductance(two_zone_layer):
 
 def test_gradcheck_solve_wrt_wind_driver(two_zone_layer):
     net, elements, drives, boundary = two_zone_layer
-    layer = PotentialFlowLayer(net, "zones", elements, drives=drives, boundary=boundary)
+    layer = KirchhoffLayer(net, "zones", elements, drives=drives, boundary=boundary)
     phi_b = torch.zeros(1, dtype=torch.float64)
     wind = torch.tensor([10.0, 0.0, 0.0], dtype=torch.float64, requires_grad=True)
 
@@ -404,7 +404,7 @@ def test_gradcheck_solve_wrt_wind_driver(two_zone_layer):
 
 def test_gradcheck_solve_wrt_sources(two_zone_layer):
     net, elements, drives, boundary = two_zone_layer
-    layer = PotentialFlowLayer(net, "zones", elements, drives=drives, boundary=boundary)
+    layer = KirchhoffLayer(net, "zones", elements, drives=drives, boundary=boundary)
     phi_b = torch.zeros(1, dtype=torch.float64)
     wind = torch.tensor([10.0, 0.0, 0.0], dtype=torch.float64)
     sources = torch.zeros(3, dtype=torch.float64, requires_grad=True)
@@ -420,7 +420,7 @@ def test_gradcheck_solve_wrt_sources(two_zone_layer):
 
 def test_gradcheck_solve_wrt_boundary_potential(two_zone_layer):
     net, elements, drives, boundary = two_zone_layer
-    layer = PotentialFlowLayer(net, "zones", elements, drives=drives, boundary=boundary)
+    layer = KirchhoffLayer(net, "zones", elements, drives=drives, boundary=boundary)
     phi_b = torch.zeros(1, dtype=torch.float64, requires_grad=True)
     wind = torch.tensor([10.0, 0.0, 0.0], dtype=torch.float64)
 
@@ -438,7 +438,7 @@ def test_adjoint_lambda_matches_autograd_gradient(two_zone_layer):
     el = PowerLaw(
         elements[0].C.detach().clone().requires_grad_(True), elements[0].n, learnable=True
     )
-    layer = PotentialFlowLayer(net, "zones", [el], drives=drives, boundary=boundary)
+    layer = KirchhoffLayer(net, "zones", [el], drives=drives, boundary=boundary)
     phi_b = torch.zeros(1, dtype=torch.float64)
     wind = torch.tensor([10.0, 0.0, 0.0], dtype=torch.float64)
 
@@ -465,7 +465,7 @@ def test_finite_difference_matches_autograd_gradient_for_zone_pressure(two_zone_
 
     def zone_pressure(C):
         el = PowerLaw(C, n, learnable=False)
-        layer = PotentialFlowLayer(net, "zones", [el], drives=drives, boundary=boundary)
+        layer = KirchhoffLayer(net, "zones", [el], drives=drives, boundary=boundary)
         phi, _ = layer.solve(
             phi_b, {"wind": wind}, None, differentiable=False, atol=1e-13, rtol=1e-13
         )
@@ -479,7 +479,7 @@ def test_finite_difference_matches_autograd_gradient_for_zone_pressure(two_zone_
         grads_fd[i] = (zone_pressure(C0 + bump) - zone_pressure(C0 - bump)) / (2 * h)
 
     el = PowerLaw(C0.clone().requires_grad_(True), n, learnable=True)
-    layer = PotentialFlowLayer(net, "zones", [el], drives=drives, boundary=boundary)
+    layer = KirchhoffLayer(net, "zones", [el], drives=drives, boundary=boundary)
     phi, _ = layer.solve(phi_b, {"wind": wind}, None, differentiable=True)
     phi[1].backward()
     grads_ad = el.C.grad
@@ -489,7 +489,7 @@ def test_finite_difference_matches_autograd_gradient_for_zone_pressure(two_zone_
 
 def test_jacobian_is_symmetric(two_zone_layer):
     net, elements, drives, boundary = two_zone_layer
-    layer = PotentialFlowLayer(net, "zones", elements, drives=drives, boundary=boundary)
+    layer = KirchhoffLayer(net, "zones", elements, drives=drives, boundary=boundary)
     phi_b = torch.zeros(1, dtype=torch.float64)
     wind = torch.tensor([10.0, 0.0, 0.0], dtype=torch.float64)
 
@@ -501,7 +501,7 @@ def test_jacobian_is_symmetric(two_zone_layer):
 
 def test_differentiable_false_matches_differentiable_true(two_zone_layer):
     net, elements, drives, boundary = two_zone_layer
-    layer = PotentialFlowLayer(net, "zones", elements, drives=drives, boundary=boundary)
+    layer = KirchhoffLayer(net, "zones", elements, drives=drives, boundary=boundary)
     phi_b = torch.zeros(1, dtype=torch.float64)
     wind = torch.tensor([10.0, 0.0, 0.0], dtype=torch.float64)
 
@@ -521,7 +521,7 @@ def test_solve_raises_for_element_tensor_with_requires_grad_but_not_learnable(tw
     net, _elements, drives, boundary = two_zone_layer
     C = torch.tensor([0.01, 0.02, 0.01], dtype=torch.float64, requires_grad=True)
     el = PowerLaw(C, 0.65, learnable=False)
-    layer = PotentialFlowLayer(net, "zones", [el], drives=drives, boundary=boundary)
+    layer = KirchhoffLayer(net, "zones", [el], drives=drives, boundary=boundary)
     phi_b = torch.zeros(1, dtype=torch.float64)
     wind = torch.tensor([10.0, 0.0, 0.0], dtype=torch.float64)
 
@@ -550,7 +550,7 @@ def test_solve_raises_for_drive_owning_its_own_differentiable_tensor(two_zone_la
     net, elements, _drives, boundary = two_zone_layer
     coeff = torch.tensor(1.0, dtype=torch.float64, requires_grad=True)
     drv = LearnableDrive(coeff)
-    layer = PotentialFlowLayer(net, "zones", elements, drives=[drv], boundary=boundary)
+    layer = KirchhoffLayer(net, "zones", elements, drives=[drv], boundary=boundary)
     phi_b = torch.zeros(1, dtype=torch.float64)
     wind = torch.tensor([10.0, 0.0, 0.0], dtype=torch.float64)
 
@@ -617,7 +617,7 @@ def test_solve_raises_when_an_element_flow_silently_drops_the_autograd_graph():
     # The differentiable solve must now raise instead, naming the offending element, because
     # `_DetachedLeak` does not declare `dp_independent = True`.
     net, elements = _mixed_leak_network(include_buggy=True)
-    layer = PotentialFlowLayer(net, "mixed", elements, boundary=["ambient"])
+    layer = KirchhoffLayer(net, "mixed", elements, boundary=["ambient"])
     phi_b = torch.zeros(1, dtype=torch.float64)
     sources = torch.tensor([0.0, 1.0], dtype=torch.float64, requires_grad=True)
 
@@ -630,7 +630,7 @@ def test_solve_matches_finite_differences_for_the_all_correct_mixed_leak_layer()
     # layer's differentiable solve must still work, and its adjoint gradient of the zone
     # pressure with respect to the interior source must match finite differences.
     net, elements = _mixed_leak_network(include_buggy=False)
-    layer = PotentialFlowLayer(net, "mixed", elements, boundary=["ambient"])
+    layer = KirchhoffLayer(net, "mixed", elements, boundary=["ambient"])
     phi_b = torch.zeros(1, dtype=torch.float64)
 
     def zone_pressure(source_z: torch.Tensor) -> torch.Tensor:
@@ -686,7 +686,7 @@ def test_solve_raises_when_dp_independent_is_wrongly_declared():
     elements = [
         _WronglyDeclaredDpIndependent(torch.tensor([0.02], dtype=torch.float64), 0.7, kind="leak")
     ]
-    layer = PotentialFlowLayer(net, "wrong_flag", elements, boundary=["ambient"])
+    layer = KirchhoffLayer(net, "wrong_flag", elements, boundary=["ambient"])
     phi_b = torch.zeros(1, dtype=torch.float64)
     sources = torch.tensor([0.0, 1.0], dtype=torch.float64, requires_grad=True)
 
@@ -723,7 +723,7 @@ def test_solve_raises_when_flow_requires_grad_via_a_parameter_but_ignores_dp():
     elements = [
         _DetachedButLearnableLeak(torch.tensor([0.02], dtype=torch.float64), 0.7, kind="leak")
     ]
-    layer = PotentialFlowLayer(net, "unused_dp", elements, boundary=["ambient"])
+    layer = KirchhoffLayer(net, "unused_dp", elements, boundary=["ambient"])
     phi_b = torch.zeros(1, dtype=torch.float64)
     sources = torch.tensor([0.0, 1.0], dtype=torch.float64, requires_grad=True)
 
@@ -762,7 +762,7 @@ def _emitter_layer(coeff=0.02):
     net.add_node("R")
     net.add_edge("R", "J", kind="pipe")
     source = _Emitter(torch.tensor([0]), torch.tensor([coeff], dtype=torch.float64))
-    layer = PotentialFlowLayer(
+    layer = KirchhoffLayer(
         net, "water", [_pipe_law()], boundary=["R"],
         node_sources=[source], linear_solver="direct",
     )
@@ -789,7 +789,7 @@ def test_node_source_enters_the_residual_and_the_jacobian_diagonal():
     phi, _ = layer.solve(pb, {}, None, differentiable=False, atol=1e-13, rtol=1e-13)
     residual = layer.residual(phi[..., layer.interior], pb, {}, None)
     assert float(residual.detach().abs().max()) < 1e-10
-    without = PotentialFlowLayer(
+    without = KirchhoffLayer(
         layer.net, "bare", [_pipe_law()], boundary=["R"],
         linear_solver="direct",
     )
@@ -836,7 +836,7 @@ def test_node_source_on_a_boundary_node_is_refused():
     net.add_node("R")
     net.add_edge("R", "J", kind="pipe")
     with pytest.raises(ValueError, match=r"acts at \['R'\]"):
-        PotentialFlowLayer(
+        KirchhoffLayer(
             net, "water", [_pipe_law()], boundary=["R"],
             node_sources=[_Emitter(torch.tensor([1]),
                                    torch.tensor([0.02], dtype=torch.float64))],
@@ -878,7 +878,7 @@ def test_grounding_counts_a_node_source_at_a_fixed_flow_only_node():
     q0 = torch.tensor([0.01], dtype=torch.float64)
     elements = [FixedFlow(q0, kind="vent")]
     source = _LinearGround(torch.tensor([0]), 0.02)
-    layer = PotentialFlowLayer(
+    layer = KirchhoffLayer(
         net, "test", elements, boundary=["R"], node_sources=[source],
         linear_solver="direct",
     )
@@ -892,7 +892,7 @@ def test_grounding_counts_a_node_source_at_a_fixed_flow_only_node():
 
     # Without the fix (edge-only grounding), this same layer is refused: the FixedFlow edge
     # contributes a zero slope, so an edge-only check sees an ungrounded interior node.
-    without_source = PotentialFlowLayer(
+    without_source = KirchhoffLayer(
         net, "bare", elements, boundary=["R"], linear_solver="direct",
     )
     with pytest.raises(RuntimeError, match="floating nodes"):
@@ -908,7 +908,7 @@ def test_a_network_grounded_only_by_node_sources_is_certified_spd():
     net.add_node("A")
     net.add_node("B")
     net.add_edge("A", "B", kind="c")
-    layer = PotentialFlowLayer(
+    layer = KirchhoffLayer(
         net, "test", [Conductance(torch.tensor([2.0], dtype=torch.float64), kind="c")],
         node_sources=[_LinearGround(torch.tensor([0]), 0.5),
                       _LinearGround(torch.tensor([1]), 0.25)],
@@ -935,12 +935,12 @@ def test_two_node_sources_on_one_node_sum_their_withdrawals():
     net.add_edge("R", "J", kind="pipe")
     a = _Emitter(torch.tensor([0]), torch.tensor([0.02], dtype=torch.float64))
     b = _Emitter(torch.tensor([0]), torch.tensor([0.01], dtype=torch.float64))
-    two = PotentialFlowLayer(
+    two = KirchhoffLayer(
         net, "water", [_pipe_law()], boundary=["R"], node_sources=[a, b],
         linear_solver="direct",
     )
     combined = _Emitter(torch.tensor([0]), torch.tensor([0.03], dtype=torch.float64))
-    one = PotentialFlowLayer(
+    one = KirchhoffLayer(
         net, "water", [_pipe_law()], boundary=["R"], node_sources=[combined],
         linear_solver="direct",
     )
@@ -960,7 +960,7 @@ def test_node_source_with_a_batched_parameter_solves_each_instance_independently
     net.add_edge("R", "J", kind="pipe")
     coeffs = torch.tensor([[0.01], [0.02], [0.04]], dtype=torch.float64)  # (3 instances, 1 node)
     source = _Emitter(torch.tensor([0]), coeffs)
-    layer = PotentialFlowLayer(
+    layer = KirchhoffLayer(
         net, "water", [_pipe_law()], boundary=["R"], node_sources=[source],
         linear_solver="direct",
     )
@@ -969,7 +969,7 @@ def test_node_source_with_a_batched_parameter_solves_each_instance_independently
     assert phi.shape[:-1] == (3,) and q.shape[:-1] == (3,)
     for i in range(3):
         single_source = _Emitter(torch.tensor([0]), coeffs[i])
-        single_layer = PotentialFlowLayer(
+        single_layer = KirchhoffLayer(
             net, "water", [_pipe_law()], boundary=["R"], node_sources=[single_source],
             linear_solver="direct",
         )
@@ -1001,7 +1001,7 @@ def test_node_source_with_an_unregistered_grad_tensor_is_named_as_a_node_source(
     net.add_node("R")
     net.add_edge("R", "J", kind="pipe")
     source = _LeakyGradSource(torch.tensor([0]), 0.02)
-    layer = PotentialFlowLayer(
+    layer = KirchhoffLayer(
         net, "water", [_pipe_law()], boundary=["R"], node_sources=[source],
         linear_solver="direct",
     )
@@ -1025,7 +1025,7 @@ def test_law_for_returns_the_law_and_its_q_slice():
     pipe = _pipe_law()
     valve = PowerLaw(torch.tensor(0.03, dtype=torch.float64),
                       torch.tensor(0.6, dtype=torch.float64), kind="valve")
-    layer = PotentialFlowLayer(net, "net", [pipe, valve], boundary=["a"])
+    layer = KirchhoffLayer(net, "net", [pipe, valve], boundary=["a"])
 
     el, sl = layer.law_for("valve")
     assert el is valve
@@ -1044,7 +1044,7 @@ def test_node_sources_default_to_empty_and_change_nothing():
     net.add_node("J")
     net.add_node("R")
     net.add_edge("R", "J", kind="pipe")
-    layer = PotentialFlowLayer(
+    layer = KirchhoffLayer(
         net, "water", [_pipe_law()], boundary=["R"],
         linear_solver="direct",
     )
@@ -1060,7 +1060,7 @@ def test_node_sources_are_exposed_read_only_as_a_tuple():
     net, layer, source = _emitter_layer()
     assert layer.node_sources == (source,)
     assert isinstance(layer.node_sources, tuple)
-    bare = PotentialFlowLayer(net, "bare", [_pipe_law()], boundary=["R"], linear_solver="direct")
+    bare = KirchhoffLayer(net, "bare", [_pipe_law()], boundary=["R"], linear_solver="direct")
     assert bare.node_sources == ()
 
 
@@ -1078,8 +1078,8 @@ def test_a_batched_drive_on_one_kind_broadcasts_a_drive_free_fixed_flow_kind():
     net.add_edge("amb", "b", kind="fan")
     elements = [PowerLaw(torch.full((3,), 0.02, dtype=f64), 0.6, kind="airpath"),
                 FixedFlow(torch.tensor([0.05], dtype=f64), kind="fan")]
-    layer = PotentialFlowLayer(net, "air", elements, drives=[ConstantDrive("airpath", "wind")],
-                               boundary=["amb"])
+    layer = KirchhoffLayer(net, "air", elements, drives=[ConstantDrive("airpath", "wind")],
+                           boundary=["amb"])
     wind = torch.tensor([[3.0, 0.0, -1.0], [8.0, 0.0, -2.0]], dtype=f64)
     phi_b = torch.zeros(1, dtype=f64)
     assert layer.dp(torch.zeros(3, dtype=f64), {"wind": wind}).shape == (2, 4)

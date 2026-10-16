@@ -38,7 +38,7 @@ net.add_edge("room", "ambient", kind="airpath")   # air can flow
 net.add_edge("room", "wall", kind="wall")          # heat conducts, air does not
 ```
 
-A potential-flow layer solving on `"airpath"` never sees the wall edges. A thermal layer
+A Kirchhoff layer solving on `"airpath"` never sees the wall edges. A thermal layer
 advecting on `"airpath"` and conducting on `"wall"` sees both, in separate blocks. The sewer
 application uses this to put water, headspace air and two quality layers on one graph; the
 street application uses it to separate `route`, `vent` and `exchange` edges.

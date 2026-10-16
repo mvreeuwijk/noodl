@@ -139,7 +139,7 @@ def _layer_flows(history: Mapping[str, Tensor], model, layer: str):
         raise KeyError(f"the history has no {key!r}, the flows layer {layer!r} is advected by")
     q = torch.as_tensor(history[key], dtype=F64)
     if owner is not None:
-        q = model.potential[owner].flows_of_kind(q, lay.flow_kinds)
+        q = model.kirchhoff[owner].flows_of_kind(q, lay.flow_kinds)
     return lay, q
 
 

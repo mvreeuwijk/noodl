@@ -13,7 +13,7 @@ from noodl.apps.electrical import (
 )
 from noodl.apps.electrical.converters import reg_root, splice
 from noodl.elements import LawContext
-from noodl.layers.potential import PotentialFlowLayer
+from noodl.layers.kirchhoff import KirchhoffLayer
 from noodl.topology import Network
 
 F64 = torch.float64
@@ -35,7 +35,7 @@ def _layer(edges, laws):
         net.add_node(n)
     for u, v, kind in edges:
         net.add_edge(u, v, kind=kind)
-    return net, PotentialFlowLayer(net, "electrical", laws, boundary=["0"], phasor=True)
+    return net, KirchhoffLayer(net, "electrical", laws, boundary=["0"], phasor=True)
 
 
 def test_transformer_with_primary_impedance_feeds_a_resistor():

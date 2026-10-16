@@ -11,7 +11,7 @@ import pytest
 import torch
 
 from noodl.elements import PowerLaw, UpstreamDensityPowerLaw
-from noodl.layers.potential import PotentialFlowLayer
+from noodl.layers.kirchhoff import KirchhoffLayer
 from noodl.topology import Network
 
 F64 = torch.float64
@@ -359,9 +359,9 @@ def test_a_buoyant_two_orifice_stack_beats_the_uncorrected_law_in_both_direction
     from noodl.drives import Stack
 
     drive = Stack.from_network(net, "airpath")
-    plain = PotentialFlowLayer(net, "air", [PowerLaw(C, n)], drives=[drive],
-                               boundary=["ambient"])
-    corrected = PotentialFlowLayer(
+    plain = KirchhoffLayer(net, "air", [PowerLaw(C, n)], drives=[drive],
+                           boundary=["ambient"])
+    corrected = KirchhoffLayer(
         net,
         "air",
         [UpstreamDensityPowerLaw(C, n, src=src, tgt=tgt, m=0.5, rho_ref=RHO_REF)],
@@ -400,7 +400,7 @@ def test_a_gradient_reaches_the_density_driver_through_a_differentiable_solve():
     src, tgt = net.endpoints("airpath")
     from noodl.drives import Stack
 
-    layer = PotentialFlowLayer(
+    layer = KirchhoffLayer(
         net,
         "air",
         [

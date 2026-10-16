@@ -5,7 +5,7 @@ junctions with demand, are nodes; full pipes, pumps and valves are edges. Water 
 every junction, and flow is driven by differences in hydraulic head.
 
 Every pipe is full and its head loss is a monotone function of the head difference, so the whole
-network is **one** `PotentialFlowLayer` whose potential is hydraulic head. That is exactly what
+network is **one** `KirchhoffLayer` whose potential is hydraulic head. That is exactly what
 distinguishes it from the free-surface [sewer](sewer.md), whose normal flow is set by slope and
 upstream inflow rather than by head difference.
 

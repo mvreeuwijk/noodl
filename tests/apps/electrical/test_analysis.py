@@ -277,7 +277,7 @@ def _coupled_run(values):
         Resistor("R4", "e", "0", 4.0),
     ])
     model, _, drivers = build_model(circuit, learnable=True)
-    layer = model.potential[LAYER]
+    layer = model.kirchhoff[LAYER]
     params = [layer.law_for("inductor")[0].L, layer.law_for("transformer")[0].M,
               layer.law_for("vccs")[0].gain, layer.law_for("resistor")[0].R]
     with torch.no_grad():

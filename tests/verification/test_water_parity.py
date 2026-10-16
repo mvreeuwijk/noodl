@@ -108,7 +108,7 @@ def test_nodal_continuity_is_exact(tmp_path):
     net = read_epanet_inp(path)
     model, state, drivers = build_model(net)
     final = water_steady(model, state, drivers)
-    layer = model.potential["water"]
+    layer = model.kirchhoff["water"]
     residual = layer.residual(
         final["water.phi"][..., layer.interior], drivers["water.phi_boundary"],
         {}, drivers["water.sources"],
@@ -456,7 +456,7 @@ def test_pressure_driven_demand(tmp_path):
     demands = results.node["demand"].loc[0]
     worst_h = _worst_heads(model, final, heads, skip=("R1",))
     assert worst_h < 1e-5, worst_h
-    source = model.potential["water"]._node_sources[0]
+    source = model.kirchhoff["water"]._node_sources[0]
     delivered = source.flow(final["water.phi"][..., source.nodes]).detach()
     worst_d = max(
         abs(float(delivered[i]) - float(demands[j.name])) / abs(float(demands[j.name]))
@@ -471,7 +471,7 @@ def test_pda_delivers_less_than_the_required_demand(tmp_path):
     net = read_epanet_inp(path)
     model, state, drivers = build_model(net)
     final = water_steady(model, state, drivers)
-    source = model.potential["water"]._node_sources[0]
+    source = model.kirchhoff["water"]._node_sources[0]
     delivered = source.flow(final["water.phi"][..., source.nodes]).detach()
     required = torch.tensor([j.demand for j in net.junctions], dtype=F64)
     assert bool((delivered < required).all())
@@ -499,7 +499,7 @@ def test_head_loss_sums_to_zero_around_every_loop(tmp_path):
     net = read_epanet_inp(path)
     model, state, drivers = build_model(net)
     final = water_steady(model, state, drivers)
-    layer = model.potential["water"]
+    layer = model.kirchhoff["water"]
     basis = model.net.cycle_basis("pipe")
     assert basis.shape[0] == 2
     loops = basis.to(F64) @ layer.dp(final["water.phi"], {})
@@ -545,15 +545,15 @@ def test_gradients_against_central_differences(tmp_path):
         return model, final
 
     model, _, drivers = build_model(net)
-    element = model.potential["water"]._laws[0]
+    element = model.kirchhoff["water"]._laws[0]
     sources = drivers["water.sources"].clone().requires_grad_(True)
     element.roughness.requires_grad_(True)
     final = water_steady(model, {"water.phi": torch.zeros(model.net.n, dtype=F64),
                                  "water.q": torch.zeros(
-                                     len(model.potential["water"].cols), dtype=F64)},
+                                     len(model.kirchhoff["water"].cols), dtype=F64)},
                          {**drivers, "water.sources": sources},
                          differentiable=True)
-    layer = model.potential["water"]
+    layer = model.kirchhoff["water"]
     final["water.phi"][..., layer.interior].sum().backward()
     analytic_sources = sources.grad.clone()
     analytic_roughness = element.roughness.grad.clone()
@@ -569,8 +569,8 @@ def test_gradients_against_central_differences(tmp_path):
         m_down, s_down = solve_sum(sources=down)
         fd_sources.append(
             (
-                float(s_up["water.phi"][..., m_up.potential["water"].interior].sum())
-                - float(s_down["water.phi"][..., m_down.potential["water"].interior].sum())
+                float(s_up["water.phi"][..., m_up.kirchhoff["water"].interior].sum())
+                - float(s_down["water.phi"][..., m_down.kirchhoff["water"].interior].sum())
             )
             / (2 * eps)
         )
@@ -593,8 +593,8 @@ def test_gradients_against_central_differences(tmp_path):
         m_down, s_down = solve_sum(roughness=down_r)
         fd_roughness.append(
             (
-                float(s_up["water.phi"][..., m_up.potential["water"].interior].sum())
-                - float(s_down["water.phi"][..., m_down.potential["water"].interior].sum())
+                float(s_up["water.phi"][..., m_up.kirchhoff["water"].interior].sum())
+                - float(s_down["water.phi"][..., m_down.kirchhoff["water"].interior].sum())
             )
             / (2 * eps_r)
         )
@@ -616,17 +616,17 @@ def test_gradient_reaches_the_pump_head_gain_h0(tmp_path):
 
     def solve_with_h0(delta: float):
         model, state, drivers = build_model(net)
-        pump = next(el for el in model.potential["water"]._laws if el.kind == "pump")
+        pump = next(el for el in model.kirchhoff["water"]._laws if el.kind == "pump")
         with torch.no_grad():
             pump.h0.add_(delta)
         final = water_steady(model, state, drivers)
         return model, final
 
     model, state, drivers = build_model(net)
-    pump = next(el for el in model.potential["water"]._laws if el.kind == "pump")
+    pump = next(el for el in model.kirchhoff["water"]._laws if el.kind == "pump")
     pump.h0.requires_grad_(True)
     final = water_steady(model, state, drivers, differentiable=True)
-    layer = model.potential["water"]
+    layer = model.kirchhoff["water"]
     final["water.phi"][..., layer.interior].sum().backward()
     analytic = float(pump.h0.grad.detach())
 
@@ -634,8 +634,8 @@ def test_gradient_reaches_the_pump_head_gain_h0(tmp_path):
     m_up, up = solve_with_h0(eps)
     m_down, down = solve_with_h0(-eps)
     fd = (
-        float(up["water.phi"][..., m_up.potential["water"].interior].sum())
-        - float(down["water.phi"][..., m_down.potential["water"].interior].sum())
+        float(up["water.phi"][..., m_up.kirchhoff["water"].interior].sum())
+        - float(down["water.phi"][..., m_down.kirchhoff["water"].interior].sum())
     ) / (2 * eps)
     assert abs(analytic - fd) <= 1e-5 * abs(fd), (analytic, fd)
 
@@ -689,10 +689,10 @@ def test_gradient_reaches_a_learnable_roughness(tmp_path):
     path, _ = _epanet(tmp_path, "twoloop_si.inp")
     net = read_epanet_inp(path)
     model, state, drivers = build_model(net)
-    element = model.potential["water"]._laws[0]
+    element = model.kirchhoff["water"]._laws[0]
     element.roughness.requires_grad_(True)
     final = water_steady(model, state, drivers, differentiable=True)
-    layer = model.potential["water"]
+    layer = model.kirchhoff["water"]
     final["water.phi"][..., layer.interior].sum().backward()
     assert element.roughness.grad is not None
     assert torch.isfinite(element.roughness.grad).all()

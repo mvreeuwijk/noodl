@@ -6,7 +6,7 @@ import pytest
 import torch
 
 from noodl.apps.electrical import ConstantPowerLoad, Impedance, PrescribedVoltage
-from noodl.layers.potential import PotentialFlowLayer
+from noodl.layers.kirchhoff import KirchhoffLayer
 from noodl.topology import Network
 
 F64 = torch.float64
@@ -32,7 +32,7 @@ def _net(edges):
 
 def _solve(edges, laws, *, phasor=False, f=60.0, drivers=None, **kwargs):
     net = _net(edges)
-    layer = PotentialFlowLayer(net, "electrical", laws, boundary=["0"], phasor=phasor)
+    layer = KirchhoffLayer(net, "electrical", laws, boundary=["0"], phasor=phasor)
     d = dict(drivers or {})
     if phasor:
         d["electrical.frequency"] = torch.tensor(f)
@@ -196,8 +196,8 @@ def _load_voltage(P, R=0.1, *, differentiable=False):
     net = _net(edges)
     load = ConstantPowerLoad(P, V_nominal=12.0, direct_current=True, learnable=differentiable)
     imp = Impedance(R, learnable=differentiable)
-    layer = PotentialFlowLayer(net, "electrical", [PrescribedVoltage(12.0), imp, load],
-                               boundary=["0"])
+    layer = KirchhoffLayer(net, "electrical", [PrescribedVoltage(12.0), imp, load],
+                           boundary=["0"])
     phi, _ = layer.solve(torch.zeros(1), {}, differentiable=differentiable)
     return phi[net.nodes.index("a")], imp, load
 
@@ -221,7 +221,7 @@ def _impedance_current(f, *, differentiable=False):
     laws = [PrescribedVoltage(120.0),
             Impedance(torch.tensor([1.0, 2.0]), L=torch.tensor([1e-2, 0.0]),
                       C=torch.tensor([math.inf, 1e-3]))]
-    layer = PotentialFlowLayer(net, "electrical", laws, boundary=["0"], phasor=True)
+    layer = KirchhoffLayer(net, "electrical", laws, boundary=["0"], phasor=True)
     _, q = layer.solve(torch.zeros(1, dtype=C128), {"electrical.frequency": f},
                        differentiable=differentiable)
     return q[1:].abs().sum()

@@ -295,10 +295,10 @@ def test_heat_port_columns_map_to_the_thermal_nodes():
 
 def test_resistor_example_has_a_thermal_layer_coupled_by_iteration():
     model, state, drivers, names = read_modelica_circuit(DATA / "Analog.Examples.Resistor.json")
-    assert list(model.potential) == ["electrical", "thermal"]
+    assert list(model.kirchhoff) == ["electrical", "thermal"]
     assert model.coupling == "iterate"
     assert names.columns["resistor.T_heatPort"].key == "thermal.phi"
-    thermal = model.potential["thermal"]
+    thermal = model.kirchhoff["thermal"]
     assert thermal.kinds == ["conductor", "heat_source"]
     assert (thermal.quantity, thermal.unit, thermal.flow_unit) == ("temperature", "K", "W")
     assert not names.dynamic
@@ -321,7 +321,7 @@ def test_resistor_example_has_a_thermal_layer_coupled_by_iteration():
 def test_heating_rectifier_thermal_start_and_temperature_drivers():
     model, state, drivers, names = read_modelica_circuit(
         DATA / "Analog.Examples.HeatingRectifier.json")
-    thermal = model.potential["thermal"]
+    thermal = model.kirchhoff["thermal"]
     assert thermal.kinds == ["conductor", "heat_source", "heat_capacitor"]
     assert names.dynamic
     # no fixed temperature: the 0 K reference is the only boundary

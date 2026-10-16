@@ -73,7 +73,7 @@ def test_energy_balance_closes_at_steady_state():
     # per-pass thermal change of ~1e-4 K, well above its own 1e-9 K tolerance.
     ss = model.steady(state, drivers, atol=1e-14, rtol=1e-14)
     T_z = ss["thermal.x"][0].item()
-    q = model.potential["air"].flows_of_kind(ss["air.q"], "airpath")
+    q = model.kirchhoff["air"].flows_of_kind(ss["air.q"], "airpath")
     assert q[0] > 0 and q[1] < 0                              # in low, out high
     assert CP_AIR * q[0].item() * (T_z - T_OUT) == pytest.approx(500.0, rel=1e-7)
     res = model.residuals(ss, drivers)
@@ -87,7 +87,7 @@ def test_ventilated_zone_with_a_wall_matches_the_algebraic_balance():
     th = model.layers["thermal"]
     names = [net.nodes[i] for i in th.interior_idx.tolist()]
     T = dict(zip(names, ss["thermal.x"].tolist(), strict=True))
-    q = model.potential["air"].flows_of_kind(ss["air.q"], "airpath")
+    q = model.kirchhoff["air"].flows_of_kind(ss["air.q"], "airpath")
     F_in = q[0].item()
     # wall: 100 (T_z - T_w) = 20 (T_w - T_o); zone: E = c_p F (T_z - T_o) + 100 (T_z - T_w)
     assert 100.0 * (T["z"] - T["z_wall"]) == pytest.approx(20.0 * (T["z_wall"] - T_OUT), rel=1e-8)

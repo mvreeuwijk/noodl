@@ -5,7 +5,7 @@ import pytest
 import torch
 
 from noodl.elements import Conductance, ConstitutiveLaw
-from noodl.layers.potential import PotentialFlowLayer
+from noodl.layers.kirchhoff import KirchhoffLayer
 from noodl.layers.transport import TransportLayer
 from noodl.model import Model
 from noodl.refs import required_state_keys
@@ -54,8 +54,8 @@ def _rc(source=None, resistor=None):
                                    ("b", "gnd", "cap")])
     source = Source(torch.tensor([1.0])) if source is None else source
     resistor = Conductance(torch.tensor([1.0]), kind="r") if resistor is None else resistor
-    layer = PotentialFlowLayer(net, "e", [source, resistor, Cap(torch.tensor([1.0]))],
-                               boundary=["gnd"])
+    layer = KirchhoffLayer(net, "e", [source, resistor, Cap(torch.tensor([1.0]))],
+                           boundary=["gnd"])
     return net, layer
 
 
@@ -128,8 +128,8 @@ def test_step_hands_the_layer_warm_start_history_and_end_time(monkeypatch):
 
 def test_classic_layer_gets_no_circuit_keywords(monkeypatch):
     net = _net(["g", "a"], [("a", "g", "r")])
-    layer = PotentialFlowLayer(net, "c", [Conductance(torch.tensor([1.0]), kind="r")],
-                               boundary=["g"])
+    layer = KirchhoffLayer(net, "c", [Conductance(torch.tensor([1.0]), kind="r")],
+                           boundary=["g"])
     seen = []
     solve = layer.solve
 
@@ -207,8 +207,8 @@ def test_residuals_use_balance_for_mna():
 
 def test_balance_matches_classic_residual():
     net = _net(["gnd", "a", "b"], [("a", "gnd", "r"), ("a", "b", "r"), ("b", "gnd", "r")])
-    layer = PotentialFlowLayer(net, "c", [Conductance(torch.tensor([1.0, 2.0, 3.0]), kind="r")],
-                               boundary=["gnd"])
+    layer = KirchhoffLayer(net, "c", [Conductance(torch.tensor([1.0, 2.0, 3.0]), kind="r")],
+                           boundary=["gnd"])
     phi = torch.tensor([0.0, 0.3, -0.2])
     sources = torch.tensor([0.0, 0.5, 0.1])
     q = layer.flows(phi, {})
@@ -236,7 +236,7 @@ def test_current_flows_reads_the_state_of_an_mna_owner():
 def _rlc_phasor():
     net = _net(["gnd", "a", "b", "c"], [("a", "gnd", "source"), ("a", "b", "r"),
                                         ("b", "c", "ind"), ("c", "gnd", "cap")])
-    layer = PotentialFlowLayer(
+    layer = KirchhoffLayer(
         net, "e", [DrivenSource(), Conductance(torch.tensor([0.5]), kind="r"),
                    Ind(torch.tensor([1e-3])), Cap(torch.tensor([1e-6]))],
         boundary=["gnd"], phasor=True)
@@ -290,7 +290,7 @@ class RealCurrent(ConstitutiveLaw):
 def test_phasor_law_returning_real_tensor(differentiable):
     net = _net(["gnd", "a", "b"], [("a", "gnd", "source"), ("a", "b", "r"),
                                    ("b", "gnd", "load")])
-    layer = PotentialFlowLayer(
+    layer = KirchhoffLayer(
         net, "e", [Source(torch.tensor([1.0])), Conductance(torch.tensor([1.0]), kind="r"),
                    RealCurrent(torch.tensor([0.5]))], boundary=["gnd"], phasor=True)
     phi, q = layer.solve(GROUND, {"e.frequency": torch.tensor(50.0)},
@@ -321,7 +321,7 @@ def test_frequency_key_and_required_inputs():
     net, layer = _rlc_phasor()
     assert layer.frequency_key == "e.frequency"
     assert _rc()[1].frequency_key is None
-    classic = PotentialFlowLayer(
+    classic = KirchhoffLayer(
         _net(["g", "a"], [("a", "g", "r")]), "c", [Conductance(torch.tensor([1.0]), kind="r")],
         boundary=["g"])
     assert classic.frequency_key is None
@@ -352,7 +352,7 @@ def test_dynamic_layer_requires_its_state_to_step():
 def _phasor_feedback_model(conductance):
     net = _net(["gnd", "a", "b", "c"], [("a", "gnd", "source"), ("a", "b", "r"),
                                         ("b", "c", "ind"), ("c", "gnd", "cap")])
-    layer = PotentialFlowLayer(
+    layer = KirchhoffLayer(
         net, "e", [DrivenSource(), conductance, Ind(torch.tensor([1e-3])),
                    Cap(torch.tensor([1e-6]))], boundary=["gnd"], phasor=True)
 

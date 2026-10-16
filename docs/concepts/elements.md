@@ -164,7 +164,7 @@ Two of them in series between prescribed potentials, `k = 1` then `k = 4`: equal
 `(6 - phi_b)^2 = 4 phi_b^2`, so `phi_b = 2` and `q = 16`.
 
 ```python
-from noodl.layers.potential import PotentialFlowLayer
+from noodl.layers.kirchhoff import KirchhoffLayer
 from noodl.topology import Network
 
 net = Network(dtype=torch.float64)
@@ -172,7 +172,7 @@ for node in ("a", "b", "c"):
     net.add_node(node)
 net.add_edge("a", "b", kind="pipe")
 net.add_edge("b", "c", kind="pipe")
-layer = PotentialFlowLayer(
+layer = KirchhoffLayer(
     net, "p", [Squared(torch.tensor([1.0, 4.0], dtype=torch.float64))], boundary=["a", "c"])
 phi, q = layer.solve(torch.tensor([6.0, 0.0], dtype=torch.float64))
 print([round(v, 9) for v in phi.tolist()], [round(v, 9) for v in q.tolist()])
@@ -200,7 +200,7 @@ Two rules worth stating explicitly, because both produce wrong answers rather th
 The contract above is the potential-controlled form, `q = g(dp)`: one flow per edge, a function
 of that edge's own potential difference. Every built-in airflow, water and sewer law has it, and
 a layer whose laws all have it is solved by nodal analysis. Five class-level declarations on
-`ConstitutiveLaw` describe the other cases; a `PotentialFlowLayer` with any of them is solved by
+`ConstitutiveLaw` describe the other cases; a `KirchhoffLayer` with any of them is solved by
 [Modified Nodal Analysis](layers.md#modified-nodal-analysis-implicit-coupled-and-dynamic-laws).
 
 | Declaration | Default | Meaning |
@@ -226,7 +226,7 @@ conductance, between two prescribed potentials:
 import torch
 
 from noodl.elements import Conductance, ImplicitLaw
-from noodl.layers.potential import PotentialFlowLayer
+from noodl.layers.kirchhoff import KirchhoffLayer
 from noodl.topology import Network
 
 F64 = torch.float64
@@ -248,7 +248,7 @@ for node in ("in", "mid", "out"):
     net.add_node(node)
 net.add_edge("in", "mid", kind="loss")
 net.add_edge("mid", "out", kind="pipe")
-layer = PotentialFlowLayer(
+layer = KirchhoffLayer(
     net, "w",
     [QuadraticLoss(torch.tensor(2.0, dtype=F64)),
      Conductance(torch.tensor(1.0, dtype=F64), kind="pipe")],

@@ -45,7 +45,7 @@ def test_case9_spot_values():
 
 def test_layer_layout_flat_start_and_complex_tellegen():
     model, state, drivers = build_power_flow(four_bus())
-    layer = model.potential[POWER_LAYER]
+    layer = model.kirchhoff[POWER_LAYER]
     assert layer.phasor and layer.kinds == ["branch", "load", "shunt", "generator"]
     q0 = state["power.q"]
     # branch ends, loads, shunt, the PV generator (the slack is a boundary node, not an edge)
@@ -92,7 +92,7 @@ def test_infeasible_loading_raises_naming_the_layer():
     heavy = tuple(dataclasses.replace(ld, p_mw=10 * ld.p_mw, q_mvar=10 * ld.q_mvar)
                   for ld in net.loads)
     model, state, drivers = build_power_flow(dataclasses.replace(net, loads=heavy))
-    with pytest.raises(RuntimeError, match="PotentialFlowLayer 'power'") as failure:
+    with pytest.raises(RuntimeError, match="KirchhoffLayer 'power'") as failure:
         solve_power_flow(model, state, drivers)
     assert "power flow: no solution found" in str(failure.value)
     assert "exceed what the network can transfer" in str(failure.value)
@@ -117,7 +117,7 @@ def _failing_steady(model, error):
 
 def test_a_singular_power_flow_system_gets_the_advice():
     model, state, drivers = build_power_flow(four_bus())
-    error = RuntimeError("PotentialFlowLayer 'power' solve: singular system at batch indices [0]")
+    error = RuntimeError("KirchhoffLayer 'power' solve: singular system at batch indices [0]")
     _failing_steady(model, error)
     with pytest.raises(RuntimeError, match="power flow: no solution found") as failure:
         solve_power_flow(model, state, drivers)
@@ -125,8 +125,8 @@ def test_a_singular_power_flow_system_gets_the_advice():
 
 
 @pytest.mark.parametrize("message", [
-    "PotentialFlowLayer 'power': law 0 of kind 'load' declares dp_independent = True",
-    "PotentialFlowLayer 'power_dc' solve: batch indices [0] failed to converge",
+    "KirchhoffLayer 'power': law 0 of kind 'load' declares dp_independent = True",
+    "KirchhoffLayer 'power_dc' solve: batch indices [0] failed to converge",
     "solve: batch indices [0] failed to converge after 30 iterations",
 ])
 def test_other_runtime_errors_pass_through_unchanged(message):
@@ -144,7 +144,7 @@ def test_voltage_sensitivity_to_load_matches_finite_differences():
     # converged solve, against a central difference of two plain solves (h = 1e-5 p.u.).
     net = four_bus()
     model, state, drivers = build_power_flow(net, learnable=True)
-    load, _ = model.potential[POWER_LAYER].law_for("load")
+    load, _ = model.kirchhoff[POWER_LAYER].law_for("load")
     sol = power_flow_solution(model, solve_power_flow(model, state, drivers))
     grads = [torch.autograd.grad(sol.vm[k], load.P, retain_graph=True)[0][1] for k in (2, 3)]
 
@@ -211,7 +211,7 @@ def test_branch_end_powers_close_the_power_balance():
 def test_coefficients_are_float64_whatever_the_default_dtype():
     torch.set_default_dtype(torch.float32)      # the autouse fixture restores it
     model, sol = _solve(four_bus())
-    branch, _ = model.potential[POWER_LAYER].law_for("branch")
+    branch, _ = model.kirchhoff[POWER_LAYER].law_for("branch")
     assert branch.r.dtype == torch.float64 and sol.vm.dtype == torch.float64
     assert abs(sol.vm[3] - 1.0129223498697453) < 1e-9      # its value under float64
 

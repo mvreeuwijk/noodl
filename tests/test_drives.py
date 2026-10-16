@@ -10,7 +10,7 @@ import torch
 
 from noodl.drives import ConstantDrive, Drive, Stack, Wind, WindProfile, check_drive_signature
 from noodl.elements import PowerLaw
-from noodl.layers.potential import PotentialFlowLayer
+from noodl.layers.kirchhoff import KirchhoffLayer
 from noodl.topology import Network
 
 
@@ -54,8 +54,8 @@ def test_layer_construction_rejects_a_two_argument_drive(two_zone_layer):
         def __call__(self, phi, drivers):
             return drivers["wind"]
 
-    with pytest.raises(TypeError, match=r"PotentialFlowLayer 'zones'.*OldStyle"):
-        PotentialFlowLayer(net, "zones", elements, drives=[OldStyle()], boundary=boundary)
+    with pytest.raises(TypeError, match=r"KirchhoffLayer 'zones'.*OldStyle"):
+        KirchhoffLayer(net, "zones", elements, drives=[OldStyle()], boundary=boundary)
 
 
 def test_layer_solve_feeds_drives_the_drivers_mapping_only(two_zone_layer):
@@ -69,7 +69,7 @@ def test_layer_solve_feeds_drives_the_drivers_mapping_only(two_zone_layer):
             seen["keys"] = sorted(drivers)
             return drivers["wind"]
 
-    layer = PotentialFlowLayer(net, "zones", elements, drives=[Recorder()], boundary=boundary)
+    layer = KirchhoffLayer(net, "zones", elements, drives=[Recorder()], boundary=boundary)
     wind = torch.tensor([5.0, 0.0, 0.0], dtype=torch.float64)
     phi_b = torch.zeros(1, dtype=torch.float64)
     phi, q = layer.solve(phi_b, {"wind": wind}, differentiable=False)
@@ -122,7 +122,7 @@ def test_stack_is_antisymmetric_under_edge_reversal():
 
 def test_warm_zone_draws_air_in_low_and_pushes_it_out_high():
     net = _two_opening_net()
-    layer = PotentialFlowLayer(
+    layer = KirchhoffLayer(
         net, "air", [PowerLaw(torch.tensor([0.01, 0.01], dtype=F64), 0.5)],
         drives=[Stack.from_network(net, "airpath")], boundary=["ambient"],
     )
@@ -145,8 +145,8 @@ def test_stack_equals_a_constant_drive_fed_the_same_values_on_a_shaft():
     stack = Stack.from_network(net, "airpath")
     values = stack({"rho": rho})
     el = PowerLaw(torch.tensor([0.01, 0.02, 0.01], dtype=F64), 0.65)
-    a = PotentialFlowLayer(net, "a", [el], drives=[stack], boundary=["n0", "n3"])
-    b = PotentialFlowLayer(
+    a = KirchhoffLayer(net, "a", [el], drives=[stack], boundary=["n0", "n3"])
+    b = KirchhoffLayer(
         net, "b", [el], drives=[ConstantDrive("airpath", "s")], boundary=["n0", "n3"]
     )
     pb = torch.tensor([0.0, -5.0], dtype=F64)
@@ -168,7 +168,7 @@ def test_stack_broadcasts_a_batch_of_densities():
 
 def test_stack_gradient_wrt_rho_through_the_differentiable_solve():
     net = _two_opening_net()
-    layer = PotentialFlowLayer(
+    layer = KirchhoffLayer(
         net, "air", [PowerLaw(torch.tensor([0.01, 0.01], dtype=F64), 0.5)],
         drives=[Stack.from_network(net, "airpath")], boundary=["ambient"],
     )
@@ -290,7 +290,7 @@ def test_wind_constant_cp_edges_and_batched_speed():
 def test_wind_drives_a_through_flow_and_is_differentiable_wrt_speed_and_direction():
     net = _wind_net()
     prof = WindProfile([0.0, 90.0, 180.0, 270.0], [0.6, -0.3, -0.4, -0.3])
-    layer = PotentialFlowLayer(
+    layer = KirchhoffLayer(
         net, "air", [PowerLaw(torch.tensor([0.01, 0.05, 0.01], dtype=F64), 0.5)],
         drives=[Wind.from_network(net, "airpath", ambient="ambient", profiles=[prof])],
         boundary=["ambient"],

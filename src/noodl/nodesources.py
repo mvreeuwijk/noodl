@@ -53,7 +53,7 @@ class NodeSource(torch.nn.Module):
 
     def forward(self, phi_nodes: Tensor, drivers: Mapping | None = None) -> Tensor:
         # `torch.func.functional_call` always invokes `forward`, so the differentiable path
-        # in `PotentialFlowLayer.solve` reaches `flow` through here (the same arrangement
+        # in `KirchhoffLayer.solve` reaches `flow` through here (the same arrangement
         # `ConstitutiveLaw` uses).
         return self.flow(phi_nodes, drivers)
 

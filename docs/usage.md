@@ -126,7 +126,7 @@ named for the physics it carries:
 
 | Attribute | Key | Role | Order of the tensor |
 |---|---|---|---|
-| `.pressure`, `.head` (potential layers) | `"<layer>.phi"` | state | full node order |
+| `.pressure`, `.head` (Kirchhoff layers) | `"<layer>.phi"` | state | full node order |
 | `.flow` | `"<layer>.q"` | state (driver for a transport layer whose flows nothing solves) | edge order of the layer's kinds |
 | `.boundary_pressure`, `.boundary_head` | `"<layer>.phi_boundary"` | driver | the layer's boundary order |
 | `.temperature`, `.mass_fraction`, `.concentration` | `"<layer>.x"` | state | the layer's active interior order |
@@ -151,7 +151,7 @@ filter's efficiency), replacing the layer's construction-time `transmission`; a 
 filters depend on the step's flows writes it (the building application's
 `FilterTransmission`, for UVGI filters). It reads the flows of the pass before, so such a model
 iterates each step (`coupling="iterate"`). A closure that needs this declares
-`requires_coupling = "iterate"` and `reads_flows_of = "<potential layer>"`, and `Model`
+`requires_coupling = "iterate"` and `reads_flows_of = "<Kirchhoff layer>"`, and `Model`
 refuses it unless that layer is in `iterate_tol` and `iterate_flow_tol`.
 
 The names come from each layer's `quantity`, so every application has them without code
@@ -252,7 +252,7 @@ reports:
 
 - **Errors**: a required input or state missing, a value that is not a tensor, a trailing
   shape that does not match the key's order, batch shapes that do not broadcast, a nonzero
-  source on a boundary or inactive node (which a potential layer would otherwise drop
+  source on a boundary or inactive node (which a Kirchhoff layer would otherwise drop
   silently), a state key put in the drivers, a closure output of the wrong shape.
 - **Warnings**: a key with a layer's prefix but no such input (`"thermal.source"` — *did
   you mean `"thermal.sources"`?*), a near-miss of a layer name (`"therml.sources"`), an

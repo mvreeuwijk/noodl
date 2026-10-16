@@ -1,4 +1,4 @@
-"""Sparse-path tests for PotentialFlowLayer: grounding via the per-instance
+"""Sparse-path tests for KirchhoffLayer: grounding via the per-instance
 certificate from solvers.grounding, and linear_init/solve routed through
 GraphLaplacianOperator + solvers.select.solve rather than a dense einsum Jacobian.
 """
@@ -11,7 +11,7 @@ from benchmarks.measure import saved_tensor_bytes
 from noodl.drives import ConstantDrive
 from noodl.elements import Conductance, FixedFlow, PowerLaw
 from noodl.elements.fan import FanCurve
-from noodl.layers.potential import _LINEAR_SOLVERS, PotentialFlowLayer
+from noodl.layers.kirchhoff import _LINEAR_SOLVERS, KirchhoffLayer
 from noodl.topology import Network
 
 
@@ -45,7 +45,7 @@ def test_batched_counterexample_raises_naming_instance_1_not_empty_list():
     # grounding check itself and to the per-instance diagnosis it must carry.
     net = _three_node_chain()
     g = torch.tensor([[1.0, 1.0], [0.0, 1.0]], dtype=torch.float64)
-    layer = PotentialFlowLayer(
+    layer = KirchhoffLayer(
         net, "chain", [Conductance(g, kind="conduction")], boundary=["ambient"]
     )
     phi_b = torch.zeros(2, 1, dtype=torch.float64)
@@ -54,7 +54,7 @@ def test_batched_counterexample_raises_naming_instance_1_not_empty_list():
         layer.linear_init(phi_b, {}, None)
 
     message = str(excinfo.value)
-    assert "PotentialFlowLayer 'chain'" in message  # errors name the offending layer
+    assert "KirchhoffLayer 'chain'" in message  # errors name the offending layer
     assert "linear_init" in message
     assert "ungrounded interior nodes" in message
     assert "z1" in message and "z2" in message
@@ -72,7 +72,7 @@ def test_unbatched_floating_group_error_still_names_nodes():
     net.add_edge("f1", "f2", kind="conduction")
     net.add_edge("z0", "f1", kind="duct")
 
-    layer = PotentialFlowLayer(
+    layer = KirchhoffLayer(
         net,
         "grp",
         [
@@ -85,10 +85,10 @@ def test_unbatched_floating_group_error_still_names_nodes():
     with pytest.raises(RuntimeError, match=r"f1.*f2|f2.*f1") as excinfo:
         layer.linear_init(phi_b, {}, None)
 
-    assert "PotentialFlowLayer 'grp'" in str(excinfo.value)
+    assert "KirchhoffLayer 'grp'" in str(excinfo.value)
 
 
-def _shutoff_fan_layer() -> tuple[PotentialFlowLayer, torch.Tensor, torch.Tensor]:
+def _shutoff_fan_layer() -> tuple[KirchhoffLayer, torch.Tensor, torch.Tensor]:
     """ambient (boundary) -- z, one FanCurve edge, plus a source that pulls 0.2 through it.
 
     P(q) = 100 - 200 q on 0 <= q <= 1: shutoff pressure 100 at q = 0, -100 at q = q_max, so
@@ -107,7 +107,7 @@ def _shutoff_fan_layer() -> tuple[PotentialFlowLayer, torch.Tensor, torch.Tensor
         torch.tensor(1.0, dtype=torch.float64),
         kind="fan",
     )
-    layer = PotentialFlowLayer(net, "fan", [element], boundary=["ambient"])
+    layer = KirchhoffLayer(net, "fan", [element], boundary=["ambient"])
     phi_b = torch.zeros(1, dtype=torch.float64)
     sources = torch.tensor([0.0, -0.2], dtype=torch.float64)
     return layer, phi_b, sources
@@ -130,7 +130,7 @@ def test_grounding_is_checked_on_actual_slopes_even_when_phi0_is_supplied():
     with pytest.raises(RuntimeError, match=r"solve: floating nodes") as excinfo:
         layer.solve(phi_b, {}, sources, phi0=phi0_supplied, differentiable=False)
 
-    assert "PotentialFlowLayer 'fan'" in str(excinfo.value)
+    assert "KirchhoffLayer 'fan'" in str(excinfo.value)
 
 
 def test_grounding_at_a_supplied_phi0_is_checked_on_the_differentiable_path_too():
@@ -142,7 +142,7 @@ def test_grounding_at_a_supplied_phi0_is_checked_on_the_differentiable_path_too(
         layer.solve(phi_b, {}, sources, phi0=phi0_supplied, differentiable=True)
 
 
-def _series_layer(linear_solver: str = "auto") -> tuple[PotentialFlowLayer, dict, torch.Tensor]:
+def _series_layer(linear_solver: str = "auto") -> tuple[KirchhoffLayer, dict, torch.Tensor]:
     """Three-zone series network under a wind drive, matching the shape of the CONTAM
     verification cases: ambient_w -> z1 -> z2 -> ambient_l, one PowerLaw per airpath edge.
 
@@ -157,7 +157,7 @@ def _series_layer(linear_solver: str = "auto") -> tuple[PotentialFlowLayer, dict
     element = PowerLaw(
         torch.tensor([0.010, 0.008, 0.012], dtype=torch.float64), 0.65, dp_transition=1e-6
     )
-    layer = PotentialFlowLayer(
+    layer = KirchhoffLayer(
         net,
         "series",
         [element],
@@ -225,7 +225,7 @@ def test_solve_never_assembles_the_dense_einsum_jacobian(monkeypatch, differenti
     def _no_dense_jacobian(self, *args, **kwargs):
         raise AssertionError("solve() must not assemble the dense einsum Jacobian")
 
-    monkeypatch.setattr(PotentialFlowLayer, "jacobian", _no_dense_jacobian)
+    monkeypatch.setattr(KirchhoffLayer, "jacobian", _no_dense_jacobian)
     phi, q = layer.solve(phi_b, drivers, None, differentiable=differentiable)
     assert torch.isfinite(phi).all() and torch.isfinite(q).all()
 
@@ -333,7 +333,7 @@ def test_diagnostics_are_filled_on_the_differentiable_path_too():
 def test_unknown_linear_solver_raises_value_error_naming_it():
     net = _three_node_chain()
     with pytest.raises(ValueError, match="banana"):
-        PotentialFlowLayer(
+        KirchhoffLayer(
             net,
             "chain",
             [Conductance(torch.ones(2, dtype=torch.float64), kind="conduction")],
@@ -347,7 +347,7 @@ def test_sparse_adjoint_matches_dense_jacobian_transpose_solve(two_zone_layer):
     el = PowerLaw(
         elements[0].C.detach().clone().requires_grad_(True), elements[0].n, learnable=True
     )
-    layer = PotentialFlowLayer(net, "zones", [el], drives=drives, boundary=boundary)
+    layer = KirchhoffLayer(net, "zones", [el], drives=drives, boundary=boundary)
     phi_b = torch.zeros(1, dtype=torch.float64)
     wind = torch.tensor([10.0, 0.0, 0.0], dtype=torch.float64)
 
@@ -398,7 +398,7 @@ def test_adjoint_routes_through_the_layers_own_linear_solver(monkeypatch, two_zo
 
     lam = {}
     for linear_solver in ("auto", "direct"):
-        layer = PotentialFlowLayer(
+        layer = KirchhoffLayer(
             net,
             "zones",
             list(elements),
@@ -446,7 +446,7 @@ def test_hot_path_never_touches_the_dense_incidence(monkeypatch, two_zone_layer)
     el = PowerLaw(
         elements[0].C.detach().clone().requires_grad_(True), elements[0].n, learnable=True
     )
-    layer = PotentialFlowLayer(net, "zones", [el], drives=drives, boundary=boundary)
+    layer = KirchhoffLayer(net, "zones", [el], drives=drives, boundary=boundary)
     phi_b = torch.zeros(1, dtype=torch.float64)
     drivers = {"wind": torch.tensor([10.0, 0.0, 0.0], dtype=torch.float64)}
     sources = torch.zeros(net.n, dtype=torch.float64)
@@ -454,8 +454,8 @@ def test_hot_path_never_touches_the_dense_incidence(monkeypatch, two_zone_layer)
     def _dense_touched(self):
         raise AssertionError("dense A touched")
 
-    monkeypatch.setattr(PotentialFlowLayer, "A", property(_dense_touched), raising=False)
-    monkeypatch.setattr(PotentialFlowLayer, "_diff", property(_dense_touched), raising=False)
+    monkeypatch.setattr(KirchhoffLayer, "A", property(_dense_touched), raising=False)
+    monkeypatch.setattr(KirchhoffLayer, "_diff", property(_dense_touched), raising=False)
 
     phi_i0 = layer.linear_init(phi_b, drivers, sources)
     phi0 = layer.assemble(phi_i0, phi_b)
@@ -484,7 +484,7 @@ def test_dense_incidence_is_computed_lazily(two_zone_layer):
     # asserted as "the layer holds no 2-D tensor at all after __init__", which is stronger
     # and independent of the caching mechanism's attribute names.
     net, elements, drives, boundary = two_zone_layer
-    layer = PotentialFlowLayer(net, "zones", elements, drives=drives, boundary=boundary)
+    layer = KirchhoffLayer(net, "zones", elements, drives=drives, boundary=boundary)
 
     dense = {
         name: tuple(v.shape)
@@ -510,7 +510,7 @@ def test_differentiable_solve_does_not_trace_the_initial_guess(two_zone_layer):
     # absolute byte count: what must be true is that obtaining phi0 internally adds nothing
     # material. On this fixture the pre-fix ratio is 1.99x (2397 vs 1206 bytes).
     net, elements, drives, boundary = two_zone_layer
-    layer = PotentialFlowLayer(net, "zones", elements, drives=drives, boundary=boundary)
+    layer = KirchhoffLayer(net, "zones", elements, drives=drives, boundary=boundary)
     phi_b = torch.zeros(1, dtype=torch.float64)
     drivers = {"wind": torch.tensor([10.0, 0.0, 0.0], dtype=torch.float64)}
 
@@ -651,7 +651,7 @@ def test_an_inner_solve_refusal_inside_newton_names_the_layer():
         torch.tensor(1.0, dtype=torch.float64),
         kind="fan",
     )
-    layer = PotentialFlowLayer(
+    layer = KirchhoffLayer(
         net, "fan", [element], boundary=["ambient"], linear_solver="cg"
     )
     phi_b = torch.zeros(2, 1, dtype=torch.float64)
@@ -664,7 +664,7 @@ def test_an_inner_solve_refusal_inside_newton_names_the_layer():
         layer.solve(phi_b, {}, sources, phi0=phi0, differentiable=False)
 
     message = str(excinfo.value)
-    assert "PotentialFlowLayer 'fan'" in message, message
+    assert "KirchhoffLayer 'fan'" in message, message
     assert "cg" in message, message
     assert "instance 1" in message, message
 
@@ -685,7 +685,7 @@ def test_sparse_direct_linear_solver_matches_direct_on_the_two_zone_layer(two_zo
 
     results = {}
     for linear_solver in ("direct", "sparse_direct"):
-        layer = PotentialFlowLayer(
+        layer = KirchhoffLayer(
             net, "two_zone", elements, drives, boundary=boundary, linear_solver=linear_solver
         )
         results[linear_solver] = layer.solve(phi_b, drivers, sources, differentiable=False)
@@ -705,7 +705,7 @@ def test_sparse_direct_adjoint_matches_direct_on_the_two_zone_layer(two_zone_lay
 
     lam = {}
     for linear_solver in ("direct", "sparse_direct"):
-        layer = PotentialFlowLayer(
+        layer = KirchhoffLayer(
             net, "two_zone", elements, drives, boundary=boundary, linear_solver=linear_solver
         )
         phi, _q = layer.solve(phi_b, drivers, sources, differentiable=False)
@@ -727,7 +727,7 @@ def test_sparse_direct_linear_solver_matches_direct_on_the_composed_model():
         n_buildings=2, building_nodes=12, street_nodes=8, sewer_nodes=6, ensemble=2
     )
     net = model.net
-    sparse_layer = PotentialFlowLayer(
+    sparse_layer = KirchhoffLayer(
         net,
         "composed_sparse_direct",
         model.laws,
@@ -751,7 +751,7 @@ def test_sparse_direct_adjoint_matches_direct_on_the_composed_model():
         n_buildings=2, building_nodes=12, street_nodes=8, sewer_nodes=6, ensemble=2
     )
     net = model.net
-    sparse_layer = PotentialFlowLayer(
+    sparse_layer = KirchhoffLayer(
         net,
         "composed_sparse_direct",
         model.laws,
@@ -805,7 +805,7 @@ def test_sparse_direct_layer_actually_factorises_through_scipy_splu(monkeypatch,
     monkeypatch.setattr(torch.linalg, "lu_factor_ex", spy_lu)
     monkeypatch.setattr(select_module, "pcg", spy_pcg)
 
-    layer = PotentialFlowLayer(
+    layer = KirchhoffLayer(
         net, "two_zone", elements, drives, boundary=boundary, linear_solver="sparse_direct"
     )
     phi, _q = layer.solve(phi_b, drivers, sources, differentiable=False)
@@ -828,7 +828,7 @@ def test_unknown_linear_solver_error_message_lists_sparse_direct():
     net = _three_node_chain()
     element = Conductance(torch.tensor([1.0, 1.0], dtype=torch.float64), kind="conduction")
     with pytest.raises(ValueError) as excinfo:
-        PotentialFlowLayer(
+        KirchhoffLayer(
             net, "chain", [element], boundary=["ambient"], linear_solver="banana"
         )
     assert "sparse_direct" in str(excinfo.value)
@@ -850,7 +850,7 @@ def test_sparse_direct_layer_is_differentiable_through_the_implicit_adjoint(two_
         sources = torch.zeros(1, net.n, dtype=torch.float64)
         sources[..., net.node_index("z1")] = 0.01
         sources = sources.detach().requires_grad_(True)
-        layer = PotentialFlowLayer(
+        layer = KirchhoffLayer(
             net, "two_zone", elements, drives, boundary=boundary, linear_solver=linear_solver
         )
         phi, _q = layer.solve(phi_b, drivers, sources, differentiable=True)
@@ -954,7 +954,7 @@ def test_non_differentiable_solve_returns_detached_tensors_whatever_the_caller_d
     el = PowerLaw(
         elements[0].C.detach().clone().requires_grad_(True), elements[0].n, learnable=True
     )
-    layer = PotentialFlowLayer(net, "zones", [el], drives=drives, boundary=boundary)
+    layer = KirchhoffLayer(net, "zones", [el], drives=drives, boundary=boundary)
     phi_b = torch.zeros(1, dtype=torch.float64, requires_grad=True)
     drivers = {"wind": torch.tensor([10.0, 0.0, 0.0], dtype=torch.float64)}
     sources = torch.zeros(net.n, dtype=torch.float64).requires_grad_(True)

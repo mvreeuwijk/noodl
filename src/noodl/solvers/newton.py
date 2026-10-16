@@ -72,7 +72,7 @@ def inner_solve_rtol(dtype: torch.dtype) -> float:
     This is the same "the dtype cannot be asked for precision it does not have" argument
     ``newton``'s own dtype-derived ``atol``/``rtol`` default makes, applied to the linear
     solve instead of to the Newton convergence test. It lives here, next to that default,
-    rather than in any one caller: ``PotentialFlowLayer.linear_init`` needs the identical
+    rather than in any one caller: ``KirchhoffLayer.linear_init`` needs the identical
     floor for the identical reason.
     """
     return max(_INNER_RTOL, _INNER_RTOL_ULPS * float(torch.finfo(dtype).eps))
@@ -210,7 +210,7 @@ def newton(
     ``where`` is the caller's own name for this solve, used to prefix BOTH Newton's own
     final-convergence error and every inner ``solvers.select.solve`` refusal or failure it
     triggers. It defaults to ``"newton"``, which is all a standalone call can say; a layer
-    passes something like ``"PotentialFlowLayer 'air' solve"``, because slopes change
+    passes something like ``"KirchhoffLayer 'air' solve"``, because slopes change
     between Newton iterates and an instance can lose grounding mid-iteration (a fan reaching
     shutoff, a damper closing) -- and in a composed model over one network, "newton:
     method='auto' refuses to split the batch" does not say WHICH layer failed.

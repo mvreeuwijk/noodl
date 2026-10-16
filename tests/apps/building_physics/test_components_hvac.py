@@ -81,7 +81,7 @@ def test_the_building_moves_the_air_its_components_prescribe():
     net, _ = _building().flatten(dtype=F64)
     model, state, drivers = _model(net)
     out = model.steady(state, drivers, atol=1e-14, rtol=1e-14)
-    air = model.potential["air"]
+    air = model.kirchhoff["air"]
     torch.testing.assert_close(air.flows_of_kind(out["air.q"], "duct_terminal"),
                                torch.tensor([-0.02, 0.02], dtype=F64), rtol=1e-10, atol=0)
     torch.testing.assert_close(air.flows_of_kind(out["air.q"], "air_handler"),

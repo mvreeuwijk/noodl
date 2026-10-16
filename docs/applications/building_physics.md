@@ -132,7 +132,7 @@ into a room, which leaks it back to the ambient:
 import torch
 from noodl.apps.building_physics import DuctNetwork, duct_laws_from_edges
 from noodl.elements import FixedFlow, PowerLaw
-from noodl.layers.potential import PotentialFlowLayer
+from noodl.layers.kirchhoff import KirchhoffLayer
 from noodl.topology import Network
 
 F64 = torch.float64
@@ -153,7 +153,7 @@ laws, drives = duct_laws_from_edges(net)
 laws += [FixedFlow(torch.tensor([0.05], dtype=F64), kind="fan"),
          PowerLaw(torch.tensor([0.5], dtype=F64), torch.tensor([0.5], dtype=F64),
                   kind="leak")]
-air = PotentialFlowLayer(net, "air", laws, drives=drives, boundary=["ambient"])
+air = KirchhoffLayer(net, "air", laws, drives=drives, boundary=["ambient"])
 rho = torch.full((net.n,), 1.204097, dtype=F64)
 phi, q = air.solve(torch.zeros(1, dtype=F64), {"rho": rho})
 print([round(v, 4) for v in air.flows_of_kind(q, "duct_terminal").tolist()], "kg/s")
@@ -456,7 +456,7 @@ model = build_model(
 drivers = initial_drivers(model)
 drivers["rho"] = torch.full((net.n,), 1.2041, dtype=F64)
 out = model.steady(initial_state(model), drivers, atol=1e-14, rtol=1e-14)
-air = model.potential["air"]
+air = model.kirchhoff["air"]
 print([round(v, 4) for v in air.flows_of_kind(out["air.q"], "duct_terminal").tolist()])
 print([round(v, 4) for v in air.flows_of_kind(out["air.q"], "air_handler").tolist()])
 ```
@@ -714,7 +714,7 @@ drivers["species.sources"] = torch.tensor([0.0, 4e-5], dtype=F64)  # kg/s in the
 
 times = torch.arange(13, dtype=F64) * 300.0
 out = simulate(model, state, drivers, times)
-q_fan = out["air.q"][:, model.potential["air"].kind_slice("fan")][:, 0]
+q_fan = out["air.q"][:, model.kirchhoff["air"].kind_slice("fan")][:, 0]
 signal = out["controls.outputs"][:, 1]                            # the PI's output
 for k in range(len(times)):
     print(f"{times[k] / 60:4.0f} min  CO2 {out['species.x'][k, 0] * 1e3:.4f} g/kg  "

@@ -108,7 +108,7 @@ class _ConstantIgnoringDp(ConstitutiveLaw):
 
 def test_dflow_default_raises_a_clear_error_naming_the_element_when_flow_ignores_dp():
     # Same hazard as `_dflows_functional`'s guard, one call earlier: `ConstitutiveLaw.linear_init`'s
-    # default reaches this default `dflow` (via `PotentialFlowLayer.linear_init`, called
+    # default reaches this default `dflow` (via `KirchhoffLayer.linear_init`, called
     # before every solve()), and a `flow()` that silently drops the autograd graph must
     # raise a clear, element-naming error here too rather than a raw, unattributed one.
     el = _ConstantIgnoringDp(torch.tensor(1.0))

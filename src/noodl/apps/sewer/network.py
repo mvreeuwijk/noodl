@@ -1219,9 +1219,9 @@ def initial_state(
     discovered deep inside `Model.step`.
     """
     dynamic = [c for c in model.closures if isinstance(c, DynamicWaveHydraulics)]
-    if dynamic and any(layer.quantity == "head" for layer in model.potential.values()):
+    if dynamic and any(layer.quantity == "head" for layer in model.kirchhoff.values()):
         state = dynamic[0].initial_state(drivers)
-        if "air" in model.potential:
+        if "air" in model.kirchhoff:
             state.update(air_state(model))
         if model.transport:
             if drivers is None:
@@ -1234,10 +1234,10 @@ def initial_state(
     for closure in model.closures:
         if "sewer.H" in getattr(closure, "state_keys", ()):
             state["sewer.H"] = torch.zeros(len(closure.manhole_names), dtype=F64)
-    for name, layer in model.potential.items():
+    for name, layer in model.kirchhoff.items():
         if layer.quantity != "pressure":
             raise ValueError(
-                f"apps.sewer.initial_state: potential layer {name!r} has quantity "
+                f"apps.sewer.initial_state: Kirchhoff layer {name!r} has quantity "
                 f"{layer.quantity!r}; this application builds pressure layers only"
             )
         state[f"{name}.phi"] = torch.zeros(model.net.n, dtype=F64)

@@ -110,7 +110,7 @@ def test_builder_layer_keys_kinds_and_circuit_index():
         Resistor("RE", "e", "0", 1.0),
     ])
     model, state, drivers = build_model(circuit)
-    layer = model.potential[LAYER]
+    layer = model.kirchhoff[LAYER]
     assert layer.kinds == ["voltage_source", "resistor", "capacitor", "inductor",
                            "ideal_transformer", "vcvs"]
     assert layer.quantity == "voltage" and layer.unit == "V" and layer.flow_unit == "A"
@@ -194,7 +194,7 @@ def test_phasor_model_needs_a_frequency_and_has_complex_drivers():
         build_model(circuit, frequency=50.0)
     model, _, drivers = build_model(circuit, phasor=True, frequency=50.0)
     assert drivers[f"{LAYER}.phi_boundary"].dtype == torch.complex128
-    assert model.potential[LAYER].frequency_key == f"{LAYER}.frequency"
+    assert model.kirchhoff[LAYER].frequency_key == f"{LAYER}.frequency"
     torch.testing.assert_close(drivers[f"{LAYER}.frequency"], torch.tensor(50.0))
 
 
@@ -280,7 +280,7 @@ def test_gradients_reach_learnable_law_parameters():
     circuit = Circuit([VoltageSource("V1", "in", "0", 1.0), Resistor("R1", "in", "mid", 1.0),
                        Resistor("R2", "mid", "0", 3.0)])
     model, _, drivers = build_model(circuit, learnable=True)
-    law, _ = model.potential[LAYER].law_for("resistor")
+    law, _ = model.kirchhoff[LAYER].law_for("resistor")
     v = _v(model, operating_point(model, drivers), "mid")
     (g,) = torch.autograd.grad(v, law.R)
     # v = R2 / (R1 + R2): dv/dR1 = -R2 / 16, dv/dR2 = R1 / 16

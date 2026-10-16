@@ -19,7 +19,7 @@ import torch
 from noodl._broadcast import broadcast_shapes
 from noodl.components import Component
 from noodl.elements import PrescribedFlow
-from noodl.layers.potential import PotentialFlowLayer
+from noodl.layers.kirchhoff import KirchhoffLayer
 from noodl.layers.transport import TransportLayer, active_interior
 from noodl.model import Drivers, Model, State
 from noodl.refs import drivers_from, state_from
@@ -353,9 +353,9 @@ def build_model(net: Network, *, air_laws, drives, ambient="ambient", thermal: b
             f"(the air laws' kinds are {list(law_kinds)}); a kind the air layer does "
             f"not solve carries no flow, so heat and species would silently not advect on it"
         )
-    air = PotentialFlowLayer(net, "air", list(air_laws), drives=list(drives),
-                             boundary=[ambient, *flow_balanced], quantity="pressure", unit="Pa",
-                             flow_unit="kg/s")
+    air = KirchhoffLayer(net, "air", list(air_laws), drives=list(drives),
+                         boundary=[ambient, *flow_balanced], quantity="pressure", unit="Pa",
+                         flow_unit="kg/s")
     air.node_hints.update(dict.fromkeys(_prescribed_only_nodes(net, air_laws, air),
                                         "an air-handler plenum? pass flow_balanced= to "
                                         "build_model"))
@@ -453,7 +453,7 @@ def initial_drivers(model: Model, *, values: Mapping | None = None) -> Drivers:
     """
     drivers: Drivers = {}
     T0 = model.net.node_attr("T0", default=T_REF)
-    for name, layer in model.potential.items():
+    for name, layer in model.kirchhoff.items():
         drivers[f"{name}.phi_boundary"] = torch.zeros(len(layer.bound), dtype=model.net.dtype)
     for name, layer in model.transport.items():
         if layer.quantity == "temperature":

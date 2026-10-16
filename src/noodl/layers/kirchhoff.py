@@ -1,4 +1,4 @@
-"""PotentialFlowLayer: nodal conservation residual, Jacobian and Newton solve.
+"""KirchhoffLayer: nodal conservation residual, Jacobian and Newton solve.
 
 Assembles r(phi_I) = A_I g(A^T phi + drive; theta) - s_I from a set of constitutive laws
 on typed edges (one ConstitutiveLaw per kind) and Drive terms (additive potential differences).
@@ -92,7 +92,7 @@ class _DiagonalShifted:
     def spd_certificate(self):
         if bool((self.diag_shift < 0).any()):
             return None
-        # A strictly positive shift grounds its node (`PotentialFlowLayer._extra_grounded`,
+        # A strictly positive shift grounds its node (`KirchhoffLayer._extra_grounded`,
         # the rule the layer's own grounding check applies): a network with no boundary path
         # held only by its node sources (a closed building of compressible volumes) is SPD.
         b = self.base
@@ -106,7 +106,7 @@ class _DiagonalShifted:
                                extra_grounded=extra)
 
 
-class PotentialFlowLayer:
+class KirchhoffLayer:
     """Flows driven by a potential (pressure, head): solves nodal conservation
     `A_I g(A^T phi) = s_I` for the interior potentials by Newton's method, with the constitutive
     laws on its edge kinds, drives added to the potential differences, and prescribed
@@ -186,7 +186,7 @@ class PotentialFlowLayer:
             seen_kinds.add(el.kind)
             if el.law_form not in ("potential", "implicit"):
                 raise ValueError(
-                    f"PotentialFlowLayer {name!r}: kind {el.kind!r} has law "
+                    f"KirchhoffLayer {name!r}: kind {el.kind!r} has law "
                     f"{type(el).__name__} with law_form={el.law_form!r}; expected "
                     f"'potential' or 'implicit'"
                 )
@@ -251,7 +251,7 @@ class PotentialFlowLayer:
 
         kind_set = set(self.kinds)
         for drv in self._drives:
-            check_drive_signature(drv, where=f"PotentialFlowLayer {name!r}")
+            check_drive_signature(drv, where=f"KirchhoffLayer {name!r}")
             if drv.kind not in kind_set:
                 raise ValueError(
                     f"drive kind {drv.kind!r} is not one of this layer's law kinds "
@@ -314,7 +314,7 @@ class PotentialFlowLayer:
         for ns in self._node_sources:
             if not isinstance(ns, NodeSource):
                 raise TypeError(
-                    f"PotentialFlowLayer {name!r}: node_sources entry "
+                    f"KirchhoffLayer {name!r}: node_sources entry "
                     f"{type(ns).__name__} is not a NodeSource"
                 )
             pos = self._interior_of_node[ns.nodes]
@@ -325,7 +325,7 @@ class PotentialFlowLayer:
                     if p < 0
                 ]
                 raise ValueError(
-                    f"PotentialFlowLayer {name!r}: node source {ns!r} acts at {bad}, "
+                    f"KirchhoffLayer {name!r}: node source {ns!r} acts at {bad}, "
                     f"which are not interior unknowns of this layer (a boundary node's "
                     f"potential is prescribed and an inactive node has no row)"
                 )
@@ -343,12 +343,12 @@ class PotentialFlowLayer:
         for el, (s, e) in zip(self._laws, self._law_slices, strict=True):
             if (e - s) % el.ports:
                 raise ValueError(
-                    f"PotentialFlowLayer {name!r}: kind {el.kind!r} has {e - s} edges, not a "
+                    f"KirchhoffLayer {name!r}: kind {el.kind!r} has {e - s} edges, not a "
                     f"multiple of its law's ports={el.ports}"
                 )
         if self.linear_solver == "cg":
             raise ValueError(
-                f"PotentialFlowLayer {name!r}: linear_solver='cg' needs a symmetric positive "
+                f"KirchhoffLayer {name!r}: linear_solver='cg' needs a symmetric positive "
                 f"definite Jacobian, which a Modified Nodal Analysis system is not; use "
                 f"'auto', 'sparse_direct', 'direct' or 'gmres'"
             )
@@ -356,21 +356,21 @@ class PotentialFlowLayer:
             for el in self._laws:
                 if not el.phasor_capable:
                     raise ValueError(
-                        f"PotentialFlowLayer {name!r}: kind {el.kind!r} has law "
+                        f"KirchhoffLayer {name!r}: kind {el.kind!r} has law "
                         f"{type(el).__name__}, which is not phasor-capable (a phasor layer "
                         f"takes linear laws with real or complex coefficients and laws that "
                         f"declare phasor_capable)"
                     )
             if self._node_sources:
                 raise ValueError(
-                    f"PotentialFlowLayer {name!r}: a phasor layer takes no node_sources; "
+                    f"KirchhoffLayer {name!r}: a phasor layer takes no node_sources; "
                     f"loads are edges to ground in a phasor layer"
                 )
         dynamic_kinds = {el.kind for el in self._laws if el.dynamic}
         for drv in self._drives:
             if drv.kind in dynamic_kinds:
                 raise ValueError(
-                    f"PotentialFlowLayer {name!r}: kind {drv.kind!r} has a dynamic law, which "
+                    f"KirchhoffLayer {name!r}: kind {drv.kind!r} has a dynamic law, which "
                     f"may not carry a drive (its step-start values are the potential "
                     f"differences without one)"
                 )
@@ -392,7 +392,7 @@ class PotentialFlowLayer:
         ]
         if floating:
             raise ValueError(
-                f"PotentialFlowLayer {name!r}: nodes {floating} have no path through this "
+                f"KirchhoffLayer {name!r}: nodes {floating} have no path through this "
                 f"layer's edges to a boundary node, so their potentials are undetermined; "
                 f"add a node of each such part to boundary (a ground)"
             )
@@ -417,7 +417,7 @@ class PotentialFlowLayer:
         difference; a Modified Nodal Analysis layer refuses them by name."""
         if self.mna:
             raise TypeError(
-                f"PotentialFlowLayer {self.name!r} is solved by Modified Nodal Analysis "
+                f"KirchhoffLayer {self.name!r} is solved by Modified Nodal Analysis "
                 f"(its laws include implicit, multi-port, dynamic or context-reading ones), "
                 f"so {method}() is not defined on it; read the flows from solve()'s q"
             )
@@ -596,7 +596,7 @@ class PotentialFlowLayer:
             start, end = self._kind_slices[kind]
         except KeyError as exc:
             raise KeyError(
-                f"PotentialFlowLayer {self.name!r} has no law of kind {kind!r}; its kinds "
+                f"KirchhoffLayer {self.name!r} has no law of kind {kind!r}; its kinds "
                 f"are {self.kinds}"
             ) from exc
         return slice(start, end)
@@ -668,7 +668,7 @@ class PotentialFlowLayer:
                     self._inactive_names[i] for i in flat.nonzero().flatten().tolist()
                 ]
                 raise ValueError(
-                    f"PotentialFlowLayer {self.name!r}: sources must be zero on inactive "
+                    f"KirchhoffLayer {self.name!r}: sources must be zero on inactive "
                     f"nodes (no edge of kinds {self.kinds} touches them); nonzero at {names}"
                 )
         return sources[..., self.interior]
@@ -802,7 +802,7 @@ class PotentialFlowLayer:
             # Unbatched: one instance, so a bare batch index would say nothing. Name the
             # nodes (or edges) directly.
             raise RuntimeError(
-                f"PotentialFlowLayer {self.name!r}: {where}: "
+                f"KirchhoffLayer {self.name!r}: {where}: "
                 f"{self._describe_grounding(records[0])}"
             )
         bad_idx = torch.nonzero(~certified.reshape(-1), as_tuple=False).flatten().tolist()
@@ -810,7 +810,7 @@ class PotentialFlowLayer:
             f"instance {rec['instance']}: {self._describe_grounding(rec)}" for rec in records
         )
         raise RuntimeError(
-            f"PotentialFlowLayer {self.name!r}: {where}: batch indices {bad_idx} do not "
+            f"KirchhoffLayer {self.name!r}: {where}: batch indices {bad_idx} do not "
             f"certify a grounded, positive-slope system; {details}"
         )
 
@@ -863,7 +863,7 @@ class PotentialFlowLayer:
             op,
             rhs,
             method=self.linear_solver,
-            where=f"PotentialFlowLayer {self.name!r} linear_init",
+            where=f"KirchhoffLayer {self.name!r} linear_init",
             rtol=inner_solve_rtol(rhs.dtype),
         )
         return result.x
@@ -1082,7 +1082,7 @@ class PotentialFlowLayer:
                     and any(isinstance(h, torch.Tensor) and h.requires_grad for h in history))
                 if diagnostics is None:
                     raise ValueError(
-                        f"PotentialFlowLayer {self.name!r}: on_failure='return_primal' "
+                        f"KirchhoffLayer {self.name!r}: on_failure='return_primal' "
                         f"requires diagnostics= so the status is not silently dropped; pass "
                         f"a dict and read its 'converged' and 'residual_norm' entries."
                     )
@@ -1098,18 +1098,18 @@ class PotentialFlowLayer:
             )
         if mode == "phasor":
             raise ValueError(
-                f"PotentialFlowLayer {self.name!r}: mode='phasor' needs a layer built with "
+                f"KirchhoffLayer {self.name!r}: mode='phasor' needs a layer built with "
                 f"phasor=True"
             )
         if mode is not None and mode not in ("dc", "initial"):
             raise ValueError(
-                f"PotentialFlowLayer {self.name!r}: mode={mode!r}; expected 'dc', 'initial' or "
+                f"KirchhoffLayer {self.name!r}: mode={mode!r}; expected 'dc', 'initial' or "
                 f"None (transient when dt is given, dc otherwise)"
             )
         stepping = [k for k, v in (("dt", dt), ("history", history)) if v is not None]
         if stepping:
             raise ValueError(
-                f"PotentialFlowLayer {self.name!r} is solved by nodal analysis: its laws are "
+                f"KirchhoffLayer {self.name!r} is solved by nodal analysis: its laws are "
                 f"static, so it takes no step; drop {stepping}"
             )
         drivers = drivers or {}
@@ -1124,14 +1124,14 @@ class PotentialFlowLayer:
         # instance can lose it mid-iteration; without this the refusal read "newton:
         # method='auto' refuses to split the batch ..." with no way to tell which layer of a
         # composed model over one network produced it.
-        newton_kwargs.setdefault("where", f"PotentialFlowLayer {self.name!r} solve")
+        newton_kwargs.setdefault("where", f"KirchhoffLayer {self.name!r} solve")
         if newton_kwargs.get("on_failure") == "return" and diagnostics is None:
             # `solve` returns (phi, q) tensors; without a diagnostics dict there is nowhere
             # for `converged`/`residual_norm` to go, and a non-converged phi would be
             # indistinguishable from a converged one. The escape hatch is never silent: the
             # result carries the status.
             raise ValueError(
-                f"PotentialFlowLayer {self.name!r}: on_failure='return' requires "
+                f"KirchhoffLayer {self.name!r}: on_failure='return' requires "
                 f"diagnostics= so the status is not silently dropped; pass a dict and read "
                 f"its 'converged' and 'residual_norm' entries."
             )
@@ -1482,7 +1482,7 @@ class PotentialFlowLayer:
         return _adjoint_solve(
             op,
             grad_phi_interior,
-            where=f"PotentialFlowLayer {self.name!r} adjoint",
+            where=f"KirchhoffLayer {self.name!r} adjoint",
             method=self.linear_solver,
         )
 

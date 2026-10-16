@@ -3,7 +3,7 @@ network ("the smallest thing that is honestly a digital twin rather than a
 microbenchmark"). `build_composed` returns a `ComposedModel` carrying both the
 topology (reused by other tests' physics at whatever configuration each of them needs) and a
 reference physics configuration (PowerLaw elements, sources, capacity, a sparse-path
-`PotentialFlowLayer`, a dense-path `PotentialFlowLayer` and a `TransportLayer`).
+`KirchhoffLayer`, a dense-path `KirchhoffLayer` and a `TransportLayer`).
 """
 
 from __future__ import annotations
@@ -78,7 +78,7 @@ def test_build_composed_transport_steps_on_the_dense_path():
         model.phi_boundary, model.drivers, model.sources, differentiable=False
     )
     lo, hi = model.layer._kind_slices["airpath"]
-    # The TRANSPORT layer's interior, not the potential layer's: the co2 layer advects on
+    # The TRANSPORT layer's interior, not the Kirchhoff layer's: the co2 layer advects on
     # "airpath" edges only, and the street and sewer nodes carry none, so they are inactive
     # for it and it has no row for them.
     n_i = model.transport.n_i

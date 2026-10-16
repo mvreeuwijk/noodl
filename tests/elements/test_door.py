@@ -36,7 +36,7 @@ from noodl.elements import (
     mbl_operable_door_pair,
     medium,
 )
-from noodl.layers.potential import PotentialFlowLayer
+from noodl.layers.kirchhoff import KirchhoffLayer
 from noodl.topology import Network
 
 F64 = torch.float64
@@ -559,7 +559,7 @@ def test_dp_of_wrong_width_raises():
 
 
 # ---------------------------------------------------------------------------------------
-# 6. Inside a PotentialFlowLayer
+# 6. Inside a KirchhoffLayer
 # ---------------------------------------------------------------------------------------
 
 
@@ -578,10 +578,10 @@ def _layer():
     ab, ba = mbl_door_pair(src=src, tgt=tgt, medium=AIR, wOpe=1.0, hOpe=2.2, CD=0.78, kind="door")
     oA = mbl_orifice(0.01, dp_turbulent=0.01, rho_default=AIR.rho_default, kind="ori_A")
     oB = mbl_orifice(0.02, dp_turbulent=0.01, rho_default=AIR.rho_default, kind="ori_B")
-    return net, PotentialFlowLayer(net, "air", [oA, ab, ba, oB], boundary=["out"])
+    return net, KirchhoffLayer(net, "air", [oA, ab, ba, oB], boundary=["out"])
 
 
-def test_door_pair_solves_inside_a_potential_layer_and_the_gradient_reaches_T():
+def test_door_pair_solves_inside_a_kirchhoff_layer_and_the_gradient_reaches_T():
     net, layer = _layer()
     idx = {n: net.node_index(n) for n in ("out", "A", "B")}
     phi_b = torch.tensor([5.0], dtype=F64)

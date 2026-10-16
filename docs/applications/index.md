@@ -11,12 +11,12 @@ initial point of the circuit.
 
 | Application | Physical system | Flow determination | Entry point |
 |---|---|---|---|
-| [Building physics](building_physics.md) | Multi-zone airflow, heat, contaminants | Potential: Newton on zone pressure | `build_model` |
+| [Building physics](building_physics.md) | Multi-zone airflow, heat, contaminants | Kirchhoff: Newton on zone pressure | `build_model` |
 | [Street air quality](street_aq.md) | Urban air quality, canyon exchange, routing | Closure: flows computed from the wind aloft | `build_model`, `StreetNetwork` |
-| [Sewers](sewer.md) | Gravity hydraulics, headspace air, sulfide | Continuity on a tree for the water (kinematic wave), or Newton potential on head (dynamic wave); Newton potential for the headspace air | `build_model` |
-| [Water distribution](water.md) | Pressurised mains, pumps, tanks, demand | Potential: Newton on hydraulic head | `build_model` |
+| [Sewers](sewer.md) | Gravity hydraulics, headspace air, sulfide | Continuity on a tree for the water (kinematic wave), or Kirchhoff solve on head (dynamic wave); Kirchhoff solve for the headspace air | `build_model` |
+| [Water distribution](water.md) | Pressurised mains, pumps, tanks, demand | Kirchhoff: Newton on hydraulic head | `build_model` |
 | [Flow allocation](allocation.md) | Requested flows clipped to arc capacity and free storage at the receiving node | Clip and allocate | `AllocatedFlowLayer`, `wsimod.build_model` |
-| [Electrical circuits](electrical.md) | Lumped circuits: DC, transient and AC | Potential: Modified Nodal Analysis on node voltage | `build_model`, `Circuit` |
+| [Electrical circuits](electrical.md) | Lumped circuits: DC, transient and AC | Kirchhoff: Modified Nodal Analysis on node voltage | `build_model`, `Circuit` |
 | [Coupling](coupling.md) | Two models meeting at a shared boundary | Two models exchanging values, iterated to a fixed point | `union` |
 
 ![The four flow-determination modes](../assets/four-modes.svg)
@@ -34,9 +34,9 @@ all four:
   a closed-form function of the wind aloft, so a closure computes every flow directly.
 - The **sewer** application's kinematic-wave water side exploits the fact that a tree has an
   empty cycle space: continuity alone fixes every discharge, in closed form, with no solve. Its
-  dynamic-wave water side is a potential layer on head, iterated to SWMM's fixed point, and
+  dynamic-wave water side is a Kirchhoff layer on head, iterated to SWMM's fixed point, and
   admits loops and backwater. Its *headspace air* side, on the same graph, is a full Newton
-  potential solve.
+  Kirchhoff solve.
 - The **flow allocation** application has no potential and no continuity solve — a
   request, clipped against capacity and headroom.
 - The **electrical circuits** application solves for a potential, the node voltage, with the

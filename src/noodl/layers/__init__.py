@@ -1,8 +1,8 @@
-"""Nodal-primary layers: potential-flow solves, multi-species/heat transport, reactions,
+"""Nodal-primary layers: Kirchhoff solves, multi-species/heat transport, reactions,
 and explicit clip/allocate transfer on capacity-limited arcs."""
 
 from .allocation import AllocatedFlowLayer, CapacitatedTransferLayer  # alias, pre-rename name
-from .potential import PotentialFlowLayer
+from .kirchhoff import KirchhoffLayer
 from .reaction import FirstOrderDecay, Reaction
 from .transport import TransportLayer, UndefinedSteadyState, active_interior
 
@@ -10,7 +10,7 @@ __all__ = [
     "AllocatedFlowLayer",
     "CapacitatedTransferLayer",
     "FirstOrderDecay",
-    "PotentialFlowLayer",
+    "KirchhoffLayer",
     "Reaction",
     "TransportLayer",
     "UndefinedSteadyState",

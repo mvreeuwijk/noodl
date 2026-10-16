@@ -92,7 +92,7 @@ def test_two_way_iteration_returns_the_coupled_backward_euler_solution():
 
 
 def test_a_two_way_step_never_assembles_a_dense_topology_operator(monkeypatch):
-    """The compartments carry no potential layer, so nothing on this path has a legitimate
+    """The compartments carry no Kirchhoff layer, so nothing on this path has a legitimate
     reason to form an (edges, nodes) matrix."""
 
     def forbidden(self, *args, **kwargs):

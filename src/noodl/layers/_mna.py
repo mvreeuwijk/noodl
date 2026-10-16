@@ -1,4 +1,4 @@
-"""Modified Nodal Analysis for `PotentialFlowLayer`.
+"""Modified Nodal Analysis for `KirchhoffLayer`.
 
 A layer whose constitutive laws include an implicit law (flow is an unknown), a coupled
 multi-port law, a dynamic law or a context-reading law is solved here instead of by the
@@ -98,7 +98,7 @@ def _cat(parts: list[Tensor], like: Tensor) -> Tensor:
 
 
 class MnaSystem:
-    """The Modified Nodal Analysis system of one `PotentialFlowLayer`: its unknown layout,
+    """The Modified Nodal Analysis system of one `KirchhoffLayer`: its unknown layout,
     the fixed COO pattern of its Jacobian, and the Newton (or implicit-function) solve."""
 
     def __init__(self, layer) -> None:
@@ -215,7 +215,7 @@ class MnaSystem:
         key = self.frequency_key
         if key not in drivers:
             raise KeyError(
-                f"PotentialFlowLayer {self.layer.name!r} is a phasor layer and needs the "
+                f"KirchhoffLayer {self.layer.name!r} is a phasor layer and needs the "
                 f"driver {key!r}: the frequency in Hz, one per instance"
             )
         f = drivers[key]
@@ -245,7 +245,7 @@ class MnaSystem:
             fits = False
         if not fits:
             raise ValueError(
-                f"PotentialFlowLayer {self.layer.name!r}: driver {key!r} has shape "
+                f"KirchhoffLayer {self.layer.name!r}: driver {key!r} has shape "
                 f"{tuple(f.shape)}, which is not one frequency per instance of the batch "
                 f"{tuple(batch)}; give it the batch shape (...), not (..., 1)"
             )
@@ -256,12 +256,12 @@ class MnaSystem:
         name = self.layer.name
         if mode not in (None, "phasor"):
             raise ValueError(
-                f"PotentialFlowLayer {name!r} is a phasor layer: mode={mode!r}; expected "
+                f"KirchhoffLayer {name!r} is a phasor layer: mode={mode!r}; expected "
                 f"'phasor' or None"
             )
         if dt is not None or history is not None:
             raise ValueError(
-                f"PotentialFlowLayer {name!r} is a phasor layer, which solves the "
+                f"KirchhoffLayer {name!r} is a phasor layer, which solves the "
                 f"sinusoidal steady state and takes no step; drop dt and history"
             )
         return LawContext(mode="phasor", t=t, omega=self._omega(drivers))
@@ -283,19 +283,19 @@ class MnaSystem:
         name = self.layer.name
         if mode == "phasor":
             raise ValueError(
-                f"PotentialFlowLayer {name!r}: mode='phasor' needs a layer built with "
+                f"KirchhoffLayer {name!r}: mode='phasor' needs a layer built with "
                 f"phasor=True"
             )
         if mode is not None and mode not in ("dc", "initial"):
             raise ValueError(
-                f"PotentialFlowLayer {name!r}: mode={mode!r}; expected 'dc', 'initial' or "
+                f"KirchhoffLayer {name!r}: mode={mode!r}; expected 'dc', 'initial' or "
                 f"None (transient when dt is given, dc otherwise)"
             )
         if mode in ("dc", "initial") and dt is not None:
             what = ("the consistent initial point" if mode == "initial"
                     else "the steady operating point")
             raise ValueError(
-                f"PotentialFlowLayer {name!r}: mode={mode!r} is {what}, which takes no step; "
+                f"KirchhoffLayer {name!r}: mode={mode!r} is {what}, which takes no step; "
                 f"drop dt"
             )
         if mode is None:
@@ -303,30 +303,30 @@ class MnaSystem:
         if mode != "transient":
             return LawContext(mode=mode, t=t)
         if not bool((torch.as_tensor(dt) > 0).all()):
-            raise ValueError(f"PotentialFlowLayer {name!r}: dt must be positive, got {dt!r}")
+            raise ValueError(f"KirchhoffLayer {name!r}: dt must be positive, got {dt!r}")
         if integration not in INTEGRATIONS:
             raise ValueError(
-                f"PotentialFlowLayer {name!r}: integration={integration!r}; expected one of "
+                f"KirchhoffLayer {name!r}: integration={integration!r}; expected one of "
                 f"{INTEGRATIONS}"
             )
         ctx = LawContext(mode="transient", dt=dt, t=t, integration=integration)
         if history is None:
             if self.layer.dynamic:
                 raise ValueError(
-                    f"PotentialFlowLayer {name!r}: a transient step needs history=(phi, q) "
+                    f"KirchhoffLayer {name!r}: a transient step needs history=(phi, q) "
                     f"at the step start"
                 )
             return ctx
         if not isinstance(history, (tuple, list)) or len(history) != 2:
             raise ValueError(
-                f"PotentialFlowLayer {name!r}: history must be the pair (phi, q) at the step "
+                f"KirchhoffLayer {name!r}: history must be the pair (phi, q) at the step "
                 f"start; got {type(history).__name__}"
             )
         phi_prev, q_prev = history
         n_nodes, n_edges = self.layer._n_nodes, len(self.layer.cols)
         if phi_prev.shape[-1] != n_nodes or q_prev.shape[-1] != n_edges:
             raise ValueError(
-                f"PotentialFlowLayer {name!r}: history=(phi, q) must hold every node's "
+                f"KirchhoffLayer {name!r}: history=(phi, q) must hold every node's "
                 f"potential ({n_nodes}) and every edge's flow ({n_edges}); got last "
                 f"dimensions {phi_prev.shape[-1]} and {q_prev.shape[-1]}"
             )
@@ -522,7 +522,7 @@ class MnaSystem:
             "electrical application)"
         ) if mode == "initial" else ""
         return RuntimeError(
-            f"PotentialFlowLayer {self.layer.name!r}: the Modified Nodal Analysis system is "
+            f"KirchhoffLayer {self.layer.name!r}: the Modified Nodal Analysis system is "
             f"singular; check for a loop of ideal potential sources or a cut set of flow "
             f"sources among kinds {self.implicit_kinds}, or a part connected to a boundary "
             f"only through flow-prescribed edges{initial}"
@@ -542,20 +542,20 @@ class MnaSystem:
         ctx = self._context(mode, dt, t, integration, history, drivers)
         if newton_kwargs.get("line_search") == "convex":
             raise ValueError(
-                f"PotentialFlowLayer {layer.name!r}: line_search='convex' needs a residual "
+                f"KirchhoffLayer {layer.name!r}: line_search='convex' needs a residual "
                 f"that is the gradient of a convex function, which a Modified Nodal Analysis "
                 f"residual is not; use the default line search"
             )
         requested = newton_kwargs.pop("method", layer.linear_solver)
         if requested == "cg":
             raise ValueError(
-                f"PotentialFlowLayer {layer.name!r}: method='cg' needs a symmetric positive "
+                f"KirchhoffLayer {layer.name!r}: method='cg' needs a symmetric positive "
                 f"definite Jacobian, which a Modified Nodal Analysis system is not; use "
                 f"'auto', 'sparse_direct', 'direct' or 'gmres'"
             )
         if newton_kwargs.get("on_failure") == "return" and diagnostics is None:
             raise ValueError(
-                f"PotentialFlowLayer {layer.name!r}: on_failure='return' requires "
+                f"KirchhoffLayer {layer.name!r}: on_failure='return' requires "
                 f"diagnostics= so the status is not silently dropped; pass a dict and read "
                 f"its 'converged' and 'residual_norm' entries."
             )
@@ -582,7 +582,7 @@ class MnaSystem:
                 x0[..., n_phi:] = self._to_real(q0.detach())
 
         newton_kwargs["method"] = self.method(requested)
-        newton_kwargs.setdefault("where", f"PotentialFlowLayer {layer.name!r} solve")
+        newton_kwargs.setdefault("where", f"KirchhoffLayer {layer.name!r} solve")
         # The last Jacobian and the first and last residuals, kept to diagnose a failure.
         last: dict = {}
 

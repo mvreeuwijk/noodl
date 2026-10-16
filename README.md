@@ -50,7 +50,7 @@ extra buys you.
 import torch
 
 from noodl.elements.powerlaw import PowerLaw
-from noodl.layers.potential import PotentialFlowLayer
+from noodl.layers.kirchhoff import KirchhoffLayer
 from noodl.topology import Network
 
 net = Network(dtype=torch.float64)
@@ -59,7 +59,7 @@ net.add_node("room")
 net.add_edge("room", "ambient", kind="airpath")
 
 leak = PowerLaw(C=torch.tensor(0.01), n=torch.tensor(0.65))
-layer = PotentialFlowLayer(net, "air", [leak], boundary=["ambient"])
+layer = KirchhoffLayer(net, "air", [leak], boundary=["ambient"])
 
 phi_boundary = torch.zeros(1, dtype=torch.float64)
 # sources is indexed in full node order (ambient, room); 0.05 m3/s injected into "room"
@@ -78,12 +78,12 @@ physics over the shared core:
 
 | Application | Physical system | Flow determination | Entry point |
 |---|---|---|---|
-| Building physics | Multi-zone airflow, heat and contaminant transport | Potential: Newton on zone pressure | `build_model` |
+| Building physics | Multi-zone airflow, heat and contaminant transport | Kirchhoff: Newton on zone pressure | `build_model` |
 | Street air quality | Urban air quality, canyon exchange and routing | Closure: flows computed from the wind aloft | `build_model`, `StreetNetwork` |
-| Sewers | Gravity sewer hydraulics, headspace air, sulfide | Continuity on a tree for the water; Newton potential for the headspace air | `build_model` |
-| Water distribution | Pressurised mains, pumps, tanks, demand | Potential: Newton on hydraulic head | `build_model` |
+| Sewers | Gravity sewer hydraulics, headspace air, sulfide | Continuity on a tree for the water; Kirchhoff solve for the headspace air | `build_model` |
+| Water distribution | Pressurised mains, pumps, tanks, demand | Kirchhoff: Newton on hydraulic head | `build_model` |
 | Flow allocation | Requested flows clipped to arc capacity and free storage at the receiving node | Clip and allocate | `AllocatedFlowLayer` |
-| Electrical circuits | Lumped circuits: DC, transient and AC | Potential: Modified Nodal Analysis on node voltage | `build_model`, `Circuit` |
+| Electrical circuits | Lumped circuits: DC, transient and AC | Kirchhoff: Modified Nodal Analysis on node voltage | `build_model`, `Circuit` |
 | Coupling | Two models meeting at a shared boundary | Two models exchanging values, iterated to a fixed point | `union` |
 
 ## Reading model files

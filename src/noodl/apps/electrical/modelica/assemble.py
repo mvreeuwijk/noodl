@@ -1,7 +1,7 @@
 """Assemble a `Netlist` into a noodl circuit model: laws, drivers, step grid, start state, names.
 
 `build(netlist, doc)` returns `(model, state, drivers, names)`: a `Model` with a
-`PotentialFlowLayer` named `"electrical"` (real, or phasor for a model with MBL AC parts) and,
+`KirchhoffLayer` named `"electrical"` (real, or phasor for a model with MBL AC parts) and,
 when a device has a heat port, a second one named `"thermal"` coupled to it (below), the
 start state, the drivers on the step grid and a `CircuitNames` that maps the document's
 compared columns to noodl quantities.
@@ -148,7 +148,7 @@ from noodl.apps.electrical.thermal import HeatedEdge, JouleHeating
 from noodl.apps.electrical.waveforms import Constant
 from noodl.apps.electrical.waveforms import Signal as SignalWaveform
 from noodl.elements import Conductance
-from noodl.layers.potential import PotentialFlowLayer
+from noodl.layers.kirchhoff import KirchhoffLayer
 from noodl.model import Model
 from noodl.topology import Network
 
@@ -895,7 +895,7 @@ def _thermal_edges(netlist: Netlist, heated: list[Device], problems: list[str]
 
 def _thermal(b: _Builder, net: Network, heated: list[Device], edges: dict, n_e: int,
              names: list[str], drivers: Drivers, positions: dict
-             ) -> tuple[PotentialFlowLayer, JouleHeating, State]:
+             ) -> tuple[KirchhoffLayer, JouleHeating, State]:
     """The thermal layer, the coupling closure and the thermal start state; writes the
     thermal drivers (boundary temperatures, heat, heat-port temperatures) into `drivers`."""
     nl = b.nl
@@ -917,8 +917,8 @@ def _thermal(b: _Builder, net: Network, heated: list[Device], edges: dict, n_e: 
                                     kind=kind))
     fixed = list(nl.fixed_temperatures.items())
     boundary = [names[n_e]] + [names[n_e + node] for node, _ in fixed]
-    layer = PotentialFlowLayer(net, THERMAL, laws, boundary=boundary,
-                               quantity="temperature", unit="K", flow_unit="W")
+    layer = KirchhoffLayer(net, THERMAL, laws, boundary=boundary,
+                           quantity="temperature", unit="K", flow_unit="W")
 
     # start temperatures: boundaries, heat capacitors, the mean of those elsewhere
     known = dict(fixed)
@@ -997,8 +997,8 @@ def build(netlist: Netlist, doc: CircuitDoc, *, substeps: int = 1
     drivers: Drivers = {f"{LAYER}.phi_boundary": torch.zeros(1, dtype=dtype)}
     laws = b.laws(drivers)
     raise_problems(b.problems)
-    layer = PotentialFlowLayer(net, LAYER, laws, boundary=["0"], phasor=netlist.phasor,
-                               quantity="voltage", unit="V", flow_unit="A")
+    layer = KirchhoffLayer(net, LAYER, laws, boundary=["0"], phasor=netlist.phasor,
+                           quantity="voltage", unit="V", flow_unit="A")
     if netlist.phasor:
         drivers[layer.frequency_key] = torch.tensor(netlist.frequency, dtype=F64)
     dynamic = layer.dynamic

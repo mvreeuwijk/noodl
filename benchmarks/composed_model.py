@@ -5,8 +5,8 @@ Used by the composed-model scaling gate and, as a `pytest` fixture
 (`tests/conftest.py`'s `composed_model`), by the tests that need a realistic joined
 topology and physics. `_build_topology` builds the topology ONLY -- no laws,
 drives or layers; `build_composed` then attaches one reference physics configuration to it (a
-`PowerLaw` per edge kind, sources, capacity, a migrated `PotentialFlowLayer`, a dense-path
-`PotentialFlowLayer` and a `TransportLayer`) and returns both as one `ComposedModel`.
+`PowerLaw` per edge kind, sources, capacity, a migrated `KirchhoffLayer`, a dense-path
+`KirchhoffLayer` and a `TransportLayer`) and returns both as one `ComposedModel`.
 """
 
 from __future__ import annotations
@@ -18,7 +18,7 @@ import torch
 from benchmarks.measure import time_call
 from noodl.elements import PowerLaw
 from noodl.elements.base import ConstitutiveLaw
-from noodl.layers.potential import PotentialFlowLayer
+from noodl.layers.kirchhoff import KirchhoffLayer
 from noodl.layers.transport import TransportLayer, active_interior
 from noodl.model import Model
 from noodl.topology import Network
@@ -51,8 +51,8 @@ class ComposedModel:
     # and sewer nodes carry no airpath edge, so they are inactive for that layer and have no
     # row in it at all. See `noodl.layers.transport.active_interior`.
     capacity: torch.Tensor
-    layer: PotentialFlowLayer
-    dense_layer: PotentialFlowLayer  # linear_solver="direct": the retained dense reference
+    layer: KirchhoffLayer
+    dense_layer: KirchhoffLayer  # linear_solver="direct": the retained dense reference
     transport: TransportLayer
     ensemble: int
     seed: int
@@ -207,10 +207,10 @@ def build_composed(
 
     drivers: dict = {}
 
-    layer = PotentialFlowLayer(
+    layer = KirchhoffLayer(
         net, "composed", laws, boundary=boundary, linear_solver=linear_solver
     )
-    dense_layer = PotentialFlowLayer(
+    dense_layer = KirchhoffLayer(
         net, "composed_dense", laws, boundary=boundary, linear_solver="direct"
     )
     transport = TransportLayer(
@@ -292,7 +292,7 @@ def _step_state(model: ComposedModel) -> tuple[torch.Tensor, torch.Tensor, torch
     `sources` contract, not just the transport layer's interior nodes.
     """
     dtype = model.net.dtype
-    # The TRANSPORT layer's own interior, which is smaller than the potential layer's: the
+    # The TRANSPORT layer's own interior, which is smaller than the Kirchhoff layer's: the
     # co2 layer has no row for a node no airpath edge touches.
     n_i = model.transport.n_i
     x0 = torch.full((model.ensemble, n_i), 400.0, dtype=dtype)
@@ -470,7 +470,7 @@ def workload_backward(
     """Build the composed model, run `steps` DIFFERENTIABLE steps, and time `loss.backward()`.
 
     `loss = phi[..., interior].sum() + x_final.sum()` differentiated with respect to
-    `sources` exercises both adjoints: the potential layer's implicit
+    `sources` exercises both adjoints: the Kirchhoff layer's implicit
     adjoint (through every solve) and the transport layer's `_LinearSolve` adjoint (through
     every implicit step). Only the backward pass is timed; the forward that builds the graph
     is not, because the forward budget already covers it.

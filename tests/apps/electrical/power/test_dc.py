@@ -1,4 +1,4 @@
-"""DC power flow: plain nodal analysis on the classic potential layer."""
+"""DC power flow: plain nodal analysis on the classic Kirchhoff layer."""
 
 import dataclasses
 import math
@@ -40,7 +40,7 @@ def _dc(net):
 @pytest.mark.external
 def test_case9_is_nodal_analysis_on_the_classic_layer():
     model, sol = _dc(read_matpower(power_case("case9")))
-    layer = model.potential[DC_LAYER]
+    layer = model.kirchhoff[DC_LAYER]
     assert layer.mna is False
     assert list(layer.kinds) == ["branch"]
     assert type(layer.law_for("branch")[0]) is Conductance
@@ -66,7 +66,7 @@ def test_build_rules():
     net = _shifted()
     model, state, drivers = dc_power_flow(net)
     assert state == {}
-    layer = model.potential[DC_LAYER]
+    layer = model.kirchhoff[DC_LAYER]
     rows = model.power_index.branch_rows
     branches = [net.branches[k] for k in rows]
     g = layer.law_for("branch")[0].g
@@ -123,7 +123,7 @@ def test_a_layer_error_other_than_a_failed_solve_is_not_wrapped():
     # a layer error that is neither a failed Newton solve nor a singular system (here: a
     # negative conductance written into the built model) passes through unchanged
     model, state, drivers = dc_power_flow(four_bus())
-    g = model.potential[DC_LAYER].law_for("branch")[0].g
+    g = model.kirchhoff[DC_LAYER].law_for("branch")[0].g
     with torch.no_grad():
         g[1] = -g[1]
     with pytest.raises(RuntimeError, match="negative slope") as failure:

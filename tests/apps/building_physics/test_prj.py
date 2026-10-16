@@ -268,7 +268,7 @@ def test_path_flows_index_q_in_the_layers_kind_block_layout():
     """`q` is laid out in element-KIND blocks, not in path order.
 
     `doorway_damper_fan.prj` has five kinds. Network edge order is path order --
-    pl_2, pl_2, door_3, door_3, bd_4, fan_1, door_5, door_5 -- but `PotentialFlowLayer`
+    pl_2, pl_2, door_3, door_3, bd_4, fan_1, door_5, door_5 -- but `KirchhoffLayer`
     concatenates per element, in `project.laws` order, so the two layouts differ.
     """
     p = read_prj(MIXED)
@@ -1481,7 +1481,7 @@ def test_a_steady_solve_with_an_idle_junction_without_volume_is_refused_by_name(
         ("  7  0   8   9   6   0   0   0   4 6 ", "  7  0   8   9   6   0   0   0   4 0 "),
     ], tmp_path))
     model, state, drivers = project_to_model(p)
-    (fan,) = [el for el in model.potential["air"]._laws if isinstance(el, FixedVolumeFlow)]
+    (fan,) = [el for el in model.kirchhoff["air"]._laws if isinstance(el, FixedVolumeFlow)]
     with torch.no_grad():
         fan.volume_flow.zero_()
     with pytest.raises(ValueError, match=r"TransportLayer 'species' steady: nothing passes "
@@ -1721,7 +1721,7 @@ def test_the_plenums_carry_no_zone_air_mass_change(tmp_path):
     p = read_prj(_variant(AHS.read_text(), _DENSITY_OPTIONS,
                           "   0    0.75    20     1      0      0      1", tmp_path))
     model, state, drivers = project_to_model(p)
-    (source,) = [s for s in model.potential["air"].node_sources
+    (source,) = [s for s in model.kirchhoff["air"].node_sources
                  if isinstance(s, ZoneAirMassChange)]
     assert sorted(p.net.nodes[i] for i in source.nodes.tolist()) == ["one", "three", "two"]
 
@@ -1956,7 +1956,7 @@ def test_a_steady_uvgi_project_uses_the_transmission_at_its_own_flows():
     rho = drivers["P_ref"] / (R_AIR * drivers["T"])
     tau = closure(out, {**drivers, "rho": rho})["species.transmission"]
     layer = model.transport["species"]
-    q = model.potential["air"].flows_of_kind(out["air.q"], layer.flow_kinds)
+    q = model.kirchhoff["air"].flows_of_kind(out["air.q"], layer.flow_kinds)
     sources = torch.zeros(model.net.n, 2, dtype=F64)
     expected = layer.steady(q, sources, drivers["species.x_boundary"], transmission=tau)
     torch.testing.assert_close(out["species.x"], expected, rtol=1e-12, atol=0)

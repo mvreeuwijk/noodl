@@ -109,8 +109,8 @@ def test_wrong_shapes_and_batches_are_reported():
     assert any(i.code == "batch-shape" for i in model.check(state, drivers).errors)
 
 
-def test_a_source_on_a_boundary_node_of_a_potential_layer_is_an_error():
-    """`PotentialFlowLayer` drops boundary rows of `sources` without a word; the check
+def test_a_source_on_a_boundary_node_of_a_kirchhoff_layer_is_an_error():
+    """`KirchhoffLayer` drops boundary rows of `sources` without a word; the check
     names them."""
     net, model, state, drivers = _setup()
     s = torch.zeros(net.n, dtype=F64)

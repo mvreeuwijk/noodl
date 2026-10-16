@@ -38,7 +38,7 @@ $$
 
 so the backward pass is **one transposed linear solve**, whatever the forward took. The Jacobian
 is the one Newton already assembled, and the transposed solve reuses the same operator through
-`TransposeOperator`. For a symmetric operator — which a potential-flow layer's is — `rmatvec` is
+`TransposeOperator`. For a symmetric operator — which a Kirchhoff layer's is — `rmatvec` is
 the forward action, so nothing extra is built.
 
 The practical consequence: a model that takes 12 Newton iterations to converge costs the same to

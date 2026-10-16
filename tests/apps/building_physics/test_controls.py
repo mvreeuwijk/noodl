@@ -666,7 +666,7 @@ def test_sensors_by_name_resolve_against_the_model_they_are_built_into():
     assert (temperature.key, temperature.index) == ("thermal.x",
                                                     (_interior(model, "thermal", "A"),))
     assert (pressure.key, pressure.index) == ("air.phi", (model.net.node_index("A"),))
-    column = model.potential["air"].kind_slice("airpath").start + 1
+    column = model.kirchhoff["air"].kind_slice("airpath").start + 1
     assert (flow.key, flow.index) == ("air.q", (column,))
     assert (dp.key, dp.index) == ("air.dp", (column,))
     assert isinstance(outdoor, DriverReading)

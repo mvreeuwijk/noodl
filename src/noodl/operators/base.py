@@ -55,7 +55,7 @@ class SolveResult:
         """Raise `RuntimeError` naming every non-converged flat batch index, its status
         (by `SolverStatus` name) and its residual, if any instance failed to converge.
         Returns `self` unchanged when every instance converged, so this chains:
-        `result = pcg(op, b).raise_on_failure("PotentialFlowLayer.solve")`.
+        `result = pcg(op, b).raise_on_failure("KirchhoffLayer.solve")`.
         """
         if bool(torch.all(self.converged)):
             return self

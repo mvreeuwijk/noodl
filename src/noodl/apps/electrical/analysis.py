@@ -9,7 +9,7 @@ from collections.abc import Mapping, Sequence
 import torch
 
 from noodl.apps.electrical.circuit import LAYER, Circuit, build_model
-from noodl.layers.potential import PotentialFlowLayer
+from noodl.layers.kirchhoff import KirchhoffLayer
 from noodl.model import Model
 
 Tensor = torch.Tensor
@@ -19,15 +19,15 @@ PHI, Q = f"{LAYER}.phi", f"{LAYER}.q"
 _RULES = ("trapezoidal", "backward_euler")
 
 
-def _layer(model: Model) -> PotentialFlowLayer:
-    layer = model.potential.get(LAYER)
+def _layer(model: Model) -> KirchhoffLayer:
+    layer = model.kirchhoff.get(LAYER)
     if layer is None or not hasattr(model, "circuit_index"):
-        raise ValueError(f"expected a circuit model from build_model (a potential layer "
+        raise ValueError(f"expected a circuit model from build_model (a Kirchhoff layer "
                          f"{LAYER!r} and model.circuit_index)")
     return layer
 
 
-def _time_domain(layer: PotentialFlowLayer, what: str) -> None:
+def _time_domain(layer: KirchhoffLayer, what: str) -> None:
     if layer.phasor:
         raise ValueError(f"{what}: the model is a phasor (AC) model, which has no time "
                          f"domain; build it with phasor=False")

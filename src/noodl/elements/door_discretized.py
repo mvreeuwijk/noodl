@@ -777,7 +777,7 @@ class DoorPortStream(ConstitutiveLaw):
         gaiFlo'`` dips below 0 for a compartment just below zero inside the
         ``smoothHeaviside`` band (``ClosedDoors``: -5e-5 kg/(s Pa)). The two stream edges join
         the same two nodes at the same ``dp``, so the airflow Jacobian (and every per-edge
-        slope a potential layer sums into its Laplacian) only ever sees the SUM of their
+        slope a Kirchhoff layer sums into its Laplacian) only ever sees the SUM of their
         slopes, which is the net flow's, positive; reporting it split evenly keeps that sum
         exact and each edge's slope nonnegative for the layer's grounding certificate."""
         grad_enabled = torch.is_grad_enabled()

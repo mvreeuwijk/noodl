@@ -98,9 +98,9 @@ Constitutive laws are grouped below by the physics they express, as in
 
 ## Layers
 
-::: noodl.layers.potential
+::: noodl.layers.kirchhoff
     options:
-      members: [PotentialFlowLayer]
+      members: [KirchhoffLayer]
 
 ::: noodl.layers.transport
     options:

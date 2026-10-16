@@ -10,7 +10,7 @@ import torch
 from noodl.apps.building_physics import DuctNetwork, duct_laws_from_edges
 from noodl.drives import Stack
 from noodl.elements import FixedFlow, PowerLaw
-from noodl.layers.potential import PotentialFlowLayer
+from noodl.layers.kirchhoff import KirchhoffLayer
 from noodl.topology import Network
 
 F64 = torch.float64
@@ -44,7 +44,7 @@ def _system(fan_flow=0.05, T_j=(293.15,) * 4, z_j=(1.5,) * 4, T_amb=293.15):
                  PowerLaw(torch.tensor([0.5], dtype=F64), torch.tensor([0.5], dtype=F64),
                           kind="vent")]
     drives.append(Stack.from_network(net, "vent", g=G))
-    layer = PotentialFlowLayer(net, "air", elements, drives=drives, boundary=["ambient"])
+    layer = KirchhoffLayer(net, "air", elements, drives=drives, boundary=["ambient"])
     densities = rho(net.node_attr("T0"))
     phi, q = layer.solve(torch.zeros(1, dtype=F64), {"rho": densities}, atol=1e-14,
                          rtol=1e-14)

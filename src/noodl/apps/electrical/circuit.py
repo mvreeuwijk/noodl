@@ -7,7 +7,7 @@ two-port device (transformers, controlled sources) is two consecutive edges, por
 boundary node, held at 0 V.
 
 The builder groups the devices by kind, one constitutive law per kind carrying all of its
-devices with per-device parameters, in a single `PotentialFlowLayer` named `"electrical"`
+devices with per-device parameters, in a single `KirchhoffLayer` named `"electrical"`
 solved by Modified Nodal Analysis. Device parameters are scalars (a float or a 0-d tensor);
 gradients reach the laws' parameters (`build_model(..., learnable=True)`), and an ensemble
 of circuits is a batch of drivers (a `Signal` source, a switch control, a resistor
@@ -36,7 +36,7 @@ from noodl.apps.electrical.laws import (
 )
 from noodl.apps.electrical.waveforms import Constant, _Waveform
 from noodl.elements import Conductance, ConstitutiveLaw
-from noodl.layers.potential import PotentialFlowLayer
+from noodl.layers.kirchhoff import KirchhoffLayer
 from noodl.model import Model
 from noodl.topology import Network
 
@@ -415,7 +415,7 @@ def build_model(
 ) -> tuple[Model, State, Drivers]:
     """Assemble the circuit model and return `(model, state, drivers)`.
 
-    ONE `PotentialFlowLayer` named `LAYER` on a float64 `Network` whose nodes are
+    ONE `KirchhoffLayer` named `LAYER` on a float64 `Network` whose nodes are
     `circuit.nodes` (ground first) and whose edges are added device by device (a two-port
     device's two ports consecutively), with one constitutive law per device kind (kinds in
     order of first appearance) and `circuit.ground` as the only boundary node. The layer's
@@ -430,7 +430,7 @@ def build_model(
     resistors' `alpha`; without it every resistor is at its `T_ref`. `learnable=True`
     registers the laws' principal parameters (resistance, conductance, capacitance,
     inductance, source amplitudes, turns ratio, `L1`/`L2`/`M`, gain; one entry per device)
-    as `nn.Parameter`s, reached as `model.potential["electrical"].law_for(kind)[0]`.
+    as `nn.Parameter`s, reached as `model.kirchhoff["electrical"].law_for(kind)[0]`.
 
     Drivers: `"electrical.phi_boundary"` (the ground at 0 V; complex for a phasor model) and
     `"electrical.frequency"` for a phasor model. State: `{}`; the analyses
@@ -453,8 +453,8 @@ def build_model(
         for u, v in _ports(d):
             net.add_edge(u, v, kind=kind)
     laws = [_law(kind, devices, temperature, learnable) for kind, devices in groups.items()]
-    layer = PotentialFlowLayer(net, LAYER, laws, boundary=[circuit.ground], phasor=phasor,
-                               quantity="voltage", unit="V", flow_unit="A")
+    layer = KirchhoffLayer(net, LAYER, laws, boundary=[circuit.ground], phasor=phasor,
+                           quantity="voltage", unit="V", flow_unit="A")
     model = Model(net, [layer])
     index: dict[str, tuple[str, slice]] = {}
     for kind, devices in groups.items():

@@ -14,7 +14,7 @@ What each MBL construct becomes
   series meet (`graph.ComponentGraph.junctions`; "Flow elements in series" below). The
   junctions inside a fused column chain do not appear: each chain is one edge
   (`graph.FlowPath`).
-* **Air layer** ("air", `PotentialFlowLayer`, quantity pressure, Pa). Potentials are GAUGE
+* **Air layer** ("air", `KirchhoffLayer`, quantity pressure, Pa). Potentials are GAUGE
   pressures relative to `names.p_ref` (see "Gauge reference" below). One edge kind per MBL
   instance, so that each element keeps its own `dp_turbulent`, form and drives:
   `"airpath:<name>"` for a one-way element (edge from its `port_a` side to its `port_b`
@@ -170,7 +170,7 @@ densities, whose sensitivity to it is ~1e-5 relative per pascal-order change.
 Closed zone groups
 ------------------
 MBL's `ZonalFlow` example has two rooms joined only by prescribed flows and no boundary: the
-airflow alone leaves their pressure undetermined, and the potential layer would be singular.
+airflow alone leaves their pressure undetermined, and the Kirchhoff layer would be singular.
 MBL fixes it through mass storage (`der(m) = sum(ports.m_flow)`): with balanced flows the
 mass, hence for `Buildings.Media.Air` the pressure, stays at `p_start`. The reader therefore
 makes the largest zone (the first on a tie) of every group of zones joined by
@@ -301,7 +301,7 @@ from noodl.elements import (
 )
 from noodl.elements.base import ConstitutiveLaw, memo
 from noodl.elements.media import _moist_air_buoyancy_density
-from noodl.layers.potential import PotentialFlowLayer
+from noodl.layers.kirchhoff import KirchhoffLayer
 from noodl.layers.transport import TransportLayer, active_interior
 from noodl.model import Drivers, Model, State
 from noodl.topology import Network
@@ -1612,8 +1612,8 @@ class _Builder:
         else:
             p_ref = zones[g.zones[0]].p_start if g.zones else med.p_default
 
-        air = PotentialFlowLayer(net, "air", laws, drives=drives, boundary=air_boundary,
-                                 quantity="pressure", unit="Pa", flow_unit="kg/s")
+        air = KirchhoffLayer(net, "air", laws, drives=drives, boundary=air_boundary,
+                             quantity="pressure", unit="Pa", flow_unit="kg/s")
         th_store = storage.thermo(med) if use_storage else None
         storage_air: list[int] = []
         if use_storage:
@@ -1622,7 +1622,7 @@ class _Builder:
                            and index[z] in interior]
             if storage_air:
                 vols = torch.tensor([zones[node_names[i]].V for i in storage_air], dtype=F64)
-                air = PotentialFlowLayer(
+                air = KirchhoffLayer(
                     net, "air", laws, drives=drives, boundary=air_boundary,
                     node_sources=[storage.ZoneStorage(storage_air, vols, p_ref, th_store)],
                     quantity="pressure", unit="Pa", flow_unit="kg/s")
@@ -1936,9 +1936,9 @@ class _Builder:
         # t = StartTime too.
         if free or self.graph.junctions:
             fixed = [node_names[i] for i in storage_air if i not in free]
-            init_layer = PotentialFlowLayer(net, "air", laws, drives=drives,
-                                            boundary=list(air_boundary) + fixed,
-                                            quantity="pressure", unit="Pa", flow_unit="kg/s")
+            init_layer = KirchhoffLayer(net, "air", laws, drives=drives,
+                                        boundary=list(air_boundary) + fixed,
+                                        quantity="pressure", unit="Pa", flow_unit="kg/s")
         return storage.StorageClosure(
             mbl=mbl, th=th, p_ref=p_ref, volumes=V, storage=stores, m_fixed=m_fixed,
             air_nodes=torch.tensor(storage_air, dtype=torch.long),
@@ -2021,7 +2021,7 @@ class _Builder:
             layers["species"].capacity = torch.tensor([mass(i) for i in idx], dtype=F64)
 
     @staticmethod
-    def _series(g: ComponentGraph, air: PotentialFlowLayer, index: dict[str, int],
+    def _series(g: ComponentGraph, air: KirchhoffLayer, index: dict[str, int],
                 flow_kinds: tuple[str, ...], series_kinds: dict[str, str],
                 layers: list[str]) -> _Series | None:
         """The closure's view of the elements in series (`_Series`), or None without."""
@@ -2047,7 +2047,7 @@ class _Builder:
                        col=long(col), src=long(src), tgt=long(tgt))
 
     @staticmethod
-    def _jump_edges(heads, g: ComponentGraph, air: PotentialFlowLayer) -> tuple[int, ...]:
+    def _jump_edges(heads, g: ComponentGraph, air: KirchhoffLayer) -> tuple[int, ...]:
         """The `"air.q"` columns of the heads' paths and of the elements in series with them."""
         kinds = {h.kind for h in heads}
         for chain in g.series:
@@ -2058,17 +2058,17 @@ class _Builder:
 
     @staticmethod
     def _state0_layer(net, laws, drives, air_boundary, storage_air,
-                      air) -> PotentialFlowLayer | None:
+                      air) -> KirchhoffLayer | None:
         """The air layer with every storing zone a boundary: its interior is the pressures that
         are algebraic at a step's start (junctions, zones without storage), or None."""
         if not set(air.interior.tolist()) - set(storage_air):
             return None
         fixed = list(air_boundary) + [net.nodes[i] for i in storage_air]
-        return PotentialFlowLayer(net, "air", laws, drives=drives, boundary=fixed,
-                                  quantity="pressure", unit="Pa", flow_unit="kg/s")
+        return KirchhoffLayer(net, "air", laws, drives=drives, boundary=fixed,
+                              quantity="pressure", unit="Pa", flow_unit="kg/s")
 
     @staticmethod
-    def _heat_edges(air: PotentialFlowLayer, net: Network) -> tuple[Tensor, Tensor]:
+    def _heat_edges(air: KirchhoffLayer, net: Network) -> tuple[Tensor, Tensor]:
         """`(src, tgt)` node positions of every air-layer edge, in `"air.q"` column order."""
         src = torch.empty(sum(air.kind_slice(k).stop - air.kind_slice(k).start
                               for k in dict.fromkeys(air.kinds)), dtype=torch.long)

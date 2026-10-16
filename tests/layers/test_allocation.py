@@ -242,7 +242,7 @@ def test_model_refuses_allocation_layer_as_a_transport_flow_owner_by_name():
     flow kinds (it writes `"<name>.q"` in the same key convention), but reading those flows
     would need `AllocatedFlowLayer.flows_of_kind` -- species/quality transport on
     allocated flows, deliberately not built. `_kind_flows` must not fall through to
-    `self.potential[owner]` and raise a bare `KeyError` naming nothing; it must refuse by
+    `self.kirchhoff[owner]` and raise a bare `KeyError` naming nothing; it must refuse by
     name instead.
     """
     net = _chain_net()

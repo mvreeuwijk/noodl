@@ -14,12 +14,12 @@ one graph.
 
 | # | Mode | The flow comes from | Implemented by |
 |---|---|---|---|
-| 1 | **Potential solve** | Newton's method on a nodal conservation residual: $A_I\,g(A^\top\phi) = s_I$ (with the flows of implicit constitutive laws as extra unknowns: Modified Nodal Analysis) | `PotentialFlowLayer` |
-| 2 | **Driver-prescribed** | Handed in directly as a driver value | any `TransportLayer` with no potential owner |
+| 1 | **Kirchhoff solve** | Both Kirchhoff laws plus the constitutive laws on the edges, solved together. Newton's method on a nodal conservation residual: $A_I\,g(A^\top\phi) = s_I$ (with the flows of implicit constitutive laws as extra unknowns: Modified Nodal Analysis) | `KirchhoffLayer` |
+| 2 | **Driver-prescribed** | Handed in directly as a driver value | any `TransportLayer` with no Kirchhoff-layer owner |
 | 3 | **Closure-computed** | Computed from other state by an arbitrary function | a closure writing `"<layer>.q"` |
 | 4 | **Clip-and-allocate** | A *request*, clipped against arc capacity and receiver headroom — no potential variable anywhere | `AllocatedFlowLayer` |
 
-![The four flow-determination modes: potential solve, driver-prescribed, closure-computed, clip-and-allocate](../assets/four-modes.svg)
+![The four flow-determination modes: Kirchhoff solve, driver-prescribed, closure-computed, clip-and-allocate](../assets/four-modes.svg)
 
 Worked examples of each, from the applications:
 
@@ -37,14 +37,14 @@ Getting this wrong is expensive. Modelling a gravity sewer as a potential proble
 water-allocation rule as a pressure network, produces a model that converges to a confidently
 wrong answer.
 
-## `PotentialFlowLayer`
+## `KirchhoffLayer`
 
 Solves for nodal potentials such that flow is conserved at every interior node.
 
 ```python
-from noodl.layers.potential import PotentialFlowLayer
+from noodl.layers.kirchhoff import KirchhoffLayer
 
-layer = PotentialFlowLayer(
+layer = KirchhoffLayer(
     net,
     name="air",
     laws=[leak],                # one ConstitutiveLaw per edge kind
@@ -60,7 +60,7 @@ phi, q = layer.solve(phi_boundary, drivers, sources=sources, differentiable=True
 ```
 
 `quantity` and `unit` are metadata only — nothing numerical reads them. They exist so that a
-model composing several potential layers over one network can tell a pressure layer from a
+model composing several Kirchhoff layers over one network can tell a pressure layer from a
 temperature one without matching on names.
 
 Useful accessors: `flows(phi, drivers)` evaluates the branch law; `flows_of_kind(q, kinds)`
@@ -73,7 +73,7 @@ is what actually ran. They are deliberately separate — see [Solvers](solvers.m
 
 ## Modified Nodal Analysis: implicit, coupled and dynamic laws
 
-A `PotentialFlowLayer` whose constitutive laws are all potential-controlled, single-edge and
+A `KirchhoffLayer` whose constitutive laws are all potential-controlled, single-edge and
 static is solved by nodal analysis, as above. A layer with any law that is implicit
 (`law_form = "implicit"`), multi-port (`ports > 1`), dynamic or contextual, or a layer built with
 `phasor=True`, is solved by **Modified Nodal Analysis** instead (`layer.mna` is True); the
@@ -140,7 +140,7 @@ method requested and `diagnostics["backend"]` the one that ran.
 
 ### Phasor layers
 
-`PotentialFlowLayer(..., phasor=True)` solves the sinusoidal steady state: `phi`, `q`, the
+`KirchhoffLayer(..., phasor=True)` solves the sinusoidal steady state: `phi`, `q`, the
 boundary potentials and the warm starts are complex (complex128). The frequency in Hz comes from
 the driver `layer.frequency_key` (`"<name>.frequency"`, one value per instance) and reaches the
 laws as `ctx.omega = 2 pi f`. Each complex unknown is solved as its (real, imaginary) pair, so a
@@ -193,7 +193,7 @@ Three things catch people:
   This differs from `capacity` on purpose: sources are an application-level quantity, capacity a
   layer-level one.
 - **`flow_kind` may be several kinds**, and `q` is then their flows *concatenated in that order*.
-  That is exactly what `PotentialFlowLayer.flows_of_kind(q, layer.flow_kinds)` produces, so heat
+  That is exactly what `KirchhoffLayer.flows_of_kind(q, layer.flow_kinds)` produces, so heat
   advected by both `"airpath"` and `"door"` edges needs no new operator.
 
 The three schemes: `"exact"` uses an augmented matrix exponential and controls its own error by
@@ -266,7 +266,7 @@ attributes say which. Step such a model through time instead, or give the nodes 
 **Linear solver.** The `"implicit"` and `"trapezoidal"` schemes each need one linear solve per
 step (`"exact"` has none). `linear_solver` names it: `"auto"` (the default), `"gmres"`,
 `"gmres_jacobi"`, `"gmres_ilu"`, `"sparse_direct"` or `"direct"`, resolved fresh on every solve
-(unlike `PotentialFlowLayer.linear_solver`, which is fixed for the layer's lifetime). `"auto"`
+(unlike `KirchhoffLayer.linear_solver`, which is fixed for the layer's lifetime). `"auto"`
 picks `"sparse_direct"` (SciPy's sparse LU, one exact factor-and-solve, no outer iteration) at or
 under a batch cap of 32 instances, and plain `"gmres"` above it — chosen on an interleaved
 forward/backward benchmark across the whole family (`gmres`, `gmres_jacobi`, `gmres_ilu`,
@@ -349,7 +349,7 @@ model = Model(
     closures=[density],
     reactions=[("species", decay)],
     coupling="pingpong",            # or "iterate"
-    iterate_tol={"thermal": 0.01},  # REQUIRED when coupling="iterate"; transport or potential layers
+    iterate_tol={"thermal": 0.01},  # REQUIRED when coupling="iterate"; transport or Kirchhoff layers
     iterate_max=20,
     substeps={"species": 4},
 )
@@ -358,14 +358,14 @@ state = model.step(state, drivers, dt=60.0)
 state = model.steady(state, drivers)
 ```
 
-`iterate_tol` may name a transport layer (converged on its state `.x`) or a potential layer
+`iterate_tol` may name a transport layer (converged on its state `.x`) or a Kirchhoff layer
 (converged on the largest change of its potential `.phi` over its interior and boundary nodes, in
-the potential's units, per instance). A potential layer is named when a closure computes that
+the potential's units, per instance). A Kirchhoff layer is named when a closure computes that
 layer's element coefficients, or its boundary potentials, from its own previous solution, as the
 sewer dynamic wave does with its conduit coefficients and outfall heads: for example
 `iterate_tol={"water": 1e-6}` (the sewer's head layer) repeats the pass until no head moves by
 more than 1 micrometre.
-Its `.phi` and `.q` are relaxed with `iterate_relaxation` like a transport `.x`. Potential layers not
+Its `.phi` and `.q` are relaxed with `iterate_relaxation` like a transport `.x`. Kirchhoff layers not
 named in `iterate_tol` are not iterated.
 
 `iterate_flow_tol={"water": 1e-9}` (optional, flow units) also judges such a layer's flows: a pass
@@ -374,7 +374,7 @@ potential solve stops on its warm start (its residual already within `atol`), wh
 potential back unchanged while the flows the closures read are still moving.
 
 `iterate_acceleration="anderson"` (opt-in; default `None`) replaces the relaxation of those
-potential layers' `.phi` and `.q` by Anderson mixing (type II, Walker & Ni 2011) over the last
+Kirchhoff layers' `.phi` and `.q` by Anderson mixing (type II, Walker & Ni 2011) over the last
 `iterate_memory` passes (default 5), and needs an `iterate_flow_tol` for each of them: the mixing
 minimises the fixed-point residual of `.phi` and `.q`, each divided by its tolerance, and the
 convergence test then also asks that residual of `.phi` to be within `iterate_tol`. Transport
@@ -415,7 +415,7 @@ it.
 
 ### Layers solved by Modified Nodal Analysis
 
-A potential layer whose constitutive laws include implicit, multi-port, dynamic or
+A Kirchhoff layer whose constitutive laws include implicit, multi-port, dynamic or
 context-reading ones (`layer.mna`) is solved with the flows of its implicit-law edges as
 unknowns. `Model` hands such a layer what its laws need:
 

@@ -8,7 +8,7 @@ import torch
 
 from noodl.apps.electrical import ConstantPowerLoad
 from noodl.apps.electrical.power import PiBranch, Shunt, VoltageControlledGenerator
-from noodl.layers.potential import PotentialFlowLayer
+from noodl.layers.kirchhoff import KirchhoffLayer
 from noodl.topology import Network
 
 C128 = torch.complex128
@@ -63,8 +63,8 @@ def _two_bus(device_law, kind):
     net.add_edge("1", "ground", kind="branch")
     net.add_edge("2", "ground", kind="branch")
     net.add_edge("2", "ground", kind=kind)
-    layer = PotentialFlowLayer(net, "power", [PiBranch(0.0, 0.1, 0.0, 0.0, 0.0), device_law],
-                               boundary=["ground", "1"], phasor=True)
+    layer = KirchhoffLayer(net, "power", [PiBranch(0.0, 0.1, 0.0, 0.0, 0.0), device_law],
+                           boundary=["ground", "1"], phasor=True)
     bound_names = [net.nodes[k] for k in layer.bound.tolist()]
     pb = torch.tensor([{"ground": 0.0, "1": 1.0}[n] for n in bound_names], dtype=C128)
     drivers = {"power.frequency": torch.tensor(50.0)}

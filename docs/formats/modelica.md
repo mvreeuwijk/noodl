@@ -331,7 +331,7 @@ names.value(history, "res2.terminal.i[1]")                 # a reference column,
 ```
 
 `read_modelica_circuit(path, *, substeps=1, omit=())` returns `(model, state, drivers, names)`:
-a `Model` with a `PotentialFlowLayer` named `"electrical"` (and a second one, `"thermal"`, when
+a `Model` with a `KirchhoffLayer` named `"electrical"` (and a second one, `"thermal"`, when
 a device has a heat port), its start state, its drivers on the step grid, and a `CircuitNames`
 that maps every compared column of the reference to a noodl quantity (`names.value`).
 `substeps` splits every interval of the step grid into that many equal steps; `omit` names

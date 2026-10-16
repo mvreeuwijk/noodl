@@ -166,11 +166,11 @@ def test_a_control_on_a_non_pump_is_refused():
 # ---------------------------------------------------------------------- builder
 def test_the_builder_returns_a_model_a_state_and_drivers():
     model, state, drivers = build_model(twoloop())
-    assert set(model.potential) == {"water"}
+    assert set(model.kirchhoff) == {"water"}
     assert model.transport == {}
     assert model.node_names == ["J1", "J2", "J3", "J4", "J5", "J6", "R1"]
     assert model.link_names == ["P1", "P2", "P3", "P4", "P5", "P6", "P7", "P8"]
-    assert [model.net.nodes[i] for i in model.potential["water"].bound] == ["R1"]
+    assert [model.net.nodes[i] for i in model.kirchhoff["water"].bound] == ["R1"]
     assert set(state) == {"water.phi", "water.q"}
     assert set(drivers) == {"water.phi_boundary", "water.sources"}
     assert float(drivers["water.phi_boundary"][0]) == 50.0
@@ -200,7 +200,7 @@ def test_the_two_loop_solves_to_the_measured_heads():
 def test_the_solved_residual_is_at_the_newton_tolerance():
     model, state, drivers = build_model(twoloop())
     final = water_steady(model, state, drivers)
-    layer = model.potential["water"]
+    layer = model.kirchhoff["water"]
     residual = layer.residual(
         final["water.phi"][..., layer.interior], drivers["water.phi_boundary"], {},
         drivers["water.sources"],
@@ -210,7 +210,7 @@ def test_the_solved_residual_is_at_the_newton_tolerance():
 
 def test_darcy_weisbach_switches_the_layer_to_pressure():
     model, state, drivers = build_model(twoloop(), headloss="D-W")
-    assert model.potential["water"].quantity == "pressure"
+    assert model.kirchhoff["water"].quantity == "pressure"
     assert model.head_scale == pytest.approx(998.2 * 9.80665, rel=1e-15)
     assert float(drivers["water.phi_boundary"][0]) == pytest.approx(
         50.0 * 998.2 * 9.80665, rel=1e-15
@@ -223,7 +223,7 @@ def test_pda_replaces_the_nodal_sources_with_a_node_source():
         twoloop(), pda=True, p_min=0.0, p_req=60.0
     )
     assert float(drivers["water.sources"].abs().max()) == 0.0
-    sources = model.potential["water"]._node_sources
+    sources = model.kirchhoff["water"]._node_sources
     assert len(sources) == 1
     assert sources[0].nodes.tolist() == [0, 1, 2, 3, 4, 5]
     assert "demand_model" in model.notes
@@ -282,7 +282,7 @@ def test_pda_defaults_from_the_networks_own_options():
     )
     model, _, drivers = build_model(net)
     assert float(drivers["water.sources"].abs().max()) == 0.0
-    sources = model.potential["water"]._node_sources
+    sources = model.kirchhoff["water"]._node_sources
     assert len(sources) == 1
     assert sources[0].p_min == 0.0
     assert sources[0].p_req == 60.0
@@ -421,12 +421,12 @@ def test_a_non_default_viscosity_and_gravity_reach_the_darcy_weisbach_elements()
         twoloop(), options=WaterOptions(specific_gravity=1.1, viscosity=1.5)
     )
     model, _, _ = build_model(net, headloss="D-W")
-    pipe = model.potential["water"]._laws[0]
+    pipe = model.kirchhoff["water"]._laws[0]
     assert pipe.nu == pytest.approx(EPANET_NU_SI * 1.5, rel=1e-15)
     assert pipe.scale == pytest.approx(998.2 * 1.1 * 9.80665, rel=1e-15)
     assert pipe.cfs_per_m3s == pytest.approx(1.0 / 0.3048**3, rel=1e-15)
     model, _, _ = build_model(net, headloss="D-W", friction="colebrook")
-    duct = model.potential["water"]._laws[0]
+    duct = model.kirchhoff["water"]._laws[0]
     assert duct.rho == pytest.approx(1.0 / (998.2 * 1.1), rel=1e-15)
     assert duct.mu == pytest.approx(1.002e-3 / 998.2 * 1.5, rel=1e-15)
     assert model.head_scale == pytest.approx(998.2 * 1.1 * 9.80665, rel=1e-15)
@@ -443,13 +443,13 @@ def test_a_files_flow_units_select_epanets_rounded_cfs_factor(tmp_path):
         twoloop(), headloss="D-W", options=WaterOptions(flow_units="LPS")
     )
     model, _, _ = build_model(net)
-    pipe = model.potential["water"]._laws[0]
+    pipe = model.kirchhoff["water"]._laws[0]
     assert pipe.cfs_per_m3s == pytest.approx(1000.0 / 28.317, rel=1e-15)
 
 
 def test_initial_state_refuses_an_unknown_quantity():
     model, _, _ = build_model(twoloop())
-    model.potential["water"].quantity = "nonsense"
+    model.kirchhoff["water"].quantity = "nonsense"
     with pytest.raises(ValueError, match="nonsense"):
         initial_state(model)
 
@@ -496,7 +496,7 @@ def test_tank_inflow_is_the_net_inflow_at_the_tank():
     the identity itself is checked on the reservoir, which is the same accumulation."""
     model, state, drivers = build_model(twoloop())
     final = water_steady(model, state, drivers)
-    layer = model.potential["water"]
+    layer = model.kirchhoff["water"]
     inflow = -layer._accumulate(final["water.q"])[..., layer.bound]
     # the reservoir supplies the whole demand
     assert float(inflow[0]) == pytest.approx(-0.045, abs=1e-12)

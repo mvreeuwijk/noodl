@@ -15,7 +15,7 @@ from pathlib import Path
 import torch
 
 from noodl.elements.quadratic import Quadratic
-from noodl.layers.potential import PotentialFlowLayer
+from noodl.layers.kirchhoff import KirchhoffLayer
 from noodl.layers.transport import TransportLayer
 from noodl.topology import Network
 
@@ -96,7 +96,7 @@ def test_quadratic_loop_matches_the_series_resistance_solution():
     one series quadratic resistor of coefficient a1 + a2 (their potential drops add:
     (a1 + a2) |q| q = a1 |q1| q1 + a2 |q2| q2 when q1 == q2 == q). This is reproduced here as
     the SERIES-REDUCED form of the worked example -- same physics, one branch -- rather than
-    the full three-edge mesh, which ``PotentialFlowLayer`` (a nodal-potential solver, not a
+    the full three-edge mesh, which ``KirchhoffLayer`` (a nodal-potential solver, not a
     mesh-current one) would otherwise need a third, purely-topological node for.
 
     Network: two nodes, both boundary (``n0`` at the prescribed drive a0, ``n1`` at 0), one
@@ -110,7 +110,7 @@ def test_quadratic_loop_matches_the_series_resistance_solution():
     With both endpoints boundary there is no interior unknown at all (the network is fully
     determined by the two prescribed potentials), so this drives ``layer.dp``/``layer.flows``
     directly instead of ``layer.solve`` -- there is nothing for Newton to solve, and
-    ``PotentialFlowLayer.solve``'s own docs note ``phi0`` (and hence ``linear_init``, which
+    ``KirchhoffLayer.solve``'s own docs note ``phi0`` (and hence ``linear_init``, which
     divides by the element's linear coefficient a and would divide by zero here) is only ever
     a starting guess, never required. Differentiating d|q|/da0 through ``layer.flows`` is
     therefore ordinary reverse-mode autograd on the assembled potential, not the implicit
@@ -126,7 +126,7 @@ def test_quadratic_loop_matches_the_series_resistance_solution():
     element = Quadratic(
         a=torch.tensor(0.0, dtype=F64), b=torch.tensor(a1_plus_a2, dtype=F64), kind="pipe"
     )
-    layer = PotentialFlowLayer(net, "loop", [element], boundary=["n0", "n1"])
+    layer = KirchhoffLayer(net, "loop", [element], boundary=["n0", "n1"])
     assert layer.interior.numel() == 0  # fully determined by the two boundary potentials
 
     a0 = torch.tensor(1.0, dtype=F64, requires_grad=True)

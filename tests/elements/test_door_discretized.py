@@ -45,7 +45,7 @@ from noodl.elements import (
     mbl_discretized_operable_door,
     medium,
 )
-from noodl.layers.potential import PotentialFlowLayer
+from noodl.layers.kirchhoff import KirchhoffLayer
 from noodl.topology import Network
 
 F64 = torch.float64
@@ -703,7 +703,7 @@ def test_head_is_a_drive():
 
 
 # ---------------------------------------------------------------------------------------
-# 7. Inside a PotentialFlowLayer
+# 7. Inside a KirchhoffLayer
 # ---------------------------------------------------------------------------------------
 
 
@@ -732,7 +732,7 @@ def test_head_drive_is_wired_by_kind_in_a_two_boundary_layer():
         medium=AIR,
         kind="door",
     )
-    layer = PotentialFlowLayer(net, "air", [comp], drives=[head], boundary=["A", "B"])
+    layer = KirchhoffLayer(net, "air", [comp], drives=[head], boundary=["A", "B"])
     iA, iB = net.node_index("A"), net.node_index("B")
     for dphi, TA, TB, XA, XB in CASES:
         phi = torch.zeros(2, dtype=F64)
@@ -754,7 +754,7 @@ def test_head_drive_is_wired_by_kind_in_a_two_boundary_layer():
         np.testing.assert_allclose(q.numpy(), ref["m_com"], rtol=RTOL, atol=ATOL)
 
 
-def test_discretised_door_solves_inside_a_potential_layer_and_gradients_reach_T():
+def test_discretised_door_solves_inside_a_kirchhoff_layer_and_gradients_reach_T():
     """out (boundary) -- orifice -- A (interior, warm) == door (nCom edges) == B (boundary)."""
     from noodl.elements import mbl_orifice
 
@@ -777,7 +777,7 @@ def test_discretised_door_solves_inside_a_potential_layer_and_gradients_reach_T(
         kind="door",
     )
     ori = mbl_orifice(0.05, dp_turbulent=0.01, rho_default=AIR.rho_default, kind="ori")
-    layer = PotentialFlowLayer(net, "air", [ori, comp], drives=[head], boundary=["out", "B"])
+    layer = KirchhoffLayer(net, "air", [ori, comp], drives=[head], boundary=["out", "B"])
     idx = {n: net.node_index(n) for n in ("out", "A", "B")}
     phi_b = torch.tensor([0.5, 0.0], dtype=F64)  # out, B
 

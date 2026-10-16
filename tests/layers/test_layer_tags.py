@@ -7,7 +7,7 @@ import pytest
 import torch
 
 from noodl.elements import PowerLaw
-from noodl.layers.potential import PotentialFlowLayer
+from noodl.layers.kirchhoff import KirchhoffLayer
 from noodl.layers.transport import TransportLayer, active_interior
 from noodl.topology import Network
 
@@ -37,7 +37,7 @@ def _one_kind_net():
 
 def test_kind_slice_and_flows_of_kind_follow_element_order():
     net = _two_kind_net()
-    layer = PotentialFlowLayer(
+    layer = KirchhoffLayer(
         net, "air",
         [PowerLaw(torch.tensor([0.01, 0.01], dtype=F64), 0.65, kind="airpath"),
          PowerLaw(torch.tensor([0.5], dtype=F64), 0.5, kind="door")],
@@ -57,9 +57,9 @@ def test_kind_slice_and_flows_of_kind_follow_element_order():
 def test_layers_carry_quantity_and_unit_tags():
     net = _one_kind_net()
     el = PowerLaw(torch.tensor([0.01, 0.01, 0.01], dtype=F64), 0.65)
-    default = PotentialFlowLayer(net, "air", [el], boundary=["ambient"])
+    default = KirchhoffLayer(net, "air", [el], boundary=["ambient"])
     assert (default.quantity, default.unit) == ("potential", "")
-    tagged = PotentialFlowLayer(
+    tagged = KirchhoffLayer(
         net, "air", [el], boundary=["ambient"], quantity="pressure", unit="Pa"
     )
     assert (tagged.quantity, tagged.unit) == ("pressure", "Pa")
@@ -119,9 +119,9 @@ def _wall_net():
     return net
 
 
-def test_potential_layer_treats_nodes_untouched_by_its_kinds_as_inactive():
+def test_kirchhoff_layer_treats_nodes_untouched_by_its_kinds_as_inactive():
     net = _wall_net()
-    layer = PotentialFlowLayer(
+    layer = KirchhoffLayer(
         net, "air", [PowerLaw(torch.tensor([0.01], dtype=F64), 0.65)], boundary=["ambient"]
     )
     assert layer.interior.tolist() == [net.node_index("z1")]

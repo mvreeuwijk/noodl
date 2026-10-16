@@ -48,7 +48,7 @@ def link_table(model, state, names=None, *, path=None) -> list[dict]:
     (a head gain), exactly as EPANET reports it. Velocity is `q / A` on the pipe block and
     is reported as `0.0` on a pump or a valve, which have no length to average over.
     """
-    layer = model.potential["water"]
+    layer = model.kirchhoff["water"]
     names = list(model.link_names if names is None else names)
     q = state["water.q"]
     dp = layer.dp(state["water.phi"], {}) / model.head_scale

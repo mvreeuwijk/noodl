@@ -155,7 +155,7 @@ def transport_boundary_inflow(
     `(..., n_i)`/`(..., n_b)`, never `(..., n_i, K)`).
 
     `TransportLayer` never exposes this: its own `rate()` has no row for boundary nodes at
-    all (`Model.ports()` reports boundary flows only for potential layers). Built here with
+    all (`Model.ports()` reports boundary flows only for Kirchhoff layers). Built here with
     `net.endpoints` + gather + `net.accumulate` to avoid assembling a dense topology selector.
     """
     kind = flow_kinds[0] if len(flow_kinds) == 1 else None

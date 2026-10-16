@@ -1,11 +1,11 @@
-"""Modified Nodal Analysis in PotentialFlowLayer: static real circuits."""
+"""Modified Nodal Analysis in KirchhoffLayer: static real circuits."""
 
 import pytest
 import torch
 
 import noodl.solvers.select as select_module
 from noodl.elements import Conductance, ConstitutiveLaw, FixedFlow, ImplicitLaw, LawContext
-from noodl.layers.potential import PotentialFlowLayer
+from noodl.layers.kirchhoff import KirchhoffLayer
 from noodl.nodesources import NodeSource
 from noodl.solvers.implicit import TransposeOperator
 from noodl.topology import Network
@@ -80,7 +80,7 @@ def _floating_source_net():
 
 def test_floating_voltage_source_matches_hand_analysis():
     net = _floating_source_net()
-    layer = PotentialFlowLayer(net, "e", [Conductance(torch.tensor([1.0, 0.5]), kind="r"),
+    layer = KirchhoffLayer(net, "e", [Conductance(torch.tensor([1.0, 0.5]), kind="r"),
                                           Source(torch.tensor([3.0]))], boundary=["gnd"])
     assert layer.mna and not layer.dynamic and not layer.phasor
     assert layer.implicit_edges.tolist() == [2]
@@ -99,7 +99,7 @@ def _transformer_layer(n=2.0, learnable=False):
     # source p->gnd (10 V), transformer [p->gnd primary, s->gnd secondary], load s->gnd
     net = _net(["gnd", "p", "s"], [("p", "gnd", "source"), ("p", "gnd", "xfmr"),
                                    ("s", "gnd", "xfmr"), ("s", "gnd", "load")])
-    layer = PotentialFlowLayer(
+    layer = KirchhoffLayer(
         net, "e",
         [Source(torch.tensor([10.0])), Ratio(torch.tensor(n), learnable=learnable),
          Conductance(torch.tensor([0.25]), kind="load")],
@@ -130,24 +130,24 @@ def test_ports_must_divide_edge_count():
     net = _net(["gnd", "a", "b", "c"], [("a", "gnd", "xfmr"), ("b", "gnd", "xfmr"),
                                         ("c", "gnd", "xfmr")])
     with pytest.raises(ValueError, match="multiple of its law's ports=2"):
-        PotentialFlowLayer(net, "e", [Ratio(torch.tensor(2.0))], boundary=["gnd"])
+        KirchhoffLayer(net, "e", [Ratio(torch.tensor(2.0))], boundary=["gnd"])
 
 
 def test_floating_island_is_refused_naming_nodes():
     net = _net(["gnd", "p", "s1", "s2"], [("p", "gnd", "source"), ("p", "gnd", "xfmr"),
                                           ("s1", "s2", "xfmr"), ("s1", "s2", "load")])
     with pytest.raises(ValueError, match=r"'s1', 's2'"):
-        PotentialFlowLayer(net, "e", [Source(torch.tensor([10.0])), Ratio(torch.tensor(2.0)),
+        KirchhoffLayer(net, "e", [Source(torch.tensor([10.0])), Ratio(torch.tensor(2.0)),
                                       Conductance(torch.tensor([0.25]), kind="load")],
-                           boundary=["gnd"])
+                       boundary=["gnd"])
 
 
 def test_voltage_source_loop_is_singular_and_named():
     net = _net(["gnd", "a"], [("a", "gnd", "source"), ("a", "gnd", "source"),
                               ("a", "gnd", "r")])
-    layer = PotentialFlowLayer(net, "e", [Source(torch.tensor([1.0, 2.0])),
+    layer = KirchhoffLayer(net, "e", [Source(torch.tensor([1.0, 2.0])),
                                           Conductance(torch.tensor([1.0]), kind="r")],
-                               boundary=["gnd"])
+                           boundary=["gnd"])
     with pytest.raises(RuntimeError, match=r"singular.*'source'"):
         layer.solve(torch.zeros(1), differentiable=False)
     with pytest.raises(RuntimeError, match=r"singular.*'source'"):
@@ -156,16 +156,16 @@ def test_voltage_source_loop_is_singular_and_named():
 
 def test_cg_refused_on_mna_layer():
     with pytest.raises(ValueError, match="cg"):
-        PotentialFlowLayer(_floating_source_net(), "e",
-                           [Conductance(torch.tensor([1.0, 0.5]), kind="r"),
+        KirchhoffLayer(_floating_source_net(), "e",
+                       [Conductance(torch.tensor([1.0, 0.5]), kind="r"),
                             Source(torch.tensor([3.0]))],
-                           boundary=["gnd"], linear_solver="cg")
+                       boundary=["gnd"], linear_solver="cg")
 
 
 def _driven_layer(**kwargs):
     net = _floating_source_net()
-    layer = PotentialFlowLayer(net, "e", [DrivenConductance(kind="r"), DrivenSource()],
-                               boundary=["gnd"], **kwargs)
+    layer = KirchhoffLayer(net, "e", [DrivenConductance(kind="r"), DrivenSource()],
+                           boundary=["gnd"], **kwargs)
     return net, layer
 
 
@@ -218,7 +218,7 @@ def test_node_source_parameter_gradient_matches_central_differences():
                [("a", "gnd", "source"), ("a", "b", "r"), ("c", "gnd", "r"), ("b", "c", "f")])
     source = LinearWithdrawal(torch.tensor([net.nodes.index("b")]), [0.2])
     source.c.requires_grad_(True)
-    layer = PotentialFlowLayer(
+    layer = KirchhoffLayer(
         net, "e",
         [Source(torch.tensor([2.0])), Conductance(torch.tensor([1.0, 0.5]), kind="r"),
          FixedFlow(torch.tensor([0.3]), kind="f")],
@@ -263,8 +263,8 @@ def test_batched_drivers_solve_each_instance():
 
 def test_classic_layer_is_untouched():
     net = _net(["gnd", "a", "b"], [("gnd", "a", "r"), ("a", "b", "r"), ("b", "gnd", "r")])
-    layer = PotentialFlowLayer(net, "e", [Conductance(torch.tensor([1.0, 2.0, 0.5]), kind="r")],
-                               boundary=["gnd"])
+    layer = KirchhoffLayer(net, "e", [Conductance(torch.tensor([1.0, 2.0, 0.5]), kind="r")],
+                           boundary=["gnd"])
     assert layer.mna is False and layer.dynamic is False
     assert layer.implicit_edges.numel() == 0
     sources = torch.tensor([0.0, 1.0, -0.5])
@@ -292,7 +292,7 @@ def test_fixed_flow_and_node_source_still_work_in_mna():
     net = _net(["gnd", "a", "b", "c"],
                [("a", "gnd", "source"), ("a", "b", "r"), ("c", "gnd", "r"), ("b", "c", "f")])
     nodes = torch.tensor([net.nodes.index("b"), net.nodes.index("c")])
-    layer = PotentialFlowLayer(
+    layer = KirchhoffLayer(
         net, "e",
         [Source(torch.tensor([2.0])), Conductance(torch.tensor([1.0, 0.5]), kind="r"),
          FixedFlow(torch.tensor([0.3]), kind="f")],
@@ -371,7 +371,7 @@ def _mixed_layer():
         ("n3", "n4", "f"),
     ])
     nodes = torch.tensor([net.nodes.index("n2"), net.nodes.index("n5")])
-    layer = PotentialFlowLayer(
+    layer = KirchhoffLayer(
         net, "e",
         [Cubic(torch.tensor([1.0, 0.7, 1.3, 0.4, 2.0]), torch.tensor(0.2), kind="r"),
          CoupledPair(torch.tensor(0.9), torch.tensor(0.3), kind="m"),
@@ -455,9 +455,9 @@ def test_dynamic_kind_may_not_carry_a_drive():
 
     net = _floating_source_net()
     with pytest.raises(ValueError, match="drive"):
-        PotentialFlowLayer(net, "e", [Conductance(torch.tensor([1.0, 0.5]), kind="r"),
+        KirchhoffLayer(net, "e", [Conductance(torch.tensor([1.0, 0.5]), kind="r"),
                                       Store(torch.tensor([3.0]))],
-                           drives=[Push()], boundary=["gnd"])
+                       drives=[Push()], boundary=["gnd"])
 
 
 def test_auto_factorises_sparse_whenever_scipy_is_importable(monkeypatch):
@@ -491,8 +491,8 @@ def test_unknown_law_form_is_refused_naming_the_kind():
 
     with pytest.raises(ValueError, match=r"kind 'r'.*law_form='volume'.*'potential' or "
                                          r"'implicit'"):
-        PotentialFlowLayer(_floating_source_net(), "e",
-                           [Odd(torch.tensor([1.0, 0.5]), kind="r"),
+        KirchhoffLayer(_floating_source_net(), "e",
+                       [Odd(torch.tensor([1.0, 0.5]), kind="r"),
                             Source(torch.tensor([3.0]))], boundary=["gnd"])
 
 
@@ -503,17 +503,17 @@ def test_unknown_law_form_is_refused_naming_the_kind():
 ])
 def test_classic_layer_refuses_step_and_phasor_keywords(kwargs, match):
     net = _net(["gnd", "a", "b"], [("gnd", "a", "r"), ("a", "b", "r")])
-    layer = PotentialFlowLayer(net, "e", [Conductance(torch.tensor([1.0, 2.0]), kind="r")],
-                               boundary=["gnd", "b"])
+    layer = KirchhoffLayer(net, "e", [Conductance(torch.tensor([1.0, 2.0]), kind="r")],
+                           boundary=["gnd", "b"])
     assert not layer.mna
-    with pytest.raises(ValueError, match=rf"PotentialFlowLayer 'e'.*{match}"):
+    with pytest.raises(ValueError, match=rf"KirchhoffLayer 'e'.*{match}"):
         layer.solve(torch.tensor([1.0, 0.0]), **kwargs)
 
 
 def test_classic_layer_still_accepts_the_steady_keywords():
     net = _net(["gnd", "a", "b"], [("gnd", "a", "r"), ("a", "b", "r")])
-    layer = PotentialFlowLayer(net, "e", [Conductance(torch.tensor([1.0, 2.0]), kind="r")],
-                               boundary=["gnd", "b"])
+    layer = KirchhoffLayer(net, "e", [Conductance(torch.tensor([1.0, 2.0]), kind="r")],
+                           boundary=["gnd", "b"])
     pb = torch.tensor([1.0, 0.0])
     phi, q = layer.solve(pb)
     for kwargs in ({"mode": "dc"}, {"mode": "initial"}, {"t": 3.0}, {"q0": torch.zeros(0)},
@@ -572,8 +572,8 @@ def test_convex_line_search_refused_on_mna_layer_by_keyword():
 
 def test_convex_line_search_refused_on_mna_layer_by_newton_defaults():
     net = _floating_source_net()
-    layer = PotentialFlowLayer(net, "e", [DrivenConductance(kind="r"), DrivenSource()],
-                               boundary=["gnd"], newton_defaults={"line_search": "convex"})
+    layer = KirchhoffLayer(net, "e", [DrivenConductance(kind="r"), DrivenSource()],
+                           boundary=["gnd"], newton_defaults={"line_search": "convex"})
     with pytest.raises(ValueError, match=r"'e'.*line_search='convex'.*gradient of a convex"):
         layer.solve(torch.zeros(1), {"g": torch.tensor([1.0, 0.5]), "V": torch.tensor([3.0])},
                     differentiable=False)
@@ -581,7 +581,7 @@ def test_convex_line_search_refused_on_mna_layer_by_newton_defaults():
 
 def test_classic_layer_refuses_unknown_mode():
     net = _net(["gnd", "a"], [("gnd", "a", "r")])
-    layer = PotentialFlowLayer(net, "e", [Conductance(torch.tensor([1.0]), kind="r")],
-                               boundary=["gnd"])
+    layer = KirchhoffLayer(net, "e", [Conductance(torch.tensor([1.0]), kind="r")],
+                           boundary=["gnd"])
     with pytest.raises(ValueError, match=r"'e': mode='bogus'; expected 'dc', 'initial' or None"):
         layer.solve(torch.zeros(1), {}, torch.zeros(2), differentiable=False, mode="bogus")

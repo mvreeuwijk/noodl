@@ -88,10 +88,10 @@ def _prepare_composed(
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """`(q_slice, x0, x_boundary, zero_sources)` for the co2 transport layer's implicit step.
 
-    `q_slice` comes from ONE untimed, non-differentiable potential-layer solve (the airpath
+    `q_slice` comes from ONE untimed, non-differentiable Kirchhoff-layer solve (the airpath
     slice of its flows) -- a realistic flow field to drive the transport step, built once and
     reused, detached, across every solver and every round so what differs between rows is
-    only the transport layer's own linear solve, never the potential layer's.
+    only the transport layer's own linear solve, never the Kirchhoff layer's.
     """
     lo, hi = model.layer._kind_slices["airpath"]
     _phi, q = model.layer.solve(

@@ -1,4 +1,4 @@
-"""The AC power flow: a `PowerNetwork` as one phasor `PotentialFlowLayer` in per unit.
+"""The AC power flow: a `PowerNetwork` as one phasor `KirchhoffLayer` in per unit.
 
 Build rules (MATPOWER's power-flow semantics: `makeYbus`, `bustypes`, `makeSbus`):
 
@@ -48,7 +48,7 @@ import torch
 from noodl.apps.electrical.loads import ConstantPowerLoad
 from noodl.apps.electrical.power.laws import PiBranch, Shunt, VoltageControlledGenerator
 from noodl.apps.electrical.power.network import PowerNetwork
-from noodl.layers.potential import PotentialFlowLayer
+from noodl.layers.kirchhoff import KirchhoffLayer
 from noodl.model import Model
 from noodl.topology import Network
 
@@ -251,7 +251,7 @@ def build_power_flow(
     `learnable=True` registers every constitutive-law coefficient (branch impedances,
     charging, taps and shifts, load powers, shunt admittances, generator powers and
     setpoints) as an `nn.Parameter`, reached as
-    `model.potential["power"].law_for(kind)[0]`. `model.power_index` is the
+    `model.kirchhoff["power"].law_for(kind)[0]`. `model.power_index` is the
     `PowerFlowIndex`, `model.power_network` the network. `enforce_q_limits=True` (switching
     a PV bus to PQ at a reactive-power limit) is refused: it is not implemented.
     """
@@ -297,8 +297,8 @@ def build_power_flow(
             _f64(setpoint[b] for b in found.generation), learnable=learnable))
 
     slack = str(index.slack_bus)
-    layer = PotentialFlowLayer(graph, POWER_LAYER, laws, boundary=[_GROUND, slack],
-                               phasor=True, quantity="voltage", unit="p.u.", flow_unit="p.u.")
+    layer = KirchhoffLayer(graph, POWER_LAYER, laws, boundary=[_GROUND, slack],
+                           phasor=True, quantity="voltage", unit="p.u.", flow_unit="p.u.")
     model = Model(graph, [layer])
     model.power_index = index
     model.power_network = net
@@ -341,7 +341,7 @@ def solve_power_flow(model: Model, state: State, drivers: Drivers, *, atol: floa
     except RuntimeError as exc:
         message = str(exc)
         failed = "failed to converge" in message or "singular" in message
-        if f"PotentialFlowLayer {POWER_LAYER!r}" not in message or not failed:
+        if f"KirchhoffLayer {POWER_LAYER!r}" not in message or not failed:
             raise
         raise RuntimeError(
             f"power flow: no solution found ({exc}). The loading may exceed what the "
@@ -362,7 +362,7 @@ def power_flow_solution(model: Model, state: State) -> PowerFlowSolution:
     """
     index: PowerFlowIndex = model.power_index
     net: PowerNetwork = model.power_network
-    layer = model.potential[POWER_LAYER]
+    layer = model.kirchhoff[POWER_LAYER]
     phi, q = state[f"{POWER_LAYER}.phi"], state[f"{POWER_LAYER}.q"]
     position = {bus: k for k, bus in enumerate(index.bus_ids)}
     v = phi[..., : len(index.bus_ids)]

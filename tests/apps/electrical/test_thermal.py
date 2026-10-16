@@ -1,4 +1,4 @@
-"""Electro-thermal coupling: Joule heat into a thermal potential layer, temperature back."""
+"""Electro-thermal coupling: Joule heat into a thermal Kirchhoff layer, temperature back."""
 
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ from noodl.apps.electrical import (
     Signal,
 )
 from noodl.elements import Conductance
-from noodl.layers.potential import PotentialFlowLayer
+from noodl.layers.kirchhoff import KirchhoffLayer
 from noodl.model import Model
 from noodl.topology import Network
 
@@ -39,7 +39,7 @@ def _resistor_model(dynamic):
         net.add_edge("h", "thermal.reference", kind="heat_capacitor")
     node = {n: k for k, n in enumerate(net.nodes)}
     NODE.update(node)
-    electrical = PotentialFlowLayer(
+    electrical = KirchhoffLayer(
         net, "electrical",
         [PrescribedVoltage(_f(V)), Resistance(_f(R0), alpha=_f(ALPHA), T_ref=_f(T_REF),
                                               temperature="electrical.resistor.T")],
@@ -50,7 +50,7 @@ def _resistor_model(dynamic):
                               kind="heat_source")]
     if dynamic:
         laws.append(Capacitance(_f(C_TH), v0=_f(T_AMB), kind="heat_capacitor"))
-    thermal = PotentialFlowLayer(net, "thermal", laws, boundary=["thermal.reference", "amb"])
+    thermal = KirchhoffLayer(net, "thermal", laws, boundary=["thermal.reference", "amb"])
     heated = [HeatedEdge(edge=1, p=node["s"], n=node["0"], heat_node=node["h"],
                          temperature_key="electrical.resistor.T", slot=0)]
     closure = JouleHeating(heated, base_temperatures={"electrical.resistor.T":

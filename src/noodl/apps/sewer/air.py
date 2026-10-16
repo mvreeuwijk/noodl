@@ -31,7 +31,7 @@ from noodl.drives import Stack
 from noodl.elements.base import ConstitutiveLaw
 from noodl.elements.fixed import FixedFlow
 from noodl.elements.powerlaw import PowerLaw
-from noodl.layers.potential import PotentialFlowLayer
+from noodl.layers.kirchhoff import KirchhoffLayer
 from noodl.topology import Network
 
 Tensor = torch.Tensor
@@ -317,8 +317,8 @@ def add_air_edges(graph: Network, net, fans: tuple = ()) -> AirPlan:
 
 def air_layer(graph: Network, net, plan: AirPlan, *, f_air=F_AIR_DEFAULT, f_i=F_I_DEFAULT,
               c_s: float = 1.0, leak_area=8e-4, leak_cd=0.6,
-              fans: tuple = ()) -> PotentialFlowLayer:
-    """The ``"air"`` `PotentialFlowLayer` (Pa; m3/s) over the edges `add_air_edges` added:
+              fans: tuple = ()) -> KirchhoffLayer:
+    """The ``"air"`` `KirchhoffLayer` (Pa; m3/s) over the edges `add_air_edges` added:
     `Headspace` and the leak `PowerLaw` (and `FixedFlow` fans), the `Drag` and `Stack`
     drives. It reads the per-pipe drivers ``sewer.A_air`` (total over barrels, m2),
     ``sewer.D_h`` (one barrel's, m), ``sewer.T`` (total top width, m), ``sewer.v`` (m/s) and
@@ -361,7 +361,7 @@ def air_layer(graph: Network, net, plan: AirPlan, *, f_air=F_AIR_DEFAULT, f_i=F_
         _stack_for("headspace", graph, net, crown=crown),
         _stack_for("leak", graph, net),
     ]
-    return PotentialFlowLayer(
+    return KirchhoffLayer(
         graph, "air", laws, drives=drives, boundary=["ambient"],
         quantity="pressure", unit="Pa", flow_unit="m3/s",
     )

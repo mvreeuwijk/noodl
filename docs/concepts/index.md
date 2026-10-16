@@ -24,7 +24,7 @@ Network            a typed multigraph: nodes hold storage, edges carry flow
   +-- Drives       terms added to the potential difference (stack, wind, drag)
   +-- Closures     arbitrary functions of state that produce driver values
   |
-Layers             potential flow, transport, reaction, flow allocation
+Layers             Kirchhoff, transport, reaction, flow allocation
   |
 Model              several layers on one network, stepped together
 ```
@@ -41,7 +41,7 @@ laws, the drives and the closures. Everything domain-specific in the seven
 A node conserves. An edge constitutes. That separation is what lets one piece of machinery
 carry a building's pressure network and a sewer's headspace air.
 
-Concretely, a potential-flow layer assembles and solves
+Concretely, a Kirchhoff layer assembles and solves
 
 $$
 A_I \, g\!\left(A^{\top}\phi + \text{drive};\ \theta\right) - s_I = 0
@@ -59,7 +59,7 @@ only the flows of the kinds it advects on.
 
 Three choices are deliberately left in your hands, and each has bitten someone:
 
-- **How a flow is determined.** A potential solve is one of four options, not the default
+- **How a flow is determined.** A Kirchhoff solve is one of four options, not the default
   answer. A sewer's tree flow comes from continuity, a street's from a closure, a
   water-resources arc's from a clipped request. See [Layers and models](layers.md).
 - **How tightly coupled layers must agree.** `coupling="pingpong"` takes one pass and is

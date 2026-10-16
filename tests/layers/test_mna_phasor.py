@@ -1,4 +1,4 @@
-"""Modified Nodal Analysis in PotentialFlowLayer: phasor layers (complex potentials and flows
+"""Modified Nodal Analysis in KirchhoffLayer: phasor layers (complex potentials and flows
 solved in the real view)."""
 
 import math
@@ -8,7 +8,7 @@ import torch
 
 from noodl.elements import Conductance, ConstitutiveLaw, ImplicitLaw, LawContext, PowerLaw
 from noodl.layers._mna import MnaSystem
-from noodl.layers.potential import PotentialFlowLayer
+from noodl.layers.kirchhoff import KirchhoffLayer
 from noodl.nodesources import NodeSource
 from noodl.topology import Network
 from tests._circuit_laws import Cap, DrivenSource, Ind, Source
@@ -96,7 +96,7 @@ def _series_rlc(R=2.0, L=1e-3, C=1e-6):
     # source a -> gnd (1 V), resistor a -> b, inductor b -> c, capacitor c -> gnd
     net = _net(["gnd", "a", "b", "c"], [("a", "gnd", "source"), ("a", "b", "r"),
                                         ("b", "c", "ind"), ("c", "gnd", "cap")])
-    layer = PotentialFlowLayer(
+    layer = KirchhoffLayer(
         net, "e", [Source(torch.tensor([1.0])), Conductance(torch.tensor([1.0 / R]), kind="r"),
                    Ind(torch.tensor([L])), Cap(torch.tensor([C]))],
         boundary=["gnd"], phasor=True)
@@ -125,7 +125,7 @@ def _constant_power(S, Z):
     # source s -> gnd (1 V), series impedance s -> a, constant-power load a -> gnd
     net = _net(["gnd", "s", "a"], [("s", "gnd", "source"), ("s", "a", "line"),
                                    ("a", "gnd", "load")])
-    layer = PotentialFlowLayer(
+    layer = KirchhoffLayer(
         net, "e", [Source(torch.tensor([1.0])), Impedance(torch.tensor([Z])),
                    ConstantPower(torch.tensor([S]))],
         boundary=["gnd"], phasor=True)
@@ -167,25 +167,25 @@ def test_complex_tellegen():
 def test_phasor_refuses_nonlinear_real_law():
     net = _net(["gnd", "a"], [("a", "gnd", "source"), ("a", "gnd", "r")])
     with pytest.raises(ValueError, match=r"'r'.*PowerLaw"):
-        PotentialFlowLayer(net, "e", [Source(torch.tensor([1.0])),
+        KirchhoffLayer(net, "e", [Source(torch.tensor([1.0])),
                                       PowerLaw(torch.tensor([1.0]), 0.5, kind="r")],
-                           boundary=["gnd"], phasor=True)
+                       boundary=["gnd"], phasor=True)
 
 
 def test_phasor_refuses_node_sources():
     net = _net(["gnd", "a"], [("a", "gnd", "r")])
     with pytest.raises(ValueError, match="edges to ground"):
-        PotentialFlowLayer(net, "e", [Conductance(torch.tensor([1.0]), kind="r")],
-                           node_sources=[LinearWithdrawal([net.nodes.index("a")], [0.1])],
-                           boundary=["gnd"], phasor=True)
+        KirchhoffLayer(net, "e", [Conductance(torch.tensor([1.0]), kind="r")],
+                       node_sources=[LinearWithdrawal([net.nodes.index("a")], [0.1])],
+                       boundary=["gnd"], phasor=True)
 
 
 def test_structure_has_no_node_source_entries_in_real_view():
     # A phasor layer refuses node sources at construction; the pattern must not carry
     # entries for them either (their diagonal is laid out for one real unknown per node).
     net = _net(["gnd", "a"], [("a", "gnd", "r")])
-    layer = PotentialFlowLayer(net, "e", [Conductance(torch.tensor([1.0]), kind="r")],
-                               boundary=["gnd"], phasor=True)
+    layer = KirchhoffLayer(net, "e", [Conductance(torch.tensor([1.0]), kind="r")],
+                           boundary=["gnd"], phasor=True)
     layer._node_sources = [LinearWithdrawal([net.nodes.index("a")], [0.1])]
     mna = MnaSystem(layer)
     assert torch.equal(mna.row, layer._mna.row) and torch.equal(mna.col, layer._mna.col)
@@ -216,16 +216,16 @@ def test_phasor_solve_refuses_steps_and_other_modes():
 
 def test_real_layer_refuses_phasor_mode():
     net = _net(["gnd", "a"], [("a", "gnd", "source"), ("a", "gnd", "r")])
-    layer = PotentialFlowLayer(net, "e", [Source(torch.tensor([1.0])),
+    layer = KirchhoffLayer(net, "e", [Source(torch.tensor([1.0])),
                                           Conductance(torch.tensor([1.0]), kind="r")],
-                               boundary=["gnd"])
+                           boundary=["gnd"])
     with pytest.raises(ValueError, match="phasor=True"):
         layer.solve(GROUND, mode="phasor", differentiable=False)
 
 
 def test_history_that_is_not_a_pair_is_named():
     net = _net(["gnd", "a"], [("a", "gnd", "source"), ("a", "gnd", "cap")])
-    layer = PotentialFlowLayer(net, "e", [Source(torch.tensor([1.0])),
+    layer = KirchhoffLayer(net, "e", [Source(torch.tensor([1.0])),
                                           Cap(torch.tensor([1.0]))], boundary=["gnd"])
     with pytest.raises(ValueError, match=r"history must be the pair \(phi, q\)"):
         layer.solve(GROUND, history=torch.zeros(3), dt=0.1, differentiable=False)
@@ -250,8 +250,8 @@ def test_phasor_gradcheck():
     net = _net(["gnd", "s", "a"], [("s", "gnd", "source"), ("s", "a", "r"),
                                    ("a", "gnd", "cap")])
     cond = Conductance(torch.tensor([1.0]), kind="r", learnable=True)
-    layer = PotentialFlowLayer(net, "e", [DrivenSource(), cond, Cap(torch.tensor([0.01]))],
-                               boundary=["gnd"], phasor=True)
+    layer = KirchhoffLayer(net, "e", [DrivenSource(), cond, Cap(torch.tensor([0.01]))],
+                           boundary=["gnd"], phasor=True)
     a = net.nodes.index("a")
     f = torch.tensor(10.0)
 
@@ -274,7 +274,7 @@ def test_real_view_jacobian_matches_autograd_jacobian():
                [("s", "gnd", "source"), ("s", "a", "line"), ("a", "gnd", "load"),
                 ("a", "gnd", "xfmr"), ("b", "gnd", "xfmr"), ("b", "gnd", "cap"),
                 ("b", "p", "r"), ("p", "gnd", "r")])
-    layer = PotentialFlowLayer(
+    layer = KirchhoffLayer(
         net, "e", [Source(torch.tensor([1.0])), Impedance(torch.tensor([0.02 + 0.1j])),
                    ConstantPower(torch.tensor([0.4 + 0.3j])), Ratio(torch.tensor([2.0])),
                    Cap(torch.tensor([0.05])), Conductance(torch.tensor([1.5, 0.7]), kind="r")],
@@ -314,9 +314,9 @@ def test_classic_power_residual_bit_for_bit():
             return torch.tensor([0.3, -0.2, 0.1])
 
     net = _net(["gnd", "a", "b"], [("gnd", "a", "air"), ("a", "b", "air"), ("b", "gnd", "air")])
-    layer = PotentialFlowLayer(net, "e", [PowerLaw(torch.tensor([1.0, 0.7, 1.3]), 0.6,
+    layer = KirchhoffLayer(net, "e", [PowerLaw(torch.tensor([1.0, 0.7, 1.3]), 0.6,
                                                    kind="air")],
-                               drives=[Push()], boundary=["gnd"])
+                           drives=[Push()], boundary=["gnd"])
     sources = torch.tensor([0.0, 0.2, -0.1])
     phi, q = layer.solve(torch.tensor([0.0]), {}, sources, differentiable=False)
     d = layer.dp(phi, {})
@@ -330,8 +330,8 @@ def test_classic_power_residual_bit_for_bit():
 def test_inductor_in_phasor_mode():
     # source a -> gnd, inductor a -> gnd: q = V / (j w L)
     net = _net(["gnd", "a"], [("a", "gnd", "source"), ("a", "gnd", "ind")])
-    layer = PotentialFlowLayer(net, "e", [Source(torch.tensor([2.0])), Ind(torch.tensor([0.5]))],
-                               boundary=["gnd"], phasor=True)
+    layer = KirchhoffLayer(net, "e", [Source(torch.tensor([2.0])), Ind(torch.tensor([0.5]))],
+                           boundary=["gnd"], phasor=True)
     phi, q = layer.solve(GROUND, {"e.frequency": torch.tensor(1.0)}, differentiable=False)
     expected = 2.0 / (1j * 2 * math.pi * 0.5)
     assert abs(complex(q[layer.kind_slice("ind")][0]) - expected) < 1e-12 * abs(expected)

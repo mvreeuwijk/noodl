@@ -126,7 +126,7 @@ airflow networks), and flow sources become part of the particular solution rathe
 unknowns; a branch with a *prescribed potential drop* needs the dual augmentation instead.
 Neither formulation is unconditionally better-conditioned — both reduce to a congruence
 transform of the same branch Jacobian — so the practical choice is driven by $n$ vs
-$l$ and by which sources are naturally flow- or potential-type. `noodl`'s potential
+$l$ and by which sources are naturally flow- or potential-type. `noodl`'s Kirchhoff
 layers are nodal, extended to Modified Nodal Analysis where a constitutive law requires it
 (below). The cycle space is kept for flows that are not potential-driven — prescribed or
 closure-computed flows, and the closed-form continuity solve on a tree
@@ -136,7 +136,7 @@ non-negative $f$, needed for the constant upwind operator of §2.
 
 ### Modified Nodal Analysis in noodl
 
-A `PotentialFlowLayer` whose constitutive laws all have the potential-controlled form
+A `KirchhoffLayer` whose constitutive laws all have the potential-controlled form
 $f_e = g_e(e_e)$ is solved by nodal analysis exactly as above. A law that is not of that form
 makes the layer a Modified Nodal Analysis system (Ho, Ruehli & Brennan, *The modified nodal
 approach to network analysis*, IEEE Trans. Circuits Syst. 22(6):504–509, 1975). Partition the
@@ -262,7 +262,7 @@ None of these is differentiable in the autograd sense (uncertain: no published
 "differentiable EPANET/CONTAM" was found; the closest is differentiable AC/DC
 [power-flow optimisation](https://arxiv.org/pdf/2603.28203)). Two patterns matter for
 `noodl`: every mature tool is **nodal** in the pressure/head variable (cheap, robust
-SPD systems), and `noodl`'s potential layers are nodal too, extended to Modified Nodal Analysis
+SPD systems), and `noodl`'s Kirchhoff layers are nodal too, extended to Modified Nodal Analysis
 only where a constitutive law needs it (§1); and Modelica's stream
 connectors are the strongest existing precedent for carrying enthalpy
 and species *with* the flow, matching the advection-matrix construction in §2.
@@ -495,12 +495,12 @@ storage would need a potential (a pressure-like quantity) to drive flow between 
 meeting there, but the only physical constraint at a street intersection is that the
 *flows* balance -- there is no independent state for a junction to hold, and the
 prescribed-flow edges (`route`, `vent`) that would carry that balance are FIXED-FLOW, not
-potential-driven, edges. A potential layer built entirely from fixed-flow edges has no
+potential-driven, edges. A Kirchhoff layer built entirely from fixed-flow edges has no
 element relating a node's potential to anything, so its would-be conductance matrix is
 identically zero -- singular by construction. Eliminating the
 junction sidesteps that non-problem entirely: what a junction actually does is redistribute
 the fixed street-end fluxes among each other and the atmosphere, and that redistribution is
-computed once per solve, outside any potential layer, as a routed flux (`routing_matrix`,
+computed once per solve, outside any Kirchhoff layer, as a routed flux (`routing_matrix`,
 the non-crossing fill below) plus a roof closure (`node_closure`, MUNICH's roof-exchange
 correction, which lands asymmetrically on the side needed to keep every one of a junction's
 in/out totals matched, per `StreetNetworkTransport.cxx:2980-3014`). The result is written
@@ -588,12 +588,12 @@ CONTINUITY-first. A gravity sewer runs free-surface: on the dendritic tree of se
 analysis, normal flow at every pipe is set by continuity alone -- the net inflow upstream of it
 (`cycles.particular_flow`, closed form on a tree, no Newton solve at all) -- and depth follows
 from Manning's law given that flow, not the other way round; a head difference does not drive the
-water there, so a potential layer on head is the wrong shape for it. The dynamic wave is the
-case where head differences do drive the flow, and there the sewer IS a potential layer on head.
+water there, so a Kirchhoff layer on head is the wrong shape for it. The dynamic wave is the
+case where head differences do drive the flow, and there the sewer IS a Kirchhoff layer on head.
 SWMM's dynamic-wave update (the Saint-Venant momentum equation integrated over a step) is, for
 frozen depth-dependent coefficients, linear in the end-head difference of each conduit,
 $q = c_0 + k\,(h_1 - h_2)$ with $k \ge 0$, and a junction's storage adds a monotone term in its
-own head, so one pass is an ordinary `PotentialFlowLayer` solve (§1, §3) with the outfalls as
+own head, so one pass is an ordinary `KirchhoffLayer` solve (§1, §3) with the outfalls as
 boundary heads. The coefficients depend on the heads, so the pass is iterated
 (`coupling="iterate"`) until the heads stop changing. SWMM's own Picard trials, which relax and
 average its iterates, and noodl's iterated implicit head solve share one fixed point: a state
@@ -635,9 +635,9 @@ for the costs against SWMM.
 A pressurised water-distribution network is the opposite case to the kinematic-wave sewer, and
 exactly the framework's own: every pipe runs full, and head loss is a monotone function of the
 head difference at each pipe, pump and valve, so `noodl.apps.water` is an ordinary
-`PotentialFlowLayer` (§1, §3 above) with Hazen-Williams or Darcy-Weisbach pipes, `PumpCurve` and
+`KirchhoffLayer` (§1, §3 above) with Hazen-Williams or Darcy-Weisbach pipes, `PumpCurve` and
 minor-loss elements, solved by the same batched, damped Newton iteration as every other
-potential layer in this codebase. Section 3's own table says why SWMM's dynamic-wave engine is
+Kirchhoff layer in this codebase. Section 3's own table says why SWMM's dynamic-wave engine is
 the heavier comparison: it solves the sewer's full 1-D Saint-Venant equations with surcharging
 and reverse flow, "a genuinely dynamic (not quasi-steady) network". SWMM's KINWAVE routing, which
 shares the continuity-first assumption, is the comparison target for the kinematic-wave path and
@@ -728,17 +728,17 @@ against the calibration source rather than independent validation. See
 
 ## 10. A fourth flow-determination mode: clip-and-allocate flow allocation
 
-**Why this is a fourth way of determining flows, not a variant of the potential layer.**
+**Why this is a fourth way of determining flows, not a variant of the Kirchhoff layer.**
 Sections 1 and 9 above both describe networks where flow at an edge is either the closed-
-form output of a Newton potential solve or of continuity alone on a tree. WSIMOD's own
+form output of a Newton Kirchhoff solve or of continuity alone on a tree. WSIMOD's own
 `Arc`/`Node` model (Dobson, Liu and Mijic, JOSS 2023; GMD 2024) is neither: an edge is asked
 to carry a REQUESTED flow (typically emitted by some upstream process closure, not a
 pressure difference) and simply clips it against two independent bounds -- its own arc
 capacity and the downstream node's remaining storage headroom -- with no potential variable
-anywhere in the calculation. This is the fourth way an edge's flow can be determined (alongside a potential-flow Newton solve, a driver-prescribed
+anywhere in the calculation. This is the fourth way an edge's flow can be determined (alongside a Kirchhoff Newton solve, a driver-prescribed
 flow, and a closure-computed flow), and `AllocatedFlowLayer`
 (`src/noodl/layers/allocation.py`) is its implementation: a `Model` layer type that owns
-one or more edge kinds exactly like `PotentialFlowLayer` does, but whose per-step output is
+one or more edge kinds exactly like `KirchhoffLayer` does, but whose per-step output is
 an explicit clip-and-allocate computation rather than a solve.
 
 **The clip/allocation math, condensed.** Given the previous
@@ -764,7 +764,7 @@ storage itself is for in a discrete-time capacity-limited network. The storage u
 floor at zero: $f$ is already clipped against the RECEIVER's headroom, never the sender's
 own available storage, so a caller requesting more than is actually available upstream is
 a modelling responsibility upstream of this layer (a closure sizing requests correctly),
-exactly as a `PotentialFlowLayer`'s boundary sources are trusted as given rather than
+exactly as a `KirchhoffLayer`'s boundary sources are trusted as given rather than
 second-guessed.
 
 **Two differentiability modes, and why the sharing site needed a real solve, not just a

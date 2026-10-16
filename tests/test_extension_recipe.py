@@ -4,7 +4,7 @@ This module is the worked example the guide walks through: a new branch law defi
 entirely outside `src/` (import nothing from `noodl.apps`, touch nothing under `src/`) and a
 small two-zone "application" built from it. It exists to prove the extension recipe works
 through noodl's own public surface -- `noodl.elements.base.ConstitutiveLaw`, `noodl.topology`,
-`noodl.layers.potential`, `noodl.model` -- not to add a feature.
+`noodl.layers.kirchhoff`, `noodl.model` -- not to add a feature.
 """
 
 from __future__ import annotations
@@ -12,7 +12,7 @@ from __future__ import annotations
 import torch
 
 from noodl.elements.base import ConstitutiveLaw
-from noodl.layers.potential import PotentialFlowLayer
+from noodl.layers.kirchhoff import KirchhoffLayer
 from noodl.model import Model
 from noodl.topology import Network
 
@@ -49,7 +49,7 @@ def build_two_zone(*, learnable: bool = True):
     """(model, state, drivers) for the smallest network the new law can be checked on.
 
     ambient (boundary) -> z1 -> z2 -> ambient, three `airpath` edges, one `Sigmoid` element
-    covering all three (steepness `k`, shape (3,)). One `PotentialFlowLayer`, one `Model`.
+    covering all three (steepness `k`, shape (3,)). One `KirchhoffLayer`, one `Model`.
     No `TransportLayer`, no closures: nothing here needs one, and the guide's point is the
     smallest network that exercises the new law, not a full application.
     """
@@ -63,7 +63,7 @@ def build_two_zone(*, learnable: bool = True):
 
     k = torch.tensor([1.0, 0.8, 1.2], dtype=F64)
     element = Sigmoid(k, learnable=learnable)
-    layer = PotentialFlowLayer(
+    layer = KirchhoffLayer(
         net, "air", [element], boundary=["ambient"], quantity="pressure", unit="Pa",
     )
     model = Model(net, {"air": layer})
@@ -84,7 +84,7 @@ def test_interior_flow_balance_and_gradcheck_through_the_new_law():
         residual, torch.zeros_like(residual), atol=1e-10, rtol=0.0
     )
 
-    layer = model.potential["air"]
+    layer = model.kirchhoff["air"]
     element = layer._laws[0]
     phi_b = torch.zeros(1, dtype=F64)
 

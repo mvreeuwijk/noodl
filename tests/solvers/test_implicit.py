@@ -79,7 +79,7 @@ def test_second_order_differentiation_raises_instead_of_silently_dropping_a_term
 
 def test_implicit_solve_ignores_a_grad_requiring_but_functionally_unused_parameter():
     """Regression: a residual that never reads one of its
-    own params -- e.g. `PotentialFlowLayer.solve` threading every key of a shared coupled
+    own params -- e.g. `KirchhoffLayer.solve` threading every key of a shared coupled
     `drivers` mapping into `implicit_solve`'s params positionally, including a key only a
     DIFFERENT layer's residual reads -- must not make `_Implicit.backward` raise
     `RuntimeError: element 0 of tensors does not require grad and does not have a grad_fn`

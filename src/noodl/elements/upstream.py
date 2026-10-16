@@ -28,7 +28,7 @@ under the default ping-pong coupling do not exist at all on the first (and, for 
 only) pass. A static per-edge factor taken from the nominal from-zone would carry the full
 1.8 % error with the WRONG SIGN on every path that reverses. Selecting on `sign(dp)` inside
 the element is the only place the information exists. Elements already receive the whole
-`drivers` mapping (`PotentialFlowLayer` passes it to `flow`, `dflow` and `linear_init`, and
+`drivers` mapping (`KirchhoffLayer` passes it to `flow`, `dflow` and `linear_init`, and
 rebuilds it before `torch.func.functional_call` on the differentiable path), so the density
 a `Stack` drive already reads is available here with no new capability; `Damper` is the
 existing precedent for a power law switched on `sign(dp)`.

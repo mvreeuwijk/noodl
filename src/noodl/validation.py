@@ -8,7 +8,7 @@ expected, and what was given; plus the problems found, as errors and warnings:
   whose flows must be prescribed by a driver;
 * inputs -- missing required keys, tensors whose trailing shape does not match the key's
   order, batch shapes that do not broadcast, nonzero sources on boundary or inactive nodes
-  (which a potential layer would silently drop), a state key put in the drivers;
+  (which a Kirchhoff layer would silently drop), a state key put in the drivers;
 * suspicious keys -- a key with a layer's prefix but no such input (`"thermal.source"`),
   a key whose prefix is a near-miss of a layer name (`"therml.sources"`);
 * value range -- a temperature below 150 K (`value-range`: a Celsius value given as kelvin).
@@ -206,7 +206,7 @@ def check_setup(
 
     # ---------------------------------------------------------------- configuration
     used: set[str] = set()
-    for layer in model.potential.values():
+    for layer in model.kirchhoff.values():
         used.update(layer.kinds)
     for layer in model.transport.values():
         used.update(layer.flow_kinds)

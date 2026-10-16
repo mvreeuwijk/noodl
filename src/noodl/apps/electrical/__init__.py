@@ -1,6 +1,6 @@
 """Electrical circuits: resistors, capacitors, inductors, sources, diodes, switches,
 transformers, controlled sources, impedances, constant-power loads and power converters,
-solved by Modified Nodal Analysis in a `PotentialFlowLayer` (node voltages in V, branch
+solved by Modified Nodal Analysis in a `KirchhoffLayer` (node voltages in V, branch
 currents in A), in DC, transient and phasor (AC) modes. A netlist is a `Circuit` of devices
 (`Resistor`, `Capacitor`, `VoltageSource`, ...); `build_model` turns it into a model,
 analysed by `operating_point`, `initial_state`, `transient`, `ac_sweep` and

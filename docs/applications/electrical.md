@@ -1,7 +1,7 @@
 # Electrical circuits
 
 Lumped electrical circuits: nodes carry voltages, devices between them carry currents, and
-Kirchhoff's current law holds at every node. The whole circuit is **one** `PotentialFlowLayer`
+Kirchhoff's current law holds at every node. The whole circuit is **one** `KirchhoffLayer`
 whose potential is the node voltage, solved by Modified Nodal Analysis: the currents of
 voltage sources, inductors, transformers and controlled sources are unknowns alongside the
 node voltages (see
@@ -33,7 +33,7 @@ from noodl.apps.electrical import (
 
 Every type this application offers is listed in its [catalogue](../catalogue/electrical.md),
 including the constitutive laws behind the devices (`Resistance`, `Capacitance`,
-`PrescribedVoltage`, ...), which can be used in any `PotentialFlowLayer`.
+`PrescribedVoltage`, ...), which can be used in any `KirchhoffLayer`.
 
 ## A worked example: a voltage divider
 
@@ -266,7 +266,7 @@ The [Modelica reader](#reading-modelica-circuits) uses MBL's RMS phasors through
 
 Four further constitutive laws transcribe the building-scale electrical models of the
 Modelica Buildings Library (MBL, `Buildings.Electrical`). They are not circuit devices: use
-them directly as laws of a `PotentialFlowLayer`, alongside any of the laws above.
+them directly as laws of a `KirchhoffLayer`, alongside any of the laws above.
 
 | Law (default kind) | Relation (`dp` across the edge, `q` entering its first node) | MBL model |
 |---|---|---|
@@ -299,7 +299,7 @@ import math
 import torch
 
 from noodl.apps.electrical import ConstantPowerLoad, Impedance, PrescribedVoltage
-from noodl.layers.potential import PotentialFlowLayer
+from noodl.layers.kirchhoff import KirchhoffLayer
 from noodl.topology import Network
 
 f64 = torch.float64
@@ -314,7 +314,7 @@ laws = [PrescribedVoltage(torch.tensor(120.0, dtype=f64)),
                   L=torch.tensor(0.5 / (2 * math.pi * 60.0), dtype=f64)),
         ConstantPowerLoad(torch.tensor(1000.0, dtype=f64), torch.tensor(300.0, dtype=f64),
                           V_nominal=torch.tensor(120.0, dtype=f64))]
-feeder = PotentialFlowLayer(net, "electrical", laws, boundary=["0"], phasor=True)
+feeder = KirchhoffLayer(net, "electrical", laws, boundary=["0"], phasor=True)
 phi, q = feeder.solve(torch.zeros(1, dtype=torch.complex128),
                       {"electrical.frequency": torch.tensor(60.0, dtype=f64)},
                       differentiable=False)
@@ -394,7 +394,7 @@ section; its heat-port and heat-capacitor temperatures are in `"thermal.phi"`.
 
 A device that heats up and whose resistance follows its temperature couples the circuit to a
 thermal network. noodl puts the thermal side on the same `Network` as a second
-`PotentialFlowLayer`, conventionally named `"thermal"`: temperature (K) is the potential against
+`KirchhoffLayer`, conventionally named `"thermal"`: temperature (K) is the potential against
 a reference node held at 0 K (a boundary node), heat flow (W) the flow.
 
 | Thermal part | Law | Edge | Modelica (MSL `Thermal.HeatTransfer`) |
@@ -430,7 +430,7 @@ from noodl.apps.electrical import (
     HeatedEdge, JouleHeating, PrescribedCurrent, PrescribedVoltage, Resistance, Signal,
 )
 from noodl.elements import Conductance
-from noodl.layers.potential import PotentialFlowLayer
+from noodl.layers.kirchhoff import KirchhoffLayer
 from noodl.model import Model
 from noodl.topology import Network
 
@@ -450,13 +450,13 @@ net.add_edge("h", "ambient", kind="conductor")
 net.add_edge("thermal.reference", "h", kind="heat_source")
 node = {name: k for k, name in enumerate(net.nodes)}
 
-electrical = PotentialFlowLayer(
+electrical = KirchhoffLayer(
     net, "electrical",
     [PrescribedVoltage(f64(V)),
      Resistance(f64(R0), alpha=f64(alpha), T_ref=f64(T_ref),
                 temperature="electrical.resistor.T")],
     boundary=["0"])
-thermal = PotentialFlowLayer(
+thermal = KirchhoffLayer(
     net, "thermal",
     [Conductance(f64(G), kind="conductor"),
      PrescribedCurrent(f64(1.0), waveforms=[Signal("thermal.heat", 0)], kind="heat_source")],
@@ -518,13 +518,13 @@ net.add_edge("zone", "thermal.reference", kind="heat_capacitor")
 node = {name: k for k, name in enumerate(net.nodes)}
 zone = node["zone"]
 
-electrical = PotentialFlowLayer(
+electrical = KirchhoffLayer(
     net, "electrical",
     [PrescribedVoltage(f64(400.0)), Impedance(f64(0.2)),
      ConstantPowerLoad(f64(1.0), V_nominal=f64(400.0), direct_current=True,
                        scale="electrical.load.scale")],
     boundary=["0"])
-thermal = PotentialFlowLayer(
+thermal = KirchhoffLayer(
     net, "thermal",
     [Conductance(f64(150.0), kind="conductor"),
      PrescribedCurrent(f64(1.0), waveforms=[Signal("thermal.heat", 0)], kind="heat_source"),
@@ -650,7 +650,7 @@ implicit-function adjoint, a transient through every step. The divider's output 
 model, _, drivers = build_model(divider, learnable=True)
 op = operating_point(model, drivers)
 v_out = op["electrical.phi"][model.net.nodes.index("out")]
-resistors = model.potential["electrical"].law_for("resistor")[0]
+resistors = model.kirchhoff["electrical"].law_for("resistor")[0]
 (grad,) = torch.autograd.grad(v_out, resistors.R)
 print([round(g, 12) for g in grad.tolist()])
 ```
@@ -723,7 +723,7 @@ branch (`branch_rows`) at its two ends; a `DcPowerFlowSolution` holds `va`, `pg`
 ### The AC model
 
 `build_power_flow(net)` returns `(model, state, drivers)` for one phasor
-`PotentialFlowLayer` named `"power"`, solved by
+`KirchhoffLayer` named `"power"`, solved by
 [Modified Nodal Analysis](../concepts/layers.md#modified-nodal-analysis-implicit-coupled-and-dynamic-laws).
 Its nodes are the buses (`str(bus.id)`, in table order) and one more node, `"ground"`, the
 common reference at 0. Every device is an edge **to ground**: the edge's potential difference
@@ -772,7 +772,7 @@ the solver's own error; any other error passes through unchanged.
 
 `dc_power_flow(net)` builds the DC approximation (all voltage magnitudes 1 p.u., no branch
 resistance or charging, small angle differences) as plain nodal analysis on a classic real
-`PotentialFlowLayer` named `"power_dc"`. The potential is the voltage angle `theta` (rad) at
+`KirchhoffLayer` named `"power_dc"`. The potential is the voltage angle `theta` (rad) at
 the buses; there is no ground node. Each in-service branch is one edge from bus `->` to bus with
 a `Conductance(1 / (x tau))` (`tau` the tap ratio, 0 meaning 1), and the phase shifts `sigma`
 are a `ConstantDrive` on that kind, the driver `"power_dc.shift"` holding `-sigma`, so the
@@ -833,14 +833,14 @@ not exist. Not implemented:
 
 `build_power_flow(net, learnable=True)` registers every constitutive-law coefficient (branch
 `r`, `x`, `b`, taps and shifts; load `P`, `Q`; shunt `g`, `b`; generator `P`, `V`) as an
-`nn.Parameter`, reached as `model.potential["power"].law_for(kind)[0]`, and the solve is
+`nn.Parameter`, reached as `model.kirchhoff["power"].law_for(kind)[0]`, and the solve is
 differentiable through the implicit-function adjoint. The sensitivity of bus 4's voltage
 magnitude to the three loads' real power (p.u./p.u.):
 
 ```python
 model, state, drivers = build_power_flow(net, learnable=True)
 vm = power_flow_solution(model, solve_power_flow(model, state, drivers)).vm
-(grad,) = torch.autograd.grad(vm[3], model.potential["power"].law_for("load")[0].P)
+(grad,) = torch.autograd.grad(vm[3], model.kirchhoff["power"].law_for("load")[0].P)
 print(model.power_index.load_buses, [round(g, 4) for g in grad.tolist()])
 ```
 

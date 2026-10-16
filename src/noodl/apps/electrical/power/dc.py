@@ -1,5 +1,5 @@
 """The DC power flow: a `PowerNetwork` as plain nodal analysis on a classic real
-`PotentialFlowLayer` in per unit.
+`KirchhoffLayer` in per unit.
 
 The DC approximation (all voltage magnitudes 1 p.u., no branch resistance or charging,
 small angle differences) makes the real power on a branch linear in the voltage angles.
@@ -42,7 +42,7 @@ from noodl.apps.electrical.power.build import PowerFlowIndex, _analyse
 from noodl.apps.electrical.power.network import PowerNetwork
 from noodl.drives import ConstantDrive
 from noodl.elements.conductance import Conductance
-from noodl.layers.potential import PotentialFlowLayer
+from noodl.layers.kirchhoff import KirchhoffLayer
 from noodl.model import Model
 from noodl.topology import Network
 
@@ -109,8 +109,8 @@ def dc_power_flow(net: PowerNetwork) -> tuple[Model, State, Drivers]:
         graph.add_edge(str(br.from_bus), str(br.to_bus), kind="branch")
     law = Conductance(_f64(1.0 / (br.x * (br.ratio or 1.0)) for br in branches), kind="branch")
     shift = ConstantDrive("branch", f"{DC_LAYER}.shift")
-    layer = PotentialFlowLayer(graph, DC_LAYER, [law], drives=[shift], boundary=[str(slack)],
-                               quantity="voltage angle", unit="rad", flow_unit="p.u.")
+    layer = KirchhoffLayer(graph, DC_LAYER, [law], drives=[shift], boundary=[str(slack)],
+                           quantity="voltage angle", unit="rad", flow_unit="p.u.")
     model = Model(graph, [layer])
     model.power_index = index
     model.power_network = net

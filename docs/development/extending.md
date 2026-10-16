@@ -76,10 +76,10 @@ A "new application" is nothing but a builder function returning `(model, state, 
 existing layers and laws, plus (if the application steps forward in time) an
 `initial_state` function and any closures it needs. Here is the smallest one that exercises
 `Sigmoid`: an ambient boundary and two zones, joined by three `airpath` edges, one
-`PotentialFlowLayer`, one `Model`. Verbatim from `tests/test_extension_recipe.py`:
+`KirchhoffLayer`, one `Model`. Verbatim from `tests/test_extension_recipe.py`:
 
 ```python
-from noodl.layers.potential import PotentialFlowLayer
+from noodl.layers.kirchhoff import KirchhoffLayer
 from noodl.model import Model
 from noodl.topology import Network
 import torch
@@ -91,7 +91,7 @@ def build_two_zone(*, learnable: bool = True):
     """(model, state, drivers) for the smallest network the new law can be checked on.
 
     ambient (boundary) -> z1 -> z2 -> ambient, three `airpath` edges, one `Sigmoid` law
-    covering all three (steepness `k`, shape (3,)). One `PotentialFlowLayer`, one `Model`.
+    covering all three (steepness `k`, shape (3,)). One `KirchhoffLayer`, one `Model`.
     No `TransportLayer`, no closures: nothing here needs one, and the guide's point is the
     smallest network that exercises the new law, not a full application.
     """
@@ -105,7 +105,7 @@ def build_two_zone(*, learnable: bool = True):
 
     k = torch.tensor([1.0, 0.8, 1.2], dtype=F64)
     law = Sigmoid(k, learnable=learnable)
-    layer = PotentialFlowLayer(
+    layer = KirchhoffLayer(
         net, "air", [law], boundary=["ambient"], quantity="pressure", unit="Pa",
     )
     model = Model(net, {"air": layer})
@@ -115,7 +115,7 @@ def build_two_zone(*, learnable: bool = True):
     return model, state, drivers
 ```
 
-This is deliberately the minimum: one potential layer and no transport layer, no closures. A
+This is deliberately the minimum: one Kirchhoff layer and no transport layer, no closures. A
 real application adds more of the same kind of thing, in a fixed place:
 
 - **`src/noodl/apps/<name>/network.py`** — the module a real application lives in. It defines
@@ -162,7 +162,7 @@ def test_interior_flow_balance_and_gradcheck_through_the_new_law():
         residual, torch.zeros_like(residual), atol=1e-10, rtol=0.0
     )
 
-    layer = model.potential["air"]
+    layer = model.kirchhoff["air"]
     law = layer._laws[0]
     phi_b = torch.zeros(1, dtype=F64)
 

@@ -487,9 +487,9 @@ def _edge_labels(net, cols: Sequence[int]) -> tuple[list[Hashable], dict[Hashabl
 class LayerRef:
     """One registered layer of a model, with its keys as discoverable `Field` attributes.
 
-    `kind` is `"potential"`, `"transport"` or `"allocation"`. `state` and `inputs` map each
+    `kind` is `"kirchhoff"`, `"transport"` or `"allocation"`. `state` and `inputs` map each
     key's short name (`"x"`, `"sources"`, ...) to its `Field`; the same fields are attributes
-    (`ref.x`, `ref.sources`). A transport layer whose flows no potential layer provides has
+    (`ref.x`, `ref.sources`). A transport layer whose flows no Kirchhoff layer provides has
     the driver `ref.flows` (key `"<layer>.q"`), in the order of its `flow_kinds`.
     """
 
@@ -505,7 +505,7 @@ class LayerRef:
         common = dict(dtype=net.dtype, device=net.device, layer=name)
         state: dict[str, Field] = {}
         inputs: dict[str, Field] = {}
-        if kind == "potential":
+        if kind == "kirchhoff":
             self.interior_nodes = [nodes[i] for i in layer.interior.tolist()]
             self.boundary_nodes = [nodes[i] for i in layer.bound.tolist()]
             self.inactive_nodes = [nodes[i] for i in layer.inactive.tolist()]
@@ -619,7 +619,7 @@ class LayerRef:
                     f"{name}.q", role="driver", axis="edge", labels=f_labels, aliases=f_alias,
                     ordering=f"edge order of kinds {tuple(layer.flow_kinds)}",
                     required="always", default=0.0,
-                    description="prescribed branch flows (no potential layer provides them)",
+                    description="prescribed branch flows (no Kirchhoff layer provides them)",
                     unit=getattr(layer, "flow_unit", ""), **common,
                 )
         elif kind == "allocation":
@@ -658,7 +658,7 @@ class LayerRef:
         # own; the short suffix names stay as aliases.
         q = self.quantity if self.quantity not in ("", "potential", "scalar") else None
         physical: dict[str, str] = {}
-        if kind == "potential":
+        if kind == "kirchhoff":
             if q:
                 physical.update({q: "phi", f"boundary_{q}": "phi_boundary"})
             physical["flow"] = "q"
@@ -726,8 +726,8 @@ class LayerRefs(Mapping[str, LayerRef]):
 
     def __init__(self, model: Model) -> None:
         refs: dict[str, LayerRef] = {}
-        for name, layer in model.potential.items():
-            refs[name] = LayerRef(name, layer, "potential")
+        for name, layer in model.kirchhoff.items():
+            refs[name] = LayerRef(name, layer, "kirchhoff")
         for name, layer in model.transport.items():
             refs[name] = LayerRef(name, layer, "transport", flow_owner=model.flow_layer_of[name])
         for name, layer in model.allocation.items():
@@ -860,7 +860,7 @@ def state_from(
     means `{"thermal.x": ...}` for a transport layer and `{"<name>.s": ...}` for a
     allocation one. Raises `KeyError` if, after assembly, a key a time step needs (every
     transport `"<layer>.x"`, allocation `"<layer>.s"`, the `"<layer>.phi"` and
-    `"<layer>.q"` of a potential layer with dynamic laws, and closure-carried state key) is
+    `"<layer>.q"` of a Kirchhoff layer with dynamic laws, and closure-carried state key) is
     still missing, naming it and its order.
     """
     expanded: dict = {}
@@ -892,7 +892,7 @@ def initial_drivers(model: Model, *, values: Mapping | None = None) -> dict[str,
 
 
 def _steps_from_state(layer) -> bool:
-    """Whether a potential layer's step starts from its own state: dynamic laws, outside
+    """Whether a Kirchhoff layer's step starts from its own state: dynamic laws, outside
     a phasor layer (which takes no step)."""
     return bool(getattr(layer, "dynamic", False)) and not getattr(layer, "phasor", False)
 
@@ -900,6 +900,6 @@ def _steps_from_state(layer) -> bool:
 def required_state_keys(model: Model) -> list[str]:
     """The state keys `Model.step` reads from the step-start state."""
     keys = [f"{n}.x" for n in model.transport] + [f"{n}.s" for n in model.allocation]
-    keys += [f"{n}.{s}" for n, layer in model.potential.items() if _steps_from_state(layer)
+    keys += [f"{n}.{s}" for n, layer in model.kirchhoff.items() if _steps_from_state(layer)
              for s in ("phi", "q")]
     return keys + list(model.closure_state_keys)

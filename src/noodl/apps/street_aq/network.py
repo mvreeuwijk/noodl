@@ -3,7 +3,7 @@
 The network is the ELIMINATED form: every street is a storage
 node, every intersection has been eliminated into directed `route` edges between the
 streets meeting there, and the atmosphere is the single boundary node that the `vent` and
-`exchange` edges reach. There is no potential layer and no junction node; the flows are
+`exchange` edges reach. There is no Kirchhoff layer and no junction node; the flows are
 written by `StreetFlows` into the driver `"street.q"`.
 """
 

@@ -30,7 +30,7 @@ from noodl.drives import ConstantDrive  # noqa: E402
 from noodl.elements.fan import FanCurve  # noqa: E402
 from noodl.elements.fixed import FixedFlow  # noqa: E402
 from noodl.elements.powerlaw import PowerLaw  # noqa: E402
-from noodl.layers.potential import PotentialFlowLayer  # noqa: E402
+from noodl.layers.kirchhoff import KirchhoffLayer  # noqa: E402
 from noodl.topology import Network  # noqa: E402
 
 DTYPE = torch.float64
@@ -49,7 +49,7 @@ def _series_case() -> dict:
         dp_transition=1e-6,
     )
     drive = ConstantDrive(kind="airpath", key="wind")
-    layer = PotentialFlowLayer(
+    layer = KirchhoffLayer(
         net, "series", [element], [drive], boundary=["ambient_w", "ambient_l"]
     )
     drivers = {"wind": torch.tensor([12.0, 0.0, 0.0], dtype=DTYPE)}
@@ -68,7 +68,7 @@ def _parallel_case() -> dict:
         torch.tensor(0.6, dtype=DTYPE),
         dp_transition=1e-6,
     )
-    layer = PotentialFlowLayer(net, "parallel", [element], boundary=["a", "c"])
+    layer = KirchhoffLayer(net, "parallel", [element], boundary=["a", "c"])
     phi, q = layer.solve(torch.tensor([8.0, 0.0], dtype=DTYPE), differentiable=False)
     return {"phi": phi.tolist(), "q": q.tolist()}
 
@@ -86,7 +86,7 @@ def _fan_driven_case() -> dict:
         dp_transition=1e-6,
     )
     fan = FixedFlow(torch.tensor(0.05, dtype=DTYPE), kind="fan")
-    layer = PotentialFlowLayer(net, "fan_driven", [leak, fan], boundary=["ambient"])
+    layer = KirchhoffLayer(net, "fan_driven", [leak, fan], boundary=["ambient"])
     phi, q = layer.solve(torch.zeros(1, dtype=DTYPE), differentiable=False)
     return {"phi": phi.tolist(), "q": q.tolist()}
 
@@ -102,7 +102,7 @@ def _fan_curve_case() -> dict:
     leak = PowerLaw(
         torch.tensor(0.05, dtype=DTYPE), torch.tensor(0.5, dtype=DTYPE), dp_transition=1e-6
     )
-    layer = PotentialFlowLayer(net, "fan_curve", [fan, leak], boundary=["ambient"])
+    layer = KirchhoffLayer(net, "fan_curve", [fan, leak], boundary=["ambient"])
     phi, q = layer.solve(torch.zeros(1, dtype=DTYPE), differentiable=False)
     return {"phi": phi.tolist(), "q": q.tolist()}
 

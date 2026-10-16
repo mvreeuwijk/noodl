@@ -25,7 +25,7 @@ from noodl.apps.electrical import (
     TransformerRatio,
 )
 from noodl.elements import LawContext
-from noodl.layers.potential import PotentialFlowLayer
+from noodl.layers.kirchhoff import KirchhoffLayer
 from noodl.topology import Network
 from tests._circuit_laws import Cap, Ind
 
@@ -54,7 +54,7 @@ def _net(nodes, edges):
 def _layer(edges, laws, nodes=None, **kwargs):
     nodes = nodes or sorted({n for u, v, _ in edges for n in (u, v)})
     net = _net(nodes, edges)
-    return net, PotentialFlowLayer(net, "e", laws, boundary=["gnd"], **kwargs)
+    return net, KirchhoffLayer(net, "e", laws, boundary=["gnd"], **kwargs)
 
 
 def _at(net, phi, name):

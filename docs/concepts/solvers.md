@@ -31,7 +31,7 @@ Three implementations ship:
 | Operator | What it represents |
 |---|---|
 | `DenseOperator` | A plain matrix. The retained reference against which the others are checked. |
-| `GraphLaplacianOperator` | $A_I \operatorname{diag}(g) A_I^\top$, built from `endpoints` and `accumulate` — never forming $A$. This is the Jacobian of a potential-flow layer. |
+| `GraphLaplacianOperator` | $A_I \operatorname{diag}(g) A_I^\top$, built from `endpoints` and `accumulate` — never forming $A$. This is the Jacobian of a Kirchhoff layer. |
 | `AdvectionOperator` | The upwind advection operator a transport layer solves against. |
 
 The point of the contract is that a network with $10^5$ edges assembles an $O(E)$ sparse triplet
@@ -58,7 +58,7 @@ closing, a component that turns out to be isolated — produces a singular opera
 names which component is ungrounded rather than leaving you with a failed solve.
 
 This can happen *mid-iteration*, which is why `newton` takes a `where` label and every layer
-passes something specific like `"PotentialFlowLayer 'air' solve"`. In a composed model over one
+passes something specific like `"KirchhoffLayer 'air' solve"`. In a composed model over one
 network, a bare "newton: did not converge" is not enough to find the culprit.
 
 ## `solve`: the `auto` table

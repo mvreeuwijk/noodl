@@ -1,4 +1,4 @@
-"""Correctness of the batched Newton solve of PotentialFlowLayer on random ambient networks.
+"""Correctness of the batched Newton solve of KirchhoffLayer on random ambient networks.
 
 Nothing here is timed: how fast the solve is at 100 nodes x batch 100 is measured by
 `benchmarks/newton_scaling.py`, not asserted.
@@ -8,7 +8,7 @@ import torch
 
 from noodl.drives import ConstantDrive
 from noodl.elements.powerlaw import PowerLaw
-from noodl.layers.potential import PotentialFlowLayer
+from noodl.layers.kirchhoff import KirchhoffLayer
 from noodl.solvers.newton import newton
 from noodl.topology import Network
 
@@ -45,7 +45,7 @@ def _random_layer_and_drivers(n_nodes: int, batch: int, seed: int):
     n = torch.full((batch, b), 0.65, dtype=DTYPE)
     element = PowerLaw(C, n, dp_transition=1e-6)
     drive = ConstantDrive(kind="airpath", key="wind")
-    layer = PotentialFlowLayer(net, "scaling", [element], [drive], boundary=["ambient"])
+    layer = KirchhoffLayer(net, "scaling", [element], [drive], boundary=["ambient"])
     wind = 5.0 * torch.rand(batch, b, dtype=DTYPE, generator=gen)
     drivers = {"wind": wind}
     phi_boundary = torch.zeros(batch, 1, dtype=DTYPE)

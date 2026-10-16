@@ -19,7 +19,7 @@ import pytest
 import torch
 
 from noodl.elements import Damper, FixedFlow, PowerLaw, UpstreamDensityPowerLaw
-from noodl.layers.potential import PotentialFlowLayer
+from noodl.layers.kirchhoff import KirchhoffLayer
 from noodl.topology import Network
 
 F64 = torch.float64
@@ -84,7 +84,7 @@ def test_damper_in_a_layer_lets_a_fan_exhaust_through_the_easy_direction():
     net.add_node("z")
     net.add_edge("ambient", "z", kind="damper")
     net.add_edge("z", "ambient", kind="airpath")
-    layer = PotentialFlowLayer(
+    layer = KirchhoffLayer(
         net,
         "air",
         [_damper(), FixedFlow(torch.tensor(0.05, dtype=F64), kind="airpath")],

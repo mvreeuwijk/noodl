@@ -16,7 +16,7 @@ import torch
 
 from noodl.drives import DuctStack
 from noodl.elements import AirDuct, DuctTerminal, FixedFlow, air_viscosity
-from noodl.layers.potential import PotentialFlowLayer
+from noodl.layers.kirchhoff import KirchhoffLayer
 from noodl.topology import Network
 
 F64 = torch.float64
@@ -110,9 +110,9 @@ def test_a_duct_in_a_layer_carries_a_fan_s_flow_at_contamx_s_pressure_drop():
     src, tgt = net.endpoints("duct")
     duct = AirDuct(torch.tensor([10.0], dtype=F64), torch.tensor([0.2], dtype=F64),
                    torch.tensor([9e-5], dtype=F64), src=src, tgt=tgt)
-    layer = PotentialFlowLayer(net, "air", [duct, FixedFlow(torch.tensor([0.05], dtype=F64),
+    layer = KirchhoffLayer(net, "air", [duct, FixedFlow(torch.tensor([0.05], dtype=F64),
                                                              kind="fan")],
-                               boundary=["ambient"])
+                           boundary=["ambient"])
     d = {"rho": torch.full((2,), rho(293.15), dtype=F64)}
     phi, q = layer.solve(torch.zeros(1, dtype=F64), d, atol=1e-14, rtol=1e-14)
     assert q[0].item() == pytest.approx(0.05, rel=1e-12)
@@ -305,7 +305,7 @@ def test_the_differentiable_layer_solve_reaches_a_learnable_duct_diameter():
         duct = AirDuct(torch.tensor([10.0], dtype=F64), torch.tensor([diameter], dtype=F64),
                        torch.tensor([9e-5], dtype=F64), src=src, tgt=tgt, learnable=True)
         fan = FixedFlow(torch.tensor([0.05], dtype=F64), kind="fan")
-        layer = PotentialFlowLayer(net, "air", [duct, fan], boundary=["ambient"])
+        layer = KirchhoffLayer(net, "air", [duct, fan], boundary=["ambient"])
         phi, _ = layer.solve(torch.zeros(1, dtype=F64), {"rho": torch.full((2,), 1.2, dtype=F64)},
                              differentiable=differentiable, atol=1e-14, rtol=1e-14)
         return phi[1], duct

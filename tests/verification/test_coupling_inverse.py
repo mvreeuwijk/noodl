@@ -50,7 +50,7 @@ def _indoor_after(city, state, drivers, n_steps=10, dt=60.0) -> torch.Tensor:
 @pytest.mark.slow
 def test_calibrate_leakage_coefficients_by_gradient_through_the_coupled_model(record_property):
     city, state, drivers, _street_model, building_model = _city()
-    element, _cols = building_model.potential["air"].law_for("pl_3")
+    element, _cols = building_model.kirchhoff["air"].law_for("pl_3")
     if not element.C.requires_grad:
         element.C.requires_grad_(True)
     true_C = element.C.detach().clone()

@@ -21,7 +21,7 @@ from noodl.apps.building_physics import (
 from noodl.apps.building_physics.elements import orifice_law_from_edges
 from noodl.drives import Stack
 from noodl.elements.powerlaw import PowerLaw
-from noodl.layers.potential import PotentialFlowLayer
+from noodl.layers.kirchhoff import KirchhoffLayer
 from noodl.model import Model
 from noodl.refs import Field
 from noodl.topology import Network
@@ -51,12 +51,12 @@ def test_a_layer_registered_under_another_name_is_refused():
     net, model = _two_zone_with_wall()
     th = model.transport["thermal"]
     with pytest.raises(ValueError, match="registered as 'heat'.*named 'thermal'"):
-        Model(net, {"air": model.potential["air"], "heat": th})
+        Model(net, {"air": model.kirchhoff["air"], "heat": th})
 
 
 def test_layers_may_be_given_as_a_sequence_keyed_by_their_own_names():
     net, model = _two_zone_with_wall()
-    seq = Model(net, [model.potential["air"], model.transport["thermal"]],
+    seq = Model(net, [model.kirchhoff["air"], model.transport["thermal"]],
                 closures=model.closures)
     assert list(seq.layers) == ["air", "thermal"]
 
@@ -67,8 +67,8 @@ def test_two_layers_with_one_name_are_refused():
     net.add_node("b")
     net.add_edge("a", "b", kind="k")
     leak = PowerLaw(C=torch.tensor(0.01), n=torch.tensor(0.65), kind="k")
-    one = PotentialFlowLayer(net, "air", [leak], boundary=["a"])
-    two = PotentialFlowLayer(net, "air", [leak], boundary=["a"])
+    one = KirchhoffLayer(net, "air", [leak], boundary=["a"])
+    two = KirchhoffLayer(net, "air", [leak], boundary=["a"])
     with pytest.raises(ValueError, match="two layers named 'air'"):
         Model(net, [one, two])
 
@@ -78,8 +78,8 @@ def test_a_renamed_thermal_layer_drives_the_density_closure_under_its_own_name()
     registered key and that name cannot drift apart."""
     net, _ = _two_zone_with_wall()
     th = thermal_layer(net, name="heat")
-    air = PotentialFlowLayer(net, "air", [orifice_law_from_edges(net, "airpath")],
-                             drives=[Stack.from_network(net, "airpath")], boundary=["ambient"])
+    air = KirchhoffLayer(net, "air", [orifice_law_from_edges(net, "airpath")],
+                         drives=[Stack.from_network(net, "airpath")], boundary=["ambient"])
     from noodl.apps.building_physics import IdealGasDensity
 
     model = Model(net, [air, th], closures=[IdealGasDensity(th, ambient_index=0)])

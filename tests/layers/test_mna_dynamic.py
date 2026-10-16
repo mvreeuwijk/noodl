@@ -1,4 +1,4 @@
-"""Modified Nodal Analysis in PotentialFlowLayer: dynamic laws stepped by companion forms."""
+"""Modified Nodal Analysis in KirchhoffLayer: dynamic laws stepped by companion forms."""
 
 import json
 import math
@@ -9,7 +9,7 @@ import torch
 
 import noodl.layers._mna as mna_module
 from noodl.elements import Conductance, ConstitutiveLaw, ImplicitLaw
-from noodl.layers.potential import PotentialFlowLayer
+from noodl.layers.kirchhoff import KirchhoffLayer
 from noodl.topology import Network
 from tests._circuit_laws import Cap, DrivenSource, Ind, Source
 
@@ -42,7 +42,7 @@ def _rc(V=1.0, R=1.0, C=1.0):
     # source a -> gnd (dp = phi_a = V), resistor a -> b, capacitor b -> gnd
     net = _net(["gnd", "a", "b"], [("a", "gnd", "source"), ("a", "b", "r"),
                                    ("b", "gnd", "cap")])
-    layer = PotentialFlowLayer(
+    layer = KirchhoffLayer(
         net, "e", [Source(torch.tensor([V])), Conductance(torch.tensor([1.0 / R]), kind="r"),
                    Cap(torch.tensor([C]))], boundary=["gnd"])
     return net, layer
@@ -90,7 +90,7 @@ def test_rlc_ringing_trapezoidal_second_order():
     R, L, C = 0.2, 1.0, 1.0
     net = _net(["gnd", "a", "b", "c"], [("a", "gnd", "source"), ("a", "b", "r"),
                                         ("b", "c", "ind"), ("c", "gnd", "cap")])
-    layer = PotentialFlowLayer(
+    layer = KirchhoffLayer(
         net, "e", [Source(torch.tensor([1.0])), Conductance(torch.tensor([1.0 / R]), kind="r"),
                    Ind(torch.tensor([L])), Cap(torch.tensor([C]))], boundary=["gnd"])
     c = net.nodes.index("c")
@@ -112,7 +112,7 @@ def test_rl_backward_euler_is_exact_recurrence():
     # source a -> gnd (1 V), resistor a -> b (R = 1), inductor b -> gnd (L = 1)
     net = _net(["gnd", "a", "b"], [("a", "gnd", "source"), ("a", "b", "r"),
                                    ("b", "gnd", "ind")])
-    layer = PotentialFlowLayer(
+    layer = KirchhoffLayer(
         net, "e", [Source(torch.tensor([1.0])), Conductance(torch.tensor([1.0]), kind="r"),
                    Ind(torch.tensor([1.0]))], boundary=["gnd"])
     phi, q = layer.solve(GROUND, mode="initial", differentiable=False)
@@ -129,7 +129,7 @@ def test_dc_mode_opens_capacitor_and_shorts_inductor():
     net = _net(["gnd", "a", "b", "c"], [("a", "gnd", "source"), ("a", "b", "r"),
                                         ("b", "c", "ind"), ("c", "gnd", "r"),
                                         ("c", "gnd", "cap")])
-    layer = PotentialFlowLayer(
+    layer = KirchhoffLayer(
         net, "e", [Source(torch.tensor([2.0])), Conductance(torch.tensor([1.0, 1.0]), kind="r"),
                    Ind(torch.tensor([0.5])), Cap(torch.tensor([3.0]))], boundary=["gnd"])
     assert layer.dynamic
@@ -150,7 +150,7 @@ def test_dc_mode_opens_capacitor_and_shorts_inductor():
 
 def test_transient_without_history_is_refused():
     _, layer = _rc()
-    with pytest.raises(ValueError, match=r"PotentialFlowLayer 'e': a transient step needs "
+    with pytest.raises(ValueError, match=r"KirchhoffLayer 'e': a transient step needs "
                                          r"history=\(phi, q\) at the step start"):
         layer.solve(GROUND, dt=0.1, differentiable=False)
 
@@ -184,10 +184,10 @@ def test_drive_on_dynamic_kind_is_refused():
     net = _net(["gnd", "a", "b"], [("a", "gnd", "source"), ("a", "b", "r"),
                                    ("b", "gnd", "cap")])
     with pytest.raises(ValueError, match="kind 'cap' has a dynamic law"):
-        PotentialFlowLayer(net, "e", [Source(torch.tensor([1.0])),
+        KirchhoffLayer(net, "e", [Source(torch.tensor([1.0])),
                                       Conductance(torch.tensor([1.0]), kind="r"),
                                       Cap(torch.tensor([1.0]))],
-                           drives=[Push()], boundary=["gnd"])
+                       drives=[Push()], boundary=["gnd"])
 
 
 class StepRecorder(ConstitutiveLaw):
@@ -209,8 +209,8 @@ def test_static_contextual_layer_steps_without_history():
     net = _net(["gnd", "a", "b"], [("a", "gnd", "source"), ("a", "b", "r"),
                                    ("b", "gnd", "r")])
     recorder = StepRecorder()
-    layer = PotentialFlowLayer(net, "e", [Source(torch.tensor([1.0])), recorder],
-                               boundary=["gnd"])
+    layer = KirchhoffLayer(net, "e", [Source(torch.tensor([1.0])), recorder],
+                           boundary=["gnd"])
     assert not layer.dynamic
     phi, _ = layer.solve(GROUND, dt=0.1, t=0.1, differentiable=False)
     torch.testing.assert_close(phi[net.nodes.index("b")], torch.tensor(0.5), rtol=0,
@@ -223,7 +223,7 @@ def test_gradient_through_three_steps():
     net = _net(["gnd", "a", "b"], [("a", "gnd", "source"), ("a", "b", "r"),
                                    ("b", "gnd", "cap")])
     cap = Cap(torch.tensor([0.7]), learnable=True)
-    layer = PotentialFlowLayer(
+    layer = KirchhoffLayer(
         net, "e", [DrivenSource(), Conductance(torch.tensor([2.0]), kind="r"), cap],
         boundary=["gnd"])
     b = net.nodes.index("b")
@@ -243,9 +243,9 @@ def test_gradient_through_three_steps():
 def _voltage_loop():
     net = _net(["gnd", "a"], [("a", "gnd", "source"), ("a", "gnd", "source"),
                               ("a", "gnd", "r")])
-    return PotentialFlowLayer(net, "e", [Source(torch.tensor([1.0, 2.0])),
+    return KirchhoffLayer(net, "e", [Source(torch.tensor([1.0, 2.0])),
                                          Conductance(torch.tensor([1.0]), kind="r")],
-                              boundary=["gnd"])
+                          boundary=["gnd"])
 
 
 def test_singular_message_names_flow_prescribed_parts():
@@ -269,8 +269,8 @@ def test_rank_test_runs_once_on_the_first_failing_instance(monkeypatch):
             return drivers["g"] * dp
 
     net = _net(["gnd", "a", "b"], [("gnd", "a", "r"), ("b", "gnd", "r"), ("a", "b", "source")])
-    layer = PotentialFlowLayer(net, "e", [DrivenConductance("r"), Source(torch.tensor([3.0]))],
-                               boundary=["gnd"])
+    layer = KirchhoffLayer(net, "e", [DrivenConductance("r"), Source(torch.tensor([3.0]))],
+                           boundary=["gnd"])
     shapes = []
     original = torch.linalg.matrix_rank
 
@@ -300,7 +300,7 @@ def test_diagnostics_report_the_requested_method(differentiable):
 
 def test_cg_per_call_is_refused():
     _, layer = _rc()
-    with pytest.raises(ValueError, match="PotentialFlowLayer 'e': method='cg'"):
+    with pytest.raises(ValueError, match="KirchhoffLayer 'e': method='cg'"):
         layer.solve(GROUND, method="cg", differentiable=False)
 
 
@@ -328,7 +328,7 @@ def _mesh(kinds):
 
 def _quadratic_loop():
     net = _mesh(["source", "loss", "loss"])
-    layer = PotentialFlowLayer(net, "loop", [DrivenSource(), QuadraticLoss()], boundary=[0])
+    layer = KirchhoffLayer(net, "loop", [DrivenSource(), QuadraticLoss()], boundary=[0])
     return net, layer
 
 
@@ -385,7 +385,7 @@ def test_spring_mass_damper_matches_the_worked_example_displacement_series():
     # voltage is p2(t0) = 1 (edge 2), marched by backward Euler from the "initial" state.
     R, dt = 0.2, 0.2
     net = _mesh(["ind", "r", "cap"])
-    layer = PotentialFlowLayer(
+    layer = KirchhoffLayer(
         net, "smd", [Ind(torch.tensor([1.0])), Conductance(torch.tensor([1.0 / R]), kind="r"),
                      Cap(torch.tensor([1.0]), v0=1.0)], boundary=[0])
     n2 = net.nodes.index(2)
@@ -422,8 +422,8 @@ class _WrongWidthFlow(ConstitutiveLaw):
 def test_law_of_the_wrong_width_is_refused_by_layer_and_kind(law, what):
     # the source edge makes the layer an MNA layer even when the bad law is a potential law
     net = _net(["gnd", "a", "b"], [("a", "gnd", "source"), ("a", "b", "w"), ("b", "gnd", "w")])
-    layer = PotentialFlowLayer(net, "bad", [Source(torch.tensor([1.0])), law],
-                               boundary=["gnd"])
+    layer = KirchhoffLayer(net, "bad", [Source(torch.tensor([1.0])), law],
+                           boundary=["gnd"])
     with pytest.raises(ValueError, match=rf"'bad'.*{what}.*'w'.*(width 1|a scalar).*2 edges"):
         layer.solve(GROUND, differentiable=False, phi0=torch.zeros(2, dtype=F64),
                     q0=torch.zeros(1, dtype=F64))
@@ -431,9 +431,9 @@ def test_law_of_the_wrong_width_is_refused_by_layer_and_kind(law, what):
 
 def test_batch_leading_law_output_passes_the_width_check():
     net = _net(["gnd", "a"], [("a", "gnd", "source"), ("a", "gnd", "r")])
-    layer = PotentialFlowLayer(net, "ok", [DrivenSource(), Conductance(torch.tensor([1.0]),
+    layer = KirchhoffLayer(net, "ok", [DrivenSource(), Conductance(torch.tensor([1.0]),
                                                                      kind="r")],
-                               boundary=["gnd"])
+                           boundary=["gnd"])
     phi, q = layer.solve(GROUND, {"V": torch.tensor([[1.0], [2.0], [3.0]])},
                          differentiable=False)
     assert q.shape == (3, 2)

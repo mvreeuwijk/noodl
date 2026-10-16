@@ -93,7 +93,7 @@ def _params(A, h, E, UA=0.0, dPw=0.0):
 
 
 def _volumetric_inflow(model, ss) -> float:
-    q = model.potential["air"].flows_of_kind(ss["air.q"], "airpath")
+    q = model.kirchhoff["air"].flows_of_kind(ss["air.q"], "airpath")
     return q[0].item() / RHO_0
 
 
@@ -205,7 +205,7 @@ def test_opposing_wind_three_root_case_converges_per_instance_to_a_stable_root()
     diag: dict = {}
     ss = model.steady(starts, drivers, diagnostics=diag, **TIGHT)
     assert bool(diag["converged"].all()), diag
-    q = model.potential["air"].flows_of_kind(ss["air.q"], "airpath")[..., 0] / RHO_0
+    q = model.kirchhoff["air"].flows_of_kind(ss["air.q"], "airpath")[..., 0] / RHO_0
     up = _positive_real_roots([1.0, 0.0, 3.0, -2.0 * alpha**3])          # one root ~0.45
     down = _positive_real_roots([1.0, 0.0, -3.0, 2.0 * alpha**3])        # ~0.54, ~1.40
     assert up[0] == pytest.approx(0.4547, abs=2e-3)
@@ -242,7 +242,7 @@ def test_opposing_wind_multiplicity_resolves_per_instance_under_time_stepping():
     for _ in range(steps):
         state = model.step(state, drivers, dt, diagnostics=diag, **TIGHT)
     assert bool(diag["layers"]["air"]["converged"].all()), diag   # per instance, every one
-    q = model.potential["air"].flows_of_kind(state["air.q"], "airpath")[..., 0] / RHO_0
+    q = model.kirchhoff["air"].flows_of_kind(state["air.q"], "airpath")[..., 0] / RHO_0
     assert q[0].item() == pytest.approx(-down[1], rel=1e-6)       # cold: wind wins, downward
     assert q[1].item() == pytest.approx(up[0], rel=1e-6)          # hot: buoyancy wins, upward
     assert q[2].item() == pytest.approx(up[0], rel=1e-6)          # +0.5 K off the middle root
@@ -300,7 +300,7 @@ def test_two_zone_doorway_matches_an_independent_root_finding_reference(record_p
     assert max(abs(v) for v in balances([TA_ref, TB_ref])) < 1e-8
     assert T["A"] == pytest.approx(TA_ref, abs=1e-5)
     assert T["B"] == pytest.approx(TB_ref, abs=1e-5)
-    q = model.potential["air"].flows_of_kind(ss["air.q"], "airpath")
+    q = model.kirchhoff["air"].flows_of_kind(ss["air.q"], "airpath")
     assert (q[0] + q[1]).abs().item() < 1e-10          # doorway: no net flow
     worst_abs = max(abs(T["A"] - TA_ref), abs(T["B"] - TB_ref))
     record_property("check", "Two-zone doorway vs an independent scipy.optimize.fsolve reference")
@@ -330,7 +330,7 @@ def _three_zone_stack(coupling: str, tol: float = 0.05):
 
 def _run_stack(coupling: str, dt: float, hours: float = 6.0) -> dict:
     net, model, state, sources = _three_zone_stack(coupling)
-    lo = model.potential["air"].kind_slice("airpath").start
+    lo = model.kirchhoff["air"].kind_slice("airpath").start
     door_index = 6                                                   # z1 -> z2 low opening
     flows, T3 = [], []
     steps = int(round(hours * 3600.0 / dt))

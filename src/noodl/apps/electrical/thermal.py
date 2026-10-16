@@ -1,7 +1,7 @@
 """Electro-thermal coupling: the Joule heat of circuit devices into a thermal network, and the
 heat-port temperatures back into the devices' temperature-dependent laws.
 
-The thermal side is a second `PotentialFlowLayer` on the same `Network` (conventionally named
+The thermal side is a second `KirchhoffLayer` on the same `Network` (conventionally named
 `"thermal"`): temperature (K) is its potential against a reference node held at 0 K (a
 boundary), heat flow (W) its flow. A heat conductance is a `noodl.elements.Conductance`
 (MSL `HeatTransfer.Components.ThermalConductor`), a heat capacity a `Capacitance` from the
