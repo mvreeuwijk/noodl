@@ -106,3 +106,36 @@ def test_the_refusal_also_guards_the_returning_path():
     with pytest.raises(UndefinedSteadyState):
         _room().steady(torch.zeros(2, dtype=F64), torch.zeros(2, dtype=F64),
                        torch.tensor([1e-3], dtype=F64), on_failure="return")
+
+
+def _chain(n):
+    """ambient -> 0 -> 1 -> ... -> n-1 -> ambient, plus a return edge n-1 -> 0."""
+    net = Network(dtype=F64)
+    net.add_node("ambient")
+    for i in range(n):
+        net.add_node(i)
+    net.add_edge("ambient", 0, kind="air")
+    for i in range(n - 1):
+        net.add_edge(i, i + 1, kind="air")
+    net.add_edge(n - 1, "ambient", kind="air")
+    net.add_edge(n - 1, 0, kind="air")
+    return TransportLayer(net, "c", capacity=torch.full((n,), M_ROOM, dtype=F64),
+                          flow_kind="air", boundary=["ambient"], scheme="implicit")
+
+
+def test_a_deep_chain_is_searched_per_batch_member():
+    """Member 0 flows through a 400-room chain to the ambient; member 1 recirculates the
+    same chain through its return edge with no way out, a closed group as deep as the
+    chain. Only member 1 is refused, naming every room."""
+    n, f = 400, 0.1
+    layer = _chain(n)
+    through = [f] * (n + 1) + [0.0]
+    loop = [0.0] + [f] * (n - 1) + [0.0, f]
+    sources = torch.zeros(n + 1, dtype=F64)
+    xb = torch.tensor([1e-3], dtype=F64)
+    x = layer.steady(torch.tensor(through, dtype=F64), sources, xb)
+    torch.testing.assert_close(x, torch.full((n,), 1e-3, dtype=F64), rtol=1e-12, atol=0)
+    q = torch.tensor([through, loop], dtype=F64)
+    with pytest.raises(UndefinedSteadyState, match=r"form a closed group") as err:
+        layer.steady(q, sources.expand(2, -1), xb.expand(2, -1))
+    assert f"{n - 1}]" in str(err.value) and "[0, 1, 2," in str(err.value)

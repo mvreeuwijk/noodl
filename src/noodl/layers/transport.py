@@ -130,6 +130,35 @@ def _scipy_sparse_linalg_importable() -> bool:
     return True
 
 
+def _reached_from(start: torch.Tensor, row: torch.Tensor, col: torch.Tensor,
+                  linked: torch.Tensor) -> torch.Tensor:
+    """`(B, m)` bool: per batch row, the indices reachable from `start` `(B, m)` along the
+    edges `row[e] -> col[e]` that `linked[b, e]` keeps (`(B, nnz)`). One depth-first search
+    per distinct `(start, linked)` pattern, on the host: O(m + nnz) each, whatever the depth
+    of the graph, and a batch whose instances share a pattern searches it once."""
+    m = start.shape[-1]
+    key = torch.cat((start, linked), -1).to(torch.uint8).cpu()
+    patterns, inverse = torch.unique(key, dim=0, return_inverse=True)
+    rows, cols = row.cpu(), col.cpu()
+    out = torch.zeros(patterns.shape[0], m, dtype=torch.bool)
+    for p, pattern in enumerate(patterns.bool()):
+        keep = pattern[m:]
+        r, c = rows[keep], cols[keep]
+        order = torch.argsort(r, stable=True)
+        targets = c[order].tolist()
+        bounds = torch.searchsorted(r[order], torch.arange(m + 1)).tolist()
+        seen = pattern[:m].tolist()
+        stack = pattern[:m].nonzero().flatten().tolist()
+        while stack:
+            i = stack.pop()
+            for j in targets[bounds[i]:bounds[i + 1]]:
+                if not seen[j]:
+                    seen[j] = True
+                    stack.append(j)
+        out[p] = torch.tensor(seen, dtype=torch.bool)
+    return out[inverse].to(start.device)
+
+
 class UndefinedSteadyState(ValueError):
     """A steady transport solve has no answer: a stored node keeps everything that enters
     it (nothing leaves it, or it belongs to a closed group whose contents never reach a
@@ -815,13 +844,7 @@ class TransportLayer:
             # Exact conservation cancels to rounding, a loss or a gain does not.
             exits = column.abs() > 1e-12 * scale
             linked = (row != col) & (amount != 0)
-            reach = exits
-            for _ in range(m):
-                hit = zeros.index_add(-1, col, (reach[:, row] & linked).to(amount.dtype))
-                grown = reach | (hit > 0)
-                if bool((grown == reach).all()):
-                    break
-                reach = grown
+            reach = _reached_from(exits, row, col, linked)
             stored = ~self._storage_free_stacked(reach.device)
             closed = (~reach & stored).any(0)
             if not bool(closed.any()):
