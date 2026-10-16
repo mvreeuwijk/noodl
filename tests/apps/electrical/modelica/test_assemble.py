@@ -9,7 +9,6 @@ from pathlib import Path
 import pytest
 import torch
 
-from noodl.apps.building_physics.modelica.run import step_drivers
 from noodl.apps.electrical.modelica import (
     CircuitNames,
     Column,
@@ -17,6 +16,7 @@ from noodl.apps.electrical.modelica import (
     read_modelica_circuit,
 )
 from noodl.apps.electrical.modelica.schema import load
+from noodl.modelica.timeline import step_drivers
 
 DATA = Path(__file__).resolve().parents[3] / "data" / "modelica_electrical"
 MSL = "Modelica.Electrical.Analog."

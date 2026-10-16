@@ -19,10 +19,10 @@ from collections.abc import Mapping, Sequence
 
 import torch
 
-from noodl.apps.building_physics.modelica.run import extrapolate as _extrapolate
-from noodl.apps.building_physics.modelica.run import step_drivers
 from noodl.apps.electrical.modelica.assemble import THERMAL, CircuitNames
 from noodl.model import Model, State
+from noodl.modelica.timeline import extrapolate as extrapolate  # this reader's public API
+from noodl.modelica.timeline import grid_index, step_drivers
 
 Tensor = torch.Tensor
 F64 = torch.float64
@@ -40,25 +40,6 @@ STEADY_RTOL = 1e-14
 # whose round-off floor is eps G T: Newton stalls at 1.8e-12 W on MSL's Resistor example
 # (G = 50 W/K at 300 K). 1e-11 keeps that example within 0.03 of the comparison bound.
 THERMAL_STEADY_ATOL = 1e-11
-
-
-def _grid_index(grid: Tensor, times: Tensor) -> list[int]:
-    """The position of every entry of `times` on the step grid; raises `ValueError` for a
-    time off the grid or a non-increasing one."""
-    tol = 1e-9 * max(1.0, float(grid.abs().max()))
-    diff = (times.unsqueeze(1) - grid.unsqueeze(0)).abs()
-    idx = diff.argmin(dim=1)
-    off = diff.gather(1, idx.unsqueeze(1)).squeeze(1) > tol
-    if bool(off.any()):
-        k = int(torch.nonzero(off)[0])
-        raise ValueError(
-            f"simulate_circuit: times[{k}] = {float(times[k])!r} is not a grid time of the "
-            f"circuit ({float(grid[0])} to {float(grid[-1])}, {grid.numel()} points)"
-        )
-    out = idx.tolist()
-    if any(b <= a for a, b in zip(out, out[1:], strict=False)):
-        raise ValueError("simulate_circuit: times must be increasing")
-    return out
 
 
 def simulate_circuit(model: Model, state: State, drivers: Mapping[str, Tensor],
@@ -82,7 +63,7 @@ def simulate_circuit(model: Model, state: State, drivers: Mapping[str, Tensor],
         times = torch.atleast_1d(torch.as_tensor(times, dtype=F64))
     if times.numel() == 0:
         raise ValueError("simulate_circuit: no times asked for")
-    want = _grid_index(grid, times)
+    want = grid_index(grid, times, caller="simulate_circuit")
     rows: list[State] = []
     if not names.dynamic:
         atol = THERMAL_STEADY_ATOL if f"{THERMAL}.phi" in state else STEADY_ATOL
@@ -106,13 +87,3 @@ def simulate_circuit(model: Model, state: State, drivers: Mapping[str, Tensor],
     out = {key: torch.stack([row[key] for row in rows]) for key in keys}
     out["time"] = grid[want].clone()
     return out
-
-
-def extrapolate(coarse: Mapping[str, Tensor], fine: Mapping[str, Tensor],
-                order: int = 2) -> dict[str, Tensor]:
-    """Richardson extrapolation of two `simulate_circuit` histories on the same times, `fine`
-    read with twice the `substeps` of `coarse`: `fine + (fine - coarse)/(2**order - 1)` for
-    every entry but `"time"`. The circuit steps are trapezoidal (backward Euler after each
-    restart), so `order=2` removes the leading step-size error; raises `ValueError` when the
-    two histories are not on the same times."""
-    return _extrapolate(coarse, fine, order)
