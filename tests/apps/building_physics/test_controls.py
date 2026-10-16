@@ -943,6 +943,24 @@ def test_block_parameters_given_as_tensors_carry_gradients():
     assert torch.autograd.grad(y[1], slope)[0].item() == pytest.approx(0.3)
 
 
+@pytest.mark.parametrize("bound_type", ["float", "tensor"])
+def test_a_limited_output_exactly_at_its_limit_takes_the_unlimited_gradient(bound_type):
+    """At the corner of the limiter (the unlimited output equal to y_max) the output is the
+    unlimited one, whichever type the limit is: d/d(gain) is the unlimited closed form and
+    the limit gets none, with lower and upper limits alike."""
+    for u_m, y_max, y_min, v in ((0.5, 1.0, -1.0, 1.0), (1.5, 1.0, -1.0, -1.0)):
+        gain = _parameter(2.0)
+        limits = ((_parameter(y_max), _parameter(y_min)) if bound_type == "tensor"
+                  else (y_max, y_min))
+        pid = LimitedPID(0, 1, gain=gain, y_max=limits[0], y_min=limits[1])
+        net = ControlNetwork([Constant(1.0), Constant(u_m), pid], sampled=False)
+        y = net.evaluate(net.initial_state(), {})[2]
+        assert y.item() == v                                   # 2 (1 - u_m), at a limit
+        wrt = (gain, *limits) if bound_type == "tensor" else (gain,)
+        grads = torch.autograd.grad(y, wrt)
+        assert [g.item() for g in grads] == [1.0 - u_m] + [0.0] * (len(wrt) - 1)
+
+
 def _co2_fan_loop(kp, ki, steps: int = 8):
     """The Controls section's room: a PI controller on the CO2 above 1.2 g/kg sets the
     exhaust fan's multiplier, from 1.0 g/kg; the CO2 at the end (kg/kg)."""

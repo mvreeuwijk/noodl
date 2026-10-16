@@ -641,7 +641,9 @@ requires_grad=True), ki=2e-3)` in the example below gives d(CO2)/d(kp) through `
 A float stays a float. A band or a switch's threshold only moves where the switch flips, so
 the gradient through a switch is zero wherever it does not flip; a hysteresis's slope and
 slack and a controller's limits enter its output directly and have gradients on the pieces
-where they act.
+where they act. A `LimitedPID` output exactly at a limit is on the unlimited piece: it
+carries the gradient of the unlimited output and the limit gets none, for a float limit
+and a tensor one alike.
 
 The network is a closure of the model, the first one: `build_model(..., controls=network)`
 puts it ahead of the density closure, so its writes reach every other closure. Its block
