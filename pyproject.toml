@@ -47,7 +47,7 @@ sparse = ["scipy>=1.11"]
 # silently change quickstart_demo/oxford_demo's forcing or node parameters, which an `>=` pin
 # would not catch. Test-only (`importorskip`); never a runtime dependency of noodl itself.
 dev = [
-    "pytest>=8", "ruff>=0.5", "hypothesis>=6", "pytest-cov", "scipy>=1.11",
+    "pytest>=8", "pytest-xdist>=3", "ruff>=0.5", "hypothesis>=6", "pytest-cov", "scipy>=1.11",
     "pyswmm>=2.1", "wntr>=1.5", "wsimod==0.8.1",
 ]
 # ContamX parity: NIST's `contamxpy` ships a Windows x86-64 wheel that
