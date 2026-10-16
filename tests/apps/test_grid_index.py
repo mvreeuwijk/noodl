@@ -100,3 +100,14 @@ def test_random_small_grids_agree_with_the_reference(grid_index):
             grid.tolist(), times.tolist())
         sorted_times = torch.sort(times).values
         assert _new(grid_index, grid, sorted_times) == _reference(grid, sorted_times)
+
+
+def test_the_building_reader_row_lookup_equals_the_all_pairs_argmin():
+    from noodl.apps.building_physics.modelica.assemble import _rows
+
+    gen = torch.Generator().manual_seed(3)
+    for _ in range(100):
+        grid = torch.sort(torch.randint(0, 40, (12,), generator=gen).to(F64) * 0.5).values
+        times = torch.randint(0, 40, (7,), generator=gen).to(F64) * 0.5
+        old = (grid.unsqueeze(0) - times.unsqueeze(1)).abs().argmin(dim=1)
+        assert torch.equal(_rows(grid, times), old)

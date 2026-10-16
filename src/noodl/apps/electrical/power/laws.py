@@ -44,7 +44,8 @@ class PiBranch(ConstitutiveLaw):
         self.b = self._param(b, learnable)
         # the file format's 0 means unity: normalise before registering the parameter, so
         # equivalent encodings (0 and 1) have the same values and gradients
-        ratio = torch.as_tensor(ratio)
+        if not isinstance(ratio, torch.Tensor):
+            ratio = torch.as_tensor(ratio, dtype=torch.get_default_dtype())   # as `_param`
         self.ratio = self._param(torch.where(ratio == 0, torch.ones_like(ratio), ratio),
                                  learnable)
         self.shift = self._param(shift, learnable)
