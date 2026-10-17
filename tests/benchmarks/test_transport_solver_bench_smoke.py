@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from benchmarks.transport_solver_bench import (
     SOLVERS,
     bench_composed_ensemble,
@@ -17,11 +19,8 @@ from benchmarks.transport_solver_bench import (
     main,
 )
 
-# Measured at ~9.5 s (pytest-reported) on this machine -- under a 20 s threshold for
-# the `slow` marker (registered in `pyproject.toml`, excluded by default via
-# `-m "not slow"`), so this test is left unmarked and runs in the default suite.
 
-
+@pytest.mark.slow
 def test_quick_run_writes_one_row_per_solver_with_expected_keys(tmp_path) -> None:
     """`main(["--quick"])` (redirected to a scratch JSON) reports every solver at ensemble 1,
     each with forward and backward rows carrying `median_s`/`min_s`/`max_s`/`iterations`, and

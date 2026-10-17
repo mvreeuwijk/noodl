@@ -1,5 +1,5 @@
-"""The two presets, the fallbacks of the default closure set, the turbulence floors and the
-refused earlier spellings, on whole models."""
+"""The two presets, the fallbacks of the default closure set, the turbulence floors, on
+whole models."""
 
 from __future__ import annotations
 
@@ -53,14 +53,6 @@ def test_the_default_is_the_neutral_single_direction_model_without_lmo_or_spread
         assert torch.equal(_q(default, d), _q(plain, d))
         assert torch.equal(default.steady(state, d)["street.x"],
                            plain.steady(state, d)["street.x"])
-
-
-def test_earlier_keywords_and_values_are_refused_by_build_model():
-    net = from_test_network()
-    with pytest.raises(TypeError, match="unexpected keyword argument 'exchange'"):
-        build_model(net, exchange="turbulent_velocity")
-    with pytest.raises(ValueError, match="canyon_wind must be one of"):
-        build_model(net, canyon_wind="soulhac")
 
 
 def test_the_munich_preset_is_the_munich_option_set():

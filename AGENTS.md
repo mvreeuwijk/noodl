@@ -13,10 +13,11 @@ before opening a pull request.
 Core (always include):
 
 ```bash
-tests/test_*.py tests/layers tests/solvers tests/operators tests/elements tests/components tests/apps/test_*.py tests/verification/test_newton_batched.py
+tests/test_*.py tests/layers tests/solvers tests/operators tests/elements tests/components tests/apps/test_*.py
 ```
 
-Add the application you are changing:
+Add the application you are changing. CI's `branch` job uses the same table
+(`.github/scripts/select_tests.py`): keep the two in step.
 
 | Application | Paths |
 | --- | --- |
@@ -30,16 +31,13 @@ Add the application you are changing:
 For example, for the building application:
 
 ```bash
-NOODL_PARITY_WORKERS=4 python -m pytest -q -n 2 --no-cov tests/test_*.py tests/layers tests/solvers tests/operators \
+python -m pytest -q -n 4 --no-cov tests/test_*.py tests/layers tests/solvers tests/operators \
   tests/elements tests/components tests/apps/test_*.py tests/apps/building_physics \
   tests/verification/test_contam_parity.py tests/verification/test_modelica_parity.py \
   tests/verification/test_airflow_closed_forms.py tests/verification/test_natural_ventilation.py
 ```
 
 - Pass `--no-cov` on a subset: the coverage threshold (90 %) applies to the whole suite only.
-- Keep the number of test processes at 8 or below. The reference-model comparisons start their
-  own worker pool inside each pytest worker, so the total is up to `-n` × `NOODL_PARITY_WORKERS`:
-  use `-n 2` with `NOODL_PARITY_WORKERS=4`.
 - Tests marked `slow` (full reference-model runs) are deselected by default; select them with
   `-m slow` when you change what they compare.
 - Before the pull request: `ruff check .`, the full `pytest`, and `python -m mkdocs build --strict`.

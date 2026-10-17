@@ -5,8 +5,7 @@ demand points) with a storage ceiling; edges are arcs with a capacity. Each arc 
 that is requested of it, clipped to the arc's capacity and to the free storage at the receiving
 node, and storage is conserved exactly at every node. Requests and flows are in m³/s, storage in
 m³. In noodl physics this is implemented by `AllocatedFlowLayer`, and it is the framework's
-**fourth flow-determination mode**. The earlier name `CapacitatedTransferLayer` (and module
-`noodl.layers.capacitated`) still imports, as an alias of the same class.
+**fourth flow-determination mode**.
 
 Every other application on this site determines a flow from physics: a potential difference, a
 closure, or continuity. This one does not. Each edge carries a *requested* flow, typically

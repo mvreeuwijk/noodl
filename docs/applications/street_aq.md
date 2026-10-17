@@ -276,7 +276,7 @@ without a warning:
 | `SIRANE_K3_PREFACTOR`, `SIRANE_K3_ACTIVATION` | `K_NO_O3_SOULHAC2011_PREFACTOR`, `K_NO_O3_SOULHAC2011_ACTIVATION` |
 | `SIRANE_K_FLOOR_PPB` | `PHOTOSTATIONARY_FLOOR_PPB` |
 | `k_no_o3_munich`, `k_no_o3_sirane` | `k_no_o3_jpl2003`, `k_no_o3_soulhac2011` |
-| `j_no2`, `j_no2_sirane` | `j_no2_zenith_table`, `j_no2_elevation_cloud` |
+| `j_no2_sirane` | `j_no2_elevation_cloud` |
 
 ### The canyon physics
 

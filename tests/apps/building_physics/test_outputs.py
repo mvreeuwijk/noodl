@@ -512,6 +512,7 @@ def test_building_air_change_rate_counts_the_air_handler_and_its_outdoor_air():
         building_air_change_rate(out, model, conditioned=["one", "two", "three", "ahs(Sup)"])
 
 
+@pytest.mark.slow
 def test_building_air_change_rate_counts_the_duct_system_inside_the_building():
     """ContamX (measured on this project to its print precision): the conditioned volume
     includes every duct segment's (1800.61 m3), and the air a supply terminal delivers to
@@ -542,16 +543,13 @@ def _zone_two_outside(base, tmp_path):
     return read_prj(variant)
 
 
-@pytest.mark.parametrize(("base", "volume"), [
-    pytest.param(AHS, 1202.0, id="air-handler"),
-    pytest.param(DUCTS, 1200.0 + 0.0314159 * 17.7 + 0.0176715 * 3, id="ducts"),
-])
-def test_a_zone_outside_the_building_volume_is_left_out_by_default(base, volume, tmp_path):
-    """ContamX (measured on both variants to its print precision, 8e-8): a zone whose flags
-    carry 16 is left out of the conditioned volume (1202 and 1200.61 m3), and air leaving it
-    into the space enters the building. The reader marks the zone `in_building_volume` 0,
-    and the default space is `project.building_zones`."""
-    project = _zone_two_outside(base, tmp_path)
+def test_a_zone_outside_the_building_volume_is_left_out_by_default(tmp_path):
+    """ContamX (measured to its print precision, 8e-8): a zone whose flags carry 16 is left
+    out of the conditioned volume (1202 m3), and air leaving it into the space enters the
+    building. The reader marks the zone `in_building_volume` 0, and the default space is
+    `project.building_zones`."""
+    volume = 1202.0
+    project = _zone_two_outside(AHS, tmp_path)
     assert "two" not in project.building_zones
     assert project.building_zones == [z for z in project.zones if z != "two"] + list(
         project.junctions)

@@ -252,6 +252,7 @@ def test_a_fan_curve_control_is_its_speed_ratio(tmp_path):
     assert act.key == "fan_speed.fan_4" and project.speed_edges == {"fan_4": 1}
 
 
+@pytest.mark.slow
 def test_duct_fan_and_terminal_controls_act_as_their_schedules(tmp_path):
     """`duct_three_zone.prj`: segment 2's fan speed (schedule 1) and terminal 6's opening
     (schedule 2) through schedule nodes, to 01:10 (both change before)."""

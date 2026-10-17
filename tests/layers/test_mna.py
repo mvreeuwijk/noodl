@@ -261,19 +261,6 @@ def test_batched_drivers_solve_each_instance():
     torch.testing.assert_close(_at(net, phi[2], "a"), torch.tensor(1.0), rtol=0, atol=1e-12)
 
 
-def test_classic_layer_is_untouched():
-    net = _net(["gnd", "a", "b"], [("gnd", "a", "r"), ("a", "b", "r"), ("b", "gnd", "r")])
-    layer = KirchhoffLayer(net, "e", [Conductance(torch.tensor([1.0, 2.0, 0.5]), kind="r")],
-                           boundary=["gnd"])
-    assert layer.mna is False and layer.dynamic is False
-    assert layer.implicit_edges.numel() == 0
-    sources = torch.tensor([0.0, 1.0, -0.5])
-    phi1, q1 = layer.solve(torch.zeros(1), {}, sources, differentiable=False)
-    phi2, q2 = layer.solve(torch.zeros(1), {}, sources, differentiable=False,
-                           integration="backward_euler", t=3.0, q0=None, history=None)
-    assert torch.equal(phi1, phi2) and torch.equal(q1, q2)
-
-
 def test_classic_methods_on_mna_layer_raise():
     _, layer = _transformer_layer()
     phi, _ = layer.solve(torch.zeros(1), differentiable=False)

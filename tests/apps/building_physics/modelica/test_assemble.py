@@ -355,6 +355,7 @@ def test_a_flow_direction_that_does_not_settle_is_refused_by_name(tmp_path):
         simulate(model, state, drivers, names.times[:1], scheme="midpoint")
 
 
+@pytest.mark.slow
 def test_a_jump_moved_to_the_end_of_a_run_starts_the_next_step_at_it(monkeypatch):
     """With the locator's margin at half a run, every run is too short to split, so the
     shaft's reversal at 0.192 s is moved to the end of its run (kept in the old direction to

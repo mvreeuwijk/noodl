@@ -24,7 +24,7 @@ from noodl.apps.street_aq import network as street_network
 from noodl.apps.street_aq.network import Street, StreetNetwork, street_index
 from noodl.couple import (
     CONCENTRATION_TO_MASS_FRACTION,
-    STREET_RAD_TO_CONTAM_DEG,
+    MATH_RAD_TO_COMPASS_DEG,
     DriverAlias,
     ValueLink,
     union,
@@ -80,7 +80,7 @@ def build_city(batch_size: int):
         DriverAlias(source=("street", "U_ref"), targets=(("building", "V_met", None),)),
         DriverAlias(
             source=("street", "theta_w"),
-            targets=(("building", "theta_w", STREET_RAD_TO_CONTAM_DEG),),
+            targets=(("building", "theta_w", MATH_RAD_TO_COMPASS_DEG),),
         ),
     ]
     return union(

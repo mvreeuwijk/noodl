@@ -21,7 +21,7 @@ from noodl.elements.door_discretized import (
     mbl_discretized_operable_door,
 )
 from noodl.elements.media import medium
-from noodl.elements.powerlaw_mbl import MBLPowerLaw, mbl_orifice
+from noodl.elements.powerlaw_regularized import MBLPowerLaw, mbl_orifice
 
 F64 = torch.float64
 MED = medium("Buildings.Media.Air")
@@ -53,8 +53,7 @@ def test_power_law_slopes_equal_autograd_bit_for_bit(element):
     assert torch.equal(exact, reference)
 
 
-@pytest.mark.parametrize("operable", [False, True])
-@pytest.mark.parametrize("y", [0.0, 0.3, 1.0])
+@pytest.mark.parametrize(("operable", "y"), [(False, 0.0), (True, 0.0), (True, 0.3)])
 def test_discretised_door_stream_slope_equals_autograd_bit_for_bit(operable, y):
     if operable:
         comp, head = mbl_discretized_operable_door(src=0, tgt=1, medium=MED, y_key="y",

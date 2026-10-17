@@ -30,14 +30,17 @@ python -m mkdocs build --strict
 
 ## Continuous integration
 
+A push to a branch runs only the `branch` job, which takes a few minutes. A pull request, a push to `main` and a manual run run the other `tests` jobs. A newer push cancels the run still in progress on the same branch or pull request.
+
 | Workflow / job | Runs on | What it runs |
 | --- | --- | --- |
-| `tests` / `test` | every push and pull request; Linux, Python 3.12 | `ruff check .` and the full default suite (`-m "not slow"`) with coverage |
-| `tests` / `minimum-versions` | Linux, Python 3.11, torch 2.2, numpy 1.26 | the core subset from `AGENTS.md`, installed with `.[test]` (not `.[dev]`: the `reference` extra's `wntr` needs numpy>=2.2.6) |
-| `tests` / `wheel-smoke` | Linux | builds the wheel, installs it in a clean venv and imports every application outside the source tree |
-| `tests` / `windows` | Windows, Python 3.12 | the core subset plus `tests/verification/test_contam_parity.py` with `pip install .[contam]` (the `contamxpy` wheel exists for Windows only, so this is where the CONTAM parity tests actually run) |
-| `tests` / `macos` | macOS, Python 3.12 | the core subset |
-| `slow-reference` / `slow` | weekly (Monday 03:00 UTC), manual `workflow_dispatch`, and pull requests labelled `run-slow` | `pytest -m slow` over `tests/verification` and `tests/benchmarks` (the full reference-model comparisons) |
+| `tests` / `branch` | every push to a branch other than `main`; Linux, Python 3.12 | `ruff check .`, the core tests, and the tests of every application the branch changed relative to `main` (`.github/scripts/select_tests.py`, the table in `AGENTS.md`); no coverage |
+| `tests` / `test` | pull requests, pushes to `main`, manual runs; Linux, Python 3.12 | `ruff check .` and the full default suite (`-m "not slow"`) with coverage |
+| `tests` / `minimum-versions` | pull requests, pushes to `main`; Linux, Python 3.11, torch 2.2, numpy 1.26 | the core subset from `AGENTS.md`, installed with `.[test]` (not `.[dev]`: the `reference` extra's `wntr` needs numpy>=2.2.6) |
+| `tests` / `wheel-smoke` | pull requests, pushes to `main`; Linux | builds the wheel, installs it in a clean venv and imports every application outside the source tree |
+| `tests` / `windows` | pull requests, pushes to `main`; Windows, Python 3.12 | the core subset, then every test in `tests/verification/test_contam_parity.py`, `slow` ones included, with `pip install .[contam]` (the `contamxpy` wheel exists for Windows only, so this is the only place the CONTAM parity tests run) |
+| `tests` / `macos` | pull requests, pushes to `main`; macOS, Python 3.12 | the core subset |
+| `slow-reference` / `slow` | weekly (Monday 03:00 UTC), manual `workflow_dispatch`, and pull requests labelled `run-slow` | `pytest -m slow` over all of `tests/` (full reference-model comparisons and long simulations) |
 
 Test extras: `pip install -e ".[dev]"` installs everything (`test` plus `reference`). Floats in the
 golden and pinned-value tests (`tests/test_golden_orchestration.py`, `test_pcg_results_are_pinned`)

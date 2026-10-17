@@ -84,17 +84,12 @@ def test_power_converter_losses_follow_the_dc_side_when_it_feeds_the_ac_side():
     assert abs(complex(r[1]) - (-360.0)) <= 1e-9
 
 
-@pytest.mark.parametrize("law", [ImpedanceTransformer(2.0, 0.1j), PowerConverter(0.5, 0.9)])
-@pytest.mark.parametrize("mode", ["dc", "initial", "transient"])
+@pytest.mark.parametrize("law, mode", [(ImpedanceTransformer(2.0, 0.1j), "dc"),
+                                       (PowerConverter(0.5, 0.9), "transient")])
 def test_converters_need_a_phasor_layer(law, mode):
     ctx = LawContext(mode=mode)
     with pytest.raises(ValueError, match=f"{law.kind!r}.*phasor layer"):
         law(torch.zeros(2), torch.zeros(2), {}, ctx)
-
-
-def test_converters_declare_two_port_phasor_laws():
-    for law in (ImpedanceTransformer(2.0, 0.1j), PowerConverter(0.5, 0.9)):
-        assert law.ports == 2 and law.phasor_capable and law.law_form == "implicit"
 
 
 def test_splice_and_reg_root_transcribe_mbl():

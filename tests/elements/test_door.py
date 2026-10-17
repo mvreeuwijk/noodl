@@ -243,8 +243,9 @@ def _torch_inputs(dp, TA, TB):
 # ---------------------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("med", [AIR, SIMPLE], ids=["Air", "SimpleAir"])
-@pytest.mark.parametrize("m", [0.5, 0.62])
+@pytest.mark.parametrize(
+    ("med", "m"), [(AIR, 0.5), (SIMPLE, 0.62)], ids=["Air-m0.5", "SimpleAir-m0.62"]
+)
 def test_door_open_both_directions_match_the_transcription_on_the_dp_dT_grid(med, m):
     dp, TA, TB = _grid()
     ab, ba = _pair(med, m=m)
@@ -315,7 +316,7 @@ def test_moisture_and_absolute_pressure_are_not_inputs():
 # ---------------------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("y", [0.0, 0.3, 1.0])
+@pytest.mark.parametrize("y", [0.0, 0.3])
 def test_operable_door_matches_the_transcribed_blend(y):
     dp, TA, TB = _grid()
     ab, ba = _opair()

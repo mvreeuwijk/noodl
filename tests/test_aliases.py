@@ -6,13 +6,10 @@ give the same result as the new one.
 """
 
 import dataclasses
-import importlib
 from pathlib import Path
 
-import pytest
 import torch
 
-import noodl.couple as couple
 import noodl.elements as elements
 from noodl.apps import street_aq, water
 from noodl.apps.street_aq import canyon as street_canyon
@@ -57,8 +54,6 @@ OBJECT_ALIASES = [
     (water_elements, "EPANET_G_FT", "G_FT_S2"),
     (water_elements, "EPANET_KM", "MINOR_LOSS_K_FT"),
     (water_elements, "EPANET_VISCOS_FT2", "NU_WATER_FT2"),
-    (couple, "STREET_RAD_TO_CONTAM_DEG", "MATH_RAD_TO_COMPASS_DEG"),
-    (couple, "CONTAM_DEG_TO_STREET_RAD", "COMPASS_DEG_TO_MATH_RAD"),
     (street_canyon, "KAPPA_MUNICH", "KAPPA_041"),
     (street_canyon, "GAMMA_E", "EULER_GAMMA_TRUNCATED"),
     (street_canyon, "SIRANE_EXCHANGE", "EXCHANGE_SIGMA_W_RATIO"),
@@ -76,66 +71,44 @@ OBJECT_ALIASES = [
     (street_chemistry, "SIRANE_K3_PREFACTOR", "K_NO_O3_SOULHAC2011_PREFACTOR"),
     (street_chemistry, "SIRANE_K3_ACTIVATION", "K_NO_O3_SOULHAC2011_ACTIVATION"),
     (street_chemistry, "SIRANE_K_FLOOR_PPB", "PHOTOSTATIONARY_FLOOR_PPB"),
-    (street_chemistry, "j_no2_sirane", "j_no2_elevation_cloud"),
     (street_chemistry, "k_no_o3_sirane", "k_no_o3_soulhac2011"),
 ]
 
 STREET_PACKAGE_ALIASES = [
-    ("KAPPA_MUNICH", "KAPPA_041"),
-    ("GAMMA_E", "EULER_GAMMA_TRUNCATED"),
-    ("SIRANE_EXCHANGE", "EXCHANGE_SIGMA_W_RATIO"),
-    ("SCHULTE_BETA", "ASPECT_RATIO_EXCHANGE_BETA"),
-    ("SEUIL_GAUSS", "GAUSS_CUTOFF_SIGMAS"),
-    ("soulhac_shape", "bessel_shape_parameter"),
-    ("macdonald_profile", "canopy_displacement_roughness"),
-    ("sigma_theta_munich", "sigma_theta_turbulence_intensity"),
-    ("n_theta_munich", "n_theta_rectangle_rule"),
-    ("sirane_direction_samples", "exact_gaussian_direction_samples"),
-    ("munich_idealised", "twelve_street_grid"),
+    "KAPPA_MUNICH", "GAMMA_E", "SIRANE_EXCHANGE", "SCHULTE_BETA", "SEUIL_GAUSS",
+    "soulhac_shape", "macdonald_profile", "sigma_theta_munich", "n_theta_munich",
+    "sirane_direction_samples", "munich_idealised",
 ]
 
 
-@pytest.mark.parametrize(("module", "old", "new"), OBJECT_ALIASES,
-                         ids=[old for _, old, _ in OBJECT_ALIASES])
-def test_alias_is_the_same_object(module, old, new):
-    assert getattr(module, old) is getattr(module, new)
+def test_reference_model_names_are_the_same_objects_as_the_physical_names():
+    for module, old, new in OBJECT_ALIASES:
+        assert getattr(module, old) is getattr(module, new), old
 
 
-@pytest.mark.parametrize("old", [o for m, o, _ in OBJECT_ALIASES if m in (elements, water)])
-def test_alias_is_still_exported(old):
-    module = elements if hasattr(elements, old) else water
-    assert old in module.__all__
+def test_reference_model_names_stay_exported_from_the_element_and_water_packages():
+    for module, old, _ in OBJECT_ALIASES:
+        if module in (elements, water):
+            assert old in module.__all__, old
 
 
-@pytest.mark.parametrize(("old", "new", "names"), [
-    ("noodl.elements.powerlaw_mbl", "noodl.elements.powerlaw_regularized",
-     ["MBLPowerLaw", "RegularizedPowerLaw", "mbl_orifice", "regularized_orifice", "_f64"]),
-    ("noodl.apps.sewer.swmm_xsect", "noodl.apps.sewer.xsect_tables",
-     ["kinwave_steady", "full_flow", "a_circular", "s_circular", "LCF", "A_CIRC"]),
-])
-def test_shim_module_reexports(old, new, names):
-    shim, module = importlib.import_module(old), importlib.import_module(new)
-    for name in names:
-        assert getattr(shim, name) is getattr(module, name)
+def test_street_aliases_are_exported_from_the_package():
+    new_names = {old: new for module, old, new in OBJECT_ALIASES if module is not elements}
+    for old in STREET_PACKAGE_ALIASES:
+        new = new_names[old]
+        assert getattr(street_aq, old) is getattr(street_aq, new)
+        assert old in street_aq.__all__
+        assert new in street_aq.__all__
 
 
-def test_old_conversion_names_give_the_new_conversions():
-    theta = torch.tensor([0.0, 1.0, 4.0], dtype=torch.float64)
-    wd = torch.tensor([0.0, 90.0, 270.0], dtype=torch.float64)
-    assert torch.equal(couple.apply_conversion("street_rad_to_contam_deg", theta, {}),
-                       couple.apply_conversion("math_rad_to_compass_deg", theta, {}))
-    assert torch.equal(couple.apply_conversion("contam_deg_to_street_rad", wd, {}),
-                       couple.apply_conversion("compass_deg_to_math_rad", wd, {}))
-
-
-@pytest.mark.parametrize(("physical", "path"), [
-    ("moist_air", "Buildings.Media.Air"),
-    ("moist_air_ideal_gas", "Buildings.Media.Specialized.Air.PerfectGas"),
-    ("dry_air_ideal_gas", "Modelica.Media.Air.SimpleAir"),
-])
-def test_medium_physical_key_and_modelica_path_give_the_same_medium(physical, path):
-    assert elements.medium(physical) == elements.medium(path)
-    assert elements.medium(physical).name == path
+def test_medium_physical_key_and_modelica_path_give_the_same_medium():
+    for physical, path in [
+        ("moist_air", "Buildings.Media.Air"),
+        ("moist_air_ideal_gas", "Buildings.Media.Specialized.Air.PerfectGas"),
+        ("dry_air_ideal_gas", "Modelica.Media.Air.SimpleAir"),
+    ]:
+        assert elements.medium(physical) == elements.medium(path)
+        assert elements.medium(physical).name == path
 
 
 def test_friction_epanet_is_friction_composite():
@@ -162,23 +135,8 @@ def test_geometry_swmm_is_geometry_tabulated():
         assert torch.equal(results[0][key], results[1][key])
 
 
-@pytest.mark.parametrize(("old", "new"), STREET_PACKAGE_ALIASES,
-                         ids=[old for old, _ in STREET_PACKAGE_ALIASES])
-def test_street_alias_is_exported_from_the_package(old, new):
-    assert getattr(street_aq, old) is getattr(street_aq, new)
-    assert old in street_aq.__all__
-    assert new in street_aq.__all__
-
-
-def test_street_von_karman_constants_are_named_by_value():
-    assert street_closures.KAPPA_040 == 0.40
-    assert street_closures.KAPPA_041 == 0.41
-    assert street_canyon.KAPPA == street_closures.KAPPA_040
+def test_street_kappa_follows_the_canyon_wind_profile():
     assert street_closures.PRESETS["sirane"]["kappa"] == street_closures.KAPPA_040
     assert street_closures.PRESETS["munich"]["kappa"] == street_closures.KAPPA_041
     assert street_closures.infer_kappa({"canyon_wind": "exponential_profile"}) == 0.41
     assert street_closures.infer_kappa({"canyon_wind": "bessel_profile"}) == 0.40
-
-
-def test_street_euler_gamma_is_the_truncated_value():
-    assert street_canyon.EULER_GAMMA_TRUNCATED == 0.577

@@ -1,9 +1,51 @@
+# Two tiers. A push to a branch runs `branch`: ruff, the core tests and the tests of every
+# application the branch changed (.github/scripts/select_tests.py), in a few minutes. A pull
+# request, a push to main and a manual run run everything else: the full suite with the
+# coverage threshold, the oldest supported versions, the wheel, Windows and macOS. The `slow`
+# tests run weekly (slow.yml).
 name: tests
 on:
   push:
   pull_request:
+  workflow_dispatch:
+# A newer push to the same branch or pull request cancels the run still in progress; main
+# finishes every run.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 jobs:
+  branch:
+    if: github.event_name == 'push' && github.ref != 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # the merge base with main, for the changed files
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install --upgrade pip
+      - run: pip install torch --index-url https://download.pytorch.org/whl/cpu
+      - run: pip install -e ".[dev]"
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/noodl
+          key: noodl-cache-${{ hashFiles('src/noodl/apps/electrical/power/cases.py') }}
+      - run: ruff check .
+      - name: Select the tests
+        id: select
+        run: |
+          paths=$(git diff --name-only origin/main...HEAD | python .github/scripts/select_tests.py)
+          echo "paths=$paths" >> "$GITHUB_OUTPUT"
+          echo "Testing: $paths" >> "$GITHUB_STEP_SUMMARY"
+      # The paths are left unquoted on purpose: the shell expands their globs.
+      - run: pytest -q -rs --no-cov -n auto --junitxml=junit.xml ${{ steps.select.outputs.paths }}
+      - name: Skip summary
+        if: always()
+        run: python .github/scripts/junit_summary.py junit.xml "branch tests (ubuntu, Python 3.12)" >> "$GITHUB_STEP_SUMMARY"
+
   test:
+    if: github.event_name != 'push' || github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -28,7 +70,7 @@ jobs:
       # NOODL_GOLDEN_EXACT is deliberately NOT set here: the golden file was recorded on another
       # machine and the Linux runner differs from it in the last ulp (PR #24 CI run), so every
       # job compares golden floats to rtol 1e-12 (see tests/test_golden_orchestration.py).
-      - run: pytest -q -rs --junitxml=junit.xml
+      - run: pytest -q -rs -n auto --junitxml=junit.xml
       - name: Skip summary
         if: always()
         run: python .github/scripts/junit_summary.py junit.xml "tests (ubuntu, Python 3.12)" >> "$GITHUB_STEP_SUMMARY"
@@ -37,6 +79,7 @@ jobs:
   # Core tests only; the reference-model comparisons stay in the main job, so it installs the
   # `test` extra (the `reference` extra's wntr needs numpy>=2.2.6, which cannot resolve here).
   minimum-versions:
+    if: github.event_name != 'push' || github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -49,11 +92,12 @@ jobs:
       - run: >
           pytest -q -rs --no-cov -n 2
           tests/test_*.py tests/layers tests/solvers tests/operators tests/elements
-          tests/components tests/apps/test_*.py tests/verification/test_newton_batched.py
+          tests/components tests/apps/test_*.py
 
   # Build the wheel and import it from a clean environment, outside the source tree,
   # so a missing package file or undeclared dependency fails here rather than for users.
   wheel-smoke:
+    if: github.event_name != 'push' || github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -70,6 +114,7 @@ jobs:
   # Platform checks: the core subset of AGENTS.md on Windows and macOS. The applications
   # and the heavy reference comparisons stay on Linux (main job) to keep these affordable.
   windows:
+    if: github.event_name != 'push' || github.ref == 'refs/heads/main'
     runs-on: windows-latest
     defaults:
       run:
@@ -85,15 +130,22 @@ jobs:
       # the CONTAM parity tests run rather than skip.
       - run: pip install -e ".[dev,contam]"
       - run: >
-          NOODL_PARITY_WORKERS=2 python -m pytest -q -rs --no-cov -n 2 --junitxml=junit.xml
+          python -m pytest -q -rs --no-cov -n 2 --junitxml=junit.xml
           tests/test_*.py tests/layers tests/solvers tests/operators tests/elements
-          tests/components tests/apps/test_*.py tests/verification/test_newton_batched.py
+          tests/components tests/apps/test_*.py
+      # Every CONTAM comparison, `slow` ones included (`-m ""`): the weekly slow workflow runs
+      # on Linux, where contamxpy is not installable, so this is the only place they run.
+      - run: >
+          python -m pytest -q -rs --no-cov -n 2 -m "" --junitxml=junit-contam.xml
           tests/verification/test_contam_parity.py
       - name: Skip summary
         if: always()
-        run: python .github/scripts/junit_summary.py junit.xml "tests (windows, Python 3.12)" >> "$GITHUB_STEP_SUMMARY"
+        run: |
+          python .github/scripts/junit_summary.py junit.xml "tests (windows, Python 3.12)" >> "$GITHUB_STEP_SUMMARY"
+          python .github/scripts/junit_summary.py junit-contam.xml "CONTAM comparisons (windows)" >> "$GITHUB_STEP_SUMMARY"
 
   macos:
+    if: github.event_name != 'push' || github.ref == 'refs/heads/main'
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
@@ -107,7 +159,7 @@ jobs:
       - run: >
           python -m pytest -q -rs --no-cov -n 2 --junitxml=junit.xml
           tests/test_*.py tests/layers tests/solvers tests/operators tests/elements
-          tests/components tests/apps/test_*.py tests/verification/test_newton_batched.py
+          tests/components tests/apps/test_*.py
       - name: Skip summary
         if: always()
         run: python .github/scripts/junit_summary.py junit.xml "tests (macos, Python 3.12)" >> "$GITHUB_STEP_SUMMARY"

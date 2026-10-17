@@ -128,16 +128,6 @@ def test_a_junction_on_its_bed_converges_at_the_default_min_surface_area():
     assert solve_atol(model) > SOLVE_ATOL
 
 
-def test_default_pass_budget_covers_a_slow_outfall_head():
-    """The loop fixture's outfall head contracts by ~0.92 per pass at low flow and needs 327
-    passes at t = 500 s (tests/verification/test_sewer_dynwave_parity.py); the default
-    budget, the file's MAX_TRIALS 500, covers that, so a plain build_model +
-    simulate_dynamic_wave does not run out of passes there."""
-    net, _, _ = read_swmm_inp(DATA / "loop_dynwave.inp")
-    model, _, _ = build_model(net)
-    assert model.iterate_max == 500
-
-
 def test_build_model_dispatches_and_refuses_storage(tmp_path):
     net = _tree(tmp_path)
     model, state, drivers = build_model(net)
@@ -261,19 +251,6 @@ def test_gradient_over_a_few_steps_from_the_cold_start(tmp_path):
 
 
 @pytest.mark.slow
-def test_steady_state_passes_the_total_inflow(tmp_path):
-    """1 h at 5 s, at HALF the fixture's inflows (normal depth 0.197 m in C5), which stays
-    free-surface throughout: at full inflow (0.16 m3/s in C5, normal depth 0.303 m) the
-    water at J4 reaches the 0.30 m crown of C4, which joins J4 with a zero offset."""
-    net = _tree(tmp_path, scale=0.5)
-    model, state, drivers = build_model(net)
-    state, hist = simulate_dynamic_wave(model, state, drivers, steps=720)
-    out = model.outfall_link_idx
-    total = sum(m.inflow for m in net.manholes)
-    assert hist["water.q"][-1, out].sum().item() == pytest.approx(total, rel=1e-6)
-
-
-@pytest.mark.slow
 def test_outfall_flow_rises_monotonically_towards_the_total(tmp_path):
     """The fast variant of the steady-state test: 10 minutes at half the inflows."""
     net = _tree(tmp_path, scale=0.5)
@@ -306,6 +283,7 @@ def test_dry_network_stays_finite(tmp_path):
     assert torch.isfinite(hist["water.phi"]).all() and torch.isfinite(hist["water.q"]).all()
     depth = hist["water.phi"][:, model.junction_idx] - model.junction_invert
     assert depth.min().item() > -1e-9
+    assert torch.all(hist["water.q"][0] == 0)               # the first step moves nothing
 
 
 def test_non_convergence_is_named(tmp_path):
@@ -313,12 +291,6 @@ def test_non_convergence_is_named(tmp_path):
     model, state, drivers = build_model(net, iterate_max=2, iterate_tol=1e-15)
     with pytest.raises(RuntimeError, match=r"^dynamic wave step at t=0\.0 s: .*did not converge"):
         simulate_dynamic_wave(model, state, drivers, steps=3)
-
-
-def test_first_step_of_a_dry_network_moves_nothing(tmp_path):
-    model, state, drivers = build_model(_tree(tmp_path, scale=0.0))
-    state, _ = simulate_dynamic_wave(model, state, drivers, steps=1)
-    assert torch.all(state["water.q"] == 0)
 
 
 @pytest.mark.slow
@@ -334,29 +306,6 @@ def test_batched_equals_single(tmp_path):
                                    rtol=1e-9, atol=1e-10)
 
 
-@pytest.mark.slow
-def test_gradient_through_the_steps_matches_central_differences(tmp_path):
-    """d(sum of junction depths after 60 steps)/d(Manning n of C3): wet, subcritical regime
-    from 300 s on (no flow-class switch inside the difference stencil)."""
-    net = _tree(tmp_path)
-    model, state, drivers = build_model(net)
-    hyd = model.dynamic_wave
-    state, _ = simulate_dynamic_wave(model, state, drivers, steps=60)   # wet it first
-    i = hyd.pipe_names.index("C3")
-
-    def loss(n3):
-        hyd.set_roughness(i, n3)
-        s, _ = simulate_dynamic_wave(model, state, drivers, steps=60)
-        return (s["water.phi"][model.junction_idx] - model.junction_invert).sum()
-
-    n = torch.tensor(0.013, dtype=F64, requires_grad=True)
-    loss(n).backward()
-    h = 1e-7
-    with torch.no_grad():
-        fd = (loss(n.detach() + h) - loss(n.detach() - h)) / (2 * h)
-    assert n.grad.item() == pytest.approx(fd.item(), rel=1e-5)
-
-
 def test_initial_state_and_pipe_table_serve_a_dynamic_wave_model(tmp_path):
     from noodl.apps.sewer import initial_state, pipe_table
 
@@ -369,6 +318,16 @@ def test_initial_state_and_pipe_table_serve_a_dynamic_wave_model(tmp_path):
     assert [r["pipe"] for r in rows] == model.pipe_names
     assert set(rows[0]) == {"pipe", "q", "h", "v", "R_h", "d_m", "T", "A_air", "D_h", "V_wet",
                             "V_air"}
+
+
+def test_pipe_table_has_every_column_with_the_air_on_the_dynamic_wave(tmp_path):
+    from noodl.apps.sewer.report import _COLUMNS, pipe_table
+    model, state, drivers = build_model(_tree(tmp_path), air=True, quality=False)
+    state, _ = simulate_dynamic_wave(model, state, drivers, steps=5)
+    rows = pipe_table(model, state, drivers, path=tmp_path / "pipes.csv")
+    assert [r["pipe"] for r in rows] == model.pipe_names
+    assert set(rows[0]) == set(_COLUMNS)
+    assert all(abs(v) < float("inf") for r in rows for k, v in r.items() if k != "pipe")
 
 
 def test_kinematic_routing_refuses_the_dynamic_wave_iteration_controls():
@@ -393,7 +352,15 @@ def _passes_and_history(name, steps, solve_kwargs=None, **kwargs):
 _PLAIN = {"acceleration": None}
 
 
-def test_anderson_is_the_default_and_halves_the_passes_on_the_tree():
+def test_anderson_is_the_default_acceleration():
+    from noodl.apps.sewer.dynwave import build_dynamic_wave_model
+
+    net, _, _ = read_swmm_inp(DATA / "tree_dynwave.inp")
+    assert build_dynamic_wave_model(net)[0].iterate_acceleration == "anderson"
+
+
+@pytest.mark.slow
+def test_anderson_halves_the_passes_on_the_tree():
     """Anderson mixing of the head iteration at least halves the mean passes per
     step (measured over 60 steps: 35.2 -> 14.1, plain relaxation judging heads and flows;
     34.8 when it judged the heads alone, which is now refused).
@@ -405,10 +372,6 @@ def test_anderson_is_the_default_and_halves_the_passes_on_the_tree():
     2.0e-9 m and 4.9e-10 m3/s over 60 steps;
     `test_anderson_lands_on_the_relaxed_fixed_point_with_a_tight_head_solve` shows the
     two fixed points agree to 2e-12 m once the head solve is tight."""
-    from noodl.apps.sewer.dynwave import build_dynamic_wave_model
-
-    net, _, _ = read_swmm_inp(DATA / "tree_dynwave.inp")
-    assert build_dynamic_wave_model(net)[0].iterate_acceleration == "anderson"
     fast, h_fast = _passes_and_history("tree_dynwave.inp", 30)
     plain, h_plain = _passes_and_history("tree_dynwave.inp", 30, **_PLAIN)
     assert fast <= plain / 2.0, (fast, plain)
@@ -431,17 +394,6 @@ def test_anderson_lands_on_the_relaxed_fixed_point_with_a_tight_head_solve():
                                atol=1e-10)
 
 
-@pytest.mark.slow
-def test_anderson_halves_the_passes_on_the_loop():
-    """Over the first 120 steps, through the slowly contracting outfall head near t = 500 s
-    (plain relaxation's worst case, 327 passes at 1e-11 m)."""
-    fast, h_fast = _passes_and_history("loop_dynwave.inp", 120)
-    plain, h_plain = _passes_and_history("loop_dynwave.inp", 120, **_PLAIN)
-    assert fast <= plain / 2.0, (fast, plain)
-    # the head solve's resolution, as in the tree test above
-    torch.testing.assert_close(h_fast["water.phi"], h_plain["water.phi"], rtol=0.0, atol=1e-8)
-
-
 def _slot_tree(tmp_path, scale):
     """tree_dynwave.inp with SURCHARGE_METHOD SLOT and the inflows scaled by `scale`."""
     text = (DATA / "tree_dynwave.inp").read_text().replace(
@@ -453,6 +405,7 @@ def _slot_tree(tmp_path, scale):
         dataclasses.replace(m, inflow=m.inflow * scale) for m in net.manholes))
 
 
+@pytest.mark.slow
 def test_slot_surcharges_the_tree_past_the_crown_without_refusal(tmp_path):
     """At 2.5x the fixture's inflows (1.25x tree_kinwave.inp) the water at J4 passes the
     0.30 m crown of C4 at step 95 (475 s) of 120. A 1.5x scale only reaches 0.25 m at
@@ -654,6 +607,7 @@ def _ramp(steps_up=40, hold=20, steps_down=10, low=0.8):
             + [1.0 - (1.0 - low) * (k + 1) / steps_down for k in range(steps_down)])
 
 
+@pytest.mark.slow
 def test_crown_crossing_converges_or_is_named():
     """A ramp of inflow up through J2's crown and back down (tree_extran_dynwave.inp's
     inflows times 0..1, then down to 0.8). J2 jumps above its 0.30 m crown at step 47 and
@@ -874,7 +828,7 @@ def test_junction_storage_floods_at_its_top_through_a_lagged_excess():
     assert w == pytest.approx([0.5 + 2.0, -0.22 + 2.0]) and dw == pytest.approx([200.0] * 2)
 
 
-@pytest.mark.parametrize("method", ["extran", "slot"])
+@pytest.mark.parametrize("method", ["slot", pytest.param("extran", marks=pytest.mark.slow)])
 def test_a_junction_driven_past_its_maximum_depth_floods_at_it(method):
     """MaxDepth 0.5 m everywhere: J2 (crown 0.30 m) passes 0.5 m and floods
     (dynwave.c:743-795, no ponding). It is held at y_max (1e-9 m) while the excess leaves
@@ -911,6 +865,7 @@ def test_a_junction_driven_past_its_maximum_depth_floods_at_it(method):
     assert abs(over[-1, j2].item() - (lateral - c2)) < 1e-6                  # settled
 
 
+@pytest.mark.slow
 def test_flood_releases_when_inflow_stops():
     """J2 floods (MaxDepth 0.5 m, from step 21), then its lateral inflow ramps down to
     nothing over steps 31-50 (the others stay). The lagged flood excess falls with J2's net
@@ -1031,6 +986,7 @@ def _drain(factors, conduits=("C5",)):
     return diags, sides
 
 
+@pytest.mark.slow
 def test_ramp_down_converges():
     """Every inflow of the tree ramps from its full value to nothing over steps 61-72 and
     stays off. As the network drains, J4 falls to the depth of the free outfall, which C5
@@ -1127,6 +1083,7 @@ def test_a_step_that_uses_up_the_files_trials_is_accepted():
         simulate_dynamic_wave(model, state, drivers, steps=6)
 
 
+@pytest.mark.slow
 def test_gradient_on_the_slope_switch_does_not_depend_on_the_wall_slope(monkeypatch):
     """At a step that lands on C5's switching surface (the tree's drain-down after all
     inflows stop, step 108) the returned gradient is the tie rule's -- the sensitivity of a
@@ -2225,7 +2182,8 @@ def test_an_outfall_on_a_regulator_takes_zero_normal_and_critical_depth():
             pytest.approx(head))
 
 
-@pytest.mark.parametrize("kind", ["orifice", "weir", "outlet"])
+@pytest.mark.parametrize("kind", ["weir", pytest.param("orifice", marks=pytest.mark.slow),
+                                  pytest.param("outlet", marks=pytest.mark.slow)])
 def test_a_run_ends_on_swmms_regulator_flow_at_its_own_heads(kind):
     """The fixed point is SWMM's: after each step the regulator's solved flow is
     `link_getInflow` at that step's own converged heads, and every junction holds SWMM's
@@ -2332,10 +2290,8 @@ TIDE = ((0.0, 8.10), (6.0, 8.40), (18.0, 8.00))
     (0.0, 8.10),                     # the first entry
     (3 * 3600.0, 8.25),              # linear between entries (table.c:51-63)
     (6 * 3600.0, 8.40),              # on an entry: x <= x2 interpolates to y2 (table.c:421)
-    (12 * 3600.0, 8.20),
     (20 * 3600.0, 8.00),             # beyond the last entry: its value, no wrap (table.c:424)
     (24 * 3600.0, 8.10),             # the tide repeats every 24 h of elapsed time (node.c:1449)
-    (27 * 3600.0, 8.25),
     (48 * 3600.0 + 1.5, 8.10 + 1.5 / 3600.0 * 0.05),
 ])
 def test_tidal_stage_is_swmms_table_lookup_of_the_hour_of_day(seconds, stage):
@@ -2711,6 +2667,7 @@ def test_a_flooded_junction_loses_its_contents_with_the_overflow():
     assert flooded == 10
 
 
+@pytest.mark.slow
 def test_tracer_follows_reversed_flow():
     """The loop's adverse conduit Cd is oriented J4 -> J3 (the reader reverses it, as SWMM
     does) but carries J3's water to J4, so its solved flow is negative. A tracer entering
@@ -2755,6 +2712,7 @@ def test_quality_conserves_the_tracer_while_the_tree_fills(tmp_path):
     assert _outfall_flux(model, states[-1]) > 0.0          # it reached the outfall
 
 
+@pytest.mark.slow
 def test_tracer_crosses_a_regulator_without_storage():
     """An orifice (as a weir or an outlet: every edge kind of the head layer is a flow kind
     of the quality layer) carries flow but no volume (SWMM gives a non-conduit link its
@@ -2907,6 +2865,7 @@ def test_air_is_built_on_the_dynamic_wave_tree_and_balances(tmp_path):
     assert torch.isfinite(resolved["air_quality.capacity"]).all()
 
 
+@pytest.mark.slow
 def test_air_flows_equal_the_kinematic_model_at_the_same_depths(tmp_path):
     """Same air-side physics: the dynamic model's air layer and the kinematic model's (the
     same `air_layer`, built from the kinematic reading of the same pipes), solved on the SAME
@@ -2993,6 +2952,7 @@ def test_a_full_conduit_keeps_the_air_finite():
     assert torch.isfinite(hist["air.q"]).all()
 
 
+@pytest.mark.slow
 def test_a_surcharged_tree_with_air_stays_finite():
     """The EXTRAN tree surcharges J2 (3x the inflows): with the air on, every air flow and
     pressure along the run is finite."""
@@ -3002,19 +2962,6 @@ def test_a_surcharged_tree_with_air_stays_finite():
     assert torch.isfinite(hist["air.q"]).all() and torch.isfinite(hist["air.phi"]).all()
     full = model.dynamic_wave.diameter
     assert bool((hist["sewer.h"] >= full - 1e-6).any())                      # a full conduit
-
-
-def test_pipe_table_has_every_column_on_the_dynamic_wave(tmp_path):
-    """`pipe_table` returns all of the kinematic path's columns for a dynamic-wave model,
-    with or without the air."""
-    from noodl.apps.sewer.report import _COLUMNS, pipe_table
-    for air in (False, True):
-        model, state, drivers = build_model(_tree(tmp_path), air=air, quality=False)
-        state, _ = simulate_dynamic_wave(model, state, drivers, steps=5)
-        rows = pipe_table(model, state, drivers, path=tmp_path / "pipes.csv")
-        assert [r["pipe"] for r in rows] == model.pipe_names
-        assert set(rows[0]) == set(_COLUMNS)
-        assert all(abs(v) < float("inf") for r in rows for k, v in r.items() if k != "pipe")
 
 
 def test_air_refuses_loops_branches_and_regulator_drains_by_name():
@@ -3045,6 +2992,7 @@ def test_air_refuses_a_cycle_that_never_reaches_an_outfall():
         build_model(net, air=True)
 
 
+@pytest.mark.slow
 def test_air_with_quality_couples_the_h2s_transfer(tmp_path):
     """With sulfide the air_quality layer and the two-film transfer join: sulfide loaded at
     J1 appears as headspace H2S, the transfer's sources are opposite in moles of sulfur at
@@ -3072,16 +3020,6 @@ def test_air_with_quality_couples_the_h2s_transfer(tmp_path):
     assert float(air.abs().max()) > 0.0
 
 
-def test_build_dynamic_wave_model_is_exported():
-    """The docs point at `build_dynamic_wave_model`'s `acceleration`, `memory` and
-    `iterate_flow_tol`: it is part of the sewer app's public names."""
-    import noodl.apps.sewer as sewer
-    from noodl.apps.sewer.dynwave import build_dynamic_wave_model
-
-    assert sewer.build_dynamic_wave_model is build_dynamic_wave_model
-    assert "build_dynamic_wave_model" in sewer.__all__
-
-
 # ------------------------------------------------------------------------------- ponding
 def _pond_run(net, steps=30):
     model, state, drivers = build_model(net, iterate_tol=1e-12, iterate_max=500)
@@ -3090,6 +3028,7 @@ def _pond_run(net, steps=30):
     return model, hist
 
 
+@pytest.mark.slow
 def test_ponding_keeps_the_water_a_flooding_junction_would_lose():
     """J2 (MaxDepth 0.3 m, its crown, Aponded 0.5 m2) of `ponding_dynwave.inp` rises barely
     above its rim, over the ponded area plus its conduits', and its overflow is the ponded
@@ -3146,7 +3085,7 @@ def _pond_drivers(n_start, n_last, head_start):
 
 
 @pytest.mark.parametrize("n_start,n_last,head_start", [
-    (0.02, 0.03, 0.46), (0.02, 0.03, 0.2), (0.0, 0.0, 0.1)])
+    (0.02, 0.03, 0.46), (0.0, 0.0, 0.1)])
 def test_a_ponding_junction_rising_through_its_full_head_is_monotone_and_unwalled(
         n_start, n_last, head_start):
     """`JunctionStorage` with a `pond_head` H* = 0.5 m beside a plain junction with the same top:

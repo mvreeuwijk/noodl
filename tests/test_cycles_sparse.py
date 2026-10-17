@@ -5,10 +5,8 @@ to an independent DENSE reference (the earlier dense algorithm, reproduced here 
 a multi-kind, multi-component network, plus a gradcheck through both.
 """
 
-import time
 import unittest.mock
 
-import pytest
 import torch
 from hypothesis import given, settings
 from hypothesis import strategies as st
@@ -112,10 +110,6 @@ def test_gradcheck_particular_flow():
     assert torch.autograd.gradcheck(f, (raw,), eps=1e-6, atol=1e-5)
 
 
-def test_tree_elimination_helpers_are_importable():
-    from noodl.cycles import _tree_elimination_levels, _tree_solve  # noqa: F401
-
-
 def _dense_branch_flows_reference(net, amplitudes, kind=None):
     """The earlier dense algorithm: materialise cycle_basis(kind) and matmul."""
     J = net.cycle_basis(kind).to(amplitudes.dtype)
@@ -185,44 +179,3 @@ def test_branch_flows_never_materialises_the_dense_cycle_basis_matrix():
     ):
         q = branch_flows(net, amplitudes, kind="airpath")
     assert torch.isfinite(q).all()
-
-
-@pytest.mark.slow
-def test_particular_flow_1000_node_chain_is_faster_than_dense():
-    """Reports, does not gate on, wall-clock time for a 1000-node chain (worst case for
-    tree depth: a chain's single component has depth == n, so this is also the WORST case
-    for this migration's O(depth) elimination -- a star or balanced tree would show a far
-    larger improvement).
-
-    Memory is not measured here: tracemalloc does not see PyTorch's C-level allocator (an
-    80 MB torch.zeros shows as 0.000 MB under tracemalloc, measured on this machine), so a
-    tracemalloc-based memory comparison would be a vacuous pass on Python-object overhead
-    only. This test therefore reports TIME only.
-
-    Measured on this machine: sparse 20.13 ms vs dense 70.07 ms.
-    """
-    n = 1000
-    net = Network(dtype=torch.float64)
-    for i in range(n):
-        net.add_node(i)
-    for i in range(1, n):
-        net.add_edge(i - 1, i, kind="x")
-    torch.manual_seed(0)
-    raw = torch.rand(n, dtype=torch.float64)
-    sources = raw - raw.mean()
-
-    particular_flow(net, sources)  # warm the topology cache before timing either path
-
-    t0 = time.perf_counter()
-    q_sparse = particular_flow(net, sources)
-    t_sparse = time.perf_counter() - t0
-
-    t0 = time.perf_counter()
-    q_dense = _dense_particular_flow_reference(net, sources)
-    t_dense = time.perf_counter() - t0
-
-    torch.testing.assert_close(q_sparse, q_dense, rtol=1e-9, atol=1e-9)
-    print(
-        f"\nparticular_flow 1000-node chain: sparse {t_sparse * 1e3:.2f} ms vs "
-        f"dense {t_dense * 1e3:.2f} ms"
-    )

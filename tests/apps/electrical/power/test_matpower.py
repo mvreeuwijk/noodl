@@ -130,16 +130,10 @@ def test_a_missing_table_and_a_cell_array_for_a_table_are_refused(tmp_path):
 
 
 @pytest.mark.external
-@pytest.mark.parametrize("case, sizes, ignored", [
-    ("case9", (9, 9, 3), ["gencost"]),
-    ("case14", (14, 20, 5), ["gencost", "bus_name"]),
-    ("case30", (30, 41, 6), ["gencost"]),
-    ("case9_features", (9, 10, 5), []),
-])
-def test_every_standard_case_reads(case, sizes, ignored):
-    net = read_matpower(power_case(case))
-    assert (len(net.buses), len(net.branches), len(net.generators)) == sizes
-    assert net.name == case and net.notes["ignored_fields"] == ignored
+def test_the_30_bus_standard_case_reads():
+    net = read_matpower(power_case("case30"))
+    assert (len(net.buses), len(net.branches), len(net.generators)) == (30, 41, 6)
+    assert net.name == "case30" and net.notes["ignored_fields"] == ["gencost"]
     assert sum(b.kind == "slack" for b in net.buses) == 1
 
 

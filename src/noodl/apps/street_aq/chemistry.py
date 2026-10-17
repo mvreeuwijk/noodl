@@ -27,7 +27,6 @@ __all__ = [
     "SIRANE_K3_ACTIVATION",
     "SIRANE_K3_PREFACTOR",
     "SIRANE_K_FLOOR_PPB",
-    "j_no2",
     "j_no2_elevation_cloud",
     "j_no2_sirane",
     "j_no2_zenith_table",
@@ -217,10 +216,6 @@ def j_no2_zenith_table(zenith_deg, attenuation=1.0) -> torch.Tensor:
     weight = (clamped - angles[lower]) / span
     interpolated = values[lower] + weight * (values[upper] - values[lower])
     return interpolated * torch.as_tensor(attenuation, dtype=torch.float64)
-
-
-j_no2 = j_no2_zenith_table
-"""Deprecated name of `j_no2_zenith_table`."""
 
 
 # ------------------------------------------------------------- SIRANE's chemistry closure

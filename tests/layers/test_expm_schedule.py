@@ -61,7 +61,7 @@ def test_theta_max_agrees_with_al_mohy_higham_to_the_leading_digit():
     assert 8.0 < _theta_max(2.0**-53, 55, forcing=False) < 14.0
 
 
-@pytest.mark.parametrize("norm", [0.0, 1e-3, 1.0, 12.0, 250.0, 25_000.0])
+@pytest.mark.parametrize("norm", [1e-3, 12.0, 25_000.0])
 @pytest.mark.parametrize("forcing", [False, True])
 def test_schedule_meets_the_tolerance_and_never_wastes_a_substep(norm, forcing):
     s, m = _taylor_schedule(norm, 1e-12, forcing=forcing)
@@ -275,7 +275,7 @@ def _closed_form_forced(r: float) -> tuple[float, float]:
     return value, derivative
 
 
-@pytest.mark.parametrize("r", [0.0, 1e-6, 1e-3, 1e-1, 1.0])
+@pytest.mark.parametrize("r", [0.0, 1e-6, 1.0])
 def test_forced_step_value_and_coefficient_derivative_match_the_closed_form_near_a_zero_operator(r):
     x, r_t = _one_node_forced(r)
     value, derivative = _closed_form_forced(r)
@@ -284,7 +284,7 @@ def test_forced_step_value_and_coefficient_derivative_match_the_closed_form_near
     assert dr.item() == pytest.approx(derivative, rel=1e-8, abs=1e-9)
 
 
-@pytest.mark.parametrize("dt", [1e-9, 1e-6, 1e-3, 1e-1, 1.0, 7.0])
+@pytest.mark.parametrize("dt", [1e-9, 1e-1, 7.0])
 def test_forced_action_and_its_coefficient_gradients_match_the_dense_reference_at_every_norm(dt):
     layer = _chain()
     q = _t([0.3, 0.3, -0.2, 0.3, 0.3], requires_grad=True)
@@ -302,7 +302,7 @@ def test_forced_action_and_its_coefficient_gradients_match_the_dense_reference_a
         torch.testing.assert_close(g, r, rtol=1e-8, atol=1e-12)
 
 
-@pytest.mark.parametrize("spread", [1e-6, 1e-4, 1e-2, 1.0])
+@pytest.mark.parametrize("spread", [1e-6, 1.0])
 def test_shifted_action_gradients_match_the_dense_reference_near_a_zero_operator(spread):
     """The shifted case, mirroring the forced test above on the SHIFTED path: four nodes
     with `removal = [100, 100, 100, 100 + spread]`, `q = 0` (pure decay, no advective

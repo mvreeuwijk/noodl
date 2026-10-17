@@ -59,7 +59,7 @@ def two_zone_layer():
     return net, elements, drives, boundary
 
 
-@pytest.fixture
+@pytest.fixture(scope="session")
 def composed_model():
     """The reference composed model: 8 buildings, a 40-node street and a 30-node sewer
     network, about 1030 nodes and 2200 edges, with one reference physics configuration

@@ -429,11 +429,6 @@ class Model:
 
     # ------------------------------------------------------------------- setup
     @property
-    def capacitated(self) -> dict[str, AllocatedFlowLayer]:
-        """Pre-rename name of `allocation`, kept as an alias (the same dict)."""
-        return self.allocation
-
-    @property
     def refs(self):
         """`noodl.refs.LayerRefs`: every registered layer as a `LayerRef` whose attributes
         are its state and driver keys, each knowing its node order, shape and unit

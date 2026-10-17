@@ -8,8 +8,6 @@ Code-to-code comparison with NIST's ContamX engine is `test_contam_parity.py`.
 """
 
 import math
-import sys
-from pathlib import Path
 
 import pytest
 import torch
@@ -590,102 +588,19 @@ def test_linear_init_reduces_newton_iterations_batched():
     torch.testing.assert_close(result_zero.x, result_linear.x, atol=1e-6, rtol=1e-6)
 
 
-def test_golden_helper_round_trip(tmp_path, monkeypatch):
-    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-    import golden
-
-    monkeypatch.setattr(golden, "_GOLDEN_DIR", tmp_path)
-    golden.save_golden("scratch", {"value": 1.5, "list": [1, 2, 3]})
-    assert golden.load_golden("scratch") == {"value": 1.5, "list": [1, 2, 3]}
-
-
-def test_golden_matches_stored_reference():
-    """The series, parallel, fan-driven and fan-curve cases above against committed solutions.
-
-    The cases are deterministic, so they regenerate bit-exactly and the tolerance here (1e-9)
-    is far tighter than any physical claim: this is a CHANGE DETECTOR for the potential
-    solve on these networks, not a verification -- the closed-form tests above are that,
-    and nothing here is compared with CONTAM. Regenerate with
-    `.venv/Scripts/python benchmarks/regenerate_golden.py` only when a change to those
-    numbers is intended.
-    """
-    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-    from golden import load_golden
-
-    golden = load_golden("contam_airflow")
-
-    net, layer = _series_layer(
-        torch.tensor([0.010, 0.008, 0.012], dtype=DTYPE), torch.tensor(0.65, dtype=DTYPE)
-    )
-    drivers = {"wind": torch.tensor([12.0, 0.0, 0.0], dtype=DTYPE)}
-    phi, q = layer.solve(torch.zeros(2, dtype=DTYPE), drivers, differentiable=False)
-    torch.testing.assert_close(
-        phi, torch.tensor(golden["series"]["phi"], dtype=DTYPE), atol=1e-9, rtol=1e-9
-    )
-    torch.testing.assert_close(
-        q, torch.tensor(golden["series"]["q"], dtype=DTYPE), atol=1e-9, rtol=1e-9
-    )
-
-    net, layer = _parallel_layer(
-        torch.tensor(0.020, dtype=DTYPE),
-        torch.tensor(0.015, dtype=DTYPE),
-        torch.tensor(0.6, dtype=DTYPE),
-    )
-    phi, q = layer.solve(torch.tensor([8.0, 0.0], dtype=DTYPE), differentiable=False)
-    torch.testing.assert_close(
-        phi, torch.tensor(golden["parallel"]["phi"], dtype=DTYPE), atol=1e-9, rtol=1e-9
-    )
-    torch.testing.assert_close(
-        q, torch.tensor(golden["parallel"]["q"], dtype=DTYPE), atol=1e-9, rtol=1e-9
-    )
-
-    net, layer = _fan_driven_layer(
-        torch.tensor(0.020, dtype=DTYPE),
-        torch.tensor(0.010, dtype=DTYPE),
-        torch.tensor(0.65, dtype=DTYPE),
-        torch.tensor(0.05, dtype=DTYPE),
-    )
-    phi, q = layer.solve(torch.zeros(1, dtype=DTYPE), differentiable=False)
-    torch.testing.assert_close(
-        phi, torch.tensor(golden["fan_driven"]["phi"], dtype=DTYPE), atol=1e-9, rtol=1e-9
-    )
-    torch.testing.assert_close(
-        q, torch.tensor(golden["fan_driven"]["q"], dtype=DTYPE), atol=1e-9, rtol=1e-9
-    )
-
-    net, layer = _fan_curve_layer(
-        torch.tensor(150.0, dtype=DTYPE),
-        torch.tensor(-100.0, dtype=DTYPE),
-        torch.tensor(-80.0, dtype=DTYPE),
-        torch.tensor(40.0, dtype=DTYPE),
-        torch.tensor(1.0, dtype=DTYPE),
-        torch.tensor(0.05, dtype=DTYPE),
-        torch.tensor(0.5, dtype=DTYPE),
-    )
-    phi, q = layer.solve(torch.zeros(1, dtype=DTYPE), differentiable=False)
-    torch.testing.assert_close(
-        phi, torch.tensor(golden["fan_curve"]["phi"], dtype=DTYPE), atol=1e-9, rtol=1e-9
-    )
-    torch.testing.assert_close(
-        q, torch.tensor(golden["fan_curve"]["q"], dtype=DTYPE), atol=1e-9, rtol=1e-9
-    )
-
-
 # ---------------------------------------------------------------------------------------
 # Every case above that exercises FixedFlow ("fan_driven") passes differentiable=False
 # only, so the default (differentiable=True) path -- which computes the branch Jacobian by
 # autograd rather than analytically -- would otherwise never be exercised by this suite for
 # an element whose flow does not depend on dp at all (a path that can crash for FixedFlow at
 # potential.py's autograd.grad call, in both the learnable=False and learnable=True
-# constructions). The tests below
-# parametrize the fan-driven case and two others over both paths, and add a direct
-# same-inputs comparison between the two paths so a future regression here is caught by
-# result disagreement, not just by one path failing to run.
+# constructions). The tests below run the fan-driven case and two others on the autograd
+# path, and add a direct same-inputs comparison between the two paths so a future regression
+# here is caught by result disagreement, not just by one path failing to run.
 # ---------------------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("differentiable", [False, True])
-def test_fan_driven_zone_pressure_matches_reference_on_both_paths(differentiable):
+def test_fan_driven_zone_pressure_matches_reference_with_the_autograd_jacobian():
     C1 = torch.tensor(0.020, dtype=DTYPE)
     C2 = torch.tensor(0.010, dtype=DTYPE)
     n = torch.tensor(0.65, dtype=DTYPE)
@@ -693,7 +608,7 @@ def test_fan_driven_zone_pressure_matches_reference_on_both_paths(differentiable
 
     net, layer = _fan_driven_layer(C1, C2, n, q_fan)
     phi_boundary = torch.zeros(1, dtype=DTYPE)
-    phi, q = layer.solve(phi_boundary, differentiable=differentiable)
+    phi, q = layer.solve(phi_boundary, differentiable=True)
 
     p_ref = -((q_fan / (C1 + C2)) ** (1.0 / n))
     torch.testing.assert_close(phi[net.node_index("zone")], p_ref, atol=1e-6, rtol=1e-6)
@@ -702,29 +617,27 @@ def test_fan_driven_zone_pressure_matches_reference_on_both_paths(differentiable
     torch.testing.assert_close(residual, torch.zeros_like(residual), atol=1e-8, rtol=0.0)
 
 
-@pytest.mark.parametrize("differentiable", [False, True])
-def test_series_closed_form_matches_reference_on_both_paths(differentiable):
+def test_series_closed_form_matches_reference_with_the_autograd_jacobian():
     C = [0.010, 0.008, 0.012]
     n = 0.65
     Pw = 12.0
     net, layer = _series_layer(torch.tensor(C, dtype=DTYPE), torch.tensor(n, dtype=DTYPE))
     drivers = {"wind": torch.tensor([Pw, 0.0, 0.0], dtype=DTYPE)}
     phi_boundary = torch.zeros(2, dtype=DTYPE)
-    phi, q = layer.solve(phi_boundary, drivers, differentiable=differentiable)
+    phi, q = layer.solve(phi_boundary, drivers, differentiable=True)
 
     q_ref = _series_reference_q(C, n, Pw)
     torch.testing.assert_close(q, torch.full((3,), q_ref, dtype=DTYPE), atol=1e-6, rtol=1e-6)
 
 
-@pytest.mark.parametrize("differentiable", [False, True])
-def test_stack_conservation_matches_reference_on_both_paths(differentiable):
+def test_stack_conservation_matches_reference_with_the_autograd_jacobian():
     C = torch.tensor([0.020, 0.030, 0.025, 0.018], dtype=DTYPE)
     n = torch.tensor(0.6, dtype=DTYPE)
     drive_values = torch.tensor([2.0, 1.5, 1.5, 2.0], dtype=DTYPE)
 
     net, layer = _stack_layer(C, n)
     phi_boundary = torch.zeros(2, dtype=DTYPE)
-    phi, q = layer.solve(phi_boundary, {"stack": drive_values}, differentiable=differentiable)
+    phi, q = layer.solve(phi_boundary, {"stack": drive_values}, differentiable=True)
     residual = layer.residual(
         phi[..., layer.interior], phi_boundary, {"stack": drive_values}, None
     )

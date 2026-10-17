@@ -73,14 +73,6 @@ def test_kappa_follows_the_preset_or_the_explicit_mix():
     assert resolve("sirane", {"sigma_w_min": 0.0}, "f")["kappa"] == 0.40
 
 
-def test_earlier_option_names_and_values_are_refused():
-    for old in ("roof_wind_form", "exchange", "routing"):
-        with pytest.raises(TypeError, match=rf"f: unexpected keyword argument '{old}'"):
-            resolve("sirane", {old: "x"}, "f")
-    with pytest.raises(TypeError, match=r"unexpected keyword argument 'wind'"):
-        resolve("sirane", {"wind": "x"}, "f")
-    for option, old in (("canyon_wind", "soulhac"), ("roof_exchange", "schulte"),
-                        ("junction_routing", "mixing"), ("direction_averaging", "munich"),
-                        ("stability", "munich")):
-        with pytest.raises(ValueError, match=rf"f: {option} must be one of"):
-            resolve("sirane", {option: old}, "f")
+def test_an_unknown_keyword_is_refused_naming_the_function():
+    with pytest.raises(TypeError, match=r"f: unexpected keyword argument 'exchange'"):
+        resolve("sirane", {"exchange": "x"}, "f")

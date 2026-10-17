@@ -33,7 +33,7 @@ NETWORKS = ["tree_kinwave.inp", "example1_kinwave.inp", "tree_kinwave_large.inp"
 
 #: Depth and volume come from the LIVE engine (`Link.depth`, `Link.volume` return SWMM's
 #: float64 `newDepth` / `newVolume` times its unit factor), and `geometry="swmm"` performs
-#: SWMM's own float64 operations (`swmm_xsect.py`) in essentially SWMM's order, so the only
+#: SWMM's own float64 operations (`xsect_tables.py`) in essentially SWMM's order, so the only
 #: admissible difference is float64 rounding: ~50 operations at unit roundoff 1.1e-16, through
 #: a piecewise-linear inverse and a Newton root whose relative condition numbers are O(1),
 #: bounds it near 1e-13. 1e-10 leaves three decades of headroom over that bound and is five
@@ -119,7 +119,7 @@ def test_pipe_flows(parity):
 def test_normal_depths(parity):
     """`TOL_FLOAT64`. SWMM reports ``(Y(a1) + Y(a2)) / 2`` from its 51-point ``Y_Circ``
     table (Ref. Man. Vol. II section 5.1.3; `flowrout.c::setNewLinkState`), which
-    `geometry="swmm"` reproduces (`noodl.apps.sewer.swmm_xsect`)."""
+    `geometry="swmm"` reproduces (`noodl.apps.sewer.xsect_tables`)."""
     assert _worst(*parity, "sewer.h", "depth") < TOL_FLOAT64
 
 

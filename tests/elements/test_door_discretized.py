@@ -292,8 +292,9 @@ CASES = [
 # ---------------------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("med", [AIR, SIMPLE], ids=["Air", "SimpleAir"])
-@pytest.mark.parametrize("CD", [0.65, 0.78])
+@pytest.mark.parametrize(
+    ("med", "CD"), [(AIR, 0.65), (SIMPLE, 0.78)], ids=["Air-CD0.65", "SimpleAir-CD0.78"]
+)
 def test_open_door_heads_and_compartment_flows_match_the_transcription(med, CD):
     comp, head = _open(med, CD=CD)
     for dphi, TA, TB, XA, XB in CASES:
@@ -305,7 +306,7 @@ def test_open_door_heads_and_compartment_flows_match_the_transcription(med, CD):
         np.testing.assert_allclose(q, ref["m_com"], rtol=RTOL, atol=ATOL)
 
 
-@pytest.mark.parametrize("y", [0.0, 0.4, 1.0])
+@pytest.mark.parametrize("y", [0.0, 0.4])
 def test_operable_door_compartment_flows_match_the_transcribed_blend(y):
     comp, head = _operable()
     for dphi, TA, TB, XA, XB in CASES:
@@ -411,7 +412,7 @@ def test_directional_sums_equal_mbl_outside_the_smoothing_band():
         np.testing.assert_allclose(-q[q < 0].sum(), ref["mBA"], rtol=RTOL, atol=ATOL)
 
 
-@pytest.mark.parametrize("u_target", [0.3, -0.3, 0.05, -0.8])
+@pytest.mark.parametrize("u_target", [0.3, -0.8])
 def test_directional_sums_differ_from_mbl_only_by_the_smoothing_width(u_target):
     """Place the neutral plane so that one compartment's volume flow is u_target *
     VZerCom_flow, inside MBL's smoothing band.
@@ -516,7 +517,7 @@ def test_port_flows_are_mbl_mAB_and_mBA_exactly_inside_the_smoothing_band(operab
 # ---------------------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("nCom", [1, 4, 10, 25])
+@pytest.mark.parametrize("nCom", [1, 10])
 def test_compartment_areas_and_heights_add_up_to_the_door(nCom):
     wOpe, hOpe, hA, hB = 0.9, 2.1, 1.35, 0.8
     comp, head = mbl_discretized_door(

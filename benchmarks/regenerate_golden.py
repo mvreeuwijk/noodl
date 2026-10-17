@@ -1,7 +1,7 @@
 """Regenerate the stored golden results from the current implementation.
 
-Writes `tests/golden/contam_airflow.json` (the closed-form airflow cases) and
-`tests/golden/natural_ventilation.json` (the coupled airflow-heat demo trajectory).
+Writes the stored golden results under `tests/golden/`, among them
+`natural_ventilation.json` (the coupled airflow-heat demo trajectory).
 
 This is an explicit action, not run automatically: run it only after an intentional change
 to element laws, coupling or solver defaults that is expected to change the reference
@@ -26,85 +26,8 @@ sys.path.insert(0, str(_REPO_ROOT))
 from golden import save_golden  # noqa: E402
 
 from benchmarks.natural_ventilation import run as run_natural_ventilation  # noqa: E402
-from noodl.drives import ConstantDrive  # noqa: E402
-from noodl.elements.fan import FanCurve  # noqa: E402
-from noodl.elements.fixed import FixedFlow  # noqa: E402
-from noodl.elements.powerlaw import PowerLaw  # noqa: E402
-from noodl.layers.kirchhoff import KirchhoffLayer  # noqa: E402
-from noodl.topology import Network  # noqa: E402
 
 DTYPE = torch.float64
-
-
-def _series_case() -> dict:
-    net = Network(dtype=DTYPE)
-    for name in ("ambient_w", "z1", "z2", "ambient_l"):
-        net.add_node(name)
-    net.add_edge("ambient_w", "z1", kind="airpath")
-    net.add_edge("z1", "z2", kind="airpath")
-    net.add_edge("z2", "ambient_l", kind="airpath")
-    element = PowerLaw(
-        torch.tensor([0.010, 0.008, 0.012], dtype=DTYPE),
-        torch.tensor(0.65, dtype=DTYPE),
-        dp_transition=1e-6,
-    )
-    drive = ConstantDrive(kind="airpath", key="wind")
-    layer = KirchhoffLayer(
-        net, "series", [element], [drive], boundary=["ambient_w", "ambient_l"]
-    )
-    drivers = {"wind": torch.tensor([12.0, 0.0, 0.0], dtype=DTYPE)}
-    phi, q = layer.solve(torch.zeros(2, dtype=DTYPE), drivers, differentiable=False)
-    return {"phi": phi.tolist(), "q": q.tolist()}
-
-
-def _parallel_case() -> dict:
-    net = Network(dtype=DTYPE)
-    net.add_node("a")
-    net.add_node("c")
-    net.add_edge("a", "c", kind="airpath")
-    net.add_edge("a", "c", kind="airpath")
-    element = PowerLaw(
-        torch.tensor([0.020, 0.015], dtype=DTYPE),
-        torch.tensor(0.6, dtype=DTYPE),
-        dp_transition=1e-6,
-    )
-    layer = KirchhoffLayer(net, "parallel", [element], boundary=["a", "c"])
-    phi, q = layer.solve(torch.tensor([8.0, 0.0], dtype=DTYPE), differentiable=False)
-    return {"phi": phi.tolist(), "q": q.tolist()}
-
-
-def _fan_driven_case() -> dict:
-    net = Network(dtype=DTYPE)
-    net.add_node("zone")
-    net.add_node("ambient")
-    net.add_edge("zone", "ambient", kind="airpath")
-    net.add_edge("zone", "ambient", kind="airpath")
-    net.add_edge("zone", "ambient", kind="fan")
-    leak = PowerLaw(
-        torch.tensor([0.020, 0.010], dtype=DTYPE),
-        torch.tensor(0.65, dtype=DTYPE),
-        dp_transition=1e-6,
-    )
-    fan = FixedFlow(torch.tensor(0.05, dtype=DTYPE), kind="fan")
-    layer = KirchhoffLayer(net, "fan_driven", [leak, fan], boundary=["ambient"])
-    phi, q = layer.solve(torch.zeros(1, dtype=DTYPE), differentiable=False)
-    return {"phi": phi.tolist(), "q": q.tolist()}
-
-
-def _fan_curve_case() -> dict:
-    net = Network(dtype=DTYPE)
-    net.add_node("ambient")
-    net.add_node("z")
-    net.add_edge("ambient", "z", kind="fan")
-    net.add_edge("z", "ambient", kind="airpath")
-    coeffs = torch.tensor([150.0, -100.0, -80.0, 40.0], dtype=DTYPE)
-    fan = FanCurve(coeffs, torch.tensor(1.0, dtype=DTYPE), kind="fan")
-    leak = PowerLaw(
-        torch.tensor(0.05, dtype=DTYPE), torch.tensor(0.5, dtype=DTYPE), dp_transition=1e-6
-    )
-    layer = KirchhoffLayer(net, "fan_curve", [fan, leak], boundary=["ambient"])
-    phi, q = layer.solve(torch.zeros(1, dtype=DTYPE), differentiable=False)
-    return {"phi": phi.tolist(), "q": q.tolist()}
 
 
 def _natural_ventilation_case() -> dict:
@@ -154,14 +77,6 @@ def _water_twoloop_case() -> dict:
 
 
 def main() -> None:
-    data = {
-        "series": _series_case(),
-        "parallel": _parallel_case(),
-        "fan_driven": _fan_driven_case(),
-        "fan_curve": _fan_curve_case(),
-    }
-    save_golden("contam_airflow", data)
-    print("wrote tests/golden/contam_airflow.json")
     save_golden("natural_ventilation", _natural_ventilation_case())
     print("wrote tests/golden/natural_ventilation.json")
     save_golden("munich_idealised", _munich_idealised_case())

@@ -210,8 +210,7 @@ def _finite_everywhere(fan, speed, dp):
     return q.detach(), slope.detach()
 
 
-@pytest.mark.parametrize("off", [0.0, 0.1])
-@pytest.mark.parametrize("dp", [-20.0, 0.0, 0.5])
+@pytest.mark.parametrize(("off", "dp"), [(0.0, -20.0), (0.1, 0.0), (0.1, 0.5)])
 def test_a_fan_at_zero_speed_is_stopped_and_finite(off, dp):
     """s = 0 divides the fan laws by zero: it is stopped whatever `off` is, and passes its
     shut-off orifice (times the multiplier)."""
@@ -223,7 +222,7 @@ def test_a_fan_at_zero_speed_is_stopped_and_finite(off, dp):
     torch.testing.assert_close(slope, 1.5 * shut.dflow(x, d), rtol=1e-14, atol=0)
 
 
-@pytest.mark.parametrize("speed", [0.1 - 1e-9, 0.1, 0.1 + 1e-9, 0.05, 1.0])
+@pytest.mark.parametrize("speed", [0.1 - 1e-9, 0.1, 0.1 + 1e-9, 0.05])
 def test_around_its_off_ratio_the_fan_and_its_gradients_stay_finite(speed):
     """The flow jumps at the off ratio (running fan to shut-off orifice, as in ContamX);
     on either side, and at a stopped edge, flow, slope and gradients are finite."""

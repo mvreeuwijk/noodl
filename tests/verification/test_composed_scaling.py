@@ -12,20 +12,16 @@ correctness rather than for any budget: it measures memory with a subprocess RSS
 
 from __future__ import annotations
 
+import pytest
 import torch
 
 from benchmarks.composed_model import build_composed, run_steps
-from benchmarks.measure import isolated_peak_rss, time_call
+from benchmarks.measure import isolated_peak_rss
 from noodl.elements import PowerLaw
 from noodl.layers.kirchhoff import KirchhoffLayer
 
 
-def test_time_call_returns_a_nonnegative_elapsed_seconds_and_the_callables_result():
-    elapsed, value = time_call(lambda: 2 + 2)
-    assert elapsed >= 0.0
-    assert value == 4
-
-
+@pytest.mark.slow  # spawns a fresh interpreter and allocates 200 MiB
 def test_isolated_peak_rss_sees_pytorch_allocations_a_200_mib_tensor_makes():
     # Non-vacuous by construction: the workload's only allocation is a torch tensor, which
     # `tracemalloc` reports as 0 bytes. A subprocess RSS measurement must see
@@ -57,7 +53,7 @@ def test_composed_model_parity_with_dense_reference_at_ensemble_one_and_four():
         torch.testing.assert_close(q_sparse, q_dense, rtol=1e-9, atol=1e-12)
 
 
-def test_composed_model_interface_conservation_at_every_shared_node():
+def test_composed_model_interface_conservation_at_every_shared_node(composed_model):
     """Net flux minus source vanishes at every interior node a submodel join touches.
 
     The imbalance is formed with `model.layer.A`, whose columns are in LAYER edge order --
@@ -74,7 +70,7 @@ def test_composed_model_interface_conservation_at_every_shared_node():
     tolerance the worst interior residual is 8e-11 absolute; at 1e-13 it is 2e-17, five
     orders of magnitude inside this gate.
     """
-    model = build_composed(ensemble=1)
+    model = composed_model
     phi, q = model.layer.solve(
         model.phi_boundary, model.drivers, model.sources, atol=1e-13, rtol=1e-13
     )

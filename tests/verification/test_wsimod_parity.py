@@ -183,6 +183,7 @@ def test_quickstart_smooth_mode_converges_to_hard_clip():
     assert max_abs_error < 3e-3
 
 
+@pytest.mark.slow
 def test_quickstart_projection_mode_converges_to_hard_clip():
     topology, events = _load("quickstart")
     net, _node_names, arc_names = _build_network(topology)
