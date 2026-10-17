@@ -262,7 +262,8 @@ this repository ships four kinds of test beyond ordinary unit coverage of its ow
 
 `tests/test_extension_recipe.py` ships (1)-(3) in miniature for `Sigmoid`/`build_two_zone`; a
 real application under `src/noodl/apps/<name>/` ships all four, sized to its own domain, the
-way `tests/apps/street_aq/`, `tests/apps/sewer/` and `tests/apps/water/` do for theirs.
+way `tests/apps/street_aq/`, `tests/apps/sewer/`, `tests/apps/water/` and `tests/apps/electrical/` do
+for theirs.
 
 It also ships its documentation, in the same change as the code:
 
@@ -290,7 +291,7 @@ place, and whenever a later change leaves them behind the code.
 Reading a model from a file is not a third extension point on top of the two above: a reader
 builds the same kind of network, laws and layers `build_two_zone` builds by hand, just
 driven by a parsed file. It lives next to the application it feeds — `apps/sewer/inp.py`,
-`apps/water/inp.py`, `apps/building_physics/prj.py` — rather than in a shared location, because
+`apps/water/inp.py`, `apps/building_physics/prj.py`, `apps/electrical/power/matpower.py` — rather than in a shared location, because
 each format's own section names, column layouts and units are specific to it. The reader parses
 the file into the network and domain objects the application needs (`read_swmm_inp` and
 `read_epanet_inp` return a network the caller then passes to the application's own

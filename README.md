@@ -99,6 +99,8 @@ exactly like one built by hand.
 | Modelica Buildings Library (JSON + CSV export) | `read_modelica` | Multi-zone airflow models built from MBL components | Building physics |
 | SWMM `.inp` | `read_swmm_inp` | Gravity sewer and drainage networks | Sewers |
 | EPANET `.inp` | `read_epanet_inp` | Pressurised water distribution | Water distribution |
+| Modelica Standard Library and Buildings Library circuits (JSON + CSV export) | `read_modelica_circuit` | Lumped electrical circuits | Electrical circuits |
+| MATPOWER `.m` | `read_matpower` | Balanced power networks: buses, lines, transformers, loads, shunts, generators | Electrical power flow |
 
 ## Repository layout
 
@@ -106,7 +108,8 @@ exactly like one built by hand.
 src/noodl/        the package: topology, elements (every branch law, grouped by physics),
                   drives, layers, solvers, operators, Model and couple, and apps/
                   (building_physics with its CONTAM and Modelica readers, street_aq, sewer,
-                  water, and inpfile, the tokenizer the two .inp readers share)
+                  water, wsimod, electrical with its Modelica and MATPOWER readers, and
+                  inpfile, the tokenizer the two .inp readers share)
 tests/            the suite, including verification/ — code-to-code comparisons against
                   reference models and analytical solutions — and the performance gates
 benchmarks/       timing and scaling scripts, and the composed model: eight buildings
