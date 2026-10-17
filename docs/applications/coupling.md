@@ -105,7 +105,7 @@ union(
 ```
 
 The `(Model, State, Drivers)` triple is exactly what `street_aq.build_model`, `project_to_model`,
-`sewer.build_model` and `water.build_model` all return. `union` returns fresh copies and never
+`sewer.build_model`, `water.build_model` and `electrical.build_model` all return. `union` returns fresh copies and never
 mutates its inputs.
 
 Two-wayness is set **per link** through `ValueLink.two_way`, not by an argument to `union`.

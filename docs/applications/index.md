@@ -56,7 +56,8 @@ solves the per-node QP inside the allocation layer's projection mode.
 Each application page ends with a **Verification** section: code-to-code comparisons against
 established reference models that solve the same equations (CONTAM and ContamX and the Modelica
 Buildings Library for building physics, MUNICH for street air quality, SWMM through pyswmm for
-sewers, EPANET 2.2 through WNTR for water distribution, WSIMOD for flow allocation), plus
+sewers, EPANET 2.2 through WNTR for water distribution, WSIMOD for flow allocation, the
+Modelica Standard Library and pandapower for electrical circuits), plus
 checks against analytical solutions, conservation identities and finite-difference gradients.
 
 A comparison of this kind runs noodl physics and a reference model on the same input and compares the

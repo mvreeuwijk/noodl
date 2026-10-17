@@ -1,7 +1,7 @@
 # Using noodl
 
 Every model in noodl physics is used the same way, whether it is a building, a street
-network, a sewer, a water network or an allocation network. This page is that common
+network, a sewer, a water network, an allocation network or an electrical circuit. This page is that common
 pattern. The [catalogue](catalogue/core.md) lists everything each application offers, and
 each [application page](applications/index.md) explains its physics.
 

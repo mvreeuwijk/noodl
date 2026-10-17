@@ -1,8 +1,8 @@
 # Theoretical background for `noodl`
 
 A general-purpose, differentiable network solver for conservative transport — pressures
-and buoyancy in multizone buildings, heat, contaminant species, sewer flow, and urban
-street-canyon exchange — needs one topology layer and one small set of constitutive
+and buoyancy in multizone buildings, heat, contaminant species, sewer flow, urban
+street-canyon exchange, and current in electrical circuits — needs one topology layer and one small set of constitutive
 patterns that specialise per physical domain. This page gives the graph-theoretic and
 physical foundations, compares existing multi-physics network solvers, and covers the
 differentiable-programming and co-simulation questions that follow from building this in

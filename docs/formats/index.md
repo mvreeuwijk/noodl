@@ -11,6 +11,7 @@ building the network directly, shown on each application page.
 | [Modelica Buildings Library](modelica.md) (JSON + CSV export) | `read_modelica` | Multi-zone airflow models built from MBL components | [Building physics](../applications/building_physics.md) |
 | [SWMM](swmm.md) `.inp` | `read_swmm_inp` | Gravity sewer and drainage networks | [Sewers](../applications/sewer.md) |
 | [EPANET](epanet.md) `.inp` | `read_epanet_inp` | Pressurised water distribution | [Water distribution](../applications/water.md) |
+| [Modelica circuits](modelica.md#electrical-circuits) (JSON + CSV export) | `read_modelica_circuit` | Lumped circuits from the Modelica Standard Library and Buildings Library | [Electrical circuits](../applications/electrical.md) |
 | [MATPOWER](matpower.md) `.m` (case format version 2) | `read_matpower` | Balanced power networks: buses, lines, transformers, loads, shunts, generators | [Electrical power flow](../applications/electrical.md#power-flow) |
 
 The two `.inp` formats share one lexical layer, `noodl.apps.inpfile`: `[SECTION]` headers, `;`

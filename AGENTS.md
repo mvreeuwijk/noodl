@@ -6,7 +6,7 @@ Follow [CONTRIBUTING.md](CONTRIBUTING.md): code, tests and documentation change 
 ## Running the tests
 
 The full suite takes about 45 minutes. The applications (`building_physics`, `sewer`,
-`street_aq`, `water`) are large and independent of each other. While developing, run the core
+`street_aq`, `water`, `electrical`) are large and independent of each other. While developing, run the core
 tests plus the application you are changing. Run the full suite, with coverage, once, just
 before opening a pull request.
 
@@ -24,8 +24,8 @@ Add the application you are changing. CI's `branch` job uses the same table
 | building | `tests/apps/building_physics tests/verification/test_contam_parity.py tests/verification/test_modelica_parity.py tests/verification/test_airflow_closed_forms.py tests/verification/test_natural_ventilation.py` |
 | sewer | `tests/apps/sewer tests/apps/inp tests/verification/test_sewer_*.py tests/benchmarks/test_swmm_corpus.py` |
 | water | `tests/apps/water tests/apps/inp tests/verification/test_water_parity.py tests/verification/test_wsimod_*.py` |
-| electrical | `tests/apps/electrical tests/layers/test_mna*.py tests/test_model_mna.py tests/operators/test_mna_operator.py tests/verification/test_power_flow_parity.py tests/verification/test_modelica_electrical_parity.py` |
 | street air quality | `tests/apps/street_aq tests/verification/test_munich.py tests/verification/test_sirane*.py` |
+| electrical | `tests/apps/electrical tests/layers/test_mna*.py tests/test_model_mna.py tests/operators/test_mna_operator.py tests/verification/test_power_flow_parity.py tests/verification/test_modelica_electrical_parity.py` |
 | coupling | `tests/verification/test_coupling_*.py tests/verification/test_composed_*.py` |
 
 For example, for the building application:

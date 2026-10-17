@@ -145,7 +145,7 @@ model.check(state, drivers).raise_for_errors(strict=True)
 
 - **[Concepts](concepts/index.md)** — the framework proper: what a network, law, layer and
   solver each are, and how they fit.
-- **[Applications](applications/index.md)** — six worked systems with real file readers and
+- **[Applications](applications/index.md)** — seven worked systems with real file readers and
   parity with the reference implementation in each field. If your problem is a building, a
-  street, a sewer or a water network, start there rather than from `Network`.
+  street, a sewer, a water network or an electrical circuit, start there rather than from `Network`.
 - **[Theory](theory.md)** — why any of this is well posed.

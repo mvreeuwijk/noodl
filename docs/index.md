@@ -17,7 +17,7 @@ simulation, parameter estimation, and optimisation.
 An enormous range of engineering systems are networks carrying something conserved. Air moves
 between the rooms of a building through leaks and doors; water falls through a sewer and is
 pumped through a distribution main; pollutants are carried along a street and exchanged with
-the air above. Each of these has its own literature and its own simulation tool, and each of
+the air above; current divides between the branches of an electrical circuit. Each of these has its own literature and its own simulation tool, and each of
 those tools re-implements the same three things: a graph, a conservation law at every node, and
 a constitutive law on every edge. noodl physics factors that common core out once. What remains
 specific to a problem — the pressure-flow relation of a crack, the friction law of a pipe,
@@ -39,7 +39,7 @@ calibration, sensitivity analysis and design optimisation.
 | **Composable physics layers** | Kirchhoff solves, multi-species and heat transport, reactions, and capacity-limited allocation — several of them on one network, stepped together under either of two coupling schemes. |
 | **Matvec-free solvers** | A `LinearOperator` contract with dense, graph-Laplacian and advection implementations; Newton with per-instance convergence; an implicit-function adjoint so gradients cost one linear solve rather than an unrolled tape. |
 | **Batching over instances** | Every solve is batched. A thousand building variants, or one network under a thousand weather realisations, is one call. |
-| **Verified by code-to-code comparison** | Each application is compared against a reference implementation for its domain — CONTAM, MUNICH, SWMM, EPANET, WSIMOD — with the tolerances and measured errors written down. |
+| **Verified by code-to-code comparison** | Each application is compared against a reference implementation for its domain — CONTAM, MUNICH, SWMM, EPANET, WSIMOD, the Modelica Standard Library and pandapower — with the tolerances and measured errors written down. |
 
 ## Applications
 
@@ -54,6 +54,7 @@ physics over the shared core:
 | [Sewers](applications/sewer.md) | Gravity sewer hydraulics, headspace air, sulfide | Continuity on a tree for the water; Kirchhoff solve for the headspace air | `build_model` |
 | [Water distribution](applications/water.md) | Pressurised mains, pumps, tanks, demand | Kirchhoff: Newton on hydraulic head | `build_model` |
 | [Flow allocation](applications/allocation.md) | Requested flows clipped to arc capacity and free storage at the receiving node | Clip and allocate | `AllocatedFlowLayer` |
+| [Electrical circuits](applications/electrical.md) | Lumped circuits: DC, transient and AC | Kirchhoff: Modified Nodal Analysis on node voltage | `build_model`, `Circuit` |
 | [Coupling](applications/coupling.md) | Two models meeting at a shared boundary | Two models exchanging values, iterated to a fixed point | `union` |
 
 ## Reading model files
@@ -68,6 +69,8 @@ exactly like one built by hand.
 | [Modelica Buildings Library](formats/modelica.md#buildings-library-airflow) (JSON + CSV export) | `read_modelica` | Multi-zone airflow models built from MBL components | [Building physics](applications/building_physics.md) |
 | [SWMM](formats/swmm.md) `.inp` | `read_swmm_inp` | Gravity sewer and drainage networks | [Sewers](applications/sewer.md) |
 | [EPANET](formats/epanet.md) `.inp` | `read_epanet_inp` | Pressurised water distribution | [Water distribution](applications/water.md) |
+| [Modelica circuits](formats/modelica.md#electrical-circuits) (JSON + CSV export) | `read_modelica_circuit` | Lumped circuits from the Modelica Standard Library and Buildings Library | [Electrical circuits](applications/electrical.md) |
+| [MATPOWER](formats/matpower.md) `.m` | `read_matpower` | Balanced power networks: buses, lines, transformers, loads, shunts, generators | [Electrical power flow](applications/electrical.md#power-flow) |
 
 See [File formats](formats/index.md) for what each reader accepts and refuses.
 

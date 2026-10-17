@@ -44,6 +44,12 @@ APPS = {
         ["tests/apps/water", "tests/apps/inp", "tests/verification/test_water_parity.py",
          "tests/verification/test_wsimod_*.py"],
     ),
+    "street": (
+        ["src/noodl/apps/street_aq/", "tests/apps/street_aq/", "tests/data/street/",
+         "tests/verification/test_munich.py", "tests/verification/test_sirane"],
+        ["tests/apps/street_aq", "tests/verification/test_munich.py",
+         "tests/verification/test_sirane*.py"],
+    ),
     "electrical": (
         ["src/noodl/apps/electrical/", "src/noodl/modelica/", "tests/apps/electrical/",
          "tests/data/modelica_electrical/", "tests/data/power_flow/",
@@ -51,12 +57,6 @@ APPS = {
          "tests/verification/test_modelica_electrical_parity.py"],
         ["tests/apps/electrical", "tests/verification/test_power_flow_parity.py",
          "tests/verification/test_modelica_electrical_parity.py"],
-    ),
-    "street": (
-        ["src/noodl/apps/street_aq/", "tests/apps/street_aq/", "tests/data/street/",
-         "tests/verification/test_munich.py", "tests/verification/test_sirane"],
-        ["tests/apps/street_aq", "tests/verification/test_munich.py",
-         "tests/verification/test_sirane*.py"],
     ),
     "coupling": (
         ["src/noodl/couple.py", "benchmarks/", "tests/verification/test_coupling_",
