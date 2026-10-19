@@ -1,0 +1,174 @@
+{
+  "format": "noodl-modelica/1",
+  "model": "NoodlFanShort.FanOrifice",
+  "mbl_commit": "55abf579598ca81cae0a82f337350375958e6722",
+  "openmodelica": "OpenModelica v1.27.1 (64-bit)",
+  "experiment": {
+    "StartTime": 0.0,
+    "StopTime": 60.0,
+    "Interval": 1.0,
+    "Tolerance": 1e-06
+  },
+  "medium": {
+    "class": "Buildings.Media.Specialized.Air.PerfectGas",
+    "p_default": 101325.0,
+    "T_default": 293.15,
+    "X_default": [
+      0.01,
+      0.99
+    ],
+    "nXi": 1,
+    "extraPropertiesNames": []
+  },
+  "components": [
+    {
+      "name": "bouA",
+      "class": "Buildings.Fluid.Sources.Boundary_pT",
+      "parameters": {
+        "nPorts": 1,
+        "verifyInputs": false,
+        "use_X_in": false,
+        "use_Xi_in": false,
+        "use_C_in": false,
+        "X": [
+          0.01,
+          0.99
+        ],
+        "C": [],
+        "use_p_in": false,
+        "p": 101325.0,
+        "use_T_in": false,
+        "T": 293.15
+      }
+    },
+    {
+      "name": "bouB",
+      "class": "Buildings.Fluid.Sources.Boundary_pT",
+      "parameters": {
+        "nPorts": 1,
+        "verifyInputs": false,
+        "use_X_in": false,
+        "use_Xi_in": false,
+        "use_C_in": false,
+        "X": [
+          0.01,
+          0.99
+        ],
+        "C": [],
+        "use_p_in": false,
+        "p": 101325.0,
+        "use_T_in": false,
+        "T": 293.15
+      }
+    },
+    {
+      "name": "fan",
+      "class": "Buildings.Fluid.Movers.FlowControlled_dp",
+      "parameters": {
+        "energyDynamics": "Modelica.Fluid.Types.Dynamics.SteadyState",
+        "massDynamics": "Modelica.Fluid.Types.Dynamics.SteadyState",
+        "substanceDynamics": "Modelica.Fluid.Types.Dynamics.SteadyState",
+        "traceDynamics": "Modelica.Fluid.Types.Dynamics.SteadyState",
+        "p_start": 101325.0,
+        "T_start": 293.15,
+        "X_start": [
+          0.01,
+          0.99
+        ],
+        "C_start": [],
+        "C_nominal": [],
+        "mSenFac": 1.0,
+        "allowFlowReversal": true,
+        "inputType": "Buildings.Fluid.Types.InputType.Constant",
+        "constInput": 5.0,
+        "stageInputs": [
+          500.0
+        ],
+        "computePowerUsingSimilarityLaws": false,
+        "addPowerToMedium": false,
+        "nominalValuesDefineDefaultPressureCurve": false,
+        "tau": 1.0,
+        "use_riseTime": false,
+        "riseTime": 30.0,
+        "init": "Modelica.Blocks.Types.Init.InitialOutput",
+        "m_flow_small": 5e-06,
+        "show_T": false,
+        "dp_start": 0.0,
+        "m_flow_nominal": 0.05,
+        "dp_nominal": 500.0,
+        "constantHead": 5.0,
+        "prescribeSystemPressure": false
+      },
+      "unevaluated": [
+        "heads"
+      ]
+    },
+    {
+      "name": "ori",
+      "class": "Buildings.Airflow.Multizone.Orifice",
+      "parameters": {
+        "allowFlowReversal": true,
+        "m_flow_nominal": 0.0009282887056415302,
+        "m_flow_small": 9.282887056415303e-08,
+        "show_T": false,
+        "forceErrorControlOnFlow": true,
+        "useDefaultProperties": true,
+        "dp_turbulent": 0.1,
+        "m": 0.5,
+        "C": 0.007756207692976464,
+        "A": 0.01,
+        "CD": 0.6
+      }
+    },
+    {
+      "name": "senFan",
+      "class": "Buildings.Fluid.Sensors.MassFlowRate",
+      "parameters": {
+        "allowFlowReversal": true,
+        "m_flow_nominal": 0.0,
+        "m_flow_small": 0.0
+      },
+      "role": "observer"
+    },
+    {
+      "name": "senOri",
+      "class": "Buildings.Fluid.Sensors.MassFlowRate",
+      "parameters": {
+        "allowFlowReversal": true,
+        "m_flow_nominal": 0.0,
+        "m_flow_small": 0.0
+      },
+      "role": "observer"
+    }
+  ],
+  "connections": [
+    [
+      "bouA.ports[1]",
+      "fan.port_a"
+    ],
+    [
+      "fan.port_b",
+      "senFan.port_a"
+    ],
+    [
+      "senFan.port_b",
+      "ori.port_a"
+    ],
+    [
+      "ori.port_b",
+      "senOri.port_a"
+    ],
+    [
+      "senOri.port_b",
+      "bouB.ports[1]"
+    ]
+  ],
+  "signals": [],
+  "modelica_standard_library": "4.1.0",
+  "experiment_declared": [
+    "StopTime",
+    "Interval",
+    "Tolerance"
+  ],
+  "parameter_precision": "Reals from the simulation result (full double precision)"
+}

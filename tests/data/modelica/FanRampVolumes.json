@@ -1,0 +1,283 @@
+{
+  "format": "noodl-modelica/1",
+  "model": "NoodlFanShort.FanRampVolumes",
+  "mbl_commit": "55abf579598ca81cae0a82f337350375958e6722",
+  "openmodelica": "OpenModelica v1.27.1 (64-bit)",
+  "experiment": {
+    "StartTime": 0.0,
+    "StopTime": 10.0,
+    "Interval": 0.1,
+    "Tolerance": 1e-06
+  },
+  "medium": {
+    "class": "Buildings.Media.Air",
+    "p_default": 101325.0,
+    "T_default": 293.15,
+    "X_default": [
+      0.01,
+      0.99
+    ],
+    "nXi": 1,
+    "extraPropertiesNames": [],
+    "dStp": 1.2,
+    "pStp": 101325.0
+  },
+  "components": [
+    {
+      "name": "bouA",
+      "class": "Buildings.Fluid.Sources.Boundary_pT",
+      "parameters": {
+        "nPorts": 1,
+        "verifyInputs": false,
+        "use_X_in": false,
+        "use_Xi_in": false,
+        "use_C_in": false,
+        "X": [
+          0.01,
+          0.99
+        ],
+        "C": [],
+        "use_p_in": false,
+        "p": 101325.0,
+        "use_T_in": false,
+        "T": 293.15
+      }
+    },
+    {
+      "name": "bouB",
+      "class": "Buildings.Fluid.Sources.Boundary_pT",
+      "parameters": {
+        "nPorts": 1,
+        "verifyInputs": false,
+        "use_X_in": false,
+        "use_Xi_in": false,
+        "use_C_in": false,
+        "X": [
+          0.01,
+          0.99
+        ],
+        "C": [],
+        "use_p_in": false,
+        "p": 101325.0,
+        "use_T_in": false,
+        "T": 293.15
+      }
+    },
+    {
+      "name": "volA",
+      "class": "Buildings.Fluid.MixingVolumes.MixingVolume",
+      "parameters": {
+        "energyDynamics": "Modelica.Fluid.Types.Dynamics.FixedInitial",
+        "massDynamics": "Modelica.Fluid.Types.Dynamics.FixedInitial",
+        "substanceDynamics": "Modelica.Fluid.Types.Dynamics.FixedInitial",
+        "traceDynamics": "Modelica.Fluid.Types.Dynamics.FixedInitial",
+        "p_start": 101325.0,
+        "T_start": 293.15,
+        "X_start": [
+          0.01,
+          0.99
+        ],
+        "C_start": [],
+        "C_nominal": [],
+        "mSenFac": 1.0,
+        "initialize_p": true,
+        "m_flow_nominal": 0.05,
+        "nPorts": 2,
+        "m_flow_small": 5e-06,
+        "allowFlowReversal": true,
+        "V": 50.0,
+        "use_C_flow": false
+      }
+    },
+    {
+      "name": "volB",
+      "class": "Buildings.Fluid.MixingVolumes.MixingVolume",
+      "parameters": {
+        "energyDynamics": "Modelica.Fluid.Types.Dynamics.FixedInitial",
+        "massDynamics": "Modelica.Fluid.Types.Dynamics.FixedInitial",
+        "substanceDynamics": "Modelica.Fluid.Types.Dynamics.FixedInitial",
+        "traceDynamics": "Modelica.Fluid.Types.Dynamics.FixedInitial",
+        "p_start": 101325.0,
+        "T_start": 293.15,
+        "X_start": [
+          0.01,
+          0.99
+        ],
+        "C_start": [],
+        "C_nominal": [],
+        "mSenFac": 1.0,
+        "initialize_p": true,
+        "m_flow_nominal": 0.05,
+        "nPorts": 2,
+        "m_flow_small": 5e-06,
+        "allowFlowReversal": true,
+        "V": 20.0,
+        "use_C_flow": false
+      }
+    },
+    {
+      "name": "fan",
+      "class": "Buildings.Fluid.Movers.FlowControlled_dp",
+      "parameters": {
+        "energyDynamics": "Modelica.Fluid.Types.Dynamics.SteadyState",
+        "massDynamics": "Modelica.Fluid.Types.Dynamics.SteadyState",
+        "substanceDynamics": "Modelica.Fluid.Types.Dynamics.SteadyState",
+        "traceDynamics": "Modelica.Fluid.Types.Dynamics.SteadyState",
+        "p_start": 101325.0,
+        "T_start": 293.15,
+        "X_start": [
+          0.01,
+          0.99
+        ],
+        "C_start": [],
+        "C_nominal": [],
+        "mSenFac": 1.0,
+        "allowFlowReversal": true,
+        "inputType": "Buildings.Fluid.Types.InputType.Continuous",
+        "constInput": 500.0,
+        "stageInputs": [
+          500.0
+        ],
+        "computePowerUsingSimilarityLaws": false,
+        "addPowerToMedium": false,
+        "nominalValuesDefineDefaultPressureCurve": false,
+        "tau": 1.0,
+        "use_riseTime": false,
+        "riseTime": 30.0,
+        "init": "Modelica.Blocks.Types.Init.InitialOutput",
+        "m_flow_small": 5e-06,
+        "show_T": false,
+        "dp_start": 0.0,
+        "m_flow_nominal": 0.05,
+        "dp_nominal": 500.0,
+        "constantHead": 500.0,
+        "prescribeSystemPressure": false
+      },
+      "unevaluated": [
+        "heads"
+      ]
+    },
+    {
+      "name": "oriA",
+      "class": "Buildings.Airflow.Multizone.Orifice",
+      "parameters": {
+        "allowFlowReversal": true,
+        "m_flow_nominal": 0.0009295160030897801,
+        "m_flow_small": 9.295160030897801e-08,
+        "show_T": false,
+        "forceErrorControlOnFlow": true,
+        "useDefaultProperties": true,
+        "dp_turbulent": 0.1,
+        "m": 0.5,
+        "C": 0.007745966692414834,
+        "A": 0.01,
+        "CD": 0.6
+      }
+    },
+    {
+      "name": "oriB",
+      "class": "Buildings.Airflow.Multizone.Orifice",
+      "parameters": {
+        "allowFlowReversal": true,
+        "m_flow_nominal": 0.0009295160030897801,
+        "m_flow_small": 9.295160030897801e-08,
+        "show_T": false,
+        "forceErrorControlOnFlow": true,
+        "useDefaultProperties": true,
+        "dp_turbulent": 0.1,
+        "m": 0.5,
+        "C": 0.007745966692414834,
+        "A": 0.01,
+        "CD": 0.6
+      }
+    },
+    {
+      "name": "senFan",
+      "class": "Buildings.Fluid.Sensors.MassFlowRate",
+      "parameters": {
+        "allowFlowReversal": true,
+        "m_flow_nominal": 0.0,
+        "m_flow_small": 0.0
+      },
+      "role": "observer"
+    },
+    {
+      "name": "senA",
+      "class": "Buildings.Fluid.Sensors.MassFlowRate",
+      "parameters": {
+        "allowFlowReversal": true,
+        "m_flow_nominal": 0.0,
+        "m_flow_small": 0.0
+      },
+      "role": "observer"
+    },
+    {
+      "name": "senB",
+      "class": "Buildings.Fluid.Sensors.MassFlowRate",
+      "parameters": {
+        "allowFlowReversal": true,
+        "m_flow_nominal": 0.0,
+        "m_flow_small": 0.0
+      },
+      "role": "observer"
+    }
+  ],
+  "connections": [
+    [
+      "bouA.ports[1]",
+      "oriA.port_a"
+    ],
+    [
+      "oriA.port_b",
+      "senA.port_a"
+    ],
+    [
+      "senA.port_b",
+      "volA.ports[1]"
+    ],
+    [
+      "volA.ports[2]",
+      "fan.port_a"
+    ],
+    [
+      "fan.port_b",
+      "senFan.port_a"
+    ],
+    [
+      "senFan.port_b",
+      "volB.ports[1]"
+    ],
+    [
+      "volB.ports[2]",
+      "oriB.port_a"
+    ],
+    [
+      "oriB.port_b",
+      "senB.port_a"
+    ],
+    [
+      "senB.port_b",
+      "bouB.ports[1]"
+    ]
+  ],
+  "signals": [
+    {
+      "name": "ramp",
+      "class": "Modelica.Blocks.Sources.Ramp",
+      "parameters": {
+        "height": 20.0,
+        "duration": 4.0,
+        "offset": 0.0,
+        "startTime": 1.0
+      },
+      "drives": "fan.dp_in"
+    }
+  ],
+  "modelica_standard_library": "4.1.0",
+  "experiment_declared": [
+    "StopTime",
+    "Interval",
+    "Tolerance"
+  ],
+  "parameter_precision": "Reals from the simulation result (full double precision)"
+}

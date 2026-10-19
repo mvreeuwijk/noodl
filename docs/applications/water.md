@@ -134,7 +134,8 @@ multipliers (`benchmarks/water_eps.py`) takes 2.5 times less time.
 `water_steady(model, state, drivers, **solve_kwargs)` wraps `model.steady` with defaults
 `atol=rtol=1e-11`, `max_iter=200` (both empirically tuned, the iteration cap for the
 potential form; caller overrides win), starts a cold start of the resistance form (every pipe
-flow exactly zero) from `model.initial_flows`, then checks
+flow exactly zero) from `model.initial_flows`, and the pumps from their design flows (EPANET's
+own first iterate), then checks
 every converged pump's flow against its own `q_max()` and raises naming the pump and batch
 instance if it is exceeded — rather than silently accepting an extrapolated point off the end of
 the curve.
@@ -194,9 +195,31 @@ loss near Re = 2000).
 
 `three_point_curve(q_design, h_design)` reproduces EPANET's single-point construction — shutoff
 head at 133% of design head, maximum flow at twice design flow — giving $h_0 = 4H/3$,
-$r = (H/3)/q_d^2$ and forcing $n = 2$ exactly. `PumpCurve` inverts
-$h_{\text{gain}} = w^2 (h_0 - r (q/w)^n)$ in closed form, with the same laminar blend near
-shutoff. `q_max = w (h_0/r)^{1/n}` is the flow at zero head gain.
+$r = (H/3)/q_d^2$ and forcing $n = 2$ exactly. `q_max = w (h_0/r)^{1/n}` is the flow at zero
+head gain.
+
+Every pump enters the solve in its **head-gain form**, whatever the `pipe_form`, as EPANET and
+wntr write it: `FlowControlledPump`, $H_{\text{discharge}} - H_{\text{suction}} =
+h_{\text{gain}}(q)$ with $h_{\text{gain}} = w^2 h_0 - r w^{2-n} q^n$ and the pump's flow an
+unknown. Two regularisations keep the gain strictly decreasing in $q$, so every head difference
+has exactly one flow:
+
+- below the flow where the curve's slope falls to EPANET's `RQtol`, the gain is the curve's
+  tangent there (wntr's `get_pump_line_params` construction), so the slope never vanishes;
+- below zero flow the pump is shut: the gain rises with EPANET's closed-link slope `CBIG`
+  ($10^8$ ft/cfs). A pump held beyond its shut-off head, which EPANET closes, converges to
+  EPANET's closed-link leak (excess head / `CBIG`, 3.4e-8 m³/s for 36.7 m), not to a reverse
+  flow.
+
+`PumpCurve.flow` still gives the inverted curve, $q = w((h_0 + dp/w^2)/r)^{1/n}$, with a laminar
+blend near shut-off, but the solve no longer uses it: its slope is infinite at shut-off and
+exactly zero beyond it. A Newton iterate beyond shut-off then has no Jacobian entry between the
+pump's two sides, and with a pressure-driven demand downstream only the demand's own small slope
+ties those heads to a boundary; the next step throws them far outside the curve and the system
+goes singular. That was measured on a reservoir, a pump and a pipe feeding a PDA junction
+(singular from the fifth iterate on). In the head-gain form the pump's row ties its two heads
+together on every iterate, and the same network converges quadratically, in 5 Newton
+iterations (19 with `pipe_form="potential"`).
 
 ### Valves
 
@@ -291,6 +314,7 @@ on-disk reals are **float32**, so roughly 1e-7 relative is EPANET's own precisio
 | Darcy-Weisbach, Net1 single period: heads, flows | 1e-6 / 1e-5 | 7.009e-8, 3.986e-6 |
 | Darcy-Weisbach, laminar + transitional + turbulent pipes (`lowflow_dw_si.inp`): heads, flows, per-pipe head loss | 1e-6 / 1e-6 / 2.65e-7 m | 3.5e-8, 9.4e-8, 9.6e-8 m |
 | Pressure-driven demand vs EPANET's `DEMAND MODEL PDA` | 1e-5 | 3.521e-7 heads, 2.184e-7 demands |
+| A pump feeding pressure-driven demand (two-loop with a pump, every junction pressure-limited), both `pipe_form`s | 1e-5 | 3.526e-7 heads, 2.354e-7 flows, 2.355e-7 demands |
 | PBV (active and open) and GPV on the two-loop: heads, flows, the valve's head loss | 1e-6 / 1e-6 m³/s / 1e-5 | 5.5e-7, 2.6e-7 m³/s, 6.8e-6 |
 | Head loss sums to zero around every cycle-basis loop | 1e-12 | **exactly 0.0** |
 | Autodiff vs central differences | 1e-6 × scale | 3.212e-6 / 2.505e-10 / 1.007e-6 / 2.753e-9 |

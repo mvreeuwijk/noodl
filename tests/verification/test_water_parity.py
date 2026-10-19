@@ -476,6 +476,57 @@ def test_pda_delivers_less_than_the_required_demand(tmp_path):
     assert bool((delivered > 0.8 * required).all())
 
 
+# The two-loop with a pump between the reservoir and a new demand-free junction J0, which
+# P1 now leaves: every junction downstream of the pump is pressure-limited (56-58 m against
+# the required 60 m). EPANET is run to ACCURACY 1e-8: at its default 1e-3 its own flows stop
+# up to 1.9e-4 relative short of converged on this network (P7, the smallest flow).
+_PUMP_EDITS = (
+    (" J1              \t0           \t5 ",
+     " J0              \t0           \t0           \t                \t;\n"
+     " J1              \t0           \t5 "),
+    (" P1              \tR1              \tJ1 ", " P1              \tJ0              \tJ1 "),
+    (";ID              \tNode1           \tNode2           \tParameters",
+     ";ID\tNode1\tNode2\tParameters\n PU1\tR1\tJ0\tHEAD C1"),
+    (";ID              \tX-Value     \tY-Value", ";ID\tX-Value\tY-Value\n C1\t45\t8"),
+    (" Accuracy           \t0.001",
+     " Accuracy           \t1e-8\n HEADERROR \t1e-9\n FLOWCHANGE \t1e-9"),
+    (" Trials             \t40", " Trials             \t500"),
+)
+
+
+@pytest.mark.parametrize("pipe_form", ["flow", "potential"])
+def test_a_pump_feeding_pressure_driven_demand(tmp_path, pipe_form):
+    """1e-5 relative on heads, flows and delivered demands, as for the PDA row above.
+
+    MEASURED (both pipe forms): heads 3.526e-7, flows 2.354e-7, demands 2.355e-7, the
+    reference's float32 floor. Before pumps entered in their head-gain form
+    (`FlowControlledPump`) this network did not solve at all: the system went singular.
+    """
+    path, results = _epanet(tmp_path, "twoloop_si.inp", edits=[*_PUMP_EDITS, _PDA_EDIT])
+    net = read_epanet_inp(path)
+    assert [p.name for p in net.pumps] == ["PU1"] and net.options.demand_model == "PDA"
+    model, state, drivers = build_model(net, pipe_form=pipe_form)
+    final = water_steady(model, state, drivers)
+    heads = results.node["head"].loc[0]
+    flows = results.link["flowrate"].loc[0]
+    demands = results.node["demand"].loc[0]
+    worst_h = _worst_heads(model, final, heads, skip=("R1",))
+    worst_q = _worst_flows(model, final, flows)
+    source = model.kirchhoff["water"]._node_sources[0]
+    delivered = source.flow(final["water.phi"][..., source.nodes]).detach()
+    required = torch.tensor([j.demand for j in net.junctions], dtype=F64)
+    worst_d = max(
+        abs(float(delivered[i]) - float(demands[j.name])) / abs(float(demands[j.name]))
+        for i, j in enumerate(net.junctions)
+        if j.demand > 0
+    )
+    assert worst_h < 1e-5, worst_h
+    assert worst_q < 1e-5, worst_q
+    assert worst_d < 1e-5, worst_d
+    loaded = required > 0
+    assert bool((delivered[loaded] < 0.99 * required[loaded]).all())   # really limited
+
+
 def test_a_zero_pressure_span_is_refused(tmp_path):
     path, _ = _epanet(tmp_path, "twoloop_si.inp")
     net = read_epanet_inp(path)

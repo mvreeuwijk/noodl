@@ -10,6 +10,7 @@ from noodl.apps.water.elements import (
     CompositeDarcyWeisbach,
     EpanetDarcyWeisbach,
     FlowControlledPipe,
+    FlowControlledPump,
     G,
     GeneralPurposeValve,
     HazenWilliams,
@@ -44,7 +45,8 @@ from noodl.apps.water.tanks import Control, TankLevels
 
 __all__ = [
     "DW_SI", "EPANET_QCF", "FLOW_UNITS", "G", "HW_SI", "BreakerValve", "Control",
-    "CompositeDarcyWeisbach", "FlowControlledPipe", "GeneralPurposeValve", "HazenWilliams",
+    "CompositeDarcyWeisbach", "FlowControlledPipe", "FlowControlledPump",
+    "GeneralPurposeValve", "HazenWilliams",
     "Junction",
     "MinorLoss", "PressureDrivenDemand", "Pump", "PumpCurve", "Reservoir", "Tank", "TankStorage",
     "TankLevels", "Valve", "WaterNetwork", "WaterOptions", "WaterPipe",

@@ -574,6 +574,51 @@ def test_net1_pump_stays_below_q_max_and_is_not_refused():
     assert torch.isfinite(final["water.phi"]).all()
 
 
+# ------------------------------------------------------------- pumps in the head-gain form
+def _pump_feeding_pda():
+    """R - pipe - A - PUMP - B - pipe - C: the smallest network on which a pump with a
+    pressure-driven demand downstream went singular when the pump entered as its inverted
+    curve `q = g(dp)` (an iterate beyond shut-off left B and C tied to nothing but C's
+    demand slope)."""
+    return _device_network("pump")
+
+
+@pytest.mark.parametrize("pipe_form", ["flow", "potential"])
+def test_a_pump_feeding_pressure_driven_demand_converges(pipe_form):
+    model, state, drivers = build_model(_pump_feeding_pda(), pda=True, p_req=60.0,
+                                        pipe_form=pipe_form)
+    out = water_steady(model, state, drivers)
+    phi, q = out["water.phi"], out["water.q"]
+    # the pump lifts B above A by its own curve's gain at its own flow
+    pump = model.kirchhoff["water"].law_for("pump")[0].pump
+    gain = float(pump.head_gain(q[2:3], 0.0, 0.0))
+    assert float(phi[1] - phi[0]) == pytest.approx(gain, rel=1e-10)
+    # C (p ~ 59.96 m) is short of its 60 m required pressure: the demand really is limited
+    source = model.kirchhoff["water"].node_sources[0]
+    delivered = source.flow(phi[:3])
+    assert 0.99 * 0.004 < float(delivered[2]) < 0.004
+    assert float(q[2]) == pytest.approx(float(delivered[2]), rel=1e-10)
+
+
+@pytest.mark.parametrize("pipe_form", ["flow", "potential"])
+def test_a_pump_held_beyond_shut_off_carries_only_the_closed_link_leak(pipe_form):
+    """R1 (50 m) - PUMP (shut-off 13.3 m) - J - pipe - R2 (100 m): the pump cannot lift
+    to R2, so it is shut, as EPANET closes it, with EPANET's closed-link leak
+    `excess / CBIG` (36.7 m over CBIG = 1e8 ft/cfs) and not a reverse flow."""
+    net = WaterNetwork(
+        junctions=(Junction("J", 0.0, 0.0),),
+        reservoirs=(Reservoir("R1", 50.0), Reservoir("R2", 100.0)),
+        pipes=(WaterPipe("P", "J", "R2", 500.0, 0.3, 130.0),),
+        pumps=(Pump("PU", "R1", "J", "C1"),), curves={"C1": ((0.004, 10.0),)},
+    )
+    model, state, drivers = build_model(net, pipe_form=pipe_form)
+    out = water_steady(model, state, drivers)
+    excess = 100.0 - 50.0 - 40.0 / 3.0
+    cbig = 1e8 * 0.3048 * (1.0 / 0.3048**3)
+    assert float(out["water.q"][-1]) == pytest.approx(-excess / cbig, rel=1e-6)
+    assert float(out["water.phi"][0]) == pytest.approx(100.0, abs=1e-9)
+
+
 # ---------------------------------------------------------- quality: constant-tracer invariants
 def _device_network(device):
     """R - pipe - A - DEVICE - B - pipe - C, demands at A and C."""
@@ -596,12 +641,8 @@ def _device_network(device):
                         pipes=pipes, **kwargs)
 
 
-# pda=True with a pump does not converge in the HYDRAULIC solve (quality off) on any small
-# network tried, an existing limit unrelated to quality, so that pair is not exercised.
-@pytest.mark.parametrize(
-    ("device", "pda"),
-    [("tcv", False), ("tcv", True), ("fcv", False), ("fcv", True), ("pump", False)],
-)
+@pytest.mark.parametrize("pda", [False, True])
+@pytest.mark.parametrize("device", ["tcv", "fcv", "pump"])
 def test_a_constant_tracer_is_preserved_through_every_device(device, pda):
     kwargs = {"pda": True, "p_req": 60.0} if pda else {}
     model, state, drivers = build_model(_device_network(device), quality=0.0, **kwargs)

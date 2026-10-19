@@ -1646,14 +1646,16 @@ class DynamicWaveHydraulics:
         full = torch.zeros(loss.shape[:-1] + self.node_invert.shape, dtype=F64)
         return full.index_copy(-1, self.junction_idx, loss)
 
-    def _conduit_loss_nodes(self, terms: ConduitTerms) -> Tensor | None:
+    def _conduit_loss_nodes(self, terms: ConduitTerms, *, seepage_only: bool = False
+                            ) -> Tensor | None:
         """The rate (m3/s) the conduits' evaporation and seepage take from every node
         (`dynwave.c::updateNodeFlows`, dynwave.c:555-572): the conduit's rate times its
         barrels, half from each end, or all from the end that is not an outfall; ``None``
-        where the conduits lose nothing."""
+        where the conduits lose nothing. With `seepage_only` the seepage part alone, the
+        water that takes its dissolved mass with it (`_quality_volume`)."""
         if terms.loss_rate is None:
             return None
-        rate = terms.loss_rate * QCF
+        rate = (terms.seep_loss_rate if seepage_only else terms.loss_rate) * QCF
         u_out, v_out = self.is_outfall[self.u], self.is_outfall[self.v]
         half = torch.where(u_out | v_out, 1.0, 0.5)
         at_u = torch.where(u_out, 0.0, half)
@@ -2330,6 +2332,11 @@ class DynamicWaveHydraulics:
             # `where`, not `clamp`: the derivative stays on the withdrawal side at zero inflow
             lateral = inflow[..., self.junction_idx]
             withdrawal = torch.where(lateral < 0, -lateral, 0.0 * lateral)
+            # a conduit's seepage leaves at the junction's concentration too (SWMM's
+            # qualrout.c); its evaporation takes water only, so it stays out of `withdrawal`
+            seepage = self._conduit_loss_nodes(terms, seepage_only=True)
+            if seepage is not None:
+                withdrawal = withdrawal + seepage[..., self.junction_idx]
             out.update(self._quality_volume(state, out["sewer.net_inflow"], overflow, dt,
                                             withdrawal))
         return out
@@ -2424,7 +2431,11 @@ class DynamicWaveHydraulics:
         enters during the step and is withdrawn again takes its mass with it, so a uniform
         concentration stays uniform however many control volumes the step withdraws. (The
         rate is one per step; `Model` substeps of the quality layer would interpolate the
-        capacity under it and so would not keep this exactly.)"""
+        capacity under it and so would not keep this exactly.)
+
+        A conduit's seepage (also in `net_inflow`) is part of `withdrawal`: it takes its mass,
+        ``dt seep x``, so the concentration does not rise. Evaporation is not: its water leaves
+        `net_inflow` and the volume alone, and the mass stays behind."""
         start = state["sewer.quality_volume"]
         end = torch.clamp(start + dt * (net_inflow - overflow), min=CAPACITY_FLOOR)
         lost = torch.clamp(dt * overflow / start, max=1.0)
@@ -2781,13 +2792,13 @@ def build_dynamic_wave_model(net: SewerNetwork, *, iterate_tol: float | None = N
     closure = DynamicWaveHydraulics(graph, net,
                                     quality_layer="water_quality" if quality else None,
                                     air=air)
-    if quality and closure.has_wet_losses:
+    if quality and closure._storage_inputs is not None:
         raise ValueError(
-            "build_dynamic_wave_model: the network has conduits that evaporate or seep or "
-            "storage units that evaporate or exfiltrate; water quality with those losses is "
-            "not modelled (the lost water would have to take its dissolved mass or leave the "
-            "transport volumes unchanged, and SWMM's choice is not reproduced) -- build with "
-            "quality=False")
+            "build_dynamic_wave_model: the network has storage units that evaporate or "
+            "exfiltrate; water quality with those losses is not modelled (SWMM's choice of "
+            "what mass they take is not reproduced) -- build with quality=False. Conduit "
+            "seepage and evaporation are modelled: seepage takes its mass, evaporation "
+            "concentrates")
     junction_idx = closure.junction_idx
     junction_invert = closure.node_invert[junction_idx]
 

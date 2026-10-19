@@ -13,7 +13,7 @@ units are read by `apps/water/inp.py`.
 quality sections (a quality run is configured through `build_model(quality=...)` instead).
 
 **Aggregated / interpreted:** several `[DEMANDS]` categories of one junction add up (they replace
-the `[JUNCTIONS]` demand); categories with different patterns are refused, since one demand pattern
+the `[JUNCTIONS]` demand); categories with different patterns are refused (a category with no pattern uses the default pattern, so it equals one naming that default explicitly), since one demand pattern
 per junction is modelled. `[TIMES]` values take an optional unit (any token beginning SEC, MIN, HOU or DAY,
 case-insensitive, as EPANET reads it: MINS, SECS, HOU; a bare number is hours, `HH:MM[:SS]` is a clock time); other units are refused.
 

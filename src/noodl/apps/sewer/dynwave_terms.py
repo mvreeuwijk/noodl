@@ -439,6 +439,10 @@ class ConduitTerms(NamedTuple):
     ``loss_rate`` (cfs, total over the barrels) is the evaporation plus seepage the conduit
     takes from its end nodes (`link.c::conduit_getLossRate`, times the barrels, as
     `dynwave.c::updateNodeFlows` adds it); ``None`` for a network whose conduits lose none.
+    ``seep_loss_rate`` (cfs, total over the barrels) is its seepage part alone, after the same
+    cap: the water that leaves WITH its dissolved mass (SWMM's quality routing removes a
+    seepage loss at the conduit's concentration and an evaporation loss without its mass,
+    so evaporation concentrates); ``None`` where ``loss_rate`` is.
     """
 
     flow_class: Tensor
@@ -472,6 +476,7 @@ class ConduitTerms(NamedTuple):
     cap_slope: Tensor | None = None
     cap_drop: Tensor | None = None
     loss_rate: Tensor | None = None
+    seep_loss_rate: Tensor | None = None
 
 
 class LossInputs(NamedTuple):
@@ -492,11 +497,12 @@ def _raw_width(geo: ConduitGeometry, y: Tensor) -> Tensor:
 
 
 def _conduit_losses(geo: ConduitGeometry, loss: LossInputs, depth: Tensor, volume: Tensor,
-                    dt: float, active: Tensor) -> Tensor:
+                    dt: float, active: Tensor) -> tuple[Tensor, Tensor]:
     """`link.c::conduit_getLossRate` (link.c:1334-1399) for DW routing: the evaporation plus
-    seepage rate (cfs, one barrel's) of the conduits where `active`, at the link depth `depth`
-    (ft; the mean of the step-start depth and this pass's) and the link volume `volume` (ft3,
-    total over the barrels) that caps the rate over the step `dt` (s).
+    seepage rate and the seepage part of it alone (cfs, one barrel's) of the conduits where
+    `active`, at the link depth `depth` (ft; the mean of the step-start depth and this pass's)
+    and the link volume `volume` (ft3, total over the barrels) that caps the rate
+    over the step `dt` (s).
 
     Evaporation is the top width times the true length times the rate, for an open section
     while the rate is positive; seepage the rate times the width at the depth limited to the
@@ -522,7 +528,7 @@ def _conduit_losses(geo: ConduitGeometry, loss: LossInputs, depth: Tensor, volum
     over = total > cap
     scale = torch.where(over, cap / torch.where(over, total, torch.ones_like(total)),
                         torch.ones_like(total))                                # link.c:1390-1392
-    return total * scale
+    return total * scale, seep * scale
 
 
 def _slot_width(y: Tensor, y_full: Tensor, slot: bool, w_max: Tensor | None = None,
@@ -889,17 +895,18 @@ def conduit_terms(geo: ConduitGeometry, depth1: Tensor, depth2: Tensor, q_last: 
                   + torch.where(a_mid > FUDGE, geo.loss_average
                                 * (qa / torch.where(a_mid > FUDGE, a_mid, one)), zero))
         denom = 1.0 + dq1 + losses / 2.0 / length * dt                         # :232, :239
-    loss_rate = None
+    loss_rate = seep_loss_rate = None
     explicit = q_old - dq2 + dq3 + dq4
     carry = q_old + dq3 + dq4
     if loss is not None and (geo.loss_evap is not None or geo.seep_rate is not None):
         # dwflow.c:236 -- dq6 = lossRate 2.5 dt v / L (the TRUE length, link_getLength); the
         # rate is the previous trial's depth and volume (this pass's, at the fixed point)
         a_mean = (a1 + a2) / 2.0
-        per_barrel = _conduit_losses(geo, loss, torch.minimum(y_mid, yf),
+        per_barrel, seep_barrel = _conduit_losses(geo, loss, torch.minimum(y_mid, yf),
                                      a_mean * geo.length * barrels, dt, ~dry_exit)
         dq6 = per_barrel * 2.5 * dt * v / geo.length
         loss_rate = per_barrel * barrels                                   # dynwave.c:560-561
+        seep_loss_rate = seep_barrel * barrels
         explicit = explicit + dq6
         carry = carry + dq6
     momentum = explicit / denom                                                # :240
@@ -1001,6 +1008,7 @@ def conduit_terms(geo: ConduitGeometry, depth1: Tensor, depth2: Tensor, q_last: 
         cap_slope=cap_slope,
         cap_drop=cap_drop,
         loss_rate=loss_rate,
+        seep_loss_rate=seep_loss_rate,
     )
 
 

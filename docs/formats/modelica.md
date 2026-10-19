@@ -112,9 +112,17 @@ its MBL default, so an export that omits one is read as MBL would:
 `energyDynamics = SteadyState` (the default, `DynamicFreeInitial`, adds a mixing volume of
 1 s time constant), `prescribeSystemPressure = false` and `inputType` `Constant` or
 `Continuous` (`Stages` is refused). Each violation is refused naming the instance and the
-parameter. A mover with volume mass storage is refused too (set `massDynamics = SteadyState`
-or read with `mass_storage=False`): the storage closure evaluates the airflow with
-`KirchhoffLayer.flows`, which an air layer solved by Modified Nodal Analysis does not have.
+parameter. With volume mass storage the mover's flow is algebraic, not a state (it has no
+inertia and, with `energyDynamics = SteadyState`, no volume): every step's airflow solve fixes
+it. Only the t = StartTime row is not a solve: there every storing zone is at its start
+pressure, and the rise relation does not involve the flow. As MBL's DAE does by index
+reduction, the reader takes the flow that keeps the rise held, the pressures of the mover's two
+ends changing at the same rate: between two volumes `V_a`, `V_b` whose other flows are `q_a`
+in and `q_b` out, `m_flow = (V_b q_a + V_a q_b)/(V_a + V_b)` (in general the volumes' pressure
+capacities `V k` weight it). This is the value OpenModelica reports from a start that meets the
+rise; a start that violates it (both volumes at the same `p_start` across a 5 Pa fan) is an
+inconsistent initialisation there, and here the first step moves the pressures onto the rise
+through the mover, conserving mass, with the graded start that resolves a release.
 `names.edges["<mover>"]` is its `m_flow` column, like a one-way element's.
 
 **Feedback control.** `LimPID` is supported as a P controller, `y = clamp(k (wp u_s - u_m),
@@ -181,8 +189,7 @@ its class):
   temperature sensor whose `port` is not wired to a volume's `heatPort`.
 - A `TraceSubstancesFlowSource` with a negative (extracting) flow.
 - A `FlowControlled_dp` with `use_riseTime`, `addPowerToMedium` or `prescribeSystemPressure`
-  true, with `energyDynamics` other than `SteadyState`, with `inputType = Stages`, or with
-  volume mass storage ("Movers" above).
+  true, with `energyDynamics` other than `SteadyState`, or with `inputType = Stages`.
 - Every class outside the supported list above ("component class is not supported", or
   "signal source is not supported" for a signal block), the CDL blocks
   (`Buildings.Controls.OBC.CDL`, their PID and hysteresis included) among them.
@@ -357,6 +364,21 @@ into the block or refuse the connection by name. The CSV of a model with a feedb
 holds its output `<controller>.y`, and that of a model with a `MediumColumnDynamic` the state
 of its volume, `<column>.vol.T`, `.p`, `.Xi[1]` and `.C[k]`. `ChimneyShaftNoVolume`,
 `ChimneyShaftWithVolume` and `TrickleVent` were re-exported this way at `--tolerance 1e-13`.
+
+The fan and zero-resistance paths are compared with OpenModelica on five models of the repository's
+own package `tests/data/modelica/sources/NoodlFanShort.mo` (`FanOrifice`, `FanRamp`, `FanAdverse`,
+`ShortConnections`, `FanShortParallel`: a `FlowControlled_dp` with a constant head, a ramped `dp_in`
+and a back pressure that reverses the flow; a `LosslessPipe` and a `PressureDrop` at
+`dp_nominal = 0` in series; a fan through a lossless pipe beside a leak). They are exported with
+`scripts/modelica_export.py NoodlFanShort.<Model> --package <the .mo file> --mbl <mbl>`, and are
+algebraic models in `test_modelica_parity.py`, at the same tolerance as the others.
+Three dynamic models cover a fan with volume mass storage (`FanVolumes`, `FanRampVolumes`,
+`FanLosslessVolumes`: two `MixingVolume`s of different size joined by a fan and each leaking to an
+ambient, with a constant head and a start that meets the rise; the same with `dp_in` ramped from
+0 to 20 Pa; a fan into one volume through a `LosslessPipe`). They are in the dynamic set, at the
+reference tolerance of 1e-13, with no resolution allowance: the full runs agree with
+OpenModelica to 2.5e-7 relative at (1, 2) substeps (the t = 0 row, where the fan flow is set
+by the reader, to 3.6e-8).
 
 Regenerating the committed parity records (`tests/data/modelica/parity-{algebraic,dynamic}.json`,
 in [the building physics parity tables](../applications/building_physics.md#against-openmodelica-modelica-buildings-library))
