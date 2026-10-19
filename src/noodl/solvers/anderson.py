@@ -24,9 +24,14 @@ Tensor = torch.Tensor
 #: linearly dependent on the newer ones and dropped together with every older one.
 _ANDERSON_COND_MAX = 1.0e8
 
+#: Smallest ratio between a column's orthogonalised norm and its rounding-noise estimate
+#: that `_anderson_mix` keeps (when given `ns`); a column below it carries no information
+#: above rounding and is dropped together with every older one.
+_ANDERSON_NOISE_MIN = 10.0
 
-def _anderson_mix(xs: Sequence[Tensor], gs: Sequence[Tensor],
-                  rs: Sequence[Tensor]) -> tuple[Tensor, Tensor]:
+
+def _anderson_mix(xs: Sequence[Tensor], gs: Sequence[Tensor], rs: Sequence[Tensor],
+                  ns: Sequence[Tensor] | None = None) -> tuple[Tensor, Tensor]:
     """Anderson type-II mixing (Walker & Ni 2011, undamped), per batch instance.
 
     `xs` are the fed states and `gs` the pass outputs, `(*batch, N)` each, oldest first and
@@ -40,9 +45,21 @@ def _anderson_mix(xs: Sequence[Tensor], gs: Sequence[Tensor],
     NEWEST first. Per instance it keeps the longest run of leading columns whose
     orthogonalised norm stays above `1 / _ANDERSON_COND_MAX` of the largest one so far (and
     is finite and non-zero), so an ill-conditioned history loses its oldest columns rather
-    than producing a wild step. At most `M` columns are used. Returns the mixed state and a
-    batch-shaped bool, True where at least one column was kept; where none was, the mixed
-    state is `g` itself and the caller decides what to feed instead.
+    than producing a wild step. With `ns` -- per history entry, `(*batch, M)`, a bound on the
+    rounding error of each entry of `rs`, in the same scaled units -- a column is kept only
+    while its orthogonalised norm is also at least `_ANDERSON_NOISE_MIN` times its own noise,
+    the norm of ``ns[k] + ns[k - 1]`` of the two entries it differences. The relative rule
+    alone does not see the absolute rounding floor: near convergence the leading column
+    shrinks with the residual, and a column of nothing but rounding (say in directions the
+    residual no longer has any signal in) passes it, gets a coefficient of order one and
+    drags its large output difference into the step. Near convergence the noise rule drops
+    such columns, and the mixing degrades to fewer columns, and in the end to none (the
+    caller's relaxed step), instead of following the last ulp (``docs/design/
+    orchestration.md``, "Anderson mixing", has the case and the choice of the multiple).
+
+    At most `M` columns are used. Returns the mixed state and a batch-shaped bool, True
+    where at least one column was kept; where none was, the mixed state is `g` itself and
+    the caller decides what to feed instead.
     """
     g, r = gs[-1], rs[-1]
     batch = broadcast_shapes(*(t.shape[:-1] for t in (*xs, *gs, *rs)))
@@ -60,6 +77,9 @@ def _anderson_mix(xs: Sequence[Tensor], gs: Sequence[Tensor],
     running_max = torch.zeros(batch, dtype=r.dtype, device=r.device)
     for j in range(m):
         v = rs[-1 - j] - rs[-2 - j]
+        if ns is not None:
+            noise = ns[-1 - j] + ns[-2 - j]
+            noisy = torch.sqrt((noise * noise).sum(-1)) * _ANDERSON_NOISE_MIN
         col: list[Tensor] = []
         for q_i in q_cols:
             r_ij = (q_i * v).sum(-1)
@@ -69,6 +89,8 @@ def _anderson_mix(xs: Sequence[Tensor], gs: Sequence[Tensor],
         d = torch.sqrt((v * v).sum(-1))
         running_max = torch.maximum(running_max, d)
         keep = keep & torch.isfinite(d) & (d > 0) & (d * _ANDERSON_COND_MAX > running_max)
+        if ns is not None:
+            keep = keep & (d > noisy)
         safe = torch.where(keep, d, torch.ones_like(d))
         q_cols.append(torch.where(keep[..., None], v / safe[..., None], torch.zeros_like(v)))
         diags.append(safe)
@@ -96,7 +118,10 @@ class _AndersonHistory:
     `iterate_flow_tol`, so that one dimensionless problem weighs every entry by its own
     tolerance. Both are needed: a head solve whose warm start already meets its residual
     tolerance hands the fed `phi` back unchanged, and the iteration then moves only through
-    `q`.
+    `q`. Each pass also records that residual's rounding noise, one ulp of the fed state and
+    of the output per entry (``eps (|x| + |g|)``) scaled the same way, for `_anderson_mix`'s
+    noise bound: near convergence the history columns of rounding alone are dropped, and the
+    mixing falls back to fewer columns and in the end to the relaxed step.
 
     The next fed state is, per instance:
 
@@ -126,6 +151,7 @@ class _AndersonHistory:
         self.xs: list[Tensor] = []
         self.gs: list[Tensor] = []
         self.rs: list[Tensor] = []
+        self.ns: list[Tensor] = []
 
     def mix(self, fed: Mapping[str, Tensor], out: Mapping[str, Tensor], w: float,
             converged: Tensor | None) -> State:
@@ -152,13 +178,16 @@ class _AndersonHistory:
         x = torch.cat([full(fed[k]) for k in self.keys], -1)
         g = torch.cat([full(out[k]) for k in self.keys], -1)
         r = judged([out[k] - fed[k] for k in self.keys], scale=True)
-        for hist, v in ((self.xs, x), (self.gs, g), (self.rs, r)):
+        # the rounding error of `r`: one ulp of the fed state and of the output, per entry
+        n = torch.finfo(r.dtype).eps * judged(
+            [out[k].abs() + fed[k].abs() for k in self.keys], scale=True)
+        for hist, v in ((self.xs, x), (self.gs, g), (self.rs, r), (self.ns, n)):
             hist.append(v)
             del hist[:-(self.memory + 1)]
         if len(self.xs) == 1:
             mixed = g
         else:
-            accelerated, kept = _anderson_mix(self.xs, self.gs, self.rs)
+            accelerated, kept = _anderson_mix(self.xs, self.gs, self.rs, self.ns)
             step = judged(torch.split(accelerated - x, sizes, dim=-1), scale=False)
             reverses = ((step * r < 0) & (r.abs() > 1.0)).any(-1)
             mixed = torch.where((kept & ~reverses)[..., None], accelerated, x + w * (g - x))

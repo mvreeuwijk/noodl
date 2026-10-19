@@ -1,0 +1,3 @@
+# One-off research probes for #28, kept as written; not part of the package.
+[lint]
+ignore = ["ALL"]

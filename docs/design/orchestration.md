@@ -55,3 +55,35 @@ threads it wakes slowed every later small elementwise op of the pass about three
 
 Reproduce: `python -m benchmarks.sewer_dynwave_speed`, swapping the hand-written
 factorisation for `torch.linalg.qr`.
+
+The least-squares columns (newest first) are kept while two bounds hold, and the first column
+that fails either is dropped together with every older one:
+
+- relative: its orthogonalised norm is at least `1 / _ANDERSON_COND_MAX` (1e-8) of the largest
+  one so far, so an ill-conditioned history loses its oldest columns;
+- absolute: its orthogonalised norm is at least `_ANDERSON_NOISE_MIN` (10) times its rounding
+  noise, the norm of `eps (|g| + |x|)` of the two passes it differences, scaled by the
+  tolerances exactly as the residuals are (`_AndersonHistory` keeps it per pass).
+
+The relative bound alone does not see the residuals' rounding floor. Near convergence the
+leading column shrinks with the residual, and a column that holds nothing but rounding passes
+it; on the golden toy (a tree, whose flows the sources fix, so their residuals are rounding
+only) such a column took a coefficient of order one and moved the heads by its large output
+difference. The pass count then followed the last ulp: 101 source perturbations of up to 50
+ulp at a head tolerance of 1e-10 took 10 to 15 passes, and three of them stepped into a head
+the conductance closure has no solution for and raised. The reversal safeguard of
+`_AndersonHistory` does not catch it: the step that throws the iteration off (from a
+residual of 0.1 to one of 1e1 to 1e3, in units of the tolerance) is taken when every residual
+is already below its tolerance, where the safeguard does not look, and the head solve fails two
+passes later. With the noise bound the runs all converge, in 10 to 13 passes, and near
+convergence the mixing degrades to fewer columns and in the end to the relaxed step (`tests/test_model.py::test_anderson_near_convergence_does_not_follow_rounding`).
+
+The residuals' actual floor sits somewhat above one ulp (the head solve's own tolerance, and
+earlier mixed steps that carry it into the flows), so a larger multiple narrows the toy's
+spread further: at 100 those runs take 10 or 12 passes. But it also starts to cut real secant
+information where the tolerance is close to rounding, as the sewer fixtures' HEAD_TOLERANCE of
+1e-12 m is. Over the dynamic-wave fixtures (`tests/data/sewer/*_dynwave.inp` with their own
+options, 60 steps each, passes counted from the diagnostics) the average was 14.40 passes per
+step without the bound, 14.37 at 10, 14.53 at 100 (up to 10 % more on the `shapes` fixtures)
+and, at 1000, up to 30 % more on single fixtures. Hence 10: far from convergence every column
+is many orders above it, and nothing changes.

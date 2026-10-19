@@ -1711,6 +1711,30 @@ def test_anderson_mix_drops_a_collinear_history_and_solves_a_linear_map():
     torch.testing.assert_close(xs[-1], exact, rtol=0.0, atol=1e-12)
 
 
+def test_anderson_near_convergence_does_not_follow_rounding():
+    """Perturbations of the source by a few ulp (a stand-in for platform rounding) at a head
+    tolerance of 1e-10: every run converges, in passes that differ by at most 3.
+
+    The toy's flows are fixed by its sources (a tree), so their residuals are rounding only,
+    and so are the history columns that have nothing but those entries left. Before the
+    noise rule of `_anderson_mix` (`_ANDERSON_NOISE_MIN`) such a column passed the relative
+    conditioning bound near convergence, took a coefficient of order one and threw the step
+    off: these runs took 10 to 15 passes, and three of them (k = 2, 34, 36) stepped into a
+    head the conductance closure has no solution for and raised."""
+    eps = torch.finfo(F64).eps
+    passes = []
+    for k in range(-50, 51):
+        model, state, drivers, _ = _toy(
+            coupling="iterate", iterate_tol={"toy": 1e-10}, iterate_max=400,
+            iterate_acceleration="anderson", iterate_flow_tol={"toy": 1e-9})
+        drivers["toy.sources"] = torch.tensor([20.0 * (1 + k * eps), 0.0, 0.0], dtype=F64)
+        diag: dict = {}
+        model.steady(state, drivers, diagnostics=diag, atol=1e-14, rtol=1e-14)
+        assert bool(diag["converged"])
+        passes.append(diag["passes"])
+    assert max(passes) - min(passes) <= 3
+
+
 class _RootPair:
     """Closure: k = 1 / (0.2 + phi_a^2), so with a unit source at `a` and the boundary at 0
     the pass maps phi_a -> 0.2 + phi_a^2. Fixed points 0.276 (attracting: slope 0.55) and
