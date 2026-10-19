@@ -393,7 +393,8 @@ dry-weather inflow, which are refused or absent.
 - dividers under `STEADY` or `KINWAVE`, roadway weirs, weir coefficient curves, named variables
   and expressions in control rules; pumps, control rules, orifices, weirs, outlets and storage
   units under `STEADY` or `KINWAVE`, and
-  water quality together with evaporation, seepage or exfiltration;
+  water quality together with a storage unit's evaporation or exfiltration (a conduit's
+  seepage takes its mass, its evaporation concentrates);
 - ponding together with water quality or headspace air, and ponding under `STEADY` or `KINWAVE`.
   Both `SURCHARGE_METHOD`s model surcharge, and a junction without a ponded area floods above
   `MaxDepth` (extended to its crown) plus `SurDepth`; the water that cannot enter is lost, as in

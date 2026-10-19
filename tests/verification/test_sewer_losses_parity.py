@@ -412,3 +412,41 @@ def test_a_cylinder_has_only_a_bottom_to_exfiltrate_through(tmp_path):
     Green-Ampt rate is the bottom's alone."""
     text = fixture(body=storage(shape1=CYLINDER, exfil1="80 2200 0.2"))
     assert_parity(compare(tmp_path, text, "storage_cylinder"))
+
+
+@pytest.mark.slow
+def test_seepage_takes_its_mass_with_it_as_swmm_does(tmp_path):
+    """A conduit's seepage leaves at the conduit's concentration (qualrout.c), so water that
+    enters everywhere at 100 mg/L stays at 100 mg/L down a seeping chain, in SWMM and in noodl
+    (whose seepage would otherwise raise it by the lost share of the water, 14 % here). Both
+    are read after 40 minutes, once the contents have turned over, at 1e-3 relative."""
+    body = (CHANNELS.replace("TRAPEZOIDAL  0.8          0.5        1.0        1.0",
+                             "CIRCULAR     0.8          0          0          0")
+            .replace("RECT_OPEN    0.8          0.9        0          0",
+                     "CIRCULAR     0.8          0          0          0")
+            .replace("RECT_CLOSED  0.6          0.8        0          0",
+                     "CIRCULAR     0.8          0          0          0"))
+    loads = "".join(f'{n} Tracer "" CONCENTRATION 1.0 1.0 100\n' for n in ("J1", "J2", "J3"))
+    body = body.replace("0.01\n", "0.01\n" + loads, 1) if False else body + loads
+    extra = ("\n[POLLUTANTS]\nTracer MG/L 0 0 0 0 NO * 0 0 0\n"
+             "\n[LOSSES]\nC1 0 0 0 NO 60\nC2 0 0 0 NO 60\nC3 0 0 0 NO 60\n")
+    text = fixture(body=body, extra=extra, end=("01/01/2026", "00:40:00"))
+    inp = tmp_path / "seep_quality.inp"
+    inp.write_text(text)
+    with pyswmm.Simulation(str(inp), str(inp.with_suffix(".rpt")),
+                           str(inp.with_suffix(".out"))) as sim:
+        for _ in sim:
+            pass
+        swmm = {lk.linkid: lk.pollut_quality["Tracer"] for lk in pyswmm.Links(sim)}
+    assert swmm["C4"] == pytest.approx(100.0, rel=1e-3)
+    net, _, _ = read_swmm_inp(inp)
+    model, state, drivers = build_model(net, quality=True, species=("tracer",),
+                                        iterate_tol=ITERATE_TOL, iterate_max=ITERATE_MAX)
+    load = torch.zeros(model.net.n, dtype=torch.float64)
+    load[model.junction_idx] = 0.1
+    drivers = dict(drivers, tracer_in=load)
+    steps = 40 * 60 // 5
+    state, _ = simulate_dynamic_wave(model, state, drivers, steps=steps)
+    torch.testing.assert_close(state["water_quality.x"],
+                               torch.full_like(state["water_quality.x"], 0.1), rtol=1e-3,
+                               atol=0.0)

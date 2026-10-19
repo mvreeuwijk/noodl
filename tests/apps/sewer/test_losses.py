@@ -314,9 +314,105 @@ def test_a_closure_without_the_storage_driver_names_it(tmp_path):
         model.dynamic_wave(state, {k: v for k, v in drivers.items() if k != "storage_loss"})
 
 
-def test_water_quality_with_losses_is_refused_by_name(tmp_path):
-    with pytest.raises(ValueError, match="water quality with those losses"):
-        build(tmp_path, shape1=CIRCLE, seep1=10.0, quality=True)
+def test_water_quality_with_storage_losses_is_refused_by_name(tmp_path):
+    text = NET.format(evap=1000.0, shape1=CIRCLE, shape2=CIRCLE, seep1=0.0, seep2=0.0)
+    text = text.replace("[OUTFALLS]", "[STORAGE]\nS1 9.0 3 0 CYLINDRICAL 4 3 0 0 1.5\n\n"
+                                      "[OUTFALLS]").replace(
+        "J2               9.4        3          0          0          0\n", "")
+    text = text.replace("J2               FLOW", "S1               FLOW").replace(
+        "C1               J1               J2", "C1               J1               S1").replace(
+        "C2               J2               Outfall", "C2               S1               Outfall")
+    path = tmp_path / "s.inp"
+    path.write_text(text)
+    net, _, _ = read_swmm_inp(path)
+    with pytest.raises(ValueError, match="storage units that evaporate or exfiltrate"):
+        build_model(net, quality=True)
+
+
+def _tracer_steps(tmp_path, seep, steps=24, c=0.1, contents=50.0):
+    """A tracer at the uniform concentration `c` (kg/m3) everywhere (inflows and contents) in
+    the circular two-conduit network with C1 seeping at `seep` mm/hr: per step the
+    junctions' tracer concentration and amount (kg) and quality volume (m3)."""
+    net, (model, state, drivers) = build(tmp_path, shape1=CIRCLE, seep1=seep, quality=True,
+                                         species=("tracer",), iterate_tol=1e-11, iterate_max=500)
+    load = torch.zeros(model.net.n, dtype=F64)
+    load[: len(model.dynamic_wave.junction_names)] = c
+    drivers = dict(drivers, tracer_in=load)
+    # `contents` None: the dry start's own few litres, which one step's seepage exceeds
+    state = dict(state, **{"water_quality.x": torch.full_like(state["water_quality.x"], c)})
+    if contents is not None:
+        state.update({key: torch.full_like(state["sewer.quality_volume"], contents)
+                      for key in ("sewer.quality_volume", "water_quality.capacity")})
+    rows = []
+    for _ in range(steps):
+        state, _ = simulate_dynamic_wave(model, state, drivers, steps=1)
+        x = state["water_quality.x"]
+        volume = state["water_quality.capacity"]
+        rows.append((x.clone(), (x * volume).sum().item(), volume.sum().item()))
+    return rows
+
+
+def test_seepage_removes_the_mass_it_carries_so_the_concentration_stays_put(tmp_path):
+    """SWMM's qualrout.c takes a conduit's seepage out at the conduit's concentration, so a
+    well-mixed conduit seeping keeps its concentration (probed against SWMM 5.2.4: a 100 mg/L
+    tracer through a seeping conduit leaves at 100 mg/L). The seeping network holds less
+    water and, in the same proportion, less mass than the one without seepage."""
+    c = 0.1
+    (tmp_path / "a").mkdir()
+    (tmp_path / "b").mkdir()
+    dry = _tracer_steps(tmp_path / "a", 0.0, c=c)
+    seeping = _tracer_steps(tmp_path / "b", 100.0, c=c)
+    x, mass, volume = seeping[-1]
+    torch.testing.assert_close(x, torch.full_like(x, c), rtol=1e-8, atol=0.0)
+    assert volume < dry[-1][2] * (1.0 - 1e-3)               # the seepage took water
+    assert mass == pytest.approx(c * volume, rel=1e-8)      # and mass in proportion
+    assert mass < dry[-1][1] * (1.0 - 1e-3)
+
+
+def test_evaporation_takes_water_and_leaves_the_mass(tmp_path):
+    """Evaporation leaves the mass behind (SWMM 5.2.4 raises the concentration of an
+    evaporating conduit's water: 100 mg/L enters, 113 leaves): the control volume loses the
+    water, no fraction of the contents is lost (`overflow_loss` 0) and no removal rate applies,
+    and the concentration rises as ``V_start / V_end``. A seepage loss alone is a removal
+    rate at the local concentration, ``seep / V_end``."""
+    net, (model, state, drivers) = build(tmp_path, shape1=CIRCLE, seep1=100.0, quality=True,
+                                         species=("tracer",))
+    hyd = model.dynamic_wave
+    start = torch.tensor([10.0, 20.0], dtype=F64)
+    inflow = torch.tensor([0.0, -0.5], dtype=F64)              # a net loss at J2: evaporation
+    out = hyd._quality_volume({"sewer.quality_volume": start}, inflow,
+                              torch.zeros(2, dtype=F64), 5.0)
+    torch.testing.assert_close(out["water_quality.overflow_loss"], torch.zeros(2, dtype=F64))
+    torch.testing.assert_close(out["sewer.quality_volume"],
+                               torch.tensor([10.0, 17.5], dtype=F64))
+    from noodl.apps.sewer.dynwave import OverflowLoss
+    kept = OverflowLoss(1).apply(torch.full((2,), 0.1, dtype=F64), 5.0, out)
+    torch.testing.assert_close(kept, torch.full((2,), 0.1, dtype=F64))   # the mass is kept
+    seeping = hyd._quality_volume({"sewer.quality_volume": start}, inflow,
+                                  torch.zeros(2, dtype=F64), 5.0,
+                                  torch.tensor([0.0, 0.5], dtype=F64))
+    torch.testing.assert_close(seeping["water_quality.overflow_loss"], torch.zeros(2, dtype=F64))
+    torch.testing.assert_close(seeping["water_quality.removal"],
+                               torch.tensor([0.0, 0.5 / 17.5], dtype=F64))
+    assert "water_quality.removal" not in out            # evaporation alone: none
+
+
+def test_the_conduit_rate_is_split_into_seepage_and_evaporation(tmp_path):
+    """An open conduit that seeps and evaporates reports both, and its seepage part alone
+    leaves with the mass: zero without a seepage rate, the whole rate for a closed one
+    (it cannot evaporate), and a gradient survives at the zero seepage rate of a dry link."""
+    net, (model, state, drivers) = build(tmp_path, evap=1000.0, seep1=50.0, seep2=50.0)
+    hyd = model.dynamic_wave
+    state, _ = simulate_dynamic_wave(model, state, drivers, steps=3)
+    terms = hyd._terms(state, 5.0, drivers=drivers)
+    assert terms.seep_loss_rate is not None
+    assert bool((terms.seep_loss_rate > 0).all())
+    assert float(terms.loss_rate[0] - terms.seep_loss_rate[0]) > 0.0      # C1 is open: evaporates
+    assert float(terms.loss_rate[1]) == pytest.approx(float(terms.seep_loss_rate[1]), rel=1e-14)
+    net, (model, state, drivers) = build(tmp_path, evap=1000.0)
+    state, _ = simulate_dynamic_wave(model, state, drivers, steps=3)
+    terms = model.dynamic_wave._terms(state, 5.0, drivers=drivers)
+    assert float(terms.loss_rate[0]) > 0.0 and float(terms.seep_loss_rate.abs().max()) == 0.0
 
 
 def test_evaporation_takes_water_and_a_gradient_flows_through_it(tmp_path):
@@ -340,3 +436,13 @@ def test_evaporation_takes_water_and_a_gradient_flows_through_it(tmp_path):
     h = 1e-6
     fd = (run(20000.0, bump=h)[0].item() - run(20000.0, bump=-h)[0].item()) / (2 * h)
     assert g[0].item() == pytest.approx(fd, rel=1e-4)
+
+
+def test_seepage_beyond_the_dry_starts_contents_still_conserves_the_concentration(tmp_path):
+    """From a dry start a junction holds a few litres and one step's seepage exceeds them: the
+    removal rate has no cap, so the water that enters during the step and seeps out again
+    takes its mass, and a uniform tracer stays uniform to round-off (the lost fraction capped
+    at 1 left 2.5e-4 on the first step)."""
+    rows = _tracer_steps(tmp_path, 100.0, steps=12, contents=None)
+    for x, _, _ in rows:
+        torch.testing.assert_close(x, torch.full_like(x, 0.1), rtol=1e-8, atol=0.0)

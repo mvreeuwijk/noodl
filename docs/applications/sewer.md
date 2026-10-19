@@ -760,10 +760,25 @@ the converged pass, which contains it); the rate of a unit with a positive `IMDm
 the depth, but not through its infiltration state. The evaporation rate, the conductivity
 adjustment and the Green-Ampt state are plain floats of the climate and carry no gradient.
 
+**Water quality.** Conduit seepage takes its dissolved mass with it and evaporation does not, as
+in SWMM (`qualrout.c`: a seeping conduit's water leaves at the conduit's concentration, an
+evaporating one's concentrates; probed against SWMM 5.2.4, 100 mg/L through a seeping conduit
+stays 100 mg/L and through an evaporating one rises to 113 and 132). The conduit's seepage
+(`ConduitTerms.seep_loss_rate`, after the volume cap) joins a negative lateral
+inflow in the withdrawal of a junction (`DynamicWaveHydraulics._quality_volume`), which is an
+outflow of the transport step itself, the removal rate `"water_quality.removal"` (1/s: the
+withdrawal over the end-of-step volume for the implicit scheme, over the mean volume for the
+trapezoidal one), so it leaves at the local concentration; a uniform concentration stays uniform
+while the water and the mass fall. Evaporation only lowers the transport volume, which raises
+the concentration. Quality needs circular conduits, which are closed and so do not evaporate: the
+evaporation side is pinned by `tests/apps/sewer/test_losses.py`. The removal has no cap, so a
+step whose seepage exceeds a junction's step-start contents (the first steps of a dry start)
+still conserves a uniform concentration.
+
 **Not modelled, refused by name.** Evaporation computed from temperature or read from a climate file
 (`TEMPERATURE`, `FILE`); an exfiltrating `PARABOLOID` storage unit, for which SWMM 5.2.4's
 `exfil_initState` has no case and leaves the bottom and bank areas unset; water quality with any
-of these losses; seepage under STEADY or KINWAVE routing. A conductivity adjustment applies to the
+of the storage units' losses; seepage under STEADY or KINWAVE routing. A conductivity adjustment applies to the
 Green-Ampt exfiltration through SWMM's `InfilFactor` (the last subcatchment's), which the clock
 reads from the runoff model.
 
@@ -1821,7 +1836,7 @@ publish numbers from this application.
       `USE RUNOFF` (a `TIMESERIES` outfall's stage is a driver); surface runoff itself is
       modelled ([Subcatchment runoff](#subcatchment-runoff-from-a-swmm-file));
     - conduit evaporation, seepage and storage losses under STEADY or KINWAVE routing, an
-      exfiltrating `PARABOLOID` storage unit and water quality with any loss of water (see
+      exfiltrating `PARABOLOID` storage unit and water quality with a storage unit's loss of water (see
       "Evaporation and seepage losses"), and a nonzero pollutant `Cinit`;
     - the `DUMMY` section (a link that routes its node's outflow without a section) and the
       `STREET` section, and non-circular conduits under steady or kinematic-wave routing;
