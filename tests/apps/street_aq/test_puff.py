@@ -28,6 +28,7 @@ from noodl.apps.street_aq.puff import (
     housekeep,
     puff_mass,
     puff_tables,
+    pulse_mass,
     roof_concentration,
 )
 
@@ -654,3 +655,109 @@ def test_age_zero_puffs_have_finite_bounds_with_real_tables():
     kept = housekeep(field, state, tabs)
     assert kept.live[0].tolist() == [True, False, False]
     assert float(kept.mass_dropped) == 2.0**-30
+
+
+# ---------------------------------------------------------------- pulse releases
+def _t(*v):
+    return torch.tensor(v, dtype=DT)
+
+
+def test_pulse_mass_sums_to_rate_times_duration_over_steps():
+    start, duration, rate = _t(23.0), _t(95.0), _t(2.0)
+    total = sum(pulse_mass(k * 10.0, 10.0, start, duration, rate) for k in range(30))
+    assert torch.allclose(total, rate * duration, rtol=1e-12)
+    m = pulse_mass(20.0, 10.0, _t(0.0, 25.0, 100.0), _t(50.0), _t(1.0))
+    assert m.tolist() == [10.0, 5.0, 0.0]
+
+
+def test_pulse_start_inside_a_step_has_the_central_difference_gradient():
+    t, dt, h = 100.0, 10.0, 1e-4
+    start = (t + 0.3 * dt) * torch.ones(1, dtype=DT)
+    start.requires_grad_(True)
+    duration, rate = _t(50.0), _t(3.0)
+    m = pulse_mass(t, dt, start, duration, rate)
+    (g,) = torch.autograd.grad(m.sum(), start)
+    fd = (pulse_mass(t, dt, start.detach() + h, duration, rate)
+          - pulse_mass(t, dt, start.detach() - h, duration, rate)) / (2 * h)
+    assert torch.allclose(g, fd, rtol=1e-8)
+    assert g.item() == pytest.approx(-3.0)
+    # the whole window inside one step: the total is independent of start
+    s2 = _t(103.0).requires_grad_(True)
+    total = pulse_mass(100.0, 10.0, s2, _t(5.0), rate)
+    (g2,) = torch.autograd.grad(total.sum(), s2)
+    assert g2.item() == 0.0
+
+
+def test_pulse_outside_window_is_zero_with_finite_grad():
+    for t in (0.0, 900.0):
+        start = _t(500.0).requires_grad_(True)
+        duration = _t(20.0).requires_grad_(True)
+        rate = _t(1.0).requires_grad_(True)
+        m = pulse_mass(t, 10.0, start, duration, rate)
+        assert m.item() == 0.0
+        grads = torch.autograd.grad(m.sum(), (start, duration, rate))
+        assert all(torch.isfinite(g).all() and g.item() == 0.0 for g in grads)
+
+
+def test_pulse_source_adds_to_existing_sources_and_refuses_missing_t():
+    from noodl.apps.street_aq.network import build_model
+    from noodl.apps.street_aq.puff import PulseSource
+    from noodl.contracts import StepContext, closure_spec
+
+    net, _ = twelve_street_grid()
+    model, state, drivers = build_model(net, background="per_street")
+    names = [s.name for s in net.streets]
+    src = PulseSource(model.net, names)
+    spec = closure_spec(src, index=0)
+    assert spec.integrates and spec.state_keys == ()
+    i = model.net.node_index(names[10])
+    w = torch.zeros((1, len(names)), dtype=DT)
+    w[0, 10] = 1.0
+    drv = dict(drivers)
+    drv.update({"pulse.weights": w, "pulse.rate": _t(4.0), "pulse.start": _t(5.0),
+                "pulse.duration": _t(10.0)})
+    pre = torch.zeros(model.net.n, dtype=DT)
+    pre[i] = 1.0
+    drv["street.sources"] = pre
+    ctx = StepContext(dt=10.0, t=0.0)
+    out = src(state, drv, ctx)["street.sources"]
+    assert out.shape == (1, model.net.n)
+    assert out[0, i].item() == pytest.approx(1.0 + 4.0 * 5.0 / 10.0)
+    others = torch.ones(model.net.n, dtype=torch.bool)
+    others[i] = False
+    assert torch.count_nonzero(out[0][others]) == 0
+    drv["street.sources"] = pre.unsqueeze(-1)
+    assert src(state, drv, ctx)["street.sources"].shape == (1, model.net.n, 1)
+    del drv["street.sources"]
+    assert src(state, drv, ctx)["street.sources"][0, i].item() == pytest.approx(2.0)
+    assert src(state, drv, None) == {}
+    with pytest.raises(ValueError, match=r"Model\.step\(t=\.\.\.\)"):
+        src(state, drv, StepContext(dt=10.0, t=None))
+
+
+def test_pulse_source_on_a_real_model_step_delivers_the_pulse_mass():
+    from noodl.apps.street_aq.network import build_model
+    from noodl.apps.street_aq.puff import PulseSource
+    from noodl.model import Model
+
+    net, _ = twelve_street_grid()
+    model, state, drivers = build_model(net, background="per_street")
+    names = [s.name for s in net.streets]
+    src = PulseSource(model.net, names)
+    pulsed = Model(model.net, model.layers, closures=[*model.closures, src])
+    w = torch.zeros((1, len(names)), dtype=DT)
+    w[0, 3] = 1.0
+    drv = dict(drivers)
+    drv.update({"pulse.weights": w, "pulse.rate": _t(2.0), "pulse.start": _t(0.0),
+                "pulse.duration": _t(30.0)})
+    drv.update({"U_ref": _t(3.0).squeeze(), "theta_w": _t(0.0).squeeze(),
+                "h_abl": _t(800.0).squeeze()})
+    base = {k: v for k, v in drv.items() if not k.startswith("pulse.")}
+    dt = 10.0
+    x, x_ref = dict(state), dict(state)
+    for k in range(5):
+        x = pulsed.step(x, drv, dt, t=k * dt)
+        x_ref = model.step(x_ref, base, dt, t=k * dt)
+    extra = (x["street.x"] - x_ref["street.x"]).detach().reshape(-1)
+    assert extra[3] > 0 and torch.isfinite(extra).all()
+    assert extra[3] == extra.max()

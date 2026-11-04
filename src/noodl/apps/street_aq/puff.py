@@ -20,7 +20,7 @@ so the puffs of a continuous source tile the axis exactly for any step `dt`.
 from __future__ import annotations
 
 import math
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 
 import torch
@@ -703,3 +703,91 @@ def concentration_at(field: PuffField, state: PuffState, tables: PuffTables,
 __all__ = ["ALONG_WIND", "PuffField", "PuffState", "PuffTables", "advance",
            "concentration_at", "emit", "housekeep", "puff_mass", "puff_tables",
            "roof_concentration"]
+
+
+def pulse_mass(t: float, dt: float, start: Tensor, duration: Tensor, rate: Tensor) -> Tensor:
+    """Mass (kg) of a top-hat release inside the step `[t, t + dt]`.
+
+    The release runs at `rate` (kg/s) over `[start, start + duration]`; the mass is `rate`
+    times the overlap of that window with the step, `rate * clamp(min(t + dt, start +
+    duration) - max(t, start), min=0)`, broadcasting. It is piecewise linear in `start`,
+    `duration` and `rate`, so autograd gives the exact derivative (the overlap's slope)
+    everywhere but at the kinks, and a step the window misses gets a zero value and a
+    finite zero gradient.
+    """
+    start = torch.as_tensor(start, dtype=_DTYPE)
+    duration = torch.as_tensor(duration, dtype=_DTYPE)
+    rate = torch.as_tensor(rate, dtype=_DTYPE)
+    t_in = torch.clamp(start, min=float(t))
+    t_out = torch.clamp(start + duration, max=float(t + dt))
+    return rate * torch.clamp(t_out - t_in, min=0.0)
+
+
+class PulseSource:
+    """An explicit pulse release into the street canopy (design Sect. 4.2).
+
+    An integrating closure, called `closure(state, drivers, ctx)`. Drivers: `"pulse.weights"`
+    `(B, n_s)` (the share of the release in each street of `street_nodes`, usually one-hot),
+    and `"pulse.rate"` (kg/s), `"pulse.start"` (s), `"pulse.duration"` (s), each `(B,)`. Over
+    the step `[ctx.t, ctx.t + ctx.dt]` it ADDS `pulse_mass / dt * weights` (kg/s) to
+    `"<layer>.sources"` at the street nodes, in full node order, to whatever the drivers
+    already carry there (a two-way building link writes it too), creating zeros when it is
+    absent. It does not apply `Street.emission_scale`: the transport layer built by
+    `build_model` scales `"<layer>.sources"` inside the model, so scaling here would apply
+    it twice. A query (`ctx is None`) adds nothing; a step without `Model.step(t=...)` is
+    refused by name.
+    """
+
+    integrates = True
+
+    def __init__(self, net, street_nodes: Sequence[str], *, layer_name: str = "street"):
+        self.layer_name = layer_name
+        self.street_nodes = tuple(street_nodes)
+        if not self.street_nodes:
+            raise ValueError("PulseSource: street_nodes is empty")
+        self.n_nodes = len(net.nodes)
+        self.index = torch.tensor(
+            [net.node_index(name) for name in self.street_nodes], dtype=torch.long
+        )
+        self.inputs = ("pulse.weights", "pulse.rate", "pulse.start", "pulse.duration")
+        self.outputs = (f"{layer_name}.sources",)
+
+    def __repr__(self) -> str:
+        return f"PulseSource(layer_name={self.layer_name!r}, n_streets={len(self.street_nodes)})"
+
+    def __call__(self, state, drivers, ctx=None):
+        key = f"{self.layer_name}.sources"
+        if ctx is None:
+            return {}
+        if ctx.dt is None:
+            raise ValueError("PulseSource: steady() has no step to release over")
+        if ctx.t is None:
+            raise ValueError("PulseSource: the step time is unknown; call Model.step(t=...)")
+        for name in self.inputs:
+            if name not in drivers:
+                raise KeyError(f"PulseSource: driver {name!r} is missing")
+        weights = _f64(drivers["pulse.weights"])
+        if weights.shape[-1] != len(self.street_nodes):
+            raise ValueError(
+                f"PulseSource: pulse.weights has {weights.shape[-1]} columns, one per street "
+                f"expected ({len(self.street_nodes)})"
+            )
+        mass = pulse_mass(
+            ctx.t, ctx.dt, _f64(drivers["pulse.start"]), _f64(drivers["pulse.duration"]),
+            _f64(drivers["pulse.rate"]),
+        )
+        add = weights * (mass / ctx.dt).unsqueeze(-1)          # (B, n_s), kg/s
+        full = torch.zeros((*add.shape[:-1], self.n_nodes), dtype=_DTYPE)
+        full = full.index_add(-1, self.index, add)
+        base = drivers.get(key)
+        if base is None:
+            return {key: full}
+        base = _f64(base)
+        if base.dim() >= 2 and base.shape[-1] == 1 and base.shape[-2] == self.n_nodes:
+            full = full.unsqueeze(-1)
+        elif base.shape[-1] != self.n_nodes:
+            raise ValueError(
+                f"PulseSource: {key} has shape {tuple(base.shape)}; expected (..., "
+                f"{self.n_nodes}) or (..., {self.n_nodes}, 1)"
+            )
+        return {key: base + full}
