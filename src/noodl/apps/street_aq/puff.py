@@ -399,14 +399,96 @@ def _wind(theta_w: Tensor | float, n_batch: int, where: str) -> tuple[Tensor, Te
     return torch.cos(theta), torch.sin(theta)
 
 
+def _field_rows(field: PuffField, n_batch: int, where: str) -> tuple[Tensor, Tensor]:
+    """`(width, clamp)` of the field expanded to `(B, P)`; a batch of 1 or `B` only."""
+    for name in ("width", "clamp"):
+        n_w = getattr(field, name).shape[0]
+        if n_w not in (1, n_batch):
+            raise ValueError(f"{where}: the field's {name} has {n_w} batch rows; the puffs "
+                             f"need 1 or their batch size {n_batch}")
+    return field.width.expand(n_batch, -1), field.clamp.expand(n_batch, -1)
+
+
+def puff_mass(state: PuffState) -> Tensor:
+    """`(B,)`: the summed mass of the live puffs, kg."""
+    return torch.where(state.live, state.mass, torch.zeros_like(state.mass)).sum(1)
+
+
+def _peak_bound(field: PuffField, state: PuffState, tables: PuffTables) -> Tensor:
+    """`(B, K)`, detached: a cheap upper bound of each live puff's peak roof-level
+    contribution, `|m| max_i w_i min(P_z,max, clamp_i) / (ell (2 y_c,i + sqrt(2 pi)
+    sigma_y))` (design Sect. 4.8), with `P_z,max` the vertical profile at `H_R`. The
+    slug length `ell` is the node speed (the step `dt` is common to all puffs and cancels
+    in the comparisons the bound serves). Zero for a free slot."""
+    n_batch, capacity = state.mass.shape
+    width, clamp = _field_rows(field, n_batch, "housekeep")
+    width, clamp = width.detach(), clamp.detach()
+    row = _table_rows(tables, n_batch, "housekeep")[:, None]
+    with torch.no_grad():
+        _, u, s_y, s_z, z_c = tables.at_age(state.age, state.table, row)
+        h_c, h_abl = tables.h_canopy[row[:, 0]], tables.h_abl[row[:, 0]]
+        p_z = vertical_profile(h_c[:, None].expand_as(s_y), z_c, s_z, h_c[:, None],
+                               h_abl[:, None])
+        b, k = torch.nonzero(state.live & (state.mass != 0), as_tuple=True)
+        s = state.source[b, k]
+        n_sub = field._count[s]
+        rep = torch.repeat_interleave(torch.arange(b.numel()), n_sub)
+        offset = torch.arange(rep.numel()) - torch.repeat_interleave(
+            torch.cumsum(n_sub, 0) - n_sub, n_sub)
+        p = field._start[s][rep] + offset
+        b_, k_ = b[rep], k[rep]
+        sy = s_y[b_, k_]
+        w = width[b_, p]
+        value = field.weight[p].detach() * torch.minimum(p_z[b_, k_], clamp[b_, p]) / (
+            2.0 * torch.clamp((w - _SQRT_2PI * sy) / 2.0, min=0.0) + _SQRT_2PI * sy)
+        best = torch.zeros(b.numel(), dtype=_DTYPE).scatter_reduce(0, rep, value, "amax",
+                                                                   include_self=False)
+        peak = torch.zeros(n_batch, capacity, dtype=_DTYPE)
+        peak[b, k] = state.mass[b, k].detach().abs() * best / torch.clamp(u[b, k], min=1e-12)
+    return peak
+
+
+def _retire(state: PuffState, gone: Tensor, counter: str) -> PuffState:
+    """The puffs `gone` (B, K) retired into the per-instance `counter`: their mass moves
+    with `torch.where`, so the counter keeps the graph."""
+    zero = torch.zeros_like(state.mass)
+    moved = torch.where(gone, state.mass, zero).sum(1)
+    return replace(state, mass=torch.where(gone, zero, state.mass), live=state.live & ~gone,
+                   **{counter: getattr(state, counter) + moved})
+
+
+def housekeep(field: PuffField, state: PuffState, tables: PuffTables, *,
+              drop_below: float = 1e-6) -> PuffState:
+    """Retire puffs (design Sect. 4.8): those whose age passed the table's last node or
+    whose distance `x(age)` passed `tables.x_max` go to `mass_out`; of the others, those
+    whose peak bound (`_peak_bound`) is below `drop_below` times the largest among the
+    instance's live puffs go to `mass_dropped`. An instance with no live puff is left as
+    it is. Decisions are made on detached values; the masses keep their graph."""
+    if not 0.0 <= drop_below < 1.0:
+        raise ValueError(f"housekeep: drop_below must be in [0, 1), got {drop_below!r}")
+    n_batch = state.mass.shape[0]
+    row = _table_rows(tables, n_batch, "housekeep")[:, None]
+    with torch.no_grad():
+        x = tables.at_age(state.age, state.table, row)[0]
+        out = state.live & ((state.age > tables.t_max) | (x > tables.x_max))
+    state = _retire(state, out, "mass_out")
+    peak = _peak_bound(field, state, tables)
+    with torch.no_grad():
+        faint = state.live & (peak < drop_below * peak.max(1, keepdim=True).values)
+    return _retire(state, faint, "mass_dropped")
+
+
 def emit(field: PuffField, state: PuffState, masses: Tensor, table_index: Tensor,
-         release_xy: Tensor | None = None) -> tuple[PuffState, Tensor]:
+         release_xy: Tensor | None = None, *, tables: PuffTables | None = None
+         ) -> tuple[PuffState, Tensor]:
     """One new puff per source with non-zero mass in `masses` `(B, S)` (kg, signed),
     written into the first free slots of its instance in source order: age 0, table
     `table_index[s]` (`(S,)`), displacement zero, except a release's, which is its
     position in `release_xy` `(B, R, 2)` (m) relative to its `source_xy0`. `mass_emitted`
-    accumulates the masses. Returns the state and the number of puffs dropped for capacity
-    `(B,)` (none: an instance without enough free slots is refused by name)."""
+    accumulates the masses. An instance without enough free slots evicts its faintest live
+    puffs into `mass_dropped` (by the peak bound of `housekeep` when `tables` is given,
+    else by `|m|`); the state and the number evicted `(B,)` are returned. More new puffs
+    than the capacity is refused by name."""
     n_batch, capacity = state.mass.shape
     n_src, n_rel = field.n_sources, field.n_releases
     masses = _f64(masses)
@@ -428,13 +510,22 @@ def emit(field: PuffField, state: PuffState, masses: Tensor, table_index: Tensor
                              f"got {tuple(release_xy.shape)}")
         disp0 = torch.cat([disp0, release_xy - field.source_xy0[n_src - n_rel:]], dim=1)
     new = masses.detach() != 0
-    free = ~state.live
-    n_new, n_free = new.sum(1), free.sum(1)
-    if bool((n_new > n_free).any()):
-        b = int(torch.nonzero(n_new > n_free)[0, 0])
+    n_new = new.sum(1)
+    if bool((n_new > capacity).any()):
+        b = int(torch.nonzero(n_new > capacity)[0, 0])
         raise ValueError(
-            f"emit: batch instance {b} emits {int(n_new[b])} puffs but has "
-            f"{int(n_free[b])} free slots of capacity {capacity}; raise the capacity")
+            f"emit: batch instance {b} emits {int(n_new[b])} puffs, more than the capacity "
+            f"{capacity}; raise the capacity")
+    n_evict = torch.clamp(n_new - (~state.live).sum(1), min=0)
+    if bool((n_evict > 0).any()):
+        with torch.no_grad():
+            weak = (_peak_bound(field, state, tables) if tables is not None
+                    else state.mass.abs())
+            key = torch.where(state.live, weak, torch.full_like(weak, math.inf))
+            rank = torch.argsort(torch.argsort(key, dim=1, stable=True), dim=1)
+            evict = state.live & (rank < n_evict[:, None])
+        state = _retire(state, evict, "mass_dropped")
+    free = ~state.live
     b, s = torch.nonzero(new, as_tuple=True)
     rank = (torch.cumsum(new, 1) - 1)[b, s]
     fb, fk = torch.nonzero(free, as_tuple=True)
@@ -454,7 +545,7 @@ def emit(field: PuffField, state: PuffState, masses: Tensor, table_index: Tensor
         sx2_shear=state.sx2_shear.index_put(at, zero),
         mass_emitted=state.mass_emitted + masses.sum(1),
     )
-    return state, torch.zeros(n_batch, dtype=torch.long)
+    return state, n_evict
 
 
 def advance(state: PuffState, tables: PuffTables, dt: float,
@@ -501,8 +592,7 @@ def _evaluate(field: PuffField, state: PuffState, tables: PuffTables, rec_xy: Te
     e_hi = tables.at_age(age + dt / 2.0, state.table, rk)[0] - x_a
     slug = field.along_wind == "sigma_y"
     cut = field.cutoff_sigma
-    width = field.width.expand(n_batch, -1)
-    clamp = field.clamp.expand(n_batch, -1)
+    width, clamp = _field_rows(field, n_batch, where)
     h_c, h_abl = tables.h_canopy[row], tables.h_abl[row]
     src = state.source
     with torch.no_grad():
@@ -566,7 +656,7 @@ def _evaluate(field: PuffField, state: PuffState, tables: PuffTables, rec_xy: Te
         return torch.zeros(n_batch * r, dtype=_DTYPE).index_add(0, b * r + i, c).reshape(
             n_batch, r)
 
-    rows = rows_per_chunk(capacity, n_batch, backward=grad)
+    rows = rows_per_chunk(capacity * int(field._count.max()), n_batch, backward=grad)
     if n_rec == 0:
         return torch.zeros(n_batch, 0, dtype=_DTYPE)
     return torch.cat([block(a_, min(n_rec, a_ + rows)) for a_ in range(0, n_rec, rows)],
@@ -607,4 +697,5 @@ def concentration_at(field: PuffField, state: PuffState, tables: PuffTables,
 
 
 __all__ = ["ALONG_WIND", "PuffField", "PuffState", "PuffTables", "advance",
-           "concentration_at", "emit", "puff_tables", "roof_concentration"]
+           "concentration_at", "emit", "housekeep", "puff_mass", "puff_tables",
+           "roof_concentration"]

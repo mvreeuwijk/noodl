@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -24,6 +25,8 @@ from noodl.apps.street_aq.puff import (
     advance,
     concentration_at,
     emit,
+    housekeep,
+    puff_mass,
     puff_tables,
     roof_concentration,
 )
@@ -459,7 +462,7 @@ def test_state_round_trips_through_state_keys():
     assert set(state.to_state("cloud")) == {k.replace("puff.", "cloud.") for k in keys}
 
 
-def test_emit_writes_free_slots_counts_mass_and_refuses_overflow():
+def test_emit_writes_free_slots_counts_mass_and_evicts_on_overflow():
     field = PuffField.points(3)
     state = PuffState.empty((2,), 3)
     masses = torch.tensor([[1.0, 0.0, 2.0], [0.0, 0.0, 4.0]], dtype=DT)
@@ -474,8 +477,8 @@ def test_emit_writes_free_slots_counts_mass_and_refuses_overflow():
                     torch.zeros(3, dtype=_LONG), xy)
     assert state.live.sum(1).tolist() == [3, 2]
     with pytest.raises(ValueError, match="capacity"):
-        emit(field, state, torch.tensor([[1.0, 0.0, 0.0]] * 2, dtype=DT),
-             torch.zeros(3, dtype=_LONG), xy)
+        emit(field, PuffState.empty((1,), 2), torch.ones(1, 3, dtype=DT),
+             torch.zeros(3, dtype=_LONG), xy[:1])
     with pytest.raises(ValueError, match="release_xy"):
         emit(field, PuffState.empty((2,), 3), masses, torch.zeros(3, dtype=_LONG), None)
 
@@ -499,3 +502,133 @@ def test_gradient_reaches_mass_and_release_position():
     g_m, g_xy = torch.autograd.grad(c, (mass, origin))
     torch.testing.assert_close(g_m, (c / 2.0).detach().reshape(1, 1), rtol=1e-14, atol=0)
     assert bool(torch.isfinite(g_xy).all()) and float(g_xy.abs().sum()) > 0
+
+
+# --- housekeeping and the mass account -----------------------------------------------------
+
+
+def _identity(state):
+    """emitted == live + out + dropped, exactly (the masses in these tests are dyadic)."""
+    total = puff_mass(state) + state.mass_out + state.mass_dropped
+    assert torch.equal(state.mass_emitted, total), (state.mass_emitted, total)
+
+
+def _released(masses, capacity=8, tabs=None):
+    field = PuffField.points(len(masses))
+    tabs = tabs or _hand_tables([lambda j: 3.0])
+    state, n = emit(field, PuffState.empty((1,), capacity),
+                    torch.tensor([masses], dtype=DT),
+                    torch.zeros(len(masses), dtype=_LONG),
+                    torch.zeros(1, len(masses), 2, dtype=DT))
+    assert int(n.sum()) == 0
+    _identity(state)
+    return field, tabs, state
+
+
+def test_puffs_leaving_the_domain_go_to_mass_out():
+    field, tabs, state = _released([4.0, 2.0])
+    th = torch.zeros(1, dtype=DT)
+    for _ in range(3):
+        state = advance(state, tabs, 5.0, th)
+    kept = housekeep(field, state, tabs)
+    assert torch.equal(kept.live, state.live) and float(kept.mass_out) == 0.0
+    # beyond the table's last node (age > t_max)
+    old = replace(state, age=torch.tensor([[tabs.t_max + 1.0, 5.0] + [0.0] * 6], dtype=DT))
+    out = housekeep(field, old, tabs)
+    assert out.live[0].tolist() == [False, True] + [False] * 6
+    assert float(out.mass_out) == 4.0 and float(out.mass[0, 0]) == 0.0
+    _identity(out)
+    # beyond the extent x_max, before the last node
+    short = replace(tabs, x_max=50.0)
+    far = replace(state, age=torch.tensor([[30.0, 5.0] + [0.0] * 6], dtype=DT))
+    out = housekeep(field, far, short)
+    assert out.live[0].tolist() == [False, True] + [False] * 6
+    assert float(out.mass_out) == 4.0 and float(out.mass_dropped) == 0.0
+    _identity(out)
+
+
+def test_faint_puffs_go_to_mass_dropped_and_identity_holds():
+    field, tabs, state = _released([1.0, 2.0**-10, 2.0**-30, -1.0])
+    th = torch.zeros(1, dtype=DT)
+    state = advance(state, tabs, 5.0, th)
+    _identity(state)
+    kept = housekeep(field, state, tabs)
+    assert kept.live[0, :4].tolist() == [True, True, False, True]
+    assert float(kept.mass_dropped) == 2.0**-30 and float(kept.mass_out) == 0.0
+    assert float(kept.mass[0, 2]) == 0.0
+    _identity(kept)
+    # a looser threshold drops the second, and a signed puff counts by its magnitude
+    loose = housekeep(field, state, tabs, drop_below=1e-2)
+    assert loose.live[0, :4].tolist() == [True, False, False, True]
+    _identity(loose)
+    again = housekeep(field, loose, tabs, drop_below=1e-2)
+    assert torch.equal(again.live, loose.live)
+    with pytest.raises(ValueError, match="drop_below"):
+        housekeep(field, state, tabs, drop_below=1.5)
+
+
+def test_faint_test_uses_the_peak_not_the_mass():
+    # a wide source dilutes its peak: same mass, lower peak, so it is the faint one
+    field = PuffField.points(2)
+    field.width = torch.tensor([[0.0, 5.0e7]], dtype=DT)
+    tabs = _hand_tables([lambda j: 3.0])
+    state, _ = emit(field, PuffState.empty((1,), 4), torch.ones(1, 2, dtype=DT),
+                    torch.zeros(2, dtype=_LONG), torch.zeros(1, 2, 2, dtype=DT))
+    kept = housekeep(field, advance(state, tabs, 5.0, torch.zeros(1, dtype=DT)), tabs)
+    assert kept.live[0, :2].tolist() == [True, False]
+    _identity(kept)
+
+
+def test_capacity_eviction_reports_count_and_keeps_identity():
+    for with_tables in (False, True):
+        field = PuffField.points(3)
+        tabs = _hand_tables([lambda j: 3.0])
+        kw = {"tables": tabs} if with_tables else {}
+        zero = torch.zeros(1, 3, 2, dtype=DT)
+        state, n = emit(field, PuffState.empty((1,), 4),
+                        torch.tensor([[8.0, 4.0, 2.0]], dtype=DT),
+                        torch.zeros(3, dtype=_LONG), zero, **kw)
+        assert n.tolist() == [0]
+        state, n = emit(field, state, torch.tensor([[1.0, 1.0, 0.0]], dtype=DT),
+                        torch.zeros(3, dtype=_LONG), zero, **kw)
+        assert n.tolist() == [1] and n.dtype == _LONG
+        assert float(state.mass_dropped) == 2.0 and float(state.mass_emitted) == 16.0
+        assert sorted(state.mass[0].tolist()) == [1.0, 1.0, 4.0, 8.0]
+        _identity(state)
+
+
+def test_zero_mass_sources_cost_no_slot():
+    field = PuffField.points(3)
+    state, n = emit(field, PuffState.empty((1,), 1), torch.tensor([[0.0, 3.0, 0.0]], dtype=DT),
+                    torch.zeros(3, dtype=_LONG), torch.zeros(1, 3, 2, dtype=DT))
+    assert n.tolist() == [0] and state.live.sum().item() == 1
+
+
+def test_empty_instance_housekeeps_without_nan():
+    field = PuffField.points(1)
+    tabs = _hand_tables([lambda j: 3.0])
+    mass = torch.tensor([[0.0], [2.0]], dtype=DT, requires_grad=True)
+    state, _ = emit(field, PuffState.empty((2,), 3), mass, torch.zeros(1, dtype=_LONG),
+                    torch.zeros(2, 1, 2, dtype=DT))
+    state = advance(state, tabs, 5.0, torch.zeros(2, dtype=DT))
+    kept = housekeep(field, state, tabs)
+    assert kept.live.sum(1).tolist() == [0, 1]
+    for name in ("mass", "mass_out", "mass_dropped", "mass_emitted"):
+        assert bool(torch.isfinite(getattr(kept, name)).all()), name
+    assert puff_mass(kept).tolist() == [0.0, 2.0]
+    puff_mass(kept)[1].backward(retain_graph=True)
+    assert mass.grad.tolist() == [[0.0], [1.0]]
+    # the counters keep the graph
+    old = replace(state, age=torch.full((2, 3), tabs.t_max + 1.0, dtype=DT))
+    out = housekeep(field, old, tabs)
+    g, = torch.autograd.grad(out.mass_out[1], mass)
+    assert g.tolist() == [[0.0], [1.0]]
+
+
+def test_puff_width_batch_must_match_by_name():
+    field = PuffField.points(1)
+    field.width = torch.ones(3, 1, dtype=DT)
+    state = PuffState.empty((2,), 2)
+    with pytest.raises(ValueError, match="width"):
+        roof_concentration(field, state, _hand_tables([lambda j: 3.0]),
+                           torch.zeros(1, 2, dtype=DT), 0.0, 5.0)
