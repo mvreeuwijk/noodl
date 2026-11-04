@@ -13,7 +13,7 @@ from noodl.apps.street_aq.network import (
     street_index,
     twelve_street_grid,
 )
-from noodl.apps.street_aq.puff import PuffClosure, PuffOptions, PuffState
+from noodl.apps.street_aq.puff import PuffClosure, PuffOptions, PuffState, puff_mass
 from noodl.contracts import StepContext
 from noodl.model import Model
 
@@ -270,3 +270,109 @@ def test_a_grad_run_after_a_no_grad_warm_up_has_the_full_gradient():
                 _grad_run(model, state, drv, u_star)
         grads.append(torch.autograd.grad(_grad_run(model, state, drv, u_star), u_star)[0])
     assert torch.equal(grads[1], grads[0])
+
+
+# ------------------------------------------------------------------ the mass budget (Test 3)
+
+
+def _budget_run(junction_source, thetas, capacity, *, n_steps=60, dt=5.0):
+    """A pulse in street 3 (canopy) and an above-roof pulse, stepped `n_steps` times with
+    the wind direction `thetas[k]` at step `k`; yields `(k, state, terms)` after every
+    step, `terms` the budget's sides (`_budget_sides`)."""
+    from noodl.apps.street_aq.puff import mass_in_streets, pending_roof_mass, pulse_mass
+
+    bg = 2.0e-8
+    options = PuffOptions(sigma_theta=math.radians(6.0), junction_source=junction_source,
+                          capacity=capacity, n_releases=1, x_max=300.0)
+    _, names, model, state, drivers = _puff_model(puffs=options)
+    state = {**state, "street.x": torch.full((12,), bg, dtype=DT)}
+    release = {"puff.release_xy": torch.tensor([[[-60.0, 90.0]]], dtype=DT),
+               "puff.release_z": torch.tensor([[30.0]], dtype=DT),
+               "puff.release_rate": torch.tensor([[3e-3]], dtype=DT),
+               "puff.release_start": torch.tensor([[7.0]], dtype=DT),
+               "puff.release_duration": torch.tensor([[23.0]], dtype=DT)}
+    pulse = _street_sources(model, {names[2]: 1.7e-3, names[8]: 0.3e-3})
+    steady = _street_sources(model, {names[5]: 2e-6})
+    inputs = 0.0
+    for k in range(n_steps):
+        t = dt * k
+        sources = steady + (pulse if t < 20.0 else torch.zeros_like(pulse))
+        drv = {**_drivers(model, drivers, bg=bg, theta=thetas[k], sources=sources), **release}
+        state = model.step(state, drv, dt, t=t)
+        # what entered over this step: the canopy sources (emission_scale 1) and the release
+        inputs = inputs + sources.sum() * dt + pulse_mass(
+            t, dt, release["puff.release_start"], release["puff.release_duration"],
+            release["puff.release_rate"]).sum()
+        puff = PuffState.from_state(state)
+        c_bg = drv["street.x_boundary"]
+        emit_next, drawn_next = pending_roof_mass(model, state, c_bg,
+                                                  junction_source=junction_source)
+        # the release's mass of this step is emitted by the next step too
+        emit_next = emit_next + pulse_mass(
+            t, dt, release["puff.release_start"], release["puff.release_duration"],
+            release["puff.release_rate"]).sum(-1)
+        held = (mass_in_streets(model, state, c_bg) + puff_mass(puff) + puff.mass_out
+                + puff.mass_dropped - puff.mass_drawn_down + emit_next - drawn_next)
+        yield k, model, state, held, inputs
+
+
+def _assert_budget(junction_source, thetas, capacity):
+    """Assert the identity after every step; return the final state and what the run
+    exercised (the largest `mass_out` and `mass_dropped`, the puffs evicted)."""
+    seen = {"out": 0.0, "dropped": 0.0, "evicted": 0}
+    for k, model, state, held, inputs in _budget_run(junction_source, thetas, capacity):
+        assert held.shape == (1,)
+        assert abs(float(held[0]) - float(inputs)) <= 1e-12 * float(inputs), (
+            k, float(held[0]), float(inputs))
+        puff = PuffState.from_state(state)
+        seen["out"] = max(seen["out"], float(puff.mass_out[0]))
+        seen["dropped"] = max(seen["dropped"], float(puff.mass_dropped[0]))
+        seen["evicted"] += int(model.closures[-1].last["evicted"].sum())
+    return state, seen
+
+
+@pytest.mark.parametrize("capacity", [30, 4096])
+@pytest.mark.parametrize("junction_source", ["upward", "net"])
+def test_budget_exact_every_step(junction_source, capacity):
+    """Design Sect. 4.8, at every step, with the step's flux not yet emitted counted:
+
+        sum_s V_s (x_s - C_bg,s) + sum_live m + mass_out + mass_dropped - mass_drawn_down
+            + E_pending - D_pending = sum_steps (sum_s Q_s dt + release mass)
+
+    `E_pending` is what the next step will emit (`pending_roof_mass`: the last step's roof
+    and junction fluxes times its length, plus the release's mass of the last step) and
+    `D_pending` what it will add to `mass_drawn_down` (zero under `"net"`), to 1e-12
+    relative to the input. With 30 slots (25 sources) puffs are evicted for capacity;
+    with the default capacity they leave the 300 m domain and fall below the faint
+    threshold."""
+    state, seen = _assert_budget(junction_source, [0.3] * 60, capacity)
+    if capacity == 30:
+        assert seen["evicted"] > 0 and seen["dropped"] != 0.0
+    else:
+        assert seen["evicted"] == 0 and seen["out"] != 0.0 and seen["dropped"] != 0.0
+    if junction_source == "net":
+        assert float(state["puff.mass_drawn_down"][0]) == 0.0
+    else:
+        assert float(state["puff.mass_drawn_down"][0]) > 0.0
+
+
+def test_budget_exact_when_wind_turns():
+    """The identity of `test_budget_exact_every_step` while the wind direction turns
+    between steps (the closure rebuilds its source field; live puffs turn with the wind)."""
+    thetas = [0.3 + 0.05 * k if k < 30 else 1.8 - 0.04 * (k - 30) for k in range(60)]
+    _, seen = _assert_budget("upward", thetas, 4096)
+    assert seen["out"] != 0.0
+
+
+def test_mass_in_streets_is_the_volume_weighted_excess():
+    from noodl.apps.street_aq.puff import mass_in_streets
+
+    _, _, model, state, _ = _puff_model()
+    x = torch.linspace(1.0, 2.0, 12, dtype=DT)
+    bg = torch.full((12,), 0.5, dtype=DT)
+    got = mass_in_streets(model, {**state, "street.x": x}, bg)
+    assert got.shape == (1,)
+    assert float(got[0]) == pytest.approx(float((40000.0 * (x - 0.5)).sum()), rel=1e-15)
+    batched = mass_in_streets(model, {**state, "street.x": torch.stack([x, 2 * x])}, bg)
+    assert batched.shape == (2,)
+    assert torch.allclose(batched[1], (40000.0 * (2 * x - 0.5)).sum(), rtol=1e-15, atol=0)

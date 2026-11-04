@@ -1187,6 +1187,45 @@ class PuffClosure:
                 "puff.c_ext": c_ext, "puff.time": torch.tensor([t_now, dt], dtype=_DTYPE)}
 
 
+def mass_in_streets(model, state, c_bg: Tensor, *, layer_name: str = "street") -> Tensor:
+    """`(B,)`: the street network's mass in excess of the background, kg: `sum_s V_s (x_s
+    - C_bg,s)` from the state's `"<layer>.x"` `(..., n_streets)` and `c_bg` (the
+    background, broadcasting with it), with `V_s` the layer's capacity (the street
+    volumes). An unbatched state gives `B = 1`. The streets' term of the budget identity
+    (design Sect. 4.8); `pending_roof_mass` is the step not yet emitted."""
+    layer = model.transport[layer_name]
+    x = _f64(state[f"{layer_name}.x"])
+    excess = layer.capacity * (x - _f64(c_bg))
+    return excess.reshape(-1, layer.n_i).sum(-1)
+
+
+def pending_roof_mass(model, state, c_bg: Tensor, *, junction_source: str = "upward",
+                      layer_name: str = "street") -> tuple[Tensor, Tensor]:
+    """`(emitted, drawn_down)`, each `(B,)`, kg: what the puff closure's next step will add
+    to `mass_emitted` from the roof and junction fluxes of the last step, and to
+    `mass_drawn_down`, computed as the closure does (`roof_fluxes` of `"puff.q"`,
+    `"puff.c_ext"` and the state's `"<layer>.x"` against the background `c_bg`, times the
+    last step's length `"puff.time"[1]`). The emission lags one step (design Sect. 4.2), so
+    the budget identity after a step counts these. Explicit releases are not included (their
+    pending mass is `pulse_mass` over the last step). `drawn_down` is zero under
+    `junction_source="net"`."""
+    if junction_source not in JUNCTION_SOURCES:
+        raise ValueError(f"pending_roof_mass: junction_source must be one of "
+                         f"{JUNCTION_SOURCES}, got {junction_source!r}")
+    wiring = roof_wiring(model, layer_name=layer_name)
+    dt_prev = float(state["puff.time"][1])
+    x = _f64(state[f"{layer_name}.x"])
+    f_s, up, down = roof_fluxes(wiring, _f64(state["puff.q"]), x.unsqueeze(-1),
+                                _f64(state["puff.c_ext"]).unsqueeze(-1),
+                                _f64(c_bg).unsqueeze(-1))
+    upward = junction_source == "upward"
+    junction = up if upward else up - down
+    emitted = (f_s.sum((-2, -1)) + junction.sum((-2, -1))) * dt_prev
+    drawn = down.sum((-2, -1)) * dt_prev if upward else torch.zeros_like(emitted)
+    return emitted.reshape(-1), drawn.reshape(-1)
+
+
 __all__ = ["ALONG_WIND", "JUNCTION_SOURCES", "PuffClosure", "PuffField", "PuffOptions",
            "PuffState", "PuffTables", "PulseSource", "advance", "concentration_at", "emit",
-           "housekeep", "puff_mass", "puff_tables", "pulse_mass", "roof_concentration"]
+           "housekeep", "mass_in_streets", "pending_roof_mass", "puff_mass", "puff_tables",
+           "pulse_mass", "roof_concentration"]
