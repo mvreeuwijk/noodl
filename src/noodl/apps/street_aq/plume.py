@@ -564,13 +564,18 @@ class _RecomputedTrajectory(torch.autograd.Function):
                 *(next(found) if v.requires_grad else None for v in leaves))
 
 
-def _trajectory(p: dict, n_grid: int, kappa: float) -> tuple[Tensor, Tensor, Tensor]:
-    """`(sigma_y, p_z, u)`, each `(m, n_grid)`, for the `m` hours in `p`. Each 10 s step
-    advances only the hours whose trajectory has not yet passed the grid's end, and every
-    segment between two nodes fills the grid points it covers (`X_lo <= x < X_hi`) by
-    linear interpolation as it is made."""
+def _trajectory_nodes(p: dict, n_nodes_max: int | None, kappa: float, *, x_end: float
+                      ) -> dict[str, Tensor]:
+    """The 10 s scan of the trajectory for the `m` hours in `p`: the nodes `t`, `x`, `u`,
+    `sigma_y`, `sigma_z`, `z_c`, `p_z`, each `(m, n_nodes)`.
+
+    Node 0 is the source (`t = 0`, `x = 0`, the speed at `H_R`, `SIGMA_Y0_M`, `sigma_z = 0`);
+    its `z_c` and `p_z` are node 1's (the source node has `P_z0 = P_z1`). Each step advances
+    only the hours whose trajectory has not yet passed `x_end`; a row that has passed it
+    (its last node is the first beyond `x_end`) repeats that node to the end. The scan
+    stops when every row has passed `x_end`, or after `n_nodes_max` nodes (at least 2) if
+    that is given."""
     m = p["u_star"].shape[0]
-    grid_end = (n_grid - 1) * TABLE_STEP_M
 
     def speed(z: Tensor, q: dict) -> Tensor:
         return wind_speed(z, u_star=q["u_star"], lmo=q["lmo"], z0=q["z0"], d=q["d"],
@@ -580,12 +585,14 @@ def _trajectory(p: dict, n_grid: int, kappa: float) -> tuple[Tensor, Tensor, Ten
     q = dict(p)
     u0 = speed(q["h_r"], q)
     q["u0"] = u0
-    x, u, s_y, sz_prev = torch.zeros_like(u0), u0, torch.full_like(u0, SIGMA_Y0_M), \
-        torch.zeros_like(u0)
-    p_z = None
-    index, values = [], ([], [], [])
+    x, s_y = torch.zeros_like(u0), torch.full_like(u0, SIGMA_Y0_M)
+    sz_prev = torch.zeros_like(u0)
+    zero = torch.zeros_like(u0)
+    full = {"t": zero, "x": x, "u": u0, "sigma_y": s_y, "sigma_z": zero}
+    nodes = {key: [v] for key, v in full.items()}
+    z_c_all, p_z_all = [], []
     j = 0
-    while rows.numel():
+    while rows.numel() and (n_nodes_max is None or j + 1 < max(n_nodes_max, 2)):
         j += 1
         t = TIME_STEP_S * j
         t_y = torch.clamp(t - q["ty"], min=0.0)
@@ -601,8 +608,39 @@ def _trajectory(p: dict, n_grid: int, kappa: float) -> tuple[Tensor, Tensor, Ten
         p_zj = (2.0 * torch.exp(-0.5 * ((z_c - q["h_r"]) / s_z) ** 2)
                 + torch.exp(-0.5 * ((2.0 * q["h_abl"] - z_c - q["h_r"]) / s_z) ** 2)
                 ) / (_SQRT_2PI * s_z)
-        if p_z is None:
-            p_z = p_zj                               # the source node: P_z0 = P_z1
+        t_col = torch.full_like(x_j, t)
+        for key, v in zip(full, (t_col, x_j, u_j, s_yj, s_z), strict=True):
+            full[key] = full[key].index_put((rows,), v)      # finished rows repeat
+            nodes[key].append(full[key])
+        z_c_all.append((rows, z_c))
+        p_z_all.append((rows, p_zj))
+        live = x_j.detach() <= x_end
+        rows = rows[live]
+        x, sz_prev = x_j[live], s_z[live]
+        q = {key: v[live] for key, v in q.items()}
+    out = {key: torch.stack(v, dim=1) for key, v in nodes.items()}
+    for key, parts in (("z_c", z_c_all), ("p_z", p_z_all)):
+        last = torch.zeros(m, dtype=_DTYPE)
+        cols = []
+        for r, v in parts:
+            last = last.index_put((r,), v)
+            cols.append(last)
+        out[key] = torch.stack([cols[0], *cols], dim=1)       # node 0 = node 1
+    return out
+
+
+def _trajectory(p: dict, n_grid: int, kappa: float) -> tuple[Tensor, Tensor, Tensor]:
+    """`(sigma_y, p_z, u)`, each `(m, n_grid)`, for the `m` hours in `p`: the nodes of
+    `_trajectory_nodes` out to the grid's end, where every segment between two nodes fills
+    the grid points it covers (`X_lo <= x < X_hi`) by linear interpolation."""
+    m = p["u_star"].shape[0]
+    grid_end = (n_grid - 1) * TABLE_STEP_M
+    nodes = _trajectory_nodes(p, None, kappa, x_end=grid_end)
+    xs = nodes["x"]
+    cols = (nodes["sigma_y"], nodes["p_z"], nodes["u"])
+    index, values = [], ([], [], [])
+    for j in range(1, xs.shape[1]):
+        x, x_j = xs[:, j - 1], xs[:, j]
         # grid points k * step with x <= k * step < x_j
         k_lo = torch.ceil(x.detach() / TABLE_STEP_M).long()
         k_hi = torch.clamp(torch.ceil(x_j.detach() / TABLE_STEP_M).long() - 1, max=n_grid - 1)
@@ -612,16 +650,38 @@ def _trajectory(p: dict, n_grid: int, kappa: float) -> tuple[Tensor, Tensor, Ten
             r, c = torch.nonzero(k <= k_hi[:, None], as_tuple=True)
             k = k[r, c]
             w = (k * TABLE_STEP_M - x[r]) / (x_j[r] - x[r])
-            index.append(rows[r] * n_grid + k)
-            for out, lo, hi in zip(values, (s_y, p_z, u), (s_yj, p_zj, u_j), strict=True):
+            index.append(r * n_grid + k)
+            for out, col in zip(values, cols, strict=True):
+                lo, hi = col[:, j - 1], col[:, j]
                 out.append(lo[r] + (hi[r] - lo[r]) * w)
-        live = x_j.detach() <= grid_end
-        rows = rows[live]
-        x, u, s_y, p_z, sz_prev = (v[live] for v in (x_j, u_j, s_yj, p_zj, s_z))
-        q = {key: v[live] for key, v in q.items()}
     flat = torch.cat(index)
     return tuple(torch.zeros(m * n_grid, dtype=_DTYPE).index_put((flat,), torch.cat(v))
                  .reshape(m, n_grid) for v in values)
+
+
+def crosswind_profile(y: Tensor, sigma_y: Tensor, width: Tensor) -> Tensor:
+    """The crosswind profile `f_y` (1/m) of a source of crosswind extent `width` (m) at
+    offsets `y` (m): a flat top over `|y| <= y_c` with `y_c = max((width - sqrt(2 pi)
+    sigma_y) / 2, 0)`, Gaussian tails of standard deviation `sigma_y` beyond it, and unit
+    integral. No cut-off is applied; the arguments broadcast."""
+    y_c = torch.clamp((width - _SQRT_2PI * sigma_y) / 2.0, min=0.0)
+    off = y.abs() - y_c
+    tail = torch.exp(-0.5 * (torch.clamp(off, min=0.0) / sigma_y) ** 2)
+    return torch.where(off <= 0, torch.ones_like(tail), tail) / (2.0 * y_c + _SQRT_2PI * sigma_y)
+
+
+def vertical_profile(z: Tensor, z_c: Tensor, sigma_z: Tensor, h_canopy: Tensor,
+                     h_abl: Tensor) -> Tensor:
+    """The vertical profile (1/m) at height `z` of a Gaussian centred at `z_c` with
+    standard deviation `sigma_z`, reflected in the canopy top `h_canopy` (`H_R`) and in the
+    boundary-layer top `h_abl`: `[g(z - z_c) + g(z + z_c - 2 H_R) + g(2 h - z - z_c)] /
+    (sqrt(2 pi) sigma_z)` with `g(s) = exp(-s^2 / (2 sigma_z^2))`. At `z = H_R` this is the
+    table's `p_z`. The arguments broadcast."""
+    def g(s: Tensor) -> Tensor:
+        return torch.exp(-0.5 * (s / sigma_z) ** 2)
+
+    return (g(z - z_c) + g(z + z_c - 2.0 * h_canopy) + g(2.0 * h_abl - z - z_c)
+            ) / (_SQRT_2PI * sigma_z)
 
 
 class StreetSources(NamedTuple):
@@ -726,9 +786,8 @@ def _pair_values(receptor_xy: Tensor, source_xy: Tensor, rows: dict, cos: Tensor
     y_c = torch.clamp((width[b, p] - _SQRT_2PI * s_y) / 2.0, min=0.0)
     off = y.abs() - y_c
     keep = off <= cutoff_sigma * s_y
-    b, i, p, off, s_y, p_z, u, y_c = (v[keep] for v in (b, i, p, off, s_y, p_z, u, y_c))
-    tail = torch.exp(-0.5 * (torch.clamp(off, min=0.0) / s_y) ** 2)
-    f_y = torch.where(off <= 0, torch.ones_like(tail), tail) / (2.0 * y_c + _SQRT_2PI * s_y)
+    b, i, p, y, s_y, p_z, u = (v[keep] for v in (b, i, p, y, s_y, p_z, u))
+    f_y = crosswind_profile(y, s_y, width[b, p])
     c = f_y * torch.minimum(p_z, clamp[b, p]) / u
     return b, i, p, c
 
