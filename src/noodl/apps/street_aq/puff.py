@@ -1035,12 +1035,20 @@ class PuffClosure:
         return tuple((raw, raw.detach().clone() if isinstance(raw, Tensor) else raw)
                      for raw in raws)
 
-    def _build(self, met: dict, rel: dict) -> bool:
-        """Rebuild the tables and the field when their inputs changed; whether any was."""
+    def _build(self, met: dict, rel: dict, *, new_run: bool) -> bool:
+        """Rebuild the tables and the field when their inputs changed; whether any was.
+
+        The cache holds the autograd graph of the run that built it, so it is also dropped
+        at the start of every run (`new_run`: a step from a state with no pending step) and
+        keyed on the grad mode: an earlier run's tables would carry a freed graph, or none
+        (built under `torch.no_grad`), and give a wrong or failing gradient."""
+        if new_run:
+            self._table_key = self._field_key = None
+        grad = torch.is_grad_enabled()
         o = self.options
         z_raw = rel.get("puff.release_z")
         sigma = met.get("sigma_theta", (None, o.sigma_theta))
-        raws = (met["u_star"][0], met["h_abl"][0], met["lmo"][0], sigma[0], z_raw)
+        raws = (met["u_star"][0], met["h_abl"][0], met["lmo"][0], sigma[0], z_raw, grad)
         rebuilt = False
         if not self._same(self._table_key, raws):
             centres = torch.tensor([self.centre_c], dtype=_DTYPE)
@@ -1055,7 +1063,7 @@ class PuffClosure:
                 **self.table_kwargs)
             self._table_key = self._key(raws)
             rebuilt = True
-        theta = (met["theta_w"][0],)
+        theta = (met["theta_w"][0], grad)
         if not self._same(self._field_key, theta):
             self.field = PuffField.for_network(
                 self.net, theta_w=met["theta_w"][1], n_releases=self.n_releases,
@@ -1121,7 +1129,8 @@ class PuffClosure:
             batch = (stored,)
         n_batch = batch[0] if batch else 1
         puff = self._puffs(state, n_batch)
-        rebuilt = self._build(met, rel)
+        rebuilt = self._build(met, rel, new_run=ctx is not None
+                              and float(state["puff.time"][1]) == 0.0)
         theta = met["theta_w"][1]
 
         def per_instance(t: Tensor, tail: tuple[int, ...]) -> Tensor:

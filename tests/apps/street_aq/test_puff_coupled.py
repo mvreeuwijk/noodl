@@ -231,3 +231,42 @@ def test_refusals_are_named():
     with pytest.raises(KeyError, match="u_star"):
         model.step(state, no_u_star, 5.0, t=0.0)
     model.step(state, drv, 5.0, t=0.0)
+
+
+def _grad_run(model, state, drv, u_star):
+    for k in range(4):
+        state = model.step(state, drv, 5.0, t=5.0 * k)
+    return state["street.x"].sum()
+
+
+def test_a_new_run_rebuilds_the_tables_for_its_own_graph():
+    # the same driver tensors in every run, so only the run boundary can tell the runs apart
+    _, names, model, state, drivers = _puff_model()
+    closure = model.closures[-1]
+    u_star = torch.tensor(0.5, dtype=DT, requires_grad=True)
+    src = _street_sources(model, {names[2]: 1e-3})
+    drv = {**_drivers(model, drivers, sources=src), "u_star": u_star}
+    (reference,) = torch.autograd.grad(_grad_run(model, state, drv, u_star), u_star)
+    # a warm-up without grad must not leave graph-less tables behind
+    with torch.no_grad():
+        _grad_run(model, state, drv, u_star)
+    (after,) = torch.autograd.grad(_grad_run(model, state, drv, u_star), u_star)
+    assert torch.equal(after, reference)
+    # two differentiated runs in a row on the same leaf: no freed graph is reused
+    (again,) = torch.autograd.grad(_grad_run(model, state, drv, u_star), u_star)
+    assert torch.equal(again, reference)
+    assert closure.last["rebuilt"] is False
+
+
+def test_a_grad_run_after_a_no_grad_warm_up_has_the_full_gradient():
+    grads = []
+    for warm_up in (False, True):
+        _, names, model, state, drivers = _puff_model()
+        u_star = torch.tensor(0.5, dtype=DT, requires_grad=True)
+        src = _street_sources(model, {names[2]: 1e-3})
+        drv = {**_drivers(model, drivers, sources=src), "u_star": u_star}
+        if warm_up:
+            with torch.no_grad():
+                _grad_run(model, state, drv, u_star)
+        grads.append(torch.autograd.grad(_grad_run(model, state, drv, u_star), u_star)[0])
+    assert torch.equal(grads[1], grads[0])
