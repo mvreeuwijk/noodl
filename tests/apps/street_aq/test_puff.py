@@ -5,14 +5,17 @@ from __future__ import annotations
 import math
 from pathlib import Path
 
+import pytest
 import torch
 
 from noodl.apps.street_aq.plume import (
+    _table_inputs,
     _trajectory_nodes,
     crosswind_profile,
     plume_table,
     vertical_profile,
 )
+from noodl.apps.street_aq.puff import puff_tables
 
 DT = torch.float64
 REGRESSION = Path(__file__).parents[2] / "data" / "street" / "plume_table_regression.pt"
@@ -50,22 +53,9 @@ def test_resampled_nodes_equal_the_existing_table_bit_for_bit():
 
 
 def _nodes(met=_NEUTRAL, x_end=1000.0):
-    from noodl.apps.street_aq import plume
     from noodl.apps.street_aq.canyon import KAPPA
-    # build the parameter dict exactly as plume_table does, via its private pieces
-    captured = {}
-    real = plume._trajectory
-
-    def spy(p, n_grid, kappa):
-        captured["p"] = p
-        return real(p, n_grid, kappa)
-
-    plume._trajectory = spy
-    try:
-        plume_table(**met, x_max=x_end)
-    finally:
-        plume._trajectory = real
-    return captured["p"], _trajectory_nodes(captured["p"], None, KAPPA, x_end=x_end)
+    p, _, _ = _table_inputs("plume_table", **met, x_max=x_end)
+    return p, _trajectory_nodes(p, None, KAPPA, x_end=x_end)
 
 
 def test_nodes_are_time_ordered_and_start_at_the_source():
@@ -105,3 +95,112 @@ def test_crosswind_profile_integrates_to_one():
     y = torch.linspace(-200.0, 200.0, 400001, dtype=DT)
     f = crosswind_profile(y, torch.tensor(5.0, dtype=DT), torch.tensor(30.0, dtype=DT))
     assert abs(float(torch.trapezoid(f, y)) - 1.0) < 1e-10
+
+
+_PUFF_MET = {**_NEUTRAL, "x_max": 1000.0}
+
+
+def test_table_at_node_ages_reproduces_the_scan():
+    tabs = puff_tables(centres=torch.tensor([10.0], dtype=DT), **_PUFF_MET)
+    _, nodes = _nodes()
+    zero = torch.zeros(1, dtype=torch.long)
+    x, _, sy, sz, zc = tabs.at_age(nodes["t"][0], zero, zero)
+    assert torch.equal(x, nodes["x"][0]) and torch.equal(sy, nodes["sigma_y"][0])
+    assert torch.equal(sz, nodes["sigma_z"][0]) and torch.equal(zc, nodes["z_c"][0])
+    assert tabs.t_max == float(nodes["t"][0, -1])
+    assert tabs.x.shape == (1, 1, nodes["x"].shape[1])
+
+
+def test_at_age_interpolates_linearly_and_holds_the_speed_per_segment():
+    tabs = puff_tables(centres=torch.tensor([10.0], dtype=DT), **_PUFF_MET)
+    zero = torch.zeros((), dtype=torch.long)
+    age = torch.tensor([15.0, 10.0, 0.0], dtype=DT)
+    x, u, _, _, _ = tabs.at_age(age, zero, zero)
+    assert float(x[0]) == 0.5 * float(tabs.x[0, 0, 1] + tabs.x[0, 0, 2])
+    assert float(u[0]) == float(tabs.u[0, 0, 2])            # segment (10, 20]
+    assert float(u[1]) == float(tabs.u[0, 0, 2])            # node 1 opens segment 2
+    assert float(u[2]) == float(tabs.u[0, 0, 1])
+    # the displacement is advanced on the segment speed: x_j = x_{j-1} + u_j dt
+    torch.testing.assert_close(tabs.x[0, 0, 1:] - tabs.x[0, 0, :-1],
+                               tabs.u[0, 0, 1:] * 10.0, rtol=1e-13, atol=0)
+
+
+def test_age_beyond_the_last_node_returns_the_last_node():
+    tabs = puff_tables(centres=torch.tensor([10.0], dtype=DT), **_PUFF_MET)
+    zero = torch.zeros((), dtype=torch.long)
+    x, u, sy, sz, zc = tabs.at_age(torch.tensor(tabs.t_max + 500.0, dtype=DT), zero, zero)
+    assert float(x) == float(tabs.x[0, 0, -1]) and float(u) == float(tabs.u[0, 0, -1])
+    assert float(sy) == float(tabs.sigma_y[0, 0, -1]) and float(zc) == float(tabs.z_c[0, 0, -1])
+
+
+def test_distance_resampled_puff_table_is_the_plume_table():
+    ref = plume_table(**_PUFF_MET)
+    tabs = puff_tables(centres=torch.tensor([10.0], dtype=DT), **_PUFF_MET)
+    x, u, sy = tabs.x[0, 0], tabs.u[0, 0], tabs.sigma_y[0, 0]
+    pz = vertical_profile(tabs.h_canopy[0], tabs.z_c[0, 0], tabs.sigma_z[0, 0],
+                          tabs.h_canopy[0], tabs.h_abl[0])
+    pz = torch.cat([pz[1:2], pz[1:]])                        # node 0 copies node 1
+    grid = ref.distance
+    j = torch.clamp(torch.searchsorted(x, grid, right=True), 1, x.numel() - 1)
+    w = (grid - x[j - 1]) / (x[j] - x[j - 1])
+    for table, node in ((ref.sigma_y[0], sy), (ref.p_z[0], pz), (ref.u[0], u)):
+        got = node[j - 1] + (node[j] - node[j - 1]) * w
+        torch.testing.assert_close(got, table, rtol=1e-13, atol=0)
+
+
+def test_second_table_uses_its_own_centre():
+    tabs = puff_tables(centres=torch.tensor([10.0, 40.0], dtype=DT), **_PUFF_MET)
+    assert tabs.z_c.shape[:2] == (2, 1)
+    # later nodes differ little (the spread dominates the centre) and a row that leaves
+    # early repeats its last node, so compare the first nodes
+    assert (tabs.z_c[1, :, 1:6] > tabs.z_c[0, :, 1:6]).all()
+
+
+def test_per_batch_centres_and_meteorology_broadcast():
+    met = {**_PUFF_MET, "u_star": torch.tensor([0.45, 0.2], dtype=DT)}
+    tabs = puff_tables(centres=torch.tensor([[10.0, 10.0], [40.0, 10.0]], dtype=DT), **met)
+    assert tabs.x.shape[:2] == (2, 2) and tabs.h_canopy.shape == (2,)
+    one = puff_tables(centres=torch.tensor([10.0], dtype=DT), **_PUFF_MET)
+    n = one.x.shape[-1]
+    assert torch.equal(tabs.x[0, 0, :n], one.x[0, 0])       # rows pad by repeating the end
+    assert torch.equal(tabs.x[0, 0, n:], one.x[0, 0, -1].expand(tabs.x.shape[-1] - n))
+
+
+def test_calm_meteorology_is_refused_by_name():
+    with pytest.raises(ValueError, match="MAX_TABLE_STEPS"):
+        puff_tables(centres=torch.tensor([10.0], dtype=DT), **{**_PUFF_MET, "u_star": 1e-4})
+
+
+def test_puff_tables_refuses_the_unstable_regime_by_name():
+    with pytest.raises(NotImplementedError, match="puff_tables"):
+        puff_tables(centres=torch.tensor([10.0], dtype=DT), **{**_PUFF_MET, "lmo": -50.0})
+
+
+def test_gradients_reach_meteorology_and_centres_and_second_order_raises():
+    u_star = torch.tensor([0.45], dtype=DT, requires_grad=True)
+    lmo = torch.tensor([200.0], dtype=DT, requires_grad=True)
+    centres = torch.tensor([40.0], dtype=DT, requires_grad=True)
+    met = {**_PUFF_MET, "u_star": u_star, "lmo": lmo}
+    tabs = puff_tables(centres=centres, **met)
+    zero = torch.zeros((), dtype=torch.long)
+    x, _, _, sz, zc = tabs.at_age(torch.tensor(60.0, dtype=DT), zero, zero)
+    loss = x + sz + zc
+    grads = torch.autograd.grad(loss, (u_star, lmo, centres), create_graph=False,
+                                allow_unused=False)
+    assert all(bool(torch.isfinite(g).all()) and float(g.abs().sum()) > 0 for g in grads)
+    # a finite-difference check on u_star
+    h = 1e-6
+
+    def value(us):
+        t = puff_tables(centres=centres.detach(), **{**met, "u_star": us, "lmo": lmo.detach()})
+        xx, _, _, ss, cc = t.at_age(torch.tensor(60.0, dtype=DT), zero, zero)
+        return float(xx + ss + cc)
+
+    fd = (value(u_star.detach() + h) - value(u_star.detach() - h)) / (2 * h)
+    assert abs(float(grads[0]) - fd) < 1e-5 * abs(fd)
+    tabs = puff_tables(centres=centres, **met)       # the first graph is spent
+    x, _, _, sz, zc = tabs.at_age(torch.tensor(60.0, dtype=DT), zero, zero)
+    loss = x + sz + zc
+    with pytest.raises(RuntimeError, match="second-order"):
+        g1 = torch.autograd.grad(loss, u_star, create_graph=True)[0]
+        torch.autograd.grad(g1, u_star)

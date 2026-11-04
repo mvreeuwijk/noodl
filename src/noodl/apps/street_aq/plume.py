@@ -397,6 +397,98 @@ def _expected_abs(mean: Tensor, sd: Tensor) -> Tensor:
             + mean * torch.erf(mean / (sd * math.sqrt(2.0))))
 
 
+def _table_inputs(
+    name: str,
+    *,
+    u_star: Tensor | float,
+    h_abl: Tensor | float,
+    lmo: Tensor | float,
+    h_canopy: Tensor | float,
+    z0: Tensor | float,
+    d: Tensor | float,
+    sigma_theta: Tensor | float,
+    theta_star: Tensor | float | None = None,
+    temperature: Tensor | float = DEFAULT_TEMPERATURE_K,
+    sigma_v_min: float = SIGMA_V_MIN,
+    sigma_w_min: float = SIGMA_W_MIN,
+    tau_y: Tensor | float | None = None,
+    tau_z: Tensor | float | None = None,
+    centre_c: Tensor | float = PLUME_CENTRE_C_M,
+    centre_k: Tensor | float = PLUME_CENTRE_K,
+    x_max: float = DOWNWIND_CUTOFF_M,
+    kappa: float = KAPPA,
+    neutral_abs_lmo: float = math.inf,
+) -> tuple[dict[str, Tensor], tuple[int, ...], Tensor]:
+    """The shared front end of `plume_table` and `puff_tables` (`name` prefixes the
+    refusals): checks the inputs and returns `(p, batch, u0)`, the flat per-row parameter
+    dict of the trajectory scan, the broadcast batch shape and the wind speed at `H_R`."""
+    u_star, h_abl, lmo, h_r, z0, d, sphi = (
+        _f64(v) for v in (u_star, h_abl, lmo, h_canopy, z0, d, sigma_theta)
+    )
+    if not bool((u_star > 0).all()):
+        raise ValueError(f"{name}: u_star must be strictly positive")
+    if not bool((h_abl > h_r).all()):
+        raise ValueError(
+            f"{name}: the boundary-layer height h_abl must exceed the reflection "
+            f"height h_canopy (the profile reflects at both); got h_abl down to "
+            f"{float(h_abl.min())} m against h_canopy {float(h_r.max())} m"
+        )
+    if not bool((h_r > d).all()):
+        raise ValueError(
+            f"{name}: the reflection height h_canopy must exceed the displacement "
+            f"height d (the wind profile starts at d); got {float(h_r.min())} m against "
+            f"{float(d.max())} m"
+        )
+    if not x_max > 0:
+        raise ValueError(f"{name}: x_max must be positive, got {x_max!r}")
+    unstable, _, stable = _regimes(lmo, neutral_abs_lmo)
+    if bool(unstable.any()):
+        raise NotImplementedError(
+            f"{name}: the unstable regime (lmo < 0) is not implemented -- its vertical "
+            "profile is the bi-Gaussian of Soulhac et al. (2011) Eq. (26) with the "
+            "unstable T_L of Eq. (18); see noodl.apps.street_aq.plume"
+        )
+    sv, sw, n_bv = turbulence(h_r, u_star=u_star, h_abl=h_abl, lmo=lmo,
+                              theta_star=theta_star, temperature=temperature, kappa=kappa,
+                              neutral_abs_lmo=neutral_abs_lmo)
+    sv = torch.clamp(sv, min=float(sigma_v_min))
+    sw = torch.clamp(sw, min=float(sigma_w_min))
+    safe_l = torch.where(stable, lmo, torch.ones_like(lmo))
+    a = torch.where(stable, 2.5 * u_star * safe_l / h_abl**2, 2.5 * u_star / h_abl)
+    ty_default, tz_default = default_tau(sv, sw)
+    ty = ty_default if tau_y is None else _f64(tau_y)
+    tz = tz_default if tau_z is None else _f64(tau_z)
+    if not bool((tz < TIME_STEP_S).all()):
+        raise ValueError(
+            f"{name}: tau_z must be below the {TIME_STEP_S} s time step (sigma_z at "
+            f"the first node would be zero); got {float(tz.max())} s"
+        )
+    parts = {"u_star": u_star, "h_abl": h_abl, "lmo": lmo, "h_r": h_r, "z0": z0, "d": d,
+             "sphi": sphi, "sv": sv, "sw": sw, "n_bv": n_bv, "a": a, "ty": ty, "tz": tz,
+             "c": _f64(centre_c), "k": _f64(centre_k)}
+    batch = tuple(broadcast_shapes(*(v.shape for v in parts.values())))
+    p = {key: v.expand(batch).reshape(-1) for key, v in parts.items()}
+    u0 = wind_speed(p["h_r"], u_star=p["u_star"], lmo=p["lmo"], z0=p["z0"], d=p["d"],
+                    kappa=kappa)
+    if not bool((u0 > 0).all()):
+        raise ValueError(f"{name}: the wind speed at h_canopy must be positive")
+    return p, batch, u0
+
+
+def _step_bound(name: str, u0: Tensor, grid_end: float) -> Tensor:
+    """Each row's bound on the number of 10 s steps to reach `grid_end`; refuses a bound
+    above `MAX_TABLE_STEPS`."""
+    # The speed never falls below U(H_R), so this bounds each hour's step count.
+    steps = torch.ceil((grid_end + TIME_STEP_S * u0.detach()) / (TIME_STEP_S * u0.detach()))
+    if bool((steps > MAX_TABLE_STEPS).any()):
+        raise ValueError(
+            f"{name}: the trajectory needs up to {int(steps.max())} steps of "
+            f"{TIME_STEP_S} s to reach {grid_end} m, above MAX_TABLE_STEPS = "
+            f"{MAX_TABLE_STEPS} (wind speed at h_canopy down to {float(u0.min()):.3g} m/s)"
+        )
+    return steps
+
+
 def plume_table(
     *,
     u_star: Tensor | float,
@@ -435,69 +527,18 @@ def plume_table(
     `x_max`. Needs `h_abl > h_canopy > d`, `u* > 0` and
     `tau_z < TIME_STEP_S`; the unstable regime raises `NotImplementedError`.
     """
-    u_star, h_abl, lmo, h_r, z0, d, sphi = (
-        _f64(v) for v in (u_star, h_abl, lmo, h_canopy, z0, d, sigma_theta)
-    )
-    if not bool((u_star > 0).all()):
-        raise ValueError("plume_table: u_star must be strictly positive")
-    if not bool((h_abl > h_r).all()):
-        raise ValueError(
-            f"plume_table: the boundary-layer height h_abl must exceed the reflection "
-            f"height h_canopy (the profile reflects at both); got h_abl down to "
-            f"{float(h_abl.min())} m against h_canopy {float(h_r.max())} m"
-        )
-    if not bool((h_r > d).all()):
-        raise ValueError(
-            f"plume_table: the reflection height h_canopy must exceed the displacement "
-            f"height d (the wind profile starts at d); got {float(h_r.min())} m against "
-            f"{float(d.max())} m"
-        )
-    if not x_max > 0:
-        raise ValueError(f"plume_table: x_max must be positive, got {x_max!r}")
-    unstable, _, stable = _regimes(lmo, neutral_abs_lmo)
-    if bool(unstable.any()):
-        raise NotImplementedError(
-            "plume_table: the unstable regime (lmo < 0) is not implemented -- its vertical "
-            "profile is the bi-Gaussian of Soulhac et al. (2011) Eq. (26) with the "
-            "unstable T_L of Eq. (18); see noodl.apps.street_aq.plume"
-        )
-    sv, sw, n_bv = turbulence(h_r, u_star=u_star, h_abl=h_abl, lmo=lmo,
-                              theta_star=theta_star, temperature=temperature, kappa=kappa,
-                              neutral_abs_lmo=neutral_abs_lmo)
-    sv = torch.clamp(sv, min=float(sigma_v_min))
-    sw = torch.clamp(sw, min=float(sigma_w_min))
-    safe_l = torch.where(stable, lmo, torch.ones_like(lmo))
-    a = torch.where(stable, 2.5 * u_star * safe_l / h_abl**2, 2.5 * u_star / h_abl)
-    ty_default, tz_default = default_tau(sv, sw)
-    ty = ty_default if tau_y is None else _f64(tau_y)
-    tz = tz_default if tau_z is None else _f64(tau_z)
-    if not bool((tz < TIME_STEP_S).all()):
-        raise ValueError(
-            f"plume_table: tau_z must be below the {TIME_STEP_S} s time step (sigma_z at "
-            f"the first node would be zero); got {float(tz.max())} s"
-        )
-    parts = {"u_star": u_star, "h_abl": h_abl, "lmo": lmo, "h_r": h_r, "z0": z0, "d": d,
-             "sphi": sphi, "sv": sv, "sw": sw, "n_bv": n_bv, "a": a, "ty": ty, "tz": tz,
-             "c": _f64(centre_c), "k": _f64(centre_k)}
-    batch = tuple(broadcast_shapes(*(v.shape for v in parts.values())))
-    p = {key: v.expand(batch).reshape(-1) for key, v in parts.items()}
+    p, batch, u0 = _table_inputs(
+        "plume_table", u_star=u_star, h_abl=h_abl, lmo=lmo, h_canopy=h_canopy, z0=z0, d=d,
+        sigma_theta=sigma_theta, theta_star=theta_star, temperature=temperature,
+        sigma_v_min=sigma_v_min, sigma_w_min=sigma_w_min, tau_y=tau_y, tau_z=tau_z,
+        centre_c=centre_c, centre_k=centre_k, x_max=x_max, kappa=kappa,
+        neutral_abs_lmo=neutral_abs_lmo)
     n_grid = int(math.floor(x_max / TABLE_STEP_M + 1e-9)) + 1
     if (n_grid - 1) * TABLE_STEP_M < x_max:
         n_grid += 1
     n_grid = max(n_grid, 2)
     grid_end = (n_grid - 1) * TABLE_STEP_M
-    u0 = wind_speed(p["h_r"], u_star=p["u_star"], lmo=p["lmo"], z0=p["z0"], d=p["d"],
-                    kappa=kappa)
-    if not bool((u0 > 0).all()):
-        raise ValueError("plume_table: the wind speed at h_canopy must be positive")
-    # The speed never falls below U(H_R), so this bounds each hour's step count.
-    steps = torch.ceil((grid_end + TIME_STEP_S * u0.detach()) / (TIME_STEP_S * u0.detach()))
-    if bool((steps > MAX_TABLE_STEPS).any()):
-        raise ValueError(
-            f"plume_table: the trajectory needs up to {int(steps.max())} steps of "
-            f"{TIME_STEP_S} s to reach {grid_end} m, above MAX_TABLE_STEPS = "
-            f"{MAX_TABLE_STEPS} (wind speed at h_canopy down to {float(u0.min()):.3g} m/s)"
-        )
+    steps = _step_bound("plume_table", u0, grid_end)
     keys = tuple(p)
     grad = torch.is_grad_enabled() and any(v.requires_grad for v in p.values())
     out = []
@@ -676,7 +717,7 @@ def vertical_profile(z: Tensor, z_c: Tensor, sigma_z: Tensor, h_canopy: Tensor,
     standard deviation `sigma_z`, reflected in the canopy top `h_canopy` (`H_R`) and in the
     boundary-layer top `h_abl`: `[g(z - z_c) + g(z + z_c - 2 H_R) + g(2 h - z - z_c)] /
     (sqrt(2 pi) sigma_z)` with `g(s) = exp(-s^2 / (2 sigma_z^2))`. At `z = H_R` this is the
-    table's `p_z`. The arguments broadcast."""
+    table's `p_z`. Valid for nodes >= 1 (`sigma_z` is 0 at node 0). The arguments broadcast."""
     def g(s: Tensor) -> Tensor:
         return torch.exp(-0.5 * (s / sigma_z) ** 2)
 
