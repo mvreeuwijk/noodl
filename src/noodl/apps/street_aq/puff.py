@@ -38,7 +38,8 @@ _NODE_KEYS = ("x", "u", "sigma_y", "sigma_z", "z_c")
 class PuffTables:
     """The plume trajectory by age (`puff_tables`).
 
-    `x` (m, the distance travelled), `u` (m/s, the speed of the segment ending at the node;
+    `x` (m, the distance travelled), `u` (m/s, the speed of the segment ending at the node:
+    segments are right-closed;
     node 0 holds the speed at `H_R`), `sigma_y`, `sigma_z` (m) and `z_c` (m, the plume
     centre height; node 0 holds node 1's) are `(n_tab, n_b, n_nodes)` at ages `0, step_s,
     2 step_s, ...`; a row that reaches `x_max` before the others repeats its last node.
@@ -65,7 +66,8 @@ class PuffTables:
         """`(x, u, sigma_y, sigma_z, z_c)` at `age` (s) from table `table` and
         meteorology row `row` (long tensors that broadcast with `age`; the result has their
         broadcast shape). Everything but `u` is linear in age between nodes; `u` is the
-        node speed of the segment containing `age` (not interpolated). An age beyond the
+        node speed of the segment `(t_{j-1}, t_j]` containing `age`, i.e. the speed of the first
+        segment ending at or after `age` (not interpolated; age 0 gives `U_1`). An age beyond the
         last node returns the last node's values (a later step retires such a puff); a
         negative age the source node's."""
         _, n_b, n = self.x.shape
@@ -75,7 +77,7 @@ class PuffTables:
         frac = pos - i0
         base = (table * n_b + row) * n
         lo = base + i0
-        seg = base + torch.clamp(floor + 1, 1, n - 1)
+        seg = base + torch.clamp(torch.ceil(pos.detach()).long(), 1, n - 1)
         out = []
         for node in (self.x, self.u, self.sigma_y, self.sigma_z, self.z_c):
             v = node.reshape(-1)

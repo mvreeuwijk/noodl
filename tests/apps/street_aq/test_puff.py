@@ -114,15 +114,27 @@ def test_table_at_node_ages_reproduces_the_scan():
 def test_at_age_interpolates_linearly_and_holds_the_speed_per_segment():
     tabs = puff_tables(centres=torch.tensor([10.0], dtype=DT), **_PUFF_MET)
     zero = torch.zeros((), dtype=torch.long)
-    age = torch.tensor([15.0, 10.0, 0.0], dtype=DT)
+    age = torch.tensor([15.0, 10.0, 0.0, 10.0 + 1e-9], dtype=DT)
     x, u, _, _, _ = tabs.at_age(age, zero, zero)
     assert float(x[0]) == 0.5 * float(tabs.x[0, 0, 1] + tabs.x[0, 0, 2])
     assert float(u[0]) == float(tabs.u[0, 0, 2])            # segment (10, 20]
-    assert float(u[1]) == float(tabs.u[0, 0, 2])            # node 1 opens segment 2
+    assert float(u[1]) == float(tabs.u[0, 0, 1])            # segments are right-closed
     assert float(u[2]) == float(tabs.u[0, 0, 1])
+    assert float(u[3]) == float(tabs.u[0, 0, 2])
     # the displacement is advanced on the segment speed: x_j = x_{j-1} + u_j dt
     torch.testing.assert_close(tabs.x[0, 0, 1:] - tabs.x[0, 0, :-1],
                                tabs.u[0, 0, 1:] * 10.0, rtol=1e-13, atol=0)
+
+
+def test_stepping_age_and_summing_the_speed_reproduces_the_table_distance():
+    tabs = puff_tables(centres=torch.tensor([10.0], dtype=DT), **_PUFF_MET)
+    zero = torch.zeros((), dtype=torch.long)
+    disp = torch.zeros((), dtype=DT)
+    age = torch.zeros((), dtype=DT)
+    for j in range(1, tabs.x.shape[-1]):
+        age = age + 10.0
+        disp = disp + tabs.at_age(age, zero, zero)[1] * 10.0
+        torch.testing.assert_close(disp, tabs.x[0, 0, j], rtol=1e-13, atol=0)
 
 
 def test_age_beyond_the_last_node_returns_the_last_node():
