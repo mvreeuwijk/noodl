@@ -632,3 +632,25 @@ def test_puff_width_batch_must_match_by_name():
     with pytest.raises(ValueError, match="width"):
         roof_concentration(field, state, _hand_tables([lambda j: 3.0]),
                            torch.zeros(1, 2, dtype=DT), 0.0, 5.0)
+
+
+def test_age_zero_puffs_have_finite_bounds_with_real_tables():
+    tabs = puff_tables(centres=torch.tensor([20.0], dtype=DT), **_NEUTRAL, x_max=700.0)
+    field = PuffField.points(3)
+    zero = torch.zeros(1, 3, 2, dtype=DT)
+    index = torch.zeros(3, dtype=_LONG)
+    state, _ = emit(field, PuffState.empty((1,), 3), torch.tensor([[4.0, 1.0, 2.0]], dtype=DT),
+                    index, zero, tables=tabs)
+    kept = housekeep(field, state, tabs)
+    assert kept.live[0].tolist() == [True] * 3 and float(kept.mass_dropped) == 0.0
+    # eviction ranks fresh puffs by strength: the 1.0 puff is the faintest
+    state, n = emit(field, state, torch.tensor([[0.0, 0.0, 8.0]], dtype=DT), index, zero,
+                    tables=tabs)
+    assert n.tolist() == [1] and float(state.mass_dropped) == 1.0
+    assert sorted(state.mass[0].tolist()) == [2.0, 4.0, 8.0]
+    # and an age-0 puff beside a faint one still drops the faint one
+    state, _ = emit(field, PuffState.empty((1,), 3),
+                    torch.tensor([[1.0, 2.0**-30, 0.0]], dtype=DT), index, zero, tables=tabs)
+    kept = housekeep(field, state, tabs)
+    assert kept.live[0].tolist() == [True, False, False]
+    assert float(kept.mass_dropped) == 2.0**-30

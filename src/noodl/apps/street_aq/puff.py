@@ -425,7 +425,10 @@ def _peak_bound(field: PuffField, state: PuffState, tables: PuffTables) -> Tenso
     width, clamp = width.detach(), clamp.detach()
     row = _table_rows(tables, n_batch, "housekeep")[:, None]
     with torch.no_grad():
-        _, u, s_y, s_z, z_c = tables.at_age(state.age, state.table, row)
+        # the profiles are valid from node 1 on (sigma_z is 0 at age 0): a puff younger
+        # than a table step is bounded at one step
+        age = torch.clamp(state.age, min=tables.step_s)
+        _, u, s_y, s_z, z_c = tables.at_age(age, state.table, row)
         h_c, h_abl = tables.h_canopy[row[:, 0]], tables.h_abl[row[:, 0]]
         p_z = vertical_profile(h_c[:, None].expand_as(s_y), z_c, s_z, h_c[:, None],
                                h_abl[:, None])
@@ -440,7 +443,8 @@ def _peak_bound(field: PuffField, state: PuffState, tables: PuffTables) -> Tenso
         sy = s_y[b_, k_]
         w = width[b_, p]
         value = field.weight[p].detach() * torch.minimum(p_z[b_, k_], clamp[b_, p]) / (
-            2.0 * torch.clamp((w - _SQRT_2PI * sy) / 2.0, min=0.0) + _SQRT_2PI * sy)
+            torch.clamp(2.0 * torch.clamp((w - _SQRT_2PI * sy) / 2.0, min=0.0) + _SQRT_2PI * sy,
+                        min=1e-12))
         best = torch.zeros(b.numel(), dtype=_DTYPE).scatter_reduce(0, rep, value, "amax",
                                                                    include_self=False)
         peak = torch.zeros(n_batch, capacity, dtype=_DTYPE)
