@@ -8,14 +8,25 @@ from pathlib import Path
 import pytest
 import torch
 
+from noodl.apps.street_aq.network import twelve_street_grid
 from noodl.apps.street_aq.plume import (
     _table_inputs,
     _trajectory_nodes,
     crosswind_profile,
     plume_table,
+    street_midpoints,
     vertical_profile,
 )
-from noodl.apps.street_aq.puff import puff_tables
+from noodl.apps.street_aq.puff import (
+    PuffField,
+    PuffState,
+    PuffTables,
+    advance,
+    concentration_at,
+    emit,
+    puff_tables,
+    roof_concentration,
+)
 
 DT = torch.float64
 REGRESSION = Path(__file__).parents[2] / "data" / "street" / "plume_table_regression.pt"
@@ -216,3 +227,275 @@ def test_gradients_reach_meteorology_and_centres_and_second_order_raises():
     with pytest.raises(RuntimeError, match="second-order"):
         g1 = torch.autograd.grad(loss, u_star, create_graph=True)[0]
         torch.autograd.grad(g1, u_star)
+
+
+# --- the puff field: emit, advance, evaluate ---------------------------------------------
+
+_LONG = torch.long
+
+
+def _hand_tables(speeds, *, n_nodes=90, z_c=15.0, h_canopy=0.0, h_abl=1e6):
+    """A hand-made `PuffTables` with spreads `0.5 + 0.2 t` and node speeds `speeds(j)`
+    (one row per entry of `speeds`; `x_j = x_{j-1} + 10 u_j`, node 0 holds `u_1`)."""
+    t = torch.arange(n_nodes, dtype=DT) * 10.0
+    rows_x, rows_u = [], []
+    for speed in speeds:
+        u = torch.tensor([speed(max(j, 1)) for j in range(n_nodes)], dtype=DT)
+        x = torch.cat([torch.zeros(1, dtype=DT), torch.cumsum(u[1:] * 10.0, 0)])
+        rows_x.append(x)
+        rows_u.append(u)
+    n_b = len(speeds)
+    sigma = (0.5 + 0.2 * t).expand(1, n_b, n_nodes).clone()
+    return PuffTables(
+        x=torch.stack(rows_x)[None], u=torch.stack(rows_u)[None], sigma_y=sigma,
+        sigma_z=sigma.clone(), z_c=torch.full((1, n_b, n_nodes), z_c, dtype=DT),
+        h_canopy=torch.full((n_b,), h_canopy, dtype=DT),
+        h_abl=torch.full((n_b,), h_abl, dtype=DT), x_max=1e9)
+
+
+def _gauss(s, sigma):
+    return torch.exp(-0.5 * (s / sigma) ** 2) / (math.sqrt(2.0 * math.pi) * sigma)
+
+
+def _one_release(field, tables, *, mass, origin, dt, steps, theta):
+    state = PuffState.empty((1,), 8)
+    state, dropped = emit(field, state, torch.tensor([[mass]], dtype=DT),
+                          torch.zeros(1, dtype=_LONG),
+                          torch.tensor([[origin]], dtype=DT))
+    assert int(dropped.sum()) == 0
+    for _ in range(steps):
+        state = advance(state, tables, dt, torch.tensor([theta], dtype=DT))
+    return state
+
+
+def _wind_points(origin, theta, along, cross, z):
+    """`(R, 3)` points at `along`/`cross` wind offsets from `origin` and heights `z`, with
+    the offsets and heights flattened alongside."""
+    a, c, zz = (torch.tensor(v, dtype=DT) for v in (along, cross, z))
+    a, c, zz = (v.reshape(-1) for v in torch.meshgrid(a, c, zz, indexing="ij"))
+    e = torch.tensor([math.cos(theta), math.sin(theta)], dtype=DT)
+    n = torch.tensor([-math.sin(theta), math.cos(theta)], dtype=DT)
+    xy = torch.tensor(origin, dtype=DT) + a[:, None] * e + c[:, None] * n
+    return torch.cat([xy, zz[:, None]], dim=1), a, c, zz
+
+
+def test_single_point_puff_matches_the_closed_form():
+    # constant u = 3, sigma_y = sigma_z = 0.5 + 0.2 t, z_c = 15, H_R = 0 (the canopy image
+    # is the ground image), h = 1e6; one puff of 2 kg advanced to age 60 s in steps of 5 s
+    tabs = _hand_tables([lambda j: 3.0])
+    field = PuffField.points(1, along_wind="sigma_y")
+    theta, origin = 0.4, (30.0, -20.0)
+    state = _one_release(field, tabs, mass=2.0, origin=origin, dt=5.0, steps=12, theta=theta)
+    assert float(state.age[0, 0]) == 60.0
+    points, a, c, z = _wind_points(origin, theta, [168.0, 177.0, 180.0, 186.0, 200.0],
+                                   [0.0, 4.0, -9.0], [1.0, 15.0, 25.0])
+    sigma = 0.5 + 0.2 * 60.0
+    # the slug spans x(57.5) - x(60) = -7.5 m to x(62.5) - x(60) = +7.5 m: ell = 15 m
+    lo, hi, ell = -7.5, 7.5, 15.0
+    u = a - 180.0
+    root2 = math.sqrt(2.0) * sigma
+    g_x = (torch.erf((u - lo) / root2) - torch.erf((u - hi) / root2)) / (2.0 * ell)
+    vertical = _gauss(z - 15.0, sigma) + _gauss(z + 15.0, sigma)
+    expected = 2.0 * g_x * _gauss(c, sigma) * vertical
+    th = torch.tensor([theta], dtype=DT)
+    got = concentration_at(field, state, tabs, points, th, 5.0)
+    assert got.shape == (1, points.shape[0])
+    torch.testing.assert_close(got[0], expected, rtol=1e-13, atol=0)
+    # ell -> 0: the plain Gaussian puff
+    tiny = concentration_at(field, state, tabs, points, th, 1e-4)
+    plain = 2.0 * _gauss(u, sigma) * _gauss(c, sigma) * vertical
+    torch.testing.assert_close(tiny[0], plain, rtol=1e-8, atol=0)
+
+
+def test_slug_without_along_wind_spread_is_a_top_hat():
+    tabs = _hand_tables([lambda j: 3.0])
+    field = PuffField.points(1, along_wind="none")
+    theta, origin = 1.1, (0.0, 0.0)
+    state = _one_release(field, tabs, mass=2.0, origin=origin, dt=5.0, steps=12, theta=theta)
+    # slug [172.5, 187.5) m from the origin
+    inside, _, _, _ = _wind_points(origin, theta, [172.6, 177.0, 180.0, 187.4], [2.0], [15.0])
+    outside, _, _, _ = _wind_points(origin, theta, [172.4, 187.6, 210.0, 100.0], [2.0], [15.0])
+    th = torch.tensor([theta], dtype=DT)
+    sigma = torch.tensor(12.5, dtype=DT)
+    level = 2.0 / 15.0 * _gauss(torch.tensor(2.0, dtype=DT), sigma) * (
+        _gauss(torch.tensor(0.0, dtype=DT), sigma) + _gauss(torch.tensor(30.0, dtype=DT), sigma))
+    torch.testing.assert_close(concentration_at(field, state, tabs, inside, th, 5.0)[0],
+                               level.expand(4), rtol=1e-13, atol=0)
+    assert torch.equal(concentration_at(field, state, tabs, outside, th, 5.0),
+                       torch.zeros(1, 4, dtype=DT))
+    # beyond cutoff_sigma crosswind standard deviations the puff is exactly zero
+    far, _, _, _ = _wind_points(origin, theta, [180.0], [4.0 * 12.5 + 0.01], [15.0])
+    assert float(concentration_at(field, state, tabs, far, th, 5.0)) == 0.0
+
+
+def _x_at(x, t):
+    """The distance `x` (nodes every 10 s) at ages `t`, independent of `at_age`."""
+    pos = t / 10.0
+    j = torch.clamp(torch.floor(pos).long(), 0, x.numel() - 2)
+    return x[j] + (x[j + 1] - x[j]) * (pos - j)
+
+
+@pytest.mark.parametrize("speed", [lambda j: 3.0, lambda j: 2.0 + 0.05 * j],
+                         ids=["constant", "growing"])
+@pytest.mark.parametrize("dt", [2.0, 5.0, 10.0])
+def test_continuous_source_tiles_to_one_over_u(dt, speed):
+    tabs = _hand_tables([speed])
+    field = PuffField.points(1, along_wind="none")
+    theta = 0.7
+    th = torch.tensor([theta], dtype=DT)
+    state = PuffState.empty((1,), 80)
+    for _ in range(60):  # unit rate: mass dt per step
+        state, _ = emit(field, state, torch.tensor([[dt]], dtype=DT),
+                        torch.zeros(1, dtype=_LONG), torch.zeros(1, 1, 2, dtype=DT))
+        state = advance(state, tabs, dt, th)
+    # receptors at ages (k + f) dt along the axis: the slug of the puff of age k dt covers
+    # them (a slug spans [x(a - dt/2), x(a + dt/2)])
+    ks = torch.arange(2, 58, dtype=DT)
+    fs = torch.tensor([-0.4, -0.1, 0.2, 0.45], dtype=DT)
+    age_c = (ks[:, None] * dt).expand(-1, 4).reshape(-1)
+    x_tab = tabs.x[0, 0]
+    x_r = _x_at(x_tab, ((ks[:, None] + fs[None]) * dt).reshape(-1))
+    e = torch.tensor([math.cos(theta), math.sin(theta)], dtype=DT)
+    z = 3.0
+    points = torch.cat([x_r[:, None] * e, torch.full((x_r.numel(), 1), z, dtype=DT)], dim=1)
+    got = concentration_at(field, state, tabs, points, th, dt)[0]
+    sigma = 0.5 + 0.2 * age_c
+    zz = torch.full_like(sigma, z)
+    profile = _gauss(torch.zeros_like(sigma), sigma) * (
+        _gauss(zz - 15.0, sigma) + _gauss(zz + 15.0, sigma))
+    ell = _x_at(x_tab, age_c + dt / 2) - _x_at(x_tab, age_c - dt / 2)
+    torch.testing.assert_close(got, profile * dt / ell, rtol=1e-12, atol=0)
+    # where the covering slug lies within one table segment, dt / ell is exactly 1/u there
+    seg_lo = torch.floor((age_c - dt / 2) / 10.0)
+    seg_hi = torch.ceil((age_c + dt / 2) / 10.0)
+    within = seg_hi - seg_lo == 1
+    u_seg = tabs.u[0, 0][seg_hi.long()]
+    if dt < 10.0:
+        assert bool(within.any())
+        torch.testing.assert_close(got[within], (profile / u_seg)[within], rtol=1e-12, atol=0)
+    if speed(1) == speed(7):
+        torch.testing.assert_close(got, profile / 3.0, rtol=1e-12, atol=0)
+
+
+def test_receptor_owner_excludes_own_puffs():
+    tabs = _hand_tables([lambda j: 3.0], h_canopy=2.0)
+    field = PuffField.points(2)
+    state = PuffState.empty((1,), 4)
+    state, _ = emit(field, state, torch.tensor([[1.0, 3.0]], dtype=DT),
+                    torch.zeros(2, dtype=_LONG),
+                    torch.tensor([[[0.0, 0.0], [5.0, 0.0]]], dtype=DT))
+    th = torch.tensor([0.0], dtype=DT)
+    for _ in range(6):
+        state = advance(state, tabs, 5.0, th)
+    xy = torch.tensor([[95.0, 1.0]] * 3, dtype=DT)
+    owner = torch.tensor([0, 1, -1], dtype=_LONG)
+    rc = roof_concentration(field, state, tabs, xy, th, 5.0, receptor_owner=owner)[0]
+    free = concentration_at(field, state, tabs, torch.cat(
+        [xy, torch.full((3, 1), 2.0, dtype=DT)], dim=1), th, 5.0)[0]
+    assert float(rc[0]) > 0 and float(rc[1]) > 0
+    torch.testing.assert_close(rc[0] + rc[1], rc[2], rtol=1e-14, atol=0)
+    torch.testing.assert_close(rc[2], free[2], rtol=1e-14, atol=0)  # no clamp on points
+    assert torch.equal(roof_concentration(field, state, tabs, xy, th, 5.0,
+                                          receptor_owner=None)[0], rc[2].expand(3))
+
+
+def test_street_puffs_skip_their_own_street_and_reach_downwind_ones():
+    net, names = twelve_street_grid()
+    theta = math.pi / 2 - 0.2  # toward north, slightly east
+    th = torch.tensor([theta], dtype=DT)
+    field = PuffField.for_network(net, theta_w=th)
+    n_s, n_j = len(net.streets), len(net.junctions)
+    assert field.n_sources == n_s + n_j
+    assert field.source_xy0.shape == (n_s + n_j, 2)
+    assert torch.equal(field.source_xy0[:n_s], street_midpoints(net))
+    assert field.width.shape == (1, field.xy.shape[0])
+    tabs = puff_tables(centres=torch.tensor([10.0], dtype=DT), **_PUFF_MET)
+    emitter = names.index("11")              # E11 (0,-100) -> C (0,0)
+    masses = torch.zeros(1, n_s + n_j, dtype=DT)
+    masses[0, emitter] = 1.0
+    state, _ = emit(field, PuffState.empty((1,), 16), masses,
+                    torch.zeros(n_s + n_j, dtype=_LONG))
+    for _ in range(3):
+        state = advance(state, tabs, 5.0, th)
+    mids = street_midpoints(net)
+    own = torch.arange(n_s, dtype=_LONG)
+    with_own = roof_concentration(field, state, tabs, mids, th, 5.0, receptor_owner=None)[0]
+    without = roof_concentration(field, state, tabs, mids, th, 5.0, receptor_owner=own)[0]
+    assert float(with_own[emitter]) > 0 and float(without[emitter]) == 0.0
+    others = torch.ones(n_s, dtype=torch.bool)
+    others[emitter] = False
+    assert torch.equal(with_own[others], without[others])
+    assert float(without[names.index("6")]) > 0           # C -> A, downwind
+
+
+def test_advance_follows_the_wind_direction():
+    tabs = _hand_tables([lambda j: 3.0, lambda j: 1.0 + 0.1 * j])
+    field = PuffField.points(1)
+    theta = torch.tensor([0.3, 2.0], dtype=DT)
+    state = PuffState.empty((2,), 3)
+    state, _ = emit(field, state, torch.tensor([[1.0], [2.0]], dtype=DT),
+                    torch.zeros(1, dtype=_LONG), torch.zeros(2, 1, 2, dtype=DT))
+    for _ in range(7):  # 3 s steps cross the 10 s nodes
+        state = advance(state, tabs, 3.0, theta)
+    assert torch.equal(state.age[:, 0], torch.full((2,), 21.0, dtype=DT))
+    x = torch.stack([_x_at(tabs.x[0, b], torch.tensor(21.0, dtype=DT)) for b in range(2)])
+    expected = x[:, None] * torch.stack([torch.cos(theta), torch.sin(theta)], dim=-1)
+    torch.testing.assert_close(state.disp[:, 0], expected, rtol=1e-13, atol=1e-13)
+    # free slots do not move
+    assert torch.equal(state.disp[:, 1:], torch.zeros(2, 2, 2, dtype=DT))
+    assert torch.equal(state.age[:, 1:], torch.zeros(2, 2, dtype=DT))
+
+
+def test_state_round_trips_through_state_keys():
+    state = PuffState.empty((2,), 5)
+    keys = state.to_state()
+    assert "puff.mass" in keys and keys["puff.disp"].shape == (2, 5, 2)
+    assert keys["puff.live"].dtype == torch.bool and keys["puff.source"].dtype == _LONG
+    assert keys["puff.mass_out"].shape == (2,) and keys["puff.mass"].dtype == DT
+    back = PuffState.from_state(keys)
+    assert all(torch.equal(getattr(back, k.split(".", 1)[1]), v) for k, v in keys.items())
+    with pytest.raises(KeyError, match="puff.age"):
+        PuffState.from_state({k: v for k, v in keys.items() if k != "puff.age"})
+    assert set(state.to_state("cloud")) == {k.replace("puff.", "cloud.") for k in keys}
+
+
+def test_emit_writes_free_slots_counts_mass_and_refuses_overflow():
+    field = PuffField.points(3)
+    state = PuffState.empty((2,), 3)
+    masses = torch.tensor([[1.0, 0.0, 2.0], [0.0, 0.0, 4.0]], dtype=DT)
+    xy = torch.tensor([[[1.0, 2.0]] * 3, [[3.0, 4.0]] * 3], dtype=DT)
+    state, dropped = emit(field, state, masses, torch.tensor([0, 1, 2], dtype=_LONG), xy)
+    assert torch.equal(dropped, torch.zeros(2, dtype=_LONG))
+    assert state.live.sum(1).tolist() == [2, 1]
+    assert state.source[0, :2].tolist() == [0, 2] and state.table[0, :2].tolist() == [0, 2]
+    assert torch.equal(state.disp[1, 0], torch.tensor([3.0, 4.0], dtype=DT))
+    assert torch.equal(state.mass_emitted, torch.tensor([3.0, 4.0], dtype=DT))
+    state, _ = emit(field, state, torch.tensor([[0.0, 0.0, 1.0], [1.0, 0.0, 0.0]], dtype=DT),
+                    torch.zeros(3, dtype=_LONG), xy)
+    assert state.live.sum(1).tolist() == [3, 2]
+    with pytest.raises(ValueError, match="capacity"):
+        emit(field, state, torch.tensor([[1.0, 0.0, 0.0]] * 2, dtype=DT),
+             torch.zeros(3, dtype=_LONG), xy)
+    with pytest.raises(ValueError, match="release_xy"):
+        emit(field, PuffState.empty((2,), 3), masses, torch.zeros(3, dtype=_LONG), None)
+
+
+def test_along_wind_option_is_checked_by_name():
+    with pytest.raises(ValueError, match="along_wind"):
+        PuffField.points(1, along_wind="gaussian")
+
+
+def test_gradient_reaches_mass_and_release_position():
+    tabs = _hand_tables([lambda j: 3.0])
+    field = PuffField.points(1)
+    mass = torch.tensor([[2.0]], dtype=DT, requires_grad=True)
+    origin = torch.tensor([[[30.0, -20.0]]], dtype=DT, requires_grad=True)
+    state, _ = emit(field, PuffState.empty((1,), 2), mass, torch.zeros(1, dtype=_LONG), origin)
+    th = torch.tensor([0.4], dtype=DT)
+    for _ in range(4):
+        state = advance(state, tabs, 5.0, th)
+    points = torch.tensor([[85.0, 5.0, 10.0]], dtype=DT)
+    c = concentration_at(field, state, tabs, points, th, 5.0).sum()
+    g_m, g_xy = torch.autograd.grad(c, (mass, origin))
+    torch.testing.assert_close(g_m, (c / 2.0).detach().reshape(1, 1), rtol=1e-14, atol=0)
+    assert bool(torch.isfinite(g_xy).all()) and float(g_xy.abs().sum()) > 0
