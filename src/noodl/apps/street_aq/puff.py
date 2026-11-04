@@ -21,11 +21,12 @@ from __future__ import annotations
 
 import math
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 
 import torch
 from torch import Tensor
 
+from noodl.apps.street_aq.above_roof import roof_fluxes, roof_wiring
 from noodl.apps.street_aq.canyon import KAPPA
 from noodl.apps.street_aq.closures import SIGMA_V_MIN, SIGMA_W_MIN
 from noodl.apps.street_aq.network import StreetNetwork
@@ -35,6 +36,7 @@ from noodl.apps.street_aq.plume import (
     DEFAULT_TEMPERATURE_K,
     DOWNWIND_CUTOFF_M,
     GAUSS_CUTOFF_SIGMAS,
+    PLUME_CENTRE_C_M,
     PLUME_CENTRE_K,
     TIME_STEP_S,
     _f64,
@@ -700,11 +702,6 @@ def concentration_at(field: PuffField, state: PuffState, tables: PuffTables,
                      "concentration_at")
 
 
-__all__ = ["ALONG_WIND", "PuffField", "PuffState", "PuffTables", "advance",
-           "concentration_at", "emit", "housekeep", "puff_mass", "puff_tables",
-           "roof_concentration"]
-
-
 def pulse_mass(t: float, dt: float, start: Tensor, duration: Tensor, rate: Tensor) -> Tensor:
     """Mass (kg) of a top-hat release inside the step `[t, t + dt]`.
 
@@ -791,3 +788,396 @@ class PulseSource:
                 f"{self.n_nodes}) or (..., {self.n_nodes}, 1)"
             )
         return {key: base + full}
+
+
+JUNCTION_SOURCES = ("upward", "net")
+"""The junction source options of `PuffClosure` (as `street_steady_with_plume`'s)."""
+
+_RELEASE_KEYS = ("puff.release_xy", "puff.release_z", "puff.release_rate",
+                 "puff.release_start", "puff.release_duration")
+_CARRIED = ("puff.q", "puff.c_ext", "puff.time")
+
+
+@dataclass(frozen=True)
+class PuffOptions:
+    """The puff model of `build_model(..., puffs=PuffOptions(...))` (design Sect. 4-5).
+
+    `h_canopy`, `z0`, `d` (m) are the tables' canopy height `H_R`, roughness and
+    displacement; `sigma_theta` (rad) the wind-direction spread, `None` for the
+    `"sigma_theta"` driver. `junction_source` is one of `JUNCTION_SOURCES`; `along_wind` one
+    of `ALONG_WIND`; `capacity` the puff slots per batch instance; `drop_below` the faint
+    threshold of `housekeep`; `cutoff_sigma` the profiles' cut-off; `x_max` (m) the extent
+    of the tables (a puff beyond it leaves the domain); `n_releases` the explicit
+    above-roof releases. `table_kwargs` go to `puff_tables` (the empirical inputs:
+    `theta_star`, `temperature`, `tau_y`, `tau_z`, `centre_k`, the floors); a `"centre_c"`
+    entry there is the centre of the canopy sources' table (default
+    `plume.PLUME_CENTRE_C_M`). `shear` (wind-shear stretching, design Sect. 4.7) is not
+    available yet and refused by name."""
+
+    h_canopy: float = 20.0
+    z0: float = 1.0
+    d: float = 13.0
+    sigma_theta: float | None = None
+    junction_source: str = "upward"
+    along_wind: str = "sigma_y"
+    capacity: int = 4096
+    drop_below: float = 1e-6
+    shear: bool = False
+    cutoff_sigma: float = GAUSS_CUTOFF_SIGMAS
+    x_max: float = DOWNWIND_CUTOFF_M
+    n_releases: int = 0
+    table_kwargs: Mapping = field(default_factory=dict)
+
+
+class PuffClosure:
+    """The unsteady above-roof model as an integrating closure of the street model
+    (design Sect. 4.5): it writes `"<layer>.x_boundary"` = `C_ext` per street, the caller's
+    `"<layer>.x_boundary"` driver (`C_bg`, read afresh every step) plus the puffs at each
+    street midpoint at roof level (a street's own puffs excluded, as `street_kernel` does).
+
+    Each step, from the state at its start: (1) emit the puffs of the previous step, the
+    masses backward Euler moved over it: `roof_fluxes` of the stored flows `"puff.q"` and
+    boundary `"puff.c_ext"` with the state's `"<layer>.x"` and this step's `C_bg`, times the
+    stored step length (street roof fluxes; junction vertical fluxes `F_up`, or `F_up -
+    F_down` under `junction_source="net"`; under `"upward"` `F_down dt` is added to
+    `mass_drawn_down`), and each explicit release's `pulse_mass` over that step; (2)
+    `advance` every puff by `dt` on the current wind; (3) `housekeep`; (4) evaluate `C_ext`
+    and store this step's flows (`"<layer>.q"`, written by the flow closure, which must
+    run first), `C_ext` and `"puff.time"` = `(t, dt)` of this step (`t` is 0 when the step
+    has none). The puffs live in the state as `PuffState.to_state()` keys.
+
+    Drivers: `"u_star"`, `"theta_w"`, `"h_abl"` (required), `"lmo"` (optional, neutral
+    without it) and `"sigma_theta"` when `options.sigma_theta` is None, each one value per
+    instance (under `meteo="per_street"` with a trailing street axis, or junction axis for
+    `"sigma_theta"`, whose values must all be equal). With `n_releases = R`:
+    `"puff.release_xy"` `(B, R, 2)` (m), `"puff.release_z"` (m, the centre of release
+    `r`'s table `1 + r`), `"puff.release_rate"` (kg/s), `"puff.release_start"` and
+    `"puff.release_duration"` (s), each `(B, R)` (the batch dim optional), and
+    `Model.step(t=...)`. The batch is `()` or `(B,)`. Tables and source field are rebuilt
+    when one of their drivers is a different tensor, or has a different value, than at the
+    last build (a value-only cache would reuse an earlier run's graph).
+
+    A query (`ctx is None`) returns `C_ext` from the state's puffs without advancing.
+    `last` holds the latest step's `{"live": (B,) live puffs, "evicted": (B,) puffs evicted
+    for capacity, "rebuilt": whether the tables or the field were rebuilt}`.
+
+    The closure reads the flow wiring of the model it is bound to (`bind`, which
+    `build_model` calls) and refuses, at every step, a bound model whose coupling is not
+    ping-pong, which sub-steps the layer, steps it other than by backward Euler or carries a
+    reaction, and a removal on the layer (design Sect. 3: the mass account is written for
+    one backward-Euler step without sinks)."""
+
+    integrates = True
+
+    def __init__(self, net: StreetNetwork, options: PuffOptions, *, meteo: str = "uniform",
+                 layer_name: str = "street") -> None:
+        if options.junction_source not in JUNCTION_SOURCES:
+            raise ValueError(f"PuffOptions: junction_source must be one of "
+                             f"{JUNCTION_SOURCES}, got {options.junction_source!r}")
+        if options.along_wind not in ALONG_WIND:
+            raise ValueError(f"PuffOptions: along_wind must be one of {ALONG_WIND}, got "
+                             f"{options.along_wind!r}")
+        if options.shear:
+            raise NotImplementedError("PuffOptions: shear=True (wind-shear stretching) is not "
+                                      "available yet; pass shear=False")
+        if int(options.capacity) < 1:
+            raise ValueError(f"PuffOptions: capacity must be >= 1, got {options.capacity!r}")
+        if not 0.0 <= options.drop_below < 1.0:
+            raise ValueError(f"PuffOptions: drop_below must be in [0, 1), got "
+                             f"{options.drop_below!r}")
+        if int(options.n_releases) < 0:
+            raise ValueError(f"PuffOptions: n_releases must be >= 0, got "
+                             f"{options.n_releases!r}")
+        if meteo not in ("uniform", "per_street"):
+            raise ValueError(f"PuffClosure: meteo must be 'uniform' or 'per_street', got "
+                             f"{meteo!r}")
+        kwargs = dict(options.table_kwargs)
+        self.centre_c = float(kwargs.pop("centre_c", PLUME_CENTRE_C_M))
+        self.table_kwargs = kwargs
+        self.net, self.options, self.meteo, self.layer_name = net, options, meteo, layer_name
+        self.n_streets = len(net.streets)
+        self.n_releases = int(options.n_releases)
+        self.receptors = street_midpoints(net)
+        self.receptor_owner = torch.arange(self.n_streets)
+        self.state_keys = (*(f"puff.{n}" for n in _STATE_FIELDS), *_CARRIED)
+        self.model = None
+        self.wiring = None
+        self.tables: PuffTables | None = None
+        self.field: PuffField | None = None
+        self._table_key: tuple | None = None
+        self._field_key: tuple | None = None
+        self.last: dict = {}
+
+    def __repr__(self) -> str:
+        return (f"PuffClosure(layer_name={self.layer_name!r}, n_streets={self.n_streets}, "
+                f"n_releases={self.n_releases})")
+
+    def bind(self, model) -> None:
+        """Read the flow wiring of `model` (`above_roof.roof_wiring`), whose coupling,
+        substeps, scheme, reactions and removal every step then checks; `build_model` binds
+        the model it builds. A `Model` built by hand around this closure must bind it."""
+        wiring = roof_wiring(model, layer_name=self.layer_name)
+        if wiring.n_streets != self.n_streets:
+            raise ValueError(f"PuffClosure: the model has {wiring.n_streets} streets, the "
+                             f"network {self.n_streets}")
+        self.model, self.wiring = model, wiring
+
+    def initial_state(self) -> dict[str, Tensor]:
+        """The puff keys of a state before the first step: no puffs (one unbatched
+        instance, expanded to the drivers' batch on the first step), zero flows and
+        boundary, and no pending step (`"puff.time"` = `(0, 0)`)."""
+        self._require_bound()
+        n_q = sum(int(self.model.net.edge_index(kind).numel())
+                  for kind in self.model.transport[self.layer_name].flow_kinds)
+        return {**PuffState.empty((1,), self.options.capacity).to_state(),
+                "puff.q": torch.zeros(n_q, dtype=_DTYPE),
+                "puff.c_ext": torch.zeros(self.n_streets, dtype=_DTYPE),
+                "puff.time": torch.zeros(2, dtype=_DTYPE)}
+
+    # ---------------------------------------------------------------- checks
+    def _require_bound(self) -> None:
+        if self.model is None:
+            raise ValueError("PuffClosure: not bound to a model; call closure.bind(model)")
+
+    def _check_model(self, drivers) -> None:
+        self._require_bound()
+        model, name = self.model, self.layer_name
+        if model.coupling != "pingpong":
+            raise ValueError(
+                f"PuffClosure: the street model has coupling={model.coupling!r}; the puff "
+                f"emission is the mass of one backward-Euler step from the step-start state, "
+                f"which needs coupling='pingpong' (a two-way link in noodl.couple.union "
+                f"re-steps the whole street model and is unaffected)")
+        if model.substeps.get(name, 1) != 1:
+            raise ValueError(
+                f"PuffClosure: transport layer {name!r} takes substeps="
+                f"{model.substeps[name]}; the puff emission is the mass of one "
+                f"backward-Euler step, so give it no substeps")
+        if model.reactions:
+            raise ValueError("PuffClosure: the street model carries a reaction; the puff "
+                             "mass account has no chemistry, build it with chemistry=None")
+        layer = model.transport[name]
+        if f"{name}.removal" in drivers or layer.removal is not None:
+            raise ValueError(
+                f"PuffClosure: transport layer {name!r} has a removal (the driver "
+                f"{name + '.removal'!r} or the layer's own); the puff mass account has no "
+                f"deposition, drop it")
+        if layer.scheme != "implicit":
+            raise ValueError(f"PuffClosure: transport layer {name!r} has scheme="
+                             f"{layer.scheme!r}; the puff emission needs scheme='implicit'")
+
+    # ---------------------------------------------------------------- drivers
+    @staticmethod
+    def _instance(drivers, key: str, *, required: bool = True, axis: int = 0):
+        """`(raw, value)`: the driver as given and as one value per instance (a trailing
+        axis of length `axis`, when `axis`, checked uniform and dropped)."""
+        raw = drivers.get(key)
+        if raw is None:
+            if required:
+                hint = (" or pass PuffOptions(sigma_theta=...)" if key == "sigma_theta"
+                        else "")
+                raise KeyError(f"PuffClosure: the driver {key!r} is missing; the puff "
+                               f"tables need it{hint}")
+            return None, None
+        value = _f64(raw)
+        if axis:
+            if value.dim() == 0 or value.shape[-1] != axis:
+                raise ValueError(f"PuffClosure: under meteo='per_street' {key!r} needs a "
+                                 f"trailing axis of length {axis}, got {tuple(value.shape)}")
+            with torch.no_grad():
+                uniform = bool((value == value[..., :1]).all())
+            if not uniform:
+                raise ValueError(
+                    f"PuffClosure: {key!r} differs along its street (or junction) axis; the "
+                    f"puff tables take one meteorology per instance, so pass equal values "
+                    f"or build with meteo='uniform'")
+            value = value[..., 0]
+        return raw, value
+
+    def _drivers(self, drivers, need_releases: bool) -> tuple[dict, dict]:
+        per_street = self.meteo == "per_street"
+        n_s = self.n_streets if per_street else 0
+        n_j = self.wiring.n_junctions if per_street else 0
+        met = {key: self._instance(drivers, key, axis=n_s)
+               for key in ("u_star", "theta_w", "h_abl")}
+        met["lmo"] = self._instance(drivers, "lmo", required=False, axis=n_s)
+        if self.options.sigma_theta is None:
+            met["sigma_theta"] = self._instance(drivers, "sigma_theta", axis=n_j)
+        keys = _RELEASE_KEYS if need_releases else ("puff.release_z",)
+        rel = {}
+        for key in keys if self.n_releases else ():
+            if key not in drivers:
+                raise KeyError(f"PuffClosure: the driver {key!r} is missing; the model has "
+                               f"{self.n_releases} above-roof release(s)")
+            rel[key] = _f64(drivers[key])
+            trailing = ((self.n_releases, 2) if key == "puff.release_xy"
+                        else (self.n_releases,))
+            if tuple(rel[key].shape[rel[key].dim() - len(trailing):]) != trailing:
+                raise ValueError(f"PuffClosure: {key!r} must end in {trailing}, got "
+                                 f"{tuple(rel[key].shape)}")
+        return met, rel
+
+    # ---------------------------------------------------------------- caches
+    @staticmethod
+    def _same(key: tuple | None, raws: tuple) -> bool:
+        """Whether every input is the same object, with the same value, as at the build."""
+        if key is None:
+            return False
+        for (old, value), raw in zip(key, raws, strict=True):
+            if old is not raw:
+                return False
+            if isinstance(raw, Tensor) and not torch.equal(value, raw.detach()):
+                return False
+        return True
+
+    @staticmethod
+    def _key(raws: tuple) -> tuple:
+        return tuple((raw, raw.detach().clone() if isinstance(raw, Tensor) else raw)
+                     for raw in raws)
+
+    def _build(self, met: dict, rel: dict) -> bool:
+        """Rebuild the tables and the field when their inputs changed; whether any was."""
+        o = self.options
+        z_raw = rel.get("puff.release_z")
+        sigma = met.get("sigma_theta", (None, o.sigma_theta))
+        raws = (met["u_star"][0], met["h_abl"][0], met["lmo"][0], sigma[0], z_raw)
+        rebuilt = False
+        if not self._same(self._table_key, raws):
+            centres = torch.tensor([self.centre_c], dtype=_DTYPE)
+            if self.n_releases:
+                z = rel["puff.release_z"]
+                z = z.reshape(-1, self.n_releases) if z.dim() > 1 else z[None]
+                centres = torch.cat([centres[:, None].expand(1, z.shape[0]), z.T])
+            lmo = met["lmo"][1] if met["lmo"][1] is not None else math.inf
+            self.tables = puff_tables(
+                centres=centres, u_star=met["u_star"][1], h_abl=met["h_abl"][1], lmo=lmo,
+                h_canopy=o.h_canopy, z0=o.z0, d=o.d, sigma_theta=sigma[1], x_max=o.x_max,
+                **self.table_kwargs)
+            self._table_key = self._key(raws)
+            rebuilt = True
+        theta = (met["theta_w"][0],)
+        if not self._same(self._field_key, theta):
+            self.field = PuffField.for_network(
+                self.net, theta_w=met["theta_w"][1], n_releases=self.n_releases,
+                along_wind=o.along_wind, cutoff_sigma=o.cutoff_sigma)
+            self._field_key = self._key(theta)
+            rebuilt = True
+        return rebuilt
+
+    # ---------------------------------------------------------------- the step
+    @staticmethod
+    def _batch(shapes: list[tuple[int, ...]]) -> tuple[int, ...]:
+        try:
+            batch = tuple(torch.broadcast_shapes(*shapes))
+        except RuntimeError as exc:
+            raise ValueError(f"PuffClosure: the batch shapes of the state and drivers "
+                             f"{shapes} do not broadcast") from exc
+        if len(batch) > 1:
+            raise ValueError(f"PuffClosure: the batch must be () or (B,), got {batch}; "
+                             f"flatten a multi-dimensional batch to (B,)")
+        return batch
+
+    @staticmethod
+    def _puffs(state, n_batch: int) -> PuffState:
+        """The state's puffs with `n_batch` instances: an unbatched seed with nothing live
+        is expanded (design ruling: one leading batch dim)."""
+        puff = PuffState.from_state(state)
+        have = puff.mass.shape[0]
+        if have == n_batch:
+            return puff
+        if have != 1:
+            raise ValueError(f"PuffClosure: the state's puffs have batch {have}, the drivers "
+                             f"{n_batch}")
+        if bool(puff.live.any()):
+            raise ValueError(f"PuffClosure: the state's puffs are unbatched and some are "
+                             f"live, but the drivers have batch {n_batch}; start a batched "
+                             f"run from initial_state")
+        return PuffState(**{n: getattr(puff, n).expand(n_batch, *getattr(puff, n).shape[1:])
+                            .clone() for n in _STATE_FIELDS})
+
+    def __call__(self, state, drivers, ctx=None):
+        name = self.layer_name
+        xb_key, q_key = f"{name}.x_boundary", f"{name}.q"
+        if ctx is None:
+            self._require_bound()
+        else:
+            self._check_model(drivers)
+        if xb_key not in drivers:
+            raise KeyError(f"PuffClosure: the driver {xb_key!r} (the background C_bg, one "
+                           f"per street) is missing")
+        c_bg = _f64(drivers[xb_key])
+        if c_bg.dim() == 0 or c_bg.shape[-1] != self.n_streets:
+            raise ValueError(f"PuffClosure: {xb_key!r} must be (..., {self.n_streets}), one "
+                             f"background per street, got {tuple(c_bg.shape)}")
+        met, rel = self._drivers(drivers, need_releases=ctx is not None)
+        x = _f64(state[f"{name}.x"])
+        shapes = [tuple(c_bg.shape[:-1]), tuple(x.shape[:-1])]
+        shapes += [tuple(v.shape) for _, v in met.values() if v is not None]
+        shapes += [tuple(v.shape[:v.dim() - (2 if k == "puff.release_xy" else 1)])
+                   for k, v in rel.items()]
+        batch = self._batch(shapes)
+        stored = state["puff.mass"].shape[0]
+        if not batch and stored > 1:
+            batch = (stored,)
+        n_batch = batch[0] if batch else 1
+        puff = self._puffs(state, n_batch)
+        rebuilt = self._build(met, rel)
+        theta = met["theta_w"][1]
+
+        def per_instance(t: Tensor, tail: tuple[int, ...]) -> Tensor:
+            return t.expand((*batch, *tail)).reshape(n_batch, *tail)
+
+        def c_ext_of(puff: PuffState, dt: float) -> Tensor:
+            c = roof_concentration(self.field, puff, self.tables, self.receptors, theta, dt,
+                                   receptor_owner=self.receptor_owner)
+            return c_bg + (c if batch else c[0])
+
+        if ctx is None:
+            dt_prev = float(state["puff.time"][1])
+            if dt_prev <= 0 or not bool(puff.live.any()):
+                return {xb_key: c_bg.expand((*batch, self.n_streets))}
+            return {xb_key: c_ext_of(puff, dt_prev)}
+        if self.n_releases and ctx.t is None:
+            raise ValueError("PuffClosure: the releases need the step time; call "
+                             "Model.step(t=...)")
+        if q_key not in drivers:
+            raise KeyError(f"PuffClosure: the driver {q_key!r} is missing; the flow closure "
+                           f"must run before the puff closure")
+        dt = float(ctx.dt)
+        t_prev, dt_prev = (float(v) for v in state["puff.time"])
+        # (1) the previous step's fluxes, the masses backward Euler moved over it
+        f_s, up, down = roof_fluxes(self.wiring, _f64(state["puff.q"]), x.unsqueeze(-1),
+                                    _f64(state["puff.c_ext"]).unsqueeze(-1),
+                                    c_bg.unsqueeze(-1))
+        upward = self.options.junction_source == "upward"
+        junction = up if upward else up - down
+        n_j = self.wiring.n_junctions
+        parts = [per_instance(f_s[..., 0] * dt_prev, (self.n_streets,)),
+                 per_instance(junction[..., 0] * dt_prev, (n_j,))]
+        release_xy = None
+        if self.n_releases:
+            r = self.n_releases
+            parts.append(per_instance(
+                pulse_mass(t_prev, dt_prev, rel["puff.release_start"],
+                           rel["puff.release_duration"], rel["puff.release_rate"]), (r,)))
+            release_xy = per_instance(rel["puff.release_xy"], (r, 2))
+        table_index = torch.cat([torch.zeros(self.n_streets + n_j, dtype=torch.long),
+                                 1 + torch.arange(self.n_releases)])
+        puff, evicted = emit(self.field, puff, torch.cat(parts, dim=1), table_index,
+                             release_xy, tables=self.tables)
+        if upward:
+            drawn = per_instance(down[..., 0].sum(-1) * dt_prev, ())
+            puff = replace(puff, mass_drawn_down=puff.mass_drawn_down + drawn)
+        # (2) advance, (3) housekeep, (4) evaluate
+        puff = advance(puff, self.tables, dt, theta)
+        puff = housekeep(self.field, puff, self.tables, drop_below=self.options.drop_below)
+        c_ext = c_ext_of(puff, dt)
+        self.last = {"live": puff.live.sum(1), "evicted": evicted, "rebuilt": rebuilt}
+        t_now = 0.0 if ctx.t is None else float(ctx.t)
+        return {xb_key: c_ext, **puff.to_state(), "puff.q": drivers[q_key],
+                "puff.c_ext": c_ext, "puff.time": torch.tensor([t_now, dt], dtype=_DTYPE)}
+
+
+__all__ = ["ALONG_WIND", "JUNCTION_SOURCES", "PuffClosure", "PuffField", "PuffOptions",
+           "PuffState", "PuffTables", "PulseSource", "advance", "concentration_at", "emit",
+           "housekeep", "puff_mass", "puff_tables", "pulse_mass", "roof_concentration"]

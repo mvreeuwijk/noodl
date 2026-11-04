@@ -12,6 +12,7 @@ from __future__ import annotations
 import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
 import torch
 
@@ -25,6 +26,9 @@ from noodl.model import Drivers, Model, State
 from noodl.refs import initial_drivers as refs_initial_drivers
 from noodl.refs import state_from
 from noodl.topology import Network
+
+if TYPE_CHECKING:
+    from noodl.apps.street_aq.puff import PuffOptions
 
 _DTYPE = torch.float64
 """EVERY tensor this application builds is float64: `torch.get_default_dtype()` is float32
@@ -327,6 +331,7 @@ def build_model(
     background: str = "uniform",
     atmosphere: str = "atmosphere",
     layer_name: str = "street",
+    puffs: PuffOptions | None = None,
 ) -> tuple[Model, State, Drivers]:
     """`(Model, initial state, driver template)` for one street network.
 
@@ -379,7 +384,26 @@ def build_model(
     (`ComputeInflowRateExtended`) that the atmosphere's contribution to a street is that
     street's OWN background, carried in by that street's own vent and exchange flows, never
     a network-wide value shared across streets.
+
+    `puffs=PuffOptions(...)` adds the unsteady above-roof puff model
+    (`noodl.apps.street_aq.puff.PuffClosure`, appended after the flow closure): it writes
+    every street's `"<layer>.x_boundary"` as the caller's background plus the puffs of the
+    roof and junction fluxes of the earlier steps, and carries the puffs in the state
+    (the returned state and `initial_state` seed them). It needs `background="per_street"`,
+    `scheme="implicit"`, one species and no chemistry, and refuses anything else by name.
+    `None` (the default) builds the model without it.
     """
+    if puffs is not None:
+        wrong = [(background != "per_street", "background='per_street'", background),
+                 (scheme != "implicit", "scheme='implicit'", scheme),
+                 (len(tuple(species)) != 1, "one species", tuple(species)),
+                 (chemistry is not None, "chemistry=None", chemistry)]
+        for bad, needed, got in wrong:
+            if bad:
+                raise ValueError(
+                    f"build_model: puffs= needs {needed}, got {got!r}; the puff mass "
+                    f"account is written for one backward-Euler step of one species per "
+                    f"street with its own background, without chemistry")
     if meteo not in ("uniform", "per_street"):
         raise ValueError(
             f"build_model: meteo must be 'uniform' or 'per_street', got {meteo!r}"
@@ -464,13 +488,21 @@ def build_model(
         meteo=meteo, layer_name=layer_name, **options,
     )
     reactions = [(layer_name, chemistry)] if chemistry is not None else []
-    model = Model(graph, {layer_name: layer}, closures=[closure], reactions=reactions)
+    closures = [closure]
+    if puffs is not None:
+        from noodl.apps.street_aq.puff import PuffClosure
+
+        closures.append(PuffClosure(net, puffs, meteo=meteo, layer_name=layer_name))
+    model = Model(graph, {layer_name: layer}, closures=closures, reactions=reactions)
+    if puffs is not None:
+        closures[-1].bind(model)
     n_streets = len(net.streets)
     state: State = {
         f"{layer_name}.x": torch.zeros(
             (n_streets,) if n_species == 1 else (n_streets, n_species), dtype=_DTYPE
         )
     }
+    state.update(_puff_state(model))
     n_b = len(boundary)
     drivers: Drivers = {
         f"{layer_name}.x_boundary": torch.zeros(
@@ -499,8 +531,20 @@ def initial_state(model: Model, *, values: Mapping | None = None) -> State:
             )
         shape = (layer.n_i,) if layer.n_species == 1 else (layer.n_i, layer.n_species)
         state[f"{name}.x"] = torch.zeros(shape, dtype=_DTYPE)
+    state.update(_puff_state(model))
     if values:
         state = state_from(model, values, base=state)
+    return state
+
+
+def _puff_state(model: Model) -> State:
+    """The empty puff keys of every `PuffClosure` of `model` (none without one)."""
+    from noodl.apps.street_aq.puff import PuffClosure
+
+    state: State = {}
+    for closure in model.closures:
+        if isinstance(closure, PuffClosure):
+            state.update(closure.initial_state())
     return state
 
 

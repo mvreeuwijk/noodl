@@ -82,6 +82,24 @@ from noodl.apps.street_aq.plume import (
     source_points,
     street_kernel,
 )
+from noodl.apps.street_aq.puff import (
+    ALONG_WIND,
+    JUNCTION_SOURCES,
+    PuffClosure,
+    PuffField,
+    PuffOptions,
+    PuffState,
+    PuffTables,
+    PulseSource,
+    advance,
+    concentration_at,
+    emit,
+    housekeep,
+    puff_mass,
+    puff_tables,
+    pulse_mass,
+    roof_concentration,
+)
 from noodl.apps.street_aq.report import (
     from_ug_m3,
     to_ug_m3,
@@ -102,6 +120,22 @@ from noodl.apps.street_aq.routing import (
 )
 
 __all__ = [
+    "ALONG_WIND",
+    "JUNCTION_SOURCES",
+    "PuffClosure",
+    "PuffField",
+    "PuffOptions",
+    "PuffState",
+    "PuffTables",
+    "PulseSource",
+    "advance",
+    "concentration_at",
+    "emit",
+    "housekeep",
+    "puff_mass",
+    "puff_tables",
+    "pulse_mass",
+    "roof_concentration",
     "ASPECT_RATIO_EXCHANGE_BETA",
     "EULER_GAMMA_TRUNCATED",
     "EXCHANGE_SIGMA_W_RATIO",

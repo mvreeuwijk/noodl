@@ -699,6 +699,18 @@ def test_pulse_outside_window_is_zero_with_finite_grad():
         assert all(torch.isfinite(g).all() and g.item() == 0.0 for g in grads)
 
 
+def test_zero_duration_pulse_is_zero_with_finite_grad():
+    for t in (0.0, 10.0, 20.0):
+        start = _t(15.0).requires_grad_(True)
+        duration = _t(0.0).requires_grad_(True)
+        rate = _t(2.0).requires_grad_(True)
+        m = pulse_mass(t, 10.0, start, duration, rate)
+        assert m.item() == 0.0
+        grads = torch.autograd.grad(m.sum(), (start, duration, rate))
+        assert all(bool(torch.isfinite(g).all()) for g in grads)
+        assert grads[0].item() == 0.0 and grads[2].item() == 0.0
+
+
 def test_pulse_source_adds_to_existing_sources_and_refuses_missing_t():
     from noodl.apps.street_aq.network import build_model
     from noodl.apps.street_aq.puff import PulseSource
