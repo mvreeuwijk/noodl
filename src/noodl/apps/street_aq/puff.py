@@ -6,16 +6,17 @@ returns the kernel's `u`, `sigma_y` and roof-level `p_z` with the scan's `sigma_
 centre height `z_c` resampled the same way, one table per release class (the centre law
 `z_c = max(H_R, d + E|N(c - d, (k sigma_z)^2)|)` takes its own `c`, so an above-roof
 release at height `z_s` has its own table). A puff's age maps to its distance by the exact
-travel time of the grid's piecewise-linear speed `u(x)` (`PuffTables.at_age`), so the slugs
-of a continuous source tile the axis at density `1/u(x)` and their steady limit is the
-kernel itself (design Sect. 4.4, amended).
+travel time of the grid's piecewise-linear speed `u(x)` (`PuffTables.at_age`).
 
 The puffs themselves (design Sect. 4.3-4.6): a `PuffField` holds the sources' geometry
 (streets as `plume.source_points`, junctions as `plume.junction_sources`, explicit
 releases as points), a `PuffState` the puffs in fixed `(B, K)` slots, and `emit`,
 `advance`, `roof_concentration` and `concentration_at` are pure functions of them. A puff
 of age `a` is a slug along the wind spanning `[x(a - dt/2), x(a + dt/2)]` from its source,
-so the puffs of a continuous source tile the axis exactly for any step `dt`.
+so the puffs of a continuous source tile the axis exactly for any step `dt`. A receptor
+reads the table at its own distance from the source; with `along_wind="none"` the slug is
+a segment of the steady plume (density `m / (dt u(x))`, not a uniform top-hat), so the
+steady limit of a continuous source is the steady kernel itself for any `dt`.
 """
 
 from __future__ import annotations
@@ -148,6 +149,23 @@ class PuffTables:
             v = col.reshape(-1)
             out.append(v[lo] + (v[hi] - v[lo]) * frac)
         return out[0], out[1], out[2], out[3], out[4], out[5]
+
+    def at_distance(self, x: Tensor, table: Tensor, row: Tensor
+                    ) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
+        """`(u, sigma_y, sigma_z, z_c, p_z)` at distance `x` (m) from table `table` and
+        meteorology row `row` (broadcasting as in `at_age`), linear between grid points;
+        a distance outside the grid reads its end values."""
+        n_tab, n_b, n = self.u.shape
+        x, base = torch.broadcast_tensors(_f64(x), (table * n_b + row) * n)
+        pos = torch.clamp(x / self.step, 0.0, float(n - 1))
+        i0 = torch.clamp(torch.floor(pos.detach()).long(), 0, n - 2)
+        frac = pos - i0
+        lo = base + i0
+        out = []
+        for col in (self.u, self.sigma_y, self.sigma_z, self.z_c, self.p_z):
+            v = col.reshape(-1)
+            out.append(v[lo] + (v[lo + 1] - v[lo]) * frac)
+        return out[0], out[1], out[2], out[3], out[4]
 
 
 def puff_tables(
@@ -297,9 +315,10 @@ class PuffField:
     sub-source sits at the origin so that its emission position is its displacement.
 
     `along_wind` (one of `ALONG_WIND`) is the along-wind profile: `"sigma_y"` (the default)
-    a slug convolved with a Gaussian of `sigma_x = sigma_y(a)`, `"none"` the slug alone
-    (design Sect. 4.3). `cutoff_sigma` is the cut-off in standard deviations beyond the
-    flat top (crosswind) and beyond the slug ends (along the wind)."""
+    a uniform slug convolved with a Gaussian of `sigma_x = sigma_y(x(a))`, `"none"` the slug
+    alone as a segment of the steady plume (design Sect. 4.3; `_evaluate`). `cutoff_sigma`
+    is the cut-off in standard deviations beyond the flat top (crosswind) and beyond the
+    slug ends (along the wind)."""
 
     def __init__(self, *, xy: Tensor, owner: Tensor, weight: Tensor, width: Tensor,
                  clamp: Tensor, source_xy0: Tensor, n_streets: int, n_junctions: int,
@@ -580,10 +599,18 @@ def _evaluate(field: PuffField, state: PuffState, tables: PuffTables, rec_xy: Te
     source's displaced bounding box grown by the slug ends, `cutoff_sigma` spreads and its
     widest flat top, then the surviving pairs expanded to the source's sub-sources and cut
     exactly. Masks are detached; the kept values carry the graph. A puff of age 0 (not yet
-    advanced: no spread) or whose slug has zero length (beyond the table's last node)
-    contributes nothing. At roof level the vertical profile is the table's `p_z` at the
-    puff's distance `x(a)`; at a receptor height it is `vertical_profile` of `sigma_z` and
-    `z_c` read there."""
+    advanced) or whose slug has zero length contributes nothing.
+
+    A receptor at along-wind offset `s` from the puff reads the table at its OWN distance
+    from the source, `x(a) + s` (design Sect. 4.3, amended): `sigma_y` (crosswind profile
+    and cut-off), and at roof level `min(p_z, clamp)`, at a receptor height
+    `vertical_profile` of `sigma_z` and `z_c`. Under `"none"` the slug is a segment of the
+    steady plume: it spans the distances travelled in the ages `[a - dt/2, a + dt/2]`
+    (clamped at 0), a time `tau`, and its along-wind density is `m / (tau u(x(a) + s))`,
+    which integrates to `m` over the slug because `int dx / u = tau`; the steady limit of
+    a continuous source is then the steady kernel itself. Under `"sigma_y"` the read is
+    at `x(a) + s` clamped to the slug's ends, and the along-wind factor is the slug
+    convolved with a Gaussian of `sigma_x = sigma_y(x(a))` (density `m / ell`)."""
     if not dt > 0:
         raise ValueError(f"{where}: dt must be positive, got {dt!r}")
     n_batch, capacity = state.mass.shape
@@ -591,9 +618,11 @@ def _evaluate(field: PuffField, state: PuffState, tables: PuffTables, rec_xy: Te
     row = _table_rows(tables, n_batch, where)
     rk = row[:, None]
     age = state.age
-    x_a, _, s_y, s_z, z_c, p_z_roof = tables.at_age(age, state.table, rk)
-    e_lo = tables.at_age(torch.clamp(age - dt / 2.0, min=0.0), state.table, rk)[0] - x_a
+    x_a, _, s_y, _, _, _ = tables.at_age(age, state.table, rk)
+    a_lo = torch.clamp(age - dt / 2.0, min=0.0)
+    e_lo = tables.at_age(a_lo, state.table, rk)[0] - x_a
     e_hi = tables.at_age(age + dt / 2.0, state.table, rk)[0] - x_a
+    tau = age + dt / 2.0 - a_lo
     slug = field.along_wind == "sigma_y"
     cut = field.cutoff_sigma
     width, clamp = _field_rows(field, n_batch, where)
@@ -601,8 +630,16 @@ def _evaluate(field: PuffField, state: PuffState, tables: PuffTables, rec_xy: Te
     src = state.source
     with torch.no_grad():
         active = state.live & (state.mass != 0) & (age > 0) & (e_hi > e_lo)
+        # the receptors read sigma_y anywhere up to the slug's far end: bound it by the
+        # running maximum of the table's sigma_y there
+        n_b = tables.u.shape[1]
+        sy_max = torch.cummax(tables.sigma_y.detach(), dim=-1).values.reshape(-1)
+        n_grid = tables.u.shape[-1]
+        far = torch.clamp(torch.ceil((x_a + e_hi).detach() / tables.step).long(), 0,
+                          n_grid - 1)
+        s_y_far = sy_max[(state.table * n_b + rk) * n_grid + far]
         reach = (torch.maximum(-e_lo, e_hi) + (cut * s_y if slug else 0.0)
-                 + field._half_width.expand(n_batch, -1).gather(1, src) + cut * s_y)
+                 + field._half_width.expand(n_batch, -1).gather(1, src) + cut * s_y_far)
         reach = torch.where(active, reach, torch.zeros_like(reach))
         box_lo = field._box_lo[src] + state.disp - reach[..., None]
         box_hi = field._box_hi[src] + state.disp + reach[..., None]
@@ -634,26 +671,32 @@ def _evaluate(field: PuffField, state: PuffState, tables: PuffTables, rec_xy: Te
         d = rec_xy[a_:b_][i] - (field.xy[p] + state.disp[b, k])
         x = d[:, 0] * cos[b] + d[:, 1] * sin[b]
         y = d[:, 1] * cos[b] - d[:, 0] * sin[b]
-        sy, lo, hi, w = s_y[b, k], e_lo[b, k], e_hi[b, k], width[b, p]
+        sx, lo, hi, w = s_y[b, k], e_lo[b, k], e_hi[b, k], width[b, p]
+        with torch.no_grad():
+            if slug:
+                keep = (x >= lo - cut * sx) & (x <= hi + cut * sx)
+            else:
+                keep = (x >= lo) & (x < hi)
+        b, k, i, p, x, y, sx, lo, hi, w = (
+            v[keep] for v in (b, k, i, p, x, y, sx, lo, hi, w))
+        # the table at the receptor's own distance (clamped to the slug under "sigma_y")
+        x_r = x_a[b, k] + (torch.minimum(torch.maximum(x, lo), hi) if slug else x)
+        u_r, sy, s_z, z_c, p_z_r = tables.at_distance(x_r, state.table[b, k], row[b])
         with torch.no_grad():
             y_c = torch.clamp((w - _SQRT_2PI * sy) / 2.0, min=0.0)
             keep = y.abs() - y_c <= cut * sy
-            if slug:
-                keep &= (x >= lo - cut * sy) & (x <= hi + cut * sy)
-            else:
-                keep &= (x >= lo) & (x < hi)
-        b, k, i, p, x, y, sy, lo, hi, w = (
-            v[keep] for v in (b, k, i, p, x, y, sy, lo, hi, w))
+        b, k, i, p, x, y, sx, lo, hi, w, u_r, sy, s_z, z_c, p_z_r = (
+            v[keep] for v in (b, k, i, p, x, y, sx, lo, hi, w, u_r, sy, s_z, z_c, p_z_r))
         if slug:
-            root2 = math.sqrt(2.0) * sy
+            root2 = math.sqrt(2.0) * sx
             g_x = (torch.erf((x - lo) / root2) - torch.erf((x - hi) / root2)) / (
                 2.0 * (hi - lo))
         else:
-            g_x = 1.0 / (hi - lo)
+            g_x = 1.0 / (tau[b, k] * u_r)
         if rec_z is None:
-            p_z = torch.minimum(p_z_roof[b, k], clamp[b, p])
+            p_z = torch.minimum(p_z_r, clamp[b, p])
         else:
-            p_z = vertical_profile(rec_z[a_:b_][i], z_c[b, k], s_z[b, k], h_c[b], h_abl[b])
+            p_z = vertical_profile(rec_z[a_:b_][i], z_c, s_z, h_c[b], h_abl[b])
         c = state.mass[b, k] * field.weight[p] * g_x * crosswind_profile(y, sy, w) * p_z
         return torch.zeros(n_batch * r, dtype=_DTYPE).index_add(0, b * r + i, c).reshape(
             n_batch, r)
@@ -672,8 +715,8 @@ def roof_concentration(field: PuffField, state: PuffState, tables: PuffTables,
     `receptors_xy` `(R, 2)`, design Sect. 4.3: per sub-source `m w_i g_x f_y min(P_z,
     clamp_i)`, with `g_x` the slug of the puff's age `a`, `[x(a - dt/2), x(a + dt/2)]` along
     the wind `theta_w` from its source (`dt`, s, the step: consecutive puffs of a
-    continuous source tile the axis), and `f_y` and the table's `p_z` read at the puff's
-    distance `x(a)`. A puff whose source
+    continuous source tile the axis), and `f_y` and the table's `p_z` read at the
+    receptor's own distance from the source (`_evaluate`). A puff whose source
     is `receptor_owner[r]` (`(R,)`, long; -1 for none) contributes nothing to receptor
     `r`: a street's own `C_ext` excludes its own puffs, as `street_kernel` does."""
     if receptor_owner is not None:

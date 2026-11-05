@@ -314,8 +314,10 @@ def _wind_points(origin, theta, along, cross, z):
 
 
 def test_single_point_puff_matches_the_closed_form():
-    # constant u = 3, sigma_y = sigma_z = 0.5 + 0.2 t, z_c = 15, H_R = 0 (the canopy image
-    # is the ground image), h = 1e6; one puff of 2 kg advanced to age 60 s in steps of 5 s
+    # constant u = 3, spreads 0.5 + 0.2 x / 3, z_c = 15, H_R = 0 (the canopy image is the
+    # ground image), h = 1e6; one puff of 2 kg advanced to age 60 s (x = 180 m) in 5 s
+    # steps. Along the wind: the slug convolved with sigma_x = sigma_y(180 m); crosswind
+    # and vertical: the spreads at the receptor's distance clamped to the slug's ends
     tabs = _hand_tables([lambda k: 3.0])
     field = PuffField.points(1, along_wind="sigma_y")
     theta, origin = 0.4, (30.0, -20.0)
@@ -323,12 +325,13 @@ def test_single_point_puff_matches_the_closed_form():
     assert float(state.age[0, 0]) == 60.0
     points, a, c, z = _wind_points(origin, theta, [168.0, 177.0, 180.0, 186.0, 200.0],
                                    [0.0, 4.0, -9.0], [1.0, 15.0, 25.0])
-    sigma = 0.5 + 0.2 * 60.0
+    sigma_x = _spread(torch.tensor(180.0, dtype=DT))
     # the slug spans x(57.5) - x(60) = -7.5 m to x(62.5) - x(60) = +7.5 m: ell = 15 m
     lo, hi, ell = -7.5, 7.5, 15.0
     u = a - 180.0
-    root2 = math.sqrt(2.0) * sigma
+    root2 = math.sqrt(2.0) * sigma_x
     g_x = (torch.erf((u - lo) / root2) - torch.erf((u - hi) / root2)) / (2.0 * ell)
+    sigma = _spread(180.0 + torch.clamp(u, lo, hi))
     vertical = _gauss(z - 15.0, sigma) + _gauss(z + 15.0, sigma)
     expected = 2.0 * g_x * _gauss(c, sigma) * vertical
     th = torch.tensor([theta], dtype=DT)
@@ -337,29 +340,36 @@ def test_single_point_puff_matches_the_closed_form():
     torch.testing.assert_close(got[0], expected, rtol=1e-13, atol=0)
     # ell -> 0: the plain Gaussian puff
     tiny = concentration_at(field, state, tabs, points, th, 1e-4)
-    plain = 2.0 * _gauss(u, sigma) * _gauss(c, sigma) * vertical
+    near = _spread(180.0 + torch.clamp(u, -1.5e-4, 1.5e-4))  # slug ends at dt = 1e-4 s
+    plain = 2.0 * _gauss(u, sigma_x) * _gauss(c, near) * (
+        _gauss(z - 15.0, near) + _gauss(z + 15.0, near))
     torch.testing.assert_close(tiny[0], plain, rtol=1e-8, atol=0)
 
 
-def test_slug_without_along_wind_spread_is_a_top_hat():
+def test_slug_without_along_wind_spread_is_a_segment_of_the_steady_plume():
+    # the slug [172.5, 187.5) m from the origin carries density m / (dt u) with the
+    # spreads read at each receptor's own distance: the steady plume of rate m / dt
     tabs = _hand_tables([lambda k: 3.0])
     field = PuffField.points(1, along_wind="none")
     theta, origin = 1.1, (0.0, 0.0)
     state = _one_release(field, tabs, mass=2.0, origin=origin, dt=5.0, steps=12, theta=theta)
-    # slug [172.5, 187.5) m from the origin
-    inside, _, _, _ = _wind_points(origin, theta, [172.6, 177.0, 180.0, 187.4], [2.0], [15.0])
+    along = [172.6, 177.0, 180.0, 187.4]
+    inside, _, _, _ = _wind_points(origin, theta, along, [2.0], [15.0])
     outside, _, _, _ = _wind_points(origin, theta, [172.4, 187.6, 210.0, 100.0], [2.0], [15.0])
     th = torch.tensor([theta], dtype=DT)
-    sigma = torch.tensor(12.5, dtype=DT)
-    level = 2.0 / 15.0 * _gauss(torch.tensor(2.0, dtype=DT), sigma) * (
-        _gauss(torch.tensor(0.0, dtype=DT), sigma) + _gauss(torch.tensor(30.0, dtype=DT), sigma))
+    sigma = _spread(torch.tensor(along, dtype=DT))
+    level = 2.0 / (5.0 * 3.0) * _gauss(torch.tensor(2.0, dtype=DT), sigma) * (
+        _gauss(torch.zeros_like(sigma), sigma) + _gauss(torch.full_like(sigma, 30.0), sigma))
     torch.testing.assert_close(concentration_at(field, state, tabs, inside, th, 5.0)[0],
-                               level.expand(4), rtol=1e-13, atol=0)
+                               level, rtol=1e-13, atol=0)
     assert torch.equal(concentration_at(field, state, tabs, outside, th, 5.0),
                        torch.zeros(1, 4, dtype=DT))
-    # beyond cutoff_sigma crosswind standard deviations the puff is exactly zero
+    # beyond cutoff_sigma crosswind standard deviations (of the receptor's own sigma_y)
+    # the puff is exactly zero
     far, _, _, _ = _wind_points(origin, theta, [180.0], [4.0 * 12.5 + 0.01], [15.0])
     assert float(concentration_at(field, state, tabs, far, th, 5.0)) == 0.0
+    near, _, _, _ = _wind_points(origin, theta, [180.0], [4.0 * 12.5 - 0.01], [15.0])
+    assert float(concentration_at(field, state, tabs, near, th, 5.0)) > 0.0
 
 
 def test_roof_level_reads_the_table_p_z_and_free_receptors_the_profile():
@@ -370,10 +380,9 @@ def test_roof_level_reads_the_table_p_z_and_free_receptors_the_profile():
     field = PuffField.points(1, along_wind="none")
     th = torch.tensor([0.0], dtype=DT)
     state = _one_release(field, tabs, mass=2.0, origin=(0.0, 0.0), dt=5.0, steps=1, theta=0.0)
-    x, _, s_y, s_z, z_c, p_z = tabs.at_age(state.age[0, 0], _ZERO, _ZERO)
-    lo = tabs.at_age(torch.tensor(2.5, dtype=DT), _ZERO, _ZERO)[0]
-    hi = tabs.at_age(torch.tensor(7.5, dtype=DT), _ZERO, _ZERO)[0]
-    level = 2.0 / (hi - lo) * crosswind_profile(torch.zeros((), dtype=DT), s_y,
+    x, u, s_y, s_z, z_c, p_z = tabs.at_age(state.age[0, 0], _ZERO, _ZERO)
+    # the slug covers the ages [2.5, 7.5] s: density m / (5 s * u(x))
+    level = 2.0 / (5.0 * u) * crosswind_profile(torch.zeros((), dtype=DT), s_y,
                                                 torch.zeros((), dtype=DT))
     xy = torch.stack([x, torch.zeros((), dtype=DT)])[None]
     roof = roof_concentration(field, state, tabs, xy, th, 5.0)[0, 0]
@@ -390,7 +399,7 @@ def test_roof_level_reads_the_table_p_z_and_free_receptors_the_profile():
                                           (lambda k: 2.0 + 0.01 * k, 2.0, 0.001)],
                          ids=["constant", "growing"])
 @pytest.mark.parametrize("dt", [2.0, 5.0, 10.0])
-def test_continuous_source_tiles_to_one_over_u(dt, speed, u0, g):
+def test_continuous_source_is_the_steady_plume(dt, speed, u0, g):
     tabs = _hand_tables([speed])
     field = PuffField.points(1, along_wind="none")
     theta = 0.7
@@ -400,29 +409,21 @@ def test_continuous_source_tiles_to_one_over_u(dt, speed, u0, g):
         state, _ = emit(field, state, torch.tensor([[dt]], dtype=DT),
                         torch.zeros(1, dtype=_LONG), torch.zeros(1, 1, 2, dtype=DT))
         state = advance(state, tabs, dt, th)
-    # receptors at ages (k + f) dt along the axis: the slug of the puff of age k dt covers
-    # them (a slug spans [x(a - dt/2), x(a + dt/2)]); x(t) in closed form for u = u0 + g x
+    # receptors at ages (k + f) dt along the axis, x(t) in closed form for u = u0 + g x:
+    # each lies in exactly one slug, and the train is the steady plume, profile / u(x)
     ks = list(range(2, 58))
     fs = [-0.4, -0.1, 0.2, 0.45]
-    age_c = torch.tensor([k * dt for k in ks for _ in fs], dtype=DT)
     x_r = torch.tensor([_x_linear_speed(u0, g, (k + f) * dt) for k in ks for f in fs],
                        dtype=DT)
-    x_c = torch.tensor([_x_linear_speed(u0, g, float(a)) for a in age_c], dtype=DT)
-    ell = torch.tensor([_x_linear_speed(u0, g, float(a) + dt / 2)
-                        - _x_linear_speed(u0, g, float(a) - dt / 2) for a in age_c], dtype=DT)
     e = torch.tensor([math.cos(theta), math.sin(theta)], dtype=DT)
     z = 3.0
     points = torch.cat([x_r[:, None] * e, torch.full((x_r.numel(), 1), z, dtype=DT)], dim=1)
     got = concentration_at(field, state, tabs, points, th, dt)[0]
-    sigma = _spread(x_c)
+    sigma = _spread(x_r)
     zz = torch.full_like(sigma, z)
     profile = _gauss(torch.zeros_like(sigma), sigma) * (
         _gauss(zz - 15.0, sigma) + _gauss(zz + 15.0, sigma))
-    torch.testing.assert_close(got, profile * dt / ell, rtol=1e-11, atol=0)
-    # dt / ell is 1/u at the puff's distance to second order: (g dt / 2)^2 / 6 relative
-    u_c = u0 + g * x_c
-    bound = (g * dt / 2.0) ** 2 / 6.0 * 1.01 + 1e-12
-    assert float((got * u_c / profile - 1.0).abs().max()) <= bound
+    torch.testing.assert_close(got, profile / (u0 + g * x_r), rtol=1e-11, atol=0)
 
 
 def test_receptor_owner_excludes_own_puffs():
@@ -431,19 +432,21 @@ def test_receptor_owner_excludes_own_puffs():
     state = PuffState.empty((1,), 4)
     state, _ = emit(field, state, torch.tensor([[1.0, 3.0]], dtype=DT),
                     torch.zeros(2, dtype=_LONG),
-                    torch.tensor([[[0.0, 0.0], [5.0, 0.0]]], dtype=DT))
+                    torch.tensor([[[0.0, 0.0], [10.0, 0.0]]], dtype=DT))
     th = torch.tensor([0.0], dtype=DT)
-    for _ in range(6):
-        state = advance(state, tabs, 5.0, th)
-    xy = torch.tensor([[95.0, 1.0]] * 3, dtype=DT)
+    for _ in range(3):
+        state = advance(state, tabs, 10.0, th)
+    # the receptor is 100 m and 90 m from the two releases, grid distances, where the
+    # table's p_z is the vertical profile exactly
+    xy = torch.tensor([[100.0, 1.0]] * 3, dtype=DT)
     owner = torch.tensor([0, 1, -1], dtype=_LONG)
-    rc = roof_concentration(field, state, tabs, xy, th, 5.0, receptor_owner=owner)[0]
+    rc = roof_concentration(field, state, tabs, xy, th, 10.0, receptor_owner=owner)[0]
     free = concentration_at(field, state, tabs, torch.cat(
-        [xy, torch.full((3, 1), 2.0, dtype=DT)], dim=1), th, 5.0)[0]
+        [xy, torch.full((3, 1), 2.0, dtype=DT)], dim=1), th, 10.0)[0]
     assert float(rc[0]) > 0 and float(rc[1]) > 0
     torch.testing.assert_close(rc[0] + rc[1], rc[2], rtol=1e-14, atol=0)
     torch.testing.assert_close(rc[2], free[2], rtol=1e-14, atol=0)  # no clamp on points
-    assert torch.equal(roof_concentration(field, state, tabs, xy, th, 5.0,
+    assert torch.equal(roof_concentration(field, state, tabs, xy, th, 10.0,
                                           receptor_owner=None)[0], rc[2].expand(3))
 
 

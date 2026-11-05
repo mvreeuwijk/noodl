@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+from dataclasses import replace
 
 import pytest
 import torch
@@ -376,3 +377,156 @@ def test_mass_in_streets_is_the_volume_weighted_excess():
     batched = mass_in_streets(model, {**state, "street.x": torch.stack([x, 2 * x])}, bg)
     assert batched.shape == (2,)
     assert torch.allclose(batched[1], (40000.0 * (2 * x - 0.5)).sum(), rtol=1e-15, atol=0)
+
+
+# --- Test 2: the steady limit (design Sect. 2, 4.3) ------------------------------------------
+
+_STEADY_THETA = 0.3
+_STEADY_MET = {"u_star": 0.5, "h_abl": 800.0, "lmo": math.inf, "h_canopy": 20.0, "z0": 1.0,
+               "d": 13.0, "sigma_theta": math.radians(6.0)}
+
+
+def _steady_setup(along_wind):
+    from noodl.apps.street_aq.plume import (
+        junction_kernel,
+        plume_table,
+        street_kernel,
+        street_midpoints,
+    )
+    from noodl.apps.street_aq.puff import PuffField, puff_tables
+
+    net, _ = twelve_street_grid()
+    table = plume_table(**_STEADY_MET)
+    kernel = torch.cat([street_kernel(net, table, theta_w=_STEADY_THETA),
+                        junction_kernel(net, table, theta_w=_STEADY_THETA)], dim=1)
+    tables = puff_tables(centres=torch.tensor([10.0], dtype=DT), **_STEADY_MET)
+    field = PuffField.for_network(net, theta_w=_STEADY_THETA, along_wind=along_wind)
+    return net, kernel, tables, field, street_midpoints(net)
+
+
+def _steady_train(field, tables, dt):
+    """The puffs of a unit continuous source in every street and junction (one batch
+    instance per source) once steady: ages dt, 2 dt, ... while x(age) <= x_max, mass dt,
+    displaced x(age) along the wind -- what emit / advance / housekeep leave behind
+    (`test_steady_train_is_what_the_step_loop_leaves`)."""
+    zero = torch.zeros((), dtype=torch.long)
+    n_src = field.n_sources
+    ages = torch.arange(1, int(float(tables.t[0, 0, -1]) / dt) + 2, dtype=DT) * dt
+    x = tables.at_age(ages, zero, zero)[0]
+    ages, x = ages[x <= tables.x_max], x[x <= tables.x_max]
+    k = ages.numel()
+    e = torch.tensor([math.cos(_STEADY_THETA), math.sin(_STEADY_THETA)], dtype=DT)
+    empty = PuffState.empty((n_src,), k)
+    return replace(empty, mass=torch.full((n_src, k), dt, dtype=DT),
+                   age=ages.expand(n_src, k).clone(),
+                   disp=(x[:, None] * e).expand(n_src, k, 2).clone(),
+                   source=torch.arange(n_src)[:, None].expand(n_src, k).clone(),
+                   live=torch.ones(n_src, k, dtype=torch.bool))
+
+
+def _kernel_error(field, tables, receptors, kernel, state, dt):
+    """max |K_puff - K| / max K, `K_puff[i, j]` the puffs of source `j` at street `i`'s
+    midpoint, its own street's puffs excluded (as `street_kernel`)."""
+    from noodl.apps.street_aq.puff import roof_concentration
+
+    n = receptors.shape[0]
+    k_puff = roof_concentration(field, state, tables, receptors, _STEADY_THETA, dt,
+                                receptor_owner=torch.arange(n)).T
+    return float((k_puff - kernel).abs().max() / kernel.abs().max())
+
+
+def test_steady_train_is_what_the_step_loop_leaves():
+    from noodl.apps.street_aq.puff import advance, emit, housekeep
+
+    _, kernel, tables, field, receptors = _steady_setup("none")
+    dt, n_src = 10.0, field.n_sources
+    state = PuffState.empty((n_src,), 200)
+    for _ in range(int(float(tables.t[0, 0, -1]) / dt) + 3):
+        state, _ = emit(field, state, torch.eye(n_src, dtype=DT) * dt,
+                        torch.zeros(n_src, dtype=torch.long), tables=tables)
+        state = advance(state, tables, dt, _STEADY_THETA)
+        state = housekeep(field, state, tables, drop_below=0.0)
+    direct = _steady_train(field, tables, dt)
+    order = torch.argsort(state.age.masked_fill(~state.live, math.inf), dim=1)
+    live = int(state.live[0].sum())
+    assert live == direct.age.shape[1]
+    torch.testing.assert_close(state.age.gather(1, order)[:, :live], direct.age,
+                               rtol=0, atol=0)
+    disp = state.disp.gather(1, order[..., None].expand(-1, -1, 2))[:, :live]
+    torch.testing.assert_close(disp, direct.disp, rtol=1e-13, atol=1e-11)
+    looped = _kernel_error(field, tables, receptors, kernel, state, dt)
+    assert looped == pytest.approx(_kernel_error(field, tables, receptors, kernel, direct,
+                                                 dt), abs=1e-14)
+
+
+# Measured (measurements.md, Round 3): e(5 s) = 5.6e-16, the steady kernel to rounding;
+# rounded up to one significant figure.
+_TOL_5S = 6e-16
+# Measured max e(dt) / dt over the steps below: 6.0e-16 /s (e at rounding level); rounded up.
+_C_PER_S = 7e-16
+
+
+def test_steady_limit_without_along_wind_spread_is_the_kernel():
+    """Test 2a, kernel level: the puff train of a unit continuous source per street and
+    junction, at the street midpoints, against `street_kernel` / `junction_kernel` built
+    from the same `plume_table` inputs. With the slug a segment of the steady plume
+    (design Sect. 4.3) the error is rounding from dt = 10 s down (no pair falls in the
+    first slug's emission-lag gap here)."""
+    _, kernel, tables, field, receptors = _steady_setup("none")
+    errors = {dt: _kernel_error(field, tables, receptors, kernel,
+                                _steady_train(field, tables, dt), dt)
+              for dt in (10.0, 5.0, 2.5, 1.25, 0.625)}
+    print("steady limit, along_wind='none', e(dt):", errors)
+    assert errors[5.0] <= _TOL_5S
+    assert all(e <= 1e-8 for dt, e in errors.items() if dt <= 1.25)
+    assert all(e <= _C_PER_S * dt for dt, e in errors.items())
+
+
+# Measured (measurements.md, Round 3): e = 7.9e-12 at 10 s and 1.6e-11 at 5 s, the level
+# of the stopping rule (C_ext changes < 1e-12 relative per step); one significant
+# figure, rounded up.
+_COUPLED_TOL = {10.0: 8e-12, 5.0: 2e-11}
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("dt", [10.0, 5.0])
+def test_coupled_steady_limit_without_along_wind_spread_is_the_steady_model(dt):
+    """Test 2a, coupled: constant sources in every street, the puff model stepped until
+    C_ext changes < 1e-12 relative, against `street_steady_with_plume` with the kernels of
+    the same `plume_table` inputs (junction_source "upward"). 250 / 470 steps: 40 / 80 s."""
+    from noodl.apps.street_aq.above_roof import street_steady_with_plume
+    from noodl.apps.street_aq.plume import junction_kernel, plume_table, street_kernel
+
+    bg = 2e-8
+    net, _ = twelve_street_grid()
+    plain, s0, d0 = build_model(net, background="per_street")
+    src = torch.zeros(plain.net.n, dtype=DT)
+    for i, name in enumerate(street_index(plain)):
+        src[plain.net.node_index(name)] = 1e-6 * (i + 1)
+    met = {"u_star": torch.tensor(_STEADY_MET["u_star"], dtype=DT),
+           "theta_w": torch.tensor(_STEADY_THETA, dtype=DT),
+           "h_abl": torch.tensor(_STEADY_MET["h_abl"], dtype=DT)}
+    drv = {**d0, **met, "street.x_boundary": torch.full((12,), bg, dtype=DT),
+           "street.sources": src}
+    table = plume_table(**_STEADY_MET)
+    ref = street_steady_with_plume(
+        plain, s0, drv, kernel=street_kernel(net, table, theta_w=_STEADY_THETA),
+        junction_kernel=junction_kernel(net, table, theta_w=_STEADY_THETA),
+        junction_source="upward")["street.c_ext"]
+    model, state, d1 = build_model(net, background="per_street", puffs=PuffOptions(
+        sigma_theta=_STEADY_MET["sigma_theta"], along_wind="none", junction_source="upward",
+        drop_below=0.0, capacity=2000))
+    drv1 = {**d1, **met, "street.x_boundary": drv["street.x_boundary"],
+            "street.sources": src}
+    prev = None
+    with torch.no_grad():
+        for k in range(2000):
+            state = model.step(state, drv1, dt, t=dt * k)
+            c = state["puff.c_ext"]
+            if prev is not None and float((c - prev).abs().max()
+                                          / (c - bg).abs().max()) < 1e-12:
+                break
+            prev = c
+    e = float((c - ref).abs().max() / (ref - bg).abs().max())
+    print(f"coupled steady limit, dt = {dt} s: e = {e:.3e} after {k} steps")
+    assert e <= _COUPLED_TOL[dt]
