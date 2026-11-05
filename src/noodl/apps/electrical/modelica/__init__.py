@@ -36,10 +36,12 @@ def read_modelica_circuit(path: str | Path, *, substeps: int = 1, omit: Iterable
     Comparing with the reference at round-off needs tight Newton tolerances: with the
     layer's defaults an algebraic model such as MBL's `ACACTransformer` example stays
     farther from OpenModelica than `1e-9` relative. `simulate_circuit` solves algebraic
-    models at `atol=1e-12, rtol=1e-14` by default (`run.STEADY_ATOL`, `run.STEADY_RTOL`),
-    and a heat-port thermal network's heat balance at `atol=1e-11`
-    (`run.THERMAL_STEADY_ATOL`, through `Model.steady`'s `layer_options`); pass the same to
-    `model.steady` when solving by hand.
+    models at `atol=1e-12, rtol=1e-14` by default (`run.STEADY_ATOL`, `run.STEADY_RTOL`);
+    pass the same to `model.steady` when solving by hand. A heat-port thermal network is a
+    heat layer solved by one linear solve per pass, with no tolerance of its own; stepping
+    by hand, give it the circuit's rule on every step
+    (`layer_options={"thermal": {"scheme": "implicit"}}` on a backward Euler step,
+    `"trapezoidal"` otherwise), as `simulate_circuit` does.
     """
     doc = schema.load(path)
     return assemble.build(netlist.build(doc, omit=omit), doc, substeps=substeps)

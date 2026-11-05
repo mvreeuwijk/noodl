@@ -56,6 +56,9 @@ def kind_flows(model: Model, name: str, state: Mapping[str, Tensor],
     """Transport layer `name`'s branch flows, in its own `flow_kinds` order; see
     `Model._kind_flows`."""
     layer = model.transport[name]
+    if not layer.flow_kinds:
+        # A conduction-only layer: nothing advects, so its flows are empty.
+        return torch.zeros(0, dtype=layer.net.dtype, device=layer.net.device)
     owner = model.flow_layer_of[name]
     key = model.flow_driver_of[name]
     if owner is not None:
@@ -139,7 +142,8 @@ def run_pass(
                       new, made, diag)
     _step_allocations(model, base, drv, dt, new, made, diag)
     transfer_layers = _transfer_layers(model, boundary_transfers, dt)
-    _advance_transport(model, base, drv, dt, transfer_layers, new, made, diag)
+    _advance_transport(model, base, drv, dt, transfer_layers, new, made, diag,
+                       solve_kwargs.get(LAYER_OPTIONS, {}))
     _collect_closure_state(model, drv, written, new, made)
     return new, diag, drv
 
@@ -216,10 +220,12 @@ def _transfer_layers(model: Model, boundary_transfers, dt) -> set[str]:
 
 
 def _advance_transport(model: Model, base, drv, dt, transfer_layers: set[str], new: dict,
-                       made: list, diag: dict) -> None:
+                       made: list, diag: dict, options: Mapping[str, Mapping]) -> None:
     """Advance (or, with `dt=None`, solve to steady) every transport layer on the flows of
-    its kinds, applying the reactions on the side of the step `reaction_order` names."""
+    its kinds, applying the reactions on the side of the step `reaction_order` names.
+    `options` are the `layer_options`: a transport layer's `scheme` for this step."""
     for name, layer in model.transport.items():
+        scheme = options.get(name, {}).get("scheme")
         want_transfer = name in transfer_layers
         q_kind = model._kind_flows(name, new, drv)
         xb = require(drv, f"{name}.x_boundary")
@@ -292,6 +298,12 @@ def _advance_transport(model: Model, base, drv, dt, transfer_layers: set[str], n
                         f"storage at the state's own time); build it with "
                         f"Model.initial_capacities(state, drivers)"
                     )
+            # The sources at the step start, when a closure carries them as state: the
+            # trapezoidal rule integrates them as it integrates the state (`Model`).
+            src_prev = None
+            if (f"{name}.sources" in model.closure_state_keys
+                    and (layer.scheme if scheme is None else scheme) == "trapezoidal"):
+                src_prev = require(base, f"{name}.sources")
             k = model.substeps[name]
             for j in range(1, k + 1):
                 if cap is None:
@@ -299,12 +311,16 @@ def _advance_transport(model: Model, base, drv, dt, transfer_layers: set[str], n
                 else:
                     cap_prev_j = cap_prev + (j - 1) / k * (cap - cap_prev)
                     cap_j = cap_prev + j / k * (cap - cap_prev)
+                src_j, src_prev_j = sources, None
+                if src_prev is not None:
+                    src_prev_j = src_prev + (j - 1) / k * (sources - src_prev)
+                    src_j = src_prev + j / k * (sources - src_prev)
                 if want_transfer:
                     stepped = layer.step_with_transfer(
-                        x, q_kind, sources, xb, dt / k,
+                        x, q_kind, src_j, xb, dt / k,
                         capacity=cap_j, capacity_prev=cap_prev_j, removal=removal,
                         transmission=transmission, conductance=conductance,
-                        diagnostics=layer_diag,
+                        diagnostics=layer_diag, scheme=scheme, sources_prev=src_prev_j,
                     )
                     x = stepped.x
                     transfer_total = (
@@ -312,10 +328,11 @@ def _advance_transport(model: Model, base, drv, dt, transfer_layers: set[str], n
                         else transfer_total + stepped.boundary_transfer
                     )
                 else:
-                    x = layer.step(x, q_kind, sources, xb, dt / k, capacity=cap_j,
+                    x = layer.step(x, q_kind, src_j, xb, dt / k, capacity=cap_j,
                                    capacity_prev=cap_prev_j, removal=removal,
                                    transmission=transmission, conductance=conductance,
-                                   diagnostics=layer_diag)
+                                   diagnostics=layer_diag, scheme=scheme,
+                                   sources_prev=src_prev_j)
             if cap is not None:
                 new[f"{name}.capacity"] = cap
                 made.append(f"{name}.capacity")

@@ -680,7 +680,7 @@ class LayerRef:
                                 "the construction-time one",
                     **common,
                 )
-            if flow_owner is None:
+            if flow_owner is None and layer.flow_kinds:
                 cols: list[int] = []
                 for k in layer.flow_kinds:
                     cols += net.edge_index(k).tolist()

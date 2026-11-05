@@ -96,7 +96,8 @@ class _AndersonHistory:
     `iterate_flow_tol`, so that one dimensionless problem weighs every entry by its own
     tolerance. Both are needed: a head solve whose warm start already meets its residual
     tolerance hands the fed `phi` back unchanged, and the iteration then moves only through
-    `q`.
+    `q`. The transport layers named in `iterate_mixed` add their ``"<layer>.x"`` after them,
+    divided by their `iterate_tol`.
 
     The next fed state is, per instance:
 
@@ -122,6 +123,11 @@ class _AndersonHistory:
             for name, tol in model.iterate_tol.items() if name in model.kirchhoff
         ]
         self.keys = [f"{name}.{s}" for name, *_ in self.layers for s in ("phi", "q")]
+        # The `iterate_mixed` transport layers: their `x`, judged over every entry, divided
+        # by their `iterate_tol`.
+        self.transport = [(name, float(model.iterate_tol[name]))
+                          for name in getattr(model, "iterate_mixed", ())]
+        self.keys += [f"{name}.x" for name, _ in self.transport]
         self.memory = memory
         self.xs: list[Tensor] = []
         self.gs: list[Tensor] = []
@@ -147,6 +153,9 @@ class _AndersonHistory:
             for i, (_, nodes, tol, flow_tol) in enumerate(self.layers):
                 pieces.append(full(parts[2 * i])[..., nodes] / (tol if scale else 1.0))
                 pieces.append(full(parts[2 * i + 1]) / (flow_tol if scale else 1.0))
+            first = 2 * len(self.layers)
+            for i, (_, tol) in enumerate(self.transport):
+                pieces.append(full(parts[first + i]) / (tol if scale else 1.0))
             return torch.cat(pieces, -1)
 
         x = torch.cat([full(fed[k]) for k in self.keys], -1)

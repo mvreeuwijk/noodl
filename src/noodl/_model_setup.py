@@ -113,6 +113,11 @@ def flow_owners(
     flow_layer_of: dict[str, str | None] = {}
     flow_driver_of: dict[str, str] = {}
     for tname, tl in transport.items():
+        flow_driver_of[tname] = f"{tname}.q"
+        if not tl.flow_kinds:
+            # A conduction-only layer advects nothing: no owner and no flow driver.
+            flow_layer_of[tname] = None
+            continue
         owners = [
             pn for pn, pl in kirchhoff.items()
             if all(k in pl.kinds for k in tl.flow_kinds)
@@ -134,7 +139,6 @@ def flow_owners(
                 f"({owners}); at most one may"
             )
         flow_layer_of[tname] = owners[0] if owners else None
-        flow_driver_of[tname] = f"{tname}.q"
     return flow_layer_of, flow_driver_of
 
 
@@ -170,6 +174,7 @@ class CouplingOptions:
     iterate_on_limit: str
     adjoint_rtol: float
     iterate_flow_tol: dict[str, float]
+    iterate_mixed: tuple[str, ...] = ()
 
     @classmethod
     def validate(
@@ -178,6 +183,7 @@ class CouplingOptions:
         iterate_on_limit: str, adjoint_rtol: float,
         iterate_flow_tol: Mapping[str, float] | None,
         kirchhoff: Mapping[str, KirchhoffLayer], transport: Mapping[str, TransportLayer],
+        iterate_mixed: Sequence[str] = (),
     ) -> CouplingOptions:
         """The options, checked in the model's order. The checks that combine
         `iterate_acceleration` with the layers come after the closures' coupling check and
@@ -258,11 +264,32 @@ class CouplingOptions:
         bad = {k: v for k, v in flow_tol.items() if not v > 0.0}
         if bad:
             raise ValueError(f"Model: iterate_flow_tol must be positive, got {bad}")
+        # The transport layers whose state the Anderson mixing includes (`_iterate`); every
+        # other transport state is relaxed.
+        mixed = (iterate_mixed,) if isinstance(iterate_mixed, str) else tuple(iterate_mixed)
+        if mixed and iterate_acceleration != "anderson":
+            raise ValueError(
+                f"Model: iterate_mixed={list(mixed)} names transport layers for the Anderson "
+                f"mixing, which needs iterate_acceleration='anderson', got "
+                f"{iterate_acceleration!r}"
+            )
+        stray = sorted(k for k in mixed if k not in transport or k not in tol)
+        if stray:
+            raise KeyError(
+                f"Model: iterate_mixed names {stray}, which are not transport layers named "
+                f"in iterate_tol ({sorted(k for k in tol if k in transport)})"
+            )
+        species = sorted(k for k in mixed if transport[k].n_species != 1)
+        if species:
+            raise ValueError(
+                f"Model: iterate_mixed names {species}, which carry several species; the "
+                f"Anderson mixing takes a transport layer of one quantity"
+            )
         return cls(
             coupling=coupling, iterate_tol=tol, iterate_max=max_passes,
             iterate_relaxation=relaxation, iterate_acceleration=iterate_acceleration,
             iterate_memory=iterate_memory, iterate_on_limit=iterate_on_limit,
-            adjoint_rtol=rtol, iterate_flow_tol=flow_tol,
+            adjoint_rtol=rtol, iterate_flow_tol=flow_tol, iterate_mixed=mixed,
         )
 
     def check_acceleration(self, kirchhoff: Mapping[str, KirchhoffLayer]) -> None:

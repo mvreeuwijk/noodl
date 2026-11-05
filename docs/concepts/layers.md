@@ -214,11 +214,25 @@ Four things catch people:
   conduction kind counts as a touch for the active interior.
 - **`flow_kind` may be several kinds**, and `q` is then their flows *concatenated in that order*.
   That is exactly what `KirchhoffLayer.flows_of_kind(q, layer.flow_kinds)` produces, so heat
-  advected by both `"airpath"` and `"door"` edges needs no new operator.
+  advected by both `"airpath"` and `"door"` edges needs no new operator. It may also be none,
+  `flow_kind=()`: a conduction-only layer (a heat network of conductances and capacities, as the
+  electrical application's heat ports use), whose `q` is empty; in a `Model` it has no flow
+  driver and no flow owner.
 
 The three schemes: `"exact"` uses an augmented matrix exponential and controls its own error by
 sub-stepping; `"implicit"` is implicit Euler; `"trapezoidal"` is the second-order variant. Use
 `"exact"` for heat, `"implicit"` for species — the application defaults reflect this.
+
+`step(..., scheme=...)` takes one step with another scheme than the layer's own, checked as the
+constructor checks it (a storage-free node with throughflow still needs `"implicit"`); in a
+`Model`, `model.step(..., layer_options={"thermal": {"scheme": "implicit"}})` does the same for
+one step. A layer coupled to a circuit steps this way with the circuit's own rule: backward
+Euler on the step after a restart, trapezoidal otherwise. `step(..., sources_prev=...)`
+(trapezoidal only) gives the sources at the START of the step; the trapezoidal rule then
+integrates them as it integrates the state, `dt/2 (sources_prev + sources)`, instead of holding
+`sources` over the step. A `Model` passes it when a closure carries the layer's sources as state
+(`state_keys` holding `"<layer>.sources"`, as the electrical application's `JouleHeating` does):
+the step-start state's `"<layer>.sources"` are then the heat at the step start.
 
 The exact scheme bases its sub-stepping on the operator's one-norm `||dt M||_1`, computed from
 the state-independent matrix before any arithmetic on the state; if the predicted work exceeds
@@ -317,7 +331,9 @@ call is held at its value, its source dropped, as above; a group of folded nodes
 only to each other (every conductance to a stored node or boundary zero) has no temperature and is
 refused, naming the nodes. Each group is factored as a small dense matrix, batched over the groups
 of one size, never as a matrix over the whole network; a group is as large as the set of folded
-nodes joined to each other, usually the surfaces of one zone. A storage-free node that air flows
+nodes joined to each other, usually the surfaces of one zone. A layer whose every interior node is
+folded (a heat network without any heat capacity) has nothing to step: its step and its steady
+state are the folded nodes' balance at the end of the step. A storage-free node that air flows
 through (a plenum), or that has a removal or reaction, is not folded and still needs
 `scheme="implicit"`. `layer.folded_mask` is the `(n_i,)` boolean mask of the folded nodes. `rate`
 and the dense `operator` still describe the whole network, a folded node as its algebraic balance.
@@ -468,7 +484,13 @@ Kirchhoff layers' `.phi` and `.q` by Anderson mixing (type II, Walker & Ni 2011)
 `iterate_memory` passes (default 5), and needs an `iterate_flow_tol` for each of them: the mixing
 minimises the fixed-point residual of `.phi` and `.q`, each divided by its tolerance, and the
 convergence test then also asks that residual of `.phi` to be within `iterate_tol`. Transport
-states stay relaxed. Mixing changes only the sequence of fed states, never the fixed point, and the
+states stay relaxed, except those of the transport layers named in `iterate_mixed` (each also in
+`iterate_tol`): their `.x` is mixed with the Kirchhoff layers' state, divided by its
+`iterate_tol`, and its fixed-point residual is judged too. Name a transport layer there when its
+state is a function of the Kirchhoff layers' alone, re-solved each pass, such as a heat layer fed
+by a circuit's Joule heat: relaxed, it would carry a memory of earlier passes into the map the
+mixing assumes to be one of the fed state, and the iteration could stop with the circuit solved
+at temperatures the heat layer no longer has. Mixing changes only the sequence of fed states, never the fixed point, and the
 fixed-point adjoint is unchanged. Two safeguards: an ill-conditioned history drops its oldest
 passes, and a mixed step that would move any entry against its own residual is replaced by the
 relaxed step, because the relaxed iteration only reaches fixed points that attract it and a secant

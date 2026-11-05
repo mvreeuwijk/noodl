@@ -413,8 +413,8 @@ names.value(history, "res2.terminal.i[1]")                 # a reference column,
 ```
 
 `read_modelica_circuit(path, *, substeps=1, omit=())` returns `(model, state, drivers, names)`:
-a `Model` with a `KirchhoffLayer` named `"electrical"` (and a second one, `"thermal"`, when
-a device has a heat port), its start state, its drivers on the step grid, and a `CircuitNames`
+a `Model` with a `KirchhoffLayer` named `"electrical"` (and a heat layer, a `TransportLayer`
+named `"thermal"`, when a device has a heat port), its start state, its drivers on the step grid, and a `CircuitNames`
 that maps every compared column of the reference to a noodl quantity (`names.value`).
 `substeps` splits every interval of the step grid into that many equal steps; `omit` names
 components to drop, with their connections, before the circuit is built.
@@ -466,8 +466,8 @@ AC terminal, plus `Vc` of a `TwoPortRCLine` with capacitance.
 | MSL `Analog.Sources` | `ConstantVoltage`, `StepVoltage`, `SineVoltage`, `RampVoltage`, `PulseVoltage`, `SignalVoltage`, `SineVoltageVariableFrequencyAndAmplitude`, `CosineVoltageVariableFrequencyAndAmplitude` | `PrescribedVoltage` following the equivalent `Modelica.Blocks.Sources` signal |
 | MSL `Analog.Sensors` | `CurrentSensor` | a wire (its two pins are one node) |
 | | `VoltageSensor`, `PotentialSensor` | ignored, with their connections |
-| MSL `Thermal.HeatTransfer` | `Components.ThermalConductor`, `Components.HeatCapacitor` | `Conductance`, `Capacitance` in the thermal layer |
-| | `Sources.FixedTemperature`, `Celsius.FixedTemperature` | a thermal boundary node |
+| MSL `Thermal.HeatTransfer` | `Components.ThermalConductor`, `Components.HeatCapacitor` | a conduction edge, a node's heat capacity in the heat layer (a heat port without one holds no heat: a storage-free node) |
+| | `Sources.FixedTemperature`, `Celsius.FixedTemperature` | a boundary node of the heat layer |
 | MBL `DC` | `Sources.ConstantVoltage` | `PrescribedVoltage` |
 | | `Loads.Resistor`, `Lines.TwoPortResistance` | `Impedance(R)` |
 | | `Loads.Conductor` | `ConstantPowerLoad(..., direct_current=True)` |
@@ -508,6 +508,9 @@ signals, `Modelica.Blocks.Math` chains included.
   one model.
 - A thermal network part (thermal nodes joined by conductors) held by no fixed temperature and
   no heat capacitor: its temperature is undetermined, and the refusal names its nodes.
+- A thermal node that no `ThermalConductor` reaches and no fixed temperature holds (a heat
+  capacitor directly on a heat port): the heat layer conducts heat only along conductors; put a
+  `ThermalConductor` between them.
 - A non-finite (NaN or infinite) frequency `f` of an AC source or temperature `T` of a fixed
   temperature.
 - In a phasor model: an MSL analog component other than `Ground`, a DC `TwoPortRCLine` with
@@ -542,8 +545,8 @@ source `E` also feeds the omitted branch, so its current is not comparable with 
   node, its `v = {v[1], v[2]}` the phasor `v[1] + j v[2]`; a device with one AC terminal is an
   edge from that node to the reference.
 - MSL's `Ground`, MBL's implicit AC neutral and the absolute DC reference are all node `"0"` at
-  potential 0. Heat ports are nodes of the thermal layer, whose reference node
-  `"thermal.reference"` is held at 0 K.
+  potential 0. Heat ports are nodes of the heat layer, which has no reference node: its
+  temperatures are absolute (K), in its state `"thermal.x"`.
 
 ### Real or phasor
 
@@ -588,9 +591,11 @@ which the class rule and the simulated value differ by more than `1e-12` relativ
 ### Solver tolerances
 
 `simulate_circuit` solves a model without storage at each output time with Newton's
-`atol=1e-12`, `rtol=1e-14` (`atol=1e-11` with a heat-port thermal network, whose heat balance
-in W stalls at about `2e-12` W). The layer's default, `1.5e-8`, leaves MBL's `ACACTransformer`
+`atol=1e-12`, `rtol=1e-14` (a heat-port thermal network is a linear solve, with no tolerance
+of its own). The layer's default, `1.5e-8`, leaves MBL's `ACACTransformer`
 example up to 29 times the comparison bound from OpenModelica. Pass the same tolerances to
 `model.steady` when solving such a model by hand. The steps of a dynamic model use the layer's
-own tolerances. The comparison and the measured agreement are on [the verification
+own tolerances; the heat layer of a model with heat ports takes the circuit's rule on every
+step (`layer_options={"thermal": {"scheme": "implicit"}}` after a restart, `"trapezoidal"`
+otherwise), which `simulate_circuit` gives it. The comparison and the measured agreement are on [the verification
 page](../verification.md#modelica-electrical-circuits-model-by-model).

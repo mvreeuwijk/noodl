@@ -322,17 +322,30 @@ def test_a_folded_group_with_no_neighbour_at_all_is_refused_at_construction():
                        storage_free=["a", "b"])
 
 
-def test_a_layer_of_folded_nodes_only_is_refused_at_construction():
+@pytest.mark.parametrize("scheme", SCHEMES)
+def test_a_layer_of_folded_nodes_only_is_algebraic(scheme):
+    """No stored node at all (a heat network without heat capacity): every step and the
+    steady state are the folded node's balance at the end of the step, whatever the start
+    value; the boundary transfer is that balance's heat over the step."""
     net = Network(dtype=F64)
     for n in ("ambient", "sky", "s"):
         net.add_node(n)
     net.add_edge("ambient", "sky", kind="air")
     net.add_edge("s", "ambient", kind="film")
     net.add_edge("s", "sky", kind="rad")
-    with pytest.raises(ValueError, match=r"no stored node"):
-        TransportLayer(net, "T", capacity=_t([0.0]), flow_kind="air",
-                       boundary=["ambient", "sky"], conduction_kind=("film", "rad"),
-                       conductance=_t([1.0, 2.0]), storage_free=["s"])
+    layer = TransportLayer(net, "T", capacity=_t([0.0]), flow_kind="air",
+                           boundary=["ambient", "sky"], conduction_kind=("film", "rad"),
+                           conductance=_t([1.0, 2.0]), storage_free=["s"], scheme=scheme)
+    q, xb, src = _t([0.0]), _t([270.0, 250.0]), _t([0.0, 0.0, 3.0])
+    balance = (1.0 * 270.0 + 2.0 * 250.0 + 3.0) / 3.0
+    assert layer.step(_t([300.0]), q, src, xb, 10.0).tolist() == pytest.approx([balance],
+                                                                                 rel=1e-15)
+    assert layer.steady(q, src, xb).tolist() == pytest.approx([balance], rel=1e-15)
+    out = layer.step_with_transfer(_t([300.0]), q, src, xb, 10.0)
+    torch.testing.assert_close(out.boundary_transfer,
+                               10.0 * _t([1.0 * (balance - 270.0), 2.0 * (balance - 250.0)]))
+    batched = layer.step(_t([[300.0], [200.0]]), q, src, xb, 10.0)
+    torch.testing.assert_close(batched, torch.full((2, 1), balance, dtype=F64))
 
 
 # ---------------------------------------------------------------- the maximum principle
