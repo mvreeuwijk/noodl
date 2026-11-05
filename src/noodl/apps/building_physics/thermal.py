@@ -126,15 +126,15 @@ def thermal_layer(net: Network, *, ambient="ambient", name: str = "thermal",
     storage_free = tuple(storage_free)
     boundary = [ambient, *fixed_temperature]
     kinds = tuple(flow_kinds)
+    present = set(net.edge_kinds())
     if scheme is None:
         ventilated = set()
         for kind in kinds:
-            if kind in set(net.edge_kinds()):
+            if kind in present:
                 src, tgt = net.endpoints(kind)
                 ventilated.update(src.tolist() + tgt.tolist())
         free_idx = [net.node_index(n) for n in net.canonical(list(storage_free))]
         scheme = "implicit" if any(i in ventilated for i in free_idx) else "exact"
-    present = set(net.edge_kinds())
     if conduction_kind is None:
         cond_kinds = ("wall",) if "wall" in present else ()
     else:

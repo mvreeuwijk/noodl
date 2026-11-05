@@ -623,3 +623,36 @@ def test_a_folded_surface_with_a_radiative_coefficient_iterated_through_a_model(
         state = model.step(state, drivers, 1000.0)
     torch.testing.assert_close(state["thermal.x"], _t([t_s + P_HEAT / H_S, t_s]), rtol=0,
                                atol=1e-6)
+
+
+def test_attributes_reassigned_after_construction_reach_the_folded_step():
+    """`capacity` (as the Modelica assembly reassigns it) and `carrier` edited on a built
+    layer act on the folded step exactly as on the same layer built with them."""
+    layer = _wall("exact")
+    layer.step(X0_WALL, Q0, SRC0, XB, 600.0)            # the kept layer exists and was used
+    layer.capacity = layer.capacity * 100.0
+    built = TransportLayer(
+        _wall_net(), "T", capacity=_t([100 * CZ, 0.0, 100 * CW, 0.0]), flow_kind="air",
+        boundary=["ambient"], conduction_kind=("film", "wall"),
+        conductance=_t([H1, H2, K1, K2]), storage_free=["s1", "s2"],
+    )
+    q = _t([0.05])
+    torch.testing.assert_close(layer.step(X0_WALL, q, SRC0, XB, 600.0),
+                               built.step(X0_WALL, q, SRC0, XB, 600.0), rtol=1e-14, atol=0)
+    layer.carrier = torch.as_tensor(1005.0, dtype=F64)
+    built.carrier = torch.as_tensor(1005.0, dtype=F64)
+    hot = layer.step(X0_WALL, q, SRC0, XB, 600.0)
+    torch.testing.assert_close(hot, built.step(X0_WALL, q, SRC0, XB, 600.0), rtol=1e-14,
+                               atol=0)
+    assert abs(hot[0].item() - X0_WALL[0].item()) > 1.0    # the carrier really acted
+
+
+def test_moving_the_layer_drops_the_cached_folding():
+    layer = _wall("exact")
+    layer.step(X0_WALL, Q0, SRC0, XB, 600.0)
+    assert layer._fold_cache is not None
+    layer.to(dtype=torch.float32)
+    assert layer._fold_cache is None
+    x = layer.step(X0_WALL.float(), Q0.float(), SRC0.float(), XB.float(), 600.0)
+    ref = _wall("exact").step(X0_WALL, Q0, SRC0, XB, 600.0)
+    torch.testing.assert_close(x.double(), ref, rtol=1e-5, atol=0)

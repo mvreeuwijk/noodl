@@ -840,37 +840,57 @@ class TransportLayer(TopologyGuard):
         # The layer over the kept nodes: this layer's own state with the folded nodes taken
         # out of the interior (no edge of the folded network touches them, so they are like
         # inactive nodes) and the folded network's conduction edges in place of its own.
-        kept = object.__new__(_KeptNodes)
-        kept.__dict__.update(self.__dict__)
+        # Only that STRUCTURE is fixed here; everything else (capacity, removal, kinetics,
+        # carrier, ...) is read from this layer on every call (`_kept_layer`), so an
+        # attribute reassigned after construction reaches the folded step too.
         kept_nodes = self.interior_idx.index_select(0, plan.kept)
         folded_nodes = self.interior_idx.index_select(0, plan.folded)
-        kept.interior_idx = kept_nodes
-        kept.n_i = int(kept_nodes.numel())
-        kept.inactive_idx = torch.cat([self.inactive_idx, folded_nodes])
-        kept._inactive_names = self._inactive_names + [net.nodes[i]
-                                                       for i in folded_nodes.tolist()]
-        kept.storage_free_mask = self.storage_free_mask.index_select(0, plan.kept)
-        kept._has_storage_free = bool(kept.storage_free_mask.any())
-        kept.folded_mask = torch.zeros_like(kept.storage_free_mask)
-        kept.capacity = self.capacity.index_select(-1, plan.kept)
-        kept.removal = None if self.removal is None else self.removal.index_select(-2, plan.kept)
-        kept.kinetics = (None if self.kinetics is None
-                         else self.kinetics.index_select(-3, plan.kept))
+        kept_free = self.storage_free_mask.index_select(0, plan.kept)
         of_node = torch.full((net.n,), -1, dtype=torch.long)
-        of_node[kept_nodes] = torch.arange(kept.n_i, dtype=torch.long)
-        kept._interior_of_node = of_node
+        of_node[kept_nodes] = torch.arange(int(kept_nodes.numel()), dtype=torch.long)
         b_r = int(plan.src.numel())
-        if b_r:
+        structure = {
+            "interior_idx": kept_nodes,
+            "n_i": int(kept_nodes.numel()),
+            "inactive_idx": torch.cat([self.inactive_idx, folded_nodes]),
+            "_inactive_names": self._inactive_names + [net.nodes[i]
+                                                       for i in folded_nodes.tolist()],
+            "storage_free_mask": kept_free,
+            "_has_storage_free": bool(kept_free.any()),
+            "folded_mask": torch.zeros_like(kept_free),
+            "_interior_of_node": of_node,
             # Its conductance is always handed in per call (`Folded.conductance`); the
             # stored value is never read.
-            kept._conduction_edges = (plan.src, plan.tgt,
-                                      torch.zeros(b_r, dtype=self._conduction_edges[2].dtype))
-            kept.conduction_kinds, kept._conduction_sizes = ("folded",), (b_r,)
-        else:
-            kept._conduction_edges = None
-            kept.conduction_kinds, kept._conduction_sizes = (), ()
-        kept._fold_plan, kept._kept, kept._fold_cache = None, None, None
+            "_conduction_edges": (
+                (plan.src, plan.tgt, torch.zeros(b_r, dtype=self._conduction_edges[2].dtype))
+                if b_r else None),
+            "conduction_kinds": ("folded",) if b_r else (),
+            "_conduction_sizes": (b_r,) if b_r else (),
+            "_fold_plan": None, "_kept": None, "_fold_cache": None,
+        }
+        kept = object.__new__(_KeptNodes)
+        kept._structure = structure
         self._kept = kept
+
+    def _kept_layer(self) -> _KeptNodes:
+        """The kept-node layer for this call: this layer's current attributes, the kept
+        structure over them, and the per-node coefficients sliced to the kept nodes (a few
+        `index_select`s and two dictionary updates per call)."""
+        kept, kept_pos = self._kept, self._fold_plan.kept
+        kept.__dict__.update(self.__dict__)
+        kept.__dict__.update(kept._structure)
+        kept.capacity = self.capacity.index_select(-1, kept_pos)
+        kept.removal = None if self.removal is None else self.removal.index_select(-2, kept_pos)
+        kept.kinetics = (None if self.kinetics is None
+                         else self.kinetics.index_select(-3, kept_pos))
+        return kept
+
+    def _move_with(self, mover) -> None:
+        """Move as every layer does, then drop the cached folding: it is recomputed at the
+        new device and precision on the next call."""
+        super()._move_with(mover)
+        if getattr(self, "_fold_cache", None) is not None:
+            self._fold_cache = None
 
     def _fold_conductance(self, conductance: torch.Tensor | None) -> Folded:
         """This call's folding, from the per-call conductance (validated) or else the
@@ -878,8 +898,7 @@ class TransportLayer(TopologyGuard):
         g = self._conduction_edges[2] if conductance is None else conductance
         if conductance is None and not g.requires_grad:
             cache = self._fold_cache
-            if (cache is not None and cache[0] is g
-                    and cache[1].conductance.dtype == torch.float64):
+            if cache is not None and cache[0] is g:
                 return cache[1]
             folded = fold_conductance(self._fold_plan, g.to(torch.float64),
                                       self._refuse_closed_folded)
@@ -926,7 +945,7 @@ class TransportLayer(TopologyGuard):
                                     "sources")
         src_k, ys = fold_sources(plan, folded, self._node_major(src_i, self.n_i))
         sources_kept = src_k.new_zeros(src_k.shape[:-2] + (self.net.n, self.n_species))
-        sources_kept = sources_kept.index_copy(-2, self._kept.interior_idx, src_k)
+        sources_kept = sources_kept.index_copy(-2, self._kept._structure["interior_idx"], src_k)
 
         def kept_capacity(c):
             return None if c is None else self._capacity_arg(c).index_select(-1, plan.kept)
@@ -939,7 +958,8 @@ class TransportLayer(TopologyGuard):
         """The interior values, node-major, from the kept nodes' (see `_folding.recover`)."""
         return recover(
             self._fold_plan, folded, ys, x_kept, x_boundary,
-            kept_nodes=self._kept.interior_idx, boundary_idx=self.boundary_idx, n=self.net.n,
+            kept_nodes=self._kept._structure["interior_idx"], boundary_idx=self.boundary_idx,
+            n=self.net.n,
             x_held=x_held, y_scale=y_scale,
         )
 
@@ -960,7 +980,7 @@ class TransportLayer(TopologyGuard):
         g = self._conductance_arg(conductance)
         folded, ys, sources_kept, cap_k, cap_prev_k, rem_k, _ = self._fold_inputs(
             sources, capacity, capacity_prev, removal, g)
-        result, integral = self._kept._step(
+        result, integral = self._kept_layer()._step(
             x_n.index_select(-2, self._fold_plan.kept), q, sources_kept, x_boundary, dt,
             on_failure=on_failure, capacity=cap_k, capacity_prev=cap_prev_k, removal=rem_k,
             transmission=transmission, conductance=folded.conductance,
@@ -974,7 +994,7 @@ class TransportLayer(TopologyGuard):
         xb_end = x_boundary if x_boundary_end is None else x_boundary_end
         xb_n = self._node_major(
             self._to_stacked(xb_end.to(dtype), self.n_b, "x_boundary")[0], self.n_b)
-        n_k = self._kept.n_i
+        n_k = self._kept._structure["n_i"]
         if isinstance(result, SolveResult):
             full = self._recover(folded, ys, self._node_major(result.x, n_k), xb_n, x_n)
             return dataclasses.replace(result, x=self._stacked_of(full)), None
@@ -1005,14 +1025,14 @@ class TransportLayer(TopologyGuard):
         folded, ys, sources_kept, cap_k, _, rem_k, _ = self._fold_inputs(
             sources, capacity, None, removal, g)
         _, reduced = self._to_stacked(self._sources_interior(sources), self.n_i, "sources")
-        result = self._kept.steady(
+        result = self._kept_layer().steady(
             q, sources_kept, x_boundary, on_failure=on_failure, capacity=cap_k,
             removal=rem_k, transmission=transmission, conductance=folded.conductance,
             diagnostics=diagnostics,
         )
         xb_n = self._node_major(
             self._to_stacked(x_boundary.to(dtype), self.n_b, "x_boundary")[0], self.n_b)
-        n_k = self._kept.n_i
+        n_k = self._kept._structure["n_i"]
         if isinstance(result, SolveResult):
             full = self._recover(folded, ys, self._node_major(result.x, n_k), xb_n, None)
             return dataclasses.replace(result, x=self._stacked_of(full))
