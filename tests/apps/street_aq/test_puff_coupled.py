@@ -587,6 +587,19 @@ def test_steady_limit_in_a_weakly_unstable_hour_is_the_kernel():
     assert all(e <= 1e-12 for e in errors.values())
 
 
+def test_steady_limit_in_a_weakly_stable_hour_is_the_kernel():
+    """Test 2a in an hour of the band 0 < h / L <= 1 (L = 660 m, h = 330 m), tabulated as
+    neutral turbulence under the stable wind profile: the train is the kernel to
+    rounding."""
+    met = {**_STEADY_MET, "u_star": 0.3, "h_abl": 330.0, "lmo": 660.0}
+    _, kernel, tables, field, receptors = _steady_setup("none", met)
+    errors = {dt: _kernel_error(field, tables, receptors, kernel,
+                                _steady_train(field, tables, dt), dt)
+              for dt in (10.0, 2.5)}
+    print("steady limit, weakly stable, along_wind='none', e(dt):", errors)
+    assert all(e <= 1e-12 for e in errors.values())
+
+
 def test_steady_limit_with_along_wind_spread_has_a_converged_floor():
     """Test 2b, kernel level: with `along_wind="sigma_y"` the steady limit is the kernel
     smoothed along the wind, a property of the slender-plume steady kernel, not an error;

@@ -83,10 +83,12 @@ derived; each is a named parameter with a default:
   probe cases' grids end between 688 and 708 m with 700 m cells (708 m in one of the 38
   runs; 686-700 m in the ten committed as test fixtures).
 
-Unstable hours (`L < 0`). SIRANE classifies an hour by `h / L` (`CONVECTIVE_H_OVER_L`):
-a weakly unstable hour, `h / |L| <= 0.3`, is tabulated exactly as a neutral one -- the
-neutral `sigma_v`, `sigma_w`, `a` and `N = 0` -- except that the wind profile `U(z)` keeps
-the unstable `psi_m` of `L`; the probe runs agree with this at the neutral cases' level.
+Stability classes. SIRANE classifies an hour by `h / L`, as the ADMS scheme it cites (CERC,
+2001): an hour in the neutral class `-CONVECTIVE_H_OVER_L <= h / L <= STABLE_H_OVER_L`
+(-0.3 to 1) is tabulated exactly as a neutral one -- the neutral `sigma_v`, `sigma_w`,
+`a = 2.5 u*/h` and `N = 0` -- except that the wind profile `U(z)` keeps the `psi_m` of `L`;
+the stable law above applies only for `h / L > 1`. The probe runs agree with this at the
+neutral cases' level on both sides of `L -> infinity`.
 
 Not implemented, by name: the convective regime (`h / |L| > 0.3`), where SIRANE switches to
 another vertical mechanism (the probe runs fit `sigma_z = sigma_w t / sqrt(1 + t / 2 T_L)`
@@ -216,6 +218,18 @@ DEFAULT_TEMPERATURE_K = 288.15
 """The air temperature used with an explicit `theta_star`, K (the default `theta*` does not
 need one)."""
 
+STABLE_H_OVER_L = 1.0
+"""SIRANE's stable regime boundary in `h / L`: an hour with `L > 0` and `h / L <=
+STABLE_H_OVER_L` is in the neutral class (see `CONVECTIVE_H_OVER_L`) and tabulated as neutral
+-- the neutral `sigma_v`, `sigma_w`, `sigma_z`, `a = 2.5 u*/h` and `N = 0` -- with only the wind
+profile `U(z)` seeing `L`; above it the stable law of this module applies. The ADMS neutral
+class `h/L <= 1` (CERC, 2001), boundary included. Read off SIRANE probe runs of one street
+along the wind (u* = 0.3 m/s, h = 330 m, `tests/data/street/sirane_kernel_probe`): at h / L =
+0.25, 0.5 and 0.9 the grid is the neutral kernel's (`G2_S025`, `G2_S05`, `G2_S09`; the stable
+law gives sigma_y 21, 8 and 1.5 % off and P_z / U p90 1.9e-2, 4.1e-2 and 7.8e-2), at 1.1 it is
+the stable law's (`G2_S11`; neutral turbulence there is 5.3e-2 off at the median); 1.5
+(not committed) is stable too."""
+
 CONVECTIVE_H_OVER_L = 0.3
 """SIRANE's unstable regime boundary in `h / |L|` (the boundary-layer height over the
 Obukhov length): an hour with `L < 0` and `h / |L| <= CONVECTIVE_H_OVER_L` is tabulated as
@@ -294,8 +308,9 @@ def turbulence(
     Eqs. (12)-(13) (`psi_h = -5 zeta`, `z_T` dropped). `theta_star=None` takes
     `theta* = u*^2 T / (kappa g L)` (the definition of `L` under Eq. 10), for which
     `N^2 = u*^2 / (kappa^2 L) (1/z + 5/L)` whatever the temperature. The plume table does
-    not use the unstable branch: it takes the neutral one for `h / |L| <=
-    CONVECTIVE_H_OVER_L` and refuses the convective hours beyond.
+    not use the unstable branch, and the stable one only for `h / L > STABLE_H_OVER_L`: it
+    takes the neutral branch for `-CONVECTIVE_H_OVER_L <= h / L <= STABLE_H_OVER_L` and
+    refuses the convective hours beyond.
     """
     z, u_star, h, lmo = (_f64(v) for v in (z, u_star, h_abl, lmo))
     unstable, neutral, stable = _regimes(lmo, neutral_abs_lmo)
@@ -476,9 +491,10 @@ def _table_inputs(
             f"{CONVECTIVE_H_OVER_L} are tabulated (see noodl.apps.street_aq.plume); got "
             f"h_abl / |lmo| up to {float(torch.where(convective, h_over_l, 0.0).max()):.3g}"
         )
-    # Weakly unstable hours take the neutral turbulence (SIRANE's classification): the
-    # wind profile alone sees L.
-    turbulence_lmo = torch.where(unstable, torch.full_like(lmo, math.inf), lmo)
+    # SIRANE's neutral class (-0.3 <= h/L <= 1) takes the neutral turbulence: the wind
+    # profile alone sees L.
+    stable = stable & (h_over_l > STABLE_H_OVER_L)
+    turbulence_lmo = torch.where(stable, lmo, torch.full_like(lmo, math.inf))
     sv, sw, n_bv = turbulence(h_r, u_star=u_star, h_abl=h_abl, lmo=turbulence_lmo,
                               theta_star=theta_star, temperature=temperature, kappa=kappa,
                               neutral_abs_lmo=neutral_abs_lmo)

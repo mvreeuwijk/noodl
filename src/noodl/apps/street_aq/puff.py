@@ -252,7 +252,7 @@ def puff_tables(
     bit, and `sigma_z`, `z_c` are the scan's nodes resampled the same way (`_trajectory`).
     Needs `h_abl > h_canopy > d`, `u* > 0` and `tau_z < TIME_STEP_S`; a wind at `H_R` so
     low that the scan would need more than `MAX_TABLE_STEPS` steps, and the convective
-    regime (`h_abl / |lmo| > CONVECTIVE_H_OVER_L`; weakly unstable hours are tabulated as in
+    regime (`h_abl / |lmo| > CONVECTIVE_H_OVER_L`; SIRANE's neutral class is tabulated as in
     `plume_table`), are refused by name. Rows are built in chunks under `KERNEL_BYTES_CAP`
     (`table_chunks`)."""
     centres = torch.as_tensor(centres, dtype=_DTYPE)

@@ -24,8 +24,9 @@ Five comparisons, each by case:
   fluxes, `u_d W L (Cint - Cext)`, against SIRANE's printed `Cext`, with the inputs and
   options the archive can discriminate;
 - the same kernel against SIRANE's own concentration grids, centrelines and receptors in
-  fifteen cases of one isolated street (`tests/data/street/sirane_kernel_probe`, see its
-  NOTICE.md) across, along and oblique to the wind, neutral, stable and weakly unstable.
+  nineteen cases of one isolated street (`tests/data/street/sirane_kernel_probe`, see its
+  NOTICE.md) across, along and oblique to the wind, neutral, stable and on both sides of
+  SIRANE's neutral class.
 
 Tolerances are set from the measured values and each comment states the measured number and
 why the tolerance is what it is. SIRANE prints every velocity to two decimals, which is the
@@ -478,8 +479,10 @@ def test_the_plume_inputs_sirane_discriminates(record_property, capsys):
 # Kensington hour with SIRANE's floors, and U1500, U5000, U30K weakly unstable (u* = 0.3
 # m/s, h = 330 m, L = -1500, -5000, -30000 m: h / |L| <= 0.3, tabulated as neutral under the
 # unstable wind profile, `plume.CONVECTIVE_H_OVER_L`; T029 the same just below the
-# boundary, h / |L| = 0.29). The street's and the junctions'
-# fluxes are SIRANE's own (its Listing), so the comparison isolates the kernel.
+# boundary, h / |L| = 0.29; S025, S05, S09 weakly stable, h / L = 0.25, 0.5, 0.9, likewise
+# tabulated as neutral, `plume.STABLE_H_OVER_L`, and S11 just above, h / L = 1.1, stable).
+# The street's and the junctions' fluxes are SIRANE's own (its Listing), so the comparison
+# isolates the kernel.
 #
 # These checks are IN SAMPLE: the default time-offset knots, the plume-centre law and
 # theta* = 0.060 K were fitted on these cases and their meteorologies (M1, M2, M3F among
@@ -565,6 +568,12 @@ PROBE_TOLERANCES = {
     # just below SIRANE's regime boundary (L = -1137.93 m, h = 330 m: h / |L| = 0.29), along
     # the wind: measured 3.09e-4, 1.56e-2 (the far field near the centreline).
     "G2_T029": (5e-4, 2.4e-2),
+    # weakly stable (u* = 0.3 m/s, h = 330 m) along the wind, measured (median, p90):
+    # G2_S025 (h/L = 0.25) 2.62e-4, 1.84e-2; G2_S05 (0.5) 2.27e-4, 1.75e-2; G2_S09 (0.9)
+    # 2.37e-4, 1.57e-2 -- SIRANE's neutral class (the stable law gave 1.12e-1, 2.07e-1;
+    # 2.85e-2, 7.01e-2; 1.23e-2, 3.14e-2); G2_S11 (h/L = 1.1, stable law) 3.00e-4, 2.65e-2.
+    "G2_S025": (4e-4, 2.8e-2), "G2_S05": (3.5e-4, 2.7e-2), "G2_S09": (3.5e-4, 2.4e-2),
+    "G2_S11": (4.5e-4, 4e-2),
 }
 
 

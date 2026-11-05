@@ -2,7 +2,7 @@
 
 Reference data: compact extracts of SIRANE v2.1 rev 128 output (LMFA / École Centrale de
 Lyon, http://air.ec-lyon.fr/SIRANE/; the model is described in Soulhac et al. 2011,
-*Atmospheric Environment* 45, 7379-7395) for fifteen single-street cases. Each case is one
+*Atmospheric Environment* 45, 7379-7395) for nineteen single-street cases. Each case is one
 isolated street under imposed meteorology, built from the South Kensington deck
 (`../sirane_south_kensington`), so that SIRANE's above-roof street-plume kernel can be
 compared with noodl physics' directly. They are the reference for `plume.py` and are used
@@ -30,6 +30,7 @@ background, no deposition and no chemistry. The hour read is 07/01/2014 01:00.
 | `*_M3F` | | the South Kensington hour through SIRANE's preprocessor (u* printed 0.14 m/s, L = 100 m, h = 114.5 m), with SIRANE's floors `SIGMA_V_MIN` = 0.5 and `SIGMA_W_MIN` = 0.3 m/s |
 | `*_U1500`, `*_U5000`, `*_U30K` | | weakly unstable, u* = 0.3 m/s, h = 330 m, L = -1500, -5000 and -30000 m (h / \|L\| <= 0.3, SIRANE's neutral class), no turbulence floors |
 | `G2_T029` | | the same at L = -1137.93 m (h / \|L\| = 0.29, just inside the neutral class) |
+| `G2_S025`, `G2_S05`, `G2_S09`, `G2_S11` | | weakly stable, u* = 0.3 m/s, h = 330 m, L = 1320, 660, 366.67 and 300 m (h / L = 0.25, 0.5 and 0.9 in SIRANE's neutral class, 1.1 just above it), no turbulence floors |
 
 ## The files
 

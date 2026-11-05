@@ -613,5 +613,169 @@
   },
   "W": 20.0,
   "H": 20.0
+ },
+ "G2_S025": {
+  "street": [
+   [
+    -100.0,
+    0.0
+   ],
+   [
+    100.0,
+    0.0
+   ]
+  ],
+  "street_flux_g_s": 0.0,
+  "node_flux_g_s": [
+   0.0,
+   1000.0
+  ],
+  "cint_ug_m3": 7168000.0,
+  "max_ug_m3": 7168421.5,
+  "n_cells_scored": 8101,
+  "meteo": {
+   "u_star": 0.3,
+   "lmo": 1320.0,
+   "h_abl": 330.0,
+   "sigma_theta_deg": 7.29,
+   "theta_star": 0.005,
+   "temperature_c": 4.0,
+   "wind_from_deg": 270.0
+  },
+  "options": {
+   "H_R": 20.0,
+   "U_MIN": 0.0,
+   "SIGMA_V_MIN": 0.0,
+   "SIGMA_W_MIN": 0.0
+  },
+  "site": {
+   "Z0D": 1.0,
+   "ZDISPL": 13.0
+  },
+  "W": 20.0,
+  "H": 20.0
+ },
+ "G2_S05": {
+  "street": [
+   [
+    -100.0,
+    0.0
+   ],
+   [
+    100.0,
+    0.0
+   ]
+  ],
+  "street_flux_g_s": 0.0,
+  "node_flux_g_s": [
+   0.0,
+   1000.0
+  ],
+  "cint_ug_m3": 7168000.0,
+  "max_ug_m3": 7167553.0,
+  "n_cells_scored": 8078,
+  "meteo": {
+   "u_star": 0.3,
+   "lmo": 660.0,
+   "h_abl": 330.0,
+   "sigma_theta_deg": 7.23,
+   "theta_star": 0.01,
+   "temperature_c": 4.0,
+   "wind_from_deg": 270.0
+  },
+  "options": {
+   "H_R": 20.0,
+   "U_MIN": 0.0,
+   "SIGMA_V_MIN": 0.0,
+   "SIGMA_W_MIN": 0.0
+  },
+  "site": {
+   "Z0D": 1.0,
+   "ZDISPL": 13.0
+  },
+  "W": 20.0,
+  "H": 20.0
+ },
+ "G2_S09": {
+  "street": [
+   [
+    -100.0,
+    0.0
+   ],
+   [
+    100.0,
+    0.0
+   ]
+  ],
+  "street_flux_g_s": 0.0,
+  "node_flux_g_s": [
+   0.0,
+   1000.0
+  ],
+  "cint_ug_m3": 7166000.0,
+  "max_ug_m3": 7166218.0,
+  "n_cells_scored": 8046,
+  "meteo": {
+   "u_star": 0.3,
+   "lmo": 366.67,
+   "h_abl": 330.0,
+   "sigma_theta_deg": 7.15,
+   "theta_star": 0.017,
+   "temperature_c": 4.0,
+   "wind_from_deg": 270.0
+  },
+  "options": {
+   "H_R": 20.0,
+   "U_MIN": 0.0,
+   "SIGMA_V_MIN": 0.0,
+   "SIGMA_W_MIN": 0.0
+  },
+  "site": {
+   "Z0D": 1.0,
+   "ZDISPL": 13.0
+  },
+  "W": 20.0,
+  "H": 20.0
+ },
+ "G2_S11": {
+  "street": [
+   [
+    -100.0,
+    0.0
+   ],
+   [
+    100.0,
+    0.0
+   ]
+  ],
+  "street_flux_g_s": 0.0,
+  "node_flux_g_s": [
+   0.0,
+   1000.0
+  ],
+  "cint_ug_m3": 7166000.0,
+  "max_ug_m3": 7165574.5,
+  "n_cells_scored": 8276,
+  "meteo": {
+   "u_star": 0.3,
+   "lmo": 300.0,
+   "h_abl": 330.0,
+   "sigma_theta_deg": 7.1,
+   "theta_star": 0.021,
+   "temperature_c": 4.0,
+   "wind_from_deg": 270.0
+  },
+  "options": {
+   "H_R": 20.0,
+   "U_MIN": 0.0,
+   "SIGMA_V_MIN": 0.0,
+   "SIGMA_W_MIN": 0.0
+  },
+  "site": {
+   "Z0D": 1.0,
+   "ZDISPL": 13.0
+  },
+  "W": 20.0,
+  "H": 20.0
  }
 }
