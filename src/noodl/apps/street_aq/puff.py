@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field, fields, replace
 
 import torch
 from torch import Tensor
@@ -1270,7 +1270,15 @@ class PuffClosure:
 
         # under autograd the step is checkpointed (design Sect. 4.5): the graph keeps the
         # puff state of every step and the backward recomputes the step's puffs and pairs
-        if torch.is_grad_enabled() and _CHECKPOINT:
+        # (only when something reaching the step requires grad: a forward-only run outside
+        # `torch.no_grad` records nothing and pays no checkpoint)
+        reaching = [*(getattr(puff, f.name) for f in fields(PuffState)),
+                    *(getattr(tables, f.name) for f in fields(PuffTables)),
+                    field.xy, field.weight, field.width, field.clamp,
+                    masses, drawn, release_xy, theta, c_bg]
+        recorded = torch.is_grad_enabled() and any(
+            isinstance(v, Tensor) and v.requires_grad for v in reaching)
+        if recorded and _CHECKPOINT:
             puff, c_ext, evicted = checkpoint(puff_step, puff, use_reentrant=False)
         else:
             puff, c_ext, evicted = puff_step(puff)

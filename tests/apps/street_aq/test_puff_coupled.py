@@ -778,3 +778,44 @@ def test_saved_bytes_grow_linearly_with_the_live_puffs(monkeypatch):
     plain = _saved_bytes_per_step()
     assert straight_line_residual(plain) > 0.05
     assert float(plain[-1, 1]) > 100 * float(rows[-1, 1])
+
+
+# ------------------------------------------------------------------ union with a building
+
+
+def test_puff_street_couples_to_a_building_through_union():
+    """The puff street model and a small vented building join through `couple.union`
+    (unchanged) with a two-way `ValueLink`: an above-roof pulse upwind of the grid reaches
+    the street the building reads after the travel time, and the building's indoor
+    concentration is zero until then and positive after."""
+    from noodl.couple import CONCENTRATION_TO_MASS_FRACTION, ValueLink, union
+    from tests.test_couple import _tiny_building_model
+
+    net, names = twelve_street_grid(L=200.0)
+    model, state, drivers = build_model(
+        net, background="per_street", puffs=PuffOptions(sigma_theta=math.radians(6.0),
+                                                        n_releases=1))
+    target = names.index("4")
+    drv = {**_drivers(model, drivers, bg=0.0),
+           "puff.release_xy": torch.tensor([[-150.0, 200.0]], dtype=DT),
+           "puff.release_z": torch.tensor([30.0], dtype=DT),
+           "puff.release_rate": torch.tensor([1e-3], dtype=DT),
+           "puff.release_start": torch.tensor([0.0], dtype=DT),
+           "puff.release_duration": torch.tensor([10.0], dtype=DT)}
+    state = {**state, "street.x": torch.zeros(12, dtype=DT)}
+    b_model, b_state, b_drivers = _tiny_building_model()
+    b_state = {"species.x": torch.zeros(1, dtype=DT)}
+    link = ValueLink(from_model="street", from_key="street.x", from_index=target,
+                     to_model="building", to_key="species.x_boundary", to_index=0,
+                     convert=CONCENTRATION_TO_MASS_FRACTION, two_way=True)
+    city, s, d = union({"street": (model, state, drv), "building": (b_model, b_state, b_drivers)},
+                       shared=[link])
+    indoor, outdoor = [], []
+    for k in range(30):
+        s = city.step(s, d, 10.0, t=10.0 * k)
+        indoor.append(float(s["building"]["species.x"][0]))
+        outdoor.append(float(s["street"]["street.x"][target]))
+    first = next(k for k, v in enumerate(outdoor) if v > 0.0)
+    assert first >= 1
+    assert all(v == 0.0 for v in indoor[:first])
+    assert indoor[-1] > 0.0
