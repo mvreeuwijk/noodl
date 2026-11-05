@@ -383,6 +383,10 @@ def twoloop() -> WaterNetwork:
     )
 
 
+#: Option values of `build_model(friction=...)` named for the reference model, normalised to
+#: the physical name: ``"epanet"`` is EPANET 2.2's composite friction law.
+_FRICTION_ALIASES = {"epanet": "composite"}
+
 
 def _rounded_cfs_per_m3s(flow_units: str | None) -> float | None:
     """EPANET's internal cfs per m3/s for a file in `flow_units` (None: exact)."""
@@ -446,6 +450,7 @@ def build_model(
     EPANET, and a `.inp` with `HEADLOSS D-W` then reproduces EPANET to its float32 output.
     `"colebrook"` keeps the generic `Duct` (Colebrook, laminar line below Re = 2000, water
     at 1.002e-3 / 998.2 m^2/s) for users who want the implicit Colebrook law instead.
+    Alias: `friction="epanet"` for `"composite"` (EPANET).
 
     The Darcy-Weisbach path works in PRESSURE (`Duct` is written for it), so the whole
     layer does: heads are multiplied by `rho g` on the way in and `model.head_scale`
@@ -502,6 +507,7 @@ def build_model(
         raise ValueError(
             f"build_model: headloss must be 'H-W' or 'D-W', got {headloss!r}"
         )
+    friction = _FRICTION_ALIASES.get(friction, friction)
     if pipe_form is None:
         pipe_form = "potential" if headloss == "D-W" and friction == "colebrook" else "flow"
     if friction not in ("composite", "colebrook"):

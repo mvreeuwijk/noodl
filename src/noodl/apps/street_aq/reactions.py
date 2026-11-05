@@ -58,9 +58,14 @@ def k_no_o3_jpl2003(temperature) -> torch.Tensor:
     The NASA/JPL (2003) rate, as in MUNICH's Leighton mechanism, at the absolute
     temperature `temperature` (K), times `N_A * 1e-6`. It is `Photostationary`'s default
     rate.
+
+    Alias: `k_no_o3_munich` (MUNICH).
     """
     t = torch.as_tensor(temperature, dtype=torch.float64)
     return 3.0e-12 * AVOGADRO * 1e-6 * torch.exp(-1500.0 / t)
+
+
+k_no_o3_munich = k_no_o3_jpl2003  # alias, the MUNICH name
 
 
 def molar_volume(temperature, pressure=P_STANDARD) -> torch.Tensor:

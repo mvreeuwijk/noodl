@@ -148,7 +148,11 @@ def test_tabulated_geometry_refuses_storage_by_name():
         build_model(net, storage=True, air=False, quality=False)
 
 
-@pytest.mark.parametrize("geometry", ["circle", "swmm"])     # "swmm": the old name, no alias
+def test_swmm_names_the_tabulated_geometry():
+    assert read_swmm_inp(DATA / "tree_kinwave.inp", geometry="swmm")[0].geometry == "tabulated"
+
+
+@pytest.mark.parametrize("geometry", ["circle"])
 def test_unknown_geometry_is_refused_by_name(geometry):
     with pytest.raises(ValueError, match=rf"geometry must be 'analytic' or 'tabulated', got "
                                          rf"'{geometry}'"):

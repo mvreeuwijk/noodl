@@ -376,6 +376,8 @@ class DoorCompartment(_DoorCompartmentBase):
     ``VZerCom_flow = vZer A/nCom = vZer dA`` (``DoorDiscretized.mo:52``,
     ``TwoWayFlowElement.mo:83``). Defaults are MBL's: ``CD = 0.65``, ``dp_turbulent = 0.01``,
     ``vZer = 0.001``. Build a whole door with :func:`discretized_door`.
+
+    Alias: `MBLDoorCompartment` (MBL).
     """
 
     def __init__(
@@ -443,6 +445,8 @@ class OperableDoorCompartment(_DoorCompartmentBase):
     ``drivers[y_key]`` is a 0-d scalar or a tensor whose last dimension is 1 or the edge
     count, broadcasting against ``dp``; values are used as given (MBL declares ``min=0,
     max=1``, ``:29``).
+
+    Alias: `MBLDoorCompartmentOperable` (MBL).
     """
 
     def __init__(
@@ -597,7 +601,10 @@ def discretized_door(
     its head drive. Defaults are MBL's (``DoorDiscretized.mo:6-11``,
     ``TwoWayFlowElementBuoyancy.mo:6-14``, ``DoorDiscretizedOpen.mo:6``,
     ``TwoWayFlowElement.mo:19``). ``dA = wOpe hOpe / nCom`` on every edge
-    (``DoorDiscretizedOpen.mo:23``, ``DoorDiscretized.mo:60``)."""
+    (``DoorDiscretizedOpen.mo:23``, ``DoorDiscretized.mo:60``).
+
+    Alias: `mbl_discretized_door` (MBL).
+    """
     n = _check_ncom(nCom)
     s, t = _door_endpoints(n, src, tgt)
     hAg, hBg = _heights(n, hOpe, hA, hB)
@@ -657,7 +664,10 @@ def discretized_operable_door(
 ) -> tuple[OperableDoorCompartment, DoorCompartmentHead]:
     """One ``DoorDiscretizedOperable`` as ``nCom`` edges of ``kind``; see
     :func:`discretized_door`. ``AOpe = wOpe hOpe`` (``DoorDiscretizedOperable.mo:35``);
-    ``LClo`` has no MBL default."""
+    ``LClo`` has no MBL default.
+
+    Alias: `mbl_discretized_operable_door` (MBL).
+    """
     n = _check_ncom(nCom)
     s, t = _door_endpoints(n, src, tgt)
     hAg, hBg = _heights(n, hOpe, hA, hB)
@@ -716,6 +726,8 @@ class DoorPortStream(ConstitutiveLaw):
     every time scheme and the moist-air heat carrier see MBL's streams, and the edges' flows
     ARE the door's ``m1_flow``/``m2_flow`` (``mAB_flow``, ``-mBA_flow``). The node mass balance
     is the same (``mAB - mBA`` is the compartments' net flow).
+
+    Alias: `MBLDoorPortStream` (MBL).
     """
 
     def __init__(self, comp: _DoorCompartmentBase, head: DoorCompartmentHead,
@@ -810,3 +822,11 @@ class DoorPortStream(ConstitutiveLaw):
         """Tangent at ``dp = 0`` on a one-edge zero."""
         zero = torch.zeros(1, dtype=self._dtype())
         return self.flow(zero, drivers), self.dflow(zero, drivers)
+
+# Modelica Buildings Library (MBL) names, kept as aliases: they name the reference model
+# these laws are transcribed from.
+MBLDoorCompartment = DoorCompartment  # alias, the MBL name
+MBLDoorCompartmentOperable = OperableDoorCompartment  # alias, the MBL name
+MBLDoorPortStream = DoorPortStream  # alias, the MBL name
+mbl_discretized_door = discretized_door  # alias, the MBL name
+mbl_discretized_operable_door = discretized_operable_door  # alias, the MBL name

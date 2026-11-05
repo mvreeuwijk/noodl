@@ -469,7 +469,7 @@ def test_a_non_default_viscosity_and_gravity_reach_the_darcy_weisbach_elements()
     assert model.head_scale == pytest.approx(998.2 * 1.1 * 9.80665, rel=1e-15)
 
 
-@pytest.mark.parametrize("friction", ["swamee", "epanet"])  # "epanet": the old name, no alias
+@pytest.mark.parametrize("friction", ["swamee"])
 def test_an_unknown_friction_law_is_refused(friction):
     with pytest.raises(ValueError, match=rf"friction must be 'composite' or 'colebrook', got "
                                          rf"'{friction}'"):

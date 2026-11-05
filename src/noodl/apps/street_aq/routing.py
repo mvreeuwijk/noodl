@@ -40,12 +40,20 @@ MAX_SIGMA_THETA_EXACT = math.pi / 4.0
 """The largest direction spread `direction_averaging="exact_gaussian"` accepts (exclusive). The
 exact average integrates over the whole real line of directions, not around the circle:
 the Gaussian mass lying more than half a turn from the mean, which that ignores, is below
-`erfc(4 / sqrt 2) = 6.3e-5` at `pi/4` and below `1e-15` at 20 degrees."""
+`erfc(4 / sqrt 2) = 6.3e-5` at `pi/4` and below `1e-15` at 20 degrees.
+
+Alias: `MAX_SIGMA_THETA_SIRANE` (SIRANE)."""
+
+MAX_SIGMA_THETA_SIRANE = MAX_SIGMA_THETA_EXACT  # alias, the SIRANE name
 
 EXACT_GAUSSIAN_WINDOW = 8.0
 """Half-width of the `direction_averaging="exact_gaussian"` window, in units of `sigma_theta`:
 switch angles farther than `8 sigma_theta` from the mean direction are dropped, because
-the Gaussian mass beyond them, `Phi(-8) = 6.2e-16`, is below float64 resolution."""
+the Gaussian mass beyond them, `Phi(-8) = 6.2e-16`, is below float64 resolution.
+
+Alias: `SIRANE_WINDOW` (SIRANE)."""
+
+SIRANE_WINDOW = EXACT_GAUSSIAN_WINDOW  # alias, the SIRANE name
 
 _FLOW_KINDS = ("route", "vent", "exchange")
 """The edge kinds `StreetFlows` writes its concatenated `q` in, and the order
@@ -83,17 +91,28 @@ def sigma_theta_turbulence_intensity(sigma_v: Tensor, u_ref: Tensor) -> Tensor:
     neutral branch `sigma_v = 1.2 u*` exactly, so `sigma_theta` is independent of the wind
     speed whenever `u*` is proportional to it -- which is why the published idealised case
     has the same sample count at 5 and at 10 m/s.
+
+    Alias: `sigma_theta_munich` (MUNICH).
     """
     return torch.clamp(sigma_v / u_ref, max=MAX_SIGMA_THETA)
+
+
+sigma_theta_munich = sigma_theta_turbulence_intensity  # alias, the MUNICH name
 
 
 def n_theta_rectangle_rule(sigma_theta: Tensor) -> Tensor:
     """The sample count of the `rectangle_rule` direction average:
     `ntheta = floor(sigma_theta in DEGREES)` (MUNICH, SRC `:3568`), as a long tensor,
     clamped to `[1, 10]`. MUNICH skips the averaging entirely at 1, i.e. below two
-    degrees."""
+    degrees.
+
+    Alias: `n_theta_munich` (MUNICH).
+    """
     degrees = sigma_theta * 180.0 / math.pi
     return torch.clamp(torch.floor(degrees).long(), min=1, max=MAX_N_THETA)
+
+
+n_theta_munich = n_theta_rectangle_rule  # alias, the MUNICH name
 
 
 def direction_offsets(
@@ -209,6 +228,8 @@ def exact_gaussian_direction_samples(
     zero-weight samples, so every junction and instance shares one sample axis. A spread
     of zero gives the single sample at the mean. Raises `ValueError` for a spread that is
     negative, not finite, or at least `MAX_SIGMA_THETA_EXACT`.
+
+    Alias: `sirane_direction_samples` (SIRANE).
     """
     theta = torch.as_tensor(theta, dtype=torch.float64)
     sigma = torch.as_tensor(sigma_theta, dtype=torch.float64)
@@ -254,6 +275,9 @@ def exact_gaussian_direction_samples(
     cdf = torch.cat([zeros, cdf, zeros + 1.0], -1)
     weights = cdf[..., 1:] - cdf[..., :-1]
     return offsets, weights
+
+
+sirane_direction_samples = exact_gaussian_direction_samples  # alias, the SIRANE name
 
 
 def node_closure(flux: Tensor) -> tuple[Tensor, Tensor, Tensor, Tensor]:
