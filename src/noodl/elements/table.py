@@ -228,6 +228,3 @@ class SplineFlowTable(ConstitutiveLaw):
         inside = (dp > x1) & (dp < x2)
         left = dp <= x1
         return torch.where(inside, cubic, torch.where(left, lin_left, lin_right))
-
-# Pre-rename names, kept as aliases so existing code keeps working.
-MBLTable = SplineFlowTable  # alias, the pre-rename name

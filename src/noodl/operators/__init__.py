@@ -10,12 +10,14 @@ from noodl.operators.base import (
 )
 from noodl.operators.dense import DenseOperator
 from noodl.operators.graph import GraphLaplacianOperator
+from noodl.operators.shifted import ShiftedOperator
 
 __all__ = [
     "AdvectionOperator",
     "DenseOperator",
     "GraphLaplacianOperator",
     "LinearOperator",
+    "ShiftedOperator",
     "SolveResult",
     "SolverStatus",
     "SparseAssembling",

@@ -39,8 +39,7 @@ from torch import Tensor
 from torch.utils.checkpoint import checkpoint
 
 from noodl.apps.street_aq.above_roof import roof_fluxes, roof_wiring
-from noodl.apps.street_aq.canyon import KAPPA
-from noodl.apps.street_aq.closures import SIGMA_V_MIN, SIGMA_W_MIN
+from noodl.apps.street_aq.closures import KAPPA_040, SIGMA_V_MIN, SIGMA_W_MIN
 from noodl.apps.street_aq.network import StreetNetwork
 from noodl.apps.street_aq.plume import (
     _DTYPE,
@@ -133,7 +132,7 @@ class PuffTables:
     lmo: Tensor | None = None
     z0: Tensor | None = None
     d: Tensor | None = None
-    kappa: float = KAPPA
+    kappa: float = KAPPA_040
     t: Tensor = field(init=False)
     _span: float = field(init=False, repr=False, compare=False)
     _shifted: Tensor = field(init=False, repr=False, compare=False)
@@ -277,7 +276,7 @@ def puff_tables(
     tau_z: Tensor | float | None = None,
     centre_k: Tensor | float = PLUME_CENTRE_K,
     x_max: float = DOWNWIND_CUTOFF_M,
-    kappa: float = KAPPA,
+    kappa: float = KAPPA_040,
 ) -> PuffTables:
     """SIRANE's plume trajectory on the steady kernel's distance grid (module docstring),
     one table per entry of `centres`.

@@ -68,9 +68,9 @@ def test_resampled_nodes_equal_the_existing_table_bit_for_bit():
 
 
 def _nodes(met=_NEUTRAL, x_end=1000.0):
-    from noodl.apps.street_aq.canyon import KAPPA
+    from noodl.apps.street_aq.closures import KAPPA_040
     p, _, _ = _table_inputs("plume_table", **met, x_max=x_end)
-    return p, _trajectory_nodes(p, None, KAPPA, x_end=x_end)
+    return p, _trajectory_nodes(p, None, KAPPA_040, x_end=x_end)
 
 
 def test_nodes_are_time_ordered_and_start_at_the_source():
@@ -93,8 +93,8 @@ def test_nodes_pad_finished_rows_by_repeating_the_last_node():
 
 def test_n_nodes_max_truncates_the_scan():
     p, _ = _nodes()
-    from noodl.apps.street_aq.canyon import KAPPA
-    n = _trajectory_nodes(p, 5, KAPPA, x_end=1000.0)
+    from noodl.apps.street_aq.closures import KAPPA_040
+    n = _trajectory_nodes(p, 5, KAPPA_040, x_end=1000.0)
     assert n["x"].shape == (1, 5)
 
 

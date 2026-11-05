@@ -3,9 +3,8 @@
 One page per application plus one for the core library. Every public name (the module's
 `__all__`) is listed under its role -- set-up, network components, constitutive laws, drives,
 closures, reactions, sources, waveforms, files, functions, constants -- with the first line of its
-docstring and its call signature. A name exported twice for one object (the old,
-model-named spelling kept as an alias of the physical name) is listed once, with its
-aliases.
+docstring and its call signature. A name exported twice for one object is listed once, with
+its other names.
 
 Run `python scripts/gen_catalogue.py` after adding or changing anything public.
 `tests/test_docs_catalogue.py` fails when the committed pages are stale or when a public
@@ -84,15 +83,7 @@ ROLES = [
      "Subclass these to add a constitutive law, drive, closure, reaction or node source; see "
      "[Extending noodl](../development/extending.md)."),
 ]
-BASE_CLASSES = {"ConstitutiveLaw", "ImplicitLaw", "Drive", "Closure", "Reaction", "NodeSource"}
-CONSTANT_ALIASES = {
-    "KAPPA": "KAPPA_040", "KAPPA_MUNICH": "KAPPA_041",
-    "GAMMA_E": "EULER_GAMMA_TRUNCATED", "SIRANE_EXCHANGE": "EXCHANGE_SIGMA_W_RATIO",
-    "SCHULTE_BETA": "ASPECT_RATIO_EXCHANGE_BETA", "SEUIL_GAUSS": "GAUSS_CUTOFF_SIGMAS",
-}
-"""Pre-rename constant names kept as aliases (`tests/test_docs_catalogue.py` checks each
-pair is one object). Constants cannot be deduplicated by identity: two equal float literals
-in one module are one object to the compiler."""
+BASE_CLASSES = {"ConstitutiveLaw", "ImplicitLaw", "Drive", "Reaction", "NodeSource"}
 OPTION_MODULES = {"street_aq": "noodl.apps.street_aq.closures"}
 """Pages whose application has named model options: the module defining `OPTIONS` (option
 -> allowed values), `PRESETS` (preset -> its choices) and, in the docstring under
@@ -208,7 +199,6 @@ def _role(name: str, obj) -> str:
 def _entries(modules: list[str]) -> list[dict]:
     seen: dict[int, dict] = {}
     order: list[dict] = []
-    pending_alias: dict[str, list[str]] = {}
     for modname in modules:
         mod = importlib.import_module(modname)
         names = getattr(mod, "__all__", None)
@@ -217,9 +207,6 @@ def _entries(modules: list[str]) -> list[dict]:
                 inspect.isclass(o) or inspect.isfunction(o)) and o.__module__ == modname]
         for name in names:
             obj = getattr(mod, name)
-            if name in CONSTANT_ALIASES and not (inspect.isclass(obj) or inspect.isfunction(obj)):
-                pending_alias.setdefault(CONSTANT_ALIASES[name], []).append(name)
-                continue
             key = id(obj) if (inspect.isclass(obj) or inspect.isfunction(obj)) else (modname, name)
             if key in seen:
                 entry = seen[key]
@@ -239,9 +226,6 @@ def _entries(modules: list[str]) -> list[dict]:
             entry["aliases"].remove(primary)
             entry["aliases"].append(entry["name"])
             entry["name"] = primary
-    for entry in order:
-        if entry["name"] in pending_alias:
-            entry["aliases"] += pending_alias[entry["name"]]
     return order
 
 

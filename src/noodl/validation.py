@@ -34,8 +34,8 @@ from noodl._broadcast import broadcast_shapes
 from noodl.refs import (
     Field,
     input_unit_declarations,
-    normalize_unit,
     required_state_keys,
+    units_agree,
 )
 
 Tensor = torch.Tensor
@@ -190,9 +190,10 @@ def _declared(model, attr: str) -> set[str]:
 
 def _check_units(model, specs, who, add) -> None:
     """`unit-mismatch` (warning): a closure declares a unit, for an input in `input_specs` or
-    an output in `output_units`, that differs (after `normalize_unit`) from the unit of the
+    an output in `output_units`, that differs (by `units_agree`) from the unit of the
     layer field or earlier declared input the key refers to. `unit-undeclared` (info): a
-    field the model knows has no unit. Units are compared as strings; nothing is converted."""
+    field the model knows has no unit. Units are compared after normalising their spelling
+    (`noodl.refs.normalize_unit`: "m3", "m^3" and "m³" agree); nothing is converted."""
     refs = model.refs
     fields = refs.fields()
     reference: dict[str, tuple[str, str]] = {}      # key -> (unit, where it was declared)
@@ -209,7 +210,7 @@ def _check_units(model, specs, who, add) -> None:
         if key not in reference and kind == "input":
             reference[key] = (unit, who_)
         ref = reference.get(key)
-        if ref is None or normalize_unit(ref[0]) == normalize_unit(unit):
+        if ref is None or units_agree(ref[0], unit):
             return
         add(Issue("warning", "unit-mismatch",
                   f"{who_} declares {kind} {key!r} in [{unit}], but {ref[1]} {key!r} has "
@@ -263,8 +264,7 @@ def check_setup(
         used.update(layer.kinds)
     for layer in model.transport.values():
         used.update(layer.flow_kinds)
-        if getattr(layer, "conduction_kind", None):
-            used.add(layer.conduction_kind)
+        used.update(layer.conduction_kinds)
     for layer in model.allocation.values():
         used.add(layer.kind)
     layer_kinds = set(used)

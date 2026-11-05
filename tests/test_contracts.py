@@ -264,9 +264,7 @@ def test_an_uninspectable_callable_is_accepted_as_declared(monkeypatch):
 
 def test_the_two_protocols_are_distinct_at_runtime():
     """`IntegratingClosure` needs the `integrates` attribute; `AlgebraicClosure` is any
-    callable. `noodl.model.Closure` is kept as an alias of `AlgebraicClosure`."""
-    from noodl.model import Closure
-
+    callable."""
     def plain(s, d):
         return {}
 
@@ -276,7 +274,6 @@ def test_the_two_protocols_are_distinct_at_runtime():
 
     assert isinstance(plain, AlgebraicClosure) and not isinstance(plain, IntegratingClosure)
     assert isinstance(clocked, IntegratingClosure)
-    assert Closure is AlgebraicClosure
 
 
 @pytest.mark.parametrize("attr", ["inputs", "outputs", "state_keys", "edge_kinds"])

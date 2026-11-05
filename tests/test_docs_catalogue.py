@@ -104,7 +104,7 @@ def test_generator_signatures_roles_and_summaries():
     from noodl.apps import building_physics as bp
     from noodl.drives import Drive
     from noodl.elements.base import ConstitutiveLaw
-    from noodl.model import Closure, StepContext
+    from noodl.model import StepContext
     from noodl.refs import Field
     from noodl.validation import SetupReport
 
@@ -113,7 +113,6 @@ def test_generator_signatures_roles_and_summaries():
     assert gen._role("SetupReport", SetupReport) == "class"
     assert gen._role("StepContext", StepContext) == "class"
     assert gen._role("ConstitutiveLaw", ConstitutiveLaw) == "base"
-    assert gen._role("Closure", Closure) == "base"
     assert gen._summary(bp.initial_drivers).endswith(".")
 
 
@@ -126,14 +125,3 @@ def test_circuit_devices_are_components_and_waveforms_have_their_own_role():
     assert gen._role("PrescribedVoltage", el.PrescribedVoltage) == "law"
     page = gen.render(*[p for p in gen.PAGES if p[0] == "electrical"][0])
     assert "## Waveforms" in page and "## Sources" not in page
-
-
-def test_alias_constants_are_the_same_object_and_listed_once():
-    import importlib
-
-    for old, new in gen.CONSTANT_ALIASES.items():
-        mod = importlib.import_module("noodl.apps.street_aq")
-        assert getattr(mod, old) is getattr(mod, new), (old, new)
-    page = gen.render(*[p for p in gen.PAGES if p[0] == "street_aq"][0])
-    assert page.count("| `KAPPA_040`") == 1 and "| `KAPPA` |" not in page
-    assert "also `KAPPA`" in page

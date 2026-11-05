@@ -29,7 +29,7 @@ from noodl.apps.sewer.dynwave import (
     build_dynamic_wave_model,
     quality_state,
 )
-from noodl.apps.sewer.hydraulics import GEOMETRY_ALIASES, SewerHydraulics
+from noodl.apps.sewer.hydraulics import SewerHydraulics
 from noodl.apps.sewer.inflows import InflowSchedule
 from noodl.apps.sewer.pumps import PUMP_KINDS
 from noodl.apps.sewer.quality import H2STransfer, LateralLoads, SulfideGeneration
@@ -443,9 +443,6 @@ class SewerNetwork:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "routing", ROUTING_ALIASES.get(self.routing, self.routing))
-        object.__setattr__(
-            self, "geometry", GEOMETRY_ALIASES.get(self.geometry, self.geometry)
-        )
 
     def validate(self) -> None:
         """Refuse, BY NAME, everything this application does not model."""

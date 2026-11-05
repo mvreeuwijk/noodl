@@ -9,7 +9,7 @@ import pytest
 import torch
 
 from noodl.apps.electrical.modelica import extrapolate, read_modelica_circuit, simulate_circuit
-from noodl.apps.electrical.modelica.run import STEADY_ATOL, STEADY_RTOL, THERMAL_STEADY_ATOL
+from noodl.apps.electrical.modelica.run import STEADY_ATOL, STEADY_RTOL
 
 DATA = Path(__file__).resolve().parents[3] / "data" / "modelica_electrical"
 MSL = "Modelica.Electrical.Analog."
@@ -165,24 +165,39 @@ def test_steady_default_tolerances_and_step_keywords_reach_the_model(tmp_path):
     assert [c[1]["integration"] for c in rec.calls] == [
         "backward_euler", "trapezoidal", "trapezoidal", "backward_euler"]
     assert all(c[1]["max_iter"] == 7 and "atol" not in c[1] for c in rec.calls)
+    assert all(c[1]["layer_options"] is None for c in rec.calls)   # no heat layer
 
 
-def test_a_heat_port_circuit_is_solved_at_the_thermal_round_off_tolerance():
-    # MSL Resistor: 220 V sine heating R(T) through G = 50 W/K to 293.15 K. The electrical
-    # absolute tolerance would stall the heat balance (round-off ~ eps G T, W), so the
-    # runner gives the thermal layer THERMAL_STEADY_ATOL (and the electrical one keeps
-    # STEADY_ATOL); the coupled state is the hand fixed point at the 220 V peak (t = 0.25 s).
+def test_the_heat_layer_steps_with_the_circuits_rule():
+    # HeatingRectifier: the first step (a restart) backward Euler, then trapezoidal, for the
+    # circuit (`integration`) and its heat layer (`scheme`) alike; a caller's own
+    # layer_options are kept.
+    model, state, drivers, names = read_modelica_circuit(
+        DATA / "Analog.Examples.HeatingRectifier.json")
+    rec = _Recording(model)
+    simulate_circuit(rec, state, drivers, names, times=names.times[:3],
+                     layer_options={"electrical": {"max_iter": 40}})
+    assert [(c[1]["integration"], c[1]["layer_options"]["thermal"]["scheme"])
+            for c in rec.calls] == [("backward_euler", "implicit"),
+                                    ("trapezoidal", "trapezoidal")]
+    assert all(c[1]["layer_options"]["electrical"] == {"max_iter": 40} for c in rec.calls)
+
+
+def test_a_heat_port_circuit_is_solved_at_the_round_off_tolerance():
+    # MSL Resistor: 220 V sine heating R(T) through G = 50 W/K to 293.15 K. The heat layer is
+    # one linear solve per pass and takes no Newton tolerance, so the runner gives none for
+    # it; the coupled state is the hand fixed point at the 220 V peak (t = 0.25 s).
     model, state, drivers, names = read_modelica_circuit(DATA / "Analog.Examples.Resistor.json")
     calls = []
     steady = model.steady
 
     def recording(*args, **kwargs):
-        calls.append((kwargs["atol"], kwargs["rtol"], kwargs["layer_options"]))
+        calls.append((kwargs["atol"], kwargs["rtol"], kwargs.get("layer_options")))
         return steady(*args, **kwargs)
 
     model.steady = recording
     out = simulate_circuit(model, state, drivers, names, times=[0.0, 0.25])
-    assert calls == [(STEADY_ATOL, STEADY_RTOL, {"thermal": {"atol": THERMAL_STEADY_ATOL}})] * 2
+    assert calls == [(STEADY_ATOL, STEADY_RTOL, None)] * 2
     T = names.value(out, "resistor.T_heatPort")
     assert float(T[0]) == pytest.approx(293.15, abs=1e-9)
     assert abs(float(T[1]) - 302.73806893411466) <= 1e-9

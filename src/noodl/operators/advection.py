@@ -10,6 +10,7 @@ from __future__ import annotations
 import torch
 
 from noodl._broadcast import broadcast_shapes
+from noodl.operators.stencil import laplacian_apply, laplacian_coo_indices, laplacian_diagonal
 
 
 def _bcast_index(idx: torch.Tensor, batch_shape: torch.Size, k: int) -> torch.Tensor:
@@ -222,19 +223,15 @@ class AdvectionOperator:
         out_weight.scatter_add_(-1, up_b, w_b)
         out_action = out_weight * v_b
 
-        l_action = torch.zeros(*batch_shape, K, self._n, dtype=dtype, device=v.device)
-        if self.conduction is not None:
-            csrc, ctgt, g = self.conduction
-            g = g.to(dtype)
-            diff = v_b.index_select(-1, csrc) - v_b.index_select(-1, ctgt)
-            weighted = g.unsqueeze(-2).expand(*batch_shape, K, csrc.shape[-1]) * diff \
-                if g.dim() >= 1 and g.shape[-1] == csrc.shape[-1] else g * diff
-            csrc_b = self._expanded(("csrc",), csrc, batch_shape, K)
-            ctgt_b = self._expanded(("ctgt",), ctgt, batch_shape, K)
-            l_action.scatter_add_(-1, csrc_b, weighted)
-            l_action.scatter_add_(-1, ctgt_b, -weighted)
-
-        return in_action - out_action - l_action
+        if self.conduction is None:
+            return in_action - out_action
+        csrc, ctgt, g = self.conduction
+        g = g.to(dtype)
+        csrc_b = self._expanded(("csrc",), csrc, batch_shape, K)
+        ctgt_b = self._expanded(("ctgt",), ctgt, batch_shape, K)
+        if g.dim() >= 1 and g.shape[-1] == csrc.shape[-1]:
+            g = g.unsqueeze(-2)
+        return in_action - out_action - laplacian_apply(v_b, csrc_b, ctgt_b, g)
 
     def _embed(self, x_kn: torch.Tensor, idx: torch.Tensor, dtype: torch.dtype) -> torch.Tensor:
         shape = x_kn.shape[:-1] + (self._n,)
@@ -358,8 +355,7 @@ class AdvectionOperator:
                 else g_b
             csrc_b = _bcast_index(csrc, batch_shape, K)
             ctgt_b = _bcast_index(ctgt, batch_shape, K)
-            l_diag_full.scatter_add_(-1, csrc_b, g_b)
-            l_diag_full.scatter_add_(-1, ctgt_b, g_b)
+            l_diag_full = laplacian_diagonal(csrc_b, ctgt_b, g_b, self._n)
 
         raw_diag = in_diag_full - out_diag_full - l_diag_full
         diag_i = raw_diag.index_select(-1, self._interior_idx)
@@ -484,7 +480,7 @@ class AdvectionOperator:
         `spd_certificate()` is `None`, so `method="auto"` still routes it to GMRES whatever
         this returns), but `method="sparse_direct"` and the ILU preconditioner both need this
         form, and
-        so does `_AffineSystemOperator.assemble_sparse` (`I - alpha * M`), which just adds an
+        so does `ShiftedOperator.assemble_sparse` (`I - alpha * M`), which just adds an
         identity diagonal to it.
 
         THE STENCIL, derived from `_raw_action`/`diagonal` and matching `assemble()` bit for
@@ -556,8 +552,12 @@ class AdvectionOperator:
                 csrc, ctgt, _ = self.conduction
                 u_c, v_c = compact[csrc], compact[ctgt]
                 keep_uv = (u_c >= 0) & (v_c >= 0)
-                row_parts += [tile(u_c), tile(v_c), tile(u_c), tile(v_c)]
-                col_parts += [tile(u_c), tile(v_c), tile(v_c), tile(u_c)]
+                # `laplacian_coo_indices` lays out four blocks, (u, u), (v, v), (u, v),
+                # (v, u), in that order. The keep masks below and the conduction values
+                # in the second half of this method follow the same order.
+                conduction_row, conduction_col = laplacian_coo_indices(tile(u_c), tile(v_c))
+                row_parts.append(conduction_row)
+                col_parts.append(conduction_col)
                 keep_parts += [
                     (u_c >= 0).repeat(K), (v_c >= 0).repeat(K),
                     keep_uv.repeat(K), keep_uv.repeat(K),
@@ -623,6 +623,8 @@ class AdvectionOperator:
             g = g.to(dtype)
             n_c = g.shape[-1]
             cap_u, cap_v = cap_at(cache["u_c"]), cap_at(cache["v_c"])
+            # The block order of `laplacian_coo_indices`: (u, u), (v, v), (u, v), (v, u),
+            # each row divided by its own node's capacity.
             val_parts += [
                 tile_species(-(g / cap_u), n_c),
                 tile_species(-(g / cap_v), n_c),

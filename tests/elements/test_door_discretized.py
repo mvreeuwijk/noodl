@@ -38,11 +38,11 @@ import pytest
 import torch
 
 from noodl.elements import (
+    DoorCompartment,
     DoorCompartmentHead,
-    MBLDoorCompartment,
-    MBLDoorCompartmentOperable,
-    mbl_discretized_door,
-    mbl_discretized_operable_door,
+    OperableDoorCompartment,
+    discretized_door,
+    discretized_operable_door,
     medium,
 )
 from noodl.layers.kirchhoff import KirchhoffLayer
@@ -221,7 +221,7 @@ OPER = dict(LClo=20e-4, CDOpe=0.78, CDClo=0.78, CDCloRat=1.0, dpCloRat=4.0, mOpe
 
 def _open(med=AIR, CD=0.65, **kw):
     g = {**GEOM, **kw}
-    return mbl_discretized_door(
+    return discretized_door(
         nCom=g["nCom"],
         wOpe=g["wOpe"],
         hOpe=g["hOpe"],
@@ -240,7 +240,7 @@ def _open(med=AIR, CD=0.65, **kw):
 
 def _operable(med=AIR, **kw):
     g = {**GEOM, **kw}
-    return mbl_discretized_operable_door(
+    return discretized_operable_door(
         nCom=g["nCom"],
         wOpe=g["wOpe"],
         hOpe=g["hOpe"],
@@ -520,7 +520,7 @@ def test_port_flows_are_mbl_mAB_and_mBA_exactly_inside_the_smoothing_band(operab
 @pytest.mark.parametrize("nCom", [1, 10])
 def test_compartment_areas_and_heights_add_up_to_the_door(nCom):
     wOpe, hOpe, hA, hB = 0.9, 2.1, 1.35, 0.8
-    comp, head = mbl_discretized_door(
+    comp, head = discretized_door(
         nCom=nCom, wOpe=wOpe, hOpe=hOpe, hA=hA, hB=hB, src=0, tgt=1, medium=AIR, kind="d"
     )
     assert comp.dA.shape == (nCom,) and head.hAg.shape == (nCom,)
@@ -559,10 +559,10 @@ def test_builder_accepts_endpoints_from_the_network():
     for _ in range(3):
         net.add_edge("A", "B", kind="door")
     src, tgt = net.endpoints("door")
-    comp, head = mbl_discretized_door(nCom=3, src=src, tgt=tgt, medium=AIR, kind="door")
+    comp, head = discretized_door(nCom=3, src=src, tgt=tgt, medium=AIR, kind="door")
     assert torch.equal(comp.src, src) and torch.equal(head.tgt, tgt)
     with pytest.raises(ValueError, match="nCom"):
-        mbl_discretized_door(nCom=4, src=src, tgt=tgt, medium=AIR, kind="door")
+        discretized_door(nCom=4, src=src, tgt=tgt, medium=AIR, kind="door")
 
 
 # ---------------------------------------------------------------------------------------
@@ -684,11 +684,11 @@ def test_missing_drivers_raise_naming_key_and_kind():
 
 
 def test_short_node_driver_and_wrong_width_raise():
-    comp = MBLDoorCompartment(src=[0, 0], tgt=[3, 3], medium=AIR, dA=[0.5, 0.5], kind="d")
+    comp = DoorCompartment(src=[0, 0], tgt=[3, 3], medium=AIR, dA=[0.5, 0.5], kind="d")
     drv = _drivers(P_DEFAULT, P_DEFAULT, 297.0, 293.0)
     with pytest.raises(ValueError, match="node"):
         comp.flow(torch.zeros(2, dtype=F64), drv)
-    comp2 = MBLDoorCompartment(src=[0, 0], tgt=[1, 1], medium=AIR, dA=[0.5, 0.5], kind="d")
+    comp2 = DoorCompartment(src=[0, 0], tgt=[1, 1], medium=AIR, dA=[0.5, 0.5], kind="d")
     with pytest.raises(ValueError, match="columns"):
         comp2.flow(torch.zeros(3, dtype=F64), drv)
     with pytest.raises(ValueError, match="hAg"):
@@ -700,7 +700,7 @@ def test_head_is_a_drive():
 
     _, head = _open()
     check_drive_signature(head, where="test")
-    assert isinstance(MBLDoorCompartmentOperable, type)
+    assert isinstance(OperableDoorCompartment, type)
 
 
 # ---------------------------------------------------------------------------------------
@@ -722,7 +722,7 @@ def test_head_drive_is_wired_by_kind_in_a_two_boundary_layer():
     kind is phi_A - phi_B plus the head, and its flows are the transcription's."""
     net = _two_zone_net(NCOM)
     src, tgt = net.endpoints("door")
-    comp, head = mbl_discretized_door(
+    comp, head = discretized_door(
         nCom=NCOM,
         wOpe=1.0,
         hOpe=2.2,
@@ -757,7 +757,7 @@ def test_head_drive_is_wired_by_kind_in_a_two_boundary_layer():
 
 def test_discretised_door_solves_inside_a_kirchhoff_layer_and_gradients_reach_T():
     """out (boundary) -- orifice -- A (interior, warm) == door (nCom edges) == B (boundary)."""
-    from noodl.elements import mbl_orifice
+    from noodl.elements import regularized_orifice
 
     net = Network(dtype=F64)
     for n in ("out", "A", "B"):
@@ -766,7 +766,7 @@ def test_discretised_door_solves_inside_a_kirchhoff_layer_and_gradients_reach_T(
     for _ in range(NCOM):
         net.add_edge("A", "B", kind="door")
     src, tgt = net.endpoints("door")
-    comp, head = mbl_discretized_door(
+    comp, head = discretized_door(
         nCom=NCOM,
         wOpe=1.0,
         hOpe=2.2,
@@ -777,7 +777,7 @@ def test_discretised_door_solves_inside_a_kirchhoff_layer_and_gradients_reach_T(
         medium=AIR,
         kind="door",
     )
-    ori = mbl_orifice(0.05, dp_turbulent=0.01, rho_default=AIR.rho_default, kind="ori")
+    ori = regularized_orifice(0.05, dp_turbulent=0.01, rho_default=AIR.rho_default, kind="ori")
     layer = KirchhoffLayer(net, "air", [ori, comp], drives=[head], boundary=["out", "B"])
     idx = {n: net.node_index(n) for n in ("out", "A", "B")}
     phi_b = torch.tensor([0.5, 0.0], dtype=F64)  # out, B

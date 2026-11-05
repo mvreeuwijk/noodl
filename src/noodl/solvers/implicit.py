@@ -36,7 +36,7 @@ returning a wrong number.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 
 import torch
 
@@ -154,6 +154,64 @@ def adjoint(
     return result.x
 
 
+def refuse_second_order(where: str, *, through: str = "") -> None:
+    """Raise if this backward pass was reached by a second-order differentiation request.
+
+    Every adjoint backward in the package computes its gradients outside the autograd graph,
+    so a second derivative through it would silently miss a term. Grad mode is ON inside a
+    custom ``backward`` only under ``create_graph=True`` (an ordinary backward runs with it
+    off), which is what this tests; ``once_differentiable`` does not catch the case. Call it
+    first thing in ``backward``. ``where`` names the solve in the message and ``through``
+    is an optional phrase completing "second-order differentiation (create_graph=True) ...".
+    """
+    if torch.is_grad_enabled():
+        raise RuntimeError(
+            f"{where}: second-order differentiation (create_graph=True) {through}is not "
+            f"supported; only first-order gradients via the adjoint method are implemented, "
+            f"because the backward builds no graph over its own result. Detach the "
+            f"first-order gradient before using it in a further differentiable loss (e.g. a "
+            f"gradient-penalty term)."
+        )
+
+
+def residual_vjp(
+    params: Sequence[torch.Tensor],
+    evaluate: Callable[[list[torch.Tensor]], torch.Tensor],
+    adjoint: Callable[[], torch.Tensor],
+) -> list[torch.Tensor | None]:
+    """The gradient with respect to each of ``params`` of a solve defined by a residual.
+
+    This is the parameter-gradient pass of the adjoint method, shared by the Newton and the
+    linear implicit solves. ``evaluate(p)`` returns the residual at the solution, built from
+    detached copies ``p`` of ``params`` that require grad where the originals do;
+    ``adjoint()`` returns the adjoint vector ``lam`` (the solve of the transposed system),
+    called under ``no_grad`` and only when some parameter is actually reached. The result
+    has one entry per parameter: the vector-Jacobian product of the residual with ``-lam``,
+    or ``None`` for a parameter that does not require grad.
+
+    The residual is built BEFORE the adjoint solve so that an unreached solve returns all
+    ``None`` without solving anything. The residual can lack a graph even when a parameter
+    requires grad: a caller may thread every entry of a shared drivers mapping through
+    ``params`` including keys this residual never reads, and ``torch.autograd.grad`` refuses
+    an output with no graph at all. The exact gradient there is zero (``None``) for every
+    parameter. This cannot distinguish a legitimately unused parameter from one whose graph
+    an upstream ``detach()`` severed, the trade-off ``allow_unused=True`` already makes for
+    a partly connected residual.
+    """
+    with torch.enable_grad():
+        p = [t.detach().requires_grad_(t.requires_grad) for t in params]
+        r = evaluate(p)
+        needs_grad = [t for t in p if t.requires_grad]
+        if not needs_grad or not r.requires_grad:
+            return [None] * len(p)
+    with torch.no_grad():
+        lam = adjoint()
+    with torch.enable_grad():
+        grads = torch.autograd.grad(r, needs_grad, grad_outputs=-lam, allow_unused=True)
+    it = iter(grads)
+    return [next(it) if t.requires_grad else None for t in p]
+
+
 class _Implicit(torch.autograd.Function):
     @staticmethod
     def forward(ctx, x0, residual, operator, newton_kwargs, diagnostics, *params):
@@ -174,13 +232,7 @@ class _Implicit(torch.autograd.Function):
             # always carries its status), even though this path can only ever report
             # success -- `implicit_solve` refuses `on_failure="return"` outright, so a
             # non-converged forward raises out of `newton` above rather than reaching here.
-            diagnostics["newton_iterations"] = result.iterations
-            diagnostics["linear_iterations"] = result.linear_iterations
-            # The backend that actually ran, not the method requested: with "auto" the two
-            # differ on runtime predicates the caller cannot see.
-            diagnostics["backend"] = result.backend
-            diagnostics["converged"] = result.converged
-            diagnostics["residual_norm"] = result.residual_norm
+            result.into(diagnostics)
         ctx.residual = residual
         ctx.operator = operator
         ctx.newton_kwargs = newton_kwargs
@@ -189,52 +241,11 @@ class _Implicit(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, grad_x):
-        if torch.is_grad_enabled():
-            # See the module docstring: grad mode is enabled at this point only when the
-            # caller requested `create_graph=True` (a second-order differentiation attempt),
-            # which this Function does not support -- its own gradient computation below is
-            # not itself graph-building. Raise now rather than silently returning a gradient
-            # that looks connected but omits the (unsupported) second-order term.
-            raise RuntimeError(
-                "implicit_solve: second-order differentiation (create_graph=True) is not "
-                "supported; only first-order gradients via the adjoint method are "
-                "implemented. Detach the first-order gradient before using it in a further "
-                "differentiable loss (e.g. a gradient-penalty term)."
-            )
+        refuse_second_order("implicit_solve")
         saved = ctx.saved_tensors
         x, params = saved[0], list(saved[1:])
-        with torch.enable_grad():
-            p = [t.detach().requires_grad_(t.requires_grad) for t in params]
-            r = ctx.residual(x.detach(), *p)
-            needs_grad = [t for t in p if t.requires_grad]
-            # `r.requires_grad` can be False even when `needs_grad` is non-empty: a caller
-            # (e.g. `KirchhoffLayer.solve`) may thread every entry of a shared `drivers`
-            # mapping into `params` positionally, including keys this particular layer's
-            # residual never reads (a coupled model's OTHER layer's own driver, sitting in
-            # the same dict). When the only requires_grad=True entries are among those unused
-            # ones, `r` ends up with no grad_fn at all, and `torch.autograd.grad` refuses to
-            # start from an output that itself does not require grad -- `allow_unused=True`
-            # only excuses individual UNUSED INPUTS, not an output with no graph whatsoever.
-            # The correct gradient in that case is exactly zero (None) for every parameter:
-            # `r` provably does not depend on any of them, so there is nothing to solve.
-            #
-            # This is exact for a legitimately-unused param (a driver key some OTHER layer
-            # reads), but it is indistinguishable, by construction, from a param whose graph
-            # was accidentally severed upstream (e.g. a stray `.detach()` in a caller's own
-            # residual): both present as "r does not require grad", and both silently
-            # receive a zero gradient here. That is the same trade-off `allow_unused=True`
-            # already makes one level down, for the PARTIALLY-connected case (an individual
-            # unused input among several used ones) -- this is its natural extension to the
-            # wholly-unconnected case, not a new risk this fix introduces.
-            #
-            # The residual is therefore rebuilt BEFORE the adjoint solve, so that this
-            # all-`None` case can return without solving anything: `lambda` is only ever used
-            # as `grad_outputs` for the `torch.autograd.grad` call below, so a solve on this
-            # path would be pure waste -- and not a cheap one, since this is exactly the path
-            # a coupled model takes on every backward pass through its Kirchhoff layer.
-            if not needs_grad or not r.requires_grad:
-                return (None, None, None, None, None, *[None] * len(p))
-        with torch.no_grad():
+
+        def adjoint_vector():
             op = ctx.operator(x, *params)
             # on_failure is never forwarded: `adjoint` always raises (its own fixed
             # default), whatever the FORWARD pass was told. A forward solve may legitimately
@@ -244,7 +255,7 @@ class _Implicit(torch.autograd.Function):
             # than an exception. `method` IS forwarded, so a layer
             # configured with linear_solver="direct" keeps the dense numerics it asked for
             # on both passes rather than only on the forward one.
-            lam = adjoint(
+            return adjoint(
                 op,
                 grad_x,
                 # The forward's own `where` (a layer name, when a layer supplied one) with
@@ -253,13 +264,11 @@ class _Implicit(torch.autograd.Function):
                 where=f"{ctx.newton_kwargs.get('where', 'implicit_solve')} backward",
                 method=ctx.newton_kwargs.get("method", "auto"),
             )
-        with torch.enable_grad():
-            grads = torch.autograd.grad(r, needs_grad, grad_outputs=-lam, allow_unused=True)
-        grads_aligned = []
-        it = iter(grads)
-        for t in p:
-            grads_aligned.append(next(it) if t.requires_grad else None)
-        return (None, None, None, None, None, *grads_aligned)
+
+        grads = residual_vjp(
+            params, lambda p: ctx.residual(x.detach(), *p), adjoint_vector
+        )
+        return (None, None, None, None, None, *grads)
 
 
 def implicit_solve(

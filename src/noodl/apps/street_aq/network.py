@@ -266,10 +266,6 @@ def twelve_street_grid(
     return net, [s.name for s in streets]
 
 
-munich_idealised = twelve_street_grid
-"""Earlier name of `twelve_street_grid`."""
-
-
 class _ScaledSourcesTransport(TransportLayer):
     """A `TransportLayer` whose interior sources are multiplied by per-street factors.
 

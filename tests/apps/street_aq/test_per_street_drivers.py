@@ -17,8 +17,8 @@ from noodl.apps.street_aq.canyon import boundary_layer
 from noodl.apps.street_aq.network import (
     build_model,
     from_test_network,
-    munich_idealised,
     street_index,
+    twelve_street_grid,
 )
 
 DT = torch.float64
@@ -47,7 +47,7 @@ def _q(model, drivers):
 # ------------------------------------------------------------------------------ u_star
 
 def test_u_star_driver_replaces_the_log_law():
-    net, _ = munich_idealised()
+    net, _ = twelve_street_grid()
     model, state, _ = build_model(net, **MUNICH)
     d = _uniform_drivers(model, u_ref=5.0)
     flows = model.closures[0]
@@ -65,7 +65,7 @@ def test_u_star_driver_replaces_the_log_law():
 
 
 def test_u_star_without_u_ref_is_refused_only_where_u_ref_is_needed():
-    net, _ = munich_idealised()
+    net, _ = twelve_street_grid()
     model, _, _ = build_model(net, **MUNICH)
     d = _uniform_drivers(model)
     d.pop("U_ref")
@@ -88,7 +88,7 @@ def _expand(d, n_streets, n_junctions=None):
 
 
 def test_per_street_meteo_with_uniform_values_is_the_uniform_model():
-    net, _ = munich_idealised()
+    net, _ = twelve_street_grid()
     uniform, _, _ = build_model(net, **MUNICH)
     per, _, _ = build_model(net, meteo="per_street", **MUNICH)
     d = _uniform_drivers(uniform)
@@ -97,7 +97,7 @@ def test_per_street_meteo_with_uniform_values_is_the_uniform_model():
 
 
 def test_per_street_meteo_batches():
-    net, _ = munich_idealised()
+    net, _ = twelve_street_grid()
     per, _, _ = build_model(net, meteo="per_street", **MUNICH)
     d = _expand(_uniform_drivers(per), len(net.streets))
     batched = dict(d)
@@ -109,7 +109,7 @@ def test_per_street_meteo_batches():
 
 
 def test_each_street_takes_its_own_wind_and_each_junction_its_own_direction():
-    net, _ = munich_idealised()
+    net, _ = twelve_street_grid()
     per, _, _ = build_model(net, meteo="per_street", **MUNICH)
     uniform, _, _ = build_model(net, **MUNICH)
     n = len(net.streets)
@@ -127,7 +127,7 @@ def test_each_street_takes_its_own_wind_and_each_junction_its_own_direction():
 
 
 def test_junction_drivers_override_the_street_mean():
-    net, _ = munich_idealised()
+    net, _ = twelve_street_grid()
     per, _, _ = build_model(net, meteo="per_street", **MUNICH)
     n, n_j = len(net.streets), len(net.junctions)
     d = _expand(_uniform_drivers(per, theta=0.3), n)
@@ -140,7 +140,7 @@ def test_junction_drivers_override_the_street_mean():
 
 
 def test_default_junction_direction_is_a_circular_mean():
-    net, _ = munich_idealised()
+    net, _ = twelve_street_grid()
     per, _, _ = build_model(net, meteo="per_street", **MUNICH)
     n = len(net.streets)
     d = _expand(_uniform_drivers(per, theta=0.0), n)
@@ -155,7 +155,7 @@ def test_default_junction_direction_is_a_circular_mean():
 
 
 def test_uniform_mode_never_reads_a_batch_as_a_street_axis():
-    net, _ = munich_idealised()
+    net, _ = twelve_street_grid()
     model, _, _ = build_model(net, **MUNICH)
     n = len(net.streets)
     d = _uniform_drivers(model)
@@ -168,7 +168,7 @@ def test_uniform_mode_never_reads_a_batch_as_a_street_axis():
 
 
 def test_default_junction_lmo_keeps_the_unstable_sign():
-    net, _ = munich_idealised()
+    net, _ = twelve_street_grid()
     per, _, _ = build_model(net, meteo="per_street", **MUNICH)
     n = len(net.streets)
     d = _expand(_uniform_drivers(per), n)
@@ -187,7 +187,7 @@ def test_default_junction_lmo_keeps_the_unstable_sign():
 # --------------------------------------------------------------- per-street background
 
 def test_per_street_background_with_one_value_is_the_uniform_model():
-    net, _ = munich_idealised()
+    net, _ = twelve_street_grid()
     uniform, _, _ = build_model(net, **MUNICH)
     per, _, _ = build_model(net, background="per_street", **MUNICH)
     du = _uniform_drivers(uniform, bg=2e-8)
@@ -208,7 +208,7 @@ def test_per_street_background_enters_only_through_that_streets_own_inflow():
     j is street j's background times the flows from the atmosphere INTO street j. With no
     emission, a background on one street alone must reach the others only through that
     street's own outflow."""
-    net, _ = munich_idealised()
+    net, _ = twelve_street_grid()
     per, state, _ = build_model(net, background="per_street", **MUNICH)
     n = len(net.streets)
     d = _uniform_drivers(per, bg=0.0)
@@ -237,7 +237,7 @@ def test_per_street_background_enters_only_through_that_streets_own_inflow():
 
 def test_per_street_background_with_species_and_chemistry():
     from noodl.apps.street_aq.chemistry import photostationary_for_streets, street_steady
-    net, _ = munich_idealised()
+    net, _ = twelve_street_grid()
     reaction = photostationary_for_streets(("no", "no2", "o3"))
     per, state, drivers = build_model(net, species=("no", "no2", "o3"), chemistry=reaction,
                                       background="per_street", **MUNICH)
@@ -254,7 +254,7 @@ def test_per_street_background_with_species_and_chemistry():
 
 
 def test_bad_options_are_named():
-    net, _ = munich_idealised()
+    net, _ = twelve_street_grid()
     with pytest.raises(ValueError, match="meteo"):
         build_model(net, meteo="per_junction")
     with pytest.raises(ValueError, match="background"):
@@ -265,7 +265,7 @@ def test_junction_means_stay_finite_when_street_zero_is_degenerate():
     """Padded junction slots index street 0; a degenerate street-0 value (lmo exactly 0,
     or a pair of exactly opposing directions) must neither poison the junctions that do
     not touch street 0 nor give a NaN gradient."""
-    net, _ = munich_idealised()
+    net, _ = twelve_street_grid()
     per, _, _ = build_model(net, meteo="per_street", **MUNICH)
     flows = per.closures[0]
     n = len(net.streets)
@@ -286,7 +286,7 @@ def test_junction_means_stay_finite_when_street_zero_is_degenerate():
     lmo2 = torch.full((n,), 1e6, dtype=DT)
     k_a = net.junctions.index("A")
     a_streets = flows.slot_street[k_a][flows.slot_active[k_a]].tolist()
-    assert len(a_streets) == 4                    # the four-way hub of munich_idealised
+    assert len(a_streets) == 4                    # the four-way hub of twelve_street_grid
     lmo2[a_streets] = torch.tensor([50.0, -50.0, 200.0, -200.0], dtype=DT)
     lmo2.requires_grad_(True)
     j2 = flows.junction_values(dict(d, lmo=lmo2))["lmo"]
@@ -324,7 +324,7 @@ def test_gradients_flow_through_every_per_street_driver():
     """d(total street concentration)/d(each per-street driver), through `model.steady`:
     finite everywhere, and non-zero for every driver (a driver the forward pass silently
     dropped, or a masked NaN, would show here)."""
-    net, _ = munich_idealised()
+    net, _ = twelve_street_grid()
     n = len(net.streets)
     per, state, _ = build_model(net, meteo="per_street", background="per_street", **MUNICH)
     d = _expand(_uniform_drivers(per), n)
@@ -347,7 +347,7 @@ def test_gradients_flow_through_every_per_street_driver():
 
 
 def test_u_star_driver_under_per_street_meteo():
-    net, _ = munich_idealised()
+    net, _ = twelve_street_grid()
     n = len(net.streets)
     per, _, _ = build_model(net, meteo="per_street", **MUNICH)
     uniform, _, _ = build_model(net, **MUNICH)
@@ -368,7 +368,7 @@ def test_u_star_driver_under_per_street_meteo():
 
 
 def test_per_street_and_junction_shape_errors_are_named():
-    net, _ = munich_idealised()
+    net, _ = twelve_street_grid()
     n, n_j = len(net.streets), len(net.junctions)
     per, _, _ = build_model(net, meteo="per_street", **MUNICH)
     d = _expand(_uniform_drivers(per), n)
@@ -388,7 +388,7 @@ GAUSS = dict(preset="sirane", direction_averaging="gauss_hermite", n_theta=8, si
 
 
 def test_a_sigma_theta_driver_equal_to_the_constructor_value_is_the_same_model():
-    net, _ = munich_idealised()
+    net, _ = twelve_street_grid()
     fixed, _, _ = build_model(net, sigma_theta=0.12, **GAUSS)
     free, _, _ = build_model(net, **GAUSS)
     d = _uniform_drivers(fixed)
@@ -400,7 +400,7 @@ def test_a_sigma_theta_driver_equal_to_the_constructor_value_is_the_same_model()
 
 
 def test_a_different_sigma_theta_driver_changes_the_routing_and_overrides_the_constructor():
-    net, _ = munich_idealised()
+    net, _ = twelve_street_grid()
     fixed, _, _ = build_model(net, sigma_theta=0.12, **GAUSS)
     wider, _, _ = build_model(net, sigma_theta=0.3, **GAUSS)
     d = _uniform_drivers(fixed)
@@ -413,7 +413,7 @@ def test_a_different_sigma_theta_driver_changes_the_routing_and_overrides_the_co
 
 
 def test_a_batched_sigma_theta_driver_is_one_spread_per_instance():
-    net, _ = munich_idealised()
+    net, _ = twelve_street_grid()
     model, _, _ = build_model(net, **GAUSS)
     d = _uniform_drivers(model)
     batched = {k: torch.stack([v, v]) for k, v in d.items() if k not in
@@ -427,7 +427,7 @@ def test_a_batched_sigma_theta_driver_is_one_spread_per_instance():
 
 
 def test_a_per_junction_sigma_theta_driver_under_per_street_meteo():
-    net, _ = munich_idealised()
+    net, _ = twelve_street_grid()
     n, n_j = len(net.streets), len(net.junctions)
     uniform, _, _ = build_model(net, **GAUSS)
     per, _, _ = build_model(net, meteo="per_street", **GAUSS)
@@ -447,7 +447,7 @@ def test_a_per_junction_sigma_theta_driver_under_per_street_meteo():
 
 
 def test_a_sigma_theta_driver_is_refused_where_munich_computes_its_own():
-    net, _ = munich_idealised()
+    net, _ = twelve_street_grid()
     model, _, _ = build_model(net, **MUNICH)
     d = _uniform_drivers(model)
     with pytest.raises(ValueError,
@@ -456,7 +456,7 @@ def test_a_sigma_theta_driver_is_refused_where_munich_computes_its_own():
 
 
 def test_uniform_sigma_theta_driver_shapes_are_named():
-    net, _ = munich_idealised()
+    net, _ = twelve_street_grid()
     n_j = len(net.junctions)
     model, _, _ = build_model(net, **GAUSS)
     d = _uniform_drivers(model)
@@ -477,7 +477,7 @@ def test_uniform_sigma_theta_driver_shapes_are_named():
 # --------------------------------------------------------------- z_ref inside the canopy
 
 def test_z_ref_inside_the_canopy_runs_with_u_star_and_is_refused_with_u_ref_only():
-    net, _ = munich_idealised()
+    net, _ = twelve_street_grid()
     model, _, _ = build_model(net, z_ref=1.0, **GAUSS)      # far below d + z0
     reference, _, _ = build_model(net, **GAUSS)             # z_ref = 30 m, same u*
     d = dict(_uniform_drivers(model), u_star=torch.tensor(0.4, dtype=DT))
@@ -537,7 +537,7 @@ def test_sirane_average_is_exact_across_a_single_switch():
 
 
 def test_sirane_average_tends_to_no_average_as_the_spread_vanishes():
-    net, _ = munich_idealised()
+    net, _ = twelve_street_grid()
     exact, _, _ = build_model(net, direction_averaging="exact_gaussian", **SIRANE)
     none, _, _ = build_model(net, direction_averaging="none", **SIRANE)
     for theta in (0.3, 1.2, 4.0):                      # none of them on a switch angle
@@ -550,7 +550,7 @@ def test_sirane_average_tends_to_no_average_as_the_spread_vanishes():
 
 
 def test_sirane_average_agrees_with_a_brute_force_gaussian_average():
-    net, _ = munich_idealised()
+    net, _ = twelve_street_grid()
     n = len(net.streets)
     exact, _, _ = build_model(net, direction_averaging="exact_gaussian", **SIRANE)
     fixed, _, _ = build_model(net, direction_averaging="none", meteo="per_street", **SIRANE)
@@ -601,7 +601,7 @@ def test_sirane_average_is_differentiable_in_the_spread_and_the_mean_direction()
 
 
 def test_sirane_average_under_per_street_meteo_and_in_a_batch():
-    net, _ = munich_idealised()
+    net, _ = twelve_street_grid()
     n, n_j = len(net.streets), len(net.junctions)
     uniform, _, _ = build_model(net, direction_averaging="exact_gaussian", **SIRANE)
     per, _, _ = build_model(net, direction_averaging="exact_gaussian", meteo="per_street",
@@ -620,7 +620,7 @@ def test_sirane_average_under_per_street_meteo_and_in_a_batch():
 
 
 def test_sirane_average_with_a_different_spread_at_each_junction():
-    net, _ = munich_idealised()
+    net, _ = twelve_street_grid()
     n, n_j = len(net.streets), len(net.junctions)
     uniform, _, _ = build_model(net, direction_averaging="exact_gaussian", **SIRANE)
     per, _, _ = build_model(net, direction_averaging="exact_gaussian", meteo="per_street",
@@ -645,7 +645,7 @@ def test_sirane_average_with_a_different_spread_at_each_junction():
 
 
 def test_sirane_average_refuses_a_spread_of_a_quarter_turn_or_more():
-    net, _ = munich_idealised()
+    net, _ = twelve_street_grid()
     model, _, _ = build_model(net, direction_averaging="exact_gaussian", **SIRANE)
     d = _uniform_drivers(model)
     for bad in (math.pi / 4.0, 1.0, -0.01, float("nan")):

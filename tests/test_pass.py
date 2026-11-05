@@ -7,10 +7,10 @@ from noodl._pass import layer_kwargs, run_pass
 from noodl.drives import ConstantDrive
 from noodl.elements import PowerLaw
 from noodl.layers.kirchhoff import KirchhoffLayer
-from noodl.layers.reaction import FirstOrderDecay
 from noodl.layers.transport import TransportLayer
 from noodl.model import Model
 from noodl.topology import Network
+from tests._reactions import FirstOrderDecay
 
 F64 = torch.float64
 

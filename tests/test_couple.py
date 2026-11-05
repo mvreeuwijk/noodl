@@ -513,6 +513,22 @@ def test_an_unconverted_link_between_unequal_units_is_refused_at_construction():
     assert "concentration" in message and "mass_fraction" in message     # and both quantities
 
 
+def test_unit_spellings_of_one_unit_are_accepted_on_an_unconverted_link():
+    """Units are compared by `refs.units_agree`, as `Model.check` does: `kg/m3` and `kg/m^3`
+    are one unit, so a link between layers that spell it differently is not refused."""
+    from noodl.couple import ValueLink, union
+
+    street_model, street_state, street_drivers = _tiny_street_model()
+    building_model, building_state, building_drivers = _tiny_building_model()
+    building_model.layers["species"].unit = "kg/m^3"
+    link = ValueLink(
+        from_model="street", from_key="street.x", from_index=0,
+        to_model="building", to_key="species.x_boundary", to_index=0,  # convert=None
+    )
+    union({"street": (street_model, street_state, street_drivers),
+           "building": (building_model, building_state, building_drivers)}, shared=[link])
+
+
 def test_a_conversion_whose_units_do_not_match_the_layers_is_refused_at_construction():
     from noodl.couple import MATH_RAD_TO_COMPASS_DEG, ValueLink, union
 

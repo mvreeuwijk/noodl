@@ -1102,7 +1102,7 @@ def _storage_unit(line, curves: dict, path, lf: float = 1.0, us: bool = True) ->
     if shape not in _STORAGE_SHAPES:
         raise ValueError(f"{where} has shape {line.fields[4]!r}; SWMM's shapes are "
                          f"{_STORAGE_SHAPES}")
-    if shape == "PARABOLIC":        # SWMM 5.2.4's keyword; PARABOLOID is kept as an alias
+    if shape == "PARABOLIC":        # SWMM 5.2.4's keyword; PARABOLOID is a SWMM input synonym
         shape = "PARABOLOID"
     if shape == "TABULAR":
         label = line.fields[5]

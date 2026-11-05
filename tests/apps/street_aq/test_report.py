@@ -104,9 +104,9 @@ def _kwargs(concentration, tmp_path):
 def test_a_differentiable_solve_result_exports(tmp_path):
     from scipy.io import netcdf_file
 
-    from noodl.apps.street_aq import build_model, munich_idealised
+    from noodl.apps.street_aq import build_model, twelve_street_grid
 
-    net, _ = munich_idealised()
+    net, _ = twelve_street_grid()
     model, state, _ = build_model(net, species=("NO2",), preset="munich",
                                   canyon_wind_min=0.0, u_d_min=0.0)
     from noodl.apps.street_aq.case import StreetCase, drivers_at

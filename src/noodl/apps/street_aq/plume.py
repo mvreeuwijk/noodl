@@ -138,9 +138,9 @@ import torch
 from torch.utils.checkpoint import checkpoint
 
 from noodl._broadcast import broadcast_shapes
-from noodl.apps.street_aq.canyon import KAPPA
-from noodl.apps.street_aq.closures import SIGMA_V_MIN, SIGMA_W_MIN
+from noodl.apps.street_aq.closures import KAPPA_040, SIGMA_V_MIN, SIGMA_W_MIN
 from noodl.apps.street_aq.network import StreetNetwork
+from noodl.solvers.implicit import refuse_second_order
 
 Tensor = torch.Tensor
 _DTYPE = torch.float64
@@ -152,10 +152,6 @@ GAUSS_CUTOFF_SIGMAS = 4.0
 """The Gaussian cut-off, in lateral standard deviations: pairs more than this many
 `sigma_y` beyond the flat top contribute exactly zero. SIRANE's keyword `SEUIL_GAUSS`
 ("Sigma threshold to neglect a puff", default 4.0)."""
-
-SEUIL_GAUSS = GAUSS_CUTOFF_SIGMAS
-"""Earlier name of `GAUSS_CUTOFF_SIGMAS`."""
-
 
 TIME_STEP_S = 10.0
 """The trajectory's time step, s: the node spacing of SIRANE's plume is exactly `10 U`
@@ -295,7 +291,7 @@ def turbulence(
     lmo: Tensor | float,
     theta_star: Tensor | float | None = None,
     temperature: Tensor | float = DEFAULT_TEMPERATURE_K,
-    kappa: float = KAPPA,
+    kappa: float = KAPPA_040,
     neutral_abs_lmo: float = math.inf,
 ) -> tuple[Tensor, Tensor, Tensor]:
     """`(sigma_v, sigma_w, N)` at height `z` above ground, Eqs. (15)-(17), UNFLOORED.
@@ -354,7 +350,7 @@ def wind_speed(
     lmo: Tensor | float,
     z0: Tensor | float,
     d: Tensor | float,
-    kappa: float = KAPPA,
+    kappa: float = KAPPA_040,
 ) -> Tensor:
     """The mean wind above the canopy, Eqs. (10)-(11):
     `u = (u*/kappa) [ln((z - d + z0)/z0) - psi_m((z - d + z0)/L) + psi_m(z0/L)]`,
@@ -454,7 +450,7 @@ def _table_inputs(
     centre_c: Tensor | float = PLUME_CENTRE_C_M,
     centre_k: Tensor | float = PLUME_CENTRE_K,
     x_max: float = DOWNWIND_CUTOFF_M,
-    kappa: float = KAPPA,
+    kappa: float = KAPPA_040,
     neutral_abs_lmo: float = math.inf,
 ) -> tuple[dict[str, Tensor], tuple[int, ...], Tensor]:
     """The shared front end of `plume_table` and `puff_tables` (`name` prefixes the
@@ -554,7 +550,7 @@ def plume_table(
     centre_c: Tensor | float = PLUME_CENTRE_C_M,
     centre_k: Tensor | float = PLUME_CENTRE_K,
     x_max: float = DOWNWIND_CUTOFF_M,
-    kappa: float = KAPPA,
+    kappa: float = KAPPA_040,
     neutral_abs_lmo: float = math.inf,
 ) -> PlumeTable:
     """SIRANE's plume trajectory for each hour, resampled onto a 10 m grid (module
@@ -643,12 +639,7 @@ class _RecomputedTrajectory(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, *grads):
-        if torch.is_grad_enabled():
-            raise RuntimeError(
-                f"{ctx.where}: second-order differentiation (create_graph=True) is not "
-                "supported; the trajectory table has first-order gradients only. Detach "
-                "the first-order gradient before using it in a further differentiable loss."
-            )
+        refuse_second_order("plume_table", through="through the trajectory table ")
         values = ctx.saved_tensors
         leaves = [v.detach().requires_grad_(ctx.needs_input_grad[5 + i])
                   for i, v in enumerate(values)]

@@ -175,12 +175,14 @@ def test_balanced_line_rule_uses_the_full_values(tmp_path):
 # ------------------------------------------------------------------ further behaviour
 def test_resistor_heat_port_joins_the_thermal_network_in_kelvin():
     nl = build(load(DATA / "Analog.Examples.Resistor.json"))
-    assert nl.thermal_names[0] == "thermal.reference" and nl.node_names[0] == "0"
+    # no thermal reference node: the heat port is thermal node 0, temperatures are absolute
+    assert nl.thermal_names == ("resistor.heatPort", "thermalConductor.port_b")
+    assert nl.node_names[0] == "0"
     res = next(d for d in nl.devices if d.name == "resistor")
     cond = next(d for d in nl.devices if d.name == "thermalConductor")
     fixed = next(d for d in nl.devices if d.name == "fixedTemperature")
-    assert res.heat_node == cond.nodes["port_a"] != 0
-    assert cond.nodes["port_b"] == fixed.nodes["port"] != 0
+    assert res.heat_node == cond.nodes["port_a"] == 0
+    assert cond.nodes["port_b"] == fixed.nodes["port"] == 1
     assert nl.fixed_temperatures == {fixed.nodes["port"]: pytest.approx(293.15, abs=1e-12)}
     assert fixed.parameters == {"T": 20.0}   # parameters stay as exported (degC)
 
@@ -191,7 +193,7 @@ def test_heating_rectifier_diode_heat_port_and_heat_capacitor():
     cap = next(d for d in nl.devices if d.name == "HeatCapacitor1")
     assert diode.role == "diode" and diode.heat_node is not None
     assert cap.role == "heat_capacitor" and cap.initial == {"T": 293.15}
-    assert len(nl.thermal_names) == 3 and nl.fixed_temperatures == {}
+    assert len(nl.thermal_names) == 2 and nl.fixed_temperatures == {}
     r = next(d for d in nl.devices if d.name == "R")
     assert r.heat_node is None
 

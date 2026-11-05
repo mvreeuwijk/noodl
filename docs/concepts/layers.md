@@ -63,7 +63,8 @@ phi, q = layer.solve(phi_boundary, drivers, sources=sources, differentiable=True
 model composing several Kirchhoff layers over one network can tell a pressure layer from a
 temperature one without matching on names. They are still checked for consistency: every key
 of a layer is a `Field` carrying its `unit` (a transport layer's `unit`, `source_unit`,
-`capacity_unit` and `flow_unit` give the units of its state, sources, capacity and flows), and
+`capacity_unit`, `flow_unit` and `conductance_unit` give the units of its state, sources,
+capacity, flows and conductances), and
 `Model.check()` warns (`unit-mismatch`) when a closure declares a different unit for a key it
 reads (`input_specs`) or writes (`output_units`), and notes (`unit-undeclared`) a field with
 no unit. Units are compared as strings after trivial respelling (`m3` and `m^3`, `1` and `-`);
@@ -189,14 +190,14 @@ layer = TransportLayer(
     flow_kind=("airpath", "door"),  # one or several advecting kinds
     boundary=["ambient"],
     n_species=1,
-    conduction_kind="wall",         # optional diffusive edges
+    conduction_kind="wall",         # optional diffusive edges: one kind or a tuple of kinds
     conductance=ua,
     scheme="exact",                 # 'exact' | 'implicit' | 'trapezoidal'
     quantity="temperature", unit="K",
 )
 ```
 
-Three things catch people:
+Four things catch people:
 
 - **The active interior.** Nodes that no edge of this layer's kinds touches are *inactive* and
   have no row at all — not a zero row, which would be singular. `capacity` must be indexed by the
@@ -206,13 +207,34 @@ Three things catch people:
 - **`sources` is in full node order**, not interior order — zeros on boundary and inactive nodes.
   This differs from `capacity` on purpose: sources are an application-level quantity, capacity a
   layer-level one.
+- **`conduction_kind` may be several kinds too**: `("wall", "film", "radiation")` carries wall
+  conduction, a surface (film) coefficient and a radiative coefficient as separate edges.
+  `conductance` is then one tensor over the edges of all those kinds, the first kind's edges in
+  network order, then the second kind's, and so on; `layer.conduction_edges` lists the kinds with
+  their end nodes in exactly that order, so a closure can write one value per edge, and
+  `layer.conductance` reads the construction-time values back. Every
+  conduction kind counts as a touch for the active interior.
 - **`flow_kind` may be several kinds**, and `q` is then their flows *concatenated in that order*.
   That is exactly what `KirchhoffLayer.flows_of_kind(q, layer.flow_kinds)` produces, so heat
-  advected by both `"airpath"` and `"door"` edges needs no new operator.
+  advected by both `"airpath"` and `"door"` edges needs no new operator. It may also be none,
+  `flow_kind=()`: a conduction-only layer (a heat network of conductances and capacities, as the
+  electrical application's heat ports use), whose `q` is empty; in a `Model` it has no flow
+  driver and no flow owner.
 
 The three schemes: `"exact"` uses an augmented matrix exponential and controls its own error by
 sub-stepping; `"implicit"` is implicit Euler; `"trapezoidal"` is the second-order variant. Use
 `"exact"` for heat, `"implicit"` for species — the application defaults reflect this.
+
+`step(..., scheme=...)` takes one step with another scheme than the layer's own, checked as the
+constructor checks it (a storage-free node with throughflow still needs `"implicit"`); in a
+`Model`, `model.step(..., layer_options={"thermal": {"scheme": "implicit"}})` does the same for
+one step. A layer coupled to a circuit steps this way with the circuit's own rule: backward
+Euler on the step after a restart, trapezoidal otherwise. `step(..., sources_prev=...)`
+(trapezoidal only) gives the sources at the START of the step; the trapezoidal rule then
+integrates them as it integrates the state, `dt/2 (sources_prev + sources)`, instead of holding
+`sources` over the step. A `Model` passes it when a closure carries the layer's sources as state
+(`state_keys` holding `"<layer>.sources"`, as the electrical application's `JouleHeating` does):
+the step-start state's `"<layer>.sources"` are then the heat at the step start.
 
 The exact scheme bases its sub-stepping on the operator's one-norm `||dt M||_1`, computed from
 the state-independent matrix before any arithmetic on the state; if the predicted work exceeds
@@ -275,11 +297,68 @@ nothing); `step`'s `diagnostics` reports the number of nonzero source entries dr
 `"held_sources_dropped"` (in `Model.step`, at `diagnostics["layers"][name]`). Their capacity, at construction or per step, may be 0
 (a negative one is refused everywhere, and a zero one at any other node). Removal and kinetics act
 on a stored amount, so they do not act on these nodes. Only `scheme="implicit"` and `steady` can
-hold them: the exponential and trapezoidal steps have no algebraic form, so a layer with either
-scheme refuses storage-free nodes at construction. A `steady` solve has no value for such a node
+hold a storage-free node that flow passes through: the exponential and trapezoidal steps have no
+algebraic form, so a layer with either scheme refuses such a node at construction (a node joined
+only by conduction is folded instead, see below). A `steady` solve has no value for such a node
 with nothing passing through it, and refuses it, naming the node. Whether such a node mixes or holds is a 0/1 choice on the flows and
 carries no gradient: a held node's value has zero gradient with respect to the flows, although
 any flow through it would switch it to mixing. `layer.storage_free_mask` is the `(n_i,)` boolean mask of these nodes.
+
+**Surface and star nodes: folding a storage-free node into its neighbours.** A storage-free node
+joined to the rest of the network only by conduction (the inside surface of a wall, between the
+zone air and the first wall layer; a zone's radiant "star" node, joined to each of its surfaces)
+stores no heat, so whatever conducts in conducts out. Its temperature is the conductance-weighted
+mean of its neighbours' temperatures, plus its own source (absorbed sunlight, the radiant part of
+a gain) divided by its total conductance. Putting that back into its neighbours' balances removes
+the node: its neighbours are joined directly by *equivalent* conductances, and its source is
+shared out among them. This is the "combined surface coefficient" of building physics (a surface
+film of conductance $h A$ in series with the wall half behind it, $k A$, is one conductance
+$1/(1/(hA) + 1/(kA))$ between the air and the wall) and the star-delta transform of circuit
+theory (a star node joined to $n$ surfaces becomes conductances between every pair of them).
+Several such nodes joined to each other, the surfaces of a zone with their star node, are folded
+together as one group (in linear-algebra terms, the Schur complement or Kron reduction of their
+block of the conduction matrix).
+
+The layer does this by itself: a storage-free node with no flow edge, and no removal or kinetics
+term at construction, is folded. The folded network has positive conductances again, so every
+scheme, `exact` included, steps it, and positivity and the maximum principle hold as before (no
+new temperature extremes from the folding). After the step the folded nodes' temperatures are
+recovered from their neighbours' new values, the boundary values at the end of the step and the
+sources, and returned in the state like any other node's; the boundary transfer counts the heat
+that leaves through them. The folding is computed once from the construction-time conductance,
+and again each call that passes a per-call conductance (the driver below), so a radiative
+coefficient re-evaluated each pass is folded with its current value, and gradients reach the
+conductances and the sources through it. A folded node all of whose conductances are zero in a
+call is held at its value, its source dropped, as above; a group of folded nodes joined that call
+only to each other (every conductance to a stored node or boundary zero) has no temperature and is
+refused, naming the nodes. Checking for such a group searches the group's edges on the host, so it
+costs a little on every call in which some conductance touching a group of two or more folded
+nodes is zero (a radiative coefficient that vanishes at night); with every such conductance
+positive it costs nothing. Each group is factored as a small dense matrix, batched over the groups
+of one size, never as a matrix over the whole network; a group is as large as the set of folded
+nodes joined to each other, usually the surfaces of one zone. A layer whose every interior node is
+folded (a heat network without any heat capacity) has nothing to step: its step and its steady
+state are the folded nodes' balance at the end of the step; under `on_failure="return"` they
+return a `SolveResult` that has converged in zero iterations. `layer.steady(..., hold=x0)` holds
+the stored nodes at `x0` and solves only the folded ones: the consistent initial point
+`Model.steady(..., mode="initial")` uses. A storage-free node that air flows
+through (a plenum), or that has a removal or reaction, is not folded and still needs
+`scheme="implicit"`. `layer.folded_mask` is the `(n_i,)` boolean mask of the folded nodes. `rate`
+and the dense `operator` still describe the whole network, a folded node as its algebraic balance.
+
+**A conductance that changes with the state.** A radiative coefficient depends on the surface
+temperatures, a film coefficient on the air speed. A closure writes such a value into the driver
+`"<layer>.conductance"`, shape `(..., b_c)` in the order of `layer.conduction_edges`, and it
+*replaces* the construction-time `conductance` for that call, under all three schemes and
+`steady`. Gradients flow from the solution back to the closure that computed it. Entries must be
+zero or positive (a negative one is refused, naming the edge); zero is allowed because a
+coefficient can vanish. A stored node whose conducting edges are all zero this call, and with no
+flow through it, is isolated for that call: a transient step leaves it at its value plus its own
+source, and a steady solve refuses it as an undefined steady state (or, for a storage-free
+node, as one nothing passes through). With `Model(coupling="iterate")` the closure reads the
+previous pass's temperatures and the passes converge to the steady state of the nonlinear
+balance, for instance radiation to a boundary at the fourth power of the temperature. The library
+carries no radiation law: the closure owns it.
 
 **Undefined steady states.** A stored node that nothing leaves (no outflow, no conduction, no
 removal) keeps everything that enters it, and so does a closed group of stored nodes whose
@@ -312,18 +391,27 @@ explicit `sparse_direct` there would otherwise raise for a reason the caller did
 
 ## `Reaction`
 
-Applied to a transport layer's state after its step (by default), operator-split:
+Applied to a transport layer's state after its step (by default), operator-split. A reaction
+is any object with `apply(x, dt, drivers)` returning the new state:
 
 ```python
-from noodl.layers.reaction import FirstOrderDecay
+from noodl.layers.reaction import Reaction
 
-model = Model(net, layers, reactions=[("species", FirstOrderDecay(k))])
+class Source(Reaction):
+    def apply(self, x, dt, drivers=None):
+        return x + dt * drivers["generation"]
+
+model = Model(net, layers, reactions=[("species", Source())])
 ```
 
-`FirstOrderDecay` and `Photostationary` (Leighton NO/NO₂/O₃) ship built in; the sewer
-application adds `SulfideGeneration`. `Photostationary`'s default rate is evaluated at the
-driver `"temperature"` (K), which it requires by name unless a constant `k_no_o3` rate
-overrides it.
+The core ships only this protocol. The applications bring their own reactions: the street
+application `Photostationary` (Leighton NO/NO₂/O₃, `noodl.apps.street_aq`), the sewer
+application `SulfideGeneration`. `Photostationary`'s default rate is evaluated at the driver
+`"temperature"` (K), which it requires by name unless a constant `k_no_o3` rate overrides it.
+
+**First-order decay is not a reaction.** A species that decays as $\mathrm{d}x/\mathrm{d}t = -k x$
+is the transport layer's `removal` (a rate per node, 1/s), which is solved together with the
+transport in the same step rather than split from it.
 
 `Model(reaction_order="before_transport")` applies the reactions to the step-start state
 before the transport step instead, so the returned state is the one after transport. The
@@ -403,8 +491,10 @@ potential back unchanged while the flows the closures read are still moving.
 Kirchhoff layers' `.phi` and `.q` by Anderson mixing (type II, Walker & Ni 2011) over the last
 `iterate_memory` passes (default 5), and needs an `iterate_flow_tol` for each of them: the mixing
 minimises the fixed-point residual of `.phi` and `.q`, each divided by its tolerance, and the
-convergence test then also asks that residual of `.phi` to be within `iterate_tol`. Transport
-states stay relaxed. Mixing changes only the sequence of fed states, never the fixed point, and the
+convergence test then also asks that residual of `.phi` to be within `iterate_tol`. A
+conduction-only transport layer (`flow_kind=()`, a heat network) named in `iterate_tol` is mixed
+and judged on its fixed-point residual like a Kirchhoff layer's `.phi`; advective transport
+layers stay relaxed. Mixing changes only the sequence of fed states, never the fixed point, and the
 fixed-point adjoint is unchanged. Two safeguards: an ill-conditioned history drops its oldest
 passes, and a mixed step that would move any entry against its own residual is replaced by the
 relaxed step, because the relaxed iteration only reaches fixed points that attract it and a secant
@@ -426,6 +516,7 @@ State and driver keys are namespaced by layer name:
 | `"<layer>.sources"` | Nodal sources, **full node order** (driver, optional) |
 | `"<layer>.capacity"` | Per-step capacity override (driver, optional) |
 | `"<layer>.removal"` | Per-step first-order removal rate, 1/s, `(n_i, K)`, replacing the layer's construction-time `removal` (driver, optional; not carried in the state, so a closure that sets it must write it every step) |
+| `"<layer>.conductance"` | Per-step conduction conductance of each conduction edge, `(b_c,)` in the order of `layer.conduction_edges`, replacing the layer's construction-time `conductance` (driver, optional; zero or positive; not carried in the state, so a closure that sets it must write it every step) |
 | `"<layer>.transmission"` | Per-step pass fraction of each flow edge, `(b_flow,)` or `(b_flow, K)` in the layer's flow order, replacing the layer's construction-time `transmission` (driver, optional; not carried in the state, so a closure that sets it must write it every step) |
 | `"<layer>.requests"` | An allocation layer's per-edge request (driver, required) |
 | `"<layer>.frequency"` | A phasor layer's frequency in Hz, one per instance (driver, required) |

@@ -11,7 +11,7 @@ import math
 import torch
 
 from noodl.apps.street_aq.canyon import (
-    KAPPA,
+    KAPPA_040,
     boundary_layer,
     canyon_velocity,
     exchange_velocity,
@@ -135,9 +135,9 @@ def _hand_reference(sn, *, emission, background, u_ref=U_REF, theta_w=THETA_W,
     length = torch.tensor([s.length for s in streets], dtype=DT)
     azimuth = torch.tensor(sn.azimuth, dtype=DT)
     layer = boundary_layer(height.mean(), torch.tensor(u_ref, dtype=DT),
-                           torch.tensor(h_abl, dtype=DT), z_ref=30.0, kappa=KAPPA)
+                           torch.tensor(h_abl, dtype=DT), z_ref=30.0, kappa=KAPPA_040)
     u = canyon_velocity(width, height, torch.tensor(theta_w, dtype=DT) - azimuth,
-                        u_star=layer.u_star, canyon_wind="bessel_profile", kappa=KAPPA)
+                        u_star=layer.u_star, canyon_wind="bessel_profile", kappa=KAPPA_040)
     # The sirane preset evaluates the exchange's sigma_w at the canopy height H_R.
     sigma_w = 1.3 * layer.u_star * (1.0 - 0.8 * H_CANOPY / layer.h_abl) * torch.ones_like(height)
     u_d = exchange_velocity(sigma_w, height, width, roof_exchange="turbulent_velocity")

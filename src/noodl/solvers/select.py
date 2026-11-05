@@ -72,6 +72,25 @@ _SPARSE_DIRECT_MAX_BATCH = 32
 # message and can be reset out from under us by `catch_warnings`.
 _WARNED_SPARSE_DIRECT_NEEDS_SCIPY = False
 
+# The same once-per-process bookkeeping for the transport layer's own "auto" (see
+# `transport_solver_kwargs`): its one environment-fault fall-back, SciPy absent.
+_WARNED_AUTO_NEEDS_SCIPY = False
+
+
+def scipy_importable() -> bool:
+    """Whether ``scipy.sparse.linalg`` can be imported right now.
+
+    This is the one SciPy probe every automatic backend choice in the package uses (the
+    sparse LU needs it). It is lazy and per call, never cached: after the first import it is
+    a ``sys.modules`` lookup costing microseconds, and a cached answer would be wrong for the
+    one case it exists to detect, a process that can or cannot import SciPy.
+    """
+    try:
+        import scipy.sparse.linalg  # noqa: F401
+    except ImportError:
+        return False
+    return True
+
 
 def _describe_uncertified(op, cert: Tensor, where: str) -> str:
     """Message fragment naming which instances fail to certify SPD, and why.
@@ -197,9 +216,7 @@ def _auto_sparse_triplet(op, b: Tensor):
         return None
     if grad_on and triplet[2].requires_grad:
         return None
-    try:
-        import scipy.sparse.linalg  # noqa: F401
-    except ImportError:
+    if not scipy_importable():
         if not _WARNED_SPARSE_DIRECT_NEEDS_SCIPY:
             _WARNED_SPARSE_DIRECT_NEEDS_SCIPY = True
             # `stacklevel=2` points at `solve`, the nearest frame that means anything: this
@@ -219,6 +236,105 @@ def _auto_sparse_triplet(op, b: Tensor):
             )
         return None
     return triplet
+
+
+def transport_solver_kwargs(
+    linear_solver: str, batch_size: int, *, op=None, rhs: Tensor | None = None,
+    layer_name: str = "transport",
+) -> dict:
+    """The keywords ``solve`` should see for a transport layer's ``linear_solver``:
+    ``method``, ``preconditioner`` and ``restart``.
+
+    A transport layer resolves its choice PER SOLVE, for every linear solve it runs: the
+    steady solve, the implicit and trapezoidal steps, their ``on_failure="return"``
+    early-return paths, and (through the kwargs the differentiable solve saves) the backward
+    adjoint too. This is a SEPARATE "auto" from ``solve``'s own certified-SPD policy above,
+    scoped to the transport layer's advection operators (non-symmetric, so never CG).
+    ``batch_size`` is ``rhs.shape[:-1].numel()``, the flat instance count this solve is about
+    to run at; ``op`` and ``rhs``, when given, are the just-built operator and right-hand
+    side and are used ONLY to decide whether ``"auto"`` may factorise under grad (hazard 2
+    below); no solve reads them here.
+
+    ``"auto"`` (docs/design/solvers.md#transport-solver-choice) resolves to
+    ``method="sparse_direct"`` when ``batch_size <= _SPARSE_DIRECT_MAX_BATCH`` (the same
+    constant ``solve``'s own "auto" uses) and to plain ``gmres`` above it.
+    ``gmres_jacobi`` and ``gmres_ilu`` are never chosen by ``auto``: the benchmark found
+    ``gmres_ilu`` the clear loser at every ensemble measured (its per-instance ILU
+    factorisation, paid on both the forward and the backward pass, dominates) and the
+    gmres-versus-gmres_jacobi ordering ambiguous. An explicit ``"gmres"`` resolves to plain
+    gmres whatever the batch size.
+
+    Two hazards ``"auto"`` handles before it can return ``sparse_direct``; both fall back to
+    plain ``gmres`` and neither raises, since ``auto`` promises a backend that works:
+
+    1. SciPy absent (the optional ``noodl-physics[sparse]`` extra): ``auto`` falls back and
+       warns ONCE per process (``_WARNED_AUTO_NEEDS_SCIPY``), because a per-solve warning at
+       this default's every-step call frequency would be unusable noise.
+    2. A grad-requiring ``on_failure="return"`` solve. The differentiable forward resolves
+       ``"auto"`` inside ``torch.no_grad()`` (and the backward reuses what the forward
+       picked), so grad mode is off there and the hazard cannot fire on that path. The
+       ``on_failure="return"`` early-return paths call this OUTSIDE any ``no_grad``: an
+       explicit ``sparse_direct`` would raise there whenever grad mode is on and the rhs or
+       the operator's sparse values require grad, an eligibility refusal that
+       ``on_failure="return"`` would not catch. So in that case ``auto`` falls back to
+       ``gmres`` silently (a routing fact about this solve, not an environment fault).
+
+    ``"gmres_jacobi"`` and ``"gmres_ilu"`` resolve to ``method="gmres"`` with a real
+    preconditioner (``"jacobi"``, or SciPy's incomplete LU of ``op.assemble_sparse()`` per
+    instance); the backend is still ``"gmres"``. ``"sparse_direct"`` and ``"direct"`` pass
+    straight through.
+    """
+    if linear_solver == "gmres_jacobi":
+        return {"method": "gmres", "preconditioner": "jacobi", "restart": 30}
+    if linear_solver == "gmres_ilu":
+        return {"method": "gmres", "preconditioner": "ilu", "restart": 30}
+    if linear_solver == "gmres":
+        return {"method": "gmres", "preconditioner": None, "restart": 30}
+    if linear_solver == "auto":
+        if batch_size <= _SPARSE_DIRECT_MAX_BATCH and _transport_auto_sparse_direct_ok(
+            op, rhs, layer_name
+        ):
+            return {"method": "sparse_direct", "preconditioner": None, "restart": 30}
+        return {"method": "gmres", "preconditioner": None, "restart": 30}
+    return {"method": linear_solver, "preconditioner": None, "restart": 30}
+
+
+def _transport_auto_sparse_direct_ok(op, rhs: Tensor | None, layer_name: str) -> bool:
+    """Whether a transport layer's ``"auto"`` may resolve to ``sparse_direct`` right now:
+    the two hazards in `transport_solver_kwargs`, hazard 2 first (cheaper: no import, and
+    usually a no-op because ``op``/``rhs`` are ``None`` or grad is disabled), hazard 1
+    second. Within hazard 2, ``rhs.requires_grad`` is tested before ``assemble_sparse()``
+    is called: a plain attribute read against a real sparse assembly.
+    """
+    global _WARNED_AUTO_NEEDS_SCIPY
+    if op is not None and rhs is not None and torch.is_grad_enabled():
+        if rhs.requires_grad:
+            return False
+        values_require_grad = False
+        assemble_sparse = getattr(op, "assemble_sparse", None)
+        if assemble_sparse is not None:
+            triplet = assemble_sparse()
+            values_require_grad = triplet is not None and bool(triplet[2].requires_grad)
+        if values_require_grad:
+            return False
+    if not scipy_importable():
+        if not _WARNED_AUTO_NEEDS_SCIPY:
+            _WARNED_AUTO_NEEDS_SCIPY = True
+            warnings.warn(
+                f"noodl: TransportLayer '{layer_name}' linear_solver='auto' would have "
+                f"factorised this solve with SciPy's sparse LU (batch size at or under "
+                f"{_SPARSE_DIRECT_MAX_BATCH}), but scipy could not be imported, so it "
+                f"fell back to plain gmres. The answer is correct; it is slower at small "
+                f"batches (see benchmarks/transport_solver_bench.py). Install "
+                f"the extra to get the documented default: pip install noodl-physics[sparse]. "
+                f"This warning is issued once per process; diagnostics['linear']"
+                f"['backend'] reports the backend that actually ran on every solve.",
+                RuntimeWarning,
+                # warn <- transport_solver_kwargs <- the layer's `_resolve_solver` <- its caller
+                stacklevel=4,
+            )
+        return False
+    return True
 
 
 def _sparse_direct(op, b: Tensor, where: str, triplet=None) -> SolveResult:

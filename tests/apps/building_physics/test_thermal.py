@@ -303,3 +303,56 @@ def test_ideal_gas_density_of_batched_reference_pressures_matches_independent_ca
     # a scalar tensor pressure still gives the unbatched `(n,)`
     one = ideal(state, dict(drivers, P_ref=torch.tensor(101325.0, dtype=F64)))
     assert one["rho"].shape == (net.n,)
+
+
+def _film_wall_net(kinds):
+    """zone -- wall node -- ambient, the zone-to-wall path split into a wall-conduction edge
+    and a surface (film) edge in parallel, each of kind `kinds[i]`."""
+    net = Network(dtype=F64)
+    net.add_node("ambient", z_ref=0.0)
+    net.add_node("z", volume=50.0, T0=293.15, z_ref=0.0)
+    net.add_node("w", volume=0.0, T0=293.15, heat_capacity=2e6, z_ref=0.0)
+    net.add_edge("ambient", "z", kind="airpath", z_path=0.0, Cd=0.6, area=0.01)
+    net.add_edge("z", "w", kind=kinds[0], ua=30.0)
+    net.add_edge("w", "ambient", kind=kinds[1], ua=20.0)
+    net.add_edge("z", "w", kind=kinds[2], ua=70.0)
+    return net
+
+
+def test_thermal_layer_takes_a_tuple_of_conduction_kinds():
+    split = thermal_layer(_film_wall_net(("wall", "film", "film")),
+                          conduction_kind=("wall", "film"))
+    assert split.conduction_kinds == ("wall", "film")
+    assert [b[0] for b in split.conduction_edges] == ["wall", "film"]
+    # kind blocks concatenate in the order given: wall (30), then film (20, 70)
+    merged = thermal_layer(_film_wall_net(("wall", "wall", "wall")))
+    assert merged.conduction_kind == "wall"
+    assert split.conductance.tolist() == [30.0, 20.0, 70.0]
+
+    def sources(layer):
+        return torch.cat([src for _, src, _ in layer.conduction_edges])
+
+    assert torch.equal(sources(split), sources(merged))
+    assert torch.equal(split.interior_idx, merged.interior_idx)
+    assert torch.equal(split.capacity, merged.capacity)
+
+
+def test_thermal_layer_names_an_explicit_conduction_kind_with_no_edges():
+    net = _film_wall_net(("wall", "film", "film"))
+    with pytest.raises(ValueError, match=r"conduction_kind \['flim'\] names no edge"):
+        thermal_layer(net, conduction_kind=("wall", "flim"))
+    with pytest.raises(ValueError, match="'radiation'"):
+        thermal_layer(net, conduction_kind="radiation")
+    # the default stays tolerant: no wall edges, no conduction
+    bare = Network(dtype=F64)
+    bare.add_node("ambient", z_ref=0.0)
+    bare.add_node("z", volume=50.0, T0=293.15, z_ref=0.0)
+    bare.add_edge("ambient", "z", kind="airpath", z_path=0.0, Cd=0.6, area=0.01)
+    assert thermal_layer(bare).conduction_kinds == ()
+
+
+def test_a_wall_thermal_layer_declares_its_conductance_unit():
+    model = _single_zone(wall=True)[1]
+    assert model.refs.fields()["thermal.conductance"].unit == "W/K"
+    undeclared = {i.key for i in model.check().issues if i.code == "unit-undeclared"}
+    assert "thermal.conductance" not in undeclared

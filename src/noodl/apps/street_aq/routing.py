@@ -42,16 +42,10 @@ exact average integrates over the whole real line of directions, not around the 
 the Gaussian mass lying more than half a turn from the mean, which that ignores, is below
 `erfc(4 / sqrt 2) = 6.3e-5` at `pi/4` and below `1e-15` at 20 degrees."""
 
-MAX_SIGMA_THETA_SIRANE = MAX_SIGMA_THETA_EXACT
-"""Earlier name of `MAX_SIGMA_THETA_EXACT`."""
-
 EXACT_GAUSSIAN_WINDOW = 8.0
 """Half-width of the `direction_averaging="exact_gaussian"` window, in units of `sigma_theta`:
 switch angles farther than `8 sigma_theta` from the mean direction are dropped, because
 the Gaussian mass beyond them, `Phi(-8) = 6.2e-16`, is below float64 resolution."""
-
-SIRANE_WINDOW = EXACT_GAUSSIAN_WINDOW
-"""Earlier name of `EXACT_GAUSSIAN_WINDOW`."""
 
 _FLOW_KINDS = ("route", "vent", "exchange")
 """The edge kinds `StreetFlows` writes its concatenated `q` in, and the order
@@ -93,10 +87,6 @@ def sigma_theta_turbulence_intensity(sigma_v: Tensor, u_ref: Tensor) -> Tensor:
     return torch.clamp(sigma_v / u_ref, max=MAX_SIGMA_THETA)
 
 
-sigma_theta_munich = sigma_theta_turbulence_intensity
-"""Earlier name of `sigma_theta_turbulence_intensity`."""
-
-
 def n_theta_rectangle_rule(sigma_theta: Tensor) -> Tensor:
     """The sample count of the `rectangle_rule` direction average:
     `ntheta = floor(sigma_theta in DEGREES)` (MUNICH, SRC `:3568`), as a long tensor,
@@ -104,10 +94,6 @@ def n_theta_rectangle_rule(sigma_theta: Tensor) -> Tensor:
     degrees."""
     degrees = sigma_theta * 180.0 / math.pi
     return torch.clamp(torch.floor(degrees).long(), min=1, max=MAX_N_THETA)
-
-
-n_theta_munich = n_theta_rectangle_rule
-"""Earlier name of `n_theta_rectangle_rule`."""
 
 
 def direction_offsets(
@@ -268,10 +254,6 @@ def exact_gaussian_direction_samples(
     cdf = torch.cat([zeros, cdf, zeros + 1.0], -1)
     weights = cdf[..., 1:] - cdf[..., :-1]
     return offsets, weights
-
-
-sirane_direction_samples = exact_gaussian_direction_samples
-"""Earlier name of `exact_gaussian_direction_samples`."""
 
 
 def node_closure(flux: Tensor) -> tuple[Tensor, Tensor, Tensor, Tensor]:

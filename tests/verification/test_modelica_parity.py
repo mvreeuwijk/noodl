@@ -33,7 +33,7 @@ docstring), and these models align row for row with that convention.
 Column mapping (`ModelicaNames`): `<inst>.m_flow` is `names.edges[inst]` (an in-line sensor's
 own name maps to the flow of the element in series with it); `<inst>.m1_flow`/`m2_flow`
 (= `mAB_flow`/`mBA_flow`) of a door, plain or discretised (whose two edges are its port
-streams, `MBLDoorPortStream`), are `names.edges["<inst>.port_a1"]`/`["<inst>.port_a2"]`. A
+streams, `DoorPortStream`), are `names.edges["<inst>.port_a1"]`/`["<inst>.port_a2"]`. A
 CSV column that maps to nothing fails the test: nothing is skipped.
 
 The maximum relative error per model and variable is printed (visible with `-s`) and, when

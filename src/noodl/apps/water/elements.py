@@ -456,7 +456,7 @@ class CompositeDarcyWeisbach(ConstitutiveLaw):
     """Composite Darcy-Weisbach pipe: Hagen-Poiseuille, Dunlop's cubic, then Swamee-Jain.
 
     This is EPANET 2.2's Darcy-Weisbach pipe, reproduced operation for operation
-    (`DWpipecoeff`). The pre-rename name ``EpanetDarcyWeisbach`` is an alias.
+    (`DWpipecoeff`).
 
     Head loss in EPANET's units (feet, cfs; ``q`` signed)::
 
@@ -618,22 +618,6 @@ class CompositeDarcyWeisbach(ConstitutiveLaw):
         # The laminar tangent at q = 0, as `Duct.linear_init` uses its laminar line.
         slope = self.dflow(torch.zeros_like(self.length * self.diameter), drivers)
         return torch.zeros_like(slope), slope
-
-
-# Pre-rename names, kept as aliases so existing code keeps working.
-EpanetDarcyWeisbach = CompositeDarcyWeisbach  # alias, the pre-rename name
-epanet_friction_factor = composite_friction_factor  # alias, the pre-rename name
-EPANET_A1 = W_RE_4000  # alias, the pre-rename name
-EPANET_A2 = W_RE_2000  # alias, the pre-rename name
-EPANET_A8 = SWAMEE_JAIN_W_COEFF  # alias, the pre-rename name
-EPANET_A9 = SWAMEE_JAIN_LOG_COEFF  # alias, the pre-rename name
-EPANET_AB = DUNLOP_AB  # alias, the pre-rename name
-EPANET_AC = DUNLOP_AC  # alias, the pre-rename name
-EPANET_FOOT = M_PER_FT  # alias, the pre-rename name
-EPANET_G_FT = G_FT_S2  # alias, the pre-rename name
-EPANET_KM = MINOR_LOSS_K_FT  # alias, the pre-rename name
-EPANET_VISCOS_FT2 = NU_WATER_FT2  # alias, the pre-rename name
-EPANET_NU = NU_WATER_REF  # alias, the pre-rename name
 
 
 def epanet_minor_coefficient(minor_loss: Tensor, diameter: Tensor,

@@ -13,9 +13,9 @@ from noodl.apps.street_aq.network import (
     build_model,
     from_test_network,
     initial_state,
-    munich_idealised,
     street_geometry,
     street_index,
+    twelve_street_grid,
 )
 
 DT = torch.float64
@@ -65,7 +65,7 @@ def test_from_test_network_has_the_four_junction_geometry():
 
 
 def test_munich_idealised_topology():
-    net, names = munich_idealised(L=100.0, W=20.0, H=20.0)
+    net, names = twelve_street_grid(L=100.0, W=20.0, H=20.0)
     assert names == [str(i) for i in range(1, 13)]
     assert len(net.streets) == 12
     # Four real junctions, each a full four-way (two stubs or crossings per side), and

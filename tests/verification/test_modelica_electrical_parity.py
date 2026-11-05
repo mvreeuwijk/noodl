@@ -14,11 +14,10 @@ agreement is to round-off:
     |noodl - omc| <= 1e-9 |omc| + 1e-12   (units of the column: V, A or K).
 
 The tolerance is not loosened for any model, column or row. The steady solves use the
-runner's own Newton tolerances (`run.STEADY_ATOL`, `run.STEADY_RTOL`; `THERMAL_STEADY_ATOL`
-on the thermal layer of a circuit with a heat-port thermal network); nothing looser is
-passed. MSL's `Resistor`
-(a coupled thermal solve at every row) is compared at every row only under `-m slow`; the
-default run compares every tenth row at the same bound (`SUBSAMPLED`).
+runner's own Newton tolerances (`run.STEADY_ATOL`, `run.STEADY_RTOL`; the heat layer of a
+circuit with a heat-port thermal network is a linear solve); nothing looser is passed. MSL's
+`Resistor` (a coupled thermal solve at every row) is compared at every row only under
+`-m slow`; the default run compares every tenth row at the same bound (`SUBSAMPLED`).
 
 Dynamic models: two fixed-step runs at `r` and `2 r` substeps, combined by Richardson
 extrapolation, agree at every row after the start row to

@@ -113,6 +113,11 @@ def flow_owners(
     flow_layer_of: dict[str, str | None] = {}
     flow_driver_of: dict[str, str] = {}
     for tname, tl in transport.items():
+        flow_driver_of[tname] = f"{tname}.q"
+        if not tl.flow_kinds:
+            # A conduction-only layer advects nothing: no owner and no flow driver.
+            flow_layer_of[tname] = None
+            continue
         owners = [
             pn for pn, pl in kirchhoff.items()
             if all(k in pl.kinds for k in tl.flow_kinds)
@@ -134,7 +139,6 @@ def flow_owners(
                 f"({owners}); at most one may"
             )
         flow_layer_of[tname] = owners[0] if owners else None
-        flow_driver_of[tname] = f"{tname}.q"
     return flow_layer_of, flow_driver_of
 
 

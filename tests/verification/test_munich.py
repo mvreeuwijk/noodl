@@ -21,27 +21,27 @@ import pytest
 import torch
 
 from noodl.apps.street_aq.canyon import (
-    KAPPA_MUNICH,
-    SCHULTE_BETA,
-    SIRANE_EXCHANGE,
+    ASPECT_RATIO_EXCHANGE_BETA,
+    EXCHANGE_SIGMA_W_RATIO,
+    KAPPA_041,
     BoundaryLayer,
+    bessel_shape_parameter,
+    canopy_displacement_roughness,
     canyon_velocity,
     exchange_velocity,
-    macdonald_profile,
     roof_wind,
-    soulhac_shape,
 )
 from noodl.apps.street_aq.chemistry import photostationary_for_streets, street_steady
 from noodl.apps.street_aq.closures import resolve
-from noodl.apps.street_aq.network import build_model, munich_idealised, street_index
+from noodl.apps.street_aq.network import build_model, street_index, twelve_street_grid
+from noodl.apps.street_aq.reactions import K_NO_O3, K_NO_O3_298, MOLAR_MASS, k_no_o3_jpl2003
 from noodl.apps.street_aq.routing import (
     direction_offsets,
-    n_theta_munich,
+    n_theta_rectangle_rule,
     node_closure,
     routing_matrix,
-    sigma_theta_munich,
+    sigma_theta_turbulence_intensity,
 )
-from noodl.layers.reaction import K_NO_O3, K_NO_O3_298, MOLAR_MASS, k_no_o3_jpl2003
 
 DT = torch.float64
 FIXTURE = Path(__file__).resolve().parents[1] / "data" / "street" / "munich_idealised.json"
@@ -57,7 +57,7 @@ def _t(value):
 def test_sirane_exchange_velocity(record_property):
     """S11 Eq. (5) p. 7386; K18 Eq. (3) p. 613; K22 Eq. (B10) p. 7387;
     `StreetNetworkTransport.cxx:3273`. The regression guard against `1/sqrt(2 pi)`."""
-    assert abs(SIRANE_EXCHANGE - 0.225079079039277) < 1e-15
+    assert abs(EXCHANGE_SIGMA_W_RATIO - 0.225079079039277) < 1e-15
     u_d = exchange_velocity(_t(SIGMA_W), _t(H), _t(W), roof_exchange="turbulent_velocity")
     # The worked value 0.08681174 is quoted to eight significant figures.
     assert abs(float(u_d) / 0.08681174 - 1.0) < 1e-7
@@ -65,15 +65,15 @@ def test_sirane_exchange_velocity(record_property):
     record_property("check", "Exchange velocity u_d")
     record_property("tolerance", "rel 1e-7")
     record_property("measured_rel", abs(float(u_d) / 0.08681174 - 1.0))
-    record_property("check2", "SIRANE_EXCHANGE constant")
+    record_property("check2", "EXCHANGE_SIGMA_W_RATIO constant")
     record_property("tolerance2", "< 1e-15")
-    record_property("measured2_diff", abs(SIRANE_EXCHANGE - 0.225079079039277))
+    record_property("measured2_diff", abs(EXCHANGE_SIGMA_W_RATIO - 0.225079079039277))
 
 
 def test_schulte_mixing_length_and_exchange_velocity():
     """K18 Eqs. (4)-(8) p. 613, K22 Eq. (B11); ATM `MeteorologyStreet.cxx:547-554`."""
-    assert abs(SCHULTE_BETA - 0.450158158078553) < 1e-15
-    lm = SCHULTE_BETA / (1.0 + H / W)
+    assert abs(ASPECT_RATIO_EXCHANGE_BETA - 0.450158158078553) < 1e-15
+    lm = ASPECT_RATIO_EXCHANGE_BETA / (1.0 + H / W)
     assert abs(lm - 0.234457373999246) < 1e-15
     u_d = exchange_velocity(_t(SIGMA_W), _t(H), _t(W), roof_exchange="aspect_ratio_scaled")
     assert abs(float(u_d) / 0.09042890 - 1.0) < 1e-7
@@ -89,7 +89,7 @@ def test_schulte_mixing_length_and_exchange_velocity():
 def test_sigma_w_in_all_three_stability_branches():
     """`ComputeSigmaW`, `StreetNetworkTransport.cxx:3221-3260`; neither paper gives it."""
     layer = BoundaryLayer(u_star=_t(U_STAR), h_abl=_t(PBLH), z_ref=_t(30.0),
-                          d=_t(4.6), z0=_t(0.69), kappa=KAPPA_MUNICH)
+                          d=_t(4.6), z0=_t(0.69), kappa=KAPPA_041)
     neutral = layer.sigma_w(_t(H), lmo=_t(1.0e6), stability="monin_obukhov")
     assert abs(float(neutral) - 0.3856944) < 1e-13
     stable = layer.sigma_w(_t(H), lmo=_t(100.0), stability="monin_obukhov")
@@ -120,13 +120,13 @@ def test_exponential_canyon_wind_is_kim_2022_b14_and_not_kim_2018_9_to_11():
 
 def test_macdonald_displacement_roughness_and_roof_wind(record_property):
     """K22 Eqs. (1)-(3) p. 7373 and (B13); `ComputeMacdonaldProfile` `:3302-3353`."""
-    d_c, z0c = macdonald_profile(_t(H), _t(W))
+    d_c, z0c = canopy_displacement_roughness(_t(H), _t(W))
     assert abs(float(d_c) - 4.617352498423888) < 1e-12
     assert abs(float(z0c) - 0.6614635677623194) < 1e-12
     u_h = roof_wind(_t(U_STAR), _t(H), _t(W), roof_wind="canopy_log_law", h_mean=_t(H),
                     w_mean=_t(W))
     assert abs(float(u_h) - 0.9063192631810709) < 1e-12
-    u_star_from_ref = 5.0 * KAPPA_MUNICH / math.log((30.0 - float(d_c)) / float(z0c))
+    u_star_from_ref = 5.0 * KAPPA_041 / math.log((30.0 - float(d_c)) / float(z0c))
     assert abs(u_star_from_ref - 0.5620494130195227) < 1e-12
     worst = max(abs(float(d_c) - 4.617352498423888), abs(float(z0c) - 0.6614635677623194))
     record_property("check", "Macdonald d_c, z_0c")
@@ -140,15 +140,15 @@ def test_soulhac_shape_parameter_and_bessel_roof_wind(record_property):
     assert delta_i == 3.75
     ratio = Z0_S / delta_i
     assert abs(ratio - 0.0026666666666666666) < 1e-18
-    c = soulhac_shape(_t(ratio))
+    c = bessel_shape_parameter(_t(ratio))
     # MUNICH searches a 0.01 grid and returns 0.62; this is the continuous root, and the
     # quantisation costs 4e-4 relative in u_M.
     assert abs(float(c) - 0.6198293039179747) < 1e-13
     u_h = roof_wind(_t(U_STAR), _t(H), _t(W), roof_wind="bessel_canyon_mean", z0_s=Z0_S,
-                    kappa=KAPPA_MUNICH)
+                    kappa=KAPPA_041)
     # u_H/u* = (u_M/u*) * f_mean = 8.611791 * 0.880654, both quoted to seven figures.
     assert abs(float(u_h) / U_STAR / (8.611791 * 0.880654) - 1.0) < 2e-6
-    record_property("check", "soulhac_shape root c")
+    record_property("check", "bessel_shape_parameter root c")
     record_property("tolerance", "< 1e-13")
     record_property("measured_diff", abs(float(c) - 0.6198293039179747))
 
@@ -176,18 +176,18 @@ def test_the_nine_unnormalised_quadrature_weight_sums(n, total, record_property)
 def test_sigma_v_sigma_theta_and_the_sample_count():
     """`ComputeSigmaV` `:3194-3216`; the neutral branch collapses to exactly 1.2 u*."""
     layer = BoundaryLayer(u_star=_t(U_STAR), h_abl=_t(PBLH), z_ref=_t(30.0),
-                          d=_t(4.6), z0=_t(0.69), kappa=KAPPA_MUNICH)
+                          d=_t(4.6), z0=_t(0.69), kappa=KAPPA_041)
     sigma_v = layer.sigma_v()
     assert abs(float(sigma_v) - 1.2 * U_STAR) < 1e-15
     assert abs(float(sigma_v) - 0.36) < 1e-15
-    five = sigma_theta_munich(sigma_v, _t(5.0))
-    ten = sigma_theta_munich(sigma_v, _t(10.0))
+    five = sigma_theta_turbulence_intensity(sigma_v, _t(5.0))
+    ten = sigma_theta_turbulence_intensity(sigma_v, _t(10.0))
     assert abs(float(five) - 0.072) < 1e-15
     assert abs(float(ten) - 0.036) < 1e-15
     assert abs(float(five) * 180.0 / math.pi - 4.1253) < 1e-3
     assert abs(float(ten) * 180.0 / math.pi - 2.0626) < 1e-3
-    assert int(n_theta_munich(five)) == 4
-    assert int(n_theta_munich(ten)) == 2
+    assert int(n_theta_rectangle_rule(five)) == 4
+    assert int(n_theta_rectangle_rule(ten)) == 2
 
 
 def test_the_non_crossing_routing_matrix_distinguishes_sirane_from_mixing():
@@ -249,7 +249,7 @@ def test_the_leighton_rate_constant_and_its_conversion():
 def test_the_two_paper_versus_paper_divergences_are_pinned():
     """The two places a reader of one paper alone would implement the wrong thing."""
     # (i) the exchange coefficient: 1/(sqrt2 pi), not 1/sqrt(2 pi) -- a factor sqrt(pi).
-    assert abs((1.0 / math.sqrt(2.0 * math.pi)) / SIRANE_EXCHANGE
+    assert abs((1.0 / math.sqrt(2.0 * math.pi)) / EXCHANGE_SIGMA_W_RATIO
                - math.sqrt(math.pi)) < 1e-12
     # (ii) the exponential profile: K22 B14's 2/a_r prefactor, not K18 Eq. (9)'s 2/pi.
     a_r = H / W
@@ -270,7 +270,7 @@ def _run(fixture):
     geometry = fixture["fitted_geometry"]
     options = dict(fixture["options"])
     options.pop("comment")
-    net, names = munich_idealised(L=geometry["L_m"], W=geometry["W_m"],
+    net, names = twelve_street_grid(L=geometry["L_m"], W=geometry["W_m"],
                                   H=geometry["H_m"])
     model, state, _ = build_model(net, pblh_floor=True, **options)
     graph = model.net
@@ -311,7 +311,7 @@ def test_the_fixture_options_are_the_reference_option_set():
 
 def test_the_fixture_matches_the_network_the_application_builds():
     fixture = _fixture()
-    net, names = munich_idealised()
+    net, names = twelve_street_grid()
     assert names == [s["id"] for s in fixture["streets"]]
     for street, record in zip(net.streets, fixture["streets"], strict=True):
         assert (street.name, street.u, street.v) == (record["id"], record["u"],
@@ -458,7 +458,7 @@ def test_photostationary_chemistry_on_the_twelve_street_network():
     geometry = fixture["fitted_geometry"]
     options = dict(fixture["options"])
     options.pop("comment")
-    net, names = munich_idealised(L=geometry["L_m"], W=geometry["W_m"],
+    net, names = twelve_street_grid(L=geometry["L_m"], W=geometry["W_m"],
                                   H=geometry["H_m"])
     reaction = photostationary_for_streets(("no", "no2", "o3"), preset="munich")
     model, state, _ = build_model(

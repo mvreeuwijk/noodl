@@ -120,7 +120,7 @@ class AirMedium:
     """An air medium's default state and the two densities its flow elements need.
 
     Each is one MBL/MSL medium (``name`` is its Modelica class path); build one with
-    :func:`medium`. The pre-rename name ``MBLMedium`` is an alias.
+    :func:`medium`.
 
     ``buoyancy_density`` is stored as a private callable rather than dispatched by ``name``,
     so each medium's own ideal-gas law (or, for ``Buildings.Media.Air``, ``density_pTX``) is
@@ -291,6 +291,3 @@ def medium(name: str) -> AirMedium:
             f"unsupported medium {name!r}; supported media are: {supported}"
         )
     return factory()
-
-# Pre-rename names, kept as aliases so existing code keeps working.
-MBLMedium = AirMedium  # alias, the pre-rename name

@@ -8,16 +8,15 @@ import pytest
 import torch
 
 from noodl.apps.street_aq.chemistry import (
-    SIRANE_K_FLOOR_PPB,
+    PHOTOSTATIONARY_FLOOR_PPB,
     j_no2_elevation_cloud,
     k_no_o3_soulhac2011,
-    molar_volume,
     photostationary_for_streets,
     solar_elevation,
     street_steady,
 )
 from noodl.apps.street_aq.network import Street, StreetNetwork, build_model
-from noodl.layers.reaction import MOLAR_MASS, k_no_o3_jpl2003
+from noodl.apps.street_aq.reactions import MOLAR_MASS, k_no_o3_jpl2003, molar_volume
 
 DT = torch.float64
 MASSES = torch.tensor([MOLAR_MASS["no"], MOLAR_MASS["no2"], MOLAR_MASS["o3"]], dtype=DT)
@@ -128,7 +127,7 @@ def test_the_sirane_closure_is_eq31_in_ppb_with_its_floor(k1):
     floor."""
     t, v_l = 291.0, 23.95                                     # K, L/mol
     reaction = photostationary_for_streets(("no", "no2", "o3"), preset="sirane")
-    assert reaction.floor_ppb == SIRANE_K_FLOOR_PPB == 2.0
+    assert reaction.floor_ppb == PHOTOSTATIONARY_FLOOR_PPB == 2.0
     bg = {"no2": 40.0, "no": 15.0, "o3": 50.0}                # ug/m3
     passive = {"no2": 12.0, "no": 55.0}                       # ug/m3, emissions only
     ug = torch.tensor([[bg["no"] + passive["no"], bg["no2"] + passive["no2"], bg["o3"]]],
@@ -183,13 +182,13 @@ def test_the_sirane_closure_conserves_nox_and_ox_and_is_differentiable():
 
 def test_the_preset_is_named_and_sets_the_rate_and_the_floor():
     default = photostationary_for_streets(("no", "no2", "o3"))
-    assert default.floor_ppb == SIRANE_K_FLOOR_PPB and default.rate is k_no_o3_soulhac2011
+    assert default.floor_ppb == PHOTOSTATIONARY_FLOOR_PPB and default.rate is k_no_o3_soulhac2011
     munich = photostationary_for_streets(("no", "no2", "o3"), preset="munich")
     assert munich.floor_ppb == 0.0 and munich.rate is k_no_o3_jpl2003
     assert photostationary_for_streets(("no", "no2", "o3"), preset="sirane",
                                        floor_ppb=0.0).floor_ppb == 0.0
     mixed = photostationary_for_streets(("no", "no2", "o3"), no_o3_rate="jpl_2003")
-    assert mixed.rate is k_no_o3_jpl2003 and mixed.floor_ppb == SIRANE_K_FLOOR_PPB
+    assert mixed.rate is k_no_o3_jpl2003 and mixed.floor_ppb == PHOTOSTATIONARY_FLOOR_PPB
     custom = photostationary_for_streets(("no", "no2", "o3"), no_o3_rate=k_no_o3_soulhac2011,
                                          preset="munich")
     assert custom.rate is k_no_o3_soulhac2011 and custom.floor_ppb == 0.0
@@ -201,13 +200,9 @@ def test_the_preset_is_named_and_sets_the_rate_and_the_floor():
         photostationary_for_streets(("no", "no2", "o3"), no_o3_rate="arrhenius")
 
 
-def test_the_reference_model_rate_names_are_the_same_functions():
+def test_the_named_no_o3_rates_are_the_two_rate_functions():
     from noodl.apps.street_aq import chemistry
-    from noodl.layers import reaction
 
-    assert chemistry.k_no_o3_sirane is chemistry.k_no_o3_soulhac2011
-    assert chemistry.j_no2_sirane is chemistry.j_no2_elevation_cloud
-    assert reaction.k_no_o3_munich is reaction.k_no_o3_jpl2003
     assert chemistry.NO_O3_RATES == {"soulhac_2011": k_no_o3_soulhac2011,
                                      "jpl_2003": k_no_o3_jpl2003}
 
