@@ -207,6 +207,14 @@ def test_the_named_no_o3_rates_are_the_two_rate_functions():
                                      "jpl_2003": k_no_o3_jpl2003}
 
 
+def test_the_reference_model_rate_names_are_the_same_functions():
+    from noodl.apps.street_aq import chemistry, reactions
+
+    assert chemistry.k_no_o3_sirane is chemistry.k_no_o3_soulhac2011
+    assert chemistry.j_no2_sirane is chemistry.j_no2_elevation_cloud
+    assert reactions.k_no_o3_munich is reactions.k_no_o3_jpl2003
+
+
 # ------------------------------------------ the coupled steady state and post-processing
 
 def test_street_steady_equals_the_equilibrium_of_the_passive_steady_state():

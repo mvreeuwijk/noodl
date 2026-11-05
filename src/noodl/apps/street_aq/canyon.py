@@ -32,7 +32,11 @@ Tensor = torch.Tensor
 EULER_GAMMA_TRUNCATED = 0.577
 """The Euler-Mascheroni constant TRUNCATED to three decimals -- not 0.5772156649 -- in the
 Bessel shape equation (`bessel_shape_residual`). ATM `MeteorologyStreet.cxx:118`
-hard-codes the same truncated value. Worth about 4e-5 relative."""
+hard-codes the same truncated value. Worth about 4e-5 relative.
+
+Alias: `GAMMA_E` (SIRANE)."""
+
+GAMMA_E = EULER_GAMMA_TRUNCATED  # alias, the SIRANE/ATM name
 
 Z0_B_DEFAULT = 0.15
 """In-canyon (building) roughness, the default, m."""
@@ -45,14 +49,22 @@ EXCHANGE_SIGMA_W_RATIO = 1.0 / (math.sqrt(2.0) * math.pi)
 S11 Eq. (5) p. 7386, K18 Eq. (3) p. 613, K22 Eq. (B10) p. 7387 and
 `StreetNetworkTransport.cxx:3273` all read `sigma_w/(sqrt(2) pi)` -- the radical covers
 only the 2, verified at glyph level in all three PDFs. The reading
-`sigma_w/sqrt(2 pi)` (`1/sqrt(2 pi) = 0.398942280401433`) appears in no source."""
+`sigma_w/sqrt(2 pi)` (`1/sqrt(2 pi) = 0.398942280401433`) appears in no source.
+
+Alias: `SIRANE_EXCHANGE` (SIRANE)."""
+
+SIRANE_EXCHANGE = EXCHANGE_SIGMA_W_RATIO  # alias, the SIRANE name
 
 ASPECT_RATIO_EXCHANGE_BETA = 2.0 / (math.sqrt(2.0) * math.pi)
 """`beta` in the `aspect_ratio_scaled` roof exchange `u_d = beta sigma_w / (1 + H/W)`
 (Schulte's mixing-length form): 0.450158158078553, fixed by matching the
 `turbulent_velocity` form at `a_r = 1` (K18 p. 613). ATM `ComputeSchulteLm`,
 `MeteorologyStreet.cxx:547-554`; MUNICH v1.0 used the literal 0.45 instead, a 0.035 %
-difference."""
+difference.
+
+Alias: `SCHULTE_BETA` (MUNICH)."""
+
+SCHULTE_BETA = ASPECT_RATIO_EXCHANGE_BETA  # alias, the Schulte (MUNICH) name
 
 C_BRACKET_LO = 1e-4
 C_BRACKET_HI = 3.0
@@ -135,10 +147,15 @@ def bessel_shape_residual(c: Tensor, ratio: Tensor) -> Tensor:
     equation as `z0_s/delta_i = (2/C) exp(...)` (K22 Eq. B12; ATM `MeteorologyStreet.cxx:119-153`,
     where it is solved by a brute-force search on a 0.01 grid, so MUNICH's `C` is quantised
     -- worth 4e-4 relative in `u_M`. This solve is continuous.)
+
+    Alias: `soulhac_residual` (SIRANE).
     """
     return 0.5 * ratio * c - torch.exp(
         (math.pi / 2.0) * bessel_y1(c) / bessel_j1(c) - EULER_GAMMA_TRUNCATED
     )
+
+
+soulhac_residual = bessel_shape_residual  # alias, the Soulhac (SIRANE) name
 
 
 def bessel_shape_parameter(ratio: Tensor) -> Tensor:
@@ -150,6 +167,8 @@ def bessel_shape_parameter(ratio: Tensor) -> Tensor:
     `1.5 r - 2.527 < 0` at the high end for every `r < 1.685`, and it changes sign exactly
     once in between. A ratio at or above 1.6 is refused rather than handed to the solver,
     whose "no sign change is bracketed" message would name neither the ratio nor the reason.
+
+    Alias: `soulhac_shape` (SIRANE).
     """
     ratio = torch.as_tensor(ratio, dtype=torch.float64)
     if bool((ratio <= 0).any()):
@@ -173,6 +192,8 @@ def bessel_shape_parameter(ratio: Tensor) -> Tensor:
     hi = torch.full_like(ratio, C_BRACKET_HI)
     return solve_monotone(bessel_shape_residual, lo, hi, ratio, tol=1e-14, max_iter=200)
 
+
+soulhac_shape = bessel_shape_parameter  # alias, the Soulhac (SIRANE) name
 
 SHAPE_CONSTANT_GRID_STEP = 0.01
 """Spacing of the grid `grid_shape_parameter` searches, `c = 0.01, 0.02, ..., 1.00`
@@ -428,6 +449,8 @@ def canopy_displacement_roughness(
     input `Building_density`, default 0.4, from which the building width is derived as
     `W_b = lambda_p/(1 - lambda_p) W_mean` and `lambda_f = H_mean / (W_mean + W_b)`.
     `h_mean` and `w_mean` are NETWORK means, not per-street values.
+
+    Alias: `macdonald_profile` (MUNICH).
     """
     h_mean = torch.as_tensor(h_mean, dtype=torch.float64)
     w_mean = torch.as_tensor(w_mean, dtype=torch.float64)
@@ -439,6 +462,9 @@ def canopy_displacement_roughness(
         -(0.5 * small_delta * c_db / kappa**2 * (1.0 - d_over_h) * lambda_f) ** (-0.5)
     )
     return d_c, z0c
+
+
+macdonald_profile = canopy_displacement_roughness  # alias, the Macdonald (MUNICH) name
 
 
 def roof_wind(

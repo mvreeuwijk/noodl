@@ -314,6 +314,8 @@ class OpenDoor(_Door):
     (``BaseClasses/Door.mo:19-28``), ``CD = 0.65``, ``m = 0.5`` (``DoorOpen.mo:8-12``).
     ``wOpe``/``hOpe``/``CD``/``m`` may be scalars or one value per door. See the module
     docstring for the equations and the edge mapping.
+
+    Alias: `MBLDoorOpen` (MBL).
     """
 
     def __init__(
@@ -407,6 +409,8 @@ class OperableDoor(_Door):
     ``drivers[y_key]`` is a 0-d scalar or a tensor whose last dimension is 1 or this
     element's door count, broadcasting against ``dp``. MBL declares ``y`` with ``min=0,
     max=1`` (``:30``) and disclaims accuracy for ``0 < y < 1``; values are used as given.
+
+    Alias: `MBLDoorOperable` (MBL).
     """
 
     def __init__(
@@ -509,7 +513,10 @@ class OperableDoor(_Door):
 def open_door_pair(*, kind: str = "door", **kwargs) -> tuple[OpenDoor, OpenDoor]:
     """Both edges of one ``DoorOpen`` (or of several, with per-door ``src``/``tgt``): the
     ``"ab"`` edge (path 1) with kind ``f"{kind}_ab"`` and the ``"ba"`` edge (path 2) with kind
-    ``f"{kind}_ba"``, sharing every keyword argument of :class:`OpenDoor`."""
+    ``f"{kind}_ba"``, sharing every keyword argument of :class:`OpenDoor`.
+
+    Alias: `mbl_door_pair` (MBL).
+    """
     return (
         OpenDoor(direction="ab", kind=f"{kind}_ab", **kwargs),
         OpenDoor(direction="ba", kind=f"{kind}_ba", **kwargs),
@@ -519,8 +526,18 @@ def open_door_pair(*, kind: str = "door", **kwargs) -> tuple[OpenDoor, OpenDoor]
 def operable_door_pair(
     *, kind: str = "door", **kwargs
 ) -> tuple[OperableDoor, OperableDoor]:
-    """Both edges of one ``DoorOperable``; see :func:`open_door_pair`."""
+    """Both edges of one ``DoorOperable``; see :func:`open_door_pair`.
+
+    Alias: `mbl_operable_door_pair` (MBL).
+    """
     return (
         OperableDoor(direction="ab", kind=f"{kind}_ab", **kwargs),
         OperableDoor(direction="ba", kind=f"{kind}_ba", **kwargs),
     )
+
+# Modelica Buildings Library (MBL) names, kept as aliases: they name the reference model
+# these laws are transcribed from.
+MBLDoorOpen = OpenDoor  # alias, the MBL name
+MBLDoorOperable = OperableDoor  # alias, the MBL name
+mbl_door_pair = open_door_pair  # alias, the MBL name
+mbl_operable_door_pair = operable_door_pair  # alias, the MBL name

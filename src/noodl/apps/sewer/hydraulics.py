@@ -57,6 +57,10 @@ F64 = torch.float64
 #: non-positive capacity by name). Applied nowhere else, and recorded in `notes` when it is applied.
 CAPACITY_FLOOR = 1e-9
 
+#: Values of the ``geometry`` option named for the reference model, normalised to the
+#: physical name: ``"swmm"`` is the tabulated (51-point lookup-table) circular cross-section.
+GEOMETRY_ALIASES = {"swmm": "tabulated"}
+
 
 class SewerHydraulics:
     """The water side of a sewer, as a `Model` closure.
@@ -66,6 +70,8 @@ class SewerHydraulics:
     `storage`: under `storage=True` this closure integrates the manhole levels over the
     model's own step interval (a `StepContext`, not a fixed interval read off its own
     constructor); under `storage=False` it is a plain algebraic closure.
+
+    Alias: ``geometry="swmm"`` for ``"tabulated"`` (SWMM).
     """
 
     @property
@@ -90,6 +96,7 @@ class SewerHydraulics:
         self.net = net
         self.name = name
         self.storage = bool(storage)
+        geometry = GEOMETRY_ALIASES.get(geometry, geometry)
         if geometry not in ("analytic", "tabulated"):
             raise ValueError(
                 f"SewerHydraulics {name!r}: geometry must be 'analytic' or 'tabulated', got "

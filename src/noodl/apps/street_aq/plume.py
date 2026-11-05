@@ -151,7 +151,12 @@ GRAVITY = 9.81
 GAUSS_CUTOFF_SIGMAS = 4.0
 """The Gaussian cut-off, in lateral standard deviations: pairs more than this many
 `sigma_y` beyond the flat top contribute exactly zero. SIRANE's keyword `SEUIL_GAUSS`
-("Sigma threshold to neglect a puff", default 4.0)."""
+("Sigma threshold to neglect a puff", default 4.0).
+
+Alias: `SEUIL_GAUSS` (SIRANE)."""
+
+SEUIL_GAUSS = GAUSS_CUTOFF_SIGMAS  # alias, the SIRANE name
+
 
 TIME_STEP_S = 10.0
 """The trajectory's time step, s: the node spacing of SIRANE's plume is exactly `10 U`

@@ -325,8 +325,9 @@ scheme, `exact` included, steps it, and positivity and the maximum principle hol
 new temperature extremes from the folding). After the step the folded nodes' temperatures are
 recovered from their neighbours' new values, the boundary values at the end of the step and the
 sources, and returned in the state like any other node's; the boundary transfer counts the heat
-that leaves through them. The folding is computed once from the construction-time conductance,
-and again each call that passes a per-call conductance (the driver below), so a radiative
+that leaves through them. The folding is computed once from the construction-time conductance
+(again after an in-place edit of it, and on every call while it requires grad), and on each call
+that passes a per-call conductance (the driver below), so a radiative
 coefficient re-evaluated each pass is folded with its current value, and gradients reach the
 conductances and the sources through it. A folded node all of whose conductances are zero in a
 call is held at its value, its source dropped, as above; a group of folded nodes joined that call
@@ -342,8 +343,9 @@ state are the folded nodes' balance at the end of the step; under `on_failure="r
 return a `SolveResult` that has converged in zero iterations. `layer.steady(..., hold=x0)` holds
 the stored nodes at `x0` and solves only the folded ones: the consistent initial point
 `Model.steady(..., mode="initial")` uses. A storage-free node that air flows
-through (a plenum), or that has a removal or reaction, is not folded and still needs
-`scheme="implicit"`. `layer.folded_mask` is the `(n_i,)` boolean mask of the folded nodes. `rate`
+through (a plenum), or that has a removal or reaction at construction, is not folded and still
+needs `scheme="implicit"`; a per-call removal (the `"<layer>.removal"` driver) that is nonzero at a
+folded node is refused, naming the node. `layer.folded_mask` is the `(n_i,)` boolean mask of the folded nodes. `rate`
 and the dense `operator` still describe the whole network, a folded node as its algebraic balance.
 
 **A conductance that changes with the state.** A radiative coefficient depends on the surface

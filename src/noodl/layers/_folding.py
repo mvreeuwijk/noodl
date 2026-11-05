@@ -223,17 +223,20 @@ def _to_device(plan: FoldPlan, device) -> FoldPlan:
     return FoldPlan(*(move(v) for v in plan[:-1]), buckets)
 
 
-def fold_conductance(plan: FoldPlan, g: Tensor, refuse_closed) -> Folded:
+def fold_conductance(plan: FoldPlan, g: Tensor, refuse_closed,
+                     some_zero: bool | None = None) -> Folded:
     """The folded network's conductances `(..., b_r)` for the per-call conductances
     `g` `(..., b_c)`, and the per-bucket factors the sources and the recovery use.
 
     Differentiable in `g`. `refuse_closed(bucket, start, linked)` is called (with no
     gradient) for a bucket of groups larger than one node when some conductance touching a
-    folded node is zero: it must raise for a group node that cannot reach a neighbour."""
+    folded node is zero: it must raise for a group node that cannot reach a neighbour.
+    `some_zero` is whether some conductance touching a folded node is zero
+    (`zero_touching_folded`), when the caller has it already; `None` reads it here."""
     batch = g.shape[:-1]
     parts = [g.index_select(-1, plan.kept_edges)]
-    with torch.no_grad():
-        some_zero = bool((g.index_select(-1, plan.touching) == 0).any())
+    if some_zero is None:
+        some_zero = bool(zero_touching_folded(plan, g))
     blocks, infos = [], []
     for b in plan.buckets:
         G, m, p = b.groups, b.size, b.width
@@ -266,6 +269,12 @@ def fold_conductance(plan: FoldPlan, g: Tensor, refuse_closed) -> Folded:
             "positive definite (a conductance is not finite?)"
         )
     return Folded(torch.cat(parts, -1), tuple(blocks))
+
+
+def zero_touching_folded(plan: FoldPlan, g: Tensor) -> Tensor:
+    """0-d bool tensor, on `g`'s device: is some conductance touching a folded node zero
+    (on any batch instance)?"""
+    return (g.detach().index_select(-1, plan.touching) == 0).any()
 
 
 def fold_sources(plan: FoldPlan, folded: Folded, src: Tensor

@@ -10,6 +10,9 @@ from noodl.apps.street_aq.canyon import (
     ASPECT_RATIO_EXCHANGE_BETA,
     EULER_GAMMA_TRUNCATED,
     EXCHANGE_SIGMA_W_RATIO,
+    GAMMA_E,  # noqa: F401  (alias)
+    SCHULTE_BETA,  # noqa: F401  (alias)
+    SIRANE_EXCHANGE,  # noqa: F401  (alias)
     Z0_B_DEFAULT,
     Z0_S_DEFAULT,
     BoundaryLayer,
@@ -19,8 +22,10 @@ from noodl.apps.street_aq.canyon import (
     canyon_velocity,
     exchange_velocity,
     grid_shape_parameter,
+    macdonald_profile,  # noqa: F401  (alias)
     roof_wind,
     shape_parameter,
+    soulhac_shape,  # noqa: F401  (alias)
 )
 from noodl.apps.street_aq.case import (
     StreetCase,
@@ -33,13 +38,21 @@ from noodl.apps.street_aq.case import (
 )
 from noodl.apps.street_aq.chemistry import (
     j_no2_elevation_cloud,
+    j_no2_sirane,  # noqa: F401  (alias)
     j_no2_zenith_table,
+    k_no_o3_sirane,  # noqa: F401  (alias)
     k_no_o3_soulhac2011,
     photostationary_for_streets,
     solar_elevation,
     street_steady,
 )
-from noodl.apps.street_aq.closures import KAPPA_040, KAPPA_041, OPTIONS, PRESETS
+from noodl.apps.street_aq.closures import (
+    KAPPA_040,
+    KAPPA_041,
+    KAPPA_MUNICH,  # noqa: F401  (alias)
+    OPTIONS,
+    PRESETS,
+)
 from noodl.apps.street_aq.exposure import (
     Q_INHALATION,
     exposure_reduction_adjoint,
@@ -54,12 +67,14 @@ from noodl.apps.street_aq.network import (
     from_test_network,
     initial_drivers,
     initial_state,
+    munich_idealised,  # noqa: F401  (alias)
     street_geometry,
     street_index,
     twelve_street_grid,
 )
 from noodl.apps.street_aq.plume import (
     GAUSS_CUTOFF_SIGMAS,
+    SEUIL_GAUSS,  # noqa: F401  (alias)
     PlumeTable,
     StreetSources,
     downwind_cutoff,
@@ -96,6 +111,7 @@ from noodl.apps.street_aq.reactions import (
     MOLAR_MASS,
     Photostationary,
     k_no_o3_jpl2003,
+    k_no_o3_munich,  # noqa: F401  (alias)
     molar_volume,
 )
 from noodl.apps.street_aq.report import (
@@ -108,12 +124,17 @@ from noodl.apps.street_aq.routing import (
     StreetGeometry,
     direction_offsets,
     exact_gaussian_direction_samples,
+    n_theta_munich,  # noqa: F401  (alias)
     n_theta_rectangle_rule,
     node_closure,
     routing_matrix,
+    sigma_theta_munich,  # noqa: F401  (alias)
     sigma_theta_turbulence_intensity,
+    sirane_direction_samples,  # noqa: F401  (alias)
 )
 
+# Reference-model aliases (the imports marked `# noqa: F401  (alias)`) are importable from
+# here but kept out of `__all__`: an alias is named in its target's docstring, not catalogued.
 __all__ = [
     "ALONG_WIND",
     "JUNCTION_SOURCES",

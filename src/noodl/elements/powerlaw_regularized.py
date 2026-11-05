@@ -81,6 +81,8 @@ class RegularizedPowerLaw(ConstitutiveLaw):
     ``flow(dp)`` always returns MASS flow in kg/s: ``form="volume"`` multiplies the volumetric
     law by ``rho_default``; ``form="mass"`` returns the law's own output directly (see the
     module docstring for why no further density factor belongs there).
+
+    Alias: `MBLPowerLaw` (MBL).
     """
 
     def __init__(
@@ -185,6 +187,8 @@ def regularized_orifice(
     (overridable, per ``Orifice.mo:3``'s non-``final`` ``m=0.5`` modifier); ``C`` itself is
     ``final`` in MBL (does not depend on ``m``). ``CD`` defaults to 0.65
     (``Orifice.mo:9``, the sharp-edged-orifice discharge coefficient).
+
+    Alias: `mbl_orifice` (MBL).
     """
     A_t, CD_t, m_t = _f64(A), _f64(CD), _f64(m)
     C = CD_t * A_t * math.sqrt(2.0 / rho_default)
@@ -213,6 +217,8 @@ def effective_leakage_area(
     """``EffectiveAirLeakageArea.mo:3-5,7-14,16``:
     ``C = L * CDRat * sqrt(2 / rho_default) * dpRat ** (0.5 - m)``, ``m = 0.65`` by default
     (``:4``), ``dpRat = 4`` Pa (``:7-9``), ``CDRat = 1`` (``:11-14``).
+
+    Alias: `mbl_ela` (MBL).
     """
     L_t, dpRat_t, CDRat_t, m_t = _f64(L), _f64(dpRat), _f64(CDRat), _f64(m)
     C = L_t * CDRat_t * math.sqrt(2.0 / rho_default) * dpRat_t ** (0.5 - m_t)
@@ -241,6 +247,8 @@ def power_law_from_point(
     measured (dp, m_flow) pair; ``m`` stays a free parameter (default 0.5, inherited from
     ``Coefficient_m_flow``'s ``PowerLawResistanceParameters(m=0.5)``,
     ``Coefficient_m_flow.mo:27-28``).
+
+    Alias: `mbl_point` (MBL).
     """
     dpMea_t, mMea_t, m_t = _f64(dpMea), _f64(mMea_flow), _f64(m)
     k = mMea_t / dpMea_t**m_t
@@ -267,6 +275,8 @@ def power_law_from_points(
     """``Points_m_flow.mo:4-6,15-16``: the flow exponent itself is derived from two measured
     (dp, m_flow) pairs, ``m = (ln(mMea[0]) - ln(mMea[1])) / (ln(dpMea[0]) - ln(dpMea[1]))``,
     then ``k = mMea[0] / dpMea[0] ** m``. ``dpMea``/``mMea_flow`` are each a 2-element sequence.
+
+    Alias: `mbl_points` (MBL).
     """
     dpMea_t = _f64(dpMea)
     mMea_t = _f64(mMea_flow)
@@ -303,6 +313,8 @@ def power_law_coefficient(
 ) -> RegularizedPowerLaw:
     """``Coefficient_V_flow.mo``/``Coefficient_m_flow.mo``: ``C``/``k`` and ``m`` given
     directly, with no further formula -- a direct pass-through to :class:`RegularizedPowerLaw`.
+
+    Alias: `mbl_coefficient` (MBL).
     """
     return RegularizedPowerLaw(
         C=_f64(C),
@@ -313,3 +325,12 @@ def power_law_coefficient(
         kind=kind,
         learnable=learnable,
     )
+
+# Modelica Buildings Library (MBL) names, kept as aliases: they name the reference model
+# these laws are transcribed from.
+MBLPowerLaw = RegularizedPowerLaw  # alias, the MBL name
+mbl_orifice = regularized_orifice  # alias, the MBL name
+mbl_ela = effective_leakage_area  # alias, the MBL name
+mbl_point = power_law_from_point  # alias, the MBL name
+mbl_points = power_law_from_points  # alias, the MBL name
+mbl_coefficient = power_law_coefficient  # alias, the MBL name

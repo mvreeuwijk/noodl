@@ -310,6 +310,21 @@ def test_a_folded_group_cut_off_from_every_stored_node_is_refused_by_name():
         layer.step(STAR_X0, Q0, _star_sources(), XB, 900.0, conductance=g)
 
 
+@pytest.mark.parametrize("call", ["step", "steady"])
+def test_a_negative_per_call_conductance_on_a_folded_layer_is_refused_by_name(call):
+    """The sign check a folded layer reads together with the folding's zero check still
+    names the edge, on any batch instance, before anything is folded."""
+    _, layer = _star("exact")
+    g = torch.stack([_t(STAR_G), _t(STAR_G)])
+    g[1, 4] = -1.0                                    # s2-r radiation, second instance
+    with pytest.raises(ValueError, match=r"zero or positive; negative on conduction "
+                                         r"edge\(s\) \[\('s2', 'r'\)\]"):
+        if call == "step":
+            layer.step(STAR_X0, Q0, _star_sources(), XB, 900.0, conductance=g)
+        else:
+            layer.steady(Q0, _star_sources(), XB, conductance=g)
+
+
 def test_a_folded_group_with_no_neighbour_at_all_is_refused_at_construction():
     net = Network(dtype=F64)
     for n in ("ambient", "z", "a", "b"):
@@ -421,6 +436,65 @@ def test_gradcheck_through_the_folding(scheme):
     assert gradcheck(run, (g, src, x0), eps=1e-6, atol=1e-6, rtol=1e-6)
 
 
+@pytest.mark.parametrize("scheme", SCHEMES)
+def test_the_transfer_gradient_with_respect_to_the_stored_capacities(scheme):
+    """d(boundary transfer)/d(capacity of the stored nodes) through the folding, against a
+    fourth-order central difference with steps relative to each capacity. (`gradcheck`'s
+    absolute step of 1e-6 on capacities of 1e5 J/K moves a transfer of 1e5 J by about
+    1e-10 J, at its rounding level, so it reports a mismatch under every scheme, folded or
+    not, that is the difference quotient's own error.)"""
+    _, layer = _star(scheme)
+    src = _star_sources()
+
+    def transfer(c):
+        cap = torch.cat([c[:1], torch.zeros(4, dtype=F64), c[1:]])
+        out = layer.step_with_transfer(STAR_X0, _t([0.2]), src, XB, 900.0, capacity=cap)
+        return out.boundary_transfer.sum()
+
+    c0 = _t([STAR_CAP[0], *STAR_CAP[5:]])
+    c = c0.clone().requires_grad_(True)
+    (grad,) = torch.autograd.grad(transfer(c), c)
+    numeric = torch.empty_like(c0)
+    for i in range(c0.numel()):
+        e = torch.zeros_like(c0)
+        e[i] = 1e-3 * c0[i]
+        numeric[i] = (-transfer(c0 + 2 * e) + 8 * transfer(c0 + e) - 8 * transfer(c0 - e)
+                      + transfer(c0 - 2 * e)) / (12 * e[i])
+    torch.testing.assert_close(grad, numeric, rtol=1e-6, atol=1e-6 * grad.abs().max().item())
+
+
+def test_the_model_transfer_gradient_with_respect_to_a_capacity_driver():
+    """The same gradient through `Model.step`: the stored capacities as the driver
+    `"T.capacity"` (and the step-start state's), the transfer from
+    `boundary_transfers`, under `exact`; the state's gradient too."""
+    from noodl.model import Model
+
+    net, layer = _star("exact")
+    model = Model(net, {"T": layer})
+
+    def outputs(c):
+        cap = torch.cat([c[:1], torch.zeros(4, dtype=F64), c[1:]])
+        drivers = {"T.x_boundary": XB, "T.q": _t([0.2]), "T.sources": _star_sources(),
+                   "T.capacity": cap}
+        diagnostics: dict = {}
+        new = model.step({"T.x": STAR_X0, "T.capacity": cap}, drivers, 900.0,
+                         diagnostics=diagnostics, boundary_transfers={"T"})
+        return diagnostics["layers"]["T"]["boundary_transfer"].sum(), new["T.x"].sum()
+
+    c0 = _t([STAR_CAP[0], *STAR_CAP[5:]])
+    c = c0.clone().requires_grad_(True)
+    for k, value in enumerate(outputs(c)):
+        (grad,) = torch.autograd.grad(value, c, retain_graph=True)
+        numeric = torch.empty_like(c0)
+        for i in range(c0.numel()):
+            e = torch.zeros_like(c0)
+            e[i] = 1e-3 * c0[i]
+            f = [outputs(c0 + s * e)[k] for s in (2, 1, -1, -2)]
+            numeric[i] = (-f[0] + 8 * f[1] - 8 * f[2] + f[3]) / (12 * e[i])
+        torch.testing.assert_close(grad, numeric, rtol=1e-6,
+                                   atol=1e-6 * grad.abs().max().item())
+
+
 def test_gradient_reaches_a_construction_conductance_that_requires_grad():
     g = _t([H1, H2, K1, K2], requires_grad=True)
     layer = TransportLayer(
@@ -475,6 +549,25 @@ def test_a_storage_free_node_with_a_removal_or_reaction_is_not_folded(term):
     assert layer.folded_mask.tolist() == [False, term == "kinetics", False, term == "removal"]
     with pytest.raises(ValueError, match=r"storage-free nodes \['s(1|2)'\].*implicit"):
         _wall("exact", **kw)
+
+
+@pytest.mark.parametrize("call", ["step", "step_with_transfer", "steady"])
+def test_a_per_call_removal_at_a_folded_node_is_refused_by_name(call):
+    """A folded node has no removal term (one given at construction keeps it unfolded); a
+    per-call removal there would be dropped, so it is refused by name. A removal at the
+    stored nodes only is taken as before."""
+    layer = _wall("implicit")
+    removal = _t([1e-4, 0.0, 2e-5, 0.0])
+
+    def run(r):
+        if call == "steady":
+            return layer.steady(Q0, SRC0, XB, removal=r)
+        return getattr(layer, call)(X0_WALL, Q0, SRC0, XB, 600.0, removal=r)
+
+    run(removal)
+    bad = torch.stack([removal, _t([1e-4, 0.0, 2e-5, 3e-4])])     # a batch, s2 on one
+    with pytest.raises(ValueError, match=r"'T'.*removal.*folded.*\['s2'\]"):
+        run(bad)
 
 
 def test_a_layer_without_storage_free_nodes_has_no_folding():
@@ -739,3 +832,30 @@ def test_the_conductance_is_read_through_a_public_property():
     plain = TransportLayer(_wall_net(), "T", capacity=_t([CZ]), flow_kind="air",
                            boundary=["ambient"])
     assert plain.conductance is None
+
+
+@pytest.mark.parametrize("call", ["step", "step_with_transfer", "steady"])
+def test_a_per_call_removal_is_refused_on_a_layer_whose_every_node_is_folded(call):
+    """With no stored node left there is no kept-node step, and a per-call removal at the
+    folded node is still refused by name rather than dropped."""
+    net = Network(dtype=F64)
+    for n in ("inside", "s", "outside"):
+        net.add_node(n)
+    net.add_edge("inside", "s", kind="film")
+    net.add_edge("s", "outside", kind="film")
+    layer = TransportLayer(
+        net, "T", capacity=_t([0.0]), flow_kind=(), boundary=["inside", "outside"],
+        conduction_kind="film", conductance=_t([3.0, 5.0]), storage_free=["s"],
+        scheme="exact",
+    )
+    xb = _t([293.0, 273.0])
+    src = torch.zeros(3, dtype=F64)
+
+    def run(r):
+        if call == "steady":
+            return layer.steady(_t([]), src, xb, removal=r)
+        return getattr(layer, call)(_t([280.0]), _t([]), src, xb, 600.0, removal=r)
+
+    run(_t([0.0]))
+    with pytest.raises(ValueError, match=r"'T'.*removal.*folded.*\['s'\]"):
+        run(_t([1e-4]))

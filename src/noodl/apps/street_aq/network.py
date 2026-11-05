@@ -249,6 +249,8 @@ def twelve_street_grid(
     `L`, `W` and `H` are ARGUMENTS because the paper never published them: the absolute
     concentrations of Fig. 1 cannot be reproduced, only the ratios and the pattern.
     Returns the network and the street names `"1"` ... `"12"`, with `"11"` the emitter.
+
+    Alias: `munich_idealised` (MUNICH).
     """
     coordinates = {
         "A": (0.0, L), "B": (L, L), "C": (0.0, 0.0), "D": (L, 0.0),
@@ -264,6 +266,9 @@ def twelve_street_grid(
         y={k: v[1] for k, v in coordinates.items()},
     )
     return net, [s.name for s in streets]
+
+
+munich_idealised = twelve_street_grid  # alias, the MUNICH name
 
 
 class _ScaledSourcesTransport(TransportLayer):
