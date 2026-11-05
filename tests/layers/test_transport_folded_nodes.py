@@ -436,6 +436,33 @@ def test_gradcheck_through_the_folding(scheme):
     assert gradcheck(run, (g, src, x0), eps=1e-6, atol=1e-6, rtol=1e-6)
 
 
+@pytest.mark.parametrize("scheme", SCHEMES)
+def test_the_transfer_gradient_with_respect_to_the_stored_capacities(scheme):
+    """d(boundary transfer)/d(capacity of the stored nodes) through the folding, against a
+    fourth-order central difference with steps relative to each capacity. (`gradcheck`'s
+    absolute step of 1e-6 on capacities of 1e5 J/K moves a transfer of 1e5 J by about
+    1e-10 J, at its rounding level, so it reports a mismatch under every scheme, folded or
+    not, that is the difference quotient's own error.)"""
+    _, layer = _star(scheme)
+    src = _star_sources()
+
+    def transfer(c):
+        cap = torch.cat([c[:1], torch.zeros(4, dtype=F64), c[1:]])
+        out = layer.step_with_transfer(STAR_X0, _t([0.2]), src, XB, 900.0, capacity=cap)
+        return out.boundary_transfer.sum()
+
+    c0 = _t([STAR_CAP[0], *STAR_CAP[5:]])
+    c = c0.clone().requires_grad_(True)
+    (grad,) = torch.autograd.grad(transfer(c), c)
+    numeric = torch.empty_like(c0)
+    for i in range(c0.numel()):
+        e = torch.zeros_like(c0)
+        e[i] = 1e-3 * c0[i]
+        numeric[i] = (-transfer(c0 + 2 * e) + 8 * transfer(c0 + e) - 8 * transfer(c0 - e)
+                      + transfer(c0 - 2 * e)) / (12 * e[i])
+    torch.testing.assert_close(grad, numeric, rtol=1e-6, atol=1e-6 * grad.abs().max().item())
+
+
 def test_gradient_reaches_a_construction_conductance_that_requires_grad():
     g = _t([H1, H2, K1, K2], requires_grad=True)
     layer = TransportLayer(
