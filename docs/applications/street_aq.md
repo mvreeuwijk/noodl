@@ -605,8 +605,11 @@ Both are per-puff state (`"puff.sxz"`, `"puff.sx2_shear"`, zero at birth), integ
 step with $S$ at the step's middle age held over the step and $\sigma_z^2$ quadratic in age
 through its values at the step's start, middle and end; this is exact for a constant $S$
 and $\sigma_z \propto t$ ($\sigma_{xz} = S a^2 t^3/3$,
-$\sigma_{x,\text{shear}}^2 = S^2 a^2 t^4/6$ for $\sigma_z = a t$). $S$ is the autograd
-derivative of `plume.wind_speed`, so gradients reach the wind profile's $u_*$ and $L$.
+$\sigma_{x,\text{shear}}^2 = S^2 a^2 t^4/6$ for $\sigma_z = a t$). $S$ is the derivative
+of `plume.wind_speed` in closed form, $u_* \phi_m(z'/L)/(\kappa z')$ with
+$z' = z - d + z_0$, so gradients reach the wind profile's $u_*$ and $L$. Under `puff_dt`
+a puff is born at a positive age with zero moments, missing their growth over that age
+(cubic and quartic in it, small for intervals of tens of seconds).
 
 The puff is then a correlated $(x, z)$ Gaussian, of along-wind variance
 $\sigma_x^2 = \sigma_y(x(a))^2 + \sigma_{x,\text{shear}}^2$, convolved along the wind

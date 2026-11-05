@@ -1030,8 +1030,9 @@ def test_sheared_puff_spread_matches_the_closed_form(monkeypatch):
                                                              state.sx2_shear)
 
 
-@pytest.mark.parametrize("met", [_NEUTRAL, {**_STABLE, "lmo": 300.0}],
-                         ids=["neutral", "stable"])
+@pytest.mark.parametrize("met", [_NEUTRAL, {**_STABLE, "lmo": 300.0}, _STABLE,
+                                 {**_NEUTRAL, "lmo": -3000.0}],
+                         ids=["neutral", "neutral_class_stable", "stable", "weakly_unstable"])
 def test_shear_rate_is_the_wind_profile_derivative(met):
     from noodl.apps.street_aq.plume import wind_speed
 
@@ -1169,3 +1170,42 @@ def test_sheared_gradients_match_central_differences():
         fd = float(up - dn) / (2 * h)
         assert float(g) != 0.0, name
         assert abs(float(g) - fd) <= 1e-6 * abs(float(g)), (name, float(g), fd)
+
+
+def test_sheared_advance_runs_under_inference_mode():
+    # the shear rate is closed-form: no autograd machinery, so inference mode works
+    with torch.inference_mode():
+        tabs = puff_tables(centres=torch.tensor([30.0], dtype=DT),
+                           **{**_STABLE, "x_max": 300.0})
+        field = PuffField.points(1, shear=True)
+        state, _ = emit(field, PuffState.empty((1,), 2), torch.ones(1, 1, dtype=DT),
+                        torch.zeros(1, dtype=_LONG), torch.zeros(1, 1, 2, dtype=DT))
+        for _ in range(4):
+            state = advance(state, tabs, 5.0, 0.0, shear=True)
+        c = concentration_at(field, state, tabs, torch.tensor([[50.0, 0.0, 30.0]], dtype=DT),
+                             0.0, 5.0)
+    assert float(state.sxz[0, 0]) > 0.0 and float(c) > 0.0
+
+
+def _sheared_moments(tabs, dt, age=120.0):
+    field = PuffField.points(1, shear=True)
+    state, _ = emit(field, PuffState.empty((1,), 2), torch.ones(1, 1, dtype=DT),
+                    torch.zeros(1, dtype=_LONG), torch.zeros(1, 1, 2, dtype=DT))
+    for _ in range(round(age / dt)):
+        state = advance(state, tabs, dt, 0.0, shear=True)
+    return float(state.sxz[0, 0]), float(state.sx2_shear[0, 0])
+
+
+def test_sheared_moments_converge_with_the_step():
+    # real stable tables, a puff released at 30 m, moments at age 120 s against dt =
+    # 0.25 s. The rate held over a step and sigma_z^2 taken quadratic in age are exact
+    # only for constant rates; the tables' sigma_z is piecewise linear on the 10 m grid,
+    # whose kinks mask a clean order (measured: 1.8e-5 / 1.1e-4 relative at dt = 10 s,
+    # 2.7e-5 / 5.3e-5 at 5 s, 5.2e-6 / 1.9e-5 at 2 s, for sxz / sx2_shear)
+    tabs = puff_tables(centres=torch.tensor([30.0], dtype=DT), **{**_STABLE, "x_max": 600.0})
+    ref = _sheared_moments(tabs, 0.25)
+    assert ref[0] > 0.0 and ref[1] > 0.0
+    for dt in (10.0, 5.0):
+        sxz, sx2 = _sheared_moments(tabs, dt)
+        assert abs(sxz / ref[0] - 1.0) < 5e-5, dt
+        assert abs(sx2 / ref[1] - 1.0) < 2e-4, dt

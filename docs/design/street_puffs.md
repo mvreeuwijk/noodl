@@ -241,9 +241,8 @@ them they differ slightly.
 `PuffOptions(shear=True)` (Sykes and Henn 1995, "Representation of velocity gradient
 effects in a Gaussian puff model", *J. Appl. Meteor.* 34, 2715-2723): a vertical shear
 `S = dU/dz` of the tables' wind profile `plume.wind_speed` (row by row,
-`PuffTables.shear_rate`, the derivative taken by forward-mode autograd in `z`), at
-`z_s = max(z_c, 0.65 sigma_z)`,
-grows two per-puff moments:
+`PuffTables.shear_rate`, the derivative in closed form, below), at
+`z_s = max(z_c, 0.65 sigma_z)`, grows two per-puff moments:
 
     d(sigma_xz)/dt = S sigma_z^2,   d(sigma_x^2)/dt|shear = 2 S sigma_xz
 
@@ -258,7 +257,17 @@ over the step and `sigma_z^2` the quadratic in age through its values `q0`, `qm`
 
 exact for a constant `S` and a `sigma_z^2` quadratic in age (tested against
 `sigma_xz = S a^2 t^3 / 3`, `sigma_x,shear^2 = S^2 a^2 t^4 / 6` for `sigma_z = a t` to
-1e-10 at `dt = 0.1 s`).
+1e-10 at `dt = 0.1 s`). On real tables the rate varies with `z_s` and `sigma_z` is
+piecewise linear on the 10 m grid, whose kinks mask a clean order in `dt`: a puff released
+at 30 m in a stable hour has, at age 120 s, `sxz` within 1.8e-5 and `sx2_shear` within
+1.1e-4 (relative) at `dt = 10 s` of their values at `dt = 0.25 s`, and 5.2e-6 / 1.9e-5 at
+2 s. `S` is the closed-form derivative of the profile, `u* phi_m(z'/L) / (kappa z')` with
+`z' = z - d + z0` and `phi_m` Businger's (`1 + 5 zeta` stable and neutral,
+`(1 - 16 zeta)^(-1/4)` unstable), consistent with `plume._psi_m`; it needs no autograd, so
+it runs under `torch.inference_mode`. Under `puff_dt` a puff is born at a positive age
+(the middle of its interval less a step) with zero moments: it misses their growth over
+that age, cubic (`sxz`) and quartic (`sx2_shear`) in it, small for intervals of tens of
+seconds.
 
 Evaluation. The puff is a correlated `(x, z)` Gaussian of along-wind variance
 `sigma_x^2 = sigma_y(x(a))^2 + sx2_shear` and covariance `sxz`, convolved along the wind
@@ -268,7 +277,12 @@ profile: each term of the vertical profile, centred at `z_k` (`z_c`, `2 H_R - z_
 `sigma_x^2 - sxz^2 / sigma_z(x(a))^2` (the shear part floored at zero), shifted along the
 wind by `beta (z - z_k)`, with `beta = sxz / sigma_z(x(a))^2` for the plume and `-beta` for
 both images (a reflection in `z` flips the sign of `sxz`). `beta` and the conditional
-variance are the puff's own, at its distance `x(a)`, as `sigma_x` is; the vertical terms
+variance are the puff's own, at its distance `x(a)`, as `sigma_x` is. The floor on the
+conditional variance's shear part, `max(sx2_shear - sxz beta, 0)`, can be active: a table
+whose `sigma_z` stops growing (or a meteorology rebuild that shrinks it, since the moments
+are kept while `sigma_z` is read afresh) makes `sxz^2 / sigma_z^2` exceed `sx2_shear`.
+Mass stays exact there (the along-wind profile still integrates to one); the gradient
+through the floored part is zero. The vertical terms
 are read at the receptor's distance, as without shear. For a slug of vanishing length and
 constant spreads this is exactly the bivariate Gaussian with its images (tested to 1e-8).
 

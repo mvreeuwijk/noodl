@@ -798,6 +798,7 @@ def test_gradient_matches_central_differences(param, gradient_check):
         assert abs(auto - fd) <= 1e-6 * abs(auto), (param, c, auto, fd)
 
 
+@pytest.mark.slow
 def test_sheared_gradient_matches_central_differences(gradient_check):
     """Test 4 with the wind-shear stretching on (design Sect. 4.7), every parameter: the
     shear rate's dependence on `u_star` included (and the shear changes that gradient)."""

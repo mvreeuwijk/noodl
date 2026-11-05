@@ -31,13 +31,11 @@ transport (puffs)" of `docs/applications/street_aq.md`.
 from __future__ import annotations
 
 import math
-import warnings
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, fields, replace
 
 import torch
 from torch import Tensor
-from torch.autograd import forward_ad
 from torch.utils.checkpoint import checkpoint
 
 from noodl.apps.street_aq.above_roof import roof_fluxes, roof_wiring
@@ -66,7 +64,6 @@ from noodl.apps.street_aq.plume import (
     street_midpoints,
     table_chunks,
     vertical_profile,
-    wind_speed,
 )
 
 _PUFF_COLS = ("u", "sigma_y", "sigma_z", "z_c", "p_z")
@@ -97,6 +94,14 @@ def _travel_times(u: Tensor, step: float) -> Tensor:
     return torch.cat([torch.zeros_like(u[..., :1]), torch.cumsum(cell, -1)], dim=-1)
 
 
+def _phi_m(zeta: Tensor) -> Tensor:
+    """The dimensionless shear `1 - zeta dpsi_m/dzeta` of `plume._psi_m` (Businger):
+    `(1 - 16 zeta)^(-1/4)` for `zeta < 0`, `1 + 5 zeta` otherwise (1 when neutral)."""
+    unstable = zeta < 0
+    safe = torch.where(unstable, zeta, torch.zeros_like(zeta))
+    return torch.where(unstable, (1.0 - 16.0 * safe) ** -0.25, 1.0 + 5.0 * zeta)
+
+
 @dataclass(frozen=True)
 class PuffTables:
     """The plume trajectory on the steady kernel's distance grid, read by age
@@ -111,7 +116,7 @@ class PuffTables:
     `_evaluate`'s coarse mask) are built once, with `t`.
 
     `u_star` (m/s), `lmo`, `z0` and `d` (m), each `(n_b,)`, and `kappa` are each
-    meteorology row's wind profile (`plume.wind_speed`), which the shear stretching reads
+    meteorology row's wind profile (`plume.wind_speed`), whose shear the stretching reads
     (`shear_rate`); `puff_tables` sets them, a hand-made table may leave them None (it
     then cannot be advanced with `shear=True`)."""
 
@@ -220,24 +225,17 @@ class PuffTables:
 
     def shear_rate(self, z: Tensor, row: Tensor) -> Tensor:
         """`dU/dz` (1/s) of meteorology row `row`'s wind profile `plume.wind_speed` at
-        height `z` (m above ground; `row` long, broadcasting with `z`), by forward-mode
-        autograd in `z` (`torch.autograd.forward_ad`), which keeps the reverse-mode graph
-        to `z` and to the profile's `u_star` and `lmo`. Refused by name on tables without a
-        wind profile."""
+        height `z` (m above ground; `row` long, broadcasting with `z`): the derivative of
+        `u = (u*/kappa) [ln(z'/z0) - psi_m(z'/L) + psi_m(z0/L)]`, `z' = z - d + z0`, in
+        closed form, `u* phi_m(z'/L) / (kappa z')` (`_phi_m`). Refused by name on tables
+        without a wind profile."""
         if self.u_star is None or self.lmo is None or self.z0 is None or self.d is None:
             raise ValueError("PuffTables.shear_rate: these tables carry no wind profile "
                              "(u_star, lmo, z0, d); build them with puff_tables, or advance "
                              "with shear=False")
         u_star, lmo, z0, d = (v[row] for v in (self.u_star, self.lmo, self.z0, self.d))
-        z = _f64(z)
-        # torch loads its forward-mode decompositions on first use through the deprecated
-        # `torch.jit.script`, which warns; the warning is torch's own, not this call's
-        with warnings.catch_warnings(), forward_ad.dual_level():
-            warnings.filterwarnings("ignore", message="`torch.jit.script` is deprecated",
-                                    category=FutureWarning)
-            u = wind_speed(forward_ad.make_dual(z, torch.ones_like(z)), u_star=u_star,
-                           lmo=lmo, z0=z0, d=d, kappa=self.kappa)
-            return forward_ad.unpack_dual(u).tangent
+        height = _f64(z) - d + z0
+        return u_star * _phi_m(height / lmo) / (self.kappa * height)
 
     def _base(self, table: Tensor, row: Tensor) -> Tensor:
         """The flat index of grid point 0 of table `table`, meteorology row `row`."""
@@ -424,8 +422,10 @@ class PuffField:
     alone as a segment of the steady plume (design Sect. 4.3; `_evaluate`). `cutoff_sigma`
     is the cut-off in standard deviations beyond the flat top (crosswind) and beyond the
     slug ends (along the wind). `shear=True` evaluates the puffs' wind-shear moments
-    `sxz`, `sx2_shear` (design Sect. 4.7, `advance(..., shear=True)` integrates them): it
-    needs `along_wind="sigma_y"`."""
+    `sxz`, `sx2_shear` (design Sect. 4.7), which `advance(..., shear=True)` integrates: it
+    needs `along_wind="sigma_y"`. The two must agree (`PuffClosure` passes
+    `PuffOptions.shear` to both); a field with `shear=False` ignores the moments, and
+    `advance` without shear leaves them as they are."""
 
     def __init__(self, *, xy: Tensor, owner: Tensor, weight: Tensor, width: Tensor,
                  clamp: Tensor, source_xy0: Tensor, n_streets: int, n_junctions: int,
@@ -711,7 +711,11 @@ def advance(state: PuffState, tables: PuffTables, dt: float,
         sx2_shear += 2 S (sxz dt + S dt^2 (q0 + 2 qm) / 6)
 
     (`sxz` the value at the step's start), which is exact for a constant `S` and a
-    `sigma_z^2` quadratic in age. Tables without a wind profile are refused by name."""
+    `sigma_z^2` quadratic in age. Tables without a wind profile are refused by name.
+    Evaluate with a `PuffField(shear=True)`: a field without shear ignores the moments.
+    A puff born at a positive age (`PuffOptions.puff_dt`) starts with zero moments,
+    missing their growth over that age (cubic and quartic in it, small for intervals of
+    tens of seconds)."""
     if not dt > 0:
         raise ValueError(f"advance: dt must be positive, got {dt!r}")
     n_batch = state.mass.shape[0]

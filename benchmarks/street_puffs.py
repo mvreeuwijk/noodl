@@ -15,7 +15,7 @@ points to its directory (or `--case`), else a 24 x 24 lattice of 100 m streets.
 
 Run: `.venv/Scripts/python benchmarks/street_puffs.py [--batch 1 8] [--steps 720]
 [--capacity 8192] [--case DIR] [--hour K] [--puff-dt none|30] [--drop-below 1e-3]
-[--forward-only] [--profile]`.
+[--forward-only] [--shear] [--profile]`.
 """
 
 from __future__ import annotations
@@ -79,7 +79,7 @@ def first_stable_hour(case: StreetCase) -> int:
 
 def build(case: StreetCase, batch: int, capacity: int, hour: int = 0, *,
           puff_dt: float | None = PuffOptions.puff_dt,
-          drop_below: float = PuffOptions.drop_below):
+          drop_below: float = PuffOptions.drop_below, shear: bool = False):
     """`(model, state, drivers, source_street)` for `batch` instances of the case's `hour`,
     with a `PulseSource` on the street nearest the upwind edge."""
     species = case.species[0]
@@ -87,7 +87,7 @@ def build(case: StreetCase, batch: int, capacity: int, hour: int = 0, *,
     model, state, _ = build_model(
         net, species=(species,), background="per_street",
         puffs=PuffOptions(capacity=capacity, sigma_theta=SIGMA_THETA, puff_dt=puff_dt,
-                          drop_below=drop_below), **case.model_options())
+                          drop_below=drop_below, shear=shear), **case.model_options())
     drivers = drivers_at(case, model, hour, species=[species])
     sources = drivers.pop("street.sources")
     names = [s.name for s in net.streets]
@@ -143,6 +143,7 @@ def main() -> None:
                     help="puff emission interval, s, or 'none' (one puff per step)")
     ap.add_argument("--drop-below", type=float, default=default.drop_below)
     ap.add_argument("--forward-only", action="store_true", help="skip forward + backward")
+    ap.add_argument("--shear", action="store_true", help="wind-shear stretching on")
     ap.add_argument("--hour", type=int, help="case hour (default: the first fully stable one)")
     ap.add_argument("--profile", action="store_true",
                     help="cProfile of 20 forward steps at the first batch size "
@@ -151,10 +152,10 @@ def main() -> None:
     case, label = load_case(args.case)
     hour = first_stable_hour(case) if args.hour is None else args.hour
     puff_dt = None if args.puff_dt.lower() == "none" else float(args.puff_dt)
-    opts = {"puff_dt": puff_dt, "drop_below": args.drop_below}
+    opts = {"puff_dt": puff_dt, "drop_below": args.drop_below, "shear": args.shear}
     print(f"{label}, hour {hour}: {len(case.network.streets)} streets, dt = {DT} s, "
           f"{args.steps} steps, capacity {args.capacity}, puff_dt {puff_dt}, drop_below "
-          f"{args.drop_below}", flush=True)
+          f"{args.drop_below}, shear {args.shear}", flush=True)
     for i, batch in enumerate(args.batch):
         model, state, drivers, street = build(case, batch, args.capacity, hour, **opts)
         if args.profile and i == 0:
