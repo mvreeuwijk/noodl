@@ -132,6 +132,7 @@ from noodl._broadcast import broadcast_shapes
 from noodl.apps.street_aq.canyon import KAPPA
 from noodl.apps.street_aq.closures import SIGMA_V_MIN, SIGMA_W_MIN
 from noodl.apps.street_aq.network import StreetNetwork
+from noodl.solvers.implicit import refuse_second_order
 
 Tensor = torch.Tensor
 _DTYPE = torch.float64
@@ -546,12 +547,7 @@ class _RecomputedTrajectory(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, *grads):
-        if torch.is_grad_enabled():
-            raise RuntimeError(
-                "plume_table: second-order differentiation (create_graph=True) is not "
-                "supported; the trajectory table has first-order gradients only. Detach "
-                "the first-order gradient before using it in a further differentiable loss."
-            )
+        refuse_second_order("plume_table", through="through the trajectory table ")
         values = ctx.saved_tensors
         leaves = [v.detach().requires_grad_(ctx.needs_input_grad[3 + i])
                   for i, v in enumerate(values)]

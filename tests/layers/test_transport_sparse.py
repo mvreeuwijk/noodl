@@ -22,6 +22,7 @@ from noodl.layers.transport import (
 )
 from noodl.operators.base import SolveResult, SolverStatus
 from noodl.operators.shifted import ShiftedOperator
+from noodl.solvers import select as select_module
 from noodl.solvers.select import solve as _solve_operator
 from noodl.topology import Network
 
@@ -1248,7 +1249,7 @@ def test_auto_resolves_to_sparse_direct_at_or_under_the_batch_cap():
     assert layer._resolve_solver(1) == {
         "method": "sparse_direct", "preconditioner": None, "restart": 30,
     }
-    assert layer._resolve_solver(transport_module._SPARSE_DIRECT_MAX_BATCH) == {
+    assert layer._resolve_solver(select_module._SPARSE_DIRECT_MAX_BATCH) == {
         "method": "sparse_direct", "preconditioner": None, "restart": 30,
     }
 
@@ -1264,7 +1265,7 @@ def test_auto_resolves_to_gmres_above_the_batch_cap():
     layer = TransportLayer(
         net, "co2", capacity=torch.tensor([1000.0]), flow_kind="airpath", boundary=["ambient"],
     )
-    assert layer._resolve_solver(transport_module._SPARSE_DIRECT_MAX_BATCH + 1) == {
+    assert layer._resolve_solver(select_module._SPARSE_DIRECT_MAX_BATCH + 1) == {
         "method": "gmres", "preconditioner": None, "restart": 30,
     }
 
@@ -1412,7 +1413,7 @@ def test_auto_falls_back_to_gmres_and_warns_once_when_scipy_is_not_importable(mo
     """
     import builtins
 
-    monkeypatch.setattr(transport_module, "_WARNED_AUTO_NEEDS_SCIPY", False)
+    monkeypatch.setattr(select_module, "_WARNED_AUTO_NEEDS_SCIPY", False)
     real_import = builtins.__import__
 
     def no_scipy(name, *args, **kwargs):

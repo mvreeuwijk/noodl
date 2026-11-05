@@ -35,7 +35,6 @@ from __future__ import annotations
 import bisect
 import functools
 import math
-import warnings
 from collections.abc import Mapping, Sequence
 from typing import Literal, NamedTuple
 
@@ -47,8 +46,9 @@ from noodl.operators.advection import AdvectionOperator
 from noodl.operators.shifted import ShiftedOperator
 from noodl.operators.stencil import laplacian_coo
 from noodl.solvers.implicit import TransposeOperator as _TransposeView
-from noodl.solvers.select import _SPARSE_DIRECT_MAX_BATCH
+from noodl.solvers.implicit import refuse_second_order, residual_vjp
 from noodl.solvers.select import solve as _solve_operator
+from noodl.solvers.select import transport_solver_kwargs
 from noodl.topology import Network, Node
 
 # `_TransposeView` is `solvers.implicit.TransposeOperator`. Both this layer's operators
@@ -108,28 +108,6 @@ def active_interior(
 # and a grad-requiring `on_failure="return"` solve (which runs outside `_LinearSolve`'s
 # `no_grad`, unlike the differentiable forward/backward path).
 _TRANSPORT_SOLVERS = ("auto", "gmres", "gmres_jacobi", "gmres_ilu", "sparse_direct", "direct")
-
-# Set once, mirroring `solvers.select._WARNED_SPARSE_DIRECT_NEEDS_SCIPY`: the one fall-back
-# from this layer's "auto" to gmres that is an ENVIRONMENT fault (SciPy, the `noodl-physics[sparse]`
-# extra, is absent) rather than a modelling or grad-safety fact, so it is the only one that
-# warns, and only once per process -- a per-solve warning at this default's small-batch,
-# every-step call frequency would be unusable noise. Module state rather than a `warnings`
-# filter for the same reason `select.py` gives: `warnings.warn`'s own "once" registry is keyed
-# on the message and can be reset out from under us by `catch_warnings`.
-_WARNED_AUTO_NEEDS_SCIPY = False
-
-
-def _scipy_sparse_linalg_importable() -> bool:
-    """Whether `scipy.sparse.linalg` can be imported right now -- the same lazy, per-call
-    check `solvers.select._auto_sparse_triplet` makes (a cached answer would be wrong for the
-    one case this exists to detect: a process that can or cannot import scipy is not a
-    property this module gets to memoise, and doing so would make the fall-back untestable
-    without process isolation)."""
-    try:
-        import scipy.sparse.linalg  # noqa: F401
-    except ImportError:
-        return False
-    return True
 
 
 def _reached_from(start: torch.Tensor, row: torch.Tensor, col: torch.Tensor,
@@ -257,39 +235,24 @@ class _LinearSolve(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, grad_x):
-        if torch.is_grad_enabled():
-            # See solvers/implicit.py's module docstring: grad mode enabled here means the
-            # caller requested create_graph=True (second-order differentiation), which
-            # this adjoint does not support.
-            raise RuntimeError(
-                f"{ctx.where}: second-order differentiation (create_graph=True) is not "
-                f"supported by this implicit linear adjoint; detach the first-order "
-                f"gradient before using it in a further differentiable loss."
-            )
+        refuse_second_order(ctx.where, through="through this implicit linear adjoint ")
         saved = ctx.saved_tensors
         x, params = saved[0], list(saved[1:])
-        with torch.no_grad():
+
+        def adjoint_vector():
             op, _ = ctx.build_system(*params)
             kwargs = dict(ctx.solver_kwargs)
             method = kwargs.pop("method", "auto")
-            lam = _solve_operator(
+            return _solve_operator(
                 _TransposeView(op), grad_x, method=method, on_failure="raise",
                 where=f"{ctx.where} backward (adjoint)", **kwargs,
             ).x
-        with torch.enable_grad():
-            p = [t.detach().requires_grad_(t.requires_grad) for t in params]
+
+        def residual(p):
             op_p, rhs_p = ctx.build_system(*p)
-            residual = op_p.matvec(x.detach()) - rhs_p
-            needs_grad = [t for t in p if t.requires_grad]
-            grads = (
-                torch.autograd.grad(residual, needs_grad, grad_outputs=-lam, allow_unused=True)
-                if needs_grad else []
-            )
-        grads_aligned = []
-        it = iter(grads)
-        for t in p:
-            grads_aligned.append(next(it) if t.requires_grad else None)
-        return (None, None, None, None, None, *grads_aligned)
+            return op_p.matvec(x.detach()) - rhs_p
+
+        return (None, None, None, None, None, *residual_vjp(params, residual, adjoint_vector))
 
 
 def _linear_solve(
@@ -828,129 +791,14 @@ class TransportLayer(TopologyGuard):
     def _resolve_solver(
         self, batch_size: int, *, op=None, rhs: torch.Tensor | None = None,
     ) -> dict:
-        """The kwargs `solvers.select.solve` should see for THIS layer's `linear_solver`
-        (`method`, `preconditioner`, `restart`) -- resolved PER SOLVE, used
-        by every linear solve this layer runs: `steady`, `_implicit_step_sparse` and
-        `_trapezoidal_step_sparse`'s differentiable path AND their `on_failure="return"`
-        early-return path, and (via the resolved kwargs `_LinearSolve` saves on its `ctx`)
-        the backward adjoint too.
-
-        `batch_size` is `rhs.shape[:-1].numel()`, the flat instance count this solve is
-        about to run at. `op`/`rhs`, when given (the `on_failure="return"` call sites always
-        give them; `_LinearSolve.forward` gives them too, though it never needs them -- see
-        below), are the just-built operator and right-hand side, used ONLY to decide whether
-        `"auto"` may pick `sparse_direct` under grad (hazard 2 below); no solve reads them.
-
-        `"auto"` (see docs/design/solvers.md#transport-solver-choice): resolves to
-        `method="sparse_direct"` when
-        `batch_size <= _SPARSE_DIRECT_MAX_BATCH` (the SAME constant `solvers.select` uses for
-        its own, separate "auto" -- imported, never re-hard-coded) and to plain `gmres`
-        above it. `gmres_jacobi`/`gmres_ilu` are never chosen by `auto`: the benchmark found
-        `gmres_ilu` the clear loser at every ensemble measured (its per-instance ILU
-        factorisation cost dominates, see the COST note below) and the gmres-vs-gmres_jacobi
-        ordering ambiguous, so there is no evidence to prefer either preconditioner over
-        plain gmres as the fallback. `"gmres"` (explicit) resolves
-        to plain gmres unconditionally, regardless of `batch_size`.
-
-        TWO HAZARDS `"auto"` must handle before it can hand back `sparse_direct`, both
-        fall-backs to plain `gmres` (never a raise: `auto` is a promise to choose a backend
-        that works, the same contract `solvers.select`'s own `auto` makes):
-
-        1. **SciPy absent.** `sparse_direct` needs SciPy (`noodl-physics[sparse]`, an optional
-           extra). When it is not importable, `auto` falls back to `gmres` and warns ONCE
-           per process (`_WARNED_AUTO_NEEDS_SCIPY`, mirroring `solvers.select`'s own
-           `_WARNED_SPARSE_DIRECT_NEEDS_SCIPY` pattern and for the same reason: a per-solve
-           warning at this default's every-step call frequency would be unusable noise).
-        2. **A grad-requiring `on_failure="return"` solve.** `_LinearSolve.forward`/
-           `.backward` always resolve `"auto"` INSIDE `torch.no_grad()` (`forward`'s own
-           `with torch.no_grad(): ... resolve_solver(...)`; `backward` never re-resolves at
-           all, it reuses whatever `forward` picked), so `torch.is_grad_enabled()` is always
-           False there and this hazard cannot fire on the differentiable path -- `op`/`rhs`
-           passed from that path are accepted but never actually inspected because of this.
-           The THREE `on_failure="return"` early-return paths (`steady`,
-           `_implicit_step_sparse`, `_trapezoidal_step_sparse`), by contrast, call
-           `_resolve_solver` OUTSIDE any `no_grad`: an explicit `method="sparse_direct"`
-           reaching `solvers.select.solve` there would raise `RuntimeError` (see
-           `select._sparse_direct`) whenever grad mode is enabled and the rhs or the
-           operator's own sparse values require grad -- an eligibility refusal, not a
-           numerical failure, so `on_failure="return"` would NOT catch it. `auto` must not
-           raise for a reason the caller did not ask for (the same principle
-           `solvers.select`'s own `_auto_sparse_triplet` states), so when
-           `torch.is_grad_enabled()` and either `rhs.requires_grad` or the operator's
-           assembled sparse `values` tensor requires grad, `auto` falls back to `gmres`
-           silently (this is a routing fact about THIS solve, not an environment fault, so
-           it never warns).
-
-        `"gmres_jacobi"`/`"gmres_ilu"` resolve to `method="gmres"` with a real
-        preconditioner -- `"jacobi"` (`1 / diag(A)`) or `"ilu"` (SciPy's incomplete LU of
-        `op.assemble_sparse()`, per instance) -- rather than plain GMRES under a name that
-        promises preconditioning. `preconditioner` is otherwise the only thing that changes:
-        the backend is still `"gmres"` (preconditioning is an internal detail of how gmres
-        converges, not a distinct backend `diagnostics["linear"]["backend"]` would name
-        differently). `"sparse_direct"` and `"direct"` pass straight through:
-        `preconditioner`/`restart` are irrelevant to both and `solvers.select.solve` ignores
-        them for those two methods.
-
-        `"gmres_ilu"` COST: `"ilu"` factorises a fresh SciPy `spilu` PER
-        INSTANCE on every `gmres()` call (see `iterative._gmres_ilu_preconditioner`), and a
-        differentiable transport step calls `gmres` from BOTH `_LinearSolve.forward` and
-        `.backward` -- so one transport step under `"gmres_ilu"` pays that per-instance
-        factorisation TWICE, on every step, not once and reused across steps. `"sparse_direct"`
-        instead pays one full LU per solve (also per instance, also not reused) and then an
-        exact solve with no outer iteration; `"gmres_ilu"` pays a cheaper, incomplete
-        factorisation on both passes and then still iterates GMRES to convergence. This cost
-        shape, not iteration counts alone, is why the benchmark found it the clear loser
-        at every ensemble measured and why `auto` never chooses it.
+        """The kwargs `solvers.select.solve` should see for THIS layer's `linear_solver`,
+        resolved PER SOLVE: `select.transport_solver_kwargs` holds the rule (the "auto"
+        policy and its two hazards). Every linear solve this layer runs goes through here,
+        the backward adjoint via the kwargs `_LinearSolve` saves.
         """
-        if self.linear_solver == "gmres_jacobi":
-            return {"method": "gmres", "preconditioner": "jacobi", "restart": 30}
-        if self.linear_solver == "gmres_ilu":
-            return {"method": "gmres", "preconditioner": "ilu", "restart": 30}
-        if self.linear_solver == "gmres":
-            return {"method": "gmres", "preconditioner": None, "restart": 30}
-        if self.linear_solver == "auto":
-            if batch_size <= _SPARSE_DIRECT_MAX_BATCH and self._auto_sparse_direct_ok(op, rhs):
-                return {"method": "sparse_direct", "preconditioner": None, "restart": 30}
-            return {"method": "gmres", "preconditioner": None, "restart": 30}
-        return {"method": self.linear_solver, "preconditioner": None, "restart": 30}
-
-    def _auto_sparse_direct_ok(self, op, rhs: torch.Tensor | None) -> bool:
-        """Whether `"auto"` may resolve to `sparse_direct` right now -- the two hazards in
-        `_resolve_solver`'s docstring, hazard 2 first (cheaper: no import, and usually a
-        no-op because `op`/`rhs` are `None` or grad is disabled), hazard 1 second. Within
-        hazard 2 itself, `rhs.requires_grad` is tested before `assemble_sparse()` is ever
-        called: it is a plain attribute read, whereas `assemble_sparse()` is a real sparse
-        assembly, so a grad-enabled `on_failure="return"` solve whose rhs already requires
-        grad returns False without paying for it.
-        """
-        global _WARNED_AUTO_NEEDS_SCIPY
-        if op is not None and rhs is not None and torch.is_grad_enabled():
-            if rhs.requires_grad:
-                return False
-            values_require_grad = False
-            assemble_sparse = getattr(op, "assemble_sparse", None)
-            if assemble_sparse is not None:
-                triplet = assemble_sparse()
-                values_require_grad = triplet is not None and bool(triplet[2].requires_grad)
-            if values_require_grad:
-                return False
-        if not _scipy_sparse_linalg_importable():
-            if not _WARNED_AUTO_NEEDS_SCIPY:
-                _WARNED_AUTO_NEEDS_SCIPY = True
-                warnings.warn(
-                    f"noodl: TransportLayer '{self.name}' linear_solver='auto' would have "
-                    f"factorised this solve with SciPy's sparse LU (batch size at or under "
-                    f"{_SPARSE_DIRECT_MAX_BATCH}), but scipy could not be imported, so it "
-                    f"fell back to plain gmres. The answer is correct; it is slower at small "
-                    f"batches (see benchmarks/transport_solver_bench.py). Install "
-                    f"the extra to get the documented default: pip install noodl-physics[sparse]. "
-                    f"This warning is issued once per process; diagnostics['linear']"
-                    f"['backend'] reports the backend that actually ran on every solve.",
-                    RuntimeWarning,
-                    stacklevel=3,
-                )
-            return False
-        return True
+        return transport_solver_kwargs(
+            self.linear_solver, batch_size, op=op, rhs=rhs, layer_name=self.name
+        )
 
     def _conduction_matrix(self, dtype: torch.dtype) -> torch.Tensor | None:
         """The (..., n, n) conduction Laplacian `A_c diag(g) A_c^T`, or None if no conduction.

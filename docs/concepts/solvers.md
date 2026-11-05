@@ -26,7 +26,7 @@ class LinearOperator(Protocol):
 An operator may additionally implement `assemble_sparse() -> (row, col, values)` — the
 `SparseAssembling` protocol — which is what unlocks the sparse-direct backend.
 
-Three implementations ship:
+Four implementations ship:
 
 | Operator | What it represents |
 |---|---|

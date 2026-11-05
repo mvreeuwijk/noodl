@@ -24,7 +24,6 @@ output.
 from __future__ import annotations
 
 import dataclasses
-import importlib.util
 import math
 
 import torch
@@ -38,6 +37,7 @@ from noodl.layers._solve_policy import require_diagnostics
 from noodl.operators.mna import MnaOperator
 from noodl.solvers.implicit import implicit_solve
 from noodl.solvers.newton import newton, newton_tolerances
+from noodl.solvers.select import scipy_importable
 
 Tensor = torch.Tensor
 
@@ -45,11 +45,6 @@ Tensor = torch.Tensor
 #: original solver error is re-raised unchanged (a dense SVD of a big system costs more
 #: than the diagnosis is worth).
 _RANK_TEST_MAX_UNKNOWNS = 2000
-
-
-def _scipy_importable() -> bool:
-    """True when SciPy (the optional `noodl-physics[sparse]` extra) can be imported."""
-    return importlib.util.find_spec("scipy") is not None
 
 
 def _complex(z: Tensor, cdtype: torch.dtype = torch.complex128) -> Tensor:
@@ -538,7 +533,7 @@ class MnaSystem:
         requested = self.layer.linear_solver if requested is None else requested
         if requested != "auto":
             return requested
-        return "sparse_direct" if _scipy_importable() else "direct"
+        return "sparse_direct" if scipy_importable() else "direct"
 
     def _singular(self, op: MnaOperator | None, failing: int) -> bool:
         """True when the last Jacobian is (numerically) rank deficient in the flat batch
@@ -675,12 +670,7 @@ class MnaSystem:
                     diagnose(exc)
                     raise
                 if diagnostics is not None:
-                    diagnostics["newton_iterations"] = result.iterations
-                    diagnostics["linear_iterations"] = result.linear_iterations
-                    diagnostics["method"] = requested
-                    diagnostics["backend"] = result.backend
-                    diagnostics["converged"] = result.converged
-                    diagnostics["residual_norm"] = result.residual_norm
+                    result.into(diagnostics, method=requested)
                 return self._output(result.x, phi_boundary, drivers, ctx)
 
         layer._check_no_unreachable_differentiable_tensors()

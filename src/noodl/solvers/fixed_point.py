@@ -82,6 +82,7 @@ from collections.abc import Callable, MutableMapping, Sequence
 import torch
 from torch import Tensor
 
+from noodl.solvers.implicit import refuse_second_order
 from noodl.solvers.iterative import gmres
 
 __all__ = ["differentiate_fixed_point"]
@@ -212,19 +213,7 @@ class _FixedPointAdjoint(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, *g_out):
-        # Grad mode is ON inside a custom backward only under `create_graph=True`, i.e. when
-        # a second differentiation is being prepared; the adjoint solve below builds no
-        # graph, so that second derivative would silently miss a term. Refuse it here, as
-        # `solvers/implicit.py` does.
-        if torch.is_grad_enabled():
-            raise RuntimeError(
-                f"{ctx.where}: second-order differentiation (create_graph=True) through the "
-                f"fixed-point adjoint is not supported; only first-order gradients via the "
-                f"adjoint method are implemented, because its backward solves the adjoint "
-                f"system outside the graph, exactly as the implicit solves do (see "
-                f"solvers/implicit.py). Detach the first-order gradient before using it in a "
-                f"further differentiable loss (e.g. a gradient-penalty term)."
-            )
+        refuse_second_order(ctx.where, through="through the fixed-point adjoint ")
         z, z_next, outputs = ctx.z, ctx.z_next, ctx.outputs
         # An output nobody's loss touched arrives as a materialised zero under PyTorch's
         # default `materialize_grads`; `_or_zeros` keeps the `None` of the opposite setting

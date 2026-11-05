@@ -122,3 +122,40 @@ def test_implicit_solve_mixed_used_and_unused_parameters():
     grad_a, grad_b = torch.autograd.grad(x.sum(), (a, b), allow_unused=True)
     torch.testing.assert_close(grad_a, torch.ones_like(a))
     assert grad_b is None
+
+
+def test_residual_vjp_skips_the_adjoint_when_no_parameter_is_reached():
+    from noodl.solvers.implicit import residual_vjp
+
+    def adjoint():
+        raise AssertionError("the adjoint solve must not run")
+
+    unused = torch.tensor(1.0, requires_grad=True)
+    grads = residual_vjp([unused], lambda p: torch.zeros(()), adjoint)
+    assert grads == [None]
+
+
+def test_residual_vjp_weights_the_residual_jacobian_with_minus_the_adjoint():
+    from noodl.solvers.implicit import residual_vjp
+
+    a = torch.tensor(3.0, requires_grad=True)
+    fixed = torch.tensor(5.0)
+    grads = residual_vjp([a, fixed], lambda p: p[0] * p[1], lambda: torch.tensor(2.0))
+    assert grads[1] is None
+    torch.testing.assert_close(grads[0], torch.tensor(-2.0 * 5.0))
+
+
+def test_newton_result_into_writes_the_status_keys():
+    from noodl.solvers.newton import NewtonResult
+
+    x = torch.zeros(2)
+    result = NewtonResult(x, torch.tensor(True), 3, torch.tensor(0.5),
+                          linear_iterations=torch.tensor(7), backend="gmres")
+    diag: dict = {}
+    result.into(diag, method="auto")
+    assert diag["newton_iterations"] == 3 and diag["method"] == "auto"
+    assert diag["backend"] == "gmres" and bool(diag["converged"])
+    assert float(diag["residual_norm"]) == 0.5 and int(diag["linear_iterations"]) == 7
+    other: dict = {}
+    result.into(other)
+    assert "method" not in other

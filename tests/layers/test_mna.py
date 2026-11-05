@@ -452,10 +452,10 @@ def test_auto_factorises_sparse_whenever_scipy_is_importable(monkeypatch):
 
     _, layer = _driven_layer()
     mna = layer._mna
-    monkeypatch.setattr(mna_module, "_scipy_importable", lambda: True)
+    monkeypatch.setattr(mna_module, "scipy_importable", lambda: True)
     assert mna.method() == "sparse_direct"
     assert mna.method("direct") == "direct"
-    monkeypatch.setattr(mna_module, "_scipy_importable", lambda: False)
+    monkeypatch.setattr(mna_module, "scipy_importable", lambda: False)
     assert mna.method() == "direct"
     assert mna.method("sparse_direct") == "sparse_direct"
 

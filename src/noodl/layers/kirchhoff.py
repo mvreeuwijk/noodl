@@ -1319,19 +1319,10 @@ class KirchhoffLayer(TopologyGuard):
 
             result = newton(residual_fn, operator_fn, phi0, **newton_kwargs)
             if diagnostics is not None:
-                diagnostics["newton_iterations"] = result.iterations
-                diagnostics["linear_iterations"] = result.linear_iterations
-                diagnostics["method"] = newton_kwargs["method"]
-                # `method` is what was REQUESTED, `backend` what RAN. Under "auto" the
-                # two differ: the batch threshold and SciPy's presence decide which
-                # side of `select`'s eligibility table this solve landed on, and
-                # nothing else reports it.
-                diagnostics["backend"] = result.backend
-                # The per-instance STATUS, not only the cost. Without these two,
-                # `on_failure="return"` returned a non-converged phi with nothing
-                # anywhere reporting it.
-                diagnostics["converged"] = result.converged
-                diagnostics["residual_norm"] = result.residual_norm
+                # `method` is what was REQUESTED, `backend` what RAN: under "auto" the
+                # batch threshold and SciPy's presence decide which side of `select`'s
+                # eligibility table this solve landed on, and nothing else reports it.
+                result.into(diagnostics, method=newton_kwargs["method"])
             if last.get("x") is result.x:
                 phi, q = last["phi"], last["q"]
             else:

@@ -91,7 +91,6 @@ from noodl.topology import Network
 Tensor = torch.Tensor
 State = dict[str, Tensor]
 Drivers = dict[str, Tensor]
-_STATE_SUFFIXES = ("phi", "q", "x", "s")
 #: Potential-solve keywords the Model sets itself from the state, the step and `t`; refused
 #: among `**solve_kwargs` of `step`/`steady`.
 _MODEL_SOLVE_KEYS = frozenset({"phi0", "q0", "history", "dt", "t"})
