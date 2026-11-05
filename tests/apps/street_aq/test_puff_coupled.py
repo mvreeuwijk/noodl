@@ -220,8 +220,9 @@ def test_refusals_are_named():
     with pytest.raises(ValueError, match="junction_source"):
         build_model(net, background="per_street",
                     puffs=PuffOptions(sigma_theta=0.1, junction_source="both"))
-    with pytest.raises(NotImplementedError, match="shear"):
-        build_model(net, background="per_street", puffs=PuffOptions(shear=True))
+    with pytest.raises(ValueError, match="shear=True needs along_wind='sigma_y'"):
+        build_model(net, background="per_street",
+                    puffs=PuffOptions(sigma_theta=0.1, shear=True, along_wind="none"))
     for bad in (0.0, -30.0, math.inf):
         with pytest.raises(ValueError, match="puff_dt"):
             build_model(net, background="per_street",
@@ -303,7 +304,8 @@ def test_a_grad_run_after_a_no_grad_warm_up_has_the_full_gradient():
 # ------------------------------------------------------------------ the mass budget (Test 3)
 
 
-def _budget_run(junction_source, thetas, capacity, *, n_steps=60, dt=5.0, puff_dt=30.0):
+def _budget_run(junction_source, thetas, capacity, *, n_steps=60, dt=5.0, puff_dt=30.0,
+                shear=False):
     """A pulse in street 3 (canopy) and an above-roof pulse, stepped `n_steps` times with
     the wind direction `thetas[k]` at step `k`; yields `(k, state, terms)` after every
     step, `terms` the budget's sides (`_budget_sides`)."""
@@ -311,7 +313,8 @@ def _budget_run(junction_source, thetas, capacity, *, n_steps=60, dt=5.0, puff_d
 
     bg = 2.0e-8
     options = PuffOptions(sigma_theta=math.radians(6.0), junction_source=junction_source,
-                          capacity=capacity, n_releases=1, x_max=300.0, puff_dt=puff_dt)
+                          capacity=capacity, n_releases=1, x_max=300.0, puff_dt=puff_dt,
+                          shear=shear)
     _, names, model, state, drivers = _puff_model(puffs=options)
     state = {**state, "street.x": torch.full((12,), bg, dtype=DT)}
     release = {"puff.release_xy": torch.tensor([[[-60.0, 90.0]]], dtype=DT),
@@ -344,13 +347,13 @@ def _budget_run(junction_source, thetas, capacity, *, n_steps=60, dt=5.0, puff_d
         yield k, model, state, held, inputs
 
 
-def _assert_budget(junction_source, thetas, capacity, puff_dt=30.0):
+def _assert_budget(junction_source, thetas, capacity, puff_dt=30.0, shear=False):
     """Assert the identity after every step; return the final state and what the run
     exercised (the largest `mass_out`, `mass_dropped` and accumulated `"puff.pending"`,
     the puffs evicted)."""
-    seen = {"out": 0.0, "dropped": 0.0, "evicted": 0, "pending": 0.0}
+    seen = {"out": 0.0, "dropped": 0.0, "evicted": 0, "pending": 0.0, "sxz": 0.0}
     for k, model, state, held, inputs in _budget_run(junction_source, thetas, capacity,
-                                                     puff_dt=puff_dt):
+                                                     puff_dt=puff_dt, shear=shear):
         assert held.shape == (1,)
         assert abs(float(held[0]) - float(inputs)) <= 1e-12 * float(inputs), (
             k, float(held[0]), float(inputs))
@@ -359,6 +362,7 @@ def _assert_budget(junction_source, thetas, capacity, puff_dt=30.0):
         seen["dropped"] = max(seen["dropped"], float(puff.mass_dropped[0]))
         seen["evicted"] += int(model.closures[-1].last["evicted"].sum())
         seen["pending"] = max(seen["pending"], float(state["puff.pending"].abs().sum()))
+        seen["sxz"] = max(seen["sxz"], float(puff.sxz.abs().max()))
     return state, seen
 
 
@@ -388,6 +392,16 @@ def test_budget_exact_every_step(junction_source, capacity, puff_dt):
         assert float(state["puff.mass_drawn_down"][0]) == 0.0
     else:
         assert float(state["puff.mass_drawn_down"][0]) > 0.0
+
+
+@pytest.mark.parametrize("puff_dt", [None, 30.0])
+def test_budget_exact_with_shear(puff_dt):
+    """The identity of `test_budget_exact_every_step` with the wind-shear stretching on,
+    with the wind turning: the shear moves puff material along the wind, never in or out
+    of the account."""
+    thetas = [0.3 + 0.05 * k if k < 30 else 1.8 - 0.04 * (k - 30) for k in range(60)]
+    _, seen = _assert_budget("upward", thetas, 4096, puff_dt, shear=True)
+    assert seen["sxz"] > 0.0 and seen["out"] != 0.0
 
 
 def test_budget_exact_when_wind_turns():
@@ -734,12 +748,11 @@ def _grad_leaves(n=1, requires_grad=True):
     return out
 
 
-@pytest.fixture(scope="module")
-def gradient_check():
+def _gradient_check(options=_GRAD_OPTIONS):
     """`{(name, component): (autograd, central difference)}` of the integrated `C_ext` of
     the downwind street: autograd from one run, the central differences (relative step
     1e-6) from one batched run of every perturbation (the batch is exact, Test 5)."""
-    model, state, drivers = _pulse_model()
+    model, state, drivers = _pulse_model(options)
     leaves = _grad_leaves()
     street = torch.tensor([_GRAD_PULSE_STREET])
     loss = _integrated_c_ext(model, state, _release_drivers(drivers, leaves, street))
@@ -766,6 +779,11 @@ def gradient_check():
     return out
 
 
+@pytest.fixture(scope="module")
+def gradient_check():
+    return _gradient_check()
+
+
 @pytest.mark.parametrize("param", ["pulse.rate", "pulse.start", "puff.release_rate",
                                    "puff.release_start", "puff.release_duration",
                                    "puff.release_xy", "u_star", "theta_w"])
@@ -778,6 +796,16 @@ def test_gradient_matches_central_differences(param, gradient_check):
     for c, (auto, fd) in checked.items():
         assert auto != 0.0, (param, c)
         assert abs(auto - fd) <= 1e-6 * abs(auto), (param, c, auto, fd)
+
+
+def test_sheared_gradient_matches_central_differences(gradient_check):
+    """Test 4 with the wind-shear stretching on (design Sect. 4.7), every parameter: the
+    shear rate's dependence on `u_star` included (and the shear changes that gradient)."""
+    checked = _gradient_check(replace(_GRAD_OPTIONS, shear=True))
+    for (param, c), (auto, fd) in checked.items():
+        assert auto != 0.0, (param, c)
+        assert abs(auto - fd) <= 1e-6 * abs(auto), (param, c, auto, fd)
+    assert checked["u_star", None][0] != gradient_check["u_star", None][0]
 
 
 def test_batch_of_three_releases_equals_three_runs():

@@ -589,8 +589,43 @@ by `along_wind`:
 | `"sigma_y"` (default) | the slug, of length $\ell$, convolved with a Gaussian of $\sigma_x = \sigma_y(x(a))$: $[\mathrm{erf}((s - s_{lo})/(\sqrt{2}\sigma_x)) - \mathrm{erf}((s - s_{hi})/(\sqrt{2}\sigma_x))]/(2\ell)$, with the table read clamped to the slug's ends $s_{lo}$, $s_{hi}$ | the steady kernel smoothed along the wind: a floor of about 4.7 % of the largest kernel entry against the plain kernel |
 | `"none"` | $1/(\tau\,u(x(a) + s))$, with $\tau$ the slug's age span (s): the slug is a segment of the steady plume, not a uniform top-hat | the steady kernel itself, to rounding, for any step |
 
+#### Wind-shear stretching
+
+With `PuffOptions(shear=True)` (Sykes and Henn, 1995) a vertical shear $S = dU/dz$ of the
+tables' wind profile, at $z_s = \max(z_c, 0.65\,\sigma_z)$, grows a covariance
+$\sigma_{xz}$ between the along-wind and vertical positions in a puff, and through it an
+extra along-wind variance:
+
+$$
+\frac{d\sigma_{xz}}{dt} = S\,\sigma_z^2, \qquad
+\frac{d\sigma_{x,\text{shear}}^2}{dt} = 2\,S\,\sigma_{xz}.
+$$
+
+Both are per-puff state (`"puff.sxz"`, `"puff.sx2_shear"`, zero at birth), integrated per
+step with $S$ at the step's middle age held over the step and $\sigma_z^2$ quadratic in age
+through its values at the step's start, middle and end; this is exact for a constant $S$
+and $\sigma_z \propto t$ ($\sigma_{xz} = S a^2 t^3/3$,
+$\sigma_{x,\text{shear}}^2 = S^2 a^2 t^4/6$ for $\sigma_z = a t$). $S$ is the autograd
+derivative of `plume.wind_speed`, so gradients reach the wind profile's $u_*$ and $L$.
+
+The puff is then a correlated $(x, z)$ Gaussian, of along-wind variance
+$\sigma_x^2 = \sigma_y(x(a))^2 + \sigma_{x,\text{shear}}^2$, convolved along the wind
+with the slug. It is evaluated as the vertical profile times the conditional along-wind
+profile: each term of $P_z$, centred at $z_k$ ($z_c$, $2H_R - z_c$, $2h - z_c$), multiplies
+the slug convolved with a Gaussian of the conditional variance
+$\sigma_x^2 - \sigma_{xz}^2/\sigma_z^2$, shifted along the wind by
+$\beta (z - z_k)$, with $\beta = \sigma_{xz}/\sigma_z^2$ for the plume and $-\beta$ for
+its two images (a reflection in $z$ flips the sign of $\sigma_{xz}$). $\beta$ and the
+conditional variance are the puff's own, at $x(a)$; the vertical terms are read at the
+receptor's distance, as without shear. Every term integrates to one along the wind, so at
+every height the line integral of a sheared puff along the wind is the unsheared one: the
+shear moves material along the wind and neither makes nor loses any. At roof level the
+plume and its canopy image have the same shift, and the factor is $\min(p_z, \text{cap}_i)$
+times the terms' weighted mean of their along-wind profiles.
+
 Pairs more than `cutoff_sigma` crosswind standard deviations beyond the flat top, or (under
-`"sigma_y"`) along-wind standard deviations beyond the slug's ends, are exactly zero. A
+`"sigma_y"`) along-wind standard deviations ($\sigma_x$, with the shear part when it is
+on) beyond the slug's ends, are exactly zero. A
 street's own puffs do not count in its own `C_ext`, as in `street_kernel`. A puff leaves
 the domain at `x_max` (700 m, the steady kernel's downwind cut-off).
 
@@ -713,7 +748,7 @@ model.closures[-1].bind(pulsed)                 # the puff closure reads its wir
 | `cutoff_sigma` | 4 | standard deviations | The profiles' cut-off, as the steady kernel's. |
 | `x_max` | 700 | m | The tables' extent; a puff beyond it leaves the domain, into `mass_out`. |
 | `n_releases` | 0 | | The number of explicit above-roof releases. |
-| `shear` | `False` | | Wind-shear stretching along the wind; not available yet, `True` is refused. |
+| `shear` | `False` | | Wind-shear stretching along the wind (Sykes and Henn, 1995; [above](#wind-shear-stretching)); needs `along_wind="sigma_y"` (with `"none"` it is refused by name). |
 | `table_kwargs` | `{}` | | The empirical inputs passed on to `puff_tables` (`theta_star`, `temperature`, `tau_y`, `tau_z`, `centre_k`, the floors); a `"centre_c"` entry (m) is the centre-law constant of the street and junction sources' table. |
 
 The drivers the closure reads, one value per batch instance. Under `meteo="per_street"`
@@ -814,8 +849,8 @@ step, and 163 ms in the puffs, 115 ms of it evaluating `C_ext`; see the
 - SIRANE's steady plume laws, not SIRANERISK's puff dispersion laws: a puff's spreads are
   the steady plume's at its age. When the meteorology changes, live puffs read the new
   table at their age; their spreads are not integrated through the change.
-- No concentration fluctuations, deposition, chemistry or plume rise in the puffs, and no
-  wind-shear stretching yet (`shear=True` is refused).
+- No concentration fluctuations, deposition, chemistry or plume rise in the puffs.
+  Wind-shear stretching (`shear=True`) is available under `along_wind="sigma_y"` only.
 - Convective hours ($h/|L| > 0.3$) are refused by name, as in the steady kernel (see
   [Differentiability](#differentiability)).
 - At roof level the table's $p_z$ is interpolated between grid points; at a free receptor

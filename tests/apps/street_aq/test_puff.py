@@ -979,3 +979,193 @@ def test_evaluator_matches_the_recorded_reference(along_wind, batch):
         assert float(value.abs().max()) > 0, name
         err = float((got[name] - value).abs().max() / value.abs().max())
         assert err <= 1e-12, (name, err)
+
+
+# --- wind-shear stretching (design Sect. 4.7) -----------------------------------------------
+
+
+def _const_tables(*, u=3.0, sigma_y=4.0, sigma_z=5.0, z_c=15.0, h_canopy=2.0, h_abl=60.0,
+                  n=120):
+    """Hand tables with constant speed, spreads and centre (no wind profile)."""
+    def col(v):
+        return torch.full((1, 1, n), v, dtype=DT)
+
+    h_c, h_t = torch.full((1,), h_canopy, dtype=DT), torch.full((1,), h_abl, dtype=DT)
+    p_z = vertical_profile(h_c[:, None], col(z_c), col(sigma_z), h_c[:, None], h_t[:, None])
+    return PuffTables(u=col(u), sigma_y=col(sigma_y), sigma_z=col(sigma_z), z_c=col(z_c),
+                      p_z=p_z, h_canopy=h_c, h_abl=h_t, x_max=10.0 * (n - 1))
+
+
+def _sheared(state, sxz, sx2):
+    return replace(state, sxz=torch.full_like(state.mass, sxz) * state.live,
+                   sx2_shear=torch.full_like(state.mass, sx2) * state.live)
+
+
+def test_sheared_puff_spread_matches_the_closed_form(monkeypatch):
+    # constant dU/dz = s and sigma_z = a t (speed 3, sigma_z = (a / 3) x on the grid):
+    # sigma_xz = s a^2 t^3 / 3 and the shear part of sigma_x^2 = s^2 a^2 t^4 / 6, exact per
+    # step for these rates whatever dt
+    s, a, dt = 0.07, 0.3, 0.1
+    n = 200
+    x = torch.arange(n, dtype=DT) * 10.0
+    tabs = replace(_const_tables(n=n), sigma_z=(a / 3.0 * x).reshape(1, 1, n))
+    monkeypatch.setattr(PuffTables, "shear_rate", lambda self, z, row: torch.full_like(z, s))
+    field = PuffField.points(1)
+    state = _one_release(field, tabs, mass=1.0, origin=(0.0, 0.0), dt=dt, steps=0, theta=0.0)
+    th = torch.zeros(1, dtype=DT)
+    for _ in range(600):
+        state = advance(state, tabs, dt, th, shear=True)
+    t = float(state.age[0, 0])
+    assert t == pytest.approx(60.0, rel=1e-12)
+    assert float(state.sxz[0, 0]) == pytest.approx(s * a**2 * t**3 / 3.0, rel=1e-10)
+    assert float(state.sx2_shear[0, 0]) == pytest.approx(s**2 * a**2 * t**4 / 6.0, rel=1e-10)
+    # free slots stay zero; a new puff is born with zero shear moments
+    assert torch.equal(state.sxz[0, 1:], torch.zeros(7, dtype=DT))
+    state, _ = emit(field, state, torch.ones(1, 1, dtype=DT), torch.zeros(1, dtype=_LONG),
+                    torch.zeros(1, 1, 2, dtype=DT))
+    assert float(state.sxz[0, 1]) == 0.0 and float(state.sx2_shear[0, 1]) == 0.0
+    # shear=False leaves the moments alone
+    plain = advance(state, tabs, dt, th)
+    assert torch.equal(plain.sxz, state.sxz) and torch.equal(plain.sx2_shear,
+                                                             state.sx2_shear)
+
+
+@pytest.mark.parametrize("met", [_NEUTRAL, {**_STABLE, "lmo": 300.0}],
+                         ids=["neutral", "stable"])
+def test_shear_rate_is_the_wind_profile_derivative(met):
+    from noodl.apps.street_aq.plume import wind_speed
+
+    tabs = puff_tables(centres=torch.tensor([10.0], dtype=DT), **met, x_max=300.0)
+    z = torch.tensor([21.0, 30.0, 80.0], dtype=DT)
+    got = tabs.shear_rate(z, torch.zeros(3, dtype=_LONG))
+    h = 1e-4
+
+    def u(zz):
+        return wind_speed(zz, u_star=met["u_star"], lmo=met["lmo"], z0=met["z0"], d=met["d"])
+
+    torch.testing.assert_close(got, (u(z + h) - u(z - h)) / (2 * h), rtol=1e-8, atol=0)
+    with pytest.raises(ValueError, match="no wind profile"):
+        _const_tables().shear_rate(z, torch.zeros(3, dtype=_LONG))
+
+
+def _correlated(x, z, *, sx2, sxz, sz, zc, h_c, h_t):
+    """The point puff's (x, z) density: a bivariate Gaussian of covariance
+    `[[sx2, sxz], [sxz, sz^2]]` at `(0, zc)` and its images at `2 h_c - zc` and
+    `2 h_t - zc`, whose covariance is `-sxz`."""
+    def g2(zk, c):
+        det = sx2 * sz**2 - c * c
+        dz = z - zk
+        q = (sz**2 * x * x - 2.0 * c * x * dz + sx2 * dz * dz) / det
+        return torch.exp(-0.5 * q) / (2.0 * math.pi * math.sqrt(det))
+
+    return g2(zc, sxz) + g2(2.0 * h_c - zc, -sxz) + g2(2.0 * h_t - zc, -sxz)
+
+
+def test_sheared_point_puff_is_the_correlated_gaussian():
+    # constant spreads, sigma_y 4, sigma_z 5, z_c 15, H_R 2, h 60; moments set by hand.
+    # A slug of vanishing length is the point puff: the correlated (x, z) Gaussian with
+    # its images flipping the covariance; at roof level the same, scaled to the table p_z
+    tabs = _const_tables()
+    field = PuffField.points(1, shear=True)
+    state = _one_release(field, tabs, mass=2.0, origin=(0.0, 0.0), dt=5.0, steps=10,
+                         theta=0.0)
+    sxz, sx2 = 6.0, 10.0
+    state = _sheared(state, sxz, sx2)
+    x0 = float(state.disp[0, 0, 0])
+    points, a, c, z = _wind_points((0.0, 0.0), 0.0, [x0 - 7.0, x0 - 1.0, x0 + 2.0, x0 + 9.0],
+                                   [0.0, 3.0], [2.0, 9.0, 15.0, 24.0, 50.0])
+    th = torch.zeros(1, dtype=DT)
+    got = concentration_at(field, state, tabs, points, th, 1e-4)[0]
+    sig = torch.tensor(4.0, dtype=DT)
+    expected = 2.0 * _gauss(c, sig) * _correlated(a - x0, z, sx2=16.0 + sx2, sxz=sxz, sz=5.0,
+                                                  zc=15.0, h_c=2.0, h_t=60.0)
+    torch.testing.assert_close(got, expected, rtol=1e-8, atol=0)
+    # the correlation matters: without it the values differ
+    plain = concentration_at(field, _sheared(state, 0.0, sx2), tabs, points, th, 1e-4)[0]
+    assert float(((plain - got).abs() / got).max()) > 0.1
+    # roof level: the free receptor at H_R (the table's p_z is the profile there)
+    roof = roof_concentration(field, state, tabs, points[:, :2], th, 5.0)[0]
+    at_roof = torch.cat([points[:, :2], torch.full_like(points[:, :1], 2.0)], dim=1)
+    torch.testing.assert_close(roof, concentration_at(field, state, tabs, at_roof, th, 5.0)[0],
+                               rtol=1e-13, atol=0)
+
+
+@pytest.mark.parametrize("age", [3.0, 40.0])
+def test_sheared_slug_carries_its_mass(age):
+    # the line integral of C along the wind at every height is the unsheared one,
+    # m f_y P_z(z): shear moves material along the wind, it neither makes nor loses any
+    dt, m = 10.0, 2.0
+    tabs = _const_tables()
+    field = PuffField.points(1, shear=True, cutoff_sigma=10.0)
+    state = _one_release(field, tabs, mass=m, origin=(0.0, 0.0), dt=dt, steps=0, theta=0.0)
+    state = replace(state, age=torch.tensor([[age] + [0.0] * 7], dtype=DT),
+                    disp=state.disp.index_put((torch.tensor([0]), torch.tensor([0])),
+                                              tabs.at_age(torch.tensor([age], dtype=DT),
+                                                          _ZERO, _ZERO)[0][:, None]
+                                              * torch.tensor([[1.0, 0.0]], dtype=DT)))
+    state = _sheared(state, 9.0, 40.0)
+    lo = float(tabs.at_age(torch.tensor(max(age - dt / 2, 0.0), dtype=DT), _ZERO, _ZERO)[0])
+    hi = float(tabs.at_age(torch.tensor(age + dt / 2, dtype=DT), _ZERO, _ZERO)[0])
+    pad = 10.0 * math.sqrt(16.0 + 40.0) + 30.0
+    k = 100_000
+    edges = torch.linspace(lo - pad, hi + pad, k + 1, dtype=DT)
+    xs = 0.5 * (edges[1:] + edges[:-1])
+    f_y = _gauss(torch.zeros((), dtype=DT), torch.tensor(4.0, dtype=DT))
+    th = torch.zeros(1, dtype=DT)
+    for z in (2.0, 10.0, 15.0, 33.0, 55.0):
+        points = torch.stack([xs, torch.zeros_like(xs), torch.full_like(xs, z)], dim=1)
+        c = concentration_at(field, state, tabs, points, th, dt)[0]
+        p_z = vertical_profile(torch.tensor(z, dtype=DT), torch.tensor(15.0, dtype=DT),
+                               torch.tensor(5.0, dtype=DT), tabs.h_canopy[0], tabs.h_abl[0])
+        got = float(c.sum() * (edges[1] - edges[0]) / (f_y * p_z))
+        assert got == pytest.approx(m, rel=1e-9), z
+    roof = roof_concentration(field, state, tabs, points[:, :2], th, dt)[0]
+    got = float(roof.sum() * (edges[1] - edges[0]) / (f_y * tabs.p_z[0, 0, 0]))
+    assert got == pytest.approx(m, rel=1e-9)
+
+
+def test_shear_is_refused_by_name_without_along_wind_spread_or_wind_profile():
+    with pytest.raises(ValueError, match="shear=True needs along_wind='sigma_y'"):
+        PuffField.points(1, along_wind="none", shear=True)
+    field = PuffField.points(1)
+    state = _one_release(field, _const_tables(), mass=1.0, origin=(0.0, 0.0), dt=5.0,
+                         steps=0, theta=0.0)
+    with pytest.raises(ValueError, match="no wind profile"):
+        advance(state, _const_tables(), 5.0, 0.0, shear=True)
+
+
+def _sheared_release(u_star, lmo, xy, *, steps=12, dt=5.0):
+    """A release at 30 m on real tables, advanced with shear, at a few free receptors."""
+    tabs = puff_tables(centres=torch.tensor([30.0], dtype=DT),
+                       **{**_STABLE, "u_star": u_star, "lmo": lmo, "x_max": 600.0})
+    field = PuffField.points(1, shear=True)
+    th = torch.tensor([0.2], dtype=DT)
+    state, _ = emit(field, PuffState.empty((1,), 4), torch.tensor([[2.0]], dtype=DT),
+                    torch.zeros(1, dtype=_LONG), xy.reshape(1, 1, 2))
+    for _ in range(steps):
+        state = advance(state, tabs, dt, th, shear=True)
+    points = torch.tensor([[40.0, 15.0, 30.0], [60.0, 10.0, 45.0], [30.0, 8.0, 25.0]],
+                          dtype=DT)
+    return concentration_at(field, state, tabs, points, th, dt).sum(), state
+
+
+def test_sheared_gradients_match_central_differences():
+    p0 = {"u_star": 0.25, "lmo": 300.0, "x": -20.0}
+    leaves = {k: torch.tensor(v, dtype=DT, requires_grad=True) for k, v in p0.items()}
+
+    def run(p):
+        xy = torch.stack([p["x"], torch.zeros((), dtype=DT)])
+        return _sheared_release(p["u_star"], p["lmo"], xy)
+
+    c, state = run(leaves)
+    assert float(state.sxz[0, 0].detach()) > 0.0 and float(c.detach()) > 0.0
+    grads = torch.autograd.grad(c, list(leaves.values()))
+    for (name, v), g in zip(p0.items(), grads, strict=True):
+        h = 1e-6 * abs(v)
+        with torch.no_grad():
+            base = {k: torch.tensor(w, dtype=DT) for k, w in p0.items()}
+            up = run({**base, name: torch.tensor(v + h, dtype=DT)})[0]
+            dn = run({**base, name: torch.tensor(v - h, dtype=DT)})[0]
+        fd = float(up - dn) / (2 * h)
+        assert float(g) != 0.0, name
+        assert abs(float(g) - fd) <= 1e-6 * abs(float(g)), (name, float(g), fd)

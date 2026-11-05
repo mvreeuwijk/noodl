@@ -238,8 +238,57 @@ them they differ slightly.
 
 ### 4.7 Wind-shear stretching
 
-Not available yet: `PuffOptions(shear=True)` is refused by name, and the state's `sxz` and
-`sx2_shear` stay zero.
+`PuffOptions(shear=True)` (Sykes and Henn 1995, "Representation of velocity gradient
+effects in a Gaussian puff model", *J. Appl. Meteor.* 34, 2715-2723): a vertical shear
+`S = dU/dz` of the tables' wind profile `plume.wind_speed` (row by row,
+`PuffTables.shear_rate`, the derivative taken by forward-mode autograd in `z`), at
+`z_s = max(z_c, 0.65 sigma_z)`,
+grows two per-puff moments:
+
+    d(sigma_xz)/dt = S sigma_z^2,   d(sigma_x^2)/dt|shear = 2 S sigma_xz
+
+(`"puff.sxz"`, `"puff.sx2_shear"`, zero at birth; they move with the puffs through emit,
+eviction, housekeeping, batching and checkpointing like the other fields). `advance(...,
+shear=True)` integrates them per step with `S` at the step's middle age `a + dt/2` held
+over the step and `sigma_z^2` the quadratic in age through its values `q0`, `qm`, `q1` at
+`a`, `a + dt/2`, `a + dt`:
+
+    sxz       += S dt (q0 + 4 qm + q1) / 6
+    sx2_shear += 2 S (sxz dt + S dt^2 (q0 + 2 qm) / 6)
+
+exact for a constant `S` and a `sigma_z^2` quadratic in age (tested against
+`sigma_xz = S a^2 t^3 / 3`, `sigma_x,shear^2 = S^2 a^2 t^4 / 6` for `sigma_z = a t` to
+1e-10 at `dt = 0.1 s`).
+
+Evaluation. The puff is a correlated `(x, z)` Gaussian of along-wind variance
+`sigma_x^2 = sigma_y(x(a))^2 + sx2_shear` and covariance `sxz`, convolved along the wind
+with the slug. It is written as the vertical profile times the conditional along-wind
+profile: each term of the vertical profile, centred at `z_k` (`z_c`, `2 H_R - z_c`,
+`2 h - z_c`), multiplies the slug convolved with a Gaussian of the conditional variance
+`sigma_x^2 - sxz^2 / sigma_z(x(a))^2` (the shear part floored at zero), shifted along the
+wind by `beta (z - z_k)`, with `beta = sxz / sigma_z(x(a))^2` for the plume and `-beta` for
+both images (a reflection in `z` flips the sign of `sxz`). `beta` and the conditional
+variance are the puff's own, at its distance `x(a)`, as `sigma_x` is; the vertical terms
+are read at the receptor's distance, as without shear. For a slug of vanishing length and
+constant spreads this is exactly the bivariate Gaussian with its images (tested to 1e-8).
+
+Mass. Every term's along-wind factor integrates to one whatever its shift and width, so
+the line integral of a sheared puff along the wind at any height is the unsheared one
+(tested to 1e-9 at five heights and at roof level): the shear moves material along the
+wind and neither makes nor loses any, and the budget identity of Sect. 4.8 holds
+unchanged (tested every step over 60 steps with the wind turning).
+
+Roof level. At `z = H_R` the plume and its canopy image have the same shift
+`beta (H_R - z_c)`, the inversion image `beta (2h - H_R - z_c)`; the factor is the
+table's `min(p_z, clamp)` times the weighted mean of the two along-wind factors, the
+inversion image's weight its share of the profile at `H_R` (a logistic of the exponents'
+difference, finite as `sigma_z -> 0`). With `sxz = 0` this is the unsheared factor.
+
+The along-wind cut-off (exact cut and coarse mask) takes `sigma_x` with its shear part.
+`shear=True` needs `along_wind="sigma_y"`: the `"none"` slug is a segment of the steady
+plume with no along-wind Gaussian to stretch or correlate with `z`, and is refused by
+name. With `shear=False` nothing of this runs: the values are bit-identical to the
+unsheared model (the evaluator and one-puff-per-step regression fixtures pass unchanged).
 
 ### 4.8 Housekeeping and the budget
 

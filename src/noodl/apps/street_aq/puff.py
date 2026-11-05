@@ -19,7 +19,9 @@ interval's middle),
 so the puffs of a continuous source tile the axis exactly for any interval `dt`. A receptor
 reads the table at its own distance from the source; with `along_wind="none"` the slug is
 a segment of the steady plume (density `m / (dt u(x))`, not a uniform top-hat), so the
-steady limit of a continuous source is the steady kernel itself for any `dt`.
+steady limit of a continuous source is the steady kernel itself for any `dt`. Under
+`shear=True` (`along_wind="sigma_y"` only) the puffs also carry the Sykes-Henn wind-shear
+moments `sxz`, `sx2_shear` (`advance`, `_evaluate`; design Sect. 4.7).
 
 "design Sect. N" below refers to the sections of the design note
 `docs/design/street_puffs.md`; the user's account is the section "Unsteady above-roof
@@ -29,11 +31,13 @@ transport (puffs)" of `docs/applications/street_aq.md`.
 from __future__ import annotations
 
 import math
+import warnings
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, fields, replace
 
 import torch
 from torch import Tensor
+from torch.autograd import forward_ad
 from torch.utils.checkpoint import checkpoint
 
 from noodl.apps.street_aq.above_roof import roof_fluxes, roof_wiring
@@ -62,6 +66,7 @@ from noodl.apps.street_aq.plume import (
     street_midpoints,
     table_chunks,
     vertical_profile,
+    wind_speed,
 )
 
 _PUFF_COLS = ("u", "sigma_y", "sigma_z", "z_c", "p_z")
@@ -103,7 +108,12 @@ class PuffTables:
     each grid point at the speed `u(x)`, linear between grid points. `h_canopy` and `h_abl`
     (m) are `(n_b,)`; `x_max` is the domain's extent (a puff beyond it has left). The
     detached search key of `at_age` and the running maximum of `sigma_y` (the reach of
-    `_evaluate`'s coarse mask) are built once, with `t`."""
+    `_evaluate`'s coarse mask) are built once, with `t`.
+
+    `u_star` (m/s), `lmo`, `z0` and `d` (m), each `(n_b,)`, and `kappa` are each
+    meteorology row's wind profile (`plume.wind_speed`), which the shear stretching reads
+    (`shear_rate`); `puff_tables` sets them, a hand-made table may leave them None (it
+    then cannot be advanced with `shear=True`)."""
 
     u: Tensor
     sigma_y: Tensor
@@ -114,6 +124,11 @@ class PuffTables:
     h_abl: Tensor
     x_max: float
     step: float = TABLE_STEP_M
+    u_star: Tensor | None = None
+    lmo: Tensor | None = None
+    z0: Tensor | None = None
+    d: Tensor | None = None
+    kappa: float = KAPPA
     t: Tensor = field(init=False)
     _span: float = field(init=False, repr=False, compare=False)
     _shifted: Tensor = field(init=False, repr=False, compare=False)
@@ -203,6 +218,27 @@ class PuffTables:
         return tuple(self._read(col, *cell)
                      for col in (self.u, self.sigma_y, self.sigma_z, self.z_c, self.p_z))
 
+    def shear_rate(self, z: Tensor, row: Tensor) -> Tensor:
+        """`dU/dz` (1/s) of meteorology row `row`'s wind profile `plume.wind_speed` at
+        height `z` (m above ground; `row` long, broadcasting with `z`), by forward-mode
+        autograd in `z` (`torch.autograd.forward_ad`), which keeps the reverse-mode graph
+        to `z` and to the profile's `u_star` and `lmo`. Refused by name on tables without a
+        wind profile."""
+        if self.u_star is None or self.lmo is None or self.z0 is None or self.d is None:
+            raise ValueError("PuffTables.shear_rate: these tables carry no wind profile "
+                             "(u_star, lmo, z0, d); build them with puff_tables, or advance "
+                             "with shear=False")
+        u_star, lmo, z0, d = (v[row] for v in (self.u_star, self.lmo, self.z0, self.d))
+        z = _f64(z)
+        # torch loads its forward-mode decompositions on first use through the deprecated
+        # `torch.jit.script`, which warns; the warning is torch's own, not this call's
+        with warnings.catch_warnings(), forward_ad.dual_level():
+            warnings.filterwarnings("ignore", message="`torch.jit.script` is deprecated",
+                                    category=FutureWarning)
+            u = wind_speed(forward_ad.make_dual(z, torch.ones_like(z)), u_star=u_star,
+                           lmo=lmo, z0=z0, d=d, kappa=self.kappa)
+            return forward_ad.unpack_dual(u).tangent
+
     def _base(self, table: Tensor, row: Tensor) -> Tensor:
         """The flat index of grid point 0 of table `table`, meteorology row `row`."""
         _, n_b, n = self.u.shape
@@ -290,12 +326,23 @@ def puff_tables(
                                    _PUFF_COLS))
     cols = [torch.cat([o[i] for o in out]).reshape(n_tab, n_b, n_grid)
             for i in range(len(_PUFF_COLS))]
-    return PuffTables(*cols, h_canopy=p["h_r"].reshape(batch)[0],
-                      h_abl=p["h_abl"].reshape(batch)[0], x_max=float(x_max))
+    row = {k: p[k].reshape(batch)[0] for k in ("h_r", "h_abl", "u_star", "lmo", "z0", "d")}
+    return PuffTables(*cols, h_canopy=row["h_r"], h_abl=row["h_abl"], x_max=float(x_max),
+                      u_star=row["u_star"], lmo=row["lmo"], z0=row["z0"], d=row["d"],
+                      kappa=kappa)
 
 
 ALONG_WIND = ("sigma_y", "none")
 """The along-wind profile options of a puff (`PuffField`)."""
+
+_SHEAR_NEEDS_SIGMA_Y = (
+    "{where}: shear=True needs along_wind='sigma_y', got along_wind={along_wind!r}: the "
+    "'none' slug is a segment of the steady plume, with no along-wind Gaussian for the "
+    "shear to stretch or to correlate with the height; pass along_wind='sigma_y' or "
+    "shear=False")
+
+_SHEAR_Z_FACTOR = 0.65
+"""The shear rate of a puff is `dU/dz` at `max(z_c, 0.65 sigma_z)` (design Sect. 4.7)."""
 
 _STATE_FIELDS = ("mass", "age", "disp", "source", "table", "live", "sxz", "sx2_shear",
                  "mass_emitted", "mass_out", "mass_dropped", "mass_drawn_down")
@@ -376,15 +423,20 @@ class PuffField:
     a uniform slug convolved with a Gaussian of `sigma_x = sigma_y(x(a))`, `"none"` the slug
     alone as a segment of the steady plume (design Sect. 4.3; `_evaluate`). `cutoff_sigma`
     is the cut-off in standard deviations beyond the flat top (crosswind) and beyond the
-    slug ends (along the wind)."""
+    slug ends (along the wind). `shear=True` evaluates the puffs' wind-shear moments
+    `sxz`, `sx2_shear` (design Sect. 4.7, `advance(..., shear=True)` integrates them): it
+    needs `along_wind="sigma_y"`."""
 
     def __init__(self, *, xy: Tensor, owner: Tensor, weight: Tensor, width: Tensor,
                  clamp: Tensor, source_xy0: Tensor, n_streets: int, n_junctions: int,
                  n_releases: int, along_wind: str = "sigma_y",
-                 cutoff_sigma: float = GAUSS_CUTOFF_SIGMAS) -> None:
+                 cutoff_sigma: float = GAUSS_CUTOFF_SIGMAS, shear: bool = False) -> None:
         if along_wind not in ALONG_WIND:
             raise ValueError(
                 f"PuffField: along_wind must be one of {ALONG_WIND}, got {along_wind!r}")
+        if shear and along_wind != "sigma_y":
+            raise ValueError(_SHEAR_NEEDS_SIGMA_Y.format(where="PuffField",
+                                                         along_wind=along_wind))
         if not cutoff_sigma > 0:
             raise ValueError(f"PuffField: cutoff_sigma must be positive, got {cutoff_sigma!r}")
         n_sources = n_streets + n_junctions + n_releases
@@ -395,6 +447,7 @@ class PuffField:
         self.source_xy0 = _f64(source_xy0)
         self.n_streets, self.n_junctions, self.n_releases = n_streets, n_junctions, n_releases
         self.along_wind, self.cutoff_sigma = along_wind, float(cutoff_sigma)
+        self.shear = bool(shear)
         count = torch.bincount(self.owner, minlength=n_sources)
         if bool((self.owner[1:] < self.owner[:-1]).any()) or bool((count == 0).any()) \
                 or count.numel() != n_sources:
@@ -415,7 +468,8 @@ class PuffField:
     @classmethod
     def for_network(cls, net: StreetNetwork, *, theta_w: Tensor | float,
                     n_releases: int = 0, along_wind: str = "sigma_y",
-                    cutoff_sigma: float = GAUSS_CUTOFF_SIGMAS) -> PuffField:
+                    cutoff_sigma: float = GAUSS_CUTOFF_SIGMAS,
+                    shear: bool = False) -> PuffField:
         """The streets of `net` as `plume.source_points` (whose widths and clamps depend
         on the wind `theta_w`, scalar or `(B,)`), its junctions as `plume.junction_sources`,
         then `n_releases` explicit above-roof releases (points of zero width and no clamp)."""
@@ -436,11 +490,11 @@ class PuffField:
             source_xy0=torch.cat([street_midpoints(net), j_xy,
                                   torch.zeros(n_r, 2, dtype=_DTYPE)]),
             n_streets=n_s, n_junctions=n_j, n_releases=n_r, along_wind=along_wind,
-            cutoff_sigma=cutoff_sigma)
+            cutoff_sigma=cutoff_sigma, shear=shear)
 
     @classmethod
     def points(cls, n_releases: int, *, along_wind: str = "sigma_y",
-               cutoff_sigma: float = GAUSS_CUTOFF_SIGMAS) -> PuffField:
+               cutoff_sigma: float = GAUSS_CUTOFF_SIGMAS, shear: bool = False) -> PuffField:
         """`n_releases` explicit releases and no network: the standalone puff model."""
         n = int(n_releases)
         if n < 1:
@@ -449,7 +503,8 @@ class PuffField:
                    weight=torch.ones(n, dtype=_DTYPE), width=torch.zeros(1, n, dtype=_DTYPE),
                    clamp=torch.full((1, n), math.inf, dtype=_DTYPE),
                    source_xy0=torch.zeros(n, 2, dtype=_DTYPE), n_streets=0, n_junctions=0,
-                   n_releases=n, along_wind=along_wind, cutoff_sigma=cutoff_sigma)
+                   n_releases=n, along_wind=along_wind, cutoff_sigma=cutoff_sigma,
+                   shear=shear)
 
 
 def _table_rows(tables: PuffTables, n_batch: int, where: str) -> Tensor:
@@ -639,12 +694,24 @@ def emit(field: PuffField, state: PuffState, masses: Tensor, table_index: Tensor
 
 
 def advance(state: PuffState, tables: PuffTables, dt: float,
-            theta_w: Tensor | float) -> PuffState:
+            theta_w: Tensor | float, *, shear: bool = False) -> PuffState:
     """Every live puff `dt` (s) older and moved along the wind `theta_w` (scalar or `(B,)`,
     radians counter-clockwise from east, toward) by its table's distance increment
     `x(a + dt) - x(a)`: exact for any `dt`, since `x` is the exact travel distance at the
     table's speed, so under constant wind the displacement is `x(a)`. A wind that turns
-    between steps turns the puff's further path (design Sect. 4.4)."""
+    between steps turns the puff's further path (design Sect. 4.4).
+
+    `shear=True` also integrates the wind-shear moments (Sykes and Henn, 1995; design
+    Sect. 4.7), `d(sxz)/dt = S sigma_z^2` and `d(sx2_shear)/dt = 2 S sxz`, with `S` the
+    tables' `shear_rate` at `z_s = max(z_c, 0.65 sigma_z)` at the step's middle age
+    `a + dt/2`, held over the step, and `sigma_z^2` over the step the quadratic in age
+    through its values at `a`, `a + dt/2`, `a + dt` (`q0`, `qm`, `q1`):
+
+        sxz      += S dt (q0 + 4 qm + q1) / 6
+        sx2_shear += 2 S (sxz dt + S dt^2 (q0 + 2 qm) / 6)
+
+    (`sxz` the value at the step's start), which is exact for a constant `S` and a
+    `sigma_z^2` quadratic in age. Tables without a wind profile are refused by name."""
     if not dt > 0:
         raise ValueError(f"advance: dt must be positive, got {dt!r}")
     n_batch = state.mass.shape[0]
@@ -654,8 +721,20 @@ def advance(state: PuffState, tables: PuffTables, dt: float,
     step = (tables.at_age(age, state.table, row)[0]
             - tables.at_age(state.age, state.table, row)[0])
     disp = state.disp + step[..., None] * torch.stack([cos, sin], dim=-1)[:, None, :]
+    moments = {}
+    if shear:
+        _, _, _, s_z, z_c, _ = tables.at_age(
+            torch.stack([state.age, state.age + dt / 2.0, age]), state.table, row)
+        q0, qm, q1 = s_z * s_z
+        rate = tables.shear_rate(torch.maximum(z_c[1], _SHEAR_Z_FACTOR * s_z[1]),
+                                 row.expand_as(state.age))
+        sxz = state.sxz + rate * dt * (q0 + 4.0 * qm + q1) / 6.0
+        sx2 = state.sx2_shear + 2.0 * rate * (state.sxz * dt
+                                              + rate * dt * dt * (q0 + 2.0 * qm) / 6.0)
+        moments = {"sxz": torch.where(state.live, sxz, state.sxz),
+                   "sx2_shear": torch.where(state.live, sx2, state.sx2_shear)}
     return replace(state, age=torch.where(state.live, age, state.age),
-                   disp=torch.where(state.live[..., None], disp, state.disp))
+                   disp=torch.where(state.live[..., None], disp, state.disp), **moments)
 
 
 _COARSE_MARGIN_M = 1e-3
@@ -689,7 +768,23 @@ def _evaluate(field: PuffField, state: PuffState, tables: PuffTables, rec_xy: Te
     which integrates to `m` over the slug because `int dx / u = tau`; the steady limit of
     a continuous source is then the steady kernel itself. Under `"sigma_y"` the read is
     at `x(a) + s` clamped to the slug's ends, and the along-wind factor is the slug
-    convolved with a Gaussian of `sigma_x = sigma_y(x(a))` (density `m / ell`)."""
+    convolved with a Gaussian of `sigma_x = sigma_y(x(a))` (density `m / ell`).
+
+    With `field.shear` (design Sect. 4.7) the puff is a correlated `(x, z)` Gaussian of
+    along-wind variance `sigma_x^2 = sigma_y(x(a))^2 + sx2_shear` and covariance `sxz`,
+    convolved along the wind with the slug, written as the vertical profile times the
+    conditional along-wind profile: each term of the vertical profile, centred at `z_k`
+    (`z_c`, and the images `2 H_R - z_c`, `2 h - z_c`), multiplies the slug convolved with
+    a Gaussian of the conditional variance `sigma_x^2 - sxz^2 / sigma_z(x(a))^2` (shear
+    part floored at 0), shifted along the wind by `beta (z - z_k)` with `beta = sxz /
+    sigma_z(x(a))^2` for the plume and `-beta` for its images (a reflection in `z` flips
+    the sign of `sxz`). `beta` and the conditional variance are the puff's (at `x(a)`), the
+    vertical terms the receptor's, as without shear; each term's along-wind integral is
+    one, so the line integral along the wind at any height is the unsheared one: the
+    shear moves mass along the wind and keeps it exactly. At roof level the plume and its
+    canopy image have the same shift, and the factor is `min(p_z, clamp)` times the
+    profile's terms' weighted mean of their along-wind factors. The along-wind cut-off
+    takes `sigma_x`."""
     if not dt > 0:
         raise ValueError(f"{where}: dt must be positive, got {dt!r}")
     n_batch = state.mass.shape[0]
@@ -708,7 +803,8 @@ def _evaluate(field: PuffField, state: PuffState, tables: PuffTables, rec_xy: Te
         v is not None and v.requires_grad
         for v in (state.mass, state.age, state.disp, tables.u, tables.t, tables.sigma_y,
                   tables.sigma_z, tables.z_c, tables.p_z, tables.h_canopy, tables.h_abl,
-                  field.xy, field.weight, field.width, field.clamp, rec_xy, rec_z, cos, sin))
+                  field.xy, field.weight, field.width, field.clamp, rec_xy, rec_z, cos, sin,
+                  state.sxz, state.sx2_shear))
     # the active puffs, compacted once: puff n sits in instance bn[n], slot kn[n]
     with torch.no_grad():
         bn, kn = torch.nonzero(state.live & (state.mass != 0) & (state.age > 0),
@@ -729,9 +825,24 @@ def _evaluate(field: PuffField, state: PuffState, tables: PuffTables, rec_xy: Te
         v[on] for v in (bn, kn, tab_n, row_n, age, a_lo, x_a, s_y, e_lo, e_hi))
     tau = age + dt / 2.0 - a_lo
     src, mass, disp = state.source[bn, kn], state.mass[bn, kn], state.disp[bn, kn]
+    s_x = s_y
+    if field.shear:
+        # the puff's shear moments: the along-wind spread of the cut-off, the regression
+        # of x on z and the conditional along-wind spread (docstring)
+        sigma_z = tables.sigma_z.reshape(-1)
+        lo_on, hi_on, frac_on = lo[on], hi[on], frac[on]
+        s_za = sigma_z[lo_on] + (sigma_z[hi_on] - sigma_z[lo_on]) * frac_on
+        sxz, sx2 = state.sxz[bn, kn], state.sx2_shear[bn, kn]
+        s_x = torch.sqrt(s_y * s_y + sx2)
+        var_z = s_za * s_za
+        with torch.no_grad():
+            spread_z = var_z > 0
+        beta = torch.where(spread_z, sxz / torch.where(spread_z, var_z,
+                                                       torch.ones_like(var_z)), 0.0)
+        s_c = torch.sqrt(s_y * s_y + torch.clamp(sx2 - sxz * beta, min=0.0))
     with torch.no_grad():
         pair_n, pair_i = _coarse_pairs(field, tables, bn, src, disp, tab_n, row_n, x_a,
-                                       s_y, e_lo, e_hi, cos, sin, rec_xy, receptor_owner,
+                                       s_x, e_lo, e_hi, cos, sin, rec_xy, receptor_owner,
                                        slug)
         # chunks of whole pairs with at most `rows_per_chunk(1, 1)` sub-source pairs
         # (the cap's float64 temporaries per pair), each chunk accumulated into `out` in
@@ -749,7 +860,7 @@ def _evaluate(field: PuffField, state: PuffState, tables: PuffTables, rec_xy: Te
     # the per-pair instance gathers are skipped)
     with torch.no_grad():
         if slug:
-            keep_lo, keep_hi = e_lo - cut * s_y, e_hi + cut * s_y
+            keep_lo, keep_hi = e_lo - cut * s_x, e_hi + cut * s_x
         else:
             keep_lo, keep_hi = e_lo, e_hi
     base = tables._base(tab_n, row_n)
@@ -793,6 +904,13 @@ def _evaluate(field: PuffField, state: PuffState, tables: PuffTables, rec_xy: Te
         n, i, p, x, y, lo, hi, w, sy, cell, frac = (
             v[j] for v in (n, i, p, x, y, lo, hi, w, sy, cell, frac))
         b = None if one else b[j]
+        if field.shear:
+            c = mass[n] * field.weight[p] * crosswind_profile(y, sy, w) * _sheared_factor(
+                tables, cell, frac, x, lo, hi, s_c[n], beta[n],
+                h_c if one else h_c[b], h_abl if one else h_abl[b],
+                None if rec_z is None else rec_z[i],
+                clamp[0, p] if one else clamp[b, p])
+            return out.index_add(0, i if one else b * n_rec + i, c)
         if slug:
             root2 = math.sqrt(2.0) * s_y[n]
             g_x = (torch.erf((x - lo) / root2) - torch.erf((x - hi) / root2)) / (
@@ -820,8 +938,42 @@ def _evaluate(field: PuffField, state: PuffState, tables: PuffTables, rec_xy: Te
     return out.reshape(n_batch, n_rec)
 
 
+def _sheared_factor(tables: PuffTables, cell: Tensor, frac: Tensor, x: Tensor, lo: Tensor,
+                    hi: Tensor, s_c: Tensor, beta: Tensor, h_c: Tensor, h_abl: Tensor,
+                    z: Tensor | None, clamp: Tensor) -> Tensor:
+    """The along-wind times vertical factor (1/m^2) of a sheared puff at the pairs of
+    `_evaluate` (its docstring): the receptor at along-wind offset `x` from the puff, the
+    slug `[lo, hi]`, the conditional spread `s_c` and regression `beta` of the puff, the
+    table read at the receptor's (clamped) distance (`cell`, `frac`), the receptor height
+    `z` or roof level (None, with `clamp`)."""
+    root2 = math.sqrt(2.0) * s_c
+
+    def g_x(shift: Tensor) -> Tensor:
+        u = x - shift
+        return (torch.erf((u - lo) / root2) - torch.erf((u - hi) / root2)) / (2.0 * (hi - lo))
+
+    z_c = tables._read(tables.z_c, cell, frac)
+    s_z = tables._read(tables.sigma_z, cell, frac)
+    top = 2.0 * h_abl - z_c
+    if z is None:
+        # the inversion image's share of the profile at H_R (the plume and its canopy
+        # image have equal shares and shifts), as a logistic of the exponents' difference
+        var = 2.0 * torch.clamp(s_z, min=1e-100) ** 2
+        share = torch.sigmoid(((h_c - z_c) ** 2 - (top - h_c) ** 2) / var - math.log(2.0))
+        p_z = torch.minimum(tables._read(tables.p_z, cell, frac), clamp)
+        return p_z * ((1.0 - share) * g_x(beta * (h_c - z_c))
+                      + share * g_x(beta * (top - h_c)))
+
+    def g(s: Tensor) -> Tensor:
+        return torch.exp(-0.5 * (s / s_z) ** 2)
+
+    image = 2.0 * h_c - z_c
+    return (g(z - z_c) * g_x(beta * (z - z_c)) + g(z - image) * g_x(-beta * (z - image))
+            + g(top - z) * g_x(beta * (top - z))) / (_SQRT_2PI * s_z)
+
+
 def _coarse_pairs(field: PuffField, tables: PuffTables, bn: Tensor, src: Tensor,
-                  disp: Tensor, tab_n: Tensor, row_n: Tensor, x_a: Tensor, s_y: Tensor,
+                  disp: Tensor, tab_n: Tensor, row_n: Tensor, x_a: Tensor, s_x: Tensor,
                   e_lo: Tensor, e_hi: Tensor, cos: Tensor, sin: Tensor, rec_xy: Tensor,
                   receptor_owner: Tensor | None, slug: bool) -> tuple[Tensor, Tensor]:
     """`(n, i)`, detached: the (active puff, receptor) pairs `_evaluate`'s coarse mask
@@ -829,7 +981,8 @@ def _coarse_pairs(field: PuffField, tables: PuffTables, bn: Tensor, src: Tensor,
     (cos, sin)`, across `(-sin, cos)`) and widened by `_COARSE_MARGIN_M`, so they hold every
     pair the exact cut keeps. The receptors are sorted along the wind once; each puff's
     along-wind band is then a run of them (`searchsorted`), and only that run is tested
-    across the wind, in batches of at most `rows_per_chunk(1, 1)` candidates."""
+    across the wind, in batches of at most `rows_per_chunk(1, 1)` candidates. `s_x` is each
+    puff's along-wind spread (`sigma_y(x(a))`, with the shear part under `field.shear`)."""
     n_batch, n_src, cut = cos.shape[0], field.n_sources, field.cutoff_sigma
     c_d, s_d = cos.detach(), sin.detach()
     xy = field.xy.detach()
@@ -852,7 +1005,7 @@ def _coarse_pairs(field: PuffField, tables: PuffTables, bn: Tensor, src: Tensor,
     far = torch.clamp(torch.ceil((x_a + e_hi).detach() / tables.step).long(), 0,
                       n_grid - 1)
     s_y_far = tables._sigma_y_reach[(tab_n * n_b + row_n) * n_grid + far]
-    spread = cut * s_y.detach() if slug else 0.0
+    spread = cut * s_x.detach() if slug else 0.0
     m = _COARSE_MARGIN_M
     lo_a = extent(along_p, "amin", math.inf)[bn, src] + d_along + e_lo.detach() - spread - m
     hi_a = extent(along_p, "amax", -math.inf)[bn, src] + d_along + e_hi.detach() + spread + m
@@ -1062,8 +1215,9 @@ class PuffOptions:
     above-roof releases. `table_kwargs` go to `puff_tables` (the empirical inputs:
     `theta_star`, `temperature`, `tau_y`, `tau_z`, `centre_k`, the floors); a `"centre_c"`
     entry there is the centre of the canopy sources' table (default
-    `plume.PLUME_CENTRE_C_M`). `shear` (wind-shear stretching, design Sect. 4.7) is not
-    available yet and refused by name."""
+    `plume.PLUME_CENTRE_C_M`). `shear=True` turns on the wind-shear stretching of the
+    puffs along the wind (Sykes and Henn, 1995; design Sect. 4.7: `advance(...,
+    shear=True)` and `PuffField(shear=True)`); it needs `along_wind="sigma_y"`."""
 
     h_canopy: float = 20.0
     z0: float = 1.0
@@ -1137,9 +1291,9 @@ class PuffClosure:
         if options.along_wind not in ALONG_WIND:
             raise ValueError(f"PuffOptions: along_wind must be one of {ALONG_WIND}, got "
                              f"{options.along_wind!r}")
-        if options.shear:
-            raise NotImplementedError("PuffOptions: shear=True (wind-shear stretching) is not "
-                                      "available yet; pass shear=False")
+        if options.shear and options.along_wind != "sigma_y":
+            raise ValueError(_SHEAR_NEEDS_SIGMA_Y.format(where="PuffOptions",
+                                                         along_wind=options.along_wind))
         if int(options.capacity) < 1:
             raise ValueError(f"PuffOptions: capacity must be >= 1, got {options.capacity!r}")
         if not 0.0 <= options.drop_below < 1.0:
@@ -1335,7 +1489,7 @@ class PuffClosure:
         if not self._same(self._field_key, theta):
             self.field = PuffField.for_network(
                 self.net, theta_w=met["theta_w"][1], n_releases=self.n_releases,
-                along_wind=o.along_wind, cutoff_sigma=o.cutoff_sigma)
+                along_wind=o.along_wind, cutoff_sigma=o.cutoff_sigma, shear=o.shear)
             self._field_key = self._key(theta)
             rebuilt = True
         return rebuilt
@@ -1476,6 +1630,7 @@ class PuffClosure:
         # the step's own field and tables: a checkpoint recomputes `puff_step` in the
         # backward, after later steps may have rebuilt them
         field, tables, drop_below = self.field, self.tables, self.options.drop_below
+        shear = self.options.shear
 
         def puff_step(puff: PuffState) -> tuple[PuffState, Tensor, Tensor]:
             if emitted is None:
@@ -1486,7 +1641,7 @@ class PuffClosure:
             if drawn is not None:
                 puff = replace(puff, mass_drawn_down=puff.mass_drawn_down + drawn)
             # (2) advance, (3) housekeep, (4) evaluate
-            puff = advance(puff, tables, dt, theta)
+            puff = advance(puff, tables, dt, theta, shear=shear)
             puff = housekeep(field, puff, tables, drop_below=drop_below)
             c = roof_concentration(field, puff, tables, self.receptors, theta, span,
                                    receptor_owner=self.receptor_owner)
