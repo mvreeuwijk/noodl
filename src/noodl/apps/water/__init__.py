@@ -8,6 +8,7 @@ from noodl.apps.water.elements import (
     HW_SI,
     BreakerValve,
     CompositeDarcyWeisbach,
+    EpanetDarcyWeisbach,  # noqa: F401  (alias)
     FlowControlledPipe,
     FlowControlledPump,
     G,
@@ -17,6 +18,7 @@ from noodl.apps.water.elements import (
     PumpCurve,
     TankStorage,
     composite_friction_factor,
+    epanet_friction_factor,  # noqa: F401  (alias)
     three_point_curve,
 )
 from noodl.apps.water.inp import FLOW_UNITS, read_epanet_inp
@@ -41,6 +43,8 @@ from noodl.apps.water.network import (
 from noodl.apps.water.report import link_table, pressure_head, to_kilopascal
 from noodl.apps.water.tanks import Control, TankLevels
 
+# Reference-model aliases (the imports marked `# noqa: F401  (alias)`) are importable from
+# here but kept out of `__all__`: an alias is named in its target's docstring, not catalogued.
 __all__ = [
     "DW_SI", "EPANET_QCF", "FLOW_UNITS", "G", "HW_SI", "BreakerValve", "Control",
     "CompositeDarcyWeisbach", "FlowControlledPipe", "FlowControlledPump",

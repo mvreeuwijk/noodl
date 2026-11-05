@@ -15,6 +15,12 @@ documentation** are complete; the test suite enforces all three.
 - **Names.** Identifiers say what they do physically (`temperature`, `roof_exchange`), not
   which tool they come from. Renames do not keep the old name as an alias while noodl is
   pre-1.0: change every use in `src/`, `tests/`, `benchmarks/`, `scripts/` and `docs/` instead.
+  The one exception is a name of the external reference model a relation comes from (MBL,
+  EPANET, SWMM, SIRANE, MUNICH, Soulhac, ...: `MBLPowerLaw`, `EpanetDarcyWeisbach`,
+  `geometry="swmm"`, `soulhac_shape`): it stays as a secondary name, an alias of the
+  physical one, so the source of each relation stays visible. An alias gets no
+  documentation of its own and stays out of `__all__` (so out of the catalogue); the
+  physical name's docstring states it in one line, e.g. ``Alias: `MBLPowerLaw` (MBL).``
 
 `tests/test_docs_catalogue.py` fails when a public name has no docstring or the catalogue
 is stale; `tests/test_docs_usage.py` fails when a documented example no longer runs or

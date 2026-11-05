@@ -258,6 +258,8 @@ def read_swmm_inp(
     `geometry` defaults to ``"tabulated"``: a network read from a SWMM file is read to reproduce
     SWMM, so its conduits use SWMM 5.2's own tabulated circular section
     (`noodl.apps.sewer.xsect_tables`). Pass ``geometry="analytic"`` for the exact circle.
+
+    Alias: ``geometry="swmm"`` for ``"tabulated"`` (SWMM).
     """
     path = Path(path)
     sections = read_sections(path, leading="TITLE")      # input.c:174: the pass starts in TITLE
