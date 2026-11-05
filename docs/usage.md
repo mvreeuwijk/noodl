@@ -144,8 +144,8 @@ named for the physics it carries:
 | `.requests` (allocation layers) | `"<layer>.requests"` | driver | edge order of the layer's kind |
 
 Every key reports its unit: the layer's own for state and boundary values, and the
-application's `flow_unit`, `source_unit` and `capacity_unit` for flows, sources and
-capacity, so `describe()` shows `thermal.sources` in W and `air.q` in kg/s.
+application's `flow_unit`, `source_unit`, `capacity_unit` and `conductance_unit` for flows,
+sources, capacity and conductances, so `describe()` shows `thermal.sources` in W and `air.q` in kg/s.
 `"<layer>.removal"` is a per-step first-order removal rate (1/s, active interior order,
 `(n_i, K)`), replacing the layer's construction-time `removal`; it is written by a closure
 that owns sinks. It matters for species layers, where it removes a species from the air (a

@@ -313,11 +313,3 @@ def power_law_coefficient(
         kind=kind,
         learnable=learnable,
     )
-
-# Pre-rename names, kept as aliases so existing code keeps working.
-MBLPowerLaw = RegularizedPowerLaw  # alias, the pre-rename name
-mbl_orifice = regularized_orifice  # alias, the pre-rename name
-mbl_ela = effective_leakage_area  # alias, the pre-rename name
-mbl_point = power_law_from_point  # alias, the pre-rename name
-mbl_points = power_law_from_points  # alias, the pre-rename name
-mbl_coefficient = power_law_coefficient  # alias, the pre-rename name

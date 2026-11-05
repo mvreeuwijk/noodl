@@ -37,8 +37,8 @@ def test_batched_counterexample_raises_naming_instance_1_not_empty_list():
     # a genuinely singular instance. spd_certificate is per-instance and must catch this.
     #
     # Naming instance 1 is not on its own enough to distinguish the fix from the defect:
-    # before the fix the call DID raise here, but only downstream, from
-    # solvers.linear.solve's own singular-system retry ("singular system at batch indices
+    # before the fix the call DID raise here, but only downstream, from the dense solve's
+    # own singular-system retry ("singular system at batch indices
     # [1]") -- after a dense (n_I, n_I) Jacobian had been assembled and factorised, with no
     # statement of WHY instance 1 is singular and no check at all on any path that does not
     # end in a dense factorisation. The assertions below therefore pin the message to the

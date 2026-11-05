@@ -2,9 +2,9 @@
 
 `build(netlist, doc)` returns `(model, state, drivers, names)`: a `Model` with a
 `KirchhoffLayer` named `"electrical"` (real, or phasor for a model with MBL AC parts) and,
-when a device has a heat port, a second one named `"thermal"` coupled to it (below), the
-start state, the drivers on the step grid and a `CircuitNames` that maps the document's
-compared columns to noodl quantities.
+when a device has a heat port, a heat layer named `"thermal"` (a `TransportLayer`) coupled to
+it (below), the start state, the drivers on the step grid and a `CircuitNames` that maps the
+document's compared columns to noodl quantities.
 
 Network and laws
 ----------------
@@ -51,23 +51,35 @@ kinds come in the order `voltage_source`, `resistor`, `diode`, `capacitor`, `ind
 
 Heat ports
 ----------
-A model in which a resistor or diode has an enabled heat port gets a thermal layer
-`"thermal"` on the thermal nodes (`quantity="temperature"`, K; flows in W): temperature is
-the potential against `"thermal.reference"`, a boundary at 0 K, and the fixed temperatures
-(`HeatTransfer.Sources.FixedTemperature`, `Celsius.FixedTemperature`) are boundary nodes
-too, `"thermal.phi_boundary"` holding `[0, fixed temperatures in K...]` in that order. Edge
-kinds, in the layer's flow order: `conductor` (`ThermalConductor`: `Conductance(G)`,
-`port_a -> port_b`), `heat_source` (one per heated device, in device order:
-`PrescribedCurrent(1, Signal("thermal.heat", k))`, `thermal.reference -> heat port`) and
-`heat_capacitor` (`HeatCapacitor`: `Capacitance(C, v0=T0)`, `port -> thermal.reference`,
-`T0` the recorded start temperature). The `JouleHeating` closure writes each heated device's
-`LossPower = v i` into `"thermal.heat"` and its heat-port temperature into its slot of
-`"electrical.resistor.T"` / `"electrical.diode.T"` (devices without a heat port keep their
-parameter `T`); the layers are coupled by `coupling="iterate"` with Anderson mixing, to
-`1e-10` V and K on the potentials and `1e-10` A, `1e-8` W on the flows. The thermal start
-state: the boundaries at their temperatures, each heat capacitor's node at its `T0`, every
-other thermal node at the mean of those temperatures (0 K excluded); the heat drivers start
-at zero and the temperature drivers at the start temperatures of the heat ports.
+A model in which a resistor or diode has an enabled heat port gets a heat layer `"thermal"`,
+a conduction-only `TransportLayer` (`flow_kind=()`, `quantity="temperature"`, K; sources in
+W, capacity in J/K) on the thermal nodes. Each `ThermalConductor` is a conduction edge of
+kind `conductor` (`port_a -> port_b`, conductance `G`); each `HeatCapacitor` adds its `C` to
+the capacity of its node (`T0`, the recorded start temperature, is that node's start value);
+the fixed temperatures (`HeatTransfer.Sources.FixedTemperature`,
+`Celsius.FixedTemperature`) are the boundary nodes, `"thermal.x_boundary"` holding their
+temperatures in K in thermal-node order. A thermal node with no heat capacitor (a heat port
+between conductors) holds no heat: it is `storage_free`, and the layer folds it into its
+neighbours, so its temperature is the algebraic balance of its heat. There is no reference
+node: temperatures are absolute. A thermal node that is not a fixed temperature and that no
+conductor reaches (a heat capacitor directly on a heat port with nothing else) is refused.
+
+The `JouleHeating` closure writes each heated device's `LossPower = v i` into the layer's
+sources `"thermal.sources"` (W, full node order) and its heat-port temperature into its slot
+of `"electrical.resistor.T"` / `"electrical.diode.T"` (devices without a heat port keep their
+parameter `T`); the layers are coupled by `coupling="iterate"` with Anderson mixing on the
+circuit, to `1e-10` V and K on the potentials and temperatures and `1e-10` A on the circuit's
+flows. The heat layer is re-solved from the step start on every pass, so its temperatures are
+a function of the circuit's state alone, and the Anderson mixing mixes them with the
+circuit's potentials and currents and judges their fixed-point residual too (a relaxed heat
+state would carry a memory of earlier passes into the map the mixing sees, and the iteration
+would stop with the device temperatures up to 1e-6 K away from the heat layer's). The
+closure carries the sources as state, so a trapezoidal step integrates the heat as
+`dt/2 (P_start + P_end)`, as the circuit's companion forms integrate their currents; the
+runner steps the heat layer with the circuit's rule (`run.simulate_circuit`). The thermal
+start state: each heat capacitor's node at its `T0`, every other interior node at the mean of
+the fixed and the heat capacitors' temperatures; the sources start at zero and the
+temperature drivers at the start temperatures of the heat ports.
 
 Sources, signal inputs and the step grid
 ----------------------------------------
@@ -126,7 +138,6 @@ from noodl.apps.electrical.laws import (
     Inductance,
     JunctionDiode,
     MutualInductance,
-    PrescribedCurrent,
     PrescribedVoltage,
     Resistance,
     TransformerRatio,
@@ -137,8 +148,8 @@ from noodl.apps.electrical.modelica.schema import FLAG_DEFAULTS, CircuitDoc, Sig
 from noodl.apps.electrical.thermal import HeatedEdge, JouleHeating
 from noodl.apps.electrical.waveforms import Constant
 from noodl.apps.electrical.waveforms import Signal as SignalWaveform
-from noodl.elements import Conductance
 from noodl.layers.kirchhoff import KirchhoffLayer
+from noodl.layers.transport import TransportLayer
 from noodl.model import Model
 from noodl.modelica import signals, timeline
 from noodl.modelica.inputs import EVALUATION_ERRORS, SignalResolver, evaluation_problem
@@ -161,12 +172,11 @@ RESISTOR_SCALE = "electrical.resistor.scale"
 DIODE_T = "electrical.diode.T"
 LOAD_SCALE = "electrical.load.scale"
 THERMAL = "thermal"
-HEAT_KEY = "thermal.heat"
-_THERMAL_KINDS = ("conductor", "heat_source", "heat_capacitor")
+CONDUCTOR = "conductor"
 _THERMAL_ROLES = ("thermal_conductor", "heat_capacitor", "fixed_temperature")
-# The coupled iteration's tolerances: potentials in V and K, flows in A and W.
+# The coupled iteration's tolerances: potentials in V, temperatures in K, flows in A.
 _ITERATE_TOL = {LAYER: 1e-10, THERMAL: 1e-10}
-_ITERATE_FLOW_TOL = {LAYER: 1e-10, THERMAL: 1e-8}
+_ITERATE_FLOW_TOL = {LAYER: 1e-10}
 _ITERATE_MAX = 100
 _KINDS = ("voltage_source", "resistor", "diode", "capacitor", "inductor", "transformer",
           "ideal_transformer", "impedance", "load", "impedance_transformer",
@@ -197,12 +207,14 @@ _TERMINAL = re.compile(r"^(?P<inst>[^.]+)\.(?P<term>terminal(?:_n|_p)?)\."
 # ------------------------------------------------------------------------------ names
 @dataclass(frozen=True)
 class Column:
-    """A compared value: `part(sum(c * history[key][..., i] for i, c in terms))`, with `part`
-    `"real"` or `"imag"` (of a phasor; the real part of a real value is itself)."""
+    """A compared value: `part(offset + sum(c * history[key][..., i] for i, c in terms))`,
+    with `part` `"real"` or `"imag"` (of a phasor; the real part of a real value is itself).
+    `offset` is a constant part: a fixed temperature, which no state holds."""
 
     key: str
     terms: tuple[tuple[int, float], ...]
     part: str = "real"
+    offset: float = 0.0
 
 
 @dataclass(frozen=True, eq=False)
@@ -211,9 +223,11 @@ class CircuitNames:
 
     `times` is the output grid (s), `grid` the step grid; `restarts` holds the indices `k`
     whose step `grid[k] -> grid[k+1]` is backward Euler (0 and every signal jump). `dynamic`
-    is true when a law stores state (a capacitor, an inductor), `phasor` for a phasor model.
-    `nodes` / `thermal_nodes` map a node name to its position in the layers' `phi` (the
-    network's node order); `devices` maps a device to `(kind, positions of its edges in the
+    is true when something stores state (a capacitor, an inductor, a heat capacitor),
+    `phasor` for a phasor model. `nodes` maps an electrical node name to its position in
+    `"electrical.phi"` (the network's node order), `thermal_nodes` a thermal node name to its
+    position in the heat layer's state `"thermal.x"` (fixed temperatures, which are boundary
+    nodes, are not in it); `devices` maps a device to `(kind, positions of its edges in the
     layer's q)` (the kind of its first edge: a `TwoPortRCLine` with `use_C` lists its two
     `impedance` edges, then its `capacitor` edge); `sources` maps a voltage source to its
     position among the sources, the column of `"series:electrical.voltage_source.value"` in
@@ -239,7 +253,8 @@ class CircuitNames:
             raise KeyError(f"no compared column {column!r}")
         col = self.columns[column]
         x = history[col.key]
-        total = sum((c * x[..., i] for i, c in col.terms), torch.zeros_like(x[..., 0]))
+        total = sum((c * x[..., i] for i, c in col.terms),
+                    torch.full_like(x[..., 0], col.offset))
         if total.is_complex():
             return total.imag if col.part == "imag" else total.real
         return torch.zeros_like(total) if col.part == "imag" else total
@@ -684,10 +699,13 @@ class _Builder:
             out.setdefault(e.device, (kind, []))[1].append(index[id(e)])
         return {name: (kind, tuple(edges)) for name, (kind, edges) in out.items()}
 
-    def column(self, name: str, devices: dict[str, Device], positions, thermal_offset: int
-               ) -> Column | None:
+    def column(self, name: str, devices: dict[str, Device], positions,
+               temperatures: dict[int, int | float]) -> Column | None:
+        """The `Column` of compared variable `name`, or `None` when it maps to nothing.
+        `temperatures` maps a thermal node to its position in `"thermal.x"` (an `int`) or
+        to its fixed temperature (a `float`)."""
         nl = self.nl
-        q, phi, thermal = f"{LAYER}.q", f"{LAYER}.phi", "thermal.phi"
+        q, phi = f"{LAYER}.q", f"{LAYER}.phi"
         match = _TERMINAL.match(name)
         if match:
             inst, term, var, k = match["inst"], match["term"], match["var"], int(match["k"])
@@ -726,10 +744,20 @@ class _Builder:
         if var == "Vc" and d.role == "dc_rc_line":
             return Column(phi, ((d.nodes["mid"], 1.0), (d.nodes["c2"], -1.0)))
         if var == "T_heatPort" and d.heat_node is not None:
-            return Column(thermal, ((thermal_offset + d.heat_node, 1.0),))
+            return _temperature_column(temperatures.get(d.heat_node))
         if var == "T" and d.role == "heat_capacitor":
-            return Column(thermal, ((thermal_offset + d.nodes["port"], 1.0),))
+            return _temperature_column(temperatures.get(d.nodes["port"]))
         return None
+
+
+def _temperature_column(at: int | float | None) -> Column | None:
+    """A thermal node's temperature column: its entry of `"thermal.x"`, or a constant at a
+    fixed temperature."""
+    if at is None:
+        return None
+    if isinstance(at, int):
+        return Column(f"{THERMAL}.x", ((at, 1.0),))
+    return Column(f"{THERMAL}.x", (), offset=at)
 
 
 # Terminal -> (edge of the device, sign of its flow) for MBL terminal currents: a terminal's
@@ -758,61 +786,82 @@ def _terminal_current(d: Device, term: str) -> tuple[int, float] | None:
 
 
 # ------------------------------------------------------------------------------ thermal
-def _thermal_edges(netlist: Netlist, heated: list[Device], problems: list[str]
-                   ) -> dict[str, list[tuple[int, int, dict]]]:
-    """The thermal network's edges per kind, `(u, v, values)` on thermal node numbers."""
-    edges: dict[str, list[tuple[int, int, dict]]] = {k: [] for k in _THERMAL_KINDS}
+@dataclass(frozen=True)
+class _HeatNetwork:
+    """The thermal network read from the netlist, on thermal node numbers: the conductors
+    `(port_a, port_b, G)`, the heat capacitors' total capacity and start temperature per
+    node, the fixed temperatures, and `interior`, the thermal nodes the heat layer solves
+    for, in thermal-node order (its state order)."""
+
+    conductors: tuple[tuple[int, int, float], ...]
+    capacity: dict[int, float]
+    start: dict[int, float]
+    fixed: dict[int, float]
+    interior: tuple[int, ...]
+
+    def temperatures(self) -> dict[int, int | float]:
+        """Thermal node -> position in `"thermal.x"`, or its fixed temperature."""
+        out: dict[int, int | float] = {k: float(t) for k, t in self.fixed.items()}
+        out.update({k: i for i, k in enumerate(self.interior)})
+        return out
+
+
+def _heat_network(netlist: Netlist, problems: list[str]) -> _HeatNetwork:
+    """The netlist's thermal network (`_HeatNetwork`); a thermal node no conductor reaches
+    and no fixed temperature holds is a problem, named."""
+    conductors, capacity, start = [], {}, {}
     for d in netlist.devices:
         if d.role == "thermal_conductor":
-            edges["conductor"].append((d.nodes["port_a"], d.nodes["port_b"],
-                                       {"G": _number(d, "G", problems)}))
+            conductors.append((d.nodes["port_a"], d.nodes["port_b"], _number(d, "G", problems)))
         elif d.role == "heat_capacitor":
-            edges["heat_capacitor"].append((d.nodes["port"], 0,
-                                            {"C": _number(d, "C", problems),
-                                             "T0": _initial(d, "T", problems)}))
-    for d in heated:
-        edges["heat_source"].append((0, d.heat_node, {}))
-    return edges
+            port = d.nodes["port"]
+            capacity[port] = capacity.get(port, 0.0) + _number(d, "C", problems)
+            start.setdefault(port, _initial(d, "T", problems))
+    fixed = dict(netlist.fixed_temperatures)
+    reached = {k for u, v, _ in conductors for k in (u, v)}
+    unreached = [netlist.thermal_names[k] for k in range(len(netlist.thermal_names))
+                 if k not in reached and k not in fixed]
+    if unreached:
+        problems.append(f"the thermal nodes {', '.join(unreached)} are reached by no "
+                        f"ThermalConductor and hold no fixed temperature; noodl's heat layer "
+                        f"conducts heat only along conductors (put a ThermalConductor between "
+                        f"the heat port and its heat capacitor)")
+    interior = tuple(k for k in range(len(netlist.thermal_names))
+                     if k in reached and k not in fixed)
+    return _HeatNetwork(tuple(conductors), capacity, start, fixed, interior)
 
 
-def _thermal(b: _Builder, net: Network, heated: list[Device], edges: dict, n_e: int,
+def _thermal(b: _Builder, net: Network, heated: list[Device], heat: _HeatNetwork, n_e: int,
              names: list[str], drivers: Drivers, positions: dict
-             ) -> tuple[KirchhoffLayer, JouleHeating, State]:
-    """The thermal layer, the coupling closure and the thermal start state; writes the
-    thermal drivers (boundary temperatures, heat, heat-port temperatures) into `drivers`."""
-    nl = b.nl
-    laws = []
-    for kind in _THERMAL_KINDS:
-        found = edges[kind]
-        if not found:
-            continue
-        if kind == "conductor":
-            laws.append(Conductance(torch.tensor([v["G"] for *_, v in found], dtype=F64),
-                                    kind=kind))
-        elif kind == "heat_source":
-            laws.append(PrescribedCurrent(torch.ones(len(found), dtype=F64), kind=kind,
-                                          waveforms=[SignalWaveform(HEAT_KEY, k)
-                                                     for k in range(len(found))]))
-        else:
-            laws.append(Capacitance(torch.tensor([v["C"] for *_, v in found], dtype=F64),
-                                    v0=torch.tensor([v["T0"] for *_, v in found], dtype=F64),
-                                    kind=kind))
-    fixed = list(nl.fixed_temperatures.items())
-    boundary = [names[n_e]] + [names[n_e + node] for node, _ in fixed]
-    layer = KirchhoffLayer(net, THERMAL, laws, boundary=boundary,
-                           quantity="temperature", unit="K", flow_unit="W")
+             ) -> tuple[TransportLayer, JouleHeating, State]:
+    """The heat layer, the coupling closure and the thermal start state; writes the thermal
+    drivers (fixed temperatures, heat-port temperatures) into `drivers`."""
+    fixed = sorted(heat.fixed)
+    capacity = [heat.capacity.get(k, 0.0) for k in heat.interior]
+    layer = TransportLayer(
+        net, THERMAL, flow_kind=(), boundary=[names[n_e + k] for k in fixed],
+        capacity=torch.tensor(capacity, dtype=F64),
+        conduction_kind=CONDUCTOR,
+        conductance=torch.tensor([g for *_, g in heat.conductors], dtype=F64),
+        storage_free=[names[n_e + k] for k, c in zip(heat.interior, capacity, strict=True)
+                      if c == 0.0],
+        scheme="trapezoidal", quantity="temperature", unit="K", source_unit="W",
+        capacity_unit="J/K", conductance_unit="W/K", linear_solver="direct")
+    if layer.interior_idx.tolist() != [n_e + k for k in heat.interior]:
+        raise RuntimeError(
+            f"read_modelica_circuit: the heat layer's interior nodes "
+            f"{[names[i] for i in layer.interior_idx.tolist()]} are not the thermal network's "
+            f"solved nodes {[names[n_e + k] for k in heat.interior]} (an internal "
+            f"inconsistency of the reader; please report it)")
 
-    # start temperatures: boundaries, heat capacitors, the mean of those elsewhere
-    known = dict(fixed)
-    for u, _, v in edges["heat_capacitor"]:
-        known.setdefault(u, v["T0"])
+    # start temperatures: heat capacitors, the mean of those and the fixed ones elsewhere
+    known = {**heat.start, **heat.fixed}
     mean = (sum(known.values()) / len(known) if known
             else sum(float(d.parameters.get("T", 0.0)) for d in heated) / len(heated))
-    phi = torch.zeros(len(names), dtype=F64)
-    for k in range(1, len(nl.thermal_names)):
-        phi[n_e + k] = known.get(k, mean)
-    drivers[f"{THERMAL}.phi_boundary"] = torch.tensor([0.0] + [t for _, t in fixed], dtype=F64)
-    drivers[HEAT_KEY] = torch.zeros(len(heated), dtype=F64)
+    x = torch.tensor([heat.start.get(k, mean) for k in heat.interior], dtype=F64)
+    drivers[f"{THERMAL}.x_boundary"] = torch.tensor([heat.fixed[k] for k in fixed], dtype=F64)
+    at = {**{k: float(heat.fixed[k]) for k in fixed},
+          **{k: float(x[i]) for i, k in enumerate(heat.interior)}}
 
     keys = {"resistor": RESISTOR_T, "diode": DIODE_T}
     base = {key: drivers[key].clone() for key in keys.values() if key in drivers}
@@ -822,14 +871,12 @@ def _thermal(b: _Builder, net: Network, heated: list[Device], edges: dict, n_e: 
         edge_list.append(HeatedEdge(edge=positions[d.name][1][0], p=d.nodes["p"],
                                     n=d.nodes["n"], heat_node=n_e + d.heat_node,
                                     temperature_key=keys[d.role], slot=slot))
-    closure = JouleHeating(edge_list, electrical=LAYER, thermal=THERMAL, heat_key=HEAT_KEY,
-                           base_temperatures=base)
-    for h in edge_list:         # the temperature drivers at the heat ports' start values
+    closure = JouleHeating(edge_list, layer, electrical=LAYER, base_temperatures=base)
+    for d, h in zip(heated, edge_list, strict=True):   # the heat ports' start temperatures
         values = drivers[h.temperature_key].clone()
-        values[h.slot] = phi[h.heat_node]
+        values[h.slot] = at[d.heat_node]
         drivers[h.temperature_key] = values
-    state = {f"{THERMAL}.phi": phi,
-             f"{THERMAL}.q": torch.zeros(sum(len(e) for e in edges.values()), dtype=F64)}
+    state = {f"{THERMAL}.x": x, closure.sources_key: torch.zeros(len(names), dtype=F64)}
     return layer, closure, state
 
 
@@ -846,17 +893,18 @@ def build(netlist: Netlist, doc: CircuitDoc, *, substeps: int = 1
     n_e = len(netlist.node_names)
     positions = b.positions()
     by_name = {d.name: d for d in netlist.devices}
+    heated = [d for d in netlist.devices if d.heat_node is not None]
+    heat = _heat_network(netlist, b.problems)
+    temperatures = heat.temperatures()
     columns: dict[str, Column] = {}
     for column in doc.compared:
         if column.partition(".")[0] in netlist.omitted:
             continue        # an omitted component's column
-        found = b.column(column, by_name, positions, n_e)
+        found = b.column(column, by_name, positions, temperatures)
         if found is None:
             b.problems.append(f"compared column {column!r} maps to no noodl quantity")
         else:
             columns[column] = found
-    heated = [d for d in netlist.devices if d.heat_node is not None]
-    thermal_edges = _thermal_edges(netlist, heated, b.problems)
     if not heated and any(d.role in _THERMAL_ROLES for d in netlist.devices):
         b.problems.append("the thermal components heat no circuit device (no resistor or "
                           "diode has an enabled heat port): a thermal network alone is not "
@@ -871,9 +919,8 @@ def build(netlist: Netlist, doc: CircuitDoc, *, substeps: int = 1
         for e in b.edges[kind]:
             net.add_edge(names[e.u], names[e.v], kind=kind)
     if heated:
-        for kind in _THERMAL_KINDS:
-            for u, v, _ in thermal_edges[kind]:
-                net.add_edge(names[n_e + u], names[n_e + v], kind=kind)
+        for u, v, _ in heat.conductors:
+            net.add_edge(names[n_e + u], names[n_e + v], kind=CONDUCTOR)
 
     dtype = C128 if netlist.phasor else F64
     drivers: Drivers = {f"{LAYER}.phi_boundary": torch.zeros(1, dtype=dtype)}
@@ -885,9 +932,9 @@ def build(netlist: Netlist, doc: CircuitDoc, *, substeps: int = 1
         drivers[layer.frequency_key] = torch.tensor(netlist.frequency, dtype=F64)
     dynamic = layer.dynamic
     if heated:
-        thermal, closure, thermal_state = _thermal(b, net, heated, thermal_edges, n_e, names,
+        thermal, closure, thermal_state = _thermal(b, net, heated, heat, n_e, names,
                                                    drivers, positions)
-        dynamic = dynamic or thermal.dynamic
+        dynamic = dynamic or bool(heat.capacity.keys() - heat.fixed.keys())
         model = Model(net, [layer, thermal], closures=[closure], coupling="iterate",
                       iterate_tol=_ITERATE_TOL, iterate_flow_tol=_ITERATE_FLOW_TOL,
                       iterate_acceleration="anderson", iterate_max=_ITERATE_MAX)
@@ -903,6 +950,6 @@ def build(netlist: Netlist, doc: CircuitDoc, *, substeps: int = 1
         model=doc.model, times=b.times, grid=b.grid, restarts=b.restarts, dynamic=dynamic,
         phasor=netlist.phasor,
         nodes={name: k for k, name in enumerate(netlist.node_names)},
-        thermal_nodes={name: n_e + k for k, name in enumerate(netlist.thermal_names)},
+        thermal_nodes={netlist.thermal_names[k]: i for i, k in enumerate(heat.interior)},
         devices=positions, sources=sources, columns=columns)
     return model, state, drivers, circuit_names

@@ -810,10 +810,3 @@ class DoorPortStream(ConstitutiveLaw):
         """Tangent at ``dp = 0`` on a one-edge zero."""
         zero = torch.zeros(1, dtype=self._dtype())
         return self.flow(zero, drivers), self.dflow(zero, drivers)
-
-# Pre-rename names, kept as aliases so existing code keeps working.
-MBLDoorCompartment = DoorCompartment  # alias, the pre-rename name
-MBLDoorCompartmentOperable = OperableDoorCompartment  # alias, the pre-rename name
-MBLDoorPortStream = DoorPortStream  # alias, the pre-rename name
-mbl_discretized_door = discretized_door  # alias, the pre-rename name
-mbl_discretized_operable_door = discretized_operable_door  # alias, the pre-rename name

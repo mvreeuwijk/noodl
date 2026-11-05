@@ -524,9 +524,3 @@ def operable_door_pair(
         OperableDoor(direction="ab", kind=f"{kind}_ab", **kwargs),
         OperableDoor(direction="ba", kind=f"{kind}_ba", **kwargs),
     )
-
-# Pre-rename names, kept as aliases so existing code keeps working.
-MBLDoorOpen = OpenDoor  # alias, the pre-rename name
-MBLDoorOperable = OperableDoor  # alias, the pre-rename name
-mbl_door_pair = open_door_pair  # alias, the pre-rename name
-mbl_operable_door_pair = operable_door_pair  # alias, the pre-rename name

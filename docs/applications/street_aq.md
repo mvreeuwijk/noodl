@@ -258,26 +258,6 @@ The earlier keywords (`exchange=`, `routing=`, `roof_wind_form=`, `closure=`, an
 `"schulte"`, `"mixing"`, `"munich"`, ...) are no longer accepted: use the option names and
 values of the sections above.
 
-The earlier, model-named functions and constants are kept as aliases of the same objects,
-without a warning:
-
-| Earlier | Current |
-|---|---|
-| `soulhac_shape`, `soulhac_residual` | `bessel_shape_parameter`, `bessel_shape_residual` |
-| `macdonald_profile` | `canopy_displacement_roughness` |
-| `sigma_theta_munich`, `n_theta_munich` | `sigma_theta_turbulence_intensity`, `n_theta_rectangle_rule` |
-| `sirane_direction_samples` | `exact_gaussian_direction_samples` |
-| `munich_idealised` | `twelve_street_grid` |
-| `SIRANE_EXCHANGE`, `SCHULTE_BETA` | `EXCHANGE_SIGMA_W_RATIO`, `ASPECT_RATIO_EXCHANGE_BETA` |
-| `KAPPA_MUNICH` | `KAPPA_041` (and `KAPPA` is `KAPPA_040`) |
-| `GAMMA_E` | `EULER_GAMMA_TRUNCATED` (0.577, deliberately truncated) |
-| `MAX_SIGMA_THETA_SIRANE`, `SIRANE_WINDOW` | `MAX_SIGMA_THETA_EXACT`, `EXACT_GAUSSIAN_WINDOW` |
-| `SEUIL_GAUSS` | `GAUSS_CUTOFF_SIGMAS` |
-| `SIRANE_K3_PREFACTOR`, `SIRANE_K3_ACTIVATION` | `K_NO_O3_SOULHAC2011_PREFACTOR`, `K_NO_O3_SOULHAC2011_ACTIVATION` |
-| `SIRANE_K_FLOOR_PPB` | `PHOTOSTATIONARY_FLOOR_PPB` |
-| `k_no_o3_munich`, `k_no_o3_sirane` | `k_no_o3_jpl2003`, `k_no_o3_soulhac2011` |
-| `j_no2_sirane` | `j_no2_elevation_cloud` |
-
 ### The canyon physics
 
 `noodl.apps.street_aq.canyon` exposes the pieces directly:
@@ -345,10 +325,10 @@ angle you want.
 
 The rate $k$ of NO + O3 is evaluated at the driver `temperature` (K), which is now **required**:
 with no constant override, a missing `temperature` driver raises by name rather than assuming a
-value. The core `Photostationary` reaction (`noodl.layers.reaction`) defaults to the JPL rate
+value. The `Photostationary` reaction (`noodl.apps.street_aq`) defaults to the JPL rate
 `k_no_o3_jpl2003(T) = 3.0\times10^{-12}\exp(-1500/T)` cm³ molecule⁻¹ s⁻¹ (NASA/JPL 2003, as in
 MUNICH); to use a constant 298 K rate instead of evaluating it at the air temperature, pass
-the constant override `k_no_o3=K_NO_O3` (`noodl.layers.reaction.K_NO_O3`, the 298 K value in
+the constant override `k_no_o3=K_NO_O3` (`noodl.apps.street_aq.K_NO_O3`, the 298 K value in
 m³ kg⁻¹ s⁻¹ for the kg/m³ state); with that override `temperature` is not read.
 
 ### The SIRANE preset

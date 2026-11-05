@@ -16,12 +16,13 @@ from benchmarks.measure import saved_tensor_bytes
 from noodl.layers import transport as transport_module
 from noodl.layers.transport import (
     TransportLayer,
-    _AffineSystemOperator,
     _expm_action,
     _linear_solve,
     _van_loan_step_dense,
 )
 from noodl.operators.base import SolveResult, SolverStatus
+from noodl.operators.shifted import ShiftedOperator
+from noodl.solvers import select as select_module
 from noodl.solvers.select import solve as _solve_operator
 from noodl.topology import Network
 
@@ -1203,7 +1204,7 @@ def test_gmres_resolves_bit_identical_to_the_bare_select_solve_auto():
     """Regression proof for the EXPLICIT `linear_solver="gmres"` option (`"auto"` differs --
     see the two tests below): builds the exact same affine system `TransportLayer.step` does and
     solves it directly with `solvers.select.solve(method="auto", ...)` and no other kwargs -- this
-    operator never certifies SPD (`_AffineSystemOperator.spd_certificate()` is `None`), so
+    operator never certifies SPD (`ShiftedOperator.spd_certificate()` is `None`), so
     `select.solve`'s OWN "auto" (a separate policy) always routes it
     to plain gmres too, making this comparison bit-identical either way -- then compares
     against `step()`'s own result under `linear_solver="gmres"`.
@@ -1229,7 +1230,7 @@ def test_gmres_resolves_bit_identical_to_the_bare_select_solve_auto():
     b0 = op.boundary_forcing(xb_s) + src_s / cap_s
     x0_s, _ = layer._to_stacked(c0.to(torch.float64), layer.n_i, "x")
     rhs = x0_s + dt * b0
-    system = _AffineSystemOperator(op, dt)
+    system = ShiftedOperator.implicit_step(op, dt)
     x_old = _solve_operator(system, rhs, method="auto", where="regression probe").x
 
     assert torch.equal(x_new, x_old)
@@ -1248,7 +1249,7 @@ def test_auto_resolves_to_sparse_direct_at_or_under_the_batch_cap():
     assert layer._resolve_solver(1) == {
         "method": "sparse_direct", "preconditioner": None, "restart": 30,
     }
-    assert layer._resolve_solver(transport_module._SPARSE_DIRECT_MAX_BATCH) == {
+    assert layer._resolve_solver(select_module._SPARSE_DIRECT_MAX_BATCH) == {
         "method": "sparse_direct", "preconditioner": None, "restart": 30,
     }
 
@@ -1264,7 +1265,7 @@ def test_auto_resolves_to_gmres_above_the_batch_cap():
     layer = TransportLayer(
         net, "co2", capacity=torch.tensor([1000.0]), flow_kind="airpath", boundary=["ambient"],
     )
-    assert layer._resolve_solver(transport_module._SPARSE_DIRECT_MAX_BATCH + 1) == {
+    assert layer._resolve_solver(select_module._SPARSE_DIRECT_MAX_BATCH + 1) == {
         "method": "gmres", "preconditioner": None, "restart": 30,
     }
 
@@ -1412,7 +1413,7 @@ def test_auto_falls_back_to_gmres_and_warns_once_when_scipy_is_not_importable(mo
     """
     import builtins
 
-    monkeypatch.setattr(transport_module, "_WARNED_AUTO_NEEDS_SCIPY", False)
+    monkeypatch.setattr(select_module, "_WARNED_AUTO_NEEDS_SCIPY", False)
     real_import = builtins.__import__
 
     def no_scipy(name, *args, **kwargs):

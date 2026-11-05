@@ -46,7 +46,7 @@ import torch
 
 from noodl.apps.street_aq import build_model, drivers_at, plume, read_case, read_results
 from noodl.apps.street_aq.above_roof import roof_fluxes, roof_wiring
-from noodl.apps.street_aq.canyon import SIRANE_EXCHANGE, exchange_velocity
+from noodl.apps.street_aq.canyon import EXCHANGE_SIGMA_W_RATIO, exchange_velocity
 from noodl.apps.street_aq.network import Street, StreetNetwork
 from noodl.apps.street_aq.routing import StreetFlows
 
@@ -124,7 +124,7 @@ def test_the_exchange_velocity_of_every_street_and_hour_is_sirane_own(record_pro
     record_property("check", "Roof exchange velocity u_d vs SIRANE, 46 streets x 2 hours")
     record_property("tolerance", "abs 0.005 m/s (SIRANE prints u_d to 0.01)")
     record_property("measured_abs_max", worst)
-    record_property("constant", SIRANE_EXCHANGE)
+    record_property("constant", EXCHANGE_SIGMA_W_RATIO)
 
 
 def test_the_sigma_w_floor_is_the_exchange_velocity_floor_on_the_case():
@@ -132,7 +132,7 @@ def test_the_sigma_w_floor_is_the_exchange_velocity_floor_on_the_case():
     same floor applied to the exchange velocity, `u_d_min = 0.30 / (sqrt(2) pi)`: `u_d`
     is linear in sigma_w, and the floor binds on every street of this run."""
     floored, state = _model(sigma_w_min=SIGMA_W_FLOOR)
-    on_u_d, _ = _model(sigma_w_min=0.0, u_d_min=SIGMA_W_FLOOR * SIRANE_EXCHANGE)
+    on_u_d, _ = _model(sigma_w_min=0.0, u_d_min=SIGMA_W_FLOOR * EXCHANGE_SIGMA_W_RATIO)
     bare, _ = _model()
     for k in range(len(_results().times)):
         drivers = _drivers(floored, k)

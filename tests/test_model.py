@@ -13,11 +13,11 @@ from noodl.drives import ConstantDrive
 from noodl.elements import PowerLaw
 from noodl.elements.base import ConstitutiveLaw
 from noodl.layers.kirchhoff import KirchhoffLayer
-from noodl.layers.reaction import FirstOrderDecay
 from noodl.layers.transport import TransportLayer
 from noodl.model import Model, Ports, StepContext
 from noodl.nodesources import NodeSource
 from noodl.topology import Network
+from tests._reactions import FirstOrderDecay
 
 F64 = torch.float64
 
@@ -1741,6 +1741,67 @@ def test_anderson_keeps_the_fixed_point_the_relaxed_iteration_is_attracted_to():
                    "toy.sources": torch.tensor([1.0, 0.0], dtype=F64)}
         out = model.steady(state, drivers, atol=1e-14, rtol=1e-14)
         assert abs(out["toy.phi"][0].item() - root) < 1e-10, acceleration
+
+
+class _TwoSpeciesHeat:
+    """Closure on a two-species conduction-only layer "heat" (node "h" tied to the fixed
+    "amb" at 0 through G = 1): the source at "h" is `a + b tanh(x)` per species, with the
+    toy Kirchhoff layer's upstream potential in `a`. The fixed point solves
+    `x = a + b tanh(x)` column by column; the relaxed iteration converges slowly on both
+    (the first oscillates, the second barely contracts)."""
+
+    A, B = (1.0, -2.0), (-0.9, 0.95)
+
+    def __call__(self, state, drivers):
+        x = state["heat.x"]                                    # (1, 2): node h, two species
+        a = torch.tensor(self.A, dtype=F64) * (1.0 + 0.1 * state["toy.phi"][..., :1])
+        s = a + torch.tensor(self.B, dtype=F64) * torch.tanh(x)
+        zero = torch.zeros_like(s)
+        return {"heat.sources": torch.cat((zero, zero, zero, s, zero), -2)}   # a b c h amb
+
+
+def test_anderson_mixes_a_conduction_only_layer_with_several_species():
+    """A conduction-only transport layer with two species is Anderson-mixed like a one-species
+    one (its `(n_i, K)` state flattened for the mixing): it lands on the relaxed iteration's
+    fixed point, keeps its layout, and needs well under half the passes (relaxing the heat
+    layer while mixing only the Kirchhoff one takes more passes than plain relaxation)."""
+    net = Network(dtype=F64)
+    for n in ("a", "b", "c", "h", "amb"):
+        net.add_node(n)
+    net.add_edge("a", "b", kind="link")
+    net.add_edge("b", "c", kind="link")
+    net.add_edge("h", "amb", kind="conductor")
+    src, _ = net.endpoints("link")
+    results = {}
+    for acceleration in (None, "anderson"):
+        toy = KirchhoffLayer(net, "toy", [_DriverConductance("link")], boundary=["c"])
+        heat = TransportLayer(net, "heat", flow_kind=(), boundary=["amb"], n_species=2,
+                              capacity=torch.tensor([1.0], dtype=F64),
+                              conduction_kind="conductor",
+                              conductance=torch.tensor([1.0], dtype=F64), scheme="implicit")
+        model = Model(net, {"toy": toy, "heat": heat},
+                      closures=[_HeadDependentConductance(src, torch.tensor(1.0, dtype=F64)),
+                                _TwoSpeciesHeat()],
+                      coupling="iterate", iterate_max=400,
+                      iterate_tol={"toy": 1e-13, "heat": 1e-13},
+                      iterate_acceleration=acceleration, iterate_flow_tol={"toy": 1e-12})
+        state = {"toy.phi": torch.zeros(5, dtype=F64), "toy.q": torch.zeros(2, dtype=F64),
+                 "heat.x": torch.zeros(1, 2, dtype=F64)}
+        drivers = {"toy.phi_boundary": torch.zeros(1, dtype=F64),
+                   "toy.sources": torch.tensor([2.0, 0.0, 0.0, 0.0, 0.0], dtype=F64),
+                   "heat.x_boundary": torch.zeros(1, 2, dtype=F64)}
+        diag: dict = {}
+        out = model.steady(state, drivers, diagnostics=diag, atol=1e-14, rtol=1e-14)
+        assert bool(diag["converged"].all()), acceleration
+        assert out["heat.x"].shape == (1, 2)
+        results[acceleration] = out, diag["passes"]
+    (plain, plain_passes), (fast, fast_passes) = results[None], results["anderson"]
+    torch.testing.assert_close(fast["heat.x"], plain["heat.x"], rtol=0.0, atol=1e-11)
+    x = fast["heat.x"][0]
+    a = torch.tensor(_TwoSpeciesHeat.A, dtype=F64) * (1.0 + 0.1 * fast["toy.phi"][0])
+    torch.testing.assert_close(x, a + torch.tensor(_TwoSpeciesHeat.B, dtype=F64) * torch.tanh(x),
+                               rtol=0.0, atol=1e-11)
+    assert 2 * fast_passes < plain_passes
 
 
 class _BranchingSource:

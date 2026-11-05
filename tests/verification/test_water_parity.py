@@ -286,7 +286,7 @@ def test_a_tank_outside_its_limits_is_refused(tmp_path):
 # EPANET 2.2's D-W is a COMPOSITE friction law (`hydcoeffs.c`, `DWpipecoeff` and
 # `frictionFactor`): Hagen-Poiseuille below Re = 2000, Dunlop's cubic to 4000, Swamee-Jain
 # above, evaluated in feet and cfs with g = 32.2 ft/s^2 and water at 1.1e-5 ft^2/s.
-# `build_model` reproduces it (`EpanetDarcyWeisbach`, `friction="epanet"`, the default), so
+# `build_model` reproduces it (`CompositeDarcyWeisbach`, `friction="composite"`, the default), so
 # these tests hold D-W to the SAME tolerances as the Hazen-Williams tests above, which are
 # the float32 output floor (`2**-24` = 6e-8 relative per reported value) with an order of
 # magnitude to spare -- NOT a band around a measurement. The generic Colebrook `Duct`

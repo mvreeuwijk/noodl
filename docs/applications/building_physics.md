@@ -843,7 +843,7 @@ conducts nothing".
 
 | Function | Returns |
 |---|---|
-| `thermal_layer(net, *, ambient, name="thermal", flow_kinds=("airpath",), conduction_kind="wall", c_p=1005.0, rho=1.2041, scheme=None, fixed_temperature=(), storage_free=())` | The heat `TransportLayer`. Capacity is $\rho c_p V + C_{\text{node}}$ per active interior node. Raises naming any node with zero heat capacity that is not storage-free. `scheme` defaults to `"exact"`, or to `"implicit"` when `storage_free` names a node (the only scheme that holds them). |
+| `thermal_layer(net, *, ambient, name="thermal", flow_kinds=("airpath",), conduction_kind=None, c_p=1005.0, rho=1.2041, scheme=None, fixed_temperature=(), storage_free=())` | The heat `TransportLayer`. Capacity is $\rho c_p V + C_{\text{node}}$ per active interior node. Raises naming any node with zero heat capacity that is not storage-free. `scheme` defaults to `"exact"`, or to `"implicit"` when `storage_free` names a node that a flow edge touches (a plenum: the only scheme that holds it). A storage-free node joined only by conduction (a surface or radiant star node) is folded into its neighbours and keeps `"exact"` (see below). `conduction_kind` is one edge kind or a tuple, for example `("wall", "film", "radiation")`: wall conduction, a surface (film) coefficient and a radiative coefficient as separate edges, each with its own `ua` (W/K), concatenated in the order given into the layer's `conductance` (`None`, the default, means `"wall"` when the network has wall edges; an explicit kind with no edge is an error naming it). A closure that recomputes a coefficient from the temperatures, such as a radiative one, writes the per-step driver `"thermal.conductance"` in that order (see [transport layers](../concepts/layers.md)). |
 | `species_layer(net, *, ambient, name="species", flow_kinds=("airpath",), rho=1.2041, n_species=1, scheme="implicit", species_names=None, transmission=None, kinetics=None, storage_free=())` | The contaminant layer, as mass fractions, capacity = zone air mass $\rho V$ (CONTAM's convention). `transmission` `(b_flow, K)` is each flow edge's filter pass fraction; `kinetics` `(n_i, K, K)` each zone's first-order reactions (`reaction_kinetics` builds it). |
 | `build_model(net, *, air_laws, drives, ambient="ambient", thermal=True, species=0 (a count or a list of names), density="ideal_gas", density_kwargs=None, coupling="pingpong", iterate_tol=None, iterate_max=20, thermal_scheme=None, species_scheme="implicit", flow_kinds=None, closures=(), flow_balanced=(), storage_free=(), return_inputs=False)` | The assembled `Model`; with `return_inputs=True`, `(model, state, drivers)` like the other applications. `closures` follow the density closure; `flow_balanced` nodes join the air layer's boundary; `storage_free` nodes hold no air (see [Air-handling systems](#air-handling-systems)). |
 | `add_air_handler(target, *, supplies, returns, kind="air_handler", supply_plenum="ahs_supply", return_plenum="ahs_return", outdoor_air_fraction=1.0, min_outdoor_air=0.0, supply_volume=0.0, return_volume=0.0, T0=293.15, ambient="ambient")` | Adds an air handler's plenums and edges to a `Network` or a `Component`. `supplies` and `returns` map zones to design flows (kg/s). |
@@ -855,6 +855,19 @@ conducts nothing".
 `species_layer(..., storage_free=[...])` and `thermal_layer(..., storage_free=[...])` accept
 zero-volume nodes that hold no air, such as an air-handler plenum (see [Air-handling systems](#air-handling-systems)).
 A contaminant source or sink on such a node is refused by name: it holds no air to emit into.
+
+**Surface and radiant star nodes.** A wall surface has no heat capacity of its own: it sits
+between the zone air (a film coefficient) and the first wall layer (conduction), and in a radiant
+exchange it joins the zone's star node (a radiative coefficient). Name such nodes in
+`thermal_layer(..., storage_free=[...])` with `conduction_kind=("wall", "film", "radiation")`
+edges and the layer folds them into their neighbours: each surface film in series with the wall
+behind it becomes one combined surface coefficient, and the star node with its surfaces becomes
+equivalent conductances between the surfaces' neighbours (the star-delta transform). Absorbed
+sunlight and the radiant share of gains, given as `sources` on the surface or star nodes, are
+handed on to their neighbours the same way. The layer keeps the exact scheme, and returns the
+surface and star temperatures in the state, computed from their neighbours after each step. A
+radiative coefficient that a closure re-evaluates each pass (`"thermal.conductance"`) is folded
+with its current value. See [transport layers](../concepts/layers.md) for the details.
 
 `density` selects the closure relating temperature to air density:
 

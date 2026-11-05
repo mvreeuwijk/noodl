@@ -158,6 +158,23 @@ class NewtonResult:
     linear_iterations: torch.Tensor | None = None
     backend: str | None = None
 
+    def into(self, diagnostics: dict, *, method: str | None = None) -> None:
+        """Write this outcome into a caller-supplied ``diagnostics`` dict.
+
+        The keys are ``newton_iterations``, ``linear_iterations``, ``backend`` (the inner
+        solver that RAN, not the one requested), ``converged`` and ``residual_norm`` -- the
+        per-instance status as well as the cost, so ``on_failure="return"`` has something
+        to report. ``method``, when given, is the inner solver that was REQUESTED and is
+        stored under ``"method"``; with ``"auto"`` it differs from ``backend``.
+        """
+        diagnostics["newton_iterations"] = self.iterations
+        diagnostics["linear_iterations"] = self.linear_iterations
+        if method is not None:
+            diagnostics["method"] = method
+        diagnostics["backend"] = self.backend
+        diagnostics["converged"] = self.converged
+        diagnostics["residual_norm"] = self.residual_norm
+
 
 def newton_tolerances(
     dtype: torch.dtype, atol: float | None, rtol: float | None

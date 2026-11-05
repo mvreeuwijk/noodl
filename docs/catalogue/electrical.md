@@ -76,8 +76,8 @@ Functions of the state that compute drivers each step (densities, flows, levels)
 
 | Name | What it does | How to call it |
 |---|---|---|
-| `HeatedEdge`<br><small>`noodl.apps.electrical`</small> | A circuit device with a heat port: its edge `edge` (position in the electrical layer's `q`), its end nodes `p` and `n` (positions in `phi`), the thermal node `heat_node` of its heat port (position in the thermal layer's `phi`), and the per-edge temperature driver `temperature_key` its law reads, at position `slot` of that driver. | `HeatedEdge(edge, p, n, heat_node, temperature_key, slot)` |
-| `JouleHeating`<br><small>`noodl.apps.electrical`</small> | A coupling closure `closure(state, drivers) -> driver updates` between a circuit layer (`electrical`) and a thermal layer (`thermal`) on one network. | `JouleHeating(heated, *, electrical='electrical', thermal='thermal', heat_key='thermal.heat', base_temperatures)` |
+| `HeatedEdge`<br><small>`noodl.apps.electrical`</small> | A circuit device with a heat port: its edge `edge` (position in the electrical layer's `q`), its end nodes `p` and `n` (positions in `phi`), the network node `heat_node` of its heat port (a node of the heat layer: interior, where the heat goes, or a boundary at a fixed temperature, which absorbs it), and the per-edge temperature driver `temperature_key` its law reads, at position `slot` of that driver. | `HeatedEdge(edge, p, n, heat_node, temperature_key, slot)` |
+| `JouleHeating`<br><small>`noodl.apps.electrical`</small> | A coupling closure `closure(state, drivers) -> driver updates` between a circuit layer (`electrical`) and a heat layer (`thermal`, a `TransportLayer`) on one network. | `JouleHeating(heated, thermal, *, electrical='electrical', base_temperatures)` |
 
 ## Waveforms
 
@@ -108,7 +108,7 @@ Supporting types.
 | Name | What it does | How to call it |
 |---|---|---|
 | `CircuitNames`<br><small>`noodl.apps.electrical.modelica`</small> | What the reader built, by name. | `CircuitNames(model, times, grid, restarts, dynamic, phasor, nodes, thermal_nodes, devices, sources, columns)` |
-| `Column`<br><small>`noodl.apps.electrical.modelica`</small> | A compared value: `part(sum(c * history[key][..., i] for i, c in terms))`, with `part` `"real"` or `"imag"` (of a phasor; the real part of a real value is itself). | `Column(key, terms, part='real')` |
+| `Column`<br><small>`noodl.apps.electrical.modelica`</small> | A compared value: `part(offset + sum(c * history[key][..., i] for i, c in terms))`, with `part` `"real"` or `"imag"` (of a phasor; the real part of a real value is itself). `offset` is a constant part: a fixed temperature, which no state holds. | `Column(key, terms, part='real', offset=0.0)` |
 | `ModelicaImportError`<br><small>`noodl.apps.electrical.modelica`</small> | Raised for a malformed `noodl-modelica/1` (building) or `noodl-modelica-electrical/1` (circuit) document, or for model content the reader does not support. | `ModelicaImportError(...)` |
 | `MatpowerCaseDigestError`<br><small>`noodl.apps.electrical.power`</small> | A downloaded or cached MATPOWER case is not the file whose SHA-256 is recorded. | `MatpowerCaseDigestError(...)` |
 | `MatpowerCaseUnavailableError`<br><small>`noodl.apps.electrical.power`</small> | A MATPOWER case could not be downloaded (no network, or the server refused). | `MatpowerCaseUnavailableError(...)` |

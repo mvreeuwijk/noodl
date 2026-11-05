@@ -7,7 +7,7 @@ import torch
 
 from noodl.apps.street_aq.chemistry import photostationary_for_streets, street_steady
 from noodl.apps.street_aq.network import Street, StreetNetwork, build_model
-from noodl.layers.reaction import K_NO_O3, MOLAR_MASS
+from noodl.apps.street_aq.reactions import K_NO_O3, MOLAR_MASS
 
 DT = torch.float64
 

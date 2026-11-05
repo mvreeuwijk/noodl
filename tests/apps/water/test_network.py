@@ -469,9 +469,11 @@ def test_a_non_default_viscosity_and_gravity_reach_the_darcy_weisbach_elements()
     assert model.head_scale == pytest.approx(998.2 * 1.1 * 9.80665, rel=1e-15)
 
 
-def test_an_unknown_friction_law_is_refused():
-    with pytest.raises(ValueError, match="friction must be 'composite' or 'colebrook'"):
-        build_model(twoloop(), headloss="D-W", friction="swamee")
+@pytest.mark.parametrize("friction", ["swamee", "epanet"])  # "epanet": the old name, no alias
+def test_an_unknown_friction_law_is_refused(friction):
+    with pytest.raises(ValueError, match=rf"friction must be 'composite' or 'colebrook', got "
+                                         rf"'{friction}'"):
+        build_model(twoloop(), headloss="D-W", friction=friction)
 
 
 def test_a_files_flow_units_select_epanets_rounded_cfs_factor(tmp_path):

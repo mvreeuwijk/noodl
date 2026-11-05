@@ -7,8 +7,9 @@ it from the driver ``"<layer>.capacity"`` when a closure writes one.
 For interior capacity ``V`` (volume, or heat capacity), signed branch flow ``q``
 on the edges of ``flow_kind`` (one edge kind, or several: ``q`` then carries the
 kinds' flows concatenated in ``flow_kinds`` order, which is what
-``KirchhoffLayer.flows_of_kind(q, layer.flow_kinds)`` returns), a carrier
-factor and a transmission fraction per edge:
+``KirchhoffLayer.flows_of_kind(q, layer.flow_kinds)`` returns; or none, ``flow_kind=()``,
+for a conduction-only layer whose ``q`` is empty), a carrier factor and a transmission
+fraction per edge:
 
     V dx/dt = (In(q) - Out(q)) x + N x_b + sources
 
@@ -33,25 +34,37 @@ layer. Boundary rows must be zero (refused by name, not silently dropped); ``ste
 from __future__ import annotations
 
 import bisect
+import dataclasses
 import functools
 import math
-import warnings
 from collections.abc import Mapping, Sequence
 from typing import Literal, NamedTuple
 
 import torch
 
+from noodl.layers._folding import (
+    Folded,
+    FoldPlan,
+    fold_conductance,
+    fold_sources,
+    plan_folding,
+    recover,
+)
 from noodl.layers._topology import TopologyGuard
 from noodl.layout import as_stacked, is_stacked
 from noodl.operators.advection import AdvectionOperator
+from noodl.operators.base import SolveResult, SolverStatus
+from noodl.operators.shifted import ShiftedOperator
+from noodl.operators.stencil import laplacian_coo
 from noodl.solvers.implicit import TransposeOperator as _TransposeView
-from noodl.solvers.select import _SPARSE_DIRECT_MAX_BATCH
+from noodl.solvers.implicit import refuse_second_order, residual_vjp
 from noodl.solvers.select import solve as _solve_operator
+from noodl.solvers.select import transport_solver_kwargs
 from noodl.topology import Network, Node
 
 # `_TransposeView` is `solvers.implicit.TransposeOperator`. Both this layer's operators
-# (`AdvectionOperator`, `_AffineSystemOperator` below) declare `symmetric = False`, so
-# `TransposeOperator.spd_certificate()` returns None for them.
+# (`AdvectionOperator`, and `ShiftedOperator` wrapping it, the implicit step's system) are
+# `symmetric = False`, so `TransposeOperator.spd_certificate()` returns None for them.
 
 
 def active_interior(
@@ -91,43 +104,23 @@ def active_interior(
 
 # Inner linear solvers a TransportLayer may be configured with; resolved PER SOLVE (never
 # fixed for the layer's whole lifetime the way `KirchhoffLayer._LINEAR_SOLVERS` is used)
-# by `TransportLayer._resolve_solver` into the kwargs `solvers.select.solve` actually reads.
+# by `TransportLayer._resolve_solver` (the rule is
+# `select.transport_solver_kwargs`) into the kwargs `solvers.select.solve` actually reads.
 # "gmres" resolves to `method="gmres"` with no preconditioner.
 # "gmres_jacobi"/"gmres_ilu" resolve to `method="gmres"` with a real preconditioner.
 # "sparse_direct" (SuperLU, on the operators' COO forms) and "direct" (the dense LU reference)
 # pass straight through. `select.solve`'s OWN "auto" policy (the certified-SPD potential path)
 # is a different policy -- this is a SEPARATE "auto", scoped to this layer: it resolves to
-# `sparse_direct` at or under `_SPARSE_DIRECT_MAX_BATCH` instances and to plain `gmres` above
+# `sparse_direct` at or under `select._SPARSE_DIRECT_MAX_BATCH` instances and to plain `gmres` above
 # it (sparse_direct is not applicable there, and the gmres family's own ordering is not clean
 # enough to prefer a preconditioner over plain gmres); `gmres_jacobi`/`gmres_ilu` are never
 # chosen by `auto`. The choice rests on an interleaved benchmark, see
-# docs/design/solvers.md#transport-solver-choice. See `_resolve_solver` for the two hazards
+# docs/design/solvers.md#transport-solver-choice. See `select.transport_solver_kwargs` for the
+# two hazards
 # this default must handle: SciPy absent,
 # and a grad-requiring `on_failure="return"` solve (which runs outside `_LinearSolve`'s
 # `no_grad`, unlike the differentiable forward/backward path).
 _TRANSPORT_SOLVERS = ("auto", "gmres", "gmres_jacobi", "gmres_ilu", "sparse_direct", "direct")
-
-# Set once, mirroring `solvers.select._WARNED_SPARSE_DIRECT_NEEDS_SCIPY`: the one fall-back
-# from this layer's "auto" to gmres that is an ENVIRONMENT fault (SciPy, the `noodl-physics[sparse]`
-# extra, is absent) rather than a modelling or grad-safety fact, so it is the only one that
-# warns, and only once per process -- a per-solve warning at this default's small-batch,
-# every-step call frequency would be unusable noise. Module state rather than a `warnings`
-# filter for the same reason `select.py` gives: `warnings.warn`'s own "once" registry is keyed
-# on the message and can be reset out from under us by `catch_warnings`.
-_WARNED_AUTO_NEEDS_SCIPY = False
-
-
-def _scipy_sparse_linalg_importable() -> bool:
-    """Whether `scipy.sparse.linalg` can be imported right now -- the same lazy, per-call
-    check `solvers.select._auto_sparse_triplet` makes (a cached answer would be wrong for the
-    one case this exists to detect: a process that can or cannot import scipy is not a
-    property this module gets to memoise, and doing so would make the fall-back untestable
-    without process isolation)."""
-    try:
-        import scipy.sparse.linalg  # noqa: F401
-    except ImportError:
-        return False
-    return True
 
 
 def _reached_from(start: torch.Tensor, row: torch.Tensor, col: torch.Tensor,
@@ -255,39 +248,24 @@ class _LinearSolve(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, grad_x):
-        if torch.is_grad_enabled():
-            # See solvers/implicit.py's module docstring: grad mode enabled here means the
-            # caller requested create_graph=True (second-order differentiation), which
-            # this adjoint does not support.
-            raise RuntimeError(
-                f"{ctx.where}: second-order differentiation (create_graph=True) is not "
-                f"supported by this implicit linear adjoint; detach the first-order "
-                f"gradient before using it in a further differentiable loss."
-            )
+        refuse_second_order(ctx.where, through="through this implicit linear adjoint ")
         saved = ctx.saved_tensors
         x, params = saved[0], list(saved[1:])
-        with torch.no_grad():
+
+        def adjoint_vector():
             op, _ = ctx.build_system(*params)
             kwargs = dict(ctx.solver_kwargs)
             method = kwargs.pop("method", "auto")
-            lam = _solve_operator(
+            return _solve_operator(
                 _TransposeView(op), grad_x, method=method, on_failure="raise",
                 where=f"{ctx.where} backward (adjoint)", **kwargs,
             ).x
-        with torch.enable_grad():
-            p = [t.detach().requires_grad_(t.requires_grad) for t in params]
+
+        def residual(p):
             op_p, rhs_p = ctx.build_system(*p)
-            residual = op_p.matvec(x.detach()) - rhs_p
-            needs_grad = [t for t in p if t.requires_grad]
-            grads = (
-                torch.autograd.grad(residual, needs_grad, grad_outputs=-lam, allow_unused=True)
-                if needs_grad else []
-            )
-        grads_aligned = []
-        it = iter(grads)
-        for t in p:
-            grads_aligned.append(next(it) if t.requires_grad else None)
-        return (None, None, None, None, None, *grads_aligned)
+            return op_p.matvec(x.detach()) - rhs_p
+
+        return (None, None, None, None, None, *residual_vjp(params, residual, adjoint_vector))
 
 
 def _linear_solve(
@@ -297,94 +275,6 @@ def _linear_solve(
     return _LinearSolve.apply(
         build_system, where, resolve_solver, solver_kwargs, diagnostics, *params
     )
-
-
-class _AffineSystemOperator:
-    """(S - alpha * M): built from an AdvectionOperator, satisfying the LinearOperator
-    duck type solvers.select.solve reads (matvec, rmatvec, diagonal, shape, dtype,
-    device, symmetric, assemble, spd_certificate). Used for both the implicit scheme
-    (alpha = dt) and the trapezoidal scheme (alpha = dt / 2), and passed to
-    _linear_solve exactly like a bare AdvectionOperator is for steady() -- the adjoint
-    derivation does not care what concrete operator "A" is, only that it exposes
-    matvec/rmatvec/diagonal/assemble/spd_certificate.
-
-    `S` is the diagonal of per-row storage weights: the identity unless the layer has
-    storage-free nodes, whose rows are algebraic balances (weight 0) while flow passes
-    through them (see `TransportLayer._storage_stacked`).
-    """
-
-    symmetric = False
-
-    def __init__(self, M: AdvectionOperator, alpha: float,
-                 storage: torch.Tensor | None = None) -> None:
-        self.M = M
-        self.alpha = alpha
-        # (..., m) weights of the identity: 1 where a row stores, 0 on a storage-free
-        # node's algebraic row. None is the plain identity.
-        self.storage = storage
-        self.shape = M.shape
-        self.dtype = M.dtype
-        self.device = M.device
-        # Cache for `assemble_sparse`'s identity-block row/col index: this object is
-        # built fresh per solve and `m`/`device` never change over its life, so this is a
-        # tidy-up (one `torch.arange` fewer when `assemble_sparse` runs more than once for the
-        # same instance, e.g. forward then backward), not a speedup that matters on its own.
-        self._eye_idx: torch.Tensor | None = None
-
-    def matvec(self, x: torch.Tensor) -> torch.Tensor:
-        own = x if self.storage is None else self.storage * x
-        return own - self.alpha * self.M.matvec(x)
-
-    def rmatvec(self, y: torch.Tensor) -> torch.Tensor:
-        own = y if self.storage is None else self.storage * y
-        return own - self.alpha * self.M.rmatvec(y)
-
-    def diagonal(self) -> torch.Tensor:
-        own = 1.0 if self.storage is None else self.storage
-        return own - self.alpha * self.M.diagonal()
-
-    def assemble(self):
-        dense = self.M.assemble()
-        m = dense.shape[-1]
-        if self.storage is None:
-            eye = torch.eye(m, dtype=dense.dtype, device=dense.device)
-        else:
-            eye = torch.diag_embed(torch.broadcast_to(self.storage, dense.shape[:-1]))
-        return eye - self.alpha * dense
-
-    def assemble_sparse(self):
-        """COO `(row, col, values)` for `S - alpha * M`: `M`'s own sparse form with
-        the storage diagonal (the identity unless the layer has storage-free nodes) added,
-        `None` propagating unchanged if `M` has none to give.
-
-        DUPLICATES are how the identity and `M`'s diagonal entries combine: `M`'s own COO
-        form already carries duplicate (row, col) pairs at a diagonal position (e.g. an Out
-        term and a self-loop In term at the same interior node), all summed by the COO
-        consumer; appending one more `1.0` per diagonal position is the same mechanism, not
-        a special case.
-        """
-        triplet = self.M.assemble_sparse()
-        if triplet is None:
-            return None
-        row, col, values = triplet
-        m = self.shape[-1]
-        if self._eye_idx is None or self._eye_idx.device != row.device:
-            self._eye_idx = torch.arange(m, dtype=torch.int64, device=row.device)
-        eye_idx = self._eye_idx
-        if self.storage is None:
-            ones = torch.ones(*values.shape[:-1], m, dtype=values.dtype, device=values.device)
-        else:
-            batch = torch.broadcast_shapes(values.shape[:-1], self.storage.shape[:-1])
-            ones = torch.broadcast_to(self.storage, batch + (m,)).to(values.dtype)
-            values = values.expand(batch + values.shape[-1:])
-        return (
-            torch.cat([eye_idx, row]),
-            torch.cat([eye_idx, col]),
-            torch.cat([ones, -self.alpha * values], dim=-1),
-        )
-
-    def spd_certificate(self):
-        return None
 
 
 class TransportLayer(TopologyGuard):
@@ -397,8 +287,8 @@ class TransportLayer(TopologyGuard):
 
     ``quantity``/``unit`` are metadata a ``Model`` reports ("temperature"/"K",
     "concentration"/"ppm"); nothing in the numerics reads them. ``source_unit``,
-    ``capacity_unit`` and ``flow_unit`` are metadata ``model.refs`` reports and nothing
-    numerical reads.
+    ``capacity_unit``, ``flow_unit`` and ``conductance_unit`` (W/K for heat) are metadata
+    ``model.refs`` reports and nothing numerical reads.
 
     ``linear_solver`` names one of ``_TRANSPORT_SOLVERS``, refused by name at
     construction otherwise, and is resolved PER SOLVE by ``_resolve_solver`` into the kwargs
@@ -416,10 +306,36 @@ class TransportLayer(TopologyGuard):
     node with nothing passing through it (no flow, no conduction) keeps its value, and a
     source there is dropped for that step (it has nowhere to go); `step`'s `diagnostics`
     then carries ``"held_sources_dropped"``, the number of nonzero entries dropped. Their
-    capacity may be 0; removal and kinetics do not act on them. Only ``scheme="implicit"``
-    (and ``steady``) can hold them; a ``steady`` with nothing passing through such a node
-    is refused by name (it has no value there). ``storage_free_mask`` is ``(n_i,)`` bool,
-    True at those nodes.
+    capacity may be 0; removal and kinetics do not act on them. A storage-free node that a
+    flow edge touches, or that has a removal or kinetics term at construction, needs
+    ``scheme="implicit"`` (``steady`` holds it too); a ``steady`` with nothing passing
+    through a storage-free node is refused by name (it has no value there).
+    ``storage_free_mask`` is ``(n_i,)`` bool, True at those nodes.
+
+    FOLDED NODES: a storage-free node joined to the rest only by conduction edges (a wall's
+    surface node, a zone's radiant star node), with no removal or kinetics term, is FOLDED
+    into its neighbours. Its value is the conductance-weighted mean of its neighbours' plus
+    its own source over its total conductance, so the step replaces it by equivalent
+    conductances between its neighbours and hands its source on to them: the star-delta
+    transform, or the "combined surface coefficient" of a surface film in series with the
+    wall behind it. Storage-free nodes joined to each other (the surfaces of a zone and its
+    star node) are folded together as one group (mathematically the Schur complement, or
+    Kron reduction, of their block). The folded network is again one of positive
+    conductances, so every scheme, ``exact`` included, steps it with its maximum principle,
+    and the folded nodes' values are recovered after the step from the kept nodes' new
+    values, the boundary values at the end of the step and the sources; the state returns
+    them like any other node's. The boundary transfer counts what leaves through them. The
+    folding is computed once from the construction-time conductance, and again on every
+    call that passes ``conductance=`` (the ``"<layer>.conductance"`` driver, a radiative
+    coefficient re-evaluated each pass); gradients reach the conductances and the sources
+    through it. A folded node whose every conductance is zero in a call is held at its
+    value as above; a group of them joined only to each other in a call has no value and
+    is refused by name, and one joined only to each other at construction is refused
+    there. That check (a search over the group's edges on the host) runs on every call in
+    which some conductance touching a folded group of two or more nodes is zero, such as
+    a radiative coefficient that vanishes at night; with all of them positive it costs
+    nothing. ``folded_mask`` is ``(n_i,)`` bool, True at the folded nodes; ``rate`` and the
+    dense ``operator`` describe the whole network, folded nodes as algebraic rows.
 
     DILUTION (``dilution``, ``None`` by default): adds ``dilution * net(q) / capacity`` to
     the removal, ``net(q)`` the signed net inflow of the flow edges into each node (see
@@ -439,28 +355,36 @@ class TransportLayer(TopologyGuard):
     def _coefficients(
         self, *, removal: torch.Tensor | None = None,
         transmission: torch.Tensor | None = None,
+        conductance: torch.Tensor | None = None,
     ) -> tuple[tuple[str, ...], list[torch.Tensor]]:
         """`(names, tensors)`: every coefficient tensor that must cross `_LinearSolve`'s
         boundary explicitly. `_LinearSolve.backward` only sees what `apply` was given, so a
         coefficient read from `self` inside `build_system` silently gets no gradient.
         Topology and index tensors are not coefficients and stay on `self`. `removal`, when
-        given, is a per-call rate that replaces the layer's own (see `_removal_arg`)."""
+        given, is a per-call rate that replaces the layer's own (see `_removal_arg`);
+        `transmission` and `conductance` likewise (see `_transmission_arg`,
+        `_conductance_arg`)."""
         values = {
             "carrier": self.carrier,
             "transmission": self.transmission if transmission is None else transmission,
             "kinetics": self.kinetics,
             "removal": self.removal if removal is None else removal,
-            "conductance": None if self._conduction_edges is None else self._conduction_edges[2],
+            "conductance": (
+                None if self._conduction_edges is None
+                else self._conduction_edges[2] if conductance is None else conductance
+            ),
             "dilution": self.dilution,
         }
         names = tuple(n for n in self._COEFFICIENT_NAMES if values[n] is not None)
         return names, [values[n] for n in names]
 
     def _coefficient_map(
-        self, removal: torch.Tensor | None = None, transmission: torch.Tensor | None = None
+        self, removal: torch.Tensor | None = None, transmission: torch.Tensor | None = None,
+        conductance: torch.Tensor | None = None,
     ) -> dict[str, torch.Tensor]:
         """`_coefficients` as a name -> tensor map, for `_advection_operator`."""
-        names, values = self._coefficients(removal=removal, transmission=transmission)
+        names, values = self._coefficients(
+            removal=removal, transmission=transmission, conductance=conductance)
         return dict(zip(names, values, strict=True))
 
     def _removal_arg(self, removal: torch.Tensor | None) -> torch.Tensor | None:
@@ -513,6 +437,86 @@ class TransportLayer(TopologyGuard):
             f"({b_flow},) or ({b_flow}, {K}) (the layer's flow order), got {tuple(t.shape)}"
         )
 
+    def _conductance_arg(self, conductance: torch.Tensor | None) -> torch.Tensor | None:
+        """Validate an optional PER-STEP conduction conductance (W/K for heat), else `None`
+        (the layer's own stands; see `_coefficients`).
+
+        A closure that owns a conductance which depends on the state (a radiative
+        coefficient recomputed from the previous pass's temperatures, a film coefficient
+        that follows the air speed) hands the layer a fresh value every step through the
+        driver `"<layer>.conductance"`, passed in by `Model._pass` the way
+        `"<layer>.removal"` is. Shape `(..., b_c)`, one entry per conduction edge in the
+        order of `conduction_edges` (the kinds in `conduction_kind` order, each kind's edges
+        in network order); leading batch dimensions are allowed. It REPLACES the
+        construction-time conductance for this call, and it carries the gradient back to
+        whatever computed it.
+
+        Entries must be zero or positive: a negative one is refused, naming the edge. Zero is
+        allowed because a radiative or film coefficient can vanish. A stored node left with
+        no conducting edge this call and no flow is isolated for the call: a transient step
+        keeps it exactly as it was plus its own source, a steady solve refuses it as
+        undefined (`UndefinedSteadyState`, or, for a storage-free node, "nothing passes
+        through"), as it would a node that never had an edge.
+        """
+        if conductance is None:
+            return None
+        if self._conduction_edges is None:
+            raise ValueError(
+                f"TransportLayer '{self.name}': a per-step conductance was given but the "
+                f"layer has no conduction_kind"
+            )
+        g = torch.as_tensor(conductance, dtype=self.net.dtype)
+        b_c = self._conduction_edges[0].numel()
+        if g.dim() == 0 or g.shape[-1] != b_c:
+            raise ValueError(
+                f"TransportLayer '{self.name}': conductance must have trailing shape "
+                f"({b_c},) (one per conduction edge, in the order of `conduction_edges`), "
+                f"got {tuple(g.shape)}"
+            )
+        self._refuse_negative_conductance(g, self._conduction_edges[0],
+                                          self._conduction_edges[1])
+        return g
+
+    def _refuse_negative_conductance(
+        self, g: torch.Tensor, src: torch.Tensor, tgt: torch.Tensor
+    ) -> None:
+        """Raise `ValueError` naming the conduction edges (by end nodes) where `g` is
+        negative on any batch instance. A conductance is zero or positive."""
+        negative = (g.detach() < 0).reshape(-1, g.shape[-1]).any(0)
+        if bool(negative.any()):
+            edges = [(self.net.nodes[int(src[e])], self.net.nodes[int(tgt[e])])
+                     for e in negative.nonzero().flatten().tolist()]
+            raise ValueError(
+                f"TransportLayer '{self.name}': conductance must be zero or positive; "
+                f"negative on conduction edge(s) {edges}"
+            )
+
+    @property
+    def conduction_edges(self) -> tuple[tuple[str, torch.Tensor, torch.Tensor], ...]:
+        """The conduction edges, one `(kind, source_nodes, target_nodes)` block per kind of
+        `conduction_kind`, in that order (empty for a layer with no conduction).
+
+        `conductance` (construction-time or the per-step driver `"<layer>.conductance"`) is
+        one tensor over these blocks CONCATENATED: the first kind's edges in network order,
+        then the second kind's, and so on. The node tensors are positions in the full node
+        order of the network. A closure that writes a per-edge value reads the order here.
+        """
+        if self._conduction_edges is None:
+            return ()
+        out, start = [], 0
+        for kind, n_edges in zip(self.conduction_kinds, self._conduction_sizes, strict=True):
+            sl = slice(start, start + n_edges)
+            out.append((kind, self._conduction_edges[0][sl], self._conduction_edges[1][sl]))
+            start += n_edges
+        return tuple(out)
+
+    @property
+    def conductance(self) -> torch.Tensor | None:
+        """The construction-time conduction conductance `(..., b_c)` (W/K for heat), one
+        entry per edge in the order of `conduction_edges`; `None` for a layer with no
+        conduction. Read-only: a per-step value is the driver `"<layer>.conductance"`."""
+        return None if self._conduction_edges is None else self._conduction_edges[2]
+
     def __init__(
         self,
         net: Network,
@@ -526,7 +530,7 @@ class TransportLayer(TopologyGuard):
         transmission: torch.Tensor | None = None,
         kinetics: torch.Tensor | None = None,
         removal: torch.Tensor | None = None,
-        conduction_kind: str | None = None,
+        conduction_kind: str | Sequence[str] | None = None,
         conductance: torch.Tensor | None = None,
         dilution: torch.Tensor | float | None = None,
         dilution_mode: Literal["signed", "withdrawal"] = "signed",
@@ -539,6 +543,7 @@ class TransportLayer(TopologyGuard):
         source_unit: str = "",
         capacity_unit: str = "",
         flow_unit: str = "",
+        conductance_unit: str = "",
     ) -> None:
         if linear_solver not in _TRANSPORT_SOLVERS:
             raise ValueError(
@@ -560,8 +565,10 @@ class TransportLayer(TopologyGuard):
         # Metadata only: what this layer's state IS and what it is measured in.
         self.quantity, self.unit = quantity, unit
         # Metadata only: the units of this layer's nodal sources (W for heat, kg/s for
-        # species), of its capacity (J/K, kg, m3) and of the flows it advects on.
+        # species), of its capacity (J/K, kg, m3), of the flows it advects on and of its
+        # conduction conductances (W/K).
         self.source_unit, self.capacity_unit, self.flow_unit = source_unit, capacity_unit, flow_unit
+        self.conductance_unit = conductance_unit
         self.boundary = net.canonical(boundary)
         self.n_species = n_species
         # Metadata only, like `quantity`/`unit`: the names of the species columns, which
@@ -584,13 +591,22 @@ class TransportLayer(TopologyGuard):
         # unknown of a thermal layer, and is not one of a species layer over the same
         # network. See `active_interior`, which is also what a caller must size `capacity`
         # with.
-        kinds = self.flow_kinds if conduction_kind is None else (*self.flow_kinds, conduction_kind)
+        # One or several conduction kinds (wall conduction, a surface film, a radiative
+        # coefficient), as `flow_kind`: `conduction_kind` keeps the caller's spelling,
+        # `conduction_kinds` is the tuple, empty when the layer has no conduction.
+        self.conduction_kind = conduction_kind
+        self.conduction_kinds = (
+            () if conduction_kind is None
+            else (conduction_kind,) if isinstance(conduction_kind, str)
+            else tuple(conduction_kind)
+        )
+        kinds = (*self.flow_kinds, *self.conduction_kinds)
         self.interior_idx, self.inactive_idx = active_interior(net, kinds, self.boundary)
         self.boundary_idx = net.boundary_index(self.boundary)
         self.n_i = int(self.interior_idx.shape[0])
         self.n_b = int(self.boundary_idx.shape[0])
         self._inactive_names = [net.nodes[i] for i in self.inactive_idx.tolist()]
-        self.storage_free_mask = self._storage_free_mask(net, name, storage_free, scheme)
+        self.storage_free_mask = self._storage_free_mask(net, name, storage_free)
         # Fixed at construction; read on every step, so kept as a Python bool rather than a
         # device-synchronising `.any()` each time.
         self._has_storage_free = bool(self.storage_free_mask.any())
@@ -622,11 +638,12 @@ class TransportLayer(TopologyGuard):
         # The flow edges' endpoints, concatenated once here in `flow_kinds` order so that
         # every `_advection_operator` call is a plain attribute read (and so that a
         # multi-kind layer is one AdvectionOperator over all its flow edges, not several).
-        src_parts, tgt_parts = zip(
-            *(net.endpoints(kind) for kind in self.flow_kinds), strict=True
-        )
-        self._flow_src = torch.cat(src_parts)
-        self._flow_tgt = torch.cat(tgt_parts)
+        # No flow kind at all (`flow_kind=()`) is a conduction-only layer: a heat network of
+        # conductances and capacities with nothing advecting, whose `q` is empty.
+        ends = [net.endpoints(kind) for kind in self.flow_kinds]
+        empty = torch.zeros(0, dtype=torch.long, device=net.device)
+        self._flow_src = torch.cat([e[0] for e in ends]) if ends else empty
+        self._flow_tgt = torch.cat([e[1] for e in ends]) if ends else empty
         K = n_species
         if transmission is None:
             transmission = torch.ones(b_flow, dtype=net.dtype)
@@ -717,8 +734,7 @@ class TransportLayer(TopologyGuard):
             )
         self.dilution_mode = dilution_mode
 
-        self.conduction_kind = conduction_kind
-        if conduction_kind is not None:
+        if self.conduction_kinds:
             if conductance is None:
                 raise ValueError(
                     f"TransportLayer '{name}': conductance is required when "
@@ -728,7 +744,10 @@ class TransportLayer(TopologyGuard):
             # the (n, n) Laplacian, are this layer's whole representation of its conduction
             # topology; `operator()`, the dense reference, forms its (n, n) `L` from it on
             # demand (`_conduction_matrix`).
-            csrc, ctgt = net.endpoints(conduction_kind)
+            ends = [net.endpoints(kind) for kind in self.conduction_kinds]
+            self._conduction_sizes = tuple(len(e[0]) for e in ends)
+            csrc = torch.cat([e[0] for e in ends]) if len(ends) > 1 else ends[0][0]
+            ctgt = torch.cat([e[1] for e in ends]) if len(ends) > 1 else ends[0][1]
             b_c = len(csrc)
             g = torch.as_tensor(conductance, dtype=net.dtype)
             # Validate explicitly rather than let a mismatched length reach the assembly:
@@ -740,6 +759,7 @@ class TransportLayer(TopologyGuard):
                     f"TransportLayer '{name}': conductance must have shape ({b_c},), "
                     f"got {tuple(g.shape)}"
                 )
+            self._refuse_negative_conductance(g, csrc, ctgt)
             self._conduction_edges: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = (
                 csrc,
                 ctgt,
@@ -747,6 +767,7 @@ class TransportLayer(TopologyGuard):
             )
         else:
             self._conduction_edges = None
+            self._conduction_sizes = ()
 
         if not torch.all(self.carrier > 0):
             raise ValueError(
@@ -757,9 +778,10 @@ class TransportLayer(TopologyGuard):
             )
         self._interior_of_node = torch.full((net.n,), -1, dtype=torch.long)
         self._interior_of_node[self.interior_idx] = torch.arange(self.n_i, dtype=torch.long)
+        self._plan_folding(scheme)
 
-    def _storage_free_mask(self, net: Network, name: str, storage_free: Sequence[Node],
-                           scheme: str) -> torch.Tensor:
+    def _storage_free_mask(self, net: Network, name: str,
+                           storage_free: Sequence[Node]) -> torch.Tensor:
         """`(n_i,)` bool: True at the interior nodes that hold no amount."""
         mask = torch.zeros(self.n_i, dtype=torch.bool, device=self.interior_idx.device)
         nodes = net.canonical(list(storage_free)) if storage_free else []
@@ -772,15 +794,341 @@ class TransportLayer(TopologyGuard):
                 f"TransportLayer '{name}': storage_free nodes {outside} are not active "
                 f"interior nodes of this layer"
             )
-        if scheme != "implicit":
-            raise ValueError(
-                f"TransportLayer '{name}': storage-free nodes {nodes} hold no amount, so "
-                f"their balance is algebraic in every step; that needs scheme='implicit', "
-                f"got {scheme!r}"
-            )
         for n in nodes:
             mask[position[net.node_index(n)]] = True
         return mask
+
+    # ------------------------------------------------------------ folded nodes
+    def _plan_folding(self, scheme: str) -> None:
+        """Decide which storage-free nodes are folded into their neighbours (see the class
+        docstring) and prepare the layer over the remaining nodes that steps them.
+
+        A storage-free node is folded when no flow edge touches it and the construction-time
+        `removal` and `kinetics` are zero there. The others (a plenum with throughflow) keep
+        their algebraic row, which needs `scheme="implicit"`."""
+        n_i, K = self.n_i, self.n_species
+        self.folded_mask = torch.zeros(n_i, dtype=torch.bool, device=self.interior_idx.device)
+        self._fold_plan: FoldPlan | None = None
+        self._kept: _KeptNodes | None = None
+        self._fold_cache = None
+        if not self._has_storage_free:
+            return
+        net = self.net
+        touched = torch.zeros(net.n, dtype=torch.bool, device=self.interior_idx.device)
+        touched[self._flow_src] = True
+        touched[self._flow_tgt] = True
+        acting = torch.zeros_like(self.folded_mask)
+        if self.removal is not None:
+            acting |= (self.removal != 0).reshape(-1, n_i, K).any(0).any(-1).to(acting.device)
+        if self.kinetics is not None:
+            acting |= (self.kinetics != 0).reshape(-1, n_i, K * K).any(0).any(-1).to(
+                acting.device)
+        folded = self.storage_free_mask & ~touched[self.interior_idx] & ~acting
+        algebraic = self.storage_free_mask & ~folded
+        if scheme != "implicit" and bool(algebraic.any()):
+            names = [net.nodes[int(self.interior_idx[i])]
+                     for i in algebraic.nonzero().flatten().tolist()]
+            raise ValueError(
+                f"TransportLayer '{self.name}': storage-free nodes {names} hold no amount and "
+                f"carry flow (or a removal or reaction term), so their balance is algebraic "
+                f"in every step; that needs scheme='implicit', got {scheme!r} (storage-free "
+                f"nodes joined only by conduction are folded into their neighbours and take "
+                f"any scheme)"
+            )
+        if not bool(folded.any()):
+            return
+        # Every interior node folded (a heat network with no heat capacity at all) leaves no
+        # stored node: a step is then the recovery alone, from the boundary values and the
+        # sources at the end of the step (`_step_folded`, `_steady_folded`).
+        csrc, ctgt, _ = self._conduction_edges
+        plan = plan_folding(
+            name=self.name, nodes=net.nodes, interior_idx=self.interior_idx,
+            folded_mask=folded, src=csrc, tgt=ctgt, boundary_idx=self.boundary_idx, n=net.n,
+        )
+        self.folded_mask = folded
+        self._fold_plan = plan
+
+        # The layer over the kept nodes: the folded nodes taken out of the interior (no
+        # edge of the folded network touches them, so they are like inactive nodes) and the
+        # folded network's conduction edges in place of this layer's own. Only that
+        # STRUCTURE is fixed here; everything else (capacity, removal, kinetics, carrier,
+        # ...) is read from this layer when the kept-node step uses it (`_KeptNodes`), so an
+        # attribute reassigned after construction reaches the folded step too.
+        kept_nodes = self.interior_idx.index_select(0, plan.kept)
+        folded_nodes = self.interior_idx.index_select(0, plan.folded)
+        kept_free = self.storage_free_mask.index_select(0, plan.kept)
+        of_node = torch.full((net.n,), -1, dtype=torch.long)
+        of_node[kept_nodes] = torch.arange(int(kept_nodes.numel()), dtype=torch.long)
+        b_r = int(plan.src.numel())
+        structure = {
+            "interior_idx": kept_nodes,
+            "n_i": int(kept_nodes.numel()),
+            "inactive_idx": torch.cat([self.inactive_idx, folded_nodes]),
+            "_inactive_names": self._inactive_names + [net.nodes[i]
+                                                       for i in folded_nodes.tolist()],
+            "storage_free_mask": kept_free,
+            "_has_storage_free": bool(kept_free.any()),
+            "folded_mask": torch.zeros_like(kept_free),
+            "_interior_of_node": of_node,
+            # Its conductance is always handed in per call (`Folded.conductance`); the
+            # stored value is never read.
+            "_conduction_edges": (
+                (plan.src, plan.tgt, torch.zeros(b_r, dtype=self._conduction_edges[2].dtype))
+                if b_r else None),
+            "conduction_kinds": ("folded",) if b_r else (),
+            "_conduction_sizes": (b_r,) if b_r else (),
+            "_fold_plan": None, "_kept": None, "_fold_cache": None,
+        }
+        self._kept = _KeptNodes(self, plan.kept, structure)
+
+    def _call_scheme(self, scheme: str | None) -> str:
+        """This call's scheme: `scheme`, or the layer's own when it is `None`. A scheme
+        other than the layer's is checked as the constructor checks it: by name, and
+        `"implicit"` only on a layer whose storage-free nodes keep an algebraic row."""
+        if scheme is None or scheme == self.scheme:
+            return self.scheme
+        if scheme not in _SCHEMES:
+            raise ValueError(
+                f"TransportLayer '{self.name}': unknown scheme {scheme!r}; valid schemes are "
+                f"'exact', 'implicit', 'trapezoidal'"
+            )
+        if scheme != "implicit" and bool((self.storage_free_mask & ~self.folded_mask).any()):
+            raise ValueError(
+                f"TransportLayer '{self.name}': its storage-free nodes with throughflow (or a "
+                f"removal or reaction term) keep an algebraic row, which needs "
+                f"scheme='implicit', got {scheme!r}"
+            )
+        return scheme
+
+    def _move_with(self, mover) -> None:
+        """Move as every layer does, then drop the cached folding: it is recomputed at the
+        new device and precision on the next call."""
+        super()._move_with(mover)
+        if getattr(self, "_fold_cache", None) is not None:
+            self._fold_cache = None
+
+    def _fold_conductance(self, conductance: torch.Tensor | None) -> Folded:
+        """This call's folding, from the per-call conductance (validated) or else the
+        layer's own; the latter is computed once and kept, unless it requires grad. The
+        kept folding belongs to the conductance tensor and its version counter, so a new
+        tensor or an in-place edit of it refolds."""
+        g = self._conduction_edges[2] if conductance is None else conductance
+        if conductance is None and not g.requires_grad:
+            cache = self._fold_cache
+            if cache is not None and cache[0] is g and cache[1] == g._version:
+                return cache[2]
+            folded = fold_conductance(self._fold_plan, g.to(torch.float64),
+                                      self._refuse_closed_folded)
+            self._fold_cache = (g, g._version, folded)
+            return folded
+        return fold_conductance(self._fold_plan, g.to(torch.float64),
+                                self._refuse_closed_folded)
+
+    def _refuse_closed_folded(self, bucket, start: torch.Tensor, linked: torch.Tensor) -> None:
+        """Raise `ValueError` naming the groups of folded nodes in which some node reaches
+        no stored node or boundary through positive conductances this call (on any batch
+        instance) and is not held (a held node has no positive conductance at all)."""
+        reach = _reached_from(start, bucket.inner_row, bucket.inner_col, linked)
+        cut = (~reach).any(0)
+        if not bool(cut.any()):
+            return
+        groups = cut.reshape(bucket.groups, bucket.size).any(-1)
+        rows = groups.repeat_interleave(bucket.size)
+        names = [self.net.nodes[int(self.interior_idx[p])]
+                 for p in bucket.folded[rows].tolist()]
+        raise ValueError(
+            f"TransportLayer '{self.name}': storage-free nodes {names} are joined by "
+            f"conduction this call only to each other (every conductance from them to a "
+            f"stored node or a boundary is zero); nothing sets their value"
+        )
+
+    def _node_major(self, stacked: torch.Tensor, n_nodes: int) -> torch.Tensor:
+        """Stacked `(..., K * n_nodes)` -> node-major `(..., n_nodes, K)`."""
+        return stacked.reshape(*stacked.shape[:-1], self.n_species, n_nodes).transpose(-1, -2)
+
+    def _stacked_of(self, node_major: torch.Tensor) -> torch.Tensor:
+        """Node-major `(..., n_nodes, K)` -> stacked `(..., K * n_nodes)`."""
+        return node_major.transpose(-1, -2).reshape(*node_major.shape[:-2], -1)
+
+    def _node_major_f64(self, x: torch.Tensor, n_nodes: int,
+                        arg_name: str) -> tuple[torch.Tensor, bool]:
+        """`x` in the caller's layout (`(..., n_nodes, K)`, or `(..., n_nodes)` for one
+        species) as float64 node-major `(..., n_nodes, K)`, and whether it came reduced."""
+        stacked, reduced = self._to_stacked(x.to(torch.float64), n_nodes, arg_name)
+        return self._node_major(stacked, n_nodes), reduced
+
+    def _interior_sources(self, sources: torch.Tensor) -> tuple[torch.Tensor, bool]:
+        """Full-node `sources`, checked once (`_sources_interior`), as the interior rows in
+        float64 node-major `(..., n_i, K)`, and whether they came reduced."""
+        return self._node_major_f64(
+            self._sources_interior(sources.to(torch.float64)), self.n_i, "sources")
+
+    def _kept_capacity(self, capacity: torch.Tensor | None) -> torch.Tensor | None:
+        """A per-call capacity, checked, at the kept nodes; `None` stays `None` (the kept
+        layer then reads this layer's own)."""
+        if capacity is None:
+            return None
+        return self._capacity_arg(capacity).index_select(-1, self._fold_plan.kept)
+
+    def _kept_removal(self, removal: torch.Tensor | None) -> torch.Tensor | None:
+        """A per-call removal rate, checked, at the kept nodes; `None` stays `None`."""
+        if removal is None:
+            return None
+        return self._removal_arg(removal).index_select(-2, self._fold_plan.kept)
+
+    def _fold_sources(self, folded: Folded, src_n: torch.Tensor):
+        """`(sources_kept, ys)`: the interior sources `src_n` (from `_interior_sources`)
+        with the folded nodes' handed on to their neighbours, in full node order with the
+        folded rows zero, and the folded nodes' own source terms their recovery reads."""
+        src_k, ys = fold_sources(self._fold_plan, folded, src_n)
+        sources_kept = src_k.new_zeros(src_k.shape[:-2] + (self.net.n, self.n_species))
+        sources_kept = sources_kept.index_copy(-2, self._kept.interior_idx, src_k)
+        return sources_kept, ys
+
+    def _recover(self, folded, ys, x_kept, x_boundary, x_held, y_scale=1.0) -> torch.Tensor:
+        """The interior values, node-major, from the kept nodes' (see `_folding.recover`)."""
+        return recover(
+            self._fold_plan, folded, ys, x_kept, x_boundary,
+            kept_nodes=self._kept.interior_idx, boundary_idx=self.boundary_idx,
+            n=self.net.n,
+            x_held=x_held, y_scale=y_scale,
+        )
+
+    def _folded_held_sources_dropped(self, folded: Folded, q: torch.Tensor,
+                                     sources: torch.Tensor,
+                                     conductance: torch.Tensor | None) -> int:
+        """`_held_sources_dropped` for a folded layer, skipped when no node can be held.
+
+        A folded node is held only when every conductance touching it is zero this call,
+        and the folding then reports that some conductance there is zero (its `idle` is not
+        `None`). The other storage-free nodes (with throughflow) are the kept layer's.
+        Without either, the count is 0 and costs nothing."""
+        if not self._kept._has_storage_free and all(
+                idle is None for *_, idle in folded.blocks):
+            return 0
+        return self._held_sources_dropped(
+            q, sources, self._conduction_edges[2] if conductance is None else conductance)
+
+    def _step_folded(
+        self, x, q, sources, x_boundary, dt, *, on_failure, capacity, capacity_prev, removal,
+        transmission, conductance, want_transfer, diagnostics, x_boundary_end,
+        x_boundary_rates, scheme, sources_prev,
+    ):
+        """`_step` for a layer with folded nodes: step the kept nodes on the folded network,
+        then recover the folded nodes from the kept nodes' end-of-step values, the boundary
+        values at the end of the step and the sources. The boundary transfer is computed on
+        the whole network from the time integrals, recovered the same way (the recovery is
+        linear), so heat leaving through a folded node is counted where it arrives. With
+        `sources_prev` (trapezoidal) the kept nodes see both ends' folded sources, and the
+        folded nodes' time integrals read the mean of both ends' source terms."""
+        dtype = torch.float64
+        n_i = self.n_i
+        x_n, reduced = self._node_major_f64(x, n_i, "x")
+        g = self._conductance_arg(conductance)
+        folded = self._fold_conductance(g)
+        src_n = self._interior_sources(sources)[0]
+        prev_kept = None
+        if sources_prev is None:
+            sources_kept, ys = self._fold_sources(folded, src_n)
+        else:
+            # Both ends' sources folded in one batched pass, stacked on a leading axis; the
+            # recovery reads the end-of-step source terms only.
+            both = torch.stack(torch.broadcast_tensors(
+                src_n, self._interior_sources(sources_prev)[0]))
+            both_kept, both_ys = self._fold_sources(folded, both)
+            sources_kept, prev_kept = both_kept[0], both_kept[1]
+            ys = None if both_ys is None else [y[0] for y in both_ys]
+        kept = self._kept
+        if kept.n_i == 0:           # every node folded: no stored node, nothing to step
+            result = x_n.new_zeros(x_n.shape[:-2] + (0, self.n_species))
+            integral = x_n.new_zeros(x_n.shape[:-2] + (0,))
+        else:
+            result, integral = kept._step(
+                x_n.index_select(-2, self._fold_plan.kept), q, sources_kept, x_boundary, dt,
+                on_failure=on_failure, capacity=self._kept_capacity(capacity),
+                capacity_prev=self._kept_capacity(capacity_prev),
+                removal=self._kept_removal(removal), transmission=transmission,
+                conductance=folded.conductance,
+                want_transfer=want_transfer, diagnostics=diagnostics,
+                x_boundary_end=x_boundary_end, x_boundary_rates=x_boundary_rates,
+                return_integral=True, scheme=scheme, sources_prev=prev_kept,
+            )
+        if diagnostics is not None:
+            diagnostics["held_sources_dropped"] = self._folded_held_sources_dropped(
+                folded, q, sources, g)
+        xb_n, _ = self._node_major_f64(
+            x_boundary if x_boundary_end is None else x_boundary_end, self.n_b, "x_boundary")
+        if isinstance(result, SolveResult):
+            full = self._recover(folded, ys, self._node_major(result.x, kept.n_i), xb_n, x_n)
+            return dataclasses.replace(result, x=self._stacked_of(full)), None
+        x_new = self._recover(folded, ys, result.to(dtype), xb_n, x_n)
+        if on_failure == "return":  # every node folded: the recovery alone, no solve
+            return _recovered_only(self._stacked_of(x_new)), None
+        x_new = self._from_stacked(self._stacked_of(x_new).to(x.dtype), n_i, reduced)
+        if not want_transfer:
+            return x_new, None
+        xb_s, _ = self._to_stacked(x_boundary.to(dtype), self.n_b, "x_boundary")
+        if sources_prev is not None:     # the folded nodes' source terms, both ends' mean
+            _, ys = self._fold_sources(
+                folded, self._interior_sources(0.5 * (sources_prev + sources))[0])
+        x_int = self._recover(folded, ys, self._node_major(integral, kept.n_i),
+                              dt * self._node_major(xb_s, self.n_b), dt * x_n, y_scale=dt)
+        op = self._advection_operator(
+            q.to(dtype), self._capacity_arg(capacity),
+            self._coefficient_map(self._removal_arg(removal),
+                                  self._transmission_arg(transmission), g),
+        )
+        transfer = op.boundary_net_inflow(self._stacked_of(x_int), dt * xb_s)
+        return x_new, self._from_stacked(transfer.to(x.dtype), self.n_b, reduced)
+
+    def _steady_folded(self, q, sources, x_boundary, *, on_failure, capacity, removal,
+                       transmission, conductance, diagnostics):
+        """`steady` for a layer with folded nodes: the kept nodes' steady state on the
+        folded network, then the folded nodes recovered from it. A folded node nothing
+        passes through is refused first, as every storage-free node is."""
+        dtype = torch.float64
+        g = self._conductance_arg(conductance)
+        self._refuse_idle_storage_free(q.to(dtype),
+                                       self._conduction_edges[2] if g is None else g)
+        folded = self._fold_conductance(g)
+        src_n, reduced = self._interior_sources(sources)
+        sources_kept, ys = self._fold_sources(folded, src_n)
+        xb_n, _ = self._node_major_f64(x_boundary, self.n_b, "x_boundary")
+        kept = self._kept
+        if kept.n_i == 0:           # every node folded: the recovery alone
+            batch = torch.broadcast_shapes(sources_kept.shape[:-2], xb_n.shape[:-2])
+            result = sources_kept.new_zeros(batch + (0, self.n_species))
+        else:
+            result = kept.steady(
+                q, sources_kept, x_boundary, on_failure=on_failure,
+                capacity=self._kept_capacity(capacity), removal=self._kept_removal(removal),
+                transmission=transmission, conductance=folded.conductance,
+                diagnostics=diagnostics,
+            )
+        if isinstance(result, SolveResult):
+            full = self._recover(folded, ys, self._node_major(result.x, kept.n_i), xb_n, None)
+            return dataclasses.replace(result, x=self._stacked_of(full))
+        x = self._recover(folded, ys, result, xb_n, None)
+        if on_failure == "return":  # every node folded: the recovery alone, no solve
+            return _recovered_only(self._stacked_of(x))
+        return self._from_stacked(self._stacked_of(x), self.n_i, reduced)
+
+    def _held_steady(self, sources, x_boundary, hold, conductance) -> torch.Tensor:
+        """`steady(..., hold=...)`: the stored nodes held at `hold`, the folded nodes
+        recovered from them, the boundary values and the sources."""
+        if bool((self.storage_free_mask & ~self.folded_mask).any()):
+            raise NotImplementedError(
+                f"TransportLayer '{self.name}': a steady solve holding the stored nodes "
+                f"(hold=) is not implemented for storage-free nodes with throughflow"
+            )
+        if getattr(self, "_fold_plan", None) is None:
+            return hold
+        x_n, reduced = self._node_major_f64(hold, self.n_i, "hold")
+        folded = self._fold_conductance(self._conductance_arg(conductance))
+        _, ys = self._fold_sources(folded, self._interior_sources(sources)[0])
+        xb_n, _ = self._node_major_f64(x_boundary, self.n_b, "x_boundary")
+        x = self._recover(folded, ys, x_n.index_select(-2, self._fold_plan.kept), xb_n, x_n)
+        return self._from_stacked(self._stacked_of(x).to(hold.dtype), self.n_i, reduced)
 
     def _effective(self, cap: torch.Tensor) -> torch.Tensor:
         """`cap` with 1 at the storage-free nodes: their rows are balances of amount rates,
@@ -864,7 +1212,10 @@ class TransportLayer(TopologyGuard):
             m = self.n_species * self.n_i
             amount = values * cap.detach().to(values.dtype).index_select(-1, row % self.n_i)
             batch = torch.broadcast_shapes(amount.shape[:-1], op.diagonal().shape[:-1])
-            amount = amount.expand(batch + amount.shape[-1:]).reshape(-1, amount.shape[-1])
+            # `numel()` rather than -1: a network with no off-diagonal entry at all (a lone
+            # stored node) has no entries to infer the batch size from
+            amount = amount.expand(batch + amount.shape[-1:]).reshape(
+                torch.Size(batch).numel(), amount.shape[-1])
             diag = op.diagonal().expand(batch + (m,)).reshape(-1, m)
             zeros = amount.new_zeros(amount.shape[0], m)
             column = zeros.index_add(-1, col, amount)
@@ -914,129 +1265,14 @@ class TransportLayer(TopologyGuard):
     def _resolve_solver(
         self, batch_size: int, *, op=None, rhs: torch.Tensor | None = None,
     ) -> dict:
-        """The kwargs `solvers.select.solve` should see for THIS layer's `linear_solver`
-        (`method`, `preconditioner`, `restart`) -- resolved PER SOLVE, used
-        by every linear solve this layer runs: `steady`, `_implicit_step_sparse` and
-        `_trapezoidal_step_sparse`'s differentiable path AND their `on_failure="return"`
-        early-return path, and (via the resolved kwargs `_LinearSolve` saves on its `ctx`)
-        the backward adjoint too.
-
-        `batch_size` is `rhs.shape[:-1].numel()`, the flat instance count this solve is
-        about to run at. `op`/`rhs`, when given (the `on_failure="return"` call sites always
-        give them; `_LinearSolve.forward` gives them too, though it never needs them -- see
-        below), are the just-built operator and right-hand side, used ONLY to decide whether
-        `"auto"` may pick `sparse_direct` under grad (hazard 2 below); no solve reads them.
-
-        `"auto"` (see docs/design/solvers.md#transport-solver-choice): resolves to
-        `method="sparse_direct"` when
-        `batch_size <= _SPARSE_DIRECT_MAX_BATCH` (the SAME constant `solvers.select` uses for
-        its own, separate "auto" -- imported, never re-hard-coded) and to plain `gmres`
-        above it. `gmres_jacobi`/`gmres_ilu` are never chosen by `auto`: the benchmark found
-        `gmres_ilu` the clear loser at every ensemble measured (its per-instance ILU
-        factorisation cost dominates, see the COST note below) and the gmres-vs-gmres_jacobi
-        ordering ambiguous, so there is no evidence to prefer either preconditioner over
-        plain gmres as the fallback. `"gmres"` (explicit) resolves
-        to plain gmres unconditionally, regardless of `batch_size`.
-
-        TWO HAZARDS `"auto"` must handle before it can hand back `sparse_direct`, both
-        fall-backs to plain `gmres` (never a raise: `auto` is a promise to choose a backend
-        that works, the same contract `solvers.select`'s own `auto` makes):
-
-        1. **SciPy absent.** `sparse_direct` needs SciPy (`noodl-physics[sparse]`, an optional
-           extra). When it is not importable, `auto` falls back to `gmres` and warns ONCE
-           per process (`_WARNED_AUTO_NEEDS_SCIPY`, mirroring `solvers.select`'s own
-           `_WARNED_SPARSE_DIRECT_NEEDS_SCIPY` pattern and for the same reason: a per-solve
-           warning at this default's every-step call frequency would be unusable noise).
-        2. **A grad-requiring `on_failure="return"` solve.** `_LinearSolve.forward`/
-           `.backward` always resolve `"auto"` INSIDE `torch.no_grad()` (`forward`'s own
-           `with torch.no_grad(): ... resolve_solver(...)`; `backward` never re-resolves at
-           all, it reuses whatever `forward` picked), so `torch.is_grad_enabled()` is always
-           False there and this hazard cannot fire on the differentiable path -- `op`/`rhs`
-           passed from that path are accepted but never actually inspected because of this.
-           The THREE `on_failure="return"` early-return paths (`steady`,
-           `_implicit_step_sparse`, `_trapezoidal_step_sparse`), by contrast, call
-           `_resolve_solver` OUTSIDE any `no_grad`: an explicit `method="sparse_direct"`
-           reaching `solvers.select.solve` there would raise `RuntimeError` (see
-           `select._sparse_direct`) whenever grad mode is enabled and the rhs or the
-           operator's own sparse values require grad -- an eligibility refusal, not a
-           numerical failure, so `on_failure="return"` would NOT catch it. `auto` must not
-           raise for a reason the caller did not ask for (the same principle
-           `solvers.select`'s own `_auto_sparse_triplet` states), so when
-           `torch.is_grad_enabled()` and either `rhs.requires_grad` or the operator's
-           assembled sparse `values` tensor requires grad, `auto` falls back to `gmres`
-           silently (this is a routing fact about THIS solve, not an environment fault, so
-           it never warns).
-
-        `"gmres_jacobi"`/`"gmres_ilu"` resolve to `method="gmres"` with a real
-        preconditioner -- `"jacobi"` (`1 / diag(A)`) or `"ilu"` (SciPy's incomplete LU of
-        `op.assemble_sparse()`, per instance) -- rather than plain GMRES under a name that
-        promises preconditioning. `preconditioner` is otherwise the only thing that changes:
-        the backend is still `"gmres"` (preconditioning is an internal detail of how gmres
-        converges, not a distinct backend `diagnostics["linear"]["backend"]` would name
-        differently). `"sparse_direct"` and `"direct"` pass straight through:
-        `preconditioner`/`restart` are irrelevant to both and `solvers.select.solve` ignores
-        them for those two methods.
-
-        `"gmres_ilu"` COST: `"ilu"` factorises a fresh SciPy `spilu` PER
-        INSTANCE on every `gmres()` call (see `iterative._gmres_ilu_preconditioner`), and a
-        differentiable transport step calls `gmres` from BOTH `_LinearSolve.forward` and
-        `.backward` -- so one transport step under `"gmres_ilu"` pays that per-instance
-        factorisation TWICE, on every step, not once and reused across steps. `"sparse_direct"`
-        instead pays one full LU per solve (also per instance, also not reused) and then an
-        exact solve with no outer iteration; `"gmres_ilu"` pays a cheaper, incomplete
-        factorisation on both passes and then still iterates GMRES to convergence. This cost
-        shape, not iteration counts alone, is why the benchmark found it the clear loser
-        at every ensemble measured and why `auto` never chooses it.
+        """The kwargs `solvers.select.solve` should see for THIS layer's `linear_solver`,
+        resolved PER SOLVE: `select.transport_solver_kwargs` holds the rule (the "auto"
+        policy and its two hazards). Every linear solve this layer runs goes through here,
+        the backward adjoint via the kwargs `_LinearSolve` saves.
         """
-        if self.linear_solver == "gmres_jacobi":
-            return {"method": "gmres", "preconditioner": "jacobi", "restart": 30}
-        if self.linear_solver == "gmres_ilu":
-            return {"method": "gmres", "preconditioner": "ilu", "restart": 30}
-        if self.linear_solver == "gmres":
-            return {"method": "gmres", "preconditioner": None, "restart": 30}
-        if self.linear_solver == "auto":
-            if batch_size <= _SPARSE_DIRECT_MAX_BATCH and self._auto_sparse_direct_ok(op, rhs):
-                return {"method": "sparse_direct", "preconditioner": None, "restart": 30}
-            return {"method": "gmres", "preconditioner": None, "restart": 30}
-        return {"method": self.linear_solver, "preconditioner": None, "restart": 30}
-
-    def _auto_sparse_direct_ok(self, op, rhs: torch.Tensor | None) -> bool:
-        """Whether `"auto"` may resolve to `sparse_direct` right now -- the two hazards in
-        `_resolve_solver`'s docstring, hazard 2 first (cheaper: no import, and usually a
-        no-op because `op`/`rhs` are `None` or grad is disabled), hazard 1 second. Within
-        hazard 2 itself, `rhs.requires_grad` is tested before `assemble_sparse()` is ever
-        called: it is a plain attribute read, whereas `assemble_sparse()` is a real sparse
-        assembly, so a grad-enabled `on_failure="return"` solve whose rhs already requires
-        grad returns False without paying for it.
-        """
-        global _WARNED_AUTO_NEEDS_SCIPY
-        if op is not None and rhs is not None and torch.is_grad_enabled():
-            if rhs.requires_grad:
-                return False
-            values_require_grad = False
-            assemble_sparse = getattr(op, "assemble_sparse", None)
-            if assemble_sparse is not None:
-                triplet = assemble_sparse()
-                values_require_grad = triplet is not None and bool(triplet[2].requires_grad)
-            if values_require_grad:
-                return False
-        if not _scipy_sparse_linalg_importable():
-            if not _WARNED_AUTO_NEEDS_SCIPY:
-                _WARNED_AUTO_NEEDS_SCIPY = True
-                warnings.warn(
-                    f"noodl: TransportLayer '{self.name}' linear_solver='auto' would have "
-                    f"factorised this solve with SciPy's sparse LU (batch size at or under "
-                    f"{_SPARSE_DIRECT_MAX_BATCH}), but scipy could not be imported, so it "
-                    f"fell back to plain gmres. The answer is correct; it is slower at small "
-                    f"batches (see benchmarks/transport_solver_bench.py). Install "
-                    f"the extra to get the documented default: pip install noodl-physics[sparse]. "
-                    f"This warning is issued once per process; diagnostics['linear']"
-                    f"['backend'] reports the backend that actually ran on every solve.",
-                    RuntimeWarning,
-                    stacklevel=3,
-                )
-            return False
-        return True
+        return transport_solver_kwargs(
+            self.linear_solver, batch_size, op=op, rhs=rhs, layer_name=self.name
+        )
 
     def _conduction_matrix(self, dtype: torch.dtype) -> torch.Tensor | None:
         """The (..., n, n) conduction Laplacian `A_c diag(g) A_c^T`, or None if no conduction.
@@ -1048,23 +1284,17 @@ class TransportLayer(TopologyGuard):
         so the reference skips a subtraction instead of allocating n^2 doubles to subtract
         nothing.
 
-        `index_add` on a flattened (n*n,) view gives the same four entries per edge the
-        einsum form did (+g at (s, s) and (t, t), -g at (s, t) and (t, s)), out of place and
-        broadcasting over any leading batch dims `g` carries.
+        One `index_add` of the shared stencil's COO triplets on a flattened (n*n,) view, out of
+        place and broadcasting over any leading batch dims `g` carries.
         """
         if self._conduction_edges is None:
             return None
         csrc, ctgt, g = self._conduction_edges
         g = g.to(dtype)
         n = self.net.n
+        row, col, values = laplacian_coo(csrc, ctgt, g)
         flat = torch.zeros(g.shape[:-1] + (n * n,), dtype=dtype, device=g.device)
-        for rows, cols, sign in (
-            (csrc, csrc, 1.0),
-            (ctgt, ctgt, 1.0),
-            (csrc, ctgt, -1.0),
-            (ctgt, csrc, -1.0),
-        ):
-            flat = flat.index_add(-1, rows * n + cols, sign * g)
+        flat = flat.index_add(-1, row * n + col, values)
         return flat.reshape(g.shape[:-1] + (n, n))
 
     def _capacity_arg(self, capacity: torch.Tensor | None) -> torch.Tensor:
@@ -1192,6 +1422,8 @@ class TransportLayer(TopologyGuard):
         """
         if len(self.flow_kinds) == 1:
             return selector(q, self.flow_kinds[0])
+        if not self.flow_kinds:
+            return q.new_zeros(q.shape[:-1] + (0, self.net.n))
         return torch.cat(
             [
                 selector(q[..., lo:hi], kind)
@@ -1309,10 +1541,17 @@ class TransportLayer(TopologyGuard):
                 f"{tuple(sources.shape)}. Boundary rows must be zero."
             ) from None
         node_dim = sources.dim() - (1 if reduced else 2)
-        self._refuse_nonzero_rows(sources, node_dim, self.boundary_idx, self.boundary, "boundary")
-        self._refuse_nonzero_rows(
-            sources, node_dim, self.inactive_idx, self._inactive_names, "inactive"
-        )
+        # One check (one wait for the device) over the boundary and inactive rows together;
+        # only when it fails are they told apart, to name the nodes.
+        outside = (self.inactive_idx if not self.boundary_idx.numel()
+                   else self.boundary_idx if not self.inactive_idx.numel()
+                   else torch.cat((self.boundary_idx, self.inactive_idx)))
+        if outside.numel() and bool((sources.index_select(node_dim, outside) != 0).any()):
+            self._refuse_nonzero_rows(sources, node_dim, self.boundary_idx, self.boundary,
+                                      "boundary")
+            self._refuse_nonzero_rows(
+                sources, node_dim, self.inactive_idx, self._inactive_names, "inactive"
+            )
         return sources.index_select(node_dim, self.interior_idx)
 
     def _refuse_nonzero_rows(self, sources, node_dim, idx, names, role) -> None:
@@ -1331,7 +1570,7 @@ class TransportLayer(TopologyGuard):
             )
 
     def rate(self, x, q, sources, x_boundary, *, capacity=None, removal=None,
-             transmission=None) -> torch.Tensor:
+             transmission=None, conductance=None) -> torch.Tensor:
         """dx/dt = M x + N x_b + sources / capacity at (x, q); x's layout and dtype.
 
         The balance `Model.residuals` reports for a transport layer, and the reference the
@@ -1340,7 +1579,9 @@ class TransportLayer(TopologyGuard):
         this call only; see `_capacity_arg`. `removal` (keyword-only) is a per-call
         first-order removal rate (1/s) replacing the construction-time one; see
         `_removal_arg`. `transmission` (keyword-only) is a per-call transmission replacing
-        the construction-time one; see `_transmission_arg`.
+        the construction-time one; see `_transmission_arg`. `conductance` (keyword-only) is
+        a per-call conduction conductance replacing the construction-time one; see
+        `_conductance_arg`.
         """
         self._require_current_topology()
         dtype = torch.float64
@@ -1348,7 +1589,8 @@ class TransportLayer(TopologyGuard):
         x_s, reduced = self._to_stacked(x.to(dtype), self.n_i, "x")
         op = self._advection_operator(
             q.to(dtype), cap, self._coefficient_map(self._removal_arg(removal),
-                                                    self._transmission_arg(transmission))
+                                                    self._transmission_arg(transmission),
+                                                    self._conductance_arg(conductance))
         )
         xb_s, _ = self._to_stacked(x_boundary.to(dtype), self.n_b, "x_boundary")
         src_s, _ = self._to_stacked(
@@ -1375,11 +1617,14 @@ class TransportLayer(TopologyGuard):
         capacity_prev: torch.Tensor | None = None,
         removal: torch.Tensor | None = None,
         transmission: torch.Tensor | None = None,
+        conductance: torch.Tensor | None = None,
         diagnostics: dict | None = None,
         x_boundary_end: torch.Tensor | None = None,
         x_boundary_rates: tuple[torch.Tensor, torch.Tensor] | None = None,
+        scheme: str | None = None,
+        sources_prev: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        """Advance one timestep under `self.scheme`.
+        """Advance one timestep under `self.scheme` (or this call's `scheme`).
 
         `sources` is in FULL node order, not just this layer's interior nodes;
         see the module docstring and `_sources_interior`. `on_failure` (keyword-only,
@@ -1416,11 +1661,15 @@ class TransportLayer(TopologyGuard):
         when. `scheme="exact"` has no linear solve, so it leaves `diagnostics` untouched.
         A layer with storage-free nodes also gets `"held_sources_dropped"`: the number of
         nonzero source entries at storage-free nodes nothing passes through, which the step
-        drops (see the class docstring).
+        drops (see the class docstring); under every scheme when the layer folds some of
+        them, and from the implicit scheme otherwise.
 
         `removal` (keyword-only) is a per-call first-order removal rate (1/s) replacing the
         construction-time one; see `_removal_arg`. `transmission` (keyword-only) is a
         per-call transmission replacing the construction-time one; see `_transmission_arg`.
+        `conductance` (keyword-only) is a per-call conduction conductance replacing the
+        construction-time one, `(..., b_c)` in the order of `conduction_edges`; see
+        `_conductance_arg`.
 
         `x_boundary_end` (keyword-only, `scheme="exact"` only, default `None`): the boundary
         values at the END of the step. Given, `x_boundary` is their value at the start and
@@ -1437,14 +1686,30 @@ class TransportLayer(TopologyGuard):
         line: a zone flushing much faster than the step lags its boundary by its flushing
         time times the boundary's rate at the step's END, which the straight line's chord
         misses by about `h/2` times its curvature.
+
+        `scheme` (keyword-only, default `None`: the layer's own) is this call's scheme,
+        `"exact"`, `"implicit"` or `"trapezoidal"`: a caller that integrates the rest of a
+        coupled model with one rule per step (backward Euler on a restart, trapezoidal
+        otherwise, as a circuit does) steps this layer with the same rule. A layer with
+        storage-free nodes that keep an algebraic row (`storage_free` with throughflow)
+        refuses any scheme but `"implicit"`, as at construction.
+
+        `sources_prev` (keyword-only, `"trapezoidal"` only, default `None`): the sources at
+        the START of the step, laid out as `sources`. Given, the trapezoidal rule integrates
+        them as it integrates the state, `dt/2 (sources_prev + sources)`, instead of holding
+        `sources` over the step: the Crank-Nicolson step of a source that changes over the
+        step (the Joule heat of a device whose current changes). Folded nodes are recovered
+        from `sources`, the values at the end of the step. Any other scheme refuses it
+        (`ValueError`).
         """
         self._require_current_topology()
         return self._step(
             x, q, sources, x_boundary, dt,
             on_failure=on_failure, capacity=capacity, capacity_prev=capacity_prev,
-            removal=removal, transmission=transmission, want_transfer=False,
-            diagnostics=diagnostics,
+            removal=removal, transmission=transmission, conductance=conductance,
+            want_transfer=False, diagnostics=diagnostics,
             x_boundary_end=x_boundary_end, x_boundary_rates=x_boundary_rates,
+            scheme=scheme, sources_prev=sources_prev,
         )[0]
 
     def step_with_transfer(
@@ -1460,10 +1725,14 @@ class TransportLayer(TopologyGuard):
         capacity_prev: torch.Tensor | None = None,
         removal: torch.Tensor | None = None,
         transmission: torch.Tensor | None = None,
+        conductance: torch.Tensor | None = None,
         diagnostics: dict | None = None,
+        scheme: str | None = None,
+        sources_prev: torch.Tensor | None = None,
     ) -> TransportStep:
-        """Advance one timestep under `self.scheme`, like `step`, and also report the
-        time-integrated amount that crossed each boundary node during the step.
+        """Advance one timestep under `self.scheme` (or this call's `scheme`), like `step`,
+        and also report the time-integrated amount that crossed each boundary node during
+        the step.
 
         Returns `TransportStep(x, boundary_transfer)`. `boundary_transfer` has this layer's
         boundary layout: `(..., n_b)` for one species, or `(..., n_b, K)` stacked, matching
@@ -1493,8 +1762,9 @@ class TransportLayer(TopologyGuard):
         status alongside. `capacity`/`capacity_prev` behave exactly as in `step`.
         `diagnostics` (keyword-only) behaves exactly as in `step`. `removal` (keyword-only)
         is a per-call first-order removal rate (1/s) replacing the construction-time one;
-        see `_removal_arg`. `transmission` (keyword-only) likewise replaces the
-        construction-time transmission; see `_transmission_arg`.
+        see `_removal_arg`. `transmission` and `conductance` (keyword-only) likewise replace
+        the construction-time transmission and conduction conductance; see
+        `_transmission_arg`, `_conductance_arg`. `scheme` and `sources_prev` are `step`'s.
         """
         self._require_current_topology()
         if on_failure == "return":
@@ -1506,8 +1776,9 @@ class TransportLayer(TopologyGuard):
         result, transfer = self._step(
             x, q, sources, x_boundary, dt,
             on_failure=on_failure, capacity=capacity, capacity_prev=capacity_prev,
-            removal=removal, transmission=transmission, want_transfer=True,
-            diagnostics=diagnostics,
+            removal=removal, transmission=transmission, conductance=conductance,
+            want_transfer=True, diagnostics=diagnostics, scheme=scheme,
+            sources_prev=sources_prev,
         )
         return TransportStep(result, transfer)
 
@@ -1524,24 +1795,36 @@ class TransportLayer(TopologyGuard):
         capacity_prev: torch.Tensor | None = None,
         removal: torch.Tensor | None = None,
         transmission: torch.Tensor | None = None,
+        conductance: torch.Tensor | None = None,
         want_transfer: bool = False,
         diagnostics: dict | None = None,
         x_boundary_end: torch.Tensor | None = None,
         x_boundary_rates: tuple[torch.Tensor, torch.Tensor] | None = None,
+        return_integral: bool = False,
+        scheme: str | None = None,
+        sources_prev: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         """Shared body of `step` and `step_with_transfer`; see both for the public contract.
 
         Returns `(x_new, boundary_transfer)`, `boundary_transfer` `None` unless
         `want_transfer` (and always `None` on the `on_failure="return"` early-return path,
         which only `step` can reach -- `step_with_transfer` refuses that combination before
-        calling here).
+        calling here). With `return_integral` (the folded layer's own use, see
+        `_step_folded`) the second entry is instead the state's time integral over the
+        step, stacked, in float64, when `want_transfer`.
         """
         if on_failure not in ("raise", "return"):
             raise ValueError(
                 f"TransportLayer '{self.name}': unknown on_failure {on_failure!r}; "
                 f"expected 'raise' or 'return'"
             )
-        if on_failure == "return" and self.scheme == "exact":
+        scheme = self._call_scheme(scheme)
+        if sources_prev is not None and scheme != "trapezoidal":
+            raise ValueError(
+                f"TransportLayer '{self.name}': sources_prev (the sources at the start of the "
+                f"step) is integrated by scheme='trapezoidal' only, not by scheme={scheme!r}"
+            )
+        if on_failure == "return" and scheme == "exact":
             # Both `on_failure` checks are ARGUMENT VALIDITY and both belong here, before any
             # work. `on_failure='return'` is wrong for this scheme whatever the shapes.
             raise ValueError(
@@ -1551,18 +1834,30 @@ class TransportLayer(TopologyGuard):
                 f"on_failure='raise', or a scheme with a linear solve ('implicit', "
                 f"'trapezoidal')."
             )
-        if x_boundary_end is not None and (self.scheme != "exact" or want_transfer):
+        if x_boundary_end is not None and (scheme != "exact" or want_transfer):
             raise ValueError(
                 f"TransportLayer '{self.name}': x_boundary_end (a boundary linear in time "
                 f"over the step) is supported by step() with scheme='exact' only, not by "
-                f"scheme={self.scheme!r}" + (" with the boundary transfer" if want_transfer
-                                             else "")
+                f"scheme={scheme!r}" + (" with the boundary transfer" if want_transfer
+                                        else "")
             )
         if x_boundary_rates is not None and x_boundary_end is None:
             raise ValueError(
                 f"TransportLayer '{self.name}': x_boundary_rates needs x_boundary_end (the "
                 f"boundary's values at both ends of the step)"
             )
+        if getattr(self, "_fold_plan", None) is not None:  # absent from an older pickle
+            return self._step_folded(
+                x, q, sources, x_boundary, dt, on_failure=on_failure, capacity=capacity,
+                capacity_prev=capacity_prev, removal=removal, transmission=transmission,
+                conductance=conductance, want_transfer=want_transfer, diagnostics=diagnostics,
+                x_boundary_end=x_boundary_end, x_boundary_rates=x_boundary_rates,
+                scheme=scheme, sources_prev=sources_prev,
+            )
+        if sources_prev is not None:
+            # The trapezoidal rule's two source terms, dt/2 (sources_prev + sources): the
+            # step's right-hand side reads the sources once, as dt times their mean.
+            sources = 0.5 * (sources_prev + sources)
         out_dtype = x.dtype
         dtype = torch.float64
         if self.dilution is not None:
@@ -1573,8 +1868,9 @@ class TransportLayer(TopologyGuard):
         cap_prev_t = cap_t if capacity_prev is None else self._capacity_arg(capacity_prev)
         rem = self._removal_arg(removal)
         trans = self._transmission_arg(transmission)
-        coef_map = self._coefficient_map(rem, trans)
-        if self.scheme == "exact" and not torch.equal(cap_prev_t, cap_t):
+        cond = self._conductance_arg(conductance)
+        coef_map = self._coefficient_map(rem, trans, cond)
+        if scheme == "exact" and not torch.equal(cap_prev_t, cap_t):
             raise ValueError(
                 f"TransportLayer '{self.name}': scheme='exact' has no changing-capacity "
                 f"form (the exponential step assumes a fixed storage over the step); use "
@@ -1582,7 +1878,7 @@ class TransportLayer(TopologyGuard):
             )
         x_s, reduced = self._to_stacked(x, self.n_i, "x")
         x_s = x_s.to(dtype)
-        if self.scheme == "exact":
+        if scheme == "exact":
             op = self._advection_operator(q.to(dtype), cap_t, coef_map)
             xb_s, _ = self._to_stacked(x_boundary.to(dtype), self.n_b, "x_boundary")
             src_s, _ = self._to_stacked(
@@ -1632,23 +1928,23 @@ class TransportLayer(TopologyGuard):
                 forcing_poly=poly,
             )
             result = expm.x
-        elif self.scheme == "implicit":
+        elif scheme == "implicit":
             result, reduced = self._implicit_step_sparse(
                 x, q, sources, x_boundary, dt, on_failure, cap_t, cap_prev_t,
-                diagnostics=diagnostics, removal=rem, transmission=trans,
+                diagnostics=diagnostics, removal=rem, transmission=trans, conductance=cond,
             )
             if on_failure == "return":
                 return result, None
-        elif self.scheme == "trapezoidal":
+        elif scheme == "trapezoidal":
             result, reduced = self._trapezoidal_step_sparse(
                 x, q, sources, x_boundary, dt, on_failure, cap_t, cap_prev_t,
-                diagnostics=diagnostics, removal=rem, transmission=trans,
+                diagnostics=diagnostics, removal=rem, transmission=trans, conductance=cond,
             )
             if on_failure == "return":
                 return result, None
         else:
             raise ValueError(
-                f"TransportLayer '{self.name}': unknown scheme {self.scheme!r}; "
+                f"TransportLayer '{self.name}': unknown scheme {scheme!r}; "
                 f"valid schemes are 'exact', 'implicit', 'trapezoidal'"
             )
 
@@ -1656,15 +1952,17 @@ class TransportLayer(TopologyGuard):
         if want_transfer:
             xb_s_full, _ = self._to_stacked(x_boundary.to(dtype), self.n_b, "x_boundary")
             op_t = (
-                op if self.scheme == "exact"
+                op if scheme == "exact"
                 else self._advection_operator(q.to(dtype), cap_t, coef_map)
             )
-            if self.scheme == "implicit":
+            if scheme == "implicit":
                 x_int = dt * result
-            elif self.scheme == "trapezoidal":
+            elif scheme == "trapezoidal":
                 x_int = 0.5 * dt * (x_s + result)
             else:                       # exact: the accumulator, computed with integrate=True
                 x_int = expm.integral
+            if return_integral:
+                return self._from_stacked(result.to(out_dtype), self.n_i, reduced), x_int
             transfer_s = op_t.boundary_net_inflow(x_int, dt * xb_s_full)
 
         return (
@@ -1677,9 +1975,20 @@ class TransportLayer(TopologyGuard):
         self, q: torch.Tensor, sources: torch.Tensor, x_boundary: torch.Tensor,
         *, on_failure: str = "raise", capacity: torch.Tensor | None = None,
         removal: torch.Tensor | None = None, transmission: torch.Tensor | None = None,
+        conductance: torch.Tensor | None = None,
         diagnostics: dict | None = None,
+        hold: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Solve `0 = M x + N x_b + sources / capacity` for the steady-state `x`.
+
+        `hold` (keyword-only, default `None`): the values at which the nodes that store an
+        amount are HELD, laid out as `x`. Given, only the nodes that store none are solved
+        for (the folded nodes, from their algebraic balance at those values): the
+        consistent initial point of a layer whose stored nodes start at given values, as a
+        circuit's capacitor holds its start voltage there (`Model.steady(..., mode=
+        "initial")`). A layer with no storage-free node returns `hold` itself. A
+        storage-free node with throughflow (an algebraic row a linear solve would need) is
+        refused with it (`NotImplementedError`).
 
         `sources` is in FULL node order, not just this layer's interior nodes;
         see the module docstring and `_sources_interior`. `on_failure="raise"` (the
@@ -1700,14 +2009,23 @@ class TransportLayer(TopologyGuard):
         docstring; the `on_failure="return"` path already gives the caller the full
         `SolveResult` directly and leaves `diagnostics` untouched. `removal` (keyword-only)
         is a per-call first-order removal rate (1/s) replacing the construction-time one;
-        see `_removal_arg`. `transmission` (keyword-only) likewise replaces the
-        construction-time transmission; see `_transmission_arg`.
+        see `_removal_arg`. `transmission` and `conductance` (keyword-only) likewise replace
+        the construction-time transmission and conduction conductance; see
+        `_transmission_arg`, `_conductance_arg`.
         """
         self._require_current_topology()
         if on_failure not in ("raise", "return"):
             raise ValueError(
                 f"TransportLayer '{self.name}': unknown on_failure {on_failure!r}; "
                 f"expected 'raise' or 'return'"
+            )
+        if hold is not None:
+            return self._held_steady(sources, x_boundary, hold, conductance)
+        if getattr(self, "_fold_plan", None) is not None:  # absent from an older pickle
+            return self._steady_folded(
+                q, sources, x_boundary, on_failure=on_failure, capacity=capacity,
+                removal=removal, transmission=transmission, conductance=conductance,
+                diagnostics=diagnostics,
             )
         dtype = torch.float64
         cap_t = self._capacity_arg(capacity).to(dtype)
@@ -1716,7 +2034,8 @@ class TransportLayer(TopologyGuard):
         x_boundary = x_boundary.to(dtype)
         _, reduced = self._to_stacked(self._sources_interior(sources), self.n_i, "sources")
         names, coef = self._coefficients(removal=self._removal_arg(removal),
-                                         transmission=self._transmission_arg(transmission))
+                                         transmission=self._transmission_arg(transmission),
+                                         conductance=self._conductance_arg(conductance))
         if self._has_storage_free:
             self._refuse_idle_storage_free(
                 q, dict(zip(names, coef, strict=True)).get("conductance"))
@@ -1753,6 +2072,7 @@ class TransportLayer(TopologyGuard):
         diagnostics: dict | None = None,
         removal: torch.Tensor | None = None,
         transmission: torch.Tensor | None = None,
+        conductance: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Backward Euler on the AMOUNT `V x`: `V_new x_{n+1} - V_old x_n = dt F(x_{n+1})`,
         with `F(x) = G x + N_raw x_b + s` the capacity-FREE amount rate (`G`, `N_raw` the
@@ -1781,7 +2101,8 @@ class TransportLayer(TopologyGuard):
         cap_t = self._capacity_arg(capacity).to(dtype)
         cap_prev_t = cap_t if capacity_prev is None else self._capacity_arg(capacity_prev).to(dtype)
         _, reduced = self._to_stacked(x, self.n_i, "x")
-        names, coef = self._coefficients(removal=removal, transmission=transmission)
+        names, coef = self._coefficients(
+            removal=removal, transmission=transmission, conductance=conductance)
         if self._has_storage_free and diagnostics is not None:
             diagnostics["held_sources_dropped"] = self._held_sources_dropped(
                 q, sources, dict(zip(names, coef, strict=True)).get("conductance"))
@@ -1803,7 +2124,7 @@ class TransportLayer(TopologyGuard):
                 # operator row is empty, and a source there is dropped (counted above).
                 held = self._storage_free_stacked(storage.device) & (storage > 0)
                 rhs = torch.where(held, x_s, storage * ratio * x_s + dt * b0)
-            system = _AffineSystemOperator(op, dt, storage=storage)
+            system = ShiftedOperator.implicit_step(op, dt, storage=storage)
             return system, rhs
 
         if on_failure == "return":
@@ -1830,6 +2151,7 @@ class TransportLayer(TopologyGuard):
         diagnostics: dict | None = None,
         removal: torch.Tensor | None = None,
         transmission: torch.Tensor | None = None,
+        conductance: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Crank-Nicolson on the AMOUNT `V x`: `V_new x_{n+1} - V_old x_n =
         dt/2 (F(x_{n+1}) + F(x_n))`, with `F(x) = G x + N_raw x_b + s` the capacity-FREE
@@ -1854,7 +2176,8 @@ class TransportLayer(TopologyGuard):
         cap_t = self._capacity_arg(capacity).to(dtype)
         cap_prev_t = cap_t if capacity_prev is None else self._capacity_arg(capacity_prev).to(dtype)
         _, reduced = self._to_stacked(x, self.n_i, "x")
-        names, coef = self._coefficients(removal=removal, transmission=transmission)
+        names, coef = self._coefficients(
+            removal=removal, transmission=transmission, conductance=conductance)
 
         def build_system(x_, q_, sources_, xb_, cap_, cap_prev_, *coef_):
             coef_map = dict(zip(names, coef_, strict=True))
@@ -1877,7 +2200,7 @@ class TransportLayer(TopologyGuard):
                 else self._advection_operator(q_, cap_prev_, coef_map)
             )
             rhs = ratio * (x_s + 0.5 * dt * op_old.matvec(x_s)) + dt * b0
-            system = _AffineSystemOperator(op, 0.5 * dt)
+            system = ShiftedOperator.implicit_step(op, 0.5 * dt)
             return system, rhs
 
         if on_failure == "return":
@@ -1895,6 +2218,73 @@ class TransportLayer(TopologyGuard):
             resolve_solver=self._resolve_solver, diagnostics=diagnostics,
         )
         return x_s, reduced
+
+
+class _KeptNodes(TransportLayer):
+    """A folded layer's own stepping view: the layer over its kept nodes, on the folded
+    network (see `TransportLayer._plan_folding`).
+
+    Built once, it holds the full layer (`_layer`) and the fixed structure of the kept
+    nodes: their interior, the folded nodes as inactive ones, the folded network's
+    conduction edges. Every other attribute is the full layer's, read when it is used
+    (`__getattr__`), and the per-node coefficients `capacity`, `removal` and `kinetics`
+    are the full layer's current values sliced to the kept nodes. So an attribute
+    reassigned on the full layer after construction reaches the folded step, and a call
+    writes nothing here.
+
+    Its conductance is computed by the folding from an already checked one and is
+    non-negative by construction, and its sources are built by the folding with zero rows
+    off its interior, so neither is checked again."""
+
+    def __init__(self, layer: TransportLayer, kept: torch.Tensor, structure: dict) -> None:
+        # Not `TransportLayer.__init__`: the full layer has built everything there is.
+        self.__dict__.update(structure)
+        self._layer = layer
+        self._kept_pos = kept
+
+    def __getattr__(self, name: str):
+        # Called only for a name this view does not hold itself. Python's own protocol
+        # names (`__setstate__` while unpickling, before `_layer` is restored) are not the
+        # full layer's to answer.
+        layer = self.__dict__.get("_layer")
+        if layer is None or name.startswith("__"):
+            raise AttributeError(name)
+        return getattr(layer, name)
+
+    @property
+    def capacity(self) -> torch.Tensor:
+        return self._layer.capacity.index_select(-1, self._kept_pos)
+
+    @property
+    def removal(self) -> torch.Tensor | None:
+        removal = self._layer.removal
+        return None if removal is None else removal.index_select(-2, self._kept_pos)
+
+    @property
+    def kinetics(self) -> torch.Tensor | None:
+        kinetics = self._layer.kinetics
+        return None if kinetics is None else kinetics.index_select(-3, self._kept_pos)
+
+    def _conductance_arg(self, conductance: torch.Tensor | None) -> torch.Tensor | None:
+        return conductance
+
+    def _sources_interior(self, sources: torch.Tensor) -> torch.Tensor:
+        # Node-major `(..., n, K)`, built by `TransportLayer._fold_sources`.
+        return sources.index_select(-2, self.interior_idx)
+
+
+def _recovered_only(x: torch.Tensor) -> SolveResult:
+    """The `SolveResult` of a folded layer whose every node is folded, under
+    `on_failure="return"`: its state `x` (stacked) is the recovery alone, with no linear
+    solve, so every instance has converged in zero iterations with zero residual."""
+    batch = x.shape[:-1]
+    return SolveResult(
+        x=x, converged=torch.ones(batch, dtype=torch.bool, device=x.device),
+        iterations=torch.zeros(batch, dtype=torch.int64, device=x.device),
+        residual=torch.zeros(batch, dtype=x.dtype, device=x.device),
+        status=torch.full(batch, int(SolverStatus.CONVERGED), dtype=torch.int64,
+                          device=x.device),
+    )
 
 
 def _van_loan_step_dense(
@@ -1917,6 +2307,7 @@ def _van_loan_step_dense(
 
 
 _TAYLOR_M_MAX = 55
+_SCHEMES = ("exact", "implicit", "trapezoidal")
 
 
 class TransportStep(NamedTuple):

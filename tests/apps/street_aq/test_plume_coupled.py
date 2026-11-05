@@ -23,8 +23,8 @@ from noodl.apps.street_aq.network import (
     Street,
     StreetNetwork,
     build_model,
-    munich_idealised,
     street_index,
+    twelve_street_grid,
 )
 from noodl.apps.street_aq.plume import junction_kernel, plume_table, street_kernel
 
@@ -125,7 +125,7 @@ def lattice():
 
 @pytest.fixture(scope="module")
 def munich():
-    net, _ = munich_idealised(L=100.0, W=20.0, H=H)
+    net, _ = twelve_street_grid(L=100.0, W=20.0, H=H)
     model, state, _ = build_model(net, background="per_street")
     return net, model, state
 
@@ -212,7 +212,7 @@ def test_net_junction_source_converges_at_the_spectral_radius(munich):
 @pytest.mark.parametrize("theta, rho", [(0.3, 0.2002), (0.0, 0.3081)])
 def test_net_junction_source_spectral_radius_on_munich(munich, theta, rho):
     """The figures in `above_roof`'s docstring: with the net junction source the coupling on
-    `munich_idealised` has spectral radius 0.20 at 0.3 rad and 0.31 at 0 rad; with the
+    `twelve_street_grid` has spectral radius 0.20 at 0.3 rad and 0.31 at 0 rad; with the
     upward source it is exactly 0."""
     net, model, state = munich
     d = _drivers(model, theta=theta)
@@ -468,7 +468,7 @@ def test_no_emission_leaves_c_ext_at_a_uniform_background(case, theta, junction_
     background every street sits at C_bg and C_ext must stay there. A junction source of
     `sum_out q C_street` (not the excess) would not: it gives max C_ext / C_bg = 1.095 on
     the 7 x 7 lattice at 0.3 rad (asserted below; the figure in `above_roof`)."""
-    net = _lattice(7) if case == "lattice" else munich_idealised(L=100.0, W=20.0, H=H)[0]
+    net = _lattice(7) if case == "lattice" else twelve_street_grid(L=100.0, W=20.0, H=H)[0]
     model, state, _ = build_model(net, background="per_street")
     d = _drivers(model, theta=theta)
     d["street.sources"] = torch.zeros_like(d["street.sources"])

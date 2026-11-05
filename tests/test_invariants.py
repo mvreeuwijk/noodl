@@ -16,10 +16,10 @@ from noodl.drives import ConstantDrive
 from noodl.elements import PowerLaw
 from noodl.layers.allocation import AllocatedFlowLayer
 from noodl.layers.kirchhoff import KirchhoffLayer
-from noodl.layers.reaction import FirstOrderDecay
 from noodl.layers.transport import TransportLayer
 from noodl.model import Model
 from noodl.topology import Network
+from tests._reactions import FirstOrderDecay
 
 F64 = torch.float64
 RTOL, ATOL = 1e-9, 1e-15

@@ -40,7 +40,7 @@ The relation between the flow through an edge and the potential difference acros
 | Name | What it does | How to call it |
 |---|---|---|
 | `BreakerValve` | A pressure breaker valve (PBV): EPANET 2.2's `pbvcoeff` (`hydcoeffs.c`). | `BreakerValve(setting, minor, *, kind='pbv')` |
-| `CompositeDarcyWeisbach`<br><small>also `EpanetDarcyWeisbach`</small> | Composite Darcy-Weisbach pipe: Hagen-Poiseuille, Dunlop's cubic, then Swamee-Jain. | `CompositeDarcyWeisbach(length, diameter, roughness, *, minor_loss=0.0, nu=1.02193344e-06, cfs_per_m3s=None, scale=1.0, rtol=1e-15, max_iter=100, kind='pipe', learnable=False)` |
+| `CompositeDarcyWeisbach` | Composite Darcy-Weisbach pipe: Hagen-Poiseuille, Dunlop's cubic, then Swamee-Jain. | `CompositeDarcyWeisbach(length, diameter, roughness, *, minor_loss=0.0, nu=1.02193344e-06, cfs_per_m3s=None, scale=1.0, rtol=1e-15, max_iter=100, kind='pipe', learnable=False)` |
 | `FlowControlledPipe` | A pipe in its resistance form, ``dp = scale h(q)``, with the flow an unknown of the layer (`build_model`'s ``pipe_form="flow"``): ``pipe`` is the pipe's potential-form law (`HazenWilliams` or `CompositeDarcyWeisbach`), whose ``head_loss`` gives ``h``. | `FlowControlledPipe(pipe, *, gradient_floor=0.0, kind='pipe')` |
 | `FlowControlledPump` | A pump in its head-gain form, ``phi_discharge - phi_suction = gain(q)``, with the flow an unknown of the layer, as EPANET's and wntr's own solvers write it. ``pump`` is the pump's `PumpCurve`, whose ``head_gain`` gives the gain (with ``gradient_floor``, EPANET's ``RQtol``, and ``closed_slope``, its ``CBIG``, both in the layer's potential per m^3/s). `build_model` writes every pump in this form, whatever the ``pipe_form``. | `FlowControlledPump(pump, *, gradient_floor, closed_slope, kind='pump')` |
 | `GeneralPurposeValve` | A general purpose valve (GPV): EPANET 2.2's `gpvcoeff` (`hydcoeffs.c`). | `GeneralPurposeValve(flows, heads, n_points, *, kind='gpv')` |
@@ -81,7 +81,7 @@ Calculations and helpers.
 |---|---|---|
 | `link_table` | One row per link: flow (m3/s), head loss (m) and velocity (m/s); optionally to CSV. | `link_table(model, state, names=None, *, path=None)` |
 | `pressure_head` | Pressure head (m) at every node: the solved head minus the node's elevation. | `pressure_head(model, state, elevations=None)` |
-| `composite_friction_factor`<br><small>also `epanet_friction_factor`</small> | Composite friction factor for ``Re > 2000``: ``(f, df/dq)``. | `composite_friction_factor(q, e, s)` |
+| `composite_friction_factor` | Composite friction factor for ``Re > 2000``: ``(f, df/dq)``. | `composite_friction_factor(q, e, s)` |
 | `tank_inflow` | Net inflow (m3/s) at every tank node, from the layer's solved branch flows. | `tank_inflow(model, state)` |
 | `tank_levels` | Every tank's level (m above its bottom) in `state`, in either `tank_mode`. | `tank_levels(model, state)` |
 | `three_point_curve` | EPANET's single-point pump-curve fit: ``(h0, r, n)`` for ``h = h0 - r q^n``. | `three_point_curve(q_design, h_design)` |

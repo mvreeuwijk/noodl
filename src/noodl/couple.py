@@ -19,6 +19,7 @@ from noodl._broadcast import broadcast_shapes
 from noodl._fixed_point_loop import Verdict, confirm_gradient_dependence, run_passes
 from noodl.contracts import StepContext, call_closure
 from noodl.model import Drivers, Model, State
+from noodl.refs import units_agree
 from noodl.solvers.fixed_point import differentiate_fixed_point
 from noodl.topology import Network
 
@@ -391,7 +392,7 @@ class CoupledModel:
             f"{to_layer.unit!r}"
         )
         if link.convert is None:
-            if from_layer.unit != to_layer.unit:
+            if not units_agree(from_layer.unit, to_layer.unit):
                 raise ValueError(
                     f"CoupledModel: link {self._link_key(link)} has convert=None but {what}; "
                     f"an unconverted link requires equal units -- name a conversion mapping "
@@ -400,7 +401,8 @@ class CoupledModel:
                 )
             return
         conversion = _CONVERSIONS[link.convert]   # registration already checked above
-        if (from_layer.unit, to_layer.unit) != (conversion.from_unit, conversion.to_unit):
+        if not (units_agree(from_layer.unit, conversion.from_unit)
+                and units_agree(to_layer.unit, conversion.to_unit)):
             raise ValueError(
                 f"CoupledModel: link {self._link_key(link)} names conversion "
                 f"{link.convert!r}, which maps {conversion.from_unit!r} to "

@@ -15,9 +15,9 @@ from noodl._model_setup import (
 )
 from noodl.elements import PowerLaw
 from noodl.layers.kirchhoff import KirchhoffLayer
-from noodl.layers.reaction import FirstOrderDecay
 from noodl.layers.transport import TransportLayer
 from noodl.topology import Network
+from tests._reactions import FirstOrderDecay
 
 F64 = torch.float64
 

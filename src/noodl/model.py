@@ -20,7 +20,9 @@ in the state it returns), optional "<layer>.removal" (a transport layer's
 per-step first-order removal rate, 1/s, (..., n_i, K); absent, the layer's
 construction-time removal stands), optional "<layer>.transmission" (a transport layer's
 per-step transmission, (..., b_flow) or (..., b_flow, K) in its flow order; absent, the
-layer's construction-time transmission stands), "<layer>.requests" (an allocation layer's
+layer's construction-time transmission stands), optional "<layer>.conductance" (a transport
+layer's per-step conduction conductance, (..., b_c) in the order of its `conduction_edges`;
+absent, the construction-time conductance stands), "<layer>.requests" (an allocation layer's
 per-edge requested flow, required every step). Closures return driver updates; they may
 not write state keys. A transport layer whose kinds no
 Kirchhoff layer provides reads its branch flows from the driver "<layer>.q", in the layer's
@@ -36,8 +38,15 @@ the closure integrates once per pass instead of once per step until the key is s
 `**solve_kwargs` of `step`/`steady` reach the POTENTIAL solves only (`differentiable`,
 `on_failure`, `method`, Newton kwargs). The keywords the Model sets itself (`phi0`, `q0`,
 `history`, `dt`, `t`) are refused there by name. `layer_options` gives one Kirchhoff layer
-its own keywords on top of them (`{"thermal": {"atol": 1e-11}}`: a heat balance whose
-round-off floor is above the electrical layer's tolerance). Transport steps always raise on failure.
+its own keywords on top of them (`{"airflow": {"atol": 1e-11}}`), and one transport layer the
+scheme of this step (`{"thermal": {"scheme": "implicit"}}`: backward Euler on the step after
+a restart of a circuit it is coupled to). Transport steps always raise on failure.
+
+A transport layer stepped by the trapezoidal scheme whose sources a closure carries as state
+(`state_keys` holding `"<layer>.sources"`) integrates them by the trapezoidal rule too: the
+step-start state's `"<layer>.sources"` and this step's, `dt/2 (s_start + s_end)`
+(`TransportLayer.step`'s `sources_prev`), as a circuit's companion form integrates a
+prescribed current. Without it the step's sources are held over the step.
 
 Differentiability: ping-pong is one pass of differentiable operations; iterate carries no
 graph on its primal passes and attaches the IMPLICIT adjoint of its converged interface to
@@ -91,16 +100,13 @@ from noodl.topology import Network
 Tensor = torch.Tensor
 State = dict[str, Tensor]
 Drivers = dict[str, Tensor]
-_STATE_SUFFIXES = ("phi", "q", "x", "s")
 #: Potential-solve keywords the Model sets itself from the state, the step and `t`; refused
 #: among `**solve_kwargs` of `step`/`steady`.
 _MODEL_SOLVE_KEYS = frozenset({"phi0", "q0", "history", "dt", "t"})
+#: The keywords `layer_options` may give a transport layer.
+_TRANSPORT_OPTIONS = frozenset({"scheme"})
 # The key `layer_options` travels under inside `solve_kwargs`, to `_pass`'s layer solves.
 _LAYER_OPTIONS = LAYER_OPTIONS
-
-
-#: Kept for import compatibility: the closure Protocols live in `noodl.contracts`.
-Closure = AlgebraicClosure
 
 
 @dataclass(frozen=True)
@@ -189,7 +195,9 @@ class Model:
     replaces the relaxation of those layers' `.phi` and `.q` by Anderson mixing over the last
     `iterate_memory` passes and requires `iterate_flow_tol` for each of them; it changes the
     sequence of fed states, never the fixed point or its adjoint (`_iterate`,
-    `_AndersonHistory`).
+    `_AndersonHistory`). A conduction-only transport layer (`flow_kind=()`, a heat network)
+    named in `iterate_tol` is mixed and judged on its fixed-point residual like a Kirchhoff
+    layer's `phi`; advective transport layers stay relaxed.
 
     The onion's fixed point is differentiated IMPLICITLY, not by unrolling the passes: the
     primal passes carry no graph, and after convergence the certified pass runs once more on
@@ -547,8 +555,11 @@ class Model:
 
         `layer_options` maps a Kirchhoff layer's name to keywords for that layer's solve
         only, applied over `**solve_kwargs` (and so over the layer's own `newton_defaults`):
-        `{"thermal": {"atol": 1e-11}}`. A name that is not a Kirchhoff layer of this model,
-        or a keyword the Model sets itself, is refused by name.
+        `{"airflow": {"atol": 1e-11}}`; and a transport layer's name to the scheme of this
+        step, `{"thermal": {"scheme": "implicit"}}` (`TransportLayer.step`'s `scheme`; a
+        steady solve has no scheme and ignores it). A name that is not a layer of this
+        model, a keyword the Model sets itself, or a transport-layer keyword other than
+        `scheme` is refused by name.
         """
         if not dt > 0:
             raise ValueError(f"Model: dt must be positive, got {dt!r}")
@@ -584,7 +595,11 @@ class Model:
         `t` (optional) is the time of that state: closures receive it in their
         `StepContext`, and the constitutive laws of a layer solved by Modified Nodal
         Analysis are evaluated at it (a time-dependent source). A layer with dynamic laws is
-        solved at its operating point: a capacitance open, an inductance shorted.
+        solved at its operating point: a capacitance open, an inductance shorted. With
+        `mode="initial"` (passed to the Kirchhoff layers' solves) the consistent initial
+        point instead: those layers hold their dynamic laws at their start values, and every
+        transport layer holds its stored nodes at the state's `"<layer>.x"`, solving only for
+        the nodes that hold nothing (`TransportLayer.steady`'s `hold`).
 
         REACTIONS ARE NOT APPLIED. They are an operator splitting applied around a transport
         step (after it, or before it under `reaction_order="before_transport"`), so they
@@ -606,12 +621,19 @@ class Model:
         boundary_transfers: bool | Collection[str] = False, warm_start: bool = True,
     ) -> State:
         options = solve_kwargs.get(_LAYER_OPTIONS, {})
-        unknown = sorted(set(options) - set(self.kirchhoff))
+        unknown = sorted(set(options) - set(self.kirchhoff) - set(self.transport))
         if unknown:
             raise ValueError(
-                f"Model: layer_options names {unknown}, not Kirchhoff layer(s) of this model "
-                f"(has {sorted(self.kirchhoff)})"
+                f"Model: layer_options names {unknown}, not Kirchhoff or transport layer(s) "
+                f"of this model (has {sorted(self.kirchhoff)} and {sorted(self.transport)})"
             )
+        for name in set(options) & set(self.transport):
+            extra = sorted(set(options[name]) - _TRANSPORT_OPTIONS)
+            if extra:
+                raise ValueError(
+                    f"Model: layer_options gives transport layer {name!r} {extra}; a "
+                    f"transport layer takes only {sorted(_TRANSPORT_OPTIONS)}"
+                )
         for keys in (solve_kwargs, *options.values()):
             owned = sorted(_MODEL_SOLVE_KEYS.intersection(keys))
             if owned:
@@ -975,6 +997,7 @@ class Model:
                 capacity=drv.get(f"{name}.capacity"),
                 removal=drv.get(f"{name}.removal"),
                 transmission=drv.get(f"{name}.transmission"),
+                conductance=drv.get(f"{name}.conductance"),
             )
         return out
 
@@ -1119,6 +1142,10 @@ class _ModelPasses:
             if name in model.transport:
                 layer = model.transport[name]
                 d = (new[f"{name}.x"] - prev[f"{name}.x"]).abs()
+                if self.anderson is not None and name in self.anderson.mixed_transport:
+                    # A mixed state's fixed-point residual, as a Kirchhoff layer's below.
+                    key = f"{name}.x"
+                    d = torch.maximum(d, (new[key] - z.get(key, prev[key])).abs())
                 d_s, _ = layer._to_stacked(d, layer.n_i, "x")
                 change[name] = d_s.amax(-1)
             else:
@@ -1174,6 +1201,8 @@ class _ModelPasses:
         w = model.iterate_relaxation
         if prev is not None:
             for name in model.transport:
+                if self.anderson is not None and name in self.anderson.mixed_transport:
+                    continue        # Anderson-mixed below
                 key = f"{name}.x"
                 fed[key] = prev[key] + w * (new[key] - prev[key])
             if self.anderson is None:
@@ -1182,8 +1211,9 @@ class _ModelPasses:
                         for key in (f"{name}.phi", f"{name}.q"):
                             fed[key] = prev[key] + w * (new[key] - prev[key])
         if self.anderson is not None:
-            # The named Kirchhoff layers' `phi` and `q` are Anderson-mixed instead
-            # (`_AndersonHistory`), from pass 1 on; transport states stay relaxed.
+            # The named Kirchhoff layers' `phi` and `q`, and the named conduction-only
+            # transport layers' `x`, are Anderson-mixed instead (`_AndersonHistory`), from
+            # pass 1 on; advective transport layers stay relaxed.
             fed.update(self.anderson.mix(
                 z, new, w, verdict.converged if verdict is not None else None))
         self.prev = new

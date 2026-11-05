@@ -73,6 +73,14 @@ Functions of the state that compute drivers each step (densities, flows, levels)
 |---|---|---|
 | `StreetFlows` | The closure that turns the wind drivers into every prescribed edge flow. | `StreetFlows(net, layer, geometry, *, preset='sirane', canyon_wind=None, roof_wind=None, roof_exchange=None, junction_routing=None, direction_averaging=None, direction_spread=None, stability=None, shape_constant=None, n_theta=None, sigma_theta=None, kappa=None, canyon_wind_min=None, u_d_min=None, sigma_w_min=None, sigma_v_min=None, sigma_w_height=None, h_canopy=None, z0_s=0.01, z_ref=30.0, pblh_floor=True, meteo='uniform', layer_name='street')` |
 
+## Reactions
+
+Transformations applied to transported species each step.
+
+| Name | What it does | How to call it |
+|---|---|---|
+| `Photostationary` | NO/NO2/O3 relaxed to the Leighton photostationary state, in closed form. | `Photostationary(no, no2, o3, *, j_key='J_NO2', rate=None, temperature_key='temperature', k_no_o3=None, floor_ppb=0.0, molar_volume_key='molar_volume', m_no=0.03, m_no2=0.046, m_o3=0.048)` |
+
 ## Files
 
 Readers and writers of other tools' file formats.
@@ -99,28 +107,28 @@ Calculations and helpers.
 
 | Name | What it does | How to call it |
 |---|---|---|
-| `bessel_shape_parameter`<br><small>also `soulhac_shape`</small> | The shape parameter `c` of the Bessel canyon profile: the root of `bessel_shape_residual`, batched and differentiable in `ratio`. | `bessel_shape_parameter(ratio)` |
+| `bessel_shape_parameter` | The shape parameter `c` of the Bessel canyon profile: the root of `bessel_shape_residual`, batched and differentiable in `ratio`. | `bessel_shape_parameter(ratio)` |
 | `boundary_layer` | Friction velocity and the boundary-layer height from the network-mean geometry and reference wind, batched and differentiable. | `boundary_layer(h_mean, u_ref, h_abl, *, z_ref=30.0, kappa=0.4, pblh_floor=None)` |
-| `canopy_displacement_roughness`<br><small>also `macdonald_profile`</small> | Macdonald (1998) displacement height and roughness length, `(d_c, z0c)`, in metres. | `canopy_displacement_roughness(h_mean, w_mean, *, lambda_p=0.4, big_delta=4.43, small_delta=1.0, c_db=1.2, kappa=0.41)` |
+| `canopy_displacement_roughness` | Macdonald (1998) displacement height and roughness length, `(d_c, z0c)`, in metres. | `canopy_displacement_roughness(h_mean, w_mean, *, lambda_p=0.4, big_delta=4.43, small_delta=1.0, c_db=1.2, kappa=0.41)` |
 | `canyon_velocity` | The SIGNED along-canyon velocity, m/s. Positive means from `u` to `v`. | `canyon_velocity(W, H, phi, *, u_star=None, u_h=None, canyon_wind=None, z0_b=0.15, z0_s=0.01, kappa=0.4, canyon_wind_min=0.0, shape_constant='exact_root')` |
 | `direction_offsets` | Wind-direction samples and their weights, `(offsets (..., m), weights (..., m))`. | `direction_offsets(direction_averaging=None, sigma_theta=None, *, n_theta=None)` |
 | `downwind_cutoff` | SIRANE's downwind cut-off, m: `meteo_cell_dx / \|cos theta_w\|`, the x-size of the meteo-grid cell over the cosine of the wind's angle to the x axis (an empirical rule: 900 m cells give 910 m, 700 m cells 700 m whatever the cells' y-size, and a wind at 45 degrees to the axis ~1020 m; `\|cos\|` is floored at 1e-6). It holds for cells of about 700 m and larger: with smaller cells SIRANE stops the Gaussian plume much earlier (about 168 m for 350 m cells) and continues with a cell-based far field, which this kernel does not model. | `downwind_cutoff(theta_w, meteo_cell_dx)` |
 | `drivers_at` | The driver mapping at time index `k` for `model`, built from `case`. | `drivers_at(case, model, k, *, species=None)` |
-| `exact_gaussian_direction_samples`<br><small>also `sirane_direction_samples`</small> | The EXACT Gaussian direction average of the junction routing, as samples and weights `(offsets (..., n_j, m), weights (..., n_j, m))` -- SIRANE's `P^_ij(phi0) = int f(phi - phi0) P_ij(phi) dphi` (Soulhac et al. 2011, Atmos. Environ. 45:7379, Eq. 7) with `f` the normal density of standard deviation `sigma_theta`. | `exact_gaussian_direction_samples(theta, sigma_theta, slot_angle, slot_active)` |
+| `exact_gaussian_direction_samples` | The EXACT Gaussian direction average of the junction routing, as samples and weights `(offsets (..., n_j, m), weights (..., n_j, m))` -- SIRANE's `P^_ij(phi0) = int f(phi - phi0) P_ij(phi) dphi` (Soulhac et al. 2011, Atmos. Environ. 45:7379, Eq. 7) with `f` the normal density of standard deviation `sigma_theta`. | `exact_gaussian_direction_samples(theta, sigma_theta, slot_angle, slot_active)` |
 | `exchange_velocity` | The roof exchange velocity `u_d`, m/s. | `exchange_velocity(sigma_w, H, W, *, roof_exchange=None, u_d_min=0.0, sigma_w_min=0.0)` |
 | `grid_shape_parameter` | The shape parameter `c` the way MUNICH evaluates it: the point of the grid `c = 0.01, 0.02, ..., 1.00` that minimises `\|2/c exp((pi/2) Y1(c)/J1(c) - gamma_E) - z0/di\|` (ATM `ComputeSiraneC`, `MeteorologyStreet.cxx:114-152`; the first minimum wins on a tie, as MUNICH's strict `>` makes it). | `grid_shape_parameter(ratio)` |
 | `exposure_reduction_adjoint` | Exposure reduction from cutting each listed street's emission by `delta_fraction` of their mean, to first order, from ONE steady solve and one backward pass (the adjoint); compare `exposure_reduction_forward`. | `exposure_reduction_adjoint(model, state, drivers, *, population, streets, delta_fraction=0.1)` |
 | `exposure_reduction_forward` | The same exposure reductions as `exposure_reduction_adjoint`, by brute force: one steady solve per street with that street's emission cut (`len(streets) + 1` solves, no linearisation). | `exposure_reduction_forward(model, state, drivers, *, population, streets, delta_fraction=0.1)` |
 | `from_test_network` | A fixed four-junction, three-street test geometry. | `from_test_network()` |
 | `from_ug_m3` | ug/m3 -> kg/m3. | `from_ug_m3(x)` |
-| `j_no2_elevation_cloud`<br><small>also `j_no2_sirane`</small> | SIRANE's NO2 photolysis rate `k1` (1/s) at solar elevation `elevation_deg` under `cloud_octas` of cloud (0 to 8). | `j_no2_elevation_cloud(elevation_deg, cloud_octas=0.0)` |
+| `j_no2_elevation_cloud` | SIRANE's NO2 photolysis rate `k1` (1/s) at solar elevation `elevation_deg` under `cloud_octas` of cloud (0 to 8). | `j_no2_elevation_cloud(elevation_deg, cloud_octas=0.0)` |
 | `j_no2_zenith_table` | Clear-sky `J_NO2` [1/s] at `zenith_deg`, times `attenuation`. | `j_no2_zenith_table(zenith_deg, attenuation=1.0)` |
 | `junction_kernel` | `batch + (n_streets, n_junctions)`: `C_ext` above street `i` (at its midpoint) per unit vertical-flux rate out of junction `j`, s/m3 -- SIRANE's intersection plume (Soulhac et al. 2011, Sect. 5.2: `C_ext` sums the contributions of upwind streets AND intersections), each junction one point source of `junction_sources`' width and clamp. `table`, `theta_w`, `cutoff_sigma` and `meteo_cell_dx` are `plume_kernel`'s. | `junction_kernel(net, table, *, theta_w, cutoff_sigma=4.0, meteo_cell_dx=None)` |
 | `junction_sources` | `(xy (J, 2), width (J,), clamp (J,))`: every junction as one point source of width `W_j` and clamp `1/H_j`, with `W_j`, `H_j` the mean width and height of the streets that meet at the junction. The mean is a choice: on SIRANE's South Kensington fluxes, at the deck's downwind cut-off, it gives SIRANE's `C_ext` to a median 0.32 % and p90 1.38 %, against 0.35 % and 1.38 % with the largest width and height, and 0.53 % and 1.48 % with the smallest. | `junction_sources(net)` |
 | `k_no_o3_jpl2003` | k(NO + O3) = 3.0e-12 exp(-1500/T) cm3 molecule^-1 s^-1, returned in m3 mol^-1 s^-1. | `k_no_o3_jpl2003(temperature)` |
-| `k_no_o3_soulhac2011`<br><small>also `k_no_o3_sirane`</small> | k(NO + O3) = 1.325e6 exp(-1430/T) m3 mol^-1 s^-1 at `temperature` (K), SIRANE's rate (Soulhac et al. 2011, with the prefactor that reproduces SIRANE v2.1 output). | `k_no_o3_soulhac2011(temperature)` |
-| `twelve_street_grid`<br><small>also `munich_idealised`</small> | The 12-street network of Kim et al. 2022 Fig. 1, p. 7374. | `twelve_street_grid(*, L=100.0, W=20.0, H=20.0)` |
-| `n_theta_rectangle_rule`<br><small>also `n_theta_munich`</small> | The sample count of the `rectangle_rule` direction average: `ntheta = floor(sigma_theta in DEGREES)` (MUNICH, SRC `:3568`), as a long tensor, clamped to `[1, 10]`. MUNICH skips the averaging entirely at 1, i.e. below two degrees. | `n_theta_rectangle_rule(sigma_theta)` |
+| `k_no_o3_soulhac2011` | k(NO + O3) = 1.325e6 exp(-1430/T) m3 mol^-1 s^-1 at `temperature` (K), SIRANE's rate (Soulhac et al. 2011, with the prefactor that reproduces SIRANE v2.1 output). | `k_no_o3_soulhac2011(temperature)` |
+| `molar_volume` | The ideal-gas molar volume `R T / P`, m3/mol, at `temperature` (K) and `pressure` (Pa). | `molar_volume(temperature, pressure=101325.0)` |
+| `n_theta_rectangle_rule` | The sample count of the `rectangle_rule` direction average: `ntheta = floor(sigma_theta in DEGREES)` (MUNICH, SRC `:3568`), as a long tensor, clamped to `[1, 10]`. MUNICH skips the averaging entirely at 1, i.e. below two degrees. | `n_theta_rectangle_rule(sigma_theta)` |
 | `node_closure` | MUNICH's roof closure at an intersection, before any routing (SRC `:2980-3014`). | `node_closure(flux)` |
 | `photostationary_for_streets` | The Leighton reaction wired to the `"no"`, `"no2"` and `"o3"` columns of `species`. | `photostationary_for_streets(species, *, preset=None, no_o3_rate=None, floor_ppb=None, j_key='J_NO2', temperature_key='temperature', molar_volume_key='molar_volume')` |
 | `plume_kernel` | Concentration at each receptor per unit rate at each source, s/m3: `batch + (R, P)`. | `plume_kernel(receptor_xy, source_xy, table, *, theta_w, width=0.0, clamp=inf, cutoff_sigma=4.0, meteo_cell_dx=None)` |
@@ -128,7 +136,7 @@ Calculations and helpers.
 | `roof_wind` | Wind speed at roof level `u_H`, from the friction velocity. | `roof_wind(u_star, H, W, *, roof_wind=None, z0_s=0.01, kappa=0.41, h_mean=None, w_mean=None, n_levels=100, shape_constant='exact_root')` |
 | `routing_matrix` | The street-to-street flux matrix `F[..., p, r]` from ORDERED, closed marginals. | `routing_matrix(flux_in, flux_out, *, junction_routing=None)` |
 | `shape_parameter` | The Bessel shape parameter `c`, by the `shape_constant` closure option: `"exact_root"` is `bessel_shape_parameter` (the continuous root), `"grid_search"` is `grid_shape_parameter` (MUNICH's argmin on a 0.01 grid). | `shape_parameter(ratio, shape_constant='exact_root')` |
-| `sigma_theta_turbulence_intensity`<br><small>also `sigma_theta_munich`</small> | `sigma_theta = min(sigma_v / U, 10 deg)` (SRC `:3567`; Blackadar 1997, Soulhac 2009), the `direction_spread="turbulence_intensity"` spread. | `sigma_theta_turbulence_intensity(sigma_v, u_ref)` |
+| `sigma_theta_turbulence_intensity` | `sigma_theta = min(sigma_v / U, 10 deg)` (SRC `:3567`; Blackadar 1997, Soulhac 2009), the `direction_spread="turbulence_intensity"` spread. | `sigma_theta_turbulence_intensity(sigma_v, u_ref)` |
 | `solar_elevation` | The solar elevation (degrees) at `latitude_deg`, day `day_of_year` (1 January = 1) and clock time `hour` (fractional hours), in SIRANE's convention. | `solar_elevation(latitude_deg, day_of_year, hour)` |
 | `source_points` | Each street's roof flux as SIRANE's sub-sources: a street `u -> v` of coordinate length `L` is cut into `n = floor(L / SUBSOURCE_LENGTH_M) + 1` equal segments with one sub-source at the centre of each, weight `1/n`, width `(L/n)\|sin phi\|` and clamp `min(CLAMP_LENGTH_M / W, 1/(H (1 - \|sin phi\|)))`, where `phi` is the angle between the street and the wind `theta_w` (radians counter-clockwise from east, the direction the wind blows TOWARD; any batch shape) and `W`, `H` the street's width and height. The coordinate length is used, not `Street.length`, because the points lie on the drawn segment. | `source_points(net, *, theta_w)` |
 | `street_geometry` | The plain-tensor view of `net` that `StreetFlows` consumes. | `street_geometry(net)` |
@@ -139,6 +147,7 @@ Calculations and helpers.
 | `street_steady_with_plume` | The steady state of the street network with `C_ext` from the above-roof plumes. | `street_steady_with_plume(model, state, drivers, *, kernel, junction_kernel, junction_source='upward', background=None, tol=1e-12, max_iter=100, relaxation=1.0, adjoint_rtol=1e-12, adjoint_restart=20, diagnostics=None, layer_name='street', **solve_kwargs)` |
 | `to_ug_m3` | kg/m3 -> ug/m3. | `to_ug_m3(x)` |
 | `total_exposure` | Population-weighted inhaled dose rate, `sum_i q p_i c_i`: breathing rate `q` times each street's population `p_i` times its concentration `c_i`. | `total_exposure(concentration, population, *, q=0.0001586111111111111)` |
+| `twelve_street_grid` | The 12-street network of Kim et al. 2022 Fig. 1, p. 7374. | `twelve_street_grid(*, L=100.0, W=20.0, H=20.0)` |
 
 ## Constants and tables
 
@@ -146,12 +155,15 @@ Named values and option tables.
 
 | Name | Value |
 |---|---|
-| `ASPECT_RATIO_EXCHANGE_BETA`<br><small>also `SCHULTE_BETA`</small> | `0.45015815807855303` |
-| `EULER_GAMMA_TRUNCATED`<br><small>also `GAMMA_E`</small> | `0.577` |
-| `EXCHANGE_SIGMA_W_RATIO`<br><small>also `SIRANE_EXCHANGE`</small> | `0.22507907903927651` |
-| `GAUSS_CUTOFF_SIGMAS`<br><small>also `SEUIL_GAUSS`</small> | `4.0` |
-| `KAPPA_040`<br><small>also `KAPPA`</small> | `0.4` |
-| `KAPPA_041`<br><small>also `KAPPA_MUNICH`</small> | `0.41` |
+| `ASPECT_RATIO_EXCHANGE_BETA` | `0.45015815807855303` |
+| `EULER_GAMMA_TRUNCATED` | `0.577` |
+| `EXCHANGE_SIGMA_W_RATIO` | `0.22507907903927651` |
+| `GAUSS_CUTOFF_SIGMAS` | `4.0` |
+| `K_NO_O3` | `245236.36481890272` |
+| `K_NO_O3_298` | `1.9546779094727322e-14` |
+| `KAPPA_040` | `0.4` |
+| `KAPPA_041` | `0.41` |
+| `MOLAR_MASS` | table of 3 entries: `no`, `no2`, `o3` |
 | `OPTIONS` | table of 9 entries: `canyon_wind`, `roof_wind`, `roof_exchange`, `junction_routing`, `direction_averaging`, `direction_spread`, `stability`, `sigma_w_height`, ... |
 | `PRESETS` | table of 2 entries: `sirane`, `munich` |
 | `Q_INHALATION` | `0.0001586111111111111` |

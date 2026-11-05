@@ -9,7 +9,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from noodl.apps.street_aq import SIRANE_EXCHANGE, munich_idealised
+from noodl.apps.street_aq import EXCHANGE_SIGMA_W_RATIO, twelve_street_grid
 from noodl.apps.street_aq.case import StreetCase, read_case, read_results
 
 STREET_DATA = Path(__file__).resolve().parents[2] / "data" / "street"
@@ -37,7 +37,7 @@ def _write_stale_hour(src: Path, dst: Path, *, sigma_w: float) -> None:
 
 
 def _munich_case(species=("NO2",), n_hours=1, *, start=datetime(2014, 3, 16)):
-    net, _ = munich_idealised()
+    net, _ = twelve_street_grid()
     return net, StreetCase.synthetic(
         net, species=species, times=[3600.0 * i for i in range(n_hours)],
         meteo=dict(wind_dir_from_deg=200.0, wind_speed=5.0),
@@ -127,11 +127,11 @@ def test_c_in_and_c_above_are_micrograms_to_kg_per_m3(case):
 
 
 def test_exchange_velocity_pinned_against_sirane_s_own_output(case):
-    """SIRANE's own printed `u_d` equals `Sigma_wH * SIRANE_EXCHANGE` (`sigma_w /
+    """SIRANE's own printed `u_d` equals `Sigma_wH * EXCHANGE_SIGMA_W_RATIO` (`sigma_w /
     (sqrt(2) pi)`) to the two decimals it prints -- NOT `Sigma_wH / sqrt(2 pi)`, the other
     reading of Soulhac et al. (2011) Eq. 5."""
     results = read_results(RESULT_DIR, case=case)
-    right = np.round(results.sigma_w_roof * SIRANE_EXCHANGE, 2)
+    right = np.round(results.sigma_w_roof * EXCHANGE_SIGMA_W_RATIO, 2)
     np.testing.assert_array_equal(right, results.u_exchange)
     wrong = np.round(results.sigma_w_roof / math.sqrt(2.0 * math.pi), 2)
     assert not np.array_equal(wrong, results.u_exchange)
@@ -267,7 +267,7 @@ def test_munich_results_size_mismatch_is_named(tmp_path):
 
 
 def test_munich_results_needs_case_start(tmp_path):
-    net, _ = munich_idealised()
+    net, _ = twelve_street_grid()
     case = StreetCase.synthetic(
         net, species=("NO2",), times=[0.0],
         meteo=dict(wind_dir_from_deg=200.0, wind_speed=5.0),

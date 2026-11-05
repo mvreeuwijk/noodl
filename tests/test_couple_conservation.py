@@ -515,7 +515,9 @@ def test_every_pass_of_a_two_way_step_integrates_over_the_same_clocked_interval(
     one_pass = [(10.0 + i * sub, sub) for i in range(substeps)]
     assert diagnostics["passes"] >= 2
     assert len(clocked.calls) == diagnostics["passes"] * substeps
-    assert clocked.calls == pytest.approx(one_pass * diagnostics["passes"])
+    # pytest.approx compares flat sequences only (pytest >= 9.2): compare (t, dt) pairs flattened.
+    flat = [v for call in clocked.calls for v in call]
+    assert flat == pytest.approx([v for call in one_pass * diagnostics["passes"] for v in call])
 
 
 def _counting_union(b, **kwargs):

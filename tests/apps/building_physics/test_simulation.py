@@ -179,7 +179,7 @@ def test_the_zone_air_mass_change_enters_the_airflow_balance():
     V, i = 300.0, project.net.node_index("one")
     p_old, p_new = 101325.0 + out["air.phi"][-2, i], 101325.0 + out["air.phi"][-1, i]
     dM = V / R_AIR * (p_new / 303.15 - p_old / 293.15)
-    assert net_in.item() == pytest.approx(dM / 300.0, rel=1e-9)
+    assert net_in.item() == pytest.approx((dM / 300.0).item(), rel=1e-9)
     without = simulate(model, state, drivers, [0.0, 300.0, 600.0], inputs=step_up,
                        air_mass_change=False, **TIGHT)
     f0 = project.path_flows(without["air.q"][-1])
@@ -990,7 +990,7 @@ def test_a_controlled_zone_temperature_enters_the_air_mass_change():
     V, i = 300.0, project.net.node_index("one")
     p_old, p_new = 101325.0 + out["air.phi"][-2, i], 101325.0 + out["air.phi"][-1, i]
     dM = V / R_AIR * (p_new / 303.15 - p_old / 293.15)
-    assert (flows[0] - flows[1]).item() == pytest.approx(dM / 300.0, rel=1e-9)
+    assert (flows[0] - flows[1]).item() == pytest.approx((dM / 300.0).item(), rel=1e-9)
     assert out["controls.outputs"][:, 0].tolist() == [293.15, 293.15, 303.15]
 
 

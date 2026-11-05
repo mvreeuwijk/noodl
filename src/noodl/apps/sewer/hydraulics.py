@@ -57,10 +57,6 @@ F64 = torch.float64
 #: non-positive capacity by name). Applied nowhere else, and recorded in `notes` when it is applied.
 CAPACITY_FLOOR = 1e-9
 
-#: Pre-rename values of the ``geometry`` option, normalised to the physical name:
-#: ``"swmm"`` is the tabulated (51-point lookup-table) circular cross-section.
-GEOMETRY_ALIASES = {"swmm": "tabulated"}
-
 
 class SewerHydraulics:
     """The water side of a sewer, as a `Model` closure.
@@ -94,7 +90,6 @@ class SewerHydraulics:
         self.net = net
         self.name = name
         self.storage = bool(storage)
-        geometry = GEOMETRY_ALIASES.get(geometry, geometry)
         if geometry not in ("analytic", "tabulated"):
             raise ValueError(
                 f"SewerHydraulics {name!r}: geometry must be 'analytic' or 'tabulated', got "

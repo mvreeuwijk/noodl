@@ -27,6 +27,12 @@ from __future__ import annotations
 import torch
 
 from noodl._broadcast import broadcast_shapes
+from noodl.operators.stencil import (
+    laplacian_apply,
+    laplacian_coo_indices,
+    laplacian_coo_values,
+    laplacian_diagonal,
+)
 from noodl.solvers.grounding import spd_certificate as _spd_certificate
 from noodl.solvers.grounding import spd_diagnosis as _spd_diagnosis
 
@@ -206,10 +212,7 @@ class GraphLaplacianOperator:
         slopes = self.slopes.expand(batch_shape + (self.slopes.shape[-1],))
         pad = torch.zeros(batch_shape + (1,), dtype=x.dtype, device=x.device)
         phi = torch.cat([x, pad], dim=-1)
-        w = slopes * (torch.gather(phi, -1, src) - torch.gather(phi, -1, tgt))
-        out = torch.zeros(batch_shape + (n_i + 1,), dtype=x.dtype, device=x.device)
-        out.scatter_add_(-1, src, w)
-        out.scatter_add_(-1, tgt, -w)
+        out = laplacian_apply(phi, src, tgt, slopes)
         # A VIEW of the accumulator, not a copy: the pad slot is simply not part of it.
         return out[..., :n_i]
 
@@ -225,11 +228,8 @@ class GraphLaplacianOperator:
         # the same padded compact domain `_apply` uses (every edge incident to a boundary
         # node contributes to the pad slot, which is dropped).
         n_i = self.n_interior
-        batch_shape, src, tgt = self._endpoints_for(self.slopes.shape[:-1], self.device)
-        diag = torch.zeros(batch_shape + (n_i + 1,), dtype=self.dtype, device=self.device)
-        diag.scatter_add_(-1, src, self.slopes)
-        diag.scatter_add_(-1, tgt, self.slopes)
-        return diag[..., :n_i]
+        _, src, tgt = self._endpoints_for(self.slopes.shape[:-1], self.device)
+        return laplacian_diagonal(src, tgt, self.slopes, n_i + 1)[..., :n_i]
 
     def assemble(self) -> Tensor:
         """Dense (..., n_interior, n_interior), the reference path for small problems only."""
@@ -274,20 +274,37 @@ class GraphLaplacianOperator:
         cached = self._coo_indices
         if cached is None:
             sc, tc = self._src_compact, self._tgt_compact
-            row = torch.cat([sc, tc, sc, tc]).to(torch.int64)
-            col = torch.cat([sc, tc, tc, sc]).to(torch.int64)
+            row, col = laplacian_coo_indices(sc, tc)
+            row, col = row.to(torch.int64), col.to(torch.int64)
             keep = torch.nonzero((row < n_i) & (col < n_i), as_tuple=False).flatten()
             cached = (row[keep], col[keep], keep)
             self._coo_indices = cached
         row, col, keep = cached
         g = self.slopes
-        values = torch.cat([g, g, -g, -g], dim=-1).index_select(-1, keep)
+        values = laplacian_coo_values(g).index_select(-1, keep)
         return row, col, values
 
     def spd_certificate(self) -> Tensor:
         return _spd_certificate(
             self.src, self.tgt, self.slopes, self.interior_of_node, self.boundary_mask
         )
+
+    def spd_certificate_with_shift(self, shift: Tensor) -> Tensor:
+        """SPD certificate of this Laplacian plus `diag(shift)`, for a NON-NEGATIVE `shift`
+        of shape `(..., n_interior)`.
+
+        A strictly positive shift grounds its node (`KirchhoffLayer._extra_grounded`, the
+        rule the layer's own grounding check applies): a network with no boundary path held
+        only by its node sources (a closed building of compressible volumes) is SPD.
+        """
+        idx = self.interior_of_node
+        interior = idx >= 0
+        positive = shift > 0
+        extra = torch.zeros(positive.shape[:-1] + idx.shape, dtype=torch.bool,
+                            device=positive.device)
+        extra[..., interior] = positive[..., idx[interior]]
+        return _spd_certificate(self.src, self.tgt, self.slopes, idx, self.boundary_mask,
+                                extra_grounded=extra)
 
     def spd_diagnosis(self) -> list[dict]:
         """Delegate to solvers.grounding.spd_diagnosis with the operator's parameters."""

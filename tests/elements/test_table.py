@@ -18,7 +18,7 @@ import numpy as np
 import pytest
 import torch
 
-from noodl.elements.table import MBLTable
+from noodl.elements.table import SplineFlowTable
 
 # ---------------------------------------------------------------------------------------
 # NumPy transcription of Modelica.Fluid.Utilities.cubicHermite (MSL Fluid/Utilities.mo:787-832)
@@ -38,7 +38,7 @@ def _cubic_hermite_np(x, x1, x2, y1, y2, y1d, y2d):
         h11 = t3 - t2
         return y1 * h00 + h * y1d * h10 + y2 * h01 + h * y2d * h11
     # Degenerate case, x1 == x2 (Fluid/Utilities.mo:821-823); unreachable for a strictly
-    # increasing MBLTable knot sequence but transcribed for completeness.
+    # increasing SplineFlowTable knot sequence but transcribed for completeness.
     return (y1 + y2) / 2
 
 
@@ -144,7 +144,7 @@ def test_spline_derivatives_np_two_point_table_is_the_secant_slope():
 
 
 # ---------------------------------------------------------------------------------------
-# 1. MBLTable(form="mass") matches the NumPy reference on MBL's OneWayFlow tabDat_m_flow
+# 1. SplineFlowTable(form="mass") matches the NumPy reference on MBL's OneWayFlow tabDat_m_flow
 # ---------------------------------------------------------------------------------------
 
 # Buildings/Airflow/Multizone/Validation/OneWayFlow.mo:99-103 ("tabDat_m_flow").
@@ -182,7 +182,7 @@ def _dp_probe_grid(dp_points):
 
 
 def test_mass_form_matches_reference_on_onewayflow_tabdat_m_flow():
-    el = MBLTable(_ONEWAYFLOW_DP, _ONEWAYFLOW_M_FLOW, form="mass")
+    el = SplineFlowTable(_ONEWAYFLOW_DP, _ONEWAYFLOW_M_FLOW, form="mass")
     d_ref = _spline_derivatives_np(_ONEWAYFLOW_DP, _ONEWAYFLOW_M_FLOW)
     dp_np = _dp_probe_grid(_ONEWAYFLOW_DP)
     expected = _interpolate_np(dp_np, _ONEWAYFLOW_DP, _ONEWAYFLOW_M_FLOW, d_ref)
@@ -197,7 +197,7 @@ def test_mass_form_matches_reference_on_onewayflow_tabdat_m_flow():
 def test_volume_form_matches_reference_scaled_by_rho_default_before_the_spline():
     """Table_V_flow.mo:4-5: `mMea_flow_nominal = VMea_flow_nominal*rho_default` -- the
     volume-rate table is scaled to a mass-flow table BEFORE `splineDerivatives`/`interpolate`
-    run (not scaled after, the way `MBLPowerLaw`'s volume form multiplies `rho_default` in
+    run (not scaled after, the way `RegularizedPowerLaw`'s volume form multiplies `rho_default` in
     at evaluation time), since the Fritsch-Carlson monotonicity correction only commutes with
     positive scaling because `alpha`/`beta` are themselves scale-invariant ratios -- this test
     exercises the literal MBL order, not that equivalence.
@@ -208,7 +208,7 @@ def test_volume_form_matches_reference_scaled_by_rho_default_before_the_spline()
     dp_np = _dp_probe_grid(_ONEWAYFLOW_DP)
     expected = _interpolate_np(dp_np, _ONEWAYFLOW_DP, mass_points_ref, d_ref)
 
-    el = MBLTable(_ONEWAYFLOW_DP, _ONEWAYFLOW_V_FLOW, form="volume", rho_default=rho_default)
+    el = SplineFlowTable(_ONEWAYFLOW_DP, _ONEWAYFLOW_V_FLOW, form="volume", rho_default=rho_default)
     dp = torch.tensor(dp_np, dtype=torch.float64)
     got = el.flow(dp)
     torch.testing.assert_close(
@@ -233,7 +233,7 @@ def _random_monotone_table(rng, n=9):
 def test_mass_form_matches_reference_on_a_random_monotone_table():
     rng = np.random.default_rng(20260924)
     dp_np, flow_np = _random_monotone_table(rng)
-    el = MBLTable(dp_np.tolist(), flow_np.tolist(), form="mass")
+    el = SplineFlowTable(dp_np.tolist(), flow_np.tolist(), form="mass")
     d_ref = _spline_derivatives_np(dp_np.tolist(), flow_np.tolist())
     probes = _dp_probe_grid(dp_np.tolist())
     expected = _interpolate_np(probes, dp_np.tolist(), flow_np.tolist(), d_ref)
@@ -248,7 +248,7 @@ def test_mass_form_matches_reference_on_a_random_monotone_table():
 def test_monotonicity_preserved_on_a_monotone_table_sampled_densely():
     rng = np.random.default_rng(999)
     dp_np, flow_np = _random_monotone_table(rng, n=7)
-    el = MBLTable(dp_np.tolist(), flow_np.tolist(), form="mass")
+    el = SplineFlowTable(dp_np.tolist(), flow_np.tolist(), form="mass")
 
     probes = np.linspace(dp_np[0] - 10.0, dp_np[-1] + 10.0, 10_000)
     got = el.flow(torch.tensor(probes, dtype=torch.float64)).numpy()
@@ -263,7 +263,7 @@ def test_monotonicity_preserved_on_a_monotone_table_sampled_densely():
 def test_gradcheck_inside_at_knots_and_extrapolating():
     rng = np.random.default_rng(7)
     dp_np, flow_np = _random_monotone_table(rng, n=6)
-    el = MBLTable(dp_np.tolist(), flow_np.tolist(), form="mass")
+    el = SplineFlowTable(dp_np.tolist(), flow_np.tolist(), form="mass")
 
     probes = _dp_probe_grid(dp_np.tolist())
     dp = torch.tensor(probes, dtype=torch.float64, requires_grad=True)
@@ -278,7 +278,7 @@ def test_gradcheck_inside_at_knots_and_extrapolating():
 def test_flow_broadcasts_leading_batch_dims():
     rng = np.random.default_rng(3)
     dp_np, flow_np = _random_monotone_table(rng, n=8)
-    el = MBLTable(dp_np.tolist(), flow_np.tolist(), form="mass")
+    el = SplineFlowTable(dp_np.tolist(), flow_np.tolist(), form="mass")
     d_ref = _spline_derivatives_np(dp_np.tolist(), flow_np.tolist())
 
     probes = _dp_probe_grid(dp_np.tolist())
@@ -310,29 +310,29 @@ def test_flow_broadcasts_leading_batch_dims():
 
 def test_invalid_form_is_rejected():
     with pytest.raises(ValueError):
-        MBLTable([0.0, 1.0], [0.0, 1.0], form="bogus")
+        SplineFlowTable([0.0, 1.0], [0.0, 1.0], form="bogus")
 
 
 def test_volume_form_without_rho_default_is_rejected():
     with pytest.raises(ValueError):
-        MBLTable([0.0, 1.0], [0.0, 1.0], form="volume")
+        SplineFlowTable([0.0, 1.0], [0.0, 1.0], form="volume")
 
 
 def test_mismatched_lengths_are_rejected():
     with pytest.raises(ValueError):
-        MBLTable([0.0, 1.0, 2.0], [0.0, 1.0], form="mass")
+        SplineFlowTable([0.0, 1.0, 2.0], [0.0, 1.0], form="mass")
 
 
 def test_non_strictly_increasing_knots_are_rejected_naming_the_index():
     with pytest.raises(ValueError, match="2"):
-        MBLTable([0.0, 1.0, 1.0, 3.0], [0.0, 1.0, 2.0, 3.0], form="mass")
+        SplineFlowTable([0.0, 1.0, 1.0, 3.0], [0.0, 1.0, 2.0, 3.0], form="mass")
 
 
 def test_decreasing_knots_are_rejected():
     with pytest.raises(ValueError):
-        MBLTable([0.0, 2.0, 1.0], [0.0, 1.0, 2.0], form="mass")
+        SplineFlowTable([0.0, 2.0, 1.0], [0.0, 1.0, 2.0], form="mass")
 
 
 def test_too_few_knots_are_rejected():
     with pytest.raises(ValueError):
-        MBLTable([0.0], [0.0], form="mass")
+        SplineFlowTable([0.0], [0.0], form="mass")

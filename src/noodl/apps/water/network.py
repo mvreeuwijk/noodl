@@ -383,9 +383,6 @@ def twoloop() -> WaterNetwork:
     )
 
 
-#: Pre-rename option values of `build_model(friction=...)`, normalised to the physical name.
-_FRICTION_ALIASES = {"epanet": "composite"}
-
 
 def _rounded_cfs_per_m3s(flow_units: str | None) -> float | None:
     """EPANET's internal cfs per m3/s for a file in `flow_units` (None: exact)."""
@@ -505,7 +502,6 @@ def build_model(
         raise ValueError(
             f"build_model: headloss must be 'H-W' or 'D-W', got {headloss!r}"
         )
-    friction = _FRICTION_ALIASES.get(friction, friction)
     if pipe_form is None:
         pipe_form = "potential" if headloss == "D-W" and friction == "colebrook" else "flow"
     if friction not in ("composite", "colebrook"):

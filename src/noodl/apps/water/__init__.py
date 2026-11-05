@@ -8,7 +8,6 @@ from noodl.apps.water.elements import (
     HW_SI,
     BreakerValve,
     CompositeDarcyWeisbach,
-    EpanetDarcyWeisbach,
     FlowControlledPipe,
     FlowControlledPump,
     G,
@@ -18,7 +17,6 @@ from noodl.apps.water.elements import (
     PumpCurve,
     TankStorage,
     composite_friction_factor,
-    epanet_friction_factor,
     three_point_curve,
 )
 from noodl.apps.water.inp import FLOW_UNITS, read_epanet_inp
@@ -54,6 +52,4 @@ __all__ = [
     "composite_friction_factor", "read_epanet_inp", "tank_inflow", "tank_levels",
     "three_point_curve",
     "to_kilopascal", "twoloop", "water_step", "water_steady",
-    # aliases, the pre-rename names
-    "EpanetDarcyWeisbach", "epanet_friction_factor",
 ]

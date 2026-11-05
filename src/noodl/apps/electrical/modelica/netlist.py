@@ -13,17 +13,17 @@ TWO nodes, one per conductor, written `<inst>.<terminal>[1]` and `[2]`; a `conne
 conductor k with conductor k. An MBL AC terminal (one-phase, also used by the balanced
 three-phase package) is ONE complex node; every one-terminal AC device is an edge from it to
 the reference. MSL `Ground`, MBL's implicit AC neutral and the absolute DC reference are all
-the electrical node 0, named `"0"`. Heat ports are nodes of a separate thermal network whose
-node 0, `"thermal.reference"`, is the 0 K reference.
+the electrical node 0, named `"0"`. Heat ports are nodes of a separate thermal network, which
+has no reference node: its temperatures are absolute (K).
 
 Union-find elements are tuples: `("pin", "R1.p")`, `("dc", "res.terminal", 1)`,
 `("ac", "Z1.terminal")`, `("heat", "R1.heatPort")`, `("internal", "RC.mid")`, and the fixed
-`REFERENCE` and `THERMAL_REFERENCE`. Ideal current sensors (`schema.WIRES`) join their two
+`REFERENCE`. Ideal current sensors (`schema.WIRES`) join their two
 ends; observers (voltage and potential sensors, and any component the exporter marked
 `"role": "observer"`) are ignored with their connections; grounds join their pin to node 0.
 Nodes are numbered in the order the devices' ports first reach them (devices in document
-order, ports in the order below), after the reference; a node is named after the first
-element that reached it.
+order, ports in the order below), electrical nodes after the reference, thermal nodes from 0;
+a node is named after the first element that reached it.
 
 `Device.nodes` keys per role (MBL `terminal_n` is the side a two-port's current enters):
 
@@ -96,7 +96,6 @@ from noodl.apps.electrical.modelica.schema import (
 from noodl.modelica.schema import flag
 
 REFERENCE = ("reference", "0")
-THERMAL_REFERENCE = ("thermal_reference", "thermal.reference")
 
 _AC1 = "Buildings.Electrical.AC.OnePhase."
 _AC3 = "Buildings.Electrical.AC.ThreePhasesBalanced."
@@ -159,7 +158,8 @@ class Device:
 
 @dataclass(frozen=True)
 class Netlist:
-    """Devices on numbered electrical and thermal nodes (node 0 is each network's reference).
+    """Devices on numbered electrical and thermal nodes (electrical node 0 is the reference;
+    the thermal network has none).
 
     `phasor` is true for a model with MBL AC components, `frequency` their sources' common
     frequency in Hz (`None` for a real model). `signals` are the document's signal blocks
@@ -371,9 +371,7 @@ def _floating_thermal_nodes(devices: list[Device], fixed: dict, thermal_names: l
             parent[find(d.nodes["port_a"])] = find(d.nodes["port_b"])
     held = {find(node) for node in fixed}
     held |= {find(d.nodes["port"]) for d in devices if d.role == "heat_capacitor"}
-    held.add(find(0))       # the reference, and whatever a conductor joins to it
-    floating = [thermal_names[k] for k in range(1, len(thermal_names))
-                if find(k) not in held]
+    floating = [thermal_names[k] for k in range(len(thermal_names)) if find(k) not in held]
     if not floating:
         return []
     return [f"the thermal network is floating at {', '.join(floating)}: no fixed temperature "
@@ -455,9 +453,8 @@ def build(doc: CircuitDoc, *, omit: Iterable[str] = ()) -> Netlist:
 
     # union-find over every active component's elements
     # the fixed references stay their own class's root
-    uf = UnionFind(keep_root=lambda e: e in (REFERENCE, THERMAL_REFERENCE))
+    uf = UnionFind(keep_root=lambda e: e == REFERENCE)
     uf.add(REFERENCE)
-    uf.add(THERMAL_REFERENCE)
     device_elements: dict[str, dict[str, tuple]] = {}
     heat_elements: dict[str, tuple] = {}
     for comp in active:
@@ -536,8 +533,8 @@ def build(doc: CircuitDoc, *, omit: Iterable[str] = ()) -> Netlist:
     # node numbering, in the order the devices' ports first reach a node
     electrical: dict[tuple, int] = {uf.find(REFERENCE): 0}
     electrical_names = ["0"]
-    thermal: dict[tuple, int] = {uf.find(THERMAL_REFERENCE): 0}
-    thermal_names = ["thermal.reference"]
+    thermal: dict[tuple, int] = {}
+    thermal_names: list[str] = []
 
     def number(element: tuple, table: dict, labels: list) -> int:
         root = uf.find(element)
@@ -581,7 +578,7 @@ def build(doc: CircuitDoc, *, omit: Iterable[str] = ()) -> Netlist:
 
     def lookup(table: dict) -> dict[str, int]:
         return {_text(e): table[uf.find(e)] for e in uf.parent
-                if e not in (REFERENCE, THERMAL_REFERENCE) and uf.find(e) in table}
+                if e != REFERENCE and uf.find(e) in table}
 
     return Netlist(
         node_names=tuple(electrical_names), node_of=lookup(electrical),

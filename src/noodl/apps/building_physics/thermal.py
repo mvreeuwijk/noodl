@@ -99,29 +99,60 @@ def add_zone(net: Network | Component, zone: Zone, *, ambient="ambient") -> None
 
 
 def thermal_layer(net: Network, *, ambient="ambient", name: str = "thermal",
-                  flow_kinds=("airpath",), conduction_kind: str = "wall", c_p: float = CP_AIR,
+                  flow_kinds=("airpath",), conduction_kind: str | Sequence[str] | None = None,
+                  c_p: float = CP_AIR,
                   rho: float = RHO_0, scheme: str | None = None,
                   fixed_temperature=(), storage_free: Sequence = ()) -> TransportLayer:
     """The heat layer: capacity rho c_p V + heat_capacity per active interior node, carrier
     c_p on the flow kinds, conduction UA on `conduction_kind` edges (if any exist).
 
-    `storage_free` names nodes that hold no heat (a zero-volume air-handler plenum): their
-    capacity may be zero, and they need the implicit scheme. `scheme` defaults to "exact",
-    or to "implicit" when `storage_free` names any node; an explicit other scheme with
-    storage-free nodes is refused by name.
+    `conduction_kind` is one edge kind or a tuple of kinds; left out (`None`) it is `"wall"`
+    when the network has wall edges and no conduction when it has none. Given explicitly,
+    a tuple such as `("wall", "film", "radiation")` carries wall conduction, the surface
+    (film) coefficient and a radiative coefficient as separate edges. Each kind's `ua` (W/K)
+    is read from its edges, and the layer's `conductance` is the kinds concatenated in the
+    order given (see `TransportLayer.conduction_edges`). An explicitly given kind the network
+    has no edge of is an error naming it (a misspelt kind must not silently change the
+    conductance order). A closure that recomputes a coefficient from
+    the state writes the per-step driver `"<layer>.conductance"` in that order.
+
+    `storage_free` names nodes that hold no heat: their capacity may be zero. A storage-free
+    node that air passes through (a zero-volume air-handler plenum) needs the implicit
+    scheme. One joined only by conduction (a wall's surface node, a zone's radiant star
+    node) is folded into its neighbours (see `TransportLayer`) and takes any scheme.
+    `scheme` defaults to "exact", or to "implicit" when a storage-free node touches a flow
+    edge; an explicit other scheme with such a node is refused by name.
     """
     storage_free = tuple(storage_free)
-    if scheme is None:
-        scheme = "implicit" if len(storage_free) else "exact"
     boundary = [ambient, *fixed_temperature]
     kinds = tuple(flow_kinds)
-    has_walls = conduction_kind in net.edge_kinds()
+    present = set(net.edge_kinds())
+    if scheme is None:
+        ventilated = set()
+        for kind in kinds:
+            if kind in present:
+                src, tgt = net.endpoints(kind)
+                ventilated.update(src.tolist() + tgt.tolist())
+        free_idx = [net.node_index(n) for n in net.canonical(list(storage_free))]
+        scheme = "implicit" if any(i in ventilated for i in free_idx) else "exact"
+    if conduction_kind is None:
+        cond_kinds = ("wall",) if "wall" in present else ()
+    else:
+        cond_kinds = ((conduction_kind,) if isinstance(conduction_kind, str)
+                      else tuple(conduction_kind))
+        missing = [k for k in cond_kinds if k not in present]
+        if missing:
+            raise ValueError(
+                f"thermal layer {name!r}: conduction_kind {missing} names no edge of the "
+                f"network (edge kinds: {sorted(present)})"
+            )
+    has_walls = bool(cond_kinds)
     # `active_interior` is the ONE place the active-interior rule lives, and
     # is exactly what `TransportLayer` sizes its own interior with -- a wall-mass node has
     # conduction edges and no airpath edges, so conduction must be counted as a touch here
     # too or the capacity vector would be one entry short of the layer's rows.
     interior, _ = active_interior(
-        net, kinds + ((conduction_kind,) if has_walls else ()), boundary
+        net, kinds + cond_kinds, boundary
     )
     capacity = (rho * c_p * net.node_attr("volume", default=0.0)
                 + net.node_attr("heat_capacity", default=0.0))[interior]
@@ -138,10 +169,11 @@ def thermal_layer(net: Network, *, ambient="ambient", name: str = "thermal",
         )
     return TransportLayer(
         net, name, capacity=capacity, flow_kind=kinds, boundary=boundary, carrier=float(c_p),
-        conduction_kind=conduction_kind if has_walls else None,
-        conductance=net.edge_attr("ua", conduction_kind) if has_walls else None,
+        conduction_kind=(cond_kinds[0] if len(cond_kinds) == 1 else cond_kinds) or None,
+        conductance=(torch.cat([net.edge_attr("ua", k) for k in cond_kinds])
+                     if has_walls else None),
         scheme=scheme, quantity="temperature", unit="K",
-        source_unit="W", capacity_unit="J/K", flow_unit="kg/s",
+        source_unit="W", capacity_unit="J/K", flow_unit="kg/s", conductance_unit="W/K",
         storage_free=tuple(storage_free),
     )
 

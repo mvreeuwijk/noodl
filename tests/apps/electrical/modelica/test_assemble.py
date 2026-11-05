@@ -14,6 +14,7 @@ from noodl.apps.electrical.modelica import (
     Column,
     ModelicaImportError,
     read_modelica_circuit,
+    simulate_circuit,
 )
 from noodl.apps.electrical.modelica.schema import load
 from noodl.modelica.timeline import step_drivers
@@ -286,28 +287,31 @@ def test_rc_line_capacitor_starts_at_its_recorded_voltage():
 def test_heat_port_columns_map_to_the_thermal_nodes():
     *_, names = read_modelica_circuit(DATA / "Analog.Examples.HeatingRectifier.json")
     col = names.columns["HeatingDiode1.T_heatPort"]
-    assert col.key == "thermal.phi"
+    assert col.key == "thermal.x"
     assert col.terms == ((names.thermal_nodes["HeatingDiode1.heatPort"], 1.0),)
     assert names.columns["HeatCapacitor1.T"].terms == (
         (names.thermal_nodes["HeatCapacitor1.port"], 1.0),)
-    assert set(names.thermal_nodes.values()).isdisjoint(names.nodes.values())
+    # positions in the heat layer's state, in thermal-node order
+    assert names.thermal_nodes == {"HeatingDiode1.heatPort": 0, "HeatCapacitor1.port": 1}
 
 
-def test_resistor_example_has_a_thermal_layer_coupled_by_iteration():
+def test_resistor_example_has_a_heat_layer_coupled_by_iteration():
     model, state, drivers, names = read_modelica_circuit(DATA / "Analog.Examples.Resistor.json")
-    assert list(model.kirchhoff) == ["electrical", "thermal"]
+    assert list(model.kirchhoff) == ["electrical"] and list(model.transport) == ["thermal"]
     assert model.coupling == "iterate"
-    assert names.columns["resistor.T_heatPort"].key == "thermal.phi"
-    thermal = model.kirchhoff["thermal"]
-    assert thermal.kinds == ["conductor", "heat_source"]
-    assert (thermal.quantity, thermal.unit, thermal.flow_unit) == ("temperature", "K", "W")
+    assert names.columns["resistor.T_heatPort"].key == "thermal.x"
+    thermal = model.transport["thermal"]
+    assert thermal.flow_kinds == () and thermal.conduction_kinds == ("conductor",)
+    assert (thermal.quantity, thermal.unit, thermal.source_unit) == ("temperature", "K", "W")
     assert not names.dynamic
-    # boundaries: the 0 K reference and the fixed temperature (20 degC), in that order
-    torch.testing.assert_close(drivers["thermal.phi_boundary"],
-                               torch.tensor([0.0, 293.15], dtype=torch.float64))
+    # the fixed temperature (20 degC) is the one boundary; the heat port holds no heat
+    torch.testing.assert_close(drivers["thermal.x_boundary"],
+                               torch.tensor([293.15], dtype=torch.float64))
+    assert thermal.storage_free_mask.tolist() == [True]
+    assert thermal.folded_mask.tolist() == [True]
     heat_port = names.thermal_nodes["resistor.heatPort"]
-    assert float(state["thermal.phi"][heat_port]) == 293.15
-    assert float(drivers["thermal.heat"][0]) == 0.0
+    assert float(state["thermal.x"][heat_port]) == 293.15
+    assert float(state["thermal.sources"].abs().sum()) == 0.0
     # at t = 0.25 s the source is at its 220 V peak: the hand fixed point of
     # alpha x^2 + x - V^2/(G R0) = 0 (R0 = 100, alpha = 1e-3, G = 50 W/K, T_ref = 293.15 K)
     t = float(names.grid[25])
@@ -321,24 +325,71 @@ def test_resistor_example_has_a_thermal_layer_coupled_by_iteration():
 def test_heating_rectifier_thermal_start_and_temperature_drivers():
     model, state, drivers, names = read_modelica_circuit(
         DATA / "Analog.Examples.HeatingRectifier.json")
-    thermal = model.kirchhoff["thermal"]
-    assert thermal.kinds == ["conductor", "heat_source", "heat_capacitor"]
+    thermal = model.transport["thermal"]
+    assert thermal.conduction_kinds == ("conductor",)
     assert names.dynamic
-    # no fixed temperature: the 0 K reference is the only boundary
-    torch.testing.assert_close(drivers["thermal.phi_boundary"],
-                               torch.tensor([0.0], dtype=torch.float64))
+    # no fixed temperature: no boundary at all; the heat port holds no heat (folded), the
+    # heat capacitor's node holds C = 1 J/K
+    assert thermal.n_b == 0 and drivers["thermal.x_boundary"].shape == (0,)
+    assert thermal.folded_mask.tolist() == [True, False]
+    assert float(thermal.capacity[1]) == 1.0
     port = names.thermal_nodes["HeatingDiode1.heatPort"]
     capacitor = names.thermal_nodes["HeatCapacitor1.port"]
-    assert float(state["thermal.phi"][capacitor]) == 293.15
-    assert float(state["thermal.phi"][port]) == 293.15      # the mean of the known ones
-    assert float(state["thermal.phi"][names.thermal_nodes["thermal.reference"]]) == 0.0
-    assert state["thermal.q"].shape == (3,)
+    assert float(state["thermal.x"][capacitor]) == 293.15
+    assert float(state["thermal.x"][port]) == 293.15      # the mean of the known ones
+    assert state["thermal.x"].shape == (2,)
     # the heated diode reads its heat port; the resistor without one keeps its T
     assert drivers["electrical.diode.T"].tolist() == [293.15]
     assert drivers["electrical.resistor.T"].tolist() == [300.15]
     closure = model.closures[0]
     out = closure(state, drivers)
-    assert set(out) == {"thermal.heat", "electrical.diode.T"}
+    assert set(out) == {"thermal.sources", "electrical.diode.T"}
+    assert closure.state_keys == ("thermal.sources",)
+
+
+def test_a_heat_port_on_a_fixed_temperature_reads_it_and_hands_it_its_heat(tmp_path):
+    # r's heat port directly on a FixedTemperature (no conductor): the port is the boundary,
+    # its column the fixed temperature, and its heat goes to the boundary (no source).
+    path = _doc(tmp_path, [
+        _c("V", MSL + "Sources.ConstantVoltage", V=2.0),
+        _c("r", MSL + "Basic.Resistor", R=1.0, T_ref=300.15, alpha=0.01, useHeatPort=True,
+           T=300.15),
+        _c("G", MSL + "Basic.Ground"),
+        _c("ft", "Modelica.Thermal.HeatTransfer.Sources.FixedTemperature", T=310.0),
+        _c("r2", MSL + "Basic.Resistor", R=1.0, T_ref=300.15, alpha=0.01, useHeatPort=True,
+           T=300.15),
+        _c("k", "Modelica.Thermal.HeatTransfer.Components.ThermalConductor", G=2.0),
+    ], [["V.p", "r.p"], ["V.n", "G.p"], ["r.n", "G.p"], ["r.heatPort", "ft.port"],
+        ["V.p", "r2.p"], ["r2.n", "G.p"], ["r2.heatPort", "k.port_a"], ["k.port_b", "ft.port"]],
+        compared=["r.T_heatPort", "r2.T_heatPort"])
+    model, state, drivers, names = read_modelica_circuit(path)
+    assert names.columns["r.T_heatPort"].offset == 310.0
+    assert names.columns["r.T_heatPort"].terms == ()
+    out = simulate_circuit(model, state, drivers, names, times=names.times[:1])
+    assert names.value(out, "r.T_heatPort").tolist() == [310.0]
+    # r2: R = 1 (1 + 0.01 (T - 300.15)), 4 / R W into G = 2 W/K at 310 K
+    T = float(names.value(out, "r2.T_heatPort")[0])
+    assert abs(2.0 * (T - 310.0) - 4.0 / (1.0 + 0.01 * (T - 300.15))) <= 1e-9
+    # only r2's heat port is a source; r's heat goes to the fixed temperature
+    heat = model.closures[0](
+        {**state, **{k: v[0] for k, v in out.items() if k != "time"}}, drivers)
+    sources = heat["thermal.sources"]
+    port = model.net.nodes.index("r2.heatPort")
+    assert sources.shape == (len(model.net.nodes),)
+    assert sources.nonzero().flatten().tolist() == [port]
+
+
+def test_a_heat_capacitor_no_conductor_reaches_is_refused(tmp_path):
+    path = _doc(tmp_path, [
+        _c("V", MSL + "Sources.ConstantVoltage", V=1.0),
+        _c("r", MSL + "Basic.Resistor", R=1.0, T_ref=300.15, alpha=0.0, useHeatPort=True,
+           T=300.15),
+        _c("G", MSL + "Basic.Ground"),
+        _c("hc", "Modelica.Thermal.HeatTransfer.Components.HeatCapacitor", {"T": 300.0},
+           C=1.0),
+    ], [["V.p", "r.p"], ["V.n", "G.p"], ["r.n", "G.p"], ["r.heatPort", "hc.port"]])
+    with pytest.raises(ModelicaImportError, match="reached by no ThermalConductor"):
+        read_modelica_circuit(path)
 
 
 def test_thermal_components_without_a_heated_device_are_refused(tmp_path):
