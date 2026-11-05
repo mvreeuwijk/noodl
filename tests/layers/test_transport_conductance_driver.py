@@ -270,3 +270,9 @@ def test_stepping_the_radiative_coefficient_settles_on_the_same_root(scheme):
     for _ in range(60):
         state = model.step(state, drivers, 100.0)
     assert state["thermal.x"].item() == pytest.approx(root, abs=1e-6)
+
+
+def test_a_negative_construction_time_conductance_is_refused_by_name():
+    message = r"zero or positive; negative on conduction edge.*'b', 'ambient'"
+    with pytest.raises(ValueError, match=message):
+        _layer(g=[0.7, -1.0, 0.4])

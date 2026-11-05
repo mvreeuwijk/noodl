@@ -436,16 +436,23 @@ class TransportLayer(TopologyGuard):
                 f"({b_c},) (one per conduction edge, in the order of `conduction_edges`), "
                 f"got {tuple(g.shape)}"
             )
-        negative = (g.detach() < 0).reshape(-1, b_c).any(0)
+        self._refuse_negative_conductance(g, self._conduction_edges[0],
+                                          self._conduction_edges[1])
+        return g
+
+    def _refuse_negative_conductance(
+        self, g: torch.Tensor, src: torch.Tensor, tgt: torch.Tensor
+    ) -> None:
+        """Raise `ValueError` naming the conduction edges (by end nodes) where `g` is
+        negative on any batch instance. A conductance is zero or positive."""
+        negative = (g.detach() < 0).reshape(-1, g.shape[-1]).any(0)
         if bool(negative.any()):
-            edges = [(self.net.nodes[int(self._conduction_edges[0][e])],
-                      self.net.nodes[int(self._conduction_edges[1][e])])
+            edges = [(self.net.nodes[int(src[e])], self.net.nodes[int(tgt[e])])
                      for e in negative.nonzero().flatten().tolist()]
             raise ValueError(
                 f"TransportLayer '{self.name}': conductance must be zero or positive; "
                 f"negative on conduction edge(s) {edges}"
             )
-        return g
 
     @property
     def conduction_edges(self) -> tuple[tuple[str, torch.Tensor, torch.Tensor], ...]:
@@ -704,6 +711,7 @@ class TransportLayer(TopologyGuard):
                     f"TransportLayer '{name}': conductance must have shape ({b_c},), "
                     f"got {tuple(g.shape)}"
                 )
+            self._refuse_negative_conductance(g, csrc, ctgt)
             self._conduction_edges: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = (
                 csrc,
                 ctgt,

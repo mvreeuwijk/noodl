@@ -321,8 +321,7 @@ def _film_wall_net(kinds):
 
 def test_thermal_layer_takes_a_tuple_of_conduction_kinds():
     split = thermal_layer(_film_wall_net(("wall", "film", "film")),
-                          conduction_kind=("wall", "film", "radiation"))
-    # "radiation" has no edge: left out, as an absent default "wall" always was
+                          conduction_kind=("wall", "film"))
     assert split.conduction_kinds == ("wall", "film")
     assert [b[0] for b in split.conduction_edges] == ["wall", "film"]
     # kind blocks concatenate in the order given: wall (30), then film (20, 70)
@@ -333,3 +332,17 @@ def test_thermal_layer_takes_a_tuple_of_conduction_kinds():
     assert torch.equal(split._conduction_edges[0], merged._conduction_edges[0])
     assert torch.equal(split.interior_idx, merged.interior_idx)
     assert torch.equal(split.capacity, merged.capacity)
+
+
+def test_thermal_layer_names_an_explicit_conduction_kind_with_no_edges():
+    net = _film_wall_net(("wall", "film", "film"))
+    with pytest.raises(ValueError, match=r"conduction_kind \['flim'\] names no edge"):
+        thermal_layer(net, conduction_kind=("wall", "flim"))
+    with pytest.raises(ValueError, match="'radiation'"):
+        thermal_layer(net, conduction_kind="radiation")
+    # the default stays tolerant: no wall edges, no conduction
+    bare = Network(dtype=F64)
+    bare.add_node("ambient", z_ref=0.0)
+    bare.add_node("z", volume=50.0, T0=293.15, z_ref=0.0)
+    bare.add_edge("ambient", "z", kind="airpath", z_path=0.0, Cd=0.6, area=0.01)
+    assert thermal_layer(bare).conduction_kinds == ()

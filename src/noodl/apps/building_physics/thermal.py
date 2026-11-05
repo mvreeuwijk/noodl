@@ -99,19 +99,21 @@ def add_zone(net: Network | Component, zone: Zone, *, ambient="ambient") -> None
 
 
 def thermal_layer(net: Network, *, ambient="ambient", name: str = "thermal",
-                  flow_kinds=("airpath",), conduction_kind: str | Sequence[str] = "wall",
+                  flow_kinds=("airpath",), conduction_kind: str | Sequence[str] | None = None,
                   c_p: float = CP_AIR,
                   rho: float = RHO_0, scheme: str | None = None,
                   fixed_temperature=(), storage_free: Sequence = ()) -> TransportLayer:
     """The heat layer: capacity rho c_p V + heat_capacity per active interior node, carrier
     c_p on the flow kinds, conduction UA on `conduction_kind` edges (if any exist).
 
-    `conduction_kind` is one edge kind (wall conduction, the default `"wall"`) or a tuple of
-    kinds, for instance `("wall", "film", "radiation")` to carry wall conduction, the surface
+    `conduction_kind` is one edge kind or a tuple of kinds; left out (`None`) it is `"wall"`
+    when the network has wall edges and no conduction when it has none. Given explicitly,
+    a tuple such as `("wall", "film", "radiation")` carries wall conduction, the surface
     (film) coefficient and a radiative coefficient as separate edges. Each kind's `ua` (W/K)
     is read from its edges, and the layer's `conductance` is the kinds concatenated in the
-    order given (see `TransportLayer.conduction_edges`). A kind the network has no edge of is
-    left out, as the default `"wall"` always was. A closure that recomputes a coefficient from
+    order given (see `TransportLayer.conduction_edges`). An explicitly given kind the network
+    has no edge of is an error naming it (a misspelt kind must not silently change the
+    conductance order). A closure that recomputes a coefficient from
     the state writes the per-step driver `"<layer>.conductance"` in that order.
 
     `storage_free` names nodes that hold no heat (a zero-volume air-handler plenum): their
@@ -125,8 +127,17 @@ def thermal_layer(net: Network, *, ambient="ambient", name: str = "thermal",
     boundary = [ambient, *fixed_temperature]
     kinds = tuple(flow_kinds)
     present = set(net.edge_kinds())
-    wanted = (conduction_kind,) if isinstance(conduction_kind, str) else tuple(conduction_kind)
-    cond_kinds = tuple(k for k in wanted if k in present)
+    if conduction_kind is None:
+        cond_kinds = ("wall",) if "wall" in present else ()
+    else:
+        cond_kinds = ((conduction_kind,) if isinstance(conduction_kind, str)
+                      else tuple(conduction_kind))
+        missing = [k for k in cond_kinds if k not in present]
+        if missing:
+            raise ValueError(
+                f"thermal layer {name!r}: conduction_kind {missing} names no edge of the "
+                f"network (edge kinds: {sorted(present)})"
+            )
     has_walls = bool(cond_kinds)
     # `active_interior` is the ONE place the active-interior rule lives, and
     # is exactly what `TransportLayer` sizes its own interior with -- a wall-mass node has
