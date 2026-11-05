@@ -310,6 +310,21 @@ def test_a_folded_group_cut_off_from_every_stored_node_is_refused_by_name():
         layer.step(STAR_X0, Q0, _star_sources(), XB, 900.0, conductance=g)
 
 
+@pytest.mark.parametrize("call", ["step", "steady"])
+def test_a_negative_per_call_conductance_on_a_folded_layer_is_refused_by_name(call):
+    """The sign check a folded layer reads together with the folding's zero check still
+    names the edge, on any batch instance, before anything is folded."""
+    _, layer = _star("exact")
+    g = torch.stack([_t(STAR_G), _t(STAR_G)])
+    g[1, 4] = -1.0                                    # s2-r radiation, second instance
+    with pytest.raises(ValueError, match=r"zero or positive; negative on conduction "
+                                         r"edge\(s\) \[\('s2', 'r'\)\]"):
+        if call == "step":
+            layer.step(STAR_X0, Q0, _star_sources(), XB, 900.0, conductance=g)
+        else:
+            layer.steady(Q0, _star_sources(), XB, conductance=g)
+
+
 def test_a_folded_group_with_no_neighbour_at_all_is_refused_at_construction():
     net = Network(dtype=F64)
     for n in ("ambient", "z", "a", "b"):
