@@ -126,6 +126,8 @@ class AirMedium:
     so each medium's own ideal-gas law (or, for ``Buildings.Media.Air``, ``density_pTX``) is
     fixed at construction time in :func:`medium` below and never re-derived from ``name`` at
     call time.
+
+    Alias: `MBLMedium` (MBL).
     """
 
     name: str
@@ -291,3 +293,7 @@ def medium(name: str) -> AirMedium:
             f"unsupported medium {name!r}; supported media are: {supported}"
         )
     return factory()
+
+# Modelica Buildings Library (MBL) names, kept as aliases: they name the reference model
+# these laws are transcribed from.
+MBLMedium = AirMedium  # alias, the MBL name

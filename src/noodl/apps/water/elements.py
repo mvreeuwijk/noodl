@@ -373,6 +373,7 @@ class MinorLoss(ConstitutiveLaw):
 #: digit from `src/hydcoeffs.c` (v2.2), where they are ``A1``, ``A2``, ``A8``, ``A9``,
 #: ``AB`` and ``AC``. ``w = q / (nu d) = Re pi / 4``, so ``W_RE_4000`` (``A1``) is
 #: Re = 4000 and ``W_RE_2000`` (``A2``) is Re = 2000.
+#: Aliases: `EPANET_A1`, `EPANET_A2`, `EPANET_A8`, `EPANET_A9`, `EPANET_AB`, `EPANET_AC` (EPANET).
 W_RE_4000 = 3.14159265358979323850e03  # 1000 pi
 W_RE_2000 = 1.57079632679489661930e03  # 500 pi
 SWAMEE_JAIN_W_COEFF = 4.61841319859066668690e00  # 5.74 (pi/4)^0.9
@@ -385,11 +386,13 @@ DUNLOP_AC = -5.14214965799093883760e-03  # -2 * 0.9 * 2 / ln(10) * AB
 #: 32.2 ft/s^2, NOT standard gravity's 32.174, and the minor-loss conversion
 #: ``0.02517 K / d^4`` (`input1.c`, `convertunits`) is ``8 / (32.2 pi^2)`` ROUNDED to
 #: four figures. Both are part of what EPANET computes, so both are reproduced here.
+#: Aliases: `EPANET_FOOT`, `EPANET_G_FT`, `EPANET_KM` (EPANET).
 M_PER_FT = 0.3048
 G_FT_S2 = 32.2
 MINOR_LOSS_K_FT = 0.02517
 #: EPANET's default kinematic viscosity of water, ``VISCOS = 1.1e-5`` ft^2/s (`types.h`),
 #: = 1.0219e-6 m^2/s; ``[OPTIONS] VISCOSITY`` multiplies it.
+#: Aliases: `EPANET_VISCOS_FT2`, `EPANET_NU` (EPANET).
 NU_WATER_FT2 = 1.1e-5
 NU_WATER_REF = NU_WATER_FT2 * M_PER_FT**2
 #: EPANET's own flow-unit factors, file units per cfs (`types.h`, ``GPMperCFS`` ...).
@@ -435,6 +438,8 @@ def composite_friction_factor(q: Tensor, e: Tensor, s: Tensor) -> tuple[Tensor, 
 
     Both branches are evaluated everywhere and selected with ``where``; the Swamee-Jain
     branch sees ``w`` clamped to at least ``A1`` so its un-taken values stay finite.
+
+    Alias: `epanet_friction_factor` (EPANET).
     """
     w = q / s
     turbulent = w >= W_RE_4000
@@ -489,6 +494,8 @@ class CompositeDarcyWeisbach(ConstitutiveLaw):
     ``solve_monotone`` inversion is deliberately not used: it needs an autograd
     derivative per iteration and a collapsed bracket to stop; see
     ``docs/design/water_street.md#headloss-inversion``.)
+
+    Alias: `EpanetDarcyWeisbach` (EPANET).
     """
 
     def __init__(
@@ -618,6 +625,23 @@ class CompositeDarcyWeisbach(ConstitutiveLaw):
         # The laminar tangent at q = 0, as `Duct.linear_init` uses its laminar line.
         slope = self.dflow(torch.zeros_like(self.length * self.diameter), drivers)
         return torch.zeros_like(slope), slope
+
+
+# EPANET 2.2 names, kept as aliases: they name the reference model (and its C identifiers)
+# this law is transcribed from.
+EpanetDarcyWeisbach = CompositeDarcyWeisbach  # alias, the EPANET name
+epanet_friction_factor = composite_friction_factor  # alias, the EPANET name
+EPANET_A1 = W_RE_4000  # alias, the EPANET name
+EPANET_A2 = W_RE_2000  # alias, the EPANET name
+EPANET_A8 = SWAMEE_JAIN_W_COEFF  # alias, the EPANET name
+EPANET_A9 = SWAMEE_JAIN_LOG_COEFF  # alias, the EPANET name
+EPANET_AB = DUNLOP_AB  # alias, the EPANET name
+EPANET_AC = DUNLOP_AC  # alias, the EPANET name
+EPANET_FOOT = M_PER_FT  # alias, the EPANET name
+EPANET_G_FT = G_FT_S2  # alias, the EPANET name
+EPANET_KM = MINOR_LOSS_K_FT  # alias, the EPANET name
+EPANET_VISCOS_FT2 = NU_WATER_FT2  # alias, the EPANET name
+EPANET_NU = NU_WATER_REF  # alias, the EPANET name
 
 
 def epanet_minor_coefficient(minor_loss: Tensor, diameter: Tensor,

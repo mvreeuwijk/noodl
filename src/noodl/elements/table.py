@@ -121,6 +121,8 @@ class SplineFlowTable(ConstitutiveLaw):
     (``Table_V_flow.mo:5``, see the module docstring); ``form="mass"`` (``Table_m_flow``)
     treats ``flow_points`` as mass-flow knots directly. ``rho_default`` is required (and used)
     only for ``form="volume"``.
+
+    Alias: `MBLTable` (MBL).
     """
 
     def __init__(
@@ -228,3 +230,7 @@ class SplineFlowTable(ConstitutiveLaw):
         inside = (dp > x1) & (dp < x2)
         left = dp <= x1
         return torch.where(inside, cubic, torch.where(left, lin_left, lin_right))
+
+# Modelica Buildings Library (MBL) names, kept as aliases: they name the reference model
+# these laws are transcribed from.
+MBLTable = SplineFlowTable  # alias, the MBL name

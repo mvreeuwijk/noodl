@@ -100,7 +100,11 @@ closure written with 0.41 is selected."""
 KAPPA_041 = 0.41
 """The von Karman constant 0.41: the `munich` preset's, and the one the
 `exponential_profile`, `aspect_ratio_scaled` and `canopy_log_law` closures are written with
-(MUNICH, `StreetNetworkTransport.cxx:21`)."""
+(MUNICH, `StreetNetworkTransport.cxx:21`).
+
+Alias: `KAPPA_MUNICH` (MUNICH)."""
+
+KAPPA_MUNICH = KAPPA_041  # alias, the MUNICH name
 
 _NUMERIC = ("kappa", "canyon_wind_min", "u_d_min", "sigma_w_min", "sigma_v_min",
             "h_canopy")

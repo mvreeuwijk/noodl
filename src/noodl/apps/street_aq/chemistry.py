@@ -214,14 +214,26 @@ def j_no2_zenith_table(zenith_deg, attenuation=1.0) -> torch.Tensor:
 
 K_NO_O3_SOULHAC2011_PREFACTOR = 1.325e6
 """m3 mol^-1 s^-1: the prefactor of the Soulhac et al. (2011) k(NO + O3) (SIRANE's),
-2.2e-12 cm3 molecule^-1 s^-1 x N_A."""
+2.2e-12 cm3 molecule^-1 s^-1 x N_A.
+
+Alias: `SIRANE_K3_PREFACTOR` (SIRANE)."""
 
 K_NO_O3_SOULHAC2011_ACTIVATION = 1430.0
-"""K: the activation temperature of the Soulhac et al. (2011) k(NO + O3) (SIRANE's)."""
+"""K: the activation temperature of the Soulhac et al. (2011) k(NO + O3) (SIRANE's).
+
+Alias: `SIRANE_K3_ACTIVATION` (SIRANE)."""
 
 PHOTOSTATIONARY_FLOOR_PPB = 2.0
 """ppb: the lower bound on `k1/k3` (`J/k`) in the photostationary split, SIRANE's 2 ppb (the
-`sirane` preset's `floor_ppb`)."""
+`sirane` preset's `floor_ppb`).
+
+Alias: `SIRANE_K_FLOOR_PPB` (SIRANE)."""
+
+SIRANE_K3_PREFACTOR = K_NO_O3_SOULHAC2011_PREFACTOR  # alias, the SIRANE name
+
+SIRANE_K3_ACTIVATION = K_NO_O3_SOULHAC2011_ACTIVATION  # alias, the SIRANE name
+
+SIRANE_K_FLOOR_PPB = PHOTOSTATIONARY_FLOOR_PPB  # alias, the SIRANE name
 
 
 def solar_elevation(latitude_deg, day_of_year, hour) -> torch.Tensor:
@@ -251,6 +263,8 @@ def j_no2_elevation_cloud(elevation_deg, cloud_octas=0.0) -> torch.Tensor:
     et al. (2011) Eq. 32 with the bracket clipped at zero, which makes `k1` zero for
     `a <= 1.458 deg` and so at night. The clear-sky overhead value is 9.50e-3 1/s. The
     clip is the only non-smooth point.
+
+    Alias: `j_no2_sirane` (SIRANE).
     """
     elevation = torch.as_tensor(elevation_deg, dtype=torch.float64)
     cloud = torch.as_tensor(cloud_octas, dtype=torch.float64)
@@ -265,16 +279,23 @@ def j_no2_elevation_cloud(elevation_deg, cloud_octas=0.0) -> torch.Tensor:
     return clear * (1.0 - 0.75 * (cloud / 8.0) ** 3.4)
 
 
+j_no2_sirane = j_no2_elevation_cloud  # alias, the SIRANE name
+
+
 def k_no_o3_soulhac2011(temperature) -> torch.Tensor:
     """k(NO + O3) = 1.325e6 exp(-1430/T) m3 mol^-1 s^-1 at `temperature` (K), SIRANE's
     rate (Soulhac et al. 2011, with the prefactor that reproduces SIRANE v2.1 output).
 
     In SIRANE the temperature is its ground-level air temperature. Divided by the molar
     volume in litres and times 1e-6 it is the rate in ppb^-1 s^-1 that SIRANE prints.
+
+    Alias: `k_no_o3_sirane` (SIRANE).
     """
     t = torch.as_tensor(temperature, dtype=torch.float64)
     return K_NO_O3_SOULHAC2011_PREFACTOR * torch.exp(-K_NO_O3_SOULHAC2011_ACTIVATION / t)
 
+
+k_no_o3_sirane = k_no_o3_soulhac2011  # alias, the SIRANE name
 
 NO_O3_RATES = {"soulhac_2011": k_no_o3_soulhac2011, "jpl_2003": k_no_o3_jpl2003}
 """The named NO + O3 rates `photostationary_for_streets(no_o3_rate=...)` takes."""
