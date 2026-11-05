@@ -33,6 +33,7 @@ layer. Boundary rows must be zero (refused by name, not silently dropped); ``ste
 from __future__ import annotations
 
 import bisect
+import dataclasses
 import functools
 import math
 from collections.abc import Mapping, Sequence
@@ -40,9 +41,18 @@ from typing import Literal, NamedTuple
 
 import torch
 
+from noodl.layers._folding import (
+    Folded,
+    FoldPlan,
+    fold_conductance,
+    fold_sources,
+    plan_folding,
+    recover,
+)
 from noodl.layers._topology import TopologyGuard
 from noodl.layout import as_stacked, is_stacked
 from noodl.operators.advection import AdvectionOperator
+from noodl.operators.base import SolveResult
 from noodl.operators.shifted import ShiftedOperator
 from noodl.operators.stencil import laplacian_coo
 from noodl.solvers.implicit import TransposeOperator as _TransposeView
@@ -295,10 +305,33 @@ class TransportLayer(TopologyGuard):
     node with nothing passing through it (no flow, no conduction) keeps its value, and a
     source there is dropped for that step (it has nowhere to go); `step`'s `diagnostics`
     then carries ``"held_sources_dropped"``, the number of nonzero entries dropped. Their
-    capacity may be 0; removal and kinetics do not act on them. Only ``scheme="implicit"``
-    (and ``steady``) can hold them; a ``steady`` with nothing passing through such a node
-    is refused by name (it has no value there). ``storage_free_mask`` is ``(n_i,)`` bool,
-    True at those nodes.
+    capacity may be 0; removal and kinetics do not act on them. A storage-free node that a
+    flow edge touches, or that has a removal or kinetics term at construction, needs
+    ``scheme="implicit"`` (``steady`` holds it too); a ``steady`` with nothing passing
+    through a storage-free node is refused by name (it has no value there).
+    ``storage_free_mask`` is ``(n_i,)`` bool, True at those nodes.
+
+    FOLDED NODES: a storage-free node joined to the rest only by conduction edges (a wall's
+    surface node, a zone's radiant star node), with no removal or kinetics term, is FOLDED
+    into its neighbours. Its value is the conductance-weighted mean of its neighbours' plus
+    its own source over its total conductance, so the step replaces it by equivalent
+    conductances between its neighbours and hands its source on to them: the star-delta
+    transform, or the "combined surface coefficient" of a surface film in series with the
+    wall behind it. Storage-free nodes joined to each other (the surfaces of a zone and its
+    star node) are folded together as one group (mathematically the Schur complement, or
+    Kron reduction, of their block). The folded network is again one of positive
+    conductances, so every scheme, ``exact`` included, steps it with its maximum principle,
+    and the folded nodes' values are recovered after the step from the kept nodes' new
+    values, the boundary values at the end of the step and the sources; the state returns
+    them like any other node's. The boundary transfer counts what leaves through them. The
+    folding is computed once from the construction-time conductance, and again on every
+    call that passes ``conductance=`` (the ``"<layer>.conductance"`` driver, a radiative
+    coefficient re-evaluated each pass); gradients reach the conductances and the sources
+    through it. A folded node whose every conductance is zero in a call is held at its
+    value as above; a group of them joined only to each other in a call has no value and
+    is refused by name, and one joined only to each other at construction is refused
+    there. ``folded_mask`` is ``(n_i,)`` bool, True at the folded nodes; ``rate`` and the
+    dense ``operator`` describe the whole network, folded nodes as algebraic rows.
 
     DILUTION (``dilution``, ``None`` by default): adds ``dilution * net(q) / capacity`` to
     the removal, ``net(q)`` the signed net inflow of the flow edges into each node (see
@@ -559,7 +592,7 @@ class TransportLayer(TopologyGuard):
         self.n_i = int(self.interior_idx.shape[0])
         self.n_b = int(self.boundary_idx.shape[0])
         self._inactive_names = [net.nodes[i] for i in self.inactive_idx.tolist()]
-        self.storage_free_mask = self._storage_free_mask(net, name, storage_free, scheme)
+        self.storage_free_mask = self._storage_free_mask(net, name, storage_free)
         # Fixed at construction; read on every step, so kept as a Python bool rather than a
         # device-synchronising `.any()` each time.
         self._has_storage_free = bool(self.storage_free_mask.any())
@@ -730,9 +763,10 @@ class TransportLayer(TopologyGuard):
             )
         self._interior_of_node = torch.full((net.n,), -1, dtype=torch.long)
         self._interior_of_node[self.interior_idx] = torch.arange(self.n_i, dtype=torch.long)
+        self._plan_folding(scheme)
 
-    def _storage_free_mask(self, net: Network, name: str, storage_free: Sequence[Node],
-                           scheme: str) -> torch.Tensor:
+    def _storage_free_mask(self, net: Network, name: str,
+                           storage_free: Sequence[Node]) -> torch.Tensor:
         """`(n_i,)` bool: True at the interior nodes that hold no amount."""
         mask = torch.zeros(self.n_i, dtype=torch.bool, device=self.interior_idx.device)
         nodes = net.canonical(list(storage_free)) if storage_free else []
@@ -745,15 +779,245 @@ class TransportLayer(TopologyGuard):
                 f"TransportLayer '{name}': storage_free nodes {outside} are not active "
                 f"interior nodes of this layer"
             )
-        if scheme != "implicit":
-            raise ValueError(
-                f"TransportLayer '{name}': storage-free nodes {nodes} hold no amount, so "
-                f"their balance is algebraic in every step; that needs scheme='implicit', "
-                f"got {scheme!r}"
-            )
         for n in nodes:
             mask[position[net.node_index(n)]] = True
         return mask
+
+    # ------------------------------------------------------------ folded nodes
+    def _plan_folding(self, scheme: str) -> None:
+        """Decide which storage-free nodes are folded into their neighbours (see the class
+        docstring) and prepare the layer over the remaining nodes that steps them.
+
+        A storage-free node is folded when no flow edge touches it and the construction-time
+        `removal` and `kinetics` are zero there. The others (a plenum with throughflow) keep
+        their algebraic row, which needs `scheme="implicit"`."""
+        n_i, K = self.n_i, self.n_species
+        self.folded_mask = torch.zeros(n_i, dtype=torch.bool, device=self.interior_idx.device)
+        self._fold_plan: FoldPlan | None = None
+        self._kept: _KeptNodes | None = None
+        self._fold_cache = None
+        if not self._has_storage_free:
+            return
+        net = self.net
+        touched = torch.zeros(net.n, dtype=torch.bool, device=self.interior_idx.device)
+        touched[self._flow_src] = True
+        touched[self._flow_tgt] = True
+        acting = torch.zeros_like(self.folded_mask)
+        if self.removal is not None:
+            acting |= (self.removal != 0).reshape(-1, n_i, K).any(0).any(-1).to(acting.device)
+        if self.kinetics is not None:
+            acting |= (self.kinetics != 0).reshape(-1, n_i, K * K).any(0).any(-1).to(
+                acting.device)
+        folded = self.storage_free_mask & ~touched[self.interior_idx] & ~acting
+        algebraic = self.storage_free_mask & ~folded
+        if scheme != "implicit" and bool(algebraic.any()):
+            names = [net.nodes[int(self.interior_idx[i])]
+                     for i in algebraic.nonzero().flatten().tolist()]
+            raise ValueError(
+                f"TransportLayer '{self.name}': storage-free nodes {names} hold no amount and "
+                f"carry flow (or a removal or reaction term), so their balance is algebraic "
+                f"in every step; that needs scheme='implicit', got {scheme!r} (storage-free "
+                f"nodes joined only by conduction are folded into their neighbours and take "
+                f"any scheme)"
+            )
+        if not bool(folded.any()):
+            return
+        if bool(folded.all()):
+            names = [net.nodes[i] for i in self.interior_idx.tolist()]
+            raise ValueError(
+                f"TransportLayer '{self.name}': every interior node {names} is storage-free "
+                f"and joined only by conduction, so folding them into the boundaries leaves "
+                f"no stored node to step; give the layer a node that holds an amount"
+            )
+        csrc, ctgt, _ = self._conduction_edges
+        plan = plan_folding(
+            name=self.name, nodes=net.nodes, interior_idx=self.interior_idx,
+            folded_mask=folded, src=csrc, tgt=ctgt, boundary_idx=self.boundary_idx, n=net.n,
+        )
+        self.folded_mask = folded
+        self._fold_plan = plan
+
+        # The layer over the kept nodes: this layer's own state with the folded nodes taken
+        # out of the interior (no edge of the folded network touches them, so they are like
+        # inactive nodes) and the folded network's conduction edges in place of its own.
+        kept = object.__new__(_KeptNodes)
+        kept.__dict__.update(self.__dict__)
+        kept_nodes = self.interior_idx.index_select(0, plan.kept)
+        folded_nodes = self.interior_idx.index_select(0, plan.folded)
+        kept.interior_idx = kept_nodes
+        kept.n_i = int(kept_nodes.numel())
+        kept.inactive_idx = torch.cat([self.inactive_idx, folded_nodes])
+        kept._inactive_names = self._inactive_names + [net.nodes[i]
+                                                       for i in folded_nodes.tolist()]
+        kept.storage_free_mask = self.storage_free_mask.index_select(0, plan.kept)
+        kept._has_storage_free = bool(kept.storage_free_mask.any())
+        kept.folded_mask = torch.zeros_like(kept.storage_free_mask)
+        kept.capacity = self.capacity.index_select(-1, plan.kept)
+        kept.removal = None if self.removal is None else self.removal.index_select(-2, plan.kept)
+        kept.kinetics = (None if self.kinetics is None
+                         else self.kinetics.index_select(-3, plan.kept))
+        of_node = torch.full((net.n,), -1, dtype=torch.long)
+        of_node[kept_nodes] = torch.arange(kept.n_i, dtype=torch.long)
+        kept._interior_of_node = of_node
+        b_r = int(plan.src.numel())
+        if b_r:
+            # Its conductance is always handed in per call (`Folded.conductance`); the
+            # stored value is never read.
+            kept._conduction_edges = (plan.src, plan.tgt,
+                                      torch.zeros(b_r, dtype=self._conduction_edges[2].dtype))
+            kept.conduction_kinds, kept._conduction_sizes = ("folded",), (b_r,)
+        else:
+            kept._conduction_edges = None
+            kept.conduction_kinds, kept._conduction_sizes = (), ()
+        kept._fold_plan, kept._kept, kept._fold_cache = None, None, None
+        self._kept = kept
+
+    def _fold_conductance(self, conductance: torch.Tensor | None) -> Folded:
+        """This call's folding, from the per-call conductance (validated) or else the
+        layer's own; the latter is computed once and kept, unless it requires grad."""
+        g = self._conduction_edges[2] if conductance is None else conductance
+        if conductance is None and not g.requires_grad:
+            cache = self._fold_cache
+            if (cache is not None and cache[0] is g
+                    and cache[1].conductance.dtype == torch.float64):
+                return cache[1]
+            folded = fold_conductance(self._fold_plan, g.to(torch.float64),
+                                      self._refuse_closed_folded)
+            self._fold_cache = (g, folded)
+            return folded
+        return fold_conductance(self._fold_plan, g.to(torch.float64),
+                                self._refuse_closed_folded)
+
+    def _refuse_closed_folded(self, bucket, start: torch.Tensor, linked: torch.Tensor) -> None:
+        """Raise `ValueError` naming the groups of folded nodes in which some node reaches
+        no stored node or boundary through positive conductances this call (on any batch
+        instance) and is not held (a held node has no positive conductance at all)."""
+        reach = _reached_from(start, bucket.inner_row, bucket.inner_col, linked)
+        cut = (~reach).any(0)
+        if not bool(cut.any()):
+            return
+        groups = cut.reshape(bucket.groups, bucket.size).any(-1)
+        rows = groups.repeat_interleave(bucket.size)
+        names = [self.net.nodes[int(self.interior_idx[p])]
+                 for p in bucket.folded[rows].tolist()]
+        raise ValueError(
+            f"TransportLayer '{self.name}': storage-free nodes {names} are joined by "
+            f"conduction this call only to each other (every conductance from them to a "
+            f"stored node or a boundary is zero); nothing sets their value"
+        )
+
+    def _node_major(self, stacked: torch.Tensor, n_nodes: int) -> torch.Tensor:
+        """Stacked `(..., K * n_nodes)` -> node-major `(..., n_nodes, K)`."""
+        return stacked.reshape(*stacked.shape[:-1], self.n_species, n_nodes).transpose(-1, -2)
+
+    def _stacked_of(self, node_major: torch.Tensor) -> torch.Tensor:
+        """Node-major `(..., n_nodes, K)` -> stacked `(..., K * n_nodes)`."""
+        return node_major.transpose(-1, -2).reshape(*node_major.shape[:-2], -1)
+
+    def _fold_inputs(self, sources, capacity, capacity_prev, removal, g):
+        """The per-call inputs of the kept-node layer: `(folded, ys, sources_kept, cap,
+        cap_prev, removal, g)`. `sources_kept` is in full node order, the folded rows zero
+        and their sources folded into their neighbours; `g` is the per-call conductance,
+        already validated by `_conductance_arg` (`None`: the layer's own)."""
+        dtype = torch.float64
+        plan = self._fold_plan
+        folded = self._fold_conductance(g)
+        src_i, _ = self._to_stacked(self._sources_interior(sources.to(dtype)), self.n_i,
+                                    "sources")
+        src_k, ys = fold_sources(plan, folded, self._node_major(src_i, self.n_i))
+        sources_kept = src_k.new_zeros(src_k.shape[:-2] + (self.net.n, self.n_species))
+        sources_kept = sources_kept.index_copy(-2, self._kept.interior_idx, src_k)
+
+        def kept_capacity(c):
+            return None if c is None else self._capacity_arg(c).index_select(-1, plan.kept)
+
+        rem = None if removal is None else self._removal_arg(removal).index_select(-2, plan.kept)
+        return (folded, ys, sources_kept, kept_capacity(capacity),
+                kept_capacity(capacity_prev), rem, g)
+
+    def _recover(self, folded, ys, x_kept, x_boundary, x_held, y_scale=1.0) -> torch.Tensor:
+        """The interior values, node-major, from the kept nodes' (see `_folding.recover`)."""
+        return recover(
+            self._fold_plan, folded, ys, x_kept, x_boundary,
+            kept_nodes=self._kept.interior_idx, boundary_idx=self.boundary_idx, n=self.net.n,
+            x_held=x_held, y_scale=y_scale,
+        )
+
+    def _step_folded(
+        self, x, q, sources, x_boundary, dt, *, on_failure, capacity, capacity_prev, removal,
+        transmission, conductance, want_transfer, diagnostics, x_boundary_end,
+        x_boundary_rates,
+    ):
+        """`_step` for a layer with folded nodes: step the kept nodes on the folded network,
+        then recover the folded nodes from the kept nodes' end-of-step values, the boundary
+        values at the end of the step and the sources. The boundary transfer is computed on
+        the whole network from the time integrals, recovered the same way (the recovery is
+        linear), so heat leaving through a folded node is counted where it arrives."""
+        dtype = torch.float64
+        n_i = self.n_i
+        x_s, reduced = self._to_stacked(x, n_i, "x")
+        x_n = self._node_major(x_s.to(dtype), n_i)
+        g = self._conductance_arg(conductance)
+        folded, ys, sources_kept, cap_k, cap_prev_k, rem_k, _ = self._fold_inputs(
+            sources, capacity, capacity_prev, removal, g)
+        result, integral = self._kept._step(
+            x_n.index_select(-2, self._fold_plan.kept), q, sources_kept, x_boundary, dt,
+            on_failure=on_failure, capacity=cap_k, capacity_prev=cap_prev_k, removal=rem_k,
+            transmission=transmission, conductance=folded.conductance,
+            want_transfer=want_transfer, diagnostics=diagnostics,
+            x_boundary_end=x_boundary_end, x_boundary_rates=x_boundary_rates,
+            return_integral=True,
+        )
+        if diagnostics is not None:
+            diagnostics["held_sources_dropped"] = self._held_sources_dropped(
+                q, sources, self._conduction_edges[2] if g is None else g)
+        xb_end = x_boundary if x_boundary_end is None else x_boundary_end
+        xb_n = self._node_major(
+            self._to_stacked(xb_end.to(dtype), self.n_b, "x_boundary")[0], self.n_b)
+        n_k = self._kept.n_i
+        if isinstance(result, SolveResult):
+            full = self._recover(folded, ys, self._node_major(result.x, n_k), xb_n, x_n)
+            return dataclasses.replace(result, x=self._stacked_of(full)), None
+        x_new = self._recover(folded, ys, result.to(dtype), xb_n, x_n)
+        x_new = self._from_stacked(self._stacked_of(x_new).to(x.dtype), n_i, reduced)
+        if not want_transfer:
+            return x_new, None
+        xb_s, _ = self._to_stacked(x_boundary.to(dtype), self.n_b, "x_boundary")
+        x_int = self._recover(folded, ys, self._node_major(integral, n_k),
+                              dt * self._node_major(xb_s, self.n_b), dt * x_n, y_scale=dt)
+        op = self._advection_operator(
+            q.to(dtype), self._capacity_arg(capacity),
+            self._coefficient_map(self._removal_arg(removal),
+                                  self._transmission_arg(transmission), g),
+        )
+        transfer = op.boundary_net_inflow(self._stacked_of(x_int), dt * xb_s)
+        return x_new, self._from_stacked(transfer.to(x.dtype), self.n_b, reduced)
+
+    def _steady_folded(self, q, sources, x_boundary, *, on_failure, capacity, removal,
+                       transmission, conductance, diagnostics):
+        """`steady` for a layer with folded nodes: the kept nodes' steady state on the
+        folded network, then the folded nodes recovered from it. A folded node nothing
+        passes through is refused first, as every storage-free node is."""
+        dtype = torch.float64
+        g = self._conductance_arg(conductance)
+        self._refuse_idle_storage_free(q.to(dtype),
+                                       self._conduction_edges[2] if g is None else g)
+        folded, ys, sources_kept, cap_k, _, rem_k, _ = self._fold_inputs(
+            sources, capacity, None, removal, g)
+        _, reduced = self._to_stacked(self._sources_interior(sources), self.n_i, "sources")
+        result = self._kept.steady(
+            q, sources_kept, x_boundary, on_failure=on_failure, capacity=cap_k,
+            removal=rem_k, transmission=transmission, conductance=folded.conductance,
+            diagnostics=diagnostics,
+        )
+        xb_n = self._node_major(
+            self._to_stacked(x_boundary.to(dtype), self.n_b, "x_boundary")[0], self.n_b)
+        n_k = self._kept.n_i
+        if isinstance(result, SolveResult):
+            full = self._recover(folded, ys, self._node_major(result.x, n_k), xb_n, None)
+            return dataclasses.replace(result, x=self._stacked_of(full))
+        x = self._recover(folded, ys, result, xb_n, None)
+        return self._from_stacked(self._stacked_of(x), self.n_i, reduced)
 
     def _effective(self, cap: torch.Tensor) -> torch.Tensor:
         """`cap` with 1 at the storage-free nodes: their rows are balances of amount rates,
@@ -1272,7 +1536,8 @@ class TransportLayer(TopologyGuard):
         when. `scheme="exact"` has no linear solve, so it leaves `diagnostics` untouched.
         A layer with storage-free nodes also gets `"held_sources_dropped"`: the number of
         nonzero source entries at storage-free nodes nothing passes through, which the step
-        drops (see the class docstring).
+        drops (see the class docstring); under every scheme when the layer folds some of
+        them, and from the implicit scheme otherwise.
 
         `removal` (keyword-only) is a per-call first-order removal rate (1/s) replacing the
         construction-time one; see `_removal_arg`. `transmission` (keyword-only) is a
@@ -1390,13 +1655,16 @@ class TransportLayer(TopologyGuard):
         diagnostics: dict | None = None,
         x_boundary_end: torch.Tensor | None = None,
         x_boundary_rates: tuple[torch.Tensor, torch.Tensor] | None = None,
+        return_integral: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         """Shared body of `step` and `step_with_transfer`; see both for the public contract.
 
         Returns `(x_new, boundary_transfer)`, `boundary_transfer` `None` unless
         `want_transfer` (and always `None` on the `on_failure="return"` early-return path,
         which only `step` can reach -- `step_with_transfer` refuses that combination before
-        calling here).
+        calling here). With `return_integral` (the folded layer's own use, see
+        `_step_folded`) the second entry is instead the state's time integral over the
+        step, stacked, in float64, when `want_transfer`.
         """
         if on_failure not in ("raise", "return"):
             raise ValueError(
@@ -1424,6 +1692,13 @@ class TransportLayer(TopologyGuard):
             raise ValueError(
                 f"TransportLayer '{self.name}': x_boundary_rates needs x_boundary_end (the "
                 f"boundary's values at both ends of the step)"
+            )
+        if getattr(self, "_fold_plan", None) is not None:  # absent from an older pickle
+            return self._step_folded(
+                x, q, sources, x_boundary, dt, on_failure=on_failure, capacity=capacity,
+                capacity_prev=capacity_prev, removal=removal, transmission=transmission,
+                conductance=conductance, want_transfer=want_transfer, diagnostics=diagnostics,
+                x_boundary_end=x_boundary_end, x_boundary_rates=x_boundary_rates,
             )
         out_dtype = x.dtype
         dtype = torch.float64
@@ -1528,6 +1803,8 @@ class TransportLayer(TopologyGuard):
                 x_int = 0.5 * dt * (x_s + result)
             else:                       # exact: the accumulator, computed with integrate=True
                 x_int = expm.integral
+            if return_integral:
+                return self._from_stacked(result.to(out_dtype), self.n_i, reduced), x_int
             transfer_s = op_t.boundary_net_inflow(x_int, dt * xb_s_full)
 
         return (
@@ -1573,6 +1850,12 @@ class TransportLayer(TopologyGuard):
             raise ValueError(
                 f"TransportLayer '{self.name}': unknown on_failure {on_failure!r}; "
                 f"expected 'raise' or 'return'"
+            )
+        if getattr(self, "_fold_plan", None) is not None:  # absent from an older pickle
+            return self._steady_folded(
+                q, sources, x_boundary, on_failure=on_failure, capacity=capacity,
+                removal=removal, transmission=transmission, conductance=conductance,
+                diagnostics=diagnostics,
             )
         dtype = torch.float64
         cap_t = self._capacity_arg(capacity).to(dtype)
@@ -1765,6 +2048,16 @@ class TransportLayer(TopologyGuard):
             resolve_solver=self._resolve_solver, diagnostics=diagnostics,
         )
         return x_s, reduced
+
+
+class _KeptNodes(TransportLayer):
+    """A folded layer's own stepping view: the layer over its kept nodes, on the folded
+    network (see `TransportLayer._plan_folding`). Its conductance is computed by the folding
+    from an already validated one and is non-negative by construction, so it is not
+    validated again."""
+
+    def _conductance_arg(self, conductance: torch.Tensor | None) -> torch.Tensor | None:
+        return conductance
 
 
 def _van_loan_step_dense(

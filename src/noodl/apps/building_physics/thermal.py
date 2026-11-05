@@ -116,16 +116,24 @@ def thermal_layer(net: Network, *, ambient="ambient", name: str = "thermal",
     conductance order). A closure that recomputes a coefficient from
     the state writes the per-step driver `"<layer>.conductance"` in that order.
 
-    `storage_free` names nodes that hold no heat (a zero-volume air-handler plenum): their
-    capacity may be zero, and they need the implicit scheme. `scheme` defaults to "exact",
-    or to "implicit" when `storage_free` names any node; an explicit other scheme with
-    storage-free nodes is refused by name.
+    `storage_free` names nodes that hold no heat: their capacity may be zero. A storage-free
+    node that air passes through (a zero-volume air-handler plenum) needs the implicit
+    scheme. One joined only by conduction (a wall's surface node, a zone's radiant star
+    node) is folded into its neighbours (see `TransportLayer`) and takes any scheme.
+    `scheme` defaults to "exact", or to "implicit" when a storage-free node touches a flow
+    edge; an explicit other scheme with such a node is refused by name.
     """
     storage_free = tuple(storage_free)
-    if scheme is None:
-        scheme = "implicit" if len(storage_free) else "exact"
     boundary = [ambient, *fixed_temperature]
     kinds = tuple(flow_kinds)
+    if scheme is None:
+        ventilated = set()
+        for kind in kinds:
+            if kind in set(net.edge_kinds()):
+                src, tgt = net.endpoints(kind)
+                ventilated.update(src.tolist() + tgt.tolist())
+        free_idx = [net.node_index(n) for n in net.canonical(list(storage_free))]
+        scheme = "implicit" if any(i in ventilated for i in free_idx) else "exact"
     present = set(net.edge_kinds())
     if conduction_kind is None:
         cond_kinds = ("wall",) if "wall" in present else ()

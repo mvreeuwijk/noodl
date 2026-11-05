@@ -281,11 +281,46 @@ nothing); `step`'s `diagnostics` reports the number of nonzero source entries dr
 `"held_sources_dropped"` (in `Model.step`, at `diagnostics["layers"][name]`). Their capacity, at construction or per step, may be 0
 (a negative one is refused everywhere, and a zero one at any other node). Removal and kinetics act
 on a stored amount, so they do not act on these nodes. Only `scheme="implicit"` and `steady` can
-hold them: the exponential and trapezoidal steps have no algebraic form, so a layer with either
-scheme refuses storage-free nodes at construction. A `steady` solve has no value for such a node
+hold a storage-free node that flow passes through: the exponential and trapezoidal steps have no
+algebraic form, so a layer with either scheme refuses such a node at construction (a node joined
+only by conduction is folded instead, see below). A `steady` solve has no value for such a node
 with nothing passing through it, and refuses it, naming the node. Whether such a node mixes or holds is a 0/1 choice on the flows and
 carries no gradient: a held node's value has zero gradient with respect to the flows, although
 any flow through it would switch it to mixing. `layer.storage_free_mask` is the `(n_i,)` boolean mask of these nodes.
+
+**Surface and star nodes: folding a storage-free node into its neighbours.** A storage-free node
+joined to the rest of the network only by conduction (the inside surface of a wall, between the
+zone air and the first wall layer; a zone's radiant "star" node, joined to each of its surfaces)
+stores no heat, so whatever conducts in conducts out. Its temperature is the conductance-weighted
+mean of its neighbours' temperatures, plus its own source (absorbed sunlight, the radiant part of
+a gain) divided by its total conductance. Putting that back into its neighbours' balances removes
+the node: its neighbours are joined directly by *equivalent* conductances, and its source is
+shared out among them. This is the "combined surface coefficient" of building physics (a surface
+film of conductance $h A$ in series with the wall half behind it, $k A$, is one conductance
+$1/(1/(hA) + 1/(kA))$ between the air and the wall) and the star-delta transform of circuit
+theory (a star node joined to $n$ surfaces becomes conductances between every pair of them).
+Several such nodes joined to each other, the surfaces of a zone with their star node, are folded
+together as one group (in linear-algebra terms, the Schur complement or Kron reduction of their
+block of the conduction matrix).
+
+The layer does this by itself: a storage-free node with no flow edge, and no removal or kinetics
+term at construction, is folded. The folded network has positive conductances again, so every
+scheme, `exact` included, steps it, and positivity and the maximum principle hold as before (no
+new temperature extremes from the folding). After the step the folded nodes' temperatures are
+recovered from their neighbours' new values, the boundary values at the end of the step and the
+sources, and returned in the state like any other node's; the boundary transfer counts the heat
+that leaves through them. The folding is computed once from the construction-time conductance,
+and again each call that passes a per-call conductance (the driver below), so a radiative
+coefficient re-evaluated each pass is folded with its current value, and gradients reach the
+conductances and the sources through it. A folded node all of whose conductances are zero in a
+call is held at its value, its source dropped, as above; a group of folded nodes joined that call
+only to each other (every conductance to a stored node or boundary zero) has no temperature and is
+refused, naming the nodes. Each group is factored as a small dense matrix, batched over the groups
+of one size, never as a matrix over the whole network; a group is as large as the set of folded
+nodes joined to each other, usually the surfaces of one zone. A storage-free node that air flows
+through (a plenum), or that has a removal or reaction, is not folded and still needs
+`scheme="implicit"`. `layer.folded_mask` is the `(n_i,)` boolean mask of the folded nodes. `rate`
+and the dense `operator` still describe the whole network, a folded node as its algebraic balance.
 
 **A conductance that changes with the state.** A radiative coefficient depends on the surface
 temperatures, a film coefficient on the air speed. A closure writes such a value into the driver
