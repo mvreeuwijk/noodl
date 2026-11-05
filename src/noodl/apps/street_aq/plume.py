@@ -224,9 +224,11 @@ neutral -- the neutral `sigma_v`, `sigma_w` and `a`, `N = 0` -- with only the wi
 this module does not implement (`plume_table` raises `NotImplementedError`). This is the
 neutral class `-0.3 <= h/L` of the ADMS scheme SIRANE cites (CERC, 2001). Read off SIRANE
 probe runs of one street along the wind (u* = 0.3 m/s, h = 330 m): at h / |L| = 0.29 the grid
-is the neutral kernel's (median 3.4e-3, as at L -> infinity), at 0.31 it is not (1.0e-1);
-L = -10000, -2000, -1500 and -1200 m at h = 330 m are neutral, L = -1000 m at h = 330 m and
-L = -2000 m at h = 1000 m are not (`tests/data/street/sirane_kernel_probe`, NOTICE.md)."""
+is the neutral kernel's (the committed case `G2_T029` in
+`tests/data/street/sirane_kernel_probe`), at 0.31 it is not (1.0e-1 median against the
+neutral kernel); among further runs not committed as fixtures, L = -10000, -2000, -1500 and
+-1200 m at h = 330 m are neutral, L = -1000 m at h = 330 m and L = -2000 m at h = 1000 m are
+not."""
 
 MAX_TABLE_STEPS = 10_000
 """The largest number of 10 s trajectory steps `plume_table` takes before refusing."""
@@ -291,7 +293,9 @@ def turbulence(
     `N^2 = (g/T)(theta*/kappa)(1/z + 5/L)` from the stable potential-temperature profile of
     Eqs. (12)-(13) (`psi_h = -5 zeta`, `z_T` dropped). `theta_star=None` takes
     `theta* = u*^2 T / (kappa g L)` (the definition of `L` under Eq. 10), for which
-    `N^2 = u*^2 / (kappa^2 L) (1/z + 5/L)` whatever the temperature.
+    `N^2 = u*^2 / (kappa^2 L) (1/z + 5/L)` whatever the temperature. The plume table does
+    not use the unstable branch: it takes the neutral one for `h / |L| <=
+    CONVECTIVE_H_OVER_L` and refuses the convective hours beyond.
     """
     z, u_star, h, lmo = (_f64(v) for v in (z, u_star, h_abl, lmo))
     unstable, neutral, stable = _regimes(lmo, neutral_abs_lmo)

@@ -24,7 +24,7 @@ Five comparisons, each by case:
   fluxes, `u_d W L (Cint - Cext)`, against SIRANE's printed `Cext`, with the inputs and
   options the archive can discriminate;
 - the same kernel against SIRANE's own concentration grids, centrelines and receptors in
-  fourteen cases of one isolated street (`tests/data/street/sirane_kernel_probe`, see its
+  fifteen cases of one isolated street (`tests/data/street/sirane_kernel_probe`, see its
   NOTICE.md) across, along and oblique to the wind, neutral, stable and weakly unstable.
 
 Tolerances are set from the measured values and each comment states the measured number and
@@ -477,7 +477,8 @@ def test_the_plume_inputs_sirane_discriminates(record_property, capsys):
 # degrees; M1 is neutral (u* = 0.6 m/s), M2 stable (u* = 0.3 m/s, L = 100 m), M3F the South
 # Kensington hour with SIRANE's floors, and U1500, U5000, U30K weakly unstable (u* = 0.3
 # m/s, h = 330 m, L = -1500, -5000, -30000 m: h / |L| <= 0.3, tabulated as neutral under the
-# unstable wind profile, `plume.CONVECTIVE_H_OVER_L`). The street's and the junctions'
+# unstable wind profile, `plume.CONVECTIVE_H_OVER_L`; T029 the same just below the
+# boundary, h / |L| = 0.29). The street's and the junctions'
 # fluxes are SIRANE's own (its Listing), so the comparison isolates the kernel.
 #
 # These checks are IN SAMPLE: the default time-offset knots, the plume-centre law and
@@ -561,6 +562,9 @@ PROBE_TOLERANCES = {
     # 1.07e-2; G3_U1500 3.35e-3, 1.06e-2; G3_U5000 3.44e-3, 1.06e-2.
     "G1_U1500": (3e-3, 1.5e-2), "G1_U30K": (3e-3, 1.6e-2), "G3_U1500": (5e-3, 1.6e-2),
     "G3_U5000": (5.5e-3, 1.6e-2),
+    # just below SIRANE's regime boundary (L = -1137.93 m, h = 330 m: h / |L| = 0.29), along
+    # the wind: measured 3.09e-4, 1.56e-2 (the far field near the centreline).
+    "G2_T029": (5e-4, 2.4e-2),
 }
 
 
