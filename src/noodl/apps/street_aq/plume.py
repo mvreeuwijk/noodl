@@ -129,8 +129,7 @@ import torch
 from torch.utils.checkpoint import checkpoint
 
 from noodl._broadcast import broadcast_shapes
-from noodl.apps.street_aq.canyon import KAPPA
-from noodl.apps.street_aq.closures import SIGMA_V_MIN, SIGMA_W_MIN
+from noodl.apps.street_aq.closures import KAPPA_040, SIGMA_V_MIN, SIGMA_W_MIN
 from noodl.apps.street_aq.network import StreetNetwork
 from noodl.solvers.implicit import refuse_second_order
 
@@ -257,7 +256,7 @@ def turbulence(
     lmo: Tensor | float,
     theta_star: Tensor | float | None = None,
     temperature: Tensor | float = DEFAULT_TEMPERATURE_K,
-    kappa: float = KAPPA,
+    kappa: float = KAPPA_040,
     neutral_abs_lmo: float = math.inf,
 ) -> tuple[Tensor, Tensor, Tensor]:
     """`(sigma_v, sigma_w, N)` at height `z` above ground, Eqs. (15)-(17), UNFLOORED.
@@ -313,7 +312,7 @@ def wind_speed(
     lmo: Tensor | float,
     z0: Tensor | float,
     d: Tensor | float,
-    kappa: float = KAPPA,
+    kappa: float = KAPPA_040,
 ) -> Tensor:
     """The mean wind above the canopy, Eqs. (10)-(11):
     `u = (u*/kappa) [ln((z - d + z0)/z0) - psi_m((z - d + z0)/L) + psi_m(z0/L)]`,
@@ -412,7 +411,7 @@ def plume_table(
     centre_c: Tensor | float = PLUME_CENTRE_C_M,
     centre_k: Tensor | float = PLUME_CENTRE_K,
     x_max: float = DOWNWIND_CUTOFF_M,
-    kappa: float = KAPPA,
+    kappa: float = KAPPA_040,
     neutral_abs_lmo: float = math.inf,
 ) -> PlumeTable:
     """SIRANE's plume trajectory for each hour, resampled onto a 10 m grid (module

@@ -3,12 +3,11 @@ and explicit clip/allocate transfer on capacity-limited arcs."""
 
 from .allocation import AllocatedFlowLayer
 from .kirchhoff import KirchhoffLayer
-from .reaction import FirstOrderDecay, Reaction
+from .reaction import Reaction
 from .transport import TransportLayer, UndefinedSteadyState, active_interior
 
 __all__ = [
     "AllocatedFlowLayer",
-    "FirstOrderDecay",
     "KirchhoffLayer",
     "Reaction",
     "TransportLayer",

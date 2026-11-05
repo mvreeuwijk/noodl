@@ -108,7 +108,7 @@ Constitutive laws are grouped below by the physics they express, as in
 
 ::: noodl.layers.reaction
     options:
-      members: [Reaction, FirstOrderDecay, Photostationary]
+      members: [Reaction]
 
 ::: noodl.layers.allocation
     options:

@@ -84,14 +84,6 @@ Functions of the state that compute drivers each step (densities, flows, levels)
 | `IntegratingClosure`<br><small>`noodl.contracts`</small> | A closure that advances state of its own over the step (`integrates = True`). | `IntegratingClosure(...)` |
 | `ClosureSpec`<br><small>`noodl.contracts`</small> | A closure and its declarations, read once by `closure_spec`. | `ClosureSpec(closure, label, integrates, declares_integrates, state_keys, key_labels, reads, writes, edge_kinds, requires_coupling, reads_flows_of, species_columns, output_units=<factory>, owner='Model')` |
 
-## Reactions
-
-Transformations applied to transported species each step.
-
-| Name | What it does | How to call it |
-|---|---|---|
-| `FirstOrderDecay`<br><small>`noodl.layers`</small> | ``x <- x * exp(-rate * dt)``; ``rate`` broadcasts against ``x``. | `FirstOrderDecay(rate)` |
-
 ## Files
 
 Readers and writers of other tools' file formats.

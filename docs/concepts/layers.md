@@ -312,18 +312,27 @@ explicit `sparse_direct` there would otherwise raise for a reason the caller did
 
 ## `Reaction`
 
-Applied to a transport layer's state after its step (by default), operator-split:
+Applied to a transport layer's state after its step (by default), operator-split. A reaction
+is any object with `apply(x, dt, drivers)` returning the new state:
 
 ```python
-from noodl.layers.reaction import FirstOrderDecay
+from noodl.layers.reaction import Reaction
 
-model = Model(net, layers, reactions=[("species", FirstOrderDecay(k))])
+class Source(Reaction):
+    def apply(self, x, dt, drivers=None):
+        return x + dt * drivers["generation"]
+
+model = Model(net, layers, reactions=[("species", Source())])
 ```
 
-`FirstOrderDecay` and `Photostationary` (Leighton NO/NO₂/O₃) ship built in; the sewer
-application adds `SulfideGeneration`. `Photostationary`'s default rate is evaluated at the
-driver `"temperature"` (K), which it requires by name unless a constant `k_no_o3` rate
-overrides it.
+The core ships only this protocol. The applications bring their own reactions: the street
+application `Photostationary` (Leighton NO/NO₂/O₃, `noodl.apps.street_aq`), the sewer
+application `SulfideGeneration`. `Photostationary`'s default rate is evaluated at the driver
+`"temperature"` (K), which it requires by name unless a constant `k_no_o3` rate overrides it.
+
+**First-order decay is not a reaction.** A species that decays as $\mathrm{d}x/\mathrm{d}t = -k x$
+is the transport layer's `removal` (a rate per node, 1/s), which is solved together with the
+transport in the same step rather than split from it.
 
 `Model(reaction_order="before_transport")` applies the reactions to the step-start state
 before the transport step instead, so the returned state is the one after transport. The

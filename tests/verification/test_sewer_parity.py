@@ -154,8 +154,6 @@ def test_tracer_concentration(tmp_path):
     `tau = V/q < 170 s`, so three tanks in series have decayed by
     `(t/tau)^2/2 exp(-t/tau) < 1e-15` by t = 7200 s. 1e-9 is a wide margin over both.
     """
-    from noodl.layers.reaction import FirstOrderDecay
-
     net, loads, pollutants = read_swmm_inp(DATA / "tree_kinwave_pollut.inp")
     model, state, drivers = build_model(net, air=False, quality=False)
     resolved = model._apply_closures(state, drivers)
@@ -173,7 +171,6 @@ def test_tracer_concentration(tmp_path):
     c["C3"] = mix_j3 / (1.0 + k * float(tau[order["C3"]]))
     mix_j4 = (c["C3"] * 0.13 + c["C4"] * 0.03) / 0.16
     c["C5"] = mix_j4 / (1.0 + k * float(tau[order["C5"]]))
-    _ = FirstOrderDecay  # the framework reaction the app's own layer would carry
     swmm = _run_swmm(tmp_path, "tree_kinwave_pollut.inp")
     worst = 0.0
     for name in LINKS:

@@ -84,11 +84,6 @@ ROLES = [
      "[Extending noodl](../development/extending.md)."),
 ]
 BASE_CLASSES = {"ConstitutiveLaw", "ImplicitLaw", "Drive", "Reaction", "NodeSource"}
-CONSTANT_ALIASES = {"KAPPA": "KAPPA_040"}
-"""Constants exported under two names for one value (`tests/test_docs_catalogue.py` checks each
-pair is one object); the second name is listed under the first. Constants cannot be
-deduplicated by identity: two equal float literals in one module are one object to the
-compiler."""
 OPTION_MODULES = {"street_aq": "noodl.apps.street_aq.closures"}
 """Pages whose application has named model options: the module defining `OPTIONS` (option
 -> allowed values), `PRESETS` (preset -> its choices) and, in the docstring under
@@ -204,7 +199,6 @@ def _role(name: str, obj) -> str:
 def _entries(modules: list[str]) -> list[dict]:
     seen: dict[int, dict] = {}
     order: list[dict] = []
-    pending_alias: dict[str, list[str]] = {}
     for modname in modules:
         mod = importlib.import_module(modname)
         names = getattr(mod, "__all__", None)
@@ -213,9 +207,6 @@ def _entries(modules: list[str]) -> list[dict]:
                 inspect.isclass(o) or inspect.isfunction(o)) and o.__module__ == modname]
         for name in names:
             obj = getattr(mod, name)
-            if name in CONSTANT_ALIASES and not (inspect.isclass(obj) or inspect.isfunction(obj)):
-                pending_alias.setdefault(CONSTANT_ALIASES[name], []).append(name)
-                continue
             key = id(obj) if (inspect.isclass(obj) or inspect.isfunction(obj)) else (modname, name)
             if key in seen:
                 entry = seen[key]
@@ -235,9 +226,6 @@ def _entries(modules: list[str]) -> list[dict]:
             entry["aliases"].remove(primary)
             entry["aliases"].append(entry["name"])
             entry["name"] = primary
-    for entry in order:
-        if entry["name"] in pending_alias:
-            entry["aliases"] += pending_alias[entry["name"]]
     return order
 
 

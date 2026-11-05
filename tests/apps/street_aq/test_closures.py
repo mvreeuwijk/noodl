@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import pytest
 
-from noodl.apps.street_aq.canyon import KAPPA
 from noodl.apps.street_aq.closures import (
+    KAPPA_040,
     KAPPA_041,
     OPTIONS,
     PRESETS,
@@ -27,7 +27,7 @@ def test_both_presets_set_every_option_to_an_allowed_value():
 
 def test_the_presets_are_the_two_reference_closure_sets():
     sirane, munich = PRESETS["sirane"], PRESETS["munich"]
-    assert sirane["kappa"] == KAPPA and munich["kappa"] == KAPPA_041
+    assert sirane["kappa"] == KAPPA_040 and munich["kappa"] == KAPPA_041
     assert (sirane["sigma_w_min"], sirane["sigma_v_min"]) == (0.30, 0.5)
     assert (munich["sigma_w_min"], munich["sigma_v_min"]) == (0.0, 0.0)
     assert (munich["canyon_wind_min"], munich["u_d_min"]) == (0.1, 0.001)

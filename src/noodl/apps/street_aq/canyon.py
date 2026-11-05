@@ -29,10 +29,6 @@ from noodl.solvers.scalar import solve_monotone
 
 Tensor = torch.Tensor
 
-KAPPA = KAPPA_040
-"""von Karman constant for the neutral form (`canyon_velocity`'s default, `kappa = 0.4`);
-the same value as `closures.KAPPA_040`."""
-
 EULER_GAMMA_TRUNCATED = 0.577
 """The Euler-Mascheroni constant TRUNCATED to three decimals -- not 0.5772156649 -- in the
 Bessel shape equation (`bessel_shape_residual`). ATM `MeteorologyStreet.cxx:118`
@@ -289,7 +285,7 @@ class BoundaryLayer:
     z_ref: Tensor
     d: Tensor
     z0: Tensor
-    kappa: float = KAPPA
+    kappa: float = KAPPA_040
 
     def sigma_w(self, z: Tensor, *, lmo: Tensor | None = None,
                 stability: str = "neutral") -> Tensor:
@@ -373,7 +369,7 @@ def boundary_layer(
     h_abl: Tensor,
     *,
     z_ref: Tensor | float = 30.0,
-    kappa: float = KAPPA,
+    kappa: float = KAPPA_040,
     pblh_floor: Tensor | float | None = None,
 ) -> BoundaryLayer:
     """Friction velocity and the boundary-layer height from the network-mean geometry and
@@ -521,7 +517,7 @@ def canyon_velocity(
     canyon_wind: str | None = None,
     z0_b: Tensor | float = Z0_B_DEFAULT,
     z0_s: Tensor | float = Z0_S_DEFAULT,
-    kappa: float = KAPPA,
+    kappa: float = KAPPA_040,
     canyon_wind_min: float = 0.0,
     shape_constant: str = "exact_root",
 ) -> Tensor:

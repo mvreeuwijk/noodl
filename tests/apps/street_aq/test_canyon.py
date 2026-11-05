@@ -20,7 +20,7 @@ from noodl.apps.street_aq.canyon import (
     C_BRACKET_LO,
     EULER_GAMMA_TRUNCATED,
     EXCHANGE_SIGMA_W_RATIO,
-    KAPPA,
+    KAPPA_040,
     KAPPA_041,
     Z0_B_DEFAULT,
     BoundaryLayer,
@@ -61,7 +61,7 @@ def _scipy_canyon_velocity(width, height, roughness, phi, u_star):
     alpha = math.log(di / roughness)
     beta = math.exp(c / math.sqrt(2.0) * (1.0 - height / di))
     u_h = u_star * math.sqrt(
-        math.pi / (math.sqrt(2.0) * KAPPA**2 * c)
+        math.pi / (math.sqrt(2.0) * KAPPA_040**2 * c)
         * (yv(0, c) - jv(0, c) * yv(1, c) / jv(1, c))
     )
     return (
@@ -146,7 +146,7 @@ def test_soulhac_canyon_velocity_matches_the_scipy_reference(w_over_h, angle_deg
     got = canyon_velocity(
         torch.tensor([width], dtype=DT), torch.tensor([height], dtype=DT),
         torch.tensor([phi], dtype=DT), u_star=torch.tensor([u_star], dtype=DT),
-        canyon_wind="bessel_profile", z0_b=Z0_B_DEFAULT, kappa=KAPPA,
+        canyon_wind="bessel_profile", z0_b=Z0_B_DEFAULT, kappa=KAPPA_040,
     )
     want = _scipy_canyon_velocity(width, height, Z0_B_DEFAULT, phi, u_star)
     # atol covers the 90-degree column, where cos(phi) is 1e-17 and a relative
@@ -231,7 +231,7 @@ def test_exchange_velocity_refuses_a_negative_sigma_w():
 def test_boundary_layer_matches_the_neutral_form_and_floors_the_abl_when_asked():
     bl = boundary_layer(torch.tensor(23.3333333333333333, dtype=DT),
                         torch.tensor([2.0], dtype=DT), torch.tensor([1200.0], dtype=DT),
-                        z_ref=30.0, kappa=KAPPA)
+                        z_ref=30.0, kappa=KAPPA_040)
     d = 2.0 * 23.3333333333333333 / 3.0
     z0 = 23.3333333333333333 / 10.0
     want = 0.4 * 2.0 / math.log((30.0 - d) / z0)

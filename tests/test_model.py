@@ -13,11 +13,11 @@ from noodl.drives import ConstantDrive
 from noodl.elements import PowerLaw
 from noodl.elements.base import ConstitutiveLaw
 from noodl.layers.kirchhoff import KirchhoffLayer
-from noodl.layers.reaction import FirstOrderDecay
 from noodl.layers.transport import TransportLayer
 from noodl.model import Model, Ports, StepContext
 from noodl.nodesources import NodeSource
 from noodl.topology import Network
+from tests._reactions import FirstOrderDecay
 
 F64 = torch.float64
 

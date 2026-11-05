@@ -34,8 +34,8 @@ from noodl._broadcast import broadcast_shapes
 from noodl.refs import (
     Field,
     input_unit_declarations,
-    normalize_unit,
     required_state_keys,
+    units_agree,
 )
 
 Tensor = torch.Tensor
@@ -190,7 +190,7 @@ def _declared(model, attr: str) -> set[str]:
 
 def _check_units(model, specs, who, add) -> None:
     """`unit-mismatch` (warning): a closure declares a unit, for an input in `input_specs` or
-    an output in `output_units`, that differs (after `normalize_unit`) from the unit of the
+    an output in `output_units`, that differs (by `units_agree`) from the unit of the
     layer field or earlier declared input the key refers to. `unit-undeclared` (info): a
     field the model knows has no unit. Units are compared as strings; nothing is converted."""
     refs = model.refs
@@ -209,7 +209,7 @@ def _check_units(model, specs, who, add) -> None:
         if key not in reference and kind == "input":
             reference[key] = (unit, who_)
         ref = reference.get(key)
-        if ref is None or normalize_unit(ref[0]) == normalize_unit(unit):
+        if ref is None or units_agree(ref[0], unit):
             return
         add(Issue("warning", "unit-mismatch",
                   f"{who_} declares {kind} {key!r} in [{unit}], but {ref[1]} {key!r} has "

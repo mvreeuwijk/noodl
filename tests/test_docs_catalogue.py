@@ -125,14 +125,3 @@ def test_circuit_devices_are_components_and_waveforms_have_their_own_role():
     assert gen._role("PrescribedVoltage", el.PrescribedVoltage) == "law"
     page = gen.render(*[p for p in gen.PAGES if p[0] == "electrical"][0])
     assert "## Waveforms" in page and "## Sources" not in page
-
-
-def test_constants_exported_under_two_names_are_one_object_and_listed_once():
-    import importlib
-
-    for old, new in gen.CONSTANT_ALIASES.items():
-        mod = importlib.import_module("noodl.apps.street_aq")
-        assert getattr(mod, old) is getattr(mod, new), (old, new)
-    page = gen.render(*[p for p in gen.PAGES if p[0] == "street_aq"][0])
-    assert page.count("| `KAPPA_040`") == 1 and "| `KAPPA` |" not in page
-    assert "also `KAPPA`" in page

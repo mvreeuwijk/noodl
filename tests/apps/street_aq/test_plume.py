@@ -14,7 +14,7 @@ import pytest
 import torch
 
 from noodl.apps.street_aq import plume
-from noodl.apps.street_aq.canyon import KAPPA
+from noodl.apps.street_aq.closures import KAPPA_040
 from noodl.apps.street_aq.network import Street, StreetNetwork, from_test_network
 from noodl.apps.street_aq.plume import (
     GAUSS_CUTOFF_SIGMAS,
@@ -71,15 +71,15 @@ def test_neutral_and_stable_turbulence_by_hand():
     assert float(sv) == pytest.approx(2 * us * (1 - 0.5 * z / h) ** 0.75, rel=1e-12)
     assert float(sw) == pytest.approx(1.3 * us * (1 - 0.5 * z / h) ** 0.75, rel=1e-12)
     # default theta* = u*^2 T / (kappa g L): N is independent of T
-    assert float(n) == pytest.approx(math.sqrt(us**2 / (KAPPA**2 * L) * (1 / z + 5 / L)),
+    assert float(n) == pytest.approx(math.sqrt(us**2 / (KAPPA_040**2 * L) * (1 / z + 5 / L)),
                                      rel=1e-12)
-    theta_star = us**2 * 280.0 / (KAPPA * plume.GRAVITY * L)
+    theta_star = us**2 * 280.0 / (KAPPA_040 * plume.GRAVITY * L)
     _, _, n_t = turbulence(z, u_star=us, h_abl=h, lmo=L, theta_star=theta_star,
                            temperature=280.0)
     assert float(n_t) == pytest.approx(float(n), rel=1e-12)
     _, _, n_o = turbulence(z, u_star=us, h_abl=h, lmo=L, theta_star=0.06, temperature=277.15)
     assert float(n_o) == pytest.approx(
-        math.sqrt(plume.GRAVITY / 277.15 * 0.06 / KAPPA * (1 / z + 5 / L)), rel=1e-12)
+        math.sqrt(plume.GRAVITY / 277.15 * 0.06 / KAPPA_040 * (1 / z + 5 / L)), rel=1e-12)
 
 
 def test_neutral_band_and_bad_lengths():
@@ -93,10 +93,10 @@ def test_neutral_band_and_bad_lengths():
 
 def test_wind_speed_profile():
     u = wind_speed(30.0, u_star=0.5, lmo=math.inf, z0=1.0, d=13.0)
-    assert float(u) == pytest.approx(0.5 / KAPPA * math.log(18.0), rel=1e-12)
+    assert float(u) == pytest.approx(0.5 / KAPPA_040 * math.log(18.0), rel=1e-12)
     u_s = wind_speed(30.0, u_star=0.5, lmo=100.0, z0=1.0, d=13.0)
     assert float(u_s) == pytest.approx(
-        0.5 / KAPPA * (math.log(18.0) + 5 * 18.0 / 100.0 - 5 * 1.0 / 100.0), rel=1e-12)
+        0.5 / KAPPA_040 * (math.log(18.0) + 5 * 18.0 / 100.0 - 5 * 1.0 / 100.0), rel=1e-12)
     L = -100.0
     u_u = wind_speed(30.0, u_star=0.5, lmo=L, z0=1.0, d=13.0)
 
@@ -106,7 +106,7 @@ def test_wind_speed_profile():
                 - 2 * math.atan(xx) + math.pi / 2)
 
     assert float(u_u) == pytest.approx(
-        0.5 / KAPPA * (math.log(18.0) - psi(18.0 / L) + psi(1.0 / L)), rel=1e-12)
+        0.5 / KAPPA_040 * (math.log(18.0) - psi(18.0 / L) + psi(1.0 / L)), rel=1e-12)
 
 
 def test_default_time_offsets_follow_the_tables():

@@ -325,10 +325,10 @@ angle you want.
 
 The rate $k$ of NO + O3 is evaluated at the driver `temperature` (K), which is now **required**:
 with no constant override, a missing `temperature` driver raises by name rather than assuming a
-value. The core `Photostationary` reaction (`noodl.layers.reaction`) defaults to the JPL rate
+value. The `Photostationary` reaction (`noodl.apps.street_aq`) defaults to the JPL rate
 `k_no_o3_jpl2003(T) = 3.0\times10^{-12}\exp(-1500/T)` cm³ molecule⁻¹ s⁻¹ (NASA/JPL 2003, as in
 MUNICH); to use a constant 298 K rate instead of evaluating it at the air temperature, pass
-the constant override `k_no_o3=K_NO_O3` (`noodl.layers.reaction.K_NO_O3`, the 298 K value in
+the constant override `k_no_o3=K_NO_O3` (`noodl.apps.street_aq.K_NO_O3`, the 298 K value in
 m³ kg⁻¹ s⁻¹ for the kg/m³ state); with that override `temperature` is not read.
 
 ### The SIRANE preset

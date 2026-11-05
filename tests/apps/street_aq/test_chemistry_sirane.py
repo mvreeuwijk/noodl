@@ -11,13 +11,12 @@ from noodl.apps.street_aq.chemistry import (
     PHOTOSTATIONARY_FLOOR_PPB,
     j_no2_elevation_cloud,
     k_no_o3_soulhac2011,
-    molar_volume,
     photostationary_for_streets,
     solar_elevation,
     street_steady,
 )
 from noodl.apps.street_aq.network import Street, StreetNetwork, build_model
-from noodl.layers.reaction import MOLAR_MASS, k_no_o3_jpl2003
+from noodl.apps.street_aq.reactions import MOLAR_MASS, k_no_o3_jpl2003, molar_volume
 
 DT = torch.float64
 MASSES = torch.tensor([MOLAR_MASS["no"], MOLAR_MASS["no2"], MOLAR_MASS["o3"]], dtype=DT)

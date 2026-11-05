@@ -7,12 +7,8 @@ from collections.abc import Callable, Sequence
 import torch
 
 from noodl.apps.street_aq.closures import PRESETS, preset_options
-from noodl.layers.reaction import (
-    Photostationary,
-    Reaction,
-    k_no_o3_jpl2003,
-    molar_volume,
-)
+from noodl.apps.street_aq.reactions import Photostationary, k_no_o3_jpl2003
+from noodl.layers.reaction import Reaction
 from noodl.model import Drivers, Model, State
 
 __all__ = [
@@ -25,9 +21,7 @@ __all__ = [
     "PHOTOSTATIONARY_FLOOR_PPB",
     "j_no2_elevation_cloud",
     "j_no2_zenith_table",
-    "k_no_o3_jpl2003",
     "k_no_o3_soulhac2011",
-    "molar_volume",
     "photostationary_for_streets",
     "solar_elevation",
     "street_steady",

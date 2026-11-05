@@ -34,6 +34,7 @@ from noodl.apps.street_aq.canyon import (
 from noodl.apps.street_aq.chemistry import photostationary_for_streets, street_steady
 from noodl.apps.street_aq.closures import resolve
 from noodl.apps.street_aq.network import build_model, street_index, twelve_street_grid
+from noodl.apps.street_aq.reactions import K_NO_O3, K_NO_O3_298, MOLAR_MASS, k_no_o3_jpl2003
 from noodl.apps.street_aq.routing import (
     direction_offsets,
     n_theta_rectangle_rule,
@@ -41,7 +42,6 @@ from noodl.apps.street_aq.routing import (
     routing_matrix,
     sigma_theta_turbulence_intensity,
 )
-from noodl.layers.reaction import K_NO_O3, K_NO_O3_298, MOLAR_MASS, k_no_o3_jpl2003
 
 DT = torch.float64
 FIXTURE = Path(__file__).resolve().parents[1] / "data" / "street" / "munich_idealised.json"

@@ -11,7 +11,7 @@ import math
 import pytest
 import torch
 
-from noodl.apps.street_aq.canyon import KAPPA, KAPPA_041
+from noodl.apps.street_aq.canyon import KAPPA_040, KAPPA_041
 from noodl.apps.street_aq.routing import (
     MAX_N_THETA,
     MAX_SIGMA_THETA,
@@ -344,14 +344,14 @@ def test_street_flows_resolves_kappa_by_formulation():
     def make(**kwargs) -> StreetFlows:
         return StreetFlows(net, None, geometry, **kwargs)
 
-    assert make().kappa == KAPPA
+    assert make().kappa == KAPPA_040
     assert make(canyon_wind="exponential_profile").kappa == KAPPA_041
     assert make(roof_exchange="aspect_ratio_scaled").kappa == KAPPA_041
     assert make(roof_wind="canopy_log_law").kappa == KAPPA_041
     assert make(canyon_wind="exponential_profile", kappa=0.38).kappa == 0.38
     assert make(preset="munich").kappa == KAPPA_041
     assert make(preset="munich", canyon_wind="bessel_profile",
-                roof_exchange="turbulent_velocity").kappa == KAPPA
+                roof_exchange="turbulent_velocity").kappa == KAPPA_040
 
 
 def _street_layer(net, kinds) -> TransportLayer:

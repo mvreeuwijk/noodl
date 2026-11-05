@@ -73,6 +73,14 @@ Functions of the state that compute drivers each step (densities, flows, levels)
 |---|---|---|
 | `StreetFlows` | The closure that turns the wind drivers into every prescribed edge flow. | `StreetFlows(net, layer, geometry, *, preset='sirane', canyon_wind=None, roof_wind=None, roof_exchange=None, junction_routing=None, direction_averaging=None, direction_spread=None, stability=None, shape_constant=None, n_theta=None, sigma_theta=None, kappa=None, canyon_wind_min=None, u_d_min=None, sigma_w_min=None, sigma_v_min=None, sigma_w_height=None, h_canopy=None, z0_s=0.01, z_ref=30.0, pblh_floor=True, meteo='uniform', layer_name='street')` |
 
+## Reactions
+
+Transformations applied to transported species each step.
+
+| Name | What it does | How to call it |
+|---|---|---|
+| `Photostationary` | NO/NO2/O3 relaxed to the Leighton photostationary state, in closed form. | `Photostationary(no, no2, o3, *, j_key='J_NO2', rate=None, temperature_key='temperature', k_no_o3=None, floor_ppb=0.0, molar_volume_key='molar_volume', m_no=0.03, m_no2=0.046, m_o3=0.048)` |
+
 ## Files
 
 Readers and writers of other tools' file formats.
@@ -119,6 +127,7 @@ Calculations and helpers.
 | `junction_sources` | `(xy (J, 2), width (J,), clamp (J,))`: every junction as one point source of width `W_j` and clamp `1/H_j`, with `W_j`, `H_j` the mean width and height of the streets that meet at the junction. The mean is a choice: on SIRANE's South Kensington fluxes, at the deck's downwind cut-off, it gives SIRANE's `C_ext` to a median 0.32 % and p90 1.38 %, against 0.35 % and 1.38 % with the largest width and height, and 0.53 % and 1.48 % with the smallest. | `junction_sources(net)` |
 | `k_no_o3_jpl2003` | k(NO + O3) = 3.0e-12 exp(-1500/T) cm3 molecule^-1 s^-1, returned in m3 mol^-1 s^-1. | `k_no_o3_jpl2003(temperature)` |
 | `k_no_o3_soulhac2011` | k(NO + O3) = 1.325e6 exp(-1430/T) m3 mol^-1 s^-1 at `temperature` (K), SIRANE's rate (Soulhac et al. 2011, with the prefactor that reproduces SIRANE v2.1 output). | `k_no_o3_soulhac2011(temperature)` |
+| `molar_volume` | The ideal-gas molar volume `R T / P`, m3/mol, at `temperature` (K) and `pressure` (Pa). | `molar_volume(temperature, pressure=101325.0)` |
 | `n_theta_rectangle_rule` | The sample count of the `rectangle_rule` direction average: `ntheta = floor(sigma_theta in DEGREES)` (MUNICH, SRC `:3568`), as a long tensor, clamped to `[1, 10]`. MUNICH skips the averaging entirely at 1, i.e. below two degrees. | `n_theta_rectangle_rule(sigma_theta)` |
 | `node_closure` | MUNICH's roof closure at an intersection, before any routing (SRC `:2980-3014`). | `node_closure(flux)` |
 | `photostationary_for_streets` | The Leighton reaction wired to the `"no"`, `"no2"` and `"o3"` columns of `species`. | `photostationary_for_streets(species, *, preset=None, no_o3_rate=None, floor_ppb=None, j_key='J_NO2', temperature_key='temperature', molar_volume_key='molar_volume')` |
@@ -150,8 +159,11 @@ Named values and option tables.
 | `EULER_GAMMA_TRUNCATED` | `0.577` |
 | `EXCHANGE_SIGMA_W_RATIO` | `0.22507907903927651` |
 | `GAUSS_CUTOFF_SIGMAS` | `4.0` |
-| `KAPPA_040`<br><small>also `KAPPA`</small> | `0.4` |
+| `K_NO_O3` | `245236.36481890272` |
+| `K_NO_O3_298` | `1.9546779094727322e-14` |
+| `KAPPA_040` | `0.4` |
 | `KAPPA_041` | `0.41` |
+| `MOLAR_MASS` | table of 3 entries: `no`, `no2`, `o3` |
 | `OPTIONS` | table of 9 entries: `canyon_wind`, `roof_wind`, `roof_exchange`, `junction_routing`, `direction_averaging`, `direction_spread`, `stability`, `sigma_w_height`, ... |
 | `PRESETS` | table of 2 entries: `sirane`, `munich` |
 | `Q_INHALATION` | `0.0001586111111111111` |
