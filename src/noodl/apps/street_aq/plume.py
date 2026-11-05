@@ -533,10 +533,7 @@ def plume_table(
         sigma_v_min=sigma_v_min, sigma_w_min=sigma_w_min, tau_y=tau_y, tau_z=tau_z,
         centre_c=centre_c, centre_k=centre_k, x_max=x_max, kappa=kappa,
         neutral_abs_lmo=neutral_abs_lmo)
-    n_grid = int(math.floor(x_max / TABLE_STEP_M + 1e-9)) + 1
-    if (n_grid - 1) * TABLE_STEP_M < x_max:
-        n_grid += 1
-    n_grid = max(n_grid, 2)
+    n_grid = _grid_size(x_max)
     grid_end = (n_grid - 1) * TABLE_STEP_M
     steps = _step_bound("plume_table", u0, grid_end)
     keys = tuple(p)
@@ -545,12 +542,22 @@ def plume_table(
     for a_, b_ in table_chunks(steps.tolist()):
         values = [p[k][a_:b_] for k in keys]
         if grad:
-            out.append(_RecomputedTrajectory.apply(keys, n_grid, kappa, *values))
+            out.append(_RecomputedTrajectory.apply("plume_table", _TABLE_KEYS, keys, n_grid,
+                                                   kappa, *values))
         else:
             out.append(_trajectory(dict(zip(keys, values, strict=True)), n_grid, kappa))
     s_y, p_z, u = (torch.cat([o[i] for o in out]) for i in range(3))
     return PlumeTable(batch=batch, sigma_y=s_y, p_z=p_z, u=u, step=TABLE_STEP_M,
                       x_max=float(x_max))
+
+
+def _grid_size(x_max: float) -> int:
+    """The number of `TABLE_STEP_M` grid points from 0 to the first at or beyond `x_max`
+    (at least 2)."""
+    n_grid = int(math.floor(x_max / TABLE_STEP_M + 1e-9)) + 1
+    if (n_grid - 1) * TABLE_STEP_M < x_max:
+        n_grid += 1
+    return max(n_grid, 2)
 
 
 def table_chunks(steps: list[float]) -> list[tuple[int, int]]:
@@ -577,31 +584,32 @@ class _RecomputedTrajectory(torch.autograd.Function):
     backward builds no graph over its own result, and `once_differentiable` does not catch a
     `create_graph=True` request (the convention of `noodl.solvers.implicit`), so `backward`
     checks `torch.is_grad_enabled()` at its entry -- off in every ordinary backward pass, on
-    only under `create_graph=True` -- and raises by name."""
+    only under `create_graph=True` -- and raises by name (`where`, the calling function).
+    `cols` are the resampled columns (`_trajectory`)."""
 
     @staticmethod
-    def forward(ctx, keys, n_grid, kappa, *values):
-        ctx.keys, ctx.n_grid, ctx.kappa = keys, n_grid, kappa
+    def forward(ctx, where, cols, keys, n_grid, kappa, *values):
+        ctx.where, ctx.cols, ctx.keys, ctx.n_grid, ctx.kappa = where, cols, keys, n_grid, kappa
         ctx.save_for_backward(*values)
-        return _trajectory(dict(zip(keys, values, strict=True)), n_grid, kappa)
+        return _trajectory(dict(zip(keys, values, strict=True)), n_grid, kappa, cols)
 
     @staticmethod
     def backward(ctx, *grads):
         if torch.is_grad_enabled():
             raise RuntimeError(
-                "plume_table: second-order differentiation (create_graph=True) is not "
+                f"{ctx.where}: second-order differentiation (create_graph=True) is not "
                 "supported; the trajectory table has first-order gradients only. Detach "
                 "the first-order gradient before using it in a further differentiable loss."
             )
         values = ctx.saved_tensors
-        leaves = [v.detach().requires_grad_(ctx.needs_input_grad[3 + i])
+        leaves = [v.detach().requires_grad_(ctx.needs_input_grad[5 + i])
                   for i, v in enumerate(values)]
         wanted = [v for v in leaves if v.requires_grad]
         with torch.enable_grad():
             out = _trajectory(dict(zip(ctx.keys, leaves, strict=True)), ctx.n_grid,
-                              ctx.kappa)
+                              ctx.kappa, ctx.cols)
             found = iter(torch.autograd.grad(out, wanted, grads, allow_unused=True))
-        return (None, None, None,
+        return (None, None, None, None, None,
                 *(next(found) if v.requires_grad else None for v in leaves))
 
 
@@ -670,16 +678,27 @@ def _trajectory_nodes(p: dict, n_nodes_max: int | None, kappa: float, *, x_end: 
     return out
 
 
-def _trajectory(p: dict, n_grid: int, kappa: float) -> tuple[Tensor, Tensor, Tensor]:
-    """`(sigma_y, p_z, u)`, each `(m, n_grid)`, for the `m` hours in `p`: the nodes of
-    `_trajectory_nodes` out to the grid's end, where every segment between two nodes fills
-    the grid points it covers (`X_lo <= x < X_hi`) by linear interpolation."""
-    m = p["u_star"].shape[0]
+def _trajectory(p: dict, n_grid: int, kappa: float, cols: tuple[str, ...] = _TABLE_KEYS
+                ) -> tuple[Tensor, ...]:
+    """The node columns `cols` (default `(sigma_y, p_z, u)`), each `(m, n_grid)`, for the
+    `m` hours in `p`: the nodes of `_trajectory_nodes` out to the grid's end, resampled
+    onto the distance grid (`_resample`). The source node's `sigma_z` (0) is taken as node
+    1's, as its `p_z` and `z_c` are (`P_z0 = P_z1`)."""
     grid_end = (n_grid - 1) * TABLE_STEP_M
     nodes = _trajectory_nodes(p, None, kappa, x_end=grid_end)
-    xs = nodes["x"]
-    cols = (nodes["sigma_y"], nodes["p_z"], nodes["u"])
-    index, values = [], ([], [], [])
+    if "sigma_z" in cols:
+        s_z = nodes["sigma_z"]
+        nodes["sigma_z"] = torch.cat([s_z[:, 1:2], s_z[:, 1:]], dim=1)
+    return _resample(nodes["x"], tuple(nodes[k] for k in cols), n_grid)
+
+
+def _resample(xs: Tensor, cols: tuple[Tensor, ...], n_grid: int) -> tuple[Tensor, ...]:
+    """Node columns `cols` `(m, n_nodes)` at node distances `xs` resampled onto the grid
+    `0, TABLE_STEP_M, ..., (n_grid - 1) TABLE_STEP_M`: every segment between two nodes
+    fills the grid points it covers (`X_lo <= x < X_hi`) by linear interpolation. The nodes
+    must reach past the grid's end."""
+    m = xs.shape[0]
+    index, values = [], tuple([] for _ in cols)
     for j in range(1, xs.shape[1]):
         x, x_j = xs[:, j - 1], xs[:, j]
         # grid points k * step with x <= k * step < x_j

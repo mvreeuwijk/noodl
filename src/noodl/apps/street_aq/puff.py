@@ -1,13 +1,14 @@
 """SIRANE's plume trajectory in time: the tables of the unsteady above-roof puff model.
 
 `plume_table` resamples the 10 s scan of the plume (`plume._trajectory_nodes`) onto a
-distance grid for the steady kernel. A puff reads the same scan by its age: `puff_tables`
-returns the nodes `t_j = 10 j` s of `X`, `U`, `sigma_y`, `sigma_z` and the centre height
-`z_c`, one table per release class (the centre law `z_c = max(H_R, d + E|N(c - d,
-(k sigma_z)^2)|)` takes its own `c`, so an above-roof release at height `z_s` has its own
-table), and `PuffTables.at_age` interpolates them linearly in age. The speed is the
-scan's per-segment node speed (`X_j = X_{j-1} + U_j dt`), so a puff that advances its
-displacement by `U(a) dt` per step follows the table's `X` exactly under constant wind.
+10 m distance grid for the steady kernel. The puffs read that same grid: `puff_tables`
+returns the kernel's `u`, `sigma_y` and roof-level `p_z` with the scan's `sigma_z` and
+centre height `z_c` resampled the same way, one table per release class (the centre law
+`z_c = max(H_R, d + E|N(c - d, (k sigma_z)^2)|)` takes its own `c`, so an above-roof
+release at height `z_s` has its own table). A puff's age maps to its distance by the exact
+travel time of the grid's piecewise-linear speed `u(x)` (`PuffTables.at_age`), so the slugs
+of a continuous source tile the axis at density `1/u(x)` and their steady limit is the
+kernel itself (design Sect. 4.4, amended).
 
 The puffs themselves (design Sect. 4.3-4.6): a `PuffField` holds the sources' geometry
 (streets as `plume.source_points`, junctions as `plume.junction_sources`, explicit
@@ -38,11 +39,13 @@ from noodl.apps.street_aq.plume import (
     GAUSS_CUTOFF_SIGMAS,
     PLUME_CENTRE_C_M,
     PLUME_CENTRE_K,
-    TIME_STEP_S,
+    TABLE_STEP_M,
     _f64,
+    _grid_size,
+    _RecomputedTrajectory,
     _step_bound,
     _table_inputs,
-    _trajectory_nodes,
+    _trajectory,
     crosswind_profile,
     junction_sources,
     rows_per_chunk,
@@ -52,101 +55,99 @@ from noodl.apps.street_aq.plume import (
     vertical_profile,
 )
 
-_NODE_KEYS = ("x", "u", "sigma_y", "sigma_z", "z_c")
+_PUFF_COLS = ("u", "sigma_y", "sigma_z", "z_c", "p_z")
+
+
+def _travel_times(u: Tensor, step: float) -> Tensor:
+    """`(..., n)`: the travel time (s) from the source to each grid point at the speed
+    `u` `(..., n)` (m/s at grid spacing `step`), linear between grid points: cell `k` takes
+    `log(u_{k+1} / u_k) / g_k` with `g_k = (u_{k+1} - u_k) / step`, i.e. `step / u_k` times
+    `log1p(r) / r` with `r = (u_{k+1} - u_k) / u_k` (1 at `r = 0`)."""
+    r = (u[..., 1:] - u[..., :-1]) / u[..., :-1]
+    flat = r == 0
+    r_safe = torch.where(flat, torch.ones_like(r), r)
+    ratio = torch.where(flat, torch.ones_like(r), torch.log1p(r_safe) / r_safe)
+    cell = step * ratio / u[..., :-1]
+    return torch.cat([torch.zeros_like(u[..., :1]), torch.cumsum(cell, -1)], dim=-1)
 
 
 @dataclass(frozen=True)
 class PuffTables:
-    """The plume trajectory by age (`puff_tables`).
+    """The plume trajectory on the steady kernel's distance grid, read by age
+    (`puff_tables`).
 
-    `x` (m, the distance travelled), `u` (m/s, the speed of the segment ending at the node:
-    segments are right-closed;
-    node 0 holds the speed at `H_R`), `sigma_y`, `sigma_z` (m) and `z_c` (m, the plume
-    centre height; node 0 holds node 1's) are `(n_tab, n_b, n_nodes)` at ages `0, step_s,
-    2 step_s, ...`; a row that reaches `x_max` before the others repeats its last node.
-    `h_canopy` and `h_abl` (m) are `(n_b,)`; `x_max` is the extent the tables were built to
-    (the last node of each row is the first beyond it)."""
+    `u` (m/s), `sigma_y`, `sigma_z` (m), `z_c` (m, the plume centre height) and `p_z`
+    (1/m, the vertical profile at `H_R`) are `(n_tab, n_b, n_grid)` at distances `0, step,
+    2 step, ...` (`distance`); `t` (s, same shape, derived from `u`) is the travel time to
+    each grid point at the speed `u(x)`, linear between grid points. `h_canopy` and `h_abl`
+    (m) are `(n_b,)`; `x_max` is the domain's extent (a puff beyond it has left)."""
 
-    x: Tensor
     u: Tensor
     sigma_y: Tensor
     sigma_z: Tensor
     z_c: Tensor
+    p_z: Tensor
     h_canopy: Tensor
     h_abl: Tensor
     x_max: float
-    step_s: float = TIME_STEP_S
+    step: float = TABLE_STEP_M
+    t: Tensor = field(init=False)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "t", _travel_times(self.u, self.step))
 
     @property
-    def t_max(self) -> float:
-        """The age of the last node, s."""
-        return (self.x.shape[-1] - 1) * self.step_s
+    def distance(self) -> Tensor:
+        """`(n_grid,)`: the grid distances, m."""
+        return torch.arange(self.u.shape[-1], dtype=_DTYPE) * self.step
 
     def at_age(self, age: Tensor, table: Tensor, row: Tensor
-               ) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
-        """`(x, u, sigma_y, sigma_z, z_c)` at `age` (s) from table `table` and
+               ) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]:
+        """`(x, u, sigma_y, sigma_z, z_c, p_z)` at `age` (s) from table `table` and
         meteorology row `row` (long tensors that broadcast with `age`; the result has their
-        broadcast shape). Everything but `u` is linear in age between nodes; `u` is the
-        node speed of the segment `(t_{j-1}, t_j]` containing `age`, i.e. the speed of the first
-        segment ending at or after `age` (not interpolated; age 0 gives `U_1`). An age beyond the
-        last node returns the last node's values (a later step retires such a puff); a
-        negative age the source node's."""
-        _, n_b, n = self.x.shape
-        pos = torch.clamp(age / self.step_s, 0.0, float(n - 1))
-        floor = torch.floor(pos.detach()).long()
-        i0 = torch.clamp(floor, 0, n - 2)
-        frac = pos - i0
-        base = (table * n_b + row) * n
-        lo = base + i0
-        seg = base + torch.clamp(torch.ceil(pos.detach()).long(), 1, n - 1)
-        out = []
-        for node in (self.x, self.u, self.sigma_y, self.sigma_z, self.z_c):
-            v = node.reshape(-1)
-            if node is self.u:
-                out.append(v[seg])
-            else:
-                out.append(v[lo] * (1.0 - frac) + v[lo + 1] * frac)
-        return out[0], out[1], out[2], out[3], out[4]
+        broadcast shape).
 
-
-class _RecomputedNodes(torch.autograd.Function):
-    """One chunk of `_trajectory_nodes` that keeps no graph (the `_RecomputedTrajectory`
-    pattern of `plume`): the forward runs without one and the backward rebuilds the chunk's
-    graph and differentiates it. First derivatives only; `create_graph=True` raises."""
-
-    @staticmethod
-    def forward(ctx, keys, kappa, x_end, *values):
-        ctx.keys, ctx.kappa, ctx.x_end = keys, kappa, x_end
-        ctx.save_for_backward(*values)
-        nodes = _trajectory_nodes(dict(zip(keys, values, strict=True)), None, kappa,
-                                  x_end=x_end)
-        return tuple(nodes[k] for k in _NODE_KEYS)
-
-    @staticmethod
-    def backward(ctx, *grads):
-        if torch.is_grad_enabled():
-            raise RuntimeError(
-                "puff_tables: second-order differentiation (create_graph=True) is not "
-                "supported; the trajectory tables have first-order gradients only. Detach "
-                "the first-order gradient before using it in a further differentiable loss."
-            )
-        values = ctx.saved_tensors
-        leaves = [v.detach().requires_grad_(ctx.needs_input_grad[3 + i])
-                  for i, v in enumerate(values)]
-        wanted = [v for v in leaves if v.requires_grad]
-        with torch.enable_grad():
-            nodes = _trajectory_nodes(dict(zip(ctx.keys, leaves, strict=True)), None,
-                                      ctx.kappa, x_end=ctx.x_end)
-            found = iter(torch.autograd.grad([nodes[k] for k in _NODE_KEYS], wanted, grads,
-                                             allow_unused=True))
-        return (None, None, None,
-                *(next(found) if v.requires_grad else None for v in leaves))
-
-
-def _pad_nodes(a: Tensor, n: int) -> Tensor:
-    """`a` `(m, n_a)` extended to `n` columns by repeating its last column."""
-    return a if a.shape[1] == n else torch.cat(
-        [a, a[:, -1:].expand(-1, n - a.shape[1])], dim=1)
+        `x` is the distance travelled in `age` at the speed `u(x)`: within grid cell `k`,
+        `dx/dt = u_k + g_k (x - x_k)` with `g_k = (u_{k+1} - u_k) / step`, so `x = x_k +
+        (u_k / g_k)(exp(g_k (age - t_k)) - 1)` (`x_k + u_k (age - t_k)` when `g_k = 0`).
+        The other columns are linear in `x` between grid points (so `u` is `u(x)`). Beyond
+        the grid's end the puff moves on at the last speed and the other columns hold their
+        last values; a negative age is the source's."""
+        n_tab, n_b, n = self.u.shape
+        age, base = torch.broadcast_tensors(_f64(age), (table * n_b + row) * n)
+        a = torch.clamp(age, min=0.0)
+        t = self.t.reshape(-1)
+        with torch.no_grad():
+            # cell k: the last grid point with t_k <= a (n - 1 beyond the end), found by
+            # one search over all rows shifted by row number times a span above every
+            # travel time, then corrected by one cell for the shift's rounding
+            t_d, a_d = t.detach(), a.detach()
+            span = 2.0 ** math.ceil(math.log2(float(t_d.max()) + 1.0) + 1.0)
+            r = base // n
+            shifted = t_d + torch.arange(n_tab * n_b).repeat_interleave(n).to(_DTYPE) * span
+            key = torch.clamp(a_d, max=span / 2.0) + r.to(_DTYPE) * span
+            k = torch.searchsorted(shifted, key.reshape(-1), right=True).reshape(key.shape)
+            k = torch.clamp(k - 1 - r * n, 0, n - 1)
+            k = torch.where((k > 0) & (a_d < t_d[base + k]), k - 1, k)
+            up = torch.clamp(k + 1, max=n - 1)
+            k = torch.where((k < n - 1) & (a_d >= t_d[base + up]), up, k)
+        lo = base + k
+        hi = base + torch.clamp(k + 1, max=n - 1)
+        u_flat = self.u.reshape(-1)
+        u_k = u_flat[lo]
+        s = a - t[lo]
+        z = (u_flat[hi] - u_k) / self.step * s
+        flat = z == 0
+        z_safe = torch.where(flat, torch.ones_like(z), z)
+        phi = torch.where(flat, torch.ones_like(z), torch.expm1(z_safe) / z_safe)
+        x_k = k.to(_DTYPE) * self.step
+        x = x_k + u_k * s * phi
+        frac = (x - x_k) / self.step
+        out = [x]
+        for col in (self.u, self.sigma_y, self.sigma_z, self.z_c, self.p_z):
+            v = col.reshape(-1)
+            out.append(v[lo] + (v[hi] - v[lo]) * frac)
+        return out[0], out[1], out[2], out[3], out[4], out[5]
 
 
 def puff_tables(
@@ -169,13 +170,15 @@ def puff_tables(
     x_max: float = DOWNWIND_CUTOFF_M,
     kappa: float = KAPPA,
 ) -> PuffTables:
-    """SIRANE's plume trajectory by age (module docstring), one table per entry of
-    `centres`.
+    """SIRANE's plume trajectory on the steady kernel's distance grid (module docstring),
+    one table per entry of `centres`.
 
     `centres` (m) is `centre_c` of the centre law, `(n_tab,)` or `(n_tab, n_b)`; the
     meteorology (`u_star`, `h_abl`, `lmo`, `sigma_theta`, `theta_star`, `temperature`, and
     the empirical inputs, all as in `plume_table`) is scalar or `(n_b,)` and broadcasts
-    to `n_b` hours. `x_max` is the extent: each row's scan ends at the first node beyond it.
+    to `n_b` hours. The grid is `plume_table`'s, out to the first grid point at or beyond
+    `x_max`; for the same centre its `sigma_y`, `p_z` and `u` are `plume_table`'s bit for
+    bit, and `sigma_z`, `z_c` are the scan's nodes resampled the same way (`_trajectory`).
     Needs `h_abl > h_canopy > d`, `u* > 0` and `tau_z < TIME_STEP_S`; a wind at `H_R` so
     low that the scan would need more than `MAX_TABLE_STEPS` steps, and the unstable regime,
     are refused by name. Rows are built in chunks under `KERNEL_BYTES_CAP`
@@ -196,24 +199,23 @@ def puff_tables(
             f"puff_tables: the meteorology must be scalar or (n_b,) and centres (n_tab,) "
             f"or (n_tab, n_b); the broadcast shape is {batch}")
     n_tab, n_b = batch
-    x_end = float(x_max)
-    steps = _step_bound("puff_tables", u0, x_end)
+    n_grid = _grid_size(x_max)
+    steps = _step_bound("puff_tables", u0, (n_grid - 1) * TABLE_STEP_M)
     keys = tuple(p)
     grad = torch.is_grad_enabled() and any(v.requires_grad for v in p.values())
     out = []
     for a_, b_ in table_chunks(steps.tolist()):
         values = [p[k][a_:b_] for k in keys]
         if grad:
-            out.append(_RecomputedNodes.apply(keys, kappa, x_end, *values))
+            out.append(_RecomputedTrajectory.apply("puff_tables", _PUFF_COLS, keys, n_grid,
+                                                   kappa, *values))
         else:
-            nodes = _trajectory_nodes(dict(zip(keys, values, strict=True)), None, kappa,
-                                      x_end=x_end)
-            out.append(tuple(nodes[k] for k in _NODE_KEYS))
-    n_nodes = max(o[0].shape[1] for o in out)
-    cols = [torch.cat([_pad_nodes(o[i], n_nodes) for o in out]).reshape(n_tab, n_b, n_nodes)
-            for i in range(len(_NODE_KEYS))]
+            out.append(_trajectory(dict(zip(keys, values, strict=True)), n_grid, kappa,
+                                   _PUFF_COLS))
+    cols = [torch.cat([o[i] for o in out]).reshape(n_tab, n_b, n_grid)
+            for i in range(len(_PUFF_COLS))]
     return PuffTables(*cols, h_canopy=p["h_r"].reshape(batch)[0],
-                      h_abl=p["h_abl"].reshape(batch)[0], x_max=x_end)
+                      h_abl=p["h_abl"].reshape(batch)[0], x_max=float(x_max))
 
 
 ALONG_WIND = ("sigma_y", "none")
@@ -383,7 +385,7 @@ class PuffField:
 def _table_rows(tables: PuffTables, n_batch: int, where: str) -> Tensor:
     """`(B,)`: each batch instance's meteorology row of `tables` (its own when the tables
     have `B` rows, row 0 when they have one)."""
-    n_b = tables.x.shape[1]
+    n_b = tables.u.shape[1]
     if n_b == n_batch:
         return torch.arange(n_batch)
     if n_b == 1:
@@ -418,22 +420,16 @@ def puff_mass(state: PuffState) -> Tensor:
 
 def _peak_bound(field: PuffField, state: PuffState, tables: PuffTables) -> Tensor:
     """`(B, K)`, detached: a cheap upper bound of each live puff's peak roof-level
-    contribution, `|m| max_i w_i min(P_z,max, clamp_i) / (ell (2 y_c,i + sqrt(2 pi)
-    sigma_y))` (design Sect. 4.8), with `P_z,max` the vertical profile at `H_R`. The
-    slug length `ell` is the node speed (the step `dt` is common to all puffs and cancels
-    in the comparisons the bound serves). Zero for a free slot."""
+    contribution, `|m| max_i w_i min(P_z, clamp_i) / (ell (2 y_c,i + sqrt(2 pi)
+    sigma_y))` (design Sect. 4.8), with `P_z` the table's roof-level profile at the puff's
+    distance. The slug length `ell` is the speed there (the step `dt` is common to all
+    puffs and cancels in the comparisons the bound serves). Zero for a free slot."""
     n_batch, capacity = state.mass.shape
     width, clamp = _field_rows(field, n_batch, "housekeep")
     width, clamp = width.detach(), clamp.detach()
     row = _table_rows(tables, n_batch, "housekeep")[:, None]
     with torch.no_grad():
-        # the profiles are valid from node 1 on (sigma_z is 0 at age 0): a puff younger
-        # than a table step is bounded at one step
-        age = torch.clamp(state.age, min=tables.step_s)
-        _, u, s_y, s_z, z_c = tables.at_age(age, state.table, row)
-        h_c, h_abl = tables.h_canopy[row[:, 0]], tables.h_abl[row[:, 0]]
-        p_z = vertical_profile(h_c[:, None].expand_as(s_y), z_c, s_z, h_c[:, None],
-                               h_abl[:, None])
+        _, u, s_y, _, _, p_z = tables.at_age(state.age, state.table, row)
         b, k = torch.nonzero(state.live & (state.mass != 0), as_tuple=True)
         s = state.source[b, k]
         n_sub = field._count[s]
@@ -465,8 +461,8 @@ def _retire(state: PuffState, gone: Tensor, counter: str) -> PuffState:
 
 def housekeep(field: PuffField, state: PuffState, tables: PuffTables, *,
               drop_below: float = 1e-6) -> PuffState:
-    """Retire puffs (design Sect. 4.8): those whose age passed the table's last node or
-    whose distance `x(age)` passed `tables.x_max` go to `mass_out`; of the others, those
+    """Retire puffs (design Sect. 4.8): those whose distance `x(age)` passed
+    `tables.x_max` go to `mass_out`; of the others, those
     whose peak bound (`_peak_bound`) is below `drop_below` times the largest among the
     instance's live puffs go to `mass_dropped`. An instance with no live puff is left as
     it is. Decisions are made on detached values; the masses keep their graph."""
@@ -476,7 +472,7 @@ def housekeep(field: PuffField, state: PuffState, tables: PuffTables, *,
     row = _table_rows(tables, n_batch, "housekeep")[:, None]
     with torch.no_grad():
         x = tables.at_age(state.age, state.table, row)[0]
-        out = state.live & ((state.age > tables.t_max) | (x > tables.x_max))
+        out = state.live & (x > tables.x_max)
     state = _retire(state, out, "mass_out")
     peak = _peak_bound(field, state, tables)
     with torch.no_grad():
@@ -558,9 +554,9 @@ def advance(state: PuffState, tables: PuffTables, dt: float,
             theta_w: Tensor | float) -> PuffState:
     """Every live puff `dt` (s) older and moved along the wind `theta_w` (scalar or `(B,)`,
     radians counter-clockwise from east, toward) by its table's distance increment
-    `x(a + dt) - x(a)`: exact for any `dt`, since `x` is the integral of the node speed,
-    so under constant wind the displacement is `x(a)`. A wind that turns between steps
-    turns the puff's further path (design Sect. 4.4)."""
+    `x(a + dt) - x(a)`: exact for any `dt`, since `x` is the exact travel distance at the
+    table's speed, so under constant wind the displacement is `x(a)`. A wind that turns
+    between steps turns the puff's further path (design Sect. 4.4)."""
     if not dt > 0:
         raise ValueError(f"advance: dt must be positive, got {dt!r}")
     n_batch = state.mass.shape[0]
@@ -585,7 +581,9 @@ def _evaluate(field: PuffField, state: PuffState, tables: PuffTables, rec_xy: Te
     widest flat top, then the surviving pairs expanded to the source's sub-sources and cut
     exactly. Masks are detached; the kept values carry the graph. A puff of age 0 (not yet
     advanced: no spread) or whose slug has zero length (beyond the table's last node)
-    contributes nothing."""
+    contributes nothing. At roof level the vertical profile is the table's `p_z` at the
+    puff's distance `x(a)`; at a receptor height it is `vertical_profile` of `sigma_z` and
+    `z_c` read there."""
     if not dt > 0:
         raise ValueError(f"{where}: dt must be positive, got {dt!r}")
     n_batch, capacity = state.mass.shape
@@ -593,7 +591,7 @@ def _evaluate(field: PuffField, state: PuffState, tables: PuffTables, rec_xy: Te
     row = _table_rows(tables, n_batch, where)
     rk = row[:, None]
     age = state.age
-    x_a, _, s_y, s_z, z_c = tables.at_age(age, state.table, rk)
+    x_a, _, s_y, s_z, z_c, p_z_roof = tables.at_age(age, state.table, rk)
     e_lo = tables.at_age(torch.clamp(age - dt / 2.0, min=0.0), state.table, rk)[0] - x_a
     e_hi = tables.at_age(age + dt / 2.0, state.table, rk)[0] - x_a
     slug = field.along_wind == "sigma_y"
@@ -612,8 +610,9 @@ def _evaluate(field: PuffField, state: PuffState, tables: PuffTables, rec_xy: Te
     n_rec = rec_xy.shape[0]
     rec_d = rec_xy.detach()
     grad = torch.is_grad_enabled() and any(
-        v.requires_grad for v in (state.mass, state.disp, tables.x, tables.sigma_y,
-                                  tables.z_c, field.width, rec_xy, cos))
+        v.requires_grad for v in (state.mass, state.disp, tables.u, tables.sigma_y,
+                                  tables.sigma_z, tables.z_c, tables.p_z, field.width,
+                                  rec_xy, cos))
 
     def block(a_: int, b_: int) -> Tensor:
         r = b_ - a_
@@ -652,12 +651,9 @@ def _evaluate(field: PuffField, state: PuffState, tables: PuffTables, rec_xy: Te
         else:
             g_x = 1.0 / (hi - lo)
         if rec_z is None:
-            z = h_c[b]
+            p_z = torch.minimum(p_z_roof[b, k], clamp[b, p])
         else:
-            z = rec_z[a_:b_][i]
-        p_z = vertical_profile(z, z_c[b, k], s_z[b, k], h_c[b], h_abl[b])
-        if rec_z is None:
-            p_z = torch.minimum(p_z, clamp[b, p])
+            p_z = vertical_profile(rec_z[a_:b_][i], z_c[b, k], s_z[b, k], h_c[b], h_abl[b])
         c = state.mass[b, k] * field.weight[p] * g_x * crosswind_profile(y, sy, w) * p_z
         return torch.zeros(n_batch * r, dtype=_DTYPE).index_add(0, b * r + i, c).reshape(
             n_batch, r)
@@ -676,7 +672,8 @@ def roof_concentration(field: PuffField, state: PuffState, tables: PuffTables,
     `receptors_xy` `(R, 2)`, design Sect. 4.3: per sub-source `m w_i g_x f_y min(P_z,
     clamp_i)`, with `g_x` the slug of the puff's age `a`, `[x(a - dt/2), x(a + dt/2)]` along
     the wind `theta_w` from its source (`dt`, s, the step: consecutive puffs of a
-    continuous source tile the axis), and `f_y`, `P_z` read at age `a`. A puff whose source
+    continuous source tile the axis), and `f_y` and the table's `p_z` read at the puff's
+    distance `x(a)`. A puff whose source
     is `receptor_owner[r]` (`(R,)`, long; -1 for none) contributes nothing to receptor
     `r`: a street's own `C_ext` excludes its own puffs, as `street_kernel` does."""
     if receptor_owner is not None:

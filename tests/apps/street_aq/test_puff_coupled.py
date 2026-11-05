@@ -191,7 +191,7 @@ def test_released_puff_reaches_the_streets():
     for k in range(3, 30):
         state = model.step(state, drv, 5.0, t=5.0 * k)
     assert float(state["street.x"].max()) > 0.0
-    assert model.closures[-1].tables.x.shape[0] == 2
+    assert model.closures[-1].tables.u.shape[0] == 2
     with pytest.raises(ValueError, match=r"Model\.step\(t=\.\.\.\)"):
         model.step(state, drv, 5.0)
 
