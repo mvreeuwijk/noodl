@@ -1287,7 +1287,9 @@ class PuffClosure:
     requires grad, is a different tensor (a value-only match would reuse another leaf's
     graph). The cache is dropped at the start of a run and when a run resumes from a state
     this closure did not produce while the cache holds a graph, so a run continues after a
-    backward from its detached state (truncated BPTT) with the same driver tensors;
+    backward from its detached state (truncated BPTT; every state tensor detached or
+    copied, `"puff.time"` included, which is how a resume is recognised) with the same
+    driver tensors;
     `reset()` drops it by hand, to continue a run after a backward in any other way. Under
     `meteo="per_street"` the tables read the first street's (or junction's) entry of each
     meteorology driver, so a gradient with respect to those drivers reaches that entry only.

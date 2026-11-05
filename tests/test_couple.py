@@ -517,7 +517,7 @@ def test_a_conversion_whose_units_do_not_match_the_layers_is_refused_at_construc
 
 
 def _multi_kind_building_model():
-    """`_tiny_building_model` with TWO advecting edge kinds on its species layer."""
+    """`tiny_building_model` with TWO advecting edge kinds on its species layer."""
     from noodl.layers.transport import TransportLayer
     from noodl.model import Model
 
@@ -542,7 +542,7 @@ def _multi_kind_building_model():
 
 
 def _two_species_building_model():
-    """`_tiny_building_model` with TWO species on its species layer."""
+    """`tiny_building_model` with TWO species on its species layer."""
     from noodl.layers.transport import TransportLayer
     from noodl.model import Model
 

@@ -642,7 +642,8 @@ the same value every step cost no rebuild. The cache holds the autograd graph of
 that built it, so it is dropped at the start of every run (a state with no pending step)
 and when a run resumes from a state the closure did not produce while the cache holds a
 graph: to continue a run after a backward (truncated backpropagation through time),
-detach the state and step on with the same driver tensors, and the gradient is that of a
+detach every tensor of the state (`"puff.time"` included: the closure recognises a resume
+by that tensor's identity) and step on with the same driver tensors, and the gradient is that of a
 fresh closure resumed from the detached state. `PuffClosure.reset()` drops the cache by
 hand, to continue a run after a backward in any other way (a driver changed in place, a
 state kept with its graph and stepped again).
