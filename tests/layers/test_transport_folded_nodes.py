@@ -463,6 +463,38 @@ def test_the_transfer_gradient_with_respect_to_the_stored_capacities(scheme):
     torch.testing.assert_close(grad, numeric, rtol=1e-6, atol=1e-6 * grad.abs().max().item())
 
 
+def test_the_model_transfer_gradient_with_respect_to_a_capacity_driver():
+    """The same gradient through `Model.step`: the stored capacities as the driver
+    `"T.capacity"` (and the step-start state's), the transfer from
+    `boundary_transfers`, under `exact`; the state's gradient too."""
+    from noodl.model import Model
+
+    net, layer = _star("exact")
+    model = Model(net, {"T": layer})
+
+    def outputs(c):
+        cap = torch.cat([c[:1], torch.zeros(4, dtype=F64), c[1:]])
+        drivers = {"T.x_boundary": XB, "T.q": _t([0.2]), "T.sources": _star_sources(),
+                   "T.capacity": cap}
+        diagnostics: dict = {}
+        new = model.step({"T.x": STAR_X0, "T.capacity": cap}, drivers, 900.0,
+                         diagnostics=diagnostics, boundary_transfers={"T"})
+        return diagnostics["layers"]["T"]["boundary_transfer"].sum(), new["T.x"].sum()
+
+    c0 = _t([STAR_CAP[0], *STAR_CAP[5:]])
+    c = c0.clone().requires_grad_(True)
+    for k, value in enumerate(outputs(c)):
+        (grad,) = torch.autograd.grad(value, c, retain_graph=True)
+        numeric = torch.empty_like(c0)
+        for i in range(c0.numel()):
+            e = torch.zeros_like(c0)
+            e[i] = 1e-3 * c0[i]
+            f = [outputs(c0 + s * e)[k] for s in (2, 1, -1, -2)]
+            numeric[i] = (-f[0] + 8 * f[1] - 8 * f[2] + f[3]) / (12 * e[i])
+        torch.testing.assert_close(grad, numeric, rtol=1e-6,
+                                   atol=1e-6 * grad.abs().max().item())
+
+
 def test_gradient_reaches_a_construction_conductance_that_requires_grad():
     g = _t([H1, H2, K1, K2], requires_grad=True)
     layer = TransportLayer(
