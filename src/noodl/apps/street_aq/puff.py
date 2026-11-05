@@ -601,7 +601,9 @@ def _retire(state: PuffState, gone: Tensor, counter: str) -> PuffState:
 def housekeep(field: PuffField, state: PuffState, tables: PuffTables, *,
               drop_below: float = 1e-3) -> PuffState:
     """Retire puffs (design Sect. 4.8): those whose distance `x(age)` passed
-    `tables.x_max` go to `mass_out`; of the others, those whose peak estimate
+    `tables.x_max` go to `mass_out` (the centre decides, not the slug's near end, so a
+    receptor within half a slug of `x_max` sees a small step in `C_ext` when a puff
+    retires); of the others, those whose peak estimate
     (`_peak_bound`) is below `drop_below` (default 1e-3, as `PuffOptions.drop_below`)
     times the largest among the instance's live puffs go to `mass_dropped`. An instance
     with no live puff is left as it is. Decisions are made on detached values; the masses
