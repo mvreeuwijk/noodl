@@ -20,7 +20,9 @@ in the state it returns), optional "<layer>.removal" (a transport layer's
 per-step first-order removal rate, 1/s, (..., n_i, K); absent, the layer's
 construction-time removal stands), optional "<layer>.transmission" (a transport layer's
 per-step transmission, (..., b_flow) or (..., b_flow, K) in its flow order; absent, the
-layer's construction-time transmission stands), "<layer>.requests" (an allocation layer's
+layer's construction-time transmission stands), optional "<layer>.conductance" (a transport
+layer's per-step conduction conductance, (..., b_c) in the order of its `conduction_edges`;
+absent, the construction-time conductance stands), "<layer>.requests" (an allocation layer's
 per-edge requested flow, required every step). Closures return driver updates; they may
 not write state keys. A transport layer whose kinds no
 Kirchhoff layer provides reads its branch flows from the driver "<layer>.q", in the layer's
@@ -970,6 +972,7 @@ class Model:
                 capacity=drv.get(f"{name}.capacity"),
                 removal=drv.get(f"{name}.removal"),
                 transmission=drv.get(f"{name}.transmission"),
+                conductance=drv.get(f"{name}.conductance"),
             )
         return out
 

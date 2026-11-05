@@ -666,6 +666,20 @@ class LayerRef:
                             "construction-time transmission",
                 unit="1", **common,
             )
+            if layer.conduction_kinds:
+                c_cols: list[int] = []
+                for k in layer.conduction_kinds:
+                    c_cols += net.edge_index(k).tolist()
+                c_labels, c_alias = _edge_labels(net, c_cols)
+                inputs["conductance"] = Field(
+                    f"{name}.conductance", role="driver", axis="edge", labels=c_labels,
+                    aliases=c_alias,
+                    ordering=f"edge order of kinds {tuple(layer.conduction_kinds)}",
+                    required="optional", default=None,
+                    description="per-step conduction conductance of each edge overriding "
+                                "the construction-time one",
+                    **common,
+                )
             if flow_owner is None:
                 cols: list[int] = []
                 for k in layer.flow_kinds:

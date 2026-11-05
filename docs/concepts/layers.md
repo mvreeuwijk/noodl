@@ -189,14 +189,14 @@ layer = TransportLayer(
     flow_kind=("airpath", "door"),  # one or several advecting kinds
     boundary=["ambient"],
     n_species=1,
-    conduction_kind="wall",         # optional diffusive edges
+    conduction_kind="wall",         # optional diffusive edges: one kind or a tuple of kinds
     conductance=ua,
     scheme="exact",                 # 'exact' | 'implicit' | 'trapezoidal'
     quantity="temperature", unit="K",
 )
 ```
 
-Three things catch people:
+Four things catch people:
 
 - **The active interior.** Nodes that no edge of this layer's kinds touches are *inactive* and
   have no row at all — not a zero row, which would be singular. `capacity` must be indexed by the
@@ -206,6 +206,12 @@ Three things catch people:
 - **`sources` is in full node order**, not interior order — zeros on boundary and inactive nodes.
   This differs from `capacity` on purpose: sources are an application-level quantity, capacity a
   layer-level one.
+- **`conduction_kind` may be several kinds too**: `("wall", "film", "radiation")` carries wall
+  conduction, a surface (film) coefficient and a radiative coefficient as separate edges.
+  `conductance` is then one tensor over the edges of all those kinds, the first kind's edges in
+  network order, then the second kind's, and so on; `layer.conduction_edges` lists the kinds with
+  their end nodes in exactly that order, so a closure can write one value per edge. Every
+  conduction kind counts as a touch for the active interior.
 - **`flow_kind` may be several kinds**, and `q` is then their flows *concatenated in that order*.
   That is exactly what `KirchhoffLayer.flows_of_kind(q, layer.flow_kinds)` produces, so heat
   advected by both `"airpath"` and `"door"` edges needs no new operator.
@@ -280,6 +286,20 @@ scheme refuses storage-free nodes at construction. A `steady` solve has no value
 with nothing passing through it, and refuses it, naming the node. Whether such a node mixes or holds is a 0/1 choice on the flows and
 carries no gradient: a held node's value has zero gradient with respect to the flows, although
 any flow through it would switch it to mixing. `layer.storage_free_mask` is the `(n_i,)` boolean mask of these nodes.
+
+**A conductance that changes with the state.** A radiative coefficient depends on the surface
+temperatures, a film coefficient on the air speed. A closure writes such a value into the driver
+`"<layer>.conductance"`, shape `(..., b_c)` in the order of `layer.conduction_edges`, and it
+*replaces* the construction-time `conductance` for that call, under all three schemes and
+`steady`. Gradients flow from the solution back to the closure that computed it. Entries must be
+zero or positive (a negative one is refused, naming the edge); zero is allowed because a
+coefficient can vanish. A stored node whose conducting edges are all zero this call, and with no
+flow through it, is isolated for that call: a transient step leaves it at its value plus its own
+source, and a steady solve refuses it as an undefined steady state (or, for a storage-free
+node, as one nothing passes through). With `Model(coupling="iterate")` the closure reads the
+previous pass's temperatures and the passes converge to the steady state of the nonlinear
+balance, for instance radiation to a boundary at the fourth power of the temperature. The library
+carries no radiation law: the closure owns it.
 
 **Undefined steady states.** A stored node that nothing leaves (no outflow, no conduction, no
 removal) keeps everything that enters it, and so does a closed group of stored nodes whose
@@ -435,6 +455,7 @@ State and driver keys are namespaced by layer name:
 | `"<layer>.sources"` | Nodal sources, **full node order** (driver, optional) |
 | `"<layer>.capacity"` | Per-step capacity override (driver, optional) |
 | `"<layer>.removal"` | Per-step first-order removal rate, 1/s, `(n_i, K)`, replacing the layer's construction-time `removal` (driver, optional; not carried in the state, so a closure that sets it must write it every step) |
+| `"<layer>.conductance"` | Per-step conduction conductance of each conduction edge, `(b_c,)` in the order of `layer.conduction_edges`, replacing the layer's construction-time `conductance` (driver, optional; zero or positive; not carried in the state, so a closure that sets it must write it every step) |
 | `"<layer>.transmission"` | Per-step pass fraction of each flow edge, `(b_flow,)` or `(b_flow, K)` in the layer's flow order, replacing the layer's construction-time `transmission` (driver, optional; not carried in the state, so a closure that sets it must write it every step) |
 | `"<layer>.requests"` | An allocation layer's per-edge request (driver, required) |
 | `"<layer>.frequency"` | A phasor layer's frequency in Hz, one per instance (driver, required) |

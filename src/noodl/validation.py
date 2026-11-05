@@ -263,8 +263,7 @@ def check_setup(
         used.update(layer.kinds)
     for layer in model.transport.values():
         used.update(layer.flow_kinds)
-        if getattr(layer, "conduction_kind", None):
-            used.add(layer.conduction_kind)
+        used.update(layer.conduction_kinds)
     for layer in model.allocation.values():
         used.add(layer.kind)
     layer_kinds = set(used)

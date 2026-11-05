@@ -235,6 +235,10 @@ def _advance_transport(model: Model, base, drv, dt, transfer_layers: set[str], n
         # A per-step transmission, written by a closure whose filters depend on the
         # step's flows or conditions (a UVGI filter). Absent, the layer's own stands.
         transmission = drv.get(f"{name}.transmission")
+        # A per-step conduction conductance, written by a closure whose coefficient depends
+        # on the state (a radiative coefficient from the previous pass's temperatures).
+        # Absent, the layer's own stands.
+        conductance = drv.get(f"{name}.conductance")
         transfer_total = None
         # A fresh dict per layer, threaded into `steady`/`step`/
         # `step_with_transfer` as an out-parameter and read back below into
@@ -255,7 +259,8 @@ def _advance_transport(model: Model, base, drv, dt, transfer_layers: set[str], n
                 )
             x = layer.steady(
                 q_kind, sources, xb, capacity=cap, removal=removal,
-                transmission=transmission, diagnostics=layer_diag
+                transmission=transmission, conductance=conductance,
+                diagnostics=layer_diag
             )
             if cap is not None:
                 # The capacity this state was solved with, as a step records its own.
@@ -298,7 +303,8 @@ def _advance_transport(model: Model, base, drv, dt, transfer_layers: set[str], n
                     stepped = layer.step_with_transfer(
                         x, q_kind, sources, xb, dt / k,
                         capacity=cap_j, capacity_prev=cap_prev_j, removal=removal,
-                        transmission=transmission, diagnostics=layer_diag,
+                        transmission=transmission, conductance=conductance,
+                        diagnostics=layer_diag,
                     )
                     x = stepped.x
                     transfer_total = (
@@ -308,7 +314,8 @@ def _advance_transport(model: Model, base, drv, dt, transfer_layers: set[str], n
                 else:
                     x = layer.step(x, q_kind, sources, xb, dt / k, capacity=cap_j,
                                    capacity_prev=cap_prev_j, removal=removal,
-                                   transmission=transmission, diagnostics=layer_diag)
+                                   transmission=transmission, conductance=conductance,
+                                   diagnostics=layer_diag)
             if cap is not None:
                 new[f"{name}.capacity"] = cap
                 made.append(f"{name}.capacity")

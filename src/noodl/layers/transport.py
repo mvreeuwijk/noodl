@@ -318,28 +318,36 @@ class TransportLayer(TopologyGuard):
     def _coefficients(
         self, *, removal: torch.Tensor | None = None,
         transmission: torch.Tensor | None = None,
+        conductance: torch.Tensor | None = None,
     ) -> tuple[tuple[str, ...], list[torch.Tensor]]:
         """`(names, tensors)`: every coefficient tensor that must cross `_LinearSolve`'s
         boundary explicitly. `_LinearSolve.backward` only sees what `apply` was given, so a
         coefficient read from `self` inside `build_system` silently gets no gradient.
         Topology and index tensors are not coefficients and stay on `self`. `removal`, when
-        given, is a per-call rate that replaces the layer's own (see `_removal_arg`)."""
+        given, is a per-call rate that replaces the layer's own (see `_removal_arg`);
+        `transmission` and `conductance` likewise (see `_transmission_arg`,
+        `_conductance_arg`)."""
         values = {
             "carrier": self.carrier,
             "transmission": self.transmission if transmission is None else transmission,
             "kinetics": self.kinetics,
             "removal": self.removal if removal is None else removal,
-            "conductance": None if self._conduction_edges is None else self._conduction_edges[2],
+            "conductance": (
+                None if self._conduction_edges is None
+                else self._conduction_edges[2] if conductance is None else conductance
+            ),
             "dilution": self.dilution,
         }
         names = tuple(n for n in self._COEFFICIENT_NAMES if values[n] is not None)
         return names, [values[n] for n in names]
 
     def _coefficient_map(
-        self, removal: torch.Tensor | None = None, transmission: torch.Tensor | None = None
+        self, removal: torch.Tensor | None = None, transmission: torch.Tensor | None = None,
+        conductance: torch.Tensor | None = None,
     ) -> dict[str, torch.Tensor]:
         """`_coefficients` as a name -> tensor map, for `_advection_operator`."""
-        names, values = self._coefficients(removal=removal, transmission=transmission)
+        names, values = self._coefficients(
+            removal=removal, transmission=transmission, conductance=conductance)
         return dict(zip(names, values, strict=True))
 
     def _removal_arg(self, removal: torch.Tensor | None) -> torch.Tensor | None:
@@ -392,6 +400,72 @@ class TransportLayer(TopologyGuard):
             f"({b_flow},) or ({b_flow}, {K}) (the layer's flow order), got {tuple(t.shape)}"
         )
 
+    def _conductance_arg(self, conductance: torch.Tensor | None) -> torch.Tensor | None:
+        """Validate an optional PER-STEP conduction conductance (W/K for heat), else `None`
+        (the layer's own stands; see `_coefficients`).
+
+        A closure that owns a conductance which depends on the state (a radiative
+        coefficient recomputed from the previous pass's temperatures, a film coefficient
+        that follows the air speed) hands the layer a fresh value every step through the
+        driver `"<layer>.conductance"`, passed in by `Model._pass` the way
+        `"<layer>.removal"` is. Shape `(..., b_c)`, one entry per conduction edge in the
+        order of `conduction_edges` (the kinds in `conduction_kind` order, each kind's edges
+        in network order); leading batch dimensions are allowed. It REPLACES the
+        construction-time conductance for this call, and it carries the gradient back to
+        whatever computed it.
+
+        Entries must be zero or positive: a negative one is refused, naming the edge. Zero is
+        allowed because a radiative or film coefficient can vanish. A stored node left with
+        no conducting edge this call and no flow is isolated for the call: a transient step
+        keeps it exactly as it was plus its own source, a steady solve refuses it as
+        undefined (`UndefinedSteadyState`, or, for a storage-free node, "nothing passes
+        through"), as it would a node that never had an edge.
+        """
+        if conductance is None:
+            return None
+        if self._conduction_edges is None:
+            raise ValueError(
+                f"TransportLayer '{self.name}': a per-step conductance was given but the "
+                f"layer has no conduction_kind"
+            )
+        g = torch.as_tensor(conductance, dtype=self.net.dtype)
+        b_c = self._conduction_edges[0].numel()
+        if g.dim() == 0 or g.shape[-1] != b_c:
+            raise ValueError(
+                f"TransportLayer '{self.name}': conductance must have trailing shape "
+                f"({b_c},) (one per conduction edge, in the order of `conduction_edges`), "
+                f"got {tuple(g.shape)}"
+            )
+        negative = (g.detach() < 0).reshape(-1, b_c).any(0)
+        if bool(negative.any()):
+            edges = [(self.net.nodes[int(self._conduction_edges[0][e])],
+                      self.net.nodes[int(self._conduction_edges[1][e])])
+                     for e in negative.nonzero().flatten().tolist()]
+            raise ValueError(
+                f"TransportLayer '{self.name}': conductance must be zero or positive; "
+                f"negative on conduction edge(s) {edges}"
+            )
+        return g
+
+    @property
+    def conduction_edges(self) -> tuple[tuple[str, torch.Tensor, torch.Tensor], ...]:
+        """The conduction edges, one `(kind, source_nodes, target_nodes)` block per kind of
+        `conduction_kind`, in that order (empty for a layer with no conduction).
+
+        `conductance` (construction-time or the per-step driver `"<layer>.conductance"`) is
+        one tensor over these blocks CONCATENATED: the first kind's edges in network order,
+        then the second kind's, and so on. The node tensors are positions in the full node
+        order of the network. A closure that writes a per-edge value reads the order here.
+        """
+        if self._conduction_edges is None:
+            return ()
+        out, start = [], 0
+        for kind, n_edges in zip(self.conduction_kinds, self._conduction_sizes, strict=True):
+            sl = slice(start, start + n_edges)
+            out.append((kind, self._conduction_edges[0][sl], self._conduction_edges[1][sl]))
+            start += n_edges
+        return tuple(out)
+
     def __init__(
         self,
         net: Network,
@@ -405,7 +479,7 @@ class TransportLayer(TopologyGuard):
         transmission: torch.Tensor | None = None,
         kinetics: torch.Tensor | None = None,
         removal: torch.Tensor | None = None,
-        conduction_kind: str | None = None,
+        conduction_kind: str | Sequence[str] | None = None,
         conductance: torch.Tensor | None = None,
         dilution: torch.Tensor | float | None = None,
         dilution_mode: Literal["signed", "withdrawal"] = "signed",
@@ -463,7 +537,16 @@ class TransportLayer(TopologyGuard):
         # unknown of a thermal layer, and is not one of a species layer over the same
         # network. See `active_interior`, which is also what a caller must size `capacity`
         # with.
-        kinds = self.flow_kinds if conduction_kind is None else (*self.flow_kinds, conduction_kind)
+        # One or several conduction kinds (wall conduction, a surface film, a radiative
+        # coefficient), as `flow_kind`: `conduction_kind` keeps the caller's spelling,
+        # `conduction_kinds` is the tuple, empty when the layer has no conduction.
+        self.conduction_kind = conduction_kind
+        self.conduction_kinds = (
+            () if conduction_kind is None
+            else (conduction_kind,) if isinstance(conduction_kind, str)
+            else tuple(conduction_kind)
+        )
+        kinds = (*self.flow_kinds, *self.conduction_kinds)
         self.interior_idx, self.inactive_idx = active_interior(net, kinds, self.boundary)
         self.boundary_idx = net.boundary_index(self.boundary)
         self.n_i = int(self.interior_idx.shape[0])
@@ -596,8 +679,7 @@ class TransportLayer(TopologyGuard):
             )
         self.dilution_mode = dilution_mode
 
-        self.conduction_kind = conduction_kind
-        if conduction_kind is not None:
+        if self.conduction_kinds:
             if conductance is None:
                 raise ValueError(
                     f"TransportLayer '{name}': conductance is required when "
@@ -607,7 +689,10 @@ class TransportLayer(TopologyGuard):
             # the (n, n) Laplacian, are this layer's whole representation of its conduction
             # topology; `operator()`, the dense reference, forms its (n, n) `L` from it on
             # demand (`_conduction_matrix`).
-            csrc, ctgt = net.endpoints(conduction_kind)
+            ends = [net.endpoints(kind) for kind in self.conduction_kinds]
+            self._conduction_sizes = tuple(len(e[0]) for e in ends)
+            csrc = torch.cat([e[0] for e in ends]) if len(ends) > 1 else ends[0][0]
+            ctgt = torch.cat([e[1] for e in ends]) if len(ends) > 1 else ends[0][1]
             b_c = len(csrc)
             g = torch.as_tensor(conductance, dtype=net.dtype)
             # Validate explicitly rather than let a mismatched length reach the assembly:
@@ -626,6 +711,7 @@ class TransportLayer(TopologyGuard):
             )
         else:
             self._conduction_edges = None
+            self._conduction_sizes = ()
 
         if not torch.all(self.carrier > 0):
             raise ValueError(
@@ -1089,7 +1175,7 @@ class TransportLayer(TopologyGuard):
             )
 
     def rate(self, x, q, sources, x_boundary, *, capacity=None, removal=None,
-             transmission=None) -> torch.Tensor:
+             transmission=None, conductance=None) -> torch.Tensor:
         """dx/dt = M x + N x_b + sources / capacity at (x, q); x's layout and dtype.
 
         The balance `Model.residuals` reports for a transport layer, and the reference the
@@ -1098,7 +1184,9 @@ class TransportLayer(TopologyGuard):
         this call only; see `_capacity_arg`. `removal` (keyword-only) is a per-call
         first-order removal rate (1/s) replacing the construction-time one; see
         `_removal_arg`. `transmission` (keyword-only) is a per-call transmission replacing
-        the construction-time one; see `_transmission_arg`.
+        the construction-time one; see `_transmission_arg`. `conductance` (keyword-only) is
+        a per-call conduction conductance replacing the construction-time one; see
+        `_conductance_arg`.
         """
         self._require_current_topology()
         dtype = torch.float64
@@ -1106,7 +1194,8 @@ class TransportLayer(TopologyGuard):
         x_s, reduced = self._to_stacked(x.to(dtype), self.n_i, "x")
         op = self._advection_operator(
             q.to(dtype), cap, self._coefficient_map(self._removal_arg(removal),
-                                                    self._transmission_arg(transmission))
+                                                    self._transmission_arg(transmission),
+                                                    self._conductance_arg(conductance))
         )
         xb_s, _ = self._to_stacked(x_boundary.to(dtype), self.n_b, "x_boundary")
         src_s, _ = self._to_stacked(
@@ -1133,6 +1222,7 @@ class TransportLayer(TopologyGuard):
         capacity_prev: torch.Tensor | None = None,
         removal: torch.Tensor | None = None,
         transmission: torch.Tensor | None = None,
+        conductance: torch.Tensor | None = None,
         diagnostics: dict | None = None,
         x_boundary_end: torch.Tensor | None = None,
         x_boundary_rates: tuple[torch.Tensor, torch.Tensor] | None = None,
@@ -1179,6 +1269,9 @@ class TransportLayer(TopologyGuard):
         `removal` (keyword-only) is a per-call first-order removal rate (1/s) replacing the
         construction-time one; see `_removal_arg`. `transmission` (keyword-only) is a
         per-call transmission replacing the construction-time one; see `_transmission_arg`.
+        `conductance` (keyword-only) is a per-call conduction conductance replacing the
+        construction-time one, `(..., b_c)` in the order of `conduction_edges`; see
+        `_conductance_arg`.
 
         `x_boundary_end` (keyword-only, `scheme="exact"` only, default `None`): the boundary
         values at the END of the step. Given, `x_boundary` is their value at the start and
@@ -1200,8 +1293,8 @@ class TransportLayer(TopologyGuard):
         return self._step(
             x, q, sources, x_boundary, dt,
             on_failure=on_failure, capacity=capacity, capacity_prev=capacity_prev,
-            removal=removal, transmission=transmission, want_transfer=False,
-            diagnostics=diagnostics,
+            removal=removal, transmission=transmission, conductance=conductance,
+            want_transfer=False, diagnostics=diagnostics,
             x_boundary_end=x_boundary_end, x_boundary_rates=x_boundary_rates,
         )[0]
 
@@ -1218,6 +1311,7 @@ class TransportLayer(TopologyGuard):
         capacity_prev: torch.Tensor | None = None,
         removal: torch.Tensor | None = None,
         transmission: torch.Tensor | None = None,
+        conductance: torch.Tensor | None = None,
         diagnostics: dict | None = None,
     ) -> TransportStep:
         """Advance one timestep under `self.scheme`, like `step`, and also report the
@@ -1251,8 +1345,9 @@ class TransportLayer(TopologyGuard):
         status alongside. `capacity`/`capacity_prev` behave exactly as in `step`.
         `diagnostics` (keyword-only) behaves exactly as in `step`. `removal` (keyword-only)
         is a per-call first-order removal rate (1/s) replacing the construction-time one;
-        see `_removal_arg`. `transmission` (keyword-only) likewise replaces the
-        construction-time transmission; see `_transmission_arg`.
+        see `_removal_arg`. `transmission` and `conductance` (keyword-only) likewise replace
+        the construction-time transmission and conduction conductance; see
+        `_transmission_arg`, `_conductance_arg`.
         """
         self._require_current_topology()
         if on_failure == "return":
@@ -1264,8 +1359,8 @@ class TransportLayer(TopologyGuard):
         result, transfer = self._step(
             x, q, sources, x_boundary, dt,
             on_failure=on_failure, capacity=capacity, capacity_prev=capacity_prev,
-            removal=removal, transmission=transmission, want_transfer=True,
-            diagnostics=diagnostics,
+            removal=removal, transmission=transmission, conductance=conductance,
+            want_transfer=True, diagnostics=diagnostics,
         )
         return TransportStep(result, transfer)
 
@@ -1282,6 +1377,7 @@ class TransportLayer(TopologyGuard):
         capacity_prev: torch.Tensor | None = None,
         removal: torch.Tensor | None = None,
         transmission: torch.Tensor | None = None,
+        conductance: torch.Tensor | None = None,
         want_transfer: bool = False,
         diagnostics: dict | None = None,
         x_boundary_end: torch.Tensor | None = None,
@@ -1331,7 +1427,8 @@ class TransportLayer(TopologyGuard):
         cap_prev_t = cap_t if capacity_prev is None else self._capacity_arg(capacity_prev)
         rem = self._removal_arg(removal)
         trans = self._transmission_arg(transmission)
-        coef_map = self._coefficient_map(rem, trans)
+        cond = self._conductance_arg(conductance)
+        coef_map = self._coefficient_map(rem, trans, cond)
         if self.scheme == "exact" and not torch.equal(cap_prev_t, cap_t):
             raise ValueError(
                 f"TransportLayer '{self.name}': scheme='exact' has no changing-capacity "
@@ -1393,14 +1490,14 @@ class TransportLayer(TopologyGuard):
         elif self.scheme == "implicit":
             result, reduced = self._implicit_step_sparse(
                 x, q, sources, x_boundary, dt, on_failure, cap_t, cap_prev_t,
-                diagnostics=diagnostics, removal=rem, transmission=trans,
+                diagnostics=diagnostics, removal=rem, transmission=trans, conductance=cond,
             )
             if on_failure == "return":
                 return result, None
         elif self.scheme == "trapezoidal":
             result, reduced = self._trapezoidal_step_sparse(
                 x, q, sources, x_boundary, dt, on_failure, cap_t, cap_prev_t,
-                diagnostics=diagnostics, removal=rem, transmission=trans,
+                diagnostics=diagnostics, removal=rem, transmission=trans, conductance=cond,
             )
             if on_failure == "return":
                 return result, None
@@ -1435,6 +1532,7 @@ class TransportLayer(TopologyGuard):
         self, q: torch.Tensor, sources: torch.Tensor, x_boundary: torch.Tensor,
         *, on_failure: str = "raise", capacity: torch.Tensor | None = None,
         removal: torch.Tensor | None = None, transmission: torch.Tensor | None = None,
+        conductance: torch.Tensor | None = None,
         diagnostics: dict | None = None,
     ) -> torch.Tensor:
         """Solve `0 = M x + N x_b + sources / capacity` for the steady-state `x`.
@@ -1458,8 +1556,9 @@ class TransportLayer(TopologyGuard):
         docstring; the `on_failure="return"` path already gives the caller the full
         `SolveResult` directly and leaves `diagnostics` untouched. `removal` (keyword-only)
         is a per-call first-order removal rate (1/s) replacing the construction-time one;
-        see `_removal_arg`. `transmission` (keyword-only) likewise replaces the
-        construction-time transmission; see `_transmission_arg`.
+        see `_removal_arg`. `transmission` and `conductance` (keyword-only) likewise replace
+        the construction-time transmission and conduction conductance; see
+        `_transmission_arg`, `_conductance_arg`.
         """
         self._require_current_topology()
         if on_failure not in ("raise", "return"):
@@ -1474,7 +1573,8 @@ class TransportLayer(TopologyGuard):
         x_boundary = x_boundary.to(dtype)
         _, reduced = self._to_stacked(self._sources_interior(sources), self.n_i, "sources")
         names, coef = self._coefficients(removal=self._removal_arg(removal),
-                                         transmission=self._transmission_arg(transmission))
+                                         transmission=self._transmission_arg(transmission),
+                                         conductance=self._conductance_arg(conductance))
         if self._has_storage_free:
             self._refuse_idle_storage_free(
                 q, dict(zip(names, coef, strict=True)).get("conductance"))
@@ -1511,6 +1611,7 @@ class TransportLayer(TopologyGuard):
         diagnostics: dict | None = None,
         removal: torch.Tensor | None = None,
         transmission: torch.Tensor | None = None,
+        conductance: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Backward Euler on the AMOUNT `V x`: `V_new x_{n+1} - V_old x_n = dt F(x_{n+1})`,
         with `F(x) = G x + N_raw x_b + s` the capacity-FREE amount rate (`G`, `N_raw` the
@@ -1539,7 +1640,8 @@ class TransportLayer(TopologyGuard):
         cap_t = self._capacity_arg(capacity).to(dtype)
         cap_prev_t = cap_t if capacity_prev is None else self._capacity_arg(capacity_prev).to(dtype)
         _, reduced = self._to_stacked(x, self.n_i, "x")
-        names, coef = self._coefficients(removal=removal, transmission=transmission)
+        names, coef = self._coefficients(
+            removal=removal, transmission=transmission, conductance=conductance)
         if self._has_storage_free and diagnostics is not None:
             diagnostics["held_sources_dropped"] = self._held_sources_dropped(
                 q, sources, dict(zip(names, coef, strict=True)).get("conductance"))
@@ -1588,6 +1690,7 @@ class TransportLayer(TopologyGuard):
         diagnostics: dict | None = None,
         removal: torch.Tensor | None = None,
         transmission: torch.Tensor | None = None,
+        conductance: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Crank-Nicolson on the AMOUNT `V x`: `V_new x_{n+1} - V_old x_n =
         dt/2 (F(x_{n+1}) + F(x_n))`, with `F(x) = G x + N_raw x_b + s` the capacity-FREE
@@ -1612,7 +1715,8 @@ class TransportLayer(TopologyGuard):
         cap_t = self._capacity_arg(capacity).to(dtype)
         cap_prev_t = cap_t if capacity_prev is None else self._capacity_arg(capacity_prev).to(dtype)
         _, reduced = self._to_stacked(x, self.n_i, "x")
-        names, coef = self._coefficients(removal=removal, transmission=transmission)
+        names, coef = self._coefficients(
+            removal=removal, transmission=transmission, conductance=conductance)
 
         def build_system(x_, q_, sources_, xb_, cap_, cap_prev_, *coef_):
             coef_map = dict(zip(names, coef_, strict=True))
