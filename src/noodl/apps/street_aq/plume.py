@@ -83,9 +83,16 @@ derived; each is a named parameter with a default:
   probe cases' grids end between 688 and 708 m with 700 m cells (708 m in one of the 38
   runs; 686-700 m in the ten committed as test fixtures).
 
-Not implemented, by name: the unstable regime (`L < 0`; SIRANE's bi-Gaussian, Eq. 26, and
-the unstable Lagrangian time scale of Eq. 18, which the paper prints with inconsistent
-units): `plume_table` raises `NotImplementedError`. Plume rise (roof sources are passive)
+Unstable hours (`L < 0`). SIRANE classifies an hour by `h / L` (`CONVECTIVE_H_OVER_L`):
+a weakly unstable hour, `h / |L| <= 0.3`, is tabulated exactly as a neutral one -- the
+neutral `sigma_v`, `sigma_w`, `a` and `N = 0` -- except that the wind profile `U(z)` keeps
+the unstable `psi_m` of `L`; the probe runs agree with this at the neutral cases' level.
+
+Not implemented, by name: the convective regime (`h / |L| > 0.3`), where SIRANE switches to
+another vertical mechanism (the probe runs fit `sigma_z = sigma_w t / sqrt(1 + t / 2 T_L)`
+of Eq. (29) in weak convection, with `T_L` not the printed Eq. (18), which has inconsistent
+units, and a further departure in strong convection consistent with the bi-Gaussian of Eq.
+(26)): `plume_table` raises `NotImplementedError`. Plume rise (roof sources are passive)
 and wet-deposition depletion. SIRANE's `B_RUE_DECOUP = 1` path (streets cut on the
 retro-trajectory grid), which uses another, cell-based mechanism.
 
@@ -208,6 +215,18 @@ runs do not pin down exactly."""
 DEFAULT_TEMPERATURE_K = 288.15
 """The air temperature used with an explicit `theta_star`, K (the default `theta*` does not
 need one)."""
+
+CONVECTIVE_H_OVER_L = 0.3
+"""SIRANE's unstable regime boundary in `h / |L|` (the boundary-layer height over the
+Obukhov length): an hour with `L < 0` and `h / |L| <= CONVECTIVE_H_OVER_L` is tabulated as
+neutral -- the neutral `sigma_v`, `sigma_w` and `a`, `N = 0` -- with only the wind profile
+`U(z)` seeing `L` (Eqs. 10-11); above it SIRANE switches to its convective mechanism, which
+this module does not implement (`plume_table` raises `NotImplementedError`). This is the
+neutral class `-0.3 <= h/L` of the ADMS scheme SIRANE cites (CERC, 2001). Read off SIRANE
+probe runs of one street along the wind (u* = 0.3 m/s, h = 330 m): at h / |L| = 0.29 the grid
+is the neutral kernel's (median 3.4e-3, as at L -> infinity), at 0.31 it is not (1.0e-1);
+L = -10000, -2000, -1500 and -1200 m at h = 330 m are neutral, L = -1000 m at h = 330 m and
+L = -2000 m at h = 1000 m are not (`tests/data/street/sirane_kernel_probe`, NOTICE.md)."""
 
 MAX_TABLE_STEPS = 10_000
 """The largest number of 10 s trajectory steps `plume_table` takes before refusing."""
@@ -442,13 +461,21 @@ def _table_inputs(
     if not x_max > 0:
         raise ValueError(f"{name}: x_max must be positive, got {x_max!r}")
     unstable, _, stable = _regimes(lmo, neutral_abs_lmo)
-    if bool(unstable.any()):
+    h_over_l = h_abl / lmo.abs()
+    convective = unstable & (h_over_l > CONVECTIVE_H_OVER_L)
+    if bool(convective.any()):
         raise NotImplementedError(
-            f"{name}: the unstable regime (lmo < 0) is not implemented -- its vertical "
-            "profile is the bi-Gaussian of Soulhac et al. (2011) Eq. (26) with the "
-            "unstable T_L of Eq. (18); see noodl.apps.street_aq.plume"
+            f"{name}: the convective unstable regime (lmo < 0 with h_abl / |lmo| > "
+            f"{CONVECTIVE_H_OVER_L}) is not implemented -- SIRANE switches there to "
+            "another vertical mechanism (Soulhac et al. (2011) Eqs. (18), (26) and (29); "
+            "not yet reproduced). Hours with h_abl / |lmo| <= "
+            f"{CONVECTIVE_H_OVER_L} are tabulated (see noodl.apps.street_aq.plume); got "
+            f"h_abl / |lmo| up to {float(torch.where(convective, h_over_l, 0.0).max()):.3g}"
         )
-    sv, sw, n_bv = turbulence(h_r, u_star=u_star, h_abl=h_abl, lmo=lmo,
+    # Weakly unstable hours take the neutral turbulence (SIRANE's classification): the
+    # wind profile alone sees L.
+    turbulence_lmo = torch.where(unstable, torch.full_like(lmo, math.inf), lmo)
+    sv, sw, n_bv = turbulence(h_r, u_star=u_star, h_abl=h_abl, lmo=turbulence_lmo,
                               theta_star=theta_star, temperature=temperature, kappa=kappa,
                               neutral_abs_lmo=neutral_abs_lmo)
     sv = torch.clamp(sv, min=float(sigma_v_min))
@@ -525,7 +552,8 @@ def plume_table(
     `downwind_cutoff(theta_w, meteo_cell_dx).max()`. The hours are built in chunks under
     `KERNEL_BYTES_CAP` (`table_chunks`), each step advancing only the hours still short of
     `x_max`. Needs `h_abl > h_canopy > d`, `u* > 0` and
-    `tau_z < TIME_STEP_S`; the unstable regime raises `NotImplementedError`.
+    `tau_z < TIME_STEP_S`; the convective regime (`lmo < 0` with `h_abl / |lmo| >
+    CONVECTIVE_H_OVER_L`) raises `NotImplementedError`.
     """
     p, batch, u0 = _table_inputs(
         "plume_table", u_star=u_star, h_abl=h_abl, lmo=lmo, h_canopy=h_canopy, z0=z0, d=d,

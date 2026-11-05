@@ -489,10 +489,18 @@ tables are piecewise linear with a floor, and the crosswind and downwind cut-off
 (a pair that crosses one jumps to exactly zero, and its gradient is that of whichever side
 it sits on).
 
-Not implemented: the unstable regime (a negative Monin-Obukhov length -- the paper's
-bi-Gaussian and Lagrangian time scale for that regime cannot be transcribed as printed),
-plume rise, wet-deposition depletion, and SIRANE's cell-based retrotrajectory path
-(`B_RUE_DECOUP = 1`).
+Unstable hours follow SIRANE's classification by `h / L`: a weakly unstable hour
+(`h / |L| <= 0.3`, `plume.CONVECTIVE_H_OVER_L`) is tabulated as a neutral one, with the
+neutral turbulence and only the wind profile seeing `L`; four SIRANE probe cases of this
+class (L = -1500 to -30000 m, across and oblique to the wind) agree at the neutral cases'
+level. The Paris case's first hour (541 unstable streets, all with `h / |L| <= 0.15`) falls in
+this class.
+
+Not implemented: the convective regime (`h / |L| > 0.3`, refused by name -- SIRANE switches
+there to another vertical mechanism, close to Eq. (29)'s unstable `sigma_z` with a
+Lagrangian time scale that is not the paper's Eq. (18) as printed, which is not yet
+reproduced), plume rise, wet-deposition depletion, and SIRANE's cell-based retrotrajectory
+path (`B_RUE_DECOUP = 1`).
 
 ### Cost
 

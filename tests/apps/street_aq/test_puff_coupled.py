@@ -419,7 +419,7 @@ _STEADY_MET = {"u_star": 0.5, "h_abl": 800.0, "lmo": math.inf, "h_canopy": 20.0,
                "d": 13.0, "sigma_theta": math.radians(6.0)}
 
 
-def _steady_setup(along_wind):
+def _steady_setup(along_wind, met=None):
     from noodl.apps.street_aq.plume import (
         junction_kernel,
         plume_table,
@@ -428,11 +428,12 @@ def _steady_setup(along_wind):
     )
     from noodl.apps.street_aq.puff import PuffField, puff_tables
 
+    met = _STEADY_MET if met is None else met
     net, _ = twelve_street_grid()
-    table = plume_table(**_STEADY_MET)
+    table = plume_table(**met)
     kernel = torch.cat([street_kernel(net, table, theta_w=_STEADY_THETA),
                         junction_kernel(net, table, theta_w=_STEADY_THETA)], dim=1)
-    tables = puff_tables(centres=torch.tensor([10.0], dtype=DT), **_STEADY_MET)
+    tables = puff_tables(centres=torch.tensor([10.0], dtype=DT), **met)
     field = PuffField.for_network(net, theta_w=_STEADY_THETA, along_wind=along_wind)
     return net, kernel, tables, field, street_midpoints(net)
 
@@ -569,6 +570,20 @@ def test_steady_limit_without_along_wind_spread_is_the_kernel():
               for dt in (10.0, 5.0, 2.5, 1.25, 0.625)}
     print("steady limit, along_wind='none', e(dt):", errors)
     # measured (measurements.md, Round 3): 3.8e-16 to 7.5e-16 at every dt, i.e. rounding
+    assert all(e <= 1e-12 for e in errors.values())
+
+
+def test_steady_limit_in_a_weakly_unstable_hour_is_the_kernel():
+    """Test 2a in a weakly unstable hour (L = -2000 m, h = 330 m: h / |L| = 0.165, tabulated
+    as neutral turbulence under the unstable wind profile, as Paris's first hour): the puff
+    tables and the kernel come from the same inputs, so the train is the kernel to
+    rounding."""
+    met = {**_STEADY_MET, "u_star": 0.3, "h_abl": 330.0, "lmo": -2000.0}
+    _, kernel, tables, field, receptors = _steady_setup("none", met)
+    errors = {dt: _kernel_error(field, tables, receptors, kernel,
+                                _steady_train(field, tables, dt), dt)
+              for dt in (10.0, 2.5)}
+    print("steady limit, weakly unstable, along_wind='none', e(dt):", errors)
     assert all(e <= 1e-12 for e in errors.values())
 
 

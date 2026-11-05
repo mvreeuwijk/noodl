@@ -24,8 +24,8 @@ Five comparisons, each by case:
   fluxes, `u_d W L (Cint - Cext)`, against SIRANE's printed `Cext`, with the inputs and
   options the archive can discriminate;
 - the same kernel against SIRANE's own concentration grids, centrelines and receptors in
-  ten cases of one isolated street (`tests/data/street/sirane_kernel_probe`, see its
-  NOTICE.md) across, along and oblique to the wind, neutral and stable.
+  fourteen cases of one isolated street (`tests/data/street/sirane_kernel_probe`, see its
+  NOTICE.md) across, along and oblique to the wind, neutral, stable and weakly unstable.
 
 Tolerances are set from the measured values and each comment states the measured number and
 why the tolerance is what it is. SIRANE prints every velocity to two decimals, which is the
@@ -475,14 +475,18 @@ def test_the_plume_inputs_sirane_discriminates(record_property, capsys):
 # (`tests/data/street/sirane_kernel_probe`, see its NOTICE.md). G1 lies across the wind,
 # G2 along it (its flux vents at the downwind junction), G3 at 45 degrees and G6 at 20
 # degrees; M1 is neutral (u* = 0.6 m/s), M2 stable (u* = 0.3 m/s, L = 100 m), M3F the South
-# Kensington hour with SIRANE's floors. The street's and the junctions' fluxes are
-# SIRANE's own (its Listing), so the comparison isolates the kernel.
+# Kensington hour with SIRANE's floors, and U1500, U5000, U30K weakly unstable (u* = 0.3
+# m/s, h = 330 m, L = -1500, -5000, -30000 m: h / |L| <= 0.3, tabulated as neutral under the
+# unstable wind profile, `plume.CONVECTIVE_H_OVER_L`). The street's and the junctions'
+# fluxes are SIRANE's own (its Listing), so the comparison isolates the kernel.
 #
 # These checks are IN SAMPLE: the default time-offset knots, the plume-centre law and
 # theta* = 0.060 K were fitted on these cases and their meteorologies (M1, M2, M3F among
 # them). They verify that the implementation reproduces SIRANE where it was calibrated,
 # and pin the per-case agreement; the out-of-sample check (in geometry) is the South
-# Kensington C_ext above.
+# Kensington C_ext above. The weakly unstable cases are out of sample in meteorology (no
+# constant was fitted to them); their error is that of a neutral hour at u* = 0.3 m/s,
+# h = 330 m (the L = -30000 m case, neutral to 1e-4 in the wind, scores as L = -1500 m).
 
 PROBES = Path(__file__).resolve().parents[1] / "data" / "street" / "sirane_kernel_probe"
 NEUTRAL_LMO = 1.0e5        # m: SIRANE prints L = 1e6 m for a neutral hour
@@ -553,6 +557,10 @@ PROBE_TOLERANCES = {
     "G1_M2": (6e-3, 1.2e-2), "G1_M3F": (6.5e-3, 4.5e-2), "G2_M1": (3e-4, 2e-3),
     "G2_M3F": (2.5e-4, 2.5e-3), "G3_M1": (2.5e-3, 5.5e-3), "G3_M2": (9e-3, 2.8e-2),
     "G6_M1": (2e-3, 4.5e-3),
+    # weakly unstable, measured (median, p90): G1_U1500 1.96e-3, 9.46e-3; G1_U30K 1.98e-3,
+    # 1.07e-2; G3_U1500 3.35e-3, 1.06e-2; G3_U5000 3.44e-3, 1.06e-2.
+    "G1_U1500": (3e-3, 1.5e-2), "G1_U30K": (3e-3, 1.6e-2), "G3_U1500": (5e-3, 1.6e-2),
+    "G3_U5000": (5.5e-3, 1.6e-2),
 }
 
 
