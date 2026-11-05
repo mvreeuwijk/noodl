@@ -1080,25 +1080,25 @@ class TransportLayer(TopologyGuard):
         x = self._recover(folded, ys, result, xb_n, None)
         return self._from_stacked(self._stacked_of(x), self.n_i, reduced)
 
-    def _held_steady(self, sources, x_boundary, stored, conductance) -> torch.Tensor:
-        """`steady(..., stored=...)`: the stored nodes at `stored`, the folded nodes
+    def _held_steady(self, sources, x_boundary, hold, conductance) -> torch.Tensor:
+        """`steady(..., hold=...)`: the stored nodes held at `hold`, the folded nodes
         recovered from them, the boundary values and the sources."""
         if bool((self.storage_free_mask & ~self.folded_mask).any()):
             raise NotImplementedError(
                 f"TransportLayer '{self.name}': a steady solve holding the stored nodes "
-                f"(stored=) is not implemented for storage-free nodes with throughflow"
+                f"(hold=) is not implemented for storage-free nodes with throughflow"
             )
         if getattr(self, "_fold_plan", None) is None:
-            return stored
+            return hold
         dtype = torch.float64
-        x_s, reduced = self._to_stacked(stored, self.n_i, "stored")
+        x_s, reduced = self._to_stacked(hold, self.n_i, "hold")
         x_n = self._node_major(x_s.to(dtype), self.n_i)
         folded = self._fold_conductance(self._conductance_arg(conductance))
         _, ys = self._fold_sources(folded, sources.to(dtype))
         xb_n = self._node_major(
             self._to_stacked(x_boundary.to(dtype), self.n_b, "x_boundary")[0], self.n_b)
         x = self._recover(folded, ys, x_n.index_select(-2, self._fold_plan.kept), xb_n, x_n)
-        return self._from_stacked(self._stacked_of(x).to(stored.dtype), self.n_i, reduced)
+        return self._from_stacked(self._stacked_of(x).to(hold.dtype), self.n_i, reduced)
 
     def _effective(self, cap: torch.Tensor) -> torch.Tensor:
         """`cap` with 1 at the storage-free nodes: their rows are balances of amount rates,
@@ -1940,16 +1940,16 @@ class TransportLayer(TopologyGuard):
         removal: torch.Tensor | None = None, transmission: torch.Tensor | None = None,
         conductance: torch.Tensor | None = None,
         diagnostics: dict | None = None,
-        stored: torch.Tensor | None = None,
+        hold: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Solve `0 = M x + N x_b + sources / capacity` for the steady-state `x`.
 
-        `stored` (keyword-only, default `None`): the state at which the nodes that hold an
-        amount are HELD, laid out as `x`. Given, only the nodes that hold none are solved
+        `hold` (keyword-only, default `None`): the values at which the nodes that store an
+        amount are HELD, laid out as `x`. Given, only the nodes that store none are solved
         for (the folded nodes, from their algebraic balance at those values): the
         consistent initial point of a layer whose stored nodes start at given values, as a
         circuit's capacitor holds its start voltage there (`Model.steady(..., mode=
-        "initial")`). A layer with no storage-free node returns `stored` itself. A
+        "initial")`). A layer with no storage-free node returns `hold` itself. A
         storage-free node with throughflow (an algebraic row a linear solve would need) is
         refused with it (`NotImplementedError`).
 
@@ -1982,8 +1982,8 @@ class TransportLayer(TopologyGuard):
                 f"TransportLayer '{self.name}': unknown on_failure {on_failure!r}; "
                 f"expected 'raise' or 'return'"
             )
-        if stored is not None:
-            return self._held_steady(sources, x_boundary, stored, conductance)
+        if hold is not None:
+            return self._held_steady(sources, x_boundary, hold, conductance)
         if getattr(self, "_fold_plan", None) is not None:  # absent from an older pickle
             return self._steady_folded(
                 q, sources, x_boundary, on_failure=on_failure, capacity=capacity,

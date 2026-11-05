@@ -334,7 +334,9 @@ refused, naming the nodes. Each group is factored as a small dense matrix, batch
 of one size, never as a matrix over the whole network; a group is as large as the set of folded
 nodes joined to each other, usually the surfaces of one zone. A layer whose every interior node is
 folded (a heat network without any heat capacity) has nothing to step: its step and its steady
-state are the folded nodes' balance at the end of the step. A storage-free node that air flows
+state are the folded nodes' balance at the end of the step. `layer.steady(..., hold=x0)` holds
+the stored nodes at `x0` and solves only the folded ones: the consistent initial point
+`Model.steady(..., mode="initial")` uses. A storage-free node that air flows
 through (a plenum), or that has a removal or reaction, is not folded and still needs
 `scheme="implicit"`. `layer.folded_mask` is the `(n_i,)` boolean mask of the folded nodes. `rate`
 and the dense `operator` still describe the whole network, a folded node as its algebraic balance.

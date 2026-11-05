@@ -599,7 +599,7 @@ class Model:
         `mode="initial"` (passed to the Kirchhoff layers' solves) the consistent initial
         point instead: those layers hold their dynamic laws at their start values, and every
         transport layer holds its stored nodes at the state's `"<layer>.x"`, solving only for
-        the nodes that hold nothing (`TransportLayer.steady`'s `stored`).
+        the nodes that hold nothing (`TransportLayer.steady`'s `hold`).
 
         REACTIONS ARE NOT APPLIED. They are an operator splitting applied around a transport
         step (after it, or before it under `reaction_order="before_transport"`), so they

@@ -178,13 +178,13 @@ def test_a_stored_node_with_only_a_folded_neighbour_has_no_steady_state():
 def test_steady_holding_the_stored_nodes_solves_only_the_folded_ones():
     layer = _lump(folded=True)
     src = _source(layer, "s", 6.0)
-    out = layer.steady(EMPTY, src, _t([TA]), stored=_t([350.0, 0.0]))
+    out = layer.steady(EMPTY, src, _t([TA]), hold=_t([350.0, 0.0]))
     # s between m (2G) and the ambient (2G) with 6 W of its own
     assert out.tolist() == pytest.approx([350.0, (350.0 + TA) / 2 + 6.0 / (4 * G)],
                                          rel=1e-14)
     plain = _lump()
     held = _t([350.0])
-    assert plain.steady(EMPTY, _source(plain, "m", 1.0), _t([TA]), stored=held) is held
+    assert plain.steady(EMPTY, _source(plain, "m", 1.0), _t([TA]), hold=held) is held
 
 
 def test_steady_holding_the_stored_nodes_refuses_a_plenum():
@@ -198,4 +198,4 @@ def test_steady_holding_the_stored_nodes_refuses_a_plenum():
                            storage_free=["p"], scheme="implicit")
     with pytest.raises(NotImplementedError, match="storage-free nodes with throughflow"):
         layer.steady(_t([1.0, 1.0, 1.0]), torch.zeros(3, dtype=F64), _t([1.0]),
-                     stored=_t([0.0, 0.0]))
+                     hold=_t([0.0, 0.0]))

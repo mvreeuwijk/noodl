@@ -268,13 +268,13 @@ def _advance_transport(model: Model, base, drv, dt, transfer_layers: set[str], n
                     if like is None
                     else model._zero_sources(layer, like, layer.n_i)
                 )
-            stored = None
+            hold = None
             if initial:
-                stored = require(base, f"{name}.x")
+                hold = require(base, f"{name}.x")
             x = layer.steady(
                 q_kind, sources, xb, capacity=cap, removal=removal,
                 transmission=transmission, conductance=conductance,
-                diagnostics=layer_diag, stored=stored,
+                diagnostics=layer_diag, hold=hold,
             )
             if cap is not None:
                 # The capacity this state was solved with, as a step records its own.
