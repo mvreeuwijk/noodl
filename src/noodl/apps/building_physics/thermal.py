@@ -173,7 +173,7 @@ def thermal_layer(net: Network, *, ambient="ambient", name: str = "thermal",
         conductance=(torch.cat([net.edge_attr("ua", k) for k in cond_kinds])
                      if has_walls else None),
         scheme=scheme, quantity="temperature", unit="K",
-        source_unit="W", capacity_unit="J/K", flow_unit="kg/s",
+        source_unit="W", capacity_unit="J/K", flow_unit="kg/s", conductance_unit="W/K",
         storage_free=tuple(storage_free),
     )
 

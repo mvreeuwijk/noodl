@@ -37,6 +37,15 @@ def test_a_negative_shift_drops_the_spd_certificate():
     assert ShiftedOperator(base, torch.tensor([0.5, -0.1])).spd_certificate() is None
 
 
+def test_a_base_with_no_shifted_certificate_gives_none():
+    """A base operator that cannot certify itself plus a shift (here a stand-in with only
+    the shape attributes) gives no certificate rather than an AttributeError."""
+    class _Base:
+        symmetric, shape, dtype, device = True, (2, 2), torch.float64, torch.device("cpu")
+
+    assert ShiftedOperator(_Base(), torch.tensor([1.0, 2.0])).spd_certificate() is None
+
+
 def test_a_scaled_operator_never_certifies():
     base = _chain(torch.tensor([1.0, 1.0]))
     assert ShiftedOperator.implicit_step(base, 0.1).spd_certificate() is None

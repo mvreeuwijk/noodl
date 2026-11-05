@@ -192,7 +192,8 @@ def _check_units(model, specs, who, add) -> None:
     """`unit-mismatch` (warning): a closure declares a unit, for an input in `input_specs` or
     an output in `output_units`, that differs (by `units_agree`) from the unit of the
     layer field or earlier declared input the key refers to. `unit-undeclared` (info): a
-    field the model knows has no unit. Units are compared as strings; nothing is converted."""
+    field the model knows has no unit. Units are compared after normalising their spelling
+    (`noodl.refs.normalize_unit`: "m3", "m^3" and "m³" agree); nothing is converted."""
     refs = model.refs
     fields = refs.fields()
     reference: dict[str, tuple[str, str]] = {}      # key -> (unit, where it was declared)

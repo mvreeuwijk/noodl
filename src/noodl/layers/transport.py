@@ -287,8 +287,8 @@ class TransportLayer(TopologyGuard):
 
     ``quantity``/``unit`` are metadata a ``Model`` reports ("temperature"/"K",
     "concentration"/"ppm"); nothing in the numerics reads them. ``source_unit``,
-    ``capacity_unit`` and ``flow_unit`` are metadata ``model.refs`` reports and nothing
-    numerical reads.
+    ``capacity_unit``, ``flow_unit`` and ``conductance_unit`` (W/K for heat) are metadata
+    ``model.refs`` reports and nothing numerical reads.
 
     ``linear_solver`` names one of ``_TRANSPORT_SOLVERS``, refused by name at
     construction otherwise, and is resolved PER SOLVE by ``_resolve_solver`` into the kwargs
@@ -533,6 +533,7 @@ class TransportLayer(TopologyGuard):
         source_unit: str = "",
         capacity_unit: str = "",
         flow_unit: str = "",
+        conductance_unit: str = "",
     ) -> None:
         if linear_solver not in _TRANSPORT_SOLVERS:
             raise ValueError(
@@ -554,8 +555,10 @@ class TransportLayer(TopologyGuard):
         # Metadata only: what this layer's state IS and what it is measured in.
         self.quantity, self.unit = quantity, unit
         # Metadata only: the units of this layer's nodal sources (W for heat, kg/s for
-        # species), of its capacity (J/K, kg, m3) and of the flows it advects on.
+        # species), of its capacity (J/K, kg, m3), of the flows it advects on and of its
+        # conduction conductances (W/K).
         self.source_unit, self.capacity_unit, self.flow_unit = source_unit, capacity_unit, flow_unit
+        self.conductance_unit = conductance_unit
         self.boundary = net.canonical(boundary)
         self.n_species = n_species
         # Metadata only, like `quantity`/`unit`: the names of the species columns, which

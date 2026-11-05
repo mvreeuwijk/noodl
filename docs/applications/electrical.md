@@ -458,7 +458,8 @@ electrical = KirchhoffLayer(
 thermal = TransportLayer(
     net, "thermal", flow_kind=(), boundary=["ambient"], capacity=f64([0.0]),
     conduction_kind="conductor", conductance=f64([G]), storage_free=["h"],
-    quantity="temperature", unit="K", source_unit="W", capacity_unit="J/K")
+    quantity="temperature", unit="K", source_unit="W", capacity_unit="J/K",
+    conductance_unit="W/K")
 joule = JouleHeating(
     [HeatedEdge(edge=1, p=node["s"], n=node["0"], heat_node=node["h"],
                 temperature_key="electrical.resistor.T", slot=0)],
@@ -534,7 +535,7 @@ electrical = KirchhoffLayer(
 thermal = TransportLayer(
     net, "thermal", flow_kind=(), boundary=["outdoor"], capacity=f64([1e7]),
     conduction_kind="conductor", conductance=f64([150.0]), quantity="temperature",
-    unit="K", source_unit="W", capacity_unit="J/K")
+    unit="K", source_unit="W", capacity_unit="J/K", conductance_unit="W/K")
 
 
 class HeatPumpLoad:

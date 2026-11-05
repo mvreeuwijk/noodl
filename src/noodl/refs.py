@@ -678,7 +678,7 @@ class LayerRef:
                     required="optional", default=None,
                     description="per-step conduction conductance of each edge overriding "
                                 "the construction-time one",
-                    **common,
+                    unit=getattr(layer, "conductance_unit", ""), **common,
                 )
             if flow_owner is None and layer.flow_kinds:
                 cols: list[int] = []

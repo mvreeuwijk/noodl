@@ -63,7 +63,8 @@ phi, q = layer.solve(phi_boundary, drivers, sources=sources, differentiable=True
 model composing several Kirchhoff layers over one network can tell a pressure layer from a
 temperature one without matching on names. They are still checked for consistency: every key
 of a layer is a `Field` carrying its `unit` (a transport layer's `unit`, `source_unit`,
-`capacity_unit` and `flow_unit` give the units of its state, sources, capacity and flows), and
+`capacity_unit`, `flow_unit` and `conductance_unit` give the units of its state, sources,
+capacity, flows and conductances), and
 `Model.check()` warns (`unit-mismatch`) when a closure declares a different unit for a key it
 reads (`input_specs`) or writes (`output_units`), and notes (`unit-undeclared`) a field with
 no unit. Units are compared as strings after trivial respelling (`m3` and `m^3`, `1` and `-`);

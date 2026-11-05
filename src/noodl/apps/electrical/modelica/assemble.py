@@ -846,7 +846,7 @@ def _thermal(b: _Builder, net: Network, heated: list[Device], heat: _HeatNetwork
         storage_free=[names[n_e + k] for k, c in zip(heat.interior, capacity, strict=True)
                       if c == 0.0],
         scheme="trapezoidal", quantity="temperature", unit="K", source_unit="W",
-        capacity_unit="J/K", linear_solver="direct")
+        capacity_unit="J/K", conductance_unit="W/K", linear_solver="direct")
     if layer.interior_idx.tolist() != [n_e + k for k in heat.interior]:
         raise RuntimeError(
             f"read_modelica_circuit: the heat layer's interior nodes "

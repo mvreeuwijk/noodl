@@ -346,3 +346,10 @@ def test_thermal_layer_names_an_explicit_conduction_kind_with_no_edges():
     bare.add_node("z", volume=50.0, T0=293.15, z_ref=0.0)
     bare.add_edge("ambient", "z", kind="airpath", z_path=0.0, Cd=0.6, area=0.01)
     assert thermal_layer(bare).conduction_kinds == ()
+
+
+def test_a_wall_thermal_layer_declares_its_conductance_unit():
+    model = _single_zone(wall=True)[1]
+    assert model.refs.fields()["thermal.conductance"].unit == "W/K"
+    undeclared = {i.key for i in model.check().issues if i.code == "unit-undeclared"}
+    assert "thermal.conductance" not in undeclared

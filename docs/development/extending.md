@@ -270,7 +270,7 @@ It also ships its documentation, in the same change as the code:
 - **The common set-up.** `build_model`, `initial_state(model, *, values=None)` and
   `initial_drivers(model, *, values=None)`, exported in `__all__` like every other
   application, and layers built with a physical `quantity`, `unit`, `flow_unit`, `source_unit` and
-  `capacity_unit` (and `species_names`), so that `model.refs` names and units their keys.
+  `capacity_unit` (and `conductance_unit` and `species_names`), so that `model.refs` names and units their keys.
 - **Units in every docstring.** A component field, law coefficient or drive parameter
   with a physical unit states it (`length` (m), `C` in the flow unit per Pa^n), and an
   application that reads network attributes declares them in an `attributes.py` like

@@ -223,17 +223,15 @@ class AdvectionOperator:
         out_weight.scatter_add_(-1, up_b, w_b)
         out_action = out_weight * v_b
 
-        l_action = torch.zeros(*batch_shape, K, self._n, dtype=dtype, device=v.device)
-        if self.conduction is not None:
-            csrc, ctgt, g = self.conduction
-            g = g.to(dtype)
-            csrc_b = self._expanded(("csrc",), csrc, batch_shape, K)
-            ctgt_b = self._expanded(("ctgt",), ctgt, batch_shape, K)
-            if g.dim() >= 1 and g.shape[-1] == csrc.shape[-1]:
-                g = g.unsqueeze(-2)
-            l_action = laplacian_apply(v_b, csrc_b, ctgt_b, g)
-
-        return in_action - out_action - l_action
+        if self.conduction is None:
+            return in_action - out_action
+        csrc, ctgt, g = self.conduction
+        g = g.to(dtype)
+        csrc_b = self._expanded(("csrc",), csrc, batch_shape, K)
+        ctgt_b = self._expanded(("ctgt",), ctgt, batch_shape, K)
+        if g.dim() >= 1 and g.shape[-1] == csrc.shape[-1]:
+            g = g.unsqueeze(-2)
+        return in_action - out_action - laplacian_apply(v_b, csrc_b, ctgt_b, g)
 
     def _embed(self, x_kn: torch.Tensor, idx: torch.Tensor, dtype: torch.dtype) -> torch.Tensor:
         shape = x_kn.shape[:-1] + (self._n,)
@@ -554,6 +552,9 @@ class AdvectionOperator:
                 csrc, ctgt, _ = self.conduction
                 u_c, v_c = compact[csrc], compact[ctgt]
                 keep_uv = (u_c >= 0) & (v_c >= 0)
+                # `laplacian_coo_indices` lays out four blocks, (u, u), (v, v), (u, v),
+                # (v, u), in that order. The keep masks below and the conduction values
+                # in the second half of this method follow the same order.
                 conduction_row, conduction_col = laplacian_coo_indices(tile(u_c), tile(v_c))
                 row_parts.append(conduction_row)
                 col_parts.append(conduction_col)
@@ -622,6 +623,8 @@ class AdvectionOperator:
             g = g.to(dtype)
             n_c = g.shape[-1]
             cap_u, cap_v = cap_at(cache["u_c"]), cap_at(cache["v_c"])
+            # The block order of `laplacian_coo_indices`: (u, u), (v, v), (u, v), (v, u),
+            # each row divided by its own node's capacity.
             val_parts += [
                 tile_species(-(g / cap_u), n_c),
                 tile_species(-(g / cap_v), n_c),

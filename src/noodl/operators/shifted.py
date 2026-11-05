@@ -29,7 +29,8 @@ class ShiftedOperator:
     SPD certificate. A non-negative diagonal added to an SPD matrix is SPD, so for an
     unscaled shifted Laplacian the certificate is delegated to the base
     (`base.spd_certificate_with_shift`, which also credits strictly positive shift entries
-    with grounding their node) and kept ONLY while every shift entry is non-negative; a
+    with grounding their node; a base without that method gives no certificate) and kept
+    ONLY while every shift entry is non-negative; a
     negative entry could destroy definiteness, so the certificate is dropped rather than
     asserted (`solvers.select.solve` then routes to GMRES, which needs none). A scaled
     operator never certifies: `S - alpha M` with an advective `M` is not SPD.
@@ -136,6 +137,7 @@ class ShiftedOperator:
     def spd_certificate(self):
         if self.scale is not None or not torch.is_tensor(self.shift):
             return None
-        if bool((self.shift < 0).any()):
+        certify = getattr(self.base, "spd_certificate_with_shift", None)
+        if certify is None or bool((self.shift < 0).any()):
             return None
-        return self.base.spd_certificate_with_shift(self.shift)
+        return certify(self.shift)

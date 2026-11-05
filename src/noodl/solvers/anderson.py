@@ -98,6 +98,9 @@ class _AndersonHistory:
     tolerance hands the fed `phi` back unchanged, and the iteration then moves only through
     `q`. The conduction-only transport layers (no flow kinds) named in `iterate_tol` add their
     ``"<layer>.x"`` after them, divided by their `iterate_tol` (`mixed_transport` names them).
+    A layer with several species has its `(..., n_i, K)` state flattened to `(..., n_i K)`
+    for the mixing and restored afterwards: the mixing acts entry by entry, so the layout
+    does not matter to it.
 
     The next fed state is, per instance:
 
@@ -127,10 +130,15 @@ class _AndersonHistory:
         # Kirchhoff heat layer was) named in `iterate_tol`: their `x`, judged over every
         # entry, divided by their tolerance. Advective transport layers stay relaxed.
         self.transport = [(name, float(tol)) for name, tol in model.iterate_tol.items()
-                          if name in model.transport and not model.transport[name].flow_kinds
-                          and model.transport[name].n_species == 1]
+                          if name in model.transport and not model.transport[name].flow_kinds]
         self.mixed_transport = frozenset(name for name, _ in self.transport)
         self.keys += [f"{name}.x" for name, _ in self.transport]
+        # The keys whose state has a species axis `(..., n_i, K)`, K > 1: flattened for
+        # the mixing and restored to `(n_i, K)` afterwards.
+        self.species_shape = {f"{name}.x": (model.transport[name].n_i,
+                                            model.transport[name].n_species)
+                              for name, _ in self.transport
+                              if model.transport[name].n_species > 1}
         self.memory = memory
         self.xs: list[Tensor] = []
         self.gs: list[Tensor] = []
@@ -142,6 +150,10 @@ class _AndersonHistory:
         mixed keys. `w` is the relaxation of the fallback step; `converged` (batch-shaped,
         or None before any verdict) marks the instances to hold at `fed`."""
         fed = {k: fed.get(k, out[k]) for k in self.keys}
+        if self.species_shape:
+            fed = {k: v.flatten(-2) if k in self.species_shape else v for k, v in fed.items()}
+            out = {k: out[k].flatten(-2) if k in self.species_shape else out[k]
+                   for k in self.keys}
         batch = broadcast_shapes(
             *(t.shape[:-1] for k in self.keys for t in (fed[k], out[k])))
         sizes = [out[k].shape[-1] for k in self.keys]
@@ -176,4 +188,7 @@ class _AndersonHistory:
             mixed = torch.where((kept & ~reverses)[..., None], accelerated, x + w * (g - x))
         if converged is not None:
             mixed = torch.where(converged[..., None], x, mixed)
-        return dict(zip(self.keys, torch.split(mixed, sizes, dim=-1), strict=True))
+        pieces = dict(zip(self.keys, torch.split(mixed, sizes, dim=-1), strict=True))
+        for k, shape in self.species_shape.items():
+            pieces[k] = pieces[k].unflatten(-1, shape)
+        return pieces
