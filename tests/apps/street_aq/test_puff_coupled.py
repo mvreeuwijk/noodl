@@ -459,13 +459,6 @@ def test_steady_train_is_what_the_step_loop_leaves():
                                                  dt), abs=1e-14)
 
 
-# Measured (measurements.md, Round 3): e(5 s) = 5.6e-16, the steady kernel to rounding;
-# rounded up to one significant figure.
-_TOL_5S = 6e-16
-# Measured max e(dt) / dt over the steps below: 6.0e-16 /s (e at rounding level); rounded up.
-_C_PER_S = 7e-16
-
-
 def test_steady_limit_without_along_wind_spread_is_the_kernel():
     """Test 2a, kernel level: the puff train of a unit continuous source per street and
     junction, at the street midpoints, against `street_kernel` / `junction_kernel` built
@@ -477,9 +470,24 @@ def test_steady_limit_without_along_wind_spread_is_the_kernel():
                                 _steady_train(field, tables, dt), dt)
               for dt in (10.0, 5.0, 2.5, 1.25, 0.625)}
     print("steady limit, along_wind='none', e(dt):", errors)
-    assert errors[5.0] <= _TOL_5S
-    assert all(e <= 1e-8 for dt, e in errors.items() if dt <= 1.25)
-    assert all(e <= _C_PER_S * dt for dt, e in errors.items())
+    # measured (measurements.md, Round 3): 3.8e-16 to 7.5e-16 at every dt, i.e. rounding
+    assert all(e <= 1e-12 for e in errors.values())
+
+
+def test_steady_limit_with_along_wind_spread_has_a_converged_floor():
+    """Test 2b, kernel level: with `along_wind="sigma_y"` the steady limit is the kernel
+    smoothed along the wind, a property of the slender-plume steady kernel, not an error;
+    its distance to the PLAIN kernel (max |dK| / max K) is the floor. Measured
+    (measurements.md, Round 3): 0.117 (10 s), 0.0699 (5 s), 0.0577 (2.5 s), 0.0457
+    (1.25 s), 0.0468 (0.625 s): below 0.10 from 5 s, and converged at O(dt) because a
+    receptor reads the table at its own distance clamped to the slug's ends."""
+    _, kernel, tables, field, receptors = _steady_setup("sigma_y")
+    floor = {dt: _kernel_error(field, tables, receptors, kernel,
+                               _steady_train(field, tables, dt), dt)
+             for dt in (5.0, 2.5, 1.25, 0.625)}
+    print("steady limit, along_wind='sigma_y', floor against the plain kernel:", floor)
+    assert all(f < 0.10 for f in floor.values())
+    assert abs(floor[0.625] - floor[1.25]) < 0.10 * floor[1.25]
 
 
 # Measured (measurements.md, Round 3): e = 7.9e-12 at 10 s and 1.6e-11 at 5 s, the level
