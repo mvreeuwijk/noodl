@@ -477,6 +477,25 @@ def test_a_storage_free_node_with_a_removal_or_reaction_is_not_folded(term):
         _wall("exact", **kw)
 
 
+@pytest.mark.parametrize("call", ["step", "step_with_transfer", "steady"])
+def test_a_per_call_removal_at_a_folded_node_is_refused_by_name(call):
+    """A folded node has no removal term (one given at construction keeps it unfolded); a
+    per-call removal there would be dropped, so it is refused by name. A removal at the
+    stored nodes only is taken as before."""
+    layer = _wall("implicit")
+    removal = _t([1e-4, 0.0, 2e-5, 0.0])
+
+    def run(r):
+        if call == "steady":
+            return layer.steady(Q0, SRC0, XB, removal=r)
+        return getattr(layer, call)(X0_WALL, Q0, SRC0, XB, 600.0, removal=r)
+
+    run(removal)
+    bad = torch.stack([removal, _t([1e-4, 0.0, 2e-5, 3e-4])])     # a batch, s2 on one
+    with pytest.raises(ValueError, match=r"'T'.*removal.*folded.*\['s2'\]"):
+        run(bad)
+
+
 def test_a_layer_without_storage_free_nodes_has_no_folding():
     layer = _two_node_wall()
     assert layer.folded_mask.tolist() == [False, False]

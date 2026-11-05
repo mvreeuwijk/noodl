@@ -334,8 +334,10 @@ class TransportLayer(TopologyGuard):
     there. That check (a search over the group's edges on the host) runs on every call in
     which some conductance touching a folded group of two or more nodes is zero, such as
     a radiative coefficient that vanishes at night; with all of them positive it costs
-    nothing. ``folded_mask`` is ``(n_i,)`` bool, True at the folded nodes; ``rate`` and the
-    dense ``operator`` describe the whole network, folded nodes as algebraic rows.
+    nothing. A per-call ``removal`` nonzero at a folded node is refused by name (a folded
+    node has no removal term). ``folded_mask`` is ``(n_i,)`` bool, True at the folded
+    nodes; ``rate`` and the dense ``operator`` describe the whole network, folded nodes as
+    algebraic rows.
 
     DILUTION (``dilution``, ``None`` by default): adds ``dilution * net(q) / capacity`` to
     the removal, ``net(q)`` the signed net inflow of the flow edges into each node (see
@@ -971,10 +973,26 @@ class TransportLayer(TopologyGuard):
         return self._capacity_arg(capacity).index_select(-1, self._fold_plan.kept)
 
     def _kept_removal(self, removal: torch.Tensor | None) -> torch.Tensor | None:
-        """A per-call removal rate, checked, at the kept nodes; `None` stays `None`."""
+        """A per-call removal rate, checked, at the kept nodes; `None` stays `None`.
+
+        A folded node has no removal term (one nonzero at construction keeps the node
+        unfolded), so a per-call removal that is nonzero there is refused by name rather
+        than dropped."""
         if removal is None:
             return None
-        return self._removal_arg(removal).index_select(-2, self._fold_plan.kept)
+        r = self._removal_arg(removal)
+        at_folded = (r.detach().index_select(-2, self._fold_plan.folded) != 0)
+        at_folded = at_folded.reshape(-1, *at_folded.shape[-2:]).any(0).any(-1)
+        if bool(at_folded.any()):
+            names = [self.net.nodes[int(self.interior_idx[self._fold_plan.folded[p]])]
+                     for p in at_folded.nonzero().flatten().tolist()]
+            raise ValueError(
+                f"TransportLayer '{self.name}': a per-call removal is nonzero at folded "
+                f"storage-free nodes {names}; a folded node has no removal term (give the "
+                f"removal there at construction, which keeps the node as an algebraic row "
+                f"under scheme='implicit')"
+            )
+        return r.index_select(-2, self._fold_plan.kept)
 
     def _fold_sources(self, folded: Folded, src_n: torch.Tensor):
         """`(sources_kept, ys)`: the interior sources `src_n` (from `_interior_sources`)
