@@ -147,6 +147,18 @@ class PuffTables:
         The other columns are linear in `x` between grid points (so `u` is `u(x)`). Beyond
         the grid's end the puff moves on at the last speed and the other columns hold their
         last values; a negative age is the source's."""
+        x, lo, hi, frac = self._travel(age, table, row)
+        out = [x]
+        for col in (self.u, self.sigma_y, self.sigma_z, self.z_c, self.p_z):
+            v = col.reshape(-1)
+            out.append(v[lo] + (v[hi] - v[lo]) * frac)
+        return out[0], out[1], out[2], out[3], out[4], out[5]
+
+    def _travel(self, age: Tensor, table: Tensor, row: Tensor
+                ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
+        """`(x, lo, hi, frac)` of `at_age`: the distance, the flat indices of the grid
+        points around it and the fraction of the cell beyond `lo`; a column `v` (flat)
+        reads `v[lo] + (v[hi] - v[lo]) * frac`."""
         _, n_b, n = self.u.shape
         age, base = torch.broadcast_tensors(_f64(age), (table * n_b + row) * n)
         a = torch.clamp(age, min=0.0)
@@ -176,29 +188,37 @@ class PuffTables:
         phi = torch.where(small, 1.0 + z / 2.0 + z * z / 6.0, torch.expm1(z_safe) / z_safe)
         x_k = k.to(_DTYPE) * self.step
         x = x_k + u_k * s * phi
-        frac = (x - x_k) / self.step
-        out = [x]
-        for col in (self.u, self.sigma_y, self.sigma_z, self.z_c, self.p_z):
-            v = col.reshape(-1)
-            out.append(v[lo] + (v[hi] - v[lo]) * frac)
-        return out[0], out[1], out[2], out[3], out[4], out[5]
+        return x, lo, hi, (x - x_k) / self.step
 
     def at_distance(self, x: Tensor, table: Tensor, row: Tensor
                     ) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
         """`(u, sigma_y, sigma_z, z_c, p_z)` at distance `x` (m) from table `table` and
         meteorology row `row` (broadcasting as in `at_age`), linear between grid points;
         a distance outside the grid reads its end values."""
-        n_tab, n_b, n = self.u.shape
-        x, base = torch.broadcast_tensors(_f64(x), (table * n_b + row) * n)
+        cell = self._cell(x, self._base(table, row))
+        return tuple(self._read(col, *cell)
+                     for col in (self.u, self.sigma_y, self.sigma_z, self.z_c, self.p_z))
+
+    def _base(self, table: Tensor, row: Tensor) -> Tensor:
+        """The flat index of grid point 0 of table `table`, meteorology row `row`."""
+        _, n_b, n = self.u.shape
+        return (table * n_b + row) * n
+
+    def _cell(self, x: Tensor, base: Tensor) -> tuple[Tensor, Tensor]:
+        """`(lo, frac)` of `at_distance` at distance `x` on the rows starting at `base`
+        (`_base`): the flat index of the grid point at or below `x` and the fraction of
+        the cell beyond it, for `_read`."""
+        n = self.u.shape[-1]
+        x, base = torch.broadcast_tensors(_f64(x), base)
         pos = torch.clamp(x / self.step, 0.0, float(n - 1))
         i0 = torch.clamp(torch.floor(pos.detach()).long(), 0, n - 2)
-        frac = pos - i0
-        lo = base + i0
-        out = []
-        for col in (self.u, self.sigma_y, self.sigma_z, self.z_c, self.p_z):
-            v = col.reshape(-1)
-            out.append(v[lo] + (v[lo + 1] - v[lo]) * frac)
-        return out[0], out[1], out[2], out[3], out[4]
+        return base + i0, pos - i0
+
+    @staticmethod
+    def _read(col: Tensor, lo: Tensor, frac: Tensor) -> Tensor:
+        """Column `col` (`(n_tab, n_b, n_grid)`) at the cells `_cell` found."""
+        v = col.reshape(-1)
+        return v[lo] + (v[lo + 1] - v[lo]) * frac
 
 
 def puff_tables(
@@ -377,14 +397,7 @@ class PuffField:
                              "in source order")
         self._count = count
         self._start = torch.cumsum(count, 0) - count
-        # detached geometry of the coarse mask: each source's sub-source bounding box and
-        # its widest flat top
-        xy_d = self.xy.detach()
-        index = self.owner[:, None].expand(-1, 2)
-        self._box_lo = torch.full((n_sources, 2), math.inf, dtype=_DTYPE).scatter_reduce(
-            0, index, xy_d, "amin")
-        self._box_hi = torch.full((n_sources, 2), -math.inf, dtype=_DTYPE).scatter_reduce(
-            0, index, xy_d, "amax")
+        # detached geometry of the coarse mask: each source's widest flat top
         w = self.width.detach()
         self._half_width = torch.zeros(w.shape[0], n_sources, dtype=_DTYPE).scatter_reduce(
             1, self.owner.expand_as(w), w, "amax") / 2.0
@@ -638,17 +651,27 @@ def advance(state: PuffState, tables: PuffTables, dt: float,
                    disp=torch.where(state.live[..., None], disp, state.disp))
 
 
+_COARSE_MARGIN_M = 1e-3
+"""Slack (m) added to every bound of `_evaluate`'s coarse mask, so that rounding in the
+wind-frame projection never drops a pair the exact cut keeps."""
+
+
 def _evaluate(field: PuffField, state: PuffState, tables: PuffTables, rec_xy: Tensor,
               rec_z: Tensor | None, theta_w: Tensor | float, dt: float,
               receptor_owner: Tensor | None, where: str) -> Tensor:
     """`(B, R)`: the puffs at receptors `rec_xy` `(R, 2)` and heights `rec_z` `(R,)`, or at
     roof level `H_R` with each sub-source's clamp when `rec_z` is None.
 
-    Two levels, as `plume._pair_values`: a coarse mask of (puff, receptor) pairs by the
-    source's displaced bounding box grown by the slug ends, `cutoff_sigma` spreads and its
-    widest flat top, then the surviving pairs expanded to the source's sub-sources and cut
-    exactly. Masks are detached; the kept values carry the graph. A puff of age 0 (not yet
-    advanced) or whose slug has zero length contributes nothing.
+    Two levels, as `plume._pair_values`, on the active puffs only (live, non-zero mass,
+    age > 0, a slug of positive length; compacted once): a coarse mask of (puff, receptor)
+    pairs in each instance's wind frame (along the wind, the source's sub-source extent
+    shifted by the puff's displacement and grown by the slug's ends, plus `cutoff_sigma`
+    spreads under `"sigma_y"`; across it, the same extent grown by the source's widest
+    flat top and `cutoff_sigma` times the largest `sigma_y` up to the slug's far end),
+    then the surviving pairs expanded to the source's sub-sources and cut exactly. Masks
+    are detached; the kept values carry the graph. A puff of age 0 (not yet advanced) or
+    whose slug has zero length contributes nothing. Each receptor sums its contributions
+    in slot order, then sub-source order.
 
     A receptor at along-wind offset `s` from the puff reads the table at its OWN distance
     from the source, `x(a) + s` (design Sect. 4.3, amended): `sigma_y` (crosswind profile
@@ -662,106 +685,212 @@ def _evaluate(field: PuffField, state: PuffState, tables: PuffTables, rec_xy: Te
     convolved with a Gaussian of `sigma_x = sigma_y(x(a))` (density `m / ell`)."""
     if not dt > 0:
         raise ValueError(f"{where}: dt must be positive, got {dt!r}")
-    n_batch, capacity = state.mass.shape
+    n_batch = state.mass.shape[0]
     cos, sin = _wind(theta_w, n_batch, where)
     row = _table_rows(tables, n_batch, where)
-    rk = row[:, None]
-    age = state.age
-    x_a, _, s_y, _, _, _ = tables.at_age(age, state.table, rk)
-    a_lo = torch.clamp(age - dt / 2.0, min=0.0)
-    e_lo = tables.at_age(a_lo, state.table, rk)[0] - x_a
-    e_hi = tables.at_age(age + dt / 2.0, state.table, rk)[0] - x_a
-    tau = age + dt / 2.0 - a_lo
     slug = field.along_wind == "sigma_y"
     cut = field.cutoff_sigma
     width, clamp = _field_rows(field, n_batch, where)
     h_c, h_abl = tables.h_canopy[row], tables.h_abl[row]
-    src = state.source
-    with torch.no_grad():
-        active = state.live & (state.mass != 0) & (age > 0) & (e_hi > e_lo)
-        # the receptors read sigma_y anywhere up to the slug's far end: bound it by the
-        # running maximum of the table's sigma_y there
-        n_b, n_grid = tables.u.shape[1:]
-        far = torch.clamp(torch.ceil((x_a + e_hi).detach() / tables.step).long(), 0,
-                          n_grid - 1)
-        s_y_far = tables._sigma_y_reach[(state.table * n_b + rk) * n_grid + far]
-        reach = (torch.maximum(-e_lo, e_hi) + (cut * s_y if slug else 0.0)
-                 + field._half_width.expand(n_batch, -1).gather(1, src) + cut * s_y_far)
-        reach = torch.where(active, reach, torch.zeros_like(reach))
-        box_lo = field._box_lo[src] + state.disp - reach[..., None]
-        box_hi = field._box_hi[src] + state.disp + reach[..., None]
     rec_xy = _f64(rec_xy)
     n_rec = rec_xy.shape[0]
-    rec_d = rec_xy.detach()
+    if n_rec == 0:
+        return torch.zeros(n_batch, 0, dtype=_DTYPE)
     # every tensor that reaches the values below
     grad = torch.is_grad_enabled() and any(
         v is not None and v.requires_grad
         for v in (state.mass, state.age, state.disp, tables.u, tables.t, tables.sigma_y,
                   tables.sigma_z, tables.z_c, tables.p_z, tables.h_canopy, tables.h_abl,
                   field.xy, field.weight, field.width, field.clamp, rec_xy, rec_z, cos, sin))
+    # the active puffs, compacted once: puff n sits in instance bn[n], slot kn[n]
+    with torch.no_grad():
+        bn, kn = torch.nonzero(state.live & (state.mass != 0) & (state.age > 0),
+                               as_tuple=True)
+    tab_n, row_n, age = state.table[bn, kn], row[bn], state.age[bn, kn]
+    a_lo = torch.clamp(age - dt / 2.0, min=0.0)
+    # the puff and its slug's ends, in one lookup
+    x3, lo, hi, frac = tables._travel(torch.cat([age, a_lo, age + dt / 2.0]),
+                                      tab_n.repeat(3), row_n.repeat(3))
+    x_a, x_lo, x_hi = x3.chunk(3)
+    lo, hi, frac = lo[:age.numel()], hi[:age.numel()], frac[:age.numel()]
+    sigma_y = tables.sigma_y.reshape(-1)
+    s_y = sigma_y[lo] + (sigma_y[hi] - sigma_y[lo]) * frac
+    e_lo, e_hi = x_lo - x_a, x_hi - x_a
+    with torch.no_grad():
+        on = torch.nonzero(e_hi > e_lo, as_tuple=True)[0]
+    bn, kn, tab_n, row_n, age, a_lo, x_a, s_y, e_lo, e_hi = (
+        v[on] for v in (bn, kn, tab_n, row_n, age, a_lo, x_a, s_y, e_lo, e_hi))
+    tau = age + dt / 2.0 - a_lo
+    src, mass, disp = state.source[bn, kn], state.mass[bn, kn], state.disp[bn, kn]
+    with torch.no_grad():
+        pair_n, pair_i = _coarse_pairs(field, tables, bn, src, disp, tab_n, row_n, x_a,
+                                       s_y, e_lo, e_hi, cos, sin, rec_xy, receptor_owner,
+                                       slug)
+        # chunks of whole pairs with at most `rows_per_chunk(1, 1)` sub-source pairs
+        # (the cap's float64 temporaries per pair), each chunk accumulated into `out` in
+        # pair order
+        ends = torch.cumsum(field._count[src[pair_n]], 0)
+        per_chunk = rows_per_chunk(1, 1, backward=grad)
+        total = int(ends[-1]) if ends.numel() else 0
+        marks = torch.arange(per_chunk, max(total, per_chunk), per_chunk, dtype=ends.dtype)
+        bounds = sorted({0, pair_n.numel(),
+                         *torch.searchsorted(ends, marks, right=True).tolist()})
+        if len(bounds) == 1:
+            bounds = [0, 0]
 
-    def block(a_: int, b_: int) -> Tensor:
-        r = b_ - a_
-        pts = rec_d[a_:b_]
-        mask = (active[..., None]
-                & (pts[:, 0] >= box_lo[..., 0, None]) & (pts[:, 0] <= box_hi[..., 0, None])
-                & (pts[:, 1] >= box_lo[..., 1, None]) & (pts[:, 1] <= box_hi[..., 1, None]))
-        if receptor_owner is not None:
-            mask &= src[..., None] != receptor_owner[a_:b_]
-        b, k, i = torch.nonzero(mask, as_tuple=True)
-        del mask
-        s = src[b, k]
+    # per active puff: the along-wind keep bounds and the table rows (with one instance
+    # the per-pair instance gathers are skipped)
+    with torch.no_grad():
+        if slug:
+            keep_lo, keep_hi = e_lo - cut * s_y, e_hi + cut * s_y
+        else:
+            keep_lo, keep_hi = e_lo, e_hi
+    base = tables._base(tab_n, row_n)
+    one = n_batch == 1
+    # coordinates as contiguous columns
+    rec_x, rec_y = rec_xy[:, 0].contiguous(), rec_xy[:, 1].contiguous()
+    src_x, src_y = field.xy[:, 0].contiguous(), field.xy[:, 1].contiguous()
+    disp_x, disp_y = disp[:, 0].contiguous(), disp[:, 1].contiguous()
+
+    def block(out: Tensor, j0: int, j1: int) -> Tensor:
+        n, i = pair_n[j0:j1], pair_i[j0:j1]
+        s = src[n]
         n_sub = field._count[s]
-        rep = torch.repeat_interleave(torch.arange(b.numel()), n_sub)
-        offset = torch.arange(rep.numel()) - torch.repeat_interleave(
-            torch.cumsum(n_sub, 0) - n_sub, n_sub)
-        p = field._start[s][rep] + offset
-        b, k, i = b[rep], k[rep], i[rep]
-        d = rec_xy[a_:b_][i] - (field.xy[p] + state.disp[b, k])
-        x = d[:, 0] * cos[b] + d[:, 1] * sin[b]
-        y = d[:, 1] * cos[b] - d[:, 0] * sin[b]
-        sx, lo, hi, w = s_y[b, k], e_lo[b, k], e_hi[b, k], width[b, p]
+        rep = torch.repeat_interleave(n_sub)        # pair of each sub-source pair
+        p = (field._start[s] - (torch.cumsum(n_sub, 0) - n_sub))[rep] + torch.arange(
+            rep.numel())
+        n, i = n[rep], i[rep]
+        b = None if one else bn[n]
+        c_b, s_b = (cos, sin) if one else (cos[b], sin[b])
+        d_x = rec_x[i] - (src_x[p] + disp_x[n])
+        d_y = rec_y[i] - (src_y[p] + disp_y[n])
+        x = d_x * c_b + d_y * s_b
+        y = d_y * c_b - d_x * s_b
         with torch.no_grad():
             if slug:
-                keep = (x >= lo - cut * sx) & (x <= hi + cut * sx)
+                keep = (x >= keep_lo[n]) & (x <= keep_hi[n])
             else:
-                keep = (x >= lo) & (x < hi)
-        b, k, i, p, x, y, sx, lo, hi, w = (
-            v[keep] for v in (b, k, i, p, x, y, sx, lo, hi, w))
+                keep = (x >= keep_lo[n]) & (x < keep_hi[n])
+            j = torch.nonzero(keep, as_tuple=True)[0]
+        n, i, p, x, y = (v[j] for v in (n, i, p, x, y))
+        b = None if one else b[j]
+        lo, hi = e_lo[n], e_hi[n]
         # the table at the receptor's own distance (clamped to the slug under "sigma_y")
-        x_r = x_a[b, k] + (torch.minimum(torch.maximum(x, lo), hi) if slug else x)
-        u_r, sy, s_z, z_c, p_z_r = tables.at_distance(x_r, state.table[b, k], row[b])
+        x_r = x_a[n] + (torch.minimum(torch.maximum(x, lo), hi) if slug else x)
+        cell, frac = tables._cell(x_r, base[n])
+        sy = tables._read(tables.sigma_y, cell, frac)
+        w = width[0, p] if one else width[b, p]
         with torch.no_grad():
             y_c = torch.clamp((w - _SQRT_2PI * sy) / 2.0, min=0.0)
-            keep = y.abs() - y_c <= cut * sy
-        b, k, i, p, x, y, sx, lo, hi, w, u_r, sy, s_z, z_c, p_z_r = (
-            v[keep] for v in (b, k, i, p, x, y, sx, lo, hi, w, u_r, sy, s_z, z_c, p_z_r))
+            j = torch.nonzero(y.abs() - y_c <= cut * sy, as_tuple=True)[0]
+        n, i, p, x, y, lo, hi, w, sy, cell, frac = (
+            v[j] for v in (n, i, p, x, y, lo, hi, w, sy, cell, frac))
+        b = None if one else b[j]
         if slug:
-            root2 = math.sqrt(2.0) * sx
+            root2 = math.sqrt(2.0) * s_y[n]
             g_x = (torch.erf((x - lo) / root2) - torch.erf((x - hi) / root2)) / (
                 2.0 * (hi - lo))
         else:
-            g_x = 1.0 / (tau[b, k] * u_r)
+            g_x = 1.0 / (tau[n] * tables._read(tables.u, cell, frac))
         if rec_z is None:
-            p_z = torch.minimum(p_z_r, clamp[b, p])
+            p_z = torch.minimum(tables._read(tables.p_z, cell, frac),
+                                clamp[0, p] if one else clamp[b, p])
         else:
-            p_z = vertical_profile(rec_z[a_:b_][i], z_c, s_z, h_c[b], h_abl[b])
-        c = state.mass[b, k] * field.weight[p] * g_x * crosswind_profile(y, sy, w) * p_z
-        return torch.zeros(n_batch * r, dtype=_DTYPE).index_add(0, b * r + i, c).reshape(
-            n_batch, r)
+            p_z = vertical_profile(rec_z[i], tables._read(tables.z_c, cell, frac),
+                                   tables._read(tables.sigma_z, cell, frac),
+                                   h_c if one else h_c[b], h_abl if one else h_abl[b])
+        c = mass[n] * field.weight[p] * g_x * crosswind_profile(y, sy, w) * p_z
+        return out.index_add(0, i if one else b * n_rec + i, c)
 
-    def evaluate(a_: int, b_: int) -> Tensor:
+    out = torch.zeros(n_batch * n_rec, dtype=_DTYPE)
+    for j0, j1 in zip(bounds[:-1], bounds[1:], strict=True):
         # under autograd each chunk is checkpointed (design Sect. 4.5): the graph keeps
         # the puff state, the backward recomputes the pair products
         if grad and _CHECKPOINT:
-            return checkpoint(block, a_, b_, use_reentrant=False)
-        return block(a_, b_)
+            out = checkpoint(block, out, j0, j1, use_reentrant=False)
+        else:
+            out = block(out, j0, j1)
+    return out.reshape(n_batch, n_rec)
 
-    rows = rows_per_chunk(capacity * int(field._count.max()), n_batch, backward=grad)
-    if n_rec == 0:
-        return torch.zeros(n_batch, 0, dtype=_DTYPE)
-    return torch.cat([evaluate(a_, min(n_rec, a_ + rows)) for a_ in range(0, n_rec, rows)],
-                     dim=1)
+
+def _coarse_pairs(field: PuffField, tables: PuffTables, bn: Tensor, src: Tensor,
+                  disp: Tensor, tab_n: Tensor, row_n: Tensor, x_a: Tensor, s_y: Tensor,
+                  e_lo: Tensor, e_hi: Tensor, cos: Tensor, sin: Tensor, rec_xy: Tensor,
+                  receptor_owner: Tensor | None, slug: bool) -> tuple[Tensor, Tensor]:
+    """`(n, i)`, detached: the (active puff, receptor) pairs `_evaluate`'s coarse mask
+    keeps, ordered by puff. The bounds are taken in each instance's wind frame (along `e =
+    (cos, sin)`, across `(-sin, cos)`) and widened by `_COARSE_MARGIN_M`, so they hold every
+    pair the exact cut keeps. The receptors are sorted along the wind once; each puff's
+    along-wind band is then a run of them (`searchsorted`), and only that run is tested
+    across the wind, in batches of at most `rows_per_chunk(1, 1)` candidates."""
+    n_batch, n_src, cut = cos.shape[0], field.n_sources, field.cutoff_sigma
+    c_d, s_d = cos.detach(), sin.detach()
+    xy = field.xy.detach()
+    along_p = xy[:, 0] * c_d[:, None] + xy[:, 1] * s_d[:, None]            # (B, P)
+    across_p = xy[:, 1] * c_d[:, None] - xy[:, 0] * s_d[:, None]
+    owner = field.owner.expand(n_batch, -1)
+
+    def extent(v: Tensor, how: str, fill: float) -> Tensor:
+        """`(B, S)`: the `how` of `v` `(B, P)` over each source's sub-sources."""
+        return torch.full((n_batch, n_src), fill, dtype=_DTYPE).scatter_reduce(
+            1, owner, v, how)
+
+    d = disp.detach()
+    cb, sb = c_d[bn], s_d[bn]
+    d_along = d[:, 0] * cb + d[:, 1] * sb
+    d_across = d[:, 1] * cb - d[:, 0] * sb
+    # the receptors read sigma_y anywhere up to the slug's far end: bound it by the
+    # running maximum of the table's sigma_y there
+    n_b, n_grid = tables.u.shape[1:]
+    far = torch.clamp(torch.ceil((x_a + e_hi).detach() / tables.step).long(), 0,
+                      n_grid - 1)
+    s_y_far = tables._sigma_y_reach[(tab_n * n_b + row_n) * n_grid + far]
+    spread = cut * s_y.detach() if slug else 0.0
+    m = _COARSE_MARGIN_M
+    lo_a = extent(along_p, "amin", math.inf)[bn, src] + d_along + e_lo.detach() - spread - m
+    hi_a = extent(along_p, "amax", -math.inf)[bn, src] + d_along + e_hi.detach() + spread + m
+    reach = field._half_width.expand(n_batch, -1)[bn, src] + cut * s_y_far + m
+    lo_c = extent(across_p, "amin", math.inf)[bn, src] + d_across - reach
+    hi_c = extent(across_p, "amax", -math.inf)[bn, src] + d_across + reach
+    rec = rec_xy.detach()
+    rec_along = rec[:, 0] * c_d[:, None] + rec[:, 1] * s_d[:, None]          # (B, R)
+    rec_across = rec[:, 1] * c_d[:, None] - rec[:, 0] * s_d[:, None]
+    n_rec, n_on = rec.shape[0], bn.numel()
+    if n_on == 0:
+        return bn, bn
+    # the receptors sorted by their along-wind coordinate, instance after instance (each
+    # instance's keys shifted by a span above every coordinate and bound), so that a
+    # puff's along-wind band is one run of the sorted receptors
+    big = float(torch.cat([rec_along.abs().reshape(-1), lo_a.abs(), hi_a.abs()]).max())
+    span = 2.0 ** math.ceil(math.log2(2.0 * big + 1.0) + 1.0)
+    shift = torch.arange(n_batch, dtype=_DTYPE) * span
+    key, order = torch.sort((rec_along + shift[:, None]).reshape(-1))
+    first = torch.searchsorted(key, lo_a + shift[bn])
+    count = torch.clamp(torch.searchsorted(key, hi_a + shift[bn], right=True) - first, min=0)
+    ends = torch.cumsum(count, 0)
+    budget = rows_per_chunk(1, 1)
+    across = rec_across.reshape(-1)
+    pair_n, pair_i = [], []
+    a_ = 0
+    while a_ < n_on:
+        # puffs [a_, b_): at most `budget` candidates, at least one puff
+        done = int(ends[a_ - 1]) if a_ else 0
+        b_ = max(a_ + 1, int(torch.searchsorted(ends, done + budget, right=True)))
+        cnt = count[a_:b_]
+        rep = torch.repeat_interleave(cnt)          # puff of each candidate, from a_
+        flat = order[(first[a_:b_] - (torch.cumsum(cnt, 0) - cnt))[rep]
+                     + torch.arange(rep.numel())]
+        rep += a_
+        i = flat % n_rec if n_batch > 1 else flat
+        rc = across[flat]
+        keep = (rc >= lo_c[rep]) & (rc <= hi_c[rep])
+        if receptor_owner is not None:
+            keep &= src[rep] != receptor_owner[i]
+        keep = torch.nonzero(keep, as_tuple=True)[0]
+        pair_n.append(rep[keep])
+        pair_i.append(i[keep])
+        a_ = b_
+    return torch.cat(pair_n), torch.cat(pair_i)
 
 
 def roof_concentration(field: PuffField, state: PuffState, tables: PuffTables,

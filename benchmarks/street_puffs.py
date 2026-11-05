@@ -14,7 +14,7 @@ The network is the 577-street Le Perreux-sur-Marne MUNICH case when `NOODL_PARIS
 points to its directory (or `--case`), else a 24 x 24 lattice of 100 m streets.
 
 Run: `.venv/Scripts/python benchmarks/street_puffs.py [--batch 1 8] [--steps 720]
-[--capacity 4096] [--case DIR] [--hour K] [--puff-dt none|30] [--drop-below 1e-3]
+[--capacity 8192] [--case DIR] [--hour K] [--puff-dt none|30] [--drop-below 1e-3]
 [--forward-only] [--profile]`.
 """
 
@@ -136,7 +136,7 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--batch", type=int, nargs="+", default=[1, 8])
     ap.add_argument("--steps", type=int, default=720)
-    ap.add_argument("--capacity", type=int, default=4096)
+    ap.add_argument("--capacity", type=int, default=8192)
     ap.add_argument("--case")
     default = PuffOptions()
     ap.add_argument("--puff-dt", default=str(default.puff_dt).lower(),
