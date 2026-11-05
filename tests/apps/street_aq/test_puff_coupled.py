@@ -146,13 +146,17 @@ def test_closure_keeps_caller_background_and_reports_diagnostics():
     assert closure.last["rebuilt"] is True
     state = model.step(state, drv, 5.0, t=5.0)
     assert closure.last["rebuilt"] is False
+    assert int(closure.last["live"].sum()) == 0  # accumulating towards puff_dt = 30 s
+    for k in range(2, 7):
+        state = model.step(state, drv, 5.0, t=5.0 * k)
+    assert closure.last["rebuilt"] is False
     assert int(closure.last["live"].sum()) > 0
     assert closure.last["evicted"].shape == (1,)
     # the caller's background is not replaced by the closure's own C_ext
     assert torch.equal(drv["street.x_boundary"], torch.full((12,), 2.0**-26, dtype=DT))
     # a new tensor of the same value rebuilds (identity rule); a changed value too
     drv2 = {**drv, "u_star": drv["u_star"].clone()}
-    model.step(state, drv2, 5.0, t=10.0)
+    model.step(state, drv2, 5.0, t=35.0)
     assert closure.last["rebuilt"] is True
 
 
@@ -182,14 +186,21 @@ def test_released_puff_reaches_the_streets():
                 "puff.release_rate": torch.tensor([[1e-3]], dtype=DT),
                 "puff.release_start": torch.tensor([[0.0]], dtype=DT),
                 "puff.release_duration": torch.tensor([[10.0]], dtype=DT)})
-    # the release over [0, 10] s is emitted at the starts of the next two steps
-    for k in range(3):
+    # the release over [0, 10] s is accumulated over the first puff interval (30 s, six
+    # steps) and emitted as one puff at the start of the seventh step
+    for k in range(6):
         state = model.step(state, drv, 5.0, t=5.0 * k)
+    assert not bool(PuffState.from_state(state).live.any())
+    assert float(state["puff.pending"][0, -1]) == pytest.approx(1e-2, rel=1e-12)
+    state = model.step(state, drv, 5.0, t=30.0)
     puff = PuffState.from_state(state)
     released = puff.live & (puff.table == 1)
-    assert int(released.sum()) == 2
+    assert int(released.sum()) == 1
     assert float(puff.mass[released].sum()) == pytest.approx(1e-2, rel=1e-12)
-    for k in range(3, 30):
+    # emitted at the age puff_dt/2 - dt/2 and advanced one step: the interval's middle
+    assert float(puff.age[released][0]) == 17.5
+    assert float(state["puff.pending"].abs().max()) == 0.0
+    for k in range(7, 30):
         state = model.step(state, drv, 5.0, t=5.0 * k)
     assert float(state["street.x"].max()) > 0.0
     assert model.closures[-1].tables.u.shape[0] == 2
@@ -210,6 +221,10 @@ def test_refusals_are_named():
                     puffs=PuffOptions(sigma_theta=0.1, junction_source="both"))
     with pytest.raises(NotImplementedError, match="shear"):
         build_model(net, background="per_street", puffs=PuffOptions(shear=True))
+    for bad in (0.0, -30.0, math.inf):
+        with pytest.raises(ValueError, match="puff_dt"):
+            build_model(net, background="per_street",
+                        puffs=PuffOptions(sigma_theta=0.1, puff_dt=bad))
 
     model, state, drivers = build_model(net, background="per_street", puffs=OPTIONS)
     drv = _drivers(model, drivers)
@@ -232,6 +247,14 @@ def test_refusals_are_named():
     with pytest.raises(KeyError, match="u_star"):
         model.step(state, no_u_star, 5.0, t=0.0)
     model.step(state, drv, 5.0, t=0.0)
+    # a street step must divide puff_dt (30 s), and the steps of an interval fill it
+    with pytest.raises(ValueError, match=r"does not divide PuffOptions\.puff_dt"):
+        model.step(state, drv, 7.0, t=0.0)
+    s = state
+    for t, dt in ((0.0, 10.0), (10.0, 10.0), (20.0, 5.0)):
+        s = model.step(s, drv, dt, t=t)
+    with pytest.raises(ValueError, match="past PuffOptions.puff_dt"):
+        model.step(model.step(s, drv, 10.0, t=25.0), drv, 10.0, t=35.0)
 
 
 def _grad_run(model, state, drv, u_star):
@@ -276,7 +299,7 @@ def test_a_grad_run_after_a_no_grad_warm_up_has_the_full_gradient():
 # ------------------------------------------------------------------ the mass budget (Test 3)
 
 
-def _budget_run(junction_source, thetas, capacity, *, n_steps=60, dt=5.0):
+def _budget_run(junction_source, thetas, capacity, *, n_steps=60, dt=5.0, puff_dt=30.0):
     """A pulse in street 3 (canopy) and an above-roof pulse, stepped `n_steps` times with
     the wind direction `thetas[k]` at step `k`; yields `(k, state, terms)` after every
     step, `terms` the budget's sides (`_budget_sides`)."""
@@ -284,7 +307,7 @@ def _budget_run(junction_source, thetas, capacity, *, n_steps=60, dt=5.0):
 
     bg = 2.0e-8
     options = PuffOptions(sigma_theta=math.radians(6.0), junction_source=junction_source,
-                          capacity=capacity, n_releases=1, x_max=300.0)
+                          capacity=capacity, n_releases=1, x_max=300.0, puff_dt=puff_dt)
     _, names, model, state, drivers = _puff_model(puffs=options)
     state = {**state, "street.x": torch.full((12,), bg, dtype=DT)}
     release = {"puff.release_xy": torch.tensor([[[-60.0, 90.0]]], dtype=DT),
@@ -317,11 +340,13 @@ def _budget_run(junction_source, thetas, capacity, *, n_steps=60, dt=5.0):
         yield k, model, state, held, inputs
 
 
-def _assert_budget(junction_source, thetas, capacity):
+def _assert_budget(junction_source, thetas, capacity, puff_dt=30.0):
     """Assert the identity after every step; return the final state and what the run
-    exercised (the largest `mass_out` and `mass_dropped`, the puffs evicted)."""
-    seen = {"out": 0.0, "dropped": 0.0, "evicted": 0}
-    for k, model, state, held, inputs in _budget_run(junction_source, thetas, capacity):
+    exercised (the largest `mass_out`, `mass_dropped` and accumulated `"puff.pending"`,
+    the puffs evicted)."""
+    seen = {"out": 0.0, "dropped": 0.0, "evicted": 0, "pending": 0.0}
+    for k, model, state, held, inputs in _budget_run(junction_source, thetas, capacity,
+                                                     puff_dt=puff_dt):
         assert held.shape == (1,)
         assert abs(float(held[0]) - float(inputs)) <= 1e-12 * float(inputs), (
             k, float(held[0]), float(inputs))
@@ -329,12 +354,14 @@ def _assert_budget(junction_source, thetas, capacity):
         seen["out"] = max(seen["out"], float(puff.mass_out[0]))
         seen["dropped"] = max(seen["dropped"], float(puff.mass_dropped[0]))
         seen["evicted"] += int(model.closures[-1].last["evicted"].sum())
+        seen["pending"] = max(seen["pending"], float(state["puff.pending"].abs().sum()))
     return state, seen
 
 
+@pytest.mark.parametrize("puff_dt", [None, 30.0])
 @pytest.mark.parametrize("capacity", [30, 4096])
 @pytest.mark.parametrize("junction_source", ["upward", "net"])
-def test_budget_exact_every_step(junction_source, capacity):
+def test_budget_exact_every_step(junction_source, capacity, puff_dt):
     """Design Sect. 4.8, at every step, with the step's flux not yet emitted counted:
 
         sum_s V_s (x_s - C_bg,s) + sum_live m + mass_out + mass_dropped - mass_drawn_down
@@ -345,8 +372,10 @@ def test_budget_exact_every_step(junction_source, capacity):
     `D_pending` what it will add to `mass_drawn_down` (zero under `"net"`), to 1e-12
     relative to the input. With 30 slots (25 sources) puffs are evicted for capacity;
     with the default capacity they leave the 300 m domain and fall below the faint
-    threshold."""
-    state, seen = _assert_budget(junction_source, [0.3] * 60, capacity)
+    threshold. Under `puff_dt` = 30 s (six 5 s steps a puff) `E_pending` also holds the
+    mass accumulated towards the next emission (`"puff.pending"`)."""
+    state, seen = _assert_budget(junction_source, [0.3] * 60, capacity, puff_dt)
+    assert (seen["pending"] > 0.0) == (puff_dt is not None)
     if capacity == 30:
         assert seen["evicted"] > 0 and seen["dropped"] != 0.0
     else:
@@ -404,14 +433,21 @@ def _steady_setup(along_wind):
     return net, kernel, tables, field, street_midpoints(net)
 
 
-def _steady_train(field, tables, dt):
+def _steady_train(field, tables, dt, puff_dt=None):
     """The puffs of a unit continuous source in every street and junction (one batch
     instance per source) once steady: ages dt, 2 dt, ... while x(age) <= x_max, mass dt,
     displaced x(age) along the wind -- what emit / advance / housekeep leave behind
-    (`test_steady_train_is_what_the_step_loop_leaves`)."""
+    (`test_steady_train_is_what_the_step_loop_leaves`). With an emission interval
+    `puff_dt` (the street step `dt` dividing it), the train at the step right after an
+    emission: ages `puff_dt/2 + dt/2 + j puff_dt`, mass `puff_dt`."""
     zero = torch.zeros((), dtype=torch.long)
     n_src = field.n_sources
-    ages = torch.arange(1, int(float(tables.t[0, 0, -1]) / dt) + 2, dtype=DT) * dt
+    if puff_dt is None:
+        ages = torch.arange(1, int(float(tables.t[0, 0, -1]) / dt) + 2, dtype=DT) * dt
+    else:
+        ages = (puff_dt / 2.0 + dt / 2.0 + torch.arange(
+            int(float(tables.t[0, 0, -1]) / puff_dt) + 2, dtype=DT) * puff_dt)
+        dt = puff_dt
     x = tables.at_age(ages, zero, zero)[0]
     ages, x = ages[x <= tables.x_max], x[x <= tables.x_max]
     k = ages.numel()
@@ -457,6 +493,64 @@ def test_steady_train_is_what_the_step_loop_leaves():
     looped = _kernel_error(field, tables, receptors, kernel, state, dt)
     assert looped == pytest.approx(_kernel_error(field, tables, receptors, kernel, direct,
                                                  dt), abs=1e-14)
+
+
+def test_steady_train_with_a_puff_interval_is_what_the_step_loop_leaves():
+    """Under an emission interval (`puff_dt` = 30 s, street step 5 s) the puffs emitted
+    every sixth step at the age `puff_dt/2 - dt/2`, displaced `x` of it, are the direct
+    train of `_steady_train(..., puff_dt)` at the step after an emission."""
+    from noodl.apps.street_aq.puff import advance, emit, housekeep
+
+    _, kernel, tables, field, receptors = _steady_setup("none")
+    dt, puff_dt, n_src = 5.0, 30.0, field.n_sources
+    state = PuffState.empty((n_src,), 60)
+    n_emit = int(float(tables.t[0, 0, -1]) / puff_dt) + 3
+    for k in range(6 * n_emit + 1):
+        if k % 6 == 0:
+            state, _ = emit(field, state, torch.eye(n_src, dtype=DT) * puff_dt,
+                            torch.zeros(n_src, dtype=torch.long), tables=tables,
+                            age=puff_dt / 2.0 - dt / 2.0, theta_w=_STEADY_THETA)
+        state = advance(state, tables, dt, _STEADY_THETA)
+        state = housekeep(field, state, tables, drop_below=0.0)
+    direct = _steady_train(field, tables, dt, puff_dt)
+    order = torch.argsort(state.age.masked_fill(~state.live, math.inf), dim=1)
+    live = int(state.live[0].sum())
+    assert live == direct.age.shape[1]
+    torch.testing.assert_close(state.age.gather(1, order)[:, :live], direct.age,
+                               rtol=0, atol=0)
+    disp = state.disp.gather(1, order[..., None].expand(-1, -1, 2))[:, :live]
+    torch.testing.assert_close(disp, direct.disp, rtol=1e-13, atol=1e-11)
+    looped = _kernel_error(field, tables, receptors, kernel, state, puff_dt)
+    assert looped == pytest.approx(_kernel_error(field, tables, receptors, kernel, direct,
+                                                 puff_dt), abs=1e-14)
+
+
+def _train_disp(tables, ages):
+    """`(n, k, 2)`: the displacement `x(age)` along `_STEADY_THETA` of `ages` `(n, k)`."""
+    zero = torch.zeros((), dtype=torch.long)
+    e = torch.tensor([math.cos(_STEADY_THETA), math.sin(_STEADY_THETA)], dtype=DT)
+    return tables.at_age(ages, zero, zero)[0][..., None] * e
+
+
+def test_steady_limit_with_a_puff_interval_is_the_kernel():
+    """Test 2a with an emission interval: the train of `puff_dt` = 30 s puffs, each a slug
+    spanning its interval, at the 5 s street step right after an emission (ages counted
+    from the intervals' middles) is the kernel to rounding, as one puff per step is. At
+    the five later steps of the interval the newest material is still accumulating (the
+    lag gap `[0, x(dt/2 + j dt))`, j = 1..5): the error there is reported, not bounded."""
+    _, kernel, tables, field, receptors = _steady_setup("none")
+    dt, puff_dt = 5.0, 30.0
+    train = _steady_train(field, tables, dt, puff_dt)
+    e = _kernel_error(field, tables, receptors, kernel, train, puff_dt)
+    later = []
+    for j in range(1, 6):
+        age = train.age + j * dt
+        later.append(_kernel_error(field, tables, receptors, kernel,
+                                   replace(train, age=age, disp=_train_disp(tables, age)),
+                                   puff_dt))
+    print(f"steady limit, puff_dt = 30 s, dt = 5 s: e = {e:.2e} after an emission; at the "
+          f"later steps {[f'{v:.2e}' for v in later]}")
+    assert e <= 1e-12
 
 
 def test_steady_limit_without_along_wind_spread_is_the_kernel():
@@ -523,7 +617,7 @@ def test_coupled_steady_limit_without_along_wind_spread_is_the_steady_model(dt):
         junction_source="upward")["street.c_ext"]
     model, state, d1 = build_model(net, background="per_street", puffs=PuffOptions(
         sigma_theta=_STEADY_MET["sigma_theta"], along_wind="none", junction_source="upward",
-        drop_below=0.0, capacity=2000))
+        drop_below=0.0, capacity=2000, puff_dt=None))
     drv1 = {**d1, **met, "street.x_boundary": drv["street.x_boundary"],
             "street.sources": src}
     prev = None
@@ -546,8 +640,10 @@ def test_coupled_steady_limit_without_along_wind_spread_is_the_steady_model(dt):
 # relative drop decision is a cut-off like the spatial ones), so no (puff, receptor) pair
 # and no drop decision sits within the finite-difference step of a cut-off; the pulse and
 # the release end inside a step (28 s, 29 s), away from the overlap's kinks.
+# They run one puff per step (puff_dt=None): under puff_dt = 30 s the release [12, 29] s
+# lies inside one emission interval, so its start has no effect on the puffs.
 _GRAD_OPTIONS = PuffOptions(sigma_theta=math.radians(6.0), n_releases=1, drop_below=0.0,
-                            capacity=1024)
+                            capacity=1024, puff_dt=None)
 _GRAD_TARGET = 6  # street 7 (D-B), downwind of the pulse street 8 (E8-C) along 0.3 rad
 _GRAD_PULSE_STREET = 7
 _GRAD_PARAMS = {"pulse.rate": 1e-3, "pulse.start": 7.0, "puff.release_rate": 3e-3,
@@ -710,16 +806,18 @@ def _turning_run(model, state, drivers, leaves, steps):
     return torch.stack(history), s["street.x"][0]
 
 
-def test_checkpoint_leaves_values_and_gradients_bit_identical(monkeypatch):
+@pytest.mark.parametrize("puff_dt", [None, 30.0])
+def test_checkpoint_leaves_values_and_gradients_bit_identical(monkeypatch, puff_dt):
     """The per-step checkpoint (design Sect. 4.5) changes no value and no gradient, bit
     for bit, also across two differentiated runs on the same closure (its per-run cache)
-    and with the wind turning every step."""
+    and with the wind turning every step; under `puff_dt` the mass accumulated between
+    emissions carries the graph from step to step outside the checkpoint."""
     from noodl.apps.street_aq import puff
 
     out = {}
     for checkpointed in (True, False):
         monkeypatch.setattr(puff, "_CHECKPOINT", checkpointed)
-        model, state, drivers = _pulse_model()
+        model, state, drivers = _pulse_model(replace(_GRAD_OPTIONS, puff_dt=puff_dt))
         for run in range(2):
             leaves = _grad_leaves()
             c_ext, x = _turning_run(model, state, drivers, leaves, 20)
@@ -731,7 +829,10 @@ def test_checkpoint_leaves_values_and_gradients_bit_identical(monkeypatch):
         assert torch.equal(a[0], b[0]) and torch.equal(a[1], b[1])
         for g_a, g_b in zip(a[2], b[2], strict=True):
             assert torch.equal(g_a, g_b)
-    assert all(bool((g != 0).any()) for g in out[True, 0][2])
+    # the release [12, 29] s inside one 30 s interval: its start moves no puff
+    moot = {"puff.release_start"} if puff_dt else set()
+    assert all(bool((g != 0).any()) == (name not in moot)
+               for name, g in zip(_GRAD_PARAMS, out[True, 0][2], strict=True))
 
 
 def _saved_bytes_per_step(steps=40):
@@ -778,6 +879,154 @@ def test_saved_bytes_grow_linearly_with_the_live_puffs(monkeypatch):
     plain = _saved_bytes_per_step()
     assert straight_line_residual(plain) > 0.05
     assert float(plain[-1, 1]) > 100 * float(rows[-1, 1])
+
+
+def test_gradient_with_a_puff_interval_matches_central_differences():
+    """Test 4 under `puff_dt` = 30 s (the mass accumulated between emissions carries the
+    graph): the gradient of the downwind street's integrated `C_ext` to the pulse and
+    release rates and the meteorology against central differences (relative step 1e-6),
+    to 1e-6 relative."""
+    model, state, drivers = _pulse_model(replace(_GRAD_OPTIONS, puff_dt=30.0))
+    names = ("pulse.rate", "puff.release_rate", "u_star", "theta_w")
+    leaves = _grad_leaves()
+    street = torch.tensor([_GRAD_PULSE_STREET])
+    loss = _integrated_c_ext(model, state, _release_drivers(drivers, leaves, street))
+    grads = torch.autograd.grad(loss[0, _GRAD_TARGET], [leaves[n] for n in names])
+    p = _grad_leaves(2 * len(names), requires_grad=False)
+    steps = []
+    for j, name in enumerate(names):
+        v = p[name][2 * j].clone()
+        h = 1e-6 * abs(float(v))
+        p[name][2 * j:2 * j + 2] = torch.stack([v + h, v - h])
+        steps.append(float(p[name][2 * j] - p[name][2 * j + 1]))
+    with torch.no_grad():
+        values = _integrated_c_ext(
+            model, state, _release_drivers(drivers, p, street.expand(2 * len(names))))
+    values = values[:, _GRAD_TARGET]
+    for j, name in enumerate(names):
+        auto = float(grads[j][0])
+        fd = float(values[2 * j] - values[2 * j + 1]) / steps[j]
+        assert auto != 0.0, name
+        assert abs(auto - fd) <= 1e-6 * abs(auto), (name, auto, fd)
+
+
+# ------------------------------------------------------------------ the emission interval
+
+_REGRESSION = "tests/data/street/puff_one_per_step_regression.pt"
+
+
+def _regression_run(options):
+    """The run recorded in `_REGRESSION` before `puff_dt` existed (commit e90355c): a pulse
+    in streets 3 and 9 over [0, 20) s, a steady source in street 6, an above-roof release of
+    3e-3 kg/s over [7, 30] s at (-60, 90) m, z = 30 m, background 2e-8, the wind turning
+    0.01 rad a step from 0.3 rad, 40 steps of 5 s; `(C_ext (40, 12), street x (40, 12),
+    final state)`."""
+    net, names = twelve_street_grid()
+    model, state, drivers = build_model(net, background="per_street", puffs=options)
+    bg = 2.0e-8
+    state = {**state, "street.x": torch.full((12,), bg, dtype=DT)}
+    pulse = _street_sources(model, {names[2]: 1.7e-3, names[8]: 0.3e-3})
+    steady = _street_sources(model, {names[5]: 2e-6})
+    release = {"puff.release_xy": torch.tensor([[[-60.0, 90.0]]], dtype=DT),
+               "puff.release_z": torch.tensor([[30.0]], dtype=DT),
+               "puff.release_rate": torch.tensor([[3e-3]], dtype=DT),
+               "puff.release_start": torch.tensor([[7.0]], dtype=DT),
+               "puff.release_duration": torch.tensor([[23.0]], dtype=DT)}
+    c, x = [], []
+    for k in range(40):
+        t = 5.0 * k
+        drv = {**drivers, "u_star": torch.tensor(0.5, dtype=DT),
+               "theta_w": torch.tensor(0.3 + 0.01 * k, dtype=DT),
+               "h_abl": torch.tensor(800.0, dtype=DT),
+               "street.x_boundary": torch.full((12,), bg, dtype=DT),
+               "street.sources": steady + (pulse if t < 20.0 else torch.zeros_like(pulse)),
+               **release}
+        state = model.step(state, drv, 5.0, t=t)
+        c.append(state["puff.c_ext"].clone())
+        x.append(state["street.x"].clone())
+    return torch.stack(c), torch.stack(x), state
+
+
+def test_puff_dt_none_is_bit_identical_to_one_puff_per_step():
+    """`puff_dt=None` is the model as it was before the emission interval, bit for bit
+    (the run recorded at e90355c: C_ext and the street concentrations at every step, the
+    budget counters, the live puffs), and `puff_dt` equal to the street step is the same
+    model too."""
+    ref = torch.load(_REGRESSION, weights_only=True)
+    options = PuffOptions(sigma_theta=math.radians(6.0), n_releases=1, drop_below=1e-6,
+                          capacity=4096, puff_dt=None)
+    c, x, state = _regression_run(options)
+    assert torch.equal(c, ref["c_ext"]) and torch.equal(x, ref["street_x"])
+    puff = PuffState.from_state(state)
+    for name, value in ref["counters"].items():
+        assert torch.equal(getattr(puff, name), value), name
+    assert torch.equal(puff_mass(puff), ref["live_mass"])
+    assert torch.equal(puff.live.sum(1), ref["live"])
+    c5, x5, _ = _regression_run(replace(options, puff_dt=5.0))
+    assert torch.equal(c5, c) and torch.equal(x5, x)
+
+
+def _release_series(options, steps=80):
+    """`(street x - C_bg (steps, 12), C_ext - C_bg (steps, 12))` of an above-roof release
+    of 3e-3 kg/s over [12, 29] s at (-150, 20) m, z = 30 m (the Test 4 release), wind 0.3
+    rad, u* = 0.5 m/s, streets starting at the background, dt = 5 s."""
+    model, state, drivers = _pulse_model(options)
+    leaves = _grad_leaves(requires_grad=False)
+    leaves["pulse.rate"] = torch.zeros(1, dtype=DT)
+    drv = _release_drivers(drivers, leaves, torch.tensor([_GRAD_PULSE_STREET]))
+    bg = drv["street.x_boundary"]
+    state = {**state, "street.x": bg.clone()}
+    xs, cs = [], []
+    with torch.no_grad():
+        for k in range(steps):
+            state = model.step(state, drv, 5.0, t=5.0 * k)
+            xs.append(state["street.x"][0] - bg)
+            cs.append(state["puff.c_ext"][0] - bg)
+    return torch.stack(xs), torch.stack(cs)
+
+
+@pytest.fixture(scope="module")
+def release_series():
+    """The release run under (puff_dt, drop_below) = (None, 1e-6), (30 s, 1e-6) and
+    (None, 1e-3)."""
+    base = replace(_GRAD_OPTIONS, capacity=4096)
+    return {(puff_dt, drop): _release_series(replace(base, puff_dt=puff_dt, drop_below=drop))
+            for puff_dt, drop in ((None, 1e-6), (30.0, 1e-6), (None, 1e-3))}
+
+
+# the street the release reaches most (street 3, index 2: peak excess 3.7e-8 kg/m3)
+_RELEASE_TARGET = 2
+
+
+def _series_error(got, ref):
+    """max_t |got - ref| / max_t |ref| of the target street, and the relative error of its
+    time integral (the dose)."""
+    g, r = got[:, _RELEASE_TARGET], ref[:, _RELEASE_TARGET]
+    return float((g - r).abs().max() / r.abs().max()), float((g.sum() - r.sum()) / r.sum())
+
+
+def test_puff_interval_accuracy_against_one_puff_per_step(release_series):
+    """The accuracy cost of puff_dt = 30 s against one puff per 5 s step (drop_below 1e-6
+    both), for a 17 s release: the 30 s slug spreads it over its interval, centred at the
+    interval's middle (15 s; the release's own is 20.5 s). Measured (measurements.md, Task
+    12) at the most-hit street: street concentration 0.376 of its peak, C_ext 0.570, dose
+    +2.5e-2; bounds one significant figure, rounded up."""
+    ref = release_series[None, 1e-6]
+    x_err, dose = _series_error(release_series[30.0, 1e-6][0], ref[0])
+    c_err, _ = _series_error(release_series[30.0, 1e-6][1], ref[1])
+    print(f"puff_dt 30 vs None: x {x_err:.3e}, C_ext {c_err:.3e}, dose {dose:+.3e}")
+    assert x_err <= 0.4 and c_err <= 0.6 and abs(dose) <= 3e-2
+
+
+def test_faint_threshold_accuracy_against_1e_6(release_series):
+    """The accuracy cost of drop_below = 1e-3 against 1e-6 (one puff per step). Measured
+    (measurements.md, Task 12) at the most-hit street: street concentration 1.26e-4 of its
+    peak, C_ext 1.06e-4, dose -5.5e-5; bounds one significant figure, rounded up."""
+    ref = release_series[None, 1e-6]
+    x_err, dose = _series_error(release_series[None, 1e-3][0], ref[0])
+    c_err, _ = _series_error(release_series[None, 1e-3][1], ref[1])
+    print(f"drop_below 1e-3 vs 1e-6: x {x_err:.3e}, C_ext {c_err:.3e}, dose {dose:+.3e}")
+    assert x_err <= 2e-4 and c_err <= 2e-4 and abs(dose) <= 6e-5
 
 
 # ------------------------------------------------------------------ union with a building

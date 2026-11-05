@@ -13,7 +13,9 @@ The puffs themselves (design Sect. 4.3-4.6): a `PuffField` holds the sources' ge
 releases as points), a `PuffState` the puffs in fixed `(B, K)` slots, and `emit`,
 `advance`, `roof_concentration` and `concentration_at` are pure functions of them. A puff
 of age `a` is a slug along the wind spanning `[x(a - dt/2), x(a + dt/2)]` from its source,
-so the puffs of a continuous source tile the axis exactly for any step `dt`. A receptor
+`dt` the emission interval (the street step, or `PuffOptions.puff_dt` when the closure
+accumulates several steps into one puff, its age then counted from the interval's middle),
+so the puffs of a continuous source tile the axis exactly for any interval `dt`. A receptor
 reads the table at its own distance from the source; with `along_wind="none"` the slug is
 a segment of the steady plume (density `m / (dt u(x))`, not a uniform top-hat), so the
 steady limit of a continuous source is the steady kernel itself for any `dt`.
@@ -532,17 +534,25 @@ def housekeep(field: PuffField, state: PuffState, tables: PuffTables, *,
 
 
 def emit(field: PuffField, state: PuffState, masses: Tensor, table_index: Tensor,
-         release_xy: Tensor | None = None, *, tables: PuffTables | None = None
+         release_xy: Tensor | None = None, *, tables: PuffTables | None = None,
+         age: float = 0.0, theta_w: Tensor | float | None = None
          ) -> tuple[PuffState, Tensor]:
     """One new puff per source with non-zero mass in `masses` `(B, S)` (kg, signed),
-    written into the first free slots of its instance in source order: age 0, table
-    `table_index[s]` (`(S,)`), displacement zero, except a release's, which is its
-    position in `release_xy` `(B, R, 2)` (m) relative to its `source_xy0`. `mass_emitted`
-    accumulates the masses. An instance without enough free slots evicts its faintest live
-    puffs into `mass_dropped` (by the peak estimate of `housekeep` when `tables` is given,
-    else by `|m|`); the state and the number evicted `(B,)` are returned. More new puffs
-    than the capacity is refused by name."""
+    written into the first free slots of its instance in source order: age `age` (s,
+    default 0), table `table_index[s]` (`(S,)`), displacement zero, except a release's,
+    which is its position in `release_xy` `(B, R, 2)` (m) relative to its `source_xy0`. A
+    positive `age` (a puff accumulated over an emission interval, `PuffOptions.puff_dt`)
+    adds the distance `x(age)` travelled along the wind `theta_w`, which it then needs with
+    `tables`. `mass_emitted` accumulates the masses. An instance without enough free slots
+    evicts its faintest live puffs into `mass_dropped` (by the peak estimate of `housekeep`
+    when `tables` is given, else by `|m|`); the state and the number evicted `(B,)` are
+    returned. More new puffs than the capacity is refused by name."""
     n_batch, capacity = state.mass.shape
+    if not age >= 0.0:
+        raise ValueError(f"emit: age must be >= 0, got {age!r}")
+    if age > 0.0 and (tables is None or theta_w is None):
+        raise ValueError("emit: a positive age needs tables= and theta_w= (the puffs start "
+                         "x(age) downwind)")
     n_src, n_rel = field.n_sources, field.n_releases
     masses = _f64(masses)
     if masses.shape != (n_batch, n_src):
@@ -562,6 +572,12 @@ def emit(field: PuffField, state: PuffState, masses: Tensor, table_index: Tensor
             raise ValueError(f"emit: release_xy must be (B, R, 2) = {(n_batch, n_rel, 2)}, "
                              f"got {tuple(release_xy.shape)}")
         disp0 = torch.cat([disp0, release_xy - field.source_xy0[n_src - n_rel:]], dim=1)
+    if age > 0.0:
+        cos, sin = _wind(theta_w, n_batch, "emit")
+        row = _table_rows(tables, n_batch, "emit")[:, None]
+        x0 = tables.at_age(torch.full((n_batch, n_src), age, dtype=_DTYPE), table_index,
+                           row)[0]
+        disp0 = disp0 + x0[..., None] * torch.stack([cos, sin], dim=-1)[:, None, :]
     new = masses.detach() != 0
     n_new = new.sum(1)
     if bool((n_new > capacity).any()):
@@ -589,7 +605,7 @@ def emit(field: PuffField, state: PuffState, masses: Tensor, table_index: Tensor
     state = replace(
         state,
         mass=state.mass.index_put(at, masses[b, s]),
-        age=state.age.index_put(at, zero),
+        age=state.age.index_put(at, zero + age),
         disp=state.disp.index_put(at, disp0[b, s]),
         source=state.source.index_put(at, s),
         table=state.table.index_put(at, table_index[s]),
@@ -753,9 +769,10 @@ def roof_concentration(field: PuffField, state: PuffState, tables: PuffTables,
     """`(B, R)`: the puffs' concentration (kg/m3) at roof level `H_R` above
     `receptors_xy` `(R, 2)`, design Sect. 4.3: per sub-source `m w_i g_x f_y min(P_z,
     clamp_i)`, with `g_x` the slug of the puff's age `a`, `[x(a - dt/2), x(a + dt/2)]` along
-    the wind `theta_w` from its source (`dt`, s, the step: consecutive puffs of a
-    continuous source tile the axis), and `f_y` and the table's `p_z` read at the
-    receptor's own distance from the source (`_evaluate`). A puff whose source
+    the wind `theta_w` from its source (`dt`, s, the emission interval: the step, or
+    `PuffOptions.puff_dt`; consecutive puffs of a continuous source tile the axis),
+    and `f_y` and the table's `p_z` read at the receptor's own distance from the source
+    (`_evaluate`). A puff whose source
     is `receptor_owner[r]` (`(R,)`, long; -1 for none) contributes nothing to receptor
     `r`: a street's own `C_ext` excludes its own puffs, as `street_kernel` does."""
     if receptor_owner is not None:
@@ -874,7 +891,10 @@ JUNCTION_SOURCES = ("upward", "net")
 
 _RELEASE_KEYS = ("puff.release_xy", "puff.release_z", "puff.release_rate",
                  "puff.release_start", "puff.release_duration")
-_CARRIED = ("puff.q", "puff.c_ext", "puff.time")
+_CARRIED = ("puff.q", "puff.c_ext", "puff.time", "puff.pending", "puff.pending_time")
+_PUFF_DT_RTOL = 1e-9
+"""Relative tolerance of `puff_dt` checks: a street step divides `puff_dt`, and the steps
+since the last emission fill it."""
 
 
 @dataclass(frozen=True)
@@ -884,8 +904,11 @@ class PuffOptions:
     `h_canopy`, `z0`, `d` (m) are the tables' canopy height `H_R`, roughness and
     displacement; `sigma_theta` (rad) the wind-direction spread, `None` for the
     `"sigma_theta"` driver. `junction_source` is one of `JUNCTION_SOURCES`; `along_wind` one
-    of `ALONG_WIND`; `capacity` the puff slots per batch instance; `drop_below` the faint
-    threshold of `housekeep`; `cutoff_sigma` the profiles' cut-off; `x_max` (m) the extent
+    of `ALONG_WIND`; `capacity` the puff slots per batch instance; `puff_dt` (s) the
+    emission interval: each source's mass is accumulated over the street steps of one
+    interval and emitted as one puff, whose slug spans the interval (`None`: one puff per
+    street step); every street step must divide it. `drop_below` the faint threshold of
+    `housekeep`; `cutoff_sigma` the profiles' cut-off; `x_max` (m) the extent
     of the tables (a puff beyond it leaves the domain); `n_releases` the explicit
     above-roof releases. `table_kwargs` go to `puff_tables` (the empirical inputs:
     `theta_star`, `temperature`, `tau_y`, `tau_z`, `centre_k`, the floors); a `"centre_c"`
@@ -900,7 +923,8 @@ class PuffOptions:
     junction_source: str = "upward"
     along_wind: str = "sigma_y"
     capacity: int = 4096
-    drop_below: float = 1e-6
+    puff_dt: float | None = 30.0
+    drop_below: float = 1e-3
     shear: bool = False
     cutoff_sigma: float = GAUSS_CUTOFF_SIGMAS
     x_max: float = DOWNWIND_CUTOFF_M
@@ -919,8 +943,13 @@ class PuffClosure:
     boundary `"puff.c_ext"` with the state's `"<layer>.x"` and this step's `C_bg`, times the
     stored step length (street roof fluxes; junction vertical fluxes `F_up`, or `F_up -
     F_down` under `junction_source="net"`; under `"upward"` `F_down dt` is added to
-    `mass_drawn_down`), and each explicit release's `pulse_mass` over that step; (2)
-    `advance` every puff by `dt` on the current wind; (3) `housekeep`; (4) evaluate `C_ext`
+    `mass_drawn_down`), and each explicit release's `pulse_mass` over that step; under
+    `options.puff_dt` these masses are added to `"puff.pending"` instead and emitted, one
+    puff per source, once the steps since the last emission fill `puff_dt`, at the age
+    `puff_dt/2 - dt/2` (displaced `x` of it along the current wind) so that after (2) the
+    puff's age is counted from the middle of its interval and its slug, of age span
+    `puff_dt`, covers the material of the whole interval; (2) `advance` every puff by
+    `dt` on the current wind; (3) `housekeep`; (4) evaluate `C_ext`
     and store this step's flows (`"<layer>.q"`, written by the flow closure, which must
     run first), `C_ext` and `"puff.time"` = `(t, dt)` of this step (`t` is 0 when the step
     has none). The puffs live in the state as `PuffState.to_state()` keys.
@@ -964,6 +993,9 @@ class PuffClosure:
         if not 0.0 <= options.drop_below < 1.0:
             raise ValueError(f"PuffOptions: drop_below must be in [0, 1), got "
                              f"{options.drop_below!r}")
+        if options.puff_dt is not None and not 0.0 < options.puff_dt < math.inf:
+            raise ValueError(f"PuffOptions: puff_dt must be None or a positive number of "
+                             f"seconds, got {options.puff_dt!r}")
         if int(options.n_releases) < 0:
             raise ValueError(f"PuffOptions: n_releases must be >= 0, got "
                              f"{options.n_releases!r}")
@@ -1004,14 +1036,19 @@ class PuffClosure:
     def initial_state(self) -> dict[str, Tensor]:
         """The puff keys of a state before the first step: no puffs (one unbatched
         instance, expanded to the drivers' batch on the first step), zero flows and
-        boundary, and no pending step (`"puff.time"` = `(0, 0)`)."""
+        boundary, no pending step (`"puff.time"` = `(0, 0)`) and nothing accumulated
+        towards the next emission (`"puff.pending"` `(1, S)` kg per source,
+        `"puff.pending_time"` `(1,)` s)."""
         self._require_bound()
         n_q = sum(int(self.model.net.edge_index(kind).numel())
                   for kind in self.model.transport[self.layer_name].flow_kinds)
+        n_src = self.n_streets + self.wiring.n_junctions + self.n_releases
         return {**PuffState.empty((1,), self.options.capacity).to_state(),
                 "puff.q": torch.zeros(n_q, dtype=_DTYPE),
                 "puff.c_ext": torch.zeros(self.n_streets, dtype=_DTYPE),
-                "puff.time": torch.zeros(2, dtype=_DTYPE)}
+                "puff.time": torch.zeros(2, dtype=_DTYPE),
+                "puff.pending": torch.zeros(1, n_src, dtype=_DTYPE),
+                "puff.pending_time": torch.zeros(1, dtype=_DTYPE)}
 
     # ---------------------------------------------------------------- checks
     def _require_bound(self) -> None:
@@ -1220,11 +1257,12 @@ class PuffClosure:
                                    receptor_owner=self.receptor_owner)
             return c_bg + (c if batch else c[0])
 
+        puff_dt = self.options.puff_dt
         if ctx is None:
             dt_prev = float(state["puff.time"][1])
             if dt_prev <= 0 or not bool(puff.live.any()):
                 return {xb_key: c_bg.expand((*batch, self.n_streets))}
-            return {xb_key: c_ext_of(puff, dt_prev)}
+            return {xb_key: c_ext_of(puff, dt_prev if puff_dt is None else puff_dt)}
         if self.n_releases and ctx.t is None:
             raise ValueError("PuffClosure: the releases need the step time; call "
                              "Model.step(t=...)")
@@ -1232,6 +1270,12 @@ class PuffClosure:
             raise KeyError(f"PuffClosure: the driver {q_key!r} is missing; the flow closure "
                            f"must run before the puff closure")
         dt = float(ctx.dt)
+        if puff_dt is not None:
+            n_steps = puff_dt / dt
+            if abs(n_steps - round(n_steps)) > _PUFF_DT_RTOL * n_steps or round(n_steps) < 1:
+                raise ValueError(f"PuffClosure: the street step dt = {dt!r} s does not divide "
+                                 f"PuffOptions.puff_dt = {puff_dt!r} s; pick a step that does "
+                                 f"or puff_dt=None (one puff per step)")
         t_prev, dt_prev = (float(v) for v in state["puff.time"])
         # (1) the previous step's fluxes, the masses backward Euler moved over it
         f_s, up, down = roof_fluxes(self.wiring, _f64(state["puff.q"]), x.unsqueeze(-1),
@@ -1253,18 +1297,46 @@ class PuffClosure:
                                  1 + torch.arange(self.n_releases)])
         masses = torch.cat(parts, dim=1)
         drawn = per_instance(down[..., 0].sum(-1) * dt_prev, ()) if upward else None
+        # the emission interval: under `puff_dt` the step's masses join those accumulated
+        # since the last emission, emitted as one puff per source once the steps fill
+        # `puff_dt`, at the age of the interval's midpoint less this step's advance (its
+        # slug then spans the interval, `[x(a - puff_dt/2), x(a + puff_dt/2)]`)
+        pending = _f64(state["puff.pending"])
+        if pending.shape[0] != n_batch:
+            pending = pending.expand(n_batch, -1)
+        pending_time = _f64(state["puff.pending_time"])
+        age0, span = 0.0, dt
+        if puff_dt is None:
+            emitted = masses
+        else:
+            filled = float(pending_time[0]) + dt_prev
+            if filled > puff_dt * (1.0 + _PUFF_DT_RTOL):
+                raise ValueError(f"PuffClosure: the street steps since the last emission "
+                                 f"span {filled!r} s, past PuffOptions.puff_dt = {puff_dt!r} "
+                                 f"s; keep a step that divides puff_dt within an interval")
+            pending = pending + masses
+            age0, span = puff_dt / 2.0 - dt / 2.0, puff_dt
+            if filled >= puff_dt * (1.0 - _PUFF_DT_RTOL):
+                emitted, pending = pending, torch.zeros_like(pending)
+                pending_time = torch.zeros_like(pending_time)
+            else:
+                emitted, pending_time = None, pending_time + dt_prev
         # the step's own field and tables: a checkpoint recomputes `puff_step` in the
         # backward, after later steps may have rebuilt them
         field, tables, drop_below = self.field, self.tables, self.options.drop_below
 
         def puff_step(puff: PuffState) -> tuple[PuffState, Tensor, Tensor]:
-            puff, evicted = emit(field, puff, masses, table_index, release_xy, tables=tables)
+            if emitted is None:
+                evicted = torch.zeros(n_batch, dtype=torch.long)
+            else:
+                puff, evicted = emit(field, puff, emitted, table_index, release_xy,
+                                     tables=tables, age=age0, theta_w=theta)
             if drawn is not None:
                 puff = replace(puff, mass_drawn_down=puff.mass_drawn_down + drawn)
             # (2) advance, (3) housekeep, (4) evaluate
             puff = advance(puff, tables, dt, theta)
             puff = housekeep(field, puff, tables, drop_below=drop_below)
-            c = roof_concentration(field, puff, tables, self.receptors, theta, dt,
+            c = roof_concentration(field, puff, tables, self.receptors, theta, span,
                                    receptor_owner=self.receptor_owner)
             return puff, c_bg + (c if batch else c[0]), evicted
 
@@ -1275,7 +1347,7 @@ class PuffClosure:
         reaching = [*(getattr(puff, f.name) for f in fields(PuffState)),
                     *(getattr(tables, f.name) for f in fields(PuffTables)),
                     field.xy, field.weight, field.width, field.clamp,
-                    masses, drawn, release_xy, theta, c_bg]
+                    emitted, drawn, release_xy, theta, c_bg]
         recorded = torch.is_grad_enabled() and any(
             isinstance(v, Tensor) and v.requires_grad for v in reaching)
         if recorded and _CHECKPOINT:
@@ -1285,7 +1357,8 @@ class PuffClosure:
         self.last = {"live": puff.live.sum(1), "evicted": evicted, "rebuilt": rebuilt}
         t_now = 0.0 if ctx.t is None else float(ctx.t)
         return {xb_key: c_ext, **puff.to_state(), "puff.q": drivers[q_key],
-                "puff.c_ext": c_ext, "puff.time": torch.tensor([t_now, dt], dtype=_DTYPE)}
+                "puff.c_ext": c_ext, "puff.time": torch.tensor([t_now, dt], dtype=_DTYPE),
+                "puff.pending": pending, "puff.pending_time": pending_time}
 
 
 def mass_in_streets(model, state, c_bg: Tensor, *, layer_name: str = "street") -> Tensor:
@@ -1307,9 +1380,10 @@ def pending_roof_mass(model, state, c_bg: Tensor, *, junction_source: str = "upw
     `mass_drawn_down`, computed as the closure does (`roof_fluxes` of `"puff.q"`,
     `"puff.c_ext"` and the state's `"<layer>.x"` against the background `c_bg`, times the
     last step's length `"puff.time"[1]`). The emission lags one step (design Sect. 4.2), so
-    the budget identity after a step counts these. Explicit releases are not included (their
-    pending mass is `pulse_mass` over the last step). `drawn_down` is zero under
-    `junction_source="net"`."""
+    the budget identity after a step counts these, and under `PuffOptions.puff_dt` the mass
+    accumulated towards the next emission (`"puff.pending"`, releases included). The
+    explicit releases' mass of the last step is not included (it is `pulse_mass` over the
+    last step). `drawn_down` is zero under `junction_source="net"`."""
     if junction_source not in JUNCTION_SOURCES:
         raise ValueError(f"pending_roof_mass: junction_source must be one of "
                          f"{JUNCTION_SOURCES}, got {junction_source!r}")
@@ -1323,7 +1397,8 @@ def pending_roof_mass(model, state, c_bg: Tensor, *, junction_source: str = "upw
     junction = up if upward else up - down
     emitted = (f_s.sum((-2, -1)) + junction.sum((-2, -1))) * dt_prev
     drawn = down.sum((-2, -1)) * dt_prev if upward else torch.zeros_like(emitted)
-    return emitted.reshape(-1), drawn.reshape(-1)
+    emitted = emitted.reshape(-1) + _f64(state["puff.pending"]).sum(-1)
+    return emitted, drawn.reshape(-1)
 
 
 __all__ = ["ALONG_WIND", "JUNCTION_SOURCES", "PuffClosure", "PuffField", "PuffOptions",

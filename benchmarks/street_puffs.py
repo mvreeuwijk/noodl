@@ -6,13 +6,16 @@ regime yet) held constant, dt = 5 s, one simulated hour (720 steps), batch 1
 and 8 (the batch varies the wind direction by a few degrees). Prints ms/step for the
 forward run (under `torch.no_grad()`) and for forward + backward (a loss on the final
 street concentrations, checkpointed puff steps), the peak number of live puffs over the
-batch and the number of puffs evicted (capacity reached).
+batch and the number of puffs evicted (capacity reached). The puffs are emitted every
+`--puff-dt` seconds (default 30, `none` for one puff per street step) and dropped below
+`--drop-below` of the instance's peak (default 1e-3), the `PuffOptions` defaults.
 
 The network is the 577-street Le Perreux-sur-Marne MUNICH case when `NOODL_PARIS_CASE`
 points to its directory (or `--case`), else a 24 x 24 lattice of 100 m streets.
 
 Run: `.venv/Scripts/python benchmarks/street_puffs.py [--batch 1 8] [--steps 720]
-[--capacity 4096] [--case DIR] [--hour K] [--forward-only] [--profile]`.
+[--capacity 4096] [--case DIR] [--hour K] [--puff-dt 30|none] [--drop-below 1e-3]
+[--forward-only] [--profile]`.
 """
 
 from __future__ import annotations
@@ -74,14 +77,16 @@ def first_stable_hour(case: StreetCase) -> int:
     return next(k for k in range(len(case.times)) if bool((case.meteo["lmo"][k] > 0).all()))
 
 
-def build(case: StreetCase, batch: int, capacity: int, hour: int = 0):
+def build(case: StreetCase, batch: int, capacity: int, hour: int = 0, *,
+          puff_dt: float | None = 30.0, drop_below: float = 1e-3):
     """`(model, state, drivers, source_street)` for `batch` instances of the case's `hour`,
     with a `PulseSource` on the street nearest the upwind edge."""
     species = case.species[0]
     net = case.network
     model, state, _ = build_model(
         net, species=(species,), background="per_street",
-        puffs=PuffOptions(capacity=capacity, sigma_theta=SIGMA_THETA), **case.model_options())
+        puffs=PuffOptions(capacity=capacity, sigma_theta=SIGMA_THETA, puff_dt=puff_dt,
+                          drop_below=drop_below), **case.model_options())
     drivers = drivers_at(case, model, hour, species=[species])
     sources = drivers.pop("street.sources")
     names = [s.name for s in net.streets]
@@ -132,6 +137,9 @@ def main() -> None:
     ap.add_argument("--steps", type=int, default=720)
     ap.add_argument("--capacity", type=int, default=4096)
     ap.add_argument("--case")
+    ap.add_argument("--puff-dt", default="30",
+                    help="puff emission interval, s, or 'none' (one puff per step)")
+    ap.add_argument("--drop-below", type=float, default=1e-3)
     ap.add_argument("--forward-only", action="store_true", help="skip forward + backward")
     ap.add_argument("--hour", type=int, help="case hour (default: the first fully stable one)")
     ap.add_argument("--profile", action="store_true",
@@ -140,10 +148,13 @@ def main() -> None:
     args = ap.parse_args()
     case, label = load_case(args.case)
     hour = first_stable_hour(case) if args.hour is None else args.hour
+    puff_dt = None if args.puff_dt.lower() == "none" else float(args.puff_dt)
+    opts = {"puff_dt": puff_dt, "drop_below": args.drop_below}
     print(f"{label}, hour {hour}: {len(case.network.streets)} streets, dt = {DT} s, "
-          f"{args.steps} steps, capacity {args.capacity}", flush=True)
+          f"{args.steps} steps, capacity {args.capacity}, puff_dt {puff_dt}, drop_below "
+          f"{args.drop_below}", flush=True)
     for i, batch in enumerate(args.batch):
-        model, state, drivers, street = build(case, batch, args.capacity, hour)
+        model, state, drivers, street = build(case, batch, args.capacity, hour, **opts)
         if args.profile and i == 0:
             prof = cProfile.Profile()
             with torch.no_grad():
@@ -151,14 +162,14 @@ def main() -> None:
                 run(model, state, drivers, 20)
                 prof.disable()
             pstats.Stats(prof).sort_stats("cumulative").print_stats(10)
-            model, state, drivers, street = build(case, batch, args.capacity, hour)
+            model, state, drivers, street = build(case, batch, args.capacity, hour, **opts)
         with torch.no_grad():
             sec, peak, ev = run(model, state, drivers, args.steps)
         print(f"B={batch} pulse on street {street}: forward {1e3 * sec / args.steps:.1f} "
               f"ms/step, peak live {peak}, evicted {ev}", flush=True)
         if args.forward_only:
             continue
-        model, state, drivers, _ = build(case, batch, args.capacity, hour)
+        model, state, drivers, _ = build(case, batch, args.capacity, hour, **opts)
         drivers["pulse.rate"].requires_grad_(True)
         sec, peak, ev = run(model, state, drivers, args.steps, grad=True)
         print(f"B={batch}: forward+backward {1e3 * sec / args.steps:.1f} ms/step, "
