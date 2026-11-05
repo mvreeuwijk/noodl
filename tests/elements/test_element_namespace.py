@@ -4,13 +4,12 @@ import noodl.elements as elements
 
 NAMES = [
     "Conductance", "Damper", "Duct", "ConstitutiveLaw", "FanCurve", "FixedFlow", "Orifice",
-    "PowerLaw",
-    "Quadratic", "UpstreamDensityPowerLaw",
-    "DoorCompartmentHead", "MBLDoorCompartment", "MBLDoorCompartmentOperable", "MBLDoorOpen",
-    "MBLDoorPortStream",
-    "MBLDoorOperable", "MBLMedium", "MBLPowerLaw", "MBLTable", "medium", "mbl_coefficient",
-    "mbl_discretized_door", "mbl_discretized_operable_door", "mbl_door_pair", "mbl_ela",
-    "mbl_operable_door_pair", "mbl_orifice", "mbl_point", "mbl_points",
+    "PowerLaw", "Quadratic", "UpstreamDensityPowerLaw", "DoorCompartmentHead",
+    "DoorCompartment", "OperableDoorCompartment", "OpenDoor", "DoorPortStream", "OperableDoor",
+    "AirMedium", "RegularizedPowerLaw", "SplineFlowTable", "medium", "power_law_coefficient",
+    "discretized_door", "discretized_operable_door", "open_door_pair", "effective_leakage_area",
+    "operable_door_pair", "regularized_orifice", "power_law_from_point",
+    "power_law_from_points",
 ]
 
 

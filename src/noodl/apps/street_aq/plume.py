@@ -145,10 +145,6 @@ GAUSS_CUTOFF_SIGMAS = 4.0
 `sigma_y` beyond the flat top contribute exactly zero. SIRANE's keyword `SEUIL_GAUSS`
 ("Sigma threshold to neglect a puff", default 4.0)."""
 
-SEUIL_GAUSS = GAUSS_CUTOFF_SIGMAS
-"""Earlier name of `GAUSS_CUTOFF_SIGMAS`."""
-
-
 TIME_STEP_S = 10.0
 """The trajectory's time step, s: the node spacing of SIRANE's plume is exactly `10 U`
 (31.192 m at `U(H_R)` = 3.119 m/s, 43.357 m at 4.336 m/s)."""

@@ -9,9 +9,9 @@ import numpy as np
 import pytest
 import torch
 
-from noodl.apps.street_aq.canyon import SIRANE_EXCHANGE
+from noodl.apps.street_aq.canyon import EXCHANGE_SIGMA_W_RATIO
 from noodl.apps.street_aq.case import StreetCase, drivers_at
-from noodl.apps.street_aq.network import build_model, from_test_network, munich_idealised
+from noodl.apps.street_aq.network import build_model, from_test_network, twelve_street_grid
 from noodl.apps.street_aq.routing import StreetFlows
 
 DT = torch.float64
@@ -42,14 +42,14 @@ def test_the_default_is_the_neutral_single_direction_model_without_lmo_or_spread
     """With no `lmo` and no `sigma_theta` the sirane preset's Monin-Obukhov turbulence is
     the neutral form and its exact Gaussian average is the single mean direction, bit for
     bit; where the turbulence clears SIRANE's floors, nothing else differs."""
-    for net in (from_test_network(), munich_idealised()[0]):
+    for net in (from_test_network(), twelve_street_grid()[0]):
         default, state, _ = build_model(net)
         plain, _, _ = build_model(net, direction_averaging="none", stability="neutral",
                                   sigma_w_min=0.0, sigma_v_min=0.0)
         d = _drivers(default)
         flows = _flows(default)
         _bl, _u, u_d = flows.velocities(d)
-        assert bool((u_d > 0.30 * SIRANE_EXCHANGE).all())      # the floor does not bind
+        assert bool((u_d > 0.30 * EXCHANGE_SIGMA_W_RATIO).all())      # the floor does not bind
         assert torch.equal(_q(default, d), _q(plain, d))
         assert torch.equal(default.steady(state, d)["street.x"],
                            plain.steady(state, d)["street.x"])
@@ -58,7 +58,7 @@ def test_the_default_is_the_neutral_single_direction_model_without_lmo_or_spread
 def test_the_munich_preset_is_the_munich_option_set():
     """`preset="munich"` against the same closures spelt out one by one (the physics-named
     strings), with a stable and an unstable Obukhov length: bit for bit."""
-    net, _ = munich_idealised()
+    net, _ = twelve_street_grid()
     preset, _, _ = build_model(net, preset="munich")
     spelt, _, _ = build_model(
         net, canyon_wind="exponential_profile", roof_exchange="aspect_ratio_scaled",
@@ -81,7 +81,7 @@ def test_the_sigma_w_floor_is_the_exchange_velocity_floor_it_replaces_bit_for_bi
     net = from_test_network()
     floored, _, _ = build_model(net, direction_averaging="none", sigma_w_min=0.30)
     emulated, _, _ = build_model(net, direction_averaging="none", sigma_w_min=0.0,
-                                 u_d_min=0.30 * SIRANE_EXCHANGE)
+                                 u_d_min=0.30 * EXCHANGE_SIGMA_W_RATIO)
     unfloored, _, _ = build_model(net, direction_averaging="none", sigma_w_min=0.0)
     for u_ref in (0.3, 1.0, 6.0):
         d = _drivers(floored, u_ref=u_ref, lmo=torch.tensor(80.0, dtype=DT))
@@ -95,7 +95,7 @@ def test_the_sigma_v_floor_widens_the_turbulence_intensity_spread():
     Under a weak friction velocity (u* = 0.1 m/s, so sigma_v = 0.12 m/s) and an 8 m/s wind
     the spread is 0.86 degrees (one sample); a 0.5 m/s floor makes it 3.6 degrees (three
     rectangle-rule samples) and a 5 m/s floor reaches the 10-degree cap (ten)."""
-    net, _ = munich_idealised()
+    net, _ = twelve_street_grid()
     counts = []
     for floor in (0.0, 0.5, 5.0):
         model, _, _ = build_model(net, preset="munich", sigma_v_min=floor)
@@ -106,7 +106,7 @@ def test_the_sigma_v_floor_widens_the_turbulence_intensity_spread():
 
 
 def test_a_driven_spread_is_refused_by_the_turbulence_intensity_spread():
-    net, _ = munich_idealised()
+    net, _ = twelve_street_grid()
     model, _, _ = build_model(net, preset="munich")
     with pytest.raises(ValueError, match=r"'sigma_theta' is not used with "
                                          r"direction_spread='turbulence_intensity'"):
@@ -114,7 +114,7 @@ def test_a_driven_spread_is_refused_by_the_turbulence_intensity_spread():
 
 
 def test_the_spread_driver_falls_back_to_the_constructor_value_then_zero():
-    net, _ = munich_idealised()
+    net, _ = twelve_street_grid()
     fixed, _, _ = build_model(net, sigma_theta=0.1, sigma_w_min=0.0)
     free, _, _ = build_model(net, sigma_w_min=0.0)
     none, _, _ = build_model(net, direction_averaging="none", sigma_w_min=0.0)
@@ -134,7 +134,7 @@ def _case(net, **meteo):
 
 
 def test_drivers_at_passes_the_direction_spread_through():
-    net, _ = munich_idealised()
+    net, _ = twelve_street_grid()
     n_s, n_j = len(net.streets), len(net.junctions)
     spread = np.full((2, n_s), math.radians(8.0))
     spread[1] = math.radians(4.0)
@@ -192,7 +192,7 @@ def test_the_sirane_preset_evaluates_the_exchange_sigma_w_at_the_canopy_height()
     u_star, h_abl = 0.9, 400.0
 
     def closed_form(z):
-        return 1.3 * u_star * (1.0 - 0.8 * z / h_abl) * SIRANE_EXCHANGE
+        return 1.3 * u_star * (1.0 - 0.8 * z / h_abl) * EXCHANGE_SIGMA_W_RATIO
 
     default, _, _ = build_model(net, sigma_w_min=0.0)
     assert _flows(default).sigma_w_height == "canopy_height"
@@ -230,7 +230,7 @@ def test_the_canopy_height_sigma_w_matches_sirane_hand_entered_values(h_canopy,
     net = from_test_network()
     model, _, _ = build_model(net, sigma_w_min=0.0, h_canopy=h_canopy)
     u_d = _u_d(model, u_star=1.487, h_abl=1615.5, lmo=2152.72)
-    sigma_w = u_d / SIRANE_EXCHANGE
+    sigma_w = u_d / EXCHANGE_SIGMA_W_RATIO
     assert torch.allclose(sigma_w, torch.full_like(sigma_w, sirane_sigma_w), rtol=4e-4,
                           atol=0.0)
 

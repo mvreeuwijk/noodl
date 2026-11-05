@@ -14,14 +14,14 @@ import torch
 
 from noodl.elements import door_discretized
 from noodl.elements.base import ConstitutiveLaw, memo
-from noodl.elements.door import MBLDoorOpen
+from noodl.elements.door import OpenDoor
 from noodl.elements.door_discretized import (
-    MBLDoorPortStream,
-    mbl_discretized_door,
-    mbl_discretized_operable_door,
+    DoorPortStream,
+    discretized_door,
+    discretized_operable_door,
 )
 from noodl.elements.media import medium
-from noodl.elements.powerlaw_regularized import MBLPowerLaw, mbl_orifice
+from noodl.elements.powerlaw_regularized import RegularizedPowerLaw, regularized_orifice
 
 F64 = torch.float64
 MED = medium("Buildings.Media.Air")
@@ -37,11 +37,11 @@ def _samples(dp_turbulent: float, n: int, seed: int) -> torch.Tensor:
 
 
 @pytest.mark.parametrize("element", [
-    mbl_orifice(0.37, rho_default=1.2),
-    mbl_orifice(0.02, m=0.65, rho_default=1.19, dp_turbulent=0.01),
-    MBLPowerLaw(C=1.3e-3, m=0.66, dp_turbulent=0.1, form="mass", rho_default=1.2),
-    MBLDoorOpen(direction="ab", src=[0], tgt=[1], medium=MED),
-    MBLDoorOpen(direction="ba", src=[0, 1], tgt=[1, 2], medium=MED, wOpe=[0.9, 1.3]),
+    regularized_orifice(0.37, rho_default=1.2),
+    regularized_orifice(0.02, m=0.65, rho_default=1.19, dp_turbulent=0.01),
+    RegularizedPowerLaw(C=1.3e-3, m=0.66, dp_turbulent=0.1, form="mass", rho_default=1.2),
+    OpenDoor(direction="ab", src=[0], tgt=[1], medium=MED),
+    OpenDoor(direction="ba", src=[0, 1], tgt=[1, 2], medium=MED, wOpe=[0.9, 1.3]),
 ])
 def test_power_law_slopes_equal_autograd_bit_for_bit(element):
     drivers = {"T": torch.tensor([293.15, 295.0, 290.0], dtype=F64)}
@@ -56,11 +56,11 @@ def test_power_law_slopes_equal_autograd_bit_for_bit(element):
 @pytest.mark.parametrize(("operable", "y"), [(False, 0.0), (True, 0.0), (True, 0.3)])
 def test_discretised_door_stream_slope_equals_autograd_bit_for_bit(operable, y):
     if operable:
-        comp, head = mbl_discretized_operable_door(src=0, tgt=1, medium=MED, y_key="y",
+        comp, head = discretized_operable_door(src=0, tgt=1, medium=MED, y_key="y",
                                                    LClo=0.01)
     else:
-        comp, head = mbl_discretized_door(src=0, tgt=1, medium=MED, nCom=6)
-    stream = MBLDoorPortStream(comp, head, "ab", "door")
+        comp, head = discretized_door(src=0, tgt=1, medium=MED, nCom=6)
+    stream = DoorPortStream(comp, head, "ab", "door")
     drivers = {"T": torch.tensor([293.15, 296.0], dtype=F64),
                "p_abs": torch.tensor([101325.0, 101321.0], dtype=F64),
                "X_w": torch.full((2,), 0.01, dtype=F64), "y": torch.tensor(y, dtype=F64)}
@@ -98,10 +98,10 @@ def test_stream_slope_at_the_smooth_heaviside_band_edges(operable, monkeypatch):
     bit for bit with autograd off the bounds, and everywhere with autograd of the same law
     whose clamp has that convention by construction (`_heaviside_zero_slope_at_bounds`)."""
     if operable:
-        comp, _ = mbl_discretized_operable_door(src=0, tgt=1, medium=MED, y_key="y",
+        comp, _ = discretized_operable_door(src=0, tgt=1, medium=MED, y_key="y",
                                                 LClo=0.01)
     else:
-        comp, _ = mbl_discretized_door(src=0, tgt=1, medium=MED)
+        comp, _ = discretized_door(src=0, tgt=1, medium=MED)
     drivers = {"T": torch.tensor([293.15, 297.0], dtype=F64),
                "p_abs": torch.tensor([101325.0, 101325.0], dtype=F64),
                "X_w": torch.full((2,), 0.01, dtype=F64), "y": torch.tensor(1.0, dtype=F64)}
@@ -146,7 +146,7 @@ def test_stream_slope_at_the_smooth_heaviside_band_edges(operable, monkeypatch):
 
 
 def test_slopes_under_grad_mode_are_autograd_and_differentiable():
-    orifice = mbl_orifice(0.37, rho_default=1.2, learnable=True)
+    orifice = regularized_orifice(0.37, rho_default=1.2, learnable=True)
     dp = torch.linspace(-2.0, 2.0, 9, dtype=F64)
     slope = orifice.dflow(dp)
     (g,) = torch.autograd.grad(slope.sum(), orifice.C)

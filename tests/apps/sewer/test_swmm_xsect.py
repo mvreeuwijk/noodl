@@ -148,10 +148,6 @@ def test_tabulated_geometry_refuses_storage_by_name():
         build_model(net, storage=True, air=False, quality=False)
 
 
-def test_swmm_names_the_tabulated_geometry():
-    assert read_swmm_inp(DATA / "tree_kinwave.inp", geometry="swmm")[0].geometry == "tabulated"
-
-
 def test_unknown_geometry_is_refused_by_name():
     with pytest.raises(ValueError, match="geometry must be 'analytic' or 'tabulated'"):
         read_swmm_inp(DATA / "tree_kinwave.inp", geometry="circle")

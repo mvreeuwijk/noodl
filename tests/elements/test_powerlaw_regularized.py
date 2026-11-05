@@ -14,12 +14,12 @@ import pytest
 import torch
 
 from noodl.elements.powerlaw_regularized import (
-    MBLPowerLaw,
-    mbl_coefficient,
-    mbl_ela,
-    mbl_orifice,
-    mbl_point,
-    mbl_points,
+    RegularizedPowerLaw,
+    effective_leakage_area,
+    power_law_coefficient,
+    power_law_from_point,
+    power_law_from_points,
+    regularized_orifice,
 )
 
 # ---------------------------------------------------------------------------------------
@@ -92,7 +92,7 @@ def test_powerlaw_and_powerlawfixedm_agree_for_the_same_m(m, dp_t):
 
 
 # ---------------------------------------------------------------------------------------
-# 1-2. MBLPowerLaw flow matches the MBL regularised power law, volume and mass forms
+# 1-2. RegularizedPowerLaw flow matches the MBL regularised power law, volume and mass forms
 # ---------------------------------------------------------------------------------------
 
 
@@ -101,7 +101,7 @@ def test_powerlaw_and_powerlawfixedm_agree_for_the_same_m(m, dp_t):
 def test_volume_form_flow_is_rho_default_times_mbl_powerlaw(m, dp_t):
     C = 1.3
     rho_default = 1.2
-    el = MBLPowerLaw(
+    el = RegularizedPowerLaw(
         C=torch.tensor(C, dtype=torch.float64),
         m=torch.tensor(m, dtype=torch.float64),
         dp_turbulent=dp_t,
@@ -121,7 +121,7 @@ def test_volume_form_flow_is_rho_default_times_mbl_powerlaw(m, dp_t):
 @pytest.mark.parametrize("dp_t", _DP_T_VALUES)
 def test_mass_form_flow_is_mbl_powerlaw_without_rho_default(m, dp_t):
     C = 1.3
-    el = MBLPowerLaw(
+    el = RegularizedPowerLaw(
         C=torch.tensor(C, dtype=torch.float64),
         m=torch.tensor(m, dtype=torch.float64),
         dp_turbulent=dp_t,
@@ -145,7 +145,7 @@ def test_mass_form_flow_is_mbl_powerlaw_without_rho_default(m, dp_t):
 def _inner_branch_torch(C, m, dp, dp_t):
     """The regularised polynomial branch alone (``powerLaw.mo:24-29``), evaluated with no
     ``torch.where``/mask -- used only to probe continuity AT the exact switch point, where
-    ``MBLPowerLaw._regularised`` itself always selects the "outer" branch (its mask is a
+    ``RegularizedPowerLaw._regularised`` itself always selects the "outer" branch (its mask is a
     strict ``<``).
     """
     gamma = 1.5
@@ -205,7 +205,7 @@ def test_continuity_of_value_and_first_two_derivatives_at_transition(m, dp_t):
 @pytest.mark.parametrize("dp_t", _DP_T_VALUES)
 @pytest.mark.parametrize("form", ["volume", "mass"])
 def test_gradcheck_inside_and_outside_the_band_including_zero(m, dp_t, form):
-    el = MBLPowerLaw(
+    el = RegularizedPowerLaw(
         C=torch.tensor(1.3, dtype=torch.float64),
         m=torch.tensor(m, dtype=torch.float64),
         dp_turbulent=dp_t,
@@ -231,7 +231,7 @@ def test_gradcheck_inside_and_outside_the_band_including_zero(m, dp_t, form):
 )
 def test_mbl_orifice_coefficient(A, CD, rho_default):
     """Orifice.mo:3-5,9: `C = CD * A * sqrt(2 / rho_default)`, `m = 0.5` fixed default."""
-    el = mbl_orifice(A=A, CD=CD, rho_default=rho_default)
+    el = regularized_orifice(A=A, CD=CD, rho_default=rho_default)
     expected_C = CD * A * math.sqrt(2.0 / rho_default)
     torch.testing.assert_close(
         el.C, torch.tensor(expected_C, dtype=torch.float64), rtol=1e-12, atol=0.0
@@ -248,7 +248,7 @@ def test_mbl_ela_coefficient(L, dpRat, CDRat, m, rho_default):
     """EffectiveAirLeakageArea.mo:3-5,7-14,16:
     `C = L * CDRat * sqrt(2 / rho_default) * dpRat ** (0.5 - m)`.
     """
-    el = mbl_ela(L=L, dpRat=dpRat, CDRat=CDRat, m=m, rho_default=rho_default)
+    el = effective_leakage_area(L=L, dpRat=dpRat, CDRat=CDRat, m=m, rho_default=rho_default)
     expected_C = L * CDRat * math.sqrt(2.0 / rho_default) * dpRat ** (0.5 - m)
     torch.testing.assert_close(
         el.C, torch.tensor(expected_C, dtype=torch.float64), rtol=1e-12, atol=0.0
@@ -264,7 +264,7 @@ def test_mbl_ela_coefficient(L, dpRat, CDRat, m, rho_default):
 def test_mbl_point_coefficient(dpMea, mMea, m):
     """Point_m_flow.mo:4-5: `k = mMea_flow_nominal / dpMea_nominal ** m` (the `C` of the
     Coefficient_m_flow mass form)."""
-    el = mbl_point(dpMea=dpMea, mMea_flow=mMea, m=m, rho_default=1.2)
+    el = power_law_from_point(dpMea=dpMea, mMea_flow=mMea, m=m, rho_default=1.2)
     expected_k = mMea / dpMea**m
     torch.testing.assert_close(
         el.C, torch.tensor(expected_k, dtype=torch.float64), rtol=1e-12, atol=0.0
@@ -280,7 +280,7 @@ def test_mbl_point_coefficient(dpMea, mMea, m):
 def test_mbl_points_coefficient(dpMea, mMea):
     """Points_m_flow.mo:4-6,15-16: `m = (ln(mMea1)-ln(mMea2))/(ln(dpMea1)-ln(dpMea2))`,
     `k = mMea1 / dpMea1 ** m`."""
-    el = mbl_points(dpMea=dpMea, mMea_flow=mMea, rho_default=1.2)
+    el = power_law_from_points(dpMea=dpMea, mMea_flow=mMea, rho_default=1.2)
     expected_m = (math.log(mMea[0]) - math.log(mMea[1])) / (
         math.log(dpMea[0]) - math.log(dpMea[1])
     )
@@ -300,25 +300,25 @@ def test_mbl_points_coefficient(dpMea, mMea):
 )
 def test_mbl_coefficient_is_a_direct_pass_through(C, m, rho_default):
     """Coefficient_V_flow.mo/Coefficient_m_flow.mo: `C`/`k` and `m` are given directly."""
-    el_v = mbl_coefficient(C=C, m=m, form="volume", rho_default=rho_default)
+    el_v = power_law_coefficient(C=C, m=m, form="volume", rho_default=rho_default)
     torch.testing.assert_close(el_v.C, torch.tensor(C, dtype=torch.float64))
     torch.testing.assert_close(el_v.m, torch.tensor(m, dtype=torch.float64))
     assert el_v.form == "volume"
 
-    el_m = mbl_coefficient(C=C, m=m, form="mass", rho_default=rho_default)
+    el_m = power_law_coefficient(C=C, m=m, form="mass", rho_default=rho_default)
     torch.testing.assert_close(el_m.C, torch.tensor(C, dtype=torch.float64))
     assert el_m.form == "mass"
 
 
 # ---------------------------------------------------------------------------------------
-# 6. mbl_points reproduces both measured points exactly (well outside the turbulent band)
+# 6. power_law_from_points reproduces both measured points exactly (well outside the turbulent band)
 # ---------------------------------------------------------------------------------------
 
 
 def test_mbl_points_fit_reproduces_both_measured_points():
     dpMea = (4.0, 50.0)
     mMea = (0.019, 0.15)
-    el = mbl_points(dpMea=dpMea, mMea_flow=mMea, dp_turbulent=0.1, rho_default=1.2)
+    el = power_law_from_points(dpMea=dpMea, mMea_flow=mMea, dp_turbulent=0.1, rho_default=1.2)
     dp = torch.tensor(dpMea, dtype=torch.float64)
     got = el.flow(dp)
     torch.testing.assert_close(got, torch.tensor(mMea, dtype=torch.float64), rtol=1e-12, atol=0.0)
@@ -332,7 +332,7 @@ def test_mbl_points_fit_reproduces_both_measured_points():
 def test_mblpowerlaw_broadcasts_leading_batch_dims_against_per_edge_parameters():
     """Elements broadcast over leading batch dims, like every other noodl element
     (``noodl.elements.powerlaw.PowerLaw``'s own
-    ``test_broadcasts_batched_parameters_against_batched_dp``) -- ``MBLPowerLaw`` must too,
+    ``test_broadcasts_batched_parameters_against_batched_dp``) -- ``RegularizedPowerLaw`` must too,
     since ``_regularised`` uses only ordinary elementwise torch broadcasting with no
     special-casing of ``dp``'s shape. Per-edge ``C``/``m`` of shape ``(b,)`` against ``dp`` of
     shape ``(B, b)`` and ``(B1, B2, b)``.
@@ -341,7 +341,7 @@ def test_mblpowerlaw_broadcasts_leading_batch_dims_against_per_edge_parameters()
     C = torch.tensor([1.0, 1.3, 0.7], dtype=torch.float64)  # per-edge, shape (b=3,)
     m = torch.tensor([0.5, 0.65, 1.0], dtype=torch.float64)  # per-edge, shape (b=3,)
     b = C.shape[0]
-    el = MBLPowerLaw(C=C, m=m, dp_turbulent=dp_t, form="mass", rho_default=1.2)
+    el = RegularizedPowerLaw(C=C, m=m, dp_turbulent=dp_t, form="mass", rho_default=1.2)
 
     dp_np = _dp_grid(dp_t)  # shape (B,)
     B = dp_np.shape[0]
@@ -370,7 +370,7 @@ def test_mblpowerlaw_broadcasts_leading_batch_dims_against_per_edge_parameters()
 
 
 def test_mbl_orifice_constructor_broadcasts_leading_batch_dims():
-    """Same broadcasting requirement for a constructor's output: ``mbl_orifice`` with a
+    """Same broadcasting requirement for a constructor's output: ``regularized_orifice`` with a
     per-edge area ``A`` of shape ``(b,)`` against ``dp`` of shape ``(B, b)`` and
     ``(B1, B2, b)``.
     """
@@ -378,7 +378,7 @@ def test_mbl_orifice_constructor_broadcasts_leading_batch_dims():
     rho_default = 1.2
     A = torch.tensor([0.01, 0.02, 0.03], dtype=torch.float64)  # per-edge, shape (b=3,)
     b = A.shape[0]
-    el = mbl_orifice(A=A, CD=0.65, dp_turbulent=dp_t, rho_default=rho_default)
+    el = regularized_orifice(A=A, CD=0.65, dp_turbulent=dp_t, rho_default=rho_default)
     expected_C = 0.65 * A * math.sqrt(2.0 / rho_default)
     torch.testing.assert_close(el.C, expected_C, rtol=1e-12, atol=0.0)
 
@@ -415,7 +415,7 @@ def test_mbl_orifice_constructor_broadcasts_leading_batch_dims():
 
 def test_invalid_form_is_rejected():
     with pytest.raises(ValueError):
-        MBLPowerLaw(
+        RegularizedPowerLaw(
             C=torch.tensor(1.0, dtype=torch.float64),
             m=torch.tensor(0.5, dtype=torch.float64),
             form="bogus",
@@ -428,7 +428,7 @@ def test_switching_values_mark_the_band_edges_where_the_law_changes_piece():
     edges, where the law passes from the polynomial to the sharp branch. The law is twice
     continuously differentiable there, not three times: the third difference quotient jumps
     across the edge, which is why a time integrator puts a step boundary on it."""
-    law = MBLPowerLaw(C=0.3, m=0.65, dp_turbulent=0.1, form="volume", rho_default=1.2)
+    law = RegularizedPowerLaw(C=0.3, m=0.65, dp_turbulent=0.1, form="volume", rho_default=1.2)
     dp = torch.tensor([-0.2, -0.1, 0.0, 0.1, 0.2], dtype=torch.float64)
     sw = law.switching(dp)
     assert sw.shape == (10,)

@@ -32,7 +32,7 @@ LINKS = ["C1", "C2", "C3", "C4", "C5"]
 NETWORKS = ["tree_kinwave.inp", "example1_kinwave.inp", "tree_kinwave_large.inp"]
 
 #: Depth and volume come from the LIVE engine (`Link.depth`, `Link.volume` return SWMM's
-#: float64 `newDepth` / `newVolume` times its unit factor), and `geometry="swmm"` performs
+#: float64 `newDepth` / `newVolume` times its unit factor), and `geometry="tabulated"` performs
 #: SWMM's own float64 operations (`xsect_tables.py`) in essentially SWMM's order, so the only
 #: admissible difference is float64 rounding: ~50 operations at unit roundoff 1.1e-16, through
 #: a piecewise-linear inverse and a Newton root whose relative condition numbers are O(1),
@@ -75,7 +75,7 @@ def _run_swmm(tmp_path, name, links=None):
     return out
 
 
-def _noodl(name, geometry="swmm"):
+def _noodl(name, geometry="tabulated"):
     net, _, _ = read_swmm_inp(DATA / name, geometry=geometry)
     model, state, drivers = build_model(net, air=False, quality=False)
     return net, model._apply_closures(state, drivers)
@@ -119,7 +119,7 @@ def test_pipe_flows(parity):
 def test_normal_depths(parity):
     """`TOL_FLOAT64`. SWMM reports ``(Y(a1) + Y(a2)) / 2`` from its 51-point ``Y_Circ``
     table (Ref. Man. Vol. II section 5.1.3; `flowrout.c::setNewLinkState`), which
-    `geometry="swmm"` reproduces (`noodl.apps.sewer.xsect_tables`)."""
+    `geometry="tabulated"` reproduces (`noodl.apps.sewer.xsect_tables`)."""
     assert _worst(*parity, "sewer.h", "depth") < TOL_FLOAT64
 
 
@@ -149,7 +149,7 @@ def test_tracer_concentration(tmp_path):
     step: `qualrout.c::findLinkQual` applies `c (1 - k dt)` (`getReactedQual`) and then mixes
     with the inflow over the OLD volume, `c = (c V + c_in q dt) / (V + q dt)`
     (`getMixedQual`), whose fixed point is `c = c_in q / (q + k V)`. With
-    `geometry="swmm"` the volume `V` is SWMM's own, so what remains is float64 rounding
+    `geometry="tabulated"` the volume `V` is SWMM's own, so what remains is float64 rounding
     (~1e-15) and SWMM's distance from steady state after 2 h: the slowest tank has
     `tau = V/q < 170 s`, so three tanks in series have decayed by
     `(t/tau)^2/2 exp(-t/tau) < 1e-15` by t = 7200 s. 1e-9 is a wide margin over both.

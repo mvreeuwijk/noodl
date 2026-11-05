@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import pytest
 
-from noodl.apps.street_aq.canyon import KAPPA, KAPPA_MUNICH
+from noodl.apps.street_aq.canyon import KAPPA
 from noodl.apps.street_aq.closures import (
+    KAPPA_041,
     OPTIONS,
     PRESETS,
+    infer_kappa,
     normalise,
     preset_options,
     resolve,
@@ -25,7 +27,7 @@ def test_both_presets_set_every_option_to_an_allowed_value():
 
 def test_the_presets_are_the_two_reference_closure_sets():
     sirane, munich = PRESETS["sirane"], PRESETS["munich"]
-    assert sirane["kappa"] == KAPPA and munich["kappa"] == KAPPA_MUNICH
+    assert sirane["kappa"] == KAPPA and munich["kappa"] == KAPPA_041
     assert (sirane["sigma_w_min"], sirane["sigma_v_min"]) == (0.30, 0.5)
     assert (munich["sigma_w_min"], munich["sigma_v_min"]) == (0.0, 0.0)
     assert (munich["canyon_wind_min"], munich["u_d_min"]) == (0.1, 0.001)
@@ -76,3 +78,8 @@ def test_kappa_follows_the_preset_or_the_explicit_mix():
 def test_an_unknown_keyword_is_refused_naming_the_function():
     with pytest.raises(TypeError, match=r"f: unexpected keyword argument 'exchange'"):
         resolve("sirane", {"exchange": "x"}, "f")
+
+
+def test_street_kappa_follows_the_canyon_wind_profile():
+    assert infer_kappa({"canyon_wind": "exponential_profile"}) == 0.41
+    assert infer_kappa({"canyon_wind": "bessel_profile"}) == 0.40

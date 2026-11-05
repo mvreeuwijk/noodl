@@ -15,26 +15,26 @@ import pytest
 import torch
 
 from noodl.apps.street_aq.canyon import (
+    ASPECT_RATIO_EXCHANGE_BETA,
     C_BRACKET_HI,
     C_BRACKET_LO,
-    GAMMA_E,
+    EULER_GAMMA_TRUNCATED,
+    EXCHANGE_SIGMA_W_RATIO,
     KAPPA,
-    KAPPA_MUNICH,
-    SCHULTE_BETA,
-    SIRANE_EXCHANGE,
+    KAPPA_041,
     Z0_B_DEFAULT,
     BoundaryLayer,
     bessel_j0,
     bessel_j1,
+    bessel_shape_parameter,
+    bessel_shape_residual,
     bessel_y0,
     bessel_y1,
     boundary_layer,
+    canopy_displacement_roughness,
     canyon_velocity,
     exchange_velocity,
-    macdonald_profile,
     roof_wind,
-    soulhac_residual,
-    soulhac_shape,
 )
 
 DT = torch.float64
@@ -45,7 +45,7 @@ def _scipy_shape(ratio: float) -> float:
     from scipy.special import jv, yv
 
     def f(c):
-        u = math.pi / 2.0 * yv(1, c) / jv(1, c) - GAMMA_E
+        u = math.pi / 2.0 * yv(1, c) / jv(1, c) - EULER_GAMMA_TRUNCATED
         return 0.5 * ratio * c - (math.exp(u) if u < 700.0 else float("inf"))
 
     return brentq(f, C_BRACKET_LO, C_BRACKET_HI, xtol=1e-16, rtol=8.9e-16)
@@ -108,33 +108,33 @@ def test_bessel_wrappers_are_differentiable_and_use_the_standard_identities():
 
 def test_soulhac_shape_matches_brentq():
     ratios = [0.0026666666666666666, 0.0075, 0.015, 0.03, 0.1, 0.5]
-    got = soulhac_shape(torch.tensor(ratios, dtype=DT))
+    got = bessel_shape_parameter(torch.tensor(ratios, dtype=DT))
     want = torch.tensor([_scipy_shape(r) for r in ratios], dtype=DT)
     torch.testing.assert_close(got, want, rtol=1e-12, atol=0)
     torch.testing.assert_close(
-        soulhac_residual(got, torch.tensor(ratios, dtype=DT)),
+        bessel_shape_residual(got, torch.tensor(ratios, dtype=DT)),
         torch.zeros(len(ratios), dtype=DT), rtol=0, atol=1e-14,
     )
 
 
 def test_soulhac_shape_is_differentiable_in_the_roughness_ratio():
     ratio = torch.tensor([0.015, 0.03], dtype=DT, requires_grad=True)
-    (grad,) = torch.autograd.grad(soulhac_shape(ratio).sum(), ratio)
+    (grad,) = torch.autograd.grad(bessel_shape_parameter(ratio).sum(), ratio)
     step = 1e-8
     for i in range(2):
         plus = ratio.detach().clone()
         minus = ratio.detach().clone()
         plus[i] += step
         minus[i] -= step
-        central = (soulhac_shape(plus)[i] - soulhac_shape(minus)[i]) / (2 * step)
+        central = (bessel_shape_parameter(plus)[i] - bessel_shape_parameter(minus)[i]) / (2 * step)
         assert abs(float(grad[i]) / float(central) - 1.0) < 1e-6
 
 
 def test_soulhac_shape_refuses_a_roughness_comparable_to_the_canyon():
     with pytest.raises(ValueError, match=r"bessel_shape_parameter.*1\.6.*index"):
-        soulhac_shape(torch.tensor([0.01, 2.0], dtype=DT))
+        bessel_shape_parameter(torch.tensor([0.01, 2.0], dtype=DT))
     with pytest.raises(ValueError, match=r"bessel_shape_parameter.*strictly positive"):
-        soulhac_shape(torch.tensor([0.0], dtype=DT))
+        bessel_shape_parameter(torch.tensor([0.0], dtype=DT))
 
 
 @pytest.mark.parametrize("w_over_h", [0.5, 1.0, 2.0, 4.0])
@@ -204,8 +204,8 @@ def test_exchange_velocity_sirane_and_schulte_agree_at_unit_aspect_ratio():
     sirane = exchange_velocity(sigma_w, one, one, roof_exchange="turbulent_velocity")
     schulte = exchange_velocity(sigma_w, one, one, roof_exchange="aspect_ratio_scaled")
     torch.testing.assert_close(sirane, schulte, rtol=1e-14, atol=0)
-    assert abs(SIRANE_EXCHANGE - 1.0 / (math.sqrt(2.0) * math.pi)) < 1e-16
-    assert abs(SCHULTE_BETA - 2.0 * SIRANE_EXCHANGE) < 1e-16
+    assert abs(EXCHANGE_SIGMA_W_RATIO - 1.0 / (math.sqrt(2.0) * math.pi)) < 1e-16
+    assert abs(ASPECT_RATIO_EXCHANGE_BETA - 2.0 * EXCHANGE_SIGMA_W_RATIO) < 1e-16
 
 
 def test_the_sigma_w_floor_is_the_exchange_velocity_floor_bit_for_bit():
@@ -254,7 +254,7 @@ def test_sigma_w_neutral_form_and_the_three_munich_branches():
                        h_abl=torch.tensor([500.0], dtype=DT),
                        z_ref=torch.tensor([30.0], dtype=DT),
                        d=torch.tensor([4.6], dtype=DT), z0=torch.tensor([0.69], dtype=DT),
-                       kappa=KAPPA_MUNICH)
+                       kappa=KAPPA_041)
     z = torch.tensor([6.9], dtype=DT)
     torch.testing.assert_close(bl.sigma_w(z), torch.tensor([0.3856944], dtype=DT),
                                rtol=1e-13, atol=0)
@@ -276,7 +276,7 @@ def test_sigma_v_neutral_is_exactly_1_point_2_u_star():
                        h_abl=torch.tensor([500.0], dtype=DT),
                        z_ref=torch.tensor([30.0], dtype=DT),
                        d=torch.tensor([4.6], dtype=DT), z0=torch.tensor([0.69], dtype=DT),
-                       kappa=KAPPA_MUNICH)
+                       kappa=KAPPA_041)
     torch.testing.assert_close(bl.sigma_v(), torch.tensor([0.36], dtype=DT),
                                rtol=1e-13, atol=0)
 
@@ -284,7 +284,7 @@ def test_sigma_v_neutral_is_exactly_1_point_2_u_star():
 def test_macdonald_and_bessel_roof_wind_reproduce_the_published_geometry():
     h = torch.tensor([6.9], dtype=DT)
     w = torch.tensor([7.5], dtype=DT)
-    d_c, z0c = macdonald_profile(h, w)
+    d_c, z0c = canopy_displacement_roughness(h, w)
     torch.testing.assert_close(d_c, torch.tensor([4.617352498423888], dtype=DT),
                                rtol=1e-12, atol=0)
     torch.testing.assert_close(z0c, torch.tensor([0.6614635677623194], dtype=DT),
@@ -293,7 +293,7 @@ def test_macdonald_and_bessel_roof_wind_reproduce_the_published_geometry():
     macdonald = roof_wind(u_star, h, w, roof_wind="canopy_log_law", h_mean=h, w_mean=w)
     torch.testing.assert_close(macdonald, torch.tensor([0.9063192631810709], dtype=DT),
                                rtol=1e-12, atol=0)
-    sirane = roof_wind(u_star, h, w, roof_wind="bessel_canyon_mean", z0_s=0.01, kappa=KAPPA_MUNICH)
+    sirane = roof_wind(u_star, h, w, roof_wind="bessel_canyon_mean", z0_s=0.01, kappa=KAPPA_041)
     # u_H / u* = (u_M/u*) * f_mean = 8.611791 * 0.880654 at the continuous root.
     torch.testing.assert_close(sirane / u_star, torch.tensor([8.611791 * 0.880654],
                                                              dtype=DT), rtol=2e-6, atol=0)
@@ -336,7 +336,7 @@ def test_the_munich_sigmas_are_finite_and_differentiable_at_a_calm_step():
     bl = BoundaryLayer(u_star=u_star, h_abl=torch.tensor([500.0], dtype=DT),
                        z_ref=torch.tensor([30.0], dtype=DT),
                        d=torch.tensor([4.6], dtype=DT), z0=torch.tensor([0.69], dtype=DT),
-                       kappa=KAPPA_MUNICH)
+                       kappa=KAPPA_041)
     lmo = torch.tensor([-50.0], dtype=DT)
     for value in (bl.sigma_w(torch.tensor([6.9], dtype=DT), lmo=lmo,
                              stability="monin_obukhov"),
@@ -358,7 +358,7 @@ def test_sigma_v_neutral_form_and_the_three_munich_branches():
                        h_abl=torch.tensor([500.0], dtype=DT),
                        z_ref=torch.tensor([30.0], dtype=DT),
                        d=torch.tensor([4.6], dtype=DT), z0=torch.tensor([0.69], dtype=DT),
-                       kappa=KAPPA_MUNICH)
+                       kappa=KAPPA_041)
     neutral = bl.sigma_v(lmo=torch.tensor([1e6], dtype=DT), stability="monin_obukhov")
     torch.testing.assert_close(neutral, torch.tensor([0.36], dtype=DT),
                                rtol=1e-13, atol=0)
@@ -376,7 +376,7 @@ def test_sigma_v_neutral_form_and_the_three_munich_branches():
 
 
 def test_soulhac_canyon_velocity_refuses_a_roughness_at_or_above_the_half_width():
-    """`soulhac_shape` only refuses `z0_b/di >= 1.6`, but `alpha = ln(di/z0_b)` is zero at
+    """`bessel_shape_parameter` only refuses `z0_b/di >= 1.6`, but `alpha = ln(di/z0_b)` is zero at
     ratio 1 and negative on (1, 1.6), so `canyon_velocity` returned a silent NaN there.
     W = 0.3 m with z0_b = 0.15 m is exactly ratio 1; W = 0.32 m is just below it."""
     u_star = torch.tensor([0.4], dtype=DT)

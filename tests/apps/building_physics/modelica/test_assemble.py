@@ -191,7 +191,7 @@ def test_zonal_flows_are_prescribed_directional_edges_and_carry_moisture():
 # -------------------------------------------------- mixed: doors, stack, sources, balance
 def test_mixed_model_conserves_mass_and_accumulates_the_trace_substance():
     model, state, drivers, names = _load("mixed_rooms.json")
-    # a discretised door is its two port streams (MBLDoorPortStream), whatever its nCom
+    # a discretised door is its two port streams (DoorPortStream), whatever its nCom
     assert names.kinds["dooDis"] == ("door_ab:dooDis", "door_ba:dooDis")
     assert len(names.edges["dooDis"]) == 2
     hist = simulate(model, state, drivers, names.times)

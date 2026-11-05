@@ -11,8 +11,8 @@ import pytest
 
 from noodl.apps.street_aq import (
     StreetCase,
-    munich_idealised,
     read_case,
+    twelve_street_grid,
     write_case,
     write_sweep,
 )
@@ -29,7 +29,7 @@ def sk():
 
 
 def _synthetic(n_hours=2, *, species=("NO2",), emissions=1e-3, background=2e-8, **meteo):
-    net, _ = munich_idealised()
+    net, _ = twelve_street_grid()
     base = dict(wind_dir_from_deg=45.0, wind_speed=5.0)
     base.update(meteo)
     return StreetCase.synthetic(
@@ -103,7 +103,7 @@ def test_a_synthetic_case_writes_and_re_reads(tmp_path):
 
 
 def test_emissions_varying_by_hour_get_one_street_file_per_distinct_hour(tmp_path):
-    net, _ = munich_idealised()
+    net, _ = twelve_street_grid()
     emissions = np.zeros((3, len(net.streets), 1))
     emissions[0, 10, 0] = 2e-3
     emissions[1, 3, 0] = 5e-4
@@ -137,7 +137,7 @@ def test_direction_is_written_as_degrees_from_without_a_flip(tmp_path):
 
 
 def test_masses_are_written_in_sirane_units(tmp_path):
-    net, _ = munich_idealised()
+    net, _ = twelve_street_grid()
     emissions = np.zeros((2, len(net.streets), 1))
     emissions[:, 4, 0] = 1e-3  # kg/s
     write_case(tmp_path / "deck", _synthetic(emissions=emissions, background=4e-8),
@@ -153,7 +153,7 @@ def test_masses_are_written_in_sirane_units(tmp_path):
 
 def test_the_background_covers_whole_days_around_the_period(tmp_path):
     case = StreetCase.synthetic(
-        munich_idealised()[0], species=["NO2"], times=[0.0, 3600.0],
+        twelve_street_grid()[0], species=["NO2"], times=[0.0, 3600.0],
         meteo=dict(wind_dir_from_deg=0.0, wind_speed=5.0), emissions=0.0,
         background=np.array([1e-9, 3e-9]), start=datetime(2014, 1, 7, 23),
     )
@@ -295,7 +295,7 @@ def test_what_sirane_cannot_express_is_named(tmp_path, kwargs, options, match):
 
 
 def test_meteo_varying_between_streets_is_refused(tmp_path):
-    net, _ = munich_idealised()
+    net, _ = twelve_street_grid()
     direction = np.full((2, len(net.streets)), 45.0)
     direction[:, 3] = 50.0
     with pytest.raises(ValueError, match="varies between streets"):
@@ -314,7 +314,7 @@ def test_a_street_length_that_is_not_its_geometry_is_refused(tmp_path):
 
 
 def test_sirane_needs_a_start_date(tmp_path):
-    net, _ = munich_idealised()
+    net, _ = twelve_street_grid()
     case = StreetCase.synthetic(net, species=["NO2"], times=[0.0],
                                 meteo=dict(wind_dir_from_deg=0.0, wind_speed=5.0),
                                 emissions=0.0, background=0.0)

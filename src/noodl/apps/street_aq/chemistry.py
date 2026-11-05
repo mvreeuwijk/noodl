@@ -11,7 +11,6 @@ from noodl.layers.reaction import (
     Photostationary,
     Reaction,
     k_no_o3_jpl2003,
-    k_no_o3_munich,
     molar_volume,
 )
 from noodl.model import Drivers, Model, State
@@ -24,15 +23,9 @@ __all__ = [
     "K_NO_O3_SOULHAC2011_PREFACTOR",
     "NO_O3_RATES",
     "PHOTOSTATIONARY_FLOOR_PPB",
-    "SIRANE_K3_ACTIVATION",
-    "SIRANE_K3_PREFACTOR",
-    "SIRANE_K_FLOOR_PPB",
     "j_no2_elevation_cloud",
-    "j_no2_sirane",
     "j_no2_zenith_table",
     "k_no_o3_jpl2003",
-    "k_no_o3_munich",
-    "k_no_o3_sirane",
     "k_no_o3_soulhac2011",
     "molar_volume",
     "photostationary_for_streets",
@@ -236,15 +229,6 @@ PHOTOSTATIONARY_FLOOR_PPB = 2.0
 """ppb: the lower bound on `k1/k3` (`J/k`) in the photostationary split, SIRANE's 2 ppb (the
 `sirane` preset's `floor_ppb`)."""
 
-SIRANE_K3_PREFACTOR = K_NO_O3_SOULHAC2011_PREFACTOR
-"""Earlier name of `K_NO_O3_SOULHAC2011_PREFACTOR`."""
-
-SIRANE_K3_ACTIVATION = K_NO_O3_SOULHAC2011_ACTIVATION
-"""Earlier name of `K_NO_O3_SOULHAC2011_ACTIVATION`."""
-
-SIRANE_K_FLOOR_PPB = PHOTOSTATIONARY_FLOOR_PPB
-"""Earlier name of `PHOTOSTATIONARY_FLOOR_PPB`."""
-
 
 def solar_elevation(latitude_deg, day_of_year, hour) -> torch.Tensor:
     """The solar elevation (degrees) at `latitude_deg`, day `day_of_year` (1 January = 1)
@@ -287,10 +271,6 @@ def j_no2_elevation_cloud(elevation_deg, cloud_octas=0.0) -> torch.Tensor:
     return clear * (1.0 - 0.75 * (cloud / 8.0) ** 3.4)
 
 
-j_no2_sirane = j_no2_elevation_cloud
-"""Deprecated name of `j_no2_elevation_cloud`."""
-
-
 def k_no_o3_soulhac2011(temperature) -> torch.Tensor:
     """k(NO + O3) = 1.325e6 exp(-1430/T) m3 mol^-1 s^-1 at `temperature` (K), SIRANE's
     rate (Soulhac et al. 2011, with the prefactor that reproduces SIRANE v2.1 output).
@@ -301,9 +281,6 @@ def k_no_o3_soulhac2011(temperature) -> torch.Tensor:
     t = torch.as_tensor(temperature, dtype=torch.float64)
     return K_NO_O3_SOULHAC2011_PREFACTOR * torch.exp(-K_NO_O3_SOULHAC2011_ACTIVATION / t)
 
-
-k_no_o3_sirane = k_no_o3_soulhac2011
-"""Deprecated name of `k_no_o3_soulhac2011`."""
 
 NO_O3_RATES = {"soulhac_2011": k_no_o3_soulhac2011, "jpl_2003": k_no_o3_jpl2003}
 """The named NO + O3 rates `photostationary_for_streets(no_o3_rate=...)` takes."""

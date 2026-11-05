@@ -29,12 +29,12 @@ import pytest
 import torch
 
 from noodl.elements import (
-    MBLDoorOpen,
-    MBLDoorOperable,
-    mbl_door_pair,
-    mbl_ela,
-    mbl_operable_door_pair,
+    OpenDoor,
+    OperableDoor,
+    effective_leakage_area,
     medium,
+    open_door_pair,
+    operable_door_pair,
 )
 from noodl.layers.kirchhoff import KirchhoffLayer
 from noodl.topology import Network
@@ -192,7 +192,7 @@ DT_GRID = np.array([-10.0, -3.0, -1e-3, 0.0, 1e-3, 0.5, 3.0, 10.0])
 
 def _pair(med=AIR, **kw):
     p = {**DOOR, **kw}
-    return mbl_door_pair(
+    return open_door_pair(
         src=[0],
         tgt=[1],
         medium=med,
@@ -207,7 +207,7 @@ def _pair(med=AIR, **kw):
 
 def _opair(**kw):
     p = {**OPER, **kw}
-    return mbl_operable_door_pair(
+    return operable_door_pair(
         src=[0],
         tgt=[1],
         medium=AIR,
@@ -353,7 +353,7 @@ def test_operable_door_closed_is_the_effective_air_leakage_area_law():
     ela = _ela_np(dp, L=20e-4, dpRat=4.0, CDRat=1.0, m=0.65, dp_t=0.01, med=AIR)
     np.testing.assert_allclose((q_ab + q_ba).numpy(), ela, rtol=RTOL, atol=ATOL)
     # ... and the noodl ELA element built the way Validation/DoorOpenClosed.mo builds `lea`.
-    lea = mbl_ela(20e-4, m=0.65, dp_turbulent=0.01, rho_default=AIR.rho_default)
+    lea = effective_leakage_area(20e-4, m=0.65, dp_turbulent=0.01, rho_default=AIR.rho_default)
     torch.testing.assert_close(q_ab + q_ba, lea.flow(dp_t[..., 0]), rtol=RTOL, atol=ATOL)
 
 
@@ -402,7 +402,7 @@ def test_multi_edge_element_broadcasts_over_leading_batch_dims():
     """Two doors (nodes 0->2 and 1->2) with per-edge geometry, batch shape (2, 3)."""
     wOpe = torch.tensor([0.9, 1.2], dtype=F64)
     hOpe = torch.tensor([2.1, 2.4], dtype=F64)
-    ab = MBLDoorOpen(
+    ab = OpenDoor(
         direction="ab",
         src=[0, 1],
         tgt=[2, 2],
@@ -414,7 +414,7 @@ def test_multi_edge_element_broadcasts_over_leading_batch_dims():
         dp_turbulent=0.01,
         kind="d_ab",
     )
-    ba = MBLDoorOpen(
+    ba = OpenDoor(
         direction="ba",
         src=[0, 1],
         tgt=[2, 2],
@@ -493,8 +493,8 @@ def test_gradcheck_operable_wrt_dp_T_and_y():
 
 def test_dflow_is_positive_and_linear_init_is_per_edge():
     wOpe = torch.tensor([0.9, 1.2], dtype=F64)
-    ab = MBLDoorOpen(direction="ab", src=[0, 1], tgt=[2, 2], medium=AIR, wOpe=wOpe, kind="x")
-    ba = MBLDoorOpen(direction="ba", src=[0, 1], tgt=[2, 2], medium=AIR, wOpe=wOpe, kind="y")
+    ab = OpenDoor(direction="ab", src=[0, 1], tgt=[2, 2], medium=AIR, wOpe=wOpe, kind="x")
+    ba = OpenDoor(direction="ba", src=[0, 1], tgt=[2, 2], medium=AIR, wOpe=wOpe, kind="y")
     T = torch.tensor([300.0, 290.0, 293.15], dtype=F64)
     for el in (ab, ba):
         c, k = el.linear_init({"T": T})
@@ -518,21 +518,21 @@ def test_pair_constructors_share_parameters_and_name_the_kinds():
     ab, ba = _pair()
     assert (ab.direction, ba.direction) == ("ab", "ba")
     assert (ab.kind, ba.kind) == ("door_ab", "door_ba")
-    assert isinstance(ab, MBLDoorOpen) and isinstance(ba, MBLDoorOpen)
+    assert isinstance(ab, OpenDoor) and isinstance(ba, OpenDoor)
     oab, oba = _opair()
-    assert isinstance(oab, MBLDoorOperable) and isinstance(oba, MBLDoorOperable)
+    assert isinstance(oab, OperableDoor) and isinstance(oba, OperableDoor)
     assert (oab.kind, oba.kind) == ("door_ab", "door_ba")
     assert oab.y_key == oba.y_key == "y"
 
 
 def test_bad_direction_raises():
     with pytest.raises(ValueError, match="direction"):
-        MBLDoorOpen(direction="up", src=[0], tgt=[1], medium=AIR)
+        OpenDoor(direction="up", src=[0], tgt=[1], medium=AIR)
 
 
 def test_mismatched_endpoints_raise():
     with pytest.raises(ValueError, match="src"):
-        MBLDoorOpen(direction="ab", src=[0, 1], tgt=[1], medium=AIR)
+        OpenDoor(direction="ab", src=[0, 1], tgt=[1], medium=AIR)
 
 
 def test_missing_temperature_driver_raises_naming_key_and_kind():
@@ -548,13 +548,13 @@ def test_missing_opening_driver_raises_naming_key():
 
 
 def test_temperature_driver_too_short_raises():
-    ab = MBLDoorOpen(direction="ab", src=[0], tgt=[3], medium=AIR)
+    ab = OpenDoor(direction="ab", src=[0], tgt=[3], medium=AIR)
     with pytest.raises(ValueError, match="node"):
         ab.flow(torch.zeros(1, dtype=F64), {"T": torch.tensor([293.0, 294.0], dtype=F64)})
 
 
 def test_dp_of_wrong_width_raises():
-    ab = MBLDoorOpen(direction="ab", src=[0, 1], tgt=[2, 2], medium=AIR)
+    ab = OpenDoor(direction="ab", src=[0, 1], tgt=[2, 2], medium=AIR)
     with pytest.raises(ValueError, match="columns"):
         ab.flow(torch.zeros(1, dtype=F64), {"T": torch.full((3,), 293.0, dtype=F64)})
 
@@ -566,7 +566,7 @@ def test_dp_of_wrong_width_raises():
 
 def _layer():
     """out (boundary) -- orifice -- A == door pair == B -- orifice -- out."""
-    from noodl.elements import mbl_orifice
+    from noodl.elements import regularized_orifice
 
     net = Network(dtype=F64)
     for n in ("out", "A", "B"):
@@ -576,9 +576,9 @@ def _layer():
     net.add_edge("A", "B", kind="door_ba")
     net.add_edge("B", "out", kind="ori_B")
     src, tgt = net.endpoints("door_ab")
-    ab, ba = mbl_door_pair(src=src, tgt=tgt, medium=AIR, wOpe=1.0, hOpe=2.2, CD=0.78, kind="door")
-    oA = mbl_orifice(0.01, dp_turbulent=0.01, rho_default=AIR.rho_default, kind="ori_A")
-    oB = mbl_orifice(0.02, dp_turbulent=0.01, rho_default=AIR.rho_default, kind="ori_B")
+    ab, ba = open_door_pair(src=src, tgt=tgt, medium=AIR, wOpe=1.0, hOpe=2.2, CD=0.78, kind="door")
+    oA = regularized_orifice(0.01, dp_turbulent=0.01, rho_default=AIR.rho_default, kind="ori_A")
+    oB = regularized_orifice(0.02, dp_turbulent=0.01, rho_default=AIR.rho_default, kind="ori_B")
     return net, KirchhoffLayer(net, "air", [oA, ab, ba, oB], boundary=["out"])
 
 
@@ -617,7 +617,7 @@ def test_switching_values_mark_the_pressure_and_buoyancy_band_edges():
     """The pressure term's band `|dp| < dp_turbulent` and the buoyancy term's
     `|conTP (T_A - T_B)| < (m_flow_turbulent/kT)^2` (`basicFlowFunction_dp`), each as two
     edge values in units of the band width."""
-    door = MBLDoorOpen(direction="ab", src=[0], tgt=[1], medium=AIR, kind="d")
+    door = OpenDoor(direction="ab", src=[0], tgt=[1], medium=AIR, kind="d")
     drv = {"T": torch.tensor([293.15, 293.16], dtype=F64)}
     dp = torch.tensor([0.003], dtype=F64)
     sw = door.switching(dp, drv)

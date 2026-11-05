@@ -17,8 +17,8 @@ from noodl.apps.street_aq import plume
 from noodl.apps.street_aq.canyon import KAPPA
 from noodl.apps.street_aq.network import Street, StreetNetwork, from_test_network
 from noodl.apps.street_aq.plume import (
+    GAUSS_CUTOFF_SIGMAS,
     KERNEL_BYTES_CAP,
-    SEUIL_GAUSS,
     default_tau,
     junction_kernel,
     junction_sources,
@@ -632,4 +632,4 @@ def test_paris_size_kernel_builds_in_chunks_under_the_cap():
     assert k.shape == (577, 577) and kj.shape == (577, len(net.junctions))
     assert bool(torch.isfinite(k).all()) and bool((k >= 0).all())
     assert int((k > 0).sum()) > 577
-    assert SEUIL_GAUSS == 4.0
+    assert GAUSS_CUTOFF_SIGMAS == 4.0

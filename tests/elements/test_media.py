@@ -204,3 +204,13 @@ def test_specific_heat_capacity_cp():
             1006 * 0.99 + 1860 * 0.01, rel=1e-15
         )
     assert media.medium("Modelica.Media.Air.SimpleAir").specific_heat_cp(0.3) == 1005.45
+
+
+def test_medium_physical_key_and_modelica_path_give_the_same_medium():
+    for physical, path in [
+        ("moist_air", "Buildings.Media.Air"),
+        ("moist_air_ideal_gas", "Buildings.Media.Specialized.Air.PerfectGas"),
+        ("dry_air_ideal_gas", "Modelica.Media.Air.SimpleAir"),
+    ]:
+        assert media.medium(physical) == media.medium(path)
+        assert media.medium(physical).name == path

@@ -98,10 +98,6 @@ _MODEL_SOLVE_KEYS = frozenset({"phi0", "q0", "history", "dt", "t"})
 _LAYER_OPTIONS = LAYER_OPTIONS
 
 
-#: Kept for import compatibility: the closure Protocols live in `noodl.contracts`.
-Closure = AlgebraicClosure
-
-
 @dataclass(frozen=True)
 class Ports:
     """What a coupled or external model may prescribe and read."""

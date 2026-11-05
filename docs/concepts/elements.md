@@ -101,26 +101,6 @@ laws `Resistance`, `Capacitance`, `Inductance`, `PrescribedVoltage`, `Prescribed
 `DependentSource`, most of them in the implicit, multi-port or dynamic forms described
 [below](#implicit-coupled-and-dynamic-constitutive-laws).
 
-**Pre-rename names.** Identifiers now say what a law does physically, not which tool it
-comes from. The earlier names still import, as aliases of the same objects:
-
-| Pre-rename name | Name |
-|---|---|
-| `MBLPowerLaw` | `RegularizedPowerLaw` |
-| `mbl_orifice`, `mbl_ela` | `regularized_orifice`, `effective_leakage_area` |
-| `mbl_point`, `mbl_points`, `mbl_coefficient` | `power_law_from_point`, `power_law_from_points`, `power_law_coefficient` |
-| `MBLTable` | `SplineFlowTable` |
-| `MBLDoorOpen`, `MBLDoorOperable` | `OpenDoor`, `OperableDoor` |
-| `mbl_door_pair`, `mbl_operable_door_pair` | `open_door_pair`, `operable_door_pair` |
-| `MBLDoorCompartment`, `MBLDoorCompartmentOperable` | `DoorCompartment`, `OperableDoorCompartment` |
-| `MBLDoorPortStream` | `DoorPortStream` |
-| `mbl_discretized_door`, `mbl_discretized_operable_door` | `discretized_door`, `discretized_operable_door` |
-| `MBLMedium` | `AirMedium` |
-| `EpanetDarcyWeisbach`, `epanet_friction_factor` (water) | `CompositeDarcyWeisbach`, `composite_friction_factor` |
-| `friction="epanet"` (water `build_model`) | `friction="composite"` |
-| `geometry="swmm"` (sewer) | `geometry="tabulated"` |
-| `soulhac_shape`, `macdonald_profile`, `munich_idealised`, `SIRANE_EXCHANGE`, `KAPPA_MUNICH`, ... (street air quality) | `bessel_shape_parameter`, `canopy_displacement_roughness`, `twelve_street_grid`, `EXCHANGE_SIGMA_W_RATIO`, `KAPPA_041`, ...: the full table is under [Earlier option names](../applications/street_aq.md#earlier-option-names) |
-
 ### A note on `Duct`
 
 `Duct` unrolls a fixed number of Colebrook iterations (default `n_iter=4`) rather than iterating

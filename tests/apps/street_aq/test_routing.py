@@ -11,19 +11,19 @@ import math
 import pytest
 import torch
 
-from noodl.apps.street_aq.canyon import KAPPA, KAPPA_MUNICH
+from noodl.apps.street_aq.canyon import KAPPA, KAPPA_041
 from noodl.apps.street_aq.routing import (
     MAX_N_THETA,
     MAX_SIGMA_THETA,
     StreetFlows,
     StreetGeometry,
     direction_offsets,
-    n_theta_munich,
+    exact_gaussian_direction_samples,
+    n_theta_rectangle_rule,
     node_closure,
     order_slots,
     routing_matrix,
-    sigma_theta_munich,
-    sirane_direction_samples,
+    sigma_theta_turbulence_intensity,
 )
 from noodl.layers.transport import TransportLayer
 from noodl.topology import Network
@@ -163,13 +163,13 @@ def test_munich_sample_count_and_sigma_theta():
     assert MAX_N_THETA == 10
     sigma_v = torch.tensor([0.36, 0.36, 5.0], dtype=DT)
     u_ref = torch.tensor([5.0, 10.0, 1.0], dtype=DT)
-    sigma = sigma_theta_munich(sigma_v, u_ref)
+    sigma = sigma_theta_turbulence_intensity(sigma_v, u_ref)
     torch.testing.assert_close(
         sigma, torch.tensor([0.072, 0.036, math.pi / 18.0], dtype=DT), rtol=1e-13, atol=0
     )
     # u* = 0.3, PBLH = 500 -> sigma_v = 1.2 u* = 0.36; U = 5 gives 4.1253 deg (n = 4)
     # and U = 10 gives 2.0626 deg (n = 2).
-    assert n_theta_munich(sigma).tolist() == [4, 2, 10]
+    assert n_theta_rectangle_rule(sigma).tolist() == [4, 2, 10]
 
 
 def test_direction_offsets_handle_a_batch_with_different_sample_counts():
@@ -217,7 +217,7 @@ def test_sirane_samples_are_one_per_interval_between_switch_angles():
     slot_active = torch.tensor([[True, True], [True, False]])
     theta = torch.tensor([0.1, 0.1], dtype=DT)
     sigma = torch.tensor([0.05, 0.05], dtype=DT)
-    offsets, weights = sirane_direction_samples(theta, sigma, slot_angle, slot_active)
+    offsets, weights = exact_gaussian_direction_samples(theta, sigma, slot_angle, slot_active)
     # Junction 0 has one switch in reach (0, at -0.1 = -2 sigma); junction 1 none, so it
     # gets one sample at the mean and a zero-weight pad.
     assert offsets.shape == weights.shape == (2, 2)
@@ -234,13 +234,13 @@ def test_sirane_samples_are_one_per_interval_between_switch_angles():
     torch.testing.assert_close(weights.sum(-1), torch.ones(2, dtype=DT), rtol=1e-15,
                                atol=0)
     # No spread: one sample at the mean for every junction.
-    offsets, weights = sirane_direction_samples(theta, torch.zeros(2, dtype=DT),
+    offsets, weights = exact_gaussian_direction_samples(theta, torch.zeros(2, dtype=DT),
                                                 slot_angle, slot_active)
     assert offsets.shape == (2, 1)
     torch.testing.assert_close(weights, torch.ones(2, 1, dtype=DT), rtol=0, atol=0)
     with pytest.raises(ValueError, match=r"direction_averaging='exact_gaussian' needs "
                                          r"0 <= sigma_theta < pi/4"):
-        sirane_direction_samples(theta, torch.full((2,), 0.8, dtype=DT), slot_angle,
+        exact_gaussian_direction_samples(theta, torch.full((2,), 0.8, dtype=DT), slot_angle,
                                  slot_active)
 
 
@@ -252,7 +252,7 @@ def test_sirane_samples_never_cross_a_switch_of_the_next_turn():
     slot_active = torch.tensor([[True, True]])
     theta = torch.zeros(1, dtype=DT)
     sigma = torch.full((1,), 0.75, dtype=DT)
-    offsets, weights = sirane_direction_samples(theta, sigma, slot_angle, slot_active)
+    offsets, weights = exact_gaussian_direction_samples(theta, sigma, slot_angle, slot_active)
     assert bool((offsets.abs() < math.pi).all())
 
     def pattern(phi):                                   # the in/out classification
@@ -345,11 +345,11 @@ def test_street_flows_resolves_kappa_by_formulation():
         return StreetFlows(net, None, geometry, **kwargs)
 
     assert make().kappa == KAPPA
-    assert make(canyon_wind="exponential_profile").kappa == KAPPA_MUNICH
-    assert make(roof_exchange="aspect_ratio_scaled").kappa == KAPPA_MUNICH
-    assert make(roof_wind="canopy_log_law").kappa == KAPPA_MUNICH
+    assert make(canyon_wind="exponential_profile").kappa == KAPPA_041
+    assert make(roof_exchange="aspect_ratio_scaled").kappa == KAPPA_041
+    assert make(roof_wind="canopy_log_law").kappa == KAPPA_041
     assert make(canyon_wind="exponential_profile", kappa=0.38).kappa == 0.38
-    assert make(preset="munich").kappa == KAPPA_MUNICH
+    assert make(preset="munich").kappa == KAPPA_041
     assert make(preset="munich", canyon_wind="bessel_profile",
                 roof_exchange="turbulent_velocity").kappa == KAPPA
 

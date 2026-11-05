@@ -1,4 +1,4 @@
-"""`EpanetDarcyWeisbach` against a line-by-line scalar transcription of EPANET 2.2's C.
+"""`CompositeDarcyWeisbach` against a line-by-line scalar transcription of EPANET 2.2's C.
 
 The reference below is `DWpipecoeff` and `frictionFactor` from EPANET 2.2
 `src/hydcoeffs.c`, with `resistcoeff`'s D-W resistance and `input1.c`'s minor-loss
@@ -13,9 +13,9 @@ import pytest
 import torch
 
 from noodl.apps.water.elements import (
-    EPANET_NU,
-    EpanetDarcyWeisbach,
-    epanet_friction_factor,
+    NU_WATER_REF,
+    CompositeDarcyWeisbach,
+    composite_friction_factor,
 )
 
 F64 = torch.float64
@@ -71,11 +71,11 @@ LENGTH, DIAMETER, EPS = 300.0, 0.05, 0.05e-3  # m
 
 def _reynolds_flow(re, diameter=DIAMETER):
     """The flow (m3/s) at Reynolds number `re` in EPANET's own water."""
-    return re * math.pi * diameter * EPANET_NU / 4.0
+    return re * math.pi * diameter * NU_WATER_REF / 4.0
 
 
 def _pipe(minor=0.0, **kw):
-    return EpanetDarcyWeisbach(
+    return CompositeDarcyWeisbach(
         torch.tensor([LENGTH], dtype=F64),
         torch.tensor([DIAMETER], dtype=F64),
         torch.tensor([EPS], dtype=F64),
@@ -118,22 +118,22 @@ def test_the_friction_factor_is_continuous_with_its_slope_at_2000_and_4000():
     below, above = 1.0 - 1e-12, 1.0 + 1e-12
     # Re = 2000: laminar f = 64/Re = 16 pi s / q in these variables
     q2 = A2 * float(s[0])
-    f_tr, dfdq_tr = epanet_friction_factor(torch.tensor([q2 * above], dtype=F64), e, s)
+    f_tr, dfdq_tr = composite_friction_factor(torch.tensor([q2 * above], dtype=F64), e, s)
     assert float(f_tr[0]) == pytest.approx(64.0 / 2000.0, rel=1e-10)
     assert float(dfdq_tr[0]) == pytest.approx(-16.0 * math.pi * float(s[0]) / q2**2, rel=1e-9)
     # Re = 4000
     q4 = A1 * float(s[0])
-    f_lo, g_lo = epanet_friction_factor(torch.tensor([q4 * below], dtype=F64), e, s)
-    f_hi, g_hi = epanet_friction_factor(torch.tensor([q4], dtype=F64), e, s)
+    f_lo, g_lo = composite_friction_factor(torch.tensor([q4 * below], dtype=F64), e, s)
+    f_hi, g_hi = composite_friction_factor(torch.tensor([q4], dtype=F64), e, s)
     assert float(f_lo[0]) == pytest.approx(float(f_hi[0]), rel=1e-11)
     assert float(g_lo[0]) == pytest.approx(float(g_hi[0]), rel=1e-9)
 
 
 def test_flow_inverts_the_head_loss_in_every_regime():
     res = torch.tensor([0.0, 10.0, 1500.0, 2000.0, 2600.0, 3900.0, 4100.0, 5e4, 2e6], dtype=F64)
-    q = torch.cat([res, -res[1:]]) * math.pi * DIAMETER * EPANET_NU / 4.0
+    q = torch.cat([res, -res[1:]]) * math.pi * DIAMETER * NU_WATER_REF / 4.0
     n = q.numel()
-    pipe = EpanetDarcyWeisbach(
+    pipe = CompositeDarcyWeisbach(
         torch.full((n,), LENGTH, dtype=F64), torch.full((n,), DIAMETER, dtype=F64),
         torch.full((n,), EPS, dtype=F64), minor_loss=torch.full((n,), 1.5, dtype=F64),
         scale=998.2 * 9.80665,
@@ -169,7 +169,7 @@ def test_flow_gradcheck_in_dp_and_roughness(re):
     h_ref = max(h, 1e-3)
 
     def fn(x, y):
-        pipe = EpanetDarcyWeisbach(
+        pipe = CompositeDarcyWeisbach(
             torch.tensor([LENGTH], dtype=F64), torch.tensor([DIAMETER], dtype=F64),
             EPS * y, minor_loss=torch.tensor([1.0], dtype=F64),
         )
@@ -183,7 +183,7 @@ def test_flow_gradcheck_in_dp_and_roughness(re):
 def test_autograd_through_flow_agrees_with_dflow():
     q = torch.tensor([_reynolds_flow(r) for r in (0.0, 500.0, 2500.0, 3e4)], dtype=F64)
     n = q.numel()
-    pipe = EpanetDarcyWeisbach(
+    pipe = CompositeDarcyWeisbach(
         torch.full((n,), LENGTH, dtype=F64), torch.full((n,), DIAMETER, dtype=F64),
         torch.full((n,), EPS, dtype=F64), scale=9789.0,
     )

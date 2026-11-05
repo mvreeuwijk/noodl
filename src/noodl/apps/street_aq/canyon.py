@@ -33,17 +33,10 @@ KAPPA = KAPPA_040
 """von Karman constant for the neutral form (`canyon_velocity`'s default, `kappa = 0.4`);
 the same value as `closures.KAPPA_040`."""
 
-KAPPA_MUNICH = KAPPA_041
-"""Earlier name of `KAPPA_041` (0.41, the constant MUNICH uses,
-`StreetNetworkTransport.cxx:21`)."""
-
 EULER_GAMMA_TRUNCATED = 0.577
 """The Euler-Mascheroni constant TRUNCATED to three decimals -- not 0.5772156649 -- in the
 Bessel shape equation (`bessel_shape_residual`). ATM `MeteorologyStreet.cxx:118`
 hard-codes the same truncated value. Worth about 4e-5 relative."""
-
-GAMMA_E = EULER_GAMMA_TRUNCATED
-"""Earlier name of `EULER_GAMMA_TRUNCATED`."""
 
 Z0_B_DEFAULT = 0.15
 """In-canyon (building) roughness, the default, m."""
@@ -58,18 +51,12 @@ S11 Eq. (5) p. 7386, K18 Eq. (3) p. 613, K22 Eq. (B10) p. 7387 and
 only the 2, verified at glyph level in all three PDFs. The reading
 `sigma_w/sqrt(2 pi)` (`1/sqrt(2 pi) = 0.398942280401433`) appears in no source."""
 
-SIRANE_EXCHANGE = EXCHANGE_SIGMA_W_RATIO
-"""Earlier name of `EXCHANGE_SIGMA_W_RATIO`."""
-
 ASPECT_RATIO_EXCHANGE_BETA = 2.0 / (math.sqrt(2.0) * math.pi)
 """`beta` in the `aspect_ratio_scaled` roof exchange `u_d = beta sigma_w / (1 + H/W)`
 (Schulte's mixing-length form): 0.450158158078553, fixed by matching the
 `turbulent_velocity` form at `a_r = 1` (K18 p. 613). ATM `ComputeSchulteLm`,
 `MeteorologyStreet.cxx:547-554`; MUNICH v1.0 used the literal 0.45 instead, a 0.035 %
 difference."""
-
-SCHULTE_BETA = ASPECT_RATIO_EXCHANGE_BETA
-"""Earlier name of `ASPECT_RATIO_EXCHANGE_BETA`."""
 
 C_BRACKET_LO = 1e-4
 C_BRACKET_HI = 3.0
@@ -158,10 +145,6 @@ def bessel_shape_residual(c: Tensor, ratio: Tensor) -> Tensor:
     )
 
 
-soulhac_residual = bessel_shape_residual
-"""Earlier name of `bessel_shape_residual`."""
-
-
 def bessel_shape_parameter(ratio: Tensor) -> Tensor:
     """The shape parameter `c` of the Bessel canyon profile: the root of
     `bessel_shape_residual`, batched and differentiable in `ratio`.
@@ -194,9 +177,6 @@ def bessel_shape_parameter(ratio: Tensor) -> Tensor:
     hi = torch.full_like(ratio, C_BRACKET_HI)
     return solve_monotone(bessel_shape_residual, lo, hi, ratio, tol=1e-14, max_iter=200)
 
-
-soulhac_shape = bessel_shape_parameter
-"""Earlier name of `bessel_shape_parameter`."""
 
 SHAPE_CONSTANT_GRID_STEP = 0.01
 """Spacing of the grid `grid_shape_parameter` searches, `c = 0.01, 0.02, ..., 1.00`
@@ -463,10 +443,6 @@ def canopy_displacement_roughness(
         -(0.5 * small_delta * c_db / kappa**2 * (1.0 - d_over_h) * lambda_f) ** (-0.5)
     )
     return d_c, z0c
-
-
-macdonald_profile = canopy_displacement_roughness
-"""Earlier name of `canopy_displacement_roughness`."""
 
 
 def roof_wind(

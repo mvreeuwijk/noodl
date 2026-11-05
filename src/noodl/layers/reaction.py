@@ -73,10 +73,6 @@ def k_no_o3_jpl2003(temperature) -> torch.Tensor:
     return 3.0e-12 * AVOGADRO * 1e-6 * torch.exp(-1500.0 / t)
 
 
-k_no_o3_munich = k_no_o3_jpl2003
-"""Deprecated name of `k_no_o3_jpl2003`."""
-
-
 def molar_volume(temperature, pressure=P_STANDARD) -> torch.Tensor:
     """The ideal-gas molar volume `R T / P`, m3/mol, at `temperature` (K) and `pressure` (Pa).
 
