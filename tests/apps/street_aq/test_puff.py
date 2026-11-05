@@ -914,25 +914,30 @@ def test_one_slug_carries_its_mass_along_the_wind(age, along_wind):
 EVALUATE_REGRESSION = REGRESSION.with_name("puff_evaluate_regression.pt")
 
 
-def _evaluate_regression_case(along_wind):
+def _evaluate_regression_case(along_wind, batch):
     """`{name: (B, R)}`: roof (with and without `receptor_owner`) and free-receptor
-    concentrations of a crowded puff state on `twelve_street_grid`, B = 3 oblique winds,
-    two tables, a release, and age-0 puffs (emitted, not yet advanced)."""
+    concentrations of a crowded puff state on `twelve_street_grid`, B = 3 oblique winds
+    (or the first of them alone, `batch` 1), two tables, a release, and age-0 puffs
+    (emitted, not yet advanced). Besides a coarse grid, 5 m spaced receptors at 0.4 rad
+    (a patch inside the cloud and two lines across it) sit near the slug ends and
+    crosswind cut-offs of many puffs."""
     net, _ = twelve_street_grid()
-    theta = torch.tensor([0.3, 0.5, -2.6], dtype=DT)
+    keep = slice(0, batch)
+    theta = torch.tensor([0.3, 0.5, -2.6], dtype=DT)[keep]
     field = PuffField.for_network(net, theta_w=theta, n_releases=1, along_wind=along_wind)
     n_s, n_src = len(net.streets), field.n_sources
     tabs = puff_tables(centres=torch.tensor([10.0, 30.0], dtype=DT),
-                       **{**_PUFF_MET, "u_star": torch.tensor([0.45, 0.3, 0.6], dtype=DT)})
+                       **{**_PUFF_MET, "u_star": torch.tensor([0.45, 0.3, 0.6], dtype=DT)[keep]})
     table_index = torch.zeros(n_src, dtype=_LONG)
     table_index[-1] = 1
     release_xy = torch.tensor([[[-150.0, 20.0]], [[-120.0, -40.0]], [[260.0, 150.0]]],
-                              dtype=DT)
-    state = PuffState.empty((3,), 512)
+                              dtype=DT)[keep]
+    state = PuffState.empty((batch,), 512)
     base = torch.linspace(0.5, 2.0, n_src, dtype=DT)
+    scale = torch.tensor([[1.0], [0.7], [1.3]], dtype=DT)[keep]
     for step in range(13):
-        masses = base * (1.0 + 0.1 * step) * torch.tensor([[1.0], [0.7], [1.3]], dtype=DT)
-        masses[1, 3] = 0.0                                  # a source without a puff
+        masses = base * (1.0 + 0.1 * step) * scale
+        masses[-1, 3] = 0.0                                 # a source without a puff
         state, _ = emit(field, state, masses, table_index, release_xy, tables=tabs)
         if step < 12:
             state = advance(state, tabs, 5.0, theta)
@@ -940,6 +945,15 @@ def _evaluate_regression_case(along_wind):
     grid = torch.stack(torch.meshgrid(torch.linspace(-150.0, 250.0, 9, dtype=DT),
                                       torch.linspace(-150.0, 250.0, 9, dtype=DT),
                                       indexing="ij"), dim=-1).reshape(-1, 2)
+    patch = torch.stack(torch.meshgrid(torch.arange(-8.0, 8.0, dtype=DT) * 5.0,
+                                       torch.arange(-8.0, 8.0, dtype=DT) * 5.0,
+                                       indexing="ij"), dim=-1).reshape(-1, 2)
+    along = torch.arange(-250.0, 350.0, 5.0, dtype=DT)
+    lines = torch.cat([torch.stack([along, torch.full_like(along, y)], dim=1)
+                       for y in (-110.0, 230.0)])     # crossing the cloud's edges
+    rot = torch.tensor([[math.cos(0.4), math.sin(0.4)], [-math.sin(0.4), math.cos(0.4)]],
+                       dtype=DT)
+    fine = torch.cat([patch, lines]) @ rot + torch.tensor([52.5, 61.5], dtype=DT)
     points = torch.cat([torch.cat([grid, torch.full((81, 1), z, dtype=DT)], dim=1)
                         for z in (5.0, 20.0, 35.0)])
     owner = torch.arange(n_s, dtype=_LONG)
@@ -949,14 +963,18 @@ def _evaluate_regression_case(along_wind):
                                          receptor_owner=owner),
         "roof": roof_concentration(field, state, tabs, grid, theta, 5.0),
         "free": concentration_at(field, state, tabs, points, theta, 5.0),
+        "roof_fine": roof_concentration(field, state, tabs, fine, theta, 5.0),
+        "free_fine": concentration_at(field, state, tabs, torch.cat(
+            [fine, torch.full((fine.shape[0], 1), 24.0, dtype=DT)], dim=1), theta, 5.0),
     }
 
 
+@pytest.mark.parametrize("batch", [3, 1])
 @pytest.mark.parametrize("along_wind", ["sigma_y", "none"])
-def test_evaluator_matches_the_recorded_reference(along_wind):
+def test_evaluator_matches_the_recorded_reference(along_wind, batch):
     # recorded with the evaluator before Task 14's optimisation (ec66a3c)
-    ref = torch.load(EVALUATE_REGRESSION, weights_only=True)[along_wind]
-    got = _evaluate_regression_case(along_wind)
+    ref = torch.load(EVALUATE_REGRESSION, weights_only=True)[f"{along_wind}/B{batch}"]
+    got = _evaluate_regression_case(along_wind, batch)
     for name, value in ref.items():
         assert float(value.abs().max()) > 0, name
         err = float((got[name] - value).abs().max() / value.abs().max())
