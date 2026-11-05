@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import replace
+from pathlib import Path
 
 import pytest
 import torch
@@ -138,7 +139,7 @@ def test_query_returns_c_ext_without_advancing():
 
 
 def test_closure_keeps_caller_background_and_reports_diagnostics():
-    _, names, model, state, drivers = _puff_model()
+    _, names, model, state, drivers = _puff_model(puffs=replace(OPTIONS, puff_dt=30.0))
     src = _street_sources(model, {names[2]: 1e-3})
     drv = _drivers(model, drivers, sources=src)
     closure = model.closures[-1]
@@ -179,7 +180,7 @@ def test_batched_drivers_expand_the_unbatched_seed():
 
 def test_released_puff_reaches_the_streets():
     _, _, model, state, drivers = _puff_model(
-        puffs=PuffOptions(sigma_theta=math.radians(6.0), n_releases=1))
+        puffs=PuffOptions(sigma_theta=math.radians(6.0), n_releases=1, puff_dt=30.0))
     drv = _drivers(model, drivers, bg=0.0)
     drv.update({"puff.release_xy": torch.tensor([[[-150.0, 100.0]]], dtype=DT),
                 "puff.release_z": torch.tensor([[30.0]], dtype=DT),
@@ -248,6 +249,9 @@ def test_refusals_are_named():
         model.step(state, no_u_star, 5.0, t=0.0)
     model.step(state, drv, 5.0, t=0.0)
     # a street step must divide puff_dt (30 s), and the steps of an interval fill it
+    model, state, drivers = build_model(net, background="per_street",
+                                        puffs=replace(OPTIONS, puff_dt=30.0))
+    drv = _drivers(model, drivers)
     with pytest.raises(ValueError, match=r"does not divide PuffOptions\.puff_dt"):
         model.step(state, drv, 7.0, t=0.0)
     s = state
@@ -912,7 +916,8 @@ def test_gradient_with_a_puff_interval_matches_central_differences():
 
 # ------------------------------------------------------------------ the emission interval
 
-_REGRESSION = "tests/data/street/puff_one_per_step_regression.pt"
+_REGRESSION = (Path(__file__).parents[2] / "data" / "street"
+               / "puff_one_per_step_regression.pt")
 
 
 def _regression_run(options):

@@ -532,6 +532,25 @@ def test_emit_writes_free_slots_counts_mass_and_evicts_on_overflow():
         emit(field, PuffState.empty((2,), 3), masses, torch.zeros(3, dtype=_LONG), None)
 
 
+def test_emit_refuses_a_bad_age_by_name():
+    field = PuffField.points(1)
+    args = (PuffState.empty((1,), 2), torch.ones(1, 1, dtype=DT), torch.zeros(1, dtype=_LONG),
+            torch.zeros(1, 1, 2, dtype=DT))
+    tabs = _hand_tables([lambda k: 3.0])
+    for bad in (-1.0, math.nan):
+        with pytest.raises(ValueError, match="age must be >= 0"):
+            emit(field, *args, tables=tabs, age=bad, theta_w=0.0)
+    with pytest.raises(ValueError, match="tables= and theta_w="):
+        emit(field, *args, age=12.5, theta_w=0.0)
+    with pytest.raises(ValueError, match="tables= and theta_w="):
+        emit(field, *args, tables=tabs, age=12.5)
+    # a positive age starts the puff x(age) downwind: 3 m/s for 12.5 s along 0
+    state, _ = emit(field, *args, tables=tabs, age=12.5, theta_w=0.0)
+    assert float(state.age[0, 0]) == 12.5
+    torch.testing.assert_close(state.disp[0, 0], torch.tensor([37.5, 0.0], dtype=DT),
+                               rtol=1e-14, atol=1e-12)
+
+
 def test_along_wind_option_is_checked_by_name():
     with pytest.raises(ValueError, match="along_wind"):
         PuffField.points(1, along_wind="gaussian")

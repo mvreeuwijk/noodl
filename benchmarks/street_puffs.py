@@ -7,14 +7,14 @@ and 8 (the batch varies the wind direction by a few degrees). Prints ms/step for
 forward run (under `torch.no_grad()`) and for forward + backward (a loss on the final
 street concentrations, checkpointed puff steps), the peak number of live puffs over the
 batch and the number of puffs evicted (capacity reached). The puffs are emitted every
-`--puff-dt` seconds (default 30, `none` for one puff per street step) and dropped below
+`--puff-dt` seconds (default `none`: one puff per street step) and dropped below
 `--drop-below` of the instance's peak (default 1e-3), the `PuffOptions` defaults.
 
 The network is the 577-street Le Perreux-sur-Marne MUNICH case when `NOODL_PARIS_CASE`
 points to its directory (or `--case`), else a 24 x 24 lattice of 100 m streets.
 
 Run: `.venv/Scripts/python benchmarks/street_puffs.py [--batch 1 8] [--steps 720]
-[--capacity 4096] [--case DIR] [--hour K] [--puff-dt 30|none] [--drop-below 1e-3]
+[--capacity 4096] [--case DIR] [--hour K] [--puff-dt none|30] [--drop-below 1e-3]
 [--forward-only] [--profile]`.
 """
 
@@ -78,7 +78,8 @@ def first_stable_hour(case: StreetCase) -> int:
 
 
 def build(case: StreetCase, batch: int, capacity: int, hour: int = 0, *,
-          puff_dt: float | None = 30.0, drop_below: float = 1e-3):
+          puff_dt: float | None = PuffOptions.puff_dt,
+          drop_below: float = PuffOptions.drop_below):
     """`(model, state, drivers, source_street)` for `batch` instances of the case's `hour`,
     with a `PulseSource` on the street nearest the upwind edge."""
     species = case.species[0]
@@ -137,9 +138,10 @@ def main() -> None:
     ap.add_argument("--steps", type=int, default=720)
     ap.add_argument("--capacity", type=int, default=4096)
     ap.add_argument("--case")
-    ap.add_argument("--puff-dt", default="30",
+    default = PuffOptions()
+    ap.add_argument("--puff-dt", default=str(default.puff_dt).lower(),
                     help="puff emission interval, s, or 'none' (one puff per step)")
-    ap.add_argument("--drop-below", type=float, default=1e-3)
+    ap.add_argument("--drop-below", type=float, default=default.drop_below)
     ap.add_argument("--forward-only", action="store_true", help="skip forward + backward")
     ap.add_argument("--hour", type=int, help="case hour (default: the first fully stable one)")
     ap.add_argument("--profile", action="store_true",

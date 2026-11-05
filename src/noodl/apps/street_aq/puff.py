@@ -13,8 +13,9 @@ The puffs themselves (design Sect. 4.3-4.6): a `PuffField` holds the sources' ge
 releases as points), a `PuffState` the puffs in fixed `(B, K)` slots, and `emit`,
 `advance`, `roof_concentration` and `concentration_at` are pure functions of them. A puff
 of age `a` is a slug along the wind spanning `[x(a - dt/2), x(a + dt/2)]` from its source,
-`dt` the emission interval (the street step, or `PuffOptions.puff_dt` when the closure
-accumulates several steps into one puff, its age then counted from the interval's middle),
+`dt` the emission interval (the street step by default, or `PuffOptions.puff_dt` when the
+closure is asked to accumulate several steps into one puff, its age then counted from the
+interval's middle),
 so the puffs of a continuous source tile the axis exactly for any interval `dt`. A receptor
 reads the table at its own distance from the source; with `along_wind="none"` the slug is
 a segment of the steady plume (density `m / (dt u(x))`, not a uniform top-hat), so the
@@ -905,10 +906,17 @@ class PuffOptions:
     displacement; `sigma_theta` (rad) the wind-direction spread, `None` for the
     `"sigma_theta"` driver. `junction_source` is one of `JUNCTION_SOURCES`; `along_wind` one
     of `ALONG_WIND`; `capacity` the puff slots per batch instance; `puff_dt` (s) the
-    emission interval: each source's mass is accumulated over the street steps of one
-    interval and emitted as one puff, whose slug spans the interval (`None`: one puff per
-    street step); every street step must divide it. `drop_below` the faint threshold of
-    `housekeep`; `cutoff_sigma` the profiles' cut-off; `x_max` (m) the extent
+    emission interval, `None` (the default) for one puff per source per street step. A
+    number is an opt-in that saves capacity, not time: each source's mass is accumulated
+    over the street steps of one interval and emitted as one puff whose slug spans the
+    interval, and every street step must divide it. Within an interval the newest material
+    is pending, not yet a puff, so `C_ext` near the sources lags by up to one interval and
+    short releases are smeared over it (measured on `twelve_street_grid` at 30 s / 5 s
+    steps: a steady `C_ext` flickering by up to 0.74 of its peak each interval, street
+    concentrations within 3 %; a 17 s release's street-concentration peak off by 0.38, its
+    dose by 2.5 %); the pair work of `C_ext` does not fall, since a longer slug covers
+    proportionally more receptors. `drop_below` the faint threshold of `housekeep`;
+    `cutoff_sigma` the profiles' cut-off; `x_max` (m) the extent
     of the tables (a puff beyond it leaves the domain); `n_releases` the explicit
     above-roof releases. `table_kwargs` go to `puff_tables` (the empirical inputs:
     `theta_star`, `temperature`, `tau_y`, `tau_z`, `centre_k`, the floors); a `"centre_c"`
@@ -923,7 +931,7 @@ class PuffOptions:
     junction_source: str = "upward"
     along_wind: str = "sigma_y"
     capacity: int = 4096
-    puff_dt: float | None = 30.0
+    puff_dt: float | None = None
     drop_below: float = 1e-3
     shear: bool = False
     cutoff_sigma: float = GAUSS_CUTOFF_SIGMAS
@@ -943,8 +951,9 @@ class PuffClosure:
     boundary `"puff.c_ext"` with the state's `"<layer>.x"` and this step's `C_bg`, times the
     stored step length (street roof fluxes; junction vertical fluxes `F_up`, or `F_up -
     F_down` under `junction_source="net"`; under `"upward"` `F_down dt` is added to
-    `mass_drawn_down`), and each explicit release's `pulse_mass` over that step; under
-    `options.puff_dt` these masses are added to `"puff.pending"` instead and emitted, one
+    `mass_drawn_down`), and each explicit release's `pulse_mass` over that step (one
+    puff per source and step, the default); under a numeric `options.puff_dt` these
+    masses are added to `"puff.pending"` instead and emitted, one
     puff per source, once the steps since the last emission fill `puff_dt`, at the age
     `puff_dt/2 - dt/2` (displaced `x` of it along the current wind) so that after (2) the
     puff's age is counted from the middle of its interval and its slug, of age span
