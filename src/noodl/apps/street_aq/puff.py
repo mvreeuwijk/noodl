@@ -59,15 +59,21 @@ from noodl.apps.street_aq.plume import (
 _PUFF_COLS = ("u", "sigma_y", "sigma_z", "z_c", "p_z")
 
 
+_SERIES_BELOW = 1e-5
+"""Below this `|r|` or `|z|` the travel-time ratios use their Taylor series (truncation
+error below 3e-16 relative)."""
+
+
 def _travel_times(u: Tensor, step: float) -> Tensor:
     """`(..., n)`: the travel time (s) from the source to each grid point at the speed
     `u` `(..., n)` (m/s at grid spacing `step`), linear between grid points: cell `k` takes
     `log(u_{k+1} / u_k) / g_k` with `g_k = (u_{k+1} - u_k) / step`, i.e. `step / u_k` times
-    `log1p(r) / r` with `r = (u_{k+1} - u_k) / u_k` (1 at `r = 0`)."""
+    `log1p(r) / r` with `r = (u_{k+1} - u_k) / u_k`, by its series `1 - r/2 + r^2/3` for
+    `|r| < _SERIES_BELOW` (value and derivative right on a flat cell)."""
     r = (u[..., 1:] - u[..., :-1]) / u[..., :-1]
-    flat = r == 0
-    r_safe = torch.where(flat, torch.ones_like(r), r)
-    ratio = torch.where(flat, torch.ones_like(r), torch.log1p(r_safe) / r_safe)
+    small = r.detach().abs() < _SERIES_BELOW
+    r_safe = torch.where(small, torch.ones_like(r), r)
+    ratio = torch.where(small, 1.0 - r / 2.0 + r * r / 3.0, torch.log1p(r_safe) / r_safe)
     cell = step * ratio / u[..., :-1]
     return torch.cat([torch.zeros_like(u[..., :1]), torch.cumsum(cell, -1)], dim=-1)
 
@@ -138,9 +144,10 @@ class PuffTables:
         u_k = u_flat[lo]
         s = a - t[lo]
         z = (u_flat[hi] - u_k) / self.step * s
-        flat = z == 0
-        z_safe = torch.where(flat, torch.ones_like(z), z)
-        phi = torch.where(flat, torch.ones_like(z), torch.expm1(z_safe) / z_safe)
+        # expm1(z) / z, by its series near z = 0 (value and derivative right there)
+        small = z.detach().abs() < _SERIES_BELOW
+        z_safe = torch.where(small, torch.ones_like(z), z)
+        phi = torch.where(small, 1.0 + z / 2.0 + z * z / 6.0, torch.expm1(z_safe) / z_safe)
         x_k = k.to(_DTYPE) * self.step
         x = x_k + u_k * s * phi
         frac = (x - x_k) / self.step
@@ -438,11 +445,13 @@ def puff_mass(state: PuffState) -> Tensor:
 
 
 def _peak_bound(field: PuffField, state: PuffState, tables: PuffTables) -> Tensor:
-    """`(B, K)`, detached: a cheap upper bound of each live puff's peak roof-level
+    """`(B, K)`, detached: a cheap estimate of each live puff's peak roof-level
     contribution, `|m| max_i w_i min(P_z, clamp_i) / (ell (2 y_c,i + sqrt(2 pi)
-    sigma_y))` (design Sect. 4.8), with `P_z` the table's roof-level profile at the puff's
-    distance. The slug length `ell` is the speed there (the step `dt` is common to all
-    puffs and cancels in the comparisons the bound serves). Zero for a free slot."""
+    sigma_y))` (design Sect. 4.8), with the profiles at the puff's distance and `ell` the
+    speed there (the step `dt` is common to all puffs and cancels). It is not a bound:
+    receptors read the table at their own distance, which can give up to about twice
+    this; it only ranks puffs against a relative threshold (`housekeep`, `emit`'s
+    eviction). Zero for a free slot."""
     n_batch, capacity = state.mass.shape
     width, clamp = _field_rows(field, n_batch, "housekeep")
     width, clamp = width.detach(), clamp.detach()
@@ -482,7 +491,7 @@ def housekeep(field: PuffField, state: PuffState, tables: PuffTables, *,
               drop_below: float = 1e-6) -> PuffState:
     """Retire puffs (design Sect. 4.8): those whose distance `x(age)` passed
     `tables.x_max` go to `mass_out`; of the others, those
-    whose peak bound (`_peak_bound`) is below `drop_below` times the largest among the
+    whose peak estimate (`_peak_bound`) is below `drop_below` times the largest among the
     instance's live puffs go to `mass_dropped`. An instance with no live puff is left as
     it is. Decisions are made on detached values; the masses keep their graph."""
     if not 0.0 <= drop_below < 1.0:
@@ -507,7 +516,7 @@ def emit(field: PuffField, state: PuffState, masses: Tensor, table_index: Tensor
     `table_index[s]` (`(S,)`), displacement zero, except a release's, which is its
     position in `release_xy` `(B, R, 2)` (m) relative to its `source_xy0`. `mass_emitted`
     accumulates the masses. An instance without enough free slots evicts its faintest live
-    puffs into `mass_dropped` (by the peak bound of `housekeep` when `tables` is given,
+    puffs into `mass_dropped` (by the peak estimate of `housekeep` when `tables` is given,
     else by `|m|`); the state and the number evicted `(B,)` are returned. More new puffs
     than the capacity is refused by name."""
     n_batch, capacity = state.mass.shape

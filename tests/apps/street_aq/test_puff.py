@@ -822,3 +822,71 @@ def test_pulse_source_on_a_real_model_step_delivers_the_pulse_mass():
     extra = (x["street.x"] - x_ref["street.x"]).detach().reshape(-1)
     assert extra[3] > 0 and torch.isfinite(extra).all()
     assert extra[3] == extra.max()
+
+
+# --- review fixes: flat-cell gradients, slug mass ---------------------------------------
+
+
+def _flat_leaf_tables(u, n=20, spread=2.0):
+    s = torch.full((1, 1, n), spread, dtype=DT)
+    return PuffTables(u=u, sigma_y=s, sigma_z=s.clone(), z_c=torch.full_like(s, 15.0),
+                      p_z=s.clone(), h_canopy=torch.zeros(1, dtype=DT),
+                      h_abl=torch.full((1,), 1e6, dtype=DT), x_max=10.0 * (n - 1))
+
+
+@pytest.mark.parametrize("bump", [0.0, 1e-7, 0.2], ids=["flat", "nearly_flat", "sloped"])
+def test_distance_gradient_to_the_speed_table_matches_finite_differences(bump):
+    # the travel-time ratios switch to their series near a flat cell: value AND derivative
+    n = 20
+    u0 = torch.full((1, 1, n), 3.0, dtype=DT)
+    u0[0, 0, 7:] += bump
+    age = torch.tensor([17.0, 26.0], dtype=DT)       # inside cells 5 and 7 at u = 3
+    u = u0.clone().requires_grad_(True)
+    x = _flat_leaf_tables(u).at_age(age, _ZERO, _ZERO)[0].sum()
+    g, = torch.autograd.grad(x, u)
+    h = 1e-6
+    fd = torch.zeros(n, dtype=DT)
+    for k in range(n):
+        up, dn = u0.clone(), u0.clone()
+        up[0, 0, k] += h
+        dn[0, 0, k] -= h
+        fd[k] = (_flat_leaf_tables(up).at_age(age, _ZERO, _ZERO)[0].sum()
+                 - _flat_leaf_tables(dn).at_age(age, _ZERO, _ZERO)[0].sum()) / (2 * h)
+    assert float(fd.abs().max()) > 1.0
+    torch.testing.assert_close(g[0, 0], fd, rtol=0, atol=1e-6)
+
+
+@pytest.mark.parametrize("along_wind", ["none", "sigma_y"])
+@pytest.mark.parametrize("age", [3.0, 10.0, 40.0])
+def test_one_slug_carries_its_mass_along_the_wind(age, along_wind):
+    # speed 2 + 0.005 x, constant spreads: the line integral of C along the axis, divided
+    # by the (constant) crosswind and vertical factors, is the mass -- including a puff
+    # younger than dt / 2, whose slug starts at the source (ages clamped at 0)
+    n, dt, sigma, z = 120, 10.0, 5.0, 15.0
+    u = (2.0 + 0.05 * torch.arange(n, dtype=DT)).reshape(1, 1, n)
+    s = torch.full((1, 1, n), sigma, dtype=DT)
+    tabs = PuffTables(u=u, sigma_y=s, sigma_z=s.clone(), z_c=torch.full_like(s, z),
+                      p_z=s.clone(), h_canopy=torch.zeros(1, dtype=DT),
+                      h_abl=torch.full((1,), 1e6, dtype=DT), x_max=10.0 * (n - 1))
+    field = PuffField.points(1, along_wind=along_wind, cutoff_sigma=10.0)
+    state, _ = emit(field, PuffState.empty((1,), 2), torch.tensor([[2.0]], dtype=DT),
+                    torch.zeros(1, dtype=_LONG), torch.zeros(1, 1, 2, dtype=DT))
+    state = replace(state, age=torch.tensor([[age, 0.0]], dtype=DT),
+                    disp=state.disp.index_put((torch.tensor([0]), torch.tensor([0])),
+                                              tabs.at_age(torch.tensor([age], dtype=DT),
+                                                          _ZERO, _ZERO)[0][:, None]
+                                              * torch.tensor([[1.0, 0.0]], dtype=DT)))
+    lo = float(tabs.at_age(torch.tensor(max(age - dt / 2, 0.0), dtype=DT), _ZERO, _ZERO)[0])
+    hi = float(tabs.at_age(torch.tensor(age + dt / 2, dtype=DT), _ZERO, _ZERO)[0])
+    pad = 10.0 * sigma if along_wind == "sigma_y" else 0.0
+    m = 200_000
+    edges = torch.linspace(lo - pad, hi + pad, m + 1, dtype=DT)
+    xs = 0.5 * (edges[1:] + edges[:-1])                     # midpoint rule
+    points = torch.stack([xs, torch.zeros_like(xs), torch.full_like(xs, z)], dim=1)
+    c = concentration_at(field, state, tabs, points, 0.0, dt)[0]
+    sig = torch.tensor(sigma, dtype=DT)
+    factors = _gauss(torch.zeros((), dtype=DT), sig) * (
+        _gauss(torch.zeros((), dtype=DT), sig) + _gauss(torch.tensor(2.0 * z, dtype=DT), sig))
+    mass = float(c.sum() * (edges[1] - edges[0]) / factors)
+    # midpoint-rule error at 200 000 points is below 1e-9 relative (measured <= 4.2e-11)
+    assert mass == pytest.approx(2.0, rel=1e-9)
