@@ -538,3 +538,243 @@ def test_coupled_steady_limit_without_along_wind_spread_is_the_steady_model(dt):
     e = float((c - ref).abs().max() / (ref - bg).abs().max())
     print(f"coupled steady limit, dt = {dt} s: e = {e:.3e} after {k} steps")
     assert e <= _COUPLED_TOL[dt]
+
+
+# --- Tests 4 and 5: gradients, batching, checkpointing (design Sect. 4.5, 4.9) ---------------
+
+# Ruling P3: the wind is oblique (0.3 rad) and the faint threshold is off (drop_below=0: a
+# relative drop decision is a cut-off like the spatial ones), so no (puff, receptor) pair
+# and no drop decision sits within the finite-difference step of a cut-off; the pulse and
+# the release end inside a step (28 s, 29 s), away from the overlap's kinks.
+_GRAD_OPTIONS = PuffOptions(sigma_theta=math.radians(6.0), n_releases=1, drop_below=0.0,
+                            capacity=1024)
+_GRAD_TARGET = 6  # street 7 (D-B), downwind of the pulse street 8 (E8-C) along 0.3 rad
+_GRAD_PULSE_STREET = 7
+_GRAD_PARAMS = {"pulse.rate": 1e-3, "pulse.start": 7.0, "puff.release_rate": 3e-3,
+                "puff.release_start": 12.0, "puff.release_duration": 17.0,
+                "puff.release_xy": (-150.0, 20.0), "u_star": 0.5, "theta_w": 0.3}
+
+
+def _pulse_model(options=_GRAD_OPTIONS):
+    """The street model with puffs and a `PulseSource` (run first, so its sources reach
+    the street step), the puff closure bound to it."""
+    from noodl.apps.street_aq.puff import PulseSource
+
+    net, names = twelve_street_grid()
+    model, state, drivers = build_model(net, background="per_street", puffs=options)
+    pulsed = Model(model.net, model.layers,
+                   closures=[PulseSource(model.net, names), *model.closures])
+    model.closures[-1].bind(pulsed)
+    return pulsed, state, drivers
+
+
+def _release_drivers(drivers, p, street):
+    """The drivers of a batch of `B` releases: `p` maps the names of `_GRAD_PARAMS` to
+    `(B,)` tensors (`(B, 2)` for `"puff.release_xy"`), `street` `(B,)` is the pulse's
+    street; every meteorology driver carries the batch."""
+    n = street.shape[0]
+
+    def full(*shape, value):
+        return torch.full(shape, value, dtype=DT)
+
+    return {**drivers, "u_star": p["u_star"], "theta_w": p["theta_w"],
+            "h_abl": full(n, value=800.0), "street.x_boundary": full(12, value=2.0**-26),
+            "pulse.weights": torch.nn.functional.one_hot(street, 12).to(DT),
+            "pulse.rate": p["pulse.rate"], "pulse.start": p["pulse.start"],
+            "pulse.duration": full(n, value=21.0),
+            "puff.release_xy": p["puff.release_xy"][:, None, :],
+            "puff.release_z": full(n, 1, value=30.0),
+            "puff.release_rate": p["puff.release_rate"][:, None],
+            "puff.release_start": p["puff.release_start"][:, None],
+            "puff.release_duration": p["puff.release_duration"][:, None]}
+
+
+def _integrated_c_ext(model, state, drv, *, steps=40, dt=5.0):
+    """`(B, 12)`: each street's `C_ext` integrated over `steps` steps of `dt`, kg s/m3."""
+    total = 0.0
+    for k in range(steps):
+        state = model.step(state, drv, dt, t=dt * k)
+        total = total + state["puff.c_ext"] * dt
+    return total
+
+
+def _grad_leaves(n=1, requires_grad=True):
+    out = {}
+    for name, value in _GRAD_PARAMS.items():
+        v = torch.tensor(value, dtype=DT)
+        out[name] = v.expand(n, *v.shape).clone().requires_grad_(requires_grad)
+    return out
+
+
+@pytest.fixture(scope="module")
+def gradient_check():
+    """`{(name, component): (autograd, central difference)}` of the integrated `C_ext` of
+    the downwind street: autograd from one run, the central differences (relative step
+    1e-6) from one batched run of every perturbation (the batch is exact, Test 5)."""
+    model, state, drivers = _pulse_model()
+    leaves = _grad_leaves()
+    street = torch.tensor([_GRAD_PULSE_STREET])
+    loss = _integrated_c_ext(model, state, _release_drivers(drivers, leaves, street))
+    grads = torch.autograd.grad(loss[0, _GRAD_TARGET], list(leaves.values()))
+    cases = [(name, c) for name in _GRAD_PARAMS
+             for c in ((0, 1) if name == "puff.release_xy" else (None,))]
+    p = _grad_leaves(2 * len(cases), requires_grad=False)
+    steps = []
+    for j, (name, c) in enumerate(cases):
+        at = (slice(2 * j, 2 * j + 2),) if c is None else (slice(2 * j, 2 * j + 2), c)
+        v = p[name][at][0].clone()
+        h = 1e-6 * abs(float(v))
+        p[name][at] = torch.stack([v + h, v - h])
+        steps.append(float(p[name][at][0] - p[name][at][1]))
+    with torch.no_grad():
+        values = _integrated_c_ext(
+            model, state, _release_drivers(drivers, p, street.expand(2 * len(cases))))
+    values = values[:, _GRAD_TARGET]
+    out = {}
+    for j, (name, c) in enumerate(cases):
+        g = grads[list(_GRAD_PARAMS).index(name)][0]
+        auto = float(g if c is None else g[c])
+        out[name, c] = (auto, float(values[2 * j] - values[2 * j + 1]) / steps[j])
+    return out
+
+
+@pytest.mark.parametrize("param", ["pulse.rate", "pulse.start", "puff.release_rate",
+                                   "puff.release_start", "puff.release_duration",
+                                   "puff.release_xy", "u_star", "theta_w"])
+def test_gradient_matches_central_differences(param, gradient_check):
+    """Test 4: the gradient of the downwind street's integrated `C_ext` over 40 steps at
+    dt = 5 s to the release, the pulse and the meteorology, against central differences
+    (relative step 1e-6), to 1e-6 relative (both components of the release position)."""
+    checked = {c: v for (name, c), v in gradient_check.items() if name == param}
+    assert checked
+    for c, (auto, fd) in checked.items():
+        assert auto != 0.0, (param, c)
+        assert abs(auto - fd) <= 1e-6 * abs(auto), (param, c, auto, fd)
+
+
+def test_batch_of_three_releases_equals_three_runs():
+    """Test 5: three releases (different street, start time and u*) in one batch give each
+    separate run's values (C_ext at every step and the street concentrations, 1e-13
+    relative) and gradients (to u*, the start and the rate, 1e-12 relative)."""
+    model, state, drivers = _pulse_model()
+    streets = torch.tensor([7, 2, 5])
+    starts, u_stars = [7.0, 3.0, 11.0], [0.5, 0.4, 0.6]
+    wrt = ("u_star", "pulse.start", "pulse.rate")
+
+    def run(index):
+        p = _grad_leaves(len(index))
+        with torch.no_grad():
+            p["pulse.start"].copy_(torch.tensor([starts[i] for i in index], dtype=DT))
+            p["u_star"].copy_(torch.tensor([u_stars[i] for i in index], dtype=DT))
+        drv = _release_drivers(drivers, p, streets[list(index)])
+        s, history = state, []
+        for k in range(40):
+            s = model.step(s, drv, 5.0, t=5.0 * k)
+            history.append(torch.cat([s["puff.c_ext"], s["street.x"]], dim=-1))
+        history = torch.stack(history, dim=1)          # (B, steps, 24)
+        loss = history[..., :12].sum()
+        return history.detach(), torch.autograd.grad(loss, [p[name] for name in wrt])
+
+    batch, batch_grads = run([0, 1, 2])
+    for i in range(3):
+        alone, grads = run([i])
+        scale = alone.abs().max()
+        assert (batch[i] - alone[0]).abs().max() <= 1e-13 * scale, i
+        for name, g_b, g_1 in zip(wrt, batch_grads, grads, strict=True):
+            assert abs(float(g_b[i] - g_1[0])) <= 1e-12 * abs(float(g_1[0])), (i, name)
+
+
+def test_second_order_is_refused_by_name():
+    """A `create_graph=True` gradient through the coupled run is refused by name: through
+    the tables (u*) and through the street step (the pulse rate)."""
+    model, state, drivers = _pulse_model()
+    street = torch.tensor([_GRAD_PULSE_STREET])
+    for name in ("u_star", "pulse.rate"):
+        leaves = _grad_leaves()
+        loss = _integrated_c_ext(model, state, _release_drivers(drivers, leaves, street),
+                                 steps=8)[0, _GRAD_TARGET]
+        with pytest.raises(RuntimeError, match="second-order differentiation"):
+            torch.autograd.grad(loss, leaves[name], create_graph=True)
+
+
+def _turning_run(model, state, drivers, leaves, steps):
+    """`(C_ext (steps, 12), street x (12,))` of a run whose wind turns every step (the
+    closure rebuilds its field each step, so a checkpoint replayed in the backward must use
+    its own step's field)."""
+    street = torch.tensor([_GRAD_PULSE_STREET])
+    drv = _release_drivers(drivers, leaves, street)
+    s, history = state, []
+    for k in range(steps):
+        s = model.step(s, {**drv, "theta_w": leaves["theta_w"] + 0.02 * k}, 5.0, t=5.0 * k)
+        history.append(s["puff.c_ext"][0])
+    return torch.stack(history), s["street.x"][0]
+
+
+def test_checkpoint_leaves_values_and_gradients_bit_identical(monkeypatch):
+    """The per-step checkpoint (design Sect. 4.5) changes no value and no gradient, bit
+    for bit, also across two differentiated runs on the same closure (its per-run cache)
+    and with the wind turning every step."""
+    from noodl.apps.street_aq import puff
+
+    out = {}
+    for checkpointed in (True, False):
+        monkeypatch.setattr(puff, "_CHECKPOINT", checkpointed)
+        model, state, drivers = _pulse_model()
+        for run in range(2):
+            leaves = _grad_leaves()
+            c_ext, x = _turning_run(model, state, drivers, leaves, 20)
+            loss = c_ext[:, _GRAD_TARGET].sum() + 1e3 * x.sum()
+            grads = torch.autograd.grad(loss, list(leaves.values()))
+            out[checkpointed, run] = (c_ext.detach(), x.detach(), grads)
+    for run in range(2):
+        a, b = out[True, run], out[False, run]
+        assert torch.equal(a[0], b[0]) and torch.equal(a[1], b[1])
+        for g_a, g_b in zip(a[2], b[2], strict=True):
+            assert torch.equal(g_a, g_b)
+    assert all(bool((g != 0).any()) for g in out[True, 0][2])
+
+
+def _saved_bytes_per_step(steps=40):
+    """`(live puffs, autograd-saved bytes)` after every step of a differentiated run, the
+    bytes summed over every tensor autograd saves (`saved_tensors_hooks`)."""
+    model, state, drivers = _pulse_model()
+    leaves = _grad_leaves()
+    drv = _release_drivers(drivers, leaves, torch.tensor([_GRAD_PULSE_STREET]))
+    total, rows = [0], []
+
+    def pack(t):
+        total[0] += t.numel() * t.element_size()
+        return t
+
+    with torch.autograd.graph.saved_tensors_hooks(pack, lambda t: t):
+        s = state
+        for k in range(steps):
+            s = model.step(s, drv, 5.0, t=5.0 * k)
+            rows.append((int(s["puff.live"].sum()), total[0]))
+    return torch.tensor(rows, dtype=DT)
+
+
+def test_saved_bytes_grow_linearly_with_the_live_puffs(monkeypatch):
+    """Under the per-step checkpoint the graph holds what each step saves outside the
+    checkpointed puff step (the street step's flows and solve), the same every step, and,
+    by reference, each step's input puff state ((B, K) slot arrays, which the hooks do not
+    see: proportional to the capacity). So the saved bytes after step k are linear
+    in the live puff count (which grows linearly here, ~16 puffs a step): a straight-line
+    fit leaves < 1 % of the final total. Without the checkpoint every step also saves its
+    (puff, receptor, sub-source) products, which grow with the live puffs, so the total
+    grows quadratically (measured: 0.86 MB with, 605 MB without, at 40 steps)."""
+    from noodl.apps.street_aq import puff
+
+    def straight_line_residual(rows):
+        live, saved = rows[5:, 0], rows[5:, 1]   # past the first puffs' arrival
+        a = torch.stack([torch.ones_like(live), live], dim=1)
+        fit = torch.linalg.lstsq(a, saved[:, None]).solution
+        return float((a @ fit - saved[:, None]).abs().max() / saved[-1])
+
+    rows = _saved_bytes_per_step()
+    assert float(rows[-1, 0]) > 5 * float(rows[5, 0])
+    assert straight_line_residual(rows) < 0.01
+    monkeypatch.setattr(puff, "_CHECKPOINT", False)
+    plain = _saved_bytes_per_step()
+    assert straight_line_residual(plain) > 0.05
+    assert float(plain[-1, 1]) > 100 * float(rows[-1, 1])

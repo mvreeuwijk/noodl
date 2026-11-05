@@ -27,6 +27,7 @@ from dataclasses import dataclass, field, replace
 
 import torch
 from torch import Tensor
+from torch.utils.checkpoint import checkpoint
 
 from noodl.apps.street_aq.above_roof import roof_fluxes, roof_wiring
 from noodl.apps.street_aq.canyon import KAPPA
@@ -58,6 +59,12 @@ from noodl.apps.street_aq.plume import (
 
 _PUFF_COLS = ("u", "sigma_y", "sigma_z", "z_c", "p_z")
 
+_CHECKPOINT = True
+"""Whether, under autograd, `PuffClosure` checkpoints each step's puffs (emit, advance,
+housekeep, evaluate) and `_evaluate` its receptor chunks (design Sect. 4.5). Values and
+gradients are the same bit for bit either way; the tests switch it off to show that and
+to measure the memory it saves."""
+
 
 _SERIES_BELOW = 1e-5
 """Below this `|r|` or `|z|` the travel-time ratios use their Taylor series (truncation
@@ -87,7 +94,9 @@ class PuffTables:
     (1/m, the vertical profile at `H_R`) are `(n_tab, n_b, n_grid)` at distances `0, step,
     2 step, ...` (`distance`); `t` (s, same shape, derived from `u`) is the travel time to
     each grid point at the speed `u(x)`, linear between grid points. `h_canopy` and `h_abl`
-    (m) are `(n_b,)`; `x_max` is the domain's extent (a puff beyond it has left)."""
+    (m) are `(n_b,)`; `x_max` is the domain's extent (a puff beyond it has left). The
+    detached search key of `at_age` and the running maximum of `sigma_y` (the reach of
+    `_evaluate`'s coarse mask) are built once, with `t`."""
 
     u: Tensor
     sigma_y: Tensor
@@ -99,9 +108,24 @@ class PuffTables:
     x_max: float
     step: float = TABLE_STEP_M
     t: Tensor = field(init=False)
+    _span: float = field(init=False, repr=False, compare=False)
+    _shifted: Tensor = field(init=False, repr=False, compare=False)
+    _sigma_y_reach: Tensor = field(init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "t", _travel_times(self.u, self.step))
+        t = _travel_times(self.u, self.step)
+        object.__setattr__(self, "t", t)
+        n_tab, n_b, n = self.u.shape
+        with torch.no_grad():
+            # every row's travel times shifted by its row number times a span above every
+            # travel time, so one search finds the cell of any (row, age) (`at_age`)
+            t_d = t.detach().reshape(-1)
+            span = 2.0 ** math.ceil(math.log2(float(t_d.max()) + 1.0) + 1.0)
+            shifted = t_d + torch.arange(n_tab * n_b).repeat_interleave(n).to(_DTYPE) * span
+            reach = torch.cummax(self.sigma_y.detach(), dim=-1).values.reshape(-1)
+        object.__setattr__(self, "_span", span)
+        object.__setattr__(self, "_shifted", shifted)
+        object.__setattr__(self, "_sigma_y_reach", reach)
 
     @property
     def distance(self) -> Tensor:
@@ -120,20 +144,19 @@ class PuffTables:
         The other columns are linear in `x` between grid points (so `u` is `u(x)`). Beyond
         the grid's end the puff moves on at the last speed and the other columns hold their
         last values; a negative age is the source's."""
-        n_tab, n_b, n = self.u.shape
+        _, n_b, n = self.u.shape
         age, base = torch.broadcast_tensors(_f64(age), (table * n_b + row) * n)
         a = torch.clamp(age, min=0.0)
         t = self.t.reshape(-1)
         with torch.no_grad():
             # cell k: the last grid point with t_k <= a (n - 1 beyond the end), found by
-            # one search over all rows shifted by row number times a span above every
-            # travel time, then corrected by one cell for the shift's rounding
-            t_d, a_d = t.detach(), a.detach()
-            span = 2.0 ** math.ceil(math.log2(float(t_d.max()) + 1.0) + 1.0)
+            # one search over the shifted rows (`__post_init__`), then corrected by one
+            # cell for the shift's rounding
+            t_d, a_d, span = t.detach(), a.detach(), self._span
             r = base // n
-            shifted = t_d + torch.arange(n_tab * n_b).repeat_interleave(n).to(_DTYPE) * span
             key = torch.clamp(a_d, max=span / 2.0) + r.to(_DTYPE) * span
-            k = torch.searchsorted(shifted, key.reshape(-1), right=True).reshape(key.shape)
+            k = torch.searchsorted(self._shifted, key.reshape(-1), right=True).reshape(
+                key.shape)
             k = torch.clamp(k - 1 - r * n, 0, n - 1)
             k = torch.where((k > 0) & (a_d < t_d[base + k]), k - 1, k)
             up = torch.clamp(k + 1, max=n - 1)
@@ -641,12 +664,10 @@ def _evaluate(field: PuffField, state: PuffState, tables: PuffTables, rec_xy: Te
         active = state.live & (state.mass != 0) & (age > 0) & (e_hi > e_lo)
         # the receptors read sigma_y anywhere up to the slug's far end: bound it by the
         # running maximum of the table's sigma_y there
-        n_b = tables.u.shape[1]
-        sy_max = torch.cummax(tables.sigma_y.detach(), dim=-1).values.reshape(-1)
-        n_grid = tables.u.shape[-1]
+        n_b, n_grid = tables.u.shape[1:]
         far = torch.clamp(torch.ceil((x_a + e_hi).detach() / tables.step).long(), 0,
                           n_grid - 1)
-        s_y_far = sy_max[(state.table * n_b + rk) * n_grid + far]
+        s_y_far = tables._sigma_y_reach[(state.table * n_b + rk) * n_grid + far]
         reach = (torch.maximum(-e_lo, e_hi) + (cut * s_y if slug else 0.0)
                  + field._half_width.expand(n_batch, -1).gather(1, src) + cut * s_y_far)
         reach = torch.where(active, reach, torch.zeros_like(reach))
@@ -655,10 +676,12 @@ def _evaluate(field: PuffField, state: PuffState, tables: PuffTables, rec_xy: Te
     rec_xy = _f64(rec_xy)
     n_rec = rec_xy.shape[0]
     rec_d = rec_xy.detach()
+    # every tensor that reaches the values below
     grad = torch.is_grad_enabled() and any(
-        v.requires_grad for v in (state.mass, state.disp, tables.u, tables.sigma_y,
-                                  tables.sigma_z, tables.z_c, tables.p_z, field.width,
-                                  rec_xy, cos))
+        v is not None and v.requires_grad
+        for v in (state.mass, state.age, state.disp, tables.u, tables.t, tables.sigma_y,
+                  tables.sigma_z, tables.z_c, tables.p_z, tables.h_canopy, tables.h_abl,
+                  field.xy, field.weight, field.width, field.clamp, rec_xy, rec_z, cos, sin))
 
     def block(a_: int, b_: int) -> Tensor:
         r = b_ - a_
@@ -710,10 +733,17 @@ def _evaluate(field: PuffField, state: PuffState, tables: PuffTables, rec_xy: Te
         return torch.zeros(n_batch * r, dtype=_DTYPE).index_add(0, b * r + i, c).reshape(
             n_batch, r)
 
+    def evaluate(a_: int, b_: int) -> Tensor:
+        # under autograd each chunk is checkpointed (design Sect. 4.5): the graph keeps
+        # the puff state, the backward recomputes the pair products
+        if grad and _CHECKPOINT:
+            return checkpoint(block, a_, b_, use_reentrant=False)
+        return block(a_, b_)
+
     rows = rows_per_chunk(capacity * int(field._count.max()), n_batch, backward=grad)
     if n_rec == 0:
         return torch.zeros(n_batch, 0, dtype=_DTYPE)
-    return torch.cat([block(a_, min(n_rec, a_ + rows)) for a_ in range(0, n_rec, rows)],
+    return torch.cat([evaluate(a_, min(n_rec, a_ + rows)) for a_ in range(0, n_rec, rows)],
                      dim=1)
 
 
@@ -1221,15 +1251,29 @@ class PuffClosure:
             release_xy = per_instance(rel["puff.release_xy"], (r, 2))
         table_index = torch.cat([torch.zeros(self.n_streets + n_j, dtype=torch.long),
                                  1 + torch.arange(self.n_releases)])
-        puff, evicted = emit(self.field, puff, torch.cat(parts, dim=1), table_index,
-                             release_xy, tables=self.tables)
-        if upward:
-            drawn = per_instance(down[..., 0].sum(-1) * dt_prev, ())
-            puff = replace(puff, mass_drawn_down=puff.mass_drawn_down + drawn)
-        # (2) advance, (3) housekeep, (4) evaluate
-        puff = advance(puff, self.tables, dt, theta)
-        puff = housekeep(self.field, puff, self.tables, drop_below=self.options.drop_below)
-        c_ext = c_ext_of(puff, dt)
+        masses = torch.cat(parts, dim=1)
+        drawn = per_instance(down[..., 0].sum(-1) * dt_prev, ()) if upward else None
+        # the step's own field and tables: a checkpoint recomputes `puff_step` in the
+        # backward, after later steps may have rebuilt them
+        field, tables, drop_below = self.field, self.tables, self.options.drop_below
+
+        def puff_step(puff: PuffState) -> tuple[PuffState, Tensor, Tensor]:
+            puff, evicted = emit(field, puff, masses, table_index, release_xy, tables=tables)
+            if drawn is not None:
+                puff = replace(puff, mass_drawn_down=puff.mass_drawn_down + drawn)
+            # (2) advance, (3) housekeep, (4) evaluate
+            puff = advance(puff, tables, dt, theta)
+            puff = housekeep(field, puff, tables, drop_below=drop_below)
+            c = roof_concentration(field, puff, tables, self.receptors, theta, dt,
+                                   receptor_owner=self.receptor_owner)
+            return puff, c_bg + (c if batch else c[0]), evicted
+
+        # under autograd the step is checkpointed (design Sect. 4.5): the graph keeps the
+        # puff state of every step and the backward recomputes the step's puffs and pairs
+        if torch.is_grad_enabled() and _CHECKPOINT:
+            puff, c_ext, evicted = checkpoint(puff_step, puff, use_reentrant=False)
+        else:
+            puff, c_ext, evicted = puff_step(puff)
         self.last = {"live": puff.live.sum(1), "evicted": evicted, "rebuilt": rebuilt}
         t_now = 0.0 if ctx.t is None else float(ctx.t)
         return {xb_key: c_ext, **puff.to_state(), "puff.q": drivers[q_key],
