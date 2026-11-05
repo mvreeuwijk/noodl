@@ -1082,6 +1082,7 @@ class TransportLayer(TopologyGuard):
             sources_kept, prev_kept = both_kept[0], both_kept[1]
             ys = None if both_ys is None else [y[0] for y in both_ys]
         kept = self._kept
+        kept_removal = self._kept_removal(removal)    # refused at a folded node, kept or not
         if kept.n_i == 0:           # every node folded: no stored node, nothing to step
             result = x_n.new_zeros(x_n.shape[:-2] + (0, self.n_species))
             integral = x_n.new_zeros(x_n.shape[:-2] + (0,))
@@ -1090,7 +1091,7 @@ class TransportLayer(TopologyGuard):
                 x_n.index_select(-2, self._fold_plan.kept), q, sources_kept, x_boundary, dt,
                 on_failure=on_failure, capacity=self._kept_capacity(capacity),
                 capacity_prev=self._kept_capacity(capacity_prev),
-                removal=self._kept_removal(removal), transmission=transmission,
+                removal=kept_removal, transmission=transmission,
                 conductance=folded.conductance,
                 want_transfer=want_transfer, diagnostics=diagnostics,
                 x_boundary_end=x_boundary_end, x_boundary_rates=x_boundary_rates,
@@ -1138,13 +1139,14 @@ class TransportLayer(TopologyGuard):
         sources_kept, ys = self._fold_sources(folded, src_n)
         xb_n, _ = self._node_major_f64(x_boundary, self.n_b, "x_boundary")
         kept = self._kept
+        kept_removal = self._kept_removal(removal)    # refused at a folded node, kept or not
         if kept.n_i == 0:           # every node folded: the recovery alone
             batch = torch.broadcast_shapes(sources_kept.shape[:-2], xb_n.shape[:-2])
             result = sources_kept.new_zeros(batch + (0, self.n_species))
         else:
             result = kept.steady(
                 q, sources_kept, x_boundary, on_failure=on_failure,
-                capacity=self._kept_capacity(capacity), removal=self._kept_removal(removal),
+                capacity=self._kept_capacity(capacity), removal=kept_removal,
                 transmission=transmission, conductance=folded.conductance,
                 diagnostics=diagnostics,
             )

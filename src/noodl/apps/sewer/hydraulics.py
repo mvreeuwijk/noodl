@@ -70,6 +70,8 @@ class SewerHydraulics:
     `storage`: under `storage=True` this closure integrates the manhole levels over the
     model's own step interval (a `StepContext`, not a fixed interval read off its own
     constructor); under `storage=False` it is a plain algebraic closure.
+
+    Alias: ``geometry="swmm"`` for ``"tabulated"`` (SWMM).
     """
 
     @property

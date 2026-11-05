@@ -832,3 +832,30 @@ def test_the_conductance_is_read_through_a_public_property():
     plain = TransportLayer(_wall_net(), "T", capacity=_t([CZ]), flow_kind="air",
                            boundary=["ambient"])
     assert plain.conductance is None
+
+
+@pytest.mark.parametrize("call", ["step", "step_with_transfer", "steady"])
+def test_a_per_call_removal_is_refused_on_a_layer_whose_every_node_is_folded(call):
+    """With no stored node left there is no kept-node step, and a per-call removal at the
+    folded node is still refused by name rather than dropped."""
+    net = Network(dtype=F64)
+    for n in ("inside", "s", "outside"):
+        net.add_node(n)
+    net.add_edge("inside", "s", kind="film")
+    net.add_edge("s", "outside", kind="film")
+    layer = TransportLayer(
+        net, "T", capacity=_t([0.0]), flow_kind=(), boundary=["inside", "outside"],
+        conduction_kind="film", conductance=_t([3.0, 5.0]), storage_free=["s"],
+        scheme="exact",
+    )
+    xb = _t([293.0, 273.0])
+    src = torch.zeros(3, dtype=F64)
+
+    def run(r):
+        if call == "steady":
+            return layer.steady(_t([]), src, xb, removal=r)
+        return getattr(layer, call)(_t([280.0]), _t([]), src, xb, 600.0, removal=r)
+
+    run(_t([0.0]))
+    with pytest.raises(ValueError, match=r"'T'.*removal.*folded.*\['s'\]"):
+        run(_t([1e-4]))
