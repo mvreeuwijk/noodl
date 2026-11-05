@@ -325,9 +325,10 @@ class TransportLayer(TopologyGuard):
     and the folded nodes' values are recovered after the step from the kept nodes' new
     values, the boundary values at the end of the step and the sources; the state returns
     them like any other node's. The boundary transfer counts what leaves through them. The
-    folding is computed once from the construction-time conductance, and again on every
-    call that passes ``conductance=`` (the ``"<layer>.conductance"`` driver, a radiative
-    coefficient re-evaluated each pass); gradients reach the conductances and the sources
+    folding is computed once from the construction-time conductance (again after an
+    in-place edit of it, and on every call while it requires grad), and on every call that
+    passes ``conductance=`` (the ``"<layer>.conductance"`` driver, a radiative coefficient
+    re-evaluated each pass); gradients reach the conductances and the sources
     through it. A folded node whose every conductance is zero in a call is held at its
     value as above; a group of them joined only to each other in a call has no value and
     is refused by name, and one joined only to each other at construction is refused
@@ -885,8 +886,8 @@ class TransportLayer(TopologyGuard):
 
     def _call_scheme(self, scheme: str | None) -> str:
         """This call's scheme: `scheme`, or the layer's own when it is `None`. A scheme
-        other than the layer's is checked as the constructor checks it: by name, and
-        `"implicit"` only on a layer whose storage-free nodes keep an algebraic row."""
+        other than the layer's is checked as the constructor checks it: by name, and only
+        `"implicit"` on a layer whose storage-free nodes keep an algebraic row."""
         if scheme is None or scheme == self.scheme:
             return self.scheme
         if scheme not in _SCHEMES:
