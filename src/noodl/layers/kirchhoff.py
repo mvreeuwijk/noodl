@@ -22,6 +22,7 @@ from noodl.layers._solve_policy import resolve_classic, resolve_mna
 from noodl.layers._topology import TopologyGuard
 from noodl.nodesources import NodeSource
 from noodl.operators.graph import GraphLaplacianOperator
+from noodl.operators.shifted import ShiftedOperator
 from noodl.solvers.grounding import spd_certificate, spd_diagnosis
 from noodl.solvers.implicit import adjoint as _adjoint_solve
 from noodl.solvers.implicit import implicit_solve
@@ -44,70 +45,6 @@ from noodl.topology import Network
 # explicit `linear_solver=` is honoured verbatim at every ensemble size. `diagnostics`
 # reports which backend actually ran (see `solve`).
 _LINEAR_SOLVERS = ("auto", "cg", "gmres", "direct", "sparse_direct")
-
-
-class _DiagonalShifted:
-    """`A_I diag(g) A_I^T + diag(d)`: the Jacobian of a layer carrying potential-dependent
-    NODAL sources, satisfying the LinearOperator duck type
-    `solvers.select.solve` reads.
-
-    The shift is symmetric by construction, so the whole operator stays symmetric and the
-    adjoint's `rmatvec` is still the forward action. The SPD certificate is delegated to the
-    Laplacian and kept ONLY when every shift entry is non-negative: a non-negative diagonal
-    added to an SPD matrix is SPD, while a negative one could destroy definiteness, so the
-    certificate is dropped there rather than asserted (`solvers.select.solve` then routes to
-    GMRES, which needs none).
-    """
-
-    symmetric = True
-
-    def __init__(self, base: GraphLaplacianOperator, diag: torch.Tensor) -> None:
-        self.base = base
-        self.diag_shift = diag
-        self.shape = broadcast_shapes(base.shape[:-2], diag.shape[:-1]) + base.shape[-2:]
-        self.dtype = base.dtype
-        self.device = base.device
-
-    def matvec(self, x: torch.Tensor) -> torch.Tensor:
-        return self.base.matvec(x) + self.diag_shift * x
-
-    def rmatvec(self, x: torch.Tensor) -> torch.Tensor:
-        return self.base.rmatvec(x) + self.diag_shift * x
-
-    def diagonal(self) -> torch.Tensor:
-        return self.base.diagonal() + self.diag_shift
-
-    def assemble(self) -> torch.Tensor:
-        return self.base.assemble() + torch.diag_embed(
-            self.diag_shift.expand(self.shape[:-1])
-        )
-
-    def assemble_sparse(self) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        row, col, values = self.base.assemble_sparse()
-        n_i = self.base.n_interior
-        idx = torch.arange(n_i, dtype=torch.int64, device=row.device)
-        shift = self.diag_shift.expand(values.shape[:-1] + (n_i,))
-        return (
-            torch.cat([row, idx]),
-            torch.cat([col, idx]),
-            torch.cat([values, shift], dim=-1),
-        )
-
-    def spd_certificate(self):
-        if bool((self.diag_shift < 0).any()):
-            return None
-        # A strictly positive shift grounds its node (`KirchhoffLayer._extra_grounded`,
-        # the rule the layer's own grounding check applies): a network with no boundary path
-        # held only by its node sources (a closed building of compressible volumes) is SPD.
-        b = self.base
-        idx = b.interior_of_node
-        interior = idx >= 0
-        positive = self.diag_shift > 0
-        extra = torch.zeros(positive.shape[:-1] + idx.shape, dtype=torch.bool,
-                            device=positive.device)
-        extra[..., interior] = positive[..., idx[interior]]
-        return spd_certificate(b.src, b.tgt, b.slopes, idx, b.boundary_mask,
-                               extra_grounded=extra)
 
 
 #: Containers longer than this are not entered by `_held_tensors`: a long list or dict on a
@@ -617,7 +554,7 @@ class KirchhoffLayer(TopologyGuard):
 
     def _operator_at(
         self, slopes: torch.Tensor, node_slopes: torch.Tensor | None = None
-    ) -> GraphLaplacianOperator | _DiagonalShifted:
+    ) -> GraphLaplacianOperator | ShiftedOperator:
         """The matvec-free `A_I diag(slopes) A_I^T` operator at the given per-edge slope, in
         this layer's own endpoint/interior-index representation -- the construction repeated
         by `linear_init`, `solve`'s `operator_fn` (both the non-differentiable and
@@ -639,7 +576,7 @@ class KirchhoffLayer(TopologyGuard):
         )
         if node_slopes is None:
             return op
-        return _DiagonalShifted(op, node_slopes)
+        return ShiftedOperator(op, node_slopes)
 
     # ------------------------------------------------------------------ assembly
     def dp(self, phi: torch.Tensor, drivers: Mapping) -> torch.Tensor:
@@ -874,7 +811,7 @@ class KirchhoffLayer(TopologyGuard):
         """Full-node-order bool from `node_slopes` (per COMPACT interior row, as
         `_node_source_slopes` returns): True at an interior node whose own node-source slope
         is strictly positive there. Such a node is grounded independent of any edge
-        path -- `_DiagonalShifted`'s positive diagonal shift there is exactly the SPD
+        path -- `ShiftedOperator`'s positive diagonal shift there is exactly the SPD
         contribution a boundary connection would otherwise have to supply -- so
         `_grounding_check` must treat it exactly like a boundary node when deciding whether
         the rest of the graph reaches ground. `None` when this layer has no node sources,

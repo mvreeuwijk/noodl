@@ -16,12 +16,12 @@ from benchmarks.measure import saved_tensor_bytes
 from noodl.layers import transport as transport_module
 from noodl.layers.transport import (
     TransportLayer,
-    _AffineSystemOperator,
     _expm_action,
     _linear_solve,
     _van_loan_step_dense,
 )
 from noodl.operators.base import SolveResult, SolverStatus
+from noodl.operators.shifted import ShiftedOperator
 from noodl.solvers.select import solve as _solve_operator
 from noodl.topology import Network
 
@@ -1203,7 +1203,7 @@ def test_gmres_resolves_bit_identical_to_the_bare_select_solve_auto():
     """Regression proof for the EXPLICIT `linear_solver="gmres"` option (`"auto"` differs --
     see the two tests below): builds the exact same affine system `TransportLayer.step` does and
     solves it directly with `solvers.select.solve(method="auto", ...)` and no other kwargs -- this
-    operator never certifies SPD (`_AffineSystemOperator.spd_certificate()` is `None`), so
+    operator never certifies SPD (`ShiftedOperator.spd_certificate()` is `None`), so
     `select.solve`'s OWN "auto" (a separate policy) always routes it
     to plain gmres too, making this comparison bit-identical either way -- then compares
     against `step()`'s own result under `linear_solver="gmres"`.
@@ -1229,7 +1229,7 @@ def test_gmres_resolves_bit_identical_to_the_bare_select_solve_auto():
     b0 = op.boundary_forcing(xb_s) + src_s / cap_s
     x0_s, _ = layer._to_stacked(c0.to(torch.float64), layer.n_i, "x")
     rhs = x0_s + dt * b0
-    system = _AffineSystemOperator(op, dt)
+    system = ShiftedOperator.implicit_step(op, dt)
     x_old = _solve_operator(system, rhs, method="auto", where="regression probe").x
 
     assert torch.equal(x_new, x_old)

@@ -10,6 +10,7 @@ from __future__ import annotations
 import torch
 
 from noodl._broadcast import broadcast_shapes
+from noodl.operators.stencil import laplacian_apply, laplacian_coo_indices, laplacian_diagonal
 
 
 def _bcast_index(idx: torch.Tensor, batch_shape: torch.Size, k: int) -> torch.Tensor:
@@ -226,13 +227,11 @@ class AdvectionOperator:
         if self.conduction is not None:
             csrc, ctgt, g = self.conduction
             g = g.to(dtype)
-            diff = v_b.index_select(-1, csrc) - v_b.index_select(-1, ctgt)
-            weighted = g.unsqueeze(-2).expand(*batch_shape, K, csrc.shape[-1]) * diff \
-                if g.dim() >= 1 and g.shape[-1] == csrc.shape[-1] else g * diff
             csrc_b = self._expanded(("csrc",), csrc, batch_shape, K)
             ctgt_b = self._expanded(("ctgt",), ctgt, batch_shape, K)
-            l_action.scatter_add_(-1, csrc_b, weighted)
-            l_action.scatter_add_(-1, ctgt_b, -weighted)
+            if g.dim() >= 1 and g.shape[-1] == csrc.shape[-1]:
+                g = g.unsqueeze(-2)
+            l_action = laplacian_apply(v_b, csrc_b, ctgt_b, g)
 
         return in_action - out_action - l_action
 
@@ -358,8 +357,7 @@ class AdvectionOperator:
                 else g_b
             csrc_b = _bcast_index(csrc, batch_shape, K)
             ctgt_b = _bcast_index(ctgt, batch_shape, K)
-            l_diag_full.scatter_add_(-1, csrc_b, g_b)
-            l_diag_full.scatter_add_(-1, ctgt_b, g_b)
+            l_diag_full = laplacian_diagonal(csrc_b, ctgt_b, g_b, self._n)
 
         raw_diag = in_diag_full - out_diag_full - l_diag_full
         diag_i = raw_diag.index_select(-1, self._interior_idx)
@@ -484,7 +482,7 @@ class AdvectionOperator:
         `spd_certificate()` is `None`, so `method="auto"` still routes it to GMRES whatever
         this returns), but `method="sparse_direct"` and the ILU preconditioner both need this
         form, and
-        so does `_AffineSystemOperator.assemble_sparse` (`I - alpha * M`), which just adds an
+        so does `ShiftedOperator.assemble_sparse` (`I - alpha * M`), which just adds an
         identity diagonal to it.
 
         THE STENCIL, derived from `_raw_action`/`diagonal` and matching `assemble()` bit for
@@ -556,8 +554,9 @@ class AdvectionOperator:
                 csrc, ctgt, _ = self.conduction
                 u_c, v_c = compact[csrc], compact[ctgt]
                 keep_uv = (u_c >= 0) & (v_c >= 0)
-                row_parts += [tile(u_c), tile(v_c), tile(u_c), tile(v_c)]
-                col_parts += [tile(u_c), tile(v_c), tile(v_c), tile(u_c)]
+                conduction_row, conduction_col = laplacian_coo_indices(tile(u_c), tile(v_c))
+                row_parts.append(conduction_row)
+                col_parts.append(conduction_col)
                 keep_parts += [
                     (u_c >= 0).repeat(K), (v_c >= 0).repeat(K),
                     keep_uv.repeat(K), keep_uv.repeat(K),

@@ -32,6 +32,7 @@ Three implementations ship:
 |---|---|
 | `DenseOperator` | A plain matrix. The retained reference against which the others are checked. |
 | `GraphLaplacianOperator` | $A_I \operatorname{diag}(g) A_I^\top$, built from `endpoints` and `accumulate` — never forming $A$. This is the Jacobian of a Kirchhoff layer. |
+| `ShiftedOperator` | `scale * base + diag(shift)`: a wrapped operator with a diagonal added. Two uses: a Kirchhoff layer's Jacobian with potential-dependent nodal sources (Laplacian plus shift), and the implicit/trapezoidal transport step `S - alpha M`. |
 | `AdvectionOperator` | The upwind advection operator a transport layer solves against. |
 
 The point of the contract is that a network with $10^5$ edges assembles an $O(E)$ sparse triplet
@@ -43,7 +44,7 @@ or applies itself in $O(E)$ work, and never materialises an $n \times b$ dense m
 and it is deliberately conservative: an operator asserts SPD only when it can prove it.
 
 `GraphLaplacianOperator` certifies when its conductances are positive and the interior is
-grounded. `_DiagonalShifted` — the Jacobian of a layer carrying potential-dependent nodal
+grounded. `ShiftedOperator` (a Laplacian plus a diagonal) — the Jacobian of a layer carrying potential-dependent nodal
 sources — delegates to the Laplacian and keeps the certificate **only when every shift entry is
 non-negative**: a non-negative diagonal added to an SPD matrix is SPD, a negative one might not
 be, so the certificate is dropped rather than asserted. The solve then routes to GMRES, which

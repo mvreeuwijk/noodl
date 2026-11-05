@@ -44,14 +44,16 @@ import torch
 from noodl.layers._topology import TopologyGuard
 from noodl.layout import as_stacked, is_stacked
 from noodl.operators.advection import AdvectionOperator
+from noodl.operators.shifted import ShiftedOperator
+from noodl.operators.stencil import laplacian_coo
 from noodl.solvers.implicit import TransposeOperator as _TransposeView
 from noodl.solvers.select import _SPARSE_DIRECT_MAX_BATCH
 from noodl.solvers.select import solve as _solve_operator
 from noodl.topology import Network, Node
 
 # `_TransposeView` is `solvers.implicit.TransposeOperator`. Both this layer's operators
-# (`AdvectionOperator`, `_AffineSystemOperator` below) declare `symmetric = False`, so
-# `TransposeOperator.spd_certificate()` returns None for them.
+# (`AdvectionOperator`, and `ShiftedOperator` wrapping it, the implicit step's system) are
+# `symmetric = False`, so `TransposeOperator.spd_certificate()` returns None for them.
 
 
 def active_interior(
@@ -297,94 +299,6 @@ def _linear_solve(
     return _LinearSolve.apply(
         build_system, where, resolve_solver, solver_kwargs, diagnostics, *params
     )
-
-
-class _AffineSystemOperator:
-    """(S - alpha * M): built from an AdvectionOperator, satisfying the LinearOperator
-    duck type solvers.select.solve reads (matvec, rmatvec, diagonal, shape, dtype,
-    device, symmetric, assemble, spd_certificate). Used for both the implicit scheme
-    (alpha = dt) and the trapezoidal scheme (alpha = dt / 2), and passed to
-    _linear_solve exactly like a bare AdvectionOperator is for steady() -- the adjoint
-    derivation does not care what concrete operator "A" is, only that it exposes
-    matvec/rmatvec/diagonal/assemble/spd_certificate.
-
-    `S` is the diagonal of per-row storage weights: the identity unless the layer has
-    storage-free nodes, whose rows are algebraic balances (weight 0) while flow passes
-    through them (see `TransportLayer._storage_stacked`).
-    """
-
-    symmetric = False
-
-    def __init__(self, M: AdvectionOperator, alpha: float,
-                 storage: torch.Tensor | None = None) -> None:
-        self.M = M
-        self.alpha = alpha
-        # (..., m) weights of the identity: 1 where a row stores, 0 on a storage-free
-        # node's algebraic row. None is the plain identity.
-        self.storage = storage
-        self.shape = M.shape
-        self.dtype = M.dtype
-        self.device = M.device
-        # Cache for `assemble_sparse`'s identity-block row/col index: this object is
-        # built fresh per solve and `m`/`device` never change over its life, so this is a
-        # tidy-up (one `torch.arange` fewer when `assemble_sparse` runs more than once for the
-        # same instance, e.g. forward then backward), not a speedup that matters on its own.
-        self._eye_idx: torch.Tensor | None = None
-
-    def matvec(self, x: torch.Tensor) -> torch.Tensor:
-        own = x if self.storage is None else self.storage * x
-        return own - self.alpha * self.M.matvec(x)
-
-    def rmatvec(self, y: torch.Tensor) -> torch.Tensor:
-        own = y if self.storage is None else self.storage * y
-        return own - self.alpha * self.M.rmatvec(y)
-
-    def diagonal(self) -> torch.Tensor:
-        own = 1.0 if self.storage is None else self.storage
-        return own - self.alpha * self.M.diagonal()
-
-    def assemble(self):
-        dense = self.M.assemble()
-        m = dense.shape[-1]
-        if self.storage is None:
-            eye = torch.eye(m, dtype=dense.dtype, device=dense.device)
-        else:
-            eye = torch.diag_embed(torch.broadcast_to(self.storage, dense.shape[:-1]))
-        return eye - self.alpha * dense
-
-    def assemble_sparse(self):
-        """COO `(row, col, values)` for `S - alpha * M`: `M`'s own sparse form with
-        the storage diagonal (the identity unless the layer has storage-free nodes) added,
-        `None` propagating unchanged if `M` has none to give.
-
-        DUPLICATES are how the identity and `M`'s diagonal entries combine: `M`'s own COO
-        form already carries duplicate (row, col) pairs at a diagonal position (e.g. an Out
-        term and a self-loop In term at the same interior node), all summed by the COO
-        consumer; appending one more `1.0` per diagonal position is the same mechanism, not
-        a special case.
-        """
-        triplet = self.M.assemble_sparse()
-        if triplet is None:
-            return None
-        row, col, values = triplet
-        m = self.shape[-1]
-        if self._eye_idx is None or self._eye_idx.device != row.device:
-            self._eye_idx = torch.arange(m, dtype=torch.int64, device=row.device)
-        eye_idx = self._eye_idx
-        if self.storage is None:
-            ones = torch.ones(*values.shape[:-1], m, dtype=values.dtype, device=values.device)
-        else:
-            batch = torch.broadcast_shapes(values.shape[:-1], self.storage.shape[:-1])
-            ones = torch.broadcast_to(self.storage, batch + (m,)).to(values.dtype)
-            values = values.expand(batch + values.shape[-1:])
-        return (
-            torch.cat([eye_idx, row]),
-            torch.cat([eye_idx, col]),
-            torch.cat([ones, -self.alpha * values], dim=-1),
-        )
-
-    def spd_certificate(self):
-        return None
 
 
 class TransportLayer(TopologyGuard):
@@ -1048,23 +962,17 @@ class TransportLayer(TopologyGuard):
         so the reference skips a subtraction instead of allocating n^2 doubles to subtract
         nothing.
 
-        `index_add` on a flattened (n*n,) view gives the same four entries per edge the
-        einsum form did (+g at (s, s) and (t, t), -g at (s, t) and (t, s)), out of place and
-        broadcasting over any leading batch dims `g` carries.
+        One `index_add` of the shared stencil's COO triplets on a flattened (n*n,) view, out of
+        place and broadcasting over any leading batch dims `g` carries.
         """
         if self._conduction_edges is None:
             return None
         csrc, ctgt, g = self._conduction_edges
         g = g.to(dtype)
         n = self.net.n
+        row, col, values = laplacian_coo(csrc, ctgt, g)
         flat = torch.zeros(g.shape[:-1] + (n * n,), dtype=dtype, device=g.device)
-        for rows, cols, sign in (
-            (csrc, csrc, 1.0),
-            (ctgt, ctgt, 1.0),
-            (csrc, ctgt, -1.0),
-            (ctgt, csrc, -1.0),
-        ):
-            flat = flat.index_add(-1, rows * n + cols, sign * g)
+        flat = flat.index_add(-1, row * n + col, values)
         return flat.reshape(g.shape[:-1] + (n, n))
 
     def _capacity_arg(self, capacity: torch.Tensor | None) -> torch.Tensor:
@@ -1803,7 +1711,7 @@ class TransportLayer(TopologyGuard):
                 # operator row is empty, and a source there is dropped (counted above).
                 held = self._storage_free_stacked(storage.device) & (storage > 0)
                 rhs = torch.where(held, x_s, storage * ratio * x_s + dt * b0)
-            system = _AffineSystemOperator(op, dt, storage=storage)
+            system = ShiftedOperator.implicit_step(op, dt, storage=storage)
             return system, rhs
 
         if on_failure == "return":
@@ -1877,7 +1785,7 @@ class TransportLayer(TopologyGuard):
                 else self._advection_operator(q_, cap_prev_, coef_map)
             )
             rhs = ratio * (x_s + 0.5 * dt * op_old.matvec(x_s)) + dt * b0
-            system = _AffineSystemOperator(op, 0.5 * dt)
+            system = ShiftedOperator.implicit_step(op, 0.5 * dt)
             return system, rhs
 
         if on_failure == "return":

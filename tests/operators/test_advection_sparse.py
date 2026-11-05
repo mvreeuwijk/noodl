@@ -1,4 +1,4 @@
-"""Parity tests for `AdvectionOperator.assemble_sparse`, `_AffineSystemOperator.assemble_sparse`
+"""Parity tests for `AdvectionOperator.assemble_sparse`, `ShiftedOperator.assemble_sparse`
 and `TransposeOperator.assemble_sparse`: the sparse COO form must scatter, via
 `index_put_(accumulate=True)`, to exactly the same dense matrix as the operator's own
 `assemble()`, to 1e-14 -- the dense code is the reference throughout.
@@ -9,7 +9,8 @@ from __future__ import annotations
 import pytest
 import torch
 
-from noodl.layers.transport import TransportLayer, _AffineSystemOperator
+from noodl.layers.transport import TransportLayer
+from noodl.operators.shifted import ShiftedOperator
 from noodl.solvers.implicit import TransposeOperator
 from noodl.solvers.select import solve as _solve_operator
 from noodl.topology import Network
@@ -170,7 +171,7 @@ def test_sparse_form_matches_the_dense_assembly_for_a_batched_conductance_only_o
 
 def test_affine_system_sparse_form_matches_its_dense_form():
     op = _random_layer(1, conduction=True, kinetics=True, removal=True, n_species=2)
-    system = _AffineSystemOperator(op, 0.7)
+    system = ShiftedOperator.implicit_step(op, 0.7)
     row, col, values = system.assemble_sparse()
     dense = _dense_from_coo(row, col, values, op.shape[-1])
     torch.testing.assert_close(dense, system.assemble(), rtol=1e-14, atol=1e-15)
@@ -185,7 +186,7 @@ def test_transpose_view_swaps_the_sparse_form():
 
 def test_sparse_direct_matches_direct_for_the_affine_system_batched():
     op = _random_layer(0, conduction=True, kinetics=True, removal=True, n_species=2)
-    system = _AffineSystemOperator(op, 0.4)
+    system = ShiftedOperator.implicit_step(op, 0.4)
     m = system.shape[-1]
     b = torch.randn(3, m, dtype=F64, generator=torch.Generator().manual_seed(11))
     with torch.no_grad():
@@ -207,7 +208,7 @@ def test_sparse_direct_matches_direct_for_the_affine_system_unbatched():
                            flow_kind="flow", boundary=["ambient"])
     q = torch.tensor([0.3, -0.2, 0.1], dtype=F64)
     op = layer._advection_operator(q)
-    system = _AffineSystemOperator(op, 0.5)
+    system = ShiftedOperator.implicit_step(op, 0.5)
     m = system.shape[-1]
     b = torch.randn(m, dtype=F64, generator=torch.Generator().manual_seed(5))
     with torch.no_grad():
