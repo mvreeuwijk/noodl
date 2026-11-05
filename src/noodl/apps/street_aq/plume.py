@@ -240,9 +240,9 @@ neutral class `-0.3 <= h/L` of the ADMS scheme SIRANE cites (CERC, 2001). Read o
 probe runs of one street along the wind (u* = 0.3 m/s, h = 330 m): at h / |L| = 0.29 the grid
 is the neutral kernel's (the committed case `G2_T029` in
 `tests/data/street/sirane_kernel_probe`), at 0.31 it is not (1.0e-1 median against the
-neutral kernel); among further runs not committed as fixtures, L = -10000, -2000, -1500 and
--1200 m at h = 330 m are neutral, L = -1000 m at h = 330 m and L = -2000 m at h = 1000 m are
-not."""
+neutral kernel; that run is not committed as a fixture); among further runs, also not
+committed, L = -10000, -2000, -1500 and -1200 m at h = 330 m are neutral, L = -1000 m at
+h = 330 m and L = -2000 m at h = 1000 m are not."""
 
 MAX_TABLE_STEPS = 10_000
 """The largest number of 10 s trajectory steps `plume_table` takes before refusing."""

@@ -690,6 +690,22 @@ def test_weakly_stable_hour_is_the_neutral_table_under_the_stable_wind_profile(h
     assert torch.equal(t.p_z, t_theta.p_z)
 
 
+@pytest.mark.parametrize("met", [{**WEAKLY_STABLE, "lmo": 330.0 / 0.5},
+                                 {**WEAKLY_STABLE, "lmo": 330.0 / 1.0},
+                                 WEAKLY_UNSTABLE], ids=["h/L=0.5", "h/L=1", "h/L=-0.165"])
+def test_neutral_class_rows_take_the_neutral_a_and_no_brunt_vaisala(met):
+    """The scan's own inputs for a row of SIRANE's neutral class: `a = 2.5 u*/h` and
+    `N = 0`, read directly (not through a second table built the same way)."""
+    p, _, _ = plume._table_inputs("test", **met, theta_star=0.05)
+    assert float(p["a"][0]) == pytest.approx(2.5 * met["u_star"] / met["h_abl"], rel=1e-15)
+    assert float(p["n_bv"][0]) == 0.0
+    # just above the class edge the stable law's own a and N are taken
+    above, _, _ = plume._table_inputs("test", **{**WEAKLY_STABLE, "lmo": 330.0 / 1.01},
+                                      theta_star=0.05)
+    assert float(above["n_bv"][0]) > 0.0
+    assert float(above["a"][0]) != pytest.approx(2.5 * 0.3 / 330.0, rel=1e-6)
+
+
 def test_just_above_the_stable_boundary_the_stable_law_applies():
     met = {**WEAKLY_STABLE, "lmo": 330.0 / 1.01}
     t = plume_table(**met, sigma_v_min=0.0, sigma_w_min=0.0)

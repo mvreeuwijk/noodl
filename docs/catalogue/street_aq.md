@@ -40,7 +40,7 @@ Build the model and its starting state and inputs.
 
 | Name | What it does | How to call it |
 |---|---|---|
-| `build_model` | `(Model, initial state, driver template)` for one street network. | `build_model(net, *, preset='sirane', canyon_wind=None, roof_wind=None, roof_exchange=None, junction_routing=None, direction_averaging=None, direction_spread=None, stability=None, shape_constant=None, n_theta=None, sigma_theta=None, species=('nox',), chemistry=None, scheme='implicit', kappa=None, canyon_wind_min=None, u_d_min=None, sigma_w_min=None, sigma_v_min=None, sigma_w_height=None, h_canopy=None, z0_s=0.01, z_ref=30.0, pblh_floor=True, meteo='uniform', background='uniform', atmosphere='atmosphere', layer_name='street')` |
+| `build_model` | `(Model, initial state, driver template)` for one street network. | `build_model(net, *, preset='sirane', canyon_wind=None, roof_wind=None, roof_exchange=None, junction_routing=None, direction_averaging=None, direction_spread=None, stability=None, shape_constant=None, n_theta=None, sigma_theta=None, species=('nox',), chemistry=None, scheme='implicit', kappa=None, canyon_wind_min=None, u_d_min=None, sigma_w_min=None, sigma_v_min=None, sigma_w_height=None, h_canopy=None, z0_s=0.01, z_ref=30.0, pblh_floor=True, meteo='uniform', background='uniform', atmosphere='atmosphere', layer_name='street', puffs=None)` |
 | `initial_drivers` | `build_model`'s driver template (copied), then `values` by name (see `noodl.refs.drivers_from`), e.g. by street and species name. | `initial_drivers(model, *, values=None)` |
 | `initial_state` | Zero concentration everywhere, in each transport layer's own shape; then `values` by street and species name (see `noodl.refs.state_from`): `initial_state(model, values={"street": {"s1": {"nox": 1e-7}}})`. | `initial_state(model, *, values=None)` |
 
@@ -50,6 +50,9 @@ Descriptions of the physical objects a network is built from.
 
 | Name | What it does | How to call it |
 |---|---|---|
+| `PuffOptions` | The options of the unsteady above-roof puff model, `build_model(..., puffs=PuffOptions(...))`: canopy height `h_canopy`, `z0`, `d` (m), puff slots `capacity` per instance, emission interval `puff_dt` (s), faint threshold `drop_below` (design Sect. 4-5). | `PuffOptions(h_canopy=20.0, z0=1.0, d=13.0, sigma_theta=None, junction_source='upward', along_wind='sigma_y', capacity=4096, puff_dt=None, drop_below=0.001, shear=False, cutoff_sigma=4.0, x_max=700.0, n_releases=0, table_kwargs=<factory>)` |
+| `PuffState` | The puffs of `B` batch instances in `K` fixed slots, and the mass counters. | `PuffState(mass, age, disp, source, table, live, sxz, sx2_shear, mass_emitted, mass_out, mass_dropped, mass_drawn_down)` |
+| `PuffTables` | The plume trajectory on the steady kernel's distance grid, read by age (`puff_tables`). | `PuffTables(u, sigma_y, sigma_z, z_c, p_z, h_canopy, h_abl, x_max, step=10.0)` |
 | `PlumeTable` | One plume trajectory per hour, resampled onto a distance grid (`plume_table`). | `PlumeTable(batch, sigma_y, p_z, u, step, x_max)` |
 | `Street` | One street segment between junctions `u` and `v` (the azimuth points `u -> v`): its `length`, `width` and building `height` (m), the roughness length of its building walls `z0_b` (m, 0.15 by default) and `emission_scale`, a dimensionless factor applied to its emissions. | `Street(name, u, v, length, width, height, z0_b=0.15, emission_scale=1.0)` |
 | `StreetCase` | One street-network case: the network plus every array a `Model` built on it needs to run, independent of which source model (`source`) it came from. | `StreetCase(source, network, times, street_ids, junction_ids, species, meteo, meteo_junction, emissions, background, native, start=None)` |
@@ -71,7 +74,16 @@ Functions of the state that compute drivers each step (densities, flows, levels)
 
 | Name | What it does | How to call it |
 |---|---|---|
+| `PuffClosure` | The unsteady above-roof model as an integrating closure of the street model (design Sect. 4.5): it writes `"<layer>.x_boundary"` = `C_ext` per street, the caller's `"<layer>.x_boundary"` driver (`C_bg`, read afresh every step) plus the puffs at each street midpoint at roof level (a street's own puffs excluded, as `street_kernel` does). | `PuffClosure(net, options, *, meteo='uniform', layer_name='street')` |
 | `StreetFlows` | The closure that turns the wind drivers into every prescribed edge flow. | `StreetFlows(net, layer, geometry, *, preset='sirane', canyon_wind=None, roof_wind=None, roof_exchange=None, junction_routing=None, direction_averaging=None, direction_spread=None, stability=None, shape_constant=None, n_theta=None, sigma_theta=None, kappa=None, canyon_wind_min=None, u_d_min=None, sigma_w_min=None, sigma_v_min=None, sigma_w_height=None, h_canopy=None, z0_s=0.01, z_ref=30.0, pblh_floor=True, meteo='uniform', layer_name='street')` |
+
+## Sources
+
+Nodal sources and withdrawals.
+
+| Name | What it does | How to call it |
+|---|---|---|
+| `PulseSource` | An explicit pulse release into the street canopy: `"pulse.rate"` (kg/s) from `"pulse.start"` for `"pulse.duration"` (s), added to the streets' sources (design Sect. 4.2). | `PulseSource(net, street_nodes, *, layer_name='street')` |
 
 ## Files
 
@@ -91,6 +103,7 @@ Supporting types.
 
 | Name | What it does | How to call it |
 |---|---|---|
+| `PuffField` | The sources puffs are emitted from, and the evaluation options. | `PuffField(*, xy, owner, weight, width, clamp, source_xy0, n_streets, n_junctions, n_releases, along_wind='sigma_y', cutoff_sigma=4.0)` |
 | `StreetSources` | Every street's roof flux as sub-sources (`source_points`). | `StreetSources(xy, owner, weight, width, clamp)` |
 
 ## Functions
@@ -99,6 +112,14 @@ Calculations and helpers.
 
 | Name | What it does | How to call it |
 |---|---|---|
+| `advance` | Every live puff `dt` (s) older and moved along the wind `theta_w` (scalar or `(B,)`, radians counter-clockwise from east, toward) by its table's distance increment `x(a + dt) - x(a)`: exact for any `dt`, since `x` is the exact travel distance at the table's speed, so under constant wind the displacement is `x(a)`. A wind that turns between steps turns the puff's further path (design Sect. 4.4). | `advance(state, tables, dt, theta_w)` |
+| `concentration_at` | `(B, R)`: the puffs' concentration (kg/m3) at `points` `(R, 3)` (x, y, z in m), as `roof_concentration` but at each point's own height and without the clamp (SIRANE's roof-level device), and with no receptor excluded. | `concentration_at(field, state, tables, points, theta_w, dt)` |
+| `emit` | One new puff per source with non-zero mass in `masses` `(B, S)` (kg, signed), written into the first free slots of its instance in source order: age `age` (s, default 0), table `table_index[s]` (`(S,)`), displacement zero, except a release's, which is its position in `release_xy` `(B, R, 2)` (m) relative to its `source_xy0`. A positive `age` (a puff accumulated over an emission interval, `PuffOptions.puff_dt`) adds the distance `x(age)` travelled along the wind `theta_w`, which it then needs with `tables`. `mass_emitted` accumulates the masses. An instance without enough free slots evicts its faintest live puffs into `mass_dropped` (by the peak estimate of `housekeep` when `tables` is given, else by `\|m\|`); the state and the number evicted `(B,)` are returned. More new puffs than the capacity is refused by name. | `emit(field, state, masses, table_index, release_xy=None, *, tables=None, age=0.0, theta_w=None)` |
+| `housekeep` | Retire puffs (design Sect. 4.8): those whose distance `x(age)` passed `tables.x_max` go to `mass_out`; of the others, those whose peak estimate (`_peak_bound`) is below `drop_below` times the largest among the instance's live puffs go to `mass_dropped`. An instance with no live puff is left as it is. Decisions are made on detached values; the masses keep their graph. | `housekeep(field, state, tables, *, drop_below=1e-06)` |
+| `puff_mass` | `(B,)`: the summed mass of the live puffs, kg. | `puff_mass(state)` |
+| `puff_tables` | SIRANE's plume trajectory on the steady kernel's distance grid (module docstring), one table per entry of `centres`. | `puff_tables(*, centres, u_star, h_abl, lmo, h_canopy, z0, d, sigma_theta, theta_star=None, temperature=288.15, sigma_v_min=0.5, sigma_w_min=0.3, tau_y=None, tau_z=None, centre_k=0.675, x_max=700.0, kappa=0.4)` |
+| `pulse_mass` | Mass (kg) of a top-hat release inside the step `[t, t + dt]`. | `pulse_mass(t, dt, start, duration, rate)` |
+| `roof_concentration` | `(B, R)`: the puffs' concentration (kg/m3) at roof level `H_R` above `receptors_xy` `(R, 2)`, design Sect. 4.3: per sub-source `m w_i g_x f_y min(P_z, clamp_i)`, with `g_x` the slug of the puff's age `a`, `[x(a - dt/2), x(a + dt/2)]` along the wind `theta_w` from its source (`dt`, s, the emission interval: the step, or `PuffOptions.puff_dt`; consecutive puffs of a continuous source tile the axis), and `f_y` and the table's `p_z` read at the receptor's own distance from the source (`_evaluate`). A puff whose source is `receptor_owner[r]` (`(R,)`, long; -1 for none) contributes nothing to receptor `r`: a street's own `C_ext` excludes its own puffs, as `street_kernel` does. | `roof_concentration(field, state, tables, receptors_xy, theta_w, dt, *, receptor_owner=None)` |
 | `bessel_shape_parameter`<br><small>also `soulhac_shape`</small> | The shape parameter `c` of the Bessel canyon profile: the root of `bessel_shape_residual`, batched and differentiable in `ratio`. | `bessel_shape_parameter(ratio)` |
 | `boundary_layer` | Friction velocity and the boundary-layer height from the network-mean geometry and reference wind, batched and differentiable. | `boundary_layer(h_mean, u_ref, h_abl, *, z_ref=30.0, kappa=0.4, pblh_floor=None)` |
 | `canopy_displacement_roughness`<br><small>also `macdonald_profile`</small> | Macdonald (1998) displacement height and roughness length, `(d_c, z0c)`, in metres. | `canopy_displacement_roughness(h_mean, w_mean, *, lambda_p=0.4, big_delta=4.43, small_delta=1.0, c_db=1.2, kappa=0.41)` |
@@ -146,6 +167,8 @@ Named values and option tables.
 
 | Name | Value |
 |---|---|
+| `ALONG_WIND` | 2 names: `sigma_y`, `none` |
+| `JUNCTION_SOURCES` | 2 names: `upward`, `net` |
 | `ASPECT_RATIO_EXCHANGE_BETA`<br><small>also `SCHULTE_BETA`</small> | `0.45015815807855303` |
 | `EULER_GAMMA_TRUNCATED`<br><small>also `GAMMA_E`</small> | `0.577` |
 | `EXCHANGE_SIGMA_W_RATIO`<br><small>also `SIRANE_EXCHANGE`</small> | `0.22507907903927651` |

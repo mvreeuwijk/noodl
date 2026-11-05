@@ -20,6 +20,10 @@ so the puffs of a continuous source tile the axis exactly for any interval `dt`.
 reads the table at its own distance from the source; with `along_wind="none"` the slug is
 a segment of the steady plume (density `m / (dt u(x))`, not a uniform top-hat), so the
 steady limit of a continuous source is the steady kernel itself for any `dt`.
+
+"design Sect. N" below refers to the sections of the design note
+`docs/design/street_puffs.md`; the user's account is the section "Unsteady above-roof
+transport (puffs)" of `docs/applications/street_aq.md`.
 """
 
 from __future__ import annotations
@@ -948,7 +952,9 @@ def pulse_mass(t: float, dt: float, start: Tensor, duration: Tensor, rate: Tenso
 
 
 class PulseSource:
-    """An explicit pulse release into the street canopy (design Sect. 4.2).
+    """An explicit pulse release into the street canopy: `"pulse.rate"` (kg/s) from
+    `"pulse.start"` for `"pulse.duration"` (s), added to the streets' sources (design
+    Sect. 4.2).
 
     An integrating closure, called `closure(state, drivers, ctx)`. Drivers: `"pulse.weights"`
     `(B, n_s)` (the share of the release in each street of `street_nodes`, usually one-hot),
@@ -1030,7 +1036,10 @@ since the last emission fill it."""
 
 @dataclass(frozen=True)
 class PuffOptions:
-    """The puff model of `build_model(..., puffs=PuffOptions(...))` (design Sect. 4-5).
+    """The options of the unsteady above-roof puff model, `build_model(...,
+    puffs=PuffOptions(...))`: canopy height `h_canopy`, `z0`, `d` (m), puff slots
+    `capacity` per instance, emission interval `puff_dt` (s), faint threshold `drop_below`
+    (design Sect. 4-5).
 
     `h_canopy`, `z0`, `d` (m) are the tables' canopy height `H_R`, roughness and
     displacement; `sigma_theta` (rad) the wind-direction spread, `None` for the
@@ -1102,7 +1111,9 @@ class PuffClosure:
     `"puff.release_duration"` (s), each `(B, R)` (the batch dim optional), and
     `Model.step(t=...)`. The batch is `()` or `(B,)`. Tables and source field are rebuilt
     when one of their drivers is a different tensor, or has a different value, than at the
-    last build (a value-only cache would reuse an earlier run's graph).
+    last build (a value-only cache would reuse an earlier run's graph). Under
+    `meteo="per_street"` the tables read the first street's (or junction's) entry of each
+    meteorology driver, so a gradient with respect to those drivers reaches that entry only.
 
     A query (`ctx is None`) returns `C_ext` from the state's puffs without advancing.
     `last` holds the latest step's `{"live": (B,) live puffs, "evicted": (B,) puffs evicted
