@@ -417,12 +417,10 @@ temperature hands its heat to that boundary), and each temperature driver as the
 give (or `base_temperatures[key]` when the drivers lack it) with the heated devices' entries
 replaced by their heat-port temperatures (devices without a heat port keep the temperature
 you give). Build the model with `coupling="iterate"`, so that every step (or steady solve)
-repeats circuit and heat solves until both stop changing. With Anderson mixing
-(`iterate_acceleration="anderson"`), name the heat layer in `iterate_mixed`: it is re-solved
-from the start of the step on every pass, so its temperatures are a function of the circuit's
-state alone, and mixing them with the circuit's potentials and currents keeps the map the
-mixing sees one of the fed state (relaxed instead, they would carry a memory of earlier
-passes, and the iteration could stop with the devices' temperatures off the heat layer's).
+repeats circuit and heat solves until both stop changing. Anderson mixing
+(`iterate_acceleration="anderson"`) mixes the heat layer's temperatures with the circuit's
+potentials and currents and judges their fixed-point residual like the circuit's, as it does
+for every conduction-only transport layer named in `iterate_tol`.
 
 A resistor `R(T) = R0 (1 + alpha (T - T_ref))` on 220 V, cooled through `G = 50` W/K to
 293.15 K, settles where its Joule heat `V^2 / R(T)` equals `G (T - 293.15)`, a quadratic in
@@ -468,7 +466,7 @@ joule = JouleHeating(
 model = Model(net, [electrical, thermal], closures=[joule], coupling="iterate",
               iterate_tol={"electrical": 1e-10, "thermal": 1e-10},
               iterate_flow_tol={"electrical": 1e-10}, iterate_acceleration="anderson",
-              iterate_mixed=["thermal"], iterate_max=100)
+              iterate_max=100)
 
 state = {"electrical.phi": torch.zeros(len(net.nodes), dtype=torch.float64),
          "electrical.q": torch.zeros(2, dtype=torch.float64),

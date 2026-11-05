@@ -483,14 +483,10 @@ potential back unchanged while the flows the closures read are still moving.
 Kirchhoff layers' `.phi` and `.q` by Anderson mixing (type II, Walker & Ni 2011) over the last
 `iterate_memory` passes (default 5), and needs an `iterate_flow_tol` for each of them: the mixing
 minimises the fixed-point residual of `.phi` and `.q`, each divided by its tolerance, and the
-convergence test then also asks that residual of `.phi` to be within `iterate_tol`. Transport
-states stay relaxed, except those of the transport layers named in `iterate_mixed` (each also in
-`iterate_tol`): their `.x` is mixed with the Kirchhoff layers' state, divided by its
-`iterate_tol`, and its fixed-point residual is judged too. Name a transport layer there when its
-state is a function of the Kirchhoff layers' alone, re-solved each pass, such as a heat layer fed
-by a circuit's Joule heat: relaxed, it would carry a memory of earlier passes into the map the
-mixing assumes to be one of the fed state, and the iteration could stop with the circuit solved
-at temperatures the heat layer no longer has. Mixing changes only the sequence of fed states, never the fixed point, and the
+convergence test then also asks that residual of `.phi` to be within `iterate_tol`. A
+conduction-only transport layer (`flow_kind=()`, a heat network) named in `iterate_tol` is mixed
+and judged on its fixed-point residual like a Kirchhoff layer's `.phi`; advective transport
+layers stay relaxed. Mixing changes only the sequence of fed states, never the fixed point, and the
 fixed-point adjoint is unchanged. Two safeguards: an ill-conditioned history drops its oldest
 passes, and a mixed step that would move any entry against its own residual is replaced by the
 relaxed step, because the relaxed iteration only reaches fixed points that attract it and a secant

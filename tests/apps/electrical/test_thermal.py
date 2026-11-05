@@ -16,7 +16,7 @@ V, R0, ALPHA, T_REF, G, T_AMB, C_TH = 220.0, 100.0, 1e-3, 293.15, 50.0, 293.15, 
 F64 = torch.float64
 COUPLING = dict(coupling="iterate", iterate_tol={"electrical": 1e-10, "thermal": 1e-10},
                 iterate_flow_tol={"electrical": 1e-10}, iterate_acceleration="anderson",
-                iterate_mixed=["thermal"], iterate_max=100)
+                iterate_max=100)
 
 
 def _f(x):
@@ -239,3 +239,44 @@ def test_batched_temperature_driver_with_unbatched_state_matches_independent_run
     # unheated devices keep their temperatures, the heated slot takes the heat port
     torch.testing.assert_close(batched["T"][:, 1], torch.full((2,), 310.0))
     torch.testing.assert_close(batched["T"][:, [0, 2]], drivers[:, [0, 2]])
+
+
+def test_the_initial_point_holds_the_heat_capacity_at_its_start_temperature():
+    # h (heat port, no capacity) --G1-- c (C_TH) --G-- amb. With mode="initial" the stored
+    # node c is held at its start 400 K, as the old Capacitance(C, v0=T0) held it, and the
+    # folded port satisfies its balance G1 (T_h - 400) = P(T_h); the DC operating point
+    # instead solves c too. P(T) = V^2 / (R0 (1 + alpha (T - Tref))).
+    G1 = 20.0
+    net = Network(dtype=F64)
+    for name in ("0", "s", "h", "c", "amb"):
+        net.add_node(name)
+    net.add_edge("s", "0", kind="voltage_source")
+    net.add_edge("s", "0", kind="resistor")
+    net.add_edge("h", "c", kind="conductor")
+    net.add_edge("c", "amb", kind="conductor")
+    electrical = KirchhoffLayer(
+        net, "electrical",
+        [PrescribedVoltage(_f(V)), Resistance(_f(R0), alpha=_f(ALPHA), T_ref=_f(T_REF),
+                                              temperature="electrical.resistor.T")],
+        boundary=["0"])
+    thermal = TransportLayer(net, "thermal", flow_kind=(), boundary=["amb"],
+                             capacity=_f([0.0, C_TH]), conduction_kind="conductor",
+                             conductance=_f([G1, G]), storage_free=["h"])
+    closure = JouleHeating([HeatedEdge(edge=1, p=1, n=0, heat_node=2,
+                                       temperature_key="electrical.resistor.T", slot=0)],
+                           thermal, base_temperatures={"electrical.resistor.T": _f([T_REF])})
+    model = Model(net, [electrical, thermal], closures=[closure], **COUPLING)
+    state = {"electrical.phi": _f([0.0, V, 0.0, 0.0, 0.0]),
+             "electrical.q": _f([V / R0, V / R0]), "thermal.x": _f([400.0, 400.0]),
+             "thermal.sources": torch.zeros(5, dtype=F64)}
+    drivers = {"electrical.phi_boundary": _f([0.0]), "thermal.x_boundary": _f([T_AMB]),
+               "electrical.resistor.T": _f([T_REF])}
+    T_h = 400.0
+    for _ in range(100):      # the hand fixed point of the port's balance
+        T_h = 400.0 + _power(T_h) / G1
+    out = model.steady(state, drivers, mode="initial")
+    assert float(out["thermal.x"][1]) == 400.0
+    assert abs(float(out["thermal.x"][0]) - T_h) <= 1e-9
+    assert abs(float(out["electrical.q"][1]) - _power(T_h) / V) <= 1e-11
+    dc = model.steady(state, drivers)
+    assert abs(float(dc["thermal.x"][1]) - 400.0) > 50.0      # the DC point is elsewhere

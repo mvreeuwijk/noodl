@@ -195,13 +195,9 @@ class Model:
     replaces the relaxation of those layers' `.phi` and `.q` by Anderson mixing over the last
     `iterate_memory` passes and requires `iterate_flow_tol` for each of them; it changes the
     sequence of fed states, never the fixed point or its adjoint (`_iterate`,
-    `_AndersonHistory`). Transport states stay relaxed under it, except those of the transport
-    layers named in `iterate_mixed` (each also in `iterate_tol`), which are mixed with the
-    Kirchhoff layers' and judged, like them, on their fixed-point residual too (the state a
-    pass returns against the state it was fed). Name a transport layer there when its state
-    is a function of the Kirchhoff layers' alone, re-solved every pass (a heat layer fed by
-    the Joule heat of a circuit): relaxed, it would carry a memory of earlier passes into the
-    map the mixing assumes to be one of the fed state.
+    `_AndersonHistory`). A conduction-only transport layer (`flow_kind=()`, a heat network)
+    named in `iterate_tol` is mixed and judged on its fixed-point residual like a Kirchhoff
+    layer's `phi`; advective transport layers stay relaxed.
 
     The onion's fixed point is differentiated IMPLICITLY, not by unrolling the passes: the
     primal passes carry no graph, and after convergence the certified pass runs once more on
@@ -244,7 +240,6 @@ class Model:
         iterate_memory: int = 5,
         iterate_flow_tol: Mapping[str, float] | None = None,
         iterate_on_limit: str = "raise",
-        iterate_mixed: Sequence[str] = (),
     ) -> None:
         validate_modes(coupling, reaction_order)
         self.reaction_order = reaction_order
@@ -278,7 +273,7 @@ class Model:
             iterate_relaxation=iterate_relaxation, iterate_acceleration=iterate_acceleration,
             iterate_memory=iterate_memory, iterate_on_limit=iterate_on_limit,
             adjoint_rtol=adjoint_rtol, iterate_flow_tol=iterate_flow_tol,
-            kirchhoff=self.kirchhoff, transport=self.transport, iterate_mixed=iterate_mixed,
+            kirchhoff=self.kirchhoff, transport=self.transport,
         )
         self.coupling = options.coupling
         self.iterate_tol = options.iterate_tol
@@ -289,7 +284,6 @@ class Model:
         self.iterate_on_limit = options.iterate_on_limit
         self.adjoint_rtol = options.adjoint_rtol
         self.iterate_flow_tol = options.iterate_flow_tol
-        self.iterate_mixed = options.iterate_mixed
         self._schedule.check_coupling(coupling, options.iterate_flow_tol)
         options.check_acceleration(self.kirchhoff)
         self.substeps = validate_substeps(self.transport, substeps)
@@ -601,7 +595,11 @@ class Model:
         `t` (optional) is the time of that state: closures receive it in their
         `StepContext`, and the constitutive laws of a layer solved by Modified Nodal
         Analysis are evaluated at it (a time-dependent source). A layer with dynamic laws is
-        solved at its operating point: a capacitance open, an inductance shorted.
+        solved at its operating point: a capacitance open, an inductance shorted. With
+        `mode="initial"` (passed to the Kirchhoff layers' solves) the consistent initial
+        point instead: those layers hold their dynamic laws at their start values, and every
+        transport layer holds its stored nodes at the state's `"<layer>.x"`, solving only for
+        the nodes that hold nothing (`TransportLayer.steady`'s `stored`).
 
         REACTIONS ARE NOT APPLIED. They are an operator splitting applied around a transport
         step (after it, or before it under `reaction_order="before_transport"`), so they
@@ -1144,7 +1142,7 @@ class _ModelPasses:
             if name in model.transport:
                 layer = model.transport[name]
                 d = (new[f"{name}.x"] - prev[f"{name}.x"]).abs()
-                if self.anderson is not None and name in model.iterate_mixed:
+                if self.anderson is not None and name in self.anderson.mixed_transport:
                     # A mixed state's fixed-point residual, as a Kirchhoff layer's below.
                     key = f"{name}.x"
                     d = torch.maximum(d, (new[key] - z.get(key, prev[key])).abs())
@@ -1203,7 +1201,7 @@ class _ModelPasses:
         w = model.iterate_relaxation
         if prev is not None:
             for name in model.transport:
-                if self.anderson is not None and name in model.iterate_mixed:
+                if self.anderson is not None and name in self.anderson.mixed_transport:
                     continue        # Anderson-mixed below
                 key = f"{name}.x"
                 fed[key] = prev[key] + w * (new[key] - prev[key])
@@ -1213,9 +1211,9 @@ class _ModelPasses:
                         for key in (f"{name}.phi", f"{name}.q"):
                             fed[key] = prev[key] + w * (new[key] - prev[key])
         if self.anderson is not None:
-            # The named Kirchhoff layers' `phi` and `q`, and the `iterate_mixed` transport
-            # layers' `x`, are Anderson-mixed instead (`_AndersonHistory`), from pass 1 on;
-            # every other transport state stays relaxed.
+            # The named Kirchhoff layers' `phi` and `q`, and the named conduction-only
+            # transport layers' `x`, are Anderson-mixed instead (`_AndersonHistory`), from
+            # pass 1 on; advective transport layers stay relaxed.
             fed.update(self.anderson.mix(
                 z, new, w, verdict.converged if verdict is not None else None))
         self.prev = new

@@ -96,8 +96,8 @@ class _AndersonHistory:
     `iterate_flow_tol`, so that one dimensionless problem weighs every entry by its own
     tolerance. Both are needed: a head solve whose warm start already meets its residual
     tolerance hands the fed `phi` back unchanged, and the iteration then moves only through
-    `q`. The transport layers named in `iterate_mixed` add their ``"<layer>.x"`` after them,
-    divided by their `iterate_tol`.
+    `q`. The conduction-only transport layers (no flow kinds) named in `iterate_tol` add their
+    ``"<layer>.x"`` after them, divided by their `iterate_tol` (`mixed_transport` names them).
 
     The next fed state is, per instance:
 
@@ -123,10 +123,13 @@ class _AndersonHistory:
             for name, tol in model.iterate_tol.items() if name in model.kirchhoff
         ]
         self.keys = [f"{name}.{s}" for name, *_ in self.layers for s in ("phi", "q")]
-        # The `iterate_mixed` transport layers: their `x`, judged over every entry, divided
-        # by their `iterate_tol`.
-        self.transport = [(name, float(model.iterate_tol[name]))
-                          for name in getattr(model, "iterate_mixed", ())]
+        # The conduction-only transport layers (no flow kinds: a heat network, what a
+        # Kirchhoff heat layer was) named in `iterate_tol`: their `x`, judged over every
+        # entry, divided by their tolerance. Advective transport layers stay relaxed.
+        self.transport = [(name, float(tol)) for name, tol in model.iterate_tol.items()
+                          if name in model.transport and not model.transport[name].flow_kinds
+                          and model.transport[name].n_species == 1]
+        self.mixed_transport = frozenset(name for name, _ in self.transport)
         self.keys += [f"{name}.x" for name, _ in self.transport]
         self.memory = memory
         self.xs: list[Tensor] = []

@@ -70,7 +70,7 @@ of `"electrical.resistor.T"` / `"electrical.diode.T"` (devices without a heat po
 parameter `T`); the layers are coupled by `coupling="iterate"` with Anderson mixing on the
 circuit, to `1e-10` V and K on the potentials and temperatures and `1e-10` A on the circuit's
 flows. The heat layer is re-solved from the step start on every pass, so its temperatures are
-a function of the circuit's state alone: `iterate_mixed=("thermal",)` mixes them with the
+a function of the circuit's state alone, and the Anderson mixing mixes them with the
 circuit's potentials and currents and judges their fixed-point residual too (a relaxed heat
 state would carry a memory of earlier passes into the map the mixing sees, and the iteration
 would stop with the device temperatures up to 1e-6 K away from the heat layer's). The
@@ -848,7 +848,11 @@ def _thermal(b: _Builder, net: Network, heated: list[Device], heat: _HeatNetwork
         scheme="trapezoidal", quantity="temperature", unit="K", source_unit="W",
         capacity_unit="J/K", linear_solver="direct")
     if layer.interior_idx.tolist() != [n_e + k for k in heat.interior]:
-        raise AssertionError("the heat layer's interior is not the thermal network's")
+        raise RuntimeError(
+            f"read_modelica_circuit: the heat layer's interior nodes "
+            f"{[names[i] for i in layer.interior_idx.tolist()]} are not the thermal network's "
+            f"solved nodes {[names[n_e + k] for k in heat.interior]} (an internal "
+            f"inconsistency of the reader; please report it)")
 
     # start temperatures: heat capacitors, the mean of those and the fixed ones elsewhere
     known = {**heat.start, **heat.fixed}
@@ -933,8 +937,7 @@ def build(netlist: Netlist, doc: CircuitDoc, *, substeps: int = 1
         dynamic = dynamic or bool(heat.capacity.keys() - heat.fixed.keys())
         model = Model(net, [layer, thermal], closures=[closure], coupling="iterate",
                       iterate_tol=_ITERATE_TOL, iterate_flow_tol=_ITERATE_FLOW_TOL,
-                      iterate_acceleration="anderson", iterate_mixed=(THERMAL,),
-                      iterate_max=_ITERATE_MAX)
+                      iterate_acceleration="anderson", iterate_max=_ITERATE_MAX)
     else:
         model = Model(net, [layer])
     # with only the thermal side dynamic the circuit has no capacitor or inductor, so its

@@ -4,6 +4,9 @@ and a conduction-only transport layer (`flow_kind=()`) in a model."""
 
 from __future__ import annotations
 
+import math
+from pathlib import Path
+
 import pytest
 import torch
 
@@ -12,6 +15,7 @@ from noodl.model import Model
 from noodl.topology import Network
 
 F64 = torch.float64
+DATA = Path(__file__).resolve().parent / "data" / "modelica_electrical"
 C, G, TA, DT = 4.0, 3.0, 280.0, 0.7
 
 
@@ -117,62 +121,27 @@ def test_substeps_interpolate_the_sources_between_both_ends():
     assert float(out["T.x"][0]) == pytest.approx(x, rel=1e-14)
 
 
-# ---------------------------------------------------------------- iterate_mixed
-def _coupled_resistor(**coupling):
-    """A 220 V resistor R(T) = 100 (1 + 1e-3 (T - 293.15)) whose heat port (storage-free)
-    conducts 50 W/K to 293.15 K, coupled by `JouleHeating`."""
-    from noodl.apps.electrical import HeatedEdge, JouleHeating, PrescribedVoltage, Resistance
-    from noodl.layers.kirchhoff import KirchhoffLayer
+# ---------------------------------------------------------------- Anderson mixing of a heat state
+def test_anderson_mixing_lands_the_circuit_on_the_heat_layers_temperature():
+    """MSL's Resistor (220 V sine, R(T), heat port folded into G = 50 W/K to 293.15 K) at
+    t = 0.49 s: the iteration must stop with the circuit solved at the temperature the heat
+    layer reports. With the heat state relaxed instead of mixed, two passes of the heat layer
+    agreed to 1.8e-11 K while the circuit was solved at a temperature 4.8e-7 K away, and the
+    current came out 6.7e-11 A (4.8e-10 relative) off the one at the reported temperature."""
+    from noodl.apps.electrical.modelica import read_modelica_circuit
+    from noodl.apps.electrical.modelica.run import STEADY_ATOL, STEADY_RTOL
+    from noodl.modelica.timeline import step_drivers
 
-    net = Network(dtype=F64)
-    for n in ("0", "s", "h", "amb"):
-        net.add_node(n)
-    net.add_edge("s", "0", kind="voltage_source")
-    net.add_edge("s", "0", kind="resistor")
-    net.add_edge("h", "amb", kind="conductor")
-    electrical = KirchhoffLayer(
-        net, "electrical",
-        [PrescribedVoltage(_t(220.0)), Resistance(_t(100.0), alpha=_t(1e-3), T_ref=_t(293.15),
-                                                  temperature="electrical.resistor.T")],
-        boundary=["0"])
-    thermal = TransportLayer(net, "thermal", flow_kind=(), boundary=["amb"],
-                             capacity=_t([0.0]), conduction_kind="conductor",
-                             conductance=_t([50.0]), storage_free=["h"])
-    joule = JouleHeating([HeatedEdge(edge=1, p=1, n=0, heat_node=2,
-                                     temperature_key="electrical.resistor.T", slot=0)],
-                         thermal, base_temperatures={"electrical.resistor.T": _t([293.15])})
-    model = Model(net, [electrical, thermal], closures=[joule], **coupling)
-    state = {"electrical.phi": _t([0.0, 220.0, 0.0, 0.0]), "electrical.q": _t([2.2, 2.2]),
-             "thermal.x": _t([293.15]), "thermal.sources": torch.zeros(4, dtype=F64)}
-    drivers = {"electrical.phi_boundary": _t([0.0]), "thermal.x_boundary": _t([293.15]),
-               "electrical.resistor.T": _t([293.15])}
-    return model, state, drivers
-
-
-ANDERSON = dict(coupling="iterate", iterate_tol={"electrical": 1e-10, "thermal": 1e-10},
-                iterate_flow_tol={"electrical": 1e-10}, iterate_acceleration="anderson",
-                iterate_max=100)
-
-
-def test_a_mixed_heat_state_lands_on_the_coupled_fixed_point():
-    # the device's temperature driver and the heat layer's temperature agree at the end
-    model, state, drivers = _coupled_resistor(**ANDERSON, iterate_mixed=["thermal"])
-    assert model.iterate_mixed == ("thermal",)
+    model, state, drivers, names = read_modelica_circuit(
+        DATA / "Analog.Examples.Resistor.json")
+    t = 0.49
     diag: dict = {}
-    out = model.steady(state, drivers, diagnostics=diag)
+    out = model.steady(state, step_drivers(drivers, names.grid, t), t=t, atol=STEADY_ATOL,
+                       rtol=STEADY_RTOL, diagnostics=diag)
+    assert bool(diag["converged"])
     T = float(out["thermal.x"][0])
-    assert abs(T - 302.73806893411466) <= 1e-9
-    i = 220.0 / (100.0 * (1.0 + 1e-3 * (T - 293.15)))
-    assert abs(float(out["electrical.q"][1]) - i) <= 1e-11
-
-
-def test_iterate_mixed_is_refused_without_anderson_or_for_an_unjudged_layer():
-    with pytest.raises(ValueError, match="needs iterate_acceleration='anderson'"):
-        _coupled_resistor(coupling="iterate", iterate_tol={"electrical": 1e-10,
-                                                           "thermal": 1e-10},
-                          iterate_mixed=["thermal"])
-    with pytest.raises(KeyError, match=r"iterate_mixed names \['electrical'\]"):
-        _coupled_resistor(**ANDERSON, iterate_mixed=["electrical"])
-    with pytest.raises(KeyError, match=r"iterate_mixed names \['thermal'\]"):
-        _coupled_resistor(**{**ANDERSON, "iterate_tol": {"electrical": 1e-10}},
-                          iterate_mixed=["thermal"])
+    v = 220.0 * math.sin(2.0 * math.pi * t)
+    i = v / (100.0 * (1.0 + 1e-3 * (T - 293.15)))
+    assert abs(float(out["electrical.q"][1]) - i) <= 1e-13
+    # and both on OpenModelica's fixed point (its CSV row at 0.49 s)
+    assert abs(T - 293.1881633891936) <= 1e-11

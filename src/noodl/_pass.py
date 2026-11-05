@@ -143,7 +143,8 @@ def run_pass(
     _step_allocations(model, base, drv, dt, new, made, diag)
     transfer_layers = _transfer_layers(model, boundary_transfers, dt)
     _advance_transport(model, base, drv, dt, transfer_layers, new, made, diag,
-                       solve_kwargs.get(LAYER_OPTIONS, {}))
+                       solve_kwargs.get(LAYER_OPTIONS, {}),
+                       initial=solve_kwargs.get("mode") == "initial")
     _collect_closure_state(model, drv, written, new, made)
     return new, diag, drv
 
@@ -220,10 +221,14 @@ def _transfer_layers(model: Model, boundary_transfers, dt) -> set[str]:
 
 
 def _advance_transport(model: Model, base, drv, dt, transfer_layers: set[str], new: dict,
-                       made: list, diag: dict, options: Mapping[str, Mapping]) -> None:
+                       made: list, diag: dict, options: Mapping[str, Mapping], *,
+                       initial: bool = False) -> None:
     """Advance (or, with `dt=None`, solve to steady) every transport layer on the flows of
     its kinds, applying the reactions on the side of the step `reaction_order` names.
-    `options` are the `layer_options`: a transport layer's `scheme` for this step."""
+    `options` are the `layer_options`: a transport layer's `scheme` for this step. With
+    `initial` (a steady solve with `mode="initial"`, the consistent initial point) a
+    transport layer holds its stored nodes at the state's `"<layer>.x"` and solves only
+    for the nodes that hold nothing, as a capacitor holds its start voltage there."""
     for name, layer in model.transport.items():
         scheme = options.get(name, {}).get("scheme")
         want_transfer = name in transfer_layers
@@ -263,10 +268,13 @@ def _advance_transport(model: Model, base, drv, dt, transfer_layers: set[str], n
                     if like is None
                     else model._zero_sources(layer, like, layer.n_i)
                 )
+            stored = None
+            if initial:
+                stored = require(base, f"{name}.x")
             x = layer.steady(
                 q_kind, sources, xb, capacity=cap, removal=removal,
                 transmission=transmission, conductance=conductance,
-                diagnostics=layer_diag
+                diagnostics=layer_diag, stored=stored,
             )
             if cap is not None:
                 # The capacity this state was solved with, as a step records its own.
