@@ -93,17 +93,19 @@ def active_interior(
 
 # Inner linear solvers a TransportLayer may be configured with; resolved PER SOLVE (never
 # fixed for the layer's whole lifetime the way `KirchhoffLayer._LINEAR_SOLVERS` is used)
-# by `TransportLayer._resolve_solver` into the kwargs `solvers.select.solve` actually reads.
+# by `TransportLayer._resolve_solver` (the rule is
+# `select.transport_solver_kwargs`) into the kwargs `solvers.select.solve` actually reads.
 # "gmres" resolves to `method="gmres"` with no preconditioner.
 # "gmres_jacobi"/"gmres_ilu" resolve to `method="gmres"` with a real preconditioner.
 # "sparse_direct" (SuperLU, on the operators' COO forms) and "direct" (the dense LU reference)
 # pass straight through. `select.solve`'s OWN "auto" policy (the certified-SPD potential path)
 # is a different policy -- this is a SEPARATE "auto", scoped to this layer: it resolves to
-# `sparse_direct` at or under `_SPARSE_DIRECT_MAX_BATCH` instances and to plain `gmres` above
+# `sparse_direct` at or under `select._SPARSE_DIRECT_MAX_BATCH` instances and to plain `gmres` above
 # it (sparse_direct is not applicable there, and the gmres family's own ordering is not clean
 # enough to prefer a preconditioner over plain gmres); `gmres_jacobi`/`gmres_ilu` are never
 # chosen by `auto`. The choice rests on an interleaved benchmark, see
-# docs/design/solvers.md#transport-solver-choice. See `_resolve_solver` for the two hazards
+# docs/design/solvers.md#transport-solver-choice. See `select.transport_solver_kwargs` for the
+# two hazards
 # this default must handle: SciPy absent,
 # and a grad-requiring `on_failure="return"` solve (which runs outside `_LinearSolve`'s
 # `no_grad`, unlike the differentiable forward/backward path).

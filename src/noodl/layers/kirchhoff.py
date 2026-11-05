@@ -1349,13 +1349,7 @@ class KirchhoffLayer(TopologyGuard):
                 )
             x = result.x
             if diagnostics is not None:
-                diagnostics.update(
-                    newton_iterations=result.iterations,
-                    linear_iterations=result.linear_iterations,
-                    backend=result.backend,
-                    converged=result.converged,
-                    residual_norm=result.residual_norm,
-                )
+                result.into(diagnostics)
         else:
             x = implicit_solve(
                 residual_fn,
