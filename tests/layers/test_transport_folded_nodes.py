@@ -669,3 +669,73 @@ def test_moving_the_layer_drops_the_cached_folding():
     x = layer.step(X0_WALL.float(), Q0.float(), SRC0.float(), XB.float(), 600.0)
     ref = _wall("exact").step(X0_WALL, Q0, SRC0, XB, 600.0)
     torch.testing.assert_close(x.double(), ref, rtol=1e-5, atol=0)
+
+
+def test_an_in_place_edit_of_the_conductance_refolds():
+    """The kept folding belongs to the conductance tensor and its version: an in-place edit
+    of the construction-time conductance is folded again, as a new layer would be."""
+    layer = _wall("exact")
+    layer.step(X0_WALL, Q0, SRC0, XB, 600.0)
+    layer.conductance[0] = 2.0 * H1
+    torch.testing.assert_close(layer.step(X0_WALL, Q0, SRC0, XB, 600.0),
+                               _wall("exact", g=(2.0 * H1, H2, K1, K2)).step(
+                                   X0_WALL, Q0, SRC0, XB, 600.0), rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("scheme", ["implicit", "trapezoidal"])
+def test_a_layer_of_folded_nodes_only_returns_a_solve_result_under_on_failure_return(scheme):
+    """No stored node, no linear solve: `on_failure="return"` still returns a
+    `SolveResult` (converged, zero iterations), its `x` the recovered state, stacked."""
+    net = Network(dtype=F64)
+    for n in ("ambient", "sky", "s"):
+        net.add_node(n)
+    net.add_edge("ambient", "sky", kind="air")
+    net.add_edge("s", "ambient", kind="film")
+    layer = TransportLayer(net, "T", capacity=_t([0.0]), flow_kind="air",
+                           boundary=["ambient", "sky"], conduction_kind="film",
+                           conductance=_t([2.0]), storage_free=["s"], scheme=scheme)
+    q, xb, src = _t([0.0]), _t([270.0, 250.0]), _t([0.0, 0.0, 4.0])
+    for result, plain in ((layer.step(_t([300.0]), q, src, xb, 10.0, on_failure="return"),
+                           layer.step(_t([300.0]), q, src, xb, 10.0)),
+                          (layer.steady(q, src, xb, on_failure="return"),
+                           layer.steady(q, src, xb))):
+        assert bool(result.converged.all()) and int(result.iterations.sum()) == 0
+        assert result.x.tolist() == plain.tolist()
+        assert plain.tolist() == pytest.approx([270.0 + 4.0 / 2.0], rel=1e-15)
+
+
+def test_the_kept_node_view_is_built_once_and_a_call_writes_nothing_on_it():
+    """The kept-node layer is one object holding the full layer and its own structure; its
+    per-node coefficients are the full layer's sliced on reading, and a step leaves it as
+    it was (no per-call copy of the full layer's attributes)."""
+    layer = _wall("trapezoidal")
+    kept = layer._kept
+    before = dict(vars(kept))
+    diagnostics: dict = {}
+    layer.step(X0_WALL, _t([0.05]), SRC0, XB, 600.0, diagnostics=diagnostics)
+    assert layer._kept is kept
+    assert vars(kept).keys() == before.keys()
+    assert all(vars(kept)[k] is v for k, v in before.items())
+    assert "capacity" not in vars(kept) and "carrier" not in vars(kept)
+    assert kept.capacity.tolist() == [CZ, CW]
+    assert kept.carrier is layer.carrier
+    assert diagnostics["held_sources_dropped"] == 0
+
+
+def test_a_folded_layer_survives_pickling():
+    import pickle
+
+    layer = _wall("implicit")
+    copy = pickle.loads(pickle.dumps(layer))
+    assert copy._kept._layer is copy
+    torch.testing.assert_close(copy.step(X0_WALL, Q0, SRC0, XB, 600.0),
+                               layer.step(X0_WALL, Q0, SRC0, XB, 600.0), rtol=0, atol=0)
+
+
+def test_the_conductance_is_read_through_a_public_property():
+    layer = _wall("exact")
+    assert layer.conductance.tolist() == [H1, H2, K1, K2]
+    assert _two_node_wall().conductance.shape == (2,)
+    plain = TransportLayer(_wall_net(), "T", capacity=_t([CZ]), flow_kind="air",
+                           boundary=["ambient"])
+    assert plain.conductance is None

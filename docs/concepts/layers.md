@@ -211,7 +211,8 @@ Four things catch people:
   conduction, a surface (film) coefficient and a radiative coefficient as separate edges.
   `conductance` is then one tensor over the edges of all those kinds, the first kind's edges in
   network order, then the second kind's, and so on; `layer.conduction_edges` lists the kinds with
-  their end nodes in exactly that order, so a closure can write one value per edge. Every
+  their end nodes in exactly that order, so a closure can write one value per edge, and
+  `layer.conductance` reads the construction-time values back. Every
   conduction kind counts as a touch for the active interior.
 - **`flow_kind` may be several kinds**, and `q` is then their flows *concatenated in that order*.
   That is exactly what `KirchhoffLayer.flows_of_kind(q, layer.flow_kinds)` produces, so heat
@@ -330,11 +331,15 @@ coefficient re-evaluated each pass is folded with its current value, and gradien
 conductances and the sources through it. A folded node all of whose conductances are zero in a
 call is held at its value, its source dropped, as above; a group of folded nodes joined that call
 only to each other (every conductance to a stored node or boundary zero) has no temperature and is
-refused, naming the nodes. Each group is factored as a small dense matrix, batched over the groups
+refused, naming the nodes. Checking for such a group searches the group's edges on the host, so it
+costs a little on every call in which some conductance touching a group of two or more folded
+nodes is zero (a radiative coefficient that vanishes at night); with every such conductance
+positive it costs nothing. Each group is factored as a small dense matrix, batched over the groups
 of one size, never as a matrix over the whole network; a group is as large as the set of folded
 nodes joined to each other, usually the surfaces of one zone. A layer whose every interior node is
 folded (a heat network without any heat capacity) has nothing to step: its step and its steady
-state are the folded nodes' balance at the end of the step. `layer.steady(..., hold=x0)` holds
+state are the folded nodes' balance at the end of the step; under `on_failure="return"` they
+return a `SolveResult` that has converged in zero iterations. `layer.steady(..., hold=x0)` holds
 the stored nodes at `x0` and solves only the folded ones: the consistent initial point
 `Model.steady(..., mode="initial")` uses. A storage-free node that air flows
 through (a plenum), or that has a removal or reaction, is not folded and still needs

@@ -327,9 +327,12 @@ def test_thermal_layer_takes_a_tuple_of_conduction_kinds():
     # kind blocks concatenate in the order given: wall (30), then film (20, 70)
     merged = thermal_layer(_film_wall_net(("wall", "wall", "wall")))
     assert merged.conduction_kind == "wall"
-    g = split._conduction_edges[2]
-    assert g.tolist() == [30.0, 20.0, 70.0]
-    assert torch.equal(split._conduction_edges[0], merged._conduction_edges[0])
+    assert split.conductance.tolist() == [30.0, 20.0, 70.0]
+
+    def sources(layer):
+        return torch.cat([src for _, src, _ in layer.conduction_edges])
+
+    assert torch.equal(sources(split), sources(merged))
     assert torch.equal(split.interior_idx, merged.interior_idx)
     assert torch.equal(split.capacity, merged.capacity)
 
