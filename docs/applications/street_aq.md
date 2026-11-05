@@ -623,9 +623,9 @@ per instance, and whether the tables were rebuilt.
 import math
 import torch
 from noodl.apps.street_aq import (
-    PuffOptions, PuffState, build_model, puff_mass, twelve_street_grid,
+    PuffOptions, PuffState, build_model, mass_in_streets, pending_roof_mass, puff_mass,
+    twelve_street_grid,
 )
-from noodl.apps.street_aq.puff import mass_in_streets, pending_roof_mass
 
 DT = torch.float64
 
@@ -727,9 +727,9 @@ first entry only.
 | `"u_star"`, `"theta_w"`, `"h_abl"` | m/s, rad, m | Friction velocity, wind direction (counter-clockwise from east, blowing toward) and boundary-layer depth. Required. |
 | `"lmo"` | m | The Obukhov length; neutral when absent. |
 | `"sigma_theta"` | rad | Only when `PuffOptions.sigma_theta` is `None`. |
-| `"puff.release_xy"` | m, `(B, R, 2)` | The releases' horizontal positions. |
-| `"puff.release_z"` | m, `(B, R)` | Their heights. Each release has its own table, whose centre law starts at that height. |
-| `"puff.release_rate"`, `"puff.release_start"`, `"puff.release_duration"` | kg/s, s, s; `(B, R)` | Each release's top-hat history. Needs `Model.step(t=...)`. |
+| `"puff.release_xy"` | m, `(B, R, 2)` or `(R, 2)` | The releases' horizontal positions. |
+| `"puff.release_z"` | m, `(B, R)` or `(R,)` | Their heights. Each release has its own table, whose centre law starts at that height. |
+| `"puff.release_rate"`, `"puff.release_start"`, `"puff.release_duration"` | kg/s, s, s; `(B, R)` or `(R,)` | Each release's top-hat history. Needs `Model.step(t=...)`. |
 
 The tables are rebuilt only when one of their drivers changes (in value, or as a different
 tensor), so under constant meteorology a run builds them once. A wind direction that
@@ -752,7 +752,9 @@ sum_s V_s (x_s - C_bg,s) + sum_live m + mass_out + mass_dropped - mass_drawn_dow
 
 `mass_in_streets` gives the first term, `puff_mass` the second, the `PuffState` counters
 the next three, and `pending_roof_mass` the last step's roof and junction mass not yet
-emitted (with `puff_dt`, also the mass accumulated towards the next emission). The tests
+emitted (with `puff_dt`, also the mass accumulated towards the next emission). The last
+step's release mass, also emitted only by the next step, is not in it: add
+`pulse_mass(t, dt, start, duration, rate)` of the last step, as the tests do. The tests
 hold the identity to 1e-12 relative at every step: with puffs evicted for capacity, with
 the wind turning between steps and under both junction sources. It is exact for a
 background constant in time (each emission uses the current step's background).
@@ -764,8 +766,8 @@ steady `C_ext`. The model is built so that this limit is the steady kernel:
 
 - With `along_wind="none"` the steady puff train of a unit source at every street and
   junction reproduces `street_kernel` and `junction_kernel` to 1e-12 at every step from
-  10 s down to 0.625 s (measured 4e-16 to 8e-16), in neutral, weakly unstable and weakly
-  stable hours, and the coupled run reaches `street_steady_with_plume`'s solution to the
+  10 s down to 0.625 s (measured 4e-16 to 8e-16) in a neutral hour, and to the same bound
+  at 10 and 2.5 s in a weakly unstable and a weakly stable hour; the coupled run reaches `street_steady_with_plume`'s solution to the
   run's own stopping tolerance (1.6e-11 at 5 s). On this grid no receptor lies in the first
   slug's lag gap, $[0, x(\Delta t/2))$ from a source, so these checks do not see the
   one-step emission lag; a receptor that close to a source would.
@@ -778,7 +780,12 @@ steady `C_ext`. The model is built so that this limit is the steady kernel:
 
 A puff's mass is linear in the street state and the fluxes, and a release's rate, start,
 duration, position and height, the meteorology (`u*`, `h_abl`, `L`, `sigma_theta`, through
-the tables) and the wind direction all carry gradients. A start time inside a step is
+the tables) and the wind direction are all differentiable. Central differences check the
+coupled run's gradient in a canopy pulse's rate and start, a release's rate, start,
+duration and x position, `u*` and the wind direction; the tables' gradients in `u*`, `L`
+and the release height are checked to be finite and non-zero, and the steady table's in
+`h_abl` and `sigma_theta` against central differences; the release height, `h_abl` and
+`sigma_theta` are not checked by central differences through a puff run. A start time inside a step is
 differentiable: a release's mass in a step is the overlap of its window with the step,
 piecewise linear. Masks, drop decisions and evictions are taken on detached values, so the
 gradient is that of the puffs kept. The cut-offs are hard, as in the steady kernel, and a
@@ -791,10 +798,14 @@ A batch of releases is a leading batch dimension on every driver and on the puff
 of $N$ releases (different streets, start times, `u*`) equals $N$ separate runs to
 rounding.
 
-On the Paris case (577 streets, one hour of 5 s steps, a pulse near the upwind edge, CPU)
-a forward step takes about 240 ms at batch 1 and 780 ms at batch 8, and forward plus
-backward about 340 ms at batch 1. About 190 ms of each step is the street model's own
-canyon-wind solve, recomputed every step; the puffs take the rest.
+On the Paris case (577 streets, a pulse near the upwind edge, 5 s steps, CPU) a forward
+step takes about 240 ms at batch 1 and 780 ms at batch 8 over one hour; forward plus
+backward takes about 340 ms a step at batch 1, measured over the first 120 steps (up to
+1134 live puffs, against 6350 at the hour's peak), not the hour. A profile of the forward
+step (on the code just before the last evaluator change, so its parts sum to more than
+the median) puts about 187 ms in the street model's own canyon-wind solve, recomputed every
+step, and 163 ms in the puffs, 115 ms of it evaluating `C_ext`; see the
+[design note](../design/street_puffs.md#410-cost-at-paris-scale).
 
 ### Limitations
 
@@ -906,11 +917,15 @@ meteorology (`read_results(...).meteo`), never the deck's.
   angles, 36 junctions), though the default time offsets and `theta*` were fitted partly on
   this hour's meteorology.
 
-  Ten further runs of one isolated street under imposed meteorology (across, along and
-  oblique to the wind, neutral and stable; `tests/data/street/sirane_kernel_probe`) check
-  the kernel directly against SIRANE's own concentration grids. These are in sample -- the
-  empirical parameters above are fitted on them -- and give a per-run median relative
-  difference of about 0.02-0.6 % over the sampled cells. Including a street's own roof-flux
+  Nineteen further runs of one isolated street under imposed meteorology
+  (`tests/data/street/sirane_kernel_probe`) check the kernel directly against SIRANE's own
+  concentration grids. Ten, across, along and oblique to the wind in neutral and stable
+  hours, are in sample -- the empirical parameters above are fitted on them. Nine test
+  SIRANE's stability classes and were not fitted on: four weakly unstable (L = -1500 to
+  -30000 m, across and oblique), one at h / |L| = 0.29 and four along the wind at
+  h / L = 0.25, 0.5, 0.9 and 1.1. Over the sampled cells the per-run median relative
+  difference is 0.016-0.6 % and the 90th percentile 0.1-2.9 %
+  (`tests/verification/test_sirane.py`, `PROBE_TOLERANCES`). Including a street's own roof-flux
   points in its own `Cext` (`self_contribution=True`) overstates it (measured median ratio
   2.33 on the South Kensington fluxes), which is why it is excluded by default.
 

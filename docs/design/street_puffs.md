@@ -34,7 +34,7 @@ departs from SIRANERISK where the steady model has to remain its limit:
 | Along the wind | plain Gaussian puffs | a slug of the length the puff train covers in one step, alone (`"none"`) or convolved with a Gaussian of `sigma_y` (`"sigma_y"`, the default) (Sect. 4.3) |
 | Puff records | one per emission | one per source (street, junction, release) per step; a street's sub-sources are expanded at evaluation (Sect. 4.3) |
 | Emission | within the step | one step late: the closure emits at the start of a step what the street step before it moved (Sect. 4.2) |
-| Housekeeping | | fixed capacity per batch instance, puffs retired past the domain and below a relative faint threshold, with every retired mass counted (Sect. 4.8) |
+| Housekeeping | not described in the 2016 paper | fixed capacity per batch instance, puffs retired past the domain and below a relative faint threshold, with every retired mass counted (Sect. 4.8) |
 
 The reason for the first and third choices is the consistency claim the paper makes: under
 constant meteorology and emissions the puff model must converge to the steady kernel as the
@@ -156,7 +156,8 @@ limit had a floor that did not fall with dt (kernel level, max |dK| / max K):
 
 Two causes, both in the tables: the scan moves the plume at its node speed, which jumps by
 up to 7 % each time the centre height passes a whole metre, while the kernel divides by the
-speed interpolated on the distance grid (7.0 % of the floor); and `P_z` computed from
+speed interpolated on the distance grid (a 7.0 % speed mismatch, which accounts for the
+whole far-field floor); and `P_z` computed from
 `sigma_z(0) = 0` diverged in the first 10 s, where the kernel holds `P_z0 = P_z1`. Reading
 the kernel's own grid removes both.
 
@@ -315,7 +316,13 @@ that each puff's along-wind band is a `searchsorted` run; pair chunks sized by t
 sub-source pairs they expand to; table reads split so each mode reads only the columns it
 needs.
 
-Where a step's time goes now (B = 1, steps 360-390, 4127 live, capacity 16384): the street
+The forward + backward rows ran over the first 120 steps only (peak 1134 live puffs),
+not the hour; the hour's forward + backward was not measured.
+
+Where a step's time goes (B = 1, steps 360-390, 4127 live, capacity 16384, profiled on the
+code just before the last evaluator change, so the parts sum to more than the 239 ms
+median of the final code; `_evaluate` alone on the captured step-360 state then took
+40-90 ms on a loaded machine): the street
 model outside the puffs about 187 ms, almost all the canyon wind's shape-parameter solve
 (`routing.velocities` -> `canyon.roof_wind` -> `bessel_shape_parameter`), recomputed every
 step under constant meteorology; the puff closure 163 ms, of which `_evaluate` 115 ms,

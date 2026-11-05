@@ -537,7 +537,9 @@ def housekeep(field: PuffField, state: PuffState, tables: PuffTables, *,
     `tables.x_max` go to `mass_out`; of the others, those
     whose peak estimate (`_peak_bound`) is below `drop_below` times the largest among the
     instance's live puffs go to `mass_dropped`. An instance with no live puff is left as
-    it is. Decisions are made on detached values; the masses keep their graph."""
+    it is. Decisions are made on detached values; the masses keep their graph. The
+    default `drop_below` here is 1e-6; `PuffClosure` passes `PuffOptions.drop_below`
+    (1e-3 by default)."""
     if not 0.0 <= drop_below < 1.0:
         raise ValueError(f"housekeep: drop_below must be in [0, 1), got {drop_below!r}")
     n_batch = state.mass.shape[0]
@@ -1039,7 +1041,7 @@ class PuffOptions:
     """The options of the unsteady above-roof puff model, `build_model(...,
     puffs=PuffOptions(...))`: canopy height `h_canopy`, `z0`, `d` (m), puff slots
     `capacity` per instance, emission interval `puff_dt` (s), faint threshold `drop_below`
-    (design Sect. 4-5).
+    (design Sect. 4.2-4.8).
 
     `h_canopy`, `z0`, `d` (m) are the tables' canopy height `H_R`, roughness and
     displacement; `sigma_theta` (rad) the wind-direction spread, `None` for the
