@@ -290,8 +290,9 @@ def puff_tables(
     Needs `h_abl > h_canopy > d`, `u* > 0` and `tau_z < TIME_STEP_S`; a wind at `H_R` so
     low that the scan would need more than `MAX_TABLE_STEPS` steps, and the convective
     regime (`h_abl / |lmo| > CONVECTIVE_H_OVER_L`; SIRANE's neutral class is tabulated as in
-    `plume_table`), are refused by name. Rows are built in chunks under `KERNEL_BYTES_CAP`
-    (`table_chunks`)."""
+    `plume_table`), are refused by name, and so is a `h_canopy`, `h_abl`, `u_star`, `lmo`,
+    `z0` or `d` that differs between the tables (axis 0; the tables keep one row of them
+    per hour). Rows are built in chunks under `KERNEL_BYTES_CAP` (`table_chunks`)."""
     centres = torch.as_tensor(centres, dtype=_DTYPE)
     if centres.ndim not in (1, 2):
         raise ValueError(
@@ -308,6 +309,14 @@ def puff_tables(
             f"puff_tables: the meteorology must be scalar or (n_b,) and centres (n_tab,) "
             f"or (n_tab, n_b); the broadcast shape is {batch}")
     n_tab, n_b = batch
+    with torch.no_grad():
+        for key, name in _ROW_KEYS.items():
+            v = p[key].reshape(batch)
+            if not bool((v == v[:1]).all()):
+                raise ValueError(
+                    f"puff_tables: {name} differs between the tables (axis 0, n_tab = "
+                    f"{n_tab}); the tables keep one meteorology row per hour, so pass it "
+                    f"scalar or (n_b,), or build one puff_tables per value")
     n_grid = _grid_size(x_max)
     steps = _step_bound("puff_tables", u0, (n_grid - 1) * TABLE_STEP_M)
     keys = tuple(p)
@@ -323,11 +332,15 @@ def puff_tables(
                                    _PUFF_COLS))
     cols = [torch.cat([o[i] for o in out]).reshape(n_tab, n_b, n_grid)
             for i in range(len(_PUFF_COLS))]
-    row = {k: p[k].reshape(batch)[0] for k in ("h_r", "h_abl", "u_star", "lmo", "z0", "d")}
+    row = {k: p[k].reshape(batch)[0] for k in _ROW_KEYS}
     return PuffTables(*cols, h_canopy=row["h_r"], h_abl=row["h_abl"], x_max=float(x_max),
                       u_star=row["u_star"], lmo=row["lmo"], z0=row["z0"], d=row["d"],
                       kappa=kappa)
 
+
+_ROW_KEYS = {"h_r": "h_canopy", "h_abl": "h_abl", "u_star": "u_star", "lmo": "lmo",
+             "z0": "z0", "d": "d"}
+"""The meteorology `PuffTables` keeps per hour (`_table_inputs` key: argument name)."""
 
 ALONG_WIND = ("sigma_y", "none")
 """The along-wind profile options of a puff (`PuffField`)."""
@@ -586,14 +599,13 @@ def _retire(state: PuffState, gone: Tensor, counter: str) -> PuffState:
 
 
 def housekeep(field: PuffField, state: PuffState, tables: PuffTables, *,
-              drop_below: float = 1e-6) -> PuffState:
+              drop_below: float = 1e-3) -> PuffState:
     """Retire puffs (design Sect. 4.8): those whose distance `x(age)` passed
-    `tables.x_max` go to `mass_out`; of the others, those
-    whose peak estimate (`_peak_bound`) is below `drop_below` times the largest among the
-    instance's live puffs go to `mass_dropped`. An instance with no live puff is left as
-    it is. Decisions are made on detached values; the masses keep their graph. The
-    default `drop_below` here is 1e-6; `PuffClosure` passes `PuffOptions.drop_below`
-    (1e-3 by default)."""
+    `tables.x_max` go to `mass_out`; of the others, those whose peak estimate
+    (`_peak_bound`) is below `drop_below` (default 1e-3, as `PuffOptions.drop_below`)
+    times the largest among the instance's live puffs go to `mass_dropped`. An instance
+    with no live puff is left as it is. Decisions are made on detached values; the masses
+    keep their graph."""
     if not 0.0 <= drop_below < 1.0:
         raise ValueError(f"housekeep: drop_below must be in [0, 1), got {drop_below!r}")
     n_batch = state.mass.shape[0]
@@ -1269,8 +1281,12 @@ class PuffClosure:
     `r`'s table `1 + r`), `"puff.release_rate"` (kg/s), `"puff.release_start"` and
     `"puff.release_duration"` (s), each `(B, R)` (the batch dim optional), and
     `Model.step(t=...)`. The batch is `()` or `(B,)`. Tables and source field are rebuilt
-    when one of their drivers is a different tensor, or has a different value, than at the
-    last build (a value-only cache would reuse an earlier run's graph). Under
+    when one of their drivers has a different value than at the last build, or, when it
+    requires grad, is a different tensor (a value-only match would reuse another leaf's
+    graph). The cache is dropped at the start of a run and when a run resumes from a state
+    this closure did not produce while the cache holds a graph, so a run continues after a
+    backward from its detached state (truncated BPTT) with the same driver tensors;
+    `reset()` drops it by hand, to continue a run after a backward in any other way. Under
     `meteo="per_street"` the tables read the first street's (or junction's) entry of each
     meteorology driver, so a gradient with respect to those drivers reaches that entry only.
 
@@ -1326,6 +1342,7 @@ class PuffClosure:
         self.field: PuffField | None = None
         self._table_key: tuple | None = None
         self._field_key: tuple | None = None
+        self._times: tuple[Tensor, ...] = ()
         self.last: dict = {}
 
     def __repr__(self) -> str:
@@ -1443,31 +1460,64 @@ class PuffClosure:
         return met, rel
 
     # ---------------------------------------------------------------- caches
+    def reset(self) -> None:
+        """Drop the cached tables and field; the next call rebuilds them. A step already
+        does this when a run starts (a state with no pending step) and when it resumes from
+        a state this closure did not produce while the cache holds a graph (a stored,
+        detached state after a backward, as in truncated BPTT); call it to continue a run
+        after a backward in any other way, e.g. after changing a driver in place."""
+        self.tables = self.field = None
+        self._table_key = self._field_key = None
+        self._times = ()
+
     @staticmethod
     def _same(key: tuple | None, raws: tuple) -> bool:
-        """Whether every input is the same object, with the same value, as at the build."""
+        """Whether every input matches the build's: a tensor that requires grad (now or
+        at the build) is the same object with the same value, one that does not has the
+        same value, and anything else is the same object or an equal number."""
         if key is None:
             return False
         for (old, value), raw in zip(key, raws, strict=True):
-            if old is not raw:
-                return False
-            if isinstance(raw, Tensor) and not torch.equal(value, raw.detach()):
+            if isinstance(raw, Tensor):
+                if old is not raw and (raw.requires_grad or not isinstance(old, Tensor)
+                                       or old.requires_grad):
+                    return False
+                if (raw.dtype != value.dtype or raw.shape != value.shape
+                        or not torch.equal(value, raw.detach())):
+                    return False
+            elif old is not raw and not (
+                    type(old) is type(raw) and isinstance(raw, (int, float))
+                    and old == raw):
                 return False
         return True
+
+    def _holds_graph(self) -> bool:
+        """Whether the cached tables or field carry an autograd graph."""
+        cached = []
+        if self.tables is not None:
+            cached += [getattr(self.tables, f.name) for f in fields(PuffTables)]
+        if self.field is not None:
+            f = self.field
+            cached += [f.xy, f.weight, f.width, f.clamp]
+        return any(isinstance(v, Tensor) and v.requires_grad for v in cached)
 
     @staticmethod
     def _key(raws: tuple) -> tuple:
         return tuple((raw, raw.detach().clone() if isinstance(raw, Tensor) else raw)
                      for raw in raws)
 
-    def _build(self, met: dict, rel: dict, *, new_run: bool) -> bool:
+    def _build(self, met: dict, rel: dict, *, new_run: bool, time: Tensor) -> bool:
         """Rebuild the tables and the field when their inputs changed; whether any was.
 
         The cache holds the autograd graph of the run that built it, so it is also dropped
-        at the start of every run (`new_run`: a step from a state with no pending step) and
-        keyed on the grad mode: an earlier run's tables would carry a freed graph, or none
-        (built under `torch.no_grad`), and give a wrong or failing gradient."""
-        if new_run:
+        at the start of every run (`new_run`: a step from a state with no pending step),
+        when it holds a graph and the state's `"puff.time"` (`time`) is neither the one
+        the last step read nor the one it wrote (a run resumed from a stored, detached
+        state after a backward), and it is keyed on the grad mode: an earlier run's tables
+        would carry a freed graph, or none (built under `torch.no_grad`), and give a wrong
+        or failing gradient."""
+        resumed = not any(time is t for t in self._times) and self._holds_graph()
+        if new_run or resumed:
             self._table_key = self._field_key = None
         grad = torch.is_grad_enabled()
         o = self.options
@@ -1554,8 +1604,9 @@ class PuffClosure:
             batch = (stored,)
         n_batch = batch[0] if batch else 1
         puff = self._puffs(state, n_batch)
-        rebuilt = self._build(met, rel, new_run=ctx is not None
-                              and float(state["puff.time"][1]) == 0.0)
+        time_in = state["puff.time"]
+        rebuilt = self._build(met, rel, new_run=ctx is not None and float(time_in[1]) == 0.0,
+                              time=time_in)
         theta = met["theta_w"][1]
 
         def per_instance(t: Tensor, tail: tuple[int, ...]) -> Tensor:
@@ -1666,8 +1717,10 @@ class PuffClosure:
             puff, c_ext, evicted = puff_step(puff)
         self.last = {"live": puff.live.sum(1), "evicted": evicted, "rebuilt": rebuilt}
         t_now = 0.0 if ctx.t is None else float(ctx.t)
+        time_out = torch.tensor([t_now, dt], dtype=_DTYPE)
+        self._times = (time_in, time_out)
         return {xb_key: c_ext, **puff.to_state(), "puff.q": drivers[q_key],
-                "puff.c_ext": c_ext, "puff.time": torch.tensor([t_now, dt], dtype=_DTYPE),
+                "puff.c_ext": c_ext, "puff.time": time_out,
                 "puff.pending": pending, "puff.pending_time": pending_time}
 
 

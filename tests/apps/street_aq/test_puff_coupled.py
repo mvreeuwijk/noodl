@@ -18,6 +18,7 @@ from noodl.apps.street_aq.network import (
 from noodl.apps.street_aq.puff import PuffClosure, PuffOptions, PuffState, puff_mass
 from noodl.contracts import StepContext
 from noodl.model import Model
+from tests._couple_models import tiny_building_model
 
 DT = torch.float64
 OPTIONS = PuffOptions(sigma_theta=math.radians(6.0))
@@ -155,9 +156,10 @@ def test_closure_keeps_caller_background_and_reports_diagnostics():
     assert closure.last["evicted"].shape == (1,)
     # the caller's background is not replaced by the closure's own C_ext
     assert torch.equal(drv["street.x_boundary"], torch.full((12,), 2.0**-26, dtype=DT))
-    # a new tensor of the same value rebuilds (identity rule); a changed value too
-    drv2 = {**drv, "u_star": drv["u_star"].clone()}
-    model.step(state, drv2, 5.0, t=35.0)
+    # a new tensor of the same value (no grad) matches by value; a changed value rebuilds
+    model.step(state, {**drv, "u_star": drv["u_star"].clone()}, 5.0, t=35.0)
+    assert closure.last["rebuilt"] is False
+    model.step(state, {**drv, "u_star": drv["u_star"] * 1.01}, 5.0, t=35.0)
     assert closure.last["rebuilt"] is True
 
 
@@ -299,6 +301,102 @@ def test_a_grad_run_after_a_no_grad_warm_up_has_the_full_gradient():
                 _grad_run(model, state, drv, u_star)
         grads.append(torch.autograd.grad(_grad_run(model, state, drv, u_star), u_star)[0])
     assert torch.equal(grads[1], grads[0])
+
+
+def _resume_leaves():
+    return (torch.tensor(0.5, dtype=DT, requires_grad=True),
+            torch.tensor(0.2, dtype=DT, requires_grad=True))
+
+
+def _resume_steps(model, state, drv, k0, n):
+    for k in range(k0, k0 + n):
+        state = model.step(state, drv, 5.0, t=5.0 * k)
+    return state
+
+
+def test_a_run_resumes_from_a_detached_state_after_a_backward():
+    """Truncated BPTT: k steps, a backward, the state detached, m more steps with the same
+    leaf tensors and a second backward. The closure's cached tables and field hold the
+    first segment's (freed) graph; resuming must rebuild them and give the gradient of a
+    fresh closure resumed from that state."""
+    _, names, model, state, drivers = _puff_model()
+    src = _street_sources(model, {names[2]: 1e-3})
+    u_star, theta = _resume_leaves()
+    drv = {**_drivers(model, drivers, sources=src), "u_star": u_star, "theta_w": theta}
+    state = _resume_steps(model, state, drv, 0, 4)
+    state["street.x"].sum().backward()
+    stored = {k: v.detach() for k, v in state.items()}
+    assert bool(stored["puff.live"].any())
+    u_star.grad = theta.grad = None
+    resumed = _resume_steps(model, dict(stored), drv, 4, 4)
+    got = torch.autograd.grad(resumed["street.x"].sum(), (u_star, theta))
+    assert model.closures[-1].last["rebuilt"] is False       # rebuilt once, at the resume
+    _, _, fresh, _, fresh_drivers = _puff_model()
+    f_drv = {**_drivers(fresh, fresh_drivers, sources=src), "u_star": u_star,
+             "theta_w": theta}
+    want = torch.autograd.grad(
+        _resume_steps(fresh, dict(stored), f_drv, 4, 4)["street.x"].sum(), (u_star, theta))
+    for g, w in zip(got, want, strict=True):
+        assert torch.equal(g, w)
+        assert float(w) != 0.0
+
+
+def test_a_resume_with_no_live_puffs_rebuilds_too():
+    # the emission still runs through the tables (`advance`), so the stale graph must go
+    # even when nothing is live at the resume
+    _, names, model, state, drivers = _puff_model()
+    u_star, theta = _resume_leaves()
+    drv = {**_drivers(model, drivers, sources=_street_sources(model, {names[2]: 1e-3})),
+           "u_star": u_star, "theta_w": theta}
+    state = _resume_steps(model, state, drv, 0, 4)
+    state["street.x"].sum().backward()
+    stored = {k: v.detach() for k, v in state.items()}
+    stored["puff.live"] = torch.zeros_like(stored["puff.live"])
+    resumed = _resume_steps(model, stored, drv, 4, 3)
+    torch.autograd.grad(resumed["street.x"].sum(), (u_star, theta))
+
+
+def test_reset_drops_the_cached_tables_and_field():
+    _, names, model, state, drivers = _puff_model()
+    closure = model.closures[-1]
+    drv = _drivers(model, drivers, sources=_street_sources(model, {names[2]: 1e-3}))
+    state = _resume_steps(model, state, drv, 0, 2)
+    assert closure.tables is not None and closure.field is not None
+    closure.reset()
+    assert closure.tables is None and closure.field is None
+    _resume_steps(model, state, drv, 2, 1)
+    assert closure.last["rebuilt"] is True
+
+
+def test_fresh_equal_valued_drivers_do_not_rebuild(monkeypatch):
+    """A caller that builds new driver tensors of the same value every step (no grad)
+    keeps the cached tables and field: they match by value."""
+    from noodl.apps.street_aq import puff as puff_module
+
+    builds = {"tables": 0, "field": 0}
+    tables_of, field_of = puff_module.puff_tables, puff_module.PuffField.for_network
+
+    def count_tables(*args, **kwargs):
+        builds["tables"] += 1
+        return tables_of(*args, **kwargs)
+
+    def count_field(*args, **kwargs):
+        builds["field"] += 1
+        return field_of(*args, **kwargs)
+
+    monkeypatch.setattr(puff_module, "puff_tables", count_tables)
+    monkeypatch.setattr(puff_module.PuffField, "for_network", count_field)
+    _, names, model, state, drivers = _puff_model()
+    src = _street_sources(model, {names[2]: 1e-3})
+    for k in range(5):
+        state = model.step(state, _drivers(model, drivers, sources=src), 5.0, t=5.0 * k)
+    assert builds == {"tables": 1, "field": 1}
+    # a grad-carrying driver still matches by identity: a new leaf rebuilds
+    for k in range(5, 7):
+        u_star = torch.tensor(0.5, dtype=DT, requires_grad=True)
+        state = model.step(state, {**_drivers(model, drivers, sources=src), "u_star": u_star},
+                           5.0, t=5.0 * k)
+    assert builds["tables"] == 3
 
 
 # ------------------------------------------------------------------ the mass budget (Test 3)
@@ -1100,7 +1198,6 @@ def test_puff_street_couples_to_a_building_through_union():
     the street the building reads after the travel time, and the building's indoor
     concentration is zero until then and positive after."""
     from noodl.couple import CONCENTRATION_TO_MASS_FRACTION, ValueLink, union
-    from tests.test_couple import _tiny_building_model
 
     net, names = twelve_street_grid(L=200.0)
     model, state, drivers = build_model(
@@ -1114,7 +1211,7 @@ def test_puff_street_couples_to_a_building_through_union():
            "puff.release_start": torch.tensor([0.0], dtype=DT),
            "puff.release_duration": torch.tensor([10.0], dtype=DT)}
     state = {**state, "street.x": torch.zeros(12, dtype=DT)}
-    b_model, b_state, b_drivers = _tiny_building_model()
+    b_model, b_state, b_drivers = tiny_building_model()
     b_state = {"species.x": torch.zeros(1, dtype=DT)}
     link = ValueLink(from_model="street", from_key="street.x", from_index=target,
                      to_model="building", to_key="species.x_boundary", to_index=0,

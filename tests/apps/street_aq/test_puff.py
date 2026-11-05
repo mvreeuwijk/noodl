@@ -225,6 +225,20 @@ def test_puff_tables_refuses_the_unstable_regime_by_name():
         puff_tables(centres=torch.tensor([10.0], dtype=DT), **{**_PUFF_MET, "lmo": -50.0})
 
 
+@pytest.mark.parametrize("name", ["h_canopy", "h_abl", "u_star", "lmo", "z0", "d"])
+def test_puff_tables_refuse_meteorology_varying_along_the_tables(name):
+    # `PuffTables` keeps one meteorology row per hour, so a value that differs between
+    # the tables (rows of `centres`) would be silently reduced to the first table's
+    base = float(_PUFF_MET[name])
+    other = 1e6 if name == "lmo" else base * 1.1
+    centres = torch.tensor([10.0, 40.0], dtype=DT)
+    with pytest.raises(ValueError, match=f"puff_tables: {name} differs between the tables"):
+        puff_tables(centres=centres,
+                    **{**_PUFF_MET, name: torch.tensor([[base], [other]], dtype=DT)})
+    # equal values along the table axis are taken
+    puff_tables(centres=centres, **{**_PUFF_MET, name: torch.tensor([[base], [base]], dtype=DT)})
+
+
 def test_gradients_reach_meteorology_and_centres_and_second_order_raises():
     u_star = torch.tensor([0.45], dtype=DT, requires_grad=True)
     lmo = torch.tensor([200.0], dtype=DT, requires_grad=True)
@@ -616,12 +630,21 @@ def test_puffs_leaving_the_domain_go_to_mass_out():
     _identity(out)
 
 
+def test_housekeep_default_threshold_is_the_closure_default():
+    import inspect
+
+    from noodl.apps.street_aq.puff import PuffOptions
+
+    default = inspect.signature(housekeep).parameters["drop_below"].default
+    assert default == PuffOptions().drop_below == 1e-3
+
+
 def test_faint_puffs_go_to_mass_dropped_and_identity_holds():
     field, tabs, state = _released([1.0, 2.0**-10, 2.0**-30, -1.0])
     th = torch.zeros(1, dtype=DT)
     state = advance(state, tabs, 5.0, th)
     _identity(state)
-    kept = housekeep(field, state, tabs)
+    kept = housekeep(field, state, tabs, drop_below=1e-6)
     assert kept.live[0, :4].tolist() == [True, True, False, True]
     assert float(kept.mass_dropped) == 2.0**-30 and float(kept.mass_out) == 0.0
     assert float(kept.mass[0, 2]) == 0.0

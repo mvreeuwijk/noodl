@@ -635,6 +635,18 @@ A query (`model.current_flows`, `model.residuals`, ...) evaluates `C_ext` from t
 without advancing them. `PuffClosure.last` holds the latest step's live and evicted puffs
 per instance, and whether the tables were rebuilt.
 
+The closure caches the tables and the field across steps and rebuilds them when the
+meteorology, the release heights or the wind direction change. A driver that requires
+grad matches by identity and value, one that does not by value alone, so new tensors of
+the same value every step cost no rebuild. The cache holds the autograd graph of the run
+that built it, so it is dropped at the start of every run (a state with no pending step)
+and when a run resumes from a state the closure did not produce while the cache holds a
+graph: to continue a run after a backward (truncated backpropagation through time),
+detach the state and step on with the same driver tensors, and the gradient is that of a
+fresh closure resumed from the detached state. `PuffClosure.reset()` drops the cache by
+hand, to continue a run after a backward in any other way (a driver changed in place, a
+state kept with its graph and stepped again).
+
 ### A worked example: a short release above the roofs
 
 ```python
