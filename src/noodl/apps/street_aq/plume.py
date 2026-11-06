@@ -83,9 +83,18 @@ derived; each is a named parameter with a default:
   probe cases' grids end between 688 and 708 m with 700 m cells (708 m in one of the 38
   runs; 686-700 m in the ten committed as test fixtures).
 
-Not implemented, by name: the unstable regime (`L < 0`; SIRANE's bi-Gaussian, Eq. 26, and
-the unstable Lagrangian time scale of Eq. 18, which the paper prints with inconsistent
-units): `plume_table` raises `NotImplementedError`. Plume rise (roof sources are passive)
+Stability classes. SIRANE classifies an hour by `h / L`, as the ADMS scheme it cites (CERC,
+2001): an hour in the neutral class `-CONVECTIVE_H_OVER_L <= h / L <= STABLE_H_OVER_L`
+(-0.3 to 1) is tabulated exactly as a neutral one -- the neutral `sigma_v`, `sigma_w`,
+`a = 2.5 u*/h` and `N = 0` -- except that the wind profile `U(z)` keeps the `psi_m` of `L`;
+the stable law above applies only for `h / L > 1`. The probe runs agree with this at the
+neutral cases' level on both sides of `L -> infinity`.
+
+Not implemented, by name: the convective regime (`h / |L| > 0.3`), where SIRANE switches to
+another vertical mechanism (the probe runs fit `sigma_z = sigma_w t / sqrt(1 + t / 2 T_L)`
+of Eq. (29) in weak convection, with `T_L` not the printed Eq. (18), which has inconsistent
+units, and a further departure in strong convection consistent with the bi-Gaussian of Eq.
+(26)): `plume_table` raises `NotImplementedError`. Plume rise (roof sources are passive)
 and wet-deposition depletion. SIRANE's `B_RUE_DECOUP = 1` path (streets cut on the
 retro-trajectory grid), which uses another, cell-based mechanism.
 
@@ -210,6 +219,32 @@ DEFAULT_TEMPERATURE_K = 288.15
 """The air temperature used with an explicit `theta_star`, K (the default `theta*` does not
 need one)."""
 
+STABLE_H_OVER_L = 1.0
+"""SIRANE's stable regime boundary in `h / L`: an hour with `L > 0` and `h / L <=
+STABLE_H_OVER_L` is in the neutral class (see `CONVECTIVE_H_OVER_L`) and tabulated as neutral
+-- the neutral `sigma_v`, `sigma_w`, `sigma_z`, `a = 2.5 u*/h` and `N = 0` -- with only the wind
+profile `U(z)` seeing `L`; above it the stable law of this module applies. The ADMS neutral
+class `h/L <= 1` (CERC, 2001), boundary included. Read off SIRANE probe runs of one street
+along the wind (u* = 0.3 m/s, h = 330 m, `tests/data/street/sirane_kernel_probe`): at h / L =
+0.25, 0.5 and 0.9 the grid is the neutral kernel's (`G2_S025`, `G2_S05`, `G2_S09`; the stable
+law gives sigma_y 21, 8 and 1.5 % off and P_z / U p90 1.9e-2, 4.1e-2 and 7.8e-2), at 1.1 it is
+the stable law's (`G2_S11`; neutral turbulence there is 5.3e-2 off at the median); 1.5
+(not committed) is stable too."""
+
+CONVECTIVE_H_OVER_L = 0.3
+"""SIRANE's unstable regime boundary in `h / |L|` (the boundary-layer height over the
+Obukhov length): an hour with `L < 0` and `h / |L| <= CONVECTIVE_H_OVER_L` is tabulated as
+neutral -- the neutral `sigma_v`, `sigma_w` and `a`, `N = 0` -- with only the wind profile
+`U(z)` seeing `L` (Eqs. 10-11); above it SIRANE switches to its convective mechanism, which
+this module does not implement (`plume_table` raises `NotImplementedError`). This is the
+neutral class `-0.3 <= h/L` of the ADMS scheme SIRANE cites (CERC, 2001). Read off SIRANE
+probe runs of one street along the wind (u* = 0.3 m/s, h = 330 m): at h / |L| = 0.29 the grid
+is the neutral kernel's (the committed case `G2_T029` in
+`tests/data/street/sirane_kernel_probe`), at 0.31 it is not (1.0e-1 median against the
+neutral kernel; that run is not committed as a fixture); among further runs, also not
+committed, L = -10000, -2000, -1500 and -1200 m at h = 330 m are neutral, L = -1000 m at
+h = 330 m and L = -2000 m at h = 1000 m are not."""
+
 MAX_TABLE_STEPS = 10_000
 """The largest number of 10 s trajectory steps `plume_table` takes before refusing."""
 
@@ -273,7 +308,10 @@ def turbulence(
     `N^2 = (g/T)(theta*/kappa)(1/z + 5/L)` from the stable potential-temperature profile of
     Eqs. (12)-(13) (`psi_h = -5 zeta`, `z_T` dropped). `theta_star=None` takes
     `theta* = u*^2 T / (kappa g L)` (the definition of `L` under Eq. 10), for which
-    `N^2 = u*^2 / (kappa^2 L) (1/z + 5/L)` whatever the temperature.
+    `N^2 = u*^2 / (kappa^2 L) (1/z + 5/L)` whatever the temperature. The plume table does
+    not use the unstable branch, and the stable one only for `h / L > STABLE_H_OVER_L`: it
+    takes the neutral branch for `-CONVECTIVE_H_OVER_L <= h / L <= STABLE_H_OVER_L` and
+    refuses the convective hours beyond.
     """
     z, u_star, h, lmo = (_f64(v) for v in (z, u_star, h_abl, lmo))
     unstable, neutral, stable = _regimes(lmo, neutral_abs_lmo)
@@ -398,6 +436,107 @@ def _expected_abs(mean: Tensor, sd: Tensor) -> Tensor:
             + mean * torch.erf(mean / (sd * math.sqrt(2.0))))
 
 
+def _table_inputs(
+    name: str,
+    *,
+    u_star: Tensor | float,
+    h_abl: Tensor | float,
+    lmo: Tensor | float,
+    h_canopy: Tensor | float,
+    z0: Tensor | float,
+    d: Tensor | float,
+    sigma_theta: Tensor | float,
+    theta_star: Tensor | float | None = None,
+    temperature: Tensor | float = DEFAULT_TEMPERATURE_K,
+    sigma_v_min: float = SIGMA_V_MIN,
+    sigma_w_min: float = SIGMA_W_MIN,
+    tau_y: Tensor | float | None = None,
+    tau_z: Tensor | float | None = None,
+    centre_c: Tensor | float = PLUME_CENTRE_C_M,
+    centre_k: Tensor | float = PLUME_CENTRE_K,
+    x_max: float = DOWNWIND_CUTOFF_M,
+    kappa: float = KAPPA_040,
+    neutral_abs_lmo: float = math.inf,
+) -> tuple[dict[str, Tensor], tuple[int, ...], Tensor]:
+    """The shared front end of `plume_table` and `puff_tables` (`name` prefixes the
+    refusals): checks the inputs and returns `(p, batch, u0)`, the flat per-row parameter
+    dict of the trajectory scan, the broadcast batch shape and the wind speed at `H_R`."""
+    u_star, h_abl, lmo, h_r, z0, d, sphi = (
+        _f64(v) for v in (u_star, h_abl, lmo, h_canopy, z0, d, sigma_theta)
+    )
+    if not bool((u_star > 0).all()):
+        raise ValueError(f"{name}: u_star must be strictly positive")
+    if not bool((h_abl > h_r).all()):
+        raise ValueError(
+            f"{name}: the boundary-layer height h_abl must exceed the reflection "
+            f"height h_canopy (the profile reflects at both); got h_abl down to "
+            f"{float(h_abl.min())} m against h_canopy {float(h_r.max())} m"
+        )
+    if not bool((h_r > d).all()):
+        raise ValueError(
+            f"{name}: the reflection height h_canopy must exceed the displacement "
+            f"height d (the wind profile starts at d); got {float(h_r.min())} m against "
+            f"{float(d.max())} m"
+        )
+    if not x_max > 0:
+        raise ValueError(f"{name}: x_max must be positive, got {x_max!r}")
+    unstable, _, stable = _regimes(lmo, neutral_abs_lmo)
+    h_over_l = h_abl / lmo.abs()
+    convective = unstable & (h_over_l > CONVECTIVE_H_OVER_L)
+    if bool(convective.any()):
+        raise NotImplementedError(
+            f"{name}: the convective unstable regime (lmo < 0 with h_abl / |lmo| > "
+            f"{CONVECTIVE_H_OVER_L}) is not implemented -- SIRANE switches there to "
+            "another vertical mechanism (Soulhac et al. (2011) Eqs. (18), (26) and (29); "
+            "not yet reproduced). Hours with h_abl / |lmo| <= "
+            f"{CONVECTIVE_H_OVER_L} are tabulated (see noodl.apps.street_aq.plume); got "
+            f"h_abl / |lmo| up to {float(torch.where(convective, h_over_l, 0.0).max()):.3g}"
+        )
+    # SIRANE's neutral class (-0.3 <= h/L <= 1) takes the neutral turbulence: the wind
+    # profile alone sees L.
+    stable = stable & (h_over_l > STABLE_H_OVER_L)
+    turbulence_lmo = torch.where(stable, lmo, torch.full_like(lmo, math.inf))
+    sv, sw, n_bv = turbulence(h_r, u_star=u_star, h_abl=h_abl, lmo=turbulence_lmo,
+                              theta_star=theta_star, temperature=temperature, kappa=kappa,
+                              neutral_abs_lmo=neutral_abs_lmo)
+    sv = torch.clamp(sv, min=float(sigma_v_min))
+    sw = torch.clamp(sw, min=float(sigma_w_min))
+    safe_l = torch.where(stable, lmo, torch.ones_like(lmo))
+    a = torch.where(stable, 2.5 * u_star * safe_l / h_abl**2, 2.5 * u_star / h_abl)
+    ty_default, tz_default = default_tau(sv, sw)
+    ty = ty_default if tau_y is None else _f64(tau_y)
+    tz = tz_default if tau_z is None else _f64(tau_z)
+    if not bool((tz < TIME_STEP_S).all()):
+        raise ValueError(
+            f"{name}: tau_z must be below the {TIME_STEP_S} s time step (sigma_z at "
+            f"the first node would be zero); got {float(tz.max())} s"
+        )
+    parts = {"u_star": u_star, "h_abl": h_abl, "lmo": lmo, "h_r": h_r, "z0": z0, "d": d,
+             "sphi": sphi, "sv": sv, "sw": sw, "n_bv": n_bv, "a": a, "ty": ty, "tz": tz,
+             "c": _f64(centre_c), "k": _f64(centre_k)}
+    batch = tuple(broadcast_shapes(*(v.shape for v in parts.values())))
+    p = {key: v.expand(batch).reshape(-1) for key, v in parts.items()}
+    u0 = wind_speed(p["h_r"], u_star=p["u_star"], lmo=p["lmo"], z0=p["z0"], d=p["d"],
+                    kappa=kappa)
+    if not bool((u0 > 0).all()):
+        raise ValueError(f"{name}: the wind speed at h_canopy must be positive")
+    return p, batch, u0
+
+
+def _step_bound(name: str, u0: Tensor, grid_end: float) -> Tensor:
+    """Each row's bound on the number of 10 s steps to reach `grid_end`; refuses a bound
+    above `MAX_TABLE_STEPS`."""
+    # The speed never falls below U(H_R), so this bounds each hour's step count.
+    steps = torch.ceil((grid_end + TIME_STEP_S * u0.detach()) / (TIME_STEP_S * u0.detach()))
+    if bool((steps > MAX_TABLE_STEPS).any()):
+        raise ValueError(
+            f"{name}: the trajectory needs up to {int(steps.max())} steps of "
+            f"{TIME_STEP_S} s to reach {grid_end} m, above MAX_TABLE_STEPS = "
+            f"{MAX_TABLE_STEPS} (wind speed at h_canopy down to {float(u0.min()):.3g} m/s)"
+        )
+    return steps
+
+
 def plume_table(
     *,
     u_star: Tensor | float,
@@ -434,83 +573,40 @@ def plume_table(
     `downwind_cutoff(theta_w, meteo_cell_dx).max()`. The hours are built in chunks under
     `KERNEL_BYTES_CAP` (`table_chunks`), each step advancing only the hours still short of
     `x_max`. Needs `h_abl > h_canopy > d`, `u* > 0` and
-    `tau_z < TIME_STEP_S`; the unstable regime raises `NotImplementedError`.
+    `tau_z < TIME_STEP_S`; the convective regime (`lmo < 0` with `h_abl / |lmo| >
+    CONVECTIVE_H_OVER_L`) raises `NotImplementedError`.
     """
-    u_star, h_abl, lmo, h_r, z0, d, sphi = (
-        _f64(v) for v in (u_star, h_abl, lmo, h_canopy, z0, d, sigma_theta)
-    )
-    if not bool((u_star > 0).all()):
-        raise ValueError("plume_table: u_star must be strictly positive")
-    if not bool((h_abl > h_r).all()):
-        raise ValueError(
-            f"plume_table: the boundary-layer height h_abl must exceed the reflection "
-            f"height h_canopy (the profile reflects at both); got h_abl down to "
-            f"{float(h_abl.min())} m against h_canopy {float(h_r.max())} m"
-        )
-    if not bool((h_r > d).all()):
-        raise ValueError(
-            f"plume_table: the reflection height h_canopy must exceed the displacement "
-            f"height d (the wind profile starts at d); got {float(h_r.min())} m against "
-            f"{float(d.max())} m"
-        )
-    if not x_max > 0:
-        raise ValueError(f"plume_table: x_max must be positive, got {x_max!r}")
-    unstable, _, stable = _regimes(lmo, neutral_abs_lmo)
-    if bool(unstable.any()):
-        raise NotImplementedError(
-            "plume_table: the unstable regime (lmo < 0) is not implemented -- its vertical "
-            "profile is the bi-Gaussian of Soulhac et al. (2011) Eq. (26) with the "
-            "unstable T_L of Eq. (18); see noodl.apps.street_aq.plume"
-        )
-    sv, sw, n_bv = turbulence(h_r, u_star=u_star, h_abl=h_abl, lmo=lmo,
-                              theta_star=theta_star, temperature=temperature, kappa=kappa,
-                              neutral_abs_lmo=neutral_abs_lmo)
-    sv = torch.clamp(sv, min=float(sigma_v_min))
-    sw = torch.clamp(sw, min=float(sigma_w_min))
-    safe_l = torch.where(stable, lmo, torch.ones_like(lmo))
-    a = torch.where(stable, 2.5 * u_star * safe_l / h_abl**2, 2.5 * u_star / h_abl)
-    ty_default, tz_default = default_tau(sv, sw)
-    ty = ty_default if tau_y is None else _f64(tau_y)
-    tz = tz_default if tau_z is None else _f64(tau_z)
-    if not bool((tz < TIME_STEP_S).all()):
-        raise ValueError(
-            f"plume_table: tau_z must be below the {TIME_STEP_S} s time step (sigma_z at "
-            f"the first node would be zero); got {float(tz.max())} s"
-        )
-    parts = {"u_star": u_star, "h_abl": h_abl, "lmo": lmo, "h_r": h_r, "z0": z0, "d": d,
-             "sphi": sphi, "sv": sv, "sw": sw, "n_bv": n_bv, "a": a, "ty": ty, "tz": tz,
-             "c": _f64(centre_c), "k": _f64(centre_k)}
-    batch = tuple(broadcast_shapes(*(v.shape for v in parts.values())))
-    p = {key: v.expand(batch).reshape(-1) for key, v in parts.items()}
-    n_grid = int(math.floor(x_max / TABLE_STEP_M + 1e-9)) + 1
-    if (n_grid - 1) * TABLE_STEP_M < x_max:
-        n_grid += 1
-    n_grid = max(n_grid, 2)
+    p, batch, u0 = _table_inputs(
+        "plume_table", u_star=u_star, h_abl=h_abl, lmo=lmo, h_canopy=h_canopy, z0=z0, d=d,
+        sigma_theta=sigma_theta, theta_star=theta_star, temperature=temperature,
+        sigma_v_min=sigma_v_min, sigma_w_min=sigma_w_min, tau_y=tau_y, tau_z=tau_z,
+        centre_c=centre_c, centre_k=centre_k, x_max=x_max, kappa=kappa,
+        neutral_abs_lmo=neutral_abs_lmo)
+    n_grid = _grid_size(x_max)
     grid_end = (n_grid - 1) * TABLE_STEP_M
-    u0 = wind_speed(p["h_r"], u_star=p["u_star"], lmo=p["lmo"], z0=p["z0"], d=p["d"],
-                    kappa=kappa)
-    if not bool((u0 > 0).all()):
-        raise ValueError("plume_table: the wind speed at h_canopy must be positive")
-    # The speed never falls below U(H_R), so this bounds each hour's step count.
-    steps = torch.ceil((grid_end + TIME_STEP_S * u0.detach()) / (TIME_STEP_S * u0.detach()))
-    if bool((steps > MAX_TABLE_STEPS).any()):
-        raise ValueError(
-            f"plume_table: the trajectory needs up to {int(steps.max())} steps of "
-            f"{TIME_STEP_S} s to reach {grid_end} m, above MAX_TABLE_STEPS = "
-            f"{MAX_TABLE_STEPS} (wind speed at h_canopy down to {float(u0.min()):.3g} m/s)"
-        )
+    steps = _step_bound("plume_table", u0, grid_end)
     keys = tuple(p)
     grad = torch.is_grad_enabled() and any(v.requires_grad for v in p.values())
     out = []
     for a_, b_ in table_chunks(steps.tolist()):
         values = [p[k][a_:b_] for k in keys]
         if grad:
-            out.append(_RecomputedTrajectory.apply(keys, n_grid, kappa, *values))
+            out.append(_RecomputedTrajectory.apply("plume_table", _TABLE_KEYS, keys, n_grid,
+                                                   kappa, *values))
         else:
             out.append(_trajectory(dict(zip(keys, values, strict=True)), n_grid, kappa))
     s_y, p_z, u = (torch.cat([o[i] for o in out]) for i in range(3))
     return PlumeTable(batch=batch, sigma_y=s_y, p_z=p_z, u=u, step=TABLE_STEP_M,
                       x_max=float(x_max))
+
+
+def _grid_size(x_max: float) -> int:
+    """The number of `TABLE_STEP_M` grid points from 0 to the first at or beyond `x_max`
+    (at least 2)."""
+    n_grid = int(math.floor(x_max / TABLE_STEP_M + 1e-9)) + 1
+    if (n_grid - 1) * TABLE_STEP_M < x_max:
+        n_grid += 1
+    return max(n_grid, 2)
 
 
 def table_chunks(steps: list[float]) -> list[tuple[int, int]]:
@@ -537,36 +633,42 @@ class _RecomputedTrajectory(torch.autograd.Function):
     backward builds no graph over its own result, and `once_differentiable` does not catch a
     `create_graph=True` request (the convention of `noodl.solvers.implicit`), so `backward`
     checks `torch.is_grad_enabled()` at its entry -- off in every ordinary backward pass, on
-    only under `create_graph=True` -- and raises by name."""
+    only under `create_graph=True` -- and raises by name (`where`, the calling function).
+    `cols` are the resampled columns (`_trajectory`)."""
 
     @staticmethod
-    def forward(ctx, keys, n_grid, kappa, *values):
-        ctx.keys, ctx.n_grid, ctx.kappa = keys, n_grid, kappa
+    def forward(ctx, where, cols, keys, n_grid, kappa, *values):
+        ctx.where, ctx.cols, ctx.keys, ctx.n_grid, ctx.kappa = where, cols, keys, n_grid, kappa
         ctx.save_for_backward(*values)
-        return _trajectory(dict(zip(keys, values, strict=True)), n_grid, kappa)
+        return _trajectory(dict(zip(keys, values, strict=True)), n_grid, kappa, cols)
 
     @staticmethod
     def backward(ctx, *grads):
         refuse_second_order("plume_table", through="through the trajectory table ")
         values = ctx.saved_tensors
-        leaves = [v.detach().requires_grad_(ctx.needs_input_grad[3 + i])
+        leaves = [v.detach().requires_grad_(ctx.needs_input_grad[5 + i])
                   for i, v in enumerate(values)]
         wanted = [v for v in leaves if v.requires_grad]
         with torch.enable_grad():
             out = _trajectory(dict(zip(ctx.keys, leaves, strict=True)), ctx.n_grid,
-                              ctx.kappa)
+                              ctx.kappa, ctx.cols)
             found = iter(torch.autograd.grad(out, wanted, grads, allow_unused=True))
-        return (None, None, None,
+        return (None, None, None, None, None,
                 *(next(found) if v.requires_grad else None for v in leaves))
 
 
-def _trajectory(p: dict, n_grid: int, kappa: float) -> tuple[Tensor, Tensor, Tensor]:
-    """`(sigma_y, p_z, u)`, each `(m, n_grid)`, for the `m` hours in `p`. Each 10 s step
-    advances only the hours whose trajectory has not yet passed the grid's end, and every
-    segment between two nodes fills the grid points it covers (`X_lo <= x < X_hi`) by
-    linear interpolation as it is made."""
+def _trajectory_nodes(p: dict, n_nodes_max: int | None, kappa: float, *, x_end: float
+                      ) -> dict[str, Tensor]:
+    """The 10 s scan of the trajectory for the `m` hours in `p`: the nodes `t`, `x`, `u`,
+    `sigma_y`, `sigma_z`, `z_c`, `p_z`, each `(m, n_nodes)`.
+
+    Node 0 is the source (`t = 0`, `x = 0`, the speed at `H_R`, `SIGMA_Y0_M`, `sigma_z = 0`);
+    its `z_c` and `p_z` are node 1's (the source node has `P_z0 = P_z1`). Each step advances
+    only the hours whose trajectory has not yet passed `x_end`; a row that has passed it
+    (its last node is the first beyond `x_end`) repeats that node to the end. The scan
+    stops when every row has passed `x_end`, or after `n_nodes_max` nodes (at least 2) if
+    that is given."""
     m = p["u_star"].shape[0]
-    grid_end = (n_grid - 1) * TABLE_STEP_M
 
     def speed(z: Tensor, q: dict) -> Tensor:
         return wind_speed(z, u_star=q["u_star"], lmo=q["lmo"], z0=q["z0"], d=q["d"],
@@ -576,12 +678,14 @@ def _trajectory(p: dict, n_grid: int, kappa: float) -> tuple[Tensor, Tensor, Ten
     q = dict(p)
     u0 = speed(q["h_r"], q)
     q["u0"] = u0
-    x, u, s_y, sz_prev = torch.zeros_like(u0), u0, torch.full_like(u0, SIGMA_Y0_M), \
-        torch.zeros_like(u0)
-    p_z = None
-    index, values = [], ([], [], [])
+    x, s_y = torch.zeros_like(u0), torch.full_like(u0, SIGMA_Y0_M)
+    sz_prev = torch.zeros_like(u0)
+    zero = torch.zeros_like(u0)
+    full = {"t": zero, "x": x, "u": u0, "sigma_y": s_y, "sigma_z": zero}
+    nodes = {key: [v] for key, v in full.items()}
+    z_c_all, p_z_all = [], []
     j = 0
-    while rows.numel():
+    while rows.numel() and (n_nodes_max is None or j + 1 < max(n_nodes_max, 2)):
         j += 1
         t = TIME_STEP_S * j
         t_y = torch.clamp(t - q["ty"], min=0.0)
@@ -597,8 +701,50 @@ def _trajectory(p: dict, n_grid: int, kappa: float) -> tuple[Tensor, Tensor, Ten
         p_zj = (2.0 * torch.exp(-0.5 * ((z_c - q["h_r"]) / s_z) ** 2)
                 + torch.exp(-0.5 * ((2.0 * q["h_abl"] - z_c - q["h_r"]) / s_z) ** 2)
                 ) / (_SQRT_2PI * s_z)
-        if p_z is None:
-            p_z = p_zj                               # the source node: P_z0 = P_z1
+        t_col = torch.full_like(x_j, t)
+        for key, v in zip(full, (t_col, x_j, u_j, s_yj, s_z), strict=True):
+            full[key] = full[key].index_put((rows,), v)      # finished rows repeat
+            nodes[key].append(full[key])
+        z_c_all.append((rows, z_c))
+        p_z_all.append((rows, p_zj))
+        live = x_j.detach() <= x_end
+        rows = rows[live]
+        x, sz_prev = x_j[live], s_z[live]
+        q = {key: v[live] for key, v in q.items()}
+    out = {key: torch.stack(v, dim=1) for key, v in nodes.items()}
+    for key, parts in (("z_c", z_c_all), ("p_z", p_z_all)):
+        last = torch.zeros(m, dtype=_DTYPE)
+        cols = []
+        for r, v in parts:
+            last = last.index_put((r,), v)
+            cols.append(last)
+        out[key] = torch.stack([cols[0], *cols], dim=1)       # node 0 = node 1
+    return out
+
+
+def _trajectory(p: dict, n_grid: int, kappa: float, cols: tuple[str, ...] = _TABLE_KEYS
+                ) -> tuple[Tensor, ...]:
+    """The node columns `cols` (default `(sigma_y, p_z, u)`), each `(m, n_grid)`, for the
+    `m` hours in `p`: the nodes of `_trajectory_nodes` out to the grid's end, resampled
+    onto the distance grid (`_resample`). The source node's `sigma_z` (0) is taken as node
+    1's, as its `p_z` and `z_c` are (`P_z0 = P_z1`)."""
+    grid_end = (n_grid - 1) * TABLE_STEP_M
+    nodes = _trajectory_nodes(p, None, kappa, x_end=grid_end)
+    if "sigma_z" in cols:
+        s_z = nodes["sigma_z"]
+        nodes["sigma_z"] = torch.cat([s_z[:, 1:2], s_z[:, 1:]], dim=1)
+    return _resample(nodes["x"], tuple(nodes[k] for k in cols), n_grid)
+
+
+def _resample(xs: Tensor, cols: tuple[Tensor, ...], n_grid: int) -> tuple[Tensor, ...]:
+    """Node columns `cols` `(m, n_nodes)` at node distances `xs` resampled onto the grid
+    `0, TABLE_STEP_M, ..., (n_grid - 1) TABLE_STEP_M`: every segment between two nodes
+    fills the grid points it covers (`X_lo <= x < X_hi`) by linear interpolation. The nodes
+    must reach past the grid's end."""
+    m = xs.shape[0]
+    index, values = [], tuple([] for _ in cols)
+    for j in range(1, xs.shape[1]):
+        x, x_j = xs[:, j - 1], xs[:, j]
         # grid points k * step with x <= k * step < x_j
         k_lo = torch.ceil(x.detach() / TABLE_STEP_M).long()
         k_hi = torch.clamp(torch.ceil(x_j.detach() / TABLE_STEP_M).long() - 1, max=n_grid - 1)
@@ -608,16 +754,38 @@ def _trajectory(p: dict, n_grid: int, kappa: float) -> tuple[Tensor, Tensor, Ten
             r, c = torch.nonzero(k <= k_hi[:, None], as_tuple=True)
             k = k[r, c]
             w = (k * TABLE_STEP_M - x[r]) / (x_j[r] - x[r])
-            index.append(rows[r] * n_grid + k)
-            for out, lo, hi in zip(values, (s_y, p_z, u), (s_yj, p_zj, u_j), strict=True):
+            index.append(r * n_grid + k)
+            for out, col in zip(values, cols, strict=True):
+                lo, hi = col[:, j - 1], col[:, j]
                 out.append(lo[r] + (hi[r] - lo[r]) * w)
-        live = x_j.detach() <= grid_end
-        rows = rows[live]
-        x, u, s_y, p_z, sz_prev = (v[live] for v in (x_j, u_j, s_yj, p_zj, s_z))
-        q = {key: v[live] for key, v in q.items()}
     flat = torch.cat(index)
     return tuple(torch.zeros(m * n_grid, dtype=_DTYPE).index_put((flat,), torch.cat(v))
                  .reshape(m, n_grid) for v in values)
+
+
+def crosswind_profile(y: Tensor, sigma_y: Tensor, width: Tensor) -> Tensor:
+    """The crosswind profile `f_y` (1/m) of a source of crosswind extent `width` (m) at
+    offsets `y` (m): a flat top over `|y| <= y_c` with `y_c = max((width - sqrt(2 pi)
+    sigma_y) / 2, 0)`, Gaussian tails of standard deviation `sigma_y` beyond it, and unit
+    integral. No cut-off is applied; the arguments broadcast."""
+    y_c = torch.clamp((width - _SQRT_2PI * sigma_y) / 2.0, min=0.0)
+    off = y.abs() - y_c
+    tail = torch.exp(-0.5 * (torch.clamp(off, min=0.0) / sigma_y) ** 2)
+    return torch.where(off <= 0, torch.ones_like(tail), tail) / (2.0 * y_c + _SQRT_2PI * sigma_y)
+
+
+def vertical_profile(z: Tensor, z_c: Tensor, sigma_z: Tensor, h_canopy: Tensor,
+                     h_abl: Tensor) -> Tensor:
+    """The vertical profile (1/m) at height `z` of a Gaussian centred at `z_c` with
+    standard deviation `sigma_z`, reflected in the canopy top `h_canopy` (`H_R`) and in the
+    boundary-layer top `h_abl`: `[g(z - z_c) + g(z + z_c - 2 H_R) + g(2 h - z - z_c)] /
+    (sqrt(2 pi) sigma_z)` with `g(s) = exp(-s^2 / (2 sigma_z^2))`. At `z = H_R` this is the
+    table's `p_z`. Valid for nodes >= 1 (`sigma_z` is 0 at node 0). The arguments broadcast."""
+    def g(s: Tensor) -> Tensor:
+        return torch.exp(-0.5 * (s / sigma_z) ** 2)
+
+    return (g(z - z_c) + g(z + z_c - 2.0 * h_canopy) + g(2.0 * h_abl - z - z_c)
+            ) / (_SQRT_2PI * sigma_z)
 
 
 class StreetSources(NamedTuple):
@@ -722,9 +890,8 @@ def _pair_values(receptor_xy: Tensor, source_xy: Tensor, rows: dict, cos: Tensor
     y_c = torch.clamp((width[b, p] - _SQRT_2PI * s_y) / 2.0, min=0.0)
     off = y.abs() - y_c
     keep = off <= cutoff_sigma * s_y
-    b, i, p, off, s_y, p_z, u, y_c = (v[keep] for v in (b, i, p, off, s_y, p_z, u, y_c))
-    tail = torch.exp(-0.5 * (torch.clamp(off, min=0.0) / s_y) ** 2)
-    f_y = torch.where(off <= 0, torch.ones_like(tail), tail) / (2.0 * y_c + _SQRT_2PI * s_y)
+    b, i, p, y, s_y, p_z, u = (v[keep] for v in (b, i, p, y, s_y, p_z, u))
+    f_y = crosswind_profile(y, s_y, width[b, p])
     c = f_y * torch.minimum(p_z, clamp[b, p]) / u
     return b, i, p, c
 

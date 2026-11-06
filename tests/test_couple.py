@@ -14,6 +14,7 @@ from noodl.couple import (
     union,
 )
 from noodl.topology import Network
+from tests._couple_models import tiny_building_model
 
 F64 = torch.float64
 
@@ -149,44 +150,11 @@ def _tiny_street_model():
     return model, state, drivers
 
 
-def _tiny_building_model():
-    """One zone 'z0' with an airpath to 'ambient'. Species state only."""
-    from noodl.layers.transport import TransportLayer
-    from noodl.model import Model
-
-    net = Network(dtype=F64)
-    net.add_node("ambient")
-    net.add_node("z0")
-    net.add_edge("z0", "ambient", kind="airpath")
-    layer = TransportLayer(
-        net, "species", capacity=torch.tensor([5.0], dtype=F64), flow_kind="airpath",
-        boundary=["ambient"], quantity="mass_fraction", unit="kg/kg",
-    )
-
-    def closure(state, drivers):
-        # NEGATIVE: edge is z0(source)->ambient(target), and Network.upwind picks the
-        # TARGET as upwind when q < 0 -- so this is infiltration FROM ambient INTO z0.
-        # This sign is required, not cosmetic: with q > 0 (z0 exhausting outward), "ambient"
-        # is never the upwind node for this edge, so `species.x_boundary`'s value never
-        # enters the state update at all (`AdvectionOperator.boundary_forcing` evaluates to
-        # zero regardless of x_boundary) and a test asserting on the resulting `species.x`
-        # cannot distinguish a working coupling from a no-op one.
-        return {"species.q": torch.tensor([-0.5], dtype=F64)}  # ambient infiltrates INTO z0
-
-    model = Model(net, {"species": layer}, closures=[closure])
-    state = {"species.x": torch.tensor([0.1], dtype=F64)}
-    drivers = {
-        "species.x_boundary": torch.zeros(1, dtype=F64),
-        "rho_amb": torch.tensor(1.2, dtype=F64),
-    }
-    return model, state, drivers
-
-
 def test_one_way_union_sets_building_boundary_from_street_segment():
     from noodl.couple import ValueLink, union
 
     street_model, street_state, street_drivers = _tiny_street_model()
-    building_model, building_state, building_drivers = _tiny_building_model()
+    building_model, building_state, building_drivers = tiny_building_model()
     link = ValueLink(
         from_model="street", from_key="street.x", from_index=0,
         to_model="building", to_key="species.x_boundary", to_index=0,
@@ -201,7 +169,7 @@ def test_one_way_union_sets_building_boundary_from_street_segment():
     # street.x[0] = 3.0 kg/m3 -> mass fraction 3.0 / 1.2 = 2.5 kg/kg must have been used as
     # building's species.x_boundary for this step -- checked indirectly via the building's
     # own resulting state matching a standalone run given that exact boundary value.
-    expected_building_model, _, expected_building_drivers = _tiny_building_model()
+    expected_building_model, _, expected_building_drivers = tiny_building_model()
     expected_building_drivers["species.x_boundary"] = torch.tensor([2.5], dtype=F64)
     expected = expected_building_model.step(building_state, expected_building_drivers, dt=1.0)
     assert torch.allclose(new_state["building"]["species.x"], expected["species.x"])
@@ -221,7 +189,7 @@ def _coupled_model(**kwargs):
     from noodl.couple import union
 
     street_model, street_state, street_drivers = _tiny_street_model()
-    building_model, building_state, building_drivers = _tiny_building_model()
+    building_model, building_state, building_drivers = tiny_building_model()
     return union(
         {"street": (street_model, street_state, street_drivers),
          "building": (building_model, building_state, building_drivers)},
@@ -288,7 +256,7 @@ def test_two_way_step_differs_from_a_one_way_pass_and_is_sensitive_to_the_glue()
     (coupled_model, state, drivers), _ = _coupled_model(iterate_max=100)
     two_way = coupled_model.step(state, drivers, dt=1.0)
     street_model, street_state, street_drivers = _tiny_street_model()
-    building_model, building_state, building_drivers = _tiny_building_model()
+    building_model, building_state, building_drivers = tiny_building_model()
     one_way_link = ValueLink(
         from_model="street", from_key="street.x", from_index=0,
         to_model="building", to_key="species.x_boundary", to_index=0,
@@ -333,7 +301,7 @@ def test_two_way_convergence_and_non_convergence_are_judged_per_batch_instance()
 
     def batched_coupled_model(**kwargs):
         street_model, street_state, street_drivers = _tiny_street_model()
-        building_model, building_state, building_drivers = _tiny_building_model()
+        building_model, building_state, building_drivers = tiny_building_model()
         # Two instances, differing tenfold at the coupled segment, so instance 1's residual
         # is ~10x instance 0's at every pass and one absolute tolerance separates them:
         street_state["street.x"] = torch.tensor([[3.0, 4.0], [30.0, 4.0]], dtype=F64)
@@ -377,7 +345,7 @@ def test_two_way_feedback_adds_to_the_callers_own_sources_and_never_overwrites_t
     from noodl.couple import union
 
     street_model, street_state, street_drivers = _tiny_street_model()
-    building_model, building_state, building_drivers = _tiny_building_model()
+    building_model, building_state, building_drivers = tiny_building_model()
     # atm, seg0, seg1 in full node order: seg0 (the coupled node) already emits 0.7, seg1 0.2.
     own_sources = torch.tensor([0.0, 0.7, 0.2], dtype=F64)
     street_drivers["street.sources"] = own_sources
@@ -413,7 +381,7 @@ def test_a_to_key_that_is_not_a_boundary_driver_is_refused_at_construction():
     from noodl.couple import ValueLink, union
 
     street_model, street_state, street_drivers = _tiny_street_model()
-    building_model, building_state, building_drivers = _tiny_building_model()
+    building_model, building_state, building_drivers = tiny_building_model()
     bad = ValueLink(
         from_model="street", from_key="street.x", from_index=0,
         to_model="building", to_key="species.sources", to_index=0,
@@ -427,7 +395,7 @@ def test_a_sources_key_that_is_not_a_source_term_is_refused_at_construction():
     from noodl.couple import ValueLink, union
 
     street_model, street_state, street_drivers = _tiny_street_model()
-    building_model, building_state, building_drivers = _tiny_building_model()
+    building_model, building_state, building_drivers = tiny_building_model()
     bad = ValueLink(
         from_model="street", from_key="street.x", from_index=0,
         to_model="building", to_key="species.x_boundary", to_index=0,
@@ -450,7 +418,7 @@ def test_driver_alias_writes_every_target_through_its_own_conversion():
     from noodl.couple import MATH_RAD_TO_COMPASS_DEG, DriverAlias, ValueLink, union
 
     street_model, street_state, street_drivers = _tiny_street_model()
-    building_model, building_state, building_drivers = _tiny_building_model()
+    building_model, building_state, building_drivers = tiny_building_model()
     street_drivers["theta_w"] = torch.tensor(0.5 * math.pi, dtype=F64)  # blowing north
     building_drivers["theta_w"] = torch.tensor(-1.0, dtype=F64)  # stale; must be overwritten
     seen: dict = {}
@@ -483,7 +451,7 @@ def test_unregistered_conversion_is_refused_at_union_construction():
     from noodl.couple import ValueLink, union
 
     street_model, street_state, street_drivers = _tiny_street_model()
-    building_model, building_state, building_drivers = _tiny_building_model()
+    building_model, building_state, building_drivers = tiny_building_model()
     bad = ValueLink(
         from_model="street", from_key="street.x", from_index=0,
         to_model="building", to_key="species.x_boundary", to_index=0, convert="furlongs",
@@ -499,7 +467,7 @@ def test_an_unconverted_link_between_unequal_units_is_refused_at_construction():
     from noodl.couple import ValueLink, union
 
     street_model, street_state, street_drivers = _tiny_street_model()
-    building_model, building_state, building_drivers = _tiny_building_model()
+    building_model, building_state, building_drivers = tiny_building_model()
     bad = ValueLink(
         from_model="street", from_key="street.x", from_index=0,
         to_model="building", to_key="species.x_boundary", to_index=0,  # convert=None
@@ -519,7 +487,7 @@ def test_unit_spellings_of_one_unit_are_accepted_on_an_unconverted_link():
     from noodl.couple import ValueLink, union
 
     street_model, street_state, street_drivers = _tiny_street_model()
-    building_model, building_state, building_drivers = _tiny_building_model()
+    building_model, building_state, building_drivers = tiny_building_model()
     building_model.layers["species"].unit = "kg/m^3"
     link = ValueLink(
         from_model="street", from_key="street.x", from_index=0,
@@ -533,7 +501,7 @@ def test_a_conversion_whose_units_do_not_match_the_layers_is_refused_at_construc
     from noodl.couple import MATH_RAD_TO_COMPASS_DEG, ValueLink, union
 
     street_model, street_state, street_drivers = _tiny_street_model()
-    building_model, building_state, building_drivers = _tiny_building_model()
+    building_model, building_state, building_drivers = tiny_building_model()
     bad = ValueLink(  # an ANGLE conversion on a species link: rad -> deg, not kg/m3 -> kg/kg
         from_model="street", from_key="street.x", from_index=0,
         to_model="building", to_key="species.x_boundary", to_index=0,
@@ -549,7 +517,7 @@ def test_a_conversion_whose_units_do_not_match_the_layers_is_refused_at_construc
 
 
 def _multi_kind_building_model():
-    """`_tiny_building_model` with TWO advecting edge kinds on its species layer."""
+    """`tiny_building_model` with TWO advecting edge kinds on its species layer."""
     from noodl.layers.transport import TransportLayer
     from noodl.model import Model
 
@@ -574,7 +542,7 @@ def _multi_kind_building_model():
 
 
 def _two_species_building_model():
-    """`_tiny_building_model` with TWO species on its species layer."""
+    """`tiny_building_model` with TWO species on its species layer."""
     from noodl.layers.transport import TransportLayer
     from noodl.model import Model
 
@@ -705,7 +673,7 @@ def test_wind_direction_conversions_on_the_cardinal_points(wd, theta):
 
 def test_original_models_still_run_standalone_unchanged_after_union():
     street_model, street_state, street_drivers = _tiny_street_model()
-    building_model, building_state, building_drivers = _tiny_building_model()
+    building_model, building_state, building_drivers = tiny_building_model()
     baseline_street = street_model.step(dict(street_state), dict(street_drivers), dt=1.0)
     baseline_building = building_model.step(dict(building_state), dict(building_drivers), dt=1.0)
     street_snapshot = {k: v.clone() for k, v in street_drivers.items()}
@@ -733,7 +701,7 @@ def test_substeps_calls_the_fast_model_k_times_with_the_glue_held_constant():
     from noodl.couple import union
 
     street_model, street_state, street_drivers = _tiny_street_model()
-    building_model, building_state, building_drivers = _tiny_building_model()
+    building_model, building_state, building_drivers = tiny_building_model()
     calls: list[tuple[float, torch.Tensor]] = []
     real_step = building_model.step
 
@@ -865,7 +833,7 @@ def test_gradient_flows_across_the_join_and_matches_central_differences():
 
     def indoor(x0: torch.Tensor) -> torch.Tensor:
         street_model, street_state, street_drivers = _tiny_street_model()
-        building_model, building_state, building_drivers = _tiny_building_model()
+        building_model, building_state, building_drivers = tiny_building_model()
         street_state = dict(street_state)
         street_state["street.x"] = torch.stack([x0, street_state["street.x"][1]])
         coupled_model, state, drivers = union(
@@ -999,7 +967,7 @@ def test_the_ambient_density_of_a_conversion_is_evaluated_at_the_step_clock(k):
     from noodl.model import Model
 
     street, s_state, s_drivers = _tiny_street_model()
-    building, b_state, b_drivers = _tiny_building_model()
+    building, b_state, b_drivers = tiny_building_model()
     density = _ClockDensity()
     building = Model(building.net, building.transport, closures=[*building.closures, density])
     link = ValueLink(

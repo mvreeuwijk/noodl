@@ -571,6 +571,181 @@ def test_gradients_through_the_stable_table_match_finite_differences():
         assert float(g) == pytest.approx(fd, rel=1e-5, abs=1e-12), key
 
 
+# ------------------------------------------------------------------ unstable hours
+
+# A weakly unstable hour (h / |L| = 0.165 <= CONVECTIVE_H_OVER_L), Paris-like.
+WEAKLY_UNSTABLE = {**NEUTRAL, "u_star": 0.3, "h_abl": 330.0, "lmo": -2000.0}
+
+
+def test_weakly_unstable_hour_is_the_neutral_table_under_the_unstable_wind_profile():
+    """SIRANE tabulates an hour with `h / |L| <= 0.3` as neutral: the neutral `sigma_v`,
+    `sigma_w` (so `sigma_z` and the time offsets) with only `U(z)` seeing `L`. The table
+    differs from the neutral one (the wind at `H_R` is the unstable `U`), and its default
+    time offsets are those of the neutral turbulence, not of Eqs. (15)-(16)'s unstable
+    `sigma_v`, `sigma_w`."""
+    t = plume_table(**WEAKLY_UNSTABLE, sigma_v_min=0.0, sigma_w_min=0.0)
+    n = plume_table(**{**WEAKLY_UNSTABLE, "lmo": math.inf}, sigma_v_min=0.0,
+                    sigma_w_min=0.0)
+    assert float(t.u[0, 0]) == pytest.approx(_u(20.0, WEAKLY_UNSTABLE), rel=1e-14)
+    assert float(t.u[0, 0]) != float(n.u[0, 0])
+    sv_n, sw_n, _ = turbulence(20.0, u_star=0.3, h_abl=330.0, lmo=math.inf)
+    tau_y, tau_z = default_tau(sv_n, sw_n)
+    explicit = plume_table(**WEAKLY_UNSTABLE, sigma_v_min=0.0, sigma_w_min=0.0,
+                           tau_y=tau_y, tau_z=tau_z)
+    for key in ("sigma_y", "p_z", "u"):
+        assert torch.equal(getattr(t, key), getattr(explicit, key))
+    sv_u, sw_u, _ = turbulence(20.0, u_star=0.3, h_abl=330.0, lmo=-2000.0)
+    unstable_tau = plume_table(**WEAKLY_UNSTABLE, sigma_v_min=0.0, sigma_w_min=0.0,
+                               tau_y=default_tau(sv_u, sw_u)[0],
+                               tau_z=default_tau(sv_u, sw_u)[1])
+    assert not torch.equal(t.sigma_y, unstable_tau.sigma_y)
+
+
+def test_unstable_tables_tend_to_the_neutral_table_as_lmo_goes_to_minus_infinity():
+    """Within the weakly unstable class only the wind profile sees `L`, through
+    `psi_m(z / L) -> 0`: the table converges to the neutral one."""
+    n = plume_table(**{**WEAKLY_UNSTABLE, "lmo": math.inf})
+    errors = []
+    for lmo in (-1e4, -1e6, -1e8):
+        t = plume_table(**{**WEAKLY_UNSTABLE, "lmo": lmo})
+        errors.append(max(float(((getattr(t, k) - getattr(n, k)).abs()
+                                 / getattr(n, k).abs()).max())
+                          for k in ("sigma_y", "p_z", "u")))
+    print("weakly unstable -> neutral, max relative table difference:", errors)
+    assert errors[0] > errors[1] > errors[2]
+    assert errors[2] < 1e-6
+
+
+def test_convective_hours_are_refused_by_name_and_the_boundary_is_tabulated():
+    with pytest.raises(NotImplementedError, match="convective unstable regime"):
+        plume_table(**{**WEAKLY_UNSTABLE, "lmo": -1000.0})       # h / |L| = 0.33
+    edge = plume_table(**{**WEAKLY_UNSTABLE, "lmo": -1100.0})     # h / |L| = 0.3
+    assert bool(torch.isfinite(edge.p_z).all())
+    lmo = torch.tensor([math.inf, 80.0, -2000.0, -1000.0], dtype=DT)
+    with pytest.raises(NotImplementedError, match=r"h_abl / \|lmo\| up to 0\.33"):
+        plume_table(**{**WEAKLY_UNSTABLE, "lmo": lmo})
+
+
+def test_batched_unstable_rows_match_single_hours():
+    us = torch.tensor([0.3, 0.2, 0.45], dtype=DT)
+    lmo = torch.tensor([-2000.0, 80.0, math.inf], dtype=DT)
+    h = torch.tensor([330.0, 250.0, 800.0], dtype=DT)
+    t = plume_table(**{**WEAKLY_UNSTABLE, "u_star": us, "lmo": lmo, "h_abl": h})
+    for b in range(3):
+        one = plume_table(**{**WEAKLY_UNSTABLE, "u_star": float(us[b]),
+                             "lmo": float(lmo[b]), "h_abl": float(h[b])})
+        for key in ("sigma_y", "p_z", "u"):
+            assert torch.allclose(getattr(t, key)[b], getattr(one, key)[0], rtol=1e-14,
+                                  atol=0)
+
+
+def test_gradients_through_the_weakly_unstable_table_match_finite_differences():
+    """The street kernel of a weakly unstable hour against central differences in `L`
+    (through the wind profile only) and the other meteorology (the reflection height
+    24.7 m keeps `max(floor(z_c), H_R)` off its kink)."""
+    net = _grid_net()
+    base = {"u_star": 0.3, "lmo": -2000.0, "h_abl": 330.0, "h_canopy": 24.7,
+            "sigma_theta": math.radians(6.0), "z0": 1.0, "d": 13.0}
+
+    def total(**vals):
+        t = plume_table(**{**WEAKLY_UNSTABLE, **vals})
+        return street_kernel(net, t, theta_w=0.35, cutoff_sigma=math.inf).sum()
+
+    params = {k: torch.tensor(v, dtype=DT, requires_grad=True) for k, v in base.items()}
+    grads = torch.autograd.grad(total(**params), list(params.values()))
+    for (key, value), g in zip(base.items(), grads, strict=True):
+        eps = 1e-6 * max(0.1, abs(value))
+        fd = (float(total(**{**base, key: value + eps}))
+              - float(total(**{**base, key: value - eps}))) / (2 * eps)
+        assert bool(torch.isfinite(g))
+        assert float(g) == pytest.approx(fd, rel=1e-5, abs=1e-12), key
+    assert float(grads[1]) != 0.0                       # L reaches the kernel
+
+
+# A weakly stable hour (h / L = 0.5 <= STABLE_H_OVER_L): SIRANE's neutral class too.
+WEAKLY_STABLE = {**NEUTRAL, "u_star": 0.3, "h_abl": 330.0, "lmo": 660.0}
+
+
+def _neutral_turbulence_table(met, **kw):
+    """The table of `met` with the neutral turbulence's default time offsets passed
+    explicitly -- what SIRANE's neutral class tabulates, whatever the sign of `L`."""
+    sv, sw, _ = turbulence(met["h_canopy"], u_star=met["u_star"], h_abl=met["h_abl"],
+                           lmo=math.inf)
+    tau_y, tau_z = default_tau(sv, sw)
+    return plume_table(**met, sigma_v_min=0.0, sigma_w_min=0.0, tau_y=tau_y, tau_z=tau_z,
+                       **kw)
+
+
+@pytest.mark.parametrize("h_over_l", [0.25, 0.5, 0.9, 1.0])
+def test_weakly_stable_hour_is_the_neutral_table_under_the_stable_wind_profile(h_over_l):
+    """SIRANE tabulates `0 < h / L <= 1` as neutral (neutral `sigma_v`, `sigma_w`,
+    `a = 2.5 u*/h`, `N = 0`), with only `U(z)` seeing `L`; `h / L = 1` belongs to it."""
+    met = {**WEAKLY_STABLE, "lmo": 330.0 / h_over_l}
+    t = plume_table(**met, sigma_v_min=0.0, sigma_w_min=0.0)
+    for key in ("sigma_y", "p_z", "u"):
+        assert torch.equal(getattr(t, key), getattr(_neutral_turbulence_table(met), key))
+    assert float(t.u[0, 0]) == pytest.approx(_u(20.0, met), rel=1e-14)
+    # theta* has nothing to act on (N = 0)
+    t_theta = plume_table(**met, sigma_v_min=0.0, sigma_w_min=0.0, theta_star=0.05)
+    assert torch.equal(t.p_z, t_theta.p_z)
+
+
+@pytest.mark.parametrize("met", [{**WEAKLY_STABLE, "lmo": 330.0 / 0.5},
+                                 {**WEAKLY_STABLE, "lmo": 330.0 / 1.0},
+                                 WEAKLY_UNSTABLE], ids=["h/L=0.5", "h/L=1", "h/L=-0.165"])
+def test_neutral_class_rows_take_the_neutral_a_and_no_brunt_vaisala(met):
+    """The scan's own inputs for a row of SIRANE's neutral class: `a = 2.5 u*/h` and
+    `N = 0`, read directly (not through a second table built the same way)."""
+    p, _, _ = plume._table_inputs("test", **met, theta_star=0.05)
+    assert float(p["a"][0]) == pytest.approx(2.5 * met["u_star"] / met["h_abl"], rel=1e-15)
+    assert float(p["n_bv"][0]) == 0.0
+    # just above the class edge the stable law's own a and N are taken
+    above, _, _ = plume._table_inputs("test", **{**WEAKLY_STABLE, "lmo": 330.0 / 1.01},
+                                      theta_star=0.05)
+    assert float(above["n_bv"][0]) > 0.0
+    assert float(above["a"][0]) != pytest.approx(2.5 * 0.3 / 330.0, rel=1e-6)
+
+
+def test_just_above_the_stable_boundary_the_stable_law_applies():
+    met = {**WEAKLY_STABLE, "lmo": 330.0 / 1.01}
+    t = plume_table(**met, sigma_v_min=0.0, sigma_w_min=0.0)
+    assert not torch.equal(t.p_z, _neutral_turbulence_table(met).p_z)
+    assert not torch.equal(t.sigma_y, _neutral_turbulence_table(met).sigma_y)
+
+
+def test_batched_rows_straddling_both_boundaries_match_single_hours():
+    lmo = torch.tensor([-1100.0, -2000.0, math.inf, 1320.0, 330.0, 330.0 / 1.01, 220.0],
+                       dtype=DT)
+    t = plume_table(**{**WEAKLY_STABLE, "lmo": lmo})
+    for b in range(lmo.numel()):
+        one = plume_table(**{**WEAKLY_STABLE, "lmo": float(lmo[b])})
+        for key in ("sigma_y", "p_z", "u"):
+            assert torch.allclose(getattr(t, key)[b], getattr(one, key)[0], rtol=1e-14,
+                                  atol=0)
+
+
+def test_gradients_through_the_weakly_stable_table_match_finite_differences():
+    """Central differences in `L` (through the wind profile only) and the other
+    meteorology in the band `0 < h / L <= 1`."""
+    net = _grid_net()
+    base = {"u_star": 0.3, "lmo": 660.0, "h_abl": 330.0, "h_canopy": 24.7,
+            "sigma_theta": math.radians(6.0), "z0": 1.0, "d": 13.0}
+
+    def total(**vals):
+        t = plume_table(**{**WEAKLY_STABLE, **vals})
+        return street_kernel(net, t, theta_w=0.35, cutoff_sigma=math.inf).sum()
+
+    params = {k: torch.tensor(v, dtype=DT, requires_grad=True) for k, v in base.items()}
+    grads = torch.autograd.grad(total(**params), list(params.values()))
+    for (key, value), g in zip(base.items(), grads, strict=True):
+        eps = 1e-6 * max(0.1, abs(value))
+        fd = (float(total(**{**base, key: value + eps}))
+              - float(total(**{**base, key: value - eps}))) / (2 * eps)
+        assert bool(torch.isfinite(g))
+        assert float(g) == pytest.approx(fd, rel=1e-5, abs=1e-12), key
+    assert float(grads[1]) != 0.0
+
+
 @pytest.mark.parametrize("name", ["u_star", "d"])
 def test_second_order_differentiation_of_the_table_raises_by_name(name):
     """The table's backward builds no graph over its own gradient, so a second-order

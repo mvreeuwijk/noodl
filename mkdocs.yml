@@ -92,6 +92,7 @@ nav:
       - Core orchestration: design/orchestration.md
       - Sewers: design/sewer.md
       - Solver selection: design/solvers.md
+      - Street puffs: design/street_puffs.md
       - Water and street air quality: design/water_street.md
   - Development:
       - Extending noodl: development/extending.md

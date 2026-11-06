@@ -11,4 +11,5 @@ the platform or problem size changes.
 - [Core orchestration](orchestration.md)
 - [Sewers](sewer.md)
 - [Solver selection](solvers.md)
+- [Street puffs: unsteady above-roof transport](street_puffs.md)
 - [Water distribution and street air quality](water_street.md)

@@ -408,5 +408,374 @@
   },
   "W": 20.0,
   "H": 20.0
+ },
+ "G1_U1500": {
+  "street": [
+   [
+    0.0,
+    -100.0
+   ],
+   [
+    0.0,
+    100.0
+   ]
+  ],
+  "street_flux_g_s": 959.0,
+  "node_flux_g_s": [
+   20.48,
+   20.48
+  ],
+  "cint_ug_m3": 2871000.0,
+  "max_ug_m3": 2870503.75,
+  "n_cells_scored": 25934,
+  "meteo": {
+   "u_star": 0.3,
+   "lmo": -1500.0,
+   "h_abl": 330.0,
+   "sigma_theta_deg": 7.39,
+   "theta_star": -0.004,
+   "temperature_c": 4.0,
+   "wind_from_deg": 270.0
+  },
+  "options": {
+   "H_R": 20.0,
+   "U_MIN": 0.0,
+   "SIGMA_V_MIN": 0.0,
+   "SIGMA_W_MIN": 0.0
+  },
+  "site": {
+   "Z0D": 1.0,
+   "ZDISPL": 13.0
+  },
+  "W": 20.0,
+  "H": 20.0
+ },
+ "G1_U30K": {
+  "street": [
+   [
+    0.0,
+    -100.0
+   ],
+   [
+    0.0,
+    100.0
+   ]
+  ],
+  "street_flux_g_s": 959.2,
+  "node_flux_g_s": [
+   20.38,
+   20.38
+  ],
+  "cint_ug_m3": 2871000.0,
+  "max_ug_m3": 2871096.0,
+  "n_cells_scored": 25902,
+  "meteo": {
+   "u_star": 0.3,
+   "lmo": -30000.03,
+   "h_abl": 330.0,
+   "sigma_theta_deg": 7.35,
+   "theta_star": -0.0,
+   "temperature_c": 4.0,
+   "wind_from_deg": 270.0
+  },
+  "options": {
+   "H_R": 20.0,
+   "U_MIN": 0.0,
+   "SIGMA_V_MIN": 0.0,
+   "SIGMA_W_MIN": 0.0
+  },
+  "site": {
+   "Z0D": 1.0,
+   "ZDISPL": 13.0
+  },
+  "W": 20.0,
+  "H": 20.0
+ },
+ "G3_U5000": {
+  "street": [
+   [
+    -70.710678,
+    -70.710678
+   ],
+   [
+    70.710678,
+    70.710678
+   ]
+  ],
+  "street_flux_g_s": 772.1,
+  "node_flux_g_s": [
+   0.0,
+   227.9
+  ],
+  "cint_ug_m3": 2311000.0,
+  "max_ug_m3": 2310930.25,
+  "n_cells_scored": 29528,
+  "meteo": {
+   "u_star": 0.3,
+   "lmo": -5000.0,
+   "h_abl": 330.0,
+   "sigma_theta_deg": 7.36,
+   "theta_star": -0.001,
+   "temperature_c": 4.0,
+   "wind_from_deg": 270.0
+  },
+  "options": {
+   "H_R": 20.0,
+   "U_MIN": 0.0,
+   "SIGMA_V_MIN": 0.0,
+   "SIGMA_W_MIN": 0.0
+  },
+  "site": {
+   "Z0D": 1.0,
+   "ZDISPL": 13.0
+  },
+  "W": 20.0,
+  "H": 20.0
+ },
+ "G3_U1500": {
+  "street": [
+   [
+    -70.710678,
+    -70.710678
+   ],
+   [
+    70.710678,
+    70.710678
+   ]
+  ],
+  "street_flux_g_s": 772.1,
+  "node_flux_g_s": [
+   0.0,
+   227.9
+  ],
+  "cint_ug_m3": 2311000.0,
+  "max_ug_m3": 2310962.0,
+  "n_cells_scored": 29564,
+  "meteo": {
+   "u_star": 0.3,
+   "lmo": -1500.0,
+   "h_abl": 330.0,
+   "sigma_theta_deg": 7.39,
+   "theta_star": -0.004,
+   "temperature_c": 4.0,
+   "wind_from_deg": 270.0
+  },
+  "options": {
+   "H_R": 20.0,
+   "U_MIN": 0.0,
+   "SIGMA_V_MIN": 0.0,
+   "SIGMA_W_MIN": 0.0
+  },
+  "site": {
+   "Z0D": 1.0,
+   "ZDISPL": 13.0
+  },
+  "W": 20.0,
+  "H": 20.0
+ },
+ "G2_T029": {
+  "street": [
+   [
+    -100.0,
+    0.0
+   ],
+   [
+    100.0,
+    0.0
+   ]
+  ],
+  "street_flux_g_s": 0.0,
+  "node_flux_g_s": [
+   0.0,
+   1000.0
+  ],
+  "cint_ug_m3": 7170000.0,
+  "max_ug_m3": 7170131.5,
+  "n_cells_scored": 8142,
+  "meteo": {
+   "u_star": 0.3,
+   "lmo": -1137.93,
+   "h_abl": 330.0,
+   "sigma_theta_deg": 7.4,
+   "theta_star": -0.006,
+   "temperature_c": 4.0,
+   "wind_from_deg": 270.0
+  },
+  "options": {
+   "H_R": 20.0,
+   "U_MIN": 0.0,
+   "SIGMA_V_MIN": 0.0,
+   "SIGMA_W_MIN": 0.0
+  },
+  "site": {
+   "Z0D": 1.0,
+   "ZDISPL": 13.0
+  },
+  "W": 20.0,
+  "H": 20.0
+ },
+ "G2_S025": {
+  "street": [
+   [
+    -100.0,
+    0.0
+   ],
+   [
+    100.0,
+    0.0
+   ]
+  ],
+  "street_flux_g_s": 0.0,
+  "node_flux_g_s": [
+   0.0,
+   1000.0
+  ],
+  "cint_ug_m3": 7168000.0,
+  "max_ug_m3": 7168421.5,
+  "n_cells_scored": 8101,
+  "meteo": {
+   "u_star": 0.3,
+   "lmo": 1320.0,
+   "h_abl": 330.0,
+   "sigma_theta_deg": 7.29,
+   "theta_star": 0.005,
+   "temperature_c": 4.0,
+   "wind_from_deg": 270.0
+  },
+  "options": {
+   "H_R": 20.0,
+   "U_MIN": 0.0,
+   "SIGMA_V_MIN": 0.0,
+   "SIGMA_W_MIN": 0.0
+  },
+  "site": {
+   "Z0D": 1.0,
+   "ZDISPL": 13.0
+  },
+  "W": 20.0,
+  "H": 20.0
+ },
+ "G2_S05": {
+  "street": [
+   [
+    -100.0,
+    0.0
+   ],
+   [
+    100.0,
+    0.0
+   ]
+  ],
+  "street_flux_g_s": 0.0,
+  "node_flux_g_s": [
+   0.0,
+   1000.0
+  ],
+  "cint_ug_m3": 7168000.0,
+  "max_ug_m3": 7167553.0,
+  "n_cells_scored": 8078,
+  "meteo": {
+   "u_star": 0.3,
+   "lmo": 660.0,
+   "h_abl": 330.0,
+   "sigma_theta_deg": 7.23,
+   "theta_star": 0.01,
+   "temperature_c": 4.0,
+   "wind_from_deg": 270.0
+  },
+  "options": {
+   "H_R": 20.0,
+   "U_MIN": 0.0,
+   "SIGMA_V_MIN": 0.0,
+   "SIGMA_W_MIN": 0.0
+  },
+  "site": {
+   "Z0D": 1.0,
+   "ZDISPL": 13.0
+  },
+  "W": 20.0,
+  "H": 20.0
+ },
+ "G2_S09": {
+  "street": [
+   [
+    -100.0,
+    0.0
+   ],
+   [
+    100.0,
+    0.0
+   ]
+  ],
+  "street_flux_g_s": 0.0,
+  "node_flux_g_s": [
+   0.0,
+   1000.0
+  ],
+  "cint_ug_m3": 7166000.0,
+  "max_ug_m3": 7166218.0,
+  "n_cells_scored": 8046,
+  "meteo": {
+   "u_star": 0.3,
+   "lmo": 366.67,
+   "h_abl": 330.0,
+   "sigma_theta_deg": 7.15,
+   "theta_star": 0.017,
+   "temperature_c": 4.0,
+   "wind_from_deg": 270.0
+  },
+  "options": {
+   "H_R": 20.0,
+   "U_MIN": 0.0,
+   "SIGMA_V_MIN": 0.0,
+   "SIGMA_W_MIN": 0.0
+  },
+  "site": {
+   "Z0D": 1.0,
+   "ZDISPL": 13.0
+  },
+  "W": 20.0,
+  "H": 20.0
+ },
+ "G2_S11": {
+  "street": [
+   [
+    -100.0,
+    0.0
+   ],
+   [
+    100.0,
+    0.0
+   ]
+  ],
+  "street_flux_g_s": 0.0,
+  "node_flux_g_s": [
+   0.0,
+   1000.0
+  ],
+  "cint_ug_m3": 7166000.0,
+  "max_ug_m3": 7165574.5,
+  "n_cells_scored": 8276,
+  "meteo": {
+   "u_star": 0.3,
+   "lmo": 300.0,
+   "h_abl": 330.0,
+   "sigma_theta_deg": 7.1,
+   "theta_star": 0.021,
+   "temperature_c": 4.0,
+   "wind_from_deg": 270.0
+  },
+  "options": {
+   "H_R": 20.0,
+   "U_MIN": 0.0,
+   "SIGMA_V_MIN": 0.0,
+   "SIGMA_W_MIN": 0.0
+  },
+  "site": {
+   "Z0D": 1.0,
+   "ZDISPL": 13.0
+  },
+  "W": 20.0,
+  "H": 20.0
  }
 }
