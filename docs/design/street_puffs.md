@@ -307,11 +307,24 @@ unsheared model (the evaluator and one-puff-per-step regression fixtures pass un
 ### 4.8 Housekeeping and the budget
 
 Fixed capacity K per batch instance, arrays (B, K) and a live mask, no Python lists of
-puffs. Each step retires the puffs past `x_max` into `mass_out` and those whose peak
+puffs. Each step retires the puffs that have left into `mass_out` and those whose peak
 estimate is below `drop_below` times the instance's largest into `mass_dropped`; when new
 puffs do not fit, the faintest live ones are evicted into `mass_dropped`. The peak estimate
 reads the profiles at the puff's own distance, so it is a ranking, not a bound (a receptor
 can see up to about twice it).
+
+A puff has left (`retire`, `PuffOptions`) either past `x_max` from its source
+(`"distance"`, the default, the steady kernel's cut-off) or once its rear edge is downwind
+of every corner of the box around the street and junction sources (`"domain"`). The rear
+edge is the puff's most upwind sub-source less `x(a) - x(a - span/2)` (half its slug) and
+`cutoff_sigma` along-wind spreads (`sigma_y`, plus `sx2_shear` under shear): past it the
+evaluator's own cut-off leaves no receptor in the box. The current wind decides, so a later
+reversal does not revive a retired puff. Under `"domain"` the tables reach the network's
+diagonal plus `x_max`, which leaves room for the margin and for releases outside the box;
+the grid only grows, and its first `x_max` is bit-identical. `"distance"` alone would drop
+a release cloud 700 m from its source in a larger network. A release injected at street
+level (`PulseSource`) leaves the streets as street puffs, so the rule is per model, not
+per source.
 
 `drop_below`: on a pulse release over `twelve_street_grid` (above-roof release 3e-3 kg/s
 over [12, 29] s, 80 steps of 5 s) 1e-3 against 1e-6 changes the most-hit street's

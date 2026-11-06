@@ -609,8 +609,24 @@ times the terms' weighted mean of their along-wind profiles.
 Pairs more than `cutoff_sigma` crosswind standard deviations beyond the flat top, or (under
 `"sigma_y"`) along-wind standard deviations ($\sigma_x$, with the shear part when it is
 on) beyond the slug's ends, are exactly zero. A
-street's own puffs do not count in its own `C_ext`, as in `street_kernel`. A puff leaves
-the domain at `x_max` (700 m, the steady kernel's downwind cut-off).
+street's own puffs do not count in its own `C_ext`, as in `street_kernel`.
+
+How a puff leaves is set by `retire`:
+
+- `"distance"` (the default) retires a puff once it is `x_max` (700 m) from its source.
+  That is the steady kernel's downwind cut-off, so a continuous source reproduces
+  `street_kernel`.
+- `"domain"` retires a puff once the whole network lies upwind of its rear edge: its most
+  upwind point, less half its slug and `cutoff_sigma` along-wind spreads. Use it for a
+  release, whose cloud matters wherever it is in the network. On a 1.5 km line of streets
+  a release under `"distance"` vanishes 700 m from where it was emitted; under `"domain"`
+  it reaches the last street at about ten times the concentration. The tables then reach
+  the network's diagonal plus `x_max`, and beyond their end a puff keeps its last spread.
+  In a network smaller than `x_max`, puffs leave sooner than under `"distance"`.
+
+The decision uses the current wind, so a puff retired just before the wind turns back is
+not revived. Under either rule, puffs fainter than `drop_below` times the brightest puff
+are dropped, and so are the faintest when the slots run out.
 
 ### The step
 
@@ -620,8 +636,8 @@ start of step $k$, from the state at that time, it
 1. emits the puffs of step $k-1$: the masses above, from the street concentrations at the
    end of step $k-1$ and the flows and `C_ext` it stored then;
 2. advances every puff by $\Delta t$ on the current wind direction;
-3. retires the puffs past `x_max` and those fainter than `drop_below` times the brightest
-   puff of their batch instance;
+3. retires the puffs that have left (`retire`, above) and those fainter than `drop_below`
+   times the brightest puff of their batch instance;
 4. evaluates `C_ext` at every street midpoint at roof level and writes it as
    `"<layer>.x_boundary"`: the caller's background driver plus the puffs.
 
@@ -742,7 +758,8 @@ model.closures[-1].bind(pulsed)                 # the puff closure reads its wir
 | `puff_dt` | `None` | s | The emission interval. `None` gives one puff per source per street step. A number (a multiple of the street step) accumulates each source's mass over the interval into one puff whose slug spans it. It saves capacity, not time: the work of evaluating `C_ext` follows the area the cloud covers, not the number of puffs. Within an interval the newest material is pending rather than a puff, so `C_ext` near the sources lags by up to one interval and short releases are smeared over it. On `twelve_street_grid` with 30 s intervals and 5 s steps a steady `C_ext` flickers by up to 0.74 of its peak each interval (street concentrations stay within 3 %), and a 17 s release's peak street concentration is off by 0.38 of it and its dose by 2.5 %. |
 | `drop_below` | 1e-3 | | The faint threshold, relative to the brightest puff of the instance by a cheap peak estimate; dropped mass goes to `mass_dropped`. Against 1e-6 it changes street concentrations and `C_ext` by about 1e-4 of their peak. |
 | `cutoff_sigma` | 4 | standard deviations | The profiles' cut-off, as the steady kernel's. |
-| `x_max` | 700 | m | The tables' extent. A puff retires, into `mass_out`, when its centre passes `x_max`, while the near end of its slug may still be inside, so receptors within half a slug of `x_max` see a small step in `C_ext`. |
+| `x_max` | 700 | m | The steady kernel's downwind cut-off. Under `retire="distance"` it is the tables' extent, and a puff retires, into `mass_out`, when its centre passes it, while the near end of its slug may still be inside, so receptors within half a slug of `x_max` see a small step in `C_ext`. Under `"domain"` the tables reach the network's diagonal plus `x_max`. |
+| `retire` | `"distance"` | | How a puff leaves, into `mass_out`: `"distance"` past `x_max` from its source, as the steady kernel; `"domain"` once the whole network lies upwind of its rear edge ([above](#the-puffs)), for releases whose cloud crosses the network. |
 | `n_releases` | 0 | | The number of explicit above-roof releases. |
 | `shear` | `False` | | Wind-shear stretching along the wind (Sykes and Henn, 1995; [above](#wind-shear-stretching)); needs `along_wind="sigma_y"` (with `"none"` it is refused by name). |
 | `table_kwargs` | `{}` | | The empirical inputs passed on to `puff_tables` (`theta_star`, `temperature`, `tau_y`, `tau_z`, `centre_k`, the floors); a `"centre_c"` entry (m) is the centre-law constant of the street and junction sources' table. |

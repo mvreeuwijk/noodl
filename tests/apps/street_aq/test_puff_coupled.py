@@ -403,7 +403,7 @@ def test_fresh_equal_valued_drivers_do_not_rebuild(monkeypatch):
 
 
 def _budget_run(junction_source, thetas, capacity, *, n_steps=60, dt=5.0, puff_dt=30.0,
-                shear=False):
+                shear=False, retire="distance"):
     """A pulse in street 3 (canopy) and an above-roof pulse, stepped `n_steps` times with
     the wind direction `thetas[k]` at step `k`; yields `(k, state, terms)` after every
     step, `terms` the budget's sides (`_budget_sides`)."""
@@ -412,7 +412,7 @@ def _budget_run(junction_source, thetas, capacity, *, n_steps=60, dt=5.0, puff_d
     bg = 2.0e-8
     options = PuffOptions(sigma_theta=math.radians(6.0), junction_source=junction_source,
                           capacity=capacity, n_releases=1, x_max=300.0, puff_dt=puff_dt,
-                          shear=shear)
+                          shear=shear, retire=retire)
     _, names, model, state, drivers = _puff_model(puffs=options)
     state = {**state, "street.x": torch.full((12,), bg, dtype=DT)}
     release = {"puff.release_xy": torch.tensor([[[-60.0, 90.0]]], dtype=DT),
@@ -445,13 +445,16 @@ def _budget_run(junction_source, thetas, capacity, *, n_steps=60, dt=5.0, puff_d
         yield k, model, state, held, inputs
 
 
-def _assert_budget(junction_source, thetas, capacity, puff_dt=30.0, shear=False):
+def _assert_budget(junction_source, thetas, capacity, puff_dt=30.0, shear=False,
+                   retire="distance"):
     """Assert the identity after every step; return the final state and what the run
     exercised (the largest `mass_out`, `mass_dropped` and accumulated `"puff.pending"`,
     the puffs evicted)."""
     seen = {"out": 0.0, "dropped": 0.0, "evicted": 0, "pending": 0.0, "sxz": 0.0}
     for k, model, state, held, inputs in _budget_run(junction_source, thetas, capacity,
-                                                     puff_dt=puff_dt, shear=shear):
+                                                     n_steps=len(thetas),
+                                                     puff_dt=puff_dt, shear=shear,
+                                                     retire=retire):
         assert held.shape == (1,)
         assert abs(float(held[0]) - float(inputs)) <= 1e-12 * float(inputs), (
             k, float(held[0]), float(inputs))
@@ -508,6 +511,72 @@ def test_budget_exact_when_wind_turns():
     thetas = [0.3 + 0.05 * k if k < 30 else 1.8 - 0.04 * (k - 30) for k in range(60)]
     _, seen = _assert_budget("upward", thetas, 4096)
     assert seen["out"] != 0.0
+
+
+def test_budget_exact_when_puffs_leave_the_domain():
+    """The identity of `test_budget_exact_every_step` under `retire="domain"`, with the
+    wind turning: puffs leave the network into `mass_out` once their rear edge has passed
+    it (500 s: the edge trails the centre by `cutoff_sigma` spreads)."""
+    thetas = [0.3 + 0.02 * k for k in range(100)]
+    _, seen = _assert_budget("upward", thetas, 4096, retire="domain")
+    assert seen["out"] != 0.0
+
+
+def test_domain_retirement_extends_the_tables():
+    """Under `retire="domain"` the tables reach the network's diagonal plus `x_max`."""
+    options = PuffOptions(sigma_theta=math.radians(6.0), retire="domain", x_max=300.0)
+    _, _, model, state, drivers = _puff_model(puffs=options)
+    closure = model.closures[-1]
+    # the twelve-street grid spans 300 m by 300 m
+    assert closure.extent == pytest.approx(300.0 + 300.0 * math.sqrt(2.0), rel=1e-12)
+    model.step(state, _drivers(model, drivers), 5.0, t=0.0)
+    assert closure.tables.u.shape[-1] == math.ceil(closure.extent / 10.0) + 1
+    with pytest.raises(ValueError, match="retire must be one of"):
+        _puff_model(puffs=PuffOptions(retire="edge"))
+
+
+def _line_run(retire):
+    """A release 50 m upwind of a 1.5 km line of fifteen 100 m streets along the wind;
+    returns the furthest a live release puff got, the largest `C_ext` at the last
+    street, and the final state."""
+    from noodl.apps.street_aq.network import Street, StreetNetwork
+
+    n = 15
+    net = StreetNetwork(
+        streets=[Street(str(i + 1), f"N{i}", f"N{i + 1}", 100.0, 20.0, 20.0)
+                 for i in range(n)],
+        x={f"N{i}": 100.0 * i for i in range(n + 1)}, y={f"N{i}": 0.0 for i in range(n + 1)})
+    options = PuffOptions(sigma_theta=math.radians(6.0), n_releases=1, retire=retire)
+    model, state, drivers = build_model(net, background="per_street", puffs=options)
+    drv = {**_drivers(model, drivers, bg=0.0),
+           "puff.release_xy": torch.tensor([[[-50.0, 0.0]]], dtype=DT),
+           "puff.release_z": torch.tensor([[30.0]], dtype=DT),
+           "puff.release_rate": torch.tensor([[1e-3]], dtype=DT),
+           "puff.release_start": torch.tensor([[0.0]], dtype=DT),
+           "puff.release_duration": torch.tensor([[20.0]], dtype=DT)}
+    furthest, far = 0.0, 0.0
+    for k in range(45):
+        state = model.step(state, drv, 20.0, t=20.0 * k)
+        puff = PuffState.from_state(state)
+        released = puff.live & (puff.table == 1)
+        if bool(released.any()):
+            furthest = max(furthest, float(puff.disp[..., 0][released].max()))
+        far = max(far, float(state["puff.c_ext"][..., -1].max()))
+    return furthest, far, state
+
+
+def test_a_release_crosses_a_network_longer_than_x_max_under_domain_retirement():
+    """Under `"distance"` a release leaves 700 m from where it was emitted, inside a 1.5 km
+    network; under `"domain"` it crosses the network, reaches the last street at about
+    ten times the concentration, and leaves past the network's end."""
+    near, far_distance, _ = _line_run("distance")
+    beyond, far_domain, state = _line_run("domain")
+    assert near < 700.0
+    assert beyond > 1500.0
+    assert far_domain > 5.0 * far_distance > 0.0
+    puff = PuffState.from_state(state)
+    assert not bool((puff.live & (puff.table == 1)).any())
+    assert float(puff.mass_out[0]) > 0.0
 
 
 def test_mass_in_streets_is_the_volume_weighted_excess():

@@ -345,6 +345,11 @@ _ROW_KEYS = {"h_r": "h_canopy", "h_abl": "h_abl", "u_star": "u_star", "lmo": "lm
 ALONG_WIND = ("sigma_y", "none")
 """The along-wind profile options of a puff (`PuffField`)."""
 
+RETIRE = ("distance", "domain")
+"""How a puff leaves (`housekeep`, `PuffOptions.retire`): `"distance"` once its distance
+`x(age)` from its source passes `x_max`, the steady kernel's downwind cut-off; `"domain"`
+once the whole domain lies upwind of its rear edge."""
+
 _SHEAR_NEEDS_SIGMA_Y = (
     "{where}: shear=True needs along_wind='sigma_y', got along_wind={along_wind!r}: the "
     "'none' slug is a segment of the steady plume, with no along-wind Gaussian for the "
@@ -428,6 +433,8 @@ class PuffField:
     move by the puff's displacement. `source_xy0` `(S, 2)` is each source's reference
     point: a street's midpoint, a junction's position, and the origin for a release, whose
     sub-source sits at the origin so that its emission position is its displacement.
+    `domain` `(4,)` (m, `x0, y0, x1, y1`) is the box around the street and junction
+    sub-sources (`housekeep(..., retire="domain")`), None when there are none.
 
     `along_wind` (one of `ALONG_WIND`) is the along-wind profile: `"sigma_y"` (the default)
     a uniform slug convolved with a Gaussian of `sigma_x = sigma_y(x(a))`, `"none"` the slug
@@ -467,6 +474,9 @@ class PuffField:
                              "in source order")
         self._count = count
         self._start = torch.cumsum(count, 0) - count
+        fixed = self.xy.detach()[self.owner < n_streets + n_junctions]
+        self.domain = (torch.cat([fixed.min(0).values, fixed.max(0).values])
+                       if fixed.shape[0] else None)
         # detached geometry of the coarse mask: each source's widest flat top
         w = self.width.detach()
         self._half_width = torch.zeros(w.shape[0], n_sources, dtype=_DTYPE).scatter_reduce(
@@ -599,27 +609,74 @@ def _retire(state: PuffState, gone: Tensor, counter: str) -> PuffState:
 
 
 def housekeep(field: PuffField, state: PuffState, tables: PuffTables, *,
-              drop_below: float = 1e-3) -> PuffState:
-    """Retire puffs (design Sect. 4.8): those whose distance `x(age)` passed
-    `tables.x_max` go to `mass_out` (the centre decides, not the slug's near end, so a
-    receptor within half a slug of `x_max` sees a small step in `C_ext` when a puff
-    retires); of the others, those whose peak estimate
-    (`_peak_bound`) is below `drop_below` (default 1e-3, as `PuffOptions.drop_below`)
-    times the largest among the instance's live puffs go to `mass_dropped`. An instance
-    with no live puff is left as it is. Decisions are made on detached values; the masses
-    keep their graph."""
+              drop_below: float = 1e-3, retire: str = "distance",
+              theta_w: Tensor | float | None = None, span: float | None = None
+              ) -> PuffState:
+    """Retire puffs (design Sect. 4.8). Those that have left go to `mass_out`: under
+    `retire="distance"` (the default) those whose distance `x(age)` passed `tables.x_max`
+    (the centre decides, not the slug's near end, so a receptor within half a slug of
+    `x_max` sees a small step in `C_ext` when a puff retires); under `retire="domain"`
+    those whose rear edge, along the wind `theta_w` (scalar or `(B,)`), is downwind of
+    every corner of `field.domain`. The rear edge is the puff's most upwind sub-source
+    less half its slug (`x(a) - x(a - span/2)`, `span` (s) the emission interval) and
+    `cutoff_sigma` times its along-wind spread (`sigma_y`, with `sx2_shear` added under
+    shear), so a retired puff no longer reaches any receptor in the domain under the
+    current wind; a wind that later turns back does not revive it. Of the others, those
+    whose peak estimate (`_peak_bound`) is below `drop_below` (default 1e-3, as
+    `PuffOptions.drop_below`) times the largest among the instance's live puffs go to
+    `mass_dropped`. An instance with no live puff is left as it is. Decisions are made on
+    detached values; the masses keep their graph."""
     if not 0.0 <= drop_below < 1.0:
         raise ValueError(f"housekeep: drop_below must be in [0, 1), got {drop_below!r}")
+    if retire not in RETIRE:
+        raise ValueError(f"housekeep: retire must be one of {RETIRE}, got {retire!r}")
     n_batch = state.mass.shape[0]
     row = _table_rows(tables, n_batch, "housekeep")[:, None]
-    with torch.no_grad():
-        x = tables.at_age(state.age, state.table, row)[0]
-        out = state.live & (x > tables.x_max)
+    if retire == "distance":
+        with torch.no_grad():
+            x = tables.at_age(state.age, state.table, row)[0]
+            out = state.live & (x > tables.x_max)
+    else:
+        if field.domain is None:
+            raise ValueError("housekeep: retire='domain' needs a field with streets or "
+                             "junctions (its domain); a PuffField.points field has none, "
+                             "use retire='distance'")
+        if theta_w is None or span is None or not span > 0:
+            raise ValueError(f"housekeep: retire='domain' needs theta_w= and a positive "
+                             f"span= (the emission interval, s), got theta_w={theta_w!r}, "
+                             f"span={span!r}")
+        out = _left_domain(field, state, tables, row, theta_w, float(span))
     state = _retire(state, out, "mass_out")
     peak = _peak_bound(field, state, tables)
     with torch.no_grad():
         faint = state.live & (peak < drop_below * peak.max(1, keepdim=True).values)
     return _retire(state, faint, "mass_dropped")
+
+
+def _left_domain(field: PuffField, state: PuffState, tables: PuffTables, row: Tensor,
+                 theta_w: Tensor | float, span: float) -> Tensor:
+    """`(B, K)`: the live puffs whose rear edge is downwind of the whole domain
+    (`housekeep(..., retire="domain")`)."""
+    n_batch = state.mass.shape[0]
+    cos, sin = _wind(theta_w, n_batch, "housekeep")
+    with torch.no_grad():
+        e = torch.stack([cos, sin], dim=-1).detach()  # (B, 2)
+        x0, y0, x1, y1 = field.domain.tolist()
+        corners = torch.tensor([[x0, y0], [x0, y1], [x1, y0], [x1, y1]], dtype=_DTYPE)
+        front = (corners @ e.T).max(0).values  # (B,)
+        along = e @ field.xy.detach().T  # (B, P)
+        first = torch.full((n_batch, field.n_sources), math.inf, dtype=_DTYPE)
+        first = first.scatter_reduce(1, field.owner.expand(n_batch, -1), along, "amin")
+        age = state.age.detach()
+        x, _, s_y, _, _, _ = tables.at_age(age, state.table, row)
+        x_back = tables.at_age(torch.clamp(age - span / 2.0, min=0.0), state.table, row)[0]
+        s_x2 = s_y * s_y
+        if field.shear:
+            s_x2 = s_x2 + state.sx2_shear.detach().clamp(min=0.0)
+        rear = (first.gather(1, state.source)
+                + (state.disp.detach() * e[:, None, :]).sum(-1)
+                - (x - x_back) - field.cutoff_sigma * torch.sqrt(s_x2))
+        return state.live & (rear > front[:, None])
 
 
 def emit(field: PuffField, state: PuffState, masses: Tensor, table_index: Tensor,
@@ -1227,8 +1284,14 @@ class PuffOptions:
     concentrations within 3 %; a 17 s release's street-concentration peak off by 0.38, its
     dose by 2.5 %); the pair work of `C_ext` does not fall, since a longer slug covers
     proportionally more receptors. `drop_below` the faint threshold of `housekeep`;
-    `cutoff_sigma` the profiles' cut-off; `x_max` (m) the extent
-    of the tables (a puff beyond it leaves the domain); `n_releases` the explicit
+    `cutoff_sigma` the profiles' cut-off; `retire` (one of `RETIRE`) how a puff leaves:
+    `"distance"` (the default) once it is `x_max` (m) from its source, the steady
+    kernel's downwind cut-off and the tables' extent, so a continuous source reproduces
+    `street_kernel`; `"domain"` once the whole network lies upwind of its rear edge
+    (`housekeep`), for a release whose cloud matters wherever it is in the network: the
+    tables then extend to the network's diagonal plus `x_max` (beyond their end a puff
+    keeps its last spread), and in a network smaller than `x_max` puffs leave sooner than
+    under `"distance"`; `n_releases` the explicit
     above-roof releases. `table_kwargs` go to `puff_tables` (the empirical inputs:
     `theta_star`, `temperature`, `tau_y`, `tau_z`, `centre_k`, the floors); a `"centre_c"`
     entry there is the centre of the canopy sources' table (default
@@ -1248,6 +1311,7 @@ class PuffOptions:
     shear: bool = False
     cutoff_sigma: float = GAUSS_CUTOFF_SIGMAS
     x_max: float = DOWNWIND_CUTOFF_M
+    retire: str = "distance"
     n_releases: int = 0
     table_kwargs: Mapping = field(default_factory=dict)
 
@@ -1319,6 +1383,9 @@ class PuffClosure:
                                                          along_wind=options.along_wind))
         if int(options.capacity) < 1:
             raise ValueError(f"PuffOptions: capacity must be >= 1, got {options.capacity!r}")
+        if options.retire not in RETIRE:
+            raise ValueError(f"PuffOptions: retire must be one of {RETIRE}, got "
+                             f"{options.retire!r}")
         if not 0.0 <= options.drop_below < 1.0:
             raise ValueError(f"PuffOptions: drop_below must be in [0, 1), got "
                              f"{options.drop_below!r}")
@@ -1338,6 +1405,11 @@ class PuffClosure:
         self.n_streets = len(net.streets)
         self.n_releases = int(options.n_releases)
         self.receptors = street_midpoints(net)
+        # the tables' extent: the cut-off, or under retire="domain" the network's diagonal
+        # plus it (room for the rear edge's margin and for releases outside the network)
+        xs, ys = list(net.x.values()), list(net.y.values())
+        diagonal = math.hypot(max(xs) - min(xs), max(ys) - min(ys))
+        self.extent = float(options.x_max) + (diagonal if options.retire == "domain" else 0.0)
         self.receptor_owner = torch.arange(self.n_streets)
         self.state_keys = (*(f"puff.{n}" for n in _STATE_FIELDS), *_CARRIED)
         self.model = None
@@ -1538,7 +1610,7 @@ class PuffClosure:
             lmo = met["lmo"][1] if met["lmo"][1] is not None else math.inf
             self.tables = puff_tables(
                 centres=centres, u_star=met["u_star"][1], h_abl=met["h_abl"][1], lmo=lmo,
-                h_canopy=o.h_canopy, z0=o.z0, d=o.d, sigma_theta=sigma[1], x_max=o.x_max,
+                h_canopy=o.h_canopy, z0=o.z0, d=o.d, sigma_theta=sigma[1], x_max=self.extent,
                 **self.table_kwargs)
             self._table_key = self._key(raws)
             rebuilt = True
@@ -1688,7 +1760,7 @@ class PuffClosure:
         # the step's own field and tables: a checkpoint recomputes `puff_step` in the
         # backward, after later steps may have rebuilt them
         field, tables, drop_below = self.field, self.tables, self.options.drop_below
-        shear = self.options.shear
+        shear, retire = self.options.shear, self.options.retire
 
         def puff_step(puff: PuffState) -> tuple[PuffState, Tensor, Tensor]:
             if emitted is None:
@@ -1700,7 +1772,8 @@ class PuffClosure:
                 puff = replace(puff, mass_drawn_down=puff.mass_drawn_down + drawn)
             # (2) advance, (3) housekeep, (4) evaluate
             puff = advance(puff, tables, dt, theta, shear=shear)
-            puff = housekeep(field, puff, tables, drop_below=drop_below)
+            puff = housekeep(field, puff, tables, drop_below=drop_below, retire=retire,
+                             theta_w=theta, span=span)
             c = roof_concentration(field, puff, tables, self.receptors, theta, span,
                                    receptor_owner=self.receptor_owner)
             return puff, c_bg + (c if batch else c[0]), evicted
@@ -1768,7 +1841,7 @@ def pending_roof_mass(model, state, c_bg: Tensor, *, junction_source: str = "upw
     return emitted, drawn.reshape(-1)
 
 
-__all__ = ["ALONG_WIND", "JUNCTION_SOURCES", "PuffClosure", "PuffField", "PuffOptions",
+__all__ = ["ALONG_WIND", "JUNCTION_SOURCES", "RETIRE", "PuffClosure", "PuffField", "PuffOptions",
            "PuffState", "PuffTables", "PulseSource", "advance", "concentration_at", "emit",
            "housekeep", "mass_in_streets", "pending_roof_mass", "puff_mass", "puff_tables",
            "pulse_mass", "roof_concentration"]

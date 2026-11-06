@@ -88,6 +88,7 @@ from noodl.apps.street_aq.plume import (
 from noodl.apps.street_aq.puff import (
     ALONG_WIND,
     JUNCTION_SOURCES,
+    RETIRE,
     PuffClosure,
     PuffField,
     PuffOptions,
@@ -150,6 +151,7 @@ __all__ = [
     "OPTIONS",
     "PRESETS",
     "Q_INHALATION",
+    "RETIRE",
     "Z0_B_DEFAULT",
     "Z0_S_DEFAULT",
     "BoundaryLayer",

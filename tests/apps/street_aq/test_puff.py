@@ -717,6 +717,92 @@ def test_empty_instance_housekeeps_without_nan():
     assert g.tolist() == [[0.0], [1.0]]
 
 
+def _domain_state(field, tabs, positions, *, age=10.0, n_batch=1):
+    """One release puff per entry of `positions` (m), masses 1, 2, 4, ..., in each of
+    `n_batch` instances, at age `age` with the displacement its position."""
+    n_s = field.n_sources
+    state = PuffState.empty((n_batch,), len(positions))
+    for i, xy in enumerate(positions):
+        masses = torch.zeros(n_batch, n_s, dtype=DT)
+        masses[:, -1] = 2.0**i
+        state, _ = emit(field, state, masses, torch.zeros(n_s, dtype=_LONG),
+                        torch.tensor([[xy]] * n_batch, dtype=DT))
+    return replace(state, age=torch.full_like(state.age, age))
+
+
+def test_domain_retirement_waits_for_the_rear_edge_to_pass_the_domain():
+    """Under `retire="domain"` a puff leaves once its rear edge (its position less half
+    its slug, `u span / 2` at a constant speed, and `cutoff_sigma` along-wind spreads) is
+    downwind of every corner of the domain, under each instance's own wind; a puff beside
+    the domain, or inside it beyond `x_max`, stays."""
+    net, _ = twelve_street_grid()
+    field = PuffField.for_network(net, theta_w=0.0, n_releases=1)
+    tabs = _const_tables(u=3.0, sigma_y=4.0)
+    x0, _, x1, y1 = field.domain.tolist()
+    span = 5.0
+    margin = 3.0 * span / 2.0 + field.cutoff_sigma * 4.0
+    positions = [(x1 + margin - 0.5, 50.0), (x1 + margin + 0.5, 50.0), (0.0, 50.0),
+                 (0.0, y1 + 500.0), (x0 - margin - 0.5, 50.0)]
+    state = _domain_state(field, tabs, positions, n_batch=2)
+    theta = torch.tensor([0.0, math.pi], dtype=DT)
+    out = housekeep(field, state, tabs, drop_below=0.0, retire="domain", theta_w=theta,
+                    span=span)
+    assert out.live.tolist() == [[True, False, True, True, True],
+                                 [True, True, True, True, False]]
+    assert out.mass_out.tolist() == [2.0, 16.0]
+    _identity(out)
+    # inside the domain beyond a short x_max: "distance" retires, "domain" keeps
+    short = replace(tabs, x_max=20.0)
+    kept = housekeep(field, state, short, drop_below=0.0, retire="domain", theta_w=theta,
+                     span=span)
+    assert bool(kept.live[:, 2].all())
+    gone = housekeep(field, state, short, drop_below=0.0)
+    assert not bool(gone.live.any())
+
+
+def test_domain_retirement_reads_street_puffs_and_shear():
+    """A street's puff leaves by its most upwind sub-source; under shear the along-wind
+    spread is `sqrt(sigma_y^2 + sx2_shear)`."""
+    net, names = twelve_street_grid()
+    s = names.index("4")  # A -> B, along x
+    tabs = _const_tables(u=3.0, sigma_y=4.0)
+    span = 5.0
+    for shear, sx2 in ((False, 0.0), (True, 9.0)):
+        field = PuffField.for_network(net, theta_w=0.0, shear=shear)
+        first = float(field.xy[field.owner == s, 0].min())
+        x1 = float(field.domain[2])
+        margin = 3.0 * span / 2.0 + field.cutoff_sigma * math.sqrt(16.0 + sx2)
+        masses = torch.zeros(2, field.n_sources, dtype=DT)
+        masses[:, s] = 1.0
+        state, _ = emit(field, PuffState.empty((2,), 1), masses,
+                        torch.zeros(field.n_sources, dtype=_LONG))
+        shift = torch.tensor([[x1 - first + margin - 0.5], [x1 - first + margin + 0.5]],
+                             dtype=DT)
+        state = replace(state, age=torch.full_like(state.age, 10.0),
+                        disp=torch.stack([shift, torch.zeros_like(shift)], dim=-1),
+                        sx2_shear=torch.full_like(state.age, sx2))
+        out = housekeep(field, state, tabs, drop_below=0.0, retire="domain", theta_w=0.0,
+                        span=span)
+        assert out.live[:, 0].tolist() == [True, False], shear
+
+
+def test_domain_retirement_refusals_are_named():
+    net, _ = twelve_street_grid()
+    tabs = _const_tables()
+    points = PuffField.points(1)
+    assert points.domain is None
+    state = PuffState.empty((1,), 2)
+    with pytest.raises(ValueError, match="PuffField.points field has none"):
+        housekeep(points, state, tabs, retire="domain", theta_w=0.0, span=5.0)
+    field = PuffField.for_network(net, theta_w=0.0)
+    with pytest.raises(ValueError, match="positive span="):
+        housekeep(field, state, tabs, retire="domain", theta_w=0.0)
+    with pytest.raises(ValueError, match="theta_w="):
+        housekeep(field, state, tabs, retire="domain", span=5.0)
+    with pytest.raises(ValueError, match="retire must be one of"):
+        housekeep(field, state, tabs, retire="edge")
+
+
 def test_puff_width_batch_must_match_by_name():
     field = PuffField.points(1)
     field.width = torch.ones(3, 1, dtype=DT)
