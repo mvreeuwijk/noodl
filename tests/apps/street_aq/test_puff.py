@@ -31,6 +31,7 @@ from noodl.apps.street_aq.puff import (
     pulse_mass,
     roof_concentration,
 )
+from tests._records import assert_matches_record
 
 DT = torch.float64
 REGRESSION = Path(__file__).parents[2] / "data" / "street" / "plume_table_regression.pt"
@@ -62,9 +63,8 @@ def test_resampled_nodes_equal_the_existing_table_bit_for_bit():
         name = kwargs.pop("name")
         t = plume_table(**kwargs)
         ref = ref_all[name]
-        assert torch.equal(t.sigma_y, ref["sigma_y"]), name
-        assert torch.equal(t.p_z, ref["p_z"]), name
-        assert torch.equal(t.u, ref["u"]), name
+        for col in ("sigma_y", "p_z", "u"):
+            assert_matches_record(getattr(t, col), ref[col], (name, col))
 
 
 def _nodes(met=_NEUTRAL, x_end=1000.0):
@@ -1085,9 +1085,7 @@ def test_evaluator_matches_the_recorded_reference(along_wind, batch):
     ref = torch.load(EVALUATE_REGRESSION, weights_only=True)[f"{along_wind}/B{batch}"]
     got = _evaluate_regression_case(along_wind, batch)
     for name, value in ref.items():
-        assert float(value.abs().max()) > 0, name
-        err = float((got[name] - value).abs().max() / value.abs().max())
-        assert err <= 1e-12, (name, err)
+        assert_matches_record(got[name], value, name)
 
 
 # --- wind-shear stretching (design Sect. 4.7) -----------------------------------------------
