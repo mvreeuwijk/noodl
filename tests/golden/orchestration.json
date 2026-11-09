@@ -343,13 +343,21 @@
             },
             "electrical.q": {
               "data": [
-                -0.06666666666666668,
-                0.06666666666666668,
+                -0.06666666666666667,
+                0.06666666666666668
+              ],
+              "dtype": "torch.float64",
+              "shape": [
+                2
+              ]
+            },
+            "electrical.storage_flow": {
+              "data": [
                 0.06666666666666667
               ],
               "dtype": "torch.float64",
               "shape": [
-                3
+                1
               ]
             }
           }
@@ -384,13 +392,21 @@
             },
             "electrical.q": {
               "data": [
-                -0.20000000000000004,
-                0.20000000000000004,
-                0.2
+                -0.2,
+                0.20000000000000004
               ],
               "dtype": "torch.float64",
               "shape": [
-                3
+                2
+              ]
+            },
+            "electrical.storage_flow": {
+              "data": [
+                0.20000000000000004
+              ],
+              "dtype": "torch.float64",
+              "shape": [
+                1
               ]
             }
           }
@@ -426,12 +442,20 @@
             "electrical.q": {
               "data": [
                 -0.5333333333333332,
-                0.5333333333333332,
                 0.5333333333333332
               ],
               "dtype": "torch.float64",
               "shape": [
-                3
+                2
+              ]
+            },
+            "electrical.storage_flow": {
+              "data": [
+                0.5333333333333332
+              ],
+              "dtype": "torch.float64",
+              "shape": [
+                1
               ]
             }
           }

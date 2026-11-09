@@ -78,7 +78,7 @@ tensor).
 |---|---|---|---|---|
 | `Resistor(name, p, n, R, alpha=0, T_ref=300.15)` | `v = R (1 + alpha (T - T_ref)) i` | `Resistance` (`resistor`) | `Basic.Resistor` | yes |
 | `Conductor(name, p, n, G)` | `i = G v` | `Conductance` (`conduction`) | `Basic.Conductor` | yes |
-| `Capacitor(name, p, n, C, v0=0)` | `i = C dv/dt` | `Capacitance` (`capacitor`) | `Basic.Capacitor` | yes |
+| `Capacitor(name, p, n, C, v0=0)` | `i = C dv/dt` | `LinearStorage` at the other pin when one pin is the ground, else `Capacitance` (`capacitor`) | `Basic.Capacitor` | yes (an edge) |
 | `Inductor(name, p, n, L, i0=0)` | `v = L di/dt` | `Inductance` (`inductor`) | `Basic.Inductor` | yes |
 | `VoltageSource(name, p, n, V, waveform, offset=0)` | `v = offset + V unit(t)` | `PrescribedVoltage` (`voltage_source`) | `Sources.*Voltage` | `Constant`, `Sine` |
 | `CurrentSource(name, p, n, I, waveform, offset=0)` | `i = offset + I unit(t)` | `PrescribedCurrent` (`current_source`) | `Sources.*Current` | `Constant`, `Sine` |
@@ -243,6 +243,13 @@ L1: P = 0.000000 W, Q = 0.500000 var
   A source delivering power carries a negative current, as `V1` does in the divider.
 - A two-port device is two consecutive edges, port 1 `p1 -> n1` then port 2 `p2 -> n2`;
   `device_values` gives its voltage and current as pairs `(port 1, port 2)`.
+- A capacitor with one pin on the ground is not an edge: it is a node storage at its other
+  pin (`layer.storage`), and its current is the entry of `"electrical.storage_flow"` that
+  `model.circuit_storage[name]` gives (`(entry, p, n, sign)`; `sign` is `+1` when the ground
+  is pin `n`, `-1` when it is pin `p`). `device_values` and the transient result
+  (`"electrical.storage_flow"`) report it. A capacitor between two other nodes is a
+  `Capacitance` edge, and a phasor model keeps every capacitor as an edge. With
+  `learnable=True` a grounded capacitor's `C` is `layer.storage[0].C`, not on a law.
 - `"electrical.q"` is ordered by kind (kinds in order of first appearance), then by device;
   `model.circuit_index[name]` is the device's `(kind, slice)` in that order.
 

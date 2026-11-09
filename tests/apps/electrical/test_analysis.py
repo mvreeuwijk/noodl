@@ -221,7 +221,8 @@ def test_diode_transient_with_tight_newton_tolerances():
     state = initial_state(model, drivers, **tight)
     out = transient(model, state, drivers, _grid(1e-5, end=1e-4), **tight)
     assert out["scheme"][:3] == ["backward_euler", "backward_euler", "trapezoidal"]
-    values = device_values(model, {PHI: out[PHI][-1], Q: out[Q][-1]})
+    values = device_values(model, {PHI: out[PHI][-1], Q: out[Q][-1],
+                                   "electrical.storage_flow": out["electrical.storage_flow"][-1]})
     v = values["D1"][0]
     # KCL at d to round-off, and the diode current on its own law
     torch.testing.assert_close(values["R1"][1], values["D1"][1] + values["C1"][1], rtol=0,

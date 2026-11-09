@@ -1,8 +1,9 @@
 """Run a circuit `read_modelica_circuit` built, over its step grid.
 
 `simulate_circuit(model, state, drivers, names)` returns, at the output times, the layers'
-states (`"electrical.phi"`, `"electrical.q"`, and `"thermal.x"` when the circuit has a
-thermal network) stacked over time, plus `"time"`.
+states (`"electrical.phi"`, `"electrical.q"`, `"electrical.storage_flow"` when the circuit has
+capacitors to ground, and `"thermal.x"` when the circuit has a thermal network) stacked over
+time, plus `"time"`.
 
 An algebraic circuit (no capacitor, no inductor) is solved with `model.steady` at each
 requested time, warm-started from the previous solution. A dynamic one is stepped over the
@@ -46,8 +47,8 @@ def simulate_circuit(model: Model, state: State, drivers: Mapping[str, Tensor],
                      **solve_kwargs) -> dict[str, Tensor]:
     """The circuit's history at `times` (default `names.times`; each must be a time of
     `names.grid`, increasing; a single time may be a scalar): `"time"` `(T,)` (the grid times
-    found, a new tensor) and every `".phi"` / `".q"` state entry the model returns, stacked
-    on dim 0.
+    found, a new tensor) and every `".phi"`, `".q"`, `".x"` and `".storage_flow"` state entry
+    the model returns, stacked on dim 0.
 
     `solve_kwargs` (Newton's `atol`, `rtol`, `max_iter`, ...) are passed to every
     `model.steady` / `model.step`. The steady solves of an algebraic circuit default to
@@ -90,7 +91,7 @@ def simulate_circuit(model: Model, state: State, drivers: Mapping[str, Tensor],
                                **kwargs)
             if k + 1 in wanted:
                 rows.append(state)
-    keys = [key for key in rows[0] if key.endswith((".phi", ".q", ".x"))]
+    keys = [key for key in rows[0] if key.endswith((".phi", ".q", ".x", ".storage_flow"))]
     out = {key: torch.stack([row[key] for row in rows]) for key in keys}
     out["time"] = grid[want].clone()
     return out

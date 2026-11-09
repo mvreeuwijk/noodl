@@ -15,7 +15,7 @@ from noodl.model import Model
 Tensor = torch.Tensor
 F64 = torch.float64
 State = dict[str, Tensor]
-PHI, Q = f"{LAYER}.phi", f"{LAYER}.q"
+PHI, Q, SF = f"{LAYER}.phi", f"{LAYER}.q", f"{LAYER}.storage_flow"
 _RULES = ("trapezoidal", "backward_euler")
 
 
@@ -60,7 +60,11 @@ def initial_state(model: Model, drivers: Mapping[str, Tensor], *, t: float = 0.0
     name = layer.name
     phi, q = layer.solve(drivers[f"{name}.phi_boundary"], drivers,
                          drivers.get(f"{name}.sources"), mode="initial", t=t, **solve_kwargs)
-    return {f"{name}.phi": phi, f"{name}.q": q}
+    out = {f"{name}.phi": phi, f"{name}.q": q}
+    if layer.storage:       # the current into each grounded capacitor holding its v0
+        out[SF] = layer.storage_flows(phi, drivers, dt=None, mode="initial", q=q,
+                                      sources=drivers.get(f"{name}.sources"))
+    return out
 
 
 def _times(times) -> list[float]:
@@ -91,7 +95,9 @@ def transient(model: Model, state: Mapping[str, Tensor], drivers: Mapping[str, T
 
     Returns `{"time": (T,), "electrical.phi": (T, ..., n), "electrical.q": (T, ..., b),
     "scheme": [scheme of each step]}`, the start state as row 0 (rows broadcast to the
-    batch shape of the steps).
+    batch shape of the steps), and `"electrical.storage_flow": (T, ..., s)` when the circuit
+    has capacitors to ground (their currents, in `model.circuit_storage` order; row 0 is the
+    start state's, zero when it has none).
     """
     layer = _layer(model)
     _time_domain(layer, "transient")
@@ -101,7 +107,12 @@ def transient(model: Model, state: Mapping[str, Tensor], drivers: Mapping[str, T
     sources = [el for el in (layer.law_for(k)[0] for k in layer.kinds)
                if hasattr(el, "breakpoints")]
     phis, qs, rules = [state[PHI]], [state[Q]], []
+    flows = []
     current = dict(state)
+    if layer.storage:
+        if SF not in current:
+            current[SF] = layer.storage_flows(state[PHI], {}, dt=None)
+        flows.append(current[SF])
     # the sources are evaluated at t0 + dt (as Model.step does), so breakpoints are
     # searched over the evaluation times, never missing one between rounded grid times
     evaluated = grid[0]
@@ -117,13 +128,18 @@ def transient(model: Model, state: Mapping[str, Tensor], drivers: Mapping[str, T
         evaluated = end
         phis.append(current[PHI])
         qs.append(current[Q])
+        if layer.storage:
+            flows.append(current[SF])
         rules.append(rule)
-    return {
+    out = {
         "time": torch.tensor(grid, dtype=F64),
         PHI: torch.stack(torch.broadcast_tensors(*phis)),
         Q: torch.stack(torch.broadcast_tensors(*qs)),
         "scheme": rules,
     }
+    if layer.storage:
+        out[SF] = torch.stack(torch.broadcast_tensors(*flows))
+    return out
 
 
 def ac_sweep(circuit: Circuit, frequencies, **solve_kwargs) -> dict[str, Tensor]:
@@ -166,6 +182,13 @@ def device_values(model: Model, state: Mapping[str, Tensor]) -> dict[str, tuple[
         if edges.stop - edges.start == 1:
             v, i = v[..., 0], i[..., 0]
         out[name] = (v, i)
+    for name, (entry, p, n, sign) in getattr(model, "circuit_storage", {}).items():
+        if SF not in state:
+            raise ValueError(f"device_values: {name!r} is a capacitor to ground, whose current "
+                             f"is state[{SF!r}]; the state has none (use a state from "
+                             f"operating_point, initial_state or a transient row)")
+        phi = state[PHI]
+        out[name] = (phi[..., p] - phi[..., n], sign * state[SF][..., entry])
     return out
 
 

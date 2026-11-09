@@ -102,7 +102,7 @@ def test_off_grid_time_is_refused():
 def test_history_holds_time_and_every_layer_state_on_the_output_grid(tmp_path):
     model, state, drivers, names = read_modelica_circuit(_rc_fixture(tmp_path), substeps=2)
     out = simulate_circuit(model, state, drivers, names)
-    assert set(out) == {"time", "electrical.phi", "electrical.q"}
+    assert set(out) == {"time", "electrical.phi", "electrical.q", "electrical.storage_flow"}
     torch.testing.assert_close(out["time"], names.times, rtol=0, atol=0)
     assert out["electrical.phi"].shape[0] == names.times.numel() == 11
     # Row 0 is the start state itself.
