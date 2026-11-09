@@ -12,7 +12,8 @@ Each case runs `--steps` steps (one solve for `case118`), warmed once, over `--r
 rounds; the median wall time per step is reported. In a separate, instrumented run the
 time and the number of calls of the three parts of a Newton iteration are counted: the
 Jacobian (`MnaSystem.operator`, the forward-mode colouring), the linear solve
-(`solvers.select._sparse_direct`, SciPy's SuperLU) and the residual (`MnaSystem.residual`).
+(`solvers.select._sparse_direct`, SciPy's SuperLU) and the residual
+(`MnaSystem._residual_parts`, which `residual` calls).
 A third run under `cProfile` counts the calls that reach `torch._refs` / `torch._prims`,
 PyTorch's Python fallbacks for operations without a native kernel (complex elementwise
 ops among them).
@@ -113,14 +114,14 @@ class _Counter:
 
 @contextlib.contextmanager
 def _instrumented(counter: _Counter):
-    saved = (MnaSystem.operator, MnaSystem.residual, select._sparse_direct)
+    saved = (MnaSystem.operator, MnaSystem._residual_parts, select._sparse_direct)
     MnaSystem.operator = counter.wrap("jacobian", MnaSystem.operator)
-    MnaSystem.residual = counter.wrap("residual", MnaSystem.residual)
+    MnaSystem._residual_parts = counter.wrap("residual", MnaSystem._residual_parts)
     select._sparse_direct = counter.wrap("lu", select._sparse_direct)
     try:
         yield
     finally:
-        MnaSystem.operator, MnaSystem.residual, select._sparse_direct = saved
+        MnaSystem.operator, MnaSystem._residual_parts, select._sparse_direct = saved
 
 
 def _refs_calls(run) -> dict[str, int]:

@@ -286,7 +286,7 @@ def test_real_view_jacobian_matches_autograd_jacobian():
     pb = torch.zeros(1, dtype=C128)
     sources = torch.randn(net.n, generator=gen, dtype=C128)
     ctx = LawContext(mode="phasor", omega=torch.tensor([2 * math.pi * 3.0]))
-    call = mna._plain_call
+    call = layer._owner_call
 
     def residual(z):
         return mna.residual(z, pb, {}, sources, ctx, call)

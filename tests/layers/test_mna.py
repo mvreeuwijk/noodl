@@ -379,13 +379,13 @@ def test_assembled_jacobian_matches_autograd_jacobian_of_the_residual():
     pb = torch.tensor([0.4])
     sources = torch.randn(net.n, generator=gen, dtype=F64)
     ctx = LawContext(mode="dc")
-    call = mna._plain_call
+    call = layer._owner_call
 
     def residual(z):
         return mna.residual(z, pb, {}, sources, ctx, call)
 
     expected = torch.autograd.functional.jacobian(residual, x)
-    op = mna.operator(x, pb, {}, ctx, mna._slopes_fn({}, mna._plain_call, ctx, None))
+    op = mna.operator(x, pb, {}, ctx, mna._slopes_fn({}, layer._owner_call, ctx, None))
     torch.testing.assert_close(op.assemble(), expected, rtol=1e-13, atol=1e-13)
     # rmatvec is the transpose action
     v = torch.randn(mna.n, generator=gen, dtype=F64)
@@ -403,7 +403,7 @@ def test_mixed_nonlinear_network_converges_with_zero_residual():
         assert bool(diagnostics["converged"])
         mna = layer._mna
         x = torch.cat([phi[layer.interior], q[mna.f_edges]])
-        r = mna.residual(x, pb, {}, sources, LawContext(mode="dc"), mna._plain_call)
+        r = mna.residual(x, pb, {}, sources, LawContext(mode="dc"), layer._owner_call)
         assert float(r.abs().max()) < 1e-12
         # Tellegen with the withdrawals: their withdrawal w leaves the balance as
         # -sum(phi_I w), the power the withdrawals take out of the network.
@@ -412,6 +412,59 @@ def test_mixed_nonlinear_network_converges_with_zero_residual():
         withdrawn[ns.nodes] = ns.flow(phi[ns.nodes]) * phi[ns.nodes]
         torch.testing.assert_close(layer.power_residual(phi, q, {}, sources),
                                    -withdrawn.sum(), rtol=0, atol=1e-12)
+
+
+def _counting_residuals(monkeypatch, layer):
+    """Count every evaluation of the layer's flows and relation residuals (each residual,
+    and each recomputation of the solved flows, evaluates them once)."""
+    count = {"n": 0}
+    mna = layer._mna
+    original = mna._flows_and_residuals
+
+    def counted(*args, **kwargs):
+        count["n"] += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(mna, "_flows_and_residuals", counted)
+    return count
+
+
+@pytest.mark.parametrize("grad_mode", [True, False])
+def test_a_differentiable_solve_nothing_reaches_evaluates_no_residual_outside_newton(
+        monkeypatch, grad_mode):
+    """With no gradient wanted, the differentiable solve with flow unknowns evaluates exactly
+    the residuals the primal solve does (the starting guess's probe and Newton's own): the
+    threading is checked on Newton's residuals, not at the start and the root again, and
+    the root's potentials and flows are Newton's last residual's, not recomputed."""
+    _, layer = _mixed_layer()
+    pb = torch.tensor([0.4])
+    sources = torch.tensor([0.0, 0.1, -0.2, 0.05, 0.0, 0.3])
+    count = _counting_residuals(monkeypatch, layer)
+    diagnostics = {}
+    phi_p, q_p = layer.solve(pb, {}, sources, differentiable=False, diagnostics=diagnostics,
+                             atol=1e-13, rtol=0)
+    primal = count["n"]
+    assert primal > diagnostics["newton_iterations"]
+    count["n"] = 0
+    with torch.set_grad_enabled(grad_mode):
+        phi, q = layer.solve(pb, {}, sources, diagnostics=diagnostics, atol=1e-13, rtol=0)
+    assert count["n"] == primal
+    assert not phi.requires_grad and not q.requires_grad
+    assert torch.equal(phi, phi_p) and torch.equal(q, q_p)
+
+
+def test_a_differentiable_solve_with_a_gradient_recomputes_the_flows_with_their_graph(
+        monkeypatch):
+    _, layer = _mixed_layer()
+    pb = torch.tensor([0.4])
+    sources = torch.tensor([0.0, 0.1, -0.2, 0.05, 0.0, 0.3], requires_grad=True)
+    count = _counting_residuals(monkeypatch, layer)
+    layer.solve(pb, {}, sources.detach(), atol=1e-13, rtol=0)
+    unreached = count["n"]
+    count["n"] = 0
+    phi, q = layer.solve(pb, {}, sources, atol=1e-13, rtol=0)
+    assert count["n"] == unreached + 1
+    assert phi.requires_grad and q.requires_grad
 
 
 def test_warm_start_is_used():

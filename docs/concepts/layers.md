@@ -301,10 +301,12 @@ one step description per solve (`_Step`: the law context and what the storage do
   `history`, and `storage_flow` under the trapezoidal scheme on a layer with storage. A layer
   with storage, a dynamic law or a law that reads the context takes a step; a layer with none
   of these has static laws, takes no step, and refuses `dt` and `history` (it accepts and
-  ignores `t`, a valid `scheme`, `q0` and the modes `"dc"` and `"initial"`). A layer whose
-  laws read the context but none dynamic steps without history, at its operating point at the
-  step end. `storage_flow` is refused on a layer without storage, and any step keyword
-  without `dt`.
+  ignores `t`, a valid `scheme`, `q0` and the modes `"dc"` and `"initial"`). In practice
+  only a fast-path layer takes no step: an ideal or relation law reads the context, so a
+  layer with one steps. A layer whose laws read the context but none dynamic steps without
+  history, at its operating point at the step end. A layer whose storage is all that steps
+  takes `history=(phi, None)`: its laws read no step-start flow. `storage_flow` is refused
+  on a layer without storage, and any step keyword without `dt`.
 - **a phasor** (always, on a `phasor=True` layer): ignores `scheme` and refuses `dt`,
   `history` and any mode but `"phasor"`.
 

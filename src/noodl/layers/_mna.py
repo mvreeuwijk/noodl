@@ -31,20 +31,17 @@ not `None` is held at that potential: its KCL row is replaced by `phi_i - initia
 from __future__ import annotations
 
 import dataclasses
+import functools
 import math
 
 import torch
-from torch.func import functional_call
 
 from noodl._broadcast import broadcast_shapes
-from noodl._tracking import bulk_values, same_tracking
 from noodl.elements._slopes import _colour_blocks, _complex
 from noodl.elements.base import SCHEMES, LawContext
 from noodl.layers._device import complex_of
-from noodl.layers._solve_policy import require_diagnostics
 from noodl.operators.mna import MnaOperator
-from noodl.solvers.implicit import implicit_solve
-from noodl.solvers.newton import newton, newton_tolerances
+from noodl.solvers.newton import newton_tolerances
 from noodl.solvers.select import scipy_importable
 
 Tensor = torch.Tensor
@@ -279,23 +276,6 @@ class MnaSystem:
             lctx = by_slice[(s, e)] = dataclasses.replace(ctx, **changes)
         return lctx
 
-    def _owners(self) -> list:
-        return [*self.layer._laws, *self.layer._withdrawals, *self.layer._storage]
-
-    def _plain_call(self, i: int, args: tuple, kwargs: dict | None = None):
-        """Law (or, past the laws, withdrawal, then storage) `i` with its own
-        parameters."""
-        return self._owners()[i](*args, **(kwargs or {}))
-
-    def _functional_call(self, rebuilt: list[dict]):
-        """A `call` substituting the threaded parameters `rebuilt[i]` into owner `i`."""
-        owners = self._owners()
-
-        def call(i: int, args: tuple, kwargs: dict | None = None):
-            return functional_call(owners[i], rebuilt[i], args, kwargs or {})
-
-        return call
-
     def _check_width(self, el, out, n_edges: int, what: str) -> None:
         """A law returns one value per edge of its kind: refuse any other trailing width."""
         if out.dim() == 0 or out.shape[-1] != n_edges:
@@ -340,7 +320,7 @@ class MnaSystem:
                 f"KirchhoffLayer {layer.name!r}: q must hold every edge's flow "
                 f"({n_edges}) as solve() returns it; got last dimension {q.shape[-1]}")
         out, _ = self._flows_and_residuals(phi, q[..., self.f_edges], drivers,
-                                           LawContext(mode="dc"), self._plain_call)
+                                           LawContext(mode="dc"), layer._owner_call)
         return out
 
     def _withdrawal(self, phi, drivers, call) -> Tensor | None:
@@ -477,6 +457,11 @@ class MnaSystem:
         """KCL at the interior nodes, then the implicit laws' residuals (real view).
         `store` (the step's `storage`) adds the storage withdrawal on a step, or replaces the
         held rows at the initial point."""
+        return self._residual_parts(x, phi_boundary, drivers, sources, ctx, call, store)[0]
+
+    def _residual_parts(self, x, phi_boundary, drivers, sources, ctx, call, store=None):
+        """`(residual, phi, q)`: `residual` and the full-node potentials and every edge's flow
+        it was evaluated at (the solve returns the last two at the root)."""
         layer = self.layer
         phi_I, q_F = self._unknowns(x)
         phi = layer.assemble(phi_I, phi_boundary)
@@ -490,7 +475,7 @@ class MnaSystem:
             kcl = torch.where(store.rows, phi_I - value.to(phi_I.dtype), kcl)
         elif store is not None:
             kcl = kcl + self._storage_withdrawal(phi, drivers, store, ctx, call)
-        return self._to_real(_cat([kcl, r_F], kcl))
+        return self._to_real(_cat([kcl, r_F], kcl)), phi, q
 
     def operator(self, x, phi_boundary, drivers, ctx, node_slope_fn,
                  adjoint: bool = False) -> MnaOperator:
@@ -601,36 +586,45 @@ class MnaSystem:
             f"only through flow-prescribed edges{initial}"
         )
 
-    def solve(self, phi_boundary, drivers, sources, phi0, *, q0, history, dt, t, scheme,
-              mode, differentiable, diagnostics, storage_flow=None, **newton_kwargs):
+    def inputs(self, phi_boundary, drivers, sources, phi0, q0):
+        """`(phi_boundary, sources, phi0, q0)` as the solve takes them: on a phasor layer in
+        the complex dtype of its network's precision (complex128 on a float64 network), real
+        or complex as given, with the frequency driver checked against their batch."""
+        if self.w != 2:
+            return phi_boundary, sources, phi0, q0
+        phi_boundary, sources, phi0, q0 = (
+            None if v is None else torch.as_tensor(v).to(self.cdtype)
+            for v in (phi_boundary, sources, phi0, q0))
+        self._check_frequency(drivers, [
+            v.shape[:-1] for v in (phi_boundary, sources, phi0, q0) if v is not None])
+        return phi_boundary, sources, phi0, q0
+
+    def refuse(self, newton_kwargs) -> None:
+        """Refuse the Newton keywords this system cannot take, by name: the convex line
+        search and conjugate gradients."""
         layer = self.layer
-        drivers = drivers or {}
-        if self.w == 2:
-            # Real or complex inputs; the phasor layer works in the complex dtype of its
-            # network's precision (complex128 on a float64 network).
-            phi_boundary, sources, phi0, q0 = (
-                None if v is None else torch.as_tensor(v).to(self.cdtype)
-                for v in (phi_boundary, sources, phi0, q0))
-            self._check_frequency(drivers, [
-                v.shape[:-1] for v in (phi_boundary, sources, phi0, q0) if v is not None])
-        step = layer._step(mode, dt, t, scheme, history, storage_flow, drivers)
-        ctx, store = step.ctx, step.storage
         if newton_kwargs.get("line_search") == "convex":
             raise ValueError(
                 f"KirchhoffLayer {layer.name!r}: line_search='convex' needs a residual "
                 f"that is the gradient of a convex function, which a Modified Nodal Analysis "
                 f"residual is not; use the default line search"
             )
-        requested = newton_kwargs.pop("method", layer.linear_solver)
-        if requested == "cg":
+        if newton_kwargs.get("method", layer.linear_solver) == "cg":
             raise ValueError(
                 f"KirchhoffLayer {layer.name!r}: method='cg' needs a symmetric positive "
                 f"definite Jacobian, which a Modified Nodal Analysis system is not; use "
                 f"'auto', 'sparse_direct', 'direct' or 'gmres'"
             )
-        if newton_kwargs.get("on_failure") == "return":
-            require_diagnostics(layer.name, "return", diagnostics)
-        plain = self._plain_call
+
+    def solve(self, phi_boundary, drivers, sources, phi0, q0, step, history, policy,
+              diagnostics, newton_kwargs, fn_factory):
+        """The solve of `KirchhoffLayer.solve` on this system, after its checks and its
+        `policy`: the primal Newton where the solve is not differentiated (or where nothing
+        reaches it, `policy.forward_only`), else the implicit-function solve through the
+        threaded parameters (`fn_factory()`, a `FunctionalLaws`)."""
+        layer = self.layer
+        ctx, store = step.ctx, step.storage
+        plain = layer._owner_call
         real_dtype = phi_boundary.real.dtype if phi_boundary.is_complex() else phi_boundary.dtype
 
         # The initial guess: zeros, or the caller's warm start. It is not differentiable
@@ -652,12 +646,12 @@ class MnaSystem:
             if q0 is not None:
                 x0[..., n_phi:] = self._to_real(q0.detach())
 
+        requested = newton_kwargs["method"]
         newton_kwargs["method"] = self.method(requested)
         if layer.linear:
             # The residual is affine: the full Newton step lands on the solution, so the
             # damped first step (`newton`'s omega=0.75) would only cost a second iteration.
             newton_kwargs.setdefault("omega", 1.0)
-        newton_kwargs.setdefault("where", f"KirchhoffLayer {layer.name!r} solve")
         # The last Jacobian and the first and last residuals, kept to diagnose a failure.
         last: dict = {}
 
@@ -670,10 +664,15 @@ class MnaSystem:
             if self._singular(last.get("op"), self._first_failing(last, newton_kwargs)):
                 raise self._singular_error(ctx.mode) from exc
 
-        if not differentiable:
+        if not policy.differentiable or policy.forward_only:
+            # the primal solve: also a differentiable one that nothing reaches
+            point: dict = {}
+
             def residual_fn(x):
-                return remember(
-                    self.residual(x, phi_boundary, drivers, sources, ctx, plain, store))
+                r, phi, q = self._residual_parts(
+                    x, phi_boundary, drivers, sources, ctx, plain, store)
+                point.update(x=x, phi=phi, q=q)
+                return remember(r)
 
             slopes_fn = self._slopes_fn(drivers, plain, ctx, store)
 
@@ -683,106 +682,39 @@ class MnaSystem:
                 return last["op"]
 
             with torch.no_grad():
-                try:
-                    result = newton(residual_fn, operator_fn, x0, **newton_kwargs)
-                except RuntimeError as exc:
-                    diagnose(exc)
-                    raise
-                if diagnostics is not None:
-                    result.into(diagnostics, method=requested)
+                result = layer._newton_primal(residual_fn, operator_fn, x0, newton_kwargs,
+                                              diagnostics, diagnose, requested=requested)
+                if point.get("x") is result.x:
+                    # Newton's last residual was at the point it returns
+                    return point["phi"], point["q"]
                 return self._output(result.x, phi_boundary, drivers, ctx)
 
-        layer._check_no_unreachable_differentiable_tensors()
-        # Threaded through `Function.apply` exactly as on the classic path: every law's and
-        # withdrawal's own parameters (substituted back in with `functional_call`), every
-        # driver, the sources (zero-filled when absent) and the boundary potentials; on a
-        # transient step also the step-start state, so gradients flow back through time.
-        owners = self._owners()
-        param_dicts = [dict(owner.named_parameters()) for owner in owners]
-        param_names = [list(d.keys()) for d in param_dicts]
-        param_tensors = [
-            d[name] for d, names in zip(param_dicts, param_names, strict=True) for name in names
-        ]
-        driver_keys = sorted(drivers.keys())
-        driver_tensors = bulk_values(drivers, driver_keys)
-        sources_tensor = (
-            sources
-            if sources is not None
-            else torch.zeros(
-                phi_boundary.shape[:-1] + (layer._n_nodes,),
-                dtype=phi_boundary.dtype,
-                device=phi_boundary.device,
-            )
-        )
-        history_tensors = (tuple(h for h in history if h is not None)
-                           if history is not None and ctx.mode == "transient" else ())
-        # on a step of a layer with storage, also the flow into storage at the step start
-        stepping = store is not None and not isinstance(store, _Held)
-        flow_tensors = ((store.previous,) if stepping and store.previous is not None
-                        else ())
-        all_params = (*param_tensors, *driver_tensors, sources_tensor, phi_boundary,
-                      *history_tensors, *flow_tensors)
-
-        def _rebuild(params):
-            offset = 0
-            rebuilt = []
-            for names in param_names:
-                rebuilt.append({name: params[offset + j] for j, name in enumerate(names)})
-                offset += len(names)
-            drv = same_tracking(
-                drivers,
-                dict(zip(driver_keys, params[offset: offset + len(driver_keys)], strict=True)),
-            )
-            offset += len(driver_keys)
-            lctx = ctx
-            if ctx.dp_prev is not None:
-                lctx = layer._with_history(
-                    ctx, params[offset + 2],
-                    params[offset + 3] if len(history_tensors) == 2 else None)
-            if self.w == 2:
-                # the angular frequency from the threaded frequency driver
-                lctx = dataclasses.replace(lctx, omega=self._omega(drv))
-            st = store
-            if stepping:
-                # the storage step from the threaded step-start potentials and flows
-                st = dataclasses.replace(
-                    store, phi_prev=params[offset + 2],
-                    previous=params[offset + 2 + len(history_tensors)] if flow_tensors
-                    else None)
-            return (self._functional_call(rebuilt), drv, params[offset], params[offset + 1],
-                    lctx, st)
+        fn = fn_factory()
 
         def residual_fn(x, *params):
-            call, drv, src, pb, step, st = _rebuild(params)
-            return remember(self.residual(x, pb, drv, src, step, call, st))
-
-        def residual_at(point):
-            def at(*params):
-                call, drv, src, pb, step, st = _rebuild(params)
-                return self.residual(point, pb, drv, src, step, call, st)
-            return at
-
-        layer._require_threaded(residual_at(x0), all_params)
+            rebuilt, drv, src, pb, st = fn.rebuild(params)
+            r, phi, q = self._residual_parts(x, pb, drv, src, st.ctx,
+                                             functools.partial(fn.call, rebuilt), st.storage)
+            if not q.requires_grad:
+                fn.last = (x, phi, q)
+            return remember(r)
 
         def operator_fn(x, *params):
-            call, drv, src, pb, step, st = _rebuild(params)
+            rebuilt, drv, src, pb, st = fn.rebuild(params)
+            call = functools.partial(fn.call, rebuilt)
             # the one `adjoint` flag: the operator also builds the adjoint, so every law,
             # withdrawal and storage that declares `exact_slope = False` gives autograd
             last["op"] = self._hold(
-                self.operator(x, pb, drv, step, self._slopes_fn(drv, call, step, st),
-                              adjoint=True), st)
+                self.operator(x, pb, drv, st.ctx, self._slopes_fn(drv, call, st.ctx, st.storage),
+                              adjoint=True), st.storage)
             return last["op"]
 
-        try:
-            x = implicit_solve(residual_fn, operator_fn, x0, all_params,
-                               diagnostics=diagnostics, **newton_kwargs)
-        except RuntimeError as exc:
-            diagnose(exc)
-            raise
-        # checked again at the root, where the adjoint linearises (see `_require_threaded`)
-        layer._require_threaded(residual_at(x.detach()), all_params)
-        if diagnostics is not None:
-            diagnostics["method"] = requested
+        x = layer._newton_differentiable(fn, residual_fn, operator_fn, x0, policy,
+                                         newton_kwargs, diagnostics, diagnose,
+                                         requested=requested)
+        parts = fn.root_parts(x)
+        if parts is not None:
+            return parts
         return self._output(x, phi_boundary, drivers, ctx)
 
     def _output(self, x, phi_boundary, drivers, ctx) -> tuple[Tensor, Tensor]:
@@ -791,5 +723,5 @@ class MnaSystem:
         the parameters' graph as the classic path's final `flows` does."""
         phi_I, q_F = self._unknowns(x)
         phi = self.layer.assemble(phi_I, phi_boundary)
-        q, _ = self._flows_and_residuals(phi, q_F, drivers, ctx, self._plain_call)
+        q, _ = self._flows_and_residuals(phi, q_F, drivers, ctx, self.layer._owner_call)
         return phi, q

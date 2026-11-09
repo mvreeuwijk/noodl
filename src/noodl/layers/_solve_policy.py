@@ -1,10 +1,15 @@
 """How `on_failure`, `differentiable` and `diagnostics=` combine.
 
-`KirchhoffLayer.solve` has a classic (nodal Newton) path and an MNA path. Both decide, from the
-same keywords and from whether anything differentiable reaches the solve, whether the solve is
-differentiated, whether it is a forward Newton alone, and what `on_failure` Newton is given.
-The decisions live here, one function per path. Each reproduces the order in which the
-`newton_kwargs` are mutated, because the error a caller sees depends on it.
+`KirchhoffLayer.solve` decides, from these keywords and from whether anything differentiable
+reaches the solve, whether the solve is differentiated, whether it is a forward Newton alone,
+and what `on_failure` Newton is given: one function, `resolve`, for both paths (the fast path,
+where every flow follows from the potentials, and the path with flow unknowns).
+
+`resolve` completes the `newton_kwargs` in place, in this order, because the error a caller
+sees depends on it: `method` (the layer's `linear_solver` unless given), `on_failure`
+(`"return_primal"` becomes `"return"`), `where`, the refusal of `"return"` without
+`diagnostics=`, then `forward_only` and, where the solve is differentiated, the final
+`"raise"`.
 """
 
 from __future__ import annotations
@@ -12,19 +17,18 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-import torch
-
 if TYPE_CHECKING:
     from noodl.layers.kirchhoff import KirchhoffLayer
 
 
 @dataclass(frozen=True)
 class SolvePolicy:
-    """The resolved path of one classic solve.
+    """The resolved path of one solve.
 
     `differentiable`: the solve is differentiated (the implicit adjoint) and not the primal
-    path. `forward_only`: a differentiable solve that nothing reaches, run as its forward
-    Newton alone (`on_failure="return_primal"`).
+    path. `forward_only`: a differentiable solve that nothing reaches
+    (`on_failure="return_primal"`). The fast path runs it as its threaded forward Newton
+    alone; a layer with flow unknowns runs its primal solve.
     """
 
     differentiable: bool
@@ -42,7 +46,7 @@ def require_diagnostics(name: str, on_failure: str, diagnostics: dict | None) ->
     )
 
 
-def resolve_mna(
+def resolve(
     layer: KirchhoffLayer,
     newton_kwargs: dict,
     diagnostics: dict | None,
@@ -50,44 +54,15 @@ def resolve_mna(
     drivers,
     sources,
     phi_boundary,
-    history,
-) -> bool:
-    """The `differentiable` flag for an MNA solve; rewrites `on_failure="return_primal"`.
-
-    `"return_primal"` is `"return"` where nothing differentiable reaches the solve (then its
-    primal Newton alone) and `"raise"` where it is differentiated. Mutates `newton_kwargs`.
-    """
-    if newton_kwargs.get("on_failure") != "return_primal":
-        return differentiable
-    reaches = layer._reaches_grad(drivers or {}, sources, phi_boundary) or (
-        history is not None
-        and torch.is_grad_enabled()
-        and any(isinstance(h, torch.Tensor) and h.requires_grad for h in history)
-    )
-    require_diagnostics(layer.name, "return_primal", diagnostics)
-    if differentiable and not reaches:
-        # the differentiable path's own refusal still applies to the primal one
-        layer._check_no_unreachable_differentiable_tensors()
-        differentiable = False
-    newton_kwargs["on_failure"] = "raise" if differentiable else "return"
-    return differentiable
-
-
-def resolve_classic(
-    layer: KirchhoffLayer,
-    newton_kwargs: dict,
-    diagnostics: dict | None,
-    differentiable: bool,
-    drivers,
-    sources,
-    phi_boundary,
-    extra=(),
+    step_start=(),
 ) -> SolvePolicy:
-    """The path of a classic solve; completes `newton_kwargs` in place. `extra` are the
-    step-start tensors of a step of a layer with storage (`KirchhoffLayer._reaches_grad`).
+    """The path of one solve; completes `newton_kwargs` in place (order: module docstring).
 
-    Order of the mutations: `method`, `on_failure` (`return_primal` to `return`), `where`, the
-    diagnostics refusal, then `forward_only` and the final `"raise"`.
+    `step_start` are the step-start tensors the differentiable solve threads
+    (`FunctionalLaws.step_start`). `on_failure="return_primal"` is `"return"` where nothing
+    differentiable reaches the solve (`forward_only`, or the primal path) and `"raise"` where
+    it is differentiated. Its refusal without `diagnostics=` names `"return"` on the fast
+    path and `"return_primal"` on a layer with flow unknowns (the messages each path gave).
     """
     newton_kwargs.setdefault("method", layer.linear_solver)
     primal_only = newton_kwargs.get("on_failure") == "return_primal"
@@ -106,23 +81,14 @@ def resolve_classic(
         # for `converged`/`residual_norm` to go, and a non-converged phi would be
         # indistinguishable from a converged one. The escape hatch is never silent: the
         # result carries the status.
-        require_diagnostics(layer.name, "return", diagnostics)
-    return _classic_path(
-        layer, newton_kwargs, primal_only, differentiable, drivers, sources, phi_boundary,
-        extra,
-    )
-
-
-def _classic_path(
-    layer, newton_kwargs, primal_only, differentiable, drivers, sources, phi_boundary,
-    extra=(),
-) -> SolvePolicy:
+        named = "return_primal" if primal_only and layer.mna else "return"
+        require_diagnostics(layer.name, named, diagnostics)
     # "return_primal": "return" unless something differentiable reaches the solve; a
-    # differentiable solve that nothing reaches is its forward Newton alone.
+    # differentiable solve that nothing reaches is not differentiated.
     forward_only = (
         primal_only
         and differentiable
-        and not layer._reaches_grad(drivers, sources, phi_boundary, extra)
+        and not layer._reaches_grad(drivers, sources, phi_boundary, step_start)
     )
     if primal_only and differentiable and not forward_only:
         newton_kwargs["on_failure"] = "raise"

@@ -18,9 +18,9 @@ import torch
 from noodl._broadcast import broadcast_shapes
 from noodl._tracking import bulk_values
 from noodl.elements.base import ConstitutiveLaw, ImplicitLaw, LawContext
-from noodl.layers._functional import FunctionalLaws
+from noodl.layers._functional import FunctionalLaws, step_start
 from noodl.layers._mna import MnaSystem, _Held, check_scheme
-from noodl.layers._solve_policy import resolve_classic, resolve_mna
+from noodl.layers._solve_policy import resolve
 from noodl.layers._topology import TopologyGuard
 from noodl.operators.graph import GraphLaplacianOperator
 from noodl.operators.shifted import ShiftedOperator
@@ -737,6 +737,12 @@ class KirchhoffLayer(TopologyGuard):
             previous = previous[..., s:e]
         return phi[..., st.nodes], step.phi_prev[..., st.nodes], previous
 
+    def _owner_call(self, i: int, args: tuple, kwargs: dict | None = None):
+        """Owner `i` (a law, then past the laws a withdrawal, then a storage) called with its
+        own parameters."""
+        owners = (*self._laws, *self._withdrawals, *self._storage)
+        return owners[i](*args, **(kwargs or {}))
+
     @staticmethod
     def _add(a: torch.Tensor | None, b: torch.Tensor | None) -> torch.Tensor | None:
         """`a + b`, where `None` is an absent term."""
@@ -955,7 +961,6 @@ class KirchhoffLayer(TopologyGuard):
         checked as `solve` checks them (refused on a layer that takes no step)."""
         if scheme is None:
             scheme = self.scheme
-        check_scheme(self.name, scheme)
         self._check_forward_euler(scheme)
         return self._step(None, dt, None, scheme, history, storage_flow, drivers)
 
@@ -1256,11 +1261,12 @@ class KirchhoffLayer(TopologyGuard):
         What this establishes is structural and holds AT THAT POINT only: a law that reads
         an un-threaded tensor on a branch inactive there is not seen. The differentiable
         solve therefore applies it to every residual its forward Newton evaluates
-        (`_solve_implicit`, `_threaded_residual`, at no extra evaluation), from the starting
-        guess to the root, which is the point the adjoint linearises at (its residual VJP
-        and Jacobian operator are both evaluated there); the Jacobian operator is not
-        checked separately: it is the same laws' slopes, their exact `dflow` or the autograd
-        derivative of their flows (`FunctionalLaws.dflows`), a constant of the adjoint.
+        (`_newton_differentiable`, `_threaded_residual`, at no extra evaluation), from the
+        starting guess to the root, which is the point the adjoint linearises at (its
+        residual VJP and Jacobian operator are both evaluated there); the Jacobian operator
+        is not checked separately: it is the same laws' slopes, their exact `dflow` or the
+        autograd derivative of their flows (`FunctionalLaws.dflows`), a constant of the
+        adjoint.
         Tensors held as attributes, buffers or in containers are refused before solving
         by `_check_no_unreachable_differentiable_tensors`, which also names them; this
         check catches the rest (a closure capture) and describes the layer.
@@ -1443,19 +1449,26 @@ class KirchhoffLayer(TopologyGuard):
         self._check_forward_euler(scheme)
         for key, value in self.newton_defaults.items():
             newton_kwargs.setdefault(key, value)
-        if self.mna:
-            return self._solve_mna(
-                phi_boundary, drivers, sources, phi0, q0, history, dt, t, scheme, mode,
-                differentiable, diagnostics, newton_kwargs, storage_flow,
-            )
-        check_scheme(self.name, scheme)
         drivers = drivers or {}
+        if self.mna:
+            phi_boundary, sources, phi0, q0 = self._mna.inputs(
+                phi_boundary, drivers, sources, phi0, q0)
         step = self._step(mode, dt, t, scheme, history, storage_flow, drivers)
-        extra = () if step.storage is None else (step.storage.phi_prev, step.storage.previous)
-        policy = resolve_classic(
+        if self.mna:
+            self._mna.refuse(newton_kwargs)
+        policy = resolve(
             self, newton_kwargs, diagnostics, differentiable, drivers, sources, phi_boundary,
-            extra,
+            step_start(step, history),
         )
+        if self.mna:
+            if policy.differentiable:
+                # a tensor held where the solve does not thread it is refused by name
+                self._check_no_unreachable_differentiable_tensors()
+            return self._mna.solve(
+                phi_boundary, drivers, sources, phi0, q0, step, history, policy, diagnostics,
+                newton_kwargs,
+                lambda: FunctionalLaws(self, drivers, sources, phi_boundary, step, history),
+            )
         phi0, dq0, node_slopes0 = self._starting_point(
             phi0, phi_boundary, drivers, sources, step)
         if not policy.differentiable:
@@ -1465,30 +1478,12 @@ class KirchhoffLayer(TopologyGuard):
             )
         # A tensor held where the solve does not thread it is refused before solving, by
         # name; one reached only through a closure, at every residual the forward Newton
-        # evaluates, the starting guess first and the root last (`_solve_implicit`).
+        # evaluates, the starting guess first and the root last (`_newton_differentiable`).
         self._check_no_unreachable_differentiable_tensors()
-        fn = FunctionalLaws(self, drivers, sources, phi_boundary, step)
+        fn = FunctionalLaws(self, drivers, sources, phi_boundary, step, history)
         return self._solve_implicit(
             fn, phi0, dq0, node_slopes0, phi_boundary, drivers, policy, diagnostics,
             newton_kwargs,
-        )
-
-    def _solve_mna(
-        self, phi_boundary, drivers, sources, phi0, q0, history, dt, t, scheme, mode,
-        differentiable, diagnostics, newton_kwargs, storage_flow=None,
-    ):
-        """`solve` of a layer solved by Modified Nodal Analysis (`noodl.layers._mna`)."""
-        step_start = history
-        if storage_flow is not None:
-            step_start = (*(history or ()), storage_flow)
-        differentiable = resolve_mna(
-            self, newton_kwargs, diagnostics, differentiable, drivers, sources, phi_boundary,
-            step_start,
-        )
-        return self._mna.solve(
-            phi_boundary, drivers, sources, phi0, q0=q0, history=history, dt=dt, t=t,
-            scheme=scheme, mode=mode, differentiable=differentiable,
-            diagnostics=diagnostics, storage_flow=storage_flow, **newton_kwargs,
         )
 
     def _check_forward_euler(self, scheme) -> None:
@@ -1518,12 +1513,15 @@ class KirchhoffLayer(TopologyGuard):
         step needs `dt > 0` and, from the step start, `history=(phi, q)`: required on a layer
         with a storage or a dynamic law, with `q` required only by a dynamic law and `None`
         otherwise. A layer with storage under the trapezoidal scheme needs `storage_flow`,
-        the flow into every storage entry at the step start. A layer with no storage, no
-        dynamic law and no law that reads the context takes no step: it refuses `dt` and
-        `history`. Every keyword is checked by name; `check_dt=False` skips the positivity
-        of `dt` (a host sync for a tensor `dt`) when the solve of the same step has checked
-        it, and `omega=False` leaves a phasor layer's angular frequency out (`storage_flows`
-        reads no law)."""
+        the flow into every storage entry at the step start; `history=(phi, None)` is the
+        step of a layer whose storage is all that steps. A layer with no storage, no dynamic
+        law and no law that reads the context takes no step: it refuses `dt` and `history`.
+        In practice that is a fast-path layer only: a layer with an ideal or relation law
+        reads the context, so it steps. A scheme outside `SCHEMES` is refused on every
+        layer but a phasor one, which ignores it. Every keyword is checked by name;
+        `check_dt=False` skips the positivity of `dt` (a host sync for a tensor `dt`) when
+        the solve of the same step has checked it, and `omega=False` leaves a phasor layer's
+        angular frequency out (`storage_flows` reads no law)."""
         name = self.name
         if self.phasor:
             if mode not in (None, "phasor"):
@@ -1537,6 +1535,8 @@ class KirchhoffLayer(TopologyGuard):
                     f"sinusoidal steady state and takes no step; drop dt and history"
                 )
         else:
+            # a phasor layer ignores the scheme
+            check_scheme(name, scheme)
             if mode == "phasor":
                 raise ValueError(
                     f"KirchhoffLayer {name!r}: mode='phasor' needs a layer built with "
@@ -1586,7 +1586,7 @@ class KirchhoffLayer(TopologyGuard):
                                  omega=self._mna._omega(drivers) if omega else None)
                 return _Step(ctx, None)
             ctx = LawContext(mode="dc" if mode is None else mode, t=t)
-            held = (self._mna._held(drivers, self._mna._plain_call)
+            held = (self._mna._held(drivers, self._owner_call)
                     if mode == "initial" and self._storage and self.mna else None)
             return _Step(ctx, held)
         if not check_dt:
@@ -1597,7 +1597,6 @@ class KirchhoffLayer(TopologyGuard):
                 raise ValueError(f"KirchhoffLayer {name!r}: dt must be positive, got {dt!r}")
         elif not bool((torch.as_tensor(dt) > 0).all()):
             raise ValueError(f"KirchhoffLayer {name!r}: dt must be positive, got {dt!r}")
-        check_scheme(name, scheme)
         if len(self._dynamic_edges):
             self._check_head_off_dynamic_edges(drivers)
         ctx = LawContext(mode="transient", dt=dt, t=t, scheme=scheme)
@@ -1808,7 +1807,7 @@ class KirchhoffLayer(TopologyGuard):
     def _initial_storage_flows(self, phi, q, sources, drivers, zeros) -> torch.Tensor:
         """`storage_flows` at the initial point of a layer solved by Modified Nodal Analysis:
         each held node's flow imbalance, split among its entries by capacity."""
-        held = self._mna._held_values(drivers, self._mna._plain_call)
+        held = self._mna._held_values(drivers, self._owner_call)
         if held is None:
             return zeros
         if q is None:
@@ -1923,12 +1922,8 @@ class KirchhoffLayer(TopologyGuard):
                 dq = self.dflows(phi, drivers)
                 return self._operator_at(dq, self._withdrawal_slopes(phi, drivers, step))
 
-            result = newton(residual_fn, operator_fn, phi0, **newton_kwargs)
-            if diagnostics is not None:
-                # `method` is what was REQUESTED, `backend` what RAN: under "auto" the
-                # batch threshold and SciPy's presence decide which side of `select`'s
-                # eligibility table this solve landed on, and nothing else reports it.
-                result.into(diagnostics, method=newton_kwargs["method"])
+            result = self._newton_primal(residual_fn, operator_fn, phi0, newton_kwargs,
+                                         diagnostics)
             if last.get("x") is result.x:
                 phi, q = last["phi"], last["q"]
             else:
@@ -1940,22 +1935,8 @@ class KirchhoffLayer(TopologyGuard):
         self, fn, phi0, dq0, node_slopes0, phi_boundary, drivers, policy, diagnostics,
         newton_kwargs,
     ):
-        """The differentiable classic solve through the implicit-function adjoint."""
-        all_params = fn.all_params
+        """The differentiable fast-path solve through the implicit-function adjoint."""
         reuse_start = fn.layer_slopes
-
-        detached: dict = {}
-
-        def residual_fn(x, *params):
-            # The forward Newton (under no_grad) evaluates each residual with the threaded
-            # tensors detached, which is `_require_threaded`'s check at no extra cost. The
-            # adjoint's VJP (under grad mode) needs the residual's graph to `params`.
-            if torch.is_grad_enabled():
-                return fn.residual_fn(x, *params)
-            if not _same_objects(detached.get("of"), params):   # detached once per solve
-                detached.update(of=params, to=_detached(params))
-            return self._threaded_residual(lambda *p: fn.residual_fn(x, *p), detached["to"],
-                                           detach=False)
 
         def operator_fn(x, *params):
             # At the starting point the grounding check's slopes are the first operator's,
@@ -1964,49 +1945,91 @@ class KirchhoffLayer(TopologyGuard):
                 return self._operator_at(dq0, node_slopes0)
             return fn.operator_fn(x, *params)
 
-        if policy.forward_only:
-            # `implicit_solve`'s own forward (the same Newton on the same autograd Jacobian),
-            # which may return unconverged: nothing reaches a gradient, so no adjoint is
-            # ever asked of this point.
-            with torch.no_grad():
-                result = newton(
-                    lambda x: residual_fn(x, *all_params),
-                    lambda x: operator_fn(x, *all_params),
-                    phi0,
-                    **newton_kwargs,
-                )
-            x = result.x
-            if diagnostics is not None:
-                result.into(diagnostics)
-        else:
-            x = implicit_solve(
-                residual_fn,
-                operator_fn,
-                phi0,
-                all_params,
-                diagnostics=diagnostics,
-                **newton_kwargs,
-            )
+        x = self._newton_differentiable(fn, fn.residual_fn, operator_fn, phi0, policy,
+                                        newton_kwargs, diagnostics)
+        parts = fn.root_parts(x)
+        if parts is not None:
+            return parts
+        phi = self.assemble(x, phi_boundary)
+        q = self.flows(phi, drivers)
+        return phi, q
+
+    def _newton_primal(self, residual_fn, operator_fn, x0, newton_kwargs, diagnostics,
+                       on_fail=None, *, requested=None):
+        """Newton alone, under `no_grad`, on either path; returns its `NewtonResult`.
+
+        `on_fail(exc)` is called with a Newton error before it propagates (the rank test of
+        a layer with flow unknowns, which may raise a clearer error). `diagnostics` gets the
+        result, with `"method"` the inner solver `requested` (`newton_kwargs["method"]`
+        unless given): under `"auto"` the batch threshold and SciPy's presence decide which
+        backend ran, and nothing else reports it."""
+        with torch.no_grad():
+            try:
+                result = newton(residual_fn, operator_fn, x0, **newton_kwargs)
+            except RuntimeError as exc:
+                if on_fail is not None:
+                    on_fail(exc)
+                raise
+        if diagnostics is not None:
+            result.into(diagnostics, method=newton_kwargs["method"] if requested is None
+                        else requested)
+        return result
+
+    def _newton_differentiable(self, fn, residual_fn, operator_fn, x0, policy, newton_kwargs,
+                               diagnostics, on_fail=None, *, requested=None):
+        """The differentiable solve of `residual_fn(x, *fn.all_params) = 0`, on either path;
+        returns the root, carrying the implicit-function adjoint.
+
+        The forward Newton evaluates each residual with the threaded tensors detached and
+        refuses one that still requires grad (`_threaded_residual`: `_require_threaded`'s
+        check at no extra evaluation); the adjoint's VJP, under grad mode, takes the
+        residual's graph to `params`. `policy.forward_only` (on the fast path) runs the
+        forward Newton alone: nothing reaches a gradient, so no adjoint is ever asked of a
+        point it may return unconverged. The root is checked again only when Newton's last
+        residual (`fn.last`) was not at it, which leaves `fn.last` at the root either way.
+        `on_fail` and `requested` are `_newton_primal`'s."""
+        all_params = fn.all_params
+        detached: dict = {}
+
+        def residual(x, *params):
+            if torch.is_grad_enabled():
+                return residual_fn(x, *params)
+            if not _same_objects(detached.get("of"), params):   # detached once per solve
+                detached.update(of=params, to=_detached(params))
+            return self._threaded_residual(lambda *p: residual_fn(x, *p), detached["to"],
+                                           detach=False)
+
+        try:
+            if policy.forward_only:
+                # `implicit_solve`'s own forward (the same Newton on the same Jacobian)
+                with torch.no_grad():
+                    result = newton(
+                        lambda x: residual(x, *all_params),
+                        lambda x: operator_fn(x, *all_params),
+                        x0,
+                        **newton_kwargs,
+                    )
+                x = result.x
+                if diagnostics is not None:
+                    result.into(diagnostics)
+            else:
+                x = implicit_solve(residual, operator_fn, x0, all_params,
+                                   diagnostics=diagnostics, **newton_kwargs)
+        except RuntimeError as exc:
+            if on_fail is not None:
+                on_fail(exc)
+            raise
         # The adjoint linearises at the root, so the threading check must hold there: a law
         # may read an un-threaded tensor only on a branch the starting guess did not reach.
         # Newton's last residual is normally at the root it returns, and was checked.
         root = x.detach()
         last = fn.last
-        at_root = (last is not None and last[0].shape == root.shape
-                   and torch.equal(last[0], root))
-        if not at_root:
-            self._require_threaded(lambda *params: fn.residual_fn(root, *params), all_params)
+        if not (last is not None and last[0].shape == root.shape
+                and torch.equal(last[0], root)):
+            self._require_threaded(lambda *params: residual_fn(root, *params), all_params)
         if diagnostics is not None:
-            diagnostics["method"] = newton_kwargs["method"]
-        wanted = torch.is_grad_enabled() and (x.requires_grad or any(
-            isinstance(t, torch.Tensor) and t.requires_grad for t in all_params))
-        if at_root and not wanted:
-            # no gradient is wanted: the root's potentials and flows, as Newton's last
-            # residual computed them (the same values `assemble` and `flows` give)
-            return fn.last[1], fn.last[2]
-        phi = self.assemble(x, phi_boundary)
-        q = self.flows(phi, drivers)
-        return phi, q
+            diagnostics["method"] = newton_kwargs["method"] if requested is None else requested
+        return x
 
     def adjoint(self, phi_interior, phi_boundary, drivers, grad_phi_interior, *, dt=None,
                 scheme=None, history=None, storage_flow=None):
