@@ -53,6 +53,13 @@ interface, backward memory is one pass, and the gradient error is of the order o
 residual rather than the unrolled truncation counted from the start state. The convergence
 decision itself is still made on detached copies and never enters the graph.
 
+`Model.fixed_point` gives the same treatment to any repeated pass of an application:
+`street_steady` (transport and chemistry), `street_steady_with_plume` (the above-roof plumes)
+and `sewer_steady` (stepping to steady state) all run on it. Its watched keys are the
+interface of the adjoint and every key the pass returns is an output. Unlike
+`coupling="iterate"` it has no confirmation pass at the certified state when pass 1 finds
+nothing differentiable.
+
 ## The contract
 
 For `differentiable=True` to be *safe*, two rules must hold. A violation raises a `ValueError`
@@ -150,7 +157,8 @@ that would fail if the claim stopped holding.
   tests/layers/test_transport_coefficients.py::test_removal_gradient and
   tests/layers/test_transport_coefficients.py::test_conductance_gradient, all parametrised
   over scheme, plus each one's `_steady` counterpart).
-- **Coupled fixed points are differentiated implicitly.** Both `Model`'s own `coupling="iterate"`
+- **Coupled fixed points are differentiated implicitly.** `Model`'s own `coupling="iterate"`,
+  `Model.fixed_point` (and so `street_steady`, `street_steady_with_plume` and `sewer_steady`)
   and `couple.CoupledModel`'s two-way join run their passes to convergence WITHOUT a graph, run
   the certified pass once more on the graph, and attach the implicit adjoint of the interface
   equations (`solvers.fixed_point`): one small GMRES solve on $(I - J^T)$ at the converged

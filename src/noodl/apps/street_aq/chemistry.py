@@ -125,11 +125,10 @@ def street_steady(
     `model.steady(...)`, returned unchanged.
 
     The iteration is plain successive substitution -- solve transport at the current
-    composition, relax the composition to its photostationary state, repeat -- and it is
-    differentiable by unrolling: every pass stays on the autograd graph, so memory grows
-    with the pass count here (unlike `Model`'s own `coupling="iterate"`, which differentiates
-    its converged fixed point implicitly -- see `noodl.solvers.fixed_point`; this loop is a
-    separate mechanism and has not been given the same treatment). `tol` is an ABSOLUTE
+    composition, relax the composition to its photostationary state, repeat -- run by
+    `Model.fixed_point`, so it is differentiated at its converged fixed point (implicit
+    adjoint, backward memory of one pass; see `noodl.solvers.fixed_point`), not through the
+    unrolled passes. `tol` is an ABSOLUTE
     tolerance on the state in its own units (kg/m3), tested on the largest change over all
     streets and species; a budget it cannot meet raises, naming the pass count and the
     change that was left.
@@ -146,24 +145,14 @@ def street_steady(
     if reaction is None:
         return model.steady(state, drivers, **solve_kwargs)
     key = f"{layer_name}.x"
-    current = dict(state)
-    change = float("inf")
-    # `_passes` rather than `passes`: the count is not read inside the body (ruff B007),
-    # only the budget matters, and the failure message names `max_iter` itself.
-    for _passes in range(int(max_iter)):
+
+    def transport_then_chemistry(current: State) -> State:
         solved = model.steady(current, drivers, **solve_kwargs)
-        relaxed = dict(solved)
-        relaxed[key] = reaction.apply(solved[key], None, drivers)
-        with torch.no_grad():
-            if key in current:
-                change = float((relaxed[key] - current[key]).abs().max())
-        current = relaxed
-        if change <= tol:
-            return current
-    raise RuntimeError(
-        f"street_steady: the transport-and-chemistry fixed point did not converge within "
-        f"{max_iter} passes; the largest change on the last pass was {change} against an "
-        f"absolute tolerance of {tol} (kg/m3)"
+        return {**solved, key: reaction.apply(solved[key], None, drivers)}
+
+    return model.fixed_point(
+        transport_then_chemistry, state, watch=[key], tol=tol, max_passes=int(max_iter),
+        where="street_steady",
     )
 
 

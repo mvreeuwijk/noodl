@@ -285,7 +285,11 @@ def test_the_relation_holds_to_tol_at_return(munich):
         c = out["street.c_ext"]
         f_s, up, _down = roof_fluxes(w, q, out["street.x"][:, None], c[:, None],
                                      d["street.x_boundary"][:, None])
-        torch.testing.assert_close(f_s[:, 0], out["street.roof_flux"], rtol=1e-6, atol=0)
+        # The returned state is the last pass's own: its fluxes were computed at the fed
+        # iterate, which differs from the returned `c_ext` by the last change (<= tol).
+        slack = tol * float(q.abs().max()) * float(c.abs().max())
+        torch.testing.assert_close(f_s[:, 0], out["street.roof_flux"], rtol=1e-6,
+                                   atol=2 * slack)
         image = d["street.x_boundary"] + k_s @ f_s[:, 0] + k_j @ up[:, 0]
         assert float((image - c).abs().max()) <= 2 * tol * float(c.abs().max())
 

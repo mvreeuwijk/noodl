@@ -182,6 +182,13 @@ shape and its unit.
 `model.step(state, drivers, dt)` returns the new state; call it in a loop, changing the
 drivers between steps as the inputs change. `model.steady(state, drivers)` returns the
 quasi-steady state instead (an allocation layer, which is a time-stepping rule, has none).
+
+`model.fixed_point(pass_fn, state, watch=[...], tol=...)` repeats any function of a state (a
+`steady` or a `step` plus a reaction, a boundary read off the previous pass) until the watched
+keys stop changing, and returns the last pass's state. It is what `street_steady`,
+`street_steady_with_plume` and `sewer_steady` run on, and its gradient is that of the fixed
+point (implicit adjoint), not of the unrolled passes; `relaxation`, a per-instance `measure`
+and `diagnostics` are described in its docstring.
 Each potential solve starts from the state's last potentials (and a layer solved by Modified
 Nodal Analysis from its last implicit-law flows too); `warm_start=False` starts it
 from the layer's linear initial guess instead, while closures still read those potentials
