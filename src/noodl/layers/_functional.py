@@ -69,18 +69,19 @@ class FunctionalLaws:
         )
         self.all_params = (*param_tensors, *driver_tensors, sources_tensor, phi_boundary)
         self.last = None
-        self._rebuilt = None
+        self._rebuilt: list = []
 
     def rebuild(self, params):
         """`(law and node-source parameter dicts, drivers, sources, phi_boundary)` from the
-        flat `params`; the last result is reused while `params` holds the same objects (the
-        forward Newton calls with one tuple throughout)."""
-        memo = self._rebuilt
-        if memo is not None and len(memo[0]) == len(params) and all(
-                a is b for a, b in zip(memo[0], params, strict=True)):
-            return memo[1]
+        flat `params`. The last two results are reused while `params` holds the same objects:
+        the forward Newton alternates two tuples (the residual's detached one and the
+        operator's)."""
+        for key, out in self._rebuilt:
+            if len(key) == len(params) and all(
+                    a is b for a, b in zip(key, params, strict=True)):
+                return out
         out = self._rebuild(params)
-        self._rebuilt = (tuple(params), out)
+        self._rebuilt = [(tuple(params), out), *self._rebuilt[:1]]
         return out
 
     def _rebuild(self, params):
@@ -241,13 +242,19 @@ class FunctionalLaws:
     def layer_slopes(self) -> bool:
         """Whether `dflows`/`node_slopes` equal the layer's own `dflows` and node-source
         slopes: true unless a law or node source overrides `dflow` with a slope it does not
-        declare exact (`exact_slope = False`), which only the layer's slopes use."""
+        declare exact (`exact_slope = False`), which only the layer's slopes use. Cached on
+        the layer against its owners' `exact_slope` flags (which may be set per instance)."""
         layer = self.layer
-        return not any(
-            not owner.exact_slope and _analytic(owner, base)
-            for owners, base in ((layer._laws, ConstitutiveLaw),
-                                 (layer._node_sources, NodeSource))
-            for owner in owners)
+        owners = (*layer._laws, *layer._node_sources)
+        flags = tuple(o.exact_slope for o in owners)
+        cache = getattr(layer, "_layer_slopes", None)
+        if cache is None or cache[0] != flags:
+            value = not any(
+                not o.exact_slope and _analytic(o, ConstitutiveLaw if i < len(layer._laws)
+                                                else NodeSource)
+                for i, o in enumerate(owners))
+            cache = layer._layer_slopes = (flags, value)
+        return cache[1]
 
     def operator_fn(self, x, *params):
         layer = self.layer

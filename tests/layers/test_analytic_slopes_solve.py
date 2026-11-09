@@ -243,3 +243,48 @@ def test_a_solve_nothing_differentiable_reaches_is_the_primal_solve(network):
     (phi_p, q_p), diag_p = out[False]
     assert torch.equal(phi_d, phi_p) and torch.equal(q_d, q_p)
     assert diag_d["newton_iterations"] == diag_p["newton_iterations"]
+
+
+# ---------------------------------------------------------------------------- MNA twin
+def _mna_aided(exact: bool):
+    """A prescribed potential in series with a power law and an aided power-law load: the
+    ideal source makes the layer an MNA one."""
+    from tests._circuit_laws import Source
+
+    net = _net(["g", "a", "b"], [("a", "g", "source"), ("a", "b", "r"), ("b", "g", "load")])
+    aided = _AidedPowerLaw(_t([0.3]), _t(0.8), kind="load", dp_transition=1e-6,
+                           learnable=True)
+    aided.exact_slope = exact
+    layer = KirchhoffLayer(
+        net, "e", [Source(_t([1.0])), PowerLaw(_t([0.5]), _t(0.65), kind="r",
+                                               dp_transition=1e-6), aided],
+        boundary=["g"])
+    assert layer.mna
+    return layer, aided
+
+
+def test_mna_a_newton_aid_declared_inexact_keeps_correct_gradients():
+    layer, aided = _mna_aided(False)
+    sources, phi_b = _t([0.0, 0.2, -0.1], grad=True), _t([0.0], grad=True)
+    _gradcheck(layer, phi_b, {}, sources, (aided.C,))
+
+
+def test_mna_a_newton_aid_declared_exact_corrupts_the_gradient():
+    """The gate matters on the MNA path too: claiming `exact_slope` hands the adjoint the
+    aid's doubled slope."""
+    layer, aided = _mna_aided(True)
+    phi_b, sources = _t([0.0]), _t([0.0, 0.2, -0.1])
+
+    def potential(C):
+        with torch.no_grad():
+            aided.C.copy_(C)
+        return layer.solve(phi_b, {}, sources, differentiable=True, **TIGHT)[0][2]
+
+    C0 = aided.C.detach().clone()
+    phi = layer.solve(phi_b, {}, sources, differentiable=True, **TIGHT)[0]
+    (adjoint,) = torch.autograd.grad(phi[2], aided.C)
+    h = 1e-7
+    central = (potential(C0 + h) - potential(C0 - h)) / (2 * h)
+    with pytest.raises(AssertionError):
+        torch.testing.assert_close(adjoint, central.reshape(adjoint.shape), rtol=1e-4,
+                                   atol=1e-8)

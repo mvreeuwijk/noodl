@@ -12,9 +12,6 @@ or the returned `(phi, q)` (values, dtype, `requires_grad`), the diagnostics dic
 gradient of a fixed loss with respect to the one leaf tensor that reaches the solve. The
 comparison is exact. Extend the matrix (new keywords, new layer kinds) and regenerate only for
 a deliberate change of behaviour.
-
-The record was taken with a fourth axis, the removed `analytic_primal` keyword; its
-`analytic=False` half is the matrix this file runs (`_expected`).
 """
 
 from __future__ import annotations
@@ -204,17 +201,10 @@ def golden():
     return load_golden("orchestration")["solve_policy"]
 
 
-def _expected(records: dict[str, Any]) -> dict[str, Any]:
-    """The recorded matrix without the removed `analytic_primal` axis: its `analytic=False`
-    half, keyed as `build_matrix` keys it (a record taken without the axis is unchanged)."""
-    return {k.replace("|analytic=False|", "|"): v for k, v in records.items()
-            if "|analytic=True|" not in k}
-
-
 @pytest.mark.parametrize("kind", sorted(LAYERS))
 def test_the_solve_policy_matrix_matches_the_golden_record(kind, golden):
     actual = json.loads(json.dumps(build_matrix(kind)))
-    expected = _expected(golden[kind])
+    expected = golden[kind]
     assert set(actual) == set(expected), "the matrix axes changed: regenerate the golden"
     bad = [(k, first_difference(actual[k], expected[k])) for k in actual
            if first_difference(actual[k], expected[k])]

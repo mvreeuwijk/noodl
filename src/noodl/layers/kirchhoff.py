@@ -67,7 +67,23 @@ def _same_objects(a, b) -> bool:
     return a is not None and len(a) == len(b) and all(x is y for x, y in zip(a, b, strict=True))
 
 
-def _held_tensors(obj, *, registered_threaded: bool = True):
+def _shallow(obj):
+    """What one object of a scan holds, by identity: a container's items (its length alone
+    past `_SCAN_MAX_ITEMS`, where the scan does not enter it), an object's attributes. Equal
+    shallow signatures of every object a scan visited mean the scan would find the same
+    tensors (`KirchhoffLayer._held_scan`)."""
+    if isinstance(obj, dict):
+        if len(obj) > _SCAN_MAX_ITEMS:
+            return len(obj)
+        return tuple((k, id(v)) for k, v in obj.items())
+    if isinstance(obj, (list, tuple, set, frozenset)):
+        if len(obj) > _SCAN_MAX_ITEMS:
+            return len(obj)
+        return tuple(map(id, obj))
+    return tuple((k, id(v)) for k, v in vars(obj).items())
+
+
+def _held_tensors(obj, *, registered_threaded: bool = True, visited: list | None = None):
     """Yield `(name, tensor)` for every tensor `obj` holds: its attributes, its registered
     buffers (when a module), and tensors nested at any depth (up to 8) in lists, tuples,
     dicts, sets and the attributes of plain objects and modules held there.
@@ -76,8 +92,10 @@ def _held_tensors(obj, *, registered_threaded: bool = True):
     submodules (`_modules`, scanned as holders of their own) are not yielded: the
     differentiable solve threads them. A module reached through a container or a plain
     attribute is not registered, so its parameters ARE yielded. Each object is visited once
-    (cycles end), and a container longer than `_SCAN_MAX_ITEMS` is not entered."""
+    (cycles end), and a container longer than `_SCAN_MAX_ITEMS` is not entered. `visited`,
+    when given, collects every object whose contents the scan read (`_shallow`)."""
     seen: set[int] = set()
+    record = visited.append if visited is not None else (lambda _o: None)
 
     def walk(label, value, depth):
         if isinstance(value, torch.Tensor):
@@ -86,6 +104,7 @@ def _held_tensors(obj, *, registered_threaded: bool = True):
         if depth >= 8 or isinstance(value, _ATOMS + _OPAQUE) or id(value) in seen:
             return
         seen.add(id(value))
+        record(value)
         if isinstance(value, dict):
             if len(value) <= _SCAN_MAX_ITEMS:
                 for k, v in value.items():
@@ -100,8 +119,13 @@ def _held_tensors(obj, *, registered_threaded: bool = True):
                     yield from walk(f"{label}.{k}", v, depth + 1)
 
     skip = {"_memo_cache"}
+    record(obj)
     if registered_threaded:
         skip |= {"_parameters", "_buffers", "_modules"}
+        if isinstance(obj, torch.nn.Module):
+            # what is registered decides what is skipped: a change there changes the scan
+            for registry in (obj._parameters, obj._buffers, obj._modules):
+                record(registry)
     for name, value in vars(obj).items():
         if name not in skip:
             yield from walk(name, value, 0)
@@ -948,51 +972,67 @@ class KirchhoffLayer(TopologyGuard):
         return a gradient that is silently wrong (if some other path happens to also touch
         the same value) or silently `None` (if it doesn't).
         """
-        for el in (*self._laws, *self._node_sources):
-            # A law may wrap another (`Scaled`): scan every submodule's own attributes,
-            # its registered buffers, and tensors nested in lists, tuples, dicts and sets.
-            holders = el.modules() if isinstance(el, torch.nn.Module) else (el,)
-            for name, value in (kv for h in holders for kv in _held_tensors(h)):
-                if value.requires_grad:
-                    if isinstance(el, NodeSource):
-                        # A NodeSource has no `learnable=` constructor kwarg (unlike
-                        # ConstitutiveLaw) -- its fix is to register the tensor as an nn.Parameter
-                        # directly, so it must be named and fixed as a node source, not
-                        # rendered (and told to construct itself) as if it were a ConstitutiveLaw.
-                        raise ValueError(
-                            f"node source {el!r} has a tensor attribute {name!r} with "
-                            f"requires_grad=True that is not a registered nn.Parameter, so "
-                            f"the differentiable solve cannot reach it through "
-                            f"Function.apply and its gradient would be silently wrong or "
-                            f"absent. Register it as an nn.Parameter "
-                            f"(self.<name> = torch.nn.Parameter(...)) in __init__ so it is "
-                            f"reachable via named_parameters() (buffers and tensors inside "
-                            f"containers are not), or use differentiable=False."
-                        )
-                    raise ValueError(
-                        f"law {el!r} (kind {el.kind!r}) has a "
-                        f"tensor attribute {name!r} with requires_grad=True that is not a "
-                        f"registered nn.Parameter (a buffer or a tensor inside a container "
-                        f"is not one either), so the differentiable solve cannot reach "
-                        f"it through Function.apply and its gradient would be silently wrong "
-                        f"or absent. Construct this law with learnable=True (so the tensor "
-                        f"is registered and reachable via named_parameters()), or use "
-                        f"differentiable=False."
-                    )
+        for role, el, name, value in self._held_scan():
+            if not value.requires_grad:
+                continue
+            if role == "drive":
+                raise ValueError(
+                    f"drive {el!r} (kind {el.kind!r}) has a tensor attribute {name!r} "
+                    f"with requires_grad=True; a Drive is captured by closure inside the "
+                    f"differentiable solve, not threaded through Function.apply, so its "
+                    f"gradient would be silently absent. A Drive must read every "
+                    f"differentiable quantity from the `drivers` mapping passed to "
+                    f"solve() rather than owning it directly, or use "
+                    f"differentiable=False."
+                )
+            if role == "source":
+                # A NodeSource has no `learnable=` constructor kwarg (unlike
+                # ConstitutiveLaw) -- its fix is to register the tensor as an nn.Parameter
+                # directly, so it must be named and fixed as a node source, not
+                # rendered (and told to construct itself) as if it were a ConstitutiveLaw.
+                raise ValueError(
+                    f"node source {el!r} has a tensor attribute {name!r} with "
+                    f"requires_grad=True that is not a registered nn.Parameter, so "
+                    f"the differentiable solve cannot reach it through "
+                    f"Function.apply and its gradient would be silently wrong or "
+                    f"absent. Register it as an nn.Parameter "
+                    f"(self.<name> = torch.nn.Parameter(...)) in __init__ so it is "
+                    f"reachable via named_parameters() (buffers and tensors inside "
+                    f"containers are not), or use differentiable=False."
+                )
+            raise ValueError(
+                f"law {el!r} (kind {el.kind!r}) has a "
+                f"tensor attribute {name!r} with requires_grad=True that is not a "
+                f"registered nn.Parameter (a buffer or a tensor inside a container "
+                f"is not one either), so the differentiable solve cannot reach "
+                f"it through Function.apply and its gradient would be silently wrong "
+                f"or absent. Construct this law with learnable=True (so the tensor "
+                f"is registered and reachable via named_parameters()), or use "
+                f"differentiable=False."
+            )
+
+    def _held_scan(self) -> list:
+        """`(role, owner, name, tensor)` for every tensor the laws, node sources (every submodule:
+        a law may wrap another, `Scaled`) and drives hold where the differentiable solve does
+        not thread it (`_held_tensors`; a drive's own parameters included, since drives are
+        not threaded). The scan is cached: it is repeated only when an object it read holds
+        something else (`_shallow`), and the tensors' `requires_grad` is read live."""
+        cache = getattr(self, "_held_cache", None)
+        if cache is not None and all(_shallow(o) == sig for o, sig in cache[1]):
+            return cache[0]
+        visited: list = [self._laws, self._node_sources, self._drives]
+        found = []
+        for role, owners in (("law", self._laws), ("source", self._node_sources)):
+            for el in owners:
+                holders = el.modules() if isinstance(el, torch.nn.Module) else (el,)
+                for h in holders:
+                    found += [(role, el, n, v) for n, v in _held_tensors(h, visited=visited)]
         for drv in self._drives:
-            # A drive's own parameters are not threaded either (only laws' and node
-            # sources' are), so they are reported too.
-            for name, value in _held_tensors(drv, registered_threaded=False):
-                if value.requires_grad:
-                    raise ValueError(
-                        f"drive {drv!r} (kind {drv.kind!r}) has a tensor attribute {name!r} "
-                        f"with requires_grad=True; a Drive is captured by closure inside the "
-                        f"differentiable solve, not threaded through Function.apply, so its "
-                        f"gradient would be silently absent. A Drive must read every "
-                        f"differentiable quantity from the `drivers` mapping passed to "
-                        f"solve() rather than owning it directly, or use "
-                        f"differentiable=False."
-                    )
+            found += [("drive", drv, n, v) for n, v in
+                      _held_tensors(drv, registered_threaded=False, visited=visited)]
+        # the visited objects are kept alive by the cache, so their ids are not reused
+        self._held_cache = (found, [(o, _shallow(o)) for o in visited])
+        return found
 
     def _require_threaded(self, residual, params) -> None:
         """Refuse a differentiable solve whose residual depends on a tensor that is not threaded.

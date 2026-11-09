@@ -408,11 +408,21 @@ class MnaSystem:
         return self.layer._scatter_node_sources(
             lambda j, ns: call(n_el + j, (phi[..., ns.nodes], drivers)))
 
-    def _node_slopes(self, phi, drivers) -> Tensor | None:
+    def _node_slopes(self, phi, drivers, adjoint: bool = False) -> Tensor | None:
         """`d w / d phi` per interior row: a node source reads its own node's potential only,
-        so its own `dflow` is the whole diagonal."""
-        return self.layer._scatter_node_sources(
-            lambda j, ns: ns.dflow(phi[..., ns.nodes], drivers))
+        so its own `dflow` is the whole diagonal; except, when the operator also builds the
+        adjoint (`adjoint`, the differentiable solve), for a node source that declares
+        `exact_slope = False`, whose slope is then the autograd derivative of its flow."""
+        def slope(j, ns):
+            phi_n = phi[..., ns.nodes]
+            if adjoint and not ns.exact_slope:
+                leaf = phi_n.detach().requires_grad_(True)
+                with torch.enable_grad():
+                    (grad,) = torch.autograd.grad(ns(leaf, drivers).sum(), leaf)
+                return grad
+            return ns.dflow(phi_n, drivers)
+
+        return self.layer._scatter_node_sources(slope)
 
     # ------------------------------------------------------------- residual and Jacobian
     def residual(self, x, phi_boundary, drivers, sources, ctx, call) -> Tensor:
@@ -427,8 +437,14 @@ class MnaSystem:
             kcl = kcl + w
         return self._to_real(_cat([kcl, r_F], kcl))
 
-    def operator(self, x, phi_boundary, drivers, ctx, node_slope_fn) -> MnaOperator:
-        """The Jacobian of `residual` at `x`, as COO triplets on the fixed pattern."""
+    def operator(self, x, phi_boundary, drivers, ctx, node_slope_fn,
+                 adjoint: bool = False) -> MnaOperator:
+        """The Jacobian of `residual` at `x`, as COO triplets on the fixed pattern.
+
+        `adjoint`: the operator also builds the adjoint (the differentiable solve). A law
+        that declares `exact_slope = False` then gives its blocks by autograd of its own
+        `forward` (`_coloured_jacobian`), not its `jacobian`, whose `dflow` shortcut would
+        hand the adjoint a Newton aid; the primal solve keeps `jacobian`."""
         layer = self.layer
         w = self.w
         phi_I, q_F = self._unknowns(x)
@@ -447,7 +463,10 @@ class MnaSystem:
                 q_s = q_F[..., f0:f0 + e - s]
             else:
                 q_s = None
-            blocks += el.jacobian(dp_s, q_s, drivers, lctx)
+            if adjoint and not el.exact_slope:
+                blocks += el._coloured_jacobian(dp_s, q_s, drivers, lctx)
+            else:
+                blocks += el.jacobian(dp_s, q_s, drivers, lctx)
         parts = [blk.flatten(-5) for blk in blocks]
         parts.append(torch.ones(1, dtype=x.dtype, device=x.device))
         if w == 1 and layer._node_sources:
@@ -671,7 +690,8 @@ class MnaSystem:
         def operator_fn(x, *params):
             call, drv, src, pb, step = _rebuild(params)
             last["op"] = self.operator(
-                x, pb, drv, step, lambda phi: self._node_slopes(phi, drv))
+                x, pb, drv, step, lambda phi: self._node_slopes(phi, drv, adjoint=True),
+                adjoint=True)
             return last["op"]
 
         try:
