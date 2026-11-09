@@ -634,7 +634,10 @@ class Model:
         Euler (`layer_options`, merged over the caller's); `"exact"` layers are untouched. On
         the other steps the layers' own schemes apply, or a `scheme=` in `solve_kwargs`.
         `record` keeps only those indices into `times` (default all). `diagnostics["schemes"]`
-        lists the scheme of each step (`None`: the layer default). Differentiable through
+        lists the scheme of each step (`None`: the layer default); it is the only entry `march`
+        fills. A restart index past the last step is ignored, a negative one is refused. A
+        transport layer whose own scheme is `"trapezoidal"` steps by backward Euler on a restart
+        step and by trapezoidal otherwise. Differentiable through
         time as `step` is.
         """
         from noodl._march import march

@@ -27,6 +27,9 @@ def march(model: Model, state, drivers, times, *, restarts: Collection[int] = ()
         raise ValueError(f"Model.march: times must be strictly increasing, got {grid}")
     # a restart index past the last step is ignored (one restart set serves any prefix of a grid)
     restart_steps = {int(k) for k in restarts}
+    negative = sorted(k for k in restart_steps if k < 0)
+    if negative:
+        raise ValueError(f"Model.march: restarts must be step indices >= 0, got {negative}")
     rows = list(range(len(grid))) if record is None else [int(k) for k in record]
     if not rows or any(not 0 <= k < len(grid) for k in rows) or rows != sorted(set(rows)):
         raise ValueError(f"Model.march: record must be increasing indices into the {len(grid)} "

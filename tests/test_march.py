@@ -201,3 +201,46 @@ def test_simulate_circuit_equals_the_old_loop_bitwise():
     assert set(out) == {*keys, "time"}
     for key in keys:
         assert torch.equal(out[key], torch.stack([row[key] for row in rows]))
+
+
+def test_negative_restart_is_refused():
+    model, state, drivers = _rc()
+    with pytest.raises(ValueError, match="restarts"):
+        model.march(state, drivers, GRID, restarts={-1})
+
+
+def test_restart_past_the_last_step_is_ignored():
+    model, state, drivers = _rc()
+    a = model.march(state, drivers, GRID, restarts={0, 99})
+    b = model.march(state, drivers, GRID, restarts={0})
+    assert torch.equal(a[PHI], b[PHI])
+
+
+def test_layer_options_merge_over_the_callers_on_a_restart_step(monkeypatch):
+    model, species, state, drivers = _transport_model("trapezoidal")
+    seen = []
+    original = model.step
+
+    def spy(*args, **kwargs):
+        seen.append(kwargs["layer_options"])
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(model, "step", spy)
+    model.march(state, drivers, [0.0, 60.0, 120.0], restarts={0},
+                layer_options={"air": {"atol": 1e-10}, "species": {"scheme": "trapezoidal"}})
+    assert seen[0] == {"air": {"atol": 1e-10}, "species": {"scheme": "backward_euler"}}
+    assert seen[1] == {"air": {"atol": 1e-10}, "species": {"scheme": "trapezoidal"}}
+
+
+def test_a_trapezoidal_transport_layer_matches_explicit_steps():
+    model, species, state, drivers = _transport_model("trapezoidal")
+    grid = [0.0, 60.0, 120.0, 180.0]
+    diag: dict = {}
+    out = model.march(state, drivers, grid, restarts={0}, diagnostics=diag)
+    assert diag["schemes"] == ["backward_euler", None, None]
+    cur, rows = state, [state["species.x"]]
+    for k, rule in enumerate(("backward_euler", "trapezoidal", "trapezoidal")):
+        cur = model.step(cur, drivers, grid[k + 1] - grid[k], t=grid[k],
+                         layer_options={"species": {"scheme": rule}})
+        rows.append(cur["species.x"])
+    assert torch.equal(out["species.x"], torch.stack(rows))
