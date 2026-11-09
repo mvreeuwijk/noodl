@@ -188,25 +188,15 @@ def _elements_cases() -> dict[type, Callable[[], list[Case]]]:
 
 
 def _building_cases() -> dict[type, Callable[[], list[Case]]]:
-    from noodl.apps.building_physics.modelica import storage
     from noodl.apps.building_physics.modelica.assemble import _HeldMover, _ZonalFlowEdge
     from noodl.elements import medium
 
     air = medium("Buildings.Media.Air")
-    th = storage.thermo(air)
-    k = th.k(_t([293.15, 297.0]), _t([0.0, 0.0]))
-    zone_drv = {"T": _t([293.15, 297.0]), "X_w": _t([0.0, 0.0]),
-                "air.storage_prev": torch.stack([_t([1.0, -2.0]), k], dim=-1),
-                "air.storage_rate": _t([0.1, 0.1]), "air.storage_offset": _t([0.01, 0.0]),
-                "air.storage_gain": _t([0.3, 0.0]), "air.storage_w_fed": _t([0.02, 0.0])}
     return {
         _ZonalFlowEdge: lambda: [Case(
             _ZonalFlowEdge(kind="z", direction="ab", src=0, tgt=1, medium=air, key="m"),
             _grid(1), {"m": _t(0.2)})],
         _HeldMover: lambda: [Case(_HeldMover("mover"), _grid(1))],
-        storage.ZoneStorage: lambda: [Case(
-            storage.ZoneStorage([0, 1], _t([50.0, 120.0]), 101325.0, th), _grid(2, -6, 3),
-            zone_drv)],
     }
 
 
@@ -489,11 +479,26 @@ class StorageCase:
     phi_start: torch.Tensor
     previous: torch.Tensor
     drivers: dict = field(default_factory=dict)
+    schemes: tuple = ("backward_euler", "trapezoidal")
 
 
 def _storage_cases() -> dict[type, Callable[[], list[StorageCase]]]:
+    from noodl.apps.building_physics.modelica.storage import ZoneStorage, thermo
     from noodl.apps.building_physics.prj import ZoneAirMassChange
+    from noodl.elements import medium
     from noodl.storage import LinearStorage
+
+    th = thermo(medium("Buildings.Media.Air"))
+    T, X = _t([293.15, 297.0]), _t([0.0, 0.01])
+    k = th.k(T, X)
+    mbl = {"T": T, "X_w": X, "air.storage_k_prev": k * _t([1.0, 1.0001])}
+    bdf2 = {**mbl, "air.storage_bdf2_factor": _t([0.07, 0.07]),
+            "air.storage_bdf2_offset": _t([0.002, -0.001])}
+    gain = {"air.storage_coupling_gain": _t([0.4, 0.0]),
+            "air.storage_inflow": _t([0.02, 0.01])}
+
+    def make_zone():
+        return ZoneStorage([0, 1], _t([50.0, 120.0]), 101325.0, th)
 
     zone = {"P_ref": _t(101325.0), "T": _t([293.15, 297.0]),
             "air.mass_start": _t([60.0, 140.0])}
@@ -510,6 +515,17 @@ def _storage_cases() -> dict[type, Callable[[], list[StorageCase]]]:
             StorageCase(ZoneAirMassChange([0, 1], _t([50.0, 120.0])), _grid(2, -6, 3),
                         _t([0.0, 0.0]), _t([0.0, 0.0]), {"P_ref": _t(101325.0),
                                                          "T": _t([293.15, 297.0])}),
+        ],
+        # MBL volume mass storage: the plain step rate (backward Euler only), BDF2 drivers,
+        # and the coupling gain on either
+        ZoneStorage: lambda: [
+            StorageCase(make_zone(), _grid(2, -6, 3), _t([1.0, -2.0]), _t([0.0, 0.0]), mbl,
+                        schemes=("backward_euler",)),
+            StorageCase(make_zone(), _grid(2, -6, 3), _t([1.0, -2.0]), _t([0.0, 0.0]), bdf2),
+            StorageCase(make_zone(), _grid(2, -6, 3), _t([1.0, -2.0]), _t([0.0, 0.0]),
+                        {**mbl, **gain}, schemes=("backward_euler",)),
+            StorageCase(make_zone(), _grid(2, -6, 3), _t([1.0, -2.0]), _t([0.0, 0.0]),
+                        {**bdf2, **gain}),
         ],
     }
 
@@ -560,10 +576,10 @@ def test_rate_slope_is_the_derivative_of_rate_unless_declared(cls):
 
     cases = STORAGE_CASES[cls]()
     assert cases and all(type(c.storage) is cls for c in cases)
-    contexts = [LawContext(mode="transient", dt=dt, t=dt, scheme=scheme)
-                for scheme in ("backward_euler", "trapezoidal") for dt in (1e-3, 30.0)]
     differs = False
     for case in cases:
+        contexts = [LawContext(mode="transient", dt=dt, t=dt, scheme=scheme)
+                    for scheme in case.schemes for dt in (1e-3, 30.0)]
         for ctx in contexts:
             x, analytic, reference = _storage_mismatch(case, ctx)
             differs = differs or x.numel() > 0
