@@ -17,7 +17,7 @@ def test_residual_and_operator_match_the_layer():
     assert fn.all_params[-2].shape == (layer._n_nodes,)
     assert fn.driver_keys == sorted(drivers)
     x = torch.tensor([3.0, 1.0], dtype=torch.float64)
-    ref, _, _ = layer._residual_parts(x, phi_b, drivers, None)
+    ref, _, _ = layer._residual(x, phi_b, drivers, None)
     assert torch.allclose(fn.residual_fn(x, *fn.all_params), ref, rtol=0, atol=1e-14)
     phi = layer.assemble(x, phi_b)
     dq = layer.dflows(phi, drivers)

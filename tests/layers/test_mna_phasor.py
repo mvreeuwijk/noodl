@@ -7,8 +7,8 @@ import pytest
 import torch
 
 from noodl.elements import Conductance, ConstitutiveLaw, ImplicitLaw, LawContext, PowerLaw
-from noodl.layers._flow_unknowns import MnaSystem
-from noodl.layers.kirchhoff import KirchhoffLayer
+from noodl.layers._flow_unknowns import flow_unknowns
+from noodl.layers.kirchhoff import KirchhoffLayer, _Step
 from noodl.topology import Network
 from noodl.withdrawals import NodeWithdrawal
 from tests._circuit_laws import Cap, DrivenSource, Ind, Source
@@ -187,9 +187,9 @@ def test_structure_has_no_withdrawal_entries_in_real_view():
     layer = KirchhoffLayer(net, "e", [Conductance(torch.tensor([1.0]), kind="r")],
                            boundary=["gnd"], phasor=True)
     layer._withdrawals = [LinearWithdrawal([net.nodes.index("a")], [0.1])]
-    mna = MnaSystem(layer)
-    assert torch.equal(mna.row, layer._mna.row) and torch.equal(mna.col, layer._mna.col)
-    assert int(mna.src.max()) < mna._node_slot
+    u = flow_unknowns(layer)
+    assert torch.equal(u.row, layer._unknowns.row) and torch.equal(u.col, layer._unknowns.col)
+    assert int(u.src.max()) < u.node_slot
 
 
 def test_missing_frequency_driver_named():
@@ -279,20 +279,20 @@ def test_real_view_jacobian_matches_autograd_jacobian():
                    ConstantPower(torch.tensor([0.4 + 0.3j])), Ratio(torch.tensor([2.0])),
                    Cap(torch.tensor([0.05])), Conductance(torch.tensor([1.5, 0.7]), kind="r")],
         boundary=["gnd"], phasor=True)
-    mna = layer._mna
-    assert mna.w == 2 and mna.n_I == 4 and mna.n_F == 5 and mna.n == 18
+    u = layer._unknowns
+    assert u.w == 2 and u.n_I == 4 and u.n_F == 5 and u.n == 18
     gen = torch.Generator().manual_seed(11)
-    x = torch.randn(mna.n, generator=gen, dtype=F64)
+    x = torch.randn(u.n, generator=gen, dtype=F64)
     pb = torch.zeros(1, dtype=C128)
     sources = torch.randn(net.n, generator=gen, dtype=C128)
-    ctx = LawContext(mode="phasor", omega=torch.tensor([2 * math.pi * 3.0]))
+    step = _Step(LawContext(mode="phasor", omega=torch.tensor([2 * math.pi * 3.0])), None)
     call = layer._owner_call
 
     def residual(z):
-        return mna.residual(z, pb, {}, sources, ctx, call)
+        return layer._residual(z, pb, {}, sources, step, call)[0]
 
     expected = torch.autograd.functional.jacobian(residual, x)
-    op = mna.operator(x, pb, {}, ctx, None)
+    op = layer._operator(x, pb, {}, step)
     J = op.assemble()
     torch.testing.assert_close(J, expected, rtol=1e-13, atol=1e-13)
     # the load block is not of the holomorphic form [[a, -b], [b, a]]
@@ -300,7 +300,7 @@ def test_real_view_jacobian_matches_autograd_jacobian():
     ia = int(layer._interior_of_node[a])
     block = J[2 * ia: 2 * ia + 2, 2 * ia: 2 * ia + 2]
     assert not torch.allclose(block[0, 1], -block[1, 0])
-    v = torch.randn(mna.n, generator=gen, dtype=F64)
+    v = torch.randn(u.n, generator=gen, dtype=F64)
     torch.testing.assert_close(op.rmatvec(v), expected.T @ v, rtol=1e-13, atol=1e-13)
 
 

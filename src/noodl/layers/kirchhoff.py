@@ -17,13 +17,29 @@ import torch
 
 from noodl._broadcast import broadcast_shapes
 from noodl._tracking import bulk_values
+from noodl.elements._slopes import _colour_blocks
 from noodl.elements.base import SCHEMES, ConstitutiveLaw, ImplicitLaw, LawContext
-from noodl.layers._flow_unknowns import MnaSystem, _Held, angular_frequency
+from noodl.layers._flow_unknowns import (
+    FlowUnknowns,
+    _cat,
+    _Held,
+    angular_frequency,
+    cdtype,
+    check_frequency,
+    first_failing,
+    flow_unknowns,
+    linear_method,
+    singular,
+    singular_error,
+    split,
+    to_real,
+)
 from noodl.layers._functional import FunctionalLaws, step_start
 from noodl.layers._solve_policy import resolve
 from noodl.layers._topology import TopologyGuard
 from noodl.operators.graph import GraphLaplacianOperator
 from noodl.operators.shifted import ShiftedOperator
+from noodl.operators.sparse import SparseOperator
 from noodl.solvers.grounding import spd_certificate, spd_diagnosis
 from noodl.solvers.implicit import adjoint as _adjoint_solve
 from noodl.solvers.implicit import implicit_solve
@@ -299,12 +315,11 @@ class KirchhoffLayer(TopologyGuard):
         self._boundary_storage: list[NodeStorage] = []
         if scheme == "forward_euler":
             self._boundary_storage, self._storage = self._storage, []
-        # Modified Nodal Analysis: a law whose flow is an unknown (implicit), that couples
-        # several edges (ports > 1), that stores (dynamic) or that reads the law context
-        # cannot be solved by the classic nodal path; such a layer is solved by `MnaSystem`
-        # (`noodl.layers._flow_unknowns`).
-        # Node storage does not make a layer MNA: it adds a diagonal to the nodal Jacobian,
-        # but it makes the layer dynamic (it steps from its state).
+        # Flow unknowns: a law whose flow is an unknown (a relation), that couples several
+        # edges (ports > 1), that stores (dynamic) or that reads the law context cannot be
+        # solved by the fast path; such a layer adds flow unknowns (`_flow_unknowns`). Node
+        # storage does not: it adds a diagonal to the nodal Jacobian, but it makes the layer
+        # dynamic (it steps from its state).
         self.phasor = phasor
         self.dynamic = any(el.dynamic for el in self._laws) or bool(self._storage)
         self.mna = self.phasor or any(
@@ -468,10 +483,14 @@ class KirchhoffLayer(TopologyGuard):
         self._reads_history = bool(dyn) or any(self._relation) or any(
             el._takes_ctx for el in self._laws)
 
-        self._mna: MnaSystem | None = None
+        # The layout of the flow unknowns; `None` on the fast path. The one attribute every
+        # path decision of `_residual`, `_operator` and `solve` reads.
+        self._unknowns: FlowUnknowns | None = None
+        # The step-start restrictions of the law context, per law (`_law_ctx`).
+        self._law_ctxs: tuple[LawContext | None, dict] = (None, {})
         if self.mna:
-            self._check_mna_structure()
-            self._mna = MnaSystem(self)
+            self._check_flow_unknowns_structure()
+            self._unknowns = flow_unknowns(self)
 
     def _check_boundary_storage(self, net, name, scheme) -> list[torch.Tensor]:
         """Construction checks of storage under `scheme="forward_euler"`, and each boundary
@@ -520,9 +539,9 @@ class KirchhoffLayer(TopologyGuard):
             cols.append(torch.tensor([column[i] for i in nodes], dtype=torch.long))
         return cols
 
-    def _check_mna_structure(self) -> None:
-        """Construction checks of a Modified Nodal Analysis layer: port groups, solver,
-        and a boundary node in every connected part."""
+    def _check_flow_unknowns_structure(self) -> None:
+        """Construction checks of a layer with flow unknowns: port groups, solver, and a
+        boundary node in every connected part."""
         name = self.name
         for el, (s, e) in zip(self._laws, self._law_slices, strict=True):
             if (e - s) % el.ports:
@@ -583,9 +602,9 @@ class KirchhoffLayer(TopologyGuard):
         """Positions, in layer edge order (the columns of `solve`'s `q`), of the edges whose
         flow is an unknown of the layer (implicit constitutive laws); empty for a classic
         layer."""
-        if self._mna is None:
+        if self._unknowns is None:
             return torch.zeros(0, dtype=torch.long)
-        return self._mna.f_edges
+        return self._unknowns.edges
 
     @property
     def frequency_key(self) -> str | None:
@@ -871,7 +890,7 @@ class KirchhoffLayer(TopologyGuard):
         if self.mna:
             if q is None:
                 self._refuse_on_mna("flows without q")
-            return self._mna.flows(phi, drivers or {}, q)
+            return self._flows_given(phi, drivers or {}, q)
         drivers = drivers or {}
         d = self.dp(phi, drivers)
         parts = [
@@ -976,7 +995,7 @@ class KirchhoffLayer(TopologyGuard):
         self._require_current_topology()
         drivers = drivers or {}
         step = self._public_step(dt, scheme, history, storage_flow, drivers)
-        return self._residual_parts(phi_interior, phi_boundary, drivers, sources, step)[0]
+        return self._residual(phi_interior, phi_boundary, drivers, sources, step)[0]
 
     def _public_step(self, dt, scheme, history, storage_flow, drivers) -> _Step:
         """The `_Step` of `residual`, `jacobian` and `adjoint`: their step keywords,
@@ -1008,20 +1027,327 @@ class KirchhoffLayer(TopologyGuard):
                 lambda j, st: storage_flow[..., slice(*self._storage_slices[j])]))
         return lhs if w is None else lhs + w
 
-    def _residual_parts(self, phi_interior, phi_boundary, drivers, sources, step=None):
-        """`(residual, phi, q)`: the residual and the full-node potentials and edge flows it
-        was evaluated at (`solve` reuses the last two instead of recomputing them). `step`
-        (a `_StorageStep`, on a step of a layer with storage) adds the storage withdrawal."""
-        phi = self.assemble(phi_interior, phi_boundary)
-        q = self.flows(phi, drivers)
-        # (A_I q), by scatter-add over this layer's edges then a select of the interior
-        # rows, rather than einsum against the (n_I, b) slice of the dense incidence: this
-        # is once per Newton residual evaluation, where the einsum form dominates the cost
-        # (numbers: docs/design/orchestration.md#residual-incidence-product).
-        lhs = self._accumulate_interior(q)
-        s_I = self._source_interior(sources, phi_interior)
-        w = self._withdrawal(phi, drivers, step)
-        return (lhs - s_I if w is None else lhs - s_I + w), phi, q
+    def _residual(self, x, phi_boundary, drivers, sources, step=None, call=None):
+        """`(residual, phi, q)`: the residual at the unknowns `x` and the full-node potentials
+        and every edge's flow it was evaluated at (`solve` reuses the last two instead of
+        recomputing them). `step` is the solve's `_Step` (`None` is the steady point without
+        storage).
+
+        On the fast path `x` is the interior potentials, and the residual is the balance
+        `A_I q(phi) - s_I (+ w(phi))`, with the storage withdrawal on a step; `call` is not
+        used (the laws are the layer's own). With flow unknowns `x` is `[phi_I, q_F]` in the
+        real view, the residual is the balance rows, then the relations' own residuals, and
+        `call(i, args)` evaluates owner `i` (`_owner_call`, or the threaded parameters of the
+        differentiable solve); a step adds the storage withdrawal, and the initial point
+        replaces the held rows (`_Held`)."""
+        u = self._unknowns
+        if u is None:
+            phi = self.assemble(x, phi_boundary)
+            q = self.flows(phi, drivers)
+            # (A_I q), by scatter-add over this layer's edges then a select of the interior
+            # rows, rather than einsum against the (n_I, b) slice of the dense incidence:
+            # this is once per Newton residual evaluation, where the einsum form dominates
+            # the cost (numbers: docs/design/orchestration.md#residual-incidence-product).
+            lhs = self._accumulate_interior(q)
+            s_I = self._source_interior(sources, x)
+            # `(lhs - s) + (w_withdrawal + w_storage)`: `_withdrawal` adds the two first
+            w = self._withdrawal(phi, drivers, step)
+            return (lhs - s_I if w is None else lhs - s_I + w), phi, q
+        ctx, store = (LawContext(mode="dc"), None) if step is None else (step.ctx, step.storage)
+        phi_I, q_F = split(u, x)
+        phi = self.assemble(phi_I, phi_boundary)
+        q, r_F = self._flows_and_residuals(phi, q_F, drivers, ctx, call)
+        kcl = self._accumulate_interior(q) - self._source_interior(sources, phi_I)
+        # `((lhs - s) + w_withdrawal) + w_storage`, not the fast path's association
+        w = self._withdrawal_called(phi, drivers, call)
+        if w is not None:
+            kcl = kcl + w
+        if isinstance(store, _Held):
+            _, value = self._held_values(drivers, call)
+            kcl = torch.where(store.rows, phi_I - value.to(phi_I.dtype), kcl)
+        elif store is not None:
+            kcl = kcl + self._storage_withdrawal(phi, drivers, store, ctx, call)
+        return to_real(self, _cat([kcl, r_F], kcl)), phi, q
+
+    def _operator(self, x, phi_boundary, drivers, step=None, slopes=None,
+                  adjoint: bool = False):
+        """The Jacobian of `_residual` at the unknowns `x`.
+
+        On the fast path the matvec-free `A_I diag(dflows) A_I^T` (`_operator_at`), shifted
+        by the withdrawals' and, on a step, the storages' slopes; `slopes` and `adjoint` are
+        not used. With flow unknowns the COO triplets on the fixed pattern (a
+        `SparseOperator`), with the rows the initial point holds replaced (`_hold`).
+        `slopes(phi, adjoint)` gives the diagonal of the withdrawals and storages
+        (`_slopes_fn`). `adjoint`: the operator also builds the adjoint (the differentiable
+        solve). A law that declares `exact_slope = False` then gives its blocks by autograd
+        of its own `forward` (`_coloured_jacobian`), not its `jacobian`, whose `dflow`
+        shortcut would hand the adjoint a Newton aid; the same flag reaches `slopes`, where
+        an inexact withdrawal or storage gives autograd too. The primal solve
+        (`adjoint=False`) keeps the analytic slopes."""
+        u = self._unknowns
+        if u is None:
+            phi = self.assemble(x, phi_boundary)
+            dq = self.dflows(phi, drivers)
+            return self._operator_at(dq, self._withdrawal_slopes(phi, drivers, step))
+        ctx = LawContext(mode="dc") if step is None else step.ctx
+        phi_I, q_F = split(u, x)
+        phi = self.assemble(phi_I, phi_boundary)
+        dp = self.dp(phi, drivers)
+        blocks = []
+        for el, rel, (s, e) in zip(self._laws, self._relation, self._law_slices,
+                                   strict=True):
+            lctx = self._law_ctx(ctx, s, e)
+            dp_s = dp[..., s:e]
+            # Called on the law module itself, also on the differentiable path: the values
+            # equal those of a `functional_call` with the threaded parameters, because the
+            # threaded tensors ARE the module's own parameters (the same argument as
+            # `dp_independent` in `_functional.py`), and the blocks carry no graph.
+            if rel:
+                f0 = int(u.index[s])
+                q_s = q_F[..., f0:f0 + e - s]
+            else:
+                q_s = None
+            if adjoint and not el.exact_slope:
+                blocks += el._coloured_jacobian(dp_s, q_s, drivers, lctx)
+            else:
+                blocks += el.jacobian(dp_s, q_s, drivers, lctx)
+        parts = [blk.flatten(-5) for blk in blocks]
+        parts.append(torch.ones(1, dtype=x.dtype, device=x.device))
+        if u.diag:
+            d = slopes(phi, adjoint)
+            parts.append(d if d is not None else
+                         torch.zeros(u.n_I, dtype=x.dtype, device=x.device))
+        flat = _cat(parts, x)
+        values = flat[..., u.src] * u.sign.to(dtype=flat.dtype, device=flat.device)
+        op = SparseOperator(u.row, u.col, values, u.n)
+        return op if step is None else self._hold(op, step.storage)
+
+    # ------------------------------------------------------------------ flow unknowns
+    def _complex_inputs(self, phi_boundary, drivers, sources, phi0, q0):
+        """`(phi_boundary, sources, phi0, q0)` as a solve with flow unknowns takes them: on a
+        phasor layer in the complex dtype of its network's precision (complex128 on a
+        float64 network), real or complex as given, with the frequency driver checked
+        against their batch."""
+        if not self.phasor:
+            return phi_boundary, sources, phi0, q0
+        dtype = cdtype(self)
+        phi_boundary, sources, phi0, q0 = (
+            None if v is None else torch.as_tensor(v).to(dtype)
+            for v in (phi_boundary, sources, phi0, q0))
+        check_frequency(self, drivers, [
+            v.shape[:-1] for v in (phi_boundary, sources, phi0, q0) if v is not None])
+        return phi_boundary, sources, phi0, q0
+
+    def _refuse_newton_options(self, newton_kwargs) -> None:
+        """Refuse the Newton keywords a layer with flow unknowns cannot take, by name: the
+        convex line search and conjugate gradients."""
+        if newton_kwargs.get("line_search") == "convex":
+            raise ValueError(
+                f"KirchhoffLayer {self.name!r}: line_search='convex' needs a residual "
+                f"that is the gradient of a convex function, which the residual of a layer "
+                f"with flow unknowns is not; use the default line search"
+            )
+        if newton_kwargs.get("method", self.linear_solver) == "cg":
+            raise ValueError(
+                f"KirchhoffLayer {self.name!r}: method='cg' needs a symmetric positive "
+                f"definite Jacobian, which a layer with flow unknowns does not have; use "
+                f"'auto', 'sparse_direct', 'direct' or 'gmres'"
+            )
+
+    def _law_ctx(self, ctx: LawContext, s: int, e: int) -> LawContext:
+        """`ctx` with the step-start values restricted to one law's edges `[s, e)`. The
+        restrictions of the last context seen are kept: a Newton solve calls this with the
+        same context on every iteration."""
+        if ctx.dp_prev is None and ctx.q_prev is None:
+            return ctx
+        cached_ctx, by_slice = self._law_ctxs
+        if cached_ctx is not ctx:
+            by_slice = {}
+            self._law_ctxs = (ctx, by_slice)
+        lctx = by_slice.get((s, e))
+        if lctx is None:
+            changes = {}
+            if ctx.dp_prev is not None:
+                changes["dp_prev"] = ctx.dp_prev[..., s:e]
+            if ctx.q_prev is not None:
+                changes["q_prev"] = ctx.q_prev[..., s:e]
+            lctx = by_slice[(s, e)] = dataclasses.replace(ctx, **changes)
+        return lctx
+
+    def _check_width(self, el, out, n_edges: int, what: str) -> None:
+        """A law returns one value per edge of its kind: refuse any other trailing width."""
+        if out.dim() == 0 or out.shape[-1] != n_edges:
+            width = "a scalar" if out.dim() == 0 else f"width {out.shape[-1]}"
+            raise ValueError(
+                f"layer {self.name!r}: the {what} of the {el.kind!r} law is {width} "
+                f"but the kind has {n_edges} edges")
+
+    def _flows_and_residuals(self, phi, q_F, drivers, ctx, call):
+        """`(q, r_F)`: every edge's flow (the law flow on potential-controlled edges, the
+        unknown on relation edges) and the relations' residuals, in layer edge order."""
+        index = self._unknowns.index
+        dp = self.dp(phi, drivers)
+        q_parts, r_parts = [], []
+        for i, (el, (s, e)) in enumerate(
+                zip(self._laws, self._law_slices, strict=True)):
+            lctx = self._law_ctx(ctx, s, e)
+            dp_s = dp[..., s:e]
+            if self._relation[i]:
+                f0 = int(index[s])
+                q_s = q_F[..., f0:f0 + e - s]
+                r_s = call(i, (dp_s, q_s, drivers, lctx))
+                self._check_width(el, r_s, e - s, "residual")
+                r_parts.append(r_s)
+            else:
+                q_s = call(i, (dp_s, drivers, lctx))
+                self._check_width(el, q_s, e - s, "flow")
+            q_parts.append(q_s)
+        return _cat(q_parts, dp), _cat(r_parts, dp)
+
+    def _flows_given(self, phi, drivers, q) -> torch.Tensor:
+        """`flows` of a layer with flow unknowns: `q`'s flow-unknown columns as given, the
+        other edges' flows from their laws at `phi` (steady context)."""
+        if self.phasor:
+            raise TypeError(
+                f"KirchhoffLayer {self.name!r} is a phasor layer: flows() is not defined on "
+                f"it; read the flows from solve()'s q")
+        n_edges = len(self.cols)
+        if q.shape[-1] != n_edges:
+            raise ValueError(
+                f"KirchhoffLayer {self.name!r}: q must hold every edge's flow "
+                f"({n_edges}) as solve() returns it; got last dimension {q.shape[-1]}")
+        out, _ = self._flows_and_residuals(phi, q[..., self._unknowns.edges], drivers,
+                                           LawContext(mode="dc"), self._owner_call)
+        return out
+
+    def _withdrawal_called(self, phi, drivers, call):
+        """The withdrawals' withdrawal per interior row, each called through `call`; `None`
+        without withdrawals."""
+        n_el = len(self._laws)
+        return self._scatter_withdrawals(
+            lambda j, ns: call(n_el + j, (phi[..., ns.nodes], drivers)))
+
+    def _node_slopes(self, phi, drivers, adjoint: bool = False):
+        """`d w / d phi` per interior row: a withdrawal reads its own node's potential only,
+        so its own `dflow` is the whole diagonal; except, when the operator also builds the
+        adjoint (`adjoint`, the differentiable solve), for a withdrawal that declares
+        `exact_slope = False`, whose slope is then the autograd derivative of its flow."""
+        def slope(j, ns):
+            phi_n = phi[..., ns.nodes]
+            if adjoint and not ns.exact_slope:
+                leaf = phi_n.detach().requires_grad_(True)
+                with torch.enable_grad():
+                    (grad,) = torch.autograd.grad(ns(leaf, drivers).sum(), leaf)
+                return grad
+            return ns.dflow(phi_n, drivers)
+
+        return self._scatter_withdrawals(slope)
+
+    def _held_values(self, drivers, call, *, check: bool = False):
+        """`(rows, value)`: the interior rows held at the initial point ((n_I,) bool) and
+        the potential each is held at ((..., n_I), zero elsewhere); `None` when no storage
+        holds an initial potential. `initial` is evaluated through `call`, so on the
+        differentiable path with the threaded parameters. `check` refuses entries at one
+        node with different initial values, by name."""
+        n_I = len(self.interior)
+        base = len(self._laws) + len(self._withdrawals)
+        held = []
+        for j, _st in enumerate(self._storage):
+            v = call(base + j, (drivers,), {"part": "initial"})
+            if v is not None:
+                pos = self._storage_positions[j]
+                v = torch.as_tensor(v, device=pos.device)
+                held.append((j, pos, v.expand(v.shape[:-1] + pos.shape) if v.dim()
+                             else v.expand(pos.shape)))
+        if not held:
+            return None
+        batch = broadcast_shapes(*(v.shape[:-1] for _, _, v in held))
+        dtype = held[0][2].dtype
+        value = torch.zeros(batch + (n_I,), dtype=dtype, device=held[0][2].device)
+        rows = torch.zeros(n_I, dtype=torch.bool, device=value.device)
+        for _, pos, v in held:
+            value = value.index_copy(-1, pos, v.to(dtype).expand(batch + pos.shape))
+            rows[pos] = True
+        if check:
+            for _, pos, v in held:
+                differ = (v.to(dtype) != value[..., pos]).reshape(-1, pos.numel()).any(0)
+                if bool(differ.any()):
+                    row = pos[differ.nonzero()[0, 0]]
+                    names = [f"{type(self._storage[k]).__name__} (storage {k})"
+                             for k, p, _ in held if bool((p == row).any())]
+                    node = self.net.nodes[int(self.interior[row])]
+                    raise ValueError(
+                        f"KirchhoffLayer {self.name!r}: the storage entries at node "
+                        f"{node!r} hold different initial potentials ({', '.join(names)}); "
+                        f"mode='initial' holds a node at one value")
+        return rows, value
+
+    def _held(self, drivers, call) -> _Held | None:
+        """The held rows of `mode="initial"` and their masks on the Jacobian's values
+        (refusing entries at one node that disagree)."""
+        found = self._held_values(drivers, call, check=True)
+        if found is None:
+            return None
+        u = self._unknowns
+        rows = found[0].to(u.row.device)
+        full = torch.zeros(u.n, dtype=torch.bool, device=rows.device)
+        full[: u.n_I] = rows
+        diag = torch.arange(len(u.row) - u.n_I, len(u.row), device=rows.device)
+        return _Held(rows=rows, clear=full[u.row], ones=diag[rows])
+
+    def _storage_withdrawal(self, phi, drivers, store, ctx, call):
+        """The storages' withdrawal `NodeStorage.rate` per interior row on a transient
+        step (`store`, a `_StorageStep`), in the context `ctx`."""
+        base = len(self._laws) + len(self._withdrawals)
+        return self._scatter_storage(lambda j, st: call(
+            base + j, (*self._storage_args(j, st, phi, store), ctx, drivers)))
+
+    def _storage_slopes(self, phi, drivers, store, ctx, call, adjoint: bool):
+        """`d w / d phi` of the storages per interior row on a transient step (`store`, a
+        `_StorageStep`; a storage reads its own node's potential only, so this is the whole
+        diagonal): their analytic `rate_slope`, except, when the operator also builds the
+        adjoint (`adjoint`, the differentiable solve), for a storage that declares
+        `exact_slope = False`, whose slope is then the derivative of its `rate` by autograd.
+        The values carry no graph, like every Jacobian entry."""
+        base = len(self._laws) + len(self._withdrawals)
+
+        def slope(j, st):
+            phi_n, phi_start, previous = self._storage_args(j, st, phi, store)
+            if adjoint and not st.exact_slope:
+                block, = _colour_blocks(
+                    lambda v: call(base + j, (v, phi_start, previous, ctx, drivers)),
+                    (phi_n,), 1, 1)
+                return block[..., 0, 0, 0, 0]
+            return st.rate_slope(phi_n, phi_start, previous, ctx, drivers)
+
+        d = self._scatter_storage(slope)
+        return None if d is None else d.detach()
+
+    def _slopes_fn(self, drivers, call, step):
+        """The diagonal of the withdrawals and, on a step, of the storages, as a function
+        `slopes(phi, adjoint)` of the full-node potentials (`None` when there is neither).
+        `adjoint` is `_operator`'s own flag, passed on to `_node_slopes` and
+        `_storage_slopes`: the operator also builds the adjoint."""
+        ctx, store = (LawContext(mode="dc"), None) if step is None else (step.ctx, step.storage)
+        stepping = store is not None and not isinstance(store, _Held)
+
+        def slopes(phi, adjoint: bool = False):
+            d = self._node_slopes(phi, drivers, adjoint)
+            if not stepping:
+                return d
+            s = self._storage_slopes(phi, drivers, store, ctx, call, adjoint)
+            return s if d is None else d + s
+
+        return slopes
+
+    def _hold(self, op: SparseOperator, store) -> SparseOperator:
+        """`op` with each row `mode="initial"` holds replaced by the row of
+        `phi_i - initial_i`: its values zeroed, 1 on its diagonal slot."""
+        if not isinstance(store, _Held):
+            return op
+        values = op.values.masked_fill(store.clear, 0.0)
+        values[..., store.ones] = 1.0
+        return SparseOperator(op.row, op.col, values, self._unknowns.n)
 
     def jacobian(self, phi_interior, phi_boundary, drivers, *, dt=None, scheme=None,
                  history=None, storage_flow=None):
@@ -1454,9 +1780,9 @@ class KirchhoffLayer(TopologyGuard):
         the context takes no step and refuses `dt`, `history` and `storage_flow`; it accepts
         and ignores `t`, `q0` and a valid `scheme`. Without `dt` storage is absent.
 
-        A layer solved by Modified Nodal Analysis (`self.mna`) solves for the interior
-        potentials and the flows of its implicit-law edges together (`MnaSystem`),
-        from zeros or the warm start `phi0` (interior potentials) and `q0` (the flows of
+        A layer with flow unknowns (`self.mna`) solves for the interior potentials and the
+        flows of its implicit-law edges together (`noodl.layers._flow_unknowns`), from zeros
+        or the warm start `phi0` (interior potentials) and `q0` (the flows of
         `implicit_edges`); the returned `q` covers every edge. A phasor layer is always in
         `"phasor"` mode (no `dt` or `history`; the frequency driver `"<name>.frequency"` is
         required, and `phi_boundary`, `sources`, `phi0`, `q0` may be real or complex and are
@@ -1474,44 +1800,133 @@ class KirchhoffLayer(TopologyGuard):
         drivers = drivers or {}
         # The order of the refusals is part of the contract: (phasor) inputs, the step's
         # keywords, the Newton options a layer with flow unknowns refuses, the policy, the
-        # unreachable-tensor check, then the path's solve.
-        if self.mna:
-            phi_boundary, sources, phi0, q0 = self._mna.inputs(
+        # unreachable-tensor check, then the path's solve. On the fast path the starting
+        # point's grounding check comes before the unreachable-tensor check.
+        u = self._unknowns
+        if u is not None:
+            phi_boundary, sources, phi0, q0 = self._complex_inputs(
                 phi_boundary, drivers, sources, phi0, q0)
         step = self._step(mode, dt, t, scheme, history, storage_flow, drivers)
-        if self.mna:
-            self._mna.refuse(newton_kwargs)
+        if u is not None:
+            self._refuse_newton_options(newton_kwargs)
         policy = resolve(
             self, newton_kwargs, diagnostics, differentiable, drivers, sources, phi_boundary,
             step_start(step, history),
         )
-        if self.mna:
-            fn = None
-            if policy.differentiable:
-                # a tensor held where the solve does not thread it is refused by name
-                self._check_no_unreachable_differentiable_tensors()
-                if not policy.forward_only:
-                    fn = FunctionalLaws(self, drivers, sources, phi_boundary, step, history)
-            return self._mna.solve(
-                phi_boundary, drivers, sources, phi0, q0, step, fn, diagnostics,
-                newton_kwargs,
-            )
-        phi0, dq0, node_slopes0 = self._starting_point(
-            phi0, phi_boundary, drivers, sources, step)
-        if not policy.differentiable:
-            return self._solve_primal(
-                phi0, dq0, node_slopes0, phi_boundary, drivers, sources, diagnostics,
-                newton_kwargs, step,
-            )
         # A tensor held where the solve does not thread it is refused before solving, by
         # name; one reached only through a closure, at every residual the forward Newton
         # evaluates, the starting guess first and the root last (`_newton_differentiable`).
-        self._check_no_unreachable_differentiable_tensors()
-        fn = FunctionalLaws(self, drivers, sources, phi_boundary, step, history)
-        return self._solve_implicit(
-            fn, phi0, dq0, node_slopes0, phi_boundary, drivers, policy, diagnostics,
-            newton_kwargs,
-        )
+        # With flow unknowns a differentiable solve that nothing reaches is the primal one.
+        fn = None
+        if u is not None and policy.differentiable:
+            self._check_no_unreachable_differentiable_tensors()
+            if not policy.forward_only:
+                fn = FunctionalLaws(self, drivers, sources, phi_boundary, step, history)
+        x0, start = self._starting_point(phi0, phi_boundary, drivers, sources, step, q0=q0)
+        if u is None and policy.differentiable:
+            self._check_no_unreachable_differentiable_tensors()
+            fn = FunctionalLaws(self, drivers, sources, phi_boundary, step, history)
+
+        requested = newton_kwargs["method"]
+        on_fail = last = None
+        if u is not None:
+            newton_kwargs["method"] = linear_method(self, requested)
+            if self.linear:
+                # The residual is affine: the full Newton step lands on the solution, so the
+                # damped first step (`newton`'s omega=0.75) would only cost a second
+                # iteration.
+                newton_kwargs.setdefault("omega", 1.0)
+            # The last Jacobian and the first and last residuals, kept to diagnose a failure
+            # by a rank test, which may raise a clearer error than Newton's.
+            last = {}
+
+            def on_fail(exc):
+                if singular(last.get("op"), u.n, first_failing(last, newton_kwargs)):
+                    kinds = [el.kind for el, rel in zip(self._laws, self._relation,
+                                                        strict=True) if rel]
+                    raise singular_error(self, kinds, step.ctx.mode) from exc
+
+        if fn is None:
+            # The primal solve (with flow unknowns also a differentiable one that nothing
+            # reaches). The WHOLE of it runs under no_grad -- the Newton iteration, every
+            # inner linear solve inside it, and the final assemble/flows -- whatever grad
+            # mode the caller is in: there is no legitimate graph to build (any graph would
+            # be an unrolled trace through the converged iterate, not the gradient
+            # `differentiable=True` computes), and `solvers.select.solve`'s "auto" refuses
+            # sparse-direct when grad mode is on and an input requires grad, which made the
+            # backend a function of the caller's context. The returned `(phi, q)` are
+            # detached; `diagnostics` is unaffected.
+            plain = self._owner_call
+            slopes = None if u is None else self._slopes_fn(drivers, plain, step)
+            # The last residual's point, potentials and flows: Newton returns the iterate it
+            # last evaluated the residual at, whose flows are then the result's.
+            point: dict = {}
+
+            def residual_fn(x):
+                r, phi, q = self._residual(x, phi_boundary, drivers, sources, step, plain)
+                point.update(x=x, phi=phi, q=q)
+                if last is not None:
+                    last.setdefault("r0", r.detach())
+                    last["r"] = r.detach()
+                return r
+
+            def operator_fn(x):
+                # At the fast path's starting point the grounding check's slopes are the
+                # first operator's.
+                if start is not None and x is x0:
+                    return self._operator_at(*start)
+                op = self._operator(x, phi_boundary, drivers, step, slopes)
+                if last is not None:
+                    last["op"] = op
+                return op
+
+            with torch.no_grad():
+                result = self._newton_primal(residual_fn, operator_fn, x0, newton_kwargs,
+                                             diagnostics, on_fail, requested=requested)
+                if point.get("x") is result.x:
+                    return point["phi"], point["q"]
+                return self._output(result.x, phi_boundary, drivers, step)
+
+        if u is None:
+            # the threaded residual and operator of the fast path
+            residual_fn = fn.residual_fn
+            reuse_start = fn.layer_slopes
+
+            def operator_fn(x, *params):
+                # At the starting point the grounding check's slopes are the first
+                # operator's, as on the primal path, where they are the same slopes
+                # (`layer_slopes`).
+                if x is x0 and reuse_start and not torch.is_grad_enabled():
+                    return self._operator_at(*start)
+                return fn.operator_fn(x, *params)
+        else:
+            def residual_fn(x, *params):
+                rebuilt, drv, src, pb, st = fn.rebuild(params)
+                r, phi, q = self._residual(x, pb, drv, src, st,
+                                           functools.partial(fn.call, rebuilt))
+                if not q.requires_grad:
+                    fn.last = (x, phi, q)
+                last.setdefault("r0", r.detach())
+                last["r"] = r.detach()
+                return r
+
+            def operator_fn(x, *params):
+                rebuilt, drv, src, pb, st = fn.rebuild(params)
+                call = functools.partial(fn.call, rebuilt)
+                # the one `adjoint` flag: the operator also builds the adjoint, so every
+                # law, withdrawal and storage that declares `exact_slope = False` gives
+                # autograd
+                last["op"] = self._operator(x, pb, drv, st, self._slopes_fn(drv, call, st),
+                                            adjoint=True)
+                return last["op"]
+
+        x = self._newton_differentiable(fn, residual_fn, operator_fn, x0, policy,
+                                        newton_kwargs, diagnostics, on_fail,
+                                        requested=requested)
+        parts = fn.root_parts(x)
+        if parts is not None:
+            return parts
+        return self._output(x, phi_boundary, drivers, step)
 
     def _check_forward_euler(self, scheme) -> None:
         """Refuse `"forward_euler"` on a layer that steps anything inside its solve (storage
@@ -1613,7 +2028,7 @@ class KirchhoffLayer(TopologyGuard):
                                  omega=angular_frequency(self, drivers) if omega else None)
                 return _Step(ctx, None)
             ctx = LawContext(mode="dc" if mode is None else mode, t=t)
-            held = (self._mna._held(drivers, self._owner_call)
+            held = (self._held(drivers, self._owner_call)
                     if mode == "initial" and self._storage and self.mna else None)
             return _Step(ctx, held)
         if not check_dt:
@@ -1834,7 +2249,7 @@ class KirchhoffLayer(TopologyGuard):
     def _initial_storage_flows(self, phi, q, sources, drivers, zeros) -> torch.Tensor:
         """`storage_flows` at the initial point of a layer solved by Modified Nodal Analysis:
         each held node's flow imbalance, split among its entries by capacity."""
-        held = self._mna._held_values(drivers, self._owner_call)
+        held = self._held_values(drivers, self._owner_call)
         if held is None:
             return zeros
         if q is None:
@@ -1862,11 +2277,14 @@ class KirchhoffLayer(TopologyGuard):
         batch = broadcast_shapes(*(p.shape[:-1] for p in parts))
         return torch.cat([p.expand(batch + p.shape[-1:]) for p in parts], dim=-1)
 
-    def _starting_point(self, phi0, phi_boundary, drivers, sources, step=None):
-        """The Newton starting guess, certified grounded: `(phi0, dq0, node_slopes0)`.
+    def _starting_point(self, phi0, phi_boundary, drivers, sources, step=None, *, q0=None):
+        """The Newton starting guess `x0` and, on the fast path, the slopes there `start`.
 
-        `dq0` and `node_slopes0` are the slopes at that point; the first operator reuses them.
-        `step` is the storage step of a layer with storage (`None` otherwise).
+        The fast path starts from `linear_init` (or `phi0`), certified grounded; `start` is
+        `(dq0, node_slopes0)`, the slopes at that point, which the first operator reuses.
+        A layer with flow unknowns starts from zeros, or the warm start `phi0` (interior
+        potentials) and `q0` (the flow unknowns), in the real view; `start` is `None`.
+        `step` is the solve's `_Step`.
         """
         # The initial guess is NOT a differentiable quantity, and neither is the grounding
         # check below. Both are computed under no_grad (and a caller-supplied phi0 is
@@ -1877,6 +2295,27 @@ class KirchhoffLayer(TopologyGuard):
         # the iteration started from, so tracing the guess buys no gradient at all.
         # `linear_init` itself is untouched and stays differentiable for callers who want it
         # directly.
+        u = self._unknowns
+        if u is not None:
+            real_dtype = (phi_boundary.real.dtype if phi_boundary.is_complex()
+                          else phi_boundary.dtype)
+            with torch.no_grad():
+                probe = self._residual(
+                    torch.zeros(u.n, dtype=real_dtype, device=phi_boundary.device),
+                    phi_boundary, drivers, sources, step, self._owner_call)[0]
+                shapes = [probe.shape[:-1]]
+                if phi0 is not None:
+                    shapes.append(phi0.shape[:-1])
+                if q0 is not None:
+                    shapes.append(q0.shape[:-1])
+                B = broadcast_shapes(*shapes)
+                x0 = torch.zeros(B + (u.n,), dtype=real_dtype, device=phi_boundary.device)
+                n_phi = u.w * u.n_I
+                if phi0 is not None:
+                    x0[..., :n_phi] = to_real(self, phi0.detach())
+                if q0 is not None:
+                    x0[..., n_phi:] = to_real(self, q0.detach())
+            return x0, None
         with torch.no_grad():
             if phi0 is None:
                 phi0 = self.linear_init(phi_boundary, drivers, sources, _step=step)
@@ -1898,87 +2337,19 @@ class KirchhoffLayer(TopologyGuard):
             dq0 = self.dflows(phi0_full, drivers)
             node_slopes0 = self._withdrawal_slopes(phi0_full, drivers, step)
             self._grounding_check(dq0, where="solve", node_slopes=node_slopes0)
-        return phi0, dq0, node_slopes0
+        return phi0, (dq0, node_slopes0)
 
-    def _solve_primal(
-        self, phi0, dq0, node_slopes0, phi_boundary, drivers, sources, diagnostics,
-        newton_kwargs, step=None,
-    ):
-        """The non-differentiable classic solve: Newton alone, detached `(phi, q)`."""
-        # The WHOLE non-differentiable solve runs under no_grad -- the Newton iteration,
-        # every inner linear solve inside it, and the final assemble/flows. Two reasons,
-        # the second of which is the one that made this mandatory rather than tidy:
-        #
-        # 1. There is no legitimate graph to build here. This branch does not use the
-        #    implicit adjoint, so any graph it leaves behind is an UNROLLED trace through
-        #    the converged Newton iterate -- real gradients, but not the ones
-        #    `differentiable=True` computes, retained for a caller who asked for the
-        #    non-differentiable path.
-        # 2. It made the inner solver's choice depend on the CALLER's ambient grad mode.
-        #    `solvers.select.solve`'s "auto" refuses the non-differentiable sparse-direct
-        #    backend when grad mode is on and an input requires grad (correctly: it would
-        #    silently detach). With the iteration running under whatever mode the caller
-        #    happened to be in, the same `solve(differentiable=False)` factorised through
-        #    SuperLU from a plain call and fell back to PCG -- a much slower, different
-        #    code path (docs/design/solvers.md) -- from inside `torch.enable_grad()` with a
-        #    grad-requiring `sources`. A solver choice must not be a function of the
-        #    caller's context. The guard in `select.solve` stays as the last line of
-        #    defence; this removes the condition that was tripping it.
-        #
-        # `diagnostics` is unaffected by no_grad; the returned `(phi, q)` are
-        # unconditionally detached -- see the docstring.
-        with torch.no_grad():
-            # The last residual's point, potentials and flows: Newton returns the iterate
-            # it last evaluated the residual at, whose flows are then the result's.
-            last: dict = {}
-
-            def residual_fn(x):
-                r, phi, q = self._residual_parts(x, phi_boundary, drivers, sources, step)
-                last.update(x=x, phi=phi, q=q)
-                return r
-
-            def operator_fn(x):
-                # A matvec-free A_I diag(dq) A_I^T at the current iterate, instead of the
-                # dense (n_interior, n_interior) einsum layer.jacobian() assembles.
-                # Rebuilt each iteration because dq is what changes; the endpoint/index
-                # tensors it closes over are cached on the layer at construction. At the
-                # starting point the grounding check's slopes above are those slopes.
-                if x is phi0:
-                    return self._operator_at(dq0, node_slopes0)
-                phi = self.assemble(x, phi_boundary)
-                dq = self.dflows(phi, drivers)
-                return self._operator_at(dq, self._withdrawal_slopes(phi, drivers, step))
-
-            result = self._newton_primal(residual_fn, operator_fn, phi0, newton_kwargs,
-                                         diagnostics)
-            if last.get("x") is result.x:
-                phi, q = last["phi"], last["q"]
-            else:
-                phi = self.assemble(result.x, phi_boundary)
-                q = self.flows(phi, drivers)
-        return phi, q
-
-    def _solve_implicit(
-        self, fn, phi0, dq0, node_slopes0, phi_boundary, drivers, policy, diagnostics,
-        newton_kwargs,
-    ):
-        """The differentiable fast-path solve through the implicit-function adjoint."""
-        reuse_start = fn.layer_slopes
-
-        def operator_fn(x, *params):
-            # At the starting point the grounding check's slopes are the first operator's,
-            # as on the primal path, where they are the same slopes (`layer_slopes`).
-            if x is phi0 and reuse_start and not torch.is_grad_enabled():
-                return self._operator_at(dq0, node_slopes0)
-            return fn.operator_fn(x, *params)
-
-        x = self._newton_differentiable(fn, fn.residual_fn, operator_fn, phi0, policy,
-                                        newton_kwargs, diagnostics)
-        parts = fn.root_parts(x)
-        if parts is not None:
-            return parts
-        phi = self.assemble(x, phi_boundary)
-        q = self.flows(phi, drivers)
+    def _output(self, x, phi_boundary, drivers, step):
+        """`(phi, q)` at the solution `x`: full-node potentials and every edge's flow. The
+        laws are called on the layer's own modules, so on the differentiable path `q` keeps
+        the parameters' graph."""
+        u = self._unknowns
+        if u is None:
+            phi = self.assemble(x, phi_boundary)
+            return phi, self.flows(phi, drivers)
+        phi_I, q_F = split(u, x)
+        phi = self.assemble(phi_I, phi_boundary)
+        q, _ = self._flows_and_residuals(phi, q_F, drivers, step.ctx, self._owner_call)
         return phi, q
 
     def _newton_primal(self, residual_fn, operator_fn, x0, newton_kwargs, diagnostics,

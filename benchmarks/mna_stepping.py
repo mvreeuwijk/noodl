@@ -11,9 +11,10 @@ Three cases from the electrical tests:
 Each case runs `--steps` steps (one solve for `case118`), warmed once, over `--rounds`
 rounds; the median wall time per step is reported. In a separate, instrumented run the
 time and the number of calls of the three parts of a Newton iteration are counted: the
-Jacobian (`MnaSystem.operator`, the forward-mode colouring), the linear solve
+Jacobian (`KirchhoffLayer._operator`, the reverse-mode colouring), the linear solve
 (`solvers.select._sparse_direct`, SciPy's SuperLU) and the residual
-(`MnaSystem._residual_parts`, which `residual` calls).
+(`KirchhoffLayer._residual`). The Jacobian and the residual are counted on layers with flow
+unknowns only (the fast-path layers of a coupled case are not this benchmark's subject).
 A third run under `cProfile` counts the calls that reach `torch._refs` / `torch._prims`,
 PyTorch's Python fallbacks for operations without a native kernel (complex elementwise
 ops among them).
@@ -49,7 +50,7 @@ from noodl.apps.electrical.power import (
     read_matpower,
     solve_power_flow,
 )
-from noodl.layers._flow_unknowns import MnaSystem
+from noodl.layers.kirchhoff import KirchhoffLayer
 
 ROOT = Path(__file__).resolve().parent.parent
 CIRCUITS = ROOT / "tests" / "data" / "modelica_electrical"
@@ -101,8 +102,12 @@ class _Counter:
         self.time: dict[str, float] = {}
         self.calls: dict[str, int] = {}
 
-    def wrap(self, part: str, fn):
+    def wrap(self, part: str, fn, when=None):
+        """`fn` timed and counted under `part`, on the calls for which `when(*args)` holds
+        (every call without `when`)."""
         def timed(*args, **kwargs):
+            if when is not None and not when(*args):
+                return fn(*args, **kwargs)
             t0 = time.perf_counter()
             try:
                 return fn(*args, **kwargs)
@@ -114,14 +119,20 @@ class _Counter:
 
 @contextlib.contextmanager
 def _instrumented(counter: _Counter):
-    saved = (MnaSystem.operator, MnaSystem._residual_parts, select._sparse_direct)
-    MnaSystem.operator = counter.wrap("jacobian", MnaSystem.operator)
-    MnaSystem._residual_parts = counter.wrap("residual", MnaSystem._residual_parts)
+    saved = (KirchhoffLayer._operator, KirchhoffLayer._residual, select._sparse_direct)
+
+    def flow_unknowns(layer, *args):
+        return layer._unknowns is not None
+
+    KirchhoffLayer._operator = counter.wrap("jacobian", KirchhoffLayer._operator,
+                                            flow_unknowns)
+    KirchhoffLayer._residual = counter.wrap("residual", KirchhoffLayer._residual,
+                                            flow_unknowns)
     select._sparse_direct = counter.wrap("lu", select._sparse_direct)
     try:
         yield
     finally:
-        MnaSystem.operator, MnaSystem._residual_parts, select._sparse_direct = saved
+        KirchhoffLayer._operator, KirchhoffLayer._residual, select._sparse_direct = saved
 
 
 def _refs_calls(run) -> dict[str, int]:

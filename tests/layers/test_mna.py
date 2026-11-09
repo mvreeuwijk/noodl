@@ -6,7 +6,7 @@ import torch
 import noodl.solvers.select as select_module
 from noodl.elements import Conductance, ConstitutiveLaw, FixedFlow, ImplicitLaw, LawContext
 from noodl.heads import EdgeHeads
-from noodl.layers.kirchhoff import KirchhoffLayer
+from noodl.layers.kirchhoff import KirchhoffLayer, _Step
 from noodl.solvers.implicit import TransposeOperator
 from noodl.topology import Network
 from noodl.withdrawals import NodeWithdrawal
@@ -372,23 +372,23 @@ def _mixed_layer():
 
 def test_assembled_jacobian_matches_autograd_jacobian_of_the_residual():
     net, layer = _mixed_layer()
-    mna = layer._mna
-    assert mna.n_I == 5 and mna.n_F == 3 and mna.n == 8
+    u = layer._unknowns
+    assert u.n_I == 5 and u.n_F == 3 and u.n == 8
     gen = torch.Generator().manual_seed(7)
-    x = torch.randn(mna.n, generator=gen, dtype=F64)
+    x = torch.randn(u.n, generator=gen, dtype=F64)
     pb = torch.tensor([0.4])
     sources = torch.randn(net.n, generator=gen, dtype=F64)
-    ctx = LawContext(mode="dc")
+    step = _Step(LawContext(mode="dc"), None)
     call = layer._owner_call
 
     def residual(z):
-        return mna.residual(z, pb, {}, sources, ctx, call)
+        return layer._residual(z, pb, {}, sources, step, call)[0]
 
     expected = torch.autograd.functional.jacobian(residual, x)
-    op = mna.operator(x, pb, {}, ctx, mna._slopes_fn({}, layer._owner_call, ctx, None))
+    op = layer._operator(x, pb, {}, step, layer._slopes_fn({}, call, step))
     torch.testing.assert_close(op.assemble(), expected, rtol=1e-13, atol=1e-13)
     # rmatvec is the transpose action
-    v = torch.randn(mna.n, generator=gen, dtype=F64)
+    v = torch.randn(u.n, generator=gen, dtype=F64)
     torch.testing.assert_close(op.rmatvec(v), expected.T @ v, rtol=1e-13, atol=1e-13)
 
 
@@ -401,9 +401,9 @@ def test_mixed_nonlinear_network_converges_with_zero_residual():
         phi, q = layer.solve(pb, {}, sources, differentiable=False, method=method,
                              diagnostics=diagnostics, atol=1e-13, rtol=0)
         assert bool(diagnostics["converged"])
-        mna = layer._mna
-        x = torch.cat([phi[layer.interior], q[mna.f_edges]])
-        r = mna.residual(x, pb, {}, sources, LawContext(mode="dc"), layer._owner_call)
+        x = torch.cat([phi[layer.interior], q[layer.implicit_edges]])
+        r, _, _ = layer._residual(x, pb, {}, sources, _Step(LawContext(mode="dc"), None),
+                                  layer._owner_call)
         assert float(r.abs().max()) < 1e-12
         # Tellegen with the withdrawals: their withdrawal w leaves the balance as
         # -sum(phi_I w), the power the withdrawals take out of the network.
@@ -418,14 +418,13 @@ def _counting_residuals(monkeypatch, layer):
     """Count every evaluation of the layer's flows and relation residuals (each residual,
     and each recomputation of the solved flows, evaluates them once)."""
     count = {"n": 0}
-    mna = layer._mna
-    original = mna._flows_and_residuals
+    original = layer._flows_and_residuals
 
     def counted(*args, **kwargs):
         count["n"] += 1
         return original(*args, **kwargs)
 
-    monkeypatch.setattr(mna, "_flows_and_residuals", counted)
+    monkeypatch.setattr(layer, "_flows_and_residuals", counted)
     return count
 
 
@@ -698,3 +697,25 @@ def test_flows_of_mna_layer_gradients_match_central_differences():
     torch.testing.assert_close(g[1], fd_c, rtol=1e-6, atol=1e-8)
     torch.testing.assert_close(g[2][..., 0], w[0])     # the implicit edge passes q
     assert torch.all(g[2][..., 1:] == 0)
+
+
+def test_the_layer_assembles_its_flow_unknowns_itself():
+    """The flow unknowns' layout is `FlowUnknowns` (`None` on the fast path) and their
+    residual and Jacobian are the layer's own: the former `noodl.layers._mna` and
+    `noodl.operators.mna` are gone, and the only `mna` attributes left are `mna` and
+    `_refuse_on_mna`, which go with the path triggers."""
+    import importlib
+
+    from noodl.layers._flow_unknowns import FlowUnknowns
+
+    for module in ("noodl.layers._mna", "noodl.operators.mna"):
+        with pytest.raises(ModuleNotFoundError):
+            importlib.import_module(module)
+    layer = _fan_layer()
+    assert isinstance(layer._unknowns, FlowUnknowns)
+    assert [name for name in vars(layer) if "mna" in name.lower()] == ["mna"]
+    assert [name for name in dir(KirchhoffLayer) if "mna" in name.lower()] == ["_refuse_on_mna"]
+    net = _net(["gnd", "a"], [("a", "gnd", "r")])
+    fast = KirchhoffLayer(net, "e", [Conductance(torch.tensor([1.0]), kind="r")],
+                          boundary=["gnd"])
+    assert fast._unknowns is None and fast.implicit_edges.numel() == 0
