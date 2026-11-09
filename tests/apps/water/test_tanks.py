@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 import torch
 
+from noodl import Model
 from noodl.apps.water.inp import read_epanet_inp
 from noodl.apps.water.network import (
     Tank,
@@ -216,3 +217,30 @@ def test_gradient_through_storage_steps_against_central_differences():
     with torch.no_grad():
         fd = (level(sources + e) - level(sources - e)) / (2 * h)
     assert math.isclose(float(analytic[k]), float(fd), rel_tol=1e-6), (analytic[k], fd)
+
+
+def test_controls_read_the_step_start_level_in_every_pass_of_a_step(monkeypatch):
+    """Under coupling="iterate" a step takes several passes. The tank is held at its
+    step-start head through all of them, and the level controls read that head too, as
+    EPANET (and the closure-carried level before) did, not the level a previous pass of the
+    same step has advanced it to. Here the step carries the tank across the 140 ft ABOVE
+    trigger, so an advanced level would close the pump inside the step."""
+    pingpong, _, drivers = build_model(read_epanet_inp(NET1))
+    model = Model(pingpong.net, {"water": pingpong.kirchhoff["water"]},
+                  closures=[pingpong.tank_closure], coupling="iterate",
+                  iterate_tol={"water": 1e-9})
+    state = initial_state(pingpong, values={"water.tank_level": {"2": 42.5}})
+    read = []
+    levels = TankLevels.levels
+    monkeypatch.setattr(TankLevels, "levels",
+                        lambda self, s: read.append(float(levels(self, s)[0]))
+                        or levels(self, s))
+    kwargs = dict(atol=1e-11, rtol=1e-11, max_iter=200)
+    diagnostics: dict = {}
+    stepped = model.step(state, drivers, 1800.0, diagnostics=diagnostics, **kwargs)
+    assert diagnostics["passes"] >= 2 and len(read) >= 2
+    assert read == pytest.approx([42.5] * len(read), abs=1e-12)
+    assert float(tank_levels(pingpong, stepped)[0]) > 140 * 0.3048   # crossed in this step
+    assert stepped["water.link_status"].tolist() == [1.0]             # ... the pump stays open
+    once = pingpong.step(state, drivers, 1800.0, **kwargs)
+    torch.testing.assert_close(stepped["water.phi"], once["water.phi"], rtol=0, atol=1e-9)

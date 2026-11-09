@@ -84,6 +84,7 @@ from noodl._model_setup import (
 )
 from noodl._pass import (
     LAYER_OPTIONS,
+    boundary_values,
     circuit_kwargs,
     kind_flows,
     require,
@@ -990,7 +991,7 @@ class Model:
                                           drv)
                 continue
             out[name] = layer.residual(
-                phi[..., layer.interior], self._require(drv, f"{name}.phi_boundary"), drv,
+                phi[..., layer.interior], boundary_values(name, layer, drv, state), drv,
                 drv.get(f"{name}.sources"),
             )
         for name, layer in self.transport.items():
@@ -1051,7 +1052,7 @@ class Model:
             phi_prev = state.get(f"{owner}.phi")
             phi0 = None if phi_prev is None else phi_prev[..., layer.interior]
             _phi, q = layer.solve(
-                self._require(drv, f"{owner}.phi_boundary"), drv,
+                boundary_values(owner, layer, drv, state), drv,
                 drv.get(f"{owner}.sources"), phi0=phi0,
             )
             return layer.flows_of_kind(q, self.transport[name].flow_kinds)

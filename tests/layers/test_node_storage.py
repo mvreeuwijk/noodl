@@ -497,3 +497,24 @@ def test_forward_euler_refusals():
     model = Model(layer.net, [layer])
     with pytest.raises(KeyError, match="held at its potential at the step start"):
         model.steady({}, {"w.phi_boundary": torch.tensor([1.25, 2.0])})
+
+
+def test_the_layer_holds_boundary_storage_on_every_model_path():
+    """`steady`, `step`, `residuals` and `current_flows` all hold the tank at the state's
+    potential, whatever the driver's column says (the stale 0.0 here)."""
+    layer = _tank_layer()
+    model = Model(layer.net, [layer])
+    drivers = {"w.phi_boundary": torch.tensor([1.25, 0.0]),
+               "w.sources": torch.tensor([0.0, 0.3, -0.2, 0.0])}
+    steady = model.steady({"w.phi": torch.tensor([1.25, 0.0, 0.0, 2.0])}, drivers)
+    assert layer.holds_storage and float(steady["w.phi"][3]) == 2.0
+    residual = model.residuals(steady, drivers)["w"]
+    torch.testing.assert_close(residual, torch.zeros_like(residual), rtol=0, atol=1e-12)
+    report = model.check(steady, drivers, steady=True)
+    assert report.ok, str(report)
+
+
+def test_forward_euler_without_storage_is_refused():
+    with pytest.raises(ValueError, match="this layer has none"):
+        KirchhoffLayer(_tank_net(), "w", [Conductance(G.clone(), kind="g")],
+                       boundary=["gnd", "t"], scheme="forward_euler")

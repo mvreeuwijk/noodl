@@ -149,10 +149,10 @@ class KirchhoffLayer(TopologyGuard):
 
     With `scheme="forward_euler"` the storage sits at BOUNDARY nodes instead, and is stepped
     by forward Euler (EPANET's tank): it is never an unknown. The solve holds each storage
-    node at its potential at the step start (a `Model` pass writes it into
-    `"<name>.phi_boundary"`), and the step then moves it by `dt * inflow / C`
-    (`advance_storage`), `inflow` being the flow the solve delivers to the node
-    (`storage_flows`) and `C` the storage's capacity. Only a linear storage (a constant
+    node at its potential at the step start (`hold_storage`; every `Model` path writes it
+    into `"<name>.phi_boundary"`, whatever the driver gives there), and the step then moves
+    it by `dt * inflow / C` (`advance_storage`), `inflow` being the flow the solve delivers
+    to the node (`storage_flows`) and `C` the storage's capacity. Only a linear storage (a constant
     capacity, `LinearStorage`) is accepted there, and only one entry per node. Such a
     layer's solve takes no step and does not depend on `dt`.
 
@@ -160,8 +160,8 @@ class KirchhoffLayer(TopologyGuard):
     scheme of a transient step of a layer with dynamic laws or storage, one of `SCHEMES`
     (`noodl.elements.base`); a `solve` call may give its own. `"exact"` is a `TransportLayer`
     scheme and is refused here by name. `"forward_euler"` is for storage at boundary nodes
-    only (above): a layer with storage at interior nodes or with dynamic laws refuses it, and
-    a layer with boundary storage refuses every other scheme.
+    only (above): a layer with storage at interior nodes, with dynamic laws or with no storage
+    refuses it, and a layer with boundary storage refuses every other scheme.
 
     `analytic_primal` (default ``False``): a ``differentiable=True`` solve that nothing
     differentiable reaches (grad mode off, or no input requiring grad) runs the
@@ -427,6 +427,12 @@ class KirchhoffLayer(TopologyGuard):
         `bound`)."""
         if scheme != "forward_euler":
             return []
+        if not self._boundary_storage:
+            raise ValueError(
+                f"KirchhoffLayer {name!r}: scheme='forward_euler' steps storage at boundary "
+                f"nodes, and this layer has none; give it storage=[LinearStorage at boundary "
+                f"nodes], or use 'backward_euler' or 'trapezoidal'"
+            )
         dynamic = [el.kind for el in self._laws if el.dynamic]
         if dynamic:
             raise ValueError(
@@ -565,6 +571,13 @@ class KirchhoffLayer(TopologyGuard):
         nodes under `scheme="forward_euler"`), in the order given at construction
         (read-only); their entries are the columns of `storage_flows`."""
         return tuple(self._storage) + tuple(self._boundary_storage)
+
+    @property
+    def holds_storage(self) -> bool:
+        """True when this layer's storage sits at boundary nodes (`scheme="forward_euler"`):
+        every solve holds those nodes at their step-start potentials (`hold_storage`), and a
+        step moves them afterwards (`advance_storage`)."""
+        return bool(self._boundary_storage)
 
     # ------------------------------------------------------- dense references (lazy)
     @property
@@ -1632,11 +1645,29 @@ class KirchhoffLayer(TopologyGuard):
         batch = broadcast_shapes(*(p.shape[:-1] for p in parts))
         return torch.cat([p.expand(batch + p.shape[-1:]) for p in parts], dim=-1)
 
+    def _held_nodes(self) -> torch.Tensor:
+        """The full-node positions of every boundary storage node, in entry order."""
+        return torch.cat([st.nodes for st in self._boundary_storage])
+
+    def hold_potentials(self, phi, phi_start) -> torch.Tensor:
+        """`phi` (full-node) with every boundary storage node (`scheme="forward_euler"`) at
+        its potential in `phi_start`: what a closure reading the state sees of such a node
+        during a step, the value the solve holds it at. Unchanged on a layer without
+        boundary storage."""
+        if not self._boundary_storage:
+            return phi
+        idx = self._held_nodes().to(phi.device)
+        held = phi_start[..., idx]
+        batch = broadcast_shapes(phi.shape[:-1], held.shape[:-1])
+        out = phi.expand(batch + phi.shape[-1:]).clone()
+        out[..., idx] = held.to(out.dtype)
+        return out
+
     def hold_storage(self, phi_boundary, phi_start) -> torch.Tensor:
         """`phi_boundary` with the column of every storage node at a boundary node
         (`scheme="forward_euler"`) replaced by its potential in `phi_start` (full-node, the
-        step start): the value the solve holds it at. Unchanged on a layer without boundary
-        storage."""
+        step start): the value the solve holds it at, whatever the driver gave there.
+        Unchanged on a layer without boundary storage."""
         if not self._boundary_storage:
             return phi_boundary
         cols = torch.cat(self._boundary_storage_cols).to(phi_boundary.device)

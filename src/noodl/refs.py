@@ -1048,7 +1048,7 @@ def _reads_step_flows(layer) -> bool:
 def _holds_storage(layer) -> bool:
     """Whether a Kirchhoff layer holds storage at boundary nodes (`scheme="forward_euler"`):
     every solve then reads its step-start potentials `"<layer>.phi"`."""
-    return bool(getattr(layer, "storage", ())) and getattr(layer, "scheme", "") == "forward_euler"
+    return bool(getattr(layer, "holds_storage", False))
 
 
 def _needs_storage_flow(layer) -> bool:

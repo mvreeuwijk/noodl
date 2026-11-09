@@ -1108,12 +1108,17 @@ def water_event_step(model: Model, state: State, drivers: Drivers, dt_max: float
             "with water_step"
         )
     closure = model.tank_closure
+    layer = model.kirchhoff["water"]
     solved = water_steady(model, state, drivers, **solve_kwargs)
     inflow = solved["water.storage_flow"]
-    dt = closure.event_step(closure.levels(state), inflow / closure.area, dt_max)
+    # The level rises at inflow / A, A = C * head_scale: the capacity C of the storage that
+    # moves the tank in step 3, so the projected crossing and the move use one area.
+    (storage,) = layer.storage
+    heads = solved["water.phi"][..., storage.nodes]
+    area = storage.capacity(heads, heads, drivers) * closure.head_scale
+    dt = closure.event_step(closure.levels(state), inflow / area, dt_max)
     out = dict(solved)
-    out["water.phi"] = model.kirchhoff["water"].advance_storage(
-        solved["water.phi"], inflow, dt, drivers)
+    out["water.phi"] = layer.advance_storage(solved["water.phi"], inflow, dt, drivers)
     return out, dt
 
 

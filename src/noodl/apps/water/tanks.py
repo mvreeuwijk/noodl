@@ -11,9 +11,13 @@ the solve holds at its step-start head and the step then moves by `dt * inflow /
 
 Per call the closure (1) applies every control's level test with EPANET's semantics, under
 `no_grad` -- the switch itself is a combinatorial decision; and (2) writes the reservoir heads
-(and, for tanks held at boundary nodes, their current heads, which a `Model` pass replaces by
-the step-start ones) into `"water.phi_boundary"` and the per-pump status into
-`"water.status"`.
+into `"water.phi_boundary"` and the per-pump status into `"water.status"`. A tank held at a
+boundary node has a column of `"water.phi_boundary"` too, which the closure fills with zeros:
+the layer holds the tank at its step-start head there on every path (`Model` steps, steady
+solves, `residuals`, `current_flows`; `KirchhoffLayer.hold_storage`), so it is the only
+authority for the tank heads. During a step the controls read the step-start levels: a
+`Model` pass shows a closure the held head of such a node, not the level a previous pass of
+the same step has advanced it to (`coupling="iterate"`).
 
 `event_step` is EPANET's ADAPTIVE shortening, and it is not optional: with a fixed step
 the pump switches up to a whole step late and the tank level diverges from EPANET; the step
@@ -58,10 +62,10 @@ class TankLevels:
 
     A tank's level is its head in `"water.phi"` at `tank_nodes` less its bottom (`levels`).
     Per call it applies the controls to those levels, refuses a level outside `[min, max]`
-    by name, and writes the reservoir heads, then the tanks' current heads, into
-    `"water.phi_boundary"`; a `Model` pass holds the tanks at their step-start heads
-    whatever is written there. Only the link status is carried. `event_step` is EPANET's
-    shortening of the step to the next control crossing.
+    by name, and writes the reservoir heads into `"water.phi_boundary"`, then zeros in the
+    tanks' columns, which the layer fills with their step-start heads
+    (`KirchhoffLayer.hold_storage`). Only the link status is carried. `event_step` is
+    EPANET's shortening of the step to the next control crossing.
     """
 
     state_keys = ("water.link_status",)
@@ -116,9 +120,6 @@ class TankLevels:
         self.tank_of = {t.name: i for i, t in enumerate(self.tanks)}
         self.pump_of = {name: i for i, name in enumerate(self.pump_names)}
         self.bottom = torch.tensor([t.elevation for t in self.tanks], dtype=F64)
-        self.area = torch.tensor(
-            [torch.pi * t.diameter**2 / 4.0 for t in self.tanks], dtype=F64
-        )
         self.y_min = torch.tensor([t.min_level for t in self.tanks], dtype=F64)
         self.y_max = torch.tensor([t.max_level for t in self.tanks], dtype=F64)
 
@@ -141,11 +142,12 @@ class TankLevels:
                 "water.link_status": status}
 
     def _boundary(self, state, level: Tensor) -> Tensor:
-        """The reservoir heads, then the tanks' heads (boundary nodes here)."""
-        heads = state["water.phi"][..., self.tank_nodes]
+        """The reservoir heads, then zeros in the tanks' columns (boundary nodes here, whose
+        heads the layer holds: `KirchhoffLayer.hold_storage`)."""
+        batch = level.shape[:-1]
         return torch.cat(
-            [self.reservoir_heads.expand(heads.shape[:-1] + self.reservoir_heads.shape),
-             heads],
+            [self.reservoir_heads.expand(batch + self.reservoir_heads.shape),
+             torch.zeros(batch + level.shape[-1:], dtype=level.dtype, device=level.device)],
             dim=-1,
         )
 

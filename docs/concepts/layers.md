@@ -124,9 +124,13 @@ storages in list order, then their nodes.
 
 **Storage at boundary nodes, stepped by forward Euler.** With `scheme="forward_euler"` the
 storage sits at boundary nodes instead (an EPANET tank), and is never an unknown. The solve
-holds each storage node at its potential at the step start: a `Model` pass writes the
-step-start `"<layer>.phi"` into those columns of `"<layer>.phi_boundary"` (`hold_storage`),
-whatever a closure wrote there. After the solve the step moves each storage node by
+holds each storage node at its potential at the step start (`layer.holds_storage` is True):
+the layer writes the step-start `"<layer>.phi"` into those columns of
+`"<layer>.phi_boundary"` (`hold_storage`), whatever the driver gives there, on every `Model`
+path (`step`, `steady`, `residuals`, `current_flows`, `check`), so a closure may fill those
+columns with anything. During a step a closure reading `"<layer>.phi"` sees such a node at
+its step-start potential too (`hold_potentials`), even in the later passes of
+`coupling="iterate"`. After the solve the step moves each storage node by
 $\Delta t\,w / C$ (`advance_storage(phi, storage_flow, dt)`), with $w$ the flow the solve
 delivered to the node and $C$ the storage's capacity. That is explicit Euler, EPANET's own
 tank method; the solve itself takes no step and does not depend on `dt`.
@@ -146,8 +150,8 @@ phi_next = layer.advance_storage(phi, w, dt=600.0)      # T1 moved by dt * w / a
   solve, steady or not.
 - Only a linear storage (`LinearStorage`, a constant capacity) is accepted at a boundary node,
   one entry per node; a nonlinear one is refused by name.
-- A layer whose storage sits at interior nodes, or with dynamic laws, refuses
-  `"forward_euler"`; a layer with boundary storage refuses the other schemes, and a storage at
+- A layer whose storage sits at interior nodes, with dynamic laws, or with no storage at
+  all refuses `"forward_euler"`; a layer with boundary storage refuses the other schemes, and a storage at
   a boundary node of a layer with another scheme is refused.
 - Gradients reach the capacities through `advance_storage`; the solve does not depend on them.
 

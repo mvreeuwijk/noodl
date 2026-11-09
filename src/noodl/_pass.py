@@ -40,6 +40,24 @@ def require(drivers: Mapping[str, Tensor], key: str) -> Tensor:
         raise KeyError(f"Model: driver {key!r} is required and was not given") from exc
 
 
+def boundary_values(name: str, layer: KirchhoffLayer, drv: Mapping[str, Tensor],
+                    start: Mapping[str, Tensor]) -> Tensor:
+    """Kirchhoff layer `name`'s boundary potentials: the driver `"<name>.phi_boundary"`, with
+    every storage node at a boundary node (`layer.holds_storage`) held at its potential in
+    the state `start` (`KirchhoffLayer.hold_storage`). Every path that solves or evaluates
+    the layer at a state takes its boundary values here."""
+    pb = require(drv, f"{name}.phi_boundary")
+    if not layer.holds_storage:
+        return pb
+    phi = start.get(f"{name}.phi")
+    if phi is None:
+        raise KeyError(
+            f"Model: state {name + '.phi'!r} is required by Kirchhoff layer {name!r}, whose "
+            f"storage at boundary nodes is held at its potential at the step start"
+        )
+    return layer.hold_storage(pb, phi)
+
+
 def zero_sources(layer: TransportLayer, like: Tensor, n_like: int, n_nodes: int) -> Tensor:
     """Full-node zeros (`n_nodes` nodes) in `like`'s LAYOUT (reduced `(n,)` or stacked
     `(n, K)`); see `Model._zero_sources`."""
@@ -147,6 +165,13 @@ def run_pass(
     for key in model.closure_state_keys:
         if key in base:
             closure_state[key] = base[key]
+    # A storage node at a boundary node is held at its step-start potential through the step,
+    # so a closure reading it (a tank-level control) reads that value, not the level a
+    # previous pass of the same step has already advanced it to.
+    for name, layer in model.kirchhoff.items():
+        key = f"{name}.phi"
+        if layer.holds_storage and key in closure_state and key in base:
+            closure_state[key] = layer.hold_potentials(closure_state[key], base[key])
     written: set[str] = set()
     ctx = StepContext(dt=dt, t=t)
     drv = model._apply_closures(closure_state, drivers, written, ctx)
@@ -169,19 +194,9 @@ def _solve_potentials(model: Model, state, base, drv, dt, t, solve_kwargs, warm_
                       new: dict, made: list, diag: dict) -> None:
     """Solve every Kirchhoff layer at the closures' drivers, into `new`/`made`/`diag`."""
     for name, layer in model.kirchhoff.items():
-        pb = require(drv, f"{name}.phi_boundary")
-        held = layer.scheme == "forward_euler" and bool(layer.storage)
-        if held:
-            # Storage at boundary nodes (an EPANET tank) is held at its step-start
-            # potential through the solve, whatever a closure wrote there.
-            start = base.get(f"{name}.phi")
-            if start is None:
-                raise KeyError(
-                    f"Model: state {name + '.phi'!r} is required by Kirchhoff layer "
-                    f"{name!r}, whose storage at boundary nodes is held at its potential "
-                    f"at the step start"
-                )
-            pb = layer.hold_storage(pb, start)
+        # Storage at boundary nodes (an EPANET tank) is held at its step-start potential
+        # through the solve, whatever a closure wrote there.
+        pb = boundary_values(name, layer, drv, base)
         sources = drv.get(f"{name}.sources")
         phi_prev = state.get(f"{name}.phi") if warm_start else None
         phi0 = None if phi_prev is None else phi_prev[..., layer.interior]
@@ -204,7 +219,7 @@ def _solve_potentials(model: Model, state, base, drv, dt, t, solve_kwargs, warm_
                 history=circuit.get("history"), storage_flow=circuit.get("storage_flow"),
                 mode=kwargs.get("mode"), q=q, sources=sources, _checked=True)
             made.append(f"{name}.storage_flow")
-            if held and dt is not None:
+            if layer.holds_storage and dt is not None:
                 # ... and stepped after it, by forward Euler on the flow it received.
                 new[f"{name}.phi"] = layer.advance_storage(
                     phi, new[f"{name}.storage_flow"], dt, drv)
