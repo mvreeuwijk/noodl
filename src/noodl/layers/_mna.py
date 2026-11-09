@@ -111,6 +111,9 @@ class MnaSystem:
                    zip(layer._laws, layer._law_slices, strict=True)
                    if el.law_form == "implicit"]
         self.f_edges = torch.cat(f_parts) if f_parts else torch.zeros(0, dtype=torch.long)
+        dyn = [torch.arange(s, e) for el, (s, e) in
+               zip(layer._laws, layer._law_slices, strict=True) if el.dynamic]
+        self._dynamic_edges = torch.cat(dyn) if dyn else torch.zeros(0, dtype=torch.long)
         self.n_I = len(layer.interior)
         self.n_F = len(self.f_edges)
         self.n = self.w * (self.n_I + self.n_F)
@@ -314,6 +317,7 @@ class MnaSystem:
             raise ValueError(f"KirchhoffLayer {name!r}: dt must be positive, got {dt!r}")
         check_scheme(name, scheme)
         ctx = LawContext(mode="transient", dt=dt, t=t, scheme=scheme)
+        self._check_head_off_dynamic_edges(drivers)
         if history is None:
             if self.layer.dynamic:
                 raise ValueError(
@@ -335,6 +339,25 @@ class MnaSystem:
                 f"dimensions {phi_prev.shape[-1]} and {q_prev.shape[-1]}"
             )
         return self._with_history(ctx, phi_prev, q_prev)
+
+    def _check_head_off_dynamic_edges(self, drivers) -> None:
+        """Refuse a head driver that is not zero on an edge with a dynamic law: the step-start
+        potential difference of such an edge is taken without a head. Once per solve; free
+        when there is no head or no dynamic law."""
+        if not len(self._dynamic_edges):
+            return
+        head = drivers.get(self.layer.head_key)
+        if head is None:
+            return
+        self.layer._check_head_width(head)
+        on_dynamic = head[..., self._dynamic_edges]
+        if bool((on_dynamic != 0).any()):
+            kinds = sorted({el.kind for el in self.layer._laws if el.dynamic})
+            raise ValueError(
+                f"KirchhoffLayer {self.layer.name!r}: driver {self.layer.head_key!r} is not "
+                f"zero on an edge of kind {kinds}, whose law is dynamic (its step-start "
+                f"potential difference is taken without a head)"
+            )
 
     def _with_history(self, ctx: LawContext, phi_prev: Tensor, q_prev: Tensor) -> LawContext:
         """`ctx` with the step-start values taken from `(phi_prev, q_prev)`."""

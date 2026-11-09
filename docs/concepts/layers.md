@@ -175,6 +175,33 @@ Which method to write on a subclass:
 A withdrawal that is not storage (a demand, a leak) is a `NodeSource`
 ([Constitutive laws](elements.md)).
 
+## Heads: stack, wind and drag
+
+A *head* is a term added to an edge's potential difference: the buoyancy of a warm column of
+air (stack), the wind pressure on an opening, the drag a moving surface exerts on the air above
+it. A buoyancy head is a driver, like wind speed: a `KirchhoffLayer` reads the optional driver
+`"<layer>.head"` (`(..., b)`, one value per edge in the layer's edge order, in the potential's
+unit; absent means zero) and adds it to every edge's `phi[src] - phi[tgt]` once.
+
+`noodl.heads.EdgeHeads` is the `Model` closure that writes it. Give it the layer and the head
+terms (`Stack`, `DuctStack`, `Wind`, `ConstantDrive`, ...); it adds them up in the columns of
+each term's kind and writes the total:
+
+```python
+from noodl.drives import Stack
+from noodl.heads import EdgeHeads
+
+heads = EdgeHeads(air, [Stack.from_network(net, "airpath")])   # writes "air.head"
+model = Model(net, {"air": air}, closures=[density_closure, heads])
+```
+
+A term is a function of the drivers only, never of the potential, so the Jacobian stays exact
+and symmetric. Because the head is a driver, a gradient reaches whatever produced it: a head
+may depend on a learnable parameter that a closure reads. A kind whose law is dynamic (a
+capacitance, an inductance) takes no head: `EdgeHeads` refuses such a term, and a non-zero
+head entry on a dynamic edge is refused when the layer is solved. The `drives=` argument of
+`KirchhoffLayer` still works and adds its terms after the head.
+
 ## Modified Nodal Analysis: implicit, coupled and dynamic laws
 
 A `KirchhoffLayer` whose constitutive laws are all potential-controlled, single-edge and

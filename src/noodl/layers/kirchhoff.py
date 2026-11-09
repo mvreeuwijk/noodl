@@ -256,6 +256,7 @@ class KirchhoffLayer(TopologyGuard):
         self.net = net
         self._record_topology(net)
         self.name = name
+        self.head_key = f"{name}.head"
         self._laws = list(laws)
         self._drives = list(drives)
         self.kinds = [el.kind for el in laws]
@@ -796,9 +797,17 @@ class KirchhoffLayer(TopologyGuard):
 
     # ------------------------------------------------------------------ assembly
     def dp(self, phi: torch.Tensor, drivers: Mapping) -> torch.Tensor:
+        """Every edge's potential difference `phi[src] - phi[tgt]` plus its head: the driver
+        `"<layer>.head"` (`noodl.heads.EdgeHeads`, absent means zero) and any `drives`."""
         self._require_current_topology()
         drivers = drivers or {}
         d = self._difference(phi)
+        head = drivers.get(self.head_key)
+        if head is not None:
+            self._check_head_width(head)
+            d = d + head
+        if not self._drives:
+            return d
         parts = []
         for kind, (start, end) in self._kind_slices.items():
             block = d[..., start:end]
@@ -822,6 +831,16 @@ class KirchhoffLayer(TopologyGuard):
         # broadcast to the common batch shape before they are joined.
         batch = broadcast_shapes(*(b.shape[:-1] for _, b in parts))
         return torch.cat([b.expand(batch + b.shape[-1:]) for _, b in parts], dim=-1)
+
+    def _check_head_width(self, head: torch.Tensor) -> None:
+        """Refuse a head driver that is not one value per edge of this layer."""
+        if head.ndim == 0 or head.shape[-1] != len(self.cols):
+            given = "a scalar" if head.ndim == 0 else head.shape[-1]
+            raise ValueError(
+                f"KirchhoffLayer {self.name!r}: driver {self.head_key!r} must have one value "
+                f"per edge of the layer ({len(self.cols)}, in edge order of kinds "
+                f"{tuple(self.kinds)}) in its last dimension; got width {given}"
+            )
 
     def flows(
         self, phi: torch.Tensor, drivers: Mapping, q: torch.Tensor | None = None

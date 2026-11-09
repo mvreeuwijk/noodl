@@ -66,6 +66,11 @@ class ConstantDrive:
         self.kind = kind
         self.key = key
 
+    @property
+    def inputs(self) -> tuple[str, ...]:
+        """The driver keys this term reads."""
+        return (self.key,)
+
     def __call__(self, drivers: Mapping[str, torch.Tensor]) -> torch.Tensor:
         try:
             return drivers[self.key]
@@ -141,6 +146,11 @@ class Stack:
         head_tgt = rho[..., self.tgt] * (z_ref[self.tgt] - z_path)
         return self.g * (head_src - head_tgt)
 
+    @property
+    def inputs(self) -> tuple[str, ...]:
+        """The driver keys this term reads."""
+        return (self.rho_key,)
+
 
 class DuctStack:
     """Hydrostatic term of a duct segment between two junctions: the air column at the
@@ -187,6 +197,11 @@ class DuctStack:
         z = self.z_ref.to(rho.dtype)
         mean = 2.0 / (1.0 / rho[..., self.src] + 1.0 / rho[..., self.tgt])
         return self.g * mean * (z[self.src] - z[self.tgt])
+
+    @property
+    def inputs(self) -> tuple[str, ...]:
+        """The driver keys this term reads."""
+        return (self.rho_key,)
 
 
 class WindProfile:
@@ -434,3 +449,11 @@ class Wind:
             self.sign.to(dtype) * self.envelope.to(dtype) * 0.5 * rho * V**2
             * self.ch.to(dtype) * Cp
         )
+
+    @property
+    def inputs(self) -> tuple[str, ...]:
+        """The driver keys this term reads (the direction only with a Cp profile)."""
+        keys = [self.rho_key, self.speed_key]
+        if self.profiles:
+            keys.append(self.direction_key)
+        return tuple(keys)

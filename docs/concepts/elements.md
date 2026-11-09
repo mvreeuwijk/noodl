@@ -342,6 +342,10 @@ and records the relative-velocity form as out of scope rather than quietly appro
 If you genuinely need a term that depends on solved state, it belongs in a **closure**, which
 runs between layer solves and writes driver values. See [Layers and models](layers.md#closures).
 
+A drive can also be written once per solve as a driver: the closure `EdgeHeads` adds up head
+terms (stack, wind, drag) on one layer's edges and writes `"<layer>.head"`, which the layer adds
+to every edge's potential difference. See [Heads](layers.md#heads-stack-wind-and-drag).
+
 ## Node sources and node storage
 
 Two objects act at a node rather than on an edge, each as a function of that node's own

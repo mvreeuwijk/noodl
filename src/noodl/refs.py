@@ -614,6 +614,15 @@ class LayerRef:
                 description="nodal injection (zero on boundary and inactive nodes)",
                 unit=getattr(layer, "flow_unit", ""), **common,
             )
+            # Short name "edge_head", not "head": a layer whose quantity is "head" (water)
+            # names its potential `ref.head`, and that attribute must stay the potential.
+            inputs["edge_head"] = Field(
+                f"{name}.head", role="driver", axis="edge", labels=q_labels, aliases=q_alias,
+                ordering=f"edge order of kinds {tuple(layer.kinds)}",
+                required="optional", default=0.0,
+                description="added to each edge's potential difference (stack, wind, drag)",
+                **meta, **common,
+            )
             frequency = getattr(layer, "frequency_key", None)
             if frequency is not None:
                 inputs["frequency"] = Field(

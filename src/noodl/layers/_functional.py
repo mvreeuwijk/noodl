@@ -130,6 +130,12 @@ class FunctionalLaws:
     def dp(self, phi, drv):
         layer = self.layer
         d = layer._difference(phi)
+        head = drv.get(layer.head_key)
+        if head is not None:
+            layer._check_head_width(head)
+            d = d + head
+        if not layer._drives:
+            return d
         parts = []
         for kind, (start, end) in layer._kind_slices.items():
             block = d[..., start:end]
