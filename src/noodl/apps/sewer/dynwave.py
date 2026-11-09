@@ -641,9 +641,9 @@ class JunctionStorage(NodeStorage):
     the step-start head and net inflow are SWMM's own, read from the drivers below, so the
     `rate` arguments ``phi_start`` and ``previous`` (the layer's step-start potentials and
     ``"water.storage_flow"``) are not read: ``"water.storage_flow"`` is an output, the flow
-    into storage at the end of each step. Under ``"backward_euler"`` the ``N_start`` terms
-    are dropped (``w = (A_s/dt)(H - H_start)``); SWMM and `build_dynamic_wave_model` use the
-    trapezoidal scheme.
+    into storage at the end of each step. Only SWMM's trapezoidal scheme is defined: the
+    closure evaluates the pass constants (band, crown and top withdrawals, flood wall and
+    excess) at ``2/dt``, so `rate` and `rate_slope` refuse any other scheme by name.
 
     ``w(H) = (2 A_s/dt)(H - H_start) - N_start + (2 A_bed/dt) K_BED min(H - z_bed, 0)``
     (m3/s, positive out of the network), so that with the conduit flows and the lateral
@@ -782,12 +782,15 @@ class JunctionStorage(NodeStorage):
             self.register_buffer("pond_head", torch.as_tensor(pond_head, dtype=F64))
 
     @staticmethod
-    def _start_flow(drivers: Mapping, ctx: LawContext) -> Tensor:
-        """SWMM's step-start net inflow ``N_start`` (m3/s, the driver
-        ``"water.net_inflow_start"``) under the trapezoidal scheme; zeros under backward
-        Euler, which has no step-start rate."""
-        n_start = drivers["water.net_inflow_start"]
-        return n_start if ctx.scheme == "trapezoidal" else torch.zeros_like(n_start)
+    def _check_scheme(ctx: LawContext) -> None:
+        """Refuse a step that is not SWMM's trapezoidal one (`rate`, `rate_slope`)."""
+        if ctx.scheme != _JUNCTION_SCHEME:
+            raise ValueError(
+                f"JunctionStorage: scheme={ctx.scheme!r}; the dynamic-wave junction storage "
+                f"is SWMM's trapezoidal continuity (dynwave.c:694-711), whose pass constants "
+                f"the closure evaluates at 2/dt: step the head layer with "
+                f"scheme={_JUNCTION_SCHEME!r}"
+            )
 
     def _storage(self, phi: Tensor, drivers: Mapping,
                  ctx: LawContext) -> tuple[Tensor, Tensor, Tensor]:
@@ -798,7 +801,7 @@ class JunctionStorage(NodeStorage):
         bed = rate2 * self.bed_area * K_BED
         dry = torch.clamp(phi - self.bed, max=0.0)
         rise = phi - drivers["water.head_start"]
-        n_start = self._start_flow(drivers, ctx)
+        n_start = drivers["water.net_inflow_start"]
         storage = rate2 * area * rise - n_start                              # dynwave.c:694-711
         slope = (rate2 * area).expand_as(storage)
         if "water.area_switch_head" in drivers:
@@ -813,8 +816,8 @@ class JunctionStorage(NodeStorage):
                      drivers: Mapping, rate2, n_start: Tensor) -> tuple[Tensor, Tensor]:
         """The drop-end area switch within the pass (class docstring): ``max(lo, min(hi,
         N_last + S (H - H*)))`` where a threshold applies (finite ``H*``), the lagged storage
-        and slope elsewhere. `rate2` is the step's `step_rate_factor` and `n_start` the
-        step-start rate (`_start_flow`)."""
+        and slope elsewhere. `rate2` is the step's `step_rate_factor` and `n_start` SWMM's
+        step-start net inflow."""
         h_star = drivers["water.area_switch_head"]
         on = torch.isfinite(h_star)
         if not bool(on.any()):
@@ -856,7 +859,7 @@ class JunctionStorage(NodeStorage):
         h_star = torch.where(on, self.pond_head, phi)
         rate2 = step_rate_factor(ctx)
         a_hi = drivers["water.pond_area"]
-        head_start, n_start = drivers["water.head_start"], self._start_flow(drivers, ctx)
+        head_start, n_start = drivers["water.head_start"], drivers["water.net_inflow_start"]
         # the surcharged form as the next trial would take it, also at a fed head above H*
         anchor_slope = drivers["water.surcharge_slope"]
         eligible = self._eligible(drivers, ctx)
@@ -1027,6 +1030,7 @@ class JunctionStorage(NodeStorage):
         """Withdrawal (m3/s) at junction heads `phi_nodes` (m) over the step `ctx`: the
         junction rules of the class docstring. `phi_start` and `previous` are not read (the
         step start is SWMM's, from ``"water.head_start"`` and ``"water.net_inflow_start"``)."""
+        self._check_scheme(ctx)
         free, _ = self._free(phi_nodes, drivers, ctx)
         if not self.floods:
             return free
@@ -1038,6 +1042,7 @@ class JunctionStorage(NodeStorage):
                    ctx: LawContext, drivers: Mapping | None = None) -> Tensor:
         """d(withdrawal)/dH (m2/s), analytic and strictly positive: the derivative of
         `rate`."""
+        self._check_scheme(ctx)
         free, slope = self._free(phi_nodes, drivers, ctx)
         if self.floods:
             wall = self._wall(phi_nodes, drivers, ctx)
@@ -2311,6 +2316,8 @@ class DynamicWaveHydraulics:
             "water.dry_upstream": terms.dry_upstream.to(F64),
             "water.dry_downstream": terms.dry_downstream.to(F64),
             "water.storage_area": area_ft2 * _AREA_SI,
+            # not the layer's step-start phi: the carried depth is clamped at 0 (`yNew < 0 ->
+            # 0`, dynwave.c:743), so below its invert a junction restarts from the invert
             "water.head_start": self.node_invert[jidx] + state["sewer.junction_depth"],
             "water.net_inflow_start": state["sewer.net_inflow"],
             "water.surcharge_slope": anchor,

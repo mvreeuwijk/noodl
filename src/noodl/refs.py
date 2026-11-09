@@ -594,8 +594,7 @@ class LayerRef:
                 state["storage_flow"] = Field(
                     f"{name}.storage_flow", role="state", axis="node", labels=entries,
                     ordering="storage entry order (storages in list order, then their nodes)",
-                    required="step" if _needs_storage_flow(layer) else "optional",
-                    default=0.0,
+                    required="optional", default=0.0,
                     description="flow into every storage entry (the trapezoidal step start)"
                     if not holds else "flow into every boundary storage entry",
                     unit=getattr(layer, "flow_unit", ""), **common,
@@ -1051,18 +1050,10 @@ def _holds_storage(layer) -> bool:
     return bool(getattr(layer, "holds_storage", False))
 
 
-def _needs_storage_flow(layer) -> bool:
-    """Whether a Kirchhoff layer's step reads `"<layer>.storage_flow"`: it has storage and
-    steps by the trapezoidal scheme (its own; a step may give another)."""
-    return bool(getattr(layer, "storage", ())) and getattr(layer, "scheme", "") == "trapezoidal"
-
-
 def required_state_keys(model: Model) -> list[str]:
     """The state keys `Model.step` reads from the step-start state."""
     keys = [f"{n}.x" for n in model.transport] + [f"{n}.s" for n in model.allocation]
     keys += [f"{n}.{s}" for n, layer in model.kirchhoff.items() if _steps_from_state(layer)
              for s in (("phi", "q") if _reads_step_flows(layer) else ("phi",))]
     keys += [f"{n}.phi" for n, layer in model.kirchhoff.items() if _holds_storage(layer)]
-    keys += [f"{n}.storage_flow" for n, layer in model.kirchhoff.items()
-             if _needs_storage_flow(layer)]
     return keys + list(model.closure_state_keys)

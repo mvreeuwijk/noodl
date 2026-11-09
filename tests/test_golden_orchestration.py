@@ -533,9 +533,6 @@ def case_sewer_dynwave_tree_anderson():
     model, state, drivers = build_dynamic_wave_model(net, iterate_tol=1e-9)
     diags: list = []
     final, hist = simulate_dynamic_wave(model, state, drivers, steps=4, diagnostics=diags)
-    # "water.storage_flow" (the flow into the junction storage, an output since the junction
-    # storage became a `NodeStorage`) postdates the record; it is not an input of any step
-    final = {k: v for k, v in final.items() if k != "water.storage_flow"}
     return {"acceleration": model.iterate_acceleration, "final": record(final),
             "history": ser(hist), "diagnostics": ser(diags)}
 

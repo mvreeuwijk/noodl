@@ -3450,3 +3450,21 @@ def test_junction_storage_rate_is_the_old_node_source_flow_bit_for_bit(case, dt)
         assert bool((heads > storage.top).any())                            # the wall
     if storage.ponds:                                     # the ponded line above H*
         assert bool((slope == 2.0 / dt * new_drv["water.pond_area"]).any())
+
+
+def test_junction_storage_refuses_a_scheme_other_than_swmms_trapezoidal():
+    """The closure evaluates the pass constants (band, crown and top withdrawals, flood wall)
+    at SWMM's 2/dt, so a backward-Euler step of the head layer would mix two schemes: the
+    junction storage refuses it by name, directly and through `Model.step(scheme=...)`."""
+    from noodl.apps.sewer.dynwave import build_dynamic_wave_model
+
+    storage, drivers, heads = _port_cases()[0]
+    for method in (storage.rate, storage.rate_slope):
+        with pytest.raises(ValueError, match="trapezoidal"):
+            method(heads, heads, None, LawContext(mode="transient", dt=5.0,
+                                                  scheme="backward_euler"), drivers)
+    net, _, _ = read_swmm_inp(DATA / "tree_dynwave.inp")
+    model, state, drv = build_dynamic_wave_model(net)
+    assert model.layers["water"].scheme == "trapezoidal"
+    with pytest.raises(ValueError, match="JunctionStorage: scheme='backward_euler'"):
+        model.step(state, drv, 5.0, scheme="backward_euler")

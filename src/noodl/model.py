@@ -387,7 +387,7 @@ class Model:
         step), `history` is the STEP-START state's `(phi, q)` -- `base`, never the fed state,
         so an iterated coupling re-steps every pass from the same start -- and `dt` the step;
         a layer with storage also gets `storage_flow` from the step-start state's
-        `"<name>.storage_flow"`, required by the trapezoidal scheme.
+        `"<name>.storage_flow"`, read by the trapezoidal scheme (zeros when it is missing).
         """
         return circuit_kwargs(name, layer, state, base, dt, t)
 

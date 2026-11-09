@@ -468,6 +468,7 @@ class StorageCase:
     phi_start: torch.Tensor
     previous: torch.Tensor
     drivers: dict = field(default_factory=dict)
+    schemes: tuple = ("backward_euler", "trapezoidal")
 
 
 def _storage_cases() -> dict[type, Callable[[], list[StorageCase]]]:
@@ -492,6 +493,13 @@ def _storage_cases() -> dict[type, Callable[[], list[StorageCase]]]:
                  "water.surcharge_slope": one(0.01), "water.flood_excess": one(0.002)}
     plain_drv = {"water.storage_area": _t([2.0, 2.0]), "water.head_start": _t([1.5, 1.0]),
                  "water.net_inflow_start": _t([0.3, 0.0])}
+    # the drop-end area switch about H* = 1.1 m (junction 0; none at junction 1)
+    switch_drv = {"water.storage_area": one(2.0), "water.head_start": one(1.0),
+                  "water.net_inflow_start": one(0.1),
+                  "water.area_switch_head": _t([1.1, float("inf")]),
+                  "water.area_below": one(2.0), "water.area_above": one(3.0),
+                  "water.area_switch_slope": one(10.0), "water.net_inflow_last": one(0.0)}
+    swmm = ("trapezoidal",)     # SWMM's continuity: `JunctionStorage` refuses other schemes
     return {
         LinearStorage: lambda: [
             StorageCase(LinearStorage([0], 2.5), _grid(1), _t([0.3]), _t([0.01])),
@@ -500,17 +508,19 @@ def _storage_cases() -> dict[type, Callable[[], list[StorageCase]]]:
         ],
         JunctionStorage: lambda: [
             StorageCase(JunctionStorage(torch.tensor([0, 1]), bed=_t([1.0, 1.0]), bed_area=0.5),
-                        _grid(2, -6, 0.5, centre=1.0), zero2, zero2, plain_drv),
+                        _grid(2, -6, 0.5, centre=1.0), zero2, zero2, plain_drv, swmm),
+            StorageCase(JunctionStorage(torch.tensor([0, 1]), bed=_t([0.0, 0.0]), bed_area=0.5),
+                        _grid(2, -6, 0.3, centre=1.1), zero2, zero2, switch_drv, swmm),
             StorageCase(JunctionStorage(torch.arange(2), torch.zeros(2, dtype=F64),
                                         bed_area=12.566 * 0.0929, crown=one(0.3), top=one(0.5),
                                         surchargeable=torch.tensor([True, True])),
-                        _grid(2, -6, 0.3, centre=0.4), zero2, zero2, store_drv),
+                        _grid(2, -6, 0.3, centre=0.4), zero2, zero2, store_drv, swmm),
             StorageCase(JunctionStorage(torch.arange(2), torch.zeros(2, dtype=F64),
                                         bed_area=12.566 * 0.0929, crown=one(0.3), top=one(0.5),
                                         surchargeable=torch.tensor([False, False]),
                                         pond_head=_t([0.5, float("inf")])),
                         _grid(2, -6, 0.3, centre=0.4), zero2, zero2,
-                        {**store_drv, "water.surcharged": one(0.0)}),
+                        {**store_drv, "water.surcharged": one(0.0)}, swmm),
         ],
         ZoneAirMassChange: lambda: [
             StorageCase(ZoneAirMassChange([0, 1], _t([50.0, 120.0])), _grid(2, -6, 3),
@@ -569,10 +579,10 @@ def test_rate_slope_is_the_derivative_of_rate_unless_declared(cls):
 
     cases = STORAGE_CASES[cls]()
     assert cases and all(type(c.storage) is cls for c in cases)
-    contexts = [LawContext(mode="transient", dt=dt, t=dt, scheme=scheme)
-                for scheme in ("backward_euler", "trapezoidal") for dt in (1e-3, 30.0)]
     differs = False
     for case in cases:
+        contexts = [LawContext(mode="transient", dt=dt, t=dt, scheme=scheme)
+                    for scheme in case.schemes for dt in (1e-3, 30.0)]
         for ctx in contexts:
             x, analytic, reference = _storage_mismatch(case, ctx)
             differs = differs or x.numel() > 0

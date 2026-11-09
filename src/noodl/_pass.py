@@ -136,11 +136,11 @@ def circuit_kwargs(name: str, layer: KirchhoffLayer, state: Mapping[str, Tensor]
             key = f"{name}.storage_flow"
             flow = base.get(key)
             if flow is None and (layer.scheme if scheme is None else scheme) == "trapezoidal":
-                raise KeyError(
-                    f"Model: state {key!r} is required to step Kirchhoff layer {name!r} "
-                    f"by the trapezoidal scheme: the flow into its storage at the step start "
-                    f"(a steady solve writes zeros)"
-                )
+                # a missing step-start flow into storage is zero (the state at rest; the
+                # `refs` default), as after a steady solve
+                phi = base[f"{name}.phi"]
+                flow = torch.zeros(phi.shape[:-1] + (layer._n_entries,), dtype=phi.dtype,
+                                   device=phi.device)
             if flow is not None:
                 out["storage_flow"] = flow
     return out

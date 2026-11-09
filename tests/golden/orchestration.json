@@ -4115,6 +4115,19 @@
             "shape": [
               5
             ]
+          },
+          "water.storage_flow": {
+            "data": [
+              0.023625494911730473,
+              0.037444521906049376,
+              0.014317886492023259,
+              0.003925213046966709,
+              0.0006858144117374294
+            ],
+            "dtype": "torch.float64",
+            "shape": [
+              5
+            ]
           }
         },
         "state_order": [
@@ -4123,7 +4136,8 @@
           "sewer.junction_depth",
           "sewer.pipe_flow",
           "sewer.mid_area",
-          "sewer.net_inflow"
+          "sewer.net_inflow",
+          "water.storage_flow"
         ]
       },
       "history": {
