@@ -56,6 +56,25 @@ by a test.
 
 ![Two independent models exchanging values through a ValueLink, iterated to a fixed point](../assets/app-coupling.svg)
 
+### Why a union is not one `Model`
+
+Folding `CoupledModel` into `Model` over a disjoint-union network was considered and
+rejected: it is not simpler in code, and it would put coupling-only rules into `Model`.
+
+1. **Sub-steps.** Each model has its own `dt` sub-steps (`substeps` per model). `Model`
+   sub-steps its transport layers only and runs closures and Kirchhoff layers once per step.
+2. **Pass order.** The recipient-first schedule and the conservative transfer of an integrated
+   boundary amount need a pass order per network. `Model`'s pass order is fixed by layer kind.
+3. **Names.** A union network would need every node, layer and driver key renamed, and every
+   application closure reads fixed keys (`"street.x"`, `"rho_amb"`).
+4. **Coupling mode.** Each model keeps its own mode (building `iterate`, street `pingpong`).
+5. **Nothing to delete.** The loop and the adjoint are already shared (`run_passes`,
+   `differentiate_fixed_point`), so a merge would remove little and add all of the above to
+   `Model`.
+
+`CoupledModel` is "a `Model` across several networks": the loop and the adjoint are shared,
+the schedule is its own.
+
 ## A worked example
 
 ```python
