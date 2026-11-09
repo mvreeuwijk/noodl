@@ -64,6 +64,10 @@ from noodl.solvers.select import solve as _solve_operator
 from noodl.solvers.select import transport_solver_kwargs
 from noodl.topology import Network, Node
 
+#: The schemes a transport layer steps with: every layer scheme but `"forward_euler"`, which
+#: steps a Kirchhoff layer's boundary storage only.
+_TRANSPORT_SCHEMES = tuple(s for s in SCHEMES if s != "forward_euler")
+
 # `_TransposeView` is `solvers.implicit.TransposeOperator`. Both this layer's operators
 # (`AdvectionOperator`, and `ShiftedOperator` wrapping it, the implicit step's system) are
 # `symmetric = False`, so `TransposeOperator.spd_certificate()` returns None for them.
@@ -594,9 +598,10 @@ class TransportLayer(TopologyGuard):
                 f"TransportLayer '{name}': species_names {list(self.species_names)} repeat a "
                 f"name; each species must have its own"
             )
-        if scheme not in SCHEMES:
+        if scheme not in _TRANSPORT_SCHEMES:
             raise ValueError(
-                f"TransportLayer '{name}': unknown scheme {scheme!r}; expected one of {SCHEMES}"
+                f"TransportLayer '{name}': unknown scheme {scheme!r}; expected one of "
+                f"{_TRANSPORT_SCHEMES}"
             )
         self.scheme = scheme
         # Nodes no edge of this layer's kinds touches are INACTIVE -- excluded
@@ -901,10 +906,10 @@ class TransportLayer(TopologyGuard):
         `"backward_euler"` on a layer whose storage-free nodes keep an algebraic row."""
         if scheme is None or scheme == self.scheme:
             return self.scheme
-        if scheme not in SCHEMES:
+        if scheme not in _TRANSPORT_SCHEMES:
             raise ValueError(
                 f"TransportLayer '{self.name}': unknown scheme {scheme!r}; expected one of "
-                f"{SCHEMES}"
+                f"{_TRANSPORT_SCHEMES}"
             )
         if scheme != "backward_euler" and bool((self.storage_free_mask & ~self.folded_mask).any()):
             raise ValueError(
@@ -1995,7 +2000,7 @@ class TransportLayer(TopologyGuard):
         else:
             raise ValueError(
                 f"TransportLayer '{self.name}': unknown scheme {scheme!r}; "
-                f"expected one of {SCHEMES}"
+                f"expected one of {_TRANSPORT_SCHEMES}"
             )
 
         transfer_s = None

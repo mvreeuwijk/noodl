@@ -342,7 +342,9 @@ potential, and each adds only a diagonal entry to the Jacobian:
   which the layer turns into a withdrawal over each step with its scheme's step rate. A
   capacitor to ground, a tank, a zone's air mass. A layer solved by nodal analysis or by
   Modified Nodal Analysis takes it (not a phasor layer); at the consistent initial point of
-  the latter a storage with an `initial()` potential holds its node there. See
+  the latter a storage with an `initial()` potential holds its node there. Under
+  `scheme="forward_euler"` a linear storage sits at a boundary node instead (an EPANET tank),
+  held through the solve and moved by explicit Euler after it. See
   [Node storage](layers.md#node-storage).
 - **`NodeSource`** (`noodl.NodeSource`): a withdrawal that is **not** storage, `w(phi)` at the
   current instant: EPANET's pressure-driven demand, a leak. A storage written as a node source

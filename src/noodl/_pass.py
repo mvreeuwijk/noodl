@@ -170,13 +170,25 @@ def _solve_potentials(model: Model, state, base, drv, dt, t, solve_kwargs, warm_
     """Solve every Kirchhoff layer at the closures' drivers, into `new`/`made`/`diag`."""
     for name, layer in model.kirchhoff.items():
         pb = require(drv, f"{name}.phi_boundary")
+        held = layer.scheme == "forward_euler" and bool(layer.storage)
+        if held:
+            # Storage at boundary nodes (an EPANET tank) is held at its step-start
+            # potential through the solve, whatever a closure wrote there.
+            start = base.get(f"{name}.phi")
+            if start is None:
+                raise KeyError(
+                    f"Model: state {name + '.phi'!r} is required by Kirchhoff layer "
+                    f"{name!r}, whose storage at boundary nodes is held at its potential "
+                    f"at the step start"
+                )
+            pb = layer.hold_storage(pb, start)
         sources = drv.get(f"{name}.sources")
         phi_prev = state.get(f"{name}.phi") if warm_start else None
         phi0 = None if phi_prev is None else phi_prev[..., layer.interior]
         d: dict = {}
         kwargs = layer_kwargs(solve_kwargs, name)
         circuit = (circuit_kwargs(name, layer, state, base, dt, t, kwargs.get("scheme"))
-                   if layer.mna or layer.storage else {})
+                   if layer.mna or layer.dynamic else {})
         if not warm_start:
             # The implicit-law flows' warm start goes with the potentials' (`phi0`).
             circuit.pop("q0", None)
@@ -192,6 +204,10 @@ def _solve_potentials(model: Model, state, base, drv, dt, t, solve_kwargs, warm_
                 history=circuit.get("history"), storage_flow=circuit.get("storage_flow"),
                 mode=kwargs.get("mode"), q=q, sources=sources, _checked=True)
             made.append(f"{name}.storage_flow")
+            if held and dt is not None:
+                # ... and stepped after it, by forward Euler on the flow it received.
+                new[f"{name}.phi"] = layer.advance_storage(
+                    phi, new[f"{name}.storage_flow"], dt, drv)
         diag[name] = d
 
 

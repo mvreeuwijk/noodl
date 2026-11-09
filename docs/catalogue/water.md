@@ -13,9 +13,9 @@ Build the model and its starting state and inputs.
 
 | Name | What it does | How to call it |
 |---|---|---|
-| `build_model` | Assemble the water model and return `(model, state, drivers)`. | `build_model(net, *, headloss=None, pda=None, p_min=None, p_req=None, exponent=None, quality=None, coupling='pingpong', dt=None, friction='composite', pipe_form=None, tank_mode='explicit')` |
+| `build_model` | Assemble the water model and return `(model, state, drivers)`. | `build_model(net, *, headloss=None, pda=None, p_min=None, p_req=None, exponent=None, quality=None, coupling='pingpong', dt=None, friction='composite', pipe_form=None, tank_scheme='forward_euler')` |
 | `initial_drivers` | `build_model`'s driver template (copied), then `values` by name (see `noodl.refs.drivers_from`), then `demand`: `{junction: m3/s withdrawn}`, positive, stored as the negative nodal source the head solve takes. | `initial_drivers(model, *, values=None, demand=None)` |
-| `initial_state` | All-zero state, dispatching on each layer's `quantity` (the app convention), tank levels from the network file; then `values` by node, tank or pump name (see `noodl.refs.state_from`): `initial_state(model, values={"water.tank_level": {"T1": 4.0}})`. | `initial_state(model, *, values=None)` |
+| `initial_state` | All-zero state, dispatching on each layer's `quantity` (the app convention), tank levels from the network file; then `values` by node, tank or pump name (see `noodl.refs.state_from`). | `initial_state(model, *, values=None)` |
 
 ## Network components
 
@@ -27,7 +27,7 @@ Descriptions of the physical objects a network is built from.
 | `Junction` | A junction: `elevation` (m) and base `demand` (m3/s, withdrawn), optionally scaled by a time `pattern`. | `Junction(name, elevation, demand=0.0, pattern=None)` |
 | `Pump` | A pump from `u` to `v` on a head-flow `curve` (by name), at relative `speed`. | `Pump(name, u, v, curve, power=None, speed=1.0)` |
 | `Reservoir` | A fixed-head node: total `head` (m), optionally varied by a time `pattern`. | `Reservoir(name, head, pattern=None)` |
-| `Tank` | A cylindrical tank: bottom `elevation`, initial, minimum and maximum water levels and `diameter` (all m); its level is carried across steps by `TankLevels`. | `Tank(name, elevation, init_level, min_level, max_level, diameter)` |
+| `Tank` | A cylindrical tank: bottom `elevation`, initial, minimum and maximum water levels and `diameter` (all m); its level is its node's head less its bottom, stepped by the layer's storage (`build_model(tank_scheme=...)`). | `Tank(name, elevation, init_level, min_level, max_level, diameter)` |
 | `Valve` | A valve from `u` to `v`: `diameter` (m), EPANET `kind` (for example `TCV`) and its `setting` (TCV: a loss coefficient; FCV: a flow, m3/s; PBV: a head drop, m), with a minor-loss coefficient. A GPV's setting is its head-loss `curve` (a `curves` key). | `Valve(name, u, v, diameter, kind, setting, minor_loss=0.0, curve=None)` |
 | `WaterNetwork` | A pressurised distribution network, in SI, with everything the builder needs. | `WaterNetwork(junctions, reservoirs=(), tanks=(), pipes=(), pumps=(), valves=(), curves=<factory>, patterns=<factory>, controls=(), demand_pattern=None, pattern_timestep=3600.0, hydraulic_timestep=3600.0, report_timestep=3600.0, duration=0.0, headloss='H-W', options=<factory>, notes=<factory>)` |
 | `WaterOptions` | `[OPTIONS]` keys that change the physics, with EPANET 2.2's own defaults. | `WaterOptions(demand_model='DDA', minimum_pressure=0.0, required_pressure=0.1, pressure_exponent=0.5, specific_gravity=1.0, viscosity=1.0, flow_units=None)` |
@@ -54,7 +54,7 @@ Functions of the state that compute drivers each step (densities, flows, levels)
 
 | Name | What it does | How to call it |
 |---|---|---|
-| `TankLevels` | Tank levels, simple controls and the boundary heads they prescribe. | `TankLevels(net, tanks, controls, pump_names, *, dt, reservoir_heads, tank_first_index, head_scale=1.0)` |
+| `TankLevels` | Simple controls on tank levels, and the boundary heads of a water layer whose tanks are held at boundary nodes (`build_model(tank_scheme="forward_euler")`). | `TankLevels(net, tanks, controls, pump_names, *, tank_nodes, dt, reservoir_heads, head_scale=1.0)` |
 
 ## Sources and storage
 
@@ -81,12 +81,13 @@ Calculations and helpers.
 | `link_table` | One row per link: flow (m3/s), head loss (m) and velocity (m/s); optionally to CSV. | `link_table(model, state, names=None, *, path=None)` |
 | `pressure_head` | Pressure head (m) at every node: the solved head minus the node's elevation. | `pressure_head(model, state, elevations=None)` |
 | `composite_friction_factor` | Composite friction factor for ``Re > 2000``: ``(f, df/dq)``. | `composite_friction_factor(q, e, s)` |
-| `tank_inflow` | Net inflow (m3/s) at every tank node, from the layer's solved branch flows. | `tank_inflow(model, state)` |
-| `tank_levels` | Every tank's level (m above its bottom) in `state`, in either `tank_mode`. | `tank_levels(model, state)` |
+| `tank_inflow` | Net inflow (m3/s) at every tank node: the flow into every tank's storage, `"water.storage_flow"`, which a solve writes (`KirchhoffLayer.storage_flows`). Under `tank_scheme="forward_euler"` it is the inflow the solve delivered to the held tank, the rate over the step `water_event_step` takes. | `tank_inflow(model, state)` |
+| `tank_levels` | Every tank's level (m above its bottom) in `state`: its head less its bottom. | `tank_levels(model, state)` |
 | `three_point_curve` | EPANET's single-point pump-curve fit: ``(h0, r, n)`` for ``h = h0 - r q^n``. | `three_point_curve(q_design, h_design)` |
 | `to_kilopascal` | Metres of head -> kPa, at `rho = 998.2 kg/m3` and `g = 9.80665 m/s2`. | `to_kilopascal(head)` |
 | `twoloop` | The committed hand-made SI fixture (`tests/data/water/twoloop_si.inp`). | `twoloop()` |
-| `water_step` | One step of `dt` (s) of a model built with `tank_mode="storage"`: `Model.step` with `water_steady`'s Newton defaults and pump check, the tank levels stepped implicitly (`LinearStorage`, `scheme` `"backward_euler"` or `"trapezoidal"`; trapezoidal needs a step-start state whose tank flows are solved, not the build's zeros). The level controls act on the step-start levels, as EPANET's do. `"backward_euler"` is the default because it starts from any state, the build's included, and does not ring after the flow jumps that pump and level controls cause. | `water_step(model, state, drivers, dt, *, scheme='backward_euler', **solve_kwargs)` |
+| `water_event_step` | One hydraulic step of EPANET's extended period, `(state, dt)`, on a model built with `tank_scheme="forward_euler"`: one hydraulic solve, the step shortened to the next control crossing, then the tanks moved. | `water_event_step(model, state, drivers, dt_max, **solve_kwargs)` |
+| `water_step` | One step of `dt` (s) of a model built with `tank_scheme="backward_euler"` or `"trapezoidal"`: `Model.step` with `water_steady`'s Newton defaults and pump check, the tank levels stepped implicitly (`LinearStorage`, `scheme` `"backward_euler"` or `"trapezoidal"`; trapezoidal needs a step-start state whose tank flows are solved, not the build's zeros). The level controls act on the step-start levels, as EPANET's do. `"backward_euler"` is the default because it starts from any state, the build's included, and does not ring after the flow jumps that pump and level controls cause. | `water_step(model, state, drivers, dt, *, scheme='backward_euler', **solve_kwargs)` |
 | `water_steady` | The quasi-steady state: one `Model.steady` with tight Newton tolerances. | `water_steady(model, state, drivers, **solve_kwargs)` |
 
 ## Constants and tables

@@ -147,10 +147,21 @@ class KirchhoffLayer(TopologyGuard):
     not `None` at that potential. A phasor layer takes no storage (a capacitance is an
     edge law there).
 
+    With `scheme="forward_euler"` the storage sits at BOUNDARY nodes instead, and is stepped
+    by forward Euler (EPANET's tank): it is never an unknown. The solve holds each storage
+    node at its potential at the step start (a `Model` pass writes it into
+    `"<name>.phi_boundary"`), and the step then moves it by `dt * inflow / C`
+    (`advance_storage`), `inflow` being the flow the solve delivers to the node
+    (`storage_flows`) and `C` the storage's capacity. Only a linear storage (a constant
+    capacity, `LinearStorage`) is accepted there, and only one entry per node. Such a
+    layer's solve takes no step and does not depend on `dt`.
+
     `scheme` (default `"trapezoidal"`; `"backward_euler"` the other) is the time-integration
     scheme of a transient step of a layer with dynamic laws or storage, one of `SCHEMES`
     (`noodl.elements.base`); a `solve` call may give its own. `"exact"` is a `TransportLayer`
-    scheme and is refused here by name.
+    scheme and is refused here by name. `"forward_euler"` is for storage at boundary nodes
+    only (above): a layer with storage at interior nodes or with dynamic laws refuses it, and
+    a layer with boundary storage refuses every other scheme.
 
     `analytic_primal` (default ``False``): a ``differentiable=True`` solve that nothing
     differentiable reaches (grad mode off, or no input requiring grad) runs the
@@ -233,6 +244,12 @@ class KirchhoffLayer(TopologyGuard):
                     f"KirchhoffLayer {name!r}: storage entry {type(st).__name__} is not a "
                     f"NodeStorage"
                 )
+        # Under `scheme="forward_euler"` every storage sits at boundary nodes, held through
+        # the solve and stepped after it (`advance_storage`): none of the interior storage
+        # machinery below sees it, so it is kept apart.
+        self._boundary_storage: list[NodeStorage] = []
+        if scheme == "forward_euler":
+            self._boundary_storage, self._storage = self._storage, []
         # Modified Nodal Analysis: a law whose flow is an unknown (implicit), that couples
         # several edges (ports > 1), that stores (dynamic) or that reads the law context
         # cannot be solved by the classic nodal path; such a layer is solved by `MnaSystem`.
@@ -389,17 +406,61 @@ class KirchhoffLayer(TopologyGuard):
                 raise ValueError(
                     f"KirchhoffLayer {name!r}: storage {st!r} is at {bad}, which are not "
                     f"interior unknowns of this layer (a boundary node's potential is "
-                    f"prescribed and an inactive node has no row)"
+                    f"prescribed, unless the layer steps it with scheme='forward_euler', "
+                    f"and an inactive node has no row)"
                 )
             self._storage_positions.append(pos)
             self._storage_slices.append((offset, offset + pos.numel()))
             offset += pos.numel()
+        self._boundary_storage_cols = self._check_boundary_storage(net, name, scheme)
+        offset += sum(int(cols.numel()) for cols in self._boundary_storage_cols)
         self._n_entries = offset
 
         self._mna: MnaSystem | None = None
         if self.mna:
             self._check_mna_structure()
             self._mna = MnaSystem(self)
+
+    def _check_boundary_storage(self, net, name, scheme) -> list[torch.Tensor]:
+        """Construction checks of storage under `scheme="forward_euler"`, and each boundary
+        storage's columns in `"<name>.phi_boundary"` (the positions of its nodes in
+        `bound`)."""
+        if scheme != "forward_euler":
+            return []
+        dynamic = [el.kind for el in self._laws if el.dynamic]
+        if dynamic:
+            raise ValueError(
+                f"KirchhoffLayer {name!r}: scheme='forward_euler' steps storage at boundary "
+                f"nodes only, and kinds {dynamic} have dynamic laws; use 'backward_euler' or "
+                f"'trapezoidal'"
+            )
+        column = {int(n): j for j, n in enumerate(self.bound.tolist())}
+        cols, seen = [], set()
+        for st in self._boundary_storage:
+            nodes = st.nodes.tolist()
+            interior = [net.nodes[i] for i in nodes if i not in column]
+            if interior:
+                raise ValueError(
+                    f"KirchhoffLayer {name!r}: storage {st!r} is at {interior}, which are not "
+                    f"boundary nodes; scheme='forward_euler' steps storage at boundary nodes "
+                    f"only (storage at interior nodes steps with 'backward_euler' or "
+                    f"'trapezoidal')"
+                )
+            if not st.linear:
+                raise ValueError(
+                    f"KirchhoffLayer {name!r}: storage {type(st).__name__} at boundary nodes "
+                    f"is not linear; scheme='forward_euler' steps a node by dt * inflow / C "
+                    f"with a constant capacity C (a LinearStorage)"
+                )
+            again = [net.nodes[i] for i in nodes if i in seen]
+            if again:
+                raise ValueError(
+                    f"KirchhoffLayer {name!r}: boundary storage is given twice at {again}; "
+                    f"scheme='forward_euler' takes one storage entry per node"
+                )
+            seen.update(nodes)
+            cols.append(torch.tensor([column[i] for i in nodes], dtype=torch.long))
+        return cols
 
     def _check_mna_structure(self) -> None:
         """Construction checks of a Modified Nodal Analysis layer: port groups, solver,
@@ -500,9 +561,10 @@ class KirchhoffLayer(TopologyGuard):
 
     @property
     def storage(self) -> tuple:
-        """The `NodeStorage` objects at this layer's interior nodes, in the order given at
-        construction (read-only); their entries are the columns of `storage_flows`."""
-        return tuple(self._storage)
+        """The `NodeStorage` objects of this layer (at its interior nodes, or at its boundary
+        nodes under `scheme="forward_euler"`), in the order given at construction
+        (read-only); their entries are the columns of `storage_flows`."""
+        return tuple(self._storage) + tuple(self._boundary_storage)
 
     # ------------------------------------------------------- dense references (lazy)
     @property
@@ -865,6 +927,7 @@ class KirchhoffLayer(TopologyGuard):
         if scheme is None:
             scheme = self.scheme
         check_scheme(self.name, scheme)
+        self._check_forward_euler(scheme)
         return self._storage_step(None, dt, None, scheme, history, storage_flow, drivers)
 
     def balance(self, phi, q, sources=None, drivers=None, storage_flow=None):
@@ -1347,6 +1410,7 @@ class KirchhoffLayer(TopologyGuard):
         self._require_current_topology()
         if scheme is None:
             scheme = self.scheme
+        self._check_forward_euler(scheme)
         for key, value in self.newton_defaults.items():
             newton_kwargs.setdefault(key, value)
         if self.mna:
@@ -1403,6 +1467,22 @@ class KirchhoffLayer(TopologyGuard):
             scheme=scheme, mode=mode, differentiable=differentiable,
             diagnostics=diagnostics, storage_flow=storage_flow, **newton_kwargs,
         )
+
+    def _check_forward_euler(self, scheme) -> None:
+        """Refuse `"forward_euler"` on a layer that steps anything inside its solve (storage
+        at interior nodes, dynamic laws), and any other scheme on a layer whose storage sits
+        at boundary nodes, by name."""
+        if scheme == "forward_euler" and self.dynamic:
+            raise ValueError(
+                f"KirchhoffLayer {self.name!r}: scheme='forward_euler' steps storage at "
+                f"boundary nodes only; this layer steps storage at interior nodes or dynamic "
+                f"laws inside its solve, which take 'backward_euler' or 'trapezoidal'"
+            )
+        if self._boundary_storage and scheme != "forward_euler":
+            raise ValueError(
+                f"KirchhoffLayer {self.name!r}: its storage sits at boundary nodes, which "
+                f"step by scheme='forward_euler' only; got scheme={scheme!r}"
+            )
 
     def _check_classic_arguments(self, mode, dt, history, storage_flow=None) -> None:
         """Refuse the keywords a classic layer cannot honour: a step on a layer without
@@ -1519,7 +1599,21 @@ class KirchhoffLayer(TopologyGuard):
         the node's storage entries in proportion to their `capacity` (equally where the
         node's capacities sum to zero). It needs `q` (every edge's flow, as `solve` returns
         it) and `sources` (full-node; `None` means zero). An entry at a node that is not held
-        takes zero."""
+        takes zero.
+
+        Under `scheme="forward_euler"` (storage at boundary nodes) it is the flow the edge
+        flows `q` deliver to every storage node, whether or not the call is a step: the
+        storage is held through the solve and takes whatever reaches it. It needs `q`, and
+        reads nothing else."""
+        if self._boundary_storage:
+            if q is None:
+                raise ValueError(
+                    f"KirchhoffLayer {self.name!r}: storage_flows of storage at boundary "
+                    f"nodes needs q, every edge's flow (as solve returns it)"
+                )
+            inflow = -self._accumulate_bound(q)
+            return torch.cat([inflow[..., cols] for cols in self._boundary_storage_cols],
+                             dim=-1)
         drivers = drivers or {}
         if scheme is None:
             scheme = self.scheme
@@ -1537,6 +1631,58 @@ class KirchhoffLayer(TopologyGuard):
                  for j, st in enumerate(self._storage)]
         batch = broadcast_shapes(*(p.shape[:-1] for p in parts))
         return torch.cat([p.expand(batch + p.shape[-1:]) for p in parts], dim=-1)
+
+    def hold_storage(self, phi_boundary, phi_start) -> torch.Tensor:
+        """`phi_boundary` with the column of every storage node at a boundary node
+        (`scheme="forward_euler"`) replaced by its potential in `phi_start` (full-node, the
+        step start): the value the solve holds it at. Unchanged on a layer without boundary
+        storage."""
+        if not self._boundary_storage:
+            return phi_boundary
+        cols = torch.cat(self._boundary_storage_cols).to(phi_boundary.device)
+        held = phi_start[..., self.bound[cols].to(phi_start.device)]
+        batch = broadcast_shapes(phi_boundary.shape[:-1], held.shape[:-1])
+        out = phi_boundary.expand(batch + phi_boundary.shape[-1:]).clone()
+        out[..., cols] = held.to(out.dtype)
+        return out
+
+    def advance_storage(self, phi, storage_flow, dt, drivers=None) -> torch.Tensor:
+        """The potentials `phi` (full-node) after one forward-Euler step of `dt` of the
+        storage at boundary nodes (`scheme="forward_euler"`): each storage node moves by
+        `dt * storage_flow / C`, with `storage_flow` the flow into every entry over the step
+        (`storage_flows`, `"<name>.storage_flow"`) and `C` the storage's capacity. Every
+        other potential is unchanged. Differentiable in `phi`, `storage_flow`, `dt` and the
+        capacities."""
+        if not self._boundary_storage:
+            raise ValueError(
+                f"KirchhoffLayer {self.name!r} has no storage at boundary nodes "
+                f"(scheme='forward_euler'); advance_storage steps nothing"
+            )
+        if isinstance(dt, (int, float)):
+            if not dt > 0:
+                raise ValueError(
+                    f"KirchhoffLayer {self.name!r}: dt must be positive, got {dt!r}")
+        elif not bool((torch.as_tensor(dt) > 0).all()):
+            raise ValueError(f"KirchhoffLayer {self.name!r}: dt must be positive, got {dt!r}")
+        if storage_flow.shape[-1] != self._n_entries:
+            raise ValueError(
+                f"KirchhoffLayer {self.name!r}: storage_flow must hold one flow per storage "
+                f"entry ({self._n_entries}); got last dimension {storage_flow.shape[-1]}"
+            )
+        nodes, moves, offset = [], [], 0
+        for st in self._boundary_storage:
+            n = st.nodes.numel()
+            start = phi[..., st.nodes]
+            moves.append(dt * storage_flow[..., offset:offset + n]
+                         / st.capacity(start, start, drivers))
+            nodes.append(st.nodes)
+            offset += n
+        move = torch.cat(moves, dim=-1)
+        idx = torch.cat(nodes)
+        batch = broadcast_shapes(phi.shape[:-1], move.shape[:-1])
+        out = phi.expand(batch + phi.shape[-1:]).clone()
+        out[..., idx] = out[..., idx] + move
+        return out
 
     def _initial_storage_flows(self, phi, q, sources, drivers, zeros) -> torch.Tensor:
         """`storage_flows` at the initial point of a layer solved by Modified Nodal Analysis:

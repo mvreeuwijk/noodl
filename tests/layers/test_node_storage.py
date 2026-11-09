@@ -8,6 +8,7 @@ from noodl.apps.electrical.laws import Capacitance, Inductance, MutualInductance
 from noodl.elements import Conductance, LawContext, step_rate, step_rate_factor
 from noodl.layers.kirchhoff import KirchhoffLayer
 from noodl.operators.shifted import ShiftedOperator
+from noodl.refs import required_state_keys
 from noodl.topology import Network
 
 F64 = torch.float64
@@ -397,3 +398,102 @@ def test_model_step_of_a_storage_layer_does_not_need_q():
     want, _ = layer.solve(PB, {}, SRC, dt=0.25, history=(_phi_prev(layer), None))
     torch.testing.assert_close(new["heat.phi"], want, rtol=1e-12, atol=1e-12)
     assert model.refs["heat"].q.required == "optional"
+
+
+# ------------------------------------------------------------------ boundary storage
+# Under scheme="forward_euler" a storage sits at a boundary node (an EPANET tank): the solve
+# holds it at its step-start potential, and the step then moves it by dt * inflow / C.
+
+TANK_C = torch.tensor([0.8], dtype=F64)
+
+
+def _tank_net():
+    return _net(["gnd", "a", "b", "t"], (("gnd", "a"), ("a", "b"), ("b", "t")))
+
+
+def _tank_layer(storage=None, scheme="forward_euler"):
+    storage = LinearStorage([3], TANK_C.clone()) if storage is None else storage
+    return KirchhoffLayer(_tank_net(), "w", [Conductance(G.clone(), kind="g")],
+                          boundary=["gnd", "t"], storage=[storage], scheme=scheme)
+
+
+def test_boundary_storage_advances_by_dt_inflow_over_capacity_exactly():
+    layer = _tank_layer()
+    assert not layer.dynamic and len(layer.storage) == 1
+    model = Model(layer.net, [layer])
+    # the closure-free driver gives the tank column 0.0: the pass holds it at the state's 2.0
+    drivers = {"w.phi_boundary": torch.tensor([1.25, 0.0]),
+               "w.sources": torch.tensor([0.0, 0.3, -0.2, 0.0])}
+    state = {"w.phi": torch.tensor([1.25, 0.0, 0.0, 2.0])}
+    dt = 0.7
+    new = model.step(state, drivers, dt)
+    held, _ = layer.solve(torch.tensor([1.25, 2.0]), {}, drivers["w.sources"])
+    torch.testing.assert_close(new["w.phi"][:3], held[:3], rtol=0, atol=1e-14)
+    # the flow into the tank is what the step's own flows deliver to it, and the tank
+    # moves by exactly dt * inflow / C
+    inflow = -layer.net_outflow(new["w.q"])[..., [3]]
+    torch.testing.assert_close(new["w.storage_flow"], inflow, rtol=0, atol=0)
+    assert torch.equal(new["w.phi"][3], 2.0 + dt * inflow[0] / TANK_C[0])
+    assert float(inflow[0]) != 0.0
+    # a steady solve holds the tank and reports the same inflow, moving nothing
+    steady = model.steady(state, drivers)
+    assert float(steady["w.phi"][3]) == 2.0
+    torch.testing.assert_close(steady["w.storage_flow"], inflow, rtol=0, atol=1e-14)
+    # the layer's own step from a solve, as `water_event_step` takes it
+    solved = dict(new, **{"w.phi": new["w.phi"].clone()})
+    solved["w.phi"][3] = 2.0
+    torch.testing.assert_close(layer.advance_storage(solved["w.phi"], inflow, dt),
+                               new["w.phi"], rtol=0, atol=0)
+    assert model.refs["w"].phi.required == "always"
+    assert "w.phi" in required_state_keys(model)
+
+
+def test_boundary_storage_gradient_reaches_the_capacity():
+    storage = LinearStorage([3], TANK_C.clone(), learnable=True)
+    layer = _tank_layer(storage)
+    phi, q = layer.solve(torch.tensor([1.25, 2.0]), {}, torch.tensor([0.0, 0.3, -0.2, 0.0]))
+    inflow = layer.storage_flows(phi, {}, dt=None, q=q)
+    layer.advance_storage(phi, inflow, 0.7)[3].backward()
+    torch.testing.assert_close(storage.C.grad, -0.7 * inflow.detach() / TANK_C ** 2)
+
+
+def test_a_nonlinear_boundary_storage_is_refused():
+    class Cubic(NodeStorage):
+        def amount(self, phi_nodes, drivers=None):
+            return phi_nodes + phi_nodes ** 3 / 3
+
+    with pytest.raises(ValueError, match="Cubic at boundary nodes is not linear"):
+        _tank_layer(Cubic([3]))
+
+
+def test_forward_euler_refusals():
+    # storage at an interior node refuses forward_euler
+    with pytest.raises(ValueError, match=r"\['a'\], which are not boundary nodes"):
+        _tank_layer(LinearStorage([1], TANK_C.clone()))
+    # a storage at a boundary node refuses the implicit schemes
+    with pytest.raises(ValueError, match="unless the layer steps it with scheme='forward_euler'"):
+        _tank_layer(scheme="backward_euler")
+    # one entry per node
+    with pytest.raises(ValueError, match="given twice"):
+        KirchhoffLayer(_tank_net(), "w", [Conductance(G.clone(), kind="g")],
+                       boundary=["gnd", "t"], scheme="forward_euler",
+                       storage=[LinearStorage([3], TANK_C), LinearStorage([3], TANK_C)])
+    # a per-call scheme other than forward_euler on boundary storage
+    layer = _tank_layer()
+    with pytest.raises(ValueError, match="step by scheme='forward_euler' only"):
+        layer.solve(torch.tensor([1.25, 2.0]), {}, None, scheme="backward_euler")
+    # forward_euler on a layer that steps interior storage
+    rc, _ = _rc()
+    with pytest.raises(ValueError, match="boundary nodes only"):
+        rc.solve(PB, {}, SRC, dt=0.3, history=(_phi_prev(rc), None), scheme="forward_euler")
+    with pytest.raises(ValueError, match="no storage at boundary nodes"):
+        rc.advance_storage(_phi_prev(rc), torch.zeros(3), 0.3)
+    # a transport layer takes no forward_euler
+    from noodl.layers.transport import TransportLayer
+    with pytest.raises(ValueError, match="unknown scheme 'forward_euler'"):
+        TransportLayer(_net(), "x", capacity=torch.ones(3), flow_kind="g", boundary=["gnd"],
+                       scheme="forward_euler")
+    # the pass needs the step-start potentials it holds the storage at
+    model = Model(layer.net, [layer])
+    with pytest.raises(KeyError, match="held at its potential at the step start"):
+        model.steady({}, {"w.phi_boundary": torch.tensor([1.25, 2.0])})

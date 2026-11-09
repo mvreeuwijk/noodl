@@ -25,8 +25,10 @@ import torch
 from noodl.apps.water.inp import read_epanet_inp
 from noodl.apps.water.network import (
     build_model,
-    tank_inflow,
+    initial_state,
+    tank_levels,
     twoloop,
+    water_event_step,
     water_steady,
 )
 
@@ -188,14 +190,14 @@ def _extended_period(net, model, state, drivers):
     Manual section 13.1 item 17, p.113: the next step is the minimum of the nominal step
     and the time until a tank level "reaches a point that triggers a change in status for
     some link", the level "assumed to change in a linear fashion based on the current flow
-    solution". `TankLevels.event_step` is that rule; `TankLevels.__call__` re-applies the
+    solution". `water_event_step` takes one such step (one solve, the tank held at its
+    step-start head, then moved by forward Euler); `TankLevels.__call__` re-applies the
     controls at the start of every sub-step.
 
     Returns the tank level at every REPORT time, starting at t = 0.
     """
-    closure = model.tank_closure
     base = drivers["water.sources"].clone()
-    levels = [float(state["water.tank_level"][0])]
+    levels = [float(tank_levels(model, state)[0])]
     time = 0.0
     n_sub = 0
     while time < net.duration - 1e-9:
@@ -203,17 +205,10 @@ def _extended_period(net, model, state, drivers):
         while time < report_end - 1e-9:
             step_drivers = dict(drivers)
             step_drivers["water.sources"] = base * _pattern_factor(net, time)
-            solved = water_steady(model, state, step_drivers)
-            inflow = tank_inflow(model, solved)
-            rate = inflow / closure.area
-            dt = closure.event_step(state["water.tank_level"], rate, report_end - time)
-            state = dict(solved)
-            state["water.tank_level"] = closure.advance(
-                state["water.tank_level"], inflow, dt
-            )
+            state, dt = water_event_step(model, state, step_drivers, report_end - time)
             time += dt
             n_sub += 1
-        levels.append(float(state["water.tank_level"][0]))
+        levels.append(float(tank_levels(model, state)[0]))
     return levels, n_sub
 
 
@@ -276,8 +271,7 @@ def test_a_tank_outside_its_limits_is_refused(tmp_path):
     path, _ = _epanet(tmp_path, "Net1.inp")
     net = read_epanet_inp(path)
     model, state, drivers = build_model(net)
-    state = dict(state)
-    state["water.tank_level"] = torch.tensor([100.0], dtype=F64)
+    state = initial_state(model, values={"water.tank_level": {"2": 100.0}})
     with pytest.raises(ValueError, match=r"tank\(s\) \['2'\] are outside"):
         water_steady(model, state, drivers)
 
@@ -690,46 +684,51 @@ def test_gradient_reaches_the_pump_head_gain_h0(tmp_path):
 
 
 def test_tank_area_is_not_reached_by_a_single_steady_solve(tmp_path):
-    """Tank AREA never enters `TankLevels.__call__` (only `bottom + level` does), so a
-    single `water_steady` call's output is STRUCTURALLY independent of it -- not a small
+    """The solve holds every tank at its head, so a single `water_steady` call's output is
+    STRUCTURALLY independent of the tank area (the storage capacity) -- not a small
     gradient, but no path in the graph at all. This is the "structurally not
     differentiable" case: a blanket claim that roughness, demands, pump h0 AND
     tank area all reach the steady solve would overstate the last one. The next test shows
-    where the framework DOES differentiate w.r.t. area: `TankLevels.advance()`.
+    where the framework DOES differentiate w.r.t. area: the step of `water_event_step`.
     """
     path, _ = _epanet(tmp_path, "Net1.inp", duration=0)
     net = read_epanet_inp(path)
     model, state, drivers = build_model(net)
-    closure = model.tank_closure
-    closure.area.requires_grad_(True)
+    (storage,) = model.kirchhoff["water"].storage
+    storage.C.requires_grad_(True)
     final = water_steady(model, state, drivers, differentiable=True)
     assert not final["water.phi"].requires_grad
 
 
-def test_gradient_reaches_the_tank_area_through_advance(tmp_path):
-    """The tank-area channel is `TankLevels.advance`'s explicit-Euler update (the
-    previous test), not the steady solve. MEASURED: 2.753e-9 relative (analytic
-    -5.0256097e-3, central difference -5.0256097e-3).
+def test_gradient_reaches_the_tank_area_through_the_event_step(tmp_path):
+    """The tank-area channel is the forward-Euler move of `water_event_step` (the previous
+    test), not the steady solve. Net1 is Hazen-Williams, so the storage capacity IS the
+    area. MEASURED at the old explicit update: 2.753e-9 relative (analytic -5.0256097e-3,
+    central difference -5.0256097e-3).
     """
     path, _ = _epanet(tmp_path, "Net1.inp", duration=0)
     net = read_epanet_inp(path)
     model, state, drivers = build_model(net)
-    closure = model.tank_closure
-    final = water_steady(model, state, drivers)
-    inflow = tank_inflow(model, final).detach()
+    (storage,) = model.kirchhoff["water"].storage
+    assert model.head_scale == 1.0
 
-    closure.area.requires_grad_(True)
-    closure.advance(state["water.tank_level"], inflow, 3600.0).sum().backward()
-    analytic = float(closure.area.grad.detach().sum())
+    def level_sum():
+        stepped, dt = water_event_step(model, state, drivers, 3600.0)
+        assert dt == 3600.0
+        return tank_levels(model, stepped).sum()
+
+    storage.C.requires_grad_(True)
+    level_sum().backward()
+    analytic = float(storage.C.grad.detach().sum())
 
     eps = 1e-4
-    base_area = closure.area.detach().clone()
+    base_area = storage.C.detach().clone()
     with torch.no_grad():
-        closure.area.copy_(base_area + eps)
-        up = float(closure.advance(state["water.tank_level"], inflow, 3600.0).sum())
-        closure.area.copy_(base_area - eps)
-        down = float(closure.advance(state["water.tank_level"], inflow, 3600.0).sum())
-        closure.area.copy_(base_area)
+        storage.C.copy_(base_area + eps)
+        up = float(level_sum())
+        storage.C.copy_(base_area - eps)
+        down = float(level_sum())
+        storage.C.copy_(base_area)
     fd = (up - down) / (2 * eps)
     assert abs(analytic - fd) <= 1e-5 * abs(fd), (analytic, fd)
 

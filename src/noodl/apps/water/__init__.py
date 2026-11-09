@@ -36,6 +36,7 @@ from noodl.apps.water.network import (
     tank_inflow,
     tank_levels,
     twoloop,
+    water_event_step,
     water_steady,
     water_step,
 )
@@ -54,5 +55,5 @@ __all__ = [
     "build_model", "initial_drivers", "initial_state", "link_table", "pressure_head",
     "composite_friction_factor", "read_epanet_inp", "tank_inflow", "tank_levels",
     "three_point_curve",
-    "to_kilopascal", "twoloop", "water_step", "water_steady",
+    "to_kilopascal", "twoloop", "water_event_step", "water_step", "water_steady",
 ]

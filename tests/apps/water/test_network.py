@@ -706,5 +706,6 @@ def test_a_constant_tracer_is_preserved_with_a_tank_every_pipe_form_and_valve(
 @pytest.mark.parametrize("pda", [False, True])
 def test_storage_tanks_with_quality_are_refused_explicitly(pda):
     kwargs = {"pda": True, "p_req": 15.0} if pda else {}
-    with pytest.raises(ValueError, match="tank_mode='storage' with quality"):
-        build_model(_tank_device_network("tcv"), quality=0.0, tank_mode="storage", **kwargs)
+    with pytest.raises(ValueError, match="tank_scheme='backward_euler' with quality"):
+        build_model(_tank_device_network("tcv"), quality=0.0, tank_scheme="backward_euler",
+                    **kwargs)
