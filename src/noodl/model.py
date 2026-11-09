@@ -377,10 +377,11 @@ class Model:
     def _circuit_kwargs(name: str, layer: KirchhoffLayer, state: Mapping[str, Tensor],
                         base: Mapping[str, Tensor], dt: float | None,
                         t: float | None) -> dict:
-        """The solve keywords of a layer solved by Modified Nodal Analysis or with node
-        storage.
+        """The step keywords of a layer's solve: every Kirchhoff layer gets `t`, and the
+        others only where the layer reads them.
 
-        `q0`: the warm start of its implicit-law flows, from the fed state's `"<name>.q"`.
+        `q0`: the warm start of its flow unknowns (a layer that has them), from the fed
+        state's `"<name>.q"`.
         `t`: the time its laws are evaluated at -- the END of a step (`t + dt`, the time
         the solved state belongs to), the given time of a steady solve, `None` without one.
         On a step of a layer with dynamic laws or storage (not a phasor layer, which takes no

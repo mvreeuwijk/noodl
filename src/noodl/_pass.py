@@ -112,8 +112,9 @@ def kind_flows(model: Model, name: str, state: Mapping[str, Tensor],
 def circuit_kwargs(name: str, layer: KirchhoffLayer, state: Mapping[str, Tensor],
                    base: Mapping[str, Tensor], dt: float | None, t: float | None,
                    scheme: str | None = None) -> dict:
-    """The solve keywords of a layer solved by Modified Nodal Analysis or with node
-    storage; see `Model._circuit_kwargs`. `scheme` is the step's (`None`: the layer's own)."""
+    """The step keywords of a layer's solve (`t`, and `q0`, `history`, `dt` and
+    `storage_flow` where the layer reads them); see `Model._circuit_kwargs`. `scheme` is the
+    step's (`None`: the layer's own)."""
     out: dict = {"t": t if dt is None or t is None else t + dt}
     q_prev = state.get(f"{name}.q")
     if q_prev is not None and layer.mna:
@@ -202,8 +203,7 @@ def _solve_potentials(model: Model, state, base, drv, dt, t, solve_kwargs, warm_
         phi0 = None if phi_prev is None else phi_prev[..., layer.interior]
         d: dict = {}
         kwargs = layer_kwargs(solve_kwargs, name)
-        circuit = (circuit_kwargs(name, layer, state, base, dt, t, kwargs.get("scheme"))
-                   if layer.mna or layer.dynamic else {})
+        circuit = circuit_kwargs(name, layer, state, base, dt, t, kwargs.get("scheme"))
         if not warm_start:
             # The implicit-law flows' warm start goes with the potentials' (`phi0`).
             circuit.pop("q0", None)

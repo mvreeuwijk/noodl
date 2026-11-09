@@ -76,9 +76,10 @@ class FunctionalLaws:
             )
         )
         history = ()
-        if step is not None:
-            history = (step.phi_prev,) if step.previous is None else (
-                step.phi_prev, step.previous)
+        if step is not None and step.storage is not None:
+            store = step.storage
+            history = (store.phi_prev,) if store.previous is None else (
+                store.phi_prev, store.previous)
         self.all_params = (*param_tensors, *driver_tensors, sources_tensor, phi_boundary,
                            *history)
         self.last = None
@@ -120,11 +121,12 @@ class FunctionalLaws:
         offset += len(self.driver_keys)
         src = params[offset]
         pb = params[offset + 1]
-        step = None
-        if self.step is not None:
+        step = self.step
+        if step is not None and step.storage is not None:
             # the step-start tensors, threaded, in place of the originals
-            previous = None if self.step.previous is None else params[offset + 3]
-            step = dataclasses.replace(self.step, phi_prev=params[offset + 2], previous=previous)
+            previous = None if step.storage.previous is None else params[offset + 3]
+            step = dataclasses.replace(step, storage=dataclasses.replace(
+                step.storage, phi_prev=params[offset + 2], previous=previous))
         return rebuilt, drv, src, pb, step
 
     def dp(self, phi, drv):
@@ -152,11 +154,11 @@ class FunctionalLaws:
         layer = self.layer
         w = layer._scatter_withdrawals(lambda j, ns: _call(
             ns, rebuilt[self.n_el + j], (phi[..., ns.nodes], drv)))
-        if step is None:
+        if step is None or step.storage is None:
             return w
         return layer._add(w, layer._scatter_storage(lambda j, st: _call(
             st, rebuilt[self.n_owned + j],
-            (*layer._storage_args(j, st, phi, step), step.ctx, drv))))
+            (*layer._storage_args(j, st, phi, step.storage), step.ctx, drv))))
 
     def node_slopes(self, phi, drv, rebuilt, step=None):
         """The withdrawals' slopes `diag(w')`, plus the storages' on a step (`step`, the
@@ -165,11 +167,11 @@ class FunctionalLaws:
         d = layer._scatter_withdrawals(
             lambda j, ns: self._withdrawal_slope(ns, rebuilt[self.n_el + j], phi[..., ns.nodes],
                                              drv))
-        if step is None:
+        if step is None or step.storage is None:
             return d
         return layer._add(d, layer._scatter_storage(
             lambda j, st: self._storage_slope(st, rebuilt[self.n_owned + j],
-                                              layer._storage_args(j, st, phi, step),
+                                              layer._storage_args(j, st, phi, step.storage),
                                               step.ctx, drv)))
 
     @staticmethod

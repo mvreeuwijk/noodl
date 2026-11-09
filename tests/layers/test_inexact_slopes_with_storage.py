@@ -184,11 +184,11 @@ def test_the_rebuild_memo_returns_each_call_s_own_step():
     whichever entry is hit."""
     layer, *_ = _layer("classic", aided=False)
     phi_prev, flow_prev = _t([0.0, 0.4, -0.2], grad=True), _t([0.05, 0.05], grad=True)
-    step = layer._storage_step(None, DT, None, "trapezoidal", (phi_prev, None), flow_prev, {})
+    step = layer._step(None, DT, None, "trapezoidal", (phi_prev, None), flow_prev, {})
     fn = FunctionalLaws(layer, {}, _t(SOURCES), _t([0.0]), step)
     a = fn.all_params
     b = tuple(p.detach() for p in a)
     c = tuple(p.detach().clone() for p in a)
     for params in (a, b, a, b, c, a, b):
         *_, st = fn.rebuild(params)
-        assert st.phi_prev is params[-2] and st.previous is params[-1]
+        assert st.storage.phi_prev is params[-2] and st.storage.previous is params[-1]

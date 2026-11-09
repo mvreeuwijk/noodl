@@ -278,25 +278,38 @@ The nodal-only methods (`flows`, `dflows`, `residual`, `jacobian`, `linear_init`
 assume every flow is a function of its own edge's potential difference and raise `TypeError` on
 such a layer; read the flows from `solve`'s `q`, and the balance from `balance(phi, q, sources)`.
 
-### The solve keywords
+### What a solve takes: dc, initial, a step, a phasor
 
 | Keyword | Meaning |
 |---|---|
 | `mode` | `None` (default): `"transient"` when `dt` is given, `"dc"` otherwise. `"dc"`: the steady operating point (no `dt`). `"initial"`: the consistent initial point (each storage law at its initial value; no `dt`). A phasor layer is always `"phasor"`. |
 | `dt` | One implicit step of this length (s). |
 | `t` | The evaluation time, the END of the step on a transient (a time-dependent source is evaluated there); `None` when untracked. |
-| `history` | `(phi, q)` at the step start, full-node potentials and every edge's flow, as `solve` returns them. Required on a step of a layer with a dynamic law. |
+| `history` | `(phi, q)` at the step start, full-node potentials and every edge's flow, as `solve` returns them. Required on a step of a layer with a dynamic law or storage; `q` is read only by a dynamic law and may be `None` otherwise. |
 | `scheme` | `"trapezoidal"` or `"backward_euler"`; `None` (default) is the layer's own, `KirchhoffLayer(scheme=...)`, trapezoidal unless built otherwise. |
 | `phi0`, `q0` | Warm start of the interior potentials and of the implicit-edge flows; zeros otherwise. |
 
-A layer solved by nodal analysis without storage has static laws: it accepts `t`, a valid
-`scheme`, `q0` and the modes `"dc"` and `"initial"` and ignores them (`phi0` is its own warm
-start), and refuses `mode="phasor"`, `dt`, `history` and `storage_flow`, since it takes no step;
-a scheme outside the two above is refused by name. A layer solved by nodal analysis **with**
-storage takes `dt`, `history`, `scheme` and `storage_flow` (see [Node storage](#node-storage)).
-A phasor layer ignores `scheme` and refuses `dt`, `history` and any mode but `"phasor"`. On
-the differentiable path (the default) gradients reach `history` too, so a chain of steps
-back-propagates through time.
+Every layer checks these keywords the same way, by name, whichever path solves it, and builds
+one step description per solve (`_Step`: the law context and what the storage does).
+
+- **dc** (`mode="dc"`, or no `dt`): the steady operating point. Storage is absent, so no
+  `history` or `storage_flow` is taken.
+- **initial** (`mode="initial"`, no `dt`): the consistent initial point. A storage that holds
+  an `initial()` potential holds its node there, on a layer that solves for flow unknowns; the
+  other kind of layer refuses it.
+- **a step** (`dt > 0`): one implicit step ending at `t`, with the `scheme`. It needs
+  `history`, and `storage_flow` under the trapezoidal scheme on a layer with storage. A layer
+  with storage, a dynamic law or a law that reads the context takes a step; a layer with none
+  of these has static laws, takes no step, and refuses `dt` and `history` (it accepts and
+  ignores `t`, a valid `scheme`, `q0` and the modes `"dc"` and `"initial"`). A layer whose
+  laws read the context but none dynamic steps without history, at its operating point at the
+  step end. `storage_flow` is refused on a layer without storage, and any step keyword
+  without `dt`.
+- **a phasor** (always, on a `phasor=True` layer): ignores `scheme` and refuses `dt`,
+  `history` and any mode but `"phasor"`.
+
+A scheme outside the two above is refused by name. On the differentiable path (the default)
+gradients reach `history` too, so a chain of steps back-propagates through time.
 
 **Linear solver.** `linear_solver="auto"` on such a layer factorises: SciPy's sparse LU
 (`"sparse_direct"`, per instance) whenever SciPy is importable, at any batch size, and batched
@@ -696,7 +709,8 @@ unknowns. `Model` hands such a layer what its laws need:
 
 - the warm start of those flows from `"<layer>.q"` in the state, when it is there;
 - the time the laws are evaluated at: the **end** of a step (`t + dt` for `step(..., t=t)`),
-  the `t` of `steady(..., t=t)`, or `None` when no time is given;
+  the `t` of `steady(..., t=t)`, or `None` when no time is given (every Kirchhoff layer is
+  given it, whichever path solves it);
 - on a step of a layer with dynamic laws (`layer.dynamic`: a capacitance, an inductance), the
   step-start `"<layer>.phi"` and `"<layer>.q"` as its history, and `dt`. Both keys are then
   required in the state (`state_from` and `check` say so); give the first step a consistent

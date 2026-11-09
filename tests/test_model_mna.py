@@ -146,7 +146,7 @@ def test_step_without_warm_start_drops_the_flow_warm_start_but_keeps_the_history
     assert kw["dt"] == 0.1 and kw["t"] == pytest.approx(2.1)
 
 
-def test_classic_layer_gets_no_circuit_keywords(monkeypatch):
+def test_classic_layer_gets_only_the_time_among_the_step_keywords(monkeypatch):
     net = _net(["g", "a"], [("a", "g", "r")])
     layer = KirchhoffLayer(net, "c", [Conductance(torch.tensor([1.0]), kind="r")],
                            boundary=["g"])
@@ -160,7 +160,7 @@ def test_classic_layer_gets_no_circuit_keywords(monkeypatch):
     monkeypatch.setattr(layer, "solve", spy)
     state = {"c.phi": torch.zeros(2), "c.q": torch.zeros(1)}
     Model(net, [layer]).step(state, {"c.phi_boundary": torch.ones(1)}, dt=0.1, t=0.0)
-    assert seen == [{"phi0", "diagnostics"}]
+    assert seen == [{"phi0", "diagnostics", "t"}]
 
 
 def test_missing_flow_state_on_dynamic_step_is_named():

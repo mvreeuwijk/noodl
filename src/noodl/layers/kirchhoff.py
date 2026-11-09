@@ -7,6 +7,7 @@ on typed edges (one ConstitutiveLaw per kind) and the per-edge head driver
 
 from __future__ import annotations
 
+import dataclasses
 import functools
 import types
 from collections.abc import Mapping, Sequence
@@ -18,7 +19,7 @@ from noodl._broadcast import broadcast_shapes
 from noodl._tracking import bulk_values
 from noodl.elements.base import ConstitutiveLaw, ImplicitLaw, LawContext
 from noodl.layers._functional import FunctionalLaws
-from noodl.layers._mna import MnaSystem, check_scheme
+from noodl.layers._mna import MnaSystem, _Held, check_scheme
 from noodl.layers._solve_policy import resolve_classic, resolve_mna
 from noodl.layers._topology import TopologyGuard
 from noodl.operators.graph import GraphLaplacianOperator
@@ -59,13 +60,23 @@ _ATOMS = (str, bytes, int, float, complex, bool, type(None))
 
 @dataclass(frozen=True)
 class _StorageStep:
-    """One step of a layer with storage: the law context (`dt`, `t`, `scheme`), the
-    step-start potentials `phi_prev` (full-node) and the flows into every storage entry at
-    the step start, `previous` (`None` when not given; the trapezoidal scheme needs it)."""
+    """The storage of one step: the step-start potentials `phi_prev` (full-node) and the
+    flows into every storage entry at the step start, `previous` (`None` when not given; the
+    trapezoidal scheme needs it)."""
 
-    ctx: LawContext
     phi_prev: torch.Tensor
     previous: torch.Tensor | None
+
+
+@dataclass(frozen=True)
+class _Step:
+    """What one solve evaluates its laws and storage in: the law context (mode, dt, t,
+    scheme, the step-start dp_prev/q_prev of the laws that read them, omega on a phasor
+    layer) and what the storage does (`None`; a `_StorageStep` on a step; the held initial
+    rows, `_Held`, at the initial point). Built once per solve by `KirchhoffLayer._step`."""
+
+    ctx: LawContext
+    storage: _StorageStep | _Held | None
 _OPAQUE = (type, types.ModuleType, types.FunctionType, types.BuiltinFunctionType,
            types.MethodType)
 
@@ -424,6 +435,17 @@ class KirchhoffLayer(TopologyGuard):
         offset += sum(int(cols.numel()) for cols in self._boundary_storage_cols)
         self._n_entries = offset
 
+        # The edges of the laws that store (dynamic), and whether a step has anything to
+        # take: a dynamic law, a storage or a law that reads the step's context.
+        dyn = [torch.arange(s, e) for el, (s, e) in
+               zip(self._laws, self._law_slices, strict=True) if el.dynamic]
+        self._dynamic_edges = torch.cat(dyn) if dyn else torch.zeros(0, dtype=torch.long)
+        self._takes_step = bool(dyn) or bool(self._storage) or any(
+            el._takes_ctx for el in self._laws)
+        # whether a law reads the step-start potential differences and flows of its edges
+        self._reads_history = bool(dyn) or any(self._relation) or any(
+            el._takes_ctx for el in self._laws)
+
         self._mna: MnaSystem | None = None
         if self.mna:
             self._check_mna_structure()
@@ -723,28 +745,29 @@ class KirchhoffLayer(TopologyGuard):
         return b if a is None else a + b
 
     def _withdrawal(
-        self, phi: torch.Tensor, drivers: Mapping, step: _StorageStep | None = None
+        self, phi: torch.Tensor, drivers: Mapping, step: _Step | None = None
     ) -> torch.Tensor | None:
         """Total potential-dependent withdrawal per INTERIOR row: the withdrawals', plus
         the storages' step rates on a step (`step`); `None` when there is none. `phi` is
         full-node."""
         w = self._scatter_withdrawals(lambda j, ns: ns.flow(phi[..., ns.nodes], drivers))
-        if step is None:
+        if step is None or step.storage is None:
             return w
         return self._add(w, self._scatter_storage(
-            lambda j, st: st.rate(*self._storage_args(j, st, phi, step), step.ctx, drivers)))
+            lambda j, st: st.rate(*self._storage_args(j, st, phi, step.storage), step.ctx,
+                                  drivers)))
 
     def _withdrawal_slopes(
-        self, phi: torch.Tensor, drivers: Mapping, step: _StorageStep | None = None
+        self, phi: torch.Tensor, drivers: Mapping, step: _Step | None = None
     ) -> torch.Tensor | None:
         """`diag(w')` per INTERIOR row: the withdrawals' slopes, plus the storages'
         `rate_slope` on a step; `None` when there is none."""
         d = self._scatter_withdrawals(lambda j, ns: ns.dflow(phi[..., ns.nodes], drivers))
-        if step is None:
+        if step is None or step.storage is None:
             return d
         return self._add(d, self._scatter_storage(
             lambda j, st: st.rate_slope(
-                *self._storage_args(j, st, phi, step), step.ctx, drivers)))
+                *self._storage_args(j, st, phi, step.storage), step.ctx, drivers)))
 
     def _operator_at(
         self, slopes: torch.Tensor, node_slopes: torch.Tensor | None = None
@@ -927,15 +950,14 @@ class KirchhoffLayer(TopologyGuard):
         step = self._public_step(dt, scheme, history, storage_flow, drivers)
         return self._residual_parts(phi_interior, phi_boundary, drivers, sources, step)[0]
 
-    def _public_step(self, dt, scheme, history, storage_flow, drivers) -> _StorageStep | None:
-        """The storage step of `residual`, `jacobian` and `adjoint`: their step keywords,
-        checked as `solve` checks them (refused on a layer without storage)."""
-        self._check_classic_arguments(None, dt, history, storage_flow)
+    def _public_step(self, dt, scheme, history, storage_flow, drivers) -> _Step:
+        """The `_Step` of `residual`, `jacobian` and `adjoint`: their step keywords,
+        checked as `solve` checks them (refused on a layer that takes no step)."""
         if scheme is None:
             scheme = self.scheme
         check_scheme(self.name, scheme)
         self._check_forward_euler(scheme)
-        return self._storage_step(None, dt, None, scheme, history, storage_flow, drivers)
+        return self._step(None, dt, None, scheme, history, storage_flow, drivers)
 
     def balance(self, phi, q, sources=None, drivers=None, storage_flow=None):
         """The interior flow balance `A_I q - s_I (+ w(phi)) (+ storage)` of a state's own
@@ -1119,7 +1141,7 @@ class KirchhoffLayer(TopologyGuard):
         # w(phi) ~ w(0) + w'(0) phi, so w(0) moves to the right-hand side and w'(0) joins
         # the operator's diagonal.
         node_slopes = None
-        if self._withdrawals or _step is not None:
+        if self._withdrawals or (_step is not None and _step.storage is not None):
             w0 = self._withdrawal(phi0, drivers, _step)
             node_slopes = self._withdrawal_slopes(phi0, drivers, _step)
             rhs = rhs - w0
@@ -1390,42 +1412,30 @@ class KirchhoffLayer(TopologyGuard):
         (`solvers.implicit._Implicit.forward` already solved under `no_grad` and takes its
         gradients from the adjoint).
 
+        What a solve takes (`_step` checks it, by name, on both paths): `mode=None` is a step
+        when `dt` is given and the steady operating point (`"dc"`) otherwise; `"initial"` is
+        the consistent initial point, where a storage that holds an `initial()` potential
+        holds its node there (only a layer with flow unknowns can); `"dc"` and `"initial"`
+        take no `dt`. A step is one implicit step of length `dt > 0` ending at time `t` with
+        the `scheme` (`None` is the layer's own, `"trapezoidal"` by default), from the
+        step-start state `history=(phi, q)` (full-node potentials and every edge's flow, as
+        this method returns them): required by a layer with storage or a dynamic law, and `q`
+        only by a dynamic law. Under the trapezoidal scheme a layer with storage also needs
+        `storage_flow`, the flow into every storage entry at the step start, in
+        `storage_flows`' order. A layer with no storage, no dynamic law and no law that reads
+        the context takes no step and refuses `dt`, `history` and `storage_flow`; it accepts
+        and ignores `t`, `q0` and a valid `scheme`. Without `dt` storage is absent.
+
         A layer solved by Modified Nodal Analysis (`self.mna`) solves for the interior
         potentials and the flows of its implicit-law edges together (`noodl.layers._mna`),
         from zeros or the warm start `phi0` (interior potentials) and `q0` (the flows of
-        `implicit_edges`); the returned `q` covers every edge. `history`, `dt`, `t`,
-        `scheme` and `mode` set the context its laws are evaluated in (`LawContext`):
-        on a phasor layer always `"phasor"` (no `dt` or `history`; the frequency driver
-        `"<name>.frequency"` is required, and `phi_boundary`, `sources`, `phi0`, `q0` may be
-        real or complex and are taken as complex128); otherwise
-        with `dt` given, one implicit step of length `dt` ending at time `t`, with the
-        `scheme` (`"trapezoidal"` or `"backward_euler"`; `None` is the layer's own, set at
-        construction, `"trapezoidal"` by default) from the step-start state
-        `history=(phi, q)` (full-node potentials and every edge's flow, as this method
-        returns them; required when a law is dynamic); without `dt`, the steady operating
-        point (`mode="dc"`, the default), or with `mode="initial"` the consistent initial
-        point (each storage law at its initial value). Its storage (`storage`) withdraws
-        `NodeStorage.rate` on a step, as on the classic path below (`storage_flow` as
-        there); it is absent at the steady point, and at the initial point each node with a
-        storage entry whose `initial()` is not `None` is held at that potential (its flow
-        balance is replaced by `phi = initial`; see `storage_flows` for the flow into
-        storage there). On the differentiable path gradients flow to `history` and
+        `implicit_edges`); the returned `q` covers every edge. A phasor layer is always in
+        `"phasor"` mode (no `dt` or `history`; the frequency driver `"<name>.frequency"` is
+        required, and `phi_boundary`, `sources`, `phi0`, `q0` may be real or complex and are
+        taken as complex128). On the differentiable path gradients flow to `history` and
         `storage_flow` too, so a chain of steps back-propagates through time. There
         `diagnostics["method"]` is likewise the method requested and `"backend"` the one that
         ran; `method="cg"` is refused (the system is not symmetric positive definite).
-
-        A classic layer without storage, whose laws are static, accepts and ignores `q0`,
-        `t`, a valid `scheme` and the modes `"dc"` and `"initial"` (both its one steady
-        solution), and refuses `mode="phasor"`, `dt`, `history` and `storage_flow`: it takes
-        no step and solves no phasors. A classic layer WITH storage (`storage`) takes one
-        implicit step of length `dt` with the `scheme` from the step-start potentials
-        `history=(phi, q)` (`q` is not read): every storage entry withdraws
-        `NodeStorage.rate(phi, phi_start, storage_flow, ...)`, where `storage_flow` is the
-        flow into every entry at the step start, in `storage_flows`' order (required by the
-        trapezoidal scheme). Without `dt` its storage is absent (the steady point, mode
-        `"dc"`), and `mode="initial"` is refused when a storage holds an `initial()`
-        potential (holding it needs the Modified Nodal Analysis path). On the differentiable
-        path gradients flow to `history` and `storage_flow` too.
         """
         self._require_current_topology()
         if scheme is None:
@@ -1434,19 +1444,14 @@ class KirchhoffLayer(TopologyGuard):
         for key, value in self.newton_defaults.items():
             newton_kwargs.setdefault(key, value)
         if self.mna:
-            if storage_flow is not None and not self._storage:
-                raise ValueError(
-                    f"KirchhoffLayer {self.name!r} has no storage; drop storage_flow"
-                )
             return self._solve_mna(
                 phi_boundary, drivers, sources, phi0, q0, history, dt, t, scheme, mode,
                 differentiable, diagnostics, newton_kwargs, storage_flow,
             )
         check_scheme(self.name, scheme)
-        self._check_classic_arguments(mode, dt, history, storage_flow)
         drivers = drivers or {}
-        step = self._storage_step(mode, dt, t, scheme, history, storage_flow, drivers)
-        extra = () if step is None else (step.phi_prev, step.previous)
+        step = self._step(mode, dt, t, scheme, history, storage_flow, drivers)
+        extra = () if step.storage is None else (step.storage.phi_prev, step.storage.previous)
         policy = resolve_classic(
             self, newton_kwargs, diagnostics, differentiable, drivers, sources, phi_boundary,
             extra,
@@ -1502,39 +1507,63 @@ class KirchhoffLayer(TopologyGuard):
                 f"step by scheme='forward_euler' only; got scheme={scheme!r}"
             )
 
-    def _check_classic_arguments(self, mode, dt, history, storage_flow=None) -> None:
-        """Refuse the keywords a classic layer cannot honour: a step on a layer without
-        storage (its laws are static), a phasor mode, an unknown mode."""
-        if mode == "phasor":
-            raise ValueError(
-                f"KirchhoffLayer {self.name!r}: mode='phasor' needs a layer built with "
-                f"phasor=True"
-            )
-        if mode is not None and mode not in ("dc", "initial"):
-            raise ValueError(
-                f"KirchhoffLayer {self.name!r}: mode={mode!r}; expected 'dc', 'initial' or "
-                f"None (transient when dt is given, dc otherwise)"
-            )
-        if self._storage:
-            return
-        stepping = [k for k, v in (("dt", dt), ("history", history),
-                                   ("storage_flow", storage_flow)) if v is not None]
-        if stepping:
-            raise ValueError(
-                f"KirchhoffLayer {self.name!r} is solved by nodal analysis: its laws are "
-                f"static and it has no storage, so it takes no step; drop {stepping}"
-            )
+    def _step(self, mode, dt, t, scheme, history, storage_flow, drivers, *,
+              check_dt: bool = True, omega: bool = True) -> _Step:
+        """The `_Step` of one solve (and of `residual`, `jacobian`, `adjoint` and
+        `storage_flows`): the context its laws are evaluated in and what its storage does.
 
-    def _storage_step(self, mode, dt, t, scheme, history, storage_flow,
-                      drivers, *, check_dt: bool = True) -> _StorageStep | None:
-        """The step of a classic layer with storage, or `None` when storage is absent (no
-        storage, or no `dt`: the steady point). Checks the step keywords by name;
-        `check_dt=False` skips the positivity of `dt` (a host sync for a tensor `dt`) when
-        the solve of the same step has checked it."""
-        if not self._storage:
-            return None
+        `mode=None` is a step when `dt` is given and the steady operating point (`"dc"`)
+        otherwise; `"dc"` and `"initial"` (the consistent initial point) take no `dt`, and
+        `"phasor"`, on a phasor layer only (which is always in it), no `dt` or `history`. A
+        step needs `dt > 0` and, from the step start, `history=(phi, q)`: required on a layer
+        with a storage or a dynamic law, with `q` required only by a dynamic law and `None`
+        otherwise. A layer with storage under the trapezoidal scheme needs `storage_flow`,
+        the flow into every storage entry at the step start. A layer with no storage, no
+        dynamic law and no law that reads the context takes no step: it refuses `dt` and
+        `history`. Every keyword is checked by name; `check_dt=False` skips the positivity
+        of `dt` (a host sync for a tensor `dt`) when the solve of the same step has checked
+        it, and `omega=False` leaves a phasor layer's angular frequency out (`storage_flows`
+        reads no law)."""
         name = self.name
-        if mode == "initial":
+        if self.phasor:
+            if mode not in (None, "phasor"):
+                raise ValueError(
+                    f"KirchhoffLayer {name!r} is a phasor layer: mode={mode!r}; expected "
+                    f"'phasor' or None"
+                )
+            if dt is not None or history is not None:
+                raise ValueError(
+                    f"KirchhoffLayer {name!r} is a phasor layer, which solves the "
+                    f"sinusoidal steady state and takes no step; drop dt and history"
+                )
+        else:
+            if mode == "phasor":
+                raise ValueError(
+                    f"KirchhoffLayer {name!r}: mode='phasor' needs a layer built with "
+                    f"phasor=True"
+                )
+            if mode is not None and mode not in ("dc", "initial"):
+                raise ValueError(
+                    f"KirchhoffLayer {name!r}: mode={mode!r}; expected 'dc', 'initial' or "
+                    f"None (transient when dt is given, dc otherwise)"
+                )
+            if mode is not None and dt is not None:
+                what = ("the consistent initial point" if mode == "initial"
+                        else "the steady operating point")
+                raise ValueError(
+                    f"KirchhoffLayer {name!r}: mode={mode!r} is {what}, which takes no step; "
+                    f"drop dt"
+                )
+        if storage_flow is not None and not self._storage:
+            raise ValueError(f"KirchhoffLayer {name!r} has no storage; drop storage_flow")
+        if not self._takes_step:
+            stepping = [k for k, v in (("dt", dt), ("history", history)) if v is not None]
+            if stepping:
+                raise ValueError(
+                    f"KirchhoffLayer {name!r} has no storage, no dynamic law and no law that "
+                    f"reads the step's context, so it takes no step; drop {stepping}"
+                )
+        if mode == "initial" and self._storage and not self.mna:
             held = [st for st in self._storage if st.initial(drivers) is not None]
             if held:
                 raise ValueError(
@@ -1552,14 +1581,14 @@ class KirchhoffLayer(TopologyGuard):
                     f"KirchhoffLayer {name!r}: {extra} given without dt; a steady solve "
                     f"takes no step"
                 )
-            return None
-        if mode is not None:
-            what = ("the consistent initial point" if mode == "initial"
-                    else "the steady operating point")
-            raise ValueError(
-                f"KirchhoffLayer {name!r}: mode={mode!r} is {what}, which takes no step; "
-                f"drop dt"
-            )
+            if self.phasor:
+                ctx = LawContext(mode="phasor", t=t,
+                                 omega=self._mna._omega(drivers) if omega else None)
+                return _Step(ctx, None)
+            ctx = LawContext(mode="dc" if mode is None else mode, t=t)
+            held = (self._mna._held(drivers, self._mna._plain_call)
+                    if mode == "initial" and self._storage and self.mna else None)
+            return _Step(ctx, held)
         if not check_dt:
             # the solve of this step has checked it
             ...
@@ -1568,22 +1597,50 @@ class KirchhoffLayer(TopologyGuard):
                 raise ValueError(f"KirchhoffLayer {name!r}: dt must be positive, got {dt!r}")
         elif not bool((torch.as_tensor(dt) > 0).all()):
             raise ValueError(f"KirchhoffLayer {name!r}: dt must be positive, got {dt!r}")
+        check_scheme(name, scheme)
+        if len(self._dynamic_edges):
+            self._check_head_off_dynamic_edges(drivers)
+        ctx = LawContext(mode="transient", dt=dt, t=t, scheme=scheme)
         if history is None:
-            raise ValueError(
-                f"KirchhoffLayer {name!r}: a step of a layer with storage needs "
-                f"history=(phi, q) at the step start"
-            )
+            if len(self._dynamic_edges):
+                raise ValueError(
+                    f"KirchhoffLayer {name!r}: a transient step needs history=(phi, q) "
+                    f"at the step start"
+                )
+            if self._storage:
+                raise ValueError(
+                    f"KirchhoffLayer {name!r}: a step of a layer with storage needs "
+                    f"history=(phi, q) at the step start"
+                )
+            return _Step(ctx, None)
         if not isinstance(history, (tuple, list)) or len(history) != 2:
             raise ValueError(
                 f"KirchhoffLayer {name!r}: history must be the pair (phi, q) at the step "
                 f"start; got {type(history).__name__}"
             )
-        phi_prev = history[0]
-        if phi_prev.shape[-1] != self._n_nodes:
+        phi_prev, q_prev = history
+        n_edges = len(self.cols)
+        if q_prev is None:
+            if len(self._dynamic_edges):
+                raise ValueError(
+                    f"KirchhoffLayer {name!r}: a layer with a dynamic law needs "
+                    f"history=(phi, q) with q, every edge's flow at the step start"
+                )
+            if phi_prev.shape[-1] != self._n_nodes:
+                raise ValueError(
+                    f"KirchhoffLayer {name!r}: history's phi must hold every node's "
+                    f"potential ({self._n_nodes}); got last dimension {phi_prev.shape[-1]}"
+                )
+        elif phi_prev.shape[-1] != self._n_nodes or q_prev.shape[-1] != n_edges:
             raise ValueError(
-                f"KirchhoffLayer {name!r}: history's phi must hold every node's potential "
-                f"({self._n_nodes}); got last dimension {phi_prev.shape[-1]}"
+                f"KirchhoffLayer {name!r}: history=(phi, q) must hold every node's "
+                f"potential ({self._n_nodes}) and every edge's flow ({n_edges}); got last "
+                f"dimensions {phi_prev.shape[-1]} and {q_prev.shape[-1]}"
             )
+        if self._reads_history:
+            ctx = self._with_history(ctx, phi_prev, q_prev)
+        if not self._storage:
+            return _Step(ctx, None)
         if storage_flow is None:
             if scheme == "trapezoidal":
                 raise ValueError(
@@ -1596,8 +1653,36 @@ class KirchhoffLayer(TopologyGuard):
                 f"KirchhoffLayer {name!r}: storage_flow must hold one flow per storage "
                 f"entry ({self._n_entries}); got last dimension {storage_flow.shape[-1]}"
             )
-        ctx = LawContext(mode="transient", dt=dt, t=t, scheme=scheme)
-        return _StorageStep(ctx, phi_prev, storage_flow)
+        return _Step(ctx, _StorageStep(phi_prev, storage_flow))
+
+    def _with_history(self, ctx: LawContext, phi_prev, q_prev) -> LawContext:
+        """`ctx` with the step-start potential differences and flows taken from
+        `(phi_prev, q_prev)`."""
+        return dataclasses.replace(ctx, dp_prev=self._difference(phi_prev), q_prev=q_prev)
+
+    def _check_head_off_dynamic_edges(self, drivers) -> None:
+        """Refuse a head driver that is not zero on an edge with a dynamic law: the step-start
+        potential difference of such an edge is taken without a head.
+
+        `EdgeHeads` guarantees this by construction (it refuses a term on a dynamic kind), so
+        the value check is only for a head driver given directly, and is made on a CPU tensor
+        only: reading values off an accelerator is a host sync per solve, which this path does
+        not pay. The width is always checked (no sync). Free when there is no head or no
+        dynamic law.
+        """
+        head = drivers.get(self.head_key)
+        if head is None:
+            return
+        self._check_head_width(head)
+        if head.device.type != "cpu":
+            return
+        if bool((head[..., self._dynamic_edges] != 0).any()):
+            kinds = sorted({el.kind for el in self._laws if el.dynamic})
+            raise ValueError(
+                f"KirchhoffLayer {self.name!r}: driver {self.head_key!r} is not "
+                f"zero on an edge of kind {kinds}, whose law is dynamic (its step-start "
+                f"potential difference is taken without a head)"
+            )
 
     def storage_flows(self, phi, drivers, *, dt, scheme=None, history=None,
                       storage_flow=None, mode=None, q=None, sources=None,
@@ -1641,11 +1726,11 @@ class KirchhoffLayer(TopologyGuard):
             return zeros
         if mode == "initial" and self.mna:
             return self._initial_storage_flows(phi, q, sources, drivers, zeros)
-        step = self._storage_step(mode, dt, None, scheme, history, storage_flow, drivers,
-                                  check_dt=not _checked)
-        if step is None:
+        step = self._step(mode, dt, None, scheme, history, storage_flow, drivers,
+                          check_dt=not _checked, omega=False)
+        if not isinstance(step.storage, _StorageStep):
             return zeros
-        parts = [st.rate(*self._storage_args(j, st, phi, step), step.ctx, drivers)
+        parts = [st.rate(*self._storage_args(j, st, phi, step.storage), step.ctx, drivers)
                  for j, st in enumerate(self._storage)]
         batch = broadcast_shapes(*(p.shape[:-1] for p in parts))
         return torch.cat([p.expand(batch + p.shape[-1:]) for p in parts], dim=-1)

@@ -138,7 +138,7 @@ def test_rc_layer_is_classic_dynamic_and_linear():
 def test_rc_operator_is_shifted_and_certified():
     layer, _ = _rc()
     phi = _phi_prev(layer)
-    step = layer._storage_step(None, 0.5, None, "backward_euler", (phi, None), None, {})
+    step = layer._step(None, 0.5, None, "backward_euler", (phi, None), None, {})
     slopes = layer._withdrawal_slopes(phi, {}, step)
     torch.testing.assert_close(slopes, CAP / 0.5, rtol=0, atol=0)
     op = layer._operator_at(layer.dflows(phi, {}), slopes)
