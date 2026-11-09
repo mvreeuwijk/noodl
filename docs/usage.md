@@ -72,7 +72,7 @@ net.add_edge("ambient", "B", kind="airpath", z_path=0.2, Cd=0.6, area=0.05)
 net.add_edge("ambient", "B", kind="airpath", z_path=1.8, Cd=0.6, area=0.05)
 model = build_model(
     net, air_laws=[orifice_law_from_edges(net, "airpath")],
-    drives=[Stack.from_network(net, "airpath")], species=("co2",),
+    heads=[Stack.from_network(net, "airpath")], species=("co2",),
     coupling="iterate", iterate_tol={"thermal": 0.01}, iterate_max=50,
 )
 

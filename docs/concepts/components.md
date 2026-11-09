@@ -193,7 +193,7 @@ from noodl.apps.building_physics import (
 from noodl.drives import Stack
 
 el = orifice_law_from_edges(net, "airpath")
-model = build_model(net, air_laws=[el], drives=[Stack.from_network(net, "airpath")],
+model = build_model(net, air_laws=[el], heads=[Stack.from_network(net, "airpath")],
                     coupling="iterate", iterate_tol={"thermal": 0.01}, iterate_max=50)
 air, th = model.refs.air, model.refs.thermal
 rooms = [n for p in names.select(template="room") for n in names.nodes_of(p)]

@@ -269,7 +269,7 @@ def test_air_mass_change_needs_prescribed_temperatures():
     from noodl.elements import PowerLaw
 
     model, state, drivers = build_model(
-        net, air_laws=[PowerLaw(_f(0.01)[0], _f(0.5)[0], kind="airpath")], drives=[],
+        net, air_laws=[PowerLaw(_f(0.01)[0], _f(0.5)[0], kind="airpath")], heads=[],
         return_inputs=True)
     with pytest.raises(ValueError, match="air_mass_change"):
         simulate(model, state, drivers, [0.0, 60.0], air_mass_change=True)

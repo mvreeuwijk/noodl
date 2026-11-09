@@ -18,6 +18,7 @@ import torch
 
 from noodl.components import Component
 from noodl.elements import PrescribedFlow
+from noodl.heads import EdgeHeads
 from noodl.layers.kirchhoff import KirchhoffLayer
 from noodl.layers.transport import TransportLayer, active_interior
 from noodl.layout import broadcast_batch, per_instance
@@ -317,7 +318,33 @@ def check_flow_balanced(net: Network, air_laws, flow_balanced, *,
                         f"handler's prescribed flows (PrescribedFlow) may touch it")
 
 
-def build_model(net: Network, *, air_laws, drives, ambient="ambient", thermal: bool = True,
+def check_head_order(closures: Sequence) -> None:
+    """Raise `ValueError` if a closure listed after an `EdgeHeads` writes a driver one of its
+    terms reads.
+
+    The head is computed once per pass, from the drivers at the moment its closure runs, so
+    a later writer of `"rho"` (a density closure, say) would leave it one pass behind. A term
+    that declares no `inputs`, or a closure that declares no `outputs`, is not checked.
+    """
+    for i, closure in enumerate(closures):
+        if not isinstance(closure, EdgeHeads) or closure.inputs is None:
+            continue
+        reads = set(closure.inputs)
+        for later in closures[i + 1:]:
+            try:
+                written = set(later.outputs)
+            except (AttributeError, TypeError):
+                continue
+            clash = sorted(reads & written)
+            if clash:
+                raise ValueError(
+                    f"the head closure for layer {closure.layer_name!r} reads {clash}, "
+                    f"which {type(later).__name__} writes after it; list the head closure "
+                    f"after every closure that writes a driver its terms read"
+                )
+
+
+def build_model(net: Network, *, air_laws, heads, ambient="ambient", thermal: bool = True,
                 species: int | Sequence[str] = 0, density: str = "ideal_gas",
                 density_kwargs=None,
                 coupling: str = "pingpong", iterate_tol=None, iterate_max: int = 20,
@@ -366,8 +393,11 @@ def build_model(net: Network, *, air_laws, drives, ambient="ambient", thermal: b
     `edge_flow`, ...) are resolved against this model's layers. `return_inputs=True` then
     also seeds its outputs, memory and `"controls.input"`.
 
-    `closures` are appended after the density closure (an air handler's
-    `AirHandlerFlows`). `flow_balanced` names nodes whose pressure the airflow solve does
+    `heads` are the terms of the potential difference of the air edges (`Stack`, `Wind`,
+    `DuctStack`, ...; see `noodl.heads`): an `EdgeHeads` closure adds them up once per pass,
+    after the density closure, and writes the driver `"air.edge_head"`. `closures` are
+    appended after it (an air handler's `AirHandlerFlows`); one that writes a driver a head
+    term reads is refused by name. `flow_balanced` names nodes whose pressure the airflow solve does
     not need, because only prescribed, balanced flows touch them (an air handler's
     plenums): they join the air layer's boundary at zero gauge pressure, while staying
     ordinary nodes of the heat and species layers. Only edges whose law is a
@@ -388,7 +418,7 @@ def build_model(net: Network, *, air_laws, drives, ambient="ambient", thermal: b
             f"(the air laws' kinds are {list(law_kinds)}); a kind the air layer does "
             f"not solve carries no flow, so heat and species would silently not advect on it"
         )
-    air = KirchhoffLayer(net, "air", list(air_laws), drives=list(drives),
+    air = KirchhoffLayer(net, "air", list(air_laws),
                          boundary=[ambient, *flow_balanced], quantity="pressure", unit="Pa",
                          flow_unit="kg/s")
     air.node_hints.update(dict.fromkeys(_prescribed_only_nodes(net, air_laws, air),
@@ -423,7 +453,12 @@ def build_model(net: Network, *, air_laws, drives, ambient="ambient", thermal: b
             n_species=int(species) if names is None else len(names), species_names=names,
             storage_free=storage_free,
         )
+    heads = list(heads)
+    if heads:
+        # After the density closure, which writes "rho" the terms read.
+        model_closures.append(EdgeHeads(air, heads))
     model_closures.extend(closures)
+    check_head_order(model_closures)
     if controls is not None:
         controls.resolve(net, layers)
     model = Model(net, layers, closures=model_closures, coupling=coupling, iterate_tol=iterate_tol,

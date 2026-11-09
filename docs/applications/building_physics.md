@@ -58,7 +58,7 @@ el = orifice_law_from_edges(net, "airpath")
 model = build_model(
     net,
     air_laws=[el],
-    drives=[Stack.from_network(net, "airpath")],
+    heads=[Stack.from_network(net, "airpath")],
     coupling="iterate",
     iterate_tol={"thermal": 0.01},
     iterate_max=50,
@@ -87,7 +87,7 @@ the layer's boundary order for `boundary_temperature`, its active interior order
 in the wrong shape. [Using noodl](../usage.md) covers the details.
 
 The node and edge attributes this example sets (`volume`, `T0`, `z_ref`, `z_path`, `Cd`,
-`area`), and the wind attributes a `Wind` drive reads (`azimuth`, `Cp`, `Ch`, `profile`),
+`area`), and the wind attributes a `Wind` term reads (`azimuth`, `Cp`, `Ch`, `profile`),
 are listed with their units under [Network attributes](../catalogue/building_physics.md#network-attributes).
 
 Models can also be read from CONTAM `.prj`/`.wth` files or from a Modelica Buildings Library
@@ -123,7 +123,7 @@ roughness below 3.7 diameters, a segment's loss non-negative and a terminal's po
 The laws are those under [Duct elements](#duct-elements). A fan, a damper or any other
 element in a duct is an ordinary edge between two junctions, added by the caller with its own
 law. `duct_laws_from_edges(net, profiles=...)` returns the segments' and terminals'
-laws and drives, with a `Wind` drive when a terminal has a profile or a nonzero `Cp`.
+laws and head terms, with a `Wind` term when a terminal has a profile or a nonzero `Cp`.
 
 A fan draws 0.05 kg/s from the ambient through a 10 m duct and blows it through a 5 m duct
 into a room, which leaks it back to the ambient:
@@ -283,7 +283,7 @@ add_air_handler(net, supplies={"office": 0.1}, returns={"office": 0.1},
 handler, closure = air_handler_from_edges(net, "air_handler")
 plenums = air_handler_plenums(net, "air_handler")
 model = build_model(net, air_laws=[orifice_law_from_edges(net, "airpath"), handler],
-                    drives=[Stack.from_network(net, "airpath")], thermal=False, species=1,
+                    heads=[Stack.from_network(net, "airpath")], thermal=False, species=1,
                     closures=[closure], flow_balanced=plenums, storage_free=plenums)
 drivers = initial_drivers(model)
 drivers["rho"] = torch.full((net.n,), 1.2041, dtype=F64)
@@ -444,12 +444,12 @@ b.connect(leak.ports.a, office.ports.air)
 net, _ = b.flatten(dtype=F64)
 handler, closure = air_handler_from_edges(net, "air_handler")
 plenums = air_handler_plenums(net, "air_handler")
-ducts, drives = duct_laws_from_edges(net)
+ducts, duct_heads = duct_laws_from_edges(net)
 model = build_model(
     net,
     air_laws=[orifice_law_from_edges(net, "airpath"), *ducts,
               fan_law_from_edges(net), handler],
-    drives=[Stack.from_network(net, "airpath"), *drives],
+    heads=[Stack.from_network(net, "airpath"), *duct_heads],
     thermal=False, species=1, closures=[closure],
     flow_balanced=plenums, storage_free=plenums,
 )
@@ -706,7 +706,7 @@ network = ControlNetwork(
     [Actuator(1, "flow_multiplier.fan")])
 model, state, drivers = build_model(
     net, air_laws=[orifice_law_from_edges(net, "airpath"), fan],
-    drives=[Stack.from_network(net, "airpath")], species=("CO2",),
+    heads=[Stack.from_network(net, "airpath")], species=("CO2",),
     controls=network, return_inputs=True)
 state["species.x"] = torch.tensor([6e-4], dtype=F64)
 drivers["species.x_boundary"] = torch.tensor([6e-4], dtype=F64)  # outdoor CO2, kg/kg
@@ -845,7 +845,7 @@ conducts nothing".
 |---|---|
 | `thermal_layer(net, *, ambient, name="thermal", flow_kinds=("airpath",), conduction_kind=None, c_p=1005.0, rho=1.2041, scheme=None, fixed_temperature=(), storage_free=())` | The heat `TransportLayer`. Capacity is $\rho c_p V + C_{\text{node}}$ per active interior node. Raises naming any node with zero heat capacity that is not storage-free. `scheme` defaults to `"exact"`, or to `"backward_euler"` when `storage_free` names a node that a flow edge touches (a plenum: the only scheme that holds it). A storage-free node joined only by conduction (a surface or radiant star node) is folded into its neighbours and keeps `"exact"` (see below). `conduction_kind` is one edge kind or a tuple, for example `("wall", "film", "radiation")`: wall conduction, a surface (film) coefficient and a radiative coefficient as separate edges, each with its own `ua` (W/K), concatenated in the order given into the layer's `conductance` (`None`, the default, means `"wall"` when the network has wall edges; an explicit kind with no edge is an error naming it). A closure that recomputes a coefficient from the temperatures, such as a radiative one, writes the per-step driver `"thermal.conductance"` in that order (see [transport layers](../concepts/layers.md)). |
 | `species_layer(net, *, ambient, name="species", flow_kinds=("airpath",), rho=1.2041, n_species=1, scheme="backward_euler", species_names=None, transmission=None, kinetics=None, storage_free=())` | The contaminant layer, as mass fractions, capacity = zone air mass $\rho V$ (CONTAM's convention). `transmission` `(b_flow, K)` is each flow edge's filter pass fraction; `kinetics` `(n_i, K, K)` each zone's first-order reactions (`reaction_kinetics` builds it). |
-| `build_model(net, *, air_laws, drives, ambient="ambient", thermal=True, species=0 (a count or a list of names), density="ideal_gas", density_kwargs=None, coupling="pingpong", iterate_tol=None, iterate_max=20, thermal_scheme=None, species_scheme="backward_euler", flow_kinds=None, closures=(), flow_balanced=(), storage_free=(), return_inputs=False)` | The assembled `Model`; with `return_inputs=True`, `(model, state, drivers)` like the other applications. `closures` follow the density closure; `flow_balanced` nodes join the air layer's boundary; `storage_free` nodes hold no air (see [Air-handling systems](#air-handling-systems)). |
+| `build_model(net, *, air_laws, heads, ambient="ambient", thermal=True, species=0 (a count or a list of names), density="ideal_gas", density_kwargs=None, coupling="pingpong", iterate_tol=None, iterate_max=20, thermal_scheme=None, species_scheme="backward_euler", flow_kinds=None, closures=(), flow_balanced=(), storage_free=(), return_inputs=False)` | The assembled `Model`; with `return_inputs=True`, `(model, state, drivers)` like the other applications. `heads` are the stack and wind terms of the air edges (`Stack`, `DuctStack`, `Wind`, `ConstantDrive`; empty for none): an `EdgeHeads` closure adds them up once per pass after the density closure and writes the driver `"air.edge_head"`, which the layer adds to every edge's pressure difference once. `closures` follow the head closure, and one that writes a driver a term reads (`"rho"`, say) is refused by name; `flow_balanced` nodes join the air layer's boundary; `storage_free` nodes hold no air (see [Air-handling systems](#air-handling-systems)). |
 | `add_air_handler(target, *, supplies, returns, kind="air_handler", supply_plenum="ahs_supply", return_plenum="ahs_return", outdoor_air_fraction=1.0, min_outdoor_air=0.0, supply_volume=0.0, return_volume=0.0, T0=293.15, ambient="ambient")` | Adds an air handler's plenums and edges to a `Network` or a `Component`. `supplies` and `returns` map zones to design flows (kg/s). |
 | `air_handler_from_edges(net, kind)` | `(PrescribedFlow, AirHandlerFlows)`: the air handler's law and closure, from its edges' attributes. |
 | `air_handler_plenums(net, kind)` | `(supply plenum, return plenum)`. |

@@ -55,6 +55,7 @@ from noodl.elements import (
     Scaled,
     UpstreamDensityPowerLaw,
 )
+from noodl.heads import EdgeHeads
 
 DATA = Path(__file__).resolve().parents[2] / "data" / "contam"
 THREE = DATA / "valThreeZonesWthCtm-UseApi.prj"
@@ -477,7 +478,7 @@ def test_dens_zp_is_read_and_stack_d_is_refused(tmp_path):
     model, _s, _d = project_to_model(read_prj(WTH_STACK))
     assert any(isinstance(c, ZonePressureDensity) for c in model.closures)
     model, _s, _d = project_to_model(read_prj(THREE))
-    assert [type(c) for c in model.closures] == [PrescribedTemperatureDensity]
+    assert [type(c) for c in model.closures] == [PrescribedTemperatureDensity, EdgeHeads]
     text = WTH_STACK.read_text()
     with pytest.raises(ValueError, match=r"stackD = 1.*unsupported"):
         read_prj(_variant(text, _TSDENS_WTH_STACK, "   1    0.75    20     1      1      1      1",
@@ -811,7 +812,7 @@ def test_a_scheduled_fixed_flow_fan_gets_no_stack_drive(tmp_path):
     p = read_prj(_variant(text, path5, "   5    0   1  -1   1   0   0   0   1   0   1", tmp_path))
     (fan,) = [e for e in p.laws if e.kind == "fan_1"]
     assert isinstance(fan, Scaled) and isinstance(fan.inner, FixedFlow)
-    assert "fan_1" not in [d.kind for d in p.drives]
+    assert "fan_1" not in [d.kind for d in p.heads]
 
 
 def test_schedule_references_that_name_nothing_are_refused(tmp_path):
