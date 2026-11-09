@@ -37,13 +37,45 @@ class ConstantPower(ConstitutiveLaw):
         return torch.conj(self.S / dp)
 
 
-def test_one_port_default_equals_colouring():
-    law = Cubic(torch.tensor([1.5, 2.0, 0.5], dtype=F64))
+def test_one_port_default_matches_autograd_reference():
+    k = torch.tensor([1.5, 2.0, 0.5], dtype=F64)
+    law = Cubic(k)
+    dp = torch.tensor([0.3, -1.2, 2.0], dtype=F64)
+    block, = law.jacobian(dp, None, {}, None)
+    ref = torch.stack([torch.autograd.functional.jacobian(
+        lambda d, i=i: law(d, {}, None)[i], dp)[i] for i in range(3)])
+    assert block.shape == (3, 1, 1, 1, 1)
+    assert torch.equal(block.reshape(3), ref)
+
+
+def test_analytic_dflow_matches_colouring_to_rounding():
+    law = Conductance(torch.tensor([1.5, 2.0, 0.5], dtype=F64))
     dp = torch.tensor([0.3, -1.2, 2.0], dtype=F64)
     block, = law.jacobian(dp, None, {}, None)
     ref, = _colour_blocks(lambda d: law(d, {}, None), (dp,), 1, 1)
-    assert block.shape == (3, 1, 1, 1, 1)
+    torch.testing.assert_close(block, ref, rtol=1e-14, atol=0)
+
+
+class DrivenCubic(ConstitutiveLaw):
+    """q = drivers["k"] dp^3."""
+
+    def __init__(self, kind="r"):
+        super().__init__(kind)
+
+    def flow(self, dp, drivers=None):
+        return drivers["k"] * dp ** 3
+
+
+def test_driver_batch_wider_than_dp_gives_per_instance_blocks():
+    law = DrivenCubic()
+    dp = torch.tensor([0.5, 1.0], dtype=F64)
+    drivers = {"k": torch.tensor([[1.0], [2.0], [3.0]], dtype=F64)}
+    block, = law.jacobian(dp, None, drivers, None)
+    ref, = _colour_blocks(lambda d: law(d, drivers, None), (dp,), 1, 1)
+    assert block.shape == (3, 2, 1, 1, 1, 1)
     assert torch.equal(block, ref)
+    expected = drivers["k"] * 3 * dp ** 2
+    torch.testing.assert_close(block.reshape(3, 2), expected)
 
 
 def test_two_port_implicit_default_equals_colouring():

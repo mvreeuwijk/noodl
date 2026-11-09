@@ -408,7 +408,7 @@ class MnaSystem:
         return self.layer._scatter_node_sources(
             lambda j, ns: call(n_el + j, (phi[..., ns.nodes], drivers)))
 
-    def _node_slopes(self, phi, drivers, call) -> Tensor | None:
+    def _node_slopes(self, phi, drivers) -> Tensor | None:
         """`d w / d phi` per interior row: a node source reads its own node's potential only,
         so its own `dflow` is the whole diagonal."""
         return self.layer._scatter_node_sources(
@@ -427,7 +427,7 @@ class MnaSystem:
             kcl = kcl + w
         return self._to_real(_cat([kcl, r_F], kcl))
 
-    def operator(self, x, phi_boundary, drivers, ctx, call, node_slope_fn) -> MnaOperator:
+    def operator(self, x, phi_boundary, drivers, ctx, node_slope_fn) -> MnaOperator:
         """The Jacobian of `residual` at `x`, as COO triplets on the fixed pattern."""
         layer = self.layer
         w = self.w
@@ -595,10 +595,10 @@ class MnaSystem:
                 return remember(self.residual(x, phi_boundary, drivers, sources, ctx, plain))
 
             def slopes_fn(phi):
-                return self._node_slopes(phi, drivers, plain)
+                return self._node_slopes(phi, drivers)
 
             def operator_fn(x):
-                last["op"] = self.operator(x, phi_boundary, drivers, ctx, plain, slopes_fn)
+                last["op"] = self.operator(x, phi_boundary, drivers, ctx, slopes_fn)
                 return last["op"]
 
             with torch.no_grad():
@@ -671,7 +671,7 @@ class MnaSystem:
         def operator_fn(x, *params):
             call, drv, src, pb, step = _rebuild(params)
             last["op"] = self.operator(
-                x, pb, drv, step, call, lambda phi: self._node_slopes(phi, drv, call))
+                x, pb, drv, step, lambda phi: self._node_slopes(phi, drv))
             return last["op"]
 
         try:
