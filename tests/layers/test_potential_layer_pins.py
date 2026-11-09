@@ -591,7 +591,6 @@ class _PotentialCap(ConstitutiveLaw):
     Euler) or `2 C (dp - dp_prev) / dt - q_prev` (trapezoidal)."""
 
     dynamic = True
-    contextual = True
 
     def __init__(self, C, kind="pcap", learnable=False):
         super().__init__(kind)

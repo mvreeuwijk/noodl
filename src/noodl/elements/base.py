@@ -200,6 +200,12 @@ class ConstitutiveLaw(torch.nn.Module):
 
     def __init_subclass__(cls, **kwargs) -> None:
         super().__init_subclass__(**kwargs)
+        for gone, use in (
+                ("law_form", "a law that gives a relation subclasses ImplicitLaw"),
+                ("contextual", "declare a `ctx` parameter in `flow` to receive the context")):
+            if gone in cls.__dict__:
+                raise TypeError(
+                    f"{cls.__name__} defines `{gone}`, which no longer exists: {use}")
         cls._takes_ctx = "ctx" in inspect.signature(cls.flow).parameters
 
     def __init__(self, kind: str) -> None:

@@ -114,3 +114,18 @@ def test_context_is_frozen_and_modes_are_listed():
         ctx.dt = 1.0
     assert MODES == ("dc", "initial", "transient", "phasor")
     assert SCHEMES == ("exact", "backward_euler", "trapezoidal", "forward_euler")
+
+
+def test_removed_law_form_attribute_is_refused_naming_the_replacement():
+    with pytest.raises(TypeError, match=r"law_form.*subclasses ImplicitLaw"):
+        class Odd(Conductance):
+            law_form = "implicit"
+
+
+def test_removed_contextual_attribute_is_refused_naming_the_replacement():
+    with pytest.raises(TypeError, match=r"contextual.*`ctx` parameter in `flow`"):
+        class Odd(ConstitutiveLaw):
+            contextual = True
+
+            def flow(self, dp, drivers=None, ctx=None):
+                return dp
