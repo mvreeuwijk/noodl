@@ -199,7 +199,9 @@ A term is a function of the drivers only, never of the potential, so the Jacobia
 and symmetric. Because the head is a driver, a gradient reaches whatever produced it: a head
 may depend on a learnable parameter that a closure reads. A kind whose law is dynamic (a
 capacitance, an inductance) takes no head: `EdgeHeads` refuses such a term, and a non-zero
-head entry on a dynamic edge is refused when the layer is solved. The `drives=` argument of
+head entry on a dynamic edge is refused when the layer is solved (on the CPU; on an accelerator
+that value check is skipped to avoid a host wait, so a head given directly there, without
+`EdgeHeads`, is the caller's responsibility). The `drives=` argument of
 `KirchhoffLayer` still works and adds its terms after the head; `EdgeHeads` refuses a term on
 a kind that already has a drive there, so the two never add up. A term that holds tensors needs
 its own `to(device=None, dtype=None)` method for `Model.to` to move them (the terms in
