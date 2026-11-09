@@ -61,7 +61,6 @@ RHO_W = 998.2
 MU_W = 1.002e-3
 G = 9.80665
 
-
 #: Valve types this application models, and the ones it refuses. PRV and PSV switch status
 #: (open / closed / active) on the ABSOLUTE head at one end, with the if/else logic and
 #: hysteresis of the EPANET 2.2 Manual p.113; neither is implemented.

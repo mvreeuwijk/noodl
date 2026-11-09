@@ -96,7 +96,7 @@ def test_tank_storage_rate_in_every_scheme():
     prev = torch.tensor([0.25], dtype=F64)
     be = LawContext(mode="transient", dt=4.0, scheme="backward_euler")
     tr = LawContext(mode="transient", dt=4.0, scheme="trapezoidal")
-    # head rise 1 m (dp / scale), area 2: volume 2 m3 over 4 s
+    # capacity A / scale = 2 / 3 (area 2, scale 3): head rise 1 m is 2 m3 over 4 s
     assert float(store.rate(phi, start, None, be)) == pytest.approx(0.5)
     assert float(store.rate(phi, start, prev, tr)) == pytest.approx(1.0 - 0.25)
     assert float(store.initial()) == 30.0
