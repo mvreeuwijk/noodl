@@ -81,8 +81,10 @@ def resolve_classic(
     drivers,
     sources,
     phi_boundary,
+    extra=(),
 ) -> SolvePolicy:
-    """The path of a classic solve; completes `newton_kwargs` in place.
+    """The path of a classic solve; completes `newton_kwargs` in place. `extra` are the
+    step-start tensors of a step of a layer with storage (`KirchhoffLayer._reaches_grad`).
 
     Order of the mutations: `method`, `on_failure` (`return_primal` to `return`), `where`, the
     diagnostics refusal, then `analytic_primal`, `forward_only` and the final `"raise"`.
@@ -106,15 +108,17 @@ def resolve_classic(
         # result carries the status.
         require_diagnostics(layer.name, "return", diagnostics)
     return _classic_path(
-        layer, newton_kwargs, primal_only, differentiable, drivers, sources, phi_boundary
+        layer, newton_kwargs, primal_only, differentiable, drivers, sources, phi_boundary,
+        extra,
     )
 
 
 def _classic_path(
-    layer, newton_kwargs, primal_only, differentiable, drivers, sources, phi_boundary
+    layer, newton_kwargs, primal_only, differentiable, drivers, sources, phi_boundary,
+    extra=(),
 ) -> SolvePolicy:
     if differentiable and layer.analytic_primal and not layer._reaches_grad(
-        drivers, sources, phi_boundary
+        drivers, sources, phi_boundary, extra
     ):
         # Nothing differentiable reaches this solve, so the implicit path would return
         # the same detached root through an autograd Jacobian (`analytic_primal`).
@@ -124,7 +128,7 @@ def _classic_path(
     forward_only = (
         primal_only
         and differentiable
-        and not layer._reaches_grad(drivers, sources, phi_boundary)
+        and not layer._reaches_grad(drivers, sources, phi_boundary, extra)
     )
     if primal_only and differentiable and not forward_only:
         newton_kwargs["on_failure"] = "raise"

@@ -85,9 +85,9 @@ Transformations applied to transported species each step.
 |---|---|---|
 | `Photostationary` | NO/NO2/O3 relaxed to the Leighton photostationary state, in closed form. | `Photostationary(no, no2, o3, *, j_key='J_NO2', rate=None, temperature_key='temperature', k_no_o3=None, floor_ppb=0.0, molar_volume_key='molar_volume', m_no=0.03, m_no2=0.046, m_o3=0.048)` |
 
-## Sources
+## Sources and storage
 
-Nodal sources and withdrawals.
+Nodal sources, withdrawals and storage.
 
 | Name | What it does | How to call it |
 |---|---|---|

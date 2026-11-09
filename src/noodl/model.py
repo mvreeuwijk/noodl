@@ -10,6 +10,8 @@ the transport step by default or before it with `reaction_order="before_transpor
 changing.
 
 Keys. State: "<layer>.phi" (full-node order), "<layer>.q" (the layer's kind order),
+"<layer>.storage_flow" (a Kirchhoff layer with node storage: the flow into every storage
+entry, `KirchhoffLayer.storage_flows`; zeros after a steady solve),
 "<layer>.x" (interior order, (n_i,) or (n_i, K)), "<layer>.s" (an allocation layer's
 per-node storage, full-node order; that layer also writes its realised flows to
 "<layer>.q"). Drivers: "<layer>.phi_boundary", "<layer>.x_boundary", optional
@@ -37,10 +39,11 @@ the closure integrates once per pass instead of once per step until the key is s
 
 `**solve_kwargs` of `step`/`steady` reach the POTENTIAL solves only (`differentiable`,
 `on_failure`, `method`, Newton kwargs). The keywords the Model sets itself (`phi0`, `q0`,
-`history`, `dt`, `t`) are refused there by name. `layer_options` gives one Kirchhoff layer
-its own keywords on top of them (`{"airflow": {"atol": 1e-11}}`), and one transport layer the
-scheme of this step (`{"thermal": {"scheme": "backward_euler"}}`: backward Euler on the step after
-a restart of a circuit it is coupled to). Transport steps always raise on failure.
+`history`, `dt`, `t`, `storage_flow`) are refused there by name. `layer_options` gives one
+Kirchhoff layer its own keywords on top of them (`{"airflow": {"atol": 1e-11}}`), and one
+transport layer the scheme of this step (`{"thermal": {"scheme": "backward_euler"}}`:
+backward Euler on the step after a restart of a circuit it is coupled to). Transport steps
+always raise on failure.
 
 A transport layer stepped by the trapezoidal scheme whose sources a closure carries as state
 (`state_keys` holding `"<layer>.sources"`) integrates them by the trapezoidal rule too: the
@@ -102,7 +105,7 @@ State = dict[str, Tensor]
 Drivers = dict[str, Tensor]
 #: Potential-solve keywords the Model sets itself from the state, the step and `t`; refused
 #: among `**solve_kwargs` of `step`/`steady`.
-_MODEL_SOLVE_KEYS = frozenset({"phi0", "q0", "history", "dt", "t"})
+_MODEL_SOLVE_KEYS = frozenset({"phi0", "q0", "history", "dt", "t", "storage_flow"})
 #: The keywords `layer_options` may give a transport layer.
 _TRANSPORT_OPTIONS = frozenset({"scheme"})
 # The key `layer_options` travels under inside `solve_kwargs`, to `_pass`'s layer solves.
@@ -372,14 +375,17 @@ class Model:
     def _circuit_kwargs(name: str, layer: KirchhoffLayer, state: Mapping[str, Tensor],
                         base: Mapping[str, Tensor], dt: float | None,
                         t: float | None) -> dict:
-        """The solve keywords of a layer solved by Modified Nodal Analysis.
+        """The solve keywords of a layer solved by Modified Nodal Analysis or with node
+        storage.
 
         `q0`: the warm start of its implicit-law flows, from the fed state's `"<name>.q"`.
         `t`: the time its laws are evaluated at -- the END of a step (`t + dt`, the time
         the solved state belongs to), the given time of a steady solve, `None` without one.
-        On a step of a layer with dynamic laws (not a phasor layer, which takes no step),
-        `history` is the STEP-START state's `(phi, q)` -- `base`, never the fed state, so an
-        iterated coupling re-steps every pass from the same start -- and `dt` the step.
+        On a step of a layer with dynamic laws or storage (not a phasor layer, which takes no
+        step), `history` is the STEP-START state's `(phi, q)` -- `base`, never the fed state,
+        so an iterated coupling re-steps every pass from the same start -- and `dt` the step;
+        a layer with storage also gets `storage_flow` from the step-start state's
+        `"<name>.storage_flow"`, required by the trapezoidal scheme.
         """
         return circuit_kwargs(name, layer, state, base, dt, t)
 
@@ -639,8 +645,9 @@ class Model:
             if owned:
                 raise ValueError(
                     f"Model: solve keywords {owned} are set by the Model itself, not passed "
-                    f"through: phi0 and q0 (the warm starts) from the state, history from the "
-                    f"step-start state, dt from step's dt and t from the t= argument"
+                    f"through: phi0 and q0 (the warm starts) from the state, history and "
+                    f"storage_flow from the step-start state, dt from step's dt and t from "
+                    f"the t= argument"
                 )
         # The coupling seam: ping-pong is exactly ONE pass, taken with the state at the start
         # of the step; `coupling="iterate"` repeats `_pass` until the named transport states

@@ -326,3 +326,22 @@ and records the relative-velocity form as out of scope rather than quietly appro
 
 If you genuinely need a term that depends on solved state, it belongs in a **closure**, which
 runs between layer solves and writes driver values. See [Layers and models](layers.md#closures).
+
+## Node sources and node storage
+
+Two objects act at a node rather than on an edge, each as a function of that node's own
+potential, and each adds only a diagonal entry to the Jacobian:
+
+- **`NodeStorage`** (`noodl.NodeStorage`, `noodl.LinearStorage`): an amount stored at the node,
+  which the layer turns into a withdrawal over each step with its scheme's step rate. A
+  capacitor to ground, a tank, a zone's air mass. See
+  [Node storage](layers.md#node-storage).
+- **`NodeSource`** (`noodl.NodeSource`): a withdrawal that is **not** storage, `w(phi)` at the
+  current instant: EPANET's pressure-driven demand, a leak. A storage written as a node source
+  with its own step-start drivers duplicates what the layer already does; give it to
+  `KirchhoffLayer(storage=...)` instead.
+
+A dynamic edge law (`Capacitance`, `Inductance`) and a node storage both turn a change into a
+rate with `noodl.elements.step_rate`: `change / dt` under backward Euler, `2 change / dt -
+previous` under the trapezoidal scheme, with `step_rate_factor` (`1/dt` or `2/dt`) its
+derivative.

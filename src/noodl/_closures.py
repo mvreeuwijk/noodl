@@ -21,7 +21,7 @@ from noodl.contracts import (
 )
 
 Tensor = torch.Tensor
-_STATE_SUFFIXES = ("phi", "q", "x", "s")
+_STATE_SUFFIXES = ("phi", "q", "x", "s", "storage_flow")
 
 
 class ClosureSchedule:

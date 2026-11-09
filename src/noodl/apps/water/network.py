@@ -1051,7 +1051,9 @@ def water_step(model: Model, state: State, drivers: Drivers, dt: float, *,
     `water_steady`'s Newton defaults and pump check, the tank levels stepped implicitly
     (`TankStorage`, `scheme` `"backward_euler"` or `"trapezoidal"`; trapezoidal needs
     a step-start state whose tank flows are solved, not the build's zeros). The level
-    controls act on the step-start levels, as EPANET's do."""
+    controls act on the step-start levels, as EPANET's do. `"backward_euler"` is the default
+    because it starts from any state, the build's included, and does not ring after the
+    flow jumps that pump and level controls cause."""
     if getattr(model, "tank_mode", "explicit") != "storage":
         raise ValueError(
             "water_step: the model's tanks are not storage (build_model(tank_mode="

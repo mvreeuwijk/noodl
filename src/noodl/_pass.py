@@ -92,23 +92,36 @@ def kind_flows(model: Model, name: str, state: Mapping[str, Tensor],
 
 
 def circuit_kwargs(name: str, layer: KirchhoffLayer, state: Mapping[str, Tensor],
-                   base: Mapping[str, Tensor], dt: float | None, t: float | None) -> dict:
-    """The solve keywords of a layer solved by Modified Nodal Analysis; see
-    `Model._circuit_kwargs`."""
+                   base: Mapping[str, Tensor], dt: float | None, t: float | None,
+                   scheme: str | None = None) -> dict:
+    """The solve keywords of a layer solved by Modified Nodal Analysis or with node
+    storage; see `Model._circuit_kwargs`. `scheme` is the step's (`None`: the layer's own)."""
     out: dict = {"t": t if dt is None or t is None else t + dt}
     q_prev = state.get(f"{name}.q")
-    if q_prev is not None:
+    if q_prev is not None and layer.mna:
         out["q0"] = q_prev[..., layer.implicit_edges]
     if layer.dynamic and not layer.phasor and dt is not None:
         missing = [k for k in (f"{name}.phi", f"{name}.q") if k not in base]
         if missing:
             raise KeyError(
                 f"Model: state {missing} is required to step Kirchhoff layer {name!r}, "
-                f"whose dynamic laws start each step from the potentials and flows at "
-                f"the step start (an initial point: layer.solve(..., mode='initial'))"
+                f"whose dynamic laws or storage start each step from the potentials and "
+                f"flows at the step start (an initial point: layer.solve(..., "
+                f"mode='initial'), or a steady solve)"
             )
         out["history"] = (base[f"{name}.phi"], base[f"{name}.q"])
         out["dt"] = dt
+        if layer.storage:
+            key = f"{name}.storage_flow"
+            flow = base.get(key)
+            if flow is None and (layer.scheme if scheme is None else scheme) == "trapezoidal":
+                raise KeyError(
+                    f"Model: state {key!r} is required to step Kirchhoff layer {name!r} "
+                    f"by the trapezoidal scheme: the flow into its storage at the step start "
+                    f"(a steady solve writes zeros)"
+                )
+            if flow is not None:
+                out["storage_flow"] = flow
     return out
 
 
@@ -158,14 +171,22 @@ def _solve_potentials(model: Model, state, base, drv, dt, t, solve_kwargs, warm_
         phi_prev = state.get(f"{name}.phi") if warm_start else None
         phi0 = None if phi_prev is None else phi_prev[..., layer.interior]
         d: dict = {}
-        circuit = circuit_kwargs(name, layer, state, base, dt, t) if layer.mna else {}
+        kwargs = layer_kwargs(solve_kwargs, name)
+        circuit = (circuit_kwargs(name, layer, state, base, dt, t, kwargs.get("scheme"))
+                   if layer.mna or layer.storage else {})
         if not warm_start:
             # The implicit-law flows' warm start goes with the potentials' (`phi0`).
             circuit.pop("q0", None)
-        phi, q = layer.solve(pb, drv, sources, phi0=phi0, diagnostics=d, **circuit,
-                             **layer_kwargs(solve_kwargs, name))
+        phi, q = layer.solve(pb, drv, sources, phi0=phi0, diagnostics=d, **circuit, **kwargs)
         new[f"{name}.phi"], new[f"{name}.q"] = phi, q
         made += [f"{name}.phi", f"{name}.q"]
+        if layer.storage:
+            # The flow into every storage entry at the end of the step (zeros on a steady
+            # pass): the trapezoidal scheme's step-start rate on the next step.
+            new[f"{name}.storage_flow"] = layer.storage_flows(
+                phi, drv, dt=circuit.get("dt"), scheme=kwargs.get("scheme"),
+                history=circuit.get("history"), storage_flow=circuit.get("storage_flow"))
+            made.append(f"{name}.storage_flow")
         diag[name] = d
 
 

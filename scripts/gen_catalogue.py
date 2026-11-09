@@ -30,7 +30,8 @@ PAGES = [
     ("core", "Core library", None,
      ["noodl.topology", "noodl.model", "noodl.contracts", "noodl.layout", "noodl.refs",
       "noodl.validation", "noodl.layers",
-      "noodl.elements", "noodl.drives", "noodl.nodesources", "noodl.couple"],
+      "noodl.elements", "noodl.drives", "noodl.nodesources", "noodl.storage",
+      "noodl.couple"],
      "The framework every application builds on: the network, the layers, the model, the "
      "set-up helpers, and the general-purpose constitutive laws and drives."),
     ("building_physics", "Building physics", "../applications/building_physics.md",
@@ -73,7 +74,7 @@ ROLES = [
     ("closure", "Closures",
      "Functions of the state that compute drivers each step (densities, flows, levels)."),
     ("reaction", "Reactions", "Transformations applied to transported species each step."),
-    ("source", "Sources", "Nodal sources and withdrawals."),
+    ("source", "Sources and storage", "Nodal sources, withdrawals and storage."),
     ("waveform", "Waveforms", "Time signals a source follows."),
     ("file", "Files", "Readers and writers of other tools' file formats."),
     ("class", "Other classes", "Supporting types."),
@@ -83,7 +84,8 @@ ROLES = [
      "Subclass these to add a constitutive law, drive, closure, reaction or node source; see "
      "[Extending noodl](../development/extending.md)."),
 ]
-BASE_CLASSES = {"ConstitutiveLaw", "ImplicitLaw", "Drive", "Reaction", "NodeSource"}
+BASE_CLASSES = {"ConstitutiveLaw", "ImplicitLaw", "Drive", "Reaction", "NodeSource",
+                "NodeStorage"}
 OPTION_MODULES = {"street_aq": "noodl.apps.street_aq.closures"}
 """Pages whose application has named model options: the module defining `OPTIONS` (option
 -> allowed values), `PRESETS` (preset -> its choices) and, in the docstring under
@@ -156,6 +158,7 @@ def _role(name: str, obj) -> str:
     from noodl.layers.reaction import Reaction
     from noodl.model import Model
     from noodl.nodesources import NodeSource
+    from noodl.storage import NodeStorage
 
     if name in SETUP_NAMES:
         return "setup"
@@ -170,7 +173,7 @@ def _role(name: str, obj) -> str:
             return "law"
         if issubclass(obj, Reaction):
             return "reaction"
-        if issubclass(obj, NodeSource) or name.endswith(("Source", "Sink")):
+        if issubclass(obj, (NodeSource, NodeStorage)) or name.endswith(("Source", "Sink")):
             return "source"
         if obj is Model or name.endswith("Layer") or name in {"Network", "Ports", "CoupledModel"}:
             return "layer"

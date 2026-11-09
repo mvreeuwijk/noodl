@@ -4,11 +4,16 @@
 `Function.apply`. `FunctionalLaws` therefore presents the layer's residual and Jacobian
 operator as functions of the iterate and a flat tuple of tensors: the laws' and node sources'
 own `nn.Parameter`s (substituted back in with `torch.func.functional_call`), the driver
-values, `sources` and `phi_boundary`. Node sources are threaded through exactly as laws are,
-so a learnable demand exponent or required pressure gets a correct implicit-function gradient.
+values, `sources` and `phi_boundary`. Node sources and node storages are threaded through
+exactly as laws are, so a learnable demand exponent, required pressure or capacity gets a
+correct implicit-function gradient. On a step of a layer with storage the step-start
+potentials and storage flows are threaded too, so a chain of steps back-propagates through
+time.
 """
 
 from __future__ import annotations
+
+import dataclasses
 
 import torch
 
@@ -22,11 +27,13 @@ class FunctionalLaws:
     that tuple.
     """
 
-    def __init__(self, layer, drivers, sources, phi_boundary) -> None:
+    def __init__(self, layer, drivers, sources, phi_boundary, step=None) -> None:
         self.layer = layer
         self.drivers = drivers
-        owners = [*layer._laws, *layer._node_sources]
+        self.step = step
+        owners = [*layer._laws, *layer._node_sources, *layer._storage]
         self.n_el = len(layer._laws)
+        self.n_owned = self.n_el + len(layer._node_sources)
         param_dicts = [dict(owner.named_parameters()) for owner in owners]
         self.param_names = [list(d.keys()) for d in param_dicts]
         param_tensors = [
@@ -45,7 +52,12 @@ class FunctionalLaws:
                 device=phi_boundary.device,
             )
         )
-        self.all_params = (*param_tensors, *driver_tensors, sources_tensor, phi_boundary)
+        history = ()
+        if step is not None:
+            history = (step.phi_prev,) if step.previous is None else (
+                step.phi_prev, step.previous)
+        self.all_params = (*param_tensors, *driver_tensors, sources_tensor, phi_boundary,
+                           *history)
 
     def rebuild(self, params):
         offset = 0
@@ -67,6 +79,11 @@ class FunctionalLaws:
         offset += len(self.driver_keys)
         src = params[offset]
         pb = params[offset + 1]
+        if self.step is not None:
+            # the step-start tensors, threaded, in place of the originals
+            previous = None if self.step.previous is None else params[offset + 3]
+            self._threaded_step = dataclasses.replace(
+                self.step, phi_prev=params[offset + 2], previous=previous)
         return rebuilt, drv, src, pb
 
     def dp(self, phi, drv):
@@ -94,8 +111,14 @@ class FunctionalLaws:
 
     def node_withdrawal(self, phi, drv, rebuilt):
         layer = self.layer
-        return layer._scatter_node_sources(lambda j, ns: torch.func.functional_call(
+        w = layer._scatter_node_sources(lambda j, ns: torch.func.functional_call(
             ns, rebuilt[self.n_el + j], (phi[..., ns.nodes], drv)))
+        if self.step is None:
+            return w
+        step = self._threaded_step
+        return layer._add(w, layer._scatter_storage(lambda j, st: torch.func.functional_call(
+            st, rebuilt[self.n_owned + j],
+            (*layer._storage_args(j, st, phi, step), step.ctx, drv))))
 
     def node_slopes(self, phi, drv, rebuilt):
         layer = self.layer
@@ -106,7 +129,23 @@ class FunctionalLaws:
                 (grad,) = torch.autograd.grad(w.sum(), leaf)
             return grad
 
-        return layer._scatter_node_sources(slope)
+        d = layer._scatter_node_sources(slope)
+        if self.step is None:
+            return d
+        step = self._threaded_step
+
+        def storage_slope(j, st):
+            # autograd on the storage's own rate, as for a node source: the exact
+            # derivative the adjoint needs, whatever `rate_slope` an application gives
+            phi_nodes, phi_start, previous = layer._storage_args(j, st, phi, step)
+            leaf = phi_nodes.detach().requires_grad_(True)
+            with torch.enable_grad():
+                w = torch.func.functional_call(
+                    st, rebuilt[self.n_owned + j], (leaf, phi_start, previous, step.ctx, drv))
+                (grad,) = torch.autograd.grad(w.sum(), leaf)
+            return grad
+
+        return layer._add(d, layer._scatter_storage(storage_slope))
 
     @staticmethod
     def _dp_dependence_error(el, i: int) -> RuntimeError:

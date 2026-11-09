@@ -282,9 +282,14 @@ def test_capacitance_and_inductance_are_the_companion_forms(ctx):
               Cap(T([2e-3, 1e-2]), v0=T([0.4, 0.1]))),
              (Inductance(T([1e-3, 5e-2]), i0=T([0.3, -0.2])),
               Ind(T([1e-3, 5e-2]), i0=T([0.3, -0.2])))]
+    # The laws write the trapezoidal form through `step_rate` (`q - (2 C ddp / dt - q_prev)`),
+    # the reference keeps `q + q_prev - 2 C / dt ddp`: equal to rounding, a few ulp of the
+    # largest term; every other mode is the same arithmetic, bit for bit.
+    tol = 8 * torch.finfo(torch.float64).eps if ctx.scheme == "trapezoidal" and (
+        ctx.mode == "transient") else 0
     for law, reference in pairs:
         assert law.dynamic and law.phasor_capable and law.law_form == "implicit"
-        _close(law(dp, q, {}, ctx), reference(dp, q, {}, ctx), tol=0)
+        _close(law(dp, q, {}, ctx), reference(dp, q, {}, ctx), tol=tol)
 
 
 def test_rc_backward_euler_step_is_exact():

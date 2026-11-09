@@ -2,7 +2,8 @@
 
 from noodl.model import Model
 from noodl.nodesources import NodeSource
+from noodl.storage import LinearStorage, NodeStorage
 
 __version__ = "0.1.0"
 
-__all__ = ["Model", "NodeSource", "__version__"]
+__all__ = ["LinearStorage", "Model", "NodeSource", "NodeStorage", "__version__"]

@@ -21,7 +21,7 @@ from collections.abc import Mapping
 import torch
 
 from noodl.apps.electrical.waveforms import Constant, Signal, Sine, _Waveform
-from noodl.elements import ConstitutiveLaw, ImplicitLaw, LawContext
+from noodl.elements import ConstitutiveLaw, ImplicitLaw, LawContext, step_rate
 
 Tensor = torch.Tensor
 
@@ -241,9 +241,7 @@ class Capacitance(ImplicitLaw):
             return dp - self.v0
         if ctx.mode == "phasor":
             return q - 1j * ctx.omega * self.C * dp
-        if ctx.scheme == "backward_euler":
-            return q - self.C * (dp - ctx.dp_prev) / ctx.dt
-        return q + ctx.q_prev - 2.0 * self.C / ctx.dt * (dp - ctx.dp_prev)
+        return q - step_rate(self.C * (dp - ctx.dp_prev), ctx, ctx.q_prev)
 
 
 class Inductance(ImplicitLaw):
@@ -269,9 +267,7 @@ class Inductance(ImplicitLaw):
             return q - self.i0
         if ctx.mode == "phasor":
             return dp - 1j * ctx.omega * self.L * q
-        if ctx.scheme == "backward_euler":
-            return dp - self.L * (q - ctx.q_prev) / ctx.dt
-        return dp + ctx.dp_prev - 2.0 * self.L / ctx.dt * (q - ctx.q_prev)
+        return dp - step_rate(self.L * (q - ctx.q_prev), ctx, ctx.dp_prev)
 
 
 #: Boltzmann constant (J/K) and elementary charge (C), exact SI values as in MSL
@@ -450,9 +446,7 @@ class MutualInductance(ImplicitLaw):
             return (q.unflatten(-1, (-1, 2)) - self.i0).flatten(-2)
         if ctx.mode == "phasor":
             return dp - 1j * ctx.omega * self._flux(q)
-        if ctx.scheme == "backward_euler":
-            return dp - self._flux(q - ctx.q_prev) / ctx.dt
-        return dp + ctx.dp_prev - 2.0 / ctx.dt * self._flux(q - ctx.q_prev)
+        return dp - step_rate(self._flux(q - ctx.q_prev), ctx, ctx.dp_prev)
 
 
 _DEPENDENT = ("voltage", "current")

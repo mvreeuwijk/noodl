@@ -86,9 +86,9 @@ Transformations applied to transported species each step.
 | `OverflowLoss` | The contents a flooded junction loses with its overflow (a dynamic-wave quality reaction). | `OverflowLoss(n_species, layer='water_quality')` |
 | `SulfideGeneration` | Operator-split Pomeroy-Parkhurst sulfide generation and bulk BOD decay. | `SulfideGeneration(*, bod=0, sulfide=1, m_prime=0.00032, m_loss=0.64, k_bod=0.2, out_pipe=None, manhole_idx=None, n_nodes=None, n_species=None)` |
 
-## Sources
+## Sources and storage
 
-Nodal sources and withdrawals.
+Nodal sources, withdrawals and storage.
 
 | Name | What it does | How to call it |
 |---|---|---|

@@ -61,6 +61,45 @@ class LawContext:
     omega: Tensor | None = None
 
 
+def step_rate(change: Tensor, ctx: LawContext, previous: Tensor | None = None) -> Tensor:
+    """The rate at which a stored quantity changes over one implicit step: `change / dt`
+    (backward Euler) or `2 change / dt - previous` (trapezoidal, `previous` = the rate at
+    the step start).
+
+    `change` is the stored amount's change over the step (a capacitor's `C (dp - dp_prev)`, a
+    tank's `A (H - H_prev)`), and `ctx` a transient `LawContext` that gives `dt` and `scheme`.
+    Every storage in noodl turns its change into a rate here: the capacitance and inductance
+    laws, and the `NodeStorage` withdrawal of a layer (`noodl.storage`).
+    """
+    if ctx.scheme == "backward_euler":
+        return change / ctx.dt
+    if ctx.scheme != "trapezoidal":
+        raise ValueError(
+            f"step_rate: scheme={ctx.scheme!r}; a storage steps with 'backward_euler' or "
+            f"'trapezoidal' (schemes: {SCHEMES})"
+        )
+    if previous is None:
+        raise ValueError(
+            "step_rate: the trapezoidal scheme needs `previous`, the rate at the step start"
+        )
+    return 2.0 * change / ctx.dt - previous
+
+
+def step_rate_factor(ctx: LawContext) -> Tensor | float:
+    """d step_rate / d change: `1/dt` (backward Euler) or `2/dt` (trapezoidal).
+
+    The slope a storage adds to the Jacobian is this factor times its capacity
+    (`NodeStorage.rate_slope`)."""
+    if ctx.scheme == "backward_euler":
+        return 1.0 / ctx.dt
+    if ctx.scheme != "trapezoidal":
+        raise ValueError(
+            f"step_rate_factor: scheme={ctx.scheme!r}; a storage steps with "
+            f"'backward_euler' or 'trapezoidal' (schemes: {SCHEMES})"
+        )
+    return 2.0 / ctx.dt
+
+
 def memo(owner, name: str, deps: tuple, fn):
     """`fn()`, remembered on `owner` under `name` for as long as `deps` are the same objects
     (identity, and for tensors the same `_version`, so an in-place change is seen).

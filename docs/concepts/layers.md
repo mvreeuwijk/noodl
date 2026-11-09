@@ -78,6 +78,63 @@ expose the Newton pieces directly; `kind_slice(kind)` and `law_for(kind)` locate
 `method`, `backend`, `converged` and `residual_norm`. `method` is what you asked for; `backend`
 is what actually ran. They are deliberately separate — see [Solvers](solvers.md#solve-the-auto-table).
 
+### Node storage
+
+A node stores an amount; the layer integrates it. A `NodeStorage` (`noodl.storage`, exported as
+`noodl.NodeStorage`) says how much is stored at each of its nodes as a function of that node's
+own potential, `S(phi)`: the charge of a capacitor to ground, the water in a tank, the air in a
+zone. Over a step of length `dt` the layer turns the change of that amount into a withdrawal,
+positive into storage, with the step rate of its scheme (`noodl.elements.step_rate`):
+
+$$
+w = \frac{S(\varphi) - S(\varphi_{start})}{\Delta t} \quad \text{(backward Euler)}, \qquad
+w = \frac{2\,(S(\varphi) - S(\varphi_{start}))}{\Delta t} - w_{start} \quad \text{(trapezoidal)}.
+$$
+
+```python
+from noodl import LinearStorage
+
+store = LinearStorage(nodes=[1, 2, 3], capacity=[0.4, 1.1, 0.7])   # S = C phi
+layer = KirchhoffLayer(net, "heat", [conductance], boundary=["ambient"],
+                       storage=[store], scheme="backward_euler")
+phi, q = layer.solve(phi_b, drivers, sources, dt=60.0, history=(phi_prev, q_prev))
+w = layer.storage_flows(phi, drivers, dt=60.0, history=(phi_prev, q_prev))
+```
+
+Storage stays on the nodal path (`layer.mna` is False): like a node source it adds only a
+diagonal, `step_rate_factor * capacity` with `capacity = dS/dphi`, to the Jacobian, so a
+network of conductances with storage keeps its symmetric positive definite system and its
+sparse or CG solve. A node whose only connection is its storage is grounded during a step and
+reported floating at a steady solve. Several storages may share a node (their withdrawals add
+up); one `(node, storage)` pair is an *entry*, and `storage_flows` returns one flow per entry,
+storages in list order, then their nodes.
+
+- Without `dt` storage is absent: the steady point (mode `"dc"`) stores nothing.
+- With `dt` the layer needs `history=(phi, q)` at the step start (only `phi` is read) and,
+  under the trapezoidal scheme, `storage_flow`, the flow into every entry at the step start.
+- `mode="initial"` is refused when a storage holds an `initial()` potential: holding a node at
+  its initial potential needs the Modified Nodal Analysis path, which does not take storage
+  yet.
+- `layer.dynamic` is True for a layer with storage, and `layer.linear` asks every storage too.
+- On the differentiable path gradients reach the storages' registered parameters, `history`
+  and `storage_flow`, so a chain of steps back-propagates through time.
+
+Which method to write on a subclass:
+
+- **`amount`** alone, when the stored amount depends on the node's own potential only. The
+  default `change` is `amount(phi) - amount(phi_start)`, both at the *current* drivers (the
+  lagged-coefficient form SWMM and EPANET use), and the default `capacity` is its autograd
+  derivative.
+- **`change`**, when the amount at the step start is not `amount(phi_start)` at the current
+  drivers: an amount that depends on a driver that changes over the step (a zone's air mass
+  depends on its temperature), or a difference that must be formed without round-off
+  (`LinearStorage` forms `C (phi - phi_start)`).
+- **`rate`** and **`rate_slope`**, for an application whose withdrawal has rules beyond storage
+  (they default to `step_rate(change)` and `step_rate_factor * capacity`).
+
+A withdrawal that is not storage (a demand, a leak) is a `NodeSource`
+([Constitutive laws](elements.md)).
+
 ## Modified Nodal Analysis: implicit, coupled and dynamic laws
 
 A `KirchhoffLayer` whose constitutive laws are all potential-controlled, single-edge and
@@ -145,11 +202,14 @@ such a layer; read the flows from `solve`'s `q`, and the balance from `balance(p
 | `scheme` | `"trapezoidal"` or `"backward_euler"`; `None` (default) is the layer's own, `KirchhoffLayer(scheme=...)`, trapezoidal unless built otherwise. |
 | `phi0`, `q0` | Warm start of the interior potentials and of the implicit-edge flows; zeros otherwise. |
 
-A layer solved by nodal analysis has static laws: it accepts `t`, `scheme`, `q0` and the
-modes `"dc"` and `"initial"` and ignores them (`phi0` is its own warm start), and refuses
-`mode="phasor"`, `dt` and `history`, since it takes no step. A phasor layer ignores
-`scheme` and refuses `dt`, `history` and any mode but `"phasor"`. On the differentiable path (the default)
-gradients reach `history` too, so a chain of steps back-propagates through time.
+A layer solved by nodal analysis without storage has static laws: it accepts `t`, a valid
+`scheme`, `q0` and the modes `"dc"` and `"initial"` and ignores them (`phi0` is its own warm
+start), and refuses `mode="phasor"`, `dt`, `history` and `storage_flow`, since it takes no step;
+a scheme outside the two above is refused by name. A layer solved by nodal analysis **with**
+storage takes `dt`, `history`, `scheme` and `storage_flow` (see [Node storage](#node-storage)).
+A phasor layer ignores `scheme` and refuses `dt`, `history` and any mode but `"phasor"`. On
+the differentiable path (the default) gradients reach `history` too, so a chain of steps
+back-propagates through time.
 
 **Linear solver.** `linear_solver="auto"` on such a layer factorises: SciPy's sparse LU
 (`"sparse_direct"`, per instance) whenever SciPy is importable, at any batch size, and batched
@@ -519,6 +579,7 @@ State and driver keys are namespaced by layer name:
 |---|---|
 | `"<layer>.phi"` | Nodal potentials, full node order |
 | `"<layer>.q"` | Branch flows, the layer's kind order |
+| `"<layer>.storage_flow"` | A Kirchhoff layer with [node storage](#node-storage): the flow into every storage entry at the end of the step (`layer.storage_flows`), zeros after a steady solve; required to step it by the trapezoidal scheme |
 | `"<layer>.x"` | Transport state, interior order, `(n_i,)` or `(n_i, K)` |
 | `"<layer>.s"` | An allocation layer's per-node storage |
 | `"<layer>.phi_boundary"` | Prescribed boundary potentials (driver) |
@@ -556,7 +617,14 @@ unknowns. `Model` hands such a layer what its laws need:
   step-start state, so `coupling="iterate"` re-steps every pass from the same start.
 
 `scheme=` (`"trapezoidal"` or `"backward_euler"`) travels through `**solve_kwargs`; the
-keywords the Model sets itself (`phi0`, `q0`, `history`, `dt`, `t`) are refused there by name.
+keywords the Model sets itself (`phi0`, `q0`, `history`, `dt`, `t`, `storage_flow`) are refused
+there by name.
+
+A Kirchhoff layer with [node storage](#node-storage) gets the same step context (`t`, and on a
+step `dt` and the step-start `"<layer>.phi"` and `"<layer>.q"` as `history`), and also the
+step-start `"<layer>.storage_flow"`, which the trapezoidal scheme requires (a missing one is
+refused by name). After every solve the Model writes the new `"<layer>.storage_flow"`, zeros
+on a steady pass, so a run started from `steady` carries it from the first step.
 `steady` solves such a layer at its operating point (a capacitance open, an inductance
 shorted). A layer with contextual laws but no dynamic one (a time-dependent source and
 resistors, no storage) takes no history: on a step it is solved at its operating point at the

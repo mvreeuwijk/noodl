@@ -22,7 +22,7 @@ Generated from the package's own docstrings. For the ideas behind these objects,
 
 ::: noodl.elements.base
     options:
-      members: [ConstitutiveLaw, ImplicitLaw, LawContext]
+      members: [ConstitutiveLaw, ImplicitLaw, LawContext, step_rate, step_rate_factor]
 
 Constitutive laws are grouped below by the physics they express, as in
 [Airflow elements](applications/building_physics.md#airflow-elements).
@@ -94,6 +94,11 @@ Constitutive laws are grouped below by the physics they express, as in
 ::: noodl.nodesources
     options:
       members: [NodeSource]
+      heading_level: 4
+
+::: noodl.storage
+    options:
+      members: [NodeStorage, LinearStorage]
       heading_level: 4
 
 ## Layers

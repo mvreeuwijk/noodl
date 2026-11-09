@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import torch
 
-from noodl.elements.base import ConstitutiveLaw, ImplicitLaw
+from noodl.elements.base import ConstitutiveLaw, ImplicitLaw, step_rate
 from noodl.solvers.scalar import solve_monotone
 
 Tensor = torch.Tensor
@@ -826,7 +826,4 @@ class TankStorage(ImplicitLaw):
             return dp - self.scale * self.head0
         if ctx.mode != "transient":
             raise ValueError(f"tank kind {self.kind!r}: mode {ctx.mode!r} is not supported")
-        rise = self.area / self.scale * (dp - ctx.dp_prev) / ctx.dt
-        if ctx.scheme == "backward_euler":
-            return q - rise
-        return q + ctx.q_prev - 2.0 * rise
+        return q - step_rate(self.area / self.scale * (dp - ctx.dp_prev), ctx, ctx.q_prev)

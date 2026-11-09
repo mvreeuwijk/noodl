@@ -567,8 +567,8 @@ class LayerRef:
             self.inactive_nodes = [nodes[i] for i in layer.inactive.tolist()]
             q_labels, q_alias = _edge_labels(net, layer.cols.tolist())
             meta = dict(quantity=self.quantity, unit=self.unit)
-            # A layer with dynamic laws (a capacitance, an inductance) starts every time
-            # step from its potentials and flows at the step start.
+            # A layer with dynamic laws (a capacitance, an inductance) or node storage starts
+            # every time step from its potentials and flows at the step start.
             stored = _steps_from_state(layer)
             state["phi"] = Field(
                 f"{name}.phi", role="state", axis="node", labels=nodes,
@@ -585,6 +585,17 @@ class LayerRef:
                 default=0.0, description="solved branch flows",
                 unit=getattr(layer, "flow_unit", ""), **common,
             )
+            storages = getattr(layer, "storage", ())
+            if storages:
+                entries = [nodes[i] for st in storages for i in st.nodes.tolist()]
+                state["storage_flow"] = Field(
+                    f"{name}.storage_flow", role="state", axis="node", labels=entries,
+                    ordering="storage entry order (storages in list order, then their nodes)",
+                    required="step" if _needs_storage_flow(layer) else "optional",
+                    default=0.0,
+                    description="flow into every storage entry (the trapezoidal step start)",
+                    unit=getattr(layer, "flow_unit", ""), **common,
+                )
             inputs["phi_boundary"] = Field(
                 f"{name}.phi_boundary", role="driver", axis="node", labels=self.boundary_nodes,
                 aliases=_node_aliases(net, self.boundary_nodes),
@@ -1018,9 +1029,15 @@ def initial_drivers(model: Model, *, values: Mapping | None = None) -> dict[str,
 
 
 def _steps_from_state(layer) -> bool:
-    """Whether a Kirchhoff layer's step starts from its own state: dynamic laws, outside
-    a phasor layer (which takes no step)."""
+    """Whether a Kirchhoff layer's step starts from its own state: dynamic laws or node
+    storage, outside a phasor layer (which takes no step)."""
     return bool(getattr(layer, "dynamic", False)) and not getattr(layer, "phasor", False)
+
+
+def _needs_storage_flow(layer) -> bool:
+    """Whether a Kirchhoff layer's step reads `"<layer>.storage_flow"`: it has storage and
+    steps by the trapezoidal scheme (its own; a step may give another)."""
+    return bool(getattr(layer, "storage", ())) and getattr(layer, "scheme", "") == "trapezoidal"
 
 
 def required_state_keys(model: Model) -> list[str]:
@@ -1028,4 +1045,6 @@ def required_state_keys(model: Model) -> list[str]:
     keys = [f"{n}.x" for n in model.transport] + [f"{n}.s" for n in model.allocation]
     keys += [f"{n}.{s}" for n, layer in model.kirchhoff.items() if _steps_from_state(layer)
              for s in ("phi", "q")]
+    keys += [f"{n}.storage_flow" for n, layer in model.kirchhoff.items()
+             if _needs_storage_flow(layer)]
     return keys + list(model.closure_state_keys)

@@ -171,9 +171,9 @@ Functions of the state that compute drivers each step (densities, flows, levels)
 | `OccupantGeneration`<br><small>`noodl.apps.building_physics`</small> | Closure: the occupants' generation added to `"<layer>.sources"` (kg/s, full node order) of the species `layer` (a `TransportLayer`). | `OccupantGeneration(occupants, *, layer, species=None)` |
 | `SpeciesSources`<br><small>`noodl.apps.building_physics`</small> | Closure: every source's generation summed into `"<layer>.sources"` (kg/s, full node order), added to what an earlier closure or a driver put there, and every removal coefficient into `"<layer>.removal"` (1/s, active interior order), each times its entry of `"<layer>.source_multiplier"`, on its own species. | `SpeciesSources(sources, *, species, layer, names=None, heights=None, g=9.80665, pressure_key='air.phi')` |
 
-## Sources
+## Sources and storage
 
-Nodal sources and withdrawals.
+Nodal sources, withdrawals and storage.
 
 | Name | What it does | How to call it |
 |---|---|---|
@@ -320,6 +320,8 @@ Calculations and helpers.
 | `power_law_from_point`<br><small>`noodl.elements`</small> | ``Point_m_flow.mo:4-5``: ``k = mMea_flow_nominal / dpMea_nominal ** m``, fit from one measured (dp, m_flow) pair; ``m`` stays a free parameter (default 0.5, inherited from ``Coefficient_m_flow``'s ``PowerLawResistanceParameters(m=0.5)``, ``Coefficient_m_flow.mo:27-28``). | `power_law_from_point(dpMea, mMea_flow, m=0.5, dp_turbulent=0.1, *, rho_default, kind='airpath', learnable=False)` |
 | `power_law_from_points`<br><small>`noodl.elements`</small> | ``Points_m_flow.mo:4-6,15-16``: the flow exponent itself is derived from two measured (dp, m_flow) pairs, ``m = (ln(mMea[0]) - ln(mMea[1])) / (ln(dpMea[0]) - ln(dpMea[1]))``, then ``k = mMea[0] / dpMea[0] ** m``. ``dpMea``/``mMea_flow`` are each a 2-element sequence. | `power_law_from_points(dpMea, mMea_flow, dp_turbulent=0.1, *, rho_default, kind='airpath', learnable=False)` |
 | `regularized_orifice`<br><small>`noodl.elements`</small> | ``Orifice.mo:3-5,9``: ``C = CD * A * sqrt(2 / rho_default)``, ``m = 0.5`` by default (overridable, per ``Orifice.mo:3``'s non-``final`` ``m=0.5`` modifier); ``C`` itself is ``final`` in MBL (does not depend on ``m``). ``CD`` defaults to 0.65 (``Orifice.mo:9``, the sharp-edged-orifice discharge coefficient). | `regularized_orifice(A, CD=0.65, m=0.5, dp_turbulent=0.1, *, rho_default, kind='airpath', learnable=False)` |
+| `step_rate`<br><small>`noodl.elements`</small> | The rate at which a stored quantity changes over one implicit step: `change / dt` (backward Euler) or `2 change / dt - previous` (trapezoidal, `previous` = the rate at the step start). | `step_rate(change, ctx, previous=None)` |
+| `step_rate_factor`<br><small>`noodl.elements`</small> | d step_rate / d change: `1/dt` (backward Euler) or `2/dt` (trapezoidal). | `step_rate_factor(ctx)` |
 | `check_drive_signature`<br><small>`noodl.drives`</small> | Raise `TypeError` unless `drive` is callable as `drive(drivers)`. | `check_drive_signature(drive, *, where)` |
 
 ## Constants and tables
