@@ -24,7 +24,7 @@ What each MBL construct becomes
   `DoorCompartmentHead` evaluated inside the element, so that the streams carry the door's
   enthalpy, moisture and trace substances as MBL's ports do), and
   `"zonal_ab:<name>"`/`"zonal_ba:<name>"` for a zonal flow. A fused column chain
-  adds a `_ColumnHead` drive to its path (a `densitySelection = actual` column reads the
+  adds a `_ColumnHead` head term to its path (a `densitySelection = actual` column reads the
   driver `"air.forward"`, "Flow elements in series" below). The air-layer boundary is every
   boundary node plus,
   for each group of zones joined by pressure-dependent edges with no boundary among them, the

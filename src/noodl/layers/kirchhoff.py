@@ -779,7 +779,7 @@ class KirchhoffLayer(TopologyGuard):
     # ------------------------------------------------------------------ assembly
     def dp(self, phi: torch.Tensor, drivers: Mapping) -> torch.Tensor:
         """Every edge's potential difference `phi[src] - phi[tgt]` plus its head: the driver
-        `"<layer>.edge_head"` (`noodl.heads.EdgeHeads`, absent means zero)"""
+        `"<layer>.edge_head"` (`noodl.heads.EdgeHeads`; absent means zero)."""
         self._require_current_topology()
         drivers = drivers or {}
         d = self._difference(phi)
@@ -1160,10 +1160,10 @@ class KirchhoffLayer(TopologyGuard):
         (`ConstitutiveLaw._param`'s documented pass-through exception, which is still a correct
         construction -- its graph is reachable through this layer's own component calls
         (`flows`, `dflows`, `residual`, `jacobian`, `linear_init`), though NOT through
-        `solve(differentiable=False)`, which returns detached tensors);
-        Raise now, before dispatching, rather than
-        return a gradient that is silently wrong (if some other path happens to also touch
-        the same value) or silently `None` (if it doesn't).
+        `solve(differentiable=False)`, which returns detached tensors).
+        This raises now, before dispatching, rather than returning a gradient that is silently
+        wrong (if some other path happens to also touch the same value) or silently `None` (if
+        it doesn't).
         """
         for role, el, name, value in self._held_scan():
             if not value.requires_grad:
