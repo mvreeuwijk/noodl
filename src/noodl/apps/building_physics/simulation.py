@@ -137,20 +137,10 @@ def _fixed_point(model: Model, run, state: State, key: str | None, rtol: float,
     out = run(state)
     if key is None:
         return out
-    diag: dict = {}
-    try:
-        return model.fixed_point(
-            lambda z: run({**state, key: z[key]}), out, watch=[key], tol=rtol * P,
-            max_passes=max_iter, diagnostics=diag, where=f"simulate: {where}",
-        )
-    except RuntimeError as exc:
-        if "passes" not in diag or diag["changes"][-1] <= rtol * P:
-            raise
-        raise RuntimeError(
-            f"simulate: {where}: the zone pressures fed back to {cause} did not converge in "
-            f"{max_iter} passes (last change {diag['changes'][-1]:.3e} Pa > "
-            f"{rtol * P:.3e} Pa)"
-        ) from exc
+    return model.fixed_point(
+        lambda z: run({**state, key: z[key]}), out, watch=[key], tol=rtol * P,
+        max_passes=max_iter, where=f"simulate: {where}: the zone pressures fed back to {cause}",
+    )
 
 
 def _refuse_unread_inputs(model: Model, drivers: Drivers, inputs: Sequence[Input],
@@ -266,9 +256,8 @@ def simulate(model: Model, state: State, drivers: Drivers, times, *,
         state = _evaluate_controls(network, state, d, ts[1] - ts[0] if len(ts) > 1 else 0.0,
                                    ts[0])
     state = _fixed_point(model, lambda s: _airflow(model, s, d, **step_kwargs), state,
-                         step_key,
-                         zone_pressure_rtol, zone_pressure_max_iter, P_of(d), "initial airflow",
-                         cause)
+                         step_key, zone_pressure_rtol, zone_pressure_max_iter, P_of(d),
+                         "initial airflow", cause)
     state = _with_pressure_differences(model, state, d, network)
     state = {**state, **model.initial_capacities(state, d)}
     mass = start_mass(state, d) if found else None

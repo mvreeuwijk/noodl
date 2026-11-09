@@ -2616,19 +2616,8 @@ def steady(model: Model, state, drivers, *, rtol: float = 1e-12, max_iter: int =
     if key is None:
         return out
     Pb = zp[0].Pb if zp else 101325.0
-    diag: dict = {}
-    try:
-        return model.fixed_point(
-            lambda z: _model_steady(model, {**state, key: z[key]}, drivers, **solve_kwargs),
-            out, watch=[key], tol=rtol * Pb, max_passes=max_iter, diagnostics=diag,
-            where="prj.steady",
-        )
-    except RuntimeError as exc:
-        if "passes" not in diag or diag["changes"][-1] <= rtol * Pb:
-            raise
-        raise RuntimeError(
-            f"prj.steady: the zone pressures fed back to {cause} did not converge in "
-            f"{max_iter} passes "
-            f"(last pressure change {diag['changes'][-1]:.3e} Pa > rtol * Pb = "
-            f"{rtol * Pb:.3e} Pa)"
-        ) from exc
+    return model.fixed_point(
+        lambda z: _model_steady(model, {**state, key: z[key]}, drivers, **solve_kwargs),
+        out, watch=[key], tol=rtol * Pb, max_passes=max_iter,
+        where=f"prj.steady: the zone pressures fed back to {cause}",
+    )

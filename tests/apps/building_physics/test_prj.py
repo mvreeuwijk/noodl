@@ -512,7 +512,7 @@ def test_prj_steady_converges_the_zone_pressure_density_to_its_fixed_point():
     torch.testing.assert_close(again["air.q"], ss["air.q"], rtol=1e-12, atol=0)
     rel = ((one["air.q"] - ss["air.q"]) / ss["air.q"]).abs().max().item()
     assert 3e-5 < rel < 6e-5
-    with pytest.raises(RuntimeError, match=r"did not converge in 1 passes"):
+    with pytest.raises(RuntimeError, match=r"did not converge within 1 passes"):
         steady(model, state, drivers, rtol=0.0, max_iter=1, atol=1e-14)
 
 

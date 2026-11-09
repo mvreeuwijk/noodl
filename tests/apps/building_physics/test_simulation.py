@@ -705,7 +705,8 @@ def test_an_unconverged_pressure_fixed_point_names_every_coupling():
     model.closures.append(_PressureSpy())
     cooling = Input(TimeSeries([0.0, 600.0], [293.15, 273.15]), "T",
                     index=model.net.node_index("ambient"))
-    both = r"the zone densities and the pressure reader _PressureSpy did not converge in 1"
+    both = (r"the zone densities and the pressure reader _PressureSpy: the fixed point "
+            r"did not converge within 1")
     with pytest.raises(RuntimeError, match=both):
         simulate(model, state, drivers, [0.0, 300.0], inputs=[cooling],
                  zone_pressure_max_iter=1, **TIGHT)
@@ -713,7 +714,8 @@ def test_an_unconverged_pressure_fixed_point_names_every_coupling():
     model, state, drivers = project_to_model(p, ambient=dict(p.ambient_conditions, Ta=273.15))
     model.closures.append(_PressureSpy())
     with pytest.raises(RuntimeError, match=r"the zone densities and the pressure reader "
-                                           r"_PressureSpy did not converge in 1 passes"):
+                                           r"_PressureSpy: the fixed point did not converge "
+                                           r"within 1 passes"):
         steady(model, state, drivers, max_iter=1, atol=1e-14)
 
 
