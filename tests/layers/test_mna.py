@@ -384,7 +384,7 @@ def test_assembled_jacobian_matches_autograd_jacobian_of_the_residual():
         return mna.residual(z, pb, {}, sources, ctx, call)
 
     expected = torch.autograd.functional.jacobian(residual, x)
-    op = mna.operator(x, pb, {}, ctx, call, lambda phi: mna._node_slopes(phi, {}, call))
+    op = mna.operator(x, pb, {}, ctx, lambda phi: mna._node_slopes(phi, {}))
     torch.testing.assert_close(op.assemble(), expected, rtol=1e-13, atol=1e-13)
     # rmatvec is the transpose action
     v = torch.randn(mna.n, generator=gen, dtype=F64)

@@ -38,6 +38,7 @@ from torch.func import functional_call
 
 from noodl._broadcast import broadcast_shapes
 from noodl._tracking import bulk_values, same_tracking
+from noodl.elements._slopes import _colour_blocks, _complex
 from noodl.elements.base import SCHEMES, LawContext
 from noodl.layers._device import complex_of
 from noodl.layers._solve_policy import require_diagnostics
@@ -72,71 +73,6 @@ def check_scheme(layer_name: str, scheme) -> None:
 #: original solver error is re-raised unchanged (a dense SVD of a big system costs more
 #: than the diagnosis is worth).
 _RANK_TEST_MAX_UNKNOWNS = 2000
-
-
-def _complex(z: Tensor, cdtype: torch.dtype = torch.complex128) -> Tensor:
-    """`z` as a `cdtype` tensor (the layer's complex dtype: complex128 on a float64
-    network, complex64 on a float32 one) that `view_as_real` accepts: a phasor-capable law
-    may return a real tensor (a constant current) or a lazily conjugated one (a law written
-    with `torch.conj`). Both conversions are differentiable."""
-    return z.to(cdtype).resolve_conj()
-
-
-def _colour_blocks(fn, zs: tuple[Tensor, ...], m: int, w: int,
-                   cdtype: torch.dtype = torch.complex128) -> list[Tensor]:
-    """`(..., G, m, m, w, w)` per input: `d fn(*zs)[g, k, ck] / d zs[i][g, l, cl]` for a
-    groupwise `fn`, from one evaluation of `fn` and `m * w` reverse-mode gradients.
-
-    Each input is a fresh leaf (in its real view when `w == 2`), so the gradients are with
-    respect to it alone; the values carry no graph (the operator is only ever used under
-    `no_grad`). An output that does not depend on an input gives a zero block. An output
-    whose batch shape is wider than an input's (a batched driver) is evaluated again with
-    the inputs expanded to it, so the gradient is per instance, not summed over the batch.
-    """
-    with torch.enable_grad():
-        leaves, out = _evaluate(fn, zs, w, cdtype)
-        batch = _batch(out, w)
-        if any(_batch(leaf, w) != batch for leaf in leaves):
-            zs = tuple(z.expand(batch + z.shape[-1:]) for z in zs)
-            leaves, out = _evaluate(fn, zs, w, cdtype)
-        live = list(range(len(leaves))) if out.requires_grad else []
-        G = (out.shape[-2] if w == 2 else out.shape[-1]) // m
-        rows: list[list[Tensor]] = [[] for _ in leaves]
-        n_seeds = m * w
-        for seed in range(n_seeds):
-            k, ck = divmod(seed, w)
-            cot = torch.zeros(batch + (G, m, w), dtype=out.dtype, device=out.device)
-            cot[..., k, ck] = 1.0
-            cot = cot.reshape(out.shape)
-            grads = (torch.autograd.grad(out, [leaves[i] for i in live], cot,
-                                         retain_graph=seed < n_seeds - 1, allow_unused=True)
-                     if live else ())
-            by_input = dict(zip(live, grads, strict=True))
-            for i, leaf in enumerate(leaves):
-                g = by_input.get(i)
-                g = torch.zeros_like(leaf) if g is None else g
-                rows[i].append(g.reshape(batch + (G, m, w)))   # [g, l, cl] for this (k, ck)
-    # (..., G, k*w + ck, l, cl) -> (..., G, k, l, ck, cl)
-    return [torch.stack(r, dim=-3).unflatten(-3, (m, w)).transpose(-3, -2).detach()
-            for r in rows]
-
-
-def _batch(x: Tensor, w: int) -> tuple[int, ...]:
-    """The batch shape of a value per edge (in its real view when `w == 2`)."""
-    return tuple(x.shape[:-2] if w == 2 else x.shape[:-1])
-
-
-def _evaluate(fn, zs: tuple[Tensor, ...], w: int,
-              cdtype: torch.dtype = torch.complex128) -> tuple[list[Tensor], Tensor]:
-    """`fn` at fresh leaves for `zs` (real views when `w == 2`), and its output (real view
-    when `w == 2`)."""
-    if w == 2:
-        leaves = [torch.view_as_real(_complex(z, cdtype).detach()).clone().requires_grad_(True)
-                  for z in zs]
-        out = fn(*(torch.view_as_complex(leaf) for leaf in leaves))
-        return leaves, torch.view_as_real(_complex(out, cdtype))
-    leaves = [z.detach().clone().requires_grad_(True) for z in zs]
-    return leaves, fn(*leaves)
 
 
 def _cat(parts: list[Tensor], like: Tensor) -> Tensor:
@@ -493,17 +429,11 @@ class MnaSystem:
         return self.layer._scatter_node_sources(
             lambda j, ns: call(n_el + j, (phi[..., ns.nodes], drivers)))
 
-    def _node_slopes(self, phi, drivers, call) -> Tensor | None:
-        """`d w / d phi` per interior row (a node source reads its own node's potential
-        only, so one forward-mode derivative gives the whole diagonal)."""
-        n_el = len(self.layer._laws)
-
-        def slope(j, ns):
-            phi_n = phi[..., ns.nodes]
-            block, = _colour_blocks(lambda v: call(n_el + j, (v, drivers)), (phi_n,), 1, 1)
-            return block[..., 0, 0, 0, 0]
-
-        return self.layer._scatter_node_sources(slope)
+    def _node_slopes(self, phi, drivers) -> Tensor | None:
+        """`d w / d phi` per interior row: a node source reads its own node's potential only,
+        so its own `dflow` is the whole diagonal."""
+        return self.layer._scatter_node_sources(
+            lambda j, ns: ns.dflow(phi[..., ns.nodes], drivers))
 
     # ------------------------------------------------------------- storage
     def _storage_state(self, ctx, dt, t, scheme, history, storage_flow, drivers):
@@ -611,7 +541,7 @@ class MnaSystem:
         stepping = store is not None and not isinstance(store, _Held)
 
         def slopes(phi):
-            d = self._node_slopes(phi, drivers, call)
+            d = self._node_slopes(phi, drivers)
             if not stepping:
                 return d
             s = self._storage_slopes(phi, drivers, store, call, adjoint)
@@ -648,35 +578,26 @@ class MnaSystem:
             kcl = kcl + self._storage_withdrawal(phi, drivers, store, call)
         return self._to_real(_cat([kcl, r_F], kcl))
 
-    @staticmethod
-    def _potential_block(call, i, drivers, lctx, dp_s, m, w):
-        block, = _colour_blocks(lambda d: call(i, (d, drivers, lctx)), (dp_s,), m, w,
-                                complex_of(dp_s.dtype))
-        return block
-
-    @staticmethod
-    def _implicit_blocks(call, i, drivers, lctx, dp_s, q_s, m, w):
-        return _colour_blocks(lambda d, qq: call(i, (d, qq, drivers, lctx)), (dp_s, q_s), m, w,
-                              complex_of(dp_s.dtype))
-
-    def operator(self, x, phi_boundary, drivers, ctx, call, node_slope_fn) -> MnaOperator:
+    def operator(self, x, phi_boundary, drivers, ctx, node_slope_fn) -> MnaOperator:
         """The Jacobian of `residual` at `x`, as COO triplets on the fixed pattern."""
         layer = self.layer
-        w = self.w
         phi_I, q_F = self._unknowns(x)
         phi = layer.assemble(phi_I, phi_boundary)
         dp = layer.dp(phi, drivers)
         blocks = []
-        for i, (el, (s, e)) in enumerate(
-                zip(layer._laws, layer._law_slices, strict=True)):
+        for el, (s, e) in zip(layer._laws, layer._law_slices, strict=True):
             lctx = self._law_ctx(ctx, s, e)
             dp_s = dp[..., s:e]
+            # Called on the law module itself, also on the differentiable path: the values
+            # equal those of a `functional_call` with the threaded parameters, because the
+            # threaded tensors ARE the module's own parameters (the same argument as
+            # `dp_independent` in `_functional.py`), and the blocks carry no graph.
             if el.law_form == "implicit":
                 f0 = int(self._f_index[s])
                 q_s = q_F[..., f0:f0 + e - s]
-                blocks += self._implicit_blocks(call, i, drivers, lctx, dp_s, q_s, el.ports, w)
             else:
-                blocks.append(self._potential_block(call, i, drivers, lctx, dp_s, el.ports, w))
+                q_s = None
+            blocks += el.jacobian(dp_s, q_s, drivers, lctx)
         parts = [blk.flatten(-5) for blk in blocks]
         parts.append(torch.ones(1, dtype=x.dtype, device=x.device))
         if self._diag:
@@ -831,7 +752,7 @@ class MnaSystem:
 
             def operator_fn(x):
                 last["op"] = self._hold(
-                    self.operator(x, phi_boundary, drivers, ctx, plain, slopes_fn), store)
+                    self.operator(x, phi_boundary, drivers, ctx, slopes_fn), store)
                 return last["op"]
 
             with torch.no_grad():
@@ -914,7 +835,7 @@ class MnaSystem:
         def operator_fn(x, *params):
             call, drv, src, pb, step, st = _rebuild(params)
             last["op"] = self._hold(
-                self.operator(x, pb, drv, step, call,
+                self.operator(x, pb, drv, step,
                               self._slopes_fn(drv, call, st, adjoint=True)), st)
             return last["op"]
 

@@ -292,7 +292,7 @@ def test_real_view_jacobian_matches_autograd_jacobian():
         return mna.residual(z, pb, {}, sources, ctx, call)
 
     expected = torch.autograd.functional.jacobian(residual, x)
-    op = mna.operator(x, pb, {}, ctx, call, None)
+    op = mna.operator(x, pb, {}, ctx, None)
     J = op.assemble()
     torch.testing.assert_close(J, expected, rtol=1e-13, atol=1e-13)
     # the load block is not of the holomorphic form [[a, -b], [b, a]]

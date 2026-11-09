@@ -13,7 +13,9 @@ from __future__ import annotations
 
 import torch
 
+from noodl._broadcast import broadcast_shapes
 from noodl.elements import ConstitutiveLaw, ImplicitLaw
+from noodl.elements._slopes import group_shape, one_port_blocks, slope_blocks, stack_entries
 
 Tensor = torch.Tensor
 
@@ -64,6 +66,11 @@ class PiBranch(ConstitutiveLaw):
         vf, vt = v[..., 0], v[..., 1]
         return torch.stack([yff * vf + yft * vt, ytf * vf + ytt * vt], dim=-1).flatten(-2)
 
+    def jacobian(self, dp, q, drivers, ctx):
+        yff, yft, ytf, ytt = self.admittances()
+        return (slope_blocks(stack_entries([[yff, yft], [ytf, ytt]], group_shape(2, dp), dp),
+                             dp),)
+
 
 class Shunt(ConstitutiveLaw):
     """A constant-admittance shunt, `i = (g + jb) v` (p.u.), per edge bus -> ground: `g`
@@ -82,6 +89,12 @@ class Shunt(ConstitutiveLaw):
 
     def flow(self, dp: Tensor, drivers=None) -> Tensor:
         return torch.complex(self.g, self.b) * dp
+
+    def dflow(self, dp, drivers=None):
+        return torch.complex(self.g, self.b) * torch.ones_like(dp)
+
+    def jacobian(self, dp, q, drivers, ctx):
+        return (one_port_blocks(torch.complex(self.g, self.b), dp),)
 
 
 class VoltageControlledGenerator(ImplicitLaw):
@@ -104,6 +117,17 @@ class VoltageControlledGenerator(ImplicitLaw):
         magnitude = torch.sqrt(dp.real ** 2 + dp.imag ** 2)   # |v| in forward-mode-safe form
         injected = (dp * q.conj()).real + self.P
         return torch.complex(magnitude - self.V, injected)
+
+    def jacobian(self, dp, q, drivers, ctx):
+        """The real 2x2 blocks of the (non-holomorphic) residual: the magnitude's gradient
+        `v / |v|` and the real power's `(Re i, Im i)` and `(Re v, Im v)`."""
+        vx, vy, ix, iy = dp.real, dp.imag, q.real, q.imag
+        magnitude = torch.sqrt(vx ** 2 + vy ** 2)
+        d_dp = [[[[vx / magnitude, vy / magnitude], [ix, iy]]]]
+        d_q = [[[[0.0, 0.0], [vx, vy]]]]
+        shape = tuple(broadcast_shapes(dp.shape, q.shape))
+        real = torch.zeros((), dtype=vx.dtype, device=vx.device)
+        return stack_entries(d_dp, shape, real), stack_entries(d_q, shape, real)
 
 
 __all__ = ["PiBranch", "Shunt", "VoltageControlledGenerator"]

@@ -25,6 +25,7 @@ from dataclasses import dataclass
 import torch
 
 from noodl._broadcast import broadcast_shapes
+from noodl.elements._slopes import _colour_blocks
 
 Tensor = torch.Tensor
 
@@ -259,6 +260,48 @@ class ConstitutiveLaw(torch.nn.Module):
                     f"graph (e.g. a stray dp.detach())."
                 ) from exc
         return grad
+
+    def jacobian(self, dp: Tensor, q: Tensor | None, drivers: Mapping[str, Tensor] | None,
+                 ctx: LawContext | None) -> tuple[Tensor, ...]:
+        """The law's local derivative blocks, shape `(..., G, m, m, w, w)` per input: G groups
+        of `ports` = m edges, `w = 2` for a complex `dp` (its real view), else 1.
+
+        Returns `(d flow / d dp,)` for a law with a flow and `(d r / d dp, d r / d q)` for an
+        implicit law; `q` is the edges' flow, used by an implicit law only. A law that knows
+        its derivatives overrides this (a phasor law writes its entries as real 2x2 blocks).
+
+        The default is `dflow` for a one-port, non-contextual law on a real `dp`, and
+        otherwise the law's own `forward` differentiated by reverse-mode colouring.
+        """
+        if (self.ports == 1 and not self.contextual and not dp.is_complex()
+                and self._drivers_fit(dp, drivers)):
+            return (self.dflow(dp, drivers)[..., None, None, None, None],)
+        return self._coloured_jacobian(dp, q, drivers, ctx)
+
+    @staticmethod
+    def _drivers_fit(dp: Tensor, drivers: Mapping[str, Tensor] | None) -> bool:
+        """Whether every driver's batch shape broadcasts into `dp`'s: only then is the
+        autograd `dflow` per instance (a wider driver batch would be summed over)."""
+        batch = tuple(dp.shape[:-1])
+        for v in (drivers or {}).values():
+            if isinstance(v, Tensor) and v.dim() > 0:
+                try:
+                    if tuple(broadcast_shapes(batch, v.shape[:-1])) != batch:
+                        return False
+                except (RuntimeError, ValueError):
+                    return False
+        return True
+
+    def _coloured_jacobian(self, dp, q, drivers, ctx) -> tuple[Tensor, ...]:
+        """`_colour_blocks` of `forward` with respect to `dp` (and `q`, for an implicit law)."""
+        from noodl.layers._device import complex_of
+        w = 2 if dp.is_complex() else 1
+        cdtype = complex_of(dp.dtype)
+        if q is None:
+            return tuple(_colour_blocks(lambda d: self(d, drivers, ctx), (dp,), self.ports, w,
+                                        cdtype))
+        return tuple(_colour_blocks(lambda d, qq: self(d, qq, drivers, ctx), (dp, q),
+                                    self.ports, w, cdtype))
 
     def switching(self, dp: Tensor, drivers: Mapping[str, Tensor] | None = None
                   ) -> Tensor | None:

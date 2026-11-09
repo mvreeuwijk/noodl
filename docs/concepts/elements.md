@@ -33,6 +33,12 @@ class ConstitutiveLaw(torch.nn.Module):
 the Jacobian $A_I \operatorname{diag}(g') A_I^\top$ at every Newton iteration, where an
 autograd round-trip per iteration would dominate the cost.
 
+`jacobian` is the same idea for the solvers that need a law's slopes as local blocks (a law with
+several ports, an implicit law, a phasor law). A law may give its slopes in closed form by
+overriding `jacobian`; otherwise they are computed by automatic differentiation. Every law of
+the electrical application gives them in closed form, so a circuit's Newton iterations evaluate
+no derivatives by automatic differentiation.
+
 `linear_init` matters more than it appears. A nonlinear network solved from a cold start can
 take many Newton iterations or fail outright; solving the linear surrogate first puts the
 iteration inside the basin of attraction. Every built-in law provides one.
