@@ -1,18 +1,23 @@
-"""Tank levels and simple `[CONTROLS]`, as one closure carrying its own state.
+"""Simple `[CONTROLS]` on tank levels, as one closure carrying the link status.
 
-`state_keys = ("water.tank_level", "water.link_status")`: the level of every
-tank (m above its bottom) and the open/closed status of every controlled link. Both persist
-across steps and belong to no layer.
+`state_keys = ("water.link_status",)`: the open/closed status of every controlled link,
+which persists across steps and belongs to no layer. A tank's level is not carried here:
+it is the tank node's head less its bottom, read from `"water.phi"` (`TankLevels.levels`).
+The tank itself is a `noodl.LinearStorage` of its cross-section area in the water layer
+(`build_model(tank_scheme=...)`): under `"forward_euler"` (EPANET's method) a boundary node
+the solve holds at its step-start head and the step then moves by `dt * inflow / A`
+(`KirchhoffLayer.advance_storage`, `water_event_step`); under `"backward_euler"` or
+`"trapezoidal"` an interior node stepped inside the solve.
 
 Per call the closure (1) applies every control's level test with EPANET's semantics, under
-`no_grad` -- the switch itself is a combinatorial decision; and (2) writes the prescribed head
-at every tank into `"water.phi_boundary"` and the per-pump status into `"water.status"`. The
-closure itself only PASSES the level through (a closure returns driver updates and
-whatever state it carries across steps, unchanged, unless something else advances it);
-ADVANCING the level to the next time step is `advance()`, called explicitly by the
-extended-period driver (e.g. `benchmarks/water_eps.py`) with the net inflow from the solve this
-closure's own boundary values just fed into -- it is not called from `__call__`, which only ever
-reads the CURRENT level.
+`no_grad` -- the switch itself is a combinatorial decision; and (2) writes the reservoir heads
+into `"water.phi_boundary"` and the per-pump status into `"water.status"`. A tank held at a
+boundary node has a column of `"water.phi_boundary"` too, which the closure fills with zeros:
+the layer holds the tank at its step-start head there on every path (`Model` steps, steady
+solves, `residuals`, `current_flows`; `KirchhoffLayer.hold_storage`), so it is the only
+authority for the tank heads. During a step the controls read the step-start levels: a
+`Model` pass shows a closure the held head of such a node, not the level a previous pass of
+the same step has advanced it to (`coupling="iterate"`).
 
 `event_step` is EPANET's ADAPTIVE shortening, and it is not optional: with a fixed step
 the pump switches up to a whole step late and the tank level diverges from EPANET; the step
@@ -52,13 +57,20 @@ class Control:
 
 
 class TankLevels:
-    """Tank levels, simple controls and the boundary heads they prescribe."""
+    """Simple controls on tank levels, and the boundary heads of a water layer whose tanks
+    are held at boundary nodes (`build_model(tank_scheme="forward_euler")`).
 
-    state_keys = ("water.tank_level", "water.link_status")
-    # `__call__` only ever PASSES the level through unchanged (see the module
-    # docstring); `advance()` is what actually integrates it, called explicitly by the
-    # extended-period driver, so this closure does not integrate and takes no
-    # `StepContext`.
+    A tank's level is its head in `"water.phi"` at `tank_nodes` less its bottom (`levels`).
+    Per call it applies the controls to those levels, refuses a level outside `[min, max]`
+    by name, and writes the reservoir heads into `"water.phi_boundary"`, then zeros in the
+    tanks' columns, which the layer fills with their step-start heads
+    (`KirchhoffLayer.hold_storage`). Only the link status is carried. `event_step` is
+    EPANET's shortening of the step to the next control crossing.
+    """
+
+    state_keys = ("water.link_status",)
+    # The tank levels are stepped by the water layer's storage, not here, so this closure
+    # does not integrate and takes no `StepContext`.
     integrates = False
 
     def __init__(
@@ -68,9 +80,9 @@ class TankLevels:
         controls,
         pump_names,
         *,
+        tank_nodes,
         dt: float,
         reservoir_heads: Tensor,
-        tank_first_index: int,
         head_scale: float = 1.0,
     ) -> None:
         self.net = net
@@ -78,13 +90,10 @@ class TankLevels:
         self.controls = list(controls)
         self.pump_names = list(pump_names)
         # The labels of the closure-carried state, in its order (`noodl.refs`).
-        self.key_labels = {
-            "water.tank_level": [t.name for t in self.tanks],
-            "water.link_status": list(self.pump_names),
-        }
+        self.key_labels = {"water.link_status": list(self.pump_names)}
+        self.tank_nodes = torch.as_tensor(tank_nodes, dtype=torch.long)
         self.dt = float(dt)
         self.reservoir_heads = torch.as_tensor(reservoir_heads, dtype=F64)
-        self.tank_first_index = int(tank_first_index)
         # 1.0 on the Hazen-Williams path (the potential IS metres of head) and `rho g` on
         # the Darcy-Weisbach path, where the layer's potential is PRESSURE: the levels and
         # the trigger elevations stay in metres either way and are converted here, once.
@@ -111,35 +120,36 @@ class TankLevels:
         self.tank_of = {t.name: i for i, t in enumerate(self.tanks)}
         self.pump_of = {name: i for i, name in enumerate(self.pump_names)}
         self.bottom = torch.tensor([t.elevation for t in self.tanks], dtype=F64)
-        self.area = torch.tensor(
-            [torch.pi * t.diameter**2 / 4.0 for t in self.tanks], dtype=F64
-        )
         self.y_min = torch.tensor([t.min_level for t in self.tanks], dtype=F64)
         self.y_max = torch.tensor([t.max_level for t in self.tanks], dtype=F64)
 
+    def levels(self, state) -> Tensor:
+        """Every tank's level (m above its bottom) in `state`."""
+        return state["water.phi"][..., self.tank_nodes] / self.head_scale - self.bottom
+
     def __call__(self, state, drivers) -> dict[str, Tensor]:
-        level = state.get("water.tank_level")
         status = state.get("water.link_status")
-        if level is None or status is None:
+        if status is None or "water.phi" not in state:
             raise KeyError(
-                "TankLevels: states 'water.tank_level' and 'water.link_status' are both "
-                "required; build them with initial_state(model)"
+                f"{type(self).__name__}: states 'water.phi' and 'water.link_status' are "
+                f"both required; build them with initial_state(model)"
             )
+        level = self.levels(state)
         with torch.no_grad():
             status = self._apply_controls(level, status)
         self._refuse_outside(level)
-        heads = (self.bottom + level) * self.head_scale
-        boundary = torch.cat(
-            [self.reservoir_heads.expand(heads.shape[:-1] + self.reservoir_heads.shape),
-             heads],
+        return {"water.phi_boundary": self._boundary(state, level), "water.status": status,
+                "water.link_status": status}
+
+    def _boundary(self, state, level: Tensor) -> Tensor:
+        """The reservoir heads, then zeros in the tanks' columns (boundary nodes here, whose
+        heads the layer holds: `KirchhoffLayer.hold_storage`)."""
+        batch = level.shape[:-1]
+        return torch.cat(
+            [self.reservoir_heads.expand(batch + self.reservoir_heads.shape),
+             torch.zeros(batch + level.shape[-1:], dtype=level.dtype, device=level.device)],
             dim=-1,
         )
-        return {
-            "water.phi_boundary": boundary,
-            "water.status": status,
-            "water.tank_level": level,
-            "water.link_status": status,
-        }
 
     def _refuse_outside(self, level: Tensor) -> None:
         """Refuse, by name, a tank outside its `[min, max]` levels."""
@@ -157,10 +167,6 @@ class TankLevels:
                 f"closes the attached links instead, which this model does not do -- widen "
                 f"the levels or shorten the run"
             )
-
-    def advance(self, level: Tensor, inflow: Tensor, dt: float) -> Tensor:
-        """Explicit Euler on the level, from the net inflow (m3/s) at each tank node."""
-        return level + inflow * dt / self.area
 
     def event_step(self, level: Tensor, rate: Tensor, dt: float) -> float:
         """EPANET's shortened hydraulic step: the time to the next control crossing.
@@ -199,43 +205,15 @@ class TankLevels:
 
 
 class TankStorageControls(TankLevels):
-    """`TankLevels` for tanks held as storage in the layer (`build_model(tank_mode=
-    "storage")`, `elements.TankStorage`): a tank's level is its solved head less its
-    bottom, read from the state's `"water.phi"` at `tank_nodes`, not a carried
-    `"water.tank_level"`. Per call it applies the controls to those levels, refuses a level
-    outside `[min, max]` by name as `TankLevels` does, and writes the reservoir heads and the
-    datum's head 0 into `"water.phi_boundary"`. Only the link status is carried.
+    """`TankLevels` for tanks stepped inside the solve, as interior storage nodes
+    (`build_model(tank_scheme="backward_euler")` or `"trapezoidal"`): it writes only the
+    reservoir heads into `"water.phi_boundary"`, and its `event_step` never shortens a step
+    below `min_step`.
     """
 
-    state_keys = ("water.link_status",)
-
-    def __init__(self, net, tanks, controls, pump_names, *, tank_nodes, **kwargs) -> None:
-        super().__init__(net, tanks, controls, pump_names, **kwargs)
-        self.key_labels = {"water.link_status": list(self.pump_names)}
-        self.tank_nodes = torch.as_tensor(tank_nodes, dtype=torch.long)
-
-    def levels(self, state) -> Tensor:
-        """Every tank's level (m above its bottom) in `state`."""
-        return state["water.phi"][..., self.tank_nodes] / self.head_scale - self.bottom
-
-    def __call__(self, state, drivers) -> dict[str, Tensor]:
-        status = state.get("water.link_status")
-        if status is None or "water.phi" not in state:
-            raise KeyError(
-                "TankStorageControls: states 'water.phi' and 'water.link_status' are both "
-                "required; build them with initial_state(model)"
-            )
-        level = self.levels(state)
-        with torch.no_grad():
-            status = self._apply_controls(level, status)
-        self._refuse_outside(level)
-        datum = torch.zeros(level.shape[:-1] + (1,), dtype=F64)
-        boundary = torch.cat(
-            [self.reservoir_heads.expand(level.shape[:-1] + self.reservoir_heads.shape), datum],
-            dim=-1,
-        )
-        return {"water.phi_boundary": boundary, "water.status": status,
-                "water.link_status": status}
+    def _boundary(self, state, level: Tensor) -> Tensor:
+        """The reservoir heads (the tanks are interior nodes here)."""
+        return self.reservoir_heads.expand(level.shape[:-1] + self.reservoir_heads.shape)
 
     def event_step(self, level: Tensor, rate: Tensor, dt: float,
                    min_step: float = 1.0) -> float:

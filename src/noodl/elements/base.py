@@ -34,8 +34,12 @@ MODES = ("dc", "initial", "transient", "phasor")
 #: The time-integration schemes, one vocabulary for every layer kind. `"exact"` (the exact
 #: exponential of a linear step) is valid for a `TransportLayer` only; `"backward_euler"`
 #: (first order, flows at the step's end) and `"trapezoidal"` (second order) are valid for both
-#: it and a `KirchhoffLayer`, which refuses `"exact"` by name.
-SCHEMES = ("exact", "backward_euler", "trapezoidal")
+#: it and a `KirchhoffLayer`, which refuses `"exact"` by name. `"forward_euler"` is valid for
+#: a `KirchhoffLayer` whose storage sits at BOUNDARY nodes only (an EPANET tank): the solve
+#: holds each such node at its step-start potential, and the step then moves it by
+#: `dt * inflow / capacity`, the inflow being the one the solve gave. A layer with storage at
+#: interior nodes, or with dynamic laws, refuses it, and so does a `TransportLayer`.
+SCHEMES = ("exact", "backward_euler", "trapezoidal", "forward_euler")
 
 
 @dataclass(frozen=True)

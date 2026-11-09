@@ -122,6 +122,39 @@ storages in list order, then their nodes.
 - On the differentiable path gradients reach the storages' registered parameters, `history`
   and `storage_flow`, so a chain of steps back-propagates through time.
 
+**Storage at boundary nodes, stepped by forward Euler.** With `scheme="forward_euler"` the
+storage sits at boundary nodes instead (an EPANET tank), and is never an unknown. The solve
+holds each storage node at its potential at the step start (`layer.holds_storage` is True):
+the layer writes the step-start `"<layer>.phi"` into those columns of
+`"<layer>.phi_boundary"` (`hold_storage`), whatever the driver gives there, on every `Model`
+path (`step`, `steady`, `residuals`, `current_flows`, `check`), so a closure may fill those
+columns with anything. During a step a closure reading `"<layer>.phi"` sees such a node at
+its step-start potential too (`hold_potentials`), even in the later passes of
+`coupling="iterate"`. After the solve the step moves each storage node by
+$\Delta t\,w / C$ (`advance_storage(phi, storage_flow, dt)`), with $w$ the flow the solve
+delivered to the node and $C$ the storage's capacity. That is explicit Euler, EPANET's own
+tank method; the solve itself takes no step and does not depend on `dt`.
+
+```py
+store = LinearStorage(nodes=[tank], capacity=[area])
+layer = KirchhoffLayer(net, "water", laws, boundary=["R1", "T1"],
+                       storage=[store], scheme="forward_euler")
+phi, q = layer.solve(phi_boundary, drivers, sources)    # T1 held at its column of phi_boundary
+w = layer.storage_flows(phi, drivers, dt=None, q=q)     # the flow into T1
+phi_next = layer.advance_storage(phi, w, dt=600.0)      # T1 moved by dt * w / area
+```
+
+- `storage_flows` there needs `q` and returns the flow into every storage node, on a steady
+  solve as on a step; a `Model` writes it to `"<layer>.storage_flow"` after every solve and
+  moves the storage when the pass has a `dt`. `"<layer>.phi"` is then required by every
+  solve, steady or not.
+- Only a linear storage (`LinearStorage`, a constant capacity) is accepted at a boundary node,
+  one entry per node; a nonlinear one is refused by name.
+- A layer whose storage sits at interior nodes, with dynamic laws, or with no storage at
+  all refuses `"forward_euler"`; a layer with boundary storage refuses the other schemes, and a storage at
+  a boundary node of a layer with another scheme is refused.
+- Gradients reach the capacities through `advance_storage`; the solve does not depend on them.
+
 Which method to write on a subclass:
 
 - **`amount`** alone, when the stored amount depends on the node's own potential only. The
@@ -168,11 +201,14 @@ are returned as given and the potential-controlled edges' columns are evaluated 
 context), differentiably. At `solve`'s own `(phi, q)` the result is `q`. Without `q` it raises
 `TypeError`; a phasor layer has no such accessor.
 
-**One scheme vocabulary for every layer.** `SCHEMES = ("exact", "backward_euler", "trapezoidal")`
+**One scheme vocabulary for every layer.**
+`SCHEMES = ("exact", "backward_euler", "trapezoidal", "forward_euler")`
 (`noodl.elements.base`) names the time-integration schemes of both layer kinds, with the keyword
 `scheme` everywhere. A `KirchhoffLayer` takes `scheme="trapezoidal"` (the default) or
 `"backward_euler"` at construction, and `solve(scheme=None)` means "the layer's own"; it refuses
-`"exact"`, which belongs to a `TransportLayer`, by name. A name outside `SCHEMES` (the former
+`"exact"`, which belongs to a `TransportLayer`, by name. `"forward_euler"` is for a
+`KirchhoffLayer` whose storage sits at boundary nodes only
+([Node storage](#node-storage)); a `TransportLayer` refuses it. A name outside `SCHEMES` (the former
 `"implicit"` of a transport layer, the former keyword `integration=`) is refused with an error
 that lists them.
 
@@ -600,7 +636,7 @@ State and driver keys are namespaced by layer name:
 |---|---|
 | `"<layer>.phi"` | Nodal potentials, full node order |
 | `"<layer>.q"` | Branch flows, the layer's kind order |
-| `"<layer>.storage_flow"` | A Kirchhoff layer with [node storage](#node-storage): the flow into every storage entry at the end of the step (`layer.storage_flows`), zeros after a steady solve; required to step it by the trapezoidal scheme |
+| `"<layer>.storage_flow"` | A Kirchhoff layer with [node storage](#node-storage): the flow into every storage entry at the end of the step (`layer.storage_flows`), zeros after a steady solve; required to step it by the trapezoidal scheme. Under `scheme="forward_euler"` (storage at boundary nodes) the flow the solve delivered to every storage node, on a steady solve too |
 | `"<layer>.x"` | Transport state, interior order, `(n_i,)` or `(n_i, K)` |
 | `"<layer>.s"` | An allocation layer's per-node storage |
 | `"<layer>.phi_boundary"` | Prescribed boundary potentials (driver) |

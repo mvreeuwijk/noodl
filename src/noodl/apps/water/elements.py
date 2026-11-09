@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import torch
 
-from noodl.elements.base import ConstitutiveLaw, ImplicitLaw, step_rate
+from noodl.elements.base import ConstitutiveLaw, ImplicitLaw
 from noodl.solvers.scalar import solve_monotone
 
 Tensor = torch.Tensor
@@ -792,38 +792,3 @@ class FlowControlledPump(ImplicitLaw):
         status = self.pump._status(dp, drivers)
         gain = self.pump.head_gain(q, self.gradient_floor, self.closed_slope)
         return status * (dp + gain) + (1.0 - status) * q
-
-
-class TankStorage(ImplicitLaw):
-    """A cylindrical tank as storage (`build_model(tank_mode="storage")`): an edge from the
-    tank's node to a datum at head 0, so that ``dp`` is the tank's head times ``scale`` and
-    the edge's flow is the net inflow into the tank. The volume above the datum changes by
-    ``A dH``, so in a step of ``dt``:
-
-    - backward Euler: ``q = A (H - H_prev) / dt``;
-    - trapezoidal: ``q + q_prev = 2 A (H - H_prev) / dt``;
-
-    with ``H = dp / scale``. ``mode="initial"`` holds the head at ``head0`` (the tank's
-    bottom plus its initial level, m); ``mode="dc"`` is a closed tank (no inflow). EPANET
-    itself steps the level explicitly (`build_model`'s default ``tank_mode="explicit"``);
-    this implicit form differs from it by the step's own discretisation error and is
-    differentiable through time.
-    """
-
-    dynamic = True
-    linear = True
-
-    def __init__(self, area, head0, *, scale: float = 1.0, kind: str = "tank") -> None:
-        super().__init__(kind)
-        self.area = self._param(area, False)
-        self.head0 = self._param(head0, False)
-        self.scale = float(scale)
-
-    def residual(self, dp, q, drivers, ctx):
-        if ctx.mode == "dc":
-            return q
-        if ctx.mode == "initial":
-            return dp - self.scale * self.head0
-        if ctx.mode != "transient":
-            raise ValueError(f"tank kind {self.kind!r}: mode {ctx.mode!r} is not supported")
-        return q - step_rate(self.area / self.scale * (dp - ctx.dp_prev), ctx, ctx.q_prev)

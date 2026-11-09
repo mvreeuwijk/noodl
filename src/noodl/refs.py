@@ -570,13 +570,16 @@ class LayerRef:
             # A layer with dynamic laws (a capacitance, an inductance) or node storage starts
             # every time step from its potentials and flows at the step start.
             stored = _steps_from_state(layer)
+            holds = _holds_storage(layer)
             state["phi"] = Field(
                 f"{name}.phi", role="state", axis="node", labels=nodes,
                 aliases=_node_aliases(net, nodes),
-                ordering="full node order", required="step" if stored else "optional",
+                ordering="full node order",
+                required="always" if holds else "step" if stored else "optional",
                 default=None,
                 description="solved potential (the step start of its dynamic laws)" if stored
-                else "solved potential (a warm start when given)", **meta, **common,
+                else "solved potential (the held potential of its boundary storage)"
+                if holds else "solved potential (a warm start when given)", **meta, **common,
             )
             state["q"] = Field(
                 f"{name}.q", role="state", axis="edge", labels=q_labels, aliases=q_alias,
@@ -593,7 +596,8 @@ class LayerRef:
                     ordering="storage entry order (storages in list order, then their nodes)",
                     required="step" if _needs_storage_flow(layer) else "optional",
                     default=0.0,
-                    description="flow into every storage entry (the trapezoidal step start)",
+                    description="flow into every storage entry (the trapezoidal step start)"
+                    if not holds else "flow into every boundary storage entry",
                     unit=getattr(layer, "flow_unit", ""), **common,
                 )
             inputs["phi_boundary"] = Field(
@@ -1041,6 +1045,12 @@ def _reads_step_flows(layer) -> bool:
     return bool(getattr(layer, "mna", True))
 
 
+def _holds_storage(layer) -> bool:
+    """Whether a Kirchhoff layer holds storage at boundary nodes (`scheme="forward_euler"`):
+    every solve then reads its step-start potentials `"<layer>.phi"`."""
+    return bool(getattr(layer, "holds_storage", False))
+
+
 def _needs_storage_flow(layer) -> bool:
     """Whether a Kirchhoff layer's step reads `"<layer>.storage_flow"`: it has storage and
     steps by the trapezoidal scheme (its own; a step may give another)."""
@@ -1052,6 +1062,7 @@ def required_state_keys(model: Model) -> list[str]:
     keys = [f"{n}.x" for n in model.transport] + [f"{n}.s" for n in model.allocation]
     keys += [f"{n}.{s}" for n, layer in model.kirchhoff.items() if _steps_from_state(layer)
              for s in (("phi", "q") if _reads_step_flows(layer) else ("phi",))]
+    keys += [f"{n}.phi" for n, layer in model.kirchhoff.items() if _holds_storage(layer)]
     keys += [f"{n}.storage_flow" for n, layer in model.kirchhoff.items()
              if _needs_storage_flow(layer)]
     return keys + list(model.closure_state_keys)

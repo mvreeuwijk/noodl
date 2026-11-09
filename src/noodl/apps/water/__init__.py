@@ -16,7 +16,6 @@ from noodl.apps.water.elements import (
     HazenWilliams,
     MinorLoss,
     PumpCurve,
-    TankStorage,
     composite_friction_factor,
     epanet_friction_factor,  # noqa: F401  (alias)
     three_point_curve,
@@ -37,6 +36,7 @@ from noodl.apps.water.network import (
     tank_inflow,
     tank_levels,
     twoloop,
+    water_event_step,
     water_steady,
     water_step,
 )
@@ -50,10 +50,10 @@ __all__ = [
     "CompositeDarcyWeisbach", "FlowControlledPipe", "FlowControlledPump",
     "GeneralPurposeValve", "HazenWilliams",
     "Junction",
-    "MinorLoss", "PressureDrivenDemand", "Pump", "PumpCurve", "Reservoir", "Tank", "TankStorage",
+    "MinorLoss", "PressureDrivenDemand", "Pump", "PumpCurve", "Reservoir", "Tank",
     "TankLevels", "Valve", "WaterNetwork", "WaterOptions", "WaterPipe",
     "build_model", "initial_drivers", "initial_state", "link_table", "pressure_head",
     "composite_friction_factor", "read_epanet_inp", "tank_inflow", "tank_levels",
     "three_point_curve",
-    "to_kilopascal", "twoloop", "water_step", "water_steady",
+    "to_kilopascal", "twoloop", "water_event_step", "water_step", "water_steady",
 ]

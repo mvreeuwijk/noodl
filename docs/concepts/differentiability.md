@@ -245,8 +245,8 @@ the cases rather than leaving you to discover them.
   and therefore not differentiable by this framework's design — stated as such, "not an
   oversight."
 - **For a tank's area.** In the water application, tank area is not reached by a single
-  `water_steady` call — only `bottom + level` enters the steady solve. Gradients with respect to
-  it flow through `TankLevels.advance`, not through the steady state.
+  `water_steady` call — only the tank's head enters the steady solve. Gradients with respect to
+  it flow through the forward-Euler move of `water_event_step`, not through the steady state.
 
 ## Verification
 

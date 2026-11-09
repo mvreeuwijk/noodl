@@ -53,14 +53,16 @@ Tensor = torch.Tensor
 def check_scheme(layer_name: str, scheme) -> None:
     """Refuse a time-integration scheme a `KirchhoffLayer` cannot take, by name.
 
-    A circuit or network layer integrates with `"backward_euler"` or `"trapezoidal"`;
+    A circuit or network layer integrates with `"backward_euler"` or `"trapezoidal"`, or
+    with `"forward_euler"` when its storage sits at boundary nodes (the layer checks that);
     `"exact"` (the exponential of a linear transport step) belongs to a `TransportLayer`,
     and anything else is not a scheme name. The message lists `SCHEMES`.
     """
     if scheme == "exact":
         raise ValueError(
             f"KirchhoffLayer {layer_name!r}: scheme='exact' is a TransportLayer scheme; a "
-            f"KirchhoffLayer takes 'backward_euler' or 'trapezoidal' (schemes: {SCHEMES})"
+            f"KirchhoffLayer takes 'backward_euler' or 'trapezoidal' ('forward_euler' for "
+            f"storage at boundary nodes; schemes: {SCHEMES})"
         )
     if scheme not in SCHEMES:
         raise ValueError(

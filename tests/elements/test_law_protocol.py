@@ -72,4 +72,4 @@ def test_context_is_frozen_and_modes_are_listed():
     with pytest.raises(dataclasses.FrozenInstanceError):
         ctx.dt = 1.0
     assert MODES == ("dc", "initial", "transient", "phasor")
-    assert SCHEMES == ("exact", "backward_euler", "trapezoidal")
+    assert SCHEMES == ("exact", "backward_euler", "trapezoidal", "forward_euler")
