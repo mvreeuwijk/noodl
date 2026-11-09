@@ -117,7 +117,6 @@ def test_storage_gradcheck_through_the_airflow_solve():
     assert torch.autograd.gradcheck(f, (T, p), eps=1e-5, atol=1e-7)
 
 
-
 @pytest.mark.parametrize("form", ["step_rate", "bdf2", "gain"])
 def test_the_rate_slope_is_the_derivative_of_the_rate(form):
     """`ZoneStorage.rate_slope` is d rate / d phi (it keeps `exact_slope`), for the layer's
@@ -144,11 +143,34 @@ def test_the_rate_slope_is_the_derivative_of_the_rate(form):
     assert torch.allclose(slope, grad, rtol=1e-14, atol=0.0)
     dm = storage.mass_change(st.V, th.k(drv["T"], drv["X_w"]), phi.detach(),
                              drv["air.storage_k_prev"], phi_start, 101325.0)
-    expected = {"step_rate": dm / 5.0, "bdf2": 0.3 * dm - drv.get("air.storage_bdf2_offset", 0.0),
-                "gain": (dm / 5.0 + drv.get("air.storage_coupling_gain", 0.0)
-                         * drv.get("air.storage_inflow", 0.0))
-                / (1 + drv.get("air.storage_coupling_gain", 0.0))}[form]
+    if form == "step_rate":
+        expected = dm / 5.0
+    elif form == "bdf2":
+        expected = 0.3 * dm - drv["air.storage_bdf2_offset"]
+    else:
+        a = drv["air.storage_coupling_gain"]
+        expected = (dm / 5.0 + a * drv["air.storage_inflow"]) / (1 + a)
     assert torch.allclose(rate.detach(), expected, rtol=1e-14, atol=0.0)
+
+
+def test_a_trapezoidal_step_is_refused_without_the_bdf2_drivers():
+    """The closure's storage terms are backward-Euler rates, so `ZoneStorage` refuses the
+    layer's trapezoidal scheme by name (the BDF2 drivers of `simulate(scheme="midpoint")`
+    are the second-order route), for both the rate and its slope."""
+    from noodl.elements.base import LawContext
+
+    th = storage.thermo(medium("Modelica.Media.Air.SimpleAir"))
+    st = storage.ZoneStorage([0], _t([62.5]), 101325.0, th)
+    drv = {"T": _t([300.0]), "X_w": _t([0.0]), "air.storage_k_prev": th.k(_t([300.0]),
+                                                                           _t([0.0]))}
+    ctx = LawContext(mode="transient", dt=5.0, scheme="trapezoidal")
+    for method in (st.rate, st.rate_slope):
+        with pytest.raises(ValueError, match="backward Euler.*midpoint"):
+            method(_t([1.0]), _t([0.0]), _t([0.0]), ctx, drv)
+    # With the BDF2 drivers the layer's scheme is not used.
+    drv.update({"air.storage_bdf2_factor": _t([0.2]), "air.storage_bdf2_offset": _t([0.0])})
+    assert torch.isfinite(st.rate(_t([1.0]), _t([0.0]), _t([0.0]), ctx, drv)).all()
+
 
 def _perfectgas_mass_energy(doc, names, out):
     """Total fluid mass and internal energy `sum m u` of MBL's volumes, from the history,

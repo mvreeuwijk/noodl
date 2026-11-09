@@ -240,7 +240,8 @@ class ZoneStorage(NodeStorage):
     drivers: the full-node `"T"`, `"X_w"`, and per zone `"air.storage_k_prev"` (`k` at the
     step start), optionally `"air.storage_bdf2_factor"` (1/s) with
     `"air.storage_bdf2_offset"` (kg/s), and `"air.storage_coupling_gain"` with
-    `"air.storage_inflow"` (kg/s, `w_fed`). Without a gain driver `a = 0`."""
+    `"air.storage_inflow"` (kg/s, `w_fed`). Without a gain driver `a = 0`. Without the BDF2
+    drivers the layer's scheme must be backward Euler (a trapezoidal step is refused)."""
 
     #: `amount` is affine in the zone pressure at fixed drivers (`T`, `X`).
     linear = True
@@ -273,14 +274,24 @@ class ZoneStorage(NodeStorage):
         return c.expand(broadcast_shapes(c.shape, phi_nodes.shape))
 
     @staticmethod
-    def _factor(ctx: LawContext, drivers: Mapping):
+    def _bdf2_factor(ctx: LawContext, drivers: Mapping) -> Tensor | None:
+        """The BDF2 driver `"air.storage_bdf2_factor"`, or `None` for the layer's own step
+        rate, which must then be backward Euler: the storage terms `StorageClosure` gives
+        the thermal and species layers (and the gain's `w_fed`) are backward-Euler rates."""
         f = drivers.get("air.storage_bdf2_factor")
-        return step_rate_factor(ctx) if f is None else f
+        if f is None and ctx.scheme != "backward_euler":
+            raise ValueError(
+                f"ZoneStorage: scheme={ctx.scheme!r}; MBL volume mass storage steps by "
+                f"backward Euler in Model.step (its closure's storage terms are "
+                f"backward-Euler rates); for a second-order step use "
+                f"run.simulate(scheme='midpoint'), whose BDF2 rate it writes as drivers"
+            )
+        return f
 
     def rate(self, phi_nodes: Tensor, phi_start: Tensor, previous: Tensor | None,
              ctx: LawContext, drivers: Mapping | None = None) -> Tensor:
         dm = self.change(phi_nodes, phi_start, drivers)
-        f = drivers.get("air.storage_bdf2_factor")
+        f = self._bdf2_factor(ctx, drivers)
         if f is None:
             r = step_rate(dm, ctx, previous)
         else:
@@ -292,7 +303,8 @@ class ZoneStorage(NodeStorage):
 
     def rate_slope(self, phi_nodes: Tensor, phi_start: Tensor, previous: Tensor | None,
                    ctx: LawContext, drivers: Mapping | None = None) -> Tensor:
-        slope = self._factor(ctx, drivers) * self.V * self._k(drivers)
+        f = self._bdf2_factor(ctx, drivers)
+        slope = (step_rate_factor(ctx) if f is None else f) * self.V * self._k(drivers)
         a = drivers.get("air.storage_coupling_gain")
         if a is not None:
             slope = slope / (1 + a)

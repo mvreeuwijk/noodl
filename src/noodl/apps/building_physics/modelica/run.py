@@ -1117,7 +1117,7 @@ class _Midpoint:
         return torch.zeros(shape, dtype=F64)
 
     def _storage_drivers(self, s0: State, d0: Drivers, d1: Drivers, h: float):
-        """The trapezoidal storage's air drivers for the step, and state 0's terms."""
+        """The BDF2 storage drivers of the air layer for the step, and state 0's terms."""
         store = self.store
         drv0 = dict(d0)
         drv0.update(self.closure(s0, drv0))
@@ -1143,8 +1143,13 @@ class _Midpoint:
         rate = weights[0]
         offset = torch.zeros(store.V.shape, dtype=F64)
         for j, before in enumerate(reversed(states[:-1]), start=2):
+            # m_j - m0, with m0 at the carried gauge pressure `prev[..., 0]`; the layer's
+            # `ZoneStorage.change` forms m1 - m0 at its own step-start `s0["air.phi"]`. The
+            # two agree to the round-off of `(p_ref + phi) - p_ref` (the carried value is
+            # re-evaluated at every returned state, `step`), so the weights still cancel m0
+            # to that round-off (measured <= 7.3e-12 Pa).
             dm = mass_change(store.V, before[..., 1], before[..., 0], prev[..., 1],
-                             prev[..., 0], store.p_ref)  # m_j - m0
+                             prev[..., 0], store.p_ref)
             offset = offset - weights[j] * dm
         # No coupling gain: the step's own fixed point (`step`) settles the coupling.
         air_drv = {
