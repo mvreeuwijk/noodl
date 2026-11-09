@@ -17,7 +17,7 @@ from noodl._tracking import bulk_values
 from noodl.drives import Drive, check_drive_signature
 from noodl.elements.base import ConstitutiveLaw
 from noodl.layers._functional import FunctionalLaws
-from noodl.layers._mna import MnaSystem
+from noodl.layers._mna import MnaSystem, check_scheme
 from noodl.layers._solve_policy import resolve_classic, resolve_mna
 from noodl.layers._topology import TopologyGuard
 from noodl.nodesources import NodeSource
@@ -122,6 +122,11 @@ class KirchhoffLayer(TopologyGuard):
     Every law must declare `phasor_capable`, node sources are refused (a load is an edge to
     ground), and `power_residual` is the complex power balance.
 
+    `scheme` (default `"trapezoidal"`; `"backward_euler"` the other) is the time-integration
+    scheme of a transient step of a layer with dynamic laws, one of `SCHEMES`
+    (`noodl.elements.base`); a `solve` call may give its own. `"exact"` is a `TransportLayer`
+    scheme and is refused here by name.
+
     `analytic_primal` (default ``False``): a ``differentiable=True`` solve that nothing
     differentiable reaches (grad mode off, or no input requiring grad) runs the
     ``differentiable=False`` branch, whose Newton Jacobian is the laws' and node
@@ -155,7 +160,10 @@ class KirchhoffLayer(TopologyGuard):
         phasor: bool = False,
         analytic_primal: bool = False,
         newton_defaults: Mapping | None = None,
+        scheme: str = "trapezoidal",
     ) -> None:
+        check_scheme(name, scheme)
+        self.scheme = scheme
         self.analytic_primal = bool(analytic_primal)
         self.newton_defaults = dict(newton_defaults or {})
         if linear_solver not in _LINEAR_SOLVERS:
@@ -1048,7 +1056,7 @@ class KirchhoffLayer(TopologyGuard):
         history=None,
         dt=None,
         t=None,
-        integration="trapezoidal",
+        scheme=None,
         mode=None,
         differentiable=True,
         diagnostics: dict | None = None,
@@ -1149,12 +1157,13 @@ class KirchhoffLayer(TopologyGuard):
         potentials and the flows of its implicit-law edges together (`noodl.layers._mna`),
         from zeros or the warm start `phi0` (interior potentials) and `q0` (the flows of
         `implicit_edges`); the returned `q` covers every edge. `history`, `dt`, `t`,
-        `integration` and `mode` set the context its laws are evaluated in (`LawContext`):
+        `scheme` and `mode` set the context its laws are evaluated in (`LawContext`):
         on a phasor layer always `"phasor"` (no `dt` or `history`; the frequency driver
         `"<name>.frequency"` is required, and `phi_boundary`, `sources`, `phi0`, `q0` may be
         real or complex and are taken as complex128); otherwise
         with `dt` given, one implicit step of length `dt` ending at time `t`, with the
-        `integration` rule (`"trapezoidal"` or `"backward_euler"`) from the step-start state
+        `scheme` (`"trapezoidal"` or `"backward_euler"`; `None` is the layer's own, set at
+        construction, `"trapezoidal"` by default) from the step-start state
         `history=(phi, q)` (full-node potentials and every edge's flow, as this method
         returns them; required when a law is dynamic); without `dt`, the steady operating
         point (`mode="dc"`, the default), or with `mode="initial"` the consistent initial
@@ -1162,16 +1171,18 @@ class KirchhoffLayer(TopologyGuard):
         flow to `history` too, so a chain of steps back-propagates through time. There
         `diagnostics["method"]` is likewise the method requested and `"backend"` the one that
         ran; `method="cg"` is refused (the system is not symmetric positive definite). A
-        classic layer, whose laws are static, accepts and ignores `q0`, `t`, `integration`
+        classic layer, whose laws are static, accepts and ignores `q0`, `t`, `scheme`
         and the modes `"dc"` and `"initial"` (both its one steady solution), and refuses
         `mode="phasor"`, `dt` and `history`: it takes no step and solves no phasors.
         """
         self._require_current_topology()
+        if scheme is None:
+            scheme = self.scheme
         for key, value in self.newton_defaults.items():
             newton_kwargs.setdefault(key, value)
         if self.mna:
             return self._solve_mna(
-                phi_boundary, drivers, sources, phi0, q0, history, dt, t, integration, mode,
+                phi_boundary, drivers, sources, phi0, q0, history, dt, t, scheme, mode,
                 differentiable, diagnostics, newton_kwargs,
             )
         self._check_classic_arguments(mode, dt, history)
@@ -1198,7 +1209,7 @@ class KirchhoffLayer(TopologyGuard):
         )
 
     def _solve_mna(
-        self, phi_boundary, drivers, sources, phi0, q0, history, dt, t, integration, mode,
+        self, phi_boundary, drivers, sources, phi0, q0, history, dt, t, scheme, mode,
         differentiable, diagnostics, newton_kwargs,
     ):
         """`solve` of a layer solved by Modified Nodal Analysis (`noodl.layers._mna`)."""
@@ -1208,7 +1219,7 @@ class KirchhoffLayer(TopologyGuard):
         )
         return self._mna.solve(
             phi_boundary, drivers, sources, phi0, q0=q0, history=history, dt=dt, t=t,
-            integration=integration, mode=mode, differentiable=differentiable,
+            scheme=scheme, mode=mode, differentiable=differentiable,
             diagnostics=diagnostics, **newton_kwargs,
         )
 

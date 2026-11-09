@@ -40,7 +40,7 @@ def read_modelica_circuit(path: str | Path, *, substeps: int = 1, omit: Iterable
     pass the same to `model.steady` when solving by hand. A heat-port thermal network is a
     heat layer solved by one linear solve per pass, with no tolerance of its own; stepping
     by hand, give it the circuit's rule on every step
-    (`layer_options={"thermal": {"scheme": "implicit"}}` on a backward Euler step,
+    (`layer_options={"thermal": {"scheme": "backward_euler"}}` on a backward Euler step,
     `"trapezoidal"` otherwise), as `simulate_circuit` does.
     """
     doc = schema.load(path)

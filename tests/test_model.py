@@ -42,7 +42,7 @@ def _build(*, learnable=False, closures=(), reactions=(), substeps=None, **model
     )
     species = TransportLayer(
         net, "species", capacity=torch.tensor([50.0, 80.0], dtype=F64), flow_kind="airpath",
-        boundary=["ambient"], scheme="implicit", quantity="mass_fraction", unit="kg/kg",
+        boundary=["ambient"], scheme="backward_euler", quantity="mass_fraction", unit="kg/kg",
     )
     model = Model(
         net, {"air": air, "species": species}, closures=closures, reactions=reactions,
@@ -67,7 +67,7 @@ def _build_multi():
     )
     gas = TransportLayer(
         net, "gas", capacity=torch.tensor([50.0, 80.0], dtype=F64), flow_kind="airpath",
-        boundary=["ambient"], n_species=2, scheme="implicit",
+        boundary=["ambient"], n_species=2, scheme="backward_euler",
     )
     model = Model(net, {"air": air, "gas": gas})
     drivers = {
@@ -649,11 +649,11 @@ def test_iterate_steps_every_transport_layer_but_tests_only_the_named_ones():
     )
     species = TransportLayer(
         net, "species", capacity=torch.tensor([50.0, 80.0], dtype=F64), flow_kind="airpath",
-        boundary=["ambient"], scheme="implicit", quantity="mass_fraction", unit="kg/kg",
+        boundary=["ambient"], scheme="backward_euler", quantity="mass_fraction", unit="kg/kg",
     )
     heat = TransportLayer(
         net, "heat", capacity=torch.tensor([5.0e4, 8.0e4], dtype=F64), flow_kind="airpath",
-        boundary=["ambient"], scheme="implicit", quantity="temperature", unit="K",
+        boundary=["ambient"], scheme="backward_euler", quantity="temperature", unit="K",
     )
     model = Model(
         net, {"air": air, "species": species, "heat": heat}, closures=[_Feedback(2e3)],
@@ -704,7 +704,7 @@ def _prescribed_flow_network():
     net.add_edge("b", "amb", kind="link")
     layer = TransportLayer(
         net, "conc", capacity=torch.tensor([10.0, 20.0], dtype=torch.float64),
-        flow_kind="link", boundary=["amb"], scheme="implicit",
+        flow_kind="link", boundary=["amb"], scheme="backward_euler",
         quantity="concentration", unit="kg/m3",
     )
     return net, layer
@@ -851,7 +851,7 @@ def _counter_model(closures):
     net.add_edge("A", "B", kind="pipe")
     layer = TransportLayer(
         net, "c", capacity=torch.tensor([2.0], dtype=torch.float64), flow_kind="pipe",
-        boundary=[net.nodes[1]], scheme="implicit",
+        boundary=[net.nodes[1]], scheme="backward_euler",
     )
     return net, layer, Model(net, {"c": layer}, closures=closures)
 
@@ -947,7 +947,7 @@ def test_a_closure_may_declare_the_flow_driver_of_an_ownerless_layer_as_state():
     net.add_edge("A", "B", kind="pipe")
     layer = TransportLayer(
         net, "c", capacity=torch.tensor([2.0], dtype=torch.float64), flow_kind="pipe",
-        boundary=[net.nodes[1]], scheme="implicit",
+        boundary=[net.nodes[1]], scheme="backward_euler",
     )
     # Construction must NOT raise "which is layer 'c''s own state key".
     model = Model(net, {"c": layer}, closures=[_RememberedFlow()])
@@ -1778,7 +1778,7 @@ def test_anderson_mixes_a_conduction_only_layer_with_several_species():
         heat = TransportLayer(net, "heat", flow_kind=(), boundary=["amb"], n_species=2,
                               capacity=torch.tensor([1.0], dtype=F64),
                               conduction_kind="conductor",
-                              conductance=torch.tensor([1.0], dtype=F64), scheme="implicit")
+                              conductance=torch.tensor([1.0], dtype=F64), scheme="backward_euler")
         model = Model(net, {"toy": toy, "heat": heat},
                       closures=[_HeadDependentConductance(src, torch.tensor(1.0, dtype=F64)),
                                 _TwoSpeciesHeat()],
@@ -2012,7 +2012,8 @@ def test_species_columns_that_disagree_with_the_layer_are_refused_at_constructio
     )
     gas = TransportLayer(
         net, "gas", capacity=torch.tensor([50.0, 80.0], dtype=F64), flow_kind="airpath",
-        boundary=["ambient"], n_species=2, species_names=("bod", "sulfide"), scheme="implicit",
+        boundary=["ambient"], n_species=2, species_names=("bod", "sulfide"),
+        scheme="backward_euler",
     )
     good = _closure_with(species_columns={"gas": {"bod": 0, "sulfide": 1}})
     Model(net, {"air": air, "gas": gas}, closures=[good])

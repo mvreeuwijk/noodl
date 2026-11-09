@@ -66,7 +66,7 @@ switch; a reversal within the locator's margin of a step's end is moved to that 
 it of the start to the start, `run._advance_located`).
 
 The closure takes these flows from the state it is given. Under `Model.step` (`simulate`'s
-`"implicit"` scheme) that is the previous coupling pass's `"air.q"`: the transport flows, the
+`"backward_euler"` scheme) that is the previous coupling pass's `"air.q"`: the transport flows, the
 junctions' upwind ends and `"air.forward"` lag one pass behind the airflow and converge with
 the coupling iteration (to its `iterate_tol`), and the initial state carries the airflow at
 the start, so that the first pass has flows to read. `run._Midpoint` gives it the latest

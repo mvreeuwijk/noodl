@@ -2242,7 +2242,7 @@ def _initial_mass_fractions(project: Project) -> Tensor:
 
 
 def project_to_model(project: Project, *, ambient: dict | None = None, species: bool = True,
-                     scheme: str = "implicit"):
+                     scheme: str = "backward_euler"):
     """Air layer + species layer (no thermal layer: a .prj carries no thermal data), the
     initial state and the drivers for the project's ambient conditions (or `ambient`).
 

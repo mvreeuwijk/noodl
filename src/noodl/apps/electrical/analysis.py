@@ -73,16 +73,16 @@ def _times(times) -> list[float]:
 
 
 def transient(model: Model, state: Mapping[str, Tensor], drivers: Mapping[str, Tensor],
-              times: Sequence[float] | Tensor, *, integration: str = "trapezoidal",
+              times: Sequence[float] | Tensor, *, scheme: str = "trapezoidal",
               **solve_kwargs) -> dict:
     """March the circuit over the time grid `times` (s), from `state` at `times[0]` (usually
     `initial_state`), one `Model.step` per interval.
 
-    `integration="trapezoidal"` (the default) uses the trapezoidal rule (second order)
+    `scheme="trapezoidal"` (the default) uses the trapezoidal rule (second order)
     except on the first step and on every step whose interval contains a source breakpoint
     (a step, ramp or pulse edge), which use backward Euler, damping the ringing the
     trapezoidal rule shows after a discontinuity (the SPICE practice);
-    `integration="backward_euler"` uses backward Euler throughout. The grid is fixed: a
+    `scheme="backward_euler"` uses backward Euler throughout. The grid is fixed: a
     breakpoint inside a step is not inserted as a time point, so the step that contains it
     sees the source at the step end. A circuit without capacitors or inductors is solved at
     each step end as a DC operating point. `drivers` is one mapping for the whole run, so a
@@ -90,13 +90,13 @@ def transient(model: Model, state: Mapping[str, Tensor], drivers: Mapping[str, T
     `solve_kwargs`, such as Newton's `atol` and `rtol`, reach every step's layer solve.
 
     Returns `{"time": (T,), "electrical.phi": (T, ..., n), "electrical.q": (T, ..., b),
-    "integration": [rule of each step]}`, the start state as row 0 (rows broadcast to the
+    "scheme": [scheme of each step]}`, the start state as row 0 (rows broadcast to the
     batch shape of the steps).
     """
     layer = _layer(model)
     _time_domain(layer, "transient")
-    if integration not in _RULES:
-        raise ValueError(f"transient: integration={integration!r}; expected one of {_RULES}")
+    if scheme not in _RULES:
+        raise ValueError(f"transient: scheme={scheme!r}; expected one of {_RULES}")
     grid = _times(times)
     sources = [el for el in (layer.law_for(k)[0] for k in layer.kinds)
                if hasattr(el, "breakpoints")]
@@ -110,9 +110,9 @@ def transient(model: Model, state: Mapping[str, Tensor], drivers: Mapping[str, T
         dt = grid[k + 1] - t0
         end = t0 + dt
         jump = any(src.breakpoints(evaluated, end) for src in sources)
-        rule = ("backward_euler" if integration == "backward_euler" or k == 0 or jump
+        rule = ("backward_euler" if scheme == "backward_euler" or k == 0 or jump
                 else "trapezoidal")
-        current = model.step(current, drivers, dt, t=t0, integration=rule,
+        current = model.step(current, drivers, dt, t=t0, scheme=rule,
                              **solve_kwargs)
         evaluated = end
         phis.append(current[PHI])
@@ -122,7 +122,7 @@ def transient(model: Model, state: Mapping[str, Tensor], drivers: Mapping[str, T
         "time": torch.tensor(grid, dtype=F64),
         PHI: torch.stack(torch.broadcast_tensors(*phis)),
         Q: torch.stack(torch.broadcast_tensors(*qs)),
-        "integration": rules,
+        "scheme": rules,
     }
 
 

@@ -55,7 +55,7 @@ def _step(layer, q):
 @pytest.mark.parametrize(
     "family, scheme",
     [(family, scheme) for family in FAMILIES
-     for scheme in ("exact", "implicit", "trapezoidal")],
+     for scheme in ("exact", "backward_euler", "trapezoidal")],
 )
 def test_an_ensemble_batched_in_one_family_matches_the_per_instance_layers(family, scheme):
     base = _base()

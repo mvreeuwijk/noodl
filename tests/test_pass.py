@@ -29,7 +29,7 @@ def _build(**model_kw):
     for name in ("species", "tracer"):
         layers.append(TransportLayer(
             net, name, capacity=torch.tensor([50.0, 80.0], dtype=F64), flow_kind="airpath",
-            boundary=["ambient"], scheme="implicit"))
+            boundary=["ambient"], scheme="backward_euler"))
     model = Model(net, layers, **model_kw)
     drivers = {
         "air.phi_boundary": torch.zeros(1, dtype=F64),

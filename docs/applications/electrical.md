@@ -158,7 +158,7 @@ for k in (100, 200, 300):
     t = float(run["time"][k])
     print(f"t = {t * 1e3:.1f} ms: v = {float(run['electrical.phi'][k, out]):.6f} V, "
           f"exact {1.0 - math.exp(-t / tau):.6f} V")
-print(run["integration"][:3])
+print(run["scheme"][:3])
 ```
 
 ```text
@@ -169,7 +169,7 @@ t = 3.0 ms: v = 0.950212 V, exact 0.950213 V
 ```
 
 The result holds `"time"`, `"electrical.phi"` and `"electrical.q"` with the start state as row
-0, and `"integration"`, the rule each step used. `operating_point`, `initial_state`,
+0, and `"scheme"`, the rule each step used. `operating_point`, `initial_state`,
 `transient` and `ac_sweep` pass any further keyword (Newton's `atol` and `rtol`, `method`, ...)
 to every layer solve.
 
@@ -494,8 +494,8 @@ current 2.179106576 A
 (`state_keys`), so a state holds the heat dissipated at its own time.
 
 **Stepping with the circuit's rule.** A circuit steps by backward Euler after a restart and
-by the trapezoidal rule otherwise (`integration=`). Give the heat layer the same rule on
-every step with `layer_options={"thermal": {"scheme": "implicit"}}` (backward Euler) or
+by the trapezoidal rule otherwise (`scheme=`). Give the heat layer the same rule on
+every step with `layer_options={"thermal": {"scheme": "backward_euler"}}` (backward Euler) or
 `{"scheme": "trapezoidal"}`. On a trapezoidal step the heat layer integrates the heat as the
 circuit's companion forms integrate their currents, `dt/2 (P_start + P_end)`, `P_start`
 being the step-start state's `"thermal.sources"`; that is the same Crank-Nicolson rule, so the
@@ -567,8 +567,8 @@ drivers = {"electrical.phi_boundary": f64([0.0]), "thermal.x_boundary": f64([273
 for hour in range(24):
     first = hour == 0
     state = model.step(state, drivers, dt=3600.0, t=3600.0 * hour,
-                       integration="backward_euler" if first else "trapezoidal",
-                       layer_options={"thermal": {"scheme": "implicit" if first
+                       scheme="backward_euler" if first else "trapezoidal",
+                       layer_options={"thermal": {"scheme": "backward_euler" if first
                                                   else "trapezoidal"}})
 
 v = state["electrical.phi"]
@@ -591,11 +591,11 @@ layer would set an AC load's power, with source amplitudes given as RMS values (
 
 ## Time integration and breakpoints
 
-`transient(..., integration="trapezoidal")` (the default) uses the trapezoidal rule, second
+`transient(..., scheme="trapezoidal")` (the default) uses the trapezoidal rule, second
 order, except on the first step and on every step whose interval contains a source breakpoint
 (a step, ramp or pulse edge, the start of a sine), which use backward Euler. The trapezoidal rule
 rings after a discontinuity (it is A-stable, not L-stable); one backward Euler step damps that.
-This is the practice of SPICE. `integration="backward_euler"` uses backward Euler throughout.
+This is the practice of SPICE. `scheme="backward_euler"` uses backward Euler throughout.
 A pulse-driven RC circuit restarts at every edge:
 
 ```python
@@ -609,7 +609,7 @@ pulsed = Circuit([
 model, state, drivers = build_model(pulsed)
 run = transient(model, initial_state(model, drivers), drivers,
                 [k * 1e-5 for k in range(401)])
-print([k for k, rule in enumerate(run["integration"]) if rule == "backward_euler"])
+print([k for k, rule in enumerate(run["scheme"]) if rule == "backward_euler"])
 ```
 
 ```text

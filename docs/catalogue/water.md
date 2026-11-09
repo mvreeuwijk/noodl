@@ -87,7 +87,7 @@ Calculations and helpers.
 | `three_point_curve` | EPANET's single-point pump-curve fit: ``(h0, r, n)`` for ``h = h0 - r q^n``. | `three_point_curve(q_design, h_design)` |
 | `to_kilopascal` | Metres of head -> kPa, at `rho = 998.2 kg/m3` and `g = 9.80665 m/s2`. | `to_kilopascal(head)` |
 | `twoloop` | The committed hand-made SI fixture (`tests/data/water/twoloop_si.inp`). | `twoloop()` |
-| `water_step` | One step of `dt` (s) of a model built with `tank_mode="storage"`: `Model.step` with `water_steady`'s Newton defaults and pump check, the tank levels stepped implicitly (`TankStorage`, `integration` `"backward_euler"` or `"trapezoidal"`; trapezoidal needs a step-start state whose tank flows are solved, not the build's zeros). The level controls act on the step-start levels, as EPANET's do. | `water_step(model, state, drivers, dt, *, integration='backward_euler', **solve_kwargs)` |
+| `water_step` | One step of `dt` (s) of a model built with `tank_mode="storage"`: `Model.step` with `water_steady`'s Newton defaults and pump check, the tank levels stepped implicitly (`TankStorage`, `scheme` `"backward_euler"` or `"trapezoidal"`; trapezoidal needs a step-start state whose tank flows are solved, not the build's zeros). The level controls act on the step-start levels, as EPANET's do. | `water_step(model, state, drivers, dt, *, scheme='backward_euler', **solve_kwargs)` |
 | `water_steady` | The quasi-steady state: one `Model.steady` with tight Newton tolerances. | `water_steady(model, state, drivers, **solve_kwargs)` |
 
 ## Constants and tables

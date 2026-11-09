@@ -198,7 +198,7 @@ def test_sine_source_transient_steady_state_matches_its_phasor():
     samples = []
     for k in range(1, 3 * n + 1):
         phi, q = layer.solve(GROUND, history=(phi, q), dt=dt, t=k * dt,
-                             integration="trapezoidal", differentiable=False)
+                             scheme="trapezoidal", differentiable=False)
         if k > 2 * n:
             samples.append((k * dt, phi[b].item()))
     w = 2 * math.pi * f
@@ -266,14 +266,14 @@ _CONTEXTS = [
     LawContext(mode="dc"),
     LawContext(mode="initial"),
     LawContext(mode="phasor", omega=T([314.0, 1000.0])),
-    LawContext(mode="transient", dt=0.1, integration="backward_euler",
+    LawContext(mode="transient", dt=0.1, scheme="backward_euler",
                dp_prev=T([0.3, -0.2]), q_prev=T([0.05, 0.4])),
-    LawContext(mode="transient", dt=0.1, integration="trapezoidal",
+    LawContext(mode="transient", dt=0.1, scheme="trapezoidal",
                dp_prev=T([0.3, -0.2]), q_prev=T([0.05, 0.4])),
 ]
 
 
-@pytest.mark.parametrize("ctx", _CONTEXTS, ids=lambda c: f"{c.mode}-{c.integration}")
+@pytest.mark.parametrize("ctx", _CONTEXTS, ids=lambda c: f"{c.mode}-{c.scheme}")
 def test_capacitance_and_inductance_are_the_companion_forms(ctx):
     dp, q = T([1.5, -0.7]), T([0.2, 0.9])
     if ctx.mode == "phasor":
@@ -296,7 +296,7 @@ def test_rc_backward_euler_step_is_exact():
     v = 0.0
     for _ in range(3):
         phi, q = layer.solve(GROUND, history=(phi, q), dt=0.1, t=0.0,
-                             integration="backward_euler", differentiable=False)
+                             scheme="backward_euler", differentiable=False)
         v = (v + 0.1) / 1.1
         _close(_at(net, phi, "b"), v, tol=1e-13)
 
@@ -436,10 +436,10 @@ def _two_inductor_layer(laws, kinds):
     return _layer(edges, [PrescribedVoltage(T([1.0, 2.0])), Resistance(T([1.0, 2.0])), *laws])
 
 
-def _march(layer, steps, integration, dt=0.05):
+def _march(layer, steps, scheme, dt=0.05):
     phi, q = layer.solve(GROUND, mode="initial", differentiable=False)
     for _ in range(steps):
-        phi, q = layer.solve(GROUND, history=(phi, q), dt=dt, t=0.0, integration=integration,
+        phi, q = layer.solve(GROUND, history=(phi, q), dt=dt, t=0.0, scheme=scheme,
                              differentiable=False)
     return phi, q
 
@@ -450,9 +450,9 @@ def test_mutual_inductance_reduces_to_two_inductors_when_M_zero():
         ["transformer", "transformer"])
     _, single = _two_inductor_layer([Inductance(T([0.2, 0.5]), i0=T([0.1, -0.3]))],
                                     ["inductor", "inductor"])
-    for integration in ("trapezoidal", "backward_euler"):
-        phi_c, q_c = _march(coupled, 4, integration)
-        phi_s, q_s = _march(single, 4, integration)
+    for scheme in ("trapezoidal", "backward_euler"):
+        phi_c, q_c = _march(coupled, 4, scheme)
+        phi_s, q_s = _march(single, 4, scheme)
         _close(phi_c, phi_s, tol=1e-13)
         _close(q_c, q_s, tol=1e-13)
 
@@ -467,7 +467,7 @@ def test_mutual_inductance_companion_matches_hand_step():
     phi, q = layer.solve(GROUND, mode="initial", differentiable=False)
     _close(q[2:], [0.1, 0.2])
     phi, q = layer.solve(GROUND, history=(phi, q), dt=dt, t=0.0,
-                         integration="backward_euler", differentiable=False)
+                         scheme="backward_euler", differentiable=False)
     Lmat = torch.tensor([[L1, M], [M, L2]])
     di = torch.linalg.solve(Lmat, T([1.0, -0.5])) * dt
     _close(q[2:], T([0.1, 0.2]) + di, tol=1e-12)

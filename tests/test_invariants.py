@@ -40,7 +40,8 @@ def _net() -> Network:
     return net
 
 
-def _model(*, n_species=1, closures=(), reactions=(), learnable=False, scheme="implicit", **kw):
+def _model(*, n_species=1, closures=(), reactions=(), learnable=False,
+           scheme="backward_euler", **kw):
     net = _net()
     el = PowerLaw(torch.tensor([0.01, 0.02, 0.01], dtype=F64), 0.65, learnable=learnable)
     air = KirchhoffLayer(net, "air", [el], drives=[ConstantDrive("airpath", "wind")],
@@ -165,7 +166,7 @@ def test_kirchhoff_batch_equals_stack_with_optional_unbatched_warm_start(b, warm
 def test_transport_layer_batched_flows_equal_stack(b):
     net = _net()
     layer = TransportLayer(net, "gas", capacity=torch.tensor([50.0, 80.0], dtype=F64),
-                           flow_kind="airpath", boundary=["ambient"], scheme="implicit")
+                           flow_kind="airpath", boundary=["ambient"], scheme="backward_euler")
     q = 0.01 + 0.02 * torch.rand(b, 3, dtype=F64)
     x = torch.rand(b, 2, dtype=F64)
     xb = torch.rand(b, 1, dtype=F64)
@@ -224,7 +225,7 @@ def test_passive_species_in_a_decaying_mix_stays_unreacted():
 
 @pytest.mark.parametrize("n_species", [1, 3])
 @pytest.mark.parametrize("b", [None, 3])
-@pytest.mark.parametrize("scheme", ["implicit", "trapezoidal"])
+@pytest.mark.parametrize("scheme", ["backward_euler", "trapezoidal"])
 def test_uniform_conservative_tracer_stays_uniform(n_species, b, scheme):
     """x == c in the interior, c at the boundary, no sources: x stays c, whatever the flow,
     batch shape or species count."""

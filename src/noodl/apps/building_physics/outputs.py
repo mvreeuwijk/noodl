@@ -310,7 +310,7 @@ def local_mean_age(history: Mapping[str, Tensor], model, *, layer: str = "specie
     # solve takes `mass`, zero there).
     age = TransportLayer(model.net, f"{lay.name} age", capacity=lay.capacity,
                          flow_kind=lay.flow_kinds, boundary=list(lay.boundary),
-                         storage_free=free, scheme="implicit", quantity="age", unit="s",
+                         storage_free=free, scheme="backward_euler", quantity="age", unit="s",
                          source_unit="kg/s", capacity_unit="kg", flow_unit="kg/s")
     batch = torch.broadcast_shapes(f.shape[:-1], mass.shape[:-1])
     source = torch.zeros(batch + (model.net.n,), dtype=F64, device=f.device).index_copy(

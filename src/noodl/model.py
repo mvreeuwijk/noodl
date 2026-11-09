@@ -39,7 +39,7 @@ the closure integrates once per pass instead of once per step until the key is s
 `on_failure`, `method`, Newton kwargs). The keywords the Model sets itself (`phi0`, `q0`,
 `history`, `dt`, `t`) are refused there by name. `layer_options` gives one Kirchhoff layer
 its own keywords on top of them (`{"airflow": {"atol": 1e-11}}`), and one transport layer the
-scheme of this step (`{"thermal": {"scheme": "implicit"}}`: backward Euler on the step after
+scheme of this step (`{"thermal": {"scheme": "backward_euler"}}`: backward Euler on the step after
 a restart of a circuit it is coupled to). Transport steps always raise on failure.
 
 A transport layer stepped by the trapezoidal scheme whose sources a closure carries as state
@@ -415,7 +415,7 @@ class Model:
         transfer nothing reads.
 
         `diag[name]["linear"]`, when this transport layer's `scheme` runs a
-        linear solve (`"implicit"`, `"trapezoidal"`; not `"exact"`), is the LAST substep's
+        linear solve (`"backward_euler"`, `"trapezoidal"`; not `"exact"`), is the LAST substep's
         `{"backend", "iterations", "residual"}` from `TransportLayer.step`'s own
         `diagnostics=` out-parameter -- see `TransportLayer._resolve_solver` and
         `layers.transport._LinearSolve` for what each entry means and how `linear_solver`
@@ -556,7 +556,7 @@ class Model:
         `layer_options` maps a Kirchhoff layer's name to keywords for that layer's solve
         only, applied over `**solve_kwargs` (and so over the layer's own `newton_defaults`):
         `{"airflow": {"atol": 1e-11}}`; and a transport layer's name to the scheme of this
-        step, `{"thermal": {"scheme": "implicit"}}` (`TransportLayer.step`'s `scheme`; a
+        step, `{"thermal": {"scheme": "backward_euler"}}` (`TransportLayer.step`'s `scheme`; a
         steady solve has no scheme and ignores it). A name that is not a layer of this
         model, a keyword the Model sets itself, or a transport-layer keyword other than
         `scheme` is refused by name.

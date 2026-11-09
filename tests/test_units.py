@@ -37,7 +37,7 @@ def _model(closures=(), *, source_unit="kg/s"):
         quantity="pressure", unit="Pa")
     species = TransportLayer(
         net, "species", capacity=torch.tensor([50.0, 80.0], dtype=F64), flow_kind="airpath",
-        boundary=["ambient"], scheme="implicit", quantity="mass_fraction", unit="kg/kg",
+        boundary=["ambient"], scheme="backward_euler", quantity="mass_fraction", unit="kg/kg",
         source_unit=source_unit, capacity_unit="kg", flow_unit="kg/s")
     return Model(net, {"air": air, "species": species}, closures=closures)
 

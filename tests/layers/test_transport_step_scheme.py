@@ -13,7 +13,7 @@ from noodl.layers.transport import TransportLayer, UndefinedSteadyState
 from noodl.topology import Network
 
 F64 = torch.float64
-SCHEMES = ["exact", "implicit", "trapezoidal"]
+SCHEMES = ["exact", "backward_euler", "trapezoidal"]
 C, G, TA, DT = 4.0, 3.0, 280.0, 0.7
 EMPTY = torch.zeros(0, dtype=F64)
 
@@ -81,7 +81,7 @@ def test_backward_euler_and_trapezoidal_by_hand():
     be = (C * x0 + DT * (G * TA + s)) / (C + DT * G)
     cn = ((C - DT * G / 2) * x0 + DT * (G * TA + s)) / (C + DT * G / 2)
     src = _source(layer, "m", s)
-    for scheme, expected in (("implicit", be), ("trapezoidal", cn)):
+    for scheme, expected in (("backward_euler", be), ("trapezoidal", cn)):
         out = layer.step(_t([x0]), EMPTY, src, _t([TA]), DT, scheme=scheme)
         assert float(out[0]) == pytest.approx(expected, rel=1e-14)
 
@@ -100,11 +100,12 @@ def test_a_storage_free_node_with_throughflow_refuses_any_scheme_but_implicit():
     net.add_edge("p", "z", kind="air")
     net.add_edge("z", "in", kind="air")
     layer = TransportLayer(net, "T", flow_kind="air", boundary=["in"], capacity=_t([0.0, 1.0]),
-                           storage_free=["p"], scheme="implicit")
+                           storage_free=["p"], scheme="backward_euler")
     q, x, src = _t([1.0, 1.0, 1.0]), _t([0.0, 0.0]), torch.zeros(3, dtype=F64)
-    layer.step(x, q, src, _t([1.0]), DT, scheme="implicit")
+    layer.step(x, q, src, _t([1.0]), DT, scheme="backward_euler")
     for scheme in ("exact", "trapezoidal"):
-        with pytest.raises(ValueError, match="keep an algebraic row.*needs scheme='implicit'"):
+        with pytest.raises(ValueError,
+                           match="keep an algebraic row.*needs scheme='backward_euler'"):
             layer.step(x, q, src, _t([1.0]), DT, scheme=scheme)
 
 
@@ -122,7 +123,7 @@ def test_trapezoidal_integrates_the_sources_at_both_ends():
     assert float(out[0]) == pytest.approx(cn, rel=1e-14)
 
 
-@pytest.mark.parametrize("scheme", ["exact", "implicit"])
+@pytest.mark.parametrize("scheme", ["exact", "backward_euler"])
 def test_sources_prev_is_refused_by_every_other_scheme(scheme):
     layer = _lump(scheme)
     src = _source(layer, "m", 1.0)
@@ -195,7 +196,16 @@ def test_steady_holding_the_stored_nodes_refuses_a_plenum():
     net.add_edge("p", "z", kind="air")
     net.add_edge("z", "in", kind="air")
     layer = TransportLayer(net, "T", flow_kind="air", boundary=["in"], capacity=_t([0.0, 1.0]),
-                           storage_free=["p"], scheme="implicit")
+                           storage_free=["p"], scheme="backward_euler")
     with pytest.raises(NotImplementedError, match="storage-free nodes with throughflow"):
         layer.steady(_t([1.0, 1.0, 1.0]), torch.zeros(3, dtype=F64), _t([1.0]),
                      hold=_t([0.0, 0.0]))
+
+
+def test_the_old_implicit_name_is_refused_and_the_message_lists_the_schemes():
+    layer = _lump()
+    with pytest.raises(ValueError, match=r"scheme 'implicit'.*'exact', 'backward_euler'"):
+        layer.step(_t([300.0]), EMPTY, _source(layer, "m", 0.0), _t([TA]), DT,
+                   scheme="implicit")
+    with pytest.raises(ValueError, match=r"scheme 'implicit'.*'exact', 'backward_euler'"):
+        _lump("implicit")

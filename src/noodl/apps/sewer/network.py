@@ -928,7 +928,7 @@ def build_model(
     leak_cd: float = 0.6,
     fans: tuple = (),
     coupling: str = "pingpong",
-    scheme: str = "implicit",
+    scheme: str = "backward_euler",
     dt_storage: float | None = None,
     iterate_tol: float | None = None,
     iterate_max: int | None = None,

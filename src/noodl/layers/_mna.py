@@ -31,7 +31,7 @@ from torch.func import functional_call
 
 from noodl._broadcast import broadcast_shapes
 from noodl._tracking import bulk_values, same_tracking
-from noodl.elements.base import INTEGRATIONS, LawContext
+from noodl.elements.base import SCHEMES, LawContext
 from noodl.layers._device import complex_of
 from noodl.layers._solve_policy import require_diagnostics
 from noodl.operators.mna import MnaOperator
@@ -40,6 +40,26 @@ from noodl.solvers.newton import newton, newton_tolerances
 from noodl.solvers.select import scipy_importable
 
 Tensor = torch.Tensor
+
+
+def check_scheme(layer_name: str, scheme) -> None:
+    """Refuse a time-integration scheme a `KirchhoffLayer` cannot take, by name.
+
+    A circuit or network layer integrates with `"backward_euler"` or `"trapezoidal"`;
+    `"exact"` (the exponential of a linear transport step) belongs to a `TransportLayer`,
+    and anything else is not a scheme name. The message lists `SCHEMES`.
+    """
+    if scheme == "exact":
+        raise ValueError(
+            f"KirchhoffLayer {layer_name!r}: scheme='exact' is a TransportLayer scheme; a "
+            f"KirchhoffLayer takes 'backward_euler' or 'trapezoidal' (schemes: {SCHEMES})"
+        )
+    if scheme not in SCHEMES:
+        raise ValueError(
+            f"KirchhoffLayer {layer_name!r}: scheme={scheme!r}; expected one of {SCHEMES} "
+            f"('exact' is for a TransportLayer only)"
+        )
+
 
 #: The largest system whose failed solve is diagnosed by a dense rank test; above it the
 #: original solver error is re-raised unchanged (a dense SVD of a big system costs more
@@ -296,7 +316,7 @@ class MnaSystem:
             )
         return LawContext(mode="phasor", t=t, omega=self._omega(drivers))
 
-    def _context(self, mode, dt, t, integration, history, drivers) -> LawContext:
+    def _context(self, mode, dt, t, scheme, history, drivers) -> LawContext:
         """The `LawContext` the laws are evaluated in.
 
         A phasor layer is always in `"phasor"` mode (see `_phasor_context`). Otherwise:
@@ -334,12 +354,8 @@ class MnaSystem:
             return LawContext(mode=mode, t=t)
         if not bool((torch.as_tensor(dt) > 0).all()):
             raise ValueError(f"KirchhoffLayer {name!r}: dt must be positive, got {dt!r}")
-        if integration not in INTEGRATIONS:
-            raise ValueError(
-                f"KirchhoffLayer {name!r}: integration={integration!r}; expected one of "
-                f"{INTEGRATIONS}"
-            )
-        ctx = LawContext(mode="transient", dt=dt, t=t, integration=integration)
+        check_scheme(name, scheme)
+        ctx = LawContext(mode="transient", dt=dt, t=t, scheme=scheme)
         if history is None:
             if self.layer.dynamic:
                 raise ValueError(
@@ -584,7 +600,7 @@ class MnaSystem:
             f"only through flow-prescribed edges{initial}"
         )
 
-    def solve(self, phi_boundary, drivers, sources, phi0, *, q0, history, dt, t, integration,
+    def solve(self, phi_boundary, drivers, sources, phi0, *, q0, history, dt, t, scheme,
               mode, differentiable, diagnostics, **newton_kwargs):
         layer = self.layer
         drivers = drivers or {}
@@ -596,7 +612,7 @@ class MnaSystem:
                 for v in (phi_boundary, sources, phi0, q0))
             self._check_frequency(drivers, [
                 v.shape[:-1] for v in (phi_boundary, sources, phi0, q0) if v is not None])
-        ctx = self._context(mode, dt, t, integration, history, drivers)
+        ctx = self._context(mode, dt, t, scheme, history, drivers)
         if newton_kwargs.get("line_search") == "convex":
             raise ValueError(
                 f"KirchhoffLayer {layer.name!r}: line_search='convex' needs a residual "

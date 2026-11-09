@@ -47,7 +47,7 @@ class Cap(ImplicitLaw):
             return dp - self.v0
         if ctx.mode == "phasor":
             return q - 1j * ctx.omega * self.C * dp
-        if ctx.integration == "backward_euler":
+        if ctx.scheme == "backward_euler":
             return q - self.C * (dp - ctx.dp_prev) / ctx.dt
         return q + ctx.q_prev - 2.0 * self.C / ctx.dt * (dp - ctx.dp_prev)
 
@@ -70,6 +70,6 @@ class Ind(ImplicitLaw):
             return q - self.i0
         if ctx.mode == "phasor":
             return dp - 1j * ctx.omega * self.L * q
-        if ctx.integration == "backward_euler":
+        if ctx.scheme == "backward_euler":
             return dp - self.L * (q - ctx.q_prev) / ctx.dt
         return dp + ctx.dp_prev - 2.0 * self.L / ctx.dt * (q - ctx.q_prev)

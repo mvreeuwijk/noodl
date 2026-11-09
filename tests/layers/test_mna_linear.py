@@ -44,7 +44,7 @@ def test_an_rc_step_converges_in_one_newton_iteration():
     layer = _layer(Capacitance(0.5))
     phi, q = layer.solve(GROUND, mode="initial", differentiable=False)
     d = {}
-    layer.solve(GROUND, history=(phi, q), dt=0.1, t=0.0, integration="backward_euler",
+    layer.solve(GROUND, history=(phi, q), dt=0.1, t=0.0, scheme="backward_euler",
                 differentiable=False, diagnostics=d)
     assert d["newton_iterations"] == 1
 

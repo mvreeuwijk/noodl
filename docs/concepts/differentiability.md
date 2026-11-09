@@ -127,7 +127,7 @@ that would fail if the claim stopped holding.
   residual (its own class docstring calls out `solvers/implicit.py`'s warning "almost verbatim,
   because it is the identical trap").
 - **A discrete-step derivative for every integrator, including the exponential action with a
-  state-independent term count.** `implicit`, `trapezoidal` and `exact` (matrix-exponential)
+  state-independent term count.** `backward_euler`, `trapezoidal` and `exact` (matrix-exponential)
   schemes are all differentiable, and the exact scheme's tangent at equilibrium matches the
   analytic matrix-exponential derivative even from $x_0 = 0$ or $x_0 \to 0$, because the
   Taylor schedule (substep count $s$, term count $m$) is computed from $\lVert dt\, M\rVert_1$
@@ -141,7 +141,7 @@ that would fail if the claim stopped holding.
   and
   tests/layers/test_expm_schedule.py::test_shifted_action_gradients_match_the_dense_reference_near_a_zero_operator).
 - **Every transport coefficient is differentiable under every scheme.** Carrier, transmission,
-  kinetics, removal and conductance all reach the backward pass under `implicit`, `trapezoidal`
+  kinetics, removal and conductance all reach the backward pass under `backward_euler`, `trapezoidal`
   and `exact` alike, checked by `gradcheck` against each coefficient family, both in a single
   step and at steady state
   (pinned by tests/layers/test_transport_coefficients.py::test_carrier_gradient,

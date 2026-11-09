@@ -26,7 +26,7 @@ def _two_zone(scheme, *, transmission=None):
                           boundary=["amb", "out"], scheme=scheme, **kw)
 
 
-@pytest.mark.parametrize("scheme", ["implicit", "trapezoidal", "exact"])
+@pytest.mark.parametrize("scheme", ["backward_euler", "trapezoidal", "exact"])
 @pytest.mark.parametrize("q", [[1.0, 0.7, 0.4, 0.3, 0.6], [-1.0, -0.7, 0.4, 0.3, -0.6]])
 def test_amount_balance_closes_with_the_boundary_transfer(scheme, q):
     layer = _two_zone(scheme)
@@ -46,7 +46,7 @@ def test_amount_balance_closes_with_the_boundary_transfer(scheme, q):
     assert (gained - sourced + out.boundary_transfer.sum()).abs().item() < tol
 
 
-@pytest.mark.parametrize("scheme", ["implicit", "trapezoidal"])
+@pytest.mark.parametrize("scheme", ["backward_euler", "trapezoidal"])
 def test_balance_closes_across_a_changing_capacity(scheme):
     layer = _two_zone(scheme)
     x0, xb = _t([1.5, 0.25]), _t([3.0, 0.5])
@@ -59,7 +59,7 @@ def test_balance_closes_across_a_changing_capacity(scheme):
 
 
 def test_batched_flows_give_per_instance_transfers():
-    layer = _two_zone("implicit")
+    layer = _two_zone("backward_euler")
     q = torch.stack([_t([1.0, 0.7, 0.4, 0.3, 0.6]), _t([0.2, 0.1, 0.9, 0.0, 0.05])])
     x0, xb, sources = _t([1.5, 0.25]), _t([3.0, 0.5]), torch.zeros(4, dtype=F64)
     out = layer.step_with_transfer(x0, q, sources, xb, 0.8)
@@ -72,7 +72,7 @@ def test_batched_flows_give_per_instance_transfers():
 
 
 def test_stacked_single_species_layout_is_preserved():
-    layer = _two_zone("implicit")
+    layer = _two_zone("backward_euler")
     out = layer.step_with_transfer(_t([[1.5], [0.25]]), _t([1.0, 0.7, 0.4, 0.3, 0.6]),
                                    torch.zeros(4, 1, dtype=F64), _t([[3.0], [0.5]]), 0.8)
     assert out.x.shape == (2, 1) and out.boundary_transfer.shape == (2, 1)

@@ -783,7 +783,7 @@ The tables are rebuilt only when one of their drivers changes (in value, or as a
 tensor), so under constant meteorology a run builds them once. A wind direction that
 changes between steps turns every puff's further path.
 
-`build_model(..., puffs=...)` needs `background="per_street"`, `scheme="implicit"`, one
+`build_model(..., puffs=...)` needs `background="per_street"`, `scheme="backward_euler"`, one
 species and no chemistry. The closure also refuses, by name, a model coupled other than
 ping-pong, a sub-stepped street layer and a removal on it: a puff's mass is what one
 backward-Euler step without sinks moved.

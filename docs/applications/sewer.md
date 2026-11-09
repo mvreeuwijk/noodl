@@ -134,7 +134,7 @@ model, state, drivers = build_model(
     species=("bod", "sulfide"),
     f_air=0.02, f_i=7.49e-4, c_s=1.0,
     leak_area=8e-4, leak_cd=0.6, fans=(),
-    coupling="pingpong", scheme="implicit", dt_storage=None,
+    coupling="pingpong", scheme="backward_euler", dt_storage=None,
 )
 ```
 
@@ -767,7 +767,7 @@ stays 100 mg/L and through an evaporating one rises to 113 and 132). The conduit
 (`ConduitTerms.seep_loss_rate`, after the volume cap) joins a negative lateral
 inflow in the withdrawal of a junction (`DynamicWaveHydraulics._quality_volume`), which is an
 outflow of the transport step itself, the removal rate `"water_quality.removal"` (1/s: the
-withdrawal over the end-of-step volume for the implicit scheme, over the mean volume for the
+withdrawal over the end-of-step volume for the backward Euler scheme, over the mean volume for the
 trapezoidal one), so it leaves at the local concentration; a uniform concentration stays uniform
 while the water and the mass fall. Evaporation only lowers the transport volume, which raises
 the concentration. Quality needs circular conduits, which are closed and so do not evaporate: the
@@ -1373,7 +1373,7 @@ Each species `s` enters with the lateral inflow at the concentration of the driv
 `"<s>_in"` (kg/m³, one per node); only a positive inflow loads. A negative lateral inflow (a
 withdrawal) takes water and mass out at the junction's own concentration, whatever `"<s>_in"`
 is, so a uniform tracer stays uniform. It is an outflow of the transport step itself (the
-removal rate `"water_quality.removal"`, $w / V_{	ext{end}}$ for the implicit scheme), so the
+removal rate `"water_quality.removal"`, $w / V_{	ext{end}}$ for the backward Euler scheme), so the
 water that enters during the step and is withdrawn again carries its mass out too, even
 when one step withdraws several times what the junction held at its start. `"bod"` decays and `"sulfide"` is generated
 (Pomeroy–Parkhurst, see [Quality](#quality)); a species of any other name is a conservative

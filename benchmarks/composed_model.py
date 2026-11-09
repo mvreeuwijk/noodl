@@ -220,7 +220,7 @@ def build_composed(
         flow_kind="airpath",
         boundary=boundary,
         n_species=1,
-        scheme="implicit",
+        scheme="backward_euler",
     )
 
     thermal_layer: TransportLayer | None = None
@@ -236,7 +236,7 @@ def build_composed(
             flow_kind="airpath",
             boundary=boundary,
             carrier=1005.0,
-            scheme="implicit",
+            scheme="backward_euler",
             quantity="temperature",
             unit="K",
         )

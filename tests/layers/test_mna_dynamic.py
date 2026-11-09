@@ -48,9 +48,9 @@ def _rc(V=1.0, R=1.0, C=1.0):
     return net, layer
 
 
-def _march(layer, phi, q, dt, steps, integration):
+def _march(layer, phi, q, dt, steps, scheme):
     for _ in range(steps):
-        phi, q = layer.solve(GROUND, history=(phi, q), dt=dt, integration=integration,
+        phi, q = layer.solve(GROUND, history=(phi, q), dt=dt, scheme=scheme,
                              differentiable=False)
     return phi, q
 
@@ -168,8 +168,8 @@ def test_unknown_mode_step_and_integration_are_refused():
         layer.solve(GROUND, mode="transient", dt=0.1, history=(phi, q))
     with pytest.raises(ValueError, match="dt must be positive"):
         layer.solve(GROUND, dt=0.0, history=(phi, q))
-    with pytest.raises(ValueError, match="integration='euler'"):
-        layer.solve(GROUND, dt=0.1, history=(phi, q), integration="euler")
+    with pytest.raises(ValueError, match="scheme='euler'"):
+        layer.solve(GROUND, dt=0.1, history=(phi, q), scheme="euler")
     with pytest.raises(ValueError, match="history=.*every edge's flow"):
         layer.solve(GROUND, dt=0.1, history=(phi, q[:2]))
 
@@ -392,7 +392,7 @@ def test_spring_mass_damper_matches_the_worked_example_displacement_series():
     phi, q = layer.solve(GROUND, mode="initial", differentiable=False)
     displacement = [phi[n2].item()]     # p2(t0) / C = 1: the golden series' first entry
     for _ in range(50):
-        phi, q = layer.solve(GROUND, history=(phi, q), dt=dt, integration="backward_euler",
+        phi, q = layer.solve(GROUND, history=(phi, q), dt=dt, scheme="backward_euler",
                              differentiable=False)
         displacement.append(phi[n2].item())     # edge 2 is 2 -> 0 with phi[0] = 0
     want = GOLD["spring_mass_damper_displacement"]
@@ -451,3 +451,39 @@ def test_singular_dc_message_does_not_mention_the_initial_point():
     with pytest.raises(RuntimeError, match="singular") as info:
         _voltage_loop().solve(GROUND, differentiable=False)
     assert "v0" not in str(info.value)
+
+
+# ------------------------------------------------------- one scheme vocabulary
+def _with_scheme(scheme):
+    net, layer = _rc()
+    return KirchhoffLayer(
+        net, "e", [Source(torch.tensor([1.0])), Conductance(torch.tensor([1.0]), kind="r"),
+                   Cap(torch.tensor([1.0]))], boundary=["gnd"], scheme=scheme)
+
+
+def test_a_kirchhoff_layer_refuses_the_old_and_the_exact_scheme_names():
+    _, layer = _rc()
+    phi, q = layer.solve(GROUND, mode="initial", differentiable=False)
+    with pytest.raises(ValueError, match=r"scheme='implicit'.*'exact', 'backward_euler'"):
+        layer.solve(GROUND, dt=0.1, history=(phi, q), scheme="implicit")
+    with pytest.raises(ValueError, match=r"scheme='exact' is a TransportLayer scheme"):
+        layer.solve(GROUND, dt=0.1, history=(phi, q), scheme="exact")
+    with pytest.raises(ValueError, match=r"scheme='implicit'.*'exact', 'backward_euler'"):
+        _with_scheme("implicit")
+    with pytest.raises(ValueError, match=r"scheme='exact' is a TransportLayer scheme"):
+        _with_scheme("exact")
+
+
+def test_the_layer_scheme_is_the_default_of_a_step_and_trapezoidal_by_default():
+    _, plain = _rc()
+    assert plain.scheme == "trapezoidal"
+    own = _with_scheme("backward_euler")
+    phi, q = own.solve(GROUND, mode="initial", differentiable=False)
+    got = own.solve(GROUND, history=(phi, q), dt=0.3, differentiable=False)
+    want = own.solve(GROUND, history=(phi, q), dt=0.3, scheme="backward_euler",
+                     differentiable=False)
+    torch.testing.assert_close(got[0], want[0], rtol=0, atol=0)
+    torch.testing.assert_close(got[1], want[1], rtol=0, atol=0)
+    other = own.solve(GROUND, history=(phi, q), dt=0.3, scheme="trapezoidal",
+                      differentiable=False)
+    assert not torch.equal(got[0], other[0])

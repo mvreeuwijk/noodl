@@ -6,7 +6,7 @@ plus the signals' event times) and returns, at `times`, the time histories MBL's
 CSV holds: every air-layer edge flow, every node's absolute pressure, temperature, water mass
 fraction and trace-substance mass fractions. Time-varying drivers are taken at the step's END
 time, except sources, which are the MEAN of their value over the step (`assemble.py`,
-"Sources"). Two schemes: `"implicit"` (`Model.step`, flows at the step's end, first order)
+"Sources"). Two schemes: `"backward_euler"` (`Model.step`, flows at the step's end, first order)
 and `"midpoint"` (`_Midpoint`, symmetric, second order; `extrapolate` combines two of its
 runs into a fourth-order one). A model without zones (no transport layer) is algebraic in its
 boundary values and is solved with `model.steady` at every time asked for instead. Row 0 is
@@ -492,7 +492,7 @@ def _solve_air(model: Model, state: State, drivers: Drivers, **solve_kwargs) -> 
 
 
 def simulate(model: Model, state: State, drivers: Drivers, times, *,
-             scheme: str = "implicit", **step_kwargs) -> dict[str, Tensor]:
+             scheme: str = "backward_euler", **step_kwargs) -> dict[str, Tensor]:
     """Time histories at `times` (increasing times of the driver grid `"series:time"`).
 
     Returns `"time"` `(N,)`, `"air.q"` `(N, b)` in the air layer's edge order (see
@@ -526,17 +526,19 @@ def simulate(model: Model, state: State, drivers: Drivers, times, *,
     floor at OneOpenDoor's reversals (2131 s), 8.3e-6 with the switches located (measured,
     extrapolated from 1 and 2 substeps).
 
-    `scheme`: `"implicit"` (the default) is `Model.step` with `coupling="iterate"`: the
+    `scheme`: `"backward_euler"` (the default) is `Model.step` with `coupling="iterate"`: the
     transport layers advance with the flows held at their END-of-step values, first order
     in the step. `"midpoint"` (`_Midpoint`) advances each exact transport layer over two
     halves, the first with the start-of-step flows, capacity and state-dependent sources, the
     second with the end-of-step ones, the boundary values through both ends (the cubic
     Hermite with their rates where they vary, else the straight line): symmetric and second
     order in the step, so two runs at `r` and `2 r` substeps combine by `extrapolate` to
-    fourth order. It is forward-only (no gradient) and for unbatched models.
+    fourth order. It is forward-only (no gradient) and for unbatched models. `"midpoint"` is
+    an application scheme (variable-step BDF2 storage and a symmetric transport split), not
+    one of the layer schemes `SCHEMES` (`noodl.elements.base`), which `"backward_euler"` is.
     """
-    if scheme not in ("implicit", "midpoint"):
-        raise ValueError(f"simulate: unknown scheme {scheme!r}; 'implicit' or 'midpoint'")
+    if scheme not in ("backward_euler", "midpoint"):
+        raise ValueError(f"simulate: unknown scheme {scheme!r}; 'backward_euler' or 'midpoint'")
     atol = AIR_ATOL if _storage(model) is None else STORAGE_AIR_ATOL
     step_kwargs = {"atol": atol, "rtol": AIR_RTOL, **step_kwargs}
     times = torch.as_tensor(times, dtype=F64)

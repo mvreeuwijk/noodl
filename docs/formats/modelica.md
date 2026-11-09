@@ -596,6 +596,6 @@ of its own). The layer's default, `1.5e-8`, leaves MBL's `ACACTransformer`
 example up to 29 times the comparison bound from OpenModelica. Pass the same tolerances to
 `model.steady` when solving such a model by hand. The steps of a dynamic model use the layer's
 own tolerances; the heat layer of a model with heat ports takes the circuit's rule on every
-step (`layer_options={"thermal": {"scheme": "implicit"}}` after a restart, `"trapezoidal"`
+step (`layer_options={"thermal": {"scheme": "backward_euler"}}` after a restart, `"trapezoidal"`
 otherwise), which `simulate_circuit` gives it. The comparison and the measured agreement are on [the verification
 page](../verification.md#modelica-electrical-circuits-model-by-model).

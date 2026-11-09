@@ -11,7 +11,7 @@ from noodl.topology import Network
 F64 = torch.float64
 
 
-def _chain(n_species: int = 1, scheme: str = "implicit"):
+def _chain(n_species: int = 1, scheme: str = "backward_euler"):
     """ambient -> z1 -> z2 -> ambient; capacities 10, 20; node order ambient, z1, z2."""
     net = Network(dtype=F64)
     for name in ("ambient", "z1", "z2"):

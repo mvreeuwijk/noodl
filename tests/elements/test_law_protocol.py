@@ -13,7 +13,7 @@ from noodl.elements import (
     RegularizedPowerLaw,
     SplineFlowTable,
 )
-from noodl.elements.base import INTEGRATIONS, MODES, ConstitutiveLaw
+from noodl.elements.base import MODES, SCHEMES, ConstitutiveLaw
 
 
 @pytest.fixture(autouse=True)
@@ -72,4 +72,4 @@ def test_context_is_frozen_and_modes_are_listed():
     with pytest.raises(dataclasses.FrozenInstanceError):
         ctx.dt = 1.0
     assert MODES == ("dc", "initial", "transient", "phasor")
-    assert INTEGRATIONS == ("trapezoidal", "backward_euler")
+    assert SCHEMES == ("exact", "backward_euler", "trapezoidal")

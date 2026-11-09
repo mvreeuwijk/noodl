@@ -2568,7 +2568,7 @@ def _backwater_junction():
                                         head_tolerance=1e-10))
 
 
-def _withdrawn(x0, xb, *, steps=1, withdrawal=0.3, scheme="implicit"):
+def _withdrawn(x0, xb, *, steps=1, withdrawal=0.3, scheme="backward_euler"):
     """`_backwater_junction` started at `x0` with boundary concentration `xb` (kg/m3) and
     `withdrawal` (m3/s) at J: the model, drivers and states (the initial one first)."""
     model, state, drivers = build_model(_backwater_junction(), quality=True,
@@ -2583,7 +2583,7 @@ def _withdrawn(x0, xb, *, steps=1, withdrawal=0.3, scheme="implicit"):
     return model, drivers, states
 
 
-@pytest.mark.parametrize("scheme", ["implicit", "trapezoidal"])
+@pytest.mark.parametrize("scheme", ["backward_euler", "trapezoidal"])
 def test_a_withdrawal_beyond_one_turnover_keeps_a_uniform_tracer_uniform(scheme):
     """A step that withdraws more water than the junction holds at its start (``dt w >
     V_start``) still takes the water that entered during the step with its mass: the

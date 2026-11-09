@@ -272,7 +272,7 @@ def test_three_zone_transient_concentrations_match_contamx(contamx, record_prope
     steps = 24
     ref = run_transient(THREE, steps=steps, ambient=amb, airflow_convergence=TIGHT_AIRFLOW)
     assert ref["dt"] == pytest.approx(300.0)
-    model, state, drivers = project_to_model(p, ambient=amb, scheme="implicit")
+    model, state, drivers = project_to_model(p, ambient=amb, scheme="backward_euler")
     drivers["species.x_boundary"] = torch.tensor([[THREE_AMBIENT_MF]], dtype=F64)
     trace = [state["species.x"].clone()]
     for _ in range(steps):

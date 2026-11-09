@@ -827,6 +827,6 @@ class TankStorage(ImplicitLaw):
         if ctx.mode != "transient":
             raise ValueError(f"tank kind {self.kind!r}: mode {ctx.mode!r} is not supported")
         rise = self.area / self.scale * (dp - ctx.dp_prev) / ctx.dt
-        if ctx.integration == "backward_euler":
+        if ctx.scheme == "backward_euler":
             return q - rise
         return q + ctx.q_prev - 2.0 * rise

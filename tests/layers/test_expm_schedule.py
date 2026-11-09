@@ -221,7 +221,7 @@ def test_shifted_branch_gradient_matches_the_dense_reference():
 def test_the_work_budget_is_refused_by_name():
     layer = _chain(1, removal=_t([[500.0]]))
     op = layer._advection_operator(_t([0.0, 0.0]))
-    with pytest.raises(RuntimeError, match=r"matvecs.*scheme='implicit'"):
+    with pytest.raises(RuntimeError, match=r"matvecs.*scheme='backward_euler'"):
         _expm_action(op, _t([10.0]), _t([1.0]), 50.0, max_matvecs=1000, where="budget test")
 
 

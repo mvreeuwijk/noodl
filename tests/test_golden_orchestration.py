@@ -210,7 +210,7 @@ def _air_gas(*, n_species=1, closures=(), reactions=(), learnable=True, **kw):
     air = KirchhoffLayer(net, "air", [el], drives=[ConstantDrive("airpath", "wind")],
                          boundary=["ambient"])
     gas = TransportLayer(net, "gas", capacity=torch.tensor([50.0, 80.0], dtype=F64),
-                         flow_kind="airpath", boundary=["ambient"], scheme="implicit",
+                         flow_kind="airpath", boundary=["ambient"], scheme="backward_euler",
                          n_species=n_species)
     model = Model(net, {"air": air, "gas": gas}, closures=closures, reactions=reactions, **kw)
     k = (n_species,) if n_species > 1 else ()
@@ -612,7 +612,7 @@ def case_mna_dynamic_steps():
     for i in range(4):
         state = model.step(state, drivers, dt=0.25, t=0.25 * i, diagnostics=diag)
     state_be = model.step({"e.phi": phi, "e.q": q}, drivers, dt=0.25, t=0.0,
-                          integration="backward_euler")
+                          scheme="backward_euler")
     return record(state, diag, grads_of(state["e.phi"].sum(), {"C": cap.C})) | {
         "backward_euler": record(state_be)}
 

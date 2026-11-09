@@ -77,11 +77,11 @@ def test_layers_carry_quantity_and_unit_tags():
 def test_transport_over_two_flow_kinds_matches_the_single_kind_layer():
     one = TransportLayer(
         _one_kind_net(), "c", capacity=torch.tensor([10.0, 20.0], dtype=F64),
-        flow_kind="airpath", boundary=["ambient"], scheme="implicit",
+        flow_kind="airpath", boundary=["ambient"], scheme="backward_euler",
     )
     two = TransportLayer(
         _two_kind_net(), "c", capacity=torch.tensor([10.0, 20.0], dtype=F64),
-        flow_kind=("airpath", "door"), boundary=["ambient"], scheme="implicit",
+        flow_kind=("airpath", "door"), boundary=["ambient"], scheme="backward_euler",
     )
     assert two.flow_kinds == ("airpath", "door")
     q_one = torch.tensor([1.0, 0.7, 1.0], dtype=F64)          # ambient->z1, z1->z2, z2->ambient
@@ -140,14 +140,14 @@ def test_transport_layer_treats_nodes_untouched_by_its_kinds_as_inactive():
     net = _wall_net()
     species = TransportLayer(
         net, "species", capacity=torch.tensor([10.0], dtype=F64), flow_kind="airpath",
-        boundary=["ambient"], scheme="implicit",
+        boundary=["ambient"], scheme="backward_euler",
     )
     assert species.n_i == 1
     assert species.inactive_idx.tolist() == [net.node_index("wall")]
     thermal = TransportLayer(
         net, "thermal", capacity=torch.tensor([10.0, 100.0], dtype=F64), flow_kind="airpath",
         boundary=["ambient"], conduction_kind="wall",
-        conductance=torch.tensor([5.0, 5.0], dtype=F64), scheme="implicit",
+        conductance=torch.tensor([5.0, 5.0], dtype=F64), scheme="backward_euler",
     )
     assert thermal.n_i == 2
     assert thermal.inactive_idx.numel() == 0

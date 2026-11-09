@@ -245,6 +245,11 @@ phi_mid = 2.000000, q = [2.0, 2.0]
 The flow satisfies `2 q^2 + q = 10`, so `q = 2` and `phi_mid = 2`. `implicit_edges` lists the
 edges whose flow is an unknown, in layer edge order.
 
+**One scheme vocabulary for every layer.** A dynamic law reads `ctx.scheme`, one of the names in
+`SCHEMES = ("exact", "backward_euler", "trapezoidal")` (`noodl.elements.base`): the same names and
+the same keyword `scheme` a `TransportLayer` takes. A `KirchhoffLayer` gives its laws
+`"backward_euler"` or `"trapezoidal"`; `"exact"` is for transport layers only.
+
 **The law context.** A contextual law receives a `LawContext` (`noodl.elements.base`), a frozen
 dataclass the layer builds for every solve:
 
@@ -253,7 +258,7 @@ dataclass the layer builds for every solve:
 | `mode` | `"dc"` (the steady operating point), `"initial"` (the consistent initial point), `"transient"` (one implicit step) or `"phasor"` (the sinusoidal steady state) |
 | `dt` | The step length (transient only, else `None`) |
 | `t` | The evaluation time: the END of a transient step, the given time otherwise; `None` when the caller tracks no clock |
-| `integration` | `"trapezoidal"` (default) or `"backward_euler"`; read in the transient mode |
+| `scheme` | `"trapezoidal"` (default) or `"backward_euler"`; read in the transient mode |
 | `dp_prev`, `q_prev` | This kind's own potential differences and flows at the step start (transient only) |
 | `omega` | The angular frequency `2 pi f`, one per instance (phasor only) |
 
@@ -268,7 +273,7 @@ def residual(self, dp, q, drivers, ctx):
         return dp - self.v0                         # hold the initial potential difference
     if ctx.mode == "phasor":
         return q - 1j * ctx.omega * self.C * dp
-    if ctx.integration == "backward_euler":
+    if ctx.scheme == "backward_euler":
         return q - self.C * (dp - ctx.dp_prev) / ctx.dt
     return q + ctx.q_prev - 2.0 * self.C / ctx.dt * (dp - ctx.dp_prev)   # trapezoidal
 ```

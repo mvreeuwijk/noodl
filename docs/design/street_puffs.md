@@ -79,7 +79,7 @@ and 0.625 s.
 ## 3. Constraints
 
 The puff mass is what one backward-Euler street step moved, so the street model must be
-built with `background="per_street"`, `scheme="implicit"`, one substep, one species,
+built with `background="per_street"`, `scheme="backward_euler"`, one substep, one species,
 ping-pong coupling, and no removal or reaction; everything else is refused by name. Under
 `coupling="iterate"` the closure would read a relaxed end-of-step state from the second
 pass on; a building coupled two-way through `noodl.couple.union` is unaffected, since

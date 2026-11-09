@@ -139,12 +139,12 @@ def test_transfer_dominated_steady_state_is_henry_equilibrium():
     v_water, v_air = 10.0, 1.0
     water = TransportLayer(
         net, "water_quality", capacity=torch.tensor([v_water], dtype=F64),
-        flow_kind="water", boundary=["B"], n_species=1, scheme="implicit",
+        flow_kind="water", boundary=["B"], n_species=1, scheme="backward_euler",
         quantity="concentration", unit="kg/m3",
     )
     air = TransportLayer(
         net, "air_quality", capacity=torch.tensor([v_air], dtype=F64),
-        flow_kind="air", boundary=["B"], n_species=1, scheme="implicit",
+        flow_kind="air", boundary=["B"], n_species=1, scheme="backward_euler",
         quantity="concentration", unit="kg/m3",
     )
     manhole_idx = torch.tensor([net.nodes.index("M")], dtype=torch.long)

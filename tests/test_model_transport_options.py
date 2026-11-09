@@ -71,10 +71,10 @@ def test_layer_options_give_a_transport_layer_the_scheme_of_the_step(monkeypatch
     model = Model(layer.net, [layer])
     state, drivers = {"T.x": _t([300.0])}, {"T.x_boundary": _t([TA])}
     model.step(state, drivers, DT)
-    model.step(state, drivers, DT, layer_options={"T": {"scheme": "implicit"}})
-    assert seen == [None, "implicit"]
-    model.steady(state, drivers, layer_options={"T": {"scheme": "implicit"}})   # ignored
-    out = model.step(state, drivers, DT, layer_options={"T": {"scheme": "implicit"}})
+    model.step(state, drivers, DT, layer_options={"T": {"scheme": "backward_euler"}})
+    assert seen == [None, "backward_euler"]
+    model.steady(state, drivers, layer_options={"T": {"scheme": "backward_euler"}})   # ignored
+    out = model.step(state, drivers, DT, layer_options={"T": {"scheme": "backward_euler"}})
     assert float(out["T.x"][0]) == pytest.approx(
         (C * 300.0 + DT * G * TA) / (C + DT * G), rel=1e-14)
 
@@ -86,10 +86,10 @@ def test_layer_options_refuse_a_transport_keyword_other_than_the_scheme():
     with pytest.raises(ValueError, match=r"transport layer 'T' \['atol'\].*only \['scheme'\]"):
         model.step(state, drivers, DT, layer_options={"T": {"atol": 1e-9}})
     with pytest.raises(ValueError, match=r"names \['X'\], not Kirchhoff or transport"):
-        model.step(state, drivers, DT, layer_options={"X": {"scheme": "implicit"}})
+        model.step(state, drivers, DT, layer_options={"X": {"scheme": "backward_euler"}})
 
 
-@pytest.mark.parametrize("scheme", ["trapezoidal", "implicit"])
+@pytest.mark.parametrize("scheme", ["trapezoidal", "backward_euler"])
 def test_a_closure_carrying_the_sources_gives_the_trapezoidal_step_both_ends(scheme):
     # sources r t at node m: trapezoidal integrates dt/2 (r t0 + r t1); backward Euler r t1
     rate, t0 = 5.0, 2.0

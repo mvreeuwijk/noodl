@@ -90,8 +90,8 @@ def test_tank_storage_residual_in_every_mode():
     law = TankStorage(torch.tensor([2.0], dtype=F64), torch.tensor([10.0], dtype=F64), scale=3.0)
     dp, q = torch.tensor([33.0], dtype=F64), torch.tensor([0.5], dtype=F64)
     prev = dict(dp_prev=torch.tensor([30.0], dtype=F64), q_prev=torch.tensor([0.25], dtype=F64))
-    be = LawContext(mode="transient", dt=4.0, integration="backward_euler", **prev)
-    tr = LawContext(mode="transient", dt=4.0, integration="trapezoidal", **prev)
+    be = LawContext(mode="transient", dt=4.0, scheme="backward_euler", **prev)
+    tr = LawContext(mode="transient", dt=4.0, scheme="trapezoidal", **prev)
     # head rise 1 m (dp / scale), area 2: volume 2 m3 over 4 s
     assert float(law.residual(dp, q, {}, be)) == pytest.approx(0.5 - 0.5)
     assert float(law.residual(dp, q, {}, tr)) == pytest.approx(0.5 + 0.25 - 1.0)

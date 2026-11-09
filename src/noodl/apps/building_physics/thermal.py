@@ -120,7 +120,7 @@ def thermal_layer(net: Network, *, ambient="ambient", name: str = "thermal",
     node that air passes through (a zero-volume air-handler plenum) needs the implicit
     scheme. One joined only by conduction (a wall's surface node, a zone's radiant star
     node) is folded into its neighbours (see `TransportLayer`) and takes any scheme.
-    `scheme` defaults to "exact", or to "implicit" when a storage-free node touches a flow
+    `scheme` defaults to "exact", or to "backward_euler" when a storage-free node touches a flow
     edge; an explicit other scheme with such a node is refused by name.
     """
     storage_free = tuple(storage_free)
@@ -134,7 +134,7 @@ def thermal_layer(net: Network, *, ambient="ambient", name: str = "thermal",
                 src, tgt = net.endpoints(kind)
                 ventilated.update(src.tolist() + tgt.tolist())
         free_idx = [net.node_index(n) for n in net.canonical(list(storage_free))]
-        scheme = "implicit" if any(i in ventilated for i in free_idx) else "exact"
+        scheme = "backward_euler" if any(i in ventilated for i in free_idx) else "exact"
     if conduction_kind is None:
         cond_kinds = ("wall",) if "wall" in present else ()
     else:
@@ -180,7 +180,7 @@ def thermal_layer(net: Network, *, ambient="ambient", name: str = "thermal",
 
 def species_layer(net: Network, *, ambient="ambient", name: str = "species",
                   flow_kinds=("airpath",), rho: float | torch.Tensor = RHO_0,
-                  n_species: int = 1, scheme: str = "implicit",
+                  n_species: int = 1, scheme: str = "backward_euler",
                   species_names=None, transmission=None, kinetics=None,
                   storage_free: Sequence = ()) -> TransportLayer:
     """Species as mass fractions with zone air mass rho V as capacity (CONTAM convention).
@@ -191,7 +191,7 @@ def species_layer(net: Network, *, ambient="ambient", name: str = "species",
     filter; `filter_transmission` builds it) and `kinetics` (`(n_i, K, K)`, each zone's
     first-order reactions; `reaction_kinetics` builds it) go to the `TransportLayer`
     unchanged. `storage_free` names nodes that hold no air (a zero-volume air-handler
-    plenum): their volume may be zero, and the layer must use `scheme="implicit"`.
+    plenum): their volume may be zero, and the layer must use `scheme="backward_euler"`.
     """
     storage_free = tuple(storage_free)
     kinds = tuple(flow_kinds)
@@ -321,7 +321,7 @@ def build_model(net: Network, *, air_laws, drives, ambient="ambient", thermal: b
                 species: int | Sequence[str] = 0, density: str = "ideal_gas",
                 density_kwargs=None,
                 coupling: str = "pingpong", iterate_tol=None, iterate_max: int = 20,
-                thermal_scheme: str | None = None, species_scheme: str = "implicit",
+                thermal_scheme: str | None = None, species_scheme: str = "backward_euler",
                 flow_kinds=None, closures: Sequence = (), flow_balanced: Sequence = (),
                 storage_free: Sequence = (), controls: ControlNetwork | None = None,
                 return_inputs: bool = False):
@@ -358,7 +358,7 @@ def build_model(net: Network, *, air_laws, drives, ambient="ambient", thermal: b
     typo that silently drops advection. Unknown kinds raise `KeyError` naming them. The same
     value governs BOTH the thermal and the species layer.
 
-    `thermal_scheme` defaults to `thermal_layer`'s own default ("exact", or "implicit" when
+    `thermal_scheme` defaults to `thermal_layer`'s own default ("exact", or "backward_euler" when
     the layer has storage-free nodes).
 
     `controls`: a `ControlNetwork`, put first among the closures (its actuators write the

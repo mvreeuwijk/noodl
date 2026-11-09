@@ -154,7 +154,7 @@ def _plenum_model():
     net.add_edge("two", "ambient", kind="airpath")
     layer = TransportLayer(net, "species", capacity=torch.tensor([360.0, 720.0, 1.0], dtype=F64),
                            flow_kind="airpath", boundary=["ambient"], storage_free=["plenum"],
-                           scheme="implicit", species_names=("sarin",))
+                           scheme="backward_euler", species_names=("sarin",))
     return Model(net, {"species": layer})
 
 

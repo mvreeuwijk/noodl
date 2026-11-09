@@ -331,7 +331,7 @@ the street side. Both demos assert that sign.
 | The returned state's forward value agrees with the value the recipient was stepped with, to rtol | rtol 1e-9, atol 1e-14 | holds |
 | Gradient across the join vs central differences | rel 1e-5 | holds |
 | `substeps={"building": k}` calls the fast model exactly `k` times per slow step | exact | holds |
-| Closed two-way exchange conserves the total amount — exact/implicit/trapezoidal schemes, 1 and 4 recipient sub-steps | abs 1e-10 | holds |
+| Closed two-way exchange conserves the total amount — exact/backward_euler/trapezoidal schemes, 1 and 4 recipient sub-steps | abs 1e-10 | holds |
 | 2×2 analytic fixed point (one implicit step each, unit source into the recipient) solves to $(4/3, 5/3)$ | abs 1e-9 | holds |
 | Structural guard: a two-way step assembles no dense topology operator (`upwind`/`incidence`/selectors) | n/a | holds |
 | Synthetic back-coupling, 2×3 m canyon: one-way 4.169740e-08 vs two-way 4.145151e-08 kg/m³ | measured | **0.5897 %** change, 27 passes |

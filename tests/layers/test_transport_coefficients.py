@@ -52,7 +52,7 @@ def _circulating_net():
     return net
 
 
-@pytest.mark.parametrize("scheme", ["implicit", "trapezoidal", "exact"])
+@pytest.mark.parametrize("scheme", ["backward_euler", "trapezoidal", "exact"])
 def test_kinetics_gradient(scheme):
     """Species 0 turns into species 1 at rate k inside a zone with unit outflow."""
     net = _two_species_net()
@@ -78,7 +78,7 @@ def test_kinetics_gradient_steady():
         kinetics = torch.stack([torch.stack([-k, 0 * k]), torch.stack([k, 0 * k])])
         layer = TransportLayer(
             net, "c", capacity=_t([1.0]), flow_kind="flow", boundary=["ambient"],
-            n_species=2, kinetics=kinetics, scheme="implicit",
+            n_species=2, kinetics=kinetics, scheme="backward_euler",
         )
         sources = _t([[0.0, 0.0], [1.0, 0.0]])   # full node order: species 0 fed at zone
         return layer.steady(_t([1.0]), sources, torch.zeros(1, 2, dtype=F64))
@@ -87,7 +87,7 @@ def test_kinetics_gradient_steady():
     assert gradcheck(f, (k,), eps=1e-6, atol=1e-7, rtol=1e-6)
 
 
-@pytest.mark.parametrize("scheme", ["implicit", "trapezoidal", "exact"])
+@pytest.mark.parametrize("scheme", ["backward_euler", "trapezoidal", "exact"])
 def test_conductance_gradient(scheme):
     net = _conduction_net()
 
@@ -108,7 +108,7 @@ def test_conductance_gradient_steady():
     def f(g):
         layer = TransportLayer(
             net, "heat", capacity=_t([1.0, 1.0]), flow_kind="flow", boundary=["ambient"],
-            conduction_kind="wall", conductance=g.reshape(1), scheme="implicit",
+            conduction_kind="wall", conductance=g.reshape(1), scheme="backward_euler",
         )
         return layer.steady(_t([1.0]), _t([0.0, 0.0, 1.0]), _t([0.0]))
 
@@ -116,7 +116,7 @@ def test_conductance_gradient_steady():
     assert gradcheck(f, (g,), eps=1e-6, atol=1e-7, rtol=1e-6)
 
 
-@pytest.mark.parametrize("scheme", ["implicit", "trapezoidal", "exact"])
+@pytest.mark.parametrize("scheme", ["backward_euler", "trapezoidal", "exact"])
 def test_carrier_gradient(scheme):
     """A single compartment with unit outflow: dx/dt = -c q x scales the flow by carrier c."""
     net = _two_species_net()
@@ -138,7 +138,7 @@ def test_carrier_gradient_steady():
     def f(c):
         layer = TransportLayer(
             net, "c", capacity=_t([1.0]), flow_kind="flow", boundary=["ambient"],
-            carrier=c, scheme="implicit",
+            carrier=c, scheme="backward_euler",
         )
         return layer.steady(_t([1.0]), _t([0.0, 1.0]), _t([0.0]))
 
@@ -146,7 +146,7 @@ def test_carrier_gradient_steady():
     assert gradcheck(f, (c,), eps=1e-6, atol=1e-7, rtol=1e-6)
 
 
-@pytest.mark.parametrize("scheme", ["implicit", "trapezoidal", "exact"])
+@pytest.mark.parametrize("scheme", ["backward_euler", "trapezoidal", "exact"])
 def test_removal_gradient(scheme):
     """A single compartment with unit outflow and a removal term: dx/dt = -(q + r) x."""
     net = _two_species_net()
@@ -168,7 +168,7 @@ def test_removal_gradient_steady():
     def f(r):
         layer = TransportLayer(
             net, "c", capacity=_t([1.0]), flow_kind="flow", boundary=["ambient"],
-            removal=r, scheme="implicit",
+            removal=r, scheme="backward_euler",
         )
         return layer.steady(_t([1.0]), _t([0.0, 1.0]), _t([0.0]))
 
@@ -176,7 +176,7 @@ def test_removal_gradient_steady():
     assert gradcheck(f, (r,), eps=1e-6, atol=1e-7, rtol=1e-6)
 
 
-@pytest.mark.parametrize("scheme", ["implicit", "trapezoidal", "exact"])
+@pytest.mark.parametrize("scheme", ["backward_euler", "trapezoidal", "exact"])
 def test_transmission_gradient(scheme):
     """Circulating compartment, x_boundary = 1: the inflow edge's transmission scales how
     much of the boundary value re-enters, so it must reach the gradient too."""
@@ -199,7 +199,7 @@ def test_transmission_gradient_steady():
     def f(t_):
         layer = TransportLayer(
             net, "c", capacity=_t([1.0]), flow_kind="flow", boundary=["ambient"],
-            transmission=t_, scheme="implicit",
+            transmission=t_, scheme="backward_euler",
         )
         return layer.steady(_t([1.0, 1.0]), _t([0.0, 0.0]), _t([1.0]))
 
@@ -207,7 +207,7 @@ def test_transmission_gradient_steady():
     assert gradcheck(f, (transmission,), eps=1e-6, atol=1e-7, rtol=1e-6)
 
 
-@pytest.mark.parametrize("scheme", ["implicit", "trapezoidal"])
+@pytest.mark.parametrize("scheme", ["backward_euler", "trapezoidal"])
 def test_shared_coefficient_across_two_layers_accumulates_both_gradients(scheme):
     """One learnable removal tensor used by two layers: the gradient is the sum of both
     layers' contributions (the shared-parameter case)."""
@@ -229,5 +229,5 @@ def test_shared_coefficient_across_two_layers_accumulates_both_gradients(scheme)
         for layer in layers
     )
     (dr,) = torch.autograd.grad(total, (r,))
-    single = {"implicit": -1.0 / 2.5**2, "trapezoidal": -1.0 / 1.75**2}[scheme]
+    single = {"backward_euler": -1.0 / 2.5**2, "trapezoidal": -1.0 / 1.75**2}[scheme]
     assert dr.item() == pytest.approx(2 * single, rel=1e-8)

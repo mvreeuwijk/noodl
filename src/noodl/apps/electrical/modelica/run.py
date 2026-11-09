@@ -11,7 +11,7 @@ restart (`names.restarts`: the first step and every step starting at a signal ju
 read only the step-start capacitor voltages and inductor currents) and trapezoidal
 otherwise; each step reads its drivers at its END time, so the step ending at a signal
 event uses the signal's left limit there. The heat layer of a circuit with a thermal network
-takes the same rule on every step: `scheme="implicit"` (backward Euler) on a restart,
+takes the same rule on every step: `scheme="backward_euler"` (backward Euler) on a restart,
 `"trapezoidal"` otherwise, the heat integrated over the step by the same rule as the
 circuit's currents. Row 0 of a dynamic run is the start state itself.
 """
@@ -39,8 +39,6 @@ F64 = torch.float64
 # stalls at 3.4e-13 on ACDCConverter, at 1.1e-13 on the balanced ACLine.
 STEADY_ATOL = 1e-12
 STEADY_RTOL = 1e-14
-# The heat layer's integration rule per circuit rule (`TransportLayer.step`'s `scheme`).
-_HEAT_SCHEME = {"backward_euler": "implicit", "trapezoidal": "trapezoidal"}
 
 
 def simulate_circuit(model: Model, state: State, drivers: Mapping[str, Tensor],
@@ -86,9 +84,9 @@ def simulate_circuit(model: Model, state: State, drivers: Mapping[str, Tensor],
             step_options = options
             if heat:
                 step_options = {**options, THERMAL: {**options.get(THERMAL, {}),
-                                                     "scheme": _HEAT_SCHEME[scheme]}}
+                                                     "scheme": scheme}}
             state = model.step(state, step_drivers(drivers, grid, t1), dt=t1 - t0, t=t0,
-                               integration=scheme, layer_options=step_options or None,
+                               scheme=scheme, layer_options=step_options or None,
                                **kwargs)
             if k + 1 in wanted:
                 rows.append(state)

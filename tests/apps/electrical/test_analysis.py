@@ -61,7 +61,7 @@ def _rc_error(dt):
 def test_rc_charge_is_second_order_after_a_backward_euler_start():
     e1, out = _rc_error(0.01)
     e2, _ = _rc_error(0.02)
-    assert out["integration"] == ["backward_euler"] + ["trapezoidal"] * 99
+    assert out["scheme"] == ["backward_euler"] + ["trapezoidal"] * 99
     assert e1 < 1e-4
     assert math.log2(e2 / e1) >= 1.9
 
@@ -74,15 +74,15 @@ def test_transient_result_layout_and_start_row():
     assert out[PHI].shape == (3, n) and out[Q].shape == (3, b)
     torch.testing.assert_close(out["time"], torch.tensor([0.0, 0.1, 0.3]))
     torch.testing.assert_close(out[PHI][0], state[PHI], rtol=0, atol=0)
-    assert len(out["integration"]) == 2
+    assert len(out["scheme"]) == 2
 
 
 def test_backward_euler_everywhere_is_the_exact_recurrence():
     model, _, drivers = build_model(_rc())
     state = initial_state(model, drivers)
     dt = 0.1
-    out = transient(model, state, drivers, _grid(dt), integration="backward_euler")
-    assert set(out["integration"]) == {"backward_euler"}
+    out = transient(model, state, drivers, _grid(dt), scheme="backward_euler")
+    assert set(out["scheme"]) == {"backward_euler"}
     b = model.net.nodes.index("b")
     v = 0.0
     for k in range(1, 11):
@@ -97,13 +97,13 @@ def test_pulse_breakpoints_restart_with_backward_euler():
     state = initial_state(model, drivers)
     out = transient(model, state, drivers, _grid(0.125))
     be, tr = "backward_euler", "trapezoidal"
-    assert out["integration"] == [be, be, tr, be, tr, be, tr, be]
+    assert out["scheme"] == [be, be, tr, be, tr, be, tr, be]
     # an edge inside a step restarts that step (the grid is not refined)
     pulse = Pulse(width=50.0, period=0.4, start_time=0.05)
     model, _, drivers = build_model(_rc(waveform=pulse))
     out = transient(model, initial_state(model, drivers), drivers, _grid(0.125))
     # edges 0.05, 0.25, 0.45, 0.65, 0.85
-    assert out["integration"] == [be, be, tr, be, tr, be, be, tr]
+    assert out["scheme"] == [be, be, tr, be, tr, be, be, tr]
 
 
 def test_transient_of_a_batched_circuit():
@@ -112,7 +112,7 @@ def test_transient_of_a_batched_circuit():
     drivers = {**drivers, "v": torch.tensor([[1.0], [2.0], [3.0], [4.0]])}
     state = initial_state(model, drivers)
     dt = 0.25
-    out = transient(model, state, drivers, _grid(dt), integration="backward_euler")
+    out = transient(model, state, drivers, _grid(dt), scheme="backward_euler")
     assert out[PHI].shape == (5, 4, model.net.n)
     b = model.net.nodes.index("b")
     V = torch.arange(1.0, 5.0)
@@ -140,8 +140,8 @@ def test_transient_refusals():
     state = initial_state(model, drivers)
     with pytest.raises(ValueError, match="strictly increasing"):
         transient(model, state, drivers, [0.0, 0.1, 0.1])
-    with pytest.raises(ValueError, match="integration='gear'"):
-        transient(model, state, drivers, [0.0, 0.1], integration="gear")
+    with pytest.raises(ValueError, match="scheme='gear'"):
+        transient(model, state, drivers, [0.0, 0.1], scheme="gear")
     pmodel, _, pdrivers = build_model(_rc(), phasor=True, frequency=1.0)
     with pytest.raises(ValueError, match="phasor"):
         transient(pmodel, state, pdrivers, [0.0, 0.1])
@@ -220,7 +220,7 @@ def test_diode_transient_with_tight_newton_tolerances():
     tight = {"atol": 1e-15, "rtol": 0.0}
     state = initial_state(model, drivers, **tight)
     out = transient(model, state, drivers, _grid(1e-5, end=1e-4), **tight)
-    assert out["integration"][:3] == ["backward_euler", "backward_euler", "trapezoidal"]
+    assert out["scheme"][:3] == ["backward_euler", "backward_euler", "trapezoidal"]
     values = device_values(model, {PHI: out[PHI][-1], Q: out[Q][-1]})
     v = values["D1"][0]
     # KCL at d to round-off, and the diode current on its own law
@@ -284,7 +284,7 @@ def _coupled_run(values):
         for p, v in zip(params, values, strict=True):
             p.copy_(v)
     out = transient(model, initial_state(model, drivers), drivers, [0.0, 1e-4, 2e-4, 3e-4])
-    assert len(out["integration"]) == 3
+    assert len(out["scheme"]) == 3
     return out[Q][-1].sum() + out[PHI][-1].sum(), params
 
 

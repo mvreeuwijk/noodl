@@ -504,7 +504,7 @@ def test_classic_layer_still_accepts_the_steady_keywords():
     pb = torch.tensor([1.0, 0.0])
     phi, q = layer.solve(pb)
     for kwargs in ({"mode": "dc"}, {"mode": "initial"}, {"t": 3.0}, {"q0": torch.zeros(0)},
-                   {"integration": "backward_euler"}):
+                   {"scheme": "backward_euler"}):
         phi_k, q_k = layer.solve(pb, **kwargs)
         torch.testing.assert_close(phi_k, phi, rtol=0, atol=0)
         torch.testing.assert_close(q_k, q, rtol=0, atol=0)

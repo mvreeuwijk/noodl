@@ -30,8 +30,11 @@ Tensor = torch.Tensor
 
 #: The modes a dynamic or implicit constitutive law is evaluated in (see `LawContext`).
 MODES = ("dc", "initial", "transient", "phasor")
-#: The implicit time integrations a dynamic law implements in the transient mode.
-INTEGRATIONS = ("trapezoidal", "backward_euler")
+#: The time-integration schemes, one vocabulary for every layer kind. `"exact"` (the exact
+#: exponential of a linear step) is valid for a `TransportLayer` only; `"backward_euler"`
+#: (first order, flows at the step's end) and `"trapezoidal"` (second order) are valid for both
+#: it and a `KirchhoffLayer`, which refuses `"exact"` by name.
+SCHEMES = ("exact", "backward_euler", "trapezoidal")
 
 
 @dataclass(frozen=True)
@@ -42,16 +45,17 @@ class LawContext:
     a capacitance carries no current, an inductance no voltage); `"initial"` the consistent
     initial point (a capacitance holds its initial voltage, an inductance its initial
     current); `"transient"` one implicit step of length `dt` ending at time `t`, from the
-    step-start values `dp_prev` and `q_prev` of the law's own edges, with `integration` one
-    of `INTEGRATIONS`; `"phasor"` the quasi-static sinusoidal state at angular frequency
-    `omega` (a tensor broadcasting against the law's edges). `t` is the evaluation time
-    (the END of a transient step), `None` when the caller tracks no clock.
+    step-start values `dp_prev` and `q_prev` of the law's own edges, with `scheme` one
+    of `SCHEMES` (`"backward_euler"` or `"trapezoidal"`); `"phasor"` the quasi-static
+    sinusoidal state at angular frequency `omega` (a tensor broadcasting against the law's
+    edges). `t` is the evaluation time (the END of a transient step), `None` when the caller
+    tracks no clock.
     """
 
     mode: str
     dt: float | None = None
     t: float | None = None
-    integration: str = "trapezoidal"
+    scheme: str = "trapezoidal"
     dp_prev: Tensor | None = None
     q_prev: Tensor | None = None
     omega: Tensor | None = None

@@ -709,12 +709,12 @@ def test_a_stiff_zone_follows_a_curved_boundary_with_its_own_lag(tmp_path):
     assert float((hist["T"][:, i] - exact).abs().max()) <= 5e-5
 
 
-@pytest.mark.parametrize("scheme", ["implicit", "midpoint"])
+@pytest.mark.parametrize("scheme", ["backward_euler", "midpoint"])
 def test_a_thermal_removal_driver_acts_in_every_scheme(tmp_path, scheme):
     # A 1 m3 zone exchanging a prescribed F = 0.02 kg/s each way with a boundary at its own
     # 293.15 K, and a first-order heat removal r given as the driver "thermal.removal": the
     # zone is T = T_inf + (T_0 - T_inf) exp(-(k + r) t), k = F/(rho V), T_inf = k T_b/(k + r).
-    # Exact on frozen flows for the midpoint scheme's exact step; first order for "implicit".
+    # Exact on frozen flows for the midpoint scheme's exact step; first order for "backward_euler".
     doc = _doc("zonal_flow.json")
     doc["experiment"].update({"StopTime": 600.0, "Interval": 60.0})
     doc["components"] = [

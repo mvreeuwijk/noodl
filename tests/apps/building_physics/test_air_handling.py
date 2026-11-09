@@ -180,7 +180,7 @@ def test_zero_volume_plenums_carry_heat_algebraically():
                                            element],
                         drives=[Stack.from_network(net, "airpath")], closures=[closure],
                         flow_balanced=plenums, storage_free=plenums)
-    assert model.transport["thermal"].scheme == "implicit"
+    assert model.transport["thermal"].scheme == "backward_euler"
     T = model.step(initial_state(model), initial_drivers(model), DT)["thermal.x"]
     rows = model.transport["thermal"].interior_idx.tolist()
     T_room, T_supply, T_return = (T[rows.index(net.node_index(n))].item()

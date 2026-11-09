@@ -29,7 +29,7 @@ def _model(scheme, substeps):
     return model
 
 
-@pytest.mark.parametrize("scheme", ["implicit", "trapezoidal", "exact"])
+@pytest.mark.parametrize("scheme", ["backward_euler", "trapezoidal", "exact"])
 @pytest.mark.parametrize("substeps", [1, 3])
 def test_transfer_is_summed_over_substeps_and_closes_the_balance(scheme, substeps):
     model = _model(scheme, substeps)
@@ -69,7 +69,7 @@ def test_a_bare_string_boundary_transfers_is_refused_rather_than_iterated_as_cha
 
 
 def _two_layer_model():
-    """`thermal` (scheme='exact') and `species` (scheme='implicit') on the same net, each
+    """`thermal` (scheme='exact') and `species` (scheme='backward_euler') on the same net, each
     with its own flow kind -- so a caller who names only one in `boundary_transfers` can be
     checked against the other (`step_with_transfer`'s extra cost, no diagonal
     shift on the `exact` scheme's Taylor accumulator, must not be paid on a layer nothing
@@ -84,7 +84,7 @@ def _two_layer_model():
     thermal = TransportLayer(net, "thermal", capacity=_t([2.0]), flow_kind="heat",
                               boundary=["amb"], scheme="exact")
     species = TransportLayer(net, "species", capacity=_t([3.0]), flow_kind="conc",
-                              boundary=["amb"], scheme="implicit")
+                              boundary=["amb"], scheme="backward_euler")
 
     def closure(state, drivers):
         return {"thermal.q": _t([0.5, 0.5]), "species.q": _t([0.7, 0.7])}

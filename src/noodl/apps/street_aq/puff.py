@@ -1480,9 +1480,9 @@ class PuffClosure:
                 f"PuffClosure: transport layer {name!r} has a removal (the driver "
                 f"{name + '.removal'!r} or the layer's own); the puff mass account has no "
                 f"deposition, drop it")
-        if layer.scheme != "implicit":
+        if layer.scheme != "backward_euler":
             raise ValueError(f"PuffClosure: transport layer {name!r} has scheme="
-                             f"{layer.scheme!r}; the puff emission needs scheme='implicit'")
+                             f"{layer.scheme!r}; the puff emission needs scheme='backward_euler'")
 
     # ---------------------------------------------------------------- drivers
     @staticmethod

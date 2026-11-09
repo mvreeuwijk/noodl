@@ -358,7 +358,7 @@ def _street_layer(net, kinds) -> TransportLayer:
     """The transport layer `build_model` builds, with `flow_kinds` as given."""
     return TransportLayer(
         net, "street", capacity=torch.tensor([40000.0, 40000.0], dtype=DT),
-        flow_kind=kinds, boundary=["atmosphere"], scheme="implicit",
+        flow_kind=kinds, boundary=["atmosphere"], scheme="backward_euler",
         quantity="concentration", unit="kg/m3",
     )
 

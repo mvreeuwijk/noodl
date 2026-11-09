@@ -828,7 +828,7 @@ def build_model(
         transport_kinds = tuple(layer.kinds)
         layers["quality"] = TransportLayer(
             graph, "quality", capacity=cap_i, flow_kind=transport_kinds,
-            boundary=boundary, n_species=1, removal=removal, scheme="implicit",
+            boundary=boundary, n_species=1, removal=removal, scheme="backward_euler",
             quantity="concentration", unit="kg/m3",
             dilution=1.0, dilution_mode="withdrawal",
             source_unit="kg/s", capacity_unit="m3", flow_unit="m3/s",
@@ -1046,10 +1046,10 @@ def _refuse_pump_overflow(model: Model, state: State) -> None:
 
 
 def water_step(model: Model, state: State, drivers: Drivers, dt: float, *,
-               integration: str = "backward_euler", **solve_kwargs) -> State:
+               scheme: str = "backward_euler", **solve_kwargs) -> State:
     """One step of `dt` (s) of a model built with `tank_mode="storage"`: `Model.step` with
     `water_steady`'s Newton defaults and pump check, the tank levels stepped implicitly
-    (`TankStorage`, `integration` `"backward_euler"` or `"trapezoidal"`; trapezoidal needs
+    (`TankStorage`, `scheme` `"backward_euler"` or `"trapezoidal"`; trapezoidal needs
     a step-start state whose tank flows are solved, not the build's zeros). The level
     controls act on the step-start levels, as EPANET's do."""
     if getattr(model, "tank_mode", "explicit") != "storage":
@@ -1060,7 +1060,7 @@ def water_step(model: Model, state: State, drivers: Drivers, dt: float, *,
     solve_kwargs.setdefault("atol", 1e-11)
     solve_kwargs.setdefault("rtol", 1e-11)
     solve_kwargs.setdefault("max_iter", 200)
-    result = model.step(state, drivers, dt, integration=integration, **solve_kwargs)
+    result = model.step(state, drivers, dt, scheme=scheme, **solve_kwargs)
     _refuse_pump_overflow(model, result)
     return result
 

@@ -1140,7 +1140,7 @@ class DynamicWaveHydraulics:
         # the quality layer's species count and time scheme (`_quality_parts` sets them):
         # the withdrawal's removal rate is written in its layout and for its scheme
         self.quality_species = 1
-        self.quality_scheme = "implicit"
+        self.quality_scheme = "backward_euler"
         self.air = air
         self.air_quality_layer = air_quality_layer
         if quality_layer is not None:
@@ -2694,7 +2694,7 @@ def build_dynamic_wave_model(net: SewerNetwork, *, iterate_tol: float | None = N
                              outfall_stage: Mapping | None = None,
                              quality: bool = False,
                              species: tuple[str, ...] = ("bod", "sulfide"),
-                             scheme: str = "implicit",
+                             scheme: str = "backward_euler",
                              air: bool = False, f_air: float = F_AIR_DEFAULT,
                              f_i: float = F_I_DEFAULT, c_s: float = 1.0,
                              leak_area: float = 8e-4, leak_cd: float = 0.6,

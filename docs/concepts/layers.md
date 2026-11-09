@@ -105,6 +105,14 @@ are returned as given and the potential-controlled edges' columns are evaluated 
 context), differentiably. At `solve`'s own `(phi, q)` the result is `q`. Without `q` it raises
 `TypeError`; a phasor layer has no such accessor.
 
+**One scheme vocabulary for every layer.** `SCHEMES = ("exact", "backward_euler", "trapezoidal")`
+(`noodl.elements.base`) names the time-integration schemes of both layer kinds, with the keyword
+`scheme` everywhere. A `KirchhoffLayer` takes `scheme="trapezoidal"` (the default) or
+`"backward_euler"` at construction, and `solve(scheme=None)` means "the layer's own"; it refuses
+`"exact"`, which belongs to a `TransportLayer`, by name. A name outside `SCHEMES` (the former
+`"implicit"` of a transport layer, the former keyword `integration=`) is refused with an error
+that lists them.
+
 **Construction checks**, each raising `ValueError` naming the layer and the kind or nodes:
 
 - every kind's edge count is a multiple of its law's `ports`;
@@ -134,13 +142,13 @@ such a layer; read the flows from `solve`'s `q`, and the balance from `balance(p
 | `dt` | One implicit step of this length (s). |
 | `t` | The evaluation time, the END of the step on a transient (a time-dependent source is evaluated there); `None` when untracked. |
 | `history` | `(phi, q)` at the step start, full-node potentials and every edge's flow, as `solve` returns them. Required on a step of a layer with a dynamic law. |
-| `integration` | `"trapezoidal"` (default) or `"backward_euler"`. |
+| `scheme` | `"trapezoidal"` or `"backward_euler"`; `None` (default) is the layer's own, `KirchhoffLayer(scheme=...)`, trapezoidal unless built otherwise. |
 | `phi0`, `q0` | Warm start of the interior potentials and of the implicit-edge flows; zeros otherwise. |
 
-A layer solved by nodal analysis has static laws: it accepts `t`, `integration`, `q0` and the
+A layer solved by nodal analysis has static laws: it accepts `t`, `scheme`, `q0` and the
 modes `"dc"` and `"initial"` and ignores them (`phi0` is its own warm start), and refuses
 `mode="phasor"`, `dt` and `history`, since it takes no step. A phasor layer ignores
-`integration` and refuses `dt`, `history` and any mode but `"phasor"`. On the differentiable path (the default)
+`scheme` and refuses `dt`, `history` and any mode but `"phasor"`. On the differentiable path (the default)
 gradients reach `history` too, so a chain of steps back-propagates through time.
 
 **Linear solver.** `linear_solver="auto"` on such a layer factorises: SciPy's sparse LU
@@ -192,7 +200,7 @@ layer = TransportLayer(
     n_species=1,
     conduction_kind="wall",         # optional diffusive edges: one kind or a tuple of kinds
     conductance=ua,
-    scheme="exact",                 # 'exact' | 'implicit' | 'trapezoidal'
+    scheme="exact",                 # 'exact' | 'backward_euler' | 'trapezoidal'
     quantity="temperature", unit="K",
 )
 ```
@@ -222,12 +230,12 @@ Four things catch people:
   driver and no flow owner.
 
 The three schemes: `"exact"` uses an augmented matrix exponential and controls its own error by
-sub-stepping; `"implicit"` is implicit Euler; `"trapezoidal"` is the second-order variant. Use
-`"exact"` for heat, `"implicit"` for species — the application defaults reflect this.
+sub-stepping; `"backward_euler"` is implicit Euler; `"trapezoidal"` is the second-order variant. Use
+`"exact"` for heat, `"backward_euler"` for species — the application defaults reflect this.
 
 `step(..., scheme=...)` takes one step with another scheme than the layer's own, checked as the
-constructor checks it (a storage-free node with throughflow still needs `"implicit"`); in a
-`Model`, `model.step(..., layer_options={"thermal": {"scheme": "implicit"}})` does the same for
+constructor checks it (a storage-free node with throughflow still needs `"backward_euler"`); in a
+`Model`, `model.step(..., layer_options={"thermal": {"scheme": "backward_euler"}})` does the same for
 one step. A layer coupled to a circuit steps this way with the circuit's own rule: backward
 Euler on the step after a restart, trapezoidal otherwise. `step(..., sources_prev=...)`
 (trapezoidal only) gives the sources at the START of the step; the trapezoidal rule then
@@ -240,7 +248,7 @@ The exact scheme bases its sub-stepping on the operator's one-norm `||dt M||_1`,
 the state-independent matrix before any arithmetic on the state; if the predicted work exceeds
 the budget, the step is refused, raising an error that names the layer and advises the implicit
 or trapezoidal schemes. A stiff operator (large `||dt M||_1`, e.g. fast removal with a nonzero
-forcing) costs the exact scheme thousands of matvecs per step by nature; `scheme="implicit"` is
+forcing) costs the exact scheme thousands of matvecs per step by nature; `scheme="backward_euler"` is
 the documented choice there, not a larger budget. All coefficients the layer owns—carrier,
 transmission, kinetics, removal, and conductance—are differentiable under every scheme.
 
@@ -251,7 +259,7 @@ step is then exact for a boundary value that ramps linearly while the flows are 
 matters for a zone that flushes much faster than the step. With a boundary value held at the
 step mean of a ramp, such a zone relaxes to that mean and ends about half a step behind the
 boundary. With the linear boundary, it ends behind by its own flushing time, as it should. The
-Modelica importer's `scheme="midpoint"` runner uses this. The implicit and trapezoidal schemes
+Modelica importer's `scheme="midpoint"` runner uses this. The backward Euler and trapezoidal schemes
 do not accept the argument and raise `ValueError` if it is given. So does `step_with_transfer`, which returns the boundary transfer: the transfer is defined for a boundary held constant over the step.
 
 `x_boundary_rates=(start, end)`, given together with `x_boundary_end`, adds the boundary's rates
@@ -296,7 +304,7 @@ has nowhere to go, and the step drops it (no airflow through a plenum: its coil 
 nothing); `step`'s `diagnostics` reports the number of nonzero source entries dropped under
 `"held_sources_dropped"` (in `Model.step`, at `diagnostics["layers"][name]`). Their capacity, at construction or per step, may be 0
 (a negative one is refused everywhere, and a zero one at any other node). Removal and kinetics act
-on a stored amount, so they do not act on these nodes. Only `scheme="implicit"` and `steady` can
+on a stored amount, so they do not act on these nodes. Only `scheme="backward_euler"` and `steady` can
 hold a storage-free node that flow passes through: the exponential and trapezoidal steps have no
 algebraic form, so a layer with either scheme refuses such a node at construction (a node joined
 only by conduction is folded instead, see below). A `steady` solve has no value for such a node
@@ -344,7 +352,7 @@ return a `SolveResult` that has converged in zero iterations. `layer.steady(...,
 the stored nodes at `x0` and solves only the folded ones: the consistent initial point
 `Model.steady(..., mode="initial")` uses. A storage-free node that air flows
 through (a plenum), or that has a removal or reaction at construction, is not folded and still
-needs `scheme="implicit"`; a per-call removal (the `"<layer>.removal"` driver) that is nonzero at a
+needs `scheme="backward_euler"`; a per-call removal (the `"<layer>.removal"` driver) that is nonzero at a
 folded node is refused, naming the node. `layer.folded_mask` is the `(n_i,)` boolean mask of the folded nodes. `rate`
 and the dense `operator` still describe the whole network, a folded node as its algebraic balance.
 
@@ -370,7 +378,7 @@ the operator is singular. `steady` checks for this on every batch instance befor
 raises `UndefinedSteadyState` (a `ValueError`), naming the nodes; its `layer` and `nodes`
 attributes say which. Step such a model through time instead, or give the nodes an exchange.
 
-**Linear solver.** The `"implicit"` and `"trapezoidal"` schemes each need one linear solve per
+**Linear solver.** The `"backward_euler"` and `"trapezoidal"` schemes each need one linear solve per
 step (`"exact"` has none). `linear_solver` names it: `"auto"` (the default), `"gmres"`,
 `"gmres_jacobi"`, `"gmres_ilu"`, `"sparse_direct"` or `"direct"`, resolved fresh on every solve
 (unlike `KirchhoffLayer.linear_solver`, which is fixed for the layer's lifetime). `"auto"`
@@ -547,7 +555,7 @@ unknowns. `Model` hands such a layer what its laws need:
   initial point, e.g. `layer.solve(..., mode="initial")`. The history is always the
   step-start state, so `coupling="iterate"` re-steps every pass from the same start.
 
-`integration=` (`"trapezoidal"` or `"backward_euler"`) travels through `**solve_kwargs`; the
+`scheme=` (`"trapezoidal"` or `"backward_euler"`) travels through `**solve_kwargs`; the
 keywords the Model sets itself (`phi0`, `q0`, `history`, `dt`, `t`) are refused there by name.
 `steady` solves such a layer at its operating point (a capacitance open, an inductance
 shorted). A layer with contextual laws but no dynamic one (a time-dependent source and

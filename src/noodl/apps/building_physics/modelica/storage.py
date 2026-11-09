@@ -47,7 +47,7 @@ airflow solve and the `exact` transport steps per `coupling="iterate"` pass):
 * **Water** is the species layer's conservative flux form (`dilution = 0`) with capacity
   `m`; a **trace substance** has `dilution = 1` and a source correction `- s C`.
 
-In `Model.step` (`run.simulate(scheme="implicit")`) the storage is backward Euler and
+In `Model.step` (`run.simulate(scheme="backward_euler")`) the storage is backward Euler and
 `w`, `m` and the source terms use the pass's (previous iterate's) state; at convergence they
 are the end-of-step values, like everything else in the step. `run.simulate(scheme="midpoint")`
 takes the mean of the terms at the two ends of the step and the volumes' storage rate by the

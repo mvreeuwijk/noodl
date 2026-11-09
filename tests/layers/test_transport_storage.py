@@ -40,7 +40,7 @@ def _step(scheme, *, q, v_old, v_new, x0=1.0, dt=1.0, carry_capacity=True, remov
     return model.step(state, drivers, dt)["c.x"].item()
 
 
-@pytest.mark.parametrize("scheme", ["implicit", "trapezoidal"])
+@pytest.mark.parametrize("scheme", ["backward_euler", "trapezoidal"])
 @pytest.mark.parametrize(
     "q, v_old, v_new, expected",
     [
@@ -64,11 +64,11 @@ def test_amount_balance_across_a_changing_capacity(scheme, q, v_old, v_new, expe
     assert v_new * x == pytest.approx(v_old * 1.0 - (1.0 if q > 0 else 0.0) * x, rel=1e-10)
 
 
-@pytest.mark.parametrize("scheme", ["exact", "implicit", "trapezoidal"])
+@pytest.mark.parametrize("scheme", ["exact", "backward_euler", "trapezoidal"])
 def test_a_fixed_capacity_layer_is_unchanged_by_the_storage_contract(scheme):
     """Control: without capacity keys the step is the classic one. x1 = 1/(1+1) = 0.5 for
     implicit, e^{-1} for exact, (1-0.5)/(1+0.5) = 1/3 for trapezoidal (q = 1, V = 1)."""
-    expected = {"exact": 0.36787944117144233, "implicit": 0.5, "trapezoidal": 1 / 3}[scheme]
+    expected = {"exact": 0.36787944117144233, "backward_euler": 0.5, "trapezoidal": 1 / 3}[scheme]
     assert _step(scheme, q=1.0, v_old=1.0, v_new=1.0, carry_capacity=False) == pytest.approx(
         expected, rel=1e-12
     )
@@ -83,7 +83,7 @@ def _bare_layer(scheme):
                           boundary=["ambient"], scheme=scheme)
 
 
-@pytest.mark.parametrize("scheme", ["implicit", "trapezoidal"])
+@pytest.mark.parametrize("scheme", ["backward_euler", "trapezoidal"])
 def test_layer_step_with_capacity_prev_conserves_the_amount(scheme):
     layer = _bare_layer(scheme)
     x = layer.step(_t([1.0]), _t([-1.0]), _t([0.0, 0.0]), _t([0.0]), 1.0,
@@ -98,7 +98,7 @@ def test_the_exact_scheme_refuses_a_changing_capacity_by_name():
                    capacity=_t([2.0]), capacity_prev=_t([1.0]))
 
 
-@pytest.mark.parametrize("scheme", ["implicit", "trapezoidal"])
+@pytest.mark.parametrize("scheme", ["backward_euler", "trapezoidal"])
 def test_gradients_flow_through_both_capacities(scheme):
     layer = _bare_layer(scheme)
 
@@ -118,7 +118,7 @@ def test_substeps_interpolate_the_capacity_and_conserve_the_amount():
     net.add_node("zone")
     net.add_edge("zone", "ambient", kind="flow")
     layer = TransportLayer(net, "c", capacity=_t([1.0]), flow_kind="flow",
-                           boundary=["ambient"], scheme="implicit")
+                           boundary=["ambient"], scheme="backward_euler")
     model = Model(net, {"c": layer}, closures=[lambda s, d: {"c.q": _t([-1.0])}],
                   substeps={"c": 4})
     new = model.step({"c.x": _t([1.0]), "c.capacity": _t([1.0])},
@@ -136,7 +136,7 @@ def test_a_steady_solve_records_the_capacity_it_was_solved_with():
     net.add_node("zone")
     net.add_edge("zone", "ambient", kind="flow")
     layer = TransportLayer(net, "c", capacity=_t([1.0]), flow_kind="flow",
-                           boundary=["ambient"], scheme="implicit")
+                           boundary=["ambient"], scheme="backward_euler")
     model = Model(net, {"c": layer}, closures=[lambda s, d: {"c.q": _t([1.0]),
                                                              "c.capacity": _t([2.0])}])
     out = model.steady({"c.x": _t([1.0]), "c.capacity": _t([3.0])},
@@ -150,7 +150,7 @@ def test_a_written_capacity_driver_requires_the_capacity_in_the_start_state():
     net.add_node("zone")
     net.add_edge("zone", "ambient", kind="flow")
     layer = TransportLayer(net, "c", capacity=_t([1.0]), flow_kind="flow",
-                           boundary=["ambient"], scheme="implicit")
+                           boundary=["ambient"], scheme="backward_euler")
     model = Model(net, {"c": layer}, closures=[lambda s, d: {"c.q": _t([0.0]),
                                                              "c.capacity": _t([2.0])}])
     with pytest.raises(KeyError, match="c.capacity.*initial_capacities"):
@@ -164,7 +164,7 @@ def test_a_written_capacity_driver_requires_the_capacity_in_the_start_state():
     "scheme, expected",
     [
         ("trapezoidal", 1.0 / 6.0),
-        ("implicit", 1.0 / 4.0),  # control: the implicit amount form is correct
+        ("backward_euler", 1.0 / 4.0),  # control: the implicit amount form is correct
     ],
 )
 def test_changing_capacity_with_removal_uses_each_capacity_for_its_own_time(scheme, expected):
