@@ -18,6 +18,7 @@ from noodl.apps.sewer.network import (
     tree_steady,
 )
 from noodl.drives import Stack
+from noodl.heads import EdgeHeads
 
 F64 = torch.float64
 
@@ -231,11 +232,17 @@ def test_the_outfall_pipe_is_found_by_where_it_drains_not_by_position():
         assert phi_a[name] == pytest.approx(phi_b[name], abs=1e-10), name
 
 
-def test_the_headspace_stack_drive_uses_the_pipe_crown_not_the_mean_invert():
+def _air_stack(model, kind):
+    """The `Stack` term of the air layer's `EdgeHeads` closure on edge kind `kind`."""
+    heads = next(c for c in model.closures if isinstance(c, EdgeHeads) and c.layer_name == "air")
+    return next(t for t in heads.terms if isinstance(t, Stack) and t.kind == kind)
+
+
+def test_the_headspace_stack_head_uses_the_pipe_crown_not_the_mean_invert():
     """`_stack_for`'s `headspace` branch must use the pipe CROWN
     elevation (mean invert plus diameter), not the bare mean invert, as `z_path`. Built
-    with `T_head != T_amb` (the builder's own defaults, 293.15 K vs 283.15 K) so the drive
-    carries a non-trivial value, and checked against the drive's own formula
+    with `T_head != T_amb` (the builder's own defaults, 293.15 K vs 283.15 K) so the head
+    carries a non-trivial value, and checked against the term's own formula
     (`drives.Stack`'s docstring) evaluated by hand with the crown `z_path`."""
     net = SewerNetwork(
         manholes=(Manhole("J1", 12.0),),
@@ -246,10 +253,7 @@ def test_the_headspace_stack_drive_uses_the_pipe_crown_not_the_mean_invert():
     assert float(drivers["T_head"]) != float(drivers["T_amb"])
     resolved = model._apply_closures(state, drivers)
 
-    stack = next(
-        d for d in model.kirchhoff["air"]._drives
-        if isinstance(d, Stack) and d.kind == "headspace"
-    )
+    stack = _air_stack(model, "headspace")
     value = stack(resolved)
 
     graph = model.net
@@ -347,10 +351,7 @@ def test_a_ground_level_of_exactly_zero_is_not_dropped():
         outfalls=(Outfall("Out", -10.0),),
     )
     model, state, drivers = build_model(net, quality=False)
-    leak_stack = next(
-        d for d in model.kirchhoff["air"]._drives
-        if isinstance(d, Stack) and d.kind == "leak"
-    )
+    leak_stack = _air_stack(model, "leak")
     src, _ = model.net.endpoints("leak")
     manhole_node = model.net.nodes.index("A")
     (pos,) = (src == manhole_node).nonzero().flatten().tolist()

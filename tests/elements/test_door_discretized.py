@@ -45,6 +45,7 @@ from noodl.elements import (
     discretized_operable_door,
     medium,
 )
+from noodl.heads import EdgeHeads
 from noodl.layers.kirchhoff import KirchhoffLayer
 from noodl.topology import Network
 
@@ -695,11 +696,11 @@ def test_short_node_driver_and_wrong_width_raise():
         DoorCompartmentHead("d", src=[0, 0], tgt=[1, 1], hAg=[1.0], hBg=[1.0, 2.0], medium=AIR)
 
 
-def test_head_is_a_drive():
-    from noodl.drives import check_drive_signature
+def test_head_is_a_head_term():
+    from noodl.heads import HeadTerm
 
     _, head = _open()
-    check_drive_signature(head, where="test")
+    assert isinstance(head, HeadTerm)
     assert isinstance(OperableDoorCompartment, type)
 
 
@@ -717,7 +718,7 @@ def _two_zone_net(nCom):
     return net
 
 
-def test_head_drive_is_wired_by_kind_in_a_two_boundary_layer():
+def test_head_term_is_wired_by_kind_in_a_two_boundary_layer():
     """Boundary A and B at given pressures and temperatures: the layer's dp for the door
     kind is phi_A - phi_B plus the head, and its flows are the transcription's."""
     net = _two_zone_net(NCOM)
@@ -733,7 +734,8 @@ def test_head_drive_is_wired_by_kind_in_a_two_boundary_layer():
         medium=AIR,
         kind="door",
     )
-    layer = KirchhoffLayer(net, "air", [comp], drives=[head], boundary=["A", "B"])
+    layer = KirchhoffLayer(net, "air", [comp], boundary=["A", "B"])
+    heads = EdgeHeads(layer, [head])
     iA, iB = net.node_index("A"), net.node_index("B")
     for dphi, TA, TB, XA, XB in CASES:
         phi = torch.zeros(2, dtype=F64)
@@ -744,6 +746,7 @@ def test_head_drive_is_wired_by_kind_in_a_two_boundary_layer():
             "T": torch.tensor([TA, TB], dtype=F64)[[iA, iB]],
             "X_w": torch.tensor([XA, XB], dtype=F64)[[iA, iB]],
         }
+        drv.update(heads(None, drv))
         dphi_l = (phi[iA] - phi[iB]).item()
         ref = door_discretized_np(pA, pB, TA, TB, XA, XB, med=AIR, dphi=dphi_l, **GEOM)
         sl = layer.kind_slice("door")
@@ -778,7 +781,8 @@ def test_discretised_door_solves_inside_a_kirchhoff_layer_and_gradients_reach_T(
         kind="door",
     )
     ori = regularized_orifice(0.05, dp_turbulent=0.01, rho_default=AIR.rho_default, kind="ori")
-    layer = KirchhoffLayer(net, "air", [ori, comp], drives=[head], boundary=["out", "B"])
+    layer = KirchhoffLayer(net, "air", [ori, comp], boundary=["out", "B"])
+    heads = EdgeHeads(layer, [head])
     idx = {n: net.node_index(n) for n in ("out", "A", "B")}
     phi_b = torch.tensor([0.5, 0.0], dtype=F64)  # out, B
 
@@ -786,11 +790,12 @@ def test_discretised_door_solves_inside_a_kirchhoff_layer_and_gradients_reach_T(
         T = (torch.zeros(3, dtype=F64) + 293.15).index_put(
             (torch.tensor([idx["A"]]),), TA.reshape(1)
         )
-        return {
+        d = {
             "T": T,
             "p_abs": torch.full((3,), P_DEFAULT, dtype=F64),
             "X_w": torch.full((3,), 0.01, dtype=F64),
         }
+        return {**d, **heads(None, d)}
 
     TA0 = torch.tensor(299.15, dtype=F64)
     _, q = layer.solve(phi_b, drivers(TA0), differentiable=False, atol=1e-13, rtol=1e-13)

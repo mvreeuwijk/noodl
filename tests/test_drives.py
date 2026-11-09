@@ -10,6 +10,7 @@ import torch
 
 from noodl.drives import ConstantDrive, Drive, Stack, Wind, WindProfile, check_drive_signature
 from noodl.elements import PowerLaw
+from noodl.heads import EdgeHeads
 from noodl.layers.kirchhoff import KirchhoffLayer
 from noodl.topology import Network
 
@@ -46,7 +47,7 @@ def test_check_drive_signature_rejects_the_old_two_argument_form():
 
 
 def test_layer_construction_rejects_a_two_argument_drive(two_zone_layer):
-    net, elements, _, boundary = two_zone_layer
+    net, elements, boundary = two_zone_layer
 
     class OldStyle:
         kind = "airpath"
@@ -59,7 +60,7 @@ def test_layer_construction_rejects_a_two_argument_drive(two_zone_layer):
 
 
 def test_layer_solve_feeds_drives_the_drivers_mapping_only(two_zone_layer):
-    net, elements, _, boundary = two_zone_layer
+    net, elements, boundary = two_zone_layer
     seen: dict = {}
 
     class Recorder:
@@ -82,6 +83,11 @@ def test_layer_solve_feeds_drives_the_drivers_mapping_only(two_zone_layer):
 
 F64 = torch.float64
 G = 9.80665
+
+
+def _with_head(layer, terms, drivers):
+    """`drivers` plus the layer's head driver, as an `EdgeHeads` closure writes it."""
+    return {**drivers, **EdgeHeads(layer, terms)(None, drivers)}
 
 
 def _two_opening_net():
@@ -124,10 +130,11 @@ def test_warm_zone_draws_air_in_low_and_pushes_it_out_high():
     net = _two_opening_net()
     layer = KirchhoffLayer(
         net, "air", [PowerLaw(torch.tensor([0.01, 0.01], dtype=F64), 0.5)],
-        drives=[Stack.from_network(net, "airpath")], boundary=["ambient"],
+        boundary=["ambient"],
     )
     rho = torch.tensor([1.2, 1.1], dtype=F64)          # ambient dense, zone warm
-    phi, q = layer.solve(torch.zeros(1, dtype=F64), {"rho": rho}, differentiable=False)
+    drivers = _with_head(layer, [Stack.from_network(net, "airpath")], {"rho": rho})
+    phi, q = layer.solve(torch.zeros(1, dtype=F64), drivers, differentiable=False)
     assert q[0] > 0 and q[1] < 0                        # in low, out high
     assert (q[0] + q[1]).abs().item() < 1e-10           # conservation
     assert abs(phi[1].item()) < 1e-9                    # symmetric openings: neutral at 0
@@ -135,7 +142,7 @@ def test_warm_zone_draws_air_in_low_and_pushes_it_out_high():
     assert q[0].item() == pytest.approx(expected, rel=1e-8)
 
 
-def test_stack_equals_a_constant_drive_fed_the_same_values_on_a_shaft():
+def test_stack_equals_a_head_driver_fed_the_same_values_on_a_shaft():
     net = Network(dtype=F64)
     for i, z in enumerate((0.0, 3.0, 6.0, 9.0)):
         net.add_node(f"n{i}", z_ref=z)
@@ -145,13 +152,11 @@ def test_stack_equals_a_constant_drive_fed_the_same_values_on_a_shaft():
     stack = Stack.from_network(net, "airpath")
     values = stack({"rho": rho})
     el = PowerLaw(torch.tensor([0.01, 0.02, 0.01], dtype=F64), 0.65)
-    a = KirchhoffLayer(net, "a", [el], drives=[stack], boundary=["n0", "n3"])
-    b = KirchhoffLayer(
-        net, "b", [el], drives=[ConstantDrive("airpath", "s")], boundary=["n0", "n3"]
-    )
+    a = KirchhoffLayer(net, "a", [el], boundary=["n0", "n3"])
+    b = KirchhoffLayer(net, "b", [el], boundary=["n0", "n3"])
     pb = torch.tensor([0.0, -5.0], dtype=F64)
-    phi_a, q_a = a.solve(pb, {"rho": rho}, differentiable=False)
-    phi_b, q_b = b.solve(pb, {"s": values}, differentiable=False)
+    phi_a, q_a = a.solve(pb, _with_head(a, [stack], {"rho": rho}), differentiable=False)
+    phi_b, q_b = b.solve(pb, {"b.edge_head": values}, differentiable=False)
     torch.testing.assert_close(phi_a, phi_b, rtol=1e-12, atol=1e-12)
     torch.testing.assert_close(q_a, q_b, rtol=1e-12, atol=1e-12)
 
@@ -170,12 +175,14 @@ def test_stack_gradient_wrt_rho_through_the_differentiable_solve():
     net = _two_opening_net()
     layer = KirchhoffLayer(
         net, "air", [PowerLaw(torch.tensor([0.01, 0.01], dtype=F64), 0.5)],
-        drives=[Stack.from_network(net, "airpath")], boundary=["ambient"],
+        boundary=["ambient"],
     )
+    heads = EdgeHeads(layer, [Stack.from_network(net, "airpath")])
     rho = torch.tensor([1.2, 1.1], dtype=F64, requires_grad=True)
     pb = torch.zeros(1, dtype=F64)
     assert torch.autograd.gradcheck(
-        lambda r: layer.solve(pb, {"rho": r})[1], (rho,), eps=1e-6, atol=1e-6
+        lambda r: layer.solve(pb, {"rho": r, **heads(None, {"rho": r})})[1], (rho,),
+        eps=1e-6, atol=1e-6,
     )
 
 
@@ -292,20 +299,22 @@ def test_wind_drives_a_through_flow_and_is_differentiable_wrt_speed_and_directio
     prof = WindProfile([0.0, 90.0, 180.0, 270.0], [0.6, -0.3, -0.4, -0.3])
     layer = KirchhoffLayer(
         net, "air", [PowerLaw(torch.tensor([0.01, 0.05, 0.01], dtype=F64), 0.5)],
-        drives=[Wind.from_network(net, "airpath", ambient="ambient", profiles=[prof])],
         boundary=["ambient"],
     )
+    heads = EdgeHeads(
+        layer, [Wind.from_network(net, "airpath", ambient="ambient", profiles=[prof])])
     pb = torch.zeros(1, dtype=F64)
     rho = torch.tensor(1.2, dtype=F64)
-    phi, q = layer.solve(
-        pb, {"rho_amb": rho, "V_met": torch.tensor(4.0, dtype=F64),
-             "theta_w": torch.tensor(20.0, dtype=F64)}, differentiable=False,
-    )
+    wind = {"rho_amb": rho, "V_met": torch.tensor(4.0, dtype=F64),
+            "theta_w": torch.tensor(20.0, dtype=F64)}
+    phi, q = layer.solve(pb, {**wind, **heads(None, wind)}, differentiable=False)
     assert q[0] > 0 and q[1] > 0 and q[2] > 0        # windward in, leeward out
     V = torch.tensor(4.0, dtype=F64, requires_grad=True)
     th = torch.tensor(20.0, dtype=F64, requires_grad=True)
     assert torch.autograd.gradcheck(
-        lambda v, t: layer.solve(pb, {"rho_amb": rho, "V_met": v, "theta_w": t})[1],
+        lambda v, t: layer.solve(pb, {"rho_amb": rho, "V_met": v, "theta_w": t,
+                                      **heads(None, {"rho_amb": rho, "V_met": v,
+                                                     "theta_w": t})})[1],
         (V, th), eps=1e-6, atol=1e-6,
     )
 

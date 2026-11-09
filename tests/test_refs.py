@@ -21,6 +21,7 @@ from noodl.apps.building_physics import (
 from noodl.apps.building_physics.elements import orifice_law_from_edges
 from noodl.drives import Stack
 from noodl.elements.powerlaw import PowerLaw
+from noodl.heads import EdgeHeads
 from noodl.layers.kirchhoff import KirchhoffLayer
 from noodl.model import Model
 from noodl.refs import Field
@@ -79,10 +80,11 @@ def test_a_renamed_thermal_layer_drives_the_density_closure_under_its_own_name()
     net, _ = _two_zone_with_wall()
     th = thermal_layer(net, name="heat")
     air = KirchhoffLayer(net, "air", [orifice_law_from_edges(net, "airpath")],
-                         drives=[Stack.from_network(net, "airpath")], boundary=["ambient"])
+                         boundary=["ambient"])
     from noodl.apps.building_physics import IdealGasDensity
 
-    model = Model(net, [air, th], closures=[IdealGasDensity(th, ambient_index=0)])
+    model = Model(net, [air, th], closures=[IdealGasDensity(th, ambient_index=0),
+                                            EdgeHeads(air, [Stack.from_network(net, "airpath")])])
     state = initial_state(model)
     drivers = initial_drivers(model)
     assert set(state) == {"heat.x"} and "heat.x_boundary" in drivers

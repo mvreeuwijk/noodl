@@ -6,7 +6,6 @@ import pytest
 import torch
 
 from benchmarks.composed_model import build_composed
-from noodl.drives import ConstantDrive
 from noodl.elements import PowerLaw
 from noodl.topology import Network
 
@@ -41,10 +40,11 @@ def two_zone_layer():
 
     Edges (kind="airpath", insertion order): ambient->z1, z1->z2, z2->ambient.
     C = [0.01, 0.02, 0.01], n = 0.65. boundary = ["ambient"], interior = ["z1", "z2"].
-    A ConstantDrive("airpath", "wind") is attached; its driver tensor must be shaped
-    (..., 3) with the wind magnitude in column 0 (ambient->z1) and zero elsewhere.
+    A layer built from it (named "zones") takes the wind as its head driver
+    `"zones.edge_head"`, shaped (..., 3) with the wind magnitude in column 0 (ambient->z1)
+    and zero elsewhere.
 
-    Returns (net, elements, drives, boundary).
+    Returns (net, elements, boundary).
     """
     net = Network(dtype=torch.float64)
     net.add_node("ambient")
@@ -54,9 +54,8 @@ def two_zone_layer():
     net.add_edge("z1", "z2", kind="airpath")
     net.add_edge("z2", "ambient", kind="airpath")
     elements = [PowerLaw(torch.tensor([0.01, 0.02, 0.01], dtype=torch.float64), 0.65)]
-    drives = [ConstantDrive("airpath", "wind")]
     boundary = ["ambient"]
-    return net, elements, drives, boundary
+    return net, elements, boundary
 
 
 @pytest.fixture(scope="session")

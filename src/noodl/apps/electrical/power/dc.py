@@ -16,7 +16,7 @@ but the slack, whose angle is fixed. Here that is one classic layer `"power_dc"`
 - Potential: the voltage angle θ (rad) at the nodes `str(bus.id)`, in bus-table order; no
   ground node. The slack bus is the layer's one boundary node, at `radians(Va_slack)`.
 - Edges: one kind `"branch"`, an edge `from -> to` per in-service branch in file order with
-  a `Conductance(1 / (x τ))`, and one `ConstantDrive("branch", "power_dc.shift")` holding
+  a `Conductance(1 / (x τ))`, and the head driver `"power_dc.edge_head"` holding
   `-σ` per branch, so `dp = θ_f - θ_t - σ` and the edge flow `q = (θ_f - θ_t - σ) / (x τ)`
   is MATPOWER's `Pf` (p.u.). The phase shifts' injections `Pbusinj` are thereby part of the
   branch flows, not of the sources.
@@ -25,10 +25,10 @@ but the slack, whose angle is fixed. Here that is one classic layer `"power_dc"`
   the slack bus, whose balance the boundary condition replaces.
 - `r`, `b`, the bus `Bs` and the reactive demand play no part.
 
-The layer has only `Conductance` laws and a drive, so it is solved by one linear solve of
+The layer has only `Conductance` laws and a constant head, so it is solved by one linear solve of
 the weighted graph Laplacian (`layer.mna` is `False`). Driver keys:
 `"power_dc.phi_boundary"` (`[θ_slack]`, rad), `"power_dc.sources"` (full-node injections,
-p.u.) and `"power_dc.shift"` (per branch, rad); the state is empty.
+p.u.) and `"power_dc.edge_head"` (per branch, rad); the state is empty.
 """
 
 from __future__ import annotations
@@ -40,7 +40,6 @@ import torch
 
 from noodl.apps.electrical.power.build import PowerFlowIndex, _analyse
 from noodl.apps.electrical.power.network import PowerNetwork
-from noodl.drives import ConstantDrive
 from noodl.elements.conductance import Conductance
 from noodl.layers.kirchhoff import KirchhoffLayer
 from noodl.model import Model
@@ -53,7 +52,7 @@ Drivers = dict[str, Tensor]
 
 #: The name of the DC power-flow layer: state keys `"power_dc.phi"` (bus voltage angles,
 #: rad) and `"power_dc.q"` (branch real powers, p.u.); drivers `"power_dc.phi_boundary"`,
-#: `"power_dc.sources"` and `"power_dc.shift"`.
+#: `"power_dc.sources"` and `"power_dc.edge_head"`.
 DC_LAYER = "power_dc"
 
 
@@ -108,8 +107,7 @@ def dc_power_flow(net: PowerNetwork) -> tuple[Model, State, Drivers]:
     for br in branches:
         graph.add_edge(str(br.from_bus), str(br.to_bus), kind="branch")
     law = Conductance(_f64(1.0 / (br.x * (br.ratio or 1.0)) for br in branches), kind="branch")
-    shift = ConstantDrive("branch", f"{DC_LAYER}.shift")
-    layer = KirchhoffLayer(graph, DC_LAYER, [law], drives=[shift], boundary=[str(slack)],
+    layer = KirchhoffLayer(graph, DC_LAYER, [law], boundary=[str(slack)],
                            quantity="voltage angle", unit="rad", flow_unit="p.u.")
     model = Model(graph, [layer])
     model.power_index = index
@@ -128,7 +126,7 @@ def dc_power_flow(net: PowerNetwork) -> tuple[Model, State, Drivers]:
     drivers: Drivers = {
         f"{DC_LAYER}.phi_boundary": _f64([math.radians(va_slack)]),
         f"{DC_LAYER}.sources": _f64(injection[b.id] / base for b in net.buses),
-        f"{DC_LAYER}.shift": _f64(-math.radians(br.shift_deg) for br in branches),
+        f"{DC_LAYER}.edge_head": _f64(-math.radians(br.shift_deg) for br in branches),
     }
     return model, {}, drivers
 

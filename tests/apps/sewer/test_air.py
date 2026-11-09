@@ -12,6 +12,7 @@ from noodl.apps.sewer.air import (
     Headspace,
     air_density,
 )
+from noodl.heads import EdgeHeads
 from noodl.layers.kirchhoff import KirchhoffLayer
 from noodl.topology import Network
 
@@ -147,10 +148,10 @@ def test_pescod_and_price_air_to_water_velocity_ratio(h_over_d, v_w, measured):
     half = torch.tensor([7.5, 7.5], dtype=F64)
     layer = KirchhoffLayer(
         net, "air", [Headspace(half, torch.tensor([0, 1]))],
-        drives=[Drag(half, torch.tensor([0, 1]))], boundary=["A1", "A2"],
-        linear_solver="direct",
+        boundary=["A1", "A2"], linear_solver="direct",
     )
     drv = _drivers(0.30, h_over_d, v_w, n_edges=2)
+    drv.update(EdgeHeads(layer, [Drag(half, torch.tensor([0, 1]))])(None, drv))
     phi, q = layer.solve(torch.zeros(2, dtype=F64), drv, None, differentiable=False,
                          atol=1e-12, rtol=1e-12)
     ratio = float(q[0]) / float(drv["sewer.A_air"][0]) / v_w

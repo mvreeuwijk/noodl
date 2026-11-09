@@ -13,7 +13,6 @@ from __future__ import annotations
 import pytest
 import torch
 
-from noodl.drives import ConstantDrive
 from noodl.elements import OpenDoor, PowerLaw, medium
 from noodl.layers._functional import FunctionalLaws
 from noodl.layers.kirchhoff import KirchhoffLayer
@@ -68,9 +67,8 @@ def _building():
                                      ("z2", "amb", "airpath"), ("z1", "z2", "door")])
     law = PowerLaw(_t([0.010, 0.008, 0.012]), _t(0.65), learnable=True)
     door = OpenDoor(direction="ab", src=[1], tgt=[2], medium=air, kind="door")
-    layer = KirchhoffLayer(net, "air", [law, door], [ConstantDrive(kind="airpath", key="wind")],
-                           boundary=["amb"])
-    drivers = {"wind": _t([12.0, 0.0, -3.0], grad=True),
+    layer = KirchhoffLayer(net, "air", [law, door], boundary=["amb"])
+    drivers = {"air.edge_head": _t([12.0, 0.0, -3.0, 0.0], grad=True),
                "T": _t([288.15, 295.15, 291.15])}
     return layer, law, drivers
 
@@ -79,7 +77,7 @@ def test_gradcheck_building_network():
     layer, law, drivers = _building()
     sources = _t([0.0, 0.01, -0.02], grad=True)
     phi_b = _t([0.0], grad=True)
-    _gradcheck(layer, phi_b, drivers, sources, (law.C,), keys=("wind",))
+    _gradcheck(layer, phi_b, drivers, sources, (law.C,), keys=("air.edge_head",))
 
 
 # ---------------------------------------------------------------------------- water
@@ -98,10 +96,8 @@ def _water():
                           kind="valve")
     demand = PressureDrivenDemand(torch.tensor([2, 3]), _t([0.02, 0.015]), _t([5.0, 8.0]),
                                   p_min=0.0, p_req=30.0)
-    layer = KirchhoffLayer(net, "water", [pipes, valve], [ConstantDrive(kind="pipe",
-                                                                        key="pump_head")],
-                           boundary=["R"], node_sources=[demand])
-    drivers = {"pump_head": _t([3.0, 0.0, 0.0, 0.0], grad=True)}
+    layer = KirchhoffLayer(net, "water", [pipes, valve], boundary=["R"], node_sources=[demand])
+    drivers = {"water.edge_head": _t([3.0, 0.0, 0.0, 0.0, 0.0], grad=True)}
     return layer, pipes, drivers
 
 
@@ -112,7 +108,7 @@ def test_gradcheck_water_network():
     phi, _ = layer.solve(phi_b, drivers, sources, differentiable=True, **TIGHT)
     pressure = phi[2:] - _t([5.0, 8.0])
     assert bool(((pressure > 0.0) & (pressure < 30.0)).all())  # inside the demand curve
-    _gradcheck(layer, phi_b, drivers, sources, (pipes.roughness,), keys=("pump_head",),
+    _gradcheck(layer, phi_b, drivers, sources, (pipes.roughness,), keys=("water.edge_head",),
                eps={0: 1e-3})
 
 
@@ -197,7 +193,7 @@ def test_the_operator_uses_dflow_only_where_it_is_exact():
 def test_a_newton_aid_declared_inexact_keeps_correct_gradients():
     layer, aided, drivers = _aided(False)
     sources, phi_b = _t([0.0, 0.01, -0.02], grad=True), _t([0.0], grad=True)
-    _gradcheck(layer, phi_b, drivers, sources, (aided.C,), keys=("wind",))
+    _gradcheck(layer, phi_b, drivers, sources, (aided.C,), keys=("air.edge_head",))
 
 
 def test_a_newton_aid_declared_exact_corrupts_the_gradient():

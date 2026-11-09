@@ -11,6 +11,7 @@ import pytest
 import torch
 
 from noodl.elements import PowerLaw, UpstreamDensityPowerLaw
+from noodl.heads import EdgeHeads
 from noodl.layers.kirchhoff import KirchhoffLayer
 from noodl.topology import Network
 
@@ -359,19 +360,18 @@ def test_a_buoyant_two_orifice_stack_beats_the_uncorrected_law_in_both_direction
     from noodl.drives import Stack
 
     drive = Stack.from_network(net, "airpath")
-    plain = KirchhoffLayer(net, "air", [PowerLaw(C, n)], drives=[drive],
-                           boundary=["ambient"])
+    plain = KirchhoffLayer(net, "air", [PowerLaw(C, n)], boundary=["ambient"])
     corrected = KirchhoffLayer(
         net,
         "air",
         [UpstreamDensityPowerLaw(C, n, src=src, tgt=tgt, m=0.5, rho_ref=RHO_REF)],
-        drives=[drive],
         boundary=["ambient"],
     )
+    heads = EdgeHeads(plain, [drive])      # the same edge order and name as `corrected`
     phi_b = torch.zeros(1, dtype=F64)
     for T_amb, expect_inflow in ((273.15, True), (313.15, False)):
         rho = 101325.0 / (287.055 * torch.tensor([T_amb, 293.15], dtype=F64))
-        drv = {"rho": rho}
+        drv = {"rho": rho, **heads(None, {"rho": rho})}
         _, q_plain = plain.solve(phi_b, drv, differentiable=False, atol=1e-12, rtol=1e-12)
         _, q_corr = corrected.solve(phi_b, drv, differentiable=False, atol=1e-12, rtol=1e-12)
         assert (q_plain[0].item() > 0) is expect_inflow
@@ -388,7 +388,7 @@ def test_a_buoyant_two_orifice_stack_beats_the_uncorrected_law_in_both_direction
 def test_a_gradient_reaches_the_density_driver_through_a_differentiable_solve():
     """The binding contract: nothing on the path from `drivers['rho']` to the solved flow may
     be detached. The implicit-function backward reaches the density through BOTH the `Stack`
-    drive and this element's coefficient, and the two contributions have opposite signs, so a
+    head and this element's coefficient, and the two contributions have opposite signs, so a
     detached coefficient would not merely lose a term -- it would change the sign of dq/drho
     on the warm side. Checked against a central difference on the solve itself.
     """
@@ -413,14 +413,15 @@ def test_a_gradient_reaches_the_density_driver_through_a_differentiable_solve():
                 rho_ref=RHO_REF,
             )
         ],
-        drives=[Stack.from_network(net, "airpath")],
         boundary=["ambient"],
     )
+    heads = EdgeHeads(layer, [Stack.from_network(net, "airpath")])
     phi_b = torch.zeros(1, dtype=F64)
     rho0 = torch.tensor([1.2922, 1.2041], dtype=F64)
 
     def total(rho):
-        _, q = layer.solve(phi_b, {"rho": rho}, atol=1e-13, rtol=1e-13)
+        _, q = layer.solve(phi_b, {"rho": rho, **heads(None, {"rho": rho})}, atol=1e-13,
+                           rtol=1e-13)
         return q[0]
 
     rho = rho0.clone().requires_grad_(True)

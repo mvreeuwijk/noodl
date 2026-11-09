@@ -73,7 +73,7 @@ def test_build_rules():
     assert g.dtype == torch.float64
     expected = [1.0 / (br.x * (br.ratio or 1.0)) for br in branches]
     assert torch.allclose(g, torch.tensor(expected, dtype=torch.float64), rtol=0, atol=0)
-    shift = drivers[f"{DC_LAYER}.shift"]
+    shift = drivers[f"{DC_LAYER}.edge_head"]
     assert shift.dtype == torch.float64
     assert shift.tolist() == [-math.radians(br.shift_deg) for br in branches]
     assert shift.tolist()[3] == math.radians(3.0)
@@ -85,7 +85,7 @@ def test_build_rules():
 
 
 @pytest.mark.external
-def test_phase_shifter_enters_as_a_drive():
+def test_phase_shifter_enters_as_a_head():
     # case9_features: branch 1-4 has ratio 1.02 and shift -3 deg; its DC flow is 0.97 p.u.
     model, sol = _dc(read_matpower(power_case("case9_features")))
     assert abs(sol.pf[0] - 0.9699999999999992) < 1e-12

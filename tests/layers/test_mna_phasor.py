@@ -305,7 +305,7 @@ def test_real_view_jacobian_matches_autograd_jacobian():
 
 
 def test_classic_power_residual_bit_for_bit():
-    # A classic nonlinear layer with a drive and sources: the conjugating power_residual
+    # A classic nonlinear layer with a head and sources: the conjugating power_residual
     # equals the old real formula exactly.
     class Push:
         kind = "air"
@@ -316,15 +316,16 @@ def test_classic_power_residual_bit_for_bit():
     net = _net(["gnd", "a", "b"], [("gnd", "a", "air"), ("a", "b", "air"), ("b", "gnd", "air")])
     layer = KirchhoffLayer(net, "e", [PowerLaw(torch.tensor([1.0, 0.7, 1.3]), 0.6,
                                                    kind="air")],
-                           drives=[Push()], boundary=["gnd"])
+                           boundary=["gnd"])
+    drivers = {"e.edge_head": Push()({})}
     sources = torch.tensor([0.0, 0.2, -0.1])
-    phi, q = layer.solve(torch.tensor([0.0]), {}, sources, differentiable=False)
-    d = layer.dp(phi, {})
+    phi, q = layer.solve(torch.tensor([0.0]), drivers, sources, differentiable=False)
+    d = layer.dp(phi, drivers)
     drive_only = d - layer._difference(phi)
     old = ((d * q).sum(-1) - (drive_only * q).sum(-1)
            - (phi[..., layer.bound] * layer.net_outflow(q)[..., layer.bound]).sum(-1)
            - (phi[..., layer.interior] * sources[..., layer.interior]).sum(-1))
-    assert torch.equal(layer.power_residual(phi, q, {}, sources), old)
+    assert torch.equal(layer.power_residual(phi, q, drivers, sources), old)
 
 
 def test_inductor_in_phasor_mode():

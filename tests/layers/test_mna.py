@@ -5,6 +5,7 @@ import torch
 
 import noodl.solvers.select as select_module
 from noodl.elements import Conductance, ConstitutiveLaw, FixedFlow, ImplicitLaw, LawContext
+from noodl.heads import EdgeHeads
 from noodl.layers.kirchhoff import KirchhoffLayer
 from noodl.nodesources import NodeSource
 from noodl.solvers.implicit import TransposeOperator
@@ -430,7 +431,7 @@ def test_on_failure_return_requires_diagnostics():
         layer.solve(torch.zeros(1), differentiable=False, on_failure="return")
 
 
-def test_dynamic_kind_may_not_carry_a_drive():
+def test_dynamic_kind_may_not_carry_a_head():
     class Store(Source):
         dynamic = True
 
@@ -441,10 +442,10 @@ def test_dynamic_kind_may_not_carry_a_drive():
             return torch.tensor([1.0])
 
     net = _floating_source_net()
-    with pytest.raises(ValueError, match="drive"):
-        KirchhoffLayer(net, "e", [Conductance(torch.tensor([1.0, 0.5]), kind="r"),
-                                      Store(torch.tensor([3.0]))],
-                       drives=[Push()], boundary=["gnd"])
+    layer = KirchhoffLayer(net, "e", [Conductance(torch.tensor([1.0, 0.5]), kind="r"),
+                                      Store(torch.tensor([3.0]))], boundary=["gnd"])
+    with pytest.raises(ValueError, match="dynamic law, which may not carry a head"):
+        EdgeHeads(layer, [Push()])
 
 
 def test_auto_factorises_sparse_whenever_scipy_is_importable(monkeypatch):

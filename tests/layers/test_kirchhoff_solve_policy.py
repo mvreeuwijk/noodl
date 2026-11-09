@@ -24,7 +24,6 @@ from typing import Any
 import pytest
 import torch
 
-from noodl.drives import ConstantDrive
 from noodl.elements import ConstitutiveLaw, ImplicitLaw, PowerLaw
 from noodl.layers.kirchhoff import KirchhoffLayer
 from noodl.topology import Network
@@ -64,13 +63,12 @@ def _classic():
                                         ("z2", "l", "airpath")])
     element = PowerLaw(torch.tensor([0.010, 0.008, 0.012], dtype=F64), 0.65,
                        dp_transition=1e-6)
-    layer = KirchhoffLayer(net, "e", [element], [ConstantDrive(kind="airpath", key="wind")],
-                           boundary=["w", "l"])
+    layer = KirchhoffLayer(net, "e", [element], boundary=["w", "l"])
     base = torch.tensor([12.0, 0.0, 0.0], dtype=F64)
 
     def call(reaches):
         leaf = torch.tensor(1.0, dtype=F64, requires_grad=reaches)
-        return (torch.zeros(2, dtype=F64), {"wind": base * leaf}, None), {}, leaf
+        return (torch.zeros(2, dtype=F64), {"e.edge_head": base * leaf}, None), {}, leaf
 
     return layer, call
 

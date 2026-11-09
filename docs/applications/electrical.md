@@ -793,7 +793,7 @@ resistance or charging, small angle differences) as plain nodal analysis on a cl
 `KirchhoffLayer` named `"power_dc"`. The potential is the voltage angle `theta` (rad) at
 the buses; there is no ground node. Each in-service branch is one edge from bus `->` to bus with
 a `Conductance(1 / (x tau))` (`tau` the tap ratio, 0 meaning 1), and the phase shifts `sigma`
-are a `ConstantDrive` on that kind, the driver `"power_dc.shift"` holding `-sigma`, so the
+are the layer's head driver `"power_dc.edge_head"` (per branch, in edge order) holding `-sigma`, so the
 branch flow is
 
 `Pf = (theta_f - theta_t - sigma) / (x tau)`,

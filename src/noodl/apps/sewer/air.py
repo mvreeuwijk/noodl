@@ -1,5 +1,5 @@
-"""Headspace air: the `Headspace` branch element, the `Drag` drive and the air-density
-closure that feeds the existing `Stack` buoyancy drive.
+"""Headspace air: the `Headspace` branch element, the `Drag` head term and the air-density
+closure that feeds the existing `Stack` buoyancy term (both added up by `air_heads`).
 
 Per `headspace` edge the branch law is
 
@@ -7,11 +7,12 @@ Per `headspace` edge the branch law is
 
 with the wall-friction resistance ``R(h) = f_air L rho / (2 D_h A_air^2)`` (Darcy-Weisbach
 on the air segment's hydraulic diameter), the interfacial drag ``D`` from the moving water
-surface, and the stack term ``B`` from the existing `drives.Stack`.
+surface, and the stack term ``B`` from the existing `drives.Stack`; ``-D - B`` is the head
+``"air.edge_head"``.
 
 ``A_air`` and ``D_h`` arrive as per-edge DRIVERS written by `SewerHydraulics` in the same
 pass, exactly as `UpstreamDensityPowerLaw` reads its density driver: an element may read
-`drivers` inside `flow`/`dflow`/`linear_init`, a Drive may read `drivers` and nothing else.
+`drivers` inside `flow`/`dflow`/`linear_init`, a head term may read `drivers` and nothing else.
 
 Coefficient status: ``f_air`` default 0.02 is UNVERIFIED (the reported
 range for sewer crowns is 0.015-0.045, Edwini-Bonsu and Steffler 2006, paywalled);
@@ -31,6 +32,7 @@ from noodl.drives import Stack
 from noodl.elements.base import ConstitutiveLaw
 from noodl.elements.fixed import FixedFlow
 from noodl.elements.powerlaw import PowerLaw
+from noodl.heads import EdgeHeads
 from noodl.layers.kirchhoff import KirchhoffLayer
 from noodl.topology import Network
 
@@ -155,24 +157,24 @@ class Headspace(ConstitutiveLaw):
 
 
 class Drag:
-    """Interfacial drag as a `Drive`: the shear a moving water surface exerts on the air.
+    """Interfacial drag as a head term: the shear a moving water surface exerts on the air.
 
     ``D = (f_i / 2) rho U_s |U_s| T L / A_air`` with ``U_s = c_s V_w`` the surface velocity
     (Edwini-Bonsu and Steffler 2004's rigid-moving-lid framing, p.332), spread over the air
     area.
 
-    SIGN. The layer evaluates ``dp = (phi_src - phi_tgt) + sum(drives)`` and the element's
+    SIGN. The layer evaluates ``dp = (phi_src - phi_tgt) + head`` and the element's
     law is ``dp = R |Q| Q``, so the momentum balance ``phi_src - phi_tgt = R|Q|Q - D - B``
     means the
-    drive returns ``+D``: with both ends at ambient the drag alone then produces
+    term returns ``+D``: with both ends at ambient the drag alone then produces
     ``R|Q|Q = D``, i.e. flow from the upstream manhole towards the downstream one, which is
     the direction the wastewater drags the air (``-D`` would reverse it).
 
-    A `Drive` reads DRIVERS ONLY -- never `phi`, never another layer's state -- which is
+    A head term reads DRIVERS ONLY -- never `phi`, never another layer's state -- which is
     what keeps the Newton Jacobian exactly ``A_I diag(g') A_I^T``. The relative-velocity
     form ``(U_s - V_air)`` is therefore out of scope and not implemented.
 
-    ``zero_positions`` names edge positions within this kind's block whose drive is zeroed:
+    ``zero_positions`` names edge positions within this kind's block whose head is zeroed:
     the outfall edge, whose "pipe" is the open end and carries no water surface of its own.
     """
 
@@ -318,14 +320,11 @@ def air_layer(graph: Network, net, plan: AirPlan, *, f_air=F_AIR_DEFAULT, f_i=F_
               c_s: float = 1.0, leak_area=8e-4, leak_cd=0.6,
               fans: tuple = ()) -> KirchhoffLayer:
     """The ``"air"`` `KirchhoffLayer` (Pa; m3/s) over the edges `add_air_edges` added:
-    `Headspace` and the leak `PowerLaw` (and `FixedFlow` fans), the `Drag` and `Stack`
-    drives. It reads the per-pipe drivers ``sewer.A_air`` (total over barrels, m2),
-    ``sewer.D_h`` (one barrel's, m), ``sewer.T`` (total top width, m), ``sewer.v`` (m/s) and
-    ``rho_air_nodes``, which the sewer's hydraulics closure writes."""
+    `Headspace` and the leak `PowerLaw` (and `FixedFlow` fans). Its drag and stack heads
+    are the `EdgeHeads` that `air_heads` builds. The laws read the per-pipe drivers
+    ``sewer.A_air`` (total over barrels, m2) and ``sewer.D_h`` (one barrel's, m), which the
+    sewer's hydraulics closure writes."""
     length = torch.tensor([p.length for p in net.pipes], dtype=F64)
-    diameter = torch.tensor([p.diameter for p in net.pipes], dtype=F64)
-    n_pipes = plan.n_pipes
-    n_outfall_edges = plan.outfall_pipe_idx.numel()
     air_lengths = torch.cat([length, length.index_select(-1, plan.outfall_pipe_idx)])
     positions = plan.positions
     # Leak law: `PowerLaw(C = Cd A sqrt(2/rho), n = 0.5, kind="leak")` built DIRECTLY, never
@@ -350,20 +349,37 @@ def air_layer(graph: Network, net, plan: AirPlan, *, f_air=F_AIR_DEFAULT, f_i=F_
     ]
     if fans:
         laws.append(FixedFlow(torch.zeros(len(fans), dtype=F64), kind="fan"))
+    return KirchhoffLayer(
+        graph, "air", laws, boundary=["ambient"],
+        quantity="pressure", unit="Pa", flow_unit="m3/s",
+    )
+
+
+def air_heads(layer: KirchhoffLayer, graph: Network, net, plan: AirPlan, *,
+              f_i=F_I_DEFAULT, c_s: float = 1.0) -> EdgeHeads:
+    """The `EdgeHeads` closure of the ``"air"`` layer `air_layer` built: the `Drag` of the
+    moving water on the headspace edges and the `Stack` of the headspace and leak edges,
+    written as the driver ``"air.edge_head"``.
+
+    It reads ``sewer.v``, ``sewer.T``, ``sewer.A_air`` and ``rho_air_nodes``, so it is
+    registered after the sewer hydraulics closure that writes them. `f_i` and `c_s` are
+    `air_layer`'s."""
+    length = torch.tensor([p.length for p in net.pipes], dtype=F64)
+    diameter = torch.tensor([p.diameter for p in net.pipes], dtype=F64)
+    n_pipes = plan.n_pipes
+    n_outfall_edges = plan.outfall_pipe_idx.numel()
+    air_lengths = torch.cat([length, length.index_select(-1, plan.outfall_pipe_idx)])
     crown = torch.cat([diameter, diameter.index_select(-1, plan.outfall_pipe_idx)])
-    drives = [
+    terms = [
         Drag(
-            air_lengths, positions, f_i=f_i, c_s=c_s,
+            air_lengths, plan.positions, f_i=f_i, c_s=c_s,
             zero_positions=tuple(range(n_pipes, n_pipes + n_outfall_edges)),
             kind="headspace",
         ),
         _stack_for("headspace", graph, net, crown=crown),
         _stack_for("leak", graph, net),
     ]
-    return KirchhoffLayer(
-        graph, "air", laws, drives=drives, boundary=["ambient"],
-        quantity="pressure", unit="Pa", flow_unit="m3/s",
-    )
+    return EdgeHeads(layer, terms)
 
 
 def _ground_of(node_attrs) -> float:

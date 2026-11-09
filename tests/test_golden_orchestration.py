@@ -55,7 +55,6 @@ import pytest
 import torch
 
 from noodl.couple import ValueLink, union
-from noodl.drives import ConstantDrive
 from noodl.elements import PowerLaw
 from noodl.elements.base import ConstitutiveLaw
 from noodl.layers.kirchhoff import KirchhoffLayer
@@ -207,8 +206,7 @@ def _air_gas(*, n_species=1, closures=(), reactions=(), learnable=True, **kw):
     """ambient -> z1 -> z2 -> ambient: a power-law air layer and a transport layer."""
     net = _net()
     el = PowerLaw(torch.tensor([0.01, 0.02, 0.01], dtype=F64), 0.65, learnable=learnable)
-    air = KirchhoffLayer(net, "air", [el], drives=[ConstantDrive("airpath", "wind")],
-                         boundary=["ambient"])
+    air = KirchhoffLayer(net, "air", [el], boundary=["ambient"])
     gas = TransportLayer(net, "gas", capacity=torch.tensor([50.0, 80.0], dtype=F64),
                          flow_kind="airpath", boundary=["ambient"], scheme="backward_euler",
                          n_species=n_species)
@@ -216,7 +214,7 @@ def _air_gas(*, n_species=1, closures=(), reactions=(), learnable=True, **kw):
     k = (n_species,) if n_species > 1 else ()
     drivers = {
         "air.phi_boundary": torch.zeros(1, dtype=F64),
-        "wind": torch.tensor([5.0, 0.0, 0.0], dtype=F64),
+        "air.edge_head": torch.tensor([5.0, 0.0, 0.0], dtype=F64),
         "gas.x_boundary": torch.tensor([1e-3, 2e-3, 4e-3][:n_species], dtype=F64).reshape(1, *k),
         "gas.sources": torch.zeros(3, *k, dtype=F64),
     }
@@ -228,7 +226,7 @@ def _gain(state, drivers):
     """Wind that grows with z1's concentration: a genuine flow <- transport feedback."""
     x1 = state["gas.x"][..., 0]
     zero = torch.zeros_like(x1)
-    return {"wind": drivers["wind"] + torch.stack([2e3 * x1, zero, zero], dim=-1)}
+    return {"air.edge_head": drivers["air.edge_head"] + torch.stack([2e3 * x1, zero, zero], dim=-1)}
 
 
 def _conditional(state, drivers):
@@ -236,7 +234,8 @@ def _conditional(state, drivers):
     x1 = state["gas.x"][..., 0]
     zero = torch.zeros_like(x1)
     gain = torch.where(x1 > 5e-4, torch.full_like(x1, 3e3), torch.full_like(x1, 1e3))
-    return {"wind": drivers["wind"] + torch.stack([gain * x1, zero, zero], dim=-1)}
+    head = drivers["air.edge_head"]
+    return {"air.edge_head": head + torch.stack([gain * x1, zero, zero], dim=-1)}
 
 
 def _winds(b):
@@ -291,7 +290,7 @@ def case_iterate_substeps_with_reaction():
 
 def case_pingpong_batch3():
     model, state, drivers, params = _air_gas(closures=[_gain])
-    return _step_record(model, state, dict(drivers, wind=_winds(3)), params)
+    return _step_record(model, state, {**drivers, "air.edge_head": _winds(3)}, params)
 
 
 def _iterate_kw(**extra):
@@ -319,7 +318,7 @@ def case_iterate_steady_relaxation_half():
 
 def case_iterate_batch3():
     model, state, drivers, params = _air_gas(closures=[_gain], **_iterate_kw())
-    return _step_record(model, state, dict(drivers, wind=_winds(3)), params)
+    return _step_record(model, state, {**drivers, "air.edge_head": _winds(3)}, params)
 
 
 def case_iterate_batch_mixed_convergence():
@@ -328,7 +327,7 @@ def case_iterate_batch_mixed_convergence():
         closures=[_gain], coupling="iterate", iterate_tol={"gas": 1e-12}, iterate_max=11)
     winds = torch.tensor([[5.0, 0.0, 0.0], [1.0, 0.0, 0.0]], dtype=F64)
     diag: dict = {}
-    out = model.steady(state, dict(drivers, wind=winds), diagnostics=diag,
+    out = model.steady(state, {**drivers, "air.edge_head": winds}, diagnostics=diag,
                        differentiable=False, on_failure="return", **TIGHT)
     return record(out, diag)
 
@@ -337,7 +336,7 @@ def case_iterate_batch_mixed_convergence_raises():
     model, state, drivers, _ = _air_gas(
         closures=[_gain], coupling="iterate", iterate_tol={"gas": 1e-12}, iterate_max=11)
     winds = torch.tensor([[5.0, 0.0, 0.0], [1.0, 0.0, 0.0]], dtype=F64)
-    return record(model.steady(state, dict(drivers, wind=winds), **TIGHT))
+    return record(model.steady(state, {**drivers, "air.edge_head": winds}, **TIGHT))
 
 
 def case_iterate_branch_closure_cold():
@@ -552,7 +551,8 @@ class _Integrator:
         dt = 0.0 if ctx is None or ctx.dt is None else ctx.dt
         v = state["acc.v"] + dt * x1
         return {"acc.v": v,
-                "wind": drivers["wind"] + torch.stack([1e2 * v + 1e3 * x1, zero, zero], dim=-1)}
+                "air.edge_head": drivers["air.edge_head"]
+                + torch.stack([1e2 * v + 1e3 * x1, zero, zero], dim=-1)}
 
 
 def case_integrating_closure_pingpong():

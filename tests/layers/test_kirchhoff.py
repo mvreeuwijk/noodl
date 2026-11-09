@@ -175,8 +175,8 @@ def test_conductance_only_network_converges_in_one_newton_iteration():
 
 
 def test_two_zone_series_flow_matches_closed_form(two_zone_layer):
-    net, elements, drives, boundary = two_zone_layer
-    layer = KirchhoffLayer(net, "zones", elements, drives=drives, boundary=boundary)
+    net, elements, boundary = two_zone_layer
+    layer = KirchhoffLayer(net, "zones", elements, boundary=boundary)
     phi_b = torch.zeros(1, dtype=torch.float64)
     wind = torch.tensor([10.0, 0.0, 0.0], dtype=torch.float64)
 
@@ -186,7 +186,7 @@ def test_two_zone_series_flow_matches_closed_form(two_zone_layer):
     # branch flows equal to 1e-9 -- must ask newton() for that precision explicitly instead
     # of silently relying on what used to be the unconditional default.
     phi, q = layer.solve(
-        phi_b, {"wind": wind}, None, differentiable=False, atol=1e-11, rtol=1e-11
+        phi_b, {"zones.edge_head": wind}, None, differentiable=False, atol=1e-11, rtol=1e-11
     )
 
     q_ref = _closed_form_series_flow([0.01, 0.02, 0.01], 0.65, 10.0)
@@ -198,17 +198,18 @@ def test_two_zone_series_flow_matches_closed_form(two_zone_layer):
 
 
 def test_batched_wind_driver_matches_looped_solves(two_zone_layer):
-    net, elements, drives, boundary = two_zone_layer
-    layer = KirchhoffLayer(net, "zones", elements, drives=drives, boundary=boundary)
+    net, elements, boundary = two_zone_layer
+    layer = KirchhoffLayer(net, "zones", elements, boundary=boundary)
     torch.manual_seed(3)
     magnitude = 5.0 + 10.0 * torch.rand(50, 1, dtype=torch.float64)
     wind = torch.cat([magnitude, torch.zeros(50, 2, dtype=torch.float64)], dim=-1)
     phi_b = torch.zeros(50, 1, dtype=torch.float64)
 
-    phi, q = layer.solve(phi_b, {"wind": wind}, None, differentiable=False)
+    phi, q = layer.solve(phi_b, {"zones.edge_head": wind}, None, differentiable=False)
 
     looped = torch.stack(
-        [layer.solve(phi_b[i], {"wind": wind[i]}, None, differentiable=False)[1] for i in range(50)]
+        [layer.solve(phi_b[i], {"zones.edge_head": wind[i]}, None, differentiable=False)[1]
+         for i in range(50)]
     )
     torch.testing.assert_close(q, looped, atol=1e-8, rtol=1e-6)
 
@@ -224,18 +225,18 @@ def test_power_residual_is_zero_at_solution_and_nonzero_when_perturbed(two_zone_
     # can move that product outside of machine-epsilon territory, on this or any topology.
     # Perturbing q instead genuinely breaks conservation (A_interior @ q_perturbed != 0) and
     # is what actually exercises "nonzero for an inconsistent (phi, q) pair".
-    net, elements, drives, boundary = two_zone_layer
-    layer = KirchhoffLayer(net, "zones", elements, drives=drives, boundary=boundary)
+    net, elements, boundary = two_zone_layer
+    layer = KirchhoffLayer(net, "zones", elements, boundary=boundary)
     phi_b = torch.zeros(1, dtype=torch.float64)
     wind = torch.tensor([10.0, 0.0, 0.0], dtype=torch.float64)
 
-    phi, q = layer.solve(phi_b, {"wind": wind}, None, differentiable=False)
-    pr = layer.power_residual(phi, q, {"wind": wind})
+    phi, q = layer.solve(phi_b, {"zones.edge_head": wind}, None, differentiable=False)
+    pr = layer.power_residual(phi, q, {"zones.edge_head": wind})
     assert abs(pr.item()) < 1e-8
 
     q_perturbed = q.clone()
     q_perturbed[0] += 0.5
-    pr_bad = layer.power_residual(phi, q_perturbed, {"wind": wind})
+    pr_bad = layer.power_residual(phi, q_perturbed, {"zones.edge_head": wind})
     assert abs(pr_bad.item()) > 1e-3
 
 
@@ -366,7 +367,7 @@ def test_floating_group_with_mixed_slope_same_kind_edges_raises_runtime_error():
 
 
 def test_gradcheck_solve_wrt_powerlaw_conductance(two_zone_layer):
-    net, elements, drives, boundary = two_zone_layer
+    net, elements, boundary = two_zone_layer
     # Construct the element once with its own learnable Parameter and gradcheck against
     # that exact tensor object: gradcheck perturbs it in place for the numerical Jacobian
     # and autograd tracks it directly for the analytic one, so `f` need not re-read its
@@ -374,13 +375,13 @@ def test_gradcheck_solve_wrt_powerlaw_conductance(two_zone_layer):
     el = PowerLaw(
         elements[0].C.detach().clone().requires_grad_(True), elements[0].n, learnable=True
     )
-    layer = KirchhoffLayer(net, "zones", [el], drives=drives, boundary=boundary)
+    layer = KirchhoffLayer(net, "zones", [el], boundary=boundary)
     phi_b = torch.zeros(1, dtype=torch.float64)
     wind = torch.tensor([10.0, 0.0, 0.0], dtype=torch.float64)
 
     def f(C_):
         phi, _ = layer.solve(
-            phi_b, {"wind": wind}, None, differentiable=True, atol=1e-12, rtol=1e-12
+            phi_b, {"zones.edge_head": wind}, None, differentiable=True, atol=1e-12, rtol=1e-12
         )
         return phi[1:]
 
@@ -388,14 +389,14 @@ def test_gradcheck_solve_wrt_powerlaw_conductance(two_zone_layer):
 
 
 def test_gradcheck_solve_wrt_wind_driver(two_zone_layer):
-    net, elements, drives, boundary = two_zone_layer
-    layer = KirchhoffLayer(net, "zones", elements, drives=drives, boundary=boundary)
+    net, elements, boundary = two_zone_layer
+    layer = KirchhoffLayer(net, "zones", elements, boundary=boundary)
     phi_b = torch.zeros(1, dtype=torch.float64)
     wind = torch.tensor([10.0, 0.0, 0.0], dtype=torch.float64, requires_grad=True)
 
     def f(wind_):
         phi, _ = layer.solve(
-            phi_b, {"wind": wind_}, None, differentiable=True, atol=1e-12, rtol=1e-12
+            phi_b, {"zones.edge_head": wind_}, None, differentiable=True, atol=1e-12, rtol=1e-12
         )
         return phi[1:]
 
@@ -403,15 +404,15 @@ def test_gradcheck_solve_wrt_wind_driver(two_zone_layer):
 
 
 def test_gradcheck_solve_wrt_sources(two_zone_layer):
-    net, elements, drives, boundary = two_zone_layer
-    layer = KirchhoffLayer(net, "zones", elements, drives=drives, boundary=boundary)
+    net, elements, boundary = two_zone_layer
+    layer = KirchhoffLayer(net, "zones", elements, boundary=boundary)
     phi_b = torch.zeros(1, dtype=torch.float64)
     wind = torch.tensor([10.0, 0.0, 0.0], dtype=torch.float64)
     sources = torch.zeros(3, dtype=torch.float64, requires_grad=True)
 
     def f(sources_):
         phi, _ = layer.solve(
-            phi_b, {"wind": wind}, sources_, differentiable=True, atol=1e-12, rtol=1e-12
+            phi_b, {"zones.edge_head": wind}, sources_, differentiable=True, atol=1e-12, rtol=1e-12
         )
         return phi[1:]
 
@@ -419,14 +420,14 @@ def test_gradcheck_solve_wrt_sources(two_zone_layer):
 
 
 def test_gradcheck_solve_wrt_boundary_potential(two_zone_layer):
-    net, elements, drives, boundary = two_zone_layer
-    layer = KirchhoffLayer(net, "zones", elements, drives=drives, boundary=boundary)
+    net, elements, boundary = two_zone_layer
+    layer = KirchhoffLayer(net, "zones", elements, boundary=boundary)
     phi_b = torch.zeros(1, dtype=torch.float64, requires_grad=True)
     wind = torch.tensor([10.0, 0.0, 0.0], dtype=torch.float64)
 
     def f(phi_b_):
         phi, _ = layer.solve(
-            phi_b_, {"wind": wind}, None, differentiable=True, atol=1e-12, rtol=1e-12
+            phi_b_, {"zones.edge_head": wind}, None, differentiable=True, atol=1e-12, rtol=1e-12
         )
         return phi
 
@@ -434,30 +435,30 @@ def test_gradcheck_solve_wrt_boundary_potential(two_zone_layer):
 
 
 def test_adjoint_lambda_matches_autograd_gradient(two_zone_layer):
-    net, elements, drives, boundary = two_zone_layer
+    net, elements, boundary = two_zone_layer
     el = PowerLaw(
         elements[0].C.detach().clone().requires_grad_(True), elements[0].n, learnable=True
     )
-    layer = KirchhoffLayer(net, "zones", [el], drives=drives, boundary=boundary)
+    layer = KirchhoffLayer(net, "zones", [el], boundary=boundary)
     phi_b = torch.zeros(1, dtype=torch.float64)
     wind = torch.tensor([10.0, 0.0, 0.0], dtype=torch.float64)
 
-    phi, q = layer.solve(phi_b, {"wind": wind}, None, differentiable=True)
+    phi, q = layer.solve(phi_b, {"zones.edge_head": wind}, None, differentiable=True)
     loss = phi[1:].sum()
     loss.backward()
     autograd_grad = el.C.grad.clone()
 
     phi_i = phi[layer.interior].detach()
     grad_phi_i = torch.ones_like(phi_i)
-    lam = layer.adjoint(phi_i, phi_b, {"wind": wind}, grad_phi_i)
+    lam = layer.adjoint(phi_i, phi_b, {"zones.edge_head": wind}, grad_phi_i)
 
-    r = layer.residual(phi_i, phi_b, {"wind": wind}, None)
+    r = layer.residual(phi_i, phi_b, {"zones.edge_head": wind}, None)
     (dr_dC,) = torch.autograd.grad(r, el.C, grad_outputs=-lam)
     torch.testing.assert_close(dr_dC, autograd_grad, atol=1e-6, rtol=1e-5)
 
 
 def test_finite_difference_matches_autograd_gradient_for_zone_pressure(two_zone_layer):
-    net, elements, drives, boundary = two_zone_layer
+    net, elements, boundary = two_zone_layer
     n = elements[0].n
     C0 = elements[0].C.detach().clone()
     phi_b = torch.zeros(1, dtype=torch.float64)
@@ -465,9 +466,9 @@ def test_finite_difference_matches_autograd_gradient_for_zone_pressure(two_zone_
 
     def zone_pressure(C):
         el = PowerLaw(C, n, learnable=False)
-        layer = KirchhoffLayer(net, "zones", [el], drives=drives, boundary=boundary)
+        layer = KirchhoffLayer(net, "zones", [el], boundary=boundary)
         phi, _ = layer.solve(
-            phi_b, {"wind": wind}, None, differentiable=False, atol=1e-13, rtol=1e-13
+            phi_b, {"zones.edge_head": wind}, None, differentiable=False, atol=1e-13, rtol=1e-13
         )
         return phi[1]  # z1 pressure
 
@@ -479,8 +480,8 @@ def test_finite_difference_matches_autograd_gradient_for_zone_pressure(two_zone_
         grads_fd[i] = (zone_pressure(C0 + bump) - zone_pressure(C0 - bump)) / (2 * h)
 
     el = PowerLaw(C0.clone().requires_grad_(True), n, learnable=True)
-    layer = KirchhoffLayer(net, "zones", [el], drives=drives, boundary=boundary)
-    phi, _ = layer.solve(phi_b, {"wind": wind}, None, differentiable=True)
+    layer = KirchhoffLayer(net, "zones", [el], boundary=boundary)
+    phi, _ = layer.solve(phi_b, {"zones.edge_head": wind}, None, differentiable=True)
     phi[1].backward()
     grads_ad = el.C.grad
 
@@ -488,25 +489,25 @@ def test_finite_difference_matches_autograd_gradient_for_zone_pressure(two_zone_
 
 
 def test_jacobian_is_symmetric(two_zone_layer):
-    net, elements, drives, boundary = two_zone_layer
-    layer = KirchhoffLayer(net, "zones", elements, drives=drives, boundary=boundary)
+    net, elements, boundary = two_zone_layer
+    layer = KirchhoffLayer(net, "zones", elements, boundary=boundary)
     phi_b = torch.zeros(1, dtype=torch.float64)
     wind = torch.tensor([10.0, 0.0, 0.0], dtype=torch.float64)
 
-    phi, _ = layer.solve(phi_b, {"wind": wind}, None, differentiable=False)
+    phi, _ = layer.solve(phi_b, {"zones.edge_head": wind}, None, differentiable=False)
     phi_i = phi[layer.interior]
-    J = layer.jacobian(phi_i, phi_b, {"wind": wind})
+    J = layer.jacobian(phi_i, phi_b, {"zones.edge_head": wind})
     torch.testing.assert_close(J, J.transpose(-1, -2), atol=1e-10, rtol=1e-10)
 
 
 def test_differentiable_false_matches_differentiable_true(two_zone_layer):
-    net, elements, drives, boundary = two_zone_layer
-    layer = KirchhoffLayer(net, "zones", elements, drives=drives, boundary=boundary)
+    net, elements, boundary = two_zone_layer
+    layer = KirchhoffLayer(net, "zones", elements, boundary=boundary)
     phi_b = torch.zeros(1, dtype=torch.float64)
     wind = torch.tensor([10.0, 0.0, 0.0], dtype=torch.float64)
 
-    phi_nd, q_nd = layer.solve(phi_b, {"wind": wind}, None, differentiable=False)
-    phi_d, q_d = layer.solve(phi_b, {"wind": wind}, None, differentiable=True)
+    phi_nd, q_nd = layer.solve(phi_b, {"zones.edge_head": wind}, None, differentiable=False)
+    phi_d, q_d = layer.solve(phi_b, {"zones.edge_head": wind}, None, differentiable=True)
     torch.testing.assert_close(phi_nd, phi_d, atol=1e-8, rtol=1e-6)
     torch.testing.assert_close(q_nd, q_d, atol=1e-8, rtol=1e-6)
 
@@ -518,18 +519,18 @@ def test_solve_raises_for_element_tensor_with_requires_grad_but_not_learnable(tw
     # differentiable solve (which threads only registered parameters through
     # `Function.apply`) cannot reach it and would otherwise return a silently wrong or
     # missing gradient. `solve(differentiable=True)` must refuse instead.
-    net, _elements, drives, boundary = two_zone_layer
+    net, _elements, boundary = two_zone_layer
     C = torch.tensor([0.01, 0.02, 0.01], dtype=torch.float64, requires_grad=True)
     el = PowerLaw(C, 0.65, learnable=False)
-    layer = KirchhoffLayer(net, "zones", [el], drives=drives, boundary=boundary)
+    layer = KirchhoffLayer(net, "zones", [el], boundary=boundary)
     phi_b = torch.zeros(1, dtype=torch.float64)
     wind = torch.tensor([10.0, 0.0, 0.0], dtype=torch.float64)
 
     with pytest.raises(ValueError, match="C"):
-        layer.solve(phi_b, {"wind": wind}, None, differentiable=True)
+        layer.solve(phi_b, {"zones.edge_head": wind}, None, differentiable=True)
 
     # differentiable=False is unaffected: the same construction is a supported, correct use.
-    phi, _ = layer.solve(phi_b, {"wind": wind}, None, differentiable=False)
+    phi, _ = layer.solve(phi_b, {"zones.edge_head": wind}, None, differentiable=False)
     assert torch.isfinite(phi).all()
 
 
@@ -547,7 +548,7 @@ def test_solve_raises_for_drive_owning_its_own_differentiable_tensor(two_zone_la
         def __call__(self, drivers):
             return self.coeff * drivers["wind"]
 
-    net, elements, _drives, boundary = two_zone_layer
+    net, elements, boundary = two_zone_layer
     coeff = torch.tensor(1.0, dtype=torch.float64, requires_grad=True)
     drv = LearnableDrive(coeff)
     layer = KirchhoffLayer(net, "zones", elements, drives=[drv], boundary=boundary)
@@ -1078,13 +1079,13 @@ def test_a_batched_drive_on_one_kind_broadcasts_a_drive_free_fixed_flow_kind():
     net.add_edge("amb", "b", kind="fan")
     elements = [PowerLaw(torch.full((3,), 0.02, dtype=f64), 0.6, kind="airpath"),
                 FixedFlow(torch.tensor([0.05], dtype=f64), kind="fan")]
-    layer = KirchhoffLayer(net, "air", elements, drives=[ConstantDrive("airpath", "wind")],
-                           boundary=["amb"])
-    wind = torch.tensor([[3.0, 0.0, -1.0], [8.0, 0.0, -2.0]], dtype=f64)
+    layer = KirchhoffLayer(net, "air", elements, boundary=["amb"])
+    wind = torch.tensor([[3.0, 0.0, -1.0, 0.0], [8.0, 0.0, -2.0, 0.0]], dtype=f64)
     phi_b = torch.zeros(1, dtype=f64)
-    assert layer.dp(torch.zeros(3, dtype=f64), {"wind": wind}).shape == (2, 4)
-    _, q = layer.solve(phi_b, {"wind": wind}, None, differentiable=False, atol=1e-14)
+    assert layer.dp(torch.zeros(3, dtype=f64), {"air.edge_head": wind}).shape == (2, 4)
+    _, q = layer.solve(phi_b, {"air.edge_head": wind}, None, differentiable=False, atol=1e-14)
     assert q.shape == (2, 4)
     for i in range(2):
-        _, qi = layer.solve(phi_b, {"wind": wind[i]}, None, differentiable=False, atol=1e-14)
+        _, qi = layer.solve(phi_b, {"air.edge_head": wind[i]}, None, differentiable=False,
+                            atol=1e-14)
         torch.testing.assert_close(q[i], qi, rtol=1e-10, atol=1e-14)

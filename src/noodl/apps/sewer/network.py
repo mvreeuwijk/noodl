@@ -19,6 +19,7 @@ from noodl.apps.sewer.air import (
     F_AIR_DEFAULT,
     F_I_DEFAULT,
     add_air_edges,
+    air_heads,
     air_layer,
 )
 from noodl.apps.sewer.controls import ControlSet
@@ -1047,6 +1048,7 @@ def build_model(
             graph, net, plan, f_air=f_air, f_i=f_i, c_s=c_s, leak_area=leak_area,
             leak_cd=leak_cd, fans=fans,
         )
+        closures.append(air_heads(layers["air"], graph, net, plan, f_i=f_i, c_s=c_s))
         drivers["air.phi_boundary"] = torch.zeros(1, dtype=F64)
 
     sulfide_col = None

@@ -9,6 +9,7 @@ import torch
 
 import noodl.layers._mna as mna_module
 from noodl.elements import Conductance, ConstitutiveLaw, ImplicitLaw
+from noodl.heads import EdgeHeads
 from noodl.layers.kirchhoff import KirchhoffLayer
 from noodl.topology import Network
 from tests._circuit_laws import Cap, DrivenSource, Ind, Source
@@ -174,7 +175,7 @@ def test_unknown_mode_step_and_integration_are_refused():
         layer.solve(GROUND, dt=0.1, history=(phi, q[:2]))
 
 
-def test_drive_on_dynamic_kind_is_refused():
+def test_a_dynamic_kind_carries_no_head():
     class Push:
         kind = "cap"
 
@@ -183,11 +184,11 @@ def test_drive_on_dynamic_kind_is_refused():
 
     net = _net(["gnd", "a", "b"], [("a", "gnd", "source"), ("a", "b", "r"),
                                    ("b", "gnd", "cap")])
-    with pytest.raises(ValueError, match="kind 'cap' has a dynamic law"):
-        KirchhoffLayer(net, "e", [Source(torch.tensor([1.0])),
+    layer = KirchhoffLayer(net, "e", [Source(torch.tensor([1.0])),
                                       Conductance(torch.tensor([1.0]), kind="r"),
-                                      Cap(torch.tensor([1.0]))],
-                       drives=[Push()], boundary=["gnd"])
+                                      Cap(torch.tensor([1.0]))], boundary=["gnd"])
+    with pytest.raises(ValueError, match="kind 'cap' has a dynamic law"):
+        EdgeHeads(layer, [Push()])
 
 
 class StepRecorder(ConstitutiveLaw):

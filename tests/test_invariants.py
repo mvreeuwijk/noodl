@@ -12,7 +12,6 @@ import pytest
 import torch
 
 from noodl.couple import union
-from noodl.drives import ConstantDrive
 from noodl.elements import PowerLaw
 from noodl.layers.allocation import AllocatedFlowLayer
 from noodl.layers.kirchhoff import KirchhoffLayer
@@ -44,8 +43,7 @@ def _model(*, n_species=1, closures=(), reactions=(), learnable=False,
            scheme="backward_euler", **kw):
     net = _net()
     el = PowerLaw(torch.tensor([0.01, 0.02, 0.01], dtype=F64), 0.65, learnable=learnable)
-    air = KirchhoffLayer(net, "air", [el], drives=[ConstantDrive("airpath", "wind")],
-                         boundary=["ambient"])
+    air = KirchhoffLayer(net, "air", [el], boundary=["ambient"])
     gas = TransportLayer(net, "gas", capacity=torch.tensor([50.0, 80.0], dtype=F64),
                          flow_kind="airpath", boundary=["ambient"], scheme=scheme,
                          n_species=n_species)
@@ -53,7 +51,7 @@ def _model(*, n_species=1, closures=(), reactions=(), learnable=False,
     k = (n_species,) if n_species > 1 else ()
     drivers = {
         "air.phi_boundary": torch.zeros(1, dtype=F64),
-        "wind": torch.tensor([5.0, 0.0, 0.0], dtype=F64),
+        "air.edge_head": torch.tensor([5.0, 0.0, 0.0], dtype=F64),
         "gas.x_boundary": torch.tensor([1e-3, 2e-3, 4e-3][:n_species], dtype=F64).reshape(1, *k),
         "gas.sources": torch.zeros(3, *k, dtype=F64),
     }
@@ -82,7 +80,7 @@ def test_model_batch_equals_stack_of_independent_runs(b, batched):
     model, state, drivers, _ = _model()
     d = dict(drivers)
     if batched in ("wind", "all"):
-        d["wind"] = _winds(b)
+        d["air.edge_head"] = _winds(b)
     if batched in ("boundary", "all"):
         d["gas.x_boundary"] = torch.linspace(1e-3, 5e-3, b, dtype=F64).reshape(b, 1)
     if batched in ("sources", "all"):
@@ -115,10 +113,10 @@ def test_model_batched_state_with_unbatched_drivers(b):
 @pytest.mark.parametrize("b", BATCH_SIZES)
 def test_model_steady_batch_equals_stack_of_independent_runs(b):
     model, state, drivers, _ = _model()
-    d = dict(drivers, wind=_winds(b))
+    d = {**drivers, "air.edge_head": _winds(b)}
     out = model.steady(state, d)["gas.x"]
     for i in range(b):
-        single = model.steady(state, dict(d, wind=d["wind"][i]))["gas.x"]
+        single = model.steady(state, {**d, "air.edge_head": d["air.edge_head"][i]})["gas.x"]
         torch.testing.assert_close(out[i], single, rtol=1e-7, atol=1e-12)
 
 
@@ -149,15 +147,15 @@ def test_allocation_batch_equals_stack_with_unbatched_state(b, mode):
 def test_kirchhoff_batch_equals_stack_with_optional_unbatched_warm_start(b, warm):
     net = _net()
     el = PowerLaw(torch.tensor([0.01, 0.02, 0.01], dtype=F64), 0.65)
-    layer = KirchhoffLayer(net, "air", [el], drives=[ConstantDrive("airpath", "wind")],
-                           boundary=["ambient"])
+    layer = KirchhoffLayer(net, "air", [el], boundary=["ambient"])
     wind = _winds(b)
     phi_b = torch.zeros(1, dtype=F64)
     phi0 = torch.tensor([1.0, -2.0], dtype=F64) if warm else None
-    phi, q = layer.solve(phi_b, {"wind": wind}, None, phi0=phi0, differentiable=False)
+    phi, q = layer.solve(phi_b, {"air.edge_head": wind}, None, phi0=phi0, differentiable=False)
     assert phi.shape[0] == b and q.shape[0] == b
     for i in range(b):
-        p_i, q_i = layer.solve(phi_b, {"wind": wind[i]}, None, phi0=phi0, differentiable=False)
+        p_i, q_i = layer.solve(phi_b, {"air.edge_head": wind[i]}, None, phi0=phi0,
+                               differentiable=False)
         torch.testing.assert_close(q[i], q_i, rtol=1e-6, atol=1e-9)
         torch.testing.assert_close(phi[i], p_i, rtol=1e-6, atol=1e-9)
 
@@ -234,7 +232,7 @@ def test_uniform_conservative_tracer_stays_uniform(n_species, b, scheme):
     c = torch.tensor([1.5e-3, 7e-4, 3e-3][:n_species], dtype=F64)
     d = dict(drivers, **{"gas.x_boundary": c.reshape(1, *k).clone()})
     if b:
-        d["wind"] = _winds(b)
+        d["air.edge_head"] = _winds(b)
     state = {"gas.x": c.expand(2, *k).clone()}
     for _ in range(3):
         state = model.step(state, d, 600.0, atol=1e-15, rtol=1e-13)
@@ -249,7 +247,7 @@ def _gain_closure(state, drivers):
     """Wind that grows with z1's concentration: a genuine flow <- transport feedback."""
     x1 = state["gas.x"][..., 0]
     zero = torch.zeros_like(x1)
-    return {"wind": drivers["wind"] + torch.stack([2e3 * x1, zero, zero], dim=-1)}
+    return {"air.edge_head": drivers["air.edge_head"] + torch.stack([2e3 * x1, zero, zero], dim=-1)}
 
 
 def _conditional_closure(state, drivers):
@@ -257,7 +255,8 @@ def _conditional_closure(state, drivers):
     x1 = state["gas.x"][..., 0]
     zero = torch.zeros_like(x1)
     gain = torch.where(x1 > 5e-4, torch.full_like(x1, 3e3), torch.full_like(x1, 1e3))
-    return {"wind": drivers["wind"] + torch.stack([gain * x1, zero, zero], dim=-1)}
+    head = drivers["air.edge_head"]
+    return {"air.edge_head": head + torch.stack([gain * x1, zero, zero], dim=-1)}
 
 
 @pytest.mark.parametrize("closure", [None, _gain_closure])
@@ -265,7 +264,7 @@ def _conditional_closure(state, drivers):
 def test_union_of_one_model_equals_standalone(closure, b):
     kw = {} if closure is None else {"closures": [closure]}
     model, state, drivers, _ = _model(**kw)
-    d = dict(drivers, wind=_winds(b)) if b else drivers
+    d = {**drivers, "air.edge_head": _winds(b)} if b else drivers
     alone = model.step(state, d, 600.0)
     coupled, c_state, c_drivers = union({"m": (model, state, d)}, [])
     out = coupled.step(c_state, c_drivers, 600.0)["m"]
@@ -278,7 +277,7 @@ def test_unlinked_union_of_two_models_equals_each_standalone():
     result is its standalone result, and neither disturbs the other."""
     m1, s1, d1, _ = _model(closures=[_conditional_closure])
     m2, s2, d2, _ = _model(n_species=2)
-    d1 = dict(d1, wind=_winds(3))
+    d1 = {**d1, "air.edge_head": _winds(3)}
     alone1, alone2 = m1.step(s1, d1, 600.0), m2.step(s2, d2, 600.0)
     coupled, cs, cd = union({"one": (m1, s1, d1), "two": (m2, s2, d2)}, [])
     out = coupled.step(cs, cd, 600.0)

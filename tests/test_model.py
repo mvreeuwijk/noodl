@@ -9,7 +9,6 @@ import warnings
 import pytest
 import torch
 
-from noodl.drives import ConstantDrive
 from noodl.elements import PowerLaw
 from noodl.elements.base import ConstitutiveLaw
 from noodl.layers.kirchhoff import KirchhoffLayer
@@ -37,7 +36,7 @@ def _build(*, learnable=False, closures=(), reactions=(), substeps=None, **model
     net = _net()
     el = PowerLaw(torch.tensor([0.01, 0.02, 0.01], dtype=F64), 0.65, learnable=learnable)
     air = KirchhoffLayer(
-        net, "air", [el], drives=[ConstantDrive("airpath", "wind")], boundary=["ambient"],
+        net, "air", [el], boundary=["ambient"],
         quantity="pressure", unit="Pa",
     )
     species = TransportLayer(
@@ -50,7 +49,7 @@ def _build(*, learnable=False, closures=(), reactions=(), substeps=None, **model
     )
     drivers = {
         "air.phi_boundary": torch.zeros(1, dtype=F64),
-        "wind": torch.tensor([5.0, 0.0, 0.0], dtype=F64),
+        "air.edge_head": torch.tensor([5.0, 0.0, 0.0], dtype=F64),
         "species.x_boundary": torch.tensor([1e-3], dtype=F64),
         "species.sources": torch.tensor([0.0, 2e-6, 0.0], dtype=F64),
     }
@@ -63,7 +62,7 @@ def _build_multi():
     net = _net()
     air = KirchhoffLayer(
         net, "air", [PowerLaw(torch.tensor([0.01, 0.02, 0.01], dtype=F64), 0.65)],
-        drives=[ConstantDrive("airpath", "wind")], boundary=["ambient"],
+        boundary=["ambient"],
     )
     gas = TransportLayer(
         net, "gas", capacity=torch.tensor([50.0, 80.0], dtype=F64), flow_kind="airpath",
@@ -72,7 +71,7 @@ def _build_multi():
     model = Model(net, {"air": air, "gas": gas})
     drivers = {
         "air.phi_boundary": torch.zeros(1, dtype=F64),
-        "wind": torch.tensor([5.0, 0.0, 0.0], dtype=F64),
+        "air.edge_head": torch.tensor([5.0, 0.0, 0.0], dtype=F64),
         "gas.x_boundary": torch.tensor([[1e-3, 2e-3]], dtype=F64),
     }
     state = {"gas.x": torch.zeros(2, 2, dtype=F64)}
@@ -113,14 +112,15 @@ def test_steady_is_the_limit_of_stepping_and_residuals_vanish_there():
 def test_closures_update_drivers_before_the_solve_and_may_not_write_state_keys():
     class Gust:
         def __call__(self, state, drivers):
-            return {"wind": drivers["wind"] + torch.tensor([3.0, 0.0, 0.0], dtype=F64)}
+            bump = torch.tensor([3.0, 0.0, 0.0], dtype=F64)
+            return {"air.edge_head": drivers["air.edge_head"] + bump}
 
     _, plain, state, drivers, _, _ = _build()
     _, gusty, _, _, _, _ = _build(closures=[Gust()])
     q_plain = plain.step(state, drivers, 60.0)["air.q"]
     q_gusty = gusty.step(state, drivers, 60.0)["air.q"]
     assert q_gusty[0] > q_plain[0]
-    stronger = dict(drivers, wind=torch.tensor([8.0, 0.0, 0.0], dtype=F64))
+    stronger = {**drivers, "air.edge_head": torch.tensor([8.0, 0.0, 0.0], dtype=F64)}
     torch.testing.assert_close(q_gusty, plain.step(state, stronger, 60.0)["air.q"])
 
     class Rogue:
@@ -135,7 +135,7 @@ def test_closures_update_drivers_before_the_solve_and_may_not_write_state_keys()
 def test_pingpong_solves_with_the_state_at_the_start_of_the_step():
     class Feedback:
         def __call__(self, state, drivers):
-            return {"wind": torch.stack([5.0 + 1e4 * state["species.x"][..., 0],
+            return {"air.edge_head": torch.stack([5.0 + 1e4 * state["species.x"][..., 0],
                                          torch.zeros_like(state["species.x"][..., 0]),
                                          torch.zeros_like(state["species.x"][..., 0])], dim=-1)}
 
@@ -143,7 +143,8 @@ def test_pingpong_solves_with_the_state_at_the_start_of_the_step():
     start = {"species.x": torch.tensor([2e-4, 0.0], dtype=F64)}
     new = model.step(start, drivers, 60.0)
     _, plain, _, _, _, _ = _build()
-    same = plain.step(start, dict(drivers, wind=torch.tensor([7.0, 0.0, 0.0], dtype=F64)), 60.0)
+    seven = torch.tensor([7.0, 0.0, 0.0], dtype=F64)
+    same = plain.step(start, {**drivers, "air.edge_head": seven}, 60.0)
     torch.testing.assert_close(new["air.q"], same["air.q"])
 
 
@@ -438,10 +439,10 @@ def test_gradient_of_a_steady_species_loss_wrt_leakage_matches_finite_difference
 def test_batched_drivers_run_as_a_batch_matching_the_single_instances():
     _, model, state, drivers, _, _ = _build()
     winds = torch.tensor([[5.0, 0.0, 0.0], [2.0, 0.0, 0.0], [9.0, 0.0, 0.0]], dtype=F64)
-    batched = model.step(state, dict(drivers, wind=winds), 600.0)
+    batched = model.step(state, {**drivers, "air.edge_head": winds}, 600.0)
     assert batched["air.phi"].shape == (3, 3) and batched["species.x"].shape == (3, 2)
     for i in range(3):
-        single = model.step(state, dict(drivers, wind=winds[i]), 600.0)
+        single = model.step(state, {**drivers, "air.edge_head": winds[i]}, 600.0)
         torch.testing.assert_close(batched["species.x"][i], single["species.x"],
                                    rtol=1e-10, atol=1e-18)
 
@@ -461,7 +462,7 @@ class _Feedback:
         x1 = state["species.x"][..., 0]
         zero = torch.zeros_like(x1)
         bump = torch.stack([self.gain * x1, zero, zero], dim=-1)
-        return {"wind": drivers["wind"] + bump}
+        return {"air.edge_head": drivers["air.edge_head"] + bump}
 
 
 def test_iterate_requires_tolerances_naming_the_layers():
@@ -576,7 +577,8 @@ def test_iterate_batched_convergence_is_per_instance():
     # At the default Newton tolerance the weaker-wind instance stagnates at the
     # solver's own noise floor (~2e-11, measured) and never reaches the 1e-12 asked of the
     # coupling; the SOLVE is asked for the accuracy the assertion needs instead.
-    model.steady(state, dict(drivers, wind=winds), diagnostics=diag, atol=1e-14, rtol=1e-14)
+    model.steady(state, {**drivers, "air.edge_head": winds}, diagnostics=diag, atol=1e-14,
+                 rtol=1e-14)
     assert diag["converged"].shape == (2,) and bool(diag["converged"].all())
     assert diag["max_change"]["species"].shape == (2,)
 
@@ -595,7 +597,7 @@ def test_iterate_non_convergence_names_only_the_failing_batch_instances():
         iterate_max=11,
     )
     winds = torch.tensor([[5.0, 0.0, 0.0], [1.0, 0.0, 0.0]], dtype=F64)
-    drv = dict(drivers, wind=winds)
+    drv = {**drivers, "air.edge_head": winds}
     with pytest.raises(RuntimeError, match=r"instances \[1\]"):
         model.steady(state, drv, **tight)
     diag: dict = {}
@@ -645,7 +647,7 @@ def test_iterate_steps_every_transport_layer_but_tests_only_the_named_ones():
     net = _net()
     air = KirchhoffLayer(
         net, "air", [PowerLaw(torch.tensor([0.01, 0.02, 0.01], dtype=F64), 0.65)],
-        drives=[ConstantDrive("airpath", "wind")], boundary=["ambient"],
+        boundary=["ambient"],
     )
     species = TransportLayer(
         net, "species", capacity=torch.tensor([50.0, 80.0], dtype=F64), flow_kind="airpath",
@@ -661,7 +663,7 @@ def test_iterate_steps_every_transport_layer_but_tests_only_the_named_ones():
     )
     drivers = {
         "air.phi_boundary": torch.zeros(1, dtype=F64),
-        "wind": torch.tensor([5.0, 0.0, 0.0], dtype=F64),
+        "air.edge_head": torch.tensor([5.0, 0.0, 0.0], dtype=F64),
         "species.x_boundary": torch.tensor([1e-3], dtype=F64),
         "species.sources": torch.tensor([0.0, 2e-6, 0.0], dtype=F64),
         "heat.x_boundary": torch.tensor([293.0], dtype=F64),
@@ -1349,7 +1351,7 @@ def test_iterate_gradient_is_per_instance_on_a_batched_model():
         iterate_tol={"species": 1e-13}, iterate_max=80,
     )
     drv = dict(drivers)
-    drv["wind"] = torch.tensor([[5.0, 0.0, 0.0], [2.0, 0.0, 0.0]], dtype=F64)
+    drv["air.edge_head"] = torch.tensor([[5.0, 0.0, 0.0], [2.0, 0.0, 0.0]], dtype=F64)
     drv["species.sources"] = torch.tensor([0.0, 5e-4, 0.0], dtype=F64)
     tight = {"atol": 1e-14, "rtol": 1e-14}
 
@@ -2008,7 +2010,7 @@ def test_species_columns_that_disagree_with_the_layer_are_refused_at_constructio
     net = _net()
     air = KirchhoffLayer(
         net, "air", [PowerLaw(torch.tensor([0.01, 0.02, 0.01], dtype=F64), 0.65)],
-        drives=[ConstantDrive("airpath", "wind")], boundary=["ambient"],
+        boundary=["ambient"],
     )
     gas = TransportLayer(
         net, "gas", capacity=torch.tensor([50.0, 80.0], dtype=F64), flow_kind="airpath",
@@ -2038,17 +2040,17 @@ def test_a_closure_added_after_construction_is_dispatched_by_its_own_declaration
 
 def test_ownership_lists_writers_and_readers_of_declared_keys():
     class Writer:
-        outputs = ("wind",)
+        outputs = ("air.edge_head",)
         inputs = ("species.x",)
 
         def __call__(self, state, drivers):
-            return {"wind": drivers["wind"]}
+            return {"air.edge_head": drivers["air.edge_head"]}
 
     _, model, *_ = _build(closures=(Writer(),))
     own = model.refs.ownership()
     assert own["species.x"].writers == ("layer species",)
     assert any(r.startswith("closure ") for r in own["species.x"].readers)
-    assert any(w.startswith("closure ") for w in own["wind"].writers)
+    assert any(w.startswith("closure ") for w in own["air.edge_head"].writers)
     assert own["species.sources"].readers == ("layer species",)
     assert own["species.sources"].writers == ("caller",)
     assert own["species.sources"].field.role == "driver"
@@ -2063,16 +2065,16 @@ def test_field_batch_shape_is_the_shape_without_the_fields_layout():
 
 def test_check_reports_overwritten_undeclared_and_probed_outputs():
     class A:
-        outputs = ("wind",)
+        outputs = ("air.edge_head",)
 
         def __call__(self, state, drivers):
-            return {"wind": drivers["wind"], "extra": drivers["wind"]}
+            return {"air.edge_head": drivers["air.edge_head"], "extra": drivers["air.edge_head"]}
 
     class B:
-        outputs = ("wind",)
+        outputs = ("air.edge_head",)
 
         def __call__(self, state, drivers):
-            return {"wind": drivers["wind"]}
+            return {"air.edge_head": drivers["air.edge_head"]}
 
     def undeclared(state, drivers):
         return {}

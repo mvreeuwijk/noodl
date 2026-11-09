@@ -14,7 +14,6 @@ from noodl.apps.electrical import (
     build_model,
     initial_state,
 )
-from noodl.drives import ConstantDrive
 from noodl.elements import PowerLaw
 from noodl.layers.kirchhoff import KirchhoffLayer
 from noodl.layers.transport import TransportLayer
@@ -115,14 +114,13 @@ def _transport_model(scheme):
     net.add_edge("z1", "z2", kind="airpath", z_path=0.0)
     net.add_edge("z2", "ambient", kind="airpath", z_path=0.0)
     el = PowerLaw(torch.tensor([0.01, 0.02, 0.01], dtype=F64), 0.65)
-    air = KirchhoffLayer(net, "air", [el], drives=[ConstantDrive("airpath", "wind")],
-                         boundary=["ambient"], quantity="pressure", unit="Pa")
+    air = KirchhoffLayer(net, "air", [el], boundary=["ambient"], quantity="pressure", unit="Pa")
     species = TransportLayer(net, "species", capacity=torch.tensor([50.0, 80.0], dtype=F64),
                              flow_kind="airpath", boundary=["ambient"], scheme=scheme,
                              quantity="mass_fraction", unit="kg/kg")
     model = Model(net, {"air": air, "species": species})
     drivers = {"air.phi_boundary": torch.zeros(1, dtype=F64),
-               "wind": torch.tensor([5.0, 0.0, 0.0], dtype=F64),
+               "air.edge_head": torch.tensor([5.0, 0.0, 0.0], dtype=F64),
                "species.x_boundary": torch.tensor([1e-3], dtype=F64),
                "species.sources": torch.zeros(3, dtype=F64)}
     return model, species, {"species.x": torch.zeros(2, dtype=F64)}, drivers

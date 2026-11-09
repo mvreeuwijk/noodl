@@ -33,6 +33,7 @@ from noodl.apps.sewer.air import (
     F_AIR_DEFAULT,
     F_I_DEFAULT,
     add_air_edges,
+    air_heads,
     air_layer,
     check_air_topology,
 )
@@ -2826,6 +2827,7 @@ def build_dynamic_wave_model(net: SewerNetwork, *, iterate_tol: float | None = N
     if air:
         layers["air"] = air_layer(graph, net, plan, f_air=f_air, f_i=f_i, c_s=c_s,
                                   leak_area=leak_area, leak_cd=leak_cd, fans=fans)
+        closures.append(air_heads(layers["air"], graph, net, plan, f_i=f_i, c_s=c_s))
         air_parts = _air_parts(graph, closure, scheme, fans, sulfide=sulfide_air)
         parts["drivers"].update(air_parts["drivers"])
         parts["specs"].update(air_parts["specs"])

@@ -1473,11 +1473,14 @@ inverted in closed form with a laminar blend near zero. The air-side wetted peri
 $P_{\text{air}} = \pi D - P(h) + T(h)$ — the dry wall plus the water surface acting as a moving
 wall — and $D_h = 4A_{\text{air}}/P_{\text{air}}$.
 
-`Drag` is a `Drive`: $D = \tfrac{1}{2} f_i \rho U_s \lvert U_s \rvert T L / A_{\text{air}}$ with
+`Drag` is a head term: $D = \tfrac{1}{2} f_i \rho U_s \lvert U_s \rvert T L / A_{\text{air}}$ with
 $U_s = c_s V_w$. The full branch law is $\Delta p = R\lvert Q\rvert Q - D - B$, where $B$ is the
-**same `Stack` buoyancy drive the building application uses** — reused unchanged.
+**same `Stack` buoyancy term the building application uses** — reused unchanged. `air_heads`
+adds `Drag` and the two `Stack` terms (headspace and leak) up in an `EdgeHeads` closure that
+writes the layer's head driver `"air.edge_head"`, after the hydraulics closure that writes the
+`sewer.*` drivers `Drag` reads.
 
-The drag sign convention is documented and was verified rather than assumed: the drive returns
+The drag sign convention is documented and was verified rather than assumed: the term returns
 $+D$ so that with both ends at ambient the air moves from the upstream manhole toward the
 downstream one, the direction the wastewater drags it. The opposite sign was tried and caught by
 the measurement.
@@ -1485,8 +1488,8 @@ the measurement.
 #### Headspace air on the dynamic wave
 
 `build_model(net, air=True)` on a `"dynamic_wave"` network reuses the kinematic path's air layer
-unchanged (`Headspace`, `Drag`, `Stack`, the leaks and fans, built by the same `air_layer`) and
-feeds it from the solved conduits. Each conduit's air geometry is read at its **link depth**
+unchanged (`Headspace`, `Drag`, `Stack`, the leaks and fans, built by the same `air_layer` and
+`air_heads`) and feeds it from the solved conduits. Each conduit's air geometry is read at its **link depth**
 $y = \min(y_{\text{mid}}, y_{\text{full}})$ (SWMM's `Link.newDepth`, one barrel's) on the exact
 circle (`air_geometry`), whatever `net.geometry` is: the tabulated section is the water side's,
 and the air has no SWMM reference, as with the kinematic path at `geometry="tabulated"`.
@@ -1896,7 +1899,7 @@ publish numbers from this application.
 - **No gas-phase sulfide sink.** H₂S leaves the headspace by ventilation, at the outfall, and
   by re-absorption into the water (the two-film flux is signed); no wall uptake or gas-phase
   oxidation is modelled.
-- **Headspace drag uses the absolute water-surface velocity.** `Drag` drives the air with
+- **Headspace drag uses the absolute water-surface velocity.** `Drag` forces the air with
   $U_s$ rather than the relative velocity $U_s - U_{\text{air}}$, which would need the air
   layer's own solved state. The drag is overestimated where the headspace air already moves
   with the water.

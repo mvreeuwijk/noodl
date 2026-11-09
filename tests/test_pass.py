@@ -4,7 +4,6 @@ import pytest
 import torch
 
 from noodl._pass import layer_kwargs, run_pass
-from noodl.drives import ConstantDrive
 from noodl.elements import PowerLaw
 from noodl.layers.kirchhoff import KirchhoffLayer
 from noodl.layers.transport import TransportLayer
@@ -24,7 +23,7 @@ def _build(**model_kw):
     net.add_edge("z2", "ambient", kind="airpath", z_path=0.0)
     air = KirchhoffLayer(net, "air", [PowerLaw(torch.tensor([0.01, 0.02, 0.01], dtype=F64),
                                                0.65)],
-                         drives=[ConstantDrive("airpath", "wind")], boundary=["ambient"])
+                         boundary=["ambient"])
     layers = [air]
     for name in ("species", "tracer"):
         layers.append(TransportLayer(
@@ -33,7 +32,7 @@ def _build(**model_kw):
     model = Model(net, layers, **model_kw)
     drivers = {
         "air.phi_boundary": torch.zeros(1, dtype=F64),
-        "wind": torch.tensor([5.0, 0.0, 0.0], dtype=F64),
+        "air.edge_head": torch.tensor([5.0, 0.0, 0.0], dtype=F64),
         "species.x_boundary": torch.tensor([1e-3], dtype=F64),
         "species.sources": torch.tensor([0.0, 2e-6, 0.0], dtype=F64),
         "tracer.x_boundary": torch.tensor([2e-3], dtype=F64),

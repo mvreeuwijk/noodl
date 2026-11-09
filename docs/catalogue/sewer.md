@@ -65,7 +65,7 @@ Terms added to an edge's potential difference (stack, wind, fans).
 
 | Name | What it does | How to call it |
 |---|---|---|
-| `Drag` | Interfacial drag as a `Drive`: the shear a moving water surface exerts on the air. | `Drag(length, pipe_positions, *, f_i=0.000749, c_s=1.0, rho_air=1.2041, v_key='sewer.v', width_key='sewer.T', area_key='sewer.A_air', zero_positions=(), kind='headspace')` |
+| `Drag` | Interfacial drag as a head term: the shear a moving water surface exerts on the air. | `Drag(length, pipe_positions, *, f_i=0.000749, c_s=1.0, rho_air=1.2041, v_key='sewer.v', width_key='sewer.T', area_key='sewer.A_air', zero_positions=(), kind='headspace')` |
 
 ## Closures
 
