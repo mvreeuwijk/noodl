@@ -567,8 +567,7 @@ state's own flows. A phasor layer (`phasor=True`) has complex `"<layer>.phi"` an
 convergence on the modulus of the change and differentiates its fixed point in the real view.
 Anderson mixing (`iterate_acceleration="anderson"`) is refused on a phasor layer.
 `line_search="convex"` (by keyword or through `newton_defaults`) is refused on such a layer: its
-residual is not the gradient of a convex function. `analytic_primal` has no effect on it,
-because its solve already assembles the analytic operator.
+residual is not the gradient of a convex function.
 
 ### Closures
 

@@ -94,7 +94,9 @@ class PowerLaw(ConstitutiveLaw):
         # exactly 0, since dp_safe is disconnected from dp under the mask) instead of
         # producing inf * 0 = nan when a caller differentiates dflow's output again.
         dp_safe = torch.where(mask, torch.full_like(dp, dpt), dp.abs())
-        outside = n * C * dp_safe ** (n - 1)
+        # `C * (n * dp_safe^(n-1))`, the product in the order reverse-mode autograd forms it
+        # from `flow`, so this slope is the autograd derivative bit for bit.
+        outside = C * (n * dp_safe ** (n - 1))
         return torch.where(mask, k * torch.ones_like(dp), outside)
 
     def linear_init(self, drivers=None) -> tuple[Tensor, Tensor]:

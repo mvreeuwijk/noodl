@@ -413,9 +413,9 @@ network's size: 10-15 ms on the 6-node tree, from 37 ms, and 38 ms on a 2,047-co
 from 55 ms (`benchmarks/sewer_dynwave_speed.py`, which also times SWMM). With SWMM's own
 tolerances the tree's 30 minutes take 11.5 s (123 s before), about 850 times SWMM; the
 2,047-conduit tree is about 40 times SWMM. Most of it is the conduit update (`dynwave_terms.conduit_terms`), SWMM's
-normal and critical depths, and the head solve, whose Newton Jacobian is the elements' own
-analytic `dflow` on the primal passes (`KirchhoffLayer(analytic_primal=True)`; the implicit
-adjoint still differentiates the converged pass). A batch of B scenarios (`simulate_dynamic_wave`
+normal and critical depths, and the head solve, whose Newton Jacobian (and the implicit
+adjoint's) is the elements' own analytic `dflow`: every sewer law's `dflow` is the exact
+derivative of its flow (`exact_slope`, [Writing a constitutive law](../concepts/elements.md)). A batch of B scenarios (`simulate_dynamic_wave`
 with a `(B, n)` inflow) costs about the same per pass, so an ensemble amortises it.
 
 #### Units

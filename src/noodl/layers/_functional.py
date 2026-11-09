@@ -6,6 +6,12 @@ operator as functions of the iterate and a flat tuple of tensors: the laws' and 
 own `nn.Parameter`s (substituted back in with `torch.func.functional_call`), the driver
 values, `sources` and `phi_boundary`. Node sources are threaded through exactly as laws are,
 so a learnable demand exponent or required pressure gets a correct implicit-function gradient.
+
+The Jacobian operator (the forward Newton's and the adjoint's) takes each law's and node
+source's own analytic `dflow` where it declares `exact_slope` (the default), and autograd
+through its flow where it does not (`FunctionalLaws._law_slope`, `_source_slope`). The
+parameter gradients come from one autograd pass through the residual at the root
+(`solvers.implicit`), never from the slopes.
 """
 
 from __future__ import annotations
@@ -13,6 +19,22 @@ from __future__ import annotations
 import torch
 
 from noodl._tracking import bulk_values, same_tracking
+from noodl.elements.base import ConstitutiveLaw
+from noodl.nodesources import NodeSource
+
+
+def _call(module, params: dict, args: tuple):
+    """`module(*args)` with its parameters replaced by `params` (`functional_call`); a module
+    without parameters is called directly, which is the same call without the cost."""
+    if not params:
+        return module(*args)
+    return torch.func.functional_call(module, params, args)
+
+
+def _analytic(owner, base) -> bool:
+    """Whether `owner` overrides `base.dflow` (else its `dflow` is autograd anyway, and the
+    threaded autograd here gives the same slope with this module's own error messages)."""
+    return type(owner).dflow is not base.dflow
 
 
 class FunctionalLaws:
@@ -46,8 +68,22 @@ class FunctionalLaws:
             )
         )
         self.all_params = (*param_tensors, *driver_tensors, sources_tensor, phi_boundary)
+        self.last = None
+        self._rebuilt = None
 
     def rebuild(self, params):
+        """`(law and node-source parameter dicts, drivers, sources, phi_boundary)` from the
+        flat `params`; the last result is reused while `params` holds the same objects (the
+        forward Newton calls with one tuple throughout)."""
+        memo = self._rebuilt
+        if memo is not None and len(memo[0]) == len(params) and all(
+                a is b for a, b in zip(memo[0], params, strict=True)):
+            return memo[1]
+        out = self._rebuild(params)
+        self._rebuilt = (tuple(params), out)
+        return out
+
+    def _rebuild(self, params):
         offset = 0
         rebuilt = []
         for names in self.param_names:
@@ -89,24 +125,34 @@ class FunctionalLaws:
         for el, d, (s, e) in zip(
             layer._laws, rebuilt[: self.n_el], layer._law_slices, strict=True
         ):
-            parts.append(torch.func.functional_call(el, d, (dp_full[..., s:e], drv)))
+            parts.append(_call(el, d, (dp_full[..., s:e], drv)))
         return torch.cat(parts, dim=-1)
 
     def node_withdrawal(self, phi, drv, rebuilt):
         layer = self.layer
-        return layer._scatter_node_sources(lambda j, ns: torch.func.functional_call(
+        return layer._scatter_node_sources(lambda j, ns: _call(
             ns, rebuilt[self.n_el + j], (phi[..., ns.nodes], drv)))
 
     def node_slopes(self, phi, drv, rebuilt):
+        """The node sources' slopes `diag(w')`, scattered into the interior rows (or None)."""
         layer = self.layer
-        def slope(j, ns):
-            leaf = phi[..., ns.nodes].detach().requires_grad_(True)
-            with torch.enable_grad():
-                w = torch.func.functional_call(ns, rebuilt[self.n_el + j], (leaf, drv))
-                (grad,) = torch.autograd.grad(w.sum(), leaf)
-            return grad
+        return layer._scatter_node_sources(
+            lambda j, ns: self._source_slope(ns, rebuilt[self.n_el + j], phi[..., ns.nodes],
+                                             drv))
 
-        return layer._scatter_node_sources(slope)
+    @staticmethod
+    def _source_slope(ns, d, phi_nodes, drv):
+        """One node source's `dw/dphi` at its nodes: its own `dflow` where that is exact
+        (`exact_slope`), else autograd through its withdrawal."""
+        if ns.exact_slope and _analytic(ns, NodeSource):
+            # `d`'s tensors are `ns`'s own parameters (see `_law_slope`).
+            with torch.no_grad():
+                return ns.dflow(phi_nodes, drv).expand(phi_nodes.shape)
+        leaf = phi_nodes.detach().requires_grad_(True)
+        with torch.enable_grad():
+            w = _call(ns, d, (leaf, drv))
+            (grad,) = torch.autograd.grad(w.sum(), leaf)
+        return grad
 
     @staticmethod
     def _dp_dependence_error(el, i: int) -> RuntimeError:
@@ -118,84 +164,90 @@ class FunctionalLaws:
         )
 
     def dflows(self, phi, drv, rebuilt):
+        """Every edge's slope `dq/d(dp)`, law by law (`_law_slope`), in edge order."""
         layer = self.layer
         dp_full = self.dp(phi, drv)
-        parts = []
-        for i, (el, d, (s, e)) in enumerate(
-            zip(layer._laws, rebuilt[: self.n_el], layer._law_slices, strict=True)
-        ):
-            dp_slice = dp_full[..., s:e].detach().requires_grad_(True)
-            # The REDUCTION `flow.sum()` must itself execute inside the enable_grad
-            # block, not just the `functional_call` that produces `flow`: this whole
-            # method runs under the outer no_grad of Newton's forward solve (which is
-            # what keeps the forward's memory flat), and `.sum()` is an ordinary tensor op like
-            # any other -- performed under the ambient grad mode at the point it actually
-            # runs, regardless of whether its input (`flow`) already carries a grad_fn
-            # from an earlier, enable_grad-wrapped computation. Writing
-            # `torch.autograd.grad(flow.sum(), dp_slice)` with the `with
-            # torch.enable_grad():` block closed before that line evaluates `flow.sum()`
-            # under the outer no_grad, so the tensor actually handed to `autograd.grad` as
-            # `outputs` has no grad_fn of its own -- even though `flow` printed `requires_grad=True`
-            # right before the call. `torch.autograd.grad` itself does not consult the
-            # ambient grad mode at its own call site (confirmed: calling it under no_grad
-            # against an output already fully built under enable_grad, or with an explicit
-            # `grad_outputs=` and no further reduction, both work); the reduction is what
-            # must be inside the block.
-            with torch.enable_grad():
-                flow = torch.func.functional_call(el, d, (dp_slice, drv))
-                # Whether a missing/zero Jacobian contribution here is legitimate is
-                # decided ONLY by el.dp_independent -- a class-level DECLARATION (see
-                # ConstitutiveLaw) -- never inferred from whatever autograd graph `flow` happens
-                # to carry (e.g. `flow.requires_grad` with allow_unused=True): that would give
-                # ANY law whose flow() accidentally lost the autograd graph (e.g. a stray
-                # dp.detach() in a third-party subclass) an exact-zero Jacobian column
-                # instead of an error. The forward solve would still look fine (Newton
-                # converges on the exact residual regardless), but the adjoint gradient
-                # computed from that Jacobian would be silently wrong.
-                if el.dp_independent:
-                    # Cross-check the declaration against the law's own analytic
-                    # dflow(), which for a genuinely dp-independent law (FixedFlow's,
-                    # say) must be identically zero. This is called on `el` directly
-                    # (not through functional_call/`d`) rather than via a second
-                    # functional_call: torch.func.functional_call always invokes the
-                    # module's forward()/flow(), with no way to redirect it to dflow(),
-                    # and `d`'s tensors are the very same objects as el's own current
-                    # parameters (both trace back to el.named_parameters() at the start
-                    # of solve()), so reading el's own attributes here gives the same
-                    # values a substituted call would. This catches a wrongly-declared
-                    # dp_independent = True (or a dflow() inconsistent with it) instead
-                    # of silently trusting a possibly-wrong flag.
-                    analytic = el.dflow(dp_slice.detach(), drv)
-                    if not torch.equal(analytic, torch.zeros_like(analytic)):
-                        raise RuntimeError(
-                            f"law {i} of kind {el.kind!r} (type "
-                            f"{type(el).__name__}) declares dp_independent = True but "
-                            f"its own dflow() is not identically zero; either the flag "
-                            f"is wrong or dflow() is inconsistent with a dp-independent "
-                            f"flow law."
-                        )
-                    grad = torch.zeros_like(dp_slice)
-                elif not flow.requires_grad:
-                    raise self._dp_dependence_error(el, i)
-                else:
-                    try:
-                        (grad,) = torch.autograd.grad(
-                            flow.sum(), dp_slice, create_graph=False
-                        )
-                    except RuntimeError as exc:
-                        raise self._dp_dependence_error(el, i) from exc
-            parts.append(grad)
-        return torch.cat(parts, dim=-1)
+        return torch.cat([
+            self._law_slope(i, el, d, dp_full[..., s:e], drv)
+            for i, (el, d, (s, e)) in enumerate(
+                zip(layer._laws, rebuilt[: self.n_el], layer._law_slices, strict=True))
+        ], dim=-1)
+
+    def _law_slope(self, i, el, d, dp, drv):
+        """Law `i`'s slopes at its edges' `dp`: zero for a `dp_independent` law (checked
+        against its `dflow`), its own `dflow` where that is the exact derivative of its flow
+        (`exact_slope`), else autograd through its flow with the threaded parameters `d`.
+
+        The adjoint linearises with these slopes, so only an exact `dflow` may stand in for
+        autograd; a law whose `dflow` is a Newton aid declares `exact_slope = False`.
+        `dflow` is called on `el` itself, not through `functional_call`: `d`'s tensors are
+        the very same objects as `el`'s own parameters (both come from
+        `el.named_parameters()` at the start of the solve), so the values are equal. Under
+        `no_grad`: the slopes are constants of the operator, never differentiated."""
+        if el.dp_independent:
+            # Cross-check the declaration against the law's own analytic dflow(), which for
+            # a genuinely dp-independent law (FixedFlow's, say) must be identically zero.
+            # This catches a wrongly-declared dp_independent = True (or a dflow()
+            # inconsistent with it) instead of silently trusting a possibly-wrong flag.
+            with torch.no_grad():
+                analytic = el.dflow(dp.detach(), drv)
+            if not torch.equal(analytic, torch.zeros_like(analytic)):
+                raise RuntimeError(
+                    f"law {i} of kind {el.kind!r} (type "
+                    f"{type(el).__name__}) declares dp_independent = True but "
+                    f"its own dflow() is not identically zero; either the flag "
+                    f"is wrong or dflow() is inconsistent with a dp-independent "
+                    f"flow law."
+                )
+            return torch.zeros_like(dp)
+        if el.exact_slope and _analytic(el, ConstitutiveLaw):
+            with torch.no_grad():
+                return el.dflow(dp.detach(), drv).expand(dp.shape)
+        dp_slice = dp.detach().requires_grad_(True)
+        # The REDUCTION `flow.sum()` must itself execute inside the enable_grad block, not
+        # just the `functional_call` that produces `flow`: this method runs under the outer
+        # no_grad of Newton's forward solve, and `.sum()` performed under no_grad hands
+        # `autograd.grad` an output without a grad_fn even though `flow` carries one.
+        with torch.enable_grad():
+            flow = _call(el, d, (dp_slice, drv))
+            # Whether a missing Jacobian contribution is legitimate is decided ONLY by
+            # el.dp_independent, a class-level DECLARATION, never inferred from the graph
+            # `flow` happens to carry: a flow() that accidentally lost the autograd graph
+            # (a stray dp.detach()) would otherwise get an exact-zero Jacobian column and a
+            # silently wrong adjoint gradient.
+            if not flow.requires_grad:
+                raise self._dp_dependence_error(el, i)
+            try:
+                (grad,) = torch.autograd.grad(flow.sum(), dp_slice, create_graph=False)
+            except RuntimeError as exc:
+                raise self._dp_dependence_error(el, i) from exc
+        return grad
 
     def residual_fn(self, x, *params):
         layer = self.layer
         rebuilt, drv, src, pb = self.rebuild(params)
         phi = layer.assemble(x, pb)
         q = self.flows(phi, drv, rebuilt)
+        if not q.requires_grad:
+            # the point, potentials and flows of the last graph-free residual
+            # (`KirchhoffLayer._solve_implicit` returns them when no gradient is wanted)
+            self.last = (x, phi, q)
         lhs = layer._accumulate_interior(q)
         s_I = src[..., layer.interior]
         w = self.node_withdrawal(phi, drv, rebuilt)
         return lhs - s_I if w is None else lhs - s_I + w
+
+    @property
+    def layer_slopes(self) -> bool:
+        """Whether `dflows`/`node_slopes` equal the layer's own `dflows` and node-source
+        slopes: true unless a law or node source overrides `dflow` with a slope it does not
+        declare exact (`exact_slope = False`), which only the layer's slopes use."""
+        layer = self.layer
+        return not any(
+            not owner.exact_slope and _analytic(owner, base)
+            for owners, base in ((layer._laws, ConstitutiveLaw),
+                                 (layer._node_sources, NodeSource))
+            for owner in owners)
 
     def operator_fn(self, x, *params):
         layer = self.layer

@@ -1,4 +1,4 @@
-"""How `on_failure`, `differentiable`, `analytic_primal` and `diagnostics=` combine.
+"""How `on_failure`, `differentiable` and `diagnostics=` combine.
 
 `KirchhoffLayer.solve` has a classic (nodal Newton) path and an MNA path. Both decide, from the
 same keywords and from whether anything differentiable reaches the solve, whether the solve is
@@ -85,7 +85,7 @@ def resolve_classic(
     """The path of a classic solve; completes `newton_kwargs` in place.
 
     Order of the mutations: `method`, `on_failure` (`return_primal` to `return`), `where`, the
-    diagnostics refusal, then `analytic_primal`, `forward_only` and the final `"raise"`.
+    diagnostics refusal, then `forward_only` and the final `"raise"`.
     """
     newton_kwargs.setdefault("method", layer.linear_solver)
     primal_only = newton_kwargs.get("on_failure") == "return_primal"
@@ -113,12 +113,6 @@ def resolve_classic(
 def _classic_path(
     layer, newton_kwargs, primal_only, differentiable, drivers, sources, phi_boundary
 ) -> SolvePolicy:
-    if differentiable and layer.analytic_primal and not layer._reaches_grad(
-        drivers, sources, phi_boundary
-    ):
-        # Nothing differentiable reaches this solve, so the implicit path would return
-        # the same detached root through an autograd Jacobian (`analytic_primal`).
-        differentiable = False
     # "return_primal": "return" unless something differentiable reaches the solve; a
     # differentiable solve that nothing reaches is its forward Newton alone.
     forward_only = (
