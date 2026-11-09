@@ -19,15 +19,17 @@ water balance: MBL integrates the mass FRACTION, so water is not conserved when 
 How the four equations map onto noodl physics' layers (implicit in each step: one Newton
 airflow solve and the `exact` transport steps per `coupling="iterate"` pass):
 
-* **Mass**: a `NodeSource` on the air layer at every storage zone, the backward-Euler
-  withdrawal `(m - m_prev)/dt` (`ZoneStorage`). `rho_m` is proportional to `p` in all three
+* **Mass**: a `NodeStorage` on the air layer at every storage zone (`ZoneStorage`), the
+  zone's mass `m = V rho_m`, whose change the layer turns into the backward-Euler
+  withdrawal `(m - m_prev)/dt`. `rho_m` is proportional to `p` in all three
   media, `rho_m = p k(T, X)`, and the difference is formed as
   `V [k (phi - phi_prev) + (k - k_prev)(p_ref + phi_prev)]` in the gauge pressure `phi`, not
   as a difference of absolute masses, whose round-off (`eps m`, 2.6e-4 kg for the 1e12 m3
   "outside" volumes of some MBL examples) would swamp a step's mass change; for
   `Buildings.Media.Air` `k` is a constant and the second term is exactly zero. `T`, `X` are
-  the closure's drivers of the pass; `phi_prev`, `k_prev`, the state at the start of the
-  step, are the closure-carried state `"air.storage"`. The zone pressure is then an unknown
+  the closure's drivers of the pass; `phi_prev` is the layer's step-start pressure, and
+  `k_prev` is read from the closure-carried state `"air.storage"` (the driver
+  `"air.storage_k_prev"`). The zone pressure is then an unknown
   of the air layer, grounded by the storage itself, so closed zone groups need no pressure
   reference.
 * **Energy**: substituting the mass and water balances, with `u_T = du/dT`, `u_X = du/dX`,
@@ -87,6 +89,7 @@ from dataclasses import dataclass
 import torch
 
 from noodl._broadcast import broadcast_shapes
+from noodl.elements.base import LawContext, step_rate, step_rate_factor
 from noodl.elements.media import (
     _CP_AIR,
     _CP_SIMPLEAIR,
@@ -97,7 +100,7 @@ from noodl.elements.media import (
     _R_H2O,
     AirMedium,
 )
-from noodl.nodesources import NodeSource
+from noodl.storage import NodeStorage
 
 Tensor = torch.Tensor
 F64 = torch.float64
@@ -219,19 +222,28 @@ def mass_change(V, k, phi, k_prev, phi_prev, p_ref: float) -> Tensor:
     return V * (k * (phi - phi_prev) + (k - k_prev) * (p_ref + phi_prev))
 
 
-class ZoneStorage(NodeSource):
-    """The air-layer withdrawal at the storage zones (module docstring, "Mass"):
+class ZoneStorage(NodeStorage):
+    """The air mass stored in the storage zones of the air layer (module docstring, "Mass"):
+    `amount = V k(T, X) (p_ref + phi)`, so the layer withdraws the zone's mass rate.
 
-        w = (rate (m - m_prev) - offset + a w_fed) / (1 + a),
+    The withdrawal over a step is
 
-    `rate (m - m_prev) - offset` the discrete storage rate (backward Euler: `rate = 1/h`,
-    `offset = 0`; the trapezoidal rule of `run.simulate(scheme="midpoint")`: `rate = 2/h`,
-    `offset` the start-of-step rate), `w_fed` the storage rate of the pass's input state and
-    `a >= 0` the coupling gain (module docstring, "Coupling"). At a converged step
-    `w_fed = rate (m - m_prev) - offset` and `w` is the discrete storage rate itself. Reads
-    the full-node drivers `"T"`, `"X_w"` and the per-zone drivers `"air.storage_prev"`
-    (`(..., n_s, 2)`: `phi`, `k` at the start of the step), `"air.storage_rate"` (1/s),
-    `"air.storage_offset"`, `"air.storage_w_fed"` (kg/s) and `"air.storage_gain"`."""
+        w = (r + a w_fed) / (1 + a),
+
+    `r` the discrete storage rate of the change `m - m_prev` (`change`) and `a >= 0` the
+    coupling gain with `w_fed` the storage rate of the pass's input state (module docstring,
+    "Coupling"); at a converged step `w_fed = r` and `w` is the storage rate itself. `r` is
+    the layer's own step rate (`noodl.elements.step_rate`: `(m - m_prev)/dt` by backward
+    Euler), or, when `run.simulate(scheme="midpoint")` writes its variable-step BDF2
+    coefficients, `factor (m - m_prev) - offset` (`run._Midpoint`). The zone's step-start
+    gauge pressure is the layer's (`history`); the rest of the step start is read from the
+    drivers: the full-node `"T"`, `"X_w"`, and per zone `"air.storage_k_prev"` (`k` at the
+    step start), optionally `"air.storage_bdf2_factor"` (1/s) with
+    `"air.storage_bdf2_offset"` (kg/s), and `"air.storage_coupling_gain"` with
+    `"air.storage_inflow"` (kg/s, `w_fed`). Without a gain driver `a = 0`."""
+
+    #: `amount` is affine in the zone pressure at fixed drivers (`T`, `X`).
+    linear = True
 
     def __init__(self, nodes, volumes: Tensor, p_ref: float, th: StorageThermo) -> None:
         super().__init__(nodes)
@@ -242,17 +254,48 @@ class ZoneStorage(NodeSource):
     def _k(self, drivers: Mapping) -> Tensor:
         return self.th.k(drivers["T"][..., self.nodes], drivers["X_w"][..., self.nodes])
 
-    def flow(self, phi_nodes: Tensor, drivers: Mapping | None = None) -> Tensor:
-        prev = drivers["air.storage_prev"]
-        dm = mass_change(self.V, self._k(drivers), phi_nodes, prev[..., 1], prev[..., 0],
-                         self.p_ref)
-        a = drivers["air.storage_gain"]
-        rate = drivers["air.storage_rate"] * dm - drivers["air.storage_offset"]
-        return (rate + a * drivers["air.storage_w_fed"]) / (1 + a)
+    def amount(self, phi_nodes: Tensor, drivers: Mapping | None = None) -> Tensor:
+        """The zone's air mass `V k(T, X) (p_ref + phi)` (kg)."""
+        return self.V * self._k(drivers) * (self.p_ref + phi_nodes)
 
-    def dflow(self, phi_nodes: Tensor, drivers: Mapping | None = None) -> Tensor:
-        slope = (drivers["air.storage_rate"] * self.V * self._k(drivers)
-                 / (1 + drivers["air.storage_gain"]))
+    def change(self, phi_nodes: Tensor, phi_start: Tensor,
+               drivers: Mapping | None = None) -> Tensor:
+        """`m - m_prev` by `mass_change`, with `k_prev` the driver `"air.storage_k_prev"`:
+        the difference is formed in the gauge pressure, not as a difference of absolute
+        masses, whose round-off would swamp a step's mass change (module docstring,
+        "Mass")."""
+        return mass_change(self.V, self._k(drivers), phi_nodes,
+                           drivers["air.storage_k_prev"], phi_start, self.p_ref)
+
+    def capacity(self, phi_nodes: Tensor, phi_start: Tensor,
+                 drivers: Mapping | None = None) -> Tensor:
+        c = self.V * self._k(drivers)
+        return c.expand(broadcast_shapes(c.shape, phi_nodes.shape))
+
+    @staticmethod
+    def _factor(ctx: LawContext, drivers: Mapping):
+        f = drivers.get("air.storage_bdf2_factor")
+        return step_rate_factor(ctx) if f is None else f
+
+    def rate(self, phi_nodes: Tensor, phi_start: Tensor, previous: Tensor | None,
+             ctx: LawContext, drivers: Mapping | None = None) -> Tensor:
+        dm = self.change(phi_nodes, phi_start, drivers)
+        f = drivers.get("air.storage_bdf2_factor")
+        if f is None:
+            r = step_rate(dm, ctx, previous)
+        else:
+            r = f * dm - drivers["air.storage_bdf2_offset"]
+        a = drivers.get("air.storage_coupling_gain")
+        if a is None:
+            return r
+        return (r + a * drivers["air.storage_inflow"]) / (1 + a)
+
+    def rate_slope(self, phi_nodes: Tensor, phi_start: Tensor, previous: Tensor | None,
+                   ctx: LawContext, drivers: Mapping | None = None) -> Tensor:
+        slope = self._factor(ctx, drivers) * self.V * self._k(drivers)
+        a = drivers.get("air.storage_coupling_gain")
+        if a is not None:
+            slope = slope / (1 + a)
         return slope.expand(broadcast_shapes(slope.shape, phi_nodes.shape))
 
 
@@ -420,16 +463,13 @@ class StorageClosure:
             return out
         prev = state["air.storage"]
         dt = float(ctx.dt)
-        n_s = self.air_nodes.numel()
         s = drivers.get("air.sources")
         s = torch.zeros_like(p) if s is None else s.to(F64)
         q = state.get("air.q")
         net = self.net(q, p)
-        out["air.storage_prev"] = prev[..., self.air_nodes, :]
-        out["air.storage_rate"] = torch.full((n_s,), 1.0 / dt, dtype=F64)
-        out["air.storage_offset"] = torch.zeros(n_s, dtype=F64)
-        out["air.storage_gain"] = self.gain(drivers)
-        out["air.storage_w_fed"] = (net + s)[..., self.air_nodes]
+        out["air.storage_k_prev"] = prev[..., self.air_nodes, 1]
+        out["air.storage_coupling_gain"] = self.gain(drivers)
+        out["air.storage_inflow"] = (net + s)[..., self.air_nodes]
         w = self.rate_from_mass(now, prev, dt)      # backward Euler: (m - m_prev)/dt
         terms = self.terms(state, {**drivers, "_q": q}, w, net, s)
         for name in ("thermal", "species"):

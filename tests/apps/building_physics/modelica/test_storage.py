@@ -46,17 +46,21 @@ def _one_zone(med_name: str, g: float, V: float, p_ref: float = 101325.0):
     net.add_edge("z", "out", kind="c")
     th = storage.thermo(medium(med_name))
     layer = KirchhoffLayer(net, "air", [Conductance(_t([g]), kind="c")], boundary=["out"],
-                           node_sources=[storage.ZoneStorage([0], _t([V]), p_ref, th)])
+                           storage=[storage.ZoneStorage([0], _t([V]), p_ref, th)],
+                           scheme="backward_euler")
     return layer, th
 
 
-def _drivers(th, phi_prev, T, dt, *, gain=0.0, w_fed=0.0):
+def _drivers(th, T, *, gain=0.0, w_fed=0.0):
     k = th.k(_t([T]), _t([0.0]))
-    return {"T": _t([T, T]), "X_w": _t([0.0, 0.0]),
-            "air.storage_prev": torch.stack([_t([phi_prev]), k], dim=-1),
-            "air.storage_rate": _t([1.0 / dt]), "air.storage_offset": _t([0.0]),
-            "air.storage_gain": _t([gain]),
-            "air.storage_w_fed": _t([w_fed])}
+    return {"T": _t([T, T]), "X_w": _t([0.0, 0.0]), "air.storage_k_prev": k,
+            "air.storage_coupling_gain": _t([gain]), "air.storage_inflow": _t([w_fed])}
+
+
+def _step(phi_prev, dt):
+    """The step keywords from the zone's start pressure `phi_prev` (the boundary at 0)."""
+    phi_prev = torch.as_tensor(phi_prev, dtype=F64).reshape(1)
+    return {"dt": dt, "history": (torch.cat([phi_prev, _t([0.0])]), None)}
 
 
 @pytest.mark.parametrize("med_name", ["Buildings.Media.Air", "Modelica.Media.Air.SimpleAir"])
@@ -68,30 +72,30 @@ def test_a_volume_relaxes_with_its_compressibility_time_constant(med_name):
     layer, th = _one_zone(med_name, g, V)
     tau = V * float(th.k(_t([T]), _t([0.0]))[0]) / g
     dt = 0.3 * tau
-    phi, _ = layer.solve(_t([0.0]), _drivers(th, 100.0, T, dt), None, phi0=_t([100.0]),
-                         atol=1e-14, rtol=1e-14)
+    phi, _ = layer.solve(_t([0.0]), _drivers(th, T), None, phi0=_t([100.0]),
+                         atol=1e-14, rtol=1e-14, **_step(100.0, dt))
     assert float(phi[0]) == pytest.approx(100.0 / (1.0 + dt / tau), rel=1e-12)
     errors = []
     for n in (20, 40):
         p = 100.0
         for _ in range(n):
-            phi, _ = layer.solve(_t([0.0]), _drivers(th, p, T, tau / n), None, phi0=_t([p]),
-                                 atol=1e-14, rtol=1e-14)
+            phi, _ = layer.solve(_t([0.0]), _drivers(th, T), None, phi0=_t([p]),
+                                 atol=1e-14, rtol=1e-14, **_step(p, tau / n))
             p = float(phi[0])
         errors.append(abs(p - 100.0 * math.exp(-1.0)))
     assert errors[0] / errors[1] == pytest.approx(2.0, rel=0.05)
 
 
 def test_the_coupling_gain_does_not_move_the_converged_storage():
-    """`ZoneStorage`'s blend `(rate dm + a w_fed)/(1 + a)` is `rate dm` itself when `w_fed`
+    """`ZoneStorage`'s blend `(r + a w_fed)/(1 + a)` is the step rate `r` itself when `w_fed`
     is the converged storage rate, whatever the gain `a`."""
     layer, th = _one_zone("Modelica.Media.Air.SimpleAir", 2e-3, 62.5)
     dt = 5.0
-    phi0, _ = layer.solve(_t([0.0]), _drivers(th, 100.0, 300.0, dt), None, phi0=_t([100.0]),
-                          atol=1e-15, rtol=1e-15)
+    phi0, _ = layer.solve(_t([0.0]), _drivers(th, 300.0), None, phi0=_t([100.0]),
+                          atol=1e-15, rtol=1e-15, **_step(100.0, dt))
     w = -2e-3 * float(phi0[0])          # the element's inflow = the storage rate
-    phi1, _ = layer.solve(_t([0.0]), _drivers(th, 100.0, 300.0, dt, gain=0.4, w_fed=w), None,
-                          phi0=_t([50.0]), atol=1e-15, rtol=1e-15)
+    phi1, _ = layer.solve(_t([0.0]), _drivers(th, 300.0, gain=0.4, w_fed=w), None,
+                          phi0=_t([50.0]), atol=1e-15, rtol=1e-15, **_step(100.0, dt))
     assert float(phi1[0]) == pytest.approx(float(phi0[0]), rel=1e-12)
 
 
@@ -102,18 +106,49 @@ def test_storage_gradcheck_through_the_airflow_solve():
 
     def f(T, phi_prev):
         k_prev = th.k(_t([293.15]), _t([0.0]))
-        drv = {"T": torch.cat([T, T]), "X_w": _t([0.0, 0.0]),
-               "air.storage_prev": torch.stack([phi_prev, k_prev], dim=-1),
-               "air.storage_rate": _t([0.2]), "air.storage_offset": _t([0.0]),
-               "air.storage_gain": _t([0.0]),
-               "air.storage_w_fed": _t([0.0])}
-        phi, _ = layer.solve(_t([0.0]), drv, None, phi0=_t([50.0]), atol=1e-14, rtol=1e-14)
+        drv = {"T": torch.cat([T, T]), "X_w": _t([0.0, 0.0]), "air.storage_k_prev": k_prev,
+               "air.storage_coupling_gain": _t([0.0]), "air.storage_inflow": _t([0.0])}
+        phi, _ = layer.solve(_t([0.0]), drv, None, phi0=_t([50.0]), atol=1e-14, rtol=1e-14,
+                             **_step(phi_prev, 5.0))
         return phi
 
     T = _t([300.0]).requires_grad_(True)
     p = _t([80.0]).requires_grad_(True)
     assert torch.autograd.gradcheck(f, (T, p), eps=1e-5, atol=1e-7)
 
+
+
+@pytest.mark.parametrize("form", ["step_rate", "bdf2", "gain"])
+def test_the_rate_slope_is_the_derivative_of_the_rate(form):
+    """`ZoneStorage.rate_slope` is d rate / d phi (it keeps `exact_slope`), for the layer's
+    own step rate, the BDF2 drivers of `run._Midpoint` and with a coupling gain; and the
+    rate is the BDF2 formula `factor (m - m_prev) - offset` when those drivers are given."""
+    from noodl.elements.base import LawContext
+
+    th = storage.thermo(medium("Modelica.Media.Air.SimpleAir"))
+    st = storage.ZoneStorage([0, 1], _t([62.5, 30.0]), 101325.0, th)
+    drv = {"T": _t([300.0, 290.0]), "X_w": _t([0.0, 0.0]),
+           "air.storage_k_prev": th.k(_t([295.0, 291.0]), _t([0.0, 0.0]))}
+    if form == "bdf2":
+        drv.update({"air.storage_bdf2_factor": _t([0.3, 0.3]),
+                    "air.storage_bdf2_offset": _t([1e-3, -2e-3])})
+    if form == "gain":
+        drv.update({"air.storage_coupling_gain": _t([0.4, 0.1]),
+                    "air.storage_inflow": _t([2e-3, -1e-3])})
+    ctx = LawContext(mode="transient", dt=5.0, scheme="backward_euler")
+    phi_start = _t([80.0, -3.0])
+    phi = _t([60.0, 1.0]).requires_grad_(True)
+    rate = st.rate(phi, phi_start, None, ctx, drv)
+    (grad,) = torch.autograd.grad(rate.sum(), phi)
+    slope = st.rate_slope(phi.detach(), phi_start, None, ctx, drv)
+    assert torch.allclose(slope, grad, rtol=1e-14, atol=0.0)
+    dm = storage.mass_change(st.V, th.k(drv["T"], drv["X_w"]), phi.detach(),
+                             drv["air.storage_k_prev"], phi_start, 101325.0)
+    expected = {"step_rate": dm / 5.0, "bdf2": 0.3 * dm - drv.get("air.storage_bdf2_offset", 0.0),
+                "gain": (dm / 5.0 + drv.get("air.storage_coupling_gain", 0.0)
+                         * drv.get("air.storage_inflow", 0.0))
+                / (1 + drv.get("air.storage_coupling_gain", 0.0))}[form]
+    assert torch.allclose(rate.detach(), expected, rtol=1e-14, atol=0.0)
 
 def _perfectgas_mass_energy(doc, names, out):
     """Total fluid mass and internal energy `sum m u` of MBL's volumes, from the history,

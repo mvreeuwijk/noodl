@@ -1868,8 +1868,8 @@ to 1.6e-2 relative in `NaturalVentilation`'s flows).
 **Volume mass storage.** MBL's `MixingVolume` (`ConservationEquation.mo`) integrates the volume's
 mass `m = V rho(p, T, X)`, its energy `U = m u`, its water mass fraction (`der(Xi) = mbXi/m`,
 not the water mass) and its trace-substance masses. The reader writes these balances into the
-existing layers: the air layer gets a storage node source per volume (so a zone's pressure is
-an unknown even with no boundary in its group), the thermal and species layers get the zone's
+existing layers: the air layer gets a node storage per volume (`NodeStorage`, the volume's
+air mass; so a zone's pressure is an unknown even with no boundary in its group), the thermal and species layers get the zone's
 actual mass as a per-step capacity and the storage-rate form of `TransportLayer(dilution=...)`,
 and the energy balance gets MBL's flow-work, latent and moist-air carrier terms as sources
 (`noodl.apps.building_physics.modelica.storage`). `read_modelica(..., mass_storage=False)`
