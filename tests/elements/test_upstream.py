@@ -357,7 +357,7 @@ def test_a_buoyant_two_orifice_stack_beats_the_uncorrected_law_in_both_direction
     src, tgt = net.endpoints("airpath")
     C = torch.full((2,), 0.141421 * RHO_REF**0.5, dtype=F64)
     n = torch.full((2,), 0.5, dtype=F64)
-    from noodl.drives import Stack
+    from noodl.heads import Stack
 
     drive = Stack.from_network(net, "airpath")
     plain = KirchhoffLayer(net, "air", [PowerLaw(C, n)], boundary=["ambient"])
@@ -398,7 +398,7 @@ def test_a_gradient_reaches_the_density_driver_through_a_differentiable_solve():
     net.add_edge("ambient", "zone", kind="airpath", z_path=0.0)
     net.add_edge("ambient", "zone", kind="airpath", z_path=1.5)
     src, tgt = net.endpoints("airpath")
-    from noodl.drives import Stack
+    from noodl.heads import Stack
 
     layer = KirchhoffLayer(
         net,

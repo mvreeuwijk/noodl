@@ -15,8 +15,8 @@ from dataclasses import dataclass, field
 
 from noodl.apps.building_physics.thermal import T_REF
 from noodl.components import OuterRef
-from noodl.drives import DuctStack, Stack, Wind
 from noodl.elements import AirDuct, DuctTerminal
+from noodl.heads import DuctStack, Stack, Wind
 
 DEFAULT_ROUGHNESS = 9e-5       # m, CONTAM's default duct roughness
 DEFAULT_TERMINAL_LOSS = 0.125  # CONTAM's default terminal loss coefficient

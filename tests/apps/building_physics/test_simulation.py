@@ -517,7 +517,7 @@ def test_simulate_project_steady_refuses_unread_and_overlapping_inputs(tmp_path)
 @pytest.mark.parametrize("key, values", [("T", None), ("P_ref", (101325.0, 95000.0)),
                                          ("V_met", (5.23, 1.0))])
 def test_a_batched_scheduled_project_with_a_constant_flow_fan_matches_its_instances(key, values):
-    """scheduled_three_zone carries a scheduled constant-flow fan, a drive-free kind: a batch
+    """scheduled_three_zone carries a scheduled constant-flow fan, a head-free kind: a batch
     on `T`, `P_ref` or `V_met` runs, and every instance equals its own unbatched run."""
     p = read_prj(DATA / "scheduled_three_zone.prj")
     model, state, drivers = project_to_model(p)

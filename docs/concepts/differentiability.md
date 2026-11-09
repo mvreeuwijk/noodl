@@ -65,8 +65,8 @@ nothing differentiable.
 
 ## The contract
 
-For `differentiable=True` to be *safe*, two rules must hold. A violation raises a `ValueError`
-— naming the offending law or drive and the attribute where it can — rather than silently
+For `differentiable=True` to be *safe*, one rule must hold. A violation raises a `ValueError`
+— naming the offending law and the attribute where it can — rather than silently
 returning a wrong or absent gradient.
 
 The differentiable solve threads a fixed set of tensors through `Function.apply`: each law's and
@@ -74,7 +74,7 @@ node source's registered parameters, the driver values, `sources` and the bounda
 (and, on a transient step, the step-start state). Any other tensor that requires grad and reaches
 the residual is invisible to the implicit adjoint. Two checks look for one:
 
-- **Before solving, by attribute.** Every tensor a law, node source or drive holds — plain
+- **Before solving, by attribute.** Every tensor a law or node source holds — plain
   attributes, registered buffers, and tensors nested in lists, tuples, dicts, sets and plain
   objects — is scanned, and one that requires grad without being threaded is refused by name.
 - **At every Newton iterate, from the starting guess to the root, by evaluation.** The forward
@@ -90,7 +90,7 @@ read elsewhere in the state space, and it does not inspect a tensor that require
 not used at the root; neither affects the gradient at the returned solution. (The Jacobian is
 the same laws' slopes, a constant of the adjoint.)
 
-**1. A law's differentiable state must be a registered parameter.**
+**A law's differentiable state must be a registered parameter.**
 
 ```python
 leak = PowerLaw(C=torch.tensor(0.01), n=torch.tensor(0.65), learnable=True)   # correct
@@ -106,9 +106,10 @@ The attribute scan walks what the law holds (attributes, buffers, and containers
 objects nested up to eight levels, skipping containers of more than 1024 items); a tensor it
 does not reach is caught by the residual evaluation where the residual reads it.
 
-**2. A drive must read every differentiable quantity from the `drivers` mapping**, never hold
-one as an instance attribute. See [Constitutive laws and drives](elements.md#the-rule-a-drive-must-obey)
-for why this is structural rather than stylistic.
+A head term (stack, wind, drag) is not held by the layer: `EdgeHeads` writes the total as the
+driver `"<layer>.edge_head"`, so a gradient reaches whatever the head reads. See
+[Constitutive laws and heads](elements.md#the-rule-a-head-term-must-obey) for why a head is a
+function of the drivers alone.
 
 ## What is guaranteed
 
@@ -252,9 +253,10 @@ the cases rather than leaving you to discover them.
   site through a real coupled QP to give a genuine cross-gradient.
 - **At zero flow in the sewer.** `normal_depth` returns exactly $h = 0$ with gradient $0$ at
   $q = 0$, a documented modelling choice, because the true $dh/dq$ diverges there.
-- **Structurally, for `f_i`.** The sewer's interfacial drag coefficient is a `Drive` attribute
-  and therefore not differentiable by this framework's design — stated as such, "not an
-  oversight."
+- **For `f_i`.** The sewer's interfacial drag coefficient is an attribute of the head term `Drag`.
+  The head reaches the layer as the driver `"air.edge_head"`, so a gradient reaches `f_i` when it is
+  a tensor with `requires_grad=True` (it agrees with a central difference). The default is a
+  calibrated constant, not a parameter to fit.
 - **For a tank's area.** In the water application, tank area is not reached by a single
   `water_steady` call — only the tank's head enters the steady solve. Gradients with respect to
   it flow through the forward-Euler move of `water_event_step`, not through the steady state.

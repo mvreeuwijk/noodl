@@ -120,7 +120,7 @@ class Weather:
         * the barometric pressure is `"P_ref"`, the key `IdealGasDensity` looks for (CONTAM
           TN 1887r1 section 3.18). It is NOT namespaced: it is a property of the ambient
           state that any closure may read, not of one layer.
-        * `"V_met"`/`"theta_w"` are the `Wind` drive's own default `speed_key`/
+        * `"V_met"`/`"theta_w"` are the `Wind` head's own default `speed_key`/
           `direction_key` and are unchanged.
 
         A model with more than one prescribed temperature node (`thermal_layer(

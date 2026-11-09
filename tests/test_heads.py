@@ -5,9 +5,8 @@ from __future__ import annotations
 import pytest
 import torch
 
-from noodl.drives import ConstantDrive, DuctStack, Stack, Wind
 from noodl.elements import Conductance, PowerLaw
-from noodl.heads import EdgeHeads
+from noodl.heads import DriverHead, DuctStack, EdgeHeads, Stack, Wind
 from noodl.layers.kirchhoff import KirchhoffLayer
 from noodl.model import Model
 from noodl.topology import Network
@@ -44,15 +43,12 @@ def _laws():
             PowerLaw(torch.tensor([0.015]), 0.5, kind="duct")]
 
 
-def _pair(net, terms):
-    """The same layer built with drives=terms and without them (for the head driver)."""
-    old = KirchhoffLayer(net, "air", _laws(), drives=terms, boundary=["ambient"])
-    new = KirchhoffLayer(net, "air", _laws(), boundary=["ambient"])
-    return old, new
+def _air(net):
+    return KirchhoffLayer(net, "air", _laws(), boundary=["ambient"])
 
 
 def _terms(net):
-    return [Stack.from_network(net, "airpath"), ConstantDrive("duct", "duct_head")]
+    return [Stack.from_network(net, "airpath"), DriverHead("duct", "duct_head")]
 
 
 def _drivers():
@@ -62,43 +58,32 @@ def _drivers():
 PHI_B = torch.zeros(1, dtype=F64)
 
 
-def test_dp_with_one_term_per_kind_is_bitwise_the_drive_version():
+def test_dp_adds_the_head_driver_to_every_edge():
     net = _net()
     terms = _terms(net)
-    old, new = _pair(net, terms)
+    layer = _air(net)
     drivers = _drivers()
-    head = EdgeHeads(new, terms).head(drivers)
+    head = EdgeHeads(layer, terms).head(drivers)
     assert head.shape == (5,)
     phi = torch.tensor([0.0, 4.0, -2.0])
-    assert torch.equal(old.dp(phi, drivers), new.dp(phi, {**drivers, "air.edge_head": head}))
+    assert torch.equal(layer.dp(phi, {**drivers, "air.edge_head": head}),
+                       layer._difference(phi) + head)
+    assert torch.equal(layer.dp(phi, drivers), layer._difference(phi))   # absent means zero
 
 
-@pytest.mark.parametrize("differentiable", [False, True])
-def test_solve_with_one_term_per_kind_is_bitwise_the_drive_version(differentiable):
+def test_two_terms_on_one_kind_add_up():
     net = _net()
-    terms = _terms(net)
-    old, new = _pair(net, terms)
-    drivers = _drivers()
-    head = EdgeHeads(new, terms).head(drivers)
-    a = old.solve(PHI_B, drivers, differentiable=differentiable)
-    b = new.solve(PHI_B, {"air.edge_head": head}, differentiable=differentiable)
-    assert torch.equal(a[0], b[0]) and torch.equal(a[1], b[1])
-
-
-def test_two_terms_on_one_kind_agree_to_rounding():
-    net = _net()
-    terms = [Stack.from_network(net, "airpath"), ConstantDrive("airpath", "gust")]
-    old, new = _pair(net, terms)
+    terms = [Stack.from_network(net, "airpath"), DriverHead("airpath", "gust")]
+    layer = _air(net)
     drivers = {"rho": torch.tensor([1.2, 1.15, 1.1]),
                "gust": torch.tensor([1.0, -2.0, 0.5, 3.0])}
-    head = EdgeHeads(new, terms).head(drivers)
-    a = old.solve(PHI_B, drivers, differentiable=False)
-    b = new.solve(PHI_B, {"air.edge_head": head}, differentiable=False)
-    torch.testing.assert_close(b[0], a[0], rtol=1e-14, atol=0)
-    torch.testing.assert_close(b[1], a[1], rtol=1e-14, atol=0)
+    head = EdgeHeads(layer, terms).head(drivers)
+    expected = terms[0](drivers) + drivers["gust"]
+    torch.testing.assert_close(head[:4], expected, rtol=1e-14, atol=0)
+    assert head[4].item() == 0.0
 
 
-def _rc(drives=()):
+def _rc():
     # source a -> gnd, resistor a -> b (edge 1), capacitor b -> gnd (dynamic edge 2)
     net = Network(dtype=F64)
     for n in ("gnd", "a", "b"):
@@ -107,21 +92,19 @@ def _rc(drives=()):
         net.add_edge(u, v, kind=k)
     return KirchhoffLayer(
         net, "e", [Source(torch.tensor([1.0])), Conductance(torch.tensor([2.0]), kind="r"),
-                   Cap(torch.tensor([1.0]))], drives=drives, boundary=["gnd"])
+                   Cap(torch.tensor([1.0]))], boundary=["gnd"])
 
 
 @pytest.mark.parametrize("scheme", ["backward_euler", "trapezoidal"])
-def test_mna_solve_with_a_head_is_bitwise_the_drive_version(scheme):
-    term = ConstantDrive("r", "h")
-    old, new = _rc([term]), _rc()
-    drivers = {"h": torch.tensor([0.25])}
-    head = EdgeHeads(new, [term]).head(drivers)
+def test_mna_solve_with_a_head_driver_moves_the_resistor_edge(scheme):
+    layer = _rc()
+    head = EdgeHeads(layer, [DriverHead("r", "h")]).head({"h": torch.tensor([0.25])})
     assert head.tolist() == [0.0, 0.25, 0.0]
     hist = (torch.zeros(3), torch.zeros(3))
     for kw in ({"mode": "dc"}, {"dt": 0.1, "scheme": scheme, "history": hist}):
-        a = old.solve(PHI_B, drivers, differentiable=False, **kw)
-        b = new.solve(PHI_B, {"e.edge_head": head}, differentiable=False, **kw)
-        assert torch.equal(a[0], b[0]) and torch.equal(a[1], b[1])
+        a = layer.solve(PHI_B, {}, differentiable=False, **kw)
+        b = layer.solve(PHI_B, {"e.edge_head": head}, differentiable=False, **kw)
+        assert not torch.equal(a[0], b[0])
 
 
 def test_a_head_on_a_dynamic_edge_is_refused_by_name():
@@ -138,7 +121,7 @@ def test_a_head_on_a_dynamic_edge_is_refused_by_name():
 def test_gradcheck_through_a_closure_only_parameter():
     net = _net()
     layer = KirchhoffLayer(net, "air", _laws(), boundary=["ambient"])
-    heads = EdgeHeads(layer, [ConstantDrive("airpath", "h"), ConstantDrive("duct", "d")])
+    heads = EdgeHeads(layer, [DriverHead("airpath", "h"), DriverHead("duct", "d")])
     base = torch.tensor([2.0, -1.0, 3.0, 1.5])
     k = torch.tensor([1.0, 0.5], dtype=F64, requires_grad=True)   # reaches dp only via head
 
@@ -153,12 +136,12 @@ def test_gradcheck_through_a_closure_only_parameter():
 
 def test_refusals_name_the_layer_and_the_key():
     net = _net()
-    _, layer = _pair(net, [])
+    layer = _air(net)
     with pytest.raises(ValueError, match=r"'air'.*'air.edge_head'.*\(5,.*width 4"):
         layer.dp(torch.zeros(3), {"air.edge_head": torch.zeros(4)})
     with pytest.raises(ValueError, match=r"term kind 'nope'.*'air'"):
-        EdgeHeads(layer, [ConstantDrive("nope", "h")])
-    heads = EdgeHeads(layer, [ConstantDrive("airpath", "h")])
+        EdgeHeads(layer, [DriverHead("nope", "h")])
+    heads = EdgeHeads(layer, [DriverHead("airpath", "h")])
     with pytest.raises(ValueError, match=r"kind 'airpath' returned width 3.*4 edges"):
         heads.head({"h": torch.zeros(3)})
 
@@ -177,14 +160,14 @@ def test_refusals_name_the_layer_and_the_key():
 def test_a_term_on_a_dynamic_kind_is_refused():
     layer = _rc()
     with pytest.raises(ValueError, match=r"layer 'e': kind 'cap' has a dynamic law"):
-        EdgeHeads(layer, [ConstantDrive("cap", "h")])
+        EdgeHeads(layer, [DriverHead("cap", "h")])
 
 
 def test_inputs_are_the_union_of_the_terms_keys_or_unknown():
     net = _net()
-    _, layer = _pair(net, [])
+    layer = _air(net)
     heads = EdgeHeads(layer, [Stack.from_network(net, "airpath", rho_key="rho"),
-                              ConstantDrive("duct", "duct_head")])
+                              DriverHead("duct", "duct_head")])
     assert heads.inputs == ("duct_head", "rho") and heads.outputs == ("air.edge_head",)
     duct = DuctStack("duct", src=[2], tgt=[0], z_ref=[0.0, 0.0, 3.0], rho_key="rho_d")
     assert duct.inputs == ("rho_d",)
@@ -209,34 +192,27 @@ class Density:
         return {"rho": 101325.0 / (287.05 * drivers["T"])}
 
 
-def _model(use_heads):
+def _model():
     net = _net()
-    terms = _terms(net)
-    if use_heads:
-        layer = KirchhoffLayer(net, "air", _laws(), boundary=["ambient"],
-                               quantity="pressure", unit="Pa")
-        closures = [Density(), EdgeHeads(layer, terms)]
-    else:
-        layer = KirchhoffLayer(net, "air", _laws(), drives=terms, boundary=["ambient"],
-                               quantity="pressure", unit="Pa")
-        closures = [Density()]
+    layer = KirchhoffLayer(net, "air", _laws(), boundary=["ambient"],
+                           quantity="pressure", unit="Pa")
+    closures = [Density(), EdgeHeads(layer, _terms(net))]
     return Model(net, {"air": layer}, closures=closures), closures
 
 
-def test_model_with_a_head_closure_equals_the_drive_version_over_three_steps():
+def test_model_with_a_head_closure_steps_with_the_head_in_the_pass():
     drivers = {"air.phi_boundary": PHI_B, "T": torch.tensor([268.0, 294.0, 296.0]),
                "duct_head": torch.tensor([3.0])}
-    (a, _), (b, _) = _model(False), _model(True)
-    sa = sb = {}
+    model, _ = _model()
+    state = {}
     for _ in range(3):
-        sa, sb = a.step(sa, drivers, 60.0), b.step(sb, drivers, 60.0)
-        assert set(sa) == set(sb)
-        for key in sa:
-            assert torch.equal(sa[key], sb[key]), key
+        state = model.step(state, drivers, 60.0)
+        assert torch.isfinite(state["air.phi"]).all()
+    assert "air.edge_head" in model._apply_closures(state, drivers)
 
 
 def test_model_to_moves_the_term_tensors():
-    model, closures = _model(True)
+    model, closures = _model()
     stack = closures[1].terms[0]
     assert stack.z_path.dtype == torch.float64
     model.to(dtype=torch.float32)
@@ -249,7 +225,7 @@ def test_gradcheck_through_a_state_dependent_stack_head_classic():
     net = _net()
     layer = KirchhoffLayer(net, "air", _laws(), boundary=["ambient"])
     heads = EdgeHeads(layer, [Stack.from_network(net, "airpath"),
-                              ConstantDrive("duct", "duct_head")])
+                              DriverHead("duct", "duct_head")])
     T = torch.tensor([268.0, 294.0, 296.0], requires_grad=True)
 
     def f(T_):
@@ -277,25 +253,13 @@ def test_gradcheck_through_a_state_dependent_stack_head_mna():
     assert torch.autograd.gradcheck(f, (T,), eps=1e-6, atol=1e-5, rtol=1e-4)
 
 
-def test_edge_heads_refuses_a_kind_that_already_has_a_drive():
-    net = _net()
-    layer = KirchhoffLayer(net, "air", _laws(), drives=[ConstantDrive("duct", "d")],
-                           boundary=["ambient"])
-    with pytest.raises(ValueError, match=r"'air'.*kind 'duct'.*drives=.*not both"):
-        EdgeHeads(layer, [ConstantDrive("duct", "h")])
-    EdgeHeads(layer, [ConstantDrive("airpath", "h")])   # another kind is fine
-
-
 def test_power_residual_covers_the_head():
     net = _net()
-    terms = _terms(net)
-    old, new = _pair(net, terms)
+    layer = _air(net)
     drivers = _drivers()
-    head = EdgeHeads(new, terms).head(drivers)
-    phi, q = old.solve(PHI_B, drivers, differentiable=False)
-    r_old = old.power_residual(phi, q, drivers)
-    r_new = new.power_residual(phi, q, {"air.edge_head": head})
-    assert abs(r_old.item()) < 1e-10
-    torch.testing.assert_close(r_new, r_old, rtol=0, atol=1e-12)
+    head = EdgeHeads(layer, _terms(net)).head(drivers)
+    full = {**drivers, "air.edge_head": head}
+    phi, q = layer.solve(PHI_B, full, differentiable=False)
+    assert abs(layer.power_residual(phi, q, full).item()) < 1e-10
     # the test bites: the head does work on the flows, and the identity subtracts it
     assert abs((head * q).sum().item()) > 1e-6

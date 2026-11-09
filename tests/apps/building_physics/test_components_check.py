@@ -4,7 +4,7 @@ import torch
 
 from noodl.apps.building_physics import build_model, orifice_law_from_edges
 from noodl.components import Component
-from noodl.drives import Stack
+from noodl.heads import Stack
 from tests.components.conftest import leak, link, zone
 
 F64 = torch.float64

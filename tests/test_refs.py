@@ -19,9 +19,8 @@ from noodl.apps.building_physics import (
     thermal_layer,
 )
 from noodl.apps.building_physics.elements import orifice_law_from_edges
-from noodl.drives import Stack
 from noodl.elements.powerlaw import PowerLaw
-from noodl.heads import EdgeHeads
+from noodl.heads import EdgeHeads, Stack
 from noodl.layers.kirchhoff import KirchhoffLayer
 from noodl.model import Model
 from noodl.refs import Field

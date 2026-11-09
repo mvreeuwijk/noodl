@@ -62,7 +62,7 @@ def _gradcheck(layer, phi_b, drivers, sources, params=(), keys=(), eps=None, sol
 # ---------------------------------------------------------------------------- building
 def _building():
     """ambient -> z1 -> z2 -> ambient with a learnable power law, z1 <-> z2 also through an
-    open door (MBL's `DoorOpen`), and a wind drive on the power-law edges."""
+    open door (MBL's `DoorOpen`), and a wind head on the power-law edges."""
     air = medium("Buildings.Media.Air")
     net = _net(["amb", "z1", "z2"], [("amb", "z1", "airpath"), ("z1", "z2", "airpath"),
                                      ("z2", "amb", "airpath"), ("z1", "z2", "door")])
@@ -173,8 +173,7 @@ def _aided(exact: bool):
     layer, law, drivers = _building()
     aided = _AidedPowerLaw(law.C.detach().clone(), law.n.detach().clone(), learnable=True)
     aided.exact_slope = exact
-    layer = KirchhoffLayer(layer.net, "air", [aided, layer._laws[1]], list(layer._drives),
-                           boundary=["amb"])
+    layer = KirchhoffLayer(layer.net, "air", [aided, layer._laws[1]], boundary=["amb"])
     return layer, aided, drivers
 
 

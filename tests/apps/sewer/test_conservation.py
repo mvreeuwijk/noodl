@@ -87,12 +87,9 @@ def test_gradients_against_central_differences():
       below (finite, correct sign; not central-differenced here -- `f_air` is a `Headspace`
       element parameter reached the SAME way `leak_area` now is).
 
-    `f_i` is NOT one of them: it is a `Drag` DRIVE's plain attribute (never a registered
-    `nn.Parameter`), and `KirchhoffLayer`'s own differentiable-solve safety check
-    refuses `requires_grad=True` on a Drive's own tensor attribute by name (a Drive is
-    captured by closure inside the differentiable solve, not threaded through
-    `Function.apply`, so its gradient would otherwise be silently absent) --
-    STRUCTURALLY not differentiable by this framework's design, not an oversight here.
+    `f_i` is NOT one of them: it is a `Drag` head term's plain attribute, calibrated rather than
+    fitted, and it is passed here as a Python float. (The `EdgeHeads` closure writes the head
+    as a driver, so a gradient does reach a tensor `f_i`; this test does not pin that.)
     """
 
     def loss(inflow, f_i, f_air, leak_area):
@@ -139,7 +136,7 @@ def test_gradients_against_central_differences():
 def test_gradient_reaches_t_head():
     """`T_head` is a full-node/scalar DRIVER read by the
     `SewerHydraulics` closure's `_densities` and, through `rho_air_nodes`, by the air
-    layer's `Stack` buoyancy drive -- a legitimate driver path, unlike `f_i` above.
+    layer's `Stack` buoyancy head -- a legitimate driver path, unlike `f_i` above.
     MEASURED (eps = 0.01, Richardson (4 fd(eps) - fd(2 eps)) / 3): relative error 3.57e-8
     against the analytic adjoint gradient, comfortably inside this test's 1e-6 tolerance."""
 
@@ -225,6 +222,21 @@ def test_gradient_reaches_a_learnable_headspace_friction():
     new["air.q"].abs().sum().backward()
     assert element.f_air.grad is not None
     assert torch.isfinite(element.f_air.grad).all()
+
+
+def test_gradient_reaches_the_interfacial_drag_coefficient():
+    """`f_i` is a `Drag` head term's attribute; the `EdgeHeads` closure writes the head as a
+    driver, so a gradient reaches it and equals a central difference."""
+    def loss(f_i):
+        model, state, drivers = build_model(tree_steady(), quality=False, f_i=f_i)
+        return model.step(state, dict(drivers), 60.0)["air.q"].abs().sum()
+
+    f_i = torch.tensor(7.49e-4, dtype=F64, requires_grad=True)
+    loss(f_i).backward()
+    h = 1e-7
+    fd = (loss(torch.tensor(7.49e-4 + h, dtype=F64))
+          - loss(torch.tensor(7.49e-4 - h, dtype=F64))) / (2 * h)
+    assert f_i.grad.item() == pytest.approx(fd.item(), rel=1e-6)
 
 
 def test_the_golden_case_is_reproduced():

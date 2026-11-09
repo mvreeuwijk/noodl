@@ -1,5 +1,5 @@
 """Two-way flow through a large opening, discretised into ``nCom`` height compartments with a
-hydrostatic-head drive, transcribed from the Modelica Buildings Library's
+hydrostatic head term, transcribed from the Modelica Buildings Library's
 ``DoorDiscretizedOpen``/``DoorDiscretizedOperable``.
 
 Transcribed from Modelica Buildings Library (MBL) v13.0.0
@@ -65,7 +65,7 @@ The noodl mapping
 -----------------
 Compartment ``i`` of a door is one noodl edge from side A (``src``) to side B (``tgt``):
 
-* :class:`DoorCompartmentHead` is a drive (``noodl.drives`` protocol) returning
+* :class:`DoorCompartmentHead` is a head term (``noodl.heads`` protocol) returning
   ``rho_A hAg[i] - rho_B hBg[i]``, so that the layer's ``dp = (phi_A - phi_B) + head`` is
   ``dpAB[i]`` (with ``phi = p - p_ref``, any fixed gauge reference -- the Modelica reader uses
   the first boundary's pressure -- the port pressures' difference is the potentials').
@@ -184,7 +184,7 @@ class _InflowDensities:
 
 
 class DoorCompartmentHead(_InflowDensities):
-    """The hydrostatic part of ``DoorDiscretized.mo:64-66``, as a noodl drive:
+    """The hydrostatic part of ``DoorDiscretized.mo:64-66``, as a noodl head term:
     ``rho_A hAg[i] - rho_B hBg[i]`` per compartment edge, shape ``(..., n_edges)``.
 
     ``hAg``/``hBg`` are MBL's ``g_n (h - (i - 0.5) dh)`` (``DoorDiscretized.mo:34-40``), one
@@ -594,7 +594,7 @@ def discretized_door(
     p_key: str = "p_abs",
 ) -> tuple[DoorCompartment, DoorCompartmentHead]:
     """One ``DoorDiscretizedOpen`` as ``nCom`` edges of ``kind``: the compartment element and
-    its head drive. Defaults are MBL's (``DoorDiscretized.mo:6-11``,
+    its head term. Defaults are MBL's (``DoorDiscretized.mo:6-11``,
     ``TwoWayFlowElementBuoyancy.mo:6-14``, ``DoorDiscretizedOpen.mo:6``,
     ``TwoWayFlowElement.mo:19``). ``dA = wOpe hOpe / nCom`` on every edge
     (``DoorDiscretizedOpen.mo:23``, ``DoorDiscretized.mo:60``).

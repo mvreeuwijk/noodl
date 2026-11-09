@@ -18,7 +18,7 @@ Generated from the package's own docstrings. For the ideas behind these objects,
     options:
       members: [branch_flows, particular_flow, project_measured, assert_forward_oriented]
 
-## Constitutive laws and drives
+## Constitutive laws and heads
 
 ::: noodl.elements.base
     options:
@@ -84,11 +84,11 @@ Constitutive laws are grouped below by the physics they express, as in
     options:
       heading_level: 4
 
-### Drives
+### Heads
 
-::: noodl.drives
+::: noodl.heads
     options:
-      members: [Drive, ConstantDrive, Stack, Wind, WindProfile]
+      members: [HeadTerm, EdgeHeads, DriverHead, Stack, DuctStack, Wind, WindProfile]
       heading_level: 4
 
 ::: noodl.nodesources

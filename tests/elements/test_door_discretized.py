@@ -1,5 +1,5 @@
 """Tests for `noodl.elements.door_discretized`: MBL's `DoorDiscretizedOpen` and
-`DoorDiscretizedOperable` as `nCom` compartment edges plus a hydrostatic-head drive.
+`DoorDiscretizedOperable` as `nCom` compartment edges plus a hydrostatic-head term.
 
 The NumPy reference below is transcribed directly from the Modelica Buildings Library (MBL)
 v13.0.0 (commit 55abf579598ca81cae0a82f337350375958e6722) and the Modelica Standard Library

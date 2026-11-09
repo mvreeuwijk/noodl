@@ -15,7 +15,7 @@ The statements below are pinned by `tests/test_ownership.py`.
 | Layers (`KirchhoffLayer`, `TransportLayer`, `AllocatedFlowLayer`) | plain Python objects, **not** `torch.nn.Module` | a reference to the network, plus index tensors, capacities and counts copied from it at construction, and the network's topology version, device, dtype and attribute fingerprint of that time |
 | Constitutive laws, node sources | `torch.nn.Module` | their coefficients (parameters when `learnable=True`, otherwise plain tensors or buffers) |
 | `Model` | plain Python object, **not** a `torch.nn.Module` | the layer mapping, the closure list, the reaction list and the coupling options |
-| Closures, drives, reactions | arbitrary callables or plain objects | whatever they close over |
+| Closures, head terms, reactions | arbitrary callables or plain objects | whatever they close over |
 | State and drivers | dictionaries of tensors | passed in on every call; the model keeps none |
 
 ## Mutation after construction
@@ -84,7 +84,7 @@ one layer with its network). One walk over the model moves:
   structure;
 - the laws and node sources (parameters move in place, so they stay the same
   `nn.Parameter` objects an optimiser holds; buffers and plain tensor attributes move too);
-- drives, reactions and every closure of a class defined in noodl, attribute by attribute
+- head terms, reactions and every closure of a class defined in noodl, attribute by attribute
   (built-in closures need no hook of their own);
 - a user closure (a class defined outside noodl) that defines `to(device=None, dtype=None)`:
   that method is called. This is the hook for a closure that holds tensors;
@@ -138,7 +138,7 @@ present.
   own layers and laws. The copy's topology guard refers to the copy's network, so growing the
   original network does not affect the copy.
 - **`pickle` and `torch.save` of a whole model work** when every part is picklable. The
-  built-in layers, laws, drives and reactions are. A closure is an arbitrary callable: a
+  built-in layers, laws, head terms and reactions are. A closure is an arbitrary callable: a
   module-level function pickles, a `lambda` or a locally defined function does not.
 - **A copy keeps integrating closures integrating.** The model reads each closure's
   declarations once into a `ClosureSpec` that holds the closure object, so `deepcopy` and

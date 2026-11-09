@@ -134,17 +134,7 @@ class FunctionalLaws:
         if head is not None:
             layer._check_head_width(head)
             d = d + head
-        if not layer._drives:
-            return d
-        parts = []
-        for kind, (start, end) in layer._kind_slices.items():
-            block = d[..., start:end]
-            for driven in layer._drives:
-                if driven.kind == kind:
-                    block = block + driven(drv)
-            parts.append((start, block))
-        parts.sort(key=lambda p: p[0])
-        return torch.cat([p[1] for p in parts], dim=-1)
+        return d
 
     def flows(self, phi, drv, rebuilt):
         layer = self.layer

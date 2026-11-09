@@ -1,4 +1,4 @@
-"""The headspace element, the interfacial-drag drive and the air-density helper."""
+"""The headspace element, the interfacial-drag head term and the air-density helper."""
 
 import pytest
 import torch

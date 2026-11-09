@@ -21,7 +21,7 @@ Transcribed from MBL v13.0.0 (commit 55abf579) source, never from its documentat
 Angles: `winDir` is the direction the wind comes FROM, N = 0, E = pi/2 (the TMY3 file,
 `ReaderTMY3`); a surface's azimuth `azi` is the direction its outside faces, S = 0, W = pi/2
 (`Buildings.Types.Azimuth`); `alpha = 0` is wind normal onto the surface. These are not
-CONTAM's, and `noodl.drives.Wind`/`WindProfile` are not reused: there the wind pressure is a
+CONTAM's, and `noodl.heads.Wind`/`WindProfile` are not reused: there the wind pressure is a
 term of an envelope PATH's pressure difference and Cp a piecewise-linear profile, while MBL adds
 it to the boundary NODE's pressure and interpolates its profile with a cubic Hermite spline.
 """

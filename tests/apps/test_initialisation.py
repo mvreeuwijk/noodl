@@ -197,7 +197,7 @@ def test_the_static_check_is_clean_on_a_stock_street_model():
 def test_the_building_builder_can_return_the_same_triple_as_the_others():
     from noodl.apps import building_physics as bp
     from noodl.apps.building_physics.elements import orifice_law_from_edges
-    from noodl.drives import Stack
+    from noodl.heads import Stack
     from noodl.topology import Network
 
     def network():

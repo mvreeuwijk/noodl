@@ -142,7 +142,7 @@ def test_grounding_at_a_supplied_phi0_is_checked_on_the_differentiable_path_too(
 
 
 def _series_layer(linear_solver: str = "auto") -> tuple[KirchhoffLayer, dict, torch.Tensor]:
-    """Three-zone series network under a wind drive, matching the shape of the CONTAM
+    """Three-zone series network under a wind head, matching the shape of the CONTAM
     verification cases: ambient_w -> z1 -> z2 -> ambient_l, one PowerLaw per airpath edge.
 
     Returns `(layer, drivers, phi_boundary)`.
@@ -169,7 +169,7 @@ def _series_layer(linear_solver: str = "auto") -> tuple[KirchhoffLayer, dict, to
 
 
 def test_sparse_and_dense_newton_paths_agree_on_a_contam_style_series_network():
-    # Three-zone series network under a wind drive, matching the shape of the CONTAM
+    # Three-zone series network under a wind head, matching the shape of the CONTAM
     # verification cases: this exercises solve()'s full non-differentiable path (which now
     # builds a GraphLaplacianOperator per Newton iteration) against layer.jacobian() (still
     # dense, unchanged, used here only as the independent reference via a hand-rolled

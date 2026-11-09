@@ -1,7 +1,7 @@
 # Applications
 
 noodl physics is one solver. The applications below are physical systems modelled with it, each a thin
-layer of domain physics (its constitutive laws, drives and closures) over the shared core. Any of them can
+layer of domain physics (its constitutive laws, heads and closures) over the shared core. Any of them can
 be built directly in Python, as each page shows, or, where a reader exists, read from a model
 file; see [File formats](../formats/index.md). Every application is initialised the same way,
 with `initial_state(model, values=...)` and `initial_drivers(model, values=...)` by name; see
@@ -44,7 +44,7 @@ all four:
   Analysis, the full form of the nodal solve the building and water applications use.
 
 And they share machinery in ways that would be coincidence if the abstraction were wrong. The
-sewer's headspace air layer drives its Newton solve with the *same* `Stack` buoyancy term the
+sewer's headspace air layer uses the *same* `Stack` buoyancy term the
 building application uses for room air. The water application's Darcy-Weisbach pipes can be the
 framework's own `Duct` element in volumetric form (`friction="colebrook"`), though by default
 they follow EPANET's own composite friction law. The sewer and water `.inp` readers share one
@@ -91,7 +91,7 @@ The seven are also a template. A new application is:
 
 1. A **network builder** — domain dataclasses plus a function that turns them into a `Network`
    with the right edge kinds and attributes.
-2. **Constitutive laws and drives** for whatever laws are not already in the core.
+2. **Constitutive laws and heads** for whatever laws are not already in the core.
 3. **Closures** for anything that is a function of solved state.
 4. A **file reader**, if your field has a standard exchange format.
 5. A **`build_*_model`** function returning `(model, state, drivers)`, and a `*_steady` helper if

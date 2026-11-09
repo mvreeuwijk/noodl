@@ -59,7 +59,7 @@ from noodl.apps.building_physics import (
     Zone, add_zone, build_model, initial_drivers, initial_state,
 )
 from noodl.apps.building_physics.elements import add_large_opening, orifice_law_from_edges
-from noodl.drives import Stack
+from noodl.heads import Stack
 from noodl.topology import Network
 
 # 1. Configure
@@ -116,7 +116,7 @@ solving the old graph; construct the layers and model again.
   potential (pressure, head) and the flows it drives; a *transport* layer carries a
   quantity (temperature, mass fraction, concentration) on those flows; an *allocation*
   layer moves requested amounts between stores within capacity limits.
-- **Constitutive laws and drives.** The law on each kind of edge (an orifice, a pipe, a pump) and
+- **Constitutive laws and heads.** The law on each kind of edge (an orifice, a pipe, a pump) and
   the terms added to its potential difference (stack effect, wind, fans).
 - **Closures.** Functions of the state that compute inputs each step: the air density from
   the temperature, the street flows from the wind, the sewer flows from the inflows. Their
@@ -304,7 +304,7 @@ reports:
 - A table of every key the model knows: role, required or optional, order, expected
   shape, unit, and what was given.
 
-The inputs the closures, reactions, laws and drives read themselves are declared too,
+The inputs the closures, reactions, laws and head terms read themselves are declared too,
 in `model.refs.inputs`: the street model's wind speed, direction and boundary-layer depth
 (one value per instance, or one per street with `meteo="per_street"`), the sewer's inflow
 per manhole and its temperatures, CONTAM's node densities and wind, the chemistry's
@@ -323,7 +323,7 @@ print(model.refs.inputs["P_ref"].describe())
 
 A key the model knows nothing about — a custom closure's own input — is **not** rejected.
 `model.check(state, drivers, dt=600.0, probe=True)` runs one step on copies, recording
-which keys the closures, layers, laws and drives read, and reports any key nothing
+which keys the closures, layers, laws and head terms read, and reports any key nothing
 read. Without a probe the check evaluates the closures once (no solve, no time step) to
 learn what they write, so an input a closure provides is not reported missing. A custom
 closure can declare its own inputs with an `input_specs` attribute,
@@ -343,7 +343,7 @@ for issue in model.check(state, drivers_typo).issues:
 ## Finding what is available
 
 The [catalogue](catalogue/core.md) lists, for the core library and for every application,
-each type it offers — builders, network components, constitutive laws, drives, closures,
+each type it offers — builders, network components, constitutive laws, heads, closures,
 reactions, sources, file readers and writers, functions and model options — with what it
 does and how to call it. It is generated from the code, so it is always complete.
 

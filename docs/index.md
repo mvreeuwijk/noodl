@@ -28,7 +28,7 @@ differentiable. The same model that simulates forward will also tell you the der
 output with respect to any parameter, which is what turns a simulator into a tool for
 calibration, sensitivity analysis and design optimisation.
 
-![The noodl physics model stack: a network, then constitutive laws, drives and closures, then layers, then a Model that steps them together](assets/framework-overview.svg)
+![The noodl physics model stack: a network, then constitutive laws, heads and closures, then layers, then a Model that steps them together](assets/framework-overview.svg)
 
 ## What it gives you
 

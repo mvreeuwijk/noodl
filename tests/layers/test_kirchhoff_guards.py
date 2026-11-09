@@ -143,18 +143,6 @@ class _ModuleListLaw(ConstitutiveLaw):
         return self.parts[0].linear_init()
 
 
-class _NestedDrive:
-    """A drive that owns a gradient tensor two levels down."""
-
-    kind = "conduction"
-
-    def __init__(self, g):
-        self.table = {"coeffs": [_Holder(g)]}
-
-    def __call__(self, drivers):
-        return self.table["coeffs"][0].g * torch.ones(1, dtype=F64)
-
-
 class _ClosureLaw(ConstitutiveLaw):
     """Captures its coefficient in a closure, where no attribute scan can see it."""
 
@@ -187,44 +175,6 @@ def test_a_module_in_a_plain_list_is_refused():
     )
     with pytest.raises(ValueError, match=r"parts\[0\]\._parameters\['g'\]"):
         _solve_unit_source(layer)
-
-
-def test_a_gradient_tensor_nested_in_a_drive_is_refused():
-    g = torch.tensor(0.5, dtype=F64, requires_grad=True)
-    layer = KirchhoffLayer(
-        _net(), "heat", [Conductance(torch.tensor(1.0, dtype=F64))], boundary=["a"],
-        drives=[_NestedDrive(g)],
-    )
-    with pytest.raises(ValueError, match=r"drive .*table\['coeffs'\]\[0\]\.g"):
-        _solve_unit_source(layer)
-
-
-class _ModuleDrive(torch.nn.Module):
-    """A drive with a registered parameter: drives get no `functional_call`, so even a
-    registered parameter of a drive is not threaded (it gave dq/dh = 1.0, true 0.5)."""
-
-    kind = "conduction"
-
-    def __init__(self):
-        super().__init__()
-        self.h = torch.nn.Parameter(torch.tensor(1.0, dtype=F64))
-
-    def __call__(self, drivers):
-        return self.h * torch.tensor([1.0, 0.0], dtype=F64)
-
-
-def test_a_registered_parameter_of_a_module_drive_is_refused():
-    net = Network(dtype=F64)
-    for n in "abc":
-        net.add_node(n)
-    net.add_edge("a", "b", kind="conduction")
-    net.add_edge("b", "c", kind="conduction")
-    layer = KirchhoffLayer(
-        net, "heat", [Conductance(torch.tensor(1.0, dtype=F64))], boundary=["a", "c"],
-        drives=[_ModuleDrive()],
-    )
-    with pytest.raises(ValueError, match=r"drive .*_parameters\['h'\]"):
-        layer.solve(torch.zeros(2, dtype=F64))
 
 
 def test_a_gradient_tensor_captured_by_a_closure_is_refused():

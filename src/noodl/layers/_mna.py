@@ -287,7 +287,7 @@ class MnaSystem:
         consistent initial point, with no step) explicitly. A transient step reads the
         step-start state `history=(phi, q)` (full-node potentials, every edge's flow in layer
         edge order), required on a layer with a dynamic law; its potential differences are
-        taken without drives, which dynamic kinds may not carry.
+        taken without heads, which dynamic kinds may not carry.
         """
         if self.w == 2:
             return self._phasor_context(mode, dt, t, history, drivers)

@@ -1,10 +1,10 @@
-# Constitutive laws and drives
+# Constitutive laws and heads
 
 A **constitutive law** is the relation, on an edge kind, between the potential
 difference across each edge of that kind and the flow along it. Most constitutive laws give the
 flow as a function of the potential difference; some are relations between the two, with the
 flow an unknown (an ideal source, an inductance), and some couple several edges (a
-transformer's two windings). A **drive** is a term added to that potential difference before
+transformer's two windings). A **head term** is a term added to that potential difference before
 the constitutive law sees it — buoyancy, wind pressure, interfacial drag.
 
 Together they are the replaceable part of the framework. The network, the conservation law and
@@ -92,7 +92,7 @@ same physics — power laws, tables, doors — as MBL's own equations rather tha
 `power_law_from_point`, `power_law_from_points` and `power_law_coefficient`) is the power law
 family; `SplineFlowTable` a tabulated pressure-flow curve; `OpenDoor`/`OperableDoor` a lumped
 door pair (built by `open_door_pair`/`operable_door_pair`) and `DoorCompartment`/
-`OperableDoorCompartment`, with the `DoorCompartmentHead` drive, a height-discretised one (built
+`OperableDoorCompartment`, with the `DoorCompartmentHead` head term, a height-discretised one (built
 by `discretized_door`/`discretized_operable_door`, or wrapped as two port streams by
 `DoorPortStream`); `AirMedium`, built by `medium(name)`, the fixed-density medium the others
 read. See
@@ -299,37 +299,39 @@ itself: `dp.unflatten(-1, (-1, 2))` gives each group's `(port 1, port 2)`. The J
 assembled within groups only, so a law that couples edges across groups gets a wrong Jacobian
 and wrong gradients, not merely a slower Newton convergence.
 
-## Drives
+## Heads
 
-A drive contributes an additive term to the potential difference, before the law evaluates:
+A head term contributes an additive term to the potential difference, before the law evaluates:
 
 $$
-q = g\!\left(A^{\top}\phi + \text{drive}\right)
+q = g\!\left(A^{\top}\phi + \text{head}\right)
 $$
 
-`noodl.drives` provides:
+A layer adds one value per edge, the driver `"<layer>.edge_head"`, to every edge's potential
+difference. The closure `EdgeHeads` writes it: it adds up the head terms of one layer, each on
+the edges of its own kind (see [Heads](layers.md#heads-stack-wind-and-drag)). `noodl.heads`
+provides the terms:
 
-| Drive | What it adds |
+| Head term | What it adds |
 |---|---|
-| `ConstantDrive(value)` | A fixed potential difference per edge. |
+| `DriverHead(kind, key)` | A head read from a driver: the value `drivers[key]`, one per edge of the kind. |
 | `Stack(...)` | Buoyancy: the hydrostatic pressure difference from a density difference over the height between an edge's endpoints. `Stack.from_network(net, kind)` builds it from the nodes' own `z_ref` attributes. |
 | `DuctStack(kind, ...)` | The air column of a duct segment between its two junctions, at the density of their mean temperature. `DuctStack.from_network(net, kind)` builds it from the junctions' `z_ref`. |
 | `Wind(...)` | Wind pressure on a façade, from wind speed, direction and a pressure coefficient. `Wind.from_network(net, kind, ambient=...)`. |
 | `WindProfile(...)` | A vertical wind profile, identified by CONTAM's profile number. |
 
-Drives are reused across applications far more than constitutive laws are. The sewer application's
-headspace air layer drives its Newton solve with the *same* `Stack` the building application
-uses for room buoyancy, plus a sewer-specific `Drag` term — the physics is different, the
+Head terms are reused across applications far more than constitutive laws are. The sewer
+application's headspace air layer solves with the *same* `Stack` the building application
+uses for room buoyancy, plus a sewer-specific `Drag` term: the physics is different, the
 structure is not.
 
-### The rule a drive must obey
+### The rule a head term must obey
 
-**A drive is a function of the drivers alone.** It may read anything from the `drivers` mapping
-passed to `solve()`, and nothing else — not `phi`, not another layer's state, not an instance
-attribute holding a differentiable tensor.
+**A head term is a function of the drivers alone.** It may read anything from the `drivers`
+mapping, and nothing else: not `phi`, not another layer's state.
 
-This is structural. Keeping a drive independent of $\phi$ is what keeps the Newton Jacobian
-exactly $A_I \operatorname{diag}(g') A_I^\top$, with no extra coupling term. A drive that read
+This is structural. Keeping a head independent of $\phi$ is what keeps the Newton Jacobian
+exactly $A_I \operatorname{diag}(g') A_I^\top$, with no extra coupling term. A head that read
 $\phi$ would silently invalidate the Jacobian every solver in the package assembles.
 
 The sewer application's `Drag` is the worked consequence. Physically, the drag the moving water
@@ -341,10 +343,8 @@ and records the relative-velocity form as out of scope rather than quietly appro
 
 If you genuinely need a term that depends on solved state, it belongs in a **closure**, which
 runs between layer solves and writes driver values. See [Layers and models](layers.md#closures).
-
-A drive can also be written once per solve as a driver: the closure `EdgeHeads` adds up head
-terms (stack, wind, drag) on one layer's edges and writes `"<layer>.edge_head"`, which the layer adds
-to every edge's potential difference. See [Heads](layers.md#heads-stack-wind-and-drag).
+Because the head reaches the layer as a driver, a gradient reaches whatever produced it, and
+`EdgeHeads` holds no tensor the differentiable solve would miss.
 
 ## Node sources and node storage
 

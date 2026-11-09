@@ -418,15 +418,15 @@ edges and NO airpath edge: it is an unknown of the thermal layer and not of a sp
 over the same network, which is why a layer's active interior is per layer rather than
 global.
 
-**Why a drive is a function of the drivers alone.** The airflow solve is a nodal problem
+**Why a head is a function of the drivers alone.** The airflow solve is a nodal problem
 $A f(A^\top \phi + d) = s$ whose Jacobian is $A \operatorname{diag}(f') A^\top$. It is the branch head $d$ (the
 stack and wind terms) NOT depending on $\phi$ that buys this form, and with it the symmetry;
 positive definiteness then follows from the element slopes $f' > 0$ and from the network
 being grounded (a boundary node, so $A^\top$ has trivial null space), which are separate
 requirements the layer checks separately. Making $d$ a function of the thermal STATE would
 not disturb any of that -- $\phi$ is still the only unknown of the solve -- but making it a function of $\phi$ or of $f$ would, and
-a drive that closed over the flow it produces (say, an upstream density evaluated from the
-flow direction) is exactly such a term. The framework therefore defines a `Drive` as a
+a head that closed over the flow it produces (say, an upstream density evaluated from the
+flow direction) is exactly such a term. The framework therefore defines a head term as a
 function of the DRIVERS only: the node densities entering a stack head are computed from the
 temperatures held fixed for the duration of the pass, and any flow-direction dependence lives
 inside the ELEMENT, where it enters $f'$ and keeps the Jacobian symmetric (this is what
@@ -435,7 +435,7 @@ not work: a closure runs before the solve and cannot see the flow direction). CO
 previous thermal update within an airflow solve -- so matching CONTAM's numbers is partly a
 consequence of matching this convention, not only of matching its element laws.
 
-**Ping-pong and onion (Hensen 1995; Dols and Emmerich 2016).** Since drives are frozen for
+**Ping-pong and onion (Hensen 1995; Dols and Emmerich 2016).** Since heads are frozen for
 the pass, airflow and heat exchange information only BETWEEN passes, and there are two ways
 to spend passes within one time step. **Ping-pong** takes exactly one: solve the airflow at
 the temperatures at the start of the step, advance the temperatures on those flows, and move
@@ -505,7 +505,7 @@ the non-crossing fill below) plus a roof closure (`node_closure`, MUNICH's roof-
 correction, which lands asymmetrically on the side needed to keep every one of a junction's
 in/out totals matched, per `StreetNetworkTransport.cxx:2980-3014`). The result is written
 straight onto the `route`/`vent`/`exchange` edges of the `TransportLayer` as this step's
-flow, exactly like a `Drive`, before that layer's own solve runs at all.
+flow, exactly like a head, before that layer's own solve runs at all.
 
 **Why every `route`, `vent` and `exchange` flow is non-negative, with direction living in
 the topology.** Each of these three edge kinds is added to the graph in BOTH directions
@@ -661,7 +661,7 @@ the rule that no per-step path loops in Python. The pipe carrying each
 manhole's outflow is found by which pipe drains INTO that manhole's own outfall, never
 assumed to be the last pipe read from the file, because the reader's pipe order is whatever
 order the `.inp` lists conduits in, not necessarily the order the tree drains in;
-and the headspace `Stack` buoyancy drive's `z_path` on a `headspace` edge is the pipe's
+and the headspace `Stack` buoyancy head's `z_path` on a `headspace` edge is the pipe's
 CROWN elevation -- the mean of its two end inverts plus its own diameter -- not the mean
 invert alone, which is only the pipe's invert at its midpoint. A forest of more
 than one tree is supported on both the water and air sides: each component gets
@@ -675,25 +675,25 @@ does not, because `ambient` has no `ground` attribute of its own and so falls ba
 `0.0` datum rather than to the manhole's; the same `0.0` is used identically at the outfall's
 open-air edge and at `ambient`'s own fixed boundary condition (`air.phi_boundary = 0`), so
 every air pressure in the solve is shifted by the same constant -- `air.phi` is
-DATUM-REFERENCED to this convention, not to a physical zero, and every drive, refusal and
+DATUM-REFERENCED to this convention, not to a physical zero, and every head, refusal and
 verification row reads only DIFFERENCES between manholes, which the convention leaves
 unaffected.
 
-**The headspace momentum balance, and the `Drive`-cannot-see-`phi` rule.** Air in the
+**The headspace momentum balance, and the head-cannot-see-`phi` rule.** Air in the
 headspace above the flow is driven by three terms per pipe: Darcy-Weisbach wall
 friction on the air itself, buoyancy from the density difference between a warm manhole
-shaft and ambient (the SAME `Stack` drive the building application's stack effect uses, one
+shaft and ambient (the SAME `Stack` head the building application's stack effect uses, one
 full-node air-density driver, `rho_air_nodes`), and drag from the moving water surface
-dragging the air along above it. That last term is written as a `Drive` --
+dragging the air along above it. That last term is written as a head term --
 $D = \tfrac{1}{2} f_i\, \rho_{\text{air}} U_s \lvert U_s \rvert\, T L / A_{\text{air}}$ in the ABSOLUTE water-surface velocity $U_s$, not the
-physically more complete relative form $(U_s - V_{\text{air}})$ -- because a `Drive` is a function of
+physically more complete relative form $(U_s - V_{\text{air}})$ -- because a head is a function of
 the drivers alone and is never allowed to read the layer's own solved potential $\phi$
-(§1, `drives.py`): letting the drag depend on the air's own flow would put a term into the
+(§1, `heads.py`): letting the drag depend on the air's own flow would put a term into the
 Newton residual that the Jacobian $A \operatorname{diag}(g') A^\top$ does not account for, silently breaking
 the solver's own convergence theory. The absolute form is therefore not a simplification of
-convenience but the one shape the framework's `Drive` protocol admits; the relative form
+convenience but the one shape the framework's `HeadTerm` protocol admits; the relative form
 would need an element-side formulation (a batched monotone root on
-$R \lvert Q \rvert Q - \tfrac{1}{2} f_i\, \rho\, (U_s - Q/A)^2\, T L / A_{\text{air}} = \Delta p$) rather than a drive.
+$R \lvert Q \rvert Q - \tfrac{1}{2} f_i\, \rho\, (U_s - Q/A)^2\, T L / A_{\text{air}} = \Delta p$) rather than a head.
 
 **The two-film coupling, and its lagged pass.** Total sulfide in the water and H₂S in the
 headspace air are two separate `TransportLayer` species, coupled by one closure,

@@ -40,7 +40,7 @@ Two rooms joined by a doorway, one of them heated, with two leaks to ambient:
 import torch
 from noodl.apps.building_physics import Zone, add_zone, add_large_opening, orifice_law_from_edges
 from noodl.apps.building_physics import build_model, initial_drivers, initial_state
-from noodl.drives import Stack
+from noodl.heads import Stack
 from noodl.topology import Network
 
 F64 = torch.float64
@@ -132,6 +132,7 @@ into a room, which leaks it back to the ambient:
 import torch
 from noodl.apps.building_physics import DuctNetwork, duct_laws_from_edges
 from noodl.elements import FixedFlow, PowerLaw
+from noodl.heads import EdgeHeads
 from noodl.layers.kirchhoff import KirchhoffLayer
 from noodl.topology import Network
 
@@ -153,10 +154,12 @@ laws, heads = duct_laws_from_edges(net)
 laws += [FixedFlow(torch.tensor([0.05], dtype=F64), kind="fan"),
          PowerLaw(torch.tensor([0.5], dtype=F64), torch.tensor([0.5], dtype=F64),
                   kind="leak")]
-# A hand-built layer takes the head terms as drives=; a model uses an EdgeHeads closure.
-air = KirchhoffLayer(net, "air", laws, drives=heads, boundary=["ambient"])
+# A model runs the EdgeHeads closure itself; a hand-built layer applies it to the drivers.
+air = KirchhoffLayer(net, "air", laws, boundary=["ambient"])
 rho = torch.full((net.n,), 1.204097, dtype=F64)
-phi, q = air.solve(torch.zeros(1, dtype=F64), {"rho": rho})
+drivers = {"rho": rho}
+drivers.update(EdgeHeads(air, heads)(None, drivers))     # writes "air.edge_head"
+phi, q = air.solve(torch.zeros(1, dtype=F64), drivers)
 print([round(v, 4) for v in air.flows_of_kind(q, "duct_terminal").tolist()], "kg/s")
 print(f"room at {phi[net.node_index('room')].item():.4f} Pa")
 print({j: round(v * 1e3, 1) for j, v in ducts.volumes().items()}, "litres")
@@ -271,7 +274,7 @@ from noodl.apps.building_physics import (
     add_air_handler, air_handler_from_edges, air_handler_plenums, build_model,
     initial_drivers, initial_state, orifice_law_from_edges,
 )
-from noodl.drives import Stack
+from noodl.heads import Stack
 from noodl.topology import Network
 
 F64 = torch.float64
@@ -422,7 +425,7 @@ from noodl.apps.building_physics import (
     room,
 )
 from noodl.components import Component
-from noodl.drives import Stack
+from noodl.heads import Stack
 
 F64 = torch.float64
 
@@ -688,8 +691,8 @@ from noodl.apps.building_physics import (
     Actuator, ControlNetwork, IncrementalPI, Sensor, Zone, add_zone, build_model,
     node_mass_fraction, orifice_law_from_edges, simulate,
 )
-from noodl.drives import Stack
 from noodl.elements import FixedFlow, Scaled
+from noodl.heads import Stack
 from noodl.topology import Network
 
 F64 = torch.float64
@@ -846,7 +849,7 @@ conducts nothing".
 |---|---|
 | `thermal_layer(net, *, ambient, name="thermal", flow_kinds=("airpath",), conduction_kind=None, c_p=1005.0, rho=1.2041, scheme=None, fixed_temperature=(), storage_free=())` | The heat `TransportLayer`. Capacity is $\rho c_p V + C_{\text{node}}$ per active interior node. Raises naming any node with zero heat capacity that is not storage-free. `scheme` defaults to `"exact"`, or to `"backward_euler"` when `storage_free` names a node that a flow edge touches (a plenum: the only scheme that holds it). A storage-free node joined only by conduction (a surface or radiant star node) is folded into its neighbours and keeps `"exact"` (see below). `conduction_kind` is one edge kind or a tuple, for example `("wall", "film", "radiation")`: wall conduction, a surface (film) coefficient and a radiative coefficient as separate edges, each with its own `ua` (W/K), concatenated in the order given into the layer's `conductance` (`None`, the default, means `"wall"` when the network has wall edges; an explicit kind with no edge is an error naming it). A closure that recomputes a coefficient from the temperatures, such as a radiative one, writes the per-step driver `"thermal.conductance"` in that order (see [transport layers](../concepts/layers.md)). |
 | `species_layer(net, *, ambient, name="species", flow_kinds=("airpath",), rho=1.2041, n_species=1, scheme="backward_euler", species_names=None, transmission=None, kinetics=None, storage_free=())` | The contaminant layer, as mass fractions, capacity = zone air mass $\rho V$ (CONTAM's convention). `transmission` `(b_flow, K)` is each flow edge's filter pass fraction; `kinetics` `(n_i, K, K)` each zone's first-order reactions (`reaction_kinetics` builds it). |
-| `build_model(net, *, air_laws, heads, ambient="ambient", thermal=True, species=0 (a count or a list of names), density="ideal_gas", density_kwargs=None, coupling="pingpong", iterate_tol=None, iterate_max=20, thermal_scheme=None, species_scheme="backward_euler", flow_kinds=None, closures=(), flow_balanced=(), storage_free=(), return_inputs=False)` | The assembled `Model`; with `return_inputs=True`, `(model, state, drivers)` like the other applications. `heads` are the stack and wind terms of the air edges (`Stack`, `DuctStack`, `Wind`, `ConstantDrive`; empty for none): an `EdgeHeads` closure adds them up once per pass after the density closure and writes the driver `"air.edge_head"`, which the layer adds to every edge's pressure difference once. `closures` follow the head closure, and one that writes a driver a term reads (`"rho"`, say) is refused by name; `flow_balanced` nodes join the air layer's boundary; `storage_free` nodes hold no air (see [Air-handling systems](#air-handling-systems)). |
+| `build_model(net, *, air_laws, heads, ambient="ambient", thermal=True, species=0 (a count or a list of names), density="ideal_gas", density_kwargs=None, coupling="pingpong", iterate_tol=None, iterate_max=20, thermal_scheme=None, species_scheme="backward_euler", flow_kinds=None, closures=(), flow_balanced=(), storage_free=(), return_inputs=False)` | The assembled `Model`; with `return_inputs=True`, `(model, state, drivers)` like the other applications. `heads` are the stack and wind terms of the air edges (`Stack`, `DuctStack`, `Wind`, `DriverHead`; empty for none): an `EdgeHeads` closure adds them up once per pass after the density closure and writes the driver `"air.edge_head"`, which the layer adds to every edge's pressure difference once. `closures` follow the head closure, and one that writes a driver a term reads (`"rho"`, say) is refused by name; `flow_balanced` nodes join the air layer's boundary; `storage_free` nodes hold no air (see [Air-handling systems](#air-handling-systems)). |
 | `add_air_handler(target, *, supplies, returns, kind="air_handler", supply_plenum="ahs_supply", return_plenum="ahs_return", outdoor_air_fraction=1.0, min_outdoor_air=0.0, supply_volume=0.0, return_volume=0.0, T0=293.15, ambient="ambient")` | Adds an air handler's plenums and edges to a `Network` or a `Component`. `supplies` and `returns` map zones to design flows (kg/s). |
 | `air_handler_from_edges(net, kind)` | `(PrescribedFlow, AirHandlerFlows)`: the air handler's law and closure, from its edges' attributes. |
 | `air_handler_plenums(net, kind)` | `(supply plenum, return plenum)`. |
@@ -1328,7 +1331,7 @@ F = \left(\frac{\rho_{\text{up}}}{\rho_{\text{ref}}}\right)^{m} C\,\operatorname
 $$
 
 $C$ is the coefficient at the reference density $\rho_{\text{ref}}$ (kg/m³), and the node
-densities are read from the full-node driver `drivers["rho"]`, the same one the `Stack` drive
+densities are read from the full-node driver `drivers["rho"]`, the same one the `Stack` head
 reads. The exponent $m$ says how much density is folded into the coefficient: $m = 0$ for a
 mass-flow rating, $m = 1/2$ for the orifice family ($C = C_d A \sqrt{2\rho}$, including both
 openings of a two-orifice doorway), $m = 1$ for a volumetric rating. Air density changes by about
@@ -1386,7 +1389,7 @@ increasing resolution of the pressure profile over the door's height.
 **Two lumped orifices.** `add_large_opening(net, a, b, *, H, W, z_mid, Cd=0.78, kind="airpath")`
 adds two edges, both oriented `a → b`, each an orifice of area $WH/2$ (m²) at height
 $z_{\text{mid}} \mp 2H/9$ (m); build their element with `orifice_law_from_edges`. The
-`Stack` drive evaluates the hydrostatic pressure difference at each opening's own height, so a
+`Stack` head evaluates the hydrostatic pressure difference at each opening's own height, so a
 temperature difference drives opposite flows through the low and the high opening. The
 representation is exact for a neutral plane at mid-height. It uses `PowerLaw`'s laminar blend at
 $10^{-3}$ Pa and the density convention of the element it is built with.
@@ -1408,7 +1411,7 @@ closed crack is an effective-leakage-area law with area `LClo` (m², no default)
 **Source:** MBL's `DoorOpen` and `DoorOperable` (`BaseClasses/Door.mo`).
 
 **Discretised compartments.** `DoorCompartment` and `OperableDoorCompartment`, with the
-`DoorCompartmentHead` drive, cut the opening into `nCom` compartments of height
+`DoorCompartmentHead` head term, cut the opening into `nCom` compartments of height
 $\mathrm{d}h = h_{\text{Ope}} / n_{\text{Com}}$, one edge each;
 `discretized_door(*, src, tgt, medium, nCom=10, wOpe=0.9, hOpe=2.1, hA=1.35, hB=1.35, CD=0.65, ...)`
 and `discretized_operable_door` build a whole door. Compartment $i$ sees the pressure
@@ -1512,7 +1515,7 @@ the density and the viscosity of the air entering it.
 | `FixedVolumeFlow(volume_flow, *, src, tgt)` | A constant volume flow (m³/s) delivered at the density of the node it draws from. |
 | `air_viscosity(T)` | ContamX's air viscosity, $1.81625\times10^{-5} + 4.92859\times10^{-8}\,(T - 293.15)$ Pa s. |
 
-`DuctStack(kind, ...)` (in `noodl.drives`) is the hydrostatic term of a duct segment: the
+`DuctStack(kind, ...)` (in `noodl.heads`) is the hydrostatic term of a duct segment: the
 air column between its two junctions at the density of their mean temperature.
 `Damper(..., src=, tgt=, m=)` follows the entering air's density on each side, as ContamX's
 duct dampers do. `Duct` remains the TN 1887 form of the Colebrook law (used by the water
@@ -1538,7 +1541,7 @@ hydrostatic term of a 3 m vertical duct between junctions at 20 °C and 30 °C:
 
 ```python
 import torch
-from noodl.drives import DuctStack
+from noodl.heads import DuctStack
 from noodl.elements import DuctTerminal, FixedVolumeFlow
 
 F64 = torch.float64
@@ -1565,7 +1568,7 @@ The CONTAM-form elements carry one fixed reference density in their coefficients
 `orifice_law_from_edges`, the default of `Duct`, and the reference density of
 `UpstreamDensityPowerLaw`); the core `Orifice` defaults to 1.2 kg/m³. A temperature-dependent
 density reaches the airflow through the `density` closure of `build_model` (above), which feeds
-the `Stack` drive and `UpstreamDensityPowerLaw`.
+the `Stack` head and `UpstreamDensityPowerLaw`.
 
 The MBL-derived elements take their densities from a medium. `medium(name)` returns an
 `AirMedium` for one of `"moist_air"` (`Buildings.Media.Air`), `"moist_air_ideal_gas"`

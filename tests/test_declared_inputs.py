@@ -1,4 +1,4 @@
-"""Inputs that closures, reactions, elements and drives read themselves -- the street
+"""Inputs that closures, reactions, elements and head terms read themselves -- the street
 meteorology, the sewer inflows, CONTAM's densities and wind -- are declared, so
 `model.refs.inputs` names them with their layout and unit and `Model.check` reports one
 that is missing or mis-shaped before a run."""

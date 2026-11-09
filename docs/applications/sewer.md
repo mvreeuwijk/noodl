@@ -1918,8 +1918,9 @@ publish numbers from this application.
   elevation as the mean of its end nodes' inverts plus its diameter, as the kinematic path does;
   a dynamic-wave conduit raised on an inlet or outlet offset has its crown that much higher than
   the stack term sees.
-- **`f_i` is not differentiable.** It is a `Drive` attribute, and the differentiable solve
-  refuses `requires_grad=True` on it; you cannot fit it by gradient descent.
+- **`f_i` is a calibrated constant.** It is an attribute of the `Drag` head term. `EdgeHeads` writes
+  the head as the driver `"air.edge_head"`, so a gradient reaches `f_i` when it is a tensor with
+  `requires_grad=True`, but the value is calibrated against Pescod and Price (above), not fitted.
 - **Without a ground elevation, manhole shafts add no headspace volume**, so the air-quality
   capacity is the conduit headspace alone. `model.notes` says when this applies.
 

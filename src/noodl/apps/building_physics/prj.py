@@ -147,7 +147,6 @@ from noodl.apps.building_physics.thermal import (
     species_layer,
 )
 from noodl.apps.building_physics.wth import _DAYS_BEFORE_MONTH
-from noodl.drives import ConstantDrive, Stack, Wind, WindProfile
 from noodl.elements import (
     AffinityFan,
     CubicSplineFlow,
@@ -158,7 +157,7 @@ from noodl.elements import (
     Scaled,
     UpstreamDensityPowerLaw,
 )
-from noodl.heads import EdgeHeads
+from noodl.heads import DriverHead, EdgeHeads, Stack, Wind, WindProfile
 from noodl.layers.kirchhoff import KirchhoffLayer
 from noodl.layers.transport import UndefinedSteadyState, active_interior
 from noodl.model import Model
@@ -1518,11 +1517,11 @@ def _build(*, ambient_conditions, g, species, levels, profiles, elements, zones,
            run_control, source_path, filter_elements, filters, schedule_units, duct_elements,
            junctions, junction_x0_rows, segments, handlers, control_nodes, occupancy=None,
            exposures=None) -> Project:
-    """Turn the parsed records into a `Network`, elements, drives and a `Project`.
+    """Turn the parsed records into a `Network`, elements, heads and a `Project`.
 
     Order: the zones, the path edges and their elements, the path filters, constant wind
-    pressures and drives, the `Scaled` wrap of scheduled path kinds, then the duct network
-    (junctions, segments, terminals, with their own elements, drives, filters and inputs).
+    pressures and heads, the `Scaled` wrap of scheduled path kinds, then the duct network
+    (junctions, segments, terminals, with their own elements, heads, filters and inputs).
     The air handlers' paths become one prescribed-flow kind per handler, built after the
     `Scaled` wrap (their closure applies the schedules). Only then are the element kinds and
     the flow layout read, so both cover the ducts and the air handlers.
@@ -1869,7 +1868,7 @@ def _build(*, ambient_conditions, g, species, levels, profiles, elements, zones,
         if bool((net.edge_attr("profile", el.kind, default=0.0) > 0).any()):
             heads.append(Wind.from_network(net, el.kind, ambient=ambient, profiles=profiles))
     for kind in wind_pressure:
-        heads.append(ConstantDrive(kind, f"wind_pressure.{kind}"))
+        heads.append(DriverHead(kind, f"wind_pressure.{kind}"))
 
     # A path schedule multiplies the path's flow: its kind is wrapped in `Scaled`, which reads
     # one multiplier per edge of the kind from "flow_multiplier.<kind>", and the schedule
@@ -1942,7 +1941,7 @@ def _build(*, ambient_conditions, g, species, levels, profiles, elements, zones,
                                             None if index is None else tuple(index),
                                             f"path {p.nr}"))
 
-    # The duct network adds its own kinds (already wrapped where scheduled), drives, filters
+    # The duct network adds its own kinds (already wrapped where scheduled), heads, filters
     # and inputs; the kinds and the layout below are read after it, so they cover the ducts.
     duct = None
     if junctions or segments:

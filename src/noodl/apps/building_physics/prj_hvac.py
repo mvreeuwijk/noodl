@@ -26,7 +26,6 @@ from noodl.apps.building_physics.air_handling import (
 from noodl.apps.building_physics.inputs import Input
 from noodl.apps.building_physics.prj_controls import Actuation
 from noodl.apps.building_physics.thermal import RHO_0
-from noodl.drives import ConstantDrive, DuctStack, Stack, Wind
 from noodl.elements import (
     AirDuct,
     Damper,
@@ -36,6 +35,7 @@ from noodl.elements import (
     Scaled,
     UpstreamDensityPowerLaw,
 )
+from noodl.heads import DriverHead, DuctStack, Stack, Wind
 from noodl.topology import Network
 
 F64 = torch.float64
@@ -455,7 +455,7 @@ def _build_terminals(ctx: BuildContext, junctions: list[JunctionRecord],
                                             profiles=ctx.profiles))
     if any(wind_pressure):
         ctx.constant_wind_pressure[TERMINAL_KIND] = torch.tensor(wind_pressure, dtype=F64)
-        ctx.heads.append(ConstantDrive(TERMINAL_KIND, f"wind_pressure.{TERMINAL_KIND}"))
+        ctx.heads.append(DriverHead(TERMINAL_KIND, f"wind_pressure.{TERMINAL_KIND}"))
 
 
 @dataclass

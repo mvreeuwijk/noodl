@@ -1,7 +1,8 @@
 """KirchhoffLayer: nodal conservation residual, Jacobian and Newton solve.
 
-Assembles r(phi_I) = A_I g(A^T phi + drive; theta) - s_I from a set of constitutive laws
-on typed edges (one ConstitutiveLaw per kind) and Drive terms (additive potential differences).
+Assembles r(phi_I) = A_I g(A^T phi + head; theta) - s_I from a set of constitutive laws
+on typed edges (one ConstitutiveLaw per kind) and the per-edge head driver
+`"<layer>.edge_head"` (an additive potential difference, see `noodl.heads`).
 """
 
 from __future__ import annotations
@@ -15,7 +16,6 @@ import torch
 
 from noodl._broadcast import broadcast_shapes
 from noodl._tracking import bulk_values
-from noodl.drives import Drive, check_drive_signature
 from noodl.elements.base import ConstitutiveLaw, LawContext
 from noodl.layers._functional import FunctionalLaws
 from noodl.layers._mna import MnaSystem, check_scheme
@@ -151,7 +151,7 @@ def _held_tensors(obj, *, registered_threaded: bool = True, visited: list | None
 class KirchhoffLayer(TopologyGuard):
     """Flows driven by a potential (pressure, head): solves nodal conservation
     `A_I g(A^T phi) = s_I` for the interior potentials by Newton's method, with the constitutive
-    laws on its edge kinds, drives added to the potential differences, and prescribed
+    laws on its edge kinds, the head driver added to the potential differences, and prescribed
     potentials at its boundary nodes; differentiable through the converged solution.
     `flow_unit` is reported by `model.refs`, never used numerically.
 
@@ -209,7 +209,6 @@ class KirchhoffLayer(TopologyGuard):
         net: Network,
         name: str,
         laws: Sequence[ConstitutiveLaw],
-        drives: Sequence[Drive] = (),
         boundary: Sequence = (),
         linear_solver: str = "auto",
         *,
@@ -258,7 +257,6 @@ class KirchhoffLayer(TopologyGuard):
         self.name = name
         self.head_key = f"{name}.edge_head"
         self._laws = list(laws)
-        self._drives = list(drives)
         self.kinds = [el.kind for el in laws]
         self._storage = list(storage)
         for st in self._storage:
@@ -326,15 +324,6 @@ class KirchhoffLayer(TopologyGuard):
         src_all, tgt_all = net.endpoints()
         self._src = src_all[self.cols]
         self._tgt = tgt_all[self.cols]
-
-        kind_set = set(self.kinds)
-        for drv in self._drives:
-            check_drive_signature(drv, where=f"KirchhoffLayer {name!r}")
-            if drv.kind not in kind_set:
-                raise ValueError(
-                    f"drive kind {drv.kind!r} is not one of this layer's law kinds "
-                    f"{sorted(kind_set)} (layer {name!r})"
-                )
 
         node_index = {node: i for i, node in enumerate(net.nodes)}
         for b in boundary:
@@ -493,7 +482,7 @@ class KirchhoffLayer(TopologyGuard):
 
     def _check_mna_structure(self) -> None:
         """Construction checks of a Modified Nodal Analysis layer: port groups, solver,
-        drives on dynamic laws, and a boundary node in every connected part."""
+        and a boundary node in every connected part."""
         name = self.name
         for el, (s, e) in zip(self._laws, self._law_slices, strict=True):
             if (e - s) % el.ports:
@@ -525,14 +514,6 @@ class KirchhoffLayer(TopologyGuard):
                 raise ValueError(
                     f"KirchhoffLayer {name!r}: a phasor layer takes no storage; a "
                     f"capacitance is an edge law (to ground) in a phasor layer"
-                )
-        dynamic_kinds = {el.kind for el in self._laws if el.dynamic}
-        for drv in self._drives:
-            if drv.kind in dynamic_kinds:
-                raise ValueError(
-                    f"KirchhoffLayer {name!r}: kind {drv.kind!r} has a dynamic law, which "
-                    f"may not carry a drive (its step-start values are the potential "
-                    f"differences without one)"
                 )
         # Every connected part of this layer's edges must hold a boundary node: the
         # potential of a part with none is defined only up to a constant.
@@ -798,7 +779,7 @@ class KirchhoffLayer(TopologyGuard):
     # ------------------------------------------------------------------ assembly
     def dp(self, phi: torch.Tensor, drivers: Mapping) -> torch.Tensor:
         """Every edge's potential difference `phi[src] - phi[tgt]` plus its head: the driver
-        `"<layer>.edge_head"` (`noodl.heads.EdgeHeads`, absent means zero) and any `drives`."""
+        `"<layer>.edge_head"` (`noodl.heads.EdgeHeads`, absent means zero)"""
         self._require_current_topology()
         drivers = drivers or {}
         d = self._difference(phi)
@@ -806,31 +787,7 @@ class KirchhoffLayer(TopologyGuard):
         if head is not None:
             self._check_head_width(head)
             d = d + head
-        if not self._drives:
-            return d
-        parts = []
-        for kind, (start, end) in self._kind_slices.items():
-            block = d[..., start:end]
-            width = end - start
-            for drv in self._drives:
-                if drv.kind == kind:
-                    value = drv(drivers)
-                    # A width mismatch here is silent corruption, not a crash: torch.cat below
-                    # would happily accept a wrong-width block, shifting every later kind's
-                    # slice out from under `_law_slices` so a DIFFERENT law ends up being
-                    # fed this kind's drive value with no exception anywhere in the call chain.
-                    if value.ndim > 0 and value.shape[-1] != width:
-                        raise ValueError(
-                            f"drive kind {drv.kind!r} returned width {value.shape[-1]} but "
-                            f"the layer's {drv.kind!r} block has {width} edges"
-                        )
-                    block = block + value
-            parts.append((start, block))
-        parts.sort(key=lambda p: p[0])
-        # A batched drive on one kind batches that kind's block only; every block is
-        # broadcast to the common batch shape before they are joined.
-        batch = broadcast_shapes(*(b.shape[:-1] for _, b in parts))
-        return torch.cat([b.expand(batch + b.shape[-1:]) for _, b in parts], dim=-1)
+        return d
 
     def _check_head_width(self, head: torch.Tensor) -> None:
         """Refuse a head driver that is not one value per edge of this layer."""
@@ -1196,33 +1153,21 @@ class KirchhoffLayer(TopologyGuard):
         `Function.apply` -- each ConstitutiveLaw's own registered `nn.Parameter`s (found via
         `named_parameters()`, substituted in via `functional_call`) and whatever is reachable
         through the `drivers`/`sources`/`phi_boundary` arguments to `solve()`. Any OTHER
-        tensor a ConstitutiveLaw or Drive happens to hold with `requires_grad=True` is captured only
-        by closure (the law/drive object itself, not its tensor payload) and is
+        tensor a ConstitutiveLaw happens to hold with `requires_grad=True` is captured only
+        by closure (the law object itself, not its tensor payload) and is
         invisible to `_Implicit.backward`: for a ConstitutiveLaw, this happens when it was
         constructed with `learnable=False` on a tensor that already had `requires_grad=True`
         (`ConstitutiveLaw._param`'s documented pass-through exception, which is still a correct
         construction -- its graph is reachable through this layer's own component calls
         (`flows`, `dflows`, `residual`, `jacobian`, `linear_init`), though NOT through
         `solve(differentiable=False)`, which returns detached tensors);
-        for a Drive, this happens whenever a Drive
-        implementation owns a learnable coefficient directly instead of reading it from the
-        `drivers` mapping passed to `solve()`. Raise now, before dispatching, rather than
+        Raise now, before dispatching, rather than
         return a gradient that is silently wrong (if some other path happens to also touch
         the same value) or silently `None` (if it doesn't).
         """
         for role, el, name, value in self._held_scan():
             if not value.requires_grad:
                 continue
-            if role == "drive":
-                raise ValueError(
-                    f"drive {el!r} (kind {el.kind!r}) has a tensor attribute {name!r} "
-                    f"with requires_grad=True; a Drive is captured by closure inside the "
-                    f"differentiable solve, not threaded through Function.apply, so its "
-                    f"gradient would be silently absent. A Drive must read every "
-                    f"differentiable quantity from the `drivers` mapping passed to "
-                    f"solve() rather than owning it directly, or use "
-                    f"differentiable=False."
-                )
             if role == "storage":
                 raise ValueError(
                     f"storage {el!r} has a tensor attribute {name!r} with "
@@ -1260,15 +1205,14 @@ class KirchhoffLayer(TopologyGuard):
 
     def _held_scan(self) -> list:
         """`(role, owner, name, tensor)` for every tensor the laws, node sources, storages
-        (every submodule: a law may wrap another, `Scaled`) and drives hold where the
-        differentiable solve does not thread it (`_held_tensors`; a drive's own parameters
-        included, since drives are not threaded). The scan is cached: it is repeated only
-        when an object it read holds something else (`_shallow`), and the tensors'
+        (every submodule: a law may wrap another, `Scaled`) hold where the
+        differentiable solve does not thread it (`_held_tensors`). The scan is cached: it is
+        repeated only when an object it read holds something else (`_shallow`), and the tensors'
         `requires_grad` is read live."""
         cache = getattr(self, "_held_cache", None)
         if cache is not None and all(_shallow(o) == sig for o, sig in cache[1]):
             return cache[0]
-        visited: list = [self._laws, self._node_sources, self._storage, self._drives]
+        visited: list = [self._laws, self._node_sources, self._storage]
         found = []
         for role, owners in (("law", self._laws), ("source", self._node_sources),
                              ("storage", self._storage)):
@@ -1276,9 +1220,6 @@ class KirchhoffLayer(TopologyGuard):
                 holders = el.modules() if isinstance(el, torch.nn.Module) else (el,)
                 for h in holders:
                     found += [(role, el, n, v) for n, v in _held_tensors(h, visited=visited)]
-        for drv in self._drives:
-            found += [("drive", drv, n, v) for n, v in
-                      _held_tensors(drv, registered_threaded=False, visited=visited)]
         # the visited objects are kept alive by the cache, so their ids are not reused
         self._held_cache = (found, [(o, _shallow(o)) for o in visited])
         return found
@@ -1290,7 +1231,7 @@ class KirchhoffLayer(TopologyGuard):
         solve, the converged root after it) as a function of exactly the tensors handed to
         `Function.apply`. It is evaluated once, under `enable_grad`, with every one of them
         detached: if the result still requires grad, some tensor that requires grad reaches
-        the residual by another route (held by a law, a node source or a drive in a plain
+        the residual by another route (held by a law, a node source in a plain
         object, a module in a plain list, or captured by a closure), and the implicit
         adjoint would return a gradient for it that is silently wrong or absent.
 
@@ -1365,7 +1306,7 @@ class KirchhoffLayer(TopologyGuard):
         `sources`, every value in `drivers`, and every ConstitutiveLaw's registered `nn.Parameter`s
         (i.e. constructed with `learnable=True`) via the implicit-function adjoint
         (`noodl.solvers.implicit`). Only tensors reachable one of those ways are threaded
-        through `Function.apply`. Contract each ConstitutiveLaw and Drive must satisfy for
+        through `Function.apply`. Contract each ConstitutiveLaw must satisfy for
         `differentiable=True` to be safe:
 
         - A ConstitutiveLaw's own differentiable state must be a registered parameter
@@ -1374,16 +1315,13 @@ class KirchhoffLayer(TopologyGuard):
           `ConstitutiveLaw._param`, and its graph is reachable through this layer's component calls
           -- but it is invisible to the differentiable solve, and `differentiable=False` now
           returns detached tensors, so neither `solve` path carries a gradient to it).
-        - A Drive must read every differentiable quantity from the `drivers` mapping passed
-          to `solve()` (see `noodl.drives.Drive`), never hold one of its own as an
-          instance attribute.
 
         A head the potential layer reads as the driver `"<layer>.edge_head"` (see
         `noodl.heads.EdgeHeads`) is part of `drivers` only after the model's closures have run:
         a direct `solve` on raw drivers has no head, so apply the closures first (`Model.step`,
         `steady` and `simulate` do).
 
-        Violating either raises `ValueError` naming the offending law/drive and
+        Violating it raises `ValueError` naming the offending law and
         attribute before any solve is attempted, rather than silently returning a wrong or
         absent gradient.
 
@@ -2032,29 +1970,29 @@ class KirchhoffLayer(TopologyGuard):
     def power_residual(self, phi, q, drivers, sources=None):
         """Tellegen's power identity, zero at a converged solution.
 
-        (dp*conj(q)).sum() - (drive*conj(q)).sum() - (phi_bound * conj(A_bound @ q)).sum()
+        (dp*conj(q)).sum() - (head*conj(q)).sum() - (phi_bound * conj(A_bound @ q)).sum()
         - (phi_interior * conj(sources_interior)).sum()
 
         The conjugates change nothing on a real layer; on a phasor layer the identity is the
         complex power balance (real and imaginary parts both zero).
 
-        Derivation: dp = A^T phi + drive, so dp^T q = phi^T (A q) + drive^T q. Splitting
+        Derivation: dp = A^T phi + head, so dp^T q = phi^T (A q) + head^T q. Splitting
         phi^T (A q) into interior and boundary parts and using A_I q = sources_I at a
         converged solution (`residual` is exactly this equation) gives
-        dp^T q - drive^T q - phi_bound.(A_bound q) - phi_interior.sources_I == 0.
+        dp^T q - head^T q - phi_bound.(A_bound q) - phi_interior.sources_I == 0.
         `sources=None` (the default) means zero interior sources, matching `residual` and
         `linear_init`.
         """
         drivers = drivers or {}
         d = self.dp(phi, drivers)
-        drive_only = d - self._difference(phi)
+        head_only = d - self._difference(phi)
         boundary_flow = self._accumulate_bound(q)
         phi_b = phi[..., self.bound]
         phi_i = phi[..., self.interior]
         s_I = self._source_interior(sources, phi_i)
         return (
             (d * q.conj()).sum(-1)
-            - (drive_only * q.conj()).sum(-1)
+            - (head_only * q.conj()).sum(-1)
             - (phi_b * boundary_flow.conj()).sum(-1)
             - (phi_i * s_I.conj()).sum(-1)
         )

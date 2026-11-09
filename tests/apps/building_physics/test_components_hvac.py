@@ -25,7 +25,7 @@ from noodl.apps.building_physics import (
     room,
 )
 from noodl.components import Component, ComponentError
-from noodl.drives import Stack
+from noodl.heads import Stack
 
 F64 = torch.float64
 

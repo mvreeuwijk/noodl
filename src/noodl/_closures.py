@@ -186,7 +186,7 @@ class ClosureSchedule:
         else:
             # `Model.check(..., probe=True)`: record which keys are read (see
             # `noodl.validation`). The returned drivers stay tracked, so the layers',
-            # elements' and drives' reads are recorded too.
+            # elements' and head terms' reads are recorded too.
             drv = TrackedDict(drivers, probe.driver_reads)
             state = TrackedDict(state, probe.state_reads)
         for closure in closures:

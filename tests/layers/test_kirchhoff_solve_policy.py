@@ -58,7 +58,7 @@ def _net(nodes, edges):
 
 
 def _classic():
-    """ambient_w -> z1 -> z2 -> ambient_l, a power law per edge, a wind drive."""
+    """ambient_w -> z1 -> z2 -> ambient_l, a power law per edge, a wind head."""
     net = _net(["w", "z1", "z2", "l"], [("w", "z1", "airpath"), ("z1", "z2", "airpath"),
                                         ("z2", "l", "airpath")])
     element = PowerLaw(torch.tensor([0.010, 0.008, 0.012], dtype=F64), 0.65,

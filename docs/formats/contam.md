@@ -9,7 +9,7 @@ and sink models in `noodl.apps.building_physics.sources`.
 ## CONTAM `.prj`
 
 `read_prj(path) -> Project` parses a documented subset of TN 1887r1 Appendix A into a `Project`,
-building a float64 `Network`, its elements and its drives. `project_to_model(project, *,
+building a float64 `Network`, its elements and its heads. `project_to_model(project, *,
 ambient=None, species=True, scheme="backward_euler")` returns `(model, state, drivers)`.
 
 **Supported:** run control (`Project.run_control`, a `RunControl`: the steady simulation's

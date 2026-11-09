@@ -5,8 +5,7 @@ import torch
 
 from noodl.apps.building_physics import orifice_law_from_edges, thermal_layer
 from noodl.apps.building_physics.thermal import IdealGasDensity
-from noodl.drives import Stack
-from noodl.heads import EdgeHeads
+from noodl.heads import EdgeHeads, Stack
 from noodl.layers.kirchhoff import KirchhoffLayer
 from noodl.model import Model
 from tests.apps.building_physics.test_components_physics import components_house

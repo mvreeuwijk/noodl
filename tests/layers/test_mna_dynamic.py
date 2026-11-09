@@ -334,7 +334,7 @@ def _quadratic_loop():
 
 
 def _quadratic_loop_solve(theta, **kwargs):
-    """theta = [a0, a1, a2]: the drive on edge 0 and the loss coefficients of edges 1, 2.
+    """theta = [a0, a1, a2]: the head on edge 0 and the loss coefficients of edges 1, 2.
     Returns the edge potential differences and the edge flows."""
     _, layer = _quadratic_loop()
     drivers = {"V": theta[:1], "a": theta[1:]}

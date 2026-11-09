@@ -1,13 +1,13 @@
 """NodeSource: a nodal withdrawal that depends on its OWN node's potential.
 
-A `Drive` never sees `phi` (see `drives.py`): a drive is an additive term on a BRANCH's
+A head term never sees `phi` (see `heads.py`): a head is an additive term on a BRANCH's
 potential difference, and letting it read the state would put a term into the residual that
 the Jacobian `A_I diag(g') A_I^T` does not account for. A NodeSource is the other shape --
 a flow leaving the network AT a node, as a function of that node's own potential -- and it
 is exactly as safe, because its contribution to the Jacobian is a DIAGONAL entry at that
 node:
 
-    r_I(phi) = A_I g(A^T phi + drive) - s_I + w(phi_I)
+    r_I(phi) = A_I g(A^T phi + head) - s_I + w(phi_I)
     J(phi)   = A_I diag(g') A_I^T + diag(w')
 
 EPANET's own pressure-driven demand is formulated this way internally (EPANET 2.2 Manual

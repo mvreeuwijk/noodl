@@ -40,12 +40,11 @@ def test_every_catalogue_page_is_in_the_navigation():
     assert missing == []
 
 
-def test_components_elements_and_drives_state_their_units():
+def test_components_elements_and_heads_state_their_units():
     """A user must learn the unit of every coefficient from help()/the catalogue."""
     import inspect
 
     from noodl.apps.street_aq import Street
-    from noodl.drives import DuctStack, Stack, Wind
     from noodl.elements import (
         AirDuct,
         Conductance,
@@ -58,6 +57,7 @@ def test_components_elements_and_drives_state_their_units():
         PowerLaw,
         Quadratic,
     )
+    from noodl.heads import DuctStack, Stack, Wind
 
     first = lambda o: (inspect.getdoc(o) or "").split("\n\n")[0]  # noqa: E731
     assert "(m)" in first(Street) and "z0_b" in first(Street)
@@ -83,7 +83,7 @@ def test_every_documented_building_attribute_is_read_by_the_code():
 
     src = ROOT / "src" / "noodl"
     code = "".join(p.read_text(encoding="utf-8") for p in [
-        src / "drives.py", src / "refs.py", src / "apps" / "building_physics" / "thermal.py",
+        src / "heads.py", src / "refs.py", src / "apps" / "building_physics" / "thermal.py",
         src / "apps" / "building_physics" / "elements.py",
         src / "apps" / "building_physics" / "prj.py",
         src / "apps" / "building_physics" / "components.py",
@@ -102,14 +102,14 @@ def test_every_documented_building_attribute_is_read_by_the_code():
 
 def test_generator_signatures_roles_and_summaries():
     from noodl.apps import building_physics as bp
-    from noodl.drives import Drive
     from noodl.elements.base import ConstitutiveLaw
+    from noodl.heads import HeadTerm
     from noodl.model import StepContext
     from noodl.refs import Field
     from noodl.validation import SetupReport
 
     assert "*args" not in gen._signature("Field", Field)
-    assert gen._signature("Drive", Drive) == "Drive(...)"
+    assert gen._signature("HeadTerm", HeadTerm) == "HeadTerm(...)"
     assert gen._role("SetupReport", SetupReport) == "class"
     assert gen._role("StepContext", StepContext) == "class"
     assert gen._role("ConstitutiveLaw", ConstitutiveLaw) == "base"

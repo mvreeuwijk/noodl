@@ -23,7 +23,7 @@ from noodl.apps.building_physics import (
     shaft,
 )
 from noodl.components import Component
-from noodl.drives import Stack, Wind, WindProfile
+from noodl.heads import Stack, Wind, WindProfile
 from noodl.topology import Network
 
 F64 = torch.float64

@@ -1,6 +1,6 @@
 """Moving a built model, or any part of it, to another device or dtype (`Model.to`).
 
-A model is a tree of plain Python objects (layers, closures, reactions, drives, application
+A model is a tree of plain Python objects (layers, closures, reactions, heads, application
 records) around `torch.nn.Module`s (laws, node sources) and tensors. `Mover` walks that
 tree once and moves every tensor it reaches, in place where the holder is mutable:
 

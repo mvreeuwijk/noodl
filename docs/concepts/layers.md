@@ -48,7 +48,6 @@ layer = KirchhoffLayer(
     net,
     name="air",
     laws=[leak],                # one ConstitutiveLaw per edge kind
-    drives=[stack],             # additive potential-difference terms
     boundary=["ambient"],       # nodes whose potential is prescribed
     linear_solver="auto",       # 'auto' | 'cg' | 'gmres' | 'direct' | 'sparse_direct'
     quantity="pressure",        # metadata a Model reports
@@ -184,12 +183,11 @@ it. A buoyancy head is a driver, like wind speed: a `KirchhoffLayer` reads the o
 unit; absent means zero) and adds it to every edge's `phi[src] - phi[tgt]` once.
 
 `noodl.heads.EdgeHeads` is the `Model` closure that writes it. Give it the layer and the head
-terms (`Stack`, `DuctStack`, `Wind`, `ConstantDrive`, ...); it adds them up in the columns of
+terms (`Stack`, `DuctStack`, `Wind`, `DriverHead`, ...); it adds them up in the columns of
 each term's kind and writes the total:
 
 ```python
-from noodl.drives import Stack
-from noodl.heads import EdgeHeads
+from noodl.heads import EdgeHeads, Stack
 
 heads = EdgeHeads(air, [Stack.from_network(net, "airpath")])   # writes "air.edge_head"
 model = Model(net, {"air": air}, closures=[density_closure, heads])
@@ -201,11 +199,9 @@ may depend on a learnable parameter that a closure reads. A kind whose law is dy
 capacitance, an inductance) takes no head: `EdgeHeads` refuses such a term, and a non-zero
 head entry on a dynamic edge is refused when the layer is solved (on the CPU; on an accelerator
 that value check is skipped to avoid a host wait, so a head given directly there, without
-`EdgeHeads`, is the caller's responsibility). The `drives=` argument of
-`KirchhoffLayer` still works and adds its terms after the head; `EdgeHeads` refuses a term on
-a kind that already has a drive there, so the two never add up. A term that holds tensors needs
+`EdgeHeads`, is the caller's responsibility). A term that holds tensors needs
 its own `to(device=None, dtype=None)` method for `Model.to` to move them (the terms in
-`noodl.drives` do not).
+`noodl.heads` do not).
 
 ## Modified Nodal Analysis: implicit, coupled and dynamic laws
 
@@ -250,7 +246,7 @@ that lists them.
 - every kind's edge count is a multiple of its law's `ports`;
 - every connected part of the layer's edges contains a boundary node (a ground): a part with
   none (a transformer secondary left floating) has undetermined potentials;
-- a dynamic kind carries no drive (its step-start potential differences are taken without one);
+- a dynamic kind carries no head (its step-start potential differences are taken without one);
 - `linear_solver="cg"` is refused (the system is not symmetric positive definite);
 - on a phasor layer, every law is `phasor_capable` and there are no node sources and no
   storage (a capacitance is an edge law there).

@@ -496,7 +496,7 @@ class Model:
         """Move the whole model to `device` and the precision of `dtype`, in place; return it.
 
         Moves, together: the network (its cached operators), every layer's cached index,
-        capacity and law-slice tensors, the laws, node sources, drives and reactions, every
+        capacity and law-slice tensors, the laws, node sources, head terms and reactions, every
         closure of a class defined in noodl, a user closure that defines
         `to(device=, dtype=)`, and the tensors attached to the model by an application
         builder (`model.junction_idx`, a `notes` dict...). Floating tensors take the
@@ -743,7 +743,7 @@ class Model:
         exactly zero where the interface is linear. Backward memory is one pass. Whether
         anything differentiable reaches the state is a question no inspection of `state` and
         `drivers` can answer, since a differentiable parameter may be captured inside an
-        element, a drive or a closure and never appear in either; it is asked by running a
+        element, a head term or a closure and never appear in either; it is asked by running a
         pass on the graph and dropping that graph at once. Pass 1 asks first; when it finds
         nothing, the question is asked again at the certified fed state, because a closure
         may take a parameter-dependent branch only once the state has moved away from the

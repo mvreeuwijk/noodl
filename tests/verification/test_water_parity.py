@@ -533,7 +533,7 @@ def test_head_loss_sums_to_zero_around_every_loop(tmp_path):
     """1e-12. MEASURED: exactly 0.0 on both independent loops.
 
     This is an IDENTITY of the formulation, not a convergence result: the pipe kind carries
-    no drive, so `dp = A^T phi` and every cycle-basis row annihilates it by construction.
+    no head, so `dp = A^T phi` and every cycle-basis row annihilates it by construction.
     This test therefore pins that `Network.cycle_basis` and the layer's own `difference`
     sign convention agree -- which is a real thing to get wrong -- rather than that the
     Newton solve converged.

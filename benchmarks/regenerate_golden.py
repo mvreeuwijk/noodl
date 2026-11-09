@@ -35,7 +35,7 @@ def _natural_ventilation_case() -> dict:
 
     `benchmarks.natural_ventilation.run` is deterministic -- no RNG anywhere in it -- so this
     is a genuine bit-for-bit regression reference for the whole building stack at once:
-    `build_model`, the stack drive, the density closure, the large opening, and the iterated
+    `build_model`, the stack head, the density closure, the large opening, and the iterated
     coupling of the air and thermal layers, step by step.
     """
     result = run_natural_ventilation("iterate", 600.0, hours=2.0)

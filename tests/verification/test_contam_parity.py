@@ -453,7 +453,7 @@ def test_a_run_with_its_own_weather_and_ambient_files_matches_contamx(
     """`test_OneZoneWthCtm.prj` for one day at 300 s: stack-driven while the weather holds the
     ambient 20 K below the zone (00:00-06:00), then wind-driven from 270 and 90 degrees, with
     the ambient sarin from the `.ctm` switching off at 14:05 and on at 05:05 the next day.
-    Budget, flows: 33 u is the SUM of the two drives' first-order budgets, the stack's at
+    Budget, flows: 33 u is the SUM of the two heads' first-order budgets, the stack's at
     20 K (`_stack_budget(273.15)` = 17.2 u: C, rho_up, g, R and the two temperatures
     through their difference) and the wind's (16 u, the three-zone steady budget: C, wind
     speed, Cp, R, T as a product of powers <= 1). It bounds a flow driven by either alone
@@ -464,7 +464,7 @@ def test_a_run_with_its_own_weather_and_ambient_files_matches_contamx(
     Absolute floor: where the flow is near zero (calm, isothermal hours) a relative budget
     has nothing to scale; a float32 roundoff of an input moves the flow by at most its
     relative budget (<= 64 u) times the flow the same openings carry under the run's
-    largest drive, so 64 u times the largest flow; likewise 64 u times the largest mass
+    largest head, so 64 u times the largest flow; likewise 64 u times the largest mass
     fraction."""
     _project_parity(WTH_CTM, tmp_path, rtol_flow=33 * F32_U, rtol_mf=64 * F32_U,
                     record_property=record_property,

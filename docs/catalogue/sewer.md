@@ -59,9 +59,9 @@ The relation between the flow through an edge and the potential difference acros
 | `StructureLink` | A flow regulator (orifice, weir or outlet) or pump with its flow linearised about the previous pass: ``q = c0 + g (dp - dp_fed)`` (m3/s, dp = H1 - H2 in m), then the flap gate's clamp (a pump's, which never flows backwards). | `StructureLink(kind)` |
 | `Headspace` | ``dp = R \|Q\| Q`` on a headspace edge, with ``R`` read from per-edge drivers. | `Headspace(length, pipe_positions, *, f_air=0.02, rho_air=1.2041, area_key='sewer.A_air', dh_key='sewer.D_h', dp_transition=1e-08, kind='headspace', learnable=False)` |
 
-## Drives
+## Heads
 
-Terms added to an edge's potential difference (stack, wind, fans).
+Terms added to an edge's potential difference (stack, wind, drag).
 
 | Name | What it does | How to call it |
 |---|---|---|

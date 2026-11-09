@@ -17,8 +17,7 @@ from noodl.apps.sewer.network import (
     sewer_steady,
     tree_steady,
 )
-from noodl.drives import Stack
-from noodl.heads import EdgeHeads
+from noodl.heads import EdgeHeads, Stack
 
 F64 = torch.float64
 
@@ -243,7 +242,7 @@ def test_the_headspace_stack_head_uses_the_pipe_crown_not_the_mean_invert():
     elevation (mean invert plus diameter), not the bare mean invert, as `z_path`. Built
     with `T_head != T_amb` (the builder's own defaults, 293.15 K vs 283.15 K) so the head
     carries a non-trivial value, and checked against the term's own formula
-    (`drives.Stack`'s docstring) evaluated by hand with the crown `z_path`."""
+    (`heads.Stack`'s docstring) evaluated by hand with the crown `z_path`."""
     net = SewerNetwork(
         manholes=(Manhole("J1", 12.0),),
         pipes=(Pipe("A", "J1", "Out", 100.0, 0.3, 0.013, 0.01),),
@@ -314,7 +313,7 @@ def test_a_two_component_forest_builds_and_steps_with_air_true():
     """`build_model(air=True)` accepts a network whose pipe subgraph is not a single tree
     with exactly one outfall pipe. A forest gets one outfall-to-
     ambient headspace edge PER outfall pipe instead, each borrowing its own pipe's length
-    and diameter, with the drive zeroed on both appended edges."""
+    and diameter, with the head zeroed on both appended edges."""
     net = _two_component_forest()
     model, state, drivers = build_model(net, air=True, quality=True)
     assert model.net.edge_index("headspace").numel() == 4  # 2 pipes + 2 outfall edges

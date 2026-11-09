@@ -16,8 +16,7 @@ from noodl.apps.building_physics.controls import (
 )
 from noodl.apps.building_physics.prj import project_to_model, read_prj
 from noodl.apps.building_physics.simulation import _with_pressure_differences
-from noodl.drives import Stack
-from noodl.heads import EdgeHeads
+from noodl.heads import EdgeHeads, Stack
 from noodl.topology import Network
 
 F64 = torch.float64
@@ -37,7 +36,7 @@ def _two_zones():
 
 def test_the_contam_head_is_the_sum_of_the_stack_and_wind_terms():
     """Stack and wind on the wind-profile project: the closure's "air.edge_head" is, to 1e-14,
-    what the two drives added to each edge's potential difference before."""
+    what the two heads added to each edge's potential difference before."""
     project = read_prj(THREE)
     model, state, drivers = project_to_model(project)
     air = model.kirchhoff["air"]
@@ -52,7 +51,7 @@ def test_the_contam_head_is_the_sum_of_the_stack_and_wind_terms():
         expected[sl] = expected[sl] + term(drv)
     assert head.abs().max().item() > 1.0  # a real stack and wind pressure, not zeros
     torch.testing.assert_close(head, expected, atol=1e-14, rtol=0.0)
-    # The old path: each drive added to the potential difference in turn, ((d + stack) + wind).
+    # The old path: each head added to the potential difference in turn, ((d + stack) + wind).
     phi = torch.linspace(-3.0, 4.0, len(project.net.nodes), dtype=F64)
     old = air.dp(phi, {k: v for k, v in drv.items() if k != "air.edge_head"})
     for term in project.heads:

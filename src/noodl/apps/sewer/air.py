@@ -7,7 +7,7 @@ Per `headspace` edge the branch law is
 
 with the wall-friction resistance ``R(h) = f_air L rho / (2 D_h A_air^2)`` (Darcy-Weisbach
 on the air segment's hydraulic diameter), the interfacial drag ``D`` from the moving water
-surface, and the stack term ``B`` from the existing `drives.Stack`; ``-D - B`` is the head
+surface, and the stack term ``B`` from the existing `heads.Stack`; ``-D - B`` is the head
 ``"air.edge_head"``.
 
 ``A_air`` and ``D_h`` arrive as per-edge DRIVERS written by `SewerHydraulics` in the same
@@ -28,11 +28,10 @@ from dataclasses import dataclass
 
 import torch
 
-from noodl.drives import Stack
 from noodl.elements.base import ConstitutiveLaw
 from noodl.elements.fixed import FixedFlow
 from noodl.elements.powerlaw import PowerLaw
-from noodl.heads import EdgeHeads
+from noodl.heads import EdgeHeads, Stack
 from noodl.layers.kirchhoff import KirchhoffLayer
 from noodl.topology import Network
 
@@ -398,7 +397,7 @@ def _ground_of(node_attrs) -> float:
 def _stack_for(
     kind: str, graph: Network, net, *, crown: Tensor | None = None
 ) -> Stack:
-    """The existing buoyancy drive on one air kind.
+    """The existing buoyancy head on one air kind.
 
     On `headspace` edges `z_path` is the pipe CROWN elevation: the mean of the two end
     inverts plus the pipe's own diameter (the mean invert alone is
@@ -420,7 +419,7 @@ def _stack_for(
     open-air `headspace` edge, and `ambient` is itself a fixed boundary node
     (`air.phi_boundary = 0`), so the datum choice only ever shifts every air pressure by the
     same constant -- `air.phi` is DATUM-REFERENCED to this convention, not to a physical
-    zero, and differences between manholes (what every drive and refusal actually reads)
+    zero, and differences between manholes (what every head and refusal actually reads)
     are unaffected. `crown` is unused (and must be `None`) for `kind='leak'`.
     """
     if kind != "headspace" and crown is not None:

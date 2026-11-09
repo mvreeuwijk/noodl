@@ -4,7 +4,6 @@ import pytest
 import torch
 from scipy.optimize import brentq
 
-from noodl.drives import ConstantDrive
 from noodl.elements import Conductance, FixedFlow, PowerLaw
 from noodl.elements.base import ConstitutiveLaw
 from noodl.layers.kirchhoff import KirchhoffLayer
@@ -218,7 +217,7 @@ def test_power_residual_is_zero_at_solution_and_nonzero_when_perturbed(two_zone_
     # NOTE: perturbing `phi` (not `q`) and expecting `power_residual` to become large is
     # unsatisfiable for any mathematically correct implementation of the
     # specified formula: algebraically, power_residual(phi, q, drivers) collapses to exactly
-    # phi_interior . (A_interior @ q) (the dp*q and drive*q terms cancel down to phi^T(A q),
+    # phi_interior . (A_interior @ q) (the dp*q and head*q terms cancel down to phi^T(A q),
     # and the boundary term removes the boundary half of that dot product), so it depends on
     # phi only through a coefficient -- A_interior @ q -- that is fixed once q is fixed and is
     # already ~1e-17 at a converged solution. No perturbation of phi alone (with q held fixed)
@@ -297,28 +296,10 @@ def test_floating_group_with_no_path_to_boundary_raises_runtime_error():
         layer.linear_init(phi_b, {}, None)
 
 
-def test_drive_kind_not_in_layer_raises_value_error_naming_it():
-    # Regression: a drive whose kind matches none of the layer's own
-    # element kinds was previously silently dropped (dp() only ever loops over kinds that
-    # ARE in the layer, so a "hydronic" drive on an airpath-only layer never gets applied
-    # and no error is raised anywhere).
-    net = Network(dtype=torch.float64)
-    net.add_node("a")
-    net.add_node("b")
-    net.add_edge("a", "b", kind="airpath")
-    element = PowerLaw(torch.tensor([1.0], dtype=torch.float64), 0.5, kind="airpath")
-    with pytest.raises(ValueError, match="hydronic"):
-        KirchhoffLayer(
-            net, "bad", [element], drives=[ConstantDrive("hydronic", "x")], boundary=["a"]
-        )
-
-
-def test_wrong_width_drive_raises_value_error_naming_widths():
-    # Regression: a drive tensor whose trailing width does not match its
-    # kind's own edge count previously corrupted `dp` silently: torch.cat in dp() would
-    # accept the wrongly-widened block, shifting every later kind's slice out from under the
-    # (still correctly-sized) `_law_slices`, so a DIFFERENT element ends up being fed part
-    # of the wrong kind's drive value with no exception anywhere in the call chain.
+def test_wrong_width_head_raises_value_error_naming_widths():
+    # Regression: a head driver whose trailing width is not one value per edge of the layer
+    # previously corrupted `dp` silently: a wrongly-widened block shifted every later kind's
+    # slice out from under the (still correctly-sized) `_law_slices`.
     net = Network(dtype=torch.float64)
     net.add_node("a")
     net.add_node("b")
@@ -332,13 +313,12 @@ def test_wrong_width_drive_raises_value_error_naming_widths():
             Conductance(torch.tensor([1.0], dtype=torch.float64), kind="conduction"),
             PowerLaw(torch.tensor([1.0], dtype=torch.float64), 0.5, kind="airpath"),
         ],
-        drives=[ConstantDrive("airpath", "wind")],
         boundary=["a"],
     )
     phi = torch.tensor([0.0, 1.0, 2.0], dtype=torch.float64)
     wind_bad = torch.tensor([1.0, 2.0, 3.0], dtype=torch.float64)  # width 3, expected 1
     with pytest.raises(ValueError, match="airpath"):
-        layer.dp(phi, {"wind": wind_bad})
+        layer.dp(phi, {"widths.edge_head": wind_bad})
 
 
 def test_floating_group_with_mixed_slope_same_kind_edges_raises_runtime_error():
@@ -532,31 +512,6 @@ def test_solve_raises_for_element_tensor_with_requires_grad_but_not_learnable(tw
     # differentiable=False is unaffected: the same construction is a supported, correct use.
     phi, _ = layer.solve(phi_b, {"zones.edge_head": wind}, None, differentiable=False)
     assert torch.isfinite(phi).all()
-
-
-def test_solve_raises_for_drive_owning_its_own_differentiable_tensor(two_zone_layer):
-    # A Drive is captured by closure inside the differentiable solve, not
-    # threaded through Function.apply, so a Drive that owns a learnable tensor directly
-    # (instead of reading it from the `drivers` mapping every call) would get a silently
-    # absent gradient. `solve(differentiable=True)` must refuse instead.
-    class LearnableDrive:
-        kind = "airpath"
-
-        def __init__(self, coeff):
-            self.coeff = coeff
-
-        def __call__(self, drivers):
-            return self.coeff * drivers["wind"]
-
-    net, elements, boundary = two_zone_layer
-    coeff = torch.tensor(1.0, dtype=torch.float64, requires_grad=True)
-    drv = LearnableDrive(coeff)
-    layer = KirchhoffLayer(net, "zones", elements, drives=[drv], boundary=boundary)
-    phi_b = torch.zeros(1, dtype=torch.float64)
-    wind = torch.tensor([10.0, 0.0, 0.0], dtype=torch.float64)
-
-    with pytest.raises(ValueError, match="coeff"):
-        layer.solve(phi_b, {"wind": wind}, None, differentiable=True)
 
 
 class _DetachedLeak(ConstitutiveLaw):
@@ -1065,8 +1020,8 @@ def test_node_sources_are_exposed_read_only_as_a_tuple():
     assert bare.node_sources == ()
 
 
-def test_a_batched_drive_on_one_kind_broadcasts_a_drive_free_fixed_flow_kind():
-    """A batched drive on one kind and a drive-free, dp-independent kind (a constant-flow fan)
+def test_a_batched_head_on_one_kind_broadcasts_a_head_free_fixed_flow_kind():
+    """A batched head on one kind and a head-free, dp-independent kind (a constant-flow fan)
     on the same layer: the fan's unbatched dp block is broadcast to the batch before the
     blocks are joined, and every instance equals its own unbatched solve."""
     f64 = torch.float64
