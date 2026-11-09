@@ -53,8 +53,8 @@ def simulate_circuit(model: Model, state: State, drivers: Mapping[str, Tensor],
     `model.steady` / `model.step`. The steady solves of an algebraic circuit default to
     `atol=STEADY_ATOL, rtol=STEADY_RTOL` (round-off); the steps of a dynamic circuit take the
     layers' own tolerances. The heat layer is a linear solve and takes no Newton tolerance;
-    on a dynamic step it is given the step's scheme through `layer_options`, merged over any
-    `layer_options` the caller gives.
+    `Model.march` steps it by backward Euler on the restart steps (`names.restarts`), merged
+    over any `layer_options` the caller gives.
     """
     grid = names.grid
     if times is None:
@@ -64,33 +64,24 @@ def simulate_circuit(model: Model, state: State, drivers: Mapping[str, Tensor],
     if times.numel() == 0:
         raise ValueError("simulate_circuit: no times asked for")
     want = grid_index(grid, times, caller="simulate_circuit")
-    rows: list[State] = []
     if not names.dynamic:
         kwargs = {"atol": STEADY_ATOL, "rtol": STEADY_RTOL, **solve_kwargs}
+        rows: list[State] = []
         for k in want:
             t = float(grid[k])
             state = model.steady(state, step_drivers(drivers, grid, t), t=t, **kwargs)
             rows.append(state)
+        keys = [key for key in rows[0] if key.endswith((".phi", ".q", ".x"))]
+        out = {key: torch.stack([row[key] for row in rows]) for key in keys}
     else:
-        wanted = set(want)
-        if want[0] == 0:
-            rows.append(state)
         kwargs = dict(solve_kwargs)
         options = {k: dict(v) for k, v in (kwargs.pop("layer_options", None) or {}).items()}
-        heat = f"{THERMAL}.x" in state
-        for k in range(want[-1]):
-            t0, t1 = float(grid[k]), float(grid[k + 1])
-            scheme = "backward_euler" if k in names.restarts else "trapezoidal"
-            step_options = options
-            if heat:
-                step_options = {**options, THERMAL: {**options.get(THERMAL, {}),
-                                                     "scheme": scheme}}
-            state = model.step(state, step_drivers(drivers, grid, t1), dt=t1 - t0, t=t0,
-                               scheme=scheme, layer_options=step_options or None,
-                               **kwargs)
-            if k + 1 in wanted:
-                rows.append(state)
-    keys = [key for key in rows[0] if key.endswith((".phi", ".q", ".x"))]
-    out = {key: torch.stack([row[key] for row in rows]) for key in keys}
+        if f"{THERMAL}.x" in state:
+            # the heat layer's rule on the other steps; `march` takes the restarts itself
+            options[THERMAL] = {**options.get(THERMAL, {}), "scheme": "trapezoidal"}
+        out = model.march(
+            state, drivers, grid[: want[-1] + 1], restarts=names.restarts,
+            drivers_at=lambda t0, t1: step_drivers(drivers, grid, t1), record=want,
+            layer_options=options or None, scheme="trapezoidal", **kwargs)
     out["time"] = grid[want].clone()
     return out

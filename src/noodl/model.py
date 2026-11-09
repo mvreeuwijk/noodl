@@ -616,6 +616,33 @@ class Model:
                              _with_layer_options(solve_kwargs, layer_options), t=t,
                              warm_start=warm_start)
 
+    def march(self, state, drivers, times, *, restarts: Collection[int] = (),
+              drivers_at: Callable[[float, float], Drivers] | None = None,
+              record: Collection[int] | None = None, diagnostics: dict | None = None,
+              layer_options: Mapping[str, Mapping] | None = None, **solve_kwargs) -> dict:
+        """Step the model through `times` (s, increasing; `state` is at `times[0]`) and return
+        the history: `"time"` and every layer state key (ending in `.phi`, `.q`, `.x`,
+        `.storage_flow` or `.capacity`) stacked on a new leading axis, the start state as
+        row 0 and rows broadcast to the batch shape of the steps.
+
+        Step `k` is `step(state, d, dt=times[k+1]-times[k], t=times[k])` with
+        `d = drivers_at(times[k], times[k+1])` when `drivers_at` is given, else `drivers`.
+        `restarts` holds the step indices taken by backward Euler (the first step, and the
+        steps that contain a source discontinuity, damp the ringing the trapezoidal rule
+        shows after a jump): every Kirchhoff layer is solved with `scheme="backward_euler"`
+        and every transport layer whose own scheme is `"trapezoidal"` is stepped by backward
+        Euler (`layer_options`, merged over the caller's); `"exact"` layers are untouched. On
+        the other steps the layers' own schemes apply, or a `scheme=` in `solve_kwargs`.
+        `record` keeps only those indices into `times` (default all). `diagnostics["schemes"]`
+        lists the scheme of each step (`None`: the layer default). Differentiable through
+        time as `step` is.
+        """
+        from noodl._march import march
+
+        return march(self, state, drivers, times, restarts=restarts, drivers_at=drivers_at,
+                     record=record, diagnostics=diagnostics, layer_options=layer_options,
+                     **solve_kwargs)
+
     def _advance(
         self, state, drivers, dt, diagnostics, solve_kwargs, *, t=None,
         boundary_transfers: bool | Collection[str] = False, warm_start: bool = True,

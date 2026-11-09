@@ -210,6 +210,32 @@ Edges are labelled by their `name` attribute when they have one (EPANET links, S
 conduits, WSIMOD arcs, street names), otherwise by `(source, target)`, or `(source,
 target, key)` where two edges join the same nodes.
 
+## Marching over a time grid
+
+`model.march(state, drivers, times)` is the loop over `model.step` for a time grid: step `k`
+goes from `times[k]` to `times[k+1]`, and the result is a dictionary holding `"time"` and
+every layer state (`.phi`, `.q`, `.x`, `.storage_flow`, `.capacity`) stacked on a new first
+axis, with the start state as row 0. It is differentiable through time as `step` is.
+
+```py
+history = model.march(
+    state, drivers, times,
+    restarts={0},                                # steps taken by backward Euler
+    drivers_at=lambda t0, t1: drivers_of(t1),    # drivers of the step t0 -> t1
+    record=[0, 10, 20],                          # keep only these indices into times
+)
+```
+
+`restarts` names the steps taken by backward Euler: every Kirchhoff layer is solved with
+`scheme="backward_euler"` and every transport layer whose own scheme is `"trapezoidal"` is
+stepped by backward Euler, which damps the ringing the trapezoidal rule shows after a first
+step or a source discontinuity; layers with the `"exact"` scheme are untouched. On the other
+steps each layer takes its own scheme. `drivers_at` gives the drivers of each interval when
+they change in time, `diagnostics["schemes"]` the scheme of each step. The electrical
+`transient` and the Modelica electrical reader's `simulate_circuit` are this loop; the building
+application's `simulate` stays its own march (step-mean inputs, controls held over passes,
+breakpoint sub-steps, the zone-pressure loop).
+
 ## Batches and gradients
 
 A value may be a tensor instead of a number. Its shape is the batch shape, and every

@@ -10,6 +10,7 @@ import torch
 
 from noodl.apps.electrical.modelica import extrapolate, read_modelica_circuit, simulate_circuit
 from noodl.apps.electrical.modelica.run import STEADY_ATOL, STEADY_RTOL
+from noodl.model import Model
 
 DATA = Path(__file__).resolve().parents[3] / "data" / "modelica_electrical"
 MSL = "Modelica.Electrical.Analog."
@@ -141,6 +142,11 @@ class _Recording:
 
     def __init__(self, model):
         self.model, self.calls = model, []
+
+    march = Model.march     # runs on this wrapper, so its steps are recorded too
+
+    def __getattr__(self, name):
+        return getattr(self.model, name)
 
     def steady(self, state, drivers, **kwargs):
         self.calls.append(("steady", kwargs))
