@@ -13,6 +13,8 @@ from __future__ import annotations
 
 import torch
 
+from noodl._broadcast import broadcast_shapes
+
 Tensor = torch.Tensor
 
 
@@ -88,3 +90,62 @@ def complex_slope_block(c: Tensor) -> Tensor:
     re, im = c.real, c.imag
     return torch.stack([torch.stack([re, -im], dim=-1), torch.stack([im, re], dim=-1)], dim=-2)
 
+
+
+def conjugate_slope_block(b: Tensor) -> Tensor:
+    """The real 2x2 block `[[Re b, Im b], [Im b, -Re b]]` of a slope `b` with respect to the
+    CONJUGATE input, shape `b.shape + (2, 2)`: a non-holomorphic phasor law with
+    `dq = a dv + b conj(dv)` writes its block entry as
+    `complex_slope_block(a) + conjugate_slope_block(b)`."""
+    re, im = b.real, b.imag
+    return torch.stack([torch.stack([re, im], dim=-1), torch.stack([im, -re], dim=-1)], dim=-2)
+
+
+def slope_blocks(c: Tensor, like: Tensor) -> Tensor:
+    """`jacobian` blocks `c.shape + (w, w)` of a law whose slopes `c` (shape `(..., G, m, m)`)
+    are real, or complex for a holomorphic phasor law, on edge values like `like`: `c` as
+    1x1 blocks on a real `like`, `complex_slope_block(c)` on a complex one."""
+    c = torch.as_tensor(c, device=like.device)
+    if like.is_complex():
+        return complex_slope_block(c.to(like.dtype))
+    return c.to(like.dtype)[..., None, None]
+
+
+def one_port_blocks(c, *likes: Tensor) -> Tensor:
+    """`jacobian` blocks `(..., E, 1, 1, w, w)` of a one-port law with the per-edge slope `c`
+    (broadcasting against the edge values `likes`; the first sets the dtype)."""
+    like = likes[0]
+    c = torch.as_tensor(c, device=like.device)
+    shape = broadcast_shapes(c.shape, *(x.shape for x in likes))
+    return slope_blocks(torch.broadcast_to(c, shape)[..., None, None], like)
+
+
+def stack_entries(entries, shape, like: Tensor) -> Tensor:
+    """Nested lists of entries (numbers, or tensors broadcasting against `shape`) as one
+    tensor of shape `broadcast(shape, entries) + nested dims`, in `like`'s dtype: how a law
+    spells out its slope matrix per group of edges."""
+    shape = tuple(broadcast_shapes(shape, *(e.shape for e in _leaves(entries)
+                                            if isinstance(e, Tensor))))
+    return _stack(entries, shape, like)
+
+
+def _leaves(entries):
+    if isinstance(entries, (list, tuple)):
+        for e in entries:
+            yield from _leaves(e)
+    else:
+        yield entries
+
+
+def _stack(entries, shape: tuple[int, ...], like: Tensor) -> Tensor:
+    if isinstance(entries, (list, tuple)):
+        return torch.stack([_stack(e, shape, like) for e in entries], dim=len(shape))
+    if isinstance(entries, Tensor):
+        return torch.broadcast_to(entries.to(like.dtype), shape)
+    return torch.full(shape, entries, dtype=like.dtype, device=like.device)
+
+
+def group_shape(m: int, *likes: Tensor) -> tuple[int, ...]:
+    """`batch + (G,)` of edge values `likes` in groups of `m` edges."""
+    batch = broadcast_shapes(*(x.shape[:-1] for x in likes))
+    return tuple(batch) + (likes[0].shape[-1] // m,)

@@ -24,6 +24,11 @@ import torch
 
 from noodl.apps.electrical.laws import _driver
 from noodl.elements import ConstitutiveLaw, ImplicitLaw
+from noodl.elements._slopes import (
+    complex_slope_block,
+    conjugate_slope_block,
+    one_port_blocks,
+)
 
 Tensor = torch.Tensor
 
@@ -55,6 +60,14 @@ class Impedance(ImplicitLaw):
         self.C = self._param(C, False)
 
     def residual(self, dp, q, drivers, ctx):
+        return dp - self._impedance(ctx) * q
+
+    def jacobian(self, dp, q, drivers, ctx):
+        return one_port_blocks(1.0, dp, q), one_port_blocks(-self._impedance(ctx), dp, q)
+
+    def _impedance(self, ctx):
+        """`R + jX` per edge at the phasor layer's frequency; `R` on a real layer, which
+        refuses a reactance."""
         if ctx is not None and ctx.mode == "phasor":
             capacitive = torch.isfinite(self.C)
             at_rest = ctx.omega == 0
@@ -69,11 +82,11 @@ class Impedance(ImplicitLaw):
             Cs = torch.where(live, self.C, torch.ones_like(self.C))
             wC = torch.where(live, ctx.omega * Cs, torch.ones_like(Cs))
             x = ctx.omega * self.L - torch.where(live, 1.0 / wC, torch.zeros_like(wC))
-            return dp - (self.R + 1j * x) * q
+            return self.R + 1j * x
         reactive = (self.L != 0) | torch.isfinite(self.C)
         if bool(reactive.any()):
             raise ValueError(f"impedance kind {self.kind!r}: a reactance needs a phasor layer")
-        return dp - self.R * q
+        return self.R
 
 
 class ConstantPowerLoad(ConstitutiveLaw):
@@ -150,6 +163,44 @@ class ConstantPowerLoad(ConstitutiveLaw):
         else:
             simplified = S.conj() * dp / Vn ** 2
         return torch.where(small, simplified, actual)
+
+    def _slopes(self, dp, drivers):
+        """`(a, b)` per edge: `dq = a d(dp) + b conj(d(dp))` (on a real layer `b` is None
+        and `a` is `dq / d(dp)`)."""
+        S = self.power(dp, drivers)
+        Vn = self.V_nominal
+        if self.linearized:
+            if not self.direct_current:
+                return S.conj() / Vn ** 2, None
+            mag = dp.abs()
+            Vb = torch.where(mag <= (8.0 / 9.0) * Vn, 0.8 * Vn,
+                             torch.where(mag >= (12.0 / 11.0) * Vn, 1.2 * Vn, Vn))
+            return -S / Vb ** 2, None
+        if Vn is None:
+            small, safe = None, dp
+        else:
+            small = dp.abs() <= _START_FRACTION * Vn
+            safe = torch.where(small, Vn.to(dp.dtype), dp)
+            simplified = -S / Vn ** 2 if self.direct_current else S.conj() / Vn ** 2
+        actual = -(S / safe ** 2).conj()   # d conj(S / dp) / d conj(dp)
+        zero = torch.zeros((), dtype=dp.dtype, device=dp.device)
+        if not dp.is_complex():   # a real layer: conj is the identity, one slope
+            return (actual if small is None else torch.where(small, simplified, actual)), None
+        if small is None:
+            return zero, actual
+        return torch.where(small, simplified, zero), torch.where(small, zero, actual)
+
+    def dflow(self, dp, drivers=None):
+        a, _ = self._slopes(dp, drivers)
+        return torch.ones_like(dp) * a
+
+    def jacobian(self, dp, q, drivers, ctx):
+        a, b = self._slopes(dp, drivers)
+        if b is None:
+            return (one_port_blocks(a, dp),)
+        a, b = torch.broadcast_tensors(torch.as_tensor(a, dtype=dp.dtype), b,
+                                       torch.zeros_like(dp))[:2]
+        return ((complex_slope_block(a) + conjugate_slope_block(b))[..., None, None, :, :],)
 
 
 __all__ = ["ConstantPowerLoad", "Impedance"]

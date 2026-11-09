@@ -22,6 +22,12 @@ import torch
 
 from noodl.apps.electrical.waveforms import Constant, Signal, Sine, _Waveform
 from noodl.elements import ConstitutiveLaw, ImplicitLaw, LawContext
+from noodl.elements._slopes import (
+    group_shape,
+    one_port_blocks,
+    slope_blocks,
+    stack_entries,
+)
 
 Tensor = torch.Tensor
 
@@ -154,6 +160,9 @@ class PrescribedVoltage(_Source, ImplicitLaw):
     def residual(self, dp, q, drivers, ctx):
         return dp - self.value(dp, drivers, ctx)
 
+    def jacobian(self, dp, q, drivers, ctx):
+        return one_port_blocks(1.0, dp, q), one_port_blocks(0.0, dp, q)
+
 
 class PrescribedCurrent(_Source, ConstitutiveLaw):
     """An ideal current source: `q = offset + amplitude * unit(t)` (A) entering pin `p`
@@ -174,6 +183,12 @@ class PrescribedCurrent(_Source, ConstitutiveLaw):
 
     def flow(self, dp, drivers=None, ctx=None):
         return self.value(dp, drivers, ctx) + 0 * dp
+
+    def dflow(self, dp, drivers=None):
+        return torch.zeros_like(dp)
+
+    def jacobian(self, dp, q, drivers, ctx):
+        return (one_port_blocks(0.0, dp),)
 
 
 # -------------------------------------------------------------------- one-port devices
@@ -213,6 +228,9 @@ class Resistance(ConstitutiveLaw):
     def dflow(self, dp, drivers=None):
         return torch.ones_like(dp) / self.resistance(drivers)
 
+    def jacobian(self, dp, q, drivers, ctx):
+        return (one_port_blocks(self.dflow(dp, drivers), dp),)
+
     def linear_init(self, drivers=None):
         g = 1.0 / self.resistance(drivers)
         return torch.zeros_like(g), g
@@ -234,6 +252,11 @@ class Capacitance(ImplicitLaw):
         self.C = self._param(C, learnable)
         self.v0 = self._param(v0, False)
 
+    def _step_rate(self, ctx: LawContext):
+        """The step rate: `1/dt` (backward Euler) or `2/dt` (trapezoidal), the rate of
+        change of the stored charge over one step per unit of its change."""
+        return (1.0 if ctx.scheme == "backward_euler" else 2.0) / ctx.dt
+
     def residual(self, dp, q, drivers, ctx):
         if ctx.mode == "dc":
             return q
@@ -241,9 +264,21 @@ class Capacitance(ImplicitLaw):
             return dp - self.v0
         if ctx.mode == "phasor":
             return q - 1j * ctx.omega * self.C * dp
+        change = self.C * self._step_rate(ctx) * (dp - ctx.dp_prev)
         if ctx.scheme == "backward_euler":
-            return q - self.C * (dp - ctx.dp_prev) / ctx.dt
-        return q + ctx.q_prev - 2.0 * self.C / ctx.dt * (dp - ctx.dp_prev)
+            return q - change
+        return q + ctx.q_prev - change
+
+    def jacobian(self, dp, q, drivers, ctx):
+        if ctx.mode == "dc":
+            slopes = (0.0, 1.0)
+        elif ctx.mode == "initial":
+            slopes = (1.0, 0.0)
+        elif ctx.mode == "phasor":
+            slopes = (-1j * ctx.omega * self.C, 1.0)
+        else:
+            slopes = (-(self.C * self._step_rate(ctx)), 1.0)
+        return tuple(one_port_blocks(c, dp, q) for c in slopes)
 
 
 class Inductance(ImplicitLaw):
@@ -262,6 +297,11 @@ class Inductance(ImplicitLaw):
         self.L = self._param(L, learnable)
         self.i0 = self._param(i0, False)
 
+    def _step_rate(self, ctx: LawContext):
+        """The step rate: `1/dt` (backward Euler) or `2/dt` (trapezoidal), the rate of
+        change of the stored flux over one step per unit of its change."""
+        return (1.0 if ctx.scheme == "backward_euler" else 2.0) / ctx.dt
+
     def residual(self, dp, q, drivers, ctx):
         if ctx.mode == "dc":
             return dp
@@ -269,9 +309,21 @@ class Inductance(ImplicitLaw):
             return q - self.i0
         if ctx.mode == "phasor":
             return dp - 1j * ctx.omega * self.L * q
+        change = self.L * self._step_rate(ctx) * (q - ctx.q_prev)
         if ctx.scheme == "backward_euler":
-            return dp - self.L * (q - ctx.q_prev) / ctx.dt
-        return dp + ctx.dp_prev - 2.0 * self.L / ctx.dt * (q - ctx.q_prev)
+            return dp - change
+        return dp + ctx.dp_prev - change
+
+    def jacobian(self, dp, q, drivers, ctx):
+        if ctx.mode == "dc":
+            slopes = (1.0, 0.0)
+        elif ctx.mode == "initial":
+            slopes = (0.0, 1.0)
+        elif ctx.mode == "phasor":
+            slopes = (1.0, -1j * ctx.omega * self.L)
+        else:
+            slopes = (1.0, -(self.L * self._step_rate(ctx)))
+        return tuple(one_port_blocks(c, dp, q) for c in slopes)
 
 
 #: Boltzmann constant (J/K) and elementary charge (C), exact SI values as in MSL
@@ -286,6 +338,11 @@ def _exlin(x: Tensor, maxexp: Tensor) -> Tensor:
     return torch.where(x > maxexp,
                        torch.exp(maxexp) * (1.0 + x - maxexp),
                        torch.exp(torch.clamp(x, max=maxexp)))
+
+
+def _exlin_slope(x: Tensor, maxexp: Tensor) -> Tensor:
+    """`d exlin(x) / dx`: `exp(x)` up to `maxexp`, `exp(maxexp)` above it."""
+    return torch.where(x > maxexp, torch.exp(maxexp), torch.exp(torch.clamp(x, max=maxexp)))
 
 
 class JunctionDiode(ConstitutiveLaw):
@@ -318,16 +375,31 @@ class JunctionDiode(ConstitutiveLaw):
         self.XTI = self._param(XTI, False)
         self.EG = self._param(EG, False)
 
+    def _thermal(self, drivers) -> tuple[Tensor, Tensor]:
+        """`(N vt, T / TNOM)` per edge at the driver temperature `T`."""
+        T = _driver(drivers, self.temperature, self.kind)
+        vt = _BOLTZMANN * T / _ELEMENTARY_CHARGE
+        return self.N * vt, T / self.TNOM
+
     def flow(self, dp, drivers=None):
         if self.temperature is None:
             return self.Ids * (_exlin(dp / self.Vt, self.Maxexp) - 1.0) + dp / self.R
-        T = _driver(drivers, self.temperature, self.kind)
-        vt = _BOLTZMANN * T / _ELEMENTARY_CHARGE
-        n_vt = self.N * vt
-        ratio = T / self.TNOM
+        n_vt, ratio = self._thermal(drivers)
         junction = self.Ids * (_exlin(dp / n_vt, self.Maxexp) - 1.0)
         return (junction * ratio ** (self.XTI / self.N)
                 * torch.exp((ratio - 1.0) * self.EG / n_vt) + dp / self.R)
+
+    def dflow(self, dp, drivers=None):
+        if self.temperature is None:
+            return (self.Ids * _exlin_slope(dp / self.Vt, self.Maxexp) / self.Vt
+                    + torch.ones_like(dp) / self.R)
+        n_vt, ratio = self._thermal(drivers)
+        junction = self.Ids * _exlin_slope(dp / n_vt, self.Maxexp) / n_vt
+        return (junction * ratio ** (self.XTI / self.N)
+                * torch.exp((ratio - 1.0) * self.EG / n_vt) + torch.ones_like(dp) / self.R)
+
+    def jacobian(self, dp, q, drivers, ctx):
+        return (one_port_blocks(self.dflow(dp, drivers), dp),)
 
 
 def _driver_entries(spec, drivers: Mapping[str, Tensor] | None, kind: str) -> Tensor:
@@ -384,6 +456,18 @@ class SwitchedConductance(ConstitutiveLaw):
     def flow(self, dp, drivers=None):
         return torch.where(self.closed(drivers, dp.shape[-1]), dp / self.Ron, self.Goff * dp)
 
+    def _conductance(self, dp, drivers) -> Tensor:
+        """`1/Ron` where closed, `Goff` where open, per edge."""
+        one = torch.ones((), dtype=dp.real.dtype, device=dp.device)
+        return torch.where(self.closed(drivers, dp.shape[-1]), one / self.Ron,
+                           self.Goff.to(one.dtype))
+
+    def dflow(self, dp, drivers=None):
+        return torch.ones_like(dp) * self._conductance(dp, drivers)
+
+    def jacobian(self, dp, q, drivers, ctx):
+        return (one_port_blocks(self._conductance(dp, drivers), dp),)
+
 
 # -------------------------------------------------------------------- two-port devices
 def _ports(x: Tensor) -> tuple[Tensor, Tensor]:
@@ -416,6 +500,12 @@ class TransformerRatio(ImplicitLaw):
         v1, v2 = _ports(dp)
         i1, i2 = _ports(q)
         return _pairs(v1 - self.n * v2, i2 + self.n * i1)
+
+    def jacobian(self, dp, q, drivers, ctx):
+        shape = group_shape(2, dp, q)
+        n = self.n
+        return (slope_blocks(stack_entries([[1.0, -n], [0.0, 0.0]], shape, dp), dp),
+                slope_blocks(stack_entries([[0.0, 0.0], [n, 1.0]], shape, dp), dp))
 
 
 class MutualInductance(ImplicitLaw):
@@ -450,9 +540,28 @@ class MutualInductance(ImplicitLaw):
             return (q.unflatten(-1, (-1, 2)) - self.i0).flatten(-2)
         if ctx.mode == "phasor":
             return dp - 1j * ctx.omega * self._flux(q)
+        change = self._step_rate(ctx) * self._flux(q - ctx.q_prev)
         if ctx.scheme == "backward_euler":
-            return dp - self._flux(q - ctx.q_prev) / ctx.dt
-        return dp + ctx.dp_prev - 2.0 / ctx.dt * self._flux(q - ctx.q_prev)
+            return dp - change
+        return dp + ctx.dp_prev - change
+
+    def _step_rate(self, ctx: LawContext):
+        """The step rate: `1/dt` (backward Euler) or `2/dt` (trapezoidal), the rate of
+        change of the stored flux over one step per unit of its change."""
+        return (1.0 if ctx.scheme == "backward_euler" else 2.0) / ctx.dt
+
+    def jacobian(self, dp, q, drivers, ctx):
+        shape = group_shape(2, dp, q)
+        eye = stack_entries([[1.0, 0.0], [0.0, 1.0]], shape, dp)
+        zero = torch.zeros_like(eye)
+        if ctx.mode == "dc":
+            return slope_blocks(eye, dp), slope_blocks(zero, dp)
+        if ctx.mode == "initial":
+            return slope_blocks(zero, dp), slope_blocks(eye, dp)
+        f = 1j * ctx.omega if ctx.mode == "phasor" else self._step_rate(ctx)
+        d_q = [[-(f * self.L1), -(f * self.M)], [-(f * self.M), -(f * self.L2)]]
+        d_q = stack_entries(d_q, shape, dp)
+        return slope_blocks(eye.expand(d_q.shape), dp), slope_blocks(d_q, dp)
 
 
 _DEPENDENT = ("voltage", "current")
@@ -491,6 +600,18 @@ class DependentSource(ImplicitLaw):
         r1 = i1 if self.control == "voltage" else v1
         r2 = (v2 if self.output == "voltage" else i2) - controlled
         return _pairs(r1, r2)
+
+    def jacobian(self, dp, q, drivers, ctx):
+        shape = group_shape(2, dp, q)
+        by_voltage = self.control == "voltage"
+        g = -self.gain
+        # rows: r1 (the control port), r2 (the output port); columns: port 1, port 2
+        d_dp = [[0.0 if by_voltage else 1.0, 0.0],
+                [g if by_voltage else 0.0, 1.0 if self.output == "voltage" else 0.0]]
+        d_q = [[1.0 if by_voltage else 0.0, 0.0],
+               [0.0 if by_voltage else g, 0.0 if self.output == "voltage" else 1.0]]
+        return (slope_blocks(stack_entries(d_dp, shape, dp), dp),
+                slope_blocks(stack_entries(d_q, shape, dp), dp))
 
 
 __all__ = [
