@@ -1450,6 +1450,9 @@ class KirchhoffLayer(TopologyGuard):
         for key, value in self.newton_defaults.items():
             newton_kwargs.setdefault(key, value)
         drivers = drivers or {}
+        # The order of the refusals is part of the contract: (phasor) inputs, the step's
+        # keywords, the Newton options a layer with flow unknowns refuses, the policy, the
+        # unreachable-tensor check, then the path's solve.
         if self.mna:
             phi_boundary, sources, phi0, q0 = self._mna.inputs(
                 phi_boundary, drivers, sources, phi0, q0)
@@ -1461,13 +1464,15 @@ class KirchhoffLayer(TopologyGuard):
             step_start(step, history),
         )
         if self.mna:
+            fn = None
             if policy.differentiable:
                 # a tensor held where the solve does not thread it is refused by name
                 self._check_no_unreachable_differentiable_tensors()
+                if not policy.forward_only:
+                    fn = FunctionalLaws(self, drivers, sources, phi_boundary, step, history)
             return self._mna.solve(
-                phi_boundary, drivers, sources, phi0, q0, step, history, policy, diagnostics,
+                phi_boundary, drivers, sources, phi0, q0, step, fn, diagnostics,
                 newton_kwargs,
-                lambda: FunctionalLaws(self, drivers, sources, phi_boundary, step, history),
             )
         phi0, dq0, node_slopes0 = self._starting_point(
             phi0, phi_boundary, drivers, sources, step)
@@ -1963,6 +1968,8 @@ class KirchhoffLayer(TopologyGuard):
         result, with `"method"` the inner solver `requested` (`newton_kwargs["method"]`
         unless given): under `"auto"` the batch threshold and SciPy's presence decide which
         backend ran, and nothing else reports it."""
+        if requested is None:
+            requested = newton_kwargs["method"]
         with torch.no_grad():
             try:
                 result = newton(residual_fn, operator_fn, x0, **newton_kwargs)
@@ -1971,8 +1978,7 @@ class KirchhoffLayer(TopologyGuard):
                     on_fail(exc)
                 raise
         if diagnostics is not None:
-            result.into(diagnostics, method=newton_kwargs["method"] if requested is None
-                        else requested)
+            result.into(diagnostics, method=requested)
         return result
 
     def _newton_differentiable(self, fn, residual_fn, operator_fn, x0, policy, newton_kwargs,
@@ -1988,6 +1994,8 @@ class KirchhoffLayer(TopologyGuard):
         point it may return unconverged. The root is checked again only when Newton's last
         residual (`fn.last`) was not at it, which leaves `fn.last` at the root either way.
         `on_fail` and `requested` are `_newton_primal`'s."""
+        if requested is None:
+            requested = newton_kwargs["method"]
         all_params = fn.all_params
         detached: dict = {}
 
@@ -2002,19 +2010,17 @@ class KirchhoffLayer(TopologyGuard):
         try:
             if policy.forward_only:
                 # `implicit_solve`'s own forward (the same Newton on the same Jacobian)
-                with torch.no_grad():
-                    result = newton(
-                        lambda x: residual(x, *all_params),
-                        lambda x: operator_fn(x, *all_params),
-                        x0,
-                        **newton_kwargs,
-                    )
-                x = result.x
-                if diagnostics is not None:
-                    result.into(diagnostics)
+                x = self._newton_primal(
+                    lambda x: residual(x, *all_params),
+                    lambda x: operator_fn(x, *all_params),
+                    x0, newton_kwargs, diagnostics, requested=requested,
+                ).x
             else:
                 x = implicit_solve(residual, operator_fn, x0, all_params,
                                    diagnostics=diagnostics, **newton_kwargs)
+                if diagnostics is not None:
+                    # `implicit_solve` writes the outcome; the method requested goes here
+                    diagnostics["method"] = requested
         except RuntimeError as exc:
             if on_fail is not None:
                 on_fail(exc)
@@ -2027,8 +2033,6 @@ class KirchhoffLayer(TopologyGuard):
         if not (last is not None and last[0].shape == root.shape
                 and torch.equal(last[0], root)):
             self._require_threaded(lambda *params: residual_fn(root, *params), all_params)
-        if diagnostics is not None:
-            diagnostics["method"] = newton_kwargs["method"] if requested is None else requested
         return x
 
     def adjoint(self, phi_interior, phi_boundary, drivers, grad_phi_interior, *, dt=None,

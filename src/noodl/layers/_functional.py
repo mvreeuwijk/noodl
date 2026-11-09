@@ -170,7 +170,7 @@ class FunctionalLaws:
                     store, phi_prev=phi_prev,
                     previous=None if store.previous is None else params[k + 1])
             step = dataclasses.replace(step, ctx=ctx, storage=store)
-        if self._phasor:
+        if self._phasor and step is not None:
             # the angular frequency from the threaded frequency driver
             step = dataclasses.replace(step, ctx=dataclasses.replace(
                 step.ctx, omega=self.layer._mna._omega(drv)))

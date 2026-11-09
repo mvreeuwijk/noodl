@@ -40,6 +40,7 @@ from noodl._broadcast import broadcast_shapes
 from noodl.elements._slopes import _colour_blocks, _complex
 from noodl.elements.base import SCHEMES, LawContext
 from noodl.layers._device import complex_of
+from noodl.layers._solve_policy import SolvePolicy
 from noodl.operators.mna import MnaOperator
 from noodl.solvers.newton import newton_tolerances
 from noodl.solvers.select import scipy_importable
@@ -67,6 +68,9 @@ def check_scheme(layer_name: str, scheme) -> None:
             f"('exact' is for a TransportLayer only)"
         )
 
+
+#: The policy of the differentiable solve `MnaSystem.solve` runs when it is given `fn`.
+_DIFFERENTIATED = SolvePolicy(differentiable=True)
 
 #: The largest system whose failed solve is diagnosed by a dense rank test; above it the
 #: original solver error is re-raised unchanged (a dense SVD of a big system costs more
@@ -616,12 +620,12 @@ class MnaSystem:
                 f"'auto', 'sparse_direct', 'direct' or 'gmres'"
             )
 
-    def solve(self, phi_boundary, drivers, sources, phi0, q0, step, history, policy,
-              diagnostics, newton_kwargs, fn_factory):
+    def solve(self, phi_boundary, drivers, sources, phi0, q0, step, fn, diagnostics,
+              newton_kwargs):
         """The solve of `KirchhoffLayer.solve` on this system, after its checks and its
-        `policy`: the primal Newton where the solve is not differentiated (or where nothing
-        reaches it, `policy.forward_only`), else the implicit-function solve through the
-        threaded parameters (`fn_factory()`, a `FunctionalLaws`)."""
+        policy: the implicit-function solve through the threaded parameters `fn` (a
+        `FunctionalLaws`) where the solve is differentiated, else (`fn` is `None`) the primal
+        Newton, which is also what a differentiable solve that nothing reaches runs."""
         layer = self.layer
         ctx, store = step.ctx, step.storage
         plain = layer._owner_call
@@ -664,7 +668,7 @@ class MnaSystem:
             if self._singular(last.get("op"), self._first_failing(last, newton_kwargs)):
                 raise self._singular_error(ctx.mode) from exc
 
-        if not policy.differentiable or policy.forward_only:
+        if fn is None:
             # the primal solve: also a differentiable one that nothing reaches
             point: dict = {}
 
@@ -689,8 +693,6 @@ class MnaSystem:
                     return point["phi"], point["q"]
                 return self._output(result.x, phi_boundary, drivers, ctx)
 
-        fn = fn_factory()
-
         def residual_fn(x, *params):
             rebuilt, drv, src, pb, st = fn.rebuild(params)
             r, phi, q = self._residual_parts(x, pb, drv, src, st.ctx,
@@ -709,7 +711,7 @@ class MnaSystem:
                               adjoint=True), st.storage)
             return last["op"]
 
-        x = layer._newton_differentiable(fn, residual_fn, operator_fn, x0, policy,
+        x = layer._newton_differentiable(fn, residual_fn, operator_fn, x0, _DIFFERENTIATED,
                                          newton_kwargs, diagnostics, diagnose,
                                          requested=requested)
         parts = fn.root_parts(x)
