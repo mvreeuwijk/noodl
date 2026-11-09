@@ -536,13 +536,13 @@ torch.Size([13, 4]) torch.Size([13, 3, 1])
 ```
 
 `simulate` adds each zone's air-mass change to its airflow balance (CONTAM's `dodMdt`)
-exactly when the model carries a `ZoneAirMassChange` node source, which `project_to_model`
+exactly when the model carries a `ZoneAirMassChange` storage, which `project_to_model`
 attaches for a project that sets `dodMdt` (the default `air_mass_change=None`;
 `air_mass_change=False` opts out, and `True` on a model without the source is refused): a zone whose temperature rises pushes out the air it no longer holds. The mass is
 taken at the zone's absolute pressure, (P_b + P_zone) V / (R T), as ContamX's is, so a zone
 depressurised by an exhaust fan switching on also gives up a little air. For a project that
 sets `dodMdt`, `project_to_model` gives the contaminants that same zone air mass. The term is
-part of the airflow solve itself (the `ZoneAirMassChange` node source `project_to_model`
+part of the airflow solve itself (the `ZoneAirMassChange` storage `project_to_model`
 attaches), so a step of any length converges. When the model carries a `ZonePressureDensity`
 closure (CONTAM's `densZP`), `simulate` repeats each step with the latest zone pressures until
 they no longer move; the same repetition runs when a pressure-driven source is present, so the

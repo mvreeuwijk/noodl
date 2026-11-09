@@ -214,7 +214,7 @@ masses included. When the run control sets **`dodMdt = 1`**, each zone's air-mas
 step enters its airflow balance (`simulate` switches the term on by default for such a model),
 and ContamX
 takes that mass at the zone's absolute pressure even with `densZP = 0`. `project_to_model`
-therefore attaches a `ZoneAirMassChange` node source to the air layer (only when the run
+therefore attaches a `ZoneAirMassChange` storage to the air layer (only when the run
 control sets `dodMdt` and a zone has volume), which acts only when `simulate` supplies the
 step's start mass. For a `dodMdt` project with species it also adds
 a `ZonePressureDensity(densities=False)` closure, which scales the species layer's capacity (the

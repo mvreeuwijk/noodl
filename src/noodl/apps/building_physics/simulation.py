@@ -14,7 +14,7 @@ step to the next:
   include the zone pressure (measured: a zone depressurised by an exhaust switching on loses
   M dP_zone / (Pb dt) in that step with CONTAM's `densZP = 0`). The end-of-step mass depends
   on the pressures the step solves for, so the term is the airflow layer's
-  `ZoneAirMassChange` node source, inside the solve and its Jacobian: a step of any length
+  `ZoneAirMassChange` storage, inside the solve and its Jacobian: a step of any length
   converges. `simulate` supplies the start-of-step mass (`"<layer>.mass_start"`), at the
   temperatures and pressures the closures leave in the drivers. The default (None) switches
   the term on exactly when the model carries a `ZoneAirMassChange` source, which
@@ -111,9 +111,9 @@ def _with_pressure_differences(model: Model, state: State, drivers: Drivers,
 
 
 def _air_mass_source(model: Model) -> tuple[str, ZoneAirMassChange] | None:
-    """The airflow layer carrying a `ZoneAirMassChange` node source, and the source."""
+    """The airflow layer carrying a `ZoneAirMassChange` storage, and the storage."""
     for name, layer in model.kirchhoff.items():
-        for ns in layer.node_sources:
+        for ns in layer.storage:
             if isinstance(ns, ZoneAirMassChange):
                 return name, ns
     return None
@@ -230,7 +230,7 @@ def simulate(model: Model, state: State, drivers: Drivers, times, *,
     found = _air_mass_source(model) if air_mass_change is not False else None
     if air_mass_change and found is None:
         raise ValueError(
-            "simulate: air_mass_change needs a ZoneAirMassChange node source on the airflow "
+            "simulate: air_mass_change needs a ZoneAirMassChange storage on the airflow "
             "layer (project_to_model attaches one); this model has none"
         )
     mass_layer, mass_source = found if found else (None, None)
@@ -242,7 +242,7 @@ def simulate(model: Model, state: State, drivers: Drivers, times, *,
         # At the drivers the closures leave (a closure may write "T" or "P_ref"), as the
         # end-of-step mass inside the solve sees them.
         phi = state[f"{mass_layer}.phi"][..., mass_source.nodes]
-        return mass_source.mass(phi, model._apply_closures(state, d))
+        return mass_source.amount(phi, model._apply_closures(state, d))
 
     def drivers_at(t: float, t_start: float | None = None) -> Drivers:
         # A step-mean signal (an occupant's presence) is averaged over (t_start, t]; at an
@@ -292,6 +292,8 @@ def simulate(model: Model, state: State, drivers: Drivers, times, *,
             state = _evaluate_controls(network, state, d_out, t_out - t, t)
         for t1 in [*cuts, t_out]:
             d, dt, t0 = drivers_at(t1, t), t1 - t, t
+            # Feeds the burst and peak-emission sources only; the airflow storage takes its
+            # step length from the layer (`model.step(..., dt)`).
             d["time_step"] = torch.tensor(dt, dtype=F64)
 
             if mass is not None:
