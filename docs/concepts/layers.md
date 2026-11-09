@@ -110,8 +110,12 @@ up); one `(node, storage)` pair is an *entry*, and `storage_flows` returns one f
 storages in list order, then their nodes.
 
 - Without `dt` storage is absent: the steady point (mode `"dc"`) stores nothing.
-- With `dt` the layer needs `history=(phi, q)` at the step start (only `phi` is read) and,
-  under the trapezoidal scheme, `storage_flow`, the flow into every entry at the step start.
+- With `dt` the layer needs `history=(phi, q)` at the step start (only `phi` is read; `q`
+  may be `None`) and, under the trapezoidal scheme, `storage_flow`, the flow into every entry
+  at the step start.
+- `residual`, `jacobian` and `adjoint` take the same step keywords (`dt`, `scheme`,
+  `history`, `storage_flow`): with `dt` they include the storage of that step, without it
+  they are the steady forms, where storage is absent.
 - `mode="initial"` is refused when a storage holds an `initial()` potential: holding a node at
   its initial potential needs the Modified Nodal Analysis path, which does not take storage
   yet.
@@ -130,7 +134,10 @@ Which method to write on a subclass:
   depends on its temperature), or a difference that must be formed without round-off
   (`LinearStorage` forms `C (phi - phi_start)`).
 - **`rate`** and **`rate_slope`**, for an application whose withdrawal has rules beyond storage
-  (they default to `step_rate(change)` and `step_rate_factor * capacity`).
+  (they default to `step_rate(change)` and `step_rate_factor * capacity`). `rate_slope` is
+  used by the non-differentiable Newton solve; the differentiable solve takes the derivative
+  of `rate` by autograd, so an override must be the true derivative (as for
+  `NodeSource.dflow`).
 
 A withdrawal that is not storage (a demand, a leak) is a `NodeSource`
 ([Constitutive laws](elements.md)).
@@ -621,10 +628,14 @@ keywords the Model sets itself (`phi0`, `q0`, `history`, `dt`, `t`, `storage_flo
 there by name.
 
 A Kirchhoff layer with [node storage](#node-storage) gets the same step context (`t`, and on a
-step `dt` and the step-start `"<layer>.phi"` and `"<layer>.q"` as `history`), and also the
-step-start `"<layer>.storage_flow"`, which the trapezoidal scheme requires (a missing one is
-refused by name). After every solve the Model writes the new `"<layer>.storage_flow"`, zeros
-on a steady pass, so a run started from `steady` carries it from the first step.
+step `dt` and the step-start `"<layer>.phi"` as `history`; `"<layer>.q"` is not read, so it
+is not required), and also the step-start `"<layer>.storage_flow"`, which the trapezoidal
+scheme requires (a missing one is refused by name). After every solve the Model writes the
+new `"<layer>.storage_flow"`, zeros on a steady pass, so a run started from `steady` carries
+it from the first step. A state that is not at rest but carries zero `storage_flow` (built by
+hand, or with the `refs` default of 0) starts the trapezoidal scheme assuming no storage flow
+at the step start, which can ring; take the first step with `scheme="backward_euler"`, as
+`water_step` does by default.
 `steady` solves such a layer at its operating point (a capacitance open, an inductance
 shorted). A layer with contextual laws but no dynamic one (a time-dependent source and
 resistors, no storage) takes no history: on a step it is solved at its operating point at the

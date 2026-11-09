@@ -363,3 +363,37 @@ def test_gradcheck_through_two_model_steps():
         return torch.cat([state["heat.phi"], state["heat.storage_flow"]])
 
     assert torch.autograd.gradcheck(two_steps, (phi_start, storage.C, src))
+
+
+def test_residual_jacobian_and_adjoint_include_the_step_storage():
+    layer, _ = _rc()
+    phi_prev, dt = _phi_prev(layer), 0.5
+    step = dict(dt=dt, history=(phi_prev, None))
+    phi, _ = layer.solve(PB, {}, SRC, **step)
+    # the residual solve drives to zero includes the storage withdrawal of the step
+    r = layer.residual(phi[1:], PB, {}, SRC, **step)
+    torch.testing.assert_close(r, torch.zeros(3), rtol=0, atol=1e-12)
+    # without dt it is the steady residual: off by exactly the storage withdrawal
+    flows = layer.storage_flows(phi, {}, **step)
+    torch.testing.assert_close(layer.residual(phi[1:], PB, {}, SRC), -flows,
+                               rtol=0, atol=1e-12)
+    L_II, _ = _laplacian(layer)
+    want = L_II + torch.diag(CAP / dt)
+    torch.testing.assert_close(layer.jacobian(phi[1:], PB, {}, **step), want)
+    torch.testing.assert_close(layer.jacobian(phi[1:], PB, {}), L_II)
+    g = torch.tensor([1.0, -2.0, 0.5])
+    lam = layer.adjoint(phi[1:], PB, {}, g, **step)
+    torch.testing.assert_close(lam, torch.linalg.solve(want.T, g), rtol=1e-10, atol=1e-12)
+    plain = KirchhoffLayer(_net(), "heat", [Conductance(G.clone(), kind="g")],
+                           boundary=["gnd"])
+    with pytest.raises(ValueError, match="no storage"):
+        plain.residual(phi[1:], PB, {}, SRC, dt=dt)
+
+
+def test_model_step_of_a_storage_layer_does_not_need_q():
+    model, layer, _ = _model("backward_euler")
+    state = {"heat.phi": _phi_prev(layer)}
+    new = model.step(state, _drivers(), 0.25)
+    want, _ = layer.solve(PB, {}, SRC, dt=0.25, history=(_phi_prev(layer), None))
+    torch.testing.assert_close(new["heat.phi"], want, rtol=1e-12, atol=1e-12)
+    assert model.refs["heat"].q.required == "optional"

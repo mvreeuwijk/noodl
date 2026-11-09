@@ -176,7 +176,7 @@ Named values and option tables.
 
 ## Base classes (for extending)
 
-Subclass these to add a constitutive law, drive, closure, reaction or node source; see [Extending noodl](../development/extending.md).
+Subclass these to add a constitutive law, drive, closure, reaction, node source or node storage; see [Extending noodl](../development/extending.md).
 
 | Name | What it does | How to call it |
 |---|---|---|

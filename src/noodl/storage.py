@@ -25,6 +25,8 @@ Which method to write:
   drivers: an amount that depends on a driver that changes over the step (a zone's air mass
   depends on its temperature), or a difference that must be formed without round-off.
 - `rate` and `rate_slope`, for an application whose withdrawal has rules beyond storage.
+  `rate_slope` reaches only the non-differentiable Newton solve; the differentiable solve
+  differentiates `rate` by autograd, so an override must be its true derivative.
 """
 
 from __future__ import annotations
@@ -111,7 +113,12 @@ class NodeStorage(torch.nn.Module):
 
     def rate_slope(self, phi_nodes: Tensor, phi_start: Tensor, previous: Tensor | None,
                    ctx: LawContext, drivers: Mapping | None = None) -> Tensor:
-        """d rate / d phi at each node: `step_rate_factor(ctx) * capacity(...)`."""
+        """d rate / d phi at each node: `step_rate_factor(ctx) * capacity(...)`.
+
+        Used by the non-differentiable Newton solve (`differentiable=False`, or
+        `analytic_primal` with nothing differentiable reaching the solve). The
+        differentiable solve takes the derivative of `rate` by autograd instead, so an
+        override must be the true derivative of `rate` (as for `NodeSource.dflow`)."""
         return step_rate_factor(ctx) * self.capacity(phi_nodes, phi_start, drivers)
 
     def forward(self, phi_nodes: Tensor, phi_start: Tensor, previous: Tensor | None,

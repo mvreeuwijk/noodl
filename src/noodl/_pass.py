@@ -101,15 +101,18 @@ def circuit_kwargs(name: str, layer: KirchhoffLayer, state: Mapping[str, Tensor]
     if q_prev is not None and layer.mna:
         out["q0"] = q_prev[..., layer.implicit_edges]
     if layer.dynamic and not layer.phasor and dt is not None:
-        missing = [k for k in (f"{name}.phi", f"{name}.q") if k not in base]
+        # A classic layer with storage reads only the step-start potentials; a layer with
+        # dynamic laws reads the step-start flows of their edges too.
+        keys = (f"{name}.phi", f"{name}.q") if layer.mna else (f"{name}.phi",)
+        missing = [k for k in keys if k not in base]
         if missing:
             raise KeyError(
                 f"Model: state {missing} is required to step Kirchhoff layer {name!r}, "
-                f"whose dynamic laws or storage start each step from the potentials and "
-                f"flows at the step start (an initial point: layer.solve(..., "
-                f"mode='initial'), or a steady solve)"
+                f"whose dynamic laws or storage start each step from the state at the step "
+                f"start (an initial point: layer.solve(..., mode='initial'), or a steady "
+                f"solve)"
             )
-        out["history"] = (base[f"{name}.phi"], base[f"{name}.q"])
+        out["history"] = (base[f"{name}.phi"], base[f"{name}.q"] if layer.mna else None)
         out["dt"] = dt
         if layer.storage:
             key = f"{name}.storage_flow"
@@ -185,7 +188,8 @@ def _solve_potentials(model: Model, state, base, drv, dt, t, solve_kwargs, warm_
             # pass): the trapezoidal scheme's step-start rate on the next step.
             new[f"{name}.storage_flow"] = layer.storage_flows(
                 phi, drv, dt=circuit.get("dt"), scheme=kwargs.get("scheme"),
-                history=circuit.get("history"), storage_flow=circuit.get("storage_flow"))
+                history=circuit.get("history"), storage_flow=circuit.get("storage_flow"),
+                _checked=True)
             made.append(f"{name}.storage_flow")
         diag[name] = d
 

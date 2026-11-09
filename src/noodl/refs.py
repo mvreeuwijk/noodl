@@ -581,7 +581,7 @@ class LayerRef:
             state["q"] = Field(
                 f"{name}.q", role="state", axis="edge", labels=q_labels, aliases=q_alias,
                 ordering=f"edge order of kinds {tuple(layer.kinds)}",
-                required="step" if stored else "optional",
+                required="step" if stored and _reads_step_flows(layer) else "optional",
                 default=0.0, description="solved branch flows",
                 unit=getattr(layer, "flow_unit", ""), **common,
             )
@@ -1034,6 +1034,13 @@ def _steps_from_state(layer) -> bool:
     return bool(getattr(layer, "dynamic", False)) and not getattr(layer, "phasor", False)
 
 
+def _reads_step_flows(layer) -> bool:
+    """Whether a stepping Kirchhoff layer reads its step-start flows `"<layer>.q"`: a layer
+    with dynamic laws does; a classic layer whose only storage is node storage reads only
+    `"<layer>.phi"`."""
+    return bool(getattr(layer, "mna", True))
+
+
 def _needs_storage_flow(layer) -> bool:
     """Whether a Kirchhoff layer's step reads `"<layer>.storage_flow"`: it has storage and
     steps by the trapezoidal scheme (its own; a step may give another)."""
@@ -1044,7 +1051,7 @@ def required_state_keys(model: Model) -> list[str]:
     """The state keys `Model.step` reads from the step-start state."""
     keys = [f"{n}.x" for n in model.transport] + [f"{n}.s" for n in model.allocation]
     keys += [f"{n}.{s}" for n, layer in model.kirchhoff.items() if _steps_from_state(layer)
-             for s in ("phi", "q")]
+             for s in (("phi", "q") if _reads_step_flows(layer) else ("phi",))]
     keys += [f"{n}.storage_flow" for n, layer in model.kirchhoff.items()
              if _needs_storage_flow(layer)]
     return keys + list(model.closure_state_keys)

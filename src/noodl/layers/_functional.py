@@ -136,7 +136,8 @@ class FunctionalLaws:
 
         def storage_slope(j, st):
             # autograd on the storage's own rate, as for a node source: the exact
-            # derivative the adjoint needs, whatever `rate_slope` an application gives
+            # derivative the adjoint needs. `NodeStorage.rate_slope` is NOT used here; it
+            # reaches the non-differentiable Newton only (`KirchhoffLayer._solve_primal`).
             phi_nodes, phi_start, previous = layer._storage_args(j, st, phi, step)
             leaf = phi_nodes.detach().requires_grad_(True)
             with torch.enable_grad():

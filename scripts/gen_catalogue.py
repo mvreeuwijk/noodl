@@ -81,7 +81,8 @@ ROLES = [
     ("function", "Functions", "Calculations and helpers."),
     ("constant", "Constants and tables", "Named values and option tables."),
     ("base", "Base classes (for extending)",
-     "Subclass these to add a constitutive law, drive, closure, reaction or node source; see "
+     "Subclass these to add a constitutive law, drive, closure, reaction, node source or "
+     "node storage; see "
      "[Extending noodl](../development/extending.md)."),
 ]
 BASE_CLASSES = {"ConstitutiveLaw", "ImplicitLaw", "Drive", "Reaction", "NodeSource",

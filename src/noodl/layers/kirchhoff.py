@@ -843,10 +843,28 @@ class KirchhoffLayer(TopologyGuard):
                 )
         return sources[..., self.interior]
 
-    def residual(self, phi_interior, phi_boundary, drivers, sources):
+    def residual(self, phi_interior, phi_boundary, drivers, sources, *, dt=None, scheme=None,
+                 history=None, storage_flow=None):
+        """The interior Newton residual `A_I q(phi) - s_I (+ w(phi))` at the given point.
+
+        The step keywords are `solve`'s. On a layer with storage, with `dt` the storage
+        withdrawal of that step is included (the residual `solve` drives to zero); without
+        `dt` it is the steady residual, where storage is absent. A layer without storage
+        refuses them."""
         self._refuse_on_mna("residual")
         self._require_current_topology()
-        return self._residual_parts(phi_interior, phi_boundary, drivers or {}, sources)[0]
+        drivers = drivers or {}
+        step = self._public_step(dt, scheme, history, storage_flow, drivers)
+        return self._residual_parts(phi_interior, phi_boundary, drivers, sources, step)[0]
+
+    def _public_step(self, dt, scheme, history, storage_flow, drivers) -> _StorageStep | None:
+        """The storage step of `residual`, `jacobian` and `adjoint`: their step keywords,
+        checked as `solve` checks them (refused on a layer without storage)."""
+        self._check_classic_arguments(None, dt, history, storage_flow)
+        if scheme is None:
+            scheme = self.scheme
+        check_scheme(self.name, scheme)
+        return self._storage_step(None, dt, None, scheme, history, storage_flow, drivers)
 
     def balance(self, phi, q, sources=None, drivers=None, storage_flow=None):
         """The interior flow balance `A_I q - s_I (+ w(phi)) (+ storage)` of a state's own
@@ -885,20 +903,24 @@ class KirchhoffLayer(TopologyGuard):
         w = self._node_source_withdrawal(phi, drivers, step)
         return (lhs - s_I if w is None else lhs - s_I + w), phi, q
 
-    def jacobian(self, phi_interior, phi_boundary, drivers):
+    def jacobian(self, phi_interior, phi_boundary, drivers, *, dt=None, scheme=None,
+                 history=None, storage_flow=None):
         """The dense (n_I, n_I) Jacobian A_I diag(dq) A_I^T -- the retained dense reference.
 
         This is the one method that reads `self.A` (and so materialises it, once, on first
         access); no solve path calls it. Tests compare `GraphLaplacianOperator`'s matvec and
-        the adjoint against this, so its einsum form is deliberately unchanged.
+        the adjoint against this, so its einsum form is deliberately unchanged. The step
+        keywords are `residual`'s: with `dt`, a layer's storage adds its `rate_slope` to the
+        diagonal; without, it is the steady Jacobian.
         """
         self._refuse_on_mna("jacobian")
         drivers = drivers or {}
+        step = self._public_step(dt, scheme, history, storage_flow, drivers)
         phi = self.assemble(phi_interior, phi_boundary)
         dq = self.dflows(phi, drivers)
         A_I = self.A[self.interior]
         dense = torch.einsum("ie,...e,je->...ij", A_I, dq, A_I)
-        node_slopes = self._node_source_slopes(phi, drivers)
+        node_slopes = self._node_source_slopes(phi, drivers, step)
         if node_slopes is None:
             return dense
         return dense + torch.diag_embed(node_slopes.expand(dense.shape[:-1]))
@@ -1397,9 +1419,11 @@ class KirchhoffLayer(TopologyGuard):
             )
 
     def _storage_step(self, mode, dt, t, scheme, history, storage_flow,
-                      drivers) -> _StorageStep | None:
+                      drivers, *, check_dt: bool = True) -> _StorageStep | None:
         """The step of a classic layer with storage, or `None` when storage is absent (no
-        storage, or no `dt`: the steady point). Checks the step keywords by name."""
+        storage, or no `dt`: the steady point). Checks the step keywords by name;
+        `check_dt=False` skips the positivity of `dt` (a host sync for a tensor `dt`) when
+        the solve of the same step has checked it."""
         if not self._storage:
             return None
         name = self.name
@@ -1429,7 +1453,13 @@ class KirchhoffLayer(TopologyGuard):
                 f"KirchhoffLayer {name!r}: mode={mode!r} is {what}, which takes no step; "
                 f"drop dt"
             )
-        if not bool((torch.as_tensor(dt) > 0).all()):
+        if not check_dt:
+            # the solve of this step has checked it
+            ...
+        elif isinstance(dt, (int, float)):
+            if not dt > 0:
+                raise ValueError(f"KirchhoffLayer {name!r}: dt must be positive, got {dt!r}")
+        elif not bool((torch.as_tensor(dt) > 0).all()):
             raise ValueError(f"KirchhoffLayer {name!r}: dt must be positive, got {dt!r}")
         if history is None:
             raise ValueError(
@@ -1463,13 +1493,14 @@ class KirchhoffLayer(TopologyGuard):
         return _StorageStep(ctx, phi_prev, storage_flow)
 
     def storage_flows(self, phi, drivers, *, dt, scheme=None, history=None,
-                      storage_flow=None) -> torch.Tensor:
+                      storage_flow=None, _checked: bool = False) -> torch.Tensor:
         """The flow into every storage entry at the end of a step, `(..., n_entries)`, in
         entry order (storages in list order, then each one's nodes): what each
         `NodeStorage.rate` withdraws at the full-node potentials `phi`. The keywords are
         `solve`'s; without `dt` (a steady state) storage is absent and the flows are zeros.
         Differentiable in `phi`, `history`, `storage_flow`, the drivers and the storages'
-        parameters. Empty on a layer without storage."""
+        parameters. Empty on a layer without storage. (`_checked`, internal: the `solve` of
+        this step has already checked `dt`.)"""
         drivers = drivers or {}
         if scheme is None:
             scheme = self.scheme
@@ -1477,7 +1508,8 @@ class KirchhoffLayer(TopologyGuard):
                             device=phi.device)
         if not self._storage:
             return zeros
-        step = self._storage_step(None, dt, None, scheme, history, storage_flow, drivers)
+        step = self._storage_step(None, dt, None, scheme, history, storage_flow, drivers,
+                                  check_dt=not _checked)
         if step is None:
             return zeros
         parts = [st.rate(*self._storage_args(j, st, phi, step), step.ctx, drivers)
@@ -1624,8 +1656,12 @@ class KirchhoffLayer(TopologyGuard):
         q = self.flows(phi, drivers)
         return phi, q
 
-    def adjoint(self, phi_interior, phi_boundary, drivers, grad_phi_interior):
+    def adjoint(self, phi_interior, phi_boundary, drivers, grad_phi_interior, *, dt=None,
+                scheme=None, history=None, storage_flow=None):
         """Solve J(phi)^T lambda = grad_phi_interior at the given point.
+
+        The step keywords are `residual`'s: with `dt`, a layer's storage slope is in `J`;
+        without, `J` is the steady Jacobian.
 
         The operator is the SAME GraphLaplacianOperator `solve`'s Newton iteration builds
         (same endpoints, same `dflows` slopes), never the dense einsum `jacobian()` -- so
@@ -1649,9 +1685,10 @@ class KirchhoffLayer(TopologyGuard):
         """
         self._refuse_on_mna("adjoint")
         drivers = drivers or {}
+        step = self._public_step(dt, scheme, history, storage_flow, drivers)
         phi = self.assemble(phi_interior, phi_boundary)
         dq = self.dflows(phi, drivers)
-        op = self._operator_at(dq, self._node_source_slopes(phi, drivers))
+        op = self._operator_at(dq, self._node_source_slopes(phi, drivers, step))
         return _adjoint_solve(
             op,
             grad_phi_interior,
