@@ -27,7 +27,9 @@ Which method to write:
 - `rate` and `rate_slope`, for an application whose withdrawal has rules beyond storage.
   On the classic nodal path `rate_slope` reaches only the non-differentiable Newton solve
   (the differentiable solve differentiates `rate` by autograd); a layer solved by Modified
-  Nodal Analysis uses it on both paths. Either way an override must be the true derivative.
+  Nodal Analysis uses it on both paths, so an override that is not the true derivative
+  (a Newton aid) declares `exact_slope = False`, and the differentiable solve then
+  differentiates `rate` instead.
 
 `initial` gives the potential a node is held at in the consistent initial point
 (`mode="initial"`) of a layer solved by Modified Nodal Analysis: that node's flow balance is
@@ -70,6 +72,12 @@ class NodeStorage(torch.nn.Module):
     #: layer is then linear (`KirchhoffLayer.linear`) if its laws are.
     linear: bool = False
 
+    #: True when `rate_slope` is the true derivative of `rate`. A subclass whose
+    #: `rate_slope` is deliberately not (a Newton aid: a floor, a scaled slope) sets it
+    #: False, and the differentiable solve then takes this storage's slope by autograd of
+    #: `rate`, so its gradients stay exact (see `rate_slope`).
+    exact_slope: bool = True
+
     def __init__(self, nodes) -> None:
         super().__init__()
         idx = torch.as_tensor(nodes, dtype=torch.long)
@@ -107,7 +115,8 @@ class NodeStorage(torch.nn.Module):
 
     def initial(self, drivers: Mapping | None = None) -> Tensor | None:
         """The potential each node is held at in `mode="initial"`, or `None` (the default)
-        when this storage holds none."""
+        when this storage holds none. It may read the drivers and this storage's
+        registered parameters: the differentiable solve threads both."""
         return None
 
     def rate(self, phi_nodes: Tensor, phi_start: Tensor, previous: Tensor | None,
@@ -124,16 +133,21 @@ class NodeStorage(torch.nn.Module):
         On the classic nodal path it is used by the non-differentiable Newton solve
         (`differentiable=False`, or `analytic_primal` with nothing differentiable reaching
         the solve), and the differentiable solve takes the derivative of `rate` by autograd
-        instead. A layer solved by Modified Nodal Analysis uses it on both paths, so it also
-        builds the adjoint there. Either way an override must be the true derivative of
-        `rate` (as for `NodeSource.dflow`)."""
+        instead, so `exact_slope` changes nothing there. A layer solved by Modified Nodal
+        Analysis uses it on both paths, so it also builds the adjoint there; an override
+        that is not the true derivative of `rate` (a Newton aid) must declare
+        `exact_slope = False`, and the differentiable solve then differentiates `rate` by
+        autograd for this storage instead (the non-differentiable one keeps this
+        slope)."""
         return step_rate_factor(ctx) * self.capacity(phi_nodes, phi_start, drivers)
 
-    def forward(self, phi_nodes: Tensor, phi_start: Tensor, previous: Tensor | None,
-                ctx: LawContext, drivers: Mapping | None = None) -> Tensor:
+    def forward(self, *args, part: str = "rate"):
         # `torch.func.functional_call` always invokes `forward`, so the differentiable
-        # solve reaches `rate` through here (as `NodeSource.forward` reaches `flow`).
-        return self.rate(phi_nodes, phi_start, previous, ctx, drivers)
+        # solve reaches `rate` (and, with `part="initial"`, `initial`) through here, as
+        # `NodeSource.forward` reaches `flow`.
+        if part == "initial":
+            return self.initial(*args)
+        return self.rate(*args)
 
 
 class LinearStorage(NodeStorage):

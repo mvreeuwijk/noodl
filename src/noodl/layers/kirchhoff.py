@@ -1541,7 +1541,7 @@ class KirchhoffLayer(TopologyGuard):
     def _initial_storage_flows(self, phi, q, sources, drivers, zeros) -> torch.Tensor:
         """`storage_flows` at the initial point of a layer solved by Modified Nodal Analysis:
         each held node's flow imbalance, split among its entries by capacity."""
-        held = self._mna._held_values(drivers)
+        held = self._mna._held_values(drivers, self._mna._plain_call)
         if held is None:
             return zeros
         if q is None:

@@ -187,3 +187,115 @@ def test_model_initial_point_then_steps():
         torch.testing.assert_close(state["el.phi"], cap_state["el.phi"], rtol=0, atol=1e-12)
         torch.testing.assert_close(state["el.storage_flow"], cap_state["el.q"][..., 2:3],
                                    rtol=0, atol=1e-12)
+
+
+# ------------------------------------------------------------------ fix round 1
+
+
+class _ScaledSlope(LinearStorage):
+    """A storage whose `rate_slope` is 3x the true slope (a Newton aid), declared inexact."""
+
+    exact_slope = False
+
+    def rate_slope(self, phi_nodes, phi_start, previous, ctx, drivers=None):
+        return 3.0 * super().rate_slope(phi_nodes, phi_start, previous, ctx, drivers)
+
+
+def test_an_inexact_rate_slope_does_not_reach_the_gradients():
+    storage = _ScaledSlope([2], C, learnable=True)
+    layer = KirchhoffLayer(_net(False), "el", _laws(), boundary=["gnd"], storage=[storage])
+    exact, _ = _storage_layer(learnable=True, initial=None)
+    phi_start = torch.tensor([0.0, V, V0], requires_grad=True)
+
+    def step(lay, phi0, cap):
+        phi, _ = lay.solve(PB, dt=0.25, scheme="backward_euler",
+                           history=(phi0, torch.zeros(2)))
+        return phi
+
+    # the primal is the same root; the gradients are exact
+    torch.testing.assert_close(step(layer, phi_start, storage.C),
+                               step(exact, phi_start, exact.storage[0].C),
+                               rtol=0, atol=1e-12)
+    assert torch.autograd.gradcheck(lambda p, c: step(layer, p, c),
+                                    (phi_start, storage.C))
+    g = torch.autograd.grad(step(layer, phi_start, storage.C)[2], (phi_start, storage.C))
+    g_exact = torch.autograd.grad(step(exact, phi_start, exact.storage[0].C)[2],
+                                  (phi_start, exact.storage[0].C))
+    for a, b in zip(g, g_exact, strict=True):
+        torch.testing.assert_close(a, b, rtol=1e-12, atol=1e-12)
+
+
+class _LearnedInitial(LinearStorage):
+    """A storage whose initial potential is a learnable parameter."""
+
+    def __init__(self, nodes, capacity, v0):
+        super().__init__(nodes, capacity, learnable=True)
+        self.v0 = torch.nn.Parameter(torch.as_tensor(v0, dtype=F64))
+
+    def initial(self, drivers=None):
+        return self.v0 * torch.ones(len(self.nodes), dtype=F64)
+
+
+def test_gradcheck_through_the_initial_point_and_a_step():
+    storage = _LearnedInitial([2], C, V0)
+    layer = KirchhoffLayer(_net(False), "el", _laws(), boundary=["gnd"], storage=[storage])
+    src = torch.tensor([0.0, 0.0, 0.4], requires_grad=True)
+
+    def initial_then_step(s, v0, cap):
+        phi0, q0 = layer.solve(PB, sources=s, mode="initial")
+        w0 = layer.storage_flows(phi0, {}, dt=None, mode="initial", q=q0, sources=s)
+        phi1, q1 = layer.solve(PB, sources=s, dt=0.2, scheme="trapezoidal",
+                               history=(phi0, q0), storage_flow=w0)
+        w1 = layer.storage_flows(phi1, {}, dt=0.2, scheme="trapezoidal",
+                                 history=(phi0, q0), storage_flow=w0)
+        return torch.cat([phi0, w0, phi1, w1])
+
+    out = initial_then_step(src, storage.v0, storage.C)
+    torch.testing.assert_close(out[2], torch.tensor(V0), rtol=0, atol=1e-12)
+    # the source at the held node enters its storage: (V - v0) / R + 0.4
+    torch.testing.assert_close(out[3], torch.tensor((V - V0) / R + 0.4), rtol=0, atol=1e-12)
+    assert torch.autograd.gradcheck(initial_then_step, (src, storage.v0, storage.C))
+
+
+def _mixed_net(cap_at_b: bool) -> Network:
+    net = Network(dtype=F64)
+    for n in ("gnd", "s", "a", "b"):
+        net.add_node(n)
+    net.add_edge("s", "gnd", kind="voltage_source")
+    net.add_edge("s", "a", kind="resistor")
+    net.add_edge("a", "b", kind="resistor")
+    net.add_edge("a", "gnd", kind="capacitor")
+    if cap_at_b:
+        net.add_edge("b", "gnd", kind="capacitor")
+    return net
+
+
+@pytest.mark.parametrize("differentiable", [False, True])
+def test_storage_beside_a_capacitance_edge_on_one_layer(differentiable):
+    C_a, C_b = 0.4, 0.3
+    laws = lambda: [PrescribedVoltage(V, kind="voltage_source"),  # noqa: E731
+                    Resistance(torch.tensor([R, 1.5]), kind="resistor")]
+    ref = KirchhoffLayer(_mixed_net(True), "el",
+                         [*laws(), Capacitance(torch.tensor([C_a, C_b]))], boundary=["gnd"])
+    mixed = KirchhoffLayer(_mixed_net(False), "el", [*laws(), Capacitance(C_a)],
+                           boundary=["gnd"], storage=[LinearStorage([3], C_b)])
+    caps_ref, caps_mixed = ref.kind_slice("capacitor"), mixed.kind_slice("capacitor")
+    phi_prev = torch.tensor([0.0, V, 1.0, 2.0])
+    q_ref = torch.zeros(len(ref.cols))
+    q_ref[caps_ref] = torch.tensor([0.3, -0.2])
+    q_mixed = torch.zeros(len(mixed.cols))
+    q_mixed[caps_mixed] = 0.3
+    w = torch.tensor([-0.2])
+    h_ref, h_mixed = (phi_prev, q_ref), (phi_prev, q_mixed)
+    for scheme in ("backward_euler", "trapezoidal", "trapezoidal"):
+        out_ref = ref.solve(PB, dt=0.2, scheme=scheme, history=h_ref,
+                            differentiable=differentiable)
+        out_mixed = mixed.solve(PB, dt=0.2, scheme=scheme, history=h_mixed,
+                                storage_flow=w, differentiable=differentiable)
+        w = mixed.storage_flows(out_mixed[0], {}, dt=0.2, scheme=scheme, history=h_mixed,
+                                storage_flow=w)
+        torch.testing.assert_close(out_mixed[0], out_ref[0], rtol=0, atol=1e-12)
+        torch.testing.assert_close(out_mixed[1][caps_mixed], out_ref[1][caps_ref][:1],
+                                   rtol=0, atol=1e-12)
+        torch.testing.assert_close(w, out_ref[1][caps_ref][1:], rtol=0, atol=1e-12)
+        h_ref, h_mixed = out_ref, out_mixed

@@ -426,17 +426,17 @@ class MnaSystem:
     def _owners(self) -> list:
         return [*self.layer._laws, *self.layer._node_sources, *self.layer._storage]
 
-    def _plain_call(self, i: int, args: tuple):
+    def _plain_call(self, i: int, args: tuple, kwargs: dict | None = None):
         """Law (or, past the laws, node source, then storage) `i` with its own
         parameters."""
-        return self._owners()[i](*args)
+        return self._owners()[i](*args, **(kwargs or {}))
 
     def _functional_call(self, rebuilt: list[dict]):
         """A `call` substituting the threaded parameters `rebuilt[i]` into owner `i`."""
         owners = self._owners()
 
-        def call(i: int, args: tuple):
-            return functional_call(owners[i], rebuilt[i], args)
+        def call(i: int, args: tuple, kwargs: dict | None = None):
+            return functional_call(owners[i], rebuilt[i], args, kwargs or {})
 
         return call
 
@@ -519,19 +519,21 @@ class MnaSystem:
                 raise ValueError(
                     f"KirchhoffLayer {layer.name!r}: mode='initial' is the consistent "
                     f"initial point, which takes no step; drop storage_flow")
-            return self._held(drivers)
+            return self._held(drivers, self._plain_call)
         return layer._storage_step(None, dt, t, scheme, history if dt is not None else None,
                                    storage_flow, drivers, check_dt=False)
 
-    def _held_values(self, drivers, *, check: bool = False):
+    def _held_values(self, drivers, call, *, check: bool = False):
         """`(rows, value)`: the interior rows held at the initial point ((n_I,) bool) and
         the potential each is held at ((..., n_I), zero elsewhere); `None` when no storage
-        holds an initial potential. `check` refuses entries at one node with different
-        initial values, by name."""
+        holds an initial potential. `initial` is evaluated through `call`, so on the
+        differentiable path with the threaded parameters. `check` refuses entries at one
+        node with different initial values, by name."""
         layer = self.layer
+        base = len(layer._laws) + len(layer._node_sources)
         held = []
-        for j, st in enumerate(layer._storage):
-            v = st.initial(drivers)
+        for j, _st in enumerate(layer._storage):
+            v = call(base + j, (drivers,), {"part": "initial"})
             if v is not None:
                 pos = layer._storage_positions[j]
                 v = torch.as_tensor(v, device=pos.device)
@@ -560,10 +562,10 @@ class MnaSystem:
                         f"mode='initial' holds a node at one value")
         return rows, value
 
-    def _held(self, drivers) -> _Held | None:
+    def _held(self, drivers, call) -> _Held | None:
         """The held rows of `mode="initial"` and their masks on the Jacobian's values
         (refusing entries at one node that disagree)."""
-        found = self._held_values(drivers, check=True)
+        found = self._held_values(drivers, call, check=True)
         if found is None:
             return None
         rows = found[0].to(self.row.device)
@@ -580,25 +582,39 @@ class MnaSystem:
         return layer._scatter_storage(lambda j, st: call(
             base + j, (*layer._storage_args(j, st, phi, step), step.ctx, drivers)))
 
-    def _storage_slopes(self, phi, drivers, step) -> Tensor | None:
-        """`d w / d phi` of the storages per interior row on a transient `step`: their
-        analytic `rate_slope` (a storage reads its own node's potential only, so this is
-        the whole diagonal). The values carry no graph, like every Jacobian entry."""
+    def _storage_slopes(self, phi, drivers, step, call, adjoint: bool) -> Tensor | None:
+        """`d w / d phi` of the storages per interior row on a transient `step` (a storage
+        reads its own node's potential only, so this is the whole diagonal): their analytic
+        `rate_slope`, except, when the operator also builds the adjoint (`adjoint`, the
+        differentiable solve), for a storage that declares `exact_slope = False`, whose
+        slope is then the derivative of its `rate` by autograd. The values carry no graph,
+        like every Jacobian entry."""
         layer = self.layer
-        d = layer._scatter_storage(lambda j, st: st.rate_slope(
-            *layer._storage_args(j, st, phi, step), step.ctx, drivers))
+        base = len(layer._laws) + len(layer._node_sources)
+
+        def slope(j, st):
+            phi_n, phi_start, previous = layer._storage_args(j, st, phi, step)
+            if adjoint and not st.exact_slope:
+                block, = _colour_blocks(
+                    lambda v: call(base + j, (v, phi_start, previous, step.ctx, drivers)),
+                    (phi_n,), 1, 1)
+                return block[..., 0, 0, 0, 0]
+            return st.rate_slope(phi_n, phi_start, previous, step.ctx, drivers)
+
+        d = layer._scatter_storage(slope)
         return None if d is None else d.detach()
 
-    def _slopes_fn(self, drivers, call, store):
+    def _slopes_fn(self, drivers, call, store, adjoint: bool = False):
         """The diagonal of the node sources and, on a step, of the storages, as a function
-        of the full-node potentials (`None` when there is neither)."""
+        of the full-node potentials (`None` when there is neither). `adjoint`: the operator
+        also builds the adjoint (see `_storage_slopes`)."""
         stepping = store is not None and not isinstance(store, _Held)
 
         def slopes(phi):
             d = self._node_slopes(phi, drivers, call)
             if not stepping:
                 return d
-            s = self._storage_slopes(phi, drivers, store)
+            s = self._storage_slopes(phi, drivers, store, call, adjoint)
             return s if d is None else d + s
 
         return slopes
@@ -626,7 +642,7 @@ class MnaSystem:
         if w is not None:
             kcl = kcl + w
         if isinstance(store, _Held):
-            _, value = self._held_values(drivers)
+            _, value = self._held_values(drivers, call)
             kcl = torch.where(store.rows, phi_I - value.to(phi_I.dtype), kcl)
         elif store is not None:
             kcl = kcl + self._storage_withdrawal(phi, drivers, store, call)
@@ -898,7 +914,8 @@ class MnaSystem:
         def operator_fn(x, *params):
             call, drv, src, pb, step, st = _rebuild(params)
             last["op"] = self._hold(
-                self.operator(x, pb, drv, step, call, self._slopes_fn(drv, call, st)), st)
+                self.operator(x, pb, drv, step, call,
+                              self._slopes_fn(drv, call, st, adjoint=True)), st)
             return last["op"]
 
         try:
