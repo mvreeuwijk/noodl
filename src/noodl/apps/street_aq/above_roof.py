@@ -279,10 +279,11 @@ def street_steady_with_plume(
     concentrations, "<layer>.roof_flux": F_s, "<layer>.junction_flux": the junction plume
     source used, "<layer>.junction_downflux": F_down}`, the first two in the state's
     shapes, the fluxes `(..., n_streets[, n_species])` and `(..., n_junctions[, n_species])`
-    in kg/s. `c_ext` is the pass's image of the converged
-    iterate, `C_bg + K F`, and `x` the street solve at that iterate: they satisfy the
-    relation to `tol` (times `1 + contraction`). Gradients are those of the converged fixed
-    point (implicit adjoint; module docstring).
+    in kg/s. `c_ext` is the last pass's image of the converged
+    iterate, `C_bg + K F`, and `x` the street solve at that iterate; the returned fluxes are
+    those of the last pass too, computed at the fed iterate and so within `tol` of `c_ext`.
+    They satisfy the relation to `tol` (times `1 + contraction`). Gradients are those of the
+    converged fixed point (implicit adjoint; module docstring).
     """
     if not 0.0 < relaxation <= 1.0:
         raise ValueError(

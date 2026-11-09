@@ -230,6 +230,7 @@ class _FixedPointPasses:
         if any(k not in z for k in self.watch):
             # The first pass of a state that does not carry the iterate has nothing to
             # compare with: not converged, whatever the pass returned.
+            # `converged` is a scalar here, even with a per-instance `measure`.
             self.changes.append(float("inf"))
             return Verdict(converged=torch.zeros((), dtype=torch.bool))
         change = torch.as_tensor(self.measure(z, out))
