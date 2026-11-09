@@ -180,7 +180,7 @@ A withdrawal that is not storage (a demand, a leak) is a `NodeSource`
 A *head* is a term added to an edge's potential difference: the buoyancy of a warm column of
 air (stack), the wind pressure on an opening, the drag a moving surface exerts on the air above
 it. A buoyancy head is a driver, like wind speed: a `KirchhoffLayer` reads the optional driver
-`"<layer>.head"` (`(..., b)`, one value per edge in the layer's edge order, in the potential's
+`"<layer>.edge_head"` (`(..., b)`, one value per edge in the layer's edge order, in the potential's
 unit; absent means zero) and adds it to every edge's `phi[src] - phi[tgt]` once.
 
 `noodl.heads.EdgeHeads` is the `Model` closure that writes it. Give it the layer and the head
@@ -191,7 +191,7 @@ each term's kind and writes the total:
 from noodl.drives import Stack
 from noodl.heads import EdgeHeads
 
-heads = EdgeHeads(air, [Stack.from_network(net, "airpath")])   # writes "air.head"
+heads = EdgeHeads(air, [Stack.from_network(net, "airpath")])   # writes "air.edge_head"
 model = Model(net, {"air": air}, closures=[density_closure, heads])
 ```
 
@@ -200,7 +200,10 @@ and symmetric. Because the head is a driver, a gradient reaches whatever produce
 may depend on a learnable parameter that a closure reads. A kind whose law is dynamic (a
 capacitance, an inductance) takes no head: `EdgeHeads` refuses such a term, and a non-zero
 head entry on a dynamic edge is refused when the layer is solved. The `drives=` argument of
-`KirchhoffLayer` still works and adds its terms after the head.
+`KirchhoffLayer` still works and adds its terms after the head; `EdgeHeads` refuses a term on
+a kind that already has a drive there, so the two never add up. A term that holds tensors needs
+its own `to(device=None, dtype=None)` method for `Model.to` to move them (the terms in
+`noodl.drives` do not).
 
 ## Modified Nodal Analysis: implicit, coupled and dynamic laws
 

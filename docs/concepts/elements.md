@@ -343,7 +343,7 @@ If you genuinely need a term that depends on solved state, it belongs in a **clo
 runs between layer solves and writes driver values. See [Layers and models](layers.md#closures).
 
 A drive can also be written once per solve as a driver: the closure `EdgeHeads` adds up head
-terms (stack, wind, drag) on one layer's edges and writes `"<layer>.head"`, which the layer adds
+terms (stack, wind, drag) on one layer's edges and writes `"<layer>.edge_head"`, which the layer adds
 to every edge's potential difference. See [Heads](layers.md#heads-stack-wind-and-drag).
 
 ## Node sources and node storage

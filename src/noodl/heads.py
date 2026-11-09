@@ -4,7 +4,7 @@ A head is a term added to an edge's potential difference: the buoyancy of a warm
 air, the wind pressure on an opening, the drag a flow exerts on the air around it. It is a
 function of the drivers only, never of the potential, so the Newton Jacobian stays exact and
 symmetric (see `noodl.drives`). `EdgeHeads` is a `Model` closure that adds up the head terms
-of one potential layer and writes the total as the driver `"<layer>.head"`, one value per
+of one potential layer and writes the total as the driver `"<layer>.edge_head"`, one value per
 edge in the layer's edge order. The layer adds it to every edge's potential difference once,
 so a buoyancy head is a driver, like wind speed, and it can carry a gradient to whatever
 parameter its closure reads.
@@ -27,7 +27,9 @@ class HeadTerm(Protocol):
 
     `kind` names the edge kind (one law of the layer); calling the term with the drivers
     returns one value per edge of that kind, `(..., b_kind)`, in the potential's unit. An
-    optional `inputs` tuple lists the driver keys it reads.
+    optional `inputs` tuple lists the driver keys it reads. A term that holds tensors needs its
+    own `to(device=None, dtype=None)` method for `Model.to` to move them (the terms defined in
+    `noodl.drives` are moved without one).
     """
 
     kind: str
@@ -70,7 +72,7 @@ def _declared_inputs(term) -> tuple[str, ...] | None:
 class EdgeHeads:
     """Adds up head terms (stack, wind, drag, a head read from a driver) on the edges of one
     potential layer and writes the total, in the layer's edge order, as the driver
-    `"<layer>.head"`; the layer adds it to every edge's potential difference.
+    `"<layer>.edge_head"`; the layer adds it to every edge's potential difference.
 
     Terms are added in the order given, each into the columns of its own kind; an edge with
     no term gets exactly zero. A term is refused at construction if its kind is not one of
@@ -96,13 +98,19 @@ class EdgeHeads:
                     f"head term kind {term.kind!r} is not one of this layer's law kinds "
                     f"{sorted(self.slices)} (layer {self.layer_name!r})"
                 )
+            if any(d.kind == term.kind for d in layer._drives):
+                raise ValueError(
+                    f"EdgeHeads for layer {self.layer_name!r}: kind {term.kind!r} already has "
+                    f"a drive in the layer's drives=; give each edge kind its head through "
+                    f"drives= or through EdgeHeads, not both (the two would add up)"
+                )
             if term.kind in dynamic:
                 raise ValueError(
                     f"EdgeHeads for layer {self.layer_name!r}: kind {term.kind!r} has a "
                     f"dynamic law, which may not carry a head (its step-start values are "
                     f"the potential differences without one)"
                 )
-        self.outputs: tuple[str, ...] = (f"{self.layer_name}.head",)
+        self.outputs: tuple[str, ...] = (f"{self.layer_name}.edge_head",)
         keys = [_declared_inputs(t) for t in self.terms]
         self.inputs: tuple[str, ...] | None = (
             None if any(k is None for k in keys)

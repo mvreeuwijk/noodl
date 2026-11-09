@@ -342,16 +342,23 @@ class MnaSystem:
 
     def _check_head_off_dynamic_edges(self, drivers) -> None:
         """Refuse a head driver that is not zero on an edge with a dynamic law: the step-start
-        potential difference of such an edge is taken without a head. Once per solve; free
-        when there is no head or no dynamic law."""
+        potential difference of such an edge is taken without a head.
+
+        `EdgeHeads` guarantees this by construction (it refuses a term on a dynamic kind), so
+        the value check is only for a head driver given directly, and is made on a CPU tensor
+        only: reading values off an accelerator is a host sync per solve, which this path does
+        not pay. The width is always checked (no sync). Free when there is no head or no
+        dynamic law.
+        """
         if not len(self._dynamic_edges):
             return
         head = drivers.get(self.layer.head_key)
         if head is None:
             return
         self.layer._check_head_width(head)
-        on_dynamic = head[..., self._dynamic_edges]
-        if bool((on_dynamic != 0).any()):
+        if head.device.type != "cpu":
+            return
+        if bool((head[..., self._dynamic_edges] != 0).any()):
             kinds = sorted({el.kind for el in self.layer._laws if el.dynamic})
             raise ValueError(
                 f"KirchhoffLayer {self.layer.name!r}: driver {self.layer.head_key!r} is not "

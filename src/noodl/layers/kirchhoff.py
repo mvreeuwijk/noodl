@@ -256,7 +256,7 @@ class KirchhoffLayer(TopologyGuard):
         self.net = net
         self._record_topology(net)
         self.name = name
-        self.head_key = f"{name}.head"
+        self.head_key = f"{name}.edge_head"
         self._laws = list(laws)
         self._drives = list(drives)
         self.kinds = [el.kind for el in laws]
@@ -798,7 +798,7 @@ class KirchhoffLayer(TopologyGuard):
     # ------------------------------------------------------------------ assembly
     def dp(self, phi: torch.Tensor, drivers: Mapping) -> torch.Tensor:
         """Every edge's potential difference `phi[src] - phi[tgt]` plus its head: the driver
-        `"<layer>.head"` (`noodl.heads.EdgeHeads`, absent means zero) and any `drives`."""
+        `"<layer>.edge_head"` (`noodl.heads.EdgeHeads`, absent means zero) and any `drives`."""
         self._require_current_topology()
         drivers = drivers or {}
         d = self._difference(phi)

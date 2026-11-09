@@ -617,7 +617,7 @@ class LayerRef:
             # Short name "edge_head", not "head": a layer whose quantity is "head" (water)
             # names its potential `ref.head`, and that attribute must stay the potential.
             inputs["edge_head"] = Field(
-                f"{name}.head", role="driver", axis="edge", labels=q_labels, aliases=q_alias,
+                f"{name}.edge_head", role="driver", axis="edge", labels=q_labels, aliases=q_alias,
                 ordering=f"edge order of kinds {tuple(layer.kinds)}",
                 required="optional", default=0.0,
                 description="added to each edge's potential difference (stack, wind, drag)",
