@@ -36,11 +36,12 @@ def _net(nodes, edges):
     return net
 
 
-def _gradcheck(layer, phi_b, drivers, sources, params=(), keys=(), eps=None):
+def _gradcheck(layer, phi_b, drivers, sources, params=(), keys=(), eps=None, solve_step=None):
     """gradcheck of the interior potentials and the flows with respect to each of the law
     parameters `params`, the drivers named `keys`, `sources` and `phi_boundary`, one at a
     time; `eps` maps an input's position in that order to its own step (a coefficient of
-    order 100 needs a larger one than a source of order 0.01)."""
+    order 100 needs a larger one than a source of order 0.01). `solve_step` holds the solve's step
+    keywords (`dt`, `history`, `storage_flow`) for a layer with storage."""
     inputs = [*params, *(drivers[k] for k in keys), sources, phi_b]
     for i, x in enumerate(inputs):
         def f(x_, i=i):
@@ -52,7 +53,7 @@ def _gradcheck(layer, phi_b, drivers, sources, params=(), keys=(), eps=None):
             elif i == len(inputs) - 1:
                 pb = x_
             # a law parameter is read from the law itself, which gradcheck perturbs in place
-            phi, q = layer.solve(pb, drv, src, differentiable=True, **TIGHT)
+            phi, q = layer.solve(pb, drv, src, differentiable=True, **(solve_step or {}), **TIGHT)
             return phi[..., layer.interior], q
 
         step = (eps or {}).get(i, 1e-6)
@@ -129,7 +130,7 @@ def _sewer():
     storage = JunctionStorage(torch.tensor([0, 1, 2]), bed=_t([0.0, -0.1, -0.2]),
                               bed_area=1.0)
     layer = KirchhoffLayer(net, "water", [DynamicWaveConduit()], boundary=["O"],
-                           node_sources=[storage], quantity="head")
+                           storage=[storage], quantity="head")
     three = torch.ones(3, dtype=F64)
     drivers = {
         "water.flow_offset": _t([0.02, 0.03, 0.05], grad=True),
@@ -139,18 +140,27 @@ def _sewer():
         "water.switch_slope": 0.0 * three, "water.flow_last": 0.0 * three,
         "water.dry_upstream": 0.0 * three, "water.dry_downstream": 0.0 * three,
         "water.storage_area": _t([3.0, 2.5, 4.0]), "water.head_start": _t([0.6, 0.5, 0.4]),
-        "water.net_inflow_start": _t([0.01, 0.0, -0.01]), "water.storage_rate": _t(0.1),
+        "water.net_inflow_start": _t([0.01, 0.0, -0.01]),
     }
     return layer, drivers
 
 
+def _sewer_step() -> dict:
+    """The solve keywords of a 10 s step of `_sewer`; its junction storage reads the step
+    start from the drivers, not from `history` or `storage_flow`."""
+    return {"dt": 10.0, "history": (_t([0.6, 0.5, 0.4, 0.1]), None),
+            "storage_flow": _t([0.0, 0.0, 0.0])}
+
+
 def test_gradcheck_sewer_network():
     layer, drivers = _sewer()
+    step = _sewer_step()
     sources = _t([0.03, 0.01, 0.0, 0.0], grad=True)
     phi_b = _t([0.1], grad=True)
-    phi, _ = layer.solve(phi_b, drivers, sources, differentiable=True, **TIGHT)
+    phi, _ = layer.solve(phi_b, drivers, sources, differentiable=True, **step, **TIGHT)
     assert bool((phi[:3] > _t([0.0, -0.1, -0.2])).all())  # above the beds: one smooth piece
-    _gradcheck(layer, phi_b, drivers, sources, keys=("water.flow_offset", "water.conveyance"))
+    _gradcheck(layer, phi_b, drivers, sources, keys=("water.flow_offset", "water.conveyance"),
+               solve_step=step)
 
 
 # ---------------------------------------------------------------------------- the switch
@@ -231,6 +241,7 @@ def test_a_solve_nothing_differentiable_reaches_is_the_primal_solve(network):
     drivers = {k: v.detach() for k, v in drivers.items()}
     phi_b = _t([25.0]) if network is _water else _t([0.1])
     sources = torch.zeros(layer._n_nodes, dtype=F64)
+    step = _sewer_step() if network is _sewer else {}
     for owner in (*layer._laws, *layer._node_sources):
         for p in owner.parameters():
             p.requires_grad_(False)
@@ -238,7 +249,8 @@ def test_a_solve_nothing_differentiable_reaches_is_the_primal_solve(network):
     for differentiable in (True, False):
         diag: dict = {}
         out[differentiable] = layer.solve(phi_b, drivers, sources, diagnostics=diag,
-                                          differentiable=differentiable, **TIGHT), diag
+                                          differentiable=differentiable, **step,
+                                          **TIGHT), diag
     (phi_d, q_d), diag_d = out[True]
     (phi_p, q_p), diag_p = out[False]
     assert torch.equal(phi_d, phi_p) and torch.equal(q_d, q_p)

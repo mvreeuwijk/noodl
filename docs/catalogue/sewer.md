@@ -92,7 +92,7 @@ Nodal sources, withdrawals and storage.
 
 | Name | What it does | How to call it |
 |---|---|---|
-| `JunctionStorage` | SWMM's junction continuity as a node withdrawal: trapezoidal storage over the step, with a stiff bed below the invert, or no storage at all where the junction is EXTRAN-surcharged, capped by flooding at the junction's top. | `JunctionStorage(nodes, bed, bed_area, crown=None, top=None, surchargeable=None, pond_head=None)` |
+| `JunctionStorage` | SWMM's junction continuity as a node storage: trapezoidal storage over the step, with a stiff bed below the invert, or no storage at all where the junction is EXTRAN-surcharged, capped by flooding at the junction's top. | `JunctionStorage(nodes, bed, bed_area, crown=None, top=None, surchargeable=None, pond_head=None)` |
 
 ## Files
 

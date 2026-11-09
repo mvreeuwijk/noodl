@@ -275,7 +275,18 @@ network, nothing else is needed; where backwater, a flat conduit or a loop makes
 on the heads at both ends, the heads are the unknowns and the flows follow from the head
 differences. The water side then has one `KirchhoffLayer` named `"water"` (quantity `head`
 in m, flow in m³/s) over the conduits, with the outfalls as its boundary, and a
-`JunctionStorage` node source at every junction.
+`JunctionStorage` at every junction.
+
+`JunctionStorage` is the layer's node storage (`noodl.NodeStorage`): the water stored at a
+junction is $A_s H$, and the layer steps it with its own `dt` and its trapezoidal scheme. SWMM's
+junction rules (the bed, the EXTRAN band and surcharge anchor, the flood wall, ponding and the
+drop-end area switch, all described below) are `max`/`min` compositions over the storage line,
+so `JunctionStorage` overrides the storage's `rate` and `rate_slope` and keeps each rule as SWMM
+has it. Its step start is SWMM's own (the drivers `"water.head_start"` and
+`"water.net_inflow_start"`), not the layer's step-start potentials or the flow into storage, so
+a step that ends unconverged keeps SWMM's fixed points. After every step the model state holds
+`"water.storage_flow"`, the flow into each junction's storage (m³/s); it is an output, read by
+nothing.
 
 The rest of this section follows the physics in the order it enters the solve: the
 [equations](#equations) and how they are [solved](#what-is-solved) (iteration, Anderson

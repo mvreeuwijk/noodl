@@ -1083,6 +1083,10 @@ def _restart_differences(inp, rows, conn, steps):
     start["sewer.pipe_flow"] = start["water.q"]
     start["sewer.mid_area"] = torch.ones_like(start["water.q"])
     start.update(hyd.carried(start, drivers))
+    # the flow into the junction storage at the step start: the trapezoidal step needs the
+    # key, though `JunctionStorage` reads its step start from the drivers
+    start["water.storage_flow"] = torch.zeros(start["water.phi"].shape[:-1]
+                                              + model.junction_idx.shape, dtype=torch.float64)
     diags: list = []
     out, _ = simulate_dynamic_wave(model, start, drivers, steps=1,
                                    inflow=drivers["inflow"].expand(len(steps), -1),
@@ -1110,7 +1114,7 @@ def _held(hyd, heads, drv):
     (those of a pass fed it): ``{junction: H - H*}`` (m) where the net inflow lies inside
     the jump at the threshold head H*."""
     h_star = drv["water.area_switch_head"]
-    rate2 = 2.0 * drv["water.storage_rate"]
+    rate2 = 2.0 / hyd.options.routing_step
     rise = h_star - drv["water.head_start"]
     lo = rate2 * drv["water.area_below"] * rise - drv["water.net_inflow_start"]
     hi = rate2 * drv["water.area_above"] * rise - drv["water.net_inflow_start"]
