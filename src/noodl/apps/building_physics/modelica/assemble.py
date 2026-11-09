@@ -1567,9 +1567,12 @@ class _Builder:
                            and index[z] in interior]
             if storage_air:
                 vols = torch.tensor([zones[node_names[i]].V for i in storage_air], dtype=F64)
+                # Backward Euler in `Model.step`; `run._Midpoint` writes its own BDF2
+                # coefficients as drivers (`storage.ZoneStorage`).
                 air = KirchhoffLayer(
                     net, "air", laws, drives=drives, boundary=air_boundary,
-                    node_sources=[storage.ZoneStorage(storage_air, vols, p_ref, th_store)],
+                    storage=[storage.ZoneStorage(storage_air, vols, p_ref, th_store)],
+                    scheme="backward_euler",
                     quantity="pressure", unit="Pa", flow_unit="kg/s")
         layers: dict = {"air": air}
         flow_kinds = tuple(k for k in air.kinds if k not in in_series) + tuple(series_kinds)

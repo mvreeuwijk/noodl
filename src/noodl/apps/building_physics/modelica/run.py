@@ -97,8 +97,8 @@ def _start_mover_flows(air, store: StorageClosure, phi: Tensor, drv: Drivers) ->
     edges and, on the implicit (mover) edges, the flows of the index-reduced balance
     (comment above): unknowns the interior nodes' pressure rates `v` and the mover flows
     `q_F`, with `C v = net(q) + s` at every storing zone and every node a mover touches
-    (`C = V k / (1 + a)`, the storage's own pressure capacity, `ZoneStorage.dflow` per unit
-    rate; 0 at a junction, a zone without a mass balance or one whose initial equation is
+    (`C = V k / (1 + a)`, the storage's own pressure capacity, `ZoneStorage.rate_slope` per
+    unit rate; 0 at a junction, a zone without a mass balance or one whose initial equation is
     `der(p) = 0`) and `v_a = v_b` across every mover (the rise held over the instant: a
     rising `dp_in` signal's own rate is not added; a boundary's `v` is 0). Without implicit
     edges this is `air.flows(phi, drv)`."""
@@ -989,9 +989,9 @@ class _Midpoint:
     global error expands in even powers of the step (`extrapolate`).
 
     With volume mass storage (`store`, `storage` module) the volumes' storage rate at state
-    1 is the variable-step BDF2 formula in their mass (the air layer's storage node source
-    with `rate` and `offset` from the last two steps; backward Euler on the first): second
-    order and L-stable. The trapezoidal rule `m1 - m0 = h (w0 + w1)/2`, the symmetric choice,
+    1 is the variable-step BDF2 formula in their mass (the air layer's `ZoneStorage`, with
+    the BDF2 factor and offset of the last steps as drivers; backward Euler on the first):
+    second order and L-stable. The trapezoidal rule `m1 - m0 = h (w0 + w1)/2`, the symmetric choice,
     keeps the volumes' fast pressure relaxation (`tau` well under a second against steps of
     seconds) as an undamped mode that flips sign every step: ThreeRoomsContam's door flow
     carried +-2.1e-5 kg/s of it at every row (measured), where BDF2 leaves 1.7e-7, the same
@@ -1117,7 +1117,7 @@ class _Midpoint:
         return torch.zeros(shape, dtype=F64)
 
     def _storage_drivers(self, s0: State, d0: Drivers, d1: Drivers, h: float):
-        """The trapezoidal storage's air drivers for the step, and state 0's terms."""
+        """The BDF2 storage drivers of the air layer for the step, and state 0's terms."""
         store = self.store
         drv0 = dict(d0)
         drv0.update(self.closure(s0, drv0))
@@ -1143,15 +1143,19 @@ class _Midpoint:
         rate = weights[0]
         offset = torch.zeros(store.V.shape, dtype=F64)
         for j, before in enumerate(reversed(states[:-1]), start=2):
+            # m_j - m0, with m0 at the carried gauge pressure `prev[..., 0]`; the layer's
+            # `ZoneStorage.change` forms m1 - m0 at its own step-start `s0["air.phi"]`. The
+            # two agree to the round-off of `(p_ref + phi) - p_ref` (the carried value is
+            # re-evaluated at every returned state, `step`), so the weights still cancel m0
+            # to that round-off (measured <= 7.3e-12 Pa).
             dm = mass_change(store.V, before[..., 1], before[..., 0], prev[..., 1],
-                             prev[..., 0], store.p_ref)  # m_j - m0
+                             prev[..., 0], store.p_ref)
             offset = offset - weights[j] * dm
+        # No coupling gain: the step's own fixed point (`step`) settles the coupling.
         air_drv = {
-            "air.storage_prev": prev[..., store.air_nodes, :],
-            "air.storage_rate": torch.full((n_s,), rate, dtype=F64),
-            "air.storage_offset": offset[..., store.air_nodes],
-            "air.storage_gain": torch.zeros(n_s, dtype=F64),
-            "air.storage_w_fed": torch.zeros(n_s, dtype=F64),
+            "air.storage_k_prev": prev[..., store.air_nodes, 1],
+            "air.storage_bdf2_factor": torch.full((n_s,), rate, dtype=F64),
+            "air.storage_bdf2_offset": offset[..., store.air_nodes],
         }
         return drv0, q0, net0, s_air, air_drv
 
@@ -1168,7 +1172,7 @@ class _Midpoint:
         return store.terms(s, {**drv, "_q": q}, w, net, s_air, dnet=dnet)
 
     def _solve_air(self, drv: Drivers, sources, phi0: Tensor | None, h: float, layer=None,
-                   phi_b: Tensor | None = None):
+                   phi_b: Tensor | None = None, step: dict | None = None):
         """The air layer (`layer`, default the model's, with boundary values `phi_b`,
         default `"air.phi_boundary"`) at state 1 (`air.solve`, with the caller's solve
         options). With storage a solve that stalls within STORAGE_STALL times its tolerance is
@@ -1182,15 +1186,16 @@ class _Midpoint:
         layer = self.air if layer is None else layer
         pb = drv[f"{name}.phi_boundary"] if phi_b is None else phi_b
         retry = bool(self.closure.heads) and phi0 is not None
+        kw = self.kw if not step else {**self.kw, **step}
         if self.store is None and not retry:
-            return layer.solve(pb, drv, sources, phi0=phi0, **self.kw)
+            return layer.solve(pb, drv, sources, phi0=phi0, **kw)
         limit = 0.0 if self.store is None else STORAGE_STALL * self.kw.get("atol",
                                                                            STORAGE_AIR_ATOL)
 
         def attempt(start):
             diag: dict = {}
             phi, q = layer.solve(pb, drv, sources, phi0=start, diagnostics=diag,
-                                 **{**self.kw, "on_failure": "return"})
+                                 **{**kw, "on_failure": "return"})
             res = float(torch.as_tensor(diag["residual_norm"]).max())
             return phi, q, bool(torch.as_tensor(diag["converged"]).all()) or res <= limit, res
 
@@ -1251,8 +1256,12 @@ class _Midpoint:
         extra0 = self._extra_sources(s0, d0)
         z0 = self._pack(s0)
         store = self.store
+        step: dict = {}
         if store is not None:
             drv0, _, net0, s_air, air_drv = self._storage_drivers(s0, d0, d1, h)
+            # The layer's storage steps from state 0 (its rate: the BDF2 drivers above).
+            step = {"dt": h, "history": (s0[f"{name}.phi"],
+                                         s0[f"{name}.q"] if air.mna else None)}
         # The air balance at state 1: with storage, the BDF2 storage rate there is the
         # derivative of the mass at the step's END, so it balances the sources' point values
         # (`"air.sources_point"`), not their step mean. The step mean would lag the stored
@@ -1274,7 +1283,8 @@ class _Midpoint:
             drv.update(self.closure(s, drv))
             if store is not None:
                 drv.update(air_drv)
-            phi, q = self._solve_air(drv, s_end, s[f"{name}.phi"][..., air.interior], h)
+            phi, q = self._solve_air(drv, s_end, s[f"{name}.phi"][..., air.interior], h,
+                                     step=step)
             s[f"{name}.phi"], s[f"{name}.q"] = phi, q
             q_last[0] = q
             written1 = self.closure(s, d1)  # at state 1 (the closure reads, never writes, d1)
