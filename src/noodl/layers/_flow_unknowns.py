@@ -1,30 +1,35 @@
-"""Modified Nodal Analysis for `KirchhoffLayer`.
+"""The layout of a `KirchhoffLayer` whose flows are not all eliminated.
 
-A layer whose constitutive laws include an implicit law (flow is an unknown), a coupled
-multi-port law, a dynamic law or a context-reading law is solved here instead of by the
-classic nodal path. Unknowns are `[phi_I, q_F]`: the interior potentials and the flows of
-the implicit-law edges, in layer edge order. Residual rows are Kirchhoff's current law at
-the interior nodes (`A_I q - s_I + w(phi)`, with `q` the law flow on potential-controlled
-edges and the unknown on implicit ones), then the implicit laws' own residuals. The Jacobian
-is assembled as COO (`MnaOperator`) from per-law local blocks: for a law of `ports` m whose
-edges form G groups, the block `d out[g, k] / d in[g, l]` is obtained from ONE evaluation of
-the law and m reverse-mode derivatives (`torch.autograd.grad`), cotangent k seeding slot k of
-every group at once (the groups are independent, so each gradient holds row k of every
-group's block). An implicit law's blocks with respect to `dp` and to `q` come from the same
-evaluation. Reverse mode, not forward mode: PyTorch's forward-mode rules for elementwise ops
-run through its Python reference implementations (`torch._refs`), about 80 times the cost of
-the op itself, which made the Jacobian most of an MNA step.
+A law that cannot give the flow from the potential difference gives a relation instead,
+and the layer adds its flow as an unknown; a layer whose laws couple several edges, store,
+or read the law context is laid out the same way. Unknowns are `[phi_I, q_F]`: the interior
+potentials and the flows of the relation edges, in layer edge order. Residual rows are the
+flow balance at the interior nodes (`A_I q - s_I + w(phi)`, with `q` the law flow on
+potential-controlled edges and the unknown on relation edges), then the relations' own
+residuals. The Jacobian is assembled as COO (`SparseOperator`) on a fixed pattern from
+per-law local blocks: for a law of `ports` m whose edges form G groups, the block
+`d out[g, k] / d in[g, l]` is obtained from ONE evaluation of the law and m reverse-mode
+derivatives (`torch.autograd.grad`), cotangent k seeding slot k of every group at once (the
+groups are independent, so each gradient holds row k of every group's block). A relation's
+blocks with respect to `dp` and to `q` come from the same evaluation. Reverse mode, not
+forward mode: PyTorch's forward-mode rules for elementwise ops run through its Python
+reference implementations (`torch._refs`), about 80 times the cost of the op itself, which
+made the Jacobian most of a step.
+
+This module holds that layout (`FlowUnknowns`, built by `flow_unknowns`), the phasor views
+and the diagnosis of a singular system, and `MnaSystem`, the residual, Jacobian and solve on
+that layout.
 
 Phasor layers (complex potentials and flows) are solved in the real view: each complex
 unknown is a (Re, Im) pair, `w = 2`, and each local block entry becomes the real 2x2 block of
 the (possibly non-holomorphic) law, differentiated through the real views of its input and
 output.
 
-Node storage (`KirchhoffLayer(storage=)`, real layers only) enters the KCL rows as on the
-classic path: on a transient step its withdrawal `NodeStorage.rate` is added beside the node
+Node storage (`KirchhoffLayer(storage=)`, real layers only) enters the balance rows as on the
+fast path: on a transient step its withdrawal `NodeStorage.rate` is added beside the node
 sources', and its analytic `rate_slope` to the diagonal slot of each interior row. At the
 consistent initial point (`mode="initial"`) a node with a storage entry whose `initial()` is
-not `None` is held at that potential: its KCL row is replaced by `phi_i - initial_i = 0`
+not `None` is held at that potential: its balance row is replaced by `phi_i - initial_i = 0`
 (`_Held`). In the steady operating point (`mode="dc"`) storage is absent.
 """
 
@@ -38,36 +43,14 @@ import torch
 
 from noodl._broadcast import broadcast_shapes
 from noodl.elements._slopes import _colour_blocks, _complex
-from noodl.elements.base import SCHEMES, LawContext
+from noodl.elements.base import LawContext
 from noodl.layers._device import complex_of
 from noodl.layers._solve_policy import SolvePolicy
-from noodl.operators.mna import MnaOperator
+from noodl.operators.sparse import SparseOperator
 from noodl.solvers.newton import newton_tolerances
 from noodl.solvers.select import scipy_importable
 
 Tensor = torch.Tensor
-
-
-def check_scheme(layer_name: str, scheme) -> None:
-    """Refuse a time-integration scheme a `KirchhoffLayer` cannot take, by name.
-
-    A circuit or network layer integrates with `"backward_euler"` or `"trapezoidal"`, or
-    with `"forward_euler"` when its storage sits at boundary nodes (the layer checks that);
-    `"exact"` (the exponential of a linear transport step) belongs to a `TransportLayer`,
-    and anything else is not a scheme name. The message lists `SCHEMES`.
-    """
-    if scheme == "exact":
-        raise ValueError(
-            f"KirchhoffLayer {layer_name!r}: scheme='exact' is a TransportLayer scheme; a "
-            f"KirchhoffLayer takes 'backward_euler' or 'trapezoidal' ('forward_euler' for "
-            f"storage at boundary nodes; schemes: {SCHEMES})"
-        )
-    if scheme not in SCHEMES:
-        raise ValueError(
-            f"KirchhoffLayer {layer_name!r}: scheme={scheme!r}; expected one of {SCHEMES} "
-            f"('exact' is for a TransportLayer only)"
-        )
-
 
 #: The policy of the differentiable solve `MnaSystem.solve` runs when it is given `fn`.
 _DIFFERENTIATED = SolvePolicy(differentiable=True)
@@ -99,167 +82,281 @@ class _Held:
     ones: Tensor
 
 
+@dataclasses.dataclass(frozen=True)
+class FlowUnknowns:
+    """The layout of a layer whose flows are not all eliminated: which edges' flows are
+    unknowns (`edges`, layer edge order), where each sits in the unknown vector
+    `[phi_I, q_F]` (`index`), the fixed sparse pattern of the Jacobian (`row`, `col`,
+    `src`, `sign`) and the real width `w` (2 on a phasor layer).
+
+    `src` is, for each entry of the pattern, the slot of the flat block vector it takes its
+    value from, with `sign`; `one_slot` is the slot of the constant 1 of the balance rows'
+    flow-unknown columns, `node_slot` the first of the diagonal slots of withdrawals and
+    storage, present when `diag` (the last `n_I` entries of the pattern)."""
+
+    w: int
+    n_I: int
+    edges: Tensor
+    index: Tensor
+    row: Tensor
+    col: Tensor
+    src: Tensor
+    sign: Tensor
+    one_slot: int
+    node_slot: int
+    diag: bool
+
+    @property
+    def n_F(self) -> int:
+        """The number of flow unknowns."""
+        return len(self.edges)
+
+    @property
+    def n(self) -> int:
+        """The real width of the unknown vector, `w * (n_I + n_F)`."""
+        return self.w * (self.n_I + self.n_F)
+
+
+def flow_unknowns(layer) -> FlowUnknowns:
+    """The `FlowUnknowns` of `layer`: its flow unknowns (the edges of its relations) and the
+    fixed COO pattern of its Jacobian."""
+    w = 2 if layer.phasor else 1
+    b = len(layer.cols)
+    f_parts = [torch.arange(s, e) for rel, (s, e) in
+               zip(layer._relation, layer._law_slices, strict=True) if rel]
+    edges = torch.cat(f_parts) if f_parts else torch.zeros(0, dtype=torch.long)
+    n_I = len(layer.interior)
+    n_F = len(edges)
+    f_index = torch.full((b,), -1, dtype=torch.long)
+    f_index[edges] = torch.arange(n_F)
+    node = torch.stack([layer._interior_of_node[layer._src],
+                        layer._interior_of_node[layer._tgt]], dim=-1)   # (b, 2), -1 bound
+
+    sgn = torch.tensor([1.0, -1.0], dtype=torch.float64)
+    rows, cols, srcs, signs = [], [], [], []
+    offset = 0
+    ar = torch.arange
+    for el, rel, (s, e) in zip(layer._laws, layer._relation, layer._law_slices, strict=True):
+        m = el.ports
+        G = (e - s) // m
+        g, k, l_, ck, cl, a, bb = torch.meshgrid(
+            ar(G), ar(m), ar(m), ar(w), ar(w), ar(2), ar(2), indexing="ij")
+        ek = s + g * m + k
+        el_ = s + g * m + l_
+        flat = (((g * m + k) * m + l_) * w + ck) * w + cl
+        size = G * m * m * w * w
+        if not rel:
+            # balance x phi: +-q_k at edge k's endpoints, d dp_l / d phi = +-1 at edge l's
+            rn, cn = node[ek, a], node[el_, bb]
+            keep = (rn >= 0) & (cn >= 0)
+            rows.append((rn * w + ck)[keep])
+            cols.append((cn * w + cl)[keep])
+            srcs.append((offset + flat)[keep])
+            signs.append((sgn[a] * sgn[bb])[keep])
+            offset += size
+        else:
+            rrow = (n_I + f_index[ek]) * w + ck
+            # d r / d dp: columns at the potentials of edge l's endpoints
+            cn = node[el_, bb]
+            keep = (cn >= 0) & (a == 0)
+            rows.append(rrow[keep])
+            cols.append((cn * w + cl)[keep])
+            srcs.append((offset + flat)[keep])
+            signs.append(sgn[bb][keep])
+            offset += size
+            # d r / d q: columns at the flow unknowns of edge l
+            keep = (a == 0) & (bb == 0)
+            rows.append(rrow[keep])
+            cols.append(((n_I + f_index[el_]) * w + cl)[keep])
+            srcs.append((offset + flat)[keep])
+            signs.append(torch.ones(int(keep.sum()), dtype=torch.float64))
+            offset += size
+    # balance x q_F: the incidence of relation edges, a constant +-1 (slot `one`)
+    one_slot = offset
+    offset += 1
+    if n_F:
+        f, a, c = torch.meshgrid(ar(n_F), ar(2), ar(w), indexing="ij")
+        rn = node[edges[f], a]
+        keep = rn >= 0
+        rows.append((rn * w + c)[keep])
+        cols.append(((n_I + f) * w + c)[keep])
+        srcs.append(torch.full((int(keep.sum()),), one_slot))
+        signs.append(sgn[a][keep])
+    # withdrawals and storage (real layers only; a phasor layer refuses both): the
+    # diagonal slope per interior row, the last n_I entries of the pattern
+    node_slot = offset
+    diag = bool(layer._withdrawals or layer._storage) and w == 1
+    if diag:
+        idx = ar(n_I)
+        rows.append(idx)
+        cols.append(idx)
+        srcs.append(offset + idx)
+        signs.append(torch.ones(n_I, dtype=torch.float64))
+    return FlowUnknowns(
+        w=w, n_I=n_I, edges=edges, index=f_index, row=torch.cat(rows), col=torch.cat(cols),
+        src=torch.cat(srcs), sign=torch.cat(signs), one_slot=one_slot, node_slot=node_slot,
+        diag=diag)
+
+
+# ----------------------------------------------------------------- phasor views
+def cdtype(layer) -> torch.dtype:
+    """The complex dtype of a phasor layer: that of its network's precision (read at each
+    use, so `Model.to` changes it)."""
+    return complex_of(layer.net.dtype)
+
+
+def to_real(layer, z: Tensor) -> Tensor:
+    """`z` in the real view of `layer`'s unknowns: each complex value a (Re, Im) pair on a
+    phasor layer, `z` itself otherwise."""
+    return torch.view_as_real(_complex(z, cdtype(layer))).flatten(-2) if layer.phasor else z
+
+
+def to_complex(x: Tensor) -> Tensor:
+    """The complex values of the real view `x` (consecutive (Re, Im) pairs)."""
+    return torch.view_as_complex(x.unflatten(-1, (-1, 2)).contiguous())
+
+
+def split(u: FlowUnknowns, x: Tensor) -> tuple[Tensor, Tensor]:
+    """`(phi_I, q_F)` of the unknown vector `x`, in the complex view on a phasor layer."""
+    z = to_complex(x) if u.w == 2 else x
+    return z[..., : u.n_I], z[..., u.n_I:]
+
+
+def angular_frequency(layer, drivers) -> Tensor:
+    """`2 pi f` from a phasor layer's frequency driver, with a trailing axis for the law's
+    edges."""
+    key = layer.frequency_key
+    if key not in drivers:
+        raise KeyError(
+            f"KirchhoffLayer {layer.name!r} is a phasor layer and needs the "
+            f"driver {key!r}: the frequency in Hz, one per instance"
+        )
+    f = drivers[key]
+    if not isinstance(f, Tensor):
+        f = torch.tensor(f, dtype=torch.float64)
+    return 2.0 * math.pi * f.unsqueeze(-1)
+
+
+def check_frequency(layer, drivers, batches) -> None:
+    """Refuse a frequency driver that is not one value per instance of the solve.
+
+    The frequency must broadcast with the inputs' batch shape (`batches`, from the boundary
+    potentials, sources and warm starts) without adding dimensions: a frequency of shape
+    `(..., 1)` against a batch `(...)` would otherwise broadcast into an outer product of
+    instances and frequencies. With unbatched inputs the frequency sets the batch itself."""
+    key = layer.frequency_key
+    f = drivers.get(key)
+    if not isinstance(f, Tensor):
+        return
+    batch = broadcast_shapes(*batches)
+    if not batch:
+        return
+    try:
+        broadcast_shapes(tuple(f.shape), batch)
+        fits = f.dim() <= len(batch)
+    except RuntimeError:
+        fits = False
+    if not fits:
+        raise ValueError(
+            f"KirchhoffLayer {layer.name!r}: driver {key!r} has shape "
+            f"{tuple(f.shape)}, which is not one frequency per instance of the batch "
+            f"{tuple(batch)}; give it the batch shape (...), not (..., 1)"
+        )
+
+
+# ----------------------------------------------------------------- linear solver
+def linear_method(layer, requested: str | None = None) -> str:
+    """The inner linear solver for a request (default: the layer's `linear_solver`): the
+    request itself unless `"auto"`, which factorises: SciPy's sparse LU per instance
+    (`"sparse_direct"`) whenever SciPy is importable, at any batch size, and batched dense
+    LU (`"direct"`) only when it is not. The system is indefinite, so never CG.
+
+    Sparse LU at every batch size: a dense batched factorisation costs `batch * n^2` memory
+    and `batch * n^3` work, so a frequency sweep of a mid-sized circuit (64 frequencies, 1604
+    unknowns) took 6.1 s and 1.3 GB dense against 0.48 s per instance with SuperLU. A tiny
+    circuit at a huge batch may be faster dense; ask for `method="direct"` there."""
+    requested = layer.linear_solver if requested is None else requested
+    if requested != "auto":
+        return requested
+    return "sparse_direct" if scipy_importable() else "direct"
+
+
+# ----------------------------------------------------------------- diagnosis
+def singular(op: SparseOperator | None, n: int, failing: int) -> bool:
+    """True when the last Jacobian `op` (of `n` unknowns) is (numerically) rank deficient in
+    the flat batch instance `failing`. Only a system of at most `_RANK_TEST_MAX_UNKNOWNS`
+    unknowns is tested (a dense rank test of one instance); a larger one is reported as not
+    singular, so the caller re-raises the solver's own error."""
+    if op is None or n == 0 or n > _RANK_TEST_MAX_UNKNOWNS:
+        return False
+    values = op.values.reshape(-1, op.values.shape[-1])
+    A = SparseOperator(op.row, op.col, values[min(failing, len(values) - 1)], n)
+    A = A.assemble()
+    if not bool(torch.isfinite(A).all()):
+        return False
+    return bool(torch.linalg.matrix_rank(A) < n)
+
+
+def first_failing(last: dict, newton_kwargs: dict) -> int:
+    """The first flat batch instance whose last residual is above Newton's tolerance
+    (relative to its first residual), or 0 when none is (or no residual was seen)."""
+    if "r" not in last:
+        return 0
+    r0 = last["r0"].reshape(-1, last["r0"].shape[-1])
+    r = last["r"].reshape(-1, last["r"].shape[-1])
+    if r.shape != r0.shape or r.shape[-1] == 0:
+        return 0
+    atol, rtol = newton_tolerances(
+        r.dtype, newton_kwargs.get("atol"), newton_kwargs.get("rtol"))
+    norm0 = r0.abs().amax(dim=-1)
+    norm = r.abs().amax(dim=-1)
+    bad = torch.nonzero(~(norm < atol + rtol * norm0)).flatten()
+    return int(bad[0]) if len(bad) else 0
+
+
+def singular_error(layer, kinds, mode: str) -> RuntimeError:
+    """The error for a singular system of potentials and flow unknowns, naming the relation
+    `kinds`; at the initial point it also says that storage held at its initial value is
+    itself a source, and where else to start."""
+    initial = (
+        "; at the initial point (mode='initial') every dynamic law is held at its initial "
+        "value, so a capacitor acts as a voltage source at its v0 and an inductor as a "
+        "current source at its i0: a capacitor across a voltage source, or an inductor "
+        "in series with another or with a current source, makes it singular. Start the "
+        "transient from the operating point instead (mode='dc'; operating_point in the "
+        "electrical application)"
+    ) if mode == "initial" else ""
+    return RuntimeError(
+        f"KirchhoffLayer {layer.name!r}: the system of potentials and flow unknowns is "
+        f"singular; check for a loop of ideal potential sources or a cut set of flow "
+        f"sources among the relation kinds {kinds}, or a part connected to a boundary "
+        f"only through flow-prescribed edges{initial}"
+    )
+
+
 class MnaSystem:
-    """The Modified Nodal Analysis system of one `KirchhoffLayer`: its unknown layout,
-    the fixed COO pattern of its Jacobian, and the Newton (or implicit-function) solve."""
+    """The residual, Jacobian and solve of one `KirchhoffLayer` with flow unknowns, on its
+    layout `unknowns` (`FlowUnknowns`)."""
 
     def __init__(self, layer) -> None:
         self.layer = layer
         self._law_ctxs: tuple[LawContext | None, dict] = (None, {})
-        self.w = 2 if layer.phasor else 1
-        b = len(layer.cols)
-        f_parts = [torch.arange(s, e) for rel, (s, e) in
-                   zip(layer._relation, layer._law_slices, strict=True) if rel]
-        self.f_edges = torch.cat(f_parts) if f_parts else torch.zeros(0, dtype=torch.long)
-        self.n_I = len(layer.interior)
-        self.n_F = len(self.f_edges)
-        self.n = self.w * (self.n_I + self.n_F)
-        f_index = torch.full((b,), -1, dtype=torch.long)
-        f_index[self.f_edges] = torch.arange(self.n_F)
-        self._f_index = f_index
+        u = self.unknowns = flow_unknowns(layer)
+        self.w, self.n_I, self.n_F, self.n = u.w, u.n_I, u.n_F, u.n
+        self.f_edges, self._f_index = u.edges, u.index
+        self.row, self.col, self.src, self.sign = u.row, u.col, u.src, u.sign
+        self._one_slot, self._node_slot, self._diag = u.one_slot, u.node_slot, u.diag
         self.implicit_kinds = [el.kind for el, rel in
                                zip(layer._laws, layer._relation, strict=True) if rel]
-        node = torch.stack([layer._interior_of_node[layer._src],
-                            layer._interior_of_node[layer._tgt]], dim=-1)   # (b, 2), -1 bound
-        self._build_structure(node, f_index)
-
-    # ------------------------------------------------------------- structure
-    def _build_structure(self, node: Tensor, f_index: Tensor) -> None:
-        """Fixed COO pattern: `row`, `col`, and for each entry the slot `src` of the flat
-        block vector it takes its value from, with `sign`."""
-        w, n_I = self.w, self.n_I
-        sgn = torch.tensor([1.0, -1.0], dtype=torch.float64)
-        rows, cols, srcs, signs = [], [], [], []
-        offset = 0
-        ar = torch.arange
-        for el, rel, (s, e) in zip(self.layer._laws, self.layer._relation,
-                                   self.layer._law_slices, strict=True):
-            m = el.ports
-            G = (e - s) // m
-            g, k, l_, ck, cl, a, bb = torch.meshgrid(
-                ar(G), ar(m), ar(m), ar(w), ar(w), ar(2), ar(2), indexing="ij")
-            ek = s + g * m + k
-            el_ = s + g * m + l_
-            flat = (((g * m + k) * m + l_) * w + ck) * w + cl
-            size = G * m * m * w * w
-            if not rel:
-                # KCL x phi: +-q_k at edge k's endpoints, d dp_l / d phi = +-1 at edge l's
-                rn, cn = node[ek, a], node[el_, bb]
-                keep = (rn >= 0) & (cn >= 0)
-                rows.append((rn * w + ck)[keep])
-                cols.append((cn * w + cl)[keep])
-                srcs.append((offset + flat)[keep])
-                signs.append((sgn[a] * sgn[bb])[keep])
-                offset += size
-            else:
-                rrow = (n_I + f_index[ek]) * w + ck
-                # d r / d dp: columns at the potentials of edge l's endpoints
-                cn = node[el_, bb]
-                keep = (cn >= 0) & (a == 0)
-                rows.append(rrow[keep])
-                cols.append((cn * w + cl)[keep])
-                srcs.append((offset + flat)[keep])
-                signs.append(sgn[bb][keep])
-                offset += size
-                # d r / d q: columns at the flow unknowns of edge l
-                keep = (a == 0) & (bb == 0)
-                rows.append(rrow[keep])
-                cols.append(((n_I + f_index[el_]) * w + cl)[keep])
-                srcs.append((offset + flat)[keep])
-                signs.append(torch.ones(int(keep.sum()), dtype=torch.float64))
-                offset += size
-        # KCL x q_F: the incidence of implicit edges, a constant +-1 (slot `one`)
-        self._one_slot = offset
-        offset += 1
-        if self.n_F:
-            f, a, c = torch.meshgrid(ar(self.n_F), ar(2), ar(w), indexing="ij")
-            rn = node[self.f_edges[f], a]
-            keep = rn >= 0
-            rows.append((rn * w + c)[keep])
-            cols.append(((n_I + f) * w + c)[keep])
-            srcs.append(torch.full((int(keep.sum()),), self._one_slot))
-            signs.append(sgn[a][keep])
-        # withdrawals and storage (real layers only; a phasor layer refuses both): the
-        # diagonal slope per interior row, the last n_I entries of the pattern
-        self._node_slot = offset
-        self._diag = bool(self.layer._withdrawals or self.layer._storage) and w == 1
-        if self._diag:
-            idx = ar(n_I)
-            rows.append(idx)
-            cols.append(idx)
-            srcs.append(offset + idx)
-            signs.append(torch.ones(n_I, dtype=torch.float64))
-        self.row = torch.cat(rows)
-        self.col = torch.cat(cols)
-        self.src = torch.cat(srcs)
-        self.sign = torch.cat(signs)
 
     # ------------------------------------------------------------- views
     def _to_real(self, z: Tensor) -> Tensor:
-        return torch.view_as_real(_complex(z, self.cdtype)).flatten(-2) if self.w == 2 else z
-
-    def _to_complex(self, x: Tensor) -> Tensor:
-        return torch.view_as_complex(x.unflatten(-1, (-1, 2)).contiguous())
-
-    @property
-    def cdtype(self) -> torch.dtype:
-        """The complex dtype of a phasor layer: that of its network's precision (read at
-        each use, so `Model.to` changes it)."""
-        return complex_of(self.layer.net.dtype)
-
-    def _split(self, z: Tensor) -> tuple[Tensor, Tensor]:
-        """`(phi_I, q_F)` of the unknown vector, in the complex view on a phasor layer."""
-        return z[..., : self.n_I], z[..., self.n_I:]
+        return to_real(self.layer, z)
 
     def _unknowns(self, x: Tensor) -> tuple[Tensor, Tensor]:
-        return self._split(self._to_complex(x) if self.w == 2 else x)
+        return split(self.unknowns, x)
 
     # ------------------------------------------------------------- laws
-    @property
-    def frequency_key(self) -> str:
-        """The driver key of a phasor layer's frequency (Hz, one per instance)."""
-        return f"{self.layer.name}.frequency"
-
-    def _omega(self, drivers) -> Tensor:
-        """`2 pi f` from the frequency driver, with a trailing axis for the law's edges."""
-        key = self.frequency_key
-        if key not in drivers:
-            raise KeyError(
-                f"KirchhoffLayer {self.layer.name!r} is a phasor layer and needs the "
-                f"driver {key!r}: the frequency in Hz, one per instance"
-            )
-        f = drivers[key]
-        if not isinstance(f, Tensor):
-            f = torch.tensor(f, dtype=torch.float64)
-        return 2.0 * math.pi * f.unsqueeze(-1)
-
-    def _check_frequency(self, drivers, batches) -> None:
-        """Refuse a frequency driver that is not one value per instance of the solve.
-
-        The frequency must broadcast with the inputs' batch shape (`batches`, from the
-        boundary potentials, sources and warm starts) without adding dimensions: a frequency
-        of shape `(..., 1)` against a batch `(...)` would otherwise broadcast into an outer
-        product of instances and frequencies. With unbatched inputs the frequency sets the
-        batch itself."""
-        key = self.frequency_key
-        f = drivers.get(key)
-        if not isinstance(f, Tensor):
-            return
-        batch = broadcast_shapes(*batches)
-        if not batch:
-            return
-        try:
-            broadcast_shapes(tuple(f.shape), batch)
-            fits = f.dim() <= len(batch)
-        except RuntimeError:
-            fits = False
-        if not fits:
-            raise ValueError(
-                f"KirchhoffLayer {self.layer.name!r}: driver {key!r} has shape "
-                f"{tuple(f.shape)}, which is not one frequency per instance of the batch "
-                f"{tuple(batch)}; give it the batch shape (...), not (..., 1)"
-            )
-
     def _law_ctx(self, ctx: LawContext, s: int, e: int) -> LawContext:
         """`ctx` with the step-start values restricted to one law's edges `[s, e)`. The
         restrictions of the last context seen are kept: a Newton solve calls this with the
@@ -316,8 +413,8 @@ class MnaSystem:
         layer = self.layer
         if self.w == 2:
             raise TypeError(
-                f"KirchhoffLayer {layer.name!r} is a phasor layer (Modified Nodal Analysis): "
-                f"flows() is not defined on it; read the flows from solve()'s q")
+                f"KirchhoffLayer {layer.name!r} is a phasor layer: flows() is not defined on "
+                f"it; read the flows from solve()'s q")
         n_edges = len(layer.cols)
         if q.shape[-1] != n_edges:
             raise ValueError(
@@ -447,14 +544,14 @@ class MnaSystem:
 
         return slopes
 
-    def _hold(self, op: MnaOperator, store) -> MnaOperator:
+    def _hold(self, op: SparseOperator, store) -> SparseOperator:
         """`op` with each row `mode="initial"` holds replaced by the row of
         `phi_i - initial_i`: its values zeroed, 1 on its diagonal slot."""
         if not isinstance(store, _Held):
             return op
         values = op.values.masked_fill(store.clear, 0.0)
         values[..., store.ones] = 1.0
-        return MnaOperator(op.row, op.col, values, self.n)
+        return SparseOperator(op.row, op.col, values, self.n)
 
     # ------------------------------------------------------------- residual and Jacobian
     def residual(self, x, phi_boundary, drivers, sources, ctx, call, store=None) -> Tensor:
@@ -482,7 +579,7 @@ class MnaSystem:
         return self._to_real(_cat([kcl, r_F], kcl)), phi, q
 
     def operator(self, x, phi_boundary, drivers, ctx, node_slope_fn,
-                 adjoint: bool = False) -> MnaOperator:
+                 adjoint: bool = False) -> SparseOperator:
         """The Jacobian of `residual` at `x`, as COO triplets on the fixed pattern.
 
         `node_slope_fn(phi, adjoint)` gives the diagonal of the withdrawals and storages
@@ -522,84 +619,20 @@ class MnaSystem:
                          torch.zeros(self.n_I, dtype=x.dtype, device=x.device))
         flat = _cat(parts, x)
         values = flat[..., self.src] * self.sign.to(dtype=flat.dtype, device=flat.device)
-        return MnaOperator(self.row, self.col, values, self.n)
+        return SparseOperator(self.row, self.col, values, self.n)
 
     # ------------------------------------------------------------- solve
-    def method(self, requested: str | None = None) -> str:
-        """The inner linear solver for a request (default: the layer's `linear_solver`):
-        the request itself unless `"auto"`, which factorises: SciPy's sparse LU per instance
-        (`"sparse_direct"`) whenever SciPy is importable, at any batch size, and batched
-        dense LU (`"direct"`) only when it is not. The system is indefinite, so never CG.
-
-        Sparse LU at every batch size: a dense batched factorisation costs `batch * n^2`
-        memory and `batch * n^3` work, so a frequency sweep of a mid-sized circuit (64
-        frequencies, 1604 unknowns) took 6.1 s and 1.3 GB dense against 0.48 s per
-        instance with SuperLU. A tiny circuit at a huge batch may be faster dense; ask for
-        `method="direct"` there."""
-        requested = self.layer.linear_solver if requested is None else requested
-        if requested != "auto":
-            return requested
-        return "sparse_direct" if scipy_importable() else "direct"
-
-    def _singular(self, op: MnaOperator | None, failing: int) -> bool:
-        """True when the last Jacobian is (numerically) rank deficient in the flat batch
-        instance `failing`. Only a system of at most `_RANK_TEST_MAX_UNKNOWNS` unknowns is
-        tested (a dense rank test of one instance); a larger one is reported as not
-        singular, so the caller re-raises the solver's own error."""
-        if op is None or self.n == 0 or self.n > _RANK_TEST_MAX_UNKNOWNS:
-            return False
-        values = op.values.reshape(-1, op.values.shape[-1])
-        A = MnaOperator(op.row, op.col, values[min(failing, len(values) - 1)], self.n)
-        A = A.assemble()
-        if not bool(torch.isfinite(A).all()):
-            return False
-        return bool(torch.linalg.matrix_rank(A) < self.n)
-
-    @staticmethod
-    def _first_failing(last: dict, newton_kwargs: dict) -> int:
-        """The first flat batch instance whose last residual is above Newton's tolerance
-        (relative to its first residual), or 0 when none is (or no residual was seen)."""
-        if "r" not in last:
-            return 0
-        r0 = last["r0"].reshape(-1, last["r0"].shape[-1])
-        r = last["r"].reshape(-1, last["r"].shape[-1])
-        if r.shape != r0.shape or r.shape[-1] == 0:
-            return 0
-        atol, rtol = newton_tolerances(
-            r.dtype, newton_kwargs.get("atol"), newton_kwargs.get("rtol"))
-        norm0 = r0.abs().amax(dim=-1)
-        norm = r.abs().amax(dim=-1)
-        bad = torch.nonzero(~(norm < atol + rtol * norm0)).flatten()
-        return int(bad[0]) if len(bad) else 0
-
-    def _singular_error(self, mode: str) -> RuntimeError:
-        """The error for a singular system; at the initial point it also says that storage
-        held at its initial value is itself a source, and where else to start."""
-        initial = (
-            "; at the initial point (mode='initial') every dynamic law is held at its initial "
-            "value, so a capacitor acts as a voltage source at its v0 and an inductor as a "
-            "current source at its i0: a capacitor across a voltage source, or an inductor "
-            "in series with another or with a current source, makes it singular. Start the "
-            "transient from the operating point instead (mode='dc'; operating_point in the "
-            "electrical application)"
-        ) if mode == "initial" else ""
-        return RuntimeError(
-            f"KirchhoffLayer {self.layer.name!r}: the Modified Nodal Analysis system is "
-            f"singular; check for a loop of ideal potential sources or a cut set of flow "
-            f"sources among kinds {self.implicit_kinds}, or a part connected to a boundary "
-            f"only through flow-prescribed edges{initial}"
-        )
-
     def inputs(self, phi_boundary, drivers, sources, phi0, q0):
         """`(phi_boundary, sources, phi0, q0)` as the solve takes them: on a phasor layer in
         the complex dtype of its network's precision (complex128 on a float64 network), real
         or complex as given, with the frequency driver checked against their batch."""
         if self.w != 2:
             return phi_boundary, sources, phi0, q0
+        dtype = cdtype(self.layer)
         phi_boundary, sources, phi0, q0 = (
-            None if v is None else torch.as_tensor(v).to(self.cdtype)
+            None if v is None else torch.as_tensor(v).to(dtype)
             for v in (phi_boundary, sources, phi0, q0))
-        self._check_frequency(drivers, [
+        check_frequency(self.layer, drivers, [
             v.shape[:-1] for v in (phi_boundary, sources, phi0, q0) if v is not None])
         return phi_boundary, sources, phi0, q0
 
@@ -610,13 +643,13 @@ class MnaSystem:
         if newton_kwargs.get("line_search") == "convex":
             raise ValueError(
                 f"KirchhoffLayer {layer.name!r}: line_search='convex' needs a residual "
-                f"that is the gradient of a convex function, which a Modified Nodal Analysis "
-                f"residual is not; use the default line search"
+                f"that is the gradient of a convex function, which the residual of a layer "
+                f"with flow unknowns is not; use the default line search"
             )
         if newton_kwargs.get("method", layer.linear_solver) == "cg":
             raise ValueError(
                 f"KirchhoffLayer {layer.name!r}: method='cg' needs a symmetric positive "
-                f"definite Jacobian, which a Modified Nodal Analysis system is not; use "
+                f"definite Jacobian, which a layer with flow unknowns does not have; use "
                 f"'auto', 'sparse_direct', 'direct' or 'gmres'"
             )
 
@@ -651,7 +684,7 @@ class MnaSystem:
                 x0[..., n_phi:] = self._to_real(q0.detach())
 
         requested = newton_kwargs["method"]
-        newton_kwargs["method"] = self.method(requested)
+        newton_kwargs["method"] = linear_method(layer, requested)
         if layer.linear:
             # The residual is affine: the full Newton step lands on the solution, so the
             # damped first step (`newton`'s omega=0.75) would only cost a second iteration.
@@ -665,8 +698,8 @@ class MnaSystem:
             return r
 
         def diagnose(exc):
-            if self._singular(last.get("op"), self._first_failing(last, newton_kwargs)):
-                raise self._singular_error(ctx.mode) from exc
+            if singular(last.get("op"), self.n, first_failing(last, newton_kwargs)):
+                raise singular_error(layer, self.implicit_kinds, ctx.mode) from exc
 
         if fn is None:
             # the primal solve: also a differentiable one that nothing reaches

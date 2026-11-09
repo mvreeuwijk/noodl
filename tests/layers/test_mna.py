@@ -502,16 +502,16 @@ def test_dynamic_kind_may_not_carry_a_head():
 
 
 def test_auto_factorises_sparse_whenever_scipy_is_importable(monkeypatch):
-    import noodl.layers._mna as mna_module
+    import noodl.layers._flow_unknowns as flow_unknowns_module
 
     _, layer = _driven_layer()
-    mna = layer._mna
-    monkeypatch.setattr(mna_module, "scipy_importable", lambda: True)
-    assert mna.method() == "sparse_direct"
-    assert mna.method("direct") == "direct"
-    monkeypatch.setattr(mna_module, "scipy_importable", lambda: False)
-    assert mna.method() == "direct"
-    assert mna.method("sparse_direct") == "sparse_direct"
+    method = flow_unknowns_module.linear_method
+    monkeypatch.setattr(flow_unknowns_module, "scipy_importable", lambda: True)
+    assert method(layer) == "sparse_direct"
+    assert method(layer, "direct") == "direct"
+    monkeypatch.setattr(flow_unknowns_module, "scipy_importable", lambda: False)
+    assert method(layer) == "direct"
+    assert method(layer, "sparse_direct") == "sparse_direct"
 
 
 def test_auto_runs_sparse_lu_on_a_batch_above_32():

@@ -7,7 +7,7 @@ import pytest
 import torch
 
 from noodl.elements import Conductance, ConstitutiveLaw, ImplicitLaw, LawContext, PowerLaw
-from noodl.layers._mna import MnaSystem
+from noodl.layers._flow_unknowns import MnaSystem
 from noodl.layers.kirchhoff import KirchhoffLayer
 from noodl.topology import Network
 from noodl.withdrawals import NodeWithdrawal

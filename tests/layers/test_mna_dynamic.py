@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 import torch
 
-import noodl.layers._mna as mna_module
+import noodl.layers._flow_unknowns as flow_unknowns_module
 from noodl.elements import Conductance, ConstitutiveLaw, ImplicitLaw
 from noodl.heads import EdgeHeads
 from noodl.layers.kirchhoff import KirchhoffLayer
@@ -253,7 +253,7 @@ def test_singular_message_names_flow_prescribed_parts():
 
 
 def test_rank_test_is_skipped_above_the_size_cap(monkeypatch):
-    monkeypatch.setattr(mna_module, "_RANK_TEST_MAX_UNKNOWNS", 2)
+    monkeypatch.setattr(flow_unknowns_module, "_RANK_TEST_MAX_UNKNOWNS", 2)
     layer = _voltage_loop()          # 3 unknowns: phi_a and two source flows
     with pytest.raises(RuntimeError, match="failed to converge") as info:
         layer.solve(GROUND, differentiable=False)

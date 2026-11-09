@@ -49,7 +49,7 @@ from noodl.apps.electrical.power import (
     read_matpower,
     solve_power_flow,
 )
-from noodl.layers._mna import MnaSystem
+from noodl.layers._flow_unknowns import MnaSystem
 
 ROOT = Path(__file__).resolve().parent.parent
 CIRCUITS = ROOT / "tests" / "data" / "modelica_electrical"

@@ -29,7 +29,7 @@ import torch
 
 from noodl._tracking import bulk_values, same_tracking
 from noodl.elements.base import ConstitutiveLaw
-from noodl.layers._mna import _Held
+from noodl.layers._flow_unknowns import _Held, angular_frequency
 from noodl.withdrawals import NodeWithdrawal
 
 
@@ -173,7 +173,7 @@ class FunctionalLaws:
         if self._phasor and step is not None:
             # the angular frequency from the threaded frequency driver
             step = dataclasses.replace(step, ctx=dataclasses.replace(
-                step.ctx, omega=self.layer._mna._omega(drv)))
+                step.ctx, omega=angular_frequency(self.layer, drv)))
         return rebuilt, drv, src, pb, step
 
     def call(self, rebuilt, i: int, args: tuple, kwargs: dict | None = None):

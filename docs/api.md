@@ -154,7 +154,7 @@ Constitutive laws are grouped below by the physics they express, as in
 ::: noodl.operators.dense
 ::: noodl.operators.graph
 ::: noodl.operators.advection
-::: noodl.operators.mna
+::: noodl.operators.sparse
 
 ## Solvers
 

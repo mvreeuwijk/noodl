@@ -17,9 +17,9 @@ import torch
 
 from noodl._broadcast import broadcast_shapes
 from noodl._tracking import bulk_values
-from noodl.elements.base import ConstitutiveLaw, ImplicitLaw, LawContext
+from noodl.elements.base import SCHEMES, ConstitutiveLaw, ImplicitLaw, LawContext
+from noodl.layers._flow_unknowns import MnaSystem, _Held, angular_frequency
 from noodl.layers._functional import FunctionalLaws, step_start
-from noodl.layers._mna import MnaSystem, _Held, check_scheme
 from noodl.layers._solve_policy import resolve
 from noodl.layers._topology import TopologyGuard
 from noodl.operators.graph import GraphLaplacianOperator
@@ -48,6 +48,27 @@ from noodl.withdrawals import NodeWithdrawal
 # explicit `linear_solver=` is honoured verbatim at every ensemble size. `diagnostics`
 # reports which backend actually ran (see `solve`).
 _LINEAR_SOLVERS = ("auto", "cg", "gmres", "direct", "sparse_direct")
+
+
+def check_scheme(layer_name: str, scheme) -> None:
+    """Refuse a time-integration scheme a `KirchhoffLayer` cannot take, by name.
+
+    A circuit or network layer integrates with `"backward_euler"` or `"trapezoidal"`, or
+    with `"forward_euler"` when its storage sits at boundary nodes (the layer checks that);
+    `"exact"` (the exponential of a linear transport step) belongs to a `TransportLayer`,
+    and anything else is not a scheme name. The message lists `SCHEMES`.
+    """
+    if scheme == "exact":
+        raise ValueError(
+            f"KirchhoffLayer {layer_name!r}: scheme='exact' is a TransportLayer scheme; a "
+            f"KirchhoffLayer takes 'backward_euler' or 'trapezoidal' ('forward_euler' for "
+            f"storage at boundary nodes; schemes: {SCHEMES})"
+        )
+    if scheme not in SCHEMES:
+        raise ValueError(
+            f"KirchhoffLayer {layer_name!r}: scheme={scheme!r}; expected one of {SCHEMES} "
+            f"('exact' is for a TransportLayer only)"
+        )
 
 
 #: Containers longer than this are not entered by `_held_tensors`: a long list or dict on a
@@ -280,7 +301,8 @@ class KirchhoffLayer(TopologyGuard):
             self._boundary_storage, self._storage = self._storage, []
         # Modified Nodal Analysis: a law whose flow is an unknown (implicit), that couples
         # several edges (ports > 1), that stores (dynamic) or that reads the law context
-        # cannot be solved by the classic nodal path; such a layer is solved by `MnaSystem`.
+        # cannot be solved by the classic nodal path; such a layer is solved by `MnaSystem`
+        # (`noodl.layers._flow_unknowns`).
         # Node storage does not make a layer MNA: it adds a diagonal to the nodal Jacobian,
         # but it makes the layer dynamic (it steps from its state).
         self.phasor = phasor
@@ -511,7 +533,7 @@ class KirchhoffLayer(TopologyGuard):
         if self.linear_solver == "cg":
             raise ValueError(
                 f"KirchhoffLayer {name!r}: linear_solver='cg' needs a symmetric positive "
-                f"definite Jacobian, which a Modified Nodal Analysis system is not; use "
+                f"definite Jacobian, which a layer with flow unknowns does not have; use "
                 f"'auto', 'sparse_direct', 'direct' or 'gmres'"
             )
         if self.phasor:
@@ -569,7 +591,7 @@ class KirchhoffLayer(TopologyGuard):
     def frequency_key(self) -> str | None:
         """The driver key a phasor layer reads its frequency from (`"<name>.frequency"`, in
         Hz, one value per instance); `None` for a layer that is not a phasor layer."""
-        return self._mna.frequency_key if self.phasor else None
+        return f"{self.name}.frequency" if self.phasor else None
 
     def _refuse_on_mna(self, method: str) -> None:
         """Classic-only methods assume every flow is a function of its own edge's potential
@@ -1433,7 +1455,7 @@ class KirchhoffLayer(TopologyGuard):
         and ignores `t`, `q0` and a valid `scheme`. Without `dt` storage is absent.
 
         A layer solved by Modified Nodal Analysis (`self.mna`) solves for the interior
-        potentials and the flows of its implicit-law edges together (`noodl.layers._mna`),
+        potentials and the flows of its implicit-law edges together (`MnaSystem`),
         from zeros or the warm start `phi0` (interior potentials) and `q0` (the flows of
         `implicit_edges`); the returned `q` covers every edge. A phasor layer is always in
         `"phasor"` mode (no `dt` or `history`; the frequency driver `"<name>.frequency"` is
@@ -1588,7 +1610,7 @@ class KirchhoffLayer(TopologyGuard):
                 )
             if self.phasor:
                 ctx = LawContext(mode="phasor", t=t,
-                                 omega=self._mna._omega(drivers) if omega else None)
+                                 omega=angular_frequency(self, drivers) if omega else None)
                 return _Step(ctx, None)
             ctx = LawContext(mode="dc" if mode is None else mode, t=t)
             held = (self._mna._held(drivers, self._owner_call)
