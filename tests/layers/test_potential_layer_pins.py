@@ -28,11 +28,19 @@ from typing import Any
 import pytest
 import torch
 
-from noodl.apps.electrical import PrescribedCurrent, PrescribedVoltage, Resistance, Sine
-from noodl.elements import Conductance, PowerLaw
+from noodl.apps.electrical import (
+    PrescribedCurrent,
+    PrescribedVoltage,
+    Resistance,
+    Sine,
+    TransformerRatio,
+)
+from noodl.apps.water.demand import PressureDrivenDemand
+from noodl.elements import Conductance, ConstitutiveLaw, PowerLaw
 from noodl.layers.kirchhoff import KirchhoffLayer
 from noodl.storage import LinearStorage
 from noodl.topology import Network
+from noodl.withdrawals import NodeWithdrawal
 from tests._circuit_laws import Cap, Ind, Source
 from tests.golden import load_golden
 from tests.layers import test_kirchhoff as _kirchhoff
@@ -103,7 +111,6 @@ def _fast(*, linear_solver="auto", learnable=True, withdrawals=(), storage=(), n
                    kind="pipe", learnable=learnable)
     layer = KirchhoffLayer(net, name, [law], boundary=["w", "l"], linear_solver=linear_solver,
                            withdrawals=withdrawals, storage=storage)
-    assert not layer.mna
     return layer, law
 
 
@@ -329,7 +336,6 @@ def _electrical(edges, laws, nodes=("gnd", "a", "b"), **kw):
 def case_general_resistor_voltage_dc_primal():
     layer = _electrical([("a", "gnd", "voltage_source"), ("a", "gnd", "resistor")],
                         [PrescribedVoltage(_t([2.0])), Resistance(_t([4.0]))])
-    assert layer.mna
     return _solve(layer, (GROUND,), differentiable=False)
 
 
@@ -526,7 +532,6 @@ def _current_layer(storage=None):
     net = _net(["gnd", "a"], [("a", "gnd", "current_source"), ("a", "gnd", "resistor")])
     layer = KirchhoffLayer(net, "e", [source, res], boundary=["gnd"],
                            storage=[storage] if storage else ())
-    assert layer.mna
     return layer, source
 
 
@@ -562,7 +567,368 @@ def case_moves_prescribed_current_grounded_storage():
     return out
 
 
+# ------------------------------------------------------------------ added in fix round 1
+
+
+def _attempt(fn: Callable[[], dict]) -> dict:
+    """`fn()`, or the exception type and first 80 message characters: a refusal is pinned."""
+    try:
+        return fn()
+    except Exception as exc:  # noqa: BLE001 - the refusal IS the pinned behaviour
+        return {"refused": {"type": type(exc).__name__, "message": str(exc)[:80]}}
+
+
+class _DrivenDemand(NodeWithdrawal):
+    """w = drivers["demand"] phi at the given nodes: a withdrawal that reads a driver."""
+
+    def flow(self, phi_nodes, drivers=None):
+        return drivers["demand"] * phi_nodes
+
+
+class _PotentialCap(ConstitutiveLaw):
+    """A capacitance written as a potential law: it reads the step context, has no implicit
+    relation. Steady states carry no flow; a step gives `C (dp - dp_prev) / dt` (backward
+    Euler) or `2 C (dp - dp_prev) / dt - q_prev` (trapezoidal)."""
+
+    dynamic = True
+    contextual = True
+
+    def __init__(self, C, kind="pcap", learnable=False):
+        super().__init__(kind)
+        self.C = self._param(C, learnable)
+
+    def flow(self, dp, drivers=None, ctx=None):
+        if ctx.mode in ("dc", "initial"):
+            return torch.zeros_like(dp)
+        if ctx.scheme == "backward_euler":
+            return self.C * (dp - ctx.dp_prev) / ctx.dt
+        return 2.0 * self.C / ctx.dt * (dp - ctx.dp_prev) - ctx.q_prev
+
+
+def _fan(linear_solver="auto"):
+    net = _mna._net(["gnd", "a", "b"], [("gnd", "a", "fan"), ("a", "b", "ori"),
+                                        ("b", "gnd", "ori")])
+    return KirchhoffLayer(net, "air", [_mna.Head(), _mna.Orifice()], boundary=["gnd"],
+                          linear_solver=linear_solver)
+
+
+def _fan_drivers(batch=False):
+    c = _t([[0.6], [0.9]] if batch else [0.7], grad=True)
+    return {"head": _t([5.0]), "c": c}, c
+
+
+def _general_linear_solver(which):
+    drivers, c = _fan_drivers(batch=True)
+    return _attempt(lambda: _solve(_fan(which), (GROUND, drivers, torch.zeros(3, dtype=F64)),
+                                   params={"c": c}))
+
+
+def case_general_linear_solver_auto():
+    return _general_linear_solver("auto")
+
+
+def case_general_linear_solver_direct():
+    return _general_linear_solver("direct")
+
+
+def case_general_linear_solver_cg():
+    return _general_linear_solver("cg")
+
+
+def _unconverged(layer, args, on_failure):
+    return _attempt(lambda: _solve(layer, args, differentiable=False, on_failure=on_failure,
+                                   max_iter=1))
+
+
+def case_general_unconverged_return_primal():
+    drivers, _ = _fan_drivers()
+    return _unconverged(_fan(), (GROUND, drivers, torch.zeros(3, dtype=F64)), "return_primal")
+
+
+def case_general_unconverged_return():
+    drivers, _ = _fan_drivers()
+    return _unconverged(_fan(), (GROUND, drivers, torch.zeros(3, dtype=F64)), "return")
+
+
+def case_general_unconverged_raise():
+    drivers, _ = _fan_drivers()
+    return _unconverged(_fan(), (GROUND, drivers, torch.zeros(3, dtype=F64)), "raise")
+
+
+def case_fast_unconverged_return():
+    layer, _ = _fast()
+    pb, src = _fast_inputs()
+    return _unconverged(layer, (pb, {}, src), "return")
+
+
+def case_fast_unconverged_raise():
+    layer, _ = _fast()
+    pb, src = _fast_inputs()
+    return _unconverged(layer, (pb, {}, src), "raise")
+
+
+def _headed_general():
+    """gnd <-V- a -(r)- b -(load)- gnd with a head on each edge: a general layer whose
+    only reason is its source."""
+    net = _net(["gnd", "a", "b"], [("a", "gnd", "voltage_source"), ("a", "b", "r"),
+                                   ("b", "gnd", "load")])
+    laws = [PrescribedVoltage(_t([1.0])),
+            PowerLaw(_t([0.5]), _t(0.65), kind="r", dp_transition=1e-6, learnable=True),
+            PowerLaw(_t([0.3]), _t(0.8), kind="load", dp_transition=1e-6)]
+    return KirchhoffLayer(net, "e", laws, boundary=["gnd"]), laws[1]
+
+
+def case_general_with_head_driver():
+    layer, law = _headed_general()
+    head = _t([0.0, 0.4, -0.2], grad=True)
+    return _solve(layer, (GROUND, {"e.edge_head": head}, _t([0.0, 0.02, -0.01])),
+                  params={"C": law.C, "head": head})
+
+
+def case_general_with_head_driver_ensemble():
+    layer, law = _headed_general()
+    head = _t([[0.0, 0.4, -0.2], [0.0, 0.1, 0.3]], grad=True)
+    return _solve(layer, (GROUND, {"e.edge_head": head}, _t([0.0, 0.02, -0.01])),
+                  params={"C": law.C, "head": head})
+
+
+def case_general_introspection_and_refusals():
+    """What the general path answers about a solved point, and what it refuses (the fast
+    path's `residual`, `jacobian`, `adjoint` and `linear_init` are refused here).
+
+    M6 Task 32 defines these methods on every layer: it replaces the pinned refusals of this
+    case with value pins, regenerating this case only."""
+    layer = _fan()
+    drivers, _ = _fan_drivers()
+    src = _t([0.0, 0.05, -0.02])
+    phi, q = layer.solve(GROUND, drivers, src, differentiable=False)
+    phi_i = phi[..., layer.interior]
+    grad = _t([1.0, -0.5])
+
+    def probe(fn):
+        return _attempt(lambda: {"value": ser(fn())})
+
+    return {
+        "power_residual": probe(lambda: layer.power_residual(phi, q, drivers, src)),
+        "residual": probe(lambda: layer.residual(phi_i, GROUND, drivers, src)),
+        "jacobian": probe(lambda: layer.jacobian(phi_i, GROUND, drivers)),
+        "adjoint": probe(lambda: layer.adjoint(phi_i, GROUND, drivers, grad)),
+        "linear_init": probe(lambda: layer.linear_init(GROUND, drivers, src)),
+        "flows_without_q": probe(lambda: layer.flows(phi, drivers)),
+        "dflows": probe(lambda: layer.dflows(phi, drivers)),
+    }
+
+
+def case_general_phasor_rlc_parameter_gradients():
+    cap = Cap(_t([1e-6]), learnable=True)
+    ind = Ind(_t([1e-3]), learnable=True)
+    res = Resistance(_t([2.0]), kind="r", learnable=True)
+    layer = _electrical(
+        [("a", "gnd", "source"), ("a", "b", "r"), ("b", "c", "ind"), ("c", "gnd", "cap")],
+        [Source(_t([1.0])), res, ind, cap], nodes=("gnd", "a", "b", "c"), phasor=True)
+    f = _t([50.0, 5032.92])
+    diag: dict = {}
+    phi, q = layer.solve(GROUND.to(C128), {"e.frequency": f}, diagnostics=diag)
+    loss = phi.abs().sum() + q.abs().sum()
+    return {"phi": ser(phi), "q": ser(q), "diagnostics": _diag_record(diag),
+            "grads": ser(grads_of(loss, {"R": res.R, "L": ind.L, "C": cap.C}))}
+
+
+def case_general_dynamic_potential_law_without_implicit():
+    """A dynamic, context-reading potential law and no implicit law: the layer Task 30
+    may move to the fast path."""
+    pcap = _PotentialCap(_t([0.4]), learnable=True)
+    source = PrescribedCurrent(_t([1.0]), waveforms=[Sine(2.0, phase=0.3)], learnable=True)
+    layer = _electrical([("a", "gnd", "current_source"), ("a", "gnd", "resistor"),
+                         ("a", "gnd", "pcap")], [source, Resistance(_t([2.0])), pcap],
+                        nodes=("gnd", "a"))
+
+    def run():
+        phi, q = layer.solve(GROUND, t=0.0, differentiable=False)
+        out: dict[str, Any] = {"initial": {"phi": ser(phi), "q": ser(q)}}
+        history = (phi.detach().clone(), q.detach().clone())
+        loss = 0.0
+        for i, (scheme, t) in enumerate((("backward_euler", 0.2), ("trapezoidal", 0.4))):
+            diag: dict = {}
+            now = layer.solve(GROUND, history=history, dt=0.2, scheme=scheme, t=t,
+                              diagnostics=diag)
+            out[f"step{i}"] = {"phi": ser(now[0]), "q": ser(now[1]),
+                               "diagnostics": _diag_record(diag)}
+            loss = loss + _loss(*now)
+            history = now
+        out["grads"] = ser(grads_of(loss, {"amplitude": source.amplitude, "C": pcap.C}))
+        return out
+
+    return _attempt(run)
+
+
+def case_general_initial_differentiable():
+    cap = Cap(_t([1e-3]), v0=_t([0.4]))
+    ind = Ind(_t([2e-2]), i0=_t([0.1]))
+    cap.v0.requires_grad_(True)
+    ind.i0.requires_grad_(True)
+    layer = _electrical(
+        [("a", "gnd", "source"), ("a", "b", "r"), ("b", "c", "ind"), ("c", "gnd", "cap")],
+        [Source(_t([1.5])), Conductance(_t([0.5]), kind="r"), ind, cap],
+        nodes=("gnd", "a", "b", "c"))
+    return _solve(layer, (GROUND,), params={"v0": cap.v0, "i0": ind.i0}, mode="initial")
+
+
+def _transformer_net():
+    return _net(["gnd", "p", "s"], [("p", "gnd", "source"), ("p", "gnd", "xfmr"),
+                                    ("s", "gnd", "xfmr"), ("s", "gnd", "load")])
+
+
+def case_general_transformer_library():
+    ratio = TransformerRatio(_t([2.0]), kind="xfmr", learnable=True)
+    load = Resistance(_t([4.0]), kind="load", learnable=True)
+    layer = KirchhoffLayer(_transformer_net(), "e",
+                           [PrescribedVoltage(_t([10.0]), kind="source"), ratio, load],
+                           boundary=["gnd"])
+    return _solve(layer, (GROUND,), params={"n": ratio.n, "R": load.R})
+
+
+def case_general_transformer_library_phasor():
+    layer = KirchhoffLayer(
+        _transformer_net(), "e",
+        [Source(_t([10.0])), TransformerRatio(_t([2.0]), kind="xfmr"),
+         Resistance(_t([4.0]), kind="load")], boundary=["gnd"], phasor=True)
+    return _solve(layer, (GROUND.to(C128), {"e.frequency": _t([50.0, 60.0])}),
+                  differentiable=False)
+
+
+def _pda(nodes, q_required, learnable=False):
+    n = len(nodes)
+    return PressureDrivenDemand(torch.tensor(nodes), torch.tensor(q_required, dtype=F64),
+                                torch.zeros(n, dtype=F64), p_min=0.0, p_req=3.0,
+                                learnable=learnable)
+
+
+def case_fast_with_pressure_driven_demand():
+    ws = [_pda([1, 3], [0.05, 0.04], learnable=True)]
+    layer, law = _fast(withdrawals=ws)
+    pb, src = _fast_inputs(grad=True)
+    return _solve(layer, (pb, {}, src), params={"C": law.C, "q_required": ws[0].q_required})
+
+
+def case_fast_with_driven_withdrawal():
+    layer, law = _fast(withdrawals=[_DrivenDemand(torch.tensor([1, 3]))])
+    pb, src = _fast_inputs()
+    demand = _t([0.02, 0.03], grad=True)
+    return _solve(layer, (pb, {"demand": demand}, src), params={"C": law.C, "demand": demand})
+
+
+def _rc_layer(withdrawals):
+    net = _net(["gnd", "s", "a"], [("s", "gnd", "voltage_source"), ("s", "a", "resistor"),
+                                   ("a", "gnd", "resistor")])
+    return KirchhoffLayer(
+        net, "e", [PrescribedVoltage(_t([5.0])), Resistance(_t([2.0, 3.0]), learnable=True)],
+        boundary=["gnd"], withdrawals=withdrawals)
+
+
+def case_general_with_pressure_driven_demand():
+    ws = [_pda([2], [0.5], learnable=True)]
+    return _solve(_rc_layer(ws), (GROUND,), params={"q_required": ws[0].q_required})
+
+
+def case_general_with_driven_withdrawal():
+    layer = _rc_layer([_DrivenDemand(torch.tensor([1, 2]))])
+    demand = _t([0.1, 0.2], grad=True)
+    return _solve(layer, (GROUND, {"demand": demand}), params={"demand": demand})
+
+
+def case_fast_storage_initial():
+    storage = LinearStorage([1, 2], _t([0.06, 0.03]), initial=_t([0.4, -0.2]), learnable=True)
+    layer, _ = _fast(storage=[storage])
+    pb, src = _fast_inputs()
+    return _attempt(lambda: _solve(layer, (pb, {}, src), mode="initial",
+                                   params={"C": storage.C}))
+
+
 # ------------------------------------------------------------------ the registry
+
+CLASSIC, GENERAL, NO_LAYER = "classic", "general", "none"
+
+#: The path every case takes (`KirchhoffLayer.mna`), asserted against what is built and
+#: recorded as the case's `path` in the golden file. A merged assembler may reproduce the
+#: numbers of a case that changes path, so the path is pinned on its own. Task 30 updates
+#: the rows marked "moves to classic in Task 30" (a layer whose only reason for the general
+#: path is a dynamic or context-reading law, with no implicit law).
+EXPECTED_PATH = {
+    "fast_primal": CLASSIC,
+    "fast_differentiable": CLASSIC,
+    "fast_return_primal_in_grad_mode": CLASSIC,
+    "fast_return_primal_unconverged": CLASSIC,
+    "fast_ensemble3": CLASSIC,
+    "fast_linear_solver_auto": CLASSIC,
+    "fast_linear_solver_cg": CLASSIC,
+    "fast_linear_solver_direct": CLASSIC,
+    "fast_linear_solver_cg_primal": CLASSIC,
+    "fast_linear_solver_direct_primal": CLASSIC,
+    "fast_with_head_driver": CLASSIC,
+    "fast_with_head_driver_ensemble": CLASSIC,
+    "fast_with_withdrawal": CLASSIC,
+    "fast_with_withdrawal_and_head": CLASSIC,
+    "fast_storage_backward_euler": CLASSIC,
+    "fast_storage_trapezoidal": CLASSIC,
+    "fast_storage_trapezoidal_with_withdrawal": CLASSIC,
+    "fast_inexact_primal": CLASSIC,
+    "fast_inexact_differentiable": CLASSIC,
+    "fast_linear_init": CLASSIC,
+    "fast_residual_jacobian_adjoint": CLASSIC,
+    "fast_residual_jacobian_adjoint_with_storage": CLASSIC,
+    "fast_flows_and_balance": CLASSIC,
+    "general_resistor_voltage_dc_primal": GENERAL,
+    "general_resistor_voltage_dc_differentiable": GENERAL,
+    "general_cap_ind_backward_euler": GENERAL,
+    "general_cap_ind_trapezoidal": GENERAL,
+    "general_cap_ind_mixed_schemes": GENERAL,
+    "general_fan_orifice_cold_and_warm": GENERAL,
+    "general_fan_orifice_ensemble": GENERAL,
+    "general_fan_orifice_flows_and_balance": GENERAL,
+    "general_transformer": GENERAL,
+    "general_phasor_rlc_two_frequencies": GENERAL,
+    "general_phasor_rlc_batched_differentiable": GENERAL,
+    "general_storage_initial_then_trapezoidal": GENERAL,
+    "general_withdrawal_and_storage": GENERAL,
+    "general_withdrawal_steady": GENERAL,
+    "general_inexact_primal": GENERAL,
+    "general_inexact_differentiable": GENERAL,
+    # moves to classic in Task 30
+    "moves_prescribed_current_primal": GENERAL,
+    # moves to classic in Task 30
+    "moves_prescribed_current_differentiable": GENERAL,
+    # moves to classic in Task 30
+    "moves_prescribed_current_grounded_storage": GENERAL,
+    "general_linear_solver_auto": GENERAL,
+    "general_linear_solver_direct": GENERAL,
+    "general_linear_solver_cg": NO_LAYER,  # refused at construction: cg needs a symmetric Jacobian
+    "general_unconverged_return_primal": GENERAL,
+    "general_unconverged_return": GENERAL,
+    "general_unconverged_raise": GENERAL,
+    "fast_unconverged_return": CLASSIC,
+    "fast_unconverged_raise": CLASSIC,
+    "general_with_head_driver": GENERAL,
+    "general_with_head_driver_ensemble": GENERAL,
+    "general_introspection_and_refusals": GENERAL,
+    "general_phasor_rlc_parameter_gradients": GENERAL,
+    # moves to classic in Task 30
+    "general_dynamic_potential_law_without_implicit": GENERAL,
+    "general_initial_differentiable": GENERAL,
+    "general_transformer_library": GENERAL,
+    "general_transformer_library_phasor": GENERAL,
+    "fast_with_pressure_driven_demand": CLASSIC,
+    "fast_with_driven_withdrawal": CLASSIC,
+    "general_with_pressure_driven_demand": GENERAL,
+    "general_with_driven_withdrawal": GENERAL,
+    "fast_storage_initial": CLASSIC,
+}
+
+#: The rows of `EXPECTED_PATH` that Task 30 moves.
+MOVERS = ("general_dynamic_potential_law_without_implicit",
+          "moves_prescribed_current_differentiable",
+          "moves_prescribed_current_grounded_storage",
+          "moves_prescribed_current_primal")
 
 
 def _cases() -> dict[str, Callable[[], dict]]:
@@ -570,8 +936,23 @@ def _cases() -> dict[str, Callable[[], dict]]:
             if name.startswith("case_") and callable(fn)}
 
 
-#: Cases whose differences the merge of the two paths causes on purpose (Task 30).
-MOVERS = tuple(sorted(n for n in _cases() if n.startswith("moves_")))
+def run_case(fn: Callable[[], dict]) -> dict:
+    """`fn`'s outcome with the `path` of the layers it built: `"classic"`, `"general"`, or
+    `"none"` when construction was refused."""
+    seen: list[str] = []
+    original = KirchhoffLayer.__init__
+
+    def init(self, *args, **kwargs):
+        original(self, *args, **kwargs)
+        seen.append(GENERAL if self.mna else CLASSIC)
+
+    KirchhoffLayer.__init__ = init
+    try:
+        record = outcome(fn)
+    finally:
+        KirchhoffLayer.__init__ = original
+    record["path"] = "+".join(sorted(set(seen))) or NO_LAYER
+    return record
 
 
 def build_all() -> dict[str, Any]:
@@ -579,7 +960,7 @@ def build_all() -> dict[str, Any]:
     previous = torch.get_default_dtype()
     torch.set_default_dtype(F64)
     try:
-        return {name: outcome(fn) for name, fn in sorted(_cases().items())}
+        return {name: run_case(fn) for name, fn in sorted(_cases().items())}
     finally:
         torch.set_default_dtype(previous)
 
@@ -597,17 +978,34 @@ def _golden() -> dict:
 @pytest.mark.parametrize("name", sorted(_cases()))
 def test_potential_layer_pin(name):
     """The case's record equals the golden one (bit for bit under NOODL_GOLDEN_EXACT=1)."""
-    actual = json.loads(json.dumps(outcome(_cases()[name])))
+    actual = json.loads(json.dumps(run_case(_cases()[name])))
     diff = first_difference(actual, _golden()["cases"][name], name)
     assert diff is None, diff
 
 
+@pytest.mark.parametrize("name", sorted(_cases()))
+def test_case_takes_the_path_it_pins(name):
+    """Every case builds layers of the path the table says, and the golden file records it."""
+    path = run_case(_cases()[name])["path"]
+    assert path == EXPECTED_PATH[name], f"{name}: built {path}, expected {EXPECTED_PATH[name]}"
+    assert _golden()["cases"][name]["path"] == EXPECTED_PATH[name]
+
+
 def test_every_case_is_pinned_and_no_pin_is_orphaned():
-    assert set(_golden()["cases"]) == set(_cases())
+    assert set(_golden()["cases"]) == set(_cases()) == set(EXPECTED_PATH)
+
+
+def test_meta_is_consistent():
+    meta = _golden()["meta"]
+    assert meta["exact"] == sorted(_cases())
+    assert tuple(meta["movers"]) == MOVERS
+    assert set(MOVERS) <= set(EXPECTED_PATH)
+    assert set(meta["tolerance_1e-12"]) <= set(_cases())
 
 
 def test_no_case_is_an_error_outcome():
-    """A pin of an exception would hide a broken case: every case here must run."""
+    """A pin of an exception would hide a broken case: every case here must run (a case
+    that pins a refusal catches it inside the case)."""
     errors = {n: v["error"] for n, v in _golden()["cases"].items() if "error" in v}
     assert not errors, errors
 

@@ -80,7 +80,8 @@
             5
           ]
         }
-      }
+      },
+      "path": "classic"
     },
     "fast_ensemble3": {
       "ok": {
@@ -236,7 +237,8 @@
             5
           ]
         }
-      }
+      },
+      "path": "classic"
     },
     "fast_flows_and_balance": {
       "ok": {
@@ -277,7 +279,8 @@
             5
           ]
         }
-      }
+      },
+      "path": "classic"
     },
     "fast_inexact_differentiable": {
       "ok": {
@@ -370,7 +373,8 @@
             3
           ]
         }
-      }
+      },
+      "path": "classic"
     },
     "fast_inexact_primal": {
       "ok": {
@@ -410,7 +414,8 @@
             3
           ]
         }
-      }
+      },
+      "path": "classic"
     },
     "fast_linear_init": {
       "ok": {
@@ -425,7 +430,8 @@
             3
           ]
         }
-      }
+      },
+      "path": "classic"
     },
     "fast_linear_solver_auto": {
       "ok": {
@@ -537,7 +543,8 @@
             5
           ]
         }
-      }
+      },
+      "path": "classic"
     },
     "fast_linear_solver_cg": {
       "ok": {
@@ -649,7 +656,8 @@
             5
           ]
         }
-      }
+      },
+      "path": "classic"
     },
     "fast_linear_solver_cg_primal": {
       "ok": {
@@ -723,7 +731,8 @@
             5
           ]
         }
-      }
+      },
+      "path": "classic"
     },
     "fast_linear_solver_direct": {
       "ok": {
@@ -835,7 +844,8 @@
             5
           ]
         }
-      }
+      },
+      "path": "classic"
     },
     "fast_linear_solver_direct_primal": {
       "ok": {
@@ -909,7 +919,8 @@
             5
           ]
         }
-      }
+      },
+      "path": "classic"
     },
     "fast_primal": {
       "ok": {
@@ -953,7 +964,8 @@
             5
           ]
         }
-      }
+      },
+      "path": "classic"
     },
     "fast_residual_jacobian_adjoint": {
       "ok": {
@@ -1003,7 +1015,8 @@
             3
           ]
         }
-      }
+      },
+      "path": "classic"
     },
     "fast_residual_jacobian_adjoint_with_storage": {
       "ok": {
@@ -1064,7 +1077,8 @@
             3
           ]
         }
-      }
+      },
+      "path": "classic"
     },
     "fast_return_primal_in_grad_mode": {
       "ok": {
@@ -1108,7 +1122,8 @@
             5
           ]
         }
-      }
+      },
+      "path": "classic"
     },
     "fast_return_primal_unconverged": {
       "ok": {
@@ -1152,7 +1167,8 @@
             5
           ]
         }
-      }
+      },
+      "path": "classic"
     },
     "fast_storage_backward_euler": {
       "ok": {
@@ -1244,7 +1260,17 @@
             2
           ]
         }
-      }
+      },
+      "path": "classic"
+    },
+    "fast_storage_initial": {
+      "ok": {
+        "refused": {
+          "message": "KirchhoffLayer 'e': mode='initial' with storage that holds an initial potential ",
+          "type": "ValueError"
+        }
+      },
+      "path": "classic"
     },
     "fast_storage_trapezoidal": {
       "ok": {
@@ -1346,7 +1372,8 @@
             2
           ]
         }
-      }
+      },
+      "path": "classic"
     },
     "fast_storage_trapezoidal_with_withdrawal": {
       "ok": {
@@ -1448,7 +1475,132 @@
             2
           ]
         }
-      }
+      },
+      "path": "classic"
+    },
+    "fast_unconverged_raise": {
+      "ok": {
+        "refused": {
+          "message": "KirchhoffLayer 'e' solve: batch indices [0] failed to converge after 1 iteration",
+          "type": "ConvergenceError"
+        }
+      },
+      "path": "classic"
+    },
+    "fast_unconverged_return": {
+      "ok": {
+        "diagnostics": {
+          "backend": "sparse_direct",
+          "converged": {
+            "data": false,
+            "dtype": "torch.bool",
+            "shape": []
+          },
+          "linear_iterations": {
+            "data": 1,
+            "dtype": "torch.int64",
+            "shape": []
+          },
+          "newton_iterations": 1
+        },
+        "phi": {
+          "data": [
+            6.0,
+            5.969571744412097,
+            4.7375250278562255,
+            4.794223303794177,
+            0.5
+          ],
+          "dtype": "torch.float64",
+          "shape": [
+            5
+          ]
+        },
+        "q": {
+          "data": [
+            0.0010330707995740002,
+            0.009162155348559834,
+            -0.00185781151611989,
+            0.023206920543877484,
+            0.012218024684271607
+          ],
+          "dtype": "torch.float64",
+          "shape": [
+            5
+          ]
+        }
+      },
+      "path": "classic"
+    },
+    "fast_with_driven_withdrawal": {
+      "ok": {
+        "diagnostics": {
+          "backend": "sparse_direct",
+          "converged": {
+            "data": true,
+            "dtype": "torch.bool",
+            "shape": []
+          },
+          "linear_iterations": {
+            "data": 1,
+            "dtype": "torch.int64",
+            "shape": []
+          },
+          "newton_iterations": 4
+        },
+        "grads": {
+          "C": {
+            "data": [
+              131.19050826499927,
+              36.31466578822887,
+              8.960845807381125,
+              -13.015278871401419,
+              -4.234395826354332
+            ],
+            "dtype": "torch.float64",
+            "shape": [
+              5
+            ]
+          },
+          "demand": {
+            "data": [
+              -72.38411545127872,
+              -28.87453442958198
+            ],
+            "dtype": "torch.float64",
+            "shape": [
+              2
+            ]
+          }
+        },
+        "phi": {
+          "data": [
+            6.0,
+            1.4738024248426185,
+            0.5638359836502752,
+            0.6520332881111569,
+            0.5
+          ],
+          "dtype": "torch.float64",
+          "shape": [
+            5
+          ]
+        },
+        "q": {
+          "data": [
+            0.02668251608814655,
+            0.007524133308146366,
+            -0.002475866359520411,
+            0.0026454688787222415,
+            0.009682334276584695
+          ],
+          "dtype": "torch.float64",
+          "shape": [
+            5
+          ]
+        }
+      },
+      "path": "classic"
     },
     "fast_with_head_driver": {
       "ok": {
@@ -1533,7 +1685,8 @@
             5
           ]
         }
-      }
+      },
+      "path": "classic"
     },
     "fast_with_head_driver_ensemble": {
       "ok": {
@@ -1668,7 +1821,78 @@
             5
           ]
         }
-      }
+      },
+      "path": "classic"
+    },
+    "fast_with_pressure_driven_demand": {
+      "ok": {
+        "diagnostics": {
+          "backend": "sparse_direct",
+          "converged": {
+            "data": true,
+            "dtype": "torch.bool",
+            "shape": []
+          },
+          "linear_iterations": {
+            "data": 1,
+            "dtype": "torch.int64",
+            "shape": []
+          },
+          "newton_iterations": 5
+        },
+        "grads": {
+          "C": {
+            "data": [
+              196.81670700590965,
+              35.77048595708496,
+              12.723246180819388,
+              -15.450081039894604,
+              -4.396206928950039
+            ],
+            "dtype": "torch.float64",
+            "shape": [
+              5
+            ]
+          },
+          "q_required": {
+            "data": [
+              -46.3068322257177,
+              -29.56455745133292
+            ],
+            "dtype": "torch.float64",
+            "shape": [
+              2
+            ]
+          }
+        },
+        "phi": {
+          "data": [
+            6.0,
+            1.2580532492811078,
+            0.4776383051252751,
+            0.6079349280054012,
+            0.5
+          ],
+          "dtype": "torch.float64",
+          "shape": [
+            5
+          ]
+        },
+        "q": {
+          "data": [
+            0.027502478720027347,
+            0.0068092865729294854,
+            -0.0031907134256421244,
+            0.0021173751581000707,
+            0.008314530841034411
+          ],
+          "dtype": "torch.float64",
+          "shape": [
+            5
+          ]
+        }
+      },
+      "path": "classic"
     },
     "fast_with_withdrawal": {
       "ok": {
@@ -1750,7 +1974,8 @@
             5
           ]
         }
-      }
+      },
+      "path": "classic"
     },
     "fast_with_withdrawal_and_head": {
       "ok": {
@@ -1822,7 +2047,8 @@
             5
           ]
         }
-      }
+      },
+      "path": "classic"
     },
     "general_cap_ind_backward_euler": {
       "ok": {
@@ -1976,7 +2202,8 @@
             ]
           }
         }
-      }
+      },
+      "path": "general"
     },
     "general_cap_ind_mixed_schemes": {
       "ok": {
@@ -2130,7 +2357,8 @@
             ]
           }
         }
-      }
+      },
+      "path": "general"
     },
     "general_cap_ind_trapezoidal": {
       "ok": {
@@ -2284,7 +2512,130 @@
             ]
           }
         }
-      }
+      },
+      "path": "general"
+    },
+    "general_dynamic_potential_law_without_implicit": {
+      "ok": {
+        "grads": {
+          "C": {
+            "data": [
+              0.10756181398097026
+            ],
+            "dtype": "torch.float64",
+            "shape": [
+              1
+            ]
+          },
+          "amplitude": {
+            "data": [
+              3.09152651992131
+            ],
+            "dtype": "torch.float64",
+            "shape": [
+              1
+            ]
+          }
+        },
+        "initial": {
+          "phi": {
+            "data": [
+              0.0,
+              -0.5910404133226791
+            ],
+            "dtype": "torch.float64",
+            "shape": [
+              2
+            ]
+          },
+          "q": {
+            "data": [
+              0.29552020666133955,
+              -0.29552020666133955,
+              0.0
+            ],
+            "dtype": "torch.float64",
+            "shape": [
+              3
+            ]
+          }
+        },
+        "step0": {
+          "diagnostics": {
+            "backend": "sparse_direct",
+            "converged": {
+              "data": true,
+              "dtype": "torch.bool",
+              "shape": []
+            },
+            "linear_iterations": {
+              "data": 1,
+              "dtype": "torch.int64",
+              "shape": []
+            },
+            "newton_iterations": 2
+          },
+          "phi": {
+            "data": [
+              0.0,
+              -0.6018130626240152
+            ],
+            "dtype": "torch.float64",
+            "shape": [
+              2
+            ]
+          },
+          "q": {
+            "data": [
+              0.32245182991467986,
+              -0.3009065313120076,
+              -0.021545298602672288
+            ],
+            "dtype": "torch.float64",
+            "shape": [
+              3
+            ]
+          }
+        },
+        "step1": {
+          "diagnostics": {
+            "backend": "sparse_direct",
+            "converged": {
+              "data": true,
+              "dtype": "torch.bool",
+              "shape": []
+            },
+            "linear_iterations": {
+              "data": 1,
+              "dtype": "torch.int64",
+              "shape": []
+            },
+            "newton_iterations": 2
+          },
+          "phi": {
+            "data": [
+              0.0,
+              -0.35811984931129814
+            ],
+            "dtype": "torch.float64",
+            "shape": [
+              2
+            ]
+          },
+          "q": {
+            "data": [
+              -0.8172582271978914,
+              -0.17905992465564907,
+              0.9963181518535407
+            ],
+            "dtype": "torch.float64",
+            "shape": [
+              3
+            ]
+          }
+        }
+      },
+      "path": "general"
     },
     "general_fan_orifice_cold_and_warm": {
       "ok": {
@@ -2422,7 +2773,8 @@
             ]
           }
         }
-      }
+      },
+      "path": "general"
     },
     "general_fan_orifice_ensemble": {
       "ok": {
@@ -2520,7 +2872,8 @@
             3
           ]
         }
-      }
+      },
+      "path": "general"
     },
     "general_fan_orifice_flows_and_balance": {
       "ok": {
@@ -2566,7 +2919,8 @@
             3
           ]
         }
-      }
+      },
+      "path": "general"
     },
     "general_inexact_differentiable": {
       "ok": {
@@ -2657,7 +3011,8 @@
             3
           ]
         }
-      }
+      },
+      "path": "general"
     },
     "general_inexact_primal": {
       "ok": {
@@ -2697,7 +3052,296 @@
             3
           ]
         }
-      }
+      },
+      "path": "general"
+    },
+    "general_initial_differentiable": {
+      "ok": {
+        "diagnostics": {
+          "backend": "sparse_direct",
+          "converged": {
+            "data": true,
+            "dtype": "torch.bool",
+            "shape": []
+          },
+          "linear_iterations": {
+            "data": 1,
+            "dtype": "torch.int64",
+            "shape": []
+          },
+          "newton_iterations": 2
+        },
+        "grads": {
+          "i0": {
+            "data": [
+              -1.2000000000000002
+            ],
+            "dtype": "torch.float64",
+            "shape": [
+              1
+            ]
+          },
+          "v0": {
+            "data": [
+              1.0
+            ],
+            "dtype": "torch.float64",
+            "shape": [
+              1
+            ]
+          }
+        },
+        "phi": {
+          "data": [
+            0.0,
+            1.5,
+            1.3,
+            0.4
+          ],
+          "dtype": "torch.float64",
+          "shape": [
+            4
+          ]
+        },
+        "q": {
+          "data": [
+            -0.1,
+            0.09999999999999998,
+            0.1,
+            0.1
+          ],
+          "dtype": "torch.float64",
+          "shape": [
+            4
+          ]
+        }
+      },
+      "path": "general"
+    },
+    "general_introspection_and_refusals": {
+      "ok": {
+        "adjoint": {
+          "refused": {
+            "message": "KirchhoffLayer 'air' is solved by Modified Nodal Analysis (its laws include impl",
+            "type": "TypeError"
+          }
+        },
+        "dflows": {
+          "refused": {
+            "message": "KirchhoffLayer 'air' is solved by Modified Nodal Analysis (its laws include impl",
+            "type": "TypeError"
+          }
+        },
+        "flows_without_q": {
+          "refused": {
+            "message": "KirchhoffLayer 'air' is solved by Modified Nodal Analysis (its laws include impl",
+            "type": "TypeError"
+          }
+        },
+        "jacobian": {
+          "refused": {
+            "message": "KirchhoffLayer 'air' is solved by Modified Nodal Analysis (its laws include impl",
+            "type": "TypeError"
+          }
+        },
+        "linear_init": {
+          "refused": {
+            "message": "KirchhoffLayer 'air' is solved by Modified Nodal Analysis (its laws include impl",
+            "type": "TypeError"
+          }
+        },
+        "power_residual": {
+          "value": {
+            "data": -2.2589194625943776e-08,
+            "dtype": "torch.float64",
+            "shape": []
+          }
+        },
+        "residual": {
+          "refused": {
+            "message": "KirchhoffLayer 'air' is solved by Modified Nodal Analysis (its laws include impl",
+            "type": "TypeError"
+          }
+        }
+      },
+      "path": "general"
+    },
+    "general_linear_solver_auto": {
+      "ok": {
+        "diagnostics": {
+          "backend": "sparse_direct",
+          "converged": {
+            "data": [
+              true,
+              true
+            ],
+            "dtype": "torch.bool",
+            "shape": [
+              2
+            ]
+          },
+          "linear_iterations": {
+            "data": [
+              1,
+              1
+            ],
+            "dtype": "torch.int64",
+            "shape": [
+              2
+            ]
+          },
+          "newton_iterations": 4
+        },
+        "grads": {
+          "c": {
+            "data": [
+              [
+                8.999999280000088
+              ],
+              [
+                13.499998920000131
+              ]
+            ],
+            "dtype": "torch.float64",
+            "shape": [
+              2,
+              1
+            ]
+          }
+        },
+        "phi": {
+          "data": [
+            [
+              0.0,
+              5.0,
+              2.5
+            ],
+            [
+              0.0,
+              5.0,
+              2.5
+            ]
+          ],
+          "dtype": "torch.float64",
+          "shape": [
+            2,
+            3
+          ]
+        },
+        "q": {
+          "data": [
+            [
+              0.9486832601031857,
+              0.9486832601031857,
+              0.9486832601031857
+            ],
+            [
+              1.4230248901547786,
+              1.4230248901547786,
+              1.4230248901547786
+            ]
+          ],
+          "dtype": "torch.float64",
+          "shape": [
+            2,
+            3
+          ]
+        }
+      },
+      "path": "general"
+    },
+    "general_linear_solver_cg": {
+      "ok": {
+        "refused": {
+          "message": "KirchhoffLayer 'air': linear_solver='cg' needs a symmetric positive definite Jac",
+          "type": "ValueError"
+        }
+      },
+      "path": "none"
+    },
+    "general_linear_solver_direct": {
+      "ok": {
+        "diagnostics": {
+          "backend": "direct",
+          "converged": {
+            "data": [
+              true,
+              true
+            ],
+            "dtype": "torch.bool",
+            "shape": [
+              2
+            ]
+          },
+          "linear_iterations": {
+            "data": [
+              1,
+              1
+            ],
+            "dtype": "torch.int64",
+            "shape": [
+              2
+            ]
+          },
+          "newton_iterations": 4
+        },
+        "grads": {
+          "c": {
+            "data": [
+              [
+                8.999999280000088
+              ],
+              [
+                13.499998920000133
+              ]
+            ],
+            "dtype": "torch.float64",
+            "shape": [
+              2,
+              1
+            ]
+          }
+        },
+        "phi": {
+          "data": [
+            [
+              0.0,
+              5.0,
+              2.5
+            ],
+            [
+              0.0,
+              5.0,
+              2.5
+            ]
+          ],
+          "dtype": "torch.float64",
+          "shape": [
+            2,
+            3
+          ]
+        },
+        "q": {
+          "data": [
+            [
+              0.9486832601031857,
+              0.9486832601031857,
+              0.9486832601031857
+            ],
+            [
+              1.4230248901547786,
+              1.4230248901547786,
+              1.4230248901547786
+            ]
+          ],
+          "dtype": "torch.float64",
+          "shape": [
+            2,
+            3
+          ]
+        }
+      },
+      "path": "general"
     },
     "general_phasor_rlc_batched_differentiable": {
       "ok": {
@@ -2901,7 +3545,156 @@
             4
           ]
         }
-      }
+      },
+      "path": "general"
+    },
+    "general_phasor_rlc_parameter_gradients": {
+      "ok": {
+        "diagnostics": {
+          "backend": "sparse_direct",
+          "converged": {
+            "data": [
+              true,
+              true
+            ],
+            "dtype": "torch.bool",
+            "shape": [
+              2
+            ]
+          },
+          "linear_iterations": {
+            "data": [
+              1,
+              1
+            ],
+            "dtype": "torch.int64",
+            "shape": [
+              2
+            ]
+          },
+          "newton_iterations": 2
+        },
+        "grads": {
+          "C": {
+            "data": [
+              -31619287.519461066
+            ],
+            "dtype": "torch.float64",
+            "shape": [
+              1
+            ]
+          },
+          "L": {
+            "data": [
+              -15809.143782486313
+            ],
+            "dtype": "torch.float64",
+            "shape": [
+              1
+            ]
+          },
+          "R": {
+            "data": [
+              -8.905700248883784
+            ],
+            "dtype": "torch.float64",
+            "shape": [
+              1
+            ]
+          }
+        },
+        "phi": {
+          "data": [
+            [
+              [
+                0.0,
+                0.0
+              ],
+              [
+                1.0,
+                0.0
+              ],
+              [
+                0.9999996051380411,
+                -0.0006283803012687424
+              ],
+              [
+                1.0000983108849475,
+                -0.0006284423260402111
+              ]
+            ],
+            [
+              [
+                0.0,
+                0.0
+              ],
+              [
+                1.0,
+                0.0
+              ],
+              [
+                5.78432302056342e-11,
+                -7.605474421933959e-06
+              ],
+              [
+                0.00012025313821893199,
+                -15.811392102664984
+              ]
+            ]
+          ],
+          "dtype": "torch.complex128",
+          "shape": [
+            2,
+            4
+          ]
+        },
+        "q": {
+          "data": [
+            [
+              [
+                -1.97430979469281e-07,
+                -0.0003141901506343712
+              ],
+              [
+                1.974309794539053e-07,
+                0.0003141901506343712
+              ],
+              [
+                1.974309794677831e-07,
+                0.0003141901506343712
+              ],
+              [
+                1.9743097946928086e-07,
+                0.0003141901506343712
+              ]
+            ],
+            [
+              [
+                -0.49999999997107836,
+                -3.8027372109669797e-06
+              ],
+              [
+                0.49999999997107836,
+                3.8027372109669797e-06
+              ],
+              [
+                0.49999999997107836,
+                3.8027372109669797e-06
+              ],
+              [
+                0.49999999997107836,
+                3.802737210966633e-06
+              ]
+            ]
+          ],
+          "dtype": "torch.complex128",
+          "shape": [
+            2,
+            4
+          ]
+        }
+      },
+      "path": "general"
     },
     "general_phasor_rlc_two_frequencies": {
       "ok": {
@@ -3019,7 +3812,8 @@
             4
           ]
         }
-      }
+      },
+      "path": "general"
     },
     "general_resistor_voltage_dc_differentiable": {
       "ok": {
@@ -3080,7 +3874,8 @@
             3
           ]
         }
-      }
+      },
+      "path": "general"
     },
     "general_resistor_voltage_dc_primal": {
       "ok": {
@@ -3119,7 +3914,8 @@
             2
           ]
         }
-      }
+      },
+      "path": "general"
     },
     "general_storage_initial_then_trapezoidal": {
       "ok": {
@@ -3241,7 +4037,8 @@
             ]
           }
         }
-      }
+      },
+      "path": "general"
     },
     "general_transformer": {
       "ok": {
@@ -3289,7 +4086,489 @@
             4
           ]
         }
-      }
+      },
+      "path": "general"
+    },
+    "general_transformer_library": {
+      "ok": {
+        "diagnostics": {
+          "backend": "sparse_direct",
+          "converged": {
+            "data": true,
+            "dtype": "torch.bool",
+            "shape": []
+          },
+          "linear_iterations": {
+            "data": 1,
+            "dtype": "torch.int64",
+            "shape": []
+          },
+          "newton_iterations": 1
+        },
+        "grads": {
+          "R": {
+            "data": [
+              -1.953125
+            ],
+            "dtype": "torch.float64",
+            "shape": [
+              1
+            ]
+          },
+          "n": {
+            "data": [
+              -7.1875
+            ],
+            "dtype": "torch.float64",
+            "shape": [
+              1
+            ]
+          }
+        },
+        "phi": {
+          "data": [
+            0.0,
+            10.0,
+            5.0
+          ],
+          "dtype": "torch.float64",
+          "shape": [
+            3
+          ]
+        },
+        "q": {
+          "data": [
+            -0.625,
+            0.625,
+            -1.25,
+            1.25
+          ],
+          "dtype": "torch.float64",
+          "shape": [
+            4
+          ]
+        }
+      },
+      "path": "general"
+    },
+    "general_transformer_library_phasor": {
+      "ok": {
+        "diagnostics": {
+          "backend": "sparse_direct",
+          "converged": {
+            "data": true,
+            "dtype": "torch.bool",
+            "shape": []
+          },
+          "linear_iterations": {
+            "data": 1,
+            "dtype": "torch.int64",
+            "shape": []
+          },
+          "newton_iterations": 2
+        },
+        "phi": {
+          "data": [
+            [
+              0.0,
+              0.0
+            ],
+            [
+              10.0,
+              0.0
+            ],
+            [
+              5.0,
+              0.0
+            ]
+          ],
+          "dtype": "torch.complex128",
+          "shape": [
+            3
+          ]
+        },
+        "q": {
+          "data": [
+            [
+              -0.625,
+              0.0
+            ],
+            [
+              0.625,
+              0.0
+            ],
+            [
+              -1.25,
+              0.0
+            ],
+            [
+              1.25,
+              0.0
+            ]
+          ],
+          "dtype": "torch.complex128",
+          "shape": [
+            4
+          ]
+        }
+      },
+      "path": "general"
+    },
+    "general_unconverged_raise": {
+      "ok": {
+        "refused": {
+          "message": "KirchhoffLayer 'air' solve: batch indices [0] failed to converge after 1 iterati",
+          "type": "ConvergenceError"
+        }
+      },
+      "path": "general"
+    },
+    "general_unconverged_return": {
+      "ok": {
+        "diagnostics": {
+          "backend": "sparse_direct",
+          "converged": {
+            "data": false,
+            "dtype": "torch.bool",
+            "shape": []
+          },
+          "linear_iterations": {
+            "data": 1,
+            "dtype": "torch.int64",
+            "shape": []
+          },
+          "newton_iterations": 1
+        },
+        "phi": {
+          "data": [
+            0.0,
+            3.75,
+            1.875
+          ],
+          "dtype": "torch.float64",
+          "shape": [
+            3
+          ]
+        },
+        "q": {
+          "data": [
+            41.50489428970998,
+            0.9585144074730235,
+            0.9585144074730235
+          ],
+          "dtype": "torch.float64",
+          "shape": [
+            3
+          ]
+        }
+      },
+      "path": "general"
+    },
+    "general_unconverged_return_primal": {
+      "ok": {
+        "diagnostics": {
+          "backend": "sparse_direct",
+          "converged": {
+            "data": false,
+            "dtype": "torch.bool",
+            "shape": []
+          },
+          "linear_iterations": {
+            "data": 1,
+            "dtype": "torch.int64",
+            "shape": []
+          },
+          "newton_iterations": 1
+        },
+        "phi": {
+          "data": [
+            0.0,
+            3.75,
+            1.875
+          ],
+          "dtype": "torch.float64",
+          "shape": [
+            3
+          ]
+        },
+        "q": {
+          "data": [
+            41.50489428970998,
+            0.9585144074730235,
+            0.9585144074730235
+          ],
+          "dtype": "torch.float64",
+          "shape": [
+            3
+          ]
+        }
+      },
+      "path": "general"
+    },
+    "general_with_driven_withdrawal": {
+      "ok": {
+        "diagnostics": {
+          "backend": "sparse_direct",
+          "converged": {
+            "data": true,
+            "dtype": "torch.bool",
+            "shape": []
+          },
+          "linear_iterations": {
+            "data": 1,
+            "dtype": "torch.int64",
+            "shape": []
+          },
+          "newton_iterations": 2
+        },
+        "grads": {
+          "demand": {
+            "data": [
+              17.903225806451612,
+              3.61266825551341
+            ],
+            "dtype": "torch.float64",
+            "shape": [
+              2
+            ]
+          }
+        },
+        "phi": {
+          "data": [
+            0.0,
+            5.0,
+            2.4193548387096775
+          ],
+          "dtype": "torch.float64",
+          "shape": [
+            3
+          ]
+        },
+        "q": {
+          "data": [
+            -1.7903225806451613,
+            1.2903225806451613,
+            0.8064516129032259
+          ],
+          "dtype": "torch.float64",
+          "shape": [
+            3
+          ]
+        }
+      },
+      "path": "general"
+    },
+    "general_with_head_driver": {
+      "ok": {
+        "diagnostics": {
+          "backend": "sparse_direct",
+          "converged": {
+            "data": true,
+            "dtype": "torch.bool",
+            "shape": []
+          },
+          "linear_iterations": {
+            "data": 1,
+            "dtype": "torch.int64",
+            "shape": []
+          },
+          "newton_iterations": 4
+        },
+        "grads": {
+          "C": {
+            "data": [
+              1.0433783726035593
+            ],
+            "dtype": "torch.float64",
+            "shape": [
+              1
+            ]
+          },
+          "head": {
+            "data": [
+              -1.8944336953982002,
+              0.8944336953982001,
+              -0.10556630460179992
+            ],
+            "dtype": "torch.float64",
+            "shape": [
+              3
+            ]
+          }
+        },
+        "phi": {
+          "data": [
+            0.0,
+            1.0,
+            1.0208796998136447
+          ],
+          "dtype": "torch.float64",
+          "shape": [
+            3
+          ]
+        },
+        "q": {
+          "data": [
+            -0.2461797912034292,
+            0.2661797912011113,
+            0.25617979120309453
+          ],
+          "dtype": "torch.float64",
+          "shape": [
+            3
+          ]
+        }
+      },
+      "path": "general"
+    },
+    "general_with_head_driver_ensemble": {
+      "ok": {
+        "diagnostics": {
+          "backend": "sparse_direct",
+          "converged": {
+            "data": [
+              true,
+              true
+            ],
+            "dtype": "torch.bool",
+            "shape": [
+              2
+            ]
+          },
+          "linear_iterations": {
+            "data": [
+              1,
+              1
+            ],
+            "dtype": "torch.int64",
+            "shape": [
+              2
+            ]
+          },
+          "newton_iterations": 4
+        },
+        "grads": {
+          "C": {
+            "data": [
+              2.300632037265723
+            ],
+            "dtype": "torch.float64",
+            "shape": [
+              1
+            ]
+          },
+          "head": {
+            "data": [
+              [
+                -1.8944336953982002,
+                0.8944336953982001,
+                -0.10556630460179992
+              ],
+              [
+                -1.9068472819348785,
+                0.9068472819348785,
+                -0.09315271806512143
+              ]
+            ],
+            "dtype": "torch.float64",
+            "shape": [
+              2,
+              3
+            ]
+          }
+        },
+        "phi": {
+          "data": [
+            [
+              0.0,
+              1.0,
+              1.0208796998136447
+            ],
+            [
+              0.0,
+              1.0,
+              0.6494197874824246
+            ]
+          ],
+          "dtype": "torch.float64",
+          "shape": [
+            2,
+            3
+          ]
+        },
+        "q": {
+          "data": [
+            [
+              -0.2461797912034292,
+              0.2661797912011113,
+              0.25617979120309453
+            ],
+            [
+              -0.27779807042597904,
+              0.29779807042465956,
+              0.2877980704257771
+            ]
+          ],
+          "dtype": "torch.float64",
+          "shape": [
+            2,
+            3
+          ]
+        }
+      },
+      "path": "general"
+    },
+    "general_with_pressure_driven_demand": {
+      "ok": {
+        "diagnostics": {
+          "backend": "sparse_direct",
+          "converged": {
+            "data": true,
+            "dtype": "torch.bool",
+            "shape": []
+          },
+          "linear_iterations": {
+            "data": 1,
+            "dtype": "torch.int64",
+            "shape": []
+          },
+          "newton_iterations": 3
+        },
+        "grads": {
+          "q_required": {
+            "data": [
+              0.9749828266796965
+            ],
+            "dtype": "torch.float64",
+            "shape": [
+              1
+            ]
+          }
+        },
+        "phi": {
+          "data": [
+            0.0,
+            5.0,
+            2.4570074604821923
+          ],
+          "dtype": "torch.float64",
+          "shape": [
+            3
+          ]
+        },
+        "q": {
+          "data": [
+            -1.2714962697589038,
+            1.2714962697589038,
+            0.8190024868273974
+          ],
+          "dtype": "torch.float64",
+          "shape": [
+            3
+          ]
+        }
+      },
+      "path": "general"
     },
     "general_withdrawal_and_storage": {
       "ok": {
@@ -3436,7 +4715,8 @@
             ]
           }
         }
-      }
+      },
+      "path": "general"
     },
     "general_withdrawal_steady": {
       "ok": {
@@ -3475,7 +4755,8 @@
             2
           ]
         }
-      }
+      },
+      "path": "general"
     },
     "moves_prescribed_current_differentiable": {
       "ok": {
@@ -3524,7 +4805,8 @@
             2
           ]
         }
-      }
+      },
+      "path": "general"
     },
     "moves_prescribed_current_grounded_storage": {
       "ok": {
@@ -3669,7 +4951,8 @@
             ]
           }
         }
-      }
+      },
+      "path": "general"
     },
     "moves_prescribed_current_primal": {
       "ok": {
@@ -3707,7 +4990,8 @@
             2
           ]
         }
-      }
+      },
+      "path": "general"
     }
   },
   "meta": {
@@ -3729,26 +5013,47 @@
       "fast_return_primal_in_grad_mode",
       "fast_return_primal_unconverged",
       "fast_storage_backward_euler",
+      "fast_storage_initial",
       "fast_storage_trapezoidal",
       "fast_storage_trapezoidal_with_withdrawal",
+      "fast_unconverged_raise",
+      "fast_unconverged_return",
+      "fast_with_driven_withdrawal",
       "fast_with_head_driver",
       "fast_with_head_driver_ensemble",
+      "fast_with_pressure_driven_demand",
       "fast_with_withdrawal",
       "fast_with_withdrawal_and_head",
       "general_cap_ind_backward_euler",
       "general_cap_ind_mixed_schemes",
       "general_cap_ind_trapezoidal",
+      "general_dynamic_potential_law_without_implicit",
       "general_fan_orifice_cold_and_warm",
       "general_fan_orifice_ensemble",
       "general_fan_orifice_flows_and_balance",
       "general_inexact_differentiable",
       "general_inexact_primal",
+      "general_initial_differentiable",
+      "general_introspection_and_refusals",
+      "general_linear_solver_auto",
+      "general_linear_solver_cg",
+      "general_linear_solver_direct",
       "general_phasor_rlc_batched_differentiable",
+      "general_phasor_rlc_parameter_gradients",
       "general_phasor_rlc_two_frequencies",
       "general_resistor_voltage_dc_differentiable",
       "general_resistor_voltage_dc_primal",
       "general_storage_initial_then_trapezoidal",
       "general_transformer",
+      "general_transformer_library",
+      "general_transformer_library_phasor",
+      "general_unconverged_raise",
+      "general_unconverged_return",
+      "general_unconverged_return_primal",
+      "general_with_driven_withdrawal",
+      "general_with_head_driver",
+      "general_with_head_driver_ensemble",
+      "general_with_pressure_driven_demand",
       "general_withdrawal_and_storage",
       "general_withdrawal_steady",
       "moves_prescribed_current_differentiable",
@@ -3756,6 +5061,7 @@
       "moves_prescribed_current_primal"
     ],
     "movers": [
+      "general_dynamic_potential_law_without_implicit",
       "moves_prescribed_current_differentiable",
       "moves_prescribed_current_grounded_storage",
       "moves_prescribed_current_primal"
