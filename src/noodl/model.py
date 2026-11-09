@@ -71,6 +71,7 @@ from noodl._fixed_point_loop import (
     Verdict,
     confirm_gradient_dependence,
     detached,
+    fixed_point,
     run_passes,
     unsolved_mask,
 )
@@ -955,6 +956,58 @@ class Model:
         """Per instance, whether any potential solve of a pass (its `diag`) stopped short of
         its own tolerance (`on_failure="return_primal"`); ``None`` when every one converged."""
         return unsolved_mask(diag, self.kirchhoff)
+
+    def fixed_point(self, pass_fn: Callable[[State], State], state: State, *,
+                    watch: Sequence[str], tol: float, max_passes: int = 50,
+                    relaxation: float = 1.0,
+                    measure: Callable[[State, State], Tensor] | None = None,
+                    adjoint_rtol: float | None = None, adjoint_restart: int | None = None,
+                    diagnostics: dict | None = None,
+                    where: str = "Model.fixed_point") -> State:
+        """Repeat `pass_fn` from `state` until the watched keys stop changing, and return the
+        last pass's state; its gradient is that of the fixed point (implicit adjoint), not of
+        the unrolled passes.
+
+        `pass_fn(z)` maps a state to a state (a `steady` or `step` plus whatever acts on its
+        result: a reaction, a boundary read off the previous pass). Pass k feeds `z_k` and gets
+        `out_k`; `z_{k+1} = out_k`, or with `relaxation < 1` the watched keys move only
+        `relaxation` of the way, `z_k[w] + relaxation (out_k[w] - z_k[w])`, and every other key
+        comes from `out_k`. Relaxation does not move the fixed point.
+
+        Per instance (the leading batch dimensions of what `measure` returns), a pass has
+        converged when `measure(fed, out) <= tol`. `measure` defaults to the largest absolute
+        change over the watched keys, one number for the whole state; give a `measure` that
+        returns one value per instance (a relative change per hour, say) to judge a batch
+        instance by instance, which also lets the adjoint solve each instance on its own. A
+        watched key missing from the fed state counts as not converged (the first pass of a
+        state that does not carry the iterate). Failing to converge within `max_passes` raises
+        `RuntimeError` naming `where`, the pass count and the last change.
+
+        Differentiation: pass 1 runs under the caller's grad mode, to learn whether anything
+        differentiable reaches the state. When it does, the remaining primal passes run under
+        `torch.no_grad()` and one differentiable pass at the certified fed state attaches the
+        implicit adjoint (`solvers.fixed_point.differentiate_fixed_point`) of the watched keys,
+        with every key `pass_fn` returns as output: the gradient is the fixed point's own, with
+        backward memory of one pass. `adjoint_rtol` defaults to the model's, `adjoint_restart`
+        to the adjoint solve's own default. When nothing requires grad every pass runs under
+        `no_grad` and nothing more happens: unlike `coupling="iterate"`, there is NO
+        confirmation pass at the certified state, so a `pass_fn` that only takes a
+        parameter-dependent branch away from the start state is not seen; run it under
+        `torch.no_grad()` or differentiate from a state that already reaches the branch. Keys
+        other than the watched ones are held at their certified values in the differentiable
+        pass, so they are not unknowns of the adjoint.
+
+        `diagnostics`, when given, is updated with `passes`, `changes` (the change of every
+        pass, the largest over the instances), `contraction` (the ratio of the last two
+        changes: the measured spectral radius), `adjoint` (`"implicit"` or `None`) and
+        `adjoint_batched`.
+        """
+        return fixed_point(
+            pass_fn, state, watch=watch, tol=tol, max_passes=max_passes,
+            relaxation=relaxation, measure=measure,
+            adjoint_rtol=self.adjoint_rtol if adjoint_rtol is None else adjoint_rtol,
+            adjoint_restart=adjoint_restart, diagnostics=diagnostics, where=where,
+        )
 
     def residuals(self, state, drivers) -> dict[str, Tensor]:
         """Nodal balances at `state`: interior residual per Kirchhoff layer, dx/dt per

@@ -183,8 +183,10 @@ hydraulics closure writes those layers' capacity from the flows and the initial 
 evaluated from the drivers; this holds with or without `storage=True`.
 
 `sewer_steady(model, state, drivers, *, reaction=None, dt=60.0, max_iter=500, tol=1e-12)` steps
-repeatedly until every transport layer stops changing. You need it rather than `Model.steady`
-whenever quality is on, because `Model.steady` never applies reactions.
+repeatedly until every transport layer stops changing (`Model.fixed_point`: gradients are those
+of the fixed point, by the implicit adjoint, with backward memory of one step). You need it
+rather than `Model.steady` whenever quality is on, because `Model.steady` never applies
+reactions.
 
 `model._apply_closures(state, drivers)` resolves the hydraulics without stepping any layer,
 which is the quickest way to inspect `sewer.q`, `sewer.h`, `sewer.v` and the rest.

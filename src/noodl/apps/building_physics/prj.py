@@ -2603,8 +2603,9 @@ def steady(model: Model, state, drivers, *, rtol: float = 1e-12, max_iter: int =
     no node pressure moves by more than `rtol * Pb` -- a relative change in density of
     `rtol` -- and raises if that has not happened within `max_iter` passes. The map
     contracts by about `g dz rho / Pb` per pass (~1e-4 for a storey-high opening), so two or
-    three passes reach float64 precision. The passes are left on the autograd graph: the
-    returned state is differentiable, through the unrolled iteration.
+    three passes reach float64 precision. The loop is `Model.fixed_point`: the returned
+    state is differentiated at its fixed point (implicit adjoint), not through the unrolled
+    passes.
 
     A zone (or a group of zones) that no air leaves at the steady instant has no steady
     contaminant state: `UndefinedSteadyState`, naming it and giving the instant's ambient
@@ -2620,14 +2621,8 @@ def steady(model: Model, state, drivers, *, rtol: float = 1e-12, max_iter: int =
     if key is None:
         return out
     Pb = zp[0].Pb if zp else 101325.0
-    for _ in range(max_iter):
-        new = _model_steady(model, {**state, key: out[key]}, drivers, **solve_kwargs)
-        change = (new[key] - out[key]).abs().max().item()
-        out = new
-        if change <= rtol * Pb:
-            return out
-    raise RuntimeError(
-        f"prj.steady: the zone pressures fed back to {cause} did not converge in "
-        f"{max_iter} passes "
-        f"(last pressure change {change:.3e} Pa > rtol * Pb = {rtol * Pb:.3e} Pa)"
+    return model.fixed_point(
+        lambda z: _model_steady(model, {**state, key: z[key]}, drivers, **solve_kwargs),
+        out, watch=[key], tol=rtol * Pb, max_passes=max_iter,
+        where=f"prj.steady: the zone pressures fed back to {cause}",
     )

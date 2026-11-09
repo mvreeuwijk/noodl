@@ -10,15 +10,20 @@ point. Each caller keeps its own convergence measure, relaxation, messages and a
 behind `PassProblem`.
 
 `detached` and `unsolved_mask` are the two diagnostics helpers both loops need.
+
+`fixed_point` is the engine behind `Model.fixed_point`: the same loop for an arbitrary pass
+function on a state, with its own `PassProblem` (`_FixedPointPasses`).
 """
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Generic, Protocol, TypeVar
 
 import torch
+
+from noodl.solvers.fixed_point import differentiate_fixed_point
 
 Tensor = torch.Tensor
 Z = TypeVar("Z")
@@ -176,3 +181,145 @@ def unsolved_mask(diag: Mapping, names: Iterable[str]) -> Tensor | None:
             continue
         failed = ~ok if failed is None else (failed | ~ok)
     return failed
+
+
+class _FixedPointPasses:
+    """`fixed_point`'s side of `PassProblem`.
+
+    The fed iterate `z` is a state; a pass's output is the state `pass_fn` returns. The
+    verdict compares the watched keys of the fed state with the output's, per instance, and
+    `advance` relaxes the watched keys toward the output (the other keys come from it).
+    """
+
+    def __init__(self, pass_fn: Callable[[dict], dict], watch: Sequence[str], tol: float,
+                 relaxation: float, measure: Callable[[dict, dict], Tensor] | None,
+                 where: str) -> None:
+        self.pass_fn = pass_fn
+        self.watch = list(watch)
+        self.tol = tol
+        self.relaxation = relaxation
+        self.measure = measure if measure is not None else self._largest_change
+        self.where = where
+        self.changes: list[float] = []
+
+    def _largest_change(self, fed: dict, out: dict) -> Tensor:
+        """The largest absolute change over every watched key (one number: the state is
+        one instance; a `measure` gives the per-instance shape)."""
+        worst = None
+        for key in self.watch:
+            c = (out[key] - fed[key]).abs().amax()
+            worst = c if worst is None else torch.maximum(worst, c)
+        return worst
+
+    def run(self, z: dict) -> dict:
+        out = self.pass_fn(z)
+        missing = [k for k in self.watch if k not in out]
+        if missing:
+            raise KeyError(
+                f"{self.where}: the pass did not return the watched key(s) {missing}"
+            )
+        return out
+
+    def depends_on_grad(self, out: dict) -> bool:
+        return any(isinstance(v, Tensor) and v.requires_grad for v in out.values())
+
+    def detach(self, z: dict, out: dict) -> tuple[dict, dict]:
+        return z, {k: v.detach() if isinstance(v, Tensor) else v for k, v in out.items()}
+
+    def judge(self, z: dict, out: dict, *, needs_adjoint: bool) -> Verdict:
+        if any(k not in z for k in self.watch):
+            # The first pass of a state that does not carry the iterate has nothing to
+            # compare with: not converged, whatever the pass returned.
+            # `converged` is a scalar here, even with a per-instance `measure`.
+            self.changes.append(float("inf"))
+            return Verdict(converged=torch.zeros((), dtype=torch.bool))
+        change = torch.as_tensor(self.measure(z, out))
+        self.changes.append(float(change.max()))
+        return Verdict(converged=change <= self.tol, change={"change": change})
+
+    def advance(self, z: dict, out: dict, verdict: Verdict | None) -> dict:
+        fed = dict(out)
+        if self.relaxation != 1.0:
+            for key in self.watch:
+                if key in z:
+                    fed[key] = z[key] + self.relaxation * (out[key] - z[key])
+        return fed
+
+
+def fixed_point(
+    pass_fn: Callable[[dict], dict], state: dict, *, watch: Sequence[str], tol: float,
+    max_passes: int, relaxation: float, measure: Callable[[dict, dict], Tensor] | None,
+    adjoint_rtol: float, adjoint_restart: int | None, diagnostics: dict | None,
+    where: str,
+) -> dict:
+    """Repeat `pass_fn` from `state` until the watched keys stop changing; see
+    `Model.fixed_point`, which documents every argument."""
+    watch = list(watch)
+    if not watch:
+        raise ValueError(f"{where}: watch must name at least one state key")
+    if int(max_passes) < 1:
+        raise ValueError(f"{where}: max_passes must be >= 1, got {max_passes!r}")
+    if not 0.0 < relaxation <= 1.0:
+        raise ValueError(f"{where}: relaxation must be in (0, 1], got {relaxation!r}")
+    problem = _FixedPointPasses(pass_fn, watch, tol, relaxation, measure, where)
+    outcome = run_passes(problem, dict(state), max_passes=int(max_passes))
+    report: dict = {}
+    adjoint: str | None = None
+    changes = problem.changes
+    if diagnostics is not None:
+        diagnostics.update({
+            "passes": outcome.passes, "changes": changes,
+            "contraction": _contraction(changes), "adjoint": None,
+            "adjoint_batched": False,
+        })
+    if not outcome.converged:
+        raise RuntimeError(
+            f"{where}: the fixed point did not converge within {max_passes} passes; the "
+            f"largest change on the last pass was {changes[-1]:.3e} against tol {tol:.1e} "
+            f"(measured contraction {_contraction(changes):.3g}; pass relaxation < 1 if "
+            f"it is >= 1)"
+        )
+    out = outcome.out
+    if outcome.needs_adjoint:
+        fed = outcome.certified
+        interface = []
+        for key in watch:
+            z = fed[key].detach()
+            if z.shape != out[key].shape:
+                z = torch.broadcast_to(z, out[key].shape).contiguous()
+            interface.append(z)
+        out_keys: list[str] = []
+
+        def adjoint_pass(z: list[Tensor]) -> tuple[list[Tensor], list[Tensor]]:
+            f = dict(fed)
+            f.update(zip(watch, z, strict=True))
+            result = pass_fn(f)
+            out_keys[:] = list(result)
+            z_next = [result[k] for k in watch]
+            echoed = [k for k, n, t in zip(watch, z_next, z, strict=True) if n is t]
+            if echoed:
+                raise RuntimeError(
+                    f"{where}: cannot differentiate the fixed point because the pass hands "
+                    f"the watched key(s) {echoed} back unchanged instead of recomputing "
+                    f"them, which makes the interface Jacobian singular"
+                )
+            return [result[k] for k in out_keys], z_next
+
+        flat = differentiate_fixed_point(
+            interface, adjoint_pass, rtol=adjoint_rtol, restart=adjoint_restart,
+            where=where, batch_shape=tuple(outcome.verdict.converged.shape), report=report,
+        )
+        out = dict(zip(out_keys, flat, strict=True))
+        adjoint = "implicit"
+    if diagnostics is not None:
+        diagnostics.update({"adjoint": adjoint,
+                            "adjoint_batched": bool(report.get("batched", False))})
+    return out
+
+
+def _contraction(changes: list[float]) -> float:
+    """The ratio of the last two changes (NaN before two passes, 0 once the earlier one is
+    exactly zero): the measured spectral radius of the iteration."""
+    if len(changes) < 2:
+        return float("nan")
+    return changes[-1] / changes[-2] if changes[-2] > 0 else 0.0

@@ -1307,17 +1307,8 @@ def sewer_steady(
     so a sewer whose sulfide balance has a source term needs its own fixed point: step until
     every transport state stops changing.
     """
-    current = dict(state)
-    for _ in range(max_iter):
-        new = model.step(current, drivers, dt)
-        worst = 0.0
-        for name in model.transport:
-            key = f"{name}.x"
-            worst = max(worst, float((new[key] - current[key]).abs().max()))
-        current = new
-        if worst < tol:
-            return current
-    raise RuntimeError(
-        f"apps.sewer.sewer_steady: no fixed point within {max_iter} steps of {dt} s "
-        f"(largest remaining change {worst:.3e} against tol {tol})"
+    return model.fixed_point(
+        lambda current: model.step(current, drivers, dt), state,
+        watch=[f"{name}.x" for name in model.transport], tol=tol, max_passes=max_iter,
+        where=f"apps.sewer.sewer_steady (steps of {dt} s)",
     )
