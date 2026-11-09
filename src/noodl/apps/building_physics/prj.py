@@ -1843,7 +1843,7 @@ def _build(*, ambient_conditions, g, species, levels, profiles, elements, zones,
 
     # A constant wind pressure (`wPset` on a path with no profile) acts on the path's ambient
     # side: +wPset on an edge from ambient, -wPset on one into it (dp = phi_src - phi_tgt +
-    # drive). A positive value pushes air from ambient into the zone.
+    # head term). A positive value pushes air from ambient into the zone.
     wind_pressure: dict[str, list[float]] = {}
     for p, cols in zip(paths, path_edges, strict=True):
         if p.profile_nr == 0 and p.wPset != 0.0:
@@ -1863,7 +1863,7 @@ def _build(*, ambient_conditions, g, species, levels, profiles, elements, zones,
         heads.append(Stack.from_network(net, el.kind, g=g))
         # Profiles are keyed by CONTAM's own profile NUMBER, and the lookup is
         # deliberately strict -- an edge naming a number no profile carries raises inside
-        # `Wind.from_network`, naming the edge and the number. That is why the drive is
+        # `Wind.from_network`, naming the edge and the number. That is why the term is
         # built whenever an edge names a profile, even when `profiles` is empty: a missing
         # profiles section must be loud, not a silently vanishing wind pressure.
         if bool((net.edge_attr("profile", el.kind, default=0.0) > 0).any()):
@@ -1873,7 +1873,7 @@ def _build(*, ambient_conditions, g, species, levels, profiles, elements, zones,
 
     # A path schedule multiplies the path's flow: its kind is wrapped in `Scaled`, which reads
     # one multiplier per edge of the kind from "flow_multiplier.<kind>", and the schedule
-    # becomes an input on the path's own edges. Wrapping comes after the drives above, which
+    # becomes an input on the path's own edges. Wrapping comes after the head terms above, which
     # read only `el.kind` and `el.dp_independent` (both of which `Scaled` keeps), and before
     # the duct build, the kinds and the layout below, which see the wrapped elements.
     # On a fan curve the schedule is the speed ratio instead ("fan_speed.<kind>", read by
@@ -2260,7 +2260,10 @@ def project_to_model(project: Project, *, ambient: dict | None = None, species: 
     `Pb / (R T)` only at 293.15 K and 101325 Pa to five figures (2.2e-6 off even there, which
     alone put 6.5e-6 into the three-zone transient concentrations against ContamX), and about
     3.4 % off per 10 K away from it. The returned drivers carry the initial `"rho"` and
-    `"rho_amb"` for code that reads them outside a step; every step recomputes them.
+    `"rho_amb"` for code that reads them outside a step; every step recomputes them. The
+    stack and wind pressures are the driver `"air.edge_head"`, written by the model's
+    `EdgeHeads` closure on each pass, not by these drivers: a direct `layer.solve` on them has
+    no head, so run the model's closures first (`Model.step`, `steady` and `simulate` do).
 
     The drivers are at the run control's STEADY-SIMULATION instant (its day, time and day
     type): the project's schedules (`project.inputs`) are applied there, so a `steady()` on

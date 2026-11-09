@@ -1378,6 +1378,11 @@ class KirchhoffLayer(TopologyGuard):
           to `solve()` (see `noodl.drives.Drive`), never hold one of its own as an
           instance attribute.
 
+        A head the potential layer reads as the driver `"<layer>.edge_head"` (see
+        `noodl.heads.EdgeHeads`) is part of `drivers` only after the model's closures have run:
+        a direct `solve` on raw drivers has no head, so apply the closures first (`Model.step`,
+        `steady` and `simulate` do).
+
         Violating either raises `ValueError` naming the offending law/drive and
         attribute before any solve is attempted, rather than silently returning a wrong or
         absent gradient.

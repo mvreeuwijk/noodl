@@ -149,11 +149,12 @@ ducts.terminal("outlet", "room", area=0.0314)
 ducts.add_to(net)
 net.add_edge("fan_in", "fan_out", kind="fan")
 net.add_edge("room", "ambient", kind="leak")
-laws, drives = duct_laws_from_edges(net)
+laws, heads = duct_laws_from_edges(net)
 laws += [FixedFlow(torch.tensor([0.05], dtype=F64), kind="fan"),
          PowerLaw(torch.tensor([0.5], dtype=F64), torch.tensor([0.5], dtype=F64),
                   kind="leak")]
-air = KirchhoffLayer(net, "air", laws, drives=drives, boundary=["ambient"])
+# A hand-built layer takes the head terms as drives=; a model uses an EdgeHeads closure.
+air = KirchhoffLayer(net, "air", laws, drives=heads, boundary=["ambient"])
 rho = torch.full((net.n,), 1.204097, dtype=F64)
 phi, q = air.solve(torch.zeros(1, dtype=F64), {"rho": rho})
 print([round(v, 4) for v in air.flows_of_kind(q, "duct_terminal").tolist()], "kg/s")

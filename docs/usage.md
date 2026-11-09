@@ -93,6 +93,11 @@ T = th.temperature.named(state[th.temperature])
 print({room: round(float(value), 2) for room, value in T.items()})
 ```
 
+The stack and wind pressures of the air edges are the driver `"air.edge_head"`, which the
+model's `EdgeHeads` closure writes on every pass. `step`, `steady`, `check` and `simulate` run
+the closures first; a direct `model.kirchhoff["air"].solve(...)` on the raw drivers has no
+head, so apply the model's closures before it.
+
 ```text
 {'A': 304.13, 'B': 300.93}
 ```

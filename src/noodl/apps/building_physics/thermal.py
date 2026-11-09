@@ -324,7 +324,8 @@ def check_head_order(closures: Sequence) -> None:
 
     The head is computed once per pass, from the drivers at the moment its closure runs, so
     a later writer of `"rho"` (a density closure, say) would leave it one pass behind. A term
-    that declares no `inputs`, or a closure that declares no `outputs`, is not checked.
+    that declares no `inputs` (the closure's `inputs` is then None), or a closure that
+    declares no `outputs`, is not checked.
     """
     for i, closure in enumerate(closures):
         if not isinstance(closure, EdgeHeads) or closure.inputs is None:
@@ -333,8 +334,8 @@ def check_head_order(closures: Sequence) -> None:
         for later in closures[i + 1:]:
             try:
                 written = set(later.outputs)
-            except (AttributeError, TypeError):
-                continue
+            except AttributeError:
+                continue  # a closure that declares no outputs is not checked
             clash = sorted(reads & written)
             if clash:
                 raise ValueError(
@@ -397,7 +398,11 @@ def build_model(net: Network, *, air_laws, heads, ambient="ambient", thermal: bo
     `DuctStack`, ...; see `noodl.heads`): an `EdgeHeads` closure adds them up once per pass,
     after the density closure, and writes the driver `"air.edge_head"`. `closures` are
     appended after it (an air handler's `AirHandlerFlows`); one that writes a driver a head
-    term reads is refused by name. `flow_balanced` names nodes whose pressure the airflow solve does
+    term reads is refused by name. The head is not in the drivers the builder returns: a
+    direct `model.kirchhoff["air"].solve` on raw drivers has no head, so run the model's
+    closures first (`Model.step`, `steady`, `check` and `simulate` do).
+
+    `flow_balanced` names nodes whose pressure the airflow solve does
     not need, because only prescribed, balanced flows touch them (an air handler's
     plenums): they join the air layer's boundary at zero gauge pressure, while staying
     ordinary nodes of the heat and species layers. Only edges whose law is a

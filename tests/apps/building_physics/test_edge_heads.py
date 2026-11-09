@@ -52,10 +52,13 @@ def test_the_contam_head_is_the_sum_of_the_stack_and_wind_terms():
         expected[sl] = expected[sl] + term(drv)
     assert head.abs().max().item() > 1.0  # a real stack and wind pressure, not zeros
     torch.testing.assert_close(head, expected, atol=1e-14, rtol=0.0)
-    # The layer adds it once: dp is the potential difference plus the head.
-    phi = torch.zeros(len(project.net.nodes), dtype=F64)
-    plain = air.dp(phi, {k: v for k, v in drv.items() if k != "air.edge_head"})
-    torch.testing.assert_close(air.dp(phi, drv) - plain, head, atol=1e-13, rtol=0.0)
+    # The old path: each drive added to the potential difference in turn, ((d + stack) + wind).
+    phi = torch.linspace(-3.0, 4.0, len(project.net.nodes), dtype=F64)
+    old = air.dp(phi, {k: v for k, v in drv.items() if k != "air.edge_head"})
+    for term in project.heads:
+        sl = air.kind_slice(term.kind)
+        old[sl] = old[sl] + term(drv)
+    torch.testing.assert_close(air.dp(phi, drv), old, atol=1e-14, rtol=0.0)
 
 
 def test_the_head_closure_is_listed_after_the_density_closure():
@@ -128,3 +131,23 @@ def test_a_layer_with_other_edges_than_the_air_layer_is_refused_from_reading_its
                            boundary=["ambient"])
     with pytest.raises(ValueError, match=r"the t = StartTime layer has edge kinds"):
         _check_same_edges(other, air, "the t = StartTime layer")
+
+
+def test_a_term_that_declares_no_inputs_is_not_checked_against_later_closures():
+    """The order check needs the terms' `inputs`: a term without them is skipped (pinned)."""
+    class Bare:
+        kind = "airpath"
+
+        def __call__(self, drivers):
+            return torch.zeros(3, dtype=F64)
+
+    class LateDensity:
+        outputs = ("rho",)
+
+        def __call__(self, state, drivers):
+            return {}
+
+    net, el = _two_zones()
+    model = build_model(net, air_laws=[el], heads=[Bare()], closures=[LateDensity()])
+    heads = next(c for c in model.closures if isinstance(c, EdgeHeads))
+    assert heads.inputs is None
