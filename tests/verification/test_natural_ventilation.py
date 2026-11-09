@@ -67,7 +67,7 @@ def _single_zone(*, A: float, h: float, E: float, UA: float = 0.0, cp_low: float
     if cp_low or cp_high:
         drives.append(Wind.from_network(net, "airpath", ambient="ambient"))
     model = build_model(
-        net, air_laws=[el], drives=drives, density="linear",
+        net, air_laws=[el], heads=drives, density="linear",
         density_kwargs={"rho_0": RHO_0, "T_0": T_O},
         coupling=coupling, iterate_tol={"thermal": 1e-9}, iterate_max=300,
     )
@@ -261,7 +261,7 @@ def _two_zone_doorway():
     net.add_edge("ambient", "B", kind="airpath", z_path=1.8, Cd=CD, area=0.05)
     el = orifice_law_from_edges(net, "airpath")
     model = build_model(
-        net, air_laws=[el], drives=[Stack.from_network(net, "airpath")], density="linear",
+        net, air_laws=[el], heads=[Stack.from_network(net, "airpath")], density="linear",
         density_kwargs={"rho_0": RHO_0, "T_0": T_O}, coupling="iterate",
         iterate_tol={"thermal": 1e-9}, iterate_max=300,
     )
@@ -319,7 +319,7 @@ def _three_zone_stack(coupling: str, tol: float = 0.05):
     add_large_opening(net, "z2", "z3", H=1.0, W=1.5, z_mid=6.0, Cd=0.78)
     el = orifice_law_from_edges(net, "airpath")
     model = build_model(
-        net, air_laws=[el], drives=[Stack.from_network(net, "airpath")],
+        net, air_laws=[el], heads=[Stack.from_network(net, "airpath")],
         coupling=coupling, iterate_tol={"thermal": tol}, iterate_max=50,
     )
     sources = torch.zeros(net.n, dtype=F64)

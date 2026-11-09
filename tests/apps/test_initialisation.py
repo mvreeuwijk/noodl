@@ -210,7 +210,7 @@ def test_the_building_builder_can_return_the_same_triple_as_the_others():
 
     net = network()
     kw = dict(air_laws=[orifice_law_from_edges(net, "airpath")],
-              drives=[Stack.from_network(net, "airpath")])
+              heads=[Stack.from_network(net, "airpath")])
     model, state, drivers = bp.build_model(net, return_inputs=True, **kw)
     assert set(state) == set(bp.initial_state(model))
     assert set(drivers) == set(bp.initial_drivers(model))

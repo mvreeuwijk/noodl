@@ -28,7 +28,7 @@ def two_zone(aliases=None):
     net.add_edge("ambient", "B", kind="airpath", z_path=0.2, Cd=0.6, area=0.05)
     net.aliases = dict(aliases or {})
     el = orifice_law_from_edges(net, "airpath")
-    model = build_model(net, air_laws=[el], drives=[Stack.from_network(net, "airpath")])
+    model = build_model(net, air_laws=[el], heads=[Stack.from_network(net, "airpath")])
     return net, model
 
 

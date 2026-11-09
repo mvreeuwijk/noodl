@@ -52,11 +52,11 @@ def _building():
 def _model(net):
     element, closure = air_handler_from_edges(net, "air_handler")
     plenums = air_handler_plenums(net, "air_handler")
-    ducts, drives = duct_laws_from_edges(net)
+    ducts, duct_heads = duct_laws_from_edges(net)
     elements = [orifice_law_from_edges(net, "airpath"), *ducts,
                 fan_law_from_edges(net), element]
     model = build_model(net, air_laws=elements,
-                        drives=[Stack.from_network(net, "airpath"), *drives],
+                        heads=[Stack.from_network(net, "airpath"), *duct_heads],
                         thermal=False, species=1, closures=[closure], flow_balanced=plenums,
                         storage_free=plenums)
     drivers = initial_drivers(model)
@@ -182,7 +182,7 @@ def test_a_pressure_dependent_edge_on_a_plenum_is_refused_by_name():
     with pytest.raises(ValueError, match="ahu.supply"):
         build_model(net, air_laws=[orifice_law_from_edges(net, "airpath"),
                                        fan_law_from_edges(net), element],
-                    drives=[Stack.from_network(net, "airpath")], thermal=False, species=1,
+                    heads=[Stack.from_network(net, "airpath")], thermal=False, species=1,
                     closures=[closure], flow_balanced=plenums, storage_free=plenums)
 
 

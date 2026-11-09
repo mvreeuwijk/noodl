@@ -154,7 +154,7 @@ class BuildContext:
     inputs: list
     edge_filters: dict
     built: list
-    drives: list
+    heads: list
     constant_wind_pressure: dict
     actuations: list[Actuation] = field(default_factory=list)
 
@@ -309,7 +309,7 @@ def duct_element(el: DuctElementRecord, *, kind: str, src, tgt,
 def build_ducts(ctx: BuildContext, elements: dict[int, DuctElementRecord],
                 junctions: list[JunctionRecord],
                 segments: list[SegmentRecord]) -> DuctBuild:
-    """Add the junction nodes, segment and terminal edges, their elements, drives, inputs
+    """Add the junction nodes, segment and terminal edges, their elements, head terms, inputs
     and filters to the build in `ctx`."""
     from noodl.apps.building_physics.prj import _check_edge_order
 
@@ -381,7 +381,7 @@ def build_ducts(ctx: BuildContext, elements: dict[int, DuctElementRecord],
             ctx.actuations.append(Actuation(s.control_nr, key, (members.index(s),),
                                             f"segment {s.nr}"))
         ctx.built.append(element)
-        ctx.drives.append(DuctStack.from_network(net, kind, g=ctx.g))
+        ctx.heads.append(DuctStack.from_network(net, kind, g=ctx.g))
     _build_terminals(ctx, junctions, names, build)
     return build
 
@@ -449,13 +449,13 @@ def _build_terminals(ctx: BuildContext, junctions: list[JunctionRecord],
         torch.tensor([j.terminal.area for j in terminals], dtype=F64),
         torch.tensor([j.terminal.loss for j in terminals], dtype=F64), src=src, tgt=tgt,
         temperature_key="T", opening_key=opening, kind=TERMINAL_KIND))
-    ctx.drives.append(Stack.from_network(net, TERMINAL_KIND, g=ctx.g))
+    ctx.heads.append(Stack.from_network(net, TERMINAL_KIND, g=ctx.g))
     if any(j.terminal.profile_nr for j in terminals):
-        ctx.drives.append(Wind.from_network(net, TERMINAL_KIND, ambient=ctx.ambient,
+        ctx.heads.append(Wind.from_network(net, TERMINAL_KIND, ambient=ctx.ambient,
                                             profiles=ctx.profiles))
     if any(wind_pressure):
         ctx.constant_wind_pressure[TERMINAL_KIND] = torch.tensor(wind_pressure, dtype=F64)
-        ctx.drives.append(ConstantDrive(TERMINAL_KIND, f"wind_pressure.{TERMINAL_KIND}"))
+        ctx.heads.append(ConstantDrive(TERMINAL_KIND, f"wind_pressure.{TERMINAL_KIND}"))
 
 
 @dataclass
