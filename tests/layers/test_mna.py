@@ -7,9 +7,9 @@ import noodl.solvers.select as select_module
 from noodl.elements import Conductance, ConstitutiveLaw, FixedFlow, ImplicitLaw, LawContext
 from noodl.heads import EdgeHeads
 from noodl.layers.kirchhoff import KirchhoffLayer
-from noodl.nodesources import NodeSource
 from noodl.solvers.implicit import TransposeOperator
 from noodl.topology import Network
+from noodl.withdrawals import NodeWithdrawal
 from tests._circuit_laws import DrivenSource, Source
 
 F64 = torch.float64
@@ -50,7 +50,7 @@ class DrivenConductance(ConstitutiveLaw):
         return drivers["g"] * dp
 
 
-class LinearWithdrawal(NodeSource):
+class LinearWithdrawal(NodeWithdrawal):
     """w = c phi at the given nodes."""
 
     def __init__(self, nodes, c):
@@ -214,7 +214,7 @@ def test_learnable_parameter_gradients_match_central_differences():
     assert grad == pytest.approx((up - down) / (2 * h), rel=1e-7)
 
 
-def test_node_source_parameter_gradient_matches_central_differences():
+def test_withdrawal_parameter_gradient_matches_central_differences():
     net = _net(["gnd", "a", "b", "c"],
                [("a", "gnd", "source"), ("a", "b", "r"), ("c", "gnd", "r"), ("b", "c", "f")])
     source = LinearWithdrawal(torch.tensor([net.nodes.index("b")]), [0.2])
@@ -223,7 +223,7 @@ def test_node_source_parameter_gradient_matches_central_differences():
         net, "e",
         [Source(torch.tensor([2.0])), Conductance(torch.tensor([1.0, 0.5]), kind="r"),
          FixedFlow(torch.tensor([0.3]), kind="f")],
-        boundary=["gnd"], node_sources=[source])
+        boundary=["gnd"], withdrawals=[source])
 
     def loss():
         phi, q = layer.solve(torch.zeros(1))
@@ -275,7 +275,7 @@ def test_classic_methods_on_mna_layer_raise():
         layer.linear_init(torch.zeros(1), {}, None)
 
 
-def test_fixed_flow_and_node_source_still_work_in_mna():
+def test_fixed_flow_and_withdrawal_still_work_in_mna():
     # gnd ==2V== a -r(1)- b -f(0.3)- c -r(0.5)- gnd ; withdrawal 0.2 phi at b and c
     net = _net(["gnd", "a", "b", "c"],
                [("a", "gnd", "source"), ("a", "b", "r"), ("c", "gnd", "r"), ("b", "c", "f")])
@@ -284,7 +284,7 @@ def test_fixed_flow_and_node_source_still_work_in_mna():
         net, "e",
         [Source(torch.tensor([2.0])), Conductance(torch.tensor([1.0, 0.5]), kind="r"),
          FixedFlow(torch.tensor([0.3]), kind="f")],
-        boundary=["gnd"], node_sources=[LinearWithdrawal(nodes, [0.2, 0.2])])
+        boundary=["gnd"], withdrawals=[LinearWithdrawal(nodes, [0.2, 0.2])])
     sources = torch.tensor([0.0, 0.0, 0.1, 0.0])
     phi, q = layer.solve(torch.zeros(1), {}, sources, differentiable=False)
     withdrawal = torch.zeros(net.n)
@@ -340,7 +340,7 @@ class FlowControlled(ImplicitLaw):
         return dp - self.R * q - self.k * q**3
 
 
-class CubicWithdrawal(NodeSource):
+class CubicWithdrawal(NodeWithdrawal):
     def __init__(self, nodes, c):
         super().__init__(nodes)
         self.c = torch.nn.Parameter(torch.as_tensor(c, dtype=F64), requires_grad=False)
@@ -366,7 +366,7 @@ def _mixed_layer():
          FlowControlled(torch.tensor([2.0]), torch.tensor([0.5]), kind="d"),
          Ratio(torch.tensor(1.7), kind="x"),
          FixedFlow(torch.tensor([0.25]), kind="f")],
-        boundary=["g"], node_sources=[CubicWithdrawal(nodes, [0.3, 0.6])])
+        boundary=["g"], withdrawals=[CubicWithdrawal(nodes, [0.3, 0.6])])
     return net, layer
 
 
@@ -405,10 +405,10 @@ def test_mixed_nonlinear_network_converges_with_zero_residual():
         x = torch.cat([phi[layer.interior], q[mna.f_edges]])
         r = mna.residual(x, pb, {}, sources, LawContext(mode="dc"), mna._plain_call)
         assert float(r.abs().max()) < 1e-12
-        # Tellegen with the node sources: their withdrawal w leaves the balance as
+        # Tellegen with the withdrawals: their withdrawal w leaves the balance as
         # -sum(phi_I w), the power the withdrawals take out of the network.
         withdrawn = torch.zeros(net.n)
-        ns = layer.node_sources[0]
+        ns = layer.withdrawals[0]
         withdrawn[ns.nodes] = ns.flow(phi[ns.nodes]) * phi[ns.nodes]
         torch.testing.assert_close(layer.power_residual(phi, q, {}, sources),
                                    -withdrawn.sum(), rtol=0, atol=1e-12)

@@ -448,7 +448,7 @@ def test_pressure_driven_demand(tmp_path):
     demands = results.node["demand"].loc[0]
     worst_h = _worst_heads(model, final, heads, skip=("R1",))
     assert worst_h < 1e-5, worst_h
-    source = model.kirchhoff["water"]._node_sources[0]
+    source = model.kirchhoff["water"]._withdrawals[0]
     delivered = source.flow(final["water.phi"][..., source.nodes]).detach()
     worst_d = max(
         abs(float(delivered[i]) - float(demands[j.name])) / abs(float(demands[j.name]))
@@ -463,7 +463,7 @@ def test_pda_delivers_less_than_the_required_demand(tmp_path):
     net = read_epanet_inp(path)
     model, state, drivers = build_model(net)
     final = water_steady(model, state, drivers)
-    source = model.kirchhoff["water"]._node_sources[0]
+    source = model.kirchhoff["water"]._withdrawals[0]
     delivered = source.flow(final["water.phi"][..., source.nodes]).detach()
     required = torch.tensor([j.demand for j in net.junctions], dtype=F64)
     assert bool((delivered < required).all())
@@ -506,7 +506,7 @@ def test_a_pump_feeding_pressure_driven_demand(tmp_path, pipe_form):
     demands = results.node["demand"].loc[0]
     worst_h = _worst_heads(model, final, heads, skip=("R1",))
     worst_q = _worst_flows(model, final, flows)
-    source = model.kirchhoff["water"]._node_sources[0]
+    source = model.kirchhoff["water"]._withdrawals[0]
     delivered = source.flow(final["water.phi"][..., source.nodes]).detach()
     required = torch.tensor([j.demand for j in net.junctions], dtype=F64)
     worst_d = max(

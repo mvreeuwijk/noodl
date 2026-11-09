@@ -3153,7 +3153,7 @@ def test_quality_gradient_wrt_inflow_at_a_zero_inflow_junction_matches_finite_di
 
 # ---------------------------------------------------------------- the node storage port
 class _OldJunctionFlow:
-    """`JunctionStorage` as it was a node source (before it became a `NodeStorage`), copied
+    """`JunctionStorage` as it was a withdrawal (before it became a `NodeStorage`), copied
     verbatim without its docstrings: ``2/dt`` from the driver ``"water.storage_rate"``
     (1/dt), the withdrawal `flow` and its slope `dflow`."""
 
@@ -3396,7 +3396,7 @@ def _t3(a, b, c):
 
 @pytest.mark.parametrize("dt", [5.0, 30.0, 0.37])
 @pytest.mark.parametrize("case", range(5))
-def test_junction_storage_rate_is_the_old_node_source_flow_bit_for_bit(case, dt):
+def test_junction_storage_rate_is_the_old_withdrawal_flow_bit_for_bit(case, dt):
     """The port onto `NodeStorage` changes no bit: `rate`/`rate_slope` with the step from the
     layer (`step_rate_factor` gives 2/dt, the same float as the old ``2 * (1/dt)``) equal the
     old `flow`/`dflow` that read ``"water.storage_rate"``, on random heads over every branch,

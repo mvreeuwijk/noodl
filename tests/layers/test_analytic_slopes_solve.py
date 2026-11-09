@@ -1,6 +1,6 @@
 """The differentiable classic solve with analytic slopes (`FunctionalLaws.dflows`).
 
-A law (or node source) that declares `exact_slope` gives the Newton Jacobian and the adjoint
+A law (or withdrawal) that declares `exact_slope` gives the Newton Jacobian and the adjoint
 its own `dflow`; one that does not is differentiated by autograd. `gradcheck` of
 `KirchhoffLayer.solve(differentiable=True)` with respect to a learnable law parameter, a
 driver, `sources` and `phi_boundary` on a building, a water and a sewer network; and a law
@@ -97,7 +97,7 @@ def _water():
                           kind="valve")
     demand = PressureDrivenDemand(torch.tensor([2, 3]), _t([0.02, 0.015]), _t([5.0, 8.0]),
                                   p_min=0.0, p_req=30.0)
-    layer = KirchhoffLayer(net, "water", [pipes, valve], boundary=["R"], node_sources=[demand])
+    layer = KirchhoffLayer(net, "water", [pipes, valve], boundary=["R"], withdrawals=[demand])
     drivers = {"water.edge_head": _t([3.0, 0.0, 0.0, 0.0, 0.0], grad=True)}
     return layer, pipes, drivers
 
@@ -237,7 +237,7 @@ def test_a_solve_nothing_differentiable_reaches_is_the_primal_solve(network):
     phi_b = _t([25.0]) if network is _water else _t([0.1])
     sources = torch.zeros(layer._n_nodes, dtype=F64)
     step = _sewer_step() if network is _sewer else {}
-    for owner in (*layer._laws, *layer._node_sources):
+    for owner in (*layer._laws, *layer._withdrawals):
         for p in owner.parameters():
             p.requires_grad_(False)
     out = {}

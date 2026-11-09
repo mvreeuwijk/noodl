@@ -139,13 +139,13 @@ def test_rc_operator_is_shifted_and_certified():
     layer, _ = _rc()
     phi = _phi_prev(layer)
     step = layer._storage_step(None, 0.5, None, "backward_euler", (phi, None), None, {})
-    slopes = layer._node_source_slopes(phi, {}, step)
+    slopes = layer._withdrawal_slopes(phi, {}, step)
     torch.testing.assert_close(slopes, CAP / 0.5, rtol=0, atol=0)
     op = layer._operator_at(layer.dflows(phi, {}), slopes)
     assert isinstance(op, ShiftedOperator)
     assert bool(op.spd_certificate())
     # no step: the bare Laplacian, as for a layer without storage
-    assert layer._node_source_slopes(phi, {}, None) is None
+    assert layer._withdrawal_slopes(phi, {}, None) is None
 
 
 def test_rc_backward_euler_step_matches_the_closed_form():

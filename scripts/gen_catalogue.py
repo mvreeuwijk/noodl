@@ -30,7 +30,7 @@ PAGES = [
     ("core", "Core library", None,
      ["noodl.topology", "noodl.model", "noodl.contracts", "noodl.layout", "noodl.refs",
       "noodl.validation", "noodl.layers",
-      "noodl.elements", "noodl.heads", "noodl.nodesources", "noodl.storage",
+      "noodl.elements", "noodl.heads", "noodl.withdrawals", "noodl.storage",
       "noodl.couple"],
      "The framework every application builds on: the network, the layers, the model, the "
      "set-up helpers, and the general-purpose constitutive laws and heads."),
@@ -81,11 +81,11 @@ ROLES = [
     ("function", "Functions", "Calculations and helpers."),
     ("constant", "Constants and tables", "Named values and option tables."),
     ("base", "Base classes (for extending)",
-     "Subclass these to add a constitutive law, head term, closure, reaction, node source or "
+     "Subclass these to add a constitutive law, head term, closure, reaction, withdrawal or "
      "node storage; see "
      "[Extending noodl](../development/extending.md)."),
 ]
-BASE_CLASSES = {"ConstitutiveLaw", "ImplicitLaw", "HeadTerm", "Reaction", "NodeSource",
+BASE_CLASSES = {"ConstitutiveLaw", "ImplicitLaw", "HeadTerm", "Reaction", "NodeWithdrawal",
                 "NodeStorage"}
 OPTION_MODULES = {"street_aq": "noodl.apps.street_aq.closures"}
 """Pages whose application has named model options: the module defining `OPTIONS` (option
@@ -158,8 +158,8 @@ def _role(name: str, obj) -> str:
     from noodl.elements.base import ConstitutiveLaw
     from noodl.layers.reaction import Reaction
     from noodl.model import Model
-    from noodl.nodesources import NodeSource
     from noodl.storage import NodeStorage
+    from noodl.withdrawals import NodeWithdrawal
 
     if name in SETUP_NAMES:
         return "setup"
@@ -174,7 +174,7 @@ def _role(name: str, obj) -> str:
             return "law"
         if issubclass(obj, Reaction):
             return "reaction"
-        if issubclass(obj, (NodeSource, NodeStorage)) or name.endswith(("Source", "Sink")):
+        if issubclass(obj, (NodeWithdrawal, NodeStorage)) or name.endswith(("Source", "Sink")):
             return "source"
         if obj is Model or name.endswith("Layer") or name in {"Network", "Ports", "CoupledModel"}:
             return "layer"

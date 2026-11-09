@@ -11,7 +11,7 @@ withdrawal, positive INTO storage, with the step rate of the layer's scheme
     trapezoidal:     w = 2 (S(phi) - S(phi_start)) / dt - w_start
 
 `phi_start` is the potential at the step start and `w_start` the storage flow at the step
-start (the state key `"<layer>.storage_flow"`). Like a `NodeSource`, a storage adds only a
+start (the state key `"<layer>.storage_flow"`). Like a `NodeWithdrawal`, a storage adds only a
 diagonal entry to the Jacobian, `step_rate_factor * capacity` with `capacity = dS/dphi`, so a
 network of conductances with storage keeps its symmetric positive definite system. Without a
 step (a steady solve) storage is absent: nothing flows into it at rest.
@@ -63,7 +63,7 @@ class NodeStorage(torch.nn.Module):
     `rate` the step rate of the change, `rate_slope` its derivative, and `initial` `None`
     (no potential held at the consistent initial point).
 
-    Learnable coefficients must be registered `nn.Parameter`s, as on a `NodeSource`: the
+    Learnable coefficients must be registered `nn.Parameter`s, as on a `NodeWithdrawal`: the
     differentiable solve threads exactly those.
     """
 
@@ -140,7 +140,7 @@ class NodeStorage(torch.nn.Module):
     def forward(self, *args, part: str = "rate"):
         # `torch.func.functional_call` always invokes `forward`, so the differentiable
         # solve reaches `rate` (and, with `part="initial"`, `initial`) through here, as
-        # `NodeSource.forward` reaches `flow`.
+        # `NodeWithdrawal.forward` reaches `flow`.
         if part == "initial":
             return self.initial(*args)
         return self.rate(*args)

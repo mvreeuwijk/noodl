@@ -2,9 +2,9 @@
 
 `implicit_solve` differentiates a solve with respect to every tensor passed to
 `Function.apply`. `FunctionalLaws` therefore presents the layer's residual and Jacobian
-operator as functions of the iterate and a flat tuple of tensors: the laws' and node sources'
+operator as functions of the iterate and a flat tuple of tensors: the laws' and withdrawals'
 own `nn.Parameter`s (substituted back in with `torch.func.functional_call`), the driver
-values, `sources` and `phi_boundary`. Node sources and node storages are threaded through
+values, `sources` and `phi_boundary`. Withdrawals and node storages are threaded through
 exactly as laws are, so a learnable demand exponent, required pressure or capacity gets a
 correct implicit-function gradient. On a step of a layer with storage the step-start
 potentials and storage flows are threaded too, so a chain of steps back-propagates through
@@ -13,7 +13,7 @@ time.
 The Jacobian operator (the forward Newton's and the adjoint's) takes each law's and node
 source's own analytic `dflow`, and each storage's `rate_slope`, where it declares
 `exact_slope` (the default), and autograd through its flow (or rate) where it does not
-(`FunctionalLaws._law_slope`, `_source_slope`, `_storage_slope`). The parameter gradients
+(`FunctionalLaws._law_slope`, `_withdrawal_slope`, `_storage_slope`). The parameter gradients
 come from one autograd pass through the residual at the root (`solvers.implicit`), never
 from the slopes.
 """
@@ -26,7 +26,7 @@ import torch
 
 from noodl._tracking import bulk_values, same_tracking
 from noodl.elements.base import ConstitutiveLaw
-from noodl.nodesources import NodeSource
+from noodl.withdrawals import NodeWithdrawal
 
 
 def _call(module, params: dict, args: tuple):
@@ -54,9 +54,9 @@ class FunctionalLaws:
         self.layer = layer
         self.drivers = drivers
         self.step = step
-        owners = [*layer._laws, *layer._node_sources, *layer._storage]
+        owners = [*layer._laws, *layer._withdrawals, *layer._storage]
         self.n_el = len(layer._laws)
-        self.n_owned = self.n_el + len(layer._node_sources)
+        self.n_owned = self.n_el + len(layer._withdrawals)
         param_dicts = [dict(owner.named_parameters()) for owner in owners]
         self.param_names = [list(d.keys()) for d in param_dicts]
         param_tensors = [
@@ -85,7 +85,7 @@ class FunctionalLaws:
         self._rebuilt: list = []
 
     def rebuild(self, params):
-        """`(law, node-source and storage parameter dicts, drivers, sources, phi_boundary,
+        """`(law, withdrawal and storage parameter dicts, drivers, sources, phi_boundary,
         step)` from the flat `params`; `step` is the layer's step with its step-start tensors
         (`phi_prev`, `previous`) taken from `params` (`None` off a step). The last two results
         are reused while `params` holds the same objects: the forward Newton alternates two
@@ -147,10 +147,10 @@ class FunctionalLaws:
         return torch.cat(parts, dim=-1)
 
     def node_withdrawal(self, phi, drv, rebuilt, step=None):
-        """The node sources' withdrawal, plus the storages' rates on a step (`step`, the
+        """The withdrawals' withdrawal, plus the storages' rates on a step (`step`, the
         threaded one from `rebuild`), per interior row (or None)."""
         layer = self.layer
-        w = layer._scatter_node_sources(lambda j, ns: _call(
+        w = layer._scatter_withdrawals(lambda j, ns: _call(
             ns, rebuilt[self.n_el + j], (phi[..., ns.nodes], drv)))
         if step is None:
             return w
@@ -159,11 +159,11 @@ class FunctionalLaws:
             (*layer._storage_args(j, st, phi, step), step.ctx, drv))))
 
     def node_slopes(self, phi, drv, rebuilt, step=None):
-        """The node sources' slopes `diag(w')`, plus the storages' on a step (`step`, the
+        """The withdrawals' slopes `diag(w')`, plus the storages' on a step (`step`, the
         threaded one from `rebuild`), scattered into the interior rows (or None)."""
         layer = self.layer
-        d = layer._scatter_node_sources(
-            lambda j, ns: self._source_slope(ns, rebuilt[self.n_el + j], phi[..., ns.nodes],
+        d = layer._scatter_withdrawals(
+            lambda j, ns: self._withdrawal_slope(ns, rebuilt[self.n_el + j], phi[..., ns.nodes],
                                              drv))
         if step is None:
             return d
@@ -173,10 +173,10 @@ class FunctionalLaws:
                                               step.ctx, drv)))
 
     @staticmethod
-    def _source_slope(ns, d, phi_nodes, drv):
-        """One node source's `dw/dphi` at its nodes: its own `dflow` where that is exact
+    def _withdrawal_slope(ns, d, phi_nodes, drv):
+        """One withdrawal's `dw/dphi` at its nodes: its own `dflow` where that is exact
         (`exact_slope`), else autograd through its withdrawal."""
-        if ns.exact_slope and _analytic(ns, NodeSource):
+        if ns.exact_slope and _analytic(ns, NodeWithdrawal):
             # `d`'s tensors are `ns`'s own parameters (see `_law_slope`).
             with torch.no_grad():
                 return ns.dflow(phi_nodes, drv).expand(phi_nodes.shape)
@@ -191,7 +191,7 @@ class FunctionalLaws:
         """One storage's `d rate/d phi` at its nodes, `args = (phi_nodes, phi_start,
         previous)`: its `rate_slope` where that is exact (`exact_slope`, the default), else
         autograd through its rate. `rate_slope` is taken for every exact storage, overridden
-        or not: it is the slope the primal Newton uses (`KirchhoffLayer._node_source_slopes`),
+        or not: it is the slope the primal Newton uses (`KirchhoffLayer._withdrawal_slopes`),
         so a differentiable solve that nothing reaches stays the primal solve bit for bit."""
         phi_nodes, phi_start, previous = args
         if st.exact_slope:
@@ -290,22 +290,22 @@ class FunctionalLaws:
 
     @property
     def layer_slopes(self) -> bool:
-        """Whether `dflows`/`node_slopes` equal the layer's own `dflows` and node-source and
-        storage slopes (`KirchhoffLayer._node_source_slopes`): true unless a law or node
+        """Whether `dflows`/`node_slopes` equal the layer's own `dflows` and withdrawal and
+        storage slopes (`KirchhoffLayer._withdrawal_slopes`): true unless a law or node
         source overrides `dflow` with a slope it does not declare exact
         (`exact_slope = False`), or a storage declares its `rate_slope` inexact; only the
         layer's slopes use those. Cached on the layer against its owners' `exact_slope`
         flags (which may be set per instance)."""
         layer = self.layer
         n_el, n_owned = self.n_el, self.n_owned
-        owners = (*layer._laws, *layer._node_sources, *layer._storage)
+        owners = (*layer._laws, *layer._withdrawals, *layer._storage)
         flags = tuple(o.exact_slope for o in owners)
         cache = getattr(layer, "_layer_slopes", None)
         if cache is None or cache[0] != flags:
             value = not any(
                 not o.exact_slope and (
                     i >= n_owned
-                    or _analytic(o, ConstitutiveLaw if i < n_el else NodeSource))
+                    or _analytic(o, ConstitutiveLaw if i < n_el else NodeWithdrawal))
                 for i, o in enumerate(owners))
             cache = layer._layer_slopes = (flags, value)
         return cache[1]

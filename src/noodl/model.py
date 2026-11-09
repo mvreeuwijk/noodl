@@ -496,7 +496,7 @@ class Model:
         """Move the whole model to `device` and the precision of `dtype`, in place; return it.
 
         Moves, together: the network (its cached operators), every layer's cached index,
-        capacity and law-slice tensors, the laws, node sources, head terms and reactions, every
+        capacity and law-slice tensors, the laws, withdrawals, head terms and reactions, every
         closure of a class defined in noodl, a user closure that defines
         `to(device=, dtype=)`, and the tensors attached to the model by an application
         builder (`model.junction_idx`, a `notes` dict...). Floating tensors take the
@@ -557,7 +557,7 @@ class Model:
         `warm_start` (default True) starts each Kirchhoff layer's nonlinear solve from the
         state's `"<layer>.phi"` (and, on a layer solved by Modified Nodal Analysis, its
         implicit-law flows from `"<layer>.q"`). `False` starts it from the layer's linear
-        initial guess instead, while closures and node sources still read `"<layer>.phi"`
+        initial guess instead, while closures and withdrawals still read `"<layer>.phi"`
         as an input (a retry after a warm start failed to converge, without losing that
         input).
 

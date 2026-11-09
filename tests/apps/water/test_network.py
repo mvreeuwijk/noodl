@@ -255,12 +255,12 @@ def test_darcy_weisbach_switches_the_layer_to_pressure():
     assert "headloss" in model.notes
 
 
-def test_pda_replaces_the_nodal_sources_with_a_node_source():
+def test_pda_replaces_the_nodal_sources_with_a_withdrawal():
     model, _, drivers = build_model(
         twoloop(), pda=True, p_min=0.0, p_req=60.0
     )
     assert float(drivers["water.sources"].abs().max()) == 0.0
-    sources = model.kirchhoff["water"]._node_sources
+    sources = model.kirchhoff["water"]._withdrawals
     assert len(sources) == 1
     assert sources[0].nodes.tolist() == [0, 1, 2, 3, 4, 5]
     assert "demand_model" in model.notes
@@ -319,7 +319,7 @@ def test_pda_defaults_from_the_networks_own_options():
     )
     model, _, drivers = build_model(net)
     assert float(drivers["water.sources"].abs().max()) == 0.0
-    sources = model.kirchhoff["water"]._node_sources
+    sources = model.kirchhoff["water"]._withdrawals
     assert len(sources) == 1
     assert sources[0].p_min == 0.0
     assert sources[0].p_req == 60.0
@@ -596,7 +596,7 @@ def test_a_pump_feeding_pressure_driven_demand_converges(pipe_form):
     gain = float(pump.head_gain(q[2:3], 0.0, 0.0))
     assert float(phi[1] - phi[0]) == pytest.approx(gain, rel=1e-10)
     # C (p ~ 59.96 m) is short of its 60 m required pressure: the demand really is limited
-    source = model.kirchhoff["water"].node_sources[0]
+    source = model.kirchhoff["water"].withdrawals[0]
     delivered = source.flow(phi[:3])
     assert 0.99 * 0.004 < float(delivered[2]) < 0.004
     assert float(q[2]) == pytest.approx(float(delivered[2]), rel=1e-10)
@@ -658,7 +658,7 @@ def test_a_constant_tracer_is_preserved_under_pressure_driven_demand():
     drivers["quality.x_boundary"] = torch.tensor([100.0], dtype=F64)
     out = water_steady(model, state, drivers)
     # the hydraulics really are demand-limited, so the test discriminates
-    source = model.kirchhoff["water"].node_sources[0]
+    source = model.kirchhoff["water"].withdrawals[0]
     flow = source.flow(out["water.phi"][:6])
     assert bool((flow < source.q_required.detach() * 0.999).any())
     assert out["quality.x"].tolist() == pytest.approx([100.0] * 6, rel=1e-8)

@@ -695,11 +695,11 @@ def build_model(
                                  dtype=F64)))
         if held:
             boundary += [t.name for t in net.tanks]
-    node_sources: list = []
+    withdrawals: list = []
     if pda:
         if not net.junctions:
             raise ValueError("build_model: pda=True on a network with no junctions")
-        node_sources.append(
+        withdrawals.append(
             PressureDrivenDemand(
                 torch.tensor(
                     [node_names.index(j.name) for j in net.junctions], dtype=torch.long
@@ -714,7 +714,7 @@ def build_model(
             f"REQUIRED PRESSURE {p_req} m and PRESSURE EXPONENT {exponent}"
         )
     layer = KirchhoffLayer(
-        graph, "water", laws, boundary=boundary, node_sources=node_sources,
+        graph, "water", laws, boundary=boundary, withdrawals=withdrawals,
         quantity="head" if headloss == "H-W" else "pressure",
         unit="m" if headloss == "H-W" else "Pa", flow_unit="m3/s",
         storage=storages, scheme=tank_scheme if net.tanks else "backward_euler",
@@ -944,14 +944,14 @@ def initial_drivers(
         initial_drivers(model, values={"water.sources": {"J1": -0.005}})   # the same
 
     A pressure-driven model (`pda=True`) refuses `demand=` and a `water.sources` value: its
-    demands are node sources the network set at build time. On a model built with `quality=`,
+    demands are withdrawals the network set at build time. On a model built with `quality=`,
     the quality sink follows the withdrawals of the current hydraulic solution, so a changed
     `demand=` or `water.sources` changes the hydraulics and the quality together.
     """
     drivers = refs_initial_drivers(model, values=values)
     if demand or (values and "water.sources" in values):
         layer = model.kirchhoff["water"]
-        if any(isinstance(s, PressureDrivenDemand) for s in layer.node_sources):
+        if any(isinstance(s, PressureDrivenDemand) for s in layer.withdrawals):
             raise ValueError(
                 "initial_drivers: the demands of this model are pressure-driven and were "
                 "set by the network at build time, so demand= or a water.sources value "

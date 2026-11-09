@@ -185,7 +185,7 @@ Two rules worth stating explicitly, because both produce wrong answers rather th
   differentiable solve then differentiates its `flow` by autograd instead, while the
   non-differentiable solve keeps using `dflow`. `DoorPortStream` is the built-in example; every
   other built-in law's `dflow` is exact, which `tests/elements/test_dflow_exact.py` checks.
-  The same attribute exists on `NodeSource`, and on `NodeStorage` for its `rate_slope`
+  The same attribute exists on `NodeWithdrawal`, and on `NodeStorage` for its `rate_slope`
   (audited by the same test).
 
 ## Implicit, coupled and dynamic constitutive laws
@@ -346,7 +346,7 @@ runs between layer solves and writes driver values. See [Layers and models](laye
 Because the head reaches the layer as a driver, a gradient reaches whatever produced it, and
 `EdgeHeads` holds no tensor the differentiable solve would miss.
 
-## Node sources and node storage
+## Withdrawals and node storage
 
 Two objects act at a node rather than on an edge, each as a function of that node's own
 potential, and each adds only a diagonal entry to the Jacobian:
@@ -359,8 +359,8 @@ potential, and each adds only a diagonal entry to the Jacobian:
   `scheme="forward_euler"` a linear storage sits at a boundary node instead (an EPANET tank),
   held through the solve and moved by explicit Euler after it. See
   [Node storage](layers.md#node-storage).
-- **`NodeSource`** (`noodl.NodeSource`): a withdrawal that is **not** storage, `w(phi)` at the
-  current instant: EPANET's pressure-driven demand, a leak. A storage written as a node source
+- **`NodeWithdrawal`** (`noodl.NodeWithdrawal`): a withdrawal that is **not** storage, `w(phi)` at the
+  current instant: EPANET's pressure-driven demand, a leak. A storage written as a withdrawal
   with its own step-start drivers duplicates what the layer already does; give it to
   `KirchhoffLayer(storage=...)` instead.
 

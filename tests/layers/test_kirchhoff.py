@@ -7,9 +7,9 @@ from scipy.optimize import brentq
 from noodl.elements import Conductance, FixedFlow, PowerLaw
 from noodl.elements.base import ConstitutiveLaw
 from noodl.layers.kirchhoff import KirchhoffLayer
-from noodl.nodesources import NodeSource
 from noodl.solvers.newton import newton
 from noodl.topology import Network
+from noodl.withdrawals import NodeWithdrawal
 
 
 def _closed_form_series_flow(C, n, drive):
@@ -687,7 +687,7 @@ def test_solve_raises_when_flow_requires_grad_via_a_parameter_but_ignores_dp():
         layer.solve(phi_b, {}, sources, differentiable=True)
 
 
-class _Emitter(NodeSource):
+class _Emitter(NodeWithdrawal):
     """q_out = C sign(phi) |phi|^n, the orifice-type emitter EPANET also offers."""
 
     def __init__(self, nodes, coeff, exponent=0.5):
@@ -704,7 +704,7 @@ def _pipe_law():
     # C and n are explicit float64 tensors: a bare Python float here is silently cast to
     # torch.get_default_dtype() (float32 in this repo, see elements/duct.py) by
     # ConstitutiveLaw._param, and the ~1e-8 relative precision loss that costs would blow the
-    # rel=1e-9 tolerances the node-source tests below check against an independently
+    # rel=1e-9 tolerances the withdrawal tests below check against an independently
     # computed root.
     return PowerLaw(
         torch.tensor(0.05, dtype=torch.float64), torch.tensor(0.54, dtype=torch.float64),
@@ -720,12 +720,12 @@ def _emitter_layer(coeff=0.02):
     source = _Emitter(torch.tensor([0]), torch.tensor([coeff], dtype=torch.float64))
     layer = KirchhoffLayer(
         net, "water", [_pipe_law()], boundary=["R"],
-        node_sources=[source], linear_solver="direct",
+        withdrawals=[source], linear_solver="direct",
     )
     return net, layer, source
 
 
-def test_node_source_solves_against_a_hand_written_root():
+def test_withdrawal_solves_against_a_hand_written_root():
     """0.05 (10 - x)^0.54 == 0.02 x^0.5 at the junction."""
     scipy_optimize = pytest.importorskip("scipy.optimize")
     _, layer, _ = _emitter_layer()
@@ -739,7 +739,7 @@ def test_node_source_solves_against_a_hand_written_root():
     assert float(q[0]) == pytest.approx(0.02 * root**0.5, rel=1e-9)
 
 
-def test_node_source_enters_the_residual_and_the_jacobian_diagonal():
+def test_withdrawal_enters_the_residual_and_the_jacobian_diagonal():
     _, layer, _ = _emitter_layer()
     pb = torch.tensor([10.0], dtype=torch.float64)
     phi, _ = layer.solve(pb, {}, None, differentiable=False, atol=1e-13, rtol=1e-13)
@@ -755,7 +755,7 @@ def test_node_source_enters_the_residual_and_the_jacobian_diagonal():
     assert added == pytest.approx(0.5 * 0.02 * float(phi[0]) ** -0.5, rel=1e-9)
 
 
-def test_node_source_adjoint_passes_gradcheck():
+def test_withdrawal_adjoint_passes_gradcheck():
     _, layer, _ = _emitter_layer()
 
     def fn(pb):
@@ -766,7 +766,7 @@ def test_node_source_adjoint_passes_gradcheck():
     assert torch.autograd.gradcheck(fn, (pb,), eps=1e-6, atol=1e-8, rtol=1e-5)
 
 
-def test_node_source_parameter_gradient_matches_central_differences():
+def test_withdrawal_parameter_gradient_matches_central_differences():
     _, layer, source = _emitter_layer()
     source.coeff.requires_grad_(True)
     pb = torch.tensor([10.0], dtype=torch.float64)
@@ -786,7 +786,7 @@ def test_node_source_parameter_gradient_matches_central_differences():
     assert analytic == pytest.approx(fd, rel=1e-6)
 
 
-def test_node_source_on_a_boundary_node_is_refused():
+def test_withdrawal_on_a_boundary_node_is_refused():
     net = Network(dtype=torch.float64)
     net.add_node("J")
     net.add_node("R")
@@ -794,13 +794,13 @@ def test_node_source_on_a_boundary_node_is_refused():
     with pytest.raises(ValueError, match=r"acts at \['R'\]"):
         KirchhoffLayer(
             net, "water", [_pipe_law()], boundary=["R"],
-            node_sources=[_Emitter(torch.tensor([1]),
+            withdrawals=[_Emitter(torch.tensor([1]),
                                    torch.tensor([0.02], dtype=torch.float64))],
         )
 
 
-def test_a_phi_independent_node_source_is_refused():
-    class _Constant(NodeSource):
+def test_a_phi_independent_withdrawal_is_refused():
+    class _Constant(NodeWithdrawal):
         def flow(self, phi_nodes, drivers=None):
             return torch.full_like(phi_nodes, 0.01)
 
@@ -809,7 +809,7 @@ def test_a_phi_independent_node_source_is_refused():
         source.dflow(torch.tensor([5.0], dtype=torch.float64))
 
 
-class _LinearGround(NodeSource):
+class _LinearGround(NodeWithdrawal):
     """w = g * phi: a linear virtual-ground withdrawal, dflow = g everywhere (well-defined
     at phi = 0, unlike `_Emitter`'s sqrt law) -- built for the grounding tests below."""
 
@@ -821,11 +821,11 @@ class _LinearGround(NodeSource):
         return self.g * phi_nodes
 
 
-def test_grounding_counts_a_node_source_at_a_fixed_flow_only_node():
+def test_grounding_counts_a_withdrawal_at_a_fixed_flow_only_node():
     """A node reachable from every boundary only through FixedFlow edges (dflow == 0
     everywhere, the "structurally singular subnetwork" case) is ungrounded by
-    edges alone; a NodeSource with a positive slope at that node must still let it solve,
-    because the node source's own diagonal shift IS the SPD contribution a boundary
+    edges alone; a NodeWithdrawal with a positive slope at that node must still let it solve,
+    because the withdrawal's own diagonal shift IS the SPD contribution a boundary
     connection would otherwise have to supply."""
     net = Network(dtype=torch.float64)
     net.add_node("J")
@@ -835,14 +835,14 @@ def test_grounding_counts_a_node_source_at_a_fixed_flow_only_node():
     elements = [FixedFlow(q0, kind="vent")]
     source = _LinearGround(torch.tensor([0]), 0.02)
     layer = KirchhoffLayer(
-        net, "test", elements, boundary=["R"], node_sources=[source],
+        net, "test", elements, boundary=["R"], withdrawals=[source],
         linear_solver="direct",
     )
     pb = torch.tensor([10.0], dtype=torch.float64)
     phi, q = layer.solve(pb, {}, None, differentiable=False, atol=1e-13, rtol=1e-13)
     assert torch.isfinite(phi).all() and torch.isfinite(q).all()
     # The residual is exactly linear here (FixedFlow contributes a phi-independent q0, the
-    # node source w = g*phi): A_I q0 + g*phi_J = 0.
+    # withdrawal w = g*phi): A_I q0 + g*phi_J = 0.
     expected = float(-q0[0] / 0.02)
     assert float(phi[..., layer.interior]) == pytest.approx(expected, rel=1e-9)
 
@@ -855,9 +855,9 @@ def test_grounding_counts_a_node_source_at_a_fixed_flow_only_node():
         without_source.solve(pb, {}, None, differentiable=False)
 
 
-def test_a_network_grounded_only_by_node_sources_is_certified_spd():
+def test_a_network_grounded_only_by_withdrawals_is_certified_spd():
     """Two nodes joined by a conductance, no boundary at all, each held by a positive-slope
-    node source (a closed building of compressible volumes): the Jacobian is SPD, and the
+    withdrawal (a closed building of compressible volumes): the Jacobian is SPD, and the
     `auto` solver selection must see that (sparse direct, not the certificate-free GMRES
     fallback). Solution by hand: g (a - b) + ga a = s, g (b - a) + gb b = 0."""
     net = Network(dtype=torch.float64)
@@ -866,7 +866,7 @@ def test_a_network_grounded_only_by_node_sources_is_certified_spd():
     net.add_edge("A", "B", kind="c")
     layer = KirchhoffLayer(
         net, "test", [Conductance(torch.tensor([2.0], dtype=torch.float64), kind="c")],
-        node_sources=[_LinearGround(torch.tensor([0]), 0.5),
+        withdrawals=[_LinearGround(torch.tensor([0]), 0.5),
                       _LinearGround(torch.tensor([1]), 0.25)],
     )
     diag: dict = {}
@@ -882,9 +882,9 @@ def test_a_network_grounded_only_by_node_sources_is_certified_spd():
     assert diag["backend"] == "sparse_direct"
 
 
-def test_two_node_sources_on_one_node_sum_their_withdrawals():
-    """EPANET semantics -- several node sources at one junction sum, exactly as if a
-    single node source carried their combined coefficient."""
+def test_two_withdrawals_on_one_node_sum_their_withdrawals():
+    """EPANET semantics -- several withdrawals at one junction sum, exactly as if a
+    single withdrawal carried their combined coefficient."""
     net = Network(dtype=torch.float64)
     net.add_node("J")
     net.add_node("R")
@@ -892,12 +892,12 @@ def test_two_node_sources_on_one_node_sum_their_withdrawals():
     a = _Emitter(torch.tensor([0]), torch.tensor([0.02], dtype=torch.float64))
     b = _Emitter(torch.tensor([0]), torch.tensor([0.01], dtype=torch.float64))
     two = KirchhoffLayer(
-        net, "water", [_pipe_law()], boundary=["R"], node_sources=[a, b],
+        net, "water", [_pipe_law()], boundary=["R"], withdrawals=[a, b],
         linear_solver="direct",
     )
     combined = _Emitter(torch.tensor([0]), torch.tensor([0.03], dtype=torch.float64))
     one = KirchhoffLayer(
-        net, "water", [_pipe_law()], boundary=["R"], node_sources=[combined],
+        net, "water", [_pipe_law()], boundary=["R"], withdrawals=[combined],
         linear_solver="direct",
     )
     pb = torch.tensor([10.0], dtype=torch.float64)
@@ -907,8 +907,8 @@ def test_two_node_sources_on_one_node_sum_their_withdrawals():
     torch.testing.assert_close(q_two, q_one, rtol=1e-9, atol=1e-12)
 
 
-def test_node_source_with_a_batched_parameter_solves_each_instance_independently():
-    """A NodeSource whose own parameter carries a leading batch dim solves each
+def test_withdrawal_with_a_batched_parameter_solves_each_instance_independently():
+    """A NodeWithdrawal whose own parameter carries a leading batch dim solves each
     instance to the same answer an unbatched, single-instance solve would give it."""
     net = Network(dtype=torch.float64)
     net.add_node("J")
@@ -917,7 +917,7 @@ def test_node_source_with_a_batched_parameter_solves_each_instance_independently
     coeffs = torch.tensor([[0.01], [0.02], [0.04]], dtype=torch.float64)  # (3 instances, 1 node)
     source = _Emitter(torch.tensor([0]), coeffs)
     layer = KirchhoffLayer(
-        net, "water", [_pipe_law()], boundary=["R"], node_sources=[source],
+        net, "water", [_pipe_law()], boundary=["R"], withdrawals=[source],
         linear_solver="direct",
     )
     pb = torch.tensor([10.0], dtype=torch.float64)
@@ -926,7 +926,7 @@ def test_node_source_with_a_batched_parameter_solves_each_instance_independently
     for i in range(3):
         single_source = _Emitter(torch.tensor([0]), coeffs[i])
         single_layer = KirchhoffLayer(
-            net, "water", [_pipe_law()], boundary=["R"], node_sources=[single_source],
+            net, "water", [_pipe_law()], boundary=["R"], withdrawals=[single_source],
             linear_solver="direct",
         )
         phi_i, q_i = single_layer.solve(
@@ -936,12 +936,12 @@ def test_node_source_with_a_batched_parameter_solves_each_instance_independently
         torch.testing.assert_close(q[i], q_i, rtol=1e-9, atol=1e-12)
 
 
-def test_node_source_with_an_unregistered_grad_tensor_is_named_as_a_node_source():
-    """The unreachable-tensor guard must call a NodeSource a "node source" (not an
-    "element") and must not tell the caller to pass learnable=True -- a NodeSource has no
+def test_withdrawal_with_an_unregistered_grad_tensor_is_named_as_a_withdrawal():
+    """The unreachable-tensor guard must call a NodeWithdrawal a "withdrawal" (not an
+    "element") and must not tell the caller to pass learnable=True -- a NodeWithdrawal has no
     such constructor kwarg; the fix is to register the tensor as an nn.Parameter."""
 
-    class _LeakyGradSource(NodeSource):
+    class _LeakyGradSource(NodeWithdrawal):
         def __init__(self, nodes, coeff):
             super().__init__(nodes)
             self.coeff = torch.nn.Parameter(torch.as_tensor(coeff, dtype=torch.float64))
@@ -958,11 +958,11 @@ def test_node_source_with_an_unregistered_grad_tensor_is_named_as_a_node_source(
     net.add_edge("R", "J", kind="pipe")
     source = _LeakyGradSource(torch.tensor([0]), 0.02)
     layer = KirchhoffLayer(
-        net, "water", [_pipe_law()], boundary=["R"], node_sources=[source],
+        net, "water", [_pipe_law()], boundary=["R"], withdrawals=[source],
         linear_solver="direct",
     )
     pb = torch.tensor([10.0], dtype=torch.float64)
-    with pytest.raises(ValueError, match=r"node source .*'stray'") as excinfo:
+    with pytest.raises(ValueError, match=r"withdrawal .*'stray'") as excinfo:
         layer.solve(pb, {}, None, differentiable=True)
     message = str(excinfo.value)
     assert "learnable=True" not in message
@@ -995,7 +995,7 @@ def test_law_for_returns_the_law_and_its_q_slice():
         layer.law_for("nope")
 
 
-def test_node_sources_default_to_empty_and_change_nothing():
+def test_withdrawals_default_to_empty_and_change_nothing():
     net = Network(dtype=torch.float64)
     net.add_node("J")
     net.add_node("R")
@@ -1012,12 +1012,12 @@ def test_node_sources_default_to_empty_and_change_nothing():
     assert float(phi[0]) == pytest.approx(10.0 - (0.01 / 0.05) ** (1.0 / 0.54), rel=1e-9)
 
 
-def test_node_sources_are_exposed_read_only_as_a_tuple():
+def test_withdrawals_are_exposed_read_only_as_a_tuple():
     net, layer, source = _emitter_layer()
-    assert layer.node_sources == (source,)
-    assert isinstance(layer.node_sources, tuple)
+    assert layer.withdrawals == (source,)
+    assert isinstance(layer.withdrawals, tuple)
     bare = KirchhoffLayer(net, "bare", [_pipe_law()], boundary=["R"], linear_solver="direct")
-    assert bare.node_sources == ()
+    assert bare.withdrawals == ()
 
 
 def test_a_batched_head_on_one_kind_broadcasts_a_head_free_fixed_flow_kind():

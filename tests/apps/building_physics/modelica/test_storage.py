@@ -230,4 +230,4 @@ def test_mass_storage_false_is_the_quasi_steady_route():
                                            mass_storage=False)
     assert names.storage == () and "air.storage" not in state
     assert names.air_references == ("volA",)
-    assert model.kirchhoff["air"]._node_sources == []
+    assert model.kirchhoff["air"]._withdrawals == []

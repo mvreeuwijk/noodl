@@ -62,7 +62,7 @@ Nodal sources, withdrawals and storage.
 
 | Name | What it does | How to call it |
 |---|---|---|
-| `PressureDrivenDemand` | The Wagner demand function as a `NodeSource` (withdrawal, positive OUT). | `PressureDrivenDemand(nodes, q_required, elevation, *, p_min=0.0, p_req=0.0, exponent=0.5, learnable=False)` |
+| `PressureDrivenDemand` | The Wagner demand function as a `NodeWithdrawal` (withdrawal, positive OUT). | `PressureDrivenDemand(nodes, q_required, elevation, *, p_min=0.0, p_req=0.0, exponent=0.5, learnable=False)` |
 
 ## Files
 

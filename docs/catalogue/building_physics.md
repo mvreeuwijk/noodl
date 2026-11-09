@@ -340,7 +340,7 @@ Named values and option tables.
 
 ## Base classes (for extending)
 
-Subclass these to add a constitutive law, head term, closure, reaction, node source or node storage; see [Extending noodl](../development/extending.md).
+Subclass these to add a constitutive law, head term, closure, reaction, withdrawal or node storage; see [Extending noodl](../development/extending.md).
 
 | Name | What it does | How to call it |
 |---|---|---|

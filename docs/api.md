@@ -91,9 +91,9 @@ Constitutive laws are grouped below by the physics they express, as in
       members: [HeadTerm, EdgeHeads, DriverHead, Stack, DuctStack, Wind, WindProfile]
       heading_level: 4
 
-::: noodl.nodesources
+::: noodl.withdrawals
     options:
-      members: [NodeSource]
+      members: [NodeWithdrawal]
       heading_level: 4
 
 ::: noodl.storage

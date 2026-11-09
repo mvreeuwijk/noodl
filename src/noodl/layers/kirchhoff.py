@@ -21,7 +21,6 @@ from noodl.layers._functional import FunctionalLaws
 from noodl.layers._mna import MnaSystem, check_scheme
 from noodl.layers._solve_policy import resolve_classic, resolve_mna
 from noodl.layers._topology import TopologyGuard
-from noodl.nodesources import NodeSource
 from noodl.operators.graph import GraphLaplacianOperator
 from noodl.operators.shifted import ShiftedOperator
 from noodl.solvers.grounding import spd_certificate, spd_diagnosis
@@ -31,6 +30,7 @@ from noodl.solvers.newton import inner_solve_rtol, newton
 from noodl.solvers.select import solve as select_solve
 from noodl.storage import NodeStorage
 from noodl.topology import Network
+from noodl.withdrawals import NodeWithdrawal
 
 # Inner linear solvers a layer may be configured with; forwarded verbatim as
 # `solvers.select.solve`'s `method`. "direct" is the retained dense reference (the
@@ -166,7 +166,7 @@ class KirchhoffLayer(TopologyGuard):
     `"<name>.frequency"` (one per instance) and reaches the laws as `LawContext.omega`
     (`2 pi f`). Each complex unknown is solved as its (real, imaginary) pair, so a law that is
     not holomorphic in `dp` (a constant-power load, `q = conj(S / dp)`) is handled exactly.
-    Every law must declare `phasor_capable`, node sources are refused (a load is an edge to
+    Every law must declare `phasor_capable`, withdrawals are refused (a load is an edge to
     ground), and `power_residual` is the complex power balance.
 
     `storage` (default none) are `NodeStorage` objects (`noodl.storage`): an amount stored at
@@ -212,7 +212,7 @@ class KirchhoffLayer(TopologyGuard):
         boundary: Sequence = (),
         linear_solver: str = "auto",
         *,
-        node_sources: Sequence[NodeSource] = (),
+        withdrawals: Sequence[NodeWithdrawal] = (),
         quantity: str = "potential",
         unit: str = "",
         flow_unit: str = "",
@@ -334,10 +334,10 @@ class KirchhoffLayer(TopologyGuard):
         touched = torch.zeros(net.n, dtype=torch.bool)
         touched[self._src] = True
         touched[self._tgt] = True
-        # A node a node source acts at is active too: its row is the source alone (a
+        # A node a withdrawal acts at is active too: its row is the source alone (a
         # junction no conduit reaches still has its storage, `sewer.dynwave.JunctionStorage`).
-        for ns in node_sources:
-            if isinstance(ns, NodeSource):
+        for ns in withdrawals:
+            if isinstance(ns, NodeWithdrawal):
                 touched[ns.nodes] = True
         # A storage node is active too, for the same reason.
         for st in self._storage:
@@ -376,16 +376,16 @@ class KirchhoffLayer(TopologyGuard):
         # existing layer is unchanged. Each source's nodes must be INTERIOR unknowns of
         # this layer: a withdrawal at a prescribed node is absorbed by the boundary and
         # changes nothing, and one at an inactive node has no row to enter -- both are
-        # wiring mistakes, named here rather than silently dropped. `_source_positions`
+        # wiring mistakes, named here rather than silently dropped. `_withdrawal_positions`
         # holds each source's nodes in this layer's COMPACT interior indexing, which is
         # what the residual's scatter-add and the Jacobian's diagonal both need.
-        self._node_sources = list(node_sources)
-        self._source_positions: list[torch.Tensor] = []
-        for ns in self._node_sources:
-            if not isinstance(ns, NodeSource):
+        self._withdrawals = list(withdrawals)
+        self._withdrawal_positions: list[torch.Tensor] = []
+        for ns in self._withdrawals:
+            if not isinstance(ns, NodeWithdrawal):
                 raise TypeError(
-                    f"KirchhoffLayer {name!r}: node_sources entry "
-                    f"{type(ns).__name__} is not a NodeSource"
+                    f"KirchhoffLayer {name!r}: withdrawals entry "
+                    f"{type(ns).__name__} is not a NodeWithdrawal"
                 )
             pos = self._interior_of_node[ns.nodes]
             if bool((pos < 0).any()):
@@ -395,11 +395,11 @@ class KirchhoffLayer(TopologyGuard):
                     if p < 0
                 ]
                 raise ValueError(
-                    f"KirchhoffLayer {name!r}: node source {ns!r} acts at {bad}, "
+                    f"KirchhoffLayer {name!r}: withdrawal {ns!r} acts at {bad}, "
                     f"which are not interior unknowns of this layer (a boundary node's "
                     f"potential is prescribed and an inactive node has no row)"
                 )
-            self._source_positions.append(pos)
+            self._withdrawal_positions.append(pos)
 
         # NODE STORAGE. Each storage's nodes must be interior unknowns, as for node
         # sources. `_storage_positions` are their compact interior rows; `_storage_slices`
@@ -505,9 +505,9 @@ class KirchhoffLayer(TopologyGuard):
                         f"takes linear laws with real or complex coefficients and laws that "
                         f"declare phasor_capable)"
                     )
-            if self._node_sources:
+            if self._withdrawals:
                 raise ValueError(
-                    f"KirchhoffLayer {name!r}: a phasor layer takes no node_sources; "
+                    f"KirchhoffLayer {name!r}: a phasor layer takes no withdrawals; "
                     f"loads are edges to ground in a phasor layer"
                 )
             if self._storage:
@@ -564,10 +564,10 @@ class KirchhoffLayer(TopologyGuard):
             )
 
     @property
-    def node_sources(self) -> tuple:
-        """The `NodeSource` objects this layer evaluates at its interior nodes, in the order
+    def withdrawals(self) -> tuple:
+        """The `NodeWithdrawal` objects this layer evaluates at its interior nodes, in the order
         given at construction (read-only)."""
-        return tuple(self._node_sources)
+        return tuple(self._withdrawals)
 
     @property
     def storage(self) -> tuple:
@@ -631,11 +631,11 @@ class KirchhoffLayer(TopologyGuard):
 
     @property
     def linear(self) -> bool:
-        """True when every law, node source and storage is affine (`ConstitutiveLaw.linear`):
+        """True when every law, withdrawal and storage is affine (`ConstitutiveLaw.linear`):
         an MNA solve then takes the full Newton step from the start and converges in one
         iteration."""
         return (all(el.linear for el in self._laws)
-                and all(ns.linear for ns in self._node_sources)
+                and all(ns.linear for ns in self._withdrawals)
                 and all(st.linear for st in self._storage))
 
     def net_outflow(self, q: torch.Tensor) -> torch.Tensor:
@@ -700,15 +700,15 @@ class KirchhoffLayer(TopologyGuard):
             out = term if out is None else out + term
         return out
 
-    def _scatter_node_sources(self, value) -> torch.Tensor | None:
-        """The sum over node sources of `value(j, ns)` (one value per node of source `j`),
-        scattered to the INTERIOR rows; `None` when this layer has no node sources. Every
-        node-source withdrawal and slope (classic, threaded and Modified Nodal Analysis)
+    def _scatter_withdrawals(self, value) -> torch.Tensor | None:
+        """The sum over withdrawals of `value(j, ns)` (one value per node of source `j`),
+        scattered to the INTERIOR rows; `None` when this layer has no withdrawals. Every
+        withdrawal withdrawal and slope (classic, threaded and Modified Nodal Analysis)
         is assembled here."""
-        return self._scatter_entries(self._node_sources, self._source_positions, value)
+        return self._scatter_entries(self._withdrawals, self._withdrawal_positions, value)
 
     def _scatter_storage(self, value) -> torch.Tensor | None:
-        """`_scatter_node_sources` over the storages: `value(j, storage)` per storage."""
+        """`_scatter_withdrawals` over the storages: `value(j, storage)` per storage."""
         return self._scatter_entries(self._storage, self._storage_positions, value)
 
     def _storage_args(self, j: int, st: NodeStorage, phi: torch.Tensor, step: _StorageStep):
@@ -726,24 +726,24 @@ class KirchhoffLayer(TopologyGuard):
             return a
         return b if a is None else a + b
 
-    def _node_source_withdrawal(
+    def _withdrawal(
         self, phi: torch.Tensor, drivers: Mapping, step: _StorageStep | None = None
     ) -> torch.Tensor | None:
-        """Total potential-dependent withdrawal per INTERIOR row: the node sources', plus
+        """Total potential-dependent withdrawal per INTERIOR row: the withdrawals', plus
         the storages' step rates on a step (`step`); `None` when there is none. `phi` is
         full-node."""
-        w = self._scatter_node_sources(lambda j, ns: ns.flow(phi[..., ns.nodes], drivers))
+        w = self._scatter_withdrawals(lambda j, ns: ns.flow(phi[..., ns.nodes], drivers))
         if step is None:
             return w
         return self._add(w, self._scatter_storage(
             lambda j, st: st.rate(*self._storage_args(j, st, phi, step), step.ctx, drivers)))
 
-    def _node_source_slopes(
+    def _withdrawal_slopes(
         self, phi: torch.Tensor, drivers: Mapping, step: _StorageStep | None = None
     ) -> torch.Tensor | None:
-        """`diag(w')` per INTERIOR row: the node sources' slopes, plus the storages'
+        """`diag(w')` per INTERIOR row: the withdrawals' slopes, plus the storages'
         `rate_slope` on a step; `None` when there is none."""
-        d = self._scatter_node_sources(lambda j, ns: ns.dflow(phi[..., ns.nodes], drivers))
+        d = self._scatter_withdrawals(lambda j, ns: ns.dflow(phi[..., ns.nodes], drivers))
         if step is None:
             return d
         return self._add(d, self._scatter_storage(
@@ -760,7 +760,7 @@ class KirchhoffLayer(TopologyGuard):
         diagonal at the current iterate for all but `linear_init`, which instead passes its
         own tangent-at-zero `k` -- the same operator shape, at a different slope.
 
-        `node_slopes` is the `diag(w')` a potential-dependent nodal source adds to
+        `node_slopes` is the `diag(w')` a potential-dependent withdrawal adds to
         that Jacobian; `None` (the usual case) returns the bare Laplacian, so nothing about an
         existing layer's operator changes.
         """
@@ -957,7 +957,7 @@ class KirchhoffLayer(TopologyGuard):
         self._require_current_topology()
         phi_i = phi[..., self.interior]
         lhs = self._accumulate_interior(q) - self._source_interior(sources, phi_i)
-        w = self._node_source_withdrawal(phi, drivers or {})
+        w = self._withdrawal(phi, drivers or {})
         if storage_flow is not None and self._storage:
             w = self._add(w, self._scatter_storage(
                 lambda j, st: storage_flow[..., slice(*self._storage_slices[j])]))
@@ -975,7 +975,7 @@ class KirchhoffLayer(TopologyGuard):
         # (numbers: docs/design/orchestration.md#residual-incidence-product).
         lhs = self._accumulate_interior(q)
         s_I = self._source_interior(sources, phi_interior)
-        w = self._node_source_withdrawal(phi, drivers, step)
+        w = self._withdrawal(phi, drivers, step)
         return (lhs - s_I if w is None else lhs - s_I + w), phi, q
 
     def jacobian(self, phi_interior, phi_boundary, drivers, *, dt=None, scheme=None,
@@ -995,7 +995,7 @@ class KirchhoffLayer(TopologyGuard):
         dq = self.dflows(phi, drivers)
         A_I = self.A[self.interior]
         dense = torch.einsum("ie,...e,je->...ij", A_I, dq, A_I)
-        node_slopes = self._node_source_slopes(phi, drivers, step)
+        node_slopes = self._withdrawal_slopes(phi, drivers, step)
         if node_slopes is None:
             return dense
         return dense + torch.diag_embed(node_slopes.expand(dense.shape[:-1]))
@@ -1031,12 +1031,12 @@ class KirchhoffLayer(TopologyGuard):
 
     def _extra_grounded(self, node_slopes: torch.Tensor | None) -> torch.Tensor | None:
         """Full-node-order bool from `node_slopes` (per COMPACT interior row, as
-        `_node_source_slopes` returns): True at an interior node whose own node-source slope
+        `_withdrawal_slopes` returns): True at an interior node whose own withdrawal slope
         is strictly positive there. Such a node is grounded independent of any edge
         path -- `ShiftedOperator`'s positive diagonal shift there is exactly the SPD
         contribution a boundary connection would otherwise have to supply -- so
         `_grounding_check` must treat it exactly like a boundary node when deciding whether
-        the rest of the graph reaches ground. `None` when this layer has no node sources,
+        the rest of the graph reaches ground. `None` when this layer has no withdrawals,
         which leaves `_grounding_check` unchanged for every existing layer.
         """
         if node_slopes is None:
@@ -1057,11 +1057,11 @@ class KirchhoffLayer(TopologyGuard):
         it is per instance, so an edge closed in one instance but open in another cannot be
         conflated with it.
 
-        `node_slopes`, when this layer has node sources, is `diag(w')`
-        per compact interior row -- the same tensor `_node_source_slopes` returns. A node
+        `node_slopes`, when this layer has withdrawals, is `diag(w')`
+        per compact interior row -- the same tensor `_withdrawal_slopes` returns. A node
         with a strictly positive entry there is grounded independent of any edge path (see
         `_extra_grounded`), so passing it here is what keeps a node grounded ONLY through a
-        node source from being reported ungrounded.
+        withdrawal from being reported ungrounded.
         """
         extra_grounded = self._extra_grounded(node_slopes)
         certified = spd_certificate(
@@ -1119,13 +1119,13 @@ class KirchhoffLayer(TopologyGuard):
         dp0 = self.dp(phi0, drivers)
         c, k = self._linear_ck(drivers)
         rhs = self._source_interior(sources, phi0) - self._accumulate_interior(c + k * dp0)
-        # A node source contributes its tangent at phi = 0 to the same linearisation:
+        # A withdrawal contributes its tangent at phi = 0 to the same linearisation:
         # w(phi) ~ w(0) + w'(0) phi, so w(0) moves to the right-hand side and w'(0) joins
         # the operator's diagonal.
         node_slopes = None
-        if self._node_sources or _step is not None:
-            w0 = self._node_source_withdrawal(phi0, drivers, _step)
-            node_slopes = self._node_source_slopes(phi0, drivers, _step)
+        if self._withdrawals or _step is not None:
+            w0 = self._withdrawal(phi0, drivers, _step)
+            node_slopes = self._withdrawal_slopes(phi0, drivers, _step)
             rhs = rhs - w0
         self._grounding_check(k, where="linear_init", node_slopes=node_slopes)
         # k picks up a batch dimension only if some law's linear_init(drivers) actually
@@ -1178,12 +1178,12 @@ class KirchhoffLayer(TopologyGuard):
                     f"nn.Parameter in __init__, or use differentiable=False."
                 )
             if role == "source":
-                # A NodeSource has no `learnable=` constructor kwarg (unlike
+                # A NodeWithdrawal has no `learnable=` constructor kwarg (unlike
                 # ConstitutiveLaw) -- its fix is to register the tensor as an nn.Parameter
-                # directly, so it must be named and fixed as a node source, not
+                # directly, so it must be named and fixed as a withdrawal, not
                 # rendered (and told to construct itself) as if it were a ConstitutiveLaw.
                 raise ValueError(
-                    f"node source {el!r} has a tensor attribute {name!r} with "
+                    f"withdrawal {el!r} has a tensor attribute {name!r} with "
                     f"requires_grad=True that is not a registered nn.Parameter, so "
                     f"the differentiable solve cannot reach it through "
                     f"Function.apply and its gradient would be silently wrong or "
@@ -1204,7 +1204,7 @@ class KirchhoffLayer(TopologyGuard):
             )
 
     def _held_scan(self) -> list:
-        """`(role, owner, name, tensor)` for every tensor the laws, node sources, storages
+        """`(role, owner, name, tensor)` for every tensor the laws, withdrawals, storages
         (every submodule: a law may wrap another, `Scaled`) hold where the
         differentiable solve does not thread it (`_held_tensors`). The scan is cached: it is
         repeated only when an object it read holds something else (`_shallow`), and the tensors'
@@ -1212,9 +1212,9 @@ class KirchhoffLayer(TopologyGuard):
         cache = getattr(self, "_held_cache", None)
         if cache is not None and all(_shallow(o) == sig for o, sig in cache[1]):
             return cache[0]
-        visited: list = [self._laws, self._node_sources, self._storage]
+        visited: list = [self._laws, self._withdrawals, self._storage]
         found = []
-        for role, owners in (("law", self._laws), ("source", self._node_sources),
+        for role, owners in (("law", self._laws), ("source", self._withdrawals),
                              ("storage", self._storage)):
             for el in owners:
                 holders = el.modules() if isinstance(el, torch.nn.Module) else (el,)
@@ -1231,7 +1231,7 @@ class KirchhoffLayer(TopologyGuard):
         solve, the converged root after it) as a function of exactly the tensors handed to
         `Function.apply`. It is evaluated once, under `enable_grad`, with every one of them
         detached: if the result still requires grad, some tensor that requires grad reaches
-        the residual by another route (held by a law, a node source in a plain
+        the residual by another route (held by a law, a withdrawal in a plain
         object, a module in a plain list, or captured by a closure), and the implicit
         adjoint would return a gradient for it that is silently wrong or absent.
 
@@ -1278,7 +1278,7 @@ class KirchhoffLayer(TopologyGuard):
             return False
         values = bulk_values(drivers, list(drivers.keys()))
         values += [sources, phi_boundary, *extra]
-        for owner in (*self._laws, *self._node_sources, *self._storage):
+        for owner in (*self._laws, *self._withdrawals, *self._storage):
             values += list(owner.parameters())
         return any(isinstance(v, torch.Tensor) and v.requires_grad for v in values)
 
@@ -1617,7 +1617,7 @@ class KirchhoffLayer(TopologyGuard):
         With `mode="initial"` on a layer solved by Modified Nodal Analysis, a node held at
         its storage's initial potential takes whatever flow balances it: the flow into
         storage there is the node's flow imbalance `s_I - A_I q - w(phi)` (its sources, less
-        the net outflow of the edge flows `q` and the node sources' withdrawal), split among
+        the net outflow of the edge flows `q` and the withdrawals' withdrawal), split among
         the node's storage entries in proportion to their `capacity` (equally where the
         node's capacities sum to zero). It needs `q` (every edge's flow, as `solve` returns
         it) and `sources` (full-node; `None` means zero). An entry at a node that is not held
@@ -1738,7 +1738,7 @@ class KirchhoffLayer(TopologyGuard):
         rows, _ = held
         phi_i = phi[..., self.interior]
         imbalance = self._source_interior(sources, phi_i) - self._accumulate_interior(q)
-        w = self._node_source_withdrawal(phi, drivers)
+        w = self._withdrawal(phi, drivers)
         if w is not None:
             imbalance = imbalance - w
         imbalance = torch.where(rows, imbalance, torch.zeros_like(imbalance))
@@ -1789,7 +1789,7 @@ class KirchhoffLayer(TopologyGuard):
             # path the differentiable branch builds below).
             phi0_full = self.assemble(phi0, phi_boundary)
             dq0 = self.dflows(phi0_full, drivers)
-            node_slopes0 = self._node_source_slopes(phi0_full, drivers, step)
+            node_slopes0 = self._withdrawal_slopes(phi0_full, drivers, step)
             self._grounding_check(dq0, where="solve", node_slopes=node_slopes0)
         return phi0, dq0, node_slopes0
 
@@ -1840,7 +1840,7 @@ class KirchhoffLayer(TopologyGuard):
                     return self._operator_at(dq0, node_slopes0)
                 phi = self.assemble(x, phi_boundary)
                 dq = self.dflows(phi, drivers)
-                return self._operator_at(dq, self._node_source_slopes(phi, drivers, step))
+                return self._operator_at(dq, self._withdrawal_slopes(phi, drivers, step))
 
             result = newton(residual_fn, operator_fn, phi0, **newton_kwargs)
             if diagnostics is not None:
@@ -1959,7 +1959,7 @@ class KirchhoffLayer(TopologyGuard):
         step = self._public_step(dt, scheme, history, storage_flow, drivers)
         phi = self.assemble(phi_interior, phi_boundary)
         dq = self.dflows(phi, drivers)
-        op = self._operator_at(dq, self._node_source_slopes(phi, drivers, step))
+        op = self._operator_at(dq, self._withdrawal_slopes(phi, drivers, step))
         return _adjoint_solve(
             op,
             grad_phi_interior,

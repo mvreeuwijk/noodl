@@ -1,8 +1,8 @@
-"""NodeSource: a nodal withdrawal that depends on its OWN node's potential.
+"""NodeWithdrawal: a nodal withdrawal that depends on its OWN node's potential.
 
 A head term never sees `phi` (see `heads.py`): a head is an additive term on a BRANCH's
 potential difference, and letting it read the state would put a term into the residual that
-the Jacobian `A_I diag(g') A_I^T` does not account for. A NodeSource is the other shape --
+the Jacobian `A_I diag(g') A_I^T` does not account for. A NodeWithdrawal is the other shape --
 a flow leaving the network AT a node, as a function of that node's own potential -- and it
 is exactly as safe, because its contribution to the Jacobian is a DIAGONAL entry at that
 node:
@@ -27,8 +27,9 @@ import torch
 Tensor = torch.Tensor
 
 
-class NodeSource(torch.nn.Module):
-    """Base class: a potential-dependent withdrawal at a fixed set of nodes.
+class NodeWithdrawal(torch.nn.Module):
+    """A flow leaving the network at nodes that depends on the potential of the same layer
+    (pressure-driven demand, a leak): a potential-dependent withdrawal at a fixed set of nodes.
 
     Subclasses set `self.nodes` (a 1-D `long` tensor of positions in the network's FULL node
     index space, registered as a buffer by `__init__`) and implement
@@ -74,7 +75,7 @@ class NodeSource(torch.nn.Module):
                 # is better than returning a silently exact-zero diagonal.
                 raise RuntimeError(
                     f"{type(self).__name__}: flow() does not depend on phi_nodes, so it is "
-                    f"not a potential-dependent node source; pass a constant withdrawal "
+                    f"not a potential-dependent withdrawal; pass a constant withdrawal "
                     f"through `sources` instead"
                 )
             (grad,) = torch.autograd.grad(value.sum(), leaf)

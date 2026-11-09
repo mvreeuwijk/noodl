@@ -86,7 +86,7 @@ class TopologyGuard(Movable):
         self._require_current_attributes()
 
     def to(self, device=None, dtype=None):
-        """Move this layer, its network, laws and node sources to `device` and the
+        """Move this layer, its network, laws and withdrawals to `device` and the
         precision of `dtype`, in place; return the layer. Other layers on the same network
         then refuse to run until they are moved too: move a model with `Model.to`."""
         self._require_current()

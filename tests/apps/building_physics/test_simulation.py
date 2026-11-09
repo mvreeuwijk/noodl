@@ -1267,16 +1267,16 @@ def test_scatter_keeps_the_floating_dtype_of_the_driver_it_writes_into():
     assert scatter(None, None, torch.tensor(1.0, dtype=torch.float32)).dtype == F64
 
 
-def test_the_zone_air_mass_is_a_storage_entry_and_a_sealed_zone_steps_as_the_old_node_source():
-    """`ZoneAirMassChange` is node storage of the airflow layer (not a node source), and a
-    sealed pair of zones takes the pressure step the old `NodeSource` withdrawal gave, to
+def test_the_zone_air_mass_is_a_storage_entry_and_a_sealed_zone_steps_as_the_old_withdrawal():
+    """`ZoneAirMassChange` is node storage of the airflow layer (not a withdrawal), and a
+    sealed pair of zones takes the pressure step the old `NodeWithdrawal` withdrawal gave, to
     1e-12: ((P_ref + phi) V / (R T) - M_start) / dt."""
     from noodl.apps.building_physics.prj import ZoneAirMassChange
     from noodl.elements import LawContext
-    from noodl.nodesources import NodeSource
     from noodl.storage import NodeStorage
+    from noodl.withdrawals import NodeWithdrawal
 
-    class OldMassChange(NodeSource):
+    class OldMassChange(NodeWithdrawal):
         def __init__(self, nodes, volumes):
             super().__init__(nodes)
             self.register_buffer("V", volumes)
@@ -1309,12 +1309,12 @@ def test_the_zone_air_mass_is_a_storage_entry_and_a_sealed_zone_steps_as_the_old
                "time_step": torch.tensor(dt, dtype=torch.float64)}
     sources = torch.tensor([0.0, 0.01, 0.0], dtype=torch.float64)
     storage = ZoneAirMassChange([1, 2], V)
-    assert isinstance(storage, NodeStorage) and not isinstance(storage, NodeSource)
+    assert isinstance(storage, NodeStorage) and not isinstance(storage, NodeWithdrawal)
     new = KirchhoffLayer(net, "air", law, boundary=["amb"], storage=[storage],
                          scheme="backward_euler")
     old = KirchhoffLayer(net, "air", law, boundary=["amb"],
-                         node_sources=[OldMassChange([1, 2], V)])
-    assert tuple(new.storage) == (storage,) and not new.node_sources
+                         withdrawals=[OldMassChange([1, 2], V)])
+    assert tuple(new.storage) == (storage,) and not new.withdrawals
     got, _ = new.solve(torch.zeros(1, dtype=torch.float64), drivers, sources, dt=dt,
                        history=(start, None))
     want, _ = old.solve(torch.zeros(1, dtype=torch.float64), drivers, sources)
@@ -1322,7 +1322,7 @@ def test_the_zone_air_mass_is_a_storage_entry_and_a_sealed_zone_steps_as_the_old
     # the withdrawal itself, at the solved pressures, equals the old formula's
     ctx = LawContext(mode="transient", dt=dt, scheme="backward_euler")
     rate = storage.rate(got[1:], phi_nodes, None, ctx, drivers)
-    torch.testing.assert_close(rate, old.node_sources[0].flow(got[1:], drivers),
+    torch.testing.assert_close(rate, old.withdrawals[0].flow(got[1:], drivers),
                                rtol=0, atol=1e-12)
     assert rate.abs().max() > 1e-3
     # without the start mass the storage withdraws nothing: the quasi-steady solve

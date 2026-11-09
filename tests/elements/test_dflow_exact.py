@@ -1,4 +1,4 @@
-"""Every potential-form law's and node source's `dflow` against the autograd derivative of its
+"""Every potential-form law's and withdrawal's `dflow` against the autograd derivative of its
 own `flow` (the audit behind `exact_slope`).
 
 The differentiable classic solve uses `dflow` for the Newton Jacobian and the adjoint of a law
@@ -28,7 +28,7 @@ import torch
 
 import noodl
 from noodl.elements import ConstitutiveLaw
-from noodl.nodesources import NodeSource
+from noodl.withdrawals import NodeWithdrawal
 
 F64 = torch.float64
 RTOL = 1e-10
@@ -36,7 +36,7 @@ RTOL = 1e-10
 
 @dataclass
 class Case:
-    """One law (or node source) with the drivers and the points it is checked at."""
+    """One law (or withdrawal) with the drivers and the points it is checked at."""
 
     law: object
     x: torch.Tensor
@@ -347,7 +347,7 @@ def _subclasses(base: type) -> set[type]:
 def _discovered() -> list[type]:
     for info in pkgutil.walk_packages(noodl.__path__, "noodl."):
         importlib.import_module(info.name)
-    found = [c for c in _subclasses(ConstitutiveLaw) | _subclasses(NodeSource)
+    found = [c for c in _subclasses(ConstitutiveLaw) | _subclasses(NodeWithdrawal)
              if c.__module__.startswith("noodl.")
              and getattr(c, "law_form", "potential") == "potential"]
     return sorted(found, key=lambda c: f"{c.__module__}.{c.__qualname__}")

@@ -9,8 +9,8 @@ import torch
 from noodl.elements import Conductance, ConstitutiveLaw, ImplicitLaw, LawContext, PowerLaw
 from noodl.layers._mna import MnaSystem
 from noodl.layers.kirchhoff import KirchhoffLayer
-from noodl.nodesources import NodeSource
 from noodl.topology import Network
+from noodl.withdrawals import NodeWithdrawal
 from tests._circuit_laws import Cap, DrivenSource, Ind, Source
 
 F64 = torch.float64
@@ -81,7 +81,7 @@ class Ratio(ImplicitLaw):
         return torch.stack([r1, r2], -1).flatten(-2)
 
 
-class LinearWithdrawal(NodeSource):
+class LinearWithdrawal(NodeWithdrawal):
     """w = c phi at the given nodes."""
 
     def __init__(self, nodes, c):
@@ -172,21 +172,21 @@ def test_phasor_refuses_nonlinear_real_law():
                        boundary=["gnd"], phasor=True)
 
 
-def test_phasor_refuses_node_sources():
+def test_phasor_refuses_withdrawals():
     net = _net(["gnd", "a"], [("a", "gnd", "r")])
     with pytest.raises(ValueError, match="edges to ground"):
         KirchhoffLayer(net, "e", [Conductance(torch.tensor([1.0]), kind="r")],
-                       node_sources=[LinearWithdrawal([net.nodes.index("a")], [0.1])],
+                       withdrawals=[LinearWithdrawal([net.nodes.index("a")], [0.1])],
                        boundary=["gnd"], phasor=True)
 
 
-def test_structure_has_no_node_source_entries_in_real_view():
-    # A phasor layer refuses node sources at construction; the pattern must not carry
+def test_structure_has_no_withdrawal_entries_in_real_view():
+    # A phasor layer refuses withdrawals at construction; the pattern must not carry
     # entries for them either (their diagonal is laid out for one real unknown per node).
     net = _net(["gnd", "a"], [("a", "gnd", "r")])
     layer = KirchhoffLayer(net, "e", [Conductance(torch.tensor([1.0]), kind="r")],
                            boundary=["gnd"], phasor=True)
-    layer._node_sources = [LinearWithdrawal([net.nodes.index("a")], [0.1])]
+    layer._withdrawals = [LinearWithdrawal([net.nodes.index("a")], [0.1])]
     mna = MnaSystem(layer)
     assert torch.equal(mna.row, layer._mna.row) and torch.equal(mna.col, layer._mna.col)
     assert int(mna.src.max()) < mna._node_slot

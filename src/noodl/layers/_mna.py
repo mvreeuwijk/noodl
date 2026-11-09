@@ -180,10 +180,10 @@ class MnaSystem:
             cols.append(((n_I + f) * w + c)[keep])
             srcs.append(torch.full((int(keep.sum()),), self._one_slot))
             signs.append(sgn[a][keep])
-        # node sources and storage (real layers only; a phasor layer refuses both): the
+        # withdrawals and storage (real layers only; a phasor layer refuses both): the
         # diagonal slope per interior row, the last n_I entries of the pattern
         self._node_slot = offset
-        self._diag = bool(self.layer._node_sources or self.layer._storage) and w == 1
+        self._diag = bool(self.layer._withdrawals or self.layer._storage) and w == 1
         if self._diag:
             idx = ar(n_I)
             rows.append(idx)
@@ -392,10 +392,10 @@ class MnaSystem:
         return lctx
 
     def _owners(self) -> list:
-        return [*self.layer._laws, *self.layer._node_sources, *self.layer._storage]
+        return [*self.layer._laws, *self.layer._withdrawals, *self.layer._storage]
 
     def _plain_call(self, i: int, args: tuple, kwargs: dict | None = None):
-        """Law (or, past the laws, node source, then storage) `i` with its own
+        """Law (or, past the laws, withdrawal, then storage) `i` with its own
         parameters."""
         return self._owners()[i](*args, **(kwargs or {}))
 
@@ -456,15 +456,15 @@ class MnaSystem:
         return out
 
     def _withdrawal(self, phi, drivers, call) -> Tensor | None:
-        """The node sources' withdrawal per interior row, or `None` without node sources."""
+        """The withdrawals' withdrawal per interior row, or `None` without withdrawals."""
         n_el = len(self.layer._laws)
-        return self.layer._scatter_node_sources(
+        return self.layer._scatter_withdrawals(
             lambda j, ns: call(n_el + j, (phi[..., ns.nodes], drivers)))
 
     def _node_slopes(self, phi, drivers, adjoint: bool = False) -> Tensor | None:
-        """`d w / d phi` per interior row: a node source reads its own node's potential only,
+        """`d w / d phi` per interior row: a withdrawal reads its own node's potential only,
         so its own `dflow` is the whole diagonal; except, when the operator also builds the
-        adjoint (`adjoint`, the differentiable solve), for a node source that declares
+        adjoint (`adjoint`, the differentiable solve), for a withdrawal that declares
         `exact_slope = False`, whose slope is then the autograd derivative of its flow."""
         def slope(j, ns):
             phi_n = phi[..., ns.nodes]
@@ -475,7 +475,7 @@ class MnaSystem:
                 return grad
             return ns.dflow(phi_n, drivers)
 
-        return self.layer._scatter_node_sources(slope)
+        return self.layer._scatter_withdrawals(slope)
 
     # ------------------------------------------------------------- storage
     def _storage_state(self, ctx, dt, t, scheme, history, storage_flow, drivers):
@@ -502,7 +502,7 @@ class MnaSystem:
         differentiable path with the threaded parameters. `check` refuses entries at one
         node with different initial values, by name."""
         layer = self.layer
-        base = len(layer._laws) + len(layer._node_sources)
+        base = len(layer._laws) + len(layer._withdrawals)
         held = []
         for j, _st in enumerate(layer._storage):
             v = call(base + j, (drivers,), {"part": "initial"})
@@ -550,7 +550,7 @@ class MnaSystem:
         """The storages' withdrawal `NodeStorage.rate` per interior row on a transient
         `step`."""
         layer = self.layer
-        base = len(layer._laws) + len(layer._node_sources)
+        base = len(layer._laws) + len(layer._withdrawals)
         return layer._scatter_storage(lambda j, st: call(
             base + j, (*layer._storage_args(j, st, phi, step), step.ctx, drivers)))
 
@@ -562,7 +562,7 @@ class MnaSystem:
         slope is then the derivative of its `rate` by autograd. The values carry no graph,
         like every Jacobian entry."""
         layer = self.layer
-        base = len(layer._laws) + len(layer._node_sources)
+        base = len(layer._laws) + len(layer._withdrawals)
 
         def slope(j, st):
             phi_n, phi_start, previous = layer._storage_args(j, st, phi, step)
@@ -577,7 +577,7 @@ class MnaSystem:
         return None if d is None else d.detach()
 
     def _slopes_fn(self, drivers, call, store):
-        """The diagonal of the node sources and, on a step, of the storages, as a function
+        """The diagonal of the withdrawals and, on a step, of the storages, as a function
         `slopes(phi, adjoint)` of the full-node potentials (`None` when there is neither).
         `adjoint` is `operator`'s own flag, passed on to `_node_slopes` and
         `_storage_slopes`: the operator also builds the adjoint."""
@@ -625,12 +625,12 @@ class MnaSystem:
                  adjoint: bool = False) -> MnaOperator:
         """The Jacobian of `residual` at `x`, as COO triplets on the fixed pattern.
 
-        `node_slope_fn(phi, adjoint)` gives the diagonal of the node sources and storages
+        `node_slope_fn(phi, adjoint)` gives the diagonal of the withdrawals and storages
         (`_slopes_fn`). `adjoint`: the operator also builds the adjoint (the differentiable
         solve). A law that declares `exact_slope = False` then gives its blocks by autograd
         of its own `forward` (`_coloured_jacobian`), not its `jacobian`, whose `dflow`
         shortcut would hand the adjoint a Newton aid; the same flag reaches
-        `node_slope_fn`, where an inexact node source or storage gives autograd too. The
+        `node_slope_fn`, where an inexact withdrawal or storage gives autograd too. The
         primal solve (`adjoint=False`) keeps the analytic slopes."""
         layer = self.layer
         phi_I, q_F = self._unknowns(x)
@@ -822,7 +822,7 @@ class MnaSystem:
 
         layer._check_no_unreachable_differentiable_tensors()
         # Threaded through `Function.apply` exactly as on the classic path: every law's and
-        # node source's own parameters (substituted back in with `functional_call`), every
+        # withdrawal's own parameters (substituted back in with `functional_call`), every
         # driver, the sources (zero-filled when absent) and the boundary potentials; on a
         # transient step also the step-start state, so gradients flow back through time.
         owners = self._owners()
@@ -890,7 +890,7 @@ class MnaSystem:
         def operator_fn(x, *params):
             call, drv, src, pb, step, st = _rebuild(params)
             # the one `adjoint` flag: the operator also builds the adjoint, so every law,
-            # node source and storage that declares `exact_slope = False` gives autograd
+            # withdrawal and storage that declares `exact_slope = False` gives autograd
             last["op"] = self._hold(
                 self.operator(x, pb, drv, step, self._slopes_fn(drv, call, st),
                               adjoint=True), st)

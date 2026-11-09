@@ -101,7 +101,7 @@ w = layer.storage_flows(phi, drivers, dt=60.0, history=(phi_prev, q_prev))
 ```
 
 Storage does not make a layer `mna`; a layer of potential laws with storage stays on the nodal
-path. Like a node source it adds only a diagonal, `step_rate_factor * capacity` with `capacity = dS/dphi`, to the Jacobian, so a
+path. Like a withdrawal it adds only a diagonal, `step_rate_factor * capacity` with `capacity = dS/dphi`, to the Jacobian, so a
 network of conductances with storage keeps its symmetric positive definite system and its
 sparse or CG solve. A node whose only connection is its storage is grounded during a step and
 reported floating at a steady solve. Several storages may share a node (their withdrawals add
@@ -169,9 +169,9 @@ Which method to write on a subclass:
   used by both the non-differentiable and the differentiable solve, whose adjoint it builds,
   so an override that is not the true derivative (a Newton aid) declares
   `exact_slope = False`, and the differentiable solve then takes the derivative of `rate` by
-  autograd for that storage (as for `NodeSource.dflow`).
+  autograd for that storage (as for `NodeWithdrawal.dflow`).
 
-A withdrawal that is not storage (a demand, a leak) is a `NodeSource`
+A withdrawal that is not storage (a demand, a leak) is a `NodeWithdrawal`
 ([Constitutive laws](elements.md)).
 
 ## Heads: stack, wind and drag
@@ -216,7 +216,7 @@ serves any domain with ideal sources, flow-controlled laws or storage on its edg
 
 **The system.** The unknowns are the interior potentials and the flows of the implicit-law edges
 (`layer.implicit_edges`, in layer edge order). The residual rows are the conservation balance at
-the interior nodes, $A_I q - s_I$ (plus node sources), where $q$ is the law's flow on a
+the interior nodes, $A_I q - s_I$ (plus withdrawals), where $q$ is the law's flow on a
 potential-controlled edge and the unknown on an implicit one, followed by every implicit law's
 own residual. The Jacobian is assembled as a sparse, nonsymmetric matrix from each law's local
 blocks (forward-mode derivatives, one per port, two on a phasor layer), so a multi-port law
@@ -248,7 +248,7 @@ that lists them.
   none (a transformer secondary left floating) has undetermined potentials;
 - a dynamic kind carries no head (its step-start potential differences are taken without one);
 - `linear_solver="cg"` is refused (the system is not symmetric positive definite);
-- on a phasor layer, every law is `phasor_capable` and there are no node sources and no
+- on a phasor layer, every law is `phasor_capable` and there are no withdrawals and no
   storage (a capacitance is an edge law there).
 
 Such a layer takes [node storage](#node-storage) as well. On a step its withdrawal and its
@@ -259,7 +259,7 @@ node with a storage entry whose `initial()` is not `None` is *held* at that pote
 balance is replaced by `phi = initial` (entries at one node with different initial values are
 refused by name). The flow into storage there is whatever balances the node:
 `storage_flows(phi, drivers, dt=None, mode="initial", q=q, sources=sources)` returns the
-node's flow imbalance (its sources, less the net outflow of `q` and the node sources'
+node's flow imbalance (its sources, less the net outflow of `q` and the withdrawals'
 withdrawal), split among the node's entries in proportion to their `capacity`; the Model
 writes it to `"<layer>.storage_flow"`, the trapezoidal scheme's step-start flow. A
 `LinearStorage(node, C, initial=v0)` to ground is then the same circuit as a

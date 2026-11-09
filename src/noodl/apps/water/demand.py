@@ -23,14 +23,14 @@ from __future__ import annotations
 
 import torch
 
-from noodl.nodesources import NodeSource
+from noodl.withdrawals import NodeWithdrawal
 
 Tensor = torch.Tensor
 F64 = torch.float64
 
 
-class PressureDrivenDemand(NodeSource):
-    """The Wagner demand function as a `NodeSource` (withdrawal, positive OUT).
+class PressureDrivenDemand(NodeWithdrawal):
+    """The Wagner demand function as a `NodeWithdrawal` (withdrawal, positive OUT).
 
     ``flow`` uses a GUARDED kink, not a plain floor-and-power: the piecewise
     law is EXACTLY zero at and below `P_min` (not the `q_required * 1e-12**exponent` leak a

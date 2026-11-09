@@ -197,7 +197,7 @@ class ConstitutiveLaw(torch.nn.Module):
     phasor_capable: bool = False
     #: True when the law's flow (or residual) is affine in `dp` (and `q`) once its drivers
     #: and `LawContext` are fixed: its Jacobian is then constant within one solve. A layer
-    #: whose laws and node sources are all linear takes the full Newton step from the start
+    #: whose laws and withdrawals are all linear takes the full Newton step from the start
     #: (`KirchhoffLayer.linear`), so it converges in one iteration. Declared, not inferred.
     linear: bool = False
 

@@ -70,11 +70,11 @@ For `differentiable=True` to be *safe*, one rule must hold. A violation raises a
 returning a wrong or absent gradient.
 
 The differentiable solve threads a fixed set of tensors through `Function.apply`: each law's and
-node source's registered parameters, the driver values, `sources` and the boundary potentials
+withdrawal's registered parameters, the driver values, `sources` and the boundary potentials
 (and, on a transient step, the step-start state). Any other tensor that requires grad and reaches
 the residual is invisible to the implicit adjoint. Two checks look for one:
 
-- **Before solving, by attribute.** Every tensor a law or node source holds — plain
+- **Before solving, by attribute.** Every tensor a law or withdrawal holds — plain
   attributes, registered buffers, and tensors nested in lists, tuples, dicts, sets and plain
   objects — is scanned, and one that requires grad without being threaded is refused by name.
 - **At every Newton iterate, from the starting guess to the root, by evaluation.** The forward

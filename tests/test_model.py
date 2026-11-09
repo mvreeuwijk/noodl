@@ -14,8 +14,8 @@ from noodl.elements.base import ConstitutiveLaw
 from noodl.layers.kirchhoff import KirchhoffLayer
 from noodl.layers.transport import TransportLayer
 from noodl.model import Model, Ports, StepContext
-from noodl.nodesources import NodeSource
 from noodl.topology import Network
+from noodl.withdrawals import NodeWithdrawal
 from tests._reactions import FirstOrderDecay
 
 F64 = torch.float64
@@ -1555,7 +1555,7 @@ def test_unnamed_kirchhoff_layers_are_not_relaxed():
     assert set(diag["max_change"]) == {"species"}
 
 
-class _Ground(NodeSource):
+class _Ground(NodeWithdrawal):
     """w = g * phi at the given nodes (test-local): a stiff tie of a node to zero."""
 
     def __init__(self, nodes, g):
@@ -1591,7 +1591,7 @@ def test_iterate_on_a_kirchhoff_layer_converges_its_boundary_too():
     layer = KirchhoffLayer(net, "toy", [PowerLaw(C=torch.tensor(1.0, dtype=torch.float64),
                                                      n=torch.tensor(1.0, dtype=torch.float64),
                                                      kind="link")],
-                           boundary=["b"], node_sources=[_Ground([0], 1e6)])
+                           boundary=["b"], withdrawals=[_Ground([0], 1e6)])
     model = Model(net, {"toy": layer}, closures=[_BoundaryFromState(1)], coupling="iterate",
                   iterate_tol={"toy": 1e-12}, iterate_max=500)
     state = {"toy.phi": torch.zeros(2, dtype=torch.float64),
