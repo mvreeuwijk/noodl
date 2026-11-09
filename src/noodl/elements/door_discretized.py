@@ -277,13 +277,13 @@ class _DoorCompartmentBase(_InflowDensities, ConstitutiveLaw):
 
     def _law(self, drivers) -> tuple:
         """``(CVal, m, VZerCom_flow, a, b, c, d, CVal dp_turbulent^m)`` of the compartments'
-        power law (``door.power_law_band_coeffs``), a memo; implemented by each door."""
+        power law (``_band.power_law_band_coeffs``), a memo; implemented by each door."""
         raise NotImplementedError
 
     def stream_slope(self, dp: Tensor, drivers=None) -> Tensor | None:
         """``d(mAB_flow - mBA_flow)/d dpAB[i]`` per compartment (:meth:`port_flows`), by the
         chain rule in the order of operations reverse-mode autograd applies to
-        ``port_flows`` (``door.power_law_band_slope``), so that it equals the autograd
+        ``port_flows`` (``_band.power_law_band_slope``), so that it equals the autograd
         derivative bit for bit (checked in the tests). At a smoothHeaviside argument exactly on
         its clamp (``u`` exactly 0 or 1) the slope is 0, the one-sided derivative of the flat
         side, whatever torch version: torch's own clamp gradient there changed (1 in torch 2.2,
