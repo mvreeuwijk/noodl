@@ -279,7 +279,9 @@ class PumpCurve(ConstitutiveLaw):
         head_safe = torch.where(shut, torch.full_like(head, dpt), head)
         sharp = (w / (self.n * self.r * w**2)) * (head_safe / self.r) ** (1.0 / self.n - 1.0)
         q_t = w * (torch.full_like(head, dpt) / self.r) ** (1.0 / self.n)
-        laminar = torch.where(head > 0.0, q_t / (dpt * w**2), torch.zeros_like(head))
+        # `/ dpt / w**2`, not `/ (dpt * w**2)`: with a float32 `speed` (a Python float given)
+        # the product would round `dpt` to float32, 2.5e-9 off the flow's own slope.
+        laminar = torch.where(head > 0.0, q_t / dpt / w**2, torch.zeros_like(head))
         return self._status(dp, drivers) * torch.where(shut, laminar, sharp)
 
     def head_gain(self, q: Tensor, gradient_floor: float, closed_slope: float) -> Tensor:

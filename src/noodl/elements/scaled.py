@@ -48,6 +48,7 @@ class Scaled(ConstitutiveLaw):
         self.inner = law
         self.key = str(key)
         self.dp_independent = bool(law.dp_independent)
+        self.exact_slope = bool(law.exact_slope)
 
     def _s(self, width: int | None, drivers: Mapping[str, Tensor] | None) -> Tensor:
         """The multiplier; `width` is the number of edges of the kind, when known."""

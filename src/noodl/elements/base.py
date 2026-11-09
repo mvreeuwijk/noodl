@@ -130,6 +130,12 @@ class ConstitutiveLaw(torch.nn.Module):
 
     kind: str
     dp_independent: bool = False
+    #: True when `dflow` is the exact derivative of `flow` (to rounding) wherever `flow` is
+    #: smooth, so the differentiable solve may use it for its Newton Jacobian and its adjoint.
+    #: False for a law whose `dflow` is a deliberate Newton aid (a slope floor, a slope where
+    #: the flow is flat): the differentiable solve then differentiates `flow` by autograd.
+    #: Declared, not inferred; audited by `tests/elements/test_dflow_exact.py`.
+    exact_slope: bool = True
     #: "potential": flow is a function of the potential difference, `q = flow(dp)`.
     #: "implicit": the law is a relation `residual(dp, q) = 0` and the flow is an unknown
     #: of the layer (`ImplicitLaw`); this covers flow-controlled laws and ideal sources.

@@ -147,6 +147,9 @@ class AffinityFan(ConstitutiveLaw):
         self.speed_key = speed_key
         self.off = float(off)
         self.rho_key = str(rho_key)
+        # its slope is the curve's (and the shut-off law's): exact where theirs are
+        self.exact_slope = bool(curve.exact_slope
+                                and (shutoff is None or shutoff.exact_slope))
 
     def _state(self, dp: Tensor, drivers: Mapping[str, Tensor] | None):
         name = f"AffinityFan (kind {self.kind!r})"
