@@ -4,23 +4,22 @@ Each case is a constructed law and the edge values, drivers and contexts it is c
 every mode the law supports (`dc`, `initial`, a transient step under both schemes, `phasor`),
 batched inputs, and batched drivers where the law reads any. The blocks are checked against
 `_colour_blocks` (to 1e-12 relative), against central differences, and `gradcheck` confirms
-the law's autograd. The case list must cover every law the four electrical modules export,
-and each of them must override `jacobian`.
+the law's autograd. The case list must cover every law defined in `noodl.apps.electrical`
+(found by walking the package), and each of them must override `jacobian`.
 """
 
 from __future__ import annotations
 
+import importlib
 import inspect
 import math
+import pkgutil
 from dataclasses import dataclass, field
 
 import pytest
 import torch
 
-import noodl.apps.electrical.converters as converters
-import noodl.apps.electrical.laws as laws
-import noodl.apps.electrical.loads as loads
-import noodl.apps.electrical.power.laws as power_laws
+import noodl.apps.electrical
 from noodl.apps.electrical import (
     Capacitance,
     ConstantPowerLoad,
@@ -48,7 +47,6 @@ F64 = torch.float64
 C128 = torch.complex128
 B = 3   # batch size of every case
 
-MODULES = (laws, loads, converters, power_laws)
 
 
 def _t(values):
@@ -211,11 +209,14 @@ def _colour(law, dp, q, drivers, ctx):
 
 
 def _public_laws():
+    """Every public `ConstitutiveLaw` subclass defined anywhere in `noodl.apps.electrical`."""
+    pkg = noodl.apps.electrical
     found = set()
-    for module in MODULES:
-        for name in module.__all__:
-            obj = getattr(module, name)
-            if inspect.isclass(obj) and issubclass(obj, ConstitutiveLaw):
+    for info in pkgutil.walk_packages(pkg.__path__, pkg.__name__ + "."):
+        module = importlib.import_module(info.name)
+        for name, obj in vars(module).items():
+            if (inspect.isclass(obj) and issubclass(obj, ConstitutiveLaw)
+                    and obj.__module__ == module.__name__ and not name.startswith("_")):
                 found.add(obj)
     return found
 

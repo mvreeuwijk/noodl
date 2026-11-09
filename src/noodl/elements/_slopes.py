@@ -91,7 +91,6 @@ def complex_slope_block(c: Tensor) -> Tensor:
     return torch.stack([torch.stack([re, -im], dim=-1), torch.stack([im, re], dim=-1)], dim=-2)
 
 
-
 def conjugate_slope_block(b: Tensor) -> Tensor:
     """The real 2x2 block `[[Re b, Im b], [Im b, -Re b]]` of a slope `b` with respect to the
     CONJUGATE input, shape `b.shape + (2, 2)`: a non-holomorphic phasor law with

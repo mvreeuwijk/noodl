@@ -191,6 +191,8 @@ class ConstantPowerLoad(ConstitutiveLaw):
         return torch.where(small, simplified, zero), torch.where(small, zero, actual)
 
     def dflow(self, dp, drivers=None):
+        """`dq / d(dp)` per edge. On a complex `dp` only the holomorphic part `a` (the
+        load is not holomorphic; phasor layers use `jacobian`, never `dflow`)."""
         a, _ = self._slopes(dp, drivers)
         return torch.ones_like(dp) * a
 
