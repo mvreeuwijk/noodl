@@ -20,7 +20,7 @@ from collections.abc import Mapping
 
 import torch
 
-from noodl.elements.base import ConstitutiveLaw
+from noodl.elements.base import ConstitutiveLaw, ImplicitLaw
 
 Tensor = torch.Tensor
 
@@ -36,12 +36,13 @@ class Scaled(ConstitutiveLaw):
     """
 
     def __init__(self, law: ConstitutiveLaw, key: str) -> None:
-        if (law.law_form != "potential" or law.ports != 1 or law.dynamic
-                or law.contextual):
+        if (isinstance(law, ImplicitLaw) or law.ports != 1 or law.dynamic
+                or law._takes_ctx):
             raise ValueError(
                 f"Scaled (kind {law.kind!r}): {type(law).__name__} is not an explicit "
-                f"single-edge law q = F(dp) (law_form={law.law_form!r}, ports={law.ports}, "
-                f"dynamic={law.dynamic}, contextual={law.contextual}); only such a law's "
+                f"single-edge law q = F(dp) (relation={isinstance(law, ImplicitLaw)}, "
+                f"ports={law.ports}, dynamic={law.dynamic}, takes ctx={law._takes_ctx}); "
+                f"only such a law's "
                 f"flow can be scaled"
             )
         super().__init__(law.kind)

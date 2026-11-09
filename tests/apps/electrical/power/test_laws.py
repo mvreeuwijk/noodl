@@ -8,6 +8,7 @@ import torch
 
 from noodl.apps.electrical import ConstantPowerLoad
 from noodl.apps.electrical.power import PiBranch, Shunt, VoltageControlledGenerator
+from noodl.elements import ImplicitLaw
 from noodl.layers.kirchhoff import KirchhoffLayer
 from noodl.topology import Network
 
@@ -32,7 +33,7 @@ def test_pi_branch_matches_makeybus_with_tap_and_shift():
     expected = torch.tensor([-0.810594584793739 - 0.8737767557268548j,
                              0.9051910961588779 + 0.7038857638586933j], dtype=C128)
     torch.testing.assert_close(i, expected, rtol=0, atol=1e-12)
-    assert law.ports == 2 and law.law_form == "potential" and law.phasor_capable
+    assert law.ports == 2 and not isinstance(law, ImplicitLaw) and law.phasor_capable
 
 
 def test_pi_branch_ratio_zero_means_one_and_batches_branches():
@@ -52,7 +53,7 @@ def test_load_and_shunt_currents():
     torch.testing.assert_close(load(v, {}), (complex(0.9, 0.3) / v).conj(), rtol=0, atol=1e-15)
     sh = Shunt(0.05, 0.19)
     torch.testing.assert_close(sh(v, {}), complex(0.05, 0.19) * v, rtol=0, atol=1e-15)
-    assert sh.law_form == "potential" and sh.phasor_capable
+    assert not isinstance(sh, ImplicitLaw) and sh.phasor_capable
 
 
 def _two_bus(device_law, kind):
@@ -97,8 +98,8 @@ def test_voltage_controlled_generator_two_bus_closed_form():
 
 def test_generator_is_an_implicit_phasor_law():
     gen = VoltageControlledGenerator(0.5, 1.0)
-    assert gen.law_form == "implicit" and gen.phasor_capable
-    with pytest.raises(TypeError, match="implicit"):
+    assert isinstance(gen, ImplicitLaw) and gen.phasor_capable
+    with pytest.raises(TypeError, match="relation"):
         gen.flow(torch.ones(1, dtype=C128))
 
 

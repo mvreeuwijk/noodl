@@ -107,9 +107,8 @@ class MnaSystem:
         self._law_ctxs: tuple[LawContext | None, dict] = (None, {})
         self.w = 2 if layer.phasor else 1
         b = len(layer.cols)
-        f_parts = [torch.arange(s, e) for el, (s, e) in
-                   zip(layer._laws, layer._law_slices, strict=True)
-                   if el.law_form == "implicit"]
+        f_parts = [torch.arange(s, e) for rel, (s, e) in
+                   zip(layer._relation, layer._law_slices, strict=True) if rel]
         self.f_edges = torch.cat(f_parts) if f_parts else torch.zeros(0, dtype=torch.long)
         dyn = [torch.arange(s, e) for el, (s, e) in
                zip(layer._laws, layer._law_slices, strict=True) if el.dynamic]
@@ -120,7 +119,8 @@ class MnaSystem:
         f_index = torch.full((b,), -1, dtype=torch.long)
         f_index[self.f_edges] = torch.arange(self.n_F)
         self._f_index = f_index
-        self.implicit_kinds = [el.kind for el in layer._laws if el.law_form == "implicit"]
+        self.implicit_kinds = [el.kind for el, rel in
+                               zip(layer._laws, layer._relation, strict=True) if rel]
         node = torch.stack([layer._interior_of_node[layer._src],
                             layer._interior_of_node[layer._tgt]], dim=-1)   # (b, 2), -1 bound
         self._build_structure(node, f_index)
@@ -134,7 +134,8 @@ class MnaSystem:
         rows, cols, srcs, signs = [], [], [], []
         offset = 0
         ar = torch.arange
-        for el, (s, e) in zip(self.layer._laws, self.layer._law_slices, strict=True):
+        for el, rel, (s, e) in zip(self.layer._laws, self.layer._relation,
+                                   self.layer._law_slices, strict=True):
             m = el.ports
             G = (e - s) // m
             g, k, l_, ck, cl, a, bb = torch.meshgrid(
@@ -143,7 +144,7 @@ class MnaSystem:
             el_ = s + g * m + l_
             flat = (((g * m + k) * m + l_) * w + ck) * w + cl
             size = G * m * m * w * w
-            if el.law_form == "potential":
+            if not rel:
                 # KCL x phi: +-q_k at edge k's endpoints, d dp_l / d phi = +-1 at edge l's
                 rn, cn = node[ek, a], node[el_, bb]
                 keep = (rn >= 0) & (cn >= 0)
@@ -426,7 +427,7 @@ class MnaSystem:
                 zip(layer._laws, layer._law_slices, strict=True)):
             lctx = self._law_ctx(ctx, s, e)
             dp_s = dp[..., s:e]
-            if el.law_form == "implicit":
+            if layer._relation[i]:
                 f0 = int(self._f_index[s])
                 q_s = q_F[..., f0:f0 + e - s]
                 r_s = call(i, (dp_s, q_s, drivers, lctx))
@@ -637,14 +638,15 @@ class MnaSystem:
         phi = layer.assemble(phi_I, phi_boundary)
         dp = layer.dp(phi, drivers)
         blocks = []
-        for el, (s, e) in zip(layer._laws, layer._law_slices, strict=True):
+        for el, rel, (s, e) in zip(layer._laws, layer._relation, layer._law_slices,
+                                   strict=True):
             lctx = self._law_ctx(ctx, s, e)
             dp_s = dp[..., s:e]
             # Called on the law module itself, also on the differentiable path: the values
             # equal those of a `functional_call` with the threaded parameters, because the
             # threaded tensors ARE the module's own parameters (the same argument as
             # `dp_independent` in `_functional.py`), and the blocks carry no graph.
-            if el.law_form == "implicit":
+            if rel:
                 f0 = int(self._f_index[s])
                 q_s = q_F[..., f0:f0 + e - s]
             else:

@@ -172,7 +172,6 @@ class PrescribedCurrent(_Source, ConstitutiveLaw):
     """
 
     dp_independent = True
-    contextual = True
     phasor_capable = True
     linear = True
 

@@ -19,6 +19,7 @@ through ``self.flow`` re-resolves to the most-derived override on every call.
 
 from __future__ import annotations
 
+import inspect
 from collections.abc import Mapping
 from dataclasses import dataclass
 
@@ -179,19 +180,15 @@ class ConstitutiveLaw(torch.nn.Module):
     #: the flow is flat): the differentiable solve then differentiates `flow` by autograd.
     #: Declared, not inferred; audited by `tests/elements/test_dflow_exact.py`.
     exact_slope: bool = True
-    #: "potential": flow is a function of the potential difference, `q = flow(dp)`.
-    #: "implicit": the law is a relation `residual(dp, q) = 0` and the flow is an unknown
-    #: of the layer (`ImplicitLaw`); this covers flow-controlled laws and ideal sources.
-    law_form: str = "potential"
     #: Edges of this law's kind form consecutive groups of `ports` edges (kind order); the
     #: law may couple the edges within a group (a transformer's two windings), never across.
     ports: int = 1
-    #: True for a law with storage (a capacitance, an inductance): it implements every mode
-    #: of `LawContext` and reads its step-start values from the context.
+    #: True for a law that reads its step-start values (`ctx.dp_prev`, `ctx.q_prev`): the
+    #: layer then needs `history` on a step.
     dynamic: bool = False
-    #: True when `flow` takes a third argument, the `LawContext` (a dynamic or
-    #: frequency-dependent law). False keeps the two-argument `flow(dp, drivers)`.
-    contextual: bool = False
+    #: Set per class from the signature of `flow`: True when it has a parameter named `ctx`,
+    #: and the law is then given the `LawContext`.
+    _takes_ctx: bool = False
     #: True when the law accepts complex `dp` (phasor layers): a linear law with a real or
     #: complex coefficient. Nonlinear laws stay False and are refused by a phasor layer.
     phasor_capable: bool = False
@@ -201,24 +198,39 @@ class ConstitutiveLaw(torch.nn.Module):
     #: (`KirchhoffLayer.linear`), so it converges in one iteration. Declared, not inferred.
     linear: bool = False
 
+    def __init_subclass__(cls, **kwargs) -> None:
+        super().__init_subclass__(**kwargs)
+        cls._takes_ctx = "ctx" in inspect.signature(cls.flow).parameters
+
     def __init__(self, kind: str) -> None:
         super().__init__()
         self.kind = kind
 
     def flow(self, dp: Tensor, drivers: Mapping[str, Tensor] | None = None) -> Tensor:
-        """Branch flow q(dp); elementwise in dp. Abstract in the base class."""
+        """Branch flow q(dp); elementwise in dp. Abstract in the base class.
+
+        A law that needs the `LawContext` (time, frequency, step-start values) names a third
+        parameter `ctx`; the layer then passes it."""
         raise NotImplementedError(f"{type(self).__name__} does not implement flow()")
+
+    def residual(self, dp: Tensor, q: Tensor, drivers: Mapping[str, Tensor] | None = None,
+                 ctx: LawContext | None = None) -> Tensor:
+        """The law as a relation between the potential difference and the flow, zero when
+        they agree: `q - flow(dp)` for a law that gives its flow. A law that cannot give the
+        flow from the potential difference (an `ImplicitLaw`) writes this instead, and the
+        layer then solves for its flow as an unknown."""
+        return q - self(dp, drivers, ctx)
 
     def forward(self, dp: Tensor, drivers: Mapping[str, Tensor] | None = None,
                 ctx: LawContext | None = None) -> Tensor:
         """Alias for :meth:`flow` so ``Module.__call__``/``torch.func.functional_call`` work.
 
         Delegates to ``self.flow`` (rather than being assigned ``forward = flow`` in the
-        class body) so that subclass overrides of ``flow`` remain reachable. A contextual
-        law receives the `LawContext` as a third argument; any other law keeps the
+        class body) so that subclass overrides of ``flow`` remain reachable. A law whose
+        ``flow`` has a ``ctx`` parameter receives the `LawContext`; any other law keeps the
         two-argument call whatever `ctx` is.
         """
-        if self.contextual:
+        if self._takes_ctx:
             return self.flow(dp, drivers, ctx)
         return self.flow(dp, drivers)
 
@@ -280,10 +292,10 @@ class ConstitutiveLaw(torch.nn.Module):
         implicit law; `q` is the edges' flow, used by an implicit law only. A law that knows
         its derivatives overrides this (a phasor law writes its entries as real 2x2 blocks).
 
-        The default is `dflow` for a one-port, non-contextual law on a real `dp`, and
+        The default is `dflow` for a one-port, law without `ctx` on a real `dp`, and
         otherwise the law's own `forward` differentiated by reverse-mode colouring.
         """
-        if (self.ports == 1 and not self.contextual and not dp.is_complex()
+        if (self.ports == 1 and not self._takes_ctx and not dp.is_complex()
                 and self._drivers_fit(dp, drivers)):
             return (self.dflow(dp, drivers)[..., None, None, None, None],)
         return self._coloured_jacobian(dp, q, drivers, ctx)
@@ -364,20 +376,16 @@ class ConstitutiveLaw(torch.nn.Module):
 
 
 class ImplicitLaw(ConstitutiveLaw):
-    """A constitutive law written as a relation `residual(dp, q, drivers, ctx) = 0`.
+    """A law that cannot give the flow from the potential difference (an ideal source, a
+    flow-controlled pipe, an inductance) gives a relation `residual(dp, q, drivers, ctx) = 0`
+    instead, and the layer adds its flow as an unknown (Modified Nodal Analysis).
 
-    The flow of an implicit law's edges is an unknown of the layer, alongside the nodal
-    potentials (Modified Nodal Analysis). This is the form of a flow-controlled law
-    (`dp = h(q)`), of an ideal potential source (`dp = V`), and of a law that couples flow and
-    potential through stored state (an inductance). `residual` returns one value per edge,
-    with the shape of `dp`.
+    Subclasses implement `residual`, which returns one value per edge, with the shape of
+    `dp`. `flow` and `dflow` refuse: the flow is read from the layer's solved `q`.
     """
 
-    law_form = "implicit"
-    contextual = True
-
-    def residual(self, dp: Tensor, q: Tensor, drivers: Mapping[str, Tensor] | None,
-                 ctx: LawContext | None) -> Tensor:
+    def residual(self, dp: Tensor, q: Tensor, drivers: Mapping[str, Tensor] | None = None,
+                 ctx: LawContext | None = None) -> Tensor:
         raise NotImplementedError(f"{type(self).__name__} does not implement residual()")
 
     def forward(self, dp: Tensor, q: Tensor, drivers: Mapping[str, Tensor] | None = None,
@@ -385,15 +393,15 @@ class ImplicitLaw(ConstitutiveLaw):
         """Return `residual(dp, q, drivers, ctx)`.
 
         An implicit law is called as `law(dp, q, drivers, ctx)`, with the flow `q` as the
-        second argument, unlike a potential-controlled law, which is called as
-        `law(dp, drivers, ctx)` and computes its flow from `dp`.
+        second argument, unlike a law with a flow, which is called as `law(dp, drivers, ctx)`
+        and computes its flow from `dp`.
         """
         return self.residual(dp, q, drivers, ctx)
 
     def _no_flow(self) -> TypeError:
         return TypeError(
-            f"{type(self).__name__} (kind {self.kind!r}) is an implicit law: its flow is an "
-            f"unknown of the layer, not a function flow(dp); read it from the layer's solved q"
+            f"{type(self).__name__} (kind {self.kind!r}) is a relation: its flow is an "
+            f"unknown of the layer; read it from the solved q"
         )
 
     def flow(self, dp, drivers=None, ctx=None):

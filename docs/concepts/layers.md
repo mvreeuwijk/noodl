@@ -207,7 +207,8 @@ its own `to(device=None, dtype=None)` method for `Model.to` to move them (the te
 
 A `KirchhoffLayer` whose constitutive laws are all potential-controlled, single-edge and
 static is solved by nodal analysis, as above. A layer with any law that is implicit
-(`law_form = "implicit"`), multi-port (`ports > 1`), dynamic or contextual, or a layer built with
+(an `ImplicitLaw`), multi-port (`ports > 1`), dynamic or reads the context (a `ctx` parameter in
+`flow`), or a layer built with
 `phasor=True`, is solved by **Modified Nodal Analysis** instead (`layer.mna` is True); the
 declarations are described under
 [Implicit, coupled and dynamic constitutive laws](elements.md#implicit-coupled-and-dynamic-constitutive-laws).
@@ -716,7 +717,7 @@ hand, missing, or with the `refs` default of 0) starts the trapezoidal scheme as
 at the step start, which can ring; take the first step with `scheme="backward_euler"`, as
 `water_step` does by default.
 `steady` solves such a layer at its operating point (a capacitance open, an inductance
-shorted). A layer with contextual laws but no dynamic one (a time-dependent source and
+shorted). A layer with laws that read the context but no dynamic one (a time-dependent source and
 resistors, no storage) takes no history: on a step it is solved at its operating point at the
 step end, `t + dt`, with `ctx.mode == "dc"` and `ctx.dt` `None`, which is exact for a layer that
 stores nothing. `residuals` reports `layer.balance(phi, q, sources)`, the interior balance of the

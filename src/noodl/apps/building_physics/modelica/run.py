@@ -28,7 +28,7 @@ from noodl.apps.building_physics.modelica.assemble import (
 )
 from noodl.apps.building_physics.modelica.feedback import FeedbackHeat
 from noodl.apps.building_physics.modelica.storage import StorageClosure, mass_change
-from noodl.elements import ConstitutiveLaw, LawContext
+from noodl.elements import ConstitutiveLaw, ImplicitLaw, LawContext
 from noodl.model import Drivers, Model, State
 from noodl.modelica.timeline import extrapolate as extrapolate  # this reader's public API
 from noodl.modelica.timeline import grid_index
@@ -688,7 +688,7 @@ def _balanced(model: Model, store: StorageClosure, state: State, d: Drivers) -> 
     ctx = LawContext(mode="dc")
     for kind in air.kinds:
         law, sl = air.law_for(kind)
-        if law.law_form == "implicit":
+        if isinstance(law, ImplicitLaw):
             r = law.residual(dp[..., sl], q[..., sl], drv, ctx)
             if not bool((r.abs() <= BALANCE_RTOL * (dp[..., sl].abs() + 1.0)).all()):
                 return False

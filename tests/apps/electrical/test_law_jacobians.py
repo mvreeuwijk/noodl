@@ -38,7 +38,7 @@ from noodl.apps.electrical import (
     TransformerRatio,
 )
 from noodl.apps.electrical.power import PiBranch, Shunt, VoltageControlledGenerator
-from noodl.elements import ConstitutiveLaw, LawContext
+from noodl.elements import ConstitutiveLaw, ImplicitLaw, LawContext
 from noodl.elements._slopes import _colour_blocks
 from noodl.layers.kirchhoff import KirchhoffLayer
 from noodl.topology import Network
@@ -198,7 +198,7 @@ def _values(case: Case, ctx: LawContext):
     phasor = ctx.mode == "phasor"
     dp = _rand(B, case.E, lo=case.dp_range[0], hi=case.dp_range[1], seed=1, complex_=phasor)
     q = _rand(B, case.E, lo=case.q_range[0], hi=case.q_range[1], seed=2, complex_=phasor)
-    return dp, (q if case.law.law_form == "implicit" else None)
+    return dp, (q if isinstance(case.law, ImplicitLaw) else None)
 
 
 def _colour(law, dp, q, drivers, ctx):

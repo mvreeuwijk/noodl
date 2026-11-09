@@ -37,8 +37,6 @@ def _net(nodes, edges):
 class Clock(ConstitutiveLaw):
     """q = g dp, recording the time every call sees."""
 
-    contextual = True
-
     def __init__(self, kind="r"):
         super().__init__(kind)
         self.times = []

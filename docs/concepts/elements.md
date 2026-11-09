@@ -190,27 +190,32 @@ Two rules worth stating explicitly, because both produce wrong answers rather th
 
 ## Implicit, coupled and dynamic constitutive laws
 
-The contract above is the potential-controlled form, `q = g(dp)`: one flow per edge, a function
-of that edge's own potential difference. Every built-in airflow, water and sewer law has it, and
-a layer whose laws all have it is solved by nodal analysis. Five class-level declarations on
-`ConstitutiveLaw` describe the other cases; a `KirchhoffLayer` with any of them is solved by
-[Modified Nodal Analysis](layers.md#modified-nodal-analysis-implicit-coupled-and-dynamic-laws).
+Write `flow`; if you cannot, write `residual`. A law that gives its flow, `q = g(dp)`, one flow
+per edge as a function of that edge's own potential difference, writes `flow(dp, drivers)`. Every
+built-in airflow, water and sewer law does, and a layer whose laws all do is solved by nodal
+analysis. A law that cannot (a flow-controlled law, an ideal source, an inductance) subclasses
+`ImplicitLaw` and writes `residual(dp, q, drivers, ctx)` instead, the relation between the
+potential difference and the flow, zero when they agree; the layer then adds its flow as an
+unknown. Every law has `residual`: for a law with a flow it is `q - flow(dp)`, which the solve
+never calls. To read the law context (time, frequency, step-start values), name the third
+parameter of `flow` `ctx`. A `KirchhoffLayer` with a relation, a multi-port, dynamic or
+`ctx`-reading law is solved by
+[Modified Nodal Analysis](layers.md#modified-nodal-analysis-implicit-coupled-and-dynamic-laws);
+three class-level declarations on `ConstitutiveLaw` describe the rest.
 
 | Declaration | Default | Meaning |
 |---|---|---|
-| `law_form` | `"potential"` | `"potential"`: `flow(dp, drivers) -> q`. `"implicit"`: the law is a relation `residual(dp, q, drivers, ctx) = 0` and the flow of each of its edges is an unknown of the layer. |
 | `ports` | `1` | The edges of the kind form consecutive groups of `ports` edges, in the order they were added; the law may couple the edges within a group (a transformer's primary and secondary), never across groups. |
-| `dynamic` | `False` | The law stores (a capacitance, an inductance): it reads its step-start values from the context and implements every mode below. |
-| `contextual` | `False` | `flow` takes the `LawContext` as a third argument (a time- or frequency-dependent potential-controlled law, such as a current source with a waveform). Implicit laws are always contextual. |
+| `dynamic` | `False` | The law reads its step-start values (`ctx.dp_prev`, `ctx.q_prev`): the layer then needs `history` on a step. A capacitance and an inductance implement every mode below. |
 | `phasor_capable` | `False` | The law accepts complex `dp` and `q` (a linear law with real or complex coefficients, or a law written for phasors). Only such laws are allowed in a phasor layer. |
 
-**The two forms.** A potential-controlled law is the nodal half of circuit theory: its flow is
-eliminated in favour of the potentials. An implicit law covers what cannot be written that way:
-a flow-controlled law `dp = h(q)`, an ideal potential source `dp = V` (no flow is a function of
+**The two forms.** A law with a flow is the nodal half of circuit theory: its flow is eliminated
+in favour of the potentials. An `ImplicitLaw` covers what cannot be written that way: a
+flow-controlled law `dp = h(q)`, an ideal potential source `dp = V` (no flow is a function of
 `dp`), an ideal constraint inside a multi-port law, and a law whose flow and potential are
-related through stored state. The base class `ImplicitLaw` sets `law_form = "implicit"` and
-`contextual = True`; a subclass implements `residual`, which returns one value per edge, with
-the shape of `dp`. An implicit law has no `flow`: its flow is read from the layer's solution.
+related through stored state. A subclass implements `residual`, which returns one value per
+edge, with the shape of `dp`. An implicit law has no `flow`: its flow is read from the layer's
+solution.
 
 A loss given as potential difference against flow, `dp = r q |q|`, in series with a linear
 conductance, between two prescribed potentials:
@@ -265,7 +270,7 @@ edges whose flow is an unknown, in layer edge order.
 the same keyword `scheme` a `TransportLayer` takes. A `KirchhoffLayer` gives its laws
 `"backward_euler"` or `"trapezoidal"`; `"exact"` is for transport layers only.
 
-**The law context.** A contextual law receives a `LawContext` (`noodl.elements.base`), a frozen
+**The law context.** A law whose `flow` has a `ctx` parameter (and every `ImplicitLaw`) receives a `LawContext` (`noodl.elements.base`), a frozen
 dataclass the layer builds for every solve:
 
 | Field | Meaning |

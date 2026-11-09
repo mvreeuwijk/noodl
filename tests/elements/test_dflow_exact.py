@@ -27,7 +27,7 @@ import pytest
 import torch
 
 import noodl
-from noodl.elements import ConstitutiveLaw
+from noodl.elements import ConstitutiveLaw, ImplicitLaw
 from noodl.withdrawals import NodeWithdrawal
 
 F64 = torch.float64
@@ -349,7 +349,7 @@ def _discovered() -> list[type]:
         importlib.import_module(info.name)
     found = [c for c in _subclasses(ConstitutiveLaw) | _subclasses(NodeWithdrawal)
              if c.__module__.startswith("noodl.")
-             and getattr(c, "law_form", "potential") == "potential"]
+             and not issubclass(c, ImplicitLaw)]
     return sorted(found, key=lambda c: f"{c.__module__}.{c.__qualname__}")
 
 
@@ -367,7 +367,7 @@ def test_every_potential_form_law_is_audited():
 # ---------------------------------------------------------------------------- the check
 def _call(law, x, drivers, method: str):
     fn = getattr(law, method)
-    if getattr(law, "contextual", False) and method == "flow":
+    if getattr(law, "_takes_ctx", False) and method == "flow":
         from noodl.elements import LawContext
         return fn(x, drivers, LawContext(mode="dc", t=0.0))
     return fn(x, drivers)

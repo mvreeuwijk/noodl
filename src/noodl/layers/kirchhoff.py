@@ -16,7 +16,7 @@ import torch
 
 from noodl._broadcast import broadcast_shapes
 from noodl._tracking import bulk_values
-from noodl.elements.base import ConstitutiveLaw, LawContext
+from noodl.elements.base import ConstitutiveLaw, ImplicitLaw, LawContext
 from noodl.layers._functional import FunctionalLaws
 from noodl.layers._mna import MnaSystem, check_scheme
 from noodl.layers._solve_policy import resolve_classic, resolve_mna
@@ -245,18 +245,14 @@ class KirchhoffLayer(TopologyGuard):
             if el.kind in seen_kinds:
                 raise ValueError(f"duplicate law kind {el.kind!r} in layer {name!r}")
             seen_kinds.add(el.kind)
-            if el.law_form not in ("potential", "implicit"):
-                raise ValueError(
-                    f"KirchhoffLayer {name!r}: kind {el.kind!r} has law "
-                    f"{type(el).__name__} with law_form={el.law_form!r}; expected "
-                    f"'potential' or 'implicit'"
-                )
 
         self.net = net
         self._record_topology(net)
         self.name = name
         self.head_key = f"{name}.edge_head"
         self._laws = list(laws)
+        # A relation (`ImplicitLaw`) has its flow as an unknown of the layer, read once here.
+        self._relation = [isinstance(el, ImplicitLaw) for el in laws]
         self.kinds = [el.kind for el in laws]
         self._storage = list(storage)
         for st in self._storage:
@@ -279,7 +275,7 @@ class KirchhoffLayer(TopologyGuard):
         self.phasor = phasor
         self.dynamic = any(el.dynamic for el in self._laws) or bool(self._storage)
         self.mna = self.phasor or any(
-            el.law_form == "implicit" or el.ports > 1 or el.dynamic or el.contextual
+            isinstance(el, ImplicitLaw) or el.ports > 1 or el.dynamic or el._takes_ctx
             for el in self._laws
         )
         # Node name -> a likely cause, appended when that node is reported floating (an

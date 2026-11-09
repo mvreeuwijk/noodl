@@ -473,17 +473,6 @@ def test_auto_runs_sparse_lu_on_a_batch_above_32():
     torch.testing.assert_close(phi, reference.expand(40, -1), rtol=1e-12, atol=1e-12)
 
 
-def test_unknown_law_form_is_refused_naming_the_kind():
-    class Odd(Conductance):
-        law_form = "volume"
-
-    with pytest.raises(ValueError, match=r"kind 'r'.*law_form='volume'.*'potential' or "
-                                         r"'implicit'"):
-        KirchhoffLayer(_floating_source_net(), "e",
-                       [Odd(torch.tensor([1.0, 0.5]), kind="r"),
-                            Source(torch.tensor([3.0]))], boundary=["gnd"])
-
-
 @pytest.mark.parametrize("kwargs, match", [
     ({"mode": "phasor"}, "mode='phasor'.*phasor=True"),
     ({"history": (torch.zeros(3), torch.zeros(2))}, "history"),

@@ -345,5 +345,5 @@ Subclass these to add a constitutive law, head term, closure, reaction, withdraw
 | Name | What it does | How to call it |
 |---|---|---|
 | `ConstitutiveLaw`<br><small>`noodl.elements`</small> | Abstract branch law: flow as a function of potential difference. | `ConstitutiveLaw(kind)` |
-| `ImplicitLaw`<br><small>`noodl.elements`</small> | A constitutive law written as a relation `residual(dp, q, drivers, ctx) = 0`. | `ImplicitLaw(kind)` |
+| `ImplicitLaw`<br><small>`noodl.elements`</small> | A law that cannot give the flow from the potential difference (an ideal source, a flow-controlled pipe, an inductance) gives a relation `residual(dp, q, drivers, ctx) = 0` instead, and the layer adds its flow as an unknown (Modified Nodal Analysis). | `ImplicitLaw(kind)` |
 | `HeadTerm`<br><small>`noodl.heads`</small> | One additive head on the edges of one kind, computed from the drivers only. | `HeadTerm(...)` |

@@ -194,8 +194,6 @@ def test_a_dynamic_kind_carries_no_head():
 class StepRecorder(ConstitutiveLaw):
     """q = g dp for a static law that reads the context: records each mode it sees."""
 
-    contextual = True
-
     def __init__(self, kind="r"):
         super().__init__(kind)
         self.seen = []
@@ -205,7 +203,7 @@ class StepRecorder(ConstitutiveLaw):
         return dp
 
 
-def test_static_contextual_layer_steps_without_history():
+def test_static_layer_that_reads_the_context_steps_without_history():
     # A layer with no dynamic law needs no history for a step; its laws see the step.
     net = _net(["gnd", "a", "b"], [("a", "gnd", "source"), ("a", "b", "r"),
                                    ("b", "gnd", "r")])

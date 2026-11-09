@@ -23,7 +23,7 @@ from noodl.apps.electrical import (
     SwitchedConductance,
     TransformerRatio,
 )
-from noodl.elements import LawContext
+from noodl.elements import ImplicitLaw, LawContext
 from noodl.layers.kirchhoff import KirchhoffLayer
 from noodl.topology import Network
 from tests._circuit_laws import Cap, Ind
@@ -288,7 +288,7 @@ def test_capacitance_and_inductance_are_the_companion_forms(ctx):
     tol = 8 * torch.finfo(torch.float64).eps if ctx.scheme == "trapezoidal" and (
         ctx.mode == "transient") else 0
     for law, reference in pairs:
-        assert law.dynamic and law.phasor_capable and law.law_form == "implicit"
+        assert law.dynamic and law.phasor_capable and isinstance(law, ImplicitLaw)
         _close(law(dp, q, {}, ctx), reference(dp, q, {}, ctx), tol=tol)
 
 
@@ -491,15 +491,15 @@ def test_mutual_inductance_phasor_and_dc():
 
 
 def test_laws_carry_many_devices_and_declare_their_forms():
-    assert PrescribedVoltage(1.0).law_form == "implicit"
+    assert isinstance(PrescribedVoltage(1.0), ImplicitLaw)
     assert PrescribedVoltage(1.0).phasor_capable
     cur = PrescribedCurrent(T([1.0, 2.0]), waveforms=Constant())
-    assert cur.law_form == "potential" and cur.dp_independent and cur.contextual
+    assert not isinstance(cur, ImplicitLaw) and cur.dp_independent and cur._takes_ctx
     _close(cur(T([[5.0, 6.0]]), {}, LawContext(mode="dc")), [[1.0, 2.0]])
     assert TransformerRatio(1.0).ports == 2 and MutualInductance(1, 1, 0).ports == 2
     assert MutualInductance(1, 1, 0).dynamic
     assert DependentSource(1.0, control="current", output="current").ports == 2
-    assert not Resistance(1.0).contextual and Resistance(1.0).phasor_capable
+    assert not Resistance(1.0)._takes_ctx and Resistance(1.0).phasor_capable
 
 
 # ----------------------------------------------------- temperature and scale options

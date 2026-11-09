@@ -182,7 +182,7 @@ Subclass these to add a constitutive law, head term, closure, reaction, withdraw
 |---|---|---|
 | `Reaction`<br><small>`noodl.layers`</small> | A local, per-node nonlinear map applied to the state after a transport step (or before it, under `Model(reaction_order="before_transport")`). | `Reaction(...)` |
 | `ConstitutiveLaw`<br><small>`noodl.elements`</small> | Abstract branch law: flow as a function of potential difference. | `ConstitutiveLaw(kind)` |
-| `ImplicitLaw`<br><small>`noodl.elements`</small> | A constitutive law written as a relation `residual(dp, q, drivers, ctx) = 0`. | `ImplicitLaw(kind)` |
+| `ImplicitLaw`<br><small>`noodl.elements`</small> | A law that cannot give the flow from the potential difference (an ideal source, a flow-controlled pipe, an inductance) gives a relation `residual(dp, q, drivers, ctx) = 0` instead, and the layer adds its flow as an unknown (Modified Nodal Analysis). | `ImplicitLaw(kind)` |
 | `HeadTerm`<br><small>`noodl.heads`</small> | One additive head on the edges of one kind, computed from the drivers only. | `HeadTerm(...)` |
 | `NodeWithdrawal`<br><small>`noodl.withdrawals`</small> | A flow leaving the network at nodes that depends on the potential of the same layer (pressure-driven demand, a leak): a potential-dependent withdrawal at a fixed set of nodes. | `NodeWithdrawal(nodes)` |
 | `NodeStorage`<br><small>`noodl.storage`</small> | An amount stored at nodes as a function of each node's own potential; the layer turns its change over a step into a withdrawal (positive into storage). | `NodeStorage(nodes)` |
