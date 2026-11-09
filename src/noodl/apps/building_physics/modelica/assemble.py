@@ -95,9 +95,9 @@ Volume mass storage
 By default (`build(..., mass_storage=None)`) every volume whose `massDynamics` is not
 `SteadyState` stores mass compressibly, as in MBL, and the quasi-steady rules below
 ("Capacities", "Closed zone groups") are replaced by the `storage` module's: the zone pressure
-is an air-layer unknown held by a backward-Euler storage node source, the thermal and species
-capacities are the zone's actual mass per step, the thermal layer is in the storage-rate form
-(`TransportLayer(dilution=...)`), water is always carried for a moist-air medium (MBL's `Xi`
+is an air-layer unknown held by a backward-Euler node storage (`ZoneStorage`), the thermal and
+species capacities are the zone's actual mass per step, the thermal layer is in the storage-rate
+form (`TransportLayer(dilution=...)`), water is always carried for a moist-air medium (MBL's `Xi`
 moves with the stored mass), closed zone groups need no pressure reference, and the coupling
 passes are plain successive substitution. `mass_storage=False` keeps the quasi-steady airflow
 described below throughout.
