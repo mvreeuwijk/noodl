@@ -653,6 +653,53 @@ def test_a_pressure_reader_composes_with_the_zone_pressure_couplings(case):
         assert len(reader.seen) > len(counter.seen)
 
 
+def test_simulate_matches_the_old_inline_zone_pressure_loop_bitwise(monkeypatch):
+    """`simulate`'s zone-pressure loop before `Model.fixed_point`: same states, same passes."""
+    from noodl.apps.building_physics import simulation
+
+    passes = []
+    new_loop = simulation._fixed_point
+
+    def old_loop(model, run, state, key, rtol, max_iter, P, where, cause=""):
+        out = run(state)
+        if key is None:
+            return out
+        n = 0
+        for _ in range(max_iter):
+            nxt = run({**state, key: out[key]})
+            n += 1
+            change = (nxt[key] - out[key]).abs().max().item()
+            out = nxt
+            if change <= rtol * P:
+                break
+        passes.append(n)
+        return out
+
+    def counting(*a, **k):
+        n = [0]
+        run = a[1]
+
+        def counted(s):
+            n[0] += 1
+            return run(s)
+
+        out = new_loop(a[0], counted, *a[2:], **k)
+        passes.append(n[0] - 1)
+        return out
+
+    p = read_prj(STACK)
+    model, state, drivers = project_to_model(p, ambient=dict(p.ambient_conditions, Ta=273.15))
+    with torch.no_grad():
+        monkeypatch.setattr(simulation, "_fixed_point", counting)
+        new = simulate(model, state, drivers, [0.0, 300.0, 600.0], **TIGHT)
+        new_passes, passes[:] = list(passes), []
+        monkeypatch.setattr(simulation, "_fixed_point", old_loop)
+        old = simulate(model, state, drivers, [0.0, 300.0, 600.0], **TIGHT)
+    assert new_passes == passes and max(passes) > 1
+    assert old.keys() == new.keys()
+    assert all(torch.equal(old[k], new[k]) for k in old)
+
+
 def test_an_unconverged_pressure_fixed_point_names_every_coupling():
     model, state, drivers = project_to_model(read_prj(STACK))      # densZP = 1
     model.closures.append(_PressureSpy())

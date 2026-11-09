@@ -516,6 +516,34 @@ def test_prj_steady_converges_the_zone_pressure_density_to_its_fixed_point():
         steady(model, state, drivers, rtol=0.0, max_iter=1, atol=1e-14)
 
 
+def test_prj_steady_matches_the_old_inline_loop_bitwise():
+    """The loop `prj.steady` ran before `Model.fixed_point`: same state, same pass count."""
+    p = read_prj(WTH_STACK)
+    model, state, drivers = project_to_model(p, ambient=dict(p.ambient_conditions, Ta=273.15))
+    calls = []
+    real = model.steady
+
+    def counting(*a, **k):
+        calls.append(1)
+        return real(*a, **k)
+
+    model.steady = counting
+    with torch.no_grad():
+        new = prj_steady(model, state, drivers, atol=1e-14)
+        n_new, calls[:] = len(calls), []
+        out = model.steady(state, drivers, atol=1e-14)
+        key = "air.phi"
+        for _ in range(10):
+            nxt = model.steady({**state, key: out[key]}, drivers, atol=1e-14)
+            change = (nxt[key] - out[key]).abs().max().item()
+            out = nxt
+            if change <= 1e-12 * 101325.0:
+                break
+    assert n_new == len(calls) > 2
+    assert out.keys() == new.keys()
+    assert all(torch.equal(out[k], new[k]) for k in out)
+
+
 def test_prj_steady_is_one_model_steady_without_dens_zp():
     from noodl.apps.building_physics.prj import steady
 

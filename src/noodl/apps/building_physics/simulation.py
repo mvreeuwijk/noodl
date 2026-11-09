@@ -130,23 +130,27 @@ def _airflow(model: Model, state: State, drivers: Drivers, **kw) -> State:
     return new
 
 
-def _fixed_point(run, state: State, key: str | None, rtol: float, max_iter: int, P: float,
-                 where: str, cause: str = "") -> State:
+def _fixed_point(model: Model, run, state: State, key: str | None, rtol: float,
+                 max_iter: int, P: float, where: str, cause: str = "") -> State:
     """`run(state)` repeated with the latest zone pressures (`state[key]`) until they move by
-    no more than `rtol * P`; one call when `key` is None."""
+    no more than `rtol * P`, by `Model.fixed_point`; one call when `key` is None."""
     out = run(state)
     if key is None:
         return out
-    for _ in range(max_iter):
-        nxt = run({**state, key: out[key]})
-        change = (nxt[key] - out[key]).abs().max().item()
-        out = nxt
-        if change <= rtol * P:
-            return out
-    raise RuntimeError(
-        f"simulate: {where}: the zone pressures fed back to {cause} did not converge in "
-        f"{max_iter} passes (last change {change:.3e} Pa > {rtol * P:.3e} Pa)"
-    )
+    diag: dict = {}
+    try:
+        return model.fixed_point(
+            lambda z: run({**state, key: z[key]}), out, watch=[key], tol=rtol * P,
+            max_passes=max_iter, diagnostics=diag, where=f"simulate: {where}",
+        )
+    except RuntimeError as exc:
+        if "passes" not in diag or diag["changes"][-1] <= rtol * P:
+            raise
+        raise RuntimeError(
+            f"simulate: {where}: the zone pressures fed back to {cause} did not converge in "
+            f"{max_iter} passes (last change {diag['changes'][-1]:.3e} Pa > "
+            f"{rtol * P:.3e} Pa)"
+        ) from exc
 
 
 def _refuse_unread_inputs(model: Model, drivers: Drivers, inputs: Sequence[Input],
@@ -261,7 +265,8 @@ def simulate(model: Model, state: State, drivers: Drivers, times, *,
         # sensors then read 0), and a PI node's t = 0 evaluation is a full step's update.
         state = _evaluate_controls(network, state, d, ts[1] - ts[0] if len(ts) > 1 else 0.0,
                                    ts[0])
-    state = _fixed_point(lambda s: _airflow(model, s, d, **step_kwargs), state, step_key,
+    state = _fixed_point(model, lambda s: _airflow(model, s, d, **step_kwargs), state,
+                         step_key,
                          zone_pressure_rtol, zone_pressure_max_iter, P_of(d), "initial airflow",
                          cause)
     state = _with_pressure_differences(model, state, d, network)
@@ -322,7 +327,7 @@ def simulate(model: Model, state: State, drivers: Drivers, times, *,
                     return out
 
             with network.held() if network is not None else nullcontext():
-                state = _fixed_point(run, state, step_key, zone_pressure_rtol,
+                state = _fixed_point(model, run, state, step_key, zone_pressure_rtol,
                                      zone_pressure_max_iter, P_of(d),
                                      f"step of {dt} s ending at t = {t1} s", cause)
             state = _with_pressure_differences(model, state, d, network)
