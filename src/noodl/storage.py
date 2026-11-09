@@ -25,11 +25,10 @@ Which method to write:
   drivers: an amount that depends on a driver that changes over the step (a zone's air mass
   depends on its temperature), or a difference that must be formed without round-off.
 - `rate` and `rate_slope`, for an application whose withdrawal has rules beyond storage.
-  On the classic nodal path `rate_slope` reaches only the non-differentiable Newton solve
-  (the differentiable solve differentiates `rate` by autograd); a layer solved by Modified
-  Nodal Analysis uses it on both paths, so an override that is not the true derivative
-  (a Newton aid) declares `exact_slope = False`, and the differentiable solve then
-  differentiates `rate` instead.
+  Both the non-differentiable and the differentiable solve use `rate_slope`, classic and
+  Modified Nodal Analysis alike, and the differentiable solve's adjoint is built from it, so
+  an override that is not the true derivative (a Newton aid) declares
+  `exact_slope = False`, and the differentiable solve then differentiates `rate` instead.
 
 `initial` gives the potential a node is held at in the consistent initial point
 (`mode="initial"`) of a layer solved by Modified Nodal Analysis: that node's flow balance is
@@ -130,14 +129,11 @@ class NodeStorage(torch.nn.Module):
                    ctx: LawContext, drivers: Mapping | None = None) -> Tensor:
         """d rate / d phi at each node: `step_rate_factor(ctx) * capacity(...)`.
 
-        On the classic nodal path it is used by the non-differentiable Newton solve
-        (`differentiable=False`, or `analytic_primal` with nothing differentiable reaching
-        the solve), and the differentiable solve takes the derivative of `rate` by autograd
-        instead, so `exact_slope` changes nothing there. A layer solved by Modified Nodal
-        Analysis uses it on both paths, so it also builds the adjoint there; an override
-        that is not the true derivative of `rate` (a Newton aid) must declare
-        `exact_slope = False`, and the differentiable solve then differentiates `rate` by
-        autograd for this storage instead (the non-differentiable one keeps this
+        Both the non-differentiable and the differentiable solve use it, on the classic
+        nodal path and on a layer solved by Modified Nodal Analysis, so it also builds the
+        adjoint; an override that is not the true derivative of `rate` (a Newton aid) must
+        declare `exact_slope = False`, and the differentiable solve then differentiates
+        `rate` by autograd for this storage instead (the non-differentiable one keeps this
         slope)."""
         return step_rate_factor(ctx) * self.capacity(phi_nodes, phi_start, drivers)
 

@@ -38,7 +38,10 @@ $$
 
 so the backward pass is **one transposed linear solve**, whatever the forward took. The Jacobian
 is the one Newton already assembled, and the transposed solve reuses the same operator through
-`TransposeOperator`. For a symmetric operator — which a Kirchhoff layer's is — `rmatvec` is
+`TransposeOperator`. Its slopes are each law's own analytic `dflow` (a node storage's
+`rate_slope`) where the law declares it the exact derivative of its flow (`exact_slope`, the
+default), and the autograd derivative of the flow where it does not
+([Writing a constitutive law](elements.md)). For a symmetric operator — which a Kirchhoff layer's is — `rmatvec` is
 the forward action, so nothing extra is built.
 
 The practical consequence: a model that takes 12 Newton iterations to converge costs the same to
@@ -67,18 +70,18 @@ the residual is invisible to the implicit adjoint. Two checks look for one:
 - **Before solving, by attribute.** Every tensor a law, node source or drive holds — plain
   attributes, registered buffers, and tensors nested in lists, tuples, dicts, sets and plain
   objects — is scanned, and one that requires grad without being threaded is refused by name.
-- **At the starting guess and again at the root, by evaluation.** The layer evaluates its
-  residual with every threaded tensor detached; if the result still requires grad, some other
-  tensor reaches it (a tensor captured by a closure, which no scan can see), and the solve is
-  refused. The root is the point the adjoint linearises at, so a law that reads such a tensor
-  only on a branch the solve reaches after leaving the starting guess is caught there. Each
-  evaluation costs one residual evaluation.
+- **At every Newton iterate, from the starting guess to the root, by evaluation.** The forward
+  Newton evaluates the residual with every threaded tensor detached; if the result still
+  requires grad, some other tensor reaches it (a tensor captured by a closure, which no scan
+  can see), and the solve is refused. The root is the point the adjoint linearises at, so a law
+  that reads such a tensor only on a branch the solve reaches after leaving the starting guess
+  is caught there. The check is the forward's own residual evaluations: it costs none extra.
 
 What the evaluation establishes is structural and pointwise: the residual's autograd graph at
-those two points reaches no un-threaded tensor. It does not prove that no such tensor could be
+those points reaches no un-threaded tensor. It does not prove that no such tensor could be
 read elsewhere in the state space, and it does not inspect a tensor that requires grad but is
 not used at the root; neither affects the gradient at the returned solution. (The Jacobian is
-the autograd derivative of the same flows, so it reads nothing the residual does not.)
+the same laws' slopes, a constant of the adjoint.)
 
 **1. A law's differentiable state must be a registered parameter.**
 

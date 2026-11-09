@@ -730,6 +730,11 @@ class DoorPortStream(ConstitutiveLaw):
     Alias: `MBLDoorPortStream` (MBL).
     """
 
+    #: `dflow` is half the door's net slope for either stream (see `dflow`): the two edges'
+    #: slopes sum to the exact one, but neither is its own stream's derivative, so the
+    #: differentiable solve differentiates `flow` by autograd instead.
+    exact_slope = False
+
     def __init__(self, comp: _DoorCompartmentBase, head: DoorCompartmentHead,
                  direction: str, kind: str) -> None:
         ConstitutiveLaw.__init__(self, kind)

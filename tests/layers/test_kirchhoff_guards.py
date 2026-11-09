@@ -373,3 +373,28 @@ def test_an_old_pickled_network_counts_changes_and_its_layer_refuses_them():
     assert layer.net.topology_version == 1
     with pytest.raises(RuntimeError, match="topology.*changed"):
         layer.solve(torch.ones(1, dtype=F64), differentiable=False)
+
+
+# The attribute scan is cached per layer (`KirchhoffLayer._held_scan`): a change to anything it
+# read after a first, clean solve must still be refused.
+@pytest.mark.parametrize("change", ["attribute", "requires_grad", "list", "nested", "buffer"])
+def test_the_cached_attribute_scan_sees_a_later_change(change):
+    holder = _Holder(torch.tensor([2.0], dtype=F64))
+    law = _ObjectLaw(holder.g)
+    law.extra = []
+    layer = KirchhoffLayer(_net(), "heat", [law], boundary=["a"])
+    _solve_unit_source(layer)                                  # clean: cached
+    _solve_unit_source(layer)                                  # served from the cache
+    g = torch.tensor([3.0], dtype=F64, requires_grad=True)
+    if change == "attribute":
+        law.other = g
+    elif change == "requires_grad":
+        law.h.g.requires_grad_(True)
+    elif change == "list":
+        law.extra.append(g)
+    elif change == "nested":
+        law.h.g = g
+    else:
+        law.register_buffer("b", g)
+    with pytest.raises(ValueError, match="not a registered nn.Parameter"):
+        _solve_unit_source(layer)

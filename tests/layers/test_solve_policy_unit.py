@@ -28,7 +28,7 @@ def _args(layer, call, reaches):
 
 
 def test_classic_mutation_order_and_defaults():
-    layer, call = _classic(False)
+    layer, call = _classic()
     drivers, sources, phi_b = _args(layer, call, False)
     kw = {}
     policy = resolve_classic(layer, kw, None, True, drivers, sources, phi_b)
@@ -37,7 +37,7 @@ def test_classic_mutation_order_and_defaults():
 
 
 def test_classic_return_without_diagnostics_refused():
-    layer, call = _classic(False)
+    layer, call = _classic()
     drivers, sources, phi_b = _args(layer, call, False)
     for value in ("return", "return_primal"):
         with pytest.raises(ValueError, match="on_failure='return' requires"):
@@ -46,7 +46,7 @@ def test_classic_return_without_diagnostics_refused():
 
 @pytest.mark.parametrize("reaches", [True, False])
 def test_classic_return_primal(reaches):
-    layer, call = _classic(False)
+    layer, call = _classic()
     drivers, sources, phi_b = _args(layer, call, reaches)
     kw = {"on_failure": "return_primal"}
     policy = resolve_classic(layer, kw, {}, True, drivers, sources, phi_b)
@@ -55,21 +55,20 @@ def test_classic_return_primal(reaches):
     assert kw["on_failure"] == ("raise" if reaches else "return")
 
 
-def test_classic_analytic_primal_and_primal_path():
-    layer, call = _classic(True)
-    drivers, sources, phi_b = _args(layer, call, False)
-    kw = {"on_failure": "return_primal"}
-    policy = resolve_classic(layer, kw, {}, True, drivers, sources, phi_b)
-    assert policy == SolvePolicy(differentiable=False, forward_only=False)
-    assert kw["on_failure"] == "return"
-    drivers, sources, phi_b = _args(layer, call, True)
-    assert resolve_classic(layer, {}, None, True, drivers, sources, phi_b).differentiable
-    assert not resolve_classic(layer, {}, None, False, drivers, sources, phi_b).differentiable
+def test_classic_differentiable_flag_is_the_callers():
+    """`differentiable=True` stays the differentiable path whether or not anything reaches the
+    solve (no primal shortcut); `differentiable=False` is the primal path."""
+    layer, call = _classic()
+    for reaches in (False, True):
+        drivers, sources, phi_b = _args(layer, call, reaches)
+        assert resolve_classic(layer, {}, None, True, drivers, sources, phi_b).differentiable
+        assert not resolve_classic(layer, {}, None, False, drivers, sources,
+                                   phi_b).differentiable
 
 
 @pytest.mark.parametrize("reaches", [True, False])
 def test_mna_return_primal(reaches):
-    layer, call = _mna(False)
+    layer, call = _mna()
     drivers, sources, phi_b = _args(layer, call, reaches)
     kw = {"on_failure": "return_primal"}
     with pytest.raises(ValueError, match="return_primal"):
@@ -80,7 +79,7 @@ def test_mna_return_primal(reaches):
 
 
 def test_mna_other_on_failure_untouched():
-    layer, call = _mna(False)
+    layer, call = _mna()
     drivers, sources, phi_b = _args(layer, call, False)
     kw = {"on_failure": "raise"}
     assert resolve_mna(layer, kw, None, True, drivers, sources, phi_b, None) is True
@@ -88,7 +87,7 @@ def test_mna_other_on_failure_untouched():
 
 
 def test_mna_history_reaches():
-    layer, call = _mna(False)
+    layer, call = _mna()
     drivers, sources, phi_b = _args(layer, call, False)
     h = (torch.ones(2, dtype=torch.float64, requires_grad=True),)
     kw = {"on_failure": "return_primal"}

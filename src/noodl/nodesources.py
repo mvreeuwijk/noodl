@@ -41,6 +41,8 @@ class NodeSource(torch.nn.Module):
     #: True when the withdrawal is affine in the node potentials once the drivers are fixed
     #: (`ConstitutiveLaw.linear`).
     linear: bool = False
+    #: True when `dflow` is the exact derivative of `flow` (`ConstitutiveLaw.exact_slope`).
+    exact_slope: bool = True
 
     def __init__(self, nodes) -> None:
         super().__init__()

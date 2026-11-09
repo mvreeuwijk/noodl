@@ -167,9 +167,10 @@ Which method to write on a subclass:
   (`LinearStorage` forms `C (phi - phi_start)`).
 - **`rate`** and **`rate_slope`**, for an application whose withdrawal has rules beyond storage
   (they default to `step_rate(change)` and `step_rate_factor * capacity`). `rate_slope` is
-  used by the non-differentiable Newton solve; the differentiable solve takes the derivative
-  of `rate` by autograd, so an override must be the true derivative (as for
-  `NodeSource.dflow`).
+  used by both the non-differentiable and the differentiable solve, whose adjoint it builds,
+  so an override that is not the true derivative (a Newton aid) declares
+  `exact_slope = False`, and the differentiable solve then takes the derivative of `rate` by
+  autograd for that storage (as for `NodeSource.dflow`).
 
 A withdrawal that is not storage (a demand, a leak) is a `NodeSource`
 ([Constitutive laws](elements.md)).
@@ -696,8 +697,7 @@ state's own flows. A phasor layer (`phasor=True`) has complex `"<layer>.phi"` an
 convergence on the modulus of the change and differentiates its fixed point in the real view.
 Anderson mixing (`iterate_acceleration="anderson"`) is refused on a phasor layer.
 `line_search="convex"` (by keyword or through `newton_defaults`) is refused on such a layer: its
-residual is not the gradient of a convex function. `analytic_primal` has no effect on it,
-because its solve already assembles the analytic operator.
+residual is not the gradient of a convex function.
 
 ### Closures
 

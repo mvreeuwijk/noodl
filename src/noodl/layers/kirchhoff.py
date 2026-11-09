@@ -70,7 +70,33 @@ _OPAQUE = (type, types.ModuleType, types.FunctionType, types.BuiltinFunctionType
            types.MethodType)
 
 
-def _held_tensors(obj, *, registered_threaded: bool = True):
+def _detached(params) -> list:
+    """`params` with every tensor detached."""
+    return [p.detach() if isinstance(p, torch.Tensor) else p for p in params]
+
+
+def _same_objects(a, b) -> bool:
+    """Whether the sequences `a` and `b` hold the same objects (`is`), position by position."""
+    return a is not None and len(a) == len(b) and all(x is y for x, y in zip(a, b, strict=True))
+
+
+def _shallow(obj):
+    """What one object of a scan holds, by identity: a container's items (its length alone
+    past `_SCAN_MAX_ITEMS`, where the scan does not enter it), an object's attributes. Equal
+    shallow signatures of every object a scan visited mean the scan would find the same
+    tensors (`KirchhoffLayer._held_scan`)."""
+    if isinstance(obj, dict):
+        if len(obj) > _SCAN_MAX_ITEMS:
+            return len(obj)
+        return tuple((k, id(v)) for k, v in obj.items())
+    if isinstance(obj, (list, tuple, set, frozenset)):
+        if len(obj) > _SCAN_MAX_ITEMS:
+            return len(obj)
+        return tuple(map(id, obj))
+    return tuple((k, id(v)) for k, v in vars(obj).items())
+
+
+def _held_tensors(obj, *, registered_threaded: bool = True, visited: list | None = None):
     """Yield `(name, tensor)` for every tensor `obj` holds: its attributes, its registered
     buffers (when a module), and tensors nested at any depth (up to 8) in lists, tuples,
     dicts, sets and the attributes of plain objects and modules held there.
@@ -79,8 +105,10 @@ def _held_tensors(obj, *, registered_threaded: bool = True):
     submodules (`_modules`, scanned as holders of their own) are not yielded: the
     differentiable solve threads them. A module reached through a container or a plain
     attribute is not registered, so its parameters ARE yielded. Each object is visited once
-    (cycles end), and a container longer than `_SCAN_MAX_ITEMS` is not entered."""
+    (cycles end), and a container longer than `_SCAN_MAX_ITEMS` is not entered. `visited`,
+    when given, collects every object whose contents the scan read (`_shallow`)."""
     seen: set[int] = set()
+    record = visited.append if visited is not None else (lambda _o: None)
 
     def walk(label, value, depth):
         if isinstance(value, torch.Tensor):
@@ -89,6 +117,7 @@ def _held_tensors(obj, *, registered_threaded: bool = True):
         if depth >= 8 or isinstance(value, _ATOMS + _OPAQUE) or id(value) in seen:
             return
         seen.add(id(value))
+        record(value)
         if isinstance(value, dict):
             if len(value) <= _SCAN_MAX_ITEMS:
                 for k, v in value.items():
@@ -103,8 +132,13 @@ def _held_tensors(obj, *, registered_threaded: bool = True):
                     yield from walk(f"{label}.{k}", v, depth + 1)
 
     skip = {"_memo_cache"}
+    record(obj)
     if registered_threaded:
         skip |= {"_parameters", "_buffers", "_modules"}
+        if isinstance(obj, torch.nn.Module):
+            # what is registered decides what is skipped: a change there changes the scan
+            for registry in (obj._parameters, obj._buffers, obj._modules):
+                record(registry)
     for name, value in vars(obj).items():
         if name not in skip:
             yield from walk(name, value, 0)
@@ -163,16 +197,6 @@ class KirchhoffLayer(TopologyGuard):
     only (above): a layer with storage at interior nodes, with dynamic laws or with no storage
     refuses it, and a layer with boundary storage refuses every other scheme.
 
-    `analytic_primal` (default ``False``): a ``differentiable=True`` solve that nothing
-    differentiable reaches (grad mode off, or no input requiring grad) runs the
-    ``differentiable=False`` branch, whose Newton Jacobian is the laws' and node
-    sources' own analytic ``dflow`` rather than autograd through ``functional_call``. The
-    result is the same root to the Newton tolerance (not bitwise: the two Jacobians may
-    differ at a kink), returned detached as it would be anyway. It is opt-in because it
-    trusts every ``dflow`` to be the derivative of its ``flow`` (the sewer dynamic wave sets
-    it: its laws' ``dflow`` are exact). It has no effect on a layer solved by Modified Nodal
-    Analysis, whose solve already assembles the analytic Jacobian.
-
     `newton_defaults` (default none) are Newton keywords (`solvers.newton.newton`) every
     `solve` of this layer uses unless the call gives its own, for laws that need them: the
     sewer dynamic wave sets ``line_search="convex"`` and ``step_floor`` (its kinked laws are
@@ -194,14 +218,12 @@ class KirchhoffLayer(TopologyGuard):
         unit: str = "",
         flow_unit: str = "",
         phasor: bool = False,
-        analytic_primal: bool = False,
         newton_defaults: Mapping | None = None,
         scheme: str = "trapezoidal",
         storage: Sequence[NodeStorage] = (),
     ) -> None:
         check_scheme(name, scheme)
         self.scheme = scheme
-        self.analytic_primal = bool(analytic_primal)
         self.newton_defaults = dict(newton_defaults or {})
         if linear_solver not in _LINEAR_SOLVERS:
             raise ValueError(
@@ -1169,60 +1191,78 @@ class KirchhoffLayer(TopologyGuard):
         return a gradient that is silently wrong (if some other path happens to also touch
         the same value) or silently `None` (if it doesn't).
         """
-        for el in (*self._laws, *self._node_sources, *self._storage):
-            # A law may wrap another (`Scaled`): scan every submodule's own attributes,
-            # its registered buffers, and tensors nested in lists, tuples, dicts and sets.
-            holders = el.modules() if isinstance(el, torch.nn.Module) else (el,)
-            for name, value in (kv for h in holders for kv in _held_tensors(h)):
-                if value.requires_grad:
-                    if isinstance(el, NodeStorage):
-                        raise ValueError(
-                            f"storage {el!r} has a tensor attribute {name!r} with "
-                            f"requires_grad=True that is not a registered nn.Parameter, so "
-                            f"the differentiable solve cannot reach it through "
-                            f"Function.apply and its gradient would be silently wrong or "
-                            f"absent. Construct it with learnable=True, or register it as an "
-                            f"nn.Parameter in __init__, or use differentiable=False."
-                        )
-                    if isinstance(el, NodeSource):
-                        # A NodeSource has no `learnable=` constructor kwarg (unlike
-                        # ConstitutiveLaw) -- its fix is to register the tensor as an nn.Parameter
-                        # directly, so it must be named and fixed as a node source, not
-                        # rendered (and told to construct itself) as if it were a ConstitutiveLaw.
-                        raise ValueError(
-                            f"node source {el!r} has a tensor attribute {name!r} with "
-                            f"requires_grad=True that is not a registered nn.Parameter, so "
-                            f"the differentiable solve cannot reach it through "
-                            f"Function.apply and its gradient would be silently wrong or "
-                            f"absent. Register it as an nn.Parameter "
-                            f"(self.<name> = torch.nn.Parameter(...)) in __init__ so it is "
-                            f"reachable via named_parameters() (buffers and tensors inside "
-                            f"containers are not), or use differentiable=False."
-                        )
-                    raise ValueError(
-                        f"law {el!r} (kind {el.kind!r}) has a "
-                        f"tensor attribute {name!r} with requires_grad=True that is not a "
-                        f"registered nn.Parameter (a buffer or a tensor inside a container "
-                        f"is not one either), so the differentiable solve cannot reach "
-                        f"it through Function.apply and its gradient would be silently wrong "
-                        f"or absent. Construct this law with learnable=True (so the tensor "
-                        f"is registered and reachable via named_parameters()), or use "
-                        f"differentiable=False."
-                    )
+        for role, el, name, value in self._held_scan():
+            if not value.requires_grad:
+                continue
+            if role == "drive":
+                raise ValueError(
+                    f"drive {el!r} (kind {el.kind!r}) has a tensor attribute {name!r} "
+                    f"with requires_grad=True; a Drive is captured by closure inside the "
+                    f"differentiable solve, not threaded through Function.apply, so its "
+                    f"gradient would be silently absent. A Drive must read every "
+                    f"differentiable quantity from the `drivers` mapping passed to "
+                    f"solve() rather than owning it directly, or use "
+                    f"differentiable=False."
+                )
+            if role == "storage":
+                raise ValueError(
+                    f"storage {el!r} has a tensor attribute {name!r} with "
+                    f"requires_grad=True that is not a registered nn.Parameter, so "
+                    f"the differentiable solve cannot reach it through "
+                    f"Function.apply and its gradient would be silently wrong or "
+                    f"absent. Construct it with learnable=True, or register it as an "
+                    f"nn.Parameter in __init__, or use differentiable=False."
+                )
+            if role == "source":
+                # A NodeSource has no `learnable=` constructor kwarg (unlike
+                # ConstitutiveLaw) -- its fix is to register the tensor as an nn.Parameter
+                # directly, so it must be named and fixed as a node source, not
+                # rendered (and told to construct itself) as if it were a ConstitutiveLaw.
+                raise ValueError(
+                    f"node source {el!r} has a tensor attribute {name!r} with "
+                    f"requires_grad=True that is not a registered nn.Parameter, so "
+                    f"the differentiable solve cannot reach it through "
+                    f"Function.apply and its gradient would be silently wrong or "
+                    f"absent. Register it as an nn.Parameter "
+                    f"(self.<name> = torch.nn.Parameter(...)) in __init__ so it is "
+                    f"reachable via named_parameters() (buffers and tensors inside "
+                    f"containers are not), or use differentiable=False."
+                )
+            raise ValueError(
+                f"law {el!r} (kind {el.kind!r}) has a "
+                f"tensor attribute {name!r} with requires_grad=True that is not a "
+                f"registered nn.Parameter (a buffer or a tensor inside a container "
+                f"is not one either), so the differentiable solve cannot reach "
+                f"it through Function.apply and its gradient would be silently wrong "
+                f"or absent. Construct this law with learnable=True (so the tensor "
+                f"is registered and reachable via named_parameters()), or use "
+                f"differentiable=False."
+            )
+
+    def _held_scan(self) -> list:
+        """`(role, owner, name, tensor)` for every tensor the laws, node sources, storages
+        (every submodule: a law may wrap another, `Scaled`) and drives hold where the
+        differentiable solve does not thread it (`_held_tensors`; a drive's own parameters
+        included, since drives are not threaded). The scan is cached: it is repeated only
+        when an object it read holds something else (`_shallow`), and the tensors'
+        `requires_grad` is read live."""
+        cache = getattr(self, "_held_cache", None)
+        if cache is not None and all(_shallow(o) == sig for o, sig in cache[1]):
+            return cache[0]
+        visited: list = [self._laws, self._node_sources, self._storage, self._drives]
+        found = []
+        for role, owners in (("law", self._laws), ("source", self._node_sources),
+                             ("storage", self._storage)):
+            for el in owners:
+                holders = el.modules() if isinstance(el, torch.nn.Module) else (el,)
+                for h in holders:
+                    found += [(role, el, n, v) for n, v in _held_tensors(h, visited=visited)]
         for drv in self._drives:
-            # A drive's own parameters are not threaded either (only laws' and node
-            # sources' are), so they are reported too.
-            for name, value in _held_tensors(drv, registered_threaded=False):
-                if value.requires_grad:
-                    raise ValueError(
-                        f"drive {drv!r} (kind {drv.kind!r}) has a tensor attribute {name!r} "
-                        f"with requires_grad=True; a Drive is captured by closure inside the "
-                        f"differentiable solve, not threaded through Function.apply, so its "
-                        f"gradient would be silently absent. A Drive must read every "
-                        f"differentiable quantity from the `drivers` mapping passed to "
-                        f"solve() rather than owning it directly, or use "
-                        f"differentiable=False."
-                    )
+            found += [("drive", drv, n, v) for n, v in
+                      _held_tensors(drv, registered_threaded=False, visited=visited)]
+        # the visited objects are kept alive by the cache, so their ids are not reused
+        self._held_cache = (found, [(o, _shallow(o)) for o in visited])
+        return found
 
     def _require_threaded(self, residual, params) -> None:
         """Refuse a differentiable solve whose residual depends on a tensor that is not threaded.
@@ -1236,20 +1276,28 @@ class KirchhoffLayer(TopologyGuard):
         adjoint would return a gradient for it that is silently wrong or absent.
 
         What this establishes is structural and holds AT THAT POINT only: a law that reads
-        an un-threaded tensor on a branch inactive there is not seen. The solve therefore
-        runs it at the root too, which is the point the adjoint linearises at (its residual
-        VJP and Jacobian operator are both evaluated there); the Jacobian operator is not
-        checked separately, being the autograd derivative of the same laws' flows
-        (`FunctionalLaws.dflows`). Tensors held as attributes, buffers or in containers are
-        refused before solving by `_check_no_unreachable_differentiable_tensors`, which
-        also names them; this check catches the rest (a closure capture) and describes the
-        layer.
+        an un-threaded tensor on a branch inactive there is not seen. The differentiable
+        solve therefore applies it to every residual its forward Newton evaluates
+        (`_solve_implicit`, `_threaded_residual`, at no extra evaluation), from the starting
+        guess to the root, which is the point the adjoint linearises at (its residual VJP
+        and Jacobian operator are both evaluated there); the Jacobian operator is not
+        checked separately: it is the same laws' slopes, their exact `dflow` or the autograd
+        derivative of their flows (`FunctionalLaws.dflows`), a constant of the adjoint.
+        Tensors held as attributes, buffers or in containers are refused before solving
+        by `_check_no_unreachable_differentiable_tensors`, which also names them; this
+        check catches the rest (a closure capture) and describes the layer.
         """
-        detached = [p.detach() if isinstance(p, torch.Tensor) else p for p in params]
+        self._threaded_residual(residual, params)
+
+    def _threaded_residual(self, residual, params, *, detach: bool = True):
+        """`residual(*params)` evaluated with every one of `params` detached (already, with
+        `detach=False`), under grad mode, and refused (`_require_threaded`) if it still
+        requires grad; returned otherwise (it then carries no graph)."""
+        detached = _detached(params) if detach else params
         with torch.enable_grad():
             r = residual(*detached)
         if not (isinstance(r, torch.Tensor) and r.requires_grad):
-            return
+            return r
         raise ValueError(
             f"KirchhoffLayer {self.name!r}: the residual depends on a tensor with "
             f"requires_grad=True that is not a registered nn.Parameter of a law or node "
@@ -1351,8 +1399,9 @@ class KirchhoffLayer(TopologyGuard):
           the returned point, and at a non-converged point the gradient is silently wrong.
 
         `on_failure="return_primal"` is `"return"` where the solve takes the primal
-        (non-differentiable) path -- `differentiable=False`, or `analytic_primal` with nothing
-        differentiable reaching it -- and `"raise"` where it is differentiated; it needs
+        (non-differentiable) path -- `differentiable=False` -- and `"raise"` where it is
+        differentiated (a differentiable solve that nothing differentiable reaches is its
+        forward Newton alone, and returns as `"return"` does); it needs
         `diagnostics=` too. It is for a caller that iterates the solve inside an outer
         fixed point (`Model(coupling="iterate")`), where one unconverged pass is only an
         iterate and the outer iteration judges it, but where a differentiated solve must
@@ -1452,15 +1501,13 @@ class KirchhoffLayer(TopologyGuard):
                 newton_kwargs, step,
             )
         # A tensor held where the solve does not thread it is refused before solving, by
-        # name; one reached only through a closure, by evaluating the residual at the
-        # starting guess here and at the root in `_solve_implicit`.
+        # name; one reached only through a closure, at every residual the forward Newton
+        # evaluates, the starting guess first and the root last (`_solve_implicit`).
         self._check_no_unreachable_differentiable_tensors()
         fn = FunctionalLaws(self, drivers, sources, phi_boundary, step)
-        self._require_threaded(
-            lambda *params: fn.residual_fn(phi0, *params), fn.all_params
-        )
         return self._solve_implicit(
-            fn, phi0, phi_boundary, drivers, policy, diagnostics, newton_kwargs
+            fn, phi0, dq0, node_slopes0, phi_boundary, drivers, policy, diagnostics,
+            newton_kwargs,
         )
 
     def _solve_mna(
@@ -1847,11 +1894,33 @@ class KirchhoffLayer(TopologyGuard):
         return phi, q
 
     def _solve_implicit(
-        self, fn, phi0, phi_boundary, drivers, policy, diagnostics, newton_kwargs
+        self, fn, phi0, dq0, node_slopes0, phi_boundary, drivers, policy, diagnostics,
+        newton_kwargs,
     ):
         """The differentiable classic solve through the implicit-function adjoint."""
         all_params = fn.all_params
-        residual_fn, operator_fn = fn.residual_fn, fn.operator_fn
+        reuse_start = fn.layer_slopes
+
+        detached: dict = {}
+
+        def residual_fn(x, *params):
+            # The forward Newton (under no_grad) evaluates each residual with the threaded
+            # tensors detached, which is `_require_threaded`'s check at no extra cost. The
+            # adjoint's VJP (under grad mode) needs the residual's graph to `params`.
+            if torch.is_grad_enabled():
+                return fn.residual_fn(x, *params)
+            if not _same_objects(detached.get("of"), params):   # detached once per solve
+                detached.update(of=params, to=_detached(params))
+            return self._threaded_residual(lambda *p: fn.residual_fn(x, *p), detached["to"],
+                                           detach=False)
+
+        def operator_fn(x, *params):
+            # At the starting point the grounding check's slopes are the first operator's,
+            # as on the primal path, where they are the same slopes (`layer_slopes`).
+            if x is phi0 and reuse_start and not torch.is_grad_enabled():
+                return self._operator_at(dq0, node_slopes0)
+            return fn.operator_fn(x, *params)
+
         if policy.forward_only:
             # `implicit_solve`'s own forward (the same Newton on the same autograd Jacobian),
             # which may return unconverged: nothing reaches a gradient, so no adjoint is
@@ -1877,10 +1946,21 @@ class KirchhoffLayer(TopologyGuard):
             )
         # The adjoint linearises at the root, so the threading check must hold there: a law
         # may read an un-threaded tensor only on a branch the starting guess did not reach.
+        # Newton's last residual is normally at the root it returns, and was checked.
         root = x.detach()
-        self._require_threaded(lambda *params: residual_fn(root, *params), all_params)
+        last = fn.last
+        at_root = (last is not None and last[0].shape == root.shape
+                   and torch.equal(last[0], root))
+        if not at_root:
+            self._require_threaded(lambda *params: fn.residual_fn(root, *params), all_params)
         if diagnostics is not None:
             diagnostics["method"] = newton_kwargs["method"]
+        wanted = torch.is_grad_enabled() and (x.requires_grad or any(
+            isinstance(t, torch.Tensor) and t.requires_grad for t in all_params))
+        if at_root and not wanted:
+            # no gradient is wanted: the root's potentials and flows, as Newton's last
+            # residual computed them (the same values `assemble` and `flows` give)
+            return fn.last[1], fn.last[2]
         phi = self.assemble(x, phi_boundary)
         q = self.flows(phi, drivers)
         return phi, q

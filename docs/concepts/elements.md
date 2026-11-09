@@ -178,6 +178,15 @@ Two rules worth stating explicitly, because both produce wrong answers rather th
 - **Keep `dflow` consistent with `flow`.** Nothing checks them against each other at runtime. An
   inconsistent pair converges to the right answer slowly, or to a wrong one confidently. Test it
   with `torch.autograd.gradcheck` against `flow`.
+- **Declare a `dflow` that is not the derivative.** The differentiable solve uses `dflow` for
+  its Newton Jacobian and for the adjoint that computes gradients, so a `dflow` that is a
+  deliberate Newton aid (a slope floor, a slope split between two edges) would make the
+  gradients silently wrong. Such a law sets the class attribute `exact_slope = False`; the
+  differentiable solve then differentiates its `flow` by autograd instead, while the
+  non-differentiable solve keeps using `dflow`. `DoorPortStream` is the built-in example; every
+  other built-in law's `dflow` is exact, which `tests/elements/test_dflow_exact.py` checks.
+  The same attribute exists on `NodeSource`, and on `NodeStorage` for its `rate_slope`
+  (audited by the same test).
 
 ## Implicit, coupled and dynamic constitutive laws
 

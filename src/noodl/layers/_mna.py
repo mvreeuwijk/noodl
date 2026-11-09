@@ -431,11 +431,21 @@ class MnaSystem:
         return self.layer._scatter_node_sources(
             lambda j, ns: call(n_el + j, (phi[..., ns.nodes], drivers)))
 
-    def _node_slopes(self, phi, drivers) -> Tensor | None:
+    def _node_slopes(self, phi, drivers, adjoint: bool = False) -> Tensor | None:
         """`d w / d phi` per interior row: a node source reads its own node's potential only,
-        so its own `dflow` is the whole diagonal."""
-        return self.layer._scatter_node_sources(
-            lambda j, ns: ns.dflow(phi[..., ns.nodes], drivers))
+        so its own `dflow` is the whole diagonal; except, when the operator also builds the
+        adjoint (`adjoint`, the differentiable solve), for a node source that declares
+        `exact_slope = False`, whose slope is then the autograd derivative of its flow."""
+        def slope(j, ns):
+            phi_n = phi[..., ns.nodes]
+            if adjoint and not ns.exact_slope:
+                leaf = phi_n.detach().requires_grad_(True)
+                with torch.enable_grad():
+                    (grad,) = torch.autograd.grad(ns(leaf, drivers).sum(), leaf)
+                return grad
+            return ns.dflow(phi_n, drivers)
+
+        return self.layer._scatter_node_sources(slope)
 
     # ------------------------------------------------------------- storage
     def _storage_state(self, ctx, dt, t, scheme, history, storage_flow, drivers):
@@ -536,14 +546,15 @@ class MnaSystem:
         d = layer._scatter_storage(slope)
         return None if d is None else d.detach()
 
-    def _slopes_fn(self, drivers, call, store, adjoint: bool = False):
+    def _slopes_fn(self, drivers, call, store):
         """The diagonal of the node sources and, on a step, of the storages, as a function
-        of the full-node potentials (`None` when there is neither). `adjoint`: the operator
-        also builds the adjoint (see `_storage_slopes`)."""
+        `slopes(phi, adjoint)` of the full-node potentials (`None` when there is neither).
+        `adjoint` is `operator`'s own flag, passed on to `_node_slopes` and
+        `_storage_slopes`: the operator also builds the adjoint."""
         stepping = store is not None and not isinstance(store, _Held)
 
-        def slopes(phi):
-            d = self._node_slopes(phi, drivers)
+        def slopes(phi, adjoint: bool = False):
+            d = self._node_slopes(phi, drivers, adjoint)
             if not stepping:
                 return d
             s = self._storage_slopes(phi, drivers, store, call, adjoint)
@@ -580,8 +591,17 @@ class MnaSystem:
             kcl = kcl + self._storage_withdrawal(phi, drivers, store, call)
         return self._to_real(_cat([kcl, r_F], kcl))
 
-    def operator(self, x, phi_boundary, drivers, ctx, node_slope_fn) -> MnaOperator:
-        """The Jacobian of `residual` at `x`, as COO triplets on the fixed pattern."""
+    def operator(self, x, phi_boundary, drivers, ctx, node_slope_fn,
+                 adjoint: bool = False) -> MnaOperator:
+        """The Jacobian of `residual` at `x`, as COO triplets on the fixed pattern.
+
+        `node_slope_fn(phi, adjoint)` gives the diagonal of the node sources and storages
+        (`_slopes_fn`). `adjoint`: the operator also builds the adjoint (the differentiable
+        solve). A law that declares `exact_slope = False` then gives its blocks by autograd
+        of its own `forward` (`_coloured_jacobian`), not its `jacobian`, whose `dflow`
+        shortcut would hand the adjoint a Newton aid; the same flag reaches
+        `node_slope_fn`, where an inexact node source or storage gives autograd too. The
+        primal solve (`adjoint=False`) keeps the analytic slopes."""
         layer = self.layer
         phi_I, q_F = self._unknowns(x)
         phi = layer.assemble(phi_I, phi_boundary)
@@ -599,11 +619,14 @@ class MnaSystem:
                 q_s = q_F[..., f0:f0 + e - s]
             else:
                 q_s = None
-            blocks += el.jacobian(dp_s, q_s, drivers, lctx)
+            if adjoint and not el.exact_slope:
+                blocks += el._coloured_jacobian(dp_s, q_s, drivers, lctx)
+            else:
+                blocks += el.jacobian(dp_s, q_s, drivers, lctx)
         parts = [blk.flatten(-5) for blk in blocks]
         parts.append(torch.ones(1, dtype=x.dtype, device=x.device))
         if self._diag:
-            d = node_slope_fn(phi)
+            d = node_slope_fn(phi, adjoint)
             parts.append(d if d is not None else
                          torch.zeros(self.n_I, dtype=x.dtype, device=x.device))
         flat = _cat(parts, x)
@@ -836,9 +859,11 @@ class MnaSystem:
 
         def operator_fn(x, *params):
             call, drv, src, pb, step, st = _rebuild(params)
+            # the one `adjoint` flag: the operator also builds the adjoint, so every law,
+            # node source and storage that declares `exact_slope = False` gives autograd
             last["op"] = self._hold(
-                self.operator(x, pb, drv, step,
-                              self._slopes_fn(drv, call, st, adjoint=True)), st)
+                self.operator(x, pb, drv, step, self._slopes_fn(drv, call, st),
+                              adjoint=True), st)
             return last["op"]
 
         try:

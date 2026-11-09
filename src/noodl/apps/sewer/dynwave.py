@@ -2808,7 +2808,7 @@ def build_dynamic_wave_model(net: SewerNetwork, *, iterate_tol: float | None = N
     layer = KirchhoffLayer(
         graph, "water", laws(), boundary=boundary,
         node_sources=[closure.storage],
-        quantity="head", unit="m", flow_unit="m3/s", analytic_primal=True,
+        quantity="head", unit="m", flow_unit="m3/s",
         linear_solver="direct" if len(net.manholes) <= DENSE_SOLVE_MAX_JUNCTIONS else "auto",
         newton_defaults=HEAD_SOLVE_NEWTON)
     if layer.bound.tolist() != closure.outfall_idx.tolist():
