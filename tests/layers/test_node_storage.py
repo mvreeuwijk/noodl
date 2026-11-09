@@ -323,12 +323,14 @@ def test_model_steps_carry_storage_flow():
         state, phi, w = new, want_phi, want_w
 
 
-def test_model_refuses_missing_storage_flow_under_trapezoidal():
+def test_model_takes_a_missing_storage_flow_as_zero_under_trapezoidal():
     model, layer, _ = _model()
     state = model.steady({"heat.phi": _phi_prev(layer)}, _drivers())
+    want = model.step(state, _drivers(), 0.25)              # zeros after the steady solve
     del state["heat.storage_flow"]
-    with pytest.raises(KeyError, match="heat.storage_flow"):
-        model.step(state, _drivers(), 0.25)
+    got = model.step(state, _drivers(), 0.25)
+    assert torch.equal(got["heat.phi"], want["heat.phi"])
+    assert torch.equal(got["heat.storage_flow"], want["heat.storage_flow"])
     # backward Euler reads no step-start storage flow
     model.step(state, _drivers(), 0.25, scheme="backward_euler")
     with pytest.raises(ValueError, match="storage_flow"):
@@ -340,14 +342,14 @@ def test_model_refs_and_validation_know_storage_flow():
 
     model, layer, _ = _model()
     field = model.refs["heat"].storage_flow
-    assert field == "heat.storage_flow" and field.required == "step"
+    assert field == "heat.storage_flow" and field.required == "optional"
     assert field.labels == ("a", "b", "c")
     state = model.steady({"heat.phi": _phi_prev(layer)}, _drivers())
     report = check_setup(model, state, _drivers())
     assert not [i for i in report.errors + report.warnings if "storage_flow" in str(i)]
-    del state["heat.storage_flow"]
+    del state["heat.storage_flow"]                          # zero when missing
     report = check_setup(model, state, _drivers())
-    assert [i for i in report.errors if "storage_flow" in str(i)]
+    assert not [i for i in report.errors if "storage_flow" in str(i)]
 
 
 def test_gradcheck_through_two_model_steps():

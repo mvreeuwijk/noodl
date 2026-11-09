@@ -249,7 +249,10 @@ L1: P = 0.000000 W, Q = 0.500000 var
   is pin `n`, `-1` when it is pin `p`). `device_values` and the transient result
   (`"electrical.storage_flow"`) report it. A capacitor between two other nodes is a
   `Capacitance` edge, and a phasor model keeps every capacitor as an edge. With
-  `learnable=True` a grounded capacitor's `C` is `layer.storage[0].C`, not on a law.
+  `learnable=True` a grounded capacitor's `C` is `layer.storage[0].C`, not on a law. A state
+  that starts a trapezoidal step away from rest (a hot start) must carry
+  `"electrical.storage_flow"`, as `initial_state` and `operating_point` write it; a state
+  without it starts from zero capacitor current, and the first step rings.
 - `"electrical.q"` is ordered by kind (kinds in order of first appearance), then by device;
   `model.circuit_index[name]` is the device's `(kind, slice)` in that order.
 

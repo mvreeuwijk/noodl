@@ -669,7 +669,7 @@ State and driver keys are namespaced by layer name:
 |---|---|
 | `"<layer>.phi"` | Nodal potentials, full node order |
 | `"<layer>.q"` | Branch flows, the layer's kind order |
-| `"<layer>.storage_flow"` | A Kirchhoff layer with [node storage](#node-storage): the flow into every storage entry at the end of the step (`layer.storage_flows`), zeros after a steady solve; required to step it by the trapezoidal scheme. Under `scheme="forward_euler"` (storage at boundary nodes) the flow the solve delivered to every storage node, on a steady solve too |
+| `"<layer>.storage_flow"` | A Kirchhoff layer with [node storage](#node-storage): the flow into every storage entry at the end of the step (`layer.storage_flows`), zeros after a steady solve; the trapezoidal scheme's step-start flow, zero where it is missing. Under `scheme="forward_euler"` (storage at boundary nodes) the flow the solve delivered to every storage node, on a steady solve too |
 | `"<layer>.x"` | Transport state, interior order, `(n_i,)` or `(n_i, K)` |
 | `"<layer>.s"` | An allocation layer's per-node storage |
 | `"<layer>.phi_boundary"` | Prescribed boundary potentials (driver) |
@@ -713,10 +713,10 @@ there by name.
 A Kirchhoff layer with [node storage](#node-storage) gets the same step context (`t`, and on a
 step `dt` and the step-start `"<layer>.phi"` as `history`; `"<layer>.q"` is not read, so it
 is not required), and also the step-start `"<layer>.storage_flow"`, which the trapezoidal
-scheme requires (a missing one is refused by name). After every solve the Model writes the
+scheme reads (a missing one is zero: the storage at rest at the step start). After every solve the Model writes the
 new `"<layer>.storage_flow"`, zeros on a steady pass, so a run started from `steady` carries
 it from the first step. A state that is not at rest but carries zero `storage_flow` (built by
-hand, or with the `refs` default of 0) starts the trapezoidal scheme assuming no storage flow
+hand, missing, or with the `refs` default of 0) starts the trapezoidal scheme assuming no storage flow
 at the step start, which can ring; take the first step with `scheme="backward_euler"`, as
 `water_step` does by default.
 `steady` solves such a layer at its operating point (a capacitance open, an inductance

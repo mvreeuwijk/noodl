@@ -238,7 +238,7 @@ def _water_cases() -> dict[type, Callable[[], list[Case]]]:
 def _sewer_cases() -> dict[type, Callable[[], list[Case]]]:
     from noodl.apps.sewer import geometry as g
     from noodl.apps.sewer.air import Headspace
-    from noodl.apps.sewer.dynwave import DynamicWaveConduit, JunctionStorage, StructureLink
+    from noodl.apps.sewer.dynwave import DynamicWaveConduit, StructureLink
 
     n = 6
     conduit_drv = {
@@ -270,14 +270,6 @@ def _sewer_cases() -> dict[type, Callable[[], list[Case]]]:
     def one(value, k=2):
         return torch.full((k,), value, dtype=F64)
 
-    store_drv = {"water.storage_area": one(4.0), "water.pond_area": one(4.5),
-                 "water.storage_rate": _t(0.2), "water.head_start": one(0.46),
-                 "water.net_inflow_start": one(0.02), "water.net_inflow_last": one(0.03),
-                 "water.head_last": _t([0.46, 0.4]), "water.pond_switch_slope": one(40.0),
-                 "water.ponded": one(0.0), "water.surcharged": _t([0.0, 1.0]),
-                 "water.surcharge_slope": one(0.01), "water.flood_excess": one(0.002)}
-    plain_drv = {"water.storage_area": _t([2.0, 2.0]), "water.head_start": _t([1.5, 1.0]),
-                 "water.net_inflow_start": _t([0.3, 0.0]), "water.storage_rate": _t(0.2)}
     d, h = one(0.6, 1), one(0.18, 1)
     a_air, _, d_h = g.air_geometry(h, d)
     air_drv = {"sewer.A_air": a_air, "sewer.D_h": d_h, "sewer.T": g.top_width(h, d),
@@ -288,19 +280,6 @@ def _sewer_cases() -> dict[type, Callable[[], list[Case]]]:
             Case(DynamicWaveConduit(), _grid(n, -6, 1), culvert_drv),
         ],
         StructureLink: lambda: [Case(StructureLink("weir"), _grid(3, -6, 1), structure_drv)],
-        JunctionStorage: lambda: [
-            Case(JunctionStorage(torch.tensor([0, 1]), bed=_t([1.0, 1.0]), bed_area=0.5),
-                 _grid(2, -6, 0.5, centre=1.0), plain_drv),
-            Case(JunctionStorage(torch.arange(2), torch.zeros(2, dtype=F64),
-                                 bed_area=12.566 * 0.0929, crown=one(0.3), top=one(0.5),
-                                 surchargeable=torch.tensor([True, True])),
-                 _grid(2, -6, 0.3, centre=0.4), store_drv),
-            Case(JunctionStorage(torch.arange(2), torch.zeros(2, dtype=F64),
-                                 bed_area=12.566 * 0.0929, crown=one(0.3), top=one(0.5),
-                                 surchargeable=torch.tensor([False, False]),
-                                 pond_head=_t([0.5, float("inf")])),
-                 _grid(2, -6, 0.3, centre=0.4), {**store_drv, "water.surcharged": one(0.0)}),
-        ],
         Headspace: lambda: [Case(Headspace(_t([15.0]), torch.tensor([0])), _grid(1, -12, 2),
                                  air_drv)],
     }
@@ -485,6 +464,7 @@ class StorageCase:
 def _storage_cases() -> dict[type, Callable[[], list[StorageCase]]]:
     from noodl.apps.building_physics.modelica.storage import ZoneStorage, thermo
     from noodl.apps.building_physics.prj import ZoneAirMassChange
+    from noodl.apps.sewer.dynwave import JunctionStorage
     from noodl.elements import medium
     from noodl.storage import LinearStorage
 
@@ -502,11 +482,49 @@ def _storage_cases() -> dict[type, Callable[[], list[StorageCase]]]:
 
     zone = {"P_ref": _t(101325.0), "T": _t([293.15, 297.0]),
             "air.mass_start": _t([60.0, 140.0])}
+
+    def one(value, k=2):
+        return torch.full((k,), value, dtype=F64)
+
+    # the sewer junction storage (`phi_start` and `previous` are not read: its step start is
+    # SWMM's, from the drivers)
+    zero2 = _t([0.0, 0.0])
+    store_drv = {"water.storage_area": one(4.0), "water.pond_area": one(4.5),
+                 "water.head_start": one(0.46),
+                 "water.net_inflow_start": one(0.02), "water.net_inflow_last": one(0.03),
+                 "water.head_last": _t([0.46, 0.4]), "water.pond_switch_slope": one(40.0),
+                 "water.ponded": one(0.0), "water.surcharged": _t([0.0, 1.0]),
+                 "water.surcharge_slope": one(0.01), "water.flood_excess": one(0.002)}
+    plain_drv = {"water.storage_area": _t([2.0, 2.0]), "water.head_start": _t([1.5, 1.0]),
+                 "water.net_inflow_start": _t([0.3, 0.0])}
+    # the drop-end area switch about H* = 1.1 m (junction 0; none at junction 1)
+    switch_drv = {"water.storage_area": one(2.0), "water.head_start": one(1.0),
+                  "water.net_inflow_start": one(0.1),
+                  "water.area_switch_head": _t([1.1, float("inf")]),
+                  "water.area_below": one(2.0), "water.area_above": one(3.0),
+                  "water.area_switch_slope": one(10.0), "water.net_inflow_last": one(0.0)}
+    swmm = ("trapezoidal",)     # SWMM's continuity: `JunctionStorage` refuses other schemes
     return {
         LinearStorage: lambda: [
             StorageCase(LinearStorage([0], 2.5), _grid(1), _t([0.3]), _t([0.01])),
             StorageCase(LinearStorage([0, 1], _t([1e-6, 40.0]), learnable=True),
                         _grid(2, -8, 3), _t([1.0, -2.0]), _t([0.0, 0.5])),
+        ],
+        JunctionStorage: lambda: [
+            StorageCase(JunctionStorage(torch.tensor([0, 1]), bed=_t([1.0, 1.0]), bed_area=0.5),
+                        _grid(2, -6, 0.5, centre=1.0), zero2, zero2, plain_drv, swmm),
+            StorageCase(JunctionStorage(torch.tensor([0, 1]), bed=_t([0.0, 0.0]), bed_area=0.5),
+                        _grid(2, -6, 0.3, centre=1.1), zero2, zero2, switch_drv, swmm),
+            StorageCase(JunctionStorage(torch.arange(2), torch.zeros(2, dtype=F64),
+                                        bed_area=12.566 * 0.0929, crown=one(0.3), top=one(0.5),
+                                        surchargeable=torch.tensor([True, True])),
+                        _grid(2, -6, 0.3, centre=0.4), zero2, zero2, store_drv, swmm),
+            StorageCase(JunctionStorage(torch.arange(2), torch.zeros(2, dtype=F64),
+                                        bed_area=12.566 * 0.0929, crown=one(0.3), top=one(0.5),
+                                        surchargeable=torch.tensor([False, False]),
+                                        pond_head=_t([0.5, float("inf")])),
+                        _grid(2, -6, 0.3, centre=0.4), zero2, zero2,
+                        {**store_drv, "water.surcharged": one(0.0)}, swmm),
         ],
         ZoneAirMassChange: lambda: [
             StorageCase(ZoneAirMassChange([0, 1], _t([50.0, 120.0])), _grid(2, -6, 3),
