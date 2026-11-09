@@ -264,7 +264,9 @@ for _ in range(steps):
 ```
 
 **Tanks as storage.** `build_model(net, tank_mode="storage")` makes every tank an interior
-node with a `TankStorage` edge to a datum node `"_datum"` at head 0, its level stepped
+node holding a `LinearStorage` of its cross-section area $A$ (`noodl.NodeStorage`; there is
+no datum node, a tank is an ordinary node of `"water.phi"`, and the flow into it is
+`"water.storage_flow"`, which `tank_inflow` returns), its level stepped
 implicitly inside the solve: backward Euler, $q = A\,(H - H_{\text{prev}})/\Delta t$, or
 trapezoidal. `water_step(model, state, drivers, dt)` takes one step (`Model.step`, with
 `water_steady`'s Newton defaults); `tank_levels(model, state)` reads the levels from the solved
@@ -277,7 +279,7 @@ distance from a fine explicit run. Its `event_step` never shortens a step below 
 implicit step lands just short of a projected crossing, and a far shorter step stalls Newton),
 and with steps as long as an hour a switch can land up to a step late, so sub-steps of a few
 minutes are the useful range. Not with `quality`: the combination is refused with a
-`ValueError` (a storage tank is an interior node joined to the datum by a storage edge, which
+`ValueError` (a storage tank is an interior node with node storage, which
 the quality layer does not model as a well-mixed volume); use the default `tank_mode` for
 water quality, where a tank is a quality boundary whose concentration the caller sets.
 A constant tracer is preserved (every junction stays at the source concentration) across both

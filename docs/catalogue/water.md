@@ -47,7 +47,6 @@ The relation between the flow through an edge and the potential difference acros
 | `HazenWilliams` | ``h_L = K q^1.852 + m q^2`` with ``K = 10.666829500036 C^-1.852 d^-4.871 L``. | `HazenWilliams(length, diameter, roughness, *, minor_loss=0.0, dp_transition=1e-09, kind='pipe', learnable=False)` |
 | `MinorLoss` | ``h = m q \|q\|`` with ``m = K / (2 g A^2)``: a throttle control valve (TCV) or any pure minor-loss link. Inverted in closed form, ``q = sign(h) sqrt(\|h\| / m)``, with the same laminar blend and both-branch safe substitution as ``HazenWilliams``. | `MinorLoss(setting, diameter, *, dp_transition=1e-09, kind='valve', learnable=False)` |
 | `PumpCurve` | Constant-speed pump on its own edge kind: ``h_gain = w^2 (h0 - r (q/w)^n)``. | `PumpCurve(h0, r, n=2.0, *, speed=1.0, dp_transition=1e-06, status_key=None, kind='pump', learnable=False)` |
-| `TankStorage` | A cylindrical tank as storage (`build_model(tank_mode="storage")`): an edge from the tank's node to a datum at head 0, so that ``dp`` is the tank's head times ``scale`` and the edge's flow is the net inflow into the tank. The volume above the datum changes by ``A dH``, so in a step of ``dt``. | `TankStorage(area, head0, *, scale=1.0, kind='tank')` |
 
 ## Closures
 
@@ -87,7 +86,7 @@ Calculations and helpers.
 | `three_point_curve` | EPANET's single-point pump-curve fit: ``(h0, r, n)`` for ``h = h0 - r q^n``. | `three_point_curve(q_design, h_design)` |
 | `to_kilopascal` | Metres of head -> kPa, at `rho = 998.2 kg/m3` and `g = 9.80665 m/s2`. | `to_kilopascal(head)` |
 | `twoloop` | The committed hand-made SI fixture (`tests/data/water/twoloop_si.inp`). | `twoloop()` |
-| `water_step` | One step of `dt` (s) of a model built with `tank_mode="storage"`: `Model.step` with `water_steady`'s Newton defaults and pump check, the tank levels stepped implicitly (`TankStorage`, `scheme` `"backward_euler"` or `"trapezoidal"`; trapezoidal needs a step-start state whose tank flows are solved, not the build's zeros). The level controls act on the step-start levels, as EPANET's do. `"backward_euler"` is the default because it starts from any state, the build's included, and does not ring after the flow jumps that pump and level controls cause. | `water_step(model, state, drivers, dt, *, scheme='backward_euler', **solve_kwargs)` |
+| `water_step` | One step of `dt` (s) of a model built with `tank_mode="storage"`: `Model.step` with `water_steady`'s Newton defaults and pump check, the tank levels stepped implicitly (`LinearStorage`, `scheme` `"backward_euler"` or `"trapezoidal"`; trapezoidal needs a step-start state whose tank flows are solved, not the build's zeros). The level controls act on the step-start levels, as EPANET's do. `"backward_euler"` is the default because it starts from any state, the build's included, and does not ring after the flow jumps that pump and level controls cause. | `water_step(model, state, drivers, dt, *, scheme='backward_euler', **solve_kwargs)` |
 | `water_steady` | The quasi-steady state: one `Model.steady` with tight Newton tolerances. | `water_steady(model, state, drivers, **solve_kwargs)` |
 
 ## Constants and tables

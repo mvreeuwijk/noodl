@@ -6,10 +6,8 @@ from pathlib import Path
 import pytest
 import torch
 
-from noodl.apps.water.elements import TankStorage
 from noodl.apps.water.inp import read_epanet_inp
 from noodl.apps.water.network import (
-    DATUM,
     Tank,
     build_model,
     initial_state,
@@ -20,6 +18,7 @@ from noodl.apps.water.network import (
 )
 from noodl.apps.water.tanks import Control, TankLevels
 from noodl.elements.base import LawContext
+from noodl.storage import LinearStorage
 
 F64 = torch.float64
 
@@ -86,29 +85,38 @@ def test_event_step_with_controls_on_both_tanks_takes_the_earliest_crossing():
 NET1 = Path(__file__).resolve().parents[2] / "data" / "water" / "Net1.inp"
 
 
-def test_tank_storage_residual_in_every_mode():
-    law = TankStorage(torch.tensor([2.0], dtype=F64), torch.tensor([10.0], dtype=F64), scale=3.0)
-    dp, q = torch.tensor([33.0], dtype=F64), torch.tensor([0.5], dtype=F64)
-    prev = dict(dp_prev=torch.tensor([30.0], dtype=F64), q_prev=torch.tensor([0.25], dtype=F64))
-    be = LawContext(mode="transient", dt=4.0, scheme="backward_euler", **prev)
-    tr = LawContext(mode="transient", dt=4.0, scheme="trapezoidal", **prev)
+def test_tank_storage_rate_in_every_scheme():
+    """A tank is `LinearStorage(A / scale, initial=head0 * scale)`: the withdrawal into it
+    is `A dH / dt` (backward Euler) or `2 A dH / dt - w_start` (trapezoidal); `initial`
+    is the held head."""
+    store = LinearStorage([0], torch.tensor([2.0 / 3.0], dtype=F64),
+                          initial=torch.tensor([30.0], dtype=F64))
+    phi = torch.tensor([33.0], dtype=F64)
+    start = torch.tensor([30.0], dtype=F64)
+    prev = torch.tensor([0.25], dtype=F64)
+    be = LawContext(mode="transient", dt=4.0, scheme="backward_euler")
+    tr = LawContext(mode="transient", dt=4.0, scheme="trapezoidal")
     # head rise 1 m (dp / scale), area 2: volume 2 m3 over 4 s
-    assert float(law.residual(dp, q, {}, be)) == pytest.approx(0.5 - 0.5)
-    assert float(law.residual(dp, q, {}, tr)) == pytest.approx(0.5 + 0.25 - 1.0)
-    assert float(law.residual(dp, q, {}, LawContext(mode="initial"))) == 33.0 - 30.0
-    assert float(law.residual(dp, q, {}, LawContext(mode="dc"))) == 0.5
+    assert float(store.rate(phi, start, None, be)) == pytest.approx(0.5)
+    assert float(store.rate(phi, start, prev, tr)) == pytest.approx(1.0 - 0.25)
+    assert float(store.initial()) == 30.0
 
 
-def test_storage_mode_makes_the_tanks_interior_against_a_datum():
+def test_storage_mode_makes_the_tanks_interior_storage_nodes():
     model, state, drivers = build_model(read_epanet_inp(NET1), tank_mode="storage")
     layer = model.kirchhoff["water"]
     bound = [model.node_names[i] for i in layer.bound.tolist()]
-    assert bound == ["9", DATUM] and model.node_names[-1] == DATUM
-    assert layer.mna and "tank" in layer.kinds
+    assert bound == ["9"] and "tank" not in layer.kinds
+    assert "_datum" not in model.node_names and state["water.phi"].shape == (len(
+        model.node_names),)
+    (storage,) = layer.storage
+    assert [model.node_names[i] for i in storage.nodes.tolist()] == ["2"]
+    assert state["water.storage_flow"].shape == (1,)
     torch.testing.assert_close(tank_levels(model, state), torch.tensor([120.0 * 0.3048],
                                                                        dtype=F64))
     fresh = initial_state(model)
     assert torch.equal(fresh["water.phi"], state["water.phi"])
+    assert torch.equal(fresh["water.storage_flow"], state["water.storage_flow"])
 
 
 def test_storage_mode_refuses_quality_and_an_explicit_model_refuses_water_step():

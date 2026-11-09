@@ -200,11 +200,11 @@ class TankLevels:
 
 class TankStorageControls(TankLevels):
     """`TankLevels` for tanks held as storage in the layer (`build_model(tank_mode=
-    "storage")`, `elements.TankStorage`): a tank's level is its solved head less its
-    bottom, read from the state's `"water.phi"` at `tank_nodes`, not a carried
+    "storage")`, a `noodl.LinearStorage` in the layer): a tank's level is its solved head
+    less its bottom, read from the state's `"water.phi"` at `tank_nodes`, not a carried
     `"water.tank_level"`. Per call it applies the controls to those levels, refuses a level
-    outside `[min, max]` by name as `TankLevels` does, and writes the reservoir heads and the
-    datum's head 0 into `"water.phi_boundary"`. Only the link status is carried.
+    outside `[min, max]` by name as `TankLevels` does, and writes the reservoir heads into
+    `"water.phi_boundary"`. Only the link status is carried.
     """
 
     state_keys = ("water.link_status",)
@@ -229,11 +229,7 @@ class TankStorageControls(TankLevels):
         with torch.no_grad():
             status = self._apply_controls(level, status)
         self._refuse_outside(level)
-        datum = torch.zeros(level.shape[:-1] + (1,), dtype=F64)
-        boundary = torch.cat(
-            [self.reservoir_heads.expand(level.shape[:-1] + self.reservoir_heads.shape), datum],
-            dim=-1,
-        )
+        boundary = self.reservoir_heads.expand(level.shape[:-1] + self.reservoir_heads.shape)
         return {"water.phi_boundary": boundary, "water.status": status,
                 "water.link_status": status}
 
