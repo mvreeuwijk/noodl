@@ -224,7 +224,12 @@ class DriverAlias:
 
 
 class CoupledModel:
-    """Returned by `union`. `.step` takes and returns `{model_tag: State}` /
+    """Returned by `union`: "a `Model` across several networks". The fixed-point loop and the
+    adjoint are shared with `Model` (`run_passes`, `differentiate_fixed_point`); the schedule
+    (sub-steps per model, recipient first, a conservative transfer) is its own, which is why it
+    stays a separate class (`docs/design/orchestration.md`).
+
+    `.step` takes and returns `{model_tag: State}` /
     `{model_tag: Drivers}` -- each model keeps its own dicts; nothing is merged.
 
     `iterate_max=50` is a floor, not a measurement pinned here: the recipient-first schedule

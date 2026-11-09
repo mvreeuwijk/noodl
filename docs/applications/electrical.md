@@ -603,6 +603,7 @@ order, except on the first step and on every step whose interval contains a sour
 (a step, ramp or pulse edge, the start of a sine), which use backward Euler. The trapezoidal rule
 rings after a discontinuity (it is A-stable, not L-stable); one backward Euler step damps that.
 This is the practice of SPICE. `scheme="backward_euler"` uses backward Euler throughout.
+`transient` finds the restart steps and hands them to [`Model.march`](../usage.md#marching-over-a-time-grid).
 A pulse-driven RC circuit restarts at every edge:
 
 ```python

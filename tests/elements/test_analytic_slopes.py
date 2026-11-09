@@ -1,6 +1,6 @@
 """The MBL laws' analytic slopes (`dflow` under `no_grad`) against the autograd default.
 
-`door._power_law_slope_at` and `_MBLDoorCompartmentBase.stream_slope` apply the chain rule in
+`_band.power_law_band_slope` and `_MBLDoorCompartmentBase.stream_slope` apply the chain rule in
 the order reverse-mode autograd applies to the laws' forward code, so the Newton Jacobian is
 the same bit for bit as with the autograd `dflow` (and the airflow solves, and every result
 downstream, are unchanged). Checked here with `torch.equal` over the band, the band edges,

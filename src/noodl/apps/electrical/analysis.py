@@ -106,39 +106,29 @@ def transient(model: Model, state: Mapping[str, Tensor], drivers: Mapping[str, T
     grid = _times(times)
     sources = [el for el in (layer.law_for(k)[0] for k in layer.kinds)
                if hasattr(el, "breakpoints")]
-    phis, qs, rules = [state[PHI]], [state[Q]], []
-    flows = []
-    current = dict(state)
-    if layer.storage:
-        if SF not in current:
-            current[SF] = layer.storage_flows(state[PHI], {}, dt=None)
-        flows.append(current[SF])
+    if layer.storage and SF not in state:
+        state = {**state, SF: layer.storage_flows(state[PHI], {}, dt=None)}
     # the sources are evaluated at t0 + dt (as Model.step does), so breakpoints are
     # searched over the evaluation times, never missing one between rounded grid times
+    restarts = set()
     evaluated = grid[0]
     for k in range(len(grid) - 1):
-        t0 = grid[k]
-        dt = grid[k + 1] - t0
-        end = t0 + dt
-        jump = any(src.breakpoints(evaluated, end) for src in sources)
-        rule = ("backward_euler" if scheme == "backward_euler" or k == 0 or jump
-                else "trapezoidal")
-        current = model.step(current, drivers, dt, t=t0, scheme=rule,
-                             **solve_kwargs)
+        end = grid[k + 1]
+        if (scheme == "backward_euler" or k == 0
+                or any(src.breakpoints(evaluated, end) for src in sources)):
+            restarts.add(k)
         evaluated = end
-        phis.append(current[PHI])
-        qs.append(current[Q])
-        if layer.storage:
-            flows.append(current[SF])
-        rules.append(rule)
+    diagnostics: dict = {}
+    history = model.march(state, drivers, grid, restarts=restarts, scheme=scheme,
+                          diagnostics=diagnostics, **solve_kwargs)
     out = {
-        "time": torch.tensor(grid, dtype=F64),
-        PHI: torch.stack(torch.broadcast_tensors(*phis)),
-        Q: torch.stack(torch.broadcast_tensors(*qs)),
-        "scheme": rules,
+        "time": history["time"],
+        PHI: history[PHI],
+        Q: history[Q],
+        "scheme": diagnostics["schemes"],
     }
     if layer.storage:
-        out[SF] = torch.stack(torch.broadcast_tensors(*flows))
+        out[SF] = history[SF]
     return out
 
 
