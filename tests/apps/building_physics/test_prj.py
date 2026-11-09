@@ -1722,7 +1722,7 @@ def test_the_plenums_carry_no_zone_air_mass_change(tmp_path):
     p = read_prj(_variant(AHS.read_text(), _DENSITY_OPTIONS,
                           "   0    0.75    20     1      0      0      1", tmp_path))
     model, state, drivers = project_to_model(p)
-    (source,) = [s for s in model.kirchhoff["air"].node_sources
+    (source,) = [s for s in model.kirchhoff["air"].storage
                  if isinstance(s, ZoneAirMassChange)]
     assert sorted(p.net.nodes[i] for i in source.nodes.tolist()) == ["one", "three", "two"]
 

@@ -160,7 +160,7 @@ from noodl.elements import (
 from noodl.layers.kirchhoff import KirchhoffLayer
 from noodl.layers.transport import UndefinedSteadyState, active_interior
 from noodl.model import Model
-from noodl.nodesources import NodeSource
+from noodl.storage import NodeStorage
 from noodl.topology import Network
 
 F64 = torch.float64
@@ -2179,10 +2179,10 @@ class ZonePressureDensity:
         return out
 
 
-class ZoneAirMassChange(NodeSource):
-    """The zone air-mass change of a step as a withdrawal from the airflow network (CONTAM's
-    dodMdt option; `simulate` switches it on for a model that carries it, unless
-    `air_mass_change=False`):
+class ZoneAirMassChange(NodeStorage):
+    """The zone air mass as node storage on the airflow network (CONTAM's dodMdt option;
+    `simulate` switches it on for a model that carries it, unless `air_mass_change=False`).
+    Over a step the layer withdraws the air-mass change at the step's rate:
 
         w = ((P_ref + phi) V / (R T) - M_start) / dt,
 
@@ -2194,12 +2194,17 @@ class ZoneAirMassChange(NodeSource):
     carries, so the step converges at any length (the slope outgrows the envelope's
     conductance for short steps).
 
-    Reads `"T"` and `"P_ref"`, `"time_step"` (s) and `"<layer>.mass_start"` (kg, at this
-    source's nodes, in their order: `mass` at the step's start). Without
+    The step length and scheme come from the layer (`project_to_model` sets
+    `scheme="backward_euler"`, CONTAM's), and without a step the storage is absent. The
+    amount is `mass`; `change` takes the start mass from `"<layer>.mass_start"` (kg, at this
+    storage's nodes, in their order) instead of from `amount(phi_start)`, because CONTAM
+    takes the start mass at the start temperature. Reads `"T"` and `"P_ref"`. Without
     `"<layer>.mass_start"` it withdraws nothing and adds nothing to the Jacobian: the steady
     and quasi-steady solves are unchanged. The withdrawal is a difference of masses of order
     M, so the solve cannot resolve it below about 1e-16 M / dt (kg/s).
     """
+
+    linear = True
 
     def __init__(self, nodes, volumes: Tensor, *, layer: str = "air", R: float = R_AIR) -> None:
         super().__init__(nodes)
@@ -2207,20 +2212,20 @@ class ZoneAirMassChange(NodeSource):
         self.R = float(R)
         self.mass_key = f"{layer}.mass_start"
 
-    def mass(self, phi_nodes: Tensor, drivers) -> Tensor:
-        """(P_ref + phi) V / (R T) at this source's nodes (kg)."""
+    def amount(self, phi_nodes: Tensor, drivers) -> Tensor:
+        """(P_ref + phi) V / (R T) at this storage's nodes (kg)."""
         P = torch.as_tensor(drivers["P_ref"], dtype=phi_nodes.dtype).unsqueeze(-1)
         return (P + phi_nodes) * self.V / (self.R * drivers["T"][..., self.nodes])
 
-    def flow(self, phi_nodes: Tensor, drivers=None) -> Tensor:
+    def change(self, phi_nodes, phi_start, drivers=None):
         if drivers is None or self.mass_key not in drivers:
             return phi_nodes * 0.0
-        return (self.mass(phi_nodes, drivers) - drivers[self.mass_key]) / drivers["time_step"]
+        return self.amount(phi_nodes, drivers) - drivers[self.mass_key]
 
-    def dflow(self, phi_nodes: Tensor, drivers=None) -> Tensor:
+    def capacity(self, phi_nodes, phi_start, drivers=None):
         if drivers is None or self.mass_key not in drivers:
             return torch.zeros_like(phi_nodes)
-        slope = self.V / (self.R * drivers["T"][..., self.nodes] * drivers["time_step"])
+        slope = self.V / (self.R * drivers["T"][..., self.nodes])
         return slope.expand(torch.broadcast_shapes(slope.shape, phi_nodes.shape))
 
 
@@ -2290,14 +2295,14 @@ def project_to_model(project: Project, *, ambient: dict | None = None, species: 
     zone_mass_change = project.run_control is not None and project.run_control.zone_mass_change
     # The zone air-mass change source exists only when the project asks for it and there is a
     # zone to carry it (an empty node set has no air mass to change).
-    node_sources = (
+    storage = (
         [ZoneAirMassChange(zone_nodes, volumes[zone_nodes])]
         if zone_mass_change and zone_nodes else []
     )
     air = KirchhoffLayer(net, "air", project.laws, drives=project.drives,
                          boundary=[project.ambient, *project.flow_balanced],
                          quantity="pressure", unit="Pa", flow_unit="kg/s",
-                         node_sources=node_sources)
+                         storage=storage, scheme="backward_euler")
     layers: dict = {"air": air}
     # UVGI filters: their transmission follows every airflow solve (`FilterTransmission`).
     flow_filters = [f for f in project.edge_filters.values() if f.depends_on_flow]

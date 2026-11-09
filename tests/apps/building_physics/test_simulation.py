@@ -241,7 +241,7 @@ def test_air_mass_change_needs_the_zone_air_mass_term_on_the_airflow_layer():
     project = read_prj(THREE)
     _set_dod_mdt(project, True)
     model, state, drivers = project_to_model(project)
-    model.kirchhoff["air"]._node_sources = []
+    model.kirchhoff["air"]._storage = []
     with pytest.raises(ValueError, match="ZoneAirMassChange"):
         simulate(model, state, drivers, [0.0, 60.0], air_mass_change=True)
 
@@ -1216,3 +1216,70 @@ def test_scatter_keeps_the_floating_dtype_of_the_driver_it_writes_into():
     assert out.dtype == torch.float32 and out.tolist() == [0.0, 2.0, 0.0]
     assert scatter(base, None, torch.tensor(1.0, dtype=F64)).dtype == torch.float32
     assert scatter(None, None, torch.tensor(1.0, dtype=torch.float32)).dtype == F64
+
+
+def test_the_zone_air_mass_is_a_storage_entry_and_a_sealed_zone_steps_as_the_old_node_source():
+    """`ZoneAirMassChange` is node storage of the airflow layer (not a node source), and a
+    sealed pair of zones takes the pressure step the old `NodeSource` withdrawal gave, to
+    1e-12: ((P_ref + phi) V / (R T) - M_start) / dt."""
+    from noodl.apps.building_physics.prj import ZoneAirMassChange
+    from noodl.elements import LawContext
+    from noodl.nodesources import NodeSource
+    from noodl.storage import NodeStorage
+
+    class OldMassChange(NodeSource):
+        def __init__(self, nodes, volumes):
+            super().__init__(nodes)
+            self.register_buffer("V", volumes)
+
+        def flow(self, phi, drivers=None):
+            P = drivers["P_ref"].unsqueeze(-1)
+            mass = (P + phi) * self.V / (R_AIR * drivers["T"][..., self.nodes])
+            return (mass - drivers["air.mass_start"]) / drivers["time_step"]
+
+        def dflow(self, phi, drivers=None):
+            return self.V / (R_AIR * drivers["T"][..., self.nodes] * drivers["time_step"])
+
+    net = Network(dtype=torch.float64)
+    for name in ["amb", "z1", "z2"]:
+        net.add_node(name)
+    net.add_edge("amb", "z1", kind="g")      # a leak to ambient grounds the pair
+    net.add_edge("z1", "z2", kind="g")
+    law = [Conductance(torch.tensor([1e-4, 0.02], dtype=torch.float64), kind="g")]
+    V = torch.tensor([50.0, 80.0], dtype=torch.float64)
+    T = torch.tensor([283.15, 293.15, 301.15], dtype=torch.float64)
+    P_ref, dt = torch.tensor(101325.0, dtype=torch.float64), 30.0
+    start = torch.zeros(3, dtype=torch.float64)
+    phi_nodes = start[1:]
+    # the zones were 2 K and 5 K colder at the step start: the start mass is the density at
+    # the START temperature, which only the `change` override (not `amount(phi_start)` at the
+    # step's drivers) reproduces
+    T_start = T[1:] - torch.tensor([2.0, 5.0], dtype=torch.float64)
+    mass0 = (P_ref + phi_nodes) * V / (R_AIR * T_start)
+    drivers = {"P_ref": P_ref, "T": T, "air.mass_start": mass0,
+               "time_step": torch.tensor(dt, dtype=torch.float64)}
+    sources = torch.tensor([0.0, 0.01, 0.0], dtype=torch.float64)
+    storage = ZoneAirMassChange([1, 2], V)
+    assert isinstance(storage, NodeStorage) and not isinstance(storage, NodeSource)
+    new = KirchhoffLayer(net, "air", law, boundary=["amb"], storage=[storage],
+                         scheme="backward_euler")
+    old = KirchhoffLayer(net, "air", law, boundary=["amb"],
+                         node_sources=[OldMassChange([1, 2], V)])
+    assert tuple(new.storage) == (storage,) and not new.node_sources
+    got, _ = new.solve(torch.zeros(1, dtype=torch.float64), drivers, sources, dt=dt,
+                       history=(start, None))
+    want, _ = old.solve(torch.zeros(1, dtype=torch.float64), drivers, sources)
+    torch.testing.assert_close(got, want, rtol=0, atol=1e-12)
+    # the withdrawal itself, at the solved pressures, equals the old formula's
+    ctx = LawContext(mode="transient", dt=dt, scheme="backward_euler")
+    rate = storage.rate(got[1:], phi_nodes, None, ctx, drivers)
+    torch.testing.assert_close(rate, old.node_sources[0].flow(got[1:], drivers),
+                               rtol=0, atol=1e-12)
+    assert rate.abs().max() > 1e-3
+    # without the start mass the storage withdraws nothing: the quasi-steady solve
+    bare = {k: v for k, v in drivers.items() if k != "air.mass_start"}
+    quasi, _ = new.solve(torch.zeros(1, dtype=torch.float64), bare, sources, dt=dt,
+                         history=(start, None))
+    plain = KirchhoffLayer(net, "air", law, boundary=["amb"])
+    ref, _ = plain.solve(torch.zeros(1, dtype=torch.float64), bare, sources)
+    torch.testing.assert_close(quasi, ref, rtol=0, atol=1e-12)
