@@ -19,6 +19,13 @@ Phasor layers (complex potentials and flows) are solved in the real view: each c
 unknown is a (Re, Im) pair, `w = 2`, and each local block entry becomes the real 2x2 block of
 the (possibly non-holomorphic) law, differentiated through the real views of its input and
 output.
+
+Node storage (`KirchhoffLayer(storage=)`, real layers only) enters the KCL rows as on the
+classic path: on a transient step its withdrawal `NodeStorage.rate` is added beside the node
+sources', and its analytic `rate_slope` to the diagonal slot of each interior row. At the
+consistent initial point (`mode="initial"`) a node with a storage entry whose `initial()` is
+not `None` is held at that potential: its KCL row is replaced by `phi_i - initial_i = 0`
+(`_Held`). In the steady operating point (`mode="dc"`) storage is absent.
 """
 
 from __future__ import annotations
@@ -141,6 +148,18 @@ def _cat(parts: list[Tensor], like: Tensor) -> Tensor:
                       for p in parts], dim=-1)
 
 
+@dataclasses.dataclass(frozen=True)
+class _Held:
+    """The rows `mode="initial"` holds at a storage's initial potential: `rows` (n_I,) bool
+    marks the held interior rows; on the Jacobian's COO values, `clear` (nnz,) bool marks
+    every entry of a held row and `ones` indexes the diagonal-slot entries of the held rows,
+    which become 1."""
+
+    rows: Tensor
+    clear: Tensor
+    ones: Tensor
+
+
 class MnaSystem:
     """The Modified Nodal Analysis system of one `KirchhoffLayer`: its unknown layout,
     the fixed COO pattern of its Jacobian, and the Newton (or implicit-function) solve."""
@@ -220,10 +239,11 @@ class MnaSystem:
             cols.append(((n_I + f) * w + c)[keep])
             srcs.append(torch.full((int(keep.sum()),), self._one_slot))
             signs.append(sgn[a][keep])
-        # node sources (real layers only; a phasor layer refuses them): the diagonal slope
-        # per interior row
+        # node sources and storage (real layers only; a phasor layer refuses both): the
+        # diagonal slope per interior row, the last n_I entries of the pattern
         self._node_slot = offset
-        if self.layer._node_sources and w == 1:
+        self._diag = bool(self.layer._node_sources or self.layer._storage) and w == 1
+        if self._diag:
             idx = ar(n_I)
             rows.append(idx)
             cols.append(idx)
@@ -404,10 +424,11 @@ class MnaSystem:
         return lctx
 
     def _owners(self) -> list:
-        return [*self.layer._laws, *self.layer._node_sources]
+        return [*self.layer._laws, *self.layer._node_sources, *self.layer._storage]
 
     def _plain_call(self, i: int, args: tuple):
-        """Law (or, past the laws, node source) `i` with its own parameters."""
+        """Law (or, past the laws, node source, then storage) `i` with its own
+        parameters."""
         return self._owners()[i](*args)
 
     def _functional_call(self, rebuilt: list[dict]):
@@ -484,9 +505,118 @@ class MnaSystem:
 
         return self.layer._scatter_node_sources(slope)
 
+    # ------------------------------------------------------------- storage
+    def _storage_state(self, ctx, dt, t, scheme, history, storage_flow, drivers):
+        """What the layer's storage does in the context `ctx`: on a transient step the
+        layer's `_StorageStep` (checked as on the classic path), at the initial point the
+        held rows (`_Held`, or `None` when no storage holds an initial potential), and
+        `None` in the steady operating point or on a layer without storage."""
+        layer = self.layer
+        if not layer._storage:
+            return None
+        if ctx.mode == "initial":
+            if storage_flow is not None:
+                raise ValueError(
+                    f"KirchhoffLayer {layer.name!r}: mode='initial' is the consistent "
+                    f"initial point, which takes no step; drop storage_flow")
+            return self._held(drivers)
+        return layer._storage_step(None, dt, t, scheme, history if dt is not None else None,
+                                   storage_flow, drivers, check_dt=False)
+
+    def _held_values(self, drivers, *, check: bool = False):
+        """`(rows, value)`: the interior rows held at the initial point ((n_I,) bool) and
+        the potential each is held at ((..., n_I), zero elsewhere); `None` when no storage
+        holds an initial potential. `check` refuses entries at one node with different
+        initial values, by name."""
+        layer = self.layer
+        held = []
+        for j, st in enumerate(layer._storage):
+            v = st.initial(drivers)
+            if v is not None:
+                pos = layer._storage_positions[j]
+                v = torch.as_tensor(v, device=pos.device)
+                held.append((j, pos, v.expand(v.shape[:-1] + pos.shape) if v.dim()
+                             else v.expand(pos.shape)))
+        if not held:
+            return None
+        batch = broadcast_shapes(*(v.shape[:-1] for _, _, v in held))
+        dtype = held[0][2].dtype
+        value = torch.zeros(batch + (self.n_I,), dtype=dtype, device=held[0][2].device)
+        rows = torch.zeros(self.n_I, dtype=torch.bool, device=value.device)
+        for _, pos, v in held:
+            value = value.index_copy(-1, pos, v.to(dtype).expand(batch + pos.shape))
+            rows[pos] = True
+        if check:
+            for _, pos, v in held:
+                differ = (v.to(dtype) != value[..., pos]).reshape(-1, pos.numel()).any(0)
+                if bool(differ.any()):
+                    row = pos[differ.nonzero()[0, 0]]
+                    names = [f"{type(layer._storage[k]).__name__} (storage {k})"
+                             for k, p, _ in held if bool((p == row).any())]
+                    node = layer.net.nodes[int(layer.interior[row])]
+                    raise ValueError(
+                        f"KirchhoffLayer {layer.name!r}: the storage entries at node "
+                        f"{node!r} hold different initial potentials ({', '.join(names)}); "
+                        f"mode='initial' holds a node at one value")
+        return rows, value
+
+    def _held(self, drivers) -> _Held | None:
+        """The held rows of `mode="initial"` and their masks on the Jacobian's values
+        (refusing entries at one node that disagree)."""
+        found = self._held_values(drivers, check=True)
+        if found is None:
+            return None
+        rows = found[0].to(self.row.device)
+        full = torch.zeros(self.n, dtype=torch.bool, device=rows.device)
+        full[: self.n_I] = rows
+        diag = torch.arange(len(self.row) - self.n_I, len(self.row), device=rows.device)
+        return _Held(rows=rows, clear=full[self.row], ones=diag[rows])
+
+    def _storage_withdrawal(self, phi, drivers, step, call) -> Tensor | None:
+        """The storages' withdrawal `NodeStorage.rate` per interior row on a transient
+        `step`."""
+        layer = self.layer
+        base = len(layer._laws) + len(layer._node_sources)
+        return layer._scatter_storage(lambda j, st: call(
+            base + j, (*layer._storage_args(j, st, phi, step), step.ctx, drivers)))
+
+    def _storage_slopes(self, phi, drivers, step) -> Tensor | None:
+        """`d w / d phi` of the storages per interior row on a transient `step`: their
+        analytic `rate_slope` (a storage reads its own node's potential only, so this is
+        the whole diagonal). The values carry no graph, like every Jacobian entry."""
+        layer = self.layer
+        d = layer._scatter_storage(lambda j, st: st.rate_slope(
+            *layer._storage_args(j, st, phi, step), step.ctx, drivers))
+        return None if d is None else d.detach()
+
+    def _slopes_fn(self, drivers, call, store):
+        """The diagonal of the node sources and, on a step, of the storages, as a function
+        of the full-node potentials (`None` when there is neither)."""
+        stepping = store is not None and not isinstance(store, _Held)
+
+        def slopes(phi):
+            d = self._node_slopes(phi, drivers, call)
+            if not stepping:
+                return d
+            s = self._storage_slopes(phi, drivers, store)
+            return s if d is None else d + s
+
+        return slopes
+
+    def _hold(self, op: MnaOperator, store) -> MnaOperator:
+        """`op` with each row `mode="initial"` holds replaced by the row of
+        `phi_i - initial_i`: its values zeroed, 1 on its diagonal slot."""
+        if not isinstance(store, _Held):
+            return op
+        values = op.values.masked_fill(store.clear, 0.0)
+        values[..., store.ones] = 1.0
+        return MnaOperator(op.row, op.col, values, self.n)
+
     # ------------------------------------------------------------- residual and Jacobian
-    def residual(self, x, phi_boundary, drivers, sources, ctx, call) -> Tensor:
-        """KCL at the interior nodes, then the implicit laws' residuals (real view)."""
+    def residual(self, x, phi_boundary, drivers, sources, ctx, call, store=None) -> Tensor:
+        """KCL at the interior nodes, then the implicit laws' residuals (real view).
+        `store` (`_storage_state`) adds the storage withdrawal on a step, or replaces the
+        held rows at the initial point."""
         layer = self.layer
         phi_I, q_F = self._unknowns(x)
         phi = layer.assemble(phi_I, phi_boundary)
@@ -495,6 +625,11 @@ class MnaSystem:
         w = self._withdrawal(phi, drivers, call)
         if w is not None:
             kcl = kcl + w
+        if isinstance(store, _Held):
+            _, value = self._held_values(drivers)
+            kcl = torch.where(store.rows, phi_I - value.to(phi_I.dtype), kcl)
+        elif store is not None:
+            kcl = kcl + self._storage_withdrawal(phi, drivers, store, call)
         return self._to_real(_cat([kcl, r_F], kcl))
 
     @staticmethod
@@ -528,8 +663,10 @@ class MnaSystem:
                 blocks.append(self._potential_block(call, i, drivers, lctx, dp_s, el.ports, w))
         parts = [blk.flatten(-5) for blk in blocks]
         parts.append(torch.ones(1, dtype=x.dtype, device=x.device))
-        if w == 1 and layer._node_sources:
-            parts.append(node_slope_fn(phi))
+        if self._diag:
+            d = node_slope_fn(phi)
+            parts.append(d if d is not None else
+                         torch.zeros(self.n_I, dtype=x.dtype, device=x.device))
         flat = _cat(parts, x)
         values = flat[..., self.src] * self.sign.to(dtype=flat.dtype, device=flat.device)
         return MnaOperator(self.row, self.col, values, self.n)
@@ -601,7 +738,7 @@ class MnaSystem:
         )
 
     def solve(self, phi_boundary, drivers, sources, phi0, *, q0, history, dt, t, scheme,
-              mode, differentiable, diagnostics, **newton_kwargs):
+              mode, differentiable, diagnostics, storage_flow=None, **newton_kwargs):
         layer = self.layer
         drivers = drivers or {}
         if self.w == 2:
@@ -613,6 +750,7 @@ class MnaSystem:
             self._check_frequency(drivers, [
                 v.shape[:-1] for v in (phi_boundary, sources, phi0, q0) if v is not None])
         ctx = self._context(mode, dt, t, scheme, history, drivers)
+        store = self._storage_state(ctx, dt, t, scheme, history, storage_flow, drivers)
         if newton_kwargs.get("line_search") == "convex":
             raise ValueError(
                 f"KirchhoffLayer {layer.name!r}: line_search='convex' needs a residual "
@@ -636,7 +774,7 @@ class MnaSystem:
         with torch.no_grad():
             probe = self.residual(
                 torch.zeros(self.n, dtype=real_dtype, device=phi_boundary.device),
-                phi_boundary, drivers, sources, ctx, plain)
+                phi_boundary, drivers, sources, ctx, plain, store)
             shapes = [probe.shape[:-1]]
             if phi0 is not None:
                 shapes.append(phi0.shape[:-1])
@@ -670,13 +808,14 @@ class MnaSystem:
 
         if not differentiable:
             def residual_fn(x):
-                return remember(self.residual(x, phi_boundary, drivers, sources, ctx, plain))
+                return remember(
+                    self.residual(x, phi_boundary, drivers, sources, ctx, plain, store))
 
-            def slopes_fn(phi):
-                return self._node_slopes(phi, drivers, plain)
+            slopes_fn = self._slopes_fn(drivers, plain, store)
 
             def operator_fn(x):
-                last["op"] = self.operator(x, phi_boundary, drivers, ctx, plain, slopes_fn)
+                last["op"] = self._hold(
+                    self.operator(x, phi_boundary, drivers, ctx, plain, slopes_fn), store)
                 return last["op"]
 
             with torch.no_grad():
@@ -712,8 +851,12 @@ class MnaSystem:
             )
         )
         history_tensors = tuple(history) if ctx.dp_prev is not None else ()
+        # on a step of a layer with storage, also the flow into storage at the step start
+        stepping = store is not None and not isinstance(store, _Held)
+        flow_tensors = ((store.previous,) if stepping and store.previous is not None
+                        else ())
         all_params = (*param_tensors, *driver_tensors, sources_tensor, phi_boundary,
-                      *history_tensors)
+                      *history_tensors, *flow_tensors)
 
         def _rebuild(params):
             offset = 0
@@ -731,25 +874,31 @@ class MnaSystem:
             if self.w == 2:
                 # the angular frequency from the threaded frequency driver
                 step = dataclasses.replace(step, omega=self._omega(drv))
+            st = store
+            if stepping:
+                # the storage step from the threaded step-start potentials and flows
+                st = dataclasses.replace(
+                    store, phi_prev=params[offset + 2],
+                    previous=params[offset + 4] if flow_tensors else None)
             return (self._functional_call(rebuilt), drv, params[offset], params[offset + 1],
-                    step)
+                    step, st)
 
         def residual_fn(x, *params):
-            call, drv, src, pb, step = _rebuild(params)
-            return remember(self.residual(x, pb, drv, src, step, call))
+            call, drv, src, pb, step, st = _rebuild(params)
+            return remember(self.residual(x, pb, drv, src, step, call, st))
 
         def residual_at(point):
             def at(*params):
-                call, drv, src, pb, step = _rebuild(params)
-                return self.residual(point, pb, drv, src, step, call)
+                call, drv, src, pb, step, st = _rebuild(params)
+                return self.residual(point, pb, drv, src, step, call, st)
             return at
 
         layer._require_threaded(residual_at(x0), all_params)
 
         def operator_fn(x, *params):
-            call, drv, src, pb, step = _rebuild(params)
-            last["op"] = self.operator(
-                x, pb, drv, step, call, lambda phi: self._node_slopes(phi, drv, call))
+            call, drv, src, pb, step, st = _rebuild(params)
+            last["op"] = self._hold(
+                self.operator(x, pb, drv, step, call, self._slopes_fn(drv, call, st)), st)
             return last["op"]
 
         try:

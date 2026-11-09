@@ -238,9 +238,9 @@ def test_construction_and_argument_refusals():
     with pytest.raises(TypeError, match="NodeStorage"):
         KirchhoffLayer(net, "heat", [Conductance(G.clone(), kind="g")], boundary=["gnd"],
                        storage=[object()])
-    with pytest.raises(ValueError, match="Modified Nodal Analysis"):
-        KirchhoffLayer(net, "heat", [Capacitance(torch.ones(3), kind="g")],
-                       boundary=["gnd"], storage=[LinearStorage([1], 1.0)])
+    # a layer solved by Modified Nodal Analysis takes storage (tests/layers/test_mna_storage.py)
+    assert KirchhoffLayer(net, "heat", [Capacitance(torch.ones(3), kind="g")],
+                          boundary=["gnd"], storage=[LinearStorage([1], 1.0)]).mna
     plain = KirchhoffLayer(net, "heat", [Conductance(G.clone(), kind="g")], boundary=["gnd"])
     with pytest.raises(ValueError, match="no storage"):
         plain.solve(PB, dt=0.1)
@@ -264,7 +264,7 @@ def test_initial_mode_with_an_initial_value_is_refused_on_the_classic_path():
     net = _net()
     layer = KirchhoffLayer(net, "heat", [Conductance(G.clone(), kind="g")], boundary=["gnd"],
                            storage=[LinearStorage([1, 2, 3], CAP.clone(), initial=0.5)])
-    with pytest.raises(ValueError, match="Task 3"):
+    with pytest.raises(ValueError, match="classic nodal path"):
         layer.solve(PB, mode="initial")
     # without an initial value, "initial" is the steady point
     plain, _ = _rc()

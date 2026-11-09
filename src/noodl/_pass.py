@@ -185,11 +185,12 @@ def _solve_potentials(model: Model, state, base, drv, dt, t, solve_kwargs, warm_
         made += [f"{name}.phi", f"{name}.q"]
         if layer.storage:
             # The flow into every storage entry at the end of the step (zeros on a steady
-            # pass): the trapezoidal scheme's step-start rate on the next step.
+            # pass; at a held initial point, what balances each held node): the
+            # trapezoidal scheme's step-start rate on the next step.
             new[f"{name}.storage_flow"] = layer.storage_flows(
                 phi, drv, dt=circuit.get("dt"), scheme=kwargs.get("scheme"),
                 history=circuit.get("history"), storage_flow=circuit.get("storage_flow"),
-                _checked=True)
+                mode=kwargs.get("mode"), q=q, sources=sources, _checked=True)
             made.append(f"{name}.storage_flow")
         diag[name] = d
 

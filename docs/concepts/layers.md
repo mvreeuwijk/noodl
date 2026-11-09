@@ -101,8 +101,8 @@ phi, q = layer.solve(phi_b, drivers, sources, dt=60.0, history=(phi_prev, q_prev
 w = layer.storage_flows(phi, drivers, dt=60.0, history=(phi_prev, q_prev))
 ```
 
-Storage stays on the nodal path (`layer.mna` is False): like a node source it adds only a
-diagonal, `step_rate_factor * capacity` with `capacity = dS/dphi`, to the Jacobian, so a
+Storage does not make a layer `mna`; a layer of potential laws with storage stays on the nodal
+path. Like a node source it adds only a diagonal, `step_rate_factor * capacity` with `capacity = dS/dphi`, to the Jacobian, so a
 network of conductances with storage keeps its symmetric positive definite system and its
 sparse or CG solve. A node whose only connection is its storage is grounded during a step and
 reported floating at a steady solve. Several storages may share a node (their withdrawals add
@@ -116,9 +116,8 @@ storages in list order, then their nodes.
 - `residual`, `jacobian` and `adjoint` take the same step keywords (`dt`, `scheme`,
   `history`, `storage_flow`): with `dt` they include the storage of that step, without it
   they are the steady forms, where storage is absent.
-- `mode="initial"` is refused when a storage holds an `initial()` potential: holding a node at
-  its initial potential needs the Modified Nodal Analysis path, which does not take storage
-  yet.
+- `mode="initial"` on a nodal layer is refused when a storage holds an `initial()` potential:
+  holding a node at its initial potential is defined on the Modified Nodal Analysis path only.
 - `layer.dynamic` is True for a layer with storage, and `layer.linear` asks every storage too.
 - On the differentiable path gradients reach the storages' registered parameters, `history`
   and `storage_flow`, so a chain of steps back-propagates through time.
@@ -184,7 +183,22 @@ that lists them.
   none (a transformer secondary left floating) has undetermined potentials;
 - a dynamic kind carries no drive (its step-start potential differences are taken without one);
 - `linear_solver="cg"` is refused (the system is not symmetric positive definite);
-- on a phasor layer, every law is `phasor_capable` and there are no node sources.
+- on a phasor layer, every law is `phasor_capable` and there are no node sources and no
+  storage (a capacitance is an edge law there).
+
+Such a layer takes [node storage](#node-storage) as well. On a step its withdrawal and its
+analytic `rate_slope` enter each node's flow balance and the diagonal of the Jacobian, as on
+the nodal path (and the same `history`, `scheme` and `storage_flow`); in the steady operating
+point (`mode="dc"`) storage is absent. At the consistent initial point (`mode="initial"`) each
+node with a storage entry whose `initial()` is not `None` is *held* at that potential: its flow
+balance is replaced by `phi = initial` (entries at one node with different initial values are
+refused by name). The flow into storage there is whatever balances the node:
+`storage_flows(phi, drivers, dt=None, mode="initial", q=q, sources=sources)` returns the
+node's flow imbalance (its sources, less the net outflow of `q` and the node sources'
+withdrawal), split among the node's entries in proportion to their `capacity`; the Model
+writes it to `"<layer>.storage_flow"`, the trapezoidal scheme's step-start flow. A
+`LinearStorage(node, C, initial=v0)` to ground is then the same circuit as a
+`Capacitance(C, v0=v0)` edge to ground, and its storage flow the capacitor current.
 
 A system that is structurally sound but singular (a loop of ideal potential sources, a cut set
 of flow sources, a part reached only through flow-prescribed edges) raises a `RuntimeError` at

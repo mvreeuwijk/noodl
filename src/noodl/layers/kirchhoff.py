@@ -59,7 +59,7 @@ _ATOMS = (str, bytes, int, float, complex, bool, type(None))
 
 @dataclass(frozen=True)
 class _StorageStep:
-    """One step of a classic layer with storage: the law context (`dt`, `t`, `scheme`), the
+    """One step of a layer with storage: the law context (`dt`, `t`, `scheme`), the
     step-start potentials `phi_prev` (full-node) and the flows into every storage entry at
     the step start, `previous` (`None` when not given; the trapezoidal scheme needs it)."""
 
@@ -138,11 +138,14 @@ class KirchhoffLayer(TopologyGuard):
     `storage` (default none) are `NodeStorage` objects (`noodl.storage`): an amount stored at
     interior nodes, which a step of `dt` turns into a withdrawal into storage with the step
     rate of the layer's scheme; without a step (a steady solve) storage is absent. A layer
-    with storage is `dynamic` and takes `dt`, `history` and `storage_flow` in `solve`; it
-    stays on the classic nodal path (`mna` False), whose Jacobian gains only a non-negative
-    diagonal, so a network of conductances with storage keeps its symmetric positive
-    definite system. A storage node counts as grounded during a step. A layer solved by
-    Modified Nodal Analysis does not take storage yet.
+    with storage is `dynamic` and takes `dt`, `history` and `storage_flow` in `solve`.
+    Storage does not make a layer `mna`: on the classic nodal path its Jacobian gains only a
+    non-negative diagonal, so a network of conductances with storage keeps its symmetric
+    positive definite system, and a storage node counts as grounded during a step. A layer
+    solved by Modified Nodal Analysis takes storage too (its diagonal slot of each node
+    row); there `mode="initial"` holds each node with a storage entry whose `initial()` is
+    not `None` at that potential. A phasor layer takes no storage (a capacitance is an
+    edge law there).
 
     `scheme` (default `"trapezoidal"`; `"backward_euler"` the other) is the time-integration
     scheme of a transient step of a layer with dynamic laws or storage, one of `SCHEMES`
@@ -241,13 +244,6 @@ class KirchhoffLayer(TopologyGuard):
             el.law_form == "implicit" or el.ports > 1 or el.dynamic or el.contextual
             for el in self._laws
         )
-        if self.mna and self._storage:
-            raise ValueError(
-                f"KirchhoffLayer {name!r}: storage on a layer solved by Modified Nodal "
-                f"Analysis (its laws include implicit, multi-port, dynamic or context-reading "
-                f"ones) is not supported yet; give the storage to a layer of potential laws, "
-                f"or model it as a capacitance edge to a boundary node"
-            )
         # Node name -> a likely cause, appended when that node is reported floating (an
         # application's builder fills it, e.g. for a node only prescribed flows touch).
         self.node_hints: dict = {}
@@ -434,6 +430,11 @@ class KirchhoffLayer(TopologyGuard):
                 raise ValueError(
                     f"KirchhoffLayer {name!r}: a phasor layer takes no node_sources; "
                     f"loads are edges to ground in a phasor layer"
+                )
+            if self._storage:
+                raise ValueError(
+                    f"KirchhoffLayer {name!r}: a phasor layer takes no storage; a "
+                    f"capacitance is an edge law (to ground) in a phasor layer"
                 )
         dynamic_kinds = {el.kind for el in self._laws if el.dynamic}
         for drv in self._drives:
@@ -1320,8 +1321,13 @@ class KirchhoffLayer(TopologyGuard):
         `history=(phi, q)` (full-node potentials and every edge's flow, as this method
         returns them; required when a law is dynamic); without `dt`, the steady operating
         point (`mode="dc"`, the default), or with `mode="initial"` the consistent initial
-        point (each storage law at its initial value). On the differentiable path gradients
-        flow to `history` too, so a chain of steps back-propagates through time. There
+        point (each storage law at its initial value). Its storage (`storage`) withdraws
+        `NodeStorage.rate` on a step, as on the classic path below (`storage_flow` as
+        there); it is absent at the steady point, and at the initial point each node with a
+        storage entry whose `initial()` is not `None` is held at that potential (its flow
+        balance is replaced by `phi = initial`; see `storage_flows` for the flow into
+        storage there). On the differentiable path gradients flow to `history` and
+        `storage_flow` too, so a chain of steps back-propagates through time. There
         `diagnostics["method"]` is likewise the method requested and `"backend"` the one that
         ran; `method="cg"` is refused (the system is not symmetric positive definite).
 
@@ -1344,13 +1350,13 @@ class KirchhoffLayer(TopologyGuard):
         for key, value in self.newton_defaults.items():
             newton_kwargs.setdefault(key, value)
         if self.mna:
-            if storage_flow is not None:
+            if storage_flow is not None and not self._storage:
                 raise ValueError(
                     f"KirchhoffLayer {self.name!r} has no storage; drop storage_flow"
                 )
             return self._solve_mna(
                 phi_boundary, drivers, sources, phi0, q0, history, dt, t, scheme, mode,
-                differentiable, diagnostics, newton_kwargs,
+                differentiable, diagnostics, newton_kwargs, storage_flow,
             )
         check_scheme(self.name, scheme)
         self._check_classic_arguments(mode, dt, history, storage_flow)
@@ -1382,17 +1388,20 @@ class KirchhoffLayer(TopologyGuard):
 
     def _solve_mna(
         self, phi_boundary, drivers, sources, phi0, q0, history, dt, t, scheme, mode,
-        differentiable, diagnostics, newton_kwargs,
+        differentiable, diagnostics, newton_kwargs, storage_flow=None,
     ):
         """`solve` of a layer solved by Modified Nodal Analysis (`noodl.layers._mna`)."""
+        step_start = history
+        if storage_flow is not None:
+            step_start = (*(history or ()), storage_flow)
         differentiable = resolve_mna(
             self, newton_kwargs, diagnostics, differentiable, drivers, sources, phi_boundary,
-            history,
+            step_start,
         )
         return self._mna.solve(
             phi_boundary, drivers, sources, phi0, q0=q0, history=history, dt=dt, t=t,
             scheme=scheme, mode=mode, differentiable=differentiable,
-            diagnostics=diagnostics, **newton_kwargs,
+            diagnostics=diagnostics, storage_flow=storage_flow, **newton_kwargs,
         )
 
     def _check_classic_arguments(self, mode, dt, history, storage_flow=None) -> None:
@@ -1432,10 +1441,10 @@ class KirchhoffLayer(TopologyGuard):
             if held:
                 raise ValueError(
                     f"KirchhoffLayer {name!r}: mode='initial' with storage that holds an "
-                    f"initial potential ({held[0]!r}) needs the Modified Nodal Analysis "
-                    f"path, which holds a storage node at its initial potential (M4 Task 3, "
-                    f"not built yet); solve the steady point (mode='dc') or set the "
-                    f"potentials directly"
+                    f"initial potential ({held[0]!r}) is not defined on the classic nodal "
+                    f"path (a layer solved by Modified Nodal Analysis holds a storage node "
+                    f"at its initial potential); solve the steady point (mode='dc') or set "
+                    f"the potentials directly"
                 )
         if dt is None:
             extra = [k for k, v in (("history", history), ("storage_flow", storage_flow))
@@ -1493,14 +1502,24 @@ class KirchhoffLayer(TopologyGuard):
         return _StorageStep(ctx, phi_prev, storage_flow)
 
     def storage_flows(self, phi, drivers, *, dt, scheme=None, history=None,
-                      storage_flow=None, _checked: bool = False) -> torch.Tensor:
+                      storage_flow=None, mode=None, q=None, sources=None,
+                      _checked: bool = False) -> torch.Tensor:
         """The flow into every storage entry at the end of a step, `(..., n_entries)`, in
         entry order (storages in list order, then each one's nodes): what each
         `NodeStorage.rate` withdraws at the full-node potentials `phi`. The keywords are
         `solve`'s; without `dt` (a steady state) storage is absent and the flows are zeros.
         Differentiable in `phi`, `history`, `storage_flow`, the drivers and the storages'
         parameters. Empty on a layer without storage. (`_checked`, internal: the `solve` of
-        this step has already checked `dt`.)"""
+        this step has already checked `dt`.)
+
+        With `mode="initial"` on a layer solved by Modified Nodal Analysis, a node held at
+        its storage's initial potential takes whatever flow balances it: the flow into
+        storage there is the node's flow imbalance `s_I - A_I q - w(phi)` (its sources, less
+        the net outflow of the edge flows `q` and the node sources' withdrawal), split among
+        the node's storage entries in proportion to their `capacity` (equally where the
+        node's capacities sum to zero). It needs `q` (every edge's flow, as `solve` returns
+        it) and `sources` (full-node; `None` means zero). An entry at a node that is not held
+        takes zero."""
         drivers = drivers or {}
         if scheme is None:
             scheme = self.scheme
@@ -1508,12 +1527,45 @@ class KirchhoffLayer(TopologyGuard):
                             device=phi.device)
         if not self._storage:
             return zeros
-        step = self._storage_step(None, dt, None, scheme, history, storage_flow, drivers,
+        if mode == "initial" and self.mna:
+            return self._initial_storage_flows(phi, q, sources, drivers, zeros)
+        step = self._storage_step(mode, dt, None, scheme, history, storage_flow, drivers,
                                   check_dt=not _checked)
         if step is None:
             return zeros
         parts = [st.rate(*self._storage_args(j, st, phi, step), step.ctx, drivers)
                  for j, st in enumerate(self._storage)]
+        batch = broadcast_shapes(*(p.shape[:-1] for p in parts))
+        return torch.cat([p.expand(batch + p.shape[-1:]) for p in parts], dim=-1)
+
+    def _initial_storage_flows(self, phi, q, sources, drivers, zeros) -> torch.Tensor:
+        """`storage_flows` at the initial point of a layer solved by Modified Nodal Analysis:
+        each held node's flow imbalance, split among its entries by capacity."""
+        held = self._mna._held_values(drivers)
+        if held is None:
+            return zeros
+        if q is None:
+            raise ValueError(
+                f"KirchhoffLayer {self.name!r}: storage_flows(mode='initial') needs q, every "
+                f"edge's flow at the initial point (as solve returns it)"
+            )
+        rows, _ = held
+        phi_i = phi[..., self.interior]
+        imbalance = self._source_interior(sources, phi_i) - self._accumulate_interior(q)
+        w = self._node_source_withdrawal(phi, drivers)
+        if w is not None:
+            imbalance = imbalance - w
+        imbalance = torch.where(rows, imbalance, torch.zeros_like(imbalance))
+        caps = [st.capacity(phi[..., st.nodes], phi[..., st.nodes], drivers)
+                for st in self._storage]
+        total = self._scatter_storage(lambda j, st: caps[j])
+        count = self._scatter_storage(lambda j, st: torch.ones_like(caps[j]))
+        parts = []
+        for cap, pos in zip(caps, self._storage_positions, strict=True):
+            tot = total[..., pos]
+            share = torch.where(tot != 0, cap / torch.where(tot != 0, tot, 1.0),
+                                1.0 / count[..., pos])
+            parts.append(share * imbalance[..., pos])
         batch = broadcast_shapes(*(p.shape[:-1] for p in parts))
         return torch.cat([p.expand(batch + p.shape[-1:]) for p in parts], dim=-1)
 

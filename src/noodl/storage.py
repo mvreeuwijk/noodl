@@ -25,8 +25,14 @@ Which method to write:
   drivers: an amount that depends on a driver that changes over the step (a zone's air mass
   depends on its temperature), or a difference that must be formed without round-off.
 - `rate` and `rate_slope`, for an application whose withdrawal has rules beyond storage.
-  `rate_slope` reaches only the non-differentiable Newton solve; the differentiable solve
-  differentiates `rate` by autograd, so an override must be its true derivative.
+  On the classic nodal path `rate_slope` reaches only the non-differentiable Newton solve
+  (the differentiable solve differentiates `rate` by autograd); a layer solved by Modified
+  Nodal Analysis uses it on both paths. Either way an override must be the true derivative.
+
+`initial` gives the potential a node is held at in the consistent initial point
+(`mode="initial"`) of a layer solved by Modified Nodal Analysis: that node's flow balance is
+replaced by `phi = initial`, and the flow into its storage is whatever balances the node
+(`KirchhoffLayer.storage_flows`). A classic layer refuses such a storage in that mode.
 """
 
 from __future__ import annotations
@@ -115,10 +121,12 @@ class NodeStorage(torch.nn.Module):
                    ctx: LawContext, drivers: Mapping | None = None) -> Tensor:
         """d rate / d phi at each node: `step_rate_factor(ctx) * capacity(...)`.
 
-        Used by the non-differentiable Newton solve (`differentiable=False`, or
-        `analytic_primal` with nothing differentiable reaching the solve). The
-        differentiable solve takes the derivative of `rate` by autograd instead, so an
-        override must be the true derivative of `rate` (as for `NodeSource.dflow`)."""
+        On the classic nodal path it is used by the non-differentiable Newton solve
+        (`differentiable=False`, or `analytic_primal` with nothing differentiable reaching
+        the solve), and the differentiable solve takes the derivative of `rate` by autograd
+        instead. A layer solved by Modified Nodal Analysis uses it on both paths, so it also
+        builds the adjoint there. Either way an override must be the true derivative of
+        `rate` (as for `NodeSource.dflow`)."""
         return step_rate_factor(ctx) * self.capacity(phi_nodes, phi_start, drivers)
 
     def forward(self, phi_nodes: Tensor, phi_start: Tensor, previous: Tensor | None,
