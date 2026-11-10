@@ -196,7 +196,9 @@ def test_an_unknown_pump_keyword_is_refused(tmp_path):
         read_epanet_inp(path)
 
 
-def test_a_tank_with_a_volume_curve_is_refused(tmp_path):
+def test_a_volume_curve_that_does_not_cover_the_tank_levels_is_refused(tmp_path):
+    """EPANET 2.2 refuses a tank whose minimum or maximum level lies outside its volume
+    curve (`input1.c`, `validatetanks`, error 225)."""
     path = _edit(
         tmp_path, "Net1.inp",
         (" 2               \t850         \t120         \t100         \t150         "
@@ -207,7 +209,8 @@ def test_a_tank_with_a_volume_curve_is_refused(tmp_path):
     )
     net = read_epanet_inp(path)
     assert net.tanks[0].volume_curve == "VC1"
-    with pytest.raises(ValueError, match="volume curve"):
+    with pytest.raises(ValueError, match=r"tank '2'.*levels \[30.48, 45.72\] m.*volume curve "
+                                         r"'VC1'"):
         net.validate()
 
 
@@ -525,11 +528,10 @@ def test_a_volume_curve_is_converted_to_metres_and_cubic_metres(tmp_path):
     tank = net.tanks[0]
     assert (tank.volume_curve, tank.overflow) == ("VC1", True)
     assert net.curves["VC1"] == ((100 * FOOT, 1000 * FOOT**3), (150 * FOOT, 3000 * FOOT**3))
-    with pytest.raises(ValueError, match="volume curve"):
-        net.validate()
+    net.validate()
 
 
-def test_a_tank_overflow_flag_is_refused_by_validate(tmp_path):
+def test_a_tank_overflow_flag_is_read(tmp_path):
     path = _edit(
         tmp_path, "Net1.inp",
         (" 2               \t850         \t120         \t100         \t150         "
@@ -540,8 +542,7 @@ def test_a_tank_overflow_flag_is_refused_by_validate(tmp_path):
     net = read_epanet_inp(path)
     assert net.tanks[0].volume_curve is None
     assert net.tanks[0].overflow is True
-    with pytest.raises(ValueError, match="overflow"):
-        net.validate()
+    net.validate()
 
 
 RULES = """[RULES]

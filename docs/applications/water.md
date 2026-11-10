@@ -96,7 +96,7 @@ final = water_steady(model, state, drivers)
 |---|---|
 | `Junction(name, elevation, demand=0.0, pattern=None)` | A demand node. |
 | `Reservoir(name, head, pattern=None)` | Fixed-head boundary. |
-| `Tank(name, elevation, init_level, min_level, max_level, diameter)` | Cylindrical tank. |
+| `Tank(name, elevation, init_level, min_level, max_level, diameter, volume_curve=None, overflow=False, min_volume=0.0)` | A cylinder of `diameter`, or the volume curve `volume_curve` (a `curves` key, level m against volume m³); `overflow` lets it spill when full. |
 | `WaterPipe(name, u, v, length, diameter, roughness, minor_loss=0.0, status="OPEN")` | A full pipe. |
 | `Pump(name, u, v, curve, power=None, speed=1.0)` | Edge oriented **suction → discharge**; on a head `curve` (a `curves` key) or at a constant `power` (kW), at relative `speed`. |
 | `Valve(name, u, v, diameter, kind, setting, minor_loss=0.0, curve=None)` | TCV, FCV, PBV, GPV, PRV or PSV (`curve`: a GPV's head-loss curve). |
@@ -421,7 +421,9 @@ $8/(g\pi^2) = 0.0251933$ a `MinorLoss` uses.
 ### Tanks and controls
 
 Every tank is a `LinearStorage` of its cross-section area $A$ in the water layer
-(`noodl.NodeStorage`); a tank is an ordinary node of `"water.phi"`, its level is its head less
+(`noodl.NodeStorage`), or, when any tank of the network has a volume curve, every tank is one
+`TankVolumeCurve` (a cylinder as the two-point curve of its area); a tank is an ordinary node
+of `"water.phi"`, its level is its head less
 its bottom (`tank_levels`), and the flow into it is `"water.storage_flow"`, which `tank_inflow`
 returns. `build_model(tank_scheme=...)` chooses how the level moves.
 
@@ -452,6 +454,34 @@ while t < duration:
 
 Gradients with respect to a tank's area (the storage's capacity `C`) reach the levels through
 the move of each step.
+
+**Volume curves.** A tank with a volume curve is a `TankVolumeCurve`: its volume is EPANET's
+`tankvolume`, linear between the curve's points and the end values beyond them (`interp`,
+`project.c`), and its step is by volume, $V \mathrel{+}= q\,\Delta t$, $H = $ `tankgrade`$(V)$
+(`hydraul.c`), through `NodeStorage.potential_of`, the inverse of the stored amount, which
+`KirchhoffLayer.advance_storage` reads for a storage that is not linear. The control crossings
+and the time to fill are found by volume too, as EPANET's `controltimestep` and
+`tanktimestep` find them. Gradients reach the curve's volumes through the steps (against
+central differences: 1.4e-9 relative). `validate()` refuses a curve that does not cover the
+tank's minimum and maximum levels, as EPANET does (`input1.c`, error 225).
+
+**Full and empty tanks.** A tank within EPANET's `HTOL` (0.0005 ft) of its maximum level is
+full and one within `HTOL` of its minimum is empty (`hydstatus.c`, `tankstatus`). At the step
+start `TankLevels` then gives every pipe to it the one direction that drains a full tank or
+fills an empty one (`"water.one_way"`, the check-valve condition, solved exactly), closes a
+pump discharging into a full tank or drawing from an empty one, and closes a pipe both
+directions are then forbidden (a check valve into a full tank); all of it for that step
+only, in `"water.status"` and `"water.one_way"`, not in the carried state. As in EPANET a
+link whose start node is a tank or reservoir is examined at its start node only, so a pump
+from a reservoir into a full tank keeps running (EPANET then puts the tank back at its maximum
+each step, and the water is lost). A valve at a full or empty tank is refused by name.
+`water_event_step` ends a step when a tank fills or empties (`TankLevels.time_to_limit`, rounded
+to whole seconds as `tanktimestep` rounds it) and puts a tank within one second's inflow of a
+limit on it (`tanklevels`). A tank with `overflow=True` is never full: its inlet stays open,
+its level is held at the maximum, and `tank_overflow(model, state, stepped, dt)` is the flow
+spilt over the step. Volume curves and overflow are refused with the implicit schemes below,
+which also refuse a level outside the limits by name, since a tank moved inside the solve has
+no step start to close links at.
 
 **Tanks stepped inside the solve.** `build_model(net, tank_scheme="backward_euler")` (or
 `"trapezoidal"`) makes every tank an interior node instead, its level stepped
@@ -512,6 +542,11 @@ on-disk reals are **float32**, so roughly 1e-7 relative is EPANET's own precisio
 | `twoloop_si.inp`, noodl physics' own nodal continuity | 1e-13 | **2.093e-14** |
 | Net1 single period: heads, flows, pump head gain, pump flow | 1e-6 / 1e-6 / 1e-6 / 1e-8 m³/s | 7.224e-8, 2.647e-7, 1.942e-7, 3.2e-9 m³/s |
 | Net1 24 h tank level with level-triggered pump controls | 2e-4 m | **3.826e-5 m** worst of 25 steps |
+| Net1 24 h, tank on a five-point volume curve: levels, pipe 110 flow | 2e-4 m / 1e-6 m³/s | 6.9e-5 m, 5.5e-8 m³/s |
+| Net1 24 h without controls: the tank fills, its inlet closes; levels, pipe 110 and pump flows | 2e-4 m / 1e-6 m³/s | 2.5e-5 m, 3.7e-8 m³/s |
+| Net1 24 h at 1.5 times the demand: the tank empties and refills | 2e-4 m / 1e-6 m³/s | 2.3e-5 m, 3.2e-8 m³/s |
+| A pump into a tank that starts full (closed, then filling it to full many times an hour), 12 h | 2e-4 m / 1e-6 m³/s | 5.3e-6 m, 8.9e-9 m³/s |
+| Net1 24 h, the tank allowed to overflow: held at its maximum with its inlet open | 2e-4 m / 1e-6 m³/s | 2.5e-5 m, 2.5e-8 m³/s |
 | Darcy-Weisbach, `twoloop_si.inp` heads and flows | rel 1e-6 | 5.819e-8 heads, 6.482e-8 flows |
 | Darcy-Weisbach, Net1 single period: heads, flows | 1e-6 / 1e-5 | 7.009e-8, 3.986e-6 |
 | Darcy-Weisbach, laminar + transitional + turbulent pipes (`lowflow_dw_si.inp`): heads, flows, per-pipe head loss | 1e-6 / 1e-6 / 2.65e-7 m | 3.5e-8, 9.4e-8, 9.6e-8 m |
@@ -593,7 +628,7 @@ independent loop is a property of the cycle-space formulation, and it holds exac
 
 - **Not modelled, refused by name:** time-based controls and `[RULES]`;
   pump speed patterns and a numeric `[STATUS]` on a pump (a pump's speed is the driver
-  `"water.setting"`); non-cylindrical tanks;
+  `"water.setting"`); a valve at a full or empty tank;
   leakage; energy and cost reports; pipe and valve
   controls. A file using any of these raises an error naming the feature.
 - **Hazen-Williams heads carry EPANET's rounded flow-unit factor as a difference.** EPANET
@@ -656,6 +691,11 @@ independent loop is a property of the cycle-space formulation, and it holds exac
 - **Tank area does not enter a single `water_steady` call.** Only the tank's head enters the
   steady solve, so gradients with respect to tank area come from a time-stepped run
   (`water_event_step`), not from the steady state.
+- **An empty tank that was a part's only supply** leaves that part cut off: the pipe to it
+  then refuses to drain it, and the solve is refused by name ("check valve(s) ... carry flow
+  against their direction"), where EPANET reports negative pressures.
+- **Tank steps are whole-network.** `water_event_step` shortens the step to the earliest
+  time any tank fills or empties, over every instance of a batch.
 - **Tank level events are not batch-safe.** `TankLevels.event_step` indexes tanks along the
   first tensor dimension, so a batched `(B, n_tanks)` rollout with level-triggered controls
   gives wrong results. Run batched tank simulations one instance at a time.

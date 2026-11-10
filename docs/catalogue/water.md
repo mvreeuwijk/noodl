@@ -32,7 +32,7 @@ Descriptions of the physical objects a network is built from.
 | `Pump` | A pump from `u` to `v` on a head-flow `curve` (by name) or at constant `power` (kW), at relative `speed`, optionally varied by `speed_pattern`. | `Pump(name, u, v, curve, power=None, speed=1.0, speed_pattern=None, efficiency_curve=None, price=None, price_pattern=None)` |
 | `Reservoir` | A fixed-head node: total `head` (m), optionally varied by a time `pattern`. | `Reservoir(name, head, pattern=None)` |
 | `Rule` | One `[RULES]` entry: the `premises` (in file order, joined by their conjunctions), the actions when they hold (`then_actions`) and when they do not (`else_actions`). | `Rule(name, premises, then_actions, else_actions, priority=0.0)` |
-| `Tank` | A cylindrical tank: bottom `elevation`, initial, minimum and maximum water levels and `diameter` (all m); its level is its node's head less its bottom, stepped by the layer's storage (`build_model(tank_scheme=...)`). | `Tank(name, elevation, init_level, min_level, max_level, diameter, volume_curve=None, overflow=False, min_volume=0.0)` |
+| `Tank` | A tank: bottom `elevation`, initial, minimum and maximum water levels and `diameter` (all m); its level is its node's head less its bottom, stepped by the layer's storage (`build_model(tank_scheme=...)`). | `Tank(name, elevation, init_level, min_level, max_level, diameter, volume_curve=None, overflow=False, min_volume=0.0)` |
 | `Valve` | A valve from `u` to `v`: `diameter` (m), EPANET `kind` (for example `TCV`) and its `setting` (TCV: a loss coefficient; FCV: a flow, m3/s; PBV: a head drop, m), with a minor-loss coefficient. A GPV's setting is its head-loss `curve` (a `curves` key). | `Valve(name, u, v, diameter, kind, setting, minor_loss=0.0, curve=None)` |
 | `WaterNetwork` | A pressurised distribution network, in SI, with everything the builder needs. | `WaterNetwork(junctions, reservoirs=(), tanks=(), pipes=(), pumps=(), valves=(), curves=<factory>, patterns=<factory>, controls=(), rules=(), emitters=(), initial_status=<factory>, energy=<factory>, demand_pattern=None, pattern_timestep=3600.0, hydraulic_timestep=3600.0, report_timestep=3600.0, duration=0.0, explicit_rule_timestep=None, pattern_start=0.0, report_start=0.0, start_clocktime=0.0, headloss='H-W', options=<factory>, notes=<factory>)` |
 | `WaterOptions` | `[OPTIONS]` keys that change the physics, with EPANET 2.2's own defaults. | `WaterOptions(demand_model='DDA', minimum_pressure=0.0, required_pressure=0.1, pressure_exponent=0.5, specific_gravity=1.0, viscosity=1.0, flow_units=None, emitter_exponent=0.5)` |
@@ -66,7 +66,7 @@ Functions of the state that compute drivers each step (densities, flows, levels)
 
 | Name | What it does | How to call it |
 |---|---|---|
-| `TankLevels` | Simple controls on tank levels, and the boundary heads of a water layer whose tanks are held at boundary nodes (`build_model(tank_scheme="forward_euler")`). | `TankLevels(net, tanks, controls, pump_names, *, tank_nodes, dt, reservoir_heads, head_scale=1.0, link_names, link_status)` |
+| `TankLevels` | Simple controls on tank levels, and the boundary heads of a water layer whose tanks are held at boundary nodes (`build_model(tank_scheme="forward_euler")`). | `TankLevels(net, tanks, controls, pump_names, *, tank_nodes, dt, reservoir_heads, head_scale=1.0, link_names, link_status, tank_links=(), one_way=None, storage=None)` |
 
 ## Sources and storage
 
@@ -76,6 +76,7 @@ Nodal sources, withdrawals and storage.
 |---|---|---|
 | `EmitterOutflow` | EPANET's emitters as a `NodeWithdrawal` (withdrawal, positive OUT): at each node the outflow is ``q = sign(p) C \|p\|^n`` with ``p = phi - elevation`` the pressure head (m), ``C`` the discharge coefficient (m3/s per m^n) and ``n`` the emitter exponent. | `EmitterOutflow(nodes, coefficient, elevation, *, exponent=0.5, dp_transition=1e-09, learnable=False)` |
 | `PressureDrivenDemand` | The Wagner demand function as a `NodeWithdrawal` (withdrawal, positive OUT). | `PressureDrivenDemand(nodes, q_required, elevation, *, p_min=0.0, p_req=0.0, exponent=0.5, learnable=False)` |
+| `TankVolumeCurve` | Tanks whose volume is a piecewise linear function of the level: EPANET's volume curve (`[TANKS]` VolCurve, `[CURVES]` level against volume). | `TankVolumeCurve(nodes, bottom, levels, volumes, *, head_scale=1.0, learnable=False)` |
 
 ## Files
 
@@ -106,6 +107,7 @@ Calculations and helpers.
 | `power_curve` | `(h0, r, n)` of EPANET 2.2's power-function pump curve ``h = h0 - r q^n`` through `points` (`(flow, head)` pairs): one point, or three with the first at zero flow (`input2.c`, `updatepumpparams`; `input3.c`, `powercurve`). | `power_curve(points)` |
 | `tank_inflow` | Net inflow (m3/s) at every tank node: the flow into every tank's storage, `"water.storage_flow"`, which a solve writes (`KirchhoffLayer.storage_flows`). Under `tank_scheme="forward_euler"` it is the inflow the solve delivered to the held tank, the rate over the step `water_event_step` takes. | `tank_inflow(model, state)` |
 | `tank_levels` | Every tank's level (m above its bottom) in `state`: its head less its bottom. | `tank_levels(model, state)` |
+| `tank_overflow` | The flow (m3/s) every tank spilt over one `water_event_step` from `state` to `stepped` of `dt` s: for a tank that may overflow (`Tank.overflow`), what flowed in (`tank_inflow(model, stepped)`) less its volume change over the step, at least 0; 0 for every other tank. A tank that starts the step full spills everything that flows in. | `tank_overflow(model, state, stepped, dt)` |
 | `three_point_curve` | EPANET's single-point pump-curve fit: ``(h0, r, n)`` for ``h = h0 - r q^n``. | `three_point_curve(q_design, h_design)` |
 | `to_kilopascal` | Metres of head -> kPa, at `rho = 998.2 kg/m3` and `g = 9.80665 m/s2`. | `to_kilopascal(head)` |
 | `twoloop` | The committed hand-made SI fixture (`tests/data/water/twoloop_si.inp`). | `twoloop()` |

@@ -29,7 +29,9 @@ from noodl.apps.water.network import (
     build_model,
     initial_state,
     link_states,
+    tank_inflow,
     tank_levels,
+    tank_overflow,
     twoloop,
     water_event_step,
     water_steady,
@@ -277,10 +279,12 @@ def test_event_step_returns_the_nominal_step_when_nothing_is_crossed(tmp_path):
     ) == pytest.approx(672.0, abs=1e-6)
 
 
-def test_a_tank_outside_its_limits_is_refused(tmp_path):
+def test_a_tank_outside_its_limits_is_refused_by_the_implicit_schemes(tmp_path):
+    """Stepped inside the solve a tank has no full or empty rule, so a level outside its
+    limits is refused; EPANET's forward Euler closes links instead (`TankLevels`)."""
     path, _ = _epanet(tmp_path, "Net1.inp")
     net = read_epanet_inp(path)
-    model, state, drivers = build_model(net)
+    model, state, drivers = build_model(net, tank_scheme="backward_euler")
     state = initial_state(model, values={"water.tank_level": {"2": 100.0}})
     with pytest.raises(ValueError, match=r"tank\(s\) \['2'\] are outside"):
         water_steady(model, state, drivers)
@@ -2396,3 +2400,196 @@ def test_emitters_on_a_darcy_weisbach_network_match_epanet(tmp_path):
     base = {j.name: j.demand for j in net.junctions}
     for name, flow in emitted.items():
         assert abs(flow - (float(demands[name]) - base[name])) < 1e-5, (name, flow)
+
+
+# --------------------------------------------------------------------------- tanks over time
+# Volume curves, full and empty tanks and overflow, each over an extended period against
+# EPANET. Until `water_run` exists these tests step with a local loop (`_tank_run`): one
+# `water_event_step` per hydraulic step, which solves with every tank held, shortens the
+# step to the next control crossing and to the time a tank fills or empties
+# (`hydraul.c`, `tanktimestep`), and moves the tanks.
+_NET1_TANK = (" 2               \t850         \t120         \t100         \t150         "
+              "\t50.5        \t0           \t                \t;")
+_NET1_CONTROLS = (" LINK 9 OPEN IF NODE 2 BELOW 110\n LINK 9 CLOSED IF NODE 2 ABOVE 140", "")
+
+
+def _tank_run(net, model, state, drivers):
+    """`(levels, flows, states)` at every report time from 0 to the duration: every tank's
+    level, the link flows of the solve at that time (EPANET reports the solution of the
+    step that starts there) and the solved states."""
+    base = drivers["water.sources"].clone()
+
+    def at(time):
+        return {**drivers, "water.sources": base * _pattern_factor(net, time)}
+
+    levels, flows, states = [], [], []
+    time = 0.0
+    while True:
+        levels.append(tank_levels(model, state).clone())
+        if time >= net.duration - 1e-9:
+            solved = water_steady(model, state, at(time))
+            flows.append(solved["water.q"])
+            states.append(solved)
+            break
+        report_end = time + net.report_timestep
+        first = None
+        while time < report_end - 1e-9:
+            state, dt = water_event_step(model, state, at(time), report_end - time)
+            if first is None:
+                first = state
+            time += dt
+        flows.append(first["water.q"])
+        states.append(first)
+    return torch.stack(levels), torch.stack(flows), states
+
+
+def _compare_tank_run(tmp_path, text, tag, *, tanks, links=()):
+    """Run `text` through EPANET and `_tank_run`; return the worst level difference (m)
+    over every reported time and tank, and the worst flow difference (m3/s) of `links`.
+    The file is read from its own name: EPANET's run rewrites `<tag>.inp` in wntr's words."""
+    path = tmp_path / f"{tag}-input.inp"
+    path.write_text(text)
+    results = wntr.sim.EpanetSimulator(wntr.network.WaterNetworkModel(str(path))).run_sim(
+        file_prefix=str(tmp_path / tag))
+    net = read_epanet_inp(path)
+    model, start, drivers = build_model(net)
+    levels, flows, states = _tank_run(net, model, start, drivers)
+    heads = results.node["head"]
+    assert levels.shape[0] == len(heads.index)
+    worst_level = 0.0
+    for k, name in enumerate(t.name for t in net.tanks):
+        if name not in tanks:
+            continue
+        theirs = torch.tensor(heads[name].to_numpy(), dtype=F64) - net.tanks[k].elevation
+        worst_level = max(worst_level, float((levels[:, k] - theirs).abs().max()))
+    worst_flow = 0.0
+    for name in links:
+        j = model.link_names.index(name)
+        theirs = torch.tensor(results.link["flowrate"][name].to_numpy(), dtype=F64)
+        worst_flow = max(worst_flow, float((flows[:, j] - theirs).abs().max()))
+    return worst_level, worst_flow, (net, model, levels, flows, start, drivers)
+
+
+def test_volume_curve_tank_matches_epanet(tmp_path):
+    """Net1 with tank 2 on a volume curve whose area changes at every point the level
+    crosses (the pump's controls at 110 and 140 ft fall on different segments), 24 h.
+    MEASURED: 6.9e-5 m levels, 5.5e-8 m3/s in pipe 110."""
+    curve = "\n".join(f" VC {x} {y}" for x, y in ((0, 0), (60, 90000), (110, 200000),
+                                                   (130, 250000), (160, 360000)))
+    text = (DATA / "Net1.inp").read_text()
+    assert _NET1_TANK in text
+    text = text.replace(_NET1_TANK, _NET1_TANK.replace("\t                \t;",
+                                                       "\tVC              \t;"))
+    text = text.replace("[CURVES]", "[CURVES]\n" + curve)
+    worst, worst_q, (net, *_rest) = _compare_tank_run(tmp_path, text, "vc", tanks={"2"},
+                                                      links=("110",))
+    assert net.tanks[0].volume_curve == "VC"
+    assert worst < 2e-4, worst
+    assert worst_q < 1e-6, worst_q
+
+
+def test_tank_fills_and_closes_its_inlet_like_epanet(tmp_path):
+    """Net1 without its pump controls: the tank fills at about 15.5 h and stays full, with
+    pipe 110 closed against inflow (`tankstatus`) and the pump supplying only the demand.
+    MEASURED: 2.5e-5 m levels, 3.7e-8 m3/s in pipe 110 and the pump."""
+    text = (DATA / "Net1.inp").read_text().replace(*_NET1_CONTROLS)
+    worst, worst_q, (net, model, levels, flows, _s, _d) = _compare_tank_run(
+        tmp_path, text, "fill", tanks={"2"}, links=("110", "9"))
+    full = levels[:, 0] >= net.tanks[0].max_level - 1e-6
+    assert int(full.sum()) == 9                               # 16 h to 24 h, at the max
+    assert bool((flows[full, model.link_names.index("110")].abs() < 1e-12).all())
+    assert worst < 2e-4, worst
+    assert worst_q < 1e-6, worst_q
+
+
+def test_tank_empties_like_epanet(tmp_path):
+    """Net1 without its controls at 1.5 times the demand and a minimum level of 115 ft: the
+    tank empties at about 6.5 h, pipe 110 then refuses to drain it while the pump alone
+    supplies the network, and from 12 h the network refills it. MEASURED: 2.3e-5 m levels,
+    3.2e-8 m3/s in pipe 110 and the pump."""
+    text = (DATA / "Net1.inp").read_text().replace(*_NET1_CONTROLS)
+    text = text.replace(" Demand Multiplier  \t1.0", " Demand Multiplier  \t1.5")
+    text = text.replace(_NET1_TANK, _NET1_TANK.replace("\t120         \t100   ",
+                                                       "\t120         \t115   "))
+    worst, worst_q, (net, model, levels, flows, _s, _d) = _compare_tank_run(
+        tmp_path, text, "empty", tanks={"2"}, links=("110", "9"))
+    empty = levels[:, 0] <= net.tanks[0].min_level + 1e-6
+    assert int(empty.sum()) >= 5
+    assert bool((flows[empty, model.link_names.index("110")][:-1].abs() < 1e-12).all())
+    assert worst < 2e-4, worst
+    assert worst_q < 1e-6, worst_q
+
+
+_FULL_AT_START = """[TITLE]
+A pump filling a tank that starts full
+[JUNCTIONS]
+ J0  44  0
+ J1  40  5
+[RESERVOIRS]
+ R1  45
+[TANKS]
+ T1  50  10  1  10  8  0  *  ;
+[PIPES]
+ P1  T1  J1  500  200  100  0  Open
+ P0  R1  J0  50  300  100  0  Open
+[PUMPS]
+ PU1  J0  T1  HEAD C1
+[CURVES]
+ C1  12  30
+[PATTERNS]
+ 1  1.0  1.6  0.6  1.2
+[OPTIONS]
+ Units  LPS
+ Headloss  H-W
+ Pattern  1
+[TIMES]
+ Duration  12:00
+ Hydraulic Timestep  1:00
+ Pattern Timestep  3:00
+ Report Timestep  1:00
+[END]
+"""
+
+
+def test_full_tank_at_start_closes_the_pump(tmp_path):
+    """A pump discharging into a tank that starts full is closed (`tankstatus`, case 1) --
+    a CLOSED status, so its own shut-off row is not reached -- and reopens once the tank
+    has drained below the band; from then on it fills the tank to full and closes again
+    many times an hour, each fill ended by the step to the instant the tank is full
+    (`tanktimestep`, rounded to whole seconds as EPANET does). MEASURED: 5.3e-6 m levels,
+    8.9e-9 m3/s in the pump and the pipe."""
+    worst, worst_q, (net, model, levels, flows, start, drivers) = _compare_tank_run(
+        tmp_path, _FULL_AT_START, "full", tanks={"T1"}, links=("PU1", "P1"))
+    pump = model.link_names.index("PU1")
+    assert float(flows[0, pump]) == 0.0
+    solved = water_steady(model, start, drivers)
+    assert int(link_states(model, solved, drivers)[pump]) == 0
+    assert float(flows[1, pump]) > 0.01
+    assert worst < 2e-4, worst
+    assert worst_q < 1e-6, worst_q
+
+
+def test_tank_overflow_like_epanet(tmp_path):
+    """Net1 without its pump controls and tank 2 allowed to overflow: once full the tank
+    keeps its inlet open, its level is held at the maximum, and what flows in is the
+    overflow (`tank_overflow`). MEASURED: 2.5e-5 m levels, 2.5e-8 m3/s in pipe 110 and the
+    pump."""
+    text = (DATA / "Net1.inp").read_text().replace(*_NET1_CONTROLS)
+    text = text.replace(_NET1_TANK, _NET1_TANK.replace("\t                \t;",
+                                                       "\t*               \tYES"))
+    worst, worst_q, (net, model, levels, flows, start, drivers) = _compare_tank_run(
+        tmp_path, text, "overflow", tanks={"2"}, links=("110", "9"))
+    assert net.tanks[0].overflow
+    full = levels[:, 0] >= net.tanks[0].max_level - 1e-6
+    assert int(full.sum()) == 9
+    pipe = model.link_names.index("110")
+    assert bool((flows[full, pipe] < -0.03).all())     # still filling the full tank
+    # over a step that starts full, everything that flows in overflows
+    full_state = initial_state(model, values={"water.tank_level": {"2": 150 * 0.3048}})
+    stepped, dt = water_event_step(model, full_state, drivers, 600.0)
+    assert float(tank_levels(model, stepped)[0]) == pytest.approx(150 * 0.3048, abs=1e-9)
+    overflow = tank_overflow(model, full_state, stepped, dt)
+    assert float(overflow[0]) > 0.03
+    torch.testing.assert_close(overflow, tank_inflow(model, stepped), rtol=1e-12, atol=0)
+    assert worst < 2e-4, worst
+    assert worst_q < 1e-6, worst_q

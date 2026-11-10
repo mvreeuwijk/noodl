@@ -33,18 +33,154 @@ Net1 driver does not need: Net1's pattern step (2 h) is an exact multiple of its
 hydraulic step (1 h), so no demand-period boundary ever falls strictly inside a step and the
 omission is masked on every fixture the application is measured against.
 
-A level outside `[y_min, y_max]` is REFUSED by name: EPANET closes links instead, and
-silently doing the same would change the network the user asked for.
+FULL AND EMPTY TANKS. Under `"forward_euler"` the closure applies EPANET's `tankstatus`
+(`hydstatus.c`): a tank whose head is within `HTOL` of its maximum is full and one within
+`HTOL` of its minimum is empty, and every link to it is given the one direction that cannot
+fill a full tank or drain an empty one (`"water.one_way"`); a pump discharging into a full
+tank or drawing from an empty one is CLOSED for the step, as is a link both rules forbid (a
+check valve into a full tank). A tank that may overflow (`Tank.overflow`) is never full.
+The step itself is EPANET's `tanklevels` (`water_event_step`): it is shortened to the time a
+tank fills or empties (`TankLevels.time_to_limit`), and a tank within one second of its
+limit is put on it. Under the implicit schemes the tank moves inside the solve, so these
+rules do not apply there and a level outside `[y_min, y_max]` is refused by name instead.
+
+A tank that is not a cylinder is a `TankVolumeCurve`: its volume a piecewise linear
+function of its level (`[CURVES]`), stepped by volume (`NodeStorage.potential_of`).
 """
 
 from __future__ import annotations
 
 import torch
 
-from noodl.apps.water.controls import OPEN
+from noodl.apps.water.controls import CLOSED, OPEN
+from noodl.apps.water.elements import M_PER_FT, ONE_WAY_KEY, STATUS_KEY
+from noodl.elements.base import ConstitutiveLaw
+from noodl.storage import NodeStorage
 
 Tensor = torch.Tensor
 F64 = torch.float64
+
+#: EPANET 2.2's head tolerance `Htol` (0.0005 ft, `hydraul.c`, `inithyd`) in metres: a tank
+#: within it of its maximum (minimum) level is full (empty) (`hydstatus.c`, `tankstatus`).
+HTOL = 0.0005 * M_PER_FT
+
+#: EPANET's `TINY` (`types.h`): a curve segment narrower than this takes its end value
+#: (`project.c`, `interp`).
+TINY = 1e-6
+
+
+def _interp(x: Tensor, y: Tensor, last: Tensor, xx: Tensor, *,
+            right: bool = False) -> tuple[Tensor, Tensor]:
+    """EPANET 2.2's `interp` (`project.c`), per curve, and the slope it takes.
+
+    `x`, `y`: `(n, width)`, one curve per row, `x` ascending, padded beyond each row's
+    `last` index; `xx`: `(..., n)`. Returns `(y(xx), dy/dx)`: `y[0]` at or below the first
+    point, `y[last]` beyond the last (no extrapolation, slope 0), and otherwise the segment
+    whose right end is the first point with `x >= xx`, so the LEFT segment at a point, as
+    EPANET; `right=True` takes the right one there instead (the first point with `x > xx`;
+    used only for the slope a rising level moves onto)."""
+    width = x.shape[-1]
+    valid = torch.arange(width) <= last[:, None]
+    xd, xxd = x.detach(), xx.detach()[..., None]
+    k = (((xxd >= xd) if right else (xxd > xd)) & valid).sum(-1)
+    hi = torch.minimum(k.clamp(min=1), last.expand(k.shape))
+    batch = xx.shape[:-1]
+    x_full, y_full = x.expand(batch + x.shape), y.expand(batch + y.shape)
+    x1 = x_full.gather(-1, hi[..., None]).squeeze(-1)
+    x0 = x_full.gather(-1, (hi - 1)[..., None]).squeeze(-1)
+    y1 = y_full.gather(-1, hi[..., None]).squeeze(-1)
+    y0 = y_full.gather(-1, (hi - 1)[..., None]).squeeze(-1)
+    dx, dy = x1 - x0, y1 - y0
+    flat = dx.abs() < TINY
+    slope = torch.where(flat, torch.zeros_like(dy), dy / torch.where(flat, 1.0, dx))
+    inside = torch.where(flat, y1, y1 - (x1 - xx) * slope)
+    first = y_full[..., 0]
+    end = y_full.gather(-1, last.expand(k.shape)[..., None]).squeeze(-1)
+    below, above = k == 0, k > last
+    value = torch.where(below, first, torch.where(above, end, inside))
+    slope = torch.where(below | above, torch.zeros_like(slope), slope)
+    return value, slope
+
+
+class TankVolumeCurve(NodeStorage):
+    """Tanks whose volume is a piecewise linear function of the level: EPANET's volume
+    curve (`[TANKS]` VolCurve, `[CURVES]` level against volume).
+
+    `nodes` are the tank nodes, `bottom` (m) their bottom elevations, and `levels` (m
+    above the bottom) and `volumes` (m3) each tank's curve points (one sequence per tank,
+    of any lengths, levels ascending and volumes not decreasing). The layer's potential is
+    the head times `head_scale` (`rho g` on the Darcy-Weisbach path).
+
+    `amount` is EPANET's `tankvolume` and `potential_of` its `tankgrade` (`hydraul.c`), both
+    through `interp` (`project.c`): linear between the points, the end values beyond the
+    ends. `capacity` is the slope of the segment (`d volume / d phi`, the left one at a
+    point). Under `tank_scheme="forward_euler"` the layer moves a tank to
+    `potential_of(amount + dt * inflow)` (`KirchhoffLayer.advance_storage`), EPANET's
+    `V += q dt; H = tankgrade(V)`, so the volume changes by exactly `dt * inflow`.
+    With `learnable=True` the volumes are a trainable `nn.Parameter`; the gradient reaches
+    them through the steps, not through the solve, which holds the tank at its head.
+    """
+
+    linear = False
+
+    def __init__(self, nodes, bottom, levels, volumes, *, head_scale: float = 1.0,
+                 learnable: bool = False) -> None:
+        super().__init__(nodes)
+        rows_x = [[float(v) for v in row] for row in levels]
+        rows_y = [[float(v) for v in row] for row in volumes]
+        n = self.nodes.numel()
+        if len(rows_x) != n or len(rows_y) != n:
+            raise ValueError(
+                f"TankVolumeCurve: {n} nodes need {n} curves, got {len(rows_x)} level and "
+                f"{len(rows_y)} volume rows")
+        for i, (xs, ys) in enumerate(zip(rows_x, rows_y, strict=True)):
+            if len(xs) != len(ys) or not xs:
+                raise ValueError(
+                    f"TankVolumeCurve: curve {i} has {len(xs)} levels and {len(ys)} volumes")
+            if any(b <= a for a, b in zip(xs, xs[1:], strict=False)) or any(
+                    b < a for a, b in zip(ys, ys[1:], strict=False)):
+                raise ValueError(
+                    f"TankVolumeCurve: curve {i} must have ascending levels and volumes "
+                    f"that do not decrease, got levels {xs} and volumes {ys}")
+        width = max(len(xs) for xs in rows_x)
+        pad = [(xs + [xs[-1]] * (width - len(xs)), ys + [ys[-1]] * (width - len(ys)))
+               for xs, ys in zip(rows_x, rows_y, strict=True)]
+        self.register_buffer("levels", torch.tensor([x for x, _ in pad], dtype=F64))
+        self.register_buffer("last", torch.tensor([len(xs) - 1 for xs in rows_x]))
+        self.register_buffer("bottom", torch.as_tensor(bottom, dtype=F64).clone())
+        self.volumes = ConstitutiveLaw._param(torch.tensor([y for _, y in pad], dtype=F64),
+                                              learnable)
+        self.head_scale = float(head_scale)
+
+    def _level(self, phi_nodes: Tensor) -> Tensor:
+        return phi_nodes / self.head_scale - self.bottom
+
+    def amount(self, phi_nodes, drivers=None):
+        return _interp(self.levels, self.volumes, self.last, self._level(phi_nodes))[0]
+
+    def capacity(self, phi_nodes, phi_start, drivers=None):
+        return _interp(self.levels, self.volumes, self.last,
+                       self._level(phi_nodes))[1] / self.head_scale
+
+    def potential_of(self, amount, drivers=None):
+        level = _interp(self.volumes, self.levels, self.last, amount)[0]
+        return (self.bottom + level) * self.head_scale
+
+    def area_toward(self, phi_nodes: Tensor, flow: Tensor) -> Tensor:
+        """Each tank's cross-section area (m2, `d volume / d level`) on the segment its
+        level moves onto at inflow `flow`: the right one at a point when rising, the left
+        one otherwise; where that segment has none (the last point rising, the first
+        falling) the other one's, and 1 where neither has."""
+        level = self._level(phi_nodes)
+        left = _interp(self.levels, self.volumes, self.last, level)[1]
+        right = _interp(self.levels, self.volumes, self.last, level, right=True)[1]
+        rising = flow.detach() > 0
+        toward = torch.where(rising, right, left)
+        other = torch.where(rising, left, right)
+        return torch.where(toward != 0, toward, torch.where(other != 0, other, 1.0))
+
+    def extra_repr(self) -> str:
+        return f"nodes={self.nodes.tolist()}"
 
 
 class TankLevels:
@@ -52,11 +188,23 @@ class TankLevels:
     are held at boundary nodes (`build_model(tank_scheme="forward_euler")`).
 
     A tank's level is its head in `"water.phi"` at `tank_nodes` less its bottom (`levels`).
-    Per call it applies the controls to those levels, refuses a level outside `[min, max]`
-    by name, and writes the reservoir heads into `"water.phi_boundary"`, then zeros in the
-    tanks' columns, which the layer fills with their step-start heads
-    (`KirchhoffLayer.hold_storage`). Only the link status is carried. `event_step` is
-    EPANET's shortening of the step to the next control crossing.
+    Per call it applies the controls to those levels and writes the reservoir heads into
+    `"water.phi_boundary"`, then zeros in the tanks' columns, which the layer fills with
+    their step-start heads (`KirchhoffLayer.hold_storage`). Only the link status is
+    carried. `event_step` is EPANET's shortening of the step to the next control crossing,
+    `time_to_limit` the time a tank takes to fill or empty.
+
+    FULL AND EMPTY TANKS (`hydstatus.c`, `tankstatus`). `tank_links` lists, per link that
+    touches a tank, `(link, tank, at_start, kind)`: the link's position in `link_names`, the
+    tank EPANET examines for it (the start node when that is a tank or reservoir -- a link
+    from a reservoir is never examined -- else the end node), whether that tank is the
+    link's start node, and `"pipe"`, `"pump"` or `"valve"`. When a tank is full (level
+    `>= max - HTOL`, and not `overflow`) or empty (`<= min + HTOL`) the closure also writes
+    `"water.one_way"`: a pipe to it takes the one direction out of a full tank or into an
+    empty one (on top of the drivers' own, `one_way` as built); a pump discharging into a
+    full tank or drawing from an empty one, and a pipe both directions are then forbidden
+    (a check valve into a full tank), are CLOSED in `"water.status"` for the call. A valve
+    at a full or empty tank is refused by name (the valves take no direction).
 
     A pump's entry of `"water.status"` is written from the carried `"water.link_status"` on
     every call, so a pump is closed by setting that state, not the driver.
@@ -85,6 +233,9 @@ class TankLevels:
         head_scale: float = 1.0,
         link_names,
         link_status: Tensor,
+        tank_links=(),
+        one_way: Tensor | None = None,
+        storage: NodeStorage | None = None,
     ) -> None:
         self.net = net
         self.tanks = list(tanks)
@@ -129,6 +280,20 @@ class TankLevels:
         self.bottom = torch.tensor([t.elevation for t in self.tanks], dtype=F64)
         self.y_min = torch.tensor([t.min_level for t in self.tanks], dtype=F64)
         self.y_max = torch.tensor([t.max_level for t in self.tanks], dtype=F64)
+        self.overflow = torch.tensor([bool(getattr(t, "overflow", False))
+                                      for t in self.tanks])
+        # the tanks' storage, read for their volumes when it is not a cylinder's
+        self.storage = storage
+        # EPANET's `tankstatus` rules, per link that touches a tank (see the class docstring)
+        rules = list(tank_links)
+        self.one_way = (torch.zeros(len(self.link_names), dtype=F64) if one_way is None
+                        else torch.as_tensor(one_way, dtype=F64))
+        self._rule_links = torch.tensor([r[0] for r in rules], dtype=torch.long)
+        self._rule_tanks = torch.tensor([r[1] for r in rules], dtype=torch.long)
+        self._rule_out = torch.tensor([bool(r[2]) for r in rules])   # tank at the start
+        self._rule_valve = torch.tensor([r[3] == "valve" for r in rules])
+        self._is_pump = torch.zeros(len(self.link_names), dtype=torch.bool)
+        self._is_pump[self.pump_links] = True
 
     def levels(self, state) -> Tensor:
         """Every tank's level (m above its bottom) in `state`."""
@@ -142,7 +307,8 @@ class TankLevels:
                 f"both required; build them with initial_state(model)"
             )
         level = self.levels(state)
-        read = (level.detach(), status.detach(), drivers.get("water.status"))
+        read = (level.detach(), status.detach(), drivers.get(STATUS_KEY),
+                drivers.get(ONE_WAY_KEY))
         memo = getattr(self, "_memo", None)
         if memo is not None and all(
                 (a is None and b is None) or (a is not None and b is not None
@@ -153,8 +319,11 @@ class TankLevels:
             status = self._apply_controls(level, status)
         self._refuse_outside(level)
         out = {"water.phi_boundary": self._boundary(state, level),
-               "water.status": self._link_status(drivers, status),
+               STATUS_KEY: self._link_status(drivers, status),
                "water.link_status": status}
+        limited = self._full_and_empty(level, drivers, out[STATUS_KEY])
+        if limited is not None:
+            out[STATUS_KEY], out[ONE_WAY_KEY] = limited
         self._memo = (tuple(None if t is None else t.clone() for t in read), out)
         return dict(out)
 
@@ -178,7 +347,93 @@ class TankLevels:
             dim=-1,
         )
 
+    def _full_and_empty(self, level: Tensor, drivers, link_status: Tensor):
+        """`(status, one_way)` with EPANET's `tankstatus` rules applied for every full and
+        empty tank (see the class docstring), or `None` when no tank is either (the usual
+        case, which adds no driver). Computed without a graph: it only selects."""
+        if not self._rule_links.numel():
+            return None
+        with torch.no_grad():
+            level = level.detach()
+            full = (level >= self.y_max - HTOL) & ~self.overflow
+            empty = level <= self.y_min + HTOL
+            if not bool((full | empty).any()):
+                return None
+            f, e = full[..., self._rule_tanks], empty[..., self._rule_tanks]
+            start = self._rule_out
+            # the direction left open: out of a full tank, into an empty one
+            forward = (f & start) | (e & ~start)
+            reverse = (f & ~start) | (e & start)
+            if not bool((forward | reverse).any()):
+                return None
+            n_links = len(self.link_names)
+            way = drivers.get(ONE_WAY_KEY, self.one_way).detach().to(F64)
+            batch = torch.broadcast_shapes(level.shape[:-1], link_status.shape[:-1],
+                                           way.shape[:-1])
+            open_ = link_status.expand(batch + (n_links,))[..., self._rule_links] != CLOSED
+            valve = (forward | reverse) & self._rule_valve & open_
+            if bool(valve.any()):
+                links = self._rule_links[valve.reshape(-1, valve.shape[-1]).any(0)]
+                names = [self.link_names[j] for j in links.tolist()]
+                raise ValueError(
+                    f"TankLevels: valve(s) {names} are at a full or empty tank, which "
+                    f"EPANET closes against filling or draining it (`tankstatus`); a valve "
+                    f"takes no flow direction here")
+            pos = torch.zeros(batch + (n_links,), dtype=torch.bool)
+            neg = torch.zeros(batch + (n_links,), dtype=torch.bool)
+            pos[..., self._rule_links] = forward.expand(batch + forward.shape[-1:])
+            neg[..., self._rule_links] = reverse.expand(batch + reverse.shape[-1:])
+            way = way.expand(batch + (n_links,))
+            pump = self._is_pump
+            # a pump runs forward only: one that may only run in reverse is closed
+            closed = (pump & neg) | (~pump & ((pos & (neg | (way < 0)))
+                                              | (neg & (pos | (way > 0)))))
+            pipe = ~pump & ~closed
+            way = torch.where(pipe & pos, 1.0, torch.where(pipe & neg, -1.0, way))
+            status = torch.where(closed, float(CLOSED),
+                                 link_status.expand(batch + (n_links,)))
+        return status, way
+
+    def time_to_limit(self, level: Tensor, rate: Tensor) -> Tensor:
+        """Seconds each tank takes to reach its maximum level (rising, `rate > 0`) or its
+        minimum (falling) at the constant rate `rate` (dy/dt, m/s), `inf` where it stands
+        still or is at or beyond the limit it moves towards. EPANET's `tanktimestep`
+        (`hydraul.c`): `(Vmax - V) / q` or `(Vmin - V) / q` by volume, which a tank on a
+        volume curve (`TankVolumeCurve`) reads from its curve, its inflow `q` being
+        `rate` times its area on the segment it moves onto (`area_toward`, the area
+        `water_event_step` divides the inflow by). EPANET then rounds to whole seconds;
+        this is the exact time. Not differentiable: it only places a step."""
+        with torch.no_grad():
+            level, rate = level.detach(), rate.detach()
+            rising, falling = rate > 0, rate < 0
+            moving = (rising & (level < self.y_max)) | (falling & (level > self.y_min))
+            target = torch.where(rising, self.y_max, self.y_min)
+            safe = torch.where(moving, rate, torch.ones_like(rate))
+            if self._curved:
+                time = self._volume_time(target, level, safe)
+            else:
+                time = (target - level) / safe
+            return torch.where(moving, time, torch.full_like(time, torch.inf))
+
+    @property
+    def _curved(self) -> bool:
+        """True when the tanks are on volume curves (their storage is not linear)."""
+        return self.storage is not None and not self.storage.linear
+
+    def _volume_time(self, target: Tensor, level: Tensor, rate: Tensor) -> Tensor:
+        """Seconds from `level` to `target` (m, per tank) at the level rate `rate`, by
+        volume: `(V(target) - V(level)) / q` with `q = rate * area_toward(level)`."""
+        phi = (self.bottom + level) * self.head_scale
+        volume = self.storage.amount(phi)
+        to = self.storage.amount((self.bottom + target) * self.head_scale)
+        flow = rate * self.storage.area_toward(phi, rate)
+        return (to - volume) / flow
+
     def _refuse_outside(self, level: Tensor) -> None:
+        """Nothing: a tank held at a boundary node beyond a limit is full or empty
+        (`_full_and_empty`), as EPANET treats it. `TankStorageControls` refuses it."""
+
+    def _refuse_level_outside(self, level: Tensor) -> None:
         """Refuse, by name, a tank outside its `[min, max]` levels."""
         outside = (level < self.y_min - 1e-9) | (level > self.y_max + 1e-9)
         if bool(outside.any()):
@@ -210,11 +465,18 @@ class TankLevels:
         controlled tank exists -- it silently uses the wrong tank's level.
         """
         step = dt
+        level, rate = level.detach(), rate.detach()
         for control in self.controls:
-            r = float(rate[self.tank_of[control.node]])
+            i = self.tank_of[control.node]
+            r = float(rate[i])
             if r == 0.0:
                 continue
-            crossing = (control.value - float(level[self.tank_of[control.node]])) / r
+            if self._curved:   # by volume, as EPANET's `controltimestep`
+                target = level.clone()
+                target[i] = control.value
+                crossing = float(self._volume_time(target, level, rate)[i].detach())
+            else:
+                crossing = (control.value - float(level[i])) / r
             if 1e-9 < crossing < step:
                 step = crossing + 1e-9
         return step
@@ -234,13 +496,24 @@ class TankLevels:
 class TankStorageControls(TankLevels):
     """`TankLevels` for tanks stepped inside the solve, as interior storage nodes
     (`build_model(tank_scheme="backward_euler")` or `"trapezoidal"`): it writes only the
-    reservoir heads into `"water.phi_boundary"`, and its `event_step` never shortens a step
-    below `min_step`.
+    reservoir heads into `"water.phi_boundary"`, refuses a level outside `[min, max]` by
+    name instead of applying the full and empty rules, and its `event_step` never shortens
+    a step below `min_step`.
     """
 
     def _boundary(self, state, level: Tensor) -> Tensor:
         """The reservoir heads (the tanks are interior nodes here)."""
         return self.reservoir_heads.expand(level.shape[:-1] + self.reservoir_heads.shape)
+
+    def _refuse_outside(self, level: Tensor) -> None:
+        """Refuse, by name, a tank outside its `[min, max]` levels: stepped inside the solve,
+        a tank has no full or empty rule."""
+        self._refuse_level_outside(level)
+
+    def _full_and_empty(self, level: Tensor, drivers, link_status: Tensor):
+        """`None`: the full and empty rules act at the step start on a held tank; here the
+        tank moves inside the solve, and a level beyond a limit is refused instead."""
+        return None
 
     def event_step(self, level: Tensor, rate: Tensor, dt: float,
                    min_step: float = 1.0) -> float:

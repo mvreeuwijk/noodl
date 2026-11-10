@@ -476,6 +476,7 @@ def _storage_cases() -> dict[type, Callable[[], list[StorageCase]]]:
     from noodl.apps.building_physics.modelica.storage import ZoneStorage, thermo
     from noodl.apps.building_physics.prj import ZoneAirMassChange
     from noodl.apps.sewer.dynwave import JunctionStorage
+    from noodl.apps.water.tanks import TankVolumeCurve
     from noodl.elements import medium
     from noodl.storage import LinearStorage
 
@@ -520,6 +521,12 @@ def _storage_cases() -> dict[type, Callable[[], list[StorageCase]]]:
             StorageCase(LinearStorage([0], 2.5), _grid(1), _t([0.3]), _t([0.01])),
             StorageCase(LinearStorage([0, 1], _t([1e-6, 40.0]), learnable=True),
                         _grid(2, -8, 3), _t([1.0, -2.0]), _t([0.0, 0.5])),
+        ],
+        # EPANET's volume curve: on its segments and beyond both ends (slope 0 there)
+        TankVolumeCurve: lambda: [
+            StorageCase(TankVolumeCurve([0, 1], _t([0.0, 0.5]), [[0.0, 1.0, 3.0], [0.0, 2.5]],
+                                        [[0.0, 2.0, 10.0], [1.0, 6.0]], head_scale=1.5),
+                        _grid(2, -6, 0.5, centre=2.5), _t([2.0, 2.0]), _t([0.0, 0.1])),
         ],
         JunctionStorage: lambda: [
             StorageCase(JunctionStorage(torch.tensor([0, 1]), bed=_t([1.0, 1.0]), bed_area=0.5),

@@ -10,9 +10,16 @@ import torch
 
 from noodl import Model
 from noodl.apps.water.controls import CLOSED, OPEN, Control
+from noodl.apps.water.elements import ONE_WAY_KEY, STATUS_KEY
 from noodl.apps.water.inp import read_epanet_inp
 from noodl.apps.water.network import (
+    Junction,
+    Pump,
+    Reservoir,
     Tank,
+    Valve,
+    WaterNetwork,
+    WaterPipe,
     build_model,
     initial_state,
     tank_inflow,
@@ -20,7 +27,7 @@ from noodl.apps.water.network import (
     water_event_step,
     water_step,
 )
-from noodl.apps.water.tanks import TankLevels
+from noodl.apps.water.tanks import TankLevels, TankVolumeCurve
 from noodl.elements.base import LawContext
 from noodl.storage import LinearStorage
 
@@ -251,3 +258,208 @@ def test_controls_read_the_step_start_level_in_every_pass_of_a_step(monkeypatch)
     assert stepped["water.link_status"].tolist() == [1.0]             # ... the pump stays open
     once = pingpong.step(state, drivers, 1800.0, **kwargs)
     torch.testing.assert_close(stepped["water.phi"], once["water.phi"], rtol=0, atol=1e-9)
+
+
+# ------------------------------------------------------------------ volume curves
+def test_volume_curve_amount_and_inverse_follow_epanets_interp():
+    """`TankVolumeCurve` is EPANET's `tankvolume`/`tankgrade` (`hydraul.c`), both through
+    `interp` (`project.c`): linear between the points, the left segment AT a point, and
+    the end values beyond the ends (no extrapolation)."""
+    curve = TankVolumeCurve([0, 1], torch.tensor([10.0, 0.0], dtype=F64),
+                            [[0.0, 1.0, 3.0], [0.0, 2.0]], [[0.0, 2.0, 10.0], [0.0, 8.0]],
+                            head_scale=2.0)
+    level = torch.tensor([[0.5, 1.0], [1.0, 2.0], [2.0, -1.0], [-1.0, 0.5], [4.0, 1.5]],
+                         dtype=F64)
+    phi = (torch.tensor([10.0, 0.0], dtype=F64) + level) * 2.0
+    volume = curve.amount(phi)
+    expected = torch.tensor([[1.0, 4.0], [2.0, 8.0], [6.0, 0.0], [0.0, 2.0], [10.0, 6.0]],
+                            dtype=F64)
+    torch.testing.assert_close(volume, expected, rtol=0, atol=1e-14)
+    # capacity: d volume / d phi of the segment (the left one at a point), 0 beyond the ends
+    capacity = curve.capacity(phi, phi)
+    expected_slope = torch.tensor([[2.0, 4.0], [2.0, 4.0], [4.0, 0.0], [0.0, 4.0],
+                                   [0.0, 4.0]], dtype=F64) / 2.0
+    torch.testing.assert_close(capacity, expected_slope, rtol=0, atol=1e-14)
+    # potential_of inverts amount inside the curve
+    inside = torch.tensor([[1.0, 4.0], [2.0, 6.0], [6.0, 2.0]], dtype=F64)
+    back = curve.amount(curve.potential_of(inside))
+    torch.testing.assert_close(back, inside, rtol=0, atol=1e-13)
+    assert not curve.linear
+
+
+def _net1_with_volume_curve(tmp_path, points=((0, 0), (60, 90000), (110, 200000),
+                                              (130, 250000), (160, 360000))):
+    """Net1 with tank 2 on a volume curve (level ft, volume ft3) instead of its cylinder."""
+    text = NET1.read_text()
+    row = (" 2               \t850         \t120         \t100         \t150         "
+           "\t50.5        \t0           \t                \t;")
+    assert row in text
+    text = text.replace(row, row.replace("\t                \t;", "\tVC              \t;"))
+    text = text.replace("[CURVES]", "[CURVES]\n" + "\n".join(f" VC {x} {y}" for x, y in points))
+    path = tmp_path / "Net1_vc.inp"
+    path.write_text(text)
+    return path
+
+
+def test_a_volume_curve_tank_is_one_tank_volume_curve_storage(tmp_path):
+    model, state, drivers = build_model(read_epanet_inp(_net1_with_volume_curve(tmp_path)))
+    (storage,) = model.kirchhoff["water"].storage
+    assert isinstance(storage, TankVolumeCurve)
+    torch.testing.assert_close(tank_levels(model, state), torch.tensor([120.0 * 0.3048],
+                                                                       dtype=F64))
+
+
+def test_volume_curve_advance_conserves_volume(tmp_path):
+    """One EPANET step of a tank on a volume curve changes its VOLUME by exactly
+    dt * inflow (`hydraul.c`, `tanklevels`: V += q dt, H = tankgrade(V))."""
+    model, state, drivers = build_model(read_epanet_inp(_net1_with_volume_curve(tmp_path)))
+    (storage,) = model.kirchhoff["water"].storage
+    tank = storage.nodes
+    stepped, dt = water_event_step(model, state, drivers, 1800.0)
+    assert dt == 1800.0
+    inflow = tank_inflow(model, stepped)
+    before = storage.amount(state["water.phi"][tank])
+    after = storage.amount(stepped["water.phi"][tank])
+    torch.testing.assert_close(after - before, dt * inflow, rtol=1e-12, atol=0)
+    assert float(inflow[0]) > 0.0
+
+
+def test_volume_curve_gradient_against_central_differences(tmp_path):
+    """d(tank level after 3 steps) / d(one volume of the curve), through the inverse of
+    every step, against central differences."""
+    model, state, drivers = build_model(read_epanet_inp(_net1_with_volume_curve(tmp_path)))
+    (storage,) = model.kirchhoff["water"].storage
+    storage.volumes.requires_grad_(True)
+    j = 2   # the point at 110 ft, whose segments the level is on
+
+    def level():
+        s = state
+        for _ in range(3):
+            s, dt = water_event_step(model, s, drivers, 1200.0)
+            assert dt == 1200.0
+        return tank_levels(model, s)[0]
+
+    (analytic,) = torch.autograd.grad(level(), storage.volumes)
+    # MEASURED: 1.4e-9 relative at this step; 1e-3 of the volume leaves 1.6e-5 of truncation
+    h = 1e-5 * float(storage.volumes[0, j].detach())
+    with torch.no_grad():
+        base = storage.volumes.detach().clone()
+        storage.volumes[0, j] = base[0, j] + h
+        up = float(level())
+        storage.volumes[0, j] = base[0, j] - h
+        down = float(level())
+        storage.volumes.copy_(base)
+    fd = (up - down) / (2 * h)
+    assert fd != 0.0
+    assert math.isclose(float(analytic[0, j]), fd, rel_tol=1e-6), (analytic[0, j], fd)
+
+
+# ------------------------------------------------------------------ full and empty tanks
+def _tank_rules_net(*, overflow=False, valve=False):
+    """A reservoir, two junctions and two tanks, joined by every kind of link whose
+    `tankstatus` (`hydstatus.c`) rule differs: pipes with the tank at either end, a check
+    valve into the tank, a pipe between the tanks, and pumps into, out of and from a
+    reservoir to the tank."""
+    curve = {"C1": ((0.01, 30.0),)}
+    tanks = (Tank("T1", 50.0, 5.0, 1.0, 10.0, 5.0, overflow=overflow),
+             Tank("T2", 50.0, 5.0, 1.0, 10.0, 5.0))
+    pipes = (WaterPipe("P0", "R", "J0", 100.0, 0.3, 100.0),
+             WaterPipe("A", "T1", "J1", 100.0, 0.3, 100.0),
+             WaterPipe("B", "J1", "T1", 100.0, 0.3, 100.0),
+             WaterPipe("CV", "J1", "T1", 100.0, 0.3, 100.0, status="CV"),
+             WaterPipe("T", "T1", "T2", 100.0, 0.3, 100.0),
+             WaterPipe("B2", "J1", "T2", 100.0, 0.3, 100.0))
+    pumps = (Pump("PU", "J0", "T1", "C1"), Pump("PR", "R", "T1", "C1"),
+             Pump("PS", "T1", "J1", "C1"))
+    valves = (Valve("V", "J1", "T1", 0.3, "TCV", 1.0),) if valve else ()
+    return WaterNetwork(
+        junctions=(Junction("J0", 0.0), Junction("J1", 0.0, 0.001)),
+        reservoirs=(Reservoir("R", 100.0),), tanks=tanks, pipes=pipes, pumps=pumps,
+        valves=valves, curves=curve)
+
+
+def _rules(levels, **kwargs):
+    model, _, drivers = build_model(_tank_rules_net(**kwargs))
+    state = initial_state(model, values={"water.tank_level": levels})
+    out = model.tank_closure(state, drivers)
+    names = model.link_names
+    one_way = out.get(ONE_WAY_KEY, drivers[ONE_WAY_KEY])
+    return ({n: int(v) for n, v in zip(names, out[STATUS_KEY].tolist(), strict=True)},
+            {n: int(v) for n, v in zip(names, one_way.tolist(), strict=True)})
+
+
+def test_a_full_tank_lets_its_links_only_drain_it():
+    """`tankstatus`: a full tank (head >= Hmax - Htol) closes a link that would fill it: a
+    pipe takes the one direction out of the tank, a pump discharging into it closes, and a
+    link both rules forbid (the check valve into it) is CLOSED. Only the link's START node
+    is examined when it is a tank or reservoir (`n1` first), so the pump from the reservoir
+    and the pipe from T1 to T2 never see the end node."""
+    status, one_way = _rules({"T1": 10.0 - 1e-4})
+    assert one_way == {"P0": 0, "A": 1, "B": -1, "CV": 1, "T": 1, "B2": 0, "PU": 0, "PR": 0,
+                       "PS": 0}
+    assert status == {"P0": OPEN, "A": OPEN, "B": OPEN, "CV": CLOSED, "T": OPEN, "B2": OPEN,
+                      "PU": CLOSED, "PR": OPEN, "PS": OPEN}
+    status, one_way = _rules({"T2": 10.0})
+    assert one_way["T"] == 0 and one_way["B2"] == -1
+    # just below the band, nothing changes
+    status, one_way = _rules({"T1": 10.0 - 2e-4})
+    assert one_way["A"] == 0 and one_way["B"] == 0 and one_way["CV"] == 1
+    assert status["CV"] == OPEN and status["PU"] == OPEN
+
+
+def test_an_empty_tank_lets_its_links_only_fill_it():
+    status, one_way = _rules({"T1": 1.0 + 1e-4})
+    assert one_way == {"P0": 0, "A": -1, "B": 1, "CV": 1, "T": -1, "B2": 0, "PU": 0, "PR": 0,
+                       "PS": 0}
+    assert status == {"P0": OPEN, "A": OPEN, "B": OPEN, "CV": OPEN, "T": OPEN, "B2": OPEN,
+                      "PU": OPEN, "PR": OPEN, "PS": CLOSED}
+
+
+def test_a_full_tank_that_may_overflow_closes_nothing():
+    status, one_way = _rules({"T1": 10.0}, overflow=True)
+    assert one_way["A"] == 0 and one_way["B"] == 0 and status["PU"] == OPEN
+    assert status["CV"] == OPEN
+
+
+def test_a_valve_on_a_full_tank_is_refused_by_name():
+    model, _, drivers = build_model(_tank_rules_net(valve=True))
+    state = initial_state(model, values={"water.tank_level": {"T1": 10.0}})
+    with pytest.raises(ValueError, match=r"valve\(s\) \['V'\].*full or empty tank"):
+        model.tank_closure(state, drivers)
+    model.tank_closure(initial_state(model), drivers)   # not at a limit: no refusal
+
+
+def test_time_to_limit():
+    closure = _two_tank_closure(())
+    level = torch.tensor([19.0, 4.0], dtype=F64)
+    # TA rises to 20 in 1 / 0.01 s; TB falls to 0 in 4 / 0.5 s
+    torch.testing.assert_close(
+        closure.time_to_limit(level, torch.tensor([0.01, -0.5], dtype=F64)),
+        torch.tensor([100.0, 8.0], dtype=F64))
+    # already at the limit and still moving towards it, or standing still: never
+    out = closure.time_to_limit(torch.tensor([20.0, 4.0], dtype=F64),
+                                torch.tensor([0.01, 0.0], dtype=F64))
+    assert torch.isinf(out).all()
+    # moving away from the nearer limit: the time to the other one
+    out = closure.time_to_limit(torch.tensor([19.0], dtype=F64).expand(2),
+                                torch.tensor([-1.0, 1.0], dtype=F64))
+    torch.testing.assert_close(out, torch.tensor([19.0, 1.0], dtype=F64))
+
+
+def test_the_implicit_schemes_refuse_volume_curves_and_overflow(tmp_path):
+    net = read_epanet_inp(_net1_with_volume_curve(tmp_path))
+    with pytest.raises(ValueError, match=r"tank\(s\) \['2'\].*volume curve"):
+        build_model(net, tank_scheme="backward_euler")
+    with pytest.raises(ValueError, match=r"tank\(s\) \['T1'\].*overflow"):
+        build_model(_tank_rules_net(overflow=True), tank_scheme="trapezoidal")
+
+
+def test_only_the_implicit_schemes_refuse_a_level_outside_the_limits():
+    net = read_epanet_inp(NET1)
+    model, _, drivers = build_model(net)
+    state = initial_state(model, values={"water.tank_level": {"2": 100.0}})
+    model.tank_closure(state, drivers)   # forward Euler: a full tank, no refusal
+    model, _, drivers = build_model(net, tank_scheme="backward_euler")
+    state = initial_state(model, values={"water.tank_level": {"2": 100.0}})
+    with pytest.raises(ValueError, match=r"tank\(s\) \['2'\] are outside"):
+        model.tank_closure(state, drivers)
