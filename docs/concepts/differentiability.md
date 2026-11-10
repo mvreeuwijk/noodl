@@ -58,8 +58,10 @@ decision itself is still made on detached copies and never enters the graph.
 
 `Model.fixed_point` gives the same treatment to any repeated pass of an application:
 `street_steady` (transport and chemistry), `street_steady_with_plume` (the above-roof plumes)
-and `sewer_steady` (stepping to steady state) all run on it. Its watched keys are the
-interface of the adjoint and every key the pass returns is an output. Unlike
+and `sewer_steady` (stepping to steady state) all run on it. The watched keys decide
+convergence; the unknowns of the adjoint are every key the pass recomputes from the state it
+was fed and reads back (the watched keys, and any other that feeds back, such as a closure's
+manhole levels), as under `coupling="iterate"`, and every key the pass returns is an output. Unlike
 `coupling="iterate"` it has no confirmation pass at the certified state when pass 1 finds
 nothing differentiable.
 

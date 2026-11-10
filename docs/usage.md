@@ -192,8 +192,9 @@ quasi-steady state instead (an allocation layer, which is a time-stepping rule, 
 `steady` or a `step` plus a reaction, a boundary read off the previous pass) until the watched
 keys stop changing, and returns the last pass's state. It is what `street_steady`,
 `street_steady_with_plume` and `sewer_steady` run on, and its gradient is that of the fixed
-point (implicit adjoint), not of the unrolled passes; `relaxation`, a per-instance `measure`
-and `diagnostics` are described in its docstring.
+point (implicit adjoint), not of the unrolled passes, including through any unwatched key that
+feeds back from one pass to the next; `relaxation`, a per-instance `measure` and `diagnostics`
+are described in its docstring.
 Each potential solve starts from the state's last potentials (and a layer with flow unknowns
 from its last flows too); `warm_start=False` starts it
 from the layer's linear initial guess instead, while closures still read those potentials
