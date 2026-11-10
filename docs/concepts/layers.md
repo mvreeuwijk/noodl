@@ -286,9 +286,18 @@ potential source, an inductance as a flow source); the error then says so and su
 from the operating point (`mode="dc"`). Under `on_failure="return"` that singularity shows only
 as `converged=False` in `diagnostics`.
 
-The nodal-only methods (`flows`, `dflows`, `residual`, `jacobian`, `linear_init`, `adjoint`)
+The nodal-only methods (`flows`, `dflows`, `residual`, `jacobian`, `adjoint`)
 assume every flow is a function of its own edge's potential difference and raise `TypeError` on
 such a layer; read the flows from `solve`'s `q`, and the balance from `balance(phi, q, sources)`.
+
+`linear_init(phi_boundary, drivers, sources, q=False)` is defined on every layer. On a layer
+with flow unknowns it is the linear guess of the potentials and the flow unknowns together: each
+law with a flow is replaced by its tangent at zero (its own `linear_init`), each relation by its
+residual and Jacobian at zero interior potentials and zero flows, the withdrawals and storages by
+their value and slope there, and the system is solved once. It carries no gradient; on a phasor
+layer it is complex. `q=True` returns `(phi_interior, q_implicit)`, the second the flows of
+`implicit_edges` (empty on a layer without flow unknowns). A system the guess finds singular is
+reported like a singular solve. A solve still starts from zeros, or from the warm start.
 
 ### What a solve takes: dc, initial, a step, a phasor
 

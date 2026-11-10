@@ -1099,7 +1099,8 @@ class KirchhoffLayer(TopologyGuard):
                 lambda j, st: storage_flow[..., slice(*self._storage_slices[j])]))
         return lhs if w is None else lhs + w
 
-    def _residual(self, x, phi_boundary, drivers, sources, step=None, call=None):
+    def _residual(self, x, phi_boundary, drivers, sources, step=None, call=None,
+                  tangents=None):
         """`(residual, phi, q)`: the residual at the unknowns `x` and the full-node potentials
         and every edge's flow it was evaluated at (`solve` reuses the last two instead of
         recomputing them). `step` is the solve's `_Step` (`None` is the steady point without
@@ -1112,7 +1113,8 @@ class KirchhoffLayer(TopologyGuard):
         `call(i, args)` evaluates owner `i` (`_owner_call`, the default, or the threaded
         parameters of the differentiable solve); a step adds the storage withdrawal, and the
         initial point replaces the held rows (`_Held`). The layout is the step's when it
-        has one (`_Step.layout`)."""
+        has one (`_Step.layout`). `tangents` (`_tangents`, the linear guess only) puts each
+        listed law's tangent at zero in place of its flow."""
         u = self._unknowns if step is None or step.layout is None else step.layout
         if u is None:
             phi = self.assemble(x, phi_boundary)
@@ -1131,7 +1133,7 @@ class KirchhoffLayer(TopologyGuard):
         ctx, store = (LawContext(mode="dc"), None) if step is None else (step.ctx, step.storage)
         phi_I, q_F = split(u, x)
         phi = self.assemble(phi_I, phi_boundary)
-        q, r_F = self._flows_and_residuals(phi, q_F, drivers, ctx, call, u)
+        q, r_F = self._flows_and_residuals(phi, q_F, drivers, ctx, call, u, tangents)
         kcl = self._accumulate_interior(q) - self._source_interior(sources, phi_I)
         # `((lhs - s) + w_withdrawal) + w_storage`, not the fast path's association
         w = self._withdrawal_called(phi, drivers, call)
@@ -1145,7 +1147,7 @@ class KirchhoffLayer(TopologyGuard):
         return to_real(self, _cat([kcl, r_F], kcl)), phi, q
 
     def _operator(self, x, phi_boundary, drivers, step=None, slopes=None,
-                  adjoint: bool = False):
+                  adjoint: bool = False, tangents=None):
         """The Jacobian of `_residual` at the unknowns `x`.
 
         On the fast path the matvec-free `A_I diag(dflows) A_I^T` (`_operator_at`), shifted
@@ -1159,7 +1161,8 @@ class KirchhoffLayer(TopologyGuard):
         (`_coloured_jacobian`), not its `jacobian`, whose `dflow` shortcut would hand the
         adjoint a Newton aid; the same flag reaches `slopes`, where
         an inexact withdrawal or storage gives autograd too. The primal solve
-        (`adjoint=False`) keeps the analytic slopes."""
+        (`adjoint=False`) keeps the analytic slopes. `tangents` is `_residual`'s: a listed
+        law's block is the slope of its tangent at zero."""
         u = self._unknowns if step is None or step.layout is None else step.layout
         if u is None:
             phi = self.assemble(x, phi_boundary)
@@ -1170,8 +1173,8 @@ class KirchhoffLayer(TopologyGuard):
         phi = self.assemble(phi_I, phi_boundary)
         dp = self.dp(phi, drivers)
         blocks = []
-        for el, rel, (s, e) in zip(self._laws, self._relation, self._law_slices,
-                                   strict=True):
+        for i, (el, rel, (s, e)) in enumerate(zip(self._laws, self._relation,
+                                                  self._law_slices, strict=True)):
             lctx = self._law_ctx(ctx, s, e)
             dp_s = dp[..., s:e]
             # Called on the law module itself, also on the differentiable path: the values
@@ -1183,7 +1186,10 @@ class KirchhoffLayer(TopologyGuard):
                 q_s = q_F[..., f0:f0 + e - s]
             else:
                 q_s = None
-            if adjoint and not el.exact_slope:
+            if tangents is not None and i in tangents:
+                k = tangents[i][1] + torch.zeros_like(dp_s)
+                blocks.append(k[..., None, None, None, None])
+            elif adjoint and not el.exact_slope:
                 blocks += el._coloured_jacobian(dp_s, q_s, drivers, lctx)
             else:
                 blocks += el.jacobian(dp_s, q_s, drivers, lctx)
@@ -1262,10 +1268,11 @@ class KirchhoffLayer(TopologyGuard):
                 f"layer {self.name!r}: the {what} of the {el.kind!r} law is {width} "
                 f"but the kind has {n_edges} edges")
 
-    def _flows_and_residuals(self, phi, q_F, drivers, ctx, call, u=None):
+    def _flows_and_residuals(self, phi, q_F, drivers, ctx, call, u=None, tangents=None):
         """`(q, r_F)`: every edge's flow (the law flow on potential-controlled edges, the
         unknown on relation edges) and the relations' residuals, in layer edge order; `u` is
-        the layout (the layer's own by default)."""
+        the layout (the layer's own by default). A law listed in `tangents` (`_tangents`)
+        gives its tangent at zero, `c + k dp`, in place of its flow."""
         index = (self._unknowns if u is None else u).index
         dp = self.dp(phi, drivers)
         q_parts, r_parts = [], []
@@ -1279,6 +1286,9 @@ class KirchhoffLayer(TopologyGuard):
                 r_s = call(i, (dp_s, q_s, drivers, lctx))
                 self._check_width(el, r_s, e - s, "residual")
                 r_parts.append(r_s)
+            elif tangents is not None and i in tangents:
+                c, k = tangents[i]
+                q_s = c + k * dp_s
             else:
                 q_s = call(i, (dp_s, drivers, lctx))
                 self._check_width(el, q_s, e - s, "flow")
@@ -1469,12 +1479,7 @@ class KirchhoffLayer(TopologyGuard):
         # is its flow and slope there, in the solve's context (`_law_slopes`).
         cs, ks, n_es = [], [], []
         for i, (el, (s, e)) in enumerate(zip(self._laws, self._law_slices, strict=True)):
-            if el._takes_ctx:
-                zero = torch.zeros(e - s, dtype=el._dtype(), device=device)
-                c_e = el.flow(zero, drivers, self._law_ctx(ctx, s, e))
-                k_e = self._law_slopes(i, el, zero, drivers, ctx)
-            else:
-                c_e, k_e = el.linear_init(drivers)
+            c_e, k_e = self._law_tangent(i, el, drivers, ctx, device)
             cs.append(c_e)
             ks.append(k_e)
             n_es.append(e - s)
@@ -1491,6 +1496,66 @@ class KirchhoffLayer(TopologyGuard):
             c_parts.append(c_e + zero)
             k_parts.append(k_e + zero)
         return torch.cat(c_parts, dim=-1), torch.cat(k_parts, dim=-1)
+
+    def _law_tangent(self, i: int, el, drivers, ctx: LawContext, device=None):
+        """`(c, k)`: law `i`'s tangent at `dp = 0`, its flow `c + k dp` near zero. Its own
+        `linear_init`; a law that reads the context has none with one, and gives its flow and
+        slope at zero in the solve's context `ctx` (`_law_slopes`)."""
+        if el._takes_ctx:
+            s, e = self._law_slices[i]
+            zero = torch.zeros(e - s, dtype=el._dtype(), device=device)
+            return (el.flow(zero, drivers, self._law_ctx(ctx, s, e)),
+                    self._law_slopes(i, el, zero, drivers, ctx))
+        return el.linear_init(drivers)
+
+    def _tangents(self, drivers, ctx: LawContext, device=None) -> dict:
+        """`{i: (c, k)}`: the tangent at zero (`_law_tangent`) of every law `i` of a layer with
+        flow unknowns that has one, a real one-port law with a flow. A relation has none (its
+        flow is an unknown), and neither has a law of several ports or a phasor law, whose
+        tangent couples edges or is complex: the linear guess evaluates those as Newton does,
+        at the potentials it starts from."""
+        if self.phasor:
+            return {}
+        return {i: self._law_tangent(i, el, drivers, ctx, device)
+                for i, (el, rel) in enumerate(zip(self._laws, self._relation, strict=True))
+                if not rel and el.ports == 1}
+
+    def _linear_guess(self, phi_boundary, drivers, sources, step: _Step) -> torch.Tensor:
+        """The linear guess of a layer with flow unknowns, `[phi_I, q_F]` in the real view:
+        one Newton step from zero (interior potentials and flow unknowns zero) on the system
+        whose laws with a flow are replaced by their tangents at zero (`_tangents`). The
+        relations give their residual and Jacobian at that point, the withdrawals and the
+        storages their value and slope there, and the initial point holds its held rows.
+        `step` is the solve's `_Step`. Runs without gradients."""
+        u = self._unknowns
+        real_dtype = (phi_boundary.real.dtype if phi_boundary.is_complex()
+                      else phi_boundary.dtype)
+        device = phi_boundary.device
+        call = self._owner_call
+        tangents = self._tangents(drivers, step.ctx, device)
+        with torch.no_grad():
+            x = torch.zeros(u.n, dtype=real_dtype, device=device)
+            r = self._residual(x, phi_boundary, drivers, sources, step, call, tangents)[0]
+            op = self._operator(x, phi_boundary, drivers, step,
+                                self._slopes_fn(drivers, call, step), tangents=tangents)
+            batch = broadcast_shapes(op.values.shape[:-1], r.shape[:-1])
+            values = op.values.expand(batch + op.values.shape[-1:])
+            op = SparseOperator(op.row, op.col, values, u.n)
+            r = r.expand(batch + r.shape[-1:])
+            where = f"KirchhoffLayer {self.name!r} linear_init"
+            result = select_solve(op, r, method=linear_method(self), on_failure="return",
+                                  where=where, rtol=inner_solve_rtol(r.dtype))
+            if not bool(torch.all(result.converged)):
+                failing = int(torch.nonzero(~result.converged.reshape(-1))[0, 0])
+                if singular(op, u.n, failing):
+                    raise self._singular_error(step.ctx.mode)
+                result.raise_on_failure(where)
+            return -result.x
+
+    def _singular_error(self, mode: str) -> RuntimeError:
+        """`singular_error` of this layer, naming its relation kinds."""
+        kinds = [el.kind for el, rel in zip(self._laws, self._relation, strict=True) if rel]
+        return singular_error(self, kinds, mode)
 
     def _extra_grounded(self, node_slopes: torch.Tensor | None) -> torch.Tensor | None:
         """Full-node-order bool from `node_slopes` (per COMPACT interior row, as
@@ -1566,14 +1631,34 @@ class KirchhoffLayer(TopologyGuard):
             + "".join(f" ({h})" for h in hints)
         )
 
-    def linear_init(self, phi_boundary, drivers, sources, *, _step=None):
+    def linear_init(self, phi_boundary, drivers, sources, *, q=False, _step=None):
         """The solution of the network linearised at zero interior potentials
-        (`ConstitutiveLaw.linear_init`): the Newton starting guess. `_step` (internal) is the
-        solve's step: a layer with storage linearises its withdrawal the same way, and a law
-        that reads the context is linearised in the step's context (the steady one
-        without)."""
-        self._refuse_on_mna("linear_init")
+        (`ConstitutiveLaw.linear_init`): the Newton starting guess, the interior potentials.
+        `_step` (internal) is the solve's step: a layer with storage linearises its
+        withdrawal the same way, and a law that reads the context is linearised in the
+        step's context (the steady one without; on a phasor layer the phasor one).
+
+        On a layer with flow unknowns (`implicit_edges`) it is the linear guess of the
+        potentials and the flow unknowns together: each law with a flow is replaced by its
+        tangent at zero, each relation by its residual and Jacobian at zero interior
+        potentials and zero flows, and the system is solved once. There it carries no
+        gradient, and a phasor layer returns complex values. `q=True` returns
+        `(phi_interior, q_implicit)`, the second the flows of `implicit_edges` (empty on a
+        layer without flow unknowns)."""
         drivers = drivers or {}
+        if self._unknowns is not None:
+            phi_boundary, sources, _, _ = self._complex_inputs(
+                phi_boundary, drivers, sources, None, None)
+            if _step is None:
+                _step = self._step(None, None, None, self.scheme, None, None, drivers)
+            phi_I, q_F = split(self._unknowns,
+                               self._linear_guess(phi_boundary, drivers, sources, _step))
+            return (phi_I, q_F) if q else phi_I
+        phi_I = self._nodal_linear_init(phi_boundary, drivers, sources, _step)
+        return (phi_I, phi_I.new_zeros(phi_I.shape[:-1] + (0,))) if q else phi_I
+
+    def _nodal_linear_init(self, phi_boundary, drivers, sources, _step):
+        """`linear_init` of a layer without flow unknowns."""
         batch_shape = phi_boundary.shape[:-1]
         phi_i0 = torch.zeros(
             batch_shape + (len(self.interior),),
@@ -1910,8 +1995,8 @@ class KirchhoffLayer(TopologyGuard):
         drivers = drivers or {}
         # The order of the refusals is part of the contract: (phasor) inputs, the step's
         # keywords, the Newton options a layer with flow unknowns refuses, the policy, the
-        # unreachable-tensor check, then the path's solve. On the fast path the starting
-        # point's grounding check comes before the unreachable-tensor check.
+        # starting point (with its grounding check), the unreachable-tensor check, then the
+        # solve.
         u = self._unknowns
         if u is not None:
             phi_boundary, sources, phi0, q0 = self._complex_inputs(
@@ -1927,19 +2012,16 @@ class KirchhoffLayer(TopologyGuard):
             self, newton_kwargs, diagnostics, differentiable, drivers, sources, phi_boundary,
             step_start(step, history),
         )
+        x0, start = self._starting_point(phi0, phi_boundary, drivers, sources, step, q0=q0)
         # A tensor held where the solve does not thread it is refused before solving, by
         # name; one reached only through a closure, at every residual the forward Newton
         # evaluates, the starting guess first and the root last (`_newton_differentiable`).
         # With flow unknowns a differentiable solve that nothing reaches is the primal one.
         fn = None
-        if u is not None and policy.differentiable:
+        if policy.differentiable:
             self._check_no_unreachable_differentiable_tensors()
-            if not policy.forward_only:
+            if u is None or not policy.forward_only:
                 fn = FunctionalLaws(self, drivers, sources, phi_boundary, step, history)
-        x0, start = self._starting_point(phi0, phi_boundary, drivers, sources, step, q0=q0)
-        if u is None and policy.differentiable:
-            self._check_no_unreachable_differentiable_tensors()
-            fn = FunctionalLaws(self, drivers, sources, phi_boundary, step, history)
 
         requested = newton_kwargs["method"]
         on_fail = last = None
@@ -1960,9 +2042,7 @@ class KirchhoffLayer(TopologyGuard):
 
             def on_fail(exc):
                 if singular(last.get("op"), u.n, first_failing(last, newton_kwargs)):
-                    kinds = [el.kind for el, rel in zip(self._laws, self._relation,
-                                                        strict=True) if rel]
-                    raise singular_error(self, kinds, step.ctx.mode) from exc
+                    raise self._singular_error(step.ctx.mode) from exc
 
         if fn is None:
             # The primal solve (with flow unknowns also a differentiable one that nothing
@@ -2397,7 +2477,9 @@ class KirchhoffLayer(TopologyGuard):
         `(dq0, node_slopes0)`, the slopes at that point, which the first operator reuses.
         A layer with flow unknowns starts from zeros, or the warm start `phi0` (interior
         potentials) and `q0` (the flow unknowns), in the real view; `start` is `None`.
-        `step` is the solve's `_Step`.
+        `step` is the solve's `_Step`. (Its linear guess, `linear_init`, is not used here:
+        starting the general path from it moved the pinned roots by up to Newton's
+        tolerance, so a cold solve keeps the zero start.)
         """
         # The initial guess is NOT a differentiable quantity, and neither is the grounding
         # check below. Both are computed under no_grad (and a caller-supplied phi0 is

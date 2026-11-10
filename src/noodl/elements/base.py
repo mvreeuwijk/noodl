@@ -417,4 +417,7 @@ class ImplicitLaw(ConstitutiveLaw):
         raise self._no_flow()
 
     def linear_init(self, drivers=None):
+        """Refused: a relation has no tangent `(c, k)`. A layer's linear guess
+        (`KirchhoffLayer.linear_init`) takes its `residual` and `jacobian` at zero flow
+        instead."""
         raise self._no_flow()

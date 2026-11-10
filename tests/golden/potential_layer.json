@@ -3176,9 +3176,15 @@
           }
         },
         "linear_init": {
-          "refused": {
-            "message": "KirchhoffLayer 'air' is solved by Modified Nodal Analysis (its laws include impl",
-            "type": "TypeError"
+          "value": {
+            "data": [
+              5.0,
+              2.4995482460485476
+            ],
+            "dtype": "torch.float64",
+            "shape": [
+              2
+            ]
           }
         },
         "power_residual": {

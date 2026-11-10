@@ -271,8 +271,9 @@ def test_classic_methods_on_mna_layer_raise():
         layer.dflows(phi, {})
     with pytest.raises(TypeError, match="has flow unknowns"):
         layer.residual(phi[..., layer.interior], torch.zeros(1), {}, None)
-    with pytest.raises(TypeError, match="has flow unknowns"):
-        layer.linear_init(torch.zeros(1), {}, None)
+    # `linear_init` is defined on every layer (tests/layers/test_linear_guess.py)
+    torch.testing.assert_close(layer.linear_init(torch.zeros(1), {}, None),
+                               phi[..., layer.interior], rtol=0, atol=1e-12)
 
 
 def test_fixed_flow_and_withdrawal_still_work_in_mna():

@@ -693,10 +693,11 @@ def case_general_with_head_driver_ensemble():
 
 def case_general_introspection_and_refusals():
     """What the general path answers about a solved point, and what it refuses (the fast
-    path's `residual`, `jacobian`, `adjoint` and `linear_init` are refused here).
+    path's `residual`, `jacobian` and `adjoint` are refused here). `linear_init` is defined
+    on every layer since M6 Task 31: its entry pins the linear guess.
 
-    M6 Task 32 defines these methods on every layer: it replaces the pinned refusals of this
-    case with value pins, regenerating this case only."""
+    M6 Task 32 defines the other methods on every layer: it replaces the pinned refusals of
+    this case with value pins, regenerating this case only."""
     layer = _fan()
     drivers, _ = _fan_drivers()
     src = _t([0.0, 0.05, -0.02])
