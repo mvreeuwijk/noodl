@@ -415,3 +415,87 @@ def test_a_floating_node_is_refused_at_the_held_initial_point_by_name():
     phi, _ = layer.solve(GROUND, mode="initial", differentiable=False)
     torch.testing.assert_close(phi, torch.tensor([0.0, 0.2, 0.2], dtype=F64), rtol=0,
                                atol=1e-14)
+
+
+# ------------------------------------------------- residual, jacobian, adjoint at a time t
+@pytest.mark.parametrize("general", [False, True])
+def test_the_public_residual_is_evaluated_at_t(general):
+    """`residual`, `jacobian` and `adjoint` take `solve`'s `t`: zero residual at the solved
+    point of t = 0.3, and a time-dependent source refuses `t=None` by name."""
+    layer, _, _ = _source_layer(general=general)
+    phi, q = layer.solve(GROUND, t=0.3, differentiable=False)
+    phi_i = phi[..., layer.interior]
+    x = {"q": q} if general else {}
+    r = layer.residual(phi_i, GROUND, {}, None, t=0.3, **x)
+    assert float(r.abs().max()) < 1e-12
+    assert float(layer.residual(phi_i, GROUND, {}, None, t=0.4, **x).abs().max()) > 1e-3
+    width = r.shape[-1]
+    J = layer.jacobian(phi_i, GROUND, {}, t=0.3, **x)
+    assert J.shape[-1] == width
+    lam = layer.adjoint(phi_i, GROUND, {}, torch.ones(width, dtype=F64), t=0.3, **x)
+    torch.testing.assert_close(J.mT @ lam, torch.ones(width, dtype=F64), rtol=0, atol=1e-12)
+    with pytest.raises(ValueError, match="time-dependent waveforms; pass t"):
+        layer.residual(phi_i, GROUND, {}, None, **x)
+
+
+def test_the_public_methods_keep_no_step_start_on_the_layer():
+    net = _net(["gnd", "a"], [("a", "gnd", "cap"), ("a", "gnd", "resistor")])
+    layer = KirchhoffLayer(net, "e", [_FlowFormCap(_t([0.5])), Resistance(_t([2.0]))],
+                           boundary=["gnd"])
+    phi_prev = _t([0.0, 1.0], grad=True)
+    history = (phi_prev, torch.zeros(2, dtype=F64))
+    phi_i = _t([0.4])
+    layer.residual(phi_i, GROUND, {}, None, dt=0.1, history=history)
+    assert layer._law_ctxs == ()
+    layer.jacobian(phi_i, GROUND, {}, dt=0.1, history=history)
+    assert layer._law_ctxs == ()
+    layer.adjoint(phi_i, GROUND, {}, _t([1.0]), dt=0.1, history=history)
+    assert layer._law_ctxs == ()
+
+
+def test_the_law_context_is_restricted_once_per_context_in_a_differentiable_step(
+        monkeypatch):
+    """A differentiable step of a law reading the step start evaluates it in three contexts
+    (the step's own, the residual's and the operator's), the last two alternating over the
+    Newton iterations: each law's restriction of each is built once (per grad mode), not on
+    every switch. The gradient through the step start is unchanged by the cache."""
+    import dataclasses
+    import sys
+
+    builds = []
+    replace = dataclasses.replace
+
+    def counting(obj, **changes):
+        frame = sys._getframe(1)
+        if frame.f_code.co_name == "_law_ctx":
+            builds.append((id(obj), frame.f_locals["s"], torch.is_grad_enabled()))
+        return replace(obj, **changes)
+
+    source = PrescribedCurrent(_t([1.0]), waveforms=[Sine(2.0, phase=0.3)])
+    net = _net(["gnd", "a", "b"], [("a", "gnd", "current_source"), ("a", "b", "cap"),
+                                   ("b", "gnd", "resistor")])
+    layer = KirchhoffLayer(net, "e", [_AsRelation(source), _FlowFormCap(_t([0.5])),
+                                      PowerLaw(_t([2.0]), 1.5, kind="resistor")],
+                           boundary=["gnd"])
+    start = _t([0.0, 0.2, 0.1], grad=True)
+    q_prev = torch.zeros(3, dtype=F64)
+    diag: dict = {}
+    monkeypatch.setattr(kirchhoff_module.dataclasses, "replace", counting)
+    phi, _ = layer.solve(GROUND, {}, None, dt=0.1, t=0.3, history=(start, q_prev),
+                         diagnostics=diag)
+    monkeypatch.undo()
+    assert diag["newton_iterations"] > 1
+    assert builds and len(builds) == len(set(builds))
+    (g,) = torch.autograd.grad(phi.sum(), start)
+    h = 1e-6
+    fd = []
+    with torch.no_grad():
+        for i in range(3):
+            e = torch.zeros(3, dtype=F64)
+            e[i] = h
+            up = layer.solve(GROUND, {}, None, dt=0.1, t=0.3, history=(start + e, q_prev),
+                             differentiable=False, atol=1e-14)[0]
+            dn = layer.solve(GROUND, {}, None, dt=0.1, t=0.3, history=(start - e, q_prev),
+                             differentiable=False, atol=1e-14)[0]
+            fd.append(float((up - dn).sum()) / (2 * h))
+    torch.testing.assert_close(g, torch.tensor(fd, dtype=F64), rtol=1e-6, atol=1e-9)

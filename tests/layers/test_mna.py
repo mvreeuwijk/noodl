@@ -300,7 +300,7 @@ def test_layer_methods_on_a_layer_with_flow_unknowns():
     # the jacobian is the assembled operator, and the central differences of the residual
     x = _unknowns(layer, phi, q)
     J = layer.jacobian(phi_i, pb, drivers, q=q)
-    step = layer._public_step(None, None, None, None, drivers)
+    step = layer._public_step(None, None, None, None, None, drivers)
     torch.testing.assert_close(J, layer._operator(x, pb, drivers, step).assemble(),
                                rtol=0, atol=0)
 

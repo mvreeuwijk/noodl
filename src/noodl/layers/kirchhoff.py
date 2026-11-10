@@ -563,8 +563,9 @@ class KirchhoffLayer(TopologyGuard):
         # The layout of the flow unknowns; `None` on the fast path. The one attribute every
         # path decision of `_residual`, `_operator` and `solve` reads.
         self._unknowns: FlowUnknowns | None = None
-        # The step-start restrictions of the law context, per law (`_law_ctx`).
-        self._law_ctxs: tuple[LawContext | None, dict] = (None, {})
+        # The step-start restrictions of the law context, per law (`_law_ctx`): the last
+        # three contexts seen, each with its restrictions by edge slice.
+        self._law_ctxs: tuple[tuple[LawContext, dict], ...] = ()
         # The layout of the initial point with held storage on a layer without flow
         # unknowns, built on the first such solve (`_held_layout`); `None` until then.
         self._held_unknowns: FlowUnknowns | None = None
@@ -1177,7 +1178,7 @@ class KirchhoffLayer(TopologyGuard):
         return sources[..., self.interior]
 
     def residual(self, phi_interior, phi_boundary, drivers, sources, *, q=None, dt=None,
-                 scheme=None, history=None, storage_flow=None):
+                 t=None, scheme=None, history=None, storage_flow=None):
         """The Newton residual at the given point.
 
         On a layer without flow unknowns it is the interior balance `A_I q(phi) - s_I (+
@@ -1190,25 +1191,30 @@ class KirchhoffLayer(TopologyGuard):
         The step keywords are `solve`'s. On a layer with storage, with `dt` the storage
         withdrawal of that step is included (the residual `solve` drives to zero); without
         `dt` it is the steady residual, where storage is absent. A layer without storage
-        refuses them."""
-        self._require_current_topology()
-        drivers = drivers or {}
-        step = self._public_step(dt, scheme, history, storage_flow, drivers)
-        if self._unknowns is None:
-            return self._residual(phi_interior, phi_boundary, drivers, sources, step)[0]
-        phi_boundary, sources, phi_interior, q = self._complex_inputs(
-            phi_boundary, drivers, sources, phi_interior, q)
-        x = self._unknown_vector(phi_interior, q, "residual")
-        r = self._residual(x, phi_boundary, drivers, sources, step)[0]
-        return to_complex(r) if self.phasor else r
+        refuses them. `t` is the evaluation time of a law that reads it (a time-dependent
+        source), as in `solve`; such a law refuses `t=None` by name."""
+        try:
+            self._require_current_topology()
+            drivers = drivers or {}
+            step = self._public_step(dt, t, scheme, history, storage_flow, drivers)
+            if self._unknowns is None:
+                return self._residual(phi_interior, phi_boundary, drivers, sources, step)[0]
+            phi_boundary, sources, phi_interior, q = self._complex_inputs(
+                phi_boundary, drivers, sources, phi_interior, q)
+            x = self._unknown_vector(phi_interior, q, "residual")
+            r = self._residual(x, phi_boundary, drivers, sources, step)[0]
+            return to_complex(r) if self.phasor else r
+        finally:
+            # the law context's restrictions hold the caller's step start
+            self._law_ctxs = ()
 
-    def _public_step(self, dt, scheme, history, storage_flow, drivers) -> _Step:
+    def _public_step(self, dt, t, scheme, history, storage_flow, drivers) -> _Step:
         """The `_Step` of `residual`, `jacobian` and `adjoint`: their step keywords,
         checked as `solve` checks them (refused on a layer that takes no step)."""
         if scheme is None:
             scheme = self.scheme
         self._check_forward_euler(scheme)
-        return self._step(None, dt, None, scheme, history, storage_flow, drivers)
+        return self._step(None, dt, t, scheme, history, storage_flow, drivers)
 
     def balance(self, phi, q, sources=None, drivers=None, storage_flow=None):
         """The interior flow balance `A_I q - s_I (+ w(phi)) (+ storage)` of a state's own
@@ -1375,22 +1381,28 @@ class KirchhoffLayer(TopologyGuard):
 
     def _law_ctx(self, ctx: LawContext, s: int, e: int) -> LawContext:
         """`ctx` with the step-start values restricted to one law's edges `[s, e)`. The
-        restrictions of the last context seen are kept: a Newton solve calls this with the
-        same context on every iteration."""
+        restrictions of the last THREE contexts seen are kept: a Newton solve calls this with
+        the same context on every iteration, and a differentiable one uses three (the step's
+        own, for the starting point and the result's flows; the residual's, on the detached
+        step start; the operator's, on the threaded one), the last two alternating. A
+        restriction is kept per grad mode too: a slice taken under `no_grad` has no graph,
+        and the step's own context is restricted under `no_grad` for the starting point and
+        again under grad mode for the result's flows."""
         if ctx.dp_prev is None and ctx.q_prev is None:
             return ctx
-        cached_ctx, by_slice = self._law_ctxs
-        if cached_ctx is not ctx:
+        by_slice = next((cached for seen, cached in self._law_ctxs if seen is ctx), None)
+        if by_slice is None:
             by_slice = {}
-            self._law_ctxs = (ctx, by_slice)
-        lctx = by_slice.get((s, e))
+            self._law_ctxs = ((ctx, by_slice), *self._law_ctxs[:2])
+        key = (s, e, torch.is_grad_enabled())
+        lctx = by_slice.get(key)
         if lctx is None:
             changes = {}
             if ctx.dp_prev is not None:
                 changes["dp_prev"] = ctx.dp_prev[..., s:e]
             if ctx.q_prev is not None:
                 changes["q_prev"] = ctx.q_prev[..., s:e]
-            lctx = by_slice[(s, e)] = dataclasses.replace(ctx, **changes)
+            lctx = by_slice[key] = dataclasses.replace(ctx, **changes)
         return lctx
 
     def _check_width(self, el, out, n_edges: int, what: str) -> None:
@@ -1574,8 +1586,8 @@ class KirchhoffLayer(TopologyGuard):
         values[..., store.ones] = 1.0
         return SparseOperator(op.row, op.col, values, op.shape[-1])
 
-    def jacobian(self, phi_interior, phi_boundary, drivers, *, q=None, dt=None, scheme=None,
-                 history=None, storage_flow=None):
+    def jacobian(self, phi_interior, phi_boundary, drivers, *, q=None, dt=None, t=None,
+                 scheme=None, history=None, storage_flow=None):
         """The dense Jacobian of `residual` at the given point.
 
         On a layer without flow unknowns it is the `(n_I, n_I)` matrix A_I diag(dq) A_I^T --
@@ -1590,22 +1602,26 @@ class KirchhoffLayer(TopologyGuard):
         The step keywords are `residual`'s: with `dt`, a layer's storage adds its `rate_slope`
         to the diagonal; without, it is the steady Jacobian.
         """
-        self._require_current_topology()
-        drivers = drivers or {}
-        step = self._public_step(dt, scheme, history, storage_flow, drivers)
-        if self._unknowns is not None:
-            phi_boundary, _, phi_interior, q = self._complex_inputs(
-                phi_boundary, drivers, None, phi_interior, q)
-            x = self._unknown_vector(phi_interior, q, "jacobian")
-            return self._operator(x, phi_boundary, drivers, step).assemble()
-        phi = self.assemble(phi_interior, phi_boundary)
-        dq = self._dflows(phi, drivers, step.ctx)
-        A_I = self.A[self.interior]
-        dense = torch.einsum("ie,...e,je->...ij", A_I, dq, A_I)
-        node_slopes = self._withdrawal_slopes(phi, drivers, step)
-        if node_slopes is None:
-            return dense
-        return dense + torch.diag_embed(node_slopes.expand(dense.shape[:-1]))
+        try:
+            self._require_current_topology()
+            drivers = drivers or {}
+            step = self._public_step(dt, t, scheme, history, storage_flow, drivers)
+            if self._unknowns is not None:
+                phi_boundary, _, phi_interior, q = self._complex_inputs(
+                    phi_boundary, drivers, None, phi_interior, q)
+                x = self._unknown_vector(phi_interior, q, "jacobian")
+                return self._operator(x, phi_boundary, drivers, step).assemble()
+            phi = self.assemble(phi_interior, phi_boundary)
+            dq = self._dflows(phi, drivers, step.ctx)
+            A_I = self.A[self.interior]
+            dense = torch.einsum("ie,...e,je->...ij", A_I, dq, A_I)
+            node_slopes = self._withdrawal_slopes(phi, drivers, step)
+            if node_slopes is None:
+                return dense
+            return dense + torch.diag_embed(node_slopes.expand(dense.shape[:-1]))
+        finally:
+            # the law context's restrictions hold the caller's step start
+            self._law_ctxs = ()
 
     def _linear_ck(self, drivers, ctx: LawContext = _DC, device=None):
         # Each law's own (c_e, k_e) covers only its own n_e = e - s edges; only the
@@ -2185,7 +2201,7 @@ class KirchhoffLayer(TopologyGuard):
             # The restrictions of this solve's context (`_law_ctx`) hold its step-start
             # tensors, and their graph in a differentiable chain: none outlives the solve
             # (a later solve builds a new context, so nothing is reused across solves).
-            self._law_ctxs = (None, {})
+            self._law_ctxs = ()
 
     def _solve_with_fallback(self, rungs, phi_boundary, drivers, sources, phi0, *, q0,
                              diagnostics, **kwargs):
@@ -2304,10 +2320,10 @@ class KirchhoffLayer(TopologyGuard):
         # A tensor held where the solve does not thread it is refused before solving, by
         # name; one reached only through a closure, at every residual the forward Newton
         # evaluates, the starting guess first and the root last (`_newton_differentiable`).
-        # A differentiable solve that nothing reaches is the primal one: with flow unknowns
-        # as it is; on the fast path with that closure check at every residual
-        # (`primal_checked`) where nothing it threads requires grad (under `no_grad` too:
-        # the threaded residual detaches what does), the threaded slopes are the primal ones
+        # A differentiable solve that nothing reaches is the primal one, with that closure
+        # check at every residual (`primal_checked`) where nothing it threads requires grad.
+        # With flow unknowns that is all; on the fast path also only where (under `no_grad`
+        # too: the threaded residual detaches what does) the threaded slopes are the primal ones
         # (`layer_slopes`), no law is `dp_independent` (a declaration the threaded operator
         # cross-checks) and every owner's module call is its own method (`_plain_calls`).
         # Its result is the threaded forward Newton's, bit for bit, without the threading's
@@ -2316,11 +2332,16 @@ class KirchhoffLayer(TopologyGuard):
         primal_checked = False
         if policy.differentiable:
             self._check_no_unreachable_differentiable_tensors()
-            primal_checked = (
-                policy.forward_only and u is None and layer_slopes(self)
-                and not any(el.dp_independent for el in self._laws) and self._plain_calls()
-                and (torch.is_grad_enabled()
-                     or not self._threads_grad(drivers, sources, phi_boundary, starts)))
+            # Under no_grad a threaded tensor may still require grad, which the check
+            # (run under grad mode) would take for a captured one: checked only where none
+            # does.
+            checkable = policy.forward_only and (
+                torch.is_grad_enabled()
+                or not self._threads_grad(drivers, sources, phi_boundary, starts))
+            # With flow unknowns the primal solve calls every owner as a module already.
+            primal_checked = checkable and (u is not None or (
+                layer_slopes(self) and not any(el.dp_independent for el in self._laws)
+                and self._plain_calls()))
             if not (primal_checked or (policy.forward_only and u is not None)):
                 fn = FunctionalLaws(self, drivers, sources, phi_boundary, step, history)
 
@@ -2995,7 +3016,7 @@ class KirchhoffLayer(TopologyGuard):
         return x
 
     def adjoint(self, phi_interior, phi_boundary, drivers, grad_phi_interior, *, q=None,
-                dt=None, scheme=None, history=None, storage_flow=None):
+                dt=None, t=None, scheme=None, history=None, storage_flow=None):
         """Solve J^T lambda = grad_phi_interior at the given point, `J` the Jacobian of
         `residual` (`jacobian`).
 
@@ -3034,32 +3055,36 @@ class KirchhoffLayer(TopologyGuard):
         call in `torch.no_grad()`, or use `linear_solver="direct"`. A gradient of the wrong
         width, or a complex one, is refused by name.
         """
-        self._require_current_topology()
-        drivers = drivers or {}
-        step = self._public_step(dt, scheme, history, storage_flow, drivers)
-        if self._unknowns is not None:
-            phi_boundary, _, phi_interior, q = self._complex_inputs(
-                phi_boundary, drivers, None, phi_interior, q)
-            x = self._unknown_vector(phi_interior, q, "adjoint")
-            self._check_adjoint_grad(grad_phi_interior)
-            # the operator's values carry no graph, like every Jacobian entry of a solve
-            with torch.no_grad():
-                op = self._operator(x, phi_boundary, drivers, step)
+        try:
+            self._require_current_topology()
+            drivers = drivers or {}
+            step = self._public_step(dt, t, scheme, history, storage_flow, drivers)
+            if self._unknowns is not None:
+                phi_boundary, _, phi_interior, q = self._complex_inputs(
+                    phi_boundary, drivers, None, phi_interior, q)
+                x = self._unknown_vector(phi_interior, q, "adjoint")
+                self._check_adjoint_grad(grad_phi_interior)
+                # the operator's values carry no graph, like every Jacobian entry of a solve
+                with torch.no_grad():
+                    op = self._operator(x, phi_boundary, drivers, step)
+                return _adjoint_solve(
+                    op,
+                    grad_phi_interior,
+                    where=f"KirchhoffLayer {self.name!r} adjoint",
+                    method=linear_method(self),
+                )
+            phi = self.assemble(phi_interior, phi_boundary)
+            dq = self._dflows(phi, drivers, step.ctx)
+            op = self._operator_at(dq, self._withdrawal_slopes(phi, drivers, step))
             return _adjoint_solve(
                 op,
                 grad_phi_interior,
                 where=f"KirchhoffLayer {self.name!r} adjoint",
-                method=linear_method(self),
+                method=self.linear_solver,
             )
-        phi = self.assemble(phi_interior, phi_boundary)
-        dq = self._dflows(phi, drivers, step.ctx)
-        op = self._operator_at(dq, self._withdrawal_slopes(phi, drivers, step))
-        return _adjoint_solve(
-            op,
-            grad_phi_interior,
-            where=f"KirchhoffLayer {self.name!r} adjoint",
-            method=self.linear_solver,
-        )
+        finally:
+            # the law context's restrictions hold the caller's step start
+            self._law_ctxs = ()
 
     def _check_adjoint_grad(self, grad: torch.Tensor) -> None:
         """Refuse an `adjoint` gradient on a layer with flow unknowns unless it is real and

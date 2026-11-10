@@ -314,6 +314,22 @@ def test_a_closure_read_only_at_the_root_is_refused_on_the_mna_path():
         layer.solve(torch.zeros(1, dtype=F64), sources=sources)
 
 
+def test_a_closure_is_refused_on_the_mna_path_where_nothing_differentiable_reaches():
+    """`on_failure="return_primal"` with nothing threaded requiring grad on a layer with flow
+    unknowns: the primal solve, which still refuses the closure-captured tensor by name
+    rather than returning a detached result."""
+    g = torch.tensor([2.0], dtype=F64, requires_grad=True)
+    layer = KirchhoffLayer(_net(), "heat", [_ImplicitBranchLaw(g)], boundary=["a"])
+    sources = torch.tensor([0.0, 3.0], dtype=F64)
+    with pytest.raises(ValueError, match="residual depends on a tensor"):
+        layer.solve(torch.zeros(1, dtype=F64), sources=sources, on_failure="return_primal",
+                    diagnostics={})
+    with torch.no_grad():        # as on the fast path, under no_grad too
+        with pytest.raises(ValueError, match="residual depends on a tensor"):
+            layer.solve(torch.zeros(1, dtype=F64), sources=sources,
+                        on_failure="return_primal", diagnostics={})
+
+
 # ------------------------------------------------------------------ R08: old pickles
 def _as_if_pickled_before_the_guard(layer: KirchhoffLayer) -> KirchhoffLayer:
     """Round-trip `layer` through pickle with the attributes older versions lacked removed."""
