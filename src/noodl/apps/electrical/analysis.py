@@ -106,8 +106,6 @@ def transient(model: Model, state: Mapping[str, Tensor], drivers: Mapping[str, T
     grid = _times(times)
     sources = [el for el in (layer.law_for(k)[0] for k in layer.kinds)
                if hasattr(el, "breakpoints")]
-    if layer.storage and SF not in state:
-        state = {**state, SF: layer.storage_flows(state[PHI], {}, dt=None)}
     # the sources are evaluated at t0 + dt (as Model.step does), so breakpoints are
     # searched over the evaluation times, never missing one between rounded grid times
     restarts = set()

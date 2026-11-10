@@ -14,7 +14,7 @@ from noodl.apps.electrical import (
     build_model,
     initial_state,
 )
-from noodl.elements import PowerLaw
+from noodl.elements import Conductance, PowerLaw
 from noodl.layers.kirchhoff import KirchhoffLayer
 from noodl.layers.transport import TransportLayer
 from noodl.model import Model
@@ -195,7 +195,8 @@ def test_simulate_circuit_equals_the_old_loop_bitwise():
             rows.append(cur)
     if want[0] == 0:
         rows.insert(0, state)
-    keys = [key for key in rows[0] if key.endswith((".phi", ".q", ".x", ".storage_flow"))]
+    keys = [key for key in rows[0] if key.endswith((".phi", ".q", ".x", ".storage_flow"))
+            or key in model.closure_state_keys]
     assert set(out) == {*keys, "time"}
     for key in keys:
         assert torch.equal(out[key], torch.stack([row[key] for row in rows]))
@@ -242,3 +243,87 @@ def test_a_trapezoidal_transport_layer_matches_explicit_steps():
                          layer_options={"species": {"scheme": rule}})
         rows.append(cur["species.x"])
     assert torch.equal(out["species.x"], torch.stack(rows))
+
+
+def _tank_model():
+    """A reservoir feeding a tank through one junction: storage at a boundary node, stepped
+    by forward Euler."""
+    from noodl.storage import LinearStorage
+
+    net = Network(dtype=F64)
+    for n in ("res", "j", "tank"):
+        net.add_node(n)
+    net.add_edge("res", "j", kind="pipe")
+    net.add_edge("j", "tank", kind="pipe")
+    law = Conductance(torch.tensor([1.0, 1.0], dtype=F64), kind="pipe")
+    layer = KirchhoffLayer(net, "water", [law], boundary=["res", "tank"],
+                           storage=[LinearStorage([2], 10.0)], scheme="forward_euler")
+    model = Model(net, [layer])
+    drivers = {"water.phi_boundary": torch.tensor([10.0, 0.0], dtype=F64)}
+    state = {"water.phi": torch.tensor([10.0, 5.0, 1.0], dtype=F64),
+             "water.q": torch.zeros(2, dtype=F64)}
+    return model, layer, state, drivers
+
+
+def test_a_restart_keeps_forward_euler_on_a_layer_with_boundary_storage():
+    model, _, state, drivers = _tank_model()
+    times = [0.0, 1.0, 2.0, 3.0]
+    plain = model.march(state, drivers, times)
+    diag: dict = {}
+    restarted = model.march(state, drivers, times, restarts={0, 2}, diagnostics=diag)
+    assert diag["schemes"] == ["backward_euler", None, "backward_euler"]
+    for key in plain:
+        assert torch.equal(restarted[key], plain[key]), key
+
+
+def test_a_restart_gives_backward_euler_to_the_layers_that_step_in_their_solve(monkeypatch):
+    model, state, drivers = _rc()
+    seen = []
+    original = model.step
+
+    def spy(*args, **kwargs):
+        seen.append((kwargs.get("scheme"), kwargs["layer_options"]))
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(model, "step", spy)
+    model.march(state, drivers, GRID[:3], restarts={0}, scheme="trapezoidal")
+    assert seen == [("trapezoidal", {LAYER: {"scheme": "backward_euler"}}),
+                    ("trapezoidal", None)]
+
+
+def test_the_history_carries_storage_flow_the_start_state_did_not():
+    model, layer, state, drivers = _tank_model()
+    out = model.march(state, drivers, [0.0, 1.0, 2.0])
+    assert "water.storage_flow" not in state
+    step = model.step(state, drivers, dt=1.0, t=0.0)
+    assert torch.equal(out["water.storage_flow"][1], step["water.storage_flow"])
+    # row 0: what the start flows deliver to the tank
+    assert torch.equal(out["water.storage_flow"][0],
+                       layer.storage_flows(state["water.phi"], {}, dt=None, q=state["water.q"]))
+    rc, rc_state, rc_drivers = _rc()
+    rc_state = {k: v for k, v in rc_state.items() if not k.endswith(".storage_flow")}
+    hist = rc.march(rc_state, rc_drivers, GRID[:3], restarts={0})
+    assert torch.equal(hist[f"{LAYER}.storage_flow"][0],
+                       torch.zeros_like(hist[f"{LAYER}.storage_flow"][1]))
+
+
+class _Clock:
+    """An integrating closure carrying "clock.t" in the state."""
+
+    integrates = True
+    state_keys = ("clock.t",)
+
+    def __call__(self, state, drivers, ctx):
+        dt = 0.0 if ctx is None else ctx.dt
+        return {"clock.t": state["clock.t"] + dt}
+
+
+def test_the_history_records_the_closure_carried_state():
+    model, _, drivers = build_model(Circuit([
+        VoltageSource("V1", "a", "0", 1.0), Resistor("R1", "a", "b", 1.0),
+        Capacitor("C1", "b", "0", 1.0)]))
+    clocked = Model(model.net, model.kirchhoff, closures=[_Clock()])
+    state = {**initial_state(model, drivers), "clock.t": torch.tensor(0.0, dtype=F64)}
+    out = clocked.march(state, drivers, GRID, restarts={0})
+    torch.testing.assert_close(out["clock.t"], torch.tensor(GRID, dtype=F64), rtol=0,
+                               atol=1e-15)

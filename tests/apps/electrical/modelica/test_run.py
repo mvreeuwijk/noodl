@@ -167,11 +167,19 @@ def test_steady_default_tolerances_and_step_keywords_reach_the_model(tmp_path):
     model, state, drivers, names = read_modelica_circuit(_rc_fixture(tmp_path))
     rec = _Recording(model)
     simulate_circuit(rec, state, drivers, names, times=names.times[:4], max_iter=7)
-    # 0 -> 0.1 -> 0.2 -> 0.25 (the step event) -> 0.3: backward Euler again after 0.25.
-    assert [c[1]["scheme"] for c in rec.calls] == [
+    # 0 -> 0.1 -> 0.2 -> 0.25 (the step event) -> 0.3: backward Euler again after 0.25,
+    # given to the circuit layer on a restart step (no heat layer).
+    assert [_circuit_scheme(c[1]) for c in rec.calls] == [
         "backward_euler", "trapezoidal", "trapezoidal", "backward_euler"]
     assert all(c[1]["max_iter"] == 7 and "atol" not in c[1] for c in rec.calls)
-    assert all(c[1]["layer_options"] is None for c in rec.calls)   # no heat layer
+    assert [sorted(c[1]["layer_options"] or {}) for c in rec.calls] == [
+        ["electrical"], [], [], ["electrical"]]
+
+
+def _circuit_scheme(kwargs):
+    """The scheme the circuit layer's solve gets: its `layer_options` over the shared one."""
+    return (kwargs["layer_options"] or {}).get("electrical", {}).get("scheme",
+                                                                     kwargs["scheme"])
 
 
 def test_the_heat_layer_steps_with_the_circuits_rule():
@@ -183,10 +191,10 @@ def test_the_heat_layer_steps_with_the_circuits_rule():
     rec = _Recording(model)
     simulate_circuit(rec, state, drivers, names, times=names.times[:3],
                      layer_options={"electrical": {"max_iter": 40}})
-    assert [(c[1]["scheme"], c[1]["layer_options"]["thermal"]["scheme"])
+    assert [(_circuit_scheme(c[1]), c[1]["layer_options"]["thermal"]["scheme"])
             for c in rec.calls] == [("backward_euler", "backward_euler"),
                                     ("trapezoidal", "trapezoidal")]
-    assert all(c[1]["layer_options"]["electrical"] == {"max_iter": 40} for c in rec.calls)
+    assert all(c[1]["layer_options"]["electrical"]["max_iter"] == 40 for c in rec.calls)
 
 
 def test_a_heat_port_circuit_is_solved_at_the_round_off_tolerance():

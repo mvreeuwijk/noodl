@@ -638,24 +638,31 @@ class Model:
               record: Collection[int] | None = None, diagnostics: dict | None = None,
               layer_options: Mapping[str, Mapping] | None = None, **solve_kwargs) -> dict:
         """Step the model through `times` (s, increasing; `state` is at `times[0]`) and return
-        the history: `"time"` and every layer state key (ending in `.phi`, `.q`, `.x`,
-        `.storage_flow` or `.capacity`) stacked on a new leading axis, the start state as
-        row 0 and rows broadcast to the batch shape of the steps.
+        the history, stacked on a new leading axis with the start state as row 0 and rows
+        broadcast to the batch shape of the steps: `"time"`; every key of the first recorded
+        row that ends in `.phi`, `.q`, `.x`, `.storage_flow` or `.capacity`, or that a
+        closure carries in the state (`closure_state_keys`: a pump's status, a manhole
+        level); and `"<layer>.storage_flow"` of every Kirchhoff layer with storage, which a
+        start state need not carry (its row 0 is then the layer's own with no step: zero for
+        storage at interior nodes, what the start flows deliver for storage at boundary
+        nodes). A key the first row does not carry is not recorded; a recorded key missing
+        from a later row is refused by name.
 
         Step `k` is `step(state, d, dt=times[k+1]-times[k], t=times[k])` with
         `d = drivers_at(times[k], times[k+1])` when `drivers_at` is given, else `drivers`.
         `restarts` holds the step indices taken by backward Euler (the first step, and the
         steps that contain a source discontinuity, damp the ringing the trapezoidal rule
-        shows after a jump): every Kirchhoff layer is solved with `scheme="backward_euler"`
-        and every transport layer whose own scheme is `"trapezoidal"` is stepped by backward
-        Euler (`layer_options`, merged over the caller's); `"exact"` layers are untouched. On
-        the other steps the layers' own schemes apply, or a `scheme=` in `solve_kwargs`.
-        `record` keeps only those indices into `times` (default all). `diagnostics["schemes"]`
-        lists the scheme of each step (`None`: the layer default); it is the only entry `march`
-        fills. A restart index past the last step is ignored, a negative one is refused. A
-        transport layer whose own scheme is `"trapezoidal"` steps by backward Euler on a restart
-        step and by trapezoidal otherwise. Differentiable through
-        time as `step` is.
+        shows after a jump): on a restart step every layer that steps something inside its
+        solve -- a Kirchhoff layer with storage at interior nodes or dynamic laws, a
+        transport layer whose own scheme is `"trapezoidal"` -- gets
+        `scheme="backward_euler"` through `layer_options`, merged over the caller's. A
+        Kirchhoff layer whose storage sits at boundary nodes keeps its forward Euler, and
+        `"exact"` transport layers are untouched. On the other steps the layers' own schemes
+        apply, or a `scheme=` in `solve_kwargs`. `record` keeps only those indices into
+        `times` (default all). `diagnostics["schemes"]` lists the scheme of each step
+        (`"backward_euler"` on a restart, else `solve_kwargs`'s `scheme` or `None`: the
+        layer default); it is the only entry `march` fills. A restart index past the last
+        step is ignored, a negative one is refused. Differentiable through time as `step` is.
         """
         from noodl._march import march
 
