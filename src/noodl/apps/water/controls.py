@@ -57,8 +57,10 @@ class Premise:
     seconds); a status is its code (`CLOSED`, `OPEN`, `ACTIVE`).
 
     `tolerance` is EPANET's equality tolerance of a numerical premise (`rules.c`, `checkvalue`:
-    1e-3 in the unit of the file) in the premise's own SI unit; the reader sets it, and it
-    takes no part in comparing two premises.
+    1e-3 in the unit of the file) in the premise's own SI unit; the reader sets it from the
+    file's units. Built in Python it defaults to 1e-3 of the unit of an SI file (`LPS`, metres):
+    1e-6 m3/s for `FLOW` and `DEMAND`, 1e-3 m for `HEAD`, `LEVEL` and `PRESSURE`, 1e-3 for a
+    `SETTING`. It takes no part in comparing two premises.
     """
 
     conjunction: str
@@ -67,7 +69,12 @@ class Premise:
     attribute: str
     relation: str
     value: float
-    tolerance: float = field(default=1e-3, compare=False)
+    tolerance: float | None = field(default=None, compare=False)
+
+    def __post_init__(self) -> None:
+        if self.tolerance is None:
+            small = 1e-6 if self.attribute in ("FLOW", "DEMAND") else 1e-3
+            object.__setattr__(self, "tolerance", small)
 
 
 @dataclass(frozen=True)

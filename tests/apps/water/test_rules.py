@@ -57,6 +57,7 @@ SNAPSHOT = {"PRESSURE": {"J1": 50.0}, "LEVEL": {"T1": 10.0}, "HEAD": {"J1": 50.0
 
 def _fires(premises, snapshot=SNAPSHOT, **kw):
     kw.setdefault("time", 0.0)
+    kw.setdefault("step", 300.0)
     return evaluate_rules([_rule("R", premises, then=[CLOSE_P2])], snapshot, **kw) == [CLOSE_P2]
 
 
@@ -101,11 +102,12 @@ def test_the_cases_where_epanet_and_the_precedence_rule_agree():
 def test_else_actions():
     rule = _rule("R", [_premise("IF", "PRESSURE", ">", 60.0)], then=[CLOSE_P2],
                  otherwise=[OPEN_P2])
-    assert evaluate_rules([rule], SNAPSHOT, time=0.0) == [OPEN_P2]
-    assert evaluate_rules([rule], {**SNAPSHOT, "PRESSURE": {"J1": 70.0}}, time=0.0) == [CLOSE_P2]
+    assert evaluate_rules([rule], SNAPSHOT, time=0.0, step=300.0) == [OPEN_P2]
+    high = {**SNAPSHOT, "PRESSURE": {"J1": 70.0}}
+    assert evaluate_rules([rule], high, time=0.0, step=300.0) == [CLOSE_P2]
     # no ELSE: nothing
     bare = _rule("R", [_premise("IF", "PRESSURE", ">", 60.0)], then=[CLOSE_P2])
-    assert evaluate_rules([bare], SNAPSHOT, time=0.0) == []
+    assert evaluate_rules([bare], SNAPSHOT, time=0.0, step=300.0) == []
 
 
 def test_priority_resolves_conflicts():
@@ -116,37 +118,66 @@ def test_priority_resolves_conflicts():
     a = _rule("A", yes, then=[CLOSE_P2], priority=1.0)
     b = _rule("B", yes, then=[OPEN_P2], priority=2.0)
     c = _rule("C", yes, then=[CLOSE_P2], priority=2.0)
-    assert evaluate_rules([a, b], SNAPSHOT, time=0.0) == [OPEN_P2]
-    assert evaluate_rules([b, a], SNAPSHOT, time=0.0) == [OPEN_P2]
-    assert evaluate_rules([b, c], SNAPSHOT, time=0.0) == [OPEN_P2]   # tie: first listed
-    assert evaluate_rules([c, b], SNAPSHOT, time=0.0) == [CLOSE_P2]
+    assert evaluate_rules([a, b], SNAPSHOT, time=0.0, step=300.0) == [OPEN_P2]
+    assert evaluate_rules([b, a], SNAPSHOT, time=0.0, step=300.0) == [OPEN_P2]
+    assert evaluate_rules([b, c], SNAPSHOT, time=0.0, step=300.0) == [OPEN_P2]   # tie: first listed
+    assert evaluate_rules([c, b], SNAPSHOT, time=0.0, step=300.0) == [CLOSE_P2]
     twice = _rule("D", yes, then=[CLOSE_P2, OPEN_P2])
-    assert evaluate_rules([twice], SNAPSHOT, time=0.0) == [CLOSE_P2]
+    assert evaluate_rules([twice], SNAPSHOT, time=0.0, step=300.0) == [CLOSE_P2]
     # actions on different links do not compete
     other = Action("P3", "STATUS", float(CLOSED))
-    assert evaluate_rules([a, _rule("E", yes, then=[other])], SNAPSHOT, time=0.0) == [
+    assert evaluate_rules([a, _rule("E", yes, then=[other])], SNAPSHOT, time=0.0, step=300.0) == [
         CLOSE_P2, other]
     # a rule whose premises fail takes no part in the conflict
     no = _rule("F", [_premise("IF", "PRESSURE", "<", 0.0)], then=[OPEN_P2], priority=9.0)
-    assert evaluate_rules([a, no], SNAPSHOT, time=0.0) == [CLOSE_P2]
+    assert evaluate_rules([a, no], SNAPSHOT, time=0.0, step=300.0) == [CLOSE_P2]
 
 
 def test_control_and_rule_on_one_link():
-    """EPANET's order within a step: the simple controls, then the rules; a rule's action
-    stands over a control's on the same link."""
-    status, setting = _t([OPEN, OPEN]), _t([0.0, 1.0])
-    control = Control("P1", CLOSED, None, "time", value=0.0)
-    status, setting, _ = apply_controls(
-        [control], time=_t(0.0), status=status, setting=setting, link_names=["P1", "PU"],
-        link_kinds=["PIPE", "PUMP"])
-    assert status[0].item() == CLOSED
+    """EPANET's order (`ruletimestep` at the end of a step at T, then `runhyd` at T):
+    the rules' action is taken first, the simple controls of the next solve after it, so a
+    control that fires at T stands over a rule's action on the same link."""
+    names, kinds = ["P1", "PU"], ["PIPE", "PUMP"]
+    status, setting = _t([CLOSED, OPEN]), _t([0.0, 1.0])
     rule = _rule("R", [_premise("IF", "PRESSURE", ">", 0.0)],
                  then=[Action("P1", "STATUS", float(OPEN))])
-    (action,) = evaluate_rules([rule], SNAPSHOT, time=0.0)
+    (action,) = evaluate_rules([rule], SNAPSHOT, time=3600.0, step=300.0)
     status, setting, changed = take_actions(
-        [action], status=status, setting=setting, link_names=["P1", "PU"],
-        link_kinds=["PIPE", "PUMP"])
+        [action], status=status, setting=setting, link_names=names, link_kinds=kinds)
     assert status[0].item() == OPEN and changed
+    control = Control("P1", CLOSED, None, "time", value=3600.0)
+    status, setting, _ = apply_controls(
+        [control], time=_t(3600.0), status=status, setting=setting, link_names=names,
+        link_kinds=kinds)
+    assert status[0].item() == CLOSED
+    # a control that does not fire at T leaves the rule's action standing
+    status, _, _ = apply_controls(
+        [Control("P1", CLOSED, None, "time", value=7200.0)], time=_t(3600.0),
+        status=_t([OPEN, OPEN]), setting=setting, link_names=names, link_kinds=kinds)
+    assert status[0].item() == OPEN
+
+
+def test_the_rule_step_must_be_positive():
+    """EPANET never checks the rules over an empty interval (`ruletimestep`: a zero first
+    increment is made a whole one): with no step a time premise would hold for any time."""
+    rule = [_rule("R", [Premise("IF", "SYSTEM", "", "TIME", "=", 99999.0)], then=[CLOSE_P2])]
+    assert evaluate_rules(rule, SNAPSHOT, time=3600.0, step=300.0) == []
+    for step in (0.0, -1.0):
+        with pytest.raises(ValueError, match="step"):
+            evaluate_rules(rule, SNAPSHOT, time=3600.0, step=step)
+    with pytest.raises(TypeError):
+        evaluate_rules(rule, SNAPSHOT, time=3600.0)
+    model, state, drivers = build_model(_two_source(rule))
+    with pytest.raises(TypeError):
+        apply_rules(model, state, drivers, time=3600.0)
+
+
+def test_a_premise_built_in_python_has_epanets_tolerance_in_si_units():
+    """A thousandth of the unit of an SI file (LPS, metres), not 1e-3 m3/s."""
+    tol = lambda attribute: Premise("IF", "NODE", "J1", attribute, "=", 0.0).tolerance  # noqa: E731
+    assert tol("DEMAND") == tol("FLOW") == 1e-6
+    assert tol("HEAD") == tol("LEVEL") == tol("PRESSURE") == tol("SETTING") == 1e-3
+    assert Premise("IF", "NODE", "J1", "HEAD", "=", 0.0, 0.5).tolerance == 0.5
 
 
 # ------------------------------------------------------------------ premises on values
@@ -165,7 +196,7 @@ def test_value_premises_use_epanets_tolerance_of_a_thousandth():
     # the tolerance is the premise's: a thousandth of a file unit, in SI
     wide = Premise("IF", "NODE", "T1", "LEVEL", "=", 10.0, 0.3048e-3 * 100)
     assert evaluate_rules([_rule("R", [wide], then=[CLOSE_P2])],
-                          {**SNAPSHOT, "LEVEL": {"T1": 10.03}}, time=0.0) == [CLOSE_P2]
+                          {**SNAPSHOT, "LEVEL": {"T1": 10.03}}, time=0.0, step=300.0) == [CLOSE_P2]
 
 
 def test_flow_is_absolute_status_has_three_values_and_a_missing_setting_is_false():
@@ -321,13 +352,13 @@ def test_a_rule_closes_a_link_after_a_solve():
     assert model.control_closure is not None
     state = water_steady(model, state, drivers)
     assert float(state["water.q"][1]) != 0.0
-    state, changed = apply_rules(model, state, drivers, time=0.0)
+    state, changed = apply_rules(model, state, drivers, time=0.0, step=300.0)
     assert bool(changed) and state["water.link_status"][1].item() == CLOSED
     state = water_steady(model, state, drivers)
     assert float(state["water.q"][1]) == 0.0
     assert float(state["water.q"][0]) == pytest.approx(0.005, abs=1e-9)
     # nothing more to do: the link is closed
-    _, changed = apply_rules(model, state, drivers, time=0.0)
+    _, changed = apply_rules(model, state, drivers, time=0.0, step=300.0)
     assert not bool(changed)
 
 
@@ -343,7 +374,7 @@ def test_rules_read_heads_levels_flows_and_the_status_a_solve_found():
     state = water_steady(model, state, drivers)
     head = float(state["water.phi"][model.node_names.index("J1")])
     assert head > 46.0
-    state, changed = apply_rules(model, state, drivers, time=0.0)
+    state, changed = apply_rules(model, state, drivers, time=0.0, step=300.0)
     assert bool(changed) and state["water.link_status"][1].item() == CLOSED
 
 
@@ -355,7 +386,7 @@ def test_a_rule_that_does_not_hold_changes_nothing_and_batches_are_independent()
     low = {k: v.clone() for k, v in state.items()}
     low["water.phi"][j] = 10.0
     batch = {k: torch.stack([state[k], low[k]]) for k in state}
-    out, changed = apply_rules(model, batch, drivers, time=0.0)
+    out, changed = apply_rules(model, batch, drivers, time=0.0, step=300.0)
     assert changed.tolist() == [True, False]
     assert out["water.link_status"][:, 1].tolist() == [CLOSED, OPEN]
 
@@ -375,14 +406,14 @@ def test_a_rule_setting_on_a_darcy_weisbach_prv_is_in_the_layers_unit():
     want = float(water_steady(built, bstate, bdrivers)["water.phi"][built.node_names.index("B")])
     model, state, drivers = build_model(network(40.0, (rule,)))
     state = water_steady(model, state, drivers)
-    state, changed = apply_rules(model, state, drivers, time=0.0)
+    state, changed = apply_rules(model, state, drivers, time=0.0, step=300.0)
     assert bool(changed)
     assert state["water.link_status"][1].item() == ACTIVE
     got = float(water_steady(model, state, drivers)["water.phi"][model.node_names.index("B")])
     assert got == pytest.approx(want, rel=1e-9)
     assert got == pytest.approx(30.0 * model.head_scale, rel=1e-6)
     # the same setting again is within EPANET's tolerance: no change
-    _, changed = apply_rules(model, state, drivers, time=0.0)
+    _, changed = apply_rules(model, state, drivers, time=0.0, step=300.0)
     assert not bool(changed)
 
 
@@ -397,7 +428,7 @@ def test_a_rule_runs_a_pump_at_its_setting_in_a_network():
         rules=(_rule("R", [Premise("IF", "SYSTEM", "", "TIME", ">=", 0.0)],
                      then=[Action("PU", "SETTING", 0.5)]),))
     model, state, drivers = build_model(net)
-    state, changed = apply_rules(model, state, drivers, time=0.0)
+    state, changed = apply_rules(model, state, drivers, time=0.0, step=300.0)
     j = model.link_names.index("PU")
     assert bool(changed) and state["water.link_setting"][j].item() == 0.5
     slow = water_steady(model, state, drivers)
@@ -410,7 +441,7 @@ def test_a_rule_runs_a_pump_at_its_setting_in_a_network():
 
 def test_apply_rules_without_rules_is_a_no_op():
     model, state, drivers = build_model(_two_source([]))
-    out, changed = apply_rules(model, state, drivers, time=0.0)
+    out, changed = apply_rules(model, state, drivers, time=0.0, step=300.0)
     assert out is state and not bool(changed)
 
 
@@ -419,7 +450,10 @@ def test_the_network_names_what_a_rule_cannot_say():
     yes = [Premise("IF", "SYSTEM", "", "TIME", ">=", 0.0)]
     cases = [
         (_rule("R", yes, then=[Action("P1", "STATUS", float(ACTIVE))]), "ACTIVE"),
-        (_rule("R", yes, then=[Action("V1", "STATUS", float(ACTIVE))]), "ACTIVE"),
+        (_rule("R", [_premise("IF", "SETTING", "=", 1.0, object="LINK", id="P1")],
+               then=[CLOSE_P2]), "pipe"),
+        (_rule("R", [_premise("IF", "SETTING", "=", 1.0, object="LINK", id="G1")],
+               then=[CLOSE_P2]), "GPV"),
         (_rule("R", yes, then=[Action("P1", "SETTING", -1.0)]), "negative"),
         (_rule("R", yes, then=[Action("G1", "SETTING", 1.0)]), "GPV"),
         (_rule("R", [_premise("IF", "DEMAND", ">", 0.0, id="R1")], then=[CLOSE_P2]),
@@ -441,6 +475,24 @@ def test_the_network_names_what_a_rule_cannot_say():
             net.validate()
 
 
+def test_status_active_on_a_valve_is_accepted_and_does_nothing_as_in_epanet():
+    """EPANET's `takeactions` has no branch for IS_ACTIVE: no change, on an OPEN valve too
+    (measured on EPANET 2.2)."""
+    net = WaterNetwork(
+        junctions=(Junction("A", 0.0, 0.0), Junction("J1", 0.0, 0.005)),
+        reservoirs=(Reservoir("R1", 50.0),),
+        pipes=(WaterPipe("P1", "R1", "A", 100.0, 0.3, 130.0),),
+        valves=(Valve("V1", "A", "J1", 0.2, "TCV", 5.0),),
+        rules=(_rule("R", [Premise("IF", "SYSTEM", "", "TIME", ">=", 0.0)],
+                     then=[Action("V1", "STATUS", float(ACTIVE))]),),
+        initial_status={"V1": "OPEN"})
+    net.validate()
+    model, state, drivers = build_model(net)
+    out, changed = apply_rules(model, state, drivers, time=300.0, step=300.0)
+    assert not bool(changed)
+    assert out["water.link_status"].tolist() == state["water.link_status"].tolist()
+
+
 def test_a_check_valve_cannot_be_the_object_of_a_rule_action():
     """EPANET error 207: a CV cannot be controlled."""
     net = WaterNetwork(
@@ -458,10 +510,15 @@ def test_a_demand_premise_is_refused_on_a_pressure_driven_model():
         build_model(_two_source([rule]), pda=True)
 
 
-def test_a_rule_that_acts_on_a_pipe_of_the_potential_form_is_refused():
+def test_a_rule_or_control_on_a_pipe_of_the_potential_form_is_refused_at_build():
     rule = _rule("R", [Premise("IF", "SYSTEM", "", "TIME", ">=", 0.0)], then=[CLOSE_P2])
-    with pytest.raises(ValueError, match="pipe_form"):
+    with pytest.raises(ValueError, match=r"pipe_form.*potential|potential.*pipe_form"):
         build_model(_two_source([rule], headloss="D-W"), friction="colebrook")
+    control = Control("P2", CLOSED, None, "time", value=3600.0)
+    with pytest.raises(ValueError, match=r"\['P2'\].*control"):
+        build_model(_two_source([], headloss="D-W", controls=(control,)),
+                    friction="colebrook")
+    build_model(_two_source([], headloss="D-W"), friction="colebrook")
 
 
 # ------------------------------------------------------------------ the reader
@@ -495,3 +552,174 @@ def test_a_premise_carries_epanets_tolerance_in_si(tmp_path):
           "[CURVES]")
     net = read_epanet_inp(_edit(tmp_path, "Net1.inp", ("[CURVES]", us)))
     assert net.rules[0].premises[0].tolerance == pytest.approx(1e-3 * PSI_TO_M)
+
+
+# ------------------------------------------------------------------ against EPANET 2.2
+def _epanet(tmp_path, text, *, links=(), nodes=()):
+    """The last hydraulic step's `{"flow": {link: file unit}, "status": {...}, "head": {...}}`
+    of EPANET 2.2 (wntr's toolkit) on the `.inp` `text`."""
+    wntr_toolkit = pytest.importorskip("wntr.epanet.toolkit")
+    from wntr.epanet.util import EN
+    path = tmp_path / "epanet.inp"
+    path.write_text(text)
+    en = wntr_toolkit.ENepanet()
+    en.ENopen(str(path), str(tmp_path / "epanet.rpt"), str(tmp_path / "epanet.bin"))
+    en.ENopenH()
+    en.ENinitH(0)
+    out = {}
+    while True:
+        en.ENrunH()
+        out = {
+            "flow": {k: en.ENgetlinkvalue(en.ENgetlinkindex(k), EN.FLOW) for k in links},
+            "status": {k: en.ENgetlinkvalue(en.ENgetlinkindex(k), EN.STATUS) for k in links},
+            "head": {k: en.ENgetnodevalue(en.ENgetnodeindex(k), EN.HEAD) for k in nodes},
+        }
+        if en.ENnextH() <= 0:
+            break
+    en.ENcloseH()
+    en.ENclose()
+    return out
+
+
+def _inp(body, rules="", status="", duration="1:00"):
+    return (f"[TITLE]\n[JUNCTIONS]\n{body['junctions']}\n[RESERVOIRS]\n{body['reservoirs']}\n"
+            f"[PIPES]\n{body.get('pipes', '')}\n[PUMPS]\n{body.get('pumps', '')}\n"
+            f"[VALVES]\n{body.get('valves', '')}\n[CURVES]\n{body.get('curves', '')}\n"
+            f"[STATUS]\n{status}\n[RULES]\n{rules}\n[TIMES]\nDURATION {duration}\n"
+            f"HYDRAULIC TIMESTEP 1:00\nRULE TIMESTEP 0:05\n[OPTIONS]\n"
+            f"{body.get('options', 'UNITS LPS')}\n[END]\n")
+
+
+def _noodl(tmp_path, text):
+    path = tmp_path / "noodl.inp"
+    path.write_text(text)
+    net = read_epanet_inp(path)
+    model, state, drivers = build_model(net)
+    return model, water_steady(model, state, drivers), drivers
+
+
+def test_a_setting_premise_on_a_valve_with_a_fixed_status_is_never_satisfied(tmp_path):
+    """EPANET sets the setting of a valve to MISSING when its status is OPEN or CLOSED
+    (`changestatus`, `setlinkstatus`), and `checkvalue` then returns false."""
+    body = {"junctions": "A 0 0\nB 0 0\nC 0 1", "reservoirs": "R 50",
+            "pipes": "P1 R A 100 300 130 0 Open\nP3 R C 100 300 130 0 Open",
+            "valves": "V A B 200 PRV 30 0"}
+    rule = "RULE R1\nIF LINK V SETTING = 30\nTHEN LINK P3 STATUS IS CLOSED"
+    for status, fires in (("", True), ("V OPEN", False), ("V CLOSED", False)):
+        text = _inp(body, rule, status)
+        shut = abs(_epanet(tmp_path, text, links=["P3"])["flow"]["P3"]) < 1e-9
+        assert shut is fires, status
+        model, state, drivers = _noodl(tmp_path, text)
+        out, changed = apply_rules(model, state, drivers, time=300.0, step=300.0)
+        assert bool(changed) is fires, status
+        assert (out["water.link_status"][model.link_names.index("P3")].item() == CLOSED) is fires
+
+
+def test_an_open_action_reopens_a_prv_the_solver_closed(tmp_path):
+    """EPANET tests `s <= CLOSED` on the solved `LinkStatus`: a PRV closed by a reversed head
+    is fixed open by `STATUS IS OPEN` and the water runs back through it."""
+    body = {"junctions": "A 0 0\nB 0 0", "reservoirs": "R1 40\nR2 60",
+            "pipes": "P1 R1 A 100 300 130 0 Open\nP2 B R2 100 300 130 0 Open",
+            "valves": "V1 A B 200 PRV 30 0"}
+    rule = "RULE R1\nIF SYSTEM TIME >= 0\nTHEN LINK V1 STATUS IS OPEN"
+    want = _epanet(tmp_path, _inp(body, rule), links=["V1"])["flow"]["V1"] / 1000.0
+    none = _epanet(tmp_path, _inp(body), links=["V1"])["flow"]["V1"] / 1000.0
+    assert none == pytest.approx(0.0, abs=1e-9) and abs(want) > 1e-3
+    model, state, drivers = _noodl(tmp_path, _inp(body, rule))
+    j = model.link_names.index("V1")
+    assert float(state["water.q"][j]) == pytest.approx(0.0, abs=1e-9)
+    state, changed = apply_rules(model, state, drivers, time=300.0, step=300.0)
+    assert bool(changed) and state["water.link_status"][j].item() == OPEN
+    state = water_steady(model, state, drivers)
+    # 0.44 m3/s through a 300 mm pipe: EPANET stops at its own accuracy (the two differ by
+    # 5e-6 relative, measured), so the bound is 1e-5 relative, not 1e-6 absolute
+    assert float(state["water.q"][j]) == pytest.approx(want, rel=1e-5)
+
+
+PUMP_BODY = {"junctions": "A 0 0", "reservoirs": "R1 0\nR2 45",
+             "pipes": "P2 A R2 100 300 130 0 Open", "pumps": "PU R1 A HEAD C1 SPEED 0.8",
+             "curves": "C1 0 60\nC1 10 50\nC1 20 30"}
+
+
+def test_an_open_action_runs_a_pump_the_solver_shut_at_shut_off_at_speed_one(tmp_path):
+    """The pump's shut-off head at speed 0.8 is 38.4 m, below the 45 m to lift: EPANET's
+    `LinkStatus` is XHEAD (closed); `STATUS IS OPEN` sets its speed to 1 and it runs."""
+    rule = "RULE R1\nIF SYSTEM TIME >= 0\nTHEN LINK PU STATUS IS OPEN"
+    got = _epanet(tmp_path, _inp(PUMP_BODY, rule), links=["PU"])["flow"]["PU"] / 1000.0
+    assert got > 1e-3
+    model, state, drivers = _noodl(tmp_path, _inp(PUMP_BODY, rule))
+    j = model.link_names.index("PU")
+    assert float(state["water.q"][j]) == pytest.approx(0.0, abs=1e-9)
+    state, changed = apply_rules(model, state, drivers, time=300.0, step=300.0)
+    assert bool(changed) and state["water.link_setting"][j].item() == 1.0
+    state = water_steady(model, state, drivers)
+    assert float(state["water.q"][j]) == pytest.approx(got, abs=1e-6)
+
+
+def test_a_closed_action_does_nothing_to_a_pump_the_solver_shut(tmp_path):
+    """`takeactions` closes a link only if `LinkStatus > CLOSED`: a pump at shut-off is no
+    change (EPANET counts no action, and the solver may restart the pump)."""
+    rule = "RULE R1\nIF SYSTEM TIME >= 0\nTHEN LINK PU STATUS IS CLOSED"
+    model, state, drivers = _noodl(tmp_path, _inp(PUMP_BODY, rule))
+    j = model.link_names.index("PU")
+    assert float(state["water.q"][j]) == pytest.approx(0.0, abs=1e-9)
+    out, changed = apply_rules(model, state, drivers, time=300.0, step=300.0)
+    assert not bool(changed) and out["water.link_status"][j].item() == OPEN
+
+
+def test_a_flow_control_valve_the_flow_runs_back_through_reads_open(tmp_path):
+    """EPANET's `fcvstatus`: a head that falls along the flow is `XFCV`, which `checkstatus`
+    reads as OPEN though the valve's status is ACTIVE otherwise."""
+    body = {"junctions": "A 0 0\nB 0 0\nC 0 1", "reservoirs": "R1 30\nR2 50",
+            "pipes": ("P1 R1 A 100 300 130 0 Open\nP2 B R2 100 300 130 0 Open\n"
+                      "P3 R1 C 100 300 130 0 Open"),
+            "valves": "F A B 200 FCV 5 0"}
+    for relation, fires in (("IS OPEN", True), ("IS ACTIVE", False)):
+        rule = f"RULE R1\nIF LINK F STATUS {relation}\nTHEN LINK P3 STATUS IS CLOSED"
+        text = _inp(body, rule)
+        shut = abs(_epanet(tmp_path, text, links=["P3"])["flow"]["P3"]) < 1e-9
+        assert shut is fires, relation
+        model, state, drivers = _noodl(tmp_path, text)
+        _, changed = apply_rules(model, state, drivers, time=300.0, step=300.0)
+        assert bool(changed) is fires, relation
+
+
+US_SG = """[JUNCTIONS]
+A 0 0
+B 0 0
+[RESERVOIRS]
+R 200
+[PIPES]
+P1 R A 100 12 100 0 Open
+[VALVES]
+V A B 8 PRV 30 0
+[RULES]
+RULE R1
+IF NODE B PRESSURE ABOVE 20
+THEN LINK P1 STATUS IS CLOSED
+[TIMES]
+DURATION 0
+[OPTIONS]
+UNITS GPM
+HEADLOSS D-W
+SPECIFIC GRAVITY 1.2
+[END]
+"""
+
+
+def test_a_us_files_pressures_carry_the_specific_gravity(tmp_path):
+    """EPANET's `Ucf[PRESSURE]` is psi per foot times the specific gravity: a PRV set at 30
+    psi holds `30 / (0.4333 SG)` ft of head, and a PRESSURE premise or setting is read so."""
+    no_rule = US_SG.replace("[RULES]\nRULE R1\nIF NODE B PRESSURE ABOVE 20\n"
+                            "THEN LINK P1 STATUS IS CLOSED\n", "")
+    want = _epanet(tmp_path, no_rule, nodes=["B"])["head"]["B"] * 0.3048
+    assert want == pytest.approx(30.0 / (0.4333 * 1.2) * 0.3048, rel=1e-3)
+    path = tmp_path / "sg.inp"
+    path.write_text(US_SG)
+    net = read_epanet_inp(path)
+    assert net.valves[0].setting == pytest.approx(want, rel=1e-3)
+    model, state, drivers = build_model(net)
+    state = water_steady(model, state, drivers)
+    head = float(state["water.phi"][model.node_names.index("B")]) / model.head_scale
+    assert head == pytest.approx(want, rel=1e-3)
+    assert net.rules[0].premises[0].value == pytest.approx(20.0 * 0.3048 / (0.4333 * 1.2))

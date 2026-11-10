@@ -188,7 +188,10 @@ def read_epanet_inp(path) -> WaterNetwork:
         viscosity = viscosity / (NU_WATER_FT2 * (1.0 if us else FOOT**2))
     length_scale = FOOT if us else 1.0
     diameter_scale = INCH if us else 1e-3
-    pressure_scale = PSI_TO_M if us else 1.0
+    # metres of head per file pressure unit: EPANET's `Ucf[PRESSURE]` carries the specific
+    # gravity (`input1.c`, `convertunits`: psi per foot of head times SG, or metres of head
+    # times SG), a pressure being `rho g h`
+    pressure_scale = (PSI_TO_M if us else 1.0) / specific_gravity
 
     patterns: dict[str, tuple[float, ...]] = {}
     for line in sections.get("PATTERNS", []):
@@ -515,8 +518,7 @@ def read_epanet_inp(path) -> WaterNetwork:
                 f"not a junction of this network"
             )
         coefficient = as_float(line, 1, "the emitter coefficient", path) * flow
-        if us:
-            coefficient = coefficient / PSI_TO_M**emitter_exponent
+        coefficient = coefficient / pressure_scale**emitter_exponent
         emitters.append(Emitter(line.fields[0], coefficient))
 
     rules = read_rules(

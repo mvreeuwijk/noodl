@@ -44,8 +44,8 @@ SETTING_TOLERANCE = 1e-3
 
 
 def evaluate_rules(
-    rules: Sequence[Rule], snapshot: Mapping[str, Mapping[str, float]], *, time, clocktime=0.0,
-    step=0.0,
+    rules: Sequence[Rule], snapshot: Mapping[str, Mapping[str, float]], *, time, step,
+    clocktime=0.0,
 ) -> list[Action]:
     """The actions that stand after every rule is tested at `time`, in the order their
     links first appear: one per link. EPANET 2.2, `rules.c`, `checkrules`, `evalpremises`,
@@ -59,13 +59,19 @@ def evaluate_rules(
     `snapshot` maps an attribute to `{id: value}` in SI: node `"DEMAND"` (m3/s, positive out
     of the network), `"HEAD"`, `"LEVEL"` and `"PRESSURE"` (m), link `"FLOW"` (m3/s, a sign is
     ignored), `"STATUS"` (a code of `noodl.apps.water.controls`) and `"SETTING"` (in SI; `nan`
-    where the link has none), and `"DEMAND"[""]` the system demand (the sum of the junctions'
-    positive demands). Only what the rules read need be present.
+    where the link has none: a valve whose status is fixed, OPEN or CLOSED), and
+    `"DEMAND"[""]` the system demand (the sum of the junctions' positive demands).
+    Only what the rules read need be present.
 
     `time` is the simulation time (s) the rules are checked at, `clocktime` the time of day
-    (s after midnight) the simulation starts at, `step` the length (s) of the interval since
-    the previous check, which a `SYSTEM TIME` or `CLOCKTIME` premise tests (EPANET's
+    (s after midnight) the simulation starts at, `step` the length (s, positive: EPANET never
+    checks the rules over an empty interval, `ruletimestep`) of the interval since the
+    previous check, which a `SYSTEM TIME` or `CLOCKTIME` premise tests (EPANET's
     `Time1 = Htime - dt + 1`)."""
+    if not float(step) > 0.0:
+        raise ValueError(
+            f"evaluate_rules: step is the length of the rule interval and must be positive, "
+            f"got {step!r}")
     time1 = round(float(time)) - round(float(step)) + 1
     now, start = round(float(time)), round(float(clocktime))
     standing: list[tuple[Action, Rule]] = []
@@ -191,7 +197,7 @@ def _check_time(p: Premise, time1: int, now: int, start: int) -> bool:
 def take_actions(
     actions: Sequence[Action], *, status: Tensor, setting: Tensor, link_names: Sequence[str],
     link_kinds: Sequence[str], setting_scale: Sequence[float] | None = None,
-    setting_tolerance: Sequence[float] | None = None,
+    setting_tolerance: Sequence[float] | None = None, solved: Tensor | None = None,
 ) -> tuple[Tensor, Tensor, bool]:
     """`(status, setting, changed)`: the links' status and setting (`(n_links,)`, in
     `link_names` order, of `link_kinds` `"PIPE"`, `"PUMP"` or `"VALVE"`) after `actions`,
@@ -200,8 +206,12 @@ def take_actions(
 
     STATUS OPEN acts on a closed link only (a pump then runs at relative speed 1), STATUS
     CLOSED on a link that is not closed (a pump's speed is then 0); an action that finds its
-    link as it says is no change. STATUS ACTIVE is no action at all in EPANET, and none here
-    (`WaterNetwork.check` refuses it). SETTING on a pipe is its status (0 closes it); on a
+    link as it says is no change. "Closed" is the link's state as the last solve found it
+    (`solved`, as `link_states` gives it: EPANET's `LinkStatus`; the carried `status` when not
+    given), so a PRV the solver closed or a pump it shut at shut-off is closed to an OPEN, and
+    a pump shut at shut-off is not closed again by a CLOSED. The action itself is written to
+    the carried `status`. STATUS ACTIVE is no action at all in EPANET, and none here. SETTING
+    on a pipe is its status (0 closes it); on a
     pump its relative speed (positive opens a closed pump, 0 closes it); on a valve it makes
     it ACTIVE at the setting. A setting is a change only beyond `setting_tolerance` (per
     link, default 1e-3 as EPANET's `tol`, in the carried unit) of the present one, a closed
@@ -211,12 +221,13 @@ def take_actions(
     A pump CLOSED keeps its carried speed here, where EPANET sets it to 0 (the speed changes
     no flow of a shut pump, and `TankLevels` carries the build's speed on)."""
     status, setting = status.clone(), setting.clone()
+    found = status if solved is None else solved
     index = {name: j for j, name in enumerate(link_names)}
     changed = False
     for action in actions:
         j = index[action.link]
         kind = link_kinds[j]
-        s = int(status[j])
+        s = int(found[j])
         wanted: int | None = None
         if action.attribute == "STATUS":
             wanted = int(action.value)
@@ -234,16 +245,16 @@ def take_actions(
             continue
         x = action.value * (1.0 if setting_scale is None else setting_scale[j])
         tol = SETTING_TOLERANCE if setting_tolerance is None else setting_tolerance[j]
-        present = 0.0 if (kind == "PUMP" and s <= CLOSED) else float(setting[j])
         if kind == "PUMP":
+            present = 0.0 if int(status[j]) <= CLOSED else float(setting[j])
             if abs(x - present) > tol:
                 setting[j] = x
                 if x > 0.0 and s <= CLOSED:
                     status[j] = OPEN
-                if x == 0.0 and s > CLOSED:
-                    status[j] = CLOSED
+                if x == 0.0:
+                    status[j] = CLOSED   # a speed of 0 is a shut pump (never a 0-speed curve)
                 changed = True
-        elif s != ACTIVE or abs(x - present) > tol:
+        elif int(status[j]) != ACTIVE or abs(x - float(setting[j])) > tol:
             # a valve set after its status was fixed (EPANET's MISSING setting) is ACTIVE
             status[j], setting[j] = ACTIVE, x
             changed = True

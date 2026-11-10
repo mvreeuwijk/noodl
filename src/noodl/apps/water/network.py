@@ -31,7 +31,7 @@ from dataclasses import dataclass, field
 import torch
 
 from noodl._unionfind import UnionFind
-from noodl.apps.water.controls import ACTIVE, CLOSED, OPEN, Control, Rule, status_code
+from noodl.apps.water.controls import ACTIVE, CLOSED, HTOL, OPEN, Control, Rule, status_code
 from noodl.apps.water.demand import EmitterOutflow, PressureDrivenDemand
 from noodl.apps.water.elements import (
     CBIG_FT_PER_CFS,
@@ -456,6 +456,14 @@ class WaterNetwork:
                         f"EPANET 2.2 reads in no rule premise on a {premise.object.lower()}"
                         f" (DEMAND, HEAD, LEVEL and PRESSURE of a node; FLOW, STATUS and "
                         f"SETTING of a link; SYSTEM TIME, CLOCKTIME and DEMAND)")
+                if (premise.object == "LINK" and premise.attribute == "SETTING"
+                        and premise.id not in {v.name for v in self.valves
+                                               if v.kind.upper() != "GPV"}
+                        | {p.name for p in self.pumps}):
+                    raise ValueError(
+                        f"WaterNetwork: rule {rule.name!r} tests the SETTING of link "
+                        f"{premise.id!r}, which is a pipe or a GPV; only a pump's "
+                        f"or another valve's setting is one")
                 if (premise.object == "NODE" and premise.attribute == "DEMAND"
                         and premise.id in {r.name for r in self.reservoirs}):
                     raise ValueError(
@@ -474,12 +482,13 @@ class WaterNetwork:
                     raise ValueError(
                         f"WaterNetwork: rule {rule.name!r} acts on pipe {action.link!r}, a "
                         f"check valve, which EPANET 2.2 cannot control (error 207)")
-                if action.attribute == "STATUS" and action.value == ACTIVE:
+                if (action.attribute == "STATUS" and action.value == ACTIVE
+                        and action.link not in {v.name for v in self.valves}):
                     raise ValueError(
                         f"WaterNetwork: rule {rule.name!r} sets the status of link "
-                        f"{action.link!r} to ACTIVE; EPANET 2.2 takes no action on it "
-                        f"(`takeactions` acts on OPEN, CLOSED and a setting); give a valve "
-                        f"a SETTING instead")
+                        f"{action.link!r} to ACTIVE, which only a valve can take, not a pipe "
+                        f"or a pump (on a valve EPANET's `takeactions` takes no action on "
+                        f"it, and neither does this)")
                 if action.attribute == "SETTING" and action.value < 0.0:
                     raise ValueError(
                         f"WaterNetwork: rule {rule.name!r} sets link {action.link!r} to the "
@@ -846,17 +855,17 @@ def build_model(
             f"build_model: friction must be 'composite' or 'colebrook', got {friction!r}"
         )
     if pipe_form == "potential":
-        acted = {a.link for r in net.rules for a in (*r.then_actions, *r.else_actions)}
+        acted = ({a.link for r in net.rules for a in (*r.then_actions, *r.else_actions)}
+                 | {c.link for c in net.controls})
         switched = [p.name for p in net.pipes
                     if p.status.upper() != "OPEN" or p.name in net.initial_status
                     or p.name in acted]
         if switched:
             raise ValueError(
                 f"build_model: pipe(s) {switched} are closed or check valves (a CLOSED or CV "
-                f"status, a [STATUS] line or a rule's action), which a pipe takes only in its "
-                f"resistance "
-                f"form: pipe_form='potential' gives each pipe's flow from its head loss and "
-                f"reads no status; use pipe_form='flow'"
+                f"status, a [STATUS] line, a control or a rule's action), which a pipe takes "
+                f"only in its resistance form: pipe_form='potential' gives each pipe's flow "
+                f"from its head loss and reads no status; use pipe_form='flow'"
             )
     options = net.options
     if pda is None:
@@ -1562,7 +1571,6 @@ def initial_drivers(
     return drivers
 
 
-#: The most solves `water_steady` repeats for junction-pressure controls that keep switching.
 def _setting_tolerance(link, head_scale: float) -> float:
     """EPANET's tolerance on a setting a rule sets (`rules.c`, `takeactions`: 1e-3 in
     internal units, feet and cubic feet per second) in the unit the closure carries it in: a
@@ -1577,24 +1585,30 @@ def _setting_tolerance(link, head_scale: float) -> float:
 
 
 def apply_rules(model: Model, state: State, drivers: Drivers, *, time,
-                step: float = 0.0) -> tuple[State, Tensor]:
+                step: float) -> tuple[State, Tensor]:
     """`(state, changed)`: `state` after the network's `[RULES]` are tested on it at `time` (s
     since the start) and the actions that stand are taken (EPANET 2.2, `rules.c`,
     `checkrules`; `evaluate_rules`, `take_actions`); `changed` says per instance whether any
-    link's status or setting moved, which asks for a new solve. `step` is the length of the
-    interval since the previous check (the rule time step), which `SYSTEM TIME` and
-    `CLOCKTIME` premises test. A network without rules returns `state` itself.
+    link's status or setting moved, which asks for a new solve. `step` (s, positive) is the
+    length of the interval since the previous check (the rule time step), which `SYSTEM TIME`
+    and `CLOCKTIME` premises test; EPANET checks nothing before the first step has passed. A
+    network without rules returns `state` itself.
 
     `state` is a solution: the premises read its heads (`HEAD`, `PRESSURE`, `LEVEL`), flows,
-    the converged link states (`link_states`: a valve's `ACTIVE`, `OPEN` or `CLOSED` as the
-    solve found it), the settings the model has, the junctions' demands (the base demands in
-    `"water.sources"`) and a tank's inflow. The actions change the carried
-    `"water.link_status"` and `"water.link_setting"`, which `TankLevels` writes to the
-    drivers `"water.status"` and `"water.setting"` on the next solve. Rules run after the
-    simple controls, on the state they left (EPANET tests the controls at the start of a
-    step, the rules at its end): a rule's action on a link stands over a control's earlier
-    one. `water_steady` takes no time, so it applies no rule; a driver of time calls this at
-    each rule time step.
+    the link states as the solve found them (`link_states`: a valve's `ACTIVE`, `OPEN` or
+    `CLOSED`; an FCV the flow runs back through reads OPEN, EPANET's `XFCV`), the settings the
+    model has (`nan`, never satisfied, for a valve whose status is fixed OPEN or CLOSED, as
+    EPANET's MISSING), the junctions' demands (the base demands in `"water.sources"`; the
+    system demand sums the junctions' positive totals, where EPANET's `Dsystem` clamps each
+    demand category) and a tank's inflow. The actions are tested against those solved states
+    (EPANET's `LinkStatus`) and change the carried `"water.link_status"` and
+    `"water.link_setting"`, which `TankLevels` writes to the drivers `"water.status"` and
+    `"water.setting"` on the next solve.
+
+    ORDER, for a driver of time (EPANET's `ruletimestep` and `runhyd`): the rules are checked
+    at the END of a step, at its end time T, and their actions taken; the next solve, at T,
+    then applies the simple controls first (`controls`), so a control that fires at T stands
+    over a rule's action on the same link. `water_steady` has no time and applies no rule.
 
     Batched states are tested instance by instance (the rules select: they are not
     differentiable)."""
@@ -1604,7 +1618,8 @@ def apply_rules(model: Model, state: State, drivers: Drivers, *, time,
         return state, torch.zeros((), dtype=torch.bool)
     premises = [p for r in rules for p in r.premises]
     with torch.no_grad():
-        arrays, names = _rule_readings(model, closure, rules, premises, state, drivers)
+        solved = _solved_states(model, closure, state, drivers)
+        arrays, names = _rule_readings(closure, premises, state, drivers, solved)
         carried_status = state["water.link_status"].detach()
         carried_setting = state["water.link_setting"].detach()
         time = torch.as_tensor(time, dtype=F64)
@@ -1619,17 +1634,18 @@ def apply_rules(model: Model, state: State, drivers: Drivers, *, time,
         flat = {k: rows(v) for k, v in arrays.items()}
         times = time.expand(batch).reshape(-1)
         status_rows, setting_rows = rows(carried_status), rows(carried_setting)
+        solved_rows = rows(solved)
         new_status, new_setting, changed = [], [], []
         for b in range(status_rows.shape[0]):
             snapshot = {a: {i: float(flat[a][b, k]) for k, i in enumerate(ids)}
                         for a, ids in names.items()}
-            actions = evaluate_rules(rules, snapshot, time=float(times[b]),
-                                     clocktime=closure.start_clocktime, step=step)
+            actions = evaluate_rules(rules, snapshot, time=float(times[b]), step=step,
+                                     clocktime=closure.start_clocktime)
             st, se, moved = take_actions(
                 actions, status=status_rows[b], setting=setting_rows[b],
                 link_names=closure.link_names, link_kinds=closure.link_kinds,
                 setting_scale=closure.setting_scale,
-                setting_tolerance=closure.setting_tolerance)
+                setting_tolerance=closure.setting_tolerance, solved=solved_rows[b])
             new_status.append(st)
             new_setting.append(se)
             changed.append(moved)
@@ -1639,7 +1655,33 @@ def apply_rules(model: Model, state: State, drivers: Drivers, *, time,
     return out, torch.tensor(changed).reshape(batch)
 
 
-def _rule_readings(model, closure, rules, premises, state, drivers):
+def _solved_states(model, closure, state, drivers) -> Tensor:
+    """Every link's state as the solve found it, EPANET's `LinkStatus` (`link_states`), in the
+    codes of `noodl.apps.water.controls`, except that an FCV the flow runs back through (the
+    head falls along the flow, or the flow is negative: `hydstatus.c`, `fcvstatus`) is OPEN,
+    EPANET's `XFCV`, which `checkstatus` reads as open. (EPANET's hysteresis, an FCV that
+    stays `XFCV` until the flow regains its setting, needs the last step's state, which is not
+    carried.)"""
+    codes = link_states(model, state, drivers)
+    fcv = [model.link_names.index(v.name) for v in model.water_network.valves
+           if v.kind.upper() == "FCV"]
+    if fcv:
+        ends = torch.tensor(_topology(model)[0], dtype=torch.long)
+        phi = state["water.phi"].detach()
+        dp = phi[..., ends[fcv, 0]] - phi[..., ends[fcv, 1]]
+        q = state["water.q"].detach()[..., fcv]
+        reversed_ = (dp < -HTOL * closure.head_scale) | (q < -_QTOL)
+        codes = codes.clone()
+        codes[..., fcv] = torch.where(reversed_ & (codes[..., fcv] == ACTIVE),
+                                      torch.full_like(codes[..., fcv], OPEN), codes[..., fcv])
+    return codes
+
+
+#: EPANET's flow tolerance `Qtol` (0.0001 cfs, `hydraul.c`, `inithyd`) in m3/s.
+_QTOL = 1e-4 * M_PER_FT**3
+
+
+def _rule_readings(closure, premises, state, drivers, solved):
     """`(arrays, names)`: what the rules' premises read of `state`, each attribute as an
     array `(..., len(ids))` over the ids in `names[attribute]` (SI), the snapshot
     `evaluate_rules` takes; only what a premise names is computed."""
@@ -1682,8 +1724,7 @@ def _rule_readings(model, closure, rules, premises, state, drivers):
     ids = ids_of("STATUS", "LINK")
     if ids:
         idx = [closure.link_names.index(i) for i in ids]
-        codes = link_states(model, state, drivers)[..., idx]
-        arrays["STATUS"], names["STATUS"] = codes.to(F64), ids
+        arrays["STATUS"], names["STATUS"] = solved[..., idx].to(F64), ids
     ids = ids_of("SETTING", "LINK")
     if ids:
         idx = [closure.link_names.index(i) for i in ids]
@@ -1695,11 +1736,16 @@ def _rule_readings(model, closure, rules, premises, state, drivers):
         value = effective[..., idx].to(F64) / scale
         pump = torch.tensor([closure.link_kinds[j] == "PUMP" for j in idx])
         shut = pump & (status[..., idx] <= CLOSED)
-        arrays["SETTING"] = torch.where(shut, torch.zeros_like(value), value)
+        # a valve whose status is fixed (OPEN or CLOSED) has no setting: EPANET's MISSING
+        fixed = torch.tensor([closure.link_kinds[j] == "VALVE" for j in idx]) & (
+            status[..., idx] != ACTIVE)
+        value = torch.where(shut, torch.zeros_like(value), value)
+        arrays["SETTING"] = torch.where(fixed, torch.full_like(value, torch.nan), value)
         names["SETTING"] = ids
     return arrays, names
 
 
+#: The most solves `water_steady` repeats for junction-pressure controls that keep switching.
 MAX_PRESSURE_SWITCHES = 10
 
 

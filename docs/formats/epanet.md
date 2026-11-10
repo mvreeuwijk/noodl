@@ -28,10 +28,14 @@ that uses it: a pump head or GPV head-loss curve (flow, length), a pump efficien
 percent, kept as written) or a tank volume curve (length, volume). A curve used in two roles
 with different units is refused by name when the file is read.
 
+**Pressures.** A pressure in the file (`PRESSURE` premises, PRV/PSV/PBV settings, `MINIMUM` and
+`REQUIRED PRESSURE`, emitter coefficients) is converted as EPANET's `Ucf[PRESSURE]` does,
+including `SPECIFIC GRAVITY` (psi per foot of head times it; metres of head times it in an SI file).
+
 **Rules.** `[RULES]` are modelled (`apply_rules`): premises on node and link attributes and
 `SYSTEM` `TIME`, `CLOCKTIME` and `DEMAND`, `THEN`/`ELSE` actions and `PRIORITY`, with EPANET's own
 premise logic (not the textbook precedence of `AND` over `OR`). `GRADE` reads as `HEAD`; a
-`STATUS IS ACTIVE` action, an action on a `CV` pipe, a `DAY` or `POWER` premise, and anything
+`STATUS IS ACTIVE` action on a pipe or a pump, an action on a `CV` pipe, a `DAY` or `POWER` premise, and anything
 after a premise's value (but a time unit) are refused by name when the file is read or
 validated.
 
