@@ -2233,13 +2233,13 @@ def _at_unit_speed(path):
 @pytest.mark.parametrize("kind", list(_PUMP_KINDS))
 def test_pump_speed_setting(tmp_path, kind):
     """A relative speed of 0.8 given through the driver `"water.setting"` on a model built
-    at speed 1 matches EPANET with `SPEED 0.8` in the file (`hydcoeffs.c`, `pumpcoeff`: the
+    at speed 1 matches EPANET with `SPEED 1.2` in the file (`hydcoeffs.c`, `pumpcoeff`: the
     affinity laws). Heads 1e-6 relative, flows 1e-6 m3/s, states equal. MEASURED heads
     (flows 1.8e-9 m3/s each): one point 3.8e-7, three points 2.9e-7, segments 2.2e-7,
     constant power 3.6e-7."""
     parameters, curve = _PUMP_KINDS[kind]
     path, results = _epanet(tmp_path, "twoloop_si.inp",
-                            edits=_pump_edits(parameters + " SPEED 0.8", curve))
+                            edits=_pump_edits(parameters + " SPEED 1.2", curve))
     model, state, drivers = build_model(_at_unit_speed(path))
     k = model.link_names.index("PU1")
     assert float(drivers["water.setting"][k]) == 1.0
@@ -3142,3 +3142,115 @@ def test_tank_overflow_like_epanet(tmp_path):
                                rtol=1e-12, atol=0)
     assert worst < 2e-4, worst
     assert worst_q < 1e-6, worst_q
+
+
+# ---------------------------------------------------------------------------- pump energy
+# `water_run(...).energy` against the energy section of EPANET's binary output (`output.c`,
+# `saveenergy`: per pump the percent of time on line, the average efficiency, kWh per
+# million gallons (kWh per m3 in an SI file), the average and peak kW and the cost per day,
+# then the peak total power times the demand charge), read with `wntr`'s `BinFile`.
+_M3_PER_MGAL = 3785.411784
+_US_FLOW_UNITS = ("CFS", "GPM", "MGD", "IMGD", "AFD")
+
+
+class _EnergyBin(wntr.epanet.io.BinFile):
+    """`BinFile` that keeps the energy section: `energy[pump] = (on %, efficiency %, kWh per
+    volume, average kW, peak kW, cost per day)` and `peak_energy` the demand charge."""
+
+    def __init__(self):
+        super().__init__()
+        self.energy = {}
+
+    def save_energy_line(self, pump_idx, pump_name, values):
+        self.energy[pump_name] = [float(v) for v in values]
+
+
+def _epanet_energy(path, prefix):
+    """EPANET's energy section for the file `path` (run with `file_prefix=prefix`)."""
+    wntr.sim.EpanetSimulator(wntr.network.WaterNetworkModel(str(path))).run_sim(
+        file_prefix=str(prefix))
+    reader = _EnergyBin()
+    reader.read(str(prefix) + ".bin")
+    return reader.energy, float(reader.peak_energy[0])
+
+
+def _compare_energy(path, tmp_path, tag, *, duration=None):
+    """The worst relative difference of every pump's six energy fields and the demand
+    charge between `water_run` and EPANET on the file `path`; also the run."""
+    theirs, demand = _epanet_energy(path, tmp_path / tag)
+    net = read_epanet_inp(path)
+    model, _, _ = build_model(net)
+    run = water_run(model) if duration is None else water_run(model, duration=duration)
+    energy = run.energy
+    volume = _M3_PER_MGAL if net.options.flow_units in _US_FLOW_UNITS else 1.0
+    worst = 0.0
+    assert set(theirs) == set(energy.pump_names)
+    for k, name in enumerate(energy.pump_names):
+        ours = [float(energy.utilisation[k]), float(energy.efficiency[k]),
+                float(energy.energy_per_volume[k]) * volume, float(energy.average_power[k]),
+                float(energy.peak_power[k]), float(energy.cost[k])]
+        for a, b in zip(ours, theirs[name], strict=True):
+            worst = max(worst, abs(a - b) / (abs(b) or 1.0))
+    worst = max(worst, abs(float(energy.demand_charge) - demand) / (abs(demand) or 1.0))
+    return worst, theirs, run
+
+
+_NET3 = Path(wntr.__file__).parent / "library" / "networks" / "Net3.inp"
+
+
+def test_net3_energy_matches_epanet(tmp_path):
+    """Net3 over its seven days, with a price (a global price on the global price pattern 1
+    scaled by a per-pump price on pump 335) and a demand charge added to its `[ENERGY]`: its
+    two pumps (control-switched, the first at the start of every day) against EPANET's energy
+    section, all six per-pump figures and the demand charge, 1e-5 relative. MEASURED: 2.2e-6
+    (the heads and flows agree to 1e-6; the energy is their product)."""
+    text = _NET3.read_text()
+    old = " Global Price       \t0.0\n Demand Charge      \t0.0\n"
+    assert old in text
+    text = text.replace(old, " Global Price       \t0.12\n Global Pattern     \t1\n"
+                             " Demand Charge      \t5.0\n Pump 335 Price 0.2\n")
+    path = tmp_path / "net3-priced.inp"
+    path.write_text(text)
+    worst, theirs, run = _compare_energy(path, tmp_path, "net3")
+    assert theirs["10"][0] == pytest.approx(58.333, abs=1e-3) and theirs["10"][5] > 0
+    assert worst < 1e-5, worst
+
+
+def test_anytown_energy_matches_epanet(tmp_path):
+    """Anytown (`_anytown`: pumps running, tanks at mid-level, 12 in feeders) over its 24 h
+    with a price and a demand charge: three pumps on the efficiency curve E1 (a three-point
+    curve) and the Sarbu-Borza adjustment for a pump at speed 1.2 (the first one, edited; the
+    other two are shut by the solve for a part of the day and draw no energy then). MEASURED:
+    2.6e-6."""
+    path, _ = _anytown(tmp_path, placeholders=12)
+    text = path.read_text()
+    old = " Global Price       \t0\n Demand Charge      \t0\n"
+    assert old in text
+    text = text.replace(old, " Global Price       \t0.1\n Demand Charge      \t4.0\n")
+    assert text.count("HEAD 2\t;") == 3
+    text = text.replace("HEAD 2\t;", "HEAD 2\tSPEED 1.2\t;", 1)
+    path.write_text(text)
+    worst, theirs, run = _compare_energy(path, tmp_path, "anytown")
+    assert set(theirs) == {"78", "79", "80"}
+    assert all(row[5] > 0 for row in theirs.values())
+    assert worst < 1e-5, worst
+
+
+@pytest.mark.parametrize("duration, tag", [("1:30", "unaligned"), ("0:00", "zero")])
+def test_energy_of_an_unaligned_and_a_zero_duration_matches_epanet(tmp_path, duration, tag):
+    """EPANET adds a step that starts before the duration whole, past it (`nexthyd`), and an
+    hour for a duration of 0 (`addenergy`): Net1 with a price at a duration of 1:30 (the pump
+    is on line 200/1.5 percent of the time) and 0:00. MEASURED: 8.7e-8 and 1.1e-7."""
+    text = (DATA / "Net1.inp").read_text()
+    for old, new in (("Duration           \t24:00", f"Duration           \t{duration}"),
+                     (" Global Price       \t0.0", " Global Price       \t0.3")):
+        assert old in text
+        text = text.replace(old, new)
+    path = tmp_path / f"net1-{tag}.inp"
+    path.write_text(text)
+    worst, theirs, run = _compare_energy(path, tmp_path, tag)
+    if tag == "unaligned":
+        assert run.time.tolist() == [0.0, 3600.0]
+        assert theirs["9"][0] > 100.0
+    assert theirs["9"][5] > 0
+    assert worst < 1e-5, worst

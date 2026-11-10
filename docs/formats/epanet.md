@@ -9,7 +9,9 @@ units are read by `apps/water/inp.py`.
 `[PIPES]` (with their `OPEN`, `CLOSED` or `CV` status), `[PUMPS]` (`HEAD`, `POWER`, `SPEED` and
 `PATTERN`), `[VALVES]` (every type, PRV and PSV included), `[DEMANDS]`, `[PATTERNS]`, `[CURVES]`,
 `[CONTROLS]` (every form: `AT TIME`, `AT CLOCKTIME`, `IF NODE`), `[RULES]`, `[STATUS]`,
-`[EMITTERS]`, `[ENERGY]`, `[OPTIONS]` (including `EMITTER EXPONENT` and `HEADLOSS C-M`) and
+`[EMITTERS]`, `[ENERGY]` (efficiency, price, price pattern and demand charge: the pumps' energy and cost,
+`WaterResults.energy`; no head or flow depends on it), `[OPTIONS]` (including `EMITTER EXPONENT` and
+`HEADLOSS C-M`) and
 `[TIMES]` (including `RULE TIMESTEP`, `PATTERN START`, `REPORT START` and `START CLOCKTIME`, which
 reads `12 am`, `6:30 PM` and `18`).
 
@@ -24,7 +26,6 @@ past and change nothing (`net.notes["unrecognised_times"]`).
 **Ignored** because nothing in the hydraulics references them: `[TITLE]`, `[REPORT]`,
 `[COORDINATES]`, `[VERTICES]`, `[LABELS]`, `[BACKDROP]`, `[TAGS]`, `[END]`, and the
 quality sections (a quality run is configured through `build_model(quality=...)` instead).
-`[ENERGY]` is read but only reports: it changes no head or flow.
 
 **Aggregated / interpreted:** several `[DEMANDS]` categories of one junction add up (they replace
 the `[JUNCTIONS]` demand); categories with different patterns are refused (a category with no pattern uses the default pattern, so it equals one naming that default explicitly), since one demand pattern

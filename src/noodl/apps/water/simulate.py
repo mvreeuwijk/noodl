@@ -25,7 +25,9 @@ Results are kept at the report times (`quality.c`, `runqual`, which writes EPANE
 every solve at a time at or past the next report time `Rtime`, which starts at REPORT START
 and grows by REPORT TIMESTEP. They are labelled with those report times. The run ends at the
 duration (EPANET solves once more past it when the duration is not a multiple of the step,
-which reports nothing; here the last step ends at the duration).
+which reports nothing; here the last step ends at the duration). The pumps' energy
+(`energy.py`, `addenergy`) is accumulated over every step that starts before the duration,
+the last one at EPANET's own length, not shortened to the duration.
 
 BATCHES. A batch of instances (a leading dimension of the state or the drivers) takes one
 shared step: the shortest any instance needs (the spec's "Batches"), so an instance takes
@@ -47,6 +49,7 @@ from noodl.apps.water.elements import (
     SETTING_KEY,
     TIME_KEY,
 )
+from noodl.apps.water.energy import EnergyMeter, PumpEnergy
 from noodl.apps.water.network import (
     Pump,
     WaterPipe,
@@ -80,8 +83,9 @@ class WaterResults:
     inflow); `demand` (..., T, n_junctions) m3/s the junctions' delivered demands (the
     requested ones, or the pressure-driven deliveries) and `emitter_flow` (..., T,
     n_junctions) m3/s their emitters' outflow (EPANET reports the sum of the two as the
-    demand). `energy` is the pumps' energy (Task 11; `None` until then). Heads, flows,
-    levels, demands and emitter flows keep their autograd graph."""
+    demand). `energy` is the pumps' energy and cost over the run (`PumpEnergy`;
+    `None` for a network without pumps). Heads, flows, levels, demands and emitter flows
+    keep their autograd graph."""
 
     time: Tensor
     head: Tensor
@@ -93,7 +97,7 @@ class WaterResults:
     tank_overflow: Tensor
     demand: Tensor
     emitter_flow: Tensor
-    energy: object | None = None
+    energy: PumpEnergy | None = None
     node_names: list[str] = field(default_factory=list)
     link_names: list[str] = field(default_factory=list)
 
@@ -163,9 +167,10 @@ class _Clock:
                 f"water_run: REPORT START ({self.report_start} s) is after the duration "
                 f"({self.duration} s), so nothing would be reported")
 
-    def step(self, t: int, report_time: int) -> int:
+    def free_step(self, t: int, report_time: int) -> int:
         """EPANET's `timestep` before the tanks and controls: the hydraulic step, shortened
-        to the next pattern period and the next hydraulic report time, then to the end."""
+        to the next pattern period and the next hydraulic report time. EPANET does not
+        shorten it to the end of the run (`addenergy` takes the step whole)."""
         step = self.hydraulic_step
         n = (t + self.pattern_start) // self.pattern_step + 1
         to_pattern = n * self.pattern_step - t     # EPANET's arithmetic, Pstart as it is
@@ -174,7 +179,11 @@ class _Clock:
         to_report = report_time - t
         if 0 < to_report < step:
             step = to_report
-        return min(step, self.duration - t)
+        return step
+
+    def step(self, t: int, report_time: int) -> int:
+        """`free_step`, shortened to the end of the run."""
+        return min(self.free_step(t, report_time), self.duration - t)
 
 
 class _Patterns:
@@ -311,7 +320,11 @@ class _Recorder:
             setting = drivers[SETTING_KEY]
         return setting.detach() / self.setting_scale
 
-    def record(self, solved, drivers, cut_off, levels, overflow) -> None:
+    def pump_speeds(self, solved, drivers, cols) -> Tensor:
+        """The pumps' (`cols`) relative speeds in this solve, as `WaterResults.setting`."""
+        return self._setting(solved, drivers)[..., cols]
+
+    def record(self, solved, drivers, cut_off, levels, overflow, status=None) -> None:
         phi = solved["water.phi"]
         head = phi / self.scale
         n_j = self.junction_nodes.numel()
@@ -331,12 +344,13 @@ class _Recorder:
             levels = phi.new_zeros(phi.shape[:-1] + (0,))
         self.rows.append(dict(
             head=head, pressure=head - self.elevation, flow=solved["water.q"],
-            status=link_states_from_cut_off(self.model, solved, *cut_off),
+            status=(link_states_from_cut_off(self.model, solved, *cut_off)
+                    if status is None else status),
             setting=self._setting(solved, drivers), tank_level=levels,
             tank_overflow=overflow if overflow is not None else torch.zeros_like(levels),
             demand=demand, emitter_flow=emitted))
 
-    def results(self, times: list[int]) -> WaterResults:
+    def results(self, times: list[int], energy=None) -> WaterResults:
         stacked = {}
         for key in self.rows[0]:
             values = [row[key] for row in self.rows]
@@ -344,7 +358,7 @@ class _Recorder:
             stacked[key] = torch.stack([v.expand(batch + v.shape[-1:]) for v in values],
                                        dim=-2)
         return WaterResults(time=torch.tensor([float(t) for t in times], dtype=F64),
-                            energy=None, node_names=list(self.model.node_names),
+                            energy=energy, node_names=list(self.model.node_names),
                             link_names=list(self.model.link_names), **stacked)
 
 
@@ -388,37 +402,19 @@ def water_run(model, state=None, drivers=None, *, duration: float | None = None,
     storage = recorder.storage
     if diagnostics is not None:
         diagnostics["times"], diagnostics["newton_iterations"] = [], []
+    meter = EnergyMeter(model, clock.duration) if net.pumps else None
     t = 0
     hydraulic_report = clock.report_step      # EPANET's `Rtime` in the hydraulic run
     next_report = clock.report_start          # ... and in the output (`runqual`)
     reported: list[int] = []
-    while next_report <= clock.duration:
-        d = patterns.drivers_at(t)
-        state = patterns.speeds(state, t)
-        if diagnostics is not None:
-            solve = {}
-            solved, cut_off = water_steady_and_cut_off(model, state, d, diagnostics=solve,
-                                                       **solve_kwargs)
-            diagnostics["times"].append(float(t))
-            diagnostics["newton_iterations"].append(
-                solve.get("layers", {}).get("water", {}).get("newton_iterations"))
-        else:
-            solved, cut_off = water_steady_and_cut_off(model, state, d, **solve_kwargs)
-        # the drivers the solve took, the level controls' tank inflow margin among them
-        # (`with_tank_inflow`: the previous solve's), for everything read of this solve
-        d = cut_off[0]
-        levels = closure.levels(solved) if storage is not None else None
-        report = t >= next_report
-        if report:
-            reported.append(next_report)
-            next_report += clock.report_step
-        if t >= clock.duration:
-            if report:
-                recorder.record(solved, d, cut_off, levels,
-                                _final_overflow(model, storage, solved, d))
-            break
-        step = clock.step(t, hydraulic_report)
+
+    def plan(to_end: bool):
+        """`(step, advanced)` of the step that starts at `t`: EPANET's `timestep` (`to_end`:
+        shortened to the run's end), and the state with the tanks moved by it."""
+        step = (clock.step if to_end else clock.free_step)(t, hydraulic_report)
         inflow = solved["water.storage_flow"] if storage is not None else None
+        rate = None
+        lv = levels
         if storage is not None:
             heads = solved["water.phi"][..., storage.nodes]
             if isinstance(storage, TankVolumeCurve):
@@ -427,14 +423,14 @@ def water_run(model, state=None, drivers=None, *, duration: float | None = None,
                 area = storage.capacity(heads, heads, d) * closure.head_scale
             rate = inflow / area
             # `tanktimestep`: `t = ROUND(v / q)` to fill or empty, when positive and shorter
-            fill = _round(closure.time_to_limit(levels, rate, inflow))
+            fill = _round(closure.time_to_limit(lv, rate, inflow))
             fill = fill[torch.isfinite(fill) & (fill > 0)]
             if fill.numel():
                 step = min(step, int(fill.min()))
         if closure is not None and closure.controls:
             if storage is None:
-                levels = rate = solved["water.phi"].new_zeros(0)
-            ahead = closure.control_time(levels, rate, d, solved, inflow)
+                lv = rate = solved["water.phi"].new_zeros(0)
+            ahead = closure.control_time(lv, rate, d, solved, inflow)
             if ahead < step:                # `controltimestep`, rounded to whole seconds
                 step = int(ahead)
 
@@ -456,20 +452,66 @@ def water_run(model, state=None, drivers=None, *, duration: float | None = None,
                 dt1 = dt
                 if dt <= 0:
                     break
-            step, advanced = elapsed, current
-        elif storage is not None:
-            advanced = {**solved, "water.phi": _advance(model, solved["water.phi"], inflow,
-                                                        step, d)}
+            return elapsed, current
+        if storage is not None:
+            return step, {**solved, "water.phi": _advance(model, solved["water.phi"], inflow,
+                                                          step, d)}
+        return step, solved
+
+    def speeds_of(solved, d):
+        return recorder.pump_speeds(solved, d, meter.cols) if meter.any_curve else None
+
+    while next_report <= clock.duration:
+        d = patterns.drivers_at(t)
+        state = patterns.speeds(state, t)
+        if diagnostics is not None:
+            solve = {}
+            solved, cut_off = water_steady_and_cut_off(model, state, d, diagnostics=solve,
+                                                       **solve_kwargs)
+            diagnostics["times"].append(float(t))
+            diagnostics["newton_iterations"].append(
+                solve.get("layers", {}).get("water", {}).get("newton_iterations"))
         else:
-            advanced = solved
+            solved, cut_off = water_steady_and_cut_off(model, state, d, **solve_kwargs)
+        # the drivers the solve took, the level controls' tank inflow margin among them
+        # (`with_tank_inflow`: the previous solve's), for everything read of this solve
+        d = cut_off[0]
+        levels = closure.levels(solved) if storage is not None else None
+        report = t >= next_report
+        if report:
+            reported.append(next_report)
+            next_report += clock.report_step
+        # EPANET adds the energy of every step that starts before the duration (`nexthyd`),
+        # and one hour at a duration of 0
+        counted = meter is not None and (t < clock.duration or clock.duration == 0)
+        status = None
+        if report:
+            status = link_states_from_cut_off(model, solved, *cut_off)
+        elif counted:
+            status = link_states_from_cut_off(model, solved, *cut_off, valves=False)
+        if t >= clock.duration:
+            if counted:
+                meter.add(_period(net, t), 1.0, solved, status[..., meter.cols],
+                          speeds_of(solved, d))
+            if report:
+                recorder.record(solved, d, cut_off, levels,
+                                _final_overflow(model, storage, solved, d), status)
+            break
+        step, advanced = plan(True)
+        if counted:
+            # `addenergy` takes the step as EPANET's `timestep` finds it, past the duration
+            # as well; the reported results end at the duration
+            whole = plan(False)[0] if t + step >= clock.duration else step
+            meter.add(_period(net, t), whole / 3600.0, solved, status[..., meter.cols],
+                      speeds_of(solved, d))
         if report:
             recorder.record(solved, d, cut_off, levels,
-                            _overflow(model, storage, solved, advanced, step))
+                            _overflow(model, storage, solved, advanced, step), status)
         t += step
         if t >= hydraulic_report:
             hydraulic_report += clock.report_step
         state = advanced
-    return recorder.results(reported)
+    return recorder.results(reported, None if meter is None else meter.result())
 
 
 def _advance(model, phi: Tensor, inflow: Tensor, dt: int, drivers) -> Tensor:

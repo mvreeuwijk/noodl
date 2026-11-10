@@ -209,7 +209,7 @@ report time:
 | `setting` | `(..., T, n_links)` | a pump's speed (0 when closed), a PRV's, PSV's or PBV's head (m), an FCV's flow, a TCV's coefficient |
 | `tank_level`, `tank_overflow` | `(..., T, n_tanks)` | m above the bottom; m³/s spilt by a tank that may overflow |
 | `demand`, `emitter_flow` | `(..., T, n_junctions)` | m³/s delivered (the requested demand, or the pressure-driven delivery) and the emitters' outflow; EPANET reports their sum as the demand |
-| `energy` | | the pumps' energy (not yet filled: `None`) |
+| `energy` | | the pumps' energy and cost over the run (`PumpEnergy`, [below](#pump-energy-and-cost); `None` for a network without pumps) |
 
 `node_names` and `link_names` give the columns. `duration=` overrides `DURATION`, and
 `diagnostics={}` receives `"times"` (every solve's time) and `"newton_iterations"`. The run owns
@@ -240,6 +240,37 @@ Gradients reach the heads, flows, levels and demands through the solves and the 
 (a tank's area or volume curve, a demand, a roughness, a setting given as a driver); not
 through the step lengths or a switch. The implicit tank schemes (`tank_scheme="backward_euler"`
 or `"trapezoidal"`) are refused by name: their step is `water_step`'s, which no rule shortens.
+
+### Pump energy and cost
+
+`WaterResults.energy` is a `PumpEnergy`, the pumps' energy as EPANET 2.2 reports it (`hydraul.c`
+`addenergy` and `getenergy`, `output.c` `saveenergy`). Per pump, in `WaterNetwork.pumps` order
+(`pump_names`; each field `(..., n_pumps)`):
+
+| Field | Meaning |
+| --- | --- |
+| `utilisation` | percent of the run's duration the pump is on line |
+| `efficiency` | average efficiency over the time on line, percent |
+| `energy_per_volume` | kWh per m³ pumped, averaged over the time on line (EPANET prints kWh per million gallons for a file in US units: multiply by 3785.411784 m³ per million gallons) |
+| `average_power`, `peak_power` | kW, the first over the time on line |
+| `cost` | cost per day |
+
+and `demand_charge` `(...,)`, the peak total power times `[ENERGY] DEMAND CHARGE`.
+
+Every hydraulic step that starts before the duration adds its hours to each pump that is not
+closed: the efficiency is the pump's `[ENERGY] EFFICIENCY` curve at the flow `q / speed`
+(EPANET's `interp`, the end values beyond the curve, then the speed adjustment
+`100 - (100 - e)(1/speed)^0.1`) or the global efficiency, limited to 1 to 100 percent; the power
+is `dh q SpGrav / 8.814 / e` in horsepower (feet, cfs; times 0.7457 kW per horsepower), from the
+solved head gain, also for a constant-power pump (it works out as its power over the
+efficiency); the price is the pump's own `PRICE` (when positive) else the global price, times the
+pump's `PATTERN` else the global price pattern, at the pattern period `(t + PATTERN START) /
+PATTERN TIMESTEP`. A pump is not on line when its status is CLOSED: closed by a control or a
+rule, at speed 0, or shut by the solve at its shut-off head (the energy reads the status, not
+the carried speed). EPANET does not shorten the last step to the duration, and neither does the
+energy: with a duration of 1:30 and hourly steps the second step counts a full hour (the
+utilisation is then 200/1.5 percent, as EPANET reports), and a run of duration 0 counts one
+hour. The reported heads and flows are unchanged by that.
 
 ## The physics
 
@@ -728,6 +759,7 @@ on-disk reals are **float32**, so roughly 1e-7 relative is EPANET's own precisio
 | A rule acting in one instance of a batch: the shared step ends for both, each instance its forced single run | 1e-9 m / equal | exact to 1e-9 m, states equal |
 | A batch of two Net1 instances (0.8 and 1.25 times the demand) against each run alone on the batch's step boundaries; against the plain single runs | 1e-9 m / 1e-2 m | exact to 1e-9 m; 6.5e-3 m (the extra boundaries' explicit-step difference, see Limitations) |
 | SPECIFIC GRAVITY 1.2 on an LPS file with pressure-driven demand and an emitter, 2 h of a pattern: heads, flows, demand plus emitter outflow | 1e-6 / 1e-6 m³/s / 1e-6 m³/s | 1.3e-7, 2.2e-7, 1.0e-7 (EPANET's LPS factor applied) |
+| Pump energy and cost (`WaterResults.energy`): Net3 over 7 days (two control-switched pumps; a global price on a price pattern, a pump price, a demand charge), Anytown 24 h (efficiency curves, a pump at speed 1.2 for the speed adjustment, shut-off), Net1 with a duration of 1:30 (the last step counted whole) and of 0, against the energy section of EPANET's binary output: on-time, efficiency, kWh per volume, average and peak kW, cost per day, demand charge | 1e-5 relative | 2.2e-6 (Net3), 2.6e-6 (Anytown), 8.7e-8 and 1.1e-7 (Net1) |
 | Net1 24 h, tank on a five-point volume curve: levels, pipe 110 flow | 2e-4 m / 1e-6 m³/s | 2.8e-5 m, 5.5e-8 m³/s |
 | Net1 24 h, tank on a volume curve with a flat segment: below the range, crossed by the level (110-120 ft), the tail from 110 ft: levels, pipe 110 flow | 2e-4 m / 1e-6 m³/s | 2.8e-5, 2.7e-5, 2.4e-5 m; 5.5e-8, 5.6e-8, 5.1e-8 m³/s |
 | Net1 24 h without controls: the tank fills, its inlet closes; levels, pipe 110 and pump flows | 2e-4 m / 1e-6 m³/s | 2.5e-5 m, 3.7e-8 m³/s |
@@ -817,8 +849,7 @@ independent loop is a property of the cycle-space formulation, and it holds exac
 
 - **Not modelled, refused by name:** a numeric `[STATUS]` on a pump (a pump's speed is the driver
   `"water.setting"`); a valve at a full or empty tank;
-  leakage. Energy and cost are not reported yet (`WaterResults.energy` is `None`). A file using any of these raises an error naming the
-  feature.
+  leakage. A file using any of these raises an error naming the feature.
 - **Rules.** `FILLTIME` and `DRAINTIME` premises and the `DAY` and `POWER` ones are refused. A
   pump closed by a rule keeps its speed in `"water.link_setting"` (the controls' trade-off); a
   `SETTING` premise on it reads 0, as EPANET.
@@ -924,8 +955,7 @@ independent loop is a property of the cycle-space formulation, and it holds exac
   and takes the new period's multipliers on only there. `water_run` does the same
   (`test_pattern_start_shifts_the_pattern_as_epanet_does`).
 - **One demand pattern per junction.** Several `[DEMANDS]` categories of one junction must
-  share their pattern (refused by name otherwise), and an energy price pattern changes
-  nothing yet.
+  share their pattern (refused by name otherwise).
 
 ## Install
 

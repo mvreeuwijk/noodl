@@ -64,7 +64,7 @@ def test_report_times_follow_report_start_and_step():
     assert sparse.head.shape == (12, len(model.node_names))
     assert sparse.flow.shape == sparse.status.shape == (12, len(model.link_names))
     assert sparse.node_names == model.node_names and sparse.link_names == model.link_names
-    assert sparse.energy is None
+    assert sparse.energy.pump_names == ["9"]
     # a duration given to the run overrides the network's
     short = water_run(build_model(_net1())[0], duration=7200.0)
     torch.testing.assert_close(short.time, torch.tensor([0.0, 3600.0, 7200.0], dtype=F64))

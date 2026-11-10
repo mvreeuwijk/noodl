@@ -29,6 +29,7 @@ from noodl.apps.water.elements import (
     epanet_friction_factor,  # noqa: F401  (alias)
     three_point_curve,
 )
+from noodl.apps.water.energy import PumpEnergy
 from noodl.apps.water.inp import FLOW_UNITS, read_epanet_inp
 from noodl.apps.water.network import (
     Emitter,
@@ -70,6 +71,7 @@ __all__ = [
     "PressureSustainingValve",
     "Junction",
     "MinorLoss", "PiecewisePumpCurve", "Premise", "PressureDrivenDemand", "Pump", "PumpCurve",
+    "PumpEnergy",
     "Reservoir", "Rule", "ShutLinks",
     "Tank",
     "TankLevels", "TankVolumeCurve", "ThrottleValve", "Valve", "WaterNetwork", "WaterOptions",

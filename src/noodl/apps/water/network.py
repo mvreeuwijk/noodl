@@ -2638,9 +2638,13 @@ def link_states(model: Model, state: State, drivers: Drivers) -> Tensor:
         model, state, *_cut_off_plan(model, state, drivers, "link_states"))
 
 
-def link_states_from_cut_off(model: Model, state: State, drivers: Drivers, limit) -> Tensor:
+def link_states_from_cut_off(model: Model, state: State, drivers: Drivers, limit, *,
+                             valves: bool = True) -> Tensor:
     """`link_states` with the cut-off analysis `(drivers, limit)` of the solve given
-    (`water_steady_and_cut_off`). Internal to `noodl.apps.water` (run support)."""
+    (`water_steady_and_cut_off`). With `valves=False` an ACTIVE PRV or PSV keeps its code
+    ACTIVE instead of the state its residual selects (the pumps' and pipes' codes are the
+    same); the run's energy reads only the pumps. Internal to `noodl.apps.water` (run
+    support)."""
     status = _link_status(model, state, drivers)
     q = state["water.q"]
     out = torch.broadcast_to(status, q.shape[:-1] + status.shape[-1:]).clone()
@@ -2665,10 +2669,18 @@ def link_states_from_cut_off(model: Model, state: State, drivers: Drivers, limit
                     pipes(phi[..., ends[pcols, 0]] - phi[..., ends[pcols, 1]],
                           q[..., pcols].detach(), drivers, None)
             dp = phi[..., ends[cols, 0]] - phi[..., ends[cols, 1]]
-            selected = law.states(dp, q[..., cols].detach(), drivers)
+            held = drivers
+            closure = model.control_closure
+            if closure is not None:
+                # the status and speed the solve took are the closure's (a pump a control
+                # has just opened or closed, or a speed pattern has moved), not the drivers'
+                held = {**drivers, STATUS_KEY: status,
+                        SETTING_KEY: closure.effective_setting(drivers,
+                                                               state["water.link_setting"])}
+            selected = law.states(dp, q[..., cols].detach(), held)
             out[..., cols] = torch.where(running, selected.to(out.dtype), out[..., cols])
     ends = None
-    for kind in ("prv", "psv"):
+    for kind in ("prv", "psv") if valves else ():
         if kind not in layer.kinds:
             continue
         if ends is None:
