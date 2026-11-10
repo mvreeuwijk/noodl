@@ -573,7 +573,7 @@ link and an ideal diode across each check valve: the constraints' multipliers ar
 flows, so a check valve is `OPEN` where its multiplier is positive (it ties its two ends) and
 `CLOSED` where it is zero. `water_steady` sets the group's heads to that solution, with every
 flow into it exactly zero (`noodl.apps.water.elements.PIN_KEY`), by the dual active-set
-method of Goldfarb and Idnani on the group's nodes alone (`_dual_active_set`: the objective
+method of Goldfarb and Idnani on the group's nodes alone (`noodl.solvers.qp.solve_qp`: the objective
 rises strictly over every full step and no active set returns, so it ends). For a single
 junction behind shut valves that is the plain average of the far ends; a valve the average
 would drive is open and the junction takes its far end's head; and a valve that opened in an

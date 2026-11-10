@@ -26,25 +26,27 @@ ACTIVE.
 from __future__ import annotations
 
 import math
-from collections import deque
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 
 import torch
 
-from noodl._unionfind import UnionFind
 from noodl.apps.water.controls import ACTIVE, CLOSED, HTOL, OPEN, Control, Rule, status_code
+from noodl.apps.water.cut_off import (
+    NO_FLOW,
+    cut_off_plan,
+    refuse_wrong_way,
+    solve_status,
+)
 from noodl.apps.water.demand import EmitterOutflow, PressureDrivenDemand
 from noodl.apps.water.elements import (
     CBIG_FT_PER_CFS,
-    DEAD_END_KEY,
     DEMAND_FACTOR_KEY,
     EPANET_QCF,
     KW_PER_HP,
     M_PER_FT,
     NU_WATER_REF,
     ONE_WAY_KEY,
-    PIN_KEY,
     RESERVOIR_HEAD_KEY,
     RQTOL_FT_PER_CFS,
     SETTING_KEY,
@@ -66,10 +68,10 @@ from noodl.apps.water.elements import (
     PumpCurve,
     ShutLinks,
     ThrottleValve,
-    _joined_groups,
     epanet_minor_coefficient,
     three_point_curve,
 )
+from noodl.apps.water.graph import link_topology
 from noodl.apps.water.rules import evaluate_rules, take_actions_per_link
 from noodl.apps.water.tanks import TankLevels, TankStorageControls, TankVolumeCurve
 from noodl.elements.base import LawContext
@@ -1710,7 +1712,7 @@ def solved_link_states(model: Model, state: State, drivers: Drivers) -> Tensor:
     fcv = [model.link_names.index(v.name) for v in model.water_network.valves
            if v.kind.upper() == "FCV"]
     if fcv:
-        ends = torch.tensor(_topology(model)[0], dtype=torch.long)
+        ends = torch.tensor(link_topology(model)[0], dtype=torch.long)
         phi = state["water.phi"].detach()
         dp = phi[..., ends[fcv, 0]] - phi[..., ends[fcv, 1]]
         q = state["water.q"].detach()[..., fcv]
@@ -1834,7 +1836,7 @@ def water_steady(model: Model, state: State, drivers: Drivers, **solve_kwargs) -
     clamp, no warning: an exceedance raises `RuntimeError` naming the pump, the batch
     instance and the flow against `q_max`. A segmented curve's last segment and a
     constant-power pump are extended without a limit, as EPANET extends them. A converged
-    pump carrying flow backwards is refused by name too (`_refuse_wrong_way`).
+    pump carrying flow backwards is refused by name too (`refuse_wrong_way`).
 
     A state whose pipe flows are all exactly zero (a cold start) is solved from
     `model.initial_flows` when the pipes are in their resistance form: from zero flow every
@@ -1867,7 +1869,7 @@ def with_tank_inflow(model: Model, state: State, drivers: Drivers) -> Drivers:
 def water_steady_and_cut_off(model: Model, state: State, drivers: Drivers,
                              **solve_kwargs) -> tuple[State, tuple]:
     """`(state, (drivers, limit))`: `water_steady`, with the cut-off analysis of its last solve
-    (`_cut_off_plan`: the drivers it solved with, the tank inflow margin among them
+    (`cut_off_plan`: the drivers it solved with, the tank inflow margin among them
     (`with_tank_inflow`), and `limit`), which `link_states_from_cut_off` takes instead of
     analysing the solution again."""
     drivers = with_tank_inflow(model, state, drivers)
@@ -1902,7 +1904,7 @@ def water_steady_and_cut_off(model: Model, state: State, drivers: Drivers,
 def _solve_steady(model: Model, state: State, drivers: Drivers, *, plan: list | None = None,
                   **solve_kwargs) -> State:
     """One `water_steady` solve (see there), the controls as `state` and `drivers` give
-    them; `plan`, when given, receives the solve's `(drivers, limit)` (`_cut_off_plan`)."""
+    them; `plan`, when given, receives the solve's `(drivers, limit)` (`cut_off_plan`)."""
     seed = getattr(model, "initial_flows", None)
     layer = model.kirchhoff["water"]
     if seed is not None and layer.implicit_edges.numel():
@@ -1917,7 +1919,7 @@ def _solve_steady(model: Model, state: State, drivers: Drivers, *, plan: list | 
     solve_kwargs.setdefault("atol", 1e-11)
     solve_kwargs.setdefault("rtol", 1e-11)
     solve_kwargs.setdefault("max_iter", 200)
-    drivers, limit = _cut_off_plan(model, state, drivers, "water_steady")
+    drivers, limit = cut_off_plan(model, state, drivers, "water_steady")
     if plan is not None:
         plan.extend((drivers, limit))
     try:
@@ -1935,7 +1937,7 @@ def _solve_steady(model: Model, state: State, drivers: Drivers, *, plan: list | 
             layer=exc.layer, nodes=exc.nodes,
         ) from exc
     _refuse_pump_overflow(model, result, drivers)
-    _refuse_wrong_way(model, result, drivers, "water_steady")
+    refuse_wrong_way(model, result, drivers, "water_steady")
     if limit is not None:
         result = {**result, "water.phi": limit(result)[0]}
     return result
@@ -1976,653 +1978,6 @@ def _refuse_pump_overflow(model: Model, state: State, drivers: Drivers) -> None:
     raise RuntimeError("water_steady: " + "; ".join(bad))
 
 
-def _link_status(model: Model, state: State, drivers: Drivers) -> Tensor:
-    """The `"water.status"` the solve sees: the drivers' own, or, on a network with tanks,
-    the tank closure's (its controls switch the pumps; the closure remembers its last
-    answer, so the solve's own call that follows costs nothing), with every pump at speed 0
-    (`"water.setting"`) CLOSED."""
-    if model.control_closure is not None:
-        status = model.control_closure(state, drivers)[STATUS_KEY]
-    elif STATUS_KEY not in drivers:
-        raise KeyError(
-            f"water: driver {STATUS_KEY!r} is required and was not given; build the drivers "
-            f"with initial_drivers(model)")
-    else:
-        status = drivers[STATUS_KEY]
-    layer = model.kirchhoff["water"]
-    speed = drivers.get(SETTING_KEY)
-    if "pump" not in layer.kinds or speed is None:
-        return status
-    cols = layer.law_for("pump")[1]
-    stopped = speed[..., cols].detach() == 0
-    if not bool(stopped.any()):
-        return status
-    # a pump at speed 0 is closed (`hydcoeffs.c`, `pumpcoeff`)
-    status = torch.broadcast_to(status, stopped.shape[:-1] + status.shape[-1:]).clone()
-    status[..., cols] = torch.where(stopped, float(CLOSED), status[..., cols])
-    return status
-
-
-@dataclass(frozen=True)
-class _CutOff:
-    """What closed links do to one network for one set of open links and demands
-    (`_cut_off_plan`): the junctions cut off with a demand (`fed_none`) and the closed links
-    whose row ties a cut-off group to its neighbour during the solve (`ties`)."""
-
-    fed_none: tuple[str, ...]
-    ties: tuple[int, ...]
-
-
-def _cut_off_groups(net: WaterNetwork, open_links: tuple, demand: tuple) -> _CutOff:
-    """`_CutOff` for one set of open links (per link) and demands (per junction).
-
-    The groups are the connected parts of the open links. A group with no reservoir or tank
-    and no demand has no head of its own in the exact equations (`_limit` gives it EPANET's
-    after the solve); so that the solve's Jacobian is not singular, one closed link per
-    group, chosen breadth-first from the reservoirs and tanks, ties the group to its
-    neighbour during the solve (`ties`, the links `PIN_KEY` marks)."""
-    names = net.nodes()
-    n = len(names)
-    index = {name: i for i, name in enumerate(names)}
-    links = net.links()
-    groups: UnionFind[int] = UnionFind(range(n))
-    for link, is_open in zip(links, open_links, strict=True):
-        if is_open:
-            groups.union(index[link.u], index[link.v])
-    group = [groups.find(i) for i in range(n)]
-    fed = {group[index[f.name]] for f in net.fixed_head_nodes()}
-    cut = [g for g in dict.fromkeys(group) if g not in fed]
-    fed_none = tuple(j.name for j, d in zip(net.junctions, demand, strict=True)
-                     if d and group[index[j.name]] not in fed)
-    if fed_none or not cut:
-        return _CutOff(fed_none, ())
-    neighbours: dict[int, list] = {}
-    for j, (link, is_open) in enumerate(zip(links, open_links, strict=True)):
-        gu, gv = group[index[link.u]], group[index[link.v]]
-        if not is_open and gu != gv:
-            neighbours.setdefault(gu, []).append((j, gv))
-            neighbours.setdefault(gv, []).append((j, gu))
-    # Every group is reached: the layer refuses, when built, a node no link joins to a
-    # reservoir or tank.
-    reached, queue, ties = set(fed), deque(fed), []
-    while queue:
-        for j, other in neighbours.get(queue.popleft(), []):
-            if other not in reached:
-                reached.add(other)
-                ties.append(j)
-                queue.append(other)
-    return _CutOff((), tuple(ties))
-
-
-def _groups(model: Model, open_links: tuple, demand: tuple) -> _CutOff:
-    """`_cut_off_groups`, remembered per set of open links and demands: an extended-period
-    run meets the same few sets again and again."""
-    cache = model.__dict__.setdefault("_cut_off", {})
-    key = (open_links, demand)
-    if key not in cache:
-        cache[key] = _cut_off_groups(model.water_network, open_links, demand)
-    return cache[key]
-
-
-def _topology(model: Model) -> tuple[tuple, tuple]:
-    """`(ends, fixed)`: the `(start, end)` node indices of every link in `model.link_names`
-    order, and the reservoir and tank nodes; built once per model."""
-    found = model.__dict__.get("_link_topology")
-    if found is None:
-        net = model.water_network
-        index = {name: i for i, name in enumerate(model.node_names)}
-        found = model._link_topology = (
-            tuple((index[k.u], index[k.v]) for k in net.links()),
-            tuple(index[f.name] for f in net.fixed_head_nodes()))
-    return found
-
-
-def _cut_off_plan(model: Model, state: State, drivers: Drivers, caller: str):
-    """`(drivers, limit)` for one solve by `caller`, after refusing what cannot be solved.
-
-    Refused by name: a junction with a demand that closed links cut off from every
-    reservoir and tank (EPANET reports it disconnected), one that no water reaches through
-    the open links in the directions check valves and full or empty tanks leave them
-    (`_one_way_cut_off`), and a status or direction on a
-    pipe in its potential form, which reads neither. The demands are the drivers'
-    `"water.sources"`, or, under PDA, the build's demands: a pressure-driven demand is not a
-    driver, so a PDA demand changed after the build is not seen here.
-
-    A cut-off group without demand is solved, as EPANET solves it: `drivers` gains
-    `PIN_KEY` on one closed link per group (`_cut_off_groups`), which ties the group's head
-    to that link's far end with every flow exactly zero, and `limit(solution)` then gives
-    the heads with every part cut off AT THE SOLUTION at EPANET's limit, and which check
-    valves holding no flow are open there (`_limit`). `limit` is `None` when no link is
-    closed and none is one-way."""
-    net = model.water_network
-    layer = model.kirchhoff["water"]
-    status = _link_status(model, state, drivers).detach()
-    one_way = drivers.get(ONE_WAY_KEY)
-    if model.control_closure is not None:
-        # a full or empty tank's links (`TankLevels`): the closure's direction, which the
-        # solve's own call of it gives again
-        given = model.control_closure(state, drivers).get(ONE_WAY_KEY)
-        if given is not None:
-            one_way = given
-            drivers = {**drivers, ONE_WAY_KEY: given}
-    if "pipe" in layer.kinds and not isinstance(layer.law_for("pipe")[0], FlowControlledPipe):
-        cols = layer.law_for("pipe")[1]
-        if bool((status[..., cols] != OPEN).any()) or (
-                one_way is not None and bool((one_way[..., cols] != 0).any())):
-            raise ValueError(
-                f"{caller}: a pipe is closed or one-way in 'water.status'/'water.one_way' (a "
-                f"CLOSED or CV pipe, or a pipe to a full or empty tank), which pipes take "
-                f"only in their resistance form; build the model with pipe_form='flow'")
-    n_j = len(net.junctions)
-    n_l = len(model.link_names)
-    closed = status == CLOSED
-    one_way_any = one_way is not None and bool(one_way.any())
-    pressure_valves = "prv" in layer.kinds or "psv" in layer.kinds
-    if not n_j or not (bool(closed.any()) or one_way_any or pressure_valves):
-        return drivers, None
-    if any(isinstance(w, PressureDrivenDemand) for w in layer.withdrawals):
-        demand = torch.tensor([j.demand != 0 for j in net.junctions])
-    else:
-        demand = drivers["water.sources"][..., :n_j].detach() != 0
-    if pressure_valves:
-        dead = _dead_ends(model, status, demand)
-        if dead is not None:
-            drivers = {**drivers, DEAD_END_KEY: dead}
-        if not (bool(closed.any()) or one_way_any):
-            return drivers, None
-    if bool(closed.any()):
-        open_, wanted = torch.broadcast_tensors(~closed[..., None, :], demand[..., :, None])
-        batch = open_.shape[:-2]
-        pattern = torch.cat([open_[..., 0, :], wanted[..., 0]], dim=-1).reshape(-1, n_l + n_j)
-        rows, inverse = torch.unique(pattern, dim=0, return_inverse=True)
-        plans = [_groups(model, tuple(row[:n_l]), tuple(row[n_l:]))
-                 for row in rows.tolist()]
-        fed_none = sorted({name for p in plans for name in p.fed_none})
-        if fed_none:
-            raise ValueError(
-                f"{caller}: junction(s) {fed_none} are cut off from every reservoir and tank "
-                f"by closed links, yet have a demand: no head can deliver it")
-        if any(p.ties for p in plans):
-            ties = torch.zeros(len(plans), n_l, dtype=F64)
-            for k, plan in enumerate(plans):
-                ties[k, list(plan.ties)] = 1.0
-            drivers = {**drivers, PIN_KEY: ties[inverse].reshape(batch + (n_l,))}
-    if one_way_any:
-        if any(isinstance(w, PressureDrivenDemand) for w in layer.withdrawals):
-            withdrawal = torch.tensor([float(j.demand) for j in net.junctions], dtype=F64)
-        else:
-            withdrawal = -drivers["water.sources"][..., :n_j].detach()
-        unfed = _one_way_cut_off(model, closed, one_way.detach(), withdrawal)
-        if unfed:
-            raise ValueError(
-                f"{caller}: junction(s) {unfed} have a demand that no reservoir, tank or "
-                f"inflow reaches through the open links in the direction they let water "
-                f"flow: check valves (CV pipes, or the pipes of a full or empty tank) cut "
-                f"them off, so no head can deliver it")
-
-    def limit(solution: State) -> tuple[Tensor, Tensor]:
-        return _limit(model, solution, closed, demand, one_way, caller)
-
-    return drivers, limit
-
-
-def _one_way_cut_off(model: Model, closed: Tensor, one_way: Tensor,
-                     withdrawal: Tensor) -> list[str]:
-    """The junctions with a demand (``withdrawal > 0``, m3/s) that no water can reach, over
-    every batch instance (in node order; empty when none): those no path of links that are not
-    CLOSED, each taken in a direction its ``one_way`` allows, leads to from a reservoir, a
-    tank or a junction with an inflow (``withdrawal < 0``). Every flow that delivers a
-    demand runs along such a path, so these demands have no solution; the undirected test
-    of `_cut_off_groups` misses them when the only links to a reservoir or tank are check
-    valves pointing away (a pipe into an empty tank fills it only). Exact, with pumps and
-    valves taken both ways (a superset of their paths), and remembered per set of closed
-    links, directions and demand signs."""
-    closed, one_way, withdrawal = torch.broadcast_tensors(
-        closed[..., None, :], one_way[..., None, :], withdrawal[..., :, None])
-    closed, one_way, withdrawal = closed[..., 0, :], one_way[..., 0, :], withdrawal[..., 0]
-    n_l = closed.shape[-1]
-    pattern = torch.cat([closed.to(F64), one_way.to(F64), torch.sign(withdrawal)],
-                        dim=-1).reshape(-1, 2 * n_l + withdrawal.shape[-1])
-    cache = model.__dict__.setdefault("_one_way_cut_off", {})
-    unfed: set[str] = set()
-    for row in torch.unique(pattern, dim=0).tolist():
-        key = tuple(row)
-        if key not in cache:
-            cache[key] = _one_way_unfed(model, row[:n_l], row[n_l:2 * n_l], row[2 * n_l:])
-        unfed.update(cache[key])
-    return [name for name in model.node_names if name in unfed]
-
-
-def _one_way_unfed(model: Model, closed: list, one_way: list, sign: list) -> tuple:
-    """`_one_way_cut_off` for one set of closed links, directions and demand signs.
-
-    `sign` is per junction, and junction `i` is node `i`: `build_model` puts the junctions
-    first in `model.node_names`, in `net.junctions` order (the `"water.sources"` columns
-    `[:n_j]` are theirs). Checked here, once per pattern."""
-    junctions = [j.name for j in model.water_network.junctions]
-    assert list(model.node_names[:len(sign)]) == junctions, "junctions first in node_names"
-    ends, fixed = _topology(model)
-    ahead: dict[int, list[int]] = {}
-    for (u, v), shut, way in zip(ends, closed, one_way, strict=True):
-        if shut:
-            continue
-        if way >= 0:
-            ahead.setdefault(u, []).append(v)
-        if way <= 0:
-            ahead.setdefault(v, []).append(u)
-    queue = deque(list(fixed) + [i for i, s in enumerate(sign) if s < 0])
-    reached = set(queue)
-    while queue:
-        for other in ahead.get(queue.popleft(), ()):
-            if other not in reached:
-                reached.add(other)
-                queue.append(other)
-    return tuple(model.node_names[i] for i, s in enumerate(sign)
-                 if s > 0 and i not in reached)
-
-
-def _dead_ends(model: Model, status: Tensor, demand: Tensor) -> Tensor | None:
-    """`DEAD_END_KEY` for one solve: per link, +1 where a PRV or PSV that is ACTIVE has its
-    end node in a dead end, -1 its start node, 0 elsewhere; `None` when no valve has one.
-    A valve with both sides dead (in a part without demand that CLOSED links cut off from
-    every reservoir and tank) is refused by name.
-
-    A dead end of a valve is the group of junctions on one side of it that only the valve
-    joins to a reservoir or tank (through links that are not CLOSED) and that has no
-    demand. No water can flow through the valve then, and the exact condition leaves the
-    group's head anywhere that keeps the valve shut; the valve's law then ties the group
-    (`_PressureValve`, A DEAD END), as EPANET's answer does. Remembered per set of statuses
-    and demands."""
-    layer = model.kirchhoff["water"]
-    status, demand = torch.broadcast_tensors(
-        status.detach()[..., None, :], demand[..., :, None])
-    status, demand = status[..., 0, :], demand[..., 0]
-    batch = status.shape[:-1]
-    n_l = status.shape[-1]
-    pattern = torch.cat([status, demand.to(status.dtype)], dim=-1).reshape(-1, n_l
-                                                                          + demand.shape[-1])
-    rows, inverse = torch.unique(pattern, dim=0, return_inverse=True)
-    cache = model.__dict__.setdefault("_dead_ends", {})
-    cols = [layer.law_for(kind)[1] for kind in ("prv", "psv") if kind in layer.kinds]
-    out = []
-    for row in rows.tolist():
-        key = tuple(row)
-        if key not in cache:
-            cache[key] = _dead_ends_of(model, row[:n_l], row[n_l:], cols)
-        out.append(cache[key])
-    if not any(any(r) for r in out):
-        return None
-    table = torch.tensor(out, dtype=F64)
-    return table[inverse].reshape(batch + (n_l,))
-
-
-def _dead_ends_of(model: Model, status: list, demand: list, cols: list) -> list[float]:
-    """`_dead_ends` for one set of link statuses and junction demands (lists)."""
-    ends, fixed = _topology(model)
-    n_j = len(demand)
-    out = [0.0] * len(status)
-    for sl in cols:
-        for j in range(sl.start, sl.stop):
-            if status[j] != ACTIVE:
-                continue
-            group, fed = _joined_groups(ends, fixed, tuple(
-                k != j and status[k] != CLOSED for k in range(len(status))))
-            for side, node in ((1.0, ends[j][1]), (-1.0, ends[j][0])):
-                g = group[node]
-                if g in fed:
-                    continue
-                if not any(demand[i] for i in range(n_j) if group.get(i) == g):
-                    if out[j]:
-                        raise ValueError(
-                            f"water: valve {model.link_names[j]!r} joins two parts of the "
-                            f"network without demand that CLOSED links cut off from every "
-                            f"reservoir and tank, so its state and those heads are "
-                            f"undetermined; open one of those links, or close the valve")
-                    out[j] = side
-    return out
-
-
-#: A flow below this (m3/s) is zero for a check valve: it holds no flow.
-_NO_FLOW = 1e-12
-
-
-def _limit(model: Model, solution: State, closed: Tensor, demand: Tensor,
-           one_way: Tensor | None, caller: str) -> tuple[Tensor, Tensor]:
-    """`(heads, open)`: `solution`'s heads with every zero-demand part of the network that
-    the solve leaves without a head of its own set to EPANET's limit head, and, per link,
-    whether a check valve holding no flow is open there.
-
-    A link carrying flow, or open in both directions, ties its ends' heads (it is "solid");
-    a node joined by solid links to a reservoir or tank is "reliable" and keeps the solve's
-    own head. Every other node is "free": it sits behind closed links (status CLOSED) and
-    check valves holding no flow, where the exact equations leave its head anywhere that
-    keeps those valves shut. EPANET gives each closed link the conductance `1 / CBIG`, and
-    opens a check valve whose upstream head is the higher; the free heads of this model are
-    the limit of EPANET's as `CBIG` grows: the solution of the convex quadratic program
-
-        minimise   1/2 sum over the closed links and the check valves holding no flow,
-                   (a, b), of (H_a - H_b)^2
-        subject to H_u <= H_v for every such check valve u -> v
-
-    (reverse-only pipes with the ends swapped), the heads outside the structure held at the
-    solve's. Each link of the structure is a resistor of one conductance (EPANET's shut
-    check valve has `1 / CBIG` too), and each check valve is in addition an ideal diode in
-    parallel (open, EPANET's is `1 / RQtol`, 1e15 times larger): the KKT conditions are
-    the node balances of that resistor-and-diode network, with the constraints' multipliers
-    the diodes' flows (in units of `1 / CBIG`), so a check valve is open where its multiplier
-    is positive and shut where it is zero. The objective is strictly convex on the free
-    heads (every free node reaches a reliable one through the structure), so the heads are
-    unique, and `_dual_active_set` finds them in finitely many steps. The heads are a
-    linear map of the solve's heads for the active set found, so a gradient flows through
-    them. Solid links among free nodes carry no flow and tie their ends.
-
-    The multipliers, and so the states, are unique only where the active constraints'
-    normals are independent. Parallel check valves (the same ends, the same way) share one
-    constraint row and one multiplier, so they are open or shut together, as EPANET has
-    them. Other dependence (a triangle Ra -> J1, J1 -> J2, Ra -> J2, J1 and J2 both tied to
-    Ra) leaves a split of the flow among the valves undetermined; the method never adds a
-    constraint the active ones already satisfy, so such a valve has multiplier 0 and is
-    CLOSED, and the water goes through the valves it added first, the most violated as it
-    went (MEASURED: that triangle's states are EPANET's).
-
-    A junction with a demand among the free nodes is refused by name: no head delivers it.
-    At a converged solution that cannot happen where EPANET solves (a demand junction is
-    reliable: its water reaches it through links carrying flow); it fires where a
-    converged check valve holds no flow against a demand behind it, which the solve's
-    branch selection refuses first (`_refuse_wrong_way`)."""
-    phi = solution["water.phi"]
-    net = model.water_network
-    n, n_j, n_l = phi.shape[-1], len(net.junctions), len(model.link_names)
-    q = solution["water.q"].detach()
-    if one_way is None:
-        one_way = torch.zeros(n_l, dtype=q.dtype)
-    still = (one_way != 0) & (q.abs() <= _NO_FLOW) & ~closed
-    solid = ~closed & ~still
-    batch = torch.broadcast_shapes(phi.shape[:-1], solid.shape[:-1], demand.shape[:-1],
-                                   one_way.shape[:-1])
-    flat_in = phi.expand(batch + (n,)).reshape(-1, n)
-    out = flat_in.clone()
-    open_ = torch.zeros(flat_in.shape[0], n_l, dtype=torch.bool)
-    solid = solid.expand(batch + (n_l,)).reshape(-1, n_l).tolist()
-    still = still.expand(batch + (n_l,)).reshape(-1, n_l).tolist()
-    closed = closed.expand(batch + (n_l,)).reshape(-1, n_l).tolist()
-    demand = demand.expand(batch + (n_j,)).reshape(-1, n_j).tolist()
-    direction = one_way.expand(batch + (n_l,)).reshape(-1, n_l).tolist()
-    ends, fixed = _topology(model)
-    tol = 1e-9 * model.head_scale
-    for b in range(out.shape[0]):
-        group, fed = _joined_groups(ends, fixed, tuple(solid[b]))
-        free = [i for i in range(n) if group.get(i, i) not in fed]
-        if not free:
-            continue
-        for i in free:
-            if i < n_j and demand[b][i]:
-                raise ValueError(
-                    f"{caller}: junction {net.junctions[i].name!r} has a demand but is "
-                    f"joined to every reservoir and tank only through closed links and "
-                    f"check valves holding no flow")
-        structure = [j for j in range(n_l) if closed[b][j] or still[b][j]]
-        rows, far, coefficients, opened = _limit_heads(
-            ends, free, structure, [j for j in structure if still[b][j]], direction[b],
-            solid[b], flat_in[b].detach(), tol, model, caller)
-        out[b, rows] = coefficients.to(phi.dtype) @ flat_in[b][far]
-        open_[b, opened] = True
-    return out.reshape(batch + (n,)), open_.reshape(batch + (n_l,))
-
-
-def _limit_heads(ends, free, structure, valves, direction, solid, values, tol, model,
-                 caller):
-    """`(rows, far, coefficients, opened)` of `_limit` for one instance: the free nodes
-    `rows`, whose limit heads are `coefficients @ values[far]` (`far` the reliable nodes
-    the structure touches), and the check valves `opened` (the links among `valves` whose
-    multiplier is positive).
-
-    The unknowns are the tie groups of the free nodes (joined by solid links, which carry no
-    flow there). The program is assembled on them (`G`, `a` from the `structure` links;
-    one constraint per check valve whose two ends are not tied or both reliable) and solved
-    by `_dual_active_set`; its active set, as ties, then gives the heads exactly: a group
-    tied to a reliable node takes that node's head, the others solve the Laplacian over the
-    structure links with unit weights."""
-    is_free = [False] * len(values)
-    for i in free:
-        is_free[i] = True
-    ties: UnionFind[int] = UnionFind(free)
-    for j, (u, v) in enumerate(ends):
-        if solid[j] and is_free[u] and is_free[v]:
-            ties.union(u, v)
-    variables = list(dict.fromkeys(ties.find(i) for i in free))
-    k_of = {g: k for k, g in enumerate(variables)}
-    of_node = {i: k_of[ties.find(i)] for i in free}
-    far: list[int] = []
-    far_of: dict[int, int] = {}
-
-    def far_index(node: int) -> int:
-        if node not in far_of:
-            far_of[node] = len(far)
-            far.append(node)
-        return far_of[node]
-
-    # the links as (variable or None, variable or None, far index or None): the free ends
-    # as variables, a reliable end as a far node
-    links = []
-    for j in structure:
-        u, v = ends[j]
-        ku = of_node.get(u) if is_free[u] else None
-        kv = of_node.get(v) if is_free[v] else None
-        if ku is None and kv is None:
-            links.append(None)
-        elif ku is not None and kv is not None:
-            links.append((ku, kv, None) if ku != kv else None)
-        elif ku is not None:
-            links.append((ku, None, far_index(v)))
-        else:
-            links.append((None, kv, far_index(u)))
-    n_var = len(variables)
-    # one constraint per distinct row (variable +1 or None, variable -1 or None, far +1,
-    # far -1), with the check valves that share it: parallel valves give one row, else the
-    # multipliers would not be unique and a duplicate would never enter the active set
-    constraints: dict[tuple, list[int]] = {}
-    for j in valves:
-        u, v = ends[j]
-        lo, hi = (u, v) if direction[j] > 0 else (v, u)
-        k_lo = of_node.get(lo) if is_free[lo] else None
-        k_hi = of_node.get(hi) if is_free[hi] else None
-        if (k_lo is None and k_hi is None) or (k_lo is not None and k_lo == k_hi):
-            continue
-        # H_hi - H_lo >= 0, as c x >= b with the fixed heads on the right
-        constraints.setdefault((k_hi, k_lo, far_index(lo) if k_lo is None else None,
-                                far_index(hi) if k_hi is None else None), []).append(j)
-    n_far = len(far)
-    g = torch.zeros(n_var, n_var, dtype=F64)
-    b_far = torch.zeros(n_var, n_far, dtype=F64)   # the objective's `a` is `-b_far h_far`
-    for link in links:
-        if link is None:
-            continue
-        ku, kv, f = link
-        if f is None:
-            g[ku, ku] += 1.0
-            g[kv, kv] += 1.0
-            g[ku, kv] -= 1.0
-            g[kv, ku] -= 1.0
-        else:
-            k = ku if ku is not None else kv
-            g[k, k] += 1.0
-            b_far[k, f] += 1.0
-    h_far = values[far]
-    active: list[int] = []
-    multipliers: list[float] = []
-    rows = list(constraints)
-    if rows:
-        c = torch.zeros(len(rows), n_var, dtype=F64)
-        d = torch.zeros(len(rows), n_far, dtype=F64)
-        for row, (k_hi, k_lo, f_lo, f_hi) in enumerate(rows):
-            if k_hi is not None:
-                c[row, k_hi] += 1.0
-            if k_lo is not None:
-                c[row, k_lo] -= 1.0
-            if f_lo is not None:
-                d[row, f_lo] += 1.0
-            if f_hi is not None:
-                d[row, f_hi] -= 1.0
-        try:
-            _, active, multipliers = _dual_active_set(g, -b_far @ h_far, c, d @ h_far, tol)
-        except _Infeasible as exc:
-            names = [model.link_names[j] for row in exc.rows for j in constraints[rows[row]]]
-            raise ValueError(
-                f"{caller}: the check valves {names} hold no flow, yet no heads keep them "
-                f"all shut: the solve's state is not a solution") from exc
-    opened = [j for row, u in zip(active, multipliers, strict=True) if u > tol
-              for j in constraints[rows[row]]]
-    # The heads from the active set, as ties: exact where tied to a reliable node.
-    merged: UnionFind[int] = UnionFind(range(n_var))
-    anchor: dict[int, int] = {}
-    for row in active:
-        k_hi, k_lo, f_lo, f_hi = rows[row]
-        if k_hi is not None and k_lo is not None:
-            merged.union(k_hi, k_lo)
-        elif k_hi is not None:
-            anchor[k_hi] = f_lo
-        else:
-            anchor[k_lo] = f_hi
-    root = [merged.find(k) for k in range(n_var)]
-    anchored = {}
-    for k, f in anchor.items():
-        anchored.setdefault(root[k], f)
-    unknown = [r for r in dict.fromkeys(root) if r not in anchored]
-    u_of = {r: m for m, r in enumerate(unknown)}
-    lap = torch.zeros(len(unknown), len(unknown), dtype=F64)
-    rhs = torch.zeros(len(unknown), n_far, dtype=F64)
-    for link in links:
-        if link is None:
-            continue
-        ku, kv, f = link
-        ru = None if ku is None else root[ku]
-        rv = None if kv is None else root[kv]
-        if ru is not None and ru == rv:
-            continue
-        for a, other, f_other in ((ru, rv, f), (rv, ru, f)):
-            if a not in u_of:
-                continue
-            lap[u_of[a], u_of[a]] += 1.0
-            if other in u_of:
-                lap[u_of[a], u_of[other]] -= 1.0
-            else:
-                rhs[u_of[a], f_other if other is None else anchored[other]] += 1.0
-    per_unknown = torch.linalg.solve(lap, rhs) if unknown else rhs
-    coefficients = torch.zeros(n_var, n_far, dtype=F64)
-    for k in range(n_var):
-        if root[k] in anchored:
-            coefficients[k, anchored[root[k]]] = 1.0
-        else:
-            coefficients[k] = per_unknown[u_of[root[k]]]
-    return free, far, coefficients[[of_node[i] for i in free]], opened
-
-
-class _Infeasible(ValueError):
-    """`_dual_active_set`: no point satisfies the constraints `rows`."""
-
-    def __init__(self, rows: list[int]) -> None:
-        super().__init__(f"infeasible constraints {rows}")
-        self.rows = rows
-
-
-def _dual_active_set(g: Tensor, a: Tensor, c: Tensor, b: Tensor, tol: float,
-                     ) -> tuple[Tensor, list[int], list[float]]:
-    """`(x, active, multipliers)` of the strictly convex quadratic program
-    ``minimise 1/2 x' g x + a' x subject to c x >= b`` (`g` symmetric positive definite,
-    `c` one constraint per row): the dual active-set method of Goldfarb and Idnani
-    (Mathematical Programming 27, 1983), in dense arithmetic, for a small program.
-
-    It starts at the unconstrained minimum with no constraint active, and holds throughout:
-    `x` minimises the objective with the active constraints as equalities, their
-    multipliers are non-negative and their normals independent. Each outer step picks a
-    violated constraint `p` and moves `x` towards it along the direction `z` that keeps the
-    active equalities (the dual step `r` moves their multipliers); a multiplier that would
-    turn negative drops its constraint first (a partial step), and `p` joins the active set
-    when it is reached (a full step).
-
-    It ends. With `p` violated and `z` nonzero, a full step has a positive length, so the
-    objective, which the method never lets fall, strictly rises over every full step; after
-    a full step `x` is the unique minimiser over the active set, whose objective depends on
-    that set alone, so no active set returns, and there are finitely many. Between two
-    full steps only drops occur, at most one per active constraint. When `z` is zero (the
-    normal of `p` lies in the span of the active ones) and no multiplier can fall, no point
-    satisfies the constraints (`_Infeasible`, naming `p` and the active set)."""
-    chol = torch.linalg.cholesky(g)
-    g_inv = torch.cholesky_inverse(chol)
-    x = -(g_inv @ a)
-    active: list[int] = []
-    u: list[float] = []
-    for _ in range(100 * (c.shape[0] + 1) * (g.shape[0] + 1)):
-        s = c @ x - b
-        p = int(torch.argmin(s))
-        if float(s[p]) >= -tol:
-            return x, active, u
-        n_p = c[p]
-        u_p = 0.0
-        while True:
-            if active:
-                big_n = c[active].T                           # (n, k)
-                m = big_n.T @ g_inv @ big_n                    # (k, k), positive definite
-                n_star = torch.linalg.solve(m, big_n.T @ g_inv)
-                h = g_inv - g_inv @ big_n @ n_star
-                r = (n_star @ n_p).tolist()
-            else:
-                h = g_inv
-                r = []
-            z = h @ n_p
-            z_n = float(z @ n_p)
-            t1, drop = math.inf, None
-            for j, (u_j, r_j) in enumerate(zip(u, r, strict=True)):
-                if r_j > 1e-12 and u_j / r_j < t1:
-                    t1, drop = u_j / r_j, j
-            s_p = float(n_p @ x - b[p])
-            t2 = math.inf if z_n <= 1e-12 else -s_p / z_n
-            t = min(t1, t2)
-            if t == math.inf:
-                raise _Infeasible([p, *active])
-            u = [u_j - t * r_j for u_j, r_j in zip(u, r, strict=True)]
-            u_p += t
-            if t2 != math.inf:
-                x = x + t * z
-            if t == t2:
-                active.append(p)
-                u.append(u_p)
-                break
-            del active[drop], u[drop]
-    raise RuntimeError("_dual_active_set: the dual active-set method did not end")
-
-
-def _refuse_wrong_way(model: Model, state: State, drivers: Drivers, caller: str) -> None:
-    """Refuse a converged one-way pipe carrying flow against its direction, or a pump
-    carrying flow backwards. A check valve or pump an iterate would close is kept open
-    where closing it would cut a junction off (`FlowControlledPipe`,
-    `FlowControlledPump`); where the solution itself needs it closed with the junction
-    then cut off, it ends with that wrong-way flow, and the network cannot be solved."""
-    layer = model.kirchhoff["water"]
-    if "pump" in layer.kinds:
-        cols = layer.law_for("pump")[1]
-        q = state["water.q"][..., cols].detach()
-        wrong = (q < -1e-9).reshape(-1, q.shape[-1]).any(0)
-        if bool(wrong.any()):
-            names = [model.link_names[cols.start + j] for j in range(len(wrong)) if wrong[j]]
-            raise ValueError(
-                f"{caller}: pump(s) {names} carry flow backwards: with them shut a junction "
-                f"is cut off from every reservoir and tank")
-    one_way = drivers.get(ONE_WAY_KEY)
-    if one_way is None or "pipe" not in layer.kinds or not bool(one_way.any()):
-        return
-    cols = layer.law_for("pipe")[1]
-    q = state["water.q"][..., cols].detach()
-    wrong = (q * one_way[..., cols] < -1e-9).reshape(-1, q.shape[-1]).any(0)
-    if bool(wrong.any()):
-        names = [model.link_names[cols.start + j] for j in range(len(wrong)) if wrong[j]]
-        raise ValueError(
-            f"{caller}: check valve(s) {names} carry flow against their direction (a CV "
-            f"pipe, or a pipe to a full or empty tank): with them closed a junction is cut "
-            f"off from every reservoir and tank")
-
-
 def link_states(model: Model, state: State, drivers: Drivers) -> Tensor:
     """Every link's state in `state` (a solution), in `model.link_names` order, as the codes
     of `"water.status"` (`noodl.apps.water.controls`): `CLOSED` (0), `OPEN` (1) or `ACTIVE`
@@ -2647,7 +2002,7 @@ def link_states(model: Model, state: State, drivers: Drivers) -> Tensor:
     """
     drivers = with_tank_inflow(model, state, drivers)
     return link_states_from_cut_off(
-        model, state, *_cut_off_plan(model, state, drivers, "link_states"))
+        model, state, *cut_off_plan(model, state, drivers, "link_states"))
 
 
 def link_states_from_cut_off(model: Model, state: State, drivers: Drivers, limit, *,
@@ -2657,13 +2012,13 @@ def link_states_from_cut_off(model: Model, state: State, drivers: Drivers, limit
     ACTIVE instead of the state its residual selects (the pumps' and pipes' codes are the
     same); the run's energy reads only the pumps. Internal to `noodl.apps.water` (run
     support)."""
-    status = _link_status(model, state, drivers)
+    status = solve_status(model, state, drivers)
     q = state["water.q"]
     out = torch.broadcast_to(status, q.shape[:-1] + status.shape[-1:]).clone()
     one_way = drivers.get(ONE_WAY_KEY)
     if limit is not None and one_way is not None and bool(one_way.any()):
         _, open_ = limit(state)
-        shut = (one_way != 0) & (q.detach().abs() <= _NO_FLOW) & ~open_
+        shut = (one_way != 0) & (q.detach().abs() <= NO_FLOW) & ~open_
         out = torch.where(shut, torch.full_like(out, CLOSED), out)
     layer = model.kirchhoff["water"]
     if "pump" in layer.kinds:
@@ -2673,7 +2028,7 @@ def link_states_from_cut_off(model: Model, state: State, drivers: Drivers, limit
         # pump with next to none can be one, and only that one asks the law
         undecided = running & (q[..., cols].detach().abs() <= _PUMP_FLOW)
         if bool(undecided.any()):
-            ends = torch.tensor(_topology(model)[0], dtype=torch.long)
+            ends = torch.tensor(link_topology(model)[0], dtype=torch.long)
             phi = state["water.phi"].detach()
             if ("pipe" in layer.kinds and law.shut_links is not None
                     and isinstance(layer.law_for("pipe")[0], FlowControlledPipe)):
@@ -2697,7 +2052,7 @@ def link_states_from_cut_off(model: Model, state: State, drivers: Drivers, limit
         if kind not in layer.kinds:
             continue
         if ends is None:
-            ends = torch.tensor(_topology(model)[0], dtype=torch.long)
+            ends = torch.tensor(link_topology(model)[0], dtype=torch.long)
         law, cols = layer.law_for(kind)
         phi = state["water.phi"].detach()
         phi_from, phi_to = phi[..., ends[cols, 0]], phi[..., ends[cols, 1]]
@@ -2732,10 +2087,10 @@ def water_step(model: Model, state: State, drivers: Drivers, dt: float, *,
     solve_kwargs.setdefault("rtol", 1e-11)
     solve_kwargs.setdefault("max_iter", 200)
     drivers = with_tank_inflow(model, state, drivers)
-    drivers, limit = _cut_off_plan(model, state, drivers, "water_step")
+    drivers, limit = cut_off_plan(model, state, drivers, "water_step")
     result = model.step(state, drivers, dt, scheme=scheme, **solve_kwargs)
     _refuse_pump_overflow(model, result, drivers)
-    _refuse_wrong_way(model, result, drivers, "water_step")
+    refuse_wrong_way(model, result, drivers, "water_step")
     if limit is not None:
         result = {**result, "water.phi": limit(result)[0]}
     return result

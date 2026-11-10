@@ -6,13 +6,12 @@ orientation. All constants are SI.
 
 from __future__ import annotations
 
-import functools
 import math
 
 import torch
 
-from noodl._unionfind import UnionFind
 from noodl.apps.water.controls import ACTIVE, CLOSED, OPEN
+from noodl.apps.water.graph import joined_groups
 from noodl.elements._slopes import one_port_blocks
 from noodl.elements.base import ConstitutiveLaw, ImplicitLaw
 from noodl.solvers.scalar import solve_monotone
@@ -115,7 +114,7 @@ def link_flags(law, drivers, keys: tuple[str, ...], like: Tensor, summarise):
 #: group has no head of its own (EPANET gives it one through its closed links' `1 / CBIG`
 #: conductance); the marked link's row is then `dp = 0` instead of `kappa q = 0`, which ties
 #: the group to the far end of that link with every flow still exactly zero, and
-#: `water_steady` then sets the group's head to EPANET's limit (`_cut_off_plan`). Absent: no
+#: `water_steady` then sets the group's head to EPANET's limit (`cut_off_plan`). Absent: no
 #: link is marked.
 PIN_KEY = "water.closed_tie"
 
@@ -130,23 +129,6 @@ def closed_row(law, dp: Tensor, q: Tensor, drivers) -> Tensor:
     if not bool(pin.any()):
         return held
     return torch.where(pin != 0, dp, held)
-
-
-@functools.lru_cache(maxsize=256)
-def _joined_groups(ends: tuple, fixed: tuple, joined: tuple) -> tuple[dict, frozenset]:
-    """`(group, fed)` for the links `joined` (per link, of `ends`): each node's group and
-    the groups holding a node of `fixed`. Remembered: a solve meets the same few sets of
-    closed check valves on iterate after iterate."""
-    groups: UnionFind[int] = UnionFind()
-    for (u, v), is_joined in zip(ends, joined, strict=True):
-        groups.add(u)
-        groups.add(v)
-        if is_joined:
-            groups.union(u, v)
-    for n in fixed:
-        groups.add(n)
-    group = {n: groups.find(n) for n in groups.parent}
-    return group, frozenset(group[n] for n in fixed)
 
 
 def _link_range(links: slice | None) -> tuple[int, int] | None:
@@ -1624,7 +1606,7 @@ def _reopen(law, held: Tensor, ahead: Tensor, drivers, shut: Tensor | None = Non
         while any(row):
             links = tuple(joined[b][j] and not (lo <= j < hi and row[j - lo])
                           for j in range(n_links))
-            group, fed = _joined_groups(law.ends, law.fixed, links)
+            group, fed = joined_groups(law.ends, law.fixed, links)
             best: dict[int, int] = {}   # cut-off group -> the check valve to reopen
             for k, closing in enumerate(row):
                 if not closing:

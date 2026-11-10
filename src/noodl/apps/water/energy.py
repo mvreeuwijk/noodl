@@ -37,6 +37,7 @@ import torch
 
 from noodl.apps.water.controls import CLOSED
 from noodl.apps.water.elements import CBIG_FT_PER_CFS
+from noodl.apps.water.graph import link_topology
 from noodl.apps.water.tanks import QZERO
 
 Tensor = torch.Tensor
@@ -98,7 +99,7 @@ class EnergyMeter:
     `result` at the end."""
 
     def __init__(self, model, duration: int) -> None:
-        from noodl.apps.water.network import _rounded_cfs_per_m3s, _topology
+        from noodl.apps.water.network import _rounded_cfs_per_m3s
 
         net = model.water_network
         self.net = net
@@ -106,7 +107,7 @@ class EnergyMeter:
         self.names = [p.name for p in pumps]
         self.cols = torch.tensor([model.link_names.index(p.name) for p in pumps],
                                  dtype=torch.long)
-        ends = torch.tensor(_topology(model)[0], dtype=torch.long)
+        ends = torch.tensor(link_topology(model)[0], dtype=torch.long)
         self.from_node, self.to_node = ends[self.cols, 0], ends[self.cols, 1]
         self.head_scale = float(model.head_scale)
         cfs = _rounded_cfs_per_m3s(net.options.flow_units)
