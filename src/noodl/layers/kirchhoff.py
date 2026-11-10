@@ -1754,10 +1754,12 @@ class KirchhoffLayer(
         """The body of `solve`, which see. `_start` and `_report` are the fallback ladder's
         (`_solve_with_fallback`): `_start="linear"` starts from the linear initial guess
         (zeros at the held initial point of a layer without flow unknowns), `"ramp"` from
-        where `storage_ramp` settles from there; `_report` receives where the solve
-        started (`"start"`: `"linear"`, `"zeros"` or `"warm"`), whether it is that held
-        initial point (`"held"`) and the storage stages' Newton iterations
-        (`"ramp_iterations"`)."""
+        where `storage_ramp` settles from there (from the failed solve's own start, `phi0`
+        and `q0`, when no linear guess can be formed) and `"ramp_warm"` from where it
+        settles from that own start; `_report` receives where the solve started (`"start"`:
+        `"linear"`, `"zeros"` or `"warm"`), whether it is that held initial point
+        (`"held"`), where a ramp settled from (`"ramp_from"`: `"linear"` or `"warm"`) and
+        the storage stages' Newton iterations (`"ramp_iterations"`)."""
         self._require_current_topology()
         if scheme is None:
             scheme = self.scheme
@@ -1786,9 +1788,11 @@ class KirchhoffLayer(
             self, newton_kwargs, diagnostics, differentiable, drivers, sources, phi_boundary,
             starts,
         )
-        if _start is None:
+        ramp_from = "linear"
+        if _start is None or _start == "ramp_warm":
             x0, start = self._starting_point(phi0, phi_boundary, drivers, sources, step,
                                              q0=q0)
+            ramp_from = "warm"
         else:
             try:
                 x0, start = self._starting_point(None, phi_boundary, drivers, sources, step,
@@ -1800,11 +1804,14 @@ class KirchhoffLayer(
                 # storage ramp starts where the failed solve did
                 x0, start = self._starting_point(phi0, phi_boundary, drivers, sources, step,
                                                  q0=q0)
+                ramp_from = "warm"
         if _report is not None:
             _report["held"] = step.layout is not None
             _report["start"] = ("warm" if phi0 is not None or q0 is not None
                                 else "zeros" if u is not None and _start is None
                                 else "linear")
+            if _start in ("ramp", "ramp_warm"):
+                _report["ramp_from"] = ramp_from
         # A tensor held where the solve does not thread it is refused before solving, by
         # name; one reached only through a closure, at every residual the forward Newton
         # evaluates, the starting guess first and the root last (`_newton_differentiable`).
@@ -1860,7 +1867,7 @@ class KirchhoffLayer(
                         return
                     raise error from exc
 
-        if _start == "ramp":
+        if _start in ("ramp", "ramp_warm"):
             # the storage ramp's starting point; the solve below starts from it
             x0 = self._ramp(x0, phi_boundary, drivers, sources, step, newton_kwargs, _report)
             start = None

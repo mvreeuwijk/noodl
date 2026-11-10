@@ -145,12 +145,14 @@ every converged power-function pump's flow against its own `q_max()` at its spee
 naming the pump and batch instance if it is exceeded — rather than silently accepting an
 extrapolated point off the end of the curve. (A segmented curve's last segment and a
 constant-power pump are extended without a limit, as EPANET extends them.) A converged pump
-carrying flow backwards is refused by name too. The flows are seeded rather than left to the layer's fallback ladder
-([When Newton fails](../concepts/solvers.md#when-newton-fails-the-fallback-ladder)): from zero
-flow every resistance-form pipe sits on its `RQtol` slope floor and the system is numerically
-singular, and so is its linear guess, which is taken at zero flow too; the storage ramp,
-starting from zero flow as well, does not get away from it (measured on Net1 and the two-loop
-network). From the seeded flows Newton needs 5 iterations.
+carrying flow backwards is refused by name too. The flows are seeded, as EPANET seeds them,
+rather than left to the layer's linear guess or its fallback ladder
+([When Newton fails](../concepts/solvers.md#when-newton-fails-the-fallback-ladder)): at zero
+flow every resistance-form pipe sits on its `RQtol` slope floor, and the layer's linear guess,
+taken there, carries the head difference between a reservoir and a tank over that floor (on
+Net1 a flow of 1.9e7 m³/s, from which the storage ramp settles nowhere; the two-loop network,
+with one reservoir, has a sane guess). From the seeded flows Newton needs 5 iterations on
+both.
 
 ## Running over time
 
