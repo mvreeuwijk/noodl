@@ -405,3 +405,31 @@ def test_a_head_valve_reads_its_status_and_setting_from_the_drivers():
     r = valve.residual(ctx.phi_from - ctx.phi_to, q, drivers, ctx)
     # CLOSED: kappa q; OPEN: the drop less the open loss; ACTIVE: H_v - Hset
     torch.testing.assert_close(r, torch.tensor([0.6, 9.5 - 9.0, 0.5], dtype=F64))
+
+
+@pytest.mark.parametrize("kind, dead, heads, row, state", [
+    # kappa = 2, m = 100, Hset = 50, q = 0.3 (dp = 2.5 in each case)
+    # a PSV's end dead, its start (49.5) below Hset = 50: CLOSED, end tied to start (dp)
+    ("psv", 1.0, ([49.5], [47.0]), 2.5, 0),
+    # ... at or above it: OPEN, the open row (loss = 9 - 2.5 at q = 0.3)
+    ("psv", 1.0, ([60.0], [57.5]), 6.5, 1),
+    # a PRV's end dead: its own g (held = 47 - 50 against loss = 6.5): OPEN
+    ("prv", 1.0, ([49.5], [47.0]), 6.5, 1),
+    # a start dead, either kind: CLOSED, dp
+    ("prv", -1.0, ([49.5], [47.0]), 2.5, 0),
+    ("psv", -1.0, ([60.0], [57.5]), 2.5, 0),
+])
+def test_a_dead_end_row_and_the_reported_state_agree(kind, dead, heads, row, state):
+    """With `"water.dead_end"` the residual takes the row `_dead_rows` gives and `states`
+    reports that row's state (a CLOSED tie is `dp`, the open row `loss`, held `g`)."""
+    from noodl.apps.water.controls import ACTIVE
+
+    valve = _head_valve(kind, links=slice(0, 1))
+    drivers = {"water.status": torch.tensor([float(ACTIVE)], dtype=F64),
+               "water.setting": torch.tensor([40.0], dtype=F64),
+               "water.dead_end": torch.tensor([dead], dtype=F64)}
+    ctx = _context(*heads)
+    dp, q = ctx.phi_from - ctx.phi_to, torch.tensor([0.3], dtype=F64)
+    r = valve.residual(dp, q, drivers, ctx)
+    assert float(r) == pytest.approx(row, abs=1e-12)
+    assert int(valve.states(dp, q, drivers, ctx)) == state

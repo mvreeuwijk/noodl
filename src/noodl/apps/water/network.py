@@ -1587,6 +1587,8 @@ def _cut_off_plan(model: Model, state: State, drivers: Drivers, caller: str):
 def _dead_ends(model: Model, status: Tensor, demand: Tensor) -> Tensor | None:
     """`DEAD_END_KEY` for one solve: per link, +1 where a PRV or PSV that is ACTIVE has its
     end node in a dead end, -1 its start node, 0 elsewhere; `None` when no valve has one.
+    A valve with both sides dead (in a part without demand that CLOSED links cut off from
+    every reservoir and tank) is refused by name.
 
     A dead end of a valve is the group of junctions on one side of it that only the valve
     joins to a reservoir or tank (through links that are not CLOSED) and that has no
@@ -1633,6 +1635,12 @@ def _dead_ends_of(model: Model, status: list, demand: list, cols: list) -> list[
                 if g in fed:
                     continue
                 if not any(demand[i] for i in range(n_j) if group.get(i) == g):
+                    if out[j]:
+                        raise ValueError(
+                            f"water: valve {model.link_names[j]!r} joins two parts of the "
+                            f"network without demand that CLOSED links cut off from every "
+                            f"reservoir and tank, so its state and those heads are "
+                            f"undetermined; open one of those links, or close the valve")
                     out[j] = side
     return out
 

@@ -142,12 +142,15 @@ def test_a_multi_point_pump_curve_is_refused():
         ).validate()
 
 
-@pytest.mark.parametrize("kind, u, v", [("PRV", "J1", "R1"), ("PSV", "R1", "J1")])
-def test_a_pressure_valve_controlling_a_reservoir_is_refused(kind, u, v):
-    """A PRV holds its end node's head, a PSV its start node's: a reservoir's (or tank's)
+@pytest.mark.parametrize("kind, u, v", [("PRV", "J1", "R1"), ("PSV", "R1", "J1"),
+                                        ("PRV", "J1", "T1"), ("PSV", "T1", "J1")])
+def test_a_pressure_valve_controlling_a_reservoir_or_tank_is_refused(kind, u, v):
+    """A PRV holds its end node's head, a PSV its start node's: a reservoir's or tank's
     head is fixed already (EPANET refuses either, error 219)."""
-    with pytest.raises(ValueError, match=rf"{kind} 'V1' controls the head of 'R1'"):
-        _minimal(valves=(Valve("V1", u, v, 0.2, kind, 30.0),)).validate()
+    tanks = (Tank("T1", 10.0, 2.0, 0.0, 5.0, 10.0),)
+    held = v if kind == "PRV" else u
+    with pytest.raises(ValueError, match=rf"{kind} 'V1' controls the head of '{held}'"):
+        _minimal(tanks=tanks, valves=(Valve("V1", u, v, 0.2, kind, 30.0),)).validate()
 
 
 @pytest.mark.parametrize("kind", ["PRV", "PSV"])

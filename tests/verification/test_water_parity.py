@@ -1563,9 +1563,11 @@ def test_parallel_prvs_with_equal_settings_are_refused(tmp_path):
 
 def test_smoothed_prv_converges_to_exact(tmp_path):
     """`build_model(valve_smoothing=1e-3)` (metres): the heads within 2e-3 m of the exact
-    valve's, on the two-loop ACTIVE and OPEN cases and across the near-switch sweep."""
+    valve's, on the two-loop ACTIVE and OPEN cases, across the near-switch sweep, and on
+    the PSV line ACTIVE, OPEN and CLOSED."""
     texts = [_PRV_PSV_CASES["prv-active"][0][0], _PRV_PSV_CASES["prv-open"][0][0],
-             *(_prv_line(r1, 50) for r1 in (53.80, 53.8214, 53.85))]
+             *(_prv_line(r1, 50) for r1 in (53.80, 53.8214, 53.85)),
+             _psv_line(100, 70, 20), _psv_line(100, 30, 20), _psv_line(60, 70, 20)]
     for k, text in enumerate(texts):
         path = tmp_path / f"smooth{k}.inp"
         path.write_text(text)
@@ -1640,23 +1642,68 @@ def test_a_closed_prv_cutting_off_a_junction_is_held_at_the_limit_head(tmp_path)
     _compare_with_epanet(model, final, drivers, results, heads=0.2)
 
 
-@pytest.mark.parametrize("valve, r1, expected", [("PRV", 60, 2), ("PRV", 40, 1),
-                                                 ("PSV", 60, 1)])
-def test_a_valve_feeding_a_dead_end_without_demand_matches_epanet(tmp_path, valve, r1,
-                                                                   expected):
-    """A PRV or PSV feeding a dead end with no demand carries no flow, and every head behind
-    it is still EPANET's: the PRV ACTIVE at its setting (upstream above it) or OPEN at the
-    upstream head (below it); the PSV OPEN. At no flow the valve's own row and its no-flow
-    row tie; the tie takes the valve's own row, which defines the dead end's head."""
+#: `(valve, R1, which end is the dead end, EPANET's state, EPANET's dead-end head or None)`:
+#: the dead end is J2 - P2 - J3 with no demand, on the valve's end (`"end"`: J1 -> J2) or its
+#: start (`"start"`: J2 -> J1). `None`: EPANET's head there is its own, compared exactly.
+_DEAD_ENDS = [
+    ("PRV", 60, "end", 2, None),          # ACTIVE at the setting
+    ("PRV", 40, "end", 1, None),          # OPEN at the upstream head
+    ("PSV", 60, "end", 1, None),          # OPEN at the upstream head
+    ("PSV", 40, "end", 0, 35.791393),     # CLOSED: the upstream head below the setting
+    ("PRV", 40, "start", 0, 39.996788),   # CLOSED: no water flows out of a dead end
+    ("PRV", 60, "start", 0, 60.000637),
+    ("PSV", 40, "start", 0, 39.996788),
+    ("PSV", 60, "start", 0, 53.687092),
+]
+
+
+@pytest.mark.parametrize("valve, r1, side, expected, epanet_head", _DEAD_ENDS)
+def test_a_valve_feeding_a_dead_end_without_demand_matches_epanet(
+        tmp_path, valve, r1, side, expected, epanet_head):
+    """A PRV or PSV with a dead end on one side (J2 - P2 - J3, no demand, joined to the rest
+    only through the valve) carries no flow, and its state is EPANET's: on its end, a PRV
+    ACTIVE at its setting (upstream above it) or OPEN at the upstream head (below it), a PSV
+    OPEN, or CLOSED where the upstream head is below its setting; on its start, CLOSED
+    (`_PressureValve`, A DEAD END). Every flow matches to 1e-6 m3/s.
+
+    Where the valve is CLOSED the dead end has no head of its own: this model holds it at
+    the `1 / CBIG` limit, the valve's other end (`dp = 0`, as `_limit` does for any closed
+    link). EPANET's head there is not that limit (MEASURED, `epanet_head`: 3.2e-3 m and
+    6.4e-4 m off it; 53.687 m and 35.791 m, the same values as a closed TCV or PRV by
+    `[STATUS]` in its place, `test_a_closed_prv_cutting_off_a_junction_is_held_at_the_limit_
+    head`): compared as recorded, and every other head at 1e-6 relative."""
+    u, v = ("J1", "J2") if side == "end" else ("J2", "J1")
     text = _series_inp((("J1", 0), ("J2", 0), ("J3", 0)), (("R1", r1),),
                        (("P1", "R1", "J1"), ("P2", "J2", "J3")),
-                       (("V1", "J1", "J2", valve, 50, 0),))
+                       (("V1", u, v, valve, 50, 0),))
     path, results = _run_inp(tmp_path, text, "dead")
     model, state, drivers = build_model(read_epanet_inp(path))
     final = water_steady(model, state, drivers)
-    _compare_with_epanet(model, final, drivers, results)
     states = link_states(model, final, drivers).tolist()
     assert states[model.link_names.index("V1")] == expected
+    if epanet_head is None:
+        _compare_with_epanet(model, final, drivers, results)
+        return
+    heads = dict(zip(model.node_names, final["water.phi"].tolist(), strict=True))
+    reference = results.node["head"].loc[0]
+    for name in ("J2", "J3"):
+        assert heads[name] == pytest.approx(heads["J1"], abs=1e-12)   # the limit
+        assert float(reference[name]) == pytest.approx(epanet_head, abs=1e-5)
+    assert _worst_heads(model, final, reference, skip=("J2", "J3")) < 1e-6
+    _compare_with_epanet(model, final, drivers, results, heads=0.2)
+
+
+def test_a_valve_between_two_dead_ends_is_refused(tmp_path):
+    """A valve whose both sides lie in a part without demand that a CLOSED link cuts off
+    from every reservoir: its state and those heads are undetermined. Refused by name."""
+    text = _series_inp((("J1", 5), ("J2", 0), ("J3", 0), ("J4", 0)), (("R1", 60),),
+                       (("P1", "R1", "J1"), ("P2", "J1", "J2"), ("P3", "J3", "J4")),
+                       (("V1", "J2", "J3", "PRV", 50, 0),), status=" P2 Closed\n")
+    path = tmp_path / "both.inp"
+    path.write_text(text)
+    model, state, drivers = build_model(read_epanet_inp(path))
+    with pytest.raises(ValueError, match=r"valve 'V1' joins two parts"):
+        water_steady(model, state, drivers)
 
 
 def test_prv_and_psv_on_a_darcy_weisbach_pressure_layer(tmp_path):

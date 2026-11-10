@@ -269,9 +269,13 @@ $\kappa$ alone (1 m per m³/s for a valve without a minor loss) an iterate carry
 forward through a PRV whose downstream head is 7 m above its setting picks the no-flow row
 and cuts off the junctions downstream, with their demand (MEASURED: a singular step). A
 side of the valve with no demand and no other way to a reservoir or tank (a dead end)
-carries no flow; the valve then takes the row that ties that side's head, which gives
-EPANET's answer: a PRV feeding a dead end is `ACTIVE` at its setting (or `OPEN` at the
-upstream head below it), a PSV `OPEN` at its upstream head.
+carries no flow; the valve then takes a row that ties that side's head, with EPANET's
+state: a dead end on a PRV's end leaves it `ACTIVE` at its setting (or `OPEN` at the
+upstream head below it), on a PSV's end `OPEN` at its upstream head (or `CLOSED` where that
+is below its setting); a dead end on either valve's start closes it (no water flows out of
+a group without demand). A closed valve's dead end is held at the head of its other side,
+the `1 / CBIG` limit. A valve with both sides dead (a part without demand that closed
+links cut off) is refused by name.
 
 The gradient is the implicit-function one of the selected row: through an `ACTIVE` PRV the
 downstream head moves one for one with the setting, through an `OPEN` or `CLOSED` one not at
@@ -550,7 +554,11 @@ independent loop is a property of the cycle-space formulation, and it holds exac
   A PRV (or any valve) `CLOSED` by `[STATUS]` in front of junctions without demand holds them
   at the `1 / CBIG` limit, the head on the other side (60 m); EPANET reports 53.687 m for the
   same network, with a PRV or a TCV alike
-  (`test_a_closed_prv_cutting_off_a_junction_is_held_at_the_limit_head`).
+  (`test_a_closed_prv_cutting_off_a_junction_is_held_at_the_limit_head`). The same holds for a
+  PRV or PSV that closes itself in front of a dead end: a PSV whose upstream head (40 m) is
+  below its setting, EPANET 35.791 m behind it; a valve with the dead end on its start,
+  EPANET 39.997, 60.0006 or 53.687 m against the limit's 40 or 60 m; the states agree
+  (`test_a_valve_feeding_a_dead_end_without_demand_matches_epanet`).
 - **Pump curves** are single- or three-point only, with the exponent fixed at $n = 2$. Curves
   with four or more points, which EPANET connects piecewise-linearly, are refused; fit a
   three-point curve instead.

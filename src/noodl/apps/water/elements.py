@@ -969,7 +969,7 @@ NO_FLOW_TIE = 1e-10
 
 #: The per-link driver `water_steady` sets on a PRV or PSV with a dead end (`_dead_ends` in
 #: `network.py`): +1 where the group of junctions behind its END node has no demand and no
-#: other way to a reservoir or tank, -1 behind its START node, 0 elsewhere. Absent: none.
+#: other way to a reservoir or tank, -1 behind its START node, 0 neither. Absent: none.
 DEAD_END_KEY = "water.dead_end"
 
 
@@ -1016,11 +1016,16 @@ class _PressureValve(_Valve):
     A DEAD END. Where ``"water.dead_end"`` (`DEAD_END_KEY`) marks a side of the valve whose
     junctions have no demand and no other way to a reservoir or tank, no water flows
     through the valve, and the no-flow row would leave that side's head without an
-    equation (a singular step). The valve then takes the row that ties that side and gives
-    EPANET's answer (MEASURED, wntr 1.5.0, a dead end behind the valve): ``g`` where the
-    dead side is the controlled node (a PRV's end: ACTIVE at the setting, or OPEN at the
-    upstream head when that is below it), else the open row ``loss`` (a PSV's end, OPEN at
-    the upstream head; a PRV's start). The ``held`` row of a PSV ties only its start node.
+    equation (a singular step). The valve then takes a row that ties that side
+    (`_dead_rows`, which also gives the state `states` reports), as EPANET's states have it
+    (MEASURED, wntr 1.5.0):
+
+    - its END dead (+1): a PRV takes ``g`` (ACTIVE at the setting, or OPEN at the upstream
+      head where that is below it); a PSV, whose ``held`` row ties only its start, is OPEN
+      on the open row ``loss`` where its upstream head is at or above the setting, and
+      CLOSED below it, its end tied to its start (``dp = 0``, the `1 / CBIG` limit head);
+    - its START dead (-1): CLOSED, ``dp = 0``. No water can flow forward out of a group
+      without demand. (`water_steady` refuses a valve with both sides dead.)
 
     Newton's method solves the row each iterate selects (a semismooth Newton method), and
     the Jacobian and the implicit-function gradient at the solution are the selected row's:
@@ -1080,8 +1085,20 @@ class _PressureValve(_Valve):
         dead = dead[..., slice(*self.link_range)]
         if not bool(dead.any()):
             return r
-        tie = torch.where(dead == self.HELD_SIDE, g, loss)
+        tie, _ = self._dead_rows(dead, dp, held, loss, g)
         return torch.where(dead != 0, tie, r)
+
+    def _dead_rows(self, dead, dp, held, loss, g) -> tuple[Tensor, Tensor]:
+        """`(row, state)` of a valve whose side `dead` is a dead end (A DEAD END)."""
+        if self.HELD_SIDE > 0:   # PRV: its end is the node it holds
+            end_row, end_state = g, torch.where(held >= loss, ACTIVE, OPEN)
+        else:                    # PSV: its end is tied by the open row, or closed
+            shut = held > 0
+            end_row = torch.where(shut, dp, loss)
+            end_state = torch.where(shut, CLOSED, OPEN)
+        row = torch.where(dead == 1, end_row, dp)
+        state = torch.where(dead == 1, end_state, CLOSED)
+        return row, state.to(g.dtype)
 
     def _closed(self, q, flow, g) -> Tensor:
         """Where the no-flow row is taken (THE SELECTION)."""
@@ -1096,9 +1113,15 @@ class _PressureValve(_Valve):
             flow, held, loss = self._rows(dp, q, drivers, ctx)
             g = torch.where(held >= loss, held, loss)
             closed = self._closed(q, flow, g) if self.smoothing == 0 else flow < g
-            return torch.where(closed, torch.full_like(g, CLOSED),
-                               torch.where(held >= loss, torch.full_like(g, ACTIVE),
-                                           torch.full_like(g, OPEN)))
+            state = torch.where(closed, torch.full_like(g, CLOSED),
+                                torch.where(held >= loss, torch.full_like(g, ACTIVE),
+                                            torch.full_like(g, OPEN)))
+            dead = None if drivers is None else drivers.get(DEAD_END_KEY)
+            if dead is None or self.link_range is None:
+                return state
+            dead = dead[..., slice(*self.link_range)].expand(g.shape)
+            _, tied = self._dead_rows(dead, dp, held, loss, g)
+            return torch.where(dead != 0, tied, state)
 
 
 class PressureReducingValve(_PressureValve):
