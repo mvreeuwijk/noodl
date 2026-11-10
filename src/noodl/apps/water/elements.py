@@ -65,7 +65,8 @@ def link_driver(law, drivers, key: str, like: Tensor) -> Tensor:
 def link_flags(law, drivers, keys: tuple[str, ...], like: Tensor, summarise):
     """`summarise(*columns)` of the law's own columns of the drivers `keys` (in the dtype of
     `like`), remembered on the law for as long as those drivers are the same tensors,
-    unchanged in place (their `_version`), in the last few sets seen. A solve hands every
+    unchanged in place (their `_version`; an inference-mode tensor counts no versions and
+    is not remembered), in the last few sets seen. A solve hands every
     evaluation the same drivers (as two views: one on the residual's path, one on the
     Jacobian's), so the per-link tests a law makes before it reads them (is any pipe
     closed? one-way? any pump off? any valve not active?) run once per solve, not once per
@@ -73,17 +74,21 @@ def link_flags(law, drivers, keys: tuple[str, ...], like: Tensor, summarise):
     The cache lives in the law's `_memo_cache`, which the layer's scan for held tensors
     skips, and keeps the tensors it saw, so their identities are not reused."""
     tensors = tuple(_driver(law, drivers, key) for key in keys)
+    cols = slice(*law.link_range)
+    try:
+        versions = tuple(t._version for t in tensors)
+    except RuntimeError:   # an inference-mode tensor has no version counter: not remembered
+        return summarise(*(t[..., cols].to(like.dtype) for t in tensors))
     stamp = (*(id(t) for t in tensors), like.dtype)
     cache = law.__dict__.setdefault("_memo_cache", {}).setdefault("link_flags", {})
     hit = cache.get(stamp)
-    if hit is not None and all(t is s and t._version == v
-                               for t, s, v in zip(tensors, hit[0], hit[1], strict=True)):
+    if (hit is not None and hit[1] == versions
+            and all(t is s for t, s in zip(tensors, hit[0], strict=True))):
         return hit[2]
-    cols = slice(*law.link_range)
     value = summarise(*(t[..., cols].to(like.dtype) for t in tensors))
     if len(cache) >= 4:
         del cache[next(iter(cache))]
-    cache[stamp] = (tensors, tuple(t._version for t in tensors), value)
+    cache[stamp] = (tensors, versions, value)
     return value
 
 

@@ -1193,6 +1193,11 @@ def _fence_cases():
             pipe("Pa", "Ra", "J1", "CV"), pipe("P7", "J1", "J2", "CV"),
             pipe("Pb", "Rb", "J2", "CV"), pipe("Pc", "J1", "Rc", "CLOSED"),
             *(pipe(f"PZ{i}", "J2", f"Z{i}", "CLOSED") for i in range(10)), *feed)),
+        # two parallel valves from Ra (90 m) into J share one constraint row: both open,
+        # J = 90 (EPANET: 1.43e-8 m3/s through each), B and C shut
+        "parallel": ((j, k), reservoirs(90.0), (
+            pipe("A1", "R3", "J", "CV"), pipe("A2", "R3", "J", "CV"),
+            pipe("B", "J", "R1", "CV"), pipe("C", "R2", "J", "CV"), *feed)),
     }
 
 
@@ -1201,8 +1206,8 @@ def test_check_valves_fencing_a_junction_match_epanet(tmp_path, case):
     """EPANET's `1 / CBIG` limit with check valves around zero-demand junctions
     (`_limit`, the resistor-and-diode program): the shut ones are equal conductances, an
     open one at zero flow ties its ends. Heads 1e-6 relative, flows 1e-6 m3/s, every state.
-    MEASURED heads 2.5e-9; "one-opens" and "reshut" 8.5e-8 (90 against EPANET's float32
-    90.0000076); flows 1.1e-7 (K's pipes), and 8.9e-7 in "reshut", EPANET's own leak
+    MEASURED heads 2.5e-9; "one-opens", "reshut" and "parallel" 8.5e-8 (90 against EPANET's
+    float32 90.0000076); flows 1.1e-7 (K's pipes), and 8.9e-7 in "reshut", EPANET's own leak
     through its OPEN Pa and P7 at `1 / RQtol` (this model's zero-flow valves carry exactly
     0), just under the bound.
 

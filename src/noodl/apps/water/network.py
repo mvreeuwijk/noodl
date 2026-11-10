@@ -1544,6 +1544,15 @@ def _limit(model: Model, solution: State, closed: Tensor, demand: Tensor,
     linear map of the solve's heads for the active set found, so a gradient flows through
     them. Solid links among free nodes carry no flow and tie their ends.
 
+    The multipliers, and so the states, are unique only where the active constraints'
+    normals are independent. Parallel check valves (the same ends, the same way) share one
+    constraint row and one multiplier, so they are open or shut together, as EPANET has
+    them. Other dependence (a triangle Ra -> J1, J1 -> J2, Ra -> J2, J1 and J2 both tied to
+    Ra) leaves a split of the flow among the valves undetermined; the method never adds a
+    constraint the active ones already satisfy, so such a valve has multiplier 0 and is
+    CLOSED, and the water goes through the valves it added first, the most violated as it
+    went (MEASURED: that triangle's states are EPANET's).
+
     A junction with a demand among the free nodes is refused by name: no head delivers it.
     At a converged solution that cannot happen where EPANET solves (a demand junction is
     reliable: its water reaches it through links carrying flow); it fires where a
@@ -1637,7 +1646,10 @@ def _limit_heads(ends, free, structure, valves, direction, solid, values, tol, m
         else:
             links.append((None, kv, far_index(u)))
     n_var = len(variables)
-    constraints = []   # (link, variable +1 or None, variable -1 or None, far +1, far -1)
+    # one constraint per distinct row (variable +1 or None, variable -1 or None, far +1,
+    # far -1), with the check valves that share it: parallel valves give one row, else the
+    # multipliers would not be unique and a duplicate would never enter the active set
+    constraints: dict[tuple, list[int]] = {}
     for j in valves:
         u, v = ends[j]
         lo, hi = (u, v) if direction[j] > 0 else (v, u)
@@ -1646,9 +1658,8 @@ def _limit_heads(ends, free, structure, valves, direction, solid, values, tol, m
         if (k_lo is None and k_hi is None) or (k_lo is not None and k_lo == k_hi):
             continue
         # H_hi - H_lo >= 0, as c x >= b with the fixed heads on the right
-        constraints.append((j, k_hi, k_lo,
-                            far_index(lo) if k_lo is None else None,
-                            far_index(hi) if k_hi is None else None))
+        constraints.setdefault((k_hi, k_lo, far_index(lo) if k_lo is None else None,
+                                far_index(hi) if k_hi is None else None), []).append(j)
     n_far = len(far)
     g = torch.zeros(n_var, n_var, dtype=F64)
     b_far = torch.zeros(n_var, n_far, dtype=F64)   # the objective's `a` is `-b_far h_far`
@@ -1668,10 +1679,11 @@ def _limit_heads(ends, free, structure, valves, direction, solid, values, tol, m
     h_far = values[far]
     active: list[int] = []
     multipliers: list[float] = []
-    if constraints:
-        c = torch.zeros(len(constraints), n_var, dtype=F64)
-        d = torch.zeros(len(constraints), n_far, dtype=F64)
-        for row, (_, k_hi, k_lo, f_lo, f_hi) in enumerate(constraints):
+    rows = list(constraints)
+    if rows:
+        c = torch.zeros(len(rows), n_var, dtype=F64)
+        d = torch.zeros(len(rows), n_far, dtype=F64)
+        for row, (k_hi, k_lo, f_lo, f_hi) in enumerate(rows):
             if k_hi is not None:
                 c[row, k_hi] += 1.0
             if k_lo is not None:
@@ -1683,17 +1695,17 @@ def _limit_heads(ends, free, structure, valves, direction, solid, values, tol, m
         try:
             _, active, multipliers = _dual_active_set(g, -b_far @ h_far, c, d @ h_far, tol)
         except _Infeasible as exc:
-            names = [model.link_names[constraints[row][0]] for row in exc.rows]
+            names = [model.link_names[j] for row in exc.rows for j in constraints[rows[row]]]
             raise ValueError(
                 f"{caller}: the check valves {names} hold no flow, yet no heads keep them "
                 f"all shut: the solve's state is not a solution") from exc
-    opened = [constraints[row][0] for row, u in zip(active, multipliers, strict=True)
-              if u > tol]
+    opened = [j for row, u in zip(active, multipliers, strict=True) if u > tol
+              for j in constraints[rows[row]]]
     # The heads from the active set, as ties: exact where tied to a reliable node.
     merged: UnionFind[int] = UnionFind(range(n_var))
     anchor: dict[int, int] = {}
     for row in active:
-        _, k_hi, k_lo, f_lo, f_hi = constraints[row]
+        k_hi, k_lo, f_lo, f_hi = rows[row]
         if k_hi is not None and k_lo is not None:
             merged.union(k_hi, k_lo)
         elif k_hi is not None:

@@ -394,3 +394,34 @@ def test_a_demand_junction_behind_a_closed_check_valve_fed_otherwise_is_solved()
     q = _flows(model, out)
     assert q["P1"] == 0.0 and q["P2"] == pytest.approx(0.002, abs=1e-12)
     assert link_states(model, out, drivers).tolist() == [CLOSED, OPEN, OPEN, OPEN]
+
+
+def test_parallel_check_valves_open_together():
+    """Two check valves with the same ends the same way share one constraint of the limit
+    program (one multiplier): both OPEN, J tied to Ra; a duplicate row would otherwise never
+    enter the active set and be called CLOSED."""
+    net = WaterNetwork(
+        junctions=(Junction("J", 0.0), Junction("K", 0.0, 0.004)),
+        reservoirs=(Reservoir("R1", 100.0), Reservoir("R2", 50.0), Reservoir("Ra", 90.0)),
+        pipes=(_pipe("A1", "Ra", "J", "CV"), _pipe("A2", "Ra", "J", "CV"),
+               _pipe("B", "J", "R1", "CV"), _pipe("C", "R2", "J", "CV"),
+               _pipe("P3", "R1", "K"), _pipe("P4", "K", "R2")),
+    )
+    model, state, drivers = build_model(net)
+    out = water_steady(model, state, drivers)
+    assert _heads(model, out)["J"] == 90.0
+    assert link_states(model, out, drivers).tolist() == [OPEN, OPEN, CLOSED, CLOSED, OPEN, OPEN]
+
+
+def test_drivers_made_in_inference_mode_are_read_uncached():
+    """An inference-mode tensor counts no versions, so `link_flags` cannot remember it; the
+    solve reads it every time instead of failing."""
+    model, state, drivers = build_model(_closed_pipe_network())
+    reference = water_steady(model, state, drivers)
+    with torch.inference_mode():
+        cloned = {k: v.clone() for k, v in drivers.items()}
+    out = water_steady(model, state, cloned)
+    torch.testing.assert_close(out["water.q"], reference["water.q"], rtol=0, atol=0)
+    cloned["water.status"] = initial_drivers(model, values={"water.status": {"P2": CLOSED}})[
+        "water.status"]
+    assert _flows(model, water_steady(model, state, cloned))["P2"] == 0.0
