@@ -42,9 +42,6 @@ from noodl.apps.water.demand import EmitterOutflow, PressureDrivenDemand
 from noodl.apps.water.elements import (
     CBIG_FT_PER_CFS,
     DEMAND_FACTOR_KEY,
-    EPANET_QCF,
-    KW_PER_HP,
-    M_PER_FT,
     NU_WATER_REF,
     ONE_WAY_KEY,
     RESERVOIR_HEAD_KEY,
@@ -73,7 +70,8 @@ from noodl.apps.water.elements import (
 )
 from noodl.apps.water.graph import link_topology
 from noodl.apps.water.rules import evaluate_rules, take_actions_per_link
-from noodl.apps.water.tanks import TankLevels, TankStorageControls, TankVolumeCurve
+from noodl.apps.water.tanks import LinkData, TankLevels, TankStorageControls, TankVolumeCurve
+from noodl.apps.water.units import KW_PER_HP, M_PER_FT, TINY, rounded_cfs_per_m3s
 from noodl.elements.base import LawContext
 from noodl.elements.duct import Duct
 from noodl.layers.kirchhoff import KirchhoffLayer
@@ -702,15 +700,6 @@ def twoloop() -> WaterNetwork:
 _FRICTION_ALIASES = {"epanet": "composite"}
 
 
-def _rounded_cfs_per_m3s(flow_units: str | None) -> float | None:
-    """EPANET's internal cfs per m3/s for a file in `flow_units` (None: exact)."""
-    if flow_units is None:
-        return None
-    from noodl.apps.water.inp import FLOW_UNITS  # the reader imports this module
-
-    return 1.0 / (FLOW_UNITS[flow_units] * EPANET_QCF[flow_units])
-
-
 def build_model(
     net: WaterNetwork,
     *,
@@ -929,7 +918,7 @@ def build_model(
     notes: dict[str, str] = dict(net.notes)
     scale = rho * G if headloss == "D-W" else 1.0
     # EPANET's internal cfs per m3/s, and its RQtol in the layer's potential per m3/s.
-    epanet_cfs = _rounded_cfs_per_m3s(options.flow_units)
+    epanet_cfs = rounded_cfs_per_m3s(options.flow_units)
     epanet_cfs = 1.0 / M_PER_FT**3 if epanet_cfs is None else epanet_cfs
     rqtol = RQTOL_FT_PER_CFS * M_PER_FT * epanet_cfs * scale
     laws: list = []
@@ -943,7 +932,7 @@ def build_model(
                     torch.tensor([p.diameter for p in net.pipes], dtype=F64),
                     torch.tensor([p.roughness for p in net.pipes], dtype=F64),
                     minor_loss=torch.tensor([p.minor_loss for p in net.pipes], dtype=F64),
-                    cfs_per_m3s=_rounded_cfs_per_m3s(options.flow_units), kind="pipe",
+                    cfs_per_m3s=rounded_cfs_per_m3s(options.flow_units), kind="pipe",
                 )
             )
         elif headloss == "C-M":
@@ -953,7 +942,7 @@ def build_model(
                     torch.tensor([p.diameter for p in net.pipes], dtype=F64),
                     torch.tensor([p.roughness for p in net.pipes], dtype=F64),
                     minor_loss=torch.tensor([p.minor_loss for p in net.pipes], dtype=F64),
-                    cfs_per_m3s=_rounded_cfs_per_m3s(options.flow_units), kind="pipe",
+                    cfs_per_m3s=rounded_cfs_per_m3s(options.flow_units), kind="pipe",
                 )
             )
         else:
@@ -962,7 +951,7 @@ def build_model(
             roughness = torch.tensor([p.roughness for p in net.pipes], dtype=F64)
             minor = torch.tensor([p.minor_loss for p in net.pipes], dtype=F64)
             if friction == "composite":
-                cfs = _rounded_cfs_per_m3s(options.flow_units)
+                cfs = rounded_cfs_per_m3s(options.flow_units)
                 nu_ref = NU_WATER_REF * options.viscosity
                 notes["headloss"] = (
                     f"Darcy-Weisbach with EPANET 2.2's own friction law "
@@ -1035,7 +1024,7 @@ def build_model(
                   for link in net.links()],
             fixed=[node_names.index(n.name) for n in net.fixed_head_nodes()],
             shut_links=shut_links, kind="pump"))
-    rounded_cfs = _rounded_cfs_per_m3s(options.flow_units)
+    rounded_cfs = rounded_cfs_per_m3s(options.flow_units)
 
     def valve_terms(valves) -> dict:
         """The open-valve minor loss of `valves` (EPANET's `Km`, the layer's potential per
@@ -1190,22 +1179,20 @@ def build_model(
         kinds = ["PIPE" if isinstance(link, WaterPipe) else
                  "PUMP" if isinstance(link, Pump) else "VALVE" for link in net.links()]
         elevation = {j.name: j.elevation for j in net.junctions}
+        links = LinkData(
+            names=link_names, status=drivers[STATUS_KEY], kinds=kinds,
+            setting=drivers[SETTING_KEY], setting_scale=link_setting_scale(net, scale),
+            setting_tolerance=[_setting_tolerance(lk, scale) for lk in net.links()],
+            one_way=drivers[ONE_WAY_KEY])
         control_closure = (TankLevels if (held or not net.tanks) else TankStorageControls)(
-            graph, list(net.tanks), list(net.controls), [p.name for p in net.pumps],
+            list(net.tanks), list(net.controls), [p.name for p in net.pumps],
+            links=links,
             tank_nodes=[node_names.index(t.name) for t in net.tanks],
             dt=net.hydraulic_timestep if dt is None else dt,
             reservoir_heads=reservoir_heads,
             head_scale=scale,
-            link_names=link_names,
-            link_status=drivers[STATUS_KEY],
             tank_links=_tank_links(net),
-            one_way=drivers[ONE_WAY_KEY],
             storage=storages[0] if net.tanks else None,
-            link_setting=drivers[SETTING_KEY],
-            link_kinds=kinds,
-            setting_scale=[scale if (not isinstance(lk, (WaterPipe, Pump))
-                                     and lk.kind.upper() in ("PBV", "PRV", "PSV")) else 1.0
-                           for lk in net.links()],
             junctions={name: (node_names.index(name), elev)
                        for name, elev in elevation.items()},
             start_clocktime=net.start_clocktime,
@@ -1214,7 +1201,6 @@ def build_model(
                        for name, elev in (*elevation.items(),
                                           *((r.name, r.head) for r in net.reservoirs),
                                           *((t.name, t.elevation) for t in net.tanks))},
-            setting_tolerance=[_setting_tolerance(lk, scale) for lk in net.links()],
             speed_patterns=speed_patterns,
         )
         closures.append(control_closure)
@@ -1371,10 +1357,6 @@ def _pump_kind(net: WaterNetwork, pump: Pump) -> str:
     return "segments"
 
 
-#: EPANET's ``TINY`` (`types.h`), the tolerance of its pump-curve checks.
-_TINY = 1e-6
-
-
 def power_curve(points) -> tuple[float, float, float]:
     """`(h0, r, n)` of EPANET 2.2's power-function pump curve ``h = h0 - r q^n`` through
     `points` (`(flow, head)` pairs): one point, or three with the first at zero flow
@@ -1391,8 +1373,8 @@ def power_curve(points) -> tuple[float, float, float]:
         h0, r, n = three_point_curve(torch.tensor(q1, dtype=F64), torch.tensor(h1, dtype=F64))
         return float(h0), float(r), float(n)
     (_, h0), (q1, h1), (q2, h2) = points
-    if (h0 < _TINY or h0 - h1 < _TINY or h1 - h2 < _TINY or q1 < _TINY
-            or q2 - q1 < _TINY):
+    if (h0 < TINY or h0 - h1 < TINY or h1 - h2 < TINY or q1 < TINY
+            or q2 - q1 < TINY):
         raise ValueError("its heads must fall and its flows rise from point to point "
                          "(EPANET error 227)")
     n = math.log((h0 - h2) / (h0 - h1)) / math.log(q2 / q1)
@@ -1591,6 +1573,15 @@ def initial_drivers(
         key = "water.sources"
         drivers = drivers_from(model, {key: {n: -q for n, q in demand.items()}}, base=drivers)
     return drivers
+
+
+def link_setting_scale(net: WaterNetwork, head_scale: float) -> list[float]:
+    """Per link (`net.links()` order), the layer's unit of its setting per SI unit: a PRV's,
+    PSV's or PBV's head in the layer's potential (`head_scale`), 1 otherwise. Internal to
+    `noodl.apps.water` (`TankLevels`' `LinkData.setting_scale`, the run's recorder)."""
+    return [head_scale if (not isinstance(link, (WaterPipe, Pump))
+                           and link.kind.upper() in ("PBV", "PRV", "PSV")) else 1.0
+            for link in net.links()]
 
 
 def _setting_tolerance(link, head_scale: float) -> float:

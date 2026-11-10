@@ -52,10 +52,10 @@ from noodl.apps.water.elements import (
 from noodl.apps.water.energy import EnergyMeter, PumpEnergy
 from noodl.apps.water.network import (
     Pump,
-    WaterPipe,
     apply_rules_with_states,
     initial_drivers,
     initial_state,
+    link_setting_scale,
     link_states_from_cut_off,
     settle_tanks,
     solved_link_states,
@@ -272,16 +272,6 @@ class _Patterns:
         return {**state, "water.link_status": status, "water.link_setting": setting}
 
 
-def _setting_scale(model) -> Tensor:
-    """Per link, the layer's unit of its setting per SI unit (a PRV's, PSV's or PBV's head
-    in the layer's potential: `head_scale`; 1 otherwise)."""
-    scale = model.head_scale
-    return torch.tensor(
-        [1.0 if isinstance(link, (WaterPipe, Pump)) or link.kind.upper() not in (
-            "PBV", "PRV", "PSV") else scale for link in model.water_network.links()],
-        dtype=F64)
-
-
 class _Recorder:
     """What `WaterResults` keeps of a solve, per report time."""
 
@@ -294,10 +284,7 @@ class _Recorder:
         self.elevation = torch.tensor(
             [j.elevation for j in net.junctions] + [r.head for r in net.reservoirs]
             + [t.elevation for t in net.tanks], dtype=F64)
-        order = [*(j.name for j in net.junctions), *(r.name for r in net.reservoirs),
-                 *(t.name for t in net.tanks)]
-        if order != names:
-            self.elevation = self.elevation[[order.index(n) for n in names]]
+        # the nodes in `build_model`'s order (`WaterNetwork.nodes`): junctions, reservoirs, tanks
         self.junction_nodes = torch.tensor([names.index(j.name) for j in net.junctions],
                                            dtype=torch.long)
         column = {n: k for k, n in enumerate(self.junction_nodes.tolist())}
@@ -305,7 +292,10 @@ class _Recorder:
         self.withdrawals = [(w, [column[int(i)] for i in w.nodes])
                             for w in layer.withdrawals
                             if isinstance(w, (PressureDrivenDemand, EmitterOutflow))]
-        self.setting_scale = _setting_scale(model)
+        # the closure carries the build's per-link scale; without one it is derived once here
+        self.setting_scale = torch.tensor(
+            self.closure.setting_scale if self.closure is not None
+            else link_setting_scale(net, model.head_scale), dtype=F64)
         self.pumps = torch.tensor([isinstance(link, Pump) for link in net.links()])
         self.storage = layer.storage[0] if net.tanks else None
         self.rows: list[dict] = []
@@ -413,11 +403,12 @@ def water_run(model, state=None, drivers=None, *, duration: float | None = None,
     next_report = clock.report_start          # ... and in the output (`runqual`)
     reported: list[int] = []
 
-    def plan(to_end: bool):
-        """`(step, advanced, acted)` of the step that starts at `t`: EPANET's `timestep`
-        (`to_end`: shortened to the run's end), the state with the tanks moved by it and the
-        rules' actions taken at its end, and the links those actions were taken on
-        (`apply_rules_with_states`; None without rules)."""
+    def plan(to_end: bool, t: int, hydraulic_report: int, solved, levels, d):
+        """`(step, advanced, acted)` of the step that starts at `t` from the solve `solved`
+        (its tank `levels` and drivers `d`; `hydraulic_report` EPANET's `Rtime`): EPANET's
+        `timestep` (`to_end`: shortened to the run's end), the state with the tanks moved
+        by it and the rules' actions taken at its end, and the links those actions were
+        taken on (`apply_rules_with_states`; None without rules)."""
         step = (clock.step if to_end else clock.free_step)(t, hydraulic_report)
         inflow = solved["water.storage_flow"] if storage is not None else None
         rate = None
@@ -504,7 +495,7 @@ def water_run(model, state=None, drivers=None, *, duration: float | None = None,
                 recorder.record(solved, d, cut_off, levels,
                                 _final_overflow(model, storage, solved, d), status)
             break
-        step, advanced, acted = plan(True)
+        step, advanced, acted = plan(True, t, hydraulic_report, solved, levels, d)
         if counted:
             # `addenergy` takes the step as EPANET's `timestep` finds it, past the duration
             # as well; the reported results end at the duration
@@ -512,7 +503,8 @@ def water_run(model, state=None, drivers=None, *, duration: float | None = None,
             if t + clock.free_step(t, hydraulic_report) > clock.duration:
                 # the duration cut this step: EPANET's is whole, its tanks moved and its rules
                 # checked to its own end (a rule acting past the duration ends it there)
-                whole, seen, taken = plan(False)
+                whole, seen, taken = plan(False, t, hydraulic_report, solved, levels,
+                                           d)
             pumps_now, opened = _as_addenergy_sees(seen, taken, status[..., meter.cols],
                                                    meter.cols)
             meter.add(_period(net, t), whole / 3600.0,

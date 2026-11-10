@@ -16,10 +16,12 @@ from dataclasses import dataclass, field
 
 import torch
 
+from noodl.apps.water.units import M_PER_FT
+
 CLOSED, OPEN, ACTIVE = 0, 1, 2
 
 #: EPANET 2.2's head tolerance `Htol` (0.0005 ft, `hydraul.c`, `inithyd`) in metres.
-HTOL = 0.0005 * 0.3048
+HTOL = 0.0005 * M_PER_FT
 
 SECONDS_PER_DAY = 86400.0
 
@@ -143,6 +145,18 @@ def _fires_on_node(control: Control, levels, pressures, tested) -> Tensor | None
     return None
 
 
+def pump_speed_for_status(status: int) -> float | None:
+    """The relative speed a pump takes when a control or a rule sets its status: EPANET 2.2's
+    `setlinkstatus` (`hydraul.c`), where OPEN runs a pump at speed 1 and CLOSED puts it at
+    speed 0; `None` for any other status (the speed stays). `[STATUS]` is not this: EPANET's
+    `changestatus` (`input3.c`) leaves the speed of a pump it CLOSES alone."""
+    if status == OPEN:
+        return 1.0
+    if status == CLOSED:
+        return 0.0
+    return None
+
+
 def _action(control: Control, kind: str) -> tuple[int | None, float | None]:
     """`(status, setting)` a firing `control` imposes on a link of `kind` (`"PIPE"`,
     `"PUMP"` or `"VALVE"`); `None` keeps the link's own. The setting is in the control's
@@ -158,8 +172,8 @@ def _action(control: Control, kind: str) -> tuple[int | None, float | None]:
     closed in `[STATUS]`, gets its CLOSED control at 1050 s, where EPANET takes a step and
     re-solves; without it every later tank trigger moved by seconds."""
     if control.status is not None:
-        if kind == "PUMP" and control.status in (OPEN, CLOSED):
-            return control.status, 1.0 if control.status == OPEN else 0.0
+        if kind == "PUMP":
+            return control.status, pump_speed_for_status(control.status)
         return control.status, None
     if kind == "PUMP":
         return (OPEN if control.setting > 0 else CLOSED), control.setting

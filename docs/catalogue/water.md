@@ -28,6 +28,7 @@ Descriptions of the physical objects a network is built from.
 | `Emitter` | An emitter at junction `node`: the outflow is `coefficient * p^n` with `p` the pressure head (m) and `n` `WaterOptions.emitter_exponent`; `coefficient` is in m3/s per m^n. | `Emitter(node, coefficient)` |
 | `EnergyOptions` | `[ENERGY]` defaults: `global_efficiency` (percent), `global_price` ($/kWh) with an optional `global_pattern` and the monthly `demand_charge` ($/kW). Reporting only: none of them changes a head or a flow. | `EnergyOptions(global_efficiency=75.0, global_price=0.0, global_pattern=None, demand_charge=0.0)` |
 | `Junction` | A junction: `elevation` (m) and base `demand` (m3/s, withdrawn), optionally scaled by a time `pattern`. | `Junction(name, elevation, demand=0.0, pattern=None)` |
+| `LinkData` | Every link of the network as `TankLevels` carries it, each field one value per link in `names` order (`model.link_names`). | `LinkData(names, status, kinds=None, setting=None, setting_scale=None, setting_tolerance=None, one_way=None)` |
 | `Premise` | One `IF`/`AND`/`OR` clause of a rule: `object id attribute relation value`. | `Premise(conjunction, object, id, attribute, relation, value, tolerance=None)` |
 | `Pump` | A pump from `u` to `v` on a head-flow `curve` (by name) or at constant `power` (kW), at relative `speed`, optionally varied by `speed_pattern`. | `Pump(name, u, v, curve, power=None, speed=1.0, speed_pattern=None, efficiency_curve=None, price=None, price_pattern=None)` |
 | `PumpEnergy` | Each pump's energy use over a run (`pump_names` in `WaterNetwork.pumps` order), as EPANET reports it (`output.c`, `saveenergy`). `...` is the batch shape of the run. | `PumpEnergy(pump_names, utilisation, efficiency, energy_per_volume, average_power, peak_power, cost, demand_charge)` |
@@ -68,7 +69,7 @@ Functions of the state that compute drivers each step (densities, flows, levels)
 
 | Name | What it does | How to call it |
 |---|---|---|
-| `TankLevels` | Every simple `[CONTROLS]` form (time, clock time, tank level, junction pressure), and the boundary heads of a water layer whose tanks are held at boundary nodes (`build_model(tank_scheme="forward_euler")`); on a network without tanks it carries the controls alone. | `TankLevels(net, tanks, controls, pump_names, *, tank_nodes, dt, reservoir_heads, head_scale=1.0, link_names, link_status, tank_links=(), one_way=None, storage=None, link_setting=None, link_kinds=None, setting_scale=None, junctions=None, start_clocktime=0.0, rules=(), node_info=None, setting_tolerance=None, speed_patterns=())` |
+| `TankLevels` | Every simple `[CONTROLS]` form (time, clock time, tank level, junction pressure), and the boundary heads of a water layer whose tanks are held at boundary nodes (`build_model(tank_scheme="forward_euler")`); on a network without tanks it carries the controls alone. | `TankLevels(tanks, controls, pump_names, *, links, tank_nodes, dt, reservoir_heads, head_scale=1.0, tank_links=(), storage=None, junctions=None, start_clocktime=0.0, rules=(), node_info=None, speed_patterns=())` |
 
 ## Sources and storage
 

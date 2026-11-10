@@ -29,6 +29,7 @@ from noodl.apps.water.controls import (
     Action,
     Premise,
     Rule,
+    pump_speed_for_status,
 )
 
 Tensor = torch.Tensor
@@ -250,15 +251,10 @@ def take_actions_per_link(
         elif kind == "PIPE":
             wanted = CLOSED if action.value == 0.0 else OPEN
         if wanted is not None:
-            if wanted == OPEN and s <= CLOSED:
-                status[j] = OPEN
+            if (wanted == OPEN and s <= CLOSED) or (wanted == CLOSED and s > CLOSED):
+                status[j] = wanted
                 if kind == "PUMP":
-                    setting[j] = 1.0
-                acted[j] = True
-            elif wanted == CLOSED and s > CLOSED:
-                status[j] = CLOSED
-                if kind == "PUMP":
-                    setting[j] = 0.0
+                    setting[j] = pump_speed_for_status(wanted)
                 acted[j] = True
             continue
         x = action.value * (1.0 if setting_scale is None else setting_scale[j])

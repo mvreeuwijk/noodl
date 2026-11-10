@@ -53,7 +53,9 @@ function of its level (`[CURVES]`), stepped by volume (`NodeStorage.potential_of
 from __future__ import annotations
 
 import weakref
+from collections.abc import Sequence
 from contextlib import contextmanager
+from dataclasses import dataclass
 
 import torch
 
@@ -65,7 +67,6 @@ from noodl.apps.water.controls import (
     next_control_time,
 )
 from noodl.apps.water.elements import (
-    M_PER_FT,
     ONE_WAY_KEY,
     RESERVOIR_HEAD_KEY,
     SETTING_KEY,
@@ -74,6 +75,7 @@ from noodl.apps.water.elements import (
     TIME_KEY,
 )
 from noodl.apps.water.rules import SETTING_TOLERANCE
+from noodl.apps.water.units import M_PER_FT, TINY
 from noodl.elements.base import ConstitutiveLaw
 from noodl.storage import NodeStorage
 
@@ -83,12 +85,11 @@ F64 = torch.float64
 # `HTOL` (`noodl.apps.water.controls`): a tank within it of its maximum (minimum) level is
 # full (empty) (`hydstatus.c`, `tankstatus`).
 
-#: EPANET's `TINY` (`types.h`): a curve segment narrower than this takes its end value
-#: (`project.c`, `interp`). EPANET applies it in the curve's FILE units (ft or m, ft3 or m3);
-#: here it is applied in SI (m, m3). Every curve `TankVolumeCurve` accepts has strictly
-#: increasing levels and volumes that do not decrease; `interp` on the volumes never meets
-#: a flat segment's zero width (it takes the first point at or above the volume).
-TINY = 1e-6
+# EPANET's `TINY` (`noodl.apps.water.units`): a curve segment narrower than it takes its end
+# value (`project.c`, `interp`). EPANET applies it in the curve's FILE units (ft or m, ft3 or
+# m3); here it is applied in SI (m, m3). Every curve `TankVolumeCurve` accepts has strictly
+# increasing levels and volumes that do not decrease; `interp` on the volumes never meets a
+# flat segment's zero width (it takes the first point at or above the volume).
 
 #: EPANET's `QZERO` (`types.h`, 1e-6 cfs) in m3/s: `tanktimestep` (`hydraul.c`) skips a tank
 #: whose net inflow is no larger.
@@ -263,6 +264,28 @@ def _same(a: tuple, b: tuple) -> bool:
     return True
 
 
+@dataclass(frozen=True)
+class LinkData:
+    """Every link of the network as `TankLevels` carries it, each field one value per link in
+    `names` order (`model.link_names`).
+
+    `status`: the built `"water.status"` (`CLOSED`, `OPEN`, `ACTIVE`); `kinds`: `"PIPE"`,
+    `"PUMP"` or `"VALVE"` (default: every link a pump among `TankLevels`' `pump_names`,
+    every other a pipe, which a control or a rule on a valve refuses); `setting`: the built
+    `"water.setting"` (default 0); `setting_scale`: the setting's unit per SI unit (a PRV's,
+    PSV's or PBV's head in the layer's potential unit; default 1); `setting_tolerance`:
+    EPANET's tolerance on a setting a rule sets, in the carried unit (default
+    `SETTING_TOLERANCE`); `one_way`: the built `"water.one_way"` (default 0)."""
+
+    names: Sequence[str]
+    status: Tensor
+    kinds: Sequence[str] | None = None
+    setting: Tensor | None = None
+    setting_scale: Sequence[float] | None = None
+    setting_tolerance: Sequence[float] | None = None
+    one_way: Tensor | None = None
+
+
 class TankLevels:
     """Every simple `[CONTROLS]` form (time, clock time, tank level, junction
     pressure), and the boundary heads of a water layer whose tanks are held at boundary nodes
@@ -275,6 +298,8 @@ class TankLevels:
     `KirchhoffLayer.solve`'s `history`). Only the link status and setting are
     carried. `control_time` is the time to the next control that fires (EPANET's
     `controltimestep`), `time_to_limit` the time a tank takes to fill or empty (`tanktimestep`).
+    `links` (`LinkData`) is every link as built: its name, kind, status, setting, the
+    setting's unit and a rule's tolerance on it, and its allowed direction.
 
     RESERVOIR HEADS. The boundary heads are the driver `"water.reservoir_head"` (one per
     reservoir, in the layer's potential unit) when the drivers carry it -- `water_run`
@@ -312,31 +337,23 @@ class TankLevels:
 
     def __init__(
         self,
-        net,
         tanks,
         controls,
         pump_names,
         *,
+        links: LinkData,
         tank_nodes,
         dt: float,
         reservoir_heads: Tensor,
         head_scale: float = 1.0,
-        link_names,
-        link_status: Tensor,
         tank_links=(),
-        one_way: Tensor | None = None,
         storage: NodeStorage | None = None,
-        link_setting: Tensor | None = None,
-        link_kinds=None,
-        setting_scale=None,
         junctions=None,
         start_clocktime: float = 0.0,
         rules=(),
         node_info=None,
-        setting_tolerance=None,
         speed_patterns=(),
     ) -> None:
-        self.net = net
         self.tanks = list(tanks)
         self.controls = list(controls)
         # `[RULES]`: tested by `apply_rules` (`noodl.apps.water.network`) after a solve, which
@@ -358,7 +375,7 @@ class TankLevels:
         # `{junction: (node index, elevation m)}`: the nodes a pressure control reads
         self.junctions = {} if junctions is None else dict(junctions)
         names = [t.name for t in self.tanks]
-        self.link_names = list(link_names)
+        self.link_names = list(links.names)
         # The labels of the closure-carried state, in its order (`noodl.refs`).
         self.key_labels = {"water.link_status": list(self.link_names),
                            "water.link_setting": list(self.link_names)}
@@ -378,12 +395,13 @@ class TankLevels:
         self.pump_of = {name: i for i, name in enumerate(self.pump_names)}
         # Every link's status and setting as built (`model.link_names` order), the pumps'
         # places in it and every link's kind for the controls' actions.
-        self.link_status = torch.as_tensor(link_status, dtype=F64)
+        self.link_status = torch.as_tensor(links.status, dtype=F64)
         self.link_setting = (torch.zeros(len(self.link_names), dtype=F64)
-                             if link_setting is None
-                             else torch.as_tensor(link_setting, dtype=F64))
+                             if links.setting is None
+                             else torch.as_tensor(links.setting, dtype=F64))
         self.pump_links = torch.tensor([self.link_names.index(n) for n in self.pump_names],
                                        dtype=torch.long)
+        link_kinds = links.kinds
         if link_kinds is None:
             # the pumps are known here, the valves are not: a control on another link needs
             # its kind (a valve is not a pipe)
@@ -392,16 +410,16 @@ class TankLevels:
             if others:
                 raise ValueError(
                     f"TankLevels: controls and rules name link(s) {sorted(set(others))}, which are "
-                    f"not pumps; give link_kinds (\"PIPE\", \"PUMP\" or \"VALVE\" per link)")
+                    f"not pumps; give LinkData.kinds (\"PIPE\", \"PUMP\" or \"VALVE\" per link)")
             link_kinds = ["PUMP" if n in self.pump_of else "PIPE" for n in self.link_names]
         self.link_kinds = list(link_kinds)
         # a control's numeric setting is in SI; the link's setting in the layer's units
-        self.setting_scale = ([1.0] * len(self.link_names) if setting_scale is None
-                              else [float(x) for x in setting_scale])
+        self.setting_scale = ([1.0] * len(self.link_names) if links.setting_scale is None
+                              else [float(x) for x in links.setting_scale])
         # EPANET's tolerance on a setting a rule sets (`takeactions`), in the carried unit
         self.setting_tolerance = ([SETTING_TOLERANCE] * len(self.link_names)
-                                  if setting_tolerance is None
-                                  else [float(x) for x in setting_tolerance])
+                                  if links.setting_tolerance is None
+                                  else [float(x) for x in links.setting_tolerance])
         # the links whose status the closure writes: the pumps and every link a control names
         named = [self.link_names.index(c.link) for c in self.controls]
         named += [self.link_names.index(n) for n in rule_links]
@@ -436,8 +454,8 @@ class TankLevels:
         self.storage = storage
         # EPANET's `tankstatus` rules, per link that touches a tank (see the class docstring)
         rules = list(tank_links)
-        self.one_way = (torch.zeros(len(self.link_names), dtype=F64) if one_way is None
-                        else torch.as_tensor(one_way, dtype=F64))
+        self.one_way = (torch.zeros(len(self.link_names), dtype=F64) if links.one_way is None
+                        else torch.as_tensor(links.one_way, dtype=F64))
         self._rule_links = torch.tensor([r[0] for r in rules], dtype=torch.long)
         self._rule_tanks = torch.tensor([r[1] for r in rules], dtype=torch.long)
         self._rule_out = torch.tensor([bool(r[2]) for r in rules])   # tank at the start

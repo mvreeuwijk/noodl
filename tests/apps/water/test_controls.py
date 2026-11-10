@@ -325,15 +325,16 @@ def test_a_control_on_a_reservoir_or_a_numeric_setting_on_a_gpv_is_refused():
 
 
 def test_the_closure_needs_the_kinds_of_the_links_it_controls_unless_they_are_pumps():
-    from noodl.apps.water.tanks import TankLevels
+    from noodl.apps.water.tanks import LinkData, TankLevels
     tank = Tank("T1", elevation=0.0, init_level=1.0, min_level=0.0, max_level=2.0,
                 diameter=1.0)
-    kwargs = dict(tank_nodes=[0], dt=3600.0, reservoir_heads=torch.zeros(0, dtype=F64),
-                  link_names=["P1", "V1"], link_status=torch.ones(2, dtype=F64))
+    kwargs = dict(tank_nodes=[0], dt=3600.0, reservoir_heads=torch.zeros(0, dtype=F64))
+    links = dict(names=["P1", "V1"], status=torch.ones(2, dtype=F64))
     control = Control("V1", CLOSED, None, "node", "T1", True, 1.0)
-    with pytest.raises(ValueError, match="link_kinds"):
-        TankLevels(None, [tank], [control], [], **kwargs)
-    TankLevels(None, [tank], [control], [], link_kinds=["PIPE", "VALVE"], **kwargs)
+    with pytest.raises(ValueError, match="LinkData.kinds"):
+        TankLevels([tank], [control], [], links=LinkData(**links), **kwargs)
+    TankLevels([tank], [control], [], links=LinkData(**links, kinds=["PIPE", "VALVE"]),
+               **kwargs)
 
 
 def test_the_pressure_switch_cap_names_the_links_and_junctions():

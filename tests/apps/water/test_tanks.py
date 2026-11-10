@@ -29,7 +29,7 @@ from noodl.apps.water.network import (
     water_step,
 )
 from noodl.apps.water.simulate import water_run
-from noodl.apps.water.tanks import TankLevels, TankVolumeCurve
+from noodl.apps.water.tanks import LinkData, TankLevels, TankVolumeCurve
 from noodl.elements.base import LawContext
 from noodl.storage import LinearStorage
 
@@ -44,9 +44,9 @@ def _two_control_closure(controls):
              diameter=1.0),
     ]
     return TankLevels(
-        None, tanks, controls, ["P1"],
+        tanks, controls, ["P1"],
+        links=LinkData(names=["P1"], status=torch.ones(1, dtype=F64)),
         tank_nodes=[0, 1], dt=3600.0, reservoir_heads=torch.zeros(0, dtype=F64),
-        link_names=["P1"], link_status=torch.ones(1, dtype=F64),
     )
 
 

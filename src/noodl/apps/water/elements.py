@@ -12,6 +12,7 @@ import torch
 
 from noodl.apps.water.controls import ACTIVE, CLOSED, OPEN
 from noodl.apps.water.graph import joined_groups
+from noodl.apps.water.units import HP_HEAD_FT_CFS, KW_PER_HP, M_PER_FT
 from noodl.elements._slopes import one_port_blocks
 from noodl.elements.base import ConstitutiveLaw, ImplicitLaw
 from noodl.solvers.scalar import solve_monotone
@@ -716,15 +717,6 @@ class PiecewisePumpCurve(ImplicitLaw):
         return dp + self.head_gain(q, speed=_pump_speed(self, None, drivers, q))
 
 
-#: EPANET's constant of a constant-power pump: the head (ft) one horsepower lifts one cfs,
-#: ``550 / 62.4`` (`input2.c`, `updatepumpparams`).
-HP_HEAD_FT_CFS = 8.814
-
-#: EPANET's kilowatts per horsepower (`types.h`, ``KWperHP``), by which it divides the power
-#: of an SI file (`input1.c`, `convertunits`).
-KW_PER_HP = 0.7457
-
-
 class ConstantPowerPump(ImplicitLaw):
     """A pump that delivers a constant power: EPANET 2.2's ``CONST_HP`` pump (`[PUMPS]`
     ``POWER``). Its head gain is ``8.814 P w^3 / q`` in feet, horsepower and cfs
@@ -858,13 +850,12 @@ SWAMEE_JAIN_LOG_COEFF = -8.68588963806503655300e-01  # -2 / ln(10)
 DUNLOP_AB = 3.28895476345399058690e-03  # 5.74 / 4000^0.9
 DUNLOP_AC = -5.14214965799093883760e-03  # -2 * 0.9 * 2 / ln(10) * AB
 
-#: EPANET computes in feet and cfs. ``MperFT`` (`types.h`) is exact; the gravity in the
-#: D-W resistance ``R = L / (2 * 32.2 * d * A^2)`` (`hydcoeffs.c`, `resistcoeff`) is
+#: EPANET computes in feet and cfs (`M_PER_FT`, `noodl.apps.water.units`). The gravity in
+#: the D-W resistance ``R = L / (2 * 32.2 * d * A^2)`` (`hydcoeffs.c`, `resistcoeff`) is
 #: 32.2 ft/s^2, NOT standard gravity's 32.174, and the minor-loss conversion
 #: ``0.02517 K / d^4`` (`input1.c`, `convertunits`) is ``8 / (32.2 pi^2)`` ROUNDED to
 #: four figures. Both are part of what EPANET computes, so both are reproduced here.
-#: Aliases: `EPANET_FOOT`, `EPANET_G_FT`, `EPANET_KM` (EPANET).
-M_PER_FT = 0.3048
+#: Aliases: `EPANET_FOOT` (of `M_PER_FT`), `EPANET_G_FT`, `EPANET_KM` (EPANET).
 G_FT_S2 = 32.2
 MINOR_LOSS_K_FT = 0.02517
 #: EPANET's default kinematic viscosity of water, ``VISCOS = 1.1e-5`` ft^2/s (`types.h`),
@@ -872,21 +863,6 @@ MINOR_LOSS_K_FT = 0.02517
 #: Aliases: `EPANET_VISCOS_FT2`, `EPANET_NU` (EPANET).
 NU_WATER_FT2 = 1.1e-5
 NU_WATER_REF = NU_WATER_FT2 * M_PER_FT**2
-#: EPANET's own flow-unit factors, file units per cfs (`types.h`, ``GPMperCFS`` ...).
-#: Several are rounded (``LPSperCFS = 28.317`` against the exact 28.3168466), and EPANET
-#: divides a file's flows by exactly these numbers on the way in.
-EPANET_QCF = {
-    "CFS": 1.0,
-    "GPM": 448.831,
-    "MGD": 0.64632,
-    "IMGD": 0.5382,
-    "AFD": 1.9837,
-    "LPS": 28.317,
-    "LPM": 1699.0,
-    "MLD": 2.4466,
-    "CMH": 101.94,
-    "CMD": 2446.6,
-}
 
 
 def _dunlop(w: Tensor, e: Tensor) -> tuple[Tensor, Tensor, Tensor, Tensor]:

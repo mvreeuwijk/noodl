@@ -5,7 +5,6 @@ from noodl.apps.water.controls import ACTIVE, CLOSED, OPEN, Action, Control, Pre
 from noodl.apps.water.demand import EmitterOutflow, PressureDrivenDemand
 from noodl.apps.water.elements import (
     DW_SI,
-    EPANET_QCF,
     HW_SI,
     BreakerValve,
     ChezyManning,
@@ -30,7 +29,7 @@ from noodl.apps.water.elements import (
     three_point_curve,
 )
 from noodl.apps.water.energy import PumpEnergy
-from noodl.apps.water.inp import FLOW_UNITS, read_epanet_inp
+from noodl.apps.water.inp import read_epanet_inp
 from noodl.apps.water.network import (
     Emitter,
     EnergyOptions,
@@ -57,7 +56,8 @@ from noodl.apps.water.network import (
 from noodl.apps.water.report import link_table, pressure_head, to_kilopascal
 from noodl.apps.water.rules import evaluate_rules, take_actions
 from noodl.apps.water.simulate import WaterResults, pattern_factor, water_run
-from noodl.apps.water.tanks import TankLevels, TankVolumeCurve
+from noodl.apps.water.tanks import LinkData, TankLevels, TankVolumeCurve
+from noodl.apps.water.units import EPANET_QCF, FLOW_UNITS
 
 # Reference-model aliases (the imports marked `# noqa: F401  (alias)`) are importable from
 # here but kept out of `__all__`: an alias is named in its target's docstring, not catalogued.
@@ -69,7 +69,7 @@ __all__ = [
     "FlowControlledPipe", "FlowControlledPump", "FlowControlValve",
     "GeneralPurposeValve", "HazenWilliams", "PressureReducingValve",
     "PressureSustainingValve",
-    "Junction",
+    "Junction", "LinkData",
     "MinorLoss", "PiecewisePumpCurve", "Premise", "PressureDrivenDemand", "Pump", "PumpCurve",
     "PumpEnergy",
     "Reservoir", "Rule", "ShutLinks",

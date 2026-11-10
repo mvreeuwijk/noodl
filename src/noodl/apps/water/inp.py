@@ -66,30 +66,14 @@ from noodl.apps.water.network import (
     WaterOptions,
     WaterPipe,
 )
+from noodl.apps.water.units import FLOW_UNITS, M_PER_FT
 
-#: `.inp` flow units -> m3/s. GPM is one US gallon per minute; the rest follow the manual's
-#: Appendix C.2.11 list. `GPM` is exactly `3.785411784e-3 / 60 = 6.309019640343977e-05`,
-#: which reproduces wntr's own conversion of Net1's 1500 GPM design point to
-#: 0.0946352946 m3/s (measured).
-FLOW_UNITS = {
-    "CFS": 0.028316846592,
-    "GPM": 3.785411784e-3 / 60.0,
-    "MGD": 3.785411784e3 / 86400.0,
-    "IMGD": 4.54609e3 / 86400.0,
-    "AFD": 1233.48183754752 / 86400.0,
-    "LPS": 1e-3,
-    "LPM": 1e-3 / 60.0,
-    "MLD": 1e3 / 86400.0,
-    "CMH": 1.0 / 3600.0,
-    "CMD": 1.0 / 86400.0,
-}
 _US_UNITS = frozenset({"CFS", "GPM", "MGD", "IMGD", "AFD"})
-FOOT = 0.3048
 INCH = 0.0254
 #: psi -> m of head, for a US-units file's `MINIMUM PRESSURE`/`REQUIRED PRESSURE` (`wntr`'s
 #: own `HydParam.Pressure` conversion, `0.3048 / 0.4333`, confirmed to 1e-15 against
 #: `wntr.epanet.util.to_si`). SI files state these two already in metres.
-PSI_TO_M = FOOT / 0.4333
+PSI_TO_M = M_PER_FT / 0.4333
 
 _IGNORED = frozenset(
     {
@@ -185,8 +169,8 @@ def read_epanet_inp(path) -> WaterNetwork:
     # water's 1.1e-5 ft2/s, anything else is the ACTUAL kinematic viscosity, in m2/s for
     # an SI file and ft2/s for a US one. `WaterOptions.viscosity` is always the ratio.
     if viscosity <= 1e-3:
-        viscosity = viscosity / (NU_WATER_FT2 * (1.0 if us else FOOT**2))
-    length_scale = FOOT if us else 1.0
+        viscosity = viscosity / (NU_WATER_FT2 * (1.0 if us else M_PER_FT**2))
+    length_scale = M_PER_FT if us else 1.0
     diameter_scale = INCH if us else 1e-3
     # metres of head per file pressure unit: EPANET's `Ucf[PRESSURE]` carries the specific
     # gravity (`input1.c`, `convertunits`: psi per foot of head times SG, or metres of head
@@ -336,7 +320,7 @@ def read_epanet_inp(path) -> WaterNetwork:
         # millimetres (SI) -- Manual Table 3.1's own note, "epsilon = Darcy-Weisbach
         # roughness (ft)" with the [PIPES] column in millifeet.
         if headloss == "D-W":
-            roughness = roughness * (FOOT * 1e-3 if us else 1e-3)
+            roughness = roughness * (M_PER_FT * 1e-3 if us else 1e-3)
         pipes.append(
             WaterPipe(
                 line.fields[0], line.fields[1], line.fields[2],

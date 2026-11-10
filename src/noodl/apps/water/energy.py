@@ -39,18 +39,18 @@ from noodl.apps.water.controls import CLOSED
 from noodl.apps.water.elements import CBIG_FT_PER_CFS
 from noodl.apps.water.graph import link_topology
 from noodl.apps.water.tanks import QZERO
+from noodl.apps.water.units import (
+    FLOW_UNITS,
+    HP_HEAD_FT_CFS,
+    KW_PER_HP,
+    M_PER_FT,
+    TINY,
+    rounded_cfs_per_m3s,
+)
 
 Tensor = torch.Tensor
 F64 = torch.float64
 
-#: EPANET's `KWperHP` (`epanet2_enums.h`/`types.h`), kW per horsepower.
-KW_PER_HP = 0.7457
-#: The constant of `getenergy`: horsepower = `dh q SpGrav / 8.814` in feet and cfs.
-_HP_FT_CFS = 8.814
-#: EPANET's `TINY` (`types.h`): `interp` returns `y[k]` across a step in `x` below it.
-TINY = 1e-6
-#: Metres per foot (EPANET's `MperFT`), the head conversion of every SI file.
-_M_PER_FT = 0.3048
 
 
 @dataclass
@@ -99,8 +99,6 @@ class EnergyMeter:
     `result` at the end."""
 
     def __init__(self, model, duration: int) -> None:
-        from noodl.apps.water.network import _rounded_cfs_per_m3s
-
         net = model.water_network
         self.net = net
         pumps = net.pumps
@@ -110,14 +108,12 @@ class EnergyMeter:
         ends = torch.tensor(link_topology(model)[0], dtype=torch.long)
         self.from_node, self.to_node = ends[self.cols, 0], ends[self.cols, 1]
         self.head_scale = float(model.head_scale)
-        cfs = _rounded_cfs_per_m3s(net.options.flow_units)
-        self.cfs_per_m3s = 1.0 / _M_PER_FT**3 if cfs is None else cfs
+        cfs = rounded_cfs_per_m3s(net.options.flow_units)
+        self.cfs_per_m3s = 1.0 / M_PER_FT**3 if cfs is None else cfs
         self.qzero = QZERO if cfs is None else 1e-6 / self.cfs_per_m3s
-        self.kw_scale = (net.options.specific_gravity / _HP_FT_CFS * KW_PER_HP
-                         * self.cfs_per_m3s / _M_PER_FT)         # kW per (m head m3/s)
+        self.kw_scale = (net.options.specific_gravity / HP_HEAD_FT_CFS * KW_PER_HP
+                         * self.cfs_per_m3s / M_PER_FT)         # kW per (m head m3/s)
         # EPANET's `TINY` is in the file's flow units (`getenergy` interpolates `q * Ucf`)
-        from noodl.apps.water.inp import FLOW_UNITS
-
         self.tiny = TINY * (1.0 if net.options.flow_units is None
                             else FLOW_UNITS[net.options.flow_units])
         self.duration = int(duration)
@@ -191,7 +187,7 @@ class EnergyMeter:
         u, v = phi[..., self.from_node], phi[..., self.to_node]
         q = solved["water.q"][..., self.cols]
         if opened is not None and bool(opened.any()):
-            leak = (u - v).abs() / self.head_scale / _M_PER_FT / CBIG_FT_PER_CFS
+            leak = (u - v).abs() / self.head_scale / M_PER_FT / CBIG_FT_PER_CFS
             reset = torch.where(self.constant_power, 1.0, leak)   # `resetpumpflow`: Q0
             q = torch.where(opened, reset / self.cfs_per_m3s, q)
         self._steps.append((period, hours, u, v, q, states, speed))
