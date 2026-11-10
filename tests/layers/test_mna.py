@@ -334,6 +334,57 @@ def test_layer_methods_on_a_layer_with_flow_unknowns():
             call()
     with pytest.raises(ValueError, match="every edge"):
         layer.residual(phi_i, pb, drivers, src, q=q[..., :2])
+    # the adjoint's gradient has the unknowns' width and is real
+    width = r"grad must have the width of the unknowns \[phi_I, q_F\], 3 \(2 interior.*1 flow"
+    with pytest.raises(ValueError, match=width + r".*got 2$"):
+        layer.adjoint(phi_i, pb, drivers, grad[:2], q=q)
+    with pytest.raises(ValueError, match=width + r".*got 4$"):
+        layer.adjoint(phi_i, pb, drivers, torch.cat([grad, grad[:1]]), q=q)
+    with pytest.raises(ValueError, match=width + r".*got a complex gradient"):
+        layer.adjoint(phi_i, pb, drivers, grad.to(torch.complex128), q=q)
+
+
+def _central_differences(fn, x, h=1e-6):
+    """The (len(fn(x)), len(x)) central-difference Jacobian of `fn` at `x`."""
+    return torch.stack([(fn(x + h * e) - fn(x - h * e)) / (2 * h)
+                        for e in torch.eye(len(x), dtype=x.dtype)], -1)
+
+
+def _rlc_layer(phasor=False):
+    """a-gnd source, a-b R, b-c inductance, c-gnd capacitance."""
+    from tests._circuit_laws import Cap, Ind
+    net = _net(["gnd", "a", "b", "c"], [("a", "gnd", "source"), ("a", "b", "r"),
+                                        ("b", "c", "ind"), ("c", "gnd", "cap")])
+    return KirchhoffLayer(
+        net, "e", [Source(torch.tensor([1.0])), Conductance(torch.tensor([0.5]), kind="r"),
+                   Ind(torch.tensor([1e-3])), Cap(torch.tensor([1e-6]))],
+        boundary=["gnd"], phasor=phasor)
+
+
+@pytest.mark.parametrize("scheme", ["trapezoidal", "backward_euler"])
+def test_layer_methods_on_a_step_with_flow_unknowns(scheme):
+    # the step keywords enter residual, jacobian and adjoint: each dynamic relation's step
+    # form reads dt, the scheme and the step-start point
+    layer = _rlc_layer()
+    pb = torch.zeros(1)
+    history = layer.solve(pb, mode="initial", differentiable=False)
+    kw = {"dt": 1e-3, "scheme": scheme, "history": history}
+    phi, q = layer.solve(pb, differentiable=False, **kw)
+    phi_i = phi[..., layer.interior]
+    n_I = len(phi_i)
+
+    r = layer.residual(phi_i, pb, {}, None, q=q, **kw)
+    torch.testing.assert_close(r, torch.zeros_like(r), rtol=0, atol=1e-10)
+
+    J = layer.jacobian(phi_i, pb, {}, q=q, **kw)
+    fd = _central_differences(
+        lambda v: layer.residual(v[:n_I], pb, {}, None, q=_q_with(layer, q, v), **kw),
+        _unknowns(layer, phi, q))
+    torch.testing.assert_close(J, fd, rtol=1e-6, atol=1e-6)
+
+    grad = torch.arange(1.0, J.shape[-1] + 1)
+    torch.testing.assert_close(layer.adjoint(phi_i, pb, {}, grad, q=q, **kw),
+                               torch.linalg.solve(J.T, grad), rtol=1e-9, atol=1e-10)
 
 
 def _q_with(layer, q, x):
@@ -363,26 +414,35 @@ def test_dflows_on_relation_edges_is_the_slope_the_relation_implies():
 
 
 def test_layer_methods_on_a_phasor_layer():
-    from tests._circuit_laws import Cap, Ind
-    net = _net(["gnd", "a", "b", "c"], [("a", "gnd", "source"), ("a", "b", "r"),
-                                        ("b", "c", "ind"), ("c", "gnd", "cap")])
-    layer = KirchhoffLayer(
-        net, "e", [Source(torch.tensor([1.0])), Conductance(torch.tensor([0.5]), kind="r"),
-                   Ind(torch.tensor([1e-3])), Cap(torch.tensor([1e-6]))],
-        boundary=["gnd"], phasor=True)
+    layer = _rlc_layer(phasor=True)
     drivers = {"e.frequency": torch.tensor(5032.92)}
     pb = torch.zeros(1)
     phi, q = layer.solve(pb, drivers, differentiable=False)
     phi_i = phi[..., layer.interior]
+    n_I = len(phi_i)
     r = layer.residual(phi_i, pb, drivers, None, q=q)
     assert r.is_complex()
     torch.testing.assert_close(r.abs(), torch.zeros(r.shape), rtol=0, atol=1e-10)
     n = 2 * r.shape[-1]
     J = layer.jacobian(phi_i, pb, drivers, q=q)
     assert J.shape == (n, n)
+
+    # J is the Jacobian of the real view of the residual over the real view of the unknowns
+    # [Re/Im phi_I, Re/Im q_F] (consecutive (Re, Im) pairs)
+    def real_residual(v):
+        z = torch.view_as_complex(v.reshape(-1, 2).contiguous())
+        r = layer.residual(z[:n_I], pb, drivers, None, q=_q_with(layer, q, z))
+        return torch.view_as_real(r).flatten()
+
+    x = torch.view_as_real(_unknowns(layer, phi, q)).flatten()
+    torch.testing.assert_close(J, _central_differences(real_residual, x), rtol=1e-6,
+                               atol=1e-6)
+
     grad = torch.arange(1.0, n + 1)
     torch.testing.assert_close(layer.adjoint(phi_i, pb, drivers, grad, q=q),
                                torch.linalg.solve(J.T, grad), rtol=1e-8, atol=1e-8)
+    with pytest.raises(ValueError, match=r"each a \(Re, Im\) pair.*got a complex gradient"):
+        layer.adjoint(phi_i, pb, drivers, grad.to(torch.complex128)[: n // 2], q=q)
     with pytest.raises(TypeError, match="phasor layer"):
         layer.dflows(phi, drivers, q)
 

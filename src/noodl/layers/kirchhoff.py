@@ -209,25 +209,33 @@ def _held_tensors(obj, *, registered_threaded: bool = True, visited: list | None
 
 
 class KirchhoffLayer(TopologyGuard):
-    """Flows driven by a potential (pressure, head): solves nodal conservation
-    `A_I g(A^T phi) = s_I` for the interior potentials by Newton's method, with the constitutive
-    laws on its edge kinds, the head driver added to the potential differences, and prescribed
-    potentials at its boundary nodes; differentiable through the converged solution.
-    `flow_unit` is reported by `model.refs`, never used numerically.
+    """Flows driven by a potential (pressure, head): solves the flow balance at the interior
+    nodes for the interior potentials by Newton's method, with the constitutive laws on its
+    edge kinds, the head driver added to the potential differences, and prescribed potentials
+    at its boundary nodes; differentiable through the converged solution. `flow_unit` is
+    reported by `model.refs`, never used numerically.
 
-    A layer whose constitutive laws include an implicit law (`ImplicitLaw`: an ideal source,
-    a flow-controlled law) or a coupled multi-port law, or a phasor layer, has flow unknowns:
-    the flows of its implicit-law edges (`implicit_edges`) become unknowns alongside the
-    interior potentials, and every connected part of its edges must contain a boundary node
-    (a ground). A law that reads the `LawContext` (the time, its step-start values: a
-    time-dependent current source, a storing law in flow form) gives its flow from the
-    potential difference, and keeps the layer on the fast path, whose grounding is certified
-    at the start of every solve.
+    Flows from potentials (the fast path). A law that gives its flow from the potential
+    difference, `q = g(A^T phi + head)`, adds no unknown: when every law does, the balance is
+    `A_I g(A^T phi) = s_I`, the unknowns are the interior potentials alone and the Jacobian
+    is the symmetric network matrix. A law that reads the `LawContext` (the time, its
+    step-start values: a time-dependent current source, a storing law in flow form) is such a
+    law too. The grounding of this system is certified at the start of every solve.
 
-    With `phasor=True` the layer solves the sinusoidal steady state: potentials and flows are
-    complex amplitudes (complex128), the frequency in Hz comes from the driver
-    `"<name>.frequency"` (one per instance) and reaches the laws as `LawContext.omega`
-    (`2 pi f`). Each complex unknown is solved as its (real, imaginary) pair, so a law that is
+    A law that gives a relation adds its flow as an unknown. A law that cannot give the flow
+    from the potential difference (`ImplicitLaw`: an ideal source, a flow-controlled law, a
+    capacitance or inductance) gives a relation `residual(dp, q) = 0` instead, and a coupled
+    multi-port law gives its edges' flows together; the flows of those edges
+    (`implicit_edges`) become unknowns alongside the interior potentials, the relations add
+    their rows, and the Jacobian is a sparse, nonsymmetric matrix. Every connected part of
+    such a layer's edges must contain a boundary node (a ground). Every method (`solve`,
+    `flows`, `dflows`, `residual`, `jacobian`, `adjoint`, `linear_init`) is defined on every
+    layer; those that need the flows of the relations take the solved `q`.
+
+    Phasor. With `phasor=True` the layer solves the sinusoidal steady state, always with the
+    sparse operator of the previous paragraph: potentials and flows are complex amplitudes
+    (complex128), the frequency in Hz comes from the driver `"<name>.frequency"` (one per
+    instance) and reaches the laws as `LawContext.omega` (`2 pi f`). Each complex unknown is solved as its (real, imaginary) pair, so a law that is
     not holomorphic in `dp` (a constant-power load, `q = conj(S / dp)`) is handled exactly.
     Every law must declare `phasor_capable`, withdrawals are refused (a load is an edge to
     ground), and `power_residual` is the complex power balance.
@@ -236,12 +244,12 @@ class KirchhoffLayer(TopologyGuard):
     interior nodes, which a step of `dt` turns into a withdrawal into storage with the step
     rate of the layer's scheme; without a step (a steady solve) storage is absent. A layer
     with storage is `dynamic` and takes `dt`, `history` and `storage_flow` in `solve`.
-    Storage adds no flow unknowns: on the classic nodal path its Jacobian gains only a
+    Storage adds no flow unknowns: without flow unknowns its Jacobian gains only a
     non-negative diagonal, so a network of conductances with storage keeps its symmetric
     positive definite system, and a storage node counts as grounded during a step. A layer
-    solved by Modified Nodal Analysis takes storage too (its diagonal slot of each node
-    row). `mode="initial"` holds each node with a storage entry whose `initial()` is not
-    `None` at that potential, on every layer: without flow unknowns that one solve uses the
+    with flow unknowns takes storage too (its diagonal slot of each node row).
+    `mode="initial"` holds each node with a storage entry whose `initial()` is not `None` at
+    that potential, on every layer: without flow unknowns that one solve uses the
     sparse operator with the held rows. A phasor layer takes no storage (a capacitance is an
     edge law there).
 
@@ -265,8 +273,8 @@ class KirchhoffLayer(TopologyGuard):
     `solve` of this layer uses unless the call gives its own, for laws that need them: the
     sewer dynamic wave sets ``line_search="convex"`` and ``step_floor`` (its kinked laws are
     each non-decreasing, so the residual is the gradient of a convex function). A layer
-    solved by Modified Nodal Analysis refuses ``line_search="convex"``, by keyword or here: its
-    residual is not the gradient of a convex function."""
+    with flow unknowns refuses ``line_search="convex"``, by keyword or here: its residual is
+    not the gradient of a convex function."""
 
     def __init__(
         self,
@@ -625,8 +633,8 @@ class KirchhoffLayer(TopologyGuard):
     @property
     def implicit_edges(self) -> torch.Tensor:
         """Positions, in layer edge order (the columns of `solve`'s `q`), of the edges whose
-        flow is an unknown of the layer (implicit constitutive laws); empty for a classic
-        layer."""
+        flow is an unknown of the layer (the edges of relations and multi-port laws); empty
+        on a layer without flow unknowns."""
         if self._unknowns is None:
             return torch.zeros(0, dtype=torch.long)
         return self._unknowns.edges
@@ -814,8 +822,8 @@ class KirchhoffLayer(TopologyGuard):
     def _scatter_withdrawals(self, value) -> torch.Tensor | None:
         """The sum over withdrawals of `value(j, ns)` (one value per node of source `j`),
         scattered to the INTERIOR rows; `None` when this layer has no withdrawals. Every
-        withdrawal withdrawal and slope (classic, threaded and Modified Nodal Analysis)
-        is assembled here."""
+        withdrawal and its slope (with or without flow unknowns, primal or threaded) is
+        assembled here."""
         return self._scatter_entries(self._withdrawals, self._withdrawal_positions, value)
 
     def _scatter_storage(self, value) -> torch.Tensor | None:
@@ -1156,8 +1164,8 @@ class KirchhoffLayer(TopologyGuard):
         entry (`storage_flows`, the state key `"<layer>.storage_flow"`), taken as given like
         `q`; `None` leaves storage out (a steady state). Zero (to solver tolerance) at a
         solved state. Unlike `residual`, which recomputes the flows from `phi`, this takes
-        them as given, so it is defined on every layer, including one solved by Modified
-        Nodal Analysis, whose implicit-law flows are not functions of `phi`.
+        them as given, so it is defined on every layer, including one with flow unknowns,
+        whose relations' flows are not functions of `phi`.
         """
         self._require_current_topology()
         phi_i = phi[..., self.interior]
@@ -2756,6 +2764,12 @@ class KirchhoffLayer(TopologyGuard):
         is the only one on the hot path -- so this is a direct-caller's concern, stated here
         for the same reason `linear_init`'s equivalent is ("stays differentiable for callers
         who want it directly"). Wrap the call in `torch.no_grad()` to get the factorisation.
+
+        On a layer with flow unknowns the operator is built without gradients, so the result
+        is differentiable at most in `grad_phi_interior`; under grad mode with a grad-requiring
+        `grad_phi_interior`, `linear_solver="auto"` (sparse direct there) refuses: wrap the
+        call in `torch.no_grad()`, or use `linear_solver="direct"`. A gradient of the wrong
+        width, or a complex one, is refused by name.
         """
         self._require_current_topology()
         drivers = drivers or {}
@@ -2764,6 +2778,7 @@ class KirchhoffLayer(TopologyGuard):
             phi_boundary, _, phi_interior, q = self._complex_inputs(
                 phi_boundary, drivers, None, phi_interior, q)
             x = self._unknown_vector(phi_interior, q, "adjoint")
+            self._check_adjoint_grad(grad_phi_interior)
             # the operator's values carry no graph, like every Jacobian entry of a solve
             with torch.no_grad():
                 op = self._operator(x, phi_boundary, drivers, step)
@@ -2782,6 +2797,19 @@ class KirchhoffLayer(TopologyGuard):
             where=f"KirchhoffLayer {self.name!r} adjoint",
             method=self.linear_solver,
         )
+
+    def _check_adjoint_grad(self, grad: torch.Tensor) -> None:
+        """Refuse an `adjoint` gradient on a layer with flow unknowns unless it is real and
+        has the unknowns' width (a fast-path habit of passing `n_I` columns, or a complex
+        gradient on a phasor layer, would otherwise fail deep in the linear solver)."""
+        u = self._unknowns
+        if grad.shape[-1] != u.n or grad.is_complex():
+            got = "a complex gradient" if grad.is_complex() else str(grad.shape[-1])
+            raise ValueError(
+                f"KirchhoffLayer {self.name!r}: grad must have the width of the unknowns "
+                f"[phi_I, q_F], {u.n} ({u.n_I} interior potentials, then {u.n_F} flow "
+                f"unknowns{', each a (Re, Im) pair: the real view' if u.w == 2 else ''}); "
+                f"got {got}")
 
     def power_residual(self, phi, q, drivers, sources=None):
         """Tellegen's power identity, zero at a converged solution.
