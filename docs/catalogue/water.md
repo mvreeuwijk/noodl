@@ -23,14 +23,19 @@ Descriptions of the physical objects a network is built from.
 
 | Name | What it does | How to call it |
 |---|---|---|
-| `Control` | One `LINK <id> OPEN\|CLOSED IF NODE <tank> BELOW\|ABOVE <level>` line. | `Control(link, status, node, test, level)` |
+| `Action` | A `THEN`/`ELSE` action: set `attribute` (`"STATUS"`: a status code, or `"SETTING"`: a number, in SI) of `link` to `value`. | `Action(link, attribute, value)` |
+| `Control` | One line of `[CONTROLS]`: set `link` to `status` (`CLOSED`, `OPEN`, `ACTIVE`) or to a numeric `setting` (exactly one of the two is not `None`) when the trigger holds. | `Control(link, status, setting, trigger, node=None, above=None, value=0.0)` |
+| `Emitter` | An emitter at junction `node`: the outflow is `coefficient * p^n` with `p` the pressure head (m) and `n` `WaterOptions.emitter_exponent`; `coefficient` is in m3/s per m^n. | `Emitter(node, coefficient)` |
+| `EnergyOptions` | `[ENERGY]` defaults: `global_efficiency` (percent), `global_price` ($/kWh) with an optional `global_pattern` and the monthly `demand_charge` ($/kW). Reporting only: none of them changes a head or a flow. | `EnergyOptions(global_efficiency=75.0, global_price=0.0, global_pattern=None, demand_charge=0.0)` |
 | `Junction` | A junction: `elevation` (m) and base `demand` (m3/s, withdrawn), optionally scaled by a time `pattern`. | `Junction(name, elevation, demand=0.0, pattern=None)` |
-| `Pump` | A pump from `u` to `v` on a head-flow `curve` (by name), at relative `speed`. | `Pump(name, u, v, curve, power=None, speed=1.0)` |
+| `Premise` | One `IF`/`AND`/`OR` clause of a rule: `object id attribute relation value`. | `Premise(conjunction, object, id, attribute, relation, value)` |
+| `Pump` | A pump from `u` to `v` on a head-flow `curve` (by name) or at constant `power` (kW), at relative `speed`, optionally varied by `speed_pattern`. | `Pump(name, u, v, curve, power=None, speed=1.0, speed_pattern=None, efficiency_curve=None, price=None, price_pattern=None)` |
 | `Reservoir` | A fixed-head node: total `head` (m), optionally varied by a time `pattern`. | `Reservoir(name, head, pattern=None)` |
-| `Tank` | A cylindrical tank: bottom `elevation`, initial, minimum and maximum water levels and `diameter` (all m); its level is its node's head less its bottom, stepped by the layer's storage (`build_model(tank_scheme=...)`). | `Tank(name, elevation, init_level, min_level, max_level, diameter)` |
+| `Rule` | One `[RULES]` entry: the `premises` (in file order, joined by their conjunctions), the actions when they hold (`then_actions`) and when they do not (`else_actions`). | `Rule(name, premises, then_actions, else_actions, priority=0.0)` |
+| `Tank` | A cylindrical tank: bottom `elevation`, initial, minimum and maximum water levels and `diameter` (all m); its level is its node's head less its bottom, stepped by the layer's storage (`build_model(tank_scheme=...)`). | `Tank(name, elevation, init_level, min_level, max_level, diameter, volume_curve=None, overflow=False)` |
 | `Valve` | A valve from `u` to `v`: `diameter` (m), EPANET `kind` (for example `TCV`) and its `setting` (TCV: a loss coefficient; FCV: a flow, m3/s; PBV: a head drop, m), with a minor-loss coefficient. A GPV's setting is its head-loss `curve` (a `curves` key). | `Valve(name, u, v, diameter, kind, setting, minor_loss=0.0, curve=None)` |
-| `WaterNetwork` | A pressurised distribution network, in SI, with everything the builder needs. | `WaterNetwork(junctions, reservoirs=(), tanks=(), pipes=(), pumps=(), valves=(), curves=<factory>, patterns=<factory>, controls=(), demand_pattern=None, pattern_timestep=3600.0, hydraulic_timestep=3600.0, report_timestep=3600.0, duration=0.0, headloss='H-W', options=<factory>, notes=<factory>)` |
-| `WaterOptions` | `[OPTIONS]` keys that change the physics, with EPANET 2.2's own defaults. | `WaterOptions(demand_model='DDA', minimum_pressure=0.0, required_pressure=0.1, pressure_exponent=0.5, specific_gravity=1.0, viscosity=1.0, flow_units=None)` |
+| `WaterNetwork` | A pressurised distribution network, in SI, with everything the builder needs. | `WaterNetwork(junctions, reservoirs=(), tanks=(), pipes=(), pumps=(), valves=(), curves=<factory>, patterns=<factory>, controls=(), rules=(), emitters=(), initial_status=<factory>, energy=<factory>, demand_pattern=None, pattern_timestep=3600.0, hydraulic_timestep=3600.0, report_timestep=3600.0, duration=0.0, rule_timestep=None, pattern_start=0.0, report_start=0.0, start_clocktime=0.0, headloss='H-W', options=<factory>, notes=<factory>)` |
+| `WaterOptions` | `[OPTIONS]` keys that change the physics, with EPANET 2.2's own defaults. | `WaterOptions(demand_model='DDA', minimum_pressure=0.0, required_pressure=0.1, pressure_exponent=0.5, specific_gravity=1.0, viscosity=1.0, flow_units=None, emitter_exponent=0.5)` |
 | `WaterPipe` | A pipe from `u` to `v`: `length` and `diameter` (m), `roughness` (in the network's head-loss formula's units), a minor-loss coefficient and its `status`. | `WaterPipe(name, u, v, length, diameter, roughness, minor_loss=0.0, status='OPEN')` |
 
 ## Constitutive laws
@@ -96,8 +101,11 @@ Named values and option tables.
 
 | Name | Value |
 |---|---|
+| `ACTIVE` | `2` |
+| `CLOSED` | `0` |
 | `DW_SI` | `0.0826` |
 | `EPANET_QCF` | table of 10 entries: `CFS`, `GPM`, `MGD`, `IMGD`, `AFD`, `LPS`, `LPM`, `MLD`, ... |
 | `FLOW_UNITS` | table of 10 entries: `CFS`, `GPM`, `MGD`, `IMGD`, `AFD`, `LPS`, `LPM`, `MLD`, ... |
 | `G` | `9.80665` |
 | `HW_SI` | `10.666829500036` |
+| `OPEN` | `1` |

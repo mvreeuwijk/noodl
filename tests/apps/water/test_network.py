@@ -8,9 +8,9 @@ from pathlib import Path
 import pytest
 import torch
 
+from noodl.apps.water.controls import OPEN, Control
 from noodl.apps.water.inp import read_epanet_inp
 from noodl.apps.water.network import (
-    Control,
     Junction,
     Pump,
     Reservoir,
@@ -162,20 +162,20 @@ def test_an_unknown_valve_type_is_refused():
 
 
 def test_an_unmodelled_headloss_formula_is_refused():
-    with pytest.raises(ValueError, match="only H-W and D-W"):
+    with pytest.raises(ValueError, match="C-M"):
         _minimal(headloss="C-M").validate()
 
 
 def test_a_control_on_a_non_tank_is_refused():
     with pytest.raises(ValueError, match="which is not a tank"):
-        _minimal(controls=(Control("PU1", "OPEN", "J1", "BELOW", 1.0),)).validate()
+        _minimal(controls=(Control("P1", OPEN, None, "node", "J1", False, 1.0),)).validate()
 
 
 def test_a_control_on_a_non_pump_is_refused():
     with pytest.raises(ValueError, match="which is not a pump"):
         _minimal(
             tanks=(Tank("T1", 10.0, 5.0, 1.0, 9.0, 3.0),),
-            controls=(Control("P1", "OPEN", "T1", "BELOW", 1.0),),
+            controls=(Control("P1", OPEN, None, "node", "T1", False, 1.0),),
         ).validate()
 
 

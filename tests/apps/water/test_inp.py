@@ -1,11 +1,13 @@
 """The documented EPANET `.inp` subset."""
 
+import dataclasses
 from pathlib import Path
 
 import pytest
 
-from noodl.apps.water.inp import FLOW_UNITS, read_epanet_inp
-from noodl.apps.water.network import twoloop
+from noodl.apps.water.controls import CLOSED, OPEN
+from noodl.apps.water.inp import FLOW_UNITS, PSI_TO_M, read_epanet_inp
+from noodl.apps.water.network import build_model, twoloop
 
 DATA = Path(__file__).resolve().parents[2] / "data" / "water"
 FOOT = 0.3048
@@ -87,10 +89,10 @@ def test_net1_pump_curve_controls_pattern_and_times():
         type(net.pumps[0])("9", "9", "10", "1", None, 1.0),
     )
     assert net.curves["1"] == ((1500 * FLOW_UNITS["GPM"], 250 * FOOT),)
-    assert [(c.link, c.status, c.node, c.test) for c in net.controls] == [
-        ("9", "OPEN", "2", "BELOW"), ("9", "CLOSED", "2", "ABOVE")
+    assert [(c.link, c.status, c.trigger, c.node, c.above) for c in net.controls] == [
+        ("9", OPEN, "node", "2", False), ("9", CLOSED, "node", "2", True)
     ]
-    assert [c.level for c in net.controls] == pytest.approx(
+    assert [c.value for c in net.controls] == pytest.approx(
         [110 * FOOT, 140 * FOOT], rel=1e-15
     )
     assert net.patterns["1"] == (
@@ -119,26 +121,12 @@ def test_an_unknown_flow_unit_is_refused(tmp_path):
         read_epanet_inp(path)
 
 
-def test_chezy_manning_is_refused(tmp_path):
-    path = _edit(tmp_path, "twoloop_si.inp", (" Headloss           \tH-W",
-                                              " Headloss           \tC-M"))
-    with pytest.raises(ValueError, match="only H-W and D-W"):
-        read_epanet_inp(path)
-
-
-def test_a_rules_section_with_content_is_refused(tmp_path):
-    rule = "[RULES]\nRULE 1\nIF TANK T1 LEVEL BELOW 5\nTHEN LINK P1 STATUS IS OPEN"
-    path = _edit(tmp_path, "twoloop_si.inp", ("[RULES]", rule))
-    with pytest.raises(ValueError, match=r"\[RULES\]"):
-        read_epanet_inp(path)
-
-
 def test_an_emitters_section_with_content_is_refused(tmp_path):
     path = _edit(tmp_path, "twoloop_si.inp",
                  ("[EMITTERS]\n;Junction        \tCoefficient",
                   "[EMITTERS]\n;Junction        \tCoefficient\n J1              \t0.5"))
-    with pytest.raises(ValueError, match=r"\[EMITTERS\]"):
-        read_epanet_inp(path)
+    with pytest.raises(ValueError, match="emitters"):
+        read_epanet_inp(path).validate()
 
 
 def test_a_status_section_with_content_is_refused(tmp_path):
@@ -146,7 +134,7 @@ def test_a_status_section_with_content_is_refused(tmp_path):
                  ("[STATUS]\n;ID              \tStatus/Setting",
                   "[STATUS]\n;ID              \tStatus/Setting\n P1              \tClosed"))
     with pytest.raises(ValueError, match=r"\[STATUS\]"):
-        read_epanet_inp(path)
+        read_epanet_inp(path).validate()
 
 
 def test_an_unknown_section_with_content_is_refused(tmp_path):
@@ -159,8 +147,11 @@ def test_an_unknown_section_with_content_is_refused(tmp_path):
 def test_a_time_based_control_is_refused(tmp_path):
     path = _edit(tmp_path, "twoloop_si.inp",
                  ("[CONTROLS]", "[CONTROLS]\n LINK P1 CLOSED AT CLOCKTIME 6 AM"))
-    with pytest.raises(ValueError, match="time-based control"):
-        read_epanet_inp(path)
+    net = read_epanet_inp(path)
+    assert net.controls[0].trigger == "clocktime"
+    assert net.controls[0].value == 6 * 3600.0
+    with pytest.raises(ValueError, match="clock-time control"):
+        net.validate()
 
 
 def test_a_malformed_control_is_refused(tmp_path):
@@ -184,14 +175,18 @@ def test_a_constant_power_pump_is_refused(tmp_path):
                                         "              \tHEAD 1\t;",
                                         " 9               \t9               \t10"
                                         "              \tPOWER 50\t;"))
+    net = read_epanet_inp(path)
+    assert net.pumps[0].power == pytest.approx(50 * 0.745699872, rel=1e-15)
     with pytest.raises(ValueError, match="constant-POWER pump"):
-        read_epanet_inp(path)
+        net.validate()
 
 
 def test_a_speed_patterned_pump_is_refused(tmp_path):
     path = _edit(tmp_path, "Net1.inp", ("\tHEAD 1\t;", "\tHEAD 1 PATTERN 1\t;"))
+    net = read_epanet_inp(path)
+    assert net.pumps[0].speed_pattern == "1"
     with pytest.raises(ValueError, match="SPEED PATTERN"):
-        read_epanet_inp(path)
+        net.validate()
 
 
 def test_an_unknown_pump_keyword_is_refused(tmp_path):
@@ -207,9 +202,12 @@ def test_a_tank_with_a_volume_curve_is_refused(tmp_path):
          "\t50.5        \t0           \t                \t;",
          " 2               \t850         \t120         \t100         \t150         "
          "\t50.5        \t0           \tVC1             \t;"),
+        ("[CURVES]", "[CURVES]\n VC1 0 0\n VC1 100 5000"),
     )
+    net = read_epanet_inp(path)
+    assert net.tanks[0].volume_curve == "VC1"
     with pytest.raises(ValueError, match="volume curve"):
-        read_epanet_inp(path)
+        net.validate()
 
 
 def test_a_demand_for_an_unknown_junction_is_refused(tmp_path):
@@ -435,3 +433,291 @@ def test_explicit_time_units_are_honoured(tmp_path, text, seconds):
 def test_an_unknown_time_unit_is_refused(tmp_path, unit):
     with pytest.raises(ValueError, match="unknown time unit"):
         _times(tmp_path, f"Duration 30 {unit}")
+
+
+# ------------------------------------------------- every EPANET 2.2 hydraulic section
+def _wntr_network(*parts):
+    wntr = pytest.importorskip("wntr")
+    return Path(wntr.__file__).parent.joinpath(*parts)
+
+
+def test_net3_reads_status_time_controls_and_clock():
+    net = read_epanet_inp(_wntr_network("library", "networks", "Net3.inp"))
+    assert net.initial_status["10"] == "CLOSED"
+    timed = [c for c in net.controls if c.trigger == "time"]
+    assert len(timed) == 14
+    assert (timed[0].link, timed[0].status, timed[0].value) == ("10", OPEN, 3600.0)
+    assert timed[1].status == CLOSED
+    assert timed[1].value == 15 * 3600.0
+    assert net.start_clocktime == 0.0
+    assert net.duration == 168 * 3600
+    # the four tank-level controls are read as before, in metres (Net3 is a GPM file)
+    tank_level = [c for c in net.controls if c.trigger == "node"]
+    assert [(c.link, c.node, c.above) for c in tank_level] == [
+        ("335", "1", False), ("335", "1", True), ("330", "1", False), ("330", "1", True)
+    ]
+    assert tank_level[0].value == pytest.approx(17.1 * FOOT, rel=1e-15)
+    # validate() refuses one feature at a time, in the order below
+    with pytest.raises(ValueError, match="status CLOSED"):
+        net.validate()
+    net = dataclasses.replace(
+        net, pipes=tuple(dataclasses.replace(p, status="OPEN") for p in net.pipes)
+    )
+    with pytest.raises(ValueError, match=r"\[STATUS\]"):
+        net.validate()
+    with pytest.raises(ValueError, match="time-based control"):
+        dataclasses.replace(net, initial_status={}).validate()
+
+
+def test_net6_reads_prv_cv_and_power_pump():
+    net = read_epanet_inp(_wntr_network("library", "networks", "Net6.inp"))
+    prvs = [v for v in net.valves if v.kind == "PRV"]
+    assert len(prvs) == 2
+    # PRV setting 50 psi -> metres of head, as every other US pressure
+    assert prvs[0].setting == pytest.approx(50 * PSI_TO_M, rel=1e-15)
+    assert [p.status for p in net.pipes].count("CV") == 1
+    powered = [p for p in net.pumps if p.power is not None]
+    assert len(powered) == 1
+    assert powered[0].curve is None
+    assert powered[0].power == pytest.approx(15 * 0.745699872, rel=1e-12)  # hp -> kW
+    with pytest.raises(ValueError, match="status CV"):
+        net.validate()
+
+
+def test_ky10_reads_constant_power_pumps_in_kilowatts_and_the_energy_pattern():
+    net = read_epanet_inp(_wntr_network("library", "networks", "ky10.inp"))
+    assert all(p.power is not None for p in net.pumps)
+    assert min(p.power for p in net.pumps) == pytest.approx(5 * 0.745699872, rel=1e-12)
+    assert net.energy.global_pattern == "ENRG1"
+
+
+def test_anytown_reads_speed_patterns_and_efficiency_curves():
+    net = read_epanet_inp(_wntr_network("tests", "networks_for_testing", "Anytown.inp"))
+    pumps = {p.name: p for p in net.pumps}
+    assert [pumps[name].speed_pattern for name in ("78", "79", "80")] == ["2", "3", "4"]
+    assert all(pumps[name].efficiency_curve == "E1" for name in ("78", "79", "80"))
+    assert [y for _, y in net.curves["E1"]] == [0.0, 50.0, 65.0, 55.0, 40.0]
+    assert [x for x, _ in net.curves["E1"]] == pytest.approx(
+        [v * FLOW_UNITS["GPM"] for v in (0, 2000, 4000, 6000, 8000)], rel=1e-15
+    )
+    # the same file's head curve is converted as (flow, length)
+    assert net.curves["2"][0][1] == pytest.approx(300 * FOOT, rel=1e-15)
+    assert net.start_clocktime == 18 * 3600.0
+    assert net.rule_timestep == net.hydraulic_timestep / 10
+    with pytest.raises(ValueError, match="speed pattern"):
+        net.validate()
+
+
+def test_a_curve_used_as_head_and_volume_is_refused(tmp_path):
+    path = _edit(
+        tmp_path, "Net1.inp",
+        (" 2               \t850         \t120         \t100         \t150         "
+         "\t50.5        \t0           \t                \t;",
+         " 2               \t850         \t120         \t100         \t150         "
+         "\t50.5        \t0           \t1               \t;"),
+    )
+    with pytest.raises(ValueError, match="curve '1'"):
+        read_epanet_inp(path)
+
+
+def test_a_volume_curve_is_converted_to_metres_and_cubic_metres(tmp_path):
+    path = _edit(
+        tmp_path, "Net1.inp",
+        (" 2               \t850         \t120         \t100         \t150         "
+         "\t50.5        \t0           \t                \t;",
+         " 2               \t850         \t120         \t100         \t150         "
+         "\t0           \t0           \tVC1             \tYES"),
+        ("[CURVES]", "[CURVES]\n VC1 100 1000\n VC1 150 3000"),
+    )
+    net = read_epanet_inp(path)
+    tank = net.tanks[0]
+    assert (tank.volume_curve, tank.overflow) == ("VC1", True)
+    assert net.curves["VC1"] == ((100 * FOOT, 1000 * FOOT**3), (150 * FOOT, 3000 * FOOT**3))
+    with pytest.raises(ValueError, match="volume curve"):
+        net.validate()
+
+
+def test_a_tank_overflow_flag_is_refused_by_validate(tmp_path):
+    path = _edit(
+        tmp_path, "Net1.inp",
+        (" 2               \t850         \t120         \t100         \t150         "
+         "\t50.5        \t0           \t                \t;",
+         " 2               \t850         \t120         \t100         \t150         "
+         "\t50.5        \t0           \t*               \tYES"),
+    )
+    net = read_epanet_inp(path)
+    assert net.tanks[0].volume_curve is None
+    assert net.tanks[0].overflow is True
+    with pytest.raises(ValueError, match="overflow"):
+        net.validate()
+
+
+RULES = """[RULES]
+RULE R1
+IF NODE J1 PRESSURE ABOVE 20
+AND LINK P2 STATUS IS OPEN
+OR SYSTEM CLOCKTIME >= 8 PM
+THEN LINK P3 STATUS IS CLOSED
+AND LINK P4 STATUS IS CLOSED
+ELSE LINK P3 STATUS IS OPEN
+PRIORITY 2
+
+RULE R2
+IF SYSTEM TIME BELOW 6
+THEN LINK P5 STATUS IS CLOSED
+
+[CURVES]"""
+
+
+def test_rules_are_parsed(tmp_path):
+    path = _edit(tmp_path, "twoloop_si.inp", ("[CURVES]", RULES))
+    net = read_epanet_inp(path)
+    first, second = net.rules
+    assert (first.name, first.priority) == ("R1", 2.0)
+    assert [(p.conjunction, p.object, p.id, p.attribute, p.relation, p.value)
+            for p in first.premises] == [
+        ("IF", "NODE", "J1", "PRESSURE", ">", 20.0),
+        ("AND", "LINK", "P2", "STATUS", "=", float(OPEN)),
+        ("OR", "SYSTEM", "", "CLOCKTIME", ">=", 20 * 3600.0),
+    ]
+    assert [(a.link, a.attribute, a.value) for a in first.then_actions] == [
+        ("P3", "STATUS", float(CLOSED)), ("P4", "STATUS", float(CLOSED))
+    ]
+    assert [(a.link, a.attribute, a.value) for a in first.else_actions] == [
+        ("P3", "STATUS", float(OPEN))
+    ]
+    assert second.priority == 0.0
+    assert second.premises[0].value == 6 * 3600.0
+    assert second.premises[0].relation == "<"
+    with pytest.raises(ValueError, match=r"\[RULES\]"):
+        net.validate()
+
+
+def test_a_rule_naming_an_unknown_link_is_refused(tmp_path):
+    path = _edit(tmp_path, "twoloop_si.inp",
+                 ("[CURVES]", "[RULES]\nRULE R\nIF SYSTEM TIME > 1\n"
+                              "THEN LINK NOPE STATUS IS OPEN\n\n[CURVES]"))
+    with pytest.raises(ValueError, match="NOPE"):
+        read_epanet_inp(path)
+
+
+def test_emitters_are_converted(tmp_path):
+    path = _edit(tmp_path, "Net1.inp", ("[CURVES]", "[EMITTERS]\n 10 1.0\n\n[CURVES]"))
+    net = read_epanet_inp(path)
+    (emitter,) = net.emitters
+    assert emitter.node == "10"
+    assert emitter.coefficient == pytest.approx(6.309019640343977e-05 / PSI_TO_M**0.5, rel=1e-15)
+    assert net.options.emitter_exponent == 0.5
+    with pytest.raises(ValueError, match="emitters"):
+        net.validate()
+
+
+def test_an_si_emitter_is_only_converted_by_the_flow_unit(tmp_path):
+    path = _edit(tmp_path, "twoloop_si.inp",
+                 (" Emitter Exponent   	0.5", " Emitter Exponent   	0.6"),
+                 ("[CURVES]", "[EMITTERS]\n J2 2.0\n\n[CURVES]"))
+    net = read_epanet_inp(path)
+    assert net.emitters[0].coefficient == pytest.approx(2.0e-3, rel=1e-15)
+    assert net.options.emitter_exponent == 0.6
+
+
+def test_an_emitter_at_a_non_junction_is_refused(tmp_path):
+    path = _edit(tmp_path, "twoloop_si.inp", ("[CURVES]", "[EMITTERS]\n R1 2.0\n\n[CURVES]"))
+    with pytest.raises(ValueError, match="not a junction"):
+        read_epanet_inp(path)
+
+
+def test_the_chezy_manning_headloss_is_read_and_refused_by_validate(tmp_path):
+    path = _edit(tmp_path, "twoloop_si.inp",
+                 (" Headloss           \tH-W", " Headloss           \tC-M"))
+    net = read_epanet_inp(path)
+    assert net.headloss == "C-M"
+    with pytest.raises(ValueError, match="C-M"):
+        net.validate()
+    with pytest.raises(ValueError, match="C-M"):
+        build_model(net)
+
+
+@pytest.mark.parametrize(
+    ("text", "seconds"),
+    [("12 am", 0.0), ("12 AM", 0.0), ("12 pm", 12 * 3600.0), ("6:30 PM", 18.5 * 3600.0),
+     ("18", 18 * 3600.0), ("1:15:30 am", 4530.0), ("0", 0.0)],
+)
+def test_start_clocktime_reads_am_pm_and_the_24_hour_clock(tmp_path, text, seconds):
+    assert _times(tmp_path, f"Start ClockTime {text}").start_clocktime == seconds
+
+
+def test_the_other_time_options_are_read(tmp_path):
+    net = _times(tmp_path, "Hydraulic Timestep 1\nRule Timestep 0:05\nPattern Start 2\n"
+                           "Report Start 3:30")
+    assert net.rule_timestep == 300.0
+    assert net.pattern_start == 7200.0
+    assert net.report_start == 12600.0
+    assert _times(tmp_path, "Hydraulic Timestep 1").rule_timestep == 360.0
+
+
+def test_every_control_form_is_read(tmp_path):
+    text = (" LINK 9 CLOSED AT CLOCKTIME 6:30 PM\n LINK 9 OPEN AT TIME 1:30\n"
+            " LINK 9 0.5 AT TIME 2\n LINK 9 0.8 IF NODE 2 ABOVE 140")
+    net = read_epanet_inp(_edit(tmp_path, "Net1.inp", ("[CONTROLS]", "[CONTROLS]\n" + text)))
+    clock, timed, speed_timed, speed_level = net.controls[:4]
+    assert (clock.trigger, clock.status, clock.setting, clock.value) == (
+        "clocktime", CLOSED, None, 18.5 * 3600.0
+    )
+    assert (timed.trigger, timed.status, timed.value) == ("time", OPEN, 5400.0)
+    assert (speed_timed.status, speed_timed.setting, speed_timed.value) == (None, 0.5, 7200.0)
+    assert (speed_level.trigger, speed_level.node, speed_level.above, speed_level.setting) == (
+        "node", "2", True, 0.8
+    )
+    assert speed_level.value == pytest.approx(140 * FOOT, rel=1e-15)
+    with pytest.raises(ValueError, match="clock-time control"):
+        net.validate()
+
+
+def test_a_junction_pressure_control_is_converted_from_psi_and_refused(tmp_path):
+    path = _edit(tmp_path, "Net1.inp",
+                 ("[CONTROLS]", "[CONTROLS]\n LINK 9 OPEN IF NODE 10 BELOW 30"))
+    net = read_epanet_inp(path)
+    assert net.controls[0].value == pytest.approx(30 * PSI_TO_M, rel=1e-15)
+    with pytest.raises(ValueError, match="not a tank"):
+        net.validate()
+
+
+def test_a_numeric_setting_on_a_pipe_is_refused(tmp_path):
+    path = _edit(tmp_path, "twoloop_si.inp",
+                 ("[CONTROLS]", "[CONTROLS]\n LINK P1 0.5 AT TIME 2"))
+    with pytest.raises(ValueError, match="no meaning"):
+        read_epanet_inp(path)
+
+
+def test_a_status_line_reads_a_word_or_a_setting_in_si(tmp_path):
+    path = _edit(tmp_path, "Net1.inp", ("[CURVES]", "[STATUS]\n 9 0.7\n 10 Closed\n\n[CURVES]"))
+    net = read_epanet_inp(path)
+    assert net.initial_status == {"9": 0.7, "10": "CLOSED"}
+    with pytest.raises(ValueError, match=r"\[STATUS\]"):
+        net.validate()
+
+
+def test_energy_options_and_pump_overrides_are_read(tmp_path):
+    path = _edit(tmp_path, "Net1.inp",
+                 ("[CURVES]", "[CURVES]\n E1 1500 60\n"),
+                 ("[END]", "[ENERGY]\n Global Efficiency 70\n Global Price 0.12\n"
+                           " Global Pattern 1\n Demand Charge 4\n Pump 9 Efficiency E1\n"
+                           " Pump 9 Price 0.2\n Pump 9 Pattern 1\n\n[END]"))
+    net = read_epanet_inp(path)
+    assert (net.energy.global_efficiency, net.energy.global_price,
+            net.energy.global_pattern, net.energy.demand_charge) == (70.0, 0.12, "1", 4.0)
+    pump = net.pumps[0]
+    assert (pump.efficiency_curve, pump.price, pump.price_pattern) == ("E1", 0.2, "1")
+    assert net.curves["E1"] == ((1500 * FLOW_UNITS["GPM"], 60.0),)
+    net.validate()  # energy data is reporting only: it is never refused
+
+
+def test_a_check_valve_pipe_is_read_and_refused_by_validate(tmp_path):
+    cv = read_epanet_inp(_edit(
+        tmp_path, "twoloop_si.inp",
+        ("130         \t0           \tOpen", "130         \t0           \tCV"),
+    ))
+    assert cv.pipes[0].status == "CV"
+    with pytest.raises(ValueError, match="check valve"):
+        cv.validate()

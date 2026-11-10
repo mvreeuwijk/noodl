@@ -5,25 +5,38 @@ distribution](../applications/water.md). It shares its lexical tokenizer
 (`noodl.apps.inpfile`) with the SWMM reader; each format's own section names, column layouts and
 units are read by `apps/water/inp.py`.
 
-**Read:** `[JUNCTIONS]`, `[RESERVOIRS]`, `[TANKS]`, `[PIPES]`, `[PUMPS]`, `[VALVES]`,
-`[DEMANDS]`, `[PATTERNS]`, `[CURVES]`, `[CONTROLS]`, `[OPTIONS]`, `[TIMES]`.
+**Read:** `[JUNCTIONS]`, `[RESERVOIRS]`, `[TANKS]` (with a volume curve and the overflow flag),
+`[PIPES]` (with their `OPEN`, `CLOSED` or `CV` status), `[PUMPS]` (`HEAD`, `POWER`, `SPEED` and
+`PATTERN`), `[VALVES]` (every type, PRV and PSV included), `[DEMANDS]`, `[PATTERNS]`, `[CURVES]`,
+`[CONTROLS]` (every form: `AT TIME`, `AT CLOCKTIME`, `IF NODE`), `[RULES]`, `[STATUS]`,
+`[EMITTERS]`, `[ENERGY]`, `[OPTIONS]` (including `EMITTER EXPONENT` and `HEADLOSS C-M`) and
+`[TIMES]` (including `RULE TIMESTEP`, `PATTERN START`, `REPORT START` and `START CLOCKTIME`, which
+reads `12 am`, `6:30 PM` and `18`).
 
 **Ignored** because nothing in the hydraulics references them: `[TITLE]`, `[REPORT]`,
-`[COORDINATES]`, `[VERTICES]`, `[LABELS]`, `[BACKDROP]`, `[TAGS]`, `[ENERGY]`, `[END]`, and the
+`[COORDINATES]`, `[VERTICES]`, `[LABELS]`, `[BACKDROP]`, `[TAGS]`, `[END]`, and the
 quality sections (a quality run is configured through `build_model(quality=...)` instead).
+`[ENERGY]` is read but only reports: it changes no head or flow.
 
 **Aggregated / interpreted:** several `[DEMANDS]` categories of one junction add up (they replace
 the `[JUNCTIONS]` demand); categories with different patterns are refused (a category with no pattern uses the default pattern, so it equals one naming that default explicitly), since one demand pattern
 per junction is modelled. `[TIMES]` values take an optional unit (any token beginning SEC, MIN, HOU or DAY,
 case-insensitive, as EPANET reads it: MINS, SECS, HOU; a bare number is hours, `HH:MM[:SS]` is a clock time); other units are refused.
 
-**Refused by name:** `[RULES]`; `[EMITTERS]`; `[STATUS]` with content; time-based controls (only
-`LINK <id> OPEN|CLOSED IF NODE <tank> BELOW|ABOVE <level>` is read); PRV and PSV valves;
-a constant-**power** pump; a pump with a speed pattern; a tank with a volume curve; a `HEADLOSS`
-other than H-W or D-W; a closed pipe or check valve.
+**Curves by role.** `[CURVES]` has no type of its own, so each curve is converted by the role
+that uses it: a pump head or GPV head-loss curve (flow, length), a pump efficiency curve (flow,
+percent, kept as written) or a tank volume curve (length, volume). A curve used in two roles
+with different units is refused by name when the file is read.
 
-A constant-power pump is refused with a specific reason: the head-flow relation EPANET uses
-internally for one is not stated in the manual, so implementing it would be a guess.
+**Read, then refused by name.** The reader converts every feature above to SI, and
+`WaterNetwork.validate()` (called by `build_model`) refuses, naming the feature, each one the
+builder does not model yet, so a file never loads into a network that quietly means something
+else: PRV and PSV valves; a closed pipe or check valve; `[STATUS]` entries; a constant-**power**
+pump (its power is read in kW: horsepower in a US file, kilowatts in an SI one); a curve of more than
+three points; a pump speed pattern; a tank volume curve or overflow; emitters; `HEADLOSS C-M`;
+rules; and every `[CONTROLS]` form except
+`LINK <pump> OPEN|CLOSED IF NODE <tank> BELOW|ABOVE <level>`. The reader itself refuses what it
+cannot read: a malformed record or a name that is not in the network.
 
 **Units** follow `[OPTIONS] UNITS`: `CFS GPM MGD IMGD AFD` are US, `LPS LPM MLD CMH CMD` are SI,
 and everything is converted to SI on read. D-W roughness is millimetres (SI) or millifeet (US).

@@ -21,6 +21,7 @@ from dataclasses import dataclass, field
 
 import torch
 
+from noodl.apps.water.controls import Control, Rule
 from noodl.apps.water.demand import PressureDrivenDemand
 from noodl.apps.water.elements import (
     CBIG_FT_PER_CFS,
@@ -39,7 +40,7 @@ from noodl.apps.water.elements import (
     epanet_minor_coefficient,
     three_point_curve,
 )
-from noodl.apps.water.tanks import Control, TankLevels, TankStorageControls
+from noodl.apps.water.tanks import TankLevels, TankStorageControls
 from noodl.elements.duct import Duct
 from noodl.elements.fixed import FixedFlow
 from noodl.layers.kirchhoff import KirchhoffLayer
@@ -85,6 +86,9 @@ class WaterOptions:
     `flow_units` is the `.inp` file's `[OPTIONS] UNITS` (`None` for a network built by
     hand). It changes nothing physical: the EPANET-exact Darcy-Weisbach law uses it only to
     reproduce EPANET's own ROUNDED conversion of that unit to cfs (`EPANET_QCF`).
+
+    `emitter_exponent` is the exponent `n` of every emitter's `q = C p^n` (`[OPTIONS]
+    EMITTER EXPONENT`, EPANET's default 0.5).
     """
 
     demand_model: str = "DDA"
@@ -94,6 +98,7 @@ class WaterOptions:
     specific_gravity: float = 1.0
     viscosity: float = 1.0
     flow_units: str | None = None
+    emitter_exponent: float = 0.5
 
 
 @dataclass(frozen=True)
@@ -120,7 +125,10 @@ class Reservoir:
 class Tank:
     """A cylindrical tank: bottom `elevation`, initial, minimum and maximum water
     levels and `diameter` (all m); its level is its node's head less its bottom, stepped
-    by the layer's storage (`build_model(tank_scheme=...)`)."""
+    by the layer's storage (`build_model(tank_scheme=...)`).
+
+    `volume_curve` names a `curves` entry (level m, volume m3) when the tank is not a cylinder,
+    and `overflow` says the tank may spill when full (`[TANKS] Overflow YES`)."""
 
     name: str
     elevation: float
@@ -128,6 +136,8 @@ class Tank:
     min_level: float
     max_level: float
     diameter: float
+    volume_curve: str | None = None
+    overflow: bool = False
 
 
 @dataclass(frozen=True)
@@ -147,7 +157,12 @@ class WaterPipe:
 
 @dataclass(frozen=True)
 class Pump:
-    """A pump from `u` to `v` on a head-flow `curve` (by name), at relative `speed`."""
+    """A pump from `u` to `v` on a head-flow `curve` (by name) or at constant `power` (kW),
+    at relative `speed`, optionally varied by `speed_pattern`.
+
+    `efficiency_curve` (a `curves` entry, flow m3/s against percent), `price` ($/kWh) and
+    `price_pattern` come from `[ENERGY]` and are `None` when the file gives none (the
+    network's `energy` then applies); they do not enter the hydraulics."""
 
     name: str
     u: str
@@ -155,6 +170,10 @@ class Pump:
     curve: str | None
     power: float | None = None
     speed: float = 1.0
+    speed_pattern: str | None = None
+    efficiency_curve: str | None = None
+    price: float | None = None
+    price_pattern: str | None = None
 
 
 @dataclass(frozen=True)
@@ -174,6 +193,28 @@ class Valve:
 
 
 @dataclass(frozen=True)
+class Emitter:
+    """An emitter at junction `node`: the outflow is `coefficient * p^n` with `p` the
+    pressure head (m) and `n` `WaterOptions.emitter_exponent`; `coefficient` is in m3/s per
+    m^n."""
+
+    node: str
+    coefficient: float
+
+
+@dataclass(frozen=True)
+class EnergyOptions:
+    """`[ENERGY]` defaults: `global_efficiency` (percent), `global_price` ($/kWh) with an
+    optional `global_pattern` and the monthly `demand_charge` ($/kW). Reporting only: none
+    of them changes a head or a flow."""
+
+    global_efficiency: float = 75.0
+    global_price: float = 0.0
+    global_pattern: str | None = None
+    demand_charge: float = 0.0
+
+
+@dataclass(frozen=True)
 class WaterNetwork:
     """A pressurised distribution network, in SI, with everything the builder needs."""
 
@@ -186,14 +227,27 @@ class WaterNetwork:
     curves: dict[str, tuple[tuple[float, float], ...]] = field(default_factory=dict)
     patterns: dict[str, tuple[float, ...]] = field(default_factory=dict)
     controls: tuple[Control, ...] = ()
+    rules: tuple[Rule, ...] = ()
+    emitters: tuple[Emitter, ...] = ()
+    initial_status: dict[str, str | float] = field(default_factory=dict)
+    energy: EnergyOptions = field(default_factory=EnergyOptions)
     demand_pattern: str | None = None
     pattern_timestep: float = 3600.0
     hydraulic_timestep: float = 3600.0
     report_timestep: float = 3600.0
     duration: float = 0.0
+    rule_timestep: float | None = None
+    pattern_start: float = 0.0
+    report_start: float = 0.0
+    start_clocktime: float = 0.0
     headloss: str = "H-W"
     options: WaterOptions = field(default_factory=WaterOptions)
     notes: dict[str, str] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        # EPANET's default `[TIMES] RULE TIMESTEP` is a tenth of the hydraulic step.
+        if self.rule_timestep is None:
+            object.__setattr__(self, "rule_timestep", self.hydraulic_timestep / 10.0)
 
     def nodes(self) -> list[str]:
         """Node names in the builder's own order: junctions, reservoirs, tanks."""
@@ -212,8 +266,16 @@ class WaterNetwork:
         """The valves of EPANET type `kind`, in file order."""
         return [v for v in self.valves if v.kind.upper() == kind]
 
-    def validate(self) -> None:
-        """Refuse, BY NAME, everything this application does not model."""
+    def _all_links(self) -> list:
+        """Every link by name, including the valve kinds this application refuses."""
+        modelled = {id(v) for v in self.links()}
+        return [*self.links(), *(v for v in self.valves if id(v) not in modelled)]
+
+    def check(self) -> None:
+        """Refuse a network that is malformed, whatever it models: a duplicate name, no
+        fixed-head node, a link, control, status, emitter that names something that
+        is not there, a pipe without a positive size. The reader calls this; `validate`
+        calls it first and then refuses, BY NAME, each feature not yet modelled."""
         names = self.nodes()
         seen: set[str] = set()
         for name in names:
@@ -227,7 +289,7 @@ class WaterNetwork:
                 "fixed-head node too"
             )
         link_names: set[str] = set()
-        for link in self.links():
+        for link in self._all_links():
             if link.name in link_names:
                 raise ValueError(f"WaterNetwork: duplicate link name {link.name!r}")
             link_names.add(link.name)
@@ -244,19 +306,75 @@ class WaterNetwork:
                     f"and roughness, got {pipe.length!r}, {pipe.diameter!r}, "
                     f"{pipe.roughness!r}"
                 )
-            status = pipe.status.upper()
-            if status not in ("OPEN", "CLOSED", "CV"):
+            if pipe.status.upper() not in ("OPEN", "CLOSED", "CV"):
                 raise ValueError(
                     f"WaterNetwork: pipe {pipe.name!r} has status {pipe.status!r}; only "
                     f"OPEN, CLOSED and CV appear in the format"
                 )
+        for name in self.initial_status:
+            if name not in link_names:
+                raise ValueError(f"WaterNetwork: [STATUS] names {name!r}, which is not a link")
+        junction_names = {j.name for j in self.junctions}
+        for emitter in self.emitters:
+            if emitter.node not in junction_names:
+                raise ValueError(
+                    f"WaterNetwork: emitter at {emitter.node!r}, which is not a junction"
+                )
+        for control in self.controls:
+            if control.link not in link_names:
+                raise ValueError(
+                    f"WaterNetwork: control names link {control.link!r}, which is not a link"
+                )
+            if control.trigger == "node" and control.node not in seen:
+                raise ValueError(
+                    f"WaterNetwork: control on link {control.link!r} tests node "
+                    f"{control.node!r}, which is not a node"
+                )
+
+    def validate(self) -> None:
+        """Refuse, BY NAME, everything this application does not model."""
+        self.check()
+        for pipe in self.pipes:
+            status = pipe.status.upper()
             if status != "OPEN":
                 raise ValueError(
                     f"WaterNetwork: pipe {pipe.name!r} has status {status}; a closed pipe "
                     f"and a check valve are both status-switching devices and are out of "
                     f"scope"
                 )
+        if self.initial_status:
+            raise ValueError(
+                f"WaterNetwork: [STATUS] sets the initial status or setting of "
+                f"{sorted(self.initial_status)}; initial link statuses are out of scope"
+            )
+        for tank in self.tanks:
+            if tank.volume_curve is not None:
+                raise ValueError(
+                    f"WaterNetwork: tank {tank.name!r} has the volume curve "
+                    f"{tank.volume_curve!r}; only cylindrical tanks are modelled"
+                )
+            if tank.overflow:
+                raise ValueError(
+                    f"WaterNetwork: tank {tank.name!r} has overflow allowed; tank overflow "
+                    f"is out of scope"
+                )
+        if self.emitters:
+            raise ValueError(
+                f"WaterNetwork: [EMITTERS] at {[e.node for e in self.emitters]}; emitters "
+                f"are out of scope"
+            )
+        if self.rules:
+            raise ValueError(
+                f"WaterNetwork: [RULES] {[r.name for r in self.rules]}; rule-based "
+                f"controls are out of scope"
+            )
         for pump in self.pumps:
+            if pump.speed_pattern is not None:
+                raise ValueError(
+                    f"WaterNetwork: pump {pump.name!r} has the speed pattern "
+                    f"{pump.speed_pattern!r}; variable-speed pumps (SPEED PATTERN) are out "
+                    f"of scope"
+                )
             if pump.power is not None:
                 raise ValueError(
                     f"WaterNetwork: pump {pump.name!r} is a constant-POWER pump; the "
@@ -326,7 +444,7 @@ class WaterNetwork:
         if self.headloss not in ("H-W", "D-W"):
             raise ValueError(
                 f"WaterNetwork: headloss {self.headloss!r}; only H-W and D-W are modelled "
-                f"(Chezy-Manning's SI constant is UNVERIFIED)"
+                f"(C-M, Chezy-Manning, is out of scope)"
             )
         if self.options.demand_model not in ("DDA", "PDA"):
             raise ValueError(
@@ -336,15 +454,32 @@ class WaterNetwork:
         tank_names = {t.name for t in self.tanks}
         pump_names = {p.name for p in self.pumps}
         for control in self.controls:
+            if control.trigger == "time":
+                raise ValueError(
+                    f"WaterNetwork: a time-based control on link {control.link!r} "
+                    f"(AT TIME); time-based controls are out of scope"
+                )
+            if control.trigger == "clocktime":
+                raise ValueError(
+                    f"WaterNetwork: a clock-time control on link {control.link!r} "
+                    f"(AT CLOCKTIME); clock-time controls are out of scope"
+                )
             if control.node not in tank_names:
                 raise ValueError(
                     f"WaterNetwork: control on link {control.link!r} tests node "
-                    f"{control.node!r}, which is not a tank"
+                    f"{control.node!r}, which is not a tank; junction-pressure and "
+                    f"reservoir-head controls are out of scope"
                 )
             if control.link not in pump_names:
                 raise ValueError(
                     f"WaterNetwork: control names link {control.link!r}, which is not a "
-                    f"pump; pipe controls are not implemented"
+                    f"pump; pipe and valve controls are not implemented"
+                )
+            if control.setting is not None:
+                raise ValueError(
+                    f"WaterNetwork: control on link {control.link!r} sets the numeric "
+                    f"setting {control.setting!r}; setting controls (a pump speed or a "
+                    f"valve setting) are out of scope"
                 )
 
 

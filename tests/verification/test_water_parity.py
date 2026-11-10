@@ -162,10 +162,10 @@ def test_the_reader_converts_net1_gpm_and_feet(tmp_path):
     assert tank.init_level == pytest.approx(120 * 0.3048, rel=1e-15)
     assert tank.diameter == pytest.approx(50.5 * 0.3048, rel=1e-15)
     assert net.curves["1"] == ((1500 * 3.785411784e-3 / 60.0, 250 * 0.3048),)
-    assert [(c.link, c.status, c.node, c.test) for c in net.controls] == [
-        ("9", "OPEN", "2", "BELOW"), ("9", "CLOSED", "2", "ABOVE")
+    assert [(c.link, c.status, c.trigger, c.node, c.above) for c in net.controls] == [
+        ("9", 1, "node", "2", False), ("9", 0, "node", "2", True)
     ]
-    assert [c.level for c in net.controls] == pytest.approx(
+    assert [c.value for c in net.controls] == pytest.approx(
         [110 * 0.3048, 140 * 0.3048], rel=1e-15
     )
     assert net.patterns["1"] == (1.0, 1.2, 1.4, 1.6, 1.4, 1.2,

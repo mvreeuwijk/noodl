@@ -9,6 +9,7 @@ import pytest
 import torch
 
 from noodl import Model
+from noodl.apps.water.controls import CLOSED, OPEN, Control
 from noodl.apps.water.inp import read_epanet_inp
 from noodl.apps.water.network import (
     Tank,
@@ -19,7 +20,7 @@ from noodl.apps.water.network import (
     water_event_step,
     water_step,
 )
-from noodl.apps.water.tanks import Control, TankLevels
+from noodl.apps.water.tanks import TankLevels
 from noodl.elements.base import LawContext
 from noodl.storage import LinearStorage
 
@@ -39,6 +40,11 @@ def _two_tank_closure(controls):
     )
 
 
+def _control(link, status, node, above, value):
+    """A tank-level control: `LINK <link> <status> IF NODE <node> ABOVE|BELOW <value>`."""
+    return Control(link, status, None, "node", node, above, value)
+
+
 def test_event_step_tests_each_control_against_its_own_tank():
     """`TankLevels.event_step` must not test EVERY control against tank 0's level and
     rate, whichever tank the control actually names. Here the control names "TB",
@@ -49,7 +55,7 @@ def test_event_step_tests_each_control_against_its_own_tank():
     wrongly shortened the step to about 0.01 s.
     """
     closure = _two_tank_closure(
-        (Control("P1", "CLOSED", "TB", "ABOVE", 10.0),)
+        (_control("P1", CLOSED, "TB", True, 10.0),)
     )
     level = torch.tensor([9.99, 5.0], dtype=F64)
     rate = torch.tensor([1.0, 1e-3], dtype=F64)
@@ -60,7 +66,7 @@ def test_event_step_shortens_to_the_named_tanks_own_crossing():
     """The mirror case: the control's own tank DOES cross within the nominal step, while
     the OTHER tank (which the bug would have used) does not."""
     closure = _two_tank_closure(
-        (Control("P1", "CLOSED", "TB", "ABOVE", 10.0),)
+        (_control("P1", CLOSED, "TB", True, 10.0),)
     )
     level = torch.tensor([1.0, 9.99], dtype=F64)
     rate = torch.tensor([1e-6, 1.0], dtype=F64)
@@ -73,8 +79,8 @@ def test_event_step_shortens_to_the_named_tanks_own_crossing():
 def test_event_step_with_controls_on_both_tanks_takes_the_earliest_crossing():
     closure = _two_tank_closure(
         (
-            Control("P1", "CLOSED", "TA", "ABOVE", 10.0),
-            Control("P1", "OPEN", "TB", "ABOVE", 10.0),
+            _control("P1", CLOSED, "TA", True, 10.0),
+            _control("P1", OPEN, "TB", True, 10.0),
         )
     )
     level = torch.tensor([9.0, 9.9], dtype=F64)

@@ -37,23 +37,12 @@ silently doing the same would change the network the user asked for.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-
 import torch
+
+from noodl.apps.water.controls import OPEN
 
 Tensor = torch.Tensor
 F64 = torch.float64
-
-
-@dataclass(frozen=True)
-class Control:
-    """One `LINK <id> OPEN|CLOSED IF NODE <tank> BELOW|ABOVE <level>` line."""
-
-    link: str
-    status: str
-    node: str
-    test: str
-    level: float
 
 
 class TankLevels:
@@ -112,10 +101,11 @@ class TankLevels:
                     f"of this network ({self.pump_names}); pipe controls are not "
                     f"implemented"
                 )
-            if control.test not in ("BELOW", "ABOVE"):
+            if control.trigger != "node" or control.status is None or control.above is None:
                 raise ValueError(
-                    f"TankLevels: control on link {control.link!r} has test "
-                    f"{control.test!r}; only BELOW and ABOVE are read"
+                    f"TankLevels: control on link {control.link!r} is not a tank-level "
+                    f"OPEN/CLOSED control; only 'LINK <id> OPEN|CLOSED IF NODE <tank> "
+                    f"BELOW|ABOVE <level>' is applied"
                 )
         self.tank_of = {t.name: i for i, t in enumerate(self.tanks)}
         self.pump_of = {name: i for i, name in enumerate(self.pump_names)}
@@ -187,7 +177,7 @@ class TankLevels:
             r = float(rate[self.tank_of[control.node]])
             if r == 0.0:
                 continue
-            crossing = (control.level - float(level[self.tank_of[control.node]])) / r
+            crossing = (control.value - float(level[self.tank_of[control.node]])) / r
             if 1e-9 < crossing < step:
                 step = crossing + 1e-9
         return step
@@ -198,8 +188,8 @@ class TankLevels:
             i = self.tank_of[control.node]
             j = self.pump_of[control.link]
             value = level[..., i]
-            fires = value < control.level if control.test == "BELOW" else value > control.level
-            new = 1.0 if control.status == "OPEN" else 0.0
+            fires = value > control.value if control.above else value < control.value
+            new = 1.0 if control.status == OPEN else 0.0
             out[..., j] = torch.where(fires, torch.full_like(out[..., j], new), out[..., j])
         return out
 
