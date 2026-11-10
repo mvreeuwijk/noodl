@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import torch
 
+from noodl.apps.water.elements import DEMAND_FACTOR_KEY
 from noodl.withdrawals import NodeWithdrawal
 
 Tensor = torch.Tensor
@@ -40,6 +41,11 @@ class PressureDrivenDemand(NodeWithdrawal):
     negative there) -- the same both-branches-safe pattern `HazenWilliams` and `PumpCurve`
     use, so `where`'s backward never multiplies an infinite derivative (a fractional power's
     derivative at a zero or negative base) by a zero mask and produces `nan`.
+
+    The driver `"water.demand_factor"` (`DEMAND_FACTOR_KEY`, one multiplier per node of this
+    withdrawal), when given, scales `q_required`: the demand pattern's multiplier, which
+    `water_run` sets every step (EPANET's `demands` scales the required demand,
+    `hydraul.c`).
     """
 
     def __init__(
@@ -80,7 +86,11 @@ class PressureDrivenDemand(NodeWithdrawal):
         # `torch.where` are evaluated in the forward pass, so the substitution must be safe
         # regardless of which branch is finally selected.
         safe = torch.where(active, fraction.clamp(max=1.0), torch.ones_like(fraction))
-        delivered = self.q_required * safe**self.exponent
+        required = self.q_required
+        factor = None if drivers is None else drivers.get(DEMAND_FACTOR_KEY)
+        if factor is not None:
+            required = required * factor
+        delivered = required * safe**self.exponent
         return torch.where(active, delivered, torch.zeros_like(delivered))
 
 

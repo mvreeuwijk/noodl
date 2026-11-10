@@ -180,7 +180,8 @@ class Tank:
     (level m, volume m3), a tank whose volume is that curve of its level (`TankVolumeCurve`;
     the diameter is then unused). `overflow` says the tank may spill when full (`[TANKS]
     Overflow YES`): it is then never closed against filling, its level is held at the
-    maximum, and what flows in beyond it is the overflow (`tank_overflow`). `min_volume`
+    maximum, and what flows in beyond it is the overflow (`WaterResults.tank_overflow`).
+    `min_volume`
     (m3) is the file's MinVol, which moves no level (EPANET's volumes start from it)."""
 
     name: str
@@ -555,12 +556,6 @@ class WaterNetwork:
                     f"volume curve {tank.volume_curve!r} (levels {points[0][0]} to "
                     f"{points[-1][0]} m)")
         for pump in self.pumps:
-            if pump.speed_pattern is not None:
-                raise ValueError(
-                    f"WaterNetwork: pump {pump.name!r} has the speed pattern "
-                    f"{pump.speed_pattern!r}; variable-speed pumps (SPEED PATTERN) are out "
-                    f"of scope"
-                )
             if not pump.speed > 0.0:
                 raise ValueError(
                     f"WaterNetwork: pump {pump.name!r} has speed {pump.speed!r}; a "
@@ -741,9 +736,12 @@ def build_model(
     viscosity at all (`Duct`'s Reynolds-number friction factor, from the KINEMATIC
     viscosity; `scale`, below, uses the density for the head/pressure conversion, and it
     cancels from the head loss exactly as in EPANET).
-    Hazen-Williams has no such parameters -- EPANET's own H-W formula is calibrated for
-    water and does not take them either -- so a NON-DEFAULT `SPECIFIC GRAVITY` or
-    `VISCOSITY` on an H-W network is refused by name rather than silently ignored.
+    Hazen-Williams and Chezy-Manning take neither -- EPANET's own formulas are calibrated for
+    water. A NON-DEFAULT `VISCOSITY` on such a network is refused by name rather than silently
+    ignored. `SPECIFIC GRAVITY` is accepted: EPANET uses it there only to convert a pressure
+    to a head (`Ucf[PRESSURE]`), which the reader applies to every pressure in the file
+    (PDA's limits, emitter coefficients, valve settings, control and rule values), so the
+    heads and flows do not depend on it (`test_specific_gravity_on_an_si_file_matches_epanet`).
 
     `quality` is a bulk decay coefficient in 1/day (EPANET's own `[REACTIONS] Global Bulk`
     units, Manual Table 8.4 p.78), or `None`. TWO measured facts go with it.
@@ -797,7 +795,7 @@ def build_model(
     how its level moves. `"forward_euler"` (the
     default) is EPANET's: the tank is a boundary node the solve holds at its step-start head,
     and the step then moves it by `dt * inflow / A` (`KirchhoffLayer.advance_storage`;
-    `water_event_step` takes one such step, shortened to the next control crossing).
+    `water_run` takes EPANET's steps, shortened to the next control crossing).
     `"backward_euler"` or `"trapezoidal"` make every tank an interior node instead, its level
     stepped implicitly inside the solve (`water_step`) and differentiable through time; that
     step differs from EPANET's explicit one by the step's own discretisation error, so it is
@@ -882,14 +880,12 @@ def build_model(
             "emitters EPANET's demand is the delivered one, which is not read here")
     if exponent is None:
         exponent = options.pressure_exponent
-    if headloss in ("H-W", "C-M") and (options.specific_gravity != 1.0
-                                       or options.viscosity != 1.0):
+    if headloss in ("H-W", "C-M") and options.viscosity != 1.0:
         name = "Hazen-Williams" if headloss == "H-W" else "Chezy-Manning"
         raise ValueError(
-            f"build_model: [OPTIONS] SPECIFIC GRAVITY {options.specific_gravity!r} "
-            f"/ VISCOSITY {options.viscosity!r} are not the defaults, but {name} "
-            f"does not take fluid density or viscosity (EPANET's own {headloss} formula "
-            f"is calibrated for water); use headloss='D-W' or leave both at 1.0"
+            f"build_model: [OPTIONS] VISCOSITY {options.viscosity!r} is not the default, but "
+            f"{name} does not take the fluid's viscosity (EPANET's own {headloss} formula "
+            f"is calibrated for water); use headloss='D-W' or leave it at 1.0"
         )
     # EPANET 2.2: SPECIFIC GRAVITY is the density ratio and VISCOSITY the KINEMATIC
     # viscosity ratio to water at 20 C, so rho = RHO_W sg and nu = (MU_W / RHO_W) visc.
@@ -1173,16 +1169,17 @@ def build_model(
     drivers.update(_link_drivers(net, scale))
     reservoir_heads = torch.tensor([r.head * scale for r in net.reservoirs], dtype=F64)
     control_closure = None
-    if net.tanks or net.controls or net.rules:
-        # the closure of the tanks, the controls and the rules (`model.control_closure`, also on a
-        # network with controls and no tanks)
+    speed_patterns = [p.name for p in net.pumps if p.speed_pattern is not None]
+    if net.tanks or net.controls or net.rules or speed_patterns:
+        # the closure of the tanks, the controls, the rules and the pumps' speed patterns
+        # (`model.control_closure`, also on a network without tanks)
         junction_names = {j.name for j in net.junctions}
         if net.tanks and not held and any(
                 c.trigger == "node" and c.node in junction_names for c in net.controls):
             raise ValueError(
                 "build_model: a junction-pressure control acts after a solve, which the "
                 "implicit tank schemes' water_step does not repeat; use "
-                "tank_scheme='forward_euler' (water_event_step)")
+                "tank_scheme='forward_euler' (water_run)")
         kinds = ["PIPE" if isinstance(link, WaterPipe) else
                  "PUMP" if isinstance(link, Pump) else "VALVE" for link in net.links()]
         elevation = {j.name: j.elevation for j in net.junctions}
@@ -1211,6 +1208,7 @@ def build_model(
                                           *((r.name, r.head) for r in net.reservoirs),
                                           *((t.name, t.elevation) for t in net.tanks))},
             setting_tolerance=[_setting_tolerance(lk, scale) for lk in net.links()],
+            speed_patterns=speed_patterns,
         )
         closures.append(control_closure)
         for t in net.tanks:
@@ -1589,7 +1587,13 @@ def apply_rules(model: Model, state: State, drivers: Drivers, *, time,
     """`(state, changed)`: `state` after the network's `[RULES]` are tested on it at `time` (s
     since the start) and the actions that stand are taken (EPANET 2.2, `rules.c`,
     `checkrules`; `evaluate_rules`, `take_actions`); `changed` says per instance whether any
-    link's status or setting moved, which asks for a new solve. `step` (s, positive) is the
+    action was TAKEN, EPANET's action count (`takeactions`), which asks for a new solve. It is
+    not movement of the carried values: a pump the solver shut at its shut-off head is closed
+    to `STATUS IS OPEN`, which is then taken (and `changed`) on every check while the pump
+    stays shut, though the carried status is OPEN throughout. `water_run` follows
+    `ruletimestep`: a taken action ends the step, the next solve is at the action's time, and
+    the rules are next checked a rule step later -- never again at the same time until
+    nothing changes. `step` (s, positive) is the
     length of the interval since the previous check (the rule time step), which `SYSTEM TIME`
     and `CLOCKTIME` premises test; EPANET checks nothing before the first step has passed. A
     network without rules returns `state` itself.
@@ -1612,13 +1616,22 @@ def apply_rules(model: Model, state: State, drivers: Drivers, *, time,
 
     Batched states are tested instance by instance (the rules select: they are not
     differentiable)."""
+    return _apply_rules(model, state, drivers, time=time, step=step)
+
+
+def _apply_rules(model: Model, state: State, drivers: Drivers, *, time, step: float,
+                 solved: Tensor | None = None) -> tuple[State, Tensor]:
+    """`apply_rules`, with the links' solved states `solved` (`_solved_states`) given: within
+    one hydraulic step EPANET checks the rules on the step's one solution, the tanks moved
+    on (`hydraul.c`, `ruletimestep`), so `water_run` computes them once per step."""
     closure = model.control_closure
     rules = () if closure is None else closure.rules
     if not rules:
         return state, torch.zeros((), dtype=torch.bool)
     premises = [p for r in rules for p in r.premises]
     with torch.no_grad():
-        solved = _solved_states(model, closure, state, drivers)
+        if solved is None:
+            solved = _solved_states(model, closure, state, drivers)
         arrays, names = _rule_readings(closure, premises, state, drivers, solved)
         carried_status = state["water.link_status"].detach()
         carried_setting = state["water.link_setting"].detach()
@@ -1795,22 +1808,31 @@ def water_steady(model: Model, state: State, drivers: Drivers, **solve_kwargs) -
     pipe's slope sits on its `RQtol` floor and Newton's first step overshoots without bound.
     The pumps' flows, likewise, start from their design flows when they are all zero.
     """
-    result = _solve_steady(model, state, drivers, **solve_kwargs)
+    return _steady_and_plan(model, state, drivers, **solve_kwargs)[0]
+
+
+def _steady_and_plan(model: Model, state: State, drivers: Drivers,
+                     **solve_kwargs) -> tuple[State, tuple]:
+    """`water_steady`, with the cut-off plan (`_cut_off_plan`: the drivers and `limit`) of
+    its last solve, which `water_run` hands to `_link_states` instead of planning again."""
+    plan: list = []
+    result = _solve_steady(model, state, drivers, plan=plan, **solve_kwargs)
     closure = model.control_closure
     if closure is None or not closure.has_pressure_controls:
-        return result
+        return result, tuple(plan)
     for _ in range(MAX_PRESSURE_SWITCHES):
         status, setting, changed = closure.pressure_switch(result)
         if not bool(changed.any()):
-            return result
+            return result, tuple(plan)
         with closure.held_controls():
+            plan.clear()
             result = _solve_steady(
                 model, {**result, "water.link_status": status, "water.link_setting": setting},
-                drivers, **solve_kwargs)
+                drivers, plan=plan, **solve_kwargs)
     # the last solve may have settled: test it before giving up
     status, setting, changed = closure.pressure_switch(result)
     if not bool(changed.any()):
-        return result
+        return result, tuple(plan)
     moved = ((status != result["water.link_status"])
              | (setting != result["water.link_setting"])).reshape(-1, status.shape[-1]).any(0)
     links = [n for n, m in zip(model.link_names, moved.tolist(), strict=True) if m]
@@ -1821,9 +1843,10 @@ def water_steady(model: Model, state: State, drivers: Drivers, **solve_kwargs) -
         f"no consistent state")
 
 
-def _solve_steady(model: Model, state: State, drivers: Drivers, **solve_kwargs) -> State:
+def _solve_steady(model: Model, state: State, drivers: Drivers, *, plan: list | None = None,
+                  **solve_kwargs) -> State:
     """One `water_steady` solve (see there), the controls as `state` and `drivers` give
-    them."""
+    them; `plan`, when given, receives the solve's `(drivers, limit)` (`_cut_off_plan`)."""
     seed = getattr(model, "initial_flows", None)
     layer = model.kirchhoff["water"]
     if seed is not None and layer.implicit_edges.numel():
@@ -1839,6 +1862,8 @@ def _solve_steady(model: Model, state: State, drivers: Drivers, **solve_kwargs) 
     solve_kwargs.setdefault("rtol", 1e-11)
     solve_kwargs.setdefault("max_iter", 200)
     drivers, limit = _cut_off_plan(model, state, drivers, "water_steady")
+    if plan is not None:
+        plan.extend((drivers, limit))
     try:
         result = model.steady(state, drivers, **solve_kwargs)
     except UndefinedSteadyState as exc:
@@ -2557,7 +2582,11 @@ def link_states(model: Model, state: State, drivers: Drivers) -> Tensor:
     the state its residual selects at the solution (`_PressureValve.states`: CLOSED, ACTIVE
     or OPEN). A valve otherwise has its status (ACTIVE or OPEN); every other link is OPEN.
     """
-    drivers, limit = _cut_off_plan(model, state, drivers, "link_states")
+    return _link_states(model, state, *_cut_off_plan(model, state, drivers, "link_states"))
+
+
+def _link_states(model: Model, state: State, drivers: Drivers, limit) -> Tensor:
+    """`link_states` with the cut-off plan `(drivers, limit)` given (`_cut_off_plan`)."""
     status = _link_status(model, state, drivers)
     q = state["water.q"]
     out = torch.broadcast_to(status, q.shape[:-1] + status.shape[-1:]).clone()
@@ -2610,14 +2639,15 @@ def water_step(model: Model, state: State, drivers: Drivers, dt: float, *,
     `"backward_euler"` is the default because it starts from any state, the build's
     included, and does not ring after the flow jumps that pump and level controls cause.
 
-    The step is the caller's `dt`: it is never shortened to a time control (nor
-    `TankStorageControls.event_step` to anything but a level crossing), so an `AT TIME` or
-    `AT CLOCKTIME` control fires only if a step starts exactly on its second."""
+    The step is the caller's `dt`: it is never shortened, to a control or to anything else
+    (`water_run`, which takes EPANET's step rule, refuses these schemes), so an `AT TIME` or
+    `AT CLOCKTIME` control fires only if a step starts exactly on its second, and a level
+    control at the first step start past its trigger."""
     if not model.water_network.tanks or model.tank_scheme == "forward_euler":
         raise ValueError(
             "water_step: the model's tanks are not stepped inside the solve "
             "(build_model(tank_scheme='backward_euler') or 'trapezoidal'); step a "
-            "tank_scheme='forward_euler' model with water_event_step"
+            "tank_scheme='forward_euler' model with water_run"
         )
     solve_kwargs.setdefault("atol", 1e-11)
     solve_kwargs.setdefault("rtol", 1e-11)
@@ -2629,67 +2659,6 @@ def water_step(model: Model, state: State, drivers: Drivers, dt: float, *,
     if limit is not None:
         result = {**result, "water.phi": limit(result)[0]}
     return result
-
-
-def water_event_step(model: Model, state: State, drivers: Drivers, dt_max: float,
-                     **solve_kwargs) -> tuple[State, float]:
-    """One hydraulic step of EPANET's extended period, `(state, dt)`, on a model built with
-    `tank_scheme="forward_euler"`: one hydraulic solve, the step shortened to the next
-    control crossing, then the tanks moved.
-
-    1. `water_steady` solves the network with every tank held at its head in `state` (the
-       solve does not depend on the step), which gives the inflow into every tank
-       (`"water.storage_flow"`). A full or empty tank closes the links that would fill or
-       drain it (`TankLevels`, EPANET's `tankstatus`).
-    2. The step is `dt_max` shortened to the next time control (the driver `"water.time"`
-       is the step's start) and to the time at which a tank, its level changing
-       linearly at that inflow, reaches a control's trigger (`TankLevels.control_time`,
-       EPANET 2.2 Manual section 13.1 item 17), and to the time a tank fills or empties,
-       rounded to whole seconds as EPANET's `tanktimestep` (`hydraul.c`) rounds it
-       (`TankLevels.time_to_limit`).
-    3. Every tank's head moves by `dt * inflow / A` (`KirchhoffLayer.advance_storage`), a
-       tank on a volume curve by volume (`TankVolumeCurve`), and a tank whose volume is
-       then within one second's inflow of its maximum (minimum) is put on it (`hydraul.c`,
-       `tanklevels`; `_settle_tanks`). A tank that may overflow is held at its maximum so,
-       and what flowed in beyond it is `tank_overflow`.
-
-    It solves once per step; `Model.step` after the solve would solve again. The returned
-    state is the solve's, with the tanks' heads at the end of the step; `dt` is a Python
-    float. Gradients reach the tank areas (the storage capacities) and volume curves
-    through step 3 (not through a tank put on its limit)."""
-    if not model.water_network.tanks or model.tank_scheme != "forward_euler":
-        raise ValueError(
-            "water_event_step: the model's tanks are not held at boundary nodes "
-            "(build_model(tank_scheme='forward_euler')); step its interior tank storage "
-            "with water_step"
-        )
-    closure = model.control_closure
-    layer = model.kirchhoff["water"]
-    solved = water_steady(model, state, drivers, **solve_kwargs)
-    inflow = solved["water.storage_flow"]
-    # The level rises at inflow / A, A = C * head_scale: the capacity C of the storage that
-    # moves the tank in step 3, so the projected crossing and the move use one area (on a
-    # volume curve, the segment the level moves onto; the crossings are then by volume).
-    (storage,) = layer.storage
-    heads = solved["water.phi"][..., storage.nodes]
-    if isinstance(storage, TankVolumeCurve):
-        area = storage.area_toward(heads, inflow)
-    else:
-        area = storage.capacity(heads, heads, drivers) * closure.head_scale
-    levels = closure.levels(state)
-    rate = inflow / area
-    dt = min(float(dt_max), closure.control_time(levels, rate, drivers, solved, inflow))
-    # EPANET's `tanktimestep` (`hydraul.c`): the step ends when a tank fills or empties,
-    # `t = ROUND(v / q)` whole seconds, when that is positive and shorter
-    fill = float(closure.time_to_limit(levels, rate, inflow).min())
-    if math.isfinite(fill):
-        fill = float(math.floor(fill + 0.5))
-        if 0.0 < fill < dt:
-            dt = fill
-    out = dict(solved)
-    phi = layer.advance_storage(solved["water.phi"], inflow, dt, drivers)
-    out["water.phi"] = _settle_tanks(model, storage, phi, inflow, drivers)
-    return out, dt
 
 
 def _settle_tanks(model: Model, storage, phi: Tensor, inflow: Tensor, drivers) -> Tensor:
@@ -2723,21 +2692,6 @@ def _settle_tanks(model: Model, storage, phi: Tensor, inflow: Tensor, drivers) -
     return out
 
 
-def tank_overflow(model: Model, state: State, stepped: State, dt: float) -> Tensor:
-    """The flow (m3/s) every tank spilt over one `water_event_step` from `state` to
-    `stepped` of `dt` s: for a tank that may overflow (`Tank.overflow`), what flowed in
-    (`tank_inflow(model, stepped)`) less its volume change over the step, at least 0; 0 for
-    every other tank. A tank that starts the step full spills everything that flows in.
-    It stands in for the overflow per report time that Task 10's `water_run` results
-    (`WaterResults.tank_overflow`) will carry."""
-    closure = model.control_closure
-    (storage,) = model.kirchhoff["water"].storage
-    nodes = storage.nodes
-    gained = storage.change(stepped["water.phi"][..., nodes], state["water.phi"][..., nodes])
-    spill = torch.clamp(tank_inflow(model, stepped) - gained / dt, min=0.0)
-    return torch.where(closure.overflow, spill, torch.zeros_like(spill))
-
-
 def tank_levels(model: Model, state: State) -> Tensor:
     """Every tank's level (m above its bottom) in `state`: its head less its bottom."""
     return model.control_closure.levels(state)
@@ -2747,5 +2701,5 @@ def tank_inflow(model: Model, state: State) -> Tensor:
     """Net inflow (m3/s) at every tank node: the flow into every tank's storage,
     `"water.storage_flow"`, which a solve writes (`KirchhoffLayer.storage_flows`). Under
     `tank_scheme="forward_euler"` it is the inflow the solve delivered to the held tank,
-    the rate over the step `water_event_step` takes."""
+    the rate over the step `water_run` takes."""
     return state["water.storage_flow"]

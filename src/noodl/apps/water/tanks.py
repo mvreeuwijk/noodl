@@ -14,8 +14,8 @@ it is the tank node's head less its bottom, read from `"water.phi"` (`TankLevels
 The tank itself is a `noodl.LinearStorage` of its cross-section area in the water layer
 (`build_model(tank_scheme=...)`): under `"forward_euler"` (EPANET's method) a boundary node
 the solve holds at its step-start head and the step then moves by `dt * inflow / A`
-(`KirchhoffLayer.advance_storage`, `water_event_step`); under `"backward_euler"` or
-`"trapezoidal"` an interior node stepped inside the solve.
+(`KirchhoffLayer.advance_storage`, `noodl.apps.water.simulate.water_run`); under
+`"backward_euler"` or `"trapezoidal"` an interior node stepped inside the solve.
 
 Per call the closure (1) applies every control with EPANET's semantics, under `no_grad` --
 the switch itself is a combinatorial decision; and (2) writes the reservoir heads
@@ -29,18 +29,12 @@ authority for the tank heads. During a step the controls read the step-start lev
 `Model` pass shows a closure the held head of such a node, not the level a previous pass of
 the same step has advanced it to (`coupling="iterate"`).
 
-`control_time` (`next_control_time`) is EPANET's ADAPTIVE shortening, and it is not
-optional: with a fixed step
-the pump switches up to a whole step late and the tank level diverges from EPANET; the step
-is shortened to the linearly-projected trigger crossing instead (numbers in
-`docs/design/water_street.md#event-step`; checked in
-`tests/verification/test_water_parity.py::test_net1_extended_period_tank_level`). It
-implements only the CONTROL-CROSSING half of EPANET's rule
-(Manual section 13.1 item 17, p.113: the next step is the minimum of the nominal step and
-the time to the next control crossing) -- not the demand-PERIOD boundary half, which the
-Net1 driver does not need: Net1's pattern step (2 h) is an exact multiple of its
-hydraulic step (1 h), so no demand-period boundary ever falls strictly inside a step and the
-omission is masked on every fixture the application is measured against.
+`control_time` (`next_control_time`, EPANET's `controltimestep`) and `time_to_limit`
+(`tanktimestep`) are the two tank halves of EPANET's step rule, which `water_run` composes
+with the hydraulic, pattern and report steps (`hydraul.c`, `timestep`). They are not
+optional: with a fixed step the pump switches up to a whole step late and the tank level
+diverges from EPANET (numbers in `docs/design/water_street.md#event-step`; checked in
+`tests/verification/test_water_parity.py::test_net1_extended_period_tank_level`).
 
 FULL AND EMPTY TANKS. Under `"forward_euler"` the closure applies EPANET's `tankstatus`
 (`hydstatus.c`): a tank whose head is within `HTOL` of its maximum is full and one within
@@ -48,7 +42,7 @@ FULL AND EMPTY TANKS. Under `"forward_euler"` the closure applies EPANET's `tank
 fill a full tank or drain an empty one (`"water.one_way"`); a pump discharging into a full
 tank or drawing from an empty one is CLOSED for the step, as is a link both rules forbid (a
 check valve into a full tank). A tank that may overflow (`Tank.overflow`) is never full.
-The step itself is EPANET's `tanklevels` (`water_event_step`): it is shortened to the time a
+The step itself is EPANET's `tanklevels` (`water_run`): it is shortened to the time a
 tank fills or empties (`TankLevels.time_to_limit`), and a tank within one second of its
 limit is put on it. Under the implicit schemes the tank moves inside the solve, so these
 rules do not apply there and a level outside `[y_min, y_max]` is refused by name instead.
@@ -73,8 +67,10 @@ from noodl.apps.water.controls import (
 from noodl.apps.water.elements import (
     M_PER_FT,
     ONE_WAY_KEY,
+    RESERVOIR_HEAD_KEY,
     SETTING_KEY,
     STATUS_KEY,
+    TANK_INFLOW_KEY,
     TIME_KEY,
 )
 from noodl.apps.water.rules import SETTING_TOLERANCE
@@ -220,7 +216,7 @@ class TankVolumeCurve(NodeStorage):
         one otherwise; where that area is zero (no segment beyond the last point rising or
         the first falling, or a segment of flat volumes) the other one's, and 1 where
         neither has one (inside a flat segment, a level only an initial level can have).
-        Only the level rate's sign is read from it (`water_event_step`):
+        Only the level rate's sign is read from it (`water_run`):
         the times to a limit or a control are by volume at the inflow
         (`TankLevels._volume_time`) and the advance is by volume (`potential_of`), as
         EPANET's `tanktimestep` and `tanklevels`, so no area enters them. Across a flat
@@ -248,8 +244,13 @@ class TankLevels:
     Per call it applies the controls to those levels and writes the reservoir heads into
     `"water.phi_boundary"`, then zeros in the tanks' columns, which the layer fills with
     their step-start heads (`KirchhoffLayer.hold_storage`). Only the link status is
-    carried. `event_step` is EPANET's shortening of the step to the next control crossing,
-    `time_to_limit` the time a tank takes to fill or empty.
+    carried. `control_time` is the time to the next control that fires (EPANET's
+    `controltimestep`), `time_to_limit` the time a tank takes to fill or empty (`tanktimestep`).
+
+    RESERVOIR HEADS. The boundary heads are the driver `"water.reservoir_head"` (one per
+    reservoir, in the layer's potential unit) when the drivers carry it -- `water_run`
+    writes it from the reservoirs' head patterns every step (`hydraul.c`, `demands`) -- else
+    the heads as built.
 
     FULL AND EMPTY TANKS (`hydstatus.c`, `tankstatus`). `tank_links` lists, per link that
     touches a tank, `(link, tank, at_start, kind)`: the link's position in `link_names`, the
@@ -301,6 +302,7 @@ class TankLevels:
         rules=(),
         node_info=None,
         setting_tolerance=None,
+        speed_patterns=(),
     ) -> None:
         self.net = net
         self.tanks = list(tanks)
@@ -386,6 +388,8 @@ class TankLevels:
                 if kind != "PIPE" and (a.attribute == "SETTING" or (
                         kind == "PUMP" and a.value == OPEN)):
                     set_by.add(j)
+        # a pump with a speed pattern: `water_run` sets its carried speed every step
+        set_by.update(self.link_names.index(n) for n in speed_patterns)
         self._setting_links = torch.tensor(sorted(set_by), dtype=torch.long)
         self.pressure_controls = [c for c in self.controls
                                   if c.trigger == "node" and c.node in self.junctions]
@@ -422,9 +426,10 @@ class TankLevels:
                 f"'water.link_setting' are all required; build them with initial_state(model)"
             )
         level = self.levels(state)
-        # a tank on a volume curve tests its controls by volume, with a margin of one
-        # second of the last solve's inflow (`_apply_controls`)
-        inflow = state.get("water.storage_flow") if self._curved else None
+        # every tank tests its level controls by volume, with a margin of one second of the
+        # previous solve's inflow (`_apply_controls`): an input of the step, not the state's
+        # `"water.storage_flow"`, which the solve itself overwrites
+        inflow = drivers.get(TANK_INFLOW_KEY) if self.storage is not None else None
         time = self._time(drivers)
         read = (level.detach(), status.detach(), setting.detach(), drivers.get(STATUS_KEY),
                 drivers.get(SETTING_KEY), drivers.get(ONE_WAY_KEY),
@@ -439,7 +444,7 @@ class TankLevels:
             if not self._held:
                 status, setting = self._apply_controls(level, status, setting, inflow, time)
         self._refuse_outside(level)
-        out = {"water.phi_boundary": self._boundary(state, level),
+        out = {"water.phi_boundary": self._boundary(drivers, level),
                STATUS_KEY: self._link_status(drivers, status),
                "water.link_status": status, "water.link_setting": setting}
         if self._setting_links.numel():
@@ -521,12 +526,17 @@ class TankLevels:
                 link_names=self.link_names, link_kinds=self.link_kinds,
                 setting_scale=self.setting_scale)
 
-    def _boundary(self, state, level: Tensor) -> Tensor:
+    def _reservoir_heads(self, drivers) -> Tensor:
+        """The reservoir heads: the driver `RESERVOIR_HEAD_KEY` when given, else as built."""
+        return drivers.get(RESERVOIR_HEAD_KEY, self.reservoir_heads)
+
+    def _boundary(self, drivers, level: Tensor) -> Tensor:
         """The reservoir heads, then zeros in the tanks' columns (boundary nodes here, whose
         heads the layer holds: `KirchhoffLayer.hold_storage`)."""
-        batch = level.shape[:-1]
+        heads = self._reservoir_heads(drivers)
+        batch = torch.broadcast_shapes(level.shape[:-1], heads.shape[:-1])
         return torch.cat(
-            [self.reservoir_heads.expand(batch + self.reservoir_heads.shape),
+            [heads.expand(batch + heads.shape[-1:]),
              torch.zeros(batch + level.shape[-1:], dtype=level.dtype, device=level.device)],
             dim=-1,
         )
@@ -586,7 +596,7 @@ class TankLevels:
         (`hydraul.c`): `(Vmax - V) / q` or `(Vmin - V) / q` by volume, which a tank on a
         volume curve (`TankVolumeCurve`) reads from its curve, its inflow `q` being
         `rate` times its area on the segment it moves onto (`area_toward`, the area
-        `water_event_step` divides the inflow by). Given `inflow` (m3/s per tank), a
+        `water_run` divides the inflow by). Given `inflow` (m3/s per tank), a
         tank whose net inflow is at most `QZERO` is skipped (`inf`), as `tanktimestep` skips
         it. EPANET then rounds to whole seconds; this is the exact time. Not
         differentiable: it only places a step."""
@@ -645,45 +655,6 @@ class TankLevels:
                 f"the levels or shorten the run"
             )
 
-    def event_step(self, level: Tensor, rate: Tensor, dt: float,
-                   inflow: Tensor | None = None) -> float:
-        """EPANET's shortened hydraulic step: the time to the next control crossing (tank
-        level controls only; `control_time` is the one that reads every control, and takes
-        its place with `water_event_step`'s successor).
-
-        Manual section 13.1 item 17, p.113: the next step is the minimum of the nominal
-        step and the time until a tank level "reaches a point that triggers a change in
-        status for some link", computed on the assumption that the level changes LINEARLY
-        at the current solution's rate.
-
-        `level` and `rate` (dy/dt, m/s) are given for EVERY tank, not just the one the
-        caller happens to be tracking: each control tests its OWN tank (`control.node`)
-        against that tank's own level and rate. A single scalar pair, tested against
-        every control regardless of which tank it names, is wrong the moment a second
-        controlled tank exists -- it silently uses the wrong tank's level.
-
-        On a volume curve the crossing is by volume (`_volume_time`), at the tanks' inflow
-        `inflow` (m3/s) when given, as EPANET's `controltimestep` (`hydraul.c`).
-        """
-        step = dt
-        level, rate = level.detach(), rate.detach()
-        for control in self.controls:
-            if control.trigger != "node" or control.node not in self.tank_of:
-                continue
-            i = self.tank_of[control.node]
-            r = float(rate[i])
-            if r == 0.0:
-                continue
-            if self._curved:   # by volume, as EPANET's `controltimestep`
-                target = level.clone()
-                target[i] = control.value
-                crossing = float(self._volume_time(target, level, rate, inflow)[i].detach())
-            else:
-                crossing = (control.value - float(level[i])) / r
-            if 1e-9 < crossing < step:
-                step = crossing + 1e-9
-        return step
-
     def _levels(self, level: Tensor):
         """The tank levels by name (m)."""
         return {t.name: level[..., i] for i, t in enumerate(self.tanks)}
@@ -692,22 +663,35 @@ class TankLevels:
                         inflow: Tensor | None = None, time: Tensor | None = None):
         """`(status, setting)` with every time and tank-level control whose
         condition holds applied, in file order (a later control on the same link wins)
-        (`apply_controls`). A cylinder's level is tested against the control's:
-        ``level > value`` (ABOVE), ``level < value`` (BELOW). A tank on a volume
-        curve is tested by volume, as EPANET 2.2's `controls` (`hydraul.c`) tests every
-        tank: ``V(level) >= V(value) - |q|`` (ABOVE), ``V(level) <= V(value) + |q|``
-        (BELOW), ``q`` the last solve's inflow over one second (`inflow`, m3/s; 0 when not
-        given). On a curve whose volume is flat between two levels the two differ: at the
-        flat stretch's volume every control level on it is reached (a tank held at
-        `tankgrade(Vmax)` below its maximum level fires an ABOVE control set higher).
-
-        A KNOWN DIFFERENCE between the two kinds, to be settled in Task 10: EPANET tests a
-        cylinder by volume too, with the same ``|q|`` margin (one second of inflow, so it
-        fires that much early, and at equality), where a cylinder here keeps the strict
-        level test."""
+        (`apply_controls`). Every tank is tested by volume, as EPANET 2.2's `controls`
+        (`hydraul.c`) tests it: ``V(level) >= V(value) - |q|`` (ABOVE),
+        ``V(level) <= V(value) + |q|`` (BELOW), ``q`` the previous solve's inflow over one
+        second (`inflow`, m3/s: the driver `"water.tank_inflow"`, which `water_run` sets
+        each step; 0 when not given, as at EPANET's start, where a tank's `NodeDemand`
+        is 0). A control so fires
+        at equality and up to one second's inflow early: the margin that lets a step rounded
+        to whole seconds (`controltimestep`) end just short of a crossing and still fire.
+        A cylinder's volume is its area times its level, so for it the test is
+        ``level >= value - |q| / A``. On a curve whose volume is flat between two levels the
+        level and volume tests differ: at the flat stretch's volume every control level on
+        it is reached (a tank held at `tankgrade(Vmax)` below its maximum level fires an
+        ABOVE control set higher)."""
         levels = self._levels(level)
         tested = None
-        if self._curved:
+        if self.storage is not None and self.storage.linear:
+            # a cylinder: V = A level, so the volume test is `level >= value - |q| / A`
+            area = self.storage.capacity(level, level) * self.head_scale
+            slack = (torch.zeros_like(level) if inflow is None
+                     else inflow.detach().abs().expand(level.shape) / area)
+
+            def tested(control):
+                i = self.tank_of.get(control.node)
+                if i is None:
+                    return None
+                if control.above:
+                    return level[..., i] >= control.value - slack[..., i]
+                return level[..., i] <= control.value + slack[..., i]
+        elif self.storage is not None:
             phi = (self.bottom + level) * self.head_scale
             volume = self.storage.amount(phi)
             margin = (torch.zeros_like(volume) if inflow is None
@@ -736,6 +720,9 @@ class TankLevels:
         carries. On a volume curve the crossing is by volume (`_volume_time`), at the
         tanks' inflow `inflow` (m3/s) when given."""
         level, rate = level.detach(), rate.detach()
+        if inflow is not None:
+            # `controltimestep` skips a tank whose inflow is at most QZERO
+            rate = torch.where(inflow.detach().abs() <= QZERO, torch.zeros_like(rate), rate)
         time = self._time(drivers)
         crossing = None
         if self._curved:
@@ -762,13 +749,14 @@ class TankStorageControls(TankLevels):
     """`TankLevels` for tanks stepped inside the solve, as interior storage nodes
     (`build_model(tank_scheme="backward_euler")` or `"trapezoidal"`): it writes only the
     reservoir heads into `"water.phi_boundary"`, refuses a level outside `[min, max]` by
-    name instead of applying the full and empty rules, and its `event_step` never shortens
-    a step below `min_step`.
+    name instead of applying the full and empty rules.
     """
 
-    def _boundary(self, state, level: Tensor) -> Tensor:
+    def _boundary(self, drivers, level: Tensor) -> Tensor:
         """The reservoir heads (the tanks are interior nodes here)."""
-        return self.reservoir_heads.expand(level.shape[:-1] + self.reservoir_heads.shape)
+        heads = self._reservoir_heads(drivers)
+        batch = torch.broadcast_shapes(level.shape[:-1], heads.shape[:-1])
+        return heads.expand(batch + heads.shape[-1:])
 
     def _refuse_outside(self, level: Tensor) -> None:
         """Refuse, by name, a tank outside its `[min, max]` levels: stepped inside the solve,
@@ -779,13 +767,3 @@ class TankStorageControls(TankLevels):
         """`None`: the full and empty rules act at the step start on a held tank; here the
         tank moves inside the solve, and a level beyond a limit is refused instead."""
         return None
-
-    def event_step(self, level: Tensor, rate: Tensor, dt: float,
-                   min_step: float = 1.0) -> float:
-        """`TankLevels.event_step`, never below `min_step` (s). The implicit step lands a
-        little short of the projected crossing (its rate is the step's end rate, not the
-        start's), and the next projection is then a fraction of a second away: a step that
-        short makes the storage equation's `A / dt` large enough to stall Newton, while
-        `min_step` carries the level past the trigger, so the control acts at the next
-        step."""
-        return max(super().event_step(level, rate, dt), min(min_step, dt))

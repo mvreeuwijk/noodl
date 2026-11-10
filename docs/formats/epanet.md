@@ -13,6 +13,14 @@ units are read by `apps/water/inp.py`.
 `[TIMES]` (including `RULE TIMESTEP`, `PATTERN START`, `REPORT START` and `START CLOCKTIME`, which
 reads `12 am`, `6:30 PM` and `18`).
 
+**Times honoured by `water_run`** ([Running over time](../applications/water.md#running-over-time)):
+`DURATION` (the run's end), `HYDRAULIC TIMESTEP` (no longer than the pattern or report step, as
+EPANET caps it), `PATTERN TIMESTEP` and `PATTERN START` (the pattern period
+`(t + PATTERN START) / PATTERN TIMESTEP`), `REPORT TIMESTEP` and `REPORT START` (the report
+times), `RULE TIMESTEP` (a tenth of the hydraulic step unless given) and `START CLOCKTIME` (for
+`AT CLOCKTIME` controls and `CLOCKTIME` premises). `QUALITY TIMESTEP` and `STATISTIC` are read
+past and change nothing (`net.notes["unrecognised_times"]`).
+
 **Ignored** because nothing in the hydraulics references them: `[TITLE]`, `[REPORT]`,
 `[COORDINATES]`, `[VERTICES]`, `[LABELS]`, `[BACKDROP]`, `[TAGS]`, `[END]`, and the
 quality sections (a quality run is configured through `build_model(quality=...)` instead).
@@ -42,14 +50,14 @@ validated.
 **Read, then refused by name.** The reader converts every feature above to SI, and
 `WaterNetwork.validate()` (called by `build_model`) refuses, naming the feature, each one the
 builder does not model yet, so a file never loads into a network that quietly means something
-else: a numeric `[STATUS]` pump speed; a pump speed pattern;
-and a numeric `[CONTROLS]` setting on a pipe. Every other `[CONTROLS]` form is
+else: a numeric `[STATUS]` pump speed and a numeric `[CONTROLS]` setting on a pipe. A pump
+speed pattern is applied by `water_run` (0 closes the pump). Every other `[CONTROLS]` form is
 modelled: `AT TIME`, `AT CLOCKTIME` and `IF NODE` on a tank or a junction (a reservoir is refused: EPANET tests its volume of area 0, so
 the control always holds), with an
 `OPEN`, `CLOSED` or numeric action on a pipe, pump or valve. Of EPANET's own valve checks
 (`valvecheck`), `validate()` refuses a PRV or PSV whose controlled node (a PRV's end, a PSV's
 start) is a reservoir or tank, and two valves that hold one node twice (EPANET's errors 219 and
-220), naming the valves. Of its tank checks (`validatetanks`, error 225) it refuses an initial level outside the minimum and maximum, and a volume curve that does not cover both. A tank volume curve and overflow are built (`TankVolumeCurve`, `tank_overflow`) under the default `tank_scheme` and refused by name under the implicit ones. Of its pump checks it refuses a curve EPANET refuses (error 227): a
+220), naming the valves. Of its tank checks (`validatetanks`, error 225) it refuses an initial level outside the minimum and maximum, and a volume curve that does not cover both. A tank volume curve and overflow are built (`TankVolumeCurve`, `WaterResults.tank_overflow`) under the default `tank_scheme` and refused by name under the implicit ones. Of its pump checks it refuses a curve EPANET refuses (error 227): a
 one- or three-point curve with no power-function fit (`powercurve`), and any other curve whose
 flows do not rise or heads do not fall from point to point; and a constant-power pump without a
 positive power. The reader itself refuses what it cannot read: a malformed record or a name

@@ -1,6 +1,8 @@
 """EPANET's simple controls: `apply_controls` and `next_control_time` as functions, and the
 closure that carries a link's status and setting across steps (`TankLevels`)."""
 
+import dataclasses
+
 import pytest
 import torch
 
@@ -21,9 +23,9 @@ from noodl.apps.water.network import (
     WaterNetwork,
     WaterPipe,
     build_model,
-    water_event_step,
     water_steady,
 )
+from noodl.apps.water.simulate import water_run
 
 F64 = torch.float64
 LINKS = ["P1", "PU", "V1"]
@@ -93,6 +95,16 @@ def test_level_control_both_directions():
     away = next_control_time(controls[:1], time=_t(0.0), levels={"T": _t(12.0)},
                              rates={"T": _t(0.5)})
     assert away == torch.inf
+
+
+def test_a_level_crossing_is_rounded_to_whole_seconds():
+    """EPANET's `controltimestep` (`hydraul.c`): `t = ROUND(v / q)`, and a crossing that
+    rounds to 0 does not end a step."""
+    control = [Control("PU", CLOSED, None, "node", "T", True, 14.0)]
+    for rate, expected in ((1 / 4.4, 4.0), (1 / 4.5, 5.0), (1 / 0.4, torch.inf)):
+        ahead = next_control_time(control, time=_t(0.0), levels={"T": _t(13.0)},
+                                  rates={"T": _t(rate)})
+        assert float(ahead) == expected, rate
 
 
 def test_batch_instances_are_independent():
@@ -180,7 +192,7 @@ def test_time_controls_act_in_a_network_over_time():
     assert float(state["water.q"][1]) == 0.0
 
 
-def test_the_event_step_ends_at_the_next_time_control():
+def test_a_step_ends_at_the_next_time_control():
     net = WaterNetwork(
         junctions=(Junction("J1", 0.0, 0.002),),
         reservoirs=(Reservoir("R1", 50.0),),
@@ -190,13 +202,12 @@ def test_the_event_step_ends_at_the_next_time_control():
                WaterPipe("P2", "J1", "T1", 100.0, 0.3, 130.0)),
         controls=(Control("P2", CLOSED, None, "time", value=600.0),),
     )
-    model, state, drivers = build_model(net)
-    at = lambda t: {**drivers, "water.time": _t(t)}  # noqa: E731
-    state, dt = water_event_step(model, state, at(0.0), 3600.0)
-    assert dt == 600.0 and float(state["water.q"][1]) > 0.0
-    state, dt = water_event_step(model, state, at(600.0), 3600.0)
-    assert dt == 3600.0 and float(state["water.q"][1]) == 0.0
-    assert state["water.link_status"][1] == CLOSED
+    model, _, _ = build_model(dataclasses.replace(net, duration=7200.0))
+    diagnostics: dict = {}
+    out = water_run(model, diagnostics=diagnostics)
+    assert diagnostics["times"] == [0.0, 600.0, 3600.0, 7200.0]
+    assert float(out.flow[0, 1]) > 0.0
+    assert float(out.flow[1, 1]) == 0.0 and int(out.status[1, 1]) == CLOSED
 
 
 def test_a_time_control_without_the_time_driver_is_refused_by_name():
@@ -272,9 +283,10 @@ def test_a_no_op_setting_control_on_darcy_weisbach_does_not_end_a_step():
         controls=(Control("V1", None, 30.0, "time", value=600.0),),
         headloss="D-W",
     )
-    model, state, drivers = build_model(net)
-    _, dt = water_event_step(model, state, {**drivers, "water.time": _t(0.0)}, 3600.0)
-    assert dt == 3600.0
+    model, _, _ = build_model(dataclasses.replace(net, duration=3600.0))
+    diagnostics: dict = {}
+    water_run(model, diagnostics=diagnostics)
+    assert diagnostics["times"] == [0.0, 3600.0]
 
 
 def test_a_control_on_a_reservoir_or_a_numeric_setting_on_a_gpv_is_refused():

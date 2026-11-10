@@ -1,23 +1,23 @@
 """Water demonstration: Net1's 24 h extended period, over 8 demand multipliers.
 
-Runs EPANET's own Example Network 1 for a full day with its two tank-level pump controls,
-using the EVENT-SHORTENED hydraulic step (EPANET 2.2 Manual section 13.1 item 17, p.113),
-run SEQUENTIALLY over 8 demand multipliers -- one model per multiplier, not a batched leading
-dimension. `water_event_step` (one hydraulic solve per sub-step, the tank moved by
-forward Euler afterwards) shortens the step to each multiplier's OWN next
-control crossing, so the eight instances take a different number of sub-steps and land on
-different report times mid-run; a genuinely batched rollout would need a per-instance step
-(the sub-stepping loop below only ever advances one scalar `moment` at a time) or a
-global-minimum step shared by all eight, which oversamples the seven instances that did not
-need shortening on that particular sub-step -- undesirable either way, so the multipliers run
-sequentially. Prints the wall time, the tank-level trajectory of instance 0 and
-the number of hydraulic sub-steps the event shortening cost, and the Newton iterations of the
-hardest sub-step (the step where a control closes the pump and leaves pipe 10 dead-ended).
+Runs EPANET's own Example Network 1 for a full day with its two tank-level pump controls
+through `water_run` (EPANET 2.2's step rule: the hydraulic step shortened to the next pattern
+period, report time, tank fill or drain and control crossing, `hydraul.c`, `timestep`), run
+SEQUENTIALLY over 8 demand multipliers -- one run per multiplier, not a batched leading
+dimension. Each multiplier's pump switches at its own times, so its own run takes only its
+own step boundaries; a batched run (`water_run` with a leading dimension in the drivers)
+would share the shortest step of all eight, which oversamples the instances that did not
+need shortening and changes their explicit-Euler trajectories by millimetres
+(`tests/apps/water/test_simulate.py::test_batched_run_equals_single_runs`), so the benchmark
+keeps the sequential form it has always timed. Prints the wall time, the tank-level
+trajectory of multiplier 1.0, the number of hydraulic steps the event shortening cost, and
+the Newton iterations of the hardest step (the step where a control closes the pump and
+leaves pipe 10 dead-ended).
 
 `--pipe-form flow` runs the pipes in their resistance form (`build_model(pipe_form="flow")`,
 solved by Modified Nodal Analysis) instead of the default potential form. `--check-valve 21`
-makes Net1's pipe 21 a check valve (CV); its water runs backwards for 11 of the 26 sub-steps
-of the plain run, so the check valve is closed for much of the day (flow form only).
+makes Net1's pipe 21 a check valve (CV); its water runs backwards for 11 of the 26 steps of
+the plain run, so the check valve is closed for much of the day (flow form only).
 
 Run: `.venv/Scripts/python benchmarks/water_eps.py [--pipe-form potential|flow]
 [--check-valve PIPE]`
@@ -30,44 +30,22 @@ import dataclasses
 import time
 from pathlib import Path
 
-import torch
-
 from noodl.apps.water.inp import read_epanet_inp
-from noodl.apps.water.network import build_model, tank_levels, water_event_step
+from noodl.apps.water.network import build_model
+from noodl.apps.water.simulate import water_run
 
-F64 = torch.float64
 DATA = Path(__file__).resolve().parents[1] / "tests" / "data" / "water"
 MULTIPLIERS = (0.7, 0.8, 0.9, 1.0, 1.1, 1.2, 1.3, 1.4)
 
 
-def _pattern_factor(net, seconds: float) -> float:
-    if net.demand_pattern is None or net.demand_pattern not in net.patterns:
-        return 1.0
-    values = net.patterns[net.demand_pattern]
-    return values[int(seconds // net.pattern_timestep) % len(values)]
-
-
 def _run(net, multiplier: float, pipe_form: str = "potential") -> tuple[list[float], int, int]:
-    """One instance's 24 h trajectory, its sub-step count and its most Newton iterations."""
-    model, state, drivers = build_model(net, pipe_form=pipe_form)
-    base = drivers["water.sources"].clone() * multiplier
-    levels = [float(tank_levels(model, state)[0])]
-    moment = 0.0
-    sub_steps = 0
-    most = 0
-    while moment < net.duration - 1e-9:
-        report_end = moment + net.report_timestep
-        while moment < report_end - 1e-9:
-            step_drivers = dict(drivers)
-            step_drivers["water.sources"] = base * _pattern_factor(net, moment)
-            diagnostics: dict = {}
-            state, step = water_event_step(model, state, step_drivers, report_end - moment,
-                                           diagnostics=diagnostics)
-            most = max(most, diagnostics["layers"]["water"]["newton_iterations"])
-            moment += step
-            sub_steps += 1
-        levels.append(float(tank_levels(model, state)[0]))
-    return levels, sub_steps, most
+    """One instance's 24 h trajectory, its step count and its most Newton iterations."""
+    model, _, drivers = build_model(net, pipe_form=pipe_form)
+    drivers = {**drivers, "water.sources": drivers["water.sources"] * multiplier}
+    diagnostics: dict = {}
+    results = water_run(model, drivers=drivers, diagnostics=diagnostics)
+    steps = len(diagnostics["times"]) - 1
+    return results.tank_level[:, 0].tolist(), steps, max(diagnostics["newton_iterations"])
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -83,19 +61,19 @@ def main(argv: list[str] | None = None) -> None:
             for p in net.pipes))
     started = time.perf_counter()
     trajectories = []
-    total_sub_steps = 0
+    total_steps = 0
     most = 0
     for multiplier in MULTIPLIERS:
-        levels, sub_steps, worst = _run(net, multiplier, args.pipe_form)
+        levels, steps, worst = _run(net, multiplier, args.pipe_form)
         trajectories.append(levels)
-        total_sub_steps += sub_steps
+        total_steps += steps
         most = max(most, worst)
     elapsed = time.perf_counter() - started
     print(
         f"water_eps: Net1, {int(net.duration / 3600)} h, pipe_form={args.pipe_form}, "
         f"{'check valve ' + args.check_valve + ', ' if args.check_valve else ''}"
-        f"{len(MULTIPLIERS)} sequential demand multipliers, {total_sub_steps} hydraulic "
-        f"sub-steps in {elapsed:.2f} s; at most {most} Newton iterations in one sub-step"
+        f"{len(MULTIPLIERS)} sequential demand multipliers, {total_steps} hydraulic "
+        f"steps in {elapsed:.2f} s; at most {most} Newton iterations in one step"
     )
     print("tank 2 level (m) at each report step, demand multiplier 1.0:")
     baseline = trajectories[MULTIPLIERS.index(1.0)]

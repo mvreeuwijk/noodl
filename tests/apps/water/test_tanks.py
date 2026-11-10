@@ -1,7 +1,8 @@
-"""`TankLevels.event_step`, per tank; tanks held at boundary nodes and stepped by forward
+"""`TankLevels.control_time`, per tank; tanks held at boundary nodes and stepped by forward
 Euler (`tank_scheme="forward_euler"`, the default); and tanks stepped inside the solve as
 interior storage (`tank_scheme="backward_euler"`)."""
 
+import dataclasses
 import math
 from pathlib import Path
 
@@ -24,9 +25,10 @@ from noodl.apps.water.network import (
     initial_state,
     tank_inflow,
     tank_levels,
-    water_event_step,
+    water_steady,
     water_step,
 )
+from noodl.apps.water.simulate import water_run
 from noodl.apps.water.tanks import TankLevels, TankVolumeCurve
 from noodl.elements.base import LawContext
 from noodl.storage import LinearStorage
@@ -53,49 +55,37 @@ def _control(link, status, node, above, value):
     return Control(link, status, None, "node", node, above, value)
 
 
-def test_event_step_tests_each_control_against_its_own_tank():
-    """`TankLevels.event_step` must not test EVERY control against tank 0's level and
-    rate, whichever tank the control actually names. Here the control names "TB",
-    which is far from its trigger and barely moving (a crossing at 5000 s, past the 100 s
-    nominal step): the step must stay nominal. Tank "TA" (index 0) is deliberately placed
-    RIGHT next to a level of 10 with a fast rate, so that the bug -- reading index
-    0 regardless of the control's own node -- would have crossed almost immediately and
-    wrongly shortened the step to about 0.01 s.
+def _ahead(closure, level, rate):
+    """Seconds to the next control `closure` fires, its one link open."""
+    state = {"water.link_status": torch.ones(1, dtype=F64),
+             "water.link_setting": torch.zeros(1, dtype=F64)}
+    return closure.control_time(torch.tensor(level, dtype=F64), torch.tensor(rate, dtype=F64),
+                                {}, state)
+
+
+def test_the_control_time_tests_each_control_against_its_own_tank():
+    """`TankLevels.control_time` must not test EVERY control against tank 0's level and
+    rate, whichever tank the control actually names. Here the control names "TB", which
+    crosses 10 at 5000 s; tank "TA" (index 0) is deliberately placed right next to a level
+    of 10 with a fast rate, so that the bug -- reading index 0 regardless of the control's
+    own node -- would cross after about 0.01 s.
     """
-    closure = _two_control_closure(
-        (_control("P1", CLOSED, "TB", True, 10.0),)
-    )
-    level = torch.tensor([9.99, 5.0], dtype=F64)
-    rate = torch.tensor([1.0, 1e-3], dtype=F64)
-    assert closure.event_step(level, rate, 100.0) == 100.0
+    closure = _two_control_closure((_control("P1", CLOSED, "TB", True, 10.0),))
+    assert _ahead(closure, [9.99, 5.0], [1.0, 1e-3]) == 5000.0
 
 
-def test_event_step_shortens_to_the_named_tanks_own_crossing():
-    """The mirror case: the control's own tank DOES cross within the nominal step, while
-    the OTHER tank (which the bug would have used) does not."""
-    closure = _two_control_closure(
-        (_control("P1", CLOSED, "TB", True, 10.0),)
-    )
-    level = torch.tensor([1.0, 9.99], dtype=F64)
-    rate = torch.tensor([1e-6, 1.0], dtype=F64)
-    step = closure.event_step(level, rate, 100.0)
-    assert step < 1.0
-    expected = (10.0 - 9.99) / 1.0 + 1e-9
-    assert step == expected
+def test_the_control_time_is_the_named_tanks_own_crossing():
+    """The mirror case: the control's own tank crosses in 1 s, while the OTHER tank (which
+    the bug would have used) takes 9e6 s."""
+    closure = _two_control_closure((_control("P1", CLOSED, "TB", True, 10.0),))
+    assert _ahead(closure, [1.0, 9.0], [1e-6, 1.0]) == 1.0
 
 
-def test_event_step_with_controls_on_both_tanks_takes_the_earliest_crossing():
-    closure = _two_control_closure(
-        (
-            _control("P1", CLOSED, "TA", True, 10.0),
-            _control("P1", OPEN, "TB", True, 10.0),
-        )
-    )
-    level = torch.tensor([9.0, 9.9], dtype=F64)
-    rate = torch.tensor([1.0, 1.0], dtype=F64)
-    # TA crosses at 1.0 s, TB at 0.1 s -- the earlier one governs.
-    step = closure.event_step(level, rate, 100.0)
-    assert step == (10.0 - 9.9) / 1.0 + 1e-9
+def test_the_control_time_with_controls_on_both_tanks_takes_the_earliest_crossing():
+    closure = _two_control_closure((_control("P1", CLOSED, "TA", True, 10.0),
+                                    _control("P1", CLOSED, "TB", True, 10.0)))
+    # TA crosses at 2 s, TB at 1 s -- the earlier one governs.
+    assert _ahead(closure, [8.0, 9.0], [1.0, 1.0]) == 1.0
 
 
 # ------------------------------------------------------------------ tank storage
@@ -134,27 +124,35 @@ def test_forward_euler_holds_the_tanks_at_boundary_nodes():
     assert torch.equal(fresh["water.phi"], state["water.phi"])
 
 
-def test_event_step_solves_once_and_moves_the_tank_by_dt_inflow_over_area():
-    """One solve with the tank held at its step-start head, then `dt * inflow / A`; the
-    flow into the tank is the inflow the solve delivered (`tank_inflow`)."""
-    model, state, drivers = build_model(read_epanet_inp(NET1))
+def _half_hours(path=NET1, steps=1, step=1800.0):
+    """A model of `path` stepped and reported every `step` s for `steps` steps."""
+    net = dataclasses.replace(read_epanet_inp(path), hydraulic_timestep=step,
+                              report_timestep=step, duration=steps * step)
+    return build_model(net)
+
+
+def test_a_step_solves_once_and_moves_the_tank_by_dt_inflow_over_area():
+    """One solve with the tank held at its step-start head, then `dt * inflow / A`, the
+    inflow the solve delivered (`hydraul.c`, `tanklevels`)."""
+    model, state, drivers = _half_hours()
     layer = model.kirchhoff["water"]
     tank = model.node_names.index("2")
     calls = []
     solve = layer.solve
     layer.solve = lambda *a, **k: calls.append(1) or solve(*a, **k)
     try:
-        stepped, dt = water_event_step(model, state, drivers, 1800.0)
+        out = water_run(model)
     finally:
         del layer.solve
-    assert calls == [1] and dt == 1800.0
-    inflow = tank_inflow(model, stepped)
+    assert len(calls) == 2 and out.time.tolist() == [0.0, 1800.0]   # at 0 and at the end
+    inflow = -layer.net_outflow(out.flow[0])[tank]
     torch.testing.assert_close(
-        inflow, -layer.net_outflow(stepped["water.q"])[..., [tank]], rtol=0, atol=0)
+        tank_inflow(model, water_steady(model, state, drivers)), inflow.reshape(1),
+        rtol=1e-12, atol=0)
     area = torch.pi * model.water_network.tanks[0].diameter ** 2 / 4.0
-    expected = state["water.phi"][tank] + 1800.0 * inflow[0] / area
-    assert float(stepped["water.phi"][tank]) == pytest.approx(float(expected), rel=1e-15)
-    assert float(inflow[0]) > 0.0
+    expected = out.tank_level[0, 0] + 1800.0 * inflow / area
+    assert float(out.tank_level[1, 0]) == pytest.approx(float(expected), rel=1e-15)
+    assert float(inflow) > 0.0
 
 
 def test_storage_mode_makes_the_tanks_interior_storage_nodes():
@@ -180,23 +178,30 @@ def test_storage_mode_refuses_quality_and_each_scheme_refuses_the_others_step():
     with pytest.raises(ValueError, match="tank_scheme must be"):
         build_model(read_epanet_inp(NET1), tank_scheme="explicit")
     model, state, drivers = build_model(read_epanet_inp(NET1))
-    with pytest.raises(ValueError, match="water_event_step"):
+    with pytest.raises(ValueError, match="with water_run"):
         water_step(model, state, drivers, 60.0)
     model, state, drivers = build_model(read_epanet_inp(NET1), tank_scheme="backward_euler")
     with pytest.raises(ValueError, match="with water_step"):
-        water_event_step(model, state, drivers, 60.0)
+        water_run(model)
 
 
 def _first_hours(tank_scheme, dt, hours=3.0):
-    """Net1 at its first demand multiplier for `hours`, fixed steps of `dt` s."""
+    """Net1 at its first demand multiplier (its demand pattern dropped) for `hours`, fixed
+    steps of `dt` s."""
     net = read_epanet_inp(NET1)
+    net = dataclasses.replace(net, patterns={}, demand_pattern=None, junctions=tuple(
+        dataclasses.replace(j, pattern=None) for j in net.junctions))
+    if tank_scheme == "forward_euler":
+        steps = round(hours * 3600 / dt)
+        model, _, _ = build_model(dataclasses.replace(
+            net, hydraulic_timestep=dt, report_timestep=dt, duration=steps * dt))
+        diagnostics: dict = {}
+        out = water_run(model, diagnostics=diagnostics)
+        assert len(diagnostics["times"]) == steps + 1   # no crossing
+        return float(out.tank_level[-1, 0])
     model, state, drivers = build_model(net, tank_scheme=tank_scheme)
     for _ in range(round(hours * 3600 / dt)):
-        if tank_scheme == "backward_euler":
-            state = water_step(model, state, drivers, dt)
-        else:
-            state, taken = water_event_step(model, state, drivers, dt)
-            assert taken == dt   # no control is crossed in the first hours
+        state = water_step(model, state, drivers, dt)
     return float(tank_levels(model, state)[0])
 
 
@@ -313,32 +318,26 @@ def test_a_volume_curve_tank_is_one_tank_volume_curve_storage(tmp_path):
 def test_volume_curve_advance_conserves_volume(tmp_path):
     """One EPANET step of a tank on a volume curve changes its VOLUME by exactly
     dt * inflow (`hydraul.c`, `tanklevels`: V += q dt, H = tankgrade(V))."""
-    model, state, drivers = build_model(read_epanet_inp(_net1_with_volume_curve(tmp_path)))
+    model, state, drivers = _half_hours(_net1_with_volume_curve(tmp_path))
     (storage,) = model.kirchhoff["water"].storage
-    tank = storage.nodes
-    stepped, dt = water_event_step(model, state, drivers, 1800.0)
-    assert dt == 1800.0
-    inflow = tank_inflow(model, stepped)
-    before = storage.amount(state["water.phi"][tank])
-    after = storage.amount(stepped["water.phi"][tank])
-    torch.testing.assert_close(after - before, dt * inflow, rtol=1e-12, atol=0)
+    out = water_run(model)
+    inflow = tank_inflow(model, water_steady(model, state, drivers))
+    before, after = (storage.amount(out.head[k, storage.nodes]) for k in (0, 1))
+    torch.testing.assert_close(after - before, 1800.0 * inflow, rtol=1e-12, atol=0)
     assert float(inflow[0]) > 0.0
 
 
 def test_volume_curve_gradient_against_central_differences(tmp_path):
     """d(tank level after 3 steps) / d(one volume of the curve), through the inverse of
     every step, against central differences."""
-    model, state, drivers = build_model(read_epanet_inp(_net1_with_volume_curve(tmp_path)))
+    model, state, drivers = _half_hours(_net1_with_volume_curve(tmp_path), steps=3,
+                                        step=1200.0)
     (storage,) = model.kirchhoff["water"].storage
     storage.volumes.requires_grad_(True)
     j = 2   # the point at 110 ft, whose segments the level is on
 
     def level():
-        s = state
-        for _ in range(3):
-            s, dt = water_event_step(model, s, drivers, 1200.0)
-            assert dt == 1200.0
-        return tank_levels(model, s)[0]
+        return water_run(model).tank_level[-1, 0]
 
     (analytic,) = torch.autograd.grad(level(), storage.volumes)
     # MEASURED: 1.4e-9 relative at this step; 1e-3 of the volume leaves 1.6e-5 of truncation
@@ -491,7 +490,7 @@ def test_a_flat_volume_segment_is_a_jump_in_level():
     `interp`): the flat volume 10 is at the segment's LOWER level, 1 m; a volume just above
     it is just above 2 m; and the volume is flat (10) at every level between. The area
     toward the flat segment is the neighbour's, and 1 inside it (a level only a tank's
-    initial level can have): `water_event_step` reads only its sign, never a time or a
+    initial level can have): `water_run` reads only its sign, never a time or a
     level."""
     curve = TankVolumeCurve([0], torch.zeros(1, dtype=F64), [[0.0, 1.0, 2.0, 3.0]],
                             [[0.0, 10.0, 10.0, 20.0]])
@@ -515,17 +514,18 @@ def test_a_full_tank_on_a_flat_tail_is_put_at_its_lower_end(tmp_path):
     140 ft holds by volume there (`controls`), so the first step drains it."""
     path = _net1_with_volume_curve(tmp_path, points=((0, 0), (60, 90000), (110, 200000),
                                                      (160, 200000)))
-    model, state, drivers = build_model(read_epanet_inp(path))
-    stepped, dt = water_event_step(model, state, drivers, 3600.0)
-    assert float(tank_inflow(model, stepped)[0]) < 0.0
-    assert float(tank_levels(model, stepped)[0]) < 110.0 * 0.3048
+    model, state, drivers = _half_hours(path, step=3600.0)
+    tank = model.node_names.index("2")
+    layer = model.kirchhoff["water"]
+    out = water_run(model)
+    assert float(-layer.net_outflow(out.flow[0])[tank]) < 0.0
+    assert float(out.tank_level[1, 0]) < 110.0 * 0.3048
     # the same tank with the pump held open fills it: put at 110 ft
-    model, state, drivers = build_model(read_epanet_inp(path))
+    model, state, drivers = _half_hours(path, step=3600.0)
     model.control_closure.controls = []
-    stepped, dt = water_event_step(model, state, drivers, 3600.0)
-    assert float(tank_inflow(model, stepped)[0]) > 0.0
-    torch.testing.assert_close(tank_levels(model, stepped),
-                               torch.tensor([110.0 * 0.3048], dtype=F64))
+    out = water_run(model)
+    assert float(-model.kirchhoff["water"].net_outflow(out.flow[0])[tank]) > 0.0
+    torch.testing.assert_close(out.tank_level[1], torch.tensor([110.0 * 0.3048], dtype=F64))
 
 
 def test_time_to_limit_skips_a_tank_with_no_net_inflow():

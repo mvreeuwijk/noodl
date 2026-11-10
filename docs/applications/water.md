@@ -147,6 +147,100 @@ extrapolated point off the end of the curve. (A segmented curve's last segment a
 constant-power pump are extended without a limit, as EPANET extends them.) A converged pump
 carrying flow backwards is refused by name too.
 
+## Running over time
+
+`water_run(model, state=None, drivers=None, *, duration=None, diagnostics=None, **solve_kwargs)`
+is EPANET 2.2's extended-period run (`hydraul.c`, `runhyd` and `nexthyd`), on a model built
+with the default `tank_scheme="forward_euler"`. From `state` (`initial_state(model)` when
+`None`) it repeats, at each step's start time $t$ in whole seconds:
+
+1. **patterns** (`demands`): each junction's demand is its base demand in `"water.sources"`
+   times its pattern's multiplier `pattern_factor(net, pattern, t)` (its own pattern, else
+   `[OPTIONS] PATTERN`, else a pattern named "1"), with the pattern period
+   $\lfloor (t + \text{PATTERN START}) / \text{PATTERN TIMESTEP} \rfloor$; a reservoir's head
+   follows its head pattern; a pump's speed pattern sets its speed, 0 closing it and a positive
+   speed opening it again (`setlinksetting`);
+2. **controls and solve**: the simple controls are applied and the network solved
+   (`water_steady`), the junction-pressure controls solving it again up to 10 times;
+3. **the step**: the hydraulic step, ended at the next pattern period, the next report time,
+   the time a tank fills or empties and the time to the next control that would change a link
+   (`timestep`, `tanktimestep`, `controltimestep`), the last two rounded to whole seconds as
+   EPANET rounds them, and at the run's end;
+4. **the tanks** move by volume over the step, $V \mathrel{+}= q\,\Delta t$, a tank within one
+   second's inflow of a limit put on it (`tanklevels`). With `[RULES]` the step is walked in rule
+   steps: the first to the next multiple of `RULE TIMESTEP`, the tanks moved and the rules
+   checked after each (`apply_rules`); a rule that takes an action ends the step there
+   (`ruletimestep`), and the next solve applies the simple controls first.
+
+The results are kept at the report times, `REPORT START` and every `REPORT TIMESTEP` after it
+to the duration, as EPANET writes them: each the solve at that time (a tank's level is its
+level at the step's start, the flows are those of the step that starts there).
+
+```python
+from noodl.apps.water import read_epanet_inp, build_model, water_run
+
+net = read_epanet_inp("Net1.inp")       # 24 h, two tank-level pump controls
+model, state, drivers = build_model(net)
+run = water_run(model)
+
+print(run.time[:3].tolist(), tuple(run.tank_level.shape))
+print([round(float(level), 3) for level in run.tank_level[:4, 0]])   # tank 2, m
+pump = run.link_names.index("9")
+print([int(t // 3600) for t, s in zip(run.time, run.status[:, pump]) if s == 0])
+```
+
+```text
+[0.0, 3600.0, 7200.0] (25, 1)
+[36.576, 37.511, 38.425, 39.056]
+[13, 14, 15, 16, 17, 18, 19, 20, 21, 22]
+```
+
+The pump fills the tank until it reaches the 140 ft (42.67 m) trigger, between 12 and 13 h,
+and is closed until the level falls to 110 ft; the step that crosses a trigger ends at the
+crossing (to the whole second), so each switch is on time. `WaterResults` holds, at every
+report time:
+
+| Field | Shape | Meaning |
+| --- | --- | --- |
+| `time` | `(T,)` | seconds from the start |
+| `head`, `pressure` | `(..., T, n_nodes)` | m; the pressure is the head less the elevation (a reservoir's base head, a tank's bottom) |
+| `flow` | `(..., T, n_links)` | m³/s |
+| `status` | `(..., T, n_links)` | `CLOSED`, `OPEN` or `ACTIVE` as the solve found the link (`link_states`) |
+| `setting` | `(..., T, n_links)` | a pump's speed (0 when closed), a PRV's, PSV's or PBV's head (m), an FCV's flow, a TCV's coefficient |
+| `tank_level`, `tank_overflow` | `(..., T, n_tanks)` | m above the bottom; m³/s spilt by a tank that may overflow |
+| `demand`, `emitter_flow` | `(..., T, n_junctions)` | m³/s delivered (the requested demand, or the pressure-driven delivery) and the emitters' outflow; EPANET reports their sum as the demand |
+| `energy` | | the pumps' energy (not yet filled: `None`) |
+
+`node_names` and `link_names` give the columns. `duration=` overrides `DURATION`, and
+`diagnostics={}` receives `"times"` (every solve's time) and `"newton_iterations"`. The run owns
+the driver `"water.time"`; the drivers passed are the base values the patterns scale.
+
+**Batches.** A leading dimension in the state or the drivers is a batch of instances that share
+one step: the shortest any of them needs (a rule that acts in one ends it for all). Each
+instance then takes the others' step boundaries as well as its own, and so differs from its
+own single run by exactly those extra boundaries (each an extra solve of EPANET's explicit
+step): two Net1 instances at 0.8 and 1.25 times the demand are each their single run, forced
+onto the batch's boundaries, to 1e-9 m, and up to 6.5e-3 m from their plain single runs
+(`tests/apps/water/test_simulate.py::test_batched_run_equals_single_runs`).
+
+```python
+import torch
+
+base = drivers["water.sources"]
+batch = {**drivers, "water.sources": torch.stack([0.8 * base, 1.25 * base])}
+runs = water_run(model, drivers=batch)
+print(tuple(runs.tank_level.shape))
+```
+
+```text
+(2, 25, 1)
+```
+
+Gradients reach the heads, flows, levels and demands through the solves and the tank moves
+(a tank's area or volume curve, a demand, a roughness, a setting given as a driver); not
+through the step lengths or a switch. The implicit tank schemes (`tank_scheme="backward_euler"`
+or `"trapezoidal"`) are refused by name: their step is `water_step`'s, which no rule shortens.
+
 ## The physics
 
 ### Hazen-Williams
@@ -179,7 +273,8 @@ The exponent $-1.333$ is EPANET's literal, not $-4/3$. `ChezyManning` converts $
 $(\mathrm{m^3/s})^2$ with the file's own flow factor (as Darcy-Weisbach does), takes EPANET's
 `RQtol` line below the gradient floor, and carries the minor loss $m$ as `K / d^4` with EPANET's
 rounded constant. It works in metres of head, so, like Hazen-Williams, it refuses a
-non-default `SPECIFIC GRAVITY` or `VISCOSITY` by name. It enters the solve through
+non-default `VISCOSITY` by name; a `SPECIFIC GRAVITY` only converts the file's pressures to
+heads, which the reader does. It enters the solve through
 `FlowControlledPipe` like Hazen-Williams, so check valves and closed pipes work unchanged.
 
 ### Darcy-Weisbach
@@ -445,9 +540,9 @@ Every form of `[CONTROLS]` is modelled (`noodl.apps.water.controls.apply_control
 
 | Form | When it acts |
 | --- | --- |
-| `AT TIME t` | at the step that starts at `t` seconds; the driver `"water.time"` is the step's start (set it each step; the builder creates it when the network has such a control) |
+| `AT TIME t` | at the step that starts at `t` seconds; the driver `"water.time"` is the step's start (`water_run` sets it; the builder creates it when the network has such a control) |
 | `AT CLOCKTIME t` | when `(time + START CLOCKTIME) mod 24 h` equals `t` |
-| `IF NODE <tank> ABOVE or BELOW v` | at the start of a step, on the tank's level |
+| `IF NODE <tank> ABOVE or BELOW v` | at the start of a step, on the tank's volume, with one second of the previous solve's inflow as margin (EPANET's `controls`: $V \ge V(v) - |q|$ for ABOVE) |
 | `IF NODE <junction> ABOVE or BELOW v` | after a converged solve, on the pressure head within EPANET's `Htol` (0.0005 ft) of `v`: a link it switches is solved again (`water_steady`; at most 10 times) |
 
 The action is `OPEN`, `CLOSED` or a number. A number on a valve makes it `ACTIVE` at that
@@ -455,29 +550,21 @@ setting (a PRV's or PSV's head, an FCV's flow, a TCV's coefficient, in the units
 `"water.setting"`); on a pump it is the relative speed, and 0 closes it; `OPEN` runs a pump at
 speed 1, as EPANET does. The controls are tested in file order and the last one that holds wins.
 A step ends at the next time control and at the next tank level that reaches a control's trigger
-(`next_control_time`), but only for a control that would change its link's status or setting:
+(`next_control_time`, rounded to whole seconds), but only for a control that would change its
+link's status or setting:
 a pump already running does not split a step at its `OPEN AT TIME`, as in EPANET. Junction-pressure
 controls need `tank_scheme="forward_euler"` (or no tanks): `water_step` does not repeat the solve.
 
 That shortening is not optional. A fixed one-hour step was measured to diverge from EPANET by
 **2.07 m** on Net1, because the pump switches an hour late; with event shortening the same
-trajectory matches to **3.826e-5 m**.
+trajectory matches to **2.5e-5 m**. The margin of the level test matters as much: a crossing
+rounded to whole seconds may end half a second short, and with a strict level test instead
+the pump switches a step late (MEASURED: 0.76 m off on Net1 with time controls added). The
+previous solve's inflow is the driver `"water.tank_inflow"`, which `water_run` sets.
 
-`water_event_step(model, state, drivers, dt_max)` takes one such step. It solves once
-(`water_steady`, with every tank held), shortens `dt_max` to the next control crossing at the
-solved inflow, moves the tanks, and returns `(state, dt)`; with time controls the driver
-`"water.time"` is the step's start. An extended-period run therefore
-looks like this:
-
-```py
-while t < duration:
-    drivers["water.sources"] = base_demand * pattern_factor(t)
-    state, dt = water_event_step(model, state, drivers, report_end - t)
-    t += dt
-```
-
-Gradients with respect to a tank's area (the storage's capacity `C`) reach the levels through
-the move of each step.
+[Running over time](#running-over-time) is the run that takes these steps. Gradients with
+respect to a tank's area (the storage's capacity `C`) reach the levels through the move of
+each step.
 
 **Volume curves.** A tank with a volume curve is a `TankVolumeCurve`: its volume is EPANET's
 `tankvolume`, linear between the curve's points and the end values beyond them (`interp`,
@@ -494,10 +581,10 @@ segment has no area, and the level jumps across it. EPANET's `tankgrade` gives t
 the segment's lower level and any volume above it a level above its upper one, and
 `potential_of` is the same transcription. A tank whose maximum (minimum) level lies on a flat
 stretch has that stretch's volume as its `Vmax` (`Vmin`) and, filled (drained) to it, is put
-at `tankgrade(Vmax)`, the stretch's lower end, as `tanklevels` puts it. A tank on a volume
-curve tests its level controls by volume, as EPANET's `controls` (`hydraul.c`) does,
+at `tankgrade(Vmax)`, the stretch's lower end, as `tanklevels` puts it. Every tank tests its
+level controls by volume, as EPANET's `controls` (`hydraul.c`) does,
 $V(y) \ge V(y_c) - |q|$ (ABOVE) and $V(y) \le V(y_c) + |q|$ (BELOW) with $q$ one second of
-the last solve's inflow, so on a flat stretch every control level on it is reached at once.
+the previous solve's inflow, so on a flat stretch every control level on it is reached at once.
 The times to a control or a limit use the inflow, not an area.
 
 **Full and empty tanks.** A tank within EPANET's `HTOL` (0.0005 ft) of its maximum level is
@@ -510,11 +597,11 @@ only, in `"water.status"` and `"water.one_way"`, not in the carried state. As in
 link whose start node is a tank or reservoir is examined at its start node only, so a pump
 from a reservoir into a full tank keeps running (EPANET then puts the tank back at its maximum
 each step, and the water is lost). A valve at a full or empty tank is refused by name.
-`water_event_step` ends a step when a tank fills or empties (`TankLevels.time_to_limit`, rounded
+`water_run` ends a step when a tank fills or empties (`TankLevels.time_to_limit`, rounded
 to whole seconds as `tanktimestep` rounds it) and puts a tank within one second's inflow of a
 limit on it (`tanklevels`). A tank with `overflow=True` is never full: its inlet stays open,
-its level is held at the maximum, and `tank_overflow(model, state, stepped, dt)` is the flow
-spilt over the step. Volume curves and overflow are refused with the implicit schemes below,
+its level is held at the maximum, and `WaterResults.tank_overflow` is the flow it spills over
+the step from each report time. Volume curves and overflow are refused with the implicit schemes below,
 which also refuse a level outside the limits by name, since a tank moved inside the solve has
 no step start to close links at.
 
@@ -528,10 +615,9 @@ step-start levels. The step is differentiable through time (the gradient of a le
 several steps matches central differences). It is **not** the EPANET comparison mode: the
 implicit step differs from EPANET's explicit one by the step's own discretisation error. Both
 converge to the same trajectory, at first order: on Net1, halving the storage step halves its
-distance from a fine explicit run. Its `event_step` never shortens a step below 1 s (the
-implicit step lands just short of a projected crossing, and a far shorter step stalls Newton),
-and with steps as long as an hour a switch can land up to a step late, so sub-steps of a few
-minutes are the useful range. Not with `quality`: the combination is refused with a
+distance from a fine explicit run. Its step is the caller's and is never shortened (`water_run`
+refuses these schemes), so with steps as long as an hour a switch can land up to a step late,
+and sub-steps of a few minutes are the useful range. Not with `quality`: the combination is refused with a
 `ValueError` (a storage tank is an interior node with node storage, which
 the quality layer does not model as a well-mixed volume); use the default `tank_scheme` for
 water quality, where a tank is a quality boundary whose concentration the caller sets.
@@ -564,8 +650,9 @@ gives (`tests/apps/water/test_rules.py`, measured on `wntr`'s EPANET).
 
 `apply_rules(model, state, drivers, *, time, step)` tests the rules on a solved `state`
 and returns `(state, changed)`: the state with the carried `"water.link_status"` and
-`"water.link_setting"` after the actions, and per instance whether a link moved, which asks for
-a new solve. `step`, the interval since the previous check, is required and positive: EPANET
+`"water.link_setting"` after the actions, and per instance whether an action was taken
+(EPANET's action count, which asks for a new solve: a pump the solver shut at shut-off is
+reopened by `STATUS IS OPEN` at every check while it stays shut). `step`, the interval since the previous check, is required and positive: EPANET
 never checks the rules over an empty interval, and a `TIME` or `CLOCKTIME` premise tests that
 interval. The actions are tested against the link states of the solve (`link_states`, EPANET's
 `LinkStatus`): `OPEN` reopens a PRV the solver closed and a pump it shut at shut-off (at speed
@@ -575,9 +662,9 @@ the flow runs back through reads `OPEN` (`XFCV`; its hysteresis needs the last s
 which is not carried). The order within a time point is EPANET's: the rules are checked at the
 end of a step, at its time T, and the next solve at T applies the simple controls first, so a
 control that fires at T stands over a rule's action on the same link. `water_steady` has no
-time and applies no rule; a driver of time calls `apply_rules` at each rule time step
-(`WaterNetwork.rule_timestep`, a tenth of the hydraulic step unless `RULE TIMESTEP` says
-otherwise). A batched state is tested instance by instance. `SYSTEM DEMAND` is the sum of the
+time and applies no rule; `water_run` calls `apply_rules` at each rule time step inside a
+hydraulic step (`WaterNetwork.rule_timestep`, a tenth of the hydraulic step unless
+`RULE TIMESTEP` says otherwise), never at t = 0, and a rule that acts ends the step. A batched state is tested instance by instance. `SYSTEM DEMAND` is the sum of the
 junctions' positive demands; EPANET clamps each demand category of a junction, which are
 added up here.
 
@@ -629,10 +716,14 @@ on-disk reals are **float32**, so roughly 1e-7 relative is EPANET's own precisio
 | `twoloop_si.inp` heads and flows | rel 1e-6 | **4.361e-7** heads, **8.090e-8** flows |
 | `twoloop_si.inp`, noodl physics' own nodal continuity | 1e-13 | **2.093e-14** |
 | Net1 single period: heads, flows, pump head gain, pump flow | 1e-6 / 1e-6 / 1e-6 / 1e-8 m³/s | 7.224e-8, 2.647e-7, 1.942e-7, 3.2e-9 m³/s |
-| Net1 24 h tank level with level-triggered pump controls | 2e-4 m | **3.826e-5 m** worst of 25 steps |
-| Net1 24 h tank level with `AT TIME`, `AT CLOCKTIME` (START CLOCKTIME 8 am) and junction-pressure pump controls added | 2e-4 m | 1.8e-4 m (time and clock time; the cause is both EPANET's whole-second rounding of a crossing and its `+-|q|` volume margin in the level test, both Task 10), 3.4e-5 m (pressure) |
-| Net1 24 h, tank on a five-point volume curve: levels, pipe 110 flow | 2e-4 m / 1e-6 m³/s | 6.9e-5 m, 5.5e-8 m³/s |
-| Net1 24 h, tank on a volume curve with a flat segment: below the range, crossed by the level (110-120 ft), the tail from 110 ft: levels, pipe 110 flow | 2e-4 m (tail 5e-4 m, see Limitations) / 1e-6 m³/s | 6.9e-5, 1.7e-4, 3.8e-4 m; 5.6e-8, 5.6e-8, 4.4e-7 m³/s |
+| Net1 24 h tank level with level-triggered pump controls (`water_run`) | 2e-4 m | **2.5e-5 m** worst of 25 steps (26 hydraulic steps) |
+| Net1 24 h tank level with `AT TIME`, `AT CLOCKTIME` (START CLOCKTIME 8 am) and junction-pressure pump controls added | 2e-4 m | 2.4e-5 m (time and clock time; 1.8e-4 m before EPANET's whole-second crossings and volume margin), 2.2e-5 m (pressure) |
+| Net1 24 h with REPORT START and TIMESTEP 2 h; PATTERN START 1 h; a pump speed pattern (with a 0); a reservoir head pattern: report times, heads, levels, flows, states, pump setting | 1e-5 / 2e-4 m / 1e-6 m³/s / equal | heads 1.8e-7, 2.4e-7, 8.5e-8, 9.3e-8; levels 1.9e-5, 2.4e-5, 2.0e-5, 2.8e-5 m; flows 5.2e-8 to 5.9e-8 m³/s |
+| Four rules (ELSE, PRIORITY, CLOCKTIME, a PRESSURE premise) on a tank, a pump and a PRV, 24 h, RULE TIMESTEP 5 min, against EPANET's toolkit; PRIORITY flipped too | 2e-4 m / 1e-5 / 1e-6 m³/s / equal | 2.6e-5 m, 1.1e-6, 4.0e-8 m³/s; pump states and PRV settings equal at every hour |
+| A batch of two Net1 instances (0.8 and 1.25 times the demand) against each run alone on the batch's step boundaries; against the plain single runs | 1e-9 m / 1e-2 m | exact to 1e-9 m; 6.5e-3 m (the extra boundaries' explicit-step difference, see Limitations) |
+| SPECIFIC GRAVITY 1.2 on an LPS file with pressure-driven demand and an emitter, 2 h of a pattern: heads, flows, demand plus emitter outflow | 1e-6 / 1e-6 m³/s / 1e-6 m³/s | 1.3e-7, 2.2e-7, 1.0e-7 (EPANET's LPS factor applied) |
+| Net1 24 h, tank on a five-point volume curve: levels, pipe 110 flow | 2e-4 m / 1e-6 m³/s | 2.8e-5 m, 5.5e-8 m³/s |
+| Net1 24 h, tank on a volume curve with a flat segment: below the range, crossed by the level (110-120 ft), the tail from 110 ft: levels, pipe 110 flow | 2e-4 m / 1e-6 m³/s | 2.8e-5, 2.7e-5, 2.4e-5 m; 5.5e-8, 5.6e-8, 5.1e-8 m³/s |
 | Net1 24 h without controls: the tank fills, its inlet closes; levels, pipe 110 and pump flows | 2e-4 m / 1e-6 m³/s | 2.5e-5 m, 3.7e-8 m³/s |
 | Net1 24 h at 1.5 times the demand: the tank empties and refills | 2e-4 m / 1e-6 m³/s | 2.3e-5 m, 3.2e-8 m³/s |
 | A pump into a tank that starts full (closed, then filling it to full many times an hour), 12 h | 2e-4 m / 1e-6 m³/s | 5.3e-6 m, 8.9e-9 m³/s |
@@ -718,23 +809,21 @@ independent loop is a property of the cycle-space formulation, and it holds exac
 
 ## Limitations
 
-- **Not modelled, refused by name:** pump speed patterns and a numeric `[STATUS]` on a pump (a pump's speed is the driver
+- **Not modelled, refused by name:** a numeric `[STATUS]` on a pump (a pump's speed is the driver
   `"water.setting"`); a valve at a full or empty tank;
-  leakage; energy and cost reports. A file using any of these raises an error naming the
+  leakage. Energy and cost are not reported yet (`WaterResults.energy` is `None`). A file using any of these raises an error naming the
   feature.
 - **Rules.** `FILLTIME` and `DRAINTIME` premises and the `DAY` and `POWER` ones are refused. A
   pump closed by a rule keeps its speed in `"water.link_setting"` (the controls' trade-off); a
-  `SETTING` premise on it reads 0, as EPANET. The extended-period driver that checks the rules
-  at each rule time step (`water_run`, to come) is separate: `apply_rules` is the function it
-  calls.
+  `SETTING` premise on it reads 0, as EPANET.
 - **Controls.** `validate()` refuses a control on a reservoir (`IF NODE <reservoir>`): EPANET
   2.2 compares tank volumes and a reservoir has area 0, so such a control always holds. A pump
   closed by a control keeps its speed in `"water.link_setting"` where EPANET sets it to 0 (no
   flow differs: the pump is shut; read `"water.status"` too). A control that sets a pump's
   built speed leaves the `"water.setting"` driver in force (a calibration driver at 0.9 stays
   0.9 after an `OPEN`, EPANET gives 1.0). `water_step` and the implicit schemes never shorten
-  a step to a time control, which fires only if a step starts exactly on its second. The
-  simulation time is a driver, set by the caller each step; `water_run` will own it.
+  a step to a time control, which fires only if a step starts exactly on its second
+  (`water_run` refuses them).
 - **Hazen-Williams heads carry EPANET's rounded flow-unit factor as a difference.** EPANET
   converts an LPS file's flows with `LPSperCFS = 28.317` (exact 28.3168466), so its internal
   flows are 5.4e-6 relative smaller and its Hazen-Williams losses 1.0e-5 smaller than this
@@ -794,7 +883,7 @@ independent loop is a property of the cycle-space formulation, and it holds exac
   traced sources has not been compared against EPANET.
 - **Tank area does not enter a single `water_steady` call.** Only the tank's head enters the
   steady solve, so gradients with respect to tank area come from a time-stepped run
-  (`water_event_step`), not from the steady state.
+  (`water_run`), not from the steady state.
 - **An empty tank that was a part's only supply** leaves that part cut off: the pipe to it
   then refuses to drain it, and the solve is refused by name before it starts ("junction(s)
   ... have a demand that no reservoir, tank or inflow reaches"), where EPANET reports negative
@@ -803,12 +892,6 @@ independent loop is a property of the cycle-space formulation, and it holds exac
   solves Net1 with `(110, 80000)` after `(60, 90000)`), but a volume that falls as the level
   rises is not physical; `validate()` and `TankVolumeCurve` refuse it by name. Flat segments
   are accepted.
-- **Control crossings are not rounded to whole seconds yet.** EPANET rounds the time to a tank
-  control's level (`controltimestep`, `ROUND(v / q)`); `water_event_step` steps to the exact
-  crossing. Where a pump switches often this adds up: Net1 on a volume curve with a flat tail
-  at 110 ft switches 34 times a day and its levels differ from EPANET's by 3.8e-4 m (2.4e-5 m
-  with the crossings rounded). The extended-period driver `water_run`, still to come, takes
-  EPANET's step rule.
 - **Links of extreme resistance that must carry a demand are not solved.** Anytown's 0.0001 in
   placeholder pipes alone feed three junctions; EPANET reports heads of -9.9e24 m there, and
   noodl's Newton cannot bring a row whose two terms are 9.9e24 m below its tolerance (one
@@ -818,11 +901,23 @@ independent loop is a property of the cycle-space formulation, and it holds exac
   pairs of pipes joining the same junctions carry 1e-6 to 2e-5 m³/s on head-loss slopes of
   1e-4 to 1e-2 m per m³/s; EPANET's split leaves their Hazen-Williams losses 1.0e-7 m apart,
   and its flows differ from noodl's (whose losses cancel to 3.5e-10 m) by up to 1.9e-6 m³/s.
-- **Tank steps are whole-network.** `water_event_step` shortens the step to the earliest
-  time any tank fills or empties, over every instance of a batch.
-- **Tank level events are not tested on a batch.** `water_event_step` takes one step length for
-  the whole batch, and a batched `(B, n_tanks)` rollout with level-triggered controls is not
-  checked against EPANET. Run batched tank simulations one instance at a time.
+- **A batch shares one step.** `water_run` ends the step of every instance at the earliest
+  event of any (spec: "Batches"), so a batched instance is its own single run only up to the
+  extra step boundaries, each an extra solve of EPANET's explicit step (6.5e-3 m on Net1 at
+  0.8 and 1.25 times the demand; exact to 1e-9 m against its single run forced onto the same
+  boundaries). Run instances one at a time to reproduce EPANET's own sequence for each.
+- **The run ends at the duration.** EPANET's last step is not cut at `DURATION` (it solves
+  once more past it, and reports nothing there); `water_run` ends the last step at the duration.
+  A REPORT START that is not a multiple of the REPORT TIMESTEP follows EPANET's rule (the first
+  solve at or after each report time) but is not compared: wntr 1.5.0 cannot read that output.
+- **PATTERN START is transcribed with EPANET's own step rule.** EPANET looks for the next
+  pattern period at `n * PATTERN TIMESTEP - t` (`timestep`), which ignores PATTERN START: a
+  step that starts between two of the shifted period boundaries runs to the unshifted one,
+  and takes the new period's multipliers on only there. `water_run` does the same
+  (`test_pattern_start_shifts_the_pattern_as_epanet_does`).
+- **One demand pattern per junction.** Several `[DEMANDS]` categories of one junction must
+  share their pattern (refused by name otherwise), and an energy price pattern changes
+  nothing yet.
 
 ## Install
 

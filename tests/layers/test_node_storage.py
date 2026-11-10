@@ -451,7 +451,7 @@ def test_boundary_storage_advances_by_dt_inflow_over_capacity_exactly():
     steady = model.steady(state, drivers)
     assert float(steady["w.phi"][3]) == 2.0
     torch.testing.assert_close(steady["w.storage_flow"], inflow, rtol=0, atol=1e-14)
-    # the layer's own step from a solve, as `water_event_step` takes it
+    # the layer's own step from a solve, as `noodl.apps.water.water_run` takes it
     solved = dict(new, **{"w.phi": new["w.phi"].clone()})
     solved["w.phi"][3] = 2.0
     torch.testing.assert_close(layer.advance_storage(solved["w.phi"], inflow, dt),

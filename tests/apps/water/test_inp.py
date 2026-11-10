@@ -181,12 +181,12 @@ def test_a_constant_power_pump_is_read_in_kilowatts(tmp_path):
     net.validate()
 
 
-def test_a_speed_patterned_pump_is_refused(tmp_path):
+def test_a_speed_patterned_pump_is_read_and_accepted(tmp_path):
+    """`water_run` applies a pump's speed pattern (`test_simulate.py`)."""
     path = _edit(tmp_path, "Net1.inp", ("\tHEAD 1\t;", "\tHEAD 1 PATTERN 1\t;"))
     net = read_epanet_inp(path)
     assert net.pumps[0].speed_pattern == "1"
-    with pytest.raises(ValueError, match="SPEED PATTERN"):
-        net.validate()
+    net.validate()
 
 
 def test_an_unknown_pump_keyword_is_refused(tmp_path):
@@ -497,8 +497,7 @@ def test_anytown_reads_speed_patterns_and_efficiency_curves():
     assert net.curves["2"][0][1] == pytest.approx(300 * FOOT, rel=1e-15)
     assert net.start_clocktime == 18 * 3600.0
     assert net.rule_timestep == net.hydraulic_timestep / 10
-    with pytest.raises(ValueError, match="speed pattern"):
-        net.validate()
+    net.validate()
 
 
 def test_a_curve_used_as_head_and_volume_is_refused(tmp_path):

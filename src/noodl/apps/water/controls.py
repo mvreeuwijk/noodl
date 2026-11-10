@@ -233,10 +233,13 @@ def next_control_time(
     `controltimestep`: a time control `Time - Htime` ahead (a clock-time one at the next
     `Time` of the day, a whole day later if it has passed; a distance of 0 is skipped), a
     level control `(grade - h) / rate` ahead when the level moves towards it (rising to an
-    ABOVE, falling to a BELOW). A level crossing is given 1e-9 s more, so that the level
-    has crossed when the next step starts (the arithmetic may leave it a rounding short).
-    `crossing(control)` replaces the straight-line time of a level control (a tank on a
-    volume curve) by its time in seconds, or `None` to keep it.
+    ABOVE, falling to a BELOW), ROUNDED to whole seconds as EPANET rounds it
+    (`t = ROUND(v / q)`); a crossing that rounds to 0 is skipped, as EPANET skips it. The
+    rounded step may end up to half a second short of the crossing: EPANET's level test
+    (`controls`, by volume with one second's inflow as margin; `TankLevels`) fires the
+    control at the next step's start all the same. `crossing(control)` replaces the
+    straight-line time of a level control (a tank on a volume curve) by its time in
+    seconds, or `None` to keep it.
 
     Given the links' `status` and `setting` (as `apply_controls` takes them), a control that
     would change nothing, its link already as it says, does not end a step: EPANET revises
@@ -256,7 +259,8 @@ def next_control_time(
                 ahead = (control.value - level) / safe
             toward = ((rate > 0) & (level < control.value) if control.above
                       else (rate < 0) & (level > control.value))
-            ahead = torch.where(toward & (ahead > 1e-9), ahead + 1e-9,
+            # EPANET's ROUND (`types.h`): (long)(x + 0.5) for x >= 0
+            ahead = torch.where(toward, torch.floor(ahead + 0.5),
                                 torch.full_like(ahead, torch.inf))
         elif control.trigger == "time":
             ahead = round(control.value) - t

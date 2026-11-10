@@ -43,6 +43,18 @@ ONE_WAY_KEY = "water.one_way"
 #: `"water.time"` (not per link): seconds since the simulation start, which `AT TIME` and
 #: `AT CLOCKTIME` controls read (`noodl.apps.water.tanks.TankLevels`).
 TIME_KEY = "water.time"
+#: `"water.reservoir_head"`: one head per reservoir (the layer's potential unit), which the
+#: control closure writes into the boundary instead of the built heads when it is given
+#: (`water_run` sets it from the reservoirs' head patterns).
+RESERVOIR_HEAD_KEY = "water.reservoir_head"
+#: `"water.demand_factor"`: one multiplier per pressure-driven junction (in junction order)
+#: of its required demand (`PressureDrivenDemand`; `water_run` sets it from the demand
+#: patterns).
+DEMAND_FACTOR_KEY = "water.demand_factor"
+#: `"water.tank_inflow"`: one inflow per tank (m3/s), the previous solve's, which the level
+#: controls take as their one-second margin (EPANET's `controls` reads the tank's
+#: `NodeDemand` of the last solve; `water_run` sets it each step).
+TANK_INFLOW_KEY = "water.tank_inflow"
 
 _DRIVER_MEANING = {
     STATUS_KEY: "each link's status (CLOSED 0, OPEN 1, ACTIVE 2)",

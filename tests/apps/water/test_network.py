@@ -210,7 +210,7 @@ def test_a_pbv_needs_a_non_negative_setting():
 
 
 @pytest.mark.parametrize("curves, match", [
-    ({}, "has no \[CURVES\] entry"),
+    ({}, r"has no \[CURVES\] entry"),
     ({"HL": ((0.0, 0.0),)}, "at least two points"),
     ({"HL": ((0.0, 0.0), (0.0, 1.0))}, "increasing flows"),
 ])
@@ -375,11 +375,12 @@ def test_an_unmodelled_headloss_argument_is_refused():
         build_model(twoloop(), headloss="Z-Q")
 
 
-def test_chezy_manning_refuses_a_non_default_fluid_by_name():
-    net = dataclasses.replace(twoloop(), headloss="C-M",
-                              options=WaterOptions(specific_gravity=0.9))
-    with pytest.raises(ValueError, match="Chezy-Manning does not take fluid density"):
+def test_chezy_manning_refuses_a_non_default_viscosity_by_name():
+    net = dataclasses.replace(twoloop(), headloss="C-M", options=WaterOptions(viscosity=0.9))
+    with pytest.raises(ValueError, match="Chezy-Manning does not take the fluid's viscosity"):
         build_model(net)
+    # a non-default specific gravity is accepted: EPANET uses it for pressures only
+    build_model(dataclasses.replace(net, options=WaterOptions(specific_gravity=0.9)))
 
 
 # --------------------------------------------------------------------- [OPTIONS]
@@ -409,10 +410,13 @@ def test_a_non_default_viscosity_on_hazen_williams_is_refused():
         build_model(net)
 
 
-def test_a_non_default_specific_gravity_on_hazen_williams_is_refused():
+def test_a_non_default_specific_gravity_on_hazen_williams_moves_no_head():
+    """EPANET uses SPECIFIC GRAVITY on H-W only to turn a pressure into a head, which the
+    reader does; a network built in SI heads solves the same whatever it says."""
+    plain = water_steady(*build_model(twoloop()))
     net = dataclasses.replace(twoloop(), options=WaterOptions(specific_gravity=1.1))
-    with pytest.raises(ValueError, match="SPECIFIC GRAVITY"):
-        build_model(net)
+    heavy = water_steady(*build_model(net))
+    torch.testing.assert_close(heavy["water.phi"], plain["water.phi"], rtol=0, atol=0)
 
 
 def _hand_head_losses(q, length, diameter, eps, nu, g=9.80665):
