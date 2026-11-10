@@ -226,8 +226,8 @@ def test_an_unknown_valve_type_is_refused():
 
 
 def test_an_unmodelled_headloss_formula_is_refused():
-    with pytest.raises(ValueError, match="C-M"):
-        _minimal(headloss="C-M").validate()
+    with pytest.raises(ValueError, match="Z-Q"):
+        _minimal(headloss="Z-Q").validate()
 
 
 def test_a_control_on_a_non_tank_is_refused():
@@ -367,8 +367,15 @@ def test_a_junction_touching_no_pipe_is_refused_for_quality():
 
 
 def test_an_unmodelled_headloss_argument_is_refused():
-    with pytest.raises(ValueError, match="must be 'H-W' or 'D-W'"):
-        build_model(twoloop(), headloss="C-M")
+    with pytest.raises(ValueError, match="must be 'H-W', 'D-W' or 'C-M'"):
+        build_model(twoloop(), headloss="Z-Q")
+
+
+def test_chezy_manning_refuses_a_non_default_fluid_by_name():
+    net = dataclasses.replace(twoloop(), headloss="C-M",
+                              options=WaterOptions(specific_gravity=0.9))
+    with pytest.raises(ValueError, match="Chezy-Manning does not take fluid density"):
+        build_model(net)
 
 
 # --------------------------------------------------------------------- [OPTIONS]

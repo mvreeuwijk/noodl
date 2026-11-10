@@ -645,3 +645,39 @@ def test_the_inverted_curve_of_a_stopped_pump_is_no_flow():
     dp = torch.tensor([-50.0], dtype=F64)
     assert float(pump.flow(dp, drivers)) == 0.0
     assert float(pump.dflow(dp, drivers)) == 0.0
+
+
+# --------------------------------------------------------------------------- emitters, C-M
+def test_emitter_outflow_is_signed_with_the_pressure_and_finite_at_zero():
+    """`q = sign(p) C |p|^n` (EPANET's `emitterheadloss` is odd in the flow: a negative
+    pressure gives an inflow), finite slope at `p = 0`."""
+    from noodl.apps.water.demand import EmitterOutflow
+
+    emitter = EmitterOutflow(torch.tensor([1, 2]), torch.tensor([0.002, 0.004], dtype=F64),
+                             torch.tensor([10.0, 10.0], dtype=F64))
+    phi = torch.tensor([14.0, 14.0, 6.0], dtype=F64)
+    q = emitter.flow(phi[1:])
+    assert q[0].item() == pytest.approx(0.002 * 2.0)
+    assert q[1].item() == pytest.approx(-0.004 * 2.0)
+    zero = torch.tensor([10.0, 10.0], dtype=F64, requires_grad=True)
+    emitter.flow(zero).sum().backward()
+    assert torch.isfinite(zero.grad).all() and bool((zero.grad > 0).all())
+
+
+def test_chezy_manning_constant_is_epanets():
+    """`R = (4 n / (1.49 pi d^2))^2 (d / 4)^-1.333 L` in feet and cfs (`hydcoeffs.c`,
+    `resistcoeff`), `h = R q^2`."""
+    import math as m
+
+    from noodl.apps.water.elements import M_PER_FT, ChezyManning
+
+    d, length, n = 0.3, 500.0, 0.011
+    law = ChezyManning(torch.tensor([length], dtype=F64), torch.tensor([d], dtype=F64),
+                       torch.tensor([n], dtype=F64))
+    q = 0.05
+    d_ft, l_ft = d / M_PER_FT, length / M_PER_FT
+    r = (4.0 * n / (1.49 * m.pi * d_ft**2)) ** 2 * (d_ft / 4.0) ** -1.333 * l_ft
+    expected = M_PER_FT * r * (q / M_PER_FT**3) ** 2
+    got = law.head_loss(torch.tensor([q], dtype=F64)).item()
+    assert got == pytest.approx(expected, rel=1e-12)
+    assert law.head_loss(torch.tensor([-q], dtype=F64)).item() == pytest.approx(-expected)

@@ -17,11 +17,13 @@ pipe 10 dead-ended (136 are needed there). See `apps.water.network.water_steady`
 
 import math
 import warnings
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 import torch
 
+from noodl.apps.water.demand import EmitterOutflow
 from noodl.apps.water.inp import read_epanet_inp
 from noodl.apps.water.network import (
     build_model,
@@ -2151,3 +2153,116 @@ def test_a_stopped_pump_and_a_check_valve_fencing_a_group(tmp_path, r2):
     assert states["PU"] == int(results.link["status"].loc[0]["PU"]) == 0
     assert states["P2"] == 0 and int(results.link["status"].loc[0]["P2"]) == 1
     assert float(results.node["head"].loc[0]["J"]) == pytest.approx(r2, abs=1e-4)
+
+
+# --------------------------------------------------------------------------- emitters, C-M
+_EMITTERS = (
+    (";Junction        \tCoefficient", ";Junction\tCoefficient\n J4\t2.0\n J6\t1.5"),
+)
+
+
+def _emitter_flows(model, final):
+    layer = model.kirchhoff["water"]
+    source = next(w for w in layer.withdrawals if isinstance(w, EmitterOutflow))
+    flow = source.flow(final["water.phi"][..., source.nodes]).detach()
+    return {model.node_names[int(n)]: float(f) for n, f in zip(source.nodes, flow, strict=True)}
+
+
+def _emitters_as_epanet(net):
+    """`net` with its emitter coefficients in EPANET's internal flow unit, the demands'
+    correction (`_as_epanet`): EPANET's `Ke` is built with its rounded LPS factor."""
+    return replace(net, emitters=tuple(
+        replace(e, coefficient=e.coefficient * (28.3168466 / 28.317)) for e in net.emitters))
+
+
+@pytest.mark.parametrize("elevation_j4", [0, 60], ids=["positive-pressure", "negative-pressure"])
+def test_emitters_match_epanet(tmp_path, elevation_j4):
+    """Heads 1e-6 relative, flows and emitter outflows 1e-6 m3/s, with emitters at J4 and J6
+    (`[EMITTERS]` 2.0 and 1.5 LPS per m^0.5); and, raising J4 to 60 m (above the reservoir),
+    an emitter at NEGATIVE pressure, which EPANET (`hydcoeffs.c`, `emitterheadloss`: the loss
+    is odd in the flow) turns into an inflow (J4: -6.93e-3 m3/s, the sign checked below).
+
+    The comparison is with EPANET's own flow unit (`_as_epanet` for the demands,
+    `_emitters_as_epanet` for the coefficients), exactly as the other Hazen-Williams tests:
+    with the file's values the heads differ by 1.03e-6 relative (MEASURED, the rounded LPS
+    factor; held to 1e-5). MEASURED with EPANET's unit: heads 8.64e-8 (positive pressure) and
+    6.99e-8 (negative), emitter outflows 7.4e-8 and 5.7e-8 m3/s, flows 3.7e-7 and 2.6e-7 m3/s
+    (EPANET REPORTS flows in LPS with the same rounded factor, 5.4e-6 relative of 0.04 m3/s).
+    The reference's emitter flow is its own `demand` minus the junction's base demand."""
+    text = (DATA / "twoloop_si.inp").read_text().replace(*_EMITTERS[0])
+    text = text.replace(" J4              	0           	10 ",
+                        f" J4              	{elevation_j4}           	10 ")
+    path, results = _run_inp(tmp_path, text, "emitters")
+    net = read_epanet_inp(path)
+    assert [e.node for e in net.emitters] == ["J4", "J6"]
+    model, state, drivers = build_model(net)
+    heads = results.node["head"].loc[0]
+    demands = results.node["demand"].loc[0]
+    final = water_steady(model, state, drivers)
+    worst_h = _worst_heads(model, final, heads, skip=("R1",))
+    assert worst_h < 1e-5, worst_h
+    model, state, drivers = build_model(_emitters_as_epanet(net))
+    final = water_steady(model, state, _as_epanet(drivers))
+    worst_h = _worst_heads(model, final, heads, skip=("R1",))
+    assert worst_h < 1e-6, worst_h
+    base = {j.name: j.demand for j in net.junctions}
+    emitted = _emitter_flows(model, final)
+    for name, flow in emitted.items():
+        assert abs(flow - (float(demands[name]) - base[name])) < 1e-6, (name, flow)
+    assert (emitted["J4"] < 0) == (elevation_j4 == 60)
+    flows = results.link["flowrate"].loc[0]
+    worst_q = max(abs(float(final["water.q"][i]) - float(flows[name]))
+                  for i, name in enumerate(model.link_names))
+    assert worst_q < 1e-6, worst_q
+
+
+def test_chezy_manning_matches_epanet(tmp_path):
+    """Heads 1e-6 relative, flows 1e-6 m3/s with `HEADLOSS C-M` and roughness 0.011 on
+    every pipe (the file's `HEADLOSS H-W` replaced, the roughness 130 replaced).
+
+    MEASURED with the file's own demands: heads 7.6e-8 relative, flows 8.3e-9 m3/s. The law
+    carries EPANET's own LPS factor (`ChezyManning(cfs_per_m3s=...)`, as Darcy-Weisbach does),
+    so unlike Hazen-Williams it needs no `_as_epanet` correction: with it the heads are
+    4.8e-7, WORSE, which is the correction applied twice."""
+    text = (DATA / "twoloop_si.inp").read_text().replace("130         	0", "0.011       	0")
+    assert text.count("0.011") == 8 and text.count("	H-W") == 1
+    path, results = _run_inp(tmp_path, text.replace("	H-W", "	C-M"), "cm")
+    net = read_epanet_inp(path)
+    assert net.headloss == "C-M"
+    model, state, drivers = build_model(net)
+    final = water_steady(model, state, drivers)
+    heads = results.node["head"].loc[0]
+    flows = results.link["flowrate"].loc[0]
+    worst_h = _worst_heads(model, final, heads, skip=("R1",))
+    assert worst_h < 1e-6, worst_h
+    worst_q = max(abs(float(final["water.q"][i]) - float(flows[name]))
+                  for i, name in enumerate(model.link_names))
+    assert worst_q < 1e-6, worst_q
+
+
+def test_emitter_coefficient_gradient_against_central_differences(tmp_path):
+    """d(head at J6)/d(coefficient at J4) through the solve equals the central difference
+    of the solve (step 1e-4 relative) to 1e-8 relative; MEASURED 4.8e-11 (4.4e-9 at 1e-3,
+    4.4e-7 at 1e-2: the difference's own O(eps^2) error)."""
+    path, _ = _epanet(tmp_path, "twoloop_si.inp", edits=_EMITTERS)
+    net = read_epanet_inp(path)
+
+    def head_at(scale, grad=False):
+        emitters = tuple(type(e)(e.node, e.coefficient * (scale if e.node == "J4" else 1.0))
+                         for e in net.emitters)
+        model, state, drivers = build_model(replace(net, emitters=emitters))
+        layer = model.kirchhoff["water"]
+        source = next(w for w in layer.withdrawals if isinstance(w, EmitterOutflow))
+        if grad:
+            source.coefficient.requires_grad_(True)
+        final = water_steady(model, state, drivers)
+        return final["water.phi"][model.node_names.index("J6")], source
+
+    head, source = head_at(1.0, grad=True)
+    head.backward()
+    j4 = int((source.nodes == build_model(net)[0].node_names.index("J4")).nonzero())
+    analytic = float(source.coefficient.grad[j4])
+    c4 = net.emitters[0].coefficient
+    eps = 1e-4
+    numeric = (float(head_at(1 + eps)[0]) - float(head_at(1 - eps)[0])) / (2 * eps * c4)
+    assert abs(analytic - numeric) < 1e-8 * abs(numeric), (analytic, numeric)

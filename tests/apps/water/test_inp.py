@@ -121,12 +121,13 @@ def test_an_unknown_flow_unit_is_refused(tmp_path):
         read_epanet_inp(path)
 
 
-def test_an_emitters_section_with_content_is_refused(tmp_path):
+def test_an_emitters_section_with_content_is_read_and_validates(tmp_path):
     path = _edit(tmp_path, "twoloop_si.inp",
                  ("[EMITTERS]\n;Junction        \tCoefficient",
                   "[EMITTERS]\n;Junction        \tCoefficient\n J1              \t0.5"))
-    with pytest.raises(ValueError, match="emitters"):
-        read_epanet_inp(path).validate()
+    net = read_epanet_inp(path)
+    net.validate()
+    assert [e.node for e in net.emitters] == ["J1"]
 
 
 def test_a_status_section_is_read_into_initial_status(tmp_path):
@@ -599,8 +600,7 @@ def test_emitters_are_converted(tmp_path):
     assert emitter.node == "10"
     assert emitter.coefficient == pytest.approx(6.309019640343977e-05 / PSI_TO_M**0.5, rel=1e-15)
     assert net.options.emitter_exponent == 0.5
-    with pytest.raises(ValueError, match="emitters"):
-        net.validate()
+    net.validate()
 
 
 def test_an_si_emitter_is_only_converted_by_the_flow_unit(tmp_path):
@@ -618,15 +618,13 @@ def test_an_emitter_at_a_non_junction_is_refused(tmp_path):
         read_epanet_inp(path)
 
 
-def test_the_chezy_manning_headloss_is_read_and_refused_by_validate(tmp_path):
+def test_the_chezy_manning_headloss_is_read_and_validates(tmp_path):
     path = _edit(tmp_path, "twoloop_si.inp",
                  (" Headloss           \tH-W", " Headloss           \tC-M"))
     net = read_epanet_inp(path)
     assert net.headloss == "C-M"
-    with pytest.raises(ValueError, match="C-M"):
-        net.validate()
-    with pytest.raises(ValueError, match="C-M"):
-        build_model(net)
+    net.validate()
+    build_model(net)
 
 
 @pytest.mark.parametrize(

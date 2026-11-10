@@ -313,6 +313,105 @@ class HazenWilliams(ConstitutiveLaw):
         return zero, slope + zero
 
 
+#: The exponent EPANET writes into its pipe head-loss form ``h = R |q|^Hexp q / |q|`` for
+#: Chezy-Manning (`input1.c`, `hyd->Hexp = 2.0` unless ``Formflag == HW``).
+CM_EXPONENT = 2.0
+
+
+class ChezyManning(ConstitutiveLaw):
+    """``h_L = R q^2 + m q^2`` with EPANET 2.2's Chezy-Manning resistance, in feet and cfs,
+
+        R = (4 n / (1.49 pi d^2))^2 (d / 4)^-1.333 L        (`hydcoeffs.c`, `resistcoeff`,
+                                                              case ``CM``)
+
+    (``n`` the Manning roughness, dimensionless, not converted; ``d`` and ``L`` in feet; the
+    exponent ``-1.333`` is EPANET's literal, not ``-4/3``). The head loss and its gradient
+    are `hydcoeffs.c`, `pipecoeff`, with ``Hexp = 2`` (`input1.c`): ``hgrad = 2 R |q|``, the
+    friction loss ``hgrad |q| / 2`` and, where ``hgrad < RQtol``, a line. ``m`` is the minor
+    loss ``Km`` (`input1.c`, `convertunits`: ``0.02517 K / d^4``), exactly as the
+    Darcy-Weisbach law carries it. The result is converted to metres of head per
+    (m3/s)^2 with ``cfs_per_m3s`` (EPANET's own flow factor of the file's units; None: the
+    exact ``1 / 0.3048^3``).
+
+    ``flow(dp)`` inverts the law (a pure quadratic, in closed form), laminar-blended below
+    ``dp_transition`` as `HazenWilliams` is, for the potential pipe form.
+    """
+
+    def __init__(
+        self,
+        length,
+        diameter,
+        roughness,
+        *,
+        minor_loss=0.0,
+        cfs_per_m3s: float | None = None,
+        dp_transition: float = 1e-9,
+        kind: str = "pipe",
+        learnable: bool = False,
+    ) -> None:
+        super().__init__(kind)
+        self.length = self._param(length, False)
+        self.diameter = self._param(diameter, False)
+        self.roughness = self._param(roughness, learnable)
+        self.minor_loss = self._param(minor_loss, False)
+        self.cfs_per_m3s = 1.0 / M_PER_FT**3 if cfs_per_m3s is None else float(cfs_per_m3s)
+        self.dp_transition = float(dp_transition)
+
+    def resistance(self) -> Tensor:
+        """``R`` in ``h = R q^2``, metres per (m3/s)^2 (friction only)."""
+        d = self.diameter / M_PER_FT
+        length = self.length / M_PER_FT
+        r_ft = (4.0 * self.roughness / (1.49 * torch.pi * d**2)) ** 2 * (d / 4.0) ** -1.333 * length
+        return M_PER_FT * r_ft * self.cfs_per_m3s**2
+
+    def _minor(self) -> Tensor:
+        return epanet_minor_coefficient(self.minor_loss, self.diameter, self.cfs_per_m3s)
+
+    def head_loss(self, q: Tensor, gradient_floor: float = 0.0) -> Tensor:
+        """Signed head loss (m) at signed flow ``q`` (m3/s): ``R q |q| + m q |q|``; the friction
+        loss is the line ``(gradient_floor / 2) q`` where its gradient ``2 R |q|`` is below
+        ``gradient_floor`` (EPANET's ``RQtol`` rule, `pipecoeff`; continuous here, as
+        `HazenWilliams.head_loss`)."""
+        r = self.resistance()
+        a = q.abs()
+        loss = torch.where(2.0 * r * a < gradient_floor, 0.5 * gradient_floor * q, r * q * a)
+        return loss + self._minor() * q * a
+
+    def head_gradient(self, q: Tensor, gradient_floor: float = 0.0, cols=None) -> Tensor:
+        """``d head_loss / d q`` (m per m3/s), with the same ``gradient_floor``; of the pipes
+        ``cols`` only (``q`` then theirs) when given."""
+        r = self.resistance() * torch.ones_like(self.length)
+        minor = self._minor() * torch.ones_like(r)
+        if cols is not None:
+            r, minor = r[..., cols], minor[..., cols]
+        a = q.abs()
+        friction = torch.clamp(2.0 * r * a, min=gradient_floor)
+        return friction + 2.0 * minor * a
+
+    def flow(self, dp: Tensor, drivers=None) -> Tensor:
+        total = self.resistance() + self._minor()
+        dpt = self.dp_transition
+        mask = dp.abs() < dpt
+        dp_safe = torch.where(mask, torch.full_like(dp, dpt), dp.abs())
+        slope = (dpt / total) ** 0.5 / dpt
+        return torch.where(mask, slope * dp, torch.sign(dp) * (dp_safe / total) ** 0.5)
+
+    def dflow(self, dp: Tensor, drivers=None) -> Tensor:
+        total = self.resistance() + self._minor()
+        dpt = self.dp_transition
+        mask = dp.abs() < dpt
+        dp_safe = torch.where(mask, torch.full_like(dp, dpt), dp.abs())
+        sharp = 0.5 / (total * dp_safe) ** 0.5
+        lam = (dpt / total) ** 0.5 / dpt
+        return torch.where(mask, lam * torch.ones_like(dp), sharp)
+
+    def linear_init(self, drivers=None) -> tuple[Tensor, Tensor]:
+        total = self.resistance() + self._minor()
+        dpt = self.dp_transition
+        slope = (dpt / total) ** 0.5 / dpt
+        return torch.zeros_like(slope), slope
+
+
 #: EPANET's shut-off head of a single-point pump curve, per unit design head
 #: (`input2.c`, `updatepumpparams`: ``h0 = 1.33334 * h1``).
 SHUT_OFF_PER_DESIGN_HEAD = 1.33334
@@ -1583,7 +1682,7 @@ class FlowControlledPipe(ImplicitLaw):
         self.fixed = tuple(int(n) for n in fixed)
 
     def _loss(self, dp, q):
-        if isinstance(self.pipe, HazenWilliams):
+        if isinstance(self.pipe, (HazenWilliams, ChezyManning)):
             h = self.pipe.head_loss(q, self.gradient_floor)
         else:
             h = self.pipe.head_loss(q)
@@ -1614,7 +1713,7 @@ class FlowControlledPipe(ImplicitLaw):
             one_way = one_way.expand(q.shape)
             q_c, loss_c, way_c = ((q, loss, one_way) if cols is None else
                                   (q[..., cols], loss[..., cols], one_way[..., cols]))
-            if isinstance(self.pipe, HazenWilliams):
+            if isinstance(self.pipe, (HazenWilliams, ChezyManning)):
                 slope = self.pipe.head_gradient(q_c, self.gradient_floor, cols)
             else:
                 slope = self.pipe.head_gradient(q_c, cols)

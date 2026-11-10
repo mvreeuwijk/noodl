@@ -32,7 +32,7 @@ import torch
 
 from noodl._unionfind import UnionFind
 from noodl.apps.water.controls import ACTIVE, CLOSED, OPEN, Control, Rule, status_code
-from noodl.apps.water.demand import PressureDrivenDemand
+from noodl.apps.water.demand import EmitterOutflow, PressureDrivenDemand
 from noodl.apps.water.elements import (
     CBIG_FT_PER_CFS,
     DEAD_END_KEY,
@@ -46,6 +46,7 @@ from noodl.apps.water.elements import (
     SETTING_KEY,
     STATUS_KEY,
     BreakerValve,
+    ChezyManning,
     CompositeDarcyWeisbach,
     ConstantPowerPump,
     FlowControlledPipe,
@@ -456,11 +457,6 @@ class WaterNetwork:
                     f"WaterNetwork: tank {tank.name!r} has overflow allowed; tank overflow "
                     f"is out of scope"
                 )
-        if self.emitters:
-            raise ValueError(
-                f"WaterNetwork: [EMITTERS] at {[e.node for e in self.emitters]}; emitters "
-                f"are out of scope"
-            )
         if self.rules:
             raise ValueError(
                 f"WaterNetwork: [RULES] {[r.name for r in self.rules]}; rule-based "
@@ -563,10 +559,9 @@ class WaterNetwork:
                         f"leaves the other's undetermined (EPANET refuses the pair too, "
                         f"error 220)"
                     )
-        if self.headloss not in ("H-W", "D-W"):
+        if self.headloss not in ("H-W", "D-W", "C-M"):
             raise ValueError(
-                f"WaterNetwork: headloss {self.headloss!r}; only H-W and D-W are modelled "
-                f"(C-M, Chezy-Manning, is out of scope)"
+                f"WaterNetwork: headloss {self.headloss!r}; H-W, D-W and C-M are modelled"
             )
         if self.options.demand_model not in ("DDA", "PDA"):
             raise ValueError(
@@ -773,9 +768,9 @@ def build_model(
             f"build_model: pipe_form must be 'potential' or 'flow', got {pipe_form!r}"
         )
     headloss = headloss or net.headloss
-    if headloss not in ("H-W", "D-W"):
+    if headloss not in ("H-W", "D-W", "C-M"):
         raise ValueError(
-            f"build_model: headloss must be 'H-W' or 'D-W', got {headloss!r}"
+            f"build_model: headloss must be 'H-W', 'D-W' or 'C-M', got {headloss!r}"
         )
     friction = _FRICTION_ALIASES.get(friction, friction)
     if pipe_form is None:
@@ -803,12 +798,14 @@ def build_model(
         p_req = options.required_pressure
     if exponent is None:
         exponent = options.pressure_exponent
-    if headloss == "H-W" and (options.specific_gravity != 1.0 or options.viscosity != 1.0):
+    if headloss in ("H-W", "C-M") and (options.specific_gravity != 1.0
+                                       or options.viscosity != 1.0):
+        name = "Hazen-Williams" if headloss == "H-W" else "Chezy-Manning"
         raise ValueError(
             f"build_model: [OPTIONS] SPECIFIC GRAVITY {options.specific_gravity!r} "
-            f"/ VISCOSITY {options.viscosity!r} are not the defaults, but Hazen-Williams "
-            f"does not take fluid density or viscosity (EPANET's own H-W formula is "
-            f"calibrated for water); use headloss='D-W' or leave both at 1.0"
+            f"/ VISCOSITY {options.viscosity!r} are not the defaults, but {name} "
+            f"does not take fluid density or viscosity (EPANET's own {headloss} formula "
+            f"is calibrated for water); use headloss='D-W' or leave both at 1.0"
         )
     # EPANET 2.2: SPECIFIC GRAVITY is the density ratio and VISCOSITY the KINEMATIC
     # viscosity ratio to water at 20 C, so rho = RHO_W sg and nu = (MU_W / RHO_W) visc.
@@ -860,6 +857,16 @@ def build_model(
                     torch.tensor([p.roughness for p in net.pipes], dtype=F64),
                     minor_loss=torch.tensor([p.minor_loss for p in net.pipes], dtype=F64),
                     kind="pipe",
+                )
+            )
+        elif headloss == "C-M":
+            laws.append(
+                ChezyManning(
+                    torch.tensor([p.length for p in net.pipes], dtype=F64),
+                    torch.tensor([p.diameter for p in net.pipes], dtype=F64),
+                    torch.tensor([p.roughness for p in net.pipes], dtype=F64),
+                    minor_loss=torch.tensor([p.minor_loss for p in net.pipes], dtype=F64),
+                    cfs_per_m3s=_rounded_cfs_per_m3s(options.flow_units), kind="pipe",
                 )
             )
         else:
@@ -1013,10 +1020,29 @@ def build_model(
             f"pressure-driven demand (EPANET's PDA) with MINIMUM PRESSURE {p_min} m, "
             f"REQUIRED PRESSURE {p_req} m and PRESSURE EXPONENT {exponent}"
         )
+    if net.emitters:
+        exponent_e = options.emitter_exponent
+        by_node = {j.name: j for j in net.junctions}
+        withdrawals.append(
+            EmitterOutflow(
+                torch.tensor([node_names.index(e.node) for e in net.emitters],
+                             dtype=torch.long),
+                # in the layer's potential (Pa for D-W): C (p / scale)^n = (C / scale^n) p^n
+                torch.tensor([e.coefficient / scale**exponent_e for e in net.emitters],
+                             dtype=F64),
+                torch.tensor([by_node[e.node].elevation * scale for e in net.emitters],
+                             dtype=F64),
+                exponent=exponent_e,
+            )
+        )
+        notes["emitters"] = (
+            f"emitters at {[e.node for e in net.emitters]} as q = C p^n, n = {exponent_e} "
+            f"(EPANET's [EMITTERS] and EMITTER EXPONENT)"
+        )
     layer = KirchhoffLayer(
         graph, "water", laws, boundary=boundary, withdrawals=withdrawals,
-        quantity="head" if headloss == "H-W" else "pressure",
-        unit="m" if headloss == "H-W" else "Pa", flow_unit="m3/s",
+        quantity="pressure" if headloss == "D-W" else "head",
+        unit="Pa" if headloss == "D-W" else "m", flow_unit="m3/s",
         storage=storages, scheme=tank_scheme if net.tanks else "backward_euler",
     )
 

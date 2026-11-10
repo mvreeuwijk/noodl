@@ -2,12 +2,13 @@
 implementation."""
 
 from noodl.apps.water.controls import ACTIVE, CLOSED, OPEN, Action, Control, Premise, Rule
-from noodl.apps.water.demand import PressureDrivenDemand
+from noodl.apps.water.demand import EmitterOutflow, PressureDrivenDemand
 from noodl.apps.water.elements import (
     DW_SI,
     EPANET_QCF,
     HW_SI,
     BreakerValve,
+    ChezyManning,
     CompositeDarcyWeisbach,
     ConstantPowerPump,
     EpanetDarcyWeisbach,  # noqa: F401  (alias)
@@ -59,7 +60,8 @@ from noodl.apps.water.tanks import TankLevels
 # here but kept out of `__all__`: an alias is named in its target's docstring, not catalogued.
 __all__ = [
     "ACTIVE", "CLOSED", "DW_SI", "EPANET_QCF", "FLOW_UNITS", "G", "HW_SI", "OPEN", "Action",
-    "BreakerValve", "Control", "CompositeDarcyWeisbach", "ConstantPowerPump", "Emitter",
+    "BreakerValve", "ChezyManning", "Control", "CompositeDarcyWeisbach", "ConstantPowerPump",
+    "Emitter", "EmitterOutflow",
     "EnergyOptions",
     "FlowControlledPipe", "FlowControlledPump", "FlowControlValve",
     "GeneralPurposeValve", "HazenWilliams", "PressureReducingValve",

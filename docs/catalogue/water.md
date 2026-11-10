@@ -45,6 +45,7 @@ The relation between the flow through an edge and the potential difference acros
 | Name | What it does | How to call it |
 |---|---|---|
 | `BreakerValve` | A pressure breaker valve (PBV): EPANET 2.2's `pbvcoeff` (`hydcoeffs.c`). | `BreakerValve(setting, minor, *, kappa=1.0, gradient_floor=0.0, links=None, kind='pbv')` |
+| `ChezyManning` | ``h_L = R q^2 + m q^2`` with EPANET 2.2's Chezy-Manning resistance, in feet and cfs, | `ChezyManning(length, diameter, roughness, *, minor_loss=0.0, cfs_per_m3s=None, dp_transition=1e-09, kind='pipe', learnable=False)` |
 | `CompositeDarcyWeisbach` | Composite Darcy-Weisbach pipe: Hagen-Poiseuille, Dunlop's cubic, then Swamee-Jain. | `CompositeDarcyWeisbach(length, diameter, roughness, *, minor_loss=0.0, nu=1.02193344e-06, cfs_per_m3s=None, scale=1.0, rtol=1e-15, max_iter=100, kind='pipe', learnable=False)` |
 | `ConstantPowerPump` | A pump that delivers a constant power: EPANET 2.2's ``CONST_HP`` pump (`[PUMPS]` ``POWER``). Its head gain is ``8.814 P w^3 / q`` in feet, horsepower and cfs (`input2.c`, `updatepumpparams`: ``R = -8.814 P``, ``N = -1``; `hydcoeffs.c`, `pumpcoeff`: ``r = R w^(2-N)``, ``hloss = r / q``), here in the layer's potential unit and m3/s: ``a w^3 / q`` with ``a = scale 0.3048 * 8.814 P / (kw_per_hp cfs_per_m3s)``. | `ConstantPowerPump(power_kw, *, kw_per_hp=0.7457, cfs_per_m3s=None, scale=1.0, speed=1.0, links=None, kind='pump')` |
 | `FlowControlledPipe` | A pipe in its resistance form, ``dp = scale h(q)``, with the flow an unknown of the layer (`build_model`'s ``pipe_form="flow"``): ``pipe`` is the pipe's potential-form law (`HazenWilliams` or `CompositeDarcyWeisbach`), whose ``head_loss`` gives ``h``. | `FlowControlledPipe(pipe, *, gradient_floor=0.0, kappa=1.0, links=None, ends=None, fixed=(), shut_links=None, kind='pipe')` |
@@ -73,6 +74,7 @@ Nodal sources, withdrawals and storage.
 
 | Name | What it does | How to call it |
 |---|---|---|
+| `EmitterOutflow` | EPANET's emitters as a `NodeWithdrawal` (withdrawal, positive OUT): at each node the outflow is ``q = sign(p) C \|p\|^n`` with ``p = phi - elevation`` the pressure head (m), ``C`` the discharge coefficient (m3/s per m^n) and ``n`` the emitter exponent. | `EmitterOutflow(nodes, coefficient, elevation, *, exponent=0.5, dp_transition=1e-09, learnable=False)` |
 | `PressureDrivenDemand` | The Wagner demand function as a `NodeWithdrawal` (withdrawal, positive OUT). | `PressureDrivenDemand(nodes, q_required, elevation, *, p_min=0.0, p_req=0.0, exponent=0.5, learnable=False)` |
 
 ## Files

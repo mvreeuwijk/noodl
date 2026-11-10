@@ -201,8 +201,9 @@ def _building_cases() -> dict[type, Callable[[], list[Case]]]:
 
 
 def _water_cases() -> dict[type, Callable[[], list[Case]]]:
-    from noodl.apps.water.demand import PressureDrivenDemand
+    from noodl.apps.water.demand import EmitterOutflow, PressureDrivenDemand
     from noodl.apps.water.elements import (
+        ChezyManning,
         CompositeDarcyWeisbach,
         HazenWilliams,
         MinorLoss,
@@ -216,6 +217,15 @@ def _water_cases() -> dict[type, Callable[[], list[Case]]]:
             Case(HazenWilliams(_t([1000.0]), _t([0.3]), _t([100.0]), minor_loss=_t([2.0])),
                  _grid(1, -12, 3)),
         ],
+        ChezyManning: lambda: [
+            Case(ChezyManning(_t([1000.0, 300.0]), _t([0.3, 0.15]), _t([0.011, 0.013])),
+                 _grid(2, -12, 3)),
+            Case(ChezyManning(_t([1000.0]), _t([0.3]), _t([0.011]), minor_loss=_t([2.0])),
+                 _grid(1, -12, 3)),
+        ],
+        EmitterOutflow: lambda: [Case(
+            EmitterOutflow(torch.tensor([0, 1]), _t([0.002, 0.004]), _t([0.0, 5.0])),
+            _grid(2, -6, 1.6, centre=5.0))],
         MinorLoss: lambda: [Case(MinorLoss(_t([3.0]), _t([0.2])), _grid(1, -12, 3))],
         PumpCurve: lambda: [
             Case(PumpCurve(_t([40.0]), _t([2000.0])), _grid(1, -9, 2.5, centre=-40.0)),

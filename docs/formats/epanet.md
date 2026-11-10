@@ -32,7 +32,7 @@ with different units is refused by name when the file is read.
 `WaterNetwork.validate()` (called by `build_model`) refuses, naming the feature, each one the
 builder does not model yet, so a file never loads into a network that quietly means something
 else: a numeric `[STATUS]` pump speed; a pump speed pattern; a tank volume curve or overflow;
-emitters; `HEADLOSS C-M`; rules; and every `[CONTROLS]` form except
+rules; and every `[CONTROLS]` form except
 `LINK <pump> OPEN|CLOSED IF NODE <tank> BELOW|ABOVE <level>`. Of EPANET's own valve checks
 (`valvecheck`), `validate()` refuses a PRV or PSV whose controlled node (a PRV's end, a PSV's
 start) is a reservoir or tank, and two valves that hold one node twice (EPANET's errors 219 and

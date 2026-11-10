@@ -165,6 +165,22 @@ Jacobian finite. That value is empirically chosen: at 1e-9 the 24-hour tank traj
 converged to 8.18e-5 m against EPANET, and Newton iteration counts run 50/93/136/179 at
 1e-3/1e-6/1e-9/1e-12.
 
+### Chezy-Manning
+
+`HEADLOSS C-M` is EPANET 2.2's resistance (`hydcoeffs.c`, `resistcoeff`; `input1.c`, `Hexp = 2`),
+in feet and cfs with Manning's roughness $n$ (dimensionless):
+
+$$
+h_L = (R + m) q^2, \qquad R = \left(\frac{4 n}{1.49\,\pi d^2}\right)^{2} \left(\frac{d}{4}\right)^{-1.333} L
+$$
+
+The exponent $-1.333$ is EPANET's literal, not $-4/3$. `ChezyManning` converts $R$ to metres per
+$(\mathrm{m^3/s})^2$ with the file's own flow factor (as Darcy-Weisbach does), takes EPANET's
+`RQtol` line below the gradient floor, and carries the minor loss $m$ as `K / d^4` with EPANET's
+rounded constant. It works in metres of head, so, like Hazen-Williams, it refuses a
+non-default `SPECIFIC GRAVITY` or `VISCOSITY` by name. It enters the solve through
+`FlowControlledPipe` like Hazen-Williams, so check valves and closed pipes work unchanged.
+
 ### Darcy-Weisbach
 
 `CompositeDarcyWeisbach` (`friction="composite"`) is EPANET 2.2's own composite law:
@@ -472,6 +488,18 @@ $$
 Implemented with a guarded kink so both `where` branches stay finite and differentiable.
 `PressureDrivenDemand` refuses `p_req <= p_min` — a zero-span demand curve.
 
+### Emitters
+
+An emitter is a flow that leaves a junction as a power of its pressure head,
+$q = \operatorname{sign}(p)\, C |p|^{n}$ with $p = H - z$ and $n$ the `EMITTER EXPONENT` (default
+0.5), `EmitterOutflow` (a potential-dependent `NodeWithdrawal`). EPANET models it as a fictitious
+pipe to a reservoir at the junction's elevation (`hydcoeffs.c`, `emittercoeffs`,
+`emitterheadloss`); that loss is odd in the flow and not clipped, so **at negative pressure an
+emitter is an inflow** (verified against EPANET). Below `dp_transition` (1e-9 m) the law is its
+tangent line, which keeps the slope finite at $p = 0$. The coefficient is differentiable
+(`learnable`), and matches central differences to 4.8e-11 relative. Emitters add no work to a
+network without them.
+
 ## Verification
 
 Against the real EPANET 2.2 engine through `wntr` 1.5.0, which bundles `epanet22.dll`. Note the
@@ -487,6 +515,10 @@ on-disk reals are **float32**, so roughly 1e-7 relative is EPANET's own precisio
 | Darcy-Weisbach, `twoloop_si.inp` heads and flows | rel 1e-6 | 5.819e-8 heads, 6.482e-8 flows |
 | Darcy-Weisbach, Net1 single period: heads, flows | 1e-6 / 1e-5 | 7.009e-8, 3.986e-6 |
 | Darcy-Weisbach, laminar + transitional + turbulent pipes (`lowflow_dw_si.inp`): heads, flows, per-pipe head loss | 1e-6 / 1e-6 / 2.65e-7 m | 3.5e-8, 9.4e-8, 9.6e-8 m |
+| Emitters at J4 and J6 vs EPANET, with EPANET's flow unit (heads, emitter outflows, flows) | 1e-6, 1e-6 m3/s, 1e-6 m3/s | 8.640e-8, 7.4e-8, 3.7e-7 (file's values: heads 1.03e-6) |
+| An emitter at negative pressure (J4 at 60 m, an inflow) vs EPANET | 1e-6, 1e-6 m3/s, 1e-6 m3/s | 6.99e-8, 5.7e-8, 2.6e-7 |
+| `HEADLOSS C-M` (n = 0.011) vs EPANET | 1e-6, 1e-6 m3/s | 7.6e-8 heads, 8.3e-9 m3/s flows |
+| Emitter coefficient gradient vs central differences | 1e-8 | 4.8e-11 |
 | Pressure-driven demand vs EPANET's `DEMAND MODEL PDA` | 1e-5 | 3.521e-7 heads, 2.184e-7 demands |
 | A pump feeding pressure-driven demand (two-loop with a pump, every junction pressure-limited), both `pipe_form`s | 1e-5 | 3.526e-7 heads, 2.354e-7 flows, 2.355e-7 demands |
 | PBV (active and open) and GPV on the two-loop: heads, flows, the valve's head loss | 1e-6 / 1e-6 m³/s / 1e-5 | 5.5e-7, 2.6e-7 m³/s, 6.8e-6 |
@@ -562,7 +594,7 @@ independent loop is a property of the cycle-space formulation, and it holds exac
 - **Not modelled, refused by name:** time-based controls and `[RULES]`;
   pump speed patterns and a numeric `[STATUS]` on a pump (a pump's speed is the driver
   `"water.setting"`); non-cylindrical tanks;
-  emitters; leakage; energy and cost reports; Chezy-Manning head loss; pipe and valve
+  leakage; energy and cost reports; pipe and valve
   controls. A file using any of these raises an error naming the feature.
 - **Hazen-Williams heads carry EPANET's rounded flow-unit factor as a difference.** EPANET
   converts an LPS file's flows with `LPSperCFS = 28.317` (exact 28.3168466), so its internal

@@ -6,7 +6,7 @@ layouts of the EPANET 2.2 manual's Appendix C.2. Everything EPANET 2.2's hydraul
 READ and converted to SI here; `WaterNetwork.validate()` then REFUSES, by name, each feature
 the builder does not model yet (a numeric `[STATUS]` pump speed,
 a constant-POWER pump, a pump with more than a three-point curve or a SPEED PATTERN, a tank
-with a volume curve or OVERFLOW, an emitter, `HEADLOSS C-M`, a rule, and every `[CONTROLS]`
+with a volume curve or OVERFLOW, a rule, and every `[CONTROLS]`
 form except `LINK <pump> OPEN|CLOSED IF NODE <tank> BELOW|ABOVE <level>`), so that reading a
 file never changes what it means and building one never silently drops a feature. The reader
 itself refuses only what it cannot read: a malformed record, an unknown name, a curve used
