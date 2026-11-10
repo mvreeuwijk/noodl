@@ -3870,6 +3870,1753 @@
       ]
     }
   },
+  "potential_context_law_with_storage": {
+    "ok": {
+      "grads": {
+        "C": {
+          "data": [
+            -0.35359863882263226
+          ],
+          "dtype": "torch.float64",
+          "shape": [
+            1
+          ]
+        },
+        "amplitude": {
+          "data": [
+            3.6671473645354657
+          ],
+          "dtype": "torch.float64",
+          "shape": [
+            1
+          ]
+        }
+      },
+      "initial": {
+        "phi": {
+          "data": [
+            0.0,
+            0.0
+          ],
+          "dtype": "torch.float64",
+          "shape": [
+            2
+          ]
+        },
+        "q": {
+          "data": [
+            0.29552020666133955,
+            0.0
+          ],
+          "dtype": "torch.float64",
+          "shape": [
+            2
+          ]
+        },
+        "storage_flows": {
+          "data": [
+            -0.29552020666133955
+          ],
+          "dtype": "torch.float64",
+          "shape": [
+            1
+          ]
+        }
+      },
+      "step0": {
+        "diagnostics": {
+          "backend": null,
+          "converged": {
+            "data": true,
+            "dtype": "torch.bool",
+            "shape": []
+          },
+          "linear_iterations": null,
+          "newton_iterations": 0
+        },
+        "phi": {
+          "data": [
+            0.0,
+            0.15950316694540428
+          ],
+          "dtype": "torch.float64",
+          "shape": [
+            2
+          ]
+        },
+        "q": {
+          "data": [
+            -0.8006135686551199,
+            0.07975158347270214
+          ],
+          "dtype": "torch.float64",
+          "shape": [
+            2
+          ]
+        },
+        "storage_flows": {
+          "data": [
+            0.7208619851824176
+          ],
+          "dtype": "torch.float64",
+          "shape": [
+            1
+          ]
+        }
+      },
+      "step1": {
+        "diagnostics": {
+          "backend": null,
+          "converged": {
+            "data": true,
+            "dtype": "torch.bool",
+            "shape": []
+          },
+          "linear_iterations": null,
+          "newton_iterations": 0
+        },
+        "phi": {
+          "data": [
+            0.0,
+            0.04620126455573794
+          ],
+          "dtype": "torch.float64",
+          "shape": [
+            2
+          ]
+        },
+        "q": {
+          "data": [
+            0.9998997592769922,
+            0.02310063227786897
+          ],
+          "dtype": "torch.float64",
+          "shape": [
+            2
+          ]
+        },
+        "storage_flows": {
+          "data": [
+            -1.023000391554861
+          ],
+          "dtype": "torch.float64",
+          "shape": [
+            1
+          ]
+        }
+      }
+    }
+  },
+  "potential_dynamic_flow_law": {
+    "ok": {
+      "grads": {
+        "C": {
+          "data": [
+            0.10756181398097026
+          ],
+          "dtype": "torch.float64",
+          "shape": [
+            1
+          ]
+        },
+        "amplitude": {
+          "data": [
+            3.09152651992131
+          ],
+          "dtype": "torch.float64",
+          "shape": [
+            1
+          ]
+        }
+      },
+      "initial": {
+        "phi": {
+          "data": [
+            0.0,
+            -0.5910404133226791
+          ],
+          "dtype": "torch.float64",
+          "shape": [
+            2
+          ]
+        },
+        "q": {
+          "data": [
+            0.29552020666133955,
+            -0.29552020666133955,
+            0.0
+          ],
+          "dtype": "torch.float64",
+          "shape": [
+            3
+          ]
+        }
+      },
+      "step0": {
+        "diagnostics": {
+          "backend": null,
+          "converged": {
+            "data": true,
+            "dtype": "torch.bool",
+            "shape": []
+          },
+          "linear_iterations": null,
+          "newton_iterations": 0
+        },
+        "phi": {
+          "data": [
+            0.0,
+            -0.6018130626240152
+          ],
+          "dtype": "torch.float64",
+          "shape": [
+            2
+          ]
+        },
+        "q": {
+          "data": [
+            0.32245182991467986,
+            -0.3009065313120076,
+            -0.021545298602672288
+          ],
+          "dtype": "torch.float64",
+          "shape": [
+            3
+          ]
+        }
+      },
+      "step1": {
+        "diagnostics": {
+          "backend": null,
+          "converged": {
+            "data": true,
+            "dtype": "torch.bool",
+            "shape": []
+          },
+          "linear_iterations": null,
+          "newton_iterations": 0
+        },
+        "phi": {
+          "data": [
+            0.0,
+            -0.35811984931129814
+          ],
+          "dtype": "torch.float64",
+          "shape": [
+            2
+          ]
+        },
+        "q": {
+          "data": [
+            -0.8172582271978914,
+            -0.17905992465564907,
+            0.9963181518535407
+          ],
+          "dtype": "torch.float64",
+          "shape": [
+            3
+          ]
+        }
+      }
+    }
+  },
+  "potential_edge_head_with_flow_unknowns": {
+    "ok": {
+      "diagnostics": {
+        "backend": "sparse_direct",
+        "converged": {
+          "data": [
+            true,
+            true
+          ],
+          "dtype": "torch.bool",
+          "shape": [
+            2
+          ]
+        },
+        "linear_iterations": {
+          "data": [
+            1,
+            1
+          ],
+          "dtype": "torch.int64",
+          "shape": [
+            2
+          ]
+        },
+        "newton_iterations": 4
+      },
+      "grads": {
+        "C": {
+          "data": [
+            2.300632037265723
+          ],
+          "dtype": "torch.float64",
+          "shape": [
+            1
+          ]
+        },
+        "head": {
+          "data": [
+            [
+              -1.8944336953982002,
+              0.8944336953982001,
+              -0.10556630460179992
+            ],
+            [
+              -1.9068472819348785,
+              0.9068472819348785,
+              -0.09315271806512143
+            ]
+          ],
+          "dtype": "torch.float64",
+          "shape": [
+            2,
+            3
+          ]
+        }
+      },
+      "phi": {
+        "data": [
+          [
+            0.0,
+            1.0,
+            1.0208796998136447
+          ],
+          [
+            0.0,
+            1.0,
+            0.6494197874824246
+          ]
+        ],
+        "dtype": "torch.float64",
+        "shape": [
+          2,
+          3
+        ]
+      },
+      "q": {
+        "data": [
+          [
+            -0.2461797912034292,
+            0.2661797912011113,
+            0.25617979120309453
+          ],
+          [
+            -0.27779807042597904,
+            0.29779807042465956,
+            0.2877980704257771
+          ]
+        ],
+        "dtype": "torch.float64",
+        "shape": [
+          2,
+          3
+        ]
+      }
+    }
+  },
+  "potential_layer_methods_with_flow_unknowns": {
+    "ok": {
+      "adjoint": {
+        "value": {
+          "data": [
+            -0.25,
+            -1.2531170148454165,
+            -0.7799299251016151
+          ],
+          "dtype": "torch.float64",
+          "shape": [
+            3
+          ]
+        }
+      },
+      "dflows": {
+        "value": {
+          "data": [
+            0.2193862447167227,
+            0.22338689985479684
+          ],
+          "dtype": "torch.float64",
+          "shape": [
+            2
+          ]
+        }
+      },
+      "dflows_is_nan": {
+        "value": {
+          "data": [
+            1.0,
+            0.0,
+            0.0
+          ],
+          "dtype": "torch.float64",
+          "shape": [
+            3
+          ]
+        }
+      },
+      "flows": {
+        "value": {
+          "data": [
+            1.0667519649725912,
+            1.116751960574232,
+            1.0967519603308749
+          ],
+          "dtype": "torch.float64",
+          "shape": [
+            3
+          ]
+        }
+      },
+      "flows_without_q": {
+        "refused": {
+          "message": "KirchhoffLayer 'air': kinds ['fan'] give a relation, so their flows are unknowns",
+          "type": "ValueError"
+        }
+      },
+      "jacobian": {
+        "value": {
+          "data": [
+            [
+              0.2193862447167227,
+              -0.2193862447167227,
+              -1.0
+            ],
+            [
+              -0.2193862447167227,
+              0.4427731445715195,
+              0.0
+            ],
+            [
+              -1.0,
+              0.0,
+              0.0
+            ]
+          ],
+          "dtype": "torch.float64",
+          "shape": [
+            3,
+            3
+          ]
+        }
+      },
+      "linear_init": {
+        "value": {
+          "data": [
+            5.0,
+            2.4995482460485476
+          ],
+          "dtype": "torch.float64",
+          "shape": [
+            2
+          ]
+        }
+      },
+      "power_residual": {
+        "value": {
+          "data": -2.2589194625943776e-08,
+          "dtype": "torch.float64",
+          "shape": []
+        }
+      },
+      "residual": {
+        "value": {
+          "data": [
+            -4.398359190749268e-09,
+            -2.4335712958678535e-10,
+            0.0
+          ],
+          "dtype": "torch.float64",
+          "shape": [
+            3
+          ]
+        }
+      }
+    }
+  },
+  "potential_multiport_transformer_gradients": {
+    "ok": {
+      "diagnostics": {
+        "backend": "sparse_direct",
+        "converged": {
+          "data": true,
+          "dtype": "torch.bool",
+          "shape": []
+        },
+        "linear_iterations": {
+          "data": 1,
+          "dtype": "torch.int64",
+          "shape": []
+        },
+        "newton_iterations": 1
+      },
+      "grads": {
+        "R": {
+          "data": [
+            -1.953125
+          ],
+          "dtype": "torch.float64",
+          "shape": [
+            1
+          ]
+        },
+        "n": {
+          "data": [
+            -7.1875
+          ],
+          "dtype": "torch.float64",
+          "shape": [
+            1
+          ]
+        }
+      },
+      "phi": {
+        "data": [
+          0.0,
+          10.0,
+          5.0
+        ],
+        "dtype": "torch.float64",
+        "shape": [
+          3
+        ]
+      },
+      "q": {
+        "data": [
+          -0.625,
+          0.625,
+          -1.25,
+          1.25
+        ],
+        "dtype": "torch.float64",
+        "shape": [
+          4
+        ]
+      }
+    }
+  },
+  "potential_phasor_rlc_gradients": {
+    "ok": {
+      "diagnostics": {
+        "backend": "sparse_direct",
+        "converged": {
+          "data": [
+            true,
+            true
+          ],
+          "dtype": "torch.bool",
+          "shape": [
+            2
+          ]
+        },
+        "linear_iterations": {
+          "data": [
+            1,
+            1
+          ],
+          "dtype": "torch.int64",
+          "shape": [
+            2
+          ]
+        },
+        "newton_iterations": 2
+      },
+      "grads": {
+        "C": {
+          "data": [
+            -31619287.519461066
+          ],
+          "dtype": "torch.float64",
+          "shape": [
+            1
+          ]
+        },
+        "L": {
+          "data": [
+            -15809.143782486313
+          ],
+          "dtype": "torch.float64",
+          "shape": [
+            1
+          ]
+        },
+        "R": {
+          "data": [
+            -8.905700248883784
+          ],
+          "dtype": "torch.float64",
+          "shape": [
+            1
+          ]
+        }
+      },
+      "phi": {
+        "data": [
+          [
+            [
+              0.0,
+              0.0
+            ],
+            [
+              1.0,
+              0.0
+            ],
+            [
+              0.9999996051380411,
+              -0.0006283803012687424
+            ],
+            [
+              1.0000983108849475,
+              -0.0006284423260402111
+            ]
+          ],
+          [
+            [
+              0.0,
+              0.0
+            ],
+            [
+              1.0,
+              0.0
+            ],
+            [
+              5.78432302056342e-11,
+              -7.605474421933959e-06
+            ],
+            [
+              0.00012025313821893199,
+              -15.811392102664984
+            ]
+          ]
+        ],
+        "dtype": "torch.complex128",
+        "shape": [
+          2,
+          4
+        ]
+      },
+      "q": {
+        "data": [
+          [
+            [
+              -1.97430979469281e-07,
+              -0.0003141901506343712
+            ],
+            [
+              1.974309794539053e-07,
+              0.0003141901506343712
+            ],
+            [
+              1.974309794677831e-07,
+              0.0003141901506343712
+            ],
+            [
+              1.9743097946928086e-07,
+              0.0003141901506343712
+            ]
+          ],
+          [
+            [
+              -0.49999999997107836,
+              -3.8027372109669797e-06
+            ],
+            [
+              0.49999999997107836,
+              3.8027372109669797e-06
+            ],
+            [
+              0.49999999997107836,
+              3.8027372109669797e-06
+            ],
+            [
+              0.49999999997107836,
+              3.802737210966633e-06
+            ]
+          ]
+        ],
+        "dtype": "torch.complex128",
+        "shape": [
+          2,
+          4
+        ]
+      }
+    }
+  },
+  "potential_phasor_transformer": {
+    "ok": {
+      "diagnostics": {
+        "backend": "sparse_direct",
+        "converged": {
+          "data": true,
+          "dtype": "torch.bool",
+          "shape": []
+        },
+        "linear_iterations": {
+          "data": 1,
+          "dtype": "torch.int64",
+          "shape": []
+        },
+        "newton_iterations": 2
+      },
+      "phi": {
+        "data": [
+          [
+            0.0,
+            0.0
+          ],
+          [
+            10.0,
+            0.0
+          ],
+          [
+            5.0,
+            0.0
+          ]
+        ],
+        "dtype": "torch.complex128",
+        "shape": [
+          3
+        ]
+      },
+      "q": {
+        "data": [
+          [
+            -0.625,
+            0.0
+          ],
+          [
+            0.625,
+            0.0
+          ],
+          [
+            -1.25,
+            0.0
+          ],
+          [
+            1.25,
+            0.0
+          ]
+        ],
+        "dtype": "torch.complex128",
+        "shape": [
+          4
+        ]
+      }
+    }
+  },
+  "potential_refuses_cg_with_flow_unknowns": {
+    "ok": {
+      "refused": {
+        "message": "KirchhoffLayer 'air': linear_solver='cg' needs a symmetric positive definite Jac",
+        "type": "ValueError"
+      }
+    }
+  },
+  "potential_refuses_unconverged_with_flow_unknowns": {
+    "ok": {
+      "refused": {
+        "message": "KirchhoffLayer 'air' solve: batch indices [0] failed to converge after 1 iterati",
+        "type": "ConvergenceError"
+      }
+    }
+  },
+  "potential_relation_cap_ind_march": {
+    "ok": {
+      "grads": {
+        "C": {
+          "data": [
+            -738.2489327168025
+          ],
+          "dtype": "torch.float64",
+          "shape": [
+            1
+          ]
+        },
+        "L": {
+          "data": [
+            -9.232300841341152
+          ],
+          "dtype": "torch.float64",
+          "shape": [
+            1
+          ]
+        },
+        "phi_hist": {
+          "data": [
+            -0.185866081969978,
+            0.0,
+            0.0,
+            0.185866081969978
+          ],
+          "dtype": "torch.float64",
+          "shape": [
+            4
+          ]
+        },
+        "q_hist": {
+          "data": [
+            0.0,
+            0.0,
+            2.395682239838084,
+            0.0
+          ],
+          "dtype": "torch.float64",
+          "shape": [
+            4
+          ]
+        }
+      },
+      "initial": {
+        "phi": {
+          "data": [
+            0.0,
+            1.5,
+            1.5,
+            0.0
+          ],
+          "dtype": "torch.float64",
+          "shape": [
+            4
+          ]
+        },
+        "q": {
+          "data": [
+            0.0,
+            0.0,
+            0.0,
+            0.0
+          ],
+          "dtype": "torch.float64",
+          "shape": [
+            4
+          ]
+        }
+      },
+      "step0": {
+        "diagnostics": {
+          "backend": "sparse_direct",
+          "converged": {
+            "data": true,
+            "dtype": "torch.bool",
+            "shape": []
+          },
+          "linear_iterations": {
+            "data": 1,
+            "dtype": "torch.int64",
+            "shape": []
+          },
+          "newton_iterations": 2
+        },
+        "phi": {
+          "data": [
+            0.0,
+            1.5,
+            1.2857142857142856,
+            1.0714285714285714
+          ],
+          "dtype": "torch.float64",
+          "shape": [
+            4
+          ]
+        },
+        "q": {
+          "data": [
+            -0.10714285714285715,
+            0.1071428571428572,
+            0.10714285714285715,
+            0.10714285714285715
+          ],
+          "dtype": "torch.float64",
+          "shape": [
+            4
+          ]
+        }
+      },
+      "step1": {
+        "diagnostics": {
+          "backend": "sparse_direct",
+          "converged": {
+            "data": true,
+            "dtype": "torch.bool",
+            "shape": []
+          },
+          "linear_iterations": {
+            "data": 1,
+            "dtype": "torch.int64",
+            "shape": []
+          },
+          "newton_iterations": 2
+        },
+        "phi": {
+          "data": [
+            0.0,
+            1.5,
+            1.4025974025974026,
+            1.8506493506493507
+          ],
+          "dtype": "torch.float64",
+          "shape": [
+            4
+          ]
+        },
+        "q": {
+          "data": [
+            -0.04870129870129871,
+            0.04870129870129869,
+            0.0487012987012987,
+            0.048701298701298704
+          ],
+          "dtype": "torch.float64",
+          "shape": [
+            4
+          ]
+        }
+      }
+    }
+  },
+  "potential_relation_fan_ensemble_gradients": {
+    "ok": {
+      "diagnostics": {
+        "backend": "sparse_direct",
+        "converged": {
+          "data": [
+            true,
+            true,
+            true
+          ],
+          "dtype": "torch.bool",
+          "shape": [
+            3
+          ]
+        },
+        "linear_iterations": {
+          "data": [
+            1,
+            1,
+            1
+          ],
+          "dtype": "torch.int64",
+          "shape": [
+            3
+          ]
+        },
+        "newton_iterations": 4
+      },
+      "grads": {
+        "c": {
+          "data": [
+            [
+              8.999999280000088
+            ],
+            [
+              10.499999160000101
+            ],
+            [
+              13.499998920000131
+            ]
+          ],
+          "dtype": "torch.float64",
+          "shape": [
+            3,
+            1
+          ]
+        }
+      },
+      "phi": {
+        "data": [
+          [
+            0.0,
+            5.0,
+            2.5
+          ],
+          [
+            0.0,
+            5.0,
+            2.5
+          ],
+          [
+            0.0,
+            5.0,
+            2.5
+          ]
+        ],
+        "dtype": "torch.float64",
+        "shape": [
+          3,
+          3
+        ]
+      },
+      "q": {
+        "data": [
+          [
+            0.9486832601031857,
+            0.9486832601031857,
+            0.9486832601031857
+          ],
+          [
+            1.10679713678705,
+            1.10679713678705,
+            1.10679713678705
+          ],
+          [
+            1.4230248901547786,
+            1.4230248901547786,
+            1.4230248901547786
+          ]
+        ],
+        "dtype": "torch.float64",
+        "shape": [
+          3,
+          3
+        ]
+      }
+    }
+  },
+  "potential_relation_initial_conditions_gradients": {
+    "ok": {
+      "diagnostics": {
+        "backend": "sparse_direct",
+        "converged": {
+          "data": true,
+          "dtype": "torch.bool",
+          "shape": []
+        },
+        "linear_iterations": {
+          "data": 1,
+          "dtype": "torch.int64",
+          "shape": []
+        },
+        "newton_iterations": 2
+      },
+      "grads": {
+        "i0": {
+          "data": [
+            -1.2000000000000002
+          ],
+          "dtype": "torch.float64",
+          "shape": [
+            1
+          ]
+        },
+        "v0": {
+          "data": [
+            1.0
+          ],
+          "dtype": "torch.float64",
+          "shape": [
+            1
+          ]
+        }
+      },
+      "phi": {
+        "data": [
+          0.0,
+          1.5,
+          1.3,
+          0.4
+        ],
+        "dtype": "torch.float64",
+        "shape": [
+          4
+        ]
+      },
+      "q": {
+        "data": [
+          -0.1,
+          0.09999999999999998,
+          0.1,
+          0.1
+        ],
+        "dtype": "torch.float64",
+        "shape": [
+          4
+        ]
+      }
+    }
+  },
+  "potential_relation_source_gradients": {
+    "ok": {
+      "diagnostics": {
+        "backend": "sparse_direct",
+        "converged": {
+          "data": true,
+          "dtype": "torch.bool",
+          "shape": []
+        },
+        "linear_iterations": {
+          "data": 1,
+          "dtype": "torch.int64",
+          "shape": []
+        },
+        "newton_iterations": 1
+      },
+      "grads": {
+        "R": {
+          "data": [
+            -0.19241982507288632,
+            0.09329446064139946
+          ],
+          "dtype": "torch.float64",
+          "shape": [
+            2
+          ]
+        },
+        "V": {
+          "data": [
+            1.6734693877551021
+          ],
+          "dtype": "torch.float64",
+          "shape": [
+            1
+          ]
+        }
+      },
+      "phi": {
+        "data": [
+          0.0,
+          2.0,
+          0.8571428571428572
+        ],
+        "dtype": "torch.float64",
+        "shape": [
+          3
+        ]
+      },
+      "q": {
+        "data": [
+          -0.2857142857142857,
+          0.2857142857142857,
+          0.28571428571428575
+        ],
+        "dtype": "torch.float64",
+        "shape": [
+          3
+        ]
+      }
+    }
+  },
+  "potential_storage_fast_held_initial": {
+    "ok": {
+      "diagnostics": {
+        "backend": "sparse_direct",
+        "converged": {
+          "data": true,
+          "dtype": "torch.bool",
+          "shape": []
+        },
+        "linear_iterations": {
+          "data": 1,
+          "dtype": "torch.int64",
+          "shape": []
+        },
+        "newton_iterations": 5
+      },
+      "grads": {
+        "C": null
+      },
+      "phi": {
+        "data": [
+          6.0,
+          0.4,
+          -0.2,
+          0.5645935586239701,
+          0.5
+        ],
+        "dtype": "torch.float64",
+        "shape": [
+          5
+        ]
+      },
+      "q": {
+        "data": [
+          0.03064236049398044,
+          0.005739688188138207,
+          -0.010078854106991443,
+          0.0015165806026387913,
+          -0.0034045602792375277
+        ],
+        "dtype": "torch.float64",
+        "shape": [
+          5
+        ]
+      }
+    }
+  },
+  "potential_storage_fast_trapezoidal_with_withdrawal": {
+    "ok": {
+      "diagnostics": {
+        "backend": "sparse_direct",
+        "converged": {
+          "data": true,
+          "dtype": "torch.bool",
+          "shape": []
+        },
+        "linear_iterations": {
+          "data": 1,
+          "dtype": "torch.int64",
+          "shape": []
+        },
+        "newton_iterations": 5
+      },
+      "grads": {
+        "C": {
+          "data": [
+            -3.798224034877821,
+            2.484724515381711
+          ],
+          "dtype": "torch.float64",
+          "shape": [
+            2
+          ]
+        },
+        "law_C": {
+          "data": [
+            9.516074003638327,
+            2.303932980039225,
+            -12.947741170608802,
+            3.460697424140866,
+            5.338377416303424
+          ],
+          "dtype": "torch.float64",
+          "shape": [
+            5
+          ]
+        },
+        "phi_prev": {
+          "data": [
+            0.0,
+            1.2263126050870494,
+            1.128682350942845,
+            0.0,
+            0.0
+          ],
+          "dtype": "torch.float64",
+          "shape": [
+            5
+          ]
+        },
+        "storage_flow": {
+          "data": [
+            3.065781512717624,
+            5.643411754714225
+          ],
+          "dtype": "torch.float64",
+          "shape": [
+            2
+          ]
+        }
+      },
+      "phi": {
+        "data": [
+          6.0,
+          0.5858363366300816,
+          -0.2660431479230475,
+          0.44145443339220025,
+          0.5
+        ],
+        "dtype": "torch.float64",
+        "shape": [
+          5
+        ]
+      },
+      "q": {
+        "data": [
+          0.029977498980116212,
+          0.007208348756239706,
+          -0.009583021659111816,
+          -0.001422700939182899,
+          0.0031266263288901286
+        ],
+        "dtype": "torch.float64",
+        "shape": [
+          5
+        ]
+      },
+      "storage_flows": {
+        "data": [
+          0.024334534652032627,
+          0.0067913704153904995
+        ],
+        "dtype": "torch.float64",
+        "shape": [
+          2
+        ]
+      }
+    }
+  },
+  "potential_storage_held_initial_then_trapezoidal": {
+    "ok": {
+      "grads": {
+        "C": {
+          "data": [
+            7.857142857142861
+          ],
+          "dtype": "torch.float64",
+          "shape": [
+            1
+          ]
+        },
+        "R": {
+          "data": [
+            -4.196428571428571
+          ],
+          "dtype": "torch.float64",
+          "shape": [
+            1
+          ]
+        },
+        "phi_hist": {
+          "data": [
+            0.0,
+            0.0,
+            -2.3571428571428585
+          ],
+          "dtype": "torch.float64",
+          "shape": [
+            3
+          ]
+        },
+        "storage_flow": {
+          "data": [
+            -0.785714285714286
+          ],
+          "dtype": "torch.float64",
+          "shape": [
+            1
+          ]
+        }
+      },
+      "initial": {
+        "phi": {
+          "data": [
+            0.0,
+            5.0,
+            1.5
+          ],
+          "dtype": "torch.float64",
+          "shape": [
+            3
+          ]
+        },
+        "q": {
+          "data": [
+            -1.75,
+            1.75
+          ],
+          "dtype": "torch.float64",
+          "shape": [
+            2
+          ]
+        },
+        "storage_flows": {
+          "data": [
+            1.75
+          ],
+          "dtype": "torch.float64",
+          "shape": [
+            1
+          ]
+        }
+      },
+      "step": {
+        "diagnostics": {
+          "backend": "sparse_direct",
+          "converged": {
+            "data": true,
+            "dtype": "torch.bool",
+            "shape": []
+          },
+          "linear_iterations": {
+            "data": 1,
+            "dtype": "torch.int64",
+            "shape": []
+          },
+          "newton_iterations": 1
+        },
+        "phi": {
+          "data": [
+            0.0,
+            5.0,
+            2.5
+          ],
+          "dtype": "torch.float64",
+          "shape": [
+            3
+          ]
+        },
+        "q": {
+          "data": [
+            -1.25,
+            1.25
+          ],
+          "dtype": "torch.float64",
+          "shape": [
+            2
+          ]
+        },
+        "storage_flows": {
+          "data": [
+            1.2499999999999996
+          ],
+          "dtype": "torch.float64",
+          "shape": [
+            1
+          ]
+        }
+      }
+    }
+  },
+  "potential_withdrawal_and_storage_with_flow_unknowns": {
+    "ok": {
+      "balance": {
+        "data": [
+          6.938893903907228e-18,
+          -1.4332535158700921e-11
+        ],
+        "dtype": "torch.float64",
+        "shape": [
+          2
+        ]
+      },
+      "balance_steady": {
+        "data": [
+          6.938893903907228e-18,
+          -1.2656770060255038
+        ],
+        "dtype": "torch.float64",
+        "shape": [
+          2
+        ]
+      },
+      "grads": {
+        "C": {
+          "data": [
+            8.025724587870057
+          ],
+          "dtype": "torch.float64",
+          "shape": [
+            1
+          ]
+        },
+        "R": {
+          "data": [
+            -4.365196459628329
+          ],
+          "dtype": "torch.float64",
+          "shape": [
+            1
+          ]
+        },
+        "coeff": {
+          "data": [
+            6.067090744779191,
+            -2.0309500942911343
+          ],
+          "dtype": "torch.float64",
+          "shape": [
+            2
+          ]
+        },
+        "storage_flow": {
+          "data": [
+            -0.9160141699769369,
+            -2.7132854661972194,
+            1.0197271333342661
+          ],
+          "dtype": "torch.float64",
+          "shape": [
+            3
+          ]
+        }
+      },
+      "initial": {
+        "phi": {
+          "data": [
+            0.0,
+            5.0,
+            1.5
+          ],
+          "dtype": "torch.float64",
+          "shape": [
+            3
+          ]
+        },
+        "q": {
+          "data": [
+            -1.7947213595499958,
+            1.75
+          ],
+          "dtype": "torch.float64",
+          "shape": [
+            2
+          ]
+        },
+        "storage_flows": {
+          "data": [
+            1.5116979298749287,
+            0.0,
+            0.2015597239833238
+          ],
+          "dtype": "torch.float64",
+          "shape": [
+            3
+          ]
+        }
+      },
+      "step": {
+        "diagnostics": {
+          "backend": "sparse_direct",
+          "converged": {
+            "data": true,
+            "dtype": "torch.bool",
+            "shape": []
+          },
+          "linear_iterations": {
+            "data": 1,
+            "dtype": "torch.int64",
+            "shape": []
+          },
+          "newton_iterations": 3
+        },
+        "phi": {
+          "data": [
+            0.0,
+            5.0,
+            2.3761572529027717
+          ],
+          "dtype": "torch.float64",
+          "shape": [
+            3
+          ]
+        },
+        "q": {
+          "data": [
+            -1.35664273309861,
+            1.3119213735486142
+          ],
+          "dtype": "torch.float64",
+          "shape": [
+            2
+          ]
+        },
+        "storage_flows": {
+          "data": [
+            1.1167738288333864,
+            0.0,
+            0.14890317717778487
+          ],
+          "dtype": "torch.float64",
+          "shape": [
+            3
+          ]
+        }
+      }
+    }
+  },
+  "potential_withdrawal_driven_with_flow_unknowns": {
+    "ok": {
+      "diagnostics": {
+        "backend": "sparse_direct",
+        "converged": {
+          "data": true,
+          "dtype": "torch.bool",
+          "shape": []
+        },
+        "linear_iterations": {
+          "data": 1,
+          "dtype": "torch.int64",
+          "shape": []
+        },
+        "newton_iterations": 2
+      },
+      "grads": {
+        "demand": {
+          "data": [
+            17.903225806451612,
+            3.61266825551341
+          ],
+          "dtype": "torch.float64",
+          "shape": [
+            2
+          ]
+        }
+      },
+      "phi": {
+        "data": [
+          0.0,
+          5.0,
+          2.4193548387096775
+        ],
+        "dtype": "torch.float64",
+        "shape": [
+          3
+        ]
+      },
+      "q": {
+        "data": [
+          -1.7903225806451613,
+          1.2903225806451613,
+          0.8064516129032259
+        ],
+        "dtype": "torch.float64",
+        "shape": [
+          3
+        ]
+      }
+    }
+  },
+  "potential_withdrawal_fast": {
+    "ok": {
+      "diagnostics": {
+        "backend": "sparse_direct",
+        "converged": {
+          "data": true,
+          "dtype": "torch.bool",
+          "shape": []
+        },
+        "linear_iterations": {
+          "data": 1,
+          "dtype": "torch.int64",
+          "shape": []
+        },
+        "newton_iterations": 4
+      },
+      "grads": {
+        "C": {
+          "data": [
+            287.93476184966414,
+            43.74618613134676,
+            8.48715467818661,
+            -86.77308567501726,
+            4.768027734183869
+          ],
+          "dtype": "torch.float64",
+          "shape": [
+            5
+          ]
+        },
+        "coeff": {
+          "data": [
+            -160.0516930761957,
+            -126.78681280386378
+          ],
+          "dtype": "torch.float64",
+          "shape": [
+            2
+          ]
+        },
+        "sources": {
+          "data": [
+            0.0,
+            115.43608283476057,
+            161.9425354664131,
+            120.8350609378869,
+            0.0
+          ],
+          "dtype": "torch.float64",
+          "shape": [
+            5
+          ]
+        }
+      },
+      "phi": {
+        "data": [
+          6.0,
+          1.9223717818674941,
+          1.01266315157249,
+          1.1009364186753687,
+          0.5
+        ],
+        "dtype": "torch.float64",
+        "shape": [
+          5
+        ]
+      },
+      "q": {
+        "data": [
+          0.02493245000776478,
+          0.007522747614366984,
+          -0.002477252221136535,
+          0.00646369790186781,
+          0.009679777890880292
+        ],
+        "dtype": "torch.float64",
+        "shape": [
+          5
+        ]
+      }
+    }
+  },
+  "potential_withdrawal_fast_pressure_driven_demand": {
+    "ok": {
+      "diagnostics": {
+        "backend": "sparse_direct",
+        "converged": {
+          "data": true,
+          "dtype": "torch.bool",
+          "shape": []
+        },
+        "linear_iterations": {
+          "data": 1,
+          "dtype": "torch.int64",
+          "shape": []
+        },
+        "newton_iterations": 5
+      },
+      "grads": {
+        "C": {
+          "data": [
+            196.81670700590965,
+            35.77048595708496,
+            12.723246180819388,
+            -15.450081039894604,
+            -4.396206928950039
+          ],
+          "dtype": "torch.float64",
+          "shape": [
+            5
+          ]
+        },
+        "q_required": {
+          "data": [
+            -46.3068322257177,
+            -29.56455745133292
+          ],
+          "dtype": "torch.float64",
+          "shape": [
+            2
+          ]
+        }
+      },
+      "phi": {
+        "data": [
+          6.0,
+          1.2580532492811078,
+          0.4776383051252751,
+          0.6079349280054012,
+          0.5
+        ],
+        "dtype": "torch.float64",
+        "shape": [
+          5
+        ]
+      },
+      "q": {
+        "data": [
+          0.027502478720027347,
+          0.0068092865729294854,
+          -0.0031907134256421244,
+          0.0021173751581000707,
+          0.008314530841034411
+        ],
+        "dtype": "torch.float64",
+        "shape": [
+          5
+        ]
+      }
+    }
+  },
   "sewer_dynwave_tree_anderson": {
     "ok": {
       "acceleration": "anderson",

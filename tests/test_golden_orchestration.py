@@ -5,7 +5,9 @@ Every case runs a small, deterministic model through `Model.step` / `Model.stead
 whole `diagnostics` dict (pass counts, `converged`, `max_change`, `adjoint`,
 `adjoint_batched`, per-layer Newton figures), the gradient of a fixed scalar loss with
 respect to designated parameters, and, for the failure cases, the exception type and the
-first 80 characters of its message.
+first 80 characters of its message. The cases named `potential_*` (defined in
+`tests/_potential_layer_cases.py`) solve one `KirchhoffLayer` directly, for what a Model does
+not reach: relations, multi-port and phasor laws, withdrawals, storage and the layer methods.
 
 The reference is `tests/golden/orchestration.json`, generated on the unrefactored code by
 `benchmarks/regenerate_orchestration_golden.py`. The comparison is exact (floats are
@@ -61,31 +63,14 @@ from noodl.layers.kirchhoff import KirchhoffLayer
 from noodl.layers.transport import TransportLayer
 from noodl.model import Model
 from noodl.topology import Network
+from tests._potential_layer_cases import CASES as _POTENTIAL_CASES
 from tests._reactions import FirstOrderDecay
-from tests.golden import load_golden
+from tests.golden import grads_of, load_golden, ser
 
 F64 = torch.float64
 
 
 # ------------------------------------------------------------------ recording helpers
-
-
-def ser(x: Any) -> Any:
-    """A JSON-ready, exactly round-tripping form of tensors, numbers, dicts and lists."""
-    if isinstance(x, torch.Tensor):
-        t = x.detach().cpu()
-        if t.is_complex():
-            data = torch.view_as_real(t).tolist()
-        else:
-            data = t.tolist()
-        return {"dtype": str(t.dtype), "shape": list(t.shape), "data": data}
-    if isinstance(x, dict):
-        return {str(k): ser(v) for k, v in x.items()}
-    if isinstance(x, (list, tuple)):
-        return [ser(v) for v in x]
-    if x is None or isinstance(x, (bool, int, float, str)):
-        return x
-    raise TypeError(f"cannot record {type(x).__name__}: {x!r}")
 
 
 #: Exact float comparison (the recording environment); see the module docstring.
@@ -167,14 +152,6 @@ def outcome(fn: Callable[[], dict]) -> dict:
         return {"ok": fn()}
     except Exception as exc:  # noqa: BLE001 - the failure IS the characterised outcome
         return {"error": {"type": type(exc).__name__, "message": str(exc)[:80]}}
-
-
-def grads_of(loss: torch.Tensor, params: dict[str, torch.Tensor]) -> dict[str, Any]:
-    """Back-propagate `loss`; the gradients of `params` (None where nothing reached)."""
-    for p in params.values():
-        p.grad = None
-    loss.backward()
-    return {k: p.grad for k, p in params.items()}
 
 
 def record(state: dict, diag: dict | None = None, grads: dict | None = None) -> dict:
@@ -831,10 +808,12 @@ def case_coupled_electrical_union_time_dependent_law():
     return out
 
 
-CASES: dict[str, Callable[[], Any]] = {
-    name[len("case_"):]: fn for name, fn in sorted(globals().items())
-    if name.startswith("case_") and callable(fn)
-}
+CASES: dict[str, Callable[[], Any]] = dict(sorted({
+    **{name[len("case_"):]: fn for name, fn in globals().items()
+       if name.startswith("case_") and callable(fn)},
+    # one KirchhoffLayer, solved directly (tests/_potential_layer_cases.py)
+    **_POTENTIAL_CASES,
+}.items()))
 
 
 def build_all() -> dict[str, Any]:
