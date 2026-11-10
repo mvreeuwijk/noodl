@@ -148,12 +148,18 @@ def _action(control: Control, kind: str) -> tuple[int | None, float | None]:
     `"PUMP"` or `"VALVE"`); `None` keeps the link's own. The setting is in the control's
     units (SI), before `setting_scale`. EPANET 2.2 (`input3.c`,
     `controldata`; checked against wntr 1.5.0's EPANET): a pump OPENed runs at relative speed
-    1, a pump given a setting runs at it and is CLOSED at 0, a valve given a setting is
-    ACTIVE at it. A pump CLOSED keeps its speed here (EPANET sets it to 0, which changes no
-    flow: the pump is shut)."""
+    1, a pump CLOSED is at speed 0, a pump given a setting runs at it and is CLOSED at 0, a
+    valve given a setting is ACTIVE at it.
+
+    The speed 0 of a CLOSED pump changes no flow (the pump is shut), but it is a change of
+    setting: a pump closed by `[STATUS]` keeps its speed 1 (`input3.c`, `changestatus`), so
+    a CLOSED control reaching it changes the link and ends a step there (`hydraul.c`,
+    `controltimestep`: ``LinkSetting[k] != control->Setting``). MEASURED on Net6: PUMP-3881,
+    closed in `[STATUS]`, gets its CLOSED control at 1050 s, where EPANET takes a step and
+    re-solves; without it every later tank trigger moved by seconds."""
     if control.status is not None:
-        if kind == "PUMP" and control.status == OPEN:
-            return OPEN, 1.0
+        if kind == "PUMP" and control.status in (OPEN, CLOSED):
+            return control.status, 1.0 if control.status == OPEN else 0.0
         return control.status, None
     if kind == "PUMP":
         return (OPEN if control.setting > 0 else CLOSED), control.setting

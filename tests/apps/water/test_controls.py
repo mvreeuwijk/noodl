@@ -79,8 +79,10 @@ def test_level_control_both_directions():
     controls = [Control("PU", OPEN, None, "node", "T", False, 10.0),
                 Control("PU", CLOSED, None, "node", "T", True, 14.0)]
     for level, expected in ((9.0, OPEN), (12.0, CLOSED), (15.0, CLOSED)):
+        # the pump as a CLOSED control leaves it: shut, at speed 0
         status, _, changed = _apply(controls, levels={"T": _t(level)},
-                                    status=_t([OPEN, CLOSED, ACTIVE]))
+                                    status=_t([OPEN, CLOSED, ACTIVE]),
+                                    setting=_t([0.0, 0.0, 30.0]))
         assert status[1].item() == (OPEN if level < 10.0 else CLOSED)
         assert status[1].item() == expected or level == 12.0
         assert bool(changed) is (level < 10.0)
@@ -105,6 +107,24 @@ def test_a_level_crossing_is_rounded_to_whole_seconds():
         ahead = next_control_time(control, time=_t(0.0), levels={"T": _t(13.0)},
                                   rates={"T": _t(rate)})
         assert float(ahead) == expected, rate
+
+
+def test_a_closed_control_on_a_pump_closed_at_speed_one_ends_a_step():
+    """A CLOSED control puts a pump at speed 0 (`input3.c`, `controldata`), so it changes a
+    pump closed by `[STATUS]`, which keeps its speed 1 (`changestatus`), and ends a step at
+    its trigger (`hydraul.c`, `controltimestep`, ``LinkSetting[k] != control->Setting``);
+    on a pump already at 0 it changes nothing. The cause of Net6's first divergence
+    (PUMP-3881 at 1050 s, `test_water_networks`)."""
+    control = [Control("PU", CLOSED, None, "node", "T", True, 14.0)]
+    kw = dict(time=_t(0.0), levels={"T": _t(13.0)}, rates={"T": _t(1 / 100.0)},
+              link_names=LINKS, link_kinds=KINDS)
+    closed = _t([OPEN, CLOSED, ACTIVE])
+    assert float(next_control_time(control, status=closed, setting=_t([0.0, 1.0, 30.0]),
+                                   **kw)) == 100.0
+    assert next_control_time(control, status=closed, setting=_t([0.0, 0.0, 30.0]),
+                             **kw) == torch.inf
+    status, setting, changed = _apply(control, levels={"T": _t(14.5)}, status=closed)
+    assert (status[1].item(), setting[1].item(), bool(changed)) == (CLOSED, 0.0, True)
 
 
 def test_batch_instances_are_independent():

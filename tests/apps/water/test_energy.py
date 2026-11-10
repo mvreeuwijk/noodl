@@ -124,8 +124,8 @@ def test_energy_of_a_zero_duration_run_is_one_hour():
 
 
 def test_a_pump_closed_by_a_control_draws_no_energy():
-    """A pump closed by a control keeps its speed in noodl's carried setting (EPANET sets
-    it to 0): the energy reads the status. The pump here is closed at 3600 s of a 7200 s
+    """A pump closed by a control is at speed 0, as in EPANET (a pump closed otherwise keeps
+    its speed): the energy reads the status. The pump here is closed at 3600 s of a 7200 s
     run, with a second pump keeping the junction supplied; it is on line half the time."""
     net = WaterNetwork(
         junctions=(Junction("J", 0.0, 0.01),), reservoirs=(Reservoir("R", 20.0),),

@@ -534,9 +534,10 @@ class TankLevels:
 
         TRADE-OFF: a control that sets the built value (an OPEN on a pump built at speed 1)
         is then no change, so the drivers' own value stays: a calibration driver at 0.9
-        keeps 0.9 after such a control, where EPANET gives 1.0. A pump CLOSED by a control
-        keeps its speed here (EPANET sets it to 0), and a pump is shut by its status: code
-        that reads the setting alone (Task 11's energy) must read `"water.status"` too."""
+        keeps 0.9 after such a control, where EPANET gives 1.0. A pump CLOSED by a control is
+        at speed 0, as in EPANET; a pump closed otherwise (by `[STATUS]`, by a rule, by the
+        solve) keeps its speed, so code that reads the setting alone (the energy) must read
+        `"water.status"` too."""
         base = drivers.get(SETTING_KEY, self.link_setting).to(link_setting.dtype)
         base, link_setting = torch.broadcast_tensors(base, link_setting)
         idx = self._setting_links
