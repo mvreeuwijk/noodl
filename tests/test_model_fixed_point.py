@@ -184,6 +184,43 @@ def test_a_pass_that_echoes_its_watched_key_is_refused_by_name(model):
                           {"z": torch.zeros(1, dtype=F64)}, watch=["z"], tol=1e-9)
 
 
+def test_an_unwatched_key_that_feeds_back_is_an_unknown_of_the_adjoint(model):
+    """a* = 2 theta, b* = 2 a* = 4 theta; only b is watched. `a` is recomputed and fed back,
+    so holding it at its certified value would give db*/dtheta = 2, not 4."""
+    theta = torch.tensor(1.0, dtype=F64, requires_grad=True)
+
+    def pass_fn(z):
+        a = 0.5 * z["a"] + theta
+        return {"a": a, "b": 0.5 * z["b"] + a}
+
+    z0 = {"a": torch.zeros((), dtype=F64), "b": torch.zeros((), dtype=F64)}
+    diag: dict = {}
+    out = model.fixed_point(pass_fn, z0, watch=["b"], tol=1e-14, max_passes=200,
+                            adjoint_rtol=1e-13, diagnostics=diag)
+    (g,) = torch.autograd.grad(out["b"], theta)
+    assert g.item() == pytest.approx(4.0, rel=1e-12)
+    assert diag["adjoint_keys"] == ["b", "a"]
+
+
+def test_keys_the_pass_does_not_read_stay_out_of_the_adjoint(model):
+    b = torch.tensor([1.0, -2.0], dtype=F64, requires_grad=True)
+
+    def pass_fn(s):
+        z = A @ s["z"] + b
+        return {"z": z, "twice": 2.0 * z, "copied": s["copied"]}
+
+    z0 = {"z": torch.zeros(2, dtype=F64), "twice": torch.zeros(2, dtype=F64),
+          "copied": torch.ones(3, dtype=F64)}
+    diag: dict = {}
+    out = model.fixed_point(pass_fn, z0, watch=["z"], tol=1e-15, max_passes=200,
+                            diagnostics=diag)
+    assert diag["adjoint_keys"] == ["z"]
+    inv = torch.linalg.inv(torch.eye(2, dtype=F64) - A)
+    (g,) = torch.autograd.grad(out["twice"].sum(), b)
+    torch.testing.assert_close(g, 2.0 * inv.T @ torch.ones(2, dtype=F64), rtol=0, atol=1e-12)
+    assert torch.equal(out["copied"], z0["copied"]) and not out["copied"].requires_grad
+
+
 def test_bad_arguments_are_refused(model):
     z0 = {"z": torch.zeros(1, dtype=F64)}
     with pytest.raises(ValueError, match="watch must name"):
@@ -304,6 +341,50 @@ def test_sewer_steady_equals_the_old_loop_under_no_grad():
     assert got.keys() == current.keys()
     for k in current:
         assert torch.equal(got[k], current[k]), k
+
+
+@pytest.mark.parametrize("storage", [False, True])
+def test_sewer_steady_gradient_matches_central_differences(storage):
+    """With loads on the inflows (BOD and sulfide well above zero, away from the reaction's
+    clamp at zero), the fixed point's gradient against the loads is the central difference
+    of the converged states. With manhole storage the closure-carried `sewer.H` is
+    recomputed by every step, so it is an unknown of the adjoint although it is not watched."""
+    dt = 600.0
+    kw = {"storage": True, "dt_storage": dt} if storage else {}
+    model, state, drivers = sewer_build_model(tree_steady(), **kw)
+    bod0 = torch.full_like(drivers["bod_in"], 0.2)
+    sul0 = torch.full_like(drivers["sulfide_in"], 0.002)
+    weights = torch.tensor([[1.0, 300.0], [2.0, 200.0], [1.5, 100.0], [0.5, 400.0],
+                            [3.0, 250.0]], dtype=F64)
+    spy: dict = {}
+    real = model.fixed_point
+
+    def recording(*args, **kwargs):
+        return real(*args, **{**kwargs, "diagnostics": spy})
+
+    def loss(bod, sul, record=False):
+        model.fixed_point = recording if record else real
+        try:
+            out = sewer_steady(model, state, {**drivers, "bod_in": bod, "sulfide_in": sul},
+                               dt=dt, tol=1e-11)
+        finally:
+            del model.fixed_point
+        assert float(out["water_quality.x"].detach().min()) > 1e-4
+        return (out["water_quality.x"] * weights).sum() + 1e3 * out["air_quality.x"].sum()
+
+    bod = bod0.clone().requires_grad_(True)
+    sul = sul0.clone().requires_grad_(True)
+    g_bod, g_sul = torch.autograd.grad(loss(bod, sul, record=True), [bod, sul])
+    assert ("sewer.H" in spy["adjoint_keys"]) == storage
+    v_bod = torch.linspace(0.5, 1.5, bod0.numel(), dtype=F64)
+    v_sul = torch.linspace(1.0, -1.0, sul0.numel(), dtype=F64)
+    h = 1e-4
+    with torch.no_grad():
+        up = loss(bod0 + h * 0.2 * v_bod, sul0 + h * 0.002 * v_sul)
+        dn = loss(bod0 - h * 0.2 * v_bod, sul0 - h * 0.002 * v_sul)
+    fd = float(up - dn) / (2 * h)
+    ad = float(0.2 * (g_bod * v_bod).sum() + 0.002 * (g_sul * v_sul).sum())
+    assert ad == pytest.approx(fd, rel=1e-6)
 
 
 # ------------------------------------------------------------ street_steady_with_plume

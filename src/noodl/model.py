@@ -1028,21 +1028,28 @@ class Model:
         Differentiation: pass 1 runs under the caller's grad mode, to learn whether anything
         differentiable reaches the state. When it does, the remaining primal passes run under
         `torch.no_grad()` and one differentiable pass at the certified fed state attaches the
-        implicit adjoint (`solvers.fixed_point.differentiate_fixed_point`) of the watched keys,
-        with every key `pass_fn` returns as output: the gradient is the fixed point's own, with
-        backward memory of one pass. `adjoint_rtol` defaults to the model's, `adjoint_restart`
+        implicit adjoint (`solvers.fixed_point.differentiate_fixed_point`), with every key
+        `pass_fn` returns as output: the gradient is the fixed point's own, with backward
+        memory of one pass. The unknowns of that adjoint are the watched keys AND every
+        other floating-point key the pass recomputes that was in the fed state and that the
+        pass reads (the rule `coupling="iterate"` uses): `watch` decides convergence only, so
+        an unwatched key that feeds back -- a closure-carried level, an intermediate the
+        next pass reads -- is still differentiated as part of the fixed point. A key the
+        pass returns unchanged (the same tensor it was fed) is a constant of the pass, not
+        an unknown; a WATCHED key returned unchanged is refused by name. Every unknown is
+        assumed to be at its fixed point too, so a key that never settles (a counter) must
+        not be in the fed state. `adjoint_rtol` defaults to the model's, `adjoint_restart`
         to the adjoint solve's own default. When nothing requires grad every pass runs under
         `no_grad` and nothing more happens: unlike `coupling="iterate"`, there is NO
         confirmation pass at the certified state, so a `pass_fn` that only takes a
         parameter-dependent branch away from the start state is not seen; run it under
-        `torch.no_grad()` or differentiate from a state that already reaches the branch. Keys
-        other than the watched ones are held at their certified values in the differentiable
-        pass, so they are not unknowns of the adjoint.
+        `torch.no_grad()` or differentiate from a state that already reaches the branch.
 
         `diagnostics`, when given, is updated with `passes`, `changes` (the change of every
         pass, the largest over the instances), `contraction` (the ratio of the last two
-        changes: the measured spectral radius), `adjoint` (`"implicit"` or `None`) and
-        `adjoint_batched`.
+        changes: the measured spectral radius), `adjoint` (`"implicit"` or `None`),
+        `adjoint_batched` and `adjoint_keys` (the unknowns of the adjoint, empty when none
+        ran).
         """
         return fixed_point(
             pass_fn, state, watch=watch, tol=tol, max_passes=max_passes,
