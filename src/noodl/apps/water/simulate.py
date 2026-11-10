@@ -509,8 +509,11 @@ def water_run(model, state=None, drivers=None, *, duration: float | None = None,
             whole = step
             if t + clock.free_step(t, hydraulic_report) > clock.duration:
                 whole = plan(False)[0]          # the duration cut this step: EPANET's is whole
-            meter.add(_period(net, t), whole / 3600.0, solved, status[..., meter.cols],
-                      speeds_of(solved, d))
+            pumps_now, opened = _as_addenergy_sees(solved, advanced, status[..., meter.cols],
+                                                   meter.cols)
+            meter.add(_period(net, t), whole / 3600.0,
+                      {"water.phi": advanced["water.phi"], "water.q": solved["water.q"]},
+                      pumps_now, speeds_of(advanced, d), opened=opened)
         if report:
             recorder.record(solved, d, cut_off, levels,
                             _overflow(model, storage, solved, advanced, step), status)
@@ -519,6 +522,26 @@ def water_run(model, state=None, drivers=None, *, duration: float | None = None,
             hydraulic_report += clock.report_step
         state = advanced
     return recorder.results(reported, None if meter is None else meter.result())
+
+
+def _as_addenergy_sees(solved, advanced, pump_states: Tensor, cols: Tensor):
+    """`(pump_states, opened)` of a step as EPANET's `addenergy` reads them (`hydraul.c`,
+    `nexthyd`). It runs AFTER `timestep`, so after `tanklevels` has moved the tanks to the
+    step's end and `ruletimestep` has taken the actions of the rules checked there
+    (`takeactions`, `setlinkstatus`/`setlinksetting`): `getenergy` reads the solve's flows and
+    junction heads, the tank heads at the step's end (`advanced`, `plan`'s state) and each
+    pump's `LinkStatus` and `LinkSetting` as those rules left them. A pump a rule closes at the
+    end of a step draws nothing over it; one a rule opens there counts as on line, with the
+    flow its closed link carried in the solve (`opened`, see `EnergyMeter.add`); an efficiency
+    curve takes the speed the rule set. Simple controls are taken at the start of the next
+    step (`runhyd`, `controls`), so they do not reach it."""
+    if "water.link_status" not in advanced:
+        return pump_states, None
+    before = solved["water.link_status"][..., cols].to(pump_states.dtype)
+    after = advanced["water.link_status"][..., cols].to(pump_states.dtype)
+    moved = after != before                   # a rule acted on the pump in this step
+    opened = moved & (after != CLOSED) & (pump_states == CLOSED)
+    return torch.where(moved, after, pump_states), opened
 
 
 def _advance(model, phi: Tensor, inflow: Tensor, dt: int, drivers) -> Tensor:

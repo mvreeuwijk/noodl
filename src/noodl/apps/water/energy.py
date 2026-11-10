@@ -2,15 +2,16 @@
 
 Transcribed from EPANET 2.2 (tag v2.2):
 
-- `hydraul.c`, `addenergy`: at the start of every hydraulic step of `hstep` s (`nexthyd`, whose
-  step is not shortened to the duration: the last step of a run whose duration is not a
-  multiple of the step counts whole, and a run of duration 0 counts one hour) every pump
-  whose status is above CLOSED adds `dt` (hours) to its time on line, `e dt` to its
-  efficiency, `p/q dt`, `p dt` and `c p dt` to its energy per flow, energy and cost, and
-  its peak power is the largest `p`; the network's peak total power `Emax` is the largest sum
-  of the running pumps' `p`. The price `c` is the pump's own price, else the global one,
-  times the pump's price pattern, else the global price pattern, at the pattern period
-  `(t + Pstart) / Pstep`.
+- `hydraul.c`, `addenergy`: once per hydraulic step of `hstep` s (`nexthyd`, whose step is not
+  shortened to the duration: the last step of a run whose duration is not a multiple of the
+  step counts whole, and a run of duration 0 counts one hour), called after `timestep` has
+  moved the tanks to the step's end and taken the actions of the rules checked there
+  (`simulate._as_addenergy_sees`), every pump whose status is then above CLOSED adds `dt`
+  (hours) to its time on line, `e dt` to its efficiency, `p/q dt`, `p dt` and `c p dt` to
+  its energy per flow, energy and cost, and its peak power is the largest `p`; the network's
+  peak total power `Emax` is the largest sum of the running pumps' `p`. The price `c` is
+  the pump's own price, else the global one, times the pump's price pattern, else the
+  global price pattern, at the pattern period `(t + Pstart) / Pstep`.
 - `hydraul.c`, `getenergy`: no energy for a pump whose status is CLOSED (or shut by the
   solve at its shut-off head); `p = dh q SpGrav / 8.814 / e kw_per_hp` in feet, cfs and
   horsepower, the same for a constant-power pump (its power enters through the solved head
@@ -34,6 +35,7 @@ from dataclasses import dataclass
 import torch
 
 from noodl.apps.water.controls import CLOSED
+from noodl.apps.water.elements import CBIG_FT_PER_CFS
 from noodl.apps.water.tanks import QZERO
 
 Tensor = torch.Tensor
@@ -157,14 +159,24 @@ class EnergyMeter:
         self._steps: list = []
 
     def add(self, period: int, hours: float, solved, states: Tensor,
-            speed: Tensor | None) -> None:
+            speed: Tensor | None, opened: Tensor | None = None) -> None:
         """Take a step of `hours` at pattern period `period` from the solved state `solved`;
         `states` (..., n_pumps) are the pumps' states (`CLOSED` or above) and `speed`
         (..., n_pumps) their relative speeds (needed only for efficiency curves). The
-        statistics are accumulated over all the steps at once, in `result`."""
+        statistics are accumulated over all the steps at once, in `result`.
+
+        `opened` (..., n_pumps) marks the pumps that were closed in the solve and that a rule
+        opened at the step's end: EPANET charges them with the flow their closed link carried,
+        ``|dh| / CBIG`` (`hydcoeffs.c`: a closed link's conductance ``1 / CBIG``, CBIG = 1e8
+        ft per cfs), where this model's closed link carries none. Their power is that flow's,
+        negligible, but their energy per volume is ``p / q`` at it, which is not."""
         phi = solved["water.phi"]
-        self._steps.append((period, hours, phi[..., self.from_node], phi[..., self.to_node],
-                            solved["water.q"][..., self.cols], states, speed))
+        u, v = phi[..., self.from_node], phi[..., self.to_node]
+        q = solved["water.q"][..., self.cols]
+        if opened is not None and bool(opened.any()):
+            leak = (u - v).abs() / self.head_scale / _M_PER_FT / CBIG_FT_PER_CFS
+            q = torch.where(opened, leak / self.cfs_per_m3s, q)
+        self._steps.append((period, hours, u, v, q, states, speed))
 
     def _price(self, periods: Tensor) -> Tensor:
         """Each pump's price (T, n_pumps) at the pattern periods `periods` (T,)

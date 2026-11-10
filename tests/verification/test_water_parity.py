@@ -422,6 +422,40 @@ def test_rules_match_epanet(tmp_path):
     assert not torch.equal(by_priority, states[:, pump])               # PRIORITY decides
 
 
+def test_energy_under_rules_matches_epanet(tmp_path):
+    """The four rules' network (`test_rules_match_epanet`, both priorities) with a price and a
+    demand charge: the pump's energy section against EPANET's (its toolkit, as wntr reads no
+    CLOCKTIME rule), every figure and the demand charge 1e-5 relative. EPANET charges a step
+    with the pump status the rules checked at its end leave (`nexthyd` calls `addenergy`
+    after `ruletimestep`), and a pump a rule opens there with the flow its closed link
+    carried in the solve, `dh / CBIG`, which sets its energy per volume. MEASURED: 3.9e-7 and
+    2.9e-7; before, 0.1394 against EPANET's 0.1600 kWh per m3 (the opened pump's hours
+    without its `dh / CBIG` flow), and the hour before a rule closes the pump counted on."""
+    toolkit = pytest.importorskip("wntr.epanet.toolkit")
+    for night in (3, 1):
+        text = _RULES_NETWORK.format(night=night).replace(
+            "[OPTIONS]", "[ENERGY]\n Global Price 0.1\n Demand Charge 2.0\n[OPTIONS]", 1)
+        path = tmp_path / f"rules{night}.inp"
+        path.write_text(text)
+        en = toolkit.ENepanet()
+        en.ENopen(str(path), str(path.with_suffix(".rpt")), str(path.with_suffix(".bin")))
+        en.ENsolveH()
+        en.ENsaveH()
+        en.ENclose()
+        reader = _EnergyBin()
+        reader.read(str(path.with_suffix(".bin")))
+        model, _, _ = build_model(read_epanet_inp(path))
+        energy = water_run(model).energy
+        ours = [float(energy.utilisation[0]), float(energy.efficiency[0]),
+                float(energy.energy_per_volume[0]), float(energy.average_power[0]),
+                float(energy.peak_power[0]), float(energy.cost[0])]
+        for a, b in zip(ours, reader.energy["PU1"], strict=True):
+            assert a == pytest.approx(b, rel=1e-5), (night, ours, reader.energy["PU1"])
+        assert float(energy.demand_charge) == pytest.approx(float(reader.peak_energy[0]),
+                                                            rel=1e-5)
+        assert 0.0 < ours[0] < 100.0
+
+
 def test_an_unaligned_report_start_follows_epanets_output_rule(tmp_path):
     """REPORT START 1:30 with a 1 h REPORT TIMESTEP: EPANET's hydraulic steps still land on
     the whole hours (`hydraul.c`, `Rtime` from REPORT TIMESTEP), and its output takes, for
@@ -3220,14 +3254,12 @@ def test_a_pump_closed_and_opened_again_matches_epanet(tmp_path, case):
     that changes nothing (the rule left it at speed 0, as the control would), then OPENed.
     Through `water_run` against EPANET: the hydraulic steps taken (no step at 2:30 in the
     second case), heads, the tank level, flows and states at every hour, the pump's speed
-    (0 while closed, 1 again after the OPEN) and, for the controls, the energy section, 1e-5
-    relative.
+    (0 while closed, 1 again after the OPEN) and the energy section, 1e-5 relative.
 
-    The rule's case is not compared for energy: EPANET charges a step with the pump status
-    left by the rules checked at its END (`nexthyd` calls `addenergy` after `timestep`, whose
-    `ruletimestep` takes the rule's action at 2 h), so the hour before the rule closes the
-    pump counts as off. MEASURED: EPANET 50.0 percent on line and $229.20 a day, against
-    66.7 percent and $306.05 here, the hydraulics equal at every step."""
+    EPANET charges a step's energy with the pump status the rules checked at its END leave
+    (`nexthyd` calls `addenergy` after `timestep`, whose `ruletimestep` takes the rule's
+    action at 2 h), so in the rule's case the hour before the rule closes the pump counts as
+    off: 3 h of 6 on line (50 percent), against 4 h with the time controls."""
     controls, rules = _NET1_CLOSE_OPEN[case]
     text = (DATA / "Net1.inp").read_text()
     for old, new in (
@@ -3241,12 +3273,10 @@ def test_a_pump_closed_and_opened_again_matches_epanet(tmp_path, case):
     path = tmp_path / f"net1-{case}.inp"
     path.write_text(text)
     worst, theirs, run = _compare_energy(path, tmp_path, case)
-    if case == "controls":
-        assert worst < 1e-5, worst
-        assert theirs["9"][0] == pytest.approx(100.0 * 4 / 6, abs=1e-3)
-    else:
-        assert theirs["9"][0] == pytest.approx(50.0, abs=1e-3)
-        assert float(run.energy.utilisation[0]) == pytest.approx(100.0 * 4 / 6, rel=1e-12)
+    assert worst < 1e-5, worst
+    on_line = 100.0 * (4 if case == "controls" else 3) / 6
+    assert theirs["9"][0] == pytest.approx(on_line, abs=1e-3)
+    assert float(run.energy.utilisation[0]) == pytest.approx(on_line, rel=1e-12)
     results = wntr.sim.EpanetSimulator(wntr.network.WaterNetworkModel(str(path))).run_sim(
         file_prefix=str(tmp_path / f"{case}-run"))
     model, _, _ = build_model(read_epanet_inp(path))
