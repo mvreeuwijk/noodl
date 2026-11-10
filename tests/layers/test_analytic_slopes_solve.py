@@ -228,7 +228,7 @@ def test_a_newton_aid_declared_exact_corrupts_the_gradient():
 
 
 @pytest.mark.parametrize("network", [_building, _water, _sewer])
-def test_a_solve_nothing_differentiable_reaches_is_the_primal_solve(network):
+def test_a_solve_nothing_differentiable_reaches_is_the_primal_solve(network, monkeypatch):
     """With every slope exact, the differentiable forward Newton is the primal one: the same
     slopes, residuals and iterates, so the same `(phi, q)` bit for bit (the sewer relied on
     this through `analytic_primal`, which is gone)."""
@@ -237,9 +237,18 @@ def test_a_solve_nothing_differentiable_reaches_is_the_primal_solve(network):
     phi_b = _t([25.0]) if network is _water else _t([0.1])
     sources = torch.zeros(layer._n_nodes, dtype=F64)
     step = _sewer_step() if network is _sewer else {}
-    for owner in (*layer._laws, *layer._withdrawals):
-        for p in owner.parameters():
-            p.requires_grad_(False)
+    params = [p for owner in (*layer._laws, *layer._withdrawals, *layer._storage)
+              for p in owner.parameters()]
+    for p in params:
+        p.requires_grad_(False)
+    built: list = []
+    init = FunctionalLaws.__init__
+
+    def spy(self, *args, **kwargs):
+        built.append(1)
+        init(self, *args, **kwargs)
+
+    monkeypatch.setattr(FunctionalLaws, "__init__", spy)
     out = {}
     for differentiable in (True, False):
         diag: dict = {}
@@ -248,17 +257,27 @@ def test_a_solve_nothing_differentiable_reaches_is_the_primal_solve(network):
                                           **TIGHT), diag
     # `on_failure="return_primal"`: a differentiable solve nothing reaches is not
     # differentiated; on the fast path it runs the primal Newton with the closure check at
-    # every residual, or, under no_grad with a grad-requiring driver, the threaded forward
-    # Newton (which detaches it). Both are the primal solve bit for bit too.
+    # every residual (no `FunctionalLaws` built), or, under no_grad with a grad-requiring
+    # driver or owner parameter, the threaded forward Newton (which detaches it). All are
+    # the primal solve bit for bit too.
     unread = {"unread": _t([1.0]).requires_grad_(True)}
-    for name, extra, mode in (("checked", {}, torch.enable_grad),
-                              ("threaded", unread, torch.no_grad)):
+    cases = [("checked", {}, torch.enable_grad, None),
+             ("threaded", unread, torch.no_grad, None)]
+    if params:
+        cases.append(("threaded parameter", {}, torch.no_grad, params[0]))
+    for name, extra, mode, learnable in cases:
         diag = {}
+        built.clear()
+        if learnable is not None:
+            learnable.requires_grad_(True)
         with mode():
             out[name] = layer.solve(phi_b, {**drivers, **extra}, sources, diagnostics=diag,
                                     on_failure="return_primal", **step, **TIGHT), diag
+        if learnable is not None:
+            learnable.requires_grad_(False)
+        assert bool(built) == (name != "checked"), name
     (phi_p, q_p), diag_p = out[False]
-    for key in (True, "checked", "threaded"):
+    for key in (True, *(c[0] for c in cases)):
         (phi_d, q_d), diag_d = out[key]
         assert torch.equal(phi_d, phi_p) and torch.equal(q_d, q_p), key
         assert diag_d["newton_iterations"] == diag_p["newton_iterations"], key

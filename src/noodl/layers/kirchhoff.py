@@ -886,8 +886,11 @@ class KirchhoffLayer(TopologyGuard):
                 s, e = self._storage_slices[j]
                 previous = previous[..., s:e]
             start = (step.phi_prev[..., st.nodes], previous)
-            if not any(isinstance(v, torch.Tensor) and v.requires_grad for v in start):
-                # kept only without a graph: no two residuals share one
+            # kept only when the step's own tensors carry no graph (the indexed column is a
+            # copy, graph-free under no_grad whatever `phi_prev` is): no two residuals share
+            # one, and a read under grad mode never gets a column without its graph
+            if not (step.phi_prev.requires_grad
+                    or (step.previous is not None and step.previous.requires_grad)):
                 step.start_args[j] = start
         return (phi[..., st.nodes], *start)
 
@@ -1973,6 +1976,16 @@ class KirchhoffLayer(TopologyGuard):
         return torch.is_grad_enabled() and self._threads_grad(drivers, sources, phi_boundary,
                                                               extra)
 
+    def _plain_calls(self) -> bool:
+        """Whether calling every owner as a module (what the threaded solve does) is calling
+        its own method (what the primal solve does): no law, withdrawal or storage overrides
+        `forward` (its alias for `flow` or `rate`) or carries a forward hook."""
+        owners = [*((el, ConstitutiveLaw) for el in self._laws),
+                  *((ns, NodeWithdrawal) for ns in self._withdrawals),
+                  *((st, NodeStorage) for st in self._storage)]
+        return not any(type(o).forward is not base.forward or o._forward_hooks
+                       or o._forward_pre_hooks for o, base in owners)
+
     def _threads_grad(self, drivers: Mapping, sources, phi_boundary, extra=()) -> bool:
         """`_reaches_grad` whatever the grad mode: whether any of those tensors requires
         grad."""
@@ -2264,9 +2277,10 @@ class KirchhoffLayer(TopologyGuard):
             self._refuse_newton_options(newton_kwargs, "the initial point with held storage")
         elif u is not None:
             self._refuse_newton_options(newton_kwargs)
+        starts = step_start(step, history)
         policy = resolve(
             self, newton_kwargs, diagnostics, differentiable, drivers, sources, phi_boundary,
-            step_start(step, history),
+            starts,
         )
         if _start is None:
             x0, start = self._starting_point(phi0, phi_boundary, drivers, sources, step,
@@ -2291,20 +2305,23 @@ class KirchhoffLayer(TopologyGuard):
         # name; one reached only through a closure, at every residual the forward Newton
         # evaluates, the starting guess first and the root last (`_newton_differentiable`).
         # A differentiable solve that nothing reaches is the primal one: with flow unknowns
-        # as it is; on the fast path with that closure check at every residual (`checked`)
-        # where nothing it threads requires grad (under `no_grad` too: the threaded residual
-        # detaches what does), the threaded slopes are the primal ones (`layer_slopes`) and
-        # no law is `dp_independent` (a declaration the threaded operator cross-checks). Its
-        # result is the threaded forward Newton's, bit for bit, without the threading's cost.
+        # as it is; on the fast path with that closure check at every residual
+        # (`primal_checked`) where nothing it threads requires grad (under `no_grad` too:
+        # the threaded residual detaches what does), the threaded slopes are the primal ones
+        # (`layer_slopes`), no law is `dp_independent` (a declaration the threaded operator
+        # cross-checks) and every owner's module call is its own method (`_plain_calls`).
+        # Its result is the threaded forward Newton's, bit for bit, without the threading's
+        # cost.
         fn = None
-        checked = False
+        primal_checked = False
         if policy.differentiable:
             self._check_no_unreachable_differentiable_tensors()
-            checked = (policy.forward_only and u is None and layer_slopes(self)
-                       and not any(el.dp_independent for el in self._laws)
-                       and (torch.is_grad_enabled() or not self._threads_grad(
-                           drivers, sources, phi_boundary, step_start(step, history))))
-            if not (checked or (policy.forward_only and u is not None)):
+            primal_checked = (
+                policy.forward_only and u is None and layer_slopes(self)
+                and not any(el.dp_independent for el in self._laws) and self._plain_calls()
+                and (torch.is_grad_enabled()
+                     or not self._threads_grad(drivers, sources, phi_boundary, starts)))
+            if not (primal_checked or (policy.forward_only and u is not None)):
                 fn = FunctionalLaws(self, drivers, sources, phi_boundary, step, history)
 
         requested = newton_kwargs["method"]
@@ -2362,7 +2379,7 @@ class KirchhoffLayer(TopologyGuard):
                     remember(r)
                 return r
 
-            if checked:
+            if primal_checked:
                 # nothing it threads requires grad, so the layer's own residual under grad
                 # mode is `_threaded_residual`'s check
                 def residual_fn(x):
@@ -2383,7 +2400,7 @@ class KirchhoffLayer(TopologyGuard):
             with torch.no_grad():
                 result = self._newton_primal(residual_fn, operator_fn, x0, newton_kwargs,
                                              diagnostics, on_fail, requested=requested)
-                if checked and point.get("x") is not result.x:
+                if primal_checked and point.get("x") is not result.x:
                     residual_fn(result.x)   # the root is checked too
                 if point.get("x") is result.x:
                     return point["phi"], point["q"]
@@ -2931,9 +2948,9 @@ class KirchhoffLayer(TopologyGuard):
         refuses one that still requires grad (`_threaded_residual`: `_require_threaded`'s
         check at no extra evaluation); the adjoint's VJP, under grad mode, takes the
         residual's graph to `params`. `policy.forward_only` (on the fast path, where `_solve`
-        does not take the primal Newton instead) runs the
-        forward Newton alone: nothing reaches a gradient, so no adjoint is ever asked of a
-        point it may return unconverged. The root is checked again only when Newton's last
+        does not take the primal Newton instead) runs the forward Newton alone: nothing
+        reaches a gradient, so no adjoint is ever asked of a point it may return
+        unconverged. The root is checked again only when Newton's last
         residual (`fn.last`) was not at it, which leaves `fn.last` at the root either way.
         `on_fail` and `requested` are `_newton_primal`'s."""
         if requested is None:

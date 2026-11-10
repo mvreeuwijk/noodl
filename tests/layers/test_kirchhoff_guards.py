@@ -360,3 +360,85 @@ def test_the_cached_attribute_scan_sees_a_later_change(change):
         law.register_buffer("b", g)
     with pytest.raises(ValueError, match="not a registered nn.Parameter"):
         _solve_unit_source(layer)
+
+
+def test_the_closure_refusal_takes_the_primal_newton(monkeypatch):
+    """The refusal above comes from the primal Newton: no `FunctionalLaws` is built."""
+    from noodl.layers import kirchhoff
+
+    built: list = []
+    init = kirchhoff.FunctionalLaws.__init__
+
+    def spy(self, *args, **kwargs):
+        built.append(1)
+        init(self, *args, **kwargs)
+
+    monkeypatch.setattr(kirchhoff.FunctionalLaws, "__init__", spy)
+    g = torch.tensor([2.0], dtype=F64, requires_grad=True)
+    layer = KirchhoffLayer(_net(), "heat", [_BranchLaw(g, "closure")], boundary=["a"])
+    with pytest.raises(ValueError, match="residual depends on a tensor"):
+        layer.solve(torch.zeros(1, dtype=F64), sources=torch.tensor([0.0, 3.0], dtype=F64),
+                    phi0=torch.zeros(1, dtype=F64), on_failure="return_primal",
+                    diagnostics={})
+    assert not built
+
+
+class _ForwardLaw(ConstitutiveLaw):
+    """A law whose module call is not its `flow`: `forward` reads a closure-captured tensor
+    that `flow` does not."""
+
+    def __init__(self, g):
+        super().__init__("conduction")
+        self._g = lambda: g
+
+    def flow(self, dp, drivers=None):
+        return dp
+
+    def forward(self, dp, drivers=None, ctx=None):
+        return self._g() * dp
+
+    def linear_init(self, drivers=None):
+        return torch.zeros(1, dtype=F64), torch.ones(1, dtype=F64)
+
+
+@pytest.mark.parametrize("how", ["forward", "hook"])
+def test_a_law_whose_module_call_is_not_its_flow_keeps_the_threaded_solve(how):
+    """The primal Newton calls `flow`, the threaded one the module (`forward` and its
+    hooks): where they may differ the solve stays threaded and refuses, as before."""
+    g = torch.tensor([2.0], dtype=F64, requires_grad=True)
+    if how == "forward":
+        law = _ForwardLaw(g)
+    else:
+        law = Conductance(torch.tensor([1.0], dtype=F64))
+        law.register_forward_hook(lambda module, args, out: g * out)
+    layer = KirchhoffLayer(_net(), "heat", [law], boundary=["a"])
+    assert not layer._plain_calls()
+    with pytest.raises(ValueError, match="residual depends on a tensor"):
+        layer.solve(torch.zeros(1, dtype=F64), sources=torch.tensor([0.0, 1.0], dtype=F64),
+                    on_failure="return_primal", diagnostics={})
+
+
+def test_the_storage_column_cache_keeps_the_graph_of_a_grad_requiring_start():
+    """A step-start column read under no_grad is not kept when the step's `phi_prev`
+    requires grad, so a later read under grad mode carries the graph."""
+    from noodl.layers.kirchhoff import _StorageStep
+    from noodl.storage import LinearStorage
+
+    layer = KirchhoffLayer(_net(), "heat", [Conductance(torch.tensor([1.0], dtype=F64))],
+                           boundary=["a"],
+                           storage=[LinearStorage([1], torch.tensor([0.5], dtype=F64))])
+    st = layer._storage[0]
+    phi_prev = torch.tensor([0.0, 2.0], dtype=F64, requires_grad=True)
+    step = _StorageStep(phi_prev, None)
+    phi = torch.tensor([0.0, 3.0], dtype=F64)
+    with torch.no_grad():
+        _, start, _ = layer._storage_args(0, st, phi, step)
+    assert not start.requires_grad
+    _, start, _ = layer._storage_args(0, st, phi, step)
+    assert start.requires_grad
+    (grad,) = torch.autograd.grad(start.sum(), phi_prev)
+    assert torch.equal(grad, torch.tensor([0.0, 1.0], dtype=F64))
+    # a graph-free step is read once
+    plain = _StorageStep(phi_prev.detach(), None)
+    first = layer._storage_args(0, st, phi, plain)[1]
+    assert layer._storage_args(0, st, phi, plain)[1] is first
