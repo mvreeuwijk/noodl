@@ -1447,8 +1447,8 @@ def test_a_throttle_control_valve_matches_epanet(tmp_path):
 
     The head loss is compared at 1e-5 m ABSOLUTE: EPANET reports a valve's loss as the
     difference of its two FLOAT32 heads (spacing 3.8e-6 m at 48 m), which on this 0.0516 m
-    loss is 7e-5 relative. MEASURED 3.2e-6 m; this model's loss is `Km q^2` at EPANET's own
-    flow to 3e-7 relative."""
+    loss is 7e-5 relative. MEASURED: heads 5.3e-8 relative, flows 1.8e-9 m3/s, head loss
+    3.2e-6 m; this model's loss is `Km q^2` at EPANET's own flow to 3e-7 relative."""
     path, results = _epanet(tmp_path, "twoloop_si.inp", edits=_TCV)
     model, state, drivers = build_model(read_epanet_inp(path))
     final = water_steady(model, state, drivers)
@@ -1461,7 +1461,8 @@ def test_a_throttle_control_valve_matches_epanet(tmp_path):
 def test_gradient_through_a_closed_check_valve_against_central_differences(tmp_path):
     """d(sum of junction heads)/d(demands) on the check-valve network (P4 closed by its
     check valve, P7 by `[STATUS]`): the implicit adjoint on the converged branch against
-    central differences, `max|analytic - fd| <= 1e-6 max|fd|`."""
+    central differences, `max|analytic - fd| <= 1e-6 max|fd|`. MEASURED: 2.6e-8 at a scale
+    of 983, 2.7e-11 relative."""
     path, _ = _epanet(tmp_path, "twoloop_si.inp", edits=_STATUS_EDITS)
     model, state, drivers = build_model(read_epanet_inp(path))
     junctions = [model.node_names.index(f"J{k}") for k in range(1, 7)]
@@ -2940,7 +2941,8 @@ def test_emitters_behind_a_closed_pipe_match_epanet(tmp_path, case):
 def test_a_check_valve_on_a_chezy_manning_network_matches_epanet(tmp_path):
     """P4 (J3 -> J1) as a check valve closes (its water runs the other way) and P5 stays
     open, on the two-loop with `HEADLOSS C-M`, roughness 0.011; P7 closed by `[STATUS]`.
-    Heads and flows 1e-6, every link state as EPANET's."""
+    Heads and flows 1e-6, every link state as EPANET's. MEASURED: heads 7.6e-8 relative,
+    flows 2.2e-9 m3/s, every state equal."""
     text = (DATA / "twoloop_si.inp").read_text()
     for old, new in (_pipe_status_edit("P4", "CV"), _pipe_status_edit("P5", "CV"),
                      ("[STATUS]\n;ID              \tStatus/Setting",

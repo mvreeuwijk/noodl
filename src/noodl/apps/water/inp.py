@@ -3,14 +3,16 @@
 READ: `[JUNCTIONS] [RESERVOIRS] [TANKS] [PIPES] [PUMPS] [VALVES] [DEMANDS] [PATTERNS]
 [CURVES] [CONTROLS] [RULES] [STATUS] [EMITTERS] [ENERGY] [OPTIONS] [TIMES]`, with the column
 layouts of the EPANET 2.2 manual's Appendix C.2. Everything EPANET 2.2's hydraulics reads is
-READ and converted to SI here; `WaterNetwork.validate()` then REFUSES, by name, each feature
-the builder does not model yet (a numeric `[STATUS]` pump speed,
-a constant-POWER pump, a pump with more than a three-point curve or a SPEED PATTERN, a tank
-with a volume curve or OVERFLOW, a rule, and every `[CONTROLS]`
-form except `LINK <pump> OPEN|CLOSED IF NODE <tank> BELOW|ABOVE <level>`), so that reading a
-file never changes what it means and building one never silently drops a feature. The reader
+READ and converted to SI here; `WaterNetwork.validate()` (called by `build_model`) then
+REFUSES, by name, the one form the builder does not model (a numeric `[CONTROLS]` setting on
+a pipe) and what EPANET itself refuses: its valve checks (a PRV or PSV that controls a
+reservoir or tank, two valves holding one node: errors 219 and 220), its tank checks (an
+initial level outside the limits, a volume curve that does not cover them: error 225), its
+pump checks (a curve without a power-function fit, or whose flows do not rise and heads do
+not fall: error 227) and a constant-power pump without a positive power. So reading a file
+never changes what it means and building one never silently drops a feature. The reader
 itself refuses only what it cannot read: a malformed record, an unknown name, a curve used
-in two roles whose units differ.
+in two roles whose units differ, and the `[RULES]` forms `docs/formats/epanet.md` lists.
 
 CURVES BY ROLE. `[CURVES]` carries no type of its own, so each curve is converted by the role
 that uses it: a pump HEAD curve or a GPV head-loss curve (flow, length), a pump efficiency

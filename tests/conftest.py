@@ -100,13 +100,14 @@ def pytest_runtest_makereport(item, call):
 def _private_scratch_directory(tmp_path_factory):
     """Give every test process its own TMP/TEMP/TMPDIR for EPANET's scratch files.
 
-    EPANET 2.2 (the `epanet22.dll` inside `wntr`, driven by `wntr.sim.EpanetSimulator`) writes
-    its hydraulics and output scratch files `enN` into the directory named by `TMP`, numbering
-    them from a counter that restarts in each process. Under `pytest -n 4` two workers then
-    open the same file, and a run reads another network's results: heads off by ~100 m in
-    `test_two_loop_heads_and_flows`, a different test failing in about every second run, each
-    one passing alone. A per-worker directory removes the collision (the tests' own
-    `file_prefix` already lives in their `tmp_path`).
+    MEASURED: EPANET 2.2 (the `epanet22.dll` inside `wntr`, driven by
+    `wntr.sim.EpanetSimulator`) leaves scratch files `enN` in the directory named by `TMP`,
+    and under `pytest -n 4` with one shared `TMP` a run read another network's results:
+    heads off by ~100 m in `test_two_loop_heads_and_flows`, a different test failing in about
+    every second run, each one passing alone; with a per-worker directory none has failed.
+    The likely mechanism, not confirmed in the DLL: the file names come from a counter that
+    restarts in each process, so two workers open the same file. (The tests' own
+    `file_prefix` already lives in their `tmp_path`.)
     """
     names = ("TMP", "TEMP", "TMPDIR")
     saved = {name: os.environ.get(name) for name in names}

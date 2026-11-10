@@ -53,18 +53,25 @@ class Mixed(ImplicitLaw):
                 - 0.01 * ctx.phi_to**2)
 
 
-def _layer(law):
+def _layer(law, *, drain=False):
+    """The line of the module docstring; with `drain`, J2 also feeds a second reservoir R2
+    (head 30) through a pipe of conductance 0.003, so the flow through the law, and with it
+    J1's head, moves with the held head."""
     net = Network(dtype=F64)
-    for n in ("R", "J1", "J2", "J3"):
+    for n in ("R", "J1", "J2", "J3", *(("R2",) if drain else ())):
         net.add_node(n)
     net.add_edge("R", "J1", kind="pipe")
     net.add_edge("J1", "J2", kind=law.kind)
     net.add_edge("J2", "J3", kind="pipe")
-    layer = KirchhoffLayer(net, "water", [Conductance(torch.tensor([0.002, 0.004]), kind="pipe"),
-                                          law], boundary=["R"])
+    conductance = [0.002, 0.004]
+    if drain:
+        net.add_edge("J2", "R2", kind="pipe")
+        conductance.append(0.003)
+    layer = KirchhoffLayer(net, "water", [Conductance(torch.tensor(conductance), kind="pipe"),
+                                          law], boundary=["R", "R2"] if drain else ["R"])
     sources = torch.zeros(net.n)
     sources[net.nodes.index("J3")] = -DEMAND
-    return net, layer, torch.tensor([50.0]), sources
+    return net, layer, torch.tensor([50.0, 30.0] if drain else [50.0]), sources
 
 
 def test_the_end_head_is_held():
@@ -90,8 +97,12 @@ def test_jacobian_matches_autograd_of_the_residual(make):
 
 
 def test_gradient_of_the_held_head():
+    """d(head)/d(setting) downstream of the law (J3: 1 exactly) and upstream of it, where
+    the drain to R2 makes the law's flow ``DEMAND + 0.003 (s - 30)`` and so J1's head
+    ``50 - flow / 0.002``: d(J1)/ds = -1.5, against central differences."""
     setting = torch.tensor(40.0)
-    net, layer, phi_b, sources = _layer(HeldDownstreamHead(setting, learnable=True))
+    net, layer, phi_b, sources = _layer(HeldDownstreamHead(setting, learnable=True),
+                                        drain=True)
     law = layer._laws[1]
     j1, j3 = net.nodes.index("J1"), net.nodes.index("J3")
     phi, _ = layer.solve(phi_b, {}, sources)
@@ -103,13 +114,12 @@ def test_gradient_of_the_held_head():
     h = 1e-4
 
     def j1_at(value):
-        _, other, pb, src = _layer(HeldDownstreamHead(value))
+        _, other, pb, src = _layer(HeldDownstreamHead(value), drain=True)
         return float(other.solve(pb, {}, src, differentiable=False)[0][j1])
 
     central = (j1_at(40.0 + h) - j1_at(40.0 - h)) / (2 * h)
-    # The flow through the law is the demand whatever the setting, so J1's head does not
-    # move with it: both are zero, compared with an absolute floor.
-    torch.testing.assert_close(float(d_j1), central, rtol=1e-6, atol=1e-12)
+    assert abs(float(d_j1) + 1.5) < 1e-8
+    torch.testing.assert_close(float(d_j1), central, rtol=1e-6, atol=0.0)
 
 
 def test_reads_heads_on_a_flow_law_is_refused():

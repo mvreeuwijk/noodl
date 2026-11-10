@@ -814,11 +814,12 @@ on-disk reals are **float32**, so roughly 1e-7 relative is EPANET's own precisio
 | Emitters at J4 and J6 vs EPANET, the file's demands and coefficients (heads, emitter outflows, flows) | 1e-6, 1e-6 m3/s, 1e-6 m3/s | 8.6e-8, 7.3e-10, 4.0e-9 |
 | An emitter at negative pressure (J4 at 60 m, an inflow) vs EPANET | 1e-6, 1e-6 m3/s, 1e-6 m3/s | 6.99e-8, 5.7e-8, 2.6e-7 |
 | `HEADLOSS C-M` (n = 0.011) vs EPANET | 1e-6, 1e-6 m3/s | 7.6e-8 heads, 8.3e-9 m3/s flows |
+| A check valve on the `HEADLOSS C-M` two-loop (P4 closes, P5 open, P7 closed): heads, flows, every link's state | 1e-6 / 1e-6 m³/s / equal | 7.6e-8, 2.2e-9 m³/s, all equal |
 | Check valve and closed pipe on the two-loop: heads, flows, every link's state | 1e-6 / 1e-6 m³/s / equal | 6.6e-8, 2.2e-9 m³/s, all equal |
 | A junction without demand cut off by closed links (held at the average of its far ends, flows into it exactly zero) | 1e-6 / 1e-6 m³/s | 2.9e-7, 2.2e-9 m³/s |
 | Every pipe a check valve at five times the demand (two close) | 2e-6 (EPANET's closed-link leak, see Limitations) / 1e-6 m³/s / equal | 1.4e-6, 5.7e-8 m³/s |
 | A junction fenced off by two check valves (held at 75 m, the `1 / CBIG` limit) | 1e-6 | 3e-9, both valves CLOSED |
-| TCV on the two-loop: heads, flows, the valve's head loss | 1e-6 / 1e-6 m³/s / 1e-5 m | within bounds; head loss 3.2e-6 m |
+| TCV on the two-loop: heads, flows, the valve's head loss | 1e-6 / 1e-6 m³/s / 1e-5 m | 5.3e-8, 1.8e-9 m³/s, 3.2e-6 m |
 | Emitters behind a closed pipe; Darcy-Weisbach emitters (heads, emitter outflows) | 1e-6 relative to the 50 m reservoir (one case 1e-3 m: EPANET's closed-link leak) / 1e-6 m³/s | 5.4e-8, 3.1e-9 m³/s (Darcy-Weisbach); the leak case 6.9e-4 m |
 | Emitter coefficient gradient vs central differences | 1e-8 | 4.8e-11 |
 | Pressure-driven demand vs EPANET's `DEMAND MODEL PDA` | 1e-5 | 3.521e-7 heads, 2.184e-7 demands |
@@ -846,7 +847,7 @@ on-disk reals are **float32**, so roughly 1e-7 relative is EPANET's own precisio
 | Every network `wntr` ships (37 files, the two malformed ones aside) builds, or is refused by name | as listed | 36 build; `bad_times.inp` refused ("is not a time of the form HH:MM[:SS]") |
 | Head loss sums to zero around every cycle-basis loop | 1e-12 | **exactly 0.0** |
 | Autodiff vs central differences | 1e-6 × scale | 3.212e-6 / 2.505e-10 / 9.2e-10 / 2.753e-9 |
-| d(junction heads)/d(demands) through a closed check valve, vs central differences | 1e-6 × scale | within bound |
+| d(junction heads)/d(demands) through a closed check valve, vs central differences | 1e-6 × scale | 2.7e-11 × scale (2.6e-8 at scale 983) |
 | d(junction heads)/d(pump speed), every curve kind, vs central differences | 1e-6 relative | 3.1e-10 or better |
 | TRACE water quality, single source | 1e-3 | 6.438e-12 percentage points |
 | Golden regression | 1e-10 | **0.0** |
