@@ -293,7 +293,7 @@ class _ImplicitBranchLaw(ImplicitLaw):
 def test_a_closure_read_only_at_the_root_is_refused_on_the_mna_path():
     g = torch.tensor([2.0], dtype=F64, requires_grad=True)
     layer = KirchhoffLayer(_net(), "heat", [_ImplicitBranchLaw(g)], boundary=["a"])
-    assert layer.mna
+    assert layer.implicit_edges.numel() > 0
     sources = torch.tensor([0.0, 3.0], dtype=F64)
     # the primal solve reaches the branch that reads g
     phi, _ = layer.solve(torch.zeros(1, dtype=F64), sources=sources, differentiable=False)

@@ -859,7 +859,7 @@ def test_pressure_breaker_and_general_purpose_valves(tmp_path, edits):
     """
     path, results = _epanet(tmp_path, "twoloop_si.inp", edits=edits)
     model, state, drivers = build_model(read_epanet_inp(path))
-    assert model.kirchhoff["water"].mna
+    assert model.kirchhoff["water"].implicit_edges.numel() > 0
     final = water_steady(model, state, drivers)
     heads = results.node["head"].loc[0]
     flows = results.link["flowrate"].loc[0]

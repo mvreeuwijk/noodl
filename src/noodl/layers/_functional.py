@@ -28,9 +28,12 @@ import dataclasses
 import torch
 
 from noodl._tracking import bulk_values, same_tracking
-from noodl.elements.base import ConstitutiveLaw
+from noodl.elements.base import ConstitutiveLaw, LawContext
 from noodl.layers._flow_unknowns import _Held, angular_frequency
 from noodl.withdrawals import NodeWithdrawal
+
+#: The steady context, of a solve without a step (`KirchhoffLayer._DC`).
+_DC = LawContext(mode="dc")
 
 
 def _call(module, params: dict, args: tuple, kwargs: dict | None = None):
@@ -204,14 +207,27 @@ class FunctionalLaws:
             d = d + head
         return d
 
-    def flows(self, phi, drv, rebuilt):
+    def flows(self, phi, drv, rebuilt, step=None):
+        """Every edge's flow with the threaded parameters; a law that reads the context is
+        given `step`'s (the threaded one from `rebuild`; the steady one without a step),
+        restricted to its edges."""
         layer = self.layer
         dp_full = self.dp(phi, drv)
         parts = []
+        if not layer._ctx_laws:
+            for el, d, (s, e) in zip(
+                layer._laws, rebuilt[: self.n_el], layer._law_slices, strict=True
+            ):
+                parts.append(_call(el, d, (dp_full[..., s:e], drv)))
+            return torch.cat(parts, dim=-1)
+        ctx = _DC if step is None else step.ctx
         for el, d, (s, e) in zip(
             layer._laws, rebuilt[: self.n_el], layer._law_slices, strict=True
         ):
-            parts.append(_call(el, d, (dp_full[..., s:e], drv)))
+            args = (dp_full[..., s:e], drv)
+            if el._takes_ctx:
+                args += (layer._law_ctx(ctx, s, e),)
+            parts.append(_call(el, d, args))
         return torch.cat(parts, dim=-1)
 
     def node_withdrawal(self, phi, drv, rebuilt, step=None):
@@ -282,20 +298,25 @@ class FunctionalLaws:
             f"dropping the autograd graph (e.g. a stray dp.detach())."
         )
 
-    def dflows(self, phi, drv, rebuilt):
-        """Every edge's slope `dq/d(dp)`, law by law (`_law_slope`), in edge order."""
+    def dflows(self, phi, drv, rebuilt, step=None):
+        """Every edge's slope `dq/d(dp)`, law by law (`_law_slope`), in edge order; `step`
+        as in `flows`."""
         layer = self.layer
         dp_full = self.dp(phi, drv)
+        ctx = _DC if step is None else step.ctx
         return torch.cat([
-            self._law_slope(i, el, d, dp_full[..., s:e], drv)
+            self._law_slope(i, el, d, dp_full[..., s:e], drv, ctx)
             for i, (el, d, (s, e)) in enumerate(
                 zip(layer._laws, rebuilt[: self.n_el], layer._law_slices, strict=True))
         ], dim=-1)
 
-    def _law_slope(self, i, el, d, dp, drv):
+    def _law_slope(self, i, el, d, dp, drv, ctx=_DC):
         """Law `i`'s slopes at its edges' `dp`: zero for a `dp_independent` law (checked
         against its `dflow`), its own `dflow` where that is the exact derivative of its flow
         (`exact_slope`), else autograd through its flow with the threaded parameters `d`.
+        A law that reads the context gives the layer's `_law_slopes` in `ctx` (the operator
+        also builds the adjoint, so an inexact one gives autograd of its `forward`), called
+        on the law itself as here for `dflow`.
 
         The adjoint linearises with these slopes, so only an exact `dflow` may stand in for
         autograd; a law whose `dflow` is a Newton aid declares `exact_slope = False`.
@@ -319,6 +340,10 @@ class FunctionalLaws:
                     f"flow law."
                 )
             return torch.zeros_like(dp)
+        if el._takes_ctx:
+            with torch.no_grad():
+                return self.layer._law_slopes(i, el, dp.detach(), drv, ctx,
+                                              adjoint=True).expand(dp.shape)
         if el.exact_slope and _analytic(el, ConstitutiveLaw):
             with torch.no_grad():
                 return el.dflow(dp.detach(), drv).expand(dp.shape)
@@ -346,7 +371,7 @@ class FunctionalLaws:
         layer = self.layer
         rebuilt, drv, src, pb, step = self.rebuild(params)
         phi = layer.assemble(x, pb)
-        q = self.flows(phi, drv, rebuilt)
+        q = self.flows(phi, drv, rebuilt, step)
         if not q.requires_grad:
             # the point, potentials and flows of the last graph-free residual
             # (`root_parts` returns them when no gradient is wanted)
@@ -361,7 +386,8 @@ class FunctionalLaws:
         """Whether `dflows`/`node_slopes` equal the layer's own `dflows` and withdrawal and
         storage slopes (`KirchhoffLayer._withdrawal_slopes`): true unless a law or node
         source overrides `dflow` with a slope it does not declare exact
-        (`exact_slope = False`), or a storage declares its `rate_slope` inexact; only the
+        (`exact_slope = False`), a law that reads the context declares its slope inexact,
+        or a storage declares its `rate_slope` inexact; only the
         layer's slopes use those. Cached on the layer against its owners' `exact_slope`
         flags (which may be set per instance)."""
         layer = self.layer
@@ -373,6 +399,7 @@ class FunctionalLaws:
             value = not any(
                 not o.exact_slope and (
                     i >= n_owned
+                    or (i < n_el and o._takes_ctx)
                     or _analytic(o, ConstitutiveLaw if i < n_el else NodeWithdrawal))
                 for i, o in enumerate(owners))
             cache = layer._layer_slopes = (flags, value)
@@ -382,5 +409,5 @@ class FunctionalLaws:
         layer = self.layer
         rebuilt, drv, src, pb, step = self.rebuild(params)
         phi = layer.assemble(x, pb)
-        dq = self.dflows(phi, drv, rebuilt)
+        dq = self.dflows(phi, drv, rebuilt, step)
         return layer._operator_at(dq, self.node_slopes(phi, drv, rebuilt, step))

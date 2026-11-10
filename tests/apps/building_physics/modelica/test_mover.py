@@ -223,7 +223,8 @@ def test_mover_with_volume_mass_storage_matches_the_closed_form(tmp_path):
     runs = []
     for r in (1, 2):
         model, state, drivers, names = _read_modelica(path, return_names=True, substeps=r)
-        assert names.storage == ("volA", "volB") and model.kirchhoff["air"].mna
+        assert names.storage == ("volA", "volB")
+        assert model.kirchhoff["air"].implicit_edges.numel() > 0
         runs.append(simulate(model, state, drivers, names.times[:11], scheme="midpoint"))
     hist = extrapolate(*runs)
     pA, pB = (hist["p"][:, names.nodes[z]] for z in ("volA", "volB"))

@@ -129,7 +129,7 @@ def _phi_prev(layer):
 
 def test_rc_layer_is_classic_dynamic_and_linear():
     layer, storage = _rc()
-    assert not layer.mna
+    assert layer.implicit_edges.numel() == 0
     assert layer.dynamic
     assert layer.linear
     assert layer.storage == (storage,)
@@ -241,7 +241,8 @@ def test_construction_and_argument_refusals():
                        storage=[object()])
     # a layer solved by Modified Nodal Analysis takes storage (tests/layers/test_mna_storage.py)
     assert KirchhoffLayer(net, "heat", [Capacitance(torch.ones(3), kind="g")],
-                          boundary=["gnd"], storage=[LinearStorage([1], 1.0)]).mna
+                          boundary=["gnd"],
+                          storage=[LinearStorage([1], 1.0)]).implicit_edges.numel() > 0
     plain = KirchhoffLayer(net, "heat", [Conductance(G.clone(), kind="g")], boundary=["gnd"])
     with pytest.raises(ValueError, match="no storage"):
         plain.solve(PB, dt=0.1)
@@ -261,12 +262,21 @@ def test_construction_and_argument_refusals():
         layer.solve(PB, dt=0.1, history=(_phi_prev(layer), None), mode="dc")
 
 
-def test_initial_mode_with_an_initial_value_is_refused_on_the_classic_path():
+def test_initial_mode_holds_the_storage_nodes_on_the_classic_path():
+    """Every interior node is held at 0.5: the flows follow from the potentials, and the
+    flow into storage balances each node."""
     net = _net()
     layer = KirchhoffLayer(net, "heat", [Conductance(G.clone(), kind="g")], boundary=["gnd"],
                            storage=[LinearStorage([1, 2, 3], CAP.clone(), initial=0.5)])
-    with pytest.raises(ValueError, match="classic nodal path"):
-        layer.solve(PB, mode="initial")
+    assert layer.implicit_edges.numel() == 0
+    phi, q = layer.solve(PB, mode="initial")
+    torch.testing.assert_close(phi, torch.tensor([1.25, 0.5, 0.5, 0.5], dtype=F64),
+                               rtol=0, atol=1e-14)
+    torch.testing.assert_close(q, G * torch.tensor([0.75, 0.0, 0.0], dtype=F64),
+                               rtol=1e-14, atol=1e-14)
+    w = layer.storage_flows(phi, {}, dt=None, mode="initial", q=q)
+    torch.testing.assert_close(w, torch.tensor([1.5, 0.0, 0.0], dtype=F64), rtol=1e-14,
+                               atol=1e-14)
     # without an initial value, "initial" is the steady point
     plain, _ = _rc()
     plain.solve(PB, mode="initial")

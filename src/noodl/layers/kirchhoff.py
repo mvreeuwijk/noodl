@@ -65,6 +65,10 @@ from noodl.withdrawals import NodeWithdrawal
 # reports which backend actually ran (see `solve`).
 _LINEAR_SOLVERS = ("auto", "cg", "gmres", "direct", "sparse_direct")
 
+#: The steady context: what a law that reads the context sees outside a solve (`flows`,
+#: `dflows`, `linear_init` called directly) and in a solve without a step.
+_DC = LawContext(mode="dc")
+
 
 def check_scheme(layer_name: str, scheme) -> None:
     """Refuse a time-integration scheme a `KirchhoffLayer` cannot take, by name.
@@ -110,10 +114,16 @@ class _Step:
     """What one solve evaluates its laws and storage in: the law context (mode, dt, t,
     scheme, the step-start dp_prev/q_prev of the laws that read them, omega on a phasor
     layer) and what the storage does (`None`; a `_StorageStep` on a step; the held initial
-    rows, `_Held`, at the initial point). Built once per solve by `KirchhoffLayer._step`."""
+    rows, `_Held`, at the initial point). Built once per solve by `KirchhoffLayer._step`.
+
+    `layout` is the flow-unknown layout this one solve uses when it is not the layer's own:
+    the initial point of a layer without flow unknowns whose storage holds an initial
+    potential is solved with the held rows on the sparse operator, in a layout with no
+    unknown flows (`KirchhoffLayer._held_layout`). `None` everywhere else."""
 
     ctx: LawContext
     storage: _StorageStep | _Held | None
+    layout: FlowUnknowns | None = None
 _OPAQUE = (type, types.ModuleType, types.FunctionType, types.BuiltinFunctionType,
            types.MethodType)
 
@@ -204,10 +214,13 @@ class KirchhoffLayer(TopologyGuard):
     `flow_unit` is reported by `model.refs`, never used numerically.
 
     A layer whose constitutive laws include an implicit law (`ImplicitLaw`: an ideal source,
-    a flow-controlled law), a coupled multi-port law, a dynamic law or a law reading the
-    `LawContext` is solved by Modified Nodal Analysis (`mna` is True): the flows of its
-    implicit-law edges (`implicit_edges`) become unknowns alongside the interior potentials,
-    and every connected part of its edges must contain a boundary node (a ground).
+    a flow-controlled law) or a coupled multi-port law, or a phasor layer, has flow unknowns:
+    the flows of its implicit-law edges (`implicit_edges`) become unknowns alongside the
+    interior potentials, and every connected part of its edges must contain a boundary node
+    (a ground). A law that reads the `LawContext` (the time, its step-start values: a
+    time-dependent current source, a storing law in flow form) gives its flow from the
+    potential difference, and keeps the layer on the fast path, whose grounding is certified
+    at the start of every solve.
 
     With `phasor=True` the layer solves the sinusoidal steady state: potentials and flows are
     complex amplitudes (complex128), the frequency in Hz comes from the driver
@@ -221,12 +234,13 @@ class KirchhoffLayer(TopologyGuard):
     interior nodes, which a step of `dt` turns into a withdrawal into storage with the step
     rate of the layer's scheme; without a step (a steady solve) storage is absent. A layer
     with storage is `dynamic` and takes `dt`, `history` and `storage_flow` in `solve`.
-    Storage does not make a layer `mna`: on the classic nodal path its Jacobian gains only a
+    Storage adds no flow unknowns: on the classic nodal path its Jacobian gains only a
     non-negative diagonal, so a network of conductances with storage keeps its symmetric
     positive definite system, and a storage node counts as grounded during a step. A layer
     solved by Modified Nodal Analysis takes storage too (its diagonal slot of each node
-    row); there `mode="initial"` holds each node with a storage entry whose `initial()` is
-    not `None` at that potential. A phasor layer takes no storage (a capacitance is an
+    row). `mode="initial"` holds each node with a storage entry whose `initial()` is not
+    `None` at that potential, on every layer: without flow unknowns that one solve uses the
+    sparse operator with the held rows. A phasor layer takes no storage (a capacitance is an
     edge law there).
 
     With `scheme="forward_euler"` the storage sits at BOUNDARY nodes instead, and is stepped
@@ -315,17 +329,23 @@ class KirchhoffLayer(TopologyGuard):
         self._boundary_storage: list[NodeStorage] = []
         if scheme == "forward_euler":
             self._boundary_storage, self._storage = self._storage, []
-        # Flow unknowns: a law whose flow is an unknown (a relation), that couples several
-        # edges (ports > 1), that stores (dynamic) or that reads the law context cannot be
-        # solved by the fast path; such a layer adds flow unknowns (`_flow_unknowns`). Node
-        # storage does not: it adds a diagonal to the nodal Jacobian, but it makes the layer
-        # dynamic (it steps from its state).
+        # Flow unknowns: a law whose flow is an unknown (a relation) or that couples several
+        # edges (ports > 1), or a phasor layer, cannot be solved by the fast path; such a
+        # layer adds flow unknowns (`_flow_unknowns`). A law that reads the law context (the
+        # time, its step-start values) still gives its flow from the potential difference,
+        # and node storage adds a diagonal to the nodal Jacobian: both stay on the fast path,
+        # and a storing law or a storage makes the layer dynamic (it steps from its state).
         self.phasor = phasor
         self.dynamic = any(el.dynamic for el in self._laws) or bool(self._storage)
-        self.mna = self.phasor or any(
-            isinstance(el, ImplicitLaw) or el.ports > 1 or el.dynamic or el._takes_ctx
-            for el in self._laws
-        )
+        # every flow follows from the potentials: no law is a relation, none couples edges, and
+        # the layer is real, so the Jacobian is the symmetric network matrix (plus the storage
+        # and withdrawal diagonal)
+        self._eliminated = not self.phasor and not any(self._relation) and all(
+            el.ports == 1 for el in self._laws)
+        # The laws that read the law context, by position: the fast path passes them the
+        # step's context (restricted to their edges, `_law_ctx`); every other law keeps the
+        # two-argument call. Empty on most layers, which then never build a restriction.
+        self._ctx_laws = tuple(i for i, el in enumerate(self._laws) if el._takes_ctx)
         # Node name -> a likely cause, appended when that node is reported floating (an
         # application's builder fills it, e.g. for a node only prescribed flows touch).
         self.node_hints: dict = {}
@@ -488,7 +508,10 @@ class KirchhoffLayer(TopologyGuard):
         self._unknowns: FlowUnknowns | None = None
         # The step-start restrictions of the law context, per law (`_law_ctx`).
         self._law_ctxs: tuple[LawContext | None, dict] = (None, {})
-        if self.mna:
+        # The layout of the initial point with held storage on a layer without flow
+        # unknowns, built on the first such solve (`_held_layout`); `None` until then.
+        self._held_unknowns: FlowUnknowns | None = None
+        if not self._eliminated:
             self._check_flow_unknowns_structure()
             self._unknowns = flow_unknowns(self)
 
@@ -607,6 +630,13 @@ class KirchhoffLayer(TopologyGuard):
         return self._unknowns.edges
 
     @property
+    def _steps_with_flows(self) -> bool:
+        """Whether a step reads the step-start flows (`history`'s `q`): a layer with flow
+        unknowns does, and so does one with a dynamic law (its edges' step-start flows); a
+        layer whose only storage is node storage reads only the potentials."""
+        return self._unknowns is not None or bool(len(self._dynamic_edges))
+
+    @property
     def frequency_key(self) -> str | None:
         """The driver key a phasor layer reads its frequency from (`"<name>.frequency"`, in
         Hz, one value per instance); `None` for a layer that is not a phasor layer."""
@@ -615,7 +645,7 @@ class KirchhoffLayer(TopologyGuard):
     def _refuse_on_mna(self, method: str) -> None:
         """Classic-only methods assume every flow is a function of its own edge's potential
         difference; a Modified Nodal Analysis layer refuses them by name."""
-        if self.mna:
+        if self._unknowns is not None:
             raise TypeError(
                 f"KirchhoffLayer {self.name!r} is solved by Modified Nodal Analysis "
                 f"(its laws include implicit, multi-port, dynamic or context-reading ones), "
@@ -870,10 +900,11 @@ class KirchhoffLayer(TopologyGuard):
     ) -> torch.Tensor:
         """Every edge's flow at the full-node potentials `phi`, in layer edge order.
 
-        A classic layer's flow is a function of its own edge's potential difference, so `phi`
-        and `drivers` determine it; `q` is ignored.
+        On a layer without flow unknowns every flow is a function of its own edge's potential
+        difference, so `phi` and `drivers` determine it; `q` is ignored. A law that reads the
+        law context is evaluated in the steady context (`mode="dc"`, no time).
 
-        A layer solved by Modified Nodal Analysis (`mna`) has edges whose flow is NOT a
+        A layer with flow unknowns (`implicit_edges`) has edges whose flow is NOT a
         function of `phi`: an implicit law (an ideal pressure or voltage source, a fan with
         a prescribed rise) is a relation `residual(dp, q) = 0` that may not involve `q` at
         all, and the flow is then fixed by conservation at the nodes, which depends on what
@@ -885,18 +916,29 @@ class KirchhoffLayer(TopologyGuard):
         (`mode="dc"`). The result is differentiable in `phi`, `drivers` and the laws'
         parameters on the potential edges, and carries `q`'s graph on the implicit edges.
         At `solve`'s own `(phi, q)` it returns `q`. A phasor layer has no such accessor.
-        Without `q` an MNA layer raises `TypeError`.
+        Without `q` such a layer raises `TypeError`.
         """
-        if self.mna:
+        if self._unknowns is not None:
             if q is None:
                 self._refuse_on_mna("flows without q")
             return self._flows_given(phi, drivers or {}, q)
-        drivers = drivers or {}
+        return self._flows(phi, drivers or {}, _DC)
+
+    def _flows(self, phi, drivers: Mapping, ctx: LawContext) -> torch.Tensor:
+        """Every edge's flow on a layer without flow unknowns, at the full-node `phi`; a law
+        that reads the context is given `ctx`, restricted to its edges (`_law_ctx`)."""
         d = self.dp(phi, drivers)
-        parts = [
-            el.flow(d[..., s:e], drivers)
-            for el, (s, e) in zip(self._laws, self._law_slices, strict=True)
-        ]
+        if not self._ctx_laws:
+            parts = [
+                el.flow(d[..., s:e], drivers)
+                for el, (s, e) in zip(self._laws, self._law_slices, strict=True)
+            ]
+        else:
+            parts = [
+                el.flow(d[..., s:e], drivers, self._law_ctx(ctx, s, e)) if el._takes_ctx
+                else el.flow(d[..., s:e], drivers)
+                for el, (s, e) in zip(self._laws, self._law_slices, strict=True)
+            ]
         return torch.cat(parts, dim=-1)
 
     def kind_slice(self, kind: str) -> slice:
@@ -934,14 +976,43 @@ class KirchhoffLayer(TopologyGuard):
         return torch.cat([q[..., self.kind_slice(k)] for k in kinds], dim=-1)
 
     def dflows(self, phi: torch.Tensor, drivers: Mapping) -> torch.Tensor:
+        """Every edge's slope `d q / d dp` at the full-node `phi` (a law that reads the law
+        context in the steady context, as `flows`)."""
         self._refuse_on_mna("dflows")
-        drivers = drivers or {}
+        return self._dflows(phi, drivers or {}, _DC)
+
+    def _dflows(self, phi, drivers: Mapping, ctx: LawContext) -> torch.Tensor:
+        """`dflows` in the context `ctx` (`_law_slopes` per law)."""
         d = self.dp(phi, drivers)
-        parts = [
-            el.dflow(d[..., s:e], drivers)
-            for el, (s, e) in zip(self._laws, self._law_slices, strict=True)
-        ]
+        if not self._ctx_laws:
+            parts = [
+                el.dflow(d[..., s:e], drivers)
+                for el, (s, e) in zip(self._laws, self._law_slices, strict=True)
+            ]
+        else:
+            parts = [
+                self._law_slopes(i, el, d[..., s:e], drivers, ctx)
+                for i, (el, (s, e)) in enumerate(
+                    zip(self._laws, self._law_slices, strict=True))
+            ]
         return torch.cat(parts, dim=-1)
+
+    def _law_slopes(self, i: int, el, dp, drivers, ctx, adjoint: bool = False):
+        """Law `i`'s slopes `d q / d dp` at its edges' `dp`, in the context `ctx` (the
+        step's; restricted here to the law's edges). A law that does not read the context
+        gives its `dflow`. One that does has no `dflow` with a context: its slope is the
+        one-port block of its `jacobian` (its analytic one where it overrides it, else
+        autograd of its `forward` with `ctx`); with `adjoint` (the operator also builds the
+        adjoint) a law that declares `exact_slope = False` gives autograd of its `forward`,
+        as on the general path (`_operator`)."""
+        if not el._takes_ctx:
+            return el.dflow(dp, drivers)
+        lctx = self._law_ctx(ctx, *self._law_slices[i])
+        if adjoint and not el.exact_slope:
+            block = el._coloured_jacobian(dp, None, drivers, lctx)[0]
+        else:
+            block = el.jacobian(dp, None, drivers, lctx)[0]
+        return block[..., 0, 0, 0, 0]
 
     def assemble(self, phi_interior: torch.Tensor, phi_boundary: torch.Tensor) -> torch.Tensor:
         self._require_current_topology()
@@ -1037,13 +1108,14 @@ class KirchhoffLayer(TopologyGuard):
         `A_I q(phi) - s_I (+ w(phi))`, with the storage withdrawal on a step; `call` is not
         used (the laws are the layer's own). With flow unknowns `x` is `[phi_I, q_F]` in the
         real view, the residual is the balance rows, then the relations' own residuals, and
-        `call(i, args)` evaluates owner `i` (`_owner_call`, or the threaded parameters of the
-        differentiable solve); a step adds the storage withdrawal, and the initial point
-        replaces the held rows (`_Held`)."""
-        u = self._unknowns
+        `call(i, args)` evaluates owner `i` (`_owner_call`, the default, or the threaded
+        parameters of the differentiable solve); a step adds the storage withdrawal, and the
+        initial point replaces the held rows (`_Held`). The layout is the step's when it
+        has one (`_Step.layout`)."""
+        u = self._unknowns if step is None or step.layout is None else step.layout
         if u is None:
             phi = self.assemble(x, phi_boundary)
-            q = self.flows(phi, drivers)
+            q = self._flows(phi, drivers, _DC if step is None else step.ctx)
             # (A_I q), by scatter-add over this layer's edges then a select of the interior
             # rows, rather than einsum against the (n_I, b) slice of the dense incidence:
             # this is once per Newton residual evaluation, where the einsum form dominates
@@ -1053,10 +1125,12 @@ class KirchhoffLayer(TopologyGuard):
             # `(lhs - s) + (w_withdrawal + w_storage)`: `_withdrawal` adds the two first
             w = self._withdrawal(phi, drivers, step)
             return (lhs - s_I if w is None else lhs - s_I + w), phi, q
+        if call is None:
+            call = self._owner_call
         ctx, store = (LawContext(mode="dc"), None) if step is None else (step.ctx, step.storage)
         phi_I, q_F = split(u, x)
         phi = self.assemble(phi_I, phi_boundary)
-        q, r_F = self._flows_and_residuals(phi, q_F, drivers, ctx, call)
+        q, r_F = self._flows_and_residuals(phi, q_F, drivers, ctx, call, u)
         kcl = self._accumulate_interior(q) - self._source_interior(sources, phi_I)
         # `((lhs - s) + w_withdrawal) + w_storage`, not the fast path's association
         w = self._withdrawal_called(phi, drivers, call)
@@ -1078,16 +1152,17 @@ class KirchhoffLayer(TopologyGuard):
         not used. With flow unknowns the COO triplets on the fixed pattern (a
         `SparseOperator`), with the rows the initial point holds replaced (`_hold`).
         `slopes(phi, adjoint)` gives the diagonal of the withdrawals and storages
-        (`_slopes_fn`). `adjoint`: the operator also builds the adjoint (the differentiable
-        solve). A law that declares `exact_slope = False` then gives its blocks by autograd
-        of its own `forward` (`_coloured_jacobian`), not its `jacobian`, whose `dflow`
-        shortcut would hand the adjoint a Newton aid; the same flag reaches `slopes`, where
+        (`_slopes_fn`; by default the layer's own, with `step`). `adjoint`: the operator also
+        builds the adjoint (the differentiable solve). A law that declares
+        `exact_slope = False` then gives its blocks by autograd of its own `forward`
+        (`_coloured_jacobian`), not its `jacobian`, whose `dflow` shortcut would hand the
+        adjoint a Newton aid; the same flag reaches `slopes`, where
         an inexact withdrawal or storage gives autograd too. The primal solve
         (`adjoint=False`) keeps the analytic slopes."""
-        u = self._unknowns
+        u = self._unknowns if step is None or step.layout is None else step.layout
         if u is None:
             phi = self.assemble(x, phi_boundary)
-            dq = self.dflows(phi, drivers)
+            dq = self._dflows(phi, drivers, _DC if step is None else step.ctx)
             return self._operator_at(dq, self._withdrawal_slopes(phi, drivers, step))
         ctx = LawContext(mode="dc") if step is None else step.ctx
         phi_I, q_F = split(u, x)
@@ -1114,6 +1189,8 @@ class KirchhoffLayer(TopologyGuard):
         parts = [blk.flatten(-5) for blk in blocks]
         parts.append(torch.ones(1, dtype=x.dtype, device=x.device))
         if u.diag:
+            if slopes is None:
+                slopes = self._slopes_fn(drivers, self._owner_call, step)
             d = slopes(phi, adjoint)
             parts.append(d if d is not None else
                          torch.zeros(u.n_I, dtype=x.dtype, device=x.device))
@@ -1138,19 +1215,21 @@ class KirchhoffLayer(TopologyGuard):
             v.shape[:-1] for v in (phi_boundary, sources, phi0, q0) if v is not None])
         return phi_boundary, sources, phi0, q0
 
-    def _refuse_newton_options(self, newton_kwargs) -> None:
-        """Refuse the Newton keywords a layer with flow unknowns cannot take, by name: the
-        convex line search and conjugate gradients."""
+    def _refuse_newton_options(self, newton_kwargs,
+                               what: str = "a layer with flow unknowns") -> None:
+        """Refuse the Newton keywords a layer with flow unknowns (or `what` else solves on
+        the sparse operator) cannot take, by name: the convex line search and conjugate
+        gradients."""
         if newton_kwargs.get("line_search") == "convex":
             raise ValueError(
                 f"KirchhoffLayer {self.name!r}: line_search='convex' needs a residual "
-                f"that is the gradient of a convex function, which the residual of a layer "
-                f"with flow unknowns is not; use the default line search"
+                f"that is the gradient of a convex function, which the residual of {what} "
+                f"is not; use the default line search"
             )
         if newton_kwargs.get("method", self.linear_solver) == "cg":
             raise ValueError(
                 f"KirchhoffLayer {self.name!r}: method='cg' needs a symmetric positive "
-                f"definite Jacobian, which a layer with flow unknowns does not have; use "
+                f"definite Jacobian, which {what} does not have; use "
                 f"'auto', 'sparse_direct', 'direct' or 'gmres'"
             )
 
@@ -1182,10 +1261,11 @@ class KirchhoffLayer(TopologyGuard):
                 f"layer {self.name!r}: the {what} of the {el.kind!r} law is {width} "
                 f"but the kind has {n_edges} edges")
 
-    def _flows_and_residuals(self, phi, q_F, drivers, ctx, call):
+    def _flows_and_residuals(self, phi, q_F, drivers, ctx, call, u=None):
         """`(q, r_F)`: every edge's flow (the law flow on potential-controlled edges, the
-        unknown on relation edges) and the relations' residuals, in layer edge order."""
-        index = self._unknowns.index
+        unknown on relation edges) and the relations' residuals, in layer edge order; `u` is
+        the layout (the layer's own by default)."""
+        index = (self._unknowns if u is None else u).index
         dp = self.dp(phi, drivers)
         q_parts, r_parts = [], []
         for i, (el, (s, e)) in enumerate(
@@ -1282,18 +1362,22 @@ class KirchhoffLayer(TopologyGuard):
                         f"mode='initial' holds a node at one value")
         return rows, value
 
-    def _held(self, drivers, call) -> _Held | None:
-        """The held rows of `mode="initial"` and their masks on the Jacobian's values
-        (refusing entries at one node that disagree)."""
-        found = self._held_values(drivers, call, check=True)
-        if found is None:
-            return None
-        u = self._unknowns
+    def _held(self, found, u: FlowUnknowns) -> _Held:
+        """The held rows of `mode="initial"` (`found`, from `_held_values`) and their masks
+        on the values of the Jacobian of layout `u`."""
         rows = found[0].to(u.row.device)
         full = torch.zeros(u.n, dtype=torch.bool, device=rows.device)
         full[: u.n_I] = rows
         diag = torch.arange(len(u.row) - u.n_I, len(u.row), device=rows.device)
         return _Held(rows=rows, clear=full[u.row], ones=diag[rows])
+
+    def _held_layout(self) -> FlowUnknowns:
+        """The layout of the initial point with held storage on a layer without flow
+        unknowns: no unknown flows, the balance rows and their diagonal slots (`flow_unknowns`
+        of this layer). Built on the first such solve and kept; no other solve reads it."""
+        if self._held_unknowns is None:
+            self._held_unknowns = flow_unknowns(self)
+        return self._held_unknowns
 
     def _storage_withdrawal(self, phi, drivers, store, ctx, call):
         """The storages' withdrawal `NodeStorage.rate` per interior row on a transient
@@ -1347,7 +1431,7 @@ class KirchhoffLayer(TopologyGuard):
             return op
         values = op.values.masked_fill(store.clear, 0.0)
         values[..., store.ones] = 1.0
-        return SparseOperator(op.row, op.col, values, self._unknowns.n)
+        return SparseOperator(op.row, op.col, values, op.shape[-1])
 
     def jacobian(self, phi_interior, phi_boundary, drivers, *, dt=None, scheme=None,
                  history=None, storage_flow=None):
@@ -1363,7 +1447,7 @@ class KirchhoffLayer(TopologyGuard):
         drivers = drivers or {}
         step = self._public_step(dt, scheme, history, storage_flow, drivers)
         phi = self.assemble(phi_interior, phi_boundary)
-        dq = self.dflows(phi, drivers)
+        dq = self._dflows(phi, drivers, step.ctx)
         A_I = self.A[self.interior]
         dense = torch.einsum("ie,...e,je->...ij", A_I, dq, A_I)
         node_slopes = self._withdrawal_slopes(phi, drivers, step)
@@ -1371,7 +1455,7 @@ class KirchhoffLayer(TopologyGuard):
             return dense
         return dense + torch.diag_embed(node_slopes.expand(dense.shape[:-1]))
 
-    def _linear_ck(self, drivers):
+    def _linear_ck(self, drivers, ctx: LawContext = _DC):
         # Each law's own (c_e, k_e) covers only its own n_e = e - s edges; only the
         # leading BATCH dims (everything but the trailing edge-count dim) are meant to be
         # unified across laws before concatenating along the edge axis. Using
@@ -1380,9 +1464,16 @@ class KirchhoffLayer(TopologyGuard):
         # a shared (wrong) edge count instead of concatenating -- e.g. a 2-edge FixedFlow and
         # a 1-edge PowerLaw would both become
         # 2-edge before torch.cat, yielding a 4-wide result instead of the correct 3.
+        # A law that reads the context has no `linear_init` with one: its tangent at dp = 0
+        # is its flow and slope there, in the solve's context (`_law_slopes`).
         cs, ks, n_es = [], [], []
-        for el, (s, e) in zip(self._laws, self._law_slices, strict=True):
-            c_e, k_e = el.linear_init(drivers)
+        for i, (el, (s, e)) in enumerate(zip(self._laws, self._law_slices, strict=True)):
+            if el._takes_ctx:
+                zero = torch.zeros(e - s, dtype=el._dtype())
+                c_e = el.flow(zero, drivers, self._law_ctx(ctx, s, e))
+                k_e = self._law_slopes(i, el, zero, drivers, ctx)
+            else:
+                c_e, k_e = el.linear_init(drivers)
             cs.append(c_e)
             ks.append(k_e)
             n_es.append(e - s)
@@ -1477,7 +1568,9 @@ class KirchhoffLayer(TopologyGuard):
     def linear_init(self, phi_boundary, drivers, sources, *, _step=None):
         """The solution of the network linearised at zero interior potentials
         (`ConstitutiveLaw.linear_init`): the Newton starting guess. `_step` (internal) is the
-        storage step of a layer with storage, whose withdrawal is linearised the same way."""
+        solve's step: a layer with storage linearises its withdrawal the same way, and a law
+        that reads the context is linearised in the step's context (the steady one
+        without)."""
         self._refuse_on_mna("linear_init")
         drivers = drivers or {}
         batch_shape = phi_boundary.shape[:-1]
@@ -1488,7 +1581,7 @@ class KirchhoffLayer(TopologyGuard):
         )
         phi0 = self.assemble(phi_i0, phi_boundary)
         dp0 = self.dp(phi0, drivers)
-        c, k = self._linear_ck(drivers)
+        c, k = self._linear_ck(drivers, _DC if _step is None else _step.ctx)
         rhs = self._source_interior(sources, phi0) - self._accumulate_interior(c + k * dp0)
         # A withdrawal contributes its tangent at phi = 0 to the same linearisation:
         # w(phi) ~ w(0) + w'(0) phi, so w(0) moves to the right-hand side and w'(0) joins
@@ -1769,7 +1862,8 @@ class KirchhoffLayer(TopologyGuard):
         What a solve takes (`_step` checks it, by name, on both paths): `mode=None` is a step
         when `dt` is given and the steady operating point (`"dc"`) otherwise; `"initial"` is
         the consistent initial point, where a storage that holds an `initial()` potential
-        holds its node there (only a layer with flow unknowns can); `"dc"` and `"initial"`
+        holds its node there (on a layer without flow unknowns that one solve uses the
+        sparse operator with the held rows, `_held_layout`); `"dc"` and `"initial"`
         take no `dt`. A step is one implicit step of length `dt > 0` ending at time `t` with
         the `scheme` (`None` is the layer's own, `"trapezoidal"` by default), from the
         step-start state `history=(phi, q)` (full-node potentials and every edge's flow, as
@@ -1780,7 +1874,7 @@ class KirchhoffLayer(TopologyGuard):
         the context takes no step and refuses `dt`, `history` and `storage_flow`; it accepts
         and ignores `t`, `q0` and a valid `scheme`. Without `dt` storage is absent.
 
-        A layer with flow unknowns (`self.mna`) solves for the interior potentials and the
+        A layer with flow unknowns (`implicit_edges`) solves for the interior potentials and the
         flows of its implicit-law edges together (`noodl.layers._flow_unknowns`), from zeros
         or the warm start `phi0` (interior potentials) and `q0` (the flows of
         `implicit_edges`); the returned `q` covers every edge. A phasor layer is always in
@@ -1807,7 +1901,11 @@ class KirchhoffLayer(TopologyGuard):
             phi_boundary, sources, phi0, q0 = self._complex_inputs(
                 phi_boundary, drivers, sources, phi0, q0)
         step = self._step(mode, dt, t, scheme, history, storage_flow, drivers)
-        if u is not None:
+        if step.layout is not None:
+            # the initial point with held storage of a layer without flow unknowns
+            u = step.layout
+            self._refuse_newton_options(newton_kwargs, "the initial point with held storage")
+        elif u is not None:
             self._refuse_newton_options(newton_kwargs)
         policy = resolve(
             self, newton_kwargs, diagnostics, differentiable, drivers, sources, phi_boundary,
@@ -1840,6 +1938,10 @@ class KirchhoffLayer(TopologyGuard):
             # by a rank test, which may raise a clearer error than Newton's.
             last = {}
 
+            def remember(r):
+                last.setdefault("r0", r.detach())
+                last["r"] = r.detach()
+
             def on_fail(exc):
                 if singular(last.get("op"), u.n, first_failing(last, newton_kwargs)):
                     kinds = [el.kind for el, rel in zip(self._laws, self._relation,
@@ -1866,8 +1968,7 @@ class KirchhoffLayer(TopologyGuard):
                 r, phi, q = self._residual(x, phi_boundary, drivers, sources, step, plain)
                 point.update(x=x, phi=phi, q=q)
                 if last is not None:
-                    last.setdefault("r0", r.detach())
-                    last["r"] = r.detach()
+                    remember(r)
                 return r
 
             def operator_fn(x):
@@ -1906,8 +2007,7 @@ class KirchhoffLayer(TopologyGuard):
                                            functools.partial(fn.call, rebuilt))
                 if not q.requires_grad:
                     fn.last = (x, phi, q)
-                last.setdefault("r0", r.detach())
-                last["r"] = r.detach()
+                remember(r)
                 return r
 
             def operator_fn(x, *params):
@@ -2005,16 +2105,6 @@ class KirchhoffLayer(TopologyGuard):
                     f"KirchhoffLayer {name!r} has no storage, no dynamic law and no law that "
                     f"reads the step's context, so it takes no step; drop {stepping}"
                 )
-        if mode == "initial" and self._storage and not self.mna:
-            held = [st for st in self._storage if st.initial(drivers) is not None]
-            if held:
-                raise ValueError(
-                    f"KirchhoffLayer {name!r}: mode='initial' with storage that holds an "
-                    f"initial potential ({held[0]!r}) is not defined on the classic nodal "
-                    f"path (a layer solved by Modified Nodal Analysis holds a storage node "
-                    f"at its initial potential); solve the steady point (mode='dc') or set "
-                    f"the potentials directly"
-                )
         if dt is None:
             extra = [k for k, v in (("history", history), ("storage_flow", storage_flow))
                      if v is not None]
@@ -2028,9 +2118,16 @@ class KirchhoffLayer(TopologyGuard):
                                  omega=angular_frequency(self, drivers) if omega else None)
                 return _Step(ctx, None)
             ctx = LawContext(mode="dc" if mode is None else mode, t=t)
-            held = (self._held(drivers, self._owner_call)
-                    if mode == "initial" and self._storage and self.mna else None)
-            return _Step(ctx, held)
+            found = (self._held_values(drivers, self._owner_call, check=True)
+                     if mode == "initial" and self._storage else None)
+            if found is None:
+                return _Step(ctx, None)
+            if self._unknowns is not None:
+                return _Step(ctx, self._held(found, self._unknowns))
+            # a layer without flow unknowns: this one solve holds the rows on the sparse
+            # operator, in a layout with no unknown flows
+            u = self._held_layout()
+            return _Step(ctx, self._held(found, u), u)
         if not check_dt:
             # the solve of this step has checked it
             ...
@@ -2136,7 +2233,7 @@ class KirchhoffLayer(TopologyGuard):
         parameters. Empty on a layer without storage. (`_checked`, internal: the `solve` of
         this step has already checked `dt`.)
 
-        With `mode="initial"` on a layer solved by Modified Nodal Analysis, a node held at
+        With `mode="initial"`, a node held at
         its storage's initial potential takes whatever flow balances it: the flow into
         storage there is the node's flow imbalance `s_I - A_I q - w(phi)` (its sources, less
         the net outflow of the edge flows `q` and the withdrawals' withdrawal), split among
@@ -2165,7 +2262,7 @@ class KirchhoffLayer(TopologyGuard):
                             device=phi.device)
         if not self._storage:
             return zeros
-        if mode == "initial" and self.mna:
+        if mode == "initial":
             return self._initial_storage_flows(phi, q, sources, drivers, zeros)
         step = self._step(mode, dt, None, scheme, history, storage_flow, drivers,
                           check_dt=not _checked, omega=False)
@@ -2295,7 +2392,7 @@ class KirchhoffLayer(TopologyGuard):
         # the iteration started from, so tracing the guess buys no gradient at all.
         # `linear_init` itself is untouched and stays differentiable for callers who want it
         # directly.
-        u = self._unknowns
+        u = self._unknowns if step is None or step.layout is None else step.layout
         if u is not None:
             real_dtype = (phi_boundary.real.dtype if phi_boundary.is_complex()
                           else phi_boundary.dtype)
@@ -2334,7 +2431,7 @@ class KirchhoffLayer(TopologyGuard):
             # too (`dflows` here is each ConstitutiveLaw's own analytic `dflow`, not the autograd
             # path the differentiable branch builds below).
             phi0_full = self.assemble(phi0, phi_boundary)
-            dq0 = self.dflows(phi0_full, drivers)
+            dq0 = self._dflows(phi0_full, drivers, _DC if step is None else step.ctx)
             node_slopes0 = self._withdrawal_slopes(phi0_full, drivers, step)
             self._grounding_check(dq0, where="solve", node_slopes=node_slopes0)
         return phi0, (dq0, node_slopes0)
@@ -2343,13 +2440,13 @@ class KirchhoffLayer(TopologyGuard):
         """`(phi, q)` at the solution `x`: full-node potentials and every edge's flow. The
         laws are called on the layer's own modules, so on the differentiable path `q` keeps
         the parameters' graph."""
-        u = self._unknowns
+        u = self._unknowns if step.layout is None else step.layout
         if u is None:
             phi = self.assemble(x, phi_boundary)
-            return phi, self.flows(phi, drivers)
+            return phi, self._flows(phi, drivers, step.ctx)
         phi_I, q_F = split(u, x)
         phi = self.assemble(phi_I, phi_boundary)
-        q, _ = self._flows_and_residuals(phi, q_F, drivers, step.ctx, self._owner_call)
+        q, _ = self._flows_and_residuals(phi, q_F, drivers, step.ctx, self._owner_call, u)
         return phi, q
 
     def _newton_primal(self, residual_fn, operator_fn, x0, newton_kwargs, diagnostics,
@@ -2459,7 +2556,7 @@ class KirchhoffLayer(TopologyGuard):
         drivers = drivers or {}
         step = self._public_step(dt, scheme, history, storage_flow, drivers)
         phi = self.assemble(phi_interior, phi_boundary)
-        dq = self.dflows(phi, drivers)
+        dq = self._dflows(phi, drivers, step.ctx)
         op = self._operator_at(dq, self._withdrawal_slopes(phi, drivers, step))
         return _adjoint_solve(
             op,

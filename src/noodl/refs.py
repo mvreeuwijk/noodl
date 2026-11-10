@@ -1048,9 +1048,9 @@ def _steps_from_state(layer) -> bool:
 
 def _reads_step_flows(layer) -> bool:
     """Whether a stepping Kirchhoff layer reads its step-start flows `"<layer>.q"`: a layer
-    solved by Modified Nodal Analysis does (with dynamic laws, node storage or both); a
-    classic layer whose only storage is node storage reads only `"<layer>.phi"`."""
-    return bool(getattr(layer, "mna", True))
+    with flow unknowns or dynamic laws does; one whose only storage is node storage reads
+    only `"<layer>.phi"`."""
+    return bool(getattr(layer, "_steps_with_flows", True))
 
 
 def _holds_storage(layer) -> bool:

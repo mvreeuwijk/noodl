@@ -83,7 +83,7 @@ def test_floating_voltage_source_matches_hand_analysis():
     net = _floating_source_net()
     layer = KirchhoffLayer(net, "e", [Conductance(torch.tensor([1.0, 0.5]), kind="r"),
                                           Source(torch.tensor([3.0]))], boundary=["gnd"])
-    assert layer.mna and not layer.dynamic and not layer.phasor
+    assert not layer.dynamic and not layer.phasor
     assert layer.implicit_edges.tolist() == [2]
     phi, q = layer.solve(torch.zeros(1), differentiable=False)
     # Hand analysis (gnd = 0): q_r1 = 1*(0 - a), q_r2 = 0.5*(b - 0), a - b = 3.
@@ -534,7 +534,7 @@ def test_classic_layer_refuses_step_and_phasor_keywords(kwargs, match):
     net = _net(["gnd", "a", "b"], [("gnd", "a", "r"), ("a", "b", "r")])
     layer = KirchhoffLayer(net, "e", [Conductance(torch.tensor([1.0, 2.0]), kind="r")],
                            boundary=["gnd", "b"])
-    assert not layer.mna
+    assert layer.implicit_edges.numel() == 0
     with pytest.raises(ValueError, match=rf"KirchhoffLayer 'e'.*{match}"):
         layer.solve(torch.tensor([1.0, 0.0]), **kwargs)
 
@@ -652,7 +652,7 @@ def _fan_layer():
 
 def test_flows_of_mna_layer_return_the_solved_q_and_need_q():
     layer = _fan_layer()
-    assert layer.mna
+    assert layer.implicit_edges.numel() > 0
     drivers = {"head": torch.tensor([5.0]), "c": torch.tensor([0.7])}
     phi, q = layer.solve(torch.zeros(1), drivers, torch.zeros(3), differentiable=False)
     torch.testing.assert_close(layer.flows(phi, drivers, q), q, rtol=1e-10, atol=1e-12)
@@ -702,8 +702,8 @@ def test_flows_of_mna_layer_gradients_match_central_differences():
 def test_the_layer_assembles_its_flow_unknowns_itself():
     """The flow unknowns' layout is `FlowUnknowns` (`None` on the fast path) and their
     residual and Jacobian are the layer's own: the former `noodl.layers._mna` and
-    `noodl.operators.mna` are gone, and the only `mna` attributes left are `mna` and
-    `_refuse_on_mna`, which go with the path triggers."""
+    `noodl.operators.mna` are gone, and so is the `mna` attribute (the path follows from the
+    laws); the only `mna` name left is `_refuse_on_mna`, which goes with the refusals."""
     import importlib
 
     from noodl.layers._flow_unknowns import FlowUnknowns
@@ -713,7 +713,7 @@ def test_the_layer_assembles_its_flow_unknowns_itself():
             importlib.import_module(module)
     layer = _fan_layer()
     assert isinstance(layer._unknowns, FlowUnknowns)
-    assert [name for name in vars(layer) if "mna" in name.lower()] == ["mna"]
+    assert [name for name in vars(layer) if "mna" in name.lower()] == []
     assert [name for name in dir(KirchhoffLayer) if "mna" in name.lower()] == ["_refuse_on_mna"]
     net = _net(["gnd", "a"], [("a", "gnd", "r")])
     fast = KirchhoffLayer(net, "e", [Conductance(torch.tensor([1.0]), kind="r")],

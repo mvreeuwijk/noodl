@@ -81,7 +81,7 @@ def _layer(path: str, aided: bool, law_exact: bool = False, storage_exact: bool 
     if aided:
         storage.exact_slope = storage_exact
     layer = KirchhoffLayer(net, "e", laws, boundary=["g"], storage=[storage])
-    assert layer.mna == (path == "mna")
+    assert (layer.implicit_edges.numel() > 0) == (path == "mna")
     return layer, load, storage
 
 

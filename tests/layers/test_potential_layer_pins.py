@@ -734,8 +734,8 @@ def case_general_phasor_rlc_parameter_gradients():
 
 
 def case_general_dynamic_potential_law_without_implicit():
-    """A dynamic, context-reading potential law and no implicit law: the layer Task 30
-    may move to the fast path."""
+    """A dynamic, context-reading potential law and no implicit law: a layer Task 30
+    moved to the fast path."""
     pcap = _PotentialCap(_t([0.4]), learnable=True)
     source = PrescribedCurrent(_t([1.0]), waveforms=[Sine(2.0, phase=0.3)], learnable=True)
     layer = _electrical([("a", "gnd", "current_source"), ("a", "gnd", "resistor"),
@@ -837,6 +837,8 @@ def case_general_with_driven_withdrawal():
 
 
 def case_fast_storage_initial():
+    """Refused until Task 30, which solves this one call on the sparse operator with the
+    held rows (D10)."""
     storage = LinearStorage([1, 2], _t([0.06, 0.03]), initial=_t([0.4, -0.2]), learnable=True)
     layer, _ = _fast(storage=[storage])
     pb, src = _fast_inputs()
@@ -848,11 +850,11 @@ def case_fast_storage_initial():
 
 CLASSIC, GENERAL, NO_LAYER = "classic", "general", "none"
 
-#: The path every case takes (`KirchhoffLayer.mna`), asserted against what is built and
-#: recorded as the case's `path` in the golden file. A merged assembler may reproduce the
-#: numbers of a case that changes path, so the path is pinned on its own. Task 30 updates
-#: the rows marked "moves to classic in Task 30" (a layer whose only reason for the general
-#: path is a dynamic or context-reading law, with no implicit law).
+#: The path every case takes (general: the layer has flow unknowns), asserted against what
+#: is built and recorded as the case's `path` in the golden file. A merged assembler may
+#: reproduce the numbers of a case that changes path, so the path is pinned on its own.
+#: Task 30 moved the rows marked "moved in Task 30" (a layer whose only reason for the
+#: general path was a dynamic or context-reading law, with no implicit law).
 EXPECTED_PATH = {
     "fast_primal": CLASSIC,
     "fast_differentiable": CLASSIC,
@@ -893,12 +895,9 @@ EXPECTED_PATH = {
     "general_withdrawal_steady": GENERAL,
     "general_inexact_primal": GENERAL,
     "general_inexact_differentiable": GENERAL,
-    # moves to classic in Task 30
-    "moves_prescribed_current_primal": GENERAL,
-    # moves to classic in Task 30
-    "moves_prescribed_current_differentiable": GENERAL,
-    # moves to classic in Task 30
-    "moves_prescribed_current_grounded_storage": GENERAL,
+    "moves_prescribed_current_primal": CLASSIC,  # moved in Task 30
+    "moves_prescribed_current_differentiable": CLASSIC,  # moved in Task 30
+    "moves_prescribed_current_grounded_storage": CLASSIC,  # moved in Task 30
     "general_linear_solver_auto": GENERAL,
     "general_linear_solver_direct": GENERAL,
     "general_linear_solver_cg": NO_LAYER,  # refused at construction: cg needs a symmetric Jacobian
@@ -911,8 +910,7 @@ EXPECTED_PATH = {
     "general_with_head_driver_ensemble": GENERAL,
     "general_introspection_and_refusals": GENERAL,
     "general_phasor_rlc_parameter_gradients": GENERAL,
-    # moves to classic in Task 30
-    "general_dynamic_potential_law_without_implicit": GENERAL,
+    "general_dynamic_potential_law_without_implicit": CLASSIC,  # moved in Task 30
     "general_initial_differentiable": GENERAL,
     "general_transformer_library": GENERAL,
     "general_transformer_library_phasor": GENERAL,
@@ -923,7 +921,7 @@ EXPECTED_PATH = {
     "fast_storage_initial": CLASSIC,
 }
 
-#: The rows of `EXPECTED_PATH` that Task 30 moves.
+#: The rows of `EXPECTED_PATH` that Task 30 moved.
 MOVERS = ("general_dynamic_potential_law_without_implicit",
           "moves_prescribed_current_differentiable",
           "moves_prescribed_current_grounded_storage",
@@ -943,7 +941,7 @@ def run_case(fn: Callable[[], dict]) -> dict:
 
     def init(self, *args, **kwargs):
         original(self, *args, **kwargs)
-        seen.append(GENERAL if self.mna else CLASSIC)
+        seen.append(GENERAL if self._unknowns is not None else CLASSIC)
 
     KirchhoffLayer.__init__ = init
     try:

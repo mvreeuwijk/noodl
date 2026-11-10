@@ -227,7 +227,8 @@ def test_the_solved_residual_is_at_the_newton_tolerance():
 def test_the_two_pipe_forms_give_the_same_solution():
     potential = build_model(twoloop(), pipe_form="potential")
     flow = build_model(twoloop())
-    assert flow[0].kirchhoff["water"].mna and not potential[0].kirchhoff["water"].mna
+    assert flow[0].kirchhoff["water"].implicit_edges.numel() > 0
+    assert potential[0].kirchhoff["water"].implicit_edges.numel() == 0
     a, b = water_steady(*potential), water_steady(*flow)
     torch.testing.assert_close(a["water.phi"], b["water.phi"], rtol=0, atol=1e-12)
     torch.testing.assert_close(a["water.q"], b["water.q"], rtol=0, atol=1e-14)

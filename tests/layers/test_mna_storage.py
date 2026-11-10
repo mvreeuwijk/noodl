@@ -50,7 +50,7 @@ def _storage_layer(learnable=False, initial=V0):
 
 def test_storage_layer_is_mna_and_dynamic():
     layer, storage = _storage_layer()
-    assert layer.mna and layer.dynamic and layer.linear
+    assert layer.implicit_edges.numel() > 0 and layer.dynamic and layer.linear
     assert layer.storage == (storage,)
 
 

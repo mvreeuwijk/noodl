@@ -26,7 +26,7 @@ but the slack, whose angle is fixed. Here that is one classic layer `"power_dc"`
 - `r`, `b`, the bus `Bs` and the reactive demand play no part.
 
 The layer has only `Conductance` laws and a constant head, so it is solved by one linear solve of
-the weighted graph Laplacian (`layer.mna` is `False`). Driver keys:
+the weighted graph Laplacian (no flow unknowns). Driver keys:
 `"power_dc.phi_boundary"` (`[θ_slack]`, rad), `"power_dc.sources"` (full-node injections,
 p.u.) and `"power_dc.edge_head"` (per branch, rad); the state is empty.
 """

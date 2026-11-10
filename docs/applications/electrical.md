@@ -804,7 +804,7 @@ branch flow is
 MATPOWER's `Bf theta + Pfinj`. The node sources (`"power_dc.sources"`) are each bus's net
 injection `(sum Pg - sum Pd - Gs) / base_mva`, and the slack bus is the layer's one boundary
 node at its table angle (`"power_dc.phi_boundary"`). The layer solves `B theta = P` with one
-linear solve of the weighted graph Laplacian (`layer.mna` is `False`), through the same
+linear solve of the weighted graph Laplacian (the layer has no flow unknowns), through the same
 `solve_power_flow`. Line charging, `Bs` and reactive demand play no part. The slack bus's
 generation is the power its branches carry away plus its own demand and shunt conductance.
 Every other generator bus reports its generators' setpoints from the network, not from the

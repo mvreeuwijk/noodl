@@ -11,7 +11,8 @@ Three cases from the electrical tests:
 Each case runs `--steps` steps (one solve for `case118`), warmed once, over `--rounds`
 rounds; the median wall time per step is reported. In a separate, instrumented run the
 time and the number of calls of the three parts of a Newton iteration are counted: the
-Jacobian (`KirchhoffLayer._operator`, the reverse-mode colouring), the linear solve
+Jacobian (`KirchhoffLayer._operator`, the reverse-mode colouring, including the held-row
+replacement at the initial point), the linear solve
 (`solvers.select._sparse_direct`, SciPy's SuperLU) and the residual
 (`KirchhoffLayer._residual`). The Jacobian and the residual are counted on layers with flow
 unknowns only (the fast-path layers of a coupled case are not this benchmark's subject).

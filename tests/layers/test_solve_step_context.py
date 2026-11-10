@@ -38,7 +38,7 @@ def _layer(path: str, storage: bool) -> KirchhoffLayer:
     net.add_edge("a", "b", kind="r")
     stores = [LinearStorage([2], torch.tensor([1.0]))] if storage else []
     layer = KirchhoffLayer(net, "e", laws, boundary=["gnd"], storage=stores)
-    assert layer.mna == (path == "general")
+    assert (layer.implicit_edges.numel() > 0) == (path == "general")
     return layer
 
 

@@ -142,7 +142,8 @@ def test_prescribed_current_into_a_resistor():
     # current source a -> gnd draws 1 A out of a (MSL: i enters pin p = a); R = 2 => v_a = -2
     net, layer = _layer([("a", "gnd", "current_source"), ("a", "gnd", "resistor")],
                         [PrescribedCurrent(T([1.0])), Resistance(T([2.0]))])
-    assert layer.mna
+    # a current source gives its flow: the layer has no flow unknowns
+    assert layer.implicit_edges.numel() == 0
     phi, q = layer.solve(GROUND, differentiable=False)
     _close(_at(net, phi, "a"), -2.0)
     _close(q, [1.0, -1.0])

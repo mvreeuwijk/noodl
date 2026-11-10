@@ -41,7 +41,7 @@ def _dc(net):
 def test_case9_is_nodal_analysis_on_the_classic_layer():
     model, sol = _dc(read_matpower(power_case("case9")))
     layer = model.kirchhoff[DC_LAYER]
-    assert layer.mna is False
+    assert layer.implicit_edges.numel() == 0
     assert list(layer.kinds) == ["branch"]
     assert type(layer.law_for("branch")[0]) is Conductance
     assert isinstance(sol, DcPowerFlowSolution)

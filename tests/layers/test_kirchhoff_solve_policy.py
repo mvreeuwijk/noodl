@@ -83,7 +83,7 @@ def _mna():
                    PowerLaw(torch.tensor([0.3], dtype=F64), 0.8, kind="load",
                             dp_transition=1e-6)],
         boundary=["g"])
-    assert layer.mna
+    assert layer.implicit_edges.numel() > 0
 
     def call(reaches):
         leaf = torch.tensor(1.0, dtype=F64, requires_grad=reaches)

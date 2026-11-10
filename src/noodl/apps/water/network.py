@@ -1003,7 +1003,7 @@ def water_steady(model: Model, state: State, drivers: Drivers, **solve_kwargs) -
     """
     seed = getattr(model, "initial_flows", None)
     layer = model.kirchhoff["water"]
-    if seed is not None and layer.mna:
+    if seed is not None and layer.implicit_edges.numel():
         q = state["water.q"]
         for kind in ("pipe", "pump"):
             if kind in layer.kinds:

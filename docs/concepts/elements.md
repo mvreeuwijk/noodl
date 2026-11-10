@@ -253,12 +253,12 @@ layer = KirchhoffLayer(
     boundary=["in", "out"],
 )
 phi, q = layer.solve(torch.tensor([10.0, 0.0], dtype=F64))
-print(layer.mna, layer.implicit_edges.tolist())
+print(layer.implicit_edges.tolist())
 print(f"phi_mid = {float(phi[1]):.6f}, q = {[round(v, 9) for v in q.tolist()]}")
 ```
 
 ```text
-True [0]
+[0]
 phi_mid = 2.000000, q = [2.0, 2.0]
 ```
 

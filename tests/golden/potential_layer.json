@@ -1265,9 +1265,48 @@
     },
     "fast_storage_initial": {
       "ok": {
-        "refused": {
-          "message": "KirchhoffLayer 'e': mode='initial' with storage that holds an initial potential ",
-          "type": "ValueError"
+        "diagnostics": {
+          "backend": "sparse_direct",
+          "converged": {
+            "data": true,
+            "dtype": "torch.bool",
+            "shape": []
+          },
+          "linear_iterations": {
+            "data": 1,
+            "dtype": "torch.int64",
+            "shape": []
+          },
+          "newton_iterations": 5
+        },
+        "grads": {
+          "C": null
+        },
+        "phi": {
+          "data": [
+            6.0,
+            0.4,
+            -0.2,
+            0.5645935586239701,
+            0.5
+          ],
+          "dtype": "torch.float64",
+          "shape": [
+            5
+          ]
+        },
+        "q": {
+          "data": [
+            0.03064236049398044,
+            0.005739688188138207,
+            -0.010078854106991443,
+            0.0015165806026387913,
+            -0.0034045602792375277
+          ],
+          "dtype": "torch.float64",
+          "shape": [
+            5
+          ]
         }
       },
       "path": "classic"
@@ -2562,18 +2601,14 @@
         },
         "step0": {
           "diagnostics": {
-            "backend": "sparse_direct",
+            "backend": null,
             "converged": {
               "data": true,
               "dtype": "torch.bool",
               "shape": []
             },
-            "linear_iterations": {
-              "data": 1,
-              "dtype": "torch.int64",
-              "shape": []
-            },
-            "newton_iterations": 2
+            "linear_iterations": null,
+            "newton_iterations": 0
           },
           "phi": {
             "data": [
@@ -2599,18 +2634,14 @@
         },
         "step1": {
           "diagnostics": {
-            "backend": "sparse_direct",
+            "backend": null,
             "converged": {
               "data": true,
               "dtype": "torch.bool",
               "shape": []
             },
-            "linear_iterations": {
-              "data": 1,
-              "dtype": "torch.int64",
-              "shape": []
-            },
-            "newton_iterations": 2
+            "linear_iterations": null,
+            "newton_iterations": 0
           },
           "phi": {
             "data": [
@@ -2635,7 +2666,7 @@
           }
         }
       },
-      "path": "general"
+      "path": "classic"
     },
     "general_fan_orifice_cold_and_warm": {
       "ok": {
@@ -4761,18 +4792,14 @@
     "moves_prescribed_current_differentiable": {
       "ok": {
         "diagnostics": {
-          "backend": "sparse_direct",
+          "backend": null,
           "converged": {
             "data": true,
             "dtype": "torch.bool",
             "shape": []
           },
-          "linear_iterations": {
-            "data": 1,
-            "dtype": "torch.int64",
-            "shape": []
-          },
-          "newton_iterations": 1
+          "linear_iterations": null,
+          "newton_iterations": 0
         },
         "grads": {
           "amplitude": {
@@ -4806,7 +4833,7 @@
           ]
         }
       },
-      "path": "general"
+      "path": "classic"
     },
     "moves_prescribed_current_grounded_storage": {
       "ok": {
@@ -4863,18 +4890,14 @@
         },
         "step0": {
           "diagnostics": {
-            "backend": "sparse_direct",
+            "backend": null,
             "converged": {
               "data": true,
               "dtype": "torch.bool",
               "shape": []
             },
-            "linear_iterations": {
-              "data": 1,
-              "dtype": "torch.int64",
-              "shape": []
-            },
-            "newton_iterations": 1
+            "linear_iterations": null,
+            "newton_iterations": 0
           },
           "phi": {
             "data": [
@@ -4908,18 +4931,14 @@
         },
         "step1": {
           "diagnostics": {
-            "backend": "sparse_direct",
+            "backend": null,
             "converged": {
               "data": true,
               "dtype": "torch.bool",
               "shape": []
             },
-            "linear_iterations": {
-              "data": 1,
-              "dtype": "torch.int64",
-              "shape": []
-            },
-            "newton_iterations": 1
+            "linear_iterations": null,
+            "newton_iterations": 0
           },
           "phi": {
             "data": [
@@ -4952,23 +4971,19 @@
           }
         }
       },
-      "path": "general"
+      "path": "classic"
     },
     "moves_prescribed_current_primal": {
       "ok": {
         "diagnostics": {
-          "backend": "sparse_direct",
+          "backend": null,
           "converged": {
             "data": true,
             "dtype": "torch.bool",
             "shape": []
           },
-          "linear_iterations": {
-            "data": 1,
-            "dtype": "torch.int64",
-            "shape": []
-          },
-          "newton_iterations": 1
+          "linear_iterations": null,
+          "newton_iterations": 0
         },
         "phi": {
           "data": [
@@ -4991,7 +5006,7 @@
           ]
         }
       },
-      "path": "general"
+      "path": "classic"
     }
   },
   "meta": {

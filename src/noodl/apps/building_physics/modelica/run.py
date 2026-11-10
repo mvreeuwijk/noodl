@@ -102,7 +102,7 @@ def _start_mover_flows(air, store: StorageClosure, phi: Tensor, drv: Drivers) ->
     `der(p) = 0`) and `v_a = v_b` across every mover (the rise held over the instant: a
     rising `dp_in` signal's own rate is not added; a boundary's `v` is 0). Without implicit
     edges this is `air.flows(phi, drv)`."""
-    if not air.mna:
+    if not air.implicit_edges.numel():
         return air.flows(phi, drv)
     F = air.implicit_edges
     n_e = len(store.air_src)
@@ -174,7 +174,8 @@ def _initial_air(model: Model, store: StorageClosure, state: State, drivers: Dri
             phi_b = state["air.phi"][..., init.bound]
             new["air.phi"], new["air.q"] = init.solve(phi_b, drv, drv.get("air.sources"),
                                                       phi0=None, **solve_kwargs)
-            if air.mna:  # the movers' flows of the whole layer, at the solved pressures
+            if air.implicit_edges.numel():
+                # the movers' flows of the whole layer, at the solved pressures
                 new["air.q"] = _start_mover_flows(air, store, new["air.phi"], drv)
         if _same_directions(closure, before, new["air.q"]):
             break
@@ -680,7 +681,7 @@ def _balanced(model: Model, store: StorageClosure, state: State, d: Drivers) -> 
     if not bool((net.abs() <= BALANCE_RTOL * scale).all()):
         return False
     air = model.kirchhoff["air"]
-    if not air.mna:
+    if not air.implicit_edges.numel():
         return True
     drv = dict(d)
     drv.update(_closure(model)(state, drv))
@@ -1261,7 +1262,8 @@ class _Midpoint:
             drv0, _, net0, s_air, air_drv = self._storage_drivers(s0, d0, d1, h)
             # The layer's storage steps from state 0 (its rate: the BDF2 drivers above).
             step = {"dt": h, "history": (s0[f"{name}.phi"],
-                                         s0[f"{name}.q"] if air.mna else None)}
+                                         s0[f"{name}.q"] if air.implicit_edges.numel()
+                                         else None)}
         # The air balance at state 1: with storage, the BDF2 storage rate there is the
         # derivative of the mass at the step's END, so it balances the sources' point values
         # (`"air.sources_point"`), not their step mean. The step mean would lag the stored

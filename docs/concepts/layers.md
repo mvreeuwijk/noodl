@@ -115,8 +115,11 @@ storages in list order, then their nodes.
 - `residual`, `jacobian` and `adjoint` take the same step keywords (`dt`, `scheme`,
   `history`, `storage_flow`): with `dt` they include the storage of that step, without it
   they are the steady forms, where storage is absent.
-- `mode="initial"` on a nodal layer is refused when a storage holds an `initial()` potential:
-  holding a node at its initial potential is defined on the Modified Nodal Analysis path only.
+- `mode="initial"` with a storage that holds an `initial()` potential holds its node there.
+  The held rows make that one solve's system nonsymmetric, so it is solved on the sparse
+  operator of the general path (a layout with no unknown flows, built on the first such call);
+  every other solve of the layer stays on the nodal path, and that solve refuses
+  `linear_solver="cg"` and `line_search="convex"`.
 - `layer.dynamic` is True for a layer with storage, and `layer.linear` asks every storage too.
 - On the differentiable path gradients reach the storages' registered parameters, `history`
   and `storage_flow`, so a chain of steps back-propagates through time.
@@ -205,15 +208,24 @@ its own `to(device=None, dtype=None)` method for `Model.to` to move them (the te
 
 ## Modified Nodal Analysis: implicit, coupled and dynamic laws
 
-A `KirchhoffLayer` whose constitutive laws are all potential-controlled, single-edge and
-static is solved by nodal analysis, as above. A layer with any law that is implicit
-(an `ImplicitLaw`), multi-port (`ports > 1`), dynamic or reads the context (a `ctx` parameter in
-`flow`), or a layer built with
-`phasor=True`, is solved by **Modified Nodal Analysis** instead (`layer.mna` is True); the
-declarations are described under
+A `KirchhoffLayer` whose constitutive laws all give their flow from their own edge's potential
+difference is solved by nodal analysis, as above. A layer with any law that is implicit
+(an `ImplicitLaw`) or multi-port (`ports > 1`), or a layer built with `phasor=True`, is solved
+by **Modified Nodal Analysis** instead: it has flow unknowns (`layer.implicit_edges`, empty on
+the nodal path); the declarations are described under
 [Implicit, coupled and dynamic constitutive laws](elements.md#implicit-coupled-and-dynamic-constitutive-laws).
 The [electrical application](../applications/electrical.md) is built on it; the same machinery
 serves any domain with ideal sources, flow-controlled laws or storage on its edges.
+
+**Laws that read the context stay on the nodal path.** A law with a `ctx` parameter in `flow`
+that still gives its flow from the potential difference (a time-dependent current source; a
+storing law written in flow form, `q = C (dp - ctx.dp_prev) / ctx.dt` with `dynamic = True`)
+adds no flow unknown. Its flow is evaluated in the solve's context, restricted to its edges, and
+its slope is its `jacobian` there (its analytic one where it overrides it, else automatic
+differentiation of `flow` with the context), since `dflow` takes no context. The Jacobian stays
+the symmetric network matrix, so such a layer accepts `linear_solver="cg"` and
+`line_search="convex"`, and its grounding is certified at the start of every solve: a node
+reached only through a current source is refused there as floating, by name.
 
 **The system.** The unknowns are the interior potentials and the flows of the implicit-law edges
 (`layer.implicit_edges`, in layer edge order). The residual rows are the conservation balance at
@@ -295,8 +307,8 @@ one step description per solve (`_Step`: the law context and what the storage do
 - **dc** (`mode="dc"`, or no `dt`): the steady operating point. Storage is absent, so no
   `history` or `storage_flow` is taken.
 - **initial** (`mode="initial"`, no `dt`): the consistent initial point. A storage that holds
-  an `initial()` potential holds its node there, on a layer that solves for flow unknowns; the
-  other kind of layer refuses it.
+  an `initial()` potential holds its node there, on every layer (a layer without flow
+  unknowns solves that one call on the sparse operator, see [Node storage](#node-storage)).
 - **a step** (`dt > 0`): one implicit step ending at `t`, with the `scheme`. It needs
   `history`, and `storage_flow` under the trapezoidal scheme on a layer with storage. A layer
   with storage, a dynamic law or a law that reads the context takes a step; a layer with none
@@ -341,7 +353,7 @@ source voltage).
 ### On a `Model`
 
 `Model` gives such a layer its history, time and warm start; see
-[Layers solved by Modified Nodal Analysis](#layers-solved-by-modified-nodal-analysis) below.
+[Layers with flow unknowns, dynamic laws or laws that read the context](#layers-with-flow-unknowns-dynamic-laws-or-laws-that-read-the-context) below.
 
 ## `TransportLayer`
 
@@ -703,11 +715,11 @@ The allocation step sits between the potential solves and the transport steps so
 transport layer reading `"<layer>.q"` sees a freshly written flow, whichever kind of layer wrote
 it.
 
-### Layers solved by Modified Nodal Analysis
+### Layers with flow unknowns, dynamic laws or laws that read the context
 
-A Kirchhoff layer whose constitutive laws include implicit, multi-port, dynamic or
-context-reading ones (`layer.mna`) is solved with the flows of its implicit-law edges as
-unknowns. `Model` hands such a layer what its laws need:
+A Kirchhoff layer with implicit or multi-port laws is solved with the flows of its implicit-law
+edges as unknowns (`layer.implicit_edges`); one whose laws are dynamic or read the context
+(without either) is solved on the nodal path. `Model` hands such a layer what its laws need:
 
 - the warm start of those flows from `"<layer>.q"` in the state, when it is there;
 - the time the laws are evaluated at: the **end** of a step (`t + dt` for `step(..., t=t)`),
@@ -737,12 +749,13 @@ shorted). A layer with laws that read the context but no dynamic one (a time-dep
 resistors, no storage) takes no history: on a step it is solved at its operating point at the
 step end, `t + dt`, with `ctx.mode == "dc"` and `ctx.dt` `None`, which is exact for a layer that
 stores nothing. `residuals` reports `layer.balance(phi, q, sources)`, the interior balance of the
-state's own flows. A phasor layer (`phasor=True`) has complex `"<layer>.phi"` and
+state's own flows, for a layer with flow unknowns or a law that reads the context (whose flows
+need a time and a step start `residuals` does not have). A phasor layer (`phasor=True`) has complex `"<layer>.phi"` and
 `"<layer>.q"` and reads the driver `layer.frequency_key`; the iterated coupling judges its
 convergence on the modulus of the change and differentiates its fixed point in the real view.
 Anderson mixing (`iterate_acceleration="anderson"`) is refused on a phasor layer.
-`line_search="convex"` (by keyword or through `newton_defaults`) is refused on such a layer: its
-residual is not the gradient of a convex function.
+`line_search="convex"` (by keyword or through `newton_defaults`) is refused on a layer with flow
+unknowns: its residual is not the gradient of a convex function.
 
 ### Closures
 

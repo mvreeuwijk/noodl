@@ -1068,9 +1068,10 @@ class Model:
         out: dict[str, Tensor] = {}
         for name, layer in self.kirchhoff.items():
             phi = state[f"{name}.phi"]
-            if layer.mna:
-                # Implicit-law flows are unknowns, not functions of `phi`: balance the
-                # state's own flows.
+            if layer._unknowns is not None or layer._ctx_laws:
+                # Implicit-law flows are unknowns, not functions of `phi`, and a law that reads
+                # the context needs a time and step start this call does not have: balance
+                # the state's own flows.
                 out[name] = layer.balance(phi, state[f"{name}.q"], drv.get(f"{name}.sources"),
                                           drv)
                 continue
@@ -1113,12 +1114,14 @@ class Model:
         """
         drv = self._apply_closures(state, drivers)
         owner = self.flow_layer_of[name]
-        if owner in self.kirchhoff and self.kirchhoff[owner].mna and f"{owner}.q" not in state:
+        kl = self.kirchhoff.get(owner)
+        if (kl is not None and (kl._unknowns is not None or kl._ctx_laws)
+                and f"{owner}.q" not in state):
             raise KeyError(
                 f"Model: transport layer {name!r} takes its flows from Kirchhoff layer "
-                f"{owner!r}, which is solved by Modified Nodal Analysis and cannot be solved "
-                f"here without its step history; give the state {owner + '.q'!r} (step the "
-                f"model first)"
+                f"{owner!r}, which has flow unknowns or a law that reads the time or the step "
+                f"start, so it cannot be solved here without its step history; give the "
+                f"state {owner + '.q'!r} (step the model first)"
             )
         if owner in self.kirchhoff and f"{owner}.q" not in state:
             key = self.flow_driver_of[name]

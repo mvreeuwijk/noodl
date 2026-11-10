@@ -81,7 +81,8 @@ def resolve(
         # for `converged`/`residual_norm` to go, and a non-converged phi would be
         # indistinguishable from a converged one. The escape hatch is never silent: the
         # result carries the status.
-        named = "return_primal" if primal_only and layer.mna else "return"
+        named = ("return_primal" if primal_only and layer._unknowns is not None
+                 else "return")
         require_diagnostics(layer.name, named, diagnostics)
     # "return_primal": "return" unless something differentiable reaches the solve; a
     # differentiable solve that nothing reaches is not differentiated.

@@ -124,7 +124,7 @@ def test_operator_uses_a_law_override():
     layer = KirchhoffLayer(net, "e", [Source(torch.tensor([3.0])),
                                       Spied(torch.tensor([2.0]), kind="r")],
                            boundary=["gnd"])
-    assert layer.mna
+    assert layer.implicit_edges.numel() > 0
     phi, q = layer.solve(torch.zeros(1), differentiable=False)
     assert calls
     torch.testing.assert_close(q[1].to(F64), torch.tensor(6.0, dtype=F64))

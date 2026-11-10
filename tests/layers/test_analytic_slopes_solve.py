@@ -266,7 +266,7 @@ def _mna_aided(exact: bool):
         net, "e", [Source(_t([1.0])), PowerLaw(_t([0.5]), _t(0.65), kind="r",
                                                dp_transition=1e-6), aided],
         boundary=["g"])
-    assert layer.mna
+    assert layer.implicit_edges.numel() > 0
     return layer, aided
 
 

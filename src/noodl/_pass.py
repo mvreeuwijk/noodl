@@ -117,12 +117,15 @@ def circuit_kwargs(name: str, layer: KirchhoffLayer, state: Mapping[str, Tensor]
     step's (`None`: the layer's own)."""
     out: dict = {"t": t if dt is None or t is None else t + dt}
     q_prev = state.get(f"{name}.q")
-    if q_prev is not None and layer.mna:
+    flow_unknowns = layer._unknowns is not None
+    if q_prev is not None and flow_unknowns:
         out["q0"] = q_prev[..., layer.implicit_edges]
     if layer.dynamic and not layer.phasor and dt is not None:
-        # A classic layer with storage reads only the step-start potentials; a layer with
-        # dynamic laws reads the step-start flows of their edges too.
-        keys = (f"{name}.phi", f"{name}.q") if layer.mna else (f"{name}.phi",)
+        # A layer whose only storage is node storage reads only the step-start potentials;
+        # a layer with dynamic laws reads the step-start flows of their edges too, and a
+        # layer with flow unknowns takes them as well.
+        with_q = layer._steps_with_flows
+        keys = (f"{name}.phi", f"{name}.q") if with_q else (f"{name}.phi",)
         missing = [k for k in keys if k not in base]
         if missing:
             raise KeyError(
@@ -131,7 +134,7 @@ def circuit_kwargs(name: str, layer: KirchhoffLayer, state: Mapping[str, Tensor]
                 f"start (an initial point: layer.solve(..., mode='initial'), or a steady "
                 f"solve)"
             )
-        out["history"] = (base[f"{name}.phi"], base[f"{name}.q"] if layer.mna else None)
+        out["history"] = (base[f"{name}.phi"], base[f"{name}.q"] if with_q else None)
         out["dt"] = dt
         if layer.storage:
             key = f"{name}.storage_flow"
