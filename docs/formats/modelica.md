@@ -98,8 +98,8 @@ pass, converging with the coupling iteration.
 
 **Movers.** `Buildings.Fluid.Movers.FlowControlled_dp` is a fan with a prescribed pressure
 rise, `port_b.p - port_a.p = dp` (`FlowControlled_dp.mo`), whatever the flow: an implicit law,
-the flow an unknown of the air layer, so a model with a mover is solved by Modified Nodal
-Analysis (as are the electrical networks). `inputType = Constant` takes `constantHead` (default
+the flow an unknown of the air layer's solve (as the currents of sources are in the
+electrical networks). `inputType = Constant` takes `constantHead` (default
 `dp_nominal`); `Continuous` (MBL's default) takes the signal driving `<mover>.dp_in`, evaluated
 on the driver grid like any other input. The mover is an edge between its two nodes with no
 buoyancy head of its own; it may be wired to a zone or boundary directly, or to a one-way

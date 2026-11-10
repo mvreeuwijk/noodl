@@ -198,10 +198,10 @@ analysis. A law that cannot (a flow-controlled law, an ideal source, an inductan
 potential difference and the flow, zero when they agree; the layer then adds its flow as an
 unknown. Every law has `residual`: for a law with a flow it is `q - flow(dp)`, which the solve
 never calls. To read the law context (time, frequency, step-start values), name the third
-parameter of `flow` `ctx`. A `KirchhoffLayer` with a relation, a multi-port, dynamic or
-`ctx`-reading law is solved by
-[Modified Nodal Analysis](layers.md#modified-nodal-analysis-implicit-coupled-and-dynamic-laws);
-three class-level declarations on `ConstitutiveLaw` describe the rest.
+parameter of `flow` `ctx`. A `KirchhoffLayer` with a relation or a multi-port law adds those
+edges' flows as unknowns
+([Laws that give a relation](layers.md#laws-that-give-a-relation-implicit-coupled-and-dynamic-laws));
+a dynamic or `ctx`-reading law that gives its flow adds none. Three class-level declarations on `ConstitutiveLaw` describe the rest.
 
 | Declaration | Default | Meaning |
 |---|---|---|
@@ -282,7 +282,7 @@ dataclass the layer builds for every solve:
 | `dp_prev`, `q_prev` | This kind's own potential differences and flows at the step start (transient only) |
 | `omega` | The angular frequency `2 pi f`, one per instance (phasor only) |
 
-A dynamic law implements each mode as a companion form. The capacitance of the electrical
+A dynamic law implements a form for each mode. The capacitance of the electrical
 application, `q = C d(dp)/dt`:
 
 ```py
@@ -358,9 +358,9 @@ potential, and each adds only a diagonal entry to the Jacobian:
 
 - **`NodeStorage`** (`noodl.NodeStorage`, `noodl.LinearStorage`): an amount stored at the node,
   which the layer turns into a withdrawal over each step with its scheme's step rate. A
-  capacitor to ground, a tank, a zone's air mass. A layer solved by nodal analysis or by
-  Modified Nodal Analysis takes it (not a phasor layer); at the consistent initial point of
-  the latter a storage with an `initial()` potential holds its node there. Under
+  capacitor to ground, a tank, a zone's air mass. Every layer takes it, with or without
+  flow unknowns (not a phasor layer); at the consistent initial point a storage with an
+  `initial()` potential holds its node there. Under
   `scheme="forward_euler"` a linear storage sits at a boundary node instead (an EPANET tank),
   held through the solve and moved by explicit Euler after it. See
   [Node storage](layers.md#node-storage).

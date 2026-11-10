@@ -80,8 +80,8 @@ one layer with its network). One walk over the model moves:
 
 - the network (`Network.to`; its cached operators are cleared and derived again on the new
   device and dtype);
-- every layer's cached index, capacity and law-slice tensors, and its Modified Nodal Analysis
-  structure;
+- every layer's cached index, capacity and law-slice tensors, and the layout of its flow
+  unknowns;
 - the laws and withdrawals (parameters move in place, so they stay the same
   `nn.Parameter` objects an optimiser holds; buffers and plain tensor attributes move too);
 - head terms, reactions and every closure of a class defined in noodl, attribute by attribute

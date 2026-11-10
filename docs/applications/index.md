@@ -16,7 +16,7 @@ initial point of the circuit.
 | [Sewers](sewer.md) | Gravity hydraulics, headspace air, sulfide | Continuity on a tree for the water (kinematic wave), or Kirchhoff solve on head (dynamic wave); Kirchhoff solve for the headspace air | `build_model` |
 | [Water distribution](water.md) | Pressurised mains, pumps, tanks, demand | Kirchhoff: Newton on hydraulic head | `build_model` |
 | [Flow allocation](allocation.md) | Requested flows clipped to arc capacity and free storage at the receiving node | Clip and allocate | `AllocatedFlowLayer`, `wsimod.build_model` |
-| [Electrical circuits](electrical.md) | Lumped circuits: DC, transient and AC | Kirchhoff: Modified Nodal Analysis on node voltage | `build_model`, `Circuit` |
+| [Electrical circuits](electrical.md) | Lumped circuits: DC, transient and AC | Kirchhoff: node voltage, source and inductor currents as unknowns | `build_model`, `Circuit` |
 | [Coupling](coupling.md) | Two models meeting at a shared boundary | Two models exchanging values, iterated to a fixed point | `union` |
 
 ![The four flow-determination modes](../assets/four-modes.svg)
@@ -40,8 +40,8 @@ all four:
 - The **flow allocation** application has no potential and no continuity solve — a
   request, clipped against capacity and headroom.
 - The **electrical circuits** application solves for a potential, the node voltage, with the
-  currents of ideal sources, inductors and transformers as extra unknowns: Modified Nodal
-  Analysis, the full form of the nodal solve the building and water applications use.
+  currents of ideal sources, inductors and transformers as extra unknowns: the nodal solve the
+  building and water applications use, with the relations' flows added as unknowns.
 
 And they share machinery in ways that would be coincidence if the abstraction were wrong. The
 sewer's headspace air layer uses the *same* `Stack` buoyancy term the

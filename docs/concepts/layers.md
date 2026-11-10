@@ -14,7 +14,7 @@ one graph.
 
 | # | Mode | The flow comes from | Implemented by |
 |---|---|---|---|
-| 1 | **Kirchhoff solve** | Both Kirchhoff laws plus the constitutive laws on the edges, solved together. Newton's method on a nodal conservation residual: $A_I\,g(A^\top\phi) = s_I$ (with the flows of implicit constitutive laws as extra unknowns: Modified Nodal Analysis) | `KirchhoffLayer` |
+| 1 | **Kirchhoff solve** | Both Kirchhoff laws plus the constitutive laws on the edges, solved together. Newton's method on a nodal conservation residual: $A_I\,g(A^\top\phi) = s_I$ (a law that gives a relation adds its flow as an extra unknown) | `KirchhoffLayer` |
 | 2 | **Driver-prescribed** | Handed in directly as a driver value | any `TransportLayer` with no Kirchhoff-layer owner |
 | 3 | **Closure-computed** | Computed from other state by an arbitrary function | a closure writing `"<layer>.q"` |
 | 4 | **Clip-and-allocate** | A *request*, clipped against arc capacity and receiver headroom — no potential variable anywhere | `AllocatedFlowLayer` |
@@ -117,8 +117,8 @@ storages in list order, then their nodes.
   they are the steady forms, where storage is absent.
 - `mode="initial"` with a storage that holds an `initial()` potential holds its node there.
   The held rows make that one solve's system nonsymmetric, so it is solved on the sparse
-  operator of the general path (a layout with no unknown flows, built on the first such call);
-  every other solve of the layer stays on the nodal path, and that solve refuses
+  operator of a layer with flow unknowns (a layout with no unknown flows, built on the first
+  such call); every other solve of the layer keeps the symmetric system, and that solve refuses
   `linear_solver="cg"` and `line_search="convex"`.
 - `layer.dynamic` is True for a layer with storage, and `layer.linear` asks every storage too.
 - On the differentiable path gradients reach the storages' registered parameters, `history`
@@ -206,18 +206,19 @@ that value check is skipped to avoid a host wait, so a head given directly there
 its own `to(device=None, dtype=None)` method for `Model.to` to move them (the terms in
 `noodl.heads` do not).
 
-## Modified Nodal Analysis: implicit, coupled and dynamic laws
+## Laws that give a relation: implicit, coupled and dynamic laws
 
 A `KirchhoffLayer` whose constitutive laws all give their flow from their own edge's potential
-difference is solved by nodal analysis, as above. A layer with any law that is implicit
-(an `ImplicitLaw`) or multi-port (`ports > 1`), or a layer built with `phasor=True`, is solved
-by **Modified Nodal Analysis** instead: it has flow unknowns (`layer.implicit_edges`, empty on
-the nodal path); the declarations are described under
+difference has the interior potentials as its only unknowns, as above (the fast path). A law
+that cannot, an implicit law (an `ImplicitLaw`, which gives a relation) or a multi-port law
+(`ports > 1`), adds the flows of its edges as unknowns (`layer.implicit_edges`, empty on a layer
+without flow unknowns); a layer built with `phasor=True` is always solved this way. The
+declarations are described under
 [Implicit, coupled and dynamic constitutive laws](elements.md#implicit-coupled-and-dynamic-constitutive-laws).
 The [electrical application](../applications/electrical.md) is built on it; the same machinery
 serves any domain with ideal sources, flow-controlled laws or storage on its edges.
 
-**Laws that read the context stay on the nodal path.** A law with a `ctx` parameter in `flow`
+**Laws that read the context stay on the fast path.** A law with a `ctx` parameter in `flow`
 that still gives its flow from the potential difference (a time-dependent current source; a
 storing law written in flow form, `q = C (dp - ctx.dp_prev) / ctx.dt` with `dynamic = True`)
 adds no flow unknown. Its flow is evaluated in the solve's context, restricted to its edges, and
@@ -287,7 +288,7 @@ that lists them.
 
 Such a layer takes [node storage](#node-storage) as well. On a step its withdrawal and its
 analytic `rate_slope` enter each node's flow balance and the diagonal of the Jacobian, as on
-the nodal path (and the same `history`, `scheme` and `storage_flow`); in the steady operating
+the fast path (and the same `history`, `scheme` and `storage_flow`); in the steady operating
 point (`mode="dc"`) storage is absent. At the consistent initial point (`mode="initial"`) each
 node with a storage entry whose `initial()` is not `None` is *held* at that potential: its flow
 balance is replaced by `phi = initial` (entries at one node with different initial values are
@@ -748,7 +749,7 @@ it.
 
 A Kirchhoff layer with implicit or multi-port laws is solved with the flows of its implicit-law
 edges as unknowns (`layer.implicit_edges`); one whose laws are dynamic or read the context
-(without either) is solved on the nodal path. `Model` hands such a layer what its laws need:
+(without either) is solved on the fast path. `Model` hands such a layer what its laws need:
 
 - the warm start of those flows from `"<layer>.q"` in the state, when it is there;
 - the time the laws are evaluated at: the **end** of a step (`t + dt` for `step(..., t=t)`),

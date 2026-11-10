@@ -124,9 +124,9 @@ model, state, drivers = build_model(
 
 `pipe_form` is how the pipes enter the solve. In the **resistance form** (`"flow"`, the default
 except with `friction="colebrook"`) each pipe is `dp = h(q)` (`FlowControlledPipe`) with its
-flow an unknown, solved by Modified Nodal Analysis from EPANET's own first iterate (every pipe
+flow an unknown, solved from EPANET's own first iterate (every pipe
 at 1 ft/s). In the **potential form** (`"potential"`) each pipe's flow is the inverted law
-$q = g(dp)$ on the nodal path. Both give the same solution to round-off; they differ in how
+$q = g(dp)$, with no flow unknowns. Both give the same solution to round-off; they differ in how
 Newton gets there. The potential form's slope grows without bound as a pipe's flow goes to
 zero, so on Net1's 24 h run the step where a control closes the pump and leaves pipe 10
 dead-ended needs 136 Newton iterations; the resistance form's slope goes to EPANET's `RQtol`
@@ -238,8 +238,8 @@ and a **GPV** (general purpose valve) follow EPANET 2.2's own coefficient routin
   that brackets $|q|$ (the first or last segment, extended, outside the curve), with
   $\operatorname{sgn}(0) = +1$.
 
-A network with either valve is solved by Modified Nodal Analysis (sparse LU); every other
-network stays on the nodal path. PRV and PSV, which switch status on the absolute head at
+A network with either valve has those valves' flows as unknowns (solved by sparse LU); every
+other device gives its flow from the head difference. PRV and PSV, which switch status on the absolute head at
 one end, are not modelled.
 
 ### Tanks and controls

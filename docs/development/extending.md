@@ -67,8 +67,8 @@ your own package) and needs no change to `noodl.elements`, `noodl.layers` or `no
 Write `flow`; if you cannot, write `residual`. A law that cannot give its flow from the
 potential difference (an ideal source, a flow-controlled law, a law with storage or one coupling
 several edges) subclasses `noodl.elements.ImplicitLaw` instead and implements
-`residual(dp, q, drivers, ctx)`; the layer then adds its flow as an unknown and solves it by
-Modified Nodal Analysis. To read the law context, name the third parameter of `flow` `ctx`. See
+`residual(dp, q, drivers, ctx)`; the layer then adds its flow as an unknown of its
+solve. To read the law context, name the third parameter of `flow` `ctx`. See
 [Implicit, coupled and dynamic constitutive laws](../concepts/elements.md#implicit-coupled-and-dynamic-constitutive-laws).
 
 ## Level 2: a new application

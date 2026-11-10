@@ -2,10 +2,10 @@
 
 Lumped electrical circuits: nodes carry voltages, devices between them carry currents, and
 Kirchhoff's current law holds at every node. The whole circuit is **one** `KirchhoffLayer`
-whose potential is the node voltage, solved by Modified Nodal Analysis: the currents of
+whose potential is the node voltage: the currents of
 voltage sources, inductors, transformers and controlled sources are unknowns alongside the
 node voltages (see
-[Modified Nodal Analysis](../concepts/layers.md#modified-nodal-analysis-implicit-coupled-and-dynamic-laws)).
+[Laws that give a relation](../concepts/layers.md#laws-that-give-a-relation-implicit-coupled-and-dynamic-laws)).
 A circuit is analysed at its DC operating point, as a transient on a fixed time grid, or in the
 sinusoidal steady state (AC, by phasors). The device laws transcribe the Modelica Standard
 Library (MSL, `Modelica.Electrical.Analog`). The same phasor layer also solves the
@@ -507,7 +507,7 @@ current 2.179106576 A
 by the trapezoidal rule otherwise (`scheme=`). Give the heat layer the same rule on
 every step with `layer_options={"thermal": {"scheme": "backward_euler"}}` (backward Euler) or
 `{"scheme": "trapezoidal"}`. On a trapezoidal step the heat layer integrates the heat as the
-circuit's companion forms integrate their currents, `dt/2 (P_start + P_end)`, `P_start`
+circuit's capacitors and inductors integrate their currents, `dt/2 (P_start + P_end)`, `P_start`
 being the step-start state's `"thermal.sources"`; that is the same Crank-Nicolson rule, so the
 two layers agree on what a step is. The Modelica reader builds this structure for MSL models
 whose resistors or diodes have an enabled heat port (`Analog.Examples.Resistor`,
@@ -744,8 +744,8 @@ branch (`branch_rows`) at its two ends; a `DcPowerFlowSolution` holds `va`, `pg`
 ### The AC model
 
 `build_power_flow(net)` returns `(model, state, drivers)` for one phasor
-`KirchhoffLayer` named `"power"`, solved by
-[Modified Nodal Analysis](../concepts/layers.md#modified-nodal-analysis-implicit-coupled-and-dynamic-laws).
+`KirchhoffLayer` named `"power"`, whose sources' currents are unknowns of the solve
+([Laws that give a relation](../concepts/layers.md#laws-that-give-a-relation-implicit-coupled-and-dynamic-laws)).
 Its nodes are the buses (`str(bus.id)`, in table order) and one more node, `"ground"`, the
 common reference at 0. Every device is an edge **to ground**: the edge's potential difference
 is then the bus voltage phasor `v` itself, and its flow is the current `i` leaving the bus
@@ -834,7 +834,7 @@ naming what it found: not exactly **one slack bus**; a slack bus without an in-s
 generator; a regulated bus whose generators have different voltage setpoints (MATPOWER
 silently takes the last), or a setpoint that is not positive; a branch of zero impedance
 (`r = x = 0`; `x = 0` for DC), named by its row; for DC (`dc=True`), a branch whose `x tau` is
-negative, such as a series-compensated line (the DC power flow on the classic layer needs
+negative, such as a series-compensated line (the DC power flow's conductance layer needs
 positive branch susceptance; the AC power flow takes it); and buses not connected to the slack
 bus through in-service branches (an **island**).
 `dc_power_flow` also refuses a network without an in-service branch, and `PowerNetwork` itself
@@ -885,13 +885,13 @@ layer and the implicit kinds.
 
 ## Verification
 
-Every check is against a closed form or a hand Modified Nodal Analysis (`tests/apps/electrical/`,
+Every check is against a closed form or a hand analysis (`tests/apps/electrical/`,
 `tests/layers/test_mna*.py`):
 
 | Circuit | Compared | Tolerance |
 |---|---|---|
 | Divider; balanced and unbalanced Wheatstone bridge; floating voltage source between two non-ground nodes | Node voltages, bridge current | 1e-12 V or A abs |
-| Controlled sources (all four), ideal transformer, coupled windings at DC | Port voltages and currents against hand MNA | 1e-12 abs |
+| Controlled sources (all four), ideal transformer, coupled windings at DC | Port voltages and currents against hand analysis | 1e-12 abs |
 | RC charge, RL, backward Euler | The exact backward Euler recurrence at every step | 1e-13 abs |
 | RC charge and series RLC ringing, trapezoidal | Convergence order over `dt`, `dt/2`, `dt/4` | order 2 within 0.1 |
 | RC charge through `transient` (backward Euler first step) | Error at 1 s with `dt = 0.01` and order from `dt = 0.02` | error < 1e-4, order >= 1.9 |
