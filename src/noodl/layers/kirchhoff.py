@@ -43,7 +43,12 @@ from noodl.operators.graph import GraphLaplacianOperator
 from noodl.operators.shifted import ShiftedOperator
 from noodl.operators.sparse import SparseOperator
 from noodl.solvers.continuation import storage_ramp
-from noodl.solvers.errors import ConvergenceError, GroundingError, SingularSystemError
+from noodl.solvers.errors import (
+    ConvergenceError,
+    GroundingError,
+    LinearSolveError,
+    SingularSystemError,
+)
 from noodl.solvers.grounding import spd_certificate, spd_diagnosis
 from noodl.solvers.implicit import adjoint as _adjoint_solve
 from noodl.solvers.implicit import implicit_solve
@@ -2256,10 +2261,12 @@ class KirchhoffLayer(TopologyGuard):
                                   q0=q0 if ramped else None, diagnostics=diagnostics,
                                   _start="ramp" if ramped else "linear",
                                   _report=ramp, **kwargs)
-            except (ConvergenceError, SingularSystemError, GroundingError) as exc:
-                # a rung that does not converge, or whose linear guess is singular or not
-                # grounded, has failed; the first failure still stands. Any other error (a
-                # law's own bug, say) is not a failure of the rung and passes through.
+            except (ConvergenceError, SingularSystemError, GroundingError,
+                    LinearSolveError) as exc:
+                # a rung that does not converge, whose linear guess is singular or not
+                # grounded, or whose linear guess's solve does not converge, has failed; the
+                # first failure still stands. Any other error (a law's own bug, say) is not
+                # a failure of the rung and passes through.
                 last_error = exc
                 continue
             if diagnostics is None or _converged(diagnostics):

@@ -121,9 +121,9 @@ but not all instances certify, is a modelling error, not a numerical one. There 
 per-instance result to return.
 
 `SolveResult` carries `x`, `converged`, `iterations`, `residual` and `status` per instance, with
-`status` one of `CONVERGED`, `MAX_ITER`, `BREAKDOWN`, `SINGULAR`. `raise_on_failure(where)` names
-every non-converged batch index with its status and residual, and returns `self` when all
-converged, so it chains.
+`status` one of `CONVERGED`, `MAX_ITER`, `BREAKDOWN`, `SINGULAR`. `raise_on_failure(where)` raises
+`noodl.solvers.LinearSolveError` (a `RuntimeError`) naming every non-converged batch index with
+its status and residual, and returns `self` when all converged, so it chains.
 
 ## Newton
 
@@ -209,9 +209,10 @@ air = KirchhoffLayer(net, "air", laws, boundary=["ambient"],
 
 The whole batch is solved again on each rung. Only non-convergence (`ConvergenceError`) of
 the first solve climbs the ladder; any other error of it passes through. A rung that does not
-converge (`ConvergenceError`), or whose linear guess is singular (`SingularSystemError`) or
-not grounded (`GroundingError`), has failed, and the next one is tried; any other error of a
-rung (a bug in a law, say) passes through. The three are `RuntimeError`s, importable from
+converge (`ConvergenceError`), whose linear guess is singular (`SingularSystemError`) or not
+grounded (`GroundingError`), or whose linear guess's own linear solve does not converge
+(`LinearSolveError`), has failed, and the next one is tried; any other error of a rung (a
+bug in a law, say) passes through. The four are `RuntimeError`s, importable from
 `noodl.solvers`, so code that catches `RuntimeError` keeps working and code that wants to
 tell them apart can match on the type rather than on the message. On a layer with flow unknowns, the rank test that names a singular system diagnoses a
 failure only once every rung has failed too, in every `on_failure` mode: a Jacobian that is

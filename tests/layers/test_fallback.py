@@ -7,7 +7,13 @@ from noodl.elements import Conductance, PowerLaw
 from noodl.layers import kirchhoff
 from noodl.layers.kirchhoff import KirchhoffLayer
 from noodl.model import Model
-from noodl.solvers import ConvergenceError, GroundingError, SingularSystemError, implicit
+from noodl.solvers import (
+    ConvergenceError,
+    GroundingError,
+    LinearSolveError,
+    SingularSystemError,
+    implicit,
+)
 from noodl.solvers.continuation import shift_diagonal
 from noodl.topology import Network
 from noodl.withdrawals import NodeWithdrawal
@@ -386,6 +392,28 @@ def test_a_rung_whose_law_raises_another_error_passes_it_through(monkeypatch):
     monkeypatch.setattr(KirchhoffLayer, "_starting_point", broken)
     with pytest.raises(RuntimeError, match="^a law's own bug$"):
         layer.solve(PB, {}, SOURCES, phi0=FAR, differentiable=False)
+    assert failed
+
+
+def test_a_rung_whose_linear_guess_solve_does_not_converge_has_failed(monkeypatch):
+    """The linear solve of a rung's linear guess that does not converge raises
+    `LinearSolveError` (`SolveResult.raise_on_failure`), which fails the rung like a Newton
+    non-convergence: the ladder ends in its own `ConvergenceError`, naming both failures."""
+    failed = _fail_warm_newton(monkeypatch)
+    real_solve = kirchhoff.select_solve
+
+    def solve(op, b, *, where="", on_failure="raise", **kwargs):
+        result = real_solve(op, b, where=where, on_failure="return", **kwargs)
+        if where.endswith("linear_init"):
+            result.converged = torch.zeros_like(result.converged)
+        return result.raise_on_failure(where) if on_failure == "raise" else result
+
+    monkeypatch.setattr(kirchhoff, "select_solve", solve)
+    layer = _layer(fallback=("linear_guess",))
+    with pytest.raises(ConvergenceError, match="did not converge either") as info:
+        layer.solve(PB, {}, SOURCES, phi0=FAR, differentiable=False)
+    assert isinstance(info.value.__cause__, LinearSolveError)
+    assert "linear_init: batch indices" in str(info.value)
     assert failed
 
 

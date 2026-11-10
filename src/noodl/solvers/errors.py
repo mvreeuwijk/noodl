@@ -19,3 +19,9 @@ class GroundingError(RuntimeError):
     """A network solve is not grounded: interior nodes with no path to a boundary potential
     (floating nodes), or a negative slope on an edge. A `RuntimeError`, so callers that
     catch that keep working."""
+
+
+class LinearSolveError(RuntimeError):
+    """A linear solve did not converge on some instance (`SolveResult.raise_on_failure`): an
+    iterative solver ran out of iterations, or a direct one could not factorise. A
+    `RuntimeError`, so callers that catch that keep working."""
