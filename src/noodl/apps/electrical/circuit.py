@@ -7,14 +7,14 @@ two-port device (transformers, controlled sources) is two consecutive edges, por
 boundary node, held at 0 V.
 
 The builder groups the devices by kind, one constitutive law per kind carrying all of its
-devices with per-device parameters, in a single `KirchhoffLayer` named `"electrical"`
-solved by Modified Nodal Analysis. A capacitor with one pin on the ground is not an edge: it
-is a `LinearStorage` at its other pin (its current is `"electrical.storage_flow"`); a
-capacitor between two other nodes is an edge (`Capacitance`), as every capacitor of a phasor
-model is. Device parameters are scalars (a float or a 0-d tensor);
-gradients reach the laws' parameters (`build_model(..., learnable=True)`), and an ensemble
-of circuits is a batch of drivers (a `Signal` source, a switch control, a resistor
-temperature), not of device parameters.
+devices with per-device parameters, in a single `KirchhoffLayer` named `"electrical"`, whose
+sources and dynamic devices add their currents as unknowns. A capacitor with one pin on the
+ground is not an edge: it is a `LinearStorage` at its other pin (its current is
+`"electrical.storage_flow"`); a capacitor between two other nodes is an edge
+(`Capacitance`), as every capacitor of a phasor model is. Device parameters are scalars (a
+float or a 0-d tensor); gradients reach the laws' parameters (`build_model(...,
+learnable=True)`), and an ensemble of circuits is a batch of drivers (a `Signal` source, a
+switch control, a resistor temperature), not of device parameters.
 """
 
 from __future__ import annotations

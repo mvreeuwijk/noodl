@@ -1,5 +1,5 @@
-"""Test-only circuit laws shared by the Modified Nodal Analysis tests: ideal potential
-sources and the capacitance and inductance companion forms (all implicit laws)."""
+"""Test-only circuit laws shared by the tests of layers with flow unknowns: ideal potential
+sources, and the capacitance and inductance in the form of each mode (all relations)."""
 
 from noodl.elements import ImplicitLaw
 

@@ -141,8 +141,8 @@ def test_nonpositive_branch_susceptance_is_refused(change, row):
     br[row - 1] = dataclasses.replace(br[row - 1], **change)
     changed = dataclasses.replace(net, branches=tuple(br))
     with pytest.raises(ValueError, match=(
-            rf"row {row} of the branch table \(from bus 1 to bus 3\).*the DC power flow on the "
-            r"classic layer needs positive branch susceptance")):
+            rf"row {row} of the branch table \(from bus 1 to bus 3\).*the DC power flow's "
+            r"conductance layer needs positive branch susceptance")):
         dc_power_flow(changed)
     build_power_flow(changed)               # the AC power flow takes a negative reactance
 

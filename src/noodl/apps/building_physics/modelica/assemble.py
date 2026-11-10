@@ -83,7 +83,7 @@ Movers
 A `FlowControlled_dp` (`graph.FlowPath` of a mover) is the edge kind `"airpath:<name>"` with the
 implicit law `_MoverHead`, `(phi_a - phi_b) + dp = 0` (MBL: `port_b.p - port_a.p = dp`), `dp`
 its `constantHead` or the signal driving `dp_in` (a driver `"<name>.dp_in"`). The air layer
-then holds an implicit law and is solved by Modified Nodal Analysis; every MBL feature the law
+then holds a relation, and the mover's flow is an unknown of its solve; every MBL feature the law
 does not reproduce (`use_riseTime`, `addPowerToMedium`, a dynamic `energyDynamics`,
 `prescribeSystemPressure`, `inputType = Stages`) is refused by name. With volume mass storage
 the mover's flow stays algebraic (solved in every step); at t = StartTime it is the

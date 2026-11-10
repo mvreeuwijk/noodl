@@ -10,8 +10,8 @@ Node order: junctions in file order, then reservoirs, then tanks. Boundary = eve
 then every tank, in that order, which is the order `"water.phi_boundary"` is written in.
 Edge kinds partition by device type: `pipe`, `pump`, `valve` (a TCV, i.e. a settable minor
 loss), `fcv` (a `FixedFlow`), `pbv` (a `BreakerValve`) and `gpv` (a `GeneralPurposeValve`).
-The two last are implicit laws (their flow is an unknown), so a network holding either is
-solved by Modified Nodal Analysis; every other network stays on the nodal path.
+The two last are relations (their flow is an unknown of the solve); every other device gives
+its flow from the head difference.
 """
 
 from __future__ import annotations
@@ -456,11 +456,11 @@ def build_model(
     head and `head_scale` is 1.
 
     `pipe_form` is how the pipes enter the solve. `"flow"` writes them in their resistance
-    form, `dp = h(q)` (`FlowControlledPipe`), with every pipe's flow an unknown, solved by
-    Modified Nodal Analysis from EPANET's own first iterate (every pipe at 1 ft/s,
+    form, `dp = h(q)` (`FlowControlledPipe`), with every pipe's flow an unknown, solved
+    from EPANET's own first iterate (every pipe at 1 ft/s,
     `model.initial_flows`): one more unknown per pipe, and a pipe slope that goes to
     EPANET's `RQtol` floor at zero flow. `"potential"` gives each pipe's flow as a function
-    of its head loss, `q = g(dp)`, on the nodal path, whose slope grows without bound as a
+    of its head loss, `q = g(dp)`, with no flow unknowns, whose slope grows without bound as a
     pipe's flow goes to zero: on Net1's 24 h run the step where a control closes the pump
     and leaves pipe 10 dead-ended needs 136 Newton iterations there and 6 in the flow form
     (`benchmarks/water_eps.py`, which also runs 2.5 times faster). `None` (the default)

@@ -87,7 +87,7 @@ def test_residual_is_q_minus_flow_on_every_law():
         assert torch.equal(law.residual(dp, q, {}, LawContext(mode="dc")), q - law(dp, {}))
 
 
-def test_existing_form_attributes_are_not_the_law_form():
+def test_existing_form_attributes_do_not_make_a_relation():
     """Laws with their own `form` (volume or mass) stay potential-controlled."""
     power = RegularizedPowerLaw(1.0, 0.5, form="volume", rho_default=1.2)
     table = SplineFlowTable(torch.tensor([0.0, 1.0]), torch.tensor([0.0, 1.0]), form="mass")

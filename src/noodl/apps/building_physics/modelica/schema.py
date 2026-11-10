@@ -72,7 +72,7 @@ ONE_WAY = frozenset({
 })
 # A mover with a prescribed pressure rise (`Buildings/Fluid/Movers/FlowControlled_dp.mo`): the
 # one MBL mover whose airflow follows from its pressure alone, an IMPLICIT law (`graph`,
-# `assemble`: the flow is an unknown of the air layer, Modified Nodal Analysis).
+# `assemble`: the flow is an unknown of the air layer's solve).
 MOVERS = frozenset({"Buildings.Fluid.Movers.FlowControlled_dp"})
 TWO_WAY = frozenset({
     "Buildings.Airflow.Multizone.DoorOpen",

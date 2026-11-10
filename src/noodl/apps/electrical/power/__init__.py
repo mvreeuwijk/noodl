@@ -8,7 +8,7 @@ degrees), and `read_matpower` reads one from a MATPOWER version 2 case file.
 `build_power_flow` turns a network into the AC power-flow model (one phasor layer
 `"power"`), `solve_power_flow` solves it from its flat start and `power_flow_solution`
 reports bus voltages, generation and branch powers. `dc_power_flow` builds the DC power
-flow, plain nodal analysis of the bus voltage angles on a classic layer `"power_dc"`, and
+flow, plain nodal analysis of the bus voltage angles on a conductance layer `"power_dc"`, and
 `dc_power_flow_solution` reports its angles, generation and branch flows.
 `matpower_case` fetches MATPOWER's standard cases on first use into a local cache.
 """

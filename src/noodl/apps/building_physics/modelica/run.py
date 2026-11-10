@@ -73,7 +73,7 @@ def _feedback(model: Model) -> FeedbackHeat | None:
 
 # Movers with volume mass storage. A `FlowControlled_dp` (`assemble._MoverHead`, SteadyState
 # energy dynamics) has no inertia and no volume of its own: its mass flow is an ALGEBRAIC
-# variable, not a state. Within a step the airflow solve fixes it (MNA unknown); the value
+# variable, not a state. Within a step the airflow solve fixes it (a flow unknown); the value
 # carried in `"air.q"` is only the last solve's, read where noodl evaluates the flows WITHOUT
 # solving: the t = StartTime row (`_initial_air`) and state 0 taken again with other flow
 # directions (`_Midpoint._start_with_directions`, which passes state 0's own solved `q`).

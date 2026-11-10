@@ -81,7 +81,7 @@ circuit's potentials and currents and judges their fixed-point residual too (a r
 state would carry a memory of earlier passes into the map the mixing sees, and the iteration
 would stop with the device temperatures up to 1e-6 K away from the heat layer's). The
 closure carries the sources as state, so a trapezoidal step integrates the heat as
-`dt/2 (P_start + P_end)`, as the circuit's companion forms integrate their currents; the
+`dt/2 (P_start + P_end)`, as the circuit's capacitors and inductors integrate their currents; the
 runner steps the heat layer with the circuit's rule (`run.simulate_circuit`). The thermal
 start state: each heat capacitor's node at its `T0`, every other interior node at the mean of
 the fixed and the heat capacitors' temperatures; the sources start at zero and the

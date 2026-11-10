@@ -1,5 +1,5 @@
-"""The DC power flow: a `PowerNetwork` as plain nodal analysis on a classic real
-`KirchhoffLayer` in per unit.
+"""The DC power flow: a `PowerNetwork` as plain nodal analysis on a real
+`KirchhoffLayer` of conductances (no flow unknowns) in per unit.
 
 The DC approximation (all voltage magnitudes 1 p.u., no branch resistance or charging,
 small angle differences) makes the real power on a branch linear in the voltage angles.
@@ -11,7 +11,7 @@ MATPOWER's `makeBdc` writes it as `Pf = Bf θ + Pfinj` with, per in-service bran
     Pf   = b (θ_f - θ_t) - b σ,
 
 and `dcpf` solves the bus balance `Bbus θ = Pbus - Pbusinj - Gs / base_mva` for every bus
-but the slack, whose angle is fixed. Here that is one classic layer `"power_dc"`:
+but the slack, whose angle is fixed. Here that is one conductance layer `"power_dc"`:
 
 - Potential: the voltage angle θ (rad) at the nodes `str(bus.id)`, in bus-table order; no
   ground node. The slack bus is the layer's one boundary node, at `radians(Va_slack)`.
@@ -85,7 +85,7 @@ def dc_power_flow(net: PowerNetwork) -> tuple[Model, State, Drivers]:
     slack bus with an in-service generator, positive voltage setpoints at the regulated
     buses, every in-service branch with a positive `x * tau` (zero reactance and negative
     susceptance, such as a series-compensated line, are refused: a conductance of the
-    classic layer must be positive), every bus connected to the slack bus through
+    layer must be positive), every bus connected to the slack bus through
     in-service branches (otherwise a `ValueError` naming the offending branch, bus or
     buses). A network without an in-service branch is
     refused too. `model.power_index` is the `PowerFlowIndex`,

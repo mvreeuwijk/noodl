@@ -25,15 +25,16 @@ Which method to write:
   drivers: an amount that depends on a driver that changes over the step (a zone's air mass
   depends on its temperature), or a difference that must be formed without round-off.
 - `rate` and `rate_slope`, for an application whose withdrawal has rules beyond storage.
-  Both the non-differentiable and the differentiable solve use `rate_slope`, classic and
-  Modified Nodal Analysis alike, and the differentiable solve's adjoint is built from it, so
+  Both the non-differentiable and the differentiable solve use `rate_slope`, with or without
+  flow unknowns, and the differentiable solve's adjoint is built from it, so
   an override that is not the true derivative (a Newton aid) declares
   `exact_slope = False`, and the differentiable solve then differentiates `rate` instead.
 
 `initial` gives the potential a node is held at in the consistent initial point
-(`mode="initial"`) of a layer solved by Modified Nodal Analysis: that node's flow balance is
+(`mode="initial"`) of a Kirchhoff layer: that node's flow balance is
 replaced by `phi = initial`, and the flow into its storage is whatever balances the node
-(`KirchhoffLayer.storage_flows`). A classic layer refuses such a storage in that mode.
+(`KirchhoffLayer.storage_flows`). A layer without flow unknowns solves that one call with
+the sparse operator and the held rows.
 """
 
 from __future__ import annotations
@@ -129,8 +130,8 @@ class NodeStorage(torch.nn.Module):
                    ctx: LawContext, drivers: Mapping | None = None) -> Tensor:
         """d rate / d phi at each node: `step_rate_factor(ctx) * capacity(...)`.
 
-        Both the non-differentiable and the differentiable solve use it, on the classic
-        nodal path and on a layer solved by Modified Nodal Analysis, so it also builds the
+        Both the non-differentiable and the differentiable solve use it, with or without
+        flow unknowns, so it also builds the
         adjoint; an override that is not the true derivative of `rate` (a Newton aid) must
         declare `exact_slope = False`, and the differentiable solve then differentiates
         `rate` by autograd for this storage instead (the non-differentiable one keeps this

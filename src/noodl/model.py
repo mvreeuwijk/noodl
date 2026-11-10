@@ -48,7 +48,7 @@ always raise on failure.
 A transport layer stepped by the trapezoidal scheme whose sources a closure carries as state
 (`state_keys` holding `"<layer>.sources"`) integrates them by the trapezoidal rule too: the
 step-start state's `"<layer>.sources"` and this step's, `dt/2 (s_start + s_end)`
-(`TransportLayer.step`'s `sources_prev`), as a circuit's companion form integrates a
+(`TransportLayer.step`'s `sources_prev`), as a circuit's trapezoidal capacitor integrates a
 prescribed current. Without it the step's sources are held over the step.
 
 Differentiability: ping-pong is one pass of differentiable operations; iterate carries no
@@ -556,8 +556,8 @@ class Model:
         pays that cost on every one of its substeps for no benefit.
 
         `warm_start` (default True) starts each Kirchhoff layer's nonlinear solve from the
-        state's `"<layer>.phi"` (and, on a layer solved by Modified Nodal Analysis, its
-        implicit-law flows from `"<layer>.q"`). `False` starts it from the layer's linear
+        state's `"<layer>.phi"` (and, on a layer with flow unknowns, those flows from
+        `"<layer>.q"`). `False` starts it from the layer's linear
         initial guess instead, while closures and withdrawals still read `"<layer>.phi"`
         as an input (a retry after a warm start failed to converge, without losing that
         input).
@@ -602,8 +602,8 @@ class Model:
         `rate == 0` rather than advanced).
 
         `t` (optional) is the time of that state: closures receive it in their
-        `StepContext`, and the constitutive laws of a layer solved by Modified Nodal
-        Analysis are evaluated at it (a time-dependent source). A layer with dynamic laws is
+        `StepContext`, and the constitutive laws of a layer that read the
+        time are evaluated at it (a time-dependent source). A layer with dynamic laws is
         solved at its operating point: a capacitance open, an inductance shorted. With
         `mode="initial"` (passed to the Kirchhoff layers' solves) the consistent initial
         point instead: those layers hold their dynamic laws at their start values, and every

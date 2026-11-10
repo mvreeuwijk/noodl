@@ -1,4 +1,5 @@
-"""Where the time of a Modified Nodal Analysis (MNA) solve goes.
+"""Where the time of a solve with flow unknowns goes (the file name is historical: it
+keeps the name its reports and plans cite).
 
 Three cases from the electrical tests:
 
@@ -190,7 +191,7 @@ def machine_block() -> dict:
 
 
 def report(results: list[dict], machine: dict) -> str:
-    lines = ["# MNA stepping", ""]
+    lines = ["# Stepping with flow unknowns", ""]
     lines += [f"- {k}: {v}" for k, v in machine.items()]
     lines += ["", "| case | steps | ms/step (median) | min-max | jacobian | lu | residual | "
               "jacobians/step | LUs/step | residuals/step |",

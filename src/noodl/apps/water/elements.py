@@ -728,7 +728,7 @@ class FlowControlledPipe(ImplicitLaw):
 
     The potential form inverts ``h`` (``q = g(dp)``), whose slope grows without bound as the
     flow goes to zero; the resistance form's slope goes to zero there instead, which the
-    Modified Nodal Analysis system carries as a small diagonal entry. A Hazen-Williams pipe
+    solve with flow unknowns carries as a small diagonal entry. A Hazen-Williams pipe
     keeps EPANET's ``RQtol`` floor on that slope (``gradient_floor``, m per m^3/s), so a
     loop of pipes at zero flow still has a nonsingular Jacobian.
     """

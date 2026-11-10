@@ -236,8 +236,8 @@ class Resistance(ConstitutiveLaw):
 
 
 class Capacitance(ImplicitLaw):
-    """A capacitor `q = C d(dp)/dt` (`C` in F, initial voltage `v0` in V), as companion
-    forms: dc `q = 0`; initial `dp = v0`; phasor `q = j omega C dp`; transient backward Euler
+    """A capacitor `q = C d(dp)/dt` (`C` in F, initial voltage `v0` in V), in the form of each
+    mode: dc `q = 0`; initial `dp = v0`; phasor `q = j omega C dp`; transient backward Euler
     `q = C (dp - dp_prev) / dt` or trapezoidal `q + q_prev = 2 C / dt (dp - dp_prev)`. MSL
     `Basic.Capacitor`.
     """
@@ -273,8 +273,8 @@ class Capacitance(ImplicitLaw):
 
 
 class Inductance(ImplicitLaw):
-    """An inductor `dp = L dq/dt` (`L` in H, initial current `i0` in A), as companion forms:
-    dc `dp = 0`; initial `q = i0`; phasor `dp = j omega L q`; transient backward Euler
+    """An inductor `dp = L dq/dt` (`L` in H, initial current `i0` in A), in the form of each
+    mode: dc `dp = 0`; initial `q = i0`; phasor `dp = j omega L q`; transient backward Euler
     `dp = L (q - q_prev) / dt` or trapezoidal `dp + dp_prev = 2 L / dt (q - q_prev)`. MSL
     `Basic.Inductor`.
     """
@@ -494,7 +494,7 @@ class TransformerRatio(ImplicitLaw):
 class MutualInductance(ImplicitLaw):
     """Two coupled windings: `dp1 = L1 dq1/dt + M dq2/dt`, `dp2 = M dq1/dt + L2 dq2/dt`
     (`L1`, `L2`, `M` in H; initial currents `i0 = (i1, i2)` in A, per device or shared).
-    Companion forms as `Inductance` with the 2x2 inductance matrix. Edges
+    The forms of each mode as `Inductance`'s, with the 2x2 inductance matrix. Edges
     `[primary, secondary]` per device. MSL `Basic.Transformer`.
     """
 

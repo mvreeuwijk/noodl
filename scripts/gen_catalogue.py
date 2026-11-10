@@ -54,7 +54,7 @@ PAGES = [
     ("electrical", "Electrical circuits", "../applications/electrical.md",
      ["noodl.apps.electrical", "noodl.apps.electrical.modelica",
       "noodl.apps.electrical.power"],
-     "Electrical circuits by Modified Nodal Analysis: resistors, capacitors, inductors, "
+     "Electrical circuits: resistors, capacitors, inductors, "
      "sources and their waveforms, diodes, switches, transformers and controlled sources "
      "(Modelica Standard Library device laws); impedances, constant-power loads and power "
      "converters (Modelica Buildings Library laws); Joule heating into a thermal network; "

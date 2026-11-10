@@ -384,7 +384,7 @@ class ConstitutiveLaw(torch.nn.Module):
 class ImplicitLaw(ConstitutiveLaw):
     """A law that cannot give the flow from the potential difference (an ideal source, a
     flow-controlled pipe, an inductance) gives a relation `residual(dp, q, drivers, ctx) = 0`
-    instead, and the layer adds its flow as an unknown (Modified Nodal Analysis).
+    instead, and the layer adds its flow as an unknown.
 
     Subclasses implement `residual`, which returns one value per edge, with the shape of
     `dp`. `flow` and `dflow` refuse: the flow is read from the layer's solved `q`.
