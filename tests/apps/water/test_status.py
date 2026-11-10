@@ -151,6 +151,32 @@ def test_closing_a_link_that_cuts_off_a_junction_is_refused():
         water_steady(model, state, {**drivers, "water.status": closed})
 
 
+def test_a_demand_only_check_valves_pointing_away_reach_is_refused_before_the_solve():
+    """R1 - P1 - J1 (demand) - P2 - J2 (demand): with P1 reverse-only (water may leave J1
+    for R1, never come) no water reaches J1 or J2, though both are joined to R1 by open
+    links; refused by name, in a batch too. A junction with an inflow feeds them
+    instead: J1's inflow covers both demands and leaves the rest through P1."""
+    net = WaterNetwork(
+        junctions=(Junction("J1", 0.0, 0.002), Junction("J2", 0.0, 0.003)),
+        reservoirs=(Reservoir("R1", 50.0),),
+        pipes=(_pipe("P1", "R1", "J1"), _pipe("P2", "J1", "J2")),
+    )
+    model, state, drivers = build_model(net)
+    away = torch.tensor([-1.0, 0.0], dtype=F64)
+    with pytest.raises(ValueError, match=r"water_steady: junction\(s\) \['J1', 'J2'\] have "
+                                         r"a demand that no reservoir, tank or inflow"):
+        water_steady(model, state, {**drivers, "water.one_way": away})
+    both = torch.stack([torch.zeros(2, dtype=F64), away])
+    with pytest.raises(ValueError, match=r"\['J1', 'J2'\] have a demand"):
+        water_steady(model, state, {**drivers, "water.one_way": both})
+    toward = torch.tensor([1.0, 0.0], dtype=F64)
+    assert _flows(model, water_steady(model, state, {**drivers, "water.one_way": toward}))[
+        "P1"] == pytest.approx(0.005)
+    inflow = initial_drivers(model, demand={"J1": -0.01, "J2": 0.003})
+    out = water_steady(model, state, {**inflow, "water.one_way": away})
+    assert _flows(model, out)["P1"] == pytest.approx(-0.007)
+
+
 # ------------------------------------------------------------------ the drivers
 def test_the_link_drivers_are_per_link():
     """Pipes, then pumps, then valves by kind: statuses from the CLOSED column and

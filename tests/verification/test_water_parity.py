@@ -2044,6 +2044,109 @@ def test_ky4_at_time_zero(tmp_path):
         name: int(status[name]) for name in model.link_names}
 
 
+_ANYTOWN = Path(wntr.__file__).parent / "tests" / "networks_for_testing" / "Anytown.inp"
+
+#: Anytown's six "New" pipes (110, 113, 114, 115, 116, 125): 0.0001 in across, the
+#: placeholders of the Anytown design problem's candidate pipes.
+_ANYTOWN_PLACEHOLDER = "\t0.0001      \t130"
+
+
+def _anytown(tmp_path, *, run=False, pumps="running", tanks="mid", placeholders=None):
+    """wntr's Anytown edited as text, written to `tmp_path`; `(path, EPANET results at t = 0
+    or None)`. As shipped, speed patterns 2, 3 and 4 of the three pumps are all zero and
+    both tanks start at their minimum, so every junction is cut off for the whole day
+    (EPANET reports pressures of order -1e25 m). The edits:
+
+    - `pumps="running"`: the speed patterns removed (relative speed 1.0 throughout);
+      `"closed"`: removed too, and the pumps CLOSED in `[STATUS]`, which is what a speed of
+      0 is at t = 0 (`hydcoeffs.c`, `pumpcoeff`);
+    - `tanks="mid"`: tanks 41 and 42 start at 22.5 ft, halfway between their 10 and 35 ft
+      limits; `"shipped"`: at their minimum;
+    - `placeholders`: the "New" pipes' diameter (in), which as shipped (0.0001 in) feed
+      junctions 5, 6 and 7 alone (`test_anytown_placeholder_pipes_give_no_head`).
+    """
+    text = _ANYTOWN.read_text()
+    for k in "234":
+        old = f"HEAD 2\tPATTERN {k}\t;"
+        assert old in text
+        text = text.replace(old, "HEAD 2\t;")
+    if pumps == "closed":
+        header = "[STATUS]\n;ID              \tStatus/Setting\n"
+        assert header in text
+        text = text.replace(header, header + " 78 Closed\n 79 Closed\n 80 Closed\n")
+    if tanks == "mid":
+        for tank in ("41", "42"):
+            old = f" {tank}              \t215         \t10          \t10   "
+            assert old in text
+            text = text.replace(old, f" {tank}              \t215         \t22.5        \t10   ")
+    if placeholders is not None:
+        assert text.count(_ANYTOWN_PLACEHOLDER) == 6
+        text = text.replace(_ANYTOWN_PLACEHOLDER, f"\t{placeholders:<12g}\t130")
+    path = tmp_path / "anytown-edited.inp"
+    path.write_text(text)
+    if not run:
+        return path, None
+    reference = wntr.network.WaterNetworkModel(str(path))
+    reference.options.time.duration = 0
+    return path, wntr.sim.EpanetSimulator(reference).run_sim(
+        file_prefix=str(tmp_path / "anytown"))
+
+
+def _at_time_zero(net, drivers):
+    return {**drivers, "water.sources": drivers["water.sources"] * _pattern_factor(net, 0.0)}
+
+
+def test_anytown_as_shipped_is_refused_by_name(tmp_path):
+    """The shipped file is refused when built, for its speed patterns. At t = 0 those
+    speeds are 0, which closes the pumps, and the tanks are at their minimum, so the pipes
+    to them only fill them: no water reaches any junction, and `water_steady` refuses by
+    name before it solves. (Before the directed test of `_one_way_cut_off` this was a
+    "singular" RuntimeError: the undirected test counted the empty tanks as supplies.)"""
+    with pytest.raises(ValueError, match=r"pump '78' has the speed pattern '2'"):
+        build_model(read_epanet_inp(_ANYTOWN))
+    path, _ = _anytown(tmp_path, pumps="closed", tanks="shipped")
+    net = read_epanet_inp(path)
+    model, state, drivers = build_model(net)
+    demand = [j.name for j in net.junctions if j.demand]
+    with pytest.raises(ValueError, match=r"junction\(s\) (\[.*\]) have a demand that no "
+                                         r"reservoir, tank or inflow reaches") as info:
+        water_steady(model, state, _at_time_zero(net, drivers))
+    assert info.match(r"\[" + ", ".join(repr(name) for name in demand) + r"\]")
+
+
+def test_anytown_placeholder_pipes_give_no_head(tmp_path):
+    """With the pumps running and the tanks at mid-level (Ruling 21's edit) Anytown is
+    still not physical: junctions 5, 6 and 7 (600 gpm each) are fed only through the
+    0.0001 in placeholder pipes, so EPANET reports heads of -9.9e24 m there (MEASURED),
+    whereas the pumps' flows are ordinary. noodl's Newton reaches EPANET's flows (pipe
+    110: 0.0378541 m3/s) but cannot bring those pipes' rows below its tolerance: their
+    head loss and head difference are each 9.9e24 m, where one rounding step is 2^30 m, and
+    the residual stalls at 2^31 m for all 200 iterations; the Jacobian there (slopes of
+    1e27 against 1e1 elsewhere) is numerically singular, which is the error raised."""
+    path, results = _anytown(tmp_path, run=True)
+    heads = results.node["head"].loc[0]
+    assert all(float(heads[n]) < -1e24 for n in ("5", "6", "7"))
+    net = read_epanet_inp(path)
+    model, state, drivers = build_model(net)
+    with pytest.raises(RuntimeError, match="singular"):
+        water_steady(model, state, _at_time_zero(net, drivers))
+
+
+def test_anytown_at_time_zero(tmp_path):
+    """Anytown with the pumps running, the tanks at mid-level and the six placeholder pipes
+    12 in across (`_anytown`), at t = 0 (demand pattern 1 at t = 0 applied here): three
+    identical parallel pumps on the five-point curve, against EPANET on the same file.
+    Heads 1e-6 relative, flows 1e-6 m3/s, states equal. MEASURED: heads 2.6e-7, flows
+    9.9e-8 m3/s; each pump 0.0952276 m3/s, as EPANET."""
+    path, results = _anytown(tmp_path, run=True, placeholders=12)
+    net = read_epanet_inp(path)
+    model, state, drivers = build_model(net)
+    drivers = _at_time_zero(net, drivers)
+    final = water_steady(model, state, drivers)
+    worst_h, worst_q = _compare_with_epanet(model, final, drivers, results)
+    assert worst_h < 1e-6 and worst_q < 1e-6
+
+
 #: A single point, 4 L/s at 10 m.
 _ONE_POINT_4_10 = " C1\t4\t10\n"
 

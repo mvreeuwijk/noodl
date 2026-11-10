@@ -390,7 +390,9 @@ carrying flow the wrong way. Closed links and check valves need the pipes' resis
 `link_states(model, state, drivers)` gives every link's state in a solution: `CLOSED`, `OPEN`
 or `ACTIVE`, the codes `wntr` reports EPANET's in (an `ACTIVE` PRV or PSV: the row its
 condition selects there). `water_steady` refuses, before it solves, a
-junction with a demand that closed links cut off from every reservoir and tank. A group of
+junction with a demand that closed links cut off from every reservoir and tank, and one that
+no water reaches through the open links in the directions check valves and full or empty tanks
+leave them (a pipe into an empty tank only fills it). A group of
 junctions without demand that is cut off at the solution, by closed links or by check valves
 holding no flow, has no head of its own in the exact equations: any head that keeps those
 valves shut solves them. EPANET gives each closed link the conductance $1/C_\text{BIG}$ and
@@ -563,6 +565,8 @@ on-disk reals are **float32**, so roughly 1e-7 relative is EPANET's own precisio
 | A pump shut beyond its shut-off head; a zero-demand group behind a pump (shut and running at zero flow); a pump and a check valve shutting together around a group; a segmented curve starting above zero flow, shut at its first point's head | 1e-6 / 1e-6 m³/s / equal | 1.1e-7, 1.8e-8 m³/s (EPANET's leak); all states equal |
 | Pump speed 0.8 through `"water.setting"` against `SPEED 0.8` in the file, every curve kind | 1e-6 / 1e-6 m³/s / equal | 2.2e-7 to 3.8e-7, 1.8e-9 |
 | ky10 at time zero (13 constant-power pumps, PRVs, tanks), EPANET's demands | 1e-6 / 1e-6 m³/s / equal | 6.3e-7, 9.1e-8 |
+| ky4 at time zero (two constant-power pumps, one closed, an empty tank, 959 junctions), demand pattern at t = 0, EPANET at `ACCURACY 1e-8` | 1e-6 / 1e-6 m³/s / equal | 8.2e-8, 2.0e-7 (two parallel-pipe pairs: 1.9e-6, see Limitations) |
+| Anytown at time zero, pumps running, tanks at mid-level, placeholder pipes 12 in (three parallel pumps on the five-point curve) | 1e-6 / 1e-6 m³/s / equal | 2.6e-7, 9.9e-8 |
 | Head loss sums to zero around every cycle-basis loop | 1e-12 | **exactly 0.0** |
 | Autodiff vs central differences | 1e-6 × scale | 3.212e-6 / 2.505e-10 / 9.2e-10 / 2.753e-9 |
 | d(junction heads)/d(pump speed), every curve kind, vs central differences | 1e-6 relative | 3.1e-10 or better |
@@ -692,8 +696,18 @@ independent loop is a property of the cycle-space formulation, and it holds exac
   steady solve, so gradients with respect to tank area come from a time-stepped run
   (`water_event_step`), not from the steady state.
 - **An empty tank that was a part's only supply** leaves that part cut off: the pipe to it
-  then refuses to drain it, and the solve is refused by name ("check valve(s) ... carry flow
-  against their direction"), where EPANET reports negative pressures.
+  then refuses to drain it, and the solve is refused by name before it starts ("junction(s)
+  ... have a demand that no reservoir, tank or inflow reaches"), where EPANET reports negative
+  pressures (wntr's Anytown as shipped: pumps at speed 0, tanks at their minimum).
+- **Links of extreme resistance that must carry a demand are not solved.** Anytown's 0.0001 in
+  placeholder pipes alone feed three junctions; EPANET reports heads of -9.9e24 m there, and
+  noodl's Newton cannot bring a row whose two terms are 9.9e24 m below its tolerance (one
+  rounding step there is 2^30 m): it raises the "singular" error of a numerically singular
+  Jacobian. The Anytown comparison gives those pipes 12 in.
+- **Near-zero flows in parallel pipes are EPANET's to within its convergence.** On ky4, two
+  pairs of pipes joining the same junctions carry 1e-6 to 2e-5 m³/s on head-loss slopes of
+  1e-4 to 1e-2 m per m³/s; EPANET's split leaves their Hazen-Williams losses 1.0e-7 m apart,
+  and its flows differ from noodl's (whose losses cancel to 3.5e-10 m) by up to 1.9e-6 m³/s.
 - **Tank steps are whole-network.** `water_event_step` shortens the step to the earliest
   time any tank fills or empties, over every instance of a batch.
 - **Tank level events are not batch-safe.** `TankLevels.event_step` indexes tanks along the

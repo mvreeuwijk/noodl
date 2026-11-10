@@ -1714,7 +1714,9 @@ def _cut_off_plan(model: Model, state: State, drivers: Drivers, caller: str):
     """`(drivers, limit)` for one solve by `caller`, after refusing what cannot be solved.
 
     Refused by name: a junction with a demand that closed links cut off from every
-    reservoir and tank (EPANET reports it disconnected), and a status or direction on a
+    reservoir and tank (EPANET reports it disconnected), one that no water reaches through
+    the open links in the directions check valves and full or empty tanks leave them
+    (`_one_way_cut_off`), and a status or direction on a
     pipe in its potential form, which reads neither. The demands are the drivers'
     `"water.sources"`, or, under PDA, the build's demands: a pressure-driven demand is not a
     driver, so a PDA demand changed after the build is not seen here.
@@ -1778,11 +1780,72 @@ def _cut_off_plan(model: Model, state: State, drivers: Drivers, caller: str):
             for k, plan in enumerate(plans):
                 ties[k, list(plan.ties)] = 1.0
             drivers = {**drivers, PIN_KEY: ties[inverse].reshape(batch + (n_l,))}
+    if one_way_any:
+        if any(isinstance(w, PressureDrivenDemand) for w in layer.withdrawals):
+            withdrawal = torch.tensor([float(j.demand) for j in net.junctions], dtype=F64)
+        else:
+            withdrawal = -drivers["water.sources"][..., :n_j].detach()
+        unfed = _one_way_cut_off(model, closed, one_way.detach(), withdrawal)
+        if unfed:
+            raise ValueError(
+                f"{caller}: junction(s) {unfed} have a demand that no reservoir, tank or "
+                f"inflow reaches through the open links in the direction they let water "
+                f"flow: check valves (CV pipes, or the pipes of a full or empty tank) cut "
+                f"them off, so no head can deliver it")
 
     def limit(solution: State) -> tuple[Tensor, Tensor]:
         return _limit(model, solution, closed, demand, one_way, caller)
 
     return drivers, limit
+
+
+def _one_way_cut_off(model: Model, closed: Tensor, one_way: Tensor,
+                     withdrawal: Tensor) -> list[str]:
+    """The junctions with a demand (``withdrawal > 0``, m3/s) that no water can reach, over
+    every batch instance (in node order; empty when none): those no path of links that are not
+    CLOSED, each taken in a direction its ``one_way`` allows, leads to from a reservoir, a
+    tank or a junction with an inflow (``withdrawal < 0``). Every flow that delivers a
+    demand runs along such a path, so these demands have no solution; the undirected test
+    of `_cut_off_groups` misses them when the only links to a reservoir or tank are check
+    valves pointing away (a pipe into an empty tank fills it only). Exact, with pumps and
+    valves taken both ways (a superset of their paths), and remembered per set of closed
+    links, directions and demand signs."""
+    closed, one_way, withdrawal = torch.broadcast_tensors(
+        closed[..., None, :], one_way[..., None, :], withdrawal[..., :, None])
+    closed, one_way, withdrawal = closed[..., 0, :], one_way[..., 0, :], withdrawal[..., 0]
+    n_l = closed.shape[-1]
+    pattern = torch.cat([closed.to(F64), one_way.to(F64), torch.sign(withdrawal)],
+                        dim=-1).reshape(-1, 2 * n_l + withdrawal.shape[-1])
+    cache = model.__dict__.setdefault("_one_way_cut_off", {})
+    unfed: set[str] = set()
+    for row in torch.unique(pattern, dim=0).tolist():
+        key = tuple(row)
+        if key not in cache:
+            cache[key] = _one_way_unfed(model, row[:n_l], row[n_l:2 * n_l], row[2 * n_l:])
+        unfed.update(cache[key])
+    return [name for name in model.node_names if name in unfed]
+
+
+def _one_way_unfed(model: Model, closed: list, one_way: list, sign: list) -> tuple:
+    """`_one_way_cut_off` for one set of closed links, directions and demand signs."""
+    ends, fixed = _topology(model)
+    ahead: dict[int, list[int]] = {}
+    for (u, v), shut, way in zip(ends, closed, one_way, strict=True):
+        if shut:
+            continue
+        if way >= 0:
+            ahead.setdefault(u, []).append(v)
+        if way <= 0:
+            ahead.setdefault(v, []).append(u)
+    queue = deque(list(fixed) + [i for i, s in enumerate(sign) if s < 0])
+    reached = set(queue)
+    while queue:
+        for other in ahead.get(queue.popleft(), ()):
+            if other not in reached:
+                reached.add(other)
+                queue.append(other)
+    return tuple(model.node_names[i] for i, s in enumerate(sign)
+                 if s > 0 and i not in reached)
 
 
 def _dead_ends(model: Model, status: Tensor, demand: Tensor) -> Tensor | None:
