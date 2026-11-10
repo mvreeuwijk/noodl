@@ -246,10 +246,22 @@ def test_a_solve_nothing_differentiable_reaches_is_the_primal_solve(network):
         out[differentiable] = layer.solve(phi_b, drivers, sources, diagnostics=diag,
                                           differentiable=differentiable, **step,
                                           **TIGHT), diag
-    (phi_d, q_d), diag_d = out[True]
+    # `on_failure="return_primal"`: a differentiable solve nothing reaches is not
+    # differentiated; on the fast path it runs the primal Newton with the closure check at
+    # every residual, or, under no_grad with a grad-requiring driver, the threaded forward
+    # Newton (which detaches it). Both are the primal solve bit for bit too.
+    unread = {"unread": _t([1.0]).requires_grad_(True)}
+    for name, extra, mode in (("checked", {}, torch.enable_grad),
+                              ("threaded", unread, torch.no_grad)):
+        diag = {}
+        with mode():
+            out[name] = layer.solve(phi_b, {**drivers, **extra}, sources, diagnostics=diag,
+                                    on_failure="return_primal", **step, **TIGHT), diag
     (phi_p, q_p), diag_p = out[False]
-    assert torch.equal(phi_d, phi_p) and torch.equal(q_d, q_p)
-    assert diag_d["newton_iterations"] == diag_p["newton_iterations"]
+    for key in (True, "checked", "threaded"):
+        (phi_d, q_d), diag_d = out[key]
+        assert torch.equal(phi_d, phi_p) and torch.equal(q_d, q_p), key
+        assert diag_d["newton_iterations"] == diag_p["newton_iterations"], key
 
 
 # ---------------------------------------------------------------------------- MNA twin

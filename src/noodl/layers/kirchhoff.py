@@ -36,7 +36,7 @@ from noodl.layers._flow_unknowns import (
     to_complex,
     to_real,
 )
-from noodl.layers._functional import FunctionalLaws, step_start
+from noodl.layers._functional import FunctionalLaws, layer_slopes, step_start
 from noodl.layers._solve_policy import resolve
 from noodl.layers._topology import TopologyGuard
 from noodl.operators.graph import GraphLaplacianOperator
@@ -142,6 +142,10 @@ class _StorageStep:
 
     phi_prev: torch.Tensor
     previous: torch.Tensor | None
+    #: storage `j`'s `(phi_start, previous)` columns by `j`: constants of the step, taken
+    #: once per solve rather than at every residual (`KirchhoffLayer._storage_args`)
+    start_args: dict = dataclasses.field(default_factory=dict, init=False, compare=False,
+                                         repr=False)
 
 
 @dataclass(frozen=True)
@@ -181,12 +185,13 @@ def _shallow(obj):
     if isinstance(obj, dict):
         if len(obj) > _SCAN_MAX_ITEMS:
             return len(obj)
-        return tuple((k, id(v)) for k, v in obj.items())
+        return tuple(obj), tuple(map(id, obj.values()))
     if isinstance(obj, (list, tuple, set, frozenset)):
         if len(obj) > _SCAN_MAX_ITEMS:
             return len(obj)
         return tuple(map(id, obj))
-    return tuple((k, id(v)) for k, v in vars(obj).items())
+    held = vars(obj)
+    return tuple(held), tuple(map(id, held.values()))
 
 
 def _held_tensors(obj, *, registered_threaded: bool = True, visited: list | None = None):
@@ -874,11 +879,17 @@ class KirchhoffLayer(TopologyGuard):
 
     def _storage_args(self, j: int, st: NodeStorage, phi: torch.Tensor, step: _StorageStep):
         """`(phi_nodes, phi_start, previous)` of storage `j` at the full-node `phi`."""
-        previous = step.previous
-        if previous is not None:
-            s, e = self._storage_slices[j]
-            previous = previous[..., s:e]
-        return phi[..., st.nodes], step.phi_prev[..., st.nodes], previous
+        start = step.start_args.get(j)
+        if start is None:
+            previous = step.previous
+            if previous is not None:
+                s, e = self._storage_slices[j]
+                previous = previous[..., s:e]
+            start = (step.phi_prev[..., st.nodes], previous)
+            if not any(isinstance(v, torch.Tensor) and v.requires_grad for v in start):
+                # kept only without a graph: no two residuals share one
+                step.start_args[j] = start
+        return (phi[..., st.nodes], *start)
 
     def _owner_call(self, i: int, args: tuple, kwargs: dict | None = None):
         """Owner `i` (a law, then past the laws a withdrawal, then a storage) called with its
@@ -1959,8 +1970,12 @@ class KirchhoffLayer(TopologyGuard):
         grad under the current grad mode: a driver, `sources`, `phi_boundary`, a law's, node
         source's or storage's parameter, or one of `extra` (the step-start tensors of a step
         of a layer with storage)."""
-        if not torch.is_grad_enabled():
-            return False
+        return torch.is_grad_enabled() and self._threads_grad(drivers, sources, phi_boundary,
+                                                              extra)
+
+    def _threads_grad(self, drivers: Mapping, sources, phi_boundary, extra=()) -> bool:
+        """`_reaches_grad` whatever the grad mode: whether any of those tensors requires
+        grad."""
         values = bulk_values(drivers, list(drivers.keys()))
         values += [sources, phi_boundary, *extra]
         for owner in (*self._laws, *self._withdrawals, *self._storage):
@@ -2275,11 +2290,21 @@ class KirchhoffLayer(TopologyGuard):
         # A tensor held where the solve does not thread it is refused before solving, by
         # name; one reached only through a closure, at every residual the forward Newton
         # evaluates, the starting guess first and the root last (`_newton_differentiable`).
-        # With flow unknowns a differentiable solve that nothing reaches is the primal one.
+        # A differentiable solve that nothing reaches is the primal one: with flow unknowns
+        # as it is; on the fast path with that closure check at every residual (`checked`)
+        # where nothing it threads requires grad (under `no_grad` too: the threaded residual
+        # detaches what does), the threaded slopes are the primal ones (`layer_slopes`) and
+        # no law is `dp_independent` (a declaration the threaded operator cross-checks). Its
+        # result is the threaded forward Newton's, bit for bit, without the threading's cost.
         fn = None
+        checked = False
         if policy.differentiable:
             self._check_no_unreachable_differentiable_tensors()
-            if u is None or not policy.forward_only:
+            checked = (policy.forward_only and u is None and layer_slopes(self)
+                       and not any(el.dp_independent for el in self._laws)
+                       and (torch.is_grad_enabled() or not self._threads_grad(
+                           drivers, sources, phi_boundary, step_start(step, history))))
+            if not (checked or (policy.forward_only and u is not None)):
                 fn = FunctionalLaws(self, drivers, sources, phi_boundary, step, history)
 
         requested = newton_kwargs["method"]
@@ -2330,12 +2355,20 @@ class KirchhoffLayer(TopologyGuard):
             # last evaluated the residual at, whose flows are then the result's.
             point: dict = {}
 
-            def residual_fn(x):
+            def evaluate(x):
                 r, phi, q = self._residual(x, phi_boundary, drivers, sources, step, plain)
                 point.update(x=x, phi=phi, q=q)
                 if last is not None:
                     remember(r)
                 return r
+
+            if checked:
+                # nothing it threads requires grad, so the layer's own residual under grad
+                # mode is `_threaded_residual`'s check
+                def residual_fn(x):
+                    return self._threaded_residual(evaluate, (x,), detach=False)
+            else:
+                residual_fn = evaluate
 
             def operator_fn(x):
                 # At the fast path's starting point the grounding check's slopes are the
@@ -2350,6 +2383,8 @@ class KirchhoffLayer(TopologyGuard):
             with torch.no_grad():
                 result = self._newton_primal(residual_fn, operator_fn, x0, newton_kwargs,
                                              diagnostics, on_fail, requested=requested)
+                if checked and point.get("x") is not result.x:
+                    residual_fn(result.x)   # the root is checked too
                 if point.get("x") is result.x:
                     return point["phi"], point["q"]
                 return self._output(result.x, phi_boundary, drivers, step)
@@ -2895,7 +2930,8 @@ class KirchhoffLayer(TopologyGuard):
         The forward Newton evaluates each residual with the threaded tensors detached and
         refuses one that still requires grad (`_threaded_residual`: `_require_threaded`'s
         check at no extra evaluation); the adjoint's VJP, under grad mode, takes the
-        residual's graph to `params`. `policy.forward_only` (on the fast path) runs the
+        residual's graph to `params`. `policy.forward_only` (on the fast path, where `_solve`
+        does not take the primal Newton instead) runs the
         forward Newton alone: nothing reaches a gradient, so no adjoint is ever asked of a
         point it may return unconverged. The root is checked again only when Newton's last
         residual (`fn.last`) was not at it, which leaves `fn.last` at the root either way.

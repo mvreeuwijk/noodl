@@ -383,27 +383,8 @@ class FunctionalLaws:
 
     @property
     def layer_slopes(self) -> bool:
-        """Whether `dflows`/`node_slopes` equal the layer's own `dflows` and withdrawal and
-        storage slopes (`KirchhoffLayer._withdrawal_slopes`): true unless a law or node
-        source overrides `dflow` with a slope it does not declare exact
-        (`exact_slope = False`), a law that reads the context declares its slope inexact,
-        or a storage declares its `rate_slope` inexact; only the
-        layer's slopes use those. Cached on the layer against its owners' `exact_slope`
-        flags (which may be set per instance)."""
-        layer = self.layer
-        n_el, n_owned = self.n_el, self.n_owned
-        owners = (*layer._laws, *layer._withdrawals, *layer._storage)
-        flags = tuple(o.exact_slope for o in owners)
-        cache = getattr(layer, "_layer_slopes", None)
-        if cache is None or cache[0] != flags:
-            value = not any(
-                not o.exact_slope and (
-                    i >= n_owned
-                    or (i < n_el and o._takes_ctx)
-                    or _analytic(o, ConstitutiveLaw if i < n_el else NodeWithdrawal))
-                for i, o in enumerate(owners))
-            cache = layer._layer_slopes = (flags, value)
-        return cache[1]
+        """Whether `dflows`/`node_slopes` equal the layer's own slopes (`layer_slopes`)."""
+        return layer_slopes(self.layer)
 
     def operator_fn(self, x, *params):
         layer = self.layer
@@ -411,3 +392,26 @@ class FunctionalLaws:
         phi = layer.assemble(x, pb)
         dq = self.dflows(phi, drv, rebuilt, step)
         return layer._operator_at(dq, self.node_slopes(phi, drv, rebuilt, step))
+
+
+def layer_slopes(layer) -> bool:
+    """Whether `FunctionalLaws.dflows`/`node_slopes` of `layer` equal its own `dflows` and
+    withdrawal and storage slopes (`KirchhoffLayer._withdrawal_slopes`): true unless a law or
+    node source overrides `dflow` with a slope it does not declare exact (`exact_slope =
+    False`), a law that reads the context declares its slope inexact, or a storage declares
+    its `rate_slope` inexact; only the layer's slopes use those. Cached on the layer against
+    its owners' `exact_slope` flags (which may be set per instance)."""
+    n_el = len(layer._laws)
+    n_owned = n_el + len(layer._withdrawals)
+    owners = (*layer._laws, *layer._withdrawals, *layer._storage)
+    flags = tuple(o.exact_slope for o in owners)
+    cache = getattr(layer, "_layer_slopes", None)
+    if cache is None or cache[0] != flags:
+        value = not any(
+            not o.exact_slope and (
+                i >= n_owned
+                or (i < n_el and o._takes_ctx)
+                or _analytic(o, ConstitutiveLaw if i < n_el else NodeWithdrawal))
+            for i, o in enumerate(owners))
+        cache = layer._layer_slopes = (flags, value)
+    return cache[1]

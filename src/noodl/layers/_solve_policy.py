@@ -27,8 +27,10 @@ class SolvePolicy:
 
     `differentiable`: the solve is differentiated (the implicit adjoint) and not the primal
     path. `forward_only`: a differentiable solve that nothing reaches
-    (`on_failure="return_primal"`). The fast path runs it as its threaded forward Newton
-    alone; a layer with flow unknowns runs its primal solve.
+    (`on_failure="return_primal"`). The fast path runs it as its primal Newton with the
+    closure check at every residual (as its threaded forward Newton alone where the threaded
+    slopes are not the layer's own, or a law is `dp_independent`); a layer with flow
+    unknowns runs its primal solve.
     """
 
     differentiable: bool

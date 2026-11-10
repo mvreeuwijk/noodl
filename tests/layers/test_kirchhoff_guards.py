@@ -264,6 +264,18 @@ def test_a_closure_read_only_at_the_root_is_refused():
         _solve_from_zero(_BranchLaw(g, "closure"))
 
 
+def test_a_closure_is_refused_where_nothing_differentiable_reaches_the_solve():
+    """`on_failure="return_primal"` with nothing threaded requiring grad: the solve is not
+    differentiated (the primal Newton), and still refuses a closure-captured gradient tensor
+    at the residual that reads it, the root here."""
+    g = torch.tensor([2.0], dtype=F64, requires_grad=True)
+    layer = KirchhoffLayer(_net(), "heat", [_BranchLaw(g, "closure")], boundary=["a"])
+    with pytest.raises(ValueError, match="residual depends on a tensor"):
+        layer.solve(torch.zeros(1, dtype=F64), sources=torch.tensor([0.0, 3.0], dtype=F64),
+                    phi0=torch.zeros(1, dtype=F64), on_failure="return_primal",
+                    diagnostics={})
+
+
 def test_a_registered_parameter_read_only_at_the_root_is_threaded():
     """No false positive, and the gradient is right: the source fixes the flow (dq/dg = 0)
     and phi_b = 1 + (3 - 1) / g (dphi_b/dg = -2 / g**2 = -0.5)."""
