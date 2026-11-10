@@ -65,6 +65,7 @@ from noodl.apps.water.elements import (
     epanet_minor_coefficient,
     three_point_curve,
 )
+from noodl.apps.water.rules import evaluate_rules, take_actions
 from noodl.apps.water.tanks import TankLevels, TankStorageControls, TankVolumeCurve
 from noodl.elements.base import LawContext
 from noodl.elements.duct import Duct
@@ -143,6 +144,10 @@ class WaterOptions:
     viscosity: float = 1.0
     flow_units: str | None = None
     emitter_exponent: float = 0.5
+
+
+#: The node attributes of a rule premise that this application reads (`noodl.apps.water.rules`).
+_NODE_PREMISES = ("DEMAND", "HEAD", "LEVEL", "PRESSURE")
 
 
 @dataclass(frozen=True)
@@ -444,12 +449,46 @@ class WaterNetwork:
                         f"WaterNetwork: rule {rule.name!r} names link {premise.id!r}, which "
                         f"is not a link"
                     )
+                if premise.attribute in ("DAY", "POWER") or (
+                        premise.object == "NODE" and premise.attribute not in _NODE_PREMISES):
+                    raise ValueError(
+                        f"WaterNetwork: rule {rule.name!r} tests {premise.attribute}, which "
+                        f"EPANET 2.2 reads in no rule premise on a {premise.object.lower()}"
+                        f" (DEMAND, HEAD, LEVEL and PRESSURE of a node; FLOW, STATUS and "
+                        f"SETTING of a link; SYSTEM TIME, CLOCKTIME and DEMAND)")
+                if (premise.object == "NODE" and premise.attribute == "DEMAND"
+                        and premise.id in {r.name for r in self.reservoirs}):
+                    raise ValueError(
+                        f"WaterNetwork: rule {rule.name!r} tests the DEMAND of reservoir "
+                        f"{premise.id!r}; only a junction's and a tank's demand is read "
+                        f"here (a tank's is its inflow)")
+            gpvs = {v.name for v in self.valves if v.kind.upper() == "GPV"}
+            checked = {p.name for p in self.pipes if p.status.upper() == "CV"}
             for action in (*rule.then_actions, *rule.else_actions):
                 if action.link not in link_names:
                     raise ValueError(
                         f"WaterNetwork: rule {rule.name!r} acts on link {action.link!r}, "
                         f"which is not a link"
                     )
+                if action.link in checked:
+                    raise ValueError(
+                        f"WaterNetwork: rule {rule.name!r} acts on pipe {action.link!r}, a "
+                        f"check valve, which EPANET 2.2 cannot control (error 207)")
+                if action.attribute == "STATUS" and action.value == ACTIVE:
+                    raise ValueError(
+                        f"WaterNetwork: rule {rule.name!r} sets the status of link "
+                        f"{action.link!r} to ACTIVE; EPANET 2.2 takes no action on it "
+                        f"(`takeactions` acts on OPEN, CLOSED and a setting); give a valve "
+                        f"a SETTING instead")
+                if action.attribute == "SETTING" and action.value < 0.0:
+                    raise ValueError(
+                        f"WaterNetwork: rule {rule.name!r} sets link {action.link!r} to the "
+                        f"negative setting {action.value!r} (EPANET error 202)")
+                if action.attribute == "SETTING" and action.link in gpvs:
+                    raise ValueError(
+                        f"WaterNetwork: rule {rule.name!r} sets a numeric setting on the "
+                        f"GPV {action.link!r}, whose head loss is its curve (EPANET error "
+                        f"202)")
 
     def validate(self) -> None:
         """Refuse, BY NAME, everything this application does not model."""
@@ -506,11 +545,6 @@ class WaterNetwork:
                     f"[{round(tank.min_level, 6)}, {round(tank.max_level, 6)}] m outside its "
                     f"volume curve {tank.volume_curve!r} (levels {points[0][0]} to "
                     f"{points[-1][0]} m)")
-        if self.rules:
-            raise ValueError(
-                f"WaterNetwork: [RULES] {[r.name for r in self.rules]}; rule-based "
-                f"controls are out of scope"
-            )
         for pump in self.pumps:
             if pump.speed_pattern is not None:
                 raise ValueError(
@@ -812,12 +846,15 @@ def build_model(
             f"build_model: friction must be 'composite' or 'colebrook', got {friction!r}"
         )
     if pipe_form == "potential":
+        acted = {a.link for r in net.rules for a in (*r.then_actions, *r.else_actions)}
         switched = [p.name for p in net.pipes
-                    if p.status.upper() != "OPEN" or p.name in net.initial_status]
+                    if p.status.upper() != "OPEN" or p.name in net.initial_status
+                    or p.name in acted]
         if switched:
             raise ValueError(
                 f"build_model: pipe(s) {switched} are closed or check valves (a CLOSED or CV "
-                f"status, or a [STATUS] line), which a pipe takes only in its resistance "
+                f"status, a [STATUS] line or a rule's action), which a pipe takes only in its "
+                f"resistance "
                 f"form: pipe_form='potential' gives each pipe's flow from its head loss and "
                 f"reads no status; use pipe_form='flow'"
             )
@@ -828,6 +865,12 @@ def build_model(
         p_min = options.minimum_pressure
     if p_req is None:
         p_req = options.required_pressure
+    if (pda or net.emitters) and any(
+            p.attribute == "DEMAND" for r in net.rules for p in r.premises):
+        raise ValueError(
+            "build_model: a rule premise reads DEMAND, which `apply_rules` takes from the "
+            "base demands in 'water.sources'; on a pressure-driven network or one with "
+            "emitters EPANET's demand is the delivered one, which is not read here")
     if exponent is None:
         exponent = options.pressure_exponent
     if headloss in ("H-W", "C-M") and (options.specific_gravity != 1.0
@@ -1121,8 +1164,8 @@ def build_model(
     drivers.update(_link_drivers(net, scale))
     reservoir_heads = torch.tensor([r.head * scale for r in net.reservoirs], dtype=F64)
     control_closure = None
-    if net.tanks or net.controls:
-        # the closure of the tanks and of the controls (`model.control_closure`, also on a
+    if net.tanks or net.controls or net.rules:
+        # the closure of the tanks, the controls and the rules (`model.control_closure`, also on a
         # network with controls and no tanks)
         junction_names = {j.name for j in net.junctions}
         if net.tanks and not held and any(
@@ -1153,6 +1196,12 @@ def build_model(
             junctions={name: (node_names.index(name), elev)
                        for name, elev in elevation.items()},
             start_clocktime=net.start_clocktime,
+            rules=net.rules,
+            node_info={name: (node_names.index(name), elev)
+                       for name, elev in (*elevation.items(),
+                                          *((r.name, r.head) for r in net.reservoirs),
+                                          *((t.name, t.elevation) for t in net.tanks))},
+            setting_tolerance=[_setting_tolerance(lk, scale) for lk in net.links()],
         )
         closures.append(control_closure)
         for t in net.tanks:
@@ -1514,6 +1563,143 @@ def initial_drivers(
 
 
 #: The most solves `water_steady` repeats for junction-pressure controls that keep switching.
+def _setting_tolerance(link, head_scale: float) -> float:
+    """EPANET's tolerance on a setting a rule sets (`rules.c`, `takeactions`: 1e-3 in
+    internal units, feet and cubic feet per second) in the unit the closure carries it in: a
+    PRV's, PSV's or PBV's head in the layer's potential unit, an FCV's flow in m3/s, a
+    pump's speed and a TCV's coefficient as they are."""
+    kind = getattr(link, "kind", "").upper()
+    if kind in ("PRV", "PSV", "PBV"):
+        return 1e-3 * M_PER_FT * head_scale
+    if kind == "FCV":
+        return 1e-3 * M_PER_FT**3
+    return 1e-3
+
+
+def apply_rules(model: Model, state: State, drivers: Drivers, *, time,
+                step: float = 0.0) -> tuple[State, Tensor]:
+    """`(state, changed)`: `state` after the network's `[RULES]` are tested on it at `time` (s
+    since the start) and the actions that stand are taken (EPANET 2.2, `rules.c`,
+    `checkrules`; `evaluate_rules`, `take_actions`); `changed` says per instance whether any
+    link's status or setting moved, which asks for a new solve. `step` is the length of the
+    interval since the previous check (the rule time step), which `SYSTEM TIME` and
+    `CLOCKTIME` premises test. A network without rules returns `state` itself.
+
+    `state` is a solution: the premises read its heads (`HEAD`, `PRESSURE`, `LEVEL`), flows,
+    the converged link states (`link_states`: a valve's `ACTIVE`, `OPEN` or `CLOSED` as the
+    solve found it), the settings the model has, the junctions' demands (the base demands in
+    `"water.sources"`) and a tank's inflow. The actions change the carried
+    `"water.link_status"` and `"water.link_setting"`, which `TankLevels` writes to the
+    drivers `"water.status"` and `"water.setting"` on the next solve. Rules run after the
+    simple controls, on the state they left (EPANET tests the controls at the start of a
+    step, the rules at its end): a rule's action on a link stands over a control's earlier
+    one. `water_steady` takes no time, so it applies no rule; a driver of time calls this at
+    each rule time step.
+
+    Batched states are tested instance by instance (the rules select: they are not
+    differentiable)."""
+    closure = model.control_closure
+    rules = () if closure is None else closure.rules
+    if not rules:
+        return state, torch.zeros((), dtype=torch.bool)
+    premises = [p for r in rules for p in r.premises]
+    with torch.no_grad():
+        arrays, names = _rule_readings(model, closure, rules, premises, state, drivers)
+        carried_status = state["water.link_status"].detach()
+        carried_setting = state["water.link_setting"].detach()
+        time = torch.as_tensor(time, dtype=F64)
+        n = len(closure.link_names)
+        batch = torch.broadcast_shapes(
+            *(a.shape[:-1] for a in arrays.values()), carried_status.shape[:-1],
+            carried_setting.shape[:-1], time.shape)
+
+        def rows(t: Tensor) -> Tensor:
+            return t.expand(batch + t.shape[-1:]).reshape(-1, t.shape[-1])
+
+        flat = {k: rows(v) for k, v in arrays.items()}
+        times = time.expand(batch).reshape(-1)
+        status_rows, setting_rows = rows(carried_status), rows(carried_setting)
+        new_status, new_setting, changed = [], [], []
+        for b in range(status_rows.shape[0]):
+            snapshot = {a: {i: float(flat[a][b, k]) for k, i in enumerate(ids)}
+                        for a, ids in names.items()}
+            actions = evaluate_rules(rules, snapshot, time=float(times[b]),
+                                     clocktime=closure.start_clocktime, step=step)
+            st, se, moved = take_actions(
+                actions, status=status_rows[b], setting=setting_rows[b],
+                link_names=closure.link_names, link_kinds=closure.link_kinds,
+                setting_scale=closure.setting_scale,
+                setting_tolerance=closure.setting_tolerance)
+            new_status.append(st)
+            new_setting.append(se)
+            changed.append(moved)
+    out = {**state,
+           "water.link_status": torch.stack(new_status).reshape(batch + (n,)),
+           "water.link_setting": torch.stack(new_setting).reshape(batch + (n,))}
+    return out, torch.tensor(changed).reshape(batch)
+
+
+def _rule_readings(model, closure, rules, premises, state, drivers):
+    """`(arrays, names)`: what the rules' premises read of `state`, each attribute as an
+    array `(..., len(ids))` over the ids in `names[attribute]` (SI), the snapshot
+    `evaluate_rules` takes; only what a premise names is computed."""
+    arrays: dict[str, Tensor] = {}
+    names: dict[str, list[str]] = {}
+
+    def ids_of(attribute, object_):
+        return sorted({p.id for p in premises
+                       if p.attribute == attribute and p.object == object_})
+
+    phi = state["water.phi"].detach() / closure.head_scale
+    for attribute in ("HEAD", "LEVEL", "PRESSURE"):
+        ids = ids_of(attribute, "NODE")
+        if ids:
+            idx = [closure.node_info[i][0] for i in ids]
+            elevation = torch.tensor(
+                [0.0 if attribute == "HEAD" else closure.node_info[i][1] for i in ids],
+                dtype=F64)
+            arrays[attribute], names[attribute] = phi[..., idx] - elevation, ids
+    ids = ids_of("DEMAND", "NODE")
+    system = any(p.object == "SYSTEM" and p.attribute == "DEMAND" for p in premises)
+    if ids or system:
+        sources = drivers["water.sources"].detach()
+        columns = []
+        for i in ids:
+            if i in closure.tank_of:
+                columns.append(state["water.storage_flow"].detach()[..., closure.tank_of[i]])
+            else:
+                columns.append(-sources[..., closure.node_info[i][0]])
+        if system:
+            ids = [*ids, ""]
+            junctions = [index for index, _ in closure.junctions.values()]
+            columns.append(torch.clamp(-sources[..., junctions], min=0.0).sum(-1))
+        arrays["DEMAND"], names["DEMAND"] = torch.stack(
+            torch.broadcast_tensors(*columns), -1), ids
+    ids = ids_of("FLOW", "LINK")
+    if ids:
+        idx = [closure.link_names.index(i) for i in ids]
+        arrays["FLOW"], names["FLOW"] = state["water.q"].detach()[..., idx].abs(), ids
+    ids = ids_of("STATUS", "LINK")
+    if ids:
+        idx = [closure.link_names.index(i) for i in ids]
+        codes = link_states(model, state, drivers)[..., idx]
+        arrays["STATUS"], names["STATUS"] = codes.to(F64), ids
+    ids = ids_of("SETTING", "LINK")
+    if ids:
+        idx = [closure.link_names.index(i) for i in ids]
+        carried = state["water.link_setting"].detach()
+        effective = (closure._link_setting(drivers, carried) if closure._setting_links.numel()
+                     else drivers.get(SETTING_KEY, closure.link_setting))
+        status = closure._link_status(drivers, state["water.link_status"].detach())
+        scale = torch.tensor([closure.setting_scale[j] for j in idx], dtype=F64)
+        value = effective[..., idx].to(F64) / scale
+        pump = torch.tensor([closure.link_kinds[j] == "PUMP" for j in idx])
+        shut = pump & (status[..., idx] <= CLOSED)
+        arrays["SETTING"] = torch.where(shut, torch.zeros_like(value), value)
+        names["SETTING"] = ids
+    return arrays, names
+
+
 MAX_PRESSURE_SWITCHES = 10
 
 
@@ -1571,12 +1757,16 @@ def water_steady(model: Model, state: State, drivers: Drivers, **solve_kwargs) -
         status, setting, changed = closure.pressure_switch(result)
         if not bool(changed.any()):
             return result
-        before = (result["water.link_status"], result["water.link_setting"])
         with closure.held_controls():
             result = _solve_steady(
                 model, {**result, "water.link_status": status, "water.link_setting": setting},
                 drivers, **solve_kwargs)
-    moved = ((status != before[0]) | (setting != before[1])).reshape(-1, status.shape[-1]).any(0)
+    # the last solve may have settled: test it before giving up
+    status, setting, changed = closure.pressure_switch(result)
+    if not bool(changed.any()):
+        return result
+    moved = ((status != result["water.link_status"])
+             | (setting != result["water.link_setting"])).reshape(-1, status.shape[-1]).any(0)
     links = [n for n, m in zip(model.link_names, moved.tolist(), strict=True) if m]
     nodes = sorted({c.node for c in closure.pressure_controls if c.link in links})
     raise RuntimeError(

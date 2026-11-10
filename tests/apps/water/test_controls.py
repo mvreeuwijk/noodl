@@ -335,3 +335,38 @@ def test_gradient_through_a_setting_driver_with_a_control_that_does_not_fire():
     fd = (head(s0.detach() + h) - head(s0.detach() - h)) / (2 * h)
     assert float(grad) == pytest.approx(float(fd), rel=1e-5)
     assert float(grad) == pytest.approx(1.0, rel=1e-4)   # the held head follows its setting
+
+
+def test_gradient_through_a_setting_driver_with_a_setting_control_on_the_valve_itself():
+    """The same, the closure's `torch.where(moved, ...)` path exercised: a NUMERIC setting
+    control on the valve that never fires, whose setting the closure then compares with the
+    driver's."""
+    net = _prv_network(30.0, (Control("V1", None, 25.0, "time", value=1e9),))
+    model, state, drivers = build_model(net)
+    j = model.link_names.index("V1")
+
+    def head(setting):
+        setting_driver = drivers["water.setting"].clone()
+        setting_driver[j] = setting
+        out = water_steady(model, state, {**drivers, "water.setting": setting_driver,
+                                          "water.time": _t(0.0)})
+        return out["water.phi"][model.node_names.index("B")]
+
+    s0 = torch.tensor(30.0 * model.head_scale, dtype=F64, requires_grad=True)
+    (grad,) = torch.autograd.grad(head(s0), s0)
+    h = 1e-4
+    fd = (head(s0.detach() + h) - head(s0.detach() - h)) / (2 * h)
+    assert float(grad) == pytest.approx(float(fd), rel=1e-5)
+    assert float(grad) == pytest.approx(1.0, rel=1e-4)
+
+
+def test_a_pressure_switch_loop_that_has_settled_on_its_last_solve_is_not_an_error(monkeypatch):
+    """`water_steady` tests the last solve before it gives up: a network that needs exactly
+    `MAX_PRESSURE_SWITCHES` switches has settled, it is no failure."""
+    from noodl.apps.water import network
+    net = _two_source_network(controls=(
+        Control("P2", CLOSED, None, "node", "J1", True, 40.0),))
+    model, state, drivers = build_model(net)
+    monkeypatch.setattr(network, "MAX_PRESSURE_SWITCHES", 1)
+    out = water_steady(model, state, drivers)
+    assert out["water.link_status"][1].item() == CLOSED and float(out["water.q"][1]) == 0.0

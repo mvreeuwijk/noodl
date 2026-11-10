@@ -448,7 +448,7 @@ Every form of `[CONTROLS]` is modelled (`noodl.apps.water.controls.apply_control
 | `AT TIME t` | at the step that starts at `t` seconds; the driver `"water.time"` is the step's start (set it each step; the builder creates it when the network has such a control) |
 | `AT CLOCKTIME t` | when `(time + START CLOCKTIME) mod 24 h` equals `t` |
 | `IF NODE <tank> ABOVE or BELOW v` | at the start of a step, on the tank's level |
-| `IF NODE <junction> ABOVE or BELOW v` | after a converged solve, on the pressure head within EPANET's `Htol` (0.0005 ft) of `v`: a link it switches is solved again (`water_steady`; at most 20 times) |
+| `IF NODE <junction> ABOVE or BELOW v` | after a converged solve, on the pressure head within EPANET's `Htol` (0.0005 ft) of `v`: a link it switches is solved again (`water_steady`; at most 10 times) |
 
 The action is `OPEN`, `CLOSED` or a number. A number on a valve makes it `ACTIVE` at that
 setting (a PRV's or PSV's head, an FCV's flow, a TCV's coefficient, in the units of
@@ -537,6 +537,46 @@ the quality layer does not model as a well-mixed volume); use the default `tank_
 water quality, where a tank is a quality boundary whose concentration the caller sets.
 A constant tracer is preserved (every junction stays at the source concentration) across both
 `pipe_form`s, TCV, PBV and GPV valves, tanks and `pda`, tested in `tests/apps/water`.
+
+### Rules
+
+`[RULES]` are modelled as EPANET 2.2's `rules.c` has them (`noodl.apps.water.rules`):
+`IF`, `AND` and `OR` premises, `THEN` and `ELSE` actions, `PRIORITY`. A premise reads a node's
+`DEMAND`, `HEAD` (`GRADE`), `LEVEL` or `PRESSURE`, a link's `FLOW` (its absolute value),
+`STATUS` (`OPEN`, `CLOSED`, `ACTIVE`: a valve as its last solve found it, `link_states`) or
+`SETTING`, or `SYSTEM` `TIME`, `CLOCKTIME` and `DEMAND`. A numerical premise holds within
+EPANET's tolerance of a thousandth of a file unit (`checkvalue`); a `TIME` or `CLOCKTIME` premise
+tests the interval since the previous check (`checktime`: `=` when its time lies in it, across
+midnight too, an inequality at its end). An action is a link's `STATUS` (`OPEN` or `CLOSED`) or
+`SETTING`, with the same meaning as a control's (a number on a valve makes it `ACTIVE`, on a
+pump it is the speed, `OPEN` runs a pump at speed 1); as in `takeactions`, `OPEN` acts on a
+closed link only, `CLOSED` on one that is not, and a setting within EPANET's 1e-3 (feet, cubic
+feet per second, a relative speed) of the present one is no change. Among the actions on one
+link the rule of the highest `PRIORITY` stands, a tie goes to the rule listed first. A valve
+setting is converted like a control's, to the layer's potential unit (`head_scale` on
+Darcy-Weisbach).
+
+**EPANET's premise logic is not the textbook's.** Its manual says `AND` binds tighter than `OR`,
+but `evalpremises` runs left to right and a false result meeting an `AND` ends the rule false:
+`IF a AND b OR c` with `a` false is false whatever `c` is, and `IF a OR b AND c` is
+`(a OR b) AND c`. The rule is transcribed as it is, and its truth tables are the ones EPANET 2.2
+gives (`tests/apps/water/test_rules.py`, measured on `wntr`'s EPANET).
+
+`apply_rules(model, state, drivers, *, time, step=0.0)` tests the rules on a solved `state`
+and returns `(state, changed)`: the state with the carried `"water.link_status"` and
+`"water.link_setting"` after the actions, and per instance whether a link moved, which asks for
+a new solve. The rules run after the simple controls, on the state they left, so a rule's
+action on a link stands over a control's. `water_steady` has no time and applies none; a driver
+of time calls `apply_rules` at each rule time step (`WaterNetwork.rule_timestep`, a tenth of the
+hydraulic step unless `RULE TIMESTEP` says otherwise), with `step` that interval. A batched
+state is tested instance by instance.
+
+Refused by name: a rule action `STATUS IS ACTIVE` (EPANET's `takeactions` takes no action on
+it), an action on a check valve (EPANET error 207), a negative setting or a setting on a GPV
+(error 202), a `DEMAND` premise on a reservoir, and the `DAY` and `POWER` premises EPANET does
+not read; a `DEMAND` premise on a pressure-driven or emitter network (the delivered demand is
+not read); a rule action on a pipe when the pipes are in the `pipe_form="potential"`
+form, which reads no status.
 
 ### Pressure-driven demand
 
@@ -665,11 +705,18 @@ independent loop is a property of the cycle-space formulation, and it holds exac
 
 ## Limitations
 
-- **Not modelled, refused by name:** `[RULES]`;
-  pump speed patterns and a numeric `[STATUS]` on a pump (a pump's speed is the driver
+- **Not modelled, refused by name:** pump speed patterns and a numeric `[STATUS]` on a pump (a pump's speed is the driver
   `"water.setting"`); a valve at a full or empty tank;
   leakage; energy and cost reports. A file using any of these raises an error naming the
   feature.
+- **Rules.** `FILLTIME` and `DRAINTIME` premises and the `DAY` and `POWER` ones are refused;
+  a premise reads a valve's state as the last solve found it, but an action tests the carried
+  status, so a PRV the solve closed (EPANET's `LinkStatus` closed) is not seen as closed by an
+  `OPEN` action. A pump closed by a rule keeps its speed in `"water.link_setting"` (the controls'
+  trade-off); a `SETTING` premise on it reads 0, as EPANET. The extended-period driver that checks
+  the rules at each rule time step (`water_run`, to come) is separate: `apply_rules` is the
+  function it calls. In EPANET a control that fires at the same time as a rule at the end of a
+  step is applied after it, at the next solve; `apply_rules` takes the order within one step.
 - **Controls.** `validate()` refuses a control on a reservoir (`IF NODE <reservoir>`): EPANET
   2.2 compares tank volumes and a reservoir has area 0, so such a control always holds. A pump
   closed by a control keeps its speed in `"water.link_setting"` where EPANET sets it to 0 (no

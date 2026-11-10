@@ -12,7 +12,7 @@ application.
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import torch
 
@@ -55,6 +55,10 @@ class Premise:
     (`id` is `""` for the last); `relation` one of `=`, `<>`, `<`, `<=`, `>`, `>=` (`IS`,
     `NOT`, `BELOW` and `ABOVE` are normalised to these). `value` is in SI (m, m3/s, kW,
     seconds); a status is its code (`CLOSED`, `OPEN`, `ACTIVE`).
+
+    `tolerance` is EPANET's equality tolerance of a numerical premise (`rules.c`, `checkvalue`:
+    1e-3 in the unit of the file) in the premise's own SI unit; the reader sets it, and it
+    takes no part in comparing two premises.
     """
 
     conjunction: str
@@ -63,6 +67,7 @@ class Premise:
     attribute: str
     relation: str
     value: float
+    tolerance: float = field(default=1e-3, compare=False)
 
 
 @dataclass(frozen=True)

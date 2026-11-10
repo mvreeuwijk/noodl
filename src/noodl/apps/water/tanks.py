@@ -77,6 +77,7 @@ from noodl.apps.water.elements import (
     STATUS_KEY,
     TIME_KEY,
 )
+from noodl.apps.water.rules import SETTING_TOLERANCE
 from noodl.elements.base import ConstitutiveLaw
 from noodl.storage import NodeStorage
 
@@ -297,10 +298,19 @@ class TankLevels:
         setting_scale=None,
         junctions=None,
         start_clocktime: float = 0.0,
+        rules=(),
+        node_info=None,
+        setting_tolerance=None,
     ) -> None:
         self.net = net
         self.tanks = list(tanks)
         self.controls = list(controls)
+        # `[RULES]`: tested by `apply_rules` (`noodl.apps.water.network`) after a solve, which
+        # changes the same carried status and setting the controls do. `node_info` is
+        # `{node: (index in "water.phi", elevation m)}` for every node a premise may read.
+        self.rules = list(rules)
+        self.node_info = {} if node_info is None else dict(node_info)
+        rule_links = {a.link for r in self.rules for a in (*r.then_actions, *r.else_actions)}
         self.pump_names = list(pump_names)
         self.tank_nodes = torch.as_tensor(tank_nodes, dtype=torch.long)
         self.dt = float(dt)
@@ -344,25 +354,39 @@ class TankLevels:
             # the pumps are known here, the valves are not: a control on another link needs
             # its kind (a valve is not a pipe)
             others = [c.link for c in self.controls if c.link not in self.pump_of]
+            others += [n for n in rule_links if n not in self.pump_of]
             if others:
                 raise ValueError(
-                    f"TankLevels: controls name link(s) {sorted(set(others))}, which are "
+                    f"TankLevels: controls and rules name link(s) {sorted(set(others))}, which are "
                     f"not pumps; give link_kinds (\"PIPE\", \"PUMP\" or \"VALVE\" per link)")
             link_kinds = ["PUMP" if n in self.pump_of else "PIPE" for n in self.link_names]
         self.link_kinds = list(link_kinds)
         # a control's numeric setting is in SI; the link's setting in the layer's units
         self.setting_scale = ([1.0] * len(self.link_names) if setting_scale is None
                               else [float(x) for x in setting_scale])
+        # EPANET's tolerance on a setting a rule sets (`takeactions`), in the carried unit
+        self.setting_tolerance = ([SETTING_TOLERANCE] * len(self.link_names)
+                                  if setting_tolerance is None
+                                  else [float(x) for x in setting_tolerance])
         # the links whose status the closure writes: the pumps and every link a control names
         named = [self.link_names.index(c.link) for c in self.controls]
+        named += [self.link_names.index(n) for n in rule_links]
         self._status_links = torch.tensor(sorted({*self.pump_links.tolist(), *named}),
                                           dtype=torch.long)
         # the links whose setting a control may change
-        self._setting_links = torch.tensor(sorted(
-            {self.link_names.index(c.link) for c in self.controls
-             if c.setting is not None
-             or (c.status == OPEN and self.link_kinds[self.link_names.index(c.link)] == "PUMP")}),
-            dtype=torch.long)
+        set_by = {self.link_names.index(c.link) for c in self.controls
+                  if c.setting is not None
+                  or (c.status == OPEN
+                      and self.link_kinds[self.link_names.index(c.link)] == "PUMP")}
+        # a rule's SETTING on a pump or a valve (on a pipe it is a status), its OPEN on a pump
+        for rule in self.rules:
+            for a in (*rule.then_actions, *rule.else_actions):
+                j = self.link_names.index(a.link)
+                kind = self.link_kinds[j]
+                if kind != "PIPE" and (a.attribute == "SETTING" or (
+                        kind == "PUMP" and a.value == OPEN)):
+                    set_by.add(j)
+        self._setting_links = torch.tensor(sorted(set_by), dtype=torch.long)
         self.pressure_controls = [c for c in self.controls
                                   if c.trigger == "node" and c.node in self.junctions]
         self._has_clock = any(c.trigger != "node" for c in self.controls)

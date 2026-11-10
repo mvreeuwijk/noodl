@@ -28,11 +28,18 @@ that uses it: a pump head or GPV head-loss curve (flow, length), a pump efficien
 percent, kept as written) or a tank volume curve (length, volume). A curve used in two roles
 with different units is refused by name when the file is read.
 
+**Rules.** `[RULES]` are modelled (`apply_rules`): premises on node and link attributes and
+`SYSTEM` `TIME`, `CLOCKTIME` and `DEMAND`, `THEN`/`ELSE` actions and `PRIORITY`, with EPANET's own
+premise logic (not the textbook precedence of `AND` over `OR`). `GRADE` reads as `HEAD`; a
+`STATUS IS ACTIVE` action, an action on a `CV` pipe, a `DAY` or `POWER` premise, and anything
+after a premise's value (but a time unit) are refused by name when the file is read or
+validated.
+
 **Read, then refused by name.** The reader converts every feature above to SI, and
 `WaterNetwork.validate()` (called by `build_model`) refuses, naming the feature, each one the
 builder does not model yet, so a file never loads into a network that quietly means something
 else: a numeric `[STATUS]` pump speed; a pump speed pattern;
-rules; and a numeric `[CONTROLS]` setting on a pipe. Every other `[CONTROLS]` form is
+and a numeric `[CONTROLS]` setting on a pipe. Every other `[CONTROLS]` form is
 modelled: `AT TIME`, `AT CLOCKTIME` and `IF NODE` on a tank or a junction (a reservoir is refused: EPANET tests its volume of area 0, so
 the control always holds), with an
 `OPEN`, `CLOSED` or numeric action on a pipe, pump or valve. Of EPANET's own valve checks

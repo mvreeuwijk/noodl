@@ -41,6 +41,7 @@ from noodl.apps.water.network import (
     WaterNetwork,
     WaterOptions,
     WaterPipe,
+    apply_rules,
     build_model,
     initial_drivers,
     initial_state,
@@ -55,6 +56,7 @@ from noodl.apps.water.network import (
     water_step,
 )
 from noodl.apps.water.report import link_table, pressure_head, to_kilopascal
+from noodl.apps.water.rules import evaluate_rules, take_actions
 from noodl.apps.water.tanks import TankLevels, TankVolumeCurve
 
 # Reference-model aliases (the imports marked `# noqa: F401  (alias)`) are importable from
@@ -73,9 +75,10 @@ __all__ = [
     "Tank",
     "TankLevels", "TankVolumeCurve", "ThrottleValve", "Valve", "WaterNetwork", "WaterOptions",
     "WaterPipe",
-    "build_model", "initial_drivers", "initial_state", "link_states", "link_table", "pressure_head",
-    "composite_friction_factor", "power_curve", "read_epanet_inp", "tank_inflow",
+    "apply_rules", "build_model", "initial_drivers", "initial_state", "link_states",
+    "link_table", "pressure_head",
+    "composite_friction_factor", "evaluate_rules", "power_curve", "read_epanet_inp", "tank_inflow",
     "tank_levels", "tank_overflow",
-    "three_point_curve",
+    "take_actions", "three_point_curve",
     "to_kilopascal", "twoloop", "water_event_step", "water_step", "water_steady",
 ]

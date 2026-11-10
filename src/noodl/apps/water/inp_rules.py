@@ -82,6 +82,11 @@ def read_rules(
             raise ValueError(f"{path}: line {line.number}: unknown relation {rest[1]!r} in a "
                              f"rule")
         text = rest[2]
+        if len(rest) > 3 and not (category == "SYSTEM" and attribute in ("TIME", "CLOCKTIME")):
+            # EPANET (`rules.c`, `newpremise`) takes a unit only after a time
+            raise ValueError(f"{path}: line {line.number}: {' '.join(rest[3:])!r} after the "
+                             f"value of a rule premise, which takes nothing there")
+        tolerance = 1e-3   # EPANET's, in the unit of the file (`rules.c`, `checkvalue`)
         if category == "SYSTEM":
             if attribute == "TIME":
                 value = time_with_unit(rest, 2, path, line)
@@ -89,6 +94,7 @@ def read_rules(
                 value = clock_time(text, rest[3] if len(rest) > 3 else None, path, line)
             elif attribute == "DEMAND":
                 value = number(text, line) * flow
+                tolerance *= flow
             elif attribute == "DAY":
                 value = number(text, line)
             else:
@@ -98,7 +104,9 @@ def read_rules(
             if ident not in junctions and ident not in tanks and ident not in reservoirs:
                 raise ValueError(f"{path}: line {line.number}: a rule names node {ident!r}, "
                                  f"which is not a node of this network")
-            value = number(text, line) * node_scale(attribute, line)
+            scale = node_scale(attribute, line)
+            value = number(text, line) * scale
+            tolerance *= scale
         else:
             if ident not in link_kinds:
                 raise ValueError(f"{path}: line {line.number}: a rule names link {ident!r}, "
@@ -111,14 +119,17 @@ def read_rules(
                 value = float(code)
             elif attribute == "FLOW":
                 value = number(text, line) * flow
+                tolerance *= flow
             elif attribute == "POWER":
                 value = number(text, line) * power
+                tolerance *= power
             elif attribute == "SETTING":
                 value = link_setting(ident, number(text, line), line)
+                tolerance *= link_setting(ident, 1.0, line)
             else:
                 raise ValueError(f"{path}: line {line.number}: unknown link attribute "
                                  f"{attribute!r} in a rule")
-        return Premise(conjunction, category, ident, attribute, relation, value)
+        return Premise(conjunction, category, ident, attribute, relation, value, tolerance)
 
     def action(words: list[str], line) -> Action:
         if len(words) != 5 or words[3].upper() != "IS":

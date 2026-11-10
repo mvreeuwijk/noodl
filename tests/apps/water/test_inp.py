@@ -580,8 +580,7 @@ def test_rules_are_parsed(tmp_path):
     assert second.priority == 0.0
     assert second.premises[0].value == 6 * 3600.0
     assert second.premises[0].relation == "<"
-    with pytest.raises(ValueError, match=r"\[RULES\]"):
-        net.validate()
+    net.validate()   # rules are no longer refused
 
 
 def test_a_rule_naming_an_unknown_link_is_refused(tmp_path):

@@ -28,7 +28,7 @@ Descriptions of the physical objects a network is built from.
 | `Emitter` | An emitter at junction `node`: the outflow is `coefficient * p^n` with `p` the pressure head (m) and `n` `WaterOptions.emitter_exponent`; `coefficient` is in m3/s per m^n. | `Emitter(node, coefficient)` |
 | `EnergyOptions` | `[ENERGY]` defaults: `global_efficiency` (percent), `global_price` ($/kWh) with an optional `global_pattern` and the monthly `demand_charge` ($/kW). Reporting only: none of them changes a head or a flow. | `EnergyOptions(global_efficiency=75.0, global_price=0.0, global_pattern=None, demand_charge=0.0)` |
 | `Junction` | A junction: `elevation` (m) and base `demand` (m3/s, withdrawn), optionally scaled by a time `pattern`. | `Junction(name, elevation, demand=0.0, pattern=None)` |
-| `Premise` | One `IF`/`AND`/`OR` clause of a rule: `object id attribute relation value`. | `Premise(conjunction, object, id, attribute, relation, value)` |
+| `Premise` | One `IF`/`AND`/`OR` clause of a rule: `object id attribute relation value`. | `Premise(conjunction, object, id, attribute, relation, value, tolerance=0.001)` |
 | `Pump` | A pump from `u` to `v` on a head-flow `curve` (by name) or at constant `power` (kW), at relative `speed`, optionally varied by `speed_pattern`. | `Pump(name, u, v, curve, power=None, speed=1.0, speed_pattern=None, efficiency_curve=None, price=None, price_pattern=None)` |
 | `Reservoir` | A fixed-head node: total `head` (m), optionally varied by a time `pattern`. | `Reservoir(name, head, pattern=None)` |
 | `Rule` | One `[RULES]` entry: the `premises` (in file order, joined by their conjunctions), the actions when they hold (`then_actions`) and when they do not (`else_actions`). | `Rule(name, premises, then_actions, else_actions, priority=0.0)` |
@@ -66,7 +66,7 @@ Functions of the state that compute drivers each step (densities, flows, levels)
 
 | Name | What it does | How to call it |
 |---|---|---|
-| `TankLevels` | Every simple `[CONTROLS]` form (time, clock time, tank level, junction pressure), and the boundary heads of a water layer whose tanks are held at boundary nodes (`build_model(tank_scheme="forward_euler")`); on a network without tanks it carries the controls alone. | `TankLevels(net, tanks, controls, pump_names, *, tank_nodes, dt, reservoir_heads, head_scale=1.0, link_names, link_status, tank_links=(), one_way=None, storage=None, link_setting=None, link_kinds=None, setting_scale=None, junctions=None, start_clocktime=0.0)` |
+| `TankLevels` | Every simple `[CONTROLS]` form (time, clock time, tank level, junction pressure), and the boundary heads of a water layer whose tanks are held at boundary nodes (`build_model(tank_scheme="forward_euler")`); on a network without tanks it carries the controls alone. | `TankLevels(net, tanks, controls, pump_names, *, tank_nodes, dt, reservoir_heads, head_scale=1.0, link_names, link_status, tank_links=(), one_way=None, storage=None, link_setting=None, link_kinds=None, setting_scale=None, junctions=None, start_clocktime=0.0, rules=(), node_info=None, setting_tolerance=None)` |
 
 ## Sources and storage
 
@@ -100,14 +100,17 @@ Calculations and helpers.
 
 | Name | What it does | How to call it |
 |---|---|---|
+| `apply_rules` | `(state, changed)`: `state` after the network's `[RULES]` are tested on it at `time` (s since the start) and the actions that stand are taken (EPANET 2.2, `rules.c`, `checkrules`; `evaluate_rules`, `take_actions`); `changed` says per instance whether any link's status or setting moved, which asks for a new solve. `step` is the length of the interval since the previous check (the rule time step), which `SYSTEM TIME` and `CLOCKTIME` premises test. A network without rules returns `state` itself. | `apply_rules(model, state, drivers, *, time, step=0.0)` |
 | `link_states` | Every link's state in `state` (a solution), in `model.link_names` order, as the codes of `"water.status"` (`noodl.apps.water.controls`): `CLOSED` (0), `OPEN` (1) or `ACTIVE` (2). These are also the codes `wntr` reports EPANET's link states in (`results.link["status"]`). | `link_states(model, state, drivers)` |
 | `link_table` | One row per link: flow (m3/s), head loss (m) and velocity (m/s); optionally to CSV. | `link_table(model, state, names=None, *, path=None)` |
 | `pressure_head` | Pressure head (m) at every node: the solved head minus the node's elevation. | `pressure_head(model, state, elevations=None)` |
 | `composite_friction_factor` | Composite friction factor for ``Re > 2000``: ``(f, df/dq)``. | `composite_friction_factor(q, e, s)` |
+| `evaluate_rules` | The actions that stand after every rule is tested at `time`, in the order their links first appear: one per link. EPANET 2.2, `rules.c`, `checkrules`, `evalpremises`, `updateactionlist` and `onactionlist`. | `evaluate_rules(rules, snapshot, *, time, clocktime=0.0, step=0.0)` |
 | `power_curve` | `(h0, r, n)` of EPANET 2.2's power-function pump curve ``h = h0 - r q^n`` through `points` (`(flow, head)` pairs): one point, or three with the first at zero flow (`input2.c`, `updatepumpparams`; `input3.c`, `powercurve`). | `power_curve(points)` |
 | `tank_inflow` | Net inflow (m3/s) at every tank node: the flow into every tank's storage, `"water.storage_flow"`, which a solve writes (`KirchhoffLayer.storage_flows`). Under `tank_scheme="forward_euler"` it is the inflow the solve delivered to the held tank, the rate over the step `water_event_step` takes. | `tank_inflow(model, state)` |
 | `tank_levels` | Every tank's level (m above its bottom) in `state`: its head less its bottom. | `tank_levels(model, state)` |
 | `tank_overflow` | The flow (m3/s) every tank spilt over one `water_event_step` from `state` to `stepped` of `dt` s: for a tank that may overflow (`Tank.overflow`), what flowed in (`tank_inflow(model, stepped)`) less its volume change over the step, at least 0; 0 for every other tank. A tank that starts the step full spills everything that flows in. It stands in for the overflow per report time that Task 10's `water_run` results (`WaterResults.tank_overflow`) will carry. | `tank_overflow(model, state, stepped, dt)` |
+| `take_actions` | `(status, setting, changed)`: the links' status and setting (`(n_links,)`, in `link_names` order, of `link_kinds` `"PIPE"`, `"PUMP"` or `"VALVE"`) after `actions`, and whether any link changed. EPANET 2.2, `rules.c`, `takeactions`, with `hydraul.c`, `setlinkstatus` and `setlinksetting`. | `take_actions(actions, *, status, setting, link_names, link_kinds, setting_scale=None, setting_tolerance=None)` |
 | `three_point_curve` | EPANET's single-point pump-curve fit: ``(h0, r, n)`` for ``h = h0 - r q^n``. | `three_point_curve(q_design, h_design)` |
 | `to_kilopascal` | Metres of head -> kPa, at `rho = 998.2 kg/m3` and `g = 9.80665 m/s2`. | `to_kilopascal(head)` |
 | `twoloop` | The committed hand-made SI fixture (`tests/data/water/twoloop_si.inp`). | `twoloop()` |
