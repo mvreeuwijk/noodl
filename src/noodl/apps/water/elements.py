@@ -6,6 +6,8 @@ orientation. All constants are SI.
 
 from __future__ import annotations
 
+import functools
+
 import torch
 
 from noodl._unionfind import UnionFind
@@ -75,6 +77,23 @@ def closed_row(law, dp: Tensor, q: Tensor, drivers) -> Tensor:
     if not bool(pin.any()):
         return held
     return torch.where(pin != 0, dp, held)
+
+
+@functools.lru_cache(maxsize=256)
+def _joined_groups(ends: tuple, fixed: tuple, joined: tuple) -> tuple[dict, frozenset]:
+    """`(group, fed)` for the links `joined` (per link, of `ends`): each node's group and
+    the groups holding a node of `fixed`. Remembered: a solve meets the same few sets of
+    closed check valves on iterate after iterate."""
+    groups: UnionFind[int] = UnionFind()
+    for (u, v), is_joined in zip(ends, joined, strict=True):
+        groups.add(u)
+        groups.add(v)
+        if is_joined:
+            groups.union(u, v)
+    for n in fixed:
+        groups.add(n)
+    group = {n: groups.find(n) for n in groups.parent}
+    return group, frozenset(group[n] for n in fixed)
 
 
 def _link_range(links: slice | None) -> tuple[int, int] | None:
@@ -179,15 +198,19 @@ class HazenWilliams(ConstitutiveLaw):
         return torch.where(gradient < gradient_floor, gradient_floor / 1.852 * q + minor,
                            torch.sign(q) * friction + minor)
 
-    def head_gradient(self, q: Tensor, gradient_floor: float = 0.0) -> Tensor:
-        """``d head_loss / d q`` (m per m^3/s) at ``q``, with the same ``gradient_floor``."""
+    def head_gradient(self, q: Tensor, gradient_floor: float = 0.0, cols=None) -> Tensor:
+        """``d head_loss / d q`` (m per m^3/s) at ``q``, with the same ``gradient_floor``;
+        of the pipes ``cols`` only (``q`` then theirs) when given."""
         k = self.resistance()
+        minor = self._minor() * torch.ones_like(k)
+        if cols is not None:
+            k, minor = k[cols], minor[cols]
         a = q.abs()
         a_safe = torch.where(a > 0, a, torch.ones_like(a))
         gradient = torch.where(a > 0, 1.852 * k * a_safe**0.852, torch.zeros_like(a))
         friction = torch.where(gradient < gradient_floor,
                                torch.full_like(gradient, gradient_floor / 1.852), gradient)
-        return friction + 2.0 * self._minor() * a
+        return friction + 2.0 * minor * a
 
     def flow(self, dp: Tensor, drivers=None) -> Tensor:
         k = self.resistance()
@@ -644,9 +667,12 @@ class CompositeDarcyWeisbach(ConstitutiveLaw):
         g_turb = 2.0 * (f * r + m) * a + dfdq * r * a * a
         return torch.where(laminar, g_lam, g_turb)
 
-    def head_gradient(self, q: Tensor) -> Tensor:
-        """``dh/dq`` in m per (m^3/s), from EPANET's own analytic ``hgrad``."""
+    def head_gradient(self, q: Tensor, cols=None) -> Tensor:
+        """``dh/dq`` in m per (m^3/s), from EPANET's own analytic ``hgrad``; of the pipes
+        ``cols`` only (``q`` then theirs) when given."""
         r, m, e, s = self._coefficients()
+        if cols is not None:
+            r, m, e, s = r[cols], m[cols], e[cols], s[cols]
         a = (q * self.cfs_per_m3s).abs()
         return M_PER_FT * self.cfs_per_m3s * self._grad_ft(a, r, m, e, s)
 
@@ -991,19 +1017,15 @@ class FlowControlledPipe(ImplicitLaw):
         out = rows.clone()
         for b, row in enumerate(rows.tolist()):
             while any(row):
-                groups: UnionFind[int] = UnionFind()
-                for j, (u, v) in enumerate(self.ends):
-                    groups.add(u)
-                    groups.add(v)
-                    if joined[b][j] and not (lo <= j < hi and row[j - lo]):
-                        groups.union(u, v)
-                fed = {groups.find(n) for n in self.fixed}
+                links = tuple(joined[b][j] and not (lo <= j < hi and row[j - lo])
+                              for j in range(n_links))
+                group, fed = _joined_groups(self.ends, self.fixed, links)
                 best: dict[int, int] = {}   # cut-off group -> the check valve to reopen
                 for k, closing in enumerate(row):
                     if not closing:
                         continue
                     for end in self.ends[lo + k]:
-                        g = groups.find(end)
+                        g = group[end]
                         if g not in fed and (g not in best
                                              or scores[b][k] > scores[b][best[g]]):
                             best[g] = k
@@ -1021,24 +1043,43 @@ class FlowControlledPipe(ImplicitLaw):
             h = self.pipe.head_loss(q)
         return dp - self.scale * h
 
-    def _held(self, loss, q, one_way, drivers) -> Tensor:
+    def _held(self, loss, q, one_way, drivers, reopen: bool = True) -> Tensor:
         """Where a one-way pipe takes its no-flow branch (see THE SELECTION, and A CUT-OFF
         ITERATE); never at a tie. Computed without a graph: it only selects."""
         with torch.no_grad():
-            q = q.detach()
+            q, loss = torch.broadcast_tensors(q.detach(), loss.detach())
+            # Only the one-way pipes, when every instance has the same ones (the usual case);
+            # remembered by the driver's values.
+            key = (tuple(one_way.shape), one_way.detach().cpu().numpy().tobytes())
+            if getattr(self, "_one_way_cols", (None,))[0] != key:
+                flat = one_way.reshape(-1, one_way.shape[-1])
+                same = bool((flat == flat[:1]).all())
+                found = tuple((flat[0] != 0).nonzero().flatten().tolist()) if same else None
+                self._one_way_cols = (key, found)
+            found = self._one_way_cols[1]
+            one_way = one_way.expand(q.shape)
+            cols = None if found is None else torch.tensor(found, dtype=torch.long)
+            q_c, loss_c, way_c = ((q, loss, one_way) if cols is None else
+                                  (q[..., cols], loss[..., cols], one_way[..., cols]))
             if isinstance(self.pipe, HazenWilliams):
-                slope = self.pipe.head_gradient(q, self.gradient_floor)
+                slope = self.pipe.head_gradient(q_c, self.gradient_floor, cols)
             else:
-                slope = self.pipe.head_gradient(q)
+                slope = self.pipe.head_gradient(q_c, cols)
             slope = self.scale * slope
-            by_kappa = -self.kappa.detach() * q
-            loss = loss.detach()
-            forward = (loss < by_kappa) & (loss < -slope * q)
-            reverse = (loss > by_kappa) & (loss > -slope * q)
-            held = ((one_way > 0) & forward) | ((one_way < 0) & reverse)
+            kappa = self.kappa.detach() * torch.ones(q.shape[-1], dtype=q.dtype)
+            by_kappa = -(kappa if cols is None else kappa[cols]) * q_c
+            forward = (loss_c < by_kappa) & (loss_c < -slope * q_c)
+            reverse = (loss_c > by_kappa) & (loss_c > -slope * q_c)
+            held_c = ((way_c > 0) & forward) | ((way_c < 0) & reverse)
             # the flow the open equation's Newton step reaches, in the pipe's own direction
-            ahead = one_way * (q + loss / slope)
-            return self._reopen(held, ahead, drivers)
+            ahead_c = way_c * (q_c + loss_c / slope)
+            if cols is None:
+                held, ahead = held_c, ahead_c
+            else:
+                held = torch.zeros(q.shape, dtype=torch.bool)
+                ahead = torch.zeros_like(q)
+                held[..., cols], ahead[..., cols] = held_c, ahead_c
+            return self._reopen(held, ahead, drivers) if reopen else held
 
     def residual(self, dp, q, drivers, ctx):
         loss = self._loss(dp, q)
@@ -1060,7 +1101,8 @@ class FlowControlledPipe(ImplicitLaw):
             return torch.zeros_like(dp, dtype=torch.bool)
         status = link_driver(self, drivers, STATUS_KEY, dp)
         one_way = link_driver(self, drivers, ONE_WAY_KEY, dp)
-        held = self._held(self._loss(dp, q), q, one_way, drivers)
+        # At a solution a check valve may close off a group: `water_steady` holds it.
+        held = self._held(self._loss(dp, q), q, one_way, drivers, reopen=False)
         return (status == CLOSED) | held
 
 

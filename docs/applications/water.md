@@ -287,14 +287,17 @@ carrying flow the wrong way. Closed links and check valves need the pipes' resis
 
 `link_states(model, state, drivers)` gives every link's state in a solution: `CLOSED`, `OPEN`
 or `ACTIVE`, the codes `wntr` reports EPANET's in. `water_steady` refuses, before it solves, a
-junction with a demand that closed links cut off from every reservoir and tank. A cut-off
-group of junctions without demand is solved as EPANET solves it: EPANET's closed links keep a
-conductance of $1/C_\text{BIG}$, and as that vanishes the group's head tends to the plain
-average of the heads at the far ends of its closed links. `water_steady` holds the group at
-that head, with every flow into it exactly zero (`noodl.apps.water.elements.PIN_KEY`).
+junction with a demand that closed links cut off from every reservoir and tank. A group of
+junctions without demand that is cut off at the solution, by closed links or by check valves
+holding no flow, has no head of its own in the exact equations; EPANET gives it one through
+the $1/C_\text{BIG}$ conductance of those links, and as that vanishes the group's head tends
+to the plain average of the heads at their far ends. `water_steady` holds the group at that
+head, with every flow into it exactly zero (`noodl.apps.water.elements.PIN_KEY`); a check
+valve that head would open is open after all, and joins the group to its far side.
 
-The TCV's coefficient is EPANET's own, $0.02517\,K/d^4$ in feet and cfs, rounded from
-$8/(g\pi^2) = 0.025193$: 9.5e-4 relative from the exact value a `MinorLoss` uses.
+The TCV's coefficient is EPANET's own, $0.02517\,K/d^4$ in feet and cfs: $8/(32.2\,\pi^2)
+= 0.025173$ (EPANET's 32.2 ft/s² gravity) rounded to four figures, 9.2e-4 below the exact
+$8/(g\pi^2) = 0.0251933$ a `MinorLoss` uses.
 
 ### Tanks and controls
 
@@ -426,6 +429,13 @@ independent loop is a property of the cycle-space formulation, and it holds exac
   model's (MEASURED: scaling the demands by that factor removes 88-95% of the head differences).
   On ordinary networks that is below 1e-6 relative in the heads; on one with 110 m of losses
   it is 3e-5.
+- **A zero-demand group of several junctions fenced off by check valves** is held at the
+  `1 / CBIG` limit head, the average over the far ends of its closed links (75 m between
+  reservoirs at 100 and 50 m). EPANET's own answer there is not that limit: its low-flow
+  handling of the open pipe inside the group (`RQtol`) carries the 2.3e-8 m³/s leak, and its
+  head depends on that pipe's length (73.21 m at 5 m, 75.021 m at 500 m, 74.994 m at
+  5000 m; MEASURED; `test_a_group_fenced_off_by_check_valves_is_held_at_the_limit_head`).
+  A single fenced-off junction matches EPANET to 3e-9.
 - **Pump curves** are single- or three-point only, with the exponent fixed at $n = 2$. Curves
   with four or more points, which EPANET connects piecewise-linearly, are refused; fit a
   three-point curve instead.

@@ -15,14 +15,18 @@ the number of hydraulic sub-steps the event shortening cost, and the Newton iter
 hardest sub-step (the step where a control closes the pump and leaves pipe 10 dead-ended).
 
 `--pipe-form flow` runs the pipes in their resistance form (`build_model(pipe_form="flow")`,
-solved by Modified Nodal Analysis) instead of the default potential form.
+solved by Modified Nodal Analysis) instead of the default potential form. `--check-valve 21`
+makes Net1's pipe 21 a check valve (CV); its water runs backwards for 11 of the 26 sub-steps
+of the plain run, so the check valve is closed for much of the day (flow form only).
 
-Run: `.venv/Scripts/python benchmarks/water_eps.py [--pipe-form potential|flow]`
+Run: `.venv/Scripts/python benchmarks/water_eps.py [--pipe-form potential|flow]
+[--check-valve PIPE]`
 """
 
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import time
 from pathlib import Path
 
@@ -69,8 +73,14 @@ def _run(net, multiplier: float, pipe_form: str = "potential") -> tuple[list[flo
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description="Net1's 24 h extended period")
     parser.add_argument("--pipe-form", choices=("potential", "flow"), default="potential")
+    parser.add_argument("--check-valve", metavar="PIPE", default=None,
+                        help="make this pipe a check valve (CV)")
     args = parser.parse_args(argv)
     net = read_epanet_inp(DATA / "Net1.inp")
+    if args.check_valve is not None:
+        net = dataclasses.replace(net, pipes=tuple(
+            dataclasses.replace(p, status="CV") if p.name == args.check_valve else p
+            for p in net.pipes))
     started = time.perf_counter()
     trajectories = []
     total_sub_steps = 0
@@ -83,6 +93,7 @@ def main(argv: list[str] | None = None) -> None:
     elapsed = time.perf_counter() - started
     print(
         f"water_eps: Net1, {int(net.duration / 3600)} h, pipe_form={args.pipe_form}, "
+        f"{'check valve ' + args.check_valve + ', ' if args.check_valve else ''}"
         f"{len(MULTIPLIERS)} sequential demand multipliers, {total_sub_steps} hydraulic "
         f"sub-steps in {elapsed:.2f} s; at most {most} Newton iterations in one sub-step"
     )

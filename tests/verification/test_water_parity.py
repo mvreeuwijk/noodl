@@ -1035,8 +1035,8 @@ _TCV = _valve_edits(" V1  J7  J2  250  TCV  5  0\n")
 
 def test_a_throttle_control_valve_matches_epanet(tmp_path):
     """Heads, flows and the valve's head loss. The TCV's coefficient is EPANET's rounded
-    `0.02517 K / d^4` (ft, cfs), 9.5e-4 relative from the exact `8 / (g pi^2)` a
-    `MinorLoss` would use.
+    `0.02517 K / d^4` (ft, cfs): `8 / (32.2 pi^2) = 0.025173` rounded to four figures,
+    9.2e-4 below the exact `8 / (g pi^2) = 0.0251933` a `MinorLoss` would use.
 
     The head loss is compared at 1e-5 m ABSOLUTE: EPANET reports a valve's loss as the
     difference of its two FLOAT32 heads (spacing 3.8e-6 m at 48 m), which on this 0.0516 m
@@ -1074,3 +1074,71 @@ def test_gradient_through_a_closed_check_valve_against_central_differences(tmp_p
             fd[i] = (total(sources + e) - total(sources - e)) / (2 * h)
     scale = float(fd.abs().max())
     assert float((analytic - fd)[junctions].abs().max()) <= 1e-6 * scale
+
+
+# --------------------------------------------------------------------------- fenced by CVs
+def _hand_built(tmp_path, junctions, reservoirs, pipes):
+    """`(model, final, drivers, results)` for a hand-built network: this model's steady
+    state and EPANET's, the latter from the same network written through wntr."""
+    from noodl.apps.water.network import WaterNetwork
+
+    net = WaterNetwork(junctions=junctions, reservoirs=reservoirs, pipes=pipes)
+    model, state, drivers = build_model(net)
+    final = water_steady(model, state, drivers)
+    w = wntr.network.WaterNetworkModel()
+    for j in junctions:
+        w.add_junction(j.name, base_demand=j.demand, elevation=j.elevation)
+    for r in reservoirs:
+        w.add_reservoir(r.name, base_head=r.head)
+    for p in pipes:
+        w.add_pipe(p.name, p.u, p.v, length=p.length, diameter=p.diameter,
+                   roughness=p.roughness, check_valve=p.status == "CV",
+                   initial_status="CLOSED" if p.status == "CLOSED" else "OPEN")
+    w.options.time.duration = 0
+    results = wntr.sim.EpanetSimulator(w).run_sim(file_prefix=str(tmp_path / "epanet"))
+    return model, final, drivers, results
+
+
+def _fenced(*middle):
+    """R1 (100 m) and R2 (50 m) joined through K (4 L/s), and a zero-demand group (`middle`,
+    a chain of junctions) fenced off by two check valves that both point out of it towards
+    the reservoirs' far sides: P1 from the group to R1, P2 from R2 into the group."""
+    from noodl.apps.water.network import Junction, Reservoir, WaterPipe
+
+    def pipe(name, u, v, status="OPEN"):
+        return WaterPipe(name, u, v, 500.0, 0.3, 130.0, status=status)
+
+    junctions = (*(Junction(n, 0.0, 0.0) for n in middle), Junction("K", 0.0, 0.004))
+    pairs = zip(middle, middle[1:], strict=False)
+    chain = tuple(pipe(f"P{5 + i}", a, b) for i, (a, b) in enumerate(pairs))
+    pipes = (pipe("P1", middle[0], "R1", "CV"), *chain, pipe("P2", "R2", middle[-1], "CV"),
+             pipe("P3", "R1", "K"), pipe("P4", "K", "R2"))
+    return junctions, (Reservoir("R1", 100.0), Reservoir("R2", 50.0)), pipes
+
+
+def test_a_junction_fenced_off_by_check_valves_matches_epanet(tmp_path):
+    """J's two check valves both hold no flow (J above R2, below R1). Any head between 50 and
+    100 m keeps both shut; EPANET's `1 / CBIG` through both gives the average, 75 m, and so
+    does this model (`_settle`). MEASURED: J exactly 75 against EPANET's 75.000000, heads
+    3e-9 relative, both valves CLOSED as EPANET."""
+    model, final, drivers, results = _hand_built(tmp_path, *_fenced("J"))
+    _compare_with_epanet(model, final, drivers, results)
+    assert float(final["water.phi"][model.node_names.index("J")]) == 75.0
+
+
+def test_a_group_fenced_off_by_check_valves_is_held_at_the_limit_head(tmp_path):
+    """J - P5 - L, fenced off by the two check valves. This model holds both at 75 m, the
+    `1 / CBIG` limit. EPANET reports 75.021263, and that is NOT a CBIG limit but its
+    low-flow handling of P5 (its `RQtol` line carries the 2.3e-8 m3/s leak through the
+    group): with P5 5 m long EPANET gives 73.21, with 5000 m 74.994 (MEASURED, ACCURACY 1e-8
+    changes nothing). So J and L are compared at 3e-4 relative (MEASURED 2.8e-4); every
+    other head at 1e-6, every flow at 1e-6 m3/s, every state exactly. Documented in
+    docs/applications/water.md, Limitations."""
+    model, final, drivers, results = _hand_built(tmp_path, *_fenced("J", "L"))
+    heads = results.node["head"].loc[0]
+    assert _worst_heads(model, final, heads, skip=("J", "L")) < 1e-6
+    for name in ("J", "L"):
+        mine = float(final["water.phi"][model.node_names.index(name)])
+        assert mine == pytest.approx(75.0, abs=1e-12)
+        assert abs(mine - float(heads[name])) < 3e-4 * float(heads[name])
+    _compare_with_epanet(model, final, drivers, results, heads=3e-4)

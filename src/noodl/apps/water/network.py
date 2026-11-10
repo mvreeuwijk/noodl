@@ -1310,7 +1310,7 @@ def water_steady(model: Model, state: State, drivers: Drivers, **solve_kwargs) -
     solve_kwargs.setdefault("atol", 1e-11)
     solve_kwargs.setdefault("rtol", 1e-11)
     solve_kwargs.setdefault("max_iter", 200)
-    drivers, hold = _cut_off_plan(model, state, drivers, "water_steady")
+    drivers, settle = _cut_off_plan(model, state, drivers, "water_steady")
     try:
         result = model.steady(state, drivers, **solve_kwargs)
     except UndefinedSteadyState as exc:
@@ -1327,8 +1327,8 @@ def water_steady(model: Model, state: State, drivers: Drivers, **solve_kwargs) -
         ) from exc
     _refuse_pump_overflow(model, result)
     _refuse_wrong_way(model, result, drivers, "water_steady")
-    if hold is not None:
-        result = {**result, "water.phi": hold(result["water.phi"])}
+    if settle is not None:
+        result = {**result, "water.phi": settle(result)}
     return result
 
 
@@ -1444,8 +1444,18 @@ def _cut_off_groups(net: WaterNetwork, open_links: tuple, demand: tuple) -> _Cut
                    per_group[[k_of[group[i]] for i in nodes]])
 
 
+def _groups(model: Model, open_links: tuple, demand: tuple) -> _CutOff:
+    """`_cut_off_groups`, remembered per set of open links and demands: an extended-period
+    run meets the same few sets again and again."""
+    cache = model.__dict__.setdefault("_cut_off", {})
+    key = (open_links, demand)
+    if key not in cache:
+        cache[key] = _cut_off_groups(model.water_network, open_links, demand)
+    return cache[key]
+
+
 def _cut_off_plan(model: Model, state: State, drivers: Drivers, caller: str):
-    """`(drivers, hold)` for one solve by `caller`, after refusing what cannot be solved.
+    """`(drivers, settle)` for one solve by `caller`, after refusing what cannot be solved.
 
     Refused by name: a junction with a demand that closed links cut off from every
     reservoir and tank (EPANET reports it disconnected), and a status or direction on a
@@ -1455,14 +1465,15 @@ def _cut_off_plan(model: Model, state: State, drivers: Drivers, caller: str):
 
     A cut-off group without demand is solved, as EPANET solves it: `drivers` gains
     `PIN_KEY` on one closed link per group (`_cut_off_groups`), which ties the group's head
-    to that link's far end with every flow exactly zero, and `hold(phi)` then sets the
-    group's head to EPANET's limit. `hold` is `None` when nothing is cut off."""
+    to that link's far end with every flow exactly zero, and `settle(solution)` then sets
+    the heads of every group cut off AT THE SOLUTION to EPANET's limit (`_settle`). `settle`
+    is `None` when no link is closed and none is one-way."""
     net = model.water_network
     layer = model.kirchhoff["water"]
     status = _link_status(model, state, drivers).detach()
+    one_way = drivers.get(ONE_WAY_KEY)
     if "pipe" in layer.kinds and not isinstance(layer.law_for("pipe")[0], FlowControlledPipe):
         cols = layer.law_for("pipe")[1]
-        one_way = drivers.get(ONE_WAY_KEY)
         if bool((status[..., cols] != OPEN).any()) or (
                 one_way is not None and bool((one_way[..., cols] != 0).any())):
             raise ValueError(
@@ -1472,52 +1483,89 @@ def _cut_off_plan(model: Model, state: State, drivers: Drivers, caller: str):
     n_j = len(net.junctions)
     n_l = len(model.link_names)
     closed = status == CLOSED
-    if not n_j or not bool(closed.any()):
+    one_way_any = one_way is not None and bool(one_way.any())
+    if not n_j or not (bool(closed.any()) or one_way_any):
         return drivers, None
     if any(isinstance(w, PressureDrivenDemand) for w in layer.withdrawals):
         demand = torch.tensor([j.demand != 0 for j in net.junctions])
     else:
         demand = drivers["water.sources"][..., :n_j].detach() != 0
-    open_, demand = torch.broadcast_tensors(~closed[..., None, :], demand[..., :, None])
-    batch = open_.shape[:-2]
-    pattern = torch.cat([open_[..., 0, :], demand[..., 0]], dim=-1).reshape(-1, n_l + n_j)
-    # One plan per distinct pattern, remembered across solves: an extended-period run
-    # solves the same few patterns again and again.
-    cache = model.__dict__.setdefault("_cut_off", {})
-    rows, inverse = torch.unique(pattern, dim=0, return_inverse=True)
-    plans = []
-    for row in rows.tolist():
-        key = tuple(row)
-        if key not in cache:
-            cache[key] = _cut_off_groups(net, key[:n_l], key[n_l:])
-        plans.append(cache[key])
-    fed_none = sorted({name for p in plans for name in p.fed_none})
-    if fed_none:
-        raise ValueError(
-            f"{caller}: junction(s) {fed_none} are cut off from every reservoir and tank "
-            f"by closed links, yet have a demand: no head can deliver it")
-    if not any(p.nodes for p in plans):
-        return drivers, None
-    ties = torch.zeros(len(plans), n_l, dtype=F64)
-    for k, plan in enumerate(plans):
-        ties[k, list(plan.ties)] = 1.0
-    drivers = {**drivers, PIN_KEY: ties[inverse].reshape(batch + (n_l,))}
+    if bool(closed.any()):
+        open_, wanted = torch.broadcast_tensors(~closed[..., None, :], demand[..., :, None])
+        batch = open_.shape[:-2]
+        pattern = torch.cat([open_[..., 0, :], wanted[..., 0]], dim=-1).reshape(-1, n_l + n_j)
+        rows, inverse = torch.unique(pattern, dim=0, return_inverse=True)
+        plans = [_groups(model, tuple(row[:n_l]), tuple(row[n_l:]))
+                 for row in rows.tolist()]
+        fed_none = sorted({name for p in plans for name in p.fed_none})
+        if fed_none:
+            raise ValueError(
+                f"{caller}: junction(s) {fed_none} are cut off from every reservoir and tank "
+                f"by closed links, yet have a demand: no head can deliver it")
+        if any(p.nodes for p in plans):
+            ties = torch.zeros(len(plans), n_l, dtype=F64)
+            for k, plan in enumerate(plans):
+                ties[k, list(plan.ties)] = 1.0
+            drivers = {**drivers, PIN_KEY: ties[inverse].reshape(batch + (n_l,))}
 
-    def hold(phi: Tensor) -> Tensor:
-        """`phi` with every cut-off group at EPANET's limit head."""
-        out = phi.clone()
-        if len(plans) == 1:
-            plan = plans[0]
-            out[..., list(plan.nodes)] = phi @ plan.heads.T.to(phi.dtype)
-            return out
-        which = inverse.reshape(batch).expand(phi.shape[:-1]).reshape(-1)
-        flat_in, flat = phi.reshape(-1, phi.shape[-1]), out.reshape(-1, phi.shape[-1])
-        for b, k in enumerate(which.tolist()):
-            if plans[k].nodes:
-                flat[b, list(plans[k].nodes)] = plans[k].heads.to(phi.dtype) @ flat_in[b]
-        return flat.reshape(phi.shape)
+    def settle(solution: State) -> Tensor:
+        return _settle(model, solution, closed, demand, one_way)
 
-    return drivers, hold
+    return drivers, settle
+
+
+def _settle(model: Model, solution: State, closed: Tensor, demand: Tensor,
+            one_way: Tensor | None) -> Tensor:
+    """`solution`'s heads with every zero-demand group cut off AT THE SOLUTION at EPANET's
+    limit head (`_cut_off_groups`).
+
+    A group is cut off when every link joining it to the rest is closed: by its status, or a
+    check valve holding no flow. A check valve's no-flow branch does not fix the head on its
+    closed side (any head that keeps it shut is a solution; the solve stops at one of them,
+    often the open branch's tie, `dp = 0`), and EPANET's `1 / CBIG` conductance through it
+    does: the same limit as through a closed link. A check valve the limit head would open
+    (a head across it driving water its own way) is open after all: it joins the group to
+    its far side, and the groups are formed again without it."""
+    phi = solution["water.phi"]
+    net = model.water_network
+    n_j, n_l = len(net.junctions), len(model.link_names)
+    q = solution["water.q"].detach()
+    if one_way is None:
+        one_way = torch.zeros(n_l, dtype=q.dtype)
+    still = (one_way != 0) & (q.abs() <= 1e-12)
+    shut = closed | still
+    if not bool(shut.any()):
+        return phi
+    batch = torch.broadcast_shapes(phi.shape[:-1], shut.shape[:-1], demand.shape[:-1],
+                                   one_way.shape[:-1])
+    out = phi.expand(batch + phi.shape[-1:]).clone().reshape(-1, phi.shape[-1])
+    flat_in = phi.expand(batch + phi.shape[-1:]).reshape(-1, phi.shape[-1])
+    shut = shut.expand(batch + (n_l,)).reshape(-1, n_l).tolist()
+    still = still.expand(batch + (n_l,)).reshape(-1, n_l).tolist()
+    demand = demand.expand(batch + (n_j,)).reshape(-1, n_j).tolist()
+    direction = one_way.expand(batch + (n_l,)).reshape(-1, n_l).tolist()
+    ends = model.__dict__.get("_link_ends")
+    if ends is None:
+        index = {name: i for i, name in enumerate(model.node_names)}
+        ends = model._link_ends = [(index[k.u], index[k.v]) for k in net.links()]
+    tol = 1e-9 * model.head_scale
+    for b in range(out.shape[0]):
+        shut_b = shut[b]
+        while True:
+            plan = _groups(model, tuple(not x for x in shut_b), tuple(demand[b]))
+            if plan.fed_none or not plan.nodes:
+                break
+            heads = flat_in[b].detach().clone()
+            heads[list(plan.nodes)] = plan.heads.to(heads.dtype) @ flat_in[b].detach()
+            opens = [j for j in range(n_l) if shut_b[j] and still[b][j]
+                     and direction[b][j] * float(heads[ends[j][0]] - heads[ends[j][1]]) > tol]
+            if not opens:
+                out[b, list(plan.nodes)] = plan.heads.to(phi.dtype) @ flat_in[b]
+                break
+            shut_b = list(shut_b)
+            for j in opens:
+                shut_b[j] = False
+    return out.reshape(batch + phi.shape[-1:])
 
 
 def _refuse_wrong_way(model: Model, state: State, drivers: Drivers, caller: str) -> None:
@@ -1584,12 +1632,12 @@ def water_step(model: Model, state: State, drivers: Drivers, dt: float, *,
     solve_kwargs.setdefault("atol", 1e-11)
     solve_kwargs.setdefault("rtol", 1e-11)
     solve_kwargs.setdefault("max_iter", 200)
-    drivers, hold = _cut_off_plan(model, state, drivers, "water_step")
+    drivers, settle = _cut_off_plan(model, state, drivers, "water_step")
     result = model.step(state, drivers, dt, scheme=scheme, **solve_kwargs)
     _refuse_pump_overflow(model, result)
     _refuse_wrong_way(model, result, drivers, "water_step")
-    if hold is not None:
-        result = {**result, "water.phi": hold(result["water.phi"])}
+    if settle is not None:
+        result = {**result, "water.phi": settle(result)}
     return result
 
 
