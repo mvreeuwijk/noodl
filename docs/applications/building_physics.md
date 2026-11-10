@@ -514,9 +514,13 @@ It returns the time histories at `times`, which start at 0 (a `Calendar` places 
 in the year). Steps are split at every jump or kink of an input unless
 `land_on_breakpoints=False`. Each step's airflow solve starts from the previous step's
 pressures; when it does not converge from there (a fan curve after a large speed change can
-swing between the ends of its curve, where its slope is zero), the step is retried once from
-the linear initial guess, and a retry that fails too raises, naming the step.
-`simulate(..., diagnostics={})` lists the retried steps' end times under
+swing between the ends of its curve, where its slope is zero), that solve is retried from
+the linear initial guess, and a retry that fails too raises, naming the step. The retry is
+the air layer's own fallback ladder (`KirchhoffLayer(fallback=("linear_guess",))`, which
+`project_to_model` and `build_model` set; see
+[When Newton fails](../concepts/solvers.md#when-newton-fails-the-fallback-ladder)): it
+solves only the failed airflow solve again, inside its pass, not the whole step.
+`simulate(..., diagnostics={})` lists the end times of the steps with a retried solve under
 `"airflow_retries"`. A signal with a step mean, an occupant's `Presence` (see
 [Occupants](#occupants)), is written as its mean over each step (or sub-step) instead of its
 value at the step's end. The histories have one row per output time either way.

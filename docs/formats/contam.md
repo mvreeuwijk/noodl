@@ -241,9 +241,9 @@ flows = project.path_flows(solved["air.q"])   # in CONTAM path-number order
 and time step), its schedules, and the weather and ambient-concentration files it names
 (resolved next to the `.prj`). Every input is evaluated at the end of each step, with no step
 split at a schedule's jump, and the zone air-mass change enters the airflow balance when the
-run control sets `dodMdt = 1`. A step whose airflow solve does not converge from the previous
-step's pressures is retried once from the linear initial guess (`diagnostics={}` lists such
-steps under `"airflow_retries"`). A steady-airflow run returns the one steady state at the run
+run control sets `dodMdt = 1`. An airflow solve that does not converge from the previous
+step's pressures is solved again from the linear initial guess, by the air layer's fallback
+ladder (`diagnostics={}` lists the steps with such a solve under `"airflow_retries"`). A steady-airflow run returns the one steady state at the run
 control's steady instant. Cyclic contaminant runs, integration other than the trapezoid
 method with weight 1 (implicit Euler), steady airflow with transient contaminants, transient
 airflow with steady contaminants (ContamX solves those to steady state at every step), and a run

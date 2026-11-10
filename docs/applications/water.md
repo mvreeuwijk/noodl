@@ -140,7 +140,11 @@ flow exactly zero) from `model.initial_flows`, and the pumps from their design f
 own first iterate), then checks
 every converged pump's flow against its own `q_max()` and raises naming the pump and batch
 instance if it is exceeded — rather than silently accepting an extrapolated point off the end of
-the curve.
+the curve. The flows are seeded rather than left to the layer's fallback ladder
+([When Newton fails](../concepts/solvers.md#when-newton-fails-the-fallback-ladder)): from zero
+flow every resistance-form pipe sits on its `RQtol` slope floor and the system is numerically
+singular, and so is its linear guess, which is taken at zero flow too (measured on Net1 and the
+two-loop network); from the seeded flows Newton needs 5 iterations.
 
 ## The physics
 

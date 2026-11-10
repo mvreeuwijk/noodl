@@ -1182,7 +1182,10 @@ class _Midpoint:
         pressures before a run of elements in series reversed (its junction 37 Pa off,
         ChimneyShaftNoVolume at 0.19 s) Newton did not converge, from the linear guess it
         does. A solve that still fails raises `ConvergenceError`, unless the caller asked
-        for `on_failure="return"`."""
+        for `on_failure="return"`. This retry is kept here rather than left to the layer's
+        `fallback` ladder (`KirchhoffLayer(fallback=)`) because its acceptance rule is this
+        scheme's own: a stall within STORAGE_STALL times the tolerance counts as converged,
+        and the ladder would retry such a solve and change its result."""
         name = self.air_name
         layer = self.air if layer is None else layer
         pb = drv[f"{name}.phi_boundary"] if phi_b is None else phi_b
