@@ -12,8 +12,15 @@ import math
 import pytest
 import torch
 
+from noodl.apps.sewer.network import (
+    Manhole,
+    Outfall,
+    Pipe,
+    SewerNetwork,
+    sewer_steady,
+    tree_steady,
+)
 from noodl.apps.sewer.network import build_model as sewer_build_model
-from noodl.apps.sewer.network import sewer_steady, tree_steady
 from noodl.apps.street_aq.above_roof import (
     roof_fluxes,
     roof_wiring,
@@ -343,6 +350,17 @@ def test_sewer_steady_equals_the_old_loop_under_no_grad():
         assert torch.equal(got[k], current[k]), k
 
 
+def _two_pipes() -> SewerNetwork:
+    """Two short pipes in series, an inflow at each manhole: the smallest network with a
+    junction, which keeps the fixed point to some thirty passes."""
+    return SewerNetwork(
+        manholes=(Manhole("J1", 12.0, inflow=0.05), Manhole("J2", 11.0, inflow=0.03)),
+        pipes=(Pipe("C1", "J1", "J2", 50.0, 0.30, 0.013, 0.010),
+               Pipe("C2", "J2", "Outfall", 50.0, 0.45, 0.013, 0.005)),
+        outfalls=(Outfall("Outfall", 10.0),),
+    )
+
+
 @pytest.mark.parametrize("storage", [False, True])
 def test_sewer_steady_gradient_matches_central_differences(storage):
     """With loads on the inflows (BOD and sulfide well above zero, away from the reaction's
@@ -351,11 +369,10 @@ def test_sewer_steady_gradient_matches_central_differences(storage):
     recomputed by every step, so it is an unknown of the adjoint although it is not watched."""
     dt = 600.0
     kw = {"storage": True, "dt_storage": dt} if storage else {}
-    model, state, drivers = sewer_build_model(tree_steady(), **kw)
+    model, state, drivers = sewer_build_model(_two_pipes(), **kw)
     bod0 = torch.full_like(drivers["bod_in"], 0.2)
     sul0 = torch.full_like(drivers["sulfide_in"], 0.002)
-    weights = torch.tensor([[1.0, 300.0], [2.0, 200.0], [1.5, 100.0], [0.5, 400.0],
-                            [3.0, 250.0]], dtype=F64)
+    weights = torch.tensor([[1.0, 300.0], [2.0, 200.0]], dtype=F64)
     spy: dict = {}
     real = model.fixed_point
 
