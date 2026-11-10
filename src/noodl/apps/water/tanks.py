@@ -299,7 +299,10 @@ class TankLevels:
     The closure remembers its last answer with the values it read (the tank levels,
     `"water.link_status"`, the drivers' `"water.status"`): a call that reads the same
     values returns it again, which is what lets `water_steady` read the status before the
-    solve without running the controls twice.
+    solve without running the controls twice. The entries built from a driver that requires
+    grad (`"water.setting"`, `"water.reservoir_head"`) are not remembered but built again
+    from the call's own drivers, so a second `backward()` and a new leaf of equal value
+    each get a graph of their own.
     """
 
     state_keys = ("water.link_status", "water.link_setting")
@@ -466,10 +469,36 @@ class TankLevels:
         key = _identity(raw)
         fast = getattr(self, "_fast", None)
         if key is not None and fast is not None and _same(key, fast[0]):
-            return dict(fast[1])
+            return self._completed(fast[1], state, drivers)
         out = self._evaluate(state, drivers, status, setting)
-        self._fast = None if key is None else (key, out)
-        return dict(out)
+        self._fast = None if key is None else (key, self._graph_free(out))
+        return out
+
+    #: The answer's entries built from drivers a calibration may make learnable: a remembered
+    #: answer is kept without them where they carry a graph, and `_completed` builds them
+    #: again from the drivers of the call (the graph of the first call's drivers is freed
+    #: by its `backward()`, and an equal-valued new leaf must receive the gradient).
+    _GRAPH_KEYS = ("water.phi_boundary", SETTING_KEY)
+
+    @classmethod
+    def _graph_free(cls, out: dict[str, Tensor]) -> dict[str, Tensor]:
+        """`out` without the `_GRAPH_KEYS` entries that carry a graph."""
+        return {k: v for k, v in out.items()
+                if not (k in cls._GRAPH_KEYS and v.requires_grad)}
+
+    def _completed(self, remembered: dict[str, Tensor], state, drivers) -> dict[str, Tensor]:
+        """A remembered answer with its `_GRAPH_KEYS` entries built from this call's
+        `drivers` wherever they are missing or the driver they are built from requires grad
+        (no graph is ever reused across calls)."""
+        out = dict(remembered)
+        heads = drivers.get(RESERVOIR_HEAD_KEY)
+        if "water.phi_boundary" not in out or (heads is not None and heads.requires_grad):
+            out["water.phi_boundary"] = self._boundary(drivers, self.levels(state))
+        if self._setting_links.numel():
+            given = drivers.get(SETTING_KEY)
+            if SETTING_KEY not in out or (given is not None and given.requires_grad):
+                out[SETTING_KEY] = self._link_setting(drivers, out["water.link_setting"])
+        return out
 
     def _evaluate(self, state, drivers, status, setting) -> dict[str, Tensor]:
         level = self.levels(state)
@@ -488,7 +517,7 @@ class TankLevels:
                 (a is None and b is None) or (a is not None and b is not None
                                               and a.shape == b.shape and torch.equal(a, b))
                 for a, b in zip(read, memo[0], strict=True)):
-            return dict(memo[1])
+            return self._completed(memo[1], state, drivers)
         with torch.no_grad():
             if not self._held:
                 status, setting = self._apply_controls(level, status, setting, inflow, time)
@@ -501,8 +530,9 @@ class TankLevels:
         limited = self._full_and_empty(level, drivers, out[STATUS_KEY])
         if limited is not None:
             out[STATUS_KEY], out[ONE_WAY_KEY] = limited
-        self._memo = (tuple(None if t is None else t.clone() for t in read), out)
-        return dict(out)
+        self._memo = (tuple(None if t is None else t.clone() for t in read),
+                      self._graph_free(out))
+        return out
 
     def _time(self, drivers) -> Tensor | None:
         """The driver `"water.time"` when a time control needs it, else `None`."""

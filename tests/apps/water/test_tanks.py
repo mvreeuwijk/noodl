@@ -566,3 +566,40 @@ def test_water_steady_takes_the_level_margin_from_the_state(tmp_path, curved):
     assert int(with_key["water.link_status"][pump]) == CLOSED
     at_start = {**stepped, "water.storage_flow": torch.zeros_like(inflow)}
     assert int(water_steady(model, at_start, drivers)["water.link_status"][pump]) == OPEN
+
+
+def _net1_setting_gradient(model, state, drivers, leaf, node=0):
+    """d phi[node] / d "water.setting" of one `water_steady` through `leaf`."""
+    out = water_steady(model, state, {**drivers, "water.setting": leaf})
+    out["water.phi"][node].backward()
+    return leaf.grad.clone()
+
+
+def test_a_second_backward_through_the_same_learnable_setting_has_its_own_graph():
+    """The control closure remembers its answer; the entries it builds from a learnable
+    driver must not be remembered with the first call's graph, which its `backward()`
+    frees (regression: "Trying to backward through the graph a second time")."""
+    model, state, drivers = build_model(read_epanet_inp(NET1))
+    leaf = drivers["water.setting"].clone().requires_grad_(True)
+    first = _net1_setting_gradient(model, state, drivers, leaf)
+    leaf.grad = None
+    second = _net1_setting_gradient(model, state, drivers, leaf)
+    assert first.abs().sum() > 0
+    torch.testing.assert_close(second, first, rtol=0, atol=0)
+
+
+def test_an_equal_valued_new_setting_leaf_receives_the_gradient():
+    """A calibration that builds a new leaf every iteration: the memo hits by value, and the
+    gradient goes to the NEW leaf (not the stale one), equal to a fresh model's."""
+    model, state, drivers = build_model(read_epanet_inp(NET1))
+    base = drivers["water.setting"].clone()
+    old = base.clone().requires_grad_(True)
+    _net1_setting_gradient(model, state, drivers, old)
+    stale = old.grad.clone()
+    new = base.clone().requires_grad_(True)
+    got = _net1_setting_gradient(model, state, drivers, new)
+    torch.testing.assert_close(old.grad, stale, rtol=0, atol=0)   # nothing more reached it
+    fresh_model, fresh_state, fresh_drivers = build_model(read_epanet_inp(NET1))
+    want = _net1_setting_gradient(fresh_model, fresh_state, fresh_drivers,
+                                  base.clone().requires_grad_(True))
+    torch.testing.assert_close(got, want, rtol=0, atol=0)
