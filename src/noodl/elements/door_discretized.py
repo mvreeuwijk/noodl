@@ -1,5 +1,5 @@
 """Two-way flow through a large opening, discretised into ``nCom`` height compartments with a
-hydrostatic-head drive, transcribed from the Modelica Buildings Library's
+hydrostatic head term, transcribed from the Modelica Buildings Library's
 ``DoorDiscretizedOpen``/``DoorDiscretizedOperable``.
 
 Transcribed from Modelica Buildings Library (MBL) v13.0.0
@@ -65,7 +65,7 @@ The noodl mapping
 -----------------
 Compartment ``i`` of a door is one noodl edge from side A (``src``) to side B (``tgt``):
 
-* :class:`DoorCompartmentHead` is a drive (``noodl.drives`` protocol) returning
+* :class:`DoorCompartmentHead` is a head term (``noodl.heads`` protocol) returning
   ``rho_A hAg[i] - rho_B hBg[i]``, so that the layer's ``dp = (phi_A - phi_B) + head`` is
   ``dpAB[i]`` (with ``phi = p - p_ref``, any fixed gauge reference -- the Modelica reader uses
   the first boundary's pressure -- the port pressures' difference is the potentials').
@@ -90,13 +90,9 @@ from collections.abc import Mapping
 
 import torch
 
+from noodl.elements._band import power_law_band, power_law_band_coeffs, power_law_band_slope
 from noodl.elements.base import ConstitutiveLaw, band_edges, memo
-from noodl.elements.door import (
-    _power_law_at,
-    _power_law_coeffs,
-    _power_law_slope_at,
-    _slope_is_exact,
-)
+from noodl.elements.door import _slope_is_exact
 from noodl.elements.media import _R_AIR, _R_H2O, AirMedium
 
 Tensor = torch.Tensor
@@ -188,7 +184,7 @@ class _InflowDensities:
 
 
 class DoorCompartmentHead(_InflowDensities):
-    """The hydrostatic part of ``DoorDiscretized.mo:64-66``, as a noodl drive:
+    """The hydrostatic part of ``DoorDiscretized.mo:64-66``, as a noodl head term:
     ``rho_A hAg[i] - rho_B hBg[i]`` per compartment edge, shape ``(..., n_edges)``.
 
     ``hAg``/``hBg`` are MBL's ``g_n (h - (i - 0.5) dh)`` (``DoorDiscretized.mo:34-40``), one
@@ -281,13 +277,13 @@ class _DoorCompartmentBase(_InflowDensities, ConstitutiveLaw):
 
     def _law(self, drivers) -> tuple:
         """``(CVal, m, VZerCom_flow, a, b, c, d, CVal dp_turbulent^m)`` of the compartments'
-        power law (``door._power_law_coeffs``), a memo; implemented by each door."""
+        power law (``_band.power_law_band_coeffs``), a memo; implemented by each door."""
         raise NotImplementedError
 
     def stream_slope(self, dp: Tensor, drivers=None) -> Tensor | None:
         """``d(mAB_flow - mBA_flow)/d dpAB[i]`` per compartment (:meth:`port_flows`), by the
         chain rule in the order of operations reverse-mode autograd applies to
-        ``port_flows`` (``door._power_law_slope_at``), so that it equals the autograd
+        ``port_flows`` (``_band.power_law_band_slope``), so that it equals the autograd
         derivative bit for bit (checked in the tests). At a smoothHeaviside argument exactly on
         its clamp (``u`` exactly 0 or 1) the slope is 0, the one-sided derivative of the flat
         side, whatever torch version: torch's own clamp gradient there changed (1 in torch 2.2,
@@ -297,7 +293,7 @@ class _DoorCompartmentBase(_InflowDensities, ConstitutiveLaw):
         CVal, m, VZerCom, *coeffs = self._law(drivers)
         if not _slope_is_exact(dp, rho_A, rho_B, CVal, m, VZerCom):
             return None
-        dV = _power_law_at(CVal, dp, m, self.dp_turbulent, coeffs)
+        dV = power_law_band(CVal, dp, m, self.dp_turbulent, coeffs)
         # _smooth_heaviside(dV, VZerCom), forward.
         dx = 0.5 * dV / VZerCom
         xpow2 = dx * dx
@@ -318,7 +314,7 @@ class _DoorCompartmentBase(_InflowDensities, ConstitutiveLaw):
         c = (g_r1 * r2 + g_r2 * 6) * dx
         g_dx = (g_u * r1 + c) + c
         g_dV = (-(g_tb * rho_B) + (one * gai) * rho_A) + (g_dx / VZerCom) * 0.5
-        return _power_law_slope_at(CVal, dp, m, self.dp_turbulent, coeffs, g_dV)
+        return power_law_band_slope(CVal, dp, m, self.dp_turbulent, coeffs, g_dV)
 
     def flow(self, dp: Tensor, drivers=None) -> Tensor:
         """``rho_A dVAB_flow[i] - rho_B dVBA_flow[i]`` (``DoorDiscretized.mo:69-71``,
@@ -416,13 +412,13 @@ class DoorCompartment(_DoorCompartmentBase):
         def law():
             CVal = self.CD * self.dA * math.sqrt(2 / self.rho_default)  # :24
             return (CVal, self.m, self.vZer * self.dA,  # DoorDiscretized.mo:52,
-                    *_power_law_coeffs(CVal, self.m, self.dp_turbulent))  # TwoWay...mo:83
+                    *power_law_band_coeffs(CVal, self.m, self.dp_turbulent))  # TwoWay...mo:83
 
         return memo(self, "law", (self.CD, self.dA, self.m), law)
 
     def _volume_flow(self, dp: Tensor, drivers) -> tuple[Tensor, Tensor]:
         CVal, m, VZerCom, *coeffs = self._law(drivers)
-        dV = _power_law_at(CVal, dp, m, self.dp_turbulent,
+        dV = power_law_band(CVal, dp, m, self.dp_turbulent,
                            coeffs)  # DoorDiscretizedOpen.mo:27-35
         return dV, VZerCom
 
@@ -530,7 +526,7 @@ class OperableDoorCompartment(_DoorCompartmentBase):
             A = y * self.AOpe + (1 - y) * self._AClo()  # :52
             CVal = y * COpe + (1 - y) * CClo  # :54
             return (CVal, m, self.vZer * A / self.nCom,  # DoorDiscretized.mo:52,
-                    *_power_law_coeffs(CVal, m, self.dp_turbulent))  # TwoWayFlowElement.mo:83
+                    *power_law_band_coeffs(CVal, m, self.dp_turbulent))  # TwoWayFlowElement.mo:83
 
         params = (self.nCom, self.AOpe, self.LClo, self.CDOpe, self.CDClo, self.CDCloRat,
                   self.dpCloRat, self.mOpe, self.mClo)
@@ -538,7 +534,7 @@ class OperableDoorCompartment(_DoorCompartmentBase):
 
     def _volume_flow(self, dp: Tensor, drivers) -> tuple[Tensor, Tensor]:
         CVal, m, VZerCom, *coeffs = self._law(drivers)
-        dV = _power_law_at(CVal, dp, m, self.dp_turbulent,
+        dV = power_law_band(CVal, dp, m, self.dp_turbulent,
                            coeffs)  # :57-63, powerLaw.mo:17-29
         return dV, VZerCom
 
@@ -598,7 +594,7 @@ def discretized_door(
     p_key: str = "p_abs",
 ) -> tuple[DoorCompartment, DoorCompartmentHead]:
     """One ``DoorDiscretizedOpen`` as ``nCom`` edges of ``kind``: the compartment element and
-    its head drive. Defaults are MBL's (``DoorDiscretized.mo:6-11``,
+    its head term. Defaults are MBL's (``DoorDiscretized.mo:6-11``,
     ``TwoWayFlowElementBuoyancy.mo:6-14``, ``DoorDiscretizedOpen.mo:6``,
     ``TwoWayFlowElement.mo:19``). ``dA = wOpe hOpe / nCom`` on every edge
     (``DoorDiscretizedOpen.mo:23``, ``DoorDiscretized.mo:60``).
@@ -729,6 +725,11 @@ class DoorPortStream(ConstitutiveLaw):
 
     Alias: `MBLDoorPortStream` (MBL).
     """
+
+    #: `dflow` is half the door's net slope for either stream (see `dflow`): the two edges'
+    #: slopes sum to the exact one, but neither is its own stream's derivative, so the
+    #: differentiable solve differentiates `flow` by autograd instead.
+    exact_slope = False
 
     def __init__(self, comp: _DoorCompartmentBase, head: DoorCompartmentHead,
                  direction: str, kind: str) -> None:

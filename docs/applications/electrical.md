@@ -2,10 +2,10 @@
 
 Lumped electrical circuits: nodes carry voltages, devices between them carry currents, and
 Kirchhoff's current law holds at every node. The whole circuit is **one** `KirchhoffLayer`
-whose potential is the node voltage, solved by Modified Nodal Analysis: the currents of
+whose potential is the node voltage: the currents of
 voltage sources, inductors, transformers and controlled sources are unknowns alongside the
 node voltages (see
-[Modified Nodal Analysis](../concepts/layers.md#modified-nodal-analysis-implicit-coupled-and-dynamic-laws)).
+[Implicit, coupled and dynamic laws](../concepts/layers.md#implicit-coupled-and-dynamic-laws)).
 A circuit is analysed at its DC operating point, as a transient on a fixed time grid, or in the
 sinusoidal steady state (AC, by phasors). The device laws transcribe the Modelica Standard
 Library (MSL, `Modelica.Electrical.Analog`). The same phasor layer also solves the
@@ -78,7 +78,7 @@ tensor).
 |---|---|---|---|---|
 | `Resistor(name, p, n, R, alpha=0, T_ref=300.15)` | `v = R (1 + alpha (T - T_ref)) i` | `Resistance` (`resistor`) | `Basic.Resistor` | yes |
 | `Conductor(name, p, n, G)` | `i = G v` | `Conductance` (`conduction`) | `Basic.Conductor` | yes |
-| `Capacitor(name, p, n, C, v0=0)` | `i = C dv/dt` | `Capacitance` (`capacitor`) | `Basic.Capacitor` | yes |
+| `Capacitor(name, p, n, C, v0=0)` | `i = C dv/dt` | `LinearStorage` at the other pin when one pin is the ground, else `Capacitance` (`capacitor`) | `Basic.Capacitor` | yes (an edge) |
 | `Inductor(name, p, n, L, i0=0)` | `v = L di/dt` | `Inductance` (`inductor`) | `Basic.Inductor` | yes |
 | `VoltageSource(name, p, n, V, waveform, offset=0)` | `v = offset + V unit(t)` | `PrescribedVoltage` (`voltage_source`) | `Sources.*Voltage` | `Constant`, `Sine` |
 | `CurrentSource(name, p, n, I, waveform, offset=0)` | `i = offset + I unit(t)` | `PrescribedCurrent` (`current_source`) | `Sources.*Current` | `Constant`, `Sine` |
@@ -158,7 +158,7 @@ for k in (100, 200, 300):
     t = float(run["time"][k])
     print(f"t = {t * 1e3:.1f} ms: v = {float(run['electrical.phi'][k, out]):.6f} V, "
           f"exact {1.0 - math.exp(-t / tau):.6f} V")
-print(run["integration"][:3])
+print(run["scheme"][:3])
 ```
 
 ```text
@@ -169,7 +169,7 @@ t = 3.0 ms: v = 0.950212 V, exact 0.950213 V
 ```
 
 The result holds `"time"`, `"electrical.phi"` and `"electrical.q"` with the start state as row
-0, and `"integration"`, the rule each step used. `operating_point`, `initial_state`,
+0, and `"scheme"`, the rule each step used. `operating_point`, `initial_state`,
 `transient` and `ac_sweep` pass any further keyword (Newton's `atol` and `rtol`, `method`, ...)
 to every layer solve.
 
@@ -243,6 +243,16 @@ L1: P = 0.000000 W, Q = 0.500000 var
   A source delivering power carries a negative current, as `V1` does in the divider.
 - A two-port device is two consecutive edges, port 1 `p1 -> n1` then port 2 `p2 -> n2`;
   `device_values` gives its voltage and current as pairs `(port 1, port 2)`.
+- A capacitor with one pin on the ground is not an edge: it is a node storage at its other
+  pin (`layer.storage`), and its current is the entry of `"electrical.storage_flow"` that
+  `model.circuit_storage[name]` gives (`(entry, p, n, sign)`; `sign` is `+1` when the ground
+  is pin `n`, `-1` when it is pin `p`). `device_values` and the transient result
+  (`"electrical.storage_flow"`) report it. A capacitor between two other nodes is a
+  `Capacitance` edge, and a phasor model keeps every capacitor as an edge. With
+  `learnable=True` a grounded capacitor's `C` is `layer.storage[0].C`, not on a law. A state
+  that starts a trapezoidal step away from rest (a hot start) must carry
+  `"electrical.storage_flow"`, as `initial_state` and `operating_point` write it; a state
+  without it starts from zero capacitor current, and the first step rings.
 - `"electrical.q"` is ordered by kind (kinds in order of first appearance), then by device;
   `model.circuit_index[name]` is the device's `(kind, slice)` in that order.
 
@@ -494,10 +504,10 @@ current 2.179106576 A
 (`state_keys`), so a state holds the heat dissipated at its own time.
 
 **Stepping with the circuit's rule.** A circuit steps by backward Euler after a restart and
-by the trapezoidal rule otherwise (`integration=`). Give the heat layer the same rule on
-every step with `layer_options={"thermal": {"scheme": "implicit"}}` (backward Euler) or
+by the trapezoidal rule otherwise (`scheme=`). Give the heat layer the same rule on
+every step with `layer_options={"thermal": {"scheme": "backward_euler"}}` (backward Euler) or
 `{"scheme": "trapezoidal"}`. On a trapezoidal step the heat layer integrates the heat as the
-circuit's companion forms integrate their currents, `dt/2 (P_start + P_end)`, `P_start`
+circuit's capacitors and inductors integrate their currents, `dt/2 (P_start + P_end)`, `P_start`
 being the step-start state's `"thermal.sources"`; that is the same Crank-Nicolson rule, so the
 two layers agree on what a step is. The Modelica reader builds this structure for MSL models
 whose resistors or diodes have an enabled heat port (`Analog.Examples.Resistor`,
@@ -567,8 +577,8 @@ drivers = {"electrical.phi_boundary": f64([0.0]), "thermal.x_boundary": f64([273
 for hour in range(24):
     first = hour == 0
     state = model.step(state, drivers, dt=3600.0, t=3600.0 * hour,
-                       integration="backward_euler" if first else "trapezoidal",
-                       layer_options={"thermal": {"scheme": "implicit" if first
+                       scheme="backward_euler" if first else "trapezoidal",
+                       layer_options={"thermal": {"scheme": "backward_euler" if first
                                                   else "trapezoidal"}})
 
 v = state["electrical.phi"]
@@ -591,11 +601,12 @@ layer would set an AC load's power, with source amplitudes given as RMS values (
 
 ## Time integration and breakpoints
 
-`transient(..., integration="trapezoidal")` (the default) uses the trapezoidal rule, second
+`transient(..., scheme="trapezoidal")` (the default) uses the trapezoidal rule, second
 order, except on the first step and on every step whose interval contains a source breakpoint
 (a step, ramp or pulse edge, the start of a sine), which use backward Euler. The trapezoidal rule
 rings after a discontinuity (it is A-stable, not L-stable); one backward Euler step damps that.
-This is the practice of SPICE. `integration="backward_euler"` uses backward Euler throughout.
+This is the practice of SPICE. `scheme="backward_euler"` uses backward Euler throughout.
+`transient` finds the restart steps and hands them to [`Model.march`](../usage.md#marching-over-a-time-grid).
 A pulse-driven RC circuit restarts at every edge:
 
 ```python
@@ -609,7 +620,7 @@ pulsed = Circuit([
 model, state, drivers = build_model(pulsed)
 run = transient(model, initial_state(model, drivers), drivers,
                 [k * 1e-5 for k in range(401)])
-print([k for k, rule in enumerate(run["integration"]) if rule == "backward_euler"])
+print([k for k, rule in enumerate(run["scheme"]) if rule == "backward_euler"])
 ```
 
 ```text
@@ -733,8 +744,8 @@ branch (`branch_rows`) at its two ends; a `DcPowerFlowSolution` holds `va`, `pg`
 ### The AC model
 
 `build_power_flow(net)` returns `(model, state, drivers)` for one phasor
-`KirchhoffLayer` named `"power"`, solved by
-[Modified Nodal Analysis](../concepts/layers.md#modified-nodal-analysis-implicit-coupled-and-dynamic-laws).
+`KirchhoffLayer` named `"power"`, whose sources' currents are unknowns of the solve
+([Implicit, coupled and dynamic laws](../concepts/layers.md#implicit-coupled-and-dynamic-laws)).
 Its nodes are the buses (`str(bus.id)`, in table order) and one more node, `"ground"`, the
 common reference at 0. Every device is an edge **to ground**: the edge's potential difference
 is then the bus voltage phasor `v` itself, and its flow is the current `i` leaving the bus
@@ -781,11 +792,11 @@ the solver's own error; any other error passes through unchanged.
 ### The DC model
 
 `dc_power_flow(net)` builds the DC approximation (all voltage magnitudes 1 p.u., no branch
-resistance or charging, small angle differences) as plain nodal analysis on a classic real
-`KirchhoffLayer` named `"power_dc"`. The potential is the voltage angle `theta` (rad) at
+resistance or charging, small angle differences) on a real `KirchhoffLayer` with no flow
+unknowns (the fast path) named `"power_dc"`. The potential is the voltage angle `theta` (rad) at
 the buses; there is no ground node. Each in-service branch is one edge from bus `->` to bus with
 a `Conductance(1 / (x tau))` (`tau` the tap ratio, 0 meaning 1), and the phase shifts `sigma`
-are a `ConstantDrive` on that kind, the driver `"power_dc.shift"` holding `-sigma`, so the
+are the layer's head driver `"power_dc.edge_head"` (per branch, in edge order) holding `-sigma`, so the
 branch flow is
 
 `Pf = (theta_f - theta_t - sigma) / (x tau)`,
@@ -793,7 +804,7 @@ branch flow is
 MATPOWER's `Bf theta + Pfinj`. The node sources (`"power_dc.sources"`) are each bus's net
 injection `(sum Pg - sum Pd - Gs) / base_mva`, and the slack bus is the layer's one boundary
 node at its table angle (`"power_dc.phi_boundary"`). The layer solves `B theta = P` with one
-linear solve of the weighted graph Laplacian (`layer.mna` is `False`), through the same
+linear solve of the weighted graph Laplacian (the layer has no flow unknowns), through the same
 `solve_power_flow`. Line charging, `Bs` and reactive demand play no part. The slack bus's
 generation is the power its branches carry away plus its own demand and shunt conductance.
 Every other generator bus reports its generators' setpoints from the network, not from the
@@ -823,7 +834,7 @@ naming what it found: not exactly **one slack bus**; a slack bus without an in-s
 generator; a regulated bus whose generators have different voltage setpoints (MATPOWER
 silently takes the last), or a setpoint that is not positive; a branch of zero impedance
 (`r = x = 0`; `x = 0` for DC), named by its row; for DC (`dc=True`), a branch whose `x tau` is
-negative, such as a series-compensated line (the DC power flow on the classic layer needs
+negative, such as a series-compensated line (the DC power flow's conductance layer needs
 positive branch susceptance; the AC power flow takes it); and buses not connected to the slack
 bus through in-service branches (an **island**).
 `dc_power_flow` also refuses a network without an in-service branch, and `PowerNetwork` itself
@@ -874,13 +885,13 @@ layer and the implicit kinds.
 
 ## Verification
 
-Every check is against a closed form or a hand Modified Nodal Analysis (`tests/apps/electrical/`,
+Every check is against a closed form or a hand analysis (`tests/apps/electrical/`,
 `tests/layers/test_mna*.py`):
 
 | Circuit | Compared | Tolerance |
 |---|---|---|
 | Divider; balanced and unbalanced Wheatstone bridge; floating voltage source between two non-ground nodes | Node voltages, bridge current | 1e-12 V or A abs |
-| Controlled sources (all four), ideal transformer, coupled windings at DC | Port voltages and currents against hand MNA | 1e-12 abs |
+| Controlled sources (all four), ideal transformer, coupled windings at DC | Port voltages and currents against hand analysis | 1e-12 abs |
 | RC charge, RL, backward Euler | The exact backward Euler recurrence at every step | 1e-13 abs |
 | RC charge and series RLC ringing, trapezoidal | Convergence order over `dt`, `dt/2`, `dt/4` | order 2 within 0.1 |
 | RC charge through `transient` (backward Euler first step) | Error at 1 s with `dt = 0.01` and order from `dt = 0.02` | error < 1e-4, order >= 1.9 |

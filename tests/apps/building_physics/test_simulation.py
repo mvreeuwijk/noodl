@@ -241,7 +241,7 @@ def test_air_mass_change_needs_the_zone_air_mass_term_on_the_airflow_layer():
     project = read_prj(THREE)
     _set_dod_mdt(project, True)
     model, state, drivers = project_to_model(project)
-    model.kirchhoff["air"]._node_sources = []
+    model.kirchhoff["air"]._storage = []
     with pytest.raises(ValueError, match="ZoneAirMassChange"):
         simulate(model, state, drivers, [0.0, 60.0], air_mass_change=True)
 
@@ -269,7 +269,7 @@ def test_air_mass_change_needs_prescribed_temperatures():
     from noodl.elements import PowerLaw
 
     model, state, drivers = build_model(
-        net, air_laws=[PowerLaw(_f(0.01)[0], _f(0.5)[0], kind="airpath")], drives=[],
+        net, air_laws=[PowerLaw(_f(0.01)[0], _f(0.5)[0], kind="airpath")], heads=[],
         return_inputs=True)
     with pytest.raises(ValueError, match="air_mass_change"):
         simulate(model, state, drivers, [0.0, 60.0], air_mass_change=True)
@@ -517,7 +517,7 @@ def test_simulate_project_steady_refuses_unread_and_overlapping_inputs(tmp_path)
 @pytest.mark.parametrize("key, values", [("T", None), ("P_ref", (101325.0, 95000.0)),
                                          ("V_met", (5.23, 1.0))])
 def test_a_batched_scheduled_project_with_a_constant_flow_fan_matches_its_instances(key, values):
-    """scheduled_three_zone carries a scheduled constant-flow fan, a drive-free kind: a batch
+    """scheduled_three_zone carries a scheduled constant-flow fan, a head-free kind: a batch
     on `T`, `P_ref` or `V_met` runs, and every instance equals its own unbatched run."""
     p = read_prj(DATA / "scheduled_three_zone.prj")
     model, state, drivers = project_to_model(p)
@@ -653,12 +653,60 @@ def test_a_pressure_reader_composes_with_the_zone_pressure_couplings(case):
         assert len(reader.seen) > len(counter.seen)
 
 
+def test_simulate_matches_the_old_inline_zone_pressure_loop_bitwise(monkeypatch):
+    """`simulate`'s zone-pressure loop before `Model.fixed_point`: same states, same passes."""
+    from noodl.apps.building_physics import simulation
+
+    passes = []
+    new_loop = simulation._fixed_point
+
+    def old_loop(model, run, state, key, rtol, max_iter, P, where, cause=""):
+        out = run(state)
+        if key is None:
+            return out
+        n = 0
+        for _ in range(max_iter):
+            nxt = run({**state, key: out[key]})
+            n += 1
+            change = (nxt[key] - out[key]).abs().max().item()
+            out = nxt
+            if change <= rtol * P:
+                break
+        passes.append(n)
+        return out
+
+    def counting(*a, **k):
+        n = [0]
+        run = a[1]
+
+        def counted(s):
+            n[0] += 1
+            return run(s)
+
+        out = new_loop(a[0], counted, *a[2:], **k)
+        passes.append(n[0] - 1)
+        return out
+
+    p = read_prj(STACK)
+    model, state, drivers = project_to_model(p, ambient=dict(p.ambient_conditions, Ta=273.15))
+    with torch.no_grad():
+        monkeypatch.setattr(simulation, "_fixed_point", counting)
+        new = simulate(model, state, drivers, [0.0, 300.0, 600.0], **TIGHT)
+        new_passes, passes[:] = list(passes), []
+        monkeypatch.setattr(simulation, "_fixed_point", old_loop)
+        old = simulate(model, state, drivers, [0.0, 300.0, 600.0], **TIGHT)
+    assert new_passes == passes and max(passes) > 1
+    assert old.keys() == new.keys()
+    assert all(torch.equal(old[k], new[k]) for k in old)
+
+
 def test_an_unconverged_pressure_fixed_point_names_every_coupling():
     model, state, drivers = project_to_model(read_prj(STACK))      # densZP = 1
     model.closures.append(_PressureSpy())
     cooling = Input(TimeSeries([0.0, 600.0], [293.15, 273.15]), "T",
                     index=model.net.node_index("ambient"))
-    both = r"the zone densities and the pressure reader _PressureSpy did not converge in 1"
+    both = (r"the zone densities and the pressure reader _PressureSpy: the fixed point "
+            r"did not converge within 1")
     with pytest.raises(RuntimeError, match=both):
         simulate(model, state, drivers, [0.0, 300.0], inputs=[cooling],
                  zone_pressure_max_iter=1, **TIGHT)
@@ -666,7 +714,8 @@ def test_an_unconverged_pressure_fixed_point_names_every_coupling():
     model, state, drivers = project_to_model(p, ambient=dict(p.ambient_conditions, Ta=273.15))
     model.closures.append(_PressureSpy())
     with pytest.raises(RuntimeError, match=r"the zone densities and the pressure reader "
-                                           r"_PressureSpy did not converge in 1 passes"):
+                                           r"_PressureSpy: the fixed point did not converge "
+                                           r"within 1 passes"):
         steady(model, state, drivers, max_iter=1, atol=1e-14)
 
 
@@ -681,15 +730,15 @@ class _VentSpy(_PressureSpy):
         return {}
 
 
-def _vent_model(spy):
-    """A zone `z` behind a linear conductance to `out`, on a layer "vent", with a fan
-    (`"vent.sources"` at z) ramping up over the run."""
+def _vent_model(spy, fallback=()):
+    """A zone `z` behind a linear conductance to `out`, on a layer "vent" (with the fallback
+    ladder `fallback`), with a fan (`"vent.sources"` at z) ramping up over the run."""
     net = Network(dtype=F64)
     net.add_node("out")
     net.add_node("z")
     net.add_edge("out", "z", kind="c")
     layer = KirchhoffLayer(net, "vent", [Conductance(_f(1e-3), kind="c")],
-                           boundary=["out"])
+                           boundary=["out"], fallback=fallback)
     model = Model(net, {"vent": layer}, closures=[spy])
     drivers = {"vent.phi_boundary": _f(0.0), "vent.sources": _f(0.0, 0.0)}
     fan = Input(TimeSeries([0.0, 600.0], [0.0, 0.02]), "vent.sources", index=1)
@@ -725,6 +774,63 @@ def test_pressure_readers_of_different_potentials_are_refused_by_name():
 DUCTS = DATA / "duct_three_zone.prj"
 
 
+def _fail_inside_newton(monkeypatch, fails, error=None):
+    """Make the Newton iteration of a potential solve fail when `fails(layer, sources,
+    warm)` holds (`warm`: the solve starts from a given `phi0`): it takes no iteration and
+    reports its start unconverged (even one already within its tolerance), raising
+    `ConvergenceError` or returning as its `on_failure` says, or it raises `error` when
+    given. Returns the list of `(layer name, warm)` of the failed
+    solves. Both Newton entries are patched: the primal solve's (`noodl.layers.kirchhoff`)
+    and the differentiable one's (`noodl.solvers.implicit`)."""
+    from noodl.layers import kirchhoff
+    from noodl.solvers import ConvergenceError, implicit
+
+    real_start = KirchhoffLayer._starting_point
+    real_newton = kirchhoff.newton
+    current: dict = {}
+    failed = []
+
+    def starting_point(self, phi0, phi_boundary, drivers, sources, *args, **kwargs):
+        warm = phi0 is not None
+        current["fail"] = (self.name, warm) if fails(self, sources, warm) else None
+        return real_start(self, phi0, phi_boundary, drivers, sources, *args, **kwargs)
+
+    def newton(residual, operator, x0, **kwargs):
+        if current.get("fail") is not None:
+            failed.append(current["fail"])
+            if error is not None:
+                raise error
+            result = real_newton(residual, operator, x0,
+                                 **{**kwargs, "max_iter": 0, "on_failure": "return"})
+            result.converged = torch.zeros_like(result.converged)
+            if kwargs.get("on_failure", "raise") == "raise":
+                raise ConvergenceError(f"{kwargs.get('where', 'newton')}: forced to fail")
+            return result
+        return real_newton(residual, operator, x0, **kwargs)
+
+    monkeypatch.setattr(KirchhoffLayer, "_starting_point", starting_point)
+    monkeypatch.setattr(kirchhoff, "newton", newton)
+    monkeypatch.setattr(implicit, "newton", newton)
+    return failed
+
+
+def _inside_steps(monkeypatch, when=lambda t: True):
+    """Record, while `Model.step` runs a step starting at a `t` for which `when(t)` holds,
+    the state keys it was given (`seen["keys"]`); `seen["in"]` is True only then."""
+    real_step = Model.step
+    seen: dict = {"in": False}
+
+    def step(self, s, d, dt, *, t=None, **kwargs):
+        seen["in"], seen["keys"] = when(t), set(s)
+        try:
+            return real_step(self, s, d, dt, t=t, **kwargs)
+        finally:
+            seen["in"] = False
+
+    monkeypatch.setattr(Model, "step", step)
+    return seen
+
+
 @pytest.mark.slow
 def test_a_step_whose_airflow_fails_from_the_previous_pressures_is_retried_cold():
     """`duct_three_zone.prj`: the supply fan slows from speed 1 to 0.7 in the step ending
@@ -743,16 +849,16 @@ def test_a_step_whose_airflow_fails_from_the_previous_pressures_is_retried_cold(
 
 
 def test_an_iterate_coupled_step_whose_warm_airflow_fails_is_retried_cold(monkeypatch):
-    """`coupling="iterate"` (as a project with UVGI filters builds): the airflow solve of
-    the second step is made to fail whenever it starts from given pressures. The passes stop
-    once a failed solve repeats from the same fed state, the step raises `ConvergenceError`,
-    and `simulate` retries it from the linear initial guess, landing where the unforced run
-    does."""
+    """`coupling="iterate"` (as a project with UVGI filters builds): Newton in the airflow
+    solve of the second step is made to fail whenever it starts from given pressures. The
+    layer's fallback ladder solves it again from the linear initial guess inside each pass,
+    landing where the unforced run does. Without the ladder, the passes stop once a failed
+    solve repeats from the same fed state and the step raises `ConvergenceError`."""
     from noodl.solvers import ConvergenceError
 
     def run():
         spy = _VentSpy()
-        model, drivers, fan = _vent_model(spy)
+        model, drivers, fan = _vent_model(spy, fallback=("linear_guess",))
         model = Model(model.net, model.kirchhoff, closures=[spy], coupling="iterate",
                       iterate_tol={"vent": 1e-12}, iterate_flow_tol={"vent": 1e-12})
         diagnostics: dict = {}
@@ -761,39 +867,28 @@ def test_an_iterate_coupled_step_whose_warm_airflow_fails_is_retried_cold(monkey
         return model, drivers, out, diagnostics["airflow_retries"]
 
     _, _, reference, none = run()
-    real_solve = KirchhoffLayer.solve
-    forced = []
-
-    def warm_fails_late(self, pb, drivers=None, sources=None, phi0=None, *, diagnostics=None,
-                        **kwargs):
-        phi, q = real_solve(self, pb, drivers, sources, phi0, diagnostics=diagnostics,
-                            **kwargs)
-        if phi0 is not None and float(sources[..., 1]) > 0.015:     # the step ending 600 s
-            forced.append(1)
-            if kwargs.get("on_failure", "raise") == "raise":
-                raise ConvergenceError("forced")
-            diagnostics["converged"] = torch.tensor(False)
-        return phi, q
-
-    monkeypatch.setattr(KirchhoffLayer, "solve", warm_fails_late)
+    forced = _fail_inside_newton(                    # warm, in the step ending 600 s
+        monkeypatch, lambda layer, sources, warm: warm and float(sources[..., 1]) > 0.015)
     model, drivers, out, retries = run()
     assert none == [] and retries == [600.0]
     for key in ("vent.phi", "vent.q"):
         torch.testing.assert_close(out[key], reference[key], rtol=1e-10, atol=1e-12)
-    # Model.step itself: two passes, not iterate_max, then ConvergenceError, naming the stop.
+    # Model.step itself, the ladder off: two passes, not iterate_max, then ConvergenceError,
+    # naming the stop.
     forced.clear()
     state = {"vent.phi": out["vent.phi"][1], "vent.q": out["vent.q"][1]}
     with pytest.raises(ConvergenceError, match=r"within 2 passes \(of at most 20; stopped"):
-        model.step(state, {**drivers, "vent.sources": _f(0.0, 0.02)}, 300.0, t=300.0)
+        model.step(state, {**drivers, "vent.sources": _f(0.0, 0.02)}, 300.0, t=300.0,
+                   fallback=())
     assert len(forced) == 2
 
 
 @pytest.mark.slow
 def test_an_iterate_coupled_duct_project_whose_airflow_fails_is_retried_cold(monkeypatch):
     """`duct_three_zone.prj` built with `coupling="iterate"`: the fan's airflow solve fails
-    from the previous pressures in the step ending 00:35 (as without the iteration), the step
-    raises `ConvergenceError`, and `simulate` retries it from the linear initial guess,
-    landing on ContamX's flows."""
+    from the previous pressures in the step ending 00:35 (as without the iteration), and the
+    air layer's fallback ladder solves it again from the linear initial guess inside the
+    pass, landing on ContamX's flows."""
     import functools
 
     from noodl.apps.building_physics import prj
@@ -814,39 +909,37 @@ def test_a_step_whose_retry_fails_too_raises_naming_the_step(monkeypatch):
     from noodl.solvers import ConvergenceError
 
     model, state, drivers = project_to_model(read_prj(THREE))
+    step = _inside_steps(monkeypatch)
+    failed = _fail_inside_newton(monkeypatch, lambda layer, sources, warm: step["in"])
     calls = []
+    real_start = KirchhoffLayer._starting_point
 
-    def failing(self, *args, **kwargs):
-        calls.append((args[0].keys() & {"air.phi"}, kwargs.get("warm_start", True)))
-        raise ConvergenceError("did not converge")
+    def starting_point(self, phi0, *args, **kwargs):
+        if step["in"]:
+            calls.append((step["keys"] & {"air.phi"}, phi0 is not None))
+        return real_start(self, phi0, *args, **kwargs)
 
-    monkeypatch.setattr(Model, "step", failing)
+    monkeypatch.setattr(KirchhoffLayer, "_starting_point", starting_point)
     with pytest.raises(ConvergenceError, match=r"ending at t = 300.0 s.*previous step's "
                                                r"pressures.*linear initial guess"):
         simulate(model, state, drivers, [0.0, 300.0])
     # warm, then from the linear initial guess with the previous pressures still in the state
     assert calls == [({"air.phi"}, True), ({"air.phi"}, False)]
+    assert failed == [("air", True), ("air", False)]
 
 
 def test_a_retried_step_keeps_the_pressures_the_zone_densities_read(monkeypatch):
-    """densZP project, a zone 30 K warmer than outdoors (gauge pressure about 1 Pa): every
-    warm solve of the second step is made to fail, so each of its passes is retried from the
-    linear initial guess. The zone densities still read the previous pressures, so the run
-    lands where the unretried run does (without them its pressure is 8e-5 off)."""
-    from noodl.solvers import ConvergenceError
-
+    """densZP project, a zone 30 K warmer than outdoors (gauge pressure about 1 Pa): Newton
+    in every warm airflow solve of the second step is made to fail, so each of its passes
+    solves it again from the linear initial guess. The zone densities still read the
+    previous pressures, so the run lands where the unretried run does (without them its
+    pressure is 8e-5 off)."""
     model, state, drivers = project_to_model(read_prj(DATA / "pressure_source_stack.prj"))
     drivers = {**drivers, "T": _f(263.15, 293.15)}
     times = [0.0, 300.0, 600.0]
     reference = simulate(model, state, drivers, times, **TIGHT)
-    real_step = Model.step
-
-    def warm_fails_at_300(self, s, d, dt, *, t=None, warm_start=True, **kwargs):
-        if t == 300.0 and warm_start:
-            raise ConvergenceError("forced")
-        return real_step(self, s, d, dt, t=t, warm_start=warm_start, **kwargs)
-
-    monkeypatch.setattr(Model, "step", warm_fails_at_300)
+    step = _inside_steps(monkeypatch, lambda t: t == 300.0)
+    _fail_inside_newton(monkeypatch, lambda layer, sources, warm: step["in"] and warm)
     diagnostics: dict = {}
     out = simulate(model, state, drivers, times, diagnostics=diagnostics, **TIGHT)
     assert diagnostics["airflow_retries"] == [600.0]
@@ -856,20 +949,19 @@ def test_a_retried_step_keeps_the_pressures_the_zone_densities_read(monkeypatch)
 
 def test_an_error_other_than_non_convergence_passes_through_without_a_retry(monkeypatch):
     model, state, drivers = project_to_model(read_prj(THREE))
-    calls = []
 
     class SolveFailure(RuntimeError):
         pass
 
-    def failing(self, *args, **kwargs):
-        calls.append(1)
-        raise SolveFailure("singular transport matrix")
-
-    monkeypatch.setattr(Model, "step", failing)
+    step = _inside_steps(monkeypatch)
+    failed = _fail_inside_newton(monkeypatch, lambda layer, sources, warm: step["in"],
+                                 error=SolveFailure("singular transport matrix"))
     with pytest.raises(SolveFailure) as info:
         simulate(model, state, drivers, [0.0, 300.0])
+    calls = [1 for _ in failed]                      # one Newton solve, not retried
     assert type(info.value) is SolveFailure and str(info.value) == "singular transport matrix"
     assert calls == [1]
+    assert failed == [("air", True)]
 
 
 # ----------------------------------------------------------------------------- controls
@@ -1005,11 +1097,9 @@ def test_simulate_runs_a_batched_control_network():
 
 
 def test_a_retried_step_does_not_advance_a_held_controller(monkeypatch):
-    """Every warm solve of the second step fails, so the step is retried from the linear
-    initial guess; the network is held over the retry, so its PI controller advances once
-    per step, as in the run without the retry."""
-    from noodl.solvers import ConvergenceError
-
+    """Newton in every warm airflow solve of the second step fails, so the solve is retried
+    from the linear initial guess; the network is held over the step, so its PI controller
+    advances once per step, as in the run without the retry."""
     def run():
         network = ControlNetwork([DriverValue("controls.input", 0),
                                   IncrementalPI(0, kp=0.5, ki=1e-4, initial_output=0.1,
@@ -1022,14 +1112,8 @@ def test_a_retried_step_does_not_advance_a_held_controller(monkeypatch):
         return out, diagnostics["airflow_retries"]
 
     reference, none = run()
-    real_step = Model.step
-
-    def warm_fails_at_300(self, s, d, dt, *, t=None, warm_start=True, **kwargs):
-        if t == 300.0 and warm_start:
-            raise ConvergenceError("forced")
-        return real_step(self, s, d, dt, t=t, warm_start=warm_start, **kwargs)
-
-    monkeypatch.setattr(Model, "step", warm_fails_at_300)
+    step = _inside_steps(monkeypatch, lambda t: t == 300.0)
+    _fail_inside_newton(monkeypatch, lambda layer, sources, warm: step["in"] and warm)
     out, retries = run()
     assert none == [] and retries == [600.0]
     assert out["controls.outputs"].tolist() == reference["controls.outputs"].tolist()
@@ -1216,3 +1300,70 @@ def test_scatter_keeps_the_floating_dtype_of_the_driver_it_writes_into():
     assert out.dtype == torch.float32 and out.tolist() == [0.0, 2.0, 0.0]
     assert scatter(base, None, torch.tensor(1.0, dtype=F64)).dtype == torch.float32
     assert scatter(None, None, torch.tensor(1.0, dtype=torch.float32)).dtype == F64
+
+
+def test_the_zone_air_mass_is_a_storage_entry_and_a_sealed_zone_steps_as_the_old_withdrawal():
+    """`ZoneAirMassChange` is node storage of the airflow layer (not a withdrawal), and a
+    sealed pair of zones takes the pressure step the old `NodeWithdrawal` withdrawal gave, to
+    1e-12: ((P_ref + phi) V / (R T) - M_start) / dt."""
+    from noodl.apps.building_physics.prj import ZoneAirMassChange
+    from noodl.elements import LawContext
+    from noodl.storage import NodeStorage
+    from noodl.withdrawals import NodeWithdrawal
+
+    class OldMassChange(NodeWithdrawal):
+        def __init__(self, nodes, volumes):
+            super().__init__(nodes)
+            self.register_buffer("V", volumes)
+
+        def flow(self, phi, drivers=None):
+            P = drivers["P_ref"].unsqueeze(-1)
+            mass = (P + phi) * self.V / (R_AIR * drivers["T"][..., self.nodes])
+            return (mass - drivers["air.mass_start"]) / drivers["time_step"]
+
+        def dflow(self, phi, drivers=None):
+            return self.V / (R_AIR * drivers["T"][..., self.nodes] * drivers["time_step"])
+
+    net = Network(dtype=torch.float64)
+    for name in ["amb", "z1", "z2"]:
+        net.add_node(name)
+    net.add_edge("amb", "z1", kind="g")      # a leak to ambient grounds the pair
+    net.add_edge("z1", "z2", kind="g")
+    law = [Conductance(torch.tensor([1e-4, 0.02], dtype=torch.float64), kind="g")]
+    V = torch.tensor([50.0, 80.0], dtype=torch.float64)
+    T = torch.tensor([283.15, 293.15, 301.15], dtype=torch.float64)
+    P_ref, dt = torch.tensor(101325.0, dtype=torch.float64), 30.0
+    start = torch.zeros(3, dtype=torch.float64)
+    phi_nodes = start[1:]
+    # the zones were 2 K and 5 K colder at the step start: the start mass is the density at
+    # the START temperature, which only the `change` override (not `amount(phi_start)` at the
+    # step's drivers) reproduces
+    T_start = T[1:] - torch.tensor([2.0, 5.0], dtype=torch.float64)
+    mass0 = (P_ref + phi_nodes) * V / (R_AIR * T_start)
+    drivers = {"P_ref": P_ref, "T": T, "air.mass_start": mass0,
+               "time_step": torch.tensor(dt, dtype=torch.float64)}
+    sources = torch.tensor([0.0, 0.01, 0.0], dtype=torch.float64)
+    storage = ZoneAirMassChange([1, 2], V)
+    assert isinstance(storage, NodeStorage) and not isinstance(storage, NodeWithdrawal)
+    new = KirchhoffLayer(net, "air", law, boundary=["amb"], storage=[storage],
+                         scheme="backward_euler")
+    old = KirchhoffLayer(net, "air", law, boundary=["amb"],
+                         withdrawals=[OldMassChange([1, 2], V)])
+    assert tuple(new.storage) == (storage,) and not new.withdrawals
+    got, _ = new.solve(torch.zeros(1, dtype=torch.float64), drivers, sources, dt=dt,
+                       history=(start, None))
+    want, _ = old.solve(torch.zeros(1, dtype=torch.float64), drivers, sources)
+    torch.testing.assert_close(got, want, rtol=0, atol=1e-12)
+    # the withdrawal itself, at the solved pressures, equals the old formula's
+    ctx = LawContext(mode="transient", dt=dt, scheme="backward_euler")
+    rate = storage.rate(got[1:], phi_nodes, None, ctx, drivers)
+    torch.testing.assert_close(rate, old.withdrawals[0].flow(got[1:], drivers),
+                               rtol=0, atol=1e-12)
+    assert rate.abs().max() > 1e-3
+    # without the start mass the storage withdraws nothing: the quasi-steady solve
+    bare = {k: v for k, v in drivers.items() if k != "air.mass_start"}
+    quasi, _ = new.solve(torch.zeros(1, dtype=torch.float64), bare, sources, dt=dt,
+                         history=(start, None))
+    plain = KirchhoffLayer(net, "air", law, boundary=["amb"])
+    ref, _ = plain.solve(torch.zeros(1, dtype=torch.float64), bare, sources)
+    torch.testing.assert_close(quasi, ref, rtol=0, atol=1e-12)

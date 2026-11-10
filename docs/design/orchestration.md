@@ -39,7 +39,7 @@ model).
 Reproduce: `python -m benchmarks.profile_forward` and compare the residual's share of the
 profile.
 
-## Backend of the classic solve
+## Backend of the fast path
 
 For the sparse-direct versus PCG ratios (about 4.6x slower PCG on the single-instance
 forward solve) and the ensemble crossover at `select._SPARSE_DIRECT_MAX_BATCH`, see
@@ -55,3 +55,24 @@ threads it wakes slowed every later small elementwise op of the pass about three
 
 Reproduce: `python -m benchmarks.sewer_dynwave_speed`, swapping the hand-written
 factorisation for `torch.linalg.qr`.
+
+## Why `CoupledModel` is not folded into `Model`
+
+Folding `CoupledModel` into `Model` over a disjoint-union network was considered and
+rejected: it is not simpler in code, and it would put coupling-only rules into `Model`.
+
+1. **Sub-steps.** Each model has its own `dt` sub-steps (`substeps` per model). `Model`
+   sub-steps its transport layers only and runs closures and Kirchhoff layers once per step.
+2. **Pass order.** The recipient-first schedule and the conservative transfer of an integrated
+   boundary amount need a pass order per network. `Model`'s pass order is fixed by layer kind.
+3. **Names.** A union network would need every node, layer and driver key renamed, and every
+   application closure reads fixed keys (`"street.x"`, `"rho_amb"`).
+4. **Coupling mode.** Each model keeps its own mode (building `iterate`, street `pingpong`).
+5. **Nothing to delete.** The loop and the adjoint are already shared (`run_passes`,
+   `differentiate_fixed_point`), so a merge would remove little and add all of the above to
+   `Model`.
+
+`CoupledModel` is "a `Model` across several networks": the loop and the adjoint are shared,
+the schedule is its own.
+
+See [Coupling](../applications/coupling.md) for the user-facing account.

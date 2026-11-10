@@ -56,6 +56,25 @@ by a test.
 
 ![Two independent models exchanging values through a ValueLink, iterated to a fixed point](../assets/app-coupling.svg)
 
+### Why a union is not one `Model`
+
+Folding `CoupledModel` into `Model` over a disjoint-union network was considered and
+rejected: it is not simpler in code, and it would put coupling-only rules into `Model`.
+
+1. **Sub-steps.** Each model has its own `dt` sub-steps (`substeps` per model). `Model`
+   sub-steps its transport layers only and runs closures and Kirchhoff layers once per step.
+2. **Pass order.** The recipient-first schedule and the conservative transfer of an integrated
+   boundary amount need a pass order per network. `Model`'s pass order is fixed by layer kind.
+3. **Names.** A union network would need every node, layer and driver key renamed, and every
+   application closure reads fixed keys (`"street.x"`, `"rho_amb"`).
+4. **Coupling mode.** Each model keeps its own mode (building `iterate`, street `pingpong`).
+5. **Nothing to delete.** The loop and the adjoint are already shared (`run_passes`,
+   `differentiate_fixed_point`), so a merge would remove little and add all of the above to
+   `Model`.
+
+`CoupledModel` is "a `Model` across several networks": the loop and the adjoint are shared,
+the schedule is its own.
+
 ## A worked example
 
 ```python
@@ -331,7 +350,7 @@ the street side. Both demos assert that sign.
 | The returned state's forward value agrees with the value the recipient was stepped with, to rtol | rtol 1e-9, atol 1e-14 | holds |
 | Gradient across the join vs central differences | rel 1e-5 | holds |
 | `substeps={"building": k}` calls the fast model exactly `k` times per slow step | exact | holds |
-| Closed two-way exchange conserves the total amount — exact/implicit/trapezoidal schemes, 1 and 4 recipient sub-steps | abs 1e-10 | holds |
+| Closed two-way exchange conserves the total amount — exact/backward_euler/trapezoidal schemes, 1 and 4 recipient sub-steps | abs 1e-10 | holds |
 | 2×2 analytic fixed point (one implicit step each, unit source into the recipient) solves to $(4/3, 5/3)$ | abs 1e-9 | holds |
 | Structural guard: a two-way step assembles no dense topology operator (`upwind`/`incidence`/selectors) | n/a | holds |
 | Synthetic back-coupling, 2×3 m canyon: one-way 4.169740e-08 vs two-way 4.145151e-08 kg/m³ | measured | **0.5897 %** change, 27 passes |

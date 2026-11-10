@@ -689,11 +689,11 @@ def test_dynamic_parity_at_the_reference_precision_every_row(model):
 
 
 @pytest.mark.slow
-@pytest.mark.parametrize(("scheme", "order"), [("implicit", 1), ("midpoint", 2)])
+@pytest.mark.parametrize(("scheme", "order"), [("backward_euler", 1), ("midpoint", 2)])
 def test_time_integration_error_falls_with_the_order_of_the_scheme(scheme, order):
     """ZonalFlow, without extrapolation: the error of `rooB.T` against the reference over
     the rows after its start falls by 2**order from 1 to 2 substeps per output interval:
-    first order for `"implicit"` (flows at the step's end), second for `"midpoint"`, whose
+    first order for `"backward_euler"` (flows at the step's end), second for `"midpoint"`, whose
     symmetric step is what `extrapolate` relies on. The ratio must be within 10 % of
     2**order (measured: 1.97 and 4.00). `rooB.T` is the column with the largest
     time-integration error; the zonal flows are prescribed, and the pressures sit at the

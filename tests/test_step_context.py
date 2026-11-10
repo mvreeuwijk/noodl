@@ -18,7 +18,7 @@ def _t(values):
     return torch.tensor(values, dtype=F64)
 
 
-def _net_and_layer(scheme="implicit"):
+def _net_and_layer(scheme="backward_euler"):
     net = Network(dtype=F64)
     net.add_node("ambient")
     net.add_node("zone")

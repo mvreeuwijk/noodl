@@ -2,7 +2,7 @@
 
 A building is parameterised through attributes set with `net.add_node(...)` and
 `net.add_edge(...)` (or by `add_zone`, `add_large_opening` and the CONTAM reader), which the
-layer builders, elements and drives read by name. This module is the one place that says
+layer builders, elements and heads read by name. This module is the one place that says
 what each attribute means and in which unit, and `scripts/gen_catalogue.py` renders it.
 Each value is `(meaning with unit, who reads it)`.
 """

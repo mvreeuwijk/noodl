@@ -5,7 +5,7 @@ import torch
 
 from noodl.apps.building_physics import orifice_law_from_edges, thermal_layer
 from noodl.apps.building_physics.thermal import IdealGasDensity
-from noodl.drives import Stack
+from noodl.heads import EdgeHeads, Stack
 from noodl.layers.kirchhoff import KirchhoffLayer
 from noodl.model import Model
 from tests.apps.building_physics.test_components_physics import components_house
@@ -28,10 +28,11 @@ def test_thermal_layer_stores_canonical_names():
 def test_model_refs_show_canonical_boundary_nodes():
     net = house()
     el = orifice_law_from_edges(net, "airpath")
-    air = KirchhoffLayer(net, "air", [el], [Stack.from_network(net, "airpath")],
-                         boundary=["ambient"])
+    air = KirchhoffLayer(net, "air", [el], boundary=["ambient"])
     th = thermal_layer(net, fixed_temperature=["door.a"])
-    model = Model(net, {"air": air, "thermal": th}, closures=[IdealGasDensity(th, ambient_index=0)])
+    heads = EdgeHeads(air, [Stack.from_network(net, "airpath")])
+    model = Model(net, {"air": air, "thermal": th},
+                  closures=[IdealGasDensity(th, ambient_index=0), heads])
     assert model.refs.thermal.boundary_nodes == ["ambient", "A.air"]
 
 

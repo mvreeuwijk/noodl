@@ -1,4 +1,5 @@
-"""The MNA stepping benchmark runs end to end (`--quick`); it times nothing here."""
+"""The stepping benchmark (`benchmarks/mna_stepping.py`) runs end to end (`--quick`); it
+times nothing here."""
 
 from benchmarks.mna_stepping import main
 

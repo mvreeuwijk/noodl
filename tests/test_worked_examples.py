@@ -30,7 +30,7 @@ def test_three_zone_exchange_matches_the_backward_euler_series():
     (dt=0.2), initial concentrations (0, 2, 1). The worked example's implicit relation is
     ``p_new - p_old + dt * q/V = 0`` with q_i the net outflow of node i -- exactly backward
     Euler on ``V dp/dt = inflow - outflow``, which is precisely
-    ``TransportLayer(scheme="implicit")``.
+    ``TransportLayer(scheme="backward_euler")``.
 
     ``TransportLayer`` needs a boundary node (``active_interior`` in
     ``src/noodl/layers/transport.py`` makes any node touched by a flow-kind edge interior
@@ -53,7 +53,7 @@ def test_three_zone_exchange_matches_the_backward_euler_series():
     capacity = torch.tensor([10.0, 1.0, 2.0], dtype=F64)  # V for nodes 0, 1, 2
     layer = TransportLayer(
         net, "species", capacity=capacity, flow_kind="flow", boundary=["amb"],
-        scheme="implicit",
+        scheme="backward_euler",
     )
 
     q = torch.tensor([1.0, 1.0, 1.0, 0.0], dtype=F64)  # cycle flows, then the inert edge

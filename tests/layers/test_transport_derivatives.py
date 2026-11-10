@@ -63,7 +63,7 @@ def test_exact_step_tangent_matches_the_matrix_exponential_at_equilibrium(x0):
     "scheme, expected",
     [
         pytest.param("exact", -math.exp(-1.5), id="exact-control"),
-        pytest.param("implicit", -1.0 / 2.5**2, id="implicit"),
+        pytest.param("backward_euler", -1.0 / 2.5**2, id="backward_euler"),
         pytest.param("trapezoidal", -1.0 / 1.75**2, id="trapezoidal"),
     ],
 )
@@ -86,7 +86,7 @@ def test_steady_gradient_with_respect_to_removal():
     """0 = -(q + r) x + s with q = 1, s = 1: x = 1/(1 + r) = 2/3 at r = 0.5,
     dx/dr = -1/(1 + r)^2 = -4/9."""
     removal = _t([0.5], requires_grad=True)
-    layer = _layer("implicit", removal=removal)
+    layer = _layer("backward_euler", removal=removal)
     x = layer.steady(_t([1.0]), _t([0.0, 1.0]), _t([0.0]))
     assert x.item() == pytest.approx(2 / 3, rel=1e-10)
     (dr,) = torch.autograd.grad(x.sum(), (removal,), allow_unused=True)
@@ -97,7 +97,7 @@ def test_steady_gradient_with_respect_to_removal():
 def test_implicit_gradient_survives_an_outer_transform_of_the_coefficient():
     """removal = exp(theta): d x1/d theta = d x1/d r * r, with d x1/d r = -1/2.5^2 at r = 0.5."""
     theta = _t([math.log(0.5)], requires_grad=True)
-    layer = _layer("implicit", removal=torch.exp(theta))
+    layer = _layer("backward_euler", removal=torch.exp(theta))
     y = layer.step(_t([1.0]), _t([1.0]), _t([0.0, 0.0]), _t([0.0]), 1.0)
     (dtheta,) = torch.autograd.grad(y.sum(), (theta,), allow_unused=True)
     assert dtheta is not None
@@ -107,7 +107,7 @@ def test_implicit_gradient_survives_an_outer_transform_of_the_coefficient():
 def test_implicit_gradient_with_respect_to_carrier():
     """carrier c scales the flow: dx/dt = -c q x; implicit x1 = 1/(1 + c) -> dx1/dc = -1/(1+c)^2."""
     carrier = torch.tensor(1.0, dtype=F64, requires_grad=True)
-    layer = _layer("implicit", carrier=carrier)
+    layer = _layer("backward_euler", carrier=carrier)
     y = layer.step(_t([1.0]), _t([1.0]), _t([0.0, 0.0]), _t([0.0]), 1.0)
     (dc,) = torch.autograd.grad(y.sum(), (carrier,), allow_unused=True)
     assert dc is not None
@@ -122,7 +122,7 @@ def test_implicit_gradient_with_respect_to_transmission():
     outflow edge's transmission (index 0) does not enter the interior balance at all.
     """
     transmission = _t([1.0, 1.0], requires_grad=True)
-    layer = _layer("implicit", circulation=True, transmission=transmission)
+    layer = _layer("backward_euler", circulation=True, transmission=transmission)
     y = layer.step(_t([1.0]), _t([1.0, 1.0]), _t([0.0, 0.0]), _t([1.0]), 1.0)
     (dt_,) = torch.autograd.grad(y.sum(), (transmission,), allow_unused=True)
     assert dt_ is not None

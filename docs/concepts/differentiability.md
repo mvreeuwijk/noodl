@@ -38,7 +38,10 @@ $$
 
 so the backward pass is **one transposed linear solve**, whatever the forward took. The Jacobian
 is the one Newton already assembled, and the transposed solve reuses the same operator through
-`TransposeOperator`. For a symmetric operator — which a Kirchhoff layer's is — `rmatvec` is
+`TransposeOperator`. Its slopes are each law's own analytic `dflow` (a node storage's
+`rate_slope`) where the law declares it the exact derivative of its flow (`exact_slope`, the
+default), and the autograd derivative of the flow where it does not
+([Writing a constitutive law](elements.md)). For a symmetric operator — which a Kirchhoff layer's is — `rmatvec` is
 the forward action, so nothing extra is built.
 
 The practical consequence: a model that takes 12 Newton iterations to converge costs the same to
@@ -53,34 +56,43 @@ interface, backward memory is one pass, and the gradient error is of the order o
 residual rather than the unrolled truncation counted from the start state. The convergence
 decision itself is still made on detached copies and never enters the graph.
 
+`Model.fixed_point` gives the same treatment to any repeated pass of an application:
+`street_steady` (transport and chemistry), `street_steady_with_plume` (the above-roof plumes)
+and `sewer_steady` (stepping to steady state) all run on it. The watched keys decide
+convergence; the unknowns of the adjoint are every key the pass recomputes from the state it
+was fed and reads back (the watched keys, and any other that feeds back, such as a closure's
+manhole levels), as under `coupling="iterate"`, and every key the pass returns is an output. Unlike
+`coupling="iterate"` it has no confirmation pass at the certified state when pass 1 finds
+nothing differentiable.
+
 ## The contract
 
-For `differentiable=True` to be *safe*, two rules must hold. A violation raises a `ValueError`
-— naming the offending law or drive and the attribute where it can — rather than silently
+For `differentiable=True` to be *safe*, one rule must hold. A violation raises a `ValueError`
+— naming the offending law and the attribute where it can — rather than silently
 returning a wrong or absent gradient.
 
 The differentiable solve threads a fixed set of tensors through `Function.apply`: each law's and
-node source's registered parameters, the driver values, `sources` and the boundary potentials
+withdrawal's registered parameters, the driver values, `sources` and the boundary potentials
 (and, on a transient step, the step-start state). Any other tensor that requires grad and reaches
 the residual is invisible to the implicit adjoint. Two checks look for one:
 
-- **Before solving, by attribute.** Every tensor a law, node source or drive holds — plain
+- **Before solving, by attribute.** Every tensor a law or withdrawal holds — plain
   attributes, registered buffers, and tensors nested in lists, tuples, dicts, sets and plain
   objects — is scanned, and one that requires grad without being threaded is refused by name.
-- **At the starting guess and again at the root, by evaluation.** The layer evaluates its
-  residual with every threaded tensor detached; if the result still requires grad, some other
-  tensor reaches it (a tensor captured by a closure, which no scan can see), and the solve is
-  refused. The root is the point the adjoint linearises at, so a law that reads such a tensor
-  only on a branch the solve reaches after leaving the starting guess is caught there. Each
-  evaluation costs one residual evaluation.
+- **At every Newton iterate, from the starting guess to the root, by evaluation.** The forward
+  Newton evaluates the residual with every threaded tensor detached; if the result still
+  requires grad, some other tensor reaches it (a tensor captured by a closure, which no scan
+  can see), and the solve is refused. The root is the point the adjoint linearises at, so a law
+  that reads such a tensor only on a branch the solve reaches after leaving the starting guess
+  is caught there. The check is the forward's own residual evaluations: it costs none extra.
 
 What the evaluation establishes is structural and pointwise: the residual's autograd graph at
-those two points reaches no un-threaded tensor. It does not prove that no such tensor could be
+those points reaches no un-threaded tensor. It does not prove that no such tensor could be
 read elsewhere in the state space, and it does not inspect a tensor that requires grad but is
 not used at the root; neither affects the gradient at the returned solution. (The Jacobian is
-the autograd derivative of the same flows, so it reads nothing the residual does not.)
+the same laws' slopes, a constant of the adjoint.)
 
-**1. A law's differentiable state must be a registered parameter.**
+**A law's differentiable state must be a registered parameter.**
 
 ```python
 leak = PowerLaw(C=torch.tensor(0.01), n=torch.tensor(0.65), learnable=True)   # correct
@@ -96,9 +108,10 @@ The attribute scan walks what the law holds (attributes, buffers, and containers
 objects nested up to eight levels, skipping containers of more than 1024 items); a tensor it
 does not reach is caught by the residual evaluation where the residual reads it.
 
-**2. A drive must read every differentiable quantity from the `drivers` mapping**, never hold
-one as an instance attribute. See [Constitutive laws and drives](elements.md#the-rule-a-drive-must-obey)
-for why this is structural rather than stylistic.
+A head term (stack, wind, drag) is not held by the layer: `EdgeHeads` writes the total as the
+driver `"<layer>.edge_head"`, so a gradient reaches whatever the head reads. See
+[Constitutive laws and heads](elements.md#the-rule-a-head-term-must-obey) for why a head is a
+function of the drivers alone.
 
 ## What is guaranteed
 
@@ -127,7 +140,7 @@ that would fail if the claim stopped holding.
   residual (its own class docstring calls out `solvers/implicit.py`'s warning "almost verbatim,
   because it is the identical trap").
 - **A discrete-step derivative for every integrator, including the exponential action with a
-  state-independent term count.** `implicit`, `trapezoidal` and `exact` (matrix-exponential)
+  state-independent term count.** `backward_euler`, `trapezoidal` and `exact` (matrix-exponential)
   schemes are all differentiable, and the exact scheme's tangent at equilibrium matches the
   analytic matrix-exponential derivative even from $x_0 = 0$ or $x_0 \to 0$, because the
   Taylor schedule (substep count $s$, term count $m$) is computed from $\lVert dt\, M\rVert_1$
@@ -141,7 +154,7 @@ that would fail if the claim stopped holding.
   and
   tests/layers/test_expm_schedule.py::test_shifted_action_gradients_match_the_dense_reference_near_a_zero_operator).
 - **Every transport coefficient is differentiable under every scheme.** Carrier, transmission,
-  kinetics, removal and conductance all reach the backward pass under `implicit`, `trapezoidal`
+  kinetics, removal and conductance all reach the backward pass under `backward_euler`, `trapezoidal`
   and `exact` alike, checked by `gradcheck` against each coefficient family, both in a single
   step and at steady state
   (pinned by tests/layers/test_transport_coefficients.py::test_carrier_gradient,
@@ -150,7 +163,8 @@ that would fail if the claim stopped holding.
   tests/layers/test_transport_coefficients.py::test_removal_gradient and
   tests/layers/test_transport_coefficients.py::test_conductance_gradient, all parametrised
   over scheme, plus each one's `_steady` counterpart).
-- **Coupled fixed points are differentiated implicitly.** Both `Model`'s own `coupling="iterate"`
+- **Coupled fixed points are differentiated implicitly.** `Model`'s own `coupling="iterate"`,
+  `Model.fixed_point` (and so `street_steady`, `street_steady_with_plume` and `sewer_steady`)
   and `couple.CoupledModel`'s two-way join run their passes to convergence WITHOUT a graph, run
   the certified pass once more on the graph, and attach the implicit adjoint of the interface
   equations (`solvers.fixed_point`): one small GMRES solve on $(I - J^T)$ at the converged
@@ -241,12 +255,13 @@ the cases rather than leaving you to discover them.
   site through a real coupled QP to give a genuine cross-gradient.
 - **At zero flow in the sewer.** `normal_depth` returns exactly $h = 0$ with gradient $0$ at
   $q = 0$, a documented modelling choice, because the true $dh/dq$ diverges there.
-- **Structurally, for `f_i`.** The sewer's interfacial drag coefficient is a `Drive` attribute
-  and therefore not differentiable by this framework's design — stated as such, "not an
-  oversight."
+- **For `f_i`.** The sewer's interfacial drag coefficient is an attribute of the head term `Drag`.
+  The head reaches the layer as the driver `"air.edge_head"`, so a gradient reaches `f_i` when it is
+  a tensor with `requires_grad=True` (it agrees with a central difference). The default is a
+  calibrated constant, not a parameter to fit.
 - **For a tank's area.** In the water application, tank area is not reached by a single
-  `water_steady` call — only `bottom + level` enters the steady solve. Gradients with respect to
-  it flow through `TankLevels.advance`, not through the steady state.
+  `water_steady` call — only the tank's head enters the steady solve. Gradients with respect to
+  it flow through the forward-Euler move of `water_event_step`, not through the steady state.
 
 ## Verification
 

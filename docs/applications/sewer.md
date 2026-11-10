@@ -134,7 +134,7 @@ model, state, drivers = build_model(
     species=("bod", "sulfide"),
     f_air=0.02, f_i=7.49e-4, c_s=1.0,
     leak_area=8e-4, leak_cd=0.6, fans=(),
-    coupling="pingpong", scheme="implicit", dt_storage=None,
+    coupling="pingpong", scheme="backward_euler", dt_storage=None,
 )
 ```
 
@@ -183,8 +183,10 @@ hydraulics closure writes those layers' capacity from the flows and the initial 
 evaluated from the drivers; this holds with or without `storage=True`.
 
 `sewer_steady(model, state, drivers, *, reaction=None, dt=60.0, max_iter=500, tol=1e-12)` steps
-repeatedly until every transport layer stops changing. You need it rather than `Model.steady`
-whenever quality is on, because `Model.steady` never applies reactions.
+repeatedly until every transport layer stops changing (`Model.fixed_point`: gradients are those
+of the fixed point, by the implicit adjoint, with backward memory of one step). You need it
+rather than `Model.steady` whenever quality is on, because `Model.steady` never applies
+reactions.
 
 `model._apply_closures(state, drivers)` resolves the hydraulics without stepping any layer,
 which is the quickest way to inspect `sewer.q`, `sewer.h`, `sewer.v` and the rest.
@@ -273,7 +275,18 @@ network, nothing else is needed; where backwater, a flat conduit or a loop makes
 on the heads at both ends, the heads are the unknowns and the flows follow from the head
 differences. The water side then has one `KirchhoffLayer` named `"water"` (quantity `head`
 in m, flow in m³/s) over the conduits, with the outfalls as its boundary, and a
-`JunctionStorage` node source at every junction.
+`JunctionStorage` at every junction.
+
+`JunctionStorage` is the layer's node storage (`noodl.NodeStorage`): the water stored at a
+junction is $A_s H$, and the layer steps it with its own `dt` and its trapezoidal scheme. SWMM's
+junction rules (the bed, the EXTRAN band and surcharge anchor, the flood wall, ponding and the
+drop-end area switch, all described below) are `max`/`min` compositions over the storage line,
+so `JunctionStorage` overrides the storage's `rate` and `rate_slope` and keeps each rule as SWMM
+has it. Its step start is SWMM's own (the drivers `"water.head_start"` and
+`"water.net_inflow_start"`), not the layer's step-start potentials or the flow into storage, so
+a step that ends unconverged keeps SWMM's fixed points. After every step the model state holds
+`"water.storage_flow"`, the flow into each junction's storage (m³/s); it is an output, read by
+nothing.
 
 The rest of this section follows the physics in the order it enters the solve: the
 [equations](#equations) and how they are [solved](#what-is-solved) (iteration, Anderson
@@ -413,9 +426,9 @@ network's size: 10-15 ms on the 6-node tree, from 37 ms, and 38 ms on a 2,047-co
 from 55 ms (`benchmarks/sewer_dynwave_speed.py`, which also times SWMM). With SWMM's own
 tolerances the tree's 30 minutes take 11.5 s (123 s before), about 850 times SWMM; the
 2,047-conduit tree is about 40 times SWMM. Most of it is the conduit update (`dynwave_terms.conduit_terms`), SWMM's
-normal and critical depths, and the head solve, whose Newton Jacobian is the elements' own
-analytic `dflow` on the primal passes (`KirchhoffLayer(analytic_primal=True)`; the implicit
-adjoint still differentiates the converged pass). A batch of B scenarios (`simulate_dynamic_wave`
+normal and critical depths, and the head solve, whose Newton Jacobian (and the implicit
+adjoint's) is the elements' own analytic `dflow`: every sewer law's `dflow` is the exact
+derivative of its flow (`exact_slope`, [Writing a constitutive law](../concepts/elements.md)). A batch of B scenarios (`simulate_dynamic_wave`
 with a `(B, n)` inflow) costs about the same per pass, so an ensemble amortises it.
 
 #### Units
@@ -767,7 +780,7 @@ stays 100 mg/L and through an evaporating one rises to 113 and 132). The conduit
 (`ConduitTerms.seep_loss_rate`, after the volume cap) joins a negative lateral
 inflow in the withdrawal of a junction (`DynamicWaveHydraulics._quality_volume`), which is an
 outflow of the transport step itself, the removal rate `"water_quality.removal"` (1/s: the
-withdrawal over the end-of-step volume for the implicit scheme, over the mean volume for the
+withdrawal over the end-of-step volume for the backward Euler scheme, over the mean volume for the
 trapezoidal one), so it leaves at the local concentration; a uniform concentration stays uniform
 while the water and the mass fall. Evaporation only lowers the transport volume, which raises
 the concentration. Quality needs circular conduits, which are closed and so do not evaporate: the
@@ -1373,7 +1386,7 @@ Each species `s` enters with the lateral inflow at the concentration of the driv
 `"<s>_in"` (kg/m³, one per node); only a positive inflow loads. A negative lateral inflow (a
 withdrawal) takes water and mass out at the junction's own concentration, whatever `"<s>_in"`
 is, so a uniform tracer stays uniform. It is an outflow of the transport step itself (the
-removal rate `"water_quality.removal"`, $w / V_{	ext{end}}$ for the implicit scheme), so the
+removal rate `"water_quality.removal"`, $w / V_{	ext{end}}$ for the backward Euler scheme), so the
 water that enters during the step and is withdrawn again carries its mass out too, even
 when one step withdraws several times what the junction held at its start. `"bod"` decays and `"sulfide"` is generated
 (Pomeroy–Parkhurst, see [Quality](#quality)); a species of any other name is a conservative
@@ -1471,11 +1484,14 @@ inverted in closed form with a laminar blend near zero. The air-side wetted peri
 $P_{\text{air}} = \pi D - P(h) + T(h)$ — the dry wall plus the water surface acting as a moving
 wall — and $D_h = 4A_{\text{air}}/P_{\text{air}}$.
 
-`Drag` is a `Drive`: $D = \tfrac{1}{2} f_i \rho U_s \lvert U_s \rvert T L / A_{\text{air}}$ with
+`Drag` is a head term: $D = \tfrac{1}{2} f_i \rho U_s \lvert U_s \rvert T L / A_{\text{air}}$ with
 $U_s = c_s V_w$. The full branch law is $\Delta p = R\lvert Q\rvert Q - D - B$, where $B$ is the
-**same `Stack` buoyancy drive the building application uses** — reused unchanged.
+**same `Stack` buoyancy term the building application uses** — reused unchanged. `air_heads`
+adds `Drag` and the two `Stack` terms (headspace and leak) up in an `EdgeHeads` closure that
+writes the layer's head driver `"air.edge_head"`, after the hydraulics closure that writes the
+`sewer.*` drivers `Drag` reads.
 
-The drag sign convention is documented and was verified rather than assumed: the drive returns
+The drag sign convention is documented and was verified rather than assumed: the term returns
 $+D$ so that with both ends at ambient the air moves from the upstream manhole toward the
 downstream one, the direction the wastewater drags it. The opposite sign was tried and caught by
 the measurement.
@@ -1483,8 +1499,8 @@ the measurement.
 #### Headspace air on the dynamic wave
 
 `build_model(net, air=True)` on a `"dynamic_wave"` network reuses the kinematic path's air layer
-unchanged (`Headspace`, `Drag`, `Stack`, the leaks and fans, built by the same `air_layer`) and
-feeds it from the solved conduits. Each conduit's air geometry is read at its **link depth**
+unchanged (`Headspace`, `Drag`, `Stack`, the leaks and fans, built by the same `air_layer` and
+`air_heads`) and feeds it from the solved conduits. Each conduit's air geometry is read at its **link depth**
 $y = \min(y_{\text{mid}}, y_{\text{full}})$ (SWMM's `Link.newDepth`, one barrel's) on the exact
 circle (`air_geometry`), whatever `net.geometry` is: the tabulated section is the water side's,
 and the air has no SWMM reference, as with the kinematic path at `geometry="tabulated"`.
@@ -1894,7 +1910,7 @@ publish numbers from this application.
 - **No gas-phase sulfide sink.** H₂S leaves the headspace by ventilation, at the outfall, and
   by re-absorption into the water (the two-film flux is signed); no wall uptake or gas-phase
   oxidation is modelled.
-- **Headspace drag uses the absolute water-surface velocity.** `Drag` drives the air with
+- **Headspace drag uses the absolute water-surface velocity.** `Drag` forces the air with
   $U_s$ rather than the relative velocity $U_s - U_{\text{air}}$, which would need the air
   layer's own solved state. The drag is overestimated where the headspace air already moves
   with the water.
@@ -1902,8 +1918,9 @@ publish numbers from this application.
   elevation as the mean of its end nodes' inverts plus its diameter, as the kinematic path does;
   a dynamic-wave conduit raised on an inlet or outlet offset has its crown that much higher than
   the stack term sees.
-- **`f_i` is not differentiable.** It is a `Drive` attribute, and the differentiable solve
-  refuses `requires_grad=True` on it; you cannot fit it by gradient descent.
+- **`f_i` is a calibrated constant.** It is an attribute of the `Drag` head term. `EdgeHeads` writes
+  the head as the driver `"air.edge_head"`, so a gradient reaches `f_i` when it is a tensor with
+  `requires_grad=True`, but the value is calibrated against Pescod and Price (above), not fitted.
 - **Without a ground elevation, manhole shafts add no headspace volume**, so the air-quality
   capacity is the conduit headspace alone. `model.notes` says when this applies.
 

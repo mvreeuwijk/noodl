@@ -305,7 +305,7 @@ def test_implicit_step_sparse_matches_dense_reference():
     net = flow_through_zone()
     cap = torch.tensor([1000.0], dtype=torch.float64)
     layer = TransportLayer(net, "co2", capacity=cap, flow_kind="airpath",
-                            boundary=["ambient"], scheme="implicit")
+                            boundary=["ambient"], scheme="backward_euler")
     q = torch.tensor([0.5, 0.5], dtype=torch.float64)
     c0 = torch.tensor([100.0], dtype=torch.float64)
     source = torch.tensor([2.0], dtype=torch.float64)
@@ -327,7 +327,7 @@ def test_gradcheck_implicit_step_wrt_x_q_sources_boundary():
     net = flow_through_zone()
     layer = TransportLayer(
         net, "co2", capacity=torch.tensor([1000.0]), flow_kind="airpath",
-        boundary=["ambient"], scheme="implicit",
+        boundary=["ambient"], scheme="backward_euler",
     )
     x = torch.tensor([150.0], dtype=torch.float64, requires_grad=True)
     q = torch.tensor([0.4, 0.4], dtype=torch.float64, requires_grad=True)
@@ -371,7 +371,7 @@ def test_two_sealed_zones_conserve_total_amount_sparse_path():
     net.add_edge("B", "A", kind="airpath")
     cap = torch.tensor([100.0, 300.0], dtype=torch.float64)
     layer = TransportLayer(net, "co2", capacity=cap, flow_kind="airpath",
-                            boundary=["ambient"], scheme="implicit")
+                            boundary=["ambient"], scheme="backward_euler")
     q = torch.tensor([0.05, 0.05], dtype=torch.float64)
     c = torch.tensor([1000.0, 400.0], dtype=torch.float64)
     total0 = (cap * c).sum()
@@ -390,7 +390,7 @@ def test_implicit_step_on_failure_return_does_not_raise():
     net.add_edge("B", "A", kind="airpath")
     layer = TransportLayer(
         net, "co2", capacity=torch.tensor([100.0, 100.0]), flow_kind="airpath",
-        boundary=[], scheme="implicit",
+        boundary=[], scheme="backward_euler",
     )
     q = torch.zeros(2, dtype=torch.float64)
     x = torch.tensor([10.0, 5.0], dtype=torch.float64)
@@ -964,7 +964,7 @@ def test_matvec_rmatvec_boundary_forcing_broadcast_match_dense_reference_per_ins
         torch.testing.assert_close(yb[i], N_i @ x_b, rtol=1e-9, atol=1e-12)
 
 
-@pytest.mark.parametrize("scheme", ["exact", "implicit", "trapezoidal"])
+@pytest.mark.parametrize("scheme", ["exact", "backward_euler", "trapezoidal"])
 def test_step_broadcasts_unbatched_state_against_batched_flow(scheme):
     net = three_node_chain()
     cap = torch.tensor([50.0, 80.0], dtype=torch.float64)
@@ -1058,7 +1058,7 @@ def _k2_state(batch: int, n_i: int) -> torch.Tensor:
     return 50.0 + 10.0 * torch.rand(batch, n_i, 2, dtype=torch.float64)
 
 
-@pytest.mark.parametrize("scheme", ["implicit", "trapezoidal"])
+@pytest.mark.parametrize("scheme", ["backward_euler", "trapezoidal"])
 def test_k2_kinetics_removal_conduction_batched_mixed_sign_step_matches_dense_reference(scheme):
     layer = _k2_full_layer(scheme)
     q = _batched_mixed_sign_flow()
@@ -1080,7 +1080,7 @@ def test_k2_kinetics_removal_conduction_batched_mixed_sign_step_matches_dense_re
         b0_i = (N_i @ xb_i.unsqueeze(-1)).squeeze(-1) + src_i / cap
         m = M_i.shape[-1]
         eye = torch.eye(m, dtype=torch.float64)
-        if scheme == "implicit":
+        if scheme == "backward_euler":
             rhs = x0_i + dt * b0_i
             x_dense_i = torch.linalg.solve(eye - dt * M_i, rhs.unsqueeze(-1)).squeeze(-1)
         else:  # trapezoidal
@@ -1091,7 +1091,7 @@ def test_k2_kinetics_removal_conduction_batched_mixed_sign_step_matches_dense_re
 
 
 def test_k2_kinetics_removal_conduction_batched_mixed_sign_steady_matches_dense_reference():
-    layer = _k2_full_layer("implicit")  # scheme is irrelevant to steady()
+    layer = _k2_full_layer("backward_euler")  # scheme is irrelevant to steady()
     q = _batched_mixed_sign_flow()
     batch = q.shape[0]
     sources = 0.1 * _k2_state(batch, layer.n_i)
@@ -1128,7 +1128,7 @@ def test_gmres_preconditioner_names_match_the_dense_reference(name):
     `test_k2_kinetics_removal_conduction_batched_mixed_sign_step_matches_dense_reference` already
     makes for the default solver, repeated here for both new preconditioner names.
     """
-    layer = _k2_full_layer("implicit", linear_solver=name)
+    layer = _k2_full_layer("backward_euler", linear_solver=name)
     q = _batched_mixed_sign_flow()
     batch = q.shape[0]
     x = _k2_state(batch, layer.n_i)
@@ -1165,7 +1165,7 @@ def test_gradcheck_gmres_preconditioner_names_through_implicit_step(name):
     net = flow_through_zone()
     layer = TransportLayer(
         net, "co2", capacity=torch.tensor([1000.0]), flow_kind="airpath",
-        boundary=["ambient"], scheme="implicit", linear_solver=name,
+        boundary=["ambient"], scheme="backward_euler", linear_solver=name,
     )
     x = torch.tensor([150.0], dtype=torch.float64, requires_grad=True)
     q = torch.tensor([0.4, 0.4], dtype=torch.float64, requires_grad=True)
@@ -1187,7 +1187,7 @@ def test_diagnostics_linear_reports_the_resolved_preconditioner_backend(name):
     net = flow_through_zone()
     layer = TransportLayer(
         net, "co2", capacity=torch.tensor([1000.0]), flow_kind="airpath",
-        boundary=["ambient"], scheme="implicit", linear_solver=name,
+        boundary=["ambient"], scheme="backward_euler", linear_solver=name,
     )
     q = torch.tensor([0.5, 0.5], dtype=torch.float64)
     c0 = torch.tensor([100.0], dtype=torch.float64)
@@ -1213,7 +1213,7 @@ def test_gmres_resolves_bit_identical_to_the_bare_select_solve_auto():
     cap = torch.tensor([1000.0], dtype=torch.float64)
     layer = TransportLayer(
         net, "co2", capacity=cap, flow_kind="airpath", boundary=["ambient"],
-        scheme="implicit", linear_solver="gmres",
+        scheme="backward_euler", linear_solver="gmres",
     )
     q = torch.tensor([0.5, 0.5], dtype=torch.float64)
     c0 = torch.tensor([100.0], dtype=torch.float64)
@@ -1280,11 +1280,11 @@ def test_implicit_step_sparse_direct_matches_gmres_to_high_precision():
     dt = 200.0
     layer_gmres = TransportLayer(
         net, "co2", capacity=cap, flow_kind="airpath", boundary=["ambient"],
-        scheme="implicit", linear_solver="gmres",
+        scheme="backward_euler", linear_solver="gmres",
     )
     layer_sd = TransportLayer(
         net, "co2", capacity=cap, flow_kind="airpath", boundary=["ambient"],
-        scheme="implicit", linear_solver="sparse_direct",
+        scheme="backward_euler", linear_solver="sparse_direct",
     )
     x_gmres = layer_gmres.step(c0, q, _full(layer_gmres, source), c_out, dt)
     x_sd = layer_sd.step(c0, q, _full(layer_sd, source), c_out, dt)
@@ -1338,7 +1338,7 @@ def test_gradcheck_implicit_step_sparse_direct_adjoint_through_superlu():
     net = flow_through_zone()
     layer = TransportLayer(
         net, "co2", capacity=torch.tensor([1000.0]), flow_kind="airpath",
-        boundary=["ambient"], scheme="implicit", linear_solver="sparse_direct",
+        boundary=["ambient"], scheme="backward_euler", linear_solver="sparse_direct",
     )
     x = torch.tensor([150.0], dtype=torch.float64, requires_grad=True)
     q = torch.tensor([0.4, 0.4], dtype=torch.float64, requires_grad=True)
@@ -1355,7 +1355,7 @@ def test_diagnostics_linear_reports_sparse_direct_backend_and_one_iteration():
     net = flow_through_zone()
     layer = TransportLayer(
         net, "co2", capacity=torch.tensor([1000.0]), flow_kind="airpath",
-        boundary=["ambient"], scheme="implicit", linear_solver="sparse_direct",
+        boundary=["ambient"], scheme="backward_euler", linear_solver="sparse_direct",
     )
     q = torch.tensor([0.5, 0.5], dtype=torch.float64)
     c0 = torch.tensor([100.0], dtype=torch.float64)
@@ -1372,7 +1372,7 @@ def test_diagnostics_linear_reports_gmres_backend_and_at_least_one_iteration():
     net = flow_through_zone()
     layer = TransportLayer(
         net, "co2", capacity=torch.tensor([1000.0]), flow_kind="airpath",
-        boundary=["ambient"], scheme="implicit",
+        boundary=["ambient"], scheme="backward_euler",
         linear_solver="gmres",  # the default "auto" resolves to sparse_direct here
     )
     q = torch.tensor([0.5, 0.5], dtype=torch.float64)
@@ -1393,7 +1393,7 @@ def test_diagnostics_linear_reports_sparse_direct_backend_under_the_default_auto
     net = flow_through_zone()
     layer = TransportLayer(
         net, "co2", capacity=torch.tensor([1000.0]), flow_kind="airpath",
-        boundary=["ambient"], scheme="implicit",  # default linear_solver="auto"
+        boundary=["ambient"], scheme="backward_euler",  # default linear_solver="auto"
     )
     q = torch.tensor([0.5, 0.5], dtype=torch.float64)
     c0 = torch.tensor([100.0], dtype=torch.float64)
@@ -1451,7 +1451,7 @@ def test_auto_falls_back_to_gmres_for_a_grad_requiring_on_failure_return_solve()
     net = flow_through_zone()
     layer = TransportLayer(
         net, "co2", capacity=torch.tensor([1000.0]), flow_kind="airpath",
-        boundary=["ambient"], scheme="implicit", linear_solver="auto",
+        boundary=["ambient"], scheme="backward_euler", linear_solver="auto",
     )
     q = torch.tensor([0.5, 0.5], dtype=torch.float64, requires_grad=True)
     c0 = torch.tensor([100.0], dtype=torch.float64)
@@ -1484,7 +1484,7 @@ def test_differentiable_step_builds_the_system_exactly_once_per_pass(monkeypatch
     net = flow_through_zone()
     layer = TransportLayer(
         net, "co2", capacity=torch.tensor([1000.0]), flow_kind="airpath",
-        boundary=["ambient"], scheme="implicit",
+        boundary=["ambient"], scheme="backward_euler",
     )
     x = torch.tensor([150.0], dtype=torch.float64, requires_grad=True)
     q = torch.tensor([0.4, 0.4], dtype=torch.float64, requires_grad=True)

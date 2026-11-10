@@ -40,7 +40,7 @@ Two rooms joined by a doorway, one of them heated, with two leaks to ambient:
 import torch
 from noodl.apps.building_physics import Zone, add_zone, add_large_opening, orifice_law_from_edges
 from noodl.apps.building_physics import build_model, initial_drivers, initial_state
-from noodl.drives import Stack
+from noodl.heads import Stack
 from noodl.topology import Network
 
 F64 = torch.float64
@@ -58,7 +58,7 @@ el = orifice_law_from_edges(net, "airpath")
 model = build_model(
     net,
     air_laws=[el],
-    drives=[Stack.from_network(net, "airpath")],
+    heads=[Stack.from_network(net, "airpath")],
     coupling="iterate",
     iterate_tol={"thermal": 0.01},
     iterate_max=50,
@@ -87,7 +87,7 @@ the layer's boundary order for `boundary_temperature`, its active interior order
 in the wrong shape. [Using noodl](../usage.md) covers the details.
 
 The node and edge attributes this example sets (`volume`, `T0`, `z_ref`, `z_path`, `Cd`,
-`area`), and the wind attributes a `Wind` drive reads (`azimuth`, `Cp`, `Ch`, `profile`),
+`area`), and the wind attributes a `Wind` term reads (`azimuth`, `Cp`, `Ch`, `profile`),
 are listed with their units under [Network attributes](../catalogue/building_physics.md#network-attributes).
 
 Models can also be read from CONTAM `.prj`/`.wth` files or from a Modelica Buildings Library
@@ -123,7 +123,7 @@ roughness below 3.7 diameters, a segment's loss non-negative and a terminal's po
 The laws are those under [Duct elements](#duct-elements). A fan, a damper or any other
 element in a duct is an ordinary edge between two junctions, added by the caller with its own
 law. `duct_laws_from_edges(net, profiles=...)` returns the segments' and terminals'
-laws and drives, with a `Wind` drive when a terminal has a profile or a nonzero `Cp`.
+laws and head terms, with a `Wind` term when a terminal has a profile or a nonzero `Cp`.
 
 A fan draws 0.05 kg/s from the ambient through a 10 m duct and blows it through a 5 m duct
 into a room, which leaks it back to the ambient:
@@ -132,6 +132,7 @@ into a room, which leaks it back to the ambient:
 import torch
 from noodl.apps.building_physics import DuctNetwork, duct_laws_from_edges
 from noodl.elements import FixedFlow, PowerLaw
+from noodl.heads import EdgeHeads
 from noodl.layers.kirchhoff import KirchhoffLayer
 from noodl.topology import Network
 
@@ -149,13 +150,16 @@ ducts.terminal("outlet", "room", area=0.0314)
 ducts.add_to(net)
 net.add_edge("fan_in", "fan_out", kind="fan")
 net.add_edge("room", "ambient", kind="leak")
-laws, drives = duct_laws_from_edges(net)
+laws, heads = duct_laws_from_edges(net)
 laws += [FixedFlow(torch.tensor([0.05], dtype=F64), kind="fan"),
          PowerLaw(torch.tensor([0.5], dtype=F64), torch.tensor([0.5], dtype=F64),
                   kind="leak")]
-air = KirchhoffLayer(net, "air", laws, drives=drives, boundary=["ambient"])
+# A model runs the EdgeHeads closure itself; a hand-built layer applies it to the drivers.
+air = KirchhoffLayer(net, "air", laws, boundary=["ambient"])
 rho = torch.full((net.n,), 1.204097, dtype=F64)
-phi, q = air.solve(torch.zeros(1, dtype=F64), {"rho": rho})
+drivers = {"rho": rho}
+drivers.update(EdgeHeads(air, heads)(None, drivers))     # writes "air.edge_head"
+phi, q = air.solve(torch.zeros(1, dtype=F64), drivers)
 print([round(v, 4) for v in air.flows_of_kind(q, "duct_terminal").tolist()], "kg/s")
 print(f"room at {phi[net.node_index('room')].item():.4f} Pa")
 print({j: round(v * 1e3, 1) for j, v in ducts.volumes().items()}, "litres")
@@ -249,7 +253,7 @@ an imbalance unseen, and a fixed flow lies outside the air handler's balance, so
 node and the edge; CONTAM, too, joins only the air handler's own paths to its plenums. They are
 well-mixed nodes with air mass $\rho V$. A plenum of zero volume (CONTAM's default) holds no
 air and must also be named in `storage_free=`: its balance is then algebraic, the mix of what
-flows in, and the heat and species layers use the implicit scheme (`build_model` selects it
+flows in, and the heat and species layers use the backward Euler scheme (`build_model` selects it
 for heat; the species layer's default is already implicit). A plenum left out of
 `flow_balanced=` or `storage_free=` is refused, naming it and the option. While an air
 handler is switched off, nothing passes through a zero-volume plenum: it keeps its value, and
@@ -270,7 +274,7 @@ from noodl.apps.building_physics import (
     add_air_handler, air_handler_from_edges, air_handler_plenums, build_model,
     initial_drivers, initial_state, orifice_law_from_edges,
 )
-from noodl.drives import Stack
+from noodl.heads import Stack
 from noodl.topology import Network
 
 F64 = torch.float64
@@ -283,7 +287,7 @@ add_air_handler(net, supplies={"office": 0.1}, returns={"office": 0.1},
 handler, closure = air_handler_from_edges(net, "air_handler")
 plenums = air_handler_plenums(net, "air_handler")
 model = build_model(net, air_laws=[orifice_law_from_edges(net, "airpath"), handler],
-                    drives=[Stack.from_network(net, "airpath")], thermal=False, species=1,
+                    heads=[Stack.from_network(net, "airpath")], thermal=False, species=1,
                     closures=[closure], flow_balanced=plenums, storage_free=plenums)
 drivers = initial_drivers(model)
 drivers["rho"] = torch.full((net.n,), 1.2041, dtype=F64)
@@ -421,7 +425,7 @@ from noodl.apps.building_physics import (
     room,
 )
 from noodl.components import Component
-from noodl.drives import Stack
+from noodl.heads import Stack
 
 F64 = torch.float64
 
@@ -444,12 +448,12 @@ b.connect(leak.ports.a, office.ports.air)
 net, _ = b.flatten(dtype=F64)
 handler, closure = air_handler_from_edges(net, "air_handler")
 plenums = air_handler_plenums(net, "air_handler")
-ducts, drives = duct_laws_from_edges(net)
+ducts, duct_heads = duct_laws_from_edges(net)
 model = build_model(
     net,
     air_laws=[orifice_law_from_edges(net, "airpath"), *ducts,
               fan_law_from_edges(net), handler],
-    drives=[Stack.from_network(net, "airpath"), *drives],
+    heads=[Stack.from_network(net, "airpath"), *duct_heads],
     thermal=False, species=1, closures=[closure],
     flow_balanced=plenums, storage_free=plenums,
 )
@@ -510,9 +514,13 @@ It returns the time histories at `times`, which start at 0 (a `Calendar` places 
 in the year). Steps are split at every jump or kink of an input unless
 `land_on_breakpoints=False`. Each step's airflow solve starts from the previous step's
 pressures; when it does not converge from there (a fan curve after a large speed change can
-swing between the ends of its curve, where its slope is zero), the step is retried once from
-the linear initial guess, and a retry that fails too raises, naming the step.
-`simulate(..., diagnostics={})` lists the retried steps' end times under
+swing between the ends of its curve, where its slope is zero), that solve is retried from
+the linear initial guess, and a retry that fails too raises, naming the step. The retry is
+the air layer's own fallback ladder (`KirchhoffLayer(fallback=("linear_guess",))`, which
+`project_to_model` and `build_model` set; see
+[When Newton fails](../concepts/solvers.md#when-newton-fails-the-fallback-ladder)): it
+solves only the failed airflow solve again, inside its pass, not the whole step.
+`simulate(..., diagnostics={})` lists the end times of the steps with a retried solve under
 `"airflow_retries"`. A signal with a step mean, an occupant's `Presence` (see
 [Occupants](#occupants)), is written as its mean over each step (or sub-step) instead of its
 value at the step's end. The histories have one row per output time either way.
@@ -536,13 +544,13 @@ torch.Size([13, 4]) torch.Size([13, 3, 1])
 ```
 
 `simulate` adds each zone's air-mass change to its airflow balance (CONTAM's `dodMdt`)
-exactly when the model carries a `ZoneAirMassChange` node source, which `project_to_model`
+exactly when the model carries a `ZoneAirMassChange` storage, which `project_to_model`
 attaches for a project that sets `dodMdt` (the default `air_mass_change=None`;
 `air_mass_change=False` opts out, and `True` on a model without the source is refused): a zone whose temperature rises pushes out the air it no longer holds. The mass is
 taken at the zone's absolute pressure, (P_b + P_zone) V / (R T), as ContamX's is, so a zone
 depressurised by an exhaust fan switching on also gives up a little air. For a project that
 sets `dodMdt`, `project_to_model` gives the contaminants that same zone air mass. The term is
-part of the airflow solve itself (the `ZoneAirMassChange` node source `project_to_model`
+part of the airflow solve itself (the `ZoneAirMassChange` storage `project_to_model`
 attaches), so a step of any length converges. When the model carries a `ZonePressureDensity`
 closure (CONTAM's `densZP`), `simulate` repeats each step with the latest zone pressures until
 they no longer move; the same repetition runs when a pressure-driven source is present, so the
@@ -687,8 +695,8 @@ from noodl.apps.building_physics import (
     Actuator, ControlNetwork, IncrementalPI, Sensor, Zone, add_zone, build_model,
     node_mass_fraction, orifice_law_from_edges, simulate,
 )
-from noodl.drives import Stack
 from noodl.elements import FixedFlow, Scaled
+from noodl.heads import Stack
 from noodl.topology import Network
 
 F64 = torch.float64
@@ -706,7 +714,7 @@ network = ControlNetwork(
     [Actuator(1, "flow_multiplier.fan")])
 model, state, drivers = build_model(
     net, air_laws=[orifice_law_from_edges(net, "airpath"), fan],
-    drives=[Stack.from_network(net, "airpath")], species=("CO2",),
+    heads=[Stack.from_network(net, "airpath")], species=("CO2",),
     controls=network, return_inputs=True)
 state["species.x"] = torch.tensor([6e-4], dtype=F64)
 drivers["species.x_boundary"] = torch.tensor([6e-4], dtype=F64)  # outdoor CO2, kg/kg
@@ -843,9 +851,9 @@ conducts nothing".
 
 | Function | Returns |
 |---|---|
-| `thermal_layer(net, *, ambient, name="thermal", flow_kinds=("airpath",), conduction_kind=None, c_p=1005.0, rho=1.2041, scheme=None, fixed_temperature=(), storage_free=())` | The heat `TransportLayer`. Capacity is $\rho c_p V + C_{\text{node}}$ per active interior node. Raises naming any node with zero heat capacity that is not storage-free. `scheme` defaults to `"exact"`, or to `"implicit"` when `storage_free` names a node that a flow edge touches (a plenum: the only scheme that holds it). A storage-free node joined only by conduction (a surface or radiant star node) is folded into its neighbours and keeps `"exact"` (see below). `conduction_kind` is one edge kind or a tuple, for example `("wall", "film", "radiation")`: wall conduction, a surface (film) coefficient and a radiative coefficient as separate edges, each with its own `ua` (W/K), concatenated in the order given into the layer's `conductance` (`None`, the default, means `"wall"` when the network has wall edges; an explicit kind with no edge is an error naming it). A closure that recomputes a coefficient from the temperatures, such as a radiative one, writes the per-step driver `"thermal.conductance"` in that order (see [transport layers](../concepts/layers.md)). |
-| `species_layer(net, *, ambient, name="species", flow_kinds=("airpath",), rho=1.2041, n_species=1, scheme="implicit", species_names=None, transmission=None, kinetics=None, storage_free=())` | The contaminant layer, as mass fractions, capacity = zone air mass $\rho V$ (CONTAM's convention). `transmission` `(b_flow, K)` is each flow edge's filter pass fraction; `kinetics` `(n_i, K, K)` each zone's first-order reactions (`reaction_kinetics` builds it). |
-| `build_model(net, *, air_laws, drives, ambient="ambient", thermal=True, species=0 (a count or a list of names), density="ideal_gas", density_kwargs=None, coupling="pingpong", iterate_tol=None, iterate_max=20, thermal_scheme=None, species_scheme="implicit", flow_kinds=None, closures=(), flow_balanced=(), storage_free=(), return_inputs=False)` | The assembled `Model`; with `return_inputs=True`, `(model, state, drivers)` like the other applications. `closures` follow the density closure; `flow_balanced` nodes join the air layer's boundary; `storage_free` nodes hold no air (see [Air-handling systems](#air-handling-systems)). |
+| `thermal_layer(net, *, ambient, name="thermal", flow_kinds=("airpath",), conduction_kind=None, c_p=1005.0, rho=1.2041, scheme=None, fixed_temperature=(), storage_free=())` | The heat `TransportLayer`. Capacity is $\rho c_p V + C_{\text{node}}$ per active interior node. Raises naming any node with zero heat capacity that is not storage-free. `scheme` defaults to `"exact"`, or to `"backward_euler"` when `storage_free` names a node that a flow edge touches (a plenum: the only scheme that holds it). A storage-free node joined only by conduction (a surface or radiant star node) is folded into its neighbours and keeps `"exact"` (see below). `conduction_kind` is one edge kind or a tuple, for example `("wall", "film", "radiation")`: wall conduction, a surface (film) coefficient and a radiative coefficient as separate edges, each with its own `ua` (W/K), concatenated in the order given into the layer's `conductance` (`None`, the default, means `"wall"` when the network has wall edges; an explicit kind with no edge is an error naming it). A closure that recomputes a coefficient from the temperatures, such as a radiative one, writes the per-step driver `"thermal.conductance"` in that order (see [transport layers](../concepts/layers.md)). |
+| `species_layer(net, *, ambient, name="species", flow_kinds=("airpath",), rho=1.2041, n_species=1, scheme="backward_euler", species_names=None, transmission=None, kinetics=None, storage_free=())` | The contaminant layer, as mass fractions, capacity = zone air mass $\rho V$ (CONTAM's convention). `transmission` `(b_flow, K)` is each flow edge's filter pass fraction; `kinetics` `(n_i, K, K)` each zone's first-order reactions (`reaction_kinetics` builds it). |
+| `build_model(net, *, air_laws, heads, ambient="ambient", thermal=True, species=0 (a count or a list of names), density="ideal_gas", density_kwargs=None, coupling="pingpong", iterate_tol=None, iterate_max=20, thermal_scheme=None, species_scheme="backward_euler", flow_kinds=None, closures=(), flow_balanced=(), storage_free=(), return_inputs=False)` | The assembled `Model`; with `return_inputs=True`, `(model, state, drivers)` like the other applications. `heads` are the stack and wind terms of the air edges (`Stack`, `DuctStack`, `Wind`, `DriverHead`; empty for none): an `EdgeHeads` closure adds them up once per pass after the density closure and writes the driver `"air.edge_head"`, which the layer adds to every edge's pressure difference once. `closures` follow the head closure, and one that writes a driver a term reads (`"rho"`, say) is refused by name; `flow_balanced` nodes join the air layer's boundary; `storage_free` nodes hold no air (see [Air-handling systems](#air-handling-systems)). |
 | `add_air_handler(target, *, supplies, returns, kind="air_handler", supply_plenum="ahs_supply", return_plenum="ahs_return", outdoor_air_fraction=1.0, min_outdoor_air=0.0, supply_volume=0.0, return_volume=0.0, T0=293.15, ambient="ambient")` | Adds an air handler's plenums and edges to a `Network` or a `Component`. `supplies` and `returns` map zones to design flows (kg/s). |
 | `air_handler_from_edges(net, kind)` | `(PrescribedFlow, AirHandlerFlows)`: the air handler's law and closure, from its edges' attributes. |
 | `air_handler_plenums(net, kind)` | `(supply plenum, return plenum)`. |
@@ -1327,7 +1335,7 @@ F = \left(\frac{\rho_{\text{up}}}{\rho_{\text{ref}}}\right)^{m} C\,\operatorname
 $$
 
 $C$ is the coefficient at the reference density $\rho_{\text{ref}}$ (kg/m³), and the node
-densities are read from the full-node driver `drivers["rho"]`, the same one the `Stack` drive
+densities are read from the full-node driver `drivers["rho"]`, the same one the `Stack` head
 reads. The exponent $m$ says how much density is folded into the coefficient: $m = 0$ for a
 mass-flow rating, $m = 1/2$ for the orifice family ($C = C_d A \sqrt{2\rho}$, including both
 openings of a two-orifice doorway), $m = 1$ for a volumetric rating. Air density changes by about
@@ -1385,7 +1393,7 @@ increasing resolution of the pressure profile over the door's height.
 **Two lumped orifices.** `add_large_opening(net, a, b, *, H, W, z_mid, Cd=0.78, kind="airpath")`
 adds two edges, both oriented `a → b`, each an orifice of area $WH/2$ (m²) at height
 $z_{\text{mid}} \mp 2H/9$ (m); build their element with `orifice_law_from_edges`. The
-`Stack` drive evaluates the hydrostatic pressure difference at each opening's own height, so a
+`Stack` head evaluates the hydrostatic pressure difference at each opening's own height, so a
 temperature difference drives opposite flows through the low and the high opening. The
 representation is exact for a neutral plane at mid-height. It uses `PowerLaw`'s laminar blend at
 $10^{-3}$ Pa and the density convention of the element it is built with.
@@ -1407,7 +1415,7 @@ closed crack is an effective-leakage-area law with area `LClo` (m², no default)
 **Source:** MBL's `DoorOpen` and `DoorOperable` (`BaseClasses/Door.mo`).
 
 **Discretised compartments.** `DoorCompartment` and `OperableDoorCompartment`, with the
-`DoorCompartmentHead` drive, cut the opening into `nCom` compartments of height
+`DoorCompartmentHead` head term, cut the opening into `nCom` compartments of height
 $\mathrm{d}h = h_{\text{Ope}} / n_{\text{Com}}$, one edge each;
 `discretized_door(*, src, tgt, medium, nCom=10, wOpe=0.9, hOpe=2.1, hA=1.35, hB=1.35, CD=0.65, ...)`
 and `discretized_operable_door` build a whole door. Compartment $i$ sees the pressure
@@ -1511,7 +1519,7 @@ the density and the viscosity of the air entering it.
 | `FixedVolumeFlow(volume_flow, *, src, tgt)` | A constant volume flow (m³/s) delivered at the density of the node it draws from. |
 | `air_viscosity(T)` | ContamX's air viscosity, $1.81625\times10^{-5} + 4.92859\times10^{-8}\,(T - 293.15)$ Pa s. |
 
-`DuctStack(kind, ...)` (in `noodl.drives`) is the hydrostatic term of a duct segment: the
+`DuctStack(kind, ...)` (in `noodl.heads`) is the hydrostatic term of a duct segment: the
 air column between its two junctions at the density of their mean temperature.
 `Damper(..., src=, tgt=, m=)` follows the entering air's density on each side, as ContamX's
 duct dampers do. `Duct` remains the TN 1887 form of the Colebrook law (used by the water
@@ -1537,7 +1545,7 @@ hydrostatic term of a 3 m vertical duct between junctions at 20 °C and 30 °C:
 
 ```python
 import torch
-from noodl.drives import DuctStack
+from noodl.heads import DuctStack
 from noodl.elements import DuctTerminal, FixedVolumeFlow
 
 F64 = torch.float64
@@ -1564,7 +1572,7 @@ The CONTAM-form elements carry one fixed reference density in their coefficients
 `orifice_law_from_edges`, the default of `Duct`, and the reference density of
 `UpstreamDensityPowerLaw`); the core `Orifice` defaults to 1.2 kg/m³. A temperature-dependent
 density reaches the airflow through the `density` closure of `build_model` (above), which feeds
-the `Stack` drive and `UpstreamDensityPowerLaw`.
+the `Stack` head and `UpstreamDensityPowerLaw`.
 
 The MBL-derived elements take their densities from a medium. `medium(name)` returns an
 `AirMedium` for one of `"moist_air"` (`Buildings.Media.Air`), `"moist_air_ideal_gas"`
@@ -1868,9 +1876,10 @@ to 1.6e-2 relative in `NaturalVentilation`'s flows).
 **Volume mass storage.** MBL's `MixingVolume` (`ConservationEquation.mo`) integrates the volume's
 mass `m = V rho(p, T, X)`, its energy `U = m u`, its water mass fraction (`der(Xi) = mbXi/m`,
 not the water mass) and its trace-substance masses. The reader writes these balances into the
-existing layers: the air layer gets a storage node source per volume (so a zone's pressure is
-an unknown even with no boundary in its group), the thermal and species layers get the zone's
-actual mass as a per-step capacity and the storage-rate form of `TransportLayer(dilution=...)`,
+existing layers: the air layer gets a node storage per volume (`NodeStorage`, the volume's
+air mass; so a zone's pressure is an unknown even with no boundary in its group), the thermal
+and species layers get the zone's actual mass as a per-step capacity and the storage-rate form
+of `TransportLayer(dilution=...)`,
 and the energy balance gets MBL's flow-work, latent and moist-air carrier terms as sources
 (`noodl.apps.building_physics.modelica.storage`). `read_modelica(..., mass_storage=False)`
 gives the quasi-steady airflow of the CONTAM route instead.

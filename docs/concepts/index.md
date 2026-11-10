@@ -7,7 +7,7 @@ first time.
 |---|---|
 | [Networks](networks.md) | `Network`: the typed multigraph, its incidence and cycle operators, boundary and interior, batching. |
 | [Components](components.md) | Subnetworks with ports, `connect`, `flatten()` to one network, dotted names, placement, shared nodes, and reading results by component. |
-| [Constitutive laws and drives](elements.md) | The constitutive laws on edges, and the driving terms added to potential differences. |
+| [Constitutive laws and heads](elements.md) | The constitutive laws on edges, and the head terms added to potential differences. |
 | [Layers and models](layers.md) | The four ways a flow is determined, the layer types that implement them, and `Model`, which steps several together. |
 | [Using noodl](../usage.md) | The one way every model is used: configure, initialise by name, check, run; the parts every model shares; node orders and the setup report. |
 | [Solvers](solvers.md) | The matvec-free linear-operator contract, Newton, and how `method="auto"` chooses a backend. |
@@ -22,7 +22,7 @@ Every noodl physics model is the same four-part object, whatever the physics:
 Network            a typed multigraph: nodes hold storage, edges carry flow
   |
   +-- Laws         the constitutive law on each edge kind
-  +-- Drives       terms added to the potential difference (stack, wind, drag)
+  +-- Heads        terms added to the potential difference (stack, wind, drag)
   +-- Closures     arbitrary functions of state that produce driver values
   |
 Layers             Kirchhoff, transport, reaction, flow allocation
@@ -32,7 +32,7 @@ Model              several layers on one network, stepped together
 
 Read it bottom-up and it is a simulator. Read it top-down and it is a factorisation: the
 framework owns the graph, the conservation law and the solve; your problem owns the constitutive
-laws, the drives and the closures. Everything domain-specific in the seven
+laws, the heads and the closures. Everything domain-specific in the seven
 [applications](../applications/index.md) lives in those last three boxes.
 
 ![The noodl physics model stack](../assets/framework-overview.svg)
@@ -45,7 +45,7 @@ carry a building's pressure network and a sewer's headspace air.
 Concretely, a Kirchhoff layer assembles and solves
 
 $$
-A_I \, g\!\left(A^{\top}\phi + \text{drive};\ \theta\right) - s_I = 0
+A_I \, g\!\left(A^{\top}\phi + \text{head};\ \theta\right) - s_I = 0
 $$
 
 where $A$ is the network's incidence matrix, $A_I$ its interior rows, $g$ the stack of element

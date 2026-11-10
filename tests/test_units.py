@@ -13,7 +13,6 @@ import pytest
 import torch
 
 from noodl.contracts import closure_spec
-from noodl.drives import ConstantDrive
 from noodl.elements import PowerLaw
 from noodl.layers.kirchhoff import KirchhoffLayer
 from noodl.layers.transport import TransportLayer
@@ -33,11 +32,11 @@ def _model(closures=(), *, source_unit="kg/s"):
         net.add_edge(a, b, kind="airpath")
     air = KirchhoffLayer(
         net, "air", [PowerLaw(torch.tensor([0.01, 0.02, 0.01], dtype=F64), 0.65)],
-        drives=[ConstantDrive("airpath", "wind")], boundary=["ambient"],
+        boundary=["ambient"],
         quantity="pressure", unit="Pa")
     species = TransportLayer(
         net, "species", capacity=torch.tensor([50.0, 80.0], dtype=F64), flow_kind="airpath",
-        boundary=["ambient"], scheme="implicit", quantity="mass_fraction", unit="kg/kg",
+        boundary=["ambient"], scheme="backward_euler", quantity="mass_fraction", unit="kg/kg",
         source_unit=source_unit, capacity_unit="kg", flow_unit="kg/s")
     return Model(net, {"air": air, "species": species}, closures=closures)
 

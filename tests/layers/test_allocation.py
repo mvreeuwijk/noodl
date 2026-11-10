@@ -252,7 +252,7 @@ def test_model_refuses_allocation_layer_as_a_transport_flow_owner_by_name():
     # B and C are the active interior of the "link" edges once A is the boundary.
     spec = TransportLayer(
         net, "spec", capacity=torch.tensor([50.0, 50.0], dtype=F64), flow_kind="link",
-        boundary=["A"], scheme="implicit",
+        boundary=["A"], scheme="backward_euler",
     )
     model = Model(net, {"cap": cap, "spec": spec})
     assert model.flow_layer_of["spec"] == "cap"  # the ownership scan really does pick it

@@ -13,7 +13,7 @@ from noodl.model import Model
 from noodl.topology import Network
 
 F64 = torch.float64
-SCHEMES = ["implicit", "trapezoidal", "exact"]
+SCHEMES = ["backward_euler", "trapezoidal", "exact"]
 SIGMA = 5.670374419e-8
 
 
@@ -37,7 +37,7 @@ def _net(kinds=("wall", "film", "rad")):
 G = [0.7, 1.3, 0.4]
 
 
-def _layer(scheme="implicit", kinds=("wall", "film", "rad"), g=None, **kwargs):
+def _layer(scheme="backward_euler", kinds=("wall", "film", "rad"), g=None, **kwargs):
     net = _net(kinds if len(set(kinds)) == 3 else ("c", "c", "c"))
     return TransportLayer(
         net, "heat", capacity=_t([2.0, 3.0]), flow_kind="flow", boundary=["ambient"],
@@ -60,8 +60,8 @@ def _run(layer, scheme, **kw):
 
 @pytest.mark.parametrize("scheme", [*SCHEMES, "steady"])
 def test_a_tuple_of_kinds_is_the_merged_kind(scheme):
-    split = _layer("implicit" if scheme == "steady" else scheme)
-    merged = _layer("implicit" if scheme == "steady" else scheme, kinds=("c", "c", "c"))
+    split = _layer("backward_euler" if scheme == "steady" else scheme)
+    merged = _layer("backward_euler" if scheme == "steady" else scheme, kinds=("c", "c", "c"))
     assert split.conduction_kinds == ("wall", "film", "rad") and merged.conduction_kind == "c"
     assert torch.equal(_run(split, scheme), _run(merged, scheme))
     assert torch.equal(split.interior_idx, merged.interior_idx)
@@ -106,13 +106,13 @@ def test_every_conduction_kind_is_a_touch_for_active_interior():
 
 @pytest.mark.parametrize("scheme", [*SCHEMES, "steady"])
 def test_the_driver_equal_to_the_static_conductance_is_bitwise_the_absent_driver(scheme):
-    layer = _layer("implicit" if scheme == "steady" else scheme)
+    layer = _layer("backward_euler" if scheme == "steady" else scheme)
     assert torch.equal(_run(layer, scheme), _run(layer, scheme, conductance=_t(G)))
 
 
 @pytest.mark.parametrize("scheme", [*SCHEMES, "steady"])
 def test_the_driver_replaces_the_static_conductance(scheme):
-    base = "implicit" if scheme == "steady" else scheme
+    base = "backward_euler" if scheme == "steady" else scheme
     other = [1.1, 0.2, 2.0]
     driven = _run(_layer(base), scheme, conductance=_t(other))
     rebuilt = _run(_layer(base, g=other), scheme)
@@ -120,7 +120,7 @@ def test_the_driver_replaces_the_static_conductance(scheme):
     assert not torch.allclose(driven, _run(_layer(base), scheme))
 
 
-@pytest.mark.parametrize("scheme", ["implicit", "exact"])
+@pytest.mark.parametrize("scheme", ["backward_euler", "exact"])
 def test_a_batched_driver_matches_one_call_per_instance(scheme):
     layer = _layer(scheme)
     gs = _t([G, [1.1, 0.2, 2.0], [0.0, 0.5, 0.5]])
@@ -143,7 +143,7 @@ def test_gradient_flows_through_the_driver(scheme):
 
 
 def test_gradient_flows_through_the_driver_steady():
-    layer = _layer("implicit")
+    layer = _layer("backward_euler")
 
     def f(g):
         return layer.steady(Q, SRC, XB, conductance=g)
@@ -173,7 +173,7 @@ def test_a_zero_driver_isolates_a_node_for_that_call():
     """Both of `a`'s conduction edges vanish and `a` has no flow through it of its own
     conduction: a transient step still solves (the node only gains its source), a steady
     solve names the node as undefined."""
-    layer = _layer("implicit")
+    layer = _layer("backward_euler")
     g = _t([0.0, 1.0, 0.0])               # a-b, a-ambient zero; only b-ambient conducts
     out = layer.step(X0, Q, SRC, XB, 0.8, conductance=g)
     assert torch.isfinite(out).all()
@@ -195,7 +195,7 @@ def test_a_zero_driver_leaves_a_storage_free_node_idle():
     net.add_edge("s", "plenum", kind="film")
     layer = TransportLayer(
         net, "heat", capacity=_t([2.0, 0.0]), flow_kind="flow", boundary=["ambient"],
-        conduction_kind=("wall", "film"), conductance=_t([1.0, 2.0]), scheme="implicit",
+        conduction_kind=("wall", "film"), conductance=_t([1.0, 2.0]), scheme="backward_euler",
         storage_free=["plenum"],
     )
     x0, q, xb, src = _t([1.0, 0.7]), _t([0.0]), _t([0.0]), _t([0.0, 0.0, 1.0])
@@ -251,7 +251,7 @@ def _fourth_power_root():
 
 def test_iterating_the_radiative_coefficient_converges_to_the_fourth_power_steady_state():
     root = _fourth_power_root()
-    model, drivers = _radiative_model("implicit")
+    model, drivers = _radiative_model("backward_euler")
     diag: dict = {}
     out = model.steady({"thermal.x": _t([T_AMB])}, drivers, diagnostics=diag)
     assert diag["passes"] >= 3                       # the coefficient really was iterated
@@ -262,7 +262,7 @@ def test_iterating_the_radiative_coefficient_converges_to_the_fourth_power_stead
     assert abs(frozen - root) > 1e-3
 
 
-@pytest.mark.parametrize("scheme", ["implicit", "trapezoidal", "exact"])
+@pytest.mark.parametrize("scheme", ["backward_euler", "trapezoidal", "exact"])
 def test_stepping_the_radiative_coefficient_settles_on_the_same_root(scheme):
     root = _fourth_power_root()
     model, drivers = _radiative_model(scheme)

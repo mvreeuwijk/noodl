@@ -317,7 +317,7 @@ def build_model(
     sigma_theta: float | None = None,
     species: Sequence[str] = ("nox",),
     chemistry: Reaction | None = None,
-    scheme: str = "implicit",
+    scheme: str = "backward_euler",
     kappa: float | None = None,
     canyon_wind_min: float | None = None,
     u_d_min: float | None = None,
@@ -391,12 +391,12 @@ def build_model(
     every street's `"<layer>.x_boundary"` as the caller's background plus the puffs of the
     roof and junction fluxes of the earlier steps, and carries the puffs in the state
     (the returned state and `initial_state` seed them). It needs `background="per_street"`,
-    `scheme="implicit"`, one species and no chemistry, and refuses anything else by name.
+    `scheme="backward_euler"`, one species and no chemistry, and refuses anything else by name.
     `None` (the default) builds the model without it.
     """
     if puffs is not None:
         wrong = [(background != "per_street", "background='per_street'", background),
-                 (scheme != "implicit", "scheme='implicit'", scheme),
+                 (scheme != "backward_euler", "scheme='backward_euler'", scheme),
                  (len(tuple(species)) != 1, "one species", tuple(species)),
                  (chemistry is not None, "chemistry=None", chemistry)]
         for bad, needed, got in wrong:

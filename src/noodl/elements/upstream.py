@@ -30,7 +30,7 @@ only) pass. A static per-edge factor taken from the nominal from-zone would carr
 the element is the only place the information exists. Elements already receive the whole
 `drivers` mapping (`KirchhoffLayer` passes it to `flow`, `dflow` and `linear_init`, and
 rebuilds it before `torch.func.functional_call` on the differentiable path), so the density
-a `Stack` drive already reads is available here with no new capability; `Damper` is the
+a `Stack` head already reads is available here with no new capability; `Damper` is the
 existing precedent for a power law switched on `sign(dp)`.
 
 What this does NOT change
@@ -72,7 +72,7 @@ class UpstreamDensityPowerLaw(PowerLaw):
     `src`/`tgt` are node POSITIONS (as `Network.endpoints(kind)` returns them, in the
     element's own edge order) held as non-differentiable long buffers; the density itself is
     read from `drivers[rho_key]`, a full-node `(..., n_nodes)` tensor -- the same driver the
-    `Stack` drive reads, so a model that already carries buoyancy needs no extra driver.
+    `Stack` head reads, so a model that already carries buoyancy needs no extra driver.
     """
 
     def __init__(
@@ -139,7 +139,7 @@ class UpstreamDensityPowerLaw(PowerLaw):
             raise KeyError(
                 f"UpstreamDensityPowerLaw (kind {self.kind!r}): driver "
                 f"{self.rho_key!r} not found; it needs the full-node density vector the "
-                f"Stack drive also reads"
+                f"Stack head also reads"
             )
         rho = torch.as_tensor(drivers[self.rho_key])
         n_nodes = rho.shape[-1] if rho.ndim else 0

@@ -42,6 +42,7 @@ from typing import Literal, NamedTuple
 
 import torch
 
+from noodl.elements.base import SCHEMES
 from noodl.layers._folding import (
     Folded,
     FoldPlan,
@@ -62,6 +63,10 @@ from noodl.solvers.implicit import refuse_second_order, residual_vjp
 from noodl.solvers.select import solve as _solve_operator
 from noodl.solvers.select import transport_solver_kwargs
 from noodl.topology import Network, Node
+
+#: The schemes a transport layer steps with: every layer scheme but `"forward_euler"`, which
+#: steps a Kirchhoff layer's boundary storage only.
+_TRANSPORT_SCHEMES = tuple(s for s in SCHEMES if s != "forward_euler")
 
 # `_TransposeView` is `solvers.implicit.TransposeOperator`. Both this layer's operators
 # (`AdvectionOperator`, and `ShiftedOperator` wrapping it, the implicit step's system) are
@@ -309,7 +314,7 @@ class TransportLayer(TopologyGuard):
     then carries ``"held_sources_dropped"``, the number of nonzero entries dropped. Their
     capacity may be 0; removal and kinetics do not act on them. A storage-free node that a
     flow edge touches, or that has a removal or kinetics term at construction, needs
-    ``scheme="implicit"`` (``steady`` holds it too); a ``steady`` with nothing passing
+    ``scheme="backward_euler"`` (``steady`` holds it too); a ``steady`` with nothing passing
     through a storage-free node is refused by name (it has no value there).
     ``storage_free_mask`` is ``(n_i,)`` bool, True at those nodes.
 
@@ -544,7 +549,7 @@ class TransportLayer(TopologyGuard):
         dilution: torch.Tensor | float | None = None,
         dilution_mode: Literal["signed", "withdrawal"] = "signed",
         storage_free: Sequence[Node] = (),
-        scheme: Literal["exact", "implicit", "trapezoidal"] = "exact",
+        scheme: Literal["exact", "backward_euler", "trapezoidal"] = "exact",
         linear_solver: str = "auto",
         quantity: str = "scalar",
         unit: str = "",
@@ -592,6 +597,11 @@ class TransportLayer(TopologyGuard):
             raise ValueError(
                 f"TransportLayer '{name}': species_names {list(self.species_names)} repeat a "
                 f"name; each species must have its own"
+            )
+        if scheme not in _TRANSPORT_SCHEMES:
+            raise ValueError(
+                f"TransportLayer '{name}': unknown scheme {scheme!r}; expected one of "
+                f"{_TRANSPORT_SCHEMES}"
             )
         self.scheme = scheme
         # Nodes no edge of this layer's kinds touches are INACTIVE -- excluded
@@ -814,7 +824,7 @@ class TransportLayer(TopologyGuard):
 
         A storage-free node is folded when no flow edge touches it and the construction-time
         `removal` and `kinetics` are zero there. The others (a plenum with throughflow) keep
-        their algebraic row, which needs `scheme="implicit"`."""
+        their algebraic row, which needs `scheme="backward_euler"`."""
         n_i, K = self.n_i, self.n_species
         self.folded_mask = torch.zeros(n_i, dtype=torch.bool, device=self.interior_idx.device)
         self._fold_plan: FoldPlan | None = None
@@ -834,13 +844,13 @@ class TransportLayer(TopologyGuard):
                 acting.device)
         folded = self.storage_free_mask & ~touched[self.interior_idx] & ~acting
         algebraic = self.storage_free_mask & ~folded
-        if scheme != "implicit" and bool(algebraic.any()):
+        if scheme != "backward_euler" and bool(algebraic.any()):
             names = [net.nodes[int(self.interior_idx[i])]
                      for i in algebraic.nonzero().flatten().tolist()]
             raise ValueError(
                 f"TransportLayer '{self.name}': storage-free nodes {names} hold no amount and "
                 f"carry flow (or a removal or reaction term), so their balance is algebraic "
-                f"in every step; that needs scheme='implicit', got {scheme!r} (storage-free "
+                f"in every step; that needs scheme='backward_euler', got {scheme!r} (storage-free "
                 f"nodes joined only by conduction are folded into their neighbours and take "
                 f"any scheme)"
             )
@@ -893,19 +903,19 @@ class TransportLayer(TopologyGuard):
     def _call_scheme(self, scheme: str | None) -> str:
         """This call's scheme: `scheme`, or the layer's own when it is `None`. A scheme
         other than the layer's is checked as the constructor checks it: by name, and only
-        `"implicit"` on a layer whose storage-free nodes keep an algebraic row."""
+        `"backward_euler"` on a layer whose storage-free nodes keep an algebraic row."""
         if scheme is None or scheme == self.scheme:
             return self.scheme
-        if scheme not in _SCHEMES:
+        if scheme not in _TRANSPORT_SCHEMES:
             raise ValueError(
-                f"TransportLayer '{self.name}': unknown scheme {scheme!r}; valid schemes are "
-                f"'exact', 'implicit', 'trapezoidal'"
+                f"TransportLayer '{self.name}': unknown scheme {scheme!r}; expected one of "
+                f"{_TRANSPORT_SCHEMES}"
             )
-        if scheme != "implicit" and bool((self.storage_free_mask & ~self.folded_mask).any()):
+        if scheme != "backward_euler" and bool((self.storage_free_mask & ~self.folded_mask).any()):
             raise ValueError(
                 f"TransportLayer '{self.name}': its storage-free nodes with throughflow (or a "
                 f"removal or reaction term) keep an algebraic row, which needs "
-                f"scheme='implicit', got {scheme!r}"
+                f"scheme='backward_euler', got {scheme!r}"
             )
         return scheme
 
@@ -1015,7 +1025,7 @@ class TransportLayer(TopologyGuard):
                 f"TransportLayer '{self.name}': a per-call removal is nonzero at folded "
                 f"storage-free nodes {names}; a folded node has no removal term (give the "
                 f"removal there at construction, which keeps the node as an algebraic row "
-                f"under scheme='implicit')"
+                f"under scheme='backward_euler')"
             )
         return r.index_select(-2, self._fold_plan.kept)
 
@@ -1673,7 +1683,7 @@ class TransportLayer(TopologyGuard):
 
         `sources` is in FULL node order, not just this layer's interior nodes;
         see the module docstring and `_sources_interior`. `on_failure` (keyword-only,
-        default `"raise"`) is threaded to the `"implicit"` and
+        default `"raise"`) is threaded to the `"backward_euler"` and
         `"trapezoidal"` schemes' underlying linear solve; on `"return"` those two schemes
         return the raw, stacked `SolveResult` instead of a plain `Tensor` (return type
         `torch.Tensor | SolveResult`). `"exact"` has no linear solve at all
@@ -1701,7 +1711,7 @@ class TransportLayer(TopologyGuard):
         zone cost one Taylor term stays available on this path (see `_expm_action`).
 
         `diagnostics` (keyword-only), when a dict is passed, is filled with this
-        step's `"linear"` entry (`{"backend", "iterations", "residual"}`) for `"implicit"`
+        step's `"linear"` entry (`{"backend", "iterations", "residual"}`) for `"backward_euler"`
         and `"trapezoidal"` -- see `_LinearSolve`'s docstring for exactly what it holds and
         when. `scheme="exact"` has no linear solve, so it leaves `diagnostics` untouched.
         A layer with storage-free nodes also gets `"held_sources_dropped"`: the number of
@@ -1733,11 +1743,11 @@ class TransportLayer(TopologyGuard):
         misses by about `h/2` times its curvature.
 
         `scheme` (keyword-only, default `None`: the layer's own) is this call's scheme,
-        `"exact"`, `"implicit"` or `"trapezoidal"`: a caller that integrates the rest of a
+        `"exact"`, `"backward_euler"` or `"trapezoidal"`: a caller that integrates the rest of a
         coupled model with one rule per step (backward Euler on a restart, trapezoidal
         otherwise, as a circuit does) steps this layer with the same rule. A layer with
         storage-free nodes that keep an algebraic row (`storage_free` with throughflow)
-        refuses any scheme but `"implicit"`, as at construction.
+        refuses any scheme but `"backward_euler"`, as at construction.
 
         `sources_prev` (keyword-only, `"trapezoidal"` only, default `None`): the sources at
         the START of the step, laid out as `sources`. Given, the trapezoidal rule integrates
@@ -1790,7 +1800,7 @@ class TransportLayer(TopologyGuard):
         does: with transmission below one, the transfer reports what ARRIVES at the boundary
         while the interior lost more, the difference being a transit loss (not double-counted
         anywhere else). Each scheme integrates the state consistently with how it advanced
-        `x` itself: `implicit` uses `dt * x_new` (backward Euler holds the rate at the new
+        `x` itself: `backward_euler` uses `dt * x_new` (backward Euler holds the rate at the new
         state over the whole step), `trapezoidal` uses `dt/2 (x_old + x_new)` (its own
         quadrature), and `exact` uses the Taylor accumulator `int_0^dt x(tau) dtau` from
         `_expm_action(..., integrate=True)`; in every case the boundary's own prescribed
@@ -1876,7 +1886,7 @@ class TransportLayer(TopologyGuard):
                 f"TransportLayer '{self.name}': on_failure='return' has no effect for "
                 f"scheme='exact' (there is no linear solve to return the status of; "
                 f"a sub-stepping failure raises RuntimeError directly). Use the default "
-                f"on_failure='raise', or a scheme with a linear solve ('implicit', "
+                f"on_failure='raise', or a scheme with a linear solve ('backward_euler', "
                 f"'trapezoidal')."
             )
         if x_boundary_end is not None and (scheme != "exact" or want_transfer):
@@ -1919,7 +1929,7 @@ class TransportLayer(TopologyGuard):
             raise ValueError(
                 f"TransportLayer '{self.name}': scheme='exact' has no changing-capacity "
                 f"form (the exponential step assumes a fixed storage over the step); use "
-                f"scheme='implicit' or 'trapezoidal' for a layer whose capacity changes"
+                f"scheme='backward_euler' or 'trapezoidal' for a layer whose capacity changes"
             )
         x_s, reduced = self._to_stacked(x, self.n_i, "x")
         x_s = x_s.to(dtype)
@@ -1973,7 +1983,7 @@ class TransportLayer(TopologyGuard):
                 forcing_poly=poly,
             )
             result = expm.x
-        elif scheme == "implicit":
+        elif scheme == "backward_euler":
             result, reduced = self._implicit_step_sparse(
                 x, q, sources, x_boundary, dt, on_failure, cap_t, cap_prev_t,
                 diagnostics=diagnostics, removal=rem, transmission=trans, conductance=cond,
@@ -1990,7 +2000,7 @@ class TransportLayer(TopologyGuard):
         else:
             raise ValueError(
                 f"TransportLayer '{self.name}': unknown scheme {scheme!r}; "
-                f"valid schemes are 'exact', 'implicit', 'trapezoidal'"
+                f"expected one of {_TRANSPORT_SCHEMES}"
             )
 
         transfer_s = None
@@ -2000,7 +2010,7 @@ class TransportLayer(TopologyGuard):
                 op if scheme == "exact"
                 else self._advection_operator(q.to(dtype), cap_t, coef_map)
             )
-            if scheme == "implicit":
+            if scheme == "backward_euler":
                 x_int = dt * result
             elif scheme == "trapezoidal":
                 x_int = 0.5 * dt * (x_s + result)
@@ -2353,7 +2363,6 @@ def _van_loan_step_dense(
 
 
 _TAYLOR_M_MAX = 55
-_SCHEMES = ("exact", "implicit", "trapezoidal")
 
 
 class TransportStep(NamedTuple):
@@ -2593,7 +2602,7 @@ def _expm_action(
 
     Raises `RuntimeError` naming `where`, the norm and the predicted s * m when that exceeds
     `max_matvecs`: the exact scheme is O(||dt M||) matvecs by nature; a stiff problem belongs
-    to scheme='implicit'.
+    to scheme='backward_euler'.
     """
     if shift and integrate:
         raise ValueError("_expm_action: shift=True is incompatible with integrate=True")
@@ -2625,7 +2634,7 @@ def _expm_action(
         raise RuntimeError(
             f"{where}: the exponential action needs about {s * m} matvecs (||dt M||_1 = "
             f"{norm:.3e}: {s} substeps of {m} Taylor terms) against a budget of "
-            f"{max_matvecs}; this is a stiff step -- use scheme='implicit' or "
+            f"{max_matvecs}; this is a stiff step -- use scheme='backward_euler' or "
             f"'trapezoidal', or raise max_matvecs deliberately"
         )
     h = dt / s

@@ -15,7 +15,7 @@ from noodl.model import Model
 Tensor = torch.Tensor
 F64 = torch.float64
 State = dict[str, Tensor]
-PHI, Q = f"{LAYER}.phi", f"{LAYER}.q"
+PHI, Q, SF = f"{LAYER}.phi", f"{LAYER}.q", f"{LAYER}.storage_flow"
 _RULES = ("trapezoidal", "backward_euler")
 
 
@@ -60,7 +60,11 @@ def initial_state(model: Model, drivers: Mapping[str, Tensor], *, t: float = 0.0
     name = layer.name
     phi, q = layer.solve(drivers[f"{name}.phi_boundary"], drivers,
                          drivers.get(f"{name}.sources"), mode="initial", t=t, **solve_kwargs)
-    return {f"{name}.phi": phi, f"{name}.q": q}
+    out = {f"{name}.phi": phi, f"{name}.q": q}
+    if layer.storage:       # the current into each grounded capacitor holding its v0
+        out[SF] = layer.storage_flows(phi, drivers, dt=None, mode="initial", q=q,
+                                      sources=drivers.get(f"{name}.sources"))
+    return out
 
 
 def _times(times) -> list[float]:
@@ -73,16 +77,16 @@ def _times(times) -> list[float]:
 
 
 def transient(model: Model, state: Mapping[str, Tensor], drivers: Mapping[str, Tensor],
-              times: Sequence[float] | Tensor, *, integration: str = "trapezoidal",
+              times: Sequence[float] | Tensor, *, scheme: str = "trapezoidal",
               **solve_kwargs) -> dict:
     """March the circuit over the time grid `times` (s), from `state` at `times[0]` (usually
     `initial_state`), one `Model.step` per interval.
 
-    `integration="trapezoidal"` (the default) uses the trapezoidal rule (second order)
+    `scheme="trapezoidal"` (the default) uses the trapezoidal rule (second order)
     except on the first step and on every step whose interval contains a source breakpoint
     (a step, ramp or pulse edge), which use backward Euler, damping the ringing the
     trapezoidal rule shows after a discontinuity (the SPICE practice);
-    `integration="backward_euler"` uses backward Euler throughout. The grid is fixed: a
+    `scheme="backward_euler"` uses backward Euler throughout. The grid is fixed: a
     breakpoint inside a step is not inserted as a time point, so the step that contains it
     sees the source at the step end. A circuit without capacitors or inductors is solved at
     each step end as a DC operating point. `drivers` is one mapping for the whole run, so a
@@ -90,40 +94,40 @@ def transient(model: Model, state: Mapping[str, Tensor], drivers: Mapping[str, T
     `solve_kwargs`, such as Newton's `atol` and `rtol`, reach every step's layer solve.
 
     Returns `{"time": (T,), "electrical.phi": (T, ..., n), "electrical.q": (T, ..., b),
-    "integration": [rule of each step]}`, the start state as row 0 (rows broadcast to the
-    batch shape of the steps).
+    "scheme": [scheme of each step]}`, the start state as row 0 (rows broadcast to the
+    batch shape of the steps), and `"electrical.storage_flow": (T, ..., s)` when the circuit
+    has capacitors to ground (their currents, in `model.circuit_storage` order; row 0 is the
+    start state's, zero when it has none).
     """
     layer = _layer(model)
     _time_domain(layer, "transient")
-    if integration not in _RULES:
-        raise ValueError(f"transient: integration={integration!r}; expected one of {_RULES}")
+    if scheme not in _RULES:
+        raise ValueError(f"transient: scheme={scheme!r}; expected one of {_RULES}")
     grid = _times(times)
     sources = [el for el in (layer.law_for(k)[0] for k in layer.kinds)
                if hasattr(el, "breakpoints")]
-    phis, qs, rules = [state[PHI]], [state[Q]], []
-    current = dict(state)
     # the sources are evaluated at t0 + dt (as Model.step does), so breakpoints are
     # searched over the evaluation times, never missing one between rounded grid times
+    restarts = set()
     evaluated = grid[0]
     for k in range(len(grid) - 1):
-        t0 = grid[k]
-        dt = grid[k + 1] - t0
-        end = t0 + dt
-        jump = any(src.breakpoints(evaluated, end) for src in sources)
-        rule = ("backward_euler" if integration == "backward_euler" or k == 0 or jump
-                else "trapezoidal")
-        current = model.step(current, drivers, dt, t=t0, integration=rule,
-                             **solve_kwargs)
+        end = grid[k + 1]
+        if (scheme == "backward_euler" or k == 0
+                or any(src.breakpoints(evaluated, end) for src in sources)):
+            restarts.add(k)
         evaluated = end
-        phis.append(current[PHI])
-        qs.append(current[Q])
-        rules.append(rule)
-    return {
-        "time": torch.tensor(grid, dtype=F64),
-        PHI: torch.stack(torch.broadcast_tensors(*phis)),
-        Q: torch.stack(torch.broadcast_tensors(*qs)),
-        "integration": rules,
+    diagnostics: dict = {}
+    history = model.march(state, drivers, grid, restarts=restarts, scheme=scheme,
+                          diagnostics=diagnostics, **solve_kwargs)
+    out = {
+        "time": history["time"],
+        PHI: history[PHI],
+        Q: history[Q],
+        "scheme": diagnostics["schemes"],
     }
+    if layer.storage:
+        out[SF] = history[SF]
+    return out
 
 
 def ac_sweep(circuit: Circuit, frequencies, **solve_kwargs) -> dict[str, Tensor]:
@@ -166,6 +170,13 @@ def device_values(model: Model, state: Mapping[str, Tensor]) -> dict[str, tuple[
         if edges.stop - edges.start == 1:
             v, i = v[..., 0], i[..., 0]
         out[name] = (v, i)
+    for name, (entry, p, n, sign) in getattr(model, "circuit_storage", {}).items():
+        if SF not in state:
+            raise ValueError(f"device_values: {name!r} is a capacitor to ground, whose current "
+                             f"is state[{SF!r}]; the state has none (use a state from "
+                             f"operating_point, initial_state or a transient row)")
+        phi = state[PHI]
+        out[name] = (phi[..., p] - phi[..., n], sign * state[SF][..., entry])
     return out
 
 

@@ -8,7 +8,6 @@ import torch
 
 import noodl.solvers.select as select_module
 from benchmarks.measure import saved_tensor_bytes
-from noodl.drives import ConstantDrive
 from noodl.elements import Conductance, FixedFlow, PowerLaw
 from noodl.elements.fan import FanCurve
 from noodl.layers.kirchhoff import KirchhoffLayer
@@ -143,7 +142,7 @@ def test_grounding_at_a_supplied_phi0_is_checked_on_the_differentiable_path_too(
 
 
 def _series_layer(linear_solver: str = "auto") -> tuple[KirchhoffLayer, dict, torch.Tensor]:
-    """Three-zone series network under a wind drive, matching the shape of the CONTAM
+    """Three-zone series network under a wind head, matching the shape of the CONTAM
     verification cases: ambient_w -> z1 -> z2 -> ambient_l, one PowerLaw per airpath edge.
 
     Returns `(layer, drivers, phi_boundary)`.
@@ -161,17 +160,16 @@ def _series_layer(linear_solver: str = "auto") -> tuple[KirchhoffLayer, dict, to
         net,
         "series",
         [element],
-        [ConstantDrive(kind="airpath", key="wind")],
         boundary=["ambient_w", "ambient_l"],
         linear_solver=linear_solver,
     )
-    drivers = {"wind": torch.tensor([12.0, 0.0, 0.0], dtype=torch.float64)}
+    drivers = {"series.edge_head": torch.tensor([12.0, 0.0, 0.0], dtype=torch.float64)}
     phi_b = torch.zeros(2, dtype=torch.float64)
     return layer, drivers, phi_b
 
 
 def test_sparse_and_dense_newton_paths_agree_on_a_contam_style_series_network():
-    # Three-zone series network under a wind drive, matching the shape of the CONTAM
+    # Three-zone series network under a wind head, matching the shape of the CONTAM
     # verification cases: this exercises solve()'s full non-differentiable path (which now
     # builds a GraphLaplacianOperator per Newton iteration) against layer.jacobian() (still
     # dense, unchanged, used here only as the independent reference via a hand-rolled
@@ -343,21 +341,21 @@ def test_unknown_linear_solver_raises_value_error_naming_it():
 
 
 def test_sparse_adjoint_matches_dense_jacobian_transpose_solve(two_zone_layer):
-    net, elements, drives, boundary = two_zone_layer
+    net, elements, boundary = two_zone_layer
     el = PowerLaw(
         elements[0].C.detach().clone().requires_grad_(True), elements[0].n, learnable=True
     )
-    layer = KirchhoffLayer(net, "zones", [el], drives=drives, boundary=boundary)
+    layer = KirchhoffLayer(net, "zones", [el], boundary=boundary)
     phi_b = torch.zeros(1, dtype=torch.float64)
     wind = torch.tensor([10.0, 0.0, 0.0], dtype=torch.float64)
 
-    phi, q = layer.solve(phi_b, {"wind": wind}, None, differentiable=False)
+    phi, q = layer.solve(phi_b, {"zones.edge_head": wind}, None, differentiable=False)
     phi_i = phi[layer.interior]
     grad_phi_i = torch.tensor([1.0, -2.0], dtype=torch.float64)
 
-    lam_sparse = layer.adjoint(phi_i, phi_b, {"wind": wind}, grad_phi_i)
+    lam_sparse = layer.adjoint(phi_i, phi_b, {"zones.edge_head": wind}, grad_phi_i)
 
-    J = layer.jacobian(phi_i, phi_b, {"wind": wind})
+    J = layer.jacobian(phi_i, phi_b, {"zones.edge_head": wind})
     lam_dense = torch.linalg.solve(J.T, grad_phi_i)
 
     torch.testing.assert_close(lam_sparse, lam_dense, rtol=1e-9, atol=1e-12)
@@ -369,9 +367,9 @@ def test_adjoint_routes_through_the_layers_own_linear_solver(monkeypatch, two_zo
     # them on the BACKWARD pass as well, or "direct" is only half a reference. The numbers
     # must agree with the default (first assertion) AND the two must genuinely be
     # different code paths (the spies) -- either alone proves nothing.
-    net, elements, drives, boundary = two_zone_layer
+    net, elements, boundary = two_zone_layer
     phi_b = torch.zeros(1, dtype=torch.float64)
-    drivers = {"wind": torch.tensor([10.0, 0.0, 0.0], dtype=torch.float64)}
+    drivers = {"zones.edge_head": torch.tensor([10.0, 0.0, 0.0], dtype=torch.float64)}
     grad_phi_i = torch.tensor([1.0, -2.0], dtype=torch.float64)
 
     import scipy.sparse.linalg
@@ -402,7 +400,6 @@ def test_adjoint_routes_through_the_layers_own_linear_solver(monkeypatch, two_zo
             net,
             "zones",
             list(elements),
-            drives=drives,
             boundary=boundary,
             linear_solver=linear_solver,
         )
@@ -442,13 +439,13 @@ def test_hot_path_never_touches_the_dense_incidence(monkeypatch, two_zone_layer)
     # not. Every call below is on the hot path (`assemble` included, which must not read
     # `self.A.shape[0]` for the node count); `jacobian()` is deliberately NOT called here,
     # because it remains the dense reference and is allowed to build A.
-    net, elements, drives, boundary = two_zone_layer
+    net, elements, boundary = two_zone_layer
     el = PowerLaw(
         elements[0].C.detach().clone().requires_grad_(True), elements[0].n, learnable=True
     )
-    layer = KirchhoffLayer(net, "zones", [el], drives=drives, boundary=boundary)
+    layer = KirchhoffLayer(net, "zones", [el], boundary=boundary)
     phi_b = torch.zeros(1, dtype=torch.float64)
-    drivers = {"wind": torch.tensor([10.0, 0.0, 0.0], dtype=torch.float64)}
+    drivers = {"zones.edge_head": torch.tensor([10.0, 0.0, 0.0], dtype=torch.float64)}
     sources = torch.zeros(net.n, dtype=torch.float64)
 
     def _dense_touched(self):
@@ -483,8 +480,8 @@ def test_dense_incidence_is_computed_lazily(two_zone_layer):
     # built from it), they must simply not be built until someone asks. "Not built" is
     # asserted as "the layer holds no 2-D tensor at all after __init__", which is stronger
     # and independent of the caching mechanism's attribute names.
-    net, elements, drives, boundary = two_zone_layer
-    layer = KirchhoffLayer(net, "zones", elements, drives=drives, boundary=boundary)
+    net, elements, boundary = two_zone_layer
+    layer = KirchhoffLayer(net, "zones", elements, boundary=boundary)
 
     dense = {
         name: tuple(v.shape)
@@ -509,10 +506,10 @@ def test_differentiable_solve_does_not_trace_the_initial_guess(two_zone_layer):
     # The assertion is a RATIO against the same call given an already-detached phi0, not an
     # absolute byte count: what must be true is that obtaining phi0 internally adds nothing
     # material. On this fixture the pre-fix ratio is 1.99x (2397 vs 1206 bytes).
-    net, elements, drives, boundary = two_zone_layer
-    layer = KirchhoffLayer(net, "zones", elements, drives=drives, boundary=boundary)
+    net, elements, boundary = two_zone_layer
+    layer = KirchhoffLayer(net, "zones", elements, boundary=boundary)
     phi_b = torch.zeros(1, dtype=torch.float64)
-    drivers = {"wind": torch.tensor([10.0, 0.0, 0.0], dtype=torch.float64)}
+    drivers = {"zones.edge_head": torch.tensor([10.0, 0.0, 0.0], dtype=torch.float64)}
 
     def run(phi0):
         sources = torch.zeros(net.n, dtype=torch.float64, requires_grad=True)
@@ -609,9 +606,9 @@ def test_on_failure_return_primal_returns_on_the_primal_path():
 def test_on_failure_return_primal_raises_where_the_solve_is_differentiated():
     """...and ``"raise"`` where it is: a non-converged forward has no adjoint."""
     layer, drivers, phi_b = _series_layer()
-    wind = drivers["wind"].clone().requires_grad_(True)
+    wind = drivers["series.edge_head"].clone().requires_grad_(True)
     with pytest.raises(RuntimeError, match="failed to converge"):
-        layer.solve(phi_b, {"wind": wind}, None, differentiable=True, diagnostics={},
+        layer.solve(phi_b, {"series.edge_head": wind}, None, differentiable=True, diagnostics={},
                     max_iter=1, on_failure="return_primal")
 
 
@@ -677,8 +674,8 @@ def test_sparse_direct_linear_solver_matches_direct_on_the_two_zone_layer(two_zo
     every Newton inner solve and the returned flows all run through SciPy SuperLU instead of
     the dense LU, and must agree with the retained dense numerics to 1e-9.
     """
-    net, elements, drives, boundary = two_zone_layer
-    drivers = {"wind": torch.tensor([5.0, 0.0, 0.0], dtype=torch.float64)}
+    net, elements, boundary = two_zone_layer
+    drivers = {"two_zone.edge_head": torch.tensor([5.0, 0.0, 0.0], dtype=torch.float64)}
     phi_b = torch.zeros(1, 1, dtype=torch.float64)
     sources = torch.zeros(1, net.n, dtype=torch.float64)
     sources[..., net.node_index("z1")] = 0.01
@@ -686,7 +683,7 @@ def test_sparse_direct_linear_solver_matches_direct_on_the_two_zone_layer(two_zo
     results = {}
     for linear_solver in ("direct", "sparse_direct"):
         layer = KirchhoffLayer(
-            net, "two_zone", elements, drives, boundary=boundary, linear_solver=linear_solver
+            net, "two_zone", elements, boundary=boundary, linear_solver=linear_solver
         )
         results[linear_solver] = layer.solve(phi_b, drivers, sources, differentiable=False)
 
@@ -759,8 +756,8 @@ def test_sparse_direct_layer_actually_factorises_through_scipy_splu(monkeypatch,
     """
     import scipy.sparse.linalg
 
-    net, elements, drives, boundary = two_zone_layer
-    drivers = {"wind": torch.tensor([5.0, 0.0, 0.0], dtype=torch.float64)}
+    net, elements, boundary = two_zone_layer
+    drivers = {"two_zone.edge_head": torch.tensor([5.0, 0.0, 0.0], dtype=torch.float64)}
     phi_b = torch.zeros(1, 1, dtype=torch.float64)
     sources = torch.zeros(1, net.n, dtype=torch.float64)
     sources[..., net.node_index("z1")] = 0.01
@@ -787,7 +784,7 @@ def test_sparse_direct_layer_actually_factorises_through_scipy_splu(monkeypatch,
     monkeypatch.setattr(select_module, "pcg", spy_pcg)
 
     layer = KirchhoffLayer(
-        net, "two_zone", elements, drives, boundary=boundary, linear_solver="sparse_direct"
+        net, "two_zone", elements, boundary=boundary, linear_solver="sparse_direct"
     )
     phi, _q = layer.solve(phi_b, drivers, sources, differentiable=False)
     assert splu_calls, "linear_solver 'sparse_direct' must factorise through scipy splu"
@@ -818,8 +815,8 @@ def test_sparse_direct_layer_is_differentiable_through_the_implicit_adjoint(two_
     `solve` under `linear_solver="sparse_direct"` must produce the SAME gradient as under
     `linear_solver="direct"`, not a refusal and not a detached zero.
     """
-    net, elements, drives, boundary = two_zone_layer
-    drivers = {"wind": torch.tensor([5.0, 0.0, 0.0], dtype=torch.float64)}
+    net, elements, boundary = two_zone_layer
+    drivers = {"two_zone.edge_head": torch.tensor([5.0, 0.0, 0.0], dtype=torch.float64)}
     phi_b = torch.zeros(1, 1, dtype=torch.float64)
 
     grads = {}
@@ -828,7 +825,7 @@ def test_sparse_direct_layer_is_differentiable_through_the_implicit_adjoint(two_
         sources[..., net.node_index("z1")] = 0.01
         sources = sources.detach().requires_grad_(True)
         layer = KirchhoffLayer(
-            net, "two_zone", elements, drives, boundary=boundary, linear_solver=linear_solver
+            net, "two_zone", elements, boundary=boundary, linear_solver=linear_solver
         )
         phi, _q = layer.solve(phi_b, drivers, sources, differentiable=True)
         phi[..., layer.interior].sum().backward()
@@ -927,13 +924,13 @@ def test_non_differentiable_solve_returns_detached_tensors_whatever_the_caller_d
     returns carries a graph, even from inside `enable_grad` with grad-requiring inputs and a
     learnable ConstitutiveLaw. A caller who wants gradients uses `differentiable=True`.
     """
-    net, elements, drives, boundary = two_zone_layer
+    net, elements, boundary = two_zone_layer
     el = PowerLaw(
         elements[0].C.detach().clone().requires_grad_(True), elements[0].n, learnable=True
     )
-    layer = KirchhoffLayer(net, "zones", [el], drives=drives, boundary=boundary)
+    layer = KirchhoffLayer(net, "zones", [el], boundary=boundary)
     phi_b = torch.zeros(1, dtype=torch.float64, requires_grad=True)
-    drivers = {"wind": torch.tensor([10.0, 0.0, 0.0], dtype=torch.float64)}
+    drivers = {"zones.edge_head": torch.tensor([10.0, 0.0, 0.0], dtype=torch.float64)}
     sources = torch.zeros(net.n, dtype=torch.float64).requires_grad_(True)
 
     with torch.enable_grad():

@@ -769,11 +769,11 @@ def _compartment(name, *, scheme="exact", circulation=False, initial=1.0, source
 
 def _pair_with_links(links, *, extra_donor=False):
     models = {
-        "A": _compartment("a", scheme="implicit", initial=1.0),
-        "B": _compartment("b", scheme="implicit", circulation=True, initial=0.0),
+        "A": _compartment("a", scheme="backward_euler", initial=1.0),
+        "B": _compartment("b", scheme="backward_euler", circulation=True, initial=0.0),
     }
     if extra_donor:
-        models["C"] = _compartment("c", scheme="implicit", initial=1.0)
+        models["C"] = _compartment("c", scheme="backward_euler", initial=1.0)
     return union(models, links, iterate_rtol=1e-12, iterate_atol=1e-14, iterate_max=200)
 
 
@@ -812,14 +812,15 @@ def test_two_links_into_different_entries_of_one_boundary_key_are_accepted():
     net.add_edge("amb1", "zone", kind="flow")
     net.add_edge("zone", "amb2", kind="flow")
     layer = TransportLayer(net, "b", capacity=torch.tensor([1.0], dtype=F64), flow_kind="flow",
-                           boundary=["amb1", "amb2"], scheme="implicit",
+                           boundary=["amb1", "amb2"], scheme="backward_euler",
                            quantity="concentration", unit="kg/m3")
     q = torch.tensor([1.0, 1.0], dtype=F64)
     b_model = Model(net, {"b": layer}, closures=[lambda s, d: {"b.q": q}])
     b = (b_model, {"b.x": torch.tensor([0.0], dtype=F64)},
          {"b.x_boundary": torch.zeros(2, dtype=F64), "b.sources": torch.zeros(3, dtype=F64)})
     union(
-        {"A": _compartment("a", scheme="implicit"), "C": _compartment("c", scheme="implicit"),
+        {"A": _compartment("a", scheme="backward_euler"),
+         "C": _compartment("c", scheme="backward_euler"),
          "B": b},
         [ValueLink("A", "a.x", 0, "B", "b.x_boundary", 0, two_way=True),
          ValueLink("C", "c.x", 0, "B", "b.x_boundary", 1, two_way=True)],

@@ -18,7 +18,7 @@ def _t(values):
     return torch.tensor(values, dtype=F64)
 
 
-def _layer(scheme="implicit", transmission=None, K=1):
+def _layer(scheme="backward_euler", transmission=None, K=1):
     net = Network(dtype=F64)
     net.add_node("ambient")
     net.add_node("a")
@@ -36,7 +36,7 @@ SRC = _t([0.0, 0.1, 0.0])
 XB = _t([0.2])
 X0 = _t([0.3, 0.1])
 TAU = _t([0.6, 0.9, 1.0])
-SCHEMES = ["exact", "implicit", "trapezoidal"]
+SCHEMES = ["exact", "backward_euler", "trapezoidal"]
 
 
 @pytest.mark.parametrize("scheme", SCHEMES)

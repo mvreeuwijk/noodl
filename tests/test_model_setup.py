@@ -39,7 +39,7 @@ def _air(net, name="air"):
 
 def _species(net, name="species"):
     return TransportLayer(net, name, capacity=torch.tensor([50.0, 80.0], dtype=F64),
-                          flow_kind="airpath", boundary=["ambient"], scheme="implicit")
+                          flow_kind="airpath", boundary=["ambient"], scheme="backward_euler")
 
 
 def _options(**kw):

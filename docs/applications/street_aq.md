@@ -279,7 +279,9 @@ values of the sections above.
 ## Chemistry
 
 `Model.steady` never applies reactions. For a coupled transport-and-chemistry steady state use
-`street_steady`, which iterates the two by successive substitution:
+`street_steady`, which iterates the two by successive substitution (`Model.fixed_point`, so
+gradients are those of the converged fixed point, by the implicit adjoint, not of the unrolled
+passes):
 
 ```python
 from noodl.apps.street_aq import photostationary_for_streets, street_steady
@@ -505,7 +507,8 @@ largest `|C_ext|`) falls below `tol` -- typically 6-13 passes on a network the s
 Paris. It needs a model built with `background="per_street"`, and takes the two kernels as
 required keyword arguments: there is no `build_model` option for this, since the kernels
 depend on the wind and must be rebuilt every hour. The gradient is that of the converged
-fixed point, by an implicit adjoint (one GMRES solve per instance, hours never coupled).
+fixed point, by an implicit adjoint (one GMRES solve per instance, hours never coupled). The
+iteration is `Model.fixed_point`, judged per hour.
 
 | Option | Values | What changes |
 |---|---|---|
@@ -783,7 +786,7 @@ The tables are rebuilt only when one of their drivers changes (in value, or as a
 tensor), so under constant meteorology a run builds them once. A wind direction that
 changes between steps turns every puff's further path.
 
-`build_model(..., puffs=...)` needs `background="per_street"`, `scheme="implicit"`, one
+`build_model(..., puffs=...)` needs `background="per_street"`, `scheme="backward_euler"`, one
 species and no chemistry. The closure also refuses, by name, a model coupled other than
 ping-pong, a sub-stepped street layer and a removal on it: a puff's mass is what one
 backward-Euler step without sinks moved.

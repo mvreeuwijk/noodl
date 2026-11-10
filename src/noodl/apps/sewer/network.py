@@ -19,6 +19,7 @@ from noodl.apps.sewer.air import (
     F_AIR_DEFAULT,
     F_I_DEFAULT,
     add_air_edges,
+    air_heads,
     air_layer,
 )
 from noodl.apps.sewer.controls import ControlSet
@@ -928,7 +929,7 @@ def build_model(
     leak_cd: float = 0.6,
     fans: tuple = (),
     coupling: str = "pingpong",
-    scheme: str = "implicit",
+    scheme: str = "backward_euler",
     dt_storage: float | None = None,
     iterate_tol: float | None = None,
     iterate_max: int | None = None,
@@ -1047,6 +1048,7 @@ def build_model(
             graph, net, plan, f_air=f_air, f_i=f_i, c_s=c_s, leak_area=leak_area,
             leak_cd=leak_cd, fans=fans,
         )
+        closures.append(air_heads(layers["air"], graph, net, plan, f_i=f_i, c_s=c_s))
         drivers["air.phi_boundary"] = torch.zeros(1, dtype=F64)
 
     sulfide_col = None
@@ -1307,17 +1309,8 @@ def sewer_steady(
     so a sewer whose sulfide balance has a source term needs its own fixed point: step until
     every transport state stops changing.
     """
-    current = dict(state)
-    for _ in range(max_iter):
-        new = model.step(current, drivers, dt)
-        worst = 0.0
-        for name in model.transport:
-            key = f"{name}.x"
-            worst = max(worst, float((new[key] - current[key]).abs().max()))
-        current = new
-        if worst < tol:
-            return current
-    raise RuntimeError(
-        f"apps.sewer.sewer_steady: no fixed point within {max_iter} steps of {dt} s "
-        f"(largest remaining change {worst:.3e} against tol {tol})"
+    return model.fixed_point(
+        lambda current: model.step(current, drivers, dt), state,
+        watch=[f"{name}.x" for name in model.transport], tol=tol, max_passes=max_iter,
+        where=f"apps.sewer.sewer_steady (steps of {dt} s)",
     )

@@ -56,7 +56,7 @@ def test_partial_dilution_is_an_amount_whose_capacity_grows_by_dilution_times_ne
     x_exact = _tank(dilution=lam, carrier=1.0).step(
         _t([1.0]), _t([q]), _t([0.0, 0.0]), _t([0.0]), dt)
     assert float(x_exact) == pytest.approx(math.exp(-lam * q * dt / V), rel=1e-13)
-    x_impl = _tank(dilution=lam, scheme="implicit").step(
+    x_impl = _tank(dilution=lam, scheme="backward_euler").step(
         _t([1.0]), _t([q]), _t([0.0, 0.0]), _t([0.0]), dt)
     assert float(x_impl) == pytest.approx(1.0 / (1.0 + lam * q * dt / V), rel=1e-13)
 
@@ -120,7 +120,7 @@ def test_dense_operator_matches_the_sparse_one():
     assert torch.allclose(layer.net_inflow(q), _t([0.5, 0.6]), rtol=0, atol=1e-15)
 
 
-@pytest.mark.parametrize("scheme", ["exact", "implicit"])
+@pytest.mark.parametrize("scheme", ["exact", "backward_euler"])
 def test_step_gradcheck_through_the_flows(scheme):
     """The dilution term is differentiable in `q`: gradcheck of the step's output, for an
     unbalanced network (net inflow at both interior nodes)."""
@@ -157,9 +157,9 @@ def test_withdrawal_mode_is_no_sink_where_the_flows_take_more_than_they_bring():
     steady value is the mix (q_in x_b + s) / q_out; the signed form would instead remove a
     negative amount and read (q_in x_b + s) / q_in."""
     q, xb, src = _t([0.5, 1.0]), _t([100.0, 0.0]), _t([0.0, 20.0, 0.0])
-    withdrawal = _injected(dilution=1.0, dilution_mode="withdrawal", scheme="implicit")
-    plain = _injected(scheme="implicit")
-    signed = _injected(dilution=1.0, scheme="implicit")
+    withdrawal = _injected(dilution=1.0, dilution_mode="withdrawal", scheme="backward_euler")
+    plain = _injected(scheme="backward_euler")
+    signed = _injected(dilution=1.0, scheme="backward_euler")
     x = withdrawal.steady(q, src, xb)
     assert float(x) == pytest.approx((0.5 * 100.0 + 20.0) / 1.0, rel=1e-12)
     assert torch.equal(x, plain.steady(q, src, xb))
@@ -169,7 +169,7 @@ def test_withdrawal_mode_is_no_sink_where_the_flows_take_more_than_they_bring():
     assert torch.equal(step, plain.step(_t([1.0]), q, src, xb, 0.7))
 
 
-@pytest.mark.parametrize("scheme", ["exact", "implicit"])
+@pytest.mark.parametrize("scheme", ["exact", "backward_euler"])
 def test_withdrawal_mode_equals_the_signed_form_where_the_flows_bring_more(scheme):
     """Where net(q) >= 0 everywhere the two modes are the same operator, bit for bit."""
     args = (_t([1.0]), _t([0.5]), _t([0.0, 0.0]), _t([4.0]), 1.3)
@@ -188,7 +188,7 @@ def test_withdrawal_mode_keeps_the_withdrawal_side_derivative_at_zero_net_inflow
     """At net(q) = 0 the sink's derivative is the withdrawal side's: the same gradient as
     the signed form."""
     def grad(mode):
-        layer = _injected(dilution=1.0, dilution_mode=mode, scheme="implicit")
+        layer = _injected(dilution=1.0, dilution_mode=mode, scheme="backward_euler")
         q = _t([0.5, 0.5]).requires_grad_(True)
         layer.steady(q, _t([0.0, 0.3, 0.0]), _t([100.0, 0.0])).sum().backward()
         return q.grad
@@ -207,7 +207,7 @@ def test_withdrawal_mode_gradcheck_across_an_injection_and_a_withdrawal():
     net.add_edge("z2", "o", kind="flow")
     layer = TransportLayer(net, "c", capacity=_t([1.5, 0.7]), flow_kind="flow",
                            boundary=["b", "o"], dilution=1.0, dilution_mode="withdrawal",
-                           scheme="implicit")
+                           scheme="backward_euler")
 
     def f(q):
         return layer.steady(q, _t([0.0, 0.1, 0.0, 0.0]), _t([3.0, 0.0]))

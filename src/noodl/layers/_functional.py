@@ -2,31 +2,97 @@
 
 `implicit_solve` differentiates a solve with respect to every tensor passed to
 `Function.apply`. `FunctionalLaws` therefore presents the layer's residual and Jacobian
-operator as functions of the iterate and a flat tuple of tensors: the laws' and node sources'
+operator as functions of the iterate and a flat tuple of tensors: the laws' and withdrawals'
 own `nn.Parameter`s (substituted back in with `torch.func.functional_call`), the driver
-values, `sources` and `phi_boundary`. Node sources are threaded through exactly as laws are,
-so a learnable demand exponent or required pressure gets a correct implicit-function gradient.
+values, `sources` and `phi_boundary`. Withdrawals and node storages are threaded through
+exactly as laws are, so a learnable demand exponent, required pressure or capacity gets a
+correct implicit-function gradient. On a step the step-start state is threaded too: the
+potentials (read by the storage and by the laws that read the step-start potential
+difference), the flows (where a law reads them) and the flows into storage, so a chain of
+steps back-propagates through time. It serves both paths: `residual_fn` and `operator_fn`
+are the layer's own `_residual` and `_operator`, each owner called through `call` with its
+threaded parameters.
+
+The Jacobian operator (the forward Newton's and the adjoint's) takes each law's and node
+source's own analytic `dflow`, and each storage's `rate_slope`, where it declares
+`exact_slope` (the default), and autograd through its flow (or rate) where it does not
+(`KirchhoffLayer._law_slopes` and `_node_slopes` with `adjoint=True`). The parameter
+gradients come from one autograd pass through the residual at the root (`solvers.implicit`),
+never from the slopes.
 """
 
 from __future__ import annotations
 
+import dataclasses
+import functools
+
 import torch
 
 from noodl._tracking import bulk_values, same_tracking
+from noodl.elements.base import ConstitutiveLaw, LawContext
+from noodl.layers._flow_unknowns import _Held, angular_frequency
+from noodl.withdrawals import NodeWithdrawal
+
+#: The steady context, of a solve without a step (`KirchhoffLayer._DC`).
+_DC = LawContext(mode="dc")
+
+
+def _call(module, params: dict, args: tuple, kwargs: dict | None = None):
+    """`module(*args, **kwargs)` with its parameters replaced by `params` (`functional_call`);
+    a module without parameters is called directly, which is the same call without the
+    cost."""
+    if not params:
+        return module(*args) if kwargs is None else module(*args, **kwargs)
+    return torch.func.functional_call(module, params, args, kwargs)
+
+
+def _stepping(step) -> bool:
+    """Whether `step` is a step of a layer with storage (its `storage` a `_StorageStep`)."""
+    return step is not None and step.storage is not None and not isinstance(step.storage, _Held)
+
+
+def step_start(step, history=None) -> tuple:
+    """The step-start tensors a differentiable solve threads, in order: the potentials
+    `phi_prev` (on a step of a layer with storage, or where a law reads the step-start
+    potential difference), the flows `q_prev` (where a law reads them) and the flows into
+    storage `previous` (where given). Empty off a step. `history` is the solve's
+    `(phi, q)`; the storage step holds the same `phi`."""
+    if step is None:
+        return ()
+    ctx = step.ctx
+    stepping = _stepping(step)
+    if not stepping and ctx.dp_prev is None:
+        return ()
+    out = (step.storage.phi_prev if stepping else history[0],)
+    if ctx.q_prev is not None:
+        out += (ctx.q_prev,)
+    if stepping and step.storage.previous is not None:
+        out += (step.storage.previous,)
+    return out
+
+
+def _analytic(owner, base) -> bool:
+    """Whether `owner` overrides `base.dflow` (else its `dflow` is autograd anyway, and the
+    threaded autograd here gives the same slope with this module's own error messages)."""
+    return type(owner).dflow is not base.dflow
 
 
 class FunctionalLaws:
     """`residual_fn(x, *params)` and `operator_fn(x, *params)` of one layer at one call.
 
-    `all_params` is the tuple to hand to `implicit_solve`; `params` in the two functions is
-    that tuple.
+    `all_params` is the tuple to hand to `implicit_solve`, in the order `(parameters,
+    drivers, sources, phi_boundary, *step_start(step, history))`; `params` in the two
+    functions is that tuple. `last` is `(x, phi, q)` of the last residual evaluated without
+    a graph (`root_parts`); a residual a layer with flow unknowns builds sets it too.
     """
 
-    def __init__(self, layer, drivers, sources, phi_boundary) -> None:
+    def __init__(self, layer, drivers, sources, phi_boundary, step=None, history=None) -> None:
         self.layer = layer
         self.drivers = drivers
-        owners = [*layer._laws, *layer._node_sources]
+        self.step = step
+        self._owners = owners = (*layer._laws, *layer._withdrawals, *layer._storage)
         self.n_el = len(layer._laws)
+        self.n_owned = self.n_el + len(layer._withdrawals)
         param_dicts = [dict(owner.named_parameters()) for owner in owners]
         self.param_names = [list(d.keys()) for d in param_dicts]
         param_tensors = [
@@ -45,9 +111,33 @@ class FunctionalLaws:
                 device=phi_boundary.device,
             )
         )
-        self.all_params = (*param_tensors, *driver_tensors, sources_tensor, phi_boundary)
+        start = step_start(step, history)
+        self._starts = len(start)
+        self._phasor = layer.phasor
+        self.all_params = (*param_tensors, *driver_tensors, sources_tensor, phi_boundary,
+                           *start)
+        self.last = None
+        self._rebuilt: list = []
 
     def rebuild(self, params):
+        """`(law, withdrawal and storage parameter dicts, drivers, sources, phi_boundary,
+        step)` from the flat `params`; `step` is the layer's step rebuilt from `params`: its
+        storage step's `phi_prev` and `previous`, its context's `dp_prev` and `q_prev` where
+        the laws read them, and on a phasor layer its `omega` from the frequency driver
+        (`None` off a step). The last two results
+        are reused while `params` holds the same objects: the forward Newton alternates two
+        tuples (the residual's detached one and the operator's). Everything that depends on
+        `params` is in the returned value, never in a side effect, so a memo hit cannot hand
+        back another call's step tensors."""
+        for key, out in self._rebuilt:
+            if len(key) == len(params) and all(
+                    a is b for a, b in zip(key, params, strict=True)):
+                return out
+        out = self._rebuild(params)
+        self._rebuilt = [(tuple(params), out), *self._rebuilt[:1]]
+        return out
+
+    def _rebuild(self, params):
         offset = 0
         rebuilt = []
         for names in self.param_names:
@@ -67,139 +157,90 @@ class FunctionalLaws:
         offset += len(self.driver_keys)
         src = params[offset]
         pb = params[offset + 1]
-        return rebuilt, drv, src, pb
+        step = self.step
+        if self._starts:
+            # the step-start tensors, threaded, in place of the originals
+            ctx, store = step.ctx, step.storage
+            k = offset + 2
+            phi_prev = params[k]
+            q_prev = None
+            if ctx.q_prev is not None:
+                k += 1
+                q_prev = params[k]
+            if ctx.dp_prev is not None:
+                ctx = self.layer._with_history(ctx, phi_prev, q_prev)
+            if _stepping(step):
+                store = self.layer._storage_step(
+                    phi_prev, None if store.previous is None else params[k + 1])
+            step = dataclasses.replace(step, ctx=ctx, storage=store)
+        if self._phasor and step is not None:
+            # the angular frequency from the threaded frequency driver
+            step = dataclasses.replace(step, ctx=dataclasses.replace(
+                step.ctx, omega=angular_frequency(self.layer, drv)))
+        return rebuilt, drv, src, pb, step
 
-    def dp(self, phi, drv):
-        layer = self.layer
-        d = layer._difference(phi)
-        parts = []
-        for kind, (start, end) in layer._kind_slices.items():
-            block = d[..., start:end]
-            for driven in layer._drives:
-                if driven.kind == kind:
-                    block = block + driven(drv)
-            parts.append((start, block))
-        parts.sort(key=lambda p: p[0])
-        return torch.cat([p[1] for p in parts], dim=-1)
+    def call(self, rebuilt, i: int, args: tuple, kwargs: dict | None = None):
+        """Owner `i` (a law, then past the laws a withdrawal, then a storage) called with its
+        threaded parameters `rebuilt[i]` (from `rebuild`); one without parameters is called
+        directly."""
+        return _call(self._owners[i], rebuilt[i], args, kwargs)
 
-    def flows(self, phi, drv, rebuilt):
-        layer = self.layer
-        dp_full = self.dp(phi, drv)
-        parts = []
-        for el, d, (s, e) in zip(
-            layer._laws, rebuilt[: self.n_el], layer._law_slices, strict=True
-        ):
-            parts.append(torch.func.functional_call(el, d, (dp_full[..., s:e], drv)))
-        return torch.cat(parts, dim=-1)
+    def root_parts(self, x):
+        """`(phi, q)` at the solve's root `x` as Newton's last residual computed them, when
+        no gradient is wanted (the same values `assemble` and the flows give); `None` when
+        one is, and the caller computes them with their graph.
 
-    def node_withdrawal(self, phi, drv, rebuilt):
-        layer = self.layer
-        return layer._scatter_node_sources(lambda j, ns: torch.func.functional_call(
-            ns, rebuilt[self.n_el + j], (phi[..., ns.nodes], drv)))
-
-    def node_slopes(self, phi, drv, rebuilt):
-        layer = self.layer
-        def slope(j, ns):
-            leaf = phi[..., ns.nodes].detach().requires_grad_(True)
-            with torch.enable_grad():
-                w = torch.func.functional_call(ns, rebuilt[self.n_el + j], (leaf, drv))
-                (grad,) = torch.autograd.grad(w.sum(), leaf)
-            return grad
-
-        return layer._scatter_node_sources(slope)
-
-    @staticmethod
-    def _dp_dependence_error(el, i: int) -> RuntimeError:
-        return RuntimeError(
-            f"law {i} of kind {el.kind!r} (type {type(el).__name__}) produced a "
-            f"flow that does not depend on dp; if that is intended, set "
-            f"dp_independent = True on this law's class, otherwise its flow() is "
-            f"dropping the autograd graph (e.g. a stray dp.detach())."
-        )
-
-    def dflows(self, phi, drv, rebuilt):
-        layer = self.layer
-        dp_full = self.dp(phi, drv)
-        parts = []
-        for i, (el, d, (s, e)) in enumerate(
-            zip(layer._laws, rebuilt[: self.n_el], layer._law_slices, strict=True)
-        ):
-            dp_slice = dp_full[..., s:e].detach().requires_grad_(True)
-            # The REDUCTION `flow.sum()` must itself execute inside the enable_grad
-            # block, not just the `functional_call` that produces `flow`: this whole
-            # method runs under the outer no_grad of Newton's forward solve (which is
-            # what keeps the forward's memory flat), and `.sum()` is an ordinary tensor op like
-            # any other -- performed under the ambient grad mode at the point it actually
-            # runs, regardless of whether its input (`flow`) already carries a grad_fn
-            # from an earlier, enable_grad-wrapped computation. Writing
-            # `torch.autograd.grad(flow.sum(), dp_slice)` with the `with
-            # torch.enable_grad():` block closed before that line evaluates `flow.sum()`
-            # under the outer no_grad, so the tensor actually handed to `autograd.grad` as
-            # `outputs` has no grad_fn of its own -- even though `flow` printed `requires_grad=True`
-            # right before the call. `torch.autograd.grad` itself does not consult the
-            # ambient grad mode at its own call site (confirmed: calling it under no_grad
-            # against an output already fully built under enable_grad, or with an explicit
-            # `grad_outputs=` and no further reduction, both work); the reduction is what
-            # must be inside the block.
-            with torch.enable_grad():
-                flow = torch.func.functional_call(el, d, (dp_slice, drv))
-                # Whether a missing/zero Jacobian contribution here is legitimate is
-                # decided ONLY by el.dp_independent -- a class-level DECLARATION (see
-                # ConstitutiveLaw) -- never inferred from whatever autograd graph `flow` happens
-                # to carry (e.g. `flow.requires_grad` with allow_unused=True): that would give
-                # ANY law whose flow() accidentally lost the autograd graph (e.g. a stray
-                # dp.detach() in a third-party subclass) an exact-zero Jacobian column
-                # instead of an error. The forward solve would still look fine (Newton
-                # converges on the exact residual regardless), but the adjoint gradient
-                # computed from that Jacobian would be silently wrong.
-                if el.dp_independent:
-                    # Cross-check the declaration against the law's own analytic
-                    # dflow(), which for a genuinely dp-independent law (FixedFlow's,
-                    # say) must be identically zero. This is called on `el` directly
-                    # (not through functional_call/`d`) rather than via a second
-                    # functional_call: torch.func.functional_call always invokes the
-                    # module's forward()/flow(), with no way to redirect it to dflow(),
-                    # and `d`'s tensors are the very same objects as el's own current
-                    # parameters (both trace back to el.named_parameters() at the start
-                    # of solve()), so reading el's own attributes here gives the same
-                    # values a substituted call would. This catches a wrongly-declared
-                    # dp_independent = True (or a dflow() inconsistent with it) instead
-                    # of silently trusting a possibly-wrong flag.
-                    analytic = el.dflow(dp_slice.detach(), drv)
-                    if not torch.equal(analytic, torch.zeros_like(analytic)):
-                        raise RuntimeError(
-                            f"law {i} of kind {el.kind!r} (type "
-                            f"{type(el).__name__}) declares dp_independent = True but "
-                            f"its own dflow() is not identically zero; either the flag "
-                            f"is wrong or dflow() is inconsistent with a dp-independent "
-                            f"flow law."
-                        )
-                    grad = torch.zeros_like(dp_slice)
-                elif not flow.requires_grad:
-                    raise self._dp_dependence_error(el, i)
-                else:
-                    try:
-                        (grad,) = torch.autograd.grad(
-                            flow.sum(), dp_slice, create_graph=False
-                        )
-                    except RuntimeError as exc:
-                        raise self._dp_dependence_error(el, i) from exc
-            parts.append(grad)
-        return torch.cat(parts, dim=-1)
+        After `KirchhoffLayer._newton_differentiable` the last residual is at the root: it
+        is Newton's last, or the threading check's at the root."""
+        wanted = torch.is_grad_enabled() and (x.requires_grad or any(
+            isinstance(t, torch.Tensor) and t.requires_grad for t in self.all_params))
+        if wanted:
+            return None
+        return self.last[1], self.last[2]
 
     def residual_fn(self, x, *params):
-        layer = self.layer
-        rebuilt, drv, src, pb = self.rebuild(params)
-        phi = layer.assemble(x, pb)
-        q = self.flows(phi, drv, rebuilt)
-        lhs = layer._accumulate_interior(q)
-        s_I = src[..., layer.interior]
-        w = self.node_withdrawal(phi, drv, rebuilt)
-        return lhs - s_I if w is None else lhs - s_I + w
+        """The layer's residual (`KirchhoffLayer._residual`) with the threaded `params`."""
+        rebuilt, drv, src, pb, step = self.rebuild(params)
+        r, phi, q = self.layer._residual(x, pb, drv, src, step,
+                                         functools.partial(self.call, rebuilt))
+        if not q.requires_grad:
+            # the point, potentials and flows of the last graph-free residual
+            # (`root_parts` returns them when no gradient is wanted)
+            self.last = (x, phi, q)
+        return r
 
     def operator_fn(self, x, *params):
-        layer = self.layer
-        rebuilt, drv, src, pb = self.rebuild(params)
-        phi = layer.assemble(x, pb)
-        dq = self.dflows(phi, drv, rebuilt)
-        return layer._operator_at(dq, self.node_slopes(phi, drv, rebuilt))
+        """The layer's Jacobian operator (`KirchhoffLayer._operator`) with the threaded
+        `params`. It also builds the adjoint (`adjoint=True`): every law, withdrawal and
+        storage whose slope is not its own exact one gives autograd."""
+        rebuilt, drv, _, pb, step = self.rebuild(params)
+        return self.layer._operator(x, pb, drv, step, functools.partial(self.call, rebuilt),
+                                    adjoint=True)
+
+    @property
+    def layer_slopes(self) -> bool:
+        """Whether the threaded operator's slopes equal the layer's own (`layer_slopes`)."""
+        return layer_slopes(self.layer)
+
+
+def layer_slopes(layer) -> bool:
+    """Whether the slopes of `layer`'s threaded operator (`adjoint=True`) equal its primal
+    ones (`KirchhoffLayer._dflows`, `_node_slopes`): true unless a law or
+    node source overrides `dflow` with a slope it does not declare exact (`exact_slope =
+    False`), a law that reads the context declares its slope inexact, or a storage declares
+    its `rate_slope` inexact; only the layer's slopes use those. Cached on the layer against
+    its owners' `exact_slope` flags (which may be set per instance)."""
+    n_el = len(layer._laws)
+    n_owned = n_el + len(layer._withdrawals)
+    owners = (*layer._laws, *layer._withdrawals, *layer._storage)
+    flags = tuple(o.exact_slope for o in owners)
+    cache = getattr(layer, "_layer_slopes", None)
+    if cache is None or cache[0] != flags:
+        value = not any(
+            not o.exact_slope and (
+                i >= n_owned
+                or (i < n_el and o._takes_ctx)
+                or _analytic(o, ConstitutiveLaw if i < n_el else NodeWithdrawal))
+            for i, o in enumerate(owners))
+        cache = layer._layer_slopes = (flags, value)
+    return cache[1]

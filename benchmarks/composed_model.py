@@ -4,7 +4,7 @@ with a reference physics configuration on top.
 Used by the composed-model scaling gate and, as a `pytest` fixture
 (`tests/conftest.py`'s `composed_model`), by the tests that need a realistic joined
 topology and physics. `_build_topology` builds the topology ONLY -- no laws,
-drives or layers; `build_composed` then attaches one reference physics configuration to it (a
+heads or layers; `build_composed` then attaches one reference physics configuration to it (a
 `PowerLaw` per edge kind, sources, capacity, a migrated `KirchhoffLayer`, a dense-path
 `KirchhoffLayer` and a `TransportLayer`) and returns both as one `ComposedModel`.
 """
@@ -220,7 +220,7 @@ def build_composed(
         flow_kind="airpath",
         boundary=boundary,
         n_species=1,
-        scheme="implicit",
+        scheme="backward_euler",
     )
 
     thermal_layer: TransportLayer | None = None
@@ -236,7 +236,7 @@ def build_composed(
             flow_kind="airpath",
             boundary=boundary,
             carrier=1005.0,
-            scheme="implicit",
+            scheme="backward_euler",
             quantity="temperature",
             unit="K",
         )

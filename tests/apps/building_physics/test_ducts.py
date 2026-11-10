@@ -8,8 +8,8 @@ import pytest
 import torch
 
 from noodl.apps.building_physics import DuctNetwork, duct_laws_from_edges
-from noodl.drives import Stack
 from noodl.elements import FixedFlow, PowerLaw
+from noodl.heads import EdgeHeads, Stack
 from noodl.layers.kirchhoff import KirchhoffLayer
 from noodl.topology import Network
 
@@ -39,15 +39,16 @@ def _system(fan_flow=0.05, T_j=(293.15,) * 4, z_j=(1.5,) * 4, T_amb=293.15):
     ducts.add_to(net)
     net.add_edge("j2", "j3", kind="fan")
     net.add_edge("room", "ambient", kind="vent", z_path=1.5)
-    elements, drives = duct_laws_from_edges(net, g=G)
+    elements, heads = duct_laws_from_edges(net, g=G)
     elements += [FixedFlow(torch.tensor([fan_flow], dtype=F64), kind="fan"),
                  PowerLaw(torch.tensor([0.5], dtype=F64), torch.tensor([0.5], dtype=F64),
                           kind="vent")]
-    drives.append(Stack.from_network(net, "vent", g=G))
-    layer = KirchhoffLayer(net, "air", elements, drives=drives, boundary=["ambient"])
+    heads.append(Stack.from_network(net, "vent", g=G))
+    layer = KirchhoffLayer(net, "air", elements, boundary=["ambient"])
     densities = rho(net.node_attr("T0"))
-    phi, q = layer.solve(torch.zeros(1, dtype=F64), {"rho": densities}, atol=1e-14,
-                         rtol=1e-14)
+    drivers = {"rho": densities}
+    drivers.update(EdgeHeads(layer, heads)(None, drivers))
+    phi, q = layer.solve(torch.zeros(1, dtype=F64), drivers, atol=1e-14, rtol=1e-14)
     return net, phi, q, densities
 
 
@@ -182,7 +183,7 @@ def test_a_terminal_with_a_wind_profile_feels_the_wind_as_an_envelope_path():
     """The terminal runs from its junction into the ambient, so the wind enters with the sign
     of an envelope path into the ambient: value = -1/2 rho V^2 Ch Cp(theta - azimuth). At a
     wind from the wall's own direction Cp is the profile's value at 0, 0.6."""
-    from noodl.drives import Wind, WindProfile
+    from noodl.heads import Wind, WindProfile
 
     net = _wind_net(Ch=0.5, azimuth=90.0, profile=1)
     assert net.edge_attr("z_path", "duct_terminal").tolist() == [3.0, 3.0]
@@ -190,10 +191,10 @@ def test_a_terminal_with_a_wind_profile_feels_the_wind_as_an_envelope_path():
     volumes = net.node_attr("volume", default=0.0).tolist()
     assert volumes == pytest.approx([0.0, 50.0, A20, A20], rel=1e-15)
     profile = WindProfile([0.0, 180.0], [0.6, -0.3])
-    elements, drives = duct_laws_from_edges(net, profiles=[profile])
+    elements, heads = duct_laws_from_edges(net, profiles=[profile])
     assert [type(e).__name__ for e in elements] == ["AirDuct", "DuctTerminal"]
-    assert [type(d).__name__ for d in drives] == ["DuctStack", "Stack", "Wind"]
-    wind = drives[-1]
+    assert [type(d).__name__ for d in heads] == ["DuctStack", "Stack", "Wind"]
+    wind = heads[-1]
     assert isinstance(wind, Wind)
     value = wind(WIND)
     assert value[0].item() == pytest.approx(-0.5 * 1.2 * 16.0 * 0.5 * 0.6, rel=1e-15)
@@ -202,16 +203,16 @@ def test_a_terminal_with_a_wind_profile_feels_the_wind_as_an_envelope_path():
 
 def test_a_terminal_with_a_constant_pressure_coefficient_feels_the_wind_without_a_profile():
     net = _wind_net(Cp=-0.4, Ch=0.8)
-    elements, drives = duct_laws_from_edges(net)
-    assert [type(d).__name__ for d in drives] == ["DuctStack", "Stack", "Wind"]
-    value = drives[-1](WIND)
+    elements, heads = duct_laws_from_edges(net)
+    assert [type(d).__name__ for d in heads] == ["DuctStack", "Stack", "Wind"]
+    value = heads[-1](WIND)
     assert value[0].item() == pytest.approx(0.5 * 1.2 * 16.0 * 0.8 * 0.4, rel=1e-15)
     assert value[1].item() == 0.0
 
 
 def test_terminals_without_wind_get_no_wind_drive():
-    elements, drives = duct_laws_from_edges(_wind_net())
-    assert [type(d).__name__ for d in drives] == ["DuctStack", "Stack"]
+    elements, heads = duct_laws_from_edges(_wind_net())
+    assert [type(d).__name__ for d in heads] == ["DuctStack", "Stack"]
 
 
 @pytest.mark.parametrize("zone, wind, message", [

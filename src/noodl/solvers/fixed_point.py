@@ -146,6 +146,30 @@ def _vjp(
     return zeros
 
 
+def _leaves_read(tensors: Sequence[Tensor], leaves: Sequence[Tensor]) -> set[int]:
+    """The indices of `leaves` that the graph of `tensors` reaches (a tensor that IS a leaf
+    counts): one walk over the autograd nodes, each visited once."""
+    index = {id(leaf): i for i, leaf in enumerate(leaves)}
+    found: set[int] = set()
+    stack = []
+    for t in tensors:
+        if id(t) in index:
+            found.add(index[id(t)])
+        elif t.grad_fn is not None:
+            stack.append(t.grad_fn)
+    seen: dict[int, object] = {}     # holds each node, so no id is reused mid-walk
+    while stack:
+        node = stack.pop()
+        if id(node) in seen:
+            continue
+        seen[id(node)] = node
+        variable = getattr(node, "variable", None)
+        if variable is not None and id(variable) in index:
+            found.add(index[id(variable)])
+        stack.extend(n for n, _ in node.next_functions if n is not None)
+    return found
+
+
 class _AdjointOperator:
     """(I - J^T), either on the fully flattened interface or split into one block per batch
     instance. J^T w is one VJP of the read z_next = G(z); when `batch_shape` is given, that
@@ -281,6 +305,7 @@ def differentiate_fixed_point(
     where: str = "fixed point",
     batch_shape: tuple[int, ...] | None = None,
     report: MutableMapping[str, object] | None = None,
+    optional: Sequence[bool] | None = None,
 ) -> list[Tensor]:
     """One differentiable pass at the converged interface `z_star`, with the implicit adjoint
     attached to its outputs. `pass_fn(z)` returns `(outputs, z_next)`; the module docstring
@@ -310,6 +335,14 @@ def differentiate_fixed_point(
     solve of today, unconditionally correct either way. `report`, when given, is updated with
     `{"batched": bool}`: False whenever the adjoint does not attach at all (nothing ran, so
     there is nothing to report) or the flattened solve ran; True when the batched one did.
+
+    `optional`, when given, says per entry of `z_star` whether it may leave the interface
+    when the pass does not read it: an entry whose leaf no output and no `z_next` reaches
+    (found by walking the pass graph) has a zero column in `G_z`, so it determines nothing
+    the others need, and it is dropped before the adjoint solve. Its `z_next` stays an
+    ordinary output. The gradient is the same; the solve is smaller, and a caller that
+    offers every candidate key gets the interface it would have chosen by hand. `report`
+    then also carries `"unread"`, the indices dropped.
 
     **`batch_shape` is a precondition on the CALLER, not something this function can verify.**
     Passing it asserts that instances do NOT couple through `pass_fn` -- that instance i's
@@ -360,6 +393,20 @@ def differentiate_fixed_point(
         # `any(o.requires_grad for o in outputs)` is False on this branch whenever grad is
         # enabled, so no `o` here has `requires_grad=True` and no `.detach()` is needed.
         return list(outputs)
+    if optional is not None:
+        if len(optional) != len(z):
+            raise ValueError(
+                f"{where}: optional has {len(optional)} entries for {len(z)} interface "
+                f"tensors"
+            )
+        read = _leaves_read([*outputs, *z_next], z)
+        keep = [i for i in range(len(z)) if not optional[i] or i in read]
+        if report is not None:
+            report["unread"] = [i for i in range(len(z)) if i not in keep]
+        z = [z[i] for i in keep]
+        z_next = [z_next[i] for i in keep]
+        if not z:
+            return list(outputs)
     effective_batch_shape: tuple[int, ...] | None = None
     if batch_shape is not None:
         bs = tuple(batch_shape)

@@ -40,7 +40,7 @@ Build the model and its starting state and inputs.
 
 | Name | What it does | How to call it |
 |---|---|---|
-| `build_model` | `(Model, initial state, driver template)` for one street network. | `build_model(net, *, preset='sirane', canyon_wind=None, roof_wind=None, roof_exchange=None, junction_routing=None, direction_averaging=None, direction_spread=None, stability=None, shape_constant=None, n_theta=None, sigma_theta=None, species=('nox',), chemistry=None, scheme='implicit', kappa=None, canyon_wind_min=None, u_d_min=None, sigma_w_min=None, sigma_v_min=None, sigma_w_height=None, h_canopy=None, z0_s=0.01, z_ref=30.0, pblh_floor=True, meteo='uniform', background='uniform', atmosphere='atmosphere', layer_name='street', puffs=None)` |
+| `build_model` | `(Model, initial state, driver template)` for one street network. | `build_model(net, *, preset='sirane', canyon_wind=None, roof_wind=None, roof_exchange=None, junction_routing=None, direction_averaging=None, direction_spread=None, stability=None, shape_constant=None, n_theta=None, sigma_theta=None, species=('nox',), chemistry=None, scheme='backward_euler', kappa=None, canyon_wind_min=None, u_d_min=None, sigma_w_min=None, sigma_v_min=None, sigma_w_height=None, h_canopy=None, z0_s=0.01, z_ref=30.0, pblh_floor=True, meteo='uniform', background='uniform', atmosphere='atmosphere', layer_name='street', puffs=None)` |
 | `initial_drivers` | `build_model`'s driver template (copied), then `values` by name (see `noodl.refs.drivers_from`), e.g. by street and species name. | `initial_drivers(model, *, values=None)` |
 | `initial_state` | Zero concentration everywhere, in each transport layer's own shape; then `values` by street and species name (see `noodl.refs.state_from`): `initial_state(model, values={"street": {"s1": {"nox": 1e-7}}})`. | `initial_state(model, *, values=None)` |
 
@@ -85,9 +85,9 @@ Transformations applied to transported species each step.
 |---|---|---|
 | `Photostationary` | NO/NO2/O3 relaxed to the Leighton photostationary state, in closed form. | `Photostationary(no, no2, o3, *, j_key='J_NO2', rate=None, temperature_key='temperature', k_no_o3=None, floor_ppb=0.0, molar_volume_key='molar_volume', m_no=0.03, m_no2=0.046, m_o3=0.048)` |
 
-## Sources
+## Sources and storage
 
-Nodal sources and withdrawals.
+Nodal sources, withdrawals and storage.
 
 | Name | What it does | How to call it |
 |---|---|---|

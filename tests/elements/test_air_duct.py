@@ -14,8 +14,8 @@ import math
 import pytest
 import torch
 
-from noodl.drives import DuctStack
 from noodl.elements import AirDuct, DuctTerminal, FixedFlow, air_viscosity
+from noodl.heads import DuctStack
 from noodl.layers.kirchhoff import KirchhoffLayer
 from noodl.topology import Network
 

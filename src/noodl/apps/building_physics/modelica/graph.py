@@ -20,7 +20,7 @@ owns exactly one node, named after the component: every one of its own fluid por
 its declared `ports[i]`) is the SAME node, because a lumped volume or boundary is a single
 pressure state that happens to expose several connection points. A `TraceSubstancesFlowSource`
 or `MassFlowSource_T` ("source") likewise shares whichever node its own port(s) resolve to --
-it is not a node in its own right, it decorates one (it becomes a node source).
+it is not a node in its own right, it decorates one (it becomes a source at that node).
 
 Every other `connect()` pair between two ports that belong to NEITHER a zone/boundary/source
 component is a plain wire: it creates a JUNCTION node, named `"_j<k>"`. Junctions are numbered

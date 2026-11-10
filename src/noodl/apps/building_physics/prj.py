@@ -143,10 +143,10 @@ from noodl.apps.building_physics.thermal import (
     R_AIR,
     RHO_0,
     check_flow_balanced,
+    check_head_order,
     species_layer,
 )
 from noodl.apps.building_physics.wth import _DAYS_BEFORE_MONTH
-from noodl.drives import ConstantDrive, Stack, Wind, WindProfile
 from noodl.elements import (
     AffinityFan,
     CubicSplineFlow,
@@ -157,10 +157,11 @@ from noodl.elements import (
     Scaled,
     UpstreamDensityPowerLaw,
 )
+from noodl.heads import DriverHead, EdgeHeads, Stack, Wind, WindProfile
 from noodl.layers.kirchhoff import KirchhoffLayer
 from noodl.layers.transport import UndefinedSteadyState, active_interior
 from noodl.model import Model
-from noodl.nodesources import NodeSource
+from noodl.storage import NodeStorage
 from noodl.topology import Network
 
 F64 = torch.float64
@@ -459,13 +460,13 @@ def _date(token: str) -> int:
 @dataclass
 class Project:
     """A CONTAM project as read by `read_prj`: the network, its airflow laws and
-    drives, zones and their temperatures and volumes, species, initial mass fractions,
+    head terms, zones and their temperatures and volumes, species, initial mass fractions,
     sources and ambient conditions, the run control, and the schedules as `inputs`.
     `project_to_model` builds the model from it."""
 
     net: Network
     laws: list
-    drives: list
+    heads: list
     zones: list[str]
     ambient: str
     paths: list[PrjPath]
@@ -1516,11 +1517,11 @@ def _build(*, ambient_conditions, g, species, levels, profiles, elements, zones,
            run_control, source_path, filter_elements, filters, schedule_units, duct_elements,
            junctions, junction_x0_rows, segments, handlers, control_nodes, occupancy=None,
            exposures=None) -> Project:
-    """Turn the parsed records into a `Network`, elements, drives and a `Project`.
+    """Turn the parsed records into a `Network`, elements, heads and a `Project`.
 
     Order: the zones, the path edges and their elements, the path filters, constant wind
-    pressures and drives, the `Scaled` wrap of scheduled path kinds, then the duct network
-    (junctions, segments, terminals, with their own elements, drives, filters and inputs).
+    pressures and heads, the `Scaled` wrap of scheduled path kinds, then the duct network
+    (junctions, segments, terminals, with their own elements, heads, filters and inputs).
     The air handlers' paths become one prescribed-flow kind per handler, built after the
     `Scaled` wrap (their closure applies the schedules). Only then are the element kinds and
     the flow layout read, so both cover the ducts and the air handlers.
@@ -1841,7 +1842,7 @@ def _build(*, ambient_conditions, g, species, levels, profiles, elements, zones,
 
     # A constant wind pressure (`wPset` on a path with no profile) acts on the path's ambient
     # side: +wPset on an edge from ambient, -wPset on one into it (dp = phi_src - phi_tgt +
-    # drive). A positive value pushes air from ambient into the zone.
+    # head term). A positive value pushes air from ambient into the zone.
     wind_pressure: dict[str, list[float]] = {}
     for p, cols in zip(paths, path_edges, strict=True):
         if p.profile_nr == 0 and p.wPset != 0.0:
@@ -1854,24 +1855,24 @@ def _build(*, ambient_conditions, g, species, levels, profiles, elements, zones,
             for c in cols:
                 values[kind_cols.index(c)] = p.wPset if p.from_zone == -1 else -p.wPset
 
-    drives: list = []
+    heads: list = []
     for el in built:
         if el.dp_independent:
-            continue                              # a fixed flow ignores dp; a drive is moot
-        drives.append(Stack.from_network(net, el.kind, g=g))
+            continue                              # a fixed flow ignores dp; a head is moot
+        heads.append(Stack.from_network(net, el.kind, g=g))
         # Profiles are keyed by CONTAM's own profile NUMBER, and the lookup is
         # deliberately strict -- an edge naming a number no profile carries raises inside
-        # `Wind.from_network`, naming the edge and the number. That is why the drive is
+        # `Wind.from_network`, naming the edge and the number. That is why the term is
         # built whenever an edge names a profile, even when `profiles` is empty: a missing
         # profiles section must be loud, not a silently vanishing wind pressure.
         if bool((net.edge_attr("profile", el.kind, default=0.0) > 0).any()):
-            drives.append(Wind.from_network(net, el.kind, ambient=ambient, profiles=profiles))
+            heads.append(Wind.from_network(net, el.kind, ambient=ambient, profiles=profiles))
     for kind in wind_pressure:
-        drives.append(ConstantDrive(kind, f"wind_pressure.{kind}"))
+        heads.append(DriverHead(kind, f"wind_pressure.{kind}"))
 
     # A path schedule multiplies the path's flow: its kind is wrapped in `Scaled`, which reads
     # one multiplier per edge of the kind from "flow_multiplier.<kind>", and the schedule
-    # becomes an input on the path's own edges. Wrapping comes after the drives above, which
+    # becomes an input on the path's own edges. Wrapping comes after the head terms above, which
     # read only `el.kind` and `el.dp_independent` (both of which `Scaled` keeps), and before
     # the duct build, the kinds and the layout below, which see the wrapped elements.
     # On a fan curve the schedule is the speed ratio instead ("fan_speed.<kind>", read by
@@ -1940,7 +1941,7 @@ def _build(*, ambient_conditions, g, species, levels, profiles, elements, zones,
                                             None if index is None else tuple(index),
                                             f"path {p.nr}"))
 
-    # The duct network adds its own kinds (already wrapped where scheduled), drives, filters
+    # The duct network adds its own kinds (already wrapped where scheduled), heads, filters
     # and inputs; the kinds and the layout below are read after it, so they cover the ducts.
     duct = None
     if junctions or segments:
@@ -1954,7 +1955,7 @@ def _build(*, ambient_conditions, g, species, levels, profiles, elements, zones,
         ctx = BuildContext(net=net, ambient=ambient, zone_name=node_of, week=week,
                            schedule_units=schedule_units, filter_of=filter_of, g=g,
                            profiles=profiles, inputs=inputs, edge_filters=edge_filters,
-                           built=built, drives=drives,
+                           built=built, heads=heads,
                            constant_wind_pressure=wind_pressure_tensors,
                            actuations=actuations)
         duct = build_ducts(ctx, duct_elements, junctions, segments)
@@ -2013,7 +2014,7 @@ def _build(*, ambient_conditions, g, species, levels, profiles, elements, zones,
             junction_x0[i, : len(row)] = torch.tensor(row, dtype=F64)
 
     return Project(
-        net=net, laws=built, drives=drives, zones=zone_names, ambient=ambient, paths=paths,
+        net=net, laws=built, heads=heads, zones=zone_names, ambient=ambient, paths=paths,
         species=species, T_zone=torch.tensor(T_list, dtype=F64),
         zone_volumes=torch.tensor(V_list, dtype=F64), g=g,
         ambient_conditions=ambient_conditions, profiles=profiles, x0=x0, sources=sources,
@@ -2179,10 +2180,10 @@ class ZonePressureDensity:
         return out
 
 
-class ZoneAirMassChange(NodeSource):
-    """The zone air-mass change of a step as a withdrawal from the airflow network (CONTAM's
-    dodMdt option; `simulate` switches it on for a model that carries it, unless
-    `air_mass_change=False`):
+class ZoneAirMassChange(NodeStorage):
+    """The zone air mass as node storage on the airflow network (CONTAM's dodMdt option;
+    `simulate` switches it on for a model that carries it, unless `air_mass_change=False`).
+    Over a step the layer withdraws the air-mass change at the step's rate:
 
         w = ((P_ref + phi) V / (R T) - M_start) / dt,
 
@@ -2194,12 +2195,17 @@ class ZoneAirMassChange(NodeSource):
     carries, so the step converges at any length (the slope outgrows the envelope's
     conductance for short steps).
 
-    Reads `"T"` and `"P_ref"`, `"time_step"` (s) and `"<layer>.mass_start"` (kg, at this
-    source's nodes, in their order: `mass` at the step's start). Without
+    The step length and scheme come from the layer (`project_to_model` sets
+    `scheme="backward_euler"`, CONTAM's), and without a step the storage is absent. The
+    amount is `mass`; `change` takes the start mass from `"<layer>.mass_start"` (kg, at this
+    storage's nodes, in their order) instead of from `amount(phi_start)`, because CONTAM
+    takes the start mass at the start temperature. Reads `"T"` and `"P_ref"`. Without
     `"<layer>.mass_start"` it withdraws nothing and adds nothing to the Jacobian: the steady
     and quasi-steady solves are unchanged. The withdrawal is a difference of masses of order
     M, so the solve cannot resolve it below about 1e-16 M / dt (kg/s).
     """
+
+    linear = True
 
     def __init__(self, nodes, volumes: Tensor, *, layer: str = "air", R: float = R_AIR) -> None:
         super().__init__(nodes)
@@ -2207,20 +2213,20 @@ class ZoneAirMassChange(NodeSource):
         self.R = float(R)
         self.mass_key = f"{layer}.mass_start"
 
-    def mass(self, phi_nodes: Tensor, drivers) -> Tensor:
-        """(P_ref + phi) V / (R T) at this source's nodes (kg)."""
+    def amount(self, phi_nodes: Tensor, drivers) -> Tensor:
+        """(P_ref + phi) V / (R T) at this storage's nodes (kg)."""
         P = torch.as_tensor(drivers["P_ref"], dtype=phi_nodes.dtype).unsqueeze(-1)
         return (P + phi_nodes) * self.V / (self.R * drivers["T"][..., self.nodes])
 
-    def flow(self, phi_nodes: Tensor, drivers=None) -> Tensor:
+    def change(self, phi_nodes, phi_start, drivers=None):
         if drivers is None or self.mass_key not in drivers:
             return phi_nodes * 0.0
-        return (self.mass(phi_nodes, drivers) - drivers[self.mass_key]) / drivers["time_step"]
+        return self.amount(phi_nodes, drivers) - drivers[self.mass_key]
 
-    def dflow(self, phi_nodes: Tensor, drivers=None) -> Tensor:
+    def capacity(self, phi_nodes, phi_start, drivers=None):
         if drivers is None or self.mass_key not in drivers:
             return torch.zeros_like(phi_nodes)
-        slope = self.V / (self.R * drivers["T"][..., self.nodes] * drivers["time_step"])
+        slope = self.V / (self.R * drivers["T"][..., self.nodes])
         return slope.expand(torch.broadcast_shapes(slope.shape, phi_nodes.shape))
 
 
@@ -2242,7 +2248,7 @@ def _initial_mass_fractions(project: Project) -> Tensor:
 
 
 def project_to_model(project: Project, *, ambient: dict | None = None, species: bool = True,
-                     scheme: str = "implicit"):
+                     scheme: str = "backward_euler"):
     """Air layer + species layer (no thermal layer: a .prj carries no thermal data), the
     initial state and the drivers for the project's ambient conditions (or `ambient`).
 
@@ -2253,7 +2259,12 @@ def project_to_model(project: Project, *, ambient: dict | None = None, species: 
     `Pb / (R T)` only at 293.15 K and 101325 Pa to five figures (2.2e-6 off even there, which
     alone put 6.5e-6 into the three-zone transient concentrations against ContamX), and about
     3.4 % off per 10 K away from it. The returned drivers carry the initial `"rho"` and
-    `"rho_amb"` for code that reads them outside a step; every step recomputes them.
+    `"rho_amb"` for code that reads them outside a step; every step recomputes them. The
+    stack and wind pressures are the driver `"air.edge_head"`, written by the model's
+    `EdgeHeads` closure on each pass, not by these drivers: a direct `layer.solve` on them has
+    no head, so run the model's closures first (`Model.step`, `steady` and `simulate` do).
+    The air layer is built with `fallback=("linear_guess",)`: an airflow solve that does
+    not converge from its warm start is solved again from the linear initial guess.
 
     The drivers are at the run control's STEADY-SIMULATION instant (its day, time and day
     type): the project's schedules (`project.inputs`) are applied there, so a `steady()` on
@@ -2290,14 +2301,15 @@ def project_to_model(project: Project, *, ambient: dict | None = None, species: 
     zone_mass_change = project.run_control is not None and project.run_control.zone_mass_change
     # The zone air-mass change source exists only when the project asks for it and there is a
     # zone to carry it (an empty node set has no air mass to change).
-    node_sources = (
+    storage = (
         [ZoneAirMassChange(zone_nodes, volumes[zone_nodes])]
         if zone_mass_change and zone_nodes else []
     )
-    air = KirchhoffLayer(net, "air", project.laws, drives=project.drives,
+    air = KirchhoffLayer(net, "air", project.laws,
                          boundary=[project.ambient, *project.flow_balanced],
                          quantity="pressure", unit="Pa", flow_unit="kg/s",
-                         node_sources=node_sources)
+                         storage=storage, scheme="backward_euler",
+                         fallback=("linear_guess",))
     layers: dict = {"air": air}
     # UVGI filters: their transmission follows every airflow solve (`FilterTransmission`).
     flow_filters = [f for f in project.edge_filters.values() if f.depends_on_flow]
@@ -2353,6 +2365,9 @@ def project_to_model(project: Project, *, ambient: dict | None = None, species: 
             if not o.generation:
                 _occupant_nodes(o, layers["species"], "project_to_model", "breathe")
     closures.extend(project.closures)
+    # The head terms (stack, wind): after every closure that writes a driver they read.
+    if project.heads:
+        closures.append(EdgeHeads(air, project.heads))
     coupling: dict = {}
     if "species" in layers and flow_filters:
         # Last among the closures: it reads the densities and temperatures the others write.
@@ -2391,6 +2406,7 @@ def project_to_model(project: Project, *, ambient: dict | None = None, species: 
     for closure in closures:
         if isinstance(closure, ControlNetwork):
             closure.resolve(net, layers, tuple(drivers))
+    check_head_order(closures)
     model = Model(net, layers, closures=closures, **coupling)
     state: dict = {}
     if "species" in layers:
@@ -2407,7 +2423,7 @@ def project_to_model(project: Project, *, ambient: dict | None = None, species: 
             # capacities below are at the drivers as the schedules leave them.
             state.update(closure.initial_state())
             drivers.update(closure.initial_drivers())
-    # The inputs the airflow elements and drives read themselves, declared for
+    # The inputs the airflow elements and head terms read themselves, declared for
     # `model.refs.inputs` and `Model.check`.
     model.input_specs = {
         "V_met": dict(description="wind speed at the meteorological station",
@@ -2598,8 +2614,9 @@ def steady(model: Model, state, drivers, *, rtol: float = 1e-12, max_iter: int =
     no node pressure moves by more than `rtol * Pb` -- a relative change in density of
     `rtol` -- and raises if that has not happened within `max_iter` passes. The map
     contracts by about `g dz rho / Pb` per pass (~1e-4 for a storey-high opening), so two or
-    three passes reach float64 precision. The passes are left on the autograd graph: the
-    returned state is differentiable, through the unrolled iteration.
+    three passes reach float64 precision. The loop is `Model.fixed_point`: the returned
+    state is differentiated at its fixed point (implicit adjoint), not through the unrolled
+    passes.
 
     A zone (or a group of zones) that no air leaves at the steady instant has no steady
     contaminant state: `UndefinedSteadyState`, naming it and giving the instant's ambient
@@ -2615,14 +2632,8 @@ def steady(model: Model, state, drivers, *, rtol: float = 1e-12, max_iter: int =
     if key is None:
         return out
     Pb = zp[0].Pb if zp else 101325.0
-    for _ in range(max_iter):
-        new = _model_steady(model, {**state, key: out[key]}, drivers, **solve_kwargs)
-        change = (new[key] - out[key]).abs().max().item()
-        out = new
-        if change <= rtol * Pb:
-            return out
-    raise RuntimeError(
-        f"prj.steady: the zone pressures fed back to {cause} did not converge in "
-        f"{max_iter} passes "
-        f"(last pressure change {change:.3e} Pa > rtol * Pb = {rtol * Pb:.3e} Pa)"
+    return model.fixed_point(
+        lambda z: _model_steady(model, {**state, key: z[key]}, drivers, **solve_kwargs),
+        out, watch=[key], tol=rtol * Pb, max_passes=max_iter,
+        where=f"prj.steady: the zone pressures fed back to {cause}",
     )

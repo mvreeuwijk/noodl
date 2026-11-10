@@ -19,8 +19,8 @@ from noodl.apps.building_physics import (
     thermal_layer,
 )
 from noodl.apps.building_physics.elements import orifice_law_from_edges
-from noodl.drives import Stack
 from noodl.elements.powerlaw import PowerLaw
+from noodl.heads import EdgeHeads, Stack
 from noodl.layers.kirchhoff import KirchhoffLayer
 from noodl.model import Model
 from noodl.refs import Field
@@ -41,7 +41,7 @@ def _two_zone_with_wall():
     net.add_edge("A", "B", kind="airpath", z_path=1.0, Cd=0.6, area=0.05)
     net.add_edge("B", "ambient", kind="airpath", z_path=2.0, Cd=0.6, area=0.02)
     el = orifice_law_from_edges(net, "airpath")
-    model = build_model(net, air_laws=[el], drives=[Stack.from_network(net, "airpath")],
+    model = build_model(net, air_laws=[el], heads=[Stack.from_network(net, "airpath")],
                         species=("co2", "pm25"))
     return net, model
 
@@ -79,10 +79,11 @@ def test_a_renamed_thermal_layer_drives_the_density_closure_under_its_own_name()
     net, _ = _two_zone_with_wall()
     th = thermal_layer(net, name="heat")
     air = KirchhoffLayer(net, "air", [orifice_law_from_edges(net, "airpath")],
-                         drives=[Stack.from_network(net, "airpath")], boundary=["ambient"])
+                         boundary=["ambient"])
     from noodl.apps.building_physics import IdealGasDensity
 
-    model = Model(net, [air, th], closures=[IdealGasDensity(th, ambient_index=0)])
+    model = Model(net, [air, th], closures=[IdealGasDensity(th, ambient_index=0),
+                                            EdgeHeads(air, [Stack.from_network(net, "airpath")])])
     state = initial_state(model)
     drivers = initial_drivers(model)
     assert set(state) == {"heat.x"} and "heat.x_boundary" in drivers
@@ -244,7 +245,7 @@ def test_named_inputs_carry_a_gradient_through_a_step():
 def test_a_single_species_column_layout_is_accepted_as_the_layer_accepts_it():
     net = _two_zone_with_wall()[0]
     model = build_model(net, air_laws=[orifice_law_from_edges(net, "airpath")],
-                        drives=[Stack.from_network(net, "airpath")], species=1)
+                        heads=[Stack.from_network(net, "airpath")], species=1)
     state = initial_state(model)
     state["species.x"] = state["species.x"].unsqueeze(-1)            # (n_i, 1)
     drivers = initial_drivers(model)
@@ -261,7 +262,7 @@ def test_a_species_count_may_be_any_integer_but_not_a_string():
     np = pytest.importorskip("numpy")
     net = _two_zone_with_wall()[0]
     kw = dict(air_laws=[orifice_law_from_edges(net, "airpath")],
-              drives=[Stack.from_network(net, "airpath")])
+              heads=[Stack.from_network(net, "airpath")])
     assert build_model(net, species=np.int64(2), **kw).transport["species"].n_species == 2
     with pytest.raises(TypeError, match=r"pass \('co2',\)"):
         build_model(net, species="co2", **kw)

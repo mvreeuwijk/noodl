@@ -42,9 +42,16 @@ def test_every_application_has_the_same_initialisation_functions(package):
 def test_water_tank_levels_and_demands_by_name():
     net = water.read_epanet_inp(DATA / "water" / "Net1.inp")
     model, state0, drivers0 = water.build_model(net)
-    tanks = model.tank_closure.key_labels["water.tank_level"]
+    # "water.tank_level" is an input key of initial_state only: the level is written into
+    # the tank node's head, "water.phi"
+    tanks = [t.name for t in model.tank_closure.tanks]
     state = water.initial_state(model, values={"water.tank_level": {tanks[0]: 30.0}})
-    assert float(state["water.tank_level"][0]) == 30.0
+    assert "water.tank_level" not in state
+    assert float(water.tank_levels(model, state)[0]) == 30.0
+    bottom = net.tanks[0].elevation
+    assert float(state["water.phi"][model.node_names.index(tanks[0])]) == bottom + 30.0
+    with pytest.raises(KeyError, match="not tanks"):
+        water.initial_state(model, values={"water.tank_level": {"nope": 1.0}})
     assert torch.equal(state["water.link_status"], state0["water.link_status"])
     ref = model.refs.water
     junction = next(n for n in ref.sources.labels if n in ref.sources.settable)
@@ -190,7 +197,7 @@ def test_the_static_check_is_clean_on_a_stock_street_model():
 def test_the_building_builder_can_return_the_same_triple_as_the_others():
     from noodl.apps import building_physics as bp
     from noodl.apps.building_physics.elements import orifice_law_from_edges
-    from noodl.drives import Stack
+    from noodl.heads import Stack
     from noodl.topology import Network
 
     def network():
@@ -203,7 +210,7 @@ def test_the_building_builder_can_return_the_same_triple_as_the_others():
 
     net = network()
     kw = dict(air_laws=[orifice_law_from_edges(net, "airpath")],
-              drives=[Stack.from_network(net, "airpath")])
+              heads=[Stack.from_network(net, "airpath")])
     model, state, drivers = bp.build_model(net, return_inputs=True, **kw)
     assert set(state) == set(bp.initial_state(model))
     assert set(drivers) == set(bp.initial_drivers(model))

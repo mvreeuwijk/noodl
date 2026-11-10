@@ -37,8 +37,6 @@ def _net(nodes, edges):
 class Clock(ConstitutiveLaw):
     """q = g dp, recording the time every call sees."""
 
-    contextual = True
-
     def __init__(self, kind="r"):
         super().__init__(kind)
         self.times = []
@@ -72,7 +70,7 @@ def test_model_steps_rc_like_the_layer():
     state = _initial(layer)
     dt, v = 0.1, 0.0
     for _ in range(10):
-        state = model.step(state, drivers, dt=dt, integration="backward_euler")
+        state = model.step(state, drivers, dt=dt, scheme="backward_euler")
         v = (v + dt) / (1.0 + dt)
         torch.testing.assert_close(state["e.phi"][b], torch.tensor(v), rtol=0, atol=1e-14)
     torch.testing.assert_close(state["e.q"][2], state["e.q"][1], rtol=0, atol=1e-14)
@@ -148,7 +146,7 @@ def test_step_without_warm_start_drops_the_flow_warm_start_but_keeps_the_history
     assert kw["dt"] == 0.1 and kw["t"] == pytest.approx(2.1)
 
 
-def test_classic_layer_gets_no_circuit_keywords(monkeypatch):
+def test_classic_layer_gets_only_the_time_among_the_step_keywords(monkeypatch):
     net = _net(["g", "a"], [("a", "g", "r")])
     layer = KirchhoffLayer(net, "c", [Conductance(torch.tensor([1.0]), kind="r")],
                            boundary=["g"])
@@ -162,7 +160,7 @@ def test_classic_layer_gets_no_circuit_keywords(monkeypatch):
     monkeypatch.setattr(layer, "solve", spy)
     state = {"c.phi": torch.zeros(2), "c.q": torch.zeros(1)}
     Model(net, [layer]).step(state, {"c.phi_boundary": torch.ones(1)}, dt=0.1, t=0.0)
-    assert seen == [{"phi0", "diagnostics"}]
+    assert seen == [{"phi0", "diagnostics", "t"}]
 
 
 def test_missing_flow_state_on_dynamic_step_is_named():
@@ -196,22 +194,22 @@ def test_iterate_restarts_dynamic_layer_from_step_start():
     for _ in range(2):
         # Newton's default tolerance (sqrt(eps)) would accept a warm start within ~1e-8 of
         # the answer unchanged and stop the passes there; tighten it to compare at 1e-10
-        state = model.step(state, drivers, dt=dt, integration="backward_euler", atol=1e-13)
+        state = model.step(state, drivers, dt=dt, scheme="backward_euler", atol=1e-13)
         # the fixed point by hand: a backward Euler step from v_old with source V gives
         # v = (v_old + dt V)/(1 + dt), and V = 1 + 0.1 v
         v_old = float(manual["e.phi"][b])
         v = (v_old + dt) / (1.0 + dt - 0.1 * dt)
         # one plain step at the converged source value reproduces it
         fixed = {"e.phi_boundary": GROUND, "V": torch.tensor([1.0 + 0.1 * v])}
-        manual = Model(net, [layer]).step(manual, fixed, dt=dt, integration="backward_euler")
+        manual = Model(net, [layer]).step(manual, fixed, dt=dt, scheme="backward_euler")
         torch.testing.assert_close(manual["e.phi"][b], torch.tensor(v), rtol=0, atol=1e-13)
         torch.testing.assert_close(state["e.phi"], manual["e.phi"], rtol=0, atol=1e-10)
         torch.testing.assert_close(state["e.q"], manual["e.q"], rtol=0, atol=1e-10)
     # ping-pong reads the step-start potential and so differs from the fixed point
     once = pingpong.step(_initial(layer, drivers), drivers, dt=dt,
-                         integration="backward_euler")
+                         scheme="backward_euler")
     assert abs(float(once["e.phi"][b]) - float(model.step(
-        _initial(layer, drivers), drivers, dt=dt, integration="backward_euler")["e.phi"][b])
+        _initial(layer, drivers), drivers, dt=dt, scheme="backward_euler")["e.phi"][b])
     ) > 1e-6
 
 

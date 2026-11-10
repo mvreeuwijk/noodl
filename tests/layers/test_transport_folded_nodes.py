@@ -19,7 +19,7 @@ from noodl.layers.transport import TransportLayer
 from noodl.topology import Network
 
 F64 = torch.float64
-SCHEMES = ["exact", "implicit", "trapezoidal"]
+SCHEMES = ["exact", "backward_euler", "trapezoidal"]
 
 
 def _t(values, **kwargs):
@@ -110,7 +110,7 @@ def test_exact_agrees_with_implicit_at_small_steps():
     exact = _wall("exact").step(X0_WALL, Q0, SRC0, XB, 3600.0)
 
     def implicit(n):
-        layer, x = _wall("implicit"), X0_WALL
+        layer, x = _wall("backward_euler"), X0_WALL
         for _ in range(n):
             x = layer.step(x, Q0, SRC0, XB, 3600.0 / n)
         return x
@@ -268,7 +268,7 @@ def test_the_boundary_transfer_counts_a_path_between_two_boundaries():
             net, "T", capacity=_t([1.0e5, 0.0 if folded else 1.0e-6]), flow_kind="air",
             boundary=["ambient", "sky"], conduction_kind=("wall", "film", "rad"),
             conductance=_t([10.0, 15.0, 5.0]), storage_free=["s"] if folded else (),
-            scheme="implicit",
+            scheme="backward_euler",
         )
 
     x0 = _t([280.0, 275.0])
@@ -526,13 +526,13 @@ def _plenum_and_surface(scheme, **kw):
 
 @pytest.mark.parametrize("scheme", ["exact", "trapezoidal"])
 def test_a_plenum_with_throughflow_still_needs_implicit(scheme):
-    with pytest.raises(ValueError, match=r"storage-free nodes \['plenum'\].*implicit"):
+    with pytest.raises(ValueError, match=r"storage-free nodes \['plenum'\].*backward_euler"):
         _plenum_and_surface(scheme)
 
 
 def test_a_plenum_and_a_surface_in_one_implicit_layer():
     """The surface is folded, the plenum keeps its algebraic mixing row."""
-    layer = _plenum_and_surface("implicit")
+    layer = _plenum_and_surface("backward_euler")
     assert layer.folded_mask.tolist() == [False, False, True]
     q = _t([0.1, 0.1, 0.1])
     x0 = _t([280.0, 295.0, 285.0])
@@ -545,9 +545,9 @@ def test_a_plenum_and_a_surface_in_one_implicit_layer():
 def test_a_storage_free_node_with_a_removal_or_reaction_is_not_folded(term):
     kw = ({"removal": _t([[0.0], [1e-3], [0.0], [0.0]])} if term == "removal"
           else {"kinetics": _t([[[0.0]], [[0.0]], [[0.0]], [[-1e-3]]])})
-    layer = _wall("implicit", **kw)
+    layer = _wall("backward_euler", **kw)
     assert layer.folded_mask.tolist() == [False, term == "kinetics", False, term == "removal"]
-    with pytest.raises(ValueError, match=r"storage-free nodes \['s(1|2)'\].*implicit"):
+    with pytest.raises(ValueError, match=r"storage-free nodes \['s(1|2)'\].*backward_euler"):
         _wall("exact", **kw)
 
 
@@ -556,7 +556,7 @@ def test_a_per_call_removal_at_a_folded_node_is_refused_by_name(call):
     """A folded node has no removal term (one given at construction keeps it unfolded); a
     per-call removal there would be dropped, so it is refused by name. A removal at the
     stored nodes only is taken as before."""
-    layer = _wall("implicit")
+    layer = _wall("backward_euler")
     removal = _t([1e-4, 0.0, 2e-5, 0.0])
 
     def run(r):
@@ -596,7 +596,7 @@ def test_the_folded_step_is_the_limit_of_a_vanishing_surface_capacity():
             _wall_net(), "T", capacity=_t([CZ, cap_s, CW, cap_s]), flow_kind="air",
             boundary=["ambient"], conduction_kind=("film", "wall"),
             conductance=_t([H1, H2, K1, K2]),
-            storage_free=["s1", "s2"] if cap_s == 0.0 else (), scheme="implicit",
+            storage_free=["s1", "s2"] if cap_s == 0.0 else (), scheme="backward_euler",
         )
 
     src = _t([0.0, 50.0, 20.0, 0.0, 10.0])
@@ -655,7 +655,7 @@ def test_batched_states_and_sources_with_one_conductance():
 
 
 def test_on_failure_return_gives_the_whole_state():
-    _, layer = _star("implicit")
+    _, layer = _star("backward_euler")
     src = _star_sources()
     result = layer.step(STAR_X0, Q0, src, XB, 900.0, on_failure="return")
     assert bool(result.converged.all())
@@ -775,7 +775,7 @@ def test_an_in_place_edit_of_the_conductance_refolds():
                                    X0_WALL, Q0, SRC0, XB, 600.0), rtol=0, atol=0)
 
 
-@pytest.mark.parametrize("scheme", ["implicit", "trapezoidal"])
+@pytest.mark.parametrize("scheme", ["backward_euler", "trapezoidal"])
 def test_a_layer_of_folded_nodes_only_returns_a_solve_result_under_on_failure_return(scheme):
     """No stored node, no linear solve: `on_failure="return"` still returns a
     `SolveResult` (converged, zero iterations), its `x` the recovered state, stacked."""
@@ -818,7 +818,7 @@ def test_the_kept_node_view_is_built_once_and_a_call_writes_nothing_on_it():
 def test_a_folded_layer_survives_pickling():
     import pickle
 
-    layer = _wall("implicit")
+    layer = _wall("backward_euler")
     copy = pickle.loads(pickle.dumps(layer))
     assert copy._kept._layer is copy
     torch.testing.assert_close(copy.step(X0_WALL, Q0, SRC0, XB, 600.0),

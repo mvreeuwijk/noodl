@@ -13,7 +13,6 @@ import pytest
 import torch
 from scipy.optimize import brentq, fsolve
 
-from noodl.drives import ConstantDrive
 from noodl.elements.fan import FanCurve
 from noodl.elements.fixed import FixedFlow
 from noodl.elements.powerlaw import PowerLaw
@@ -41,7 +40,7 @@ RESIDUAL = {"atol": 1e-11, "rtol": 0.0}
 def _series_layer(
     C: torch.Tensor, n: torch.Tensor, dtype: torch.dtype = DTYPE
 ) -> tuple[Network, KirchhoffLayer]:
-    """ambient_w -> z1 -> z2 -> ambient_l, one PowerLaw per edge, wind drive on edge 0.
+    """ambient_w -> z1 -> z2 -> ambient_l, one PowerLaw per edge, wind head on edge 0.
 
     `dtype` defaults to the module's DTYPE (float64, used by every other case in this file);
     it is exposed so `test_series_closed_form_float32_end_to_end` below can build the exact
@@ -54,9 +53,8 @@ def _series_layer(
     net.add_edge("z1", "z2", kind="airpath")
     net.add_edge("z2", "ambient_l", kind="airpath")
     element = PowerLaw(C, n, dp_transition=1e-6)
-    drive = ConstantDrive(kind="airpath", key="wind")
     layer = KirchhoffLayer(
-        net, "series", [element], [drive], boundary=["ambient_w", "ambient_l"]
+        net, "series", [element], boundary=["ambient_w", "ambient_l"]
     )
     return net, layer
 
@@ -89,7 +87,7 @@ def test_series_closed_form_single_instance(record_property):
     net, layer = _series_layer(
         torch.tensor(C, dtype=DTYPE), torch.tensor(n, dtype=DTYPE)
     )
-    drivers = {"wind": torch.tensor([Pw, 0.0, 0.0], dtype=DTYPE)}
+    drivers = {"series.edge_head": torch.tensor([Pw, 0.0, 0.0], dtype=DTYPE)}
     phi_boundary = torch.zeros(2, dtype=DTYPE)
     phi, q = layer.solve(phi_boundary, drivers, differentiable=False, **SOLVE_TIGHT)
 
@@ -125,7 +123,7 @@ def test_series_closed_form_batched(record_property):
     net, layer = _series_layer(C, n)
     wind = torch.zeros(m, 3, dtype=DTYPE)
     wind[:, 0] = Pw
-    drivers = {"wind": wind}
+    drivers = {"series.edge_head": wind}
     phi_boundary = torch.zeros(m, 2, dtype=DTYPE)
     phi, q = layer.solve(phi_boundary, drivers, differentiable=False, **SOLVE_TIGHT)
 
@@ -388,9 +386,8 @@ def _stack_layer(
     net.add_edge("z2", "z3", kind="airpath")
     net.add_edge("z3", "out_high", kind="airpath")
     element = PowerLaw(C, n, dp_transition=1e-6)
-    drive = ConstantDrive(kind="airpath", key="stack")
     layer = KirchhoffLayer(
-        net, "stack", [element], [drive], boundary=["out_low", "out_high"]
+        net, "stack", [element], boundary=["out_low", "out_high"]
     )
     return net, layer
 
@@ -414,7 +411,7 @@ def _stack_reference(
 
     Note (topology, not a weakness of this reference): this network is a single unbranched chain
     with no interior sources, so conservation forces the SAME q through all four edges no matter
-    what the C/n values are or how the drives are distributed -- this is a structural fact, not
+    what the C/n values are or how the heads are distributed -- this is a structural fact, not
     something this reference could be built to avoid. What *does* depend on each edge's own C[e]
     and n individually is each interior node's own potential (phi_z1, phi_z2, phi_z3): a wrong
     C[e] on any single edge changes that edge's own dp_e = sign(q) * (|q| / C[e]) ** (1/n) and so
@@ -447,23 +444,25 @@ def test_stack_conservation_and_antisymmetry_single_instance(record_property):
     net, layer = _stack_layer(C, n)
     phi_boundary = torch.zeros(2, dtype=DTYPE)
 
-    phi, q = layer.solve(phi_boundary, {"stack": drive_values}, differentiable=False, **SOLVE_TIGHT)
+    phi, q = layer.solve(
+        phi_boundary, {"stack.edge_head": drive_values}, differentiable=False, **SOLVE_TIGHT
+    )
     residual = layer.residual(
-        phi[..., layer.interior], phi_boundary, {"stack": drive_values}, None
+        phi[..., layer.interior], phi_boundary, {"stack.edge_head": drive_values}, None
     )
     torch.testing.assert_close(residual, torch.zeros_like(residual), **RESIDUAL)
-    power = layer.power_residual(phi, q, {"stack": drive_values})
+    power = layer.power_residual(phi, q, {"stack.edge_head": drive_values})
     assert abs(power.item()) < RESIDUAL["atol"]
 
     phi_rev, q_rev = layer.solve(
-        phi_boundary, {"stack": -drive_values}, differentiable=False, **SOLVE_TIGHT
+        phi_boundary, {"stack.edge_head": -drive_values}, differentiable=False, **SOLVE_TIGHT
     )
     torch.testing.assert_close(q_rev, -q, **CLOSE)
     torch.testing.assert_close(phi_rev, -phi, **CLOSE)
 
     # Independent reference (see _stack_reference's docstring): solved from the element law by
     # scipy.optimize.fsolve, with no noodl code involved. drive_values above (2.0, 1.5, 1.5,
-    # 2.0) sum to 7.0 (nonzero -- the drives do not cancel) and are not all equal, so each edge's
+    # 2.0) sum to 7.0 (nonzero -- the heads do not cancel) and are not all equal, so each edge's
     # own dp differs even though conservation forces the same q through all four.
     phi_z1_ref, phi_z2_ref, phi_z3_ref, q0_ref, q1_ref, q2_ref, q3_ref = _stack_reference(
         C.tolist(), n.item(), drive_values.tolist()
@@ -492,14 +491,16 @@ def test_stack_conservation_and_antisymmetry_batched(record_property):
     net, layer = _stack_layer(C, n)
     phi_boundary = torch.zeros(m, 2, dtype=DTYPE)
 
-    phi, q = layer.solve(phi_boundary, {"stack": drive_values}, differentiable=False, **SOLVE_TIGHT)
+    phi, q = layer.solve(
+        phi_boundary, {"stack.edge_head": drive_values}, differentiable=False, **SOLVE_TIGHT
+    )
     residual = layer.residual(
-        phi[..., layer.interior], phi_boundary, {"stack": drive_values}, None
+        phi[..., layer.interior], phi_boundary, {"stack.edge_head": drive_values}, None
     )
     torch.testing.assert_close(residual, torch.zeros_like(residual), **RESIDUAL)
 
     phi_rev, q_rev = layer.solve(
-        phi_boundary, {"stack": -drive_values}, differentiable=False, **SOLVE_TIGHT
+        phi_boundary, {"stack.edge_head": -drive_values}, differentiable=False, **SOLVE_TIGHT
     )
     torch.testing.assert_close(q_rev, -q, **CLOSE)
     torch.testing.assert_close(phi_rev, -phi, **CLOSE)
@@ -538,7 +539,7 @@ def test_linear_init_reduces_newton_iterations_single_instance():
     Pw = torch.tensor(30.0, dtype=DTYPE)
 
     net, layer = _series_layer(C, n)
-    drivers = {"wind": torch.tensor([Pw, 0.0, 0.0], dtype=DTYPE)}
+    drivers = {"series.edge_head": torch.tensor([Pw, 0.0, 0.0], dtype=DTYPE)}
     phi_boundary = torch.zeros(2, dtype=DTYPE)
     sources = None
 
@@ -568,7 +569,7 @@ def test_linear_init_reduces_newton_iterations_batched():
     net, layer = _series_layer(C, n)
     wind = torch.zeros(m, 3, dtype=DTYPE)
     wind[:, 0] = Pw
-    drivers = {"wind": wind}
+    drivers = {"series.edge_head": wind}
     phi_boundary = torch.zeros(m, 2, dtype=DTYPE)
     sources = None
 
@@ -622,7 +623,7 @@ def test_series_closed_form_matches_reference_with_the_autograd_jacobian():
     n = 0.65
     Pw = 12.0
     net, layer = _series_layer(torch.tensor(C, dtype=DTYPE), torch.tensor(n, dtype=DTYPE))
-    drivers = {"wind": torch.tensor([Pw, 0.0, 0.0], dtype=DTYPE)}
+    drivers = {"series.edge_head": torch.tensor([Pw, 0.0, 0.0], dtype=DTYPE)}
     phi_boundary = torch.zeros(2, dtype=DTYPE)
     phi, q = layer.solve(phi_boundary, drivers, differentiable=True)
 
@@ -637,9 +638,9 @@ def test_stack_conservation_matches_reference_with_the_autograd_jacobian():
 
     net, layer = _stack_layer(C, n)
     phi_boundary = torch.zeros(2, dtype=DTYPE)
-    phi, q = layer.solve(phi_boundary, {"stack": drive_values}, differentiable=True)
+    phi, q = layer.solve(phi_boundary, {"stack.edge_head": drive_values}, differentiable=True)
     residual = layer.residual(
-        phi[..., layer.interior], phi_boundary, {"stack": drive_values}, None
+        phi[..., layer.interior], phi_boundary, {"stack.edge_head": drive_values}, None
     )
     torch.testing.assert_close(residual, torch.zeros_like(residual), atol=1e-9, rtol=0.0)
 
@@ -716,7 +717,7 @@ def test_series_closed_form_float32_end_to_end():
     net, layer = _series_layer(
         torch.tensor(C, dtype=dtype), torch.tensor(n, dtype=dtype), dtype=dtype
     )
-    drivers = {"wind": torch.tensor([Pw, 0.0, 0.0], dtype=dtype)}
+    drivers = {"series.edge_head": torch.tensor([Pw, 0.0, 0.0], dtype=dtype)}
     phi_boundary = torch.zeros(2, dtype=dtype)
     phi, q = layer.solve(phi_boundary, drivers, differentiable=False)
 

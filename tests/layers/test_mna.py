@@ -5,10 +5,12 @@ import torch
 
 import noodl.solvers.select as select_module
 from noodl.elements import Conductance, ConstitutiveLaw, FixedFlow, ImplicitLaw, LawContext
+from noodl.heads import EdgeHeads
+from noodl.layers._step import _Step
 from noodl.layers.kirchhoff import KirchhoffLayer
-from noodl.nodesources import NodeSource
 from noodl.solvers.implicit import TransposeOperator
 from noodl.topology import Network
+from noodl.withdrawals import NodeWithdrawal
 from tests._circuit_laws import DrivenSource, Source
 
 F64 = torch.float64
@@ -49,7 +51,7 @@ class DrivenConductance(ConstitutiveLaw):
         return drivers["g"] * dp
 
 
-class LinearWithdrawal(NodeSource):
+class LinearWithdrawal(NodeWithdrawal):
     """w = c phi at the given nodes."""
 
     def __init__(self, nodes, c):
@@ -82,7 +84,7 @@ def test_floating_voltage_source_matches_hand_analysis():
     net = _floating_source_net()
     layer = KirchhoffLayer(net, "e", [Conductance(torch.tensor([1.0, 0.5]), kind="r"),
                                           Source(torch.tensor([3.0]))], boundary=["gnd"])
-    assert layer.mna and not layer.dynamic and not layer.phasor
+    assert not layer.dynamic and not layer.phasor
     assert layer.implicit_edges.tolist() == [2]
     phi, q = layer.solve(torch.zeros(1), differentiable=False)
     # Hand analysis (gnd = 0): q_r1 = 1*(0 - a), q_r2 = 0.5*(b - 0), a - b = 3.
@@ -213,7 +215,7 @@ def test_learnable_parameter_gradients_match_central_differences():
     assert grad == pytest.approx((up - down) / (2 * h), rel=1e-7)
 
 
-def test_node_source_parameter_gradient_matches_central_differences():
+def test_withdrawal_parameter_gradient_matches_central_differences():
     net = _net(["gnd", "a", "b", "c"],
                [("a", "gnd", "source"), ("a", "b", "r"), ("c", "gnd", "r"), ("b", "c", "f")])
     source = LinearWithdrawal(torch.tensor([net.nodes.index("b")]), [0.2])
@@ -222,7 +224,7 @@ def test_node_source_parameter_gradient_matches_central_differences():
         net, "e",
         [Source(torch.tensor([2.0])), Conductance(torch.tensor([1.0, 0.5]), kind="r"),
          FixedFlow(torch.tensor([0.3]), kind="f")],
-        boundary=["gnd"], node_sources=[source])
+        boundary=["gnd"], withdrawals=[source])
 
     def loss():
         phi, q = layer.solve(torch.zeros(1))
@@ -261,20 +263,192 @@ def test_batched_drivers_solve_each_instance():
     torch.testing.assert_close(_at(net, phi[2], "a"), torch.tensor(1.0), rtol=0, atol=1e-12)
 
 
-def test_classic_methods_on_mna_layer_raise():
-    _, layer = _transformer_layer()
-    phi, _ = layer.solve(torch.zeros(1), differentiable=False)
-    with pytest.raises(TypeError, match="Modified Nodal Analysis"):
-        layer.flows(phi, {})
-    with pytest.raises(TypeError, match="Modified Nodal Analysis"):
-        layer.dflows(phi, {})
-    with pytest.raises(TypeError, match="Modified Nodal Analysis"):
-        layer.residual(phi[..., layer.interior], torch.zeros(1), {}, None)
-    with pytest.raises(TypeError, match="Modified Nodal Analysis"):
-        layer.linear_init(torch.zeros(1), {}, None)
+class Resist(ImplicitLaw):
+    """A resistor as a relation, dp - R q = 0 (flow unknown), for the implied slope 1 / R."""
+
+    linear = True
+
+    def __init__(self, R, kind="res"):
+        super().__init__(kind)
+        self.R = self._param(R, False)
+
+    def residual(self, dp, q, drivers, ctx):
+        return dp - self.R * q
 
 
-def test_fixed_flow_and_node_source_still_work_in_mna():
+def _fan_point():
+    layer = _fan_layer()
+    drivers = {"head": torch.tensor([5.0]), "c": torch.tensor([0.7])}
+    phi, q = layer.solve(torch.zeros(1), drivers, torch.zeros(3), differentiable=False)
+    return layer, drivers, phi, q
+
+
+def _unknowns(layer, phi, q):
+    return torch.cat([phi[..., layer.interior], q[..., layer.implicit_edges]], -1)
+
+
+def test_layer_methods_on_a_layer_with_flow_unknowns():
+    layer, drivers, phi, q = _fan_point()
+    pb, src = torch.zeros(1), torch.zeros(3)
+    phi_i = phi[..., layer.interior]
+    n = len(phi_i) + len(layer.implicit_edges)
+
+    # the residual of the unknowns [phi_I, q_F] is zero at the solve
+    r = layer.residual(phi_i, pb, drivers, src, q=q)
+    assert r.shape == (n,)
+    torch.testing.assert_close(r, torch.zeros(n), rtol=0, atol=1e-10)
+
+    # the jacobian is the assembled operator, and the central differences of the residual
+    x = _unknowns(layer, phi, q)
+    J = layer.jacobian(phi_i, pb, drivers, q=q)
+    step, _ = layer._public_step(pb, None, None, None, None, None, drivers)
+    torch.testing.assert_close(J, layer._operator(x, pb, drivers, step).assemble(),
+                               rtol=0, atol=0)
+
+    def residual_of(v):
+        return layer.residual(v[: len(phi_i)], pb, drivers, src, q=_q_with(layer, q, v))
+
+    h = 1e-6
+    fd = torch.stack([(residual_of(x + h * e) - residual_of(x - h * e)) / (2 * h)
+                      for e in torch.eye(n)], -1)
+    torch.testing.assert_close(J, fd, rtol=1e-6, atol=1e-6)
+
+    # the adjoint solves J^T lambda = grad over the unknowns
+    grad = torch.tensor([1.0, -0.5, 0.25])
+    lam = layer.adjoint(phi_i, pb, drivers, grad, q=q)
+    torch.testing.assert_close(lam, torch.linalg.solve(J.T, grad), rtol=1e-9, atol=1e-10)
+
+    # the slopes: the orifice edges' own, the fan (an ideal source) nan
+    slopes = layer.dflows(phi, drivers, q)
+    assert slopes.shape == (3,) and torch.isnan(slopes[0])
+    dp = layer.dp(phi, drivers)
+    torch.testing.assert_close(slopes[1:], Orifice().dflow(dp[1:], drivers))
+
+    # q is an argument of the methods that need the flows
+    with pytest.raises(ValueError, match=r"kinds \['fan'\] are implicit laws.*pass q"):
+        layer.flows(phi, drivers)
+    for call in (lambda: layer.dflows(phi, drivers),
+                 lambda: layer.residual(phi_i, pb, drivers, src),
+                 lambda: layer.jacobian(phi_i, pb, drivers),
+                 lambda: layer.adjoint(phi_i, pb, drivers, grad)):
+        with pytest.raises(ValueError, match=r"kinds \['fan'\] are implicit laws.*pass q"):
+            call()
+    with pytest.raises(ValueError, match="every edge"):
+        layer.residual(phi_i, pb, drivers, src, q=q[..., :2])
+    # the adjoint's gradient has the unknowns' width and is real
+    width = r"grad must have the width of the unknowns \[phi_I, q_F\], 3 \(2 interior.*1 flow"
+    with pytest.raises(ValueError, match=width + r".*got 2$"):
+        layer.adjoint(phi_i, pb, drivers, grad[:2], q=q)
+    with pytest.raises(ValueError, match=width + r".*got 4$"):
+        layer.adjoint(phi_i, pb, drivers, torch.cat([grad, grad[:1]]), q=q)
+    with pytest.raises(ValueError, match=width + r".*got a complex gradient"):
+        layer.adjoint(phi_i, pb, drivers, grad.to(torch.complex128), q=q)
+
+
+def _central_differences(fn, x, h=1e-6):
+    """The (len(fn(x)), len(x)) central-difference Jacobian of `fn` at `x`."""
+    return torch.stack([(fn(x + h * e) - fn(x - h * e)) / (2 * h)
+                        for e in torch.eye(len(x), dtype=x.dtype)], -1)
+
+
+def _rlc_layer(phasor=False):
+    """a-gnd source, a-b R, b-c inductance, c-gnd capacitance."""
+    from tests._circuit_laws import Cap, Ind
+    net = _net(["gnd", "a", "b", "c"], [("a", "gnd", "source"), ("a", "b", "r"),
+                                        ("b", "c", "ind"), ("c", "gnd", "cap")])
+    return KirchhoffLayer(
+        net, "e", [Source(torch.tensor([1.0])), Conductance(torch.tensor([0.5]), kind="r"),
+                   Ind(torch.tensor([1e-3])), Cap(torch.tensor([1e-6]))],
+        boundary=["gnd"], phasor=phasor)
+
+
+@pytest.mark.parametrize("scheme", ["trapezoidal", "backward_euler"])
+def test_layer_methods_on_a_step_with_flow_unknowns(scheme):
+    # the step keywords enter residual, jacobian and adjoint: each dynamic relation's step
+    # form reads dt, the scheme and the step-start point
+    layer = _rlc_layer()
+    pb = torch.zeros(1)
+    history = layer.solve(pb, mode="initial", differentiable=False)
+    kw = {"dt": 1e-3, "scheme": scheme, "history": history}
+    phi, q = layer.solve(pb, differentiable=False, **kw)
+    phi_i = phi[..., layer.interior]
+    n_I = len(phi_i)
+
+    r = layer.residual(phi_i, pb, {}, None, q=q, **kw)
+    torch.testing.assert_close(r, torch.zeros_like(r), rtol=0, atol=1e-10)
+
+    J = layer.jacobian(phi_i, pb, {}, q=q, **kw)
+    fd = _central_differences(
+        lambda v: layer.residual(v[:n_I], pb, {}, None, q=_q_with(layer, q, v), **kw),
+        _unknowns(layer, phi, q))
+    torch.testing.assert_close(J, fd, rtol=1e-6, atol=1e-6)
+
+    grad = torch.arange(1.0, J.shape[-1] + 1)
+    torch.testing.assert_close(layer.adjoint(phi_i, pb, {}, grad, q=q, **kw),
+                               torch.linalg.solve(J.T, grad), rtol=1e-9, atol=1e-10)
+
+
+def _q_with(layer, q, x):
+    """`q` with the flow unknowns' columns taken from the unknown vector `x`."""
+    out = q.clone()
+    out[..., layer.implicit_edges] = x[len(layer.interior):]
+    return out
+
+
+def test_dflows_on_relation_edges_is_the_slope_the_relation_implies():
+    # source p->gnd (10 V), resistor-as-relation p->s, conductance s->gnd, transformer-free
+    net = _net(["gnd", "p", "s"], [("p", "gnd", "source"), ("p", "s", "res"),
+                                   ("s", "gnd", "load")])
+    layer = KirchhoffLayer(net, "e", [Source(torch.tensor([10.0])), Resist(torch.tensor(4.0)),
+                                      Conductance(torch.tensor([0.25]), kind="load")],
+                           boundary=["gnd"])
+    phi, q = layer.solve(torch.zeros(1), differentiable=False)
+    slopes = layer.dflows(phi, {}, q)
+    assert torch.isnan(slopes[0])                       # the ideal source
+    torch.testing.assert_close(slopes[1:], torch.tensor([0.25, 0.25]), rtol=0, atol=1e-14)
+    # a transformer's edges: a matrix slope, nan per edge
+    _, xf = _transformer_layer()
+    phi, q = xf.solve(torch.zeros(1), differentiable=False)
+    out = xf.dflows(phi, {}, q)
+    assert torch.isnan(out[:3]).all()
+    torch.testing.assert_close(out[3], torch.tensor(0.25), rtol=0, atol=1e-14)
+
+
+def test_layer_methods_on_a_phasor_layer():
+    layer = _rlc_layer(phasor=True)
+    drivers = {"e.frequency": torch.tensor(5032.92)}
+    pb = torch.zeros(1)
+    phi, q = layer.solve(pb, drivers, differentiable=False)
+    phi_i = phi[..., layer.interior]
+    n_I = len(phi_i)
+    r = layer.residual(phi_i, pb, drivers, None, q=q)
+    assert r.is_complex()
+    torch.testing.assert_close(r.abs(), torch.zeros(r.shape), rtol=0, atol=1e-10)
+    n = 2 * r.shape[-1]
+    J = layer.jacobian(phi_i, pb, drivers, q=q)
+    assert J.shape == (n, n)
+
+    # J is the Jacobian of the real view of the residual over the real view of the unknowns
+    # [Re/Im phi_I, Re/Im q_F] (consecutive (Re, Im) pairs)
+    def real_residual(v):
+        z = torch.view_as_complex(v.reshape(-1, 2).contiguous())
+        r = layer.residual(z[:n_I], pb, drivers, None, q=_q_with(layer, q, z))
+        return torch.view_as_real(r).flatten()
+
+    x = torch.view_as_real(_unknowns(layer, phi, q)).flatten()
+    torch.testing.assert_close(J, _central_differences(real_residual, x), rtol=1e-6,
+                               atol=1e-6)
+
+    grad = torch.arange(1.0, n + 1)
+    torch.testing.assert_close(layer.adjoint(phi_i, pb, drivers, grad, q=q),
+                               torch.linalg.solve(J.T, grad), rtol=1e-8, atol=1e-8)
+    with pytest.raises(ValueError, match=r"each a \(Re, Im\) pair.*got a complex gradient"):
+        layer.adjoint(phi_i, pb, drivers, grad.to(torch.complex128)[: n // 2], q=q)
+    with pytest.raises(TypeError, match="phasor layer"):
+        layer.dflows(phi, drivers, q)
+
+
+def test_fixed_flow_and_withdrawal_still_work_in_mna():
     # gnd ==2V== a -r(1)- b -f(0.3)- c -r(0.5)- gnd ; withdrawal 0.2 phi at b and c
     net = _net(["gnd", "a", "b", "c"],
                [("a", "gnd", "source"), ("a", "b", "r"), ("c", "gnd", "r"), ("b", "c", "f")])
@@ -283,7 +457,7 @@ def test_fixed_flow_and_node_source_still_work_in_mna():
         net, "e",
         [Source(torch.tensor([2.0])), Conductance(torch.tensor([1.0, 0.5]), kind="r"),
          FixedFlow(torch.tensor([0.3]), kind="f")],
-        boundary=["gnd"], node_sources=[LinearWithdrawal(nodes, [0.2, 0.2])])
+        boundary=["gnd"], withdrawals=[LinearWithdrawal(nodes, [0.2, 0.2])])
     sources = torch.tensor([0.0, 0.0, 0.1, 0.0])
     phi, q = layer.solve(torch.zeros(1), {}, sources, differentiable=False)
     withdrawal = torch.zeros(net.n)
@@ -339,7 +513,7 @@ class FlowControlled(ImplicitLaw):
         return dp - self.R * q - self.k * q**3
 
 
-class CubicWithdrawal(NodeSource):
+class CubicWithdrawal(NodeWithdrawal):
     def __init__(self, nodes, c):
         super().__init__(nodes)
         self.c = torch.nn.Parameter(torch.as_tensor(c, dtype=F64), requires_grad=False)
@@ -365,29 +539,29 @@ def _mixed_layer():
          FlowControlled(torch.tensor([2.0]), torch.tensor([0.5]), kind="d"),
          Ratio(torch.tensor(1.7), kind="x"),
          FixedFlow(torch.tensor([0.25]), kind="f")],
-        boundary=["g"], node_sources=[CubicWithdrawal(nodes, [0.3, 0.6])])
+        boundary=["g"], withdrawals=[CubicWithdrawal(nodes, [0.3, 0.6])])
     return net, layer
 
 
 def test_assembled_jacobian_matches_autograd_jacobian_of_the_residual():
     net, layer = _mixed_layer()
-    mna = layer._mna
-    assert mna.n_I == 5 and mna.n_F == 3 and mna.n == 8
+    u = layer._unknowns
+    assert u.n_I == 5 and u.n_F == 3 and u.n == 8
     gen = torch.Generator().manual_seed(7)
-    x = torch.randn(mna.n, generator=gen, dtype=F64)
+    x = torch.randn(u.n, generator=gen, dtype=F64)
     pb = torch.tensor([0.4])
     sources = torch.randn(net.n, generator=gen, dtype=F64)
-    ctx = LawContext(mode="dc")
-    call = mna._plain_call
+    step = _Step(LawContext(mode="dc"), None)
+    call = layer._owner_call
 
     def residual(z):
-        return mna.residual(z, pb, {}, sources, ctx, call)
+        return layer._residual(z, pb, {}, sources, step, call)[0]
 
     expected = torch.autograd.functional.jacobian(residual, x)
-    op = mna.operator(x, pb, {}, ctx, call, lambda phi: mna._node_slopes(phi, {}, call))
+    op = layer._operator(x, pb, {}, step)
     torch.testing.assert_close(op.assemble(), expected, rtol=1e-13, atol=1e-13)
     # rmatvec is the transpose action
-    v = torch.randn(mna.n, generator=gen, dtype=F64)
+    v = torch.randn(u.n, generator=gen, dtype=F64)
     torch.testing.assert_close(op.rmatvec(v), expected.T @ v, rtol=1e-13, atol=1e-13)
 
 
@@ -400,17 +574,69 @@ def test_mixed_nonlinear_network_converges_with_zero_residual():
         phi, q = layer.solve(pb, {}, sources, differentiable=False, method=method,
                              diagnostics=diagnostics, atol=1e-13, rtol=0)
         assert bool(diagnostics["converged"])
-        mna = layer._mna
-        x = torch.cat([phi[layer.interior], q[mna.f_edges]])
-        r = mna.residual(x, pb, {}, sources, LawContext(mode="dc"), mna._plain_call)
+        x = torch.cat([phi[layer.interior], q[layer.implicit_edges]])
+        r, _, _ = layer._residual(x, pb, {}, sources, _Step(LawContext(mode="dc"), None),
+                                  layer._owner_call)
         assert float(r.abs().max()) < 1e-12
-        # Tellegen with the node sources: their withdrawal w leaves the balance as
+        # Tellegen with the withdrawals: their withdrawal w leaves the balance as
         # -sum(phi_I w), the power the withdrawals take out of the network.
         withdrawn = torch.zeros(net.n)
-        ns = layer.node_sources[0]
+        ns = layer.withdrawals[0]
         withdrawn[ns.nodes] = ns.flow(phi[ns.nodes]) * phi[ns.nodes]
         torch.testing.assert_close(layer.power_residual(phi, q, {}, sources),
                                    -withdrawn.sum(), rtol=0, atol=1e-12)
+
+
+def _counting_residuals(monkeypatch, layer):
+    """Count every evaluation of the layer's flows and relation residuals (each residual,
+    and each recomputation of the solved flows, evaluates them once)."""
+    count = {"n": 0}
+    original = layer._flows_and_residuals
+
+    def counted(*args, **kwargs):
+        count["n"] += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(layer, "_flows_and_residuals", counted)
+    return count
+
+
+@pytest.mark.parametrize("grad_mode", [True, False])
+def test_a_differentiable_solve_nothing_reaches_evaluates_no_residual_outside_newton(
+        monkeypatch, grad_mode):
+    """With no gradient wanted, the differentiable solve with flow unknowns evaluates exactly
+    the residuals the primal solve does (the starting guess's probe and Newton's own): the
+    threading is checked on Newton's residuals, not at the start and the root again, and
+    the root's potentials and flows are Newton's last residual's, not recomputed."""
+    _, layer = _mixed_layer()
+    pb = torch.tensor([0.4])
+    sources = torch.tensor([0.0, 0.1, -0.2, 0.05, 0.0, 0.3])
+    count = _counting_residuals(monkeypatch, layer)
+    diagnostics = {}
+    phi_p, q_p = layer.solve(pb, {}, sources, differentiable=False, diagnostics=diagnostics,
+                             atol=1e-13, rtol=0)
+    primal = count["n"]
+    assert primal > diagnostics["newton_iterations"]
+    count["n"] = 0
+    with torch.set_grad_enabled(grad_mode):
+        phi, q = layer.solve(pb, {}, sources, diagnostics=diagnostics, atol=1e-13, rtol=0)
+    assert count["n"] == primal
+    assert not phi.requires_grad and not q.requires_grad
+    assert torch.equal(phi, phi_p) and torch.equal(q, q_p)
+
+
+def test_a_differentiable_solve_with_a_gradient_recomputes_the_flows_with_their_graph(
+        monkeypatch):
+    _, layer = _mixed_layer()
+    pb = torch.tensor([0.4])
+    sources = torch.tensor([0.0, 0.1, -0.2, 0.05, 0.0, 0.3], requires_grad=True)
+    count = _counting_residuals(monkeypatch, layer)
+    layer.solve(pb, {}, sources.detach(), atol=1e-13, rtol=0)
+    unreached = count["n"]
+    count["n"] = 0
+    phi, q = layer.solve(pb, {}, sources, atol=1e-13, rtol=0)
+    assert count["n"] == unreached + 1
+    assert phi.requires_grad and q.requires_grad
 
 
 def test_warm_start_is_used():
@@ -430,7 +656,7 @@ def test_on_failure_return_requires_diagnostics():
         layer.solve(torch.zeros(1), differentiable=False, on_failure="return")
 
 
-def test_dynamic_kind_may_not_carry_a_drive():
+def test_dynamic_kind_may_not_carry_a_head():
     class Store(Source):
         dynamic = True
 
@@ -441,23 +667,23 @@ def test_dynamic_kind_may_not_carry_a_drive():
             return torch.tensor([1.0])
 
     net = _floating_source_net()
-    with pytest.raises(ValueError, match="drive"):
-        KirchhoffLayer(net, "e", [Conductance(torch.tensor([1.0, 0.5]), kind="r"),
-                                      Store(torch.tensor([3.0]))],
-                       drives=[Push()], boundary=["gnd"])
+    layer = KirchhoffLayer(net, "e", [Conductance(torch.tensor([1.0, 0.5]), kind="r"),
+                                      Store(torch.tensor([3.0]))], boundary=["gnd"])
+    with pytest.raises(ValueError, match="dynamic law, which may not carry a head"):
+        EdgeHeads(layer, [Push()])
 
 
 def test_auto_factorises_sparse_whenever_scipy_is_importable(monkeypatch):
-    import noodl.layers._mna as mna_module
+    import noodl.layers._flow_unknowns as flow_unknowns_module
 
     _, layer = _driven_layer()
-    mna = layer._mna
-    monkeypatch.setattr(mna_module, "scipy_importable", lambda: True)
-    assert mna.method() == "sparse_direct"
-    assert mna.method("direct") == "direct"
-    monkeypatch.setattr(mna_module, "scipy_importable", lambda: False)
-    assert mna.method() == "direct"
-    assert mna.method("sparse_direct") == "sparse_direct"
+    method = flow_unknowns_module.linear_method
+    monkeypatch.setattr(flow_unknowns_module, "scipy_importable", lambda: True)
+    assert method(layer) == "sparse_direct"
+    assert method(layer, "direct") == "direct"
+    monkeypatch.setattr(flow_unknowns_module, "scipy_importable", lambda: False)
+    assert method(layer) == "direct"
+    assert method(layer, "sparse_direct") == "sparse_direct"
 
 
 def test_auto_runs_sparse_lu_on_a_batch_above_32():
@@ -472,17 +698,6 @@ def test_auto_runs_sparse_lu_on_a_batch_above_32():
     torch.testing.assert_close(phi, reference.expand(40, -1), rtol=1e-12, atol=1e-12)
 
 
-def test_unknown_law_form_is_refused_naming_the_kind():
-    class Odd(Conductance):
-        law_form = "volume"
-
-    with pytest.raises(ValueError, match=r"kind 'r'.*law_form='volume'.*'potential' or "
-                                         r"'implicit'"):
-        KirchhoffLayer(_floating_source_net(), "e",
-                       [Odd(torch.tensor([1.0, 0.5]), kind="r"),
-                            Source(torch.tensor([3.0]))], boundary=["gnd"])
-
-
 @pytest.mark.parametrize("kwargs, match", [
     ({"mode": "phasor"}, "mode='phasor'.*phasor=True"),
     ({"history": (torch.zeros(3), torch.zeros(2))}, "history"),
@@ -492,7 +707,7 @@ def test_classic_layer_refuses_step_and_phasor_keywords(kwargs, match):
     net = _net(["gnd", "a", "b"], [("gnd", "a", "r"), ("a", "b", "r")])
     layer = KirchhoffLayer(net, "e", [Conductance(torch.tensor([1.0, 2.0]), kind="r")],
                            boundary=["gnd", "b"])
-    assert not layer.mna
+    assert layer.implicit_edges.numel() == 0
     with pytest.raises(ValueError, match=rf"KirchhoffLayer 'e'.*{match}"):
         layer.solve(torch.tensor([1.0, 0.0]), **kwargs)
 
@@ -504,7 +719,7 @@ def test_classic_layer_still_accepts_the_steady_keywords():
     pb = torch.tensor([1.0, 0.0])
     phi, q = layer.solve(pb)
     for kwargs in ({"mode": "dc"}, {"mode": "initial"}, {"t": 3.0}, {"q0": torch.zeros(0)},
-                   {"integration": "backward_euler"}):
+                   {"scheme": "backward_euler"}):
         phi_k, q_k = layer.solve(pb, **kwargs)
         torch.testing.assert_close(phi_k, phi, rtol=0, atol=0)
         torch.testing.assert_close(q_k, q, rtol=0, atol=0)
@@ -610,11 +825,11 @@ def _fan_layer():
 
 def test_flows_of_mna_layer_return_the_solved_q_and_need_q():
     layer = _fan_layer()
-    assert layer.mna
+    assert layer.implicit_edges.numel() > 0
     drivers = {"head": torch.tensor([5.0]), "c": torch.tensor([0.7])}
     phi, q = layer.solve(torch.zeros(1), drivers, torch.zeros(3), differentiable=False)
     torch.testing.assert_close(layer.flows(phi, drivers, q), q, rtol=1e-10, atol=1e-12)
-    with pytest.raises(TypeError, match="Modified Nodal Analysis"):
+    with pytest.raises(ValueError, match="are implicit laws"):
         layer.flows(phi, drivers)
     with pytest.raises(ValueError, match="every edge"):
         layer.flows(phi, drivers, q[..., :2])
@@ -655,3 +870,25 @@ def test_flows_of_mna_layer_gradients_match_central_differences():
     torch.testing.assert_close(g[1], fd_c, rtol=1e-6, atol=1e-8)
     torch.testing.assert_close(g[2][..., 0], w[0])     # the implicit edge passes q
     assert torch.all(g[2][..., 1:] == 0)
+
+
+def test_the_layer_assembles_its_flow_unknowns_itself():
+    """The flow unknowns' layout is `FlowUnknowns` (`None` on the fast path) and their
+    residual and Jacobian are the layer's own: the former `noodl.layers._mna` and
+    `noodl.operators.mna` are gone, and so is the `mna` attribute (the path follows from the
+    laws), and no `mna` name is left on the layer."""
+    import importlib
+
+    from noodl.layers._flow_unknowns import FlowUnknowns
+
+    for module in ("noodl.layers._mna", "noodl.operators.mna"):
+        with pytest.raises(ModuleNotFoundError):
+            importlib.import_module(module)
+    layer = _fan_layer()
+    assert isinstance(layer._unknowns, FlowUnknowns)
+    assert [name for name in vars(layer) if "mna" in name.lower()] == []
+    assert [name for name in dir(KirchhoffLayer) if "mna" in name.lower()] == []
+    net = _net(["gnd", "a"], [("a", "gnd", "r")])
+    fast = KirchhoffLayer(net, "e", [Conductance(torch.tensor([1.0]), kind="r")],
+                          boundary=["gnd"])
+    assert fast._unknowns is None and fast.implicit_edges.numel() == 0

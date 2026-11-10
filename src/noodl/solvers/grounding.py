@@ -78,12 +78,12 @@ def _grounded(
     """(..., n) bool: every node's grounded status, by label propagation over active edges.
 
     Assumes `_validate` has already been called. A node is grounded if it is a boundary node,
-    if `extra_grounded` marks it grounded directly (a potential-dependent NODAL source
+    if `extra_grounded` marks it grounded directly (a potential-dependent withdrawal
     is itself a virtual connection to ground -- its positive diagonal shift makes
     the operator SPD at that node independent of any edge path), or if it is reachable from a
     grounded node through a chain of edges each with slope strictly greater than `atol` (an
     active edge connects its endpoints undirected). `extra_grounded`, when given, is
-    `(..., n)` bool and may be batched independently of `boundary_mask` (a node source's
+    `(..., n)` bool and may be batched independently of `boundary_mask` (a withdrawal's
     slope is a function of the solve point and so can differ per instance, unlike a
     boundary node's fixed set).
     """
@@ -104,7 +104,7 @@ def _grounded(
         # interior selection is vacuously True regardless of this mask's actual values.
         return seed
     if not bool(seed.any()):
-        # No boundary node AND no node-source-grounded node at all: no interior node can
+        # No boundary node AND no withdrawal-grounded node at all: no interior node can
         # reach ground.
         return torch.zeros(batch_shape + (n,), dtype=torch.bool, device=device)
 
@@ -192,8 +192,8 @@ def spd_certificate(
     `atol`: a slope must strictly exceed this to count as active; `atol=0.0` is the
     mathematical "strictly positive" condition. `extra_grounded`: `(..., n)` bool,
     additional per-instance nodes considered grounded independent of any edge path -- a
-    potential-dependent nodal source's positive diagonal shift is exactly such a
-    connection. `None` (the default) changes nothing for a layer with no node sources.
+    potential-dependent withdrawal's positive diagonal shift is exactly such a
+    connection. `None` (the default) changes nothing for a layer with no withdrawals.
     """
     _validate(src, tgt, slopes, interior_of_node, boundary_mask)
     return _certified(

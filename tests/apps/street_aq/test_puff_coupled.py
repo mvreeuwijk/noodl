@@ -216,7 +216,7 @@ def test_refusals_are_named():
     net, _ = twelve_street_grid()
     with pytest.raises(ValueError, match="background='per_street'"):
         build_model(net, puffs=OPTIONS)
-    with pytest.raises(ValueError, match="scheme='implicit'"):
+    with pytest.raises(ValueError, match="scheme='backward_euler'"):
         build_model(net, background="per_street", scheme="exact", puffs=OPTIONS)
     with pytest.raises(ValueError, match="one species"):
         build_model(net, background="per_street", species=("nox", "o3"), puffs=OPTIONS)

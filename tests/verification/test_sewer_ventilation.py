@@ -7,6 +7,7 @@ from noodl.apps.sewer import geometry as g
 from noodl.apps.sewer.air import RHO_AIR_REF, Drag, Headspace
 from noodl.elements.fixed import FixedFlow
 from noodl.elements.powerlaw import Orifice
+from noodl.heads import EdgeHeads
 from noodl.layers.kirchhoff import KirchhoffLayer
 from noodl.topology import Network
 
@@ -22,14 +23,14 @@ def _open_reach(diameter, length, h_over_d, v_w):
     half = torch.tensor([length / 2.0] * 2, dtype=F64)
     layer = KirchhoffLayer(
         net, "air", [Headspace(half, torch.tensor([0, 1]))],
-        drives=[Drag(half, torch.tensor([0, 1]))], boundary=["A1", "A2"],
-        linear_solver="direct",
+        boundary=["A1", "A2"], linear_solver="direct",
     )
     d = torch.full((2,), diameter, dtype=F64)
     h = torch.full((2,), h_over_d * diameter, dtype=F64)
     a_air, _, d_h = g.air_geometry(h, d)
     drv = {"sewer.A_air": a_air, "sewer.D_h": d_h, "sewer.T": g.top_width(h, d),
            "sewer.v": torch.full((2,), v_w, dtype=F64)}
+    drv.update(EdgeHeads(layer, [Drag(half, torch.tensor([0, 1]))])(None, drv))
     _, q = layer.solve(torch.zeros(2, dtype=F64), drv, None, differentiable=False,
                        atol=1e-12, rtol=1e-12)
     return float(q[0]), float(a_air[0])
@@ -52,7 +53,6 @@ def _vented_reach(diameter, length, h_over_d, v_w, leak_area, fan=None):
         elements.append(FixedFlow(torch.tensor([fan], dtype=F64), kind="fan"))
     layer = KirchhoffLayer(
         net, "air", elements,
-        drives=[Drag(torch.tensor([length], dtype=F64), torch.tensor([0]))],
         boundary=["ambient"], linear_solver="direct",
     )
     d = torch.tensor([diameter], dtype=F64)
@@ -60,6 +60,8 @@ def _vented_reach(diameter, length, h_over_d, v_w, leak_area, fan=None):
     a_air, _, d_h = g.air_geometry(h, d)
     drv = {"sewer.A_air": a_air, "sewer.D_h": d_h, "sewer.T": g.top_width(h, d),
            "sewer.v": torch.tensor([v_w], dtype=F64)}
+    drag = Drag(torch.tensor([length], dtype=F64), torch.tensor([0]))
+    drv.update(EdgeHeads(layer, [drag])(None, drv))
     phi, q = layer.solve(torch.zeros(1, dtype=F64), drv, None, differentiable=False,
                          atol=1e-12, rtol=1e-12)
     return layer, phi, q, float(a_air), drv
@@ -139,12 +141,12 @@ def test_transfer_dominated_steady_state_is_henry_equilibrium():
     v_water, v_air = 10.0, 1.0
     water = TransportLayer(
         net, "water_quality", capacity=torch.tensor([v_water], dtype=F64),
-        flow_kind="water", boundary=["B"], n_species=1, scheme="implicit",
+        flow_kind="water", boundary=["B"], n_species=1, scheme="backward_euler",
         quantity="concentration", unit="kg/m3",
     )
     air = TransportLayer(
         net, "air_quality", capacity=torch.tensor([v_air], dtype=F64),
-        flow_kind="air", boundary=["B"], n_species=1, scheme="implicit",
+        flow_kind="air", boundary=["B"], n_species=1, scheme="backward_euler",
         quantity="concentration", unit="kg/m3",
     )
     manhole_idx = torch.tensor([net.nodes.index("M")], dtype=torch.long)

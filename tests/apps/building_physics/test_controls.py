@@ -623,7 +623,7 @@ def _two_rooms(**kwargs):
         build_model,
         orifice_law_from_edges,
     )
-    from noodl.drives import Stack
+    from noodl.heads import Stack
     from noodl.topology import Network
 
     net = Network(dtype=F64)
@@ -635,7 +635,7 @@ def _two_rooms(**kwargs):
     net.add_edge("B", "ambient", kind="airpath", z_path=1.5, Cd=0.6, area=0.05)
     el = orifice_law_from_edges(net, "airpath")
     kwargs.setdefault("species", ("CO2",))
-    return build_model(net, air_laws=[el], drives=[Stack.from_network(net, "airpath")],
+    return build_model(net, air_laws=[el], heads=[Stack.from_network(net, "airpath")],
                        return_inputs=True, **kwargs)
 
 
@@ -710,7 +710,7 @@ def test_a_sensor_finds_its_row_and_column_whatever_the_layer_order():
         build_model,
         orifice_law_from_edges,
     )
-    from noodl.drives import Stack
+    from noodl.heads import Stack
     from noodl.topology import Network
 
     net = Network(dtype=F64)
@@ -723,10 +723,10 @@ def test_a_sensor_finds_its_row_and_column_whatever_the_layer_order():
     net.add_edge("B", "ambient", kind="airpath", z_path=1.5, Cd=0.6, area=0.05)
     elements = [orifice_law_from_edges(net, "crack"),
                 orifice_law_from_edges(net, "airpath")]
-    drives = [Stack.from_network(net, "crack"), Stack.from_network(net, "airpath")]
+    heads = [Stack.from_network(net, "crack"), Stack.from_network(net, "airpath")]
     network = ControlNetwork([Sensor(node_mass_fraction("A")), Sensor(node_temperature("A")),
                               Sensor(edge_flow("airpath", 1))])
-    model, state, drivers = build_model(net, air_laws=elements, drives=drives,
+    model, state, drivers = build_model(net, air_laws=elements, heads=heads,
                                         flow_kinds=("airpath",), species=1,
                                         controls=network, return_inputs=True)
     assert model.transport["species"].interior_idx.tolist() == [2, 3]   # B, A; not C
@@ -971,8 +971,8 @@ def _co2_fan_loop(kp, ki, steps: int = 8):
         orifice_law_from_edges,
         simulate,
     )
-    from noodl.drives import Stack
     from noodl.elements import FixedFlow, Scaled
+    from noodl.heads import Stack
     from noodl.topology import Network
 
     net = Network(dtype=F64)
@@ -987,7 +987,7 @@ def _co2_fan_loop(kp, ki, steps: int = 8):
         [Actuator(1, "flow_multiplier.fan")])
     model, state, drivers = build_model(
         net, air_laws=[orifice_law_from_edges(net, "airpath"), fan],
-        drives=[Stack.from_network(net, "airpath")], species=("CO2",),
+        heads=[Stack.from_network(net, "airpath")], species=("CO2",),
         controls=network, return_inputs=True)
     state["species.x"] = torch.tensor([1.0e-3], dtype=F64)
     drivers["species.x_boundary"] = torch.tensor([6e-4], dtype=F64)

@@ -295,7 +295,7 @@ class GraphLaplacianOperator:
 
         A strictly positive shift grounds its node (`KirchhoffLayer._extra_grounded`, the
         rule the layer's own grounding check applies): a network with no boundary path held
-        only by its node sources (a closed building of compressible volumes) is SPD.
+        only by its withdrawals (a closed building of compressible volumes) is SPD.
         """
         idx = self.interior_of_node
         interior = idx >= 0

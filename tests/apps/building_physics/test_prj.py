@@ -55,6 +55,7 @@ from noodl.elements import (
     Scaled,
     UpstreamDensityPowerLaw,
 )
+from noodl.heads import EdgeHeads
 
 DATA = Path(__file__).resolve().parents[2] / "data" / "contam"
 THREE = DATA / "valThreeZonesWthCtm-UseApi.prj"
@@ -477,7 +478,7 @@ def test_dens_zp_is_read_and_stack_d_is_refused(tmp_path):
     model, _s, _d = project_to_model(read_prj(WTH_STACK))
     assert any(isinstance(c, ZonePressureDensity) for c in model.closures)
     model, _s, _d = project_to_model(read_prj(THREE))
-    assert [type(c) for c in model.closures] == [PrescribedTemperatureDensity]
+    assert [type(c) for c in model.closures] == [PrescribedTemperatureDensity, EdgeHeads]
     text = WTH_STACK.read_text()
     with pytest.raises(ValueError, match=r"stackD = 1.*unsupported"):
         read_prj(_variant(text, _TSDENS_WTH_STACK, "   1    0.75    20     1      1      1      1",
@@ -512,8 +513,36 @@ def test_prj_steady_converges_the_zone_pressure_density_to_its_fixed_point():
     torch.testing.assert_close(again["air.q"], ss["air.q"], rtol=1e-12, atol=0)
     rel = ((one["air.q"] - ss["air.q"]) / ss["air.q"]).abs().max().item()
     assert 3e-5 < rel < 6e-5
-    with pytest.raises(RuntimeError, match=r"did not converge in 1 passes"):
+    with pytest.raises(RuntimeError, match=r"did not converge within 1 passes"):
         steady(model, state, drivers, rtol=0.0, max_iter=1, atol=1e-14)
+
+
+def test_prj_steady_matches_the_old_inline_loop_bitwise():
+    """The loop `prj.steady` ran before `Model.fixed_point`: same state, same pass count."""
+    p = read_prj(WTH_STACK)
+    model, state, drivers = project_to_model(p, ambient=dict(p.ambient_conditions, Ta=273.15))
+    calls = []
+    real = model.steady
+
+    def counting(*a, **k):
+        calls.append(1)
+        return real(*a, **k)
+
+    model.steady = counting
+    with torch.no_grad():
+        new = prj_steady(model, state, drivers, atol=1e-14)
+        n_new, calls[:] = len(calls), []
+        out = model.steady(state, drivers, atol=1e-14)
+        key = "air.phi"
+        for _ in range(10):
+            nxt = model.steady({**state, key: out[key]}, drivers, atol=1e-14)
+            change = (nxt[key] - out[key]).abs().max().item()
+            out = nxt
+            if change <= 1e-12 * 101325.0:
+                break
+    assert n_new == len(calls) > 2
+    assert out.keys() == new.keys()
+    assert all(torch.equal(out[k], new[k]) for k in out)
 
 
 def test_prj_steady_is_one_model_steady_without_dens_zp():
@@ -783,7 +812,7 @@ def test_a_scheduled_fixed_flow_fan_gets_no_stack_drive(tmp_path):
     p = read_prj(_variant(text, path5, "   5    0   1  -1   1   0   0   0   1   0   1", tmp_path))
     (fan,) = [e for e in p.laws if e.kind == "fan_1"]
     assert isinstance(fan, Scaled) and isinstance(fan.inner, FixedFlow)
-    assert "fan_1" not in [d.kind for d in p.drives]
+    assert "fan_1" not in [d.kind for d in p.heads]
 
 
 def test_schedule_references_that_name_nothing_are_refused(tmp_path):
@@ -1722,7 +1751,7 @@ def test_the_plenums_carry_no_zone_air_mass_change(tmp_path):
     p = read_prj(_variant(AHS.read_text(), _DENSITY_OPTIONS,
                           "   0    0.75    20     1      0      0      1", tmp_path))
     model, state, drivers = project_to_model(p)
-    (source,) = [s for s in model.kirchhoff["air"].node_sources
+    (source,) = [s for s in model.kirchhoff["air"].storage
                  if isinstance(s, ZoneAirMassChange)]
     assert sorted(p.net.nodes[i] for i in source.nodes.tolist()) == ["one", "three", "two"]
 

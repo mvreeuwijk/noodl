@@ -5,9 +5,13 @@ from pathlib import Path
 import pytest
 import torch
 
+from noodl._broadcast import broadcast_shapes
 from noodl.apps.sewer import build_model, read_swmm_inp
 from noodl.apps.sewer.dynwave import (
     FUDGE_FLOW,
+    K_BED,
+    K_HOLD,
+    K_HOLD_STORAGE,
     SOLVE_ATOL,
     DynamicWaveConduit,
     JunctionStorage,
@@ -16,9 +20,25 @@ from noodl.apps.sewer.dynwave import (
     solve_atol,
 )
 from noodl.apps.sewer.xsect_tables import LCF, QCF, area_of_depth
+from noodl.elements import LawContext
 
 F64 = torch.float64
 DATA = Path(__file__).resolve().parents[2] / "data" / "sewer"
+
+
+def _step(dt=5.0):
+    """The `LawContext` of a dynamic-wave step of `dt` s (SWMM's trapezoidal scheme)."""
+    return LawContext(mode="transient", dt=dt, scheme="trapezoidal")
+
+
+def _w(storage, phi, drivers, dt=5.0):
+    """`JunctionStorage`'s withdrawal (m3/s) at heads `phi` over a step of `dt` s."""
+    return storage.rate(phi, phi, None, _step(dt), drivers)
+
+
+def _dw(storage, phi, drivers, dt=5.0):
+    """Its slope (m2/s)."""
+    return storage.rate_slope(phi, phi, None, _step(dt), drivers)
 
 
 def _tree(tmp_path, scale=1.0):
@@ -103,14 +123,13 @@ def test_junction_storage_is_trapezoidal_continuity_with_a_stiff_bed():
                          bed_area=0.5)
     drv = {"water.storage_area": torch.tensor([2.0, 2.0], dtype=F64),
            "water.head_start": torch.tensor([1.5, 1.0], dtype=F64),
-           "water.net_inflow_start": torch.tensor([0.3, 0.0], dtype=F64),
-           "water.storage_rate": torch.tensor(0.2, dtype=F64)}       # dt = 5 s
+           "water.net_inflow_start": torch.tensor([0.3, 0.0], dtype=F64)}
     phi = torch.tensor([1.6, 0.999], dtype=F64)
-    w = ns.flow(phi, drv)
+    w = _w(ns, phi, drv)
     assert w[0].item() == pytest.approx(2 * 2.0 * 0.2 * 0.1 - 0.3)
     assert w[1].item() == pytest.approx(2 * 0.2 * (2.0 + 0.5 * 1e6) * (-0.001))
     torch.testing.assert_close(
-        ns.dflow(phi, drv),
+        _dw(ns, phi, drv),
         torch.tensor([2 * 0.2 * 2.0, 2 * 0.2 * (2.0 + 0.5 * 1e6)], dtype=F64))
 
 
@@ -494,17 +513,16 @@ def test_junction_storage_holds_continuity_without_storage_where_surcharged():
     drv = {"water.storage_area": torch.full((2,), 2.0, dtype=F64),
            "water.head_start": torch.tensor([1.0, 1.25], dtype=F64),
            "water.net_inflow_start": torch.tensor([0.0, 0.3], dtype=F64),
-           "water.storage_rate": torch.tensor(0.2, dtype=F64),
            "water.surcharge_slope": torch.full((2,), 0.7, dtype=F64)}
 
     def flag(h_last):
         drv["water.head_last"] = torch.tensor(h_last, dtype=F64)
-        drv["water.surcharged"] = ns.surcharged(drv)
+        drv["water.surcharged"] = ns.surcharged(drv, _step())
         return drv["water.surcharged"].tolist()
 
     def at(h):
         phi = torch.full((2,), h, dtype=F64)
-        return ns.flow(phi, drv).tolist(), ns.dflow(phi, drv).tolist()
+        return _w(ns, phi, drv).tolist(), _dw(ns, phi, drv).tolist()
 
     # fed above the crown: both surcharged (b > 0); 0 withdrawal at the fed head
     assert flag([1.6, 1.6]) == [1.0, 1.0]
@@ -531,7 +549,7 @@ def _area_switch_drivers(n_last, h_star=1.1):
     +0.02 at 1.1 m; wall slope 10 m2/s, fed net inflow `n_last` (m3/s)."""
     one = torch.ones(1, dtype=F64)
     return {"water.storage_area": 2.0 * one, "water.head_start": one,
-            "water.net_inflow_start": 0.1 * one, "water.storage_rate": torch.tensor(0.2, dtype=F64),
+            "water.net_inflow_start": 0.1 * one,
             "water.area_switch_head": h_star * one, "water.area_below": 2.0 * one,
             "water.area_above": 3.0 * one, "water.area_switch_slope": 10.0 * one,
             "water.net_inflow_last": n_last * one}
@@ -547,7 +565,7 @@ def test_junction_storage_holds_a_filling_junction_on_its_area_threshold():
     ns = JunctionStorage(torch.tensor([0]), bed=torch.zeros(1, dtype=F64), bed_area=0.5)
 
     def w(h, n_last, **kw):
-        return ns.flow(torch.tensor([h], dtype=F64), _area_switch_drivers(n_last, **kw)).item()
+        return _w(ns, torch.tensor([h], dtype=F64), _area_switch_drivers(n_last, **kw)).item()
 
     # on the threshold for any net inflow inside the jump [-0.02, 0.02]
     for n_last in (-0.019, 0.0, 0.019):
@@ -558,12 +576,12 @@ def test_junction_storage_holds_a_filling_junction_on_its_area_threshold():
     # continuous, non-decreasing, with the slope of the active piece
     grid = torch.linspace(0.9, 1.3, 4001, dtype=F64)
     drv = {k: v.expand(4001) if v.dim() else v for k, v in _area_switch_drivers(0.0).items()}
-    ws = ns.flow(grid, drv)
+    ws = _w(ns, grid, drv)
     assert bool((ws[1:] - ws[:-1] >= 0.0).all())
     assert float((ws[1:] - ws[:-1]).abs().max()) < 10.0 * 1e-4 + 1e-12
-    slopes = ns.dflow(torch.tensor([1.0, 1.1, 1.2], dtype=F64),
-                      {k: v.expand(3) if v.dim() else v
-                       for k, v in _area_switch_drivers(0.0).items()})
+    slopes = _dw(ns, torch.tensor([1.0, 1.1, 1.2], dtype=F64),
+                 {k: v.expand(3) if v.dim() else v
+                  for k, v in _area_switch_drivers(0.0).items()})
     assert slopes.tolist() == pytest.approx([0.8, 10.0, 1.2])
     # no threshold (+inf): the lagged storage form
     assert w(1.2, 0.0, h_star=float("inf")) == pytest.approx(0.8 * 0.2 - 0.1)
@@ -702,22 +720,19 @@ def test_hold_band_never_acts_below_the_crown_at_a_large_storage_area():
     (2/dt) K_HOLD A_bed would lie above the storage line everywhere below the crown. Below
     the crown a free junction's withdrawal and slope are the storage form exactly; above
     it the band is (2/dt) K_HOLD_STORAGE A_s = 8 m2/s, steeper than the storage's 0.8."""
-    from noodl.apps.sewer.dynwave import K_HOLD_STORAGE
-
     ns = JunctionStorage(torch.tensor([0]), bed=torch.ones(1, dtype=F64), bed_area=0.001,
                          crown=torch.full((1,), 1.3, dtype=F64))
     drv = {"water.storage_area": torch.full((1,), 2.0, dtype=F64),
            "water.head_start": torch.full((1,), 1.0, dtype=F64),
            "water.net_inflow_start": torch.full((1,), 0.0, dtype=F64),
-           "water.storage_rate": torch.tensor(0.2, dtype=F64),
            "water.surcharge_slope": torch.full((1,), 0.7, dtype=F64),
            "water.head_last": torch.full((1,), 1.1, dtype=F64)}
-    drv["water.surcharged"] = ns.surcharged(drv)
+    drv["water.surcharged"] = ns.surcharged(drv, _step())
     assert drv["water.surcharged"].item() == 0.0
 
     def at(h):
         phi = torch.full((1,), h, dtype=F64)
-        return ns.flow(phi, drv).item(), ns.dflow(phi, drv).item()
+        return _w(ns, phi, drv).item(), _dw(ns, phi, drv).item()
 
     for h in (1.05, 1.1, 1.3):                                 # storage form, exactly
         w, dw = at(h)
@@ -736,34 +751,32 @@ def test_hold_band_is_continuous_at_the_crown_with_the_area_switch_active():
     max(10 (0.1), min(20 (0.1), 5 (0.02))) = 1 m3/s, while the lagged-area line gives 2 m3/s.
     The withdrawal is continuous through the crown (no 1 m3/s jump), non-decreasing, with a
     positive slope, and the surcharge flag reads the same band."""
-    from noodl.apps.sewer.dynwave import K_HOLD_STORAGE
-
     ns = JunctionStorage(torch.tensor([0]), bed=torch.zeros(1, dtype=F64), bed_area=0.01,
                          crown=torch.full((1,), 10.0, dtype=F64))
     one = torch.ones(1, dtype=F64)
     drv = {"water.storage_area": 20.0 * one, "water.head_start": 9.9 * one,
-           "water.net_inflow_start": 0.0 * one, "water.storage_rate": torch.tensor(0.5, dtype=F64),
+           "water.net_inflow_start": 0.0 * one,
            "water.area_switch_head": 9.98 * one, "water.area_below": 10.0 * one,
            "water.area_above": 20.0 * one, "water.area_switch_slope": 5.0 * one,
            "water.net_inflow_last": 0.0 * one, "water.surcharge_slope": 0.7 * one,
            "water.head_last": 9.95 * one}
-    drv["water.surcharged"] = ns.surcharged(drv)
+    drv["water.surcharged"] = ns.surcharged(drv, _step(2.0))
     assert drv["water.surcharged"].item() == 0.0
-    w_crown = ns.flow(torch.full((1,), 10.0, dtype=F64), drv).item()
+    w_crown = _w(ns, torch.full((1,), 10.0, dtype=F64), drv, dt=2.0).item()
     assert w_crown == pytest.approx(1.0)
-    above = ns.flow(torch.full((1,), 10.0 + 1e-9, dtype=F64), drv).item()
+    above = _w(ns, torch.full((1,), 10.0 + 1e-9, dtype=F64), drv, dt=2.0).item()
     assert above == pytest.approx(w_crown, abs=1e-6)
     grid = torch.linspace(9.99, 10.01, 2001, dtype=F64)
     big = {k: v.expand(2001) if v.dim() else v for k, v in drv.items()}
-    ws = ns.flow(grid, big)
+    ws = _w(ns, grid, big, dt=2.0)
     steps = ws[1:] - ws[:-1]
     stiff = 1.0 * K_HOLD_STORAGE * 20.0
     assert bool((steps >= 0.0).all())
     assert float(steps.max()) < stiff * 1e-5 + 1e-12
-    assert bool((ns.dflow(grid, big) > 0.0).all())
+    assert bool((_dw(ns, grid, big, dt=2.0) > 0.0).all())
     # the flag uses the same band: fed above the crown, the band is positive there
     drv["water.head_last"] = 10.0 + 1e-6 * one
-    assert ns.surcharged(drv).item() == 1.0
+    assert ns.surcharged(drv, _step(2.0)).item() == 1.0
 
 
 # ------------------------------------------------------------------- flooding
@@ -808,14 +821,13 @@ def test_junction_storage_floods_at_its_top_through_a_lagged_excess():
     drv = {"water.storage_area": torch.full((2,), 2.0, dtype=F64),
            "water.head_start": torch.tensor([1.0, 1.4], dtype=F64),
            "water.net_inflow_start": torch.tensor([0.0, 0.3], dtype=F64),
-           "water.storage_rate": torch.tensor(0.2, dtype=F64),
            "water.net_inflow_last": torch.tensor([0.5, -0.3], dtype=F64)}
-    drv["water.flood_excess"] = ns.flood_excess(drv)
+    drv["water.flood_excess"] = ns.flood_excess(drv, _step())
     assert drv["water.flood_excess"].tolist() == pytest.approx([0.1, 0.0])
 
     def at(h):
         phi = torch.full((2,), h, dtype=F64)
-        return ns.flow(phi, drv).tolist(), ns.dflow(phi, drv).tolist()
+        return _w(ns, phi, drv).tolist(), _dw(ns, phi, drv).tolist()
 
     w, dw = at(1.5)                                            # on the wall at the top
     assert w == pytest.approx([0.5, -0.22]) and dw == pytest.approx([200.0, 200.0])
@@ -1685,7 +1697,7 @@ def _drop_sides(tmp_path, name, steps, **build_kwargs):
         after = {key: hist[key][k] for key in ("water.phi", "water.q")}
         drv = hyd(after | before, drivers, StepContext(dt=hyd.options.routing_step))
         h_star = drv["water.area_switch_head"]
-        rate2 = 2.0 * drv["water.storage_rate"]
+        rate2 = 2.0 / hyd.options.routing_step
         rise = h_star - drv["water.head_start"]
         lo = rate2 * drv["water.area_below"] * rise - drv["water.net_inflow_start"]
         hi = rate2 * drv["water.area_above"] * rise - drv["water.net_inflow_start"]
@@ -1812,9 +1824,9 @@ def test_gradient_on_a_held_threshold_does_not_depend_on_the_wall_slope(tmp_path
     original = JunctionStorage._area_switch
     grads = []
     for scale in (1.0, 0.2, 5.0):
-        def scaled(phi, rise, storage, slope, drv, scale=scale):
+        def scaled(phi, rise, storage, slope, drv, *step, scale=scale):
             drv = dict(drv, **{"water.area_switch_slope": scale * drv["water.area_switch_slope"]})
-            return original(phi, rise, storage, slope, drv)
+            return original(phi, rise, storage, slope, drv, *step)
         monkeypatch.setattr(JunctionStorage, "_area_switch", staticmethod(scaled))
         n = torch.tensor(0.013, dtype=F64, requires_grad=True)
         loss(n).backward()
@@ -2568,7 +2580,7 @@ def _backwater_junction():
                                         head_tolerance=1e-10))
 
 
-def _withdrawn(x0, xb, *, steps=1, withdrawal=0.3, scheme="implicit"):
+def _withdrawn(x0, xb, *, steps=1, withdrawal=0.3, scheme="backward_euler"):
     """`_backwater_junction` started at `x0` with boundary concentration `xb` (kg/m3) and
     `withdrawal` (m3/s) at J: the model, drivers and states (the initial one first)."""
     model, state, drivers = build_model(_backwater_junction(), quality=True,
@@ -2583,7 +2595,7 @@ def _withdrawn(x0, xb, *, steps=1, withdrawal=0.3, scheme="implicit"):
     return model, drivers, states
 
 
-@pytest.mark.parametrize("scheme", ["implicit", "trapezoidal"])
+@pytest.mark.parametrize("scheme", ["backward_euler", "trapezoidal"])
 def test_a_withdrawal_beyond_one_turnover_keeps_a_uniform_tracer_uniform(scheme):
     """A step that withdraws more water than the junction holds at its start (``dt w >
     V_start``) still takes the water that entered during the step with its mass: the
@@ -3076,7 +3088,6 @@ def _one(value, n=2):
 
 def _pond_drivers(n_start, n_last, head_start):
     return {"water.storage_area": _one(4.0), "water.pond_area": _one(4.5),
-            "water.storage_rate": torch.tensor(1.0 / 5.0, dtype=F64),
             "water.head_start": _one(head_start), "water.net_inflow_start": _one(n_start),
             "water.net_inflow_last": _one(n_last), "water.head_last": _one(head_start),
             "water.pond_switch_slope": _one(40.0), "water.ponded": _one(0.0),
@@ -3099,8 +3110,8 @@ def test_a_ponding_junction_rising_through_its_full_head_is_monotone_and_unwalle
                             pond_head=torch.tensor([0.5, torch.inf], dtype=F64))
     assert store.ponds
     drv = _pond_drivers(n_start, n_last, head_start)
-    flow = torch.stack([store.flow(h.expand(2), drv) for h in heads])
-    slope = torch.stack([store.dflow(h.expand(2), drv) for h in heads])
+    flow = torch.stack([_w(store, h.expand(2), drv) for h in heads])
+    slope = torch.stack([_dw(store, h.expand(2), drv) for h in heads])
     assert bool((slope > 0.0).all())
     pond, plain = flow[:, 0], flow[:, 1]
     assert bool((pond[1:] >= pond[:-1] - 1e-12).all())
@@ -3138,3 +3149,322 @@ def test_quality_gradient_wrt_inflow_at_a_zero_inflow_junction_matches_finite_di
         fd = float(run(inflow + e) - run(inflow)) / h
     assert float(a.grad[k]) == pytest.approx(fd, rel=1e-3, abs=1e-8)
     assert abs(fd) > 1e-6
+
+
+# ---------------------------------------------------------------- the node storage port
+class _OldJunctionFlow:
+    """`JunctionStorage` as it was a withdrawal (before it became a `NodeStorage`), copied
+    verbatim without its docstrings: ``2/dt`` from the driver ``"water.storage_rate"``
+    (1/dt), the withdrawal `flow` and its slope `dflow`."""
+
+    def __init__(self, new):
+        for name in ("bed", "bed_area", "extran", "floods", "ponds"):
+            setattr(self, name, getattr(new, name))
+        for name in ("crown", "surchargeable", "top", "pond_head"):
+            if hasattr(new, name):
+                setattr(self, name, getattr(new, name))
+
+    def _storage(self, phi, drivers):
+        rate2 = 2.0 * drivers["water.storage_rate"]
+        area = drivers["water.storage_area"]
+        bed = rate2 * self.bed_area * K_BED
+        dry = torch.clamp(phi - self.bed, max=0.0)
+        rise = phi - drivers["water.head_start"]
+        n_start = drivers["water.net_inflow_start"]
+        storage = rate2 * area * rise - n_start
+        slope = (rate2 * area).expand_as(storage)
+        if "water.area_switch_head" in drivers:
+            storage, slope = self._area_switch(phi, rise, storage, slope, drivers)
+        storage = storage + bed * dry
+        slope = slope + bed * (phi < self.bed).to(phi.dtype)
+        return storage, slope, self._stiff(drivers)
+
+    @staticmethod
+    def _area_switch(phi, rise, storage, slope,
+                     drivers):
+        rate2 = 2.0 * drivers["water.storage_rate"]
+        h_star = drivers["water.area_switch_head"]
+        on = torch.isfinite(h_star)
+        if not bool(on.any()):
+            return storage, slope
+        h_safe = torch.where(on, h_star, phi)
+        n_start = drivers["water.net_inflow_start"]
+        lo = rate2 * drivers["water.area_below"] * rise - n_start
+        hi = rate2 * drivers["water.area_above"] * rise - n_start
+        s = drivers["water.area_switch_slope"]
+        wall = drivers["water.net_inflow_last"] + s * (phi - h_safe)
+        capped = torch.minimum(hi, wall)
+        switched = torch.maximum(lo, capped)
+        slope_sw = torch.where(
+            switched == lo, (rate2 * drivers["water.area_below"]).expand_as(lo),
+            torch.where(capped == hi, (rate2 * drivers["water.area_above"]).expand_as(hi),
+                        s.expand_as(wall)))
+        return torch.where(on, switched, storage), torch.where(on, slope_sw, slope)
+
+    def ponded(self, drivers):
+        head_last = drivers["water.head_last"]
+        if not self.ponds:
+            return torch.zeros_like(head_last)
+        return (head_last > self.pond_head).to(F64)
+
+    def _pond_free(self, phi, drivers):
+        base, base_slope = self._unponded(phi, drivers)
+        on = torch.isfinite(self.pond_head)
+        h_star = torch.where(on, self.pond_head, phi)
+        rate2 = 2.0 * drivers["water.storage_rate"]
+        a_hi = drivers["water.pond_area"]
+        head_start, n_start = drivers["water.head_start"], drivers["water.net_inflow_start"]
+
+        anchor_slope = drivers["water.surcharge_slope"]
+        eligible = self._eligible(drivers)
+        head_c = torch.minimum(drivers["water.head_last"], h_star)
+
+        def unponded(x, free, free_slope):
+            if not self.extran:
+                return free, free_slope
+            return (torch.where(eligible, anchor_slope * (x - head_c), free),
+                    torch.where(eligible, anchor_slope.expand_as(free_slope), free_slope))
+
+        def ponded_line(x):
+            return rate2 * a_hi * (x - head_start) - n_start
+
+        wu, wu_slope = unponded(phi, base, base_slope)
+        wp = ponded_line(phi)
+        wp_slope = (rate2 * a_hi).expand_as(wp)
+        at_star, _ = self._unponded(h_star, drivers)
+        at_star, _ = unponded(h_star, at_star, at_star)
+        rises = at_star <= ponded_line(h_star)
+        s_wall = drivers["water.pond_switch_slope"]
+        wall = drivers["water.net_inflow_last"] + s_wall * (phi - h_star)
+        capped = torch.minimum(wp, wall)
+        tie = torch.maximum(wu, capped)
+        tie_slope = torch.where(tie == wu, wu_slope,
+                                torch.where(capped == wp, wp_slope, s_wall.expand_as(wall)))
+        ponded = drivers["water.ponded"] > 0.5
+        lag = torch.where(ponded, wp, wu)
+        lag_slope = torch.where(ponded, wp_slope, wu_slope.expand_as(wp))
+        chosen = torch.where(rises, tie, lag)
+        chosen_slope = torch.where(rises, tie_slope, lag_slope)
+        return torch.where(on, chosen, base), torch.where(on, chosen_slope, base_slope)
+
+    def _stiff(self, drivers):
+        stiff = drivers.get("water.hold_stiffness")
+        if stiff is not None:
+            return stiff
+        rate2 = 2.0 * drivers["water.storage_rate"]
+        return rate2 * torch.clamp(K_HOLD_STORAGE * drivers["water.storage_area"],
+                                   min=K_HOLD * self.bed_area)
+
+    def crown_withdrawal(self, drivers):
+        return self._storage(self.crown, drivers)[0]
+
+    def _band(self, phi, drivers):
+        w_c = drivers.get("water.crown_withdrawal")
+        if w_c is None:
+            w_c = self.crown_withdrawal(drivers)
+        return w_c + self._stiff(drivers) * (phi - self.crown)
+
+    def surcharged(self, drivers):
+        head_last = drivers["water.head_last"]
+        if not self.extran:
+            return torch.zeros_like(head_last)
+        return (self._eligible(drivers) & ~(self.ponded(drivers) > 0.5)).to(F64)
+
+    def _eligible(self, drivers):
+        head_last = drivers["water.head_last"]
+        if not self.extran:
+            return torch.zeros_like(head_last, dtype=torch.bool)
+        if self.floods:
+            head_last = torch.minimum(head_last, self.top)
+        return ((head_last > self.crown) & self.surchargeable
+                & (self._band(head_last, drivers) > 0.0))
+
+    def _free(self, phi, drivers):
+        if self.ponds and "water.pond_area" in drivers:
+            return self._pond_free(phi, drivers)
+        return self._unponded(phi, drivers)
+
+    def _unponded(self, phi, drivers):
+        storage, slope, stiff = self._storage(phi, drivers)
+        if not self.extran:
+            return storage, slope
+        band = self._band(phi, drivers)
+        above = (phi > self.crown) & self.surchargeable
+        if self.ponds and "water.ponded" in drivers:
+            above = above & (drivers["water.ponded"] < 0.5)
+        free = torch.where(above, torch.maximum(storage, band), storage)
+        slope = torch.where(above & (band > storage), stiff.expand_as(band), slope)
+        surcharged = drivers["water.surcharged"] > 0.5
+        anchor_slope = drivers["water.surcharge_slope"]
+        anchor = anchor_slope * (phi - drivers["water.head_last"])
+        return (torch.where(surcharged, anchor, free),
+                torch.where(surcharged, anchor_slope.expand_as(slope), slope))
+
+    def _wall_slope(self, drivers):
+        given = drivers.get("water.flood_wall_slope")
+        if given is not None:
+            return given
+        stiff = self._stiff(drivers)
+        if not self.extran:
+            return stiff
+        return torch.where(drivers["water.surcharged"] > 0.5,
+                           torch.maximum(stiff, drivers["water.surcharge_slope"]), stiff)
+
+    def top_withdrawal(self, drivers):
+        w_top = drivers.get("water.top_withdrawal")
+        if w_top is None:
+            top = self.top.expand(drivers["water.net_inflow_last"].shape)
+            w_top = self._free(top, drivers)[0]
+        return w_top
+
+    def _wall_on(self, drivers):
+        if not self.ponds:
+            return None
+        return ~torch.isfinite(self.pond_head)
+
+    def flood_excess(self, drivers):
+        excess = torch.clamp(drivers["water.net_inflow_last"] - self.top_withdrawal(drivers),
+                             min=0.0)
+        on = self._wall_on(drivers)
+        return excess if on is None else torch.where(on, excess, torch.zeros_like(excess))
+
+    def _wall(self, phi, drivers):
+        w_top = drivers.get("water.top_withdrawal")
+        if w_top is None:
+            w_top, _ = self._free(self.top.expand(phi.shape), drivers)
+        return (w_top + drivers["water.flood_excess"]
+                + self._wall_slope(drivers) * (phi - self.top))
+
+    def flow(self, phi_nodes, drivers=None):
+        free, _ = self._free(phi_nodes, drivers)
+        if not self.floods:
+            return free
+        walled = torch.maximum(free, self._wall(phi_nodes, drivers))
+        on = self._wall_on(drivers)
+        return walled if on is None else torch.where(on, walled, free)
+
+    def dflow(self, phi_nodes, drivers=None):
+        free, slope = self._free(phi_nodes, drivers)
+        if self.floods:
+            wall = self._wall(phi_nodes, drivers)
+            wall_slope = self._wall_slope(drivers).expand_as(wall)
+            hold = wall >= free
+            on = self._wall_on(drivers)
+            if on is not None:
+                hold = hold & on
+            slope = torch.where(hold, wall_slope, slope)
+        return slope.expand(broadcast_shapes(slope.shape, phi_nodes.shape))
+
+
+def _port_cases():
+    """`(storage, drivers, heads)` over every branch of the junction withdrawal: three
+    junctions (a plain one, one with the drop-end area switch, one that cannot surcharge), the
+    plain bed and storage, EXTRAN surcharge and flooding, and ponding."""
+    from noodl.apps.sewer.dynwave import JunctionStorage
+
+    gen = torch.Generator().manual_seed(17)
+    three = torch.ones(3, dtype=F64)
+    heads = torch.rand((4000, 3), generator=gen, dtype=F64) * 2.4 - 0.4      # -0.4 to 2.0 m
+    base = {"water.storage_area": _t3(2.0, 3.5, 1.2),
+            "water.head_start": _t3(0.4, 0.9, 0.2),
+            "water.net_inflow_start": _t3(0.05, -0.02, 0.0),
+            "water.net_inflow_last": _t3(0.4, 0.01, -0.03),
+            "water.head_last": _t3(1.25, 1.05, 0.5),
+            "water.surcharge_slope": _t3(0.7, 0.3, 0.9),
+            "water.area_switch_head": _t3(float("inf"), 0.95, float("inf")),
+            "water.area_below": _t3(2.0, 2.5, 1.2), "water.area_above": _t3(2.0, 4.0, 1.2),
+            "water.area_switch_slope": _t3(10.0, 12.0, 10.0)}
+    plain = JunctionStorage(torch.arange(3), bed=0.0 * three, bed_area=0.5)
+    extran = JunctionStorage(torch.arange(3), bed=0.0 * three, bed_area=0.5,
+                             crown=_t3(1.0, 1.2, 0.8), top=_t3(1.5, 1.6, 1.4),
+                             surchargeable=torch.tensor([True, True, False]))
+    ponds = JunctionStorage(torch.arange(3), bed=0.0 * three, bed_area=0.5,
+                            crown=_t3(1.0, 1.2, 0.8), top=_t3(1.5, 1.6, 1.4),
+                            surchargeable=torch.tensor([True, False, False]),
+                            pond_head=_t3(1.5, float("inf"), 1.4))
+    pond = {**base, "water.pond_area": _t3(3.0, 3.5, 2.0),
+            "water.pond_switch_slope": _t3(40.0, 40.0, 40.0)}
+    return [(plain, base, heads), (extran, base, heads),
+            (extran, {**base, "water.head_last": _t3(0.9, 1.7, 0.5)}, heads),
+            (ponds, pond, heads), (ponds, {**pond, "water.head_last": _t3(1.6, 1.0, 1.45)},
+                                   heads)]
+
+
+def _t3(a, b, c):
+    return torch.tensor([a, b, c], dtype=F64)
+
+
+@pytest.mark.parametrize("dt", [5.0, 30.0, 0.37])
+@pytest.mark.parametrize("case", range(5))
+def test_junction_storage_rate_is_the_old_withdrawal_flow_bit_for_bit(case, dt):
+    """The port onto `NodeStorage` changes no bit: `rate`/`rate_slope` with the step from the
+    layer (`step_rate_factor` gives 2/dt, the same float as the old ``2 * (1/dt)``) equal the
+    old `flow`/`dflow` that read ``"water.storage_rate"``, on random heads over every branch,
+    and so do the pass constants the closure evaluates (surcharge flag, ponded state, flood
+    excess, crown and top withdrawals, band and wall stiffness)."""
+    storage, drivers, heads = _port_cases()[case]
+    old = _OldJunctionFlow(storage)
+    ctx = _step(dt)
+    assert 2.0 * (1.0 / dt) == 2.0 / dt
+    new_drv, old_drv = dict(drivers), dict(drivers, **{
+        "water.storage_rate": torch.tensor(1.0 / dt, dtype=F64)})
+    if storage.ponds:
+        new_drv["water.ponded"] = storage.ponded(new_drv)
+        old_drv["water.ponded"] = old.ponded(old_drv)
+    # the pass constants, in the closure's order
+    new_drv["water.hold_stiffness"] = storage._stiff(new_drv, ctx)
+    old_drv["water.hold_stiffness"] = old._stiff(old_drv)
+    if storage.extran:
+        new_drv["water.crown_withdrawal"] = storage.crown_withdrawal(new_drv, ctx)
+        old_drv["water.crown_withdrawal"] = old.crown_withdrawal(old_drv)
+    new_drv["water.surcharged"] = storage.surcharged(new_drv, ctx)
+    old_drv["water.surcharged"] = old.surcharged(old_drv)
+    if storage.floods:
+        new_drv["water.top_withdrawal"] = storage.top_withdrawal(new_drv, ctx)
+        old_drv["water.top_withdrawal"] = old.top_withdrawal(old_drv)
+        new_drv["water.flood_wall_slope"] = storage._wall_slope(new_drv, ctx)
+        old_drv["water.flood_wall_slope"] = old._wall_slope(old_drv)
+        new_drv["water.flood_excess"] = storage.flood_excess(new_drv, ctx)
+        old_drv["water.flood_excess"] = old.flood_excess(old_drv)
+    for key, value in new_drv.items():
+        assert torch.equal(value, old_drv[key]), key
+    start = torch.zeros_like(heads)          # not read: the step start is in the drivers
+    w = storage.rate(heads, start, None, ctx, new_drv)
+    assert torch.equal(w, old.flow(heads, old_drv))
+    assert torch.equal(storage.rate_slope(heads, start, None, ctx, new_drv),
+                       old.dflow(heads, old_drv))
+    # every branch is reached: below the bed, the free surface, and per case the rest
+    slope = storage.rate_slope(heads, start, None, ctx, new_drv)
+    bed_slope = 2.0 / dt * 0.5 * K_BED
+    assert bool((slope > bed_slope).any()) and bool((heads > 0.0).any())
+    if not storage.extran and dt >= 5.0:      # junction 1's area switch: below and above H*
+        assert bool((slope[:, 1] == 2.0 / dt * 2.5).any())
+        assert bool((slope[:, 1] == 2.0 / dt * 4.0).any())
+    if storage.extran and not storage.ponds:
+        surcharged = new_drv["water.surcharged"] > 0.5
+        above = (heads > storage.crown) & storage.surchargeable & ~surcharged
+        stiff = new_drv["water.hold_stiffness"].expand_as(slope)
+        assert bool(((slope == stiff) & above).any())                       # the band
+        if bool(surcharged.any()):                                          # the anchor
+            assert bool((slope == new_drv["water.surcharge_slope"])[:, surcharged].any())
+        assert bool((heads > storage.top).any())                            # the wall
+    if storage.ponds:                                     # the ponded line above H*
+        assert bool((slope == 2.0 / dt * new_drv["water.pond_area"]).any())
+
+
+def test_junction_storage_refuses_a_scheme_other_than_swmms_trapezoidal():
+    """The closure evaluates the pass constants (band, crown and top withdrawals, flood wall)
+    at SWMM's 2/dt, so a backward-Euler step of the head layer would mix two schemes: the
+    junction storage refuses it by name, directly and through `Model.step(scheme=...)`."""
+    from noodl.apps.sewer.dynwave import build_dynamic_wave_model
+
+    storage, drivers, heads = _port_cases()[0]
+    for method in (storage.rate, storage.rate_slope):
+        with pytest.raises(ValueError, match="trapezoidal"):
+            method(heads, heads, None, LawContext(mode="transient", dt=5.0,
+                                                  scheme="backward_euler"), drivers)
+    net, _, _ = read_swmm_inp(DATA / "tree_dynwave.inp")
+    model, state, drv = build_dynamic_wave_model(net)
+    assert model.layers["water"].scheme == "trapezoidal"
+    with pytest.raises(ValueError, match="JunctionStorage: scheme='backward_euler'"):
+        model.step(state, drv, 5.0, scheme="backward_euler")

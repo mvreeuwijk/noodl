@@ -7,8 +7,9 @@ from pathlib import Path
 import pytest
 import torch
 
-import noodl.layers._mna as mna_module
+import noodl.layers._flow_unknowns as flow_unknowns_module
 from noodl.elements import Conductance, ConstitutiveLaw, ImplicitLaw
+from noodl.heads import EdgeHeads
 from noodl.layers.kirchhoff import KirchhoffLayer
 from noodl.topology import Network
 from tests._circuit_laws import Cap, DrivenSource, Ind, Source
@@ -48,9 +49,9 @@ def _rc(V=1.0, R=1.0, C=1.0):
     return net, layer
 
 
-def _march(layer, phi, q, dt, steps, integration):
+def _march(layer, phi, q, dt, steps, scheme):
     for _ in range(steps):
-        phi, q = layer.solve(GROUND, history=(phi, q), dt=dt, integration=integration,
+        phi, q = layer.solve(GROUND, history=(phi, q), dt=dt, scheme=scheme,
                              differentiable=False)
     return phi, q
 
@@ -168,13 +169,13 @@ def test_unknown_mode_step_and_integration_are_refused():
         layer.solve(GROUND, mode="transient", dt=0.1, history=(phi, q))
     with pytest.raises(ValueError, match="dt must be positive"):
         layer.solve(GROUND, dt=0.0, history=(phi, q))
-    with pytest.raises(ValueError, match="integration='euler'"):
-        layer.solve(GROUND, dt=0.1, history=(phi, q), integration="euler")
+    with pytest.raises(ValueError, match="scheme='euler'"):
+        layer.solve(GROUND, dt=0.1, history=(phi, q), scheme="euler")
     with pytest.raises(ValueError, match="history=.*every edge's flow"):
         layer.solve(GROUND, dt=0.1, history=(phi, q[:2]))
 
 
-def test_drive_on_dynamic_kind_is_refused():
+def test_a_dynamic_kind_carries_no_head():
     class Push:
         kind = "cap"
 
@@ -183,17 +184,15 @@ def test_drive_on_dynamic_kind_is_refused():
 
     net = _net(["gnd", "a", "b"], [("a", "gnd", "source"), ("a", "b", "r"),
                                    ("b", "gnd", "cap")])
-    with pytest.raises(ValueError, match="kind 'cap' has a dynamic law"):
-        KirchhoffLayer(net, "e", [Source(torch.tensor([1.0])),
+    layer = KirchhoffLayer(net, "e", [Source(torch.tensor([1.0])),
                                       Conductance(torch.tensor([1.0]), kind="r"),
-                                      Cap(torch.tensor([1.0]))],
-                       drives=[Push()], boundary=["gnd"])
+                                      Cap(torch.tensor([1.0]))], boundary=["gnd"])
+    with pytest.raises(ValueError, match="kind 'cap' has a dynamic law"):
+        EdgeHeads(layer, [Push()])
 
 
 class StepRecorder(ConstitutiveLaw):
     """q = g dp for a static law that reads the context: records each mode it sees."""
-
-    contextual = True
 
     def __init__(self, kind="r"):
         super().__init__(kind)
@@ -204,7 +203,7 @@ class StepRecorder(ConstitutiveLaw):
         return dp
 
 
-def test_static_contextual_layer_steps_without_history():
+def test_static_layer_that_reads_the_context_steps_without_history():
     # A layer with no dynamic law needs no history for a step; its laws see the step.
     net = _net(["gnd", "a", "b"], [("a", "gnd", "source"), ("a", "b", "r"),
                                    ("b", "gnd", "r")])
@@ -254,7 +253,7 @@ def test_singular_message_names_flow_prescribed_parts():
 
 
 def test_rank_test_is_skipped_above_the_size_cap(monkeypatch):
-    monkeypatch.setattr(mna_module, "_RANK_TEST_MAX_UNKNOWNS", 2)
+    monkeypatch.setattr(flow_unknowns_module, "_RANK_TEST_MAX_UNKNOWNS", 2)
     layer = _voltage_loop()          # 3 unknowns: phi_a and two source flows
     with pytest.raises(RuntimeError, match="failed to converge") as info:
         layer.solve(GROUND, differentiable=False)
@@ -333,7 +332,7 @@ def _quadratic_loop():
 
 
 def _quadratic_loop_solve(theta, **kwargs):
-    """theta = [a0, a1, a2]: the drive on edge 0 and the loss coefficients of edges 1, 2.
+    """theta = [a0, a1, a2]: the head on edge 0 and the loss coefficients of edges 1, 2.
     Returns the edge potential differences and the edge flows."""
     _, layer = _quadratic_loop()
     drivers = {"V": theta[:1], "a": theta[1:]}
@@ -392,7 +391,7 @@ def test_spring_mass_damper_matches_the_worked_example_displacement_series():
     phi, q = layer.solve(GROUND, mode="initial", differentiable=False)
     displacement = [phi[n2].item()]     # p2(t0) / C = 1: the golden series' first entry
     for _ in range(50):
-        phi, q = layer.solve(GROUND, history=(phi, q), dt=dt, integration="backward_euler",
+        phi, q = layer.solve(GROUND, history=(phi, q), dt=dt, scheme="backward_euler",
                              differentiable=False)
         displacement.append(phi[n2].item())     # edge 2 is 2 -> 0 with phi[0] = 0
     want = GOLD["spring_mass_damper_displacement"]
@@ -451,3 +450,39 @@ def test_singular_dc_message_does_not_mention_the_initial_point():
     with pytest.raises(RuntimeError, match="singular") as info:
         _voltage_loop().solve(GROUND, differentiable=False)
     assert "v0" not in str(info.value)
+
+
+# ------------------------------------------------------- one scheme vocabulary
+def _with_scheme(scheme):
+    net, layer = _rc()
+    return KirchhoffLayer(
+        net, "e", [Source(torch.tensor([1.0])), Conductance(torch.tensor([1.0]), kind="r"),
+                   Cap(torch.tensor([1.0]))], boundary=["gnd"], scheme=scheme)
+
+
+def test_a_kirchhoff_layer_refuses_the_old_and_the_exact_scheme_names():
+    _, layer = _rc()
+    phi, q = layer.solve(GROUND, mode="initial", differentiable=False)
+    with pytest.raises(ValueError, match=r"scheme='implicit'.*'exact', 'backward_euler'"):
+        layer.solve(GROUND, dt=0.1, history=(phi, q), scheme="implicit")
+    with pytest.raises(ValueError, match=r"scheme='exact' is a TransportLayer scheme"):
+        layer.solve(GROUND, dt=0.1, history=(phi, q), scheme="exact")
+    with pytest.raises(ValueError, match=r"scheme='implicit'.*'exact', 'backward_euler'"):
+        _with_scheme("implicit")
+    with pytest.raises(ValueError, match=r"scheme='exact' is a TransportLayer scheme"):
+        _with_scheme("exact")
+
+
+def test_the_layer_scheme_is_the_default_of_a_step_and_trapezoidal_by_default():
+    _, plain = _rc()
+    assert plain.scheme == "trapezoidal"
+    own = _with_scheme("backward_euler")
+    phi, q = own.solve(GROUND, mode="initial", differentiable=False)
+    got = own.solve(GROUND, history=(phi, q), dt=0.3, differentiable=False)
+    want = own.solve(GROUND, history=(phi, q), dt=0.3, scheme="backward_euler",
+                     differentiable=False)
+    torch.testing.assert_close(got[0], want[0], rtol=0, atol=0)
+    torch.testing.assert_close(got[1], want[1], rtol=0, atol=0)
+    other = own.solve(GROUND, history=(phi, q), dt=0.3, scheme="trapezoidal",
+                      differentiable=False)
+    assert not torch.equal(got[0], other[0])

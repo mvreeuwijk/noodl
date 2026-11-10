@@ -92,23 +92,53 @@ def kind_flows(model: Model, name: str, state: Mapping[str, Tensor],
 
 
 def circuit_kwargs(name: str, layer: KirchhoffLayer, state: Mapping[str, Tensor],
-                   base: Mapping[str, Tensor], dt: float | None, t: float | None) -> dict:
-    """The solve keywords of a layer solved by Modified Nodal Analysis; see
-    `Model._circuit_kwargs`."""
+                   base: Mapping[str, Tensor], dt: float | None, t: float | None,
+                   scheme: str | None = None) -> dict:
+    """The step keywords of a layer's solve (`t`, and `q0`, `history`, `dt` and
+    `storage_flow` where the layer reads them); see `Model._circuit_kwargs`. `scheme` is the
+    step's (`None`: the layer's own). A layer that holds its storage at boundary nodes
+    takes `history` on every solve, steady or not: the step-start potentials it holds them
+    at."""
     out: dict = {"t": t if dt is None or t is None else t + dt}
     q_prev = state.get(f"{name}.q")
-    if q_prev is not None:
+    flow_unknowns = layer._unknowns is not None
+    if q_prev is not None and flow_unknowns:
         out["q0"] = q_prev[..., layer.implicit_edges]
+    if layer.holds_storage:
+        phi = base.get(f"{name}.phi")
+        if phi is None:
+            raise KeyError(
+                f"Model: state {name + '.phi'!r} is required by Kirchhoff layer {name!r}, "
+                f"whose storage at boundary nodes is held at its potential at the step start"
+            )
+        out["history"] = (phi, None)
     if layer.dynamic and not layer.phasor and dt is not None:
-        missing = [k for k in (f"{name}.phi", f"{name}.q") if k not in base]
+        # A layer whose only storage is node storage reads only the step-start potentials;
+        # a layer with dynamic laws reads the step-start flows of their edges too, and a
+        # layer with flow unknowns takes them as well.
+        with_q = layer._steps_with_flows
+        keys = (f"{name}.phi", f"{name}.q") if with_q else (f"{name}.phi",)
+        missing = [k for k in keys if k not in base]
         if missing:
             raise KeyError(
                 f"Model: state {missing} is required to step Kirchhoff layer {name!r}, "
-                f"whose dynamic laws start each step from the potentials and flows at "
-                f"the step start (an initial point: layer.solve(..., mode='initial'))"
+                f"whose dynamic laws or storage start each step from the state at the step "
+                f"start (an initial point: layer.solve(..., mode='initial'), or a steady "
+                f"solve)"
             )
-        out["history"] = (base[f"{name}.phi"], base[f"{name}.q"])
+        out["history"] = (base[f"{name}.phi"], base[f"{name}.q"] if with_q else None)
         out["dt"] = dt
+        if layer.storage:
+            key = f"{name}.storage_flow"
+            flow = base.get(key)
+            if flow is None and (layer.scheme if scheme is None else scheme) == "trapezoidal":
+                # a missing step-start flow into storage is zero (the state at rest; the
+                # `refs` default), as after a steady solve
+                phi = base[f"{name}.phi"]
+                flow = torch.zeros(phi.shape[:-1] + (layer._n_entries,), dtype=phi.dtype,
+                                   device=phi.device)
+            if flow is not None:
+                out["storage_flow"] = flow
     return out
 
 
@@ -131,6 +161,13 @@ def run_pass(
     for key in model.closure_state_keys:
         if key in base:
             closure_state[key] = base[key]
+    # A storage node at a boundary node is held at its step-start potential through the step,
+    # so a closure reading it (a tank-level control) reads that value, not the level a
+    # previous pass of the same step has already advanced it to.
+    for name, layer in model.kirchhoff.items():
+        key = f"{name}.phi"
+        if layer.holds_storage and key in closure_state and key in base:
+            closure_state[key] = layer.hold_potentials(closure_state[key], base[key])
     written: set[str] = set()
     ctx = StepContext(dt=dt, t=t)
     drv = model._apply_closures(closure_state, drivers, written, ctx)
@@ -158,14 +195,27 @@ def _solve_potentials(model: Model, state, base, drv, dt, t, solve_kwargs, warm_
         phi_prev = state.get(f"{name}.phi") if warm_start else None
         phi0 = None if phi_prev is None else phi_prev[..., layer.interior]
         d: dict = {}
-        circuit = circuit_kwargs(name, layer, state, base, dt, t) if layer.mna else {}
+        kwargs = layer_kwargs(solve_kwargs, name)
+        circuit = circuit_kwargs(name, layer, state, base, dt, t, kwargs.get("scheme"))
         if not warm_start:
             # The implicit-law flows' warm start goes with the potentials' (`phi0`).
             circuit.pop("q0", None)
-        phi, q = layer.solve(pb, drv, sources, phi0=phi0, diagnostics=d, **circuit,
-                             **layer_kwargs(solve_kwargs, name))
+        phi, q = layer.solve(pb, drv, sources, phi0=phi0, diagnostics=d, **circuit, **kwargs)
         new[f"{name}.phi"], new[f"{name}.q"] = phi, q
         made += [f"{name}.phi", f"{name}.q"]
+        if layer.storage:
+            # The flow into every storage entry at the end of the step (zeros on a steady
+            # pass; at a held initial point, what balances each held node): the
+            # trapezoidal scheme's step-start rate on the next step.
+            new[f"{name}.storage_flow"] = layer._storage_flows_at(
+                phi, drv, dt=circuit.get("dt"), scheme=kwargs.get("scheme"),
+                history=circuit.get("history"), storage_flow=circuit.get("storage_flow"),
+                mode=kwargs.get("mode"), q=q, sources=sources, check_dt=False)
+            made.append(f"{name}.storage_flow")
+            if layer.holds_storage and dt is not None:
+                # ... and stepped after it, by forward Euler on the flow it received.
+                new[f"{name}.phi"] = layer.advance_storage(
+                    phi, new[f"{name}.storage_flow"], dt, drv)
         diag[name] = d
 
 

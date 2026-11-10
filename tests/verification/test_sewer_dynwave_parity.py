@@ -1110,7 +1110,7 @@ def _held(hyd, heads, drv):
     (those of a pass fed it): ``{junction: H - H*}`` (m) where the net inflow lies inside
     the jump at the threshold head H*."""
     h_star = drv["water.area_switch_head"]
-    rate2 = 2.0 * drv["water.storage_rate"]
+    rate2 = 2.0 / hyd.options.routing_step
     rise = h_star - drv["water.head_start"]
     lo = rate2 * drv["water.area_below"] * rise - drv["water.net_inflow_start"]
     hi = rate2 * drv["water.area_above"] * rise - drv["water.net_inflow_start"]

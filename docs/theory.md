@@ -99,10 +99,10 @@ step for any instance whose residual did NOT shrink under a full step — a dead
 square-root-law edge otherwise cycles $\Delta p \to -\Delta p$ forever). Nodal analysis handles
 flow sources trivially (add to $s$) but a branch whose *natural* law fixes a flow or
 potential directly (an ideal pump, a fixed-flow fan, a prescribed pressure boundary)
-cannot be written as $f = g(e)$; this is handled by **Modified Nodal Analysis (MNA)**
-(Ho, Ruehli & Brennan 1975), which promotes that branch's flow to an extra unknown and adds one
-extra row enforcing its constitutive constraint, at the cost of a larger, indefinite
-(saddle-point) system. noodl implements it; see *Modified Nodal Analysis in noodl* below.
+cannot be written as $f = g(e)$. Such a law is an implicit law: a relation between its potential difference
+and its flow, and noodl makes that branch's flow an extra unknown of the layer, with one
+extra row for the relation, at the cost of a larger, indefinite (saddle-point) system; see
+*Implicit laws* below.
 
 **Loop (mesh) analysis.** Unknowns are the $l = b - n + c$ cycle amplitudes $\lambda$. Set
 
@@ -127,24 +127,26 @@ unknowns; a branch with a *prescribed potential drop* needs the dual augmentatio
 Neither formulation is unconditionally better-conditioned — both reduce to a congruence
 transform of the same branch Jacobian — so the practical choice is driven by $n$ vs
 $l$ and by which sources are naturally flow- or potential-type. `noodl`'s Kirchhoff
-layers are nodal, extended to Modified Nodal Analysis where a constitutive law requires it
+layers are nodal, with flow unknowns added where a constitutive law is implicit
 (below). The cycle space is kept for flows that are not potential-driven — prescribed or
 closure-computed flows, and the closed-form continuity solve on a tree
 (`cycles.particular_flow`, §9). `cycles.assert_forward_oriented` encodes a related constraint:
 only an entrywise non-negative cycle basis guarantees non-negative $\lambda$ maps to
 non-negative $f$, needed for the constant upwind operator of §2.
 
-### Modified Nodal Analysis in noodl
+### Implicit laws
 
-A `KirchhoffLayer` whose constitutive laws all have the potential-controlled form
-$f_e = g_e(e_e)$ is solved by nodal analysis exactly as above. A law that is not of that form
-makes the layer a Modified Nodal Analysis system (Ho, Ruehli & Brennan, *The modified nodal
-approach to network analysis*, IEEE Trans. Circuits Syst. 22(6):504–509, 1975). Partition the
-branches into potential-controlled branches $P$ and implicit branches $F$, whose laws are
-relations $r_F(e_F, f_F) = 0$ rather than functions: an ideal potential source ($e = V$), a
-flow-controlled law ($e = h(f)$), an inductance's companion form, the coupled constraints of a
-two-port such as an ideal transformer. The unknowns are the interior potentials $\phi_I$ and
-the implicit flows $f_F$, and the equations are KCL at the interior nodes and the implicit laws:
+A `KirchhoffLayer` whose constitutive laws all give their flow from the potential difference,
+$f_e = g_e(e_e)$, is solved by nodal analysis exactly as above. A law that is a relation
+$r_F(e_F, f_F) = 0$ instead of a flow (an implicit law) adds that flow as an unknown of the layer: an ideal
+potential source ($e = V$), a flow-controlled law ($e = h(f)$), an inductance over one time
+step, the coupled constraints of a two-port such as an ideal transformer. Circuit simulators
+call this formulation Modified Nodal Analysis (Ho, Ruehli & Brennan, *The modified nodal
+approach to network analysis*, IEEE Trans. Circuits Syst. 22(6):504–509, 1975): a layer with
+flow unknowns is that system, and the implicit laws are the branches it adds
+unknowns for. Partition the branches into those whose law gives the flow, $P$, and those whose
+law is implicit, $F$. The unknowns are the interior potentials $\phi_I$ and the flows
+$f_F$, and the equations are the flow balance (KCL) at the interior nodes and the implicit laws' relations:
 
 $$
 \begin{aligned}
@@ -160,30 +162,30 @@ J = \begin{pmatrix} A_{I,P}\, G_P'\, A_{I,P}^\top & A_{I,F} \\
 \partial_e r_F\, A_{I,F}^\top & \partial_f r_F \end{pmatrix}.
 $$
 
-The upper-left block is the nodal Laplacian of the potential-controlled branches. The
-upper-right block, the KCL rows against the implicit flows, is the incidence $A_{I,F}$
+The upper-left block is the nodal Laplacian of the branches whose law gives the flow. The
+upper-right block, the balance rows against the flow unknowns, is the incidence $A_{I,F}$
 itself, constant $\pm 1$; the lower-left block is the law's slope $\partial_e r_F$ times the
 transposed incidence. $G_P'$ and the $r_F$ derivatives are block diagonal with one
 block per group of coupled edges (a law's `ports`), so a multi-port law enters exactly.
 $J$ is nonsymmetric and indefinite in general, which is why such a layer is factorised
-(sparse or dense LU) rather than solved by conjugate gradients. MNA sits between nodal analysis
-and the **sparse tableau** formulation (Hachtel, Brayton & Gustavson, *The sparse tableau
-approach to network analysis and design*, IEEE Trans. Circuit Theory 18(1):101–113, 1971),
-which keeps every branch potential difference and flow as an unknown: MNA eliminates the
-potential-controlled flows and keeps only the flows that cannot be eliminated, so its system is
-far smaller while still admitting every law.
+(sparse or dense LU) rather than solved by conjugate gradients. This sits between nodal
+analysis and the **sparse tableau** formulation (Hachtel, Brayton & Gustavson, *The sparse
+tableau approach to network analysis and design*, IEEE Trans. Circuit Theory 18(1):101–113,
+1971), which keeps every branch potential difference and flow as an unknown: noodl eliminates
+the flows that follow from the potentials and keeps only those that cannot be eliminated, so
+its system is far smaller while still admitting every law.
 
-**Storage** (a capacitance, an inductance) enters as a companion form: one implicit step of the
-trapezoidal rule or backward Euler turns $f = C\, de/dt$ into the algebraic relation
+**Storage** (a capacitance, an inductance) enters through its time step: one implicit step of
+the trapezoidal rule or backward Euler turns $f = C\, de/dt$ into the algebraic relation
 $f + f_{\text{prev}} = \tfrac{2C}{\Delta t}(e - e_{\text{prev}})$ (trapezoidal), so a transient is
-a sequence of MNA solves from the step-start state. **Phasors** replace $d/dt$ by $j\omega$:
+a sequence of layer solves from the step-start state. **Phasors** replace $d/dt$ by $j\omega$:
 potentials and flows become complex amplitudes, solved as (real, imaginary) pairs so that a law
 that is not holomorphic (a constant-power load) is exact. Tellegen's theorem then holds for the
 complex amplitudes, $\sum_k e_k \overline{f_k} = 0$, which is the complex power balance
 (`power_residual` on a phasor layer).
 
 **Adjoint sensitivities.** The adjoint the implicit-function theorem gives (§4) solves the
-transposed MNA system, $J^\top \lambda = \partial L / \partial x$. In circuit terms this is the
+transposed system, $J^\top \lambda = \partial L / \partial x$. In circuit terms this is the
 **adjoint network** of Director & Rohrer (*The generalized adjoint network and network
 sensitivities*, IEEE Trans. Circuit Theory 16(3):318–323, 1969), who derived from Tellegen's
 theorem that the sensitivity of one response to every parameter of a network costs one extra
@@ -262,8 +264,8 @@ None of these is differentiable in the autograd sense (uncertain: no published
 "differentiable EPANET/CONTAM" was found; the closest is differentiable AC/DC
 [power-flow optimisation](https://arxiv.org/pdf/2603.28203)). Two patterns matter for
 `noodl`: every mature tool is **nodal** in the pressure/head variable (cheap, robust
-SPD systems), and `noodl`'s Kirchhoff layers are nodal too, extended to Modified Nodal Analysis
-only where a constitutive law needs it (§1); and Modelica's stream
+SPD systems), and `noodl`'s Kirchhoff layers are nodal too, with flow unknowns added only
+where a constitutive law is implicit (§1); and Modelica's stream
 connectors are the strongest existing precedent for carrying enthalpy
 and species *with* the flow, matching the advection-matrix construction in §2.
 
@@ -418,15 +420,15 @@ edges and NO airpath edge: it is an unknown of the thermal layer and not of a sp
 over the same network, which is why a layer's active interior is per layer rather than
 global.
 
-**Why a drive is a function of the drivers alone.** The airflow solve is a nodal problem
+**Why a head is a function of the drivers alone.** The airflow solve is a nodal problem
 $A f(A^\top \phi + d) = s$ whose Jacobian is $A \operatorname{diag}(f') A^\top$. It is the branch head $d$ (the
 stack and wind terms) NOT depending on $\phi$ that buys this form, and with it the symmetry;
 positive definiteness then follows from the element slopes $f' > 0$ and from the network
 being grounded (a boundary node, so $A^\top$ has trivial null space), which are separate
 requirements the layer checks separately. Making $d$ a function of the thermal STATE would
 not disturb any of that -- $\phi$ is still the only unknown of the solve -- but making it a function of $\phi$ or of $f$ would, and
-a drive that closed over the flow it produces (say, an upstream density evaluated from the
-flow direction) is exactly such a term. The framework therefore defines a `Drive` as a
+a head that closed over the flow it produces (say, an upstream density evaluated from the
+flow direction) is exactly such a term. The framework therefore defines a head term as a
 function of the DRIVERS only: the node densities entering a stack head are computed from the
 temperatures held fixed for the duration of the pass, and any flow-direction dependence lives
 inside the ELEMENT, where it enters $f'$ and keeps the Jacobian symmetric (this is what
@@ -435,7 +437,7 @@ not work: a closure runs before the solve and cannot see the flow direction). CO
 previous thermal update within an airflow solve -- so matching CONTAM's numbers is partly a
 consequence of matching this convention, not only of matching its element laws.
 
-**Ping-pong and onion (Hensen 1995; Dols and Emmerich 2016).** Since drives are frozen for
+**Ping-pong and onion (Hensen 1995; Dols and Emmerich 2016).** Since heads are frozen for
 the pass, airflow and heat exchange information only BETWEEN passes, and there are two ways
 to spend passes within one time step. **Ping-pong** takes exactly one: solve the airflow at
 the temperatures at the start of the step, advance the temperatures on those flows, and move
@@ -505,7 +507,7 @@ the non-crossing fill below) plus a roof closure (`node_closure`, MUNICH's roof-
 correction, which lands asymmetrically on the side needed to keep every one of a junction's
 in/out totals matched, per `StreetNetworkTransport.cxx:2980-3014`). The result is written
 straight onto the `route`/`vent`/`exchange` edges of the `TransportLayer` as this step's
-flow, exactly like a `Drive`, before that layer's own solve runs at all.
+flow, exactly like a head, before that layer's own solve runs at all.
 
 **Why every `route`, `vent` and `exchange` flow is non-negative, with direction living in
 the topology.** Each of these three edge kinds is added to the graph in BOTH directions
@@ -661,7 +663,7 @@ the rule that no per-step path loops in Python. The pipe carrying each
 manhole's outflow is found by which pipe drains INTO that manhole's own outfall, never
 assumed to be the last pipe read from the file, because the reader's pipe order is whatever
 order the `.inp` lists conduits in, not necessarily the order the tree drains in;
-and the headspace `Stack` buoyancy drive's `z_path` on a `headspace` edge is the pipe's
+and the headspace `Stack` buoyancy head's `z_path` on a `headspace` edge is the pipe's
 CROWN elevation -- the mean of its two end inverts plus its own diameter -- not the mean
 invert alone, which is only the pipe's invert at its midpoint. A forest of more
 than one tree is supported on both the water and air sides: each component gets
@@ -675,25 +677,25 @@ does not, because `ambient` has no `ground` attribute of its own and so falls ba
 `0.0` datum rather than to the manhole's; the same `0.0` is used identically at the outfall's
 open-air edge and at `ambient`'s own fixed boundary condition (`air.phi_boundary = 0`), so
 every air pressure in the solve is shifted by the same constant -- `air.phi` is
-DATUM-REFERENCED to this convention, not to a physical zero, and every drive, refusal and
+DATUM-REFERENCED to this convention, not to a physical zero, and every head, refusal and
 verification row reads only DIFFERENCES between manholes, which the convention leaves
 unaffected.
 
-**The headspace momentum balance, and the `Drive`-cannot-see-`phi` rule.** Air in the
+**The headspace momentum balance, and the head-cannot-see-`phi` rule.** Air in the
 headspace above the flow is driven by three terms per pipe: Darcy-Weisbach wall
 friction on the air itself, buoyancy from the density difference between a warm manhole
-shaft and ambient (the SAME `Stack` drive the building application's stack effect uses, one
+shaft and ambient (the SAME `Stack` head the building application's stack effect uses, one
 full-node air-density driver, `rho_air_nodes`), and drag from the moving water surface
-dragging the air along above it. That last term is written as a `Drive` --
+dragging the air along above it. That last term is written as a head term --
 $D = \tfrac{1}{2} f_i\, \rho_{\text{air}} U_s \lvert U_s \rvert\, T L / A_{\text{air}}$ in the ABSOLUTE water-surface velocity $U_s$, not the
-physically more complete relative form $(U_s - V_{\text{air}})$ -- because a `Drive` is a function of
+physically more complete relative form $(U_s - V_{\text{air}})$ -- because a head is a function of
 the drivers alone and is never allowed to read the layer's own solved potential $\phi$
-(§1, `drives.py`): letting the drag depend on the air's own flow would put a term into the
+(§1, `heads.py`): letting the drag depend on the air's own flow would put a term into the
 Newton residual that the Jacobian $A \operatorname{diag}(g') A^\top$ does not account for, silently breaking
 the solver's own convergence theory. The absolute form is therefore not a simplification of
-convenience but the one shape the framework's `Drive` protocol admits; the relative form
+convenience but the one shape the framework's `HeadTerm` protocol admits; the relative form
 would need an element-side formulation (a batched monotone root on
-$R \lvert Q \rvert Q - \tfrac{1}{2} f_i\, \rho\, (U_s - Q/A)^2\, T L / A_{\text{air}} = \Delta p$) rather than a drive.
+$R \lvert Q \rvert Q - \tfrac{1}{2} f_i\, \rho\, (U_s - Q/A)^2\, T L / A_{\text{air}} = \Delta p$) rather than a head.
 
 **The two-film coupling, and its lagged pass.** Total sulfide in the water and H₂S in the
 headspace air are two separate `TransportLayer` species, coupled by one closure,

@@ -279,7 +279,9 @@ class PumpCurve(ConstitutiveLaw):
         head_safe = torch.where(shut, torch.full_like(head, dpt), head)
         sharp = (w / (self.n * self.r * w**2)) * (head_safe / self.r) ** (1.0 / self.n - 1.0)
         q_t = w * (torch.full_like(head, dpt) / self.r) ** (1.0 / self.n)
-        laminar = torch.where(head > 0.0, q_t / (dpt * w**2), torch.zeros_like(head))
+        # `/ dpt / w**2`, not `/ (dpt * w**2)`: with a float32 `speed` (a Python float given)
+        # the product would round `dpt` to float32, 2.5e-9 off the flow's own slope.
+        laminar = torch.where(head > 0.0, q_t / dpt / w**2, torch.zeros_like(head))
         return self._status(dp, drivers) * torch.where(shut, laminar, sharp)
 
     def head_gain(self, q: Tensor, gradient_floor: float, closed_slope: float) -> Tensor:
@@ -726,7 +728,7 @@ class FlowControlledPipe(ImplicitLaw):
 
     The potential form inverts ``h`` (``q = g(dp)``), whose slope grows without bound as the
     flow goes to zero; the resistance form's slope goes to zero there instead, which the
-    Modified Nodal Analysis system carries as a small diagonal entry. A Hazen-Williams pipe
+    solve with flow unknowns carries as a small diagonal entry. A Hazen-Williams pipe
     keeps EPANET's ``RQtol`` floor on that slope (``gradient_floor``, m per m^3/s), so a
     loop of pipes at zero flow still has a nonsingular Jacobian.
     """
@@ -792,41 +794,3 @@ class FlowControlledPump(ImplicitLaw):
         status = self.pump._status(dp, drivers)
         gain = self.pump.head_gain(q, self.gradient_floor, self.closed_slope)
         return status * (dp + gain) + (1.0 - status) * q
-
-
-class TankStorage(ImplicitLaw):
-    """A cylindrical tank as storage (`build_model(tank_mode="storage")`): an edge from the
-    tank's node to a datum at head 0, so that ``dp`` is the tank's head times ``scale`` and
-    the edge's flow is the net inflow into the tank. The volume above the datum changes by
-    ``A dH``, so in a step of ``dt``:
-
-    - backward Euler: ``q = A (H - H_prev) / dt``;
-    - trapezoidal: ``q + q_prev = 2 A (H - H_prev) / dt``;
-
-    with ``H = dp / scale``. ``mode="initial"`` holds the head at ``head0`` (the tank's
-    bottom plus its initial level, m); ``mode="dc"`` is a closed tank (no inflow). EPANET
-    itself steps the level explicitly (`build_model`'s default ``tank_mode="explicit"``);
-    this implicit form differs from it by the step's own discretisation error and is
-    differentiable through time.
-    """
-
-    dynamic = True
-    linear = True
-
-    def __init__(self, area, head0, *, scale: float = 1.0, kind: str = "tank") -> None:
-        super().__init__(kind)
-        self.area = self._param(area, False)
-        self.head0 = self._param(head0, False)
-        self.scale = float(scale)
-
-    def residual(self, dp, q, drivers, ctx):
-        if ctx.mode == "dc":
-            return q
-        if ctx.mode == "initial":
-            return dp - self.scale * self.head0
-        if ctx.mode != "transient":
-            raise ValueError(f"tank kind {self.kind!r}: mode {ctx.mode!r} is not supported")
-        rise = self.area / self.scale * (dp - ctx.dp_prev) / ctx.dt
-        if ctx.integration == "backward_euler":
-            return q - rise
-        return q + ctx.q_prev - 2.0 * rise

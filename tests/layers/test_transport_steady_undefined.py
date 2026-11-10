@@ -23,7 +23,7 @@ def _room(removal=None):
     net.add_edge("ambient", "room", kind="air")
     net.add_edge("room", "ambient", kind="air")
     layer = TransportLayer(net, "c", capacity=torch.tensor([M_ROOM], dtype=F64),
-                           flow_kind="air", boundary=["ambient"], scheme="implicit",
+                           flow_kind="air", boundary=["ambient"], scheme="backward_euler",
                            removal=removal)
     return layer
 
@@ -68,7 +68,7 @@ def test_a_closed_loop_with_no_exit_is_refused_naming_its_rooms():
     net.add_edge("ambient", "c", kind="air")
     net.add_edge("c", "ambient", kind="air")
     layer = TransportLayer(net, "species", capacity=torch.full((3,), M_ROOM, dtype=F64),
-                           flow_kind="air", boundary=["ambient"], scheme="implicit")
+                           flow_kind="air", boundary=["ambient"], scheme="backward_euler")
     q = torch.tensor([0.1, 0.1, 0.05, 0.05], dtype=F64)
     with pytest.raises(UndefinedSteadyState, match=r"\['a', 'b'\] form a closed group") as err:
         layer.steady(q, torch.zeros(4, dtype=F64), torch.tensor([1e-3], dtype=F64))
@@ -85,7 +85,7 @@ def test_a_filter_loss_is_an_exit():
     net.add_edge("b", "a", kind="air")
     net.add_edge("ambient", "a", kind="air")    # inactive at q=0; keeps 'ambient' a boundary
     layer = TransportLayer(net, "c", capacity=torch.full((2,), M_ROOM, dtype=F64),
-                           flow_kind="air", boundary=["ambient"], scheme="implicit",
+                           flow_kind="air", boundary=["ambient"], scheme="backward_euler",
                            transmission=torch.tensor([0.5, 1.0, 1.0], dtype=F64))
     q = torch.tensor([0.1, 0.1, 0.0], dtype=F64)
     s = 1e-6
@@ -120,7 +120,7 @@ def _chain(n):
     net.add_edge(n - 1, "ambient", kind="air")
     net.add_edge(n - 1, 0, kind="air")
     return TransportLayer(net, "c", capacity=torch.full((n,), M_ROOM, dtype=F64),
-                          flow_kind="air", boundary=["ambient"], scheme="implicit")
+                          flow_kind="air", boundary=["ambient"], scheme="backward_euler")
 
 
 def test_a_deep_chain_is_searched_per_batch_member():

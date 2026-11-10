@@ -20,7 +20,7 @@ from noodl.apps.building_physics import (
     initial_state,
     orifice_law_from_edges,
 )
-from noodl.drives import Stack
+from noodl.heads import Stack
 from noodl.topology import Network
 
 F64 = torch.float64
@@ -97,7 +97,7 @@ def _house(fo=0.3, supply=0.1, plenum_volume=0.0, *, balanced=True, free=None,
         free = plenums if plenum_volume == 0.0 else ()
     model = build_model(net, air_laws=[orifice_law_from_edges(net, "airpath"),
                                            element],
-                        drives=[Stack.from_network(net, "airpath")], thermal=thermal,
+                        heads=[Stack.from_network(net, "airpath")], thermal=thermal,
                         species=1, closures=[closure],
                         flow_balanced=plenums if balanced else (), storage_free=free)
     state = initial_state(model)
@@ -178,9 +178,9 @@ def test_zero_volume_plenums_carry_heat_algebraically():
     plenums = air_handler_plenums(net, "air_handler")
     model = build_model(net, air_laws=[orifice_law_from_edges(net, "airpath"),
                                            element],
-                        drives=[Stack.from_network(net, "airpath")], closures=[closure],
+                        heads=[Stack.from_network(net, "airpath")], closures=[closure],
                         flow_balanced=plenums, storage_free=plenums)
-    assert model.transport["thermal"].scheme == "implicit"
+    assert model.transport["thermal"].scheme == "backward_euler"
     T = model.step(initial_state(model), initial_drivers(model), DT)["thermal.x"]
     rows = model.transport["thermal"].interior_idx.tolist()
     T_room, T_supply, T_return = (T[rows.index(net.node_index(n))].item()
@@ -252,7 +252,7 @@ def test_a_pressure_dependent_edge_on_a_flow_balanced_plenum_is_refused():
     with pytest.raises(ValueError, match=r"flow_balanced node 'ahs_supply' is an end of the "
                                          r"edge 'room' -> 'ahs_supply' of kind 'airpath'"):
         build_model(net, air_laws=[orifice_law_from_edges(net, "airpath"), element],
-                    drives=[Stack.from_network(net, "airpath")], thermal=False, species=1,
+                    heads=[Stack.from_network(net, "airpath")], thermal=False, species=1,
                     closures=[closure], flow_balanced=plenums, storage_free=plenums)
 
 
@@ -275,7 +275,7 @@ def test_a_fixed_flow_on_a_flow_balanced_plenum_is_refused():
         build_model(net, air_laws=[orifice_law_from_edges(net, "airpath"),
                                        FixedFlow(torch.tensor(0.01, dtype=F64), kind="fan"),
                                        element],
-                    drives=[Stack.from_network(net, "airpath")], thermal=False, species=1,
+                    heads=[Stack.from_network(net, "airpath")], thermal=False, species=1,
                     closures=[closure], flow_balanced=plenums, storage_free=plenums)
 
 

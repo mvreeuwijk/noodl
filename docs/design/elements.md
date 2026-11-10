@@ -1,6 +1,6 @@
 # Elements and components: where the evidence lives
 
-The audit of `src/noodl/elements`, `noodl.nodesources` and `src/noodl/components` for issue #22
+The audit of `src/noodl/elements`, `noodl.withdrawals` and `src/noodl/components` for issue #22
 S06 found no benchmark numbers, timings or implementation narratives in those files. What the
 code carries is mathematics, invariants and engine-parity facts, and these stay in the source.
 

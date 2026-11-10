@@ -59,7 +59,7 @@ from noodl.apps.building_physics import (
     Zone, add_zone, build_model, initial_drivers, initial_state,
 )
 from noodl.apps.building_physics.elements import add_large_opening, orifice_law_from_edges
-from noodl.drives import Stack
+from noodl.heads import Stack
 from noodl.topology import Network
 
 # 1. Configure
@@ -72,7 +72,7 @@ net.add_edge("ambient", "B", kind="airpath", z_path=0.2, Cd=0.6, area=0.05)
 net.add_edge("ambient", "B", kind="airpath", z_path=1.8, Cd=0.6, area=0.05)
 model = build_model(
     net, air_laws=[orifice_law_from_edges(net, "airpath")],
-    drives=[Stack.from_network(net, "airpath")], species=("co2",),
+    heads=[Stack.from_network(net, "airpath")], species=("co2",),
     coupling="iterate", iterate_tol={"thermal": 0.01}, iterate_max=50,
 )
 
@@ -93,6 +93,11 @@ T = th.temperature.named(state[th.temperature])
 print({room: round(float(value), 2) for room, value in T.items()})
 ```
 
+The stack and wind pressures of the air edges are the driver `"air.edge_head"`, which the
+model's `EdgeHeads` closure writes on every pass. `step`, `steady`, `check` and `simulate` run
+the closures first; a direct `model.kirchhoff["air"].solve(...)` on the raw drivers has no
+head, so apply the model's closures before it.
+
 ```text
 {'A': 304.13, 'B': 300.93}
 ```
@@ -111,7 +116,7 @@ solving the old graph; construct the layers and model again.
   potential (pressure, head) and the flows it drives; a *transport* layer carries a
   quantity (temperature, mass fraction, concentration) on those flows; an *allocation*
   layer moves requested amounts between stores within capacity limits.
-- **Constitutive laws and drives.** The law on each kind of edge (an orifice, a pipe, a pump) and
+- **Constitutive laws and heads.** The law on each kind of edge (an orifice, a pipe, a pump) and
   the terms added to its potential difference (stack effect, wind, fans).
 - **Closures.** Functions of the state that compute inputs each step: the air density from
   the temperature, the street flows from the wind, the sewer flows from the inflows. Their
@@ -133,7 +138,7 @@ named for the physics it carries:
 |---|---|---|---|
 | `.pressure`, `.head` (Kirchhoff layers) | `"<layer>.phi"` | state | full node order |
 | `.flow` | `"<layer>.q"` | state (driver for a transport layer whose flows nothing solves) | edge order of the layer's kinds |
-| `.boundary_pressure`, `.boundary_head` | `"<layer>.phi_boundary"` | driver | the layer's boundary order |
+| `.boundary_pressure`, `.boundary_head` | `"<layer>.phi_boundary"` | driver | the layer's boundary order, without the storage nodes a forward-Euler layer holds (`layer.prescribed`) |
 | `.temperature`, `.mass_fraction`, `.concentration` | `"<layer>.x"` | state | the layer's active interior order |
 | `.boundary_temperature`, ... | `"<layer>.x_boundary"` | driver | the layer's boundary order |
 | `.sources` | `"<layer>.sources"` | driver | full node order |
@@ -182,8 +187,16 @@ shape and its unit.
 `model.step(state, drivers, dt)` returns the new state; call it in a loop, changing the
 drivers between steps as the inputs change. `model.steady(state, drivers)` returns the
 quasi-steady state instead (an allocation layer, which is a time-stepping rule, has none).
-Each potential solve starts from the state's last potentials (and a layer solved by Modified
-Nodal Analysis from its last implicit-law flows too); `warm_start=False` starts it
+
+`model.fixed_point(pass_fn, state, watch=[...], tol=...)` repeats any function of a state (a
+`steady` or a `step` plus a reaction, a boundary read off the previous pass) until the watched
+keys stop changing, and returns the last pass's state. It is what `street_steady`,
+`street_steady_with_plume` and `sewer_steady` run on, and its gradient is that of the fixed
+point (implicit adjoint), not of the unrolled passes, including through any unwatched key that
+feeds back from one pass to the next; `relaxation`, a per-instance `measure` and `diagnostics`
+are described in its docstring.
+Each potential solve starts from the state's last potentials (and a layer with flow unknowns
+from its last flows too); `warm_start=False` starts it
 from the layer's linear initial guess instead, while closures still read those potentials
 (a retry when a warm start does not converge). Non-convergence raises
 `noodl.solvers.ConvergenceError`, under either coupling (with `coupling="iterate"`, when the
@@ -209,6 +222,37 @@ print(sorted(flows)[:2])
 Edges are labelled by their `name` attribute when they have one (EPANET links, SWMM
 conduits, WSIMOD arcs, street names), otherwise by `(source, target)`, or `(source,
 target, key)` where two edges join the same nodes.
+
+## Marching over a time grid
+
+`model.march(state, drivers, times)` is the loop over `model.step` for a time grid: step `k`
+goes from `times[k]` to `times[k+1]`, and the result is a dictionary holding `"time"` and
+every layer state the start state carries (`.phi`, `.q`, `.x`, `.storage_flow`, `.capacity`),
+every state key a closure carries (a pump's status, a manhole level), and the storage flow of
+every Kirchhoff layer with storage, stacked on a new first axis, with the start state as row 0.
+When the start state has no storage flow, row 0 holds the layer's own with no step. It is
+differentiable through time as `step` is.
+
+```py
+history = model.march(
+    state, drivers, times,
+    restarts={0},                                # steps taken by backward Euler
+    drivers_at=lambda t0, t1: drivers_of(t1),    # drivers of the step t0 -> t1
+    record=[0, 10, 20],                          # keep only these indices into times
+)
+```
+
+`restarts` names the steps taken by backward Euler: every Kirchhoff layer that steps
+something inside its solve (storage at interior nodes, dynamic laws) and every transport layer
+whose own scheme is `"trapezoidal"` is stepped by backward Euler, which damps the ringing the
+trapezoidal rule shows after a first step or a source discontinuity. A Kirchhoff layer whose
+storage sits at boundary nodes keeps its forward Euler, and layers with the `"exact"` scheme
+are untouched. On the other
+steps each layer takes its own scheme. `drivers_at` gives the drivers of each interval when
+they change in time, `diagnostics["schemes"]` the scheme of each step. The electrical
+`transient` and the Modelica electrical reader's `simulate_circuit` are this loop; the building
+application's `simulate` stays its own march (step-mean inputs, controls held over passes,
+breakpoint sub-steps, the zone-pressure loop).
 
 ## Batches and gradients
 
@@ -266,7 +310,7 @@ reports:
 - A table of every key the model knows: role, required or optional, order, expected
   shape, unit, and what was given.
 
-The inputs the closures, reactions, laws and drives read themselves are declared too,
+The inputs the closures, reactions, laws and head terms read themselves are declared too,
 in `model.refs.inputs`: the street model's wind speed, direction and boundary-layer depth
 (one value per instance, or one per street with `meteo="per_street"`), the sewer's inflow
 per manhole and its temperatures, CONTAM's node densities and wind, the chemistry's
@@ -285,7 +329,7 @@ print(model.refs.inputs["P_ref"].describe())
 
 A key the model knows nothing about — a custom closure's own input — is **not** rejected.
 `model.check(state, drivers, dt=600.0, probe=True)` runs one step on copies, recording
-which keys the closures, layers, laws and drives read, and reports any key nothing
+which keys the closures, layers, laws and head terms read, and reports any key nothing
 read. Without a probe the check evaluates the closures once (no solve, no time step) to
 learn what they write, so an input a closure provides is not reported missing. A custom
 closure can declare its own inputs with an `input_specs` attribute,
@@ -305,7 +349,7 @@ for issue in model.check(state, drivers_typo).issues:
 ## Finding what is available
 
 The [catalogue](catalogue/core.md) lists, for the core library and for every application,
-each type it offers — builders, network components, constitutive laws, drives, closures,
+each type it offers — builders, network components, constitutive laws, heads, closures,
 reactions, sources, file readers and writers, functions and model options — with what it
 does and how to call it. It is generated from the code, so it is always complete.
 

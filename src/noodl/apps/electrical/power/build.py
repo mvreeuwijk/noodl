@@ -167,7 +167,7 @@ def _analyse(net: PowerNetwork, dc: bool) -> _Analysis:
                 f"PowerNetwork {net.name!r}: the branch in row {k + 1} of the branch table "
                 f"(from bus {br.from_bus} to bus {br.to_bus}) has x * tau = "
                 f"{br.x * (br.ratio or 1.0)!r} (reactance x, tap ratio tau); the DC power "
-                f"flow on the classic layer needs positive branch susceptance 1 / (x tau)"
+                f"flow's conductance layer needs positive branch susceptance 1 / (x tau)"
             )
 
     parent = {b.id: b.id for b in net.buses}
@@ -229,7 +229,7 @@ def check_power_network(net: PowerNetwork, *, dc: bool = False) -> PowerFlowInde
     branch of zero impedance, `r = x = 0` for the AC power flow and `x = 0` for the DC one
     (`dc=True`; its 1-based row in the branch table and its from and to bus named); for the
     DC power flow an in-service branch of negative `x * tau` (reactance times tap ratio, 0
-    meaning 1), whose susceptance the classic layer's conductance cannot carry (named the
+    meaning 1), whose susceptance the DC layer's conductance cannot carry (named the
     same way); buses not connected to the slack bus through in-service branches (listed). A
     PV bus without an in-service generator is solved as PQ, as MATPOWER does.
     """

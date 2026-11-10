@@ -19,8 +19,8 @@ previous pass and the heat network at its heat, until both stop changing.
 
 The closure carries the sources as state (`state_keys`), so a step-start state holds the
 heat dissipated at its own time. A trapezoidal step of the heat layer then integrates the
-heat as the circuit's trapezoidal companion forms integrate their currents,
-`dt/2 (P_start + P_end)`; a backward Euler step (`scheme="implicit"`, the step after a
+heat as the circuit's trapezoidal capacitors and inductors integrate their currents,
+`dt/2 (P_start + P_end)`; a backward Euler step (`scheme="backward_euler"`, the step after a
 restart) takes `P_end` alone. Stepping the heat layer with the circuit's rule on every step
 (`Model.step(..., layer_options={"thermal": {"scheme": ...}})`) is the caller's part.
 """

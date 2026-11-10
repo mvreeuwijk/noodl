@@ -14,7 +14,7 @@ import torch
 
 from noodl.apps.building_physics.elements import add_large_opening, orifice_law_from_edges
 from noodl.apps.building_physics.thermal import Zone, add_zone, build_model, initial_state
-from noodl.drives import Stack
+from noodl.heads import Stack
 from noodl.topology import Network
 
 F64 = torch.float64
@@ -31,7 +31,7 @@ def build(coupling: str):
     net.add_edge("ambient", "B", kind="airpath", z_path=1.8, Cd=0.6, area=0.05)
     el = orifice_law_from_edges(net, "airpath")
     model = build_model(
-        net, air_laws=[el], drives=[Stack.from_network(net, "airpath")], coupling=coupling,
+        net, air_laws=[el], heads=[Stack.from_network(net, "airpath")], coupling=coupling,
         iterate_tol={"thermal": 0.01}, iterate_max=50,
     )
     sources = torch.zeros(net.n, dtype=F64)

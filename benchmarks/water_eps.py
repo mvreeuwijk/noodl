@@ -3,7 +3,8 @@
 Runs EPANET's own Example Network 1 for a full day with its two tank-level pump controls,
 using the EVENT-SHORTENED hydraulic step (EPANET 2.2 Manual section 13.1 item 17, p.113),
 run SEQUENTIALLY over 8 demand multipliers -- one model per multiplier, not a batched leading
-dimension. `TankLevels.event_step` shortens the step to each multiplier's OWN next
+dimension. `water_event_step` (one hydraulic solve per sub-step, the tank moved by
+forward Euler afterwards) shortens the step to each multiplier's OWN next
 control crossing, so the eight instances take a different number of sub-steps and land on
 different report times mid-run; a genuinely batched rollout would need a per-instance step
 (the sub-stepping loop below only ever advances one scalar `moment` at a time) or a
@@ -28,7 +29,7 @@ from pathlib import Path
 import torch
 
 from noodl.apps.water.inp import read_epanet_inp
-from noodl.apps.water.network import build_model, tank_inflow, water_steady
+from noodl.apps.water.network import build_model, tank_levels, water_event_step
 
 F64 = torch.float64
 DATA = Path(__file__).resolve().parents[1] / "tests" / "data" / "water"
@@ -45,9 +46,8 @@ def _pattern_factor(net, seconds: float) -> float:
 def _run(net, multiplier: float, pipe_form: str = "potential") -> tuple[list[float], int, int]:
     """One instance's 24 h trajectory, its sub-step count and its most Newton iterations."""
     model, state, drivers = build_model(net, pipe_form=pipe_form)
-    closure = model.tank_closure
     base = drivers["water.sources"].clone() * multiplier
-    levels = [float(state["water.tank_level"][0])]
+    levels = [float(tank_levels(model, state)[0])]
     moment = 0.0
     sub_steps = 0
     most = 0
@@ -57,20 +57,12 @@ def _run(net, multiplier: float, pipe_form: str = "potential") -> tuple[list[flo
             step_drivers = dict(drivers)
             step_drivers["water.sources"] = base * _pattern_factor(net, moment)
             diagnostics: dict = {}
-            solved = water_steady(model, state, step_drivers, diagnostics=diagnostics)
+            state, step = water_event_step(model, state, step_drivers, report_end - moment,
+                                           diagnostics=diagnostics)
             most = max(most, diagnostics["layers"]["water"]["newton_iterations"])
-            inflow = tank_inflow(model, solved)
-            rate = inflow / closure.area
-            step = closure.event_step(
-                state["water.tank_level"], rate, report_end - moment
-            )
-            state = dict(solved)
-            state["water.tank_level"] = closure.advance(
-                state["water.tank_level"], inflow, step
-            )
             moment += step
             sub_steps += 1
-        levels.append(float(state["water.tank_level"][0]))
+        levels.append(float(tank_levels(model, state)[0]))
     return levels, sub_steps, most
 
 

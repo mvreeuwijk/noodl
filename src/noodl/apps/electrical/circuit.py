@@ -7,11 +7,14 @@ two-port device (transformers, controlled sources) is two consecutive edges, por
 boundary node, held at 0 V.
 
 The builder groups the devices by kind, one constitutive law per kind carrying all of its
-devices with per-device parameters, in a single `KirchhoffLayer` named `"electrical"`
-solved by Modified Nodal Analysis. Device parameters are scalars (a float or a 0-d tensor);
-gradients reach the laws' parameters (`build_model(..., learnable=True)`), and an ensemble
-of circuits is a batch of drivers (a `Signal` source, a switch control, a resistor
-temperature), not of device parameters.
+devices with per-device parameters, in a single `KirchhoffLayer` named `"electrical"`, whose
+sources and dynamic devices add their currents as unknowns. A capacitor with one pin on the
+ground is not an edge: it is a `LinearStorage` at its other pin (its current is
+`"electrical.storage_flow"`); a capacitor between two other nodes is an edge
+(`Capacitance`), as every capacitor of a phasor model is. Device parameters are scalars (a
+float or a 0-d tensor); gradients reach the laws' parameters (`build_model(...,
+learnable=True)`), and an ensemble of circuits is a batch of drivers (a `Signal` source, a
+switch control, a resistor temperature), not of device parameters.
 """
 
 from __future__ import annotations
@@ -38,6 +41,7 @@ from noodl.apps.electrical.waveforms import Constant, _Waveform
 from noodl.elements import Conductance, ConstitutiveLaw
 from noodl.layers.kirchhoff import KirchhoffLayer
 from noodl.model import Model
+from noodl.storage import LinearStorage
 from noodl.topology import Network
 
 Tensor = torch.Tensor
@@ -242,6 +246,20 @@ def _ports(device) -> list[tuple[str, str]]:
     return [(device.p, device.n)]
 
 
+def _grounded_capacitor(device, circuit: Circuit, phasor: bool) -> tuple[str, float] | None:
+    """`(node, sign)` when `device` is a capacitor with exactly one pin on the ground in a
+    time-domain model, else `None`: `node` is the other pin, and `sign` is `+1` when the
+    ground is pin `n` (the capacitor's voltage is the node's potential) and `-1` when it is
+    pin `p`."""
+    if phasor or not isinstance(device, Capacitor) or device.p == device.n:
+        return None
+    if device.n == circuit.ground:
+        return device.p, 1.0
+    if device.p == circuit.ground:
+        return device.n, -1.0
+    return None
+
+
 def _pin_names(device) -> list[str]:
     return ["p1", "n1", "p2", "n2"] if isinstance(device, _TWO_PORT) else ["p", "n"]
 
@@ -422,6 +440,14 @@ def build_model(
     flows `"electrical.q"` are ordered by kind, then by device; `model.circuit_index` maps
     each device name to `(kind, slice)`, the slice of its edges in that order.
 
+    A capacitor with one pin on the ground becomes a `LinearStorage` at its other pin (in
+    device order, `layer.storage[0]`, its `C` the learnable parameter) and not an edge; the
+    layer's `"electrical.storage_flow"` holds its current (the current entering pin `p`, for
+    pin `n` on the ground), and `model.circuit_storage` maps its name to
+    `(entry, p, n, sign)`: the entry in `storage_flow`, the node positions of its pins, and
+    the sign of that entry in the capacitor's current. A phasor model keeps every capacitor
+    as an edge.
+
     `phasor=True` builds the AC (sinusoidal steady-state) model at `frequency` (Hz, a
     scalar or one value per instance), returned as the driver `"electrical.frequency"`; the
     layer's frequency governs, a `Sine` source's own frequency is not used there. A
@@ -447,14 +473,26 @@ def build_model(
     for node in circuit.nodes:
         net.add_node(node)
     groups: dict[str, list] = {}
+    grounded: list[tuple[Capacitor, str, float]] = []
     for d in circuit.devices:
+        found = _grounded_capacitor(d, circuit, phasor)
+        if found is not None:
+            grounded.append((d, *found))
+            continue
         kind = _kind(d)
         groups.setdefault(kind, []).append(d)
         for u, v in _ports(d):
             net.add_edge(u, v, kind=kind)
     laws = [_law(kind, devices, temperature, learnable) for kind, devices in groups.items()]
+    storage = []
+    if grounded:
+        caps = [d for d, _, _ in grounded]
+        storage = [LinearStorage(
+            [net.nodes.index(node) for _, node, _ in grounded], _values(caps, "C"),
+            initial=torch.stack([torch.as_tensor(d.v0 * sign, dtype=F64)
+                                 for d, _, sign in grounded]), learnable=learnable)]
     layer = KirchhoffLayer(net, LAYER, laws, boundary=[circuit.ground], phasor=phasor,
-                           quantity="voltage", unit="V", flow_unit="A")
+                           quantity="voltage", unit="V", flow_unit="A", storage=storage)
     model = Model(net, [layer])
     index: dict[str, tuple[str, slice]] = {}
     for kind, devices in groups.items():
@@ -464,6 +502,9 @@ def build_model(
             index[d.name] = (kind, slice(start, start + width))
             start += width
     model.circuit_index = index
+    model.circuit_storage = {
+        d.name: (k, net.nodes.index(d.p), net.nodes.index(d.n), sign)
+        for k, (d, _, sign) in enumerate(grounded)}
     dtype = torch.complex128 if phasor else F64
     drivers: Drivers = {f"{LAYER}.phi_boundary": torch.zeros(1, dtype=dtype)}
     if phasor:

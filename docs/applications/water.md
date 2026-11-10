@@ -53,7 +53,7 @@ through the pipes, and any tracer injected with it is `quality.sources` (kg/s). 
 with the reservoir at 100, an injection of 0.005 m³/s and 0.1 kg/s at A and a withdrawal of
 0.01 m³/s at B, both junctions read (0.005 × 100 + 0.1) / 0.01 = 60, and the tracer withdrawn
 equals the tracer supplied. A STAGNANT node (no inflow and no outflow, e.g. a dead end whose delivered demand is zero under `pda=True` because the pressure is below the minimum) has no steady concentration without decay: `water_steady` raises `UndefinedSteadyState` naming the node and the cause, as the transport layer does for any stagnant node (a steady solve never invents a value). With a bulk decay (`quality > 0`) the node reads 0; or step the quality in time from an initial concentration. Quality advects through every hydraulic edge kind: pipes, pumps and valves. A pressure-driven model (`pda=True`)
-refuses both `demand=` and a `water.sources` value, since its demands are node sources set
+refuses both `demand=` and a `water.sources` value, since its demands are withdrawals set
 at build time:
 
 ```python
@@ -69,8 +69,10 @@ print(round(float(water.head.named(final[water.head])["J2"]), 6))
 ```
 
 In the dictionaries the heads are `"water.phi"` (full node order) and the flows `"water.q"`
-(link order); tank levels and pump status are the state keys `"water.tank_level"` and
-`"water.link_status"`, set by tank and pump name with `initial_state(model, values=...)`.
+(link order); a tank's level is its head in `"water.phi"` less its bottom (`tank_levels`),
+and pump status is the state key `"water.link_status"`. Both are set by tank and pump name with
+`initial_state(model, values=...)`, the levels under the key `"water.tank_level"`, which
+`initial_state` reads and writes into the tank heads (it is no state key).
 See [Using noodl](../usage.md).
 
 `twoloop()` is a hand-built network: reservoir `R1` at 50 m, six junctions with demands
@@ -122,9 +124,9 @@ model, state, drivers = build_model(
 
 `pipe_form` is how the pipes enter the solve. In the **resistance form** (`"flow"`, the default
 except with `friction="colebrook"`) each pipe is `dp = h(q)` (`FlowControlledPipe`) with its
-flow an unknown, solved by Modified Nodal Analysis from EPANET's own first iterate (every pipe
+flow an unknown, solved from EPANET's own first iterate (every pipe
 at 1 ft/s). In the **potential form** (`"potential"`) each pipe's flow is the inverted law
-$q = g(dp)$ on the nodal path. Both give the same solution to round-off; they differ in how
+$q = g(dp)$, with no flow unknowns. Both give the same solution to round-off; they differ in how
 Newton gets there. The potential form's slope grows without bound as a pipe's flow goes to
 zero, so on Net1's 24 h run the step where a control closes the pump and leaves pipe 10
 dead-ended needs 136 Newton iterations; the resistance form's slope goes to EPANET's `RQtol`
@@ -138,7 +140,12 @@ flow exactly zero) from `model.initial_flows`, and the pumps from their design f
 own first iterate), then checks
 every converged pump's flow against its own `q_max()` and raises naming the pump and batch
 instance if it is exceeded — rather than silently accepting an extrapolated point off the end of
-the curve.
+the curve. The flows are seeded rather than left to the layer's fallback ladder
+([When Newton fails](../concepts/solvers.md#when-newton-fails-the-fallback-ladder)): from zero
+flow every resistance-form pipe sits on its `RQtol` slope floor and the system is numerically
+singular, and so is its linear guess, which is taken at zero flow too; the storage ramp,
+starting from zero flow as well, does not get away from it (measured on Net1 and the two-loop
+network). From the seeded flows Newton needs 5 iterations.
 
 ## The physics
 
@@ -236,35 +243,48 @@ and a **GPV** (general purpose valve) follow EPANET 2.2's own coefficient routin
   that brackets $|q|$ (the first or last segment, extended, outside the curve), with
   $\operatorname{sgn}(0) = +1$.
 
-A network with either valve is solved by Modified Nodal Analysis (sparse LU); every other
-network stays on the nodal path. PRV and PSV, which switch status on the absolute head at
+A network with either valve has those valves' flows as unknowns (solved by sparse LU); every
+other device gives its flow from the head difference. PRV and PSV, which switch status on the absolute head at
 one end, are not modelled.
 
 ### Tanks and controls
 
-`TankLevels` is a `Model` closure declaring `state_keys = ("water.tank_level",
-"water.link_status")`. Its `__call__` applies controls and returns updated drivers; it does **not**
-advance the level. `advance(level, inflow, dt)` does that by explicit Euler,
-$H \mathrel{+}= q\,\Delta t / A$. `event_step(level, rate, dt)` implements EPANET's adaptive
+Every tank is a `LinearStorage` of its cross-section area $A$ in the water layer
+(`noodl.NodeStorage`); a tank is an ordinary node of `"water.phi"`, its level is its head less
+its bottom (`tank_levels`), and the flow into it is `"water.storage_flow"`, which `tank_inflow`
+returns. `build_model(tank_scheme=...)` chooses how the level moves.
+
+With the default `tank_scheme="forward_euler"` the tank steps by EPANET's own method. It is a
+boundary node of the layer, held at its step-start head through the hydraulic solve, and the
+step then moves it by explicit Euler, $H \mathrel{+}= q\,\Delta t / A$
+(`KirchhoffLayer.advance_storage`). The held head is the tank's in the step-start
+`"water.phi"`, which `Model` passes to the solve as `history`, so `"water.phi_boundary"` gives
+the reservoirs' heads only. `TankLevels` is a `Model` closure declaring
+`state_keys = ("water.link_status",)`. Its `__call__` applies the controls to the levels and
+returns updated drivers. `event_step(level, rate, dt)` implements EPANET's adaptive
 step-shortening to the next control crossing.
 
 That shortening is not optional. A fixed one-hour step was measured to diverge from EPANET by
 **2.07 m** on Net1, because the pump switches an hour late; with event shortening the same
 trajectory matches to **8.181e-5 m**.
 
-An extended-period run therefore looks like this:
+`water_event_step(model, state, drivers, dt_max)` takes one such step. It solves once
+(`water_steady`, with every tank held), shortens `dt_max` to the next control crossing at the
+solved inflow, moves the tanks, and returns `(state, dt)`. An extended-period run therefore
+looks like this:
 
 ```py
-for _ in range(steps):
+while t < duration:
     drivers["water.sources"] = base_demand * pattern_factor(t)
-    solved = water_steady(model, state, drivers)
-    inflow = tank_inflow(model, solved)
-    dt_eff = model.tank_closure.event_step(level, rate, dt)
-    level = model.tank_closure.advance(level, inflow, dt_eff)
+    state, dt = water_event_step(model, state, drivers, report_end - t)
+    t += dt
 ```
 
-**Tanks as storage.** `build_model(net, tank_mode="storage")` makes every tank an interior
-node with a `TankStorage` edge to a datum node `"_datum"` at head 0, its level stepped
+Gradients with respect to a tank's area (the storage's capacity `C`) reach the levels through
+the move of each step.
+
+**Tanks stepped inside the solve.** `build_model(net, tank_scheme="backward_euler")` (or
+`"trapezoidal"`) makes every tank an interior node instead, its level stepped
 implicitly inside the solve: backward Euler, $q = A\,(H - H_{\text{prev}})/\Delta t$, or
 trapezoidal. `water_step(model, state, drivers, dt)` takes one step (`Model.step`, with
 `water_steady`'s Newton defaults); `tank_levels(model, state)` reads the levels from the solved
@@ -277,8 +297,8 @@ distance from a fine explicit run. Its `event_step` never shortens a step below 
 implicit step lands just short of a projected crossing, and a far shorter step stalls Newton),
 and with steps as long as an hour a switch can land up to a step late, so sub-steps of a few
 minutes are the useful range. Not with `quality`: the combination is refused with a
-`ValueError` (a storage tank is an interior node joined to the datum by a storage edge, which
-the quality layer does not model as a well-mixed volume); use the default `tank_mode` for
+`ValueError` (a storage tank is an interior node with node storage, which
+the quality layer does not model as a well-mixed volume); use the default `tank_scheme` for
 water quality, where a tank is a quality boundary whose concentration the caller sets.
 A constant tracer is preserved (every junction stays at the source concentration) across both
 `pipe_form`s, TCV, PBV and GPV valves, tanks and `pda`, tested in `tests/apps/water`.
@@ -362,9 +382,9 @@ independent loop is a property of the cycle-space formulation, and it holds exac
 - **Water-quality tracing is verified on a single source only.** The TRACE check uses a
   network with one source, where the answer is 100 % everywhere it reaches; mixing of several
   traced sources has not been compared against EPANET.
-- **Tank area does not enter a single `water_steady` call.** Only the tank's head
-  (`bottom + level`) enters the steady solve, so gradients with respect to tank area come from
-  a time-stepped run (`TankLevels.advance`), not from the steady state.
+- **Tank area does not enter a single `water_steady` call.** Only the tank's head enters the
+  steady solve, so gradients with respect to tank area come from a time-stepped run
+  (`water_event_step`), not from the steady state.
 - **Tank level events are not batch-safe.** `TankLevels.event_step` indexes tanks along the
   first tensor dimension, so a batched `(B, n_tanks)` rollout with level-triggered controls
   gives wrong results. Run batched tank simulations one instance at a time.

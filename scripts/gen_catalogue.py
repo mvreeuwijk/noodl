@@ -1,7 +1,7 @@
 """Generate the component catalogue (`docs/catalogue/*.md`) from the code itself.
 
 One page per application plus one for the core library. Every public name (the module's
-`__all__`) is listed under its role -- set-up, network components, constitutive laws, drives,
+`__all__`) is listed under its role -- set-up, network components, constitutive laws, heads,
 closures, reactions, sources, waveforms, files, functions, constants -- with the first line of its
 docstring and its call signature. A name exported twice for one object is listed once, with
 its other names.
@@ -30,13 +30,14 @@ PAGES = [
     ("core", "Core library", None,
      ["noodl.topology", "noodl.model", "noodl.contracts", "noodl.layout", "noodl.refs",
       "noodl.validation", "noodl.layers",
-      "noodl.elements", "noodl.drives", "noodl.nodesources", "noodl.couple"],
+      "noodl.elements", "noodl.heads", "noodl.withdrawals", "noodl.storage",
+      "noodl.couple"],
      "The framework every application builds on: the network, the layers, the model, the "
-     "set-up helpers, and the general-purpose constitutive laws and drives."),
+     "set-up helpers, and the general-purpose constitutive laws and heads."),
     ("building_physics", "Building physics", "../applications/building_physics.md",
-     ["noodl.apps.building_physics", "noodl.elements", "noodl.drives"],
+     ["noodl.apps.building_physics", "noodl.elements", "noodl.heads"],
      "Multi-zone airflow, heat and contaminants (CONTAM's physics; CONTAM `.prj`/`.wth`, "
-     "EPW and Modelica Buildings Library readers). The airflow constitutive laws and drives a "
+     "EPW and Modelica Buildings Library readers). The airflow constitutive laws and heads a "
      "building uses come from the core library and are listed here too."),
     ("street_aq", "Street air quality", "../applications/street_aq.md",
      ["noodl.apps.street_aq"],
@@ -53,7 +54,7 @@ PAGES = [
     ("electrical", "Electrical circuits", "../applications/electrical.md",
      ["noodl.apps.electrical", "noodl.apps.electrical.modelica",
       "noodl.apps.electrical.power"],
-     "Electrical circuits by Modified Nodal Analysis: resistors, capacitors, inductors, "
+     "Electrical circuits: resistors, capacitors, inductors, "
      "sources and their waveforms, diodes, switches, transformers and controlled sources "
      "(Modelica Standard Library device laws); impedances, constant-power loads and power "
      "converters (Modelica Buildings Library laws); Joule heating into a thermal network; "
@@ -69,21 +70,23 @@ ROLES = [
     ("layer", "Layers and model", "The conservation layers and the model that steps them."),
     ("law", "Constitutive laws",
      "The relation between the flow through an edge and the potential difference across it."),
-    ("drive", "Drives", "Terms added to an edge's potential difference (stack, wind, fans)."),
+    ("head", "Heads", "Terms added to an edge's potential difference (stack, wind, drag)."),
     ("closure", "Closures",
      "Functions of the state that compute drivers each step (densities, flows, levels)."),
     ("reaction", "Reactions", "Transformations applied to transported species each step."),
-    ("source", "Sources", "Nodal sources and withdrawals."),
+    ("source", "Sources and storage", "Nodal sources, withdrawals and storage."),
     ("waveform", "Waveforms", "Time signals a source follows."),
     ("file", "Files", "Readers and writers of other tools' file formats."),
     ("class", "Other classes", "Supporting types."),
     ("function", "Functions", "Calculations and helpers."),
     ("constant", "Constants and tables", "Named values and option tables."),
     ("base", "Base classes (for extending)",
-     "Subclass these to add a constitutive law, drive, closure, reaction or node source; see "
+     "Subclass these to add a constitutive law, head term, closure, reaction, withdrawal or "
+     "node storage; see "
      "[Extending noodl](../development/extending.md)."),
 ]
-BASE_CLASSES = {"ConstitutiveLaw", "ImplicitLaw", "Drive", "Reaction", "NodeSource"}
+BASE_CLASSES = {"ConstitutiveLaw", "ImplicitLaw", "HeadTerm", "Reaction", "NodeWithdrawal",
+                "NodeStorage"}
 OPTION_MODULES = {"street_aq": "noodl.apps.street_aq.closures"}
 """Pages whose application has named model options: the module defining `OPTIONS` (option
 -> allowed values), `PRESETS` (preset -> its choices) and, in the docstring under
@@ -155,7 +158,8 @@ def _role(name: str, obj) -> str:
     from noodl.elements.base import ConstitutiveLaw
     from noodl.layers.reaction import Reaction
     from noodl.model import Model
-    from noodl.nodesources import NodeSource
+    from noodl.storage import NodeStorage
+    from noodl.withdrawals import NodeWithdrawal
 
     if name in SETUP_NAMES:
         return "setup"
@@ -170,7 +174,7 @@ def _role(name: str, obj) -> str:
             return "law"
         if issubclass(obj, Reaction):
             return "reaction"
-        if issubclass(obj, NodeSource) or name.endswith(("Source", "Sink")):
+        if issubclass(obj, (NodeWithdrawal, NodeStorage)) or name.endswith(("Source", "Sink")):
             return "source"
         if obj is Model or name.endswith("Layer") or name in {"Network", "Ports", "CoupledModel"}:
             return "layer"
@@ -184,10 +188,10 @@ def _role(name: str, obj) -> str:
                 params = [p for p in inspect.signature(call).parameters if p != "self"]
             except (TypeError, ValueError):
                 params = []
-            if params[:1] == ["drivers"] or name.endswith("Drive") or name in {
-                "Stack", "Wind", "WindProfile",
+            if params[:1] == ["drivers"] or name.endswith("Head") or name in {
+                "Stack", "DuctStack", "Wind", "WindProfile",
             }:
-                return "drive"
+                return "head"
             if params[:2] == ["state", "drivers"]:
                 return "closure"
         return "class"
@@ -297,7 +301,7 @@ def _attributes_section(modname: str) -> list[str]:
     mod = importlib.import_module(modname)
     lines = [
         "## Network attributes", "",
-        "What the builders, constitutive laws and drives read off `net.add_node(...)` and "
+        "What the builders, constitutive laws and heads read off `net.add_node(...)` and "
         "`net.add_edge(...)`, by name. Defined in `" + modname + "`.", "",
         "**Nodes**", "", "| Attribute | Meaning | Read by |", "|---|---|---|",
     ]

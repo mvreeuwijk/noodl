@@ -312,7 +312,7 @@ def test_implicit_scheme_is_first_order_in_dt():
     layer_exact = TransportLayer(net, "co2", capacity=cap, flow_kind="airpath",
                                   boundary=["ambient"], scheme="exact")
     layer_imp = TransportLayer(net, "co2", capacity=cap, flow_kind="airpath",
-                                boundary=["ambient"], scheme="implicit")
+                                boundary=["ambient"], scheme="backward_euler")
     q = torch.tensor([0.5, 0.5], dtype=torch.float64)
     c0 = torch.tensor([100.0], dtype=torch.float64)
     source = torch.tensor([2.0], dtype=torch.float64)
@@ -394,7 +394,8 @@ def test_implicit_preserves_positivity_where_trapezoidal_goes_negative():
     xb = torch.tensor([0.0], dtype=torch.float64)
 
     imp = TransportLayer(net, "x", capacity=cap, flow_kind="airpath", boundary=["ambient"],
-                          scheme="implicit", removal=torch.tensor([rate], dtype=torch.float64))
+                          scheme="backward_euler",
+                          removal=torch.tensor([rate], dtype=torch.float64))
     trap = TransportLayer(net, "x", capacity=cap, flow_kind="airpath", boundary=["ambient"],
                            scheme="trapezoidal", removal=torch.tensor([rate], dtype=torch.float64))
 
@@ -559,7 +560,7 @@ def test_a_boundary_linear_in_time_is_refused_by_the_other_schemes():
     net = flow_through_zone()
     q = torch.tensor([0.5, 0.5], dtype=torch.float64)
     c = torch.tensor([100.0], dtype=torch.float64)
-    for scheme in ("implicit", "trapezoidal"):
+    for scheme in ("backward_euler", "trapezoidal"):
         layer = TransportLayer(
             net, "co2", capacity=torch.tensor([1000.0]), flow_kind="airpath",
             boundary=["ambient"], scheme=scheme,
@@ -593,7 +594,7 @@ def test_boundary_values_pair_with_the_caller_s_boundary_order_not_node_order():
 
     cap = torch.tensor([600.0, 900.0], dtype=torch.float64)
     layer = TransportLayer(
-        net, "co2", capacity=cap, flow_kind="airpath", boundary=boundary, scheme="implicit",
+        net, "co2", capacity=cap, flow_kind="airpath", boundary=boundary, scheme="backward_euler",
     )
     q = torch.tensor([0.4, 0.4, 0.4], dtype=torch.float64)
     x_b = torch.tensor([800.0, 20.0], dtype=torch.float64)   # [inlet, outlet]
@@ -626,7 +627,7 @@ def _two_node_layer(capacity):
     net.add_edge("B", "C", kind="pipe")
     layer = TransportLayer(
         net, "c", capacity=torch.tensor(capacity, dtype=torch.float64),
-        flow_kind="pipe", boundary=[net.nodes[2]], scheme="implicit",
+        flow_kind="pipe", boundary=[net.nodes[2]], scheme="backward_euler",
     )
     return net, layer
 

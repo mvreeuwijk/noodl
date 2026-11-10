@@ -1,12 +1,17 @@
-"""Drive protocol: additive potential-difference terms added to an element's dp.
+"""Heads: the additive potential terms (stack, wind, drag) written once per solve.
 
-A drive is a function of the `drivers` mapping ONLY: it never
-sees the potential `phi`. The Newton Jacobian `A_I diag(g') A_I^T` is therefore exact and stays
-symmetric, which is what the SPD certificate and the conjugate-gradient path rely on. Anything a
-drive needs that depends on the state -- zone densities for a stack term -- is computed by a
-`Model` closure before the solve and written into `drivers`. CONTAM does the same: densities
-from barometric pressure and temperature before the iteration, no density-pressure term in the
-Jacobian (TN 1887r1 section 3.18, eq. 8-9).
+A head is a term added to an edge's potential difference: the buoyancy of a warm column of
+air, the wind pressure on an opening, the drag a flow exerts on the air around it. It is a
+function of the drivers only, never of the potential, so the Newton Jacobian stays exact and
+symmetric, which is what the SPD certificate and the conjugate-gradient path rely on. Anything
+a head needs that depends on the state, such as zone densities for a stack term, is computed
+by a `Model` closure before the solve and written into the drivers (CONTAM does the same:
+densities from barometric pressure and temperature before the iteration, TN 1887r1 section
+3.18, eq. 8-9). `EdgeHeads` is a `Model` closure that adds up the head terms
+of one potential layer and writes the total as the driver `"<layer>.edge_head"`, one value per
+edge in the layer's edge order. The layer adds it to every edge's potential difference once,
+so a buoyancy head is a driver, like wind speed, and it can carry a gradient to whatever
+parameter its closure reads.
 """
 
 from __future__ import annotations
@@ -17,32 +22,33 @@ from typing import Protocol, runtime_checkable
 
 import torch
 
+Tensor = torch.Tensor
+
 
 @runtime_checkable
-class Drive(Protocol):
-    """A drive must read every differentiable quantity from `drivers`, never own one.
+class HeadTerm(Protocol):
+    """One additive head on the edges of one kind, computed from the drivers only.
 
-    `KirchhoffLayer.solve(differentiable=True)` only threads gradients through
-    `Function.apply` for values reachable via `phi_boundary`, `sources`, `drivers`, and each
-    ConstitutiveLaw's own registered `nn.Parameter`s. A Drive instance is captured by closure inside
-    the differentiable solve, so any tensor it holds with `requires_grad=True` is invisible to
-    the backward pass; `KirchhoffLayer._require_threaded`
-    raises on that. Geometry and index tensors (no grad) may be held as attributes.
+    `kind` names the edge kind (one law of the layer); calling the term with the drivers
+    returns one value per edge of that kind, `(..., b_kind)`, in the potential's unit. An
+    optional `inputs` tuple lists the driver keys it reads. A term that holds tensors needs its
+    own `to(device=None, dtype=None)` method for `Model.to` to move them (the terms defined here
+    are moved without one).
     """
 
     kind: str
 
-    def __call__(self, drivers: Mapping[str, torch.Tensor]) -> torch.Tensor: ...
+    def __call__(self, drivers: Mapping[str, Tensor]) -> Tensor: ...
 
 
-def check_drive_signature(drive, *, where: str) -> None:
-    """Raise `TypeError` unless `drive` is callable as `drive(drivers)`.
+def _check_term_signature(term, *, where: str) -> None:
+    """Raise `TypeError` unless `term` is callable as `term(drivers)`.
 
-    Loud guard against the older `(phi, drivers)` form: a two-argument drive
-    would otherwise fail deep inside `KirchhoffLayer.dp` with an unattributed TypeError.
+    A loud guard against the older `(phi, drivers)` form, which would otherwise fail deep
+    inside the closure with an unattributed `TypeError`.
     """
     try:
-        sig = inspect.signature(drive.__call__)
+        sig = inspect.signature(term.__call__)
     except (TypeError, ValueError):  # builtins without a signature: nothing to check
         return
     positional = [
@@ -52,21 +58,105 @@ def check_drive_signature(drive, *, where: str) -> None:
     ]
     if len(positional) != 1:
         raise TypeError(
-            f"{where}: drive {type(drive).__name__} (kind {getattr(drive, 'kind', '?')!r}) "
-            f"must be callable as drive(drivers) -- a Drive is a function of the drivers "
-            f"mapping only; got parameters {positional}. A "
-            f"drive that used to take (phi, drivers) must drop phi."
+            f"{where}: head term {type(term).__name__} (kind {getattr(term, 'kind', '?')!r}) "
+            f"must be callable as term(drivers) -- a head is a function of the drivers "
+            f"mapping only; got parameters {positional}. A term that used to take "
+            f"(phi, drivers) must drop phi."
         )
 
 
-class ConstantDrive:
-    """A drive that reads a pre-computed, already batched value from `drivers`."""
+def _declared_inputs(term) -> tuple[str, ...] | None:
+    """The driver keys `term` declares in its `inputs`, or None when it declares none."""
+    try:
+        return tuple(term.inputs)
+    except AttributeError:
+        return None
+
+
+class EdgeHeads:
+    """Adds up head terms (stack, wind, drag, a head read from a driver) on the edges of one
+    potential layer and writes the total, in the layer's edge order, as the driver
+    `"<layer>.edge_head"`; the layer adds it to every edge's potential difference.
+
+    Terms are added in the order given, each into the columns of its own kind; an edge with
+    no term gets exactly zero. A term is refused at construction if its kind is not one of
+    the layer's kinds or if the law of that kind is dynamic (a capacitance or an inductance
+    carries no head). The closure keeps the layer's name, kind slices and edge count, not the
+    layer itself.
+    """
+
+    def __init__(self, layer, terms: Sequence[HeadTerm]) -> None:
+        self.layer_name = layer.name
+        self.slices = dict(layer._kind_slices)
+        self.width = len(layer.cols)
+        dynamic = {el.kind for el in layer._laws if el.dynamic}
+        self.terms = list(terms)
+        if not self.terms:
+            raise ValueError(
+                f"EdgeHeads for layer {self.layer_name!r}: no head terms were given"
+            )
+        for term in self.terms:
+            _check_term_signature(term, where=f"EdgeHeads for layer {self.layer_name!r}")
+            if term.kind not in self.slices:
+                raise ValueError(
+                    f"head term kind {term.kind!r} is not one of this layer's law kinds "
+                    f"{sorted(self.slices)} (layer {self.layer_name!r})"
+                )
+            if term.kind in dynamic:
+                raise ValueError(
+                    f"EdgeHeads for layer {self.layer_name!r}: kind {term.kind!r} has a "
+                    f"dynamic law, which may not carry a head (its step-start values are "
+                    f"the potential differences without one)"
+                )
+        self.outputs: tuple[str, ...] = (f"{self.layer_name}.edge_head",)
+        keys = [_declared_inputs(t) for t in self.terms]
+        self.inputs: tuple[str, ...] | None = (
+            None if any(k is None for k in keys)
+            else tuple(sorted({key for k in keys for key in k}))
+        )
+
+    def head(self, drivers: Mapping[str, Tensor]) -> Tensor:
+        """The total head on every edge of the layer, `(..., b_layer)`: zeros, plus each
+        term in its kind's columns. Refuses a term that returns the wrong width."""
+        total = None
+        for term in self.terms:
+            start, end = self.slices[term.kind]
+            value = term(drivers)
+            if value.ndim > 0 and value.shape[-1] != end - start:
+                raise ValueError(
+                    f"head term kind {term.kind!r} returned width {value.shape[-1]} but "
+                    f"the layer's {term.kind!r} block has {end - start} edges "
+                    f"(layer {self.layer_name!r})"
+                )
+            if total is None:
+                batch = value.shape[:-1] if value.ndim > 0 else ()
+                total = value.new_zeros(batch + (self.width,))
+            else:
+                batch = torch.broadcast_shapes(total.shape[:-1], value.shape[:-1])
+                if batch != total.shape[:-1]:
+                    total = total.expand(batch + (self.width,))
+            block = total[..., start:end] + value
+            total = torch.cat([total[..., :start], block, total[..., end:]], dim=-1)
+        return total
+
+    def __call__(self, state, drivers) -> dict[str, Tensor]:
+        return {self.outputs[0]: self.head(drivers)}
+
+
+class DriverHead:
+    """A head read from a driver: the pre-computed, already batched value `drivers[key]`,
+    one value per edge of `kind`."""
 
     def __init__(self, kind: str, key: str) -> None:
         self.kind = kind
         self.key = key
 
-    def __call__(self, drivers: Mapping[str, torch.Tensor]) -> torch.Tensor:
+    @property
+    def inputs(self) -> tuple[str, ...]:
+        """The driver keys this term reads."""
+        return (self.key,)
+
+    def __call__(self, drivers: Mapping[str, Tensor]) -> Tensor:
         try:
             return drivers[self.key]
         except KeyError as exc:
@@ -133,13 +223,18 @@ class Stack:
             rho = drivers[self.rho_key]
         except KeyError as exc:
             raise KeyError(
-                f"Stack drive (kind {self.kind!r}): driver {self.rho_key!r} not found"
+                f"Stack head (kind {self.kind!r}): driver {self.rho_key!r} not found"
             ) from exc
         z_path = self.z_path.to(rho.dtype)
         z_ref = self.z_ref.to(rho.dtype)
         head_src = rho[..., self.src] * (z_ref[self.src] - z_path)
         head_tgt = rho[..., self.tgt] * (z_ref[self.tgt] - z_path)
         return self.g * (head_src - head_tgt)
+
+    @property
+    def inputs(self) -> tuple[str, ...]:
+        """The driver keys this term reads."""
+        return (self.rho_key,)
 
 
 class DuctStack:
@@ -182,11 +277,16 @@ class DuctStack:
             rho = drivers[self.rho_key]
         except KeyError as exc:
             raise KeyError(
-                f"DuctStack drive (kind {self.kind!r}): driver {self.rho_key!r} not found"
+                f"DuctStack head (kind {self.kind!r}): driver {self.rho_key!r} not found"
             ) from exc
         z = self.z_ref.to(rho.dtype)
         mean = 2.0 / (1.0 / rho[..., self.src] + 1.0 / rho[..., self.tgt])
         return self.g * mean * (z[self.src] - z[self.tgt])
+
+    @property
+    def inputs(self) -> tuple[str, ...]:
+        """The driver keys this term reads."""
+        return (self.rho_key,)
 
 
 class WindProfile:
@@ -418,7 +518,7 @@ class Wind:
         try:
             return torch.as_tensor(drivers[key])
         except KeyError as exc:
-            raise KeyError(f"Wind drive (kind {self.kind!r}): driver {key!r} not found") from exc
+            raise KeyError(f"Wind head (kind {self.kind!r}): driver {key!r} not found") from exc
 
     def __call__(self, drivers: Mapping[str, torch.Tensor]) -> torch.Tensor:
         rho = self._driver(drivers, self.rho_key)[..., None]
@@ -434,3 +534,11 @@ class Wind:
             self.sign.to(dtype) * self.envelope.to(dtype) * 0.5 * rho * V**2
             * self.ch.to(dtype) * Cp
         )
+
+    @property
+    def inputs(self) -> tuple[str, ...]:
+        """The driver keys this term reads (the direction only with a Cp profile)."""
+        keys = [self.rho_key, self.speed_key]
+        if self.profiles:
+            keys.append(self.direction_key)
+        return tuple(keys)

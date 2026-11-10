@@ -138,7 +138,7 @@ def test_the_limiter_corners_are_switches():
     assert vals[-2:].tolist() == pytest.approx([-0.5, 0.5])
 
 
-@pytest.mark.parametrize("scheme", ["implicit", "midpoint"])
+@pytest.mark.parametrize("scheme", ["backward_euler", "midpoint"])
 def test_simulate_records_the_controller_outputs(scheme):
     """Quasi-steady airflow (no graded start: a short run). The controller holds the room
     within 0.04 K of its set point (|y| < 0.2) while the shaft draws air through it, and the

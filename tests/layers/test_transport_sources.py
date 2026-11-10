@@ -11,7 +11,7 @@ from noodl.topology import Network
 F64 = torch.float64
 
 
-def _chain(n_species: int = 1, scheme: str = "implicit"):
+def _chain(n_species: int = 1, scheme: str = "backward_euler"):
     """ambient -> z1 -> z2 -> ambient; capacities 10, 20; node order ambient, z1, z2."""
     net = Network(dtype=F64)
     for name in ("ambient", "z1", "z2"):
@@ -26,7 +26,7 @@ def _chain(n_species: int = 1, scheme: str = "implicit"):
     return net, layer
 
 
-def test_step_takes_full_node_sources():
+def test_step_takes_full_withdrawals():
     _, layer = _chain()
     q = torch.ones(3, dtype=F64)
     s = torch.tensor([0.0, 3.0, 0.0], dtype=F64)
@@ -52,7 +52,7 @@ def test_nonzero_source_on_a_boundary_node_raises_naming_layer_and_node():
         layer.steady(torch.ones(3, dtype=F64), s, torch.zeros(1, dtype=F64))
 
 
-def test_steady_with_full_node_sources_matches_the_hand_balance():
+def test_steady_with_full_withdrawals_matches_the_hand_balance():
     _, layer = _chain()
     x = layer.steady(
         torch.ones(3, dtype=F64), torch.tensor([0.0, 3.0, 0.0], dtype=F64),
@@ -85,7 +85,7 @@ def test_rate_broadcasts_a_batch_of_states():
     torch.testing.assert_close(r[1], torch.zeros(2, dtype=F64), atol=1e-12, rtol=0.0)
 
 
-def test_multi_species_full_node_sources_have_trailing_shape_n_by_K():
+def test_multi_species_full_withdrawals_have_trailing_shape_n_by_K():
     _, layer = _chain(n_species=2)
     s = torch.zeros(3, 2, dtype=F64)
     s[1, 0] = 3.0

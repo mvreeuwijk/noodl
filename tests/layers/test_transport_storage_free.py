@@ -21,7 +21,7 @@ DT = 300.0
 M_ROOM = 120.0                       # kg of air in the room
 
 
-def _plenum(scheme="implicit", storage_free=("plenum",)):
+def _plenum(scheme="backward_euler", storage_free=("plenum",)):
     """ambient -> plenum (outdoor air), room -> plenum (recirculation), plenum -> room
     (supply), room -> ambient (exhaust)."""
     net = Network(dtype=F64)
@@ -152,7 +152,7 @@ def test_the_step_is_differentiable_through_the_flows():
 
 @pytest.mark.parametrize("scheme", ["exact", "trapezoidal"])
 def test_only_the_implicit_scheme_takes_storage_free_nodes(scheme):
-    with pytest.raises(ValueError, match=r"storage-free nodes \['plenum'\].*implicit"):
+    with pytest.raises(ValueError, match=r"storage-free nodes \['plenum'\].*backward_euler"):
         _plenum(scheme=scheme)
 
 
@@ -200,9 +200,9 @@ def test_thermal_layer_with_storage_free_nodes_uses_the_implicit_scheme():
     with pytest.raises(ValueError, match=r"\['plenum'\] have no heat capacity"):
         thermal_layer(net)
     layer = thermal_layer(net, storage_free=["plenum"])
-    assert layer.scheme == "implicit"
+    assert layer.scheme == "backward_euler"
     assert layer.storage_free_mask.tolist() == [True, False]
-    with pytest.raises(ValueError, match=r"storage-free nodes \['plenum'\].*implicit"):
+    with pytest.raises(ValueError, match=r"storage-free nodes \['plenum'\].*backward_euler"):
         thermal_layer(net, storage_free=["plenum"], scheme="exact")
     # supply air at 280 K mixes through the plenum into the room within the step
     q = torch.tensor([0.1, 0.1, 0.1], dtype=F64)
@@ -224,7 +224,7 @@ def test_a_storage_free_node_joined_only_by_conduction_takes_its_conduction_bala
     net.add_edge("room", "core", kind="wall")
     net.add_edge("core", "ambient", kind="wall")
     layer = TransportLayer(net, "T", capacity=torch.tensor([0.0, 1e5], dtype=F64),
-                           flow_kind="air", boundary=["ambient"], scheme="implicit",
+                           flow_kind="air", boundary=["ambient"], scheme="backward_euler",
                            conduction_kind="wall",
                            conductance=torch.tensor([3.0, 1.0], dtype=F64),
                            storage_free=["core"])
@@ -284,7 +284,7 @@ def _plenum_layer(**kw):
     net.add_edge("plenum", "room", kind="air")
     net.add_edge("room", "ambient", kind="air")
     return TransportLayer(net, "c", capacity=torch.tensor([0.0, M_ROOM], dtype=F64),
-                          flow_kind="air", boundary=["ambient"], scheme="implicit",
+                          flow_kind="air", boundary=["ambient"], scheme="backward_euler",
                           storage_free=["plenum"], **kw)
 
 
@@ -327,14 +327,14 @@ def test_a_negative_construction_capacity_at_a_storage_free_node_is_refused():
     net, _ = _plenum()
     with pytest.raises(ValueError, match=r"capacity.*negative.*\['plenum'\]"):
         TransportLayer(net, "c", capacity=torch.tensor([-1.0, M_ROOM], dtype=F64),
-                       flow_kind="air", boundary=["ambient"], scheme="implicit",
+                       flow_kind="air", boundary=["ambient"], scheme="backward_euler",
                        storage_free=["plenum"])
 
 
 def test_the_building_layers_take_storage_free_nodes_from_any_iterable():
     net = _building_net()
     layer = thermal_layer(net, storage_free=(n for n in ["plenum"]))
-    assert layer.scheme == "implicit"
+    assert layer.scheme == "backward_euler"
     assert layer.storage_free_mask.tolist() == [True, False]
     layer = species_layer(net, storage_free=(n for n in ["plenum"]))
     assert layer.storage_free_mask.tolist() == [True, False]

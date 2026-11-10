@@ -281,7 +281,9 @@ def test_rc_line_capacitor_starts_at_its_recorded_voltage():
     assert names.dynamic
     assert float(names.value(_hist(state), "RC_dyn.Vc")[0]) == 50.0
     kind, edges = names.devices["RC_dyn"]
-    assert kind == "impedance" and len(edges) == 3
+    # its capacitor is to ground: a storage entry, not a third edge
+    assert kind == "impedance" and len(edges) == 2
+    assert names.storage == {"RC_dyn": 0}
 
 
 def test_heat_port_columns_map_to_the_thermal_nodes():

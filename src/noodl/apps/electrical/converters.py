@@ -16,6 +16,7 @@ import torch
 
 from noodl.apps.electrical.laws import _pairs, _ports
 from noodl.elements import ImplicitLaw
+from noodl.elements._slopes import group_shape, slope_blocks, stack_entries
 
 Tensor = torch.Tensor
 
@@ -39,6 +40,29 @@ def splice(pos: Tensor, neg: Tensor, x: Tensor, deltax: float) -> Tensor:
     blend = pos * y + (1.0 - y) * neg
     return torch.where(scaled <= -_SPLICE_LIMIT, neg,
                        torch.where(scaled >= _SPLICE_LIMIT, pos, blend))
+
+
+def _reg_root_slope(x: Tensor, delta: float) -> Tensor:
+    """`d reg_root(x, delta) / dx = (x^2/2 + delta^2) / (x^2 + delta^2)^(5/4)`."""
+    s = x * x + delta * delta
+    return (0.5 * x * x + delta * delta) / s ** 1.25
+
+
+def _splice_slopes(x: Tensor, deltax: float) -> tuple[Tensor, Tensor, Tensor]:
+    """`splice(pos, neg, x, deltax)`'s weights and blend rate: `(w, 1 - w, dw/dx)`, so that
+    `d splice = w d pos + (1 - w) d neg + (pos - neg) dw/dx dx` (`w` is 0 below the band,
+    1 above it)."""
+    scaled = x / deltax
+    inner = torch.clamp(scaled, -_SPLICE_LIMIT, _SPLICE_LIMIT)
+    half_pi = math.asin(1.0)
+    tan = torch.tan(inner * half_pi)
+    tanh = torch.tanh(tan)
+    y = (tanh + 1.0) / 2.0
+    rate = 0.5 * (1.0 - tanh * tanh) * (1.0 + tan * tan) * half_pi / deltax
+    below, above = scaled <= -_SPLICE_LIMIT, scaled >= _SPLICE_LIMIT
+    w = torch.where(below, torch.zeros_like(y), torch.where(above, torch.ones_like(y), y))
+    rate = torch.where(below | above, torch.zeros_like(rate), rate)
+    return w, 1.0 - w, rate
 
 
 def _phasor_only(law, ctx) -> None:
@@ -73,6 +97,14 @@ class ImpedanceTransformer(ImplicitLaw):
         v1, v2 = _ports(dp)
         i1, i2 = _ports(q)
         return _pairs(v1 - self.impedance * i1 - self.n * v2, i2 + self.n * i1)
+
+    def jacobian(self, dp, q, drivers, ctx):
+        _phasor_only(self, ctx)
+        shape = group_shape(2, dp, q)
+        n = self.n
+        return (slope_blocks(stack_entries([[1.0, -n], [0.0, 0.0]], shape, dp), dp),
+                slope_blocks(stack_entries([[-self.impedance, 0.0], [n, 1.0]], shape, dp),
+                             dp))
 
 
 class PowerConverter(ImplicitLaw):
@@ -111,6 +143,33 @@ class PowerConverter(ImplicitLaw):
         r1 = self.voltage_ratio * modulus - v_dc
         r2 = (s_ac.real + p_dc - loss) + 1j * s_ac.imag
         return _pairs(r1, r2)
+
+    def jacobian(self, dp, q, drivers, ctx):
+        """The real 2x2 blocks of the (non-holomorphic) residual, written out from its
+        real and imaginary parts."""
+        _phasor_only(self, ctx)
+        v_ac, v_dc = _ports(dp)
+        i_ac, i_dc = _ports(q)
+        ax, ay, dx, dy = v_ac.real, v_ac.imag, v_dc.real, v_dc.imag
+        ix, iy, jx, jy = i_ac.real, i_ac.imag, i_dc.real, i_dc.imag
+        w_dc, w_ac, rate = _splice_slopes(jx, 0.1)
+        lost = 1.0 - self.efficiency
+        p_dc = dx * jx + dy * jy
+        re_s = ax * ix + ay * iy
+        keep_ac = 1.0 - lost * w_ac      # d (Re s_ac + p_dc - loss) / d Re s_ac
+        keep_dc = 1.0 - lost * w_dc      # ... / d p_dc
+        d_jx = -(lost * (p_dc - re_s) * rate)   # ... through the splice's blend
+        slope = self.voltage_ratio * _reg_root_slope(ax * ax + ay * ay, 1e-5) * 2.0
+        # [r][port][real/imag of r][real/imag of the port's value]
+        d_dp = [[[[slope * ax, slope * ay], [0.0, 0.0]], [[-1.0, 0.0], [0.0, -1.0]]],
+                [[[keep_ac * ix, keep_ac * iy], [-iy, ix]],
+                 [[keep_dc * jx, keep_dc * jy], [0.0, 0.0]]]]
+        d_q = [[[[0.0, 0.0], [0.0, 0.0]], [[0.0, 0.0], [0.0, 0.0]]],
+               [[[keep_ac * ax, keep_ac * ay], [ay, -ax]],
+                [[keep_dc * dx + d_jx, keep_dc * dy], [0.0, 0.0]]]]
+        shape = group_shape(2, dp, q)
+        real = torch.zeros((), dtype=ax.dtype, device=ax.device)
+        return stack_entries(d_dp, shape, real), stack_entries(d_q, shape, real)
 
 
 __all__ = ["ImpedanceTransformer", "PowerConverter", "reg_root", "splice"]

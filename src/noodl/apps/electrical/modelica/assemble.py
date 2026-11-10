@@ -17,6 +17,12 @@ kinds come in the order `voltage_source`, `resistor`, `diode`, `capacitor`, `ind
 `transformer`, `ideal_transformer`, `impedance`, `load`, `impedance_transformer`,
 `power_converter` (empty ones omitted), which is also the order of the layer's flows `q`.
 
+A capacitor with one pin on node 0 (the ground) is not an edge: it is a `LinearStorage` at its
+other pin, `v0` as its initial potential (`-v0` when the ground is pin `p`), and its current
+is the layer's `"electrical.storage_flow"` entry (`CircuitNames.storage`), so it takes no
+place in the flows `q`. A capacitor between two other nodes, and every capacitor of a phasor
+model, is a `capacitor` edge.
+
 - MSL `Basic.Resistor` / `VariableResistor`: `Resistance(R, alpha, T_ref)` reading the
   per-edge temperature `"electrical.resistor.T"` (the device's `T` without a heat port) and,
   when a variable resistor exists, the scale `"electrical.resistor.scale"` (its input `R`;
@@ -75,7 +81,7 @@ circuit's potentials and currents and judges their fixed-point residual too (a r
 state would carry a memory of earlier passes into the map the mixing sees, and the iteration
 would stop with the device temperatures up to 1e-6 K away from the heat layer's). The
 closure carries the sources as state, so a trapezoidal step integrates the heat as
-`dt/2 (P_start + P_end)`, as the circuit's companion forms integrate their currents; the
+`dt/2 (P_start + P_end)`, as the circuit's capacitors and inductors integrate their currents; the
 runner steps the heat layer with the circuit's rule (`run.simulate_circuit`). The thermal
 start state: each heat capacitor's node at its `T0`, every other interior node at the mean of
 the fixed and the heat capacitors' temperatures; the sources start at zero and the
@@ -114,9 +120,11 @@ Start state
 -----------
 A model with storage starts from the reference's recorded start values: `"electrical.phi"`
 from the capacitor voltages, propagated breadth-first over the capacitor edges from node 0
-(`phi[v] = phi[u] - v0` along `u -> v`; a group of capacitors not reaching node 0 is rooted
-at 0 V on its first node; a capacitor closing a loop is not read), every other node 0; and
-`"electrical.q"` zero except on inductor and transformer edges (their recorded currents). The
+(`phi[v] = phi[u] - v0` along `u -> v`, whether the capacitor is an edge or a storage; a group
+of capacitors not reaching node 0 is rooted at 0 V on its first node; a capacitor closing a
+loop is not read), every other node 0; `"electrical.storage_flow"` (one entry per capacitor to
+ground) zero; and `"electrical.q"` zero except on inductor and transformer edges (their
+recorded currents). The
 first step is backward Euler, so it reads only the capacitor voltages and the inductor
 currents. A model without storage starts its Newton solve from a flat guess: every
 electrical node but node 0 at the largest source magnitude at the start time (complex in a
@@ -128,7 +136,7 @@ from __future__ import annotations
 import math
 import re
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import torch
 
@@ -155,6 +163,7 @@ from noodl.modelica import signals, timeline
 from noodl.modelica.inputs import EVALUATION_ERRORS, SignalResolver, evaluation_problem
 from noodl.modelica.schema import flag
 from noodl.modelica.timeline import SERIES as _SERIES
+from noodl.storage import LinearStorage
 from noodl.topology import Network
 
 Tensor = torch.Tensor
@@ -229,7 +238,9 @@ class CircuitNames:
     position in the heat layer's state `"thermal.x"` (fixed temperatures, which are boundary
     nodes, are not in it); `devices` maps a device to `(kind, positions of its edges in the
     layer's q)` (the kind of its first edge: a `TwoPortRCLine` with `use_C` lists its two
-    `impedance` edges, then its `capacitor` edge); `sources` maps a voltage source to its
+    `impedance` edges, then its `capacitor` edge; a capacitor to ground has no edge: its
+    entry is in `storage`); `storage` maps a capacitor to ground to its position in
+    `"electrical.storage_flow"`; `sources` maps a voltage source to its
     position among the sources, the column of `"series:electrical.voltage_source.value"` in
     a real model; `columns` maps every compared column to its `Column`.
     """
@@ -245,6 +256,7 @@ class CircuitNames:
     devices: dict[str, tuple[str, tuple[int, ...]]]
     sources: dict[str, int]
     columns: dict[str, Column]
+    storage: dict[str, int] = field(default_factory=dict)
 
     def value(self, history: Mapping[str, Tensor], column: str) -> Tensor:
         """The column's value from `history` (entries `(T, ..., n)`, stacked over time):
@@ -329,6 +341,8 @@ class _Builder:
         self.problems: list[str] = []
         self.edges: dict[str, list[_Edge]] = {k: [] for k in _KINDS}
         self.added: list[tuple[str, _Edge]] = []     # (kind, edge) in the order added
+        self.grounded: list[_Edge] = []              # capacitors to ground: storage entries
+        self.capacitors: list[_Edge] = []            # every capacitor, in the order added
         self.source_blocks: list[Signal] = []
 
         # the step grid: output times plus every event of the signals and source blocks
@@ -412,6 +426,19 @@ class _Builder:
         self.edges[kind].append(edge)
         self.added.append((kind, edge))
 
+    def add_capacitor(self, d: Device, u: int, v: int, **values) -> None:
+        """A capacitor `u -> v`: a storage entry at the other pin when exactly one pin is
+        the ground (node 0) of a time-domain model, else a `capacitor` edge."""
+        if not self.nl.phasor and (u == 0) != (v == 0):
+            # initial potential of the node: v0 (ground is pin n), -v0 (ground is pin p)
+            edge = _Edge(d.name, u, v, {**values, "node": v if u == 0 else u,
+                                        "sign": -1.0 if u == 0 else 1.0})
+            self.grounded.append(edge)
+            self.capacitors.append(edge)
+            return
+        self.add("capacitor", d, u, v, **values)
+        self.capacitors.append(self.added[-1][1])
+
     def device(self, d: Device) -> None:
         p, n, role = self.problems, d.nodes, d.role
         if role == "voltage_source":
@@ -433,8 +460,8 @@ class _Builder:
             values["dependent"] = _flag(d, "useTemperatureDependency", p)
             self.add("diode", d, n["p"], n["n"], **values)
         elif role == "capacitor":
-            self.add("capacitor", d, n["p"], n["n"], C=_number(d, "C", p),
-                     v0=_initial(d, "v", p))
+            self.add_capacitor(d, n["p"], n["n"], C=_number(d, "C", p),
+                               v0=_initial(d, "v", p))
         elif role == "inductor":
             self.add("inductor", d, n["p"], n["n"], L=_number(d, "L", p),
                      i0=_initial(d, "i", p))
@@ -455,8 +482,8 @@ class _Builder:
             self.add("impedance", d, n["p1"], n["mid"], R=half, L=0.0, C=math.inf)
             self.add("impedance", d, n["n1"], n["mid"], R=half, L=0.0, C=math.inf)
             if _flag(d, "use_C", p):
-                self.add("capacitor", d, n["mid"], n["c2"], C=_number(d, "C", p),
-                         v0=_initial(d, "Vc", p))
+                self.add_capacitor(d, n["mid"], n["c2"], C=_number(d, "C", p),
+                                   v0=_initial(d, "Vc", p))
         elif role == "ac_impedance":
             self._ac_impedance(d)
         elif role == "ac_line":
@@ -576,6 +603,16 @@ class _Builder:
         drivers[_SERIES + key] = torch.stack(
             [torch.ones(self.n_grid, dtype=F64) if c is None else c for c in columns], dim=-1)
 
+    def storage(self) -> list:
+        """The `LinearStorage` carrying every capacitor to ground, in the order added."""
+        if not self.grounded:
+            return []
+        return [LinearStorage(
+            [e.values["node"] for e in self.grounded],
+            torch.tensor([e.values["C"] for e in self.grounded], dtype=F64),
+            initial=torch.tensor([e.values["sign"] * e.values["v0"] for e in self.grounded],
+                                 dtype=F64))]
+
     def laws(self, drivers: Drivers) -> list:
         laws = []
         for kind in _KINDS:
@@ -666,11 +703,14 @@ class _Builder:
                 values = drivers.get(_SERIES + SOURCE_KEY)
                 ref = 0.0 if values is None else float(values[0].abs().max())
             phi[1:n_e] = ref
-        return {f"{LAYER}.phi": phi, f"{LAYER}.q": q}
+        state = {f"{LAYER}.phi": phi, f"{LAYER}.q": q}
+        if self.grounded:
+            state[f"{LAYER}.storage_flow"] = torch.zeros(len(self.grounded), dtype=F64)
+        return state
 
     def _capacitor_potentials(self, n_e: int) -> Tensor:
         adjacent: dict[int, list[tuple[int, float]]] = {}
-        for e in self.edges["capacitor"]:
+        for e in self.capacitors:
             adjacent.setdefault(e.u, []).append((e.v, -e.values["v0"]))
             adjacent.setdefault(e.v, []).append((e.u, e.values["v0"]))
         phi = torch.zeros(n_e, dtype=F64)
@@ -733,6 +773,10 @@ class _Builder:
         if d is None:
             return None
         edges = positions.get(inst, ("", ()))[1]
+        for entry, e in enumerate(self.grounded):
+            if d.role == "capacitor" and e.device == inst and var == "i":
+                # the current entering pin p
+                return Column(f"{LAYER}.storage_flow", ((entry, e.values["sign"]),))
         two_pin = d.role in ("resistor", "capacitor", "inductor", "diode", "voltage_source")
         two_port = d.role in ("mutual_inductance", "ideal_transformer")
         if var == "i" and two_pin:
@@ -927,7 +971,7 @@ def build(netlist: Netlist, doc: CircuitDoc, *, substeps: int = 1
     laws = b.laws(drivers)
     raise_problems(b.problems)
     layer = KirchhoffLayer(net, LAYER, laws, boundary=["0"], phasor=netlist.phasor,
-                           quantity="voltage", unit="V", flow_unit="A")
+                           quantity="voltage", unit="V", flow_unit="A", storage=b.storage())
     if netlist.phasor:
         drivers[layer.frequency_key] = torch.tensor(netlist.frequency, dtype=F64)
     dynamic = layer.dynamic
@@ -951,5 +995,6 @@ def build(netlist: Netlist, doc: CircuitDoc, *, substeps: int = 1
         phasor=netlist.phasor,
         nodes={name: k for k, name in enumerate(netlist.node_names)},
         thermal_nodes={netlist.thermal_names[k]: i for i, k in enumerate(heat.interior)},
-        devices=positions, sources=sources, columns=columns)
+        devices=positions, sources=sources, columns=columns,
+        storage={e.device: k for k, e in enumerate(b.grounded)})
     return model, state, drivers, circuit_names

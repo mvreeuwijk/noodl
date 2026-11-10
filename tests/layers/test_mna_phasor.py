@@ -7,10 +7,11 @@ import pytest
 import torch
 
 from noodl.elements import Conductance, ConstitutiveLaw, ImplicitLaw, LawContext, PowerLaw
-from noodl.layers._mna import MnaSystem
+from noodl.layers._flow_unknowns import flow_unknowns
+from noodl.layers._step import _Step
 from noodl.layers.kirchhoff import KirchhoffLayer
-from noodl.nodesources import NodeSource
 from noodl.topology import Network
+from noodl.withdrawals import NodeWithdrawal
 from tests._circuit_laws import Cap, DrivenSource, Ind, Source
 
 F64 = torch.float64
@@ -81,7 +82,7 @@ class Ratio(ImplicitLaw):
         return torch.stack([r1, r2], -1).flatten(-2)
 
 
-class LinearWithdrawal(NodeSource):
+class LinearWithdrawal(NodeWithdrawal):
     """w = c phi at the given nodes."""
 
     def __init__(self, nodes, c):
@@ -172,24 +173,24 @@ def test_phasor_refuses_nonlinear_real_law():
                        boundary=["gnd"], phasor=True)
 
 
-def test_phasor_refuses_node_sources():
+def test_phasor_refuses_withdrawals():
     net = _net(["gnd", "a"], [("a", "gnd", "r")])
     with pytest.raises(ValueError, match="edges to ground"):
         KirchhoffLayer(net, "e", [Conductance(torch.tensor([1.0]), kind="r")],
-                       node_sources=[LinearWithdrawal([net.nodes.index("a")], [0.1])],
+                       withdrawals=[LinearWithdrawal([net.nodes.index("a")], [0.1])],
                        boundary=["gnd"], phasor=True)
 
 
-def test_structure_has_no_node_source_entries_in_real_view():
-    # A phasor layer refuses node sources at construction; the pattern must not carry
+def test_structure_has_no_withdrawal_entries_in_real_view():
+    # A phasor layer refuses withdrawals at construction; the pattern must not carry
     # entries for them either (their diagonal is laid out for one real unknown per node).
     net = _net(["gnd", "a"], [("a", "gnd", "r")])
     layer = KirchhoffLayer(net, "e", [Conductance(torch.tensor([1.0]), kind="r")],
                            boundary=["gnd"], phasor=True)
-    layer._node_sources = [LinearWithdrawal([net.nodes.index("a")], [0.1])]
-    mna = MnaSystem(layer)
-    assert torch.equal(mna.row, layer._mna.row) and torch.equal(mna.col, layer._mna.col)
-    assert int(mna.src.max()) < mna._node_slot
+    layer._withdrawals = [LinearWithdrawal([net.nodes.index("a")], [0.1])]
+    u = flow_unknowns(layer)
+    assert torch.equal(u.row, layer._unknowns.row) and torch.equal(u.col, layer._unknowns.col)
+    assert int(u.src.max()) < u.node_slot
 
 
 def test_missing_frequency_driver_named():
@@ -279,20 +280,20 @@ def test_real_view_jacobian_matches_autograd_jacobian():
                    ConstantPower(torch.tensor([0.4 + 0.3j])), Ratio(torch.tensor([2.0])),
                    Cap(torch.tensor([0.05])), Conductance(torch.tensor([1.5, 0.7]), kind="r")],
         boundary=["gnd"], phasor=True)
-    mna = layer._mna
-    assert mna.w == 2 and mna.n_I == 4 and mna.n_F == 5 and mna.n == 18
+    u = layer._unknowns
+    assert u.w == 2 and u.n_I == 4 and u.n_F == 5 and u.n == 18
     gen = torch.Generator().manual_seed(11)
-    x = torch.randn(mna.n, generator=gen, dtype=F64)
+    x = torch.randn(u.n, generator=gen, dtype=F64)
     pb = torch.zeros(1, dtype=C128)
     sources = torch.randn(net.n, generator=gen, dtype=C128)
-    ctx = LawContext(mode="phasor", omega=torch.tensor([2 * math.pi * 3.0]))
-    call = mna._plain_call
+    step = _Step(LawContext(mode="phasor", omega=torch.tensor([2 * math.pi * 3.0])), None)
+    call = layer._owner_call
 
     def residual(z):
-        return mna.residual(z, pb, {}, sources, ctx, call)
+        return layer._residual(z, pb, {}, sources, step, call)[0]
 
     expected = torch.autograd.functional.jacobian(residual, x)
-    op = mna.operator(x, pb, {}, ctx, call, None)
+    op = layer._operator(x, pb, {}, step)
     J = op.assemble()
     torch.testing.assert_close(J, expected, rtol=1e-13, atol=1e-13)
     # the load block is not of the holomorphic form [[a, -b], [b, a]]
@@ -300,12 +301,12 @@ def test_real_view_jacobian_matches_autograd_jacobian():
     ia = int(layer._interior_of_node[a])
     block = J[2 * ia: 2 * ia + 2, 2 * ia: 2 * ia + 2]
     assert not torch.allclose(block[0, 1], -block[1, 0])
-    v = torch.randn(mna.n, generator=gen, dtype=F64)
+    v = torch.randn(u.n, generator=gen, dtype=F64)
     torch.testing.assert_close(op.rmatvec(v), expected.T @ v, rtol=1e-13, atol=1e-13)
 
 
 def test_classic_power_residual_bit_for_bit():
-    # A classic nonlinear layer with a drive and sources: the conjugating power_residual
+    # A classic nonlinear layer with a head and sources: the conjugating power_residual
     # equals the old real formula exactly.
     class Push:
         kind = "air"
@@ -316,15 +317,16 @@ def test_classic_power_residual_bit_for_bit():
     net = _net(["gnd", "a", "b"], [("gnd", "a", "air"), ("a", "b", "air"), ("b", "gnd", "air")])
     layer = KirchhoffLayer(net, "e", [PowerLaw(torch.tensor([1.0, 0.7, 1.3]), 0.6,
                                                    kind="air")],
-                           drives=[Push()], boundary=["gnd"])
+                           boundary=["gnd"])
+    drivers = {"e.edge_head": Push()({})}
     sources = torch.tensor([0.0, 0.2, -0.1])
-    phi, q = layer.solve(torch.tensor([0.0]), {}, sources, differentiable=False)
-    d = layer.dp(phi, {})
-    drive_only = d - layer._difference(phi)
-    old = ((d * q).sum(-1) - (drive_only * q).sum(-1)
+    phi, q = layer.solve(torch.tensor([0.0]), drivers, sources, differentiable=False)
+    d = layer.dp(phi, drivers)
+    head_only = d - layer._difference(phi)
+    old = ((d * q).sum(-1) - (head_only * q).sum(-1)
            - (phi[..., layer.bound] * layer.net_outflow(q)[..., layer.bound]).sum(-1)
            - (phi[..., layer.interior] * sources[..., layer.interior]).sum(-1))
-    assert torch.equal(layer.power_residual(phi, q, {}, sources), old)
+    assert torch.equal(layer.power_residual(phi, q, drivers, sources), old)
 
 
 def test_inductor_in_phasor_mode():

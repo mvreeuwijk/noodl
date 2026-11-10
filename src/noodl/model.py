@@ -10,6 +10,8 @@ the transport step by default or before it with `reaction_order="before_transpor
 changing.
 
 Keys. State: "<layer>.phi" (full-node order), "<layer>.q" (the layer's kind order),
+"<layer>.storage_flow" (a Kirchhoff layer with node storage: the flow into every storage
+entry, `KirchhoffLayer.storage_flows`; zeros after a steady solve),
 "<layer>.x" (interior order, (n_i,) or (n_i, K)), "<layer>.s" (an allocation layer's
 per-node storage, full-node order; that layer also writes its realised flows to
 "<layer>.q"). Drivers: "<layer>.phi_boundary", "<layer>.x_boundary", optional
@@ -37,15 +39,16 @@ the closure integrates once per pass instead of once per step until the key is s
 
 `**solve_kwargs` of `step`/`steady` reach the POTENTIAL solves only (`differentiable`,
 `on_failure`, `method`, Newton kwargs). The keywords the Model sets itself (`phi0`, `q0`,
-`history`, `dt`, `t`) are refused there by name. `layer_options` gives one Kirchhoff layer
-its own keywords on top of them (`{"airflow": {"atol": 1e-11}}`), and one transport layer the
-scheme of this step (`{"thermal": {"scheme": "implicit"}}`: backward Euler on the step after
-a restart of a circuit it is coupled to). Transport steps always raise on failure.
+`history`, `dt`, `t`, `storage_flow`) are refused there by name. `layer_options` gives one
+Kirchhoff layer its own keywords on top of them (`{"airflow": {"atol": 1e-11}}`), and one
+transport layer the scheme of this step (`{"thermal": {"scheme": "backward_euler"}}`:
+backward Euler on the step after a restart of a circuit it is coupled to). Transport steps
+always raise on failure.
 
 A transport layer stepped by the trapezoidal scheme whose sources a closure carries as state
 (`state_keys` holding `"<layer>.sources"`) integrates them by the trapezoidal rule too: the
 step-start state's `"<layer>.sources"` and this step's, `dt/2 (s_start + s_end)`
-(`TransportLayer.step`'s `sources_prev`), as a circuit's companion form integrates a
+(`TransportLayer.step`'s `sources_prev`), as a circuit's trapezoidal capacitor integrates a
 prescribed current. Without it the step's sources are held over the step.
 
 Differentiability: ping-pong is one pass of differentiable operations; iterate carries no
@@ -68,6 +71,7 @@ from noodl._fixed_point_loop import (
     Verdict,
     confirm_gradient_dependence,
     detached,
+    fixed_point,
     run_passes,
     unsolved_mask,
 )
@@ -102,7 +106,7 @@ State = dict[str, Tensor]
 Drivers = dict[str, Tensor]
 #: Potential-solve keywords the Model sets itself from the state, the step and `t`; refused
 #: among `**solve_kwargs` of `step`/`steady`.
-_MODEL_SOLVE_KEYS = frozenset({"phi0", "q0", "history", "dt", "t"})
+_MODEL_SOLVE_KEYS = frozenset({"phi0", "q0", "history", "dt", "t", "storage_flow"})
 #: The keywords `layer_options` may give a transport layer.
 _TRANSPORT_OPTIONS = frozenset({"scheme"})
 # The key `layer_options` travels under inside `solve_kwargs`, to `_pass`'s layer solves.
@@ -173,7 +177,9 @@ class Model:
     verdict raises (or accepts, below). When the last pass's potential solve also stopped
     short, the error is `noodl.solvers.ConvergenceError` (a `RuntimeError`), so a caller can
     retry the step from another starting point (`warm_start=False`) and let every other
-    failure through. A step that is going to raise stops early, before `iterate_max`, once
+    failure through. A layer built with a `fallback` ladder climbs it inside the pass, before
+    the pass is judged (`KirchhoffLayer.solve`), so a pass whose solve a rung rescued is an
+    ordinary converged one. A step that is going to raise stops early, before `iterate_max`, once
     every unconverged instance's potential solve has failed again from a fed state within
     the tolerances of the previous pass's: the next pass would only repeat it. A potential
     solve that is differentiated still raises (`KirchhoffLayer.solve`'s
@@ -372,14 +378,20 @@ class Model:
     def _circuit_kwargs(name: str, layer: KirchhoffLayer, state: Mapping[str, Tensor],
                         base: Mapping[str, Tensor], dt: float | None,
                         t: float | None) -> dict:
-        """The solve keywords of a layer solved by Modified Nodal Analysis.
+        """The step keywords of a layer's solve: every Kirchhoff layer gets `t`, and the
+        others only where the layer reads them.
 
-        `q0`: the warm start of its implicit-law flows, from the fed state's `"<name>.q"`.
+        `q0`: the warm start of its flow unknowns (a layer that has them), from the fed
+        state's `"<name>.q"`.
         `t`: the time its laws are evaluated at -- the END of a step (`t + dt`, the time
         the solved state belongs to), the given time of a steady solve, `None` without one.
-        On a step of a layer with dynamic laws (not a phasor layer, which takes no step),
-        `history` is the STEP-START state's `(phi, q)` -- `base`, never the fed state, so an
-        iterated coupling re-steps every pass from the same start -- and `dt` the step.
+        On a step of a layer with dynamic laws or storage (not a phasor layer, which takes no
+        step), `history` is the STEP-START state's `(phi, q)` -- `base`, never the fed state,
+        so an iterated coupling re-steps every pass from the same start -- and `dt` the step;
+        a layer with storage also gets `storage_flow` from the step-start state's
+        `"<name>.storage_flow"`, read by the trapezoidal scheme (zeros when it is missing).
+        A layer that holds its storage at boundary nodes gets `history=(phi, None)` from the
+        step-start state on every solve, steady or not: the potentials it holds them at.
         """
         return circuit_kwargs(name, layer, state, base, dt, t)
 
@@ -415,7 +427,7 @@ class Model:
         transfer nothing reads.
 
         `diag[name]["linear"]`, when this transport layer's `scheme` runs a
-        linear solve (`"implicit"`, `"trapezoidal"`; not `"exact"`), is the LAST substep's
+        linear solve (`"backward_euler"`, `"trapezoidal"`; not `"exact"`), is the LAST substep's
         `{"backend", "iterations", "residual"}` from `TransportLayer.step`'s own
         `diagnostics=` out-parameter -- see `TransportLayer._resolve_solver` and
         `layers.transport._LinearSolve` for what each entry means and how `linear_solver`
@@ -488,7 +500,7 @@ class Model:
         """Move the whole model to `device` and the precision of `dtype`, in place; return it.
 
         Moves, together: the network (its cached operators), every layer's cached index,
-        capacity and law-slice tensors, the laws, node sources, drives and reactions, every
+        capacity and law-slice tensors, the laws, withdrawals, head terms and reactions, every
         closure of a class defined in noodl, a user closure that defines
         `to(device=, dtype=)`, and the tensors attached to the model by an application
         builder (`model.junction_idx`, a `notes` dict...). Floating tensors take the
@@ -547,16 +559,22 @@ class Model:
         pays that cost on every one of its substeps for no benefit.
 
         `warm_start` (default True) starts each Kirchhoff layer's nonlinear solve from the
-        state's `"<layer>.phi"` (and, on a layer solved by Modified Nodal Analysis, its
-        implicit-law flows from `"<layer>.q"`). `False` starts it from the layer's linear
-        initial guess instead, while closures and node sources still read `"<layer>.phi"`
+        state's `"<layer>.phi"` (and, on a layer with flow unknowns, those flows from
+        `"<layer>.q"`). `False` starts it from the layer's linear
+        initial guess instead, while closures and withdrawals still read `"<layer>.phi"`
         as an input (a retry after a warm start failed to converge, without losing that
         input).
+
+        `diagnostics["fallbacks"]` is `{layer: count}` over the Kirchhoff layers whose solve
+        ran with a fallback ladder (`KirchhoffLayer(fallback=)`, or a `fallback=` solve
+        keyword): how many of the step's passes had that layer's solve converge on a rung of
+        it, not on its first Newton solve. Under `coupling="iterate"` the passes are summed,
+        the differentiated one included. Absent when no layer has a ladder.
 
         `layer_options` maps a Kirchhoff layer's name to keywords for that layer's solve
         only, applied over `**solve_kwargs` (and so over the layer's own `newton_defaults`):
         `{"airflow": {"atol": 1e-11}}`; and a transport layer's name to the scheme of this
-        step, `{"thermal": {"scheme": "implicit"}}` (`TransportLayer.step`'s `scheme`; a
+        step, `{"thermal": {"scheme": "backward_euler"}}` (`TransportLayer.step`'s `scheme`; a
         steady solve has no scheme and ignores it). A name that is not a layer of this
         model, a keyword the Model sets itself, or a transport-layer keyword other than
         `scheme` is refused by name.
@@ -593,8 +611,8 @@ class Model:
         `rate == 0` rather than advanced).
 
         `t` (optional) is the time of that state: closures receive it in their
-        `StepContext`, and the constitutive laws of a layer solved by Modified Nodal
-        Analysis are evaluated at it (a time-dependent source). A layer with dynamic laws is
+        `StepContext`, and the constitutive laws of a layer that read the
+        time are evaluated at it (a time-dependent source). A layer with dynamic laws is
         solved at its operating point: a capacitance open, an inductance shorted. With
         `mode="initial"` (passed to the Kirchhoff layers' solves) the consistent initial
         point instead: those layers hold their dynamic laws at their start values, and every
@@ -615,6 +633,43 @@ class Model:
         return self._advance(state, drivers, None, diagnostics,
                              _with_layer_options(solve_kwargs, layer_options), t=t,
                              warm_start=warm_start)
+
+    def march(self, state, drivers, times, *, restarts: Collection[int] = (),
+              drivers_at: Callable[[float, float], Drivers] | None = None,
+              record: Collection[int] | None = None, diagnostics: dict | None = None,
+              layer_options: Mapping[str, Mapping] | None = None, **solve_kwargs) -> dict:
+        """Step the model through `times` (s, increasing; `state` is at `times[0]`) and return
+        the history, stacked on a new leading axis with the start state as row 0 and rows
+        broadcast to the batch shape of the steps: `"time"`; every key of the first recorded
+        row that ends in `.phi`, `.q`, `.x`, `.storage_flow` or `.capacity`, or that a
+        closure carries in the state (`closure_state_keys`: a pump's status, a manhole
+        level); and `"<layer>.storage_flow"` of every Kirchhoff layer with storage, which a
+        start state need not carry (its row 0 is then the layer's own with no step: zero for
+        storage at interior nodes, what the start flows deliver for storage at boundary
+        nodes). A key the first row does not carry is not recorded; a recorded key missing
+        from a later row is refused by name.
+
+        Step `k` is `step(state, d, dt=times[k+1]-times[k], t=times[k])` with
+        `d = drivers_at(times[k], times[k+1])` when `drivers_at` is given, else `drivers`.
+        `restarts` holds the step indices taken by backward Euler (the first step, and the
+        steps that contain a source discontinuity, damp the ringing the trapezoidal rule
+        shows after a jump): on a restart step every layer that steps something inside its
+        solve -- a Kirchhoff layer with storage at interior nodes or dynamic laws, a
+        transport layer whose own scheme is `"trapezoidal"` -- gets
+        `scheme="backward_euler"` through `layer_options`, merged over the caller's. A
+        Kirchhoff layer whose storage sits at boundary nodes keeps its forward Euler, and
+        `"exact"` transport layers are untouched. On the other steps the layers' own schemes
+        apply, or a `scheme=` in `solve_kwargs`. `record` keeps only those indices into
+        `times` (default all). `diagnostics["schemes"]` lists the scheme of each step
+        (`"backward_euler"` on a restart, else `solve_kwargs`'s `scheme` or `None`: the
+        layer default); it is the only entry `march` fills. A restart index past the last
+        step is ignored, a negative one is refused. Differentiable through time as `step` is.
+        """
+        from noodl._march import march
+
+        return march(self, state, drivers, times, restarts=restarts, drivers_at=drivers_at,
+                     record=record, diagnostics=diagnostics, layer_options=layer_options,
+                     **solve_kwargs)
 
     def _advance(
         self, state, drivers, dt, diagnostics, solve_kwargs, *, t=None,
@@ -639,8 +694,9 @@ class Model:
             if owned:
                 raise ValueError(
                     f"Model: solve keywords {owned} are set by the Model itself, not passed "
-                    f"through: phi0 and q0 (the warm starts) from the state, history from the "
-                    f"step-start state, dt from step's dt and t from the t= argument"
+                    f"through: phi0 and q0 (the warm starts) from the state, history and "
+                    f"storage_flow from the step-start state, dt from step's dt and t from "
+                    f"the t= argument"
                 )
         # The coupling seam: ping-pong is exactly ONE pass, taken with the state at the start
         # of the step; `coupling="iterate"` repeats `_pass` until the named transport states
@@ -652,6 +708,7 @@ class Model:
             )
             if diagnostics is not None:
                 diagnostics.update({"passes": 1, "layers": diag})
+                _report_fallbacks(diagnostics, _fallbacks(self, (diag,)))
             return new
         return self._iterate(
             state, drivers, dt, diagnostics, solve_kwargs, t=t,
@@ -704,7 +761,7 @@ class Model:
         exactly zero where the interface is linear. Backward memory is one pass. Whether
         anything differentiable reaches the state is a question no inspection of `state` and
         `drivers` can answer, since a differentiable parameter may be captured inside an
-        element, a drive or a closure and never appear in either; it is asked by running a
+        element, a head term or a closure and never appear in either; it is asked by running a
         pass on the graph and dropping that graph at once. Pass 1 asks first; when it finds
         nothing, the question is asked again at the certified fed state, because a closure
         may take a parameter-dependent branch only once the state has moved away from the
@@ -932,6 +989,7 @@ class Model:
             new = dict(zip(out_keys, flat, strict=True))
             # The differentiated pass's own diagnostics, DETACHED: see `detached`.
             diag = detached(adjoint_diag)
+            _add_fallbacks(problem.fallbacks, _fallbacks(self, (diag,)))
             adjoint = "implicit"
             adjoint_batched = bool(adjoint_report["batched"])
         else:
@@ -941,12 +999,72 @@ class Model:
                 {"passes": passes, "converged": converged, "max_change": change,
                  "layers": diag, "adjoint": adjoint, "adjoint_batched": adjoint_batched}
             )
+            _report_fallbacks(diagnostics, problem.fallbacks)
         return new
 
     def _unsolved(self, diag: Mapping) -> Tensor | None:
         """Per instance, whether any potential solve of a pass (its `diag`) stopped short of
         its own tolerance (`on_failure="return_primal"`); ``None`` when every one converged."""
         return unsolved_mask(diag, self.kirchhoff)
+
+    def fixed_point(self, pass_fn: Callable[[State], State], state: State, *,
+                    watch: Sequence[str], tol: float, max_passes: int = 50,
+                    relaxation: float = 1.0,
+                    measure: Callable[[State, State], Tensor] | None = None,
+                    adjoint_rtol: float | None = None, adjoint_restart: int | None = None,
+                    diagnostics: dict | None = None,
+                    where: str = "Model.fixed_point") -> State:
+        """Repeat `pass_fn` from `state` until the watched keys stop changing, and return the
+        last pass's state; its gradient is that of the fixed point (implicit adjoint), not of
+        the unrolled passes.
+
+        `pass_fn(z)` maps a state to a state (a `steady` or `step` plus whatever acts on its
+        result: a reaction, a boundary read off the previous pass). Pass k feeds `z_k` and gets
+        `out_k`; `z_{k+1} = out_k`, or with `relaxation < 1` the watched keys move only
+        `relaxation` of the way, `z_k[w] + relaxation (out_k[w] - z_k[w])`, and every other key
+        comes from `out_k`. Relaxation does not move the fixed point.
+
+        Per instance (the leading batch dimensions of what `measure` returns), a pass has
+        converged when `measure(fed, out) <= tol`. `measure` defaults to the largest absolute
+        change over the watched keys, one number for the whole state; give a `measure` that
+        returns one value per instance (a relative change per hour, say) to judge a batch
+        instance by instance, which also lets the adjoint solve each instance on its own. A
+        watched key missing from the fed state counts as not converged (the first pass of a
+        state that does not carry the iterate). Failing to converge within `max_passes` raises
+        `RuntimeError` naming `where`, the pass count and the last change.
+
+        Differentiation: pass 1 runs under the caller's grad mode, to learn whether anything
+        differentiable reaches the state. When it does, the remaining primal passes run under
+        `torch.no_grad()` and one differentiable pass at the certified fed state attaches the
+        implicit adjoint (`solvers.fixed_point.differentiate_fixed_point`), with every key
+        `pass_fn` returns as output: the gradient is the fixed point's own, with backward
+        memory of one pass. The unknowns of that adjoint are the watched keys AND every
+        other floating-point key the pass recomputes that was in the fed state and that the
+        pass reads (the rule `coupling="iterate"` uses): `watch` decides convergence only, so
+        an unwatched key that feeds back -- a closure-carried level, an intermediate the
+        next pass reads -- is still differentiated as part of the fixed point. A key the
+        pass returns unchanged (the same tensor it was fed) is a constant of the pass, not
+        an unknown; a WATCHED key returned unchanged is refused by name. Every unknown is
+        assumed to be at its fixed point too, so a key that never settles (a counter) must
+        not be in the fed state. `adjoint_rtol` defaults to the model's, `adjoint_restart`
+        to the adjoint solve's own default. When nothing requires grad every pass runs under
+        `no_grad` and nothing more happens: unlike `coupling="iterate"`, there is NO
+        confirmation pass at the certified state, so a `pass_fn` that only takes a
+        parameter-dependent branch away from the start state is not seen; run it under
+        `torch.no_grad()` or differentiate from a state that already reaches the branch.
+
+        `diagnostics`, when given, is updated with `passes`, `changes` (the change of every
+        pass, the largest over the instances), `contraction` (the ratio of the last two
+        changes: the measured spectral radius), `adjoint` (`"implicit"` or `None`),
+        `adjoint_batched` and `adjoint_keys` (the unknowns of the adjoint, empty when none
+        ran).
+        """
+        return fixed_point(
+            pass_fn, state, watch=watch, tol=tol, max_passes=max_passes,
+            relaxation=relaxation, measure=measure,
+            adjoint_rtol=self.adjoint_rtol if adjoint_rtol is None else adjoint_rtol,
+            adjoint_restart=adjoint_restart, diagnostics=diagnostics, where=where,
+        )
 
     def residuals(self, state, drivers) -> dict[str, Tensor]:
         """Nodal balances at `state`: interior residual per Kirchhoff layer, dx/dt per
@@ -976,15 +1094,17 @@ class Model:
         out: dict[str, Tensor] = {}
         for name, layer in self.kirchhoff.items():
             phi = state[f"{name}.phi"]
-            if layer.mna:
-                # Implicit-law flows are unknowns, not functions of `phi`: balance the
-                # state's own flows.
+            if layer._unknowns is not None or layer._ctx_laws:
+                # Implicit-law flows are unknowns, not functions of `phi`, and a law that reads
+                # the context needs a time and step start this call does not have: balance
+                # the state's own flows.
                 out[name] = layer.balance(phi, state[f"{name}.q"], drv.get(f"{name}.sources"),
                                           drv)
                 continue
             out[name] = layer.residual(
                 phi[..., layer.interior], self._require(drv, f"{name}.phi_boundary"), drv,
                 drv.get(f"{name}.sources"),
+                **circuit_kwargs(name, layer, state, state, None, None),
             )
         for name, layer in self.transport.items():
             xb = self._require(drv, f"{name}.x_boundary")
@@ -1021,12 +1141,14 @@ class Model:
         """
         drv = self._apply_closures(state, drivers)
         owner = self.flow_layer_of[name]
-        if owner in self.kirchhoff and self.kirchhoff[owner].mna and f"{owner}.q" not in state:
+        kl = self.kirchhoff.get(owner)
+        if (kl is not None and (kl._unknowns is not None or kl._ctx_laws)
+                and f"{owner}.q" not in state):
             raise KeyError(
                 f"Model: transport layer {name!r} takes its flows from Kirchhoff layer "
-                f"{owner!r}, which is solved by Modified Nodal Analysis and cannot be solved "
-                f"here without its step history; give the state {owner + '.q'!r} (step the "
-                f"model first)"
+                f"{owner!r}, which has flow unknowns or a law that reads the time or the step "
+                f"start, so it cannot be solved here without its step history; give the "
+                f"state {owner + '.q'!r} (step the model first)"
             )
         if owner in self.kirchhoff and f"{owner}.q" not in state:
             key = self.flow_driver_of[name]
@@ -1046,13 +1168,15 @@ class Model:
             _phi, q = layer.solve(
                 self._require(drv, f"{owner}.phi_boundary"), drv,
                 drv.get(f"{owner}.sources"), phi0=phi0,
+                **circuit_kwargs(owner, layer, state, state, None, None),
             )
             return layer.flows_of_kind(q, self.transport[name].flow_kinds)
         return self._kind_flows(name, state, drv)
 
     def ports(self, state) -> Ports:
         """Boundary nodes, the driver keys that prescribe them, and (Kirchhoff layers) the net
-        flow INTO each boundary node at `state`.
+        flow INTO each boundary node at `state`. A Kirchhoff layer's are its `prescribed`
+        nodes: a storage node it holds at a boundary node is no port.
 
         Allocation layers contribute NOTHING here, and that is deliberate rather than the
         same omission `residuals` refuses. `Ports` answers "which NODES may a coupled model
@@ -1071,9 +1195,9 @@ class Model:
         keys: dict[str, str] = {}
         flows: dict[str, Tensor] = {}
         for name, layer in self.kirchhoff.items():
-            nodes[name] = [layer.net.nodes[i] for i in layer.bound.tolist()]
+            nodes[name] = [layer.net.nodes[i] for i in layer.prescribed.tolist()]
             keys[name] = f"{name}.phi_boundary"
-            flows[name] = -layer.net_outflow(state[f"{name}.q"])[..., layer.bound]
+            flows[name] = -layer.net_outflow(state[f"{name}.q"])[..., layer.prescribed]
         flow_keys: dict[str, str] = {}
         for name, layer in self.transport.items():
             nodes[name] = list(layer.boundary)
@@ -1081,6 +1205,31 @@ class Model:
             flow_keys[name] = self.flow_driver_of[name]
         return Ports(boundary_nodes=nodes, prescribed_keys=keys, boundary_flows=flows,
                      flow_keys=flow_keys)
+
+
+def _fallbacks(model: Model, diags) -> dict[str, int]:
+    """Per Kirchhoff layer of `model` whose solve ran with a fallback ladder in the passes'
+    diagnostics `diags`, how many of those solves converged on a rung of it
+    (`KirchhoffLayer.solve`'s `fallback`). A layer without a ladder is left out."""
+    out: dict[str, int] = {}
+    for name in model.kirchhoff:
+        for d in diags:
+            layer = d.get(name, {})
+            if "fallback" in layer:
+                out[name] = out.get(name, 0) + (layer["fallback"] is not None)
+    return out
+
+
+def _add_fallbacks(total: dict[str, int], counts: Mapping[str, int]) -> None:
+    for name, count in counts.items():
+        total[name] = total.get(name, 0) + count
+
+
+def _report_fallbacks(diagnostics: dict, counts: Mapping[str, int]) -> None:
+    """`diagnostics["fallbacks"]`, only when some layer ran with a fallback ladder, so a
+    model without one reports exactly what it did before ladders existed."""
+    if counts:
+        diagnostics["fallbacks"] = dict(counts)
 
 
 class _ModelPasses:
@@ -1107,6 +1256,8 @@ class _ModelPasses:
         self.change: dict[str, Tensor] = {}
         self.prev: State | None = None
         self.inner_failed: Tensor | None = None
+        # per Kirchhoff layer, the passes whose potential solve took a fallback rung
+        self.fallbacks: dict[str, int] = {}
         self.anderson = (
             _AndersonHistory(model, model.iterate_memory)
             if model.iterate_acceleration == "anderson" else None
@@ -1132,6 +1283,7 @@ class _ModelPasses:
               needs_adjoint: bool) -> Verdict | None:
         model = self.model
         new, diag = out
+        _add_fallbacks(self.fallbacks, _fallbacks(model, (diag,)))
         self.inner_failed = inner_failed = model._unsolved(diag)
         prev = self.prev
         if prev is None:

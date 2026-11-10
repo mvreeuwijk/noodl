@@ -10,7 +10,7 @@ with no core change required.
 ## Level 1: a new branch law
 
 Every branch law is a `torch.nn.Module` subclass of `noodl.elements.base.ConstitutiveLaw`. See
-[Constitutive laws and drives](../concepts/elements.md#the-constitutivelaw-contract) for the full contract;
+[Constitutive laws and heads](../concepts/elements.md#the-constitutivelaw-contract) for the full contract;
 in short, a law owns one edge `kind` and provides `flow`, `dflow` and `linear_init`.
 
 Here is a new one, `Sigmoid`, with a single learnable coefficient (a "steepness") — verbatim
@@ -64,10 +64,11 @@ This follows `noodl.elements.conductance.Conductance`'s contract exactly:
 No other file changes. The law lives entirely in the test module (or, in a real project, in
 your own package) and needs no change to `noodl.elements`, `noodl.layers` or `noodl.model`.
 
-A law that is not a function of the potential difference (an ideal source, a flow-controlled
-law, a law with storage or one coupling several edges) subclasses `noodl.elements.ImplicitLaw`
-instead and implements `residual(dp, q, drivers, ctx)`; the layer then solves it by Modified
-Nodal Analysis. See
+Write `flow`; if you cannot, write `residual`. A law that cannot give its flow from the
+potential difference (an ideal source, a flow-controlled law, a law with storage or one coupling
+several edges) subclasses `noodl.elements.ImplicitLaw` instead and implements
+`residual(dp, q, drivers, ctx)`; the layer then adds its flow as an unknown of its
+solve. To read the law context, name the third parameter of `flow` `ctx`. See
 [Implicit, coupled and dynamic constitutive laws](../concepts/elements.md#implicit-coupled-and-dynamic-constitutive-laws).
 
 ## Level 2: a new application
@@ -271,7 +272,7 @@ It also ships its documentation, in the same change as the code:
   `initial_drivers(model, *, values=None)`, exported in `__all__` like every other
   application, and layers built with a physical `quantity`, `unit`, `flow_unit`, `source_unit` and
   `capacity_unit` (and `conductance_unit` and `species_names`), so that `model.refs` names and units their keys.
-- **Units in every docstring.** A component field, law coefficient or drive parameter
+- **Units in every docstring.** A component field, law coefficient or head-term parameter
   with a physical unit states it (`length` (m), `C` in the flow unit per Pa^n), and an
   application that reads network attributes declares them in an `attributes.py` like
   `noodl.apps.building_physics.attributes`.
@@ -296,7 +297,7 @@ each format's own section names, column layouts and units are specific to it. Th
 the file into the network and domain objects the application needs (`read_swmm_inp` and
 `read_epanet_inp` return a network the caller then passes to the application's own
 `build_model`; `project_to_model` in `apps/building_physics/prj.py` takes the extra step of
-assembling `(model, state, drivers)` itself, from the laws and drives `read_prj` already
+assembling `(model, state, drivers)` itself, from the laws and heads `read_prj` already
 built).
 
 For an `.inp`-style format, reuse `noodl.apps.inpfile` for the shared lexical layer —

@@ -110,8 +110,8 @@ def test_heated_resistor_with_heat_capacity_follows_the_coupled_trapezoidal_recu
     h = model.net.nodes.index("h")
     for k in range(6):
         scheme = "backward_euler" if k == 0 else "trapezoidal"
-        heat = "implicit" if k == 0 else "trapezoidal"
-        state = model.step(state, drivers, dt=0.5, t=0.5 * k, integration=scheme,
+        heat = "backward_euler" if k == 0 else "trapezoidal"
+        state = model.step(state, drivers, dt=0.5, t=0.5 * k, scheme=scheme,
                            layer_options={"thermal": {"scheme": heat}})
         assert abs(float(state["thermal.x"][0]) - ref[k]) <= 1e-9
         assert abs(float(state["thermal.sources"][h]) - _power(ref[k])) <= 1e-6
@@ -123,10 +123,10 @@ def test_holding_the_heat_over_a_trapezoidal_step_misses_the_recurrence():
     # recurrence by far more than its tolerance.
     model, state, drivers = _resistor_model(dynamic=True, carry_heat=False)
     ref = _scalar_recurrence(steps=2, h=0.5)
-    state = model.step(state, drivers, dt=0.5, t=0.0, integration="backward_euler",
-                       layer_options={"thermal": {"scheme": "implicit"}})
+    state = model.step(state, drivers, dt=0.5, t=0.0, scheme="backward_euler",
+                       layer_options={"thermal": {"scheme": "backward_euler"}})
     assert abs(float(state["thermal.x"][0]) - ref[0]) <= 1e-9
-    state = model.step(state, drivers, dt=0.5, t=0.5, integration="trapezoidal")
+    state = model.step(state, drivers, dt=0.5, t=0.5, scheme="trapezoidal")
     assert abs(float(state["thermal.x"][0]) - ref[1]) > 1e-4
 
 

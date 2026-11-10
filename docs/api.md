@@ -18,11 +18,11 @@ Generated from the package's own docstrings. For the ideas behind these objects,
     options:
       members: [branch_flows, particular_flow, project_measured, assert_forward_oriented]
 
-## Constitutive laws and drives
+## Constitutive laws and heads
 
 ::: noodl.elements.base
     options:
-      members: [ConstitutiveLaw, ImplicitLaw, LawContext]
+      members: [ConstitutiveLaw, ImplicitLaw, LawContext, step_rate, step_rate_factor]
 
 Constitutive laws are grouped below by the physics they express, as in
 [Airflow elements](applications/building_physics.md#airflow-elements).
@@ -84,16 +84,21 @@ Constitutive laws are grouped below by the physics they express, as in
     options:
       heading_level: 4
 
-### Drives
+### Heads
 
-::: noodl.drives
+::: noodl.heads
     options:
-      members: [Drive, ConstantDrive, Stack, Wind, WindProfile]
+      members: [HeadTerm, EdgeHeads, DriverHead, Stack, DuctStack, Wind, WindProfile]
       heading_level: 4
 
-::: noodl.nodesources
+::: noodl.withdrawals
     options:
-      members: [NodeSource]
+      members: [NodeWithdrawal]
+      heading_level: 4
+
+::: noodl.storage
+    options:
+      members: [NodeStorage, LinearStorage]
       heading_level: 4
 
 ## Layers
@@ -149,7 +154,7 @@ Constitutive laws are grouped below by the physics they express, as in
 ::: noodl.operators.dense
 ::: noodl.operators.graph
 ::: noodl.operators.advection
-::: noodl.operators.mna
+::: noodl.operators.sparse
 
 ## Solvers
 

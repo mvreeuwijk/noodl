@@ -12,7 +12,7 @@ from noodl.apps.building_physics.elements import (
     mass_orifice,
     orifice_law_from_edges,
 )
-from noodl.drives import Stack
+from noodl.heads import EdgeHeads, Stack
 from noodl.layers.kirchhoff import KirchhoffLayer
 from noodl.topology import Network
 
@@ -39,12 +39,11 @@ def test_two_orifice_doorway_reproduces_brown_solvason_with_the_neutral_plane_at
     assert net.graph.edges[hi]["z_path"] == pytest.approx(1.0 + 4.0 / 9.0)
     rho = 1.2
     el = orifice_law_from_edges(net, "airpath", rho=rho)
-    layer = KirchhoffLayer(
-        net, "air", [el], drives=[Stack.from_network(net, "airpath")],
-        boundary=["cold", "warm"],
-    )
+    layer = KirchhoffLayer(net, "air", [el], boundary=["cold", "warm"])
     densities = torch.tensor([1.25, 1.15], dtype=F64)
-    q = layer.flows(torch.zeros(2, dtype=F64), {"rho": densities})
+    drivers = {"rho": densities}
+    drivers.update(EdgeHeads(layer, [Stack.from_network(net, "airpath")])(None, drivers))
+    q = layer.flows(torch.zeros(2, dtype=F64), drivers)
     w = 0.78 / 3.0 * 0.8 * math.sqrt(rho * G * (1.25 - 1.15) * 2.0**3)
     assert q[0].item() == pytest.approx(w, rel=1e-12)    # low opening: cold -> warm
     assert q[1].item() == pytest.approx(-w, rel=1e-12)   # high opening: warm -> cold

@@ -7,7 +7,13 @@ tool's equations, the class docstring says so (for example ``RegularizedPowerLaw
 """
 
 from noodl.elements.air_duct import AirDuct, DuctTerminal, air_viscosity
-from noodl.elements.base import ConstitutiveLaw, ImplicitLaw, LawContext
+from noodl.elements.base import (
+    ConstitutiveLaw,
+    ImplicitLaw,
+    LawContext,
+    step_rate,
+    step_rate_factor,
+)
 from noodl.elements.conductance import Conductance
 from noodl.elements.curve import CubicSplineFlow, SplineCurve
 from noodl.elements.damper import Damper
@@ -108,4 +114,6 @@ __all__ = [
     "power_law_from_point",
     "power_law_from_points",
     "regularized_orifice",
+    "step_rate",
+    "step_rate_factor",
 ]

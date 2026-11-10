@@ -217,13 +217,13 @@ def test_the_exchange_edge_pair_is_exactly_the_conduction_term():
             net.add_edge("atmosphere", "s1", kind="exchange")
             layer = TransportLayer(net, "street", capacity=capacity,
                                    flow_kind=("route", "vent", "exchange"),
-                                   boundary=["atmosphere"], scheme="implicit")
+                                   boundary=["atmosphere"], scheme="backward_euler")
             q = torch.cat([route_and_vent, conductance, conductance])
         else:
             layer = TransportLayer(net, "street", capacity=capacity,
                                    flow_kind=("route", "vent"), boundary=["atmosphere"],
                                    conduction_kind="exchange", conductance=conductance,
-                                   scheme="implicit")
+                                   scheme="backward_euler")
             q = route_and_vent
         sources = torch.zeros(net.n, dtype=DT)
         sources[net.node_index("s0")] = 1.0e-3

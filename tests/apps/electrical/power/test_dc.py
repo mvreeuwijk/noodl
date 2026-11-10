@@ -41,7 +41,7 @@ def _dc(net):
 def test_case9_is_nodal_analysis_on_the_classic_layer():
     model, sol = _dc(read_matpower(power_case("case9")))
     layer = model.kirchhoff[DC_LAYER]
-    assert layer.mna is False
+    assert layer.implicit_edges.numel() == 0
     assert list(layer.kinds) == ["branch"]
     assert type(layer.law_for("branch")[0]) is Conductance
     assert isinstance(sol, DcPowerFlowSolution)
@@ -73,7 +73,7 @@ def test_build_rules():
     assert g.dtype == torch.float64
     expected = [1.0 / (br.x * (br.ratio or 1.0)) for br in branches]
     assert torch.allclose(g, torch.tensor(expected, dtype=torch.float64), rtol=0, atol=0)
-    shift = drivers[f"{DC_LAYER}.shift"]
+    shift = drivers[f"{DC_LAYER}.edge_head"]
     assert shift.dtype == torch.float64
     assert shift.tolist() == [-math.radians(br.shift_deg) for br in branches]
     assert shift.tolist()[3] == math.radians(3.0)
@@ -85,7 +85,7 @@ def test_build_rules():
 
 
 @pytest.mark.external
-def test_phase_shifter_enters_as_a_drive():
+def test_phase_shifter_enters_as_a_head():
     # case9_features: branch 1-4 has ratio 1.02 and shift -3 deg; its DC flow is 0.97 p.u.
     model, sol = _dc(read_matpower(power_case("case9_features")))
     assert abs(sol.pf[0] - 0.9699999999999992) < 1e-12
@@ -141,8 +141,8 @@ def test_nonpositive_branch_susceptance_is_refused(change, row):
     br[row - 1] = dataclasses.replace(br[row - 1], **change)
     changed = dataclasses.replace(net, branches=tuple(br))
     with pytest.raises(ValueError, match=(
-            rf"row {row} of the branch table \(from bus 1 to bus 3\).*the DC power flow on the "
-            r"classic layer needs positive branch susceptance")):
+            rf"row {row} of the branch table \(from bus 1 to bus 3\).*the DC power flow's "
+            r"conductance layer needs positive branch susceptance")):
         dc_power_flow(changed)
     build_power_flow(changed)               # the AC power flow takes a negative reactance
 

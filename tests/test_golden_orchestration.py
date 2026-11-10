@@ -5,7 +5,9 @@ Every case runs a small, deterministic model through `Model.step` / `Model.stead
 whole `diagnostics` dict (pass counts, `converged`, `max_change`, `adjoint`,
 `adjoint_batched`, per-layer Newton figures), the gradient of a fixed scalar loss with
 respect to designated parameters, and, for the failure cases, the exception type and the
-first 80 characters of its message.
+first 80 characters of its message. The cases named `potential_*` (defined in
+`tests/_potential_layer_cases.py`) solve one `KirchhoffLayer` directly, for what a Model does
+not reach: relations, multi-port and phasor laws, withdrawals, storage and the layer methods.
 
 The reference is `tests/golden/orchestration.json`, generated on the unrefactored code by
 `benchmarks/regenerate_orchestration_golden.py`. The comparison is exact (floats are
@@ -55,38 +57,20 @@ import pytest
 import torch
 
 from noodl.couple import ValueLink, union
-from noodl.drives import ConstantDrive
 from noodl.elements import PowerLaw
 from noodl.elements.base import ConstitutiveLaw
 from noodl.layers.kirchhoff import KirchhoffLayer
 from noodl.layers.transport import TransportLayer
 from noodl.model import Model
 from noodl.topology import Network
+from tests._potential_layer_cases import CASES as _POTENTIAL_CASES
 from tests._reactions import FirstOrderDecay
-from tests.golden import load_golden
+from tests.golden import grads_of, load_golden, ser
 
 F64 = torch.float64
 
 
 # ------------------------------------------------------------------ recording helpers
-
-
-def ser(x: Any) -> Any:
-    """A JSON-ready, exactly round-tripping form of tensors, numbers, dicts and lists."""
-    if isinstance(x, torch.Tensor):
-        t = x.detach().cpu()
-        if t.is_complex():
-            data = torch.view_as_real(t).tolist()
-        else:
-            data = t.tolist()
-        return {"dtype": str(t.dtype), "shape": list(t.shape), "data": data}
-    if isinstance(x, dict):
-        return {str(k): ser(v) for k, v in x.items()}
-    if isinstance(x, (list, tuple)):
-        return [ser(v) for v in x]
-    if x is None or isinstance(x, (bool, int, float, str)):
-        return x
-    raise TypeError(f"cannot record {type(x).__name__}: {x!r}")
 
 
 #: Exact float comparison (the recording environment); see the module docstring.
@@ -170,14 +154,6 @@ def outcome(fn: Callable[[], dict]) -> dict:
         return {"error": {"type": type(exc).__name__, "message": str(exc)[:80]}}
 
 
-def grads_of(loss: torch.Tensor, params: dict[str, torch.Tensor]) -> dict[str, Any]:
-    """Back-propagate `loss`; the gradients of `params` (None where nothing reached)."""
-    for p in params.values():
-        p.grad = None
-    loss.backward()
-    return {k: p.grad for k, p in params.items()}
-
-
 def record(state: dict, diag: dict | None = None, grads: dict | None = None) -> dict:
     # The golden file is written with sorted keys, so the order of the returned dicts (which
     # is part of the contract: a returned dict follows the order of its keys) is recorded.
@@ -207,16 +183,15 @@ def _air_gas(*, n_species=1, closures=(), reactions=(), learnable=True, **kw):
     """ambient -> z1 -> z2 -> ambient: a power-law air layer and a transport layer."""
     net = _net()
     el = PowerLaw(torch.tensor([0.01, 0.02, 0.01], dtype=F64), 0.65, learnable=learnable)
-    air = KirchhoffLayer(net, "air", [el], drives=[ConstantDrive("airpath", "wind")],
-                         boundary=["ambient"])
+    air = KirchhoffLayer(net, "air", [el], boundary=["ambient"])
     gas = TransportLayer(net, "gas", capacity=torch.tensor([50.0, 80.0], dtype=F64),
-                         flow_kind="airpath", boundary=["ambient"], scheme="implicit",
+                         flow_kind="airpath", boundary=["ambient"], scheme="backward_euler",
                          n_species=n_species)
     model = Model(net, {"air": air, "gas": gas}, closures=closures, reactions=reactions, **kw)
     k = (n_species,) if n_species > 1 else ()
     drivers = {
         "air.phi_boundary": torch.zeros(1, dtype=F64),
-        "wind": torch.tensor([5.0, 0.0, 0.0], dtype=F64),
+        "air.edge_head": torch.tensor([5.0, 0.0, 0.0], dtype=F64),
         "gas.x_boundary": torch.tensor([1e-3, 2e-3, 4e-3][:n_species], dtype=F64).reshape(1, *k),
         "gas.sources": torch.zeros(3, *k, dtype=F64),
     }
@@ -228,7 +203,7 @@ def _gain(state, drivers):
     """Wind that grows with z1's concentration: a genuine flow <- transport feedback."""
     x1 = state["gas.x"][..., 0]
     zero = torch.zeros_like(x1)
-    return {"wind": drivers["wind"] + torch.stack([2e3 * x1, zero, zero], dim=-1)}
+    return {"air.edge_head": drivers["air.edge_head"] + torch.stack([2e3 * x1, zero, zero], dim=-1)}
 
 
 def _conditional(state, drivers):
@@ -236,7 +211,8 @@ def _conditional(state, drivers):
     x1 = state["gas.x"][..., 0]
     zero = torch.zeros_like(x1)
     gain = torch.where(x1 > 5e-4, torch.full_like(x1, 3e3), torch.full_like(x1, 1e3))
-    return {"wind": drivers["wind"] + torch.stack([gain * x1, zero, zero], dim=-1)}
+    head = drivers["air.edge_head"]
+    return {"air.edge_head": head + torch.stack([gain * x1, zero, zero], dim=-1)}
 
 
 def _winds(b):
@@ -291,7 +267,7 @@ def case_iterate_substeps_with_reaction():
 
 def case_pingpong_batch3():
     model, state, drivers, params = _air_gas(closures=[_gain])
-    return _step_record(model, state, dict(drivers, wind=_winds(3)), params)
+    return _step_record(model, state, {**drivers, "air.edge_head": _winds(3)}, params)
 
 
 def _iterate_kw(**extra):
@@ -319,7 +295,7 @@ def case_iterate_steady_relaxation_half():
 
 def case_iterate_batch3():
     model, state, drivers, params = _air_gas(closures=[_gain], **_iterate_kw())
-    return _step_record(model, state, dict(drivers, wind=_winds(3)), params)
+    return _step_record(model, state, {**drivers, "air.edge_head": _winds(3)}, params)
 
 
 def case_iterate_batch_mixed_convergence():
@@ -328,7 +304,7 @@ def case_iterate_batch_mixed_convergence():
         closures=[_gain], coupling="iterate", iterate_tol={"gas": 1e-12}, iterate_max=11)
     winds = torch.tensor([[5.0, 0.0, 0.0], [1.0, 0.0, 0.0]], dtype=F64)
     diag: dict = {}
-    out = model.steady(state, dict(drivers, wind=winds), diagnostics=diag,
+    out = model.steady(state, {**drivers, "air.edge_head": winds}, diagnostics=diag,
                        differentiable=False, on_failure="return", **TIGHT)
     return record(out, diag)
 
@@ -337,7 +313,7 @@ def case_iterate_batch_mixed_convergence_raises():
     model, state, drivers, _ = _air_gas(
         closures=[_gain], coupling="iterate", iterate_tol={"gas": 1e-12}, iterate_max=11)
     winds = torch.tensor([[5.0, 0.0, 0.0], [1.0, 0.0, 0.0]], dtype=F64)
-    return record(model.steady(state, dict(drivers, wind=winds), **TIGHT))
+    return record(model.steady(state, {**drivers, "air.edge_head": winds}, **TIGHT))
 
 
 def case_iterate_branch_closure_cold():
@@ -552,7 +528,8 @@ class _Integrator:
         dt = 0.0 if ctx is None or ctx.dt is None else ctx.dt
         v = state["acc.v"] + dt * x1
         return {"acc.v": v,
-                "wind": drivers["wind"] + torch.stack([1e2 * v + 1e3 * x1, zero, zero], dim=-1)}
+                "air.edge_head": drivers["air.edge_head"]
+                + torch.stack([1e2 * v + 1e3 * x1, zero, zero], dim=-1)}
 
 
 def case_integrating_closure_pingpong():
@@ -612,7 +589,7 @@ def case_mna_dynamic_steps():
     for i in range(4):
         state = model.step(state, drivers, dt=0.25, t=0.25 * i, diagnostics=diag)
     state_be = model.step({"e.phi": phi, "e.q": q}, drivers, dt=0.25, t=0.0,
-                          integration="backward_euler")
+                          scheme="backward_euler")
     return record(state, diag, grads_of(state["e.phi"].sum(), {"C": cap.C})) | {
         "backward_euler": record(state_be)}
 
@@ -831,10 +808,12 @@ def case_coupled_electrical_union_time_dependent_law():
     return out
 
 
-CASES: dict[str, Callable[[], Any]] = {
-    name[len("case_"):]: fn for name, fn in sorted(globals().items())
-    if name.startswith("case_") and callable(fn)
-}
+CASES: dict[str, Callable[[], Any]] = dict(sorted({
+    **{name[len("case_"):]: fn for name, fn in globals().items()
+       if name.startswith("case_") and callable(fn)},
+    # one KirchhoffLayer, solved directly (tests/_potential_layer_cases.py)
+    **_POTENTIAL_CASES,
+}.items()))
 
 
 def build_all() -> dict[str, Any]:

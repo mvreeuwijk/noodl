@@ -1,8 +1,9 @@
 """Run a circuit `read_modelica_circuit` built, over its step grid.
 
 `simulate_circuit(model, state, drivers, names)` returns, at the output times, the layers'
-states (`"electrical.phi"`, `"electrical.q"`, and `"thermal.x"` when the circuit has a
-thermal network) stacked over time, plus `"time"`.
+states (`"electrical.phi"`, `"electrical.q"`, `"electrical.storage_flow"` when the circuit has
+capacitors to ground, and `"thermal.x"` when the circuit has a thermal network) stacked over
+time, plus `"time"`.
 
 An algebraic circuit (no capacitor, no inductor) is solved with `model.steady` at each
 requested time, warm-started from the previous solution. A dynamic one is stepped over the
@@ -11,7 +12,7 @@ restart (`names.restarts`: the first step and every step starting at a signal ju
 read only the step-start capacitor voltages and inductor currents) and trapezoidal
 otherwise; each step reads its drivers at its END time, so the step ending at a signal
 event uses the signal's left limit there. The heat layer of a circuit with a thermal network
-takes the same rule on every step: `scheme="implicit"` (backward Euler) on a restart,
+takes the same rule on every step: `scheme="backward_euler"` (backward Euler) on a restart,
 `"trapezoidal"` otherwise, the heat integrated over the step by the same rule as the
 circuit's currents. Row 0 of a dynamic run is the start state itself.
 """
@@ -39,8 +40,6 @@ F64 = torch.float64
 # stalls at 3.4e-13 on ACDCConverter, at 1.1e-13 on the balanced ACLine.
 STEADY_ATOL = 1e-12
 STEADY_RTOL = 1e-14
-# The heat layer's integration rule per circuit rule (`TransportLayer.step`'s `scheme`).
-_HEAT_SCHEME = {"backward_euler": "implicit", "trapezoidal": "trapezoidal"}
 
 
 def simulate_circuit(model: Model, state: State, drivers: Mapping[str, Tensor],
@@ -48,15 +47,15 @@ def simulate_circuit(model: Model, state: State, drivers: Mapping[str, Tensor],
                      **solve_kwargs) -> dict[str, Tensor]:
     """The circuit's history at `times` (default `names.times`; each must be a time of
     `names.grid`, increasing; a single time may be a scalar): `"time"` `(T,)` (the grid times
-    found, a new tensor) and every `".phi"` / `".q"` state entry the model returns, stacked
-    on dim 0.
+    found, a new tensor) and every `".phi"`, `".q"`, `".x"` and `".storage_flow"` state entry
+    the model returns, stacked on dim 0.
 
     `solve_kwargs` (Newton's `atol`, `rtol`, `max_iter`, ...) are passed to every
     `model.steady` / `model.step`. The steady solves of an algebraic circuit default to
     `atol=STEADY_ATOL, rtol=STEADY_RTOL` (round-off); the steps of a dynamic circuit take the
     layers' own tolerances. The heat layer is a linear solve and takes no Newton tolerance;
-    on a dynamic step it is given the step's scheme through `layer_options`, merged over any
-    `layer_options` the caller gives.
+    `Model.march` steps it by backward Euler on the restart steps (`names.restarts`), merged
+    over any `layer_options` the caller gives.
     """
     grid = names.grid
     if times is None:
@@ -66,33 +65,24 @@ def simulate_circuit(model: Model, state: State, drivers: Mapping[str, Tensor],
     if times.numel() == 0:
         raise ValueError("simulate_circuit: no times asked for")
     want = grid_index(grid, times, caller="simulate_circuit")
-    rows: list[State] = []
     if not names.dynamic:
         kwargs = {"atol": STEADY_ATOL, "rtol": STEADY_RTOL, **solve_kwargs}
+        rows: list[State] = []
         for k in want:
             t = float(grid[k])
             state = model.steady(state, step_drivers(drivers, grid, t), t=t, **kwargs)
             rows.append(state)
+        keys = [key for key in rows[0] if key.endswith((".phi", ".q", ".x"))]
+        out = {key: torch.stack([row[key] for row in rows]) for key in keys}
     else:
-        wanted = set(want)
-        if want[0] == 0:
-            rows.append(state)
         kwargs = dict(solve_kwargs)
         options = {k: dict(v) for k, v in (kwargs.pop("layer_options", None) or {}).items()}
-        heat = f"{THERMAL}.x" in state
-        for k in range(want[-1]):
-            t0, t1 = float(grid[k]), float(grid[k + 1])
-            scheme = "backward_euler" if k in names.restarts else "trapezoidal"
-            step_options = options
-            if heat:
-                step_options = {**options, THERMAL: {**options.get(THERMAL, {}),
-                                                     "scheme": _HEAT_SCHEME[scheme]}}
-            state = model.step(state, step_drivers(drivers, grid, t1), dt=t1 - t0, t=t0,
-                               integration=scheme, layer_options=step_options or None,
-                               **kwargs)
-            if k + 1 in wanted:
-                rows.append(state)
-    keys = [key for key in rows[0] if key.endswith((".phi", ".q", ".x"))]
-    out = {key: torch.stack([row[key] for row in rows]) for key in keys}
+        if f"{THERMAL}.x" in state:
+            # the heat layer's rule on the other steps; `march` takes the restarts itself
+            options[THERMAL] = {**options.get(THERMAL, {}), "scheme": "trapezoidal"}
+        out = model.march(
+            state, drivers, grid[: want[-1] + 1], restarts=names.restarts,
+            drivers_at=lambda t0, t1: step_drivers(drivers, grid, t1), record=want,
+            layer_options=options or None, scheme="trapezoidal", **kwargs)
     out["time"] = grid[want].clone()
     return out

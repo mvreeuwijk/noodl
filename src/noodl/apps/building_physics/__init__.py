@@ -1,7 +1,7 @@
 """The building application: zones, walls, heat and species layers, and `build_model`.
 
 A model built ON TOP of the core package. The core supplies every solve; this package
-decides which elements, drives, closures and layers a building network has, and in which
+decides which elements, heads, closures and layers a building network has, and in which
 units. Nothing under `src/noodl/` outside `apps/` imports from
 here.
 """

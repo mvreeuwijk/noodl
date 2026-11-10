@@ -28,7 +28,7 @@ differentiable. The same model that simulates forward will also tell you the der
 output with respect to any parameter, which is what turns a simulator into a tool for
 calibration, sensitivity analysis and design optimisation.
 
-![The noodl physics model stack: a network, then constitutive laws, drives and closures, then layers, then a Model that steps them together](assets/framework-overview.svg)
+![The noodl physics model stack: a network, then constitutive laws, heads and closures, then layers, then a Model that steps them together](assets/framework-overview.svg)
 
 ## What it gives you
 
@@ -54,7 +54,7 @@ physics over the shared core:
 | [Sewers](applications/sewer.md) | Gravity sewer hydraulics, headspace air, sulfide | Continuity on a tree for the water; Kirchhoff solve for the headspace air | `build_model` |
 | [Water distribution](applications/water.md) | Pressurised mains, pumps, tanks, demand | Kirchhoff: Newton on hydraulic head | `build_model` |
 | [Flow allocation](applications/allocation.md) | Requested flows clipped to arc capacity and free storage at the receiving node | Clip and allocate | `AllocatedFlowLayer` |
-| [Electrical circuits](applications/electrical.md) | Lumped circuits: DC, transient and AC | Kirchhoff: Modified Nodal Analysis on node voltage | `build_model`, `Circuit` |
+| [Electrical circuits](applications/electrical.md) | Lumped circuits: DC, transient and AC | Kirchhoff: node voltage, source and inductor currents as unknowns | `build_model`, `Circuit` |
 | [Coupling](applications/coupling.md) | Two models meeting at a shared boundary | Two models exchanging values, iterated to a fixed point | `union` |
 
 ## Reading model files

@@ -9,8 +9,8 @@ and sink models in `noodl.apps.building_physics.sources`.
 ## CONTAM `.prj`
 
 `read_prj(path) -> Project` parses a documented subset of TN 1887r1 Appendix A into a `Project`,
-building a float64 `Network`, its elements and its drives. `project_to_model(project, *,
-ambient=None, species=True, scheme="implicit")` returns `(model, state, drivers)`.
+building a float64 `Network`, its elements and its heads. `project_to_model(project, *,
+ambient=None, species=True, scheme="backward_euler")` returns `(model, state, drivers)`.
 
 **Supported:** run control (`Project.run_control`, a `RunControl`: the steady simulation's
 date and time, the transient run's start and end date and time, time step and output step, day
@@ -214,7 +214,7 @@ masses included. When the run control sets **`dodMdt = 1`**, each zone's air-mas
 step enters its airflow balance (`simulate` switches the term on by default for such a model),
 and ContamX
 takes that mass at the zone's absolute pressure even with `densZP = 0`. `project_to_model`
-therefore attaches a `ZoneAirMassChange` node source to the air layer (only when the run
+therefore attaches a `ZoneAirMassChange` storage to the air layer (only when the run
 control sets `dodMdt` and a zone has volume), which acts only when `simulate` supplies the
 step's start mass. For a `dodMdt` project with species it also adds
 a `ZonePressureDensity(densities=False)` closure, which scales the species layer's capacity (the
@@ -241,9 +241,9 @@ flows = project.path_flows(solved["air.q"])   # in CONTAM path-number order
 and time step), its schedules, and the weather and ambient-concentration files it names
 (resolved next to the `.prj`). Every input is evaluated at the end of each step, with no step
 split at a schedule's jump, and the zone air-mass change enters the airflow balance when the
-run control sets `dodMdt = 1`. A step whose airflow solve does not converge from the previous
-step's pressures is retried once from the linear initial guess (`diagnostics={}` lists such
-steps under `"airflow_retries"`). A steady-airflow run returns the one steady state at the run
+run control sets `dodMdt = 1`. An airflow solve that does not converge from the previous
+step's pressures is solved again from the linear initial guess, by the air layer's fallback
+ladder (`diagnostics={}` lists the steps with such a solve under `"airflow_retries"`). A steady-airflow run returns the one steady state at the run
 control's steady instant. Cyclic contaminant runs, integration other than the trapezoid
 method with weight 1 (implicit Euler), steady airflow with transient contaminants, transient
 airflow with steady contaminants (ContamX solves those to steady state at every step), and a run

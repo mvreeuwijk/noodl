@@ -56,13 +56,11 @@ import math
 
 import torch
 
+from noodl.elements._band import power_law_band, power_law_band_coeffs, power_law_band_slope
 from noodl.elements.base import ConstitutiveLaw, band_edges, memo
-from noodl.elements.door import _power_law_slope_at, _slope_is_exact
+from noodl.elements.door import _slope_is_exact
 
 Tensor = torch.Tensor
-
-_GAMMA = 1.5  # BaseClasses/PowerLawResistanceParameters.mo:6 (also powerLaw.mo:15)
-
 
 def _f64(value) -> Tensor:
     """A caller's tensor keeps its own dtype; a bare Python number becomes float64 -- this
@@ -109,16 +107,9 @@ class RegularizedPowerLaw(ConstitutiveLaw):
         self.rho_default = float(rho_default)
 
     def _coeffs(self) -> tuple:
-        """The band polynomial's ``b``, ``c``, ``d`` and ``C dp_turbulent^m`` (a memo)."""
+        """The band polynomial's ``a``, ``b``, ``c``, ``d`` and ``C dp_turbulent^m`` (a memo)."""
         C, m, dpt = self.C, self.m, self.dp_turbulent
-
-        def coeffs():
-            b = 1 / 8 * m**2 - 3 * _GAMMA - 3 / 2 * m + 35.0 / 8
-            c = -1 / 4 * m**2 + 3 * _GAMMA + 5 / 2 * m - 21.0 / 4
-            d = 1 / 8 * m**2 - _GAMMA - m + 15.0 / 8
-            return b, c, d, C * dpt**m
-
-        return memo(self, "coeffs", (C, m), coeffs)
+        return memo(self, "coeffs", (C, m), lambda: power_law_band_coeffs(C, m, dpt))
 
     def _regularised(self, dp: Tensor) -> Tensor:
         """``BaseClasses/powerLaw.mo:17-29`` (equivalently ``powerLawFixedM.mo:21-30`` with
@@ -134,20 +125,7 @@ class RegularizedPowerLaw(ConstitutiveLaw):
         ``torch.where``'s backward multiplies a finite value by the zero mask instead of
         ``inf * 0 = nan``.
         """
-        C, m = self.C, self.m
-        dpt = self.dp_turbulent
-        a = _GAMMA
-        b, c, d, C_dpt = self._coeffs()
-
-        mask = dp.abs() < dpt
-        dp_safe = torch.where(mask, torch.full_like(dp, dpt), dp.abs())
-        sharp = C * torch.sign(dp) * dp_safe**m
-
-        pi = dp / dpt
-        pi2 = pi * pi
-        inner = C_dpt * pi * (a + pi2 * (b + pi2 * (c + pi2 * d)))
-
-        return torch.where(mask, inner, sharp)
+        return power_law_band(self.C, dp, self.m, self.dp_turbulent, self._coeffs())
 
     def flow(self, dp: Tensor, drivers=None) -> Tensor:
         q = self._regularised(dp)
@@ -156,16 +134,14 @@ class RegularizedPowerLaw(ConstitutiveLaw):
         return q
 
     def dflow(self, dp: Tensor, drivers=None) -> Tensor:
-        """Under ``no_grad`` the analytic slope (``door._power_law_slope_at``: the same law,
+        """Under ``no_grad`` the analytic slope (``_band.power_law_band_slope``: the same law,
         equal to the autograd default bit for bit), else the autograd default."""
         C, m = self.C, self.m
         if not _slope_is_exact(dp, C, m):
             return super().dflow(dp, drivers)
-        b, c, d, C_dpt = self._coeffs()
         grad = (torch.full_like(dp, self.rho_default) if self.form == "volume"
                 else torch.ones_like(dp))
-        return _power_law_slope_at(C, dp, m, self.dp_turbulent, (_GAMMA, b, c, d, C_dpt),
-                                   grad)
+        return power_law_band_slope(C, dp, m, self.dp_turbulent, self._coeffs(), grad)
 
     def switching(self, dp: Tensor, drivers=None) -> Tensor:
         """The band edges ``dp = +-dp_turbulent``, where the polynomial meets the sharp law

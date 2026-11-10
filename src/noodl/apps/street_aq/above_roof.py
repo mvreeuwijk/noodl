@@ -97,7 +97,6 @@ from dataclasses import dataclass
 import torch
 
 from noodl.model import Drivers, Model, State
-from noodl.solvers.fixed_point import differentiate_fixed_point
 
 Tensor = torch.Tensor
 _DTYPE = torch.float64
@@ -280,10 +279,11 @@ def street_steady_with_plume(
     concentrations, "<layer>.roof_flux": F_s, "<layer>.junction_flux": the junction plume
     source used, "<layer>.junction_downflux": F_down}`, the first two in the state's
     shapes, the fluxes `(..., n_streets[, n_species])` and `(..., n_junctions[, n_species])`
-    in kg/s. `c_ext` is the pass's image of the converged
-    iterate, `C_bg + K F`, and `x` the street solve at that iterate: they satisfy the
-    relation to `tol` (times `1 + contraction`). Gradients are those of the converged fixed
-    point (implicit adjoint; module docstring).
+    in kg/s. `c_ext` is the last pass's image of the converged
+    iterate, `C_bg + K F`, and `x` the street solve at that iterate; the returned fluxes are
+    those of the last pass too, computed at the fed iterate and so within `tol` of `c_ext`.
+    They satisfy the relation to `tol` (times `1 + contraction`). Gradients are those of the
+    converged fixed point (implicit adjoint; module docstring).
     """
     if not 0.0 < relaxation <= 1.0:
         raise ValueError(
@@ -334,7 +334,12 @@ def street_steady_with_plume(
     def unspecies(t: Tensor) -> Tensor:
         return t.squeeze(-1) if single else t
 
-    def plume_pass(c_ext: Tensor) -> list[Tensor]:
+    c_key = f"{layer_name}.c_ext"
+    keys = (x_key, c_key, f"{layer_name}.roof_flux", f"{layer_name}.junction_flux",
+            f"{layer_name}.junction_downflux")
+
+    def plume_pass(fed: State) -> State:
+        c_ext = fed[c_key]
         solved = model.steady(state, {**drivers, xb_key: c_ext}, **solve_kwargs)
         x = solved[x_key]
         f_s, up, down = roof_fluxes(wiring, q, species_axis(x), species_axis(c_ext),
@@ -343,82 +348,33 @@ def street_steady_with_plume(
         c_new = species_axis(c_bg) + k_s @ f_s
         if k_j is not None:
             c_new = c_new + k_j @ f_j
-        return [x, unspecies(c_new), unspecies(f_s), unspecies(f_j), unspecies(down)]
+        return dict(zip(keys, [x, unspecies(c_new), unspecies(f_s), unspecies(f_j),
+                               unspecies(down)], strict=True))
 
-    changes: list[float] = []
-    with torch.no_grad():
-        c_ext = c_bg.detach()
-        converged = False
-        for _pass in range(int(max_iter)):
-            c_new = plume_pass(c_ext)[1]
-            c_ext = torch.broadcast_to(c_ext, c_new.shape)
-            step = c_new - c_ext
-            # Per instance (hour): the largest change over its streets (and species)
-            # relative to its own largest |C_ext|, so a clean hour cannot hide behind a
-            # polluted one's scale; the pass converges when every hour has.
-            flat = (-1,) if single else (-2, -1)
-            scale = c_new.abs().amax(dim=flat)
-            rel = torch.where(scale > 0, step.abs().amax(dim=flat)
-                              / torch.where(scale > 0, scale, torch.ones_like(scale)),
-                              torch.zeros_like(scale))
-            change = float(rel.max())
-            changes.append(change)
-            c_ext = c_ext + relaxation * step
-            if change <= tol:
-                converged = True
-                break
-    if not converged:
-        raise RuntimeError(
-            f"street_steady_with_plume: the above-roof fixed point did not converge within "
-            f"{max_iter} passes; the relative change on the last pass was {changes[-1]:.3e} "
-            f"against tol {tol:.1e} (measured contraction "
-            f"{_contraction(changes):.3g}; pass relaxation < 1 if it is >= 1)"
-        )
-    batch = tuple(c_ext.shape[:-1] if single else c_ext.shape[:-2])
+    flat = (-1,) if single else (-2, -1)
+
+    def relative_change(fed: State, out: State) -> Tensor:
+        # Per instance (hour): the largest change over its streets (and species) relative
+        # to its own largest |C_ext|, so a clean hour cannot hide behind a polluted one's
+        # scale; an all-zero hour counts as converged.
+        c_new = out[c_key]
+        step = c_new - fed[c_key]
+        scale = c_new.abs().amax(dim=flat)
+        return torch.where(scale > 0, step.abs().amax(dim=flat)
+                           / torch.where(scale > 0, scale, torch.ones_like(scale)),
+                           torch.zeros_like(scale))
+
     report: dict = {}
-
-    def pass_fn(z: list[Tensor]) -> tuple[list[Tensor], list[Tensor]]:
-        outputs = plume_pass(z[0])
-        return outputs, [outputs[1]]
-
-    # The final pass at the converged iterate: under the implicit adjoint when anything
-    # the answer depends on requires grad, plainly (no graph) otherwise.
-    if torch.is_grad_enabled() and _requires_grad(model, state, drivers,
-                                                  [c_bg, k_s, k_j]):
-        outputs = differentiate_fixed_point(
-            [c_ext], pass_fn, rtol=adjoint_rtol, restart=adjoint_restart,
-            where="street_steady_with_plume", batch_shape=batch or None, report=report,
-        )
-    else:
-        outputs = plume_pass(c_ext)
-    x, c_out, f_s, f_j, down = outputs
+    result = model.fixed_point(
+        plume_pass, {c_key: c_bg.detach()}, watch=[c_key], tol=tol, max_passes=int(max_iter),
+        relaxation=relaxation, measure=relative_change, adjoint_rtol=adjoint_rtol,
+        adjoint_restart=adjoint_restart, diagnostics=report,
+        where="street_steady_with_plume",
+    )
     if diagnostics is not None:
         diagnostics.update({
-            "passes": len(changes), "changes": changes,
-            "contraction": _contraction(changes),
-            "batched_adjoint": bool(report.get("batched", False)),
+            "passes": report["passes"], "changes": report["changes"],
+            "contraction": report["contraction"],
+            "batched_adjoint": report["adjoint_batched"],
         })
-    return {x_key: x, f"{layer_name}.c_ext": c_out, f"{layer_name}.roof_flux": f_s,
-            f"{layer_name}.junction_flux": f_j, f"{layer_name}.junction_downflux": down}
-
-
-def _requires_grad(model: Model, state: State, drivers: Drivers,
-                   extra: list[Tensor | None]) -> bool:
-    """Whether any input of the pass requires grad: the state, the drivers, the kernels and
-    background, and every tensor attribute of the model's transport layers and closures
-    (a capacity or geometry tensor made a parameter)."""
-    tensors = [*state.values(), *drivers.values(), *extra]
-    for part in [*model.transport.values(), *model.closures]:
-        for value in vars(part).values():
-            tensors.append(value)
-            if hasattr(value, "__dict__") and not isinstance(value, torch.Tensor):
-                tensors.extend(vars(value).values())
-    return any(isinstance(t, torch.Tensor) and t.requires_grad for t in tensors)
-
-
-def _contraction(changes: list[float]) -> float:
-    """The ratio of the last two relative changes (NaN before two passes, 0 once a change
-    is exactly zero)."""
-    if len(changes) < 2:
-        return float("nan")
-    return changes[-1] / changes[-2] if changes[-2] > 0 else 0.0
+    return {key: result[key] for key in keys}

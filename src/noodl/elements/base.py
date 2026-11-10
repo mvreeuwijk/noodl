@@ -19,19 +19,28 @@ through ``self.flow`` re-resolves to the most-derived override on every call.
 
 from __future__ import annotations
 
+import inspect
 from collections.abc import Mapping
 from dataclasses import dataclass
 
 import torch
 
 from noodl._broadcast import broadcast_shapes
+from noodl.elements._slopes import _colour_blocks
 
 Tensor = torch.Tensor
 
 #: The modes a dynamic or implicit constitutive law is evaluated in (see `LawContext`).
 MODES = ("dc", "initial", "transient", "phasor")
-#: The implicit time integrations a dynamic law implements in the transient mode.
-INTEGRATIONS = ("trapezoidal", "backward_euler")
+#: The time-integration schemes, one vocabulary for every layer kind. `"exact"` (the exact
+#: exponential of a linear step) is valid for a `TransportLayer` only; `"backward_euler"`
+#: (first order, flows at the step's end) and `"trapezoidal"` (second order) are valid for both
+#: it and a `KirchhoffLayer`, which refuses `"exact"` by name. `"forward_euler"` is valid for
+#: a `KirchhoffLayer` whose storage sits at BOUNDARY nodes only (an EPANET tank): the solve
+#: holds each such node at its step-start potential, and the step then moves it by
+#: `dt * inflow / capacity`, the inflow being the one the solve gave. A layer with storage at
+#: interior nodes, or with dynamic laws, refuses it, and so does a `TransportLayer`.
+SCHEMES = ("exact", "backward_euler", "trapezoidal", "forward_euler")
 
 
 @dataclass(frozen=True)
@@ -42,19 +51,59 @@ class LawContext:
     a capacitance carries no current, an inductance no voltage); `"initial"` the consistent
     initial point (a capacitance holds its initial voltage, an inductance its initial
     current); `"transient"` one implicit step of length `dt` ending at time `t`, from the
-    step-start values `dp_prev` and `q_prev` of the law's own edges, with `integration` one
-    of `INTEGRATIONS`; `"phasor"` the quasi-static sinusoidal state at angular frequency
-    `omega` (a tensor broadcasting against the law's edges). `t` is the evaluation time
-    (the END of a transient step), `None` when the caller tracks no clock.
+    step-start values `dp_prev` and `q_prev` of the law's own edges, with `scheme` one
+    of `SCHEMES` (`"backward_euler"` or `"trapezoidal"`); `"phasor"` the quasi-static
+    sinusoidal state at angular frequency `omega` (a tensor broadcasting against the law's
+    edges). `t` is the evaluation time (the END of a transient step), `None` when the caller
+    tracks no clock.
     """
 
     mode: str
     dt: float | None = None
     t: float | None = None
-    integration: str = "trapezoidal"
+    scheme: str = "trapezoidal"
     dp_prev: Tensor | None = None
     q_prev: Tensor | None = None
     omega: Tensor | None = None
+
+
+def step_rate(change: Tensor, ctx: LawContext, previous: Tensor | None = None) -> Tensor:
+    """The rate at which a stored quantity changes over one implicit step: `change / dt`
+    (backward Euler) or `2 change / dt - previous` (trapezoidal, `previous` = the rate at
+    the step start).
+
+    `change` is the stored amount's change over the step (a capacitor's `C (dp - dp_prev)`, a
+    tank's `A (H - H_prev)`), and `ctx` a transient `LawContext` that gives `dt` and `scheme`.
+    Every storage in noodl turns its change into a rate here: the capacitance and inductance
+    laws, and the `NodeStorage` withdrawal of a layer (`noodl.storage`).
+    """
+    if ctx.scheme == "backward_euler":
+        return change / ctx.dt
+    if ctx.scheme != "trapezoidal":
+        raise ValueError(
+            f"step_rate: scheme={ctx.scheme!r}; a storage steps with 'backward_euler' or "
+            f"'trapezoidal' (schemes: {SCHEMES})"
+        )
+    if previous is None:
+        raise ValueError(
+            "step_rate: the trapezoidal scheme needs `previous`, the rate at the step start"
+        )
+    return 2.0 * change / ctx.dt - previous
+
+
+def step_rate_factor(ctx: LawContext) -> Tensor | float:
+    """d step_rate / d change: `1/dt` (backward Euler) or `2/dt` (trapezoidal).
+
+    The slope a storage adds to the Jacobian is this factor times its capacity
+    (`NodeStorage.rate_slope`)."""
+    if ctx.scheme == "backward_euler":
+        return 1.0 / ctx.dt
+    if ctx.scheme != "trapezoidal":
+        raise ValueError(
+            f"step_rate_factor: scheme={ctx.scheme!r}; a storage steps with "
+            f"'backward_euler' or 'trapezoidal' (schemes: {SCHEMES})"
+        )
+    return 2.0 / ctx.dt
 
 
 def memo(owner, name: str, deps: tuple, fn):
@@ -112,7 +161,7 @@ class ConstitutiveLaw(torch.nn.Module):
     ``True`` only when ``flow`` is mathematically independent of ``dp`` (so ``dflow`` is
     identically zero everywhere) -- ``FixedFlow`` is the built-in example. The differentiable
     solve path (``KirchhoffLayer.solve(differentiable=True)``, in
-    ``noodl.layers._functional.FunctionalLaws.dflows``) uses this flag, and only this flag, to
+    ``noodl.layers.kirchhoff.KirchhoffLayer._law_slopes``) uses this flag, and only this flag, to
     decide whether a missing gradient of ``flow`` with respect to ``dp`` is legitimate (this
     element declares it does not depend on ``dp``) or a bug (some other element's ``flow``
     silently dropped the autograd graph, e.g. via a stray ``dp.detach()``). Declaring instead
@@ -125,46 +174,69 @@ class ConstitutiveLaw(torch.nn.Module):
 
     kind: str
     dp_independent: bool = False
-    #: "potential": flow is a function of the potential difference, `q = flow(dp)`.
-    #: "implicit": the law is a relation `residual(dp, q) = 0` and the flow is an unknown
-    #: of the layer (`ImplicitLaw`); this covers flow-controlled laws and ideal sources.
-    law_form: str = "potential"
+    #: True when `dflow` is the exact derivative of `flow` (to rounding) wherever `flow` is
+    #: smooth, so the differentiable solve may use it for its Newton Jacobian and its adjoint.
+    #: False for a law whose `dflow` is a deliberate Newton aid (a slope floor, a slope where
+    #: the flow is flat): the differentiable solve then differentiates `flow` by autograd.
+    #: Declared, not inferred; audited by `tests/elements/test_dflow_exact.py`.
+    exact_slope: bool = True
     #: Edges of this law's kind form consecutive groups of `ports` edges (kind order); the
     #: law may couple the edges within a group (a transformer's two windings), never across.
     ports: int = 1
-    #: True for a law with storage (a capacitance, an inductance): it implements every mode
-    #: of `LawContext` and reads its step-start values from the context.
+    #: True for a law that reads its step-start values (`ctx.dp_prev`, `ctx.q_prev`): the
+    #: layer then needs `history` on a step.
     dynamic: bool = False
-    #: True when `flow` takes a third argument, the `LawContext` (a dynamic or
-    #: frequency-dependent law). False keeps the two-argument `flow(dp, drivers)`.
-    contextual: bool = False
+    #: Set per class from the signature of `flow`: True when it has a parameter named `ctx`,
+    #: and the law is then given the `LawContext`.
+    _takes_ctx: bool = False
     #: True when the law accepts complex `dp` (phasor layers): a linear law with a real or
     #: complex coefficient. Nonlinear laws stay False and are refused by a phasor layer.
     phasor_capable: bool = False
     #: True when the law's flow (or residual) is affine in `dp` (and `q`) once its drivers
     #: and `LawContext` are fixed: its Jacobian is then constant within one solve. A layer
-    #: whose laws and node sources are all linear takes the full Newton step from the start
+    #: whose laws and withdrawals are all linear takes the full Newton step from the start
     #: (`KirchhoffLayer.linear`), so it converges in one iteration. Declared, not inferred.
     linear: bool = False
+
+    def __init_subclass__(cls, **kwargs) -> None:
+        super().__init_subclass__(**kwargs)
+        for gone, use in (
+                ("law_form", "an implicit law subclasses ImplicitLaw"),
+                ("contextual", "declare a `ctx` parameter in `flow` to receive the context")):
+            if gone in cls.__dict__:
+                raise TypeError(
+                    f"{cls.__name__} defines `{gone}`, which no longer exists: {use}")
+        cls._takes_ctx = "ctx" in inspect.signature(cls.flow).parameters
 
     def __init__(self, kind: str) -> None:
         super().__init__()
         self.kind = kind
 
     def flow(self, dp: Tensor, drivers: Mapping[str, Tensor] | None = None) -> Tensor:
-        """Branch flow q(dp); elementwise in dp. Abstract in the base class."""
+        """Branch flow q(dp); elementwise in dp. Abstract in the base class.
+
+        A law that needs the `LawContext` (time, frequency, step-start values) names a third
+        parameter `ctx`; the layer then passes it."""
         raise NotImplementedError(f"{type(self).__name__} does not implement flow()")
+
+    def residual(self, dp: Tensor, q: Tensor, drivers: Mapping[str, Tensor] | None = None,
+                 ctx: LawContext | None = None) -> Tensor:
+        """The law as a relation between the potential difference and the flow, zero when
+        they agree: `q - flow(dp)` for a law that gives its flow. A law that cannot give the
+        flow from the potential difference (an `ImplicitLaw`) writes this instead, and the
+        layer then solves for its flow as an unknown."""
+        return q - self(dp, drivers, ctx)
 
     def forward(self, dp: Tensor, drivers: Mapping[str, Tensor] | None = None,
                 ctx: LawContext | None = None) -> Tensor:
         """Alias for :meth:`flow` so ``Module.__call__``/``torch.func.functional_call`` work.
 
         Delegates to ``self.flow`` (rather than being assigned ``forward = flow`` in the
-        class body) so that subclass overrides of ``flow`` remain reachable. A contextual
-        law receives the `LawContext` as a third argument; any other law keeps the
+        class body) so that subclass overrides of ``flow`` remain reachable. A law whose
+        ``flow`` has a ``ctx`` parameter receives the `LawContext`; any other law keeps the
         two-argument call whatever `ctx` is.
         """
-        if self.contextual:
+        if self._takes_ctx:
             return self.flow(dp, drivers, ctx)
         return self.flow(dp, drivers)
 
@@ -184,7 +256,7 @@ class ConstitutiveLaw(torch.nn.Module):
         output that does not require grad at all, or because ``dp`` is silently unused inside
         it (e.g. a stray ``dp.detach()``) -- that is the same gradient hazard the
         differentiable solve path guards against in
-        ``noodl.layers._functional.FunctionalLaws.dflows``, reached here via
+        ``noodl.layers.kirchhoff.KirchhoffLayer._law_slopes``, reached here via
         ``KirchhoffLayer.linear_init`` instead. Raise a clear error naming the element
         and its kind rather than letting a raw, unattributed autograd error escape.
         """
@@ -216,6 +288,48 @@ class ConstitutiveLaw(torch.nn.Module):
                     f"graph (e.g. a stray dp.detach())."
                 ) from exc
         return grad
+
+    def jacobian(self, dp: Tensor, q: Tensor | None, drivers: Mapping[str, Tensor] | None,
+                 ctx: LawContext | None) -> tuple[Tensor, ...]:
+        """The law's local derivative blocks, shape `(..., G, m, m, w, w)` per input: G groups
+        of `ports` = m edges, `w = 2` for a complex `dp` (its real view), else 1.
+
+        Returns `(d flow / d dp,)` for a law with a flow and `(d r / d dp, d r / d q)` for an
+        implicit law; `q` is the edges' flow, used by an implicit law only. A law that knows
+        its derivatives overrides this (a phasor law writes its entries as real 2x2 blocks).
+
+        The default is `dflow` for a one-port, law without `ctx` on a real `dp`, and
+        otherwise the law's own `forward` differentiated by reverse-mode colouring.
+        """
+        if (self.ports == 1 and not self._takes_ctx and not dp.is_complex()
+                and self._drivers_fit(dp, drivers)):
+            return (self.dflow(dp, drivers)[..., None, None, None, None],)
+        return self._coloured_jacobian(dp, q, drivers, ctx)
+
+    @staticmethod
+    def _drivers_fit(dp: Tensor, drivers: Mapping[str, Tensor] | None) -> bool:
+        """Whether every driver's batch shape broadcasts into `dp`'s: only then is the
+        autograd `dflow` per instance (a wider driver batch would be summed over)."""
+        batch = tuple(dp.shape[:-1])
+        for v in (drivers or {}).values():
+            if isinstance(v, Tensor) and v.dim() > 0:
+                try:
+                    if tuple(broadcast_shapes(batch, v.shape[:-1])) != batch:
+                        return False
+                except (RuntimeError, ValueError):
+                    return False
+        return True
+
+    def _coloured_jacobian(self, dp, q, drivers, ctx) -> tuple[Tensor, ...]:
+        """`_colour_blocks` of `forward` with respect to `dp` (and `q`, for an implicit law)."""
+        from noodl.layers._device import complex_of
+        w = 2 if dp.is_complex() else 1
+        cdtype = complex_of(dp.dtype)
+        if q is None:
+            return tuple(_colour_blocks(lambda d: self(d, drivers, ctx), (dp,), self.ports, w,
+                                        cdtype))
+        return tuple(_colour_blocks(lambda d, qq: self(d, qq, drivers, ctx), (dp, q),
+                                    self.ports, w, cdtype))
 
     def switching(self, dp: Tensor, drivers: Mapping[str, Tensor] | None = None
                   ) -> Tensor | None:
@@ -268,20 +382,16 @@ class ConstitutiveLaw(torch.nn.Module):
 
 
 class ImplicitLaw(ConstitutiveLaw):
-    """A constitutive law written as a relation `residual(dp, q, drivers, ctx) = 0`.
+    """An implicit law: a law whose flow is an unknown of the layer (an ideal source, a
+    flow-controlled pipe, an inductance). It cannot give the flow from the potential
+    difference; it is a relation `residual(dp, q, drivers, ctx) = 0` instead.
 
-    The flow of an implicit law's edges is an unknown of the layer, alongside the nodal
-    potentials (Modified Nodal Analysis). This is the form of a flow-controlled law
-    (`dp = h(q)`), of an ideal potential source (`dp = V`), and of a law that couples flow and
-    potential through stored state (an inductance). `residual` returns one value per edge,
-    with the shape of `dp`.
+    Subclasses implement `residual`, which returns one value per edge, with the shape of
+    `dp`. `flow` and `dflow` refuse: the flow is read from the layer's solved `q`.
     """
 
-    law_form = "implicit"
-    contextual = True
-
-    def residual(self, dp: Tensor, q: Tensor, drivers: Mapping[str, Tensor] | None,
-                 ctx: LawContext | None) -> Tensor:
+    def residual(self, dp: Tensor, q: Tensor, drivers: Mapping[str, Tensor] | None = None,
+                 ctx: LawContext | None = None) -> Tensor:
         raise NotImplementedError(f"{type(self).__name__} does not implement residual()")
 
     def forward(self, dp: Tensor, q: Tensor, drivers: Mapping[str, Tensor] | None = None,
@@ -289,15 +399,15 @@ class ImplicitLaw(ConstitutiveLaw):
         """Return `residual(dp, q, drivers, ctx)`.
 
         An implicit law is called as `law(dp, q, drivers, ctx)`, with the flow `q` as the
-        second argument, unlike a potential-controlled law, which is called as
-        `law(dp, drivers, ctx)` and computes its flow from `dp`.
+        second argument, unlike a law with a flow, which is called as `law(dp, drivers, ctx)`
+        and computes its flow from `dp`.
         """
         return self.residual(dp, q, drivers, ctx)
 
     def _no_flow(self) -> TypeError:
         return TypeError(
             f"{type(self).__name__} (kind {self.kind!r}) is an implicit law: its flow is an "
-            f"unknown of the layer, not a function flow(dp); read it from the layer's solved q"
+            f"unknown of the layer; read it from the solved q"
         )
 
     def flow(self, dp, drivers=None, ctx=None):
@@ -307,4 +417,7 @@ class ImplicitLaw(ConstitutiveLaw):
         raise self._no_flow()
 
     def linear_init(self, drivers=None):
+        """Refused: an implicit law has no tangent `(c, k)`. A layer's linear guess
+        (`KirchhoffLayer.linear_init`) takes its `residual` and `jacobian` at zero flow
+        instead."""
         raise self._no_flow()

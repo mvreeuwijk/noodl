@@ -111,16 +111,18 @@ def test_builder_layer_keys_kinds_and_circuit_index():
     ])
     model, state, drivers = build_model(circuit)
     layer = model.kirchhoff[LAYER]
-    assert layer.kinds == ["voltage_source", "resistor", "capacitor", "inductor",
-                           "ideal_transformer", "vcvs"]
+    # C1 is a capacitor to ground: a storage entry, not a `capacitor` edge
+    assert layer.kinds == ["voltage_source", "resistor", "inductor", "ideal_transformer",
+                           "vcvs"]
+    assert len(layer.storage) == 1 and model.circuit_storage == {"C1": (0, 2, 0, 1.0)}
     assert layer.quantity == "voltage" and layer.unit == "V" and layer.flow_unit == "A"
     assert model.net.nodes[0] == "0"
     assert set(drivers) == {f"{LAYER}.phi_boundary"}
     index = model.circuit_index
     assert index["R2"] == ("resistor", slice(2, 3))
     assert index["R3"] == ("resistor", slice(3, 4))
-    assert index["T1"] == ("ideal_transformer", slice(8, 10))
-    assert index["E1"] == ("vcvs", slice(10, 12))
+    assert index["T1"] == ("ideal_transformer", slice(7, 9))
+    assert index["E1"] == ("vcvs", slice(9, 11))
     op = operating_point(model, drivers)
     values = device_values(model, op)
     v, i = values["T1"]

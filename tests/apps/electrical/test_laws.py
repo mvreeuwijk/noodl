@@ -23,7 +23,7 @@ from noodl.apps.electrical import (
     SwitchedConductance,
     TransformerRatio,
 )
-from noodl.elements import LawContext
+from noodl.elements import ImplicitLaw, LawContext
 from noodl.layers.kirchhoff import KirchhoffLayer
 from noodl.topology import Network
 from tests._circuit_laws import Cap, Ind
@@ -142,7 +142,8 @@ def test_prescribed_current_into_a_resistor():
     # current source a -> gnd draws 1 A out of a (MSL: i enters pin p = a); R = 2 => v_a = -2
     net, layer = _layer([("a", "gnd", "current_source"), ("a", "gnd", "resistor")],
                         [PrescribedCurrent(T([1.0])), Resistance(T([2.0]))])
-    assert layer.mna
+    # a current source gives its flow: the layer has no flow unknowns
+    assert layer.implicit_edges.numel() == 0
     phi, q = layer.solve(GROUND, differentiable=False)
     _close(_at(net, phi, "a"), -2.0)
     _close(q, [1.0, -1.0])
@@ -198,7 +199,7 @@ def test_sine_source_transient_steady_state_matches_its_phasor():
     samples = []
     for k in range(1, 3 * n + 1):
         phi, q = layer.solve(GROUND, history=(phi, q), dt=dt, t=k * dt,
-                             integration="trapezoidal", differentiable=False)
+                             scheme="trapezoidal", differentiable=False)
         if k > 2 * n:
             samples.append((k * dt, phi[b].item()))
     w = 2 * math.pi * f
@@ -266,14 +267,14 @@ _CONTEXTS = [
     LawContext(mode="dc"),
     LawContext(mode="initial"),
     LawContext(mode="phasor", omega=T([314.0, 1000.0])),
-    LawContext(mode="transient", dt=0.1, integration="backward_euler",
+    LawContext(mode="transient", dt=0.1, scheme="backward_euler",
                dp_prev=T([0.3, -0.2]), q_prev=T([0.05, 0.4])),
-    LawContext(mode="transient", dt=0.1, integration="trapezoidal",
+    LawContext(mode="transient", dt=0.1, scheme="trapezoidal",
                dp_prev=T([0.3, -0.2]), q_prev=T([0.05, 0.4])),
 ]
 
 
-@pytest.mark.parametrize("ctx", _CONTEXTS, ids=lambda c: f"{c.mode}-{c.integration}")
+@pytest.mark.parametrize("ctx", _CONTEXTS, ids=lambda c: f"{c.mode}-{c.scheme}")
 def test_capacitance_and_inductance_are_the_companion_forms(ctx):
     dp, q = T([1.5, -0.7]), T([0.2, 0.9])
     if ctx.mode == "phasor":
@@ -282,9 +283,14 @@ def test_capacitance_and_inductance_are_the_companion_forms(ctx):
               Cap(T([2e-3, 1e-2]), v0=T([0.4, 0.1]))),
              (Inductance(T([1e-3, 5e-2]), i0=T([0.3, -0.2])),
               Ind(T([1e-3, 5e-2]), i0=T([0.3, -0.2])))]
+    # The laws write the trapezoidal form through `step_rate` (`q - (2 C ddp / dt - q_prev)`),
+    # the reference keeps `q + q_prev - 2 C / dt ddp`: equal to rounding, a few ulp of the
+    # largest term; every other mode is the same arithmetic, bit for bit.
+    tol = 8 * torch.finfo(torch.float64).eps if ctx.scheme == "trapezoidal" and (
+        ctx.mode == "transient") else 0
     for law, reference in pairs:
-        assert law.dynamic and law.phasor_capable and law.law_form == "implicit"
-        _close(law(dp, q, {}, ctx), reference(dp, q, {}, ctx), tol=0)
+        assert law.dynamic and law.phasor_capable and isinstance(law, ImplicitLaw)
+        _close(law(dp, q, {}, ctx), reference(dp, q, {}, ctx), tol=tol)
 
 
 def test_rc_backward_euler_step_is_exact():
@@ -296,7 +302,7 @@ def test_rc_backward_euler_step_is_exact():
     v = 0.0
     for _ in range(3):
         phi, q = layer.solve(GROUND, history=(phi, q), dt=0.1, t=0.0,
-                             integration="backward_euler", differentiable=False)
+                             scheme="backward_euler", differentiable=False)
         v = (v + 0.1) / 1.1
         _close(_at(net, phi, "b"), v, tol=1e-13)
 
@@ -436,10 +442,10 @@ def _two_inductor_layer(laws, kinds):
     return _layer(edges, [PrescribedVoltage(T([1.0, 2.0])), Resistance(T([1.0, 2.0])), *laws])
 
 
-def _march(layer, steps, integration, dt=0.05):
+def _march(layer, steps, scheme, dt=0.05):
     phi, q = layer.solve(GROUND, mode="initial", differentiable=False)
     for _ in range(steps):
-        phi, q = layer.solve(GROUND, history=(phi, q), dt=dt, t=0.0, integration=integration,
+        phi, q = layer.solve(GROUND, history=(phi, q), dt=dt, t=0.0, scheme=scheme,
                              differentiable=False)
     return phi, q
 
@@ -450,9 +456,9 @@ def test_mutual_inductance_reduces_to_two_inductors_when_M_zero():
         ["transformer", "transformer"])
     _, single = _two_inductor_layer([Inductance(T([0.2, 0.5]), i0=T([0.1, -0.3]))],
                                     ["inductor", "inductor"])
-    for integration in ("trapezoidal", "backward_euler"):
-        phi_c, q_c = _march(coupled, 4, integration)
-        phi_s, q_s = _march(single, 4, integration)
+    for scheme in ("trapezoidal", "backward_euler"):
+        phi_c, q_c = _march(coupled, 4, scheme)
+        phi_s, q_s = _march(single, 4, scheme)
         _close(phi_c, phi_s, tol=1e-13)
         _close(q_c, q_s, tol=1e-13)
 
@@ -467,7 +473,7 @@ def test_mutual_inductance_companion_matches_hand_step():
     phi, q = layer.solve(GROUND, mode="initial", differentiable=False)
     _close(q[2:], [0.1, 0.2])
     phi, q = layer.solve(GROUND, history=(phi, q), dt=dt, t=0.0,
-                         integration="backward_euler", differentiable=False)
+                         scheme="backward_euler", differentiable=False)
     Lmat = torch.tensor([[L1, M], [M, L2]])
     di = torch.linalg.solve(Lmat, T([1.0, -0.5])) * dt
     _close(q[2:], T([0.1, 0.2]) + di, tol=1e-12)
@@ -486,15 +492,15 @@ def test_mutual_inductance_phasor_and_dc():
 
 
 def test_laws_carry_many_devices_and_declare_their_forms():
-    assert PrescribedVoltage(1.0).law_form == "implicit"
+    assert isinstance(PrescribedVoltage(1.0), ImplicitLaw)
     assert PrescribedVoltage(1.0).phasor_capable
     cur = PrescribedCurrent(T([1.0, 2.0]), waveforms=Constant())
-    assert cur.law_form == "potential" and cur.dp_independent and cur.contextual
+    assert not isinstance(cur, ImplicitLaw) and cur.dp_independent and cur._takes_ctx
     _close(cur(T([[5.0, 6.0]]), {}, LawContext(mode="dc")), [[1.0, 2.0]])
     assert TransformerRatio(1.0).ports == 2 and MutualInductance(1, 1, 0).ports == 2
     assert MutualInductance(1, 1, 0).dynamic
     assert DependentSource(1.0, control="current", output="current").ports == 2
-    assert not Resistance(1.0).contextual and Resistance(1.0).phasor_capable
+    assert not Resistance(1.0)._takes_ctx and Resistance(1.0).phasor_capable
 
 
 # ----------------------------------------------------- temperature and scale options

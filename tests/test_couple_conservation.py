@@ -66,8 +66,8 @@ def coupled_case(scheme, substeps=1, *, source=0.0, initial_b=0.0):
     "scheme, substeps",
     [
         ("exact", 1),
-        ("implicit", 1),  # control: a single implicit step's endpoint flux IS its integral
-        ("implicit", 4),
+        ("backward_euler", 1),  # control: a single implicit step's endpoint flux IS its integral
+        ("backward_euler", 4),
         ("trapezoidal", 1),
     ],
 )
@@ -85,7 +85,7 @@ def test_two_way_iteration_returns_the_coupled_backward_euler_solution():
     B: b = 1 + 1 + (a - b)      -> -a + 2b = 2
     Solution (4/3, 5/3). The old code returned (1.5, 1.5) with converged=True.
     """
-    a, b, diagnostics = coupled_case("implicit", 1, source=1.0, initial_b=1.0)
+    a, b, diagnostics = coupled_case("backward_euler", 1, source=1.0, initial_b=1.0)
     assert bool(diagnostics["converged"].all())
     assert a == pytest.approx(4 / 3, abs=1e-9)
     assert b == pytest.approx(5 / 3, abs=1e-9)
@@ -102,12 +102,13 @@ def test_a_two_way_step_never_assembles_a_dense_topology_operator(monkeypatch):
     monkeypatch.setattr(Network, "incidence", forbidden)
     monkeypatch.setattr(Network, "source_selector", forbidden)
     monkeypatch.setattr(Network, "target_selector", forbidden)
-    a, b, _ = coupled_case("implicit", 1)
+    a, b, _ = coupled_case("backward_euler", 1)
     assert a + b == pytest.approx(1.0, abs=1e-10)
 
 
-@pytest.mark.parametrize("scheme, substeps", [("exact", 1), ("implicit", 1), ("implicit", 4),
-                                              ("trapezoidal", 1), ("trapezoidal", 3)])
+@pytest.mark.parametrize("scheme, substeps", [("exact", 1), ("backward_euler", 1),
+                                              ("backward_euler", 4), ("trapezoidal", 1),
+                                              ("trapezoidal", 3)])
 def test_conservation_holds_before_convergence(scheme, substeps):
     """Conservation is by construction: cap the iteration at two passes and check the
     balance of what IS returned, on a pass-2 state that is still far from the fixed point
@@ -135,8 +136,8 @@ def test_conservation_holds_before_convergence(scheme, substeps):
 
 
 def test_unequal_capacities_nonzero_states_and_reversed_flow_conserve():
-    a = compartment("a", scheme="implicit", initial=0.3)
-    b = compartment("b", scheme="implicit", circulation=True, initial=2.0)
+    a = compartment("a", scheme="backward_euler", initial=0.3)
+    b = compartment("b", scheme="backward_euler", circulation=True, initial=2.0)
     a[0].transport["a"].capacity = _t([3.0])
     b[0].transport["b"].capacity = _t([0.5])
     # reverse B's circulation: both edges carry -1
@@ -165,12 +166,12 @@ def test_external_sources_on_both_sides_enter_the_budget_exactly():
 
 
 def test_two_recipients_of_one_donor_conserve_and_report_each_transfer():
-    a = compartment("a", scheme="implicit")
+    a = compartment("a", scheme="backward_euler")
     # initial=0.0, as the fixtures above do: with every compartment starting at the
     # same 1.0, A's boundary value would already equal each recipient's own state and no
     # transfer would ever be nonzero.
-    b1 = compartment("b1", scheme="implicit", circulation=True, initial=0.0)
-    b2 = compartment("b2", scheme="implicit", circulation=True, initial=0.0)
+    b1 = compartment("b1", scheme="backward_euler", circulation=True, initial=0.0)
+    b2 = compartment("b2", scheme="backward_euler", circulation=True, initial=0.0)
     model, state, drivers = union(
         {"A": a, "B1": b1, "B2": b2},
         [ValueLink("A", "a.x", 0, "B1", "b1.x_boundary", two_way=True),
@@ -185,8 +186,8 @@ def test_two_recipients_of_one_donor_conserve_and_report_each_transfer():
 
 
 def test_a_model_that_is_both_recipient_and_donor_is_refused_by_name():
-    a = compartment("a", scheme="implicit", circulation=True)
-    b = compartment("b", scheme="implicit", circulation=True)
+    a = compartment("a", scheme="backward_euler", circulation=True)
+    b = compartment("b", scheme="backward_euler", circulation=True)
     with pytest.raises(ValueError, match="both a recipient and a donor"):
         union({"A": a, "B": b},
               [ValueLink("A", "a.x", 0, "B", "b.x_boundary", two_way=True),
@@ -194,10 +195,10 @@ def test_a_model_that_is_both_recipient_and_donor_is_refused_by_name():
 
 
 def test_batch_with_mixed_convergence_is_reported_per_instance():
-    a = compartment("a", scheme="implicit")
+    a = compartment("a", scheme="backward_euler")
     # initial=0.0 (see the comment above): otherwise A's boundary already equals B's own
     # state and the coupling converges trivially on pass 1 for both instances.
-    b = compartment("b", scheme="implicit", circulation=True, initial=0.0)
+    b = compartment("b", scheme="backward_euler", circulation=True, initial=0.0)
     b_model, b_state, b_drivers = b
     # Instance 1 exchanges 20x faster than instance 0. Measured (for the
     # recipient-first schedule): instance 1's faster exchange reaches its own
@@ -216,7 +217,7 @@ def test_batch_with_mixed_convergence_is_reported_per_instance():
 
 
 def test_cross_interface_gradient_matches_central_differences_for_each_scheme():
-    for scheme, substeps in (("exact", 1), ("implicit", 2), ("trapezoidal", 1)):
+    for scheme, substeps in (("exact", 1), ("backward_euler", 2), ("trapezoidal", 1)):
         def run(q_val, scheme=scheme, substeps=substeps):
             a = compartment("a", scheme=scheme)
             b = compartment("b", scheme=scheme, circulation=True)
@@ -249,7 +250,7 @@ def test_partitioned_error_against_a_monolithic_reference_shrinks_with_the_step(
         net.add_edge("b", "a", kind="flow")
         net.add_edge("b", "amb", kind="flow")      # inactive: q = 0
         layer = TransportLayer(net, "m", capacity=_t([1.0, 1.0]), flow_kind="flow",
-                               boundary=["amb"], scheme="implicit")
+                               boundary=["amb"], scheme="backward_euler")
         model = Model(net, {"m": layer}, closures=[lambda s, d: {"m.q": _t([1.0, 1.0, 0.0])}])
         state = {"m.x": _t([1.0, 0.0])}
         drivers = {"m.x_boundary": _t([0.0]), "m.sources": torch.zeros(3, dtype=F64)}
@@ -258,11 +259,11 @@ def test_partitioned_error_against_a_monolithic_reference_shrinks_with_the_step(
         return state["m.x"]
 
     def partitioned(dt, steps):
-        a = compartment("a", scheme="implicit")
+        a = compartment("a", scheme="backward_euler")
         # initial=0.0, matching the monolithic reference's own state = [1.0, 0.0] above:
         # otherwise A and B start at the same value, the boundary is already at equilibrium,
         # and the partitioned run never moves at all regardless of dt.
-        b = compartment("b", scheme="implicit", circulation=True, initial=0.0)
+        b = compartment("b", scheme="backward_euler", circulation=True, initial=0.0)
         model, state, drivers = union(
             {"A": a, "B": b}, [ValueLink("A", "a.x", 0, "B", "b.x_boundary", two_way=True)],
             substeps={"B": 4}, iterate_rtol=1e-12, iterate_atol=1e-14, iterate_max=200,
@@ -285,7 +286,7 @@ def test_a_recipient_with_an_extra_unlinked_layer_runs_step_with_transfer_only_o
     real building/street coupling) must not pay `step_with_transfer`'s extra cost -- the
     coupler must ask only for the linked layer's transfer, never every transport layer of
     the recipient."""
-    a = compartment("a", scheme="implicit")
+    a = compartment("a", scheme="backward_euler")
 
     net = Network(dtype=F64)
     net.add_node("ambient")
@@ -297,7 +298,7 @@ def test_a_recipient_with_an_extra_unlinked_layer_runs_step_with_transfer_only_o
     net.add_edge("z2", "amb2", kind="heat")
     net.add_edge("amb2", "z2", kind="heat")
     linked = TransportLayer(net, "b", capacity=_t([1.0]), flow_kind="flow",
-                             boundary=["ambient"], scheme="implicit",
+                             boundary=["ambient"], scheme="backward_euler",
                              quantity="concentration", unit="kg/m3")
     extra = TransportLayer(net, "extra", capacity=_t([1.0]), flow_kind="heat",
                             boundary=["amb2"], scheme="exact")
@@ -333,8 +334,8 @@ def test_a_recipient_with_an_extra_unlinked_layer_runs_step_with_transfer_only_o
 
 
 def _coupled_with_source(s, *, iterate_rtol=1e-12):
-    a = compartment("a", scheme="implicit")
-    b = compartment("b", scheme="implicit", circulation=True, initial=1.0, source=s)
+    a = compartment("a", scheme="backward_euler")
+    b = compartment("b", scheme="backward_euler", circulation=True, initial=1.0, source=s)
     model, state, drivers = union(
         {"A": a, "B": b},
         [ValueLink("A", "a.x", 0, "B", "b.x_boundary", two_way=True)],
@@ -417,9 +418,9 @@ def test_a_one_way_link_riding_on_the_iteration_carries_its_own_gradient():
     at B's start value. Central differences say otherwise.
     """
     def run(s):
-        a = compartment("a", scheme="implicit")
-        b = compartment("b", scheme="implicit", circulation=True, initial=1.0, source=s)
-        c = compartment("c", scheme="implicit", circulation=True, initial=0.0)
+        a = compartment("a", scheme="backward_euler")
+        b = compartment("b", scheme="backward_euler", circulation=True, initial=1.0, source=s)
+        c = compartment("c", scheme="backward_euler", circulation=True, initial=0.0)
         model, state, drivers = union(
             {"A": a, "B": b, "C": c},
             [ValueLink("A", "a.x", 0, "B", "b.x_boundary", two_way=True),
@@ -450,9 +451,9 @@ def test_the_adjoint_solves_a_batched_interface_per_instance():
     weights = torch.arange(1.0, n + 1.0, dtype=F64)
 
     def run(s, diagnostics=None):
-        a = compartment("a", scheme="implicit")
+        a = compartment("a", scheme="backward_euler")
         b_model, b_state, b_drivers = compartment(
-            "b", scheme="implicit", circulation=True, initial=1.0)
+            "b", scheme="backward_euler", circulation=True, initial=1.0)
         q = torch.stack([_t([1.0 + i, 1.0 + i]) for i in range(n)])
         b_model.closures[0] = lambda _s, _d: {"b.q": q}
         b_drivers = dict(b_drivers)
@@ -499,8 +500,8 @@ def test_every_pass_of_a_two_way_step_integrates_over_the_same_clocked_interval(
     """The outer start time reaches the recipient's sub-steps at their own offsets, and
     every fixed-point pass re-steps over the SAME interval: the clock never advances with
     the pass count."""
-    a = compartment("a", scheme="implicit")
-    b_model, b_state, b_drivers = compartment("b", scheme="implicit", circulation=True)
+    a = compartment("a", scheme="backward_euler")
+    b_model, b_state, b_drivers = compartment("b", scheme="backward_euler", circulation=True)
     clocked = _ClockedSource(b_model.closures[0])
     b_model = Model(b_model.net, dict(b_model.transport), closures=[clocked])
     model, state, drivers = union(
@@ -522,7 +523,7 @@ def test_every_pass_of_a_two_way_step_integrates_over_the_same_clocked_interval(
 
 def _counting_union(b, **kwargs):
     """A (start 0) --two-way--> B, counting B's steps (one per pass, no substeps)."""
-    a = compartment("a", scheme="implicit", initial=0.0)
+    a = compartment("a", scheme="backward_euler", initial=0.0)
     b_model, b_state, b_drivers = b
     calls: list[int] = []
     real = b_model.step
@@ -546,11 +547,11 @@ def test_a_coupled_step_pays_one_confirming_pass_in_grad_mode_and_none_under_no_
     """Nothing requires grad: in grad mode one uncounted probe pass at the certified
     interface confirms it; under `torch.no_grad()` only the primal passes run."""
     assert torch.is_grad_enabled()
-    b = compartment("b", scheme="implicit", circulation=True, initial=1.0, source=0.3)
+    b = compartment("b", scheme="backward_euler", circulation=True, initial=1.0, source=0.3)
     calls, diagnostics = _counting_union(b)
     assert diagnostics["adjoint"] is None and diagnostics["passes"] >= 2
     assert len(calls) == diagnostics["passes"] + 1
-    b = compartment("b", scheme="implicit", circulation=True, initial=1.0, source=0.3)
+    b = compartment("b", scheme="backward_euler", circulation=True, initial=1.0, source=0.3)
     with torch.no_grad():
         calls, diagnostics = _counting_union(b)
     assert diagnostics["adjoint"] is None and len(calls) == diagnostics["passes"]
@@ -568,7 +569,7 @@ def test_a_coupled_step_pays_the_confirming_pass_when_a_parameter_is_unused_on_p
 def _branching_recipient(theta):
     """B (start 1) whose source reads its own coupled boundary value: the constant 1 while
     `b.x_boundary <= 0.1`, `theta` above."""
-    b_model, b_state, b_drivers = compartment("b", scheme="implicit", circulation=True,
+    b_model, b_state, b_drivers = compartment("b", scheme="backward_euler", circulation=True,
                                               initial=1.0)
     plain = b_model.closures[0]
 
@@ -587,8 +588,8 @@ def _branching_coupled(theta):
     value: the constant 1 while `b.x_boundary <= 0.1`, `theta` above. Pass 1 sees the
     boundary at A's start, 0, so it takes the constant branch and reads no parameter; the
     fixed point a = (1 + theta)/3, b = 2 (1 + theta)/3 lies on the parameter branch."""
-    a = compartment("a", scheme="implicit", initial=0.0)
-    b_model, b_state, b_drivers = compartment("b", scheme="implicit", circulation=True,
+    a = compartment("a", scheme="backward_euler", initial=0.0)
+    b_model, b_state, b_drivers = compartment("b", scheme="backward_euler", circulation=True,
                                               initial=1.0)
     plain = b_model.closures[0]
 

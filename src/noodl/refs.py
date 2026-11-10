@@ -450,7 +450,7 @@ def input_field(
     model: Model, key: str, *, description: str, unit: str = "", over=None,
     required: bool = True, ordering: str | None = None,
 ) -> Field:
-    """A `Field` for an input a closure, reaction, law or drive reads itself (a wind
+    """A `Field` for an input a closure, reaction, law or head term reads itself (a wind
     speed, an inflow), as a closure's `input_specs` or a builder's `model.input_specs`
     declares it.
 
@@ -567,29 +567,48 @@ class LayerRef:
             self.inactive_nodes = [nodes[i] for i in layer.inactive.tolist()]
             q_labels, q_alias = _edge_labels(net, layer.cols.tolist())
             meta = dict(quantity=self.quantity, unit=self.unit)
-            # A layer with dynamic laws (a capacitance, an inductance) starts every time
-            # step from its potentials and flows at the step start.
+            # A layer with dynamic laws (a capacitance, an inductance) or node storage starts
+            # every time step from its potentials and flows at the step start.
             stored = _steps_from_state(layer)
+            holds = _holds_storage(layer)
             state["phi"] = Field(
                 f"{name}.phi", role="state", axis="node", labels=nodes,
                 aliases=_node_aliases(net, nodes),
-                ordering="full node order", required="step" if stored else "optional",
+                ordering="full node order",
+                required="always" if holds else "step" if stored else "optional",
                 default=None,
                 description="solved potential (the step start of its dynamic laws)" if stored
-                else "solved potential (a warm start when given)", **meta, **common,
+                else "solved potential (the held potential of its boundary storage)"
+                if holds else "solved potential (a warm start when given)", **meta, **common,
             )
             state["q"] = Field(
                 f"{name}.q", role="state", axis="edge", labels=q_labels, aliases=q_alias,
                 ordering=f"edge order of kinds {tuple(layer.kinds)}",
-                required="step" if stored else "optional",
+                required="step" if stored and _reads_step_flows(layer) else "optional",
                 default=0.0, description="solved branch flows",
                 unit=getattr(layer, "flow_unit", ""), **common,
             )
+            storages = getattr(layer, "storage", ())
+            if storages:
+                entries = [nodes[i] for st in storages for i in st.nodes.tolist()]
+                state["storage_flow"] = Field(
+                    f"{name}.storage_flow", role="state", axis="node", labels=entries,
+                    ordering="storage entry order (storages in list order, then their nodes)",
+                    required="optional", default=0.0,
+                    description="flow into every storage entry (the trapezoidal step start)"
+                    if not holds else "flow into every boundary storage entry",
+                    unit=getattr(layer, "flow_unit", ""), **common,
+                )
+            # A layer that holds its storage at boundary nodes holds those at the step-start
+            # potentials, so the driver gives the others only.
+            given = [nodes[i] for i in layer.prescribed.tolist()]
             inputs["phi_boundary"] = Field(
-                f"{name}.phi_boundary", role="driver", axis="node", labels=self.boundary_nodes,
-                aliases=_node_aliases(net, self.boundary_nodes),
+                f"{name}.phi_boundary", role="driver", axis="node", labels=given,
+                aliases=_node_aliases(net, given),
                 ordering="boundary order", required="always", default=None,
-                description="prescribed potential at the boundary nodes", **meta, **common,
+                description="prescribed potential at the boundary nodes" + (
+                    " (but the storage nodes, held at their step-start potentials)"
+                    if holds else ""), **meta, **common,
             )
             inputs["sources"] = Field(
                 f"{name}.sources", role="driver", axis="node", labels=nodes,
@@ -598,6 +617,15 @@ class LayerRef:
                 required="optional", default=0.0,
                 description="nodal injection (zero on boundary and inactive nodes)",
                 unit=getattr(layer, "flow_unit", ""), **common,
+            )
+            # Short name "edge_head", not "head": a layer whose quantity is "head" (water)
+            # names its potential `ref.head`, and that attribute must stay the potential.
+            inputs["edge_head"] = Field(
+                f"{name}.edge_head", role="driver", axis="edge", labels=q_labels, aliases=q_alias,
+                ordering=f"edge order of kinds {tuple(layer.kinds)}",
+                required="optional", default=0.0,
+                description="added to each edge's potential difference (stack, wind, drag)",
+                **meta, **common,
             )
             frequency = getattr(layer, "frequency_key", None)
             if frequency is not None:
@@ -803,7 +831,7 @@ class LayerRefs(Mapping[str, LayerRef]):
     Item access works for every name; attribute access for names that are identifiers.
     `closure_state` maps each closure-carried state key to a `Field` when its closure
     declares the labels (a `key_labels` attribute, `{key: labels}`), else to the plain key.
-    `inputs` maps each input a closure, reaction, law or drive reads itself -- a wind
+    `inputs` maps each input a closure, reaction, law or head term reads itself -- a wind
     speed, an inflow, a photolysis rate -- to its `Field`, as the closure's or reaction's
     `input_specs`, or the builder's `model.input_specs`, declares it (`input_field`).
     """
@@ -869,7 +897,7 @@ class LayerRefs(Mapping[str, LayerRef]):
 
     def fields(self) -> dict[str, Field | str]:
         """Every key this model knows the layout of: layer keys, closure-carried keys and
-        the declared inputs of its closures, reactions, laws and drives."""
+        the declared inputs of its closures, reactions, laws and head terms."""
         out: dict[str, Field | str] = {}
         for ref in self._refs.values():
             for f in ref.fields.values():
@@ -930,7 +958,7 @@ class LayerRefs(Mapping[str, LayerRef]):
         for key, f in self.closure_state.items():
             parts.append(f.describe() if isinstance(f, Field) else f"{key!r} (closure state)")
         if self.inputs:
-            parts.append("Inputs read by the closures, reactions, laws and drives:\n"
+            parts.append("Inputs read by the closures, reactions, laws and head terms:\n"
                          + "\n".join(f.describe() for f in self.inputs.values()))
         return "\n\n".join(parts)
 
@@ -1018,14 +1046,28 @@ def initial_drivers(model: Model, *, values: Mapping | None = None) -> dict[str,
 
 
 def _steps_from_state(layer) -> bool:
-    """Whether a Kirchhoff layer's step starts from its own state: dynamic laws, outside
-    a phasor layer (which takes no step)."""
+    """Whether a Kirchhoff layer's step starts from its own state: dynamic laws or node
+    storage, outside a phasor layer (which takes no step)."""
     return bool(getattr(layer, "dynamic", False)) and not getattr(layer, "phasor", False)
+
+
+def _reads_step_flows(layer) -> bool:
+    """Whether a stepping Kirchhoff layer reads its step-start flows `"<layer>.q"`: a layer
+    with flow unknowns or dynamic laws does; one whose only storage is node storage reads
+    only `"<layer>.phi"`."""
+    return bool(getattr(layer, "_steps_with_flows", True))
+
+
+def _holds_storage(layer) -> bool:
+    """Whether a Kirchhoff layer holds storage at boundary nodes (`scheme="forward_euler"`):
+    every solve then reads its step-start potentials `"<layer>.phi"`."""
+    return bool(getattr(layer, "holds_storage", False))
 
 
 def required_state_keys(model: Model) -> list[str]:
     """The state keys `Model.step` reads from the step-start state."""
     keys = [f"{n}.x" for n in model.transport] + [f"{n}.s" for n in model.allocation]
     keys += [f"{n}.{s}" for n, layer in model.kirchhoff.items() if _steps_from_state(layer)
-             for s in ("phi", "q")]
+             for s in (("phi", "q") if _reads_step_flows(layer) else ("phi",))]
+    keys += [f"{n}.phi" for n, layer in model.kirchhoff.items() if _holds_storage(layer)]
     return keys + list(model.closure_state_keys)

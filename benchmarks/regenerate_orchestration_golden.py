@@ -7,7 +7,8 @@ Run it from the repository root, on code whose behaviour is the reference:
 
 and commit the result only for a deliberate change of behaviour; a refactor must leave the
 file untouched. The cases live in `tests/test_golden_orchestration.py` and
-`tests/layers/test_kirchhoff_solve_policy.py`, which compare against this file exactly.
+`tests/layers/test_kirchhoff_solve_policy.py` (the `potential_*` cases in
+`tests/_potential_layer_cases.py`), which compare against this file exactly.
 """
 
 from __future__ import annotations
