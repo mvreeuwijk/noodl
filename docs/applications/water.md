@@ -279,12 +279,22 @@ in `docs/plans/water-prv-psv-design.md`). $\kappa$, a pipe's own head-loss slope
 only scales the row. Newton picks the no-flow branch only where the open equation's residual
 is below both $-\kappa q$ and $-h'(q)\,q$: with $\kappa$ alone, an iterate that overshoots
 forward closes an open check valve, sets every pipe in series with it to exactly zero flow,
-and cycles (`FlowControlledPipe`). Closed links and check valves need the pipes'
-resistance form (`pipe_form="flow"`, the default); `pipe_form="potential"` refuses them.
+and cycles (`FlowControlledPipe`). An iterate that would close every check valve feeding a
+junction, which leaves the step singular, keeps open the one whose open equation predicts the
+most forward flow, so the step is taken; `water_steady` then refuses a converged check valve
+carrying flow the wrong way. Closed links and check valves need the pipes' resistance form
+(`pipe_form="flow"`, the default); `pipe_form="potential"` refuses them.
 
 `link_states(model, state, drivers)` gives every link's state in a solution: `CLOSED`, `OPEN`
 or `ACTIVE`, the codes `wntr` reports EPANET's in. `water_steady` refuses, before it solves, a
-junction with a demand that closed links cut off from every reservoir and tank.
+junction with a demand that closed links cut off from every reservoir and tank. A cut-off
+group of junctions without demand is solved as EPANET solves it: EPANET's closed links keep a
+conductance of $1/C_\text{BIG}$, and as that vanishes the group's head tends to the plain
+average of the heads at the far ends of its closed links. `water_steady` holds the group at
+that head, with every flow into it exactly zero (`noodl.apps.water.elements.PIN_KEY`).
+
+The TCV's coefficient is EPANET's own, $0.02517\,K/d^4$ in feet and cfs, rounded from
+$8/(g\pi^2) = 0.025193$: 9.5e-4 relative from the exact value a `MinorLoss` uses.
 
 ### Tanks and controls
 
@@ -410,9 +420,12 @@ independent loop is a property of the cycle-space formulation, and it holds exac
   variable-speed pumps (a numeric `[STATUS]` on a pump included); non-cylindrical tanks;
   emitters; leakage; energy and cost reports; Chezy-Manning head loss; pipe and valve
   controls. A file using any of these raises an error naming the feature.
-- **A Newton iterate that closes every check valve feeding a junction with a demand** makes the
-  system singular, and the solve fails. MEASURED on the two-loop network with every pipe a
-  check valve and five times its demands (EPANET solves it); not seen on any EPANET example.
+- **Hazen-Williams heads carry EPANET's rounded flow-unit factor as a difference.** EPANET
+  converts an LPS file's flows with `LPSperCFS = 28.317` (exact 28.3168466), so its internal
+  flows are 5.4e-6 relative smaller and its Hazen-Williams losses 1.0e-5 smaller than this
+  model's (MEASURED: scaling the demands by that factor removes 88-95% of the head differences).
+  On ordinary networks that is below 1e-6 relative in the heads; on one with 110 m of losses
+  it is 3e-5.
 - **Pump curves** are single- or three-point only, with the exponent fixed at $n = 2$. Curves
   with four or more points, which EPANET connects piecewise-linearly, are refused; fit a
   three-point curve instead.

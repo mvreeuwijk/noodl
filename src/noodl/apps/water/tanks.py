@@ -57,6 +57,14 @@ class TankLevels:
     tanks' columns, which the layer fills with their step-start heads
     (`KirchhoffLayer.hold_storage`). Only the link status is carried. `event_step` is
     EPANET's shortening of the step to the next control crossing.
+
+    A pump's entry of `"water.status"` is written from the carried `"water.link_status"` on
+    every call, so a pump is closed by setting that state, not the driver.
+
+    The closure remembers its last answer with the values it read (the tank levels,
+    `"water.link_status"`, the drivers' `"water.status"`): a call that reads the same
+    values returns it again, which is what lets `water_steady` read the status before the
+    solve without running the controls twice.
     """
 
     state_keys = ("water.link_status",)
@@ -134,12 +142,21 @@ class TankLevels:
                 f"both required; build them with initial_state(model)"
             )
         level = self.levels(state)
+        read = (level.detach(), status.detach(), drivers.get("water.status"))
+        memo = getattr(self, "_memo", None)
+        if memo is not None and all(
+                (a is None and b is None) or (a is not None and b is not None
+                                              and a.shape == b.shape and torch.equal(a, b))
+                for a, b in zip(read, memo[0], strict=True)):
+            return dict(memo[1])
         with torch.no_grad():
             status = self._apply_controls(level, status)
         self._refuse_outside(level)
-        return {"water.phi_boundary": self._boundary(state, level),
-                "water.status": self._link_status(drivers, status),
-                "water.link_status": status}
+        out = {"water.phi_boundary": self._boundary(state, level),
+               "water.status": self._link_status(drivers, status),
+               "water.link_status": status}
+        self._memo = (tuple(None if t is None else t.clone() for t in read), out)
+        return dict(out)
 
     def _link_status(self, drivers, pump_status: Tensor) -> Tensor:
         """Every link's status: the drivers' `"water.status"` (the build's when they carry

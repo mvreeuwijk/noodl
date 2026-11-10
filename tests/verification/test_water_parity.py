@@ -930,9 +930,9 @@ def test_check_valve_and_closed_pipe_match_epanet(tmp_path):
     carry exactly zero. MEASURED: heads 9.58e-7 relative (J6, 4.4e-5 m), flows 2.2e-9 m3/s.
     The head residual is not the check valves (closing P4 by `[STATUS]` instead gives the same
     9.58e-7, node for node) but EPANET's rounded LPS factor (`LPSperCFS = 28.317` against
-    28.3168466, 4.1e-6 relative in every flow and 1.852 times that in a Hazen-Williams head
-    loss): on this tree every pipe carries its whole downstream demand, and 7.5e-6 of P1's
-    0.73 m loss is the 5.7e-6 m J1 is off by.
+    28.3168466: EPANET's internal flows are 5.4e-6 relative smaller, and a Hazen-Williams
+    loss 1.852 times that): scaling this model's demands by 28.3168466 / 28.317 brings the
+    heads to 6.6e-8 (MEASURED; the plain two-loop goes from 4.4e-7 to 5.3e-8).
     """
     path, results = _epanet(tmp_path, "twoloop_si.inp", edits=_STATUS_EDITS)
     model, state, drivers = build_model(read_epanet_inp(path))
@@ -952,3 +952,125 @@ def test_check_valve_and_closed_pipe_match_epanet(tmp_path):
     assert states[model.link_names.index("P7")] == 0
     q = dict(zip(model.link_names, final["water.q"].tolist(), strict=True))
     assert q["P4"] == 0.0 and q["P7"] == 0.0 and q["P5"] > 0.0
+
+
+def _junction_demand_edit(junction, demand):
+    """Replace `junction`'s demand on its `[JUNCTIONS]` line of the two-loop fixture."""
+    line = next(row for row in (DATA / "twoloop_si.inp").read_text().splitlines()
+                if row.split()[:1] == [junction])
+    fields = line.split("\t")
+    fields[2] = f"{demand:<12g}"
+    return (line, "\t".join(fields))
+
+
+def _compare_with_epanet(model, final, drivers, results, *, heads=1e-6, flows=1e-6):
+    """Heads `heads` relative (every junction), flows `flows` m3/s absolute, link states
+    equal; returns the measured worst head and flow."""
+    worst_h = _worst_heads(model, final, results.node["head"].loc[0], skip=("R1",))
+    reference = results.link["flowrate"].loc[0]
+    worst_q = max(abs(float(final["water.q"][i]) - float(reference[name]))
+                  for i, name in enumerate(model.link_names))
+    assert worst_h < heads, worst_h
+    assert worst_q < flows, worst_q
+    states = link_states(model, final, drivers).tolist()
+    status = results.link["status"].loc[0]
+    assert dict(zip(model.link_names, states, strict=True)) == {
+        name: int(status[name]) for name in model.link_names}
+    return worst_h, worst_q
+
+
+# J6 with no demand, both its pipes closed: EPANET still gives it a head, through the
+# `1 / CBIG` conductance of the closed links.
+_J6_CUT_OFF = (
+    _junction_demand_edit("J6", 0),
+    ("[STATUS]\n;ID              \tStatus/Setting",
+     "[STATUS]\n;ID              \tStatus/Setting\n P7              \tClosed\n"
+     " P8              \tClosed"),
+)
+
+
+def test_a_junction_cut_off_without_demand_matches_epanet(tmp_path):
+    """J6 is held at EPANET's limit head, the average of J5 and J3 (its closed links' far
+    ends), with every flow into it exactly zero. MEASURED: heads 2.9e-7 relative (J6 too),
+    flows 2.2e-9 m3/s."""
+    path, results = _epanet(tmp_path, "twoloop_si.inp", edits=_J6_CUT_OFF)
+    model, state, drivers = build_model(read_epanet_inp(path))
+    final = water_steady(model, state, drivers)
+    _compare_with_epanet(model, final, drivers, results)
+    phi = dict(zip(model.node_names, final["water.phi"].tolist(), strict=True))
+    assert phi["J6"] == pytest.approx(0.5 * (phi["J5"] + phi["J3"]), abs=1e-12)
+    q = dict(zip(model.link_names, final["water.q"].tolist(), strict=True))
+    assert q["P7"] == 0.0 and q["P8"] == 0.0
+
+
+_ALL_CV_FIVE_FOLD = (
+    *(_pipe_status_edit(f"P{k}", "CV") for k in range(1, 9)),
+    *(_junction_demand_edit(name, 5 * demand) for name, demand in
+      (("J1", 5), ("J2", 8), ("J3", 6), ("J4", 10), ("J5", 7), ("J6", 9))),
+)
+
+
+def test_every_pipe_a_check_valve_at_five_times_the_demand_matches_epanet(tmp_path):
+    """An iterate of this network closes both check valves that feed J6 (P7 and P8), which
+    cuts J6 off; the pipe takes P7's open branch again for that step (`FlowControlledPipe`,
+    A CUT-OFF ITERATE) and the solve converges to EPANET's tree, P4 and P8 closed.
+
+    Heads are compared at 4e-5 relative, not 1e-6. MEASURED 3.1e-5, and the cause is
+    EPANET's rounded LPS factor (`LPSperCFS = 28.317` against 28.3168466: its internal flows
+    are 5.4e-6 smaller, its Hazen-Williams losses 1.0e-5 smaller), which on this network's
+    110 m of losses moves J6 (-59 m) by 1.2e-3 m. With this model's demands scaled by that
+    factor the heads agree to 1.4e-6, asserted below at 2e-6. Flows: 5.7e-8 m3/s."""
+    path, results = _epanet(tmp_path, "twoloop_si.inp", edits=_ALL_CV_FIVE_FOLD)
+    model, state, drivers = build_model(read_epanet_inp(path))
+    final = water_steady(model, state, drivers)
+    _compare_with_epanet(model, final, drivers, results, heads=4e-5)
+    rounded = {**drivers, "water.sources": drivers["water.sources"] * (28.3168466 / 28.317)}
+    final = water_steady(model, state, rounded)
+    # (its flows are EPANET's internal ones, 5.4e-6 below the reported: 1.2e-6 m3/s here)
+    _compare_with_epanet(model, final, rounded, results, heads=2e-6, flows=2e-6)
+
+
+_TCV = _valve_edits(" V1  J7  J2  250  TCV  5  0\n")
+
+
+def test_a_throttle_control_valve_matches_epanet(tmp_path):
+    """Heads, flows and the valve's head loss. The TCV's coefficient is EPANET's rounded
+    `0.02517 K / d^4` (ft, cfs), 9.5e-4 relative from the exact `8 / (g pi^2)` a
+    `MinorLoss` would use.
+
+    The head loss is compared at 1e-5 m ABSOLUTE: EPANET reports a valve's loss as the
+    difference of its two FLOAT32 heads (spacing 3.8e-6 m at 48 m), which on this 0.0516 m
+    loss is 7e-5 relative. MEASURED 3.2e-6 m; this model's loss is `Km q^2` at EPANET's own
+    flow to 3e-7 relative."""
+    path, results = _epanet(tmp_path, "twoloop_si.inp", edits=_TCV)
+    model, state, drivers = build_model(read_epanet_inp(path))
+    final = water_steady(model, state, drivers)
+    _compare_with_epanet(model, final, drivers, results)
+    phi = dict(zip(model.node_names, final["water.phi"].tolist(), strict=True))
+    loss, reference = phi["J7"] - phi["J2"], float(results.link["headloss"].loc[0]["V1"])
+    assert abs(loss - reference) <= 1e-5, (loss, reference)
+
+
+def test_gradient_through_a_closed_check_valve_against_central_differences(tmp_path):
+    """d(sum of junction heads)/d(demands) on the check-valve network (P4 closed by its
+    check valve, P7 by `[STATUS]`): the implicit adjoint on the converged branch against
+    central differences, `max|analytic - fd| <= 1e-6 max|fd|`."""
+    path, _ = _epanet(tmp_path, "twoloop_si.inp", edits=_STATUS_EDITS)
+    model, state, drivers = build_model(read_epanet_inp(path))
+    junctions = [model.node_names.index(f"J{k}") for k in range(1, 7)]
+
+    def total(sources):
+        final = water_steady(model, state, {**drivers, "water.sources": sources})
+        return final["water.phi"][junctions].sum()
+
+    sources = drivers["water.sources"].clone().requires_grad_(True)
+    analytic, = torch.autograd.grad(total(sources), sources)
+    h = 1e-6
+    fd = torch.zeros_like(sources)
+    for i in junctions:
+        e = torch.zeros_like(sources)
+        e[i] = h
+        with torch.no_grad():
+            fd[i] = (total(sources + e) - total(sources - e)) / (2 * h)
+    scale = float(fd.abs().max())
+    assert float((analytic - fd)[junctions].abs().max()) <= 1e-6 * scale

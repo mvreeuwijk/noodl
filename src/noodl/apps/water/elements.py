@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import torch
 
+from noodl._unionfind import UnionFind
 from noodl.apps.water.controls import ACTIVE, CLOSED, OPEN
 from noodl.elements.base import ConstitutiveLaw, ImplicitLaw
 from noodl.solvers.scalar import solve_monotone
@@ -52,6 +53,28 @@ def link_driver(law, drivers, key: str, like: Tensor) -> Tensor:
             f"not given; it carries {_DRIVER_MEANING[key]}, one value per link"
         )
     return drivers[key][..., slice(*law.link_range)].to(like.dtype)
+
+
+#: The per-link driver `water_steady` sets on one CLOSED link per junction group that closed
+#: links cut off from every reservoir and tank with no demand: 1 there, 0 elsewhere. Such a
+#: group has no head of its own (EPANET gives it one through its closed links' `1 / CBIG`
+#: conductance); the marked link's row is then `dp = 0` instead of `kappa q = 0`, which ties
+#: the group to the far end of that link with every flow still exactly zero, and
+#: `water_steady` then sets the group's head to EPANET's limit (`_cut_off_plan`). Absent: no
+#: link is marked.
+PIN_KEY = "water.closed_tie"
+
+
+def closed_row(law, dp: Tensor, q: Tensor, drivers) -> Tensor:
+    """The row of a CLOSED link: ``kappa q``, or ``dp`` where `PIN_KEY` marks the link."""
+    held = law.kappa * q
+    pin = None if drivers is None else drivers.get(PIN_KEY)
+    if pin is None or law.link_range is None:
+        return held
+    pin = pin[..., slice(*law.link_range)]
+    if not bool(pin.any()):
+        return held
+    return torch.where(pin != 0, dp, held)
 
 
 def _link_range(links: slice | None) -> tuple[int, int] | None:
@@ -759,7 +782,7 @@ class _Valve(ImplicitLaw):
         if bool((status == ACTIVE).all()):   # the usual case: no `where` in the graph
             return active
         open_ = dp - open_valve_loss(q, self.minor, self.gradient_floor)
-        return torch.where(status == CLOSED, self.kappa * q,
+        return torch.where(status == CLOSED, closed_row(self, dp, q, drivers),
                            torch.where(status == OPEN, open_, active))
 
 
@@ -922,16 +945,74 @@ class FlowControlledPipe(ImplicitLaw):
     ``RQtol`` slope, overshoots by six orders and closes it again (measured: a check valve
     between two reservoirs cycles so for 200 iterations, and converges in 5 with the
     second test).
+
+    A CUT-OFF ITERATE. An iterate can select the no-flow branch of every check valve that
+    feeds a junction, cutting the junction off from every reservoir and tank; its head then
+    has no equation and the step is singular (measured: the two-loop with every pipe a
+    check valve at five times its demands, which EPANET solves). Given ``ends`` (the
+    ``(start, end)`` node indices of every link, in `model.link_names` order) and ``fixed``
+    (the reservoir and tank nodes), the pipe takes the open branch instead for each check
+    valve it would close that touches such a cut-off group, so the step is taken; the
+    solution is still exact, and `water_steady` refuses a converged check valve that carries
+    flow the wrong way.
     """
 
     def __init__(self, pipe, *, gradient_floor: float = 0.0, kappa=1.0,
-                 links: slice | None = None, kind: str = "pipe") -> None:
+                 links: slice | None = None, ends=None, fixed=(),
+                 kind: str = "pipe") -> None:
         super().__init__(kind)
         self.pipe = pipe
         self.gradient_floor = float(gradient_floor)
         self.scale = float(getattr(pipe, "scale", 1.0))
         self.kappa = self._param(kappa, False)
         self.link_range = _link_range(links)
+        self.ends = None if ends is None else tuple((int(u), int(v)) for u, v in ends)
+        self.fixed = tuple(int(n) for n in fixed)
+
+    def _reopen(self, held: Tensor, ahead: Tensor, drivers) -> Tensor:
+        """`held` (the check valves this iterate closes), with the open branch taken again
+        where closing would cut a group of nodes off from every reservoir and tank (see A
+        CUT-OFF ITERATE): per such group, the one check valve touching it whose open
+        equation predicts the most flow in its own direction (`ahead`), until no group is
+        cut off. Links marked by `PIN_KEY` count as joined."""
+        if self.ends is None or not bool(held.any()):
+            return held
+        n_links = len(self.ends)
+        lo, hi = self.link_range
+        status = drivers[STATUS_KEY].detach()
+        pin = drivers.get(PIN_KEY)
+        batch = held.shape[:-1]
+        joined = (status != CLOSED).expand(batch + (n_links,))
+        if pin is not None:
+            joined = joined | (pin.detach() != 0).expand(batch + (n_links,))
+        joined = joined.reshape(-1, n_links).tolist()
+        rows = held.reshape(-1, hi - lo)
+        scores = ahead.expand(held.shape).reshape(-1, hi - lo).tolist()
+        out = rows.clone()
+        for b, row in enumerate(rows.tolist()):
+            while any(row):
+                groups: UnionFind[int] = UnionFind()
+                for j, (u, v) in enumerate(self.ends):
+                    groups.add(u)
+                    groups.add(v)
+                    if joined[b][j] and not (lo <= j < hi and row[j - lo]):
+                        groups.union(u, v)
+                fed = {groups.find(n) for n in self.fixed}
+                best: dict[int, int] = {}   # cut-off group -> the check valve to reopen
+                for k, closing in enumerate(row):
+                    if not closing:
+                        continue
+                    for end in self.ends[lo + k]:
+                        g = groups.find(end)
+                        if g not in fed and (g not in best
+                                             or scores[b][k] > scores[b][best[g]]):
+                            best[g] = k
+                if not best:
+                    break
+                for k in set(best.values()):
+                    row[k] = False
+                    out[b, k] = False
+        return out.reshape(held.shape)
 
     def _loss(self, dp, q):
         if isinstance(self.pipe, HazenWilliams):
@@ -940,21 +1021,24 @@ class FlowControlledPipe(ImplicitLaw):
             h = self.pipe.head_loss(q)
         return dp - self.scale * h
 
-    def _held(self, loss, q, one_way) -> Tensor:
-        """Where a one-way pipe takes its no-flow branch (see THE SELECTION); never at a
-        tie. Computed without a graph: it only selects."""
+    def _held(self, loss, q, one_way, drivers) -> Tensor:
+        """Where a one-way pipe takes its no-flow branch (see THE SELECTION, and A CUT-OFF
+        ITERATE); never at a tie. Computed without a graph: it only selects."""
         with torch.no_grad():
             q = q.detach()
             if isinstance(self.pipe, HazenWilliams):
                 slope = self.pipe.head_gradient(q, self.gradient_floor)
             else:
                 slope = self.pipe.head_gradient(q)
+            slope = self.scale * slope
             by_kappa = -self.kappa.detach() * q
-            by_slope = -self.scale * slope * q
             loss = loss.detach()
-            forward = (loss < by_kappa) & (loss < by_slope)
-            reverse = (loss > by_kappa) & (loss > by_slope)
-            return ((one_way > 0) & forward) | ((one_way < 0) & reverse)
+            forward = (loss < by_kappa) & (loss < -slope * q)
+            reverse = (loss > by_kappa) & (loss > -slope * q)
+            held = ((one_way > 0) & forward) | ((one_way < 0) & reverse)
+            # the flow the open equation's Newton step reaches, in the pipe's own direction
+            ahead = one_way * (q + loss / slope)
+            return self._reopen(held, ahead, drivers)
 
     def residual(self, dp, q, drivers, ctx):
         loss = self._loss(dp, q)
@@ -964,10 +1048,10 @@ class FlowControlledPipe(ImplicitLaw):
         one_way = link_driver(self, drivers, ONE_WAY_KEY, dp)
         closed = status == CLOSED
         if bool(one_way.any()):
-            closed = closed | self._held(loss, q, one_way)
+            closed = closed | self._held(loss, q, one_way, drivers)
         if not bool(closed.any()):   # the usual case: no `where` in the graph
             return loss
-        return torch.where(closed, self.kappa * q, loss)
+        return torch.where(closed, closed_row(self, dp, q, drivers), loss)
 
     def held_closed(self, dp, q, drivers) -> Tensor:
         """Where the pipe is closed at ``(dp, q)``: its status is ``CLOSED``, or, one-way, it
@@ -976,7 +1060,8 @@ class FlowControlledPipe(ImplicitLaw):
             return torch.zeros_like(dp, dtype=torch.bool)
         status = link_driver(self, drivers, STATUS_KEY, dp)
         one_way = link_driver(self, drivers, ONE_WAY_KEY, dp)
-        return (status == CLOSED) | self._held(self._loss(dp, q), q, one_way)
+        held = self._held(self._loss(dp, q), q, one_way, drivers)
+        return (status == CLOSED) | held
 
 
 class FlowControlledPump(ImplicitLaw):
@@ -1029,4 +1114,9 @@ class FlowControlledPump(ImplicitLaw):
         gain = self.pump.head_gain(q, self.gradient_floor, self.closed_slope)
         if bool(running.all()):   # the usual case: no `where` in the graph
             return dp + gain
-        return torch.where(running, dp + gain, self.kappa * q)
+        return torch.where(running, dp + gain, closed_row(self, dp, q, drivers))
+
+    @property
+    def link_range(self) -> tuple[int, int] | None:
+        """The pump's columns of the per-link drivers (`PumpCurve`'s ``links``)."""
+        return self.pump.link_range

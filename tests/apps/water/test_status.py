@@ -251,3 +251,47 @@ def test_kappa_is_the_head_loss_slope_at_one_foot_per_second():
     q = torch.tensor([torch.pi * 0.3**2 / 4 * M_PER_FT] * 2, dtype=F64, requires_grad=True)
     (slope,) = torch.autograd.grad(law.pipe.head_loss(q).sum(), q)
     torch.testing.assert_close(law.kappa, slope, rtol=1e-12, atol=0)
+
+
+# ------------------------------------------------------------------ cut off, no demand
+def test_a_cut_off_group_of_two_junctions_is_held_at_the_average_of_its_far_ends():
+    """C1 - P4 - C2, no demand, joined to the rest only by the closed P5 (A - C1) and P6
+    (C2 - B): both sit at EPANET's limit, the average of A and B, every flow into them
+    exactly zero; the rest of the network is the network without them."""
+    junctions = (Junction("A", 0.0, 0.005), Junction("B", 0.0, 0.003),
+                 Junction("C1", 0.0), Junction("C2", 0.0))
+    pipes = (_pipe("P1", "R1", "A"), _pipe("P2", "A", "B"), _pipe("P3", "B", "R2"),
+             _pipe("P4", "C1", "C2"), _pipe("P5", "A", "C1", status="CLOSED"),
+             _pipe("P6", "C2", "B", status="CLOSED"))
+    reservoirs = (Reservoir("R1", 50.0), Reservoir("R2", 45.0))
+    net = WaterNetwork(junctions=junctions, reservoirs=reservoirs, pipes=pipes)
+    model, state, drivers = build_model(net)
+    out = water_steady(model, state, drivers)
+    h, q = _heads(model, out), _flows(model, out)
+    assert h["C1"] == pytest.approx(0.5 * (h["A"] + h["B"]), abs=1e-12)
+    assert h["C2"] == h["C1"]
+    assert q["P4"] == 0.0 and q["P5"] == 0.0 and q["P6"] == 0.0
+    plain = WaterNetwork(junctions=junctions[:2], reservoirs=reservoirs, pipes=pipes[:3])
+    ref_model, ref_state, ref_drivers = build_model(plain)
+    ref = _heads(ref_model, water_steady(ref_model, ref_state, ref_drivers))
+    assert h["A"] == pytest.approx(ref["A"], abs=1e-12)
+    assert h["B"] == pytest.approx(ref["B"], abs=1e-12)
+    assert link_states(model, out, drivers).tolist() == [OPEN, OPEN, OPEN, OPEN, CLOSED,
+                                                         CLOSED]
+
+
+def test_water_step_names_itself_when_it_refuses():
+    from noodl.apps.water.network import Tank, water_step
+
+    net = WaterNetwork(
+        junctions=(Junction("J1", 0.0, 0.002), Junction("J2", 0.0, 0.003)),
+        reservoirs=(Reservoir("R1", 50.0),),
+        tanks=(Tank("T", 40.0, 5.0, 0.0, 10.0, 5.0),),
+        pipes=(_pipe("P1", "R1", "J1"), _pipe("P2", "J1", "T"),
+               _pipe("P3", "J1", "J2", status="CLOSED")),
+    )
+    model, state, drivers = build_model(net, tank_scheme="backward_euler")
+    from noodl.apps.water.network import initial_state
+
+    with pytest.raises(ValueError, match=r"^water_step: junction\(s\) \['J2'\]"):
+        water_step(model, initial_state(model), drivers, 60.0)
