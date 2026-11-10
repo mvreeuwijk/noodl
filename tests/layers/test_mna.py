@@ -265,13 +265,13 @@ def test_batched_drivers_solve_each_instance():
 def test_classic_methods_on_mna_layer_raise():
     _, layer = _transformer_layer()
     phi, _ = layer.solve(torch.zeros(1), differentiable=False)
-    with pytest.raises(TypeError, match="Modified Nodal Analysis"):
+    with pytest.raises(TypeError, match="has flow unknowns"):
         layer.flows(phi, {})
-    with pytest.raises(TypeError, match="Modified Nodal Analysis"):
+    with pytest.raises(TypeError, match="has flow unknowns"):
         layer.dflows(phi, {})
-    with pytest.raises(TypeError, match="Modified Nodal Analysis"):
+    with pytest.raises(TypeError, match="has flow unknowns"):
         layer.residual(phi[..., layer.interior], torch.zeros(1), {}, None)
-    with pytest.raises(TypeError, match="Modified Nodal Analysis"):
+    with pytest.raises(TypeError, match="has flow unknowns"):
         layer.linear_init(torch.zeros(1), {}, None)
 
 
@@ -656,7 +656,7 @@ def test_flows_of_mna_layer_return_the_solved_q_and_need_q():
     drivers = {"head": torch.tensor([5.0]), "c": torch.tensor([0.7])}
     phi, q = layer.solve(torch.zeros(1), drivers, torch.zeros(3), differentiable=False)
     torch.testing.assert_close(layer.flows(phi, drivers, q), q, rtol=1e-10, atol=1e-12)
-    with pytest.raises(TypeError, match="Modified Nodal Analysis"):
+    with pytest.raises(TypeError, match="has flow unknowns"):
         layer.flows(phi, drivers)
     with pytest.raises(ValueError, match="every edge"):
         layer.flows(phi, drivers, q[..., :2])

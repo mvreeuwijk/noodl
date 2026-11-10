@@ -644,12 +644,13 @@ class KirchhoffLayer(TopologyGuard):
 
     def _refuse_on_mna(self, method: str) -> None:
         """Classic-only methods assume every flow is a function of its own edge's potential
-        difference; a Modified Nodal Analysis layer refuses them by name."""
+        difference; a layer with flow unknowns refuses them by name."""
         if self._unknowns is not None:
             raise TypeError(
                 f"KirchhoffLayer {self.name!r} is solved by Modified Nodal Analysis "
-                f"(its laws include implicit, multi-port, dynamic or context-reading ones), "
-                f"so {method}() is not defined on it; read the flows from solve()'s q"
+                f"(its laws include implicit or multi-port ones, or it is a phasor layer): "
+                f"it has flow unknowns, so {method}() is not defined on it; read the flows "
+                f"from solve()'s q"
             )
 
     @property
@@ -721,8 +722,8 @@ class KirchhoffLayer(TopologyGuard):
     @property
     def linear(self) -> bool:
         """True when every law, withdrawal and storage is affine (`ConstitutiveLaw.linear`):
-        an MNA solve then takes the full Newton step from the start and converges in one
-        iteration."""
+        a solve with flow unknowns (or the held initial point) then takes the full Newton
+        step from the start and converges in one iteration."""
         return (all(el.linear for el in self._laws)
                 and all(ns.linear for ns in self._withdrawals)
                 and all(st.linear for st in self._storage))
@@ -1455,7 +1456,7 @@ class KirchhoffLayer(TopologyGuard):
             return dense
         return dense + torch.diag_embed(node_slopes.expand(dense.shape[:-1]))
 
-    def _linear_ck(self, drivers, ctx: LawContext = _DC):
+    def _linear_ck(self, drivers, ctx: LawContext = _DC, device=None):
         # Each law's own (c_e, k_e) covers only its own n_e = e - s edges; only the
         # leading BATCH dims (everything but the trailing edge-count dim) are meant to be
         # unified across laws before concatenating along the edge axis. Using
@@ -1469,7 +1470,7 @@ class KirchhoffLayer(TopologyGuard):
         cs, ks, n_es = [], [], []
         for i, (el, (s, e)) in enumerate(zip(self._laws, self._law_slices, strict=True)):
             if el._takes_ctx:
-                zero = torch.zeros(e - s, dtype=el._dtype())
+                zero = torch.zeros(e - s, dtype=el._dtype(), device=device)
                 c_e = el.flow(zero, drivers, self._law_ctx(ctx, s, e))
                 k_e = self._law_slopes(i, el, zero, drivers, ctx)
             else:
@@ -1581,7 +1582,8 @@ class KirchhoffLayer(TopologyGuard):
         )
         phi0 = self.assemble(phi_i0, phi_boundary)
         dp0 = self.dp(phi0, drivers)
-        c, k = self._linear_ck(drivers, _DC if _step is None else _step.ctx)
+        c, k = self._linear_ck(drivers, _DC if _step is None else _step.ctx,
+                               phi_boundary.device)
         rhs = self._source_interior(sources, phi0) - self._accumulate_interior(c + k * dp0)
         # A withdrawal contributes its tangent at phi = 0 to the same linearisation:
         # w(phi) ~ w(0) + w'(0) phi, so w(0) moves to the right-hand side and w'(0) joins
@@ -1885,6 +1887,20 @@ class KirchhoffLayer(TopologyGuard):
         `diagnostics["method"]` is likewise the method requested and `"backend"` the one that
         ran; `method="cg"` is refused (the system is not symmetric positive definite).
         """
+        try:
+            return self._solve(phi_boundary, drivers, sources, phi0, q0=q0, history=history,
+                               dt=dt, t=t, scheme=scheme, mode=mode,
+                               storage_flow=storage_flow, differentiable=differentiable,
+                               diagnostics=diagnostics, **newton_kwargs)
+        finally:
+            # The restrictions of this solve's context (`_law_ctx`) hold its step-start
+            # tensors, and their graph in a differentiable chain: none outlives the solve
+            # (a later solve builds a new context, so nothing is reused across solves).
+            self._law_ctxs = (None, {})
+
+    def _solve(self, phi_boundary, drivers, sources, phi0, *, q0, history, dt, t, scheme,
+               mode, storage_flow, differentiable, diagnostics, **newton_kwargs):
+        """The body of `solve`, which see."""
         self._require_current_topology()
         if scheme is None:
             scheme = self.scheme
@@ -2344,8 +2360,8 @@ class KirchhoffLayer(TopologyGuard):
         return out
 
     def _initial_storage_flows(self, phi, q, sources, drivers, zeros) -> torch.Tensor:
-        """`storage_flows` at the initial point of a layer solved by Modified Nodal Analysis:
-        each held node's flow imbalance, split among its entries by capacity."""
+        """`storage_flows` at the initial point (`mode="initial"`): each held node's flow
+        imbalance, split among its entries by capacity."""
         held = self._held_values(drivers, self._owner_call)
         if held is None:
             return zeros
@@ -2412,6 +2428,10 @@ class KirchhoffLayer(TopologyGuard):
                     x0[..., :n_phi] = to_real(self, phi0.detach())
                 if q0 is not None:
                     x0[..., n_phi:] = to_real(self, q0.detach())
+                if self._unknowns is None:
+                    # the held initial point of a layer without flow unknowns: certified
+                    # grounded like every other solve of it, a held row counting as a ground
+                    self._held_grounding_check(x0, phi_boundary, drivers, step)
             return x0, None
         with torch.no_grad():
             if phi0 is None:
@@ -2435,6 +2455,19 @@ class KirchhoffLayer(TopologyGuard):
             node_slopes0 = self._withdrawal_slopes(phi0_full, drivers, step)
             self._grounding_check(dq0, where="solve", node_slopes=node_slopes0)
         return phi0, (dq0, node_slopes0)
+
+    def _held_grounding_check(self, x0, phi_boundary, drivers, step) -> None:
+        """The grounding certificate of the held initial point of a layer without flow
+        unknowns, at its starting point `x0`: the law slopes there, with every held row
+        grounded (a positive slope on its diagonal), so a node that is neither held nor
+        joined to a boundary or a held node is refused by name."""
+        phi = self.assemble(x0, phi_boundary)
+        dq = self._dflows(phi, drivers, step.ctx)
+        rows = step.storage.rows
+        ns = self._withdrawal_slopes(phi, drivers)
+        held = rows.to(dtype=dq.dtype)
+        ns = held if ns is None else torch.where(rows, held, ns)
+        self._grounding_check(dq, where="solve", node_slopes=ns)
 
     def _output(self, x, phi_boundary, drivers, step):
         """`(phi, q)` at the solution `x`: full-node potentials and every edge's flow. The

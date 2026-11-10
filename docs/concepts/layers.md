@@ -100,7 +100,7 @@ phi, q = layer.solve(phi_b, drivers, sources, dt=60.0, history=(phi_prev, q_prev
 w = layer.storage_flows(phi, drivers, dt=60.0, history=(phi_prev, q_prev))
 ```
 
-Storage does not make a layer `mna`; a layer of potential laws with storage stays on the nodal
+Storage adds no flow unknowns; a layer of potential laws with storage stays on the nodal
 path. Like a withdrawal it adds only a diagonal, `step_rate_factor * capacity` with `capacity = dS/dphi`, to the Jacobian, so a
 network of conductances with storage keeps its symmetric positive definite system and its
 sparse or CG solve. A node whose only connection is its storage is grounded during a step and
