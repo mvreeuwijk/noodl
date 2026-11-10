@@ -46,15 +46,45 @@ _DRIVER_MEANING = {
 }
 
 
-def link_driver(law, drivers, key: str, like: Tensor) -> Tensor:
-    """The per-link driver `key` at `law.link_range`, the law's own columns of it, in the dtype of
-    `like`. Refuses a missing driver by the law's name."""
+def _driver(law, drivers, key: str) -> Tensor:
+    """The per-link driver `key`, whole; refuses a missing one by the law's name."""
     if drivers is None or key not in drivers:
         raise KeyError(
             f"{type(law).__name__} (kind {law.kind!r}): driver {key!r} is required and was "
             f"not given; it carries {_DRIVER_MEANING[key]}, one value per link"
         )
-    return drivers[key][..., slice(*law.link_range)].to(like.dtype)
+    return drivers[key]
+
+
+def link_driver(law, drivers, key: str, like: Tensor) -> Tensor:
+    """The per-link driver `key` at `law.link_range`, the law's own columns of it, in the dtype of
+    `like`. Refuses a missing driver by the law's name."""
+    return _driver(law, drivers, key)[..., slice(*law.link_range)].to(like.dtype)
+
+
+def link_flags(law, drivers, keys: tuple[str, ...], like: Tensor, summarise):
+    """`summarise(*columns)` of the law's own columns of the drivers `keys` (in the dtype of
+    `like`), remembered on the law for as long as those drivers are the same tensors,
+    unchanged in place (their `_version`), in the last few sets seen. A solve hands every
+    evaluation the same drivers (as two views: one on the residual's path, one on the
+    Jacobian's), so the per-link tests a law makes before it reads them (is any pipe
+    closed? one-way? any pump off? any valve not active?) run once per solve, not once per
+    residual, and a network with nothing closed, one-way or inactive pays nothing for them.
+    The cache lives in the law's `_memo_cache`, which the layer's scan for held tensors
+    skips, and keeps the tensors it saw, so their identities are not reused."""
+    tensors = tuple(_driver(law, drivers, key) for key in keys)
+    stamp = (*(id(t) for t in tensors), like.dtype)
+    cache = law.__dict__.setdefault("_memo_cache", {}).setdefault("link_flags", {})
+    hit = cache.get(stamp)
+    if hit is not None and all(t is s and t._version == v
+                               for t, s, v in zip(tensors, hit[0], hit[1], strict=True)):
+        return hit[2]
+    cols = slice(*law.link_range)
+    value = summarise(*(t[..., cols].to(like.dtype) for t in tensors))
+    if len(cache) >= 4:
+        del cache[next(iter(cache))]
+    cache[stamp] = (tensors, tuple(t._version for t in tensors), value)
+    return value
 
 
 #: The per-link driver `water_steady` sets on one CLOSED link per junction group that closed
@@ -192,11 +222,13 @@ class HazenWilliams(ConstitutiveLaw):
         a_safe = torch.where(live, a, torch.ones_like(a))   # no 0^(negative) in either branch
         friction = torch.where(live, k * a_safe**1.852, torch.zeros_like(a))
         gradient = torch.where(live, 1.852 * k * a_safe**0.852, torch.zeros_like(a))
-        minor = torch.sign(q) * self._minor() * a * a
         # The line is written in `q`, not `sign(q) |q|`, whose derivative is zero at `q = 0`
         # exactly: a closed check valve holds every pipe in series with it there.
-        return torch.where(gradient < gradient_floor, gradient_floor / 1.852 * q + minor,
-                           torch.sign(q) * friction + minor)
+        loss = torch.where(gradient < gradient_floor, gradient_floor / 1.852 * q,
+                           torch.sign(q) * friction)
+        if not self._has_minor:   # (adding an exact zero would change nothing but the cost)
+            return loss
+        return loss + torch.sign(q) * self._minor() * a * a
 
     def head_gradient(self, q: Tensor, gradient_floor: float = 0.0, cols=None) -> Tensor:
         """``d head_loss / d q`` (m per m^3/s) at ``q``, with the same ``gradient_floor``;
@@ -804,8 +836,10 @@ class _Valve(ImplicitLaw):
         active = self.active(dp, q, drivers)
         if self.link_range is None:
             return active
-        status = link_driver(self, drivers, STATUS_KEY, dp)
-        if bool((status == ACTIVE).all()):   # the usual case: no `where` in the graph
+        # `None` when every valve is ACTIVE, the usual case: no `where` in the graph
+        status = link_flags(self, drivers, (STATUS_KEY,), dp, lambda status: (
+            None if bool((status == ACTIVE).all()) else status))
+        if status is None:
             return active
         open_ = dp - open_valve_loss(q, self.minor, self.gradient_floor)
         return torch.where(status == CLOSED, closed_row(self, dp, q, drivers),
@@ -1043,22 +1077,29 @@ class FlowControlledPipe(ImplicitLaw):
             h = self.pipe.head_loss(q)
         return dp - self.scale * h
 
-    def _held(self, loss, q, one_way, drivers, reopen: bool = True) -> Tensor:
+    def _flags(self, drivers, like: Tensor):
+        """`(closed, one_way, cols)` of the law's columns: where the status is CLOSED (`None`
+        when nowhere), the direction (`None` when every pipe takes both) and the one-way
+        columns as a long tensor when every instance has the same ones (else `None`);
+        remembered per set of drivers (`link_flags`)."""
+        def summarise(status, one_way):
+            closed = status == CLOSED
+            if not bool(one_way.any()):
+                return (closed if bool(closed.any()) else None), None, None
+            flat = one_way.reshape(-1, one_way.shape[-1])
+            cols = ((flat[0] != 0).nonzero().flatten() if bool((flat == flat[:1]).all())
+                    else None)
+            return (closed if bool(closed.any()) else None), one_way, cols
+
+        return link_flags(self, drivers, (STATUS_KEY, ONE_WAY_KEY), like, summarise)
+
+    def _held(self, loss, q, one_way, cols, drivers) -> Tensor:
         """Where a one-way pipe takes its no-flow branch (see THE SELECTION, and A CUT-OFF
-        ITERATE); never at a tie. Computed without a graph: it only selects."""
+        ITERATE); never at a tie. `cols` are the one-way columns (`_flags`), `None` for all.
+        Computed without a graph: it only selects."""
         with torch.no_grad():
             q, loss = torch.broadcast_tensors(q.detach(), loss.detach())
-            # Only the one-way pipes, when every instance has the same ones (the usual case);
-            # remembered by the driver's values.
-            key = (tuple(one_way.shape), one_way.detach().cpu().numpy().tobytes())
-            if getattr(self, "_one_way_cols", (None,))[0] != key:
-                flat = one_way.reshape(-1, one_way.shape[-1])
-                same = bool((flat == flat[:1]).all())
-                found = tuple((flat[0] != 0).nonzero().flatten().tolist()) if same else None
-                self._one_way_cols = (key, found)
-            found = self._one_way_cols[1]
             one_way = one_way.expand(q.shape)
-            cols = None if found is None else torch.tensor(found, dtype=torch.long)
             q_c, loss_c, way_c = ((q, loss, one_way) if cols is None else
                                   (q[..., cols], loss[..., cols], one_way[..., cols]))
             if isinstance(self.pipe, HazenWilliams):
@@ -1079,31 +1120,21 @@ class FlowControlledPipe(ImplicitLaw):
                 held = torch.zeros(q.shape, dtype=torch.bool)
                 ahead = torch.zeros_like(q)
                 held[..., cols], ahead[..., cols] = held_c, ahead_c
-            return self._reopen(held, ahead, drivers) if reopen else held
+            return self._reopen(held, ahead, drivers)
 
     def residual(self, dp, q, drivers, ctx):
         loss = self._loss(dp, q)
         if self.link_range is None:
             return loss
-        status = link_driver(self, drivers, STATUS_KEY, dp)
-        one_way = link_driver(self, drivers, ONE_WAY_KEY, dp)
-        closed = status == CLOSED
-        if bool(one_way.any()):
-            closed = closed | self._held(loss, q, one_way, drivers)
-        if not bool(closed.any()):   # the usual case: no `where` in the graph
+        closed, one_way, cols = self._flags(drivers, dp)
+        if closed is None and one_way is None:   # the usual case: no `where` in the graph
             return loss
+        if one_way is not None:
+            held = self._held(loss, q, one_way, cols, drivers)
+            closed = held if closed is None else closed | held
+            if not bool(closed.any()):
+                return loss
         return torch.where(closed, closed_row(self, dp, q, drivers), loss)
-
-    def held_closed(self, dp, q, drivers) -> Tensor:
-        """Where the pipe is closed at ``(dp, q)``: its status is ``CLOSED``, or, one-way, it
-        takes its no-flow branch."""
-        if self.link_range is None:
-            return torch.zeros_like(dp, dtype=torch.bool)
-        status = link_driver(self, drivers, STATUS_KEY, dp)
-        one_way = link_driver(self, drivers, ONE_WAY_KEY, dp)
-        # At a solution a check valve may close off a group: `water_steady` holds it.
-        held = self._held(self._loss(dp, q), q, one_way, drivers, reopen=False)
-        return (status == CLOSED) | held
 
 
 class FlowControlledPump(ImplicitLaw):
@@ -1152,9 +1183,13 @@ class FlowControlledPump(ImplicitLaw):
         return self.pump.q_max()
 
     def residual(self, dp, q, drivers, ctx):
-        running = self.pump._status(dp, drivers) != 0
         gain = self.pump.head_gain(q, self.gradient_floor, self.closed_slope)
-        if bool(running.all()):   # the usual case: no `where` in the graph
+        if self.link_range is None:
+            return dp + gain
+        # `None` when every pump runs, the usual case: no `where` in the graph
+        running = link_flags(self, drivers, (STATUS_KEY,), dp, lambda status: (
+            None if bool((status != CLOSED).all()) else status != CLOSED))
+        if running is None:
             return dp + gain
         return torch.where(running, dp + gain, closed_row(self, dp, q, drivers))
 

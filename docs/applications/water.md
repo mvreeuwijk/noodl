@@ -289,11 +289,27 @@ carrying flow the wrong way. Closed links and check valves need the pipes' resis
 or `ACTIVE`, the codes `wntr` reports EPANET's in. `water_steady` refuses, before it solves, a
 junction with a demand that closed links cut off from every reservoir and tank. A group of
 junctions without demand that is cut off at the solution, by closed links or by check valves
-holding no flow, has no head of its own in the exact equations; EPANET gives it one through
-the $1/C_\text{BIG}$ conductance of those links, and as that vanishes the group's head tends
-to the plain average of the heads at their far ends. `water_steady` holds the group at that
-head, with every flow into it exactly zero (`noodl.apps.water.elements.PIN_KEY`); a check
-valve that head would open is open after all, and joins the group to its far side.
+holding no flow, has no head of its own in the exact equations: any head that keeps those
+valves shut solves them. EPANET gives each closed link the conductance $1/C_\text{BIG}$ and
+opens a check valve whose upstream head is the higher, and as $C_\text{BIG}$ grows its
+heads tend to the solution of the convex program
+
+$$\min_H \tfrac12 \sum_{(a,b)} (H_a - H_b)^2 \quad \text{subject to} \quad H_u \le H_v
+\text{ for every check valve } u \to v,$$
+
+the sum over every closed link and every check valve holding no flow, with the heads outside
+the group at the solve's own. It is the resistor-and-diode network with one conductance per
+link and an ideal diode across each check valve: the constraints' multipliers are the diodes'
+flows, so a check valve is `OPEN` where its multiplier is positive (it ties its two ends) and
+`CLOSED` where it is zero. `water_steady` sets the group's heads to that solution, with every
+flow into it exactly zero (`noodl.apps.water.elements.PIN_KEY`), by the dual active-set
+method of Goldfarb and Idnani on the group's nodes alone (`_dual_active_set`: the objective
+rises strictly over every full step and no active set returns, so it ends). For a single
+junction behind shut valves that is the plain average of the far ends; a valve the average
+would drive is open and the junction takes its far end's head; and a valve that opened in an
+intermediate active set is shut again where a later one leaves it with nothing to carry. The
+heads are a linear map of the solved heads around them for the active set found, so a
+gradient reaches them.
 
 The TCV's coefficient is EPANET's own, $0.02517\,K/d^4$ in feet and cfs: $8/(32.2\,\pi^2)
 = 0.025173$ (EPANET's 32.2 ft/s² gravity) rounded to four figures, 9.2e-4 below the exact
@@ -439,8 +455,12 @@ independent loop is a property of the cycle-space formulation, and it holds exac
   it may stop on an unconverged iterate for a group whose flows are all below its
   relative-flow test. Tests: `test_a_group_fenced_off_by_check_valves_is_held_at_the_limit_head`
   (2.8e-4 relative) and the internal-check-valve case of
-  `test_check_valves_fencing_a_junction_match_epanet` (4.1e-5). A single fenced-off
-  junction, with no link inside the group, matches EPANET to 3e-9.
+  `test_check_valves_fencing_a_junction_match_epanet` (4.1e-5: J1 = J2 = 56.6667 m, the
+  limit, against EPANET's 56.6690; MEASURED, EPANET's head there moves with the internal
+  pipe's length as well, 55.3140 m at 5 m, 56.6690 at 500 m, 56.6655 at 5000 m, unchanged
+  with `ACCURACY 1e-8`). A single fenced-off junction, with no link inside the group, matches
+  EPANET to 3e-9, and a junction fed from the highest of several reservoirs through one
+  check valve, to 8.5e-8 (EPANET's float32 head).
 - **Pump curves** are single- or three-point only, with the exponent fixed at $n = 2$. Curves
   with four or more points, which EPANET connects piecewise-linearly, are refused; fit a
   three-point curve instead.

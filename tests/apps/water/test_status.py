@@ -295,3 +295,102 @@ def test_water_step_names_itself_when_it_refuses():
 
     with pytest.raises(ValueError, match=r"^water_step: junction\(s\) \['J2'\]"):
         water_step(model, initial_state(model), drivers, 60.0)
+
+
+# ------------------------------------------------------------------ the limit program
+def test_the_dual_active_set_method_solves_small_diode_networks():
+    """`_dual_active_set` on the resistor-and-diode programs of `_limit`, against the answers
+    by hand (unit conductances; the multipliers are the open valves' flows).
+
+    One junction J between reservoirs at 100, 50 and 90 m, with check valves J -> R1,
+    R2 -> J and R3 -> J: `1/2 [(x - 100)^2 + (x - 50)^2 + (x - 90)^2]` with `x <= 100`,
+    `x >= 50`, `x >= 90`. The average 80 violates `x >= 90`, so J = 90 with a multiplier
+    3 * 90 - 240 = 30 (P6 open). With R3 at 60 instead nothing is active and J = 70.
+
+    The re-shut case: J1 and J2, Ra (90) -> J1, J1 -> J2 and Rb (60) -> J2 check valves,
+    J1 - Rc (65) closed and ten closed links from J2 to reservoirs at 0:
+    `G = [[3, -1], [-1, 12]]`, `a = [-155, -60]`. The unconstrained minimum (54.86, 9.57)
+    violates `x2 >= 60` the most (by 50.4, against 35.1 and 45.3), so the method's first
+    full step opens Pb; the answer is x1 = x2 = 90 with Pa and P7 active (multipliers 955
+    and 930) and Pb shut again, dropped when P7's normal could not be added with both
+    heads pinned."""
+    from noodl.apps.water.network import _dual_active_set
+
+    g = torch.tensor([[3.0]], dtype=F64)
+    a = torch.tensor([-240.0], dtype=F64)
+    c = torch.tensor([[-1.0], [1.0], [1.0]], dtype=F64)
+    b = torch.tensor([-100.0, 50.0, 90.0], dtype=F64)
+    x, active, u = _dual_active_set(g, a, c, b, 1e-9)
+    assert x.tolist() == pytest.approx([90.0], abs=1e-12)
+    assert active == [2] and u == pytest.approx([30.0], abs=1e-12)
+    x, active, u = _dual_active_set(g, torch.tensor([-210.0], dtype=F64), c,
+                                    torch.tensor([-100.0, 50.0, 60.0], dtype=F64), 1e-9)
+    assert x.tolist() == pytest.approx([70.0], abs=1e-12) and active == [] and u == []
+
+    g = torch.tensor([[3.0, -1.0], [-1.0, 12.0]], dtype=F64)
+    a = torch.tensor([-155.0, -60.0], dtype=F64)
+    c = torch.tensor([[1.0, 0.0], [-1.0, 1.0], [0.0, 1.0]], dtype=F64)   # Pa, P7, Pb
+    b = torch.tensor([90.0, 0.0, 60.0], dtype=F64)
+    x0 = -torch.linalg.solve(g, a)
+    assert int(torch.argmin(c @ x0 - b)) == 2   # Pb is the first constraint it reaches
+    x, active, u = _dual_active_set(g, a, c, b, 1e-9)
+    assert x.tolist() == pytest.approx([90.0, 90.0], abs=1e-12)
+    assert sorted(active) == [0, 1] and 2 not in active
+    assert dict(zip(active, u, strict=True)) == pytest.approx({0: 955.0, 1: 930.0}, abs=1e-9)
+
+
+def test_an_infeasible_program_is_refused():
+    from noodl.apps.water.network import _dual_active_set, _Infeasible
+
+    g = torch.tensor([[1.0]], dtype=F64)
+    c = torch.tensor([[1.0], [-1.0]], dtype=F64)    # x >= 2 and x <= 1
+    with pytest.raises(_Infeasible):
+        _dual_active_set(g, torch.zeros(1, dtype=F64), c,
+                         torch.tensor([2.0, -1.0], dtype=F64), 1e-9)
+
+
+def _reshut_network():
+    """The re-shut case of the docstring above, with K (4 L/s) between R1 and R2 so that
+    the solve has flow somewhere."""
+    return WaterNetwork(
+        junctions=(Junction("J1", 0.0), Junction("J2", 0.0), Junction("K", 0.0, 0.004)),
+        reservoirs=(Reservoir("R1", 100.0), Reservoir("R2", 50.0), Reservoir("Ra", 90.0),
+                    Reservoir("Rb", 60.0), Reservoir("Rc", 65.0),
+                    *(Reservoir(f"Z{i}", 0.0) for i in range(10))),
+        pipes=(_pipe("Pa", "Ra", "J1", "CV"), _pipe("P7", "J1", "J2", "CV"),
+               _pipe("Pb", "Rb", "J2", "CV"), _pipe("Pc", "J1", "Rc", "CLOSED"),
+               *(_pipe(f"PZ{i}", "J2", f"Z{i}", "CLOSED") for i in range(10)),
+               _pipe("P3", "R1", "K"), _pipe("P4", "K", "R2")),
+    )
+
+
+def test_a_check_valve_opened_on_the_way_is_shut_again():
+    """Through `water_steady`: J1 = J2 = 90 exactly (tied to Ra through the open Pa and
+    P7), Pb CLOSED, every flow into the group exactly zero; the ten reservoirs at 0 and Rc
+    do not enter."""
+    model, state, drivers = build_model(_reshut_network())
+    out = water_steady(model, state, drivers)
+    h, q = _heads(model, out), _flows(model, out)
+    assert h["J1"] == 90.0 and h["J2"] == 90.0
+    assert all(q[name] == 0.0 for name in model.link_names if name not in ("P3", "P4"))
+    states = dict(zip(model.link_names, link_states(model, out, drivers).tolist(),
+                      strict=True))
+    assert states["Pa"] == OPEN and states["P7"] == OPEN and states["Pb"] == CLOSED
+    assert states["Pc"] == CLOSED and all(states[f"PZ{i}"] == CLOSED for i in range(10))
+
+
+def test_a_demand_junction_behind_a_closed_check_valve_fed_otherwise_is_solved():
+    """The refusal of a demand junction among the free nodes does not fire where the water
+    reaches it another way (it is then reliable): D with a demand, a check valve D -> R1
+    that must shut and an open pipe R1 -> D that feeds it."""
+    net = WaterNetwork(
+        junctions=(Junction("D", 0.0, 0.002), Junction("K", 0.0, 0.004)),
+        reservoirs=(Reservoir("R1", 100.0), Reservoir("R2", 50.0)),
+        pipes=(_pipe("P1", "D", "R1", "CV"), _pipe("P2", "R1", "D"), _pipe("P3", "R1", "K"),
+               _pipe("P4", "K", "R2")),
+    )
+    model, state, drivers = build_model(net)
+    out = water_steady(model, state, drivers)
+    q = _flows(model, out)
+    assert q["P1"] == 0.0 and q["P2"] == pytest.approx(0.002, abs=1e-12)
+    assert link_states(model, out, drivers).tolist() == [CLOSED, OPEN, OPEN, OPEN]

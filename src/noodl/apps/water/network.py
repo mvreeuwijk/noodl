@@ -23,6 +23,7 @@ ACTIVE.
 
 from __future__ import annotations
 
+import math
 from collections import deque
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -1311,7 +1312,7 @@ def water_steady(model: Model, state: State, drivers: Drivers, **solve_kwargs) -
     solve_kwargs.setdefault("atol", 1e-11)
     solve_kwargs.setdefault("rtol", 1e-11)
     solve_kwargs.setdefault("max_iter", 200)
-    drivers, settle = _cut_off_plan(model, state, drivers, "water_steady")
+    drivers, limit = _cut_off_plan(model, state, drivers, "water_steady")
     try:
         result = model.steady(state, drivers, **solve_kwargs)
     except UndefinedSteadyState as exc:
@@ -1328,8 +1329,8 @@ def water_steady(model: Model, state: State, drivers: Drivers, **solve_kwargs) -
         ) from exc
     _refuse_pump_overflow(model, result)
     _refuse_wrong_way(model, result, drivers, "water_steady")
-    if settle is not None:
-        result = {**result, "water.phi": settle(result)}
+    if limit is not None:
+        result = {**result, "water.phi": limit(result)[0]}
     return result
 
 
@@ -1377,26 +1378,21 @@ def _link_status(model: Model, state: State, drivers: Drivers) -> Tensor:
 @dataclass(frozen=True)
 class _CutOff:
     """What closed links do to one network for one set of open links and demands
-    (`_cut_off_plan`): the junctions cut off with a demand (`fed_none`), the closed links
-    whose row ties a cut-off group to its neighbour (`ties`), and the cut-off nodes with the
-    matrix whose rows give their heads from all heads (`nodes`, `heads`)."""
+    (`_cut_off_plan`): the junctions cut off with a demand (`fed_none`) and the closed links
+    whose row ties a cut-off group to its neighbour during the solve (`ties`)."""
 
     fed_none: tuple[str, ...]
     ties: tuple[int, ...]
-    nodes: tuple[int, ...]
-    heads: Tensor | None
 
 
 def _cut_off_groups(net: WaterNetwork, open_links: tuple, demand: tuple) -> _CutOff:
     """`_CutOff` for one set of open links (per link) and demands (per junction).
 
     The groups are the connected parts of the open links. A group with no reservoir or tank
-    and no demand has no head of its own. EPANET gives it one through the `1 / CBIG`
-    conductance of its closed links; as `CBIG` grows that head tends to the value at which
-    the closed links' flows, all of the same conductance, sum to zero: the plain average of
-    the heads at their far ends (a harmonic, equal-weight solution, solved jointly where
-    closed links join two such groups). One closed link per group, chosen breadth-first from
-    the reservoirs and tanks, ties the group to its neighbour during the solve (`ties`)."""
+    and no demand has no head of its own in the exact equations (`_limit` gives it EPANET's
+    after the solve); so that the solve's Jacobian is not singular, one closed link per
+    group, chosen breadth-first from the reservoirs and tanks, ties the group to its
+    neighbour during the solve (`ties`, the links `PIN_KEY` marks)."""
     names = net.nodes()
     n = len(names)
     index = {name: i for i, name in enumerate(names)}
@@ -1411,14 +1407,13 @@ def _cut_off_groups(net: WaterNetwork, open_links: tuple, demand: tuple) -> _Cut
     fed_none = tuple(j.name for j, d in zip(net.junctions, demand, strict=True)
                      if d and group[index[j.name]] not in fed)
     if fed_none or not cut:
-        return _CutOff(fed_none, (), (), None)
-    across = [(j, group[index[link.u]], group[index[link.v]], index[link.u], index[link.v])
-              for j, (link, is_open) in enumerate(zip(links, open_links, strict=True))
-              if not is_open and group[index[link.u]] != group[index[link.v]]]
+        return _CutOff(fed_none, ())
     neighbours: dict[int, list] = {}
-    for j, gu, gv, _, _ in across:
-        neighbours.setdefault(gu, []).append((j, gv))
-        neighbours.setdefault(gv, []).append((j, gu))
+    for j, (link, is_open) in enumerate(zip(links, open_links, strict=True)):
+        gu, gv = group[index[link.u]], group[index[link.v]]
+        if not is_open and gu != gv:
+            neighbours.setdefault(gu, []).append((j, gv))
+            neighbours.setdefault(gv, []).append((j, gu))
     # Every group is reached: the layer refuses, when built, a node no link joins to a
     # reservoir or tank.
     reached, queue, ties = set(fed), deque(fed), []
@@ -1428,21 +1423,7 @@ def _cut_off_groups(net: WaterNetwork, open_links: tuple, demand: tuple) -> _Cut
                 reached.add(other)
                 ties.append(j)
                 queue.append(other)
-    k_of = {g: k for k, g in enumerate(cut)}
-    lap = torch.zeros(len(cut), len(cut), dtype=F64)
-    far = torch.zeros(len(cut), n, dtype=F64)
-    for _, gu, gv, u, v in across:
-        for g, h, end in ((gu, gv, v), (gv, gu, u)):
-            if g in k_of:
-                lap[k_of[g], k_of[g]] += 1.0
-                if h in k_of:
-                    lap[k_of[g], k_of[h]] -= 1.0
-                else:
-                    far[k_of[g], end] += 1.0
-    per_group = torch.linalg.solve(lap, far)
-    nodes = tuple(i for i in range(n) if group[i] in k_of)
-    return _CutOff((), tuple(ties), nodes,
-                   per_group[[k_of[group[i]] for i in nodes]])
+    return _CutOff((), tuple(ties))
 
 
 def _groups(model: Model, open_links: tuple, demand: tuple) -> _CutOff:
@@ -1455,8 +1436,21 @@ def _groups(model: Model, open_links: tuple, demand: tuple) -> _CutOff:
     return cache[key]
 
 
+def _topology(model: Model) -> tuple[tuple, tuple]:
+    """`(ends, fixed)`: the `(start, end)` node indices of every link in `model.link_names`
+    order, and the reservoir and tank nodes; built once per model."""
+    found = model.__dict__.get("_link_topology")
+    if found is None:
+        net = model.water_network
+        index = {name: i for i, name in enumerate(model.node_names)}
+        found = model._link_topology = (
+            tuple((index[k.u], index[k.v]) for k in net.links()),
+            tuple(index[f.name] for f in (*net.reservoirs, *net.tanks)))
+    return found
+
+
 def _cut_off_plan(model: Model, state: State, drivers: Drivers, caller: str):
-    """`(drivers, settle)` for one solve by `caller`, after refusing what cannot be solved.
+    """`(drivers, limit)` for one solve by `caller`, after refusing what cannot be solved.
 
     Refused by name: a junction with a demand that closed links cut off from every
     reservoir and tank (EPANET reports it disconnected), and a status or direction on a
@@ -1466,9 +1460,10 @@ def _cut_off_plan(model: Model, state: State, drivers: Drivers, caller: str):
 
     A cut-off group without demand is solved, as EPANET solves it: `drivers` gains
     `PIN_KEY` on one closed link per group (`_cut_off_groups`), which ties the group's head
-    to that link's far end with every flow exactly zero, and `settle(solution)` then sets
-    the heads of every group cut off AT THE SOLUTION to EPANET's limit (`_settle`). `settle`
-    is `None` when no link is closed and none is one-way."""
+    to that link's far end with every flow exactly zero, and `limit(solution)` then gives
+    the heads with every part cut off AT THE SOLUTION at EPANET's limit, and which check
+    valves holding no flow are open there (`_limit`). `limit` is `None` when no link is
+    closed and none is one-way."""
     net = model.water_network
     layer = model.kirchhoff["water"]
     status = _link_status(model, state, drivers).detach()
@@ -1503,149 +1498,315 @@ def _cut_off_plan(model: Model, state: State, drivers: Drivers, caller: str):
             raise ValueError(
                 f"{caller}: junction(s) {fed_none} are cut off from every reservoir and tank "
                 f"by closed links, yet have a demand: no head can deliver it")
-        if any(p.nodes for p in plans):
+        if any(p.ties for p in plans):
             ties = torch.zeros(len(plans), n_l, dtype=F64)
             for k, plan in enumerate(plans):
                 ties[k, list(plan.ties)] = 1.0
             drivers = {**drivers, PIN_KEY: ties[inverse].reshape(batch + (n_l,))}
 
-    def settle(solution: State) -> Tensor:
-        return _settle(model, solution, closed, demand, one_way, caller)
+    def limit(solution: State) -> tuple[Tensor, Tensor]:
+        return _limit(model, solution, closed, demand, one_way, caller)
 
-    return drivers, settle
+    return drivers, limit
 
 
-def _settle(model: Model, solution: State, closed: Tensor, demand: Tensor,
-            one_way: Tensor | None, caller: str) -> Tensor:
-    """`solution`'s heads with every zero-demand part of the network that the solve leaves
-    without a head of its own set to EPANET's limit head.
+#: A flow below this (m3/s) is zero for a check valve: it holds no flow.
+_NO_FLOW = 1e-12
+
+
+def _limit(model: Model, solution: State, closed: Tensor, demand: Tensor,
+           one_way: Tensor | None, caller: str) -> tuple[Tensor, Tensor]:
+    """`(heads, open)`: `solution`'s heads with every zero-demand part of the network that
+    the solve leaves without a head of its own set to EPANET's limit head, and, per link,
+    whether a check valve holding no flow is open there.
 
     A link carrying flow, or open in both directions, ties its ends' heads (it is "solid");
-    a node joined by solid links to a reservoir or tank has the solve's own head
-    ("reliable"). Every other node sits behind closed links (status CLOSED) and check valves
-    holding no flow, where the exact equations leave its head free (any head that keeps the
-    check valves shut solves them; the solve stops at one of them, often an open branch's tie
-    `dp = 0`). EPANET's limit as its closed-link conductance `1 / CBIG` vanishes:
+    a node joined by solid links to a reservoir or tank is "reliable" and keeps the solve's
+    own head. Every other node is "free": it sits behind closed links (status CLOSED) and
+    check valves holding no flow, where the exact equations leave its head anywhere that
+    keeps those valves shut. EPANET gives each closed link the conductance `1 / CBIG`, and
+    opens a check valve whose upstream head is the higher; the free heads of this model are
+    the limit of EPANET's as `CBIG` grows: the solution of the convex quadratic program
 
-    - every closed link, and every check valve in its no-flow branch, is one equal small
-      conductance; a check valve open at zero flow has a conductance infinitely larger, so
-      it ties its two ends together (its head loss at zero flow is 0);
-    - starting with every zero-flow check valve shut, the unknown heads solve the Laplacian
-      over the closed links (nodes tied to reliable ones take their head);
-    - the shut check valve whose head would drive water its own way the hardest is opened
-      (tied), and the Laplacian solved again, until none would open.
+        minimise   1/2 sum over the closed links and the check valves holding no flow,
+                   (a, b), of (H_a - H_b)^2
+        subject to H_u <= H_v for every such check valve u -> v
 
-    Each pass opens one valve and none is ever shut again, so it ends within as many passes
-    as there are zero-flow check valves; opening the hardest-driven valve first is what lets
-    a later, weaker one stay shut (its far side is then below the group's head). The solve's
-    own choice among the free heads (which valve its iterates kept open) does not enter:
-    only which links carry flow does. A junction with a demand in such a part (no solution
-    has one) and a valve that would tie two reliable heads that differ (it would carry
-    flow, so the solve's branch was not EPANET's) are refused by name."""
+    (reverse-only pipes with the ends swapped), the heads outside the structure held at the
+    solve's. Each link of the structure is a resistor of one conductance (EPANET's shut
+    check valve has `1 / CBIG` too), and each check valve is in addition an ideal diode in
+    parallel (open, EPANET's is `1 / RQtol`, 1e15 times larger): the KKT conditions are
+    the node balances of that resistor-and-diode network, with the constraints' multipliers
+    the diodes' flows (in units of `1 / CBIG`), so a check valve is open where its multiplier
+    is positive and shut where it is zero. The objective is strictly convex on the free
+    heads (every free node reaches a reliable one through the structure), so the heads are
+    unique, and `_dual_active_set` finds them in finitely many steps. The heads are a
+    linear map of the solve's heads for the active set found, so a gradient flows through
+    them. Solid links among free nodes carry no flow and tie their ends.
+
+    A junction with a demand among the free nodes is refused by name: no head delivers it.
+    At a converged solution that cannot happen where EPANET solves (a demand junction is
+    reliable: its water reaches it through links carrying flow); it fires where a
+    converged check valve holds no flow against a demand behind it, which the solve's
+    branch selection refuses first (`_refuse_wrong_way`)."""
     phi = solution["water.phi"]
     net = model.water_network
     n, n_j, n_l = phi.shape[-1], len(net.junctions), len(model.link_names)
     q = solution["water.q"].detach()
     if one_way is None:
         one_way = torch.zeros(n_l, dtype=q.dtype)
-    still = (one_way != 0) & (q.abs() <= 1e-12) & ~closed
+    still = (one_way != 0) & (q.abs() <= _NO_FLOW) & ~closed
     solid = ~closed & ~still
     batch = torch.broadcast_shapes(phi.shape[:-1], solid.shape[:-1], demand.shape[:-1],
                                    one_way.shape[:-1])
     flat_in = phi.expand(batch + (n,)).reshape(-1, n)
     out = flat_in.clone()
+    open_ = torch.zeros(flat_in.shape[0], n_l, dtype=torch.bool)
     solid = solid.expand(batch + (n_l,)).reshape(-1, n_l).tolist()
     still = still.expand(batch + (n_l,)).reshape(-1, n_l).tolist()
+    closed = closed.expand(batch + (n_l,)).reshape(-1, n_l).tolist()
     demand = demand.expand(batch + (n_j,)).reshape(-1, n_j).tolist()
     direction = one_way.expand(batch + (n_l,)).reshape(-1, n_l).tolist()
-    ends = model.__dict__.get("_link_ends")
-    if ends is None:
-        index = {name: i for i, name in enumerate(model.node_names)}
-        ends = model._link_ends = tuple((index[k.u], index[k.v]) for k in net.links())
-    fixed = tuple(model.node_names.index(f.name) for f in (*net.reservoirs, *net.tanks))
+    ends, fixed = _topology(model)
     tol = 1e-9 * model.head_scale
     for b in range(out.shape[0]):
         group, fed = _joined_groups(ends, fixed, tuple(solid[b]))
         free = [i for i in range(n) if group.get(i, i) not in fed]
         if not free:
             continue
-        reliable = [group.get(i, i) in fed for i in range(n)]
         for i in free:
             if i < n_j and demand[b][i]:
                 raise ValueError(
                     f"{caller}: junction {net.junctions[i].name!r} has a demand but is "
                     f"joined to every reservoir and tank only through closed links and "
                     f"check valves holding no flow")
-        values = flat_in[b].detach()
-        opened: set[int] = set()
-        while True:
-            heads, anchored = _limit_heads(ends, solid[b], still[b], opened, reliable, n)
-            guess = heads @ values
-            drive = {j: direction[b][j] * float(guess[ends[j][0]] - guess[ends[j][1]])
-                     for j in range(n_l) if still[b][j] and j not in opened}
-            drive = {j: d for j, d in drive.items() if d > tol}
-            if not drive:
-                break
-            j = max(drive, key=drive.get)
-            if anchored[ends[j][0]] and anchored[ends[j][1]]:
-                raise ValueError(
-                    f"{caller}: check valve {model.link_names[j]!r} holds no flow, yet the "
-                    f"heads at its two ends, both fixed by the rest of the network, would "
-                    f"drive water through it; solve again from another state")
-            opened.add(j)
-        out[b, free] = heads[free].to(phi.dtype) @ flat_in[b]
-    return out.reshape(batch + (n,))
+        structure = [j for j in range(n_l) if closed[b][j] or still[b][j]]
+        rows, far, coefficients, opened = _limit_heads(
+            ends, free, structure, [j for j in structure if still[b][j]], direction[b],
+            solid[b], flat_in[b].detach(), tol, model, caller)
+        out[b, rows] = coefficients.to(phi.dtype) @ flat_in[b][far]
+        open_[b, opened] = True
+    return out.reshape(batch + (n,)), open_.reshape(batch + (n_l,))
 
 
-def _limit_heads(ends, solid, still, opened, reliable, n) -> tuple[Tensor, list]:
-    """`(M, anchored)`: the matrix with every node's limit head `M @ phi` (`_settle`), and
-    whether each node's head is a reliable node's. A reliable node keeps its own head; the
-    others are tied into groups by solid links and the `opened`
-    check valves, and each group not tied to a reliable node solves the Laplacian over the
-    closed links (status CLOSED, and the check valves `still` not `opened`) with equal
-    weights."""
-    # Ties: the solid links among the other nodes (they carry no flow there) and the opened
-    # check valves; never a solid link between two reliable nodes, whose heads differ by
-    # its head loss.
-    tied = [j in opened or (solid[j] and not (reliable[u] and reliable[v]))
-            for j, (u, v) in enumerate(ends)]
-    groups: UnionFind[int] = UnionFind(range(n))
+def _limit_heads(ends, free, structure, valves, direction, solid, values, tol, model,
+                 caller):
+    """`(rows, far, coefficients, opened)` of `_limit` for one instance: the free nodes
+    `rows`, whose limit heads are `coefficients @ values[far]` (`far` the reliable nodes
+    the structure touches), and the check valves `opened` (the links among `valves` whose
+    multiplier is positive).
+
+    The unknowns are the tie groups of the free nodes (joined by solid links, which carry no
+    flow there). The program is assembled on them (`G`, `a` from the `structure` links;
+    one constraint per check valve whose two ends are not tied or both reliable) and solved
+    by `_dual_active_set`; its active set, as ties, then gives the heads exactly: a group
+    tied to a reliable node takes that node's head, the others solve the Laplacian over the
+    structure links with unit weights."""
+    is_free = [False] * len(values)
+    for i in free:
+        is_free[i] = True
+    ties: UnionFind[int] = UnionFind(free)
     for j, (u, v) in enumerate(ends):
-        if tied[j]:
-            groups.union(u, v)
-    group = [groups.find(i) for i in range(n)]
-    anchor: dict[int, int] = {}
-    for i in range(n):
-        if reliable[i]:
-            anchor.setdefault(group[i], i)
-    m = torch.zeros(n, n, dtype=F64)
-    unknown = [g for g in dict.fromkeys(group) if g not in anchor]
-    k_of = {g: k for k, g in enumerate(unknown)}
-    lap = torch.zeros(len(unknown), len(unknown), dtype=F64)
-    far = torch.zeros(len(unknown), n, dtype=F64)
-    for j, (u, v) in enumerate(ends):
-        if solid[j] or tied[j] or group[u] == group[v]:
-            continue
-        for a, end in ((u, v), (v, u)):
-            ga, ge = group[a], group[end]
-            if ga not in k_of:
-                continue
-            lap[k_of[ga], k_of[ga]] += 1.0
-            if ge in k_of:
-                lap[k_of[ga], k_of[ge]] -= 1.0
-            elif reliable[end]:
-                far[k_of[ga], end] += 1.0
-            else:
-                far[k_of[ga], anchor[ge]] += 1.0
-    per_group = torch.linalg.solve(lap, far) if unknown else far
-    for i in range(n):
-        if reliable[i]:
-            m[i, i] = 1.0
-        elif group[i] in anchor:
-            m[i, anchor[group[i]]] = 1.0
+        if solid[j] and is_free[u] and is_free[v]:
+            ties.union(u, v)
+    variables = list(dict.fromkeys(ties.find(i) for i in free))
+    k_of = {g: k for k, g in enumerate(variables)}
+    of_node = {i: k_of[ties.find(i)] for i in free}
+    far: list[int] = []
+    far_of: dict[int, int] = {}
+
+    def far_index(node: int) -> int:
+        if node not in far_of:
+            far_of[node] = len(far)
+            far.append(node)
+        return far_of[node]
+
+    # the links as (variable or None, variable or None, far index or None): the free ends
+    # as variables, a reliable end as a far node
+    links = []
+    for j in structure:
+        u, v = ends[j]
+        ku = of_node.get(u) if is_free[u] else None
+        kv = of_node.get(v) if is_free[v] else None
+        if ku is None and kv is None:
+            links.append(None)
+        elif ku is not None and kv is not None:
+            links.append((ku, kv, None) if ku != kv else None)
+        elif ku is not None:
+            links.append((ku, None, far_index(v)))
         else:
-            m[i] = per_group[k_of[group[i]]]
-    return m, [group[i] in anchor for i in range(n)]
+            links.append((None, kv, far_index(u)))
+    n_var = len(variables)
+    constraints = []   # (link, variable +1 or None, variable -1 or None, far +1, far -1)
+    for j in valves:
+        u, v = ends[j]
+        lo, hi = (u, v) if direction[j] > 0 else (v, u)
+        k_lo = of_node.get(lo) if is_free[lo] else None
+        k_hi = of_node.get(hi) if is_free[hi] else None
+        if (k_lo is None and k_hi is None) or (k_lo is not None and k_lo == k_hi):
+            continue
+        # H_hi - H_lo >= 0, as c x >= b with the fixed heads on the right
+        constraints.append((j, k_hi, k_lo,
+                            far_index(lo) if k_lo is None else None,
+                            far_index(hi) if k_hi is None else None))
+    n_far = len(far)
+    g = torch.zeros(n_var, n_var, dtype=F64)
+    b_far = torch.zeros(n_var, n_far, dtype=F64)   # the objective's `a` is `-b_far h_far`
+    for link in links:
+        if link is None:
+            continue
+        ku, kv, f = link
+        if f is None:
+            g[ku, ku] += 1.0
+            g[kv, kv] += 1.0
+            g[ku, kv] -= 1.0
+            g[kv, ku] -= 1.0
+        else:
+            k = ku if ku is not None else kv
+            g[k, k] += 1.0
+            b_far[k, f] += 1.0
+    h_far = values[far]
+    active: list[int] = []
+    multipliers: list[float] = []
+    if constraints:
+        c = torch.zeros(len(constraints), n_var, dtype=F64)
+        d = torch.zeros(len(constraints), n_far, dtype=F64)
+        for row, (_, k_hi, k_lo, f_lo, f_hi) in enumerate(constraints):
+            if k_hi is not None:
+                c[row, k_hi] += 1.0
+            if k_lo is not None:
+                c[row, k_lo] -= 1.0
+            if f_lo is not None:
+                d[row, f_lo] += 1.0
+            if f_hi is not None:
+                d[row, f_hi] -= 1.0
+        try:
+            _, active, multipliers = _dual_active_set(g, -b_far @ h_far, c, d @ h_far, tol)
+        except _Infeasible as exc:
+            names = [model.link_names[constraints[row][0]] for row in exc.rows]
+            raise ValueError(
+                f"{caller}: the check valves {names} hold no flow, yet no heads keep them "
+                f"all shut: the solve's state is not a solution") from exc
+    opened = [constraints[row][0] for row, u in zip(active, multipliers, strict=True)
+              if u > tol]
+    # The heads from the active set, as ties: exact where tied to a reliable node.
+    merged: UnionFind[int] = UnionFind(range(n_var))
+    anchor: dict[int, int] = {}
+    for row in active:
+        _, k_hi, k_lo, f_lo, f_hi = constraints[row]
+        if k_hi is not None and k_lo is not None:
+            merged.union(k_hi, k_lo)
+        elif k_hi is not None:
+            anchor[k_hi] = f_lo
+        else:
+            anchor[k_lo] = f_hi
+    root = [merged.find(k) for k in range(n_var)]
+    anchored = {}
+    for k, f in anchor.items():
+        anchored.setdefault(root[k], f)
+    unknown = [r for r in dict.fromkeys(root) if r not in anchored]
+    u_of = {r: m for m, r in enumerate(unknown)}
+    lap = torch.zeros(len(unknown), len(unknown), dtype=F64)
+    rhs = torch.zeros(len(unknown), n_far, dtype=F64)
+    for link in links:
+        if link is None:
+            continue
+        ku, kv, f = link
+        ru = None if ku is None else root[ku]
+        rv = None if kv is None else root[kv]
+        if ru is not None and ru == rv:
+            continue
+        for a, other, f_other in ((ru, rv, f), (rv, ru, f)):
+            if a not in u_of:
+                continue
+            lap[u_of[a], u_of[a]] += 1.0
+            if other in u_of:
+                lap[u_of[a], u_of[other]] -= 1.0
+            else:
+                rhs[u_of[a], f_other if other is None else anchored[other]] += 1.0
+    per_unknown = torch.linalg.solve(lap, rhs) if unknown else rhs
+    coefficients = torch.zeros(n_var, n_far, dtype=F64)
+    for k in range(n_var):
+        if root[k] in anchored:
+            coefficients[k, anchored[root[k]]] = 1.0
+        else:
+            coefficients[k] = per_unknown[u_of[root[k]]]
+    return free, far, coefficients[[of_node[i] for i in free]], opened
+
+
+class _Infeasible(ValueError):
+    """`_dual_active_set`: no point satisfies the constraints `rows`."""
+
+    def __init__(self, rows: list[int]) -> None:
+        super().__init__(f"infeasible constraints {rows}")
+        self.rows = rows
+
+
+def _dual_active_set(g: Tensor, a: Tensor, c: Tensor, b: Tensor, tol: float,
+                     ) -> tuple[Tensor, list[int], list[float]]:
+    """`(x, active, multipliers)` of the strictly convex quadratic program
+    ``minimise 1/2 x' g x + a' x subject to c x >= b`` (`g` symmetric positive definite,
+    `c` one constraint per row): the dual active-set method of Goldfarb and Idnani
+    (Mathematical Programming 27, 1983), in dense arithmetic, for a small program.
+
+    It starts at the unconstrained minimum with no constraint active, and holds throughout:
+    `x` minimises the objective with the active constraints as equalities, their
+    multipliers are non-negative and their normals independent. Each outer step picks a
+    violated constraint `p` and moves `x` towards it along the direction `z` that keeps the
+    active equalities (the dual step `r` moves their multipliers); a multiplier that would
+    turn negative drops its constraint first (a partial step), and `p` joins the active set
+    when it is reached (a full step).
+
+    It ends. With `p` violated and `z` nonzero, a full step has a positive length, so the
+    objective, which the method never lets fall, strictly rises over every full step; after
+    a full step `x` is the unique minimiser over the active set, whose objective depends on
+    that set alone, so no active set returns, and there are finitely many. Between two
+    full steps only drops occur, at most one per active constraint. When `z` is zero (the
+    normal of `p` lies in the span of the active ones) and no multiplier can fall, no point
+    satisfies the constraints (`_Infeasible`, naming `p` and the active set)."""
+    chol = torch.linalg.cholesky(g)
+    g_inv = torch.cholesky_inverse(chol)
+    x = -(g_inv @ a)
+    active: list[int] = []
+    u: list[float] = []
+    for _ in range(100 * (c.shape[0] + 1) * (g.shape[0] + 1)):
+        s = c @ x - b
+        p = int(torch.argmin(s))
+        if float(s[p]) >= -tol:
+            return x, active, u
+        n_p = c[p]
+        u_p = 0.0
+        while True:
+            if active:
+                big_n = c[active].T                           # (n, k)
+                m = big_n.T @ g_inv @ big_n                    # (k, k), positive definite
+                n_star = torch.linalg.solve(m, big_n.T @ g_inv)
+                h = g_inv - g_inv @ big_n @ n_star
+                r = (n_star @ n_p).tolist()
+            else:
+                h = g_inv
+                r = []
+            z = h @ n_p
+            z_n = float(z @ n_p)
+            t1, drop = math.inf, None
+            for j, (u_j, r_j) in enumerate(zip(u, r, strict=True)):
+                if r_j > 1e-12 and u_j / r_j < t1:
+                    t1, drop = u_j / r_j, j
+            s_p = float(n_p @ x - b[p])
+            t2 = math.inf if z_n <= 1e-12 else -s_p / z_n
+            t = min(t1, t2)
+            if t == math.inf:
+                raise _Infeasible([p, *active])
+            u = [u_j - t * r_j for u_j, r_j in zip(u, r, strict=True)]
+            u_p += t
+            if t2 != math.inf:
+                x = x + t * z
+            if t == t2:
+                active.append(p)
+                u.append(u_p)
+                break
+            del active[drop], u[drop]
+    raise RuntimeError("_dual_active_set: the dual active-set method did not end")
 
 
 def _refuse_wrong_way(model: Model, state: State, drivers: Drivers, caller: str) -> None:
@@ -1673,24 +1834,21 @@ def link_states(model: Model, state: State, drivers: Drivers) -> Tensor:
     (2). These are also the codes `wntr` reports EPANET's link states in
     (`results.link["status"]`).
 
-    A link whose status is CLOSED is closed. A one-way pipe (a check valve) is closed where
-    its residual holds it at zero flow (`FlowControlledPipe.held_closed`: the head across it
-    would drive the water the wrong way). A valve otherwise has its status (ACTIVE or OPEN);
-    every other link is OPEN.
+    A link whose status is CLOSED is closed. A one-way pipe (a check valve) carrying flow is
+    open; one holding no flow is closed, unless EPANET's limit would push water through it
+    (`_limit`: the multiplier of its constraint is positive, as for a valve that feeds a
+    zero-demand junction from the highest of several reservoirs). A valve otherwise has its
+    status (ACTIVE or OPEN); every other link is OPEN.
     """
-    drivers, _ = _cut_off_plan(model, state, drivers, "link_states")
+    drivers, limit = _cut_off_plan(model, state, drivers, "link_states")
     status = _link_status(model, state, drivers)
-    layer = model.kirchhoff["water"]
     q = state["water.q"]
     out = torch.broadcast_to(status, q.shape[:-1] + status.shape[-1:]).clone()
-    if "pipe" in layer.kinds:
-        law, cols = layer.law_for("pipe")
-        if isinstance(law, FlowControlledPipe):
-            seen = {**drivers, STATUS_KEY: status}
-            dp = layer.dp(state["water.phi"], seen)[..., cols]
-            closed = law.held_closed(dp, q[..., cols], seen)
-            out[..., cols] = torch.where(closed, torch.zeros_like(out[..., cols]),
-                                         out[..., cols])
+    one_way = drivers.get(ONE_WAY_KEY)
+    if limit is not None and one_way is not None and bool(one_way.any()):
+        _, open_ = limit(state)
+        shut = (one_way != 0) & (q.detach().abs() <= _NO_FLOW) & ~open_
+        out = torch.where(shut, torch.full_like(out, CLOSED), out)
     return out.detach().to(torch.long)
 
 
@@ -1712,12 +1870,12 @@ def water_step(model: Model, state: State, drivers: Drivers, dt: float, *,
     solve_kwargs.setdefault("atol", 1e-11)
     solve_kwargs.setdefault("rtol", 1e-11)
     solve_kwargs.setdefault("max_iter", 200)
-    drivers, settle = _cut_off_plan(model, state, drivers, "water_step")
+    drivers, limit = _cut_off_plan(model, state, drivers, "water_step")
     result = model.step(state, drivers, dt, scheme=scheme, **solve_kwargs)
     _refuse_pump_overflow(model, result)
     _refuse_wrong_way(model, result, drivers, "water_step")
-    if settle is not None:
-        result = {**result, "water.phi": settle(result)}
+    if limit is not None:
+        result = {**result, "water.phi": limit(result)[0]}
     return result
 
 

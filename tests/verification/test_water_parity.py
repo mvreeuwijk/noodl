@@ -60,9 +60,11 @@ def _epanet(tmp_path, name, *, edits=(), duration=None):
 
 
 def _worst_heads(model, state, heads, skip=()):
+    """The worst relative head difference; a node at head 0 (a reservoir at the datum, held
+    exactly) is compared absolutely."""
     return max(
         abs(float(state["water.phi"][i]) / model.head_scale - float(heads[name]))
-        / abs(float(heads[name]))
+        / (abs(float(heads[name])) or 1.0)
         for i, name in enumerate(model.node_names)
         if name not in skip
     )
@@ -1119,7 +1121,7 @@ def _fenced(*middle):
 def test_a_junction_fenced_off_by_check_valves_matches_epanet(tmp_path):
     """J's two check valves both hold no flow (J above R2, below R1). Any head between 50 and
     100 m keeps both shut; EPANET's `1 / CBIG` through both gives the average, 75 m, and so
-    does this model (`_settle`). MEASURED: J exactly 75 against EPANET's 75.000000, heads
+    does this model (`_limit`). MEASURED: J exactly 75 against EPANET's 75.000000, heads
     3e-9 relative, both valves CLOSED as EPANET."""
     model, final, drivers, results = _hand_built(tmp_path, *_fenced("J"))
     _compare_with_epanet(model, final, drivers, results)
@@ -1182,18 +1184,70 @@ def _fence_cases():
         "internal-shut": ((j1, j2, k), reservoirs(20.0), (
             pipe("P1", "J1", "R1", "CV"), pipe("P2", "R2", "J1", "CV"),
             pipe("P7", "J2", "J1", "CV"), pipe("P8", "R3", "J2", "CV"), *feed)),
+        # ten reservoirs at 0 behind closed links pull J2 down, so with every valve shut Rb
+        # (60 m) is the first to feed it; once Ra (90 m) feeds J1 and P7 ties J2 to J1, Pb
+        # must shut again: J1 = J2 = 90, Pa and P7 open, Pb closed
+        "reshut": ((j1, j2, k), (*reservoirs(), Reservoir("Ra", 90.0), Reservoir("Rb", 60.0),
+                                 Reservoir("Rc", 65.0),
+                                 *(Reservoir(f"Z{i}", 0.0) for i in range(10))), (
+            pipe("Pa", "Ra", "J1", "CV"), pipe("P7", "J1", "J2", "CV"),
+            pipe("Pb", "Rb", "J2", "CV"), pipe("Pc", "J1", "Rc", "CLOSED"),
+            *(pipe(f"PZ{i}", "J2", f"Z{i}", "CLOSED") for i in range(10)), *feed)),
     }
 
 
 @pytest.mark.parametrize("case", sorted(_fence_cases()))
 def test_check_valves_fencing_a_junction_match_epanet(tmp_path, case):
     """EPANET's `1 / CBIG` limit with check valves around zero-demand junctions
-    (`_settle`): the shut ones are equal conductances, an open one at zero flow ties its
-    ends. Heads 1e-6 relative, flows 1e-6 m3/s, every state. MEASURED heads 2.5e-9,
-    "one-opens" 8.5e-8 (J 90 against EPANET's float32 90.0000076), flows 1.1e-7 (K's
-    pipes), except "internal-opens", 4.1e-5: J1 and J2 at 56.666667 against 56.668983,
-    a group joined by a link inside it, which docs/applications/water.md (Limitations)
-    records as EPANET's, not a limit."""
+    (`_limit`, the resistor-and-diode program): the shut ones are equal conductances, an
+    open one at zero flow ties its ends. Heads 1e-6 relative, flows 1e-6 m3/s, every state.
+    MEASURED heads 2.5e-9; "one-opens" and "reshut" 8.5e-8 (90 against EPANET's float32
+    90.0000076); flows 1.1e-7 (K's pipes), and 8.9e-7 in "reshut", EPANET's own leak
+    through its OPEN Pa and P7 at `1 / RQtol` (this model's zero-flow valves carry exactly
+    0), just under the bound.
+
+    "internal-opens" is compared at 5e-5 (MEASURED 4.1e-5: J1 and J2 at 56.666667, the
+    limit, against EPANET's 56.668983), and the cause is EPANET's, not this model's: its
+    head there is not a limit at all. MEASURED with P7 5 m, 500 m and 5000 m long, EPANET
+    gives 55.3140, 56.6690 and 56.6655 m, unchanged with `ACCURACY 1e-8`; the same family
+    as the two-junction group of the test above (docs/applications/water.md,
+    Limitations)."""
     model, final, drivers, results = _hand_built(tmp_path, *_fence_cases()[case])
     _compare_with_epanet(model, final, drivers, results,
                          heads=5e-5 if case == "internal-opens" else 1e-6)
+
+
+@pytest.mark.parametrize("case, reservoir, expected", [
+    ("three-shut", "R3", 1 / 3),      # J the average of three shut valves' far ends
+    ("one-opens", "R3", 1.0),         # J tied to R3 through the open P6
+    ("one-opens", "R1", 0.0),         # ... and no longer a function of R1
+    ("internal-opens", "R3", 1 / 3),  # J1 = J2 = (R1 + R2 + R3) / 3 through the open P7
+    ("reshut", "Rb", 0.0),            # Pb shut again: J2 does not see Rb
+    ("reshut", "Ra", 1.0),            # J2 tied to J1 tied to Ra
+])
+def test_gradient_of_a_held_head_with_respect_to_a_reservoir_head(case, reservoir, expected):
+    """A held head is a linear map of the heads around it for the active set found
+    (`_limit`): d(held head)/d(reservoir head) by autograd through `water_steady` against
+    central differences (1e-3 m, within the active set) and the analytic slope, at 1e-9."""
+    from noodl.apps.water.network import WaterNetwork
+
+    junctions, reservoirs, pipes = _fence_cases()[case]
+    net = WaterNetwork(junctions=junctions, reservoirs=reservoirs, pipes=pipes)
+    model, state, drivers = build_model(net)
+    held = model.node_names.index(junctions[0].name)   # J, or J2 (J1 in reshut: either)
+    if case == "reshut":
+        held = model.node_names.index("J2")
+    r = [x.name for x in reservoirs].index(reservoir)
+
+    def head(boundary):
+        return water_steady(model, state, {**drivers, "water.phi_boundary": boundary})[
+            "water.phi"][held]
+
+    boundary = drivers["water.phi_boundary"].clone().requires_grad_(True)
+    (analytic,) = torch.autograd.grad(head(boundary), boundary)
+    e = torch.zeros_like(boundary)
+    e[r] = 1e-3
+    with torch.no_grad():
+        fd = (head(boundary + e) - head(boundary - e)) / 2e-3
+    assert float(analytic[r]) == pytest.approx(expected, abs=1e-9)
+    assert float(fd) == pytest.approx(expected, abs=1e-9)
