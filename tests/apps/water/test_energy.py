@@ -254,3 +254,22 @@ def test_an_undefined_default_pattern_is_a_constant_one():
     _, out = _run(net)
     assert out.head.shape[0] == 3
     torch.testing.assert_close(out.head[0], out.head[2], rtol=1e-12, atol=0)
+
+
+def test_efficiency_curve_tiny_is_in_the_files_flow_units():
+    """EPANET's `interp` treats a step in x below `TINY = 1e-6` as flat, in the file's
+    flow units (it interpolates `q * Ucf`): a 5e-10 m3/s step is 5e-7 L/s, flat, in an LPS
+    network, but a real step in m3/s."""
+    x = torch.tensor([[0.0, 5e-10]], dtype=F64)
+    y = torch.tensor([[10.0, 20.0]], dtype=F64)
+    xx = torch.tensor([[2.5e-10]], dtype=F64)
+    flat = interpolate_curves(x, y, xx, tiny=1e-6 * 1e-3)
+    real = interpolate_curves(x, y, xx, tiny=1e-12)
+    assert float(flat) == 20.0
+    assert float(real) == pytest.approx(15.0, rel=1e-12)
+    net = _constant_pump(curves={"E": ((0.0, 50.0), (0.01, 80.0))},
+                         pumps=(Pump("PU", "R", "J", None, power=5.0, efficiency_curve="E"),))
+    model, _ = _run(net)
+    from noodl.apps.water.energy import EnergyMeter
+
+    assert EnergyMeter(model, 0).tiny == pytest.approx(1e-9, rel=1e-12)

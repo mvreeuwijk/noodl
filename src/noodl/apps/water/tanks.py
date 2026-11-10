@@ -53,6 +53,7 @@ function of its level (`[CURVES]`), stepped by volume (`NodeStorage.potential_of
 
 from __future__ import annotations
 
+import weakref
 from contextlib import contextmanager
 
 import torch
@@ -232,6 +233,35 @@ class TankVolumeCurve(NodeStorage):
 
     def extra_repr(self) -> str:
         return f"nodes={self.nodes.tolist()}"
+
+
+def _identity(values) -> tuple | None:
+    """What identifies `values` (tensors, numbers or `None`) for `_same`: a tensor by weak
+    reference and version counter, `None` for an inference-mode tensor (no counter), any
+    other value as it is."""
+    out = []
+    for v in values:
+        if isinstance(v, torch.Tensor):
+            try:
+                out.append((weakref.ref(v), v._version))
+            except RuntimeError:
+                return None
+        else:
+            out.append(v)
+    return tuple(out)
+
+
+def _same(a: tuple, b: tuple) -> bool:
+    """`_identity` keys of the same objects at the same versions (values equal)."""
+    for x, y in zip(a, b, strict=True):
+        if isinstance(x, tuple) and isinstance(y, tuple):
+            if x[0]() is None or x[0]() is not y[0]() or x[1] != y[1]:
+                return False
+        elif isinstance(x, tuple) or isinstance(y, tuple):
+            return False
+        elif x is not y and not (x == y):
+            return False
+    return True
 
 
 class TankLevels:
@@ -425,21 +455,21 @@ class TankLevels:
                 f"{type(self).__name__}: states 'water.phi', 'water.link_status' and "
                 f"'water.link_setting' are all required; build them with initial_state(model)"
             )
-        # the same tensors, unchanged in place, as the last call: its answer (the solve hands
-        # the closure the same objects several times a step, and so does the run's report)
+        # the same inputs, unchanged in place, as the last call: its answer (the solve hands
+        # the closure the same objects several times a step, and so does the run's report).
+        # Every driver `_evaluate` reads is among them; a tensor is known by weak reference
+        # and version counter (the answer keeps no graph of the inputs alive), anything else
+        # by value.
         raw = (state.get("water.phi"), status, setting, drivers.get(STATUS_KEY),
                drivers.get(SETTING_KEY), drivers.get(ONE_WAY_KEY),
-               drivers.get(TANK_INFLOW_KEY), drivers.get(TIME_KEY))
-        try:
-            versions = tuple(None if t is None else t._version for t in raw)
-        except RuntimeError:        # an inference-mode tensor counts no versions
-            versions = None
+               drivers.get(TANK_INFLOW_KEY), drivers.get(TIME_KEY),
+               drivers.get(RESERVOIR_HEAD_KEY))
+        key = _identity(raw)
         fast = getattr(self, "_fast", None)
-        if (versions is not None and fast is not None and fast[1] == versions
-                and all(a is b for a, b in zip(raw, fast[0], strict=True))):
-            return dict(fast[2])
+        if key is not None and fast is not None and _same(key, fast[0]):
+            return dict(fast[1])
         out = self._evaluate(state, drivers, status, setting)
-        self._fast = None if versions is None else (raw, versions, out)
+        self._fast = None if key is None else (key, out)
         return dict(out)
 
     def _evaluate(self, state, drivers, status, setting) -> dict[str, Tensor]:
@@ -452,7 +482,8 @@ class TankLevels:
         time = self._time(drivers)
         read = (level.detach(), status.detach(), setting.detach(), drivers.get(STATUS_KEY),
                 drivers.get(SETTING_KEY), drivers.get(ONE_WAY_KEY),
-                None if inflow is None else inflow.detach(), time)
+                None if inflow is None else inflow.detach(), time,
+                drivers.get(RESERVOIR_HEAD_KEY))
         memo = getattr(self, "_memo", None)
         if memo is not None and all(
                 (a is None and b is None) or (a is not None and b is not None
@@ -484,7 +515,7 @@ class TankLevels:
                 f"{type(self).__name__}: driver {TIME_KEY!r} (s since the simulation start) "
                 f"is required by the network's AT TIME / AT CLOCKTIME controls; take the "
                 f"drivers from initial_drivers(model) and set it each step")
-        return time.detach().to(F64)
+        return torch.as_tensor(time).detach().to(F64)
 
     def _link_status(self, drivers, link_status: Tensor) -> Tensor:
         """Every link's status: the drivers' `"water.status"` (the build's when they carry

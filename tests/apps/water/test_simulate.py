@@ -309,3 +309,44 @@ def test_pressure_driven_demand_follows_its_pattern():
     torch.testing.assert_close(out.demand[:, 0], torch.tensor([0.01, 0.02], dtype=F64))
     drivers = initial_drivers(model)
     assert "water.sources" in drivers
+
+
+def _closure_net():
+    return WaterNetwork(
+        junctions=(Junction("J", 0.0, 0.002),),
+        reservoirs=(Reservoir("R", 50.0),),
+        tanks=(Tank("T", 40.0, 5.0, 0.0, 20.0, 10.0),),
+        pipes=(WaterPipe("P1", "R", "J", 500.0, 0.3, 130.0),
+               WaterPipe("P2", "J", "T", 100.0, 0.3, 130.0)),
+        controls=(Control("P2", CLOSED, None, "time", value=600.0),))
+
+
+def test_the_control_closure_follows_every_driver_it_reads():
+    """The closure remembers its last answer while its inputs are the same objects at the same
+    versions; the reservoir head (`"water.reservoir_head"`) is one of the inputs, a number
+    for the time is read by value, and the answer keeps no graph of an input alive."""
+    import gc
+    import weakref
+
+    model, state, drivers = build_model(_closure_net())
+    closure = model.control_closure
+    heads = drivers.get("water.reservoir_head", closure.reservoir_heads)
+    first = closure(state, {**drivers, "water.reservoir_head": heads})
+    second = closure(state, {**drivers, "water.reservoir_head": heads * 1.5})
+    assert float(second["water.phi_boundary"][0]) == pytest.approx(
+        1.5 * float(first["water.phi_boundary"][0]), rel=1e-12)
+    # the time as a plain number: before 600 s the control has not fired, after it has
+    early = closure(state, {**drivers, "water.time": 5.0})
+    late = closure(state, {**drivers, "water.time": 600.0})
+    assert float(early["water.link_status"][1]) == OPEN
+    assert float(late["water.link_status"][1]) == CLOSED
+    assert closure(state, {**drivers, "water.time": 600.0})["water.link_status"].tolist() \
+        == late["water.link_status"].tolist()
+    # an input that requires grad is not kept alive by the remembered answer
+    leaf = heads.clone().requires_grad_(True)
+    scaled = leaf * 2.0
+    ref = weakref.ref(scaled)
+    closure(state, {**drivers, "water.reservoir_head": scaled})
+    del scaled
+    gc.collect()
+    assert ref() is None

@@ -3275,3 +3275,44 @@ def test_energy_of_every_pump_kind_matches_epanet(tmp_path, kind, speed):
     worst, theirs, run = _compare_energy(path, tmp_path, "kind")
     assert theirs["PU1"][0] == pytest.approx(300.0 / 2.5) and theirs["PU1"][5] > 0
     assert worst < 1e-5, worst
+
+
+_RESERVOIR_PATTERN = """[JUNCTIONS]
+ J1 0 0
+[RESERVOIRS]
+ R1 50 RP
+[TANKS]
+ T1 0 5 0 10 10
+[PIPES]
+ P1 R1 J1 1000 300 100 0 Open
+ P2 J1 T1 1000 300 100 0 Closed
+[PATTERNS]
+ RP 1.0 1.5 0.8
+[TIMES]
+ Duration 3:00
+ Hydraulic Timestep 1:00
+ Pattern Timestep 1:00
+ Report Timestep 1:00
+[OPTIONS]
+ Units LPS
+ Headloss H-W
+"""
+
+
+def test_reservoir_head_pattern_with_an_idle_tank_matches_epanet(tmp_path):
+    """A reservoir head pattern (1, 1.5, 0.8 times 50 m) on a network whose only tank is
+    cut off and idle, so no tank level changes between steps: the head follows the pattern
+    each hour (the control closure's answer is remembered while its inputs are the same,
+    and the reservoir head driver is one of them: it once returned the first hour's heads).
+    Against EPANET, heads 1e-6 relative; also the pattern itself, 50, 75, 40, 50 m."""
+    path = tmp_path / "rpat.inp"
+    path.write_text(_RESERVOIR_PATTERN)
+    results = wntr.sim.EpanetSimulator(wntr.network.WaterNetworkModel(str(path))).run_sim(
+        file_prefix=str(tmp_path / "rpat"))
+    model, _, _ = build_model(read_epanet_inp(path))
+    run = water_run(model)
+    j = model.node_names.index("J1")
+    ours = [float(h) for h in run.head[:, j]]
+    theirs = [float(h) for h in results.node["head"]["J1"]]
+    assert theirs == pytest.approx([50.0, 75.0, 40.0, 50.0], rel=1e-6)
+    assert ours == pytest.approx(theirs, rel=1e-6)

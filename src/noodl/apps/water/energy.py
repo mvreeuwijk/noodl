@@ -73,7 +73,7 @@ class PumpEnergy:
     demand_charge: Tensor
 
 
-def interpolate_curves(x: Tensor, y: Tensor, xx: Tensor) -> Tensor:
+def interpolate_curves(x: Tensor, y: Tensor, xx: Tensor, tiny: float = TINY) -> Tensor:
     """EPANET's `interp` (`hydraul.c`/`input1.c`) for one curve per row: `x` and `y`
     (n_rows, L) with `x` rising along each row (a shorter curve padded by repeating its last
     point), `xx` (n_rows, B): the linear interpolation, the first value at or below the first
@@ -85,8 +85,8 @@ def interpolate_curves(x: Tensor, y: Tensor, xx: Tensor) -> Tensor:
     x0, x1 = x.gather(1, lower), x.gather(1, upper)
     y0, y1 = y.gather(1, lower), y.gather(1, upper)
     dx = x1 - x0
-    inside = y1 - (x1 - xx) * (y1 - y0) / torch.where(dx.abs() < TINY, torch.ones_like(dx), dx)
-    inside = torch.where(dx.abs() < TINY, y1, inside)
+    inside = y1 - (x1 - xx) * (y1 - y0) / torch.where(dx.abs() < tiny, torch.ones_like(dx), dx)
+    inside = torch.where(dx.abs() < tiny, y1, inside)
     return torch.where(k <= 0, y[:, :1], torch.where(k > top, y[:, -1:], inside))
 
 
@@ -111,6 +111,11 @@ class EnergyMeter:
         self.qzero = QZERO if cfs is None else 1e-6 / self.cfs_per_m3s
         self.kw_scale = (net.options.specific_gravity / _HP_FT_CFS * KW_PER_HP
                          * self.cfs_per_m3s / _M_PER_FT)         # kW per (m head m3/s)
+        # EPANET's `TINY` is in the file's flow units (`getenergy` interpolates `q * Ucf`)
+        from noodl.apps.water.inp import FLOW_UNITS
+
+        self.tiny = TINY * (1.0 if net.options.flow_units is None
+                            else FLOW_UNITS[net.options.flow_units])
         self.duration = int(duration)
         energy = net.energy
         n = len(pumps)
@@ -191,7 +196,8 @@ class EnergyMeter:
             speed = torch.where(on > 0, stack(6), torch.ones_like(on))
             xx = (q / speed).movedim(-1, 0)
             shape = xx.shape
-            e = interpolate_curves(self.curve_x, self.curve_y, xx.reshape(shape[0], -1))
+            e = interpolate_curves(self.curve_x, self.curve_y, xx.reshape(shape[0], -1),
+                                   self.tiny)
             e = e.reshape(shape).movedim(0, -1)
             sarbu = 100.0 - (100.0 - e) * (1.0 / speed) ** 0.1
             e = torch.where(self.has_curve, sarbu, e).clamp(1.0, 100.0) / 100.0
