@@ -318,6 +318,12 @@ class KirchhoffLayer(TopologyGuard):
             if el.kind in seen_kinds:
                 raise ValueError(f"duplicate law kind {el.kind!r} in layer {name!r}")
             seen_kinds.add(el.kind)
+            if el.reads_heads and (not isinstance(el, ImplicitLaw) or el.ports != 1):
+                raise TypeError(
+                    f"KirchhoffLayer {name!r}: law {type(el).__name__} (kind {el.kind!r}) "
+                    f"declares reads_heads, which only a one-port relation (an ImplicitLaw "
+                    f"with ports=1) may: the heads at its end nodes enter its residual row"
+                )
 
         self.net = net
         self._record_topology(net)
@@ -1015,7 +1021,9 @@ class KirchhoffLayer(TopologyGuard):
         d q)`, taken at `q`'s flow on that edge: `q` is every edge's flow, as `solve` returns
         it, and is required when the layer has a relation (`ValueError` without it, as for
         `flows`). The implied slope is `nan` where `d r / d q` is zero, as on an ideal
-        potential source, whose flow does not follow from its potential difference. Every
+        potential source, whose flow does not follow from its potential difference. For a
+        relation that reads the heads at its end nodes (`reads_heads`) the slope is taken
+        with those heads held fixed (`nan` where it holds a head). Every
         edge of a law with several ports is `nan` too: its slope is a matrix, not a number
         per edge. A phasor layer has no such accessor (`TypeError`: its slopes are
         complex)."""
@@ -1038,8 +1046,10 @@ class KirchhoffLayer(TopologyGuard):
                 parts.append(torch.full_like(dp_s, math.nan))
             elif rel:
                 f0 = int(index[s])
-                dr_dp, dr_dq = el.jacobian(dp_s, q_F[..., f0:f0 + e - s], drivers,
-                                           self._law_ctx(ctx, s, e))
+                lctx = self._law_ctx(ctx, s, e)
+                if el.reads_heads:
+                    lctx = self._with_heads(lctx, phi, dp_s, s, e)
+                dr_dp, dr_dq = el.jacobian(dp_s, q_F[..., f0:f0 + e - s], drivers, lctx)[:2]
                 dr_dp, dr_dq = dr_dp[..., 0, 0, 0, 0], dr_dq[..., 0, 0, 0, 0]
                 parts.append(torch.where(dr_dq != 0, -dr_dp / torch.where(
                     dr_dq != 0, dr_dq, torch.ones_like(dr_dq)),
@@ -1255,6 +1265,8 @@ class KirchhoffLayer(TopologyGuard):
                                                   self._law_slices, strict=True)):
             lctx = self._law_ctx(ctx, s, e)
             dp_s = dp[..., s:e]
+            if el.reads_heads:
+                lctx = self._with_heads(lctx, phi, dp_s, s, e)
             # Called on the law module itself, also on the differentiable path: the values
             # equal those of a `functional_call` with the threaded parameters, because the
             # threaded tensors ARE the module's own parameters (the same argument as
@@ -1267,10 +1279,15 @@ class KirchhoffLayer(TopologyGuard):
             if tangents is not None and i in tangents:
                 k = tangents[i][1] + torch.zeros_like(dp_s)
                 blocks.append(k[..., None, None, None, None])
-            elif adjoint and not el.exact_slope:
-                blocks += el._coloured_jacobian(dp_s, q_s, drivers, lctx)
             else:
-                blocks += el.jacobian(dp_s, q_s, drivers, lctx)
+                law_blocks = (el._coloured_jacobian(dp_s, q_s, drivers, lctx)
+                              if adjoint and not el.exact_slope
+                              else el.jacobian(dp_s, q_s, drivers, lctx))
+                if el.reads_heads:
+                    # each end node's column: dp's share plus the head's own (`flow_unknowns`)
+                    dr_dp, dr_dq, dr_dfrom, dr_dto = law_blocks
+                    law_blocks = (dr_dp + dr_dfrom, dr_dq, dr_dto - dr_dp)
+                blocks += law_blocks
         parts = [blk.flatten(-5) for blk in blocks]
         parts.append(torch.ones(1, dtype=x.dtype, device=x.device))
         if u.diag:
@@ -1338,6 +1355,15 @@ class KirchhoffLayer(TopologyGuard):
             lctx = by_slice[(s, e)] = dataclasses.replace(ctx, **changes)
         return lctx
 
+    def _with_heads(self, lctx: LawContext, phi, dp_s, s: int, e: int) -> LawContext:
+        """`lctx` with the heads at the start and end nodes of the edges `[s, e)` (the
+        full-node potentials `phi`), shaped like their `dp_s`: the context of a law that
+        `reads_heads`. Built afresh on every call, never cached: the heads change with the
+        iterate."""
+        return dataclasses.replace(
+            lctx, phi_from=phi[..., self._src[s:e]].expand(dp_s.shape),
+            phi_to=phi[..., self._tgt[s:e]].expand(dp_s.shape))
+
     def _check_width(self, el, out, n_edges: int, what: str) -> None:
         """A law returns one value per edge of its kind: refuse any other trailing width."""
         if out.dim() == 0 or out.shape[-1] != n_edges:
@@ -1361,6 +1387,8 @@ class KirchhoffLayer(TopologyGuard):
             if self._relation[i]:
                 f0 = int(index[s])
                 q_s = q_F[..., f0:f0 + e - s]
+                if el.reads_heads:
+                    lctx = self._with_heads(lctx, phi, dp_s, s, e)
                 r_s = call(i, (dp_s, q_s, drivers, lctx))
                 self._check_width(el, r_s, e - s, "residual")
                 r_parts.append(r_s)

@@ -201,13 +201,14 @@ never calls. To read the law context (time, frequency, step-start values), name 
 parameter of `flow` `ctx`. A `KirchhoffLayer` with a relation or a multi-port law adds those
 edges' flows as unknowns
 ([Laws that give a relation](layers.md#laws-that-give-a-relation-implicit-coupled-and-dynamic-laws));
-a dynamic or `ctx`-reading law that gives its flow adds none. Three class-level declarations on `ConstitutiveLaw` describe the rest.
+a dynamic or `ctx`-reading law that gives its flow adds none. Four class-level declarations on `ConstitutiveLaw` describe the rest.
 
 | Declaration | Default | Meaning |
 |---|---|---|
 | `ports` | `1` | The edges of the kind form consecutive groups of `ports` edges, in the order they were added; the law may couple the edges within a group (a transformer's primary and secondary), never across groups. |
 | `dynamic` | `False` | The law reads its step-start values (`ctx.dp_prev`, `ctx.q_prev`): the layer then needs `history` on a step. A capacitance and an inductance implement every mode below. |
 | `phasor_capable` | `False` | The law accepts complex `dp` and `q` (a linear law with real or complex coefficients, or a law written for phasors). Only such laws are allowed in a phasor layer. |
+| `reads_heads` | `False` | The law's residual reads the absolute potentials at its edges' start and end nodes (`ctx.phi_from`, `ctx.phi_to`), not only the difference `dp`: a valve that holds the head downstream of it. Its `jacobian` then also returns `d r / d phi_from` and `d r / d phi_to`. Only a one-port `ImplicitLaw` may declare it; a layer refuses any other law that does (`TypeError`). |
 
 **The two forms.** A law with a flow is the nodal half of circuit theory: its flow is eliminated
 in favour of the potentials. An `ImplicitLaw` covers what cannot be written that way: a
@@ -281,6 +282,7 @@ dataclass the layer builds for every solve:
 | `scheme` | `"trapezoidal"` (default) or `"backward_euler"`; read in the transient mode |
 | `dp_prev`, `q_prev` | This kind's own potential differences and flows at the step start (transient only) |
 | `omega` | The angular frequency `2 pi f`, one per instance (phasor only) |
+| `phi_from`, `phi_to` | The potentials at the start and end nodes of each of this kind's edges, shaped like `dp` (only for a law that declares `reads_heads`, else `None`) |
 
 A dynamic law implements a form for each mode. The capacitance of the electrical
 application, `q = C d(dp)/dt`:

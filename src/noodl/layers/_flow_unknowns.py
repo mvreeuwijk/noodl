@@ -86,7 +86,12 @@ class FlowUnknowns:
     `src` is, for each entry of the pattern, the slot of the flat block vector it takes its
     value from, with `sign`; `one_slot` is the slot of the constant 1 of the balance rows'
     flow-unknown columns, `node_slot` the first of the diagonal slots of withdrawals and
-    storage, present when `diag` (the last `n_I` entries of the pattern)."""
+    storage, present when `diag` (the last `n_I` entries of the pattern).
+
+    A relation takes two blocks, `d r / d dp` (used with sign +1 in the start node's column
+    and -1 in the end node's) and `d r / d q`; one that `reads_heads` takes three, the
+    derivative in the start node's column, `d r / d q` and the derivative in the end node's
+    column, each with sign +1, on the same pattern."""
 
     w: int
     n_I: int
@@ -148,7 +153,7 @@ def flow_unknowns(layer) -> FlowUnknowns:
             srcs.append((offset + flat)[keep])
             signs.append((sgn[a] * sgn[bb])[keep])
             offset += size
-        else:
+        elif not el.reads_heads:
             rrow = (n_I + f_index[ek]) * w + ck
             # d r / d dp: columns at the potentials of edge l's endpoints
             cn = node[el_, bb]
@@ -165,6 +170,24 @@ def flow_unknowns(layer) -> FlowUnknowns:
             srcs.append((offset + flat)[keep])
             signs.append(torch.ones(int(keep.sum()), dtype=torch.float64))
             offset += size
+        else:
+            # A relation that reads the heads at its end nodes (one port): its blocks are
+            # `[d r / d phi_from, d r / d q, d r / d phi_to]`, the first and last each the
+            # whole derivative in that node's column (`dp`'s share included), so the start
+            # node's column takes the first block and the end node's the third, both +1.
+            rrow = (n_I + f_index[ek]) * w + ck
+            cn = node[el_, bb]
+            keep = (cn >= 0) & (a == 0)
+            rows.append(rrow[keep])
+            cols.append((cn * w + cl)[keep])
+            srcs.append((offset + 2 * size * bb + flat)[keep])
+            signs.append(torch.ones(int(keep.sum()), dtype=torch.float64))
+            keep = (a == 0) & (bb == 0)
+            rows.append(rrow[keep])
+            cols.append(((n_I + f_index[el_]) * w + cl)[keep])
+            srcs.append((offset + size + flat)[keep])
+            signs.append(torch.ones(int(keep.sum()), dtype=torch.float64))
+            offset += 3 * size
     # balance x q_F: the incidence of relation edges, a constant +-1 (slot `one`)
     one_slot = offset
     offset += 1

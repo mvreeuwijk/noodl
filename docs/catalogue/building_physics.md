@@ -253,7 +253,7 @@ Supporting types.
 | `TimeSeries`<br><small>`noodl.apps.building_physics`</small> | Values at times since the simulation start (s): a measured or computed input. | `TimeSeries(times, values, *, interpolation='linear', name='')` |
 | `WeekSchedule`<br><small>`noodl.apps.building_physics`</small> | CONTAM's week schedule: one `DaySchedule` per day type (1-12). | `WeekSchedule(day_schedules, day_types=(1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1), *, name='')` |
 | `AirMedium`<br><small>`noodl.elements`</small> | An air medium's default state and the two densities its flow elements need. | `AirMedium(name, p_default, T_default, X_default, rho_default, has_moisture, _buoyancy, _density=None, _cp=None)` |
-| `LawContext`<br><small>`noodl.elements`</small> | What a dynamic or implicit constitutive law needs besides its own edge values. | `LawContext(mode, dt=None, t=None, scheme='trapezoidal', dp_prev=None, q_prev=None, omega=None)` |
+| `LawContext`<br><small>`noodl.elements`</small> | What a dynamic or implicit constitutive law needs besides its own edge values. | `LawContext(mode, dt=None, t=None, scheme='trapezoidal', dp_prev=None, q_prev=None, omega=None, phi_from=None, phi_to=None)` |
 | `SplineCurve`<br><small>`noodl.elements`</small> | A measured curve y(x) fitted as ContamX fits it (see the module docstring). | `SplineCurve(x, y, *, name='')` |
 
 ## Functions

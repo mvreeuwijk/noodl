@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import inspect
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import torch
 
@@ -56,6 +56,11 @@ class LawContext:
     sinusoidal state at angular frequency `omega` (a tensor broadcasting against the law's
     edges). `t` is the evaluation time (the END of a transient step), `None` when the caller
     tracks no clock.
+
+    `phi_from` and `phi_to` are the potentials (heads) at the start and end nodes of each of
+    the law's edges, shaped like its `dp`; the layer sets them only for a law that declares
+    `reads_heads` (a pressure-reducing valve holds the head downstream of it), and leaves
+    them `None` for every other law.
     """
 
     mode: str
@@ -65,6 +70,8 @@ class LawContext:
     dp_prev: Tensor | None = None
     q_prev: Tensor | None = None
     omega: Tensor | None = None
+    phi_from: Tensor | None = None
+    phi_to: Tensor | None = None
 
 
 def step_rate(change: Tensor, ctx: LawContext, previous: Tensor | None = None) -> Tensor:
@@ -197,6 +204,12 @@ class ConstitutiveLaw(torch.nn.Module):
     #: whose laws and withdrawals are all linear takes the full Newton step from the start
     #: (`KirchhoffLayer.linear`), so it converges in one iteration. Declared, not inferred.
     linear: bool = False
+    #: True for a relation (`ImplicitLaw`) whose residual reads the absolute heads at its
+    #: edges' end nodes (`ctx.phi_from`, `ctx.phi_to`), not only the drop `dp` across them:
+    #: a valve that holds the head downstream (or upstream) of it. Its `jacobian` then also
+    #: gives the residual's derivatives with respect to those heads. One-port relations only;
+    #: a layer refuses any other law that declares it. Declared, not inferred.
+    reads_heads: bool = False
 
     def __init_subclass__(cls, **kwargs) -> None:
         super().__init_subclass__(**kwargs)
@@ -295,8 +308,11 @@ class ConstitutiveLaw(torch.nn.Module):
         of `ports` = m edges, `w = 2` for a complex `dp` (its real view), else 1.
 
         Returns `(d flow / d dp,)` for a law with a flow and `(d r / d dp, d r / d q)` for an
-        implicit law; `q` is the edges' flow, used by an implicit law only. A law that knows
-        its derivatives overrides this (a phasor law writes its entries as real 2x2 blocks).
+        implicit law; `q` is the edges' flow, used by an implicit law only. An implicit law
+        that `reads_heads` returns `(d r / d dp, d r / d q, d r / d phi_from, d r / d phi_to)`,
+        each the partial with the other three held fixed (`ctx` carries the heads). A law that
+        knows its derivatives overrides this (a phasor law writes its entries as real 2x2
+        blocks).
 
         The default is `dflow` for a one-port, law without `ctx` on a real `dp`, and
         otherwise the law's own `forward` differentiated by reverse-mode colouring.
@@ -321,10 +337,19 @@ class ConstitutiveLaw(torch.nn.Module):
         return True
 
     def _coloured_jacobian(self, dp, q, drivers, ctx) -> tuple[Tensor, ...]:
-        """`_colour_blocks` of `forward` with respect to `dp` (and `q`, for an implicit law)."""
+        """`_colour_blocks` of `forward` with respect to `dp` (and `q`, for an implicit law, and
+        the heads `ctx.phi_from`, `ctx.phi_to` for one that `reads_heads`)."""
         from noodl.layers._device import complex_of
         w = 2 if dp.is_complex() else 1
         cdtype = complex_of(dp.dtype)
+        if self.reads_heads and q is not None:
+            if ctx is None or ctx.phi_from is None or ctx.phi_to is None:
+                raise ValueError(
+                    f"{type(self).__name__} (kind {self.kind!r}) reads the heads at its end "
+                    f"nodes: its context must carry phi_from and phi_to")
+            return tuple(_colour_blocks(
+                lambda d, qq, a, b: self(d, qq, drivers, replace(ctx, phi_from=a, phi_to=b)),
+                (dp, q, ctx.phi_from, ctx.phi_to), self.ports, w, cdtype))
         if q is None:
             return tuple(_colour_blocks(lambda d: self(d, drivers, ctx), (dp,), self.ports, w,
                                         cdtype))
