@@ -1979,6 +1979,71 @@ def test_ky10_constant_power_pumps_at_time_zero(tmp_path):
         name: int(status[name]) for name in model.link_names}
 
 
+#: ky4's two pairs of pipes joining the same two junctions, `(a, b)` with `a` from J-930 to
+#: J-929 (from J-702 to J-703) and `b` the other way, so their head losses cancel exactly.
+_KY4_PARALLEL = (("P-952", "P-969"), ("P-625", "P-696"))
+
+
+def test_ky4_at_time_zero(tmp_path):
+    """ky4 (`wntr/library/networks/ky4.inp`, `DURATION 0`): two constant-power pumps, one
+    closed by `[STATUS]`, T-2 at its minimum (empty), 959 junctions. One steady solve at
+    t = 0 with the t = 0 demands: every junction's demand times pattern "1" at t = 0
+    (0.33), applied here because `water_run` (which applies patterns) is not in this test.
+    The `[CONTROLS]` (pump ~@Pump-1 on T-3 below 90.75 / above 105.75 ft) do not act at
+    t = 0: T-3 starts at 100.751 ft. Without the pattern the demands are 1/0.33 times
+    EPANET's and P-539's flow is 1.4e-2 m3/s off (MEASURED; the reviewer's report).
+
+    Heads 1e-6 relative, link states equal, flows 1e-6 m3/s on every link but the four
+    below. MEASURED: heads 8.2e-8, flows 2.0e-7 on the others.
+
+    EPANET runs with `ACCURACY 1e-8`, not the file's 1e-4: EPANET stops when the flow
+    change is below that fraction of the total flow (`hydsolver.c`, `newflows`), and at
+    1e-4 its flows are off by up to 1.1e-5 m3/s (P-965, 2.8e-5 m3/s); at 1e-6 and 1e-8 its
+    answer no longer moves (MEASURED).
+
+    The two pairs of parallel pipes in `_KY4_PARALLEL` carry near-zero flows (1e-6 to
+    2e-5 m3/s) on a head-loss slope of 1e-4 to 1e-2 m per m3/s, so a head difference of
+    1e-10 m moves their split by 1e-6 m3/s. EPANET's split does not satisfy its own
+    equations: the two pipes' Hazen-Williams losses at its flows differ by 1.0e-7 m
+    (P-952/P-969) and 5.9e-9 m (P-625/P-696), though they join the same nodes (MEASURED),
+    and its flows there differ from noodl's by up to 1.9e-6 m3/s. Those four are held to
+    3e-6 m3/s and, instead, to energy balance: noodl's losses around each pair cancel to
+    1e-9 m (MEASURED 3.5e-10 m).
+    """
+    path = Path(wntr.__file__).parent / "library" / "networks" / "ky4.inp"
+    reference = wntr.network.WaterNetworkModel(str(path))
+    reference.options.hydraulic.accuracy = 1e-8
+    results = wntr.sim.EpanetSimulator(reference).run_sim(file_prefix=str(tmp_path / "ky4"))
+    net = read_epanet_inp(path)
+    assert net.duration == 0 and net.demand_pattern == "1"
+    assert [p.power is not None for p in net.pumps] == [True, True]
+    model, state, drivers = build_model(net)
+    drivers = {**drivers,
+               "water.sources": drivers["water.sources"] * _pattern_factor(net, 0.0)}
+    final = water_steady(model, state, drivers)
+    skip = tuple(r.name for r in net.reservoirs)
+    assert _worst_heads(model, final, results.node["head"].loc[0], skip=skip) < 1e-6
+    flows = results.link["flowrate"].loc[0]
+    parallel = {name for pair in _KY4_PARALLEL for name in pair}
+    q = dict(zip(model.link_names, final["water.q"].tolist(), strict=True))
+    worst = max(abs(q[name] - float(flows[name])) for name in q if name not in parallel)
+    assert worst < 1e-6, worst
+    assert max(abs(q[name] - float(flows[name])) for name in parallel) < 3e-6
+    pipes = {p.name: p for p in net.pipes}
+
+    def loss(name):   # Hazen-Williams, m, signed along the pipe
+        p = pipes[name]
+        k = 10.666829500036 * p.roughness ** -1.852 * p.diameter ** -4.871 * p.length
+        return math.copysign(k * abs(q[name]) ** 1.852, q[name])
+
+    for a, b in _KY4_PARALLEL:
+        assert abs(loss(a) + loss(b)) < 1e-9, (a, b, loss(a) + loss(b))
+    states = link_states(model, final, drivers).tolist()
+    status = results.link["status"].loc[0]
+    assert dict(zip(model.link_names, states, strict=True)) == {
+        name: int(status[name]) for name in model.link_names}
+
+
 #: A single point, 4 L/s at 10 m.
 _ONE_POINT_4_10 = " C1\t4\t10\n"
 
