@@ -138,3 +138,23 @@ def test_reads_heads_on_a_multi_port_law_is_refused():
     net.add_edge("b", "c", kind="held")
     with pytest.raises(TypeError, match="TwoPort.*reads_heads"):
         KirchhoffLayer(net, "water", [TwoPort(1.0)], boundary=["a"])
+
+
+def test_a_heads_reading_jacobian_with_two_blocks_is_refused_by_name():
+    class TwoBlocks(HeldDownstreamHead):
+        def jacobian(self, dp, q, drivers, ctx):
+            return super().jacobian(dp, q, drivers, ctx)[:2]
+
+    _, layer, phi_b, sources = _layer(TwoBlocks(40.0))
+    with pytest.raises(ValueError, match=r"TwoBlocks.*reads_heads.*4 blocks.*got 2"):
+        layer.solve(phi_b, {}, sources, differentiable=False)
+
+
+def test_a_heads_reading_law_without_its_flow_is_refused_by_name():
+    from noodl.elements.base import LawContext
+
+    law = HeldDownstreamHead(40.0)
+    one = torch.ones(1)
+    ctx = LawContext("dc", phi_from=one, phi_to=one)
+    with pytest.raises(ValueError, match=r"HeldDownstreamHead.*reads_heads.*flow"):
+        law._coloured_jacobian(one, None, {}, ctx)

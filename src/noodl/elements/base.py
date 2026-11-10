@@ -342,7 +342,12 @@ class ConstitutiveLaw(torch.nn.Module):
         from noodl.layers._device import complex_of
         w = 2 if dp.is_complex() else 1
         cdtype = complex_of(dp.dtype)
-        if self.reads_heads and q is not None:
+        if self.reads_heads:
+            if q is None:
+                raise ValueError(
+                    f"{type(self).__name__} (kind {self.kind!r}) reads_heads, so it is an "
+                    f"implicit law whose flow is an unknown: its jacobian needs that flow q, "
+                    f"and was given none")
             if ctx is None or ctx.phi_from is None or ctx.phi_to is None:
                 raise ValueError(
                     f"{type(self).__name__} (kind {self.kind!r}) reads the heads at its end "

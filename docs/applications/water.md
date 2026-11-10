@@ -70,7 +70,7 @@ print(round(float(water.head.named(final[water.head])["J2"]), 6))
 
 In the dictionaries the heads are `"water.phi"` (full node order) and the flows `"water.q"`
 (link order); a tank's level is its head in `"water.phi"` less its bottom (`tank_levels`),
-and pump status is the state key `"water.link_status"`. Both are set by tank and pump name with
+and the pumps' status under tank controls is the state key `"water.link_status"`. Both are set by tank and pump name with
 `initial_state(model, values=...)`, the levels under the key `"water.tank_level"`, which
 `initial_state` reads and writes into the tank heads (it is no state key).
 See [Using noodl](../usage.md).
@@ -225,10 +225,11 @@ iterations (19 with `pipe_form="potential"`).
 
 ### Valves
 
-A **TCV** is a settable minor loss and an **FCV** a fixed flow. A **PBV** (pressure breaker)
-and a **GPV** (general purpose valve) follow EPANET 2.2's own coefficient routines
-(`hydcoeffs.c`, `pbvcoeff` and `gpvcoeff`) as implicit laws, `BreakerValve` and
-`GeneralPurposeValve`, whose flow is an unknown of the layer:
+A **TCV** (`ThrottleValve`) is a minor loss whose coefficient is its setting, and an **FCV**
+(`FlowControlValve`) a fixed flow. A **PBV** (pressure breaker) and a **GPV** (general purpose
+valve) follow EPANET 2.2's own coefficient routines (`hydcoeffs.c`, `pbvcoeff` and `gpvcoeff`)
+as `BreakerValve` and `GeneralPurposeValve`. All four are implicit laws, whose flow is an
+unknown of the layer:
 
 - **PBV:** the head drop from the valve's start node to its end node is its setting,
   whichever way the water flows. Where the open valve's minor loss $m q^2$ exceeds the setting,
@@ -238,9 +239,52 @@ and a **GPV** (general purpose valve) follow EPANET 2.2's own coefficient routin
   that brackets $|q|$ (the first or last segment, extended, outside the curve), with
   $\operatorname{sgn}(0) = +1$.
 
-A network with either valve has those valves' flows as unknowns (solved by sparse LU); every
-other device gives its flow from the head difference. PRV and PSV, which switch status on the absolute head at
-one end, are not modelled.
+A valve's flow is an unknown of the solve (sparse LU). PRV and PSV, which switch status on the
+absolute head at one end, are not modelled yet.
+
+### Link status, settings and check valves
+
+Every link's status, setting and allowed direction are drivers, one value per link in
+`model.link_names` order (pipes, pumps, then TCVs, FCVs, PBVs, GPVs):
+
+| Driver | Values |
+|---|---|
+| `"water.status"` | `CLOSED` 0, `OPEN` 1, `ACTIVE` 2 (`noodl.apps.water.controls`); `ACTIVE` only for a valve, which then acts on its setting |
+| `"water.setting"` | a pump's relative speed, a PBV's head drop, an FCV's flow (m³/s), a TCV's loss coefficient; unused for pipes and GPVs |
+| `"water.one_way"` | 0 both directions, +1 forward flow only, -1 reverse flow only |
+
+`build_model` fills them from the file: a `CLOSED` pipe or a `[STATUS]` word sets the status, a
+`CV` pipe is forward-only, a valve's setting (or a numeric `[STATUS]` value) is its setting,
+and every valve starts `ACTIVE`. They are set by link name like any other driver:
+
+```python
+from noodl.apps.water import CLOSED, link_states
+
+model, state, drivers = build_model(twoloop())
+closed = initial_drivers(model, values={"water.status": {"P7": CLOSED}})
+final = water_steady(model, state, closed)
+print(link_states(model, final, closed).tolist())
+```
+
+```text
+[1, 1, 1, 1, 1, 1, 0, 1]
+```
+
+A `CLOSED` link carries no flow: its residual is $\kappa q$. A valve whose status is `OPEN`
+is its minor loss, $h = K_m q|q|$, whatever its setting. A check valve is one exact
+complementarity condition, solved in the same Newton iteration as everything else, with no
+outer loop over statuses: $\max(-\kappa q,\ \Delta\phi - h(q)) = 0$, either the pipe flows
+forward with $\Delta\phi = h(q)$, or it holds $q = 0$ against a reverse head (the design is
+in `docs/plans/water-prv-psv-design.md`). $\kappa$, a pipe's own head-loss slope at 1 ft/s,
+only scales the row. Newton picks the no-flow branch only where the open equation's residual
+is below both $-\kappa q$ and $-h'(q)\,q$: with $\kappa$ alone, an iterate that overshoots
+forward closes an open check valve, sets every pipe in series with it to exactly zero flow,
+and cycles (`FlowControlledPipe`). Closed links and check valves need the pipes'
+resistance form (`pipe_form="flow"`, the default); `pipe_form="potential"` refuses them.
+
+`link_states(model, state, drivers)` gives every link's state in a solution: `CLOSED`, `OPEN`
+or `ACTIVE`, the codes `wntr` reports EPANET's in. `water_steady` refuses, before it solves, a
+junction with a demand that closed links cut off from every reservoir and tank.
 
 ### Tanks and controls
 
@@ -254,7 +298,8 @@ boundary node of the layer, held at its step-start head through the hydraulic so
 step then moves it by explicit Euler, $H \mathrel{+}= q\,\Delta t / A$
 (`KirchhoffLayer.advance_storage`). `TankLevels` is a `Model` closure declaring
 `state_keys = ("water.link_status",)`. Its `__call__` applies the controls to the levels and
-returns updated drivers. `event_step(level, rate, dt)` implements EPANET's adaptive
+returns updated drivers, among them every link's `"water.status"`: the pumps' from
+`"water.link_status"`, every other link's from the drivers' own. `event_step(level, rate, dt)` implements EPANET's adaptive
 step-shortening to the next control crossing.
 
 That shortening is not optional. A fixed one-hour step was measured to diverge from EPANET by
@@ -362,9 +407,12 @@ independent loop is a property of the cycle-space formulation, and it holds exac
 ## Limitations
 
 - **Not modelled, refused by name:** PRV and PSV valves; time-based controls and `[RULES]`;
-  variable-speed pumps; non-cylindrical tanks; emitters; leakage; energy and cost reports;
-  Chezy-Manning head loss; pipe-status controls and check valves. A file using any of these
-  raises an error naming the feature.
+  variable-speed pumps (a numeric `[STATUS]` on a pump included); non-cylindrical tanks;
+  emitters; leakage; energy and cost reports; Chezy-Manning head loss; pipe and valve
+  controls. A file using any of these raises an error naming the feature.
+- **A Newton iterate that closes every check valve feeding a junction with a demand** makes the
+  system singular, and the solve fails. MEASURED on the two-loop network with every pipe a
+  check valve and five times its demands (EPANET solves it); not seen on any EPANET example.
 - **Pump curves** are single- or three-point only, with the exponent fixed at $n = 2$. Curves
   with four or more points, which EPANET connects piecewise-linearly, are refused; fit a
   three-point curve instead.

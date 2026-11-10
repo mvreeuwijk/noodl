@@ -129,12 +129,13 @@ def test_an_emitters_section_with_content_is_refused(tmp_path):
         read_epanet_inp(path).validate()
 
 
-def test_a_status_section_with_content_is_refused(tmp_path):
+def test_a_status_section_is_read_into_initial_status(tmp_path):
     path = _edit(tmp_path, "twoloop_si.inp",
                  ("[STATUS]\n;ID              \tStatus/Setting",
                   "[STATUS]\n;ID              \tStatus/Setting\n P1              \tClosed"))
-    with pytest.raises(ValueError, match=r"\[STATUS\]"):
-        read_epanet_inp(path).validate()
+    net = read_epanet_inp(path)
+    assert net.initial_status == {"P1": "CLOSED"}
+    net.validate()
 
 
 def test_an_unknown_section_with_content_is_refused(tmp_path):
@@ -457,16 +458,9 @@ def test_net3_reads_status_time_controls_and_clock():
         ("335", "1", False), ("335", "1", True), ("330", "1", False), ("330", "1", True)
     ]
     assert tank_level[0].value == pytest.approx(17.1 * FOOT, rel=1e-15)
-    # validate() refuses one feature at a time, in the order below
-    with pytest.raises(ValueError, match="status CLOSED"):
-        net.validate()
-    net = dataclasses.replace(
-        net, pipes=tuple(dataclasses.replace(p, status="OPEN") for p in net.pipes)
-    )
-    with pytest.raises(ValueError, match=r"\[STATUS\]"):
-        net.validate()
+    # the CLOSED pipe and the [STATUS] line are modelled; the time controls are refused
     with pytest.raises(ValueError, match="time-based control"):
-        dataclasses.replace(net, initial_status={}).validate()
+        net.validate()
 
 
 def test_net6_reads_prv_cv_and_power_pump():
@@ -480,7 +474,7 @@ def test_net6_reads_prv_cv_and_power_pump():
     assert len(powered) == 1
     assert powered[0].curve is None
     assert powered[0].power == pytest.approx(15 * 0.745699872, rel=1e-12)  # hp -> kW
-    with pytest.raises(ValueError, match="status CV"):
+    with pytest.raises(ValueError, match="constant-POWER pump"):
         net.validate()
 
 
@@ -713,14 +707,13 @@ def test_energy_options_and_pump_overrides_are_read(tmp_path):
     net.validate()  # energy data is reporting only: it is never refused
 
 
-def test_a_check_valve_pipe_is_read_and_refused_by_validate(tmp_path):
+def test_a_check_valve_pipe_is_read_and_validated(tmp_path):
     cv = read_epanet_inp(_edit(
         tmp_path, "twoloop_si.inp",
         ("130         \t0           \tOpen", "130         \t0           \tCV"),
     ))
     assert cv.pipes[0].status == "CV"
-    with pytest.raises(ValueError, match="check valve"):
-        cv.validate()
+    cv.validate()
 
 
 # ------------------------------------------------------------- review fix round 1

@@ -4,7 +4,7 @@ READ: `[JUNCTIONS] [RESERVOIRS] [TANKS] [PIPES] [PUMPS] [VALVES] [DEMANDS] [PATT
 [CURVES] [CONTROLS] [RULES] [STATUS] [EMITTERS] [ENERGY] [OPTIONS] [TIMES]`, with the column
 layouts of the EPANET 2.2 manual's Appendix C.2. Everything EPANET 2.2's hydraulics reads is
 READ and converted to SI here; `WaterNetwork.validate()` then REFUSES, by name, each feature
-the builder does not model yet (a PRV or PSV valve, a CV or CLOSED pipe, a `[STATUS]` entry,
+the builder does not model yet (a PRV or PSV valve, a numeric `[STATUS]` pump speed,
 a constant-POWER pump, a pump with more than a three-point curve or a SPEED PATTERN, a tank
 with a volume curve or OVERFLOW, an emitter, `HEADLOSS C-M`, a rule, and every `[CONTROLS]`
 form except `LINK <pump> OPEN|CLOSED IF NODE <tank> BELOW|ABOVE <level>`), so that reading a

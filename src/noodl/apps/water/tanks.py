@@ -11,7 +11,9 @@ the solve holds at its step-start head and the step then moves by `dt * inflow /
 
 Per call the closure (1) applies every control's level test with EPANET's semantics, under
 `no_grad` -- the switch itself is a combinatorial decision; and (2) writes the reservoir heads
-into `"water.phi_boundary"` and the per-pump status into `"water.status"`. A tank held at a
+into `"water.phi_boundary"` and the per-link status into `"water.status"`: every pump's from
+the carried `"water.link_status"`, every other link's from the drivers' own `"water.status"`
+(or, when they carry none, the build's). A tank held at a
 boundary node has a column of `"water.phi_boundary"` too, which the closure fills with zeros:
 the layer holds the tank at its step-start head there on every path (`Model` steps, steady
 solves, `residuals`, `current_flows`; `KirchhoffLayer.hold_storage`), so it is the only
@@ -73,6 +75,8 @@ class TankLevels:
         dt: float,
         reservoir_heads: Tensor,
         head_scale: float = 1.0,
+        link_names,
+        link_status: Tensor,
     ) -> None:
         self.net = net
         self.tanks = list(tanks)
@@ -109,6 +113,11 @@ class TankLevels:
                 )
         self.tank_of = {t.name: i for i, t in enumerate(self.tanks)}
         self.pump_of = {name: i for i, name in enumerate(self.pump_names)}
+        # Every link's status as built (`model.link_names` order), and the pumps' places in it.
+        self.link_names = list(link_names)
+        self.link_status = torch.as_tensor(link_status, dtype=F64)
+        self.pump_links = torch.tensor([self.link_names.index(n) for n in self.pump_names],
+                                       dtype=torch.long)
         self.bottom = torch.tensor([t.elevation for t in self.tanks], dtype=F64)
         self.y_min = torch.tensor([t.min_level for t in self.tanks], dtype=F64)
         self.y_max = torch.tensor([t.max_level for t in self.tanks], dtype=F64)
@@ -128,8 +137,19 @@ class TankLevels:
         with torch.no_grad():
             status = self._apply_controls(level, status)
         self._refuse_outside(level)
-        return {"water.phi_boundary": self._boundary(state, level), "water.status": status,
+        return {"water.phi_boundary": self._boundary(state, level),
+                "water.status": self._link_status(drivers, status),
                 "water.link_status": status}
+
+    def _link_status(self, drivers, pump_status: Tensor) -> Tensor:
+        """Every link's status: the drivers' `"water.status"` (the build's when they carry
+        none), with the pumps' entries from the carried `pump_status`."""
+        base = drivers.get("water.status", self.link_status).to(pump_status.dtype)
+        batch = pump_status.new_zeros(pump_status.shape[:-1] + (1,))   # its batch shape only
+        base, batch = torch.broadcast_tensors(base, batch)
+        out = base.clone()
+        out[..., self.pump_links] = pump_status.expand(batch.shape[:-1] + pump_status.shape[-1:])
+        return out
 
     def _boundary(self, state, level: Tensor) -> Tensor:
         """The reservoir heads, then zeros in the tanks' columns (boundary nodes here, whose

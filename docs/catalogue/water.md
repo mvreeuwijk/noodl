@@ -44,14 +44,16 @@ The relation between the flow through an edge and the potential difference acros
 
 | Name | What it does | How to call it |
 |---|---|---|
-| `BreakerValve` | A pressure breaker valve (PBV): EPANET 2.2's `pbvcoeff` (`hydcoeffs.c`). | `BreakerValve(setting, minor, *, kind='pbv')` |
+| `BreakerValve` | A pressure breaker valve (PBV): EPANET 2.2's `pbvcoeff` (`hydcoeffs.c`). | `BreakerValve(setting, minor, *, kappa=1.0, gradient_floor=0.0, links=None, kind='pbv')` |
 | `CompositeDarcyWeisbach` | Composite Darcy-Weisbach pipe: Hagen-Poiseuille, Dunlop's cubic, then Swamee-Jain. | `CompositeDarcyWeisbach(length, diameter, roughness, *, minor_loss=0.0, nu=1.02193344e-06, cfs_per_m3s=None, scale=1.0, rtol=1e-15, max_iter=100, kind='pipe', learnable=False)` |
-| `FlowControlledPipe` | A pipe in its resistance form, ``dp = scale h(q)``, with the flow an unknown of the layer (`build_model`'s ``pipe_form="flow"``): ``pipe`` is the pipe's potential-form law (`HazenWilliams` or `CompositeDarcyWeisbach`), whose ``head_loss`` gives ``h``. | `FlowControlledPipe(pipe, *, gradient_floor=0.0, kind='pipe')` |
-| `FlowControlledPump` | A pump in its head-gain form, ``phi_discharge - phi_suction = gain(q)``, with the flow an unknown of the layer, as EPANET's and wntr's own solvers write it. ``pump`` is the pump's `PumpCurve`, whose ``head_gain`` gives the gain (with ``gradient_floor``, EPANET's ``RQtol``, and ``closed_slope``, its ``CBIG``, both in the layer's potential per m^3/s). `build_model` writes every pump in this form, whatever the ``pipe_form``. | `FlowControlledPump(pump, *, gradient_floor, closed_slope, kind='pump')` |
-| `GeneralPurposeValve` | A general purpose valve (GPV): EPANET 2.2's `gpvcoeff` (`hydcoeffs.c`). | `GeneralPurposeValve(flows, heads, n_points, *, kind='gpv')` |
+| `FlowControlledPipe` | A pipe in its resistance form, ``dp = scale h(q)``, with the flow an unknown of the layer (`build_model`'s ``pipe_form="flow"``): ``pipe`` is the pipe's potential-form law (`HazenWilliams` or `CompositeDarcyWeisbach`), whose ``head_loss`` gives ``h``. | `FlowControlledPipe(pipe, *, gradient_floor=0.0, kappa=1.0, links=None, kind='pipe')` |
+| `FlowControlledPump` | A pump in its head-gain form, ``phi_discharge - phi_suction = gain(q)``, with the flow an unknown of the layer, as EPANET's and wntr's own solvers write it. ``pump`` is the pump's `PumpCurve`, whose ``head_gain`` gives the gain (with ``gradient_floor``, EPANET's ``RQtol``, and ``closed_slope``, its ``CBIG``, both in the layer's potential per m^3/s). `build_model` writes every pump in this form, whatever the ``pipe_form``. | `FlowControlledPump(pump, *, gradient_floor, closed_slope, kappa=1.0, kind='pump')` |
+| `FlowControlValve` | A flow control valve (FCV), active: its flow is its setting (m^3/s), ``kappa (q - setting) = 0``, whatever the heads. The setting is ``setting``, or the driver ``"water.setting"`` with ``links``; see `_Valve` for the status. Implicit: the flow is an unknown of the layer. | `FlowControlValve(*, setting=None, minor=0.0, kappa=1.0, gradient_floor=0.0, links=None, kind='fcv')` |
+| `GeneralPurposeValve` | A general purpose valve (GPV): EPANET 2.2's `gpvcoeff` (`hydcoeffs.c`). | `GeneralPurposeValve(flows, heads, n_points, *, minor=0.0, kappa=1.0, gradient_floor=0.0, links=None, kind='gpv')` |
 | `HazenWilliams` | ``h_L = K q^1.852 + m q^2`` with ``K = 10.666829500036 C^-1.852 d^-4.871 L``. | `HazenWilliams(length, diameter, roughness, *, minor_loss=0.0, dp_transition=1e-09, kind='pipe', learnable=False)` |
-| `MinorLoss` | ``h = m q \|q\|`` with ``m = K / (2 g A^2)``: a throttle control valve (TCV) or any pure minor-loss link. Inverted in closed form, ``q = sign(h) sqrt(\|h\| / m)``, with the same laminar blend and both-branch safe substitution as ``HazenWilliams``. | `MinorLoss(setting, diameter, *, dp_transition=1e-09, kind='valve', learnable=False)` |
-| `PumpCurve` | Constant-speed pump on its own edge kind: ``h_gain = w^2 (h0 - r (q/w)^n)``. | `PumpCurve(h0, r, n=2.0, *, speed=1.0, dp_transition=1e-06, status_key=None, kind='pump', learnable=False)` |
+| `MinorLoss` | ``h = m q \|q\|`` with ``m = K / (2 g A^2)``: any pure minor-loss link, in its potential form. Inverted in closed form, ``q = sign(h) sqrt(\|h\| / m)``, with the same laminar blend and both-branch safe substitution as ``HazenWilliams``. (`build_model` writes a throttle control valve as `ThrottleValve`, with EPANET's own coefficient and its status.) | `MinorLoss(setting, diameter, *, dp_transition=1e-09, kind='valve', learnable=False)` |
+| `PumpCurve` | Constant-speed pump on its own edge kind: ``h_gain = w^2 (h0 - r (q/w)^n)``. | `PumpCurve(h0, r, n=2.0, *, speed=1.0, dp_transition=1e-06, links=None, kind='pump', learnable=False)` |
+| `ThrottleValve` | A throttle control valve (TCV): EPANET 2.2's `tcvcoeff` (`hydcoeffs.c`). | `ThrottleValve(diameter, *, setting=None, cfs_per_m3s=None, scale=1.0, minor=0.0, kappa=1.0, gradient_floor=0.0, links=None, kind='valve')` |
 
 ## Closures
 
@@ -59,7 +61,7 @@ Functions of the state that compute drivers each step (densities, flows, levels)
 
 | Name | What it does | How to call it |
 |---|---|---|
-| `TankLevels` | Simple controls on tank levels, and the boundary heads of a water layer whose tanks are held at boundary nodes (`build_model(tank_scheme="forward_euler")`). | `TankLevels(net, tanks, controls, pump_names, *, tank_nodes, dt, reservoir_heads, head_scale=1.0)` |
+| `TankLevels` | Simple controls on tank levels, and the boundary heads of a water layer whose tanks are held at boundary nodes (`build_model(tank_scheme="forward_euler")`). | `TankLevels(net, tanks, controls, pump_names, *, tank_nodes, dt, reservoir_heads, head_scale=1.0, link_names, link_status)` |
 
 ## Sources and storage
 
@@ -83,6 +85,7 @@ Calculations and helpers.
 
 | Name | What it does | How to call it |
 |---|---|---|
+| `link_states` | Every link's state in `state` (a solution), in `model.link_names` order, as the codes of `"water.status"` (`noodl.apps.water.controls`): `CLOSED` (0), `OPEN` (1) or `ACTIVE` (2). These are also the codes `wntr` reports EPANET's link states in (`results.link["status"]`). | `link_states(model, state, drivers)` |
 | `link_table` | One row per link: flow (m3/s), head loss (m) and velocity (m/s); optionally to CSV. | `link_table(model, state, names=None, *, path=None)` |
 | `pressure_head` | Pressure head (m) at every node: the solved head minus the node's elevation. | `pressure_head(model, state, elevations=None)` |
 | `composite_friction_factor` | Composite friction factor for ``Re > 2000``: ``(f, df/dq)``. | `composite_friction_factor(q, e, s)` |

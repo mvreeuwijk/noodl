@@ -149,7 +149,7 @@ def test_the_pump_flow_is_monotone_in_dp():
 def test_a_closed_status_driver_zeroes_the_pump():
     pump = PumpCurve(
         torch.tensor([101.6], dtype=F64), torch.tensor([2836.1385287628063], dtype=F64),
-        status_key="water.status",
+        links=slice(0, 1),
     )
     drivers = {"water.status": torch.zeros(1, dtype=F64)}
     assert float(pump.flow(torch.tensor([-50.0], dtype=F64), drivers)) == 0.0
@@ -160,7 +160,7 @@ def test_a_closed_status_driver_zeroes_the_pump():
 def test_a_missing_status_driver_is_refused():
     pump = PumpCurve(
         torch.tensor([101.6], dtype=F64), torch.tensor([2836.1385287628063], dtype=F64),
-        status_key="water.status",
+        links=slice(0, 1),
     )
     with pytest.raises(KeyError, match="'water.status'"):
         pump.flow(torch.tensor([-50.0], dtype=F64), {})
@@ -169,7 +169,7 @@ def test_a_missing_status_driver_is_refused():
 def _net1_pump():
     return PumpCurve(
         torch.tensor([101.6], dtype=F64), torch.tensor([2836.1385287628063], dtype=F64),
-        status_key="water.status",
+        links=slice(0, 1),
     )
 
 
@@ -207,13 +207,14 @@ def test_the_head_gain_is_strictly_decreasing_and_continuous_through_zero_flow()
 
 
 def test_the_head_gain_form_residual_follows_the_status_driver():
-    law = FlowControlledPump(_net1_pump(), gradient_floor=FLOOR, closed_slope=CBIG)
+    law = FlowControlledPump(_net1_pump(), gradient_floor=FLOOR, closed_slope=CBIG,
+                             kappa=torch.tensor([3.0], dtype=F64))
     dp, q = torch.tensor([-62.0], dtype=F64), torch.tensor([0.1], dtype=F64)
     gain = float(law.pump.head_gain(q, FLOOR, CBIG))
     open_ = {"water.status": torch.ones(1, dtype=F64)}
     closed = {"water.status": torch.zeros(1, dtype=F64)}
     assert float(law.residual(dp, q, open_, None)) == pytest.approx(-62.0 + gain, rel=1e-14)
-    assert float(law.residual(dp, q, closed, None)) == 0.1
+    assert float(law.residual(dp, q, closed, None)) == pytest.approx(0.3, rel=1e-15)
     assert float(law.q_max()) == pytest.approx((101.6 / 2836.1385287628063) ** 0.5, rel=1e-14)
 
 

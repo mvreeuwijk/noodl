@@ -26,6 +26,7 @@ from noodl.apps.water.inp import read_epanet_inp
 from noodl.apps.water.network import (
     build_model,
     initial_state,
+    link_states,
     tank_levels,
     twoloop,
     water_event_step,
@@ -898,3 +899,56 @@ def test_gradient_through_a_valve_network_against_central_differences(tmp_path):
             fd[i] = (total(sources + e) - total(sources - e)) / (2 * h)
     scale = float(fd.abs().max())
     assert float((analytic - fd)[junctions].abs().max()) <= 1e-6 * scale
+
+
+# --------------------------------------------------------------------------- link status
+def _pipe_status_edit(pipe, status):
+    """Replace the `Open` status column of `pipe`'s `[PIPES]` line in the two-loop fixture."""
+    line = next(row for row in (DATA / "twoloop_si.inp").read_text().splitlines()
+                if row.split()[:1] == [pipe])
+    return (line, line.replace("Open", status))
+
+
+# P4 (J3 -> J1) carries its water from J1 to J3, against its own orientation, so a check
+# valve there closes; P5 (J3 -> J4) carries it forward, so one there stays open; P7 is
+# closed by `[STATUS]`. What is left is a tree fed from R1.
+_STATUS_EDITS = (
+    _pipe_status_edit("P4", "CV"),
+    _pipe_status_edit("P5", "CV"),
+    ("[STATUS]\n;ID              \tStatus/Setting",
+     "[STATUS]\n;ID              \tStatus/Setting\n P7              \tClosed"),
+)
+
+
+def test_check_valve_and_closed_pipe_match_epanet(tmp_path):
+    """Heads 1e-6 relative, flows 1e-6 m3/s absolute, and every link's state (closed or
+    open) as EPANET reports it.
+
+    EPANET does not hold a closed link at exactly zero flow: it gives it the conductance
+    `1 / CBIG` (`hydcoeffs.c`, `pipecoeff`), so its closed P4 and P7 carry a leak of order
+    `dh / CBIG`, far below the flow bound (it reports them as 0); this model's closed links
+    carry exactly zero. MEASURED: heads 9.58e-7 relative (J6, 4.4e-5 m), flows 2.2e-9 m3/s.
+    The head residual is not the check valves (closing P4 by `[STATUS]` instead gives the same
+    9.58e-7, node for node) but EPANET's rounded LPS factor (`LPSperCFS = 28.317` against
+    28.3168466, 4.1e-6 relative in every flow and 1.852 times that in a Hazen-Williams head
+    loss): on this tree every pipe carries its whole downstream demand, and 7.5e-6 of P1's
+    0.73 m loss is the 5.7e-6 m J1 is off by.
+    """
+    path, results = _epanet(tmp_path, "twoloop_si.inp", edits=_STATUS_EDITS)
+    model, state, drivers = build_model(read_epanet_inp(path))
+    final = water_steady(model, state, drivers)
+    heads = results.node["head"].loc[0]
+    flows = results.link["flowrate"].loc[0]
+    worst_h = _worst_heads(model, final, heads, skip=("R1",))
+    assert worst_h < 1e-6, worst_h
+    worst_q = max(abs(float(final["water.q"][i]) - float(flows[name]))
+                  for i, name in enumerate(model.link_names))
+    assert worst_q < 1e-6, worst_q
+    states = link_states(model, final, drivers).tolist()
+    reference = results.link["status"].loc[0]
+    assert {name: int(s) for name, s in zip(model.link_names, states, strict=True)} == {
+        name: int(reference[name]) for name in model.link_names}
+    assert states[model.link_names.index("P4")] == 0
+    assert states[model.link_names.index("P7")] == 0
+    q = dict(zip(model.link_names, final["water.q"].tolist(), strict=True))
+    assert q["P4"] == 0.0 and q["P7"] == 0.0 and q["P5"] > 0.0

@@ -1284,6 +1284,11 @@ class KirchhoffLayer(TopologyGuard):
                               if adjoint and not el.exact_slope
                               else el.jacobian(dp_s, q_s, drivers, lctx))
                 if el.reads_heads:
+                    if len(law_blocks) != 4:
+                        raise ValueError(
+                            f"{type(el).__name__} (kind {el.kind!r}) reads_heads, so its "
+                            f"jacobian must return 4 blocks (d r / d dp, d r / d q, "
+                            f"d r / d phi_from, d r / d phi_to); got {len(law_blocks)}")
                     # each end node's column: dp's share plus the head's own (`flow_unknowns`)
                     dr_dp, dr_dq, dr_dfrom, dr_dto = law_blocks
                     law_blocks = (dr_dp + dr_dfrom, dr_dq, dr_dto - dr_dp)

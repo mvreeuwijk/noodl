@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import torch
 
+from noodl.apps.water.controls import ACTIVE, CLOSED, OPEN
 from noodl.elements.base import ConstitutiveLaw, ImplicitLaw
 from noodl.solvers.scalar import solve_monotone
 
@@ -25,6 +26,50 @@ DW_SI = 0.0826
 
 #: Standard gravity (m/s^2), used by the minor-loss and pump forms.
 G = 9.80665
+
+#: The per-link drivers of a water layer, each one value per link in `model.link_names`
+#: order (pipes, pumps, then valves by kind). `"water.status"`: `CLOSED`, `OPEN` or `ACTIVE`
+#: (`noodl.apps.water.controls`); `"water.setting"`: a pump's relative speed, a PBV's head
+#: drop (the layer's potential unit), an FCV's flow (m3/s), a TCV's loss coefficient;
+#: `"water.one_way"`: 0 both directions, +1 forward flow only, -1 reverse flow only.
+STATUS_KEY = "water.status"
+SETTING_KEY = "water.setting"
+ONE_WAY_KEY = "water.one_way"
+
+_DRIVER_MEANING = {
+    STATUS_KEY: "each link's status (CLOSED 0, OPEN 1, ACTIVE 2)",
+    SETTING_KEY: "each link's setting",
+    ONE_WAY_KEY: "each link's allowed flow direction (0, +1, -1)",
+}
+
+
+def link_driver(law, drivers, key: str, like: Tensor) -> Tensor:
+    """The per-link driver `key` at `law.link_range`, the law's own columns of it, in the dtype of
+    `like`. Refuses a missing driver by the law's name."""
+    if drivers is None or key not in drivers:
+        raise KeyError(
+            f"{type(law).__name__} (kind {law.kind!r}): driver {key!r} is required and was "
+            f"not given; it carries {_DRIVER_MEANING[key]}, one value per link"
+        )
+    return drivers[key][..., slice(*law.link_range)].to(like.dtype)
+
+
+def _link_range(links: slice | None) -> tuple[int, int] | None:
+    """`links` as `(start, stop)`, the form a law keeps (a slice is not walked by the layer's
+    scan for held tensors)."""
+    return None if links is None else (int(links.start), int(links.stop))
+
+
+def open_valve_loss(q: Tensor, minor: Tensor, gradient_floor: float) -> Tensor:
+    """The head loss of an OPEN valve, ``minor q |q|``: EPANET 2.2's `valvecoeff`
+    (`hydcoeffs.c`), the valve's minor loss with its gradient ``2 minor |q|`` floored at
+    ``gradient_floor`` (EPANET's ``RQtol``). Below the floor the loss is the line
+    ``(gradient_floor / 2) q``, continuous with the quadratic where they meet (EPANET's own
+    line there, ``RQtol q``, jumps by a factor 2; the same choice as
+    `HazenWilliams.head_loss`). A valve without a minor loss is that line alone."""
+    a = q.abs()
+    return torch.where(2.0 * minor * a < gradient_floor, 0.5 * gradient_floor * q,
+                       minor * q * a)
 
 
 class HazenWilliams(ConstitutiveLaw):
@@ -105,8 +150,21 @@ class HazenWilliams(ConstitutiveLaw):
         a_safe = torch.where(live, a, torch.ones_like(a))   # no 0^(negative) in either branch
         friction = torch.where(live, k * a_safe**1.852, torch.zeros_like(a))
         gradient = torch.where(live, 1.852 * k * a_safe**0.852, torch.zeros_like(a))
-        friction = torch.where(gradient < gradient_floor, gradient_floor / 1.852 * a, friction)
-        return torch.sign(q) * (friction + self._minor() * a * a)
+        minor = torch.sign(q) * self._minor() * a * a
+        # The line is written in `q`, not `sign(q) |q|`, whose derivative is zero at `q = 0`
+        # exactly: a closed check valve holds every pipe in series with it there.
+        return torch.where(gradient < gradient_floor, gradient_floor / 1.852 * q + minor,
+                           torch.sign(q) * friction + minor)
+
+    def head_gradient(self, q: Tensor, gradient_floor: float = 0.0) -> Tensor:
+        """``d head_loss / d q`` (m per m^3/s) at ``q``, with the same ``gradient_floor``."""
+        k = self.resistance()
+        a = q.abs()
+        a_safe = torch.where(a > 0, a, torch.ones_like(a))
+        gradient = torch.where(a > 0, 1.852 * k * a_safe**0.852, torch.zeros_like(a))
+        friction = torch.where(gradient < gradient_floor,
+                               torch.full_like(gradient, gradient_floor / 1.852), gradient)
+        return friction + 2.0 * self._minor() * a
 
     def flow(self, dp: Tensor, drivers=None) -> Tensor:
         k = self.resistance()
@@ -196,11 +254,12 @@ class PumpCurve(ConstitutiveLaw):
         q = w ((h0 + dp / w^2) / r)^(1/n)      for  h0 + dp / w^2 > 0
         q = 0                                  otherwise (shut off)
 
-    ``w`` is the relative speed setting (EPANET's affinity laws, Manual p.108); ``status``
-    is read per edge from the driver ``status_key`` when given (0 closed, 1 open), which is
-    how a ``[CONTROLS]`` line reaches the element. The fitted curve is a strict power law,
-    so no root solve is needed; a monotone root solve would only be needed
-    for a MULTI-point (piecewise-linear) curve, which is out of scope.
+    ``w`` is the relative speed setting (EPANET's affinity laws, Manual p.108). With
+    ``links`` (the pumps' columns of the per-link drivers, a slice of `model.link_names`) the
+    status is read from ``"water.status"``: a ``CLOSED`` pump delivers nothing. That is how
+    ``[STATUS]`` and a ``[CONTROLS]`` line reach the element. The fitted curve is a strict
+    power law, so no root solve is needed; a monotone root solve would only be needed for a
+    MULTI-point (piecewise-linear) curve, which is out of scope.
 
     Flow is monotone increasing in ``dp`` (``dq/ddp > 0``), so the Newton Jacobian stays
     SPD-certifiable. At shut-off the slope of the sharp branch diverges, so the law is
@@ -230,7 +289,7 @@ class PumpCurve(ConstitutiveLaw):
         *,
         speed=1.0,
         dp_transition: float = 1e-6,
-        status_key: str | None = None,
+        links: slice | None = None,
         kind: str = "pump",
         learnable: bool = False,
     ) -> None:
@@ -240,17 +299,13 @@ class PumpCurve(ConstitutiveLaw):
         self.n = self._param(n, False)
         self.speed = self._param(speed, False)
         self.dp_transition = float(dp_transition)
-        self.status_key = status_key
+        self.link_range = _link_range(links)
 
     def _status(self, dp: Tensor, drivers) -> Tensor:
-        if self.status_key is None:
+        """1 where the pump runs, 0 where its `"water.status"` is CLOSED."""
+        if self.link_range is None:
             return torch.ones_like(dp)
-        if drivers is None or self.status_key not in drivers:
-            raise KeyError(
-                f"PumpCurve (kind {self.kind!r}): driver {self.status_key!r} is required "
-                f"and was not given; it carries each pump's open/closed status (1/0)"
-            )
-        return drivers[self.status_key].to(dp.dtype)
+        return (link_driver(self, drivers, STATUS_KEY, dp) != CLOSED).to(dp.dtype)
 
     def q_max(self) -> Tensor:
         """The flow at zero head gain, ``w (h0/r)^(1/n)``; see the class docstring."""
@@ -318,9 +373,10 @@ class PumpCurve(ConstitutiveLaw):
 
 
 class MinorLoss(ConstitutiveLaw):
-    """``h = m q |q|`` with ``m = K / (2 g A^2)``: a throttle control valve (TCV) or any
-    pure minor-loss link. Inverted in closed form, ``q = sign(h) sqrt(|h| / m)``, with the
-    same laminar blend and both-branch safe substitution as ``HazenWilliams``."""
+    """``h = m q |q|`` with ``m = K / (2 g A^2)``: any pure minor-loss link, in its potential
+    form. Inverted in closed form, ``q = sign(h) sqrt(|h| / m)``, with the same laminar blend
+    and both-branch safe substitution as ``HazenWilliams``. (`build_model` writes a throttle
+    control valve as `ThrottleValve`, with EPANET's own coefficient and its status.)"""
 
     def __init__(
         self,
@@ -657,7 +713,101 @@ def epanet_minor_coefficient(minor_loss: Tensor, diameter: Tensor,
     return M_PER_FT * MINOR_LOSS_K_FT * minor_loss / d_ft**4 * cfs**2
 
 
-class BreakerValve(ImplicitLaw):
+class _Valve(ImplicitLaw):
+    """What every valve shares: its status. ``links`` (a slice of `model.link_names`) are the
+    valves' columns of the per-link drivers; with it, ``"water.status"`` selects the valve's
+    equation per edge, as EPANET 2.2's `valvecoeff` (`hydcoeffs.c`) does:
+
+    - ``ACTIVE``: the valve acts on its setting (`active`, per subclass);
+    - ``OPEN``: the valve is its minor loss, ``dp = minor q |q|`` (`open_valve_loss`),
+      whatever its setting;
+    - ``CLOSED``: ``kappa q = 0``, no flow. ``kappa`` (the layer's potential per m^3/s) only
+      scales the row; the solution does not depend on it.
+
+    Without ``links`` the valve is always ``ACTIVE`` and reads no driver. ``minor`` is in
+    the layer's potential unit per (m^3/s)^2 and ``gradient_floor`` (EPANET's ``RQtol``) per
+    m^3/s.
+    """
+
+    def __init__(self, *, minor=0.0, kappa=1.0, gradient_floor: float = 0.0,
+                 links: slice | None = None, kind: str) -> None:
+        super().__init__(kind)
+        self.minor = self._param(minor, False)
+        self.kappa = self._param(kappa, False)
+        self.gradient_floor = float(gradient_floor)
+        self.link_range = _link_range(links)
+
+    def active(self, dp, q, drivers):
+        """The residual of the ACTIVE valve."""
+        raise NotImplementedError
+
+    def _setting(self, own, drivers, like: Tensor) -> Tensor:
+        """The valve's setting: the driver ``"water.setting"`` with ``links``, else ``own``."""
+        if self.link_range is None:
+            if own is None:
+                raise ValueError(
+                    f"{type(self).__name__} (kind {self.kind!r}): give a setting, or links "
+                    f"to read it from the driver {SETTING_KEY!r}")
+            return own
+        return link_driver(self, drivers, SETTING_KEY, like)
+
+    def residual(self, dp, q, drivers, ctx):
+        active = self.active(dp, q, drivers)
+        if self.link_range is None:
+            return active
+        status = link_driver(self, drivers, STATUS_KEY, dp)
+        if bool((status == ACTIVE).all()):   # the usual case: no `where` in the graph
+            return active
+        open_ = dp - open_valve_loss(q, self.minor, self.gradient_floor)
+        return torch.where(status == CLOSED, self.kappa * q,
+                           torch.where(status == OPEN, open_, active))
+
+
+class ThrottleValve(_Valve):
+    """A throttle control valve (TCV): EPANET 2.2's `tcvcoeff` (`hydcoeffs.c`).
+
+    Active, it is a minor loss whose coefficient is its setting ``K``: ``dp = m q |q|`` with
+    ``m = 0.02517 K / d^4`` in EPANET's units (`epanet_minor_coefficient`, ``cfs_per_m3s``
+    its flow conversion), times ``scale`` (``rho g`` on a pressure layer), and the gradient
+    floor of `open_valve_loss`. The setting is ``setting``, or the driver ``"water.setting"``
+    with ``links``; see `_Valve` for the status. Implicit: the flow is an unknown of the
+    layer.
+    """
+
+    def __init__(self, diameter, *, setting=None, cfs_per_m3s: float | None = None,
+                 scale: float = 1.0, minor=0.0, kappa=1.0, gradient_floor: float = 0.0,
+                 links: slice | None = None, kind: str = "valve") -> None:
+        super().__init__(minor=minor, kappa=kappa, gradient_floor=gradient_floor,
+                         links=links, kind=kind)
+        self.diameter = self._param(diameter, False)
+        self.setting = None if setting is None else self._param(setting, False)
+        self.cfs_per_m3s = cfs_per_m3s
+        self.scale = float(scale)
+
+    def active(self, dp, q, drivers):
+        k = self._setting(self.setting, drivers, dp)
+        m = self.scale * epanet_minor_coefficient(k, self.diameter, self.cfs_per_m3s)
+        return dp - open_valve_loss(q, m, self.gradient_floor)
+
+
+class FlowControlValve(_Valve):
+    """A flow control valve (FCV), active: its flow is its setting (m^3/s),
+    ``kappa (q - setting) = 0``, whatever the heads. The setting is ``setting``, or the
+    driver ``"water.setting"`` with ``links``; see `_Valve` for the status. Implicit: the
+    flow is an unknown of the layer.
+    """
+
+    def __init__(self, *, setting=None, minor=0.0, kappa=1.0, gradient_floor: float = 0.0,
+                 links: slice | None = None, kind: str = "fcv") -> None:
+        super().__init__(minor=minor, kappa=kappa, gradient_floor=gradient_floor,
+                         links=links, kind=kind)
+        self.setting = None if setting is None else self._param(setting, False)
+
+    def active(self, dp, q, drivers):
+        return self.kappa * (q - self._setting(self.setting, drivers, q))
+
+
+class BreakerValve(_Valve):
     """A pressure breaker valve (PBV): EPANET 2.2's `pbvcoeff` (`hydcoeffs.c`).
 
     Active, it holds the head drop from its start node to its end node at ``setting``,
@@ -665,21 +815,25 @@ class BreakerValve(ImplicitLaw):
     with ``m`` its minor-loss coefficient (`epanet_minor_coefficient`), where that loss
     exceeds the setting (``m q^2 > setting``) or the setting is 0. Implicit: the flow is
     an unknown of the layer. ``setting`` and ``m`` are in the layer's potential unit (head,
-    or pressure on a Darcy-Weisbach pressure layer: both scaled by ``rho g``).
+    or pressure on a Darcy-Weisbach pressure layer: both scaled by ``rho g``). The setting is
+    ``setting``, or the driver ``"water.setting"`` with ``links``; see `_Valve` for the
+    status, whose ``OPEN`` minor loss is this same ``m``.
     """
 
-    def __init__(self, setting, minor, *, kind: str = "pbv") -> None:
-        super().__init__(kind)
-        self.setting = self._param(setting, False)
-        self.minor = self._param(minor, False)
+    def __init__(self, setting, minor, *, kappa=1.0, gradient_floor: float = 0.0,
+                 links: slice | None = None, kind: str = "pbv") -> None:
+        super().__init__(minor=minor, kappa=kappa, gradient_floor=gradient_floor,
+                         links=links, kind=kind)
+        self.setting = None if setting is None else self._param(setting, False)
 
-    def residual(self, dp, q, drivers, ctx):
+    def active(self, dp, q, drivers):
+        setting = self._setting(self.setting, drivers, dp)
         loss = self.minor * q * q.abs()
-        open_ = (self.setting == 0) | (self.minor * q * q > self.setting)
-        return dp - torch.where(open_, loss, self.setting)
+        open_ = (setting == 0) | (self.minor * q * q > setting)
+        return dp - torch.where(open_, loss, setting)
 
 
-class GeneralPurposeValve(ImplicitLaw):
+class GeneralPurposeValve(_Valve):
     """A general purpose valve (GPV): EPANET 2.2's `gpvcoeff` (`hydcoeffs.c`).
 
     The head loss follows the valve's head-loss curve, ``dp = sgn(q) (h0 + r |q|)``, with
@@ -688,16 +842,19 @@ class GeneralPurposeValve(ImplicitLaw):
     ``sgn(0) = +1``. ``flows`` (m3/s) and ``heads`` (the layer's potential unit) are
     ``(n_valves, n_points)``, each row increasing in flow and padded at the end with
     ``inf`` flows to the longest curve; ``n_points`` gives each row's own length (at least
-    2). Implicit: the flow is an unknown of the layer.
+    2). Implicit: the flow is an unknown of the layer. See `_Valve` for the status.
     """
 
-    def __init__(self, flows, heads, n_points, *, kind: str = "gpv") -> None:
-        super().__init__(kind)
+    def __init__(self, flows, heads, n_points, *, minor=0.0, kappa=1.0,
+                 gradient_floor: float = 0.0, links: slice | None = None,
+                 kind: str = "gpv") -> None:
+        super().__init__(minor=minor, kappa=kappa, gradient_floor=gradient_floor,
+                         links=links, kind=kind)
         self.flows = self._param(flows, False)
         self.heads = self._param(heads, False)
         self.register_buffer("n_points", torch.as_tensor(n_points, dtype=torch.long))
 
-    def residual(self, dp, q, drivers, ctx):
+    def active(self, dp, q, drivers):
         a = q.abs()
         # The bracketing segment: k2 = number of points below |q|, kept within the curve.
         k2 = (self.flows < a.unsqueeze(-1)).sum(-1).clamp(min=1)
@@ -731,20 +888,95 @@ class FlowControlledPipe(ImplicitLaw):
     solve with flow unknowns carries as a small diagonal entry. A Hazen-Williams pipe
     keeps EPANET's ``RQtol`` floor on that slope (``gradient_floor``, m per m^3/s), so a
     loop of pipes at zero flow still has a nonsingular Jacobian.
+
+    With ``links`` (the pipes' columns of the per-link drivers, a slice of
+    `model.link_names`) the pipe reads ``"water.status"`` and ``"water.one_way"``. With
+    ``loss = dp - scale h(q)`` its residual is
+
+    - ``kappa q`` when ``CLOSED`` (no flow);
+    - ``loss`` both ways (``one_way = 0``);
+    - forward only (``+1``, a check valve), ``max(-kappa q, loss)``: either ``q > 0`` and
+      ``dp = scale h(q)``, or ``q = 0`` and ``dp <= 0``;
+    - reverse only (``-1``), ``min(-kappa q, loss)``: either ``q < 0`` and
+      ``dp = scale h(q)``, or ``q = 0`` and ``dp >= 0``.
+
+    One exact equation per pipe, with no memory of the previous status, solved by Newton's
+    method on the branch each iterate selects (`docs/plans/water-prv-psv-design.md`,
+    section 2); EPANET reaches the same states with an outer loop over statuses
+    (`hydstatus.c`, `cvstatus`). The branches are selected with ``torch.where``, never
+    ``torch.maximum``/``minimum``, which split the gradient 0.5/0.5 at a tie; a tie takes
+    the open branch, ``loss``. ``kappa`` (the layer's potential per m^3/s, per pipe) scales
+    the closed row; `build_model` sets it to the pipe's own head-loss slope at 1 ft/s,
+    EPANET's first iterate.
+
+    THE SELECTION. A forward-only pipe takes its no-flow branch where ``loss`` is below
+    BOTH ``-kappa q`` and ``-h'(q) q``, ``h'`` the pipe's own slope at the iterate
+    (reverse only: above both). The second test says that the open equation's own Newton
+    step, the heads held, would take the flow below zero. At a solution the two tests agree
+    with ``max(-kappa q, loss)`` (``q > 0`` with ``loss = 0`` is open under both, ``q = 0``
+    with ``dp < 0`` closed under both), so the solution set, the converged branch and its
+    gradient are the max's. Away from a solution the fixed ``kappa`` alone misjudges an
+    iterate that overshoots forward: ``h`` grows as ``q^1.852`` and ``kappa q`` only
+    linearly, so ``loss < -kappa q`` closes an open check valve; the closed row then puts
+    every pipe in series with it at exactly zero flow, where the next step, on the
+    ``RQtol`` slope, overshoots by six orders and closes it again (measured: a check valve
+    between two reservoirs cycles so for 200 iterations, and converges in 5 with the
+    second test).
     """
 
-    def __init__(self, pipe, *, gradient_floor: float = 0.0, kind: str = "pipe") -> None:
+    def __init__(self, pipe, *, gradient_floor: float = 0.0, kappa=1.0,
+                 links: slice | None = None, kind: str = "pipe") -> None:
         super().__init__(kind)
         self.pipe = pipe
         self.gradient_floor = float(gradient_floor)
         self.scale = float(getattr(pipe, "scale", 1.0))
+        self.kappa = self._param(kappa, False)
+        self.link_range = _link_range(links)
 
-    def residual(self, dp, q, drivers, ctx):
+    def _loss(self, dp, q):
         if isinstance(self.pipe, HazenWilliams):
             h = self.pipe.head_loss(q, self.gradient_floor)
         else:
             h = self.pipe.head_loss(q)
         return dp - self.scale * h
+
+    def _held(self, loss, q, one_way) -> Tensor:
+        """Where a one-way pipe takes its no-flow branch (see THE SELECTION); never at a
+        tie. Computed without a graph: it only selects."""
+        with torch.no_grad():
+            q = q.detach()
+            if isinstance(self.pipe, HazenWilliams):
+                slope = self.pipe.head_gradient(q, self.gradient_floor)
+            else:
+                slope = self.pipe.head_gradient(q)
+            by_kappa = -self.kappa.detach() * q
+            by_slope = -self.scale * slope * q
+            loss = loss.detach()
+            forward = (loss < by_kappa) & (loss < by_slope)
+            reverse = (loss > by_kappa) & (loss > by_slope)
+            return ((one_way > 0) & forward) | ((one_way < 0) & reverse)
+
+    def residual(self, dp, q, drivers, ctx):
+        loss = self._loss(dp, q)
+        if self.link_range is None:
+            return loss
+        status = link_driver(self, drivers, STATUS_KEY, dp)
+        one_way = link_driver(self, drivers, ONE_WAY_KEY, dp)
+        closed = status == CLOSED
+        if bool(one_way.any()):
+            closed = closed | self._held(loss, q, one_way)
+        if not bool(closed.any()):   # the usual case: no `where` in the graph
+            return loss
+        return torch.where(closed, self.kappa * q, loss)
+
+    def held_closed(self, dp, q, drivers) -> Tensor:
+        """Where the pipe is closed at ``(dp, q)``: its status is ``CLOSED``, or, one-way, it
+        takes its no-flow branch."""
+        if self.link_range is None:
+            return torch.zeros_like(dp, dtype=torch.bool)
+        status = link_driver(self, drivers, STATUS_KEY, dp)
+        one_way = link_driver(self, drivers, ONE_WAY_KEY, dp)
+        return (status == CLOSED) | self._held(self._loss(dp, q), q, one_way)
 
 
 class FlowControlledPump(ImplicitLaw):
@@ -766,17 +998,19 @@ class FlowControlledPump(ImplicitLaw):
     iterate, as a head source with the curve's slope in series, and the same network
     converges quadratically, in 5 Newton iterations (19 with `pipe_form="potential"`).
 
-    ``status`` (0 closed, 1 open) is read per edge from the driver ``status_key`` when given:
-    an open pump's residual is ``dp + gain(q)``, a closed one's is ``q``.
+    The status is the pump's own (`PumpCurve`, ``links``): an open pump's residual is
+    ``dp + gain(q)``, a ``CLOSED`` one's is ``kappa q`` (no flow). ``kappa`` (the layer's
+    potential per m^3/s) only scales the row; `build_model` sets it to 1 m per m^3/s (its
+    comment gives the measured reason).
     """
 
     def __init__(self, pump: PumpCurve, *, gradient_floor: float, closed_slope: float,
-                 kind: str = "pump") -> None:
+                 kappa=1.0, kind: str = "pump") -> None:
         super().__init__(kind)
         self.pump = pump
         self.gradient_floor = float(gradient_floor)
         self.closed_slope = float(closed_slope)
-        self.status_key = pump.status_key
+        self.kappa = self._param(kappa, False)
 
     @property
     def h0(self) -> Tensor:
@@ -791,6 +1025,8 @@ class FlowControlledPump(ImplicitLaw):
         return self.pump.q_max()
 
     def residual(self, dp, q, drivers, ctx):
-        status = self.pump._status(dp, drivers)
+        running = self.pump._status(dp, drivers) != 0
         gain = self.pump.head_gain(q, self.gradient_floor, self.closed_slope)
-        return status * (dp + gain) + (1.0 - status) * q
+        if bool(running.all()):   # the usual case: no `where` in the graph
+            return dp + gain
+        return torch.where(running, dp + gain, self.kappa * q)

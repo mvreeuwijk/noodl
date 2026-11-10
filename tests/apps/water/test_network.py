@@ -93,11 +93,21 @@ def test_a_non_positive_pipe_property_is_refused(length, diameter, roughness):
 
 
 @pytest.mark.parametrize("status", ["CLOSED", "CV"])
-def test_a_closed_pipe_or_check_valve_is_refused(status):
-    with pytest.raises(ValueError, match="status-switching"):
-        _minimal(
-            pipes=(WaterPipe("P1", "R1", "J1", 500.0, 0.3, 130.0, status=status),)
-        ).validate()
+def test_a_closed_pipe_or_check_valve_is_valid(status):
+    _minimal(
+        pipes=(WaterPipe("P1", "R1", "J1", 500.0, 0.3, 130.0, status=status),)
+    ).validate()
+
+
+@pytest.mark.parametrize("link, value, match", [
+    ("P1", "AJAR", "only OPEN, CLOSED, ACTIVE"),
+    ("P1", "ACTIVE", "only a valve can take"),
+    ("PU1", 0.8, "pump speed settings are out of scope"),
+])
+def test_an_unmodelled_status_line_is_refused(link, value, match):
+    with pytest.raises(ValueError, match=match):
+        _minimal(pumps=(Pump("PU1", "R1", "J1", "C1"),), curves={"C1": ((0.004, 10.0),)},
+                 initial_status={link: value}).validate()
 
 
 def test_an_unknown_pipe_status_is_refused():
@@ -188,7 +198,8 @@ def test_the_builder_returns_a_model_a_state_and_drivers():
     assert model.link_names == ["P1", "P2", "P3", "P4", "P5", "P6", "P7", "P8"]
     assert [model.net.nodes[i] for i in model.kirchhoff["water"].bound] == ["R1"]
     assert set(state) == {"water.phi", "water.q"}
-    assert set(drivers) == {"water.phi_boundary", "water.sources"}
+    assert set(drivers) == {"water.phi_boundary", "water.sources", "water.status",
+                            "water.setting", "water.one_way"}
     assert float(drivers["water.phi_boundary"][0]) == 50.0
     assert model.head_scale == 1.0
 

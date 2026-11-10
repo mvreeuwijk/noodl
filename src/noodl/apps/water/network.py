@@ -8,10 +8,17 @@ inflow rather than by head difference.
 
 Node order: junctions in file order, then reservoirs, then tanks. Boundary = every reservoir
 then every tank, in that order, which is the order `"water.phi_boundary"` is written in.
-Edge kinds partition by device type: `pipe`, `pump`, `valve` (a TCV, i.e. a settable minor
-loss), `fcv` (a `FixedFlow`), `pbv` (a `BreakerValve`) and `gpv` (a `GeneralPurposeValve`).
-The two last are relations (their flow is an unknown of the solve); every other device gives
-its flow from the head difference.
+Edge kinds partition by device type: `pipe`, `pump`, `valve` (a `ThrottleValve`, TCV),
+`fcv` (a `FlowControlValve`), `pbv` (a `BreakerValve`) and `gpv` (a `GeneralPurposeValve`).
+Pumps and valves are relations (their flow is an unknown of the solve), and so are pipes in
+their resistance form (`pipe_form="flow"`, the default).
+
+Every link's status, setting and allowed flow direction are drivers, one value per link in
+`model.link_names` order: `"water.status"`, `"water.setting"` and `"water.one_way"`
+(`noodl.apps.water.elements.STATUS_KEY` and its neighbours). `build_model` fills them from
+the network: a CLOSED pipe or `[STATUS]` line sets the status, a CV pipe a forward-only
+direction, a valve's setting (or a numeric `[STATUS]`) its setting, and every valve starts
+ACTIVE.
 """
 
 from __future__ import annotations
@@ -21,28 +28,32 @@ from dataclasses import dataclass, field
 
 import torch
 
-from noodl.apps.water.controls import ACTIVE, Control, Rule
+from noodl._unionfind import UnionFind
+from noodl.apps.water.controls import ACTIVE, CLOSED, OPEN, Control, Rule, status_code
 from noodl.apps.water.demand import PressureDrivenDemand
 from noodl.apps.water.elements import (
     CBIG_FT_PER_CFS,
     EPANET_QCF,
     M_PER_FT,
     NU_WATER_REF,
+    ONE_WAY_KEY,
     RQTOL_FT_PER_CFS,
+    SETTING_KEY,
+    STATUS_KEY,
     BreakerValve,
     CompositeDarcyWeisbach,
     FlowControlledPipe,
     FlowControlledPump,
+    FlowControlValve,
     GeneralPurposeValve,
     HazenWilliams,
-    MinorLoss,
     PumpCurve,
+    ThrottleValve,
     epanet_minor_coefficient,
     three_point_curve,
 )
 from noodl.apps.water.tanks import TankLevels, TankStorageControls
 from noodl.elements.duct import Duct
-from noodl.elements.fixed import FixedFlow
 from noodl.layers.kirchhoff import KirchhoffLayer
 from noodl.layers.transport import TransportLayer, UndefinedSteadyState
 from noodl.model import Model
@@ -379,19 +390,30 @@ class WaterNetwork:
     def validate(self) -> None:
         """Refuse, BY NAME, everything this application does not model."""
         self.check()
-        for pipe in self.pipes:
-            status = pipe.status.upper()
-            if status != "OPEN":
+        valve_names = {v.name for v in self.valves}
+        pump_names = {p.name for p in self.pumps}
+        for name, value in self.initial_status.items():
+            if isinstance(value, str):
+                if status_code(value) is None:
+                    raise ValueError(
+                        f"WaterNetwork: [STATUS] gives link {name!r} the status {value!r}; "
+                        f"only OPEN, CLOSED, ACTIVE or a numeric setting appear in the format"
+                    )
+                if status_code(value) == ACTIVE and name not in valve_names:
+                    raise ValueError(
+                        f"WaterNetwork: [STATUS] sets link {name!r} ACTIVE, which only a "
+                        f"valve can take, not a pipe or a pump"
+                    )
+            elif name in pump_names:
                 raise ValueError(
-                    f"WaterNetwork: pipe {pipe.name!r} has status {status}; a closed pipe "
-                    f"and a check valve are both status-switching devices and are out of "
-                    f"scope"
+                    f"WaterNetwork: [STATUS] sets pump {name!r} to the speed {value!r}; "
+                    f"pump speed settings are out of scope"
                 )
-        if self.initial_status:
-            raise ValueError(
-                f"WaterNetwork: [STATUS] sets the initial status or setting of "
-                f"{sorted(self.initial_status)}; initial link statuses are out of scope"
-            )
+            elif name not in valve_names:
+                raise ValueError(
+                    f"WaterNetwork: [STATUS] gives link {name!r} the setting {value!r}; "
+                    f"only a valve or a pump takes a numeric setting"
+                )
         for tank in self.tanks:
             if tank.volume_curve is not None:
                 raise ValueError(
@@ -695,6 +717,16 @@ def build_model(
         raise ValueError(
             f"build_model: friction must be 'composite' or 'colebrook', got {friction!r}"
         )
+    if pipe_form == "potential":
+        switched = [p.name for p in net.pipes
+                    if p.status.upper() != "OPEN" or p.name in net.initial_status]
+        if switched:
+            raise ValueError(
+                f"build_model: pipe(s) {switched} are closed or check valves (a CLOSED or CV "
+                f"status, or a [STATUS] line), which a pipe takes only in its resistance "
+                f"form: pipe_form='potential' gives each pipe's flow from its head loss and "
+                f"reads no status; use pipe_form='flow'"
+            )
     options = net.options
     if pda is None:
         pda = options.demand_model == "PDA"
@@ -735,9 +767,21 @@ def build_model(
     for valves, kind in ((tcv, "valve"), (fcv, "fcv"), (pbv, "pbv"), (gpv, "gpv")):
         for valve in valves:
             graph.add_edge(valve.u, valve.v, kind=kind, name=valve.name)
+    # Each kind's columns of the per-link drivers, in `net.links()` (= layer column) order.
+    link_slice: dict[str, slice] = {}
+    start = 0
+    for kind, count in (("pipe", len(net.pipes)), ("pump", len(net.pumps)),
+                        ("valve", len(tcv)), ("fcv", len(fcv)), ("pbv", len(pbv)),
+                        ("gpv", len(gpv))):
+        link_slice[kind] = slice(start, start + count)
+        start += count
 
     notes: dict[str, str] = dict(net.notes)
     scale = rho * G if headloss == "D-W" else 1.0
+    # EPANET's internal cfs per m3/s, and its RQtol in the layer's potential per m3/s.
+    epanet_cfs = _rounded_cfs_per_m3s(options.flow_units)
+    epanet_cfs = 1.0 / M_PER_FT**3 if epanet_cfs is None else epanet_cfs
+    rqtol = RQTOL_FT_PER_CFS * M_PER_FT * epanet_cfs * scale
     laws: list = []
     if net.pipes:
         if headloss == "H-W":
@@ -799,10 +843,17 @@ def build_model(
                 "the flow, which friction='colebrook' (the generic Duct) does not give; use "
                 "friction='composite'"
             )
-        cfs = _rounded_cfs_per_m3s(options.flow_units)
-        cfs = 1.0 / M_PER_FT**3 if cfs is None else cfs
+        pipe = laws[0]
+        # kappa: each pipe's own head-loss slope at 1 ft/s, EPANET's first iterate
+        # (`hydraul.c`, `initlinkflow`), in the layer's potential per m3/s.
+        with torch.enable_grad():
+            q_ft = torch.tensor([torch.pi * p.diameter**2 / 4.0 * M_PER_FT for p in net.pipes],
+                                dtype=F64, requires_grad=True)
+            (slope,) = torch.autograd.grad(pipe.head_loss(q_ft).sum(), q_ft)
         laws[0] = FlowControlledPipe(
-            laws[0], gradient_floor=RQTOL_FT_PER_CFS * M_PER_FT * cfs, kind="pipe")
+            pipe, gradient_floor=RQTOL_FT_PER_CFS * M_PER_FT * epanet_cfs,
+            kappa=getattr(pipe, "scale", 1.0) * slope.detach(), links=link_slice["pipe"],
+            kind="pipe")
     if net.pumps:
         h0_list, r_list, q_design_list = [], [], []
         for pump in net.pumps:
@@ -825,35 +876,41 @@ def build_model(
             torch.tensor(r_list, dtype=F64),
             2.0,
             speed=torch.tensor([p.speed for p in net.pumps], dtype=F64),
-            status_key="water.status",
+            links=link_slice["pump"],
             kind="pump",
         )
-        cfs = _rounded_cfs_per_m3s(options.flow_units)
-        cfs = 1.0 / M_PER_FT**3 if cfs is None else cfs
+        # kappa of a closed pump: 1 m per m3/s, the row `q` a closed pump had before. A pump
+        # has no head-loss slope at 1 ft/s; its curve's slope at the design flow
+        # (`2 r q_design`) solves to the same answer but, through Newton's damping switch
+        # (which reads the residual norm), costs Net1's 24 h run 3246 Newton iterations
+        # against 2952 in the potential pipe form (MEASURED, benchmarks/water_eps.py).
+        pump_kappa = torch.full((len(net.pumps),), scale, dtype=F64)
         laws.append(FlowControlledPump(
-            pump_law, gradient_floor=RQTOL_FT_PER_CFS * M_PER_FT * cfs * scale,
-            closed_slope=CBIG_FT_PER_CFS * M_PER_FT * cfs * scale, kind="pump"))
+            pump_law, gradient_floor=rqtol,
+            closed_slope=CBIG_FT_PER_CFS * M_PER_FT * epanet_cfs * scale, kappa=pump_kappa,
+            kind="pump"))
+    rounded_cfs = _rounded_cfs_per_m3s(options.flow_units)
+
+    def valve_terms(valves) -> dict:
+        """The open-valve minor loss of `valves` (EPANET's `Km`, the layer's potential per
+        (m3/s)^2) and their kappa: that loss's slope at 1 ft/s, at least 1 m per m3/s (a
+        valve with no minor loss has no head-loss slope of its own)."""
+        diameter = torch.tensor([v.diameter for v in valves], dtype=F64)
+        minor = scale * epanet_minor_coefficient(
+            torch.tensor([v.minor_loss for v in valves], dtype=F64), diameter, rounded_cfs)
+        q_ft = torch.pi * diameter**2 / 4.0 * M_PER_FT
+        return {"minor": minor, "kappa": torch.clamp(2.0 * minor * q_ft, min=scale),
+                "gradient_floor": rqtol}
+
     if tcv:
-        laws.append(
-            MinorLoss(
-                torch.tensor([v.setting * scale for v in tcv], dtype=F64),
-                torch.tensor([v.diameter for v in tcv], dtype=F64),
-                kind="valve",
-            )
-        )
+        laws.append(ThrottleValve(
+            torch.tensor([v.diameter for v in tcv], dtype=F64), cfs_per_m3s=rounded_cfs,
+            scale=scale, links=link_slice["valve"], kind="valve", **valve_terms(tcv)))
     if fcv:
-        laws.append(
-            FixedFlow(torch.tensor([v.setting for v in fcv], dtype=F64), kind="fcv")
-        )
+        laws.append(FlowControlValve(links=link_slice["fcv"], kind="fcv", **valve_terms(fcv)))
     if pbv:
-        minor = epanet_minor_coefficient(
-            torch.tensor([v.minor_loss for v in pbv], dtype=F64),
-            torch.tensor([v.diameter for v in pbv], dtype=F64),
-            _rounded_cfs_per_m3s(options.flow_units),
-        )
-        laws.append(BreakerValve(
-            torch.tensor([v.setting * scale for v in pbv], dtype=F64), minor * scale,
-            kind="pbv"))
+        laws.append(BreakerValve(None, links=link_slice["pbv"], kind="pbv",
+                                 **valve_terms(pbv)))
     if gpv:
         curves = [net.curves[v.curve] for v in gpv]
         width = max(len(c) for c in curves)
@@ -862,7 +919,9 @@ def build_model(
         for i, points in enumerate(curves):
             flows[i, : len(points)] = torch.tensor([x for x, _ in points], dtype=F64)
             heads[i, : len(points)] = torch.tensor([y * scale for _, y in points], dtype=F64)
-        laws.append(GeneralPurposeValve(flows, heads, [len(c) for c in curves], kind="gpv"))
+        laws.append(GeneralPurposeValve(flows, heads, [len(c) for c in curves],
+                                        links=link_slice["gpv"], kind="gpv",
+                                        **valve_terms(gpv)))
 
     storages: list = []
     boundary = [r.name for r in net.reservoirs]
@@ -920,6 +979,8 @@ def build_model(
         # the `RQtol` tangent of its curve, where it is a near-ideal head source of h0.
         state["water.q"][layer.kind_slice("pump")] = torch.tensor(q_design_list, dtype=F64)
 
+    link_names = [link.name for link in net.links()]
+    drivers.update(_link_drivers(net, scale))
     reservoir_heads = torch.tensor([r.head * scale for r in net.reservoirs], dtype=F64)
     tank_closure = None
     if net.tanks:
@@ -929,15 +990,15 @@ def build_model(
             dt=net.hydraulic_timestep if dt is None else dt,
             reservoir_heads=reservoir_heads,
             head_scale=scale,
+            link_names=link_names,
+            link_status=drivers[STATUS_KEY],
         )
         closures.append(tank_closure)
         for t in net.tanks:
             state["water.phi"][node_names.index(t.name)] = (t.elevation + t.init_level) * scale
-        state["water.link_status"] = torch.ones(len(net.pumps), dtype=F64)
+        state["water.link_status"] = drivers[STATUS_KEY][link_slice["pump"]].clone()
     else:
         drivers["water.phi_boundary"] = reservoir_heads
-        if net.pumps:
-            drivers["water.status"] = torch.ones(len(net.pumps), dtype=F64)
 
     sources = torch.zeros(graph.n, dtype=F64)
     if not pda:
@@ -1007,7 +1068,19 @@ def build_model(
     model = Model(graph, layers, closures=closures, coupling=coupling)
     model.notes = notes
     model.node_names = node_names
-    model.link_names = [link.name for link in net.links()]
+    model.link_names = link_names
+    model.input_specs = {
+        STATUS_KEY: dict(
+            description="each link's status: CLOSED 0, OPEN 1, ACTIVE 2 (a valve acting on "
+                        "its setting)", over=link_names, ordering="model.link_names"),
+        SETTING_KEY: dict(
+            description="each link's setting: a pump's relative speed, a PBV's head drop, "
+                        "an FCV's flow (m3/s), a TCV's loss coefficient; unused for pipes "
+                        "and GPVs", over=link_names, ordering="model.link_names"),
+        ONE_WAY_KEY: dict(
+            description="each link's allowed flow direction: 0 both, +1 forward only, -1 "
+                        "reverse only", over=link_names, ordering="model.link_names"),
+    }
     # `initial_state` starts from these flows (resistance-form pipes need a first iterate).
     model.initial_flows = state["water.q"].clone()
     model.tank_closure = tank_closure
@@ -1042,6 +1115,42 @@ def _fit_three_points(points, name: str) -> tuple[Tensor, Tensor]:
             f"curve gives {h3}); a general exponent is not implemented"
         )
     return h0, r
+
+
+def _link_drivers(net: WaterNetwork, scale: float) -> Drivers:
+    """`"water.status"`, `"water.setting"` and `"water.one_way"` from the network, one value
+    per link in `net.links()` order.
+
+    A pipe is OPEN, or CLOSED by its status column; a CV pipe is OPEN and forward-only. A
+    pump is OPEN at its speed. A valve is ACTIVE at its setting (a PBV's scaled to the
+    layer's potential unit). A `[STATUS]` word then sets the status, and a numeric
+    `[STATUS]` value a valve's setting, the valve staying ACTIVE (EPANET 2.2 Manual,
+    Appendix C.2.17)."""
+    links = net.links()
+    status = torch.full((len(links),), float(OPEN), dtype=F64)
+    setting = torch.zeros(len(links), dtype=F64)
+    one_way = torch.zeros(len(links), dtype=F64)
+    for i, link in enumerate(links):
+        kind = "PIPE" if isinstance(link, WaterPipe) else (
+            "PUMP" if isinstance(link, Pump) else link.kind.upper())
+        unit = scale if kind == "PBV" else 1.0
+        if kind == "PIPE":
+            if link.status.upper() == "CLOSED":
+                status[i] = CLOSED
+            elif link.status.upper() == "CV":
+                one_way[i] = 1.0
+        elif kind == "PUMP":
+            setting[i] = link.speed
+        else:
+            status[i] = ACTIVE
+            setting[i] = 0.0 if kind == "GPV" else link.setting * unit
+        initial = net.initial_status.get(link.name)
+        if isinstance(initial, str):
+            status[i] = status_code(initial)
+        elif initial is not None:
+            setting[i] = initial * unit
+            status[i] = ACTIVE
+    return {STATUS_KEY: status, SETTING_KEY: setting, ONE_WAY_KEY: one_way}
 
 
 def initial_state(model: Model, *, values: Mapping | None = None) -> State:
@@ -1083,7 +1192,8 @@ def initial_state(model: Model, *, values: Mapping | None = None) -> State:
     if closure is not None:
         init = torch.tensor([t.init_level for t in closure.tanks], dtype=F64)
         state["water.phi"][..., closure.tank_nodes] = (closure.bottom + init) * closure.head_scale
-        state["water.link_status"] = torch.ones(len(closure.pump_names), dtype=F64)
+        state["water.link_status"] = model.driver_template[STATUS_KEY][
+            closure.pump_links].clone()
     if levels:
         state["water.phi"] = _set_tank_levels(model, state["water.phi"], levels)
     if values:
@@ -1195,6 +1305,7 @@ def water_steady(model: Model, state: State, drivers: Drivers, **solve_kwargs) -
     solve_kwargs.setdefault("atol", 1e-11)
     solve_kwargs.setdefault("rtol", 1e-11)
     solve_kwargs.setdefault("max_iter", 200)
+    _refuse_cut_off(model, state, drivers)
     try:
         result = model.steady(state, drivers, **solve_kwargs)
     except UndefinedSteadyState as exc:
@@ -1241,6 +1352,99 @@ def _refuse_pump_overflow(model: Model, state: State) -> None:
     raise RuntimeError("water_steady: " + "; ".join(bad))
 
 
+def _link_status(model: Model, state: State, drivers: Drivers) -> Tensor:
+    """The `"water.status"` the solve sees: the drivers' own, or, on a network with tanks,
+    the tank closure's (its controls switch the pumps)."""
+    if model.tank_closure is not None:
+        return model.tank_closure(state, drivers)[STATUS_KEY]
+    if STATUS_KEY not in drivers:
+        raise KeyError(
+            f"water: driver {STATUS_KEY!r} is required and was not given; build the drivers "
+            f"with initial_drivers(model)")
+    return drivers[STATUS_KEY]
+
+
+def _cut_off_junctions(net: WaterNetwork, open_links: list[bool]) -> list[bool]:
+    """Per junction, whether no path of open links joins it to a reservoir or a tank."""
+    groups: UnionFind[str] = UnionFind(net.nodes())
+    for link, is_open in zip(net.links(), open_links, strict=True):
+        if is_open:
+            groups.union(link.u, link.v)
+    fixed = {groups.find(n.name) for n in (*net.reservoirs, *net.tanks)}
+    return [groups.find(j.name) not in fixed for j in net.junctions]
+
+
+def _refuse_cut_off(model: Model, state: State, drivers: Drivers) -> None:
+    """Refuse, before the solve, a junction with a demand that closed links cut off from
+    every reservoir and tank (its head is then undefined: EPANET reports it disconnected),
+    and a status or direction on a pipe in its potential form, which reads neither."""
+    net = model.water_network
+    layer = model.kirchhoff["water"]
+    status = _link_status(model, state, drivers).detach()
+    if "pipe" in layer.kinds and not isinstance(layer.law_for("pipe")[0], FlowControlledPipe):
+        cols = layer.law_for("pipe")[1]
+        one_way = drivers.get(ONE_WAY_KEY)
+        if bool((status[..., cols] != OPEN).any()) or (
+                one_way is not None and bool((one_way[..., cols] != 0).any())):
+            raise ValueError(
+                "water_steady: a pipe is closed or one-way in 'water.status'/'water.one_way', "
+                "which pipes take only in their resistance form; build the model with "
+                "pipe_form='flow'")
+    n_j = len(net.junctions)
+    closed = status == CLOSED
+    if not n_j or not bool(closed.any()):
+        return
+    if any(isinstance(w, PressureDrivenDemand) for w in layer.withdrawals):
+        demand = torch.tensor([j.demand != 0 for j in net.junctions])
+    else:
+        demand = drivers["water.sources"][..., :n_j].detach() != 0
+    open_, demand = torch.broadcast_tensors(~closed[..., None, :], demand[..., :, None])
+    open_ = open_[..., 0, :].reshape(-1, status.shape[-1])
+    demand = demand[..., 0].reshape(-1, n_j)
+    # One union-find per distinct set of open links, remembered across solves: an
+    # extended-period run solves the same few sets again and again.
+    cache = model.__dict__.setdefault("_cut_off", {})
+    rows, inverse = torch.unique(open_, dim=0, return_inverse=True)
+    cut = []
+    for row in rows.tolist():
+        key = tuple(row)
+        if key not in cache:
+            cache[key] = _cut_off_junctions(net, row)
+        cut.append(cache[key])
+    bad = (torch.tensor(cut, dtype=torch.bool)[inverse] & demand).any(0)
+    if bool(bad.any()):
+        names = [j.name for j, flag in zip(net.junctions, bad.tolist(), strict=True) if flag]
+        raise ValueError(
+            f"water_steady: junction(s) {names} are cut off from every reservoir and tank "
+            f"by closed links, yet have a demand: no head can deliver it")
+
+
+def link_states(model: Model, state: State, drivers: Drivers) -> Tensor:
+    """Every link's state in `state` (a solution), in `model.link_names` order, as the codes
+    of `"water.status"` (`noodl.apps.water.controls`): `CLOSED` (0), `OPEN` (1) or `ACTIVE`
+    (2). These are also the codes `wntr` reports EPANET's link states in
+    (`results.link["status"]`).
+
+    A link whose status is CLOSED is closed. A one-way pipe (a check valve) is closed where
+    its residual holds it at zero flow (`FlowControlledPipe.held_closed`: the head across it
+    would drive the water the wrong way). A valve otherwise has its status (ACTIVE or OPEN);
+    every other link is OPEN.
+    """
+    status = _link_status(model, state, drivers)
+    layer = model.kirchhoff["water"]
+    q = state["water.q"]
+    out = torch.broadcast_to(status, q.shape[:-1] + status.shape[-1:]).clone()
+    if "pipe" in layer.kinds:
+        law, cols = layer.law_for("pipe")
+        if isinstance(law, FlowControlledPipe):
+            seen = {**drivers, STATUS_KEY: status}
+            dp = layer.dp(state["water.phi"], seen)[..., cols]
+            closed = law.held_closed(dp, q[..., cols], seen)
+            out[..., cols] = torch.where(closed, torch.zeros_like(out[..., cols]),
+                                         out[..., cols])
+    return out.detach().to(torch.long)
+
+
 def water_step(model: Model, state: State, drivers: Drivers, dt: float, *,
                scheme: str = "backward_euler", **solve_kwargs) -> State:
     """One step of `dt` (s) of a model built with `tank_scheme="backward_euler"` or
@@ -1259,6 +1463,7 @@ def water_step(model: Model, state: State, drivers: Drivers, dt: float, *,
     solve_kwargs.setdefault("atol", 1e-11)
     solve_kwargs.setdefault("rtol", 1e-11)
     solve_kwargs.setdefault("max_iter", 200)
+    _refuse_cut_off(model, state, drivers)
     result = model.step(state, drivers, dt, scheme=scheme, **solve_kwargs)
     _refuse_pump_overflow(model, result)
     return result

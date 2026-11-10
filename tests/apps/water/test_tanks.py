@@ -37,6 +37,7 @@ def _two_tank_closure(controls):
     return TankLevels(
         None, tanks, controls, ["P1"],
         tank_nodes=[0, 1], dt=3600.0, reservoir_heads=torch.zeros(0, dtype=F64),
+        link_names=["P1"], link_status=torch.ones(1, dtype=F64),
     )
 
 
