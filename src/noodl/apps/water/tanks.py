@@ -541,7 +541,12 @@ class TankLevels:
         (BELOW), ``q`` the last solve's inflow over one second (`inflow`, m3/s; 0 when not
         given). On a curve whose volume is flat between two levels the two differ: at the
         flat stretch's volume every control level on it is reached (a tank held at
-        `tankgrade(Vmax)` below its maximum level fires an ABOVE control set higher)."""
+        `tankgrade(Vmax)` below its maximum level fires an ABOVE control set higher).
+
+        A KNOWN DIFFERENCE between the two kinds, to be settled in Task 10: EPANET tests a
+        cylinder by volume too, with the same ``|q|`` margin (one second of inflow, so it
+        fires that much early, and at equality), where a cylinder here keeps the strict
+        level test."""
         out = status.clone()
         if self._curved:
             phi = (self.bottom + level) * self.head_scale

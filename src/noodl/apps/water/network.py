@@ -1828,7 +1828,13 @@ def _one_way_cut_off(model: Model, closed: Tensor, one_way: Tensor,
 
 
 def _one_way_unfed(model: Model, closed: list, one_way: list, sign: list) -> tuple:
-    """`_one_way_cut_off` for one set of closed links, directions and demand signs."""
+    """`_one_way_cut_off` for one set of closed links, directions and demand signs.
+
+    `sign` is per junction, and junction `i` is node `i`: `build_model` puts the junctions
+    first in `model.node_names`, in `net.junctions` order (the `"water.sources"` columns
+    `[:n_j]` are theirs). Checked here, once per pattern."""
+    junctions = [j.name for j in model.water_network.junctions]
+    assert list(model.node_names[:len(sign)]) == junctions, "junctions first in node_names"
     ends, fixed = _topology(model)
     ahead: dict[int, list[int]] = {}
     for (u, v), shut, way in zip(ends, closed, one_way, strict=True):

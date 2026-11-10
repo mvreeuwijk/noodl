@@ -2046,8 +2046,11 @@ def test_ky4_at_time_zero(tmp_path):
 
 _ANYTOWN = Path(wntr.__file__).parent / "tests" / "networks_for_testing" / "Anytown.inp"
 
-#: Anytown's six "New" pipes (110, 113, 114, 115, 116, 125): 0.0001 in across, the
-#: placeholders of the Anytown design problem's candidate pipes.
+#: Anytown's six "New" pipes are 0.0001 in across, the placeholders of the Anytown design
+#: problem's candidate pipes. These five (110, 113, 114, 115, 116) alone feed junctions 5, 6
+#: and 7; the sixth, 125 (11 -> 17), parallels ordinary mains, carries no demand of its own
+#: and is kept as shipped, a link of extreme resistance the comparison still covers.
+_ANYTOWN_FEEDERS = ("110", "113", "114", "115", "116")
 _ANYTOWN_PLACEHOLDER = "\t0.0001      \t130"
 
 
@@ -2062,8 +2065,10 @@ def _anytown(tmp_path, *, run=False, pumps="running", tanks="mid", placeholders=
       0 is at t = 0 (`hydcoeffs.c`, `pumpcoeff`);
     - `tanks="mid"`: tanks 41 and 42 start at 22.5 ft, halfway between their 10 and 35 ft
       limits; `"shipped"`: at their minimum;
-    - `placeholders`: the "New" pipes' diameter (in), which as shipped (0.0001 in) feed
-      junctions 5, 6 and 7 alone (`test_anytown_placeholder_pipes_give_no_head`).
+    - `placeholders`: the diameter (in) of the five "New" pipes that, as shipped
+      (0.0001 in), feed junctions 5, 6 and 7 alone (`_ANYTOWN_FEEDERS`,
+      `test_anytown_placeholder_pipes_give_no_head`). The comparison uses 12 in, the size
+      of the file's own residential mains (8 to 12 in): a physically ordinary main.
     """
     text = _ANYTOWN.read_text()
     for k in "234":
@@ -2081,7 +2086,16 @@ def _anytown(tmp_path, *, run=False, pumps="running", tanks="mid", placeholders=
             text = text.replace(old, f" {tank}              \t215         \t22.5        \t10   ")
     if placeholders is not None:
         assert text.count(_ANYTOWN_PLACEHOLDER) == 6
-        text = text.replace(_ANYTOWN_PLACEHOLDER, f"\t{placeholders:<12g}\t130")
+        lines = text.splitlines(keepends=True)
+        edited = 0
+        for k, line in enumerate(lines):
+            fields = line.split()
+            if fields and fields[0] in _ANYTOWN_FEEDERS and _ANYTOWN_PLACEHOLDER in line:
+                lines[k] = line.replace(_ANYTOWN_PLACEHOLDER, f"\t{placeholders:<12g}\t130")
+                edited += 1
+        assert edited == len(_ANYTOWN_FEEDERS)
+        text = "".join(lines)
+        assert text.count(_ANYTOWN_PLACEHOLDER) == 1   # pipe 125, as shipped
     path = tmp_path / "anytown-edited.inp"
     path.write_text(text)
     if not run:
@@ -2128,16 +2142,20 @@ def test_anytown_placeholder_pipes_give_no_head(tmp_path):
     assert all(float(heads[n]) < -1e24 for n in ("5", "6", "7"))
     net = read_epanet_inp(path)
     model, state, drivers = build_model(net)
+    # Pinned to today's error: expected to change (to converge, or to a refusal naming the
+    # cause) if Newton's convergence test becomes scale-aware, relative to the size of the
+    # terms of each row rather than absolute.
     with pytest.raises(RuntimeError, match="singular"):
         water_steady(model, state, _at_time_zero(net, drivers))
 
 
 def test_anytown_at_time_zero(tmp_path):
-    """Anytown with the pumps running, the tanks at mid-level and the six placeholder pipes
-    12 in across (`_anytown`), at t = 0 (demand pattern 1 at t = 0 applied here): three
-    identical parallel pumps on the five-point curve, against EPANET on the same file.
-    Heads 1e-6 relative, flows 1e-6 m3/s, states equal. MEASURED: heads 2.6e-7, flows
-    9.9e-8 m3/s; each pump 0.0952276 m3/s, as EPANET."""
+    """Anytown with the pumps running, the tanks at mid-level and the five placeholder
+    pipes that feed junctions 5-7 12 in across (`_anytown`; pipe 125 stays 0.0001 in), at
+    t = 0 (demand pattern 1 at t = 0 applied here): three identical parallel pumps on the
+    five-point curve, against EPANET on the same file. Heads 1e-6 relative, flows 1e-6
+    m3/s, states equal. MEASURED: heads 5.6e-7, flows 4.3e-7 m3/s; each pump 0.0956532
+    m3/s, as EPANET; pipe 125 carries 3e-15 m3/s."""
     path, results = _anytown(tmp_path, run=True, placeholders=12)
     net = read_epanet_inp(path)
     model, state, drivers = build_model(net)
