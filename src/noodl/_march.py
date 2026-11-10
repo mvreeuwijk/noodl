@@ -95,6 +95,12 @@ def _columns(model: Model, history: list) -> dict[str, list]:
                 column.append(row[key])
             elif key in flows:
                 name = flows[key]
+                if model.kirchhoff[name].holds_storage and f"{name}.q" not in row:
+                    raise ValueError(
+                        f"Model.march records {key!r} from the start state; on a layer "
+                        f"that holds its storage at boundary nodes that needs every edge's "
+                        f"flow too: pass {name + '.q'!r} in the start state"
+                    )
                 column.append(model.kirchhoff[name].storage_flows(
                     row[f"{name}.phi"], {}, dt=None, q=row.get(f"{name}.q")))
             else:

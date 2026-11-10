@@ -86,10 +86,12 @@ class _FallbackMixin:
         is raised (naming the rungs tried and the last one's error), or, under
         `on_failure="return"`/`"return_primal"`, its result and diagnostics are returned.
         Only non-convergence (`ConvergenceError`) of the first solve climbs the ladder; every
-        other error of it passes through. A rung that raises any error has failed, and the
-        next is tried. On a layer with flow unknowns the rank test that names a singular
-        system diagnoses the first solve's failure only once every rung has failed too (it
-        is raised then, in place of the first error), in every `on_failure` mode. With no
+        other error of it passes through. A rung that does not converge, or whose linear guess
+        is singular, not grounded or cannot be solved, has failed, and the next is tried;
+        any other error of a rung passes through. On a layer with flow unknowns the rank
+        test that names a singular system diagnoses the first solve's failure only once
+        every rung has failed too (it is raised then, in place of the first error), in every
+        `on_failure` mode. With no
         fallback (the default) none of this runs, the rank test is made at once, and
         `diagnostics` gains no entry.
         """

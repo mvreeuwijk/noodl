@@ -307,6 +307,14 @@ def test_the_history_carries_storage_flow_the_start_state_did_not():
                        torch.zeros_like(hist[f"{LAYER}.storage_flow"][1]))
 
 
+def test_a_tank_start_state_without_flows_is_refused_by_march_by_name():
+    model, _, state, drivers = _tank_model()
+    state = {k: v for k, v in state.items() if k != "water.q"}
+    model.step(state, drivers, dt=1.0, t=0.0)  # a step accepts it
+    with pytest.raises(ValueError, match=r"Model\.march.*'water\.q'"):
+        model.march(state, drivers, [0.0, 1.0])
+
+
 class _Clock:
     """An integrating closure carrying "clock.t" in the state."""
 

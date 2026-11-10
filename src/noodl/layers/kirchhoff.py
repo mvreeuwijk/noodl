@@ -1580,7 +1580,8 @@ class KirchhoffLayer(
         values. `q=True` returns
         `(phi_interior, q_implicit)`, the second the flows of `implicit_edges` (empty on a
         layer without flow unknowns). A layer that holds its storage at boundary nodes takes
-        `history=(phi, None)`, as `solve` does."""
+        `history=(phi, None)`, as `solve` does; any other layer ignores `history`, since the
+        linear guess is the steady one."""
         drivers = drivers or {}
         phi_boundary, _ = self._hold_boundary(phi_boundary, history, None)
         step = self._step(None, None, None, self.scheme, None, None, drivers)
