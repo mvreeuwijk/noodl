@@ -44,7 +44,8 @@ that is not in the network.
 
 **Pumps** are modelled as EPANET 2.2 types them (`input2.c`, `updatepumpparams`): a curve of one
 point, or of three with the first at zero flow, is a power function `h = h0 - r q^n` (`n` fitted
-to the three points; one point gives `n = 2`); every other curve is joined by straight segments;
+to the three points; one point is fitted with EPANET's added points `(0, 1.33334 H)` and
+`(2 q, 0)`); every other curve is joined by straight segments;
 `POWER` is a constant-power pump (its power is read in kW: horsepower in a US file, kilowatts in
 an SI one, which EPANET divides by its 0.7457 kW per hp). `SPEED` is the pump's initial relative
 speed, the driver `"water.setting"`. See

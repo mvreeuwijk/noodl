@@ -22,6 +22,7 @@ from noodl.apps.water.elements import (
     PressureReducingValve,
     PressureSustainingValve,
     PumpCurve,
+    ShutLinks,
     ThrottleValve,
     composite_friction_factor,
     epanet_friction_factor,  # noqa: F401  (alias)
@@ -65,7 +66,7 @@ __all__ = [
     "PressureSustainingValve",
     "Junction",
     "MinorLoss", "PiecewisePumpCurve", "Premise", "PressureDrivenDemand", "Pump", "PumpCurve",
-    "Reservoir", "Rule",
+    "Reservoir", "Rule", "ShutLinks",
     "Tank",
     "TankLevels", "ThrottleValve", "Valve", "WaterNetwork", "WaterOptions", "WaterPipe",
     "build_model", "initial_drivers", "initial_state", "link_states", "link_table", "pressure_head",

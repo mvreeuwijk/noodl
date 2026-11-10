@@ -205,13 +205,15 @@ affinity laws for the speed:
 
 | Pump in the file | Curve | Head gain |
 |---|---|---|
-| `HEAD` curve of one point $(q_d, H)$ | `PumpCurve`, `three_point_curve`: $h_0 = 4H/3$, $r = (H/3)/q_d^2$, $n = 2$ | $w^2 h_0 - r w^{2-n} q^n$ |
+| `HEAD` curve of one point $(q_d, H)$ | `PumpCurve`, `three_point_curve`: EPANET's points $(0, 1.33334 H)$, $(q_d, H)$, $(2 q_d, 0)$ fitted as three points: $h_0 = 1.33334 H$, $n = 1.99998$, $r = 0.33334 H / q_d^n$ | $w^2 h_0 - r w^{2-n} q^n$ |
 | `HEAD` curve of three points, the first at zero flow | `PumpCurve`, `power_curve` (EPANET's `powercurve`): $h_0$ the first head, $n = \ln\frac{h_0 - h_2}{h_0 - h_1} / \ln\frac{q_2}{q_1}$, $r = (h_0 - h_1)/q_1^n$ | $w^2 h_0 - r w^{2-n} q^n$ |
 | any other `HEAD` curve | `PiecewisePumpCurve`: straight segments (`curvecoeff`), the end segments extended | $w^2 h(q/w)$ |
 | `POWER` $P$ | `ConstantPowerPump`: $8.814\,P/q$ in feet, horsepower and cfs | $8.814\,P w^3 / q$, converted to SI |
 
-EPANET's single point adds the points $(0, 1.33334 H)$ and $(2 q_d, 0)$, whose fit has
-$n = 1.99998$; this application keeps the exact $4/3$ and $n = 2$ (see Limitations).
+EPANET's own rounded 1.33334, not the manual's 133 % with exact thirds (which would force
+$n = 2$, as wntr's `get_head_curve_coefficients` has it): with $n = 2$ a pump at zero flow
+sat $6.7 \cdot 10^{-6} H$ below EPANET's (1.05e-6 relative at 63 m) and Net1's flows
+missed EPANET's by 2.9e-6 relative instead of 2.6e-7 (MEASURED).
 `q_max = w (h_0/r)^{1/n}` is a power function's flow at zero head gain.
 
 Every pump enters the solve in its **head-gain form**, whatever the `pipe_form`, as EPANET and
@@ -243,8 +245,9 @@ residual of each pump, with $r = dp + h_{\text{gain}}(q)$, is
 The branch is selected as for a check valve (`FlowControlledPipe`): the no-flow row only where
 $r < -\kappa q$ and the open row's own Newton step would reverse the flow, never at a tie (a
 pump with no demand behind it runs at zero flow on its curve, `OPEN`, as EPANET reports it),
-and never where shutting the pump would cut a group of nodes off from every reservoir and
-tank. $\kappa$ is 1 m per m³/s. The Jacobian is the closed form `(1, -h'_{\text{gain}})` on
+and never where shutting the pump, together with the check valves the same iterate shuts
+(`ShutLinks`, which the pipes' law fills first), would cut a group of nodes off from every
+reservoir and tank. $\kappa$ is 1 m per m³/s. The Jacobian is the closed form `(1, -h'_{\text{gain}})` on
 the curve's row.
 
 `PumpCurve.flow` still gives the inverted curve, $q = w((h_0 + dp/w^2)/r)^{1/n}$, with a laminar
@@ -417,7 +420,7 @@ step-shortening to the next control crossing.
 
 That shortening is not optional. A fixed one-hour step was measured to diverge from EPANET by
 **2.07 m** on Net1, because the pump switches an hour late; with event shortening the same
-trajectory matches to **8.181e-5 m**.
+trajectory matches to **3.826e-5 m**.
 
 `water_event_step(model, state, drivers, dt_max)` takes one such step. It solves once
 (`water_steady`, with every tank held), shortens `dt_max` to the next control crossing at the
@@ -479,8 +482,8 @@ on-disk reals are **float32**, so roughly 1e-7 relative is EPANET's own precisio
 |---|---|---|
 | `twoloop_si.inp` heads and flows | rel 1e-6 | **4.361e-7** heads, **8.090e-8** flows |
 | `twoloop_si.inp`, noodl physics' own nodal continuity | 1e-13 | **2.093e-14** |
-| Net1 single period: heads, flows, pump head gain | 1e-6 / 1e-5 / 1e-6 | 7.058e-8, 2.868e-6, 1.189e-7 |
-| Net1 24 h tank level with level-triggered pump controls | 2e-4 m | **8.181e-5 m** worst of 25 steps |
+| Net1 single period: heads, flows, pump head gain, pump flow | 1e-6 / 1e-6 / 1e-6 / 1e-8 m³/s | 7.224e-8, 2.647e-7, 1.942e-7, 3.2e-9 m³/s |
+| Net1 24 h tank level with level-triggered pump controls | 2e-4 m | **3.826e-5 m** worst of 25 steps |
 | Darcy-Weisbach, `twoloop_si.inp` heads and flows | rel 1e-6 | 5.819e-8 heads, 6.482e-8 flows |
 | Darcy-Weisbach, Net1 single period: heads, flows | 1e-6 / 1e-5 | 7.009e-8, 3.986e-6 |
 | Darcy-Weisbach, laminar + transitional + turbulent pipes (`lowflow_dw_si.inp`): heads, flows, per-pipe head loss | 1e-6 / 1e-6 / 2.65e-7 m | 3.5e-8, 9.4e-8, 9.6e-8 m |
@@ -490,12 +493,12 @@ on-disk reals are **float32**, so roughly 1e-7 relative is EPANET's own precisio
 | PRV and PSV, the eleven cases below: heads, flows, states, controlled head | 1e-6 / 1e-6 m³/s / equal / 1e-6 m | 9.2e-8, 3.9e-7 m³/s, all equal, 0.0 m |
 | PRV inside EPANET's `HTOL` band (EPANET `ACTIVE`, noodl `OPEN`): heads | `HTOL` = 1.524e-4 m | below `HTOL` at three points in the band |
 | Pumps on the two-loop (heads, flows, states): Net3's three-point curve ($n = 1.77$); Anytown's five-point curve on its first and second segments; Net6's constant-power pump | 1e-6 / 1e-6 m³/s / equal | 2.4e-7, 1.8e-9; 1.3e-7 and 2.2e-6 (5.2e-7 with EPANET's LPS factor, see Limitations), 7.2e-9; 2.8e-7, 1.8e-9 |
-| A pump shut beyond its shut-off head; a zero-demand group behind a pump (shut and running at zero flow); a segmented curve starting above zero flow, shut at its first point's head | 1e-6 / 1e-6 m³/s / equal | 1.1e-7, 1.8e-8 m³/s (EPANET's leak); all states equal |
-| Pump speed 0.8 through `"water.setting"` against `SPEED 0.8` in the file, every curve kind | 1e-6 / 1e-6 m³/s / equal | 2.2e-7 to 3.6e-7, 1.8e-9 |
+| A pump shut beyond its shut-off head; a zero-demand group behind a pump (shut and running at zero flow); a pump and a check valve shutting together around a group; a segmented curve starting above zero flow, shut at its first point's head | 1e-6 / 1e-6 m³/s / equal | 1.1e-7, 1.8e-8 m³/s (EPANET's leak); all states equal |
+| Pump speed 0.8 through `"water.setting"` against `SPEED 0.8` in the file, every curve kind | 1e-6 / 1e-6 m³/s / equal | 2.2e-7 to 3.8e-7, 1.8e-9 |
 | ky10 at time zero (13 constant-power pumps, PRVs, tanks), EPANET's demands | 1e-6 / 1e-6 m³/s / equal | 6.3e-7, 9.1e-8 |
 | Head loss sums to zero around every cycle-basis loop | 1e-12 | **exactly 0.0** |
-| Autodiff vs central differences | 1e-6 × scale | 3.212e-6 / 2.505e-10 / 1.007e-6 / 2.753e-9 |
-| d(junction heads)/d(pump speed), every curve kind, vs central differences | 1e-6 relative | 2.7e-10 or better |
+| Autodiff vs central differences | 1e-6 × scale | 3.212e-6 / 2.505e-10 / 9.2e-10 / 2.753e-9 |
+| d(junction heads)/d(pump speed), every curve kind, vs central differences | 1e-6 relative | 3.1e-10 or better |
 | TRACE water quality, single source | 1e-3 | 6.438e-12 percentage points |
 | Golden regression | 1e-10 | **0.0** |
 
@@ -597,14 +600,13 @@ independent loop is a property of the cycle-space formulation, and it holds exac
   below its setting, EPANET 35.791 m behind it; a valve with the dead end on its start,
   EPANET 39.997, 60.0006 or 53.687 m against the limit's 40 or 60 m; the states agree
   (`test_a_valve_feeding_a_dead_end_without_demand_matches_epanet`).
-- **A single-point pump curve has $n = 2$ exactly, EPANET's 1.99998.** EPANET adds the
-  points $(0, 1.33334 H)$ and $(2 q_d, 0)$; this application keeps $h_0 = 4H/3$. The shut-off
-  heads differ by $6.7 \cdot 10^{-6} H$: a pump at zero flow with nothing behind it sits
-  $6.7 \cdot 10^{-5}$ m lower for a 10 m design head (1.05e-6 relative at 63 m, MEASURED), and
-  Net1's pump flow is 1.2e-7 m³/s from EPANET's (6.2e-9 with EPANET's points, MEASURED).
-- **A pump the solve would shut together with a check valve on the same iterate**, the two
-  cutting a group of nodes off, makes a singular step: each law keeps itself open only where
-  closing it alone would cut a group off. No test network does this.
+- **A zero-demand group between a pump and a check valve to a higher reservoir.** With
+  no demand behind them, noodl runs the pump at zero flow and holds the group at its
+  shut-off head (63.3334 m, both R1 at 50 m and R2 at 100 m); EPANET shuts the pump too and
+  reports 74.48 m, between the reservoirs, the answer of its iteration path (with a CLOSED
+  pipe in place of the check valve it gives noodl's 63.3334 m and an OPEN pump). With any
+  demand, or R2 below 70 m, the two agree
+  (`test_a_pump_and_a_check_valve_shutting_together_match_epanet`).
 - **The Colebrook option is not EPANET below Re = 4000.** With `friction="colebrook"` a laminar
   D-W pipe's head loss follows a straight line to the Colebrook value at Re = 2000, not
   Hagen-Poiseuille, and Dunlop's transition cubic is not used. The default `friction="composite"`

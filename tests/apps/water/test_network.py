@@ -670,7 +670,7 @@ def test_a_pump_feeding_pressure_driven_demand_converges(pipe_form):
 
 @pytest.mark.parametrize("pipe_form", ["flow", "potential"])
 def test_a_pump_held_beyond_shut_off_is_shut_with_no_flow(pipe_form):
-    """R1 (50 m) - PUMP (shut-off 13.3 m) - J - pipe - R2 (100 m): the pump cannot lift
+    """R1 (50 m) - PUMP (shut-off 13.3334 m) - J - pipe - R2 (100 m): the pump cannot lift
     to R2, so it is shut, as EPANET closes it (`pumpstatus`, ``XHEAD``): exactly zero flow
     (EPANET's closed link leaks `excess / CBIG`, 3e-8 m3/s here), J at R2's head, and the
     pump's state CLOSED."""
@@ -717,7 +717,7 @@ def test_a_zero_demand_junction_fed_only_by_a_pump_sits_at_its_shut_off_head():
     model, state, drivers = build_model(net)
     out = water_steady(model, state, drivers)
     assert abs(float(out["water.q"][0])) < 1e-12
-    assert float(out["water.phi"][0]) == pytest.approx(50.0 + 40.0 / 3.0, abs=1e-9)
+    assert float(out["water.phi"][0]) == pytest.approx(50.0 + 1.33334 * 10.0, abs=1e-9)
     assert link_states(model, out, drivers).tolist() == [OPEN]
 
 
@@ -827,3 +827,33 @@ def test_a_pressure_valve_leaves_the_tank_scheme_alone(scheme, interior):
     model, _, _ = build_model(net, tank_scheme=scheme)
     tank = model.node_names.index("T1")
     assert (tank in model.kirchhoff["water"].interior.tolist()) is interior
+
+
+@pytest.mark.parametrize("r2", [None, 100.0])
+def test_a_pump_iterate_on_its_floor_tangent_with_reverse_flow_still_converges(r2):
+    """An adversarial first iterate: the pump's flow reversed (-1 L/s, on the RQtol
+    tangent below its floor flow) with ``0 < r < -kappa q``, so THE SELECTION keeps the
+    curve's row and its Newton step is of order ``r / RQtol``. The solve still ends in the
+    state it reaches from its own first iterate: on the curve feeding J's demand (no R2),
+    or shut beyond its shut-off head under R2 at 100 m."""
+    pipes = () if r2 is None else (WaterPipe("P", "J", "R2", 500.0, 0.3, 130.0),)
+    reservoirs = (Reservoir("R1", 50.0),) + (() if r2 is None else (Reservoir("R2", r2),))
+    net = WaterNetwork(junctions=(Junction("J", 0.0, 0.002),), reservoirs=reservoirs,
+                       pipes=pipes, pumps=(Pump("PU", "R1", "J", "C1"),),
+                       curves={"C1": ((0.004, 10.0),)})
+    model, state, drivers = build_model(net)
+    reference = water_steady(model, state, drivers)
+    law, cols = model.kirchhoff["water"].law_for("pump")
+    q0 = torch.tensor([-1e-3], dtype=F64)
+    shut_off = float(law.head_gain(q0, torch.ones(1, dtype=F64)))
+    adversarial = {k: v.clone() for k, v in state.items()}
+    adversarial["water.q"][cols] = q0
+    adversarial["water.phi"][model.node_names.index("J")] = 50.0 + shut_off - 5e-4
+    adversarial["water.phi"][model.node_names.index("R1")] = 50.0
+    r = float(law.residual(torch.tensor([-(shut_off - 5e-4)], dtype=F64), q0, drivers, None))
+    assert 0.0 < r < -float(law.kappa[0]) * float(q0)       # the iterate is the one asked
+    final = water_steady(model, adversarial, drivers)
+    torch.testing.assert_close(final["water.phi"], reference["water.phi"], rtol=0, atol=1e-9)
+    torch.testing.assert_close(final["water.q"], reference["water.q"], rtol=0, atol=1e-12)
+    assert link_states(model, final, drivers).tolist() == link_states(
+        model, reference, drivers).tolist()

@@ -123,13 +123,15 @@ def test_nodal_continuity_is_exact(tmp_path):
 
 # --------------------------------------------------------------------------- Net1 single period
 def test_net1_single_period(tmp_path):
-    """Heads 1e-6, FLOWS 1e-5, pump head gain 1e-6.
+    """Heads 1e-6, flows 1e-6 relative, pump head gain 1e-6, pump flow 1e-8 m3/s.
 
-    MEASURED: heads 7.058e-8, flows 2.868e-6 on pipe 113 (0.00185 m3/s, the smallest in the
-    network), pump head gain 1.189e-7. The flow residual is the reference's: EPANET's own
-    reported flows miss continuity at node 13 by 4.5e-10 m3/s while this model's satisfy it
-    to 1e-17, and tightening ACCURACY/HEADERROR/FLOWCHANGE to 1e-8/1e-9/1e-9 with 500
-    trials leaves EPANET's output BIT-IDENTICAL.
+    MEASURED: heads 7.224e-8, flows 2.647e-7, pump head gain 1.942e-7, pump flow 3.2e-9
+    m3/s. With the pump curve's exponent fixed at 2 instead of EPANET's 1.99998
+    (`three_point_curve`) the flows were 2.868e-6 apart (pipe 113, 0.00185 m3/s, the
+    smallest in the network) and the pump's 1.15e-7 m3/s. EPANET's own reported flows miss
+    continuity at node 13 by 4.5e-10 m3/s while this model's satisfy it to 1e-17, and
+    tightening ACCURACY/HEADERROR/FLOWCHANGE to 1e-8/1e-9/1e-9 with 500 trials leaves
+    EPANET's output BIT-IDENTICAL.
     """
     path, results = _epanet(tmp_path, "Net1.inp", duration=0)
     net = read_epanet_inp(path)
@@ -141,7 +143,9 @@ def test_net1_single_period(tmp_path):
     worst_h = _worst_heads(model, final, heads, skip=("9", "2"))
     worst_q = _worst_flows(model, final, flows)
     assert worst_h < 1e-6, worst_h
-    assert worst_q < 1e-5, worst_q
+    assert worst_q < 1e-6, worst_q
+    pump = model.link_names.index("9")
+    assert abs(float(final["water.q"][pump]) - float(flows["9"])) < 1e-8
     gain = float(
         final["water.phi"][model.node_names.index("10")]
         - final["water.phi"][model.node_names.index("9")]
@@ -218,11 +222,12 @@ def _extended_period(net, model, state, drivers):
 def test_net1_extended_period_tank_level(tmp_path):
     """2e-4 m ABSOLUTE per reported step.
 
-    MEASURED: 8.181e-5 m worst over the 25 reported steps, with 26 hydraulic sub-steps for
+    MEASURED: 3.826e-5 m worst over the 25 reported steps, with 26 hydraulic sub-steps for
     24 report steps. A FIXED 1 h step instead diverges by 2.07 m, because EPANET shortens
     its own step to the instant the level reaches the 140 ft trigger and a fixed step
-    switches the pump a whole hour late. The 8.2e-5 m floor is the reference's float32 head
-    output, whose resolution at 296 m is 3.5e-5 m.
+    switches the pump a whole hour late. The 3.8e-5 m floor is the reference's float32 head
+    output, whose resolution at 296 m is 3.5e-5 m (8.2e-5 m with the pump curve's exponent
+    fixed at 2 instead of EPANET's 1.99998).
     """
     path, results = _epanet(tmp_path, "Net1.inp")
     net = read_epanet_inp(path)
@@ -655,7 +660,7 @@ def test_gradients_against_central_differences(tmp_path):
 def test_gradient_reaches_the_pump_head_gain_h0(tmp_path):
     """The pump `h0` channel, on Net1 (`twoloop_si.inp` has no pump).
 
-    MEASURED: 1.007e-6 relative (analytic 0.430638, central difference 0.430638).
+    MEASURED: 9.2e-10 relative (analytic 0.4306365, central difference 0.4306365).
     """
     path, _ = _epanet(tmp_path, "Net1.inp", duration=0)
     net = read_epanet_inp(path)
@@ -1766,7 +1771,7 @@ _ANYTOWN_CURVE = _curve_lines("C1", ((0, 300), (2000, 292), (4000, 270), (6000, 
 #: Net6's constant-power pump (`wntr/library/networks/Net6.inp`, PUMP-3889, POWER 15 hp),
 #: in the kilowatts of an SI file.
 _NET6_POWER = f"POWER {15 * 0.745699872!r}"
-#: The single-point curve of `_PUMP_EDITS`: 45 L/s at 8 m, shut-off 10.67 m.
+#: The single-point curve of `_PUMP_EDITS`: 45 L/s at 8 m, shut-off 10.667 m.
 _ONE_POINT = " C1\t45\t8\n"
 
 
@@ -1797,7 +1802,7 @@ _P8_LINE = (" P8              \tJ6              \tJ3              \t500         
             "\t130         \t0           \tOpen  \t;")
 
 #: A second reservoir R2 at 70 m on J3 (pipe P9, 200 m of 300 mm): above the pump's reach of
-#: 50 + 10.67 m, so the pump is shut beyond its shut-off head.
+#: 50 + 10.667 m, so the pump is shut beyond its shut-off head.
 _R2_ABOVE_SHUT_OFF = (
     (" R1              \t50          \t                \t;",
      " R1              \t50          \t                \t;\n R2\t70\t\t;"),
@@ -1863,7 +1868,7 @@ def test_constant_power_pump(tmp_path):
 
 
 def test_pump_closes_beyond_shut_off(tmp_path):
-    """R2 holds J0 above the pump's shut-off head (50 + 10.67 m): the pump is shut, with
+    """R2 holds J0 above the pump's shut-off head (50 + 10.667 m): the pump is shut, with
     exactly zero flow (EPANET: its closed-link leak, reported as 0) and state CLOSED, as
     EPANET reports it. Heads 1e-6 relative, flows 1e-6 m3/s. MEASURED: heads 1.1e-7, flows
     1.8e-8 m3/s (EPANET's leak through the shut pump)."""
@@ -1897,7 +1902,7 @@ def test_pump_speed_setting(tmp_path, kind):
     """A relative speed of 0.8 given through the driver `"water.setting"` on a model built
     at speed 1 matches EPANET with `SPEED 0.8` in the file (`hydcoeffs.c`, `pumpcoeff`: the
     affinity laws). Heads 1e-6 relative, flows 1e-6 m3/s, states equal. MEASURED heads
-    (flows 1.8e-9 m3/s each): one point 2.5e-7, three points 2.9e-7, segments 2.2e-7,
+    (flows 1.8e-9 m3/s each): one point 3.8e-7, three points 2.9e-7, segments 2.2e-7,
     constant power 3.6e-7."""
     parameters, curve = _PUMP_KINDS[kind]
     path, results = _epanet(tmp_path, "twoloop_si.inp",
@@ -1916,7 +1921,7 @@ def test_pump_speed_setting(tmp_path, kind):
 def test_pump_speed_gradient_against_central_differences(tmp_path, kind):
     """d(sum of junction heads)/d(pump speed) by the implicit adjoint against central
     differences of 1e-6, `|analytic - fd| <= 1e-6 |fd|`, at speed 0.9. MEASURED: one point
-    134.4 (2.7e-10 relative), three points 398.39 (7.4e-12), segments 1146.06 (2.7e-11),
+    134.4 (3.1e-10 relative), three points 398.39 (7.4e-12), segments 1146.06 (2.7e-11),
     constant power 431.34 (3.8e-11)."""
     parameters, curve = _PUMP_KINDS[kind]
     model, state, drivers, _ = _pump_case(tmp_path, _pump_edits(parameters, curve))
@@ -1968,6 +1973,9 @@ def test_ky10_constant_power_pumps_at_time_zero(tmp_path):
         name: int(status[name]) for name in model.link_names}
 
 
+#: A single point, 4 L/s at 10 m.
+_ONE_POINT_4_10 = " C1\t4\t10\n"
+
 _BEHIND_A_PUMP = """[JUNCTIONS]
  J 0 0
  K 0 0
@@ -1991,22 +1999,27 @@ _BEHIND_A_PUMP = """[JUNCTIONS]
 """
 
 
+@pytest.mark.parametrize("curve, shut_off", [(_NET3_CURVE, 104 * _M_PER_FT),
+                                             (_ONE_POINT_4_10, 13.3334)],
+                         ids=["three-point", "one-point"])
 @pytest.mark.parametrize("status, pump_state", [("Closed", 1), ("Open", 0)])
-def test_a_zero_demand_group_behind_a_pump_matches_epanet(tmp_path, status, pump_state):
-    """R1 (50 m) - PU - J - P1 - K - P2 - R2 (100 m), no demand, Net3's pump curve
-    (shut-off 31.7 m). P2 CLOSED: J and K are fed by the pump alone, which runs at zero
-    flow on its curve, J and K at R1 plus the shut-off head, and the pump OPEN, as EPANET
-    has it (its closed P2 leaks 3e-8 m3/s backwards through the pump, too little for
-    `pumpstatus` to close it). P2 OPEN: R2 holds them above the shut-off head and the pump
-    is CLOSED. Heads 1e-6 relative, flows 1e-6 m3/s, states equal."""
-    path, results = _run_inp(tmp_path, _BEHIND_A_PUMP.format(status=status,
-                                                             curve=_NET3_CURVE))
+def test_a_zero_demand_group_behind_a_pump_matches_epanet(tmp_path, status, pump_state,
+                                                          curve, shut_off):
+    """R1 (50 m) - PU - J - P1 - K - P2 - R2 (100 m), no demand; Net3's pump curve
+    (shut-off 31.7 m) or a single point (4 L/s at 10 m: EPANET's shut-off 1.33334 x 10 m).
+    P2 CLOSED: J and K are fed by the pump alone, which runs at zero flow on its curve, J
+    and K at R1 plus the shut-off head, and the pump OPEN, as EPANET has it (its closed P2
+    leaks 3e-8 m3/s backwards through the pump, too little for `pumpstatus` to close it).
+    P2 OPEN: R2 holds them above the shut-off head and the pump is CLOSED. Heads 1e-6
+    relative, flows 1e-6 m3/s, states equal. (With the exact 4/3 the single point's J was
+    6.7e-5 m low, 1.05e-6 relative, MEASURED.)"""
+    path, results = _run_inp(tmp_path, _BEHIND_A_PUMP.format(status=status, curve=curve))
     model, state, drivers = build_model(read_epanet_inp(path))
     final = water_steady(model, state, drivers)
     _compare_with_epanet(model, final, drivers, results)
     assert link_states(model, final, drivers)[model.link_names.index("PU")] == pump_state
     phi = dict(zip(model.node_names, final["water.phi"].tolist(), strict=True))
-    expected = 50.0 + 104 * _M_PER_FT if status == "Closed" else 100.0
+    expected = 50.0 + shut_off if status == "Closed" else 100.0
     assert phi["J"] == pytest.approx(expected, abs=1e-9)
     assert final["water.q"].abs().max() < 1e-12
 
@@ -2048,3 +2061,49 @@ def test_a_segmented_curve_starting_above_zero_flow_shuts_at_its_first_head(
     final = water_steady(model, state, drivers)
     _compare_with_epanet(model, final, drivers, results)
     assert link_states(model, final, drivers)[model.link_names.index("PU")] == pump_state
+
+
+_PUMP_AND_CHECK_VALVE = """[JUNCTIONS]
+ J 0 {demand}
+ K 0 0
+[RESERVOIRS]
+ R1 50
+ R2 {r2}
+[PIPES]
+ P1 J K 100 300 130 0 Open
+ P2 K R2 100 300 130 0 CV
+[PUMPS]
+ PU R1 J HEAD C1
+[CURVES]
+ C1 4 10
+[OPTIONS]
+ Units LPS
+ Headloss H-W
+ Accuracy 1e-8
+ Trials 500
+[TIMES]
+ Duration 0
+[END]
+"""
+
+
+@pytest.mark.parametrize("demand, r2", [(0.5, 100), (0.1, 150), (0.0, 70)])
+def test_a_pump_and_a_check_valve_shutting_together_match_epanet(tmp_path, demand, r2):
+    """R1 (50 m) - PU (shut-off 13.3334 m) - J - P1 - K - P2 (a check valve) - R2 above:
+    an iterate shuts both PU and P2 and cuts J and K off. Each law alone saw the other as
+    open, and the step was singular (MEASURED before `ShutLinks`); the pumps' cut-off test
+    now counts the check valves shut on the same iterate and keeps PU on its curve. At the
+    solution PU feeds J's demand (or runs at zero flow, J at R1 plus the shut-off head) and
+    P2 is shut, as EPANET has it. Heads 1e-6 relative, flows 1e-6 m3/s, states equal.
+
+    (With no demand and R2 at 100 m EPANET instead shuts PU too and reports J at 74.48 m,
+    between the reservoirs: its answer there follows its own iteration path, as with the
+    fenced groups of Limitations; noodl gives the limit with PU running at zero flow,
+    63.3334 m.)"""
+    path, results = _run_inp(tmp_path, _PUMP_AND_CHECK_VALVE.format(demand=demand, r2=r2))
+    model, state, drivers = build_model(read_epanet_inp(path))
+    final = water_steady(model, state, drivers)
+    _compare_with_epanet(model, final, drivers, results)
+    states = dict(zip(model.link_names, link_states(model, final, drivers).tolist(),
+                      strict=True))
+    assert states["PU"] == 1 and states["P2"] == 0

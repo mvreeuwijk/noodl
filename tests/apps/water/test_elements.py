@@ -10,6 +10,7 @@ from noodl.apps.water.demand import PressureDrivenDemand
 from noodl.apps.water.elements import (
     HW_SI,
     KW_PER_HP,
+    PIN_KEY,
     ConstantPowerPump,
     FlowControlledPump,
     HazenWilliams,
@@ -106,15 +107,19 @@ def test_a_minor_loss_term_is_inverted_by_the_bracketed_root():
 
 
 def test_the_three_point_fit_reproduces_epanets_own_coefficients():
-    """Net1's single point, 1500 GPM / 250 ft. MEASURED against wntr's own
-    get_head_curve_coefficients: (101.6, 2836.1385287628063, 2)."""
+    """Net1's single point, 1500 GPM / 250 ft: EPANET's points (0, 1.33334 H), (q, H),
+    (2 q, 0) fitted by `powercurve` (`input2.c`, `input3.c`), n = 1.99998 (wntr's own
+    `get_head_curve_coefficients` keeps n = 2: (101.6, 2836.1385287628063, 2))."""
     gpm = 3.785411784e-3 / 60.0
-    h0, r, n = three_point_curve(
-        torch.tensor([1500.0 * gpm], dtype=F64), torch.tensor([250.0 * 0.3048], dtype=F64)
-    )
-    assert float(h0) == pytest.approx(101.6, rel=1e-12)
-    assert float(r) == pytest.approx(2836.1385287628063, rel=1e-12)
-    assert n == 2.0
+    q, h = 1500.0 * gpm, 250.0 * 0.3048
+    h0, r, n = three_point_curve(torch.tensor([q], dtype=F64), torch.tensor([h], dtype=F64))
+    expected_n = math.log(1.33334 / 0.33334) / math.log(2.0)
+    assert n == pytest.approx(expected_n, rel=1e-15) and abs(n - 1.99998) < 1e-5
+    assert float(h0) == pytest.approx(1.33334 * h, rel=1e-15)
+    assert float(r) == pytest.approx(0.33334 * h / q**expected_n, rel=1e-13)
+    # the curve passes through the design point and EPANET's zero head at twice the flow
+    assert float(h0 - r * q**n) == pytest.approx(h, rel=1e-13)
+    assert abs(float(h0 - r * (2 * q) ** n)) < 1e-12
 
 
 def test_the_pump_curve_inverts_its_fitted_law():
@@ -555,3 +560,87 @@ def test_a_dead_end_row_and_the_reported_state_agree(kind, dead, heads, row, sta
     r = valve.residual(dp, q, drivers, ctx)
     assert float(r) == pytest.approx(row, abs=1e-12)
     assert int(valve.states(dp, q, drivers, ctx)) == state
+
+
+def _mixed_pumps():
+    """Four pumps of every kind in one law: power functions with n = 2 and n = 0.5, a
+    segmented curve starting above zero flow, and constant power."""
+    power = PumpCurve(torch.tensor([101.6, 30.0], dtype=F64),
+                      torch.tensor([2836.0, 40.0], dtype=F64), torch.tensor([2.0, 0.5], dtype=F64))
+    segments = PiecewisePumpCurve(torch.tensor([[0.01, 0.1, 0.2]], dtype=F64),
+                                  torch.tensor([[90.0, 88.0, 80.0]], dtype=F64), [3])
+    constant = ConstantPowerPump(torch.tensor([10.0], dtype=F64))
+    return FlowControlledPump([(power, [0, 3]), (segments, [1]), (constant, [2])],
+                              gradient_floor=FLOOR, max_slope=CBIG,
+                              kappa=torch.tensor([1.0, 2.0, 3.0, 4.0], dtype=F64),
+                              links=slice(0, 4))
+
+
+_RUNNING = {"water.status": torch.ones(4, dtype=F64),
+            "water.setting": torch.tensor([0.9, 0.8, 1.1, 1.0], dtype=F64)}
+_STOPPED = {"water.status": torch.tensor([0.0, 1.0, 1.0, 1.0], dtype=F64),
+            "water.setting": torch.tensor([0.9, 0.0, 1.1, 1.0], dtype=F64),
+            PIN_KEY: torch.tensor([1.0, 0.0, 0.0, 0.0], dtype=F64)}
+
+
+@pytest.mark.parametrize("dp, q, drivers, rows", [
+    # running on every curve
+    ([-60.0, -50.0, -30.0, -20.0], [0.05, 0.1, 0.05, 0.2], _RUNNING, "open"),
+    # low and reverse flow: the RQtol and CBIG tangents, below a segmented curve's first
+    # point, below constant power's CBIG flow
+    ([-60.0, -50.0, -30.0, -20.0], [-1e-3, 0.005, 1e-9, 1e-12], _RUNNING, "mixed"),
+    # shut beyond the shut-off head
+    ([-200.0, -200.0, -1e6, -200.0], [0.0, 0.0, 0.0, 0.0], _RUNNING, "shut"),
+    # CLOSED and pinned, at speed 0, running
+    ([-60.0, -50.0, -30.0, -20.0], [0.05, 0.1, 0.05, 0.2], _STOPPED, "mixed"),
+], ids=["running", "low-flow", "shut", "stopped-closed-pinned"])
+def test_the_pump_jacobian_is_the_derivative_of_its_residual(dp, q, drivers, rows):
+    """`FlowControlledPump.jacobian` (closed form) against autograd of `residual`, per
+    pump, in every regime of every curve kind."""
+    law = _mixed_pumps()
+    dp, q = torch.tensor(dp, dtype=F64), torch.tensor(q, dtype=F64)
+    d_dp, d_dq = (block.reshape(4) for block in law.jacobian(dp, q, drivers, None))
+    a_dp, a_dq = torch.autograd.functional.jacobian(
+        lambda d, f: law.residual(d, f, drivers, None), (dp, q))
+    torch.testing.assert_close(d_dp, a_dp.diagonal(), rtol=1e-12, atol=0)
+    torch.testing.assert_close(d_dq, a_dq.diagonal(), rtol=1e-12, atol=0)
+    assert torch.count_nonzero(a_dp - torch.diag(a_dp.diagonal())) == 0
+    states = law.states(dp, q, drivers)
+    if rows == "open":
+        assert bool((states == OPEN).all())
+    elif rows == "shut":
+        assert bool((states == CLOSED).all()) and bool((d_dp == 0).all())
+
+
+def test_an_exponent_below_one_needs_a_slope_cap():
+    """Below 1 the slope is unbounded at zero flow: without ``max_slope`` the gain is
+    refused by name rather than returned as NaN."""
+    pump = PumpCurve(torch.tensor([30.0], dtype=F64), torch.tensor([40.0], dtype=F64),
+                     torch.tensor([0.5], dtype=F64))
+    with pytest.raises(ValueError, match="exponent below 1 .* give max_slope"):
+        pump.head_gain(torch.tensor([0.0], dtype=F64), FLOOR)
+    assert torch.isfinite(pump.head_gain(torch.tensor([-1.0, 0.0], dtype=F64), FLOOR,
+                                         CBIG)).all()
+
+
+def test_an_exponent_within_tiny_of_one_is_a_line():
+    """EPANET's `pumpcoeff` sets n = 1.0 where |n - 1| < TINY: the gain is
+    ``w^2 h0 - r w q`` exactly, with no floor."""
+    pump = PumpCurve(torch.tensor([30.0], dtype=F64), torch.tensor([40.0], dtype=F64),
+                     torch.tensor([1.0 + 5e-7], dtype=F64))
+    q = torch.tensor([-0.1, 0.0, 0.3], dtype=F64)
+    w = torch.tensor([0.8], dtype=F64)
+    gain, slope = pump.gain_and_slope(q, FLOOR, CBIG, w)
+    torch.testing.assert_close(gain, 0.64 * 30.0 - 40.0 * 0.8 * q, rtol=1e-15, atol=1e-15)
+    assert slope.tolist() == pytest.approx([32.0] * 3, rel=1e-15)
+
+
+def test_the_inverted_curve_of_a_stopped_pump_is_no_flow():
+    """`PumpCurve.flow` at speed 0 (`"water.setting"`): no flow and a zero slope, not a
+    division by zero."""
+    pump = _net1_pump()
+    drivers = {"water.status": torch.ones(1, dtype=F64),
+               "water.setting": torch.zeros(1, dtype=F64)}
+    dp = torch.tensor([-50.0], dtype=F64)
+    assert float(pump.flow(dp, drivers)) == 0.0
+    assert float(pump.dflow(dp, drivers)) == 0.0

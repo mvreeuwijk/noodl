@@ -57,6 +57,7 @@ from noodl.apps.water.elements import (
     PressureReducingValve,
     PressureSustainingValve,
     PumpCurve,
+    ShutLinks,
     ThrottleValve,
     _joined_groups,
     epanet_minor_coefficient,
@@ -848,6 +849,8 @@ def build_model(
     epanet_cfs = 1.0 / M_PER_FT**3 if epanet_cfs is None else epanet_cfs
     rqtol = RQTOL_FT_PER_CFS * M_PER_FT * epanet_cfs * scale
     laws: list = []
+    # the check valves and pumps shut on each Newton iterate, for one cut-off test over both
+    shut_links = ShutLinks(len(net.links()))
     if net.pipes:
         if headloss == "H-W":
             laws.append(
@@ -921,7 +924,7 @@ def build_model(
             ends=[(node_names.index(link.u), node_names.index(link.v))
                   for link in net.links()],
             fixed=[node_names.index(n.name) for n in (*net.reservoirs, *net.tanks)],
-            kind="pipe")
+            shut_links=shut_links, kind="pipe")
     if net.pumps:
         pump_law, q_design_list = _pump_law(net, link_slice["pump"], scale, epanet_cfs)
         # kappa of a closed pump: 1 m per m3/s, the row `q` a closed pump had before. A pump
@@ -937,7 +940,7 @@ def build_model(
             ends=[(node_names.index(link.u), node_names.index(link.v))
                   for link in net.links()],
             fixed=[node_names.index(n.name) for n in (*net.reservoirs, *net.tanks)],
-            kind="pump"))
+            shut_links=shut_links, kind="pump"))
     rounded_cfs = _rounded_cfs_per_m3s(options.flow_units)
 
     def valve_terms(valves) -> dict:
@@ -1178,9 +1181,8 @@ def power_curve(points) -> tuple[float, float, float]:
     `points` (`(flow, head)` pairs): one point, or three with the first at zero flow
     (`input2.c`, `updatepumpparams`; `input3.c`, `powercurve`).
 
-    One point ``(q1, h1)``: this application keeps the exact construction of
-    `three_point_curve`, ``h0 = 4 h1 / 3`` and ``n = 2`` (EPANET adds the points
-    ``(0, 1.33334 h1)`` and ``(2 q1, 0)``, whose exponent is 1.99998). Three points
+    One point ``(q1, h1)``: EPANET adds the points ``(0, 1.33334 h1)`` and ``(2 q1, 0)``
+    and fits the three (`three_point_curve`, whose exponent is 1.99998). Three points
     ``(0, h0), (q1, h1), (q2, h2)``: ``n = ln((h0 - h2) / (h0 - h1)) / ln(q2 / q1)``,
     ``r = (h0 - h1) / q1^n``. Raises `ValueError` where `powercurve` fails (EPANET's error
     227): heads not falling or flows not rising by more than ``TINY``, or ``n`` outside
@@ -2104,6 +2106,14 @@ def link_states(model: Model, state: State, drivers: Drivers) -> Tensor:
         if bool(running.any()):
             ends = torch.tensor(_topology(model)[0], dtype=torch.long)
             phi = state["water.phi"].detach()
+            if ("pipe" in layer.kinds and law.shut_links is not None
+                    and isinstance(layer.law_for("pipe")[0], FlowControlledPipe)):
+                # the check valves this state shuts, as the solve's own evaluation records
+                # them for the pumps' cut-off test (`ShutLinks`)
+                pipes, pcols = layer.law_for("pipe")
+                with torch.no_grad():
+                    pipes(phi[..., ends[pcols, 0]] - phi[..., ends[pcols, 1]],
+                          q[..., pcols].detach(), drivers, None)
             dp = phi[..., ends[cols, 0]] - phi[..., ends[cols, 1]]
             selected = law.states(dp, q[..., cols].detach(), drivers)
             out[..., cols] = torch.where(running, selected.to(out.dtype), out[..., cols])

@@ -313,20 +313,26 @@ class HazenWilliams(ConstitutiveLaw):
         return zero, slope + zero
 
 
+#: EPANET's shut-off head of a single-point pump curve, per unit design head
+#: (`input2.c`, `updatepumpparams`: ``h0 = 1.33334 * h1``).
+SHUT_OFF_PER_DESIGN_HEAD = 1.33334
+
+
 def three_point_curve(q_design: Tensor, h_design: Tensor) -> tuple[Tensor, Tensor, float]:
     """EPANET's single-point pump-curve fit: ``(h0, r, n)`` for ``h = h0 - r q^n``.
 
-    EPANET 2.2 Manual p.19: "EPANET adds two more points to the curve by assuming a shutoff
-    head at zero flow equal to 133% of the design head and a maximum flow at zero head equal
-    to twice the design flow", then fits ``h = A - B q^C`` through the three points. Those
-    three points force the exponent EXACTLY: ``B q_d^C = H/3`` and ``B (2 q_d)^C = 4H/3``
-    give ``2^C = 4``, so ``C = 2`` and ``h0 = 4 H / 3``. (Confirmed against wntr's own
-    `get_head_curve_coefficients` on Net1: (101.6, 2836.1385287628063, 2) for the file's
-    1500 GPM / 250 ft point.)
+    EPANET 2.2 (`input2.c`, `updatepumpparams`) adds the points ``(0, 1.33334 H)`` and
+    ``(2 q_d, 0)`` to the design point ``(q_d, H)`` and fits ``h = A - B q^C`` through the
+    three (`input3.c`, `powercurve`): ``h0 = 1.33334 H``,
+    ``n = ln(h0 / (h0 - H)) / ln 2 = ln(1.33334 / 0.33334) / ln 2 = 1.99998``,
+    ``r = (h0 - H) / q_d^n = 0.33334 H / q_d^n``. (The manual's "133%" with exact thirds
+    would force ``n = 2``; EPANET's rounded constant does not, and wntr's own
+    `get_head_curve_coefficients` keeps ``n = 2``.)
     """
-    h0 = 4.0 * h_design / 3.0
-    r = (h_design / 3.0) / q_design**2
-    return h0, r, 2.0
+    h0 = SHUT_OFF_PER_DESIGN_HEAD * h_design
+    n = math.log(SHUT_OFF_PER_DESIGN_HEAD / (SHUT_OFF_PER_DESIGN_HEAD - 1.0)) / math.log(2.0)
+    r = (h0 - h_design) / q_design**n
+    return h0, r, n
 
 
 def _pump_speed(law, speed, drivers, like: Tensor) -> Tensor:
@@ -355,9 +361,9 @@ class PumpCurve(ConstitutiveLaw):
 
     With ``links`` (the pumps' columns of the per-link drivers, a slice of
     `model.link_names`) the status is read from ``"water.status"`` (a ``CLOSED`` pump
-    delivers nothing) and the speed from ``"water.setting"``; without, the pump runs at
-    ``speed``. ``head_gain`` is the curve as `FlowControlledPump` writes it, the flow an
-    unknown; `build_model` enters every pump that way.
+    delivers nothing, and so does one at speed 0) and the speed from ``"water.setting"``;
+    without, the pump runs at ``speed``. ``head_gain`` is the curve as `FlowControlledPump`
+    writes it, the flow an unknown; `build_model` enters every pump that way.
 
     Flow is monotone increasing in ``dp`` (``dq/ddp > 0``), so the Newton Jacobian stays
     SPD-certifiable. At shut-off the slope of the sharp branch diverges, so the law is
@@ -394,12 +400,15 @@ class PumpCurve(ConstitutiveLaw):
         n_t = self.n.detach()
         line = (n_t - 1.0).abs() < 1e-6
         self._linear = bool(line.any())
-        self._capped = self._linear or bool((n_t < 1.0).any())
+        self._below_one = bool(((n_t < 1.0) & ~line).any())
+        self._capped = self._linear or self._below_one
         n_safe = torch.where(line, torch.full_like(n_t, 2.0), n_t)
+        n_eff = torch.where(line, torch.ones_like(n_t), n_t)   # `pumpcoeff`: n = 1.0
         self.register_buffer("_line", line, persistent=False)
+        self.register_buffer("_n", n_eff, persistent=False)
         self.register_buffer("_n_less_one", n_safe - 1.0, persistent=False)
         self.register_buffer("_inv_n_less_one", 1.0 / (n_safe - 1.0), persistent=False)
-        self.register_buffer("_two_less_n", 2.0 - n_t, persistent=False)
+        self.register_buffer("_two_less_n", 2.0 - n_eff, persistent=False)
 
     def _status(self, dp: Tensor, drivers) -> Tensor:
         """1 where the pump runs, 0 where its `"water.status"` is CLOSED."""
@@ -416,6 +425,9 @@ class PumpCurve(ConstitutiveLaw):
     def flow(self, dp: Tensor, drivers=None) -> Tensor:
         status = self._status(dp, drivers)
         w = _pump_speed(self, None, drivers, dp)
+        if bool((w == 0).any()):   # a stopped pump delivers nothing (`pumpcoeff`)
+            status = status * (w != 0)
+            w = torch.where(w == 0, torch.ones_like(w), w)
         head = self.h0 + dp / w**2
         dpt = self.dp_transition
         shut = head < dpt
@@ -432,6 +444,9 @@ class PumpCurve(ConstitutiveLaw):
     def dflow(self, dp: Tensor, drivers=None) -> Tensor:
         status = self._status(dp, drivers)
         w = _pump_speed(self, None, drivers, dp)
+        if bool((w == 0).any()):   # a stopped pump delivers nothing (`pumpcoeff`)
+            status = status * (w != 0)
+            w = torch.where(w == 0, torch.ones_like(w), w)
         head = self.h0 + dp / w**2
         dpt = self.dp_transition
         shut = head < dpt
@@ -446,10 +461,14 @@ class PumpCurve(ConstitutiveLaw):
     def gain_and_slope(self, q: Tensor, gradient_floor: float = 0.0,
                        max_slope: float = math.inf, speed=None) -> tuple[Tensor, Tensor]:
         """`(head_gain, gain_slope)` at once."""
+        if self._below_one and math.isinf(max_slope):
+            raise ValueError(
+                f"PumpCurve (kind {self.kind!r}): an exponent below 1 has an unbounded slope "
+                f"at zero flow; give max_slope (EPANET's CBIG, the layer's potential per "
+                f"m3/s) to cap it there")
         w = self.speed if speed is None else speed
-        n = self.n
         coeff = self.r * w ** self._two_less_n            # EPANET's `r = R w^(2-n)`
-        n_coeff = n * coeff
+        n_coeff = self._n * coeff
         # the flows between which the slope n coeff q^(n-1) lies within [floor, cap]
         q_lo = (gradient_floor / n_coeff) ** self._inv_n_less_one
         if self._capped:
@@ -1375,14 +1394,45 @@ RQTOL_FT_PER_CFS = 1e-7
 CBIG_FT_PER_CFS = 1e8
 
 
-def _reopen(law, held: Tensor, ahead: Tensor, drivers) -> Tensor:
+class ShutLinks:
+    """The one-way links the laws of one layer shut on the current iterate, shared between
+    them so that the cut-off test (`_reopen`) sees all of them at once.
+
+    `FlowControlledPipe` and `FlowControlledPump` are handed the same instance by
+    `build_model`. The layer evaluates its laws in order, pipes before pumps, on every
+    residual and Jacobian evaluation; the pipe law writes the check valves it shuts there
+    (`links`: per link in `model.link_names` order, batch first, `None` when none), and the
+    pump law, which comes next, tests the network for groups cut off by those AND the
+    pumps it would shut, keeping a pump on its curve for each such group. One test, over
+    every link shut on the iterate: a pump and a check valve that cut a group off together
+    no longer each count the other as open (the singular step it made, MEASURED on a
+    reservoir, a pump, a junction with a demand and a check valve to a higher reservoir:
+    `test_a_pump_and_a_check_valve_shutting_together_match_epanet`). The pipe law's own
+    test, made before the pumps' exists, reopens what the check valves alone cut off."""
+
+    def __init__(self, n_links: int) -> None:
+        self.n_links = int(n_links)
+        self.links: Tensor | None = None
+
+    def record(self, held: Tensor | None, link_range: tuple[int, int]) -> None:
+        """Record `held` (a law's own columns) as the links shut on this iterate."""
+        if held is None or not bool(held.any()):
+            self.links = None
+            return
+        lo, hi = link_range
+        links = torch.zeros(held.shape[:-1] + (self.n_links,), dtype=torch.bool)
+        links[..., lo:hi] = held
+        self.links = links
+
+
+def _reopen(law, held: Tensor, ahead: Tensor, drivers, shut: Tensor | None = None) -> Tensor:
     """`held` (the one-way links of `law`, check valves or pumps, this iterate closes), with
     the open branch taken again where closing would cut a group of nodes off from every
     reservoir and tank (`FlowControlledPipe`, A CUT-OFF ITERATE): per such group, the one
     link touching it whose open equation predicts the most flow in its own direction
     (`ahead`), until no group is cut off. `law` carries `ends`, `fixed` and `link_range`;
     links marked by `PIN_KEY` count as joined, and so does every link of another law that
-    is not CLOSED."""
+    is not CLOSED and not in `shut` (the other links shut on this iterate, `ShutLinks`)."""
     if law.ends is None or not bool(held.any()):
         return held
     n_links = len(law.ends)
@@ -1390,7 +1440,12 @@ def _reopen(law, held: Tensor, ahead: Tensor, drivers) -> Tensor:
     status = drivers[STATUS_KEY].detach()
     pin = drivers.get(PIN_KEY)
     batch = held.shape[:-1]
+    if shut is not None:
+        batch = torch.broadcast_shapes(batch, shut.shape[:-1])
+        held = held.expand(batch + held.shape[-1:])
     joined = (status != CLOSED).expand(batch + (n_links,))
+    if shut is not None:
+        joined = joined & ~shut.expand(batch + (n_links,))
     if pin is not None:
         joined = joined | (pin.detach() != 0).expand(batch + (n_links,))
     joined = joined.reshape(-1, n_links).tolist()
@@ -1472,14 +1527,16 @@ class FlowControlledPipe(ImplicitLaw):
     (the reservoir and tank nodes), the pipe takes the open branch instead for each check
     valve it would close that touches such a cut-off group, so the step is taken; the
     solution is still exact, and `water_steady` refuses a converged check valve that carries
-    flow the wrong way.
+    flow the wrong way. With ``shut_links`` (`ShutLinks`) the pipe records the check valves
+    it shuts, for the pumps' test over every link shut on the iterate.
     """
 
     def __init__(self, pipe, *, gradient_floor: float = 0.0, kappa=1.0,
                  links: slice | None = None, ends=None, fixed=(),
-                 kind: str = "pipe") -> None:
+                 shut_links: ShutLinks | None = None, kind: str = "pipe") -> None:
         super().__init__(kind)
         self.pipe = pipe
+        self.shut_links = shut_links
         self.gradient_floor = float(gradient_floor)
         self.scale = float(getattr(pipe, "scale", 1.0))
         self.kappa = self._param(kappa, False)
@@ -1537,9 +1594,14 @@ class FlowControlledPipe(ImplicitLaw):
                 held = torch.zeros(q.shape, dtype=torch.bool)
                 ahead = torch.zeros_like(q)
                 held[..., cols], ahead[..., cols] = held_c, ahead_c
-            return _reopen(self, held, ahead, drivers)
+            held = _reopen(self, held, ahead, drivers)
+            if self.shut_links is not None:
+                self.shut_links.record(held, self.link_range)
+            return held
 
     def residual(self, dp, q, drivers, ctx):
+        if self.shut_links is not None:
+            self.shut_links.record(None, self.link_range)
         loss = self._loss(dp, q)
         if self.link_range is None:
             return loss
@@ -1589,7 +1651,9 @@ class FlowControlledPump(ImplicitLaw):
     iterate that overshoots forward from closing (`FlowControlledPipe`, THE SELECTION, has
     the measured cycle). A CUT-OFF ITERATE is `FlowControlledPipe`'s too: given ``ends`` and
     ``fixed``, a pump an iterate would shut that cuts a group of nodes off from every
-    reservoir and tank is kept on its curve for that step.
+    reservoir and tank is kept on its curve for that step; with ``shut_links``
+    (`ShutLinks`, shared with the pipes' law) the test counts the check valves the pipes
+    shut on the same iterate as shut too.
 
     The potential form, ``PumpCurve.flow``, inverts the curve: its slope is infinite at the
     shut-off head and EXACTLY zero beyond it, where the pump delivers nothing whatever the
@@ -1606,8 +1670,9 @@ class FlowControlledPump(ImplicitLaw):
 
     def __init__(self, pump, *, gradient_floor: float = 0.0, max_slope: float = math.inf,
                  kappa=1.0, links: slice | None = None, ends=None, fixed=(),
-                 kind: str = "pump") -> None:
+                 shut_links: ShutLinks | None = None, kind: str = "pump") -> None:
         super().__init__(kind)
+        self.shut_links = shut_links
         parts = [(pump, None)] if isinstance(pump, torch.nn.Module) else list(pump)
         self.curves = torch.nn.ModuleList([curve for curve, _ in parts])
         if len(parts) == 1 and parts[0][1] is None:
@@ -1723,7 +1788,8 @@ class FlowControlledPump(ImplicitLaw):
             held = by_kappa & (r < -slope * q)
             if not bool(held.any()):
                 return None
-            held = _reopen(self, held, q + r / slope, drivers)
+            shut = None if self.shut_links is None else self.shut_links.links
+            held = _reopen(self, held, q + r / slope, drivers, shut)
             return held if bool(held.any()) else None
 
     def _rows(self, dp, q, drivers):

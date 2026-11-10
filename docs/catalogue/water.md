@@ -47,8 +47,8 @@ The relation between the flow through an edge and the potential difference acros
 | `BreakerValve` | A pressure breaker valve (PBV): EPANET 2.2's `pbvcoeff` (`hydcoeffs.c`). | `BreakerValve(setting, minor, *, kappa=1.0, gradient_floor=0.0, links=None, kind='pbv')` |
 | `CompositeDarcyWeisbach` | Composite Darcy-Weisbach pipe: Hagen-Poiseuille, Dunlop's cubic, then Swamee-Jain. | `CompositeDarcyWeisbach(length, diameter, roughness, *, minor_loss=0.0, nu=1.02193344e-06, cfs_per_m3s=None, scale=1.0, rtol=1e-15, max_iter=100, kind='pipe', learnable=False)` |
 | `ConstantPowerPump` | A pump that delivers a constant power: EPANET 2.2's ``CONST_HP`` pump (`[PUMPS]` ``POWER``). Its head gain is ``8.814 P w^3 / q`` in feet, horsepower and cfs (`input2.c`, `updatepumpparams`: ``R = -8.814 P``, ``N = -1``; `hydcoeffs.c`, `pumpcoeff`: ``r = R w^(2-N)``, ``hloss = r / q``), here in the layer's potential unit and m3/s: ``a w^3 / q`` with ``a = scale 0.3048 * 8.814 P / (kw_per_hp cfs_per_m3s)``. | `ConstantPowerPump(power_kw, *, kw_per_hp=0.7457, cfs_per_m3s=None, scale=1.0, speed=1.0, links=None, kind='pump')` |
-| `FlowControlledPipe` | A pipe in its resistance form, ``dp = scale h(q)``, with the flow an unknown of the layer (`build_model`'s ``pipe_form="flow"``): ``pipe`` is the pipe's potential-form law (`HazenWilliams` or `CompositeDarcyWeisbach`), whose ``head_loss`` gives ``h``. | `FlowControlledPipe(pipe, *, gradient_floor=0.0, kappa=1.0, links=None, ends=None, fixed=(), kind='pipe')` |
-| `FlowControlledPump` | Every pump of a layer in its head-gain form, ``phi_discharge - phi_suction = gain(q)``, with the flow an unknown of the layer, as EPANET's and wntr's own solvers write it. `build_model` writes every pump in this form, whatever the ``pipe_form``. | `FlowControlledPump(pump, *, gradient_floor=0.0, max_slope=inf, kappa=1.0, links=None, ends=None, fixed=(), kind='pump')` |
+| `FlowControlledPipe` | A pipe in its resistance form, ``dp = scale h(q)``, with the flow an unknown of the layer (`build_model`'s ``pipe_form="flow"``): ``pipe`` is the pipe's potential-form law (`HazenWilliams` or `CompositeDarcyWeisbach`), whose ``head_loss`` gives ``h``. | `FlowControlledPipe(pipe, *, gradient_floor=0.0, kappa=1.0, links=None, ends=None, fixed=(), shut_links=None, kind='pipe')` |
+| `FlowControlledPump` | Every pump of a layer in its head-gain form, ``phi_discharge - phi_suction = gain(q)``, with the flow an unknown of the layer, as EPANET's and wntr's own solvers write it. `build_model` writes every pump in this form, whatever the ``pipe_form``. | `FlowControlledPump(pump, *, gradient_floor=0.0, max_slope=inf, kappa=1.0, links=None, ends=None, fixed=(), shut_links=None, kind='pump')` |
 | `FlowControlValve` | A flow control valve (FCV), active: its flow is its setting (m^3/s), ``kappa (q - setting) = 0``, whatever the heads. The setting is ``setting``, or the driver ``"water.setting"`` with ``links``; see `_Valve` for the status. Implicit: the flow is an unknown of the layer. | `FlowControlValve(*, setting=None, minor=0.0, kappa=1.0, gradient_floor=0.0, links=None, kind='fcv')` |
 | `GeneralPurposeValve` | A general purpose valve (GPV): EPANET 2.2's `gpvcoeff` (`hydcoeffs.c`). | `GeneralPurposeValve(flows, heads, n_points, *, minor=0.0, kappa=1.0, gradient_floor=0.0, links=None, kind='gpv')` |
 | `HazenWilliams` | ``h_L = K q^1.852 + m q^2`` with ``K = 10.666829500036 C^-1.852 d^-4.871 L``. | `HazenWilliams(length, diameter, roughness, *, minor_loss=0.0, dp_transition=1e-09, kind='pipe', learnable=False)` |
@@ -82,6 +82,14 @@ Readers and writers of other tools' file formats.
 | Name | What it does | How to call it |
 |---|---|---|
 | `read_epanet_inp` | Read the documented subset of an EPANET 2.2 `.inp` into a `WaterNetwork`, in SI. | `read_epanet_inp(path)` |
+
+## Other classes
+
+Supporting types.
+
+| Name | What it does | How to call it |
+|---|---|---|
+| `ShutLinks` | The one-way links the laws of one layer shut on the current iterate, shared between them so that the cut-off test (`_reopen`) sees all of them at once. | `ShutLinks(n_links)` |
 
 ## Functions
 
