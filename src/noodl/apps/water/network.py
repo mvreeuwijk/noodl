@@ -45,6 +45,7 @@ from noodl.apps.water.elements import (
     RQTOL_FT_PER_CFS,
     SETTING_KEY,
     STATUS_KEY,
+    TIME_KEY,
     BreakerValve,
     ChezyManning,
     CompositeDarcyWeisbach,
@@ -384,6 +385,7 @@ class WaterNetwork:
                     f"WaterNetwork: emitter at {emitter.node!r}, which is not a junction"
                 )
         valve_names = {v.name for v in self.valves}
+        pump_names = {p.name for p in self.pumps}
         for control in self.controls:
             if control.link not in link_names:
                 raise ValueError(
@@ -393,6 +395,12 @@ class WaterNetwork:
                 raise ValueError(
                     f"WaterNetwork: control on link {control.link!r} sets the status ACTIVE, "
                     f"which only a valve can take, not a pipe or a pump"
+                )
+            if control.setting is not None and control.link not in valve_names | pump_names:
+                raise ValueError(
+                    f"WaterNetwork: control on link {control.link!r} sets the numeric "
+                    f"setting {control.setting!r}, which only a pump (its speed) or a valve "
+                    f"takes, not a pipe"
                 )
             if control.trigger == "node" and control.node not in seen:
                 raise ValueError(
@@ -600,36 +608,6 @@ class WaterNetwork:
                 f"WaterNetwork: DEMAND MODEL {self.options.demand_model!r}; only DDA and "
                 f"PDA are modelled"
             )
-        tank_names = {t.name for t in self.tanks}
-        pump_names = {p.name for p in self.pumps}
-        for control in self.controls:
-            if control.trigger == "time":
-                raise ValueError(
-                    f"WaterNetwork: a time-based control on link {control.link!r} "
-                    f"(AT TIME); time-based controls are out of scope"
-                )
-            if control.trigger == "clocktime":
-                raise ValueError(
-                    f"WaterNetwork: a clock-time control on link {control.link!r} "
-                    f"(AT CLOCKTIME); clock-time controls are out of scope"
-                )
-            if control.node not in tank_names:
-                raise ValueError(
-                    f"WaterNetwork: control on link {control.link!r} tests node "
-                    f"{control.node!r}, which is not a tank; junction-pressure and "
-                    f"reservoir-head controls are out of scope"
-                )
-            if control.link not in pump_names:
-                raise ValueError(
-                    f"WaterNetwork: control names link {control.link!r}, which is not a "
-                    f"pump; pipe and valve controls are not implemented"
-                )
-            if control.setting is not None:
-                raise ValueError(
-                    f"WaterNetwork: control on link {control.link!r} sets the numeric "
-                    f"setting {control.setting!r}; setting controls (a pump speed or a "
-                    f"valve setting) are out of scope"
-                )
 
 
 def twoloop() -> WaterNetwork:
@@ -1134,8 +1112,20 @@ def build_model(
     drivers.update(_link_drivers(net, scale))
     reservoir_heads = torch.tensor([r.head * scale for r in net.reservoirs], dtype=F64)
     tank_closure = None
-    if net.tanks:
-        tank_closure = (TankLevels if held else TankStorageControls)(
+    if net.tanks or net.controls:
+        # the closure of the tanks and of the controls (`model.tank_closure`, also on a
+        # network with controls and no tanks)
+        junction_names = {j.name for j in net.junctions}
+        if net.tanks and not held and any(
+                c.trigger == "node" and c.node in junction_names for c in net.controls):
+            raise ValueError(
+                "build_model: a junction-pressure control acts after a solve, which the "
+                "implicit tank schemes' water_step does not repeat; use "
+                "tank_scheme='forward_euler' (water_event_step)")
+        kinds = ["PIPE" if isinstance(link, WaterPipe) else
+                 "PUMP" if isinstance(link, Pump) else "VALVE" for link in net.links()]
+        elevation = {j.name: j.elevation for j in net.junctions}
+        tank_closure = (TankLevels if (held or not net.tanks) else TankStorageControls)(
             graph, list(net.tanks), list(net.controls), [p.name for p in net.pumps],
             tank_nodes=[node_names.index(t.name) for t in net.tanks],
             dt=net.hydraulic_timestep if dt is None else dt,
@@ -1145,12 +1135,21 @@ def build_model(
             link_status=drivers[STATUS_KEY],
             tank_links=_tank_links(net),
             one_way=drivers[ONE_WAY_KEY],
-            storage=storages[0],
+            storage=storages[0] if net.tanks else None,
+            link_setting=drivers[SETTING_KEY],
+            link_kinds=kinds,
+            reservoir_names=[r.name for r in net.reservoirs],
+            junctions={name: (node_names.index(name), elev)
+                       for name, elev in elevation.items()},
+            start_clocktime=net.start_clocktime,
         )
         closures.append(tank_closure)
         for t in net.tanks:
             state["water.phi"][node_names.index(t.name)] = (t.elevation + t.init_level) * scale
-        state["water.link_status"] = drivers[STATUS_KEY][link_slice["pump"]].clone()
+        state["water.link_status"] = drivers[STATUS_KEY].clone()
+        state["water.link_setting"] = drivers[SETTING_KEY].clone()
+        if any(c.trigger != "node" for c in net.controls):
+            drivers[TIME_KEY] = torch.zeros((), dtype=F64)
     else:
         drivers["water.phi_boundary"] = reservoir_heads
 
@@ -1236,6 +1235,10 @@ def build_model(
             description="each link's allowed flow direction: 0 both, +1 forward only, -1 "
                         "reverse only", over=link_names, ordering="model.link_names"),
     }
+    if TIME_KEY in drivers:
+        model.input_specs[TIME_KEY] = dict(
+            description="seconds since the simulation start, which the network's AT TIME and "
+                        "AT CLOCKTIME controls read (set it each step)")
     # `initial_state` starts from these flows (resistance-form pipes need a first iterate).
     model.initial_flows = state["water.q"].clone()
     model.tank_closure = tank_closure
@@ -1438,8 +1441,8 @@ def initial_state(model: Model, *, values: Mapping | None = None) -> State:
     if closure is not None:
         init = torch.tensor([t.init_level for t in closure.tanks], dtype=F64)
         state["water.phi"][..., closure.tank_nodes] = (closure.bottom + init) * closure.head_scale
-        state["water.link_status"] = model.driver_template[STATUS_KEY][
-            closure.pump_links].clone()
+        state["water.link_status"] = model.driver_template[STATUS_KEY].clone()
+        state["water.link_setting"] = model.driver_template[SETTING_KEY].clone()
     if levels:
         state["water.phi"] = _set_tank_levels(model, state["water.phi"], levels)
     if values:
@@ -1499,8 +1502,18 @@ def initial_drivers(
     return drivers
 
 
+#: The most solves `water_steady` repeats for junction-pressure controls that keep switching.
+MAX_PRESSURE_SWITCHES = 20
+
+
 def water_steady(model: Model, state: State, drivers: Drivers, **solve_kwargs) -> State:
     """The quasi-steady state: one `Model.steady` with tight Newton tolerances.
+
+    A junction-pressure control (`IF NODE <junction> BELOW|ABOVE`) acts after the solve:
+    EPANET's `pswitch` tests it on the converged heads, within `Htol` of its setting, and a
+    link it switches is solved again, with the step's other controls not tested again
+    (`TankLevels.pressure_switch`, `held_controls`), until none switches (at most
+    `MAX_PRESSURE_SWITCHES` times, else `RuntimeError`).
 
     `atol`/`rtol` default to 1e-11. MEASURED, sweeping Net1's whole 24 h duty cycle over
     the eight demand multipliers 0.7 to 1.4: 1e-14 does not converge at all (the residual
@@ -1539,6 +1552,26 @@ def water_steady(model: Model, state: State, drivers: Drivers, **solve_kwargs) -
     pipe's slope sits on its `RQtol` floor and Newton's first step overshoots without bound.
     The pumps' flows, likewise, start from their design flows when they are all zero.
     """
+    result = _solve_steady(model, state, drivers, **solve_kwargs)
+    closure = model.tank_closure
+    if closure is None or not closure.has_pressure_controls:
+        return result
+    for _ in range(MAX_PRESSURE_SWITCHES):
+        status, setting, changed = closure.pressure_switch(result)
+        if not bool(changed.any()):
+            return result
+        with closure.held_controls():
+            result = _solve_steady(
+                model, {**result, "water.link_status": status, "water.link_setting": setting},
+                drivers, **solve_kwargs)
+    raise RuntimeError(
+        f"water_steady: the junction-pressure controls kept switching links through "
+        f"{MAX_PRESSURE_SWITCHES} solves; they have no consistent state")
+
+
+def _solve_steady(model: Model, state: State, drivers: Drivers, **solve_kwargs) -> State:
+    """One `water_steady` solve (see there), the controls as `state` and `drivers` give
+    them."""
     seed = getattr(model, "initial_flows", None)
     layer = model.kirchhoff["water"]
     if seed is not None and layer.implicit_edges.numel():
@@ -2352,8 +2385,9 @@ def water_event_step(model: Model, state: State, drivers: Drivers, dt_max: float
        solve does not depend on the step), which gives the inflow into every tank
        (`"water.storage_flow"`). A full or empty tank closes the links that would fill or
        drain it (`TankLevels`, EPANET's `tankstatus`).
-    2. The step is `dt_max` shortened to the time at which a tank, its level changing
-       linearly at that inflow, reaches a control's trigger (`TankLevels.event_step`,
+    2. The step is `dt_max` shortened to the next time control (the driver `"water.time"`
+       is the step's start) and to the time at which a tank, its level changing
+       linearly at that inflow, reaches a control's trigger (`TankLevels.control_time`,
        EPANET 2.2 Manual section 13.1 item 17), and to the time a tank fills or empties,
        rounded to whole seconds as EPANET's `tanktimestep` (`hydraul.c`) rounds it
        (`TankLevels.time_to_limit`).
@@ -2388,7 +2422,7 @@ def water_event_step(model: Model, state: State, drivers: Drivers, dt_max: float
         area = storage.capacity(heads, heads, drivers) * closure.head_scale
     levels = closure.levels(state)
     rate = inflow / area
-    dt = closure.event_step(levels, rate, dt_max, inflow=inflow)
+    dt = min(float(dt_max), closure.control_time(levels, rate, drivers, solved, inflow))
     # EPANET's `tanktimestep` (`hydraul.c`): the step ends when a tank fills or empties,
     # `t = ROUND(v / q)` whole seconds, when that is positive and shorter
     fill = float(closure.time_to_limit(levels, rate, inflow).min())

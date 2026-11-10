@@ -146,14 +146,13 @@ def test_an_unknown_section_with_content_is_refused(tmp_path):
         read_epanet_inp(path)
 
 
-def test_a_time_based_control_is_refused(tmp_path):
+def test_a_clocktime_control_is_read_and_accepted(tmp_path):
     path = _edit(tmp_path, "twoloop_si.inp",
                  ("[CONTROLS]", "[CONTROLS]\n LINK P1 CLOSED AT CLOCKTIME 6 AM"))
     net = read_epanet_inp(path)
     assert net.controls[0].trigger == "clocktime"
     assert net.controls[0].value == 6 * 3600.0
-    with pytest.raises(ValueError, match="clock-time control"):
-        net.validate()
+    net.validate()
 
 
 def test_a_malformed_control_is_refused(tmp_path):
@@ -461,9 +460,8 @@ def test_net3_reads_status_time_controls_and_clock():
         ("335", "1", False), ("335", "1", True), ("330", "1", False), ("330", "1", True)
     ]
     assert tank_level[0].value == pytest.approx(17.1 * FOOT, rel=1e-15)
-    # the CLOSED pipe and the [STATUS] line are modelled; the time controls are refused
-    with pytest.raises(ValueError, match="time-based control"):
-        net.validate()
+    # the CLOSED pipe, the [STATUS] line and the time controls are modelled
+    net.validate()
 
 
 def test_net6_reads_prv_cv_and_power_pump():
@@ -660,17 +658,15 @@ def test_every_control_form_is_read(tmp_path):
         "node", "2", True, 0.8
     )
     assert speed_level.value == pytest.approx(140 * FOOT, rel=1e-15)
-    with pytest.raises(ValueError, match="clock-time control"):
-        net.validate()
+    net.validate()
 
 
-def test_a_junction_pressure_control_is_converted_from_psi_and_refused(tmp_path):
+def test_a_junction_pressure_control_is_converted_from_psi(tmp_path):
     path = _edit(tmp_path, "Net1.inp",
                  ("[CONTROLS]", "[CONTROLS]\n LINK 9 OPEN IF NODE 10 BELOW 30"))
     net = read_epanet_inp(path)
     assert net.controls[0].value == pytest.approx(30 * PSI_TO_M, rel=1e-15)
-    with pytest.raises(ValueError, match="not a tank"):
-        net.validate()
+    net.validate()
 
 
 def test_a_numeric_setting_on_a_pipe_is_refused(tmp_path):

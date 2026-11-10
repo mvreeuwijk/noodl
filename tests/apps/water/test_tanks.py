@@ -255,7 +255,8 @@ def test_controls_read_the_step_start_level_in_every_pass_of_a_step(monkeypatch)
     assert diagnostics["passes"] >= 2 and len(read) >= 2
     assert read == pytest.approx([42.5] * len(read), abs=1e-12)
     assert float(tank_levels(pingpong, stepped)[0]) > 140 * 0.3048   # crossed in this step
-    assert stepped["water.link_status"].tolist() == [1.0]             # ... the pump stays open
+    pump = pingpong.link_names.index("9")
+    assert stepped["water.link_status"][pump] == 1.0                  # ... the pump stays open
     once = pingpong.step(state, drivers, 1800.0, **kwargs)
     torch.testing.assert_close(stepped["water.phi"], once["water.phi"], rtol=0, atol=1e-9)
 

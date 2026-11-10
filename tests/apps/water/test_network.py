@@ -230,17 +230,21 @@ def test_an_unmodelled_headloss_formula_is_refused():
         _minimal(headloss="Z-Q").validate()
 
 
-def test_a_control_on_a_non_tank_is_refused():
-    with pytest.raises(ValueError, match="which is not a tank"):
-        _minimal(controls=(Control("P1", OPEN, None, "node", "J1", False, 1.0),)).validate()
+def test_every_control_form_is_accepted():
+    """Time, clock-time, tank, junction and (with a pipe or a pump as its link) every
+    control the reader reads is modelled."""
+    _minimal(controls=(Control("P1", OPEN, None, "node", "J1", False, 1.0),
+                       Control("P1", 0, None, "time", value=3600.0),
+                       Control("P1", 0, None, "clocktime", value=21600.0))).validate()
+    _minimal(
+        tanks=(Tank("T1", 10.0, 5.0, 1.0, 9.0, 3.0),),
+        controls=(Control("P1", OPEN, None, "node", "T1", False, 1.0),),
+    ).validate()
 
 
-def test_a_control_on_a_non_pump_is_refused():
-    with pytest.raises(ValueError, match="which is not a pump"):
-        _minimal(
-            tanks=(Tank("T1", 10.0, 5.0, 1.0, 9.0, 3.0),),
-            controls=(Control("P1", OPEN, None, "node", "T1", False, 1.0),),
-        ).validate()
+def test_a_numeric_setting_on_a_pipe_is_refused():
+    with pytest.raises(ValueError, match="not a pipe"):
+        _minimal(controls=(Control("P1", None, 0.5, "time", value=0.0),)).validate()
 
 
 # ---------------------------------------------------------------------- builder

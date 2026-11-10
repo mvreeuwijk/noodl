@@ -32,8 +32,9 @@ with different units is refused by name when the file is read.
 `WaterNetwork.validate()` (called by `build_model`) refuses, naming the feature, each one the
 builder does not model yet, so a file never loads into a network that quietly means something
 else: a numeric `[STATUS]` pump speed; a pump speed pattern;
-rules; and every `[CONTROLS]` form except
-`LINK <pump> OPEN|CLOSED IF NODE <tank> BELOW|ABOVE <level>`. Of EPANET's own valve checks
+rules; and a numeric `[CONTROLS]` setting on a pipe. Every other `[CONTROLS]` form is
+modelled: `AT TIME`, `AT CLOCKTIME` and `IF NODE` on a tank, a reservoir or a junction, with an
+`OPEN`, `CLOSED` or numeric action on a pipe, pump or valve. Of EPANET's own valve checks
 (`valvecheck`), `validate()` refuses a PRV or PSV whose controlled node (a PRV's end, a PSV's
 start) is a reservoir or tank, and two valves that hold one node twice (EPANET's errors 219 and
 220), naming the valves. Of its tank checks (`validatetanks`, error 225) it refuses an initial level outside the minimum and maximum, and a volume curve that does not cover both. A tank volume curve and overflow are built (`TankVolumeCurve`, `tank_overflow`) under the default `tank_scheme` and refused by name under the implicit ones. Of its pump checks it refuses a curve EPANET refuses (error 227): a

@@ -1,7 +1,15 @@
-"""Simple `[CONTROLS]` on tank levels, as one closure carrying the link status.
+"""Simple `[CONTROLS]` (time, clock time, tank level, reservoir head, junction pressure), as
+one closure carrying the link status and setting.
 
-`state_keys = ("water.link_status",)`: the open/closed status of every controlled link,
-which persists across steps and belongs to no layer. A tank's level is not carried here:
+`state_keys = ("water.link_status", "water.link_setting")`: the status and setting of every
+link (`model.link_names` order), which persist across steps and belong to no layer. The
+controls (`noodl.apps.water.controls.apply_controls`) change them; the closure writes them
+to `"water.status"` for every pump and every link a control names, and to `"water.setting"`
+for the links whose setting a control has changed from the built one (the drivers' own are
+used otherwise). `AT TIME` and `AT CLOCKTIME` read the driver `"water.time"` (s since the
+start; the driver is built when the network has such a control). A junction-pressure control
+acts after a solve, not before: `pressure_switch`, which `water_steady` repeats the solve for
+(EPANET's `pswitch`). A tank's level is not carried here:
 it is the tank node's head less its bottom, read from `"water.phi"` (`TankLevels.levels`).
 The tank itself is a `noodl.LinearStorage` of its cross-section area in the water layer
 (`build_model(tank_scheme=...)`): under `"forward_euler"` (EPANET's method) a boundary node
@@ -9,11 +17,11 @@ the solve holds at its step-start head and the step then moves by `dt * inflow /
 (`KirchhoffLayer.advance_storage`, `water_event_step`); under `"backward_euler"` or
 `"trapezoidal"` an interior node stepped inside the solve.
 
-Per call the closure (1) applies every control's level test with EPANET's semantics, under
-`no_grad` -- the switch itself is a combinatorial decision; and (2) writes the reservoir heads
-into `"water.phi_boundary"` and the per-link status into `"water.status"`: every pump's from
-the carried `"water.link_status"`, every other link's from the drivers' own `"water.status"`
-(or, when they carry none, the build's). A tank held at a
+Per call the closure (1) applies every control with EPANET's semantics, under `no_grad` --
+the switch itself is a combinatorial decision; and (2) writes the reservoir heads
+into `"water.phi_boundary"` and the per-link status into `"water.status"`: every pump's and
+every controlled link's from the carried `"water.link_status"`, every other link's from the
+drivers' own `"water.status"` (or, when they carry none, the build's). A tank held at a
 boundary node has a column of `"water.phi_boundary"` too, which the closure fills with zeros:
 the layer holds the tank at its step-start head there on every path (`Model` steps, steady
 solves, `residuals`, `current_flows`; `KirchhoffLayer.hold_storage`), so it is the only
@@ -21,7 +29,8 @@ authority for the tank heads. During a step the controls read the step-start lev
 `Model` pass shows a closure the held head of such a node, not the level a previous pass of
 the same step has advanced it to (`coupling="iterate"`).
 
-`event_step` is EPANET's ADAPTIVE shortening, and it is not optional: with a fixed step
+`control_time` (`next_control_time`) is EPANET's ADAPTIVE shortening, and it is not
+optional: with a fixed step
 the pump switches up to a whole step late and the tank level diverges from EPANET; the step
 is shortened to the linearly-projected trigger crossing instead (numbers in
 `docs/design/water_street.md#event-step`; checked in
@@ -50,19 +59,32 @@ function of its level (`[CURVES]`), stepped by volume (`NodeStorage.potential_of
 
 from __future__ import annotations
 
+from contextlib import contextmanager
+
 import torch
 
-from noodl.apps.water.controls import CLOSED, OPEN
-from noodl.apps.water.elements import M_PER_FT, ONE_WAY_KEY, STATUS_KEY
+from noodl.apps.water.controls import (
+    CLOSED,
+    HTOL,
+    OPEN,
+    apply_controls,
+    next_control_time,
+)
+from noodl.apps.water.elements import (
+    M_PER_FT,
+    ONE_WAY_KEY,
+    SETTING_KEY,
+    STATUS_KEY,
+    TIME_KEY,
+)
 from noodl.elements.base import ConstitutiveLaw
 from noodl.storage import NodeStorage
 
 Tensor = torch.Tensor
 F64 = torch.float64
 
-#: EPANET 2.2's head tolerance `Htol` (0.0005 ft, `hydraul.c`, `inithyd`) in metres: a tank
-#: within it of its maximum (minimum) level is full (empty) (`hydstatus.c`, `tankstatus`).
-HTOL = 0.0005 * M_PER_FT
+# `HTOL` (`noodl.apps.water.controls`): a tank within it of its maximum (minimum) level is
+# full (empty) (`hydstatus.c`, `tankstatus`).
 
 #: EPANET's `TINY` (`types.h`): a curve segment narrower than this takes its end value
 #: (`project.c`, `interp`). EPANET applies it in the curve's FILE units (ft or m, ft3 or m3);
@@ -216,8 +238,10 @@ class TankVolumeCurve(NodeStorage):
 
 
 class TankLevels:
-    """Simple controls on tank levels, and the boundary heads of a water layer whose tanks
-    are held at boundary nodes (`build_model(tank_scheme="forward_euler")`).
+    """Every simple `[CONTROLS]` form (time, clock time, tank level, reservoir head, junction
+    pressure), and the boundary heads of a water layer whose tanks are held at boundary nodes
+    (`build_model(tank_scheme="forward_euler")`); on a network without tanks it carries the
+    controls alone.
 
     A tank's level is its head in `"water.phi"` at `tank_nodes` less its bottom (`levels`).
     Per call it applies the controls to those levels and writes the reservoir heads into
@@ -247,7 +271,7 @@ class TankLevels:
     solve without running the controls twice.
     """
 
-    state_keys = ("water.link_status",)
+    state_keys = ("water.link_status", "water.link_setting")
     # The tank levels are stepped by the water layer's storage, not here, so this closure
     # does not integrate and takes no `StepContext`.
     integrates = False
@@ -268,47 +292,72 @@ class TankLevels:
         tank_links=(),
         one_way: Tensor | None = None,
         storage: NodeStorage | None = None,
+        link_setting: Tensor | None = None,
+        link_kinds=None,
+        reservoir_names=(),
+        junctions=None,
+        start_clocktime: float = 0.0,
     ) -> None:
         self.net = net
         self.tanks = list(tanks)
         self.controls = list(controls)
         self.pump_names = list(pump_names)
-        # The labels of the closure-carried state, in its order (`noodl.refs`).
-        self.key_labels = {"water.link_status": list(self.pump_names)}
         self.tank_nodes = torch.as_tensor(tank_nodes, dtype=torch.long)
         self.dt = float(dt)
         self.reservoir_heads = torch.as_tensor(reservoir_heads, dtype=F64)
+        self.reservoir_names = list(reservoir_names)
         # 1.0 on the Hazen-Williams path (the potential IS metres of head) and `rho g` on
         # the Darcy-Weisbach path, where the layer's potential is PRESSURE: the levels and
         # the trigger elevations stay in metres either way and are converted here, once.
         self.head_scale = float(head_scale)
+        self.start_clocktime = float(start_clocktime)
         self.notes: dict[str, str] = {}
+        # `{junction: (node index, elevation m)}`: the nodes a pressure control reads
+        self.junctions = {} if junctions is None else dict(junctions)
         names = [t.name for t in self.tanks]
+        self.link_names = list(link_names)
+        # The labels of the closure-carried state, in its order (`noodl.refs`).
+        self.key_labels = {"water.link_status": list(self.link_names),
+                           "water.link_setting": list(self.link_names)}
         for control in self.controls:
-            if control.node not in names:
+            if control.link not in self.link_names:
+                raise ValueError(
+                    f"TankLevels: control names link {control.link!r}, which is not a link "
+                    f"of this network")
+            if control.trigger == "node" and control.node not in (
+                    names + self.reservoir_names + list(self.junctions)):
                 raise ValueError(
                     f"TankLevels: control on link {control.link!r} tests node "
-                    f"{control.node!r}, which is not a tank of this network ({names})"
-                )
-            if control.link not in self.pump_names:
-                raise ValueError(
-                    f"TankLevels: control names link {control.link!r}, which is not a pump "
-                    f"of this network ({self.pump_names}); pipe controls are not "
-                    f"implemented"
-                )
-            if control.trigger != "node" or control.status is None or control.above is None:
-                raise ValueError(
-                    f"TankLevels: control on link {control.link!r} is not a tank-level "
-                    f"OPEN/CLOSED control; only 'LINK <id> OPEN|CLOSED IF NODE <tank> "
-                    f"BELOW|ABOVE <level>' is applied"
+                    f"{control.node!r}, which is not a tank, reservoir or junction of this "
+                    f"network (tanks {names})"
                 )
         self.tank_of = {t.name: i for i, t in enumerate(self.tanks)}
         self.pump_of = {name: i for i, name in enumerate(self.pump_names)}
-        # Every link's status as built (`model.link_names` order), and the pumps' places in it.
-        self.link_names = list(link_names)
+        # Every link's status and setting as built (`model.link_names` order), the pumps'
+        # places in it and every link's kind for the controls' actions.
         self.link_status = torch.as_tensor(link_status, dtype=F64)
+        self.link_setting = (torch.zeros(len(self.link_names), dtype=F64)
+                             if link_setting is None
+                             else torch.as_tensor(link_setting, dtype=F64))
         self.pump_links = torch.tensor([self.link_names.index(n) for n in self.pump_names],
                                        dtype=torch.long)
+        if link_kinds is None:
+            link_kinds = ["PUMP" if n in self.pump_of else "PIPE" for n in self.link_names]
+        self.link_kinds = list(link_kinds)
+        # the links whose status the closure writes: the pumps and every link a control names
+        named = [self.link_names.index(c.link) for c in self.controls]
+        self._status_links = torch.tensor(sorted({*self.pump_links.tolist(), *named}),
+                                          dtype=torch.long)
+        # the links whose setting a control may change
+        self._setting_links = torch.tensor(sorted(
+            {self.link_names.index(c.link) for c in self.controls
+             if c.setting is not None
+             or (c.status == OPEN and self.link_kinds[self.link_names.index(c.link)] == "PUMP")}),
+            dtype=torch.long)
+        self.pressure_controls = [c for c in self.controls
+                                  if c.trigger == "node" and c.node in self.junctions]
+        self._has_clock = any(c.trigger != "node" for c in self.controls)
+        self._held = False
         self.bottom = torch.tensor([t.elevation for t in self.tanks], dtype=F64)
         self.y_min = torch.tensor([t.min_level for t in self.tanks], dtype=F64)
         self.y_max = torch.tensor([t.max_level for t in self.tanks], dtype=F64)
@@ -333,17 +382,20 @@ class TankLevels:
 
     def __call__(self, state, drivers) -> dict[str, Tensor]:
         status = state.get("water.link_status")
-        if status is None or "water.phi" not in state:
+        setting = state.get("water.link_setting")
+        if status is None or setting is None or "water.phi" not in state:
             raise KeyError(
-                f"{type(self).__name__}: states 'water.phi' and 'water.link_status' are "
-                f"both required; build them with initial_state(model)"
+                f"{type(self).__name__}: states 'water.phi', 'water.link_status' and "
+                f"'water.link_setting' are all required; build them with initial_state(model)"
             )
         level = self.levels(state)
         # a tank on a volume curve tests its controls by volume, with a margin of one
         # second of the last solve's inflow (`_apply_controls`)
         inflow = state.get("water.storage_flow") if self._curved else None
-        read = (level.detach(), status.detach(), drivers.get(STATUS_KEY),
-                drivers.get(ONE_WAY_KEY), None if inflow is None else inflow.detach())
+        time = self._time(drivers)
+        read = (level.detach(), status.detach(), setting.detach(), drivers.get(STATUS_KEY),
+                drivers.get(SETTING_KEY), drivers.get(ONE_WAY_KEY),
+                None if inflow is None else inflow.detach(), time)
         memo = getattr(self, "_memo", None)
         if memo is not None and all(
                 (a is None and b is None) or (a is not None and b is not None
@@ -351,26 +403,83 @@ class TankLevels:
                 for a, b in zip(read, memo[0], strict=True)):
             return dict(memo[1])
         with torch.no_grad():
-            status = self._apply_controls(level, status, inflow)
+            if not self._held:
+                status, setting = self._apply_controls(level, status, setting, inflow, time)
         self._refuse_outside(level)
         out = {"water.phi_boundary": self._boundary(state, level),
                STATUS_KEY: self._link_status(drivers, status),
-               "water.link_status": status}
+               "water.link_status": status, "water.link_setting": setting}
+        if self._setting_links.numel():
+            out[SETTING_KEY] = self._link_setting(drivers, setting)
         limited = self._full_and_empty(level, drivers, out[STATUS_KEY])
         if limited is not None:
             out[STATUS_KEY], out[ONE_WAY_KEY] = limited
         self._memo = (tuple(None if t is None else t.clone() for t in read), out)
         return dict(out)
 
-    def _link_status(self, drivers, pump_status: Tensor) -> Tensor:
+    def _time(self, drivers) -> Tensor | None:
+        """The driver `"water.time"` when a time control needs it, else `None`."""
+        if not self._has_clock:
+            return None
+        time = drivers.get(TIME_KEY)
+        if time is None:
+            raise KeyError(
+                f"{type(self).__name__}: driver {TIME_KEY!r} (s since the simulation start) "
+                f"is required by the network's AT TIME / AT CLOCKTIME controls; take the "
+                f"drivers from initial_drivers(model) and set it each step")
+        return time.detach().to(F64)
+
+    def _link_status(self, drivers, link_status: Tensor) -> Tensor:
         """Every link's status: the drivers' `"water.status"` (the build's when they carry
-        none), with the pumps' entries from the carried `pump_status`."""
-        base = drivers.get("water.status", self.link_status).to(pump_status.dtype)
-        batch = pump_status.new_zeros(pump_status.shape[:-1] + (1,))   # its batch shape only
-        base, batch = torch.broadcast_tensors(base, batch)
+        none), with the pumps' and the controlled links' entries from the carried
+        `link_status`."""
+        base = drivers.get(STATUS_KEY, self.link_status).to(link_status.dtype)
+        base, link_status = torch.broadcast_tensors(base, link_status)
         out = base.clone()
-        out[..., self.pump_links] = pump_status.expand(batch.shape[:-1] + pump_status.shape[-1:])
+        out[..., self._status_links] = link_status[..., self._status_links]
         return out
+
+    def _link_setting(self, drivers, link_setting: Tensor) -> Tensor:
+        """Every link's setting: the drivers' `"water.setting"` (the build's when they carry
+        none), with the entries of the links a control may set taken from the carried
+        `link_setting` where it differs from the built one."""
+        base = drivers.get(SETTING_KEY, self.link_setting).to(link_setting.dtype)
+        base, link_setting = torch.broadcast_tensors(base, link_setting)
+        idx = self._setting_links
+        moved = link_setting[..., idx] != self.link_setting[idx]
+        out = base.clone()
+        out[..., idx] = torch.where(moved, link_setting[..., idx], base[..., idx])
+        return out
+
+    @contextmanager
+    def held_controls(self):
+        """Within it the closure applies no control, carrying the status and setting it is
+        given: EPANET's `pswitch` re-solves the same step with the status it has switched,
+        without testing the step's other controls again."""
+        self._held, self._memo = True, None
+        try:
+            yield self
+        finally:
+            self._held, self._memo = False, None
+
+    @property
+    def has_pressure_controls(self) -> bool:
+        """True when a junction-pressure control is among the controls."""
+        return bool(self.pressure_controls)
+
+    def pressure_switch(self, state) -> tuple[Tensor, Tensor, Tensor]:
+        """`(link_status, link_setting, changed)` after the junction-pressure controls
+        (`apply_controls`, EPANET's `pswitch`) are tested on the converged `state`: the
+        pressure head of a junction is its head less its elevation, within `Htol` of the
+        setting. Where `changed`, the step is solved again with the new status."""
+        pressures = {name: state["water.phi"][..., node].detach() / self.head_scale - elev
+                     for name, (node, elev) in self.junctions.items()}
+        with torch.no_grad():
+            return apply_controls(
+                self.pressure_controls, pressures=pressures,
+                status=state["water.link_status"].detach(),
+                setting=state["water.link_setting"].detach(),
+                link_names=self.link_names, link_kinds=self.link_kinds)
 
     def _boundary(self, state, level: Tensor) -> Tensor:
         """The reservoir heads, then zeros in the tanks' columns (boundary nodes here, whose
@@ -498,7 +607,9 @@ class TankLevels:
 
     def event_step(self, level: Tensor, rate: Tensor, dt: float,
                    inflow: Tensor | None = None) -> float:
-        """EPANET's shortened hydraulic step: the time to the next control crossing.
+        """EPANET's shortened hydraulic step: the time to the next control crossing (tank
+        level controls only; `control_time` is the one that reads every control, and takes
+        its place with `water_event_step`'s successor).
 
         Manual section 13.1 item 17, p.113: the next step is the minimum of the nominal
         step and the time until a tank level "reaches a point that triggers a change in
@@ -517,6 +628,8 @@ class TankLevels:
         step = dt
         level, rate = level.detach(), rate.detach()
         for control in self.controls:
+            if control.trigger != "node" or control.node not in self.tank_of:
+                continue
             i = self.tank_of[control.node]
             r = float(rate[i])
             if r == 0.0:
@@ -531,11 +644,19 @@ class TankLevels:
                 step = crossing + 1e-9
         return step
 
-    def _apply_controls(self, level: Tensor, status: Tensor,
-                        inflow: Tensor | None = None) -> Tensor:
-        """`status` with every control whose condition holds applied, in file order (a
-        later control on the same pump wins). A cylinder's level is tested against the
-        control's: ``level > value`` (ABOVE), ``level < value`` (BELOW). A tank on a volume
+    def _levels_and_heads(self, level: Tensor):
+        """The tank levels by name (m) and the reservoir heads by name (m)."""
+        levels = {t.name: level[..., i] for i, t in enumerate(self.tanks)}
+        heads = {name: self.reservoir_heads[k] / self.head_scale
+                 for k, name in enumerate(self.reservoir_names)}
+        return levels, heads
+
+    def _apply_controls(self, level: Tensor, status: Tensor, setting: Tensor,
+                        inflow: Tensor | None = None, time: Tensor | None = None):
+        """`(status, setting)` with every time, tank-level and reservoir-head control whose
+        condition holds applied, in file order (a later control on the same link wins)
+        (`apply_controls`). A cylinder's level is tested against the control's:
+        ``level > value`` (ABOVE), ``level < value`` (BELOW). A tank on a volume
         curve is tested by volume, as EPANET 2.2's `controls` (`hydraul.c`) tests every
         tank: ``V(level) >= V(value) - |q|`` (ABOVE), ``V(level) <= V(value) + |q|``
         (BELOW), ``q`` the last solve's inflow over one second (`inflow`, m3/s; 0 when not
@@ -547,26 +668,56 @@ class TankLevels:
         cylinder by volume too, with the same ``|q|`` margin (one second of inflow, so it
         fires that much early, and at equality), where a cylinder here keeps the strict
         level test."""
-        out = status.clone()
+        levels, heads = self._levels_and_heads(level)
+        tested = None
         if self._curved:
             phi = (self.bottom + level) * self.head_scale
             volume = self.storage.amount(phi)
             margin = (torch.zeros_like(volume) if inflow is None
                       else inflow.detach().abs().expand(volume.shape))
-        for control in self.controls:
-            i = self.tank_of[control.node]
-            j = self.pump_of[control.link]
-            if self._curved:
+
+            def tested(control):
+                i = self.tank_of.get(control.node)
+                if i is None:
+                    return None
                 at = level.new_full(level.shape, control.value)
                 v2 = self.storage.amount((self.bottom + at) * self.head_scale)[..., i]
                 v1, vplus = volume[..., i], margin[..., i]
-                fires = v1 >= v2 - vplus if control.above else v1 <= v2 + vplus
-            else:
-                value = level[..., i]
-                fires = value > control.value if control.above else value < control.value
-            new = 1.0 if control.status == OPEN else 0.0
-            out[..., j] = torch.where(fires, torch.full_like(out[..., j], new), out[..., j])
-        return out
+                return v1 >= v2 - vplus if control.above else v1 <= v2 + vplus
+        out, new, _ = apply_controls(
+            self.controls, time=time, clocktime=self.start_clocktime, levels=levels,
+            heads=heads, status=status, setting=setting, link_names=self.link_names,
+            link_kinds=self.link_kinds, tested=tested)
+        return out, new
+
+    def control_time(self, level: Tensor, rate: Tensor, drivers, state,
+                     inflow: Tensor | None = None) -> float:
+        """Seconds to the next control that fires (`next_control_time`, EPANET's
+        `controltimestep`), `inf` if none: the next time or clock-time control and every
+        tank level, changing linearly at `rate` (dy/dt, m/s, per tank), that reaches a
+        level control's trigger, of the controls that change the status or setting `state`
+        carries. On a volume curve the crossing is by volume (`_volume_time`), at the
+        tanks' inflow `inflow` (m3/s) when given."""
+        level, rate = level.detach(), rate.detach()
+        time = self._time(drivers)
+        crossing = None
+        if self._curved:
+            def crossing(control):
+                i = self.tank_of.get(control.node)
+                if i is None:
+                    return None
+                target = level.clone()
+                target[..., i] = control.value
+                return self._volume_time(target, level, rate, inflow)[..., i]
+        levels, _ = self._levels_and_heads(level)
+        rates = {t.name: rate[..., i] for i, t in enumerate(self.tanks)}
+        ahead = next_control_time(
+            self.controls, time=torch.zeros((), dtype=F64) if time is None else time,
+            clocktime=self.start_clocktime, levels=levels, rates=rates, crossing=crossing,
+            status=state["water.link_status"].detach(),
+            setting=state["water.link_setting"].detach(),
+            link_names=self.link_names, link_kinds=self.link_kinds)
+        return float(ahead.detach().min())
 
 
 class TankStorageControls(TankLevels):

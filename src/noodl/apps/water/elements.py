@@ -40,6 +40,9 @@ G = 9.80665
 STATUS_KEY = "water.status"
 SETTING_KEY = "water.setting"
 ONE_WAY_KEY = "water.one_way"
+#: `"water.time"` (not per link): seconds since the simulation start, which `AT TIME` and
+#: `AT CLOCKTIME` controls read (`noodl.apps.water.tanks.TankLevels`).
+TIME_KEY = "water.time"
 
 _DRIVER_MEANING = {
     STATUS_KEY: "each link's status (CLOSED 0, OPEN 1, ACTIVE 2)",

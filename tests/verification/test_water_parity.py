@@ -216,6 +216,8 @@ def _extended_period(net, model, state, drivers):
         while time < report_end - 1e-9:
             step_drivers = dict(drivers)
             step_drivers["water.sources"] = base * _pattern_factor(net, time)
+            if "water.time" in drivers:   # the network has an AT TIME / AT CLOCKTIME control
+                step_drivers["water.time"] = torch.tensor(time, dtype=F64)
             state, dt = water_event_step(model, state, step_drivers, report_end - time)
             time += dt
             n_sub += 1
@@ -246,6 +248,50 @@ def test_net1_extended_period_tank_level(tmp_path):
     assert worst < 2e-4, worst
     # The event shortening costs a handful of extra solves, not a finer grid throughout.
     assert n_sub <= 2 * len(reference)
+
+
+_TANK_CONTROLS = " LINK 9 OPEN IF NODE 2 BELOW 110\n LINK 9 CLOSED IF NODE 2 ABOVE 140\n"
+
+
+@pytest.mark.parametrize("name, lines, clock", [
+    ("time", " LINK 9 CLOSED AT TIME 3\n LINK 9 OPEN AT TIME 7:30\n", None),
+    ("clocktime", " LINK 9 CLOSED AT CLOCKTIME 11 AM\n LINK 9 OPEN AT CLOCKTIME 2:30 PM\n",
+     "8 am"),
+    ("pressure", " LINK 9 CLOSED IF NODE 11 ABOVE 123\n LINK 9 OPEN IF NODE 11 BELOW 112\n",
+     None),
+])
+def test_net1_time_clocktime_and_pressure_controls(tmp_path, name, lines, clock):
+    """Net1's 24 h run with each control form added to the tank-level ones, through the local
+    loop of `_extended_period` (`water_run` is Task 10's): the tank level at every report
+    time against EPANET's, to the 2e-4 m of the tank-level controls alone. `AT TIME` ends a
+    step at its time (`next_control_time`); `AT CLOCKTIME` counts from START CLOCKTIME; a
+    junction-pressure control acts after a solve and the step is solved again (`pswitch`).
+    A control whose link already is as it says does not end a step (`controltimestep`):
+    without that rule the 7:30 `OPEN` of the first case, the pump running since 6.07 h, splits
+    a step EPANET takes whole and the level is 1.2e-3 m off.
+
+    MEASURED: 1.8e-4 m for the time and clock-time runs (the same run: START CLOCKTIME 8 am
+    makes 11 AM the 3 h of the first), 3.4e-5 m for the pressure run. The 1.8e-4 m is EPANET
+    rounding a control crossing to whole seconds (`controltimestep`, `ROUND`), where
+    `water_event_step` steps to the exact one (Task 10's `water_run` takes EPANET's rule):
+    rounded so in a scratch run the level is 2.1e-5 m off at 7 h."""
+    edits = [(_TANK_CONTROLS, _TANK_CONTROLS + lines)]
+    if clock:
+        edits.append(("Start ClockTime    \t12 am", f"Start ClockTime    \t{clock}"))
+    path, results = _epanet(tmp_path, "Net1.inp", edits=edits)
+    net = read_epanet_inp(path)
+    model, state, drivers = build_model(net)
+    levels, _ = _extended_period(net, model, state, drivers)
+    reference = results.node["head"]["2"] - net.tanks[0].elevation
+    worst = max(abs(a - float(b)) for a, b in zip(levels, reference.tolist(), strict=True))
+    assert worst < 2e-4, worst
+    # the control did something: EPANET's own levels differ from the tank-level controls alone
+    (tmp_path / "base").mkdir()
+    _, plain = _epanet(tmp_path / "base", "Net1.inp")
+    moved = max(abs(a - float(b)) for a, b in zip(
+        reference.tolist(), (plain.node["head"]["2"] - net.tanks[0].elevation).tolist(),
+        strict=True))
+    assert moved > 0.05, moved
 
 
 def test_the_pump_switches_within_one_reported_step(tmp_path):
