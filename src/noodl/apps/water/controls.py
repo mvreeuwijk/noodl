@@ -260,24 +260,26 @@ def next_control_time(
             toward = ((rate > 0) & (level < control.value) if control.above
                       else (rate < 0) & (level > control.value))
             # EPANET's ROUND (`types.h`): (long)(x + 0.5) for x >= 0
-            ahead = torch.where(toward, torch.floor(ahead + 0.5),
-                                torch.full_like(ahead, torch.inf))
+            ahead = torch.where(toward, torch.floor(ahead + 0.5), torch.inf)
         elif control.trigger == "time":
             ahead = round(control.value) - t
         else:
             now = torch.remainder(t + round(float(clocktime)), SECONDS_PER_DAY)
             ahead = torch.remainder(round(control.value) - now, SECONDS_PER_DAY)
-        ahead = torch.where(ahead > 0, ahead, torch.full_like(ahead, torch.inf))
+        ahead = torch.where(ahead > 0, ahead, torch.inf)
         if status is not None:
             j = link_names.index(control.link)
             new_status, new_setting = _action(control, link_kinds[j])
             if new_setting is not None and setting_scale is not None:
                 new_setting = new_setting * setting_scale[j]
-            acts = torch.zeros(status.shape[:-1], dtype=torch.bool)
+            acts = None
             if new_status is not None:
-                acts = acts | (status[..., j] != new_status)
+                acts = status[..., j] != new_status
             if new_setting is not None:
-                acts = acts | (setting[..., j] != new_setting)
-            ahead = torch.where(acts, ahead, torch.full_like(ahead, torch.inf))
+                moved = setting[..., j] != new_setting
+                acts = moved if acts is None else acts | moved
+            if acts is None:
+                continue                      # it changes nothing: it never ends a step
+            ahead = torch.where(acts, ahead, torch.inf)
         best = torch.minimum(best, ahead)
     return best

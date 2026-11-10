@@ -425,6 +425,24 @@ class TankLevels:
                 f"{type(self).__name__}: states 'water.phi', 'water.link_status' and "
                 f"'water.link_setting' are all required; build them with initial_state(model)"
             )
+        # the same tensors, unchanged in place, as the last call: its answer (the solve hands
+        # the closure the same objects several times a step, and so does the run's report)
+        raw = (state.get("water.phi"), status, setting, drivers.get(STATUS_KEY),
+               drivers.get(SETTING_KEY), drivers.get(ONE_WAY_KEY),
+               drivers.get(TANK_INFLOW_KEY), drivers.get(TIME_KEY))
+        try:
+            versions = tuple(None if t is None else t._version for t in raw)
+        except RuntimeError:        # an inference-mode tensor counts no versions
+            versions = None
+        fast = getattr(self, "_fast", None)
+        if (versions is not None and fast is not None and fast[1] == versions
+                and all(a is b for a, b in zip(raw, fast[0], strict=True))):
+            return dict(fast[2])
+        out = self._evaluate(state, drivers, status, setting)
+        self._fast = None if versions is None else (raw, versions, out)
+        return dict(out)
+
+    def _evaluate(self, state, drivers, status, setting) -> dict[str, Tensor]:
         level = self.levels(state)
         # every tank tests its level controls by volume, with a margin of one second of the
         # previous solve's inflow (`_apply_controls`): an input of the step (the driver, which
@@ -509,11 +527,11 @@ class TankLevels:
         """Within it the closure applies no control, carrying the status and setting it is
         given: EPANET's `pswitch` re-solves the same step with the status it has switched,
         without testing the step's other controls again."""
-        self._held, self._memo = True, None
+        self._held, self._memo, self._fast = True, None, None
         try:
             yield self
         finally:
-            self._held, self._memo = False, None
+            self._held, self._memo, self._fast = False, None, None
 
     @property
     def has_pressure_controls(self) -> bool:

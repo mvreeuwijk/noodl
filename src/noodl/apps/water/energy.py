@@ -149,30 +149,46 @@ class EnergyMeter:
         self._base_price = torch.tensor(
             [p.price if p.price is not None and p.price > 0.0 else energy.global_price
              for p in pumps], dtype=F64)
-        self._period = None
-        zeros = torch.zeros(n, dtype=F64)
-        self.on = self.eff = self.per_flow = self.kwh = self.cost = zeros
-        self.peak = zeros
-        self.emax = torch.zeros((), dtype=F64)
-
-    def _price(self, period: int) -> Tensor:
-        """Each pump's price at the pattern period `period` (`addenergy`)."""
-        if self._period is None or self._period[0] != period:
-            length = self._pattern_length[self._pattern_row]
-            factor = self._pattern_table[self._pattern_row, period % length]
-            self._period = (period, self._base_price * factor)
-        return self._period[1]
+        self._steps: list = []
 
     def add(self, period: int, hours: float, solved, states: Tensor,
             speed: Tensor | None) -> None:
-        """Add a step of `hours` at pattern period `period` from the solved state `solved`;
+        """Take a step of `hours` at pattern period `period` from the solved state `solved`;
         `states` (..., n_pumps) are the pumps' states (`CLOSED` or above) and `speed`
-        (..., n_pumps) their relative speeds (needed only for efficiency curves)."""
-        on = (states != CLOSED).to(F64)
+        (..., n_pumps) their relative speeds (needed only for efficiency curves). The
+        statistics are accumulated over all the steps at once, in `result`."""
         phi = solved["water.phi"]
-        q = solved["water.q"][..., self.cols].abs()
+        self._steps.append((period, hours, phi[..., self.from_node], phi[..., self.to_node],
+                            solved["water.q"][..., self.cols], states, speed))
+
+    def _price(self, periods: Tensor) -> Tensor:
+        """Each pump's price (T, n_pumps) at the pattern periods `periods` (T,)
+        (`addenergy`)."""
+        row = self._pattern_row
+        factor = self._pattern_table[row, periods[:, None] % self._pattern_length[row]]
+        return self._base_price * factor
+
+    def result(self) -> PumpEnergy:
+        """The statistics over the steps taken, accumulated and converted as `addenergy` and
+        `saveenergy` do."""
+        n = len(self.names)
+        steps = self._steps
+        if not steps:
+            zero = torch.zeros(n, dtype=F64)
+            return PumpEnergy(list(self.names), zero, zero, zero, zero, zero, zero,
+                              torch.zeros((), dtype=F64))
+        batch = torch.broadcast_shapes(*(x.shape[:-1] for step in steps for x in step[2:6]))
+
+        def stack(k):
+            return torch.stack([step[k].expand(batch + (n,)) for step in steps], dim=-2)
+
+        hours = torch.tensor([step[1] for step in steps], dtype=F64)[:, None]
+        periods = torch.tensor([step[0] for step in steps], dtype=torch.long)
+        dh = (stack(2) - stack(3)).abs() / self.head_scale
+        q = stack(4).abs()
+        on = (stack(5) != CLOSED).to(F64)
         if self.any_curve:
-            speed = torch.where(on > 0, speed, torch.ones_like(speed))
+            speed = torch.where(on > 0, stack(6), torch.ones_like(on))
             xx = (q / speed).movedim(-1, 0)
             shape = xx.shape
             e = interpolate_curves(self.curve_x, self.curve_y, xx.reshape(shape[0], -1))
@@ -182,37 +198,31 @@ class EnergyMeter:
         else:
             e = self.global_fraction
         # a pump that is not on line (`on` = 0) draws nothing: `getenergy` returns 0 for it
-        kw = (phi[..., self.from_node] - phi[..., self.to_node]).abs() * q * on * (
-            self.kw_scale / self.head_scale / e)
-        self.on = self.on + on * hours
-        self.eff = self.eff + on * e * hours
-        self.per_flow = self.per_flow + kw / q.clamp(min=self.qzero) * hours
-        self.kwh = self.kwh + kw * hours
-        self.peak = torch.maximum(self.peak, kw)
-        self.cost = self.cost + self._price(period) * kw * hours
-        self.emax = torch.maximum(self.emax, kw.sum(-1))
-
-    def result(self) -> PumpEnergy:
-        """The accumulated statistics, converted as `saveenergy` does."""
-        hdur = self.duration / 3600.0
-        on = self.on
-        used = on > 0.0
+        kw = dh * q * on * (self.kw_scale / e)
+        on_hours = (on * hours).sum(-2)
+        eff = (on * e * hours).sum(-2)
+        per_flow = (kw / q.clamp(min=self.qzero) * hours).sum(-2)
+        kwh = (kw * hours).sum(-2)
+        peak = kw.amax(-2)
+        cost = (self._price(periods) * kw * hours).sum(-2)
+        emax = kw.sum(-1).amax(-1)
+        used = on_hours > 0.0
 
         def mean(x):
-            return torch.where(used, x / torch.where(used, on, torch.ones_like(on)),
+            return torch.where(used, x / torch.where(used, on_hours, torch.ones_like(on_hours)),
                                torch.zeros_like(x))
 
+        hdur = self.duration / 3600.0
         if hdur == 0.0:
-            fraction, cost = on, self.cost * 24.0
-            eff, per_flow, kwh = self.eff, self.per_flow, self.kwh
+            fraction, cost = on_hours, cost * 24.0
         else:
-            fraction, cost = on / hdur, self.cost * 24.0 / hdur
-            eff, per_flow, kwh = mean(self.eff), mean(self.per_flow), mean(self.kwh)
+            fraction, cost = on_hours / hdur, cost * 24.0 / hdur
+            eff, per_flow, kwh = mean(eff), mean(per_flow), mean(kwh)
         return PumpEnergy(
             pump_names=list(self.names), utilisation=fraction * 100.0,
             efficiency=eff * 100.0, energy_per_volume=per_flow / 3600.0,
-            average_power=kwh, peak_power=self.peak, cost=cost,
-            demand_charge=self.emax * self.net.energy.demand_charge)
+            average_power=kwh, peak_power=peak, cost=cost,
+            demand_charge=emax * self.net.energy.demand_charge)
 
 
 __all__ = ["EnergyMeter", "PumpEnergy", "interpolate_curves"]

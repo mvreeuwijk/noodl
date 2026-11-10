@@ -1712,6 +1712,9 @@ def solved_link_states(model: Model, state: State, drivers: Drivers) -> Tensor:
     return codes
 
 
+#: A flow (m3/s) above which a running pump has not been shut by the solve (`kappa q = 0`).
+_PUMP_FLOW = 1e-9
+
 #: EPANET's flow tolerance `Qtol` (0.0001 cfs, `hydraul.c`, `inithyd`) in m3/s.
 _QTOL = 1e-4 * M_PER_FT**3
 
@@ -2657,7 +2660,10 @@ def link_states_from_cut_off(model: Model, state: State, drivers: Drivers, limit
     if "pump" in layer.kinds:
         law, cols = layer.law_for("pump")
         running = out[..., cols] != CLOSED
-        if bool(running.any()):
+        # a pump the solve shut carries no flow (its row is `kappa q = 0`): only a running
+        # pump with next to none can be one, and only that one asks the law
+        undecided = running & (q[..., cols].detach().abs() <= _PUMP_FLOW)
+        if bool(undecided.any()):
             ends = torch.tensor(_topology(model)[0], dtype=torch.long)
             phi = state["water.phi"].detach()
             if ("pipe" in layer.kinds and law.shut_links is not None
@@ -2676,7 +2682,7 @@ def link_states_from_cut_off(model: Model, state: State, drivers: Drivers, limit
                 # control has just opened or closed, or a speed pattern has moved), memoised
                 held = {**drivers, **closure(state, drivers)}
             selected = law.states(dp, q[..., cols].detach(), held)
-            out[..., cols] = torch.where(running, selected.to(out.dtype), out[..., cols])
+            out[..., cols] = torch.where(undecided, selected.to(out.dtype), out[..., cols])
     ends = None
     for kind in ("prv", "psv") if valves else ():
         if kind not in layer.kinds:
