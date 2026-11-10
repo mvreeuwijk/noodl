@@ -40,24 +40,6 @@ def require(drivers: Mapping[str, Tensor], key: str) -> Tensor:
         raise KeyError(f"Model: driver {key!r} is required and was not given") from exc
 
 
-def boundary_values(name: str, layer: KirchhoffLayer, drv: Mapping[str, Tensor],
-                    start: Mapping[str, Tensor]) -> Tensor:
-    """Kirchhoff layer `name`'s boundary potentials: the driver `"<name>.phi_boundary"`, with
-    every storage node at a boundary node (`layer.holds_storage`) held at its potential in
-    the state `start` (`KirchhoffLayer.hold_storage`). Every path that solves or evaluates
-    the layer at a state takes its boundary values here."""
-    pb = require(drv, f"{name}.phi_boundary")
-    if not layer.holds_storage:
-        return pb
-    phi = start.get(f"{name}.phi")
-    if phi is None:
-        raise KeyError(
-            f"Model: state {name + '.phi'!r} is required by Kirchhoff layer {name!r}, whose "
-            f"storage at boundary nodes is held at its potential at the step start"
-        )
-    return layer.hold_storage(pb, phi)
-
-
 def zero_sources(layer: TransportLayer, like: Tensor, n_like: int, n_nodes: int) -> Tensor:
     """Full-node zeros (`n_nodes` nodes) in `like`'s LAYOUT (reduced `(n,)` or stacked
     `(n, K)`); see `Model._zero_sources`."""
@@ -114,12 +96,22 @@ def circuit_kwargs(name: str, layer: KirchhoffLayer, state: Mapping[str, Tensor]
                    scheme: str | None = None) -> dict:
     """The step keywords of a layer's solve (`t`, and `q0`, `history`, `dt` and
     `storage_flow` where the layer reads them); see `Model._circuit_kwargs`. `scheme` is the
-    step's (`None`: the layer's own)."""
+    step's (`None`: the layer's own). A layer that holds its storage at boundary nodes
+    takes `history` on every solve, steady or not: the step-start potentials it holds them
+    at."""
     out: dict = {"t": t if dt is None or t is None else t + dt}
     q_prev = state.get(f"{name}.q")
     flow_unknowns = layer._unknowns is not None
     if q_prev is not None and flow_unknowns:
         out["q0"] = q_prev[..., layer.implicit_edges]
+    if layer.holds_storage:
+        phi = base.get(f"{name}.phi")
+        if phi is None:
+            raise KeyError(
+                f"Model: state {name + '.phi'!r} is required by Kirchhoff layer {name!r}, "
+                f"whose storage at boundary nodes is held at its potential at the step start"
+            )
+        out["history"] = (phi, None)
     if layer.dynamic and not layer.phasor and dt is not None:
         # A layer whose only storage is node storage reads only the step-start potentials;
         # a layer with dynamic laws reads the step-start flows of their edges too, and a
@@ -198,9 +190,7 @@ def _solve_potentials(model: Model, state, base, drv, dt, t, solve_kwargs, warm_
                       new: dict, made: list, diag: dict) -> None:
     """Solve every Kirchhoff layer at the closures' drivers, into `new`/`made`/`diag`."""
     for name, layer in model.kirchhoff.items():
-        # Storage at boundary nodes (an EPANET tank) is held at its step-start potential
-        # through the solve, whatever a closure wrote there.
-        pb = boundary_values(name, layer, drv, base)
+        pb = require(drv, f"{name}.phi_boundary")
         sources = drv.get(f"{name}.sources")
         phi_prev = state.get(f"{name}.phi") if warm_start else None
         phi0 = None if phi_prev is None else phi_prev[..., layer.interior]
@@ -217,10 +207,10 @@ def _solve_potentials(model: Model, state, base, drv, dt, t, solve_kwargs, warm_
             # The flow into every storage entry at the end of the step (zeros on a steady
             # pass; at a held initial point, what balances each held node): the
             # trapezoidal scheme's step-start rate on the next step.
-            new[f"{name}.storage_flow"] = layer.storage_flows(
+            new[f"{name}.storage_flow"] = layer._storage_flows_at(
                 phi, drv, dt=circuit.get("dt"), scheme=kwargs.get("scheme"),
                 history=circuit.get("history"), storage_flow=circuit.get("storage_flow"),
-                mode=kwargs.get("mode"), q=q, sources=sources, _checked=True)
+                mode=kwargs.get("mode"), q=q, sources=sources, check_dt=False)
             made.append(f"{name}.storage_flow")
             if layer.holds_storage and dt is not None:
                 # ... and stepped after it, by forward Euler on the flow it received.

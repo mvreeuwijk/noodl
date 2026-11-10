@@ -22,12 +22,11 @@ the switch itself is a combinatorial decision; and (2) writes the reservoir head
 into `"water.phi_boundary"` and the per-link status into `"water.status"`: every pump's and
 every controlled link's from the carried `"water.link_status"`, every other link's from the
 drivers' own `"water.status"` (or, when they carry none, the build's). A tank held at a
-boundary node has a column of `"water.phi_boundary"` too, which the closure fills with zeros:
-the layer holds the tank at its step-start head there on every path (`Model` steps, steady
-solves, `residuals`, `current_flows`; `KirchhoffLayer.hold_storage`), so it is the only
-authority for the tank heads. During a step the controls read the step-start levels: a
-`Model` pass shows a closure the held head of such a node, not the level a previous pass of
-the same step has advanced it to (`coupling="iterate"`).
+boundary node has no column there: the layer holds it at its head in the step-start state
+`"water.phi"`, which `Model` passes to every solve as `history` (`KirchhoffLayer.solve`),
+so that state is the only authority for the tank heads. During a step the controls read the
+step-start levels: a `Model` pass shows a closure the held head of such a node, not the level
+a previous pass of the same step has advanced it to (`coupling="iterate"`).
 
 `control_time` (`next_control_time`, EPANET's `controltimestep`) and `time_to_limit`
 (`tanktimestep`) are the two tank halves of EPANET's step rule, which `water_run` composes
@@ -272,8 +271,8 @@ class TankLevels:
 
     A tank's level is its head in `"water.phi"` at `tank_nodes` less its bottom (`levels`).
     Per call it applies the controls to those levels and writes the reservoir heads into
-    `"water.phi_boundary"`, then zeros in the tanks' columns, which the layer fills with
-    their step-start heads (`KirchhoffLayer.hold_storage`). Only the link status is
+    `"water.phi_boundary"` (the layer holds the tanks at their step-start heads,
+    `KirchhoffLayer.solve`'s `history`). Only the link status and setting are
     carried. `control_time` is the time to the next control that fires (EPANET's
     `controltimestep`), `time_to_limit` the time a tank takes to fill or empty (`tanktimestep`).
 
@@ -590,15 +589,14 @@ class TankLevels:
         return drivers.get(RESERVOIR_HEAD_KEY, self.reservoir_heads)
 
     def _boundary(self, drivers, level: Tensor) -> Tensor:
-        """The reservoir heads, then zeros in the tanks' columns (boundary nodes here, whose
-        heads the layer holds: `KirchhoffLayer.hold_storage`)."""
+        """`"water.phi_boundary"`: the reservoir heads. A tank held at a boundary node has no
+        column there (the layer holds it at its head in the step-start state, which `Model`
+        passes to the solve as `history`), and a tank stepped inside the solve is an interior
+        node. A fresh tensor, not a view of the driver: the remembered answer must keep no
+        input alive (`__call__`)."""
         heads = self._reservoir_heads(drivers)
         batch = torch.broadcast_shapes(level.shape[:-1], heads.shape[:-1])
-        return torch.cat(
-            [heads.expand(batch + heads.shape[-1:]),
-             torch.zeros(batch + level.shape[-1:], dtype=level.dtype, device=level.device)],
-            dim=-1,
-        )
+        return heads.expand(batch + heads.shape[-1:]).clone()
 
     def _full_and_empty(self, level: Tensor, drivers, link_status: Tensor):
         """`(status, one_way)` with EPANET's `tankstatus` rules applied for every full and
@@ -806,16 +804,9 @@ class TankLevels:
 
 class TankStorageControls(TankLevels):
     """`TankLevels` for tanks stepped inside the solve, as interior storage nodes
-    (`build_model(tank_scheme="backward_euler")` or `"trapezoidal"`): it writes only the
-    reservoir heads into `"water.phi_boundary"`, refuses a level outside `[min, max]` by
-    name instead of applying the full and empty rules.
+    (`build_model(tank_scheme="backward_euler")` or `"trapezoidal"`): it refuses a level
+    outside `[min, max]` by name instead of applying the full and empty rules.
     """
-
-    def _boundary(self, drivers, level: Tensor) -> Tensor:
-        """The reservoir heads (the tanks are interior nodes here)."""
-        heads = self._reservoir_heads(drivers)
-        batch = torch.broadcast_shapes(level.shape[:-1], heads.shape[:-1])
-        return heads.expand(batch + heads.shape[-1:])
 
     def _refuse_outside(self, level: Tensor) -> None:
         """Refuse, by name, a tank outside its `[min, max]` levels: stepped inside the solve,

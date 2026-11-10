@@ -138,7 +138,7 @@ named for the physics it carries:
 |---|---|---|---|
 | `.pressure`, `.head` (Kirchhoff layers) | `"<layer>.phi"` | state | full node order |
 | `.flow` | `"<layer>.q"` | state (driver for a transport layer whose flows nothing solves) | edge order of the layer's kinds |
-| `.boundary_pressure`, `.boundary_head` | `"<layer>.phi_boundary"` | driver | the layer's boundary order |
+| `.boundary_pressure`, `.boundary_head` | `"<layer>.phi_boundary"` | driver | the layer's boundary order, without the storage nodes a forward-Euler layer holds (`layer.prescribed`) |
 | `.temperature`, `.mass_fraction`, `.concentration` | `"<layer>.x"` | state | the layer's active interior order |
 | `.boundary_temperature`, ... | `"<layer>.x_boundary"` | driver | the layer's boundary order |
 | `.sources` | `"<layer>.sources"` | driver | full node order |
@@ -192,8 +192,9 @@ quasi-steady state instead (an allocation layer, which is a time-stepping rule, 
 `steady` or a `step` plus a reaction, a boundary read off the previous pass) until the watched
 keys stop changing, and returns the last pass's state. It is what `street_steady`,
 `street_steady_with_plume` and `sewer_steady` run on, and its gradient is that of the fixed
-point (implicit adjoint), not of the unrolled passes; `relaxation`, a per-instance `measure`
-and `diagnostics` are described in its docstring.
+point (implicit adjoint), not of the unrolled passes, including through any unwatched key that
+feeds back from one pass to the next; `relaxation`, a per-instance `measure` and `diagnostics`
+are described in its docstring.
 Each potential solve starts from the state's last potentials (and a layer with flow unknowns
 from its last flows too); `warm_start=False` starts it
 from the layer's linear initial guess instead, while closures still read those potentials
@@ -226,8 +227,11 @@ target, key)` where two edges join the same nodes.
 
 `model.march(state, drivers, times)` is the loop over `model.step` for a time grid: step `k`
 goes from `times[k]` to `times[k+1]`, and the result is a dictionary holding `"time"` and
-every layer state (`.phi`, `.q`, `.x`, `.storage_flow`, `.capacity`) stacked on a new first
-axis, with the start state as row 0. It is differentiable through time as `step` is.
+every layer state the start state carries (`.phi`, `.q`, `.x`, `.storage_flow`, `.capacity`),
+every state key a closure carries (a pump's status, a manhole level), and the storage flow of
+every Kirchhoff layer with storage, stacked on a new first axis, with the start state as row 0.
+When the start state has no storage flow, row 0 holds the layer's own with no step. It is
+differentiable through time as `step` is.
 
 ```py
 history = model.march(
@@ -238,10 +242,12 @@ history = model.march(
 )
 ```
 
-`restarts` names the steps taken by backward Euler: every Kirchhoff layer is solved with
-`scheme="backward_euler"` and every transport layer whose own scheme is `"trapezoidal"` is
-stepped by backward Euler, which damps the ringing the trapezoidal rule shows after a first
-step or a source discontinuity; layers with the `"exact"` scheme are untouched. On the other
+`restarts` names the steps taken by backward Euler: every Kirchhoff layer that steps
+something inside its solve (storage at interior nodes, dynamic laws) and every transport layer
+whose own scheme is `"trapezoidal"` is stepped by backward Euler, which damps the ringing the
+trapezoidal rule shows after a first step or a source discontinuity. A Kirchhoff layer whose
+storage sits at boundary nodes keeps its forward Euler, and layers with the `"exact"` scheme
+are untouched. On the other
 steps each layer takes its own scheme. `drivers_at` gives the drivers of each interval when
 they change in time, `diagnostics["schemes"]` the scheme of each step. The electrical
 `transient` and the Modelica electrical reader's `simulate_circuit` are this loop; the building

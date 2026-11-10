@@ -793,10 +793,10 @@ class JunctionStorage(NodeStorage):
                 f"scheme={_JUNCTION_SCHEME!r}"
             )
 
-    def _storage(self, phi: Tensor, drivers: Mapping,
-                 ctx: LawContext) -> tuple[Tensor, Tensor, Tensor]:
+    def _storage(self, phi: Tensor, drivers: Mapping, ctx: LawContext,
+                 slopes: bool = True) -> tuple[Tensor, Tensor | None, Tensor | None]:
         """The free-surface storage withdrawal (m3/s) and slope (m2/s) at `phi`, and the band's
-        stiffness (m2/s)."""
+        stiffness (m2/s); without `slopes` the withdrawal alone (the other two `None`)."""
         rate2 = step_rate_factor(ctx)
         area = drivers["water.storage_area"]
         bed = rate2 * self.bed_area * K_BED
@@ -804,21 +804,24 @@ class JunctionStorage(NodeStorage):
         rise = phi - drivers["water.head_start"]
         n_start = drivers["water.net_inflow_start"]
         storage = rate2 * area * rise - n_start                              # dynwave.c:694-711
-        slope = (rate2 * area).expand_as(storage)
+        slope = (rate2 * area).expand_as(storage) if slopes else None
         if "water.area_switch_head" in drivers:
             storage, slope = self._area_switch(phi, rise, storage, slope, drivers, rate2,
                                                n_start)
         storage = storage + bed * dry
+        if not slopes:
+            return storage, None, None
         slope = slope + bed * (phi < self.bed).to(phi.dtype)
         return storage, slope, self._stiff(drivers, ctx)
 
     @staticmethod
-    def _area_switch(phi: Tensor, rise: Tensor, storage: Tensor, slope: Tensor,
-                     drivers: Mapping, rate2, n_start: Tensor) -> tuple[Tensor, Tensor]:
+    def _area_switch(phi: Tensor, rise: Tensor, storage: Tensor, slope: Tensor | None,
+                     drivers: Mapping, rate2, n_start: Tensor
+                     ) -> tuple[Tensor, Tensor | None]:
         """The drop-end area switch within the pass (class docstring): ``max(lo, min(hi,
         N_last + S (H - H*)))`` where a threshold applies (finite ``H*``), the lagged storage
         and slope elsewhere. `rate2` is the step's `step_rate_factor` and `n_start` SWMM's
-        step-start net inflow."""
+        step-start net inflow; a `slope` of `None` stays `None` (the withdrawal alone)."""
         h_star = drivers["water.area_switch_head"]
         on = torch.isfinite(h_star)
         if not bool(on.any()):
@@ -830,6 +833,8 @@ class JunctionStorage(NodeStorage):
         wall = drivers["water.net_inflow_last"] + s * (phi - h_safe)
         capped = torch.minimum(hi, wall)
         switched = torch.maximum(lo, capped)
+        if slope is None:
+            return torch.where(on, switched, storage), None
         slope_sw = torch.where(
             switched == lo, (rate2 * drivers["water.area_below"]).expand_as(lo),
             torch.where(capped == hi, (rate2 * drivers["water.area_above"]).expand_as(hi),
@@ -910,7 +915,7 @@ class JunctionStorage(NodeStorage):
         drop-end area switch included (so that the withdrawal is continuous there). It
         depends on the drivers only: the closure writes it once per pass as the driver
         ``"water.crown_withdrawal"``, which `rate` and `rate_slope` then read."""
-        return self._storage(self.crown, drivers, ctx)[0]
+        return self._storage(self.crown, drivers, ctx, slopes=False)[0]
 
     def _band(self, phi: Tensor, drivers: Mapping, ctx: LawContext) -> Tensor:
         """The band ``w_c + stiff (H - H_crown)`` (m3/s) at `phi` (m) (`crown_withdrawal`)."""
@@ -942,19 +947,22 @@ class JunctionStorage(NodeStorage):
         return ((head_last > self.crown) & self.surchargeable
                 & (self._band(head_last, drivers, ctx) > 0.0))                # dynwave.c:683-691
 
-    def _free(self, phi: Tensor, drivers: Mapping, ctx: LawContext) -> tuple[Tensor, Tensor]:
+    def _free(self, phi: Tensor, drivers: Mapping, ctx: LawContext,
+              slopes: bool = True) -> tuple[Tensor, Tensor | None]:
         """The non-flooded withdrawal (m3/s) and its slope (m2/s) at `phi` (m): storage,
         the hold band above the crown, or the surcharged anchor (class docstring), and for a
-        ponding junction `_pond_free`."""
+        ponding junction `_pond_free`. Without `slopes` the slope may be `None` (`rate`
+        reads the withdrawal alone; a ponding junction's slope is formed regardless)."""
         if self.ponds and "water.pond_area" in drivers:
             return self._pond_free(phi, drivers, ctx)
-        return self._unponded(phi, drivers, ctx)
+        return self._unponded(phi, drivers, ctx, slopes)
 
-    def _unponded(self, phi: Tensor, drivers: Mapping,
-                  ctx: LawContext) -> tuple[Tensor, Tensor]:
+    def _unponded(self, phi: Tensor, drivers: Mapping, ctx: LawContext,
+                  slopes: bool = True) -> tuple[Tensor, Tensor | None]:
         """`_free` without ponding: the withdrawal and slope of the junction below its full
-        head (and of every junction that does not pond)."""
-        storage, slope, stiff = self._storage(phi, drivers, ctx)
+        head (and of every junction that does not pond); without `slopes` the withdrawal
+        alone (the slope `None`)."""
+        storage, slope, stiff = self._storage(phi, drivers, ctx, slopes)
         if not self.extran:
             return storage, slope
         band = self._band(phi, drivers, ctx)
@@ -962,12 +970,14 @@ class JunctionStorage(NodeStorage):
         if self.ponds and "water.ponded" in drivers:
             above = above & (drivers["water.ponded"] < 0.5)             # dynwave.c:679-680
         free = torch.where(above, torch.maximum(storage, band), storage)
-        slope = torch.where(above & (band > storage), stiff.expand_as(band), slope)
         surcharged = drivers["water.surcharged"] > 0.5
         anchor_slope = drivers["water.surcharge_slope"]
         anchor = anchor_slope * (phi - drivers["water.head_last"])
-        return (torch.where(surcharged, anchor, free),                      # dynwave.c:716
-                torch.where(surcharged, anchor_slope.expand_as(slope), slope))
+        free = torch.where(surcharged, anchor, free)                        # dynwave.c:716
+        if not slopes:
+            return free, None
+        slope = torch.where(above & (band > storage), stiff.expand_as(band), slope)
+        return free, torch.where(surcharged, anchor_slope.expand_as(slope), slope)
 
     def _wall_slope(self, drivers: Mapping, ctx: LawContext) -> Tensor:
         """The flood wall's slope (m2/s): the hold band's stiffness, and at least the
@@ -992,7 +1002,7 @@ class JunctionStorage(NodeStorage):
         w_top = drivers.get("water.top_withdrawal")
         if w_top is None:
             top = self.top.expand(drivers["water.net_inflow_last"].shape)
-            w_top = self._free(top, drivers, ctx)[0]
+            w_top = self._free(top, drivers, ctx, slopes=False)[0]
         return w_top
 
     def _wall_on(self, drivers: Mapping) -> Tensor | None:
@@ -1017,7 +1027,7 @@ class JunctionStorage(NodeStorage):
         """The flood wall ``w(top) + E + S (H - top)`` (m3/s) at `phi` (m)."""
         w_top = drivers.get("water.top_withdrawal")
         if w_top is None:
-            w_top, _ = self._free(self.top.expand(phi.shape), drivers, ctx)
+            w_top, _ = self._free(self.top.expand(phi.shape), drivers, ctx, slopes=False)
         return (w_top + drivers["water.flood_excess"]
                 + self._wall_slope(drivers, ctx) * (phi - self.top))
 
@@ -1032,7 +1042,7 @@ class JunctionStorage(NodeStorage):
         junction rules of the class docstring. `phi_start` and `previous` are not read (the
         step start is SWMM's, from ``"water.head_start"`` and ``"water.net_inflow_start"``)."""
         self._check_scheme(ctx)
-        free, _ = self._free(phi_nodes, drivers, ctx)
+        free, _ = self._free(phi_nodes, drivers, ctx, slopes=False)
         if not self.floods:
             return free
         walled = torch.maximum(free, self._wall(phi_nodes, drivers, ctx))       # dynwave.c:752

@@ -7,10 +7,12 @@ from the free-surface sewer of `apps.sewer`, whose normal flow is set by slope a
 inflow rather than by head difference.
 
 Node order: junctions in file order, then reservoirs, then tanks. Boundary = every reservoir
-then every tank, in that order, which is the order `"water.phi_boundary"` is written in.
+then every tank, in that order. `"water.phi_boundary"` gives the reservoirs' heads, plus the
+tanks' only where they are not held at boundary nodes (`tank_scheme="forward_euler"` holds
+them at their heads in the step-start `"water.phi"`), in that order.
 Edge kinds partition by device type: `pipe`, `pump`, `valve` (a `ThrottleValve`, TCV),
 `fcv` (a `FlowControlValve`), `pbv` (a `BreakerValve`) and `gpv` (a `GeneralPurposeValve`).
-Pumps and valves are relations (their flow is an unknown of the solve), and so are pipes in
+Pumps and valves are implicit laws (their flow is an unknown of the solve), and so are pipes in
 their resistance form (`pipe_form="flow"`, the default).
 
 Every link's status, setting and allowed flow direction are drivers, one value per link in

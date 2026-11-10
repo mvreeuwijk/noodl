@@ -265,12 +265,13 @@ def fixed_point(
     outcome = run_passes(problem, dict(state), max_passes=int(max_passes))
     report: dict = {}
     adjoint: str | None = None
+    adjoint_keys: list[str] = []
     changes = problem.changes
     if diagnostics is not None:
         diagnostics.update({
             "passes": outcome.passes, "changes": changes,
             "contraction": _contraction(changes), "adjoint": None,
-            "adjoint_batched": False,
+            "adjoint_batched": False, "adjoint_keys": adjoint_keys,
         })
     if not outcome.converged:
         raise RuntimeError(
@@ -282,34 +283,65 @@ def fixed_point(
     out = outcome.out
     if outcome.needs_adjoint:
         fed = outcome.certified
+        # The adjoint's unknowns are every key the pass RECOMPUTES that was in the fed state
+        # (as `Model._iterate`'s are), not the watched keys alone: `watch` is the
+        # convergence rule only. An unwatched key the pass recomputes and feeds back to
+        # itself (a closure-carried level, an intermediate the next pass reads) is an
+        # unknown too, and holding it at its certified value would differentiate a
+        # different, smaller system -- a silently wrong gradient. Keys the pass does not
+        # read leave the interface again (`optional`), so a pass that is a function of the
+        # watched keys alone solves exactly the system it did before. A key the pass hands
+        # back unchanged (`n is t`) is a parameter of the pass, not an unknown.
+        watched = set(watch)
+        keys = list(watch) + [
+            k for k in out
+            if k not in watched and k in fed and isinstance(out[k], Tensor)
+            and isinstance(fed[k], Tensor)
+            and (out[k].is_floating_point() or out[k].is_complex())
+        ]
+        complex_keys = {k for k in keys if out[k].is_complex()}
         interface = []
-        for key in watch:
+        for key in keys:
             z = fed[key].detach()
             if z.shape != out[key].shape:
                 z = torch.broadcast_to(z, out[key].shape).contiguous()
+            if key in complex_keys:
+                z = torch.view_as_real(z.to(out[key].dtype).resolve_conj())
             interface.append(z)
         out_keys: list[str] = []
 
         def adjoint_pass(z: list[Tensor]) -> tuple[list[Tensor], list[Tensor]]:
+            fed_z = [torch.view_as_complex(v.contiguous()) if k in complex_keys else v
+                     for k, v in zip(keys, z, strict=True)]
             f = dict(fed)
-            f.update(zip(watch, z, strict=True))
-            result = pass_fn(f)
-            out_keys[:] = list(result)
-            z_next = [result[k] for k in watch]
-            echoed = [k for k, n, t in zip(watch, z_next, z, strict=True) if n is t]
-            if echoed:
+            f.update(zip(keys, fed_z, strict=True))
+            result = dict(pass_fn(f))
+            z_next = [result[k] for k in keys]
+            echoed = [k for k, n, t in zip(keys, z_next, fed_z, strict=True) if n is t]
+            refused = [k for k in echoed if k in watched]
+            if refused:
                 raise RuntimeError(
                     f"{where}: cannot differentiate the fixed point because the pass hands "
-                    f"the watched key(s) {echoed} back unchanged instead of recomputing "
+                    f"the watched key(s) {refused} back unchanged instead of recomputing "
                     f"them, which makes the interface Jacobian singular"
                 )
+            for k in echoed:
+                # Copied through: the certified value, a constant of the pass.
+                result[k] = fed[k]
+            out_keys[:] = list(result)
+            z_next = [result[k] for k in keys]
+            z_next = [torch.view_as_real(n.resolve_conj()) if k in complex_keys else n
+                      for k, n in zip(keys, z_next, strict=True)]
             return [result[k] for k in out_keys], z_next
 
         flat = differentiate_fixed_point(
             interface, adjoint_pass, rtol=adjoint_rtol, restart=adjoint_restart,
             where=where, batch_shape=tuple(outcome.verdict.converged.shape), report=report,
+            optional=[k not in watched for k in keys],
         )
         out = dict(zip(out_keys, flat, strict=True))
+        unread = set(report.get("unread", ()))
+        adjoint_keys[:] = [k for i, k in enumerate(keys) if i not in unread]
         adjoint = "implicit"
     if diagnostics is not None:
         diagnostics.update({"adjoint": adjoint,

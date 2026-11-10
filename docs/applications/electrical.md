@@ -5,7 +5,7 @@ Kirchhoff's current law holds at every node. The whole circuit is **one** `Kirch
 whose potential is the node voltage: the currents of
 voltage sources, inductors, transformers and controlled sources are unknowns alongside the
 node voltages (see
-[Laws that give a relation](../concepts/layers.md#laws-that-give-a-relation-implicit-coupled-and-dynamic-laws)).
+[Implicit, coupled and dynamic laws](../concepts/layers.md#implicit-coupled-and-dynamic-laws)).
 A circuit is analysed at its DC operating point, as a transient on a fixed time grid, or in the
 sinusoidal steady state (AC, by phasors). The device laws transcribe the Modelica Standard
 Library (MSL, `Modelica.Electrical.Analog`). The same phasor layer also solves the
@@ -745,7 +745,7 @@ branch (`branch_rows`) at its two ends; a `DcPowerFlowSolution` holds `va`, `pg`
 
 `build_power_flow(net)` returns `(model, state, drivers)` for one phasor
 `KirchhoffLayer` named `"power"`, whose sources' currents are unknowns of the solve
-([Laws that give a relation](../concepts/layers.md#laws-that-give-a-relation-implicit-coupled-and-dynamic-laws)).
+([Implicit, coupled and dynamic laws](../concepts/layers.md#implicit-coupled-and-dynamic-laws)).
 Its nodes are the buses (`str(bus.id)`, in table order) and one more node, `"ground"`, the
 common reference at 0. Every device is an edge **to ground**: the edge's potential difference
 is then the bus voltage phasor `v` itself, and its flow is the current `i` leaving the bus

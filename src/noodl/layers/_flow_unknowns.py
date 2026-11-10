@@ -1,16 +1,17 @@
 """The layout of a `KirchhoffLayer` whose flows are not all eliminated.
 
-A law that cannot give the flow from the potential difference gives a relation instead,
-and the layer adds its flow as an unknown; a layer whose laws couple several edges, store,
-or read the law context is laid out the same way. Unknowns are `[phi_I, q_F]`: the interior
-potentials and the flows of the relation edges, in layer edge order. Residual rows are the
+A law that cannot give the flow from the potential difference is an implicit law (a relation
+`r(dp, q) = 0`), and the layer adds its flow as an unknown; a layer whose laws couple
+several edges, store, or read the law context is laid out the same way. Unknowns are
+`[phi_I, q_F]`: the interior potentials and the flows of the implicit edges, in layer edge
+order. Residual rows are the
 flow balance at the interior nodes (`A_I q - s_I + w(phi)`, with `q` the law flow on
-potential-controlled edges and the unknown on relation edges), then the relations' own
+potential-controlled edges and the unknown on implicit edges), then the implicit laws' own
 residuals. The Jacobian is assembled as COO (`SparseOperator`) on a fixed pattern from
 per-law local blocks: for a law of `ports` m whose edges form G groups, the block
 `d out[g, k] / d in[g, l]` is obtained from ONE evaluation of the law and m reverse-mode
 derivatives (`torch.autograd.grad`), cotangent k seeding slot k of every group at once (the
-groups are independent, so each gradient holds row k of every group's block). A relation's
+groups are independent, so each gradient holds row k of every group's block). An implicit law's
 blocks with respect to `dp` and to `q` come from the same evaluation. Reverse mode, not
 forward mode: PyTorch's forward-mode rules for elementwise ops run through its Python
 reference implementations (`torch._refs`), about 80 times the cost of the op itself, which
@@ -44,6 +45,7 @@ from noodl._broadcast import broadcast_shapes
 from noodl.elements._slopes import _complex
 from noodl.layers._device import complex_of
 from noodl.operators.sparse import SparseOperator
+from noodl.solvers.errors import SingularSystemError
 from noodl.solvers.newton import newton_tolerances
 from noodl.solvers.select import scipy_importable
 
@@ -88,7 +90,7 @@ class FlowUnknowns:
     flow-unknown columns, `node_slot` the first of the diagonal slots of withdrawals and
     storage, present when `diag` (the last `n_I` entries of the pattern).
 
-    A relation takes two blocks, `d r / d dp` (used with sign +1 in the start node's column
+    An implicit law takes two blocks, `d r / d dp` (used with sign +1 in the start node's column
     and -1 in the end node's) and `d r / d q`; one that `reads_heads` takes three, the
     derivative in the start node's column, `d r / d q` and the derivative in the end node's
     column, each with sign +1, on the same pattern."""
@@ -117,12 +119,12 @@ class FlowUnknowns:
 
 
 def flow_unknowns(layer) -> FlowUnknowns:
-    """The `FlowUnknowns` of `layer`: its flow unknowns (the edges of its relations) and the
+    """The `FlowUnknowns` of `layer`: its flow unknowns (the edges of its implicit laws) and the
     fixed COO pattern of its Jacobian."""
     w = 2 if layer.phasor else 1
     b = len(layer.cols)
-    f_parts = [torch.arange(s, e) for rel, (s, e) in
-               zip(layer._relation, layer._law_slices, strict=True) if rel]
+    f_parts = [torch.arange(s, e) for implicit, (s, e) in
+               zip(layer._implicit, layer._law_slices, strict=True) if implicit]
     edges = torch.cat(f_parts) if f_parts else torch.zeros(0, dtype=torch.long)
     n_I = len(layer.interior)
     n_F = len(edges)
@@ -135,7 +137,7 @@ def flow_unknowns(layer) -> FlowUnknowns:
     rows, cols, srcs, signs = [], [], [], []
     offset = 0
     ar = torch.arange
-    for el, rel, (s, e) in zip(layer._laws, layer._relation, layer._law_slices, strict=True):
+    for el, implicit, (s, e) in zip(layer._laws, layer._implicit, layer._law_slices, strict=True):
         m = el.ports
         G = (e - s) // m
         g, k, l_, ck, cl, a, bb = torch.meshgrid(
@@ -144,7 +146,7 @@ def flow_unknowns(layer) -> FlowUnknowns:
         el_ = s + g * m + l_
         flat = (((g * m + k) * m + l_) * w + ck) * w + cl
         size = G * m * m * w * w
-        if not rel:
+        if not implicit:
             # balance x phi: +-q_k at edge k's endpoints, d dp_l / d phi = +-1 at edge l's
             rn, cn = node[ek, a], node[el_, bb]
             keep = (rn >= 0) & (cn >= 0)
@@ -171,7 +173,7 @@ def flow_unknowns(layer) -> FlowUnknowns:
             signs.append(torch.ones(int(keep.sum()), dtype=torch.float64))
             offset += size
         else:
-            # A relation that reads the heads at its end nodes (one port): its blocks are
+            # An implicit law that reads the heads at its end nodes (one port): its blocks are
             # `[d r / d phi_from, d r / d q, d r / d phi_to]`, the first and last each the
             # whole derivative in that node's column (`dp`'s share included), so the start
             # node's column takes the first block and the end node's the third, both +1.
@@ -188,7 +190,7 @@ def flow_unknowns(layer) -> FlowUnknowns:
             srcs.append((offset + size + flat)[keep])
             signs.append(torch.ones(int(keep.sum()), dtype=torch.float64))
             offset += 3 * size
-    # balance x q_F: the incidence of relation edges, a constant +-1 (slot `one`)
+    # balance x q_F: the incidence of implicit edges, a constant +-1 (slot `one`)
     one_slot = offset
     offset += 1
     if n_F:
@@ -331,8 +333,8 @@ def first_failing(last: dict, newton_kwargs: dict) -> int:
     return int(bad[0]) if len(bad) else 0
 
 
-def singular_error(layer, kinds, mode: str) -> RuntimeError:
-    """The error for a singular system of potentials and flow unknowns, naming the relation
+def singular_error(layer, kinds, mode: str) -> SingularSystemError:
+    """The error for a singular system of potentials and flow unknowns, naming the implicit
     `kinds`; at the initial point it also says that storage held at its initial value is
     itself a source, and where else to start."""
     initial = (
@@ -343,9 +345,9 @@ def singular_error(layer, kinds, mode: str) -> RuntimeError:
         "transient from the operating point instead (mode='dc'; operating_point in the "
         "electrical application)"
     ) if mode == "initial" else ""
-    return RuntimeError(
+    return SingularSystemError(
         f"KirchhoffLayer {layer.name!r}: the system of potentials and flow unknowns is "
         f"singular; check for a loop of ideal potential sources or a cut set of flow "
-        f"sources among the relation kinds {kinds}, or a part connected to a boundary "
+        f"sources among the implicit kinds {kinds}, or a part connected to a boundary "
         f"only through flow-prescribed edges{initial}"
     )

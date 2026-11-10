@@ -6,7 +6,8 @@ import torch
 import noodl.solvers.select as select_module
 from noodl.elements import Conductance, ConstitutiveLaw, FixedFlow, ImplicitLaw, LawContext
 from noodl.heads import EdgeHeads
-from noodl.layers.kirchhoff import KirchhoffLayer, _Step
+from noodl.layers._step import _Step
+from noodl.layers.kirchhoff import KirchhoffLayer
 from noodl.solvers.implicit import TransposeOperator
 from noodl.topology import Network
 from noodl.withdrawals import NodeWithdrawal
@@ -300,7 +301,7 @@ def test_layer_methods_on_a_layer_with_flow_unknowns():
     # the jacobian is the assembled operator, and the central differences of the residual
     x = _unknowns(layer, phi, q)
     J = layer.jacobian(phi_i, pb, drivers, q=q)
-    step = layer._public_step(None, None, None, None, drivers)
+    step, _ = layer._public_step(pb, None, None, None, None, None, drivers)
     torch.testing.assert_close(J, layer._operator(x, pb, drivers, step).assemble(),
                                rtol=0, atol=0)
 
@@ -324,13 +325,13 @@ def test_layer_methods_on_a_layer_with_flow_unknowns():
     torch.testing.assert_close(slopes[1:], Orifice().dflow(dp[1:], drivers))
 
     # q is an argument of the methods that need the flows
-    with pytest.raises(ValueError, match=r"kinds \['fan'\] give a relation.*pass q"):
+    with pytest.raises(ValueError, match=r"kinds \['fan'\] are implicit laws.*pass q"):
         layer.flows(phi, drivers)
     for call in (lambda: layer.dflows(phi, drivers),
                  lambda: layer.residual(phi_i, pb, drivers, src),
                  lambda: layer.jacobian(phi_i, pb, drivers),
                  lambda: layer.adjoint(phi_i, pb, drivers, grad)):
-        with pytest.raises(ValueError, match=r"kinds \['fan'\] give a relation.*pass q"):
+        with pytest.raises(ValueError, match=r"kinds \['fan'\] are implicit laws.*pass q"):
             call()
     with pytest.raises(ValueError, match="every edge"):
         layer.residual(phi_i, pb, drivers, src, q=q[..., :2])
@@ -557,7 +558,7 @@ def test_assembled_jacobian_matches_autograd_jacobian_of_the_residual():
         return layer._residual(z, pb, {}, sources, step, call)[0]
 
     expected = torch.autograd.functional.jacobian(residual, x)
-    op = layer._operator(x, pb, {}, step, layer._slopes_fn({}, call, step))
+    op = layer._operator(x, pb, {}, step)
     torch.testing.assert_close(op.assemble(), expected, rtol=1e-13, atol=1e-13)
     # rmatvec is the transpose action
     v = torch.randn(u.n, generator=gen, dtype=F64)
@@ -828,7 +829,7 @@ def test_flows_of_mna_layer_return_the_solved_q_and_need_q():
     drivers = {"head": torch.tensor([5.0]), "c": torch.tensor([0.7])}
     phi, q = layer.solve(torch.zeros(1), drivers, torch.zeros(3), differentiable=False)
     torch.testing.assert_close(layer.flows(phi, drivers, q), q, rtol=1e-10, atol=1e-12)
-    with pytest.raises(ValueError, match="give a relation"):
+    with pytest.raises(ValueError, match="are implicit laws"):
         layer.flows(phi, drivers)
     with pytest.raises(ValueError, match="every edge"):
         layer.flows(phi, drivers, q[..., :2])

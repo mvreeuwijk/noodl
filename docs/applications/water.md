@@ -145,7 +145,12 @@ every converged power-function pump's flow against its own `q_max()` at its spee
 naming the pump and batch instance if it is exceeded — rather than silently accepting an
 extrapolated point off the end of the curve. (A segmented curve's last segment and a
 constant-power pump are extended without a limit, as EPANET extends them.) A converged pump
-carrying flow backwards is refused by name too.
+carrying flow backwards is refused by name too. The flows are seeded rather than left to the layer's fallback ladder
+([When Newton fails](../concepts/solvers.md#when-newton-fails-the-fallback-ladder)): from zero
+flow every resistance-form pipe sits on its `RQtol` slope floor and the system is numerically
+singular, and so is its linear guess, which is taken at zero flow too; the storage ramp,
+starting from zero flow as well, does not get away from it (measured on Net1 and the two-loop
+network). From the seeded flows Newton needs 5 iterations.
 
 ## Running over time
 
@@ -589,7 +594,9 @@ returns. `build_model(tank_scheme=...)` chooses how the level moves.
 With the default `tank_scheme="forward_euler"` the tank steps by EPANET's own method. It is a
 boundary node of the layer, held at its step-start head through the hydraulic solve, and the
 step then moves it by explicit Euler, $H \mathrel{+}= q\,\Delta t / A$
-(`KirchhoffLayer.advance_storage`). `TankLevels` is a `Model` closure declaring
+(`KirchhoffLayer.advance_storage`). The held head is the tank's in the step-start
+`"water.phi"`, which `Model` passes to the solve as `history`, so `"water.phi_boundary"` gives
+the reservoirs' heads only. `TankLevels` is a `Model` closure declaring
 `state_keys = ("water.link_status", "water.link_setting")`. Its `__call__` applies the controls
 and returns updated drivers, among them every link's `"water.status"`: the pumps' and the
 controlled links' from `"water.link_status"`, every other link's from the drivers' own (and

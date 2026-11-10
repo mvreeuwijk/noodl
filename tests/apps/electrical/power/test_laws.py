@@ -99,7 +99,7 @@ def test_voltage_controlled_generator_two_bus_closed_form():
 def test_generator_is_an_implicit_phasor_law():
     gen = VoltageControlledGenerator(0.5, 1.0)
     assert isinstance(gen, ImplicitLaw) and gen.phasor_capable
-    with pytest.raises(TypeError, match="relation"):
+    with pytest.raises(TypeError, match="implicit law"):
         gen.flow(torch.ones(1, dtype=C128))
 
 

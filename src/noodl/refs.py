@@ -599,11 +599,16 @@ class LayerRef:
                     if not holds else "flow into every boundary storage entry",
                     unit=getattr(layer, "flow_unit", ""), **common,
                 )
+            # A layer that holds its storage at boundary nodes holds those at the step-start
+            # potentials, so the driver gives the others only.
+            given = [nodes[i] for i in layer.prescribed.tolist()]
             inputs["phi_boundary"] = Field(
-                f"{name}.phi_boundary", role="driver", axis="node", labels=self.boundary_nodes,
-                aliases=_node_aliases(net, self.boundary_nodes),
+                f"{name}.phi_boundary", role="driver", axis="node", labels=given,
+                aliases=_node_aliases(net, given),
                 ordering="boundary order", required="always", default=None,
-                description="prescribed potential at the boundary nodes", **meta, **common,
+                description="prescribed potential at the boundary nodes" + (
+                    " (but the storage nodes, held at their step-start potentials)"
+                    if holds else ""), **meta, **common,
             )
             inputs["sources"] = Field(
                 f"{name}.sources", role="driver", axis="node", labels=nodes,

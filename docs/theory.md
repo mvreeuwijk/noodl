@@ -99,10 +99,10 @@ step for any instance whose residual did NOT shrink under a full step — a dead
 square-root-law edge otherwise cycles $\Delta p \to -\Delta p$ forever). Nodal analysis handles
 flow sources trivially (add to $s$) but a branch whose *natural* law fixes a flow or
 potential directly (an ideal pump, a fixed-flow fan, a prescribed pressure boundary)
-cannot be written as $f = g(e)$; this is handled by **Modified Nodal Analysis (MNA)**
-(Ho, Ruehli & Brennan 1975), which promotes that branch's flow to an extra unknown and adds one
-extra row enforcing its constitutive constraint, at the cost of a larger, indefinite
-(saddle-point) system. noodl implements it; see *Modified Nodal Analysis in noodl* below.
+cannot be written as $f = g(e)$. Such a law is an implicit law: a relation between its potential difference
+and its flow, and noodl makes that branch's flow an extra unknown of the layer, with one
+extra row for the relation, at the cost of a larger, indefinite (saddle-point) system; see
+*Implicit laws* below.
 
 **Loop (mesh) analysis.** Unknowns are the $l = b - n + c$ cycle amplitudes $\lambda$. Set
 
@@ -127,24 +127,26 @@ unknowns; a branch with a *prescribed potential drop* needs the dual augmentatio
 Neither formulation is unconditionally better-conditioned — both reduce to a congruence
 transform of the same branch Jacobian — so the practical choice is driven by $n$ vs
 $l$ and by which sources are naturally flow- or potential-type. `noodl`'s Kirchhoff
-layers are nodal, extended to Modified Nodal Analysis where a constitutive law requires it
+layers are nodal, with flow unknowns added where a constitutive law is implicit
 (below). The cycle space is kept for flows that are not potential-driven — prescribed or
 closure-computed flows, and the closed-form continuity solve on a tree
 (`cycles.particular_flow`, §9). `cycles.assert_forward_oriented` encodes a related constraint:
 only an entrywise non-negative cycle basis guarantees non-negative $\lambda$ maps to
 non-negative $f$, needed for the constant upwind operator of §2.
 
-### Modified Nodal Analysis in noodl
+### Implicit laws
 
-A `KirchhoffLayer` whose constitutive laws all have the potential-controlled form
-$f_e = g_e(e_e)$ is solved by nodal analysis exactly as above. A law that is not of that form
-makes the layer a Modified Nodal Analysis system (Ho, Ruehli & Brennan, *The modified nodal
-approach to network analysis*, IEEE Trans. Circuits Syst. 22(6):504–509, 1975). Partition the
-branches into potential-controlled branches $P$ and implicit branches $F$, whose laws are
-relations $r_F(e_F, f_F) = 0$ rather than functions: an ideal potential source ($e = V$), a
-flow-controlled law ($e = h(f)$), an inductance's companion form, the coupled constraints of a
-two-port such as an ideal transformer. The unknowns are the interior potentials $\phi_I$ and
-the implicit flows $f_F$, and the equations are KCL at the interior nodes and the implicit laws:
+A `KirchhoffLayer` whose constitutive laws all give their flow from the potential difference,
+$f_e = g_e(e_e)$, is solved by nodal analysis exactly as above. A law that is a relation
+$r_F(e_F, f_F) = 0$ instead of a flow (an implicit law) adds that flow as an unknown of the layer: an ideal
+potential source ($e = V$), a flow-controlled law ($e = h(f)$), an inductance over one time
+step, the coupled constraints of a two-port such as an ideal transformer. Circuit simulators
+call this formulation Modified Nodal Analysis (Ho, Ruehli & Brennan, *The modified nodal
+approach to network analysis*, IEEE Trans. Circuits Syst. 22(6):504–509, 1975): a layer with
+flow unknowns is that system, and the implicit laws are the branches it adds
+unknowns for. Partition the branches into those whose law gives the flow, $P$, and those whose
+law is implicit, $F$. The unknowns are the interior potentials $\phi_I$ and the flows
+$f_F$, and the equations are the flow balance (KCL) at the interior nodes and the implicit laws' relations:
 
 $$
 \begin{aligned}
@@ -160,30 +162,30 @@ J = \begin{pmatrix} A_{I,P}\, G_P'\, A_{I,P}^\top & A_{I,F} \\
 \partial_e r_F\, A_{I,F}^\top & \partial_f r_F \end{pmatrix}.
 $$
 
-The upper-left block is the nodal Laplacian of the potential-controlled branches. The
-upper-right block, the KCL rows against the implicit flows, is the incidence $A_{I,F}$
+The upper-left block is the nodal Laplacian of the branches whose law gives the flow. The
+upper-right block, the balance rows against the flow unknowns, is the incidence $A_{I,F}$
 itself, constant $\pm 1$; the lower-left block is the law's slope $\partial_e r_F$ times the
 transposed incidence. $G_P'$ and the $r_F$ derivatives are block diagonal with one
 block per group of coupled edges (a law's `ports`), so a multi-port law enters exactly.
 $J$ is nonsymmetric and indefinite in general, which is why such a layer is factorised
-(sparse or dense LU) rather than solved by conjugate gradients. MNA sits between nodal analysis
-and the **sparse tableau** formulation (Hachtel, Brayton & Gustavson, *The sparse tableau
-approach to network analysis and design*, IEEE Trans. Circuit Theory 18(1):101–113, 1971),
-which keeps every branch potential difference and flow as an unknown: MNA eliminates the
-potential-controlled flows and keeps only the flows that cannot be eliminated, so its system is
-far smaller while still admitting every law.
+(sparse or dense LU) rather than solved by conjugate gradients. This sits between nodal
+analysis and the **sparse tableau** formulation (Hachtel, Brayton & Gustavson, *The sparse
+tableau approach to network analysis and design*, IEEE Trans. Circuit Theory 18(1):101–113,
+1971), which keeps every branch potential difference and flow as an unknown: noodl eliminates
+the flows that follow from the potentials and keeps only those that cannot be eliminated, so
+its system is far smaller while still admitting every law.
 
-**Storage** (a capacitance, an inductance) enters as a companion form: one implicit step of the
-trapezoidal rule or backward Euler turns $f = C\, de/dt$ into the algebraic relation
+**Storage** (a capacitance, an inductance) enters through its time step: one implicit step of
+the trapezoidal rule or backward Euler turns $f = C\, de/dt$ into the algebraic relation
 $f + f_{\text{prev}} = \tfrac{2C}{\Delta t}(e - e_{\text{prev}})$ (trapezoidal), so a transient is
-a sequence of MNA solves from the step-start state. **Phasors** replace $d/dt$ by $j\omega$:
+a sequence of layer solves from the step-start state. **Phasors** replace $d/dt$ by $j\omega$:
 potentials and flows become complex amplitudes, solved as (real, imaginary) pairs so that a law
 that is not holomorphic (a constant-power load) is exact. Tellegen's theorem then holds for the
 complex amplitudes, $\sum_k e_k \overline{f_k} = 0$, which is the complex power balance
 (`power_residual` on a phasor layer).
 
 **Adjoint sensitivities.** The adjoint the implicit-function theorem gives (§4) solves the
-transposed MNA system, $J^\top \lambda = \partial L / \partial x$. In circuit terms this is the
+transposed system, $J^\top \lambda = \partial L / \partial x$. In circuit terms this is the
 **adjoint network** of Director & Rohrer (*The generalized adjoint network and network
 sensitivities*, IEEE Trans. Circuit Theory 16(3):318–323, 1969), who derived from Tellegen's
 theorem that the sensitivity of one response to every parameter of a network costs one extra
@@ -262,8 +264,8 @@ None of these is differentiable in the autograd sense (uncertain: no published
 "differentiable EPANET/CONTAM" was found; the closest is differentiable AC/DC
 [power-flow optimisation](https://arxiv.org/pdf/2603.28203)). Two patterns matter for
 `noodl`: every mature tool is **nodal** in the pressure/head variable (cheap, robust
-SPD systems), and `noodl`'s Kirchhoff layers are nodal too, extended to Modified Nodal Analysis
-only where a constitutive law needs it (§1); and Modelica's stream
+SPD systems), and `noodl`'s Kirchhoff layers are nodal too, with flow unknowns added only
+where a constitutive law is implicit (§1); and Modelica's stream
 connectors are the strongest existing precedent for carrying enthalpy
 and species *with* the flow, matching the advection-matrix construction in §2.
 

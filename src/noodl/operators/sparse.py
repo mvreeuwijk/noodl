@@ -1,8 +1,8 @@
 """SparseOperator: a general sparse matrix per batch instance, held as COO triplets.
 
-It is the Jacobian of a `KirchhoffLayer` with flow unknowns (a law that cannot give the flow
-from the potential difference gives a relation instead, and the layer adds its flow as an
-unknown). Unlike `GraphLaplacianOperator`, it is neither symmetric nor definite (an ideal
+It is the Jacobian of a `KirchhoffLayer` with flow unknowns (an implicit law, one that cannot
+give the flow from the potential difference, has its flow added as an unknown). Unlike
+`GraphLaplacianOperator`, it is neither symmetric nor definite (an ideal
 source's row has a zero diagonal), so it declares `symmetric = False` and offers no SPD
 certificate: `solvers.select.solve` then accepts
 `"direct"` (dense batched LU of `assemble()`), `"sparse_direct"` (SuperLU of the triplet,

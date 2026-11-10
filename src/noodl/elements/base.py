@@ -168,7 +168,7 @@ class ConstitutiveLaw(torch.nn.Module):
     ``True`` only when ``flow`` is mathematically independent of ``dp`` (so ``dflow`` is
     identically zero everywhere) -- ``FixedFlow`` is the built-in example. The differentiable
     solve path (``KirchhoffLayer.solve(differentiable=True)``, in
-    ``noodl.layers._functional.FunctionalLaws.dflows``) uses this flag, and only this flag, to
+    ``noodl.layers.kirchhoff.KirchhoffLayer._law_slopes``) uses this flag, and only this flag, to
     decide whether a missing gradient of ``flow`` with respect to ``dp`` is legitimate (this
     element declares it does not depend on ``dp``) or a bug (some other element's ``flow``
     silently dropped the autograd graph, e.g. via a stray ``dp.detach()``). Declaring instead
@@ -204,17 +204,17 @@ class ConstitutiveLaw(torch.nn.Module):
     #: whose laws and withdrawals are all linear takes the full Newton step from the start
     #: (`KirchhoffLayer.linear`), so it converges in one iteration. Declared, not inferred.
     linear: bool = False
-    #: True for a relation (`ImplicitLaw`) whose residual reads the absolute heads at its
+    #: True for an implicit law (`ImplicitLaw`) whose residual reads the absolute heads at its
     #: edges' end nodes (`ctx.phi_from`, `ctx.phi_to`), not only the drop `dp` across them:
     #: a valve that holds the head downstream (or upstream) of it. Its `jacobian` then also
-    #: gives the residual's derivatives with respect to those heads. One-port relations only;
+    #: gives the residual's derivatives with respect to those heads. One-port implicit laws only;
     #: a layer refuses any other law that declares it. Declared, not inferred.
     reads_heads: bool = False
 
     def __init_subclass__(cls, **kwargs) -> None:
         super().__init_subclass__(**kwargs)
         for gone, use in (
-                ("law_form", "a law that gives a relation subclasses ImplicitLaw"),
+                ("law_form", "an implicit law subclasses ImplicitLaw"),
                 ("contextual", "declare a `ctx` parameter in `flow` to receive the context")):
             if gone in cls.__dict__:
                 raise TypeError(
@@ -269,7 +269,7 @@ class ConstitutiveLaw(torch.nn.Module):
         output that does not require grad at all, or because ``dp`` is silently unused inside
         it (e.g. a stray ``dp.detach()``) -- that is the same gradient hazard the
         differentiable solve path guards against in
-        ``noodl.layers._functional.FunctionalLaws.dflows``, reached here via
+        ``noodl.layers.kirchhoff.KirchhoffLayer._law_slopes``, reached here via
         ``KirchhoffLayer.linear_init`` instead. Raise a clear error naming the element
         and its kind rather than letting a raw, unattributed autograd error escape.
         """
@@ -412,9 +412,9 @@ class ConstitutiveLaw(torch.nn.Module):
 
 
 class ImplicitLaw(ConstitutiveLaw):
-    """A law that cannot give the flow from the potential difference (an ideal source, a
-    flow-controlled pipe, an inductance) gives a relation `residual(dp, q, drivers, ctx) = 0`
-    instead, and the layer adds its flow as an unknown.
+    """An implicit law: a law whose flow is an unknown of the layer (an ideal source, a
+    flow-controlled pipe, an inductance). It cannot give the flow from the potential
+    difference; it is a relation `residual(dp, q, drivers, ctx) = 0` instead.
 
     Subclasses implement `residual`, which returns one value per edge, with the shape of
     `dp`. `flow` and `dflow` refuse: the flow is read from the layer's solved `q`.
@@ -436,7 +436,7 @@ class ImplicitLaw(ConstitutiveLaw):
 
     def _no_flow(self) -> TypeError:
         return TypeError(
-            f"{type(self).__name__} (kind {self.kind!r}) is a relation: its flow is an "
+            f"{type(self).__name__} (kind {self.kind!r}) is an implicit law: its flow is an "
             f"unknown of the layer; read it from the solved q"
         )
 
@@ -447,7 +447,7 @@ class ImplicitLaw(ConstitutiveLaw):
         raise self._no_flow()
 
     def linear_init(self, drivers=None):
-        """Refused: a relation has no tangent `(c, k)`. A layer's linear guess
+        """Refused: an implicit law has no tangent `(c, k)`. A layer's linear guess
         (`KirchhoffLayer.linear_init`) takes its `residual` and `jacobian` at zero flow
         instead."""
         raise self._no_flow()

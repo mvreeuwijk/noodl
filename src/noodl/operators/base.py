@@ -21,6 +21,7 @@ from typing import Protocol, runtime_checkable
 import torch
 
 from noodl.operators.dense import DenseOperator
+from noodl.solvers.errors import LinearSolveError
 
 Tensor = torch.Tensor
 
@@ -52,8 +53,9 @@ class SolveResult:
     status: Tensor
 
     def raise_on_failure(self, where: str) -> SolveResult:
-        """Raise `RuntimeError` naming every non-converged flat batch index, its status
-        (by `SolverStatus` name) and its residual, if any instance failed to converge.
+        """Raise `LinearSolveError` (a `RuntimeError`) naming every non-converged flat batch
+        index, its status (by `SolverStatus` name) and its residual, if any instance failed
+        to converge.
         Returns `self` unchanged when every instance converged, so this chains:
         `result = pcg(op, b).raise_on_failure("KirchhoffLayer.solve")`.
         """
@@ -65,7 +67,7 @@ class SolveResult:
         bad = torch.nonzero(~flat_converged, as_tuple=False).flatten().tolist()
         statuses = [SolverStatus(int(flat_status[i])).name for i in bad]
         residuals = [float(flat_residual[i]) for i in bad]
-        raise RuntimeError(
+        raise LinearSolveError(
             f"{where}: batch indices {bad} failed to converge; "
             f"statuses {statuses}, residuals {residuals}"
         )

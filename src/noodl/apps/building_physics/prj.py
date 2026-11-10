@@ -2263,6 +2263,8 @@ def project_to_model(project: Project, *, ambient: dict | None = None, species: 
     stack and wind pressures are the driver `"air.edge_head"`, written by the model's
     `EdgeHeads` closure on each pass, not by these drivers: a direct `layer.solve` on them has
     no head, so run the model's closures first (`Model.step`, `steady` and `simulate` do).
+    The air layer is built with `fallback=("linear_guess",)`: an airflow solve that does
+    not converge from its warm start is solved again from the linear initial guess.
 
     The drivers are at the run control's STEADY-SIMULATION instant (its day, time and day
     type): the project's schedules (`project.inputs`) are applied there, so a `steady()` on
@@ -2306,7 +2308,8 @@ def project_to_model(project: Project, *, ambient: dict | None = None, species: 
     air = KirchhoffLayer(net, "air", project.laws,
                          boundary=[project.ambient, *project.flow_balanced],
                          quantity="pressure", unit="Pa", flow_unit="kg/s",
-                         storage=storage, scheme="backward_euler")
+                         storage=storage, scheme="backward_euler",
+                         fallback=("linear_guess",))
     layers: dict = {"air": air}
     # UVGI filters: their transmission follows every airflow solve (`FilterTransmission`).
     flow_filters = [f for f in project.edge_filters.values() if f.depends_on_flow]

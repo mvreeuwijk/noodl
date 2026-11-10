@@ -400,7 +400,9 @@ def build_model(net: Network, *, air_laws, heads, ambient="ambient", thermal: bo
     appended after it (an air handler's `AirHandlerFlows`); one that writes a driver a head
     term reads is refused by name. The head is not in the drivers the builder returns: a
     direct `model.kirchhoff["air"].solve` on raw drivers has no head, so run the model's
-    closures first (`Model.step`, `steady`, `check` and `simulate` do).
+    closures first (`Model.step`, `steady`, `check` and `simulate` do). The air layer is
+    built with `fallback=("linear_guess",)`: an airflow solve that does not converge from
+    its warm start is solved again from the linear initial guess.
 
     `flow_balanced` names nodes whose pressure the airflow solve does
     not need, because only prescribed, balanced flows touch them (an air handler's
@@ -425,7 +427,7 @@ def build_model(net: Network, *, air_laws, heads, ambient="ambient", thermal: bo
         )
     air = KirchhoffLayer(net, "air", list(air_laws),
                          boundary=[ambient, *flow_balanced], quantity="pressure", unit="Pa",
-                         flow_unit="kg/s")
+                         flow_unit="kg/s", fallback=("linear_guess",))
     air.node_hints.update(dict.fromkeys(_prescribed_only_nodes(net, air_laws, air),
                                         "an air-handler plenum? pass flow_balanced= to "
                                         "build_model"))

@@ -8,7 +8,8 @@ import torch
 
 from noodl.elements import Conductance, ConstitutiveLaw, ImplicitLaw, LawContext, PowerLaw
 from noodl.layers._flow_unknowns import flow_unknowns
-from noodl.layers.kirchhoff import KirchhoffLayer, _Step
+from noodl.layers._step import _Step
+from noodl.layers.kirchhoff import KirchhoffLayer
 from noodl.topology import Network
 from noodl.withdrawals import NodeWithdrawal
 from tests._circuit_laws import Cap, DrivenSource, Ind, Source

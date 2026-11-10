@@ -14,7 +14,7 @@ one graph.
 
 | # | Mode | The flow comes from | Implemented by |
 |---|---|---|---|
-| 1 | **Kirchhoff solve** | Both Kirchhoff laws plus the constitutive laws on the edges, solved together. Newton's method on a nodal conservation residual: $A_I\,g(A^\top\phi) = s_I$ (a law that gives a relation adds its flow as an extra unknown) | `KirchhoffLayer` |
+| 1 | **Kirchhoff solve** | Both Kirchhoff laws plus the constitutive laws on the edges, solved together. Newton's method on a nodal conservation residual: $A_I\,g(A^\top\phi) = s_I$ (an implicit law adds its flow as an extra unknown) | `KirchhoffLayer` |
 | 2 | **Driver-prescribed** | Handed in directly as a driver value | any `TransportLayer` with no Kirchhoff-layer owner |
 | 3 | **Closure-computed** | Computed from other state by an arbitrary function | a closure writing `"<layer>.q"` |
 | 4 | **Clip-and-allocate** | A *request*, clipped against arc capacity and receiver headroom — no potential variable anywhere | `AllocatedFlowLayer` |
@@ -126,25 +126,29 @@ storages in list order, then their nodes.
 
 **Storage at boundary nodes, stepped by forward Euler.** With `scheme="forward_euler"` the
 storage sits at boundary nodes instead (an EPANET tank), and is never an unknown. The solve
-holds each storage node at its potential at the step start (`layer.holds_storage` is True):
-the layer writes the step-start `"<layer>.phi"` into those columns of
-`"<layer>.phi_boundary"` (`hold_storage`), whatever the driver gives there, on every `Model`
-path (`step`, `steady`, `residuals`, `current_flows`, `check`), so a closure may fill those
-columns with anything. During a step a closure reading `"<layer>.phi"` sees such a node at
-its step-start potential too (`hold_potentials`), even in the later passes of
-`coupling="iterate"`. After the solve the step moves each storage node by
-$\Delta t\,w / C$ (`advance_storage(phi, storage_flow, dt)`), with $w$ the flow the solve
-delivered to the node and $C$ the storage's capacity. That is explicit Euler, EPANET's own
-tank method; the solve itself takes no step and does not depend on `dt`. A storage whose
-capacity changes with the potential gives the inverse of its amount, `potential_of`, and moves
-to `potential_of(amount(phi) + dt * w)` instead, so its amount changes by exactly $\Delta t\,w$
-(EPANET's tank on a volume curve, `noodl.apps.water.TankVolumeCurve`).
+holds each storage node at its potential at the step start (`layer.holds_storage` is True),
+which it reads from `history=(phi, None)`, `phi` every node's potential then: every call
+that evaluates the layer at a boundary (`solve`, `residual`, `jacobian`, `adjoint`,
+`linear_init`) takes it, steady or not, and refuses by name to run without it.
+`"<layer>.phi_boundary"` gives the other boundary nodes only, `layer.prescribed` in boundary
+order. A `Model` passes the step-start `"<layer>.phi"` as `history` on every path (`step`,
+`steady`, `residuals`, `current_flows`, `check`), as it passes every other layer's step start.
+During a step a closure reading `"<layer>.phi"` sees such a node at its step-start potential
+too (`hold_potentials`), even in the later passes of `coupling="iterate"`. After the solve
+the step moves each storage node by $\Delta t\,w / C$ (`advance_storage(phi, storage_flow,
+dt)`), with $w$ the flow the solve delivered to the node and $C$ the storage's capacity.
+That is explicit Euler, EPANET's own tank method; the solve itself takes no step and does
+not depend on `dt`. A storage whose capacity changes with the potential gives the inverse of
+its amount, `potential_of`, and moves to `potential_of(amount(phi) + dt * w)` instead, so its
+amount changes by exactly $\Delta t\,w$ (EPANET's tank on a volume curve,
+`noodl.apps.water.TankVolumeCurve`).
 
 ```py
 store = LinearStorage(nodes=[tank], capacity=[area])
 layer = KirchhoffLayer(net, "water", laws, boundary=["R1", "T1"],
                        storage=[store], scheme="forward_euler")
-phi, q = layer.solve(phi_boundary, drivers, sources)    # T1 held at its column of phi_boundary
+phi, q = layer.solve(phi_boundary, drivers, sources,    # phi_boundary: R1 only
+                     history=(phi_start, None))         # T1 held at phi_start[tank]
 w = layer.storage_flows(phi, drivers, dt=None, q=q)     # the flow into T1
 phi_next = layer.advance_storage(phi, w, dt=600.0)      # T1 moved by dt * w / area
 ```
@@ -210,11 +214,11 @@ that value check is skipped to avoid a host wait, so a head given directly there
 its own `to(device=None, dtype=None)` method for `Model.to` to move them (the terms in
 `noodl.heads` do not).
 
-## Laws that give a relation: implicit, coupled and dynamic laws
+## Implicit, coupled and dynamic laws
 
 A `KirchhoffLayer` whose constitutive laws all give their flow from their own edge's potential
 difference has the interior potentials as its only unknowns, as above (the fast path). A law
-that cannot, an implicit law (an `ImplicitLaw`, which gives a relation) or a multi-port law
+that cannot, an implicit law (an `ImplicitLaw`) or a multi-port law
 (`ports > 1`), adds the flows of its edges as unknowns (`layer.implicit_edges`, empty on a layer
 without flow unknowns); a layer built with `phasor=True` is always solved this way. The
 declarations are described under
@@ -246,18 +250,18 @@ flow is a function of its own edge's potential difference, so the potentials and
 everything. An implicit law's flow is not: a fan with a prescribed rise has a residual that does
 not contain $q$, and conservation at the nodes fixes its flow. So on a layer with flow unknowns
 the methods that need the flows take `q`, as `solve` returned it (every edge), and refuse a
-missing one with a `ValueError` that names the kinds giving a relation.
+missing one with a `ValueError` that names the implicit kinds.
 
 - `flows(phi, drivers, q)` returns the implicit edges' columns as given and evaluates the
   potential-controlled edges' columns from `phi` (steady context), differentiably. At `solve`'s
   own `(phi, q)` the result is `q`. A phasor layer has no such accessor (`TypeError`).
-- `dflows(phi, drivers, q)` is every edge's slope `d q / d dp`. On an edge of a relation
-  `r(dp, q) = 0` it is the slope the relation implies, `-(d r / d dp) / (d r / d q)` at `q`'s
+- `dflows(phi, drivers, q)` is every edge's slope `d q / d dp`. On an edge of an implicit law
+  `r(dp, q) = 0` it is the slope the law implies, `-(d r / d dp) / (d r / d q)` at `q`'s
   flow, and `nan` where `d r / d q` is zero (an ideal source: its flow does not follow from its
   potential difference). Every edge of a law with several ports is `nan`. A phasor layer has no
   such accessor (`TypeError`: its slopes are complex).
 - `residual(..., q=q)` is the residual of the unknowns `[phi_I, q_F]`, the interior potentials
-  then the flows of `implicit_edges`: the balance rows, then the relations' own residuals; it is
+  then the flows of `implicit_edges`: the balance rows, then the implicit laws' own residuals; it is
   zero at `solve`'s result. A phasor layer's rows are complex.
 - `jacobian(..., q=q)` is the dense matrix of the operator `solve`'s Newton iteration builds, of
   size `n_I + n_F` (twice that on a phasor layer, in the real view: each complex unknown a
@@ -316,7 +320,7 @@ as `converged=False` in `diagnostics`.
 with flow unknowns it is the linear guess of the potentials and the flow unknowns together: each
 law with a flow is replaced by its tangent at zero (its own `linear_init`; a law with several
 ports, and every law on a phasor layer, is taken at its flow and Jacobian at the starting
-potentials instead: the same for a linear law), each relation by its residual and Jacobian at
+potentials instead: the same for a linear law), each implicit law by its residual and Jacobian at
 zero interior potentials and zero flows, the withdrawals and storages by their value and slope
 there, and the system is solved once. On a layer with flow unknowns the result is detached: no
 gradient flows to `phi_boundary`, `sources`, the drivers or the law parameters, unlike on a
@@ -348,7 +352,7 @@ one step description per solve (`_Step`: the law context and what the storage do
   with storage, a dynamic law or a law that reads the context takes a step; a layer with none
   of these has static laws, takes no step, and refuses `dt` and `history` (it accepts and
   ignores `t`, a valid `scheme`, `q0` and the modes `"dc"` and `"initial"`). In practice
-  only a fast-path layer takes no step: an ideal or relation law reads the context, so a
+  only a fast-path layer takes no step: an ideal or implicit law reads the context, so a
   layer with one steps. A layer whose laws read the context but none dynamic steps without
   history, at its operating point at the step end. A layer whose storage is all that steps
   takes `history=(phi, None)`: its laws read no step-start flow. `storage_flow` is refused
