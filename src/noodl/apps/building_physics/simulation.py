@@ -38,6 +38,7 @@ read are recorded after every airflow solve, and its outputs are part of the his
 
 from __future__ import annotations
 
+import re
 from collections.abc import Sequence
 from contextlib import nullcontext
 from pathlib import Path
@@ -199,8 +200,10 @@ def simulate(model: Model, state: State, drivers: Drivers, times, *,
 
     `diagnostics`, when given, receives the RUN's diagnostics, not `Model.step`'s per-step
     `diagnostics` (layer statistics, pass counts), which `simulate` does not collect:
-    `"airflow_retries"`, the end time (s) of every step in which a potential solve was
-    retried (`Model.step`'s `diagnostics["fallbacks"]`), once per step.
+    `"airflow_retries"`, the end time (s) of every step in which an airflow solve was
+    retried (`Model.step`'s `diagnostics["fallbacks"]` of the airflow layers: `"air"`, the
+    layer whose pressures the zone densities or a pressure reader read, and the layer with
+    the zone air-mass storage), once per step.
 
     Returns `"time"` `(N,)`, and per row the state's `"<layer>.q"`, `"<layer>.phi"` of every
     Kirchhoff layer, `"<layer>.x"` of every transport layer, `"<layer>.capacity"` of every
@@ -234,6 +237,7 @@ def simulate(model: Model, state: State, drivers: Drivers, times, *,
     # The zone pressures the density closure or a pressure reader reads, fed back between
     # passes of a step, and the couplings that read them.
     step_key, cause = _pressure_coupling(model, "simulate")
+    airflow = _airflow_layers(model, step_key, mass_layer)
 
     def start_mass(state: State, d: Drivers) -> Tensor:
         # At the drivers the closures leave (a closure may write "T" or "P_ref"), as the
@@ -310,12 +314,13 @@ def simulate(model: Model, state: State, drivers: Drivers, times, *,
                     # The airflow layers' fallback ladder has been climbed inside the step;
                     # only the step is named here. Every other failure passes through.
                     retried = (" and again from the linear initial guess"
-                               if _retries_cold(model) else "")
+                               if _RETRIED_COLD.search(str(exc)) else "")
                     raise ConvergenceError(
                         f"simulate: step of {dt} s ending at t = {t1} s: the airflow solve "
                         f"failed from the previous step's pressures{retried} ({exc})"
                     ) from exc
-                if any(step_diagnostics.get("fallbacks", {}).values()):
+                fallbacks = step_diagnostics.get("fallbacks", {})
+                if any(fallbacks.get(name, 0) for name in airflow):
                     if not retries or retries[-1] != t1:      # once per step, all passes
                         retries.append(t1)
                 return out
@@ -337,10 +342,19 @@ def simulate(model: Model, state: State, drivers: Drivers, times, *,
     return out
 
 
-def _retries_cold(model: Model) -> bool:
-    """Whether a failed potential solve of `model` is retried from the linear initial guess
-    (a Kirchhoff layer with that rung in its fallback ladder)."""
-    return any("linear_guess" in layer.fallback for layer in model.kirchhoff.values())
+#: A layer's ladder error that names the linear guess among the rungs it tried
+#: (`KirchhoffLayer.solve`: "...; the fallback [...] did not converge either: ...").
+_RETRIED_COLD = re.compile(r"the fallback \[[^\]]*'linear_guess'[^\]]*\] did not converge")
+
+
+def _airflow_layers(model: Model, step_key: str | None, mass_layer: str | None) -> set[str]:
+    """The Kirchhoff layers that solve the airflow: `"air"`, the layer whose potential the
+    zone densities or a pressure reader feed back (`step_key`), and the layer with the zone
+    air-mass storage."""
+    names = {"air", mass_layer}
+    if step_key is not None:
+        names.add(step_key.rsplit(".", 1)[0])
+    return {name for name in names if name in model.kirchhoff}
 
 
 def _project_file(project, filename: str, what: str, where: str) -> Path:

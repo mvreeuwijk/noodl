@@ -961,6 +961,7 @@ def test_an_error_other_than_non_convergence_passes_through_without_a_retry(monk
     calls = [1 for _ in failed]                      # one Newton solve, not retried
     assert type(info.value) is SolveFailure and str(info.value) == "singular transport matrix"
     assert calls == [1]
+    assert failed == [("air", True)]
 
 
 # ----------------------------------------------------------------------------- controls
