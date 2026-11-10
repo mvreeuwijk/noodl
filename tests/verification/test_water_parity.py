@@ -2656,6 +2656,48 @@ def test_volume_curve_tank_matches_epanet(tmp_path):
     assert worst_q < 1e-6, worst_q
 
 
+#: Net1's tank 2 (levels 100 to 150 ft, starting at 120 ft) on curves with a flat segment
+#: (level ft, volume ft3), and the level bound (m) of each.
+_FLAT_VOLUME_CURVES = {
+    # a flat tail from 110 ft: the tank starts on it, full by volume; held at 110 ft,
+    # `tankgrade(Vmax)`, and its pump closed by the control at 140 ft, which holds by
+    # volume there (`hydraul.c`, `controls`), the tank cycles just below 110 ft all day
+    "tail": (((0, 0), (60, 90000), (110, 200000), (160, 200000)), 5e-4),
+    # a flat segment below the operating range (EPANET reads it, the level never meets it)
+    "middle": (((0, 0), (60, 90000), (80, 90000), (110, 200000), (130, 250000),
+                (160, 360000)), 2e-4),
+    # a flat segment from 110 to 120 ft, inside the range: the level jumps across it
+    "crossed": (((0, 0), (60, 90000), (110, 200000), (120, 200000), (130, 250000),
+                 (160, 360000)), 2e-4),
+}
+
+
+@pytest.mark.parametrize("case", list(_FLAT_VOLUME_CURVES))
+def test_flat_volume_curve_tank_matches_epanet(tmp_path, case):
+    """Net1, 24 h, its tank on a curve with a flat segment, which EPANET accepts; levels at
+    every report time, pipe 110's flow. MEASURED: levels 3.8e-4 m ("tail"), 6.9e-5 m
+    ("middle"), 1.7e-4 m ("crossed"); flows 4.4e-7, 5.5e-8, 5.6e-8 m3/s.
+
+    "tail" is held to 5e-4 m, not 2e-4: its pump switches 34 times in the day as the tank
+    cycles across 110 ft (MEASURED), and EPANET rounds each control crossing to whole
+    seconds (`hydraul.c`, `controltimestep`: `t = ROUND(v / q)`), where
+    `water_event_step` steps to the exact crossing (EPANET's step rule is `water_run`'s,
+    Task 10). MEASURED: with the crossings rounded so (`TankLevels.event_step` patched in
+    a scratch run), "tail" is 2.4e-5 m and "middle" 2.8e-5 m."""
+    points, bound = _FLAT_VOLUME_CURVES[case]
+    curve = "\n".join(f" VC {x} {y}" for x, y in points)
+    text = (DATA / "Net1.inp").read_text()
+    assert _NET1_TANK in text
+    text = text.replace(_NET1_TANK, _NET1_TANK.replace("\t                \t;",
+                                                       "\tVC              \t;"))
+    text = text.replace("[CURVES]", "[CURVES]\n" + curve)
+    worst, worst_q, (net, *_rest) = _compare_tank_run(tmp_path, text, "flat", tanks={"2"},
+                                                      links=("110",))
+    assert net.tanks[0].volume_curve == "VC"
+    assert worst < bound, worst
+    assert worst_q < 1e-6, worst_q
+
+
 def test_tank_fills_and_closes_its_inlet_like_epanet(tmp_path):
     """Net1 without its pump controls: the tank fills at about 15.5 h and stays full, with
     pipe 110 closed against inflow (`tankstatus`) and the pump supplying only the demand.

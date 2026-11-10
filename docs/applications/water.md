@@ -467,6 +467,17 @@ and the time to fill are found by volume too, as EPANET's `controltimestep` and
 central differences: 1.4e-9 relative). `validate()` refuses a curve that does not cover the
 tank's minimum and maximum levels, as EPANET does (`input1.c`, error 225).
 
+A curve may have flat segments (two points with the same volume), as EPANET allows: such a
+segment has no area, and the level jumps across it. EPANET's `tankgrade` gives the flat volume
+the segment's lower level and any volume above it a level above its upper one, and
+`potential_of` is the same transcription. A tank whose maximum (minimum) level lies on a flat
+stretch has that stretch's volume as its `Vmax` (`Vmin`) and, filled (drained) to it, is put
+at `tankgrade(Vmax)`, the stretch's lower end, as `tanklevels` puts it. A tank on a volume
+curve tests its level controls by volume, as EPANET's `controls` (`hydraul.c`) does,
+$V(y) \ge V(y_c) - |q|$ (ABOVE) and $V(y) \le V(y_c) + |q|$ (BELOW) with $q$ one second of
+the last solve's inflow, so on a flat stretch every control level on it is reached at once.
+The times to a control or a limit use the inflow, not an area.
+
 **Full and empty tanks.** A tank within EPANET's `HTOL` (0.0005 ft) of its maximum level is
 full and one within `HTOL` of its minimum is empty (`hydstatus.c`, `tankstatus`). At the step
 start `TankLevels` then gives every pipe to it the one direction that drains a full tank or
@@ -545,6 +556,7 @@ on-disk reals are **float32**, so roughly 1e-7 relative is EPANET's own precisio
 | Net1 single period: heads, flows, pump head gain, pump flow | 1e-6 / 1e-6 / 1e-6 / 1e-8 m³/s | 7.224e-8, 2.647e-7, 1.942e-7, 3.2e-9 m³/s |
 | Net1 24 h tank level with level-triggered pump controls | 2e-4 m | **3.826e-5 m** worst of 25 steps |
 | Net1 24 h, tank on a five-point volume curve: levels, pipe 110 flow | 2e-4 m / 1e-6 m³/s | 6.9e-5 m, 5.5e-8 m³/s |
+| Net1 24 h, tank on a volume curve with a flat segment: below the range, crossed by the level (110-120 ft), the tail from 110 ft: levels, pipe 110 flow | 2e-4 m (tail 5e-4 m, see Limitations) / 1e-6 m³/s | 6.9e-5, 1.7e-4, 3.8e-4 m; 5.6e-8, 5.6e-8, 4.4e-7 m³/s |
 | Net1 24 h without controls: the tank fills, its inlet closes; levels, pipe 110 and pump flows | 2e-4 m / 1e-6 m³/s | 2.5e-5 m, 3.7e-8 m³/s |
 | Net1 24 h at 1.5 times the demand: the tank empties and refills | 2e-4 m / 1e-6 m³/s | 2.3e-5 m, 3.2e-8 m³/s |
 | A pump into a tank that starts full (closed, then filling it to full many times an hour), 12 h | 2e-4 m / 1e-6 m³/s | 5.3e-6 m, 8.9e-9 m³/s |
@@ -699,6 +711,16 @@ independent loop is a property of the cycle-space formulation, and it holds exac
   then refuses to drain it, and the solve is refused by name before it starts ("junction(s)
   ... have a demand that no reservoir, tank or inflow reaches"), where EPANET reports negative
   pressures (wntr's Anytown as shipped: pumps at speed 0, tanks at their minimum).
+- **A volume that decreases along the curve is refused.** EPANET 2.2 accepts it (wntr 1.5.0
+  solves Net1 with `(110, 80000)` after `(60, 90000)`), but a volume that falls as the level
+  rises is not physical; `validate()` and `TankVolumeCurve` refuse it by name. Flat segments
+  are accepted.
+- **Control crossings are not rounded to whole seconds yet.** EPANET rounds the time to a tank
+  control's level (`controltimestep`, `ROUND(v / q)`); `water_event_step` steps to the exact
+  crossing. Where a pump switches often this adds up: Net1 on a volume curve with a flat tail
+  at 110 ft switches 34 times a day and its levels differ from EPANET's by 3.8e-4 m (2.4e-5 m
+  with the crossings rounded). The extended-period driver `water_run`, still to come, takes
+  EPANET's step rule.
 - **Links of extreme resistance that must carry a demand are not solved.** Anytown's 0.0001 in
   placeholder pipes alone feed three junctions; EPANET reports heads of -9.9e24 m there, and
   noodl's Newton cannot bring a row whose two terms are 9.9e24 m below its tolerance (one

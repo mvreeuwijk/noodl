@@ -465,18 +465,66 @@ def test_only_the_implicit_schemes_refuse_a_level_outside_the_limits():
         model.tank_closure(state, drivers)
 
 
-def test_a_volume_curve_of_one_point_or_flat_volumes_is_refused(tmp_path):
-    """A curve needs two points and strictly increasing volumes: one point leaves no
-    segment, and a flat stretch has no level for its volume (and no area)."""
+def test_a_volume_curve_of_one_point_or_decreasing_volumes_is_refused(tmp_path):
+    """A curve needs two points and volumes that do not decrease: one point leaves no
+    segment, and a volume that falls as the level rises is not physical (EPANET accepts
+    it). Flat volumes are accepted, as EPANET accepts them."""
     with pytest.raises(ValueError, match="curve 0 has 1 point"):
         TankVolumeCurve([0], torch.zeros(1, dtype=F64), [[1.0]], [[10.0]])
-    with pytest.raises(ValueError, match="curve 0 must have strictly increasing"):
+    with pytest.raises(ValueError, match="curve 0 must have strictly increasing levels and "
+                                         "volumes that do not decrease"):
         TankVolumeCurve([0], torch.zeros(1, dtype=F64), [[0.0, 1.0, 2.0, 3.0]],
-                        [[0.0, 10.0, 10.0, 20.0]])
-    for points in (((0, 0),), ((0, 0), (110, 200000), (160, 200000))):
+                        [[0.0, 10.0, 9.0, 20.0]])
+    TankVolumeCurve([0], torch.zeros(1, dtype=F64), [[0.0, 1.0, 2.0, 3.0]],
+                    [[0.0, 10.0, 10.0, 20.0]])
+    for points in (((0, 0),), ((0, 0), (60, 90000), (110, 80000), (160, 360000))):
         net = read_epanet_inp(_net1_with_volume_curve(tmp_path, points=points))
         with pytest.raises(ValueError, match=r"tank '2' has the volume curve 'VC' with"):
             net.validate()
+    read_epanet_inp(_net1_with_volume_curve(
+        tmp_path, points=((0, 0), (110, 200000), (160, 200000)))).validate()
+
+
+def test_a_flat_volume_segment_is_a_jump_in_level():
+    """Levels 0, 1, 2, 3 m, volumes 0, 10, 10, 20 m3 (EPANET's `tankgrade` through
+    `interp`): the flat volume 10 is at the segment's LOWER level, 1 m; a volume just above
+    it is just above 2 m; and the volume is flat (10) at every level between. The area
+    toward the flat segment is the neighbour's, and 1 inside it (a level only a tank's
+    initial level can have): `water_event_step` reads only its sign, never a time or a
+    level."""
+    curve = TankVolumeCurve([0], torch.zeros(1, dtype=F64), [[0.0, 1.0, 2.0, 3.0]],
+                            [[0.0, 10.0, 10.0, 20.0]])
+    level = curve.potential_of(torch.tensor([[10.0], [10.0 + 1e-3], [5.0]], dtype=F64))
+    torch.testing.assert_close(level, torch.tensor([[1.0], [2.0001], [0.5]], dtype=F64))
+    volume = curve.amount(torch.tensor([[1.0], [1.5], [2.0]], dtype=F64))
+    torch.testing.assert_close(volume, torch.full((3, 1), 10.0, dtype=F64))
+    def area(level, flow):
+        return float(curve.area_toward(torch.tensor([level], dtype=F64),
+                                       torch.tensor([flow], dtype=F64)))
+
+    assert (area(1.0, 1.0), area(2.0, -1.0), area(1.5, 1.0), area(1.5, -1.0)) == (
+        10.0, 10.0, 1.0, 1.0)
+
+
+def test_a_full_tank_on_a_flat_tail_is_put_at_its_lower_end(tmp_path):
+    """Net1's tank on (0, 0), (60, 90000), (110, 200000), (160, 200000) ft/ft3, its maximum
+    level 150 ft on the flat tail: `Vmax` is 200000 ft3, and a tank filled to it is put at
+    `tankgrade(Vmax)`, 110 ft (`hydraul.c`, `tanklevels`), not at 150 ft. It starts at
+    120 ft, on the tail, so already full by volume; the pump's control to close above
+    140 ft holds by volume there (`controls`), so the first step drains it."""
+    path = _net1_with_volume_curve(tmp_path, points=((0, 0), (60, 90000), (110, 200000),
+                                                     (160, 200000)))
+    model, state, drivers = build_model(read_epanet_inp(path))
+    stepped, dt = water_event_step(model, state, drivers, 3600.0)
+    assert float(tank_inflow(model, stepped)[0]) < 0.0
+    assert float(tank_levels(model, stepped)[0]) < 110.0 * 0.3048
+    # the same tank with the pump held open fills it: put at 110 ft
+    model, state, drivers = build_model(read_epanet_inp(path))
+    model.tank_closure.controls = []
+    stepped, dt = water_event_step(model, state, drivers, 3600.0)
+    assert float(tank_inflow(model, stepped)[0]) > 0.0
+    torch.testing.assert_close(tank_levels(model, stepped),
+                               torch.tensor([110.0 * 0.3048], dtype=F64))
 
 
 def test_time_to_limit_skips_a_tank_with_no_net_inflow():

@@ -476,12 +476,13 @@ class WaterNetwork:
                 raise ValueError(
                     f"WaterNetwork: tank {tank.name!r} names the volume curve "
                     f"{tank.volume_curve!r}, which is not among the curves")
-            if len(points) < 2 or any(b[0] <= a[0] or b[1] <= a[1]
+            if len(points) < 2 or any(b[0] <= a[0] or b[1] < a[1]
                                       for a, b in zip(points, points[1:], strict=False)):
                 raise ValueError(
                     f"WaterNetwork: tank {tank.name!r} has the volume curve "
                     f"{tank.volume_curve!r} with {len(points)} point(s); a volume curve needs "
-                    f"at least two, with levels and volumes strictly increasing")
+                    f"at least two, with levels strictly increasing and volumes that do not "
+                    f"decrease (EPANET accepts a decreasing volume, which is not physical)")
             if tank.min_level < points[0][0] or tank.max_level > points[-1][0]:
                 raise ValueError(
                     f"WaterNetwork: tank {tank.name!r} has levels "
@@ -2381,7 +2382,7 @@ def water_event_step(model: Model, state: State, drivers: Drivers, dt_max: float
         area = storage.capacity(heads, heads, drivers) * closure.head_scale
     levels = closure.levels(state)
     rate = inflow / area
-    dt = closure.event_step(levels, rate, dt_max)
+    dt = closure.event_step(levels, rate, dt_max, inflow=inflow)
     # EPANET's `tanktimestep` (`hydraul.c`): the step ends when a tank fills or empties,
     # `t = ROUND(v / q)` whole seconds, when that is positive and shorter
     fill = float(closure.time_to_limit(levels, rate, inflow).min())
@@ -2399,7 +2400,12 @@ def _settle_tanks(model: Model, storage, phi: Tensor, inflow: Tensor, drivers) -
     """`phi` with every tank that is within one second of filling or emptying put on its
     limit, EPANET 2.2's `tanklevels` (`hydraul.c`), transcribed as it is: `V + q >= Vmax`
     puts it at its maximum, else `V - q <= Vmin` at its minimum (`q` the inflow, m3/s, over
-    one second). Every other potential is `phi`'s."""
+    one second). Every other potential is `phi`'s.
+
+    The head put there is EPANET's `tankgrade(Vmax)` (`tankgrade(Vmin)`): the maximum
+    (minimum) level, except on a volume curve whose volume is flat across that level, where
+    it is the lower end of the flat stretch (`project.c`, `interp`, takes the first point at
+    or above the volume)."""
     closure = model.tank_closure
     heads = phi[..., storage.nodes]
     with torch.no_grad():
@@ -2407,10 +2413,13 @@ def _settle_tanks(model: Model, storage, phi: Tensor, inflow: Tensor, drivers) -
         low = (closure.bottom + closure.y_min) * closure.head_scale
         volume = storage.amount(heads.detach(), drivers)
         q = inflow.detach()
-        full = volume + q >= storage.amount(top, drivers)
-        empty = ~full & (volume - q <= storage.amount(low, drivers))
+        v_max, v_min = storage.amount(top, drivers), storage.amount(low, drivers)
+        full = volume + q >= v_max
+        empty = ~full & (volume - q <= v_min)
         if not bool((full | empty).any()):
             return phi
+        if isinstance(storage, TankVolumeCurve):
+            top, low = storage.potential_of(v_max), storage.potential_of(v_min)
     settled = torch.where(full, top, torch.where(empty, low, heads))
     batch = torch.broadcast_shapes(phi.shape[:-1], settled.shape[:-1])
     out = phi.expand(batch + phi.shape[-1:]).clone()

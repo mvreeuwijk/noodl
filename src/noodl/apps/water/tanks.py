@@ -67,7 +67,8 @@ HTOL = 0.0005 * M_PER_FT
 #: EPANET's `TINY` (`types.h`): a curve segment narrower than this takes its end value
 #: (`project.c`, `interp`). EPANET applies it in the curve's FILE units (ft or m, ft3 or m3);
 #: here it is applied in SI (m, m3). Every curve `TankVolumeCurve` accepts has strictly
-#: increasing levels and volumes, so it only guards a segment narrower than 1e-6 m or m3.
+#: increasing levels and volumes that do not decrease; `interp` on the volumes never meets
+#: a flat segment's zero width (it takes the first point at or above the volume).
 TINY = 1e-6
 
 #: EPANET's `QZERO` (`types.h`, 1e-6 cfs) in m3/s: `tanktimestep` (`hydraul.c`) skips a tank
@@ -116,8 +117,19 @@ class TankVolumeCurve(NodeStorage):
 
     `nodes` are the tank nodes, `bottom` (m) their bottom elevations, and `levels` (m
     above the bottom) and `volumes` (m3) each tank's curve points (one sequence per tank,
-    of at least two points, levels and volumes strictly increasing). The layer's potential is
-    the head times `head_scale` (`rho g` on the Darcy-Weisbach path).
+    of at least two points, levels strictly increasing and volumes not decreasing). The
+    layer's potential is the head times `head_scale` (`rho g` on the Darcy-Weisbach path).
+
+    FLAT SEGMENTS. A segment whose two volumes are equal has zero area; EPANET 2.2 accepts it
+    and so does this class. Its level is a jump: `tankgrade` gives the flat volume the
+    segment's LOWER level and a volume just above it a level just above its upper one
+    (`interp` takes the first point at or above the volume), and `potential_of` is the same
+    transcription. A maximum (minimum) level on a flat stretch has the stretch's volume as
+    `Vmax` (`Vmin`), and a tank put on it is put at `tankgrade(Vmax)`, the stretch's lower
+    end (`_settle_tanks`); its controls are tested by volume (`TankLevels._apply_controls`).
+    A DECREASING volume is refused by name: EPANET accepts it too (wntr 1.5.0 solves Net1
+    with `(110, 80000)` after `(60, 90000)`), but a volume that falls as the level rises is
+    not physical.
 
     `amount` is EPANET's `tankvolume` and `potential_of` its `tankgrade` (`hydraul.c`), both
     through `interp` (`project.c`): linear between the points, the end values beyond the
@@ -150,10 +162,11 @@ class TankVolumeCurve(NodeStorage):
                     f"TankVolumeCurve: curve {i} has {len(xs)} point(s); a volume curve needs "
                     f"at least two")
             if any(b <= a for a, b in zip(xs, xs[1:], strict=False)) or any(
-                    b <= a for a, b in zip(ys, ys[1:], strict=False)):
+                    b < a for a, b in zip(ys, ys[1:], strict=False)):
                 raise ValueError(
                     f"TankVolumeCurve: curve {i} must have strictly increasing levels and "
-                    f"volumes, got levels {xs} and volumes {ys}")
+                    f"volumes that do not decrease (a decreasing volume, which EPANET "
+                    f"accepts, is not physical), got levels {xs} and volumes {ys}")
         width = max(len(xs) for xs in rows_x)
         pad = [(xs + [xs[-1]] * (width - len(xs)), ys + [ys[-1]] * (width - len(ys)))
                for xs, ys in zip(rows_x, rows_y, strict=True)]
@@ -181,8 +194,15 @@ class TankVolumeCurve(NodeStorage):
     def area_toward(self, phi_nodes: Tensor, flow: Tensor) -> Tensor:
         """Each tank's cross-section area (m2, `d volume / d level`) on the segment its
         level moves onto at inflow `flow`: the right one at a point when rising, the left
-        one otherwise; where that segment has none (the last point rising, the first
-        falling) the other one's, and 1 where neither has."""
+        one otherwise; where that area is zero (no segment beyond the last point rising or
+        the first falling, or a segment of flat volumes) the other one's, and 1 where
+        neither has one (inside a flat segment, a level only an initial level can have).
+        Only the level rate's sign is read from it (`water_event_step`):
+        the times to a limit or a control are by volume at the inflow
+        (`TankLevels._volume_time`) and the advance is by volume (`potential_of`), as
+        EPANET's `tanktimestep` and `tanklevels`, so no area enters them. Across a flat
+        segment EPANET's level jumps: `tankgrade` puts the flat volume at the segment's
+        lower end and any more at its upper end; `potential_of` does the same."""
         level = self._level(phi_nodes)
         left = _interp(self.levels, self.volumes, self.last, level)[1]
         right = _interp(self.levels, self.volumes, self.last, level, right=True)[1]
@@ -319,8 +339,11 @@ class TankLevels:
                 f"both required; build them with initial_state(model)"
             )
         level = self.levels(state)
+        # a tank on a volume curve tests its controls by volume, with a margin of one
+        # second of the last solve's inflow (`_apply_controls`)
+        inflow = state.get("water.storage_flow") if self._curved else None
         read = (level.detach(), status.detach(), drivers.get(STATUS_KEY),
-                drivers.get(ONE_WAY_KEY))
+                drivers.get(ONE_WAY_KEY), None if inflow is None else inflow.detach())
         memo = getattr(self, "_memo", None)
         if memo is not None and all(
                 (a is None and b is None) or (a is not None and b is not None
@@ -328,7 +351,7 @@ class TankLevels:
                 for a, b in zip(read, memo[0], strict=True)):
             return dict(memo[1])
         with torch.no_grad():
-            status = self._apply_controls(level, status)
+            status = self._apply_controls(level, status, inflow)
         self._refuse_outside(level)
         out = {"water.phi_boundary": self._boundary(state, level),
                STATUS_KEY: self._link_status(drivers, status),
@@ -428,7 +451,7 @@ class TankLevels:
             target = torch.where(rising, self.y_max, self.y_min)
             safe = torch.where(moving, rate, torch.ones_like(rate))
             if self._curved:
-                time = self._volume_time(target, level, safe)
+                time = self._volume_time(target, level, safe, inflow)
             else:
                 time = (target - level) / safe
             return torch.where(moving, time, torch.full_like(time, torch.inf))
@@ -438,13 +461,18 @@ class TankLevels:
         """True when the tanks are on volume curves (their storage is not linear)."""
         return self.storage is not None and not self.storage.linear
 
-    def _volume_time(self, target: Tensor, level: Tensor, rate: Tensor) -> Tensor:
-        """Seconds from `level` to `target` (m, per tank) at the level rate `rate`, by
-        volume: `(V(target) - V(level)) / q` with `q = rate * area_toward(level)`."""
+    def _volume_time(self, target: Tensor, level: Tensor, rate: Tensor,
+                     inflow: Tensor | None = None) -> Tensor:
+        """Seconds from `level` to `target` (m, per tank) by volume, EPANET's
+        `(V(target) - V(level)) / q` (`tanktimestep`, `controltimestep`): `q` the tanks'
+        inflow `inflow` (m3/s), or, when not given, `rate * area_toward(level)`, the level
+        rate `rate` times the area it was divided by. No area enters with `inflow` given,
+        so a segment of zero area (flat volumes) needs none."""
         phi = (self.bottom + level) * self.head_scale
         volume = self.storage.amount(phi)
         to = self.storage.amount((self.bottom + target) * self.head_scale)
-        flow = rate * self.storage.area_toward(phi, rate)
+        flow = (rate * self.storage.area_toward(phi, rate) if inflow is None
+                else inflow.detach())
         return (to - volume) / flow
 
     def _refuse_outside(self, level: Tensor) -> None:
@@ -468,7 +496,8 @@ class TankLevels:
                 f"the levels or shorten the run"
             )
 
-    def event_step(self, level: Tensor, rate: Tensor, dt: float) -> float:
+    def event_step(self, level: Tensor, rate: Tensor, dt: float,
+                   inflow: Tensor | None = None) -> float:
         """EPANET's shortened hydraulic step: the time to the next control crossing.
 
         Manual section 13.1 item 17, p.113: the next step is the minimum of the nominal
@@ -481,6 +510,9 @@ class TankLevels:
         against that tank's own level and rate. A single scalar pair, tested against
         every control regardless of which tank it names, is wrong the moment a second
         controlled tank exists -- it silently uses the wrong tank's level.
+
+        On a volume curve the crossing is by volume (`_volume_time`), at the tanks' inflow
+        `inflow` (m3/s) when given, as EPANET's `controltimestep` (`hydraul.c`).
         """
         step = dt
         level, rate = level.detach(), rate.detach()
@@ -492,20 +524,41 @@ class TankLevels:
             if self._curved:   # by volume, as EPANET's `controltimestep`
                 target = level.clone()
                 target[i] = control.value
-                crossing = float(self._volume_time(target, level, rate)[i].detach())
+                crossing = float(self._volume_time(target, level, rate, inflow)[i].detach())
             else:
                 crossing = (control.value - float(level[i])) / r
             if 1e-9 < crossing < step:
                 step = crossing + 1e-9
         return step
 
-    def _apply_controls(self, level: Tensor, status: Tensor) -> Tensor:
+    def _apply_controls(self, level: Tensor, status: Tensor,
+                        inflow: Tensor | None = None) -> Tensor:
+        """`status` with every control whose condition holds applied, in file order (a
+        later control on the same pump wins). A cylinder's level is tested against the
+        control's: ``level > value`` (ABOVE), ``level < value`` (BELOW). A tank on a volume
+        curve is tested by volume, as EPANET 2.2's `controls` (`hydraul.c`) tests every
+        tank: ``V(level) >= V(value) - |q|`` (ABOVE), ``V(level) <= V(value) + |q|``
+        (BELOW), ``q`` the last solve's inflow over one second (`inflow`, m3/s; 0 when not
+        given). On a curve whose volume is flat between two levels the two differ: at the
+        flat stretch's volume every control level on it is reached (a tank held at
+        `tankgrade(Vmax)` below its maximum level fires an ABOVE control set higher)."""
         out = status.clone()
+        if self._curved:
+            phi = (self.bottom + level) * self.head_scale
+            volume = self.storage.amount(phi)
+            margin = (torch.zeros_like(volume) if inflow is None
+                      else inflow.detach().abs().expand(volume.shape))
         for control in self.controls:
             i = self.tank_of[control.node]
             j = self.pump_of[control.link]
-            value = level[..., i]
-            fires = value > control.value if control.above else value < control.value
+            if self._curved:
+                at = level.new_full(level.shape, control.value)
+                v2 = self.storage.amount((self.bottom + at) * self.head_scale)[..., i]
+                v1, vplus = volume[..., i], margin[..., i]
+                fires = v1 >= v2 - vplus if control.above else v1 <= v2 + vplus
+            else:
+                value = level[..., i]
+                fires = value > control.value if control.above else value < control.value
             new = 1.0 if control.status == OPEN else 0.0
             out[..., j] = torch.where(fires, torch.full_like(out[..., j], new), out[..., j])
         return out
