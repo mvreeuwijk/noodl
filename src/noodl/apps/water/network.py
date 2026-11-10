@@ -305,6 +305,18 @@ class WaterNetwork:
             + [t.name for t in self.tanks]
         )
 
+    def fixed_head_nodes(self) -> tuple:
+        """The nodes that hold a head for the cut-off analysis: the reservoirs, the tanks and
+        the junctions with an emitter. An emitter ``q = C p^n`` ties its junction's head to
+        the junction's elevation as a reservoir there would (EPANET models it as a
+        fictitious pipe to a reservoir at that elevation, `hydcoeffs.c`, `emittercoeffs`), and
+        at negative pressure it can supply a demand: a part of the network that holds one is
+        neither cut off nor without a head of its own, and the Newton solve finds its heads.
+        """
+        with_emitter = {e.node for e in self.emitters}
+        return (*self.reservoirs, *self.tanks,
+                *(j for j in self.junctions if j.name in with_emitter))
+
     def links(self) -> list:
         """Every link, in the kind order the layer's law list uses."""
         return [*self.pipes, *self.pumps,
@@ -930,7 +942,7 @@ def build_model(
             kappa=getattr(pipe, "scale", 1.0) * slope.detach(), links=link_slice["pipe"],
             ends=[(node_names.index(link.u), node_names.index(link.v))
                   for link in net.links()],
-            fixed=[node_names.index(n.name) for n in (*net.reservoirs, *net.tanks)],
+            fixed=[node_names.index(n.name) for n in net.fixed_head_nodes()],
             shut_links=shut_links, kind="pipe")
     if net.pumps:
         pump_law, q_design_list = _pump_law(net, link_slice["pump"], scale, epanet_cfs)
@@ -946,7 +958,7 @@ def build_model(
             links=link_slice["pump"],
             ends=[(node_names.index(link.u), node_names.index(link.v))
                   for link in net.links()],
-            fixed=[node_names.index(n.name) for n in (*net.reservoirs, *net.tanks)],
+            fixed=[node_names.index(n.name) for n in net.fixed_head_nodes()],
             shut_links=shut_links, kind="pump"))
     rounded_cfs = _rounded_cfs_per_m3s(options.flow_units)
 
@@ -1032,7 +1044,7 @@ def build_model(
                              dtype=F64),
                 torch.tensor([by_node[e.node].elevation * scale for e in net.emitters],
                              dtype=F64),
-                exponent=exponent_e,
+                exponent=exponent_e, dp_transition=1e-9 * scale,
             )
         )
         notes["emitters"] = (
@@ -1585,7 +1597,7 @@ def _cut_off_groups(net: WaterNetwork, open_links: tuple, demand: tuple) -> _Cut
         if is_open:
             groups.union(index[link.u], index[link.v])
     group = [groups.find(i) for i in range(n)]
-    fed = {group[index[f.name]] for f in (*net.reservoirs, *net.tanks)}
+    fed = {group[index[f.name]] for f in net.fixed_head_nodes()}
     cut = [g for g in dict.fromkeys(group) if g not in fed]
     fed_none = tuple(j.name for j, d in zip(net.junctions, demand, strict=True)
                      if d and group[index[j.name]] not in fed)
@@ -1628,7 +1640,7 @@ def _topology(model: Model) -> tuple[tuple, tuple]:
         index = {name: i for i, name in enumerate(model.node_names)}
         found = model._link_topology = (
             tuple((index[k.u], index[k.v]) for k in net.links()),
-            tuple(index[f.name] for f in (*net.reservoirs, *net.tanks)))
+            tuple(index[f.name] for f in net.fixed_head_nodes()))
     return found
 
 

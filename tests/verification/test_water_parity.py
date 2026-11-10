@@ -23,7 +23,7 @@ from pathlib import Path
 import pytest
 import torch
 
-from noodl.apps.water.demand import EmitterOutflow
+from noodl.apps.water.demand import EmitterOutflow, PressureDrivenDemand
 from noodl.apps.water.inp import read_epanet_inp
 from noodl.apps.water.network import (
     build_model,
@@ -2266,3 +2266,133 @@ def test_emitter_coefficient_gradient_against_central_differences(tmp_path):
     eps = 1e-4
     numeric = (float(head_at(1 + eps)[0]) - float(head_at(1 - eps)[0])) / (2 * eps * c4)
     assert abs(analytic - numeric) < 1e-8 * abs(numeric), (analytic, numeric)
+
+
+def _series_text(junctions, pipes, emitters, *, head="H-W", options=""):
+    """R1 (50 m) and the junctions `(name, elevation, demand)`, pipes
+    `(name, from, to, status)` (1000 m, 200 mm, C = 100) and emitters `(junction, coefficient)`,
+    as LPS `.inp` text with EPANET run to ACCURACY 1e-8."""
+    return ("[JUNCTIONS]\n" + "".join(f" {n} {z} {d}\n" for n, z, d in junctions)
+            + "[RESERVOIRS]\n R1 50\n[PIPES]\n"
+            + "".join(f" {n} {a} {b} 1000 200 100 0 {s}\n" for n, a, b, s in pipes)
+            + "[EMITTERS]\n" + "".join(f" {n} {c}\n" for n, c in emitters)
+            + "[TIMES]\n Duration 0:00\n[OPTIONS]\n Units LPS\n Headloss " + head
+            + "\n Accuracy 1e-8\n HEADERROR 1e-9\n FLOWCHANGE 1e-9\n Trials 500\n"
+            + options + "[END]\n")
+
+
+_BEHIND_A_CLOSED_PIPE = {
+    # the reviewer's repro: the emitter drains J2 toward its elevation, J2 = 0 m
+    "emitter-only-junction": (
+        (("J1", 0, 0), ("J2", 0, 0)),
+        (("P1", "R1", "J1", "Open"), ("P2", "J1", "J2", "Closed")), (("J2", 1.0),)),
+    # an emitter junction and a zero-demand junction joined by an open pipe
+    "emitter-and-zero-demand-junction": (
+        (("J1", 0, 0), ("J2", 0, 0), ("J3", 0, 0)),
+        (("P1", "R1", "J1", "Open"), ("P2", "J1", "J2", "Closed"), ("P3", "J2", "J3", "Open")),
+        (("J2", 1.0),)),
+    # a demand supplied only by the emitter's INFLOW at negative pressure (J2 = -25 m)
+    "demand-fed-by-an-emitter-inflow": (
+        (("J1", 0, 0), ("J2", 0, 5)),
+        (("P1", "R1", "J1", "Open"), ("P2", "J1", "J2", "Closed")), (("J2", 1.0),)),
+}
+
+
+@pytest.mark.parametrize("case", list(_BEHIND_A_CLOSED_PIPE))
+def test_emitters_behind_a_closed_pipe_match_epanet(tmp_path, case):
+    """An emitter ties its junction's head to the junction's elevation as a reservoir there
+    would, so the part of the network behind a closed pipe that holds one is neither "without
+    a head" (the limit head EPANET gives a zero-demand part, tied to the other side of the
+    closed link) nor "cut off" (refused when it has a demand): the solve finds its heads.
+    Heads 1e-6 relative to the 50 m reservoir, flows 1e-6 m3/s, every link's state as
+    EPANET's. Before `WaterNetwork.fixed_head_nodes` the first case gave J2 = 49.976 m,
+    EPANET's 0."""
+    junctions, pipes, emitters = _BEHIND_A_CLOSED_PIPE[case]
+    path, results = _run_inp(tmp_path, _series_text(junctions, pipes, emitters), case)
+    net = _emitters_as_epanet(read_epanet_inp(path))
+    model, state, drivers = build_model(net)
+    drivers = _as_epanet(drivers)
+    final = water_steady(model, state, drivers)
+    heads = results.node["head"].loc[0]
+    worst_h = max(abs(float(final["water.phi"][i]) - float(heads[name]))
+                  for i, name in enumerate(model.node_names))
+    # The third case is 6.92e-4 m (2.8e-5 relative to its 25 m) apart, with the cause
+    # measured: EPANET gives the closed P2 the conductance `1 / CBIG` (`hydcoeffs.c`,
+    # `pipecoeff`), so the 75 m across it leaks 7e-5 LPS, 1.4e-5 of the 5 LPS demand the
+    # emitter supplies, which shifts the emitter's head by twice that; this model's closed
+    # link carries exactly zero. The first two are 1e-6 relative to the 50 m reservoir.
+    tolerance = 1e-3 if case == "demand-fed-by-an-emitter-inflow" else 1e-6 * 50
+    assert worst_h < tolerance, worst_h
+    reference = results.link["flowrate"].loc[0]
+    for i, name in enumerate(model.link_names):
+        assert abs(float(final["water.q"][i]) - float(reference[name])) < 1e-6, name
+    states = link_states(model, final, drivers).tolist()
+    status = results.link["status"].loc[0]
+    assert states == [int(status[name]) for name in model.link_names]
+
+
+def test_a_check_valve_on_a_chezy_manning_network_matches_epanet(tmp_path):
+    """P4 (J3 -> J1) as a check valve closes (its water runs the other way) and P5 stays
+    open, on the two-loop with `HEADLOSS C-M`, roughness 0.011; P7 closed by `[STATUS]`.
+    Heads and flows 1e-6, every link state as EPANET's."""
+    text = (DATA / "twoloop_si.inp").read_text()
+    for old, new in (_pipe_status_edit("P4", "CV"), _pipe_status_edit("P5", "CV"),
+                     ("[STATUS]\n;ID              \tStatus/Setting",
+                      "[STATUS]\n;ID              \tStatus/Setting\n P7              \tClosed")):
+        assert old in text, old
+        text = text.replace(old, new)
+    text = text.replace("130         \t0", "0.011       \t0").replace("\tH-W", "\tC-M")
+    assert text.count("0.011") == 8 and text.count("CV") >= 2
+    path, results = _run_inp(tmp_path, text, "cm-cv")
+    net = read_epanet_inp(path)
+    assert net.headloss == "C-M"
+    model, state, drivers = build_model(net)
+    final = water_steady(model, state, drivers)
+    _compare_with_epanet(model, final, drivers, results)
+
+
+def test_an_emitter_with_pressure_driven_demand_on_one_junction_matches_epanet(tmp_path):
+    """`DEMAND MODEL PDA` (REQUIRED PRESSURE 60 m) and emitters at J4 and J6 together on the
+    two-loop. EPANET's reported demand is the pressure-driven demand plus the emitter flow."""
+    text = (DATA / "twoloop_si.inp").read_text().replace(*_EMITTERS[0])
+    text = text.replace(*_PDA_EDIT)
+    path, results = _run_inp(tmp_path, text, "pda-emitter")
+    net = read_epanet_inp(path)
+    model, state, drivers = build_model(_emitters_as_epanet(net))
+    final = water_steady(model, state, _as_epanet(drivers))
+    _compare_with_epanet(model, final, drivers, results, heads=1e-5)
+    layer = model.kirchhoff["water"]
+    demand = next(w for w in layer.withdrawals if isinstance(w, PressureDrivenDemand))
+    pda = demand.flow(final["water.phi"][..., demand.nodes]).detach()
+    emitted = _emitter_flows(model, final)
+    reported = results.node["demand"].loc[0]
+    for k, j in enumerate(net.junctions):
+        total = float(pda[k]) + emitted.get(j.name, 0.0)
+        assert abs(total - float(reported[j.name])) < 1e-5, (j.name, total)
+
+
+def test_emitters_on_a_darcy_weisbach_network_match_epanet(tmp_path):
+    """The pressure layer (Pa): emitters at J4 and J6 on the D-W two-loop, with EPANET's flow
+    unit (`_emitters_as_epanet`)."""
+    text = (DATA / "twoloop_si.inp").read_text().replace(*_EMITTERS[0])
+    for old, new in _DW_TWO_LOOP:
+        assert old in text, old
+        text = text.replace(old, new)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        path, results = _run_inp(tmp_path, text, "dw-emitters")
+    net = read_epanet_inp(path)
+    assert net.headloss == "D-W"
+    model, state, drivers = build_model(_emitters_as_epanet(net))
+    final = water_steady(model, state, drivers)
+    heads = results.node["head"].loc[0]
+    scale = model.head_scale
+    worst_h = max(abs(float(final["water.phi"][i]) / scale - float(heads[name]))
+                  / (abs(float(heads[name])) or 1.0)
+                  for i, name in enumerate(model.node_names) if name != "R1")
+    assert worst_h < 1e-5, worst_h
+    emitted = _emitter_flows(model, final)
+    demands = results.node["demand"].loc[0]
+    base = {j.name: j.demand for j in net.junctions}
+    for name, flow in emitted.items():
+        assert abs(flow - (float(demands[name]) - base[name])) < 1e-5, (name, flow)

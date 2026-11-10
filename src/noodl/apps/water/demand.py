@@ -99,8 +99,12 @@ class EmitterOutflow(NodeWithdrawal):
     flow above, which is what a potential-dependent withdrawal needs.
 
     EPANET linearises the fictitious pipe where its gradient falls below ``RQtol``; this
-    law instead is linear below ``dp_transition`` (m) in the pressure, tangent to the power
-    law there, which keeps the slope at ``p = 0`` finite as `HazenWilliams` does. Both
+    law instead is linear below ``dp_transition`` in the pressure, tangent to the power
+    law there, which keeps the slope at ``p = 0`` finite as `HazenWilliams` does.
+    ``dp_transition`` is in the units of ``phi`` (the layer's potential); `build_model` gives
+    it as 1e-9 m of head whatever the layer's unit (times ``rho g`` on a pressure layer,
+    whose ``elevation`` and ``coefficient`` it also scales), so the transition is the same
+    physical head difference on a Hazen-Williams, Chezy-Manning or Darcy-Weisbach network. Both
     branches of the ``torch.where`` are finite (the base fed to the power on the linear side
     is the constant ``dp_transition``), as `PressureDrivenDemand` does.
     """

@@ -664,20 +664,15 @@ def test_emitter_outflow_is_signed_with_the_pressure_and_finite_at_zero():
     assert torch.isfinite(zero.grad).all() and bool((zero.grad > 0).all())
 
 
-def test_chezy_manning_constant_is_epanets():
-    """`R = (4 n / (1.49 pi d^2))^2 (d / 4)^-1.333 L` in feet and cfs (`hydcoeffs.c`,
-    `resistcoeff`), `h = R q^2`."""
-    import math as m
+def test_chezy_manning_head_loss_is_epanets_written_out_in_feet():
+    """One pipe (L = 500 m, d = 0.3 m, n = 0.011) at 0.05 m3/s, worked by hand in EPANET's
+    feet and cfs (`hydcoeffs.c`, `resistcoeff`): d = 0.984252 ft, L = 1640.4199 ft,
+    R = (4 n / (1.49 pi d^2))^2 (d/4)^-1.333 L = 1.00114786 s^2/ft^5; q = 1.76573334 cfs;
+    h = R q^2 = 3.12139304 ft = 0.95140060 m."""
+    from noodl.apps.water.elements import ChezyManning
 
-    from noodl.apps.water.elements import M_PER_FT, ChezyManning
-
-    d, length, n = 0.3, 500.0, 0.011
-    law = ChezyManning(torch.tensor([length], dtype=F64), torch.tensor([d], dtype=F64),
-                       torch.tensor([n], dtype=F64))
-    q = 0.05
-    d_ft, l_ft = d / M_PER_FT, length / M_PER_FT
-    r = (4.0 * n / (1.49 * m.pi * d_ft**2)) ** 2 * (d_ft / 4.0) ** -1.333 * l_ft
-    expected = M_PER_FT * r * (q / M_PER_FT**3) ** 2
-    got = law.head_loss(torch.tensor([q], dtype=F64)).item()
-    assert got == pytest.approx(expected, rel=1e-12)
-    assert law.head_loss(torch.tensor([-q], dtype=F64)).item() == pytest.approx(-expected)
+    law = ChezyManning(torch.tensor([500.0], dtype=F64), torch.tensor([0.3], dtype=F64),
+                       torch.tensor([0.011], dtype=F64))
+    h = law.head_loss(torch.tensor([0.05], dtype=F64)).item()
+    assert h == pytest.approx(0.95140060, abs=1e-8)
+    assert law.head_loss(torch.tensor([-0.05], dtype=F64)).item() == pytest.approx(-h)
