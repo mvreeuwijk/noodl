@@ -73,3 +73,11 @@ class Rule:
     then_actions: tuple[Action, ...]
     else_actions: tuple[Action, ...]
     priority: float = 0.0
+
+
+_STATUS_WORDS = {"CLOSED": CLOSED, "OPEN": OPEN, "ACTIVE": ACTIVE}
+
+
+def status_code(word: str) -> int | None:
+    """The status code of the word `OPEN`, `CLOSED` or `ACTIVE` (any case), else `None`."""
+    return _STATUS_WORDS.get(word.upper())

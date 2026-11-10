@@ -721,3 +721,85 @@ def test_a_check_valve_pipe_is_read_and_refused_by_validate(tmp_path):
     assert cv.pipes[0].status == "CV"
     with pytest.raises(ValueError, match="check valve"):
         cv.validate()
+
+
+# ------------------------------------------------------------- review fix round 1
+def test_a_us_emitter_coefficient_honours_the_emitter_exponent(tmp_path):
+    """q = C p^n: C_si = f C_us / PSI_TO_M**n for any n (EPANET `convertunits`), not sqrt."""
+    path = _edit(
+        tmp_path, "Net1.inp",
+        (" Emitter Exponent   	0.5", " Emitter Exponent   	0.6"),
+        ("[CURVES]", "[EMITTERS]\n 10 2.0\n\n[CURVES]"),
+    )
+    net = read_epanet_inp(path)
+    assert net.options.emitter_exponent == 0.6
+    expected = 2.0 * FLOW_UNITS["GPM"] / PSI_TO_M**0.6
+    assert net.emitters[0].coefficient == pytest.approx(expected, rel=1e-15)
+    # the SI value reproduces the file's flow at a pressure of 10 psi
+    head = 10 * PSI_TO_M
+    assert net.emitters[0].coefficient * head**0.6 == pytest.approx(
+        2.0 * 10**0.6 * FLOW_UNITS["GPM"], rel=1e-12
+    )
+
+
+def test_a_control_time_takes_an_optional_unit(tmp_path):
+    def control(time):
+        path = _edit(tmp_path, "Net1.inp",
+                     ("[CONTROLS]", f"[CONTROLS]\n LINK 9 OPEN AT TIME {time}"))
+        return read_epanet_inp(path).controls[0]
+
+    assert control("90 MIN").value == 5400.0
+    assert control("2 HOURS").value == 7200.0
+    assert control("2").value == 7200.0
+    assert control("1:30").value == 5400.0
+    with pytest.raises(ValueError, match="unknown time unit"):
+        control("90 FURLONGS")
+
+
+def test_a_rule_system_time_takes_an_optional_unit_and_grade_is_head(tmp_path):
+    rules = ("[RULES]\nRULE R1\nIF SYSTEM TIME > 90 MIN\nAND NODE J1 GRADE < 30\n"
+             "THEN LINK P3 STATUS IS OPEN\n\n[CURVES]")
+    net = read_epanet_inp(_edit(tmp_path, "twoloop_si.inp", ("[CURVES]", rules)))
+    time, grade = net.rules[0].premises
+    assert time.value == 5400.0
+    assert (grade.attribute, grade.value) == ("HEAD", 30.0)
+    bad = rules.replace("90 MIN", "90 FURLONGS")
+    with pytest.raises(ValueError, match="unknown time unit"):
+        read_epanet_inp(_edit(tmp_path, "twoloop_si.inp", ("[CURVES]", bad)))
+
+
+def test_status_active_on_a_pump_or_pipe_control_is_refused_by_check(tmp_path):
+    path = _edit(tmp_path, "Net1.inp", ("[CONTROLS]", "[CONTROLS]\n LINK 9 ACTIVE AT TIME 2"))
+    with pytest.raises(ValueError, match="ACTIVE"):
+        read_epanet_inp(path)
+
+
+def test_an_energy_pattern_that_does_not_exist_is_refused(tmp_path):
+    path = _edit(tmp_path, "Net1.inp",
+                 ("[END]", "[ENERGY]\n Global Pattern NOPE\n\n[END]"))
+    with pytest.raises(ValueError, match="NOPE"):
+        read_epanet_inp(path)
+
+
+def test_the_rule_timestep_follows_the_hydraulic_step_and_is_capped(tmp_path):
+    net = _times(tmp_path, "Hydraulic Timestep 1")
+    assert net.rule_timestep == 360.0
+    longer = dataclasses.replace(net, hydraulic_timestep=7200.0)
+    assert longer.rule_timestep == 720.0  # not stale after `replace`
+    assert _times(tmp_path, "Hydraulic Timestep 1\nRule Timestep 2").rule_timestep == 3600.0
+    assert _times(tmp_path, "Hydraulic Timestep 1\nRule Timestep 0:05").rule_timestep == 300.0
+
+
+def test_unrecognised_times_are_recorded_and_the_tank_minimum_volume_is_read(tmp_path):
+    net = _times(tmp_path, "Quality Timestep 0:05\nStatistic NONE")
+    assert net.notes["unrecognised_times"] == "Quality Timestep 0:05; Statistic NONE"
+    assert "unrecognised_times" not in _times(tmp_path, "Hydraulic Timestep 1").notes
+    path = _edit(
+        tmp_path, "Net1.inp",
+        (" 2               \t850         \t120         \t100         \t150         "
+         "\t50.5        \t0           \t                \t;",
+         " 2               \t850         \t120         \t100         \t150         "
+         "\t50.5        \t5000        \t                \t;"),
+    )
+    assert read_epanet_inp(path).tanks[0].min_volume == pytest.approx(5000 * FOOT**3, rel=1e-15)
+    assert read_epanet_inp(DATA / "twoloop_si.inp").tanks == ()

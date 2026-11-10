@@ -50,8 +50,10 @@ from dataclasses import replace
 from pathlib import Path
 
 from noodl.apps.inpfile import as_float, read_sections, require_fields
-from noodl.apps.water.controls import ACTIVE, CLOSED, OPEN, Action, Control, Premise, Rule
+from noodl.apps.water.controls import Control, status_code
 from noodl.apps.water.elements import NU_WATER_FT2
+from noodl.apps.water.inp_rules import read_rules
+from noodl.apps.water.inp_times import clock_time, time_with_unit
 from noodl.apps.water.network import (
     Emitter,
     EnergyOptions,
@@ -104,268 +106,6 @@ _READ = frozenset(
 )
 #: Horsepower in kW (`wntr`'s `HydParam.Power`, 745.699872 W per hp).
 HP_TO_KW = 0.745699872
-_STATUS_CODES = {"CLOSED": CLOSED, "OPEN": OPEN, "ACTIVE": ACTIVE}
-
-
-def _time(text: str, path, line) -> float:
-    """`HH:MM`, `HH:MM:SS` or a bare number of HOURS -> seconds (Appendix C.2.24)."""
-    if ":" in text:
-        parts = text.split(":")
-        if len(parts) > 3:
-            raise ValueError(
-                f"{path}: line {line.number}: {text!r} is not a time of the form "
-                f"HH:MM[:SS]"
-            )
-        try:
-            values = [float(part) for part in parts]
-        except ValueError as exc:
-            raise ValueError(
-                f"{path}: line {line.number}: {text!r} is not a time of the form "
-                f"HH:MM[:SS]"
-            ) from exc
-        while len(values) < 3:
-            values.append(0.0)
-        return values[0] * 3600.0 + values[1] * 60.0 + values[2]
-    try:
-        return float(text) * 3600.0
-    except ValueError as exc:
-        raise ValueError(
-            f"{path}: line {line.number}: {text!r} is not a duration"
-        ) from exc
-
-
-# EPANET (input3.c `hour`, `match`) takes a unit token whose FIRST characters are SEC, MIN, HOU
-# or DAY, case-insensitively: MINS, SECS, HOUR, HOURS, HOU and DAYSX all match.
-_TIME_UNITS = (("SEC", 1.0), ("MIN", 60.0), ("HOU", 3600.0), ("DAY", 86400.0))
-
-
-def _time_unit_scale(token: str) -> float | None:
-    """Seconds per unit for `token`, by EPANET's leading-characters rule, else None."""
-    upper = token.upper()
-    for prefix, scale in _TIME_UNITS:
-        if upper.startswith(prefix):
-            return scale
-    return None
-
-
-def _time_with_unit(fields, index: int, path, line) -> float:
-    """A `[TIMES]` value `fields[index]` with its optional unit token `fields[index + 1]`.
-
-    A bare number without a unit is HOURS (Appendix C.2.24); a unit token starting SEC, MIN,
-    HOU or DAY (EPANET's rule, any case: MINS, SECS, HOU) scales it. A clock time
-    (`HH:MM[:SS]`) carries no unit. Any other trailing
-    token is refused rather than read as a different duration.
-    """
-    if index >= len(fields):
-        raise ValueError(f"{path}: line {line.number}: [TIMES] entry has no value")
-    value, extra = fields[index], list(fields[index + 1:])
-    if not extra:
-        return _time(value, path, line)
-    if len(extra) > 1 or ":" in value:
-        raise ValueError(
-            f"{path}: line {line.number}: cannot read {' '.join(fields[index:])!r} as a "
-            f"time: expected HH:MM[:SS] or a number with an optional unit"
-        )
-    scale = _time_unit_scale(extra[0])
-    if scale is None:
-        raise ValueError(
-            f"{path}: line {line.number}: unknown time unit {extra[0]!r}; use SECONDS, "
-            f"MINUTES, HOURS or DAYS"
-        )
-    try:
-        return float(value) * scale
-    except ValueError as exc:
-        raise ValueError(
-            f"{path}: line {line.number}: {value!r} is not a duration"
-        ) from exc
-
-
-def _clock_time(text: str, meridiem: str | None, path, line) -> float:
-    """A clock time of day, `H[:MM[:SS]]` with an optional `AM`/`PM`, in seconds after
-    midnight. `12 AM` is 0 and `12 PM` is noon; without a meridiem the time is on the 24-hour
-    clock (`18` is 6 PM), as EPANET reads it (`input3.c`, `gettime` and `hour`)."""
-    seconds = _time(text, path, line)
-    if meridiem is None:
-        return seconds % 86400.0
-    upper = meridiem.upper()
-    if upper not in ("AM", "PM") or seconds >= 13 * 3600.0:
-        raise ValueError(
-            f"{path}: line {line.number}: {text} {meridiem!r} is not a clock time; use "
-            f"H[:MM[:SS]] with AM or PM, or the 24-hour clock without"
-        )
-    if upper == "AM":
-        return seconds - 12 * 3600.0 if seconds >= 12 * 3600.0 else seconds
-    return seconds + 12 * 3600.0 if seconds < 12 * 3600.0 else seconds
-
-
-_RULE_KEYWORDS = ("RULE", "IF", "THEN", "ELSE", "AND", "OR", "PRIORITY")
-_RULE_RELATIONS = {
-    "=": "=", "IS": "=", "<>": "<>", "NOT": "<>", "<": "<", "BELOW": "<", ">": ">",
-    "ABOVE": ">", "<=": "<=", ">=": ">=",
-}
-
-
-def _read_rules(
-    lines, path, *, flow, length, pressure, power, junctions, tanks, reservoirs,
-    link_kinds, link_setting,
-) -> list[Rule]:
-    """The `[RULES]` section as `Rule`s, in SI (Appendix C.2.19).
-
-    A rule is `RULE <id>`, one `IF` and any number of `AND`/`OR` premises, one `THEN` and
-    any number of `AND` actions, optionally `ELSE` with its own, and an optional `PRIORITY`.
-    Clauses may be broken over lines anywhere, so the words are split at the keywords
-    `RULE IF THEN ELSE AND OR PRIORITY` as `wntr` does. A premise is `<NODE|LINK|SYSTEM> <id>
-    <attribute> <relation> <value>` (no id after SYSTEM); its value is converted by its
-    attribute: DEMAND and FLOW by the flow unit, HEAD and LEVEL as lengths, PRESSURE as a
-    pressure, POWER to kW, FILLTIME and DRAINTIME from hours, TIME and CLOCKTIME to seconds,
-    a link's SETTING as the link kind's setting and a STATUS to its code.
-    """
-    clauses: list[tuple[str, list[str], object]] = []
-    for line in lines:
-        for word in line.fields:
-            if word.upper() in _RULE_KEYWORDS:
-                clauses.append((word.upper(), [], line))
-            elif clauses:
-                clauses[-1][1].append(word)
-            else:
-                raise ValueError(f"{path}: line {line.number}: [RULES] content "
-                                 f"{line.raw.strip()!r} before the first RULE")
-
-    def node_scale(kind: str, node: str, attribute: str, line) -> float:
-        if attribute in ("DEMAND",):
-            return flow
-        if attribute in ("HEAD", "LEVEL"):
-            return length
-        if attribute == "PRESSURE":
-            return pressure
-        if attribute in ("FILLTIME", "DRAINTIME"):
-            return 3600.0
-        raise ValueError(f"{path}: line {line.number}: unknown node attribute {attribute!r} "
-                         f"in a rule")
-
-    def number(text: str, line) -> float:
-        try:
-            return float(text)
-        except ValueError as exc:
-            raise ValueError(f"{path}: line {line.number}: {text!r} is not a number in a "
-                             f"rule") from exc
-
-    def premise(conjunction: str, words: list[str], line) -> Premise:
-        if not words:
-            raise ValueError(f"{path}: line {line.number}: an empty {conjunction} clause")
-        kind = words[0].upper()
-        if kind == "SYSTEM":
-            ident, rest = "", words[1:]
-            category = "SYSTEM"
-        elif kind in ("NODE", "JUNCTION", "RESERVOIR", "TANK"):
-            ident, rest, category = (words[1] if len(words) > 1 else ""), words[2:], "NODE"
-        elif kind in ("LINK", "PIPE", "PUMP", "VALVE"):
-            ident, rest, category = (words[1] if len(words) > 1 else ""), words[2:], "LINK"
-        else:
-            raise ValueError(f"{path}: line {line.number}: a rule premise starts with NODE, "
-                             f"LINK or SYSTEM, got {words[0]!r}")
-        if len(rest) < 3:
-            raise ValueError(f"{path}: line {line.number}: a rule premise needs an "
-                             f"attribute, a relation and a value, got {' '.join(words)!r}")
-        attribute, relation = rest[0].upper(), _RULE_RELATIONS.get(rest[1].upper())
-        if relation is None:
-            raise ValueError(f"{path}: line {line.number}: unknown relation {rest[1]!r} in a "
-                             f"rule")
-        text = rest[2]
-        if category == "SYSTEM":
-            if attribute == "TIME":
-                value = _time(text, path, line)
-            elif attribute == "CLOCKTIME":
-                value = _clock_time(text, rest[3] if len(rest) > 3 else None, path, line)
-            elif attribute == "DEMAND":
-                value = number(text, line) * flow
-            elif attribute == "DAY":
-                value = number(text, line)
-            else:
-                raise ValueError(f"{path}: line {line.number}: unknown SYSTEM attribute "
-                                 f"{attribute!r} in a rule")
-        elif category == "NODE":
-            if ident not in junctions and ident not in tanks and ident not in reservoirs:
-                raise ValueError(f"{path}: line {line.number}: a rule names node {ident!r}, "
-                                 f"which is not a node of this network")
-            value = number(text, line) * node_scale(kind, ident, attribute, line)
-        else:
-            if ident not in link_kinds:
-                raise ValueError(f"{path}: line {line.number}: a rule names link {ident!r}, "
-                                 f"which is not a link of this network")
-            if attribute == "STATUS":
-                code = _STATUS_CODES.get(text.upper())
-                if code is None:
-                    raise ValueError(f"{path}: line {line.number}: a link STATUS is OPEN, "
-                                     f"CLOSED or ACTIVE, got {text!r}")
-                value = float(code)
-            elif attribute == "FLOW":
-                value = number(text, line) * flow
-            elif attribute == "POWER":
-                value = number(text, line) * power
-            elif attribute == "SETTING":
-                value = link_setting(ident, number(text, line), line)
-            else:
-                raise ValueError(f"{path}: line {line.number}: unknown link attribute "
-                                 f"{attribute!r} in a rule")
-        return Premise(conjunction, category, ident, attribute, relation, value)
-
-    def action(words: list[str], line) -> Action:
-        if len(words) != 5 or words[3].upper() != "IS":
-            raise ValueError(f"{path}: line {line.number}: a rule action reads 'LINK <id> "
-                             f"STATUS|SETTING IS <value>', got {' '.join(words)!r}")
-        if words[0].upper() not in ("LINK", "PIPE", "PUMP", "VALVE"):
-            raise ValueError(f"{path}: line {line.number}: a rule action acts on a link, "
-                             f"got {words[0]!r}")
-        link, attribute, text = words[1], words[2].upper(), words[4]
-        if link not in link_kinds:
-            raise ValueError(f"{path}: line {line.number}: a rule acts on link {link!r}, "
-                             f"which is not a link of this network")
-        if attribute == "STATUS":
-            code = _STATUS_CODES.get(text.upper())
-            if code is None:
-                raise ValueError(f"{path}: line {line.number}: a link STATUS is OPEN, "
-                                 f"CLOSED or ACTIVE, got {text!r}")
-            return Action(link, "STATUS", float(code))
-        if attribute == "SETTING":
-            return Action(link, "SETTING", link_setting(link, number(text, line), line))
-        raise ValueError(f"{path}: line {line.number}: a rule action sets STATUS or SETTING, "
-                         f"got {words[2]!r}")
-
-    rules: list[Rule] = []
-    current: dict | None = None
-    mode = ""
-    for keyword, words, line in clauses:
-        if keyword == "RULE":
-            if len(words) != 1:
-                raise ValueError(f"{path}: line {line.number}: RULE takes one name")
-            current = {"name": words[0], "if": [], "then": [], "else": [], "priority": 0.0}
-            rules.append(current)  # type: ignore[arg-type]
-            mode = "RULE"
-            continue
-        if current is None:
-            raise ValueError(f"{path}: line {line.number}: {keyword} before the first RULE")
-        if keyword == "IF":
-            mode = "IF"
-            current["if"].append(premise("IF", words, line))
-        elif keyword in ("AND", "OR") and mode == "IF":
-            current["if"].append(premise(keyword, words, line))
-        elif keyword == "THEN" or (keyword == "AND" and mode == "THEN"):
-            mode = "THEN"
-            current["then"].append(action(words, line))
-        elif keyword == "ELSE" or (keyword == "AND" and mode == "ELSE"):
-            mode = "ELSE"
-            current["else"].append(action(words, line))
-        elif keyword == "PRIORITY":
-            if len(words) != 1:
-                raise ValueError(f"{path}: line {line.number}: PRIORITY takes one number")
-            current["priority"] = number(words[0], line)
-        else:
-            raise ValueError(f"{path}: line {line.number}: {keyword} out of place in a rule")
-    return [
-        Rule(r["name"], tuple(r["if"]), tuple(r["then"]), tuple(r["else"]), r["priority"])
-        for r in rules  # type: ignore[index]
-    ]
 
 
 def read_epanet_inp(path) -> WaterNetwork:
@@ -577,6 +317,9 @@ def read_epanet_inp(path) -> WaterNetwork:
                 diameter,
                 volume_curve,
                 overflow,
+                # MinVol (column 7), a volume: ft3 in a US file, m3 in an SI one
+                as_float(line, 6, "the minimum volume", path) * length_scale**3
+                if len(line.fields) > 6 else 0.0,
             )
         )
 
@@ -710,7 +453,7 @@ def read_epanet_inp(path) -> WaterNetwork:
         if len(upper) < 6:
             raise ValueError(form)
         link = line.fields[1]
-        status: int | None = _STATUS_CODES.get(upper[2])
+        status: int | None = status_code(upper[2])
         setting: float | None = None
         if status is None:
             try:
@@ -723,11 +466,11 @@ def read_epanet_inp(path) -> WaterNetwork:
             setting = link_setting(link, number, line)
         if upper[3] == "AT" and upper[4] == "TIME":
             controls.append(Control(link, status, setting, "time",
-                                    value=_time(line.fields[5], path, line)))
+                                    value=time_with_unit(line.fields, 5, path, line)))
         elif upper[3] == "AT" and upper[4] == "CLOCKTIME":
             meridiem = line.fields[6] if len(line.fields) > 6 else None
             controls.append(Control(link, status, setting, "clocktime",
-                                    value=_clock_time(line.fields[5], meridiem, path, line)))
+                                    value=clock_time(line.fields[5], meridiem, path, line)))
         elif upper[3] == "IF" and upper[4] == "NODE":
             if len(upper) < 8:
                 raise ValueError(form)
@@ -750,17 +493,19 @@ def read_epanet_inp(path) -> WaterNetwork:
     for line in sections.get("STATUS", []):
         require_fields(line, 2, "a status", path)
         word = line.fields[1].upper()
-        if word in _STATUS_CODES:
+        if status_code(word) is not None:
             initial_status[line.fields[0]] = word
         else:
             initial_status[line.fields[0]] = link_setting(
                 line.fields[0], as_float(line, 1, "the setting", path), line
             )
 
-    # `[EMITTERS]`: the coefficient is a flow per square root of pressure, in the file's flow
-    # unit per psi^0.5 (US) or per m^0.5 (SI). `wntr`'s `HydParam.EmitterCoeff` multiplies a
-    # US value by `sqrt(0.4333 / 0.3048)`, i.e. divides by `sqrt(PSI_TO_M)`, the same psi to
-    # metres of head used for every other pressure here.
+    # `[EMITTERS]`: q = C p^n with n = `EMITTER EXPONENT`, C in the file's flow unit per
+    # psi^n (US) or per m^n (SI). In SI, q [m3/s] = f C_us (p_psi)^n and p_psi = p_m / PSI_TO_M,
+    # so C_si = f C_us / PSI_TO_M**n (EPANET `input1.c` `convertunits`: `ucf = pow(Ucf[FLOW],
+    # Qexp) / Ucf[PRESSURE]`). `wntr`'s `HydParam.EmitterCoeff` hard-codes n = 1/2 and is not
+    # the reference. The exponent is an `[OPTIONS]` value, read above whatever the file's
+    # section order.
     emitters: list[Emitter] = []
     for line in sections.get("EMITTERS", []):
         require_fields(line, 2, "an emitter", path)
@@ -771,10 +516,10 @@ def read_epanet_inp(path) -> WaterNetwork:
             )
         coefficient = as_float(line, 1, "the emitter coefficient", path) * flow
         if us:
-            coefficient = coefficient / PSI_TO_M**0.5
+            coefficient = coefficient / PSI_TO_M**emitter_exponent
         emitters.append(Emitter(line.fields[0], coefficient))
 
-    rules = _read_rules(
+    rules = read_rules(
         sections.get("RULES", []), path, flow=flow, length=length_scale,
         pressure=pressure_scale, power=HP_TO_KW if us else 1.0,
         junctions=junction_names, tanks=tank_names, reservoirs=reservoir_names,
@@ -854,27 +599,30 @@ def read_epanet_inp(path) -> WaterNetwork:
     pattern_start = 0.0
     report_start = 0.0
     start_clocktime = 0.0
+    unrecognised_times: list[str] = []
     for line in sections.get("TIMES", []):
         key = " ".join(f.upper() for f in line.fields[:2])
         if key.startswith("DURATION"):
-            duration = _time_with_unit(line.fields, 1, path, line)
+            duration = time_with_unit(line.fields, 1, path, line)
         elif key == "HYDRAULIC TIMESTEP":
-            hydraulic = _time_with_unit(line.fields, 2, path, line)
+            hydraulic = time_with_unit(line.fields, 2, path, line)
         elif key == "PATTERN TIMESTEP":
-            pattern_step = _time_with_unit(line.fields, 2, path, line)
+            pattern_step = time_with_unit(line.fields, 2, path, line)
         elif key == "REPORT TIMESTEP":
-            report_step = _time_with_unit(line.fields, 2, path, line)
+            report_step = time_with_unit(line.fields, 2, path, line)
         elif key == "RULE TIMESTEP":
-            rule_step = _time_with_unit(line.fields, 2, path, line)
+            rule_step = time_with_unit(line.fields, 2, path, line)
         elif key == "PATTERN START":
-            pattern_start = _time_with_unit(line.fields, 2, path, line)
+            pattern_start = time_with_unit(line.fields, 2, path, line)
         elif key == "REPORT START":
-            report_start = _time_with_unit(line.fields, 2, path, line)
+            report_start = time_with_unit(line.fields, 2, path, line)
         elif key == "START CLOCKTIME":
             require_fields(line, 3, "START CLOCKTIME", path)
-            start_clocktime = _clock_time(
+            start_clocktime = clock_time(
                 line.fields[2], line.fields[3] if len(line.fields) > 3 else None, path, line
             )
+        else:
+            unrecognised_times.append(line.raw.strip())
 
     network = WaterNetwork(
         junctions=tuple(junctions),
@@ -895,7 +643,7 @@ def read_epanet_inp(path) -> WaterNetwork:
         hydraulic_timestep=hydraulic,
         report_timestep=report_step,
         duration=duration,
-        rule_timestep=rule_step,
+        explicit_rule_timestep=rule_step,
         pattern_start=pattern_start,
         report_start=report_start,
         start_clocktime=start_clocktime,
@@ -910,11 +658,12 @@ def read_epanet_inp(path) -> WaterNetwork:
             viscosity=viscosity,
             flow_units=flow_unit,
         ),
-        notes=(
-            {"flow_units": flow_unit, "unrecognised_options": "; ".join(unrecognised)}
-            if unrecognised
-            else {"flow_units": flow_unit}
-        ),
+        notes={
+            "flow_units": flow_unit,
+            **({"unrecognised_options": "; ".join(unrecognised)} if unrecognised else {}),
+            **({"unrecognised_times": "; ".join(unrecognised_times)}
+               if unrecognised_times else {}),
+        },
     )
     network.check()
     return network

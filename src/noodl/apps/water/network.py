@@ -21,7 +21,7 @@ from dataclasses import dataclass, field
 
 import torch
 
-from noodl.apps.water.controls import Control, Rule
+from noodl.apps.water.controls import ACTIVE, Control, Rule
 from noodl.apps.water.demand import PressureDrivenDemand
 from noodl.apps.water.elements import (
     CBIG_FT_PER_CFS,
@@ -128,7 +128,8 @@ class Tank:
     by the layer's storage (`build_model(tank_scheme=...)`).
 
     `volume_curve` names a `curves` entry (level m, volume m3) when the tank is not a cylinder,
-    and `overflow` says the tank may spill when full (`[TANKS] Overflow YES`)."""
+    `overflow` says the tank may spill when full (`[TANKS] Overflow YES`) and `min_volume`
+    (m3) is the file's MinVol."""
 
     name: str
     elevation: float
@@ -138,6 +139,7 @@ class Tank:
     diameter: float
     volume_curve: str | None = None
     overflow: bool = False
+    min_volume: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -236,7 +238,7 @@ class WaterNetwork:
     hydraulic_timestep: float = 3600.0
     report_timestep: float = 3600.0
     duration: float = 0.0
-    rule_timestep: float | None = None
+    explicit_rule_timestep: float | None = None
     pattern_start: float = 0.0
     report_start: float = 0.0
     start_clocktime: float = 0.0
@@ -244,10 +246,13 @@ class WaterNetwork:
     options: WaterOptions = field(default_factory=WaterOptions)
     notes: dict[str, str] = field(default_factory=dict)
 
-    def __post_init__(self) -> None:
-        # EPANET's default `[TIMES] RULE TIMESTEP` is a tenth of the hydraulic step.
-        if self.rule_timestep is None:
-            object.__setattr__(self, "rule_timestep", self.hydraulic_timestep / 10.0)
+    @property
+    def rule_timestep(self) -> float:
+        """The time step of rule evaluation (s): `[TIMES] RULE TIMESTEP` (`explicit_rule_timestep`)
+        capped at the hydraulic step, else a tenth of the hydraulic step, as EPANET."""
+        if self.explicit_rule_timestep is None:
+            return self.hydraulic_timestep / 10.0
+        return min(self.explicit_rule_timestep, self.hydraulic_timestep)
 
     def nodes(self) -> list[str]:
         """Node names in the builder's own order: junctions, reservoirs, tanks."""
@@ -320,16 +325,56 @@ class WaterNetwork:
                 raise ValueError(
                     f"WaterNetwork: emitter at {emitter.node!r}, which is not a junction"
                 )
+        valve_names = {v.name for v in self.valves}
         for control in self.controls:
             if control.link not in link_names:
                 raise ValueError(
                     f"WaterNetwork: control names link {control.link!r}, which is not a link"
+                )
+            if control.status == ACTIVE and control.link not in valve_names:
+                raise ValueError(
+                    f"WaterNetwork: control on link {control.link!r} sets the status ACTIVE, "
+                    f"which only a valve can take, not a pipe or a pump"
                 )
             if control.trigger == "node" and control.node not in seen:
                 raise ValueError(
                     f"WaterNetwork: control on link {control.link!r} tests node "
                     f"{control.node!r}, which is not a node"
                 )
+
+        for pump in self.pumps:
+            for what, name in (("speed pattern", pump.speed_pattern),
+                               ("energy price pattern", pump.price_pattern)):
+                if name is not None and name not in self.patterns:
+                    raise ValueError(
+                        f"WaterNetwork: pump {pump.name!r} names the {what} {name!r}, which "
+                        f"has no [PATTERNS] entry"
+                    )
+        if self.energy.global_pattern is not None and (
+            self.energy.global_pattern not in self.patterns
+        ):
+            raise ValueError(
+                f"WaterNetwork: [ENERGY] GLOBAL PATTERN {self.energy.global_pattern!r} has "
+                f"no [PATTERNS] entry"
+            )
+        for rule in self.rules:
+            for premise in rule.premises:
+                if premise.object == "NODE" and premise.id not in seen:
+                    raise ValueError(
+                        f"WaterNetwork: rule {rule.name!r} names node {premise.id!r}, which "
+                        f"is not a node"
+                    )
+                if premise.object == "LINK" and premise.id not in link_names:
+                    raise ValueError(
+                        f"WaterNetwork: rule {rule.name!r} names link {premise.id!r}, which "
+                        f"is not a link"
+                    )
+            for action in (*rule.then_actions, *rule.else_actions):
+                if action.link not in link_names:
+                    raise ValueError(
+                        f"WaterNetwork: rule {rule.name!r} acts on link {action.link!r}, "
+                        f"which is not a link"
+                    )
 
     def validate(self) -> None:
         """Refuse, BY NAME, everything this application does not model."""
