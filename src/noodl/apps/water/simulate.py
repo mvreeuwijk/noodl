@@ -506,14 +506,16 @@ def water_run(model, state=None, drivers=None, *, duration: float | None = None,
         if counted:
             # `addenergy` takes the step as EPANET's `timestep` finds it, past the duration
             # as well; the reported results end at the duration
-            whole = step
+            whole, seen = step, advanced
             if t + clock.free_step(t, hydraulic_report) > clock.duration:
-                whole = plan(False)[0]          # the duration cut this step: EPANET's is whole
-            pumps_now, opened = _as_addenergy_sees(solved, advanced, status[..., meter.cols],
+                # the duration cut this step: EPANET's is whole, its tanks moved and its rules
+                # checked to its own end (a rule acting past the duration ends it there)
+                whole, seen = plan(False)
+            pumps_now, opened = _as_addenergy_sees(solved, seen, status[..., meter.cols],
                                                    meter.cols)
             meter.add(_period(net, t), whole / 3600.0,
-                      {"water.phi": advanced["water.phi"], "water.q": solved["water.q"]},
-                      pumps_now, speeds_of(advanced, d), opened=opened)
+                      {"water.phi": seen["water.phi"], "water.q": solved["water.q"]},
+                      pumps_now, speeds_of(seen, d), opened=opened)
         if report:
             recorder.record(solved, d, cut_off, levels,
                             _overflow(model, storage, solved, advanced, step), status)
@@ -532,9 +534,12 @@ def _as_addenergy_sees(solved, advanced, pump_states: Tensor, cols: Tensor):
     junction heads, the tank heads at the step's end (`advanced`, `plan`'s state) and each
     pump's `LinkStatus` and `LinkSetting` as those rules left them. A pump a rule closes at the
     end of a step draws nothing over it; one a rule opens there counts as on line, with the
-    flow its closed link carried in the solve (`opened`, see `EnergyMeter.add`); an efficiency
-    curve takes the speed the rule set. Simple controls are taken at the start of the next
-    step (`runhyd`, `controls`), so they do not reach it."""
+    `LinkFlow` EPANET then has (`opened`; `EnergyMeter.add`: 1 cfs for a constant-power pump,
+    the closed link's `dh / CBIG` for any other); an efficiency curve takes the speed the rule
+    set. Simple controls and patterns are taken at the start of the next step (`runhyd`), so
+    they do not reach it. Not covered (not measured): a pump the solve shut at its shut-off
+    head is carried OPEN here, so a rule's OPEN on it is no change of the carried status and
+    it stays off line for the step, where EPANET's `takeactions` opens it."""
     if "water.link_status" not in advanced:
         return pump_states, None
     before = solved["water.link_status"][..., cols].to(pump_states.dtype)

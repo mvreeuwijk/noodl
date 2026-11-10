@@ -422,19 +422,26 @@ def test_rules_match_epanet(tmp_path):
     assert not torch.equal(by_priority, states[:, pump])               # PRIORITY decides
 
 
-def test_energy_under_rules_matches_epanet(tmp_path):
+@pytest.mark.parametrize("pump", ["HEAD C1", "POWER 6"], ids=["curve", "power"])
+def test_energy_under_rules_matches_epanet(tmp_path, pump):
     """The four rules' network (`test_rules_match_epanet`, both priorities) with a price and a
-    demand charge: the pump's energy section against EPANET's (its toolkit, as wntr reads no
-    CLOCKTIME rule), every figure and the demand charge 1e-5 relative. EPANET charges a step
-    with the pump status the rules checked at its end leave (`nexthyd` calls `addenergy`
-    after `ruletimestep`), and a pump a rule opens there with the flow its closed link
-    carried in the solve, `dh / CBIG`, which sets its energy per volume. MEASURED: 3.9e-7 and
-    2.9e-7; before, 0.1394 against EPANET's 0.1600 kWh per m3 (the opened pump's hours
-    without its `dh / CBIG` flow), and the hour before a rule closes the pump counted on."""
+    demand charge, its pump on its one-point curve or at a constant 6 kW: the pump's energy
+    section against EPANET's (its toolkit, as wntr reads no CLOCKTIME rule), every figure and
+    the demand charge 1e-5 relative. EPANET charges a step with the pump status the rules
+    checked at its end leave (`nexthyd` calls `addenergy` after `ruletimestep`), and a pump a
+    rule opens there with its `LinkFlow` then: 1 cfs for a constant-power pump
+    (`resetpumpflow`, its `Q0`), the flow its closed link carried in the solve, `dh / CBIG`,
+    for a curve (which sets its energy per volume). MEASURED: curve 3.9e-7 and 2.9e-7 (before,
+    0.1394 against EPANET's 0.1600 kWh per m3, and the hour before a rule closes the pump
+    counted on); power 1.6e-7 (before, at priority 3: 7.636 kW average, 8.0 peak, $16.80
+    against EPANET's 8.291, 14.40 and $18.24)."""
     toolkit = pytest.importorskip("wntr.epanet.toolkit")
+    worst = 0.0
     for night in (3, 1):
         text = _RULES_NETWORK.format(night=night).replace(
             "[OPTIONS]", "[ENERGY]\n Global Price 0.1\n Demand Charge 2.0\n[OPTIONS]", 1)
+        assert " PU1  R1  J1  HEAD C1" in text
+        text = text.replace(" PU1  R1  J1  HEAD C1", " PU1  R1  J1  " + pump)
         path = tmp_path / f"rules{night}.inp"
         path.write_text(text)
         en = toolkit.ENepanet()
@@ -453,7 +460,10 @@ def test_energy_under_rules_matches_epanet(tmp_path):
             assert a == pytest.approx(b, rel=1e-5), (night, ours, reader.energy["PU1"])
         assert float(energy.demand_charge) == pytest.approx(float(reader.peak_energy[0]),
                                                             rel=1e-5)
-        assert 0.0 < ours[0] < 100.0
+        worst = max(worst, max(abs(a - b) / abs(b) for a, b in
+                               zip(ours, reader.energy["PU1"], strict=True)))
+        assert 0.0 < ours[0] <= 100.0
+    assert worst < 1e-5, worst
 
 
 def test_an_unaligned_report_start_follows_epanets_output_rule(tmp_path):
@@ -2881,8 +2891,9 @@ def test_an_emitter_with_pressure_driven_demand_on_one_junction_matches_epanet(t
 
 
 def test_emitters_on_a_darcy_weisbach_network_match_epanet(tmp_path):
-    """The pressure layer (Pa): emitters at J4 and J6 on the D-W two-loop, with EPANET's flow
-    unit (no correction: the D-W law carries EPANET's rounded LPS factor)."""
+    """The pressure layer (Pa): emitters at J4 and J6 on the D-W two-loop, with the file's
+    values (the D-W law carries EPANET's rounded LPS factor): heads 1e-6 relative, emitter
+    outflows 1e-6 m3/s. MEASURED: heads 5.4e-8, emitter outflows 3.1e-9 m3/s."""
     text = (DATA / "twoloop_si.inp").read_text().replace(*_EMITTERS[0])
     for old, new in _DW_TWO_LOOP:
         assert old in text, old
@@ -2899,12 +2910,12 @@ def test_emitters_on_a_darcy_weisbach_network_match_epanet(tmp_path):
     worst_h = max(abs(float(final["water.phi"][i]) / scale - float(heads[name]))
                   / (abs(float(heads[name])) or 1.0)
                   for i, name in enumerate(model.node_names) if name != "R1")
-    assert worst_h < 1e-5, worst_h
+    assert worst_h < 1e-6, worst_h
     emitted = _emitter_flows(model, final)
     demands = results.node["demand"].loc[0]
     base = {j.name: j.demand for j in net.junctions}
     for name, flow in emitted.items():
-        assert abs(flow - (float(demands[name]) - base[name])) < 1e-5, (name, flow)
+        assert abs(flow - (float(demands[name]) - base[name])) < 1e-6, (name, flow)
 
 
 # --------------------------------------------------------------------------- tanks over time
@@ -3289,6 +3300,48 @@ def test_a_pump_closed_and_opened_again_matches_epanet(tmp_path, case):
     steps = _toolkit_step_times(path)
     assert [float(t) for t in diagnostics["times"]] == steps
     assert 9000.0 not in steps
+
+
+def test_energy_of_a_pump_into_a_tank_matches_epanet(tmp_path):
+    """Net1 with pump 9 discharging straight into tank 2 (its controls kept), 24 h, with a
+    price: EPANET's `addenergy` runs after `tanklevels` has moved the tanks to the step's end
+    (`nexthyd`, `timestep`), so a pump next to a tank is charged with the tank's head at the
+    END of the step; every figure 1e-5 relative. MEASURED: 3.8e-7 (with the solve's tank
+    head, 1.9e-2)."""
+    text = (DATA / "Net1.inp").read_text()
+    pump = " 9               \t9               \t"
+    for old, new in ((pump + "10", pump + "2"),
+                     (" Global Price       \t0.0", " Global Price       \t0.2")):
+        assert old in text, old
+        text = text.replace(old, new)
+    path = tmp_path / "net1-pump-into-tank.inp"
+    path.write_text(text)
+    worst, theirs, _ = _compare_energy(path, tmp_path, "pump-into-tank-epanet")
+    assert theirs["9"][5] > 0
+    assert worst < 1e-5, worst
+
+
+def test_energy_of_a_step_the_duration_cuts_takes_its_rules_to_the_steps_own_end(tmp_path):
+    """Net1 for 1:30 without its controls and a rule closing pump 9 at 1:45: EPANET's second
+    step is not cut to the duration and its rules are checked to its own end, so the rule
+    acts at 1:48 (the first rule step past 1:45) and ends that step there, and the pump is
+    off over it (`addenergy` reads the status the rule left). On line 1 h of 1.5. MEASURED:
+    3.8e-8 (with the rules checked only to the duration, 0.80: 120 percent on line)."""
+    text = (DATA / "Net1.inp").read_text()
+    for old, new in (
+            (" LINK 9 OPEN IF NODE 2 BELOW 110\n LINK 9 CLOSED IF NODE 2 ABOVE 140\n", ""),
+            ("[RULES]\n", "[RULES]\nRULE LATE\nIF SYSTEM TIME >= 1:45\n"
+                           "THEN PUMP 9 STATUS IS CLOSED\n"),
+            ("Duration           \t24:00", "Duration           \t1:30"),
+            (" Global Price       \t0.0", " Global Price       \t0.2")):
+        assert old in text, old
+        text = text.replace(old, new)
+    path = tmp_path / "net1-cut.inp"
+    path.write_text(text)
+    worst, theirs, run = _compare_energy(path, tmp_path, "cut-epanet")
+    assert theirs["9"][0] == pytest.approx(100.0 / 1.5, abs=1e-3)
+    assert float(run.energy.utilisation[0]) == pytest.approx(100.0 / 1.5, rel=1e-12)
+    assert worst < 1e-5, worst
 
 
 @pytest.mark.parametrize("duration, tag", [("1:30", "unaligned"), ("0:00", "zero")])

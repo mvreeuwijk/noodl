@@ -123,6 +123,8 @@ class EnergyMeter:
         n = len(pumps)
         with_curve = [p.efficiency_curve is not None for p in pumps]
         self.has_curve = torch.tensor(with_curve, dtype=torch.bool)
+        self.constant_power = torch.tensor([p.power is not None for p in pumps],
+                                           dtype=torch.bool)
         self.any_curve = any(with_curve)
         global_eff = float(energy.global_efficiency)
         curves = [net.curves[p.efficiency_curve] if p.efficiency_curve is not None
@@ -165,17 +167,27 @@ class EnergyMeter:
         (..., n_pumps) their relative speeds (needed only for efficiency curves). The
         statistics are accumulated over all the steps at once, in `result`.
 
-        `opened` (..., n_pumps) marks the pumps that were closed in the solve and that a rule
-        opened at the step's end: EPANET charges them with the flow their closed link carried,
-        ``|dh| / CBIG`` (`hydcoeffs.c`: a closed link's conductance ``1 / CBIG``, CBIG = 1e8
-        ft per cfs), where this model's closed link carries none. Their power is that flow's,
-        negligible, but their energy per volume is ``p / q`` at it, which is not."""
+        `opened` (..., n_pumps) marks the pumps that were CLOSED in the solve and that a rule
+        opened at the step's end (a STATUS OPEN, or a positive SETTING). EPANET charges them
+        with the `LinkFlow` they then have (`hydraul.c`, `getenergy`):
+
+        - a constant-power pump: its `Q0`, 1 cfs, which `setlinkstatus` / `setlinksetting`
+          write when they reopen it (`resetpumpflow`; `input2.c`, `updatepumpparams`:
+          ``Q0 = 1.0``, "Init. flow = 1 cfs");
+        - any other pump (`resetpumpflow` leaves it): the flow its closed link carried in the
+          solve, ``|dh| / CBIG`` (`hydcoeffs.c`: a closed link's conductance ``1 / CBIG``,
+          CBIG = 1e8 ft per cfs), where this model's closed link carries none. Its power is
+          negligible, but its energy per volume ``p / q`` is not.
+
+        A control or a pattern that reopens a pump acts at the start of a step, before its
+        solve (`runhyd`), so the solve's flow is the one charged."""
         phi = solved["water.phi"]
         u, v = phi[..., self.from_node], phi[..., self.to_node]
         q = solved["water.q"][..., self.cols]
         if opened is not None and bool(opened.any()):
             leak = (u - v).abs() / self.head_scale / _M_PER_FT / CBIG_FT_PER_CFS
-            q = torch.where(opened, leak / self.cfs_per_m3s, q)
+            reset = torch.where(self.constant_power, 1.0, leak)   # `resetpumpflow`: Q0
+            q = torch.where(opened, reset / self.cfs_per_m3s, q)
         self._steps.append((period, hours, u, v, q, states, speed))
 
     def _price(self, periods: Tensor) -> Tensor:

@@ -273,13 +273,20 @@ utilisation is then 200/1.5 percent, as EPANET reports), and a run of duration 0
 hour. The reported heads and flows are unchanged by that.
 
 A step is charged as EPANET's `addenergy` sees it (`hydraul.c`, `nexthyd`: after `timestep`):
-with the solve's flows and junction heads, the tank heads moved to the step's end, and each
+with the solve's flows and junction heads, the tank heads moved to the step's end (`tanklevels`
+runs inside `timestep`: a pump next to a tank is charged with the tank's end-of-step head; Net1
+with pump 9 discharging into tank 2 agrees to 3.8e-7, 1.9e-2 with the solve's head), and each
 pump's status and speed as the rules checked at the step's end leave them. A pump a rule closes
 at the end of a step is off over that step (on Net1 with a rule closing pump 9 at 2 h and an
-OPEN at 4 h, 3 h of 6 on line, as EPANET); a pump a rule opens there is on line over it with the
-flow its closed link carried in EPANET's solve, `dh / CBIG`, which sets its energy per volume
-(`test_energy_under_rules_matches_epanet`, 3.9e-7). A simple control acts at the start of the
-next step and does not reach the energy of the step before.
+OPEN at 4 h, 3 h of 6 on line, as EPANET). A pump a rule opens there (a STATUS OPEN or a
+positive SETTING) is on line over it with the `LinkFlow` EPANET then has: a constant-power pump
+its `Q0` of 1 cfs, which `setlinkstatus` and `setlinksetting` write when they reopen it
+(`resetpumpflow`); any other pump the flow its closed link carried in the solve, `dh / CBIG`,
+which sets its energy per volume (`test_energy_under_rules_matches_epanet`: 3.9e-7 for a curve,
+1.6e-7 for a constant-power pump). A step the duration cuts is charged whole, as EPANET does,
+with its tanks moved and its rules checked to its own end: a rule that acts after the
+duration ends that step there and is charged. A simple control or a pattern acts at the start
+of the next step, before its solve, and does not reach the energy of the step before.
 
 ## The physics
 
@@ -808,7 +815,9 @@ on-disk reals are **float32**, so roughly 1e-7 relative is EPANET's own precisio
 | ky10, DURATION 0 (level controls on `~@`-named pumps) | as above | 6.3e-7, 1.3e-5 m, 9.1e-8 m³/s, equal, 6.1e-7 |
 | Anytown edited (`_anytown`), 24 h at a 1 min step; 11 s | heads 1e-4 (EPANET's closed-link leak out of the empty tanks, at a head of 0.55 m; see Limitations) | 5.1e-5 (1.8e-4 m; 9.3e-8 at t = 0), 1.8e-6 m, 2.9e-7 m³/s, equal, 3.7e-7 |
 | Net1 6 h, pump 9 CLOSED at 2 h and OPENed at 4 h by time controls; closed at 2 h by a rule, given a CLOSED control at 2:30, then OPENed: the hydraulic steps, heads, level, flows, states, the pump's speed, the energy | equal / 1e-5 / 2e-4 m / 1e-6 m³/s / equal / 1e-5 | steps equal (no step at 2:30), 1.9e-7, 2.0e-5 m, 5.1e-8 m³/s, speed 0 then 1, energy within 1e-5 |
-| The four rules' network with a price and a demand charge (both priorities): the pump's energy section against EPANET's toolkit | 1e-5 relative | 3.9e-7, 2.9e-7 |
+| The four rules' network with a price and a demand charge (both priorities), its pump on a curve or at constant power: the pump's energy section against EPANET's toolkit | 1e-5 relative | 3.9e-7 (curve), 1.6e-7 (power) |
+| Net1 with pump 9 into tank 2, 24 h: energy section | 1e-5 relative | 3.8e-7 |
+| Net1 1:30 with a rule closing the pump at 1:45 (past the duration, inside EPANET's whole last step): energy section | 1e-5 relative | 3.8e-8 |
 | Every network `wntr` ships (37 files, the two malformed ones aside) builds, or is refused by name | as listed | 36 build; `bad_times.inp` refused ("is not a time of the form HH:MM[:SS]") |
 | Head loss sums to zero around every cycle-basis loop | 1e-12 | **exactly 0.0** |
 | Autodiff vs central differences | 1e-6 × scale | 3.212e-6 / 2.505e-10 / 9.2e-10 / 2.753e-9 |
@@ -897,11 +906,12 @@ independent loop is a property of the cycle-space formulation, and it holds exac
   (EPANET rounds the time to it); over Net6's 96 h the 609 steps all match, up to a minute
   apart late in the run, and the tank levels differ by up to 1.95e-3 m. On Anytown the empty
   tanks' closed pipes leak 1.4e-7 to 2.7e-7 m³/s out of them, EPANET's pumps deliver about as
-  much less, and the heads far from the pumps differ by up to 1.8e-4 m; on the two-loop with
-  every pipe a check valve at five times the demand the two closed ones leak 5.7e-8 and
-  3.1e-8 m³/s (heads 1.4e-6 relative; 7.6e-8 with the leaks added as demands). The leak is
-  not modelled in the hydraulics; the energy reproduces it where EPANET's energy reads it (a
-  pump a rule opens at the end of a step, below).
+  much less, and the heads far from the pumps differ by up to 1.8e-4 m (1.3e-7 relative with
+  those leaks added as demands); on the two-loop with every pipe a check valve at five times
+  the demand the two closed ones leak 5.7e-8 and 3.1e-8 m³/s (heads 1.4e-6 relative; 7.6e-8
+  with the leaks added as demands). The leak is not modelled in the hydraulics; the energy
+  reproduces it where EPANET's energy reads it (a pump other than a constant-power one that a
+  rule opens at the end of a step, see the pump energy above).
 - **A zero-demand group of several junctions joined by a link inside it, fenced off by
   check valves**, is held at the `1 / CBIG` limit head (75 m between reservoirs at 100 and
   50 m). EPANET's head there is not that limit. MEASURED, for J - P5 - L fenced off between

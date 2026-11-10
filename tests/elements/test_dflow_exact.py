@@ -216,6 +216,11 @@ def _water_cases() -> dict[type, Callable[[], list[Case]]]:
                  _grid(2, -12, 3)),
             Case(HazenWilliams(_t([1000.0]), _t([0.3]), _t([100.0]), minor_loss=_t([2.0])),
                  _grid(1, -12, 3)),
+            # EPANET's rounded LPS factor, with and without its 0.02517 K / d^4 minor loss
+            Case(HazenWilliams(_t([1000.0, 300.0]), _t([0.3, 0.15]), _t([100.0, 130.0]),
+                               cfs_per_m3s=1000.0 / 28.317), _grid(2, -12, 3)),
+            Case(HazenWilliams(_t([1000.0]), _t([0.3]), _t([100.0]), minor_loss=_t([2.0]),
+                               cfs_per_m3s=1000.0 / 28.317), _grid(1, -12, 3)),
         ],
         ChezyManning: lambda: [
             Case(ChezyManning(_t([1000.0, 300.0]), _t([0.3, 0.15]), _t([0.011, 0.013])),

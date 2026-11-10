@@ -90,7 +90,8 @@ _NETWORKS = {
     # on `~@`-named pumps. MEASURED: heads 6.3e-7, flows 9.1e-8 m3/s.
     "ky10": dict(path=_library("ky10")),
     # Anytown edited (Ruling 21): 24 h at a 1 min hydraulic step, three pumps on a
-    # five-point curve, the tanks empty within the first hour. MEASURED: heads 9.3e-8 at
+    # five-point curve, the tanks (at 22.5 ft, `_anytown`) empty within the first hour,
+    # the demand outrunning the three pumps from the start. MEASURED: heads 9.3e-8 at
     # t = 0 and 5.1e-5 relative over the day (junction 14, whose head is 0.554 m, 5.1e-5 m
     # apart; the worst absolute is 1.8e-4 m, junction 17 at -120.8 m, 1.9e-6 relative),
     # levels 1.8e-6 m, flows 2.9e-7 m3/s, states equal, energy 3.7e-7. HEADS 1e-4: from the
@@ -99,8 +100,10 @@ _NETWORKS = {
     # 2.7e-7 m3/s out of the tanks, and EPANET's pumps deliver 1.1e-7 to 2.6e-7 m3/s less
     # than noodl's (MEASURED at 1, 3 and 12 h), the heads at the junctions far from the
     # pumps moving by up to 1.8e-4 m; relative to the node's own head that is large only
-    # where the head is near the datum. (Before Hazen-Williams took EPANET's rounded GPM
-    # factor, 448.831 against 448.8311688, its 3.8e-7 partly offset that: 1.16e-5.)
+    # where the head is near the datum. Those leaks added as demands bring the heads to
+    # 1.3e-7 (`test_anytown_heads_with_epanets_tank_leaks_as_demands`). (Before
+    # Hazen-Williams took EPANET's rounded GPM factor, 448.831 against 448.8311688, its
+    # 3.8e-7 partly offset that: 1.16e-5.)
     "Anytown": dict(path=_anytown_edited, heads=1e-4),
 }
 
@@ -167,6 +170,63 @@ def test_network_matches_epanet(tmp_path, name):
     assert worst_l < case.get("levels", 2e-4), worst_l
     assert worst_q < case.get("flows", 1e-6), worst_q
     assert worst_e < case.get("energy", 1e-5), worst_e
+
+
+#: Anytown's tank pipes and the junction each joins its tank to.
+_ANYTOWN_TANK_PIPES = (("142", "21", "41"), ("143", "22", "42"))
+_GPM_PER_M3S = 1000.0 / 3.785411784 * 60.0
+_CFS_M3 = 0.3048**3
+
+
+@pytest.mark.slow
+def test_anytown_heads_with_epanets_tank_leaks_as_demands(tmp_path):
+    """The cause of Anytown's head bound (`_NETWORKS`), checked: the tanks start at 22.5 ft
+    (`_anytown`) and empty within the first hour, after which their pipes 142 and 143 are
+    closed, and EPANET's closed links conduct `1 / CBIG`. Adding to this model, as an
+    inflow at junctions 21 and 22 hour by hour, the flow `dh / CBIG` (ft and cfs) its own
+    heads drive through each closed tank pipe brings the heads to 1e-6 relative of EPANET's
+    at every hour (MEASURED: 1.28e-7, from 5.13e-5 without). The leak enters as a junction
+    of demand -1 per pipe, on an hourly pattern; the 24 h report repeats the pattern's
+    first hour (tanks open, no leak) and is left out."""
+    path, _ = _anytown(tmp_path, placeholders=12)
+    results, _, _ = _epanet(path, tmp_path, "anytown")
+    model, _, _ = build_model(read_epanet_inp(path))
+    run = water_run(model)
+    nodes, links = model.node_names, model.link_names
+    theirs = torch.tensor(results.node["head"][nodes].to_numpy(), dtype=F64)[:24]
+
+    def worst(run, names):
+        cols = [names.index(n) for n in nodes]
+        return float(((run.head[:24, cols] - theirs).abs()
+                      / theirs.abs().clamp(min=1.0)).max())
+
+    assert worst(run, nodes) > 1e-5
+    text = path.read_text()
+    junctions, pipes, patterns = "", "", ""
+    for pipe, junction, tank in _ANYTOWN_TANK_PIPES:
+        leaks = []
+        for k in range(24):
+            closed = int(run.status[k, links.index(pipe)]) == 0
+            dh = float(run.head[k, nodes.index(tank)] - run.head[k, nodes.index(junction)])
+            leak = dh / 0.3048 / 1e8 * _CFS_M3 if closed else 0.0      # m3/s into junction
+            leaks.append(leak * _GPM_PER_M3S)
+        assert any(leaks)
+        junctions += f" L{junction}\t0\t-1\tLK{junction}\n"
+        pipes += f" PL{junction}\t{junction}\tL{junction}\t1\t12\t120\t0\tOpen\n"
+        patterns += f" LK{junction}\t" + "\t".join(f"{v:.10g}" for v in leaks) + "\n"
+    for section, lines in (("[RESERVOIRS]", junctions), ("[PIPES]", pipes),
+                           ("[PATTERNS]", patterns)):
+        assert text.count(section) == 1
+        if section == "[RESERVOIRS]":
+            text = text.replace(section, lines + "\n" + section)
+        else:
+            head, rest = text.split(section)
+            first, _, tail = rest.partition("\n")
+            text = head + section + first + "\n" + lines + tail
+    leaky = tmp_path / "anytown-leaky.inp"
+    leaky.write_text(text)
+    model2, _, _ = build_model(read_epanet_inp(leaky))
+    assert worst(water_run(model2), model2.node_names) < 1e-6
 
 
 #: The outcome of reading and building each network `wntr` ships: `None` builds, a string is
