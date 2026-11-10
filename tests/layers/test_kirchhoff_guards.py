@@ -434,10 +434,12 @@ def test_a_law_whose_module_call_is_not_its_flow_keeps_the_threaded_solve(how):
                     on_failure="return_primal", diagnostics={})
 
 
-def test_the_storage_column_cache_keeps_the_graph_of_a_grad_requiring_start():
-    """A step-start column read under no_grad is not kept when the step's `phi_prev`
-    requires grad, so a later read under grad mode carries the graph."""
-    from noodl.layers.kirchhoff import _StorageStep
+def test_the_storage_columns_are_taken_once_with_the_graph_of_the_step_start():
+    """A storage step's columns are taken when the step is built (`_storage_step`), with the
+    graph of a grad-requiring `phi_prev`, so a read under `no_grad` (Newton) and one under
+    grad mode (the result's storage flows) both see the same column, graph included."""
+    import dataclasses
+
     from noodl.storage import LinearStorage
 
     layer = KirchhoffLayer(_net(), "heat", [Conductance(torch.tensor([1.0], dtype=F64))],
@@ -445,16 +447,14 @@ def test_the_storage_column_cache_keeps_the_graph_of_a_grad_requiring_start():
                            storage=[LinearStorage([1], torch.tensor([0.5], dtype=F64))])
     st = layer._storage[0]
     phi_prev = torch.tensor([0.0, 2.0], dtype=F64, requires_grad=True)
-    step = _StorageStep(phi_prev, None)
+    step = layer._storage_step(phi_prev, None)
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        step.columns = ()
     phi = torch.tensor([0.0, 3.0], dtype=F64)
     with torch.no_grad():
-        _, start, _ = layer._storage_args(0, st, phi, step)
-    assert not start.requires_grad
+        _, under_no_grad, previous = layer._storage_args(0, st, phi, step)
+    assert previous is None
     _, start, _ = layer._storage_args(0, st, phi, step)
-    assert start.requires_grad
+    assert start is under_no_grad and start.requires_grad
     (grad,) = torch.autograd.grad(start.sum(), phi_prev)
     assert torch.equal(grad, torch.tensor([0.0, 1.0], dtype=F64))
-    # a graph-free step is read once
-    plain = _StorageStep(phi_prev.detach(), None)
-    first = layer._storage_args(0, st, phi, plain)[1]
-    assert layer._storage_args(0, st, phi, plain)[1] is first

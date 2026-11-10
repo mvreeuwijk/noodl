@@ -1,4 +1,4 @@
-"""The differentiable classic solve with analytic slopes (`FunctionalLaws.dflows`).
+"""The differentiable classic solve with analytic slopes (`KirchhoffLayer._law_slopes`).
 
 A law (or withdrawal) that declares `exact_slope` gives the Newton Jacobian and the adjoint
 its own `dflow`; one that does not is differentiated by autograd. `gradcheck` of
@@ -10,10 +10,13 @@ whose `dflow` is a Newton aid, which gives correct gradients only because it dec
 
 from __future__ import annotations
 
+import functools
+
 import pytest
 import torch
 
 from noodl.elements import OpenDoor, PowerLaw, medium
+from noodl.elements.base import LawContext
 from noodl.layers._functional import FunctionalLaws
 from noodl.layers.kirchhoff import KirchhoffLayer
 from noodl.topology import Network
@@ -178,8 +181,8 @@ def _aided(exact: bool):
 
 
 def test_the_operator_uses_dflow_only_where_it_is_exact():
-    """The slopes `FunctionalLaws` hands Newton and the adjoint: the law's own `dflow` for an
-    exact law (bit for bit), autograd through its flow otherwise."""
+    """The slopes the threaded operator hands Newton and the adjoint (`adjoint=True`): the
+    law's own `dflow` for an exact law (bit for bit), autograd through its flow otherwise."""
     for exact in (True, False):
         layer, aided, drivers = _aided(exact)
         phi_b, sources = _t([0.0]), _t([0.0, 0.01, -0.02])
@@ -187,7 +190,8 @@ def test_the_operator_uses_dflow_only_where_it_is_exact():
         rebuilt, drv, _, _, _ = fn.rebuild(fn.all_params)
         phi = layer.assemble(_t([3.0, 1.0]), phi_b)
         with torch.no_grad():
-            slopes = fn.dflows(phi, drv, rebuilt)
+            slopes = layer._dflows(phi, drv, LawContext(mode="dc"),
+                                   functools.partial(fn.call, rebuilt), adjoint=True)
             analytic = layer.dflows(phi, drivers)
         door = layer.kind_slice("door")
         assert torch.equal(slopes[door], analytic[door])   # the door's dflow is exact

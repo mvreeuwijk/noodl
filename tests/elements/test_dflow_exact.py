@@ -3,7 +3,7 @@ own `flow` (the audit behind `exact_slope`).
 
 The differentiable classic solve uses `dflow` for the Newton Jacobian and the adjoint of a law
 that declares `exact_slope = True` (the default), and autograd through `flow` for one that does
-not (`noodl.layers._functional.FunctionalLaws.dflows`). The adjoint needs the exact derivative:
+not (`noodl.layers.kirchhoff.KirchhoffLayer._law_slopes`). The adjoint needs the exact derivative:
 a `dflow` that is a Newton aid (a slope floor, a closed-pump slope) would silently corrupt the
 gradients. So every law that keeps the default must have a `dflow` equal to the autograd
 derivative of its `flow`, to 1e-10 relative, at sampled points on every smooth piece and inside

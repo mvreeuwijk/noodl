@@ -161,7 +161,7 @@ class ConstitutiveLaw(torch.nn.Module):
     ``True`` only when ``flow`` is mathematically independent of ``dp`` (so ``dflow`` is
     identically zero everywhere) -- ``FixedFlow`` is the built-in example. The differentiable
     solve path (``KirchhoffLayer.solve(differentiable=True)``, in
-    ``noodl.layers._functional.FunctionalLaws.dflows``) uses this flag, and only this flag, to
+    ``noodl.layers.kirchhoff.KirchhoffLayer._law_slopes``) uses this flag, and only this flag, to
     decide whether a missing gradient of ``flow`` with respect to ``dp`` is legitimate (this
     element declares it does not depend on ``dp``) or a bug (some other element's ``flow``
     silently dropped the autograd graph, e.g. via a stray ``dp.detach()``). Declaring instead
@@ -256,7 +256,7 @@ class ConstitutiveLaw(torch.nn.Module):
         output that does not require grad at all, or because ``dp`` is silently unused inside
         it (e.g. a stray ``dp.detach()``) -- that is the same gradient hazard the
         differentiable solve path guards against in
-        ``noodl.layers._functional.FunctionalLaws.dflows``, reached here via
+        ``noodl.layers.kirchhoff.KirchhoffLayer._law_slopes``, reached here via
         ``KirchhoffLayer.linear_init`` instead. Raise a clear error naming the element
         and its kind rather than letting a raw, unattributed autograd error escape.
         """

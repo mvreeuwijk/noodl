@@ -140,7 +140,7 @@ def test_linear_guess_holds_the_held_rows_of_the_initial_point():
         boundary=["gnd"], storage=[LinearStorage([2], 0.3, initial=V0)])
     drivers = {"c": torch.tensor([0.7])}
     step = layer._step("initial", None, None, layer.scheme, None, None, drivers)
-    phi_i = layer.linear_init(GROUND, drivers, None, _step=step)
+    phi_i = layer._linear_init_at(step, GROUND, drivers, None)
     a = int((layer.interior == 2).nonzero())
     assert phi_i[..., a].item() == V0
     phi, _ = layer.solve(GROUND, drivers, mode="initial", differentiable=False)

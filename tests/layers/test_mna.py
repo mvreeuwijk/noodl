@@ -557,7 +557,7 @@ def test_assembled_jacobian_matches_autograd_jacobian_of_the_residual():
         return layer._residual(z, pb, {}, sources, step, call)[0]
 
     expected = torch.autograd.functional.jacobian(residual, x)
-    op = layer._operator(x, pb, {}, step, layer._slopes_fn({}, call, step))
+    op = layer._operator(x, pb, {}, step)
     torch.testing.assert_close(op.assemble(), expected, rtol=1e-13, atol=1e-13)
     # rmatvec is the transpose action
     v = torch.randn(u.n, generator=gen, dtype=F64)
