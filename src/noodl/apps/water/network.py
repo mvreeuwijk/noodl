@@ -37,6 +37,7 @@ from noodl.apps.water.elements import (
     CBIG_FT_PER_CFS,
     DEAD_END_KEY,
     EPANET_QCF,
+    KW_PER_HP,
     M_PER_FT,
     NU_WATER_REF,
     ONE_WAY_KEY,
@@ -46,11 +47,13 @@ from noodl.apps.water.elements import (
     STATUS_KEY,
     BreakerValve,
     CompositeDarcyWeisbach,
+    ConstantPowerPump,
     FlowControlledPipe,
     FlowControlledPump,
     FlowControlValve,
     GeneralPurposeValve,
     HazenWilliams,
+    PiecewisePumpCurve,
     PressureReducingValve,
     PressureSustainingValve,
     PumpCurve,
@@ -469,13 +472,17 @@ class WaterNetwork:
                     f"{pump.speed_pattern!r}; variable-speed pumps (SPEED PATTERN) are out "
                     f"of scope"
                 )
-            if pump.power is not None:
+            if not pump.speed > 0.0:
                 raise ValueError(
-                    f"WaterNetwork: pump {pump.name!r} is a constant-POWER pump; the "
-                    f"head-flow relation EPANET uses internally for one is not stated in "
-                    f"the manual (UNVERIFIED), so only HEAD-curve "
-                    f"pumps are modelled"
+                    f"WaterNetwork: pump {pump.name!r} has speed {pump.speed!r}; a "
+                    f"relative speed setting must be positive"
                 )
+            if pump.power is not None:
+                if not pump.power > 0.0:
+                    raise ValueError(
+                        f"WaterNetwork: pump {pump.name!r} has the power {pump.power!r} kW; "
+                        f"a constant-power pump needs a positive power (EPANET error 202)")
+                continue
             if pump.curve is None:
                 raise ValueError(
                     f"WaterNetwork: pump {pump.name!r} has neither a HEAD curve nor a "
@@ -487,18 +494,19 @@ class WaterNetwork:
                     f"has no [CURVES] entry"
                 )
             points = self.curves[pump.curve]
-            if len(points) not in (1, 3):
+            if _pump_kind(self, pump) == "curve":
+                try:
+                    power_curve(points)
+                except ValueError as exc:
+                    raise ValueError(
+                        f"WaterNetwork: pump {pump.name!r}'s curve {pump.curve!r} has no "
+                        f"power-function fit h = h0 - r q^n: {exc}") from None
+            elif any(b[0] <= a[0] or b[1] >= a[1]
+                     for a, b in zip(points, points[1:], strict=False)):
                 raise ValueError(
-                    f"WaterNetwork: pump {pump.name!r} uses curve {pump.curve!r} with "
-                    f"{len(points)} points; EPANET fits the power law h = h0 - r q^n to a "
-                    f"single point or to three, and connects four or more with straight "
-                    f"segments, which is out of scope"
-                )
-            if not pump.speed > 0.0:
-                raise ValueError(
-                    f"WaterNetwork: pump {pump.name!r} has speed {pump.speed!r}; a "
-                    f"relative speed setting must be positive"
-                )
+                    f"WaterNetwork: pump {pump.name!r}'s curve {pump.curve!r} must have its "
+                    f"flows rising and its heads falling from point to point (EPANET "
+                    f"errors 227, 230)")
         junction_names = {j.name for j in self.junctions}
         for valve in self.valves:
             kind = valve.kind.upper()
@@ -718,10 +726,12 @@ def build_model(
 
     Pumps enter in their head-gain form whatever the `pipe_form`: `FlowControlledPump`,
     `phi_discharge - phi_suction = gain(q)` with the pump's flow an unknown, as EPANET writes
-    them, with EPANET's `RQtol` floor on the curve's slope and its closed-link `CBIG` below
-    zero flow (a pump held beyond shut-off converges to EPANET's closed-link leak). The
-    inverted curve, `q = g(dp)`, has a zero slope beyond shut-off that leaves a pump with a
-    pressure-driven demand downstream singular (`FlowControlledPump`'s docstring).
+    them, each on EPANET's own curve for it (`_pump_kind`: a power function, straight
+    segments, or constant power) with EPANET's `RQtol` floor and `CBIG` cap on the curve's
+    slope, and shut, with exactly zero flow, where the head asked of it exceeds its
+    shut-off head. The inverted curve, `q = g(dp)`, has a zero slope beyond shut-off that
+    leaves a pump with a pressure-driven demand downstream singular (`FlowControlledPump`'s
+    docstring).
 
     Every tank is a `LinearStorage` of its cross-section area in the layer
     (`noodl.NodeStorage`), and `tank_scheme` is how its level moves. `"forward_euler"` (the
@@ -913,30 +923,7 @@ def build_model(
             fixed=[node_names.index(n.name) for n in (*net.reservoirs, *net.tanks)],
             kind="pipe")
     if net.pumps:
-        h0_list, r_list, q_design_list = [], [], []
-        for pump in net.pumps:
-            points = net.curves[pump.curve]
-            # EPANET's design flow `Q0` (`initlinkflow`'s first iterate): the single point,
-            # or the middle one of three
-            q_design_list.append(sorted(points)[len(points) // 2][0] * pump.speed)
-            if len(points) == 1:
-                q_design, h_design = points[0]
-                h0, r, _ = three_point_curve(
-                    torch.tensor([q_design], dtype=F64),
-                    torch.tensor([h_design], dtype=F64),
-                )
-            else:
-                h0, r = _fit_three_points(points, pump.name)
-            h0_list.append(float(h0) * scale)
-            r_list.append(float(r) * scale)
-        pump_law = PumpCurve(
-            torch.tensor(h0_list, dtype=F64),
-            torch.tensor(r_list, dtype=F64),
-            2.0,
-            speed=torch.tensor([p.speed for p in net.pumps], dtype=F64),
-            links=link_slice["pump"],
-            kind="pump",
-        )
+        pump_law, q_design_list = _pump_law(net, link_slice["pump"], scale, epanet_cfs)
         # kappa of a closed pump: 1 m per m3/s, the row `q` a closed pump had before. A pump
         # has no head-loss slope at 1 ft/s; its curve's slope at the design flow
         # (`2 r q_design`) solves to the same answer but, through Newton's damping switch
@@ -945,7 +932,11 @@ def build_model(
         pump_kappa = torch.full((len(net.pumps),), scale, dtype=F64)
         laws.append(FlowControlledPump(
             pump_law, gradient_floor=rqtol,
-            closed_slope=CBIG_FT_PER_CFS * M_PER_FT * epanet_cfs * scale, kappa=pump_kappa,
+            max_slope=CBIG_FT_PER_CFS * M_PER_FT * epanet_cfs * scale, kappa=pump_kappa,
+            links=link_slice["pump"],
+            ends=[(node_names.index(link.u), node_names.index(link.v))
+                  for link in net.links()],
+            fixed=[node_names.index(n.name) for n in (*net.reservoirs, *net.tanks)],
             kind="pump"))
     rounded_cfs = _rounded_cfs_per_m3s(options.flow_units)
 
@@ -985,10 +976,10 @@ def build_model(
                                    (psv, PressureSustainingValve, "psv", "u")):
         if valves:
             # the controlled node's elevation: a PRV's end node, a PSV's start node
-            held = torch.tensor([elevation[getattr(v, end)] * scale for v in valves],
-                                dtype=F64)
-            laws.append(cls(held, smoothing=valve_smoothing * scale, links=link_slice[kind],
-                            kind=kind, **valve_terms(valves)))
+            controlled = torch.tensor(
+                [elevation[getattr(v, end)] * scale for v in valves], dtype=F64)
+            laws.append(cls(controlled, smoothing=valve_smoothing * scale,
+                            links=link_slice[kind], kind=kind, **valve_terms(valves)))
 
     storages: list = []
     boundary = [r.name for r in net.reservoirs]
@@ -1165,30 +1156,104 @@ def build_model(
     return model, state, drivers
 
 
-def _fit_three_points(points, name: str) -> tuple[Tensor, Tensor]:
-    """`(h0, r)` for `h = h0 - r q^2` through EPANET's three-point form.
+def _pump_kind(net: WaterNetwork, pump: Pump) -> str:
+    """EPANET 2.2's type of `pump` (`input2.c`, `updatepumpparams`): `"power"` for a
+    constant-power pump (``CONST_HP``), `"curve"` for a power function (``POWER_FUNC``: one
+    point, or three with the first at zero flow), `"segments"` for every other head curve
+    (``CUSTOM``)."""
+    if pump.power is not None:
+        return "power"
+    points = net.curves[pump.curve]
+    if len(points) == 1 or (len(points) == 3 and points[0][0] == 0.0):
+        return "curve"
+    return "segments"
 
-    EPANET fits `h_G = A - B q^C` through the three given points (Manual p.19). This
-    application pins `C = 2`, which is what the SINGLE-point construction forces exactly;
-    for a genuine three-point curve the fit is refused unless the
-    third point is consistent with that exponent, rather than silently fitted to another.
-    """
-    (q1, h1), (q2, h2), (q3, h3) = sorted(points)
-    if q1 != 0.0:
-        raise ValueError(
-            f"build_model: pump {name!r} has a three-point curve whose first point "
-            f"is at flow {q1}, not 0; EPANET's fit takes the shut-off head there"
-        )
-    h0 = torch.tensor(h1, dtype=F64)
-    r = torch.tensor((h1 - h2) / q2**2, dtype=F64)
-    predicted = h1 - float(r) * q3**2
-    if abs(predicted - h3) > 1e-6 * max(abs(h3), 1.0):
-        raise ValueError(
-            f"build_model: pump {name!r}'s three points are not consistent with the "
-            f"exponent 2 this application fits (the third point implies {predicted}, the "
-            f"curve gives {h3}); a general exponent is not implemented"
-        )
-    return h0, r
+
+#: EPANET's ``TINY`` (`types.h`), the tolerance of its pump-curve checks.
+_TINY = 1e-6
+
+
+def power_curve(points) -> tuple[float, float, float]:
+    """`(h0, r, n)` of EPANET 2.2's power-function pump curve ``h = h0 - r q^n`` through
+    `points` (`(flow, head)` pairs): one point, or three with the first at zero flow
+    (`input2.c`, `updatepumpparams`; `input3.c`, `powercurve`).
+
+    One point ``(q1, h1)``: this application keeps the exact construction of
+    `three_point_curve`, ``h0 = 4 h1 / 3`` and ``n = 2`` (EPANET adds the points
+    ``(0, 1.33334 h1)`` and ``(2 q1, 0)``, whose exponent is 1.99998). Three points
+    ``(0, h0), (q1, h1), (q2, h2)``: ``n = ln((h0 - h2) / (h0 - h1)) / ln(q2 / q1)``,
+    ``r = (h0 - h1) / q1^n``. Raises `ValueError` where `powercurve` fails (EPANET's error
+    227): heads not falling or flows not rising by more than ``TINY``, or ``n`` outside
+    ``(0, 20]``. EPANET applies ``TINY`` to the file's units; here it applies to SI."""
+    if len(points) == 1:
+        (q1, h1), = points
+        h0, r, n = three_point_curve(torch.tensor(q1, dtype=F64), torch.tensor(h1, dtype=F64))
+        return float(h0), float(r), float(n)
+    (_, h0), (q1, h1), (q2, h2) = points
+    if (h0 < _TINY or h0 - h1 < _TINY or h1 - h2 < _TINY or q1 < _TINY
+            or q2 - q1 < _TINY):
+        raise ValueError("its heads must fall and its flows rise from point to point "
+                         "(EPANET error 227)")
+    n = math.log((h0 - h2) / (h0 - h1)) / math.log(q2 / q1)
+    if not 0.0 < n <= 20.0:
+        raise ValueError(f"its fitted exponent {n} is outside (0, 20] (EPANET error 227)")
+    return h0, (h0 - h1) / q1**n, n
+
+
+def _pump_law(net: WaterNetwork, links: slice, scale: float, epanet_cfs: float):
+    """`(pump, q_design)`: the curve (or `(curve, columns)` parts) of `FlowControlledPump`
+    for every pump of `net`, by EPANET's type (`_pump_kind`), and each pump's first
+    iterate, EPANET's own (`hydraul.c`, `initlinkflow`: the speed times ``Q0``, which
+    `updatepumpparams` sets to the design flow of a power function, the middle of a
+    segmented curve's flows, and 1 cfs for a constant-power pump)."""
+    from noodl.apps.water.inp import _US_UNITS, HP_TO_KW  # the reader imports this module
+
+    groups: dict[str, list[int]] = {"curve": [], "segments": [], "power": []}
+    q_design = []
+    for i, pump in enumerate(net.pumps):
+        kind = _pump_kind(net, pump)
+        groups[kind].append(i)
+        if kind == "power":
+            q0 = 1.0 / epanet_cfs
+        else:
+            points = net.curves[pump.curve]
+            q0 = points[len(points) // 2][0] if kind == "curve" else (
+                0.5 * (points[0][0] + points[-1][0]))
+        q_design.append(q0 * pump.speed)
+    single = sum(bool(cols) for cols in groups.values()) == 1
+    own = links if single else None
+    parts = []
+    for kind, cols in groups.items():
+        if not cols:
+            continue
+        pumps = [net.pumps[i] for i in cols]
+        speed = torch.tensor([p.speed for p in pumps], dtype=F64)
+        if kind == "curve":
+            fits = [power_curve(net.curves[p.curve]) for p in pumps]
+            curve = PumpCurve(torch.tensor([h0 * scale for h0, _, _ in fits], dtype=F64),
+                              torch.tensor([r * scale for _, r, _ in fits], dtype=F64),
+                              torch.tensor([n for _, _, n in fits], dtype=F64),
+                              speed=speed, links=own, kind="pump")
+        elif kind == "segments":
+            points = [net.curves[p.curve] for p in pumps]
+            width = max(len(c) for c in points)
+            flows = torch.full((len(pumps), width), torch.inf, dtype=F64)
+            heads = torch.zeros((len(pumps), width), dtype=F64)
+            for k, curve_points in enumerate(points):
+                flows[k, : len(curve_points)] = torch.tensor([x for x, _ in curve_points],
+                                                             dtype=F64)
+                heads[k, : len(curve_points)] = torch.tensor(
+                    [y * scale for _, y in curve_points], dtype=F64)
+            curve = PiecewisePumpCurve(flows, heads, [len(c) for c in points], speed=speed,
+                                       links=own, kind="pump")
+        else:
+            us = net.options.flow_units is None or net.options.flow_units in _US_UNITS
+            curve = ConstantPowerPump(
+                torch.tensor([p.power for p in pumps], dtype=F64),
+                kw_per_hp=HP_TO_KW if us else KW_PER_HP, cfs_per_m3s=epanet_cfs,
+                scale=scale, speed=speed, links=own, kind="pump")
+        parts.append((curve, cols))
+    return (parts[0][0] if single else parts), q_design
 
 
 def _link_drivers(net: WaterNetwork, scale: float) -> Drivers:
@@ -1352,13 +1417,15 @@ def water_steady(model: Model, state: State, drivers: Drivers, **solve_kwargs) -
     extended-period tank trajectory has CONVERGED with respect to it, so the iterations
     are spent rather than the fidelity.
 
-    After the solve, every `pump` edge's CONVERGED flow is checked against its own
-    `q_max`: a demand for more than `q_max` is refused by name. The pump's head gain
-    (`PumpCurve.head_gain`) extrapolates the fitted curve indefinitely so that Newton's
-    intermediate iterates are never aborted mid-solve; this is where that extrapolation is
-    finally held to account, once there is a converged answer to check. No clamp, no
-    warning: an exceedance raises `RuntimeError` naming the pump, the batch instance and the
-    flow against `q_max`.
+    After the solve, the CONVERGED flow of every power-function pump is checked against its
+    own `q_max` at its speed: a demand for more than `q_max` is refused by name. The pump's
+    head gain (`PumpCurve.head_gain`) extrapolates the fitted curve indefinitely so that
+    Newton's intermediate iterates are never aborted mid-solve; this is where that
+    extrapolation is finally held to account, once there is a converged answer to check. No
+    clamp, no warning: an exceedance raises `RuntimeError` naming the pump, the batch
+    instance and the flow against `q_max`. A segmented curve's last segment and a
+    constant-power pump are extended without a limit, as EPANET extends them. A converged
+    pump carrying flow backwards is refused by name too (`_refuse_wrong_way`).
 
     A state whose pipe flows are all exactly zero (a cold start) is solved from
     `model.initial_flows` when the pipes are in their resistance form: from zero flow every
@@ -1394,15 +1461,17 @@ def water_steady(model: Model, state: State, drivers: Drivers, **solve_kwargs) -
             f"from an initial concentration. Underlying error: {exc}",
             layer=exc.layer, nodes=exc.nodes,
         ) from exc
-    _refuse_pump_overflow(model, result)
+    _refuse_pump_overflow(model, result, drivers)
     _refuse_wrong_way(model, result, drivers, "water_steady")
     if limit is not None:
         result = {**result, "water.phi": limit(result)[0]}
     return result
 
 
-def _refuse_pump_overflow(model: Model, state: State) -> None:
-    """Refuse, by name, a converged pump flow beyond its own `q_max`.
+def _refuse_pump_overflow(model: Model, state: State, drivers: Drivers) -> None:
+    """Refuse, by name, a converged flow of a power-function pump beyond its own `q_max` at
+    its speed (`"water.setting"`). A segmented curve's last segment and a constant-power
+    pump's law are extended without a limit, as EPANET extends them.
 
     Reads the layer through its public `law_for` (kind -> `(element, slice)`).
     """
@@ -1412,16 +1481,21 @@ def _refuse_pump_overflow(model: Model, state: State) -> None:
     pump, sl = layer.law_for("pump")
     lo, hi = sl.start, sl.stop
     q = state["water.q"][..., lo:hi].detach()
-    q_max = pump.q_max().detach()
+    speed = drivers.get(SETTING_KEY)
+    if speed is not None and pump.link_range is not None:
+        speed = speed[..., slice(*pump.link_range)].detach()
+    q_max = pump.q_max(speed).detach()
     over = q.abs() > q_max
     if not bool(over.any()):
         return
     names = model.link_names[lo:hi]
+    over, flat_q, q_max = torch.broadcast_tensors(over, q.abs(), q_max)
     flat_over = over.reshape(-1, over.shape[-1])
-    flat_q = q.abs().reshape(-1, q.shape[-1])
+    flat_q = flat_q.reshape(-1, q.shape[-1])
+    q_max = q_max.reshape(-1, q.shape[-1])
     bad = [
         f"pump {names[j]!r} (instance {b}): flow {float(flat_q[b, j])} exceeds "
-        f"q_max {float(q_max[j])}"
+        f"q_max {float(q_max[b, j])}"
         for b in range(flat_over.shape[0])
         for j in range(flat_over.shape[1])
         if flat_over[b, j]
@@ -1432,14 +1506,28 @@ def _refuse_pump_overflow(model: Model, state: State) -> None:
 def _link_status(model: Model, state: State, drivers: Drivers) -> Tensor:
     """The `"water.status"` the solve sees: the drivers' own, or, on a network with tanks,
     the tank closure's (its controls switch the pumps; the closure remembers its last
-    answer, so the solve's own call that follows costs nothing)."""
+    answer, so the solve's own call that follows costs nothing), with every pump at speed 0
+    (`"water.setting"`) CLOSED."""
     if model.tank_closure is not None:
-        return model.tank_closure(state, drivers)[STATUS_KEY]
-    if STATUS_KEY not in drivers:
+        status = model.tank_closure(state, drivers)[STATUS_KEY]
+    elif STATUS_KEY not in drivers:
         raise KeyError(
             f"water: driver {STATUS_KEY!r} is required and was not given; build the drivers "
             f"with initial_drivers(model)")
-    return drivers[STATUS_KEY]
+    else:
+        status = drivers[STATUS_KEY]
+    layer = model.kirchhoff["water"]
+    speed = drivers.get(SETTING_KEY)
+    if "pump" not in layer.kinds or speed is None:
+        return status
+    cols = layer.law_for("pump")[1]
+    stopped = speed[..., cols].detach() == 0
+    if not bool(stopped.any()):
+        return status
+    # a pump at speed 0 is closed (`hydcoeffs.c`, `pumpcoeff`)
+    status = torch.broadcast_to(status, stopped.shape[:-1] + status.shape[-1:]).clone()
+    status[..., cols] = torch.where(stopped, float(CLOSED), status[..., cols])
+    return status
 
 
 @dataclass(frozen=True)
@@ -1957,12 +2045,22 @@ def _dual_active_set(g: Tensor, a: Tensor, c: Tensor, b: Tensor, tol: float,
 
 
 def _refuse_wrong_way(model: Model, state: State, drivers: Drivers, caller: str) -> None:
-    """Refuse a converged one-way pipe carrying flow against its direction. A check valve
-    an iterate would close is kept open where closing it would cut a junction off
-    (`FlowControlledPipe`); where the solution itself needs it closed with the junction
+    """Refuse a converged one-way pipe carrying flow against its direction, or a pump
+    carrying flow backwards. A check valve or pump an iterate would close is kept open
+    where closing it would cut a junction off (`FlowControlledPipe`,
+    `FlowControlledPump`); where the solution itself needs it closed with the junction
     then cut off, it ends with that wrong-way flow, and the network cannot be solved."""
-    one_way = drivers.get(ONE_WAY_KEY)
     layer = model.kirchhoff["water"]
+    if "pump" in layer.kinds:
+        cols = layer.law_for("pump")[1]
+        q = state["water.q"][..., cols].detach()
+        wrong = (q < -1e-9).reshape(-1, q.shape[-1]).any(0)
+        if bool(wrong.any()):
+            names = [model.link_names[cols.start + j] for j in range(len(wrong)) if wrong[j]]
+            raise ValueError(
+                f"{caller}: pump(s) {names} carry flow backwards: with them shut a junction "
+                f"is cut off from every reservoir and tank")
+    one_way = drivers.get(ONE_WAY_KEY)
     if one_way is None or "pipe" not in layer.kinds or not bool(one_way.any()):
         return
     cols = layer.law_for("pipe")[1]
@@ -1984,7 +2082,9 @@ def link_states(model: Model, state: State, drivers: Drivers) -> Tensor:
     A link whose status is CLOSED is closed. A one-way pipe (a check valve) carrying flow is
     open; one holding no flow is closed, unless EPANET's limit would push water through it
     (`_limit`: the multiplier of its constraint is positive, as for a valve that feeds a
-    zero-demand junction from the highest of several reservoirs). An ACTIVE PRV or PSV is in
+    zero-demand junction from the highest of several reservoirs). A pump is CLOSED where
+    its status is, where its speed is 0, or where it is shut beyond its shut-off head
+    (`FlowControlledPump.states`), and OPEN elsewhere. An ACTIVE PRV or PSV is in
     the state its residual selects at the solution (`_PressureValve.states`: CLOSED, ACTIVE
     or OPEN). A valve otherwise has its status (ACTIVE or OPEN); every other link is OPEN.
     """
@@ -1998,6 +2098,15 @@ def link_states(model: Model, state: State, drivers: Drivers) -> Tensor:
         shut = (one_way != 0) & (q.detach().abs() <= _NO_FLOW) & ~open_
         out = torch.where(shut, torch.full_like(out, CLOSED), out)
     layer = model.kirchhoff["water"]
+    if "pump" in layer.kinds:
+        law, cols = layer.law_for("pump")
+        running = out[..., cols] != CLOSED
+        if bool(running.any()):
+            ends = torch.tensor(_topology(model)[0], dtype=torch.long)
+            phi = state["water.phi"].detach()
+            dp = phi[..., ends[cols, 0]] - phi[..., ends[cols, 1]]
+            selected = law.states(dp, q[..., cols].detach(), drivers)
+            out[..., cols] = torch.where(running, selected.to(out.dtype), out[..., cols])
     ends = None
     for kind in ("prv", "psv"):
         if kind not in layer.kinds:
@@ -2034,7 +2143,7 @@ def water_step(model: Model, state: State, drivers: Drivers, dt: float, *,
     solve_kwargs.setdefault("max_iter", 200)
     drivers, limit = _cut_off_plan(model, state, drivers, "water_step")
     result = model.step(state, drivers, dt, scheme=scheme, **solve_kwargs)
-    _refuse_pump_overflow(model, result)
+    _refuse_pump_overflow(model, result, drivers)
     _refuse_wrong_way(model, result, drivers, "water_step")
     if limit is not None:
         result = {**result, "water.phi": limit(result)[0]}

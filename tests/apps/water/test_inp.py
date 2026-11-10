@@ -171,15 +171,14 @@ def test_a_control_with_an_unknown_test_is_refused(tmp_path):
         read_epanet_inp(path)
 
 
-def test_a_constant_power_pump_is_refused(tmp_path):
+def test_a_constant_power_pump_is_read_in_kilowatts(tmp_path):
     path = _edit(tmp_path, "Net1.inp", (" 9               \t9               \t10"
                                         "              \tHEAD 1\t;",
                                         " 9               \t9               \t10"
                                         "              \tPOWER 50\t;"))
     net = read_epanet_inp(path)
     assert net.pumps[0].power == pytest.approx(50 * 0.745699872, rel=1e-15)
-    with pytest.raises(ValueError, match="constant-POWER pump"):
-        net.validate()
+    net.validate()
 
 
 def test_a_speed_patterned_pump_is_refused(tmp_path):
@@ -474,8 +473,6 @@ def test_net6_reads_prv_cv_and_power_pump():
     assert len(powered) == 1
     assert powered[0].curve is None
     assert powered[0].power == pytest.approx(15 * 0.745699872, rel=1e-12)  # hp -> kW
-    with pytest.raises(ValueError, match="constant-POWER pump"):
-        net.validate()
 
 
 def test_ky10_reads_constant_power_pumps_in_kilowatts_and_the_energy_pattern():

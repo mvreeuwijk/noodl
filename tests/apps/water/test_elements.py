@@ -1,16 +1,20 @@
-"""Hazen-Williams, the fitted pump curve, the minor-loss valve and pressure-driven demand."""
+"""Hazen-Williams, the pump curves, the minor-loss valve and pressure-driven demand."""
 
 import math
 
 import pytest
 import torch
 
+from noodl.apps.water.controls import CLOSED, OPEN
 from noodl.apps.water.demand import PressureDrivenDemand
 from noodl.apps.water.elements import (
     HW_SI,
+    KW_PER_HP,
+    ConstantPowerPump,
     FlowControlledPump,
     HazenWilliams,
     MinorLoss,
+    PiecewisePumpCurve,
     PumpCurve,
     three_point_curve,
 )
@@ -153,7 +157,8 @@ def test_a_closed_status_driver_zeroes_the_pump():
         torch.tensor([101.6], dtype=F64), torch.tensor([2836.1385287628063], dtype=F64),
         links=slice(0, 1),
     )
-    drivers = {"water.status": torch.zeros(1, dtype=F64)}
+    drivers = {"water.status": torch.zeros(1, dtype=F64),
+               "water.setting": torch.ones(1, dtype=F64)}
     assert float(pump.flow(torch.tensor([-50.0], dtype=F64), drivers)) == 0.0
     drivers["water.status"] = torch.ones(1, dtype=F64)
     assert float(pump.flow(torch.tensor([-50.0], dtype=F64), drivers)) > 0.0
@@ -176,6 +181,7 @@ def _net1_pump():
 
 
 FLOOR, CBIG = 1e-6, 1e9
+ON = {"water.status": torch.ones(1, dtype=F64), "water.setting": torch.ones(1, dtype=F64)}
 
 
 def test_the_head_gain_is_the_fitted_curve_above_the_floor_flow():
@@ -185,8 +191,7 @@ def test_the_head_gain_is_the_fitted_curve_above_the_floor_flow():
     assert gain.tolist() == pytest.approx((101.6 - 2836.1385287628063 * q**2).tolist(),
                                           rel=1e-14)
     # and it agrees with the inverted curve `flow`
-    on = {"water.status": torch.ones(1, dtype=F64)}
-    assert float(pump.flow(-gain[1:], on)) == pytest.approx(float(q[1]), rel=1e-12)
+    assert float(pump.flow(-gain[1:], ON)) == pytest.approx(float(q[1]), rel=1e-12)
 
 
 def test_the_head_gain_is_strictly_decreasing_and_continuous_through_zero_flow():
@@ -199,25 +204,142 @@ def test_the_head_gain_is_strictly_decreasing_and_continuous_through_zero_flow()
     assert bool((gain[1:] <= gain[:-1]).all())
     (slope,) = torch.autograd.grad(gain.sum(), q)
     assert bool((slope < 0).all())
-    # the tangent below q_bar has EPANET's RQtol slope; the shut side has CBIG
-    assert float(slope[3]) == pytest.approx(-FLOOR, rel=1e-12)
-    assert float(slope[0]) == pytest.approx(-CBIG, rel=1e-12)
-    for x in (0.0, q_bar):
-        lo, hi = (torch.tensor([x - 1e-15], dtype=F64), torch.tensor([x + 1e-15], dtype=F64))
-        jump = pump.head_gain(hi, FLOOR, CBIG) - pump.head_gain(lo, FLOOR, CBIG)
-        assert abs(float(jump)) <= 1e-5   # CBIG times the 2e-15 m^3/s step, no more
+    # below q_bar the gain is the curve's tangent there, with EPANET's RQtol slope, through
+    # zero flow and beyond (the pump's no-flow row, not the curve, shuts it)
+    for k in (0, 1, 2, 3):
+        assert float(slope[k]) == pytest.approx(-FLOOR, rel=1e-9)
+    torch.testing.assert_close(-slope, pump.gain_slope(q.detach(), FLOOR, CBIG), rtol=1e-12,
+                               atol=0)
+    lo = torch.tensor([q_bar - 1e-15], dtype=F64)
+    hi = torch.tensor([q_bar + 1e-15], dtype=F64)
+    jump = pump.head_gain(hi, FLOOR, CBIG) - pump.head_gain(lo, FLOOR, CBIG)
+    assert abs(float(jump)) < 1e-12
 
 
-def test_the_head_gain_form_residual_follows_the_status_driver():
-    law = FlowControlledPump(_net1_pump(), gradient_floor=FLOOR, closed_slope=CBIG,
-                             kappa=torch.tensor([3.0], dtype=F64))
+def test_a_pump_curve_takes_its_own_exponent_and_the_speed_affinity_laws():
+    """``w^2 h0 - r w^(2-n) q^n`` per pump (`hydcoeffs.c`, `pumpcoeff`)."""
+    pump = PumpCurve(torch.tensor([31.6992, 60.0], dtype=F64),
+                     torch.tensor([20.0, 300.0], dtype=F64),
+                     torch.tensor([1.77, 2.0], dtype=F64))
+    q = torch.tensor([0.1, 0.2], dtype=F64)
+    w = torch.tensor([0.8, 1.1], dtype=F64)
+    n, r, h0 = pump.n, pump.r, pump.h0
+    expected = w**2 * h0 - r * w ** (2 - n) * q**n
+    torch.testing.assert_close(pump.head_gain(q, FLOOR, CBIG, w), expected, rtol=1e-14,
+                               atol=0)
+    torch.testing.assert_close(pump.q_max(w), w * (h0 / r) ** (1 / n), rtol=1e-14, atol=0)
+
+
+def test_an_exponent_below_one_is_capped_at_zero_flow():
+    """``n < 1``: the slope grows without bound towards zero flow; below the flow where it
+    reaches ``max_slope`` (EPANET's ``CBIG``) the gain is the tangent there."""
+    pump = PumpCurve(torch.tensor([30.0], dtype=F64), torch.tensor([40.0], dtype=F64),
+                     torch.tensor([0.5], dtype=F64))
+    q = torch.tensor([-1e-3, 0.0, 1e-12, 0.01], dtype=F64, requires_grad=True)
+    gain = pump.head_gain(q, FLOOR, 1e4)
+    (slope,) = torch.autograd.grad(gain.sum(), q)
+    assert torch.isfinite(gain).all() and bool((slope < 0).all())
+    assert float(slope[0]) == pytest.approx(-1e4, rel=1e-12)
+    assert float(gain[3].detach()) == pytest.approx(30.0 - 40.0 * 0.01**0.5, rel=1e-14)
+
+
+def test_a_piecewise_curve_follows_its_segments_and_scales_with_speed():
+    """`curvecoeff`'s bracketing segment, extended at both ends; ``w^2 h(q / w)``."""
+    flows = torch.tensor([[0.0, 0.1, 0.2, 0.3, torch.inf]], dtype=F64)
+    heads = torch.tensor([[90.0, 88.0, 80.0, 60.0, 0.0]], dtype=F64)
+    pump = PiecewisePumpCurve(flows, heads, [4])
+    q = torch.tensor([0.05, 0.15, 0.25, 0.35, -0.1], dtype=F64).unsqueeze(-1)
+    gain = pump.head_gain(q).squeeze(-1)
+    assert gain.tolist() == pytest.approx([89.0, 84.0, 70.0, 50.0, 92.0], rel=1e-14)
+    w = torch.tensor([0.8], dtype=F64)
+    at_speed = pump.head_gain(torch.tensor([[0.12]], dtype=F64), speed=w)
+    assert float(at_speed) == pytest.approx(0.64 * 84.0, rel=1e-14)   # 0.12 / 0.8 = 0.15
+    slope = pump.gain_slope(torch.tensor([[0.12]], dtype=F64), speed=w)
+    assert float(slope) == pytest.approx(0.8 * 80.0, rel=1e-14)
+
+
+def test_a_constant_power_pump_is_epanets_8_814_p_over_q():
+    """``8.814 P / q`` ft in horsepower and cfs (`updatepumpparams`, `pumpcoeff`), here
+    in metres and m3/s, with the speed cubed; the tangent beyond EPANET's ``CBIG`` cap."""
+    cfs = 1.0 / 0.3048**3
+    pump = ConstantPowerPump(torch.tensor([10.0], dtype=F64), kw_per_hp=KW_PER_HP)
+    q = torch.tensor([0.05], dtype=F64)
+    p_hp = 10.0 / 0.7457
+    expected = 0.3048 * 8.814 * p_hp / (0.05 * cfs)
+    assert float(pump.head_gain(q, FLOOR)) == pytest.approx(expected, rel=1e-14)
+    w = torch.tensor([0.9], dtype=F64)
+    assert float(pump.head_gain(q, FLOOR, speed=w)) == pytest.approx(0.729 * expected,
+                                                                      rel=1e-14)
+    cap = pump.max_slope
+    assert cap == pytest.approx(1e8 * 0.3048 * cfs, rel=1e-14)
+    q_lo = (float(pump.coefficient) / cap) ** 0.5
+    low = torch.tensor([-1e-3, 0.0, 0.5 * q_lo], dtype=F64, requires_grad=True)
+    gain = pump.head_gain(low, FLOOR)
+    (slope,) = torch.autograd.grad(gain.sum(), low)
+    assert slope.tolist() == pytest.approx([-cap] * 3, rel=1e-12)
+    assert float(gain[1].detach()) == pytest.approx(2.0 * cap * q_lo, rel=1e-12)
+
+
+def _flow_pump(kappa=3.0):
+    return FlowControlledPump(_net1_pump(), gradient_floor=FLOOR, max_slope=CBIG,
+                              kappa=torch.tensor([kappa], dtype=F64))
+
+
+def test_the_head_gain_form_residual_follows_the_status_and_speed_drivers():
+    law = _flow_pump()
     dp, q = torch.tensor([-62.0], dtype=F64), torch.tensor([0.1], dtype=F64)
     gain = float(law.pump.head_gain(q, FLOOR, CBIG))
-    open_ = {"water.status": torch.ones(1, dtype=F64)}
-    closed = {"water.status": torch.zeros(1, dtype=F64)}
-    assert float(law.residual(dp, q, open_, None)) == pytest.approx(-62.0 + gain, rel=1e-14)
+    closed = {**ON, "water.status": torch.zeros(1, dtype=F64)}
+    stopped = {**ON, "water.setting": torch.zeros(1, dtype=F64)}
+    slow = {**ON, "water.setting": torch.full((1,), 0.9, dtype=F64)}
+    assert float(law.residual(dp, q, ON, None)) == pytest.approx(-62.0 + gain, rel=1e-14)
     assert float(law.residual(dp, q, closed, None)) == pytest.approx(0.3, rel=1e-15)
-    assert float(law.q_max()) == pytest.approx((101.6 / 2836.1385287628063) ** 0.5, rel=1e-14)
+    assert float(law.residual(dp, q, stopped, None)) == pytest.approx(0.3, rel=1e-15)
+    at_09 = float(law.pump.head_gain(q, FLOOR, CBIG, torch.tensor([0.9], dtype=F64)))
+    assert float(law.residual(dp, q, slow, None)) == pytest.approx(-62.0 + at_09, rel=1e-14)
+    assert float(law.q_max()) == pytest.approx((101.6 / 2836.1385287628063) ** 0.5,
+                                               rel=1e-14)
+
+
+def test_a_pump_beyond_its_shut_off_head_takes_the_no_flow_row():
+    """``max(-kappa q, dp + gain(q))``: the no-flow row where the head asked of the pump
+    exceeds its shut-off head and the open row's Newton step would reverse the flow; the
+    curve at a tie and wherever the flow is forward on it."""
+    law = _flow_pump()
+    q = torch.tensor([0.0], dtype=F64)
+    beyond = torch.tensor([-150.0], dtype=F64)        # shut-off 101.6 m
+    assert float(law.residual(beyond, q, ON, None)) == 0.0                      # kappa q
+    assert int(law.states(beyond, q, ON)) == CLOSED
+    tie = -law.pump.head_gain(q, FLOOR, CBIG)
+    assert float(law.residual(tie, q, ON, None)) == 0.0
+    assert int(law.states(tie, q, ON)) == OPEN
+    # a forward flow whose open Newton step stays forward keeps the curve's row, even with
+    # the row below -kappa q; one whose step would reverse it takes the no-flow row
+    q = torch.tensor([0.12], dtype=F64)
+    above = torch.tensor([-70.0], dtype=F64)
+    r = float(law.residual(above, q, ON, None))
+    assert r == pytest.approx(-70.0 + float(law.pump.head_gain(q, FLOOR, CBIG)), rel=1e-14)
+    assert r < -0.36
+    assert float(law.residual(beyond, q, ON, None)) == pytest.approx(0.36, rel=1e-15)
+
+
+def test_pumps_of_several_kinds_share_one_law():
+    """`(curve, columns)` parts: each pump's gain is its own curve's, in column order."""
+    power = PumpCurve(torch.tensor([101.6], dtype=F64),
+                      torch.tensor([2836.1385287628063], dtype=F64))
+    segments = PiecewisePumpCurve(torch.tensor([[0.0, 0.1, 0.2]], dtype=F64),
+                                  torch.tensor([[90.0, 88.0, 80.0]], dtype=F64), [3])
+    constant = ConstantPowerPump(torch.tensor([10.0], dtype=F64))
+    law = FlowControlledPump([(segments, [2]), (power, [0]), (constant, [1])],
+                             gradient_floor=FLOOR, max_slope=CBIG, links=slice(0, 3))
+    q = torch.tensor([0.1, 0.05, 0.15], dtype=F64)
+    gain = law.head_gain(q)
+    assert gain.tolist() == pytest.approx([
+        float(power.head_gain(q[:1], FLOOR, CBIG)), float(constant.head_gain(q[1:2], FLOOR)),
+        84.0], rel=1e-14)
+    q_max = law.q_max()
+    assert math.isfinite(float(q_max[0])) and math.isinf(float(q_max[1]))
+    assert math.isinf(float(q_max[2]))
 
 
 def test_minor_loss_valve_inverts_its_quadratic():

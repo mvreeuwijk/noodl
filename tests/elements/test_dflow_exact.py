@@ -219,8 +219,9 @@ def _water_cases() -> dict[type, Callable[[], list[Case]]]:
         MinorLoss: lambda: [Case(MinorLoss(_t([3.0]), _t([0.2])), _grid(1, -12, 3))],
         PumpCurve: lambda: [
             Case(PumpCurve(_t([40.0]), _t([2000.0])), _grid(1, -9, 2.5, centre=-40.0)),
-            Case(PumpCurve(_t([40.0]), _t([2000.0]), speed=_t([0.8]), links=slice(0, 1)),
-                 _grid(1, -9, 2.5, centre=-25.6), {"water.status": _t([1.0])}),
+            Case(PumpCurve(_t([40.0]), _t([2000.0]), links=slice(0, 1)),
+                 _grid(1, -9, 2.5, centre=-25.6),
+                 {"water.status": _t([1.0]), "water.setting": _t([0.8])}),
         ],
         CompositeDarcyWeisbach: lambda: [
             Case(CompositeDarcyWeisbach(_t([500.0]), _t([0.25]), _t([0.0005])),

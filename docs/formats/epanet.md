@@ -31,15 +31,24 @@ with different units is refused by name when the file is read.
 **Read, then refused by name.** The reader converts every feature above to SI, and
 `WaterNetwork.validate()` (called by `build_model`) refuses, naming the feature, each one the
 builder does not model yet, so a file never loads into a network that quietly means something
-else: a numeric `[STATUS]` pump speed; a constant-**power**
-pump (its power is read in kW: horsepower in a US file, kilowatts in an SI one); a curve of more than
-three points; a pump speed pattern; a tank volume curve or overflow; emitters; `HEADLOSS C-M`;
-rules; and every `[CONTROLS]` form except
+else: a numeric `[STATUS]` pump speed; a pump speed pattern; a tank volume curve or overflow;
+emitters; `HEADLOSS C-M`; rules; and every `[CONTROLS]` form except
 `LINK <pump> OPEN|CLOSED IF NODE <tank> BELOW|ABOVE <level>`. Of EPANET's own valve checks
 (`valvecheck`), `validate()` refuses a PRV or PSV whose controlled node (a PRV's end, a PSV's
 start) is a reservoir or tank, and two valves that hold one node twice (EPANET's errors 219 and
-220), naming the valves. The reader itself refuses what it cannot read: a malformed record or a
-name that is not in the network.
+220), naming the valves. Of its pump checks it refuses a curve EPANET refuses (error 227): a
+one- or three-point curve with no power-function fit (`powercurve`), and any other curve whose
+flows do not rise or heads do not fall from point to point; and a constant-power pump without a
+positive power. The reader itself refuses what it cannot read: a malformed record or a name
+that is not in the network.
+
+**Pumps** are modelled as EPANET 2.2 types them (`input2.c`, `updatepumpparams`): a curve of one
+point, or of three with the first at zero flow, is a power function `h = h0 - r q^n` (`n` fitted
+to the three points; one point gives `n = 2`); every other curve is joined by straight segments;
+`POWER` is a constant-power pump (its power is read in kW: horsepower in a US file, kilowatts in
+an SI one, which EPANET divides by its 0.7457 kW per hp). `SPEED` is the pump's initial relative
+speed, the driver `"water.setting"`. See
+[Water distribution: pumps](../applications/water.md#pumps).
 
 **Units** follow `[OPTIONS] UNITS`: `CFS GPM MGD IMGD AFD` are US, `LPS LPM MLD CMH CMD` are SI,
 and everything is converted to SI on read. D-W roughness is millimetres (SI) or millifeet (US).
