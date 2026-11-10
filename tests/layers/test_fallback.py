@@ -307,3 +307,64 @@ def test_a_pingpong_step_reports_the_fallbacks_of_its_pass(monkeypatch):
     _fail_warm_newton(monkeypatch)
     model.step(state, drivers, 1.0, diagnostics=diagnostics)
     assert diagnostics["fallbacks"] == {"zones": 1}
+
+
+# ------------------------------------------------------------------ errors under the ladder
+def _mixed_warm_failure():
+    """The mixed layer with flow unknowns and a warm start it cannot use in 12 iterations."""
+    _, layer = _mixed_layer()
+    args = (torch.tensor([0.4]), {}, torch.tensor([0.0, 0.1, -0.2, 0.05, 0.0, 0.3]))
+    kw = dict(phi0=torch.full((5,), 50.0), max_iter=12, atol=1e-13, rtol=0)
+    return layer, args, kw
+
+
+def test_a_rung_that_raises_is_a_failed_rung_and_the_first_failure_stands(monkeypatch):
+    """A linear guess that cannot be formed (singular there) fails its rung; the error is
+    still the first solve's non-convergence, and a return mode still returns it."""
+    layer, args, kw = _mixed_warm_failure()
+
+    def singular_guess(self, *a, **k):
+        raise self._singular_error("dc")
+
+    monkeypatch.setattr(KirchhoffLayer, "_linear_guess", singular_guess)
+    with pytest.raises(ConvergenceError, match=r"failed to converge after 12 iterations.*; "
+                                               r"the fallback \['linear_guess'\] did not "
+                                               r"converge either: .*singular"):
+        layer.solve(*args, fallback=("linear_guess",), **kw)
+    diagnostics: dict = {}
+    phi, _ = layer.solve(*args, fallback=("linear_guess",), differentiable=False,
+                         on_failure="return_primal", diagnostics=diagnostics, **kw)
+    assert diagnostics["fallback"] is None and not bool(diagnostics["converged"])
+    assert torch.isfinite(phi).all()
+
+
+def test_the_rank_test_waits_for_the_ladder(monkeypatch):
+    """A failed warm solve whose last Jacobian the rank test calls singular: without a
+    ladder the singular error is raised at once, as before; with one the rung rescues it."""
+    layer, args, kw = _mixed_warm_failure()
+    monkeypatch.setattr(kirchhoff, "singular", lambda *a: True)
+    with pytest.raises(RuntimeError, match="is singular") as info:
+        layer.solve(*args, **kw)
+    assert not isinstance(info.value, ConvergenceError)
+    diagnostics: dict = {}
+    phi, _ = layer.solve(*args, fallback=("linear_guess",), diagnostics=diagnostics, **kw)
+    assert diagnostics["fallback"] == "linear_guess"
+    assert bool(diagnostics["converged"]) and torch.isfinite(phi).all()
+
+
+def test_a_singular_layer_with_a_ladder_still_raises_the_singular_error():
+    from tests._circuit_laws import Source
+
+    net = Network(dtype=F64)
+    for n in ("gnd", "a"):
+        net.add_node(n)
+    net.add_edge("a", "gnd", kind="source")
+    net.add_edge("a", "gnd", kind="source")
+    net.add_edge("a", "gnd", kind="r")
+    layer = KirchhoffLayer(net, "e", [Source(torch.tensor([1.0, 2.0])),
+                                      Conductance(torch.tensor([1.0]), kind="r")],
+                           boundary=["gnd"], fallback=("linear_guess", "storage_ramp"))
+    for kw in ({}, {"method": "direct"}):
+        with pytest.raises(RuntimeError, match=r"singular.*'source'") as info:
+            layer.solve(torch.zeros(1), differentiable=False, **kw)
+        assert not isinstance(info.value, ConvergenceError)

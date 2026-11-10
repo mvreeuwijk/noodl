@@ -189,28 +189,40 @@ air = KirchhoffLayer(net, "air", laws, boundary=["ambient"],
   without flow unknowns does; a layer with flow unknowns starts a cold solve from zeros, so
   the rung runs there.
 - **`"storage_ramp"`: let the network settle from the linear guess through a fictitious
-  storage that is removed in steps.** Every node gets a storage term, as if it held some
-  amount that resists a change of its potential: its balance gains $g\,(x - x_\text{prev})$,
-  with $g$ a multiple of that node's own Jacobian diagonal. A large storage makes each change
-  small and the Jacobian strongly diagonal, so Newton converges from a poor start; the storage
-  is then divided by ten, three times (multiples 1, 0.1, 0.01 and 0.001), each stage starting
-  from the last one's result, and the ordinary solve starts from where it settled. This is
-  pseudo-time stepping: the stages are steps of a made-up transient whose end is the steady
-  solution (`noodl.solvers.continuation.storage_ramp`). The storage sits on the potential
-  (balance) rows only; on a layer without flow unknowns the shift keeps the operator
-  symmetric positive definite, so the SPD certificate and its solvers still apply.
+  storage that is removed in steps.** Every row gets a storage term, as if each node held
+  some amount that resists a change of its potential: its balance gains
+  $g\,(x - x_\text{prev})$, with $g$ a multiple of that row's own Jacobian diagonal. A large
+  storage makes each change small and the Jacobian strongly diagonal, so Newton converges
+  from a poor start; the storage is then divided by ten, three times (multiples 1, 0.1, 0.01
+  and 0.001), each stage starting from the last one's result, and the ordinary solve starts
+  from where it settled. This is pseudo-time stepping: the stages are steps of a made-up
+  transient whose end is the steady solution (`noodl.solvers.continuation.storage_ramp`). A
+  potential (balance) row takes the size of its diagonal, a capacity at the node; the row of
+  a flow unknown takes it with its sign, an inertia of the flow, because a relation may be
+  written either way round and a shift of the other sign would cancel its diagonal. A row
+  with a zero diagonal gets nothing: an ideal source's, and the balance of a node whose
+  every edge is a flow unknown (a water network in its resistance form, where only the
+  flows' rows carry the ramp). When the linear guess cannot be formed (it is singular, as
+  for that water network at zero flow) the ramp starts where the failed solve did. On a
+  layer without flow unknowns the shift keeps the operator symmetric positive definite, so
+  the SPD certificate and its solvers still apply.
 
-The whole batch is solved again on each rung. Only non-convergence (`ConvergenceError`) climbs
-the ladder; any other error passes through, and so does the rank test of a layer with flow
-unknowns, which reports a singular system as such. Nothing of the ladder is differentiated:
-the rung's solve is the layer's ordinary one from a new starting point, so the gradient is
-the implicit one at the exact root. `diagnostics["fallback"]` names the rung that converged
-(`None` when none was needed or none worked) and `diagnostics["fallback_iterations"]` the
-storage stages' Newton iterations; `Model.step` sums the rungs taken per layer over a step's
-passes into `diagnostics["fallbacks"]` (present only when some layer has a ladder). When no
-rung converges the first failure stands. The
-default is no ladder (`fallback=()`), which runs exactly the plain solve. The building
-application's air layers are built with `fallback=("linear_guess",)`.
+The whole batch is solved again on each rung. Only non-convergence (`ConvergenceError`) of
+the first solve climbs the ladder; any other error of it passes through. A rung that raises
+any error (a linear guess that is singular, or not grounded) has failed, and the next one is
+tried. On a layer with flow unknowns, the rank test that names a singular system diagnoses a
+failure only once every rung has failed too, in every `on_failure` mode: a Jacobian that is
+singular at the last iterate is often a symptom of a bad start, which a rung cures, and a
+system that is singular in itself fails every rung and still ends in that error. Nothing of
+the ladder is differentiated: the rung's solve is the layer's ordinary one from a new
+starting point, so the gradient is the implicit one at the exact root.
+`diagnostics["fallback"]` names the rung that converged (`None` when none was needed or none
+worked) and `diagnostics["fallback_iterations"]` the storage stages' Newton iterations;
+`Model.step` sums the rungs taken per layer over a step's passes into
+`diagnostics["fallbacks"]` (present only when some layer has a ladder). When no rung
+converges the first failure stands. The default is no ladder (`fallback=()`), which runs
+exactly the plain solve, with the rank test at once. The building application's air layers
+are built with `fallback=("linear_guess",)`.
 
 ## Monotone scalar solves
 

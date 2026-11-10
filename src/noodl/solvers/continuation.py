@@ -32,8 +32,8 @@ def shift_diagonal(op, g: Tensor):
     """`op + diag(g)` for the operators a layer's Jacobian is: a dense tensor, a
     `SparseOperator` (the shift is appended as diagonal COO entries, which its consumers
     sum), an unscaled `ShiftedOperator` with a per-row shift (the two shifts are added, so
-    the base's SPD certificate still applies), or any other operator (wrapped in a
-    `ShiftedOperator`). `g` is `(..., n)`, non-negative."""
+    the base's SPD certificate still applies while `g` is non-negative), or any other
+    operator (wrapped in a `ShiftedOperator`). `g` is `(..., n)`."""
     if isinstance(op, Tensor):
         return op + torch.diag_embed(g.to(op.dtype))
     if isinstance(op, SparseOperator):
@@ -61,6 +61,7 @@ def storage_ramp(
     x0: Tensor,
     *,
     rows: Tensor | None = None,
+    signed: Tensor | None = None,
     scales: Sequence[float] = RAMP_SCALES,
     diagnostics: dict | None = None,
     **newton_kwargs,
@@ -71,12 +72,15 @@ def storage_ramp(
 
     `g = scale * |diag(operator(x_prev))|` on `rows` (a `(n,)` bool mask; `None` is every
     row) and zero elsewhere, `x_prev` being the stage's start: each row's own Jacobian
-    diagonal sets its units, so the storage is relative. `scales` are the stages' factors.
-    Each stage is one `newton` solve with `newton_kwargs` and `on_failure="return"`, under
-    `no_grad`: a stage that does not converge still hands its last iterate on, and an
-    instance whose iterate is not finite keeps the stage's start. `diagnostics`, when given,
-    receives `"newton_iterations"`, the stages' Newton iterations summed. The result is
-    detached; it is a starting point, not a solution.
+    diagonal sets its units, so the storage is relative. On the rows of `signed` (a `(n,)`
+    bool mask; `None` is none) `g` keeps the diagonal's sign, `scale * diag`, so the shifted
+    diagonal `(1 + scale) diag` never cancels: a row written with a negative diagonal (a
+    relation `dp - f(q)`) gets an inertia rather than a storage of the wrong sign. `scales`
+    are the stages' factors. Each stage is one `newton` solve with `newton_kwargs` and
+    `on_failure="return"`, under `no_grad`: a stage that does not converge still hands its
+    last iterate on, and an instance whose iterate is not finite keeps the stage's start.
+    `diagnostics`, when given, receives `"newton_iterations"`, the stages' Newton iterations
+    summed. The result is detached; it is a starting point, not a solution.
     """
     newton_kwargs = {**newton_kwargs, "on_failure": "return"}
     x = x0.detach()
@@ -84,8 +88,11 @@ def storage_ramp(
     with torch.no_grad():
         for scale in scales:
             x_prev = x
-            diag = _diagonal(operator(x_prev)).abs()
-            g = scale * diag
+            diag = _diagonal(operator(x_prev))
+            if signed is None:
+                g = scale * diag.abs()
+            else:
+                g = scale * torch.where(signed.to(device=diag.device), diag, diag.abs())
             if rows is not None:
                 g = g * rows.to(dtype=g.dtype, device=g.device)
 

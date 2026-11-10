@@ -2115,15 +2115,18 @@ class KirchhoffLayer(TopologyGuard):
           skipped when the failed solve already started there (a layer without flow
           unknowns and no `phi0`); the initial point with held storage of a layer without
           flow unknowns, which has no linear guess, starts again from zeros instead.
-        - `"storage_ramp"`: from that same start, let the network settle through a
-          fictitious storage at every node, `g (x - x_prev)` added to its balance with `g` a
-          multiple of the node's own Jacobian diagonal, removed over four stages, each with
-          a storage ten times smaller (`noodl.solvers.continuation.storage_ramp`), and
-          solve again from where it settled. The storage sits on the potential (balance)
-          rows only: a relation's row has no sign convention a positive storage could
-          respect, and an ideal source's row has no diagonal to scale. The stages are a
-          starting point and carry no gradient; the solve that follows is this one's own,
-          so the gradient is at the exact root.
+        - `"storage_ramp"`: from that same start (or, when the linear guess cannot be
+          formed, from where the failed solve started), let the network settle through a
+          fictitious storage: `g (x - x_prev)` added to every row, `g` a multiple of the
+          row's own Jacobian diagonal, removed over four stages, each with a storage ten
+          times smaller (`noodl.solvers.continuation.storage_ramp`), and solve again from
+          where it settled. A potential (balance) row takes the diagonal's size, a capacity
+          at the node; the row of a flow unknown takes it with its sign, an inertia of the
+          flow (a relation may be written either way round, and a shift of the other sign
+          would cancel its diagonal). A row with a zero diagonal (an ideal source; a node
+          whose every edge is a flow unknown) gets none. The stages are a starting point and
+          carry no gradient; the solve that follows is this one's own, so the gradient is at
+          the exact root.
 
         `diagnostics`, when given, then also receives `"fallback"`, the rung that converged
         (`None` if the first solve did, or no rung did), and `"fallback_iterations"`, the
@@ -2131,9 +2134,13 @@ class KirchhoffLayer(TopologyGuard):
         the converged solve's. When no rung converges, the first failure stands: its error
         is raised (naming the rungs tried and the last one's error), or, under
         `on_failure="return"`/`"return_primal"`, its result and diagnostics are returned.
-        Only non-convergence (`ConvergenceError`) climbs the ladder; every other error passes
-        through. With no fallback (the default) none of this runs and `diagnostics` gains
-        no entry.
+        Only non-convergence (`ConvergenceError`) of the first solve climbs the ladder; every
+        other error of it passes through. A rung that raises any error has failed, and the
+        next is tried. On a layer with flow unknowns the rank test that names a singular
+        system diagnoses the first solve's failure only once every rung has failed too (it
+        is raised then, in place of the first error), in every `on_failure` mode. With no
+        fallback (the default) none of this runs, the rank test is made at once, and
+        `diagnostics` gains no entry.
         """
         try:
             rungs = self.fallback if fallback is None else check_fallback(self.name, fallback)
@@ -2177,12 +2184,17 @@ class KirchhoffLayer(TopologyGuard):
             if rung == "linear_guess" and report.get("start") == rung_start:
                 continue
             ramp: dict = {}
+            ramped = rung == "storage_ramp"
             try:
-                out = self._solve(phi_boundary, drivers, sources, None, q0=None,
-                                  diagnostics=diagnostics,
-                                  _start="ramp" if rung == "storage_ramp" else "linear",
+                # the storage ramp falls back to the failed solve's own start when the
+                # linear guess cannot be formed (`_solve`)
+                out = self._solve(phi_boundary, drivers, sources, phi0 if ramped else None,
+                                  q0=q0 if ramped else None, diagnostics=diagnostics,
+                                  _start="ramp" if ramped else "linear",
                                   _report=ramp, **kwargs)
-            except ConvergenceError as exc:
+            except RuntimeError as exc:
+                # any error of a rung (a singular linear guess, a grounding refusal at it,
+                # non-convergence) is that rung failing; the first failure still stands
                 last_error = exc
                 continue
             if diagnostics is None or _converged(diagnostics):
@@ -2191,6 +2203,9 @@ class KirchhoffLayer(TopologyGuard):
                                        fallback_iterations=ramp.get("ramp_iterations", 0))
                 return out
         if first_error is not None:
+            if "singular" in report:
+                # the rank test of the first solve, diagnosed once every rung has failed
+                raise report["singular"] from first_error
             if last_error is None:
                 raise first_error
             raise ConvergenceError(
@@ -2242,8 +2257,16 @@ class KirchhoffLayer(TopologyGuard):
             x0, start = self._starting_point(phi0, phi_boundary, drivers, sources, step,
                                              q0=q0)
         else:
-            x0, start = self._starting_point(None, phi_boundary, drivers, sources, step,
-                                             linear=True)
+            try:
+                x0, start = self._starting_point(None, phi_boundary, drivers, sources, step,
+                                                 linear=True)
+            except RuntimeError:
+                if _start != "ramp":
+                    raise
+                # no linear guess to settle from (singular, or not grounded there): the
+                # storage ramp starts where the failed solve did
+                x0, start = self._starting_point(phi0, phi_boundary, drivers, sources, step,
+                                                 q0=q0)
         if _report is not None:
             _report["held"] = step.layout is not None
             _report["start"] = ("warm" if phi0 is not None or q0 is not None
@@ -2278,7 +2301,13 @@ class KirchhoffLayer(TopologyGuard):
 
             def on_fail(exc):
                 if singular(last.get("op"), u.n, first_failing(last, newton_kwargs)):
-                    raise self._singular_error(step.ctx.mode) from exc
+                    error = self._singular_error(step.ctx.mode)
+                    if _report is not None:
+                        # under the fallback ladder the rank test is a diagnosis made only
+                        # once every rung has failed too (`_solve_with_fallback`)
+                        _report["singular"] = error
+                        return
+                    raise error from exc
 
         if _start == "ramp":
             # the storage ramp's starting point; the solve below starts from it
@@ -2788,8 +2817,9 @@ class KirchhoffLayer(TopologyGuard):
 
     def _ramp(self, x0, phi_boundary, drivers, sources, step, newton_kwargs, report):
         """`storage_ramp` from `x0` on this solve's own residual and Jacobian (the laws
-        called on their modules, without gradients), the storage on the potential rows:
-        the starting point of the fallback ladder's `"storage_ramp"` rung."""
+        called on their modules, without gradients): the starting point of the fallback
+        ladder's `"storage_ramp"` rung. The rows of the flow unknowns take a storage with
+        the sign of their own diagonal (an inertia), the potential rows its size."""
         call = self._owner_call
         u = self._unknowns if step.layout is None else step.layout
 
@@ -2799,11 +2829,11 @@ class KirchhoffLayer(TopologyGuard):
         def operator(x):
             return self._operator(x, phi_boundary, drivers, step)
 
-        rows = None
+        signed = None
         if u is not None:
-            rows = torch.arange(u.n, device=x0.device) < u.w * u.n_I
+            signed = torch.arange(u.n, device=x0.device) >= u.w * u.n_I
         stages: dict = {}
-        x = storage_ramp(residual, operator, x0, rows=rows, diagnostics=stages,
+        x = storage_ramp(residual, operator, x0, signed=signed, diagnostics=stages,
                          **{k: v for k, v in newton_kwargs.items() if k != "on_failure"})
         if report is not None:
             report["ramp_iterations"] = stages["newton_iterations"]
