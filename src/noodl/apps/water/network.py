@@ -51,6 +51,7 @@ from noodl.apps.water.elements import (
     HazenWilliams,
     PumpCurve,
     ThrottleValve,
+    _joined_groups,
     epanet_minor_coefficient,
     three_point_curve,
 )
@@ -1509,63 +1510,142 @@ def _cut_off_plan(model: Model, state: State, drivers: Drivers, caller: str):
             drivers = {**drivers, PIN_KEY: ties[inverse].reshape(batch + (n_l,))}
 
     def settle(solution: State) -> Tensor:
-        return _settle(model, solution, closed, demand, one_way)
+        return _settle(model, solution, closed, demand, one_way, caller)
 
     return drivers, settle
 
 
 def _settle(model: Model, solution: State, closed: Tensor, demand: Tensor,
-            one_way: Tensor | None) -> Tensor:
-    """`solution`'s heads with every zero-demand group cut off AT THE SOLUTION at EPANET's
-    limit head (`_cut_off_groups`).
+            one_way: Tensor | None, caller: str) -> Tensor:
+    """`solution`'s heads with every zero-demand part of the network that the solve leaves
+    without a head of its own set to EPANET's limit head.
 
-    A group is cut off when every link joining it to the rest is closed: by its status, or a
-    check valve holding no flow. A check valve's no-flow branch does not fix the head on its
-    closed side (any head that keeps it shut is a solution; the solve stops at one of them,
-    often the open branch's tie, `dp = 0`), and EPANET's `1 / CBIG` conductance through it
-    does: the same limit as through a closed link. A check valve the limit head would open
-    (a head across it driving water its own way) is open after all: it joins the group to
-    its far side, and the groups are formed again without it."""
+    A link carrying flow, or open in both directions, ties its ends' heads (it is "solid");
+    a node joined by solid links to a reservoir or tank has the solve's own head
+    ("reliable"). Every other node sits behind closed links (status CLOSED) and check valves
+    holding no flow, where the exact equations leave its head free (any head that keeps the
+    check valves shut solves them; the solve stops at one of them, often an open branch's tie
+    `dp = 0`). EPANET's limit as its closed-link conductance `1 / CBIG` vanishes:
+
+    - every closed link, and every check valve in its no-flow branch, is one equal small
+      conductance; a check valve open at zero flow has a conductance infinitely larger, so
+      it ties its two ends together (its head loss at zero flow is 0);
+    - starting with every zero-flow check valve shut, the unknown heads solve the Laplacian
+      over the closed links (nodes tied to reliable ones take their head);
+    - the shut check valve whose head would drive water its own way the hardest is opened
+      (tied), and the Laplacian solved again, until none would open.
+
+    Each pass opens one valve and none is ever shut again, so it ends within as many passes
+    as there are zero-flow check valves; opening the hardest-driven valve first is what lets
+    a later, weaker one stay shut (its far side is then below the group's head). The solve's
+    own choice among the free heads (which valve its iterates kept open) does not enter:
+    only which links carry flow does. A junction with a demand in such a part (no solution
+    has one) and a valve that would tie two reliable heads that differ (it would carry
+    flow, so the solve's branch was not EPANET's) are refused by name."""
     phi = solution["water.phi"]
     net = model.water_network
-    n_j, n_l = len(net.junctions), len(model.link_names)
+    n, n_j, n_l = phi.shape[-1], len(net.junctions), len(model.link_names)
     q = solution["water.q"].detach()
     if one_way is None:
         one_way = torch.zeros(n_l, dtype=q.dtype)
-    still = (one_way != 0) & (q.abs() <= 1e-12)
-    shut = closed | still
-    if not bool(shut.any()):
-        return phi
-    batch = torch.broadcast_shapes(phi.shape[:-1], shut.shape[:-1], demand.shape[:-1],
+    still = (one_way != 0) & (q.abs() <= 1e-12) & ~closed
+    solid = ~closed & ~still
+    batch = torch.broadcast_shapes(phi.shape[:-1], solid.shape[:-1], demand.shape[:-1],
                                    one_way.shape[:-1])
-    out = phi.expand(batch + phi.shape[-1:]).clone().reshape(-1, phi.shape[-1])
-    flat_in = phi.expand(batch + phi.shape[-1:]).reshape(-1, phi.shape[-1])
-    shut = shut.expand(batch + (n_l,)).reshape(-1, n_l).tolist()
+    flat_in = phi.expand(batch + (n,)).reshape(-1, n)
+    out = flat_in.clone()
+    solid = solid.expand(batch + (n_l,)).reshape(-1, n_l).tolist()
     still = still.expand(batch + (n_l,)).reshape(-1, n_l).tolist()
     demand = demand.expand(batch + (n_j,)).reshape(-1, n_j).tolist()
     direction = one_way.expand(batch + (n_l,)).reshape(-1, n_l).tolist()
     ends = model.__dict__.get("_link_ends")
     if ends is None:
         index = {name: i for i, name in enumerate(model.node_names)}
-        ends = model._link_ends = [(index[k.u], index[k.v]) for k in net.links()]
+        ends = model._link_ends = tuple((index[k.u], index[k.v]) for k in net.links())
+    fixed = tuple(model.node_names.index(f.name) for f in (*net.reservoirs, *net.tanks))
     tol = 1e-9 * model.head_scale
     for b in range(out.shape[0]):
-        shut_b = shut[b]
+        group, fed = _joined_groups(ends, fixed, tuple(solid[b]))
+        free = [i for i in range(n) if group.get(i, i) not in fed]
+        if not free:
+            continue
+        reliable = [group.get(i, i) in fed for i in range(n)]
+        for i in free:
+            if i < n_j and demand[b][i]:
+                raise ValueError(
+                    f"{caller}: junction {net.junctions[i].name!r} has a demand but is "
+                    f"joined to every reservoir and tank only through closed links and "
+                    f"check valves holding no flow")
+        values = flat_in[b].detach()
+        opened: set[int] = set()
         while True:
-            plan = _groups(model, tuple(not x for x in shut_b), tuple(demand[b]))
-            if plan.fed_none or not plan.nodes:
+            heads, anchored = _limit_heads(ends, solid[b], still[b], opened, reliable, n)
+            guess = heads @ values
+            drive = {j: direction[b][j] * float(guess[ends[j][0]] - guess[ends[j][1]])
+                     for j in range(n_l) if still[b][j] and j not in opened}
+            drive = {j: d for j, d in drive.items() if d > tol}
+            if not drive:
                 break
-            heads = flat_in[b].detach().clone()
-            heads[list(plan.nodes)] = plan.heads.to(heads.dtype) @ flat_in[b].detach()
-            opens = [j for j in range(n_l) if shut_b[j] and still[b][j]
-                     and direction[b][j] * float(heads[ends[j][0]] - heads[ends[j][1]]) > tol]
-            if not opens:
-                out[b, list(plan.nodes)] = plan.heads.to(phi.dtype) @ flat_in[b]
-                break
-            shut_b = list(shut_b)
-            for j in opens:
-                shut_b[j] = False
-    return out.reshape(batch + phi.shape[-1:])
+            j = max(drive, key=drive.get)
+            if anchored[ends[j][0]] and anchored[ends[j][1]]:
+                raise ValueError(
+                    f"{caller}: check valve {model.link_names[j]!r} holds no flow, yet the "
+                    f"heads at its two ends, both fixed by the rest of the network, would "
+                    f"drive water through it; solve again from another state")
+            opened.add(j)
+        out[b, free] = heads[free].to(phi.dtype) @ flat_in[b]
+    return out.reshape(batch + (n,))
+
+
+def _limit_heads(ends, solid, still, opened, reliable, n) -> tuple[Tensor, list]:
+    """`(M, anchored)`: the matrix with every node's limit head `M @ phi` (`_settle`), and
+    whether each node's head is a reliable node's. A reliable node keeps its own head; the
+    others are tied into groups by solid links and the `opened`
+    check valves, and each group not tied to a reliable node solves the Laplacian over the
+    closed links (status CLOSED, and the check valves `still` not `opened`) with equal
+    weights."""
+    # Ties: the solid links among the other nodes (they carry no flow there) and the opened
+    # check valves; never a solid link between two reliable nodes, whose heads differ by
+    # its head loss.
+    tied = [j in opened or (solid[j] and not (reliable[u] and reliable[v]))
+            for j, (u, v) in enumerate(ends)]
+    groups: UnionFind[int] = UnionFind(range(n))
+    for j, (u, v) in enumerate(ends):
+        if tied[j]:
+            groups.union(u, v)
+    group = [groups.find(i) for i in range(n)]
+    anchor: dict[int, int] = {}
+    for i in range(n):
+        if reliable[i]:
+            anchor.setdefault(group[i], i)
+    m = torch.zeros(n, n, dtype=F64)
+    unknown = [g for g in dict.fromkeys(group) if g not in anchor]
+    k_of = {g: k for k, g in enumerate(unknown)}
+    lap = torch.zeros(len(unknown), len(unknown), dtype=F64)
+    far = torch.zeros(len(unknown), n, dtype=F64)
+    for j, (u, v) in enumerate(ends):
+        if solid[j] or tied[j] or group[u] == group[v]:
+            continue
+        for a, end in ((u, v), (v, u)):
+            ga, ge = group[a], group[end]
+            if ga not in k_of:
+                continue
+            lap[k_of[ga], k_of[ga]] += 1.0
+            if ge in k_of:
+                lap[k_of[ga], k_of[ge]] -= 1.0
+            elif reliable[end]:
+                far[k_of[ga], end] += 1.0
+            else:
+                far[k_of[ga], anchor[ge]] += 1.0
+    per_group = torch.linalg.solve(lap, far) if unknown else far
+    for i in range(n):
+        if reliable[i]:
+            m[i, i] = 1.0
+        elif group[i] in anchor:
+            m[i, anchor[group[i]]] = 1.0
+        else:
+            m[i] = per_group[k_of[group[i]]]
+    return m, [group[i] in anchor for i in range(n)]
 
 
 def _refuse_wrong_way(model: Model, state: State, drivers: Drivers, caller: str) -> None:

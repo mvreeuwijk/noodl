@@ -429,13 +429,18 @@ independent loop is a property of the cycle-space formulation, and it holds exac
   model's (MEASURED: scaling the demands by that factor removes 88-95% of the head differences).
   On ordinary networks that is below 1e-6 relative in the heads; on one with 110 m of losses
   it is 3e-5.
-- **A zero-demand group of several junctions fenced off by check valves** is held at the
-  `1 / CBIG` limit head, the average over the far ends of its closed links (75 m between
-  reservoirs at 100 and 50 m). EPANET's own answer there is not that limit: its low-flow
-  handling of the open pipe inside the group (`RQtol`) carries the 2.3e-8 m³/s leak, and its
-  head depends on that pipe's length (73.21 m at 5 m, 75.021 m at 500 m, 74.994 m at
-  5000 m; MEASURED; `test_a_group_fenced_off_by_check_valves_is_held_at_the_limit_head`).
-  A single fenced-off junction matches EPANET to 3e-9.
+- **A zero-demand group of several junctions joined by a link inside it, fenced off by
+  check valves**, is held at the `1 / CBIG` limit head (75 m between reservoirs at 100 and
+  50 m). EPANET's head there is not that limit. MEASURED, for J - P5 - L fenced off between
+  those reservoirs: 73.2097 m with P5 5 m long, 75.0213 m at 500 m, 74.9940 m at 5000 m
+  (not monotonic in the length, so not a converged limit), unchanged with `ACCURACY 1e-8`;
+  the 2.3e-8 m³/s EPANET reports in P5 is the `1 / CBIG` flow through the closed check
+  valves (25 m over `CBIG`). Why EPANET's head moves by up to 1.8 m is a hypothesis only:
+  it may stop on an unconverged iterate for a group whose flows are all below its
+  relative-flow test. Tests: `test_a_group_fenced_off_by_check_valves_is_held_at_the_limit_head`
+  (2.8e-4 relative) and the internal-check-valve case of
+  `test_check_valves_fencing_a_junction_match_epanet` (4.1e-5). A single fenced-off
+  junction, with no link inside the group, matches EPANET to 3e-9.
 - **Pump curves** are single- or three-point only, with the exponent fixed at $n = 2$. Curves
   with four or more points, which EPANET connects piecewise-linearly, are refused; fit a
   three-point curve instead.

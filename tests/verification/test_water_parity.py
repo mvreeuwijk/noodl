@@ -1128,10 +1128,12 @@ def test_a_junction_fenced_off_by_check_valves_matches_epanet(tmp_path):
 
 def test_a_group_fenced_off_by_check_valves_is_held_at_the_limit_head(tmp_path):
     """J - P5 - L, fenced off by the two check valves. This model holds both at 75 m, the
-    `1 / CBIG` limit. EPANET reports 75.021263, and that is NOT a CBIG limit but its
-    low-flow handling of P5 (its `RQtol` line carries the 2.3e-8 m3/s leak through the
-    group): with P5 5 m long EPANET gives 73.21, with 5000 m 74.994 (MEASURED, ACCURACY 1e-8
-    changes nothing). So J and L are compared at 3e-4 relative (MEASURED 2.8e-4); every
+    `1 / CBIG` limit. EPANET reports 75.021263, which is not a limit: MEASURED with P5
+    5 m, 500 m and 5000 m long it gives 73.2097, 75.0213 and 74.9940 (not monotonic),
+    unchanged with ACCURACY 1e-8. Its 2.3e-8 m3/s in P5 is the `1 / CBIG` flow through the
+    closed check valves (25 m = 82.0 ft over 1e8). The mechanism is a HYPOTHESIS: EPANET may
+    stop on an unconverged iterate for a group whose flows are all below its relative-flow
+    test. So J and L are compared at 3e-4 relative (MEASURED 2.8e-4); every
     other head at 1e-6, every flow at 1e-6 m3/s, every state exactly. Documented in
     docs/applications/water.md, Limitations."""
     model, final, drivers, results = _hand_built(tmp_path, *_fenced("J", "L"))
@@ -1142,3 +1144,56 @@ def test_a_group_fenced_off_by_check_valves_is_held_at_the_limit_head(tmp_path):
         assert mine == pytest.approx(75.0, abs=1e-12)
         assert abs(mine - float(heads[name])) < 3e-4 * float(heads[name])
     _compare_with_epanet(model, final, drivers, results, heads=3e-4)
+
+
+def _fence_cases():
+    """The reviewer's adversarial networks: R1 (100 m) and R2 (50 m) joined through K
+    (4 L/s), and zero-demand junctions behind check valves only."""
+    from noodl.apps.water.network import Junction, Reservoir, WaterPipe
+
+    def pipe(name, u, v, status="OPEN"):
+        return WaterPipe(name, u, v, 500.0, 0.3, 130.0, status=status)
+
+    k = Junction("K", 0.0, 0.004)
+    feed = (pipe("P3", "R1", "K"), pipe("P4", "K", "R2"))
+
+    def reservoirs(third=None):
+        base = (Reservoir("R1", 100.0), Reservoir("R2", 50.0))
+        return base if third is None else (*base, Reservoir("R3", third))
+
+    j, j1, j2 = Junction("J", 0.0), Junction("J1", 0.0), Junction("J2", 0.0)
+    return {
+        # both valves point into J: P1 opens (J = 100, R1's head), P2 stays shut
+        "both-into-J": ((j, k), reservoirs(), (pipe("P1", "R1", "J", "CV"),
+                                               pipe("P2", "R2", "J", "CV"), *feed)),
+        # three valves shut, J at the average 70
+        "three-shut": ((j, k), reservoirs(60.0), (
+            pipe("P1", "J", "R1", "CV"), pipe("P2", "R2", "J", "CV"),
+            pipe("P6", "R3", "J", "CV"), *feed)),
+        # the average 80 would open P6 from R3 (90 m): it opens and J = 90
+        "one-opens": ((j, k), reservoirs(90.0), (
+            pipe("P1", "J", "R1", "CV"), pipe("P2", "R2", "J", "CV"),
+            pipe("P6", "R3", "J", "CV"), *feed)),
+        # J1 at 64 above J2 at 42 opens the internal valve P7: both at 170 / 3
+        "internal-opens": ((j1, j2, k), reservoirs(20.0), (
+            pipe("P1", "J1", "R1", "CV"), pipe("P2", "R2", "J1", "CV"),
+            pipe("P7", "J1", "J2", "CV"), pipe("P8", "R3", "J2", "CV"), *feed)),
+        # the same valve the other way stays shut: J1 = 64, J2 = 42
+        "internal-shut": ((j1, j2, k), reservoirs(20.0), (
+            pipe("P1", "J1", "R1", "CV"), pipe("P2", "R2", "J1", "CV"),
+            pipe("P7", "J2", "J1", "CV"), pipe("P8", "R3", "J2", "CV"), *feed)),
+    }
+
+
+@pytest.mark.parametrize("case", sorted(_fence_cases()))
+def test_check_valves_fencing_a_junction_match_epanet(tmp_path, case):
+    """EPANET's `1 / CBIG` limit with check valves around zero-demand junctions
+    (`_settle`): the shut ones are equal conductances, an open one at zero flow ties its
+    ends. Heads 1e-6 relative, flows 1e-6 m3/s, every state. MEASURED heads 2.5e-9,
+    "one-opens" 8.5e-8 (J 90 against EPANET's float32 90.0000076), flows 1.1e-7 (K's
+    pipes), except "internal-opens", 4.1e-5: J1 and J2 at 56.666667 against 56.668983,
+    a group joined by a link inside it, which docs/applications/water.md (Limitations)
+    records as EPANET's, not a limit."""
+    model, final, drivers, results = _hand_built(tmp_path, *_fence_cases()[case])
+    _compare_with_epanet(model, final, drivers, results,
+                         heads=5e-5 if case == "internal-opens" else 1e-6)

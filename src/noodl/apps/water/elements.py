@@ -204,7 +204,7 @@ class HazenWilliams(ConstitutiveLaw):
         k = self.resistance()
         minor = self._minor() * torch.ones_like(k)
         if cols is not None:
-            k, minor = k[cols], minor[cols]
+            k, minor = k[..., cols], minor[..., cols]
         a = q.abs()
         a_safe = torch.where(a > 0, a, torch.ones_like(a))
         gradient = torch.where(a > 0, 1.852 * k * a_safe**0.852, torch.zeros_like(a))
@@ -672,7 +672,7 @@ class CompositeDarcyWeisbach(ConstitutiveLaw):
         ``cols`` only (``q`` then theirs) when given."""
         r, m, e, s = self._coefficients()
         if cols is not None:
-            r, m, e, s = r[cols], m[cols], e[cols], s[cols]
+            r, m, e, s = r[..., cols], m[..., cols], e[..., cols], s[..., cols]
         a = (q * self.cfs_per_m3s).abs()
         return M_PER_FT * self.cfs_per_m3s * self._grad_ft(a, r, m, e, s)
 
