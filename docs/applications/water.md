@@ -448,7 +448,6 @@ Every form of `[CONTROLS]` is modelled (`noodl.apps.water.controls.apply_control
 | `AT TIME t` | at the step that starts at `t` seconds; the driver `"water.time"` is the step's start (set it each step; the builder creates it when the network has such a control) |
 | `AT CLOCKTIME t` | when `(time + START CLOCKTIME) mod 24 h` equals `t` |
 | `IF NODE <tank> ABOVE or BELOW v` | at the start of a step, on the tank's level |
-| `IF NODE <reservoir> ABOVE or BELOW v` | at the start of a step, on the reservoir's head |
 | `IF NODE <junction> ABOVE or BELOW v` | after a converged solve, on the pressure head within EPANET's `Htol` (0.0005 ft) of `v`: a link it switches is solved again (`water_steady`; at most 20 times) |
 
 The action is `OPEN`, `CLOSED` or a number. A number on a valve makes it `ACTIVE` at that
@@ -578,7 +577,7 @@ on-disk reals are **float32**, so roughly 1e-7 relative is EPANET's own precisio
 | `twoloop_si.inp`, noodl physics' own nodal continuity | 1e-13 | **2.093e-14** |
 | Net1 single period: heads, flows, pump head gain, pump flow | 1e-6 / 1e-6 / 1e-6 / 1e-8 m³/s | 7.224e-8, 2.647e-7, 1.942e-7, 3.2e-9 m³/s |
 | Net1 24 h tank level with level-triggered pump controls | 2e-4 m | **3.826e-5 m** worst of 25 steps |
-| Net1 24 h tank level with `AT TIME`, `AT CLOCKTIME` (START CLOCKTIME 8 am) and junction-pressure pump controls added | 2e-4 m | 1.8e-4 m (time and clock time: EPANET rounds a crossing to whole seconds), 3.4e-5 m (pressure) |
+| Net1 24 h tank level with `AT TIME`, `AT CLOCKTIME` (START CLOCKTIME 8 am) and junction-pressure pump controls added | 2e-4 m | 1.8e-4 m (time and clock time; the cause is both EPANET's whole-second rounding of a crossing and its `+-|q|` volume margin in the level test, both Task 10), 3.4e-5 m (pressure) |
 | Net1 24 h, tank on a five-point volume curve: levels, pipe 110 flow | 2e-4 m / 1e-6 m³/s | 6.9e-5 m, 5.5e-8 m³/s |
 | Net1 24 h, tank on a volume curve with a flat segment: below the range, crossed by the level (110-120 ft), the tail from 110 ft: levels, pipe 110 flow | 2e-4 m (tail 5e-4 m, see Limitations) / 1e-6 m³/s | 6.9e-5, 1.7e-4, 3.8e-4 m; 5.6e-8, 5.6e-8, 4.4e-7 m³/s |
 | Net1 24 h without controls: the tank fills, its inlet closes; levels, pipe 110 and pump flows | 2e-4 m / 1e-6 m³/s | 2.5e-5 m, 3.7e-8 m³/s |
@@ -671,10 +670,14 @@ independent loop is a property of the cycle-space formulation, and it holds exac
   `"water.setting"`); a valve at a full or empty tank;
   leakage; energy and cost reports. A file using any of these raises an error naming the
   feature.
-- **Controls: a reservoir-head control is not checked against EPANET** (wntr refuses to read
-  one), and a pump closed by a control keeps its speed in `"water.link_setting"` where EPANET
-  sets it to 0 (no flow differs: the pump is shut). The simulation time is a driver, set by the
-  caller each step; `water_run` will own it.
+- **Controls.** `validate()` refuses a control on a reservoir (`IF NODE <reservoir>`): EPANET
+  2.2 compares tank volumes and a reservoir has area 0, so such a control always holds. A pump
+  closed by a control keeps its speed in `"water.link_setting"` where EPANET sets it to 0 (no
+  flow differs: the pump is shut; read `"water.status"` too). A control that sets a pump's
+  built speed leaves the `"water.setting"` driver in force (a calibration driver at 0.9 stays
+  0.9 after an `OPEN`, EPANET gives 1.0). `water_step` and the implicit schemes never shorten
+  a step to a time control, which fires only if a step starts exactly on its second. The
+  simulation time is a driver, set by the caller each step; `water_run` will own it.
 - **Hazen-Williams heads carry EPANET's rounded flow-unit factor as a difference.** EPANET
   converts an LPS file's flows with `LPSperCFS = 28.317` (exact 28.3168466), so its internal
   flows are 5.4e-6 relative smaller and its Hazen-Williams losses 1.0e-5 smaller than this

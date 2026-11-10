@@ -66,7 +66,7 @@ Functions of the state that compute drivers each step (densities, flows, levels)
 
 | Name | What it does | How to call it |
 |---|---|---|
-| `TankLevels` | Every simple `[CONTROLS]` form (time, clock time, tank level, reservoir head, junction pressure), and the boundary heads of a water layer whose tanks are held at boundary nodes (`build_model(tank_scheme="forward_euler")`); on a network without tanks it carries the controls alone. | `TankLevels(net, tanks, controls, pump_names, *, tank_nodes, dt, reservoir_heads, head_scale=1.0, link_names, link_status, tank_links=(), one_way=None, storage=None, link_setting=None, link_kinds=None, reservoir_names=(), junctions=None, start_clocktime=0.0)` |
+| `TankLevels` | Every simple `[CONTROLS]` form (time, clock time, tank level, junction pressure), and the boundary heads of a water layer whose tanks are held at boundary nodes (`build_model(tank_scheme="forward_euler")`); on a network without tanks it carries the controls alone. | `TankLevels(net, tanks, controls, pump_names, *, tank_nodes, dt, reservoir_heads, head_scale=1.0, link_names, link_status, tank_links=(), one_way=None, storage=None, link_setting=None, link_kinds=None, setting_scale=None, junctions=None, start_clocktime=0.0)` |
 
 ## Sources and storage
 

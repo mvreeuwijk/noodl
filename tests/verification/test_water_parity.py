@@ -271,10 +271,12 @@ def test_net1_time_clocktime_and_pressure_controls(tmp_path, name, lines, clock)
     a step EPANET takes whole and the level is 1.2e-3 m off.
 
     MEASURED: 1.8e-4 m for the time and clock-time runs (the same run: START CLOCKTIME 8 am
-    makes 11 AM the 3 h of the first), 3.4e-5 m for the pressure run. The 1.8e-4 m is EPANET
-    rounding a control crossing to whole seconds (`controltimestep`, `ROUND`), where
-    `water_event_step` steps to the exact one (Task 10's `water_run` takes EPANET's rule):
-    rounded so in a scratch run the level is 2.1e-5 m off at 7 h."""
+    makes 11 AM the 3 h of the first), 3.4e-5 m for the pressure run. The 1.8e-4 m has two
+    causes, both EPANET's and both Task 10's: it rounds a control crossing to whole seconds
+    (`controltimestep`, `ROUND`) and tests a level control by volume with a margin of one
+    second's inflow (`controls`). MEASURED in a scratch run: with the crossings rounded alone
+    the 7 to 17 h error drops to 3.7e-5 m or less but the 18 to 24 h error rises to 1.5e-4 to
+    1.6e-4 m."""
     edits = [(_TANK_CONTROLS, _TANK_CONTROLS + lines)]
     if clock:
         edits.append(("Start ClockTime    \t12 am", f"Start ClockTime    \t{clock}"))
@@ -310,7 +312,7 @@ def test_event_step_returns_the_nominal_step_when_nothing_is_crossed(tmp_path):
     path, _ = _epanet(tmp_path, "Net1.inp")
     net = read_epanet_inp(path)
     model, _, _ = build_model(net)
-    closure = model.tank_closure
+    closure = model.control_closure
     assert closure.event_step(
         torch.tensor([36.576], dtype=F64), torch.tensor([0.0], dtype=F64), 3600.0
     ) == 3600.0

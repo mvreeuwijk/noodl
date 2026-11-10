@@ -396,11 +396,20 @@ class WaterNetwork:
                     f"WaterNetwork: control on link {control.link!r} sets the status ACTIVE, "
                     f"which only a valve can take, not a pipe or a pump"
                 )
-            if control.setting is not None and control.link not in valve_names | pump_names:
+            gpvs = {v.name for v in self.valves if v.kind.upper() == "GPV"}
+            if control.setting is not None and (
+                    control.link not in valve_names | pump_names or control.link in gpvs):
                 raise ValueError(
                     f"WaterNetwork: control on link {control.link!r} sets the numeric "
                     f"setting {control.setting!r}, which only a pump (its speed) or a valve "
-                    f"takes, not a pipe"
+                    f"other than a GPV takes, not a pipe or a GPV"
+                )
+            if control.trigger == "node" and control.node in {r.name for r in self.reservoirs}:
+                raise ValueError(
+                    f"WaterNetwork: control on link {control.link!r} tests reservoir "
+                    f"{control.node!r}; EPANET 2.2 tests a reservoir's volume, which has "
+                    f"area 0, so the control always holds, and no sensible network means "
+                    f"that. Use a tank or a junction"
                 )
             if control.trigger == "node" and control.node not in seen:
                 raise ValueError(
@@ -1111,9 +1120,9 @@ def build_model(
     link_names = [link.name for link in net.links()]
     drivers.update(_link_drivers(net, scale))
     reservoir_heads = torch.tensor([r.head * scale for r in net.reservoirs], dtype=F64)
-    tank_closure = None
+    control_closure = None
     if net.tanks or net.controls:
-        # the closure of the tanks and of the controls (`model.tank_closure`, also on a
+        # the closure of the tanks and of the controls (`model.control_closure`, also on a
         # network with controls and no tanks)
         junction_names = {j.name for j in net.junctions}
         if net.tanks and not held and any(
@@ -1125,7 +1134,7 @@ def build_model(
         kinds = ["PIPE" if isinstance(link, WaterPipe) else
                  "PUMP" if isinstance(link, Pump) else "VALVE" for link in net.links()]
         elevation = {j.name: j.elevation for j in net.junctions}
-        tank_closure = (TankLevels if (held or not net.tanks) else TankStorageControls)(
+        control_closure = (TankLevels if (held or not net.tanks) else TankStorageControls)(
             graph, list(net.tanks), list(net.controls), [p.name for p in net.pumps],
             tank_nodes=[node_names.index(t.name) for t in net.tanks],
             dt=net.hydraulic_timestep if dt is None else dt,
@@ -1138,12 +1147,14 @@ def build_model(
             storage=storages[0] if net.tanks else None,
             link_setting=drivers[SETTING_KEY],
             link_kinds=kinds,
-            reservoir_names=[r.name for r in net.reservoirs],
+            setting_scale=[scale if (not isinstance(lk, (WaterPipe, Pump))
+                                     and lk.kind.upper() in ("PBV", "PRV", "PSV")) else 1.0
+                           for lk in net.links()],
             junctions={name: (node_names.index(name), elev)
                        for name, elev in elevation.items()},
             start_clocktime=net.start_clocktime,
         )
-        closures.append(tank_closure)
+        closures.append(control_closure)
         for t in net.tanks:
             state["water.phi"][node_names.index(t.name)] = (t.elevation + t.init_level) * scale
         state["water.link_status"] = drivers[STATUS_KEY].clone()
@@ -1241,7 +1252,7 @@ def build_model(
                         "AT CLOCKTIME controls read (set it each step)")
     # `initial_state` starts from these flows (resistance-form pipes need a first iterate).
     model.initial_flows = state["water.q"].clone()
-    model.tank_closure = tank_closure
+    model.control_closure = control_closure
     model.tank_scheme = tank_scheme
     model.head_scale = scale
     model.water_network = net
@@ -1437,7 +1448,7 @@ def initial_state(model: Model, *, values: Mapping | None = None) -> State:
                 f"{layer.quantity!r}; this application builds concentration layers only"
             )
         state[f"{name}.x"] = torch.zeros(layer.n_i, dtype=F64)
-    closure = model.tank_closure
+    closure = model.control_closure
     if closure is not None:
         init = torch.tensor([t.init_level for t in closure.tanks], dtype=F64)
         state["water.phi"][..., closure.tank_nodes] = (closure.bottom + init) * closure.head_scale
@@ -1453,7 +1464,7 @@ def initial_state(model: Model, *, values: Mapping | None = None) -> State:
 def _set_tank_levels(model: Model, phi: Tensor, levels: Mapping) -> Tensor:
     """`phi` with the head of every tank named in `levels` (`{tank: m above its bottom}`)
     set from its level."""
-    closure = model.tank_closure
+    closure = model.control_closure
     if closure is None or not isinstance(levels, Mapping):
         raise ValueError(
             "initial_state: 'water.tank_level' takes {tank name: level (m)}"
@@ -1503,7 +1514,7 @@ def initial_drivers(
 
 
 #: The most solves `water_steady` repeats for junction-pressure controls that keep switching.
-MAX_PRESSURE_SWITCHES = 20
+MAX_PRESSURE_SWITCHES = 10
 
 
 def water_steady(model: Model, state: State, drivers: Drivers, **solve_kwargs) -> State:
@@ -1513,7 +1524,7 @@ def water_steady(model: Model, state: State, drivers: Drivers, **solve_kwargs) -
     EPANET's `pswitch` tests it on the converged heads, within `Htol` of its setting, and a
     link it switches is solved again, with the step's other controls not tested again
     (`TankLevels.pressure_switch`, `held_controls`), until none switches (at most
-    `MAX_PRESSURE_SWITCHES` times, else `RuntimeError`).
+    `MAX_PRESSURE_SWITCHES` times, else `RuntimeError` naming the links and junctions).
 
     `atol`/`rtol` default to 1e-11. MEASURED, sweeping Net1's whole 24 h duty cycle over
     the eight demand multipliers 0.7 to 1.4: 1e-14 does not converge at all (the residual
@@ -1553,20 +1564,25 @@ def water_steady(model: Model, state: State, drivers: Drivers, **solve_kwargs) -
     The pumps' flows, likewise, start from their design flows when they are all zero.
     """
     result = _solve_steady(model, state, drivers, **solve_kwargs)
-    closure = model.tank_closure
+    closure = model.control_closure
     if closure is None or not closure.has_pressure_controls:
         return result
     for _ in range(MAX_PRESSURE_SWITCHES):
         status, setting, changed = closure.pressure_switch(result)
         if not bool(changed.any()):
             return result
+        before = (result["water.link_status"], result["water.link_setting"])
         with closure.held_controls():
             result = _solve_steady(
                 model, {**result, "water.link_status": status, "water.link_setting": setting},
                 drivers, **solve_kwargs)
+    moved = ((status != before[0]) | (setting != before[1])).reshape(-1, status.shape[-1]).any(0)
+    links = [n for n, m in zip(model.link_names, moved.tolist(), strict=True) if m]
+    nodes = sorted({c.node for c in closure.pressure_controls if c.link in links})
     raise RuntimeError(
-        f"water_steady: the junction-pressure controls kept switching links through "
-        f"{MAX_PRESSURE_SWITCHES} solves; they have no consistent state")
+        f"water_steady: the junction-pressure controls kept switching link(s) {links} "
+        f"(tested at junction(s) {nodes}) through {MAX_PRESSURE_SWITCHES} solves; they have "
+        f"no consistent state")
 
 
 def _solve_steady(model: Model, state: State, drivers: Drivers, **solve_kwargs) -> State:
@@ -1648,8 +1664,8 @@ def _link_status(model: Model, state: State, drivers: Drivers) -> Tensor:
     the tank closure's (its controls switch the pumps; the closure remembers its last
     answer, so the solve's own call that follows costs nothing), with every pump at speed 0
     (`"water.setting"`) CLOSED."""
-    if model.tank_closure is not None:
-        status = model.tank_closure(state, drivers)[STATUS_KEY]
+    if model.control_closure is not None:
+        status = model.control_closure(state, drivers)[STATUS_KEY]
     elif STATUS_KEY not in drivers:
         raise KeyError(
             f"water: driver {STATUS_KEY!r} is required and was not given; build the drivers "
@@ -1765,10 +1781,10 @@ def _cut_off_plan(model: Model, state: State, drivers: Drivers, caller: str):
     layer = model.kirchhoff["water"]
     status = _link_status(model, state, drivers).detach()
     one_way = drivers.get(ONE_WAY_KEY)
-    if model.tank_closure is not None:
+    if model.control_closure is not None:
         # a full or empty tank's links (`TankLevels`): the closure's direction, which the
         # solve's own call of it gives again
-        given = model.tank_closure(state, drivers).get(ONE_WAY_KEY)
+        given = model.control_closure(state, drivers).get(ONE_WAY_KEY)
         if given is not None:
             one_way = given
             drivers = {**drivers, ONE_WAY_KEY: given}
@@ -2356,7 +2372,11 @@ def water_step(model: Model, state: State, drivers: Drivers, dt: float, *,
     `"trapezoidal"`; trapezoidal needs a step-start state whose tank flows are solved, not
     the build's zeros). The level controls act on the step-start levels, as EPANET's do.
     `"backward_euler"` is the default because it starts from any state, the build's
-    included, and does not ring after the flow jumps that pump and level controls cause."""
+    included, and does not ring after the flow jumps that pump and level controls cause.
+
+    The step is the caller's `dt`: it is never shortened to a time control (nor
+    `TankStorageControls.event_step` to anything but a level crossing), so an `AT TIME` or
+    `AT CLOCKTIME` control fires only if a step starts exactly on its second."""
     if not model.water_network.tanks or model.tank_scheme == "forward_euler":
         raise ValueError(
             "water_step: the model's tanks are not stepped inside the solve "
@@ -2407,7 +2427,7 @@ def water_event_step(model: Model, state: State, drivers: Drivers, dt_max: float
             "(build_model(tank_scheme='forward_euler')); step its interior tank storage "
             "with water_step"
         )
-    closure = model.tank_closure
+    closure = model.control_closure
     layer = model.kirchhoff["water"]
     solved = water_steady(model, state, drivers, **solve_kwargs)
     inflow = solved["water.storage_flow"]
@@ -2446,7 +2466,7 @@ def _settle_tanks(model: Model, storage, phi: Tensor, inflow: Tensor, drivers) -
     (minimum) level, except on a volume curve whose volume is flat across that level, where
     it is the lower end of the flat stretch (`project.c`, `interp`, takes the first point at
     or above the volume)."""
-    closure = model.tank_closure
+    closure = model.control_closure
     heads = phi[..., storage.nodes]
     with torch.no_grad():
         top = (closure.bottom + closure.y_max) * closure.head_scale
@@ -2474,7 +2494,7 @@ def tank_overflow(model: Model, state: State, stepped: State, dt: float) -> Tens
     every other tank. A tank that starts the step full spills everything that flows in.
     It stands in for the overflow per report time that Task 10's `water_run` results
     (`WaterResults.tank_overflow`) will carry."""
-    closure = model.tank_closure
+    closure = model.control_closure
     (storage,) = model.kirchhoff["water"].storage
     nodes = storage.nodes
     gained = storage.change(stepped["water.phi"][..., nodes], state["water.phi"][..., nodes])
@@ -2484,7 +2504,7 @@ def tank_overflow(model: Model, state: State, stepped: State, dt: float) -> Tens
 
 def tank_levels(model: Model, state: State) -> Tensor:
     """Every tank's level (m above its bottom) in `state`: its head less its bottom."""
-    return model.tank_closure.levels(state)
+    return model.control_closure.levels(state)
 
 
 def tank_inflow(model: Model, state: State) -> Tensor:

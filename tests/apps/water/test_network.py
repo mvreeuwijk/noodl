@@ -616,7 +616,7 @@ def test_tank_inflow_is_the_net_inflow_at_the_tank():
     inflow = -layer.net_outflow(final["water.q"])[..., layer.bound]
     # the reservoir supplies the whole demand
     assert float(inflow[0]) == pytest.approx(-0.045, abs=1e-12)
-    assert model.tank_closure is None
+    assert model.control_closure is None
 
 
 # --------------------------------------------------------- q_max is refused by name

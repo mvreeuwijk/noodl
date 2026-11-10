@@ -34,7 +34,7 @@ from noodl.storage import LinearStorage
 F64 = torch.float64
 
 
-def _two_tank_closure(controls):
+def _two_control_closure(controls):
     tanks = [
         Tank("TA", elevation=0.0, init_level=9.99, min_level=0.0, max_level=20.0,
              diameter=1.0),
@@ -62,7 +62,7 @@ def test_event_step_tests_each_control_against_its_own_tank():
     0 regardless of the control's own node -- would have crossed almost immediately and
     wrongly shortened the step to about 0.01 s.
     """
-    closure = _two_tank_closure(
+    closure = _two_control_closure(
         (_control("P1", CLOSED, "TB", True, 10.0),)
     )
     level = torch.tensor([9.99, 5.0], dtype=F64)
@@ -73,7 +73,7 @@ def test_event_step_tests_each_control_against_its_own_tank():
 def test_event_step_shortens_to_the_named_tanks_own_crossing():
     """The mirror case: the control's own tank DOES cross within the nominal step, while
     the OTHER tank (which the bug would have used) does not."""
-    closure = _two_tank_closure(
+    closure = _two_control_closure(
         (_control("P1", CLOSED, "TB", True, 10.0),)
     )
     level = torch.tensor([1.0, 9.99], dtype=F64)
@@ -85,7 +85,7 @@ def test_event_step_shortens_to_the_named_tanks_own_crossing():
 
 
 def test_event_step_with_controls_on_both_tanks_takes_the_earliest_crossing():
-    closure = _two_tank_closure(
+    closure = _two_control_closure(
         (
             _control("P1", CLOSED, "TA", True, 10.0),
             _control("P1", OPEN, "TB", True, 10.0),
@@ -241,7 +241,7 @@ def test_controls_read_the_step_start_level_in_every_pass_of_a_step(monkeypatch)
     trigger, so an advanced level would close the pump inside the step."""
     pingpong, _, drivers = build_model(read_epanet_inp(NET1))
     model = Model(pingpong.net, {"water": pingpong.kirchhoff["water"]},
-                  closures=[pingpong.tank_closure], coupling="iterate",
+                  closures=[pingpong.control_closure], coupling="iterate",
                   iterate_tol={"water": 1e-9})
     state = initial_state(pingpong, values={"water.tank_level": {"2": 42.5}})
     read = []
@@ -382,7 +382,7 @@ def _tank_rules_net(*, overflow=False, valve=False):
 def _rules(levels, **kwargs):
     model, _, drivers = build_model(_tank_rules_net(**kwargs))
     state = initial_state(model, values={"water.tank_level": levels})
-    out = model.tank_closure(state, drivers)
+    out = model.control_closure(state, drivers)
     names = model.link_names
     one_way = out.get(ONE_WAY_KEY, drivers[ONE_WAY_KEY])
     return ({n: int(v) for n, v in zip(names, out[STATUS_KEY].tolist(), strict=True)},
@@ -426,12 +426,12 @@ def test_a_valve_on_a_full_tank_is_refused_by_name():
     model, _, drivers = build_model(_tank_rules_net(valve=True))
     state = initial_state(model, values={"water.tank_level": {"T1": 10.0}})
     with pytest.raises(ValueError, match=r"valve\(s\) \['V'\].*full or empty tank"):
-        model.tank_closure(state, drivers)
-    model.tank_closure(initial_state(model), drivers)   # not at a limit: no refusal
+        model.control_closure(state, drivers)
+    model.control_closure(initial_state(model), drivers)   # not at a limit: no refusal
 
 
 def test_time_to_limit():
-    closure = _two_tank_closure(())
+    closure = _two_control_closure(())
     level = torch.tensor([19.0, 4.0], dtype=F64)
     # TA rises to 20 in 1 / 0.01 s; TB falls to 0 in 4 / 0.5 s
     torch.testing.assert_close(
@@ -459,11 +459,11 @@ def test_only_the_implicit_schemes_refuse_a_level_outside_the_limits():
     net = read_epanet_inp(NET1)
     model, _, drivers = build_model(net)
     state = initial_state(model, values={"water.tank_level": {"2": 100.0}})
-    model.tank_closure(state, drivers)   # forward Euler: a full tank, no refusal
+    model.control_closure(state, drivers)   # forward Euler: a full tank, no refusal
     model, _, drivers = build_model(net, tank_scheme="backward_euler")
     state = initial_state(model, values={"water.tank_level": {"2": 100.0}})
     with pytest.raises(ValueError, match=r"tank\(s\) \['2'\] are outside"):
-        model.tank_closure(state, drivers)
+        model.control_closure(state, drivers)
 
 
 def test_a_volume_curve_of_one_point_or_decreasing_volumes_is_refused(tmp_path):
@@ -521,7 +521,7 @@ def test_a_full_tank_on_a_flat_tail_is_put_at_its_lower_end(tmp_path):
     assert float(tank_levels(model, stepped)[0]) < 110.0 * 0.3048
     # the same tank with the pump held open fills it: put at 110 ft
     model, state, drivers = build_model(read_epanet_inp(path))
-    model.tank_closure.controls = []
+    model.control_closure.controls = []
     stepped, dt = water_event_step(model, state, drivers, 3600.0)
     assert float(tank_inflow(model, stepped)[0]) > 0.0
     torch.testing.assert_close(tank_levels(model, stepped),
@@ -530,7 +530,7 @@ def test_a_full_tank_on_a_flat_tail_is_put_at_its_lower_end(tmp_path):
 
 def test_time_to_limit_skips_a_tank_with_no_net_inflow():
     """`tanktimestep` skips a tank whose net inflow is at most QZERO (1e-6 cfs)."""
-    closure = _two_tank_closure(())
+    closure = _two_control_closure(())
     level = torch.tensor([19.0, 19.0], dtype=F64)
     rate = torch.tensor([1e-9, 1e-9], dtype=F64)
     inflow = torch.tensor([2e-8, 3e-8], dtype=F64)   # QZERO = 2.83e-8 m3/s

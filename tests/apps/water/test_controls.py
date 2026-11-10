@@ -118,7 +118,7 @@ def test_pressure_control_needs_a_resolve():
     net = _two_source_network(controls=(
         Control("P2", CLOSED, None, "node", "J1", True, 40.0),))
     model, state, drivers = build_model(net)
-    assert model.tank_closure is not None
+    assert model.control_closure is not None
     free, free_state, free_drivers = build_model(_two_source_network())
     open_flows = water_steady(free, free_state, free_drivers)["water.q"]
     assert float(open_flows[1]) != 0.0   # P2 carries water without the control
@@ -229,3 +229,109 @@ def test_a_valve_setting_control_in_a_network():
     assert drop(state) == pytest.approx(before * 100.0, rel=1e-6)
     state = water_steady(model, state, at(1200.0))   # carried on
     assert drop(state) == pytest.approx(before * 100.0, rel=1e-6)
+
+
+# ------------------------------------------------------------------ review round 1
+def _prv_network(setting, controls=()):
+    return WaterNetwork(
+        junctions=(Junction("A", 0.0, 0.0), Junction("B", 0.0, 0.002)),
+        reservoirs=(Reservoir("R1", 50.0),),
+        pipes=(WaterPipe("P1", "R1", "A", 100.0, 0.3, 130.0),),
+        valves=(Valve("V1", "A", "B", 0.2, "PRV", setting),),
+        controls=controls, headloss="D-W",
+    )
+
+
+def _head(model, state, node):
+    return float(state["water.phi"][model.node_names.index(node)])
+
+
+def test_a_prv_setting_control_on_darcy_weisbach_matches_a_prv_built_at_that_setting():
+    """The control's setting is in metres; the layer's potential on D-W is pressure
+    (`rho g` times the head), which the closure puts it in."""
+    built, bstate, bdrivers = build_model(_prv_network(30.0))
+    want = _head(built, water_steady(built, bstate, bdrivers), "B")
+    net = _prv_network(40.0, (Control("V1", None, 30.0, "time", value=0.0),))
+    model, state, drivers = build_model(net)
+    got = _head(model, water_steady(model, state, {**drivers, "water.time": _t(0.0)}), "B")
+    assert got == pytest.approx(want, rel=1e-9)
+    assert got == pytest.approx(30.0 * model.head_scale, rel=1e-6)
+
+
+def test_a_no_op_setting_control_on_darcy_weisbach_does_not_end_a_step():
+    """A setting control that sets the value the valve has is no change, on a pressure layer
+    too, so it ends no step (`controltimestep`)."""
+    net = WaterNetwork(
+        junctions=(Junction("A", 0.0, 0.0), Junction("B", 0.0, 0.002)),
+        reservoirs=(Reservoir("R1", 50.0),),
+        tanks=(Tank("T1", elevation=40.0, init_level=5.0, min_level=0.0, max_level=20.0,
+                    diameter=10.0),),
+        pipes=(WaterPipe("P1", "R1", "A", 100.0, 0.3, 130.0),
+               WaterPipe("P2", "B", "T1", 100.0, 0.3, 130.0)),
+        valves=(Valve("V1", "A", "B", 0.2, "PRV", 30.0),),
+        controls=(Control("V1", None, 30.0, "time", value=600.0),),
+        headloss="D-W",
+    )
+    model, state, drivers = build_model(net)
+    _, dt = water_event_step(model, state, {**drivers, "water.time": _t(0.0)}, 3600.0)
+    assert dt == 3600.0
+
+
+def test_a_control_on_a_reservoir_or_a_numeric_setting_on_a_gpv_is_refused():
+    with pytest.raises(ValueError, match="reservoir 'R1'"):
+        _two_source_network(controls=(Control("P2", CLOSED, None, "node", "R1", True,
+                                              1.0),)).validate()
+    net = WaterNetwork(
+        junctions=(Junction("A", 0.0, 0.0), Junction("B", 0.0, 0.002)),
+        reservoirs=(Reservoir("R1", 50.0),),
+        pipes=(WaterPipe("P1", "R1", "A", 100.0, 0.3, 130.0),),
+        valves=(Valve("V1", "A", "B", 0.2, "GPV", 0.0, curve="C"),),
+        controls=(Control("V1", None, 1.0, "time", value=0.0),),
+    )
+    with pytest.raises(ValueError, match="not a pipe or a GPV"):
+        net.validate()
+
+
+def test_the_closure_needs_the_kinds_of_the_links_it_controls_unless_they_are_pumps():
+    from noodl.apps.water.tanks import TankLevels
+    tank = Tank("T1", elevation=0.0, init_level=1.0, min_level=0.0, max_level=2.0,
+                diameter=1.0)
+    kwargs = dict(tank_nodes=[0], dt=3600.0, reservoir_heads=torch.zeros(0, dtype=F64),
+                  link_names=["P1", "V1"], link_status=torch.ones(2, dtype=F64))
+    control = Control("V1", CLOSED, None, "node", "T1", True, 1.0)
+    with pytest.raises(ValueError, match="link_kinds"):
+        TankLevels(None, [tank], [control], [], **kwargs)
+    TankLevels(None, [tank], [control], [], link_kinds=["PIPE", "VALVE"], **kwargs)
+
+
+def test_the_pressure_switch_cap_names_the_links_and_junctions():
+    """Two pressure controls that undo each other never settle."""
+    net = _two_source_network(controls=(
+        Control("P2", CLOSED, None, "node", "J1", False, 49.0),
+        Control("P2", OPEN, None, "node", "J1", True, 49.0),))
+    model, state, drivers = build_model(net)
+    with pytest.raises(RuntimeError, match=r"\['P2'\].*\['J1'\]"):
+        water_steady(model, state, drivers)
+
+
+def test_gradient_through_a_setting_driver_with_a_control_that_does_not_fire():
+    """d (head at B) / d (PRV setting) through `"water.setting"`, against central
+    differences, on a network whose closure also carries a control that never fires."""
+    net = _prv_network(30.0, (Control("P1", CLOSED, None, "time", value=1e9),))
+    model, state, drivers = build_model(net)
+    j = model.link_names.index("V1")
+
+    def head(setting):
+        setting_driver = drivers["water.setting"].clone()
+        setting_driver[j] = setting
+        out = water_steady(model, state, {**drivers, "water.setting": setting_driver,
+                                          "water.time": _t(0.0)})
+        return out["water.phi"][model.node_names.index("B")]
+
+    s0 = torch.tensor(30.0 * model.head_scale, dtype=F64, requires_grad=True)
+    value = head(s0)
+    (grad,) = torch.autograd.grad(value, s0)
+    h = 1e-4
+    fd = (head(s0.detach() + h) - head(s0.detach() - h)) / (2 * h)
+    assert float(grad) == pytest.approx(float(fd), rel=1e-5)
+    assert float(grad) == pytest.approx(1.0, rel=1e-4)   # the held head follows its setting

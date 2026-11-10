@@ -109,20 +109,19 @@ def _fires_on_clock(control: Control, time, clocktime) -> Tensor | None:
     return torch.remainder(t + round(start), SECONDS_PER_DAY) == round(control.value)
 
 
-def _fires_on_node(control: Control, levels, pressures, heads, tested) -> Tensor | None:
+def _fires_on_node(control: Control, levels, pressures, tested) -> Tensor | None:
     """Whether a node-triggered `control` fires. A tank's level is tested strictly
     (`level > value` ABOVE, `level < value` BELOW; `tested(control)` replaces that test where
-    it returns a mask, as for a tank on a volume curve), a reservoir's head the same way, a
-    junction's PRESSURE head against the setting with EPANET's `Htol` (`hydsolver.c`,
-    `pswitch`: `h <= hset + Htol` BELOW, `h >= hset - Htol` ABOVE). `None` when the node's
-    value is not among those given."""
+    it returns a mask, as for a tank on a volume curve), a junction's PRESSURE head against
+    the setting with EPANET's `Htol` (`hydsolver.c`, `pswitch`: `h <= hset + Htol` BELOW,
+    `h >= hset - Htol` ABOVE). `None` when the node's value is not among those given."""
     node = control.node
-    if node in levels or node in heads:
+    if node in levels:
         if tested is not None:
             mask = tested(control)
             if mask is not None:
                 return mask
-        value = torch.as_tensor(levels[node] if node in levels else heads[node])
+        value = torch.as_tensor(levels[node])
         return value > control.value if control.above else value < control.value
     if node in pressures:
         value = torch.as_tensor(pressures[node])
@@ -134,7 +133,8 @@ def _fires_on_node(control: Control, levels, pressures, heads, tested) -> Tensor
 
 def _action(control: Control, kind: str) -> tuple[int | None, float | None]:
     """`(status, setting)` a firing `control` imposes on a link of `kind` (`"PIPE"`,
-    `"PUMP"` or `"VALVE"`); `None` keeps the link's own. EPANET 2.2 (`input3.c`,
+    `"PUMP"` or `"VALVE"`); `None` keeps the link's own. The setting is in the control's
+    units (SI), before `setting_scale`. EPANET 2.2 (`input3.c`,
     `controldata`; checked against wntr 1.5.0's EPANET): a pump OPENed runs at relative speed
     1, a pump given a setting runs at it and is CLOSED at 0, a valve given a setting is
     ACTIVE at it. A pump CLOSED keeps its speed here (EPANET sets it to 0, which changes no
@@ -155,8 +155,8 @@ def _action(control: Control, kind: str) -> tuple[int | None, float | None]:
 def apply_controls(
     controls: Sequence[Control], *, time=None, clocktime=0.0,
     levels: Mapping[str, Tensor] | None = None, pressures: Mapping[str, Tensor] | None = None,
-    heads: Mapping[str, Tensor] | None = None, status: Tensor, setting: Tensor,
-    link_names: Sequence[str], link_kinds: Sequence[str],
+    status: Tensor, setting: Tensor, link_names: Sequence[str], link_kinds: Sequence[str],
+    setting_scale: Sequence[float] | None = None,
     tested: Callable[[Control], Tensor | None] | None = None,
 ) -> tuple[Tensor, Tensor, Tensor]:
     """`(status, setting, changed)`: the links' status and setting (`(..., n_links)`, in
@@ -167,35 +167,43 @@ def apply_controls(
 
     A control is tested only when its inputs are given: `time` (s since the start; `clocktime`
     is the start's time of day, s after midnight) for `AT TIME` and `AT CLOCKTIME`; `levels`
-    (tank name to level, m), `heads` (reservoir name to head, m) and `pressures` (junction
-    name to pressure head, m) for `IF NODE`. EPANET tests the time, tank and reservoir
+    (tank name to level, m) and `pressures` (junction name to pressure head, m) for
+    `IF NODE` (a reservoir has no control: its EPANET test compares volumes of area 0 and
+    always holds, so `WaterNetwork.check` refuses it).
+    `setting_scale` (per link, default 1) puts a control's numeric setting in the units of
+    the `setting` it acts on (a PBV's, PRV's or PSV's head in the layer's potential unit:
+    `head_scale` on a Darcy-Weisbach pressure layer). EPANET tests the time, tank and reservoir
     controls at the start of a step and the junction-pressure ones after a converged solve
     (`pswitch`, within `Htol` of the setting); `changed` then asks for a new solve, the
     caller's to make. `tested` replaces the tank-level test (see `_fires_on_node`)."""
-    levels, pressures, heads = levels or {}, pressures or {}, heads or {}
+    levels, pressures = levels or {}, pressures or {}
     index = {name: j for j, name in enumerate(link_names)}
     parts = [status.shape[:-1], setting.shape[:-1]]
-    parts += [torch.as_tensor(v).shape for m in (levels, pressures, heads) for v in m.values()]
+    parts += [torch.as_tensor(v).shape for m in (levels, pressures) for v in m.values()]
     if time is not None:
         parts.append(torch.as_tensor(time).shape)
     batch = torch.broadcast_shapes(*parts)
     status = status.expand(batch + status.shape[-1:]).clone()
     setting = setting.expand(batch + setting.shape[-1:]).clone()
-    changed = torch.zeros(batch, dtype=torch.bool)
+    status0, setting0 = status.clone(), setting.clone()
     for control in controls:
         fires = (_fires_on_clock(control, time, clocktime) if control.trigger != "node"
-                 else _fires_on_node(control, levels, pressures, heads, tested))
+                 else _fires_on_node(control, levels, pressures, tested))
         if fires is None:
             continue
         j = index[control.link]
         new_status, new_setting = _action(control, link_kinds[j])
+        if new_setting is not None and setting_scale is not None:
+            new_setting = new_setting * setting_scale[j]
         old_status, old_setting = status[..., j], setting[..., j]
         s = old_status if new_status is None else torch.where(
             fires, torch.full_like(old_status, float(new_status)), old_status)
         k = old_setting if new_setting is None else torch.where(
             fires, torch.full_like(old_setting, float(new_setting)), old_setting)
-        changed = changed | (fires & ((s != old_status) | (k != old_setting)))
         status[..., j], setting[..., j] = s, k
+    # a change is a link left otherwise than it was found: controls that undo one another
+    # (an OPEN and a CLOSED that both hold) change nothing and ask for no new solve
+    changed = ((status != status0) | (setting != setting0)).any(-1)
     return status, setting, changed
 
 
@@ -205,6 +213,7 @@ def next_control_time(
     crossing: Callable[[Control], Tensor | None] | None = None,
     status: Tensor | None = None, setting: Tensor | None = None,
     link_names: Sequence[str] = (), link_kinds: Sequence[str] = (),
+    setting_scale: Sequence[float] | None = None,
 ) -> Tensor:
     """Seconds from `time` to the next control that would fire: the next time or clock-time
     control, or the tank level that, changing linearly at `rates` (m/s), reaches a
@@ -246,6 +255,8 @@ def next_control_time(
         if status is not None:
             j = link_names.index(control.link)
             new_status, new_setting = _action(control, link_kinds[j])
+            if new_setting is not None and setting_scale is not None:
+                new_setting = new_setting * setting_scale[j]
             acts = torch.zeros(status.shape[:-1], dtype=torch.bool)
             if new_status is not None:
                 acts = acts | (status[..., j] != new_status)

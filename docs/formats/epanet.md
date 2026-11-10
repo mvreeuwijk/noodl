@@ -33,7 +33,8 @@ with different units is refused by name when the file is read.
 builder does not model yet, so a file never loads into a network that quietly means something
 else: a numeric `[STATUS]` pump speed; a pump speed pattern;
 rules; and a numeric `[CONTROLS]` setting on a pipe. Every other `[CONTROLS]` form is
-modelled: `AT TIME`, `AT CLOCKTIME` and `IF NODE` on a tank, a reservoir or a junction, with an
+modelled: `AT TIME`, `AT CLOCKTIME` and `IF NODE` on a tank or a junction (a reservoir is refused: EPANET tests its volume of area 0, so
+the control always holds), with an
 `OPEN`, `CLOSED` or numeric action on a pipe, pump or valve. Of EPANET's own valve checks
 (`valvecheck`), `validate()` refuses a PRV or PSV whose controlled node (a PRV's end, a PSV's
 start) is a reservoir or tank, and two valves that hold one node twice (EPANET's errors 219 and
