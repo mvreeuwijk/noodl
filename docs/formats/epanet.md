@@ -51,8 +51,8 @@ validated.
 **Read, then refused by name.** The reader converts every feature above to SI, and
 `WaterNetwork.validate()` (called by `build_model`) refuses, naming the feature, each one the
 builder does not model yet, so a file never loads into a network that quietly means something
-else: a numeric `[STATUS]` pump speed and a numeric `[CONTROLS]` setting on a pipe. A pump
-speed pattern is applied by `water_run` (0 closes the pump). Every other `[CONTROLS]` form is
+else: a numeric `[CONTROLS]` setting on a pipe. A numeric `[STATUS]` on a pump is its initial
+speed (0 closes it), and a pump speed pattern is applied by `water_run` (0 closes the pump). Every other `[CONTROLS]` form is
 modelled: `AT TIME`, `AT CLOCKTIME` and `IF NODE` on a tank or a junction (a reservoir is refused: EPANET tests its volume of area 0, so
 the control always holds), with an
 `OPEN`, `CLOSED` or numeric action on a pipe, pump or valve. Of EPANET's own valve checks

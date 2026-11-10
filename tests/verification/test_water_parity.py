@@ -2290,6 +2290,61 @@ def test_pump_speed_setting(tmp_path, kind):
     _compare_with_epanet(model, final, drivers, results)
 
 
+def _status_line(link, value):
+    """The two-loop fixture's `[STATUS]` section with `link value` in it."""
+    return ("[STATUS]\n;ID              \tStatus/Setting",
+            f"[STATUS]\n;ID              \tStatus/Setting\n {link}\t{value}")
+
+
+@pytest.mark.parametrize("parameters, status, speed", [
+    ("HEAD C1", "0.8", 0.8),
+    ("HEAD C1 SPEED 0.8", "Open", 1.0),
+])
+def test_a_status_line_sets_a_pumps_speed(tmp_path, parameters, status, speed):
+    """`[STATUS]` on a pump, as EPANET 2.2's `changestatus` (`input3.c`): a number is its
+    relative speed, the pump OPEN at it; the word OPEN runs it at speed 1 whatever its
+    `SPEED`. EPANET runs the file itself, through its toolkit (`wntr`'s own reader and
+    writer carry `[STATUS] OPEN` as no change of speed). Heads 1e-6 relative, flows 1e-6
+    m3/s, the pump's state and speed equal. MEASURED (the toolkit's values are not rounded
+    to float32): heads 3.8e-11 and 3.5e-11 relative, flows 7.2e-16 and 1.3e-15 m3/s."""
+    path = tmp_path / "status.inp"
+    text = (DATA / "twoloop_si.inp").read_text()
+    for old, new in _pump_edits(parameters, _ONE_POINT, (_status_line("PU1", status),)):
+        assert old in text, old
+        text = text.replace(old, new)
+    path.write_text(text)
+    model, state, drivers = build_model(read_epanet_inp(path))
+    k = model.link_names.index("PU1")
+    assert float(drivers["water.setting"][k]) == speed
+    assert int(drivers["water.status"][k]) == OPEN
+    final = water_steady(model, state, drivers)
+    theirs = _toolkit_run(path, model.link_names, model.node_names)[0]
+    heads = final["water.phi"] / model.head_scale
+    worst_h = max(abs(float(heads[i]) - h) / abs(h)
+                  for i, h in enumerate(theirs["head"]) if model.node_names[i] != "R1")
+    worst_q = max(abs(float(final["water.q"][i]) - q) for i, q in enumerate(theirs["flow"]))
+    assert worst_h < 1e-6 and worst_q < 1e-6, (worst_h, worst_q)
+    assert theirs["setting"][k] == pytest.approx(speed, rel=1e-12)
+    assert int(link_states(model, final, drivers)[k]) == int(theirs["status"][k]) == OPEN
+
+
+def test_a_status_speed_of_zero_closes_the_pump(tmp_path):
+    """`[STATUS] PU1 0` (`changestatus`: a speed of 0 is CLOSED): the pump is CLOSED at
+    speed 0, the junctions behind it cut off (refused by name, as EPANET reports them
+    disconnected)."""
+    path = tmp_path / "zero.inp"
+    text = (DATA / "twoloop_si.inp").read_text()
+    for old, new in _pump_edits("HEAD C1", _ONE_POINT, (_status_line("PU1", "0"),)):
+        text = text.replace(old, new)
+    path.write_text(text)
+    model, state, drivers = build_model(read_epanet_inp(path))
+    k = model.link_names.index("PU1")
+    assert float(drivers["water.setting"][k]) == 0.0
+    assert int(drivers["water.status"][k]) == CLOSED
+    with pytest.raises(ValueError, match="cut off from every reservoir and tank"):
+        water_steady(model, state, drivers)
+
+
 @pytest.mark.parametrize("kind", list(_PUMP_KINDS))
 def test_pump_speed_gradient_against_central_differences(tmp_path, kind):
     """d(sum of junction heads)/d(pump speed) by the implicit adjoint against central

@@ -104,7 +104,7 @@ def test_a_closed_pipe_or_check_valve_is_valid(status):
 @pytest.mark.parametrize("link, value, match", [
     ("P1", "AJAR", "only OPEN, CLOSED, ACTIVE"),
     ("P1", "ACTIVE", "only a valve can take"),
-    ("PU1", 0.8, "pump speed settings are out of scope"),
+    ("PU1", -0.5, "a speed is not negative"),
 ])
 def test_an_unmodelled_status_line_is_refused(link, value, match):
     with pytest.raises(ValueError, match=match):

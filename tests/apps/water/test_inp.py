@@ -678,8 +678,7 @@ def test_a_status_line_reads_a_word_or_a_setting_in_si(tmp_path):
     path = _edit(tmp_path, "Net1.inp", ("[CURVES]", "[STATUS]\n 9 0.7\n 10 Closed\n\n[CURVES]"))
     net = read_epanet_inp(path)
     assert net.initial_status == {"9": 0.7, "10": "CLOSED"}
-    with pytest.raises(ValueError, match=r"\[STATUS\]"):
-        net.validate()
+    net.validate()                     # pump 9 at speed 0.7 (`changestatus`)
 
 
 def test_energy_options_and_pump_overrides_are_read(tmp_path):

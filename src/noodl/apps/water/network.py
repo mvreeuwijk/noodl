@@ -19,8 +19,8 @@ Every link's status, setting and allowed flow direction are drivers, one value p
 `model.link_names` order: `"water.status"`, `"water.setting"` and `"water.one_way"`
 (`noodl.apps.water.elements.STATUS_KEY` and its neighbours). `build_model` fills them from
 the network: a CLOSED pipe or `[STATUS]` line sets the status, a CV pipe a forward-only
-direction, a valve's setting (or a numeric `[STATUS]`) its setting, and every valve starts
-ACTIVE.
+direction, a valve's setting (or a numeric `[STATUS]`) its setting, a numeric `[STATUS]`
+a pump's speed, and every valve starts ACTIVE.
 """
 
 from __future__ import annotations
@@ -523,10 +523,10 @@ class WaterNetwork:
                         f"valve can take, not a pipe or a pump"
                     )
             elif name in pump_names:
-                raise ValueError(
-                    f"WaterNetwork: [STATUS] sets pump {name!r} to the speed {value!r}; "
-                    f"pump speed settings are out of scope"
-                )
+                if value < 0.0:
+                    raise ValueError(
+                        f"WaterNetwork: [STATUS] sets pump {name!r} to the speed {value!r}; "
+                        f"a speed is not negative (EPANET error 211)")
             elif name not in valve_names:
                 raise ValueError(
                     f"WaterNetwork: [STATUS] gives link {name!r} the setting {value!r}; "
@@ -1445,9 +1445,11 @@ def _link_drivers(net: WaterNetwork, scale: float) -> Drivers:
 
     A pipe is OPEN, or CLOSED by its status column; a CV pipe is OPEN and forward-only. A
     pump is OPEN at its speed. A valve is ACTIVE at its setting (a PBV's, PRV's or PSV's
-    scaled to the layer's potential unit). A `[STATUS]` word then sets the status, and a numeric
-    `[STATUS]` value a valve's setting, the valve staying ACTIVE (EPANET 2.2 Manual,
-    Appendix C.2.17)."""
+    scaled to the layer's potential unit). A `[STATUS]` line then changes the link as EPANET
+    2.2's `changestatus` does (`input3.c`; Manual, Appendix C.2.17): a word sets the status
+    (an OPEN pump runs at speed 1, a CLOSED one keeps its speed); a number is a valve's
+    setting, the valve staying ACTIVE, or a pump's speed, the pump OPEN at it and CLOSED at
+    0."""
     links = net.links()
     status = torch.full((len(links),), float(OPEN), dtype=F64)
     setting = torch.zeros(len(links), dtype=F64)
@@ -1469,6 +1471,11 @@ def _link_drivers(net: WaterNetwork, scale: float) -> Drivers:
         initial = net.initial_status.get(link.name)
         if isinstance(initial, str):
             status[i] = status_code(initial)
+            if kind == "PUMP" and status[i] == OPEN:
+                setting[i] = 1.0
+        elif initial is not None and kind == "PUMP":
+            setting[i] = initial
+            status[i] = OPEN if initial != 0.0 else CLOSED
         elif initial is not None:
             setting[i] = initial * unit
             status[i] = ACTIVE

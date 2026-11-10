@@ -522,7 +522,9 @@ Every link's status, setting and allowed direction are drivers, one value per li
 
 `build_model` fills them from the file: a `CLOSED` pipe or a `[STATUS]` word sets the status, a
 `CV` pipe is forward-only, a valve's setting (or a numeric `[STATUS]` value) is its setting,
-and every valve starts `ACTIVE`. They are set by link name like any other driver:
+and every valve starts `ACTIVE`. On a pump `[STATUS]` acts as EPANET's `changestatus`: a number is
+its speed (the pump `OPEN` at it, `CLOSED` at 0), `OPEN` runs it at speed 1, `CLOSED` keeps its
+speed. They are set by link name like any other driver:
 
 ```python
 from noodl.apps.water import CLOSED, link_states
@@ -906,9 +908,8 @@ independent loop is a property of the cycle-space formulation, and it holds exac
 
 ## Limitations
 
-- **Not modelled, refused by name:** a numeric `[STATUS]` on a pump (a pump's speed is the driver
-  `"water.setting"`); a valve at a full or empty tank. A file using either raises an error naming
-  the feature.
+- **Not modelled, refused by name:** a valve at a full or empty tank. A file using it raises an
+  error naming the valve.
 - **Rules.** `FILLTIME` and `DRAINTIME` premises and the `DAY` and `POWER` ones are refused. A
   pump closed by a rule is at speed 0 in `"water.link_setting"`, as EPANET (`setlinkstatus`)
   and as a closing control leaves it; a `SETTING` premise on it reads 0, as EPANET.
