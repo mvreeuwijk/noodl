@@ -65,8 +65,14 @@ F64 = torch.float64
 HTOL = 0.0005 * M_PER_FT
 
 #: EPANET's `TINY` (`types.h`): a curve segment narrower than this takes its end value
-#: (`project.c`, `interp`).
+#: (`project.c`, `interp`). EPANET applies it in the curve's FILE units (ft or m, ft3 or m3);
+#: here it is applied in SI (m, m3). Every curve `TankVolumeCurve` accepts has strictly
+#: increasing levels and volumes, so it only guards a segment narrower than 1e-6 m or m3.
 TINY = 1e-6
+
+#: EPANET's `QZERO` (`types.h`, 1e-6 cfs) in m3/s: `tanktimestep` (`hydraul.c`) skips a tank
+#: whose net inflow is no larger.
+QZERO = 1e-6 * M_PER_FT**3
 
 
 def _interp(x: Tensor, y: Tensor, last: Tensor, xx: Tensor, *,
@@ -74,8 +80,10 @@ def _interp(x: Tensor, y: Tensor, last: Tensor, xx: Tensor, *,
     """EPANET 2.2's `interp` (`project.c`), per curve, and the slope it takes.
 
     `x`, `y`: `(n, width)`, one curve per row, `x` ascending, padded beyond each row's
-    `last` index; `xx`: `(..., n)`. Returns `(y(xx), dy/dx)`: `y[0]` at or below the first
-    point, `y[last]` beyond the last (no extrapolation, slope 0), and otherwise the segment
+    `last` index (at least 1: two points); `xx`: `(..., n)`, in the curves' SI units, with
+    `TINY` applied in them too (EPANET applies it in the file's units). Returns
+    `(y(xx), dy/dx)`: `y[0]` at or below the first point, `y[last]` beyond the last (no
+    extrapolation, slope 0), and otherwise the segment
     whose right end is the first point with `x >= xx`, so the LEFT segment at a point, as
     EPANET; `right=True` takes the right one there instead (the first point with `x > xx`;
     used only for the slope a rising level moves onto)."""
@@ -108,7 +116,7 @@ class TankVolumeCurve(NodeStorage):
 
     `nodes` are the tank nodes, `bottom` (m) their bottom elevations, and `levels` (m
     above the bottom) and `volumes` (m3) each tank's curve points (one sequence per tank,
-    of any lengths, levels ascending and volumes not decreasing). The layer's potential is
+    of at least two points, levels and volumes strictly increasing). The layer's potential is
     the head times `head_scale` (`rho g` on the Darcy-Weisbach path).
 
     `amount` is EPANET's `tankvolume` and `potential_of` its `tankgrade` (`hydraul.c`), both
@@ -134,14 +142,18 @@ class TankVolumeCurve(NodeStorage):
                 f"TankVolumeCurve: {n} nodes need {n} curves, got {len(rows_x)} level and "
                 f"{len(rows_y)} volume rows")
         for i, (xs, ys) in enumerate(zip(rows_x, rows_y, strict=True)):
-            if len(xs) != len(ys) or not xs:
+            if len(xs) != len(ys):
                 raise ValueError(
                     f"TankVolumeCurve: curve {i} has {len(xs)} levels and {len(ys)} volumes")
-            if any(b <= a for a, b in zip(xs, xs[1:], strict=False)) or any(
-                    b < a for a, b in zip(ys, ys[1:], strict=False)):
+            if len(xs) < 2:
                 raise ValueError(
-                    f"TankVolumeCurve: curve {i} must have ascending levels and volumes "
-                    f"that do not decrease, got levels {xs} and volumes {ys}")
+                    f"TankVolumeCurve: curve {i} has {len(xs)} point(s); a volume curve needs "
+                    f"at least two")
+            if any(b <= a for a, b in zip(xs, xs[1:], strict=False)) or any(
+                    b <= a for a, b in zip(ys, ys[1:], strict=False)):
+                raise ValueError(
+                    f"TankVolumeCurve: curve {i} must have strictly increasing levels and "
+                    f"volumes, got levels {xs} and volumes {ys}")
         width = max(len(xs) for xs in rows_x)
         pad = [(xs + [xs[-1]] * (width - len(xs)), ys + [ys[-1]] * (width - len(ys)))
                for xs, ys in zip(rows_x, rows_y, strict=True)]
@@ -394,17 +406,23 @@ class TankLevels:
                                  link_status.expand(batch + (n_links,)))
         return status, way
 
-    def time_to_limit(self, level: Tensor, rate: Tensor) -> Tensor:
+    def time_to_limit(self, level: Tensor, rate: Tensor,
+                      inflow: Tensor | None = None) -> Tensor:
         """Seconds each tank takes to reach its maximum level (rising, `rate > 0`) or its
         minimum (falling) at the constant rate `rate` (dy/dt, m/s), `inf` where it stands
         still or is at or beyond the limit it moves towards. EPANET's `tanktimestep`
         (`hydraul.c`): `(Vmax - V) / q` or `(Vmin - V) / q` by volume, which a tank on a
         volume curve (`TankVolumeCurve`) reads from its curve, its inflow `q` being
         `rate` times its area on the segment it moves onto (`area_toward`, the area
-        `water_event_step` divides the inflow by). EPANET then rounds to whole seconds;
-        this is the exact time. Not differentiable: it only places a step."""
+        `water_event_step` divides the inflow by). Given `inflow` (m3/s per tank), a
+        tank whose net inflow is at most `QZERO` is skipped (`inf`), as `tanktimestep` skips
+        it. EPANET then rounds to whole seconds; this is the exact time. Not
+        differentiable: it only places a step."""
         with torch.no_grad():
             level, rate = level.detach(), rate.detach()
+            if inflow is not None:
+                rate = torch.where(inflow.detach().abs() <= QZERO, torch.zeros_like(rate),
+                                   rate)
             rising, falling = rate > 0, rate < 0
             moving = (rising & (level < self.y_max)) | (falling & (level > self.y_min))
             target = torch.where(rising, self.y_max, self.y_min)

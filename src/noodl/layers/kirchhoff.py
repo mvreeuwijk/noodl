@@ -2562,8 +2562,15 @@ class KirchhoffLayer(TopologyGuard):
             flow = storage_flow[..., offset:offset + n]
             if st.linear:
                 moved.append(start + dt * flow / st.capacity(start, start, drivers))
-            else:   # `_check_boundary_storage`: it gives `potential_of`
-                moved.append(st.potential_of(st.amount(start, drivers) + dt * flow, drivers))
+            else:   # `_check_boundary_storage`: it overrides `potential_of`
+                target = st.potential_of(st.amount(start, drivers) + dt * flow, drivers)
+                if target is None:
+                    raise ValueError(
+                        f"KirchhoffLayer {self.name!r}: storage {type(st).__name__} at "
+                        f"boundary nodes {st.nodes.tolist()} is not linear and its "
+                        f"potential_of returned None; scheme='forward_euler' moves it to "
+                        f"potential_of(amount + dt * inflow), which must be a tensor")
+                moved.append(target)
             nodes.append(st.nodes)
             offset += n
         batch = broadcast_shapes(phi.shape[:-1], *(m.shape[:-1] for m in moved))

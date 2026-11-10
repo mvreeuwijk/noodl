@@ -476,6 +476,12 @@ class WaterNetwork:
                 raise ValueError(
                     f"WaterNetwork: tank {tank.name!r} names the volume curve "
                     f"{tank.volume_curve!r}, which is not among the curves")
+            if len(points) < 2 or any(b[0] <= a[0] or b[1] <= a[1]
+                                      for a, b in zip(points, points[1:], strict=False)):
+                raise ValueError(
+                    f"WaterNetwork: tank {tank.name!r} has the volume curve "
+                    f"{tank.volume_curve!r} with {len(points)} point(s); a volume curve needs "
+                    f"at least two, with levels and volumes strictly increasing")
             if tank.min_level < points[0][0] or tank.max_level > points[-1][0]:
                 raise ValueError(
                     f"WaterNetwork: tank {tank.name!r} has levels "
@@ -2315,7 +2321,7 @@ def water_event_step(model: Model, state: State, drivers: Drivers, dt_max: float
     dt = closure.event_step(levels, rate, dt_max)
     # EPANET's `tanktimestep` (`hydraul.c`): the step ends when a tank fills or empties,
     # `t = ROUND(v / q)` whole seconds, when that is positive and shorter
-    fill = float(closure.time_to_limit(levels, rate).min())
+    fill = float(closure.time_to_limit(levels, rate, inflow).min())
     if math.isfinite(fill):
         fill = float(math.floor(fill + 0.5))
         if 0.0 < fill < dt:
@@ -2353,7 +2359,9 @@ def tank_overflow(model: Model, state: State, stepped: State, dt: float) -> Tens
     """The flow (m3/s) every tank spilt over one `water_event_step` from `state` to
     `stepped` of `dt` s: for a tank that may overflow (`Tank.overflow`), what flowed in
     (`tank_inflow(model, stepped)`) less its volume change over the step, at least 0; 0 for
-    every other tank. A tank that starts the step full spills everything that flows in."""
+    every other tank. A tank that starts the step full spills everything that flows in.
+    It stands in for the overflow per report time that Task 10's `water_run` results
+    (`WaterResults.tank_overflow`) will carry."""
     closure = model.tank_closure
     (storage,) = model.kirchhoff["water"].storage
     nodes = storage.nodes

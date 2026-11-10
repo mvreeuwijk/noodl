@@ -503,6 +503,18 @@ class _SquareRoot(NodeStorage):
         return amount.sqrt()
 
 
+def test_a_potential_of_that_returns_none_is_refused_by_name():
+    class Declines(_SquareRoot):
+        def potential_of(self, amount, drivers=None):
+            return None
+
+    layer = _tank_layer(Declines([3]))
+    with pytest.raises(ValueError, match=r"Declines at boundary nodes \[3\] is not linear "
+                                         "and its potential_of returned None"):
+        layer.advance_storage(torch.tensor([1.25, 0.1, 0.2, 2.0], dtype=F64),
+                              torch.tensor([0.3], dtype=F64), 0.5)
+
+
 def test_a_storage_with_an_inverse_advances_by_its_amount():
     """A boundary storage that gives `potential_of` moves its node to
     `potential_of(amount(start) + dt * flow)`: the amount changes by exactly dt * flow."""

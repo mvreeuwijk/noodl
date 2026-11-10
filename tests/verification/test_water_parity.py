@@ -2515,7 +2515,12 @@ def test_tank_empties_like_epanet(tmp_path):
         tmp_path, text, "empty", tanks={"2"}, links=("110", "9"))
     empty = levels[:, 0] <= net.tanks[0].min_level + 1e-6
     assert int(empty.sum()) >= 5
-    assert bool((flows[empty, model.link_names.index("110")][:-1].abs() < 1e-12).all())
+    pipe = flows[empty, model.link_names.index("110")]
+    # every report time the tank is empty, pipe 110 is closed against draining it, except
+    # the last (12 h), where the network head has risen past the tank's and the pipe is
+    # refilling it (-16 L/s, EPANET -16.41 L/s) from an empty tank, which the rule allows
+    assert bool((pipe[:-1].abs() < 1e-12).all())
+    assert float(pipe[-1]) < -0.01
     assert worst < 2e-4, worst
     assert worst_q < 1e-6, worst_q
 

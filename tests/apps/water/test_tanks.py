@@ -463,3 +463,27 @@ def test_only_the_implicit_schemes_refuse_a_level_outside_the_limits():
     state = initial_state(model, values={"water.tank_level": {"2": 100.0}})
     with pytest.raises(ValueError, match=r"tank\(s\) \['2'\] are outside"):
         model.tank_closure(state, drivers)
+
+
+def test_a_volume_curve_of_one_point_or_flat_volumes_is_refused(tmp_path):
+    """A curve needs two points and strictly increasing volumes: one point leaves no
+    segment, and a flat stretch has no level for its volume (and no area)."""
+    with pytest.raises(ValueError, match="curve 0 has 1 point"):
+        TankVolumeCurve([0], torch.zeros(1, dtype=F64), [[1.0]], [[10.0]])
+    with pytest.raises(ValueError, match="curve 0 must have strictly increasing"):
+        TankVolumeCurve([0], torch.zeros(1, dtype=F64), [[0.0, 1.0, 2.0, 3.0]],
+                        [[0.0, 10.0, 10.0, 20.0]])
+    for points in (((0, 0),), ((0, 0), (110, 200000), (160, 200000))):
+        net = read_epanet_inp(_net1_with_volume_curve(tmp_path, points=points))
+        with pytest.raises(ValueError, match=r"tank '2' has the volume curve 'VC' with"):
+            net.validate()
+
+
+def test_time_to_limit_skips_a_tank_with_no_net_inflow():
+    """`tanktimestep` skips a tank whose net inflow is at most QZERO (1e-6 cfs)."""
+    closure = _two_tank_closure(())
+    level = torch.tensor([19.0, 19.0], dtype=F64)
+    rate = torch.tensor([1e-9, 1e-9], dtype=F64)
+    inflow = torch.tensor([2e-8, 3e-8], dtype=F64)   # QZERO = 2.83e-8 m3/s
+    out = closure.time_to_limit(level, rate, inflow)
+    assert math.isinf(float(out[0])) and float(out[1]) == pytest.approx(1e9)
