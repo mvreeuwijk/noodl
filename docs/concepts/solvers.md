@@ -208,9 +208,12 @@ air = KirchhoffLayer(net, "air", laws, boundary=["ambient"],
   the SPD certificate and its solvers still apply.
 
 The whole batch is solved again on each rung. Only non-convergence (`ConvergenceError`) of
-the first solve climbs the ladder; any other error of it passes through. A rung that raises
-any error (a linear guess that is singular, or not grounded) has failed, and the next one is
-tried. On a layer with flow unknowns, the rank test that names a singular system diagnoses a
+the first solve climbs the ladder; any other error of it passes through. A rung that does not
+converge (`ConvergenceError`), or whose linear guess is singular (`SingularSystemError`) or
+not grounded (`GroundingError`), has failed, and the next one is tried; any other error of a
+rung (a bug in a law, say) passes through. The three are `RuntimeError`s, importable from
+`noodl.solvers`, so code that catches `RuntimeError` keeps working and code that wants to
+tell them apart can match on the type rather than on the message. On a layer with flow unknowns, the rank test that names a singular system diagnoses a
 failure only once every rung has failed too, in every `on_failure` mode: a Jacobian that is
 singular at the last iterate is often a symptom of a bad start, which a rung cures, and a
 system that is singular in itself fails every rung and still ends in that error. Nothing of

@@ -7,7 +7,7 @@ from noodl.elements import Conductance, PowerLaw
 from noodl.layers import kirchhoff
 from noodl.layers.kirchhoff import KirchhoffLayer
 from noodl.model import Model
-from noodl.solvers import ConvergenceError, implicit
+from noodl.solvers import ConvergenceError, GroundingError, SingularSystemError, implicit
 from noodl.solvers.continuation import shift_diagonal
 from noodl.topology import Network
 from noodl.withdrawals import NodeWithdrawal
@@ -365,6 +365,36 @@ def test_a_singular_layer_with_a_ladder_still_raises_the_singular_error():
                                       Conductance(torch.tensor([1.0]), kind="r")],
                            boundary=["gnd"], fallback=("linear_guess", "storage_ramp"))
     for kw in ({}, {"method": "direct"}):
-        with pytest.raises(RuntimeError, match=r"singular.*'source'") as info:
+        with pytest.raises(SingularSystemError, match=r"singular.*'source'") as info:
             layer.solve(torch.zeros(1), differentiable=False, **kw)
         assert not isinstance(info.value, ConvergenceError)
+
+
+def test_a_rung_whose_law_raises_another_error_passes_it_through(monkeypatch):
+    """Only non-convergence, a singular system or a grounding refusal fails a rung; a law's
+    own error on a rung (a shape bug, say) is not reported as "the fallback did not converge
+    either" but passes through as it is."""
+    failed = _fail_warm_newton(monkeypatch)
+    layer = _layer(fallback=("linear_guess",))
+    real = KirchhoffLayer._starting_point
+
+    def broken(self, phi0, *args, **kwargs):
+        if phi0 is None:
+            raise RuntimeError("a law's own bug")
+        return real(self, phi0, *args, **kwargs)
+
+    monkeypatch.setattr(KirchhoffLayer, "_starting_point", broken)
+    with pytest.raises(RuntimeError, match="^a law's own bug$"):
+        layer.solve(PB, {}, SOURCES, phi0=FAR, differentiable=False)
+    assert failed
+
+
+def test_a_floating_node_is_a_grounding_error():
+    net = _net()
+    net.add_node("island")
+    net.add_node("island2")
+    net.add_edge("island", "island2", kind="airpath")
+    law = PowerLaw(torch.tensor([0.01, 0.02, 0.01, 0.01], dtype=F64), 0.65)
+    layer = KirchhoffLayer(net, "zones", [law], boundary=["ambient"])
+    with pytest.raises(GroundingError, match="floating nodes"):
+        layer.solve(PB, {}, torch.zeros(5, dtype=F64))

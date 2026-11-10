@@ -44,6 +44,7 @@ from noodl._broadcast import broadcast_shapes
 from noodl.elements._slopes import _complex
 from noodl.layers._device import complex_of
 from noodl.operators.sparse import SparseOperator
+from noodl.solvers.errors import SingularSystemError
 from noodl.solvers.newton import newton_tolerances
 from noodl.solvers.select import scipy_importable
 
@@ -308,7 +309,7 @@ def first_failing(last: dict, newton_kwargs: dict) -> int:
     return int(bad[0]) if len(bad) else 0
 
 
-def singular_error(layer, kinds, mode: str) -> RuntimeError:
+def singular_error(layer, kinds, mode: str) -> SingularSystemError:
     """The error for a singular system of potentials and flow unknowns, naming the relation
     `kinds`; at the initial point it also says that storage held at its initial value is
     itself a source, and where else to start."""
@@ -320,7 +321,7 @@ def singular_error(layer, kinds, mode: str) -> RuntimeError:
         "transient from the operating point instead (mode='dc'; operating_point in the "
         "electrical application)"
     ) if mode == "initial" else ""
-    return RuntimeError(
+    return SingularSystemError(
         f"KirchhoffLayer {layer.name!r}: the system of potentials and flow unknowns is "
         f"singular; check for a loop of ideal potential sources or a cut set of flow "
         f"sources among the relation kinds {kinds}, or a part connected to a boundary "

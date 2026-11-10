@@ -43,7 +43,7 @@ from noodl.operators.graph import GraphLaplacianOperator
 from noodl.operators.shifted import ShiftedOperator
 from noodl.operators.sparse import SparseOperator
 from noodl.solvers.continuation import storage_ramp
-from noodl.solvers.errors import ConvergenceError
+from noodl.solvers.errors import ConvergenceError, GroundingError, SingularSystemError
 from noodl.solvers.grounding import spd_certificate, spd_diagnosis
 from noodl.solvers.implicit import adjoint as _adjoint_solve
 from noodl.solvers.implicit import implicit_solve
@@ -1711,7 +1711,7 @@ class KirchhoffLayer(TopologyGuard):
                 result.raise_on_failure(where)
             return -result.x
 
-    def _singular_error(self, mode: str) -> RuntimeError:
+    def _singular_error(self, mode: str) -> SingularSystemError:
         """`singular_error` of this layer, naming its relation kinds."""
         kinds = [el.kind for el, rel in zip(self._laws, self._relation, strict=True) if rel]
         return singular_error(self, kinds, mode)
@@ -1737,7 +1737,7 @@ class KirchhoffLayer(TopologyGuard):
     def _grounding_check(
         self, slopes: torch.Tensor, *, where: str, node_slopes: torch.Tensor | None = None
     ) -> None:
-        """Raise unless every instance in `slopes` certifies SPD.
+        """Raise `GroundingError` unless every instance in `slopes` certifies SPD.
 
         It is run on the slopes GIVEN -- the caller decides whether those are
         `linear_init`'s tangent-at-zero slopes or the actual `dflows` at a solve point -- and
@@ -1764,7 +1764,7 @@ class KirchhoffLayer(TopologyGuard):
         if certified.ndim == 0:
             # Unbatched: one instance, so a bare batch index would say nothing. Name the
             # nodes (or edges) directly.
-            raise RuntimeError(
+            raise GroundingError(
                 f"KirchhoffLayer {self.name!r}: {where}: "
                 f"{self._describe_grounding(records[0])}"
             )
@@ -1772,7 +1772,7 @@ class KirchhoffLayer(TopologyGuard):
         details = "; ".join(
             f"instance {rec['instance']}: {self._describe_grounding(rec)}" for rec in records
         )
-        raise RuntimeError(
+        raise GroundingError(
             f"KirchhoffLayer {self.name!r}: {where}: batch indices {bad_idx} do not "
             f"certify a grounded, positive-slope system; {details}"
         )
@@ -2236,9 +2236,10 @@ class KirchhoffLayer(TopologyGuard):
                                   q0=q0 if ramped else None, diagnostics=diagnostics,
                                   _start="ramp" if ramped else "linear",
                                   _report=ramp, **kwargs)
-            except RuntimeError as exc:
-                # any error of a rung (a singular linear guess, a grounding refusal at it,
-                # non-convergence) is that rung failing; the first failure still stands
+            except (ConvergenceError, SingularSystemError, GroundingError) as exc:
+                # a rung that does not converge, or whose linear guess is singular or not
+                # grounded, has failed; the first failure still stands. Any other error (a
+                # law's own bug, say) is not a failure of the rung and passes through.
                 last_error = exc
                 continue
             if diagnostics is None or _converged(diagnostics):
