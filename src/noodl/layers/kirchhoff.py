@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import dataclasses
 import functools
+import math
 import types
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -32,6 +33,7 @@ from noodl.layers._flow_unknowns import (
     singular,
     singular_error,
     split,
+    to_complex,
     to_real,
 )
 from noodl.layers._functional import FunctionalLaws, step_start
@@ -642,16 +644,35 @@ class KirchhoffLayer(TopologyGuard):
         Hz, one value per instance); `None` for a layer that is not a phasor layer."""
         return f"{self.name}.frequency" if self.phasor else None
 
-    def _refuse_on_mna(self, method: str) -> None:
-        """Classic-only methods assume every flow is a function of its own edge's potential
-        difference; a layer with flow unknowns refuses them by name."""
-        if self._unknowns is not None:
-            raise TypeError(
-                f"KirchhoffLayer {self.name!r} is solved by Modified Nodal Analysis "
-                f"(its laws include implicit or multi-port ones, or it is a phasor layer): "
-                f"it has flow unknowns, so {method}() is not defined on it; read the flows "
-                f"from solve()'s q"
-            )
+    def _relation_kinds(self) -> list[str]:
+        """The kinds of this layer that give a relation, whose flows are its unknowns."""
+        return [el.kind for el, rel in zip(self._laws, self._relation, strict=True) if rel]
+
+    def _flow_unknown_columns(self, q, what: str, like: torch.Tensor) -> torch.Tensor:
+        """`q`'s columns of the flow unknowns, for a layer with flow unknowns. `q` is every
+        edge's flow, as `solve` returns it. Without it a layer with relations cannot give
+        `what` (the unknown flows are not functions of the potentials) and refuses by name;
+        a layer with no relation needs none (`like` sets the empty columns' type)."""
+        edges = self._unknowns.edges
+        if q is None:
+            if len(edges):
+                raise ValueError(
+                    f"KirchhoffLayer {self.name!r}: kinds {self._relation_kinds()} give a "
+                    f"relation, so their flows are unknowns of the layer; pass q (the flows "
+                    f"solve returned) to {what}")
+            return like.new_zeros(like.shape[:-1] + (0,))
+        n_edges = len(self.cols)
+        if q.shape[-1] != n_edges:
+            raise ValueError(
+                f"KirchhoffLayer {self.name!r}: q must hold every edge's flow "
+                f"({n_edges}) as solve() returns it; got last dimension {q.shape[-1]}")
+        return q[..., edges]
+
+    def _unknown_vector(self, phi_interior, q, what: str) -> torch.Tensor:
+        """The unknowns `[phi_I, q_F]` in the real view, from the interior potentials and
+        every edge's flow `q` (`_flow_unknown_columns`)."""
+        q_F = self._flow_unknown_columns(q, what, phi_interior)
+        return _cat([to_real(self, phi_interior), to_real(self, q_F)], phi_interior)
 
     @property
     def withdrawals(self) -> tuple:
@@ -917,11 +938,9 @@ class KirchhoffLayer(TopologyGuard):
         (`mode="dc"`). The result is differentiable in `phi`, `drivers` and the laws'
         parameters on the potential edges, and carries `q`'s graph on the implicit edges.
         At `solve`'s own `(phi, q)` it returns `q`. A phasor layer has no such accessor.
-        Without `q` such a layer raises `TypeError`.
+        Without `q` such a layer raises `ValueError`, naming the kinds that give a relation.
         """
         if self._unknowns is not None:
-            if q is None:
-                self._refuse_on_mna("flows without q")
             return self._flows_given(phi, drivers or {}, q)
         return self._flows(phi, drivers or {}, _DC)
 
@@ -976,11 +995,49 @@ class KirchhoffLayer(TopologyGuard):
             kinds = (kinds,)
         return torch.cat([q[..., self.kind_slice(k)] for k in kinds], dim=-1)
 
-    def dflows(self, phi: torch.Tensor, drivers: Mapping) -> torch.Tensor:
-        """Every edge's slope `d q / d dp` at the full-node `phi` (a law that reads the law
-        context in the steady context, as `flows`)."""
-        self._refuse_on_mna("dflows")
-        return self._dflows(phi, drivers or {}, _DC)
+    def dflows(self, phi: torch.Tensor, drivers: Mapping,
+               q: torch.Tensor | None = None) -> torch.Tensor:
+        """Every edge's slope `d q / d dp` at the full-node `phi`, in layer edge order (a law
+        that reads the law context in the steady context, as `flows`).
+
+        On a layer without flow unknowns that is each law's own slope. On a layer with flow
+        unknowns the edges of a flow-form law give theirs the same way, and an edge of a
+        relation `r(dp, q) = 0` gives the slope the relation implies, `-(d r / d dp) / (d r /
+        d q)`, taken at `q`'s flow on that edge: `q` is every edge's flow, as `solve` returns
+        it, and is required when the layer has a relation (`ValueError` without it, as for
+        `flows`). The implied slope is `nan` where `d r / d q` is zero, as on an ideal
+        potential source, whose flow does not follow from its potential difference. Every
+        edge of a law with several ports is `nan` too: its slope is a matrix, not a number
+        per edge. A phasor layer has no such accessor (`TypeError`: its slopes are
+        complex)."""
+        if self._unknowns is None:
+            return self._dflows(phi, drivers or {}, _DC)
+        if self.phasor:
+            raise TypeError(
+                f"KirchhoffLayer {self.name!r} is a phasor layer: dflows() is not defined on "
+                f"it (its slopes are complex); its Jacobian is jacobian()'s")
+        drivers = drivers or {}
+        q_F = self._flow_unknown_columns(q, "dflows", phi)
+        index = self._unknowns.index
+        ctx = LawContext(mode="dc")
+        d = self.dp(phi, drivers)
+        parts = []
+        for i, (el, rel, (s, e)) in enumerate(zip(self._laws, self._relation,
+                                                  self._law_slices, strict=True)):
+            dp_s = d[..., s:e]
+            if el.ports != 1:
+                parts.append(torch.full_like(dp_s, math.nan))
+            elif rel:
+                f0 = int(index[s])
+                dr_dp, dr_dq = el.jacobian(dp_s, q_F[..., f0:f0 + e - s], drivers,
+                                           self._law_ctx(ctx, s, e))
+                dr_dp, dr_dq = dr_dp[..., 0, 0, 0, 0], dr_dq[..., 0, 0, 0, 0]
+                parts.append(torch.where(dr_dq != 0, -dr_dp / torch.where(
+                    dr_dq != 0, dr_dq, torch.ones_like(dr_dq)),
+                    torch.full_like(dr_dq, math.nan)))
+            else:
+                parts.append(self._law_slopes(i, el, dp_s, drivers, ctx))
+        return _cat(parts, d)
 
     def _dflows(self, phi, drivers: Mapping, ctx: LawContext) -> torch.Tensor:
         """`dflows` in the context `ctx` (`_law_slopes` per law)."""
@@ -1055,19 +1112,31 @@ class KirchhoffLayer(TopologyGuard):
                 )
         return sources[..., self.interior]
 
-    def residual(self, phi_interior, phi_boundary, drivers, sources, *, dt=None, scheme=None,
-                 history=None, storage_flow=None):
-        """The interior Newton residual `A_I q(phi) - s_I (+ w(phi))` at the given point.
+    def residual(self, phi_interior, phi_boundary, drivers, sources, *, q=None, dt=None,
+                 scheme=None, history=None, storage_flow=None):
+        """The Newton residual at the given point.
+
+        On a layer without flow unknowns it is the interior balance `A_I q(phi) - s_I (+
+        w(phi))`, `n_I` rows; `q` is ignored. On a layer with flow unknowns the unknowns are
+        the interior potentials and the flows of the relations' edges, `[phi_I, q_F]` in that
+        order, and the residual is the balance rows, then the relations' own residuals:
+        `q` is every edge's flow, as `solve` returns it (its flow-unknown columns are read),
+        and is required (`ValueError` without it). A phasor layer's rows are complex.
 
         The step keywords are `solve`'s. On a layer with storage, with `dt` the storage
         withdrawal of that step is included (the residual `solve` drives to zero); without
         `dt` it is the steady residual, where storage is absent. A layer without storage
         refuses them."""
-        self._refuse_on_mna("residual")
         self._require_current_topology()
         drivers = drivers or {}
         step = self._public_step(dt, scheme, history, storage_flow, drivers)
-        return self._residual(phi_interior, phi_boundary, drivers, sources, step)[0]
+        if self._unknowns is None:
+            return self._residual(phi_interior, phi_boundary, drivers, sources, step)[0]
+        phi_boundary, sources, phi_interior, q = self._complex_inputs(
+            phi_boundary, drivers, sources, phi_interior, q)
+        x = self._unknown_vector(phi_interior, q, "residual")
+        r = self._residual(x, phi_boundary, drivers, sources, step)[0]
+        return to_complex(r) if self.phasor else r
 
     def _public_step(self, dt, scheme, history, storage_flow, drivers) -> _Step:
         """The `_Step` of `residual`, `jacobian` and `adjoint`: their step keywords,
@@ -1289,6 +1358,7 @@ class KirchhoffLayer(TopologyGuard):
             elif tangents is not None and i in tangents:
                 c, k = tangents[i]
                 q_s = c + k * dp_s
+                self._check_width(el, q_s, e - s, "flow")
             else:
                 q_s = call(i, (dp_s, drivers, lctx))
                 self._check_width(el, q_s, e - s, "flow")
@@ -1302,12 +1372,8 @@ class KirchhoffLayer(TopologyGuard):
             raise TypeError(
                 f"KirchhoffLayer {self.name!r} is a phasor layer: flows() is not defined on "
                 f"it; read the flows from solve()'s q")
-        n_edges = len(self.cols)
-        if q.shape[-1] != n_edges:
-            raise ValueError(
-                f"KirchhoffLayer {self.name!r}: q must hold every edge's flow "
-                f"({n_edges}) as solve() returns it; got last dimension {q.shape[-1]}")
-        out, _ = self._flows_and_residuals(phi, q[..., self._unknowns.edges], drivers,
+        q_F = self._flow_unknown_columns(q, "flows", phi)
+        out, _ = self._flows_and_residuals(phi, q_F, drivers,
                                            LawContext(mode="dc"), self._owner_call)
         return out
 
@@ -1444,19 +1510,30 @@ class KirchhoffLayer(TopologyGuard):
         values[..., store.ones] = 1.0
         return SparseOperator(op.row, op.col, values, op.shape[-1])
 
-    def jacobian(self, phi_interior, phi_boundary, drivers, *, dt=None, scheme=None,
+    def jacobian(self, phi_interior, phi_boundary, drivers, *, q=None, dt=None, scheme=None,
                  history=None, storage_flow=None):
-        """The dense (n_I, n_I) Jacobian A_I diag(dq) A_I^T -- the retained dense reference.
+        """The dense Jacobian of `residual` at the given point.
 
-        This is the one method that reads `self.A` (and so materialises it, once, on first
-        access); no solve path calls it. Tests compare `GraphLaplacianOperator`'s matvec and
-        the adjoint against this, so its einsum form is deliberately unchanged. The step
-        keywords are `residual`'s: with `dt`, a layer's storage adds its `rate_slope` to the
-        diagonal; without, it is the steady Jacobian.
+        On a layer without flow unknowns it is the `(n_I, n_I)` matrix A_I diag(dq) A_I^T --
+        the retained dense reference. That is the one method that reads `self.A` (and so
+        materialises it, once, on first access); no solve path calls it. Tests compare
+        `GraphLaplacianOperator`'s matvec and the adjoint against this, so its einsum form is
+        deliberately unchanged; `q` is ignored. On a layer with flow unknowns it is the
+        matrix of the operator `solve`'s Newton iteration builds, `(n_I + n_F)` square over
+        the unknowns `[phi_I, q_F]` (`residual`), with `q` required; a phasor layer's matrix
+        is in the real view (each complex unknown a (Re, Im) pair, twice the width).
+
+        The step keywords are `residual`'s: with `dt`, a layer's storage adds its `rate_slope`
+        to the diagonal; without, it is the steady Jacobian.
         """
-        self._refuse_on_mna("jacobian")
+        self._require_current_topology()
         drivers = drivers or {}
         step = self._public_step(dt, scheme, history, storage_flow, drivers)
+        if self._unknowns is not None:
+            phi_boundary, _, phi_interior, q = self._complex_inputs(
+                phi_boundary, drivers, None, phi_interior, q)
+            x = self._unknown_vector(phi_interior, q, "jacobian")
+            return self._operator(x, phi_boundary, drivers, step).assemble()
         phi = self.assemble(phi_interior, phi_boundary)
         dq = self._dflows(phi, drivers, step.ctx)
         A_I = self.A[self.interior]
@@ -1532,6 +1609,8 @@ class KirchhoffLayer(TopologyGuard):
                       else phi_boundary.dtype)
         device = phi_boundary.device
         call = self._owner_call
+        # outside no_grad: a law that reads the context may take its slope by autograd
+        # (`_law_slopes`), which needs grad mode
         tangents = self._tangents(drivers, step.ctx, device)
         with torch.no_grad():
             x = torch.zeros(u.n, dtype=real_dtype, device=device)
@@ -1640,9 +1719,13 @@ class KirchhoffLayer(TopologyGuard):
 
         On a layer with flow unknowns (`implicit_edges`) it is the linear guess of the
         potentials and the flow unknowns together: each law with a flow is replaced by its
-        tangent at zero, each relation by its residual and Jacobian at zero interior
-        potentials and zero flows, and the system is solved once. There it carries no
-        gradient, and a phasor layer returns complex values. `q=True` returns
+        tangent at zero (a law with several ports, and every law on a phasor layer, is taken
+        at its flow and Jacobian at the starting potentials instead: the same for a linear
+        law), each relation by its residual and Jacobian at zero interior potentials and
+        zero flows, and the system is solved once. On a layer with flow unknowns the result
+        is detached: no gradient flows to `phi_boundary`, `sources`, the drivers or the law
+        parameters, unlike on a layer without flow unknowns. A phasor layer returns complex
+        values. `q=True` returns
         `(phi_interior, q_implicit)`, the second the flows of `implicit_edges` (empty on a
         layer without flow unknowns)."""
         drivers = drivers or {}
@@ -2640,17 +2723,24 @@ class KirchhoffLayer(TopologyGuard):
             self._require_threaded(lambda *params: residual_fn(root, *params), all_params)
         return x
 
-    def adjoint(self, phi_interior, phi_boundary, drivers, grad_phi_interior, *, dt=None,
-                scheme=None, history=None, storage_flow=None):
-        """Solve J(phi)^T lambda = grad_phi_interior at the given point.
+    def adjoint(self, phi_interior, phi_boundary, drivers, grad_phi_interior, *, q=None,
+                dt=None, scheme=None, history=None, storage_flow=None):
+        """Solve J^T lambda = grad_phi_interior at the given point, `J` the Jacobian of
+        `residual` (`jacobian`).
+
+        On a layer with flow unknowns `J` is over the unknowns `[phi_I, q_F]`: the gradient
+        has their width, the interior potentials then the flow unknowns (`q` is every edge's
+        flow, as `solve` returns it, and is required), and so does the result; on a phasor
+        layer both are in the real view. The system is the sparse operator `solve`'s Newton
+        iteration builds, solved with the layer's inner solver.
 
         The step keywords are `residual`'s: with `dt`, a layer's storage slope is in `J`;
         without, `J` is the steady Jacobian.
 
-        The operator is the SAME GraphLaplacianOperator `solve`'s Newton iteration builds
-        (same endpoints, same `dflows` slopes), never the dense einsum `jacobian()` -- so
-        the adjoint costs one matvec-free transposed solve rather than an (n_I, n_I)
-        materialisation, and cannot drift from the forward path's own operator. The
+        Without flow unknowns the operator is the SAME GraphLaplacianOperator `solve`'s Newton
+        iteration builds (same endpoints, same `dflows` slopes), never the dense einsum
+        `jacobian()` -- so the adjoint costs one matvec-free transposed solve rather than an
+        (n_I, n_I) materialisation, and cannot drift from the forward path's own operator. The
         transposed action comes from the operator's `rmatvec` via
         `solvers.implicit.TransposeOperator`; for this symmetric Laplacian that equals its
         `matvec`, but nothing here assumes it. `method=self.linear_solver` carries the
@@ -2667,9 +2757,22 @@ class KirchhoffLayer(TopologyGuard):
         for the same reason `linear_init`'s equivalent is ("stays differentiable for callers
         who want it directly"). Wrap the call in `torch.no_grad()` to get the factorisation.
         """
-        self._refuse_on_mna("adjoint")
+        self._require_current_topology()
         drivers = drivers or {}
         step = self._public_step(dt, scheme, history, storage_flow, drivers)
+        if self._unknowns is not None:
+            phi_boundary, _, phi_interior, q = self._complex_inputs(
+                phi_boundary, drivers, None, phi_interior, q)
+            x = self._unknown_vector(phi_interior, q, "adjoint")
+            # the operator's values carry no graph, like every Jacobian entry of a solve
+            with torch.no_grad():
+                op = self._operator(x, phi_boundary, drivers, step)
+            return _adjoint_solve(
+                op,
+                grad_phi_interior,
+                where=f"KirchhoffLayer {self.name!r} adjoint",
+                method=linear_method(self),
+            )
         phi = self.assemble(phi_interior, phi_boundary)
         dq = self._dflows(phi, drivers, step.ctx)
         op = self._operator_at(dq, self._withdrawal_slopes(phi, drivers, step))

@@ -235,13 +235,34 @@ own residual. The Jacobian is assembled as a sparse, nonsymmetric matrix from ea
 blocks (forward-mode derivatives, one per port, two on a phasor layer), so a multi-port law
 couples the edges of its group exactly. `solve` still returns `(phi, q)`, with `q` covering every edge.
 
-**`flows` on an MNA layer.** `flows(phi, drivers)` is a function of the potentials only on a classic
-layer. An implicit law's flow is not: a fan with a prescribed rise has a residual that does not
-contain $q$, and conservation at the nodes fixes its flow. So an MNA layer takes the flows as input,
-`flows(phi, drivers, q)`, with `q` as `solve` returned it (every edge). The implicit edges' columns
-are returned as given and the potential-controlled edges' columns are evaluated from `phi` (steady
-context), differentiably. At `solve`'s own `(phi, q)` the result is `q`. Without `q` it raises
-`TypeError`; a phasor layer has no such accessor.
+**The methods on a layer with flow unknowns.** `flows`, `dflows`, `residual`, `jacobian`,
+`adjoint` and `linear_init` are defined on every layer. On a layer without flow unknowns every
+flow is a function of its own edge's potential difference, so the potentials and drivers give
+everything. An implicit law's flow is not: a fan with a prescribed rise has a residual that does
+not contain $q$, and conservation at the nodes fixes its flow. So on a layer with flow unknowns
+the methods that need the flows take `q`, as `solve` returned it (every edge), and refuse a
+missing one with a `ValueError` that names the kinds giving a relation.
+
+- `flows(phi, drivers, q)` returns the implicit edges' columns as given and evaluates the
+  potential-controlled edges' columns from `phi` (steady context), differentiably. At `solve`'s
+  own `(phi, q)` the result is `q`. A phasor layer has no such accessor (`TypeError`).
+- `dflows(phi, drivers, q)` is every edge's slope `d q / d dp`. On an edge of a relation
+  `r(dp, q) = 0` it is the slope the relation implies, `-(d r / d dp) / (d r / d q)` at `q`'s
+  flow, and `nan` where `d r / d q` is zero (an ideal source: its flow does not follow from its
+  potential difference). Every edge of a law with several ports is `nan`. A phasor layer has no
+  such accessor (`TypeError`: its slopes are complex).
+- `residual(..., q=q)` is the residual of the unknowns `[phi_I, q_F]`, the interior potentials
+  then the flows of `implicit_edges`: the balance rows, then the relations' own residuals; it is
+  zero at `solve`'s result. A phasor layer's rows are complex.
+- `jacobian(..., q=q)` is the dense matrix of the operator `solve`'s Newton iteration builds, of
+  size `n_I + n_F` (twice that on a phasor layer, in the real view: each complex unknown a
+  (Re, Im) pair).
+- `adjoint(..., grad, q=q)` solves `J^T lambda = grad` with that matrix; `grad` and the result
+  have the width of the unknowns (the real view on a phasor layer).
+
+On a layer without flow unknowns `residual` keeps its `n_I` balance rows, and `q` is ignored
+by `residual`, `jacobian` and `adjoint`. The balance of a given state is `balance(phi, q,
+sources)`.
 
 **One scheme vocabulary for every layer.**
 `SCHEMES = ("exact", "backward_euler", "trapezoidal", "forward_euler")`
@@ -286,16 +307,15 @@ potential source, an inductance as a flow source); the error then says so and su
 from the operating point (`mode="dc"`). Under `on_failure="return"` that singularity shows only
 as `converged=False` in `diagnostics`.
 
-The nodal-only methods (`flows`, `dflows`, `residual`, `jacobian`, `adjoint`)
-assume every flow is a function of its own edge's potential difference and raise `TypeError` on
-such a layer; read the flows from `solve`'s `q`, and the balance from `balance(phi, q, sources)`.
-
 `linear_init(phi_boundary, drivers, sources, q=False)` is defined on every layer. On a layer
 with flow unknowns it is the linear guess of the potentials and the flow unknowns together: each
-law with a flow is replaced by its tangent at zero (its own `linear_init`), each relation by its
-residual and Jacobian at zero interior potentials and zero flows, the withdrawals and storages by
-their value and slope there, and the system is solved once. It carries no gradient; on a phasor
-layer it is complex. `q=True` returns `(phi_interior, q_implicit)`, the second the flows of
+law with a flow is replaced by its tangent at zero (its own `linear_init`; a law with several
+ports, and every law on a phasor layer, is taken at its flow and Jacobian at the starting
+potentials instead: the same for a linear law), each relation by its residual and Jacobian at
+zero interior potentials and zero flows, the withdrawals and storages by their value and slope
+there, and the system is solved once. On a layer with flow unknowns the result is detached: no
+gradient flows to `phi_boundary`, `sources`, the drivers or the law parameters, unlike on a
+layer without flow unknowns. On a phasor layer it is complex. `q=True` returns `(phi_interior, q_implicit)`, the second the flows of
 `implicit_edges` (empty on a layer without flow unknowns). A system the guess finds singular is
 reported like a singular solve. A solve still starts from zeros, or from the warm start.
 

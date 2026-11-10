@@ -692,30 +692,32 @@ def case_general_with_head_driver_ensemble():
 
 
 def case_general_introspection_and_refusals():
-    """What the general path answers about a solved point, and what it refuses (the fast
-    path's `residual`, `jacobian` and `adjoint` are refused here). `linear_init` is defined
-    on every layer since M6 Task 31: its entry pins the linear guess.
-
-    M6 Task 32 defines the other methods on every layer: it replaces the pinned refusals of
-    this case with value pins, regenerating this case only."""
+    """What the general path answers about a solved point: its balance, linear guess, flows,
+    slopes, residual, Jacobian and adjoint (all defined on every layer since M6 Task 32,
+    which replaced this case's pinned refusals with these values), and what it refuses
+    without the flows `q`."""
     layer = _fan()
     drivers, _ = _fan_drivers()
     src = _t([0.0, 0.05, -0.02])
     phi, q = layer.solve(GROUND, drivers, src, differentiable=False)
     phi_i = phi[..., layer.interior]
-    grad = _t([1.0, -0.5])
+    grad = _t([1.0, -0.5, 0.25])
 
     def probe(fn):
         return _attempt(lambda: {"value": ser(fn())})
 
     return {
         "power_residual": probe(lambda: layer.power_residual(phi, q, drivers, src)),
-        "residual": probe(lambda: layer.residual(phi_i, GROUND, drivers, src)),
-        "jacobian": probe(lambda: layer.jacobian(phi_i, GROUND, drivers)),
-        "adjoint": probe(lambda: layer.adjoint(phi_i, GROUND, drivers, grad)),
+        "residual": probe(lambda: layer.residual(phi_i, GROUND, drivers, src, q=q)),
+        "jacobian": probe(lambda: layer.jacobian(phi_i, GROUND, drivers, q=q)),
+        "adjoint": probe(lambda: layer.adjoint(phi_i, GROUND, drivers, grad, q=q)),
         "linear_init": probe(lambda: layer.linear_init(GROUND, drivers, src)),
+        "flows": probe(lambda: layer.flows(phi, drivers, q)),
         "flows_without_q": probe(lambda: layer.flows(phi, drivers)),
-        "dflows": probe(lambda: layer.dflows(phi, drivers)),
+        # the fan is an ideal source: its implied slope is nan, recorded as a flag so that
+        # the pinned records stay finite
+        "dflows_is_nan": probe(lambda: torch.isnan(layer.dflows(phi, drivers, q)).to(F64)),
+        "dflows": probe(lambda: layer.dflows(phi, drivers, q)[..., 1:]),
     }
 
 

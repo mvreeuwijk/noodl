@@ -3152,27 +3152,86 @@
     "general_introspection_and_refusals": {
       "ok": {
         "adjoint": {
-          "refused": {
-            "message": "KirchhoffLayer 'air' is solved by Modified Nodal Analysis (its laws include impl",
-            "type": "TypeError"
+          "value": {
+            "data": [
+              -0.25,
+              -1.2531170148454165,
+              -0.7799299251016151
+            ],
+            "dtype": "torch.float64",
+            "shape": [
+              3
+            ]
           }
         },
         "dflows": {
-          "refused": {
-            "message": "KirchhoffLayer 'air' is solved by Modified Nodal Analysis (its laws include impl",
-            "type": "TypeError"
+          "value": {
+            "data": [
+              0.2193862447167227,
+              0.22338689985479684
+            ],
+            "dtype": "torch.float64",
+            "shape": [
+              2
+            ]
+          }
+        },
+        "dflows_is_nan": {
+          "value": {
+            "data": [
+              1.0,
+              0.0,
+              0.0
+            ],
+            "dtype": "torch.float64",
+            "shape": [
+              3
+            ]
+          }
+        },
+        "flows": {
+          "value": {
+            "data": [
+              1.0667519649725912,
+              1.116751960574232,
+              1.0967519603308749
+            ],
+            "dtype": "torch.float64",
+            "shape": [
+              3
+            ]
           }
         },
         "flows_without_q": {
           "refused": {
-            "message": "KirchhoffLayer 'air' is solved by Modified Nodal Analysis (its laws include impl",
-            "type": "TypeError"
+            "message": "KirchhoffLayer 'air': kinds ['fan'] give a relation, so their flows are unknowns",
+            "type": "ValueError"
           }
         },
         "jacobian": {
-          "refused": {
-            "message": "KirchhoffLayer 'air' is solved by Modified Nodal Analysis (its laws include impl",
-            "type": "TypeError"
+          "value": {
+            "data": [
+              [
+                0.2193862447167227,
+                -0.2193862447167227,
+                -1.0
+              ],
+              [
+                -0.2193862447167227,
+                0.4427731445715195,
+                0.0
+              ],
+              [
+                -1.0,
+                0.0,
+                0.0
+              ]
+            ],
+            "dtype": "torch.float64",
+            "shape": [
+              3,
+              3
+            ]
           }
         },
         "linear_init": {
@@ -3195,9 +3254,16 @@
           }
         },
         "residual": {
-          "refused": {
-            "message": "KirchhoffLayer 'air' is solved by Modified Nodal Analysis (its laws include impl",
-            "type": "TypeError"
+          "value": {
+            "data": [
+              -4.398359190749268e-09,
+              -2.4335712958678535e-10,
+              0.0
+            ],
+            "dtype": "torch.float64",
+            "shape": [
+              3
+            ]
           }
         }
       },

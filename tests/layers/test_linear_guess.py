@@ -9,7 +9,7 @@ import torch
 
 from noodl import LinearStorage
 from noodl.apps.electrical import JunctionDiode, PrescribedVoltage, Resistance
-from noodl.elements import Conductance
+from noodl.elements import Conductance, ConstitutiveLaw
 from noodl.layers.kirchhoff import KirchhoffLayer
 from tests._circuit_laws import Cap, Ind, Source
 from tests.layers.test_mna import Orifice, _fan_layer, _net, _transformer_layer
@@ -158,3 +158,33 @@ def test_a_singular_linear_guess_is_diagnosed():
         layer.linear_init(GROUND, {"c": torch.tensor([0.7])}, None)
     with pytest.raises(RuntimeError, match="singular"):
         layer.solve(GROUND, {"c": torch.tensor([0.7])}, differentiable=False)
+
+
+def test_the_guess_of_a_layer_with_flow_unknowns_is_detached():
+    # the documented contract: no gradient reaches the inputs on this path, unlike on a
+    # layer without flow unknowns
+    _, layer = _transformer_layer()
+    pb = torch.zeros(1, requires_grad=True)
+    out = layer.linear_init(pb, {}, None)
+    assert not out.requires_grad
+    net = _net(["gnd", "a"], [("gnd", "a", "r")])
+    fast = KirchhoffLayer(net, "f", [Conductance(torch.tensor([1.0]), kind="r")],
+                          boundary=["gnd"])
+    assert fast.linear_init(pb, {}, torch.tensor([0.0, 1.0], requires_grad=True)).requires_grad
+
+
+def test_a_starting_point_refusal_comes_before_the_unreachable_tensor_refusal():
+    # a law whose flow has the wrong width refuses at the starting point; the same layer
+    # holds a tensor with requires_grad the differentiable solve cannot reach
+    class Wide(ConstitutiveLaw):
+        def __init__(self):
+            super().__init__("wide")
+            self.g = self._param(torch.tensor([1.0], requires_grad=True), False)
+
+        def flow(self, dp, drivers=None):
+            return torch.cat([self.g * dp, self.g * dp], -1)
+
+    net = _net(["gnd", "a"], [("a", "gnd", "source"), ("a", "gnd", "wide")])
+    layer = KirchhoffLayer(net, "e", [Source(torch.tensor([1.0])), Wide()], boundary=["gnd"])
+    with pytest.raises(ValueError, match="the flow of the 'wide' law is width 2"):
+        layer.solve(GROUND)
