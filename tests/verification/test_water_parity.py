@@ -1256,3 +1256,441 @@ def test_gradient_of_a_held_head_with_respect_to_a_reservoir_head(case, reservoi
         fd = (head(boundary + e) - head(boundary - e)) / 2e-3
     assert float(analytic[r]) == pytest.approx(expected, abs=1e-9)
     assert float(fd) == pytest.approx(expected, abs=1e-9)
+
+
+# --------------------------------------------------------------------------- PRV and PSV
+#: EPANET's `HTOL` (`input1.c`, 0.0005 ft): the margin of its PRV/PSV status rules.
+HTOL = 0.0005 * 0.3048
+
+
+def _series_inp(junctions, reservoirs, pipes, valves, status=""):
+    """A small LPS / H-W network as `.inp` text: every pipe 1000 m, 200 mm, C = 100, every
+    valve 200 mm. These are the series networks of the design note's section 4
+    (`docs/plans/water-prv-psv-design.md`), whose measured numbers they reproduce: 0.206 m
+    across the open PRV with `Km = 10`, the PRV's switch at an upstream reservoir of
+    53.8214 m."""
+    def rows(items, fmt):
+        return "".join(fmt.format(*item) for item in items)
+    return ("[JUNCTIONS]\n" + rows(junctions, " {} 0 {}\n")
+            + "[RESERVOIRS]\n" + rows(reservoirs, " {} {}\n")
+            + "[PIPES]\n" + rows(pipes, " {} {} {} 1000 200 100 0 Open\n")
+            + "[VALVES]\n" + rows(valves, " {} {} {} 200 {} {} {}\n")
+            + (f"[STATUS]\n{status}" if status else "")
+            + "[TIMES]\n Duration 0:00\n[OPTIONS]\n Units LPS\n Headloss H-W\n[END]\n")
+
+
+def _prv_line(r1, setting, minor=0, demand=20):
+    """R1 -> P1 -> J1 -> PRV V1 -> J2 -> P2 -> J3 (`demand` L/s)."""
+    return _series_inp((("J1", 0), ("J2", 0), ("J3", demand)), (("R1", r1),),
+                       (("P1", "R1", "J1"), ("P2", "J2", "J3")),
+                       (("V1", "J1", "J2", "PRV", setting, minor),))
+
+
+def _psv_line(r1, setting, r2):
+    """R1 -> P1 -> J1 -> PSV V1 -> J2 -> P2 -> R2."""
+    return _series_inp((("J1", 0), ("J2", 0)), (("R1", r1), ("R2", r2)),
+                       (("P1", "R1", "J1"), ("P2", "J2", "R2")),
+                       (("V1", "J1", "J2", "PSV", setting, 0),))
+
+
+def _twoloop_inp(valve):
+    """The two-loop fixture with J7 and the valve line `valve` (`_valve_edits`), and EPANET's
+    `ACCURACY` at 1e-8 instead of the fixture's 0.001. At 0.001 EPANET stops with an ACTIVE
+    PRV's flow 5.8e-6 m3/s short of its own node balance (its `CBIG` penalty on J2 absorbs
+    the rest): heads 5.8e-6 relative from this model's, J7 by 2.8e-4 m; at 1e-8 they agree
+    to 6e-8 (MEASURED, case "prv-active")."""
+    text = (DATA / "twoloop_si.inp").read_text()
+    for old, new in (*_valve_edits(valve),
+                     (" Accuracy           \t0.001", " Accuracy           \t1e-8")):
+        assert old in text, old
+        text = text.replace(old, new)
+    return text
+
+
+#: The upstream reservoir heads of the near-switch sweep, all at least 2 HTOL from the
+#: switch at 53.8214 m: OPEN below it, ACTIVE above.
+_NEAR_SWITCH = (53.80, 53.81, 53.82, 53.822, 53.83, 53.85)
+
+#: The cases of the design note's section 4: `(networks, {valve: EPANET state})`, the
+#: states as EPANET reports them (MEASURED, wntr 1.5.0).
+_PRV_PSV_CASES = {
+    "prv-active": ([_twoloop_inp(" V1  J7  J2  250  PRV  48  0\n")], {"V1": 2}),
+    "prv-open": ([_twoloop_inp(" V1  J7  J2  250  PRV  49.9  0\n")], {"V1": 1}),
+    "prv-open-minor-loss": ([_prv_line(40, 50, minor=10)], {"V1": 1}),
+    "prv-closed-reverse": ([_twoloop_inp(" V1  J2  J7  250  PRV  49.9  0\n")], {"V1": 0}),
+    "prv-closed-downstream-above": ([_twoloop_inp(" V1  J7  J2  250  PRV  45  0\n")],
+                                    {"V1": 0}),
+    "psv-active": ([_psv_line(100, 70, 20)], {"V1": 2}),
+    "psv-open": ([_psv_line(100, 30, 20)], {"V1": 1}),
+    "psv-closed-upstream-below": ([_psv_line(60, 70, 20)], {"V1": 0}),
+    "psv-closed-reverse": ([_psv_line(60, 30, 80)], {"V1": 0}),
+    "prv-psv-series": ([_series_inp(
+        (("J1", 0), ("J2", 0), ("J3", 10), ("J4", 0)), (("R1", 100), ("R2", 10)),
+        (("P1", "R1", "J1"), ("P2", "J2", "J3"), ("P3", "J4", "R2")),
+        (("V1", "J1", "J2", "PRV", 60, 0), ("V2", "J3", "J4", "PSV", 55, 0)))],
+        {"V1": 2, "V2": 2}),
+    "near-switch": ([_prv_line(r1, 50) for r1 in _NEAR_SWITCH], None),
+}
+
+
+def _run_inp(tmp_path, text, tag="case"):
+    """`(path, results)`: `text` written to `tmp_path` and run by EPANET."""
+    path = tmp_path / f"{tag}.inp"
+    path.write_text(text)
+    model = wntr.network.WaterNetworkModel(str(path))
+    results = wntr.sim.EpanetSimulator(model).run_sim(file_prefix=str(tmp_path / tag))
+    return path, results
+
+
+def _controlled(model, name):
+    """`(node, Hset)` of the valve `name`: its controlled node (a PRV's end, a PSV's start)
+    and the head it holds there (the node's elevation plus the setting), in metres."""
+    net = model.water_network
+    valve = next(v for v in net.valves if v.name == name)
+    node = valve.v if valve.kind.upper() == "PRV" else valve.u
+    elevation = next(j.elevation for j in net.junctions if j.name == node)
+    return node, elevation + valve.setting
+
+
+def _as_epanet(drivers):
+    """`drivers` with the demands EPANET computes with: its LPS factor is rounded
+    (`LPSperCFS = 28.317` against 28.3168466), so its internal flows are 5.4e-6 relative
+    below the file's (`test_every_pipe_a_check_valve_at_five_times_the_demand_matches_epanet`)."""
+    return {**drivers, "water.sources": drivers["water.sources"] * (28.3168466 / 28.317)}
+
+
+@pytest.mark.parametrize("case", list(_PRV_PSV_CASES))
+def test_prv_psv_match_epanet(tmp_path, case):
+    """The design note's eleven cases (`docs/plans/water-prv-psv-design.md`, section 4):
+    heads 1e-6 relative, flows 1e-6 m3/s absolute, every link's state as EPANET reports it,
+    and an ACTIVE valve's controlled head equal to its setting to Newton's tolerance and
+    within 1e-6 m of EPANET's. The near-switch case sweeps the PRV's upstream reservoir
+    across its switch (53.8214 m) at points at least `2 HTOL` from it: OPEN below, ACTIVE
+    above, as EPANET.
+
+    The heads are compared with the demands EPANET computes with (`_as_epanet`). With the
+    file's demands they differ by up to 2.4e-6 relative (MEASURED, J3 of
+    "prv-open-minor-loss", 7.9e-5 m): the C = 100 pipes lose 3.8 m per km, and EPANET's
+    rounded LPS factor makes those losses 1.0e-5 smaller. With EPANET's demands the worst
+    is 9.2e-8, flows 3.9e-7 m3/s, every state equal, every controlled head exactly its
+    setting and EPANET's (the table in docs/applications/water.md). The file's demands are
+    held to 1e-5."""
+    texts, expected = _PRV_PSV_CASES[case]
+    for k, text in enumerate(texts):
+        path, results = _run_inp(tmp_path, text, f"{case}{k}")
+        model, state, drivers = build_model(read_epanet_inp(path))
+        final = water_steady(model, state, drivers)
+        _compare_with_epanet(model, final, drivers, results, heads=1e-5)
+        drivers = _as_epanet(drivers)
+        final = water_steady(model, state, drivers)
+        _compare_with_epanet(model, final, drivers, results)
+        states = dict(zip(model.link_names, link_states(model, final, drivers).tolist(),
+                          strict=True))
+        if expected is not None:
+            assert {name: states[name] for name in expected} == expected
+        heads = dict(zip(model.node_names, final["water.phi"].tolist(), strict=True))
+        for name in (n for n in model.link_names if n.startswith("V")):
+            if states[name] == 2:
+                node, hset = _controlled(model, name)
+                assert abs(heads[node] - hset) < 1e-9, (name, heads[node], hset)
+                assert abs(heads[node] - float(results.node["head"].loc[0][node])) < 1e-6
+
+
+def test_prv_inside_htol_band(tmp_path):
+    """Inside EPANET's `HTOL` band below the switch EPANET holds the PRV ACTIVE with the
+    downstream head at the setting while the upstream head is below it (a negative head drop
+    through an active valve, MEASURED 8.8e-5 m at 53.8213); this model gives the ideal
+    valve, OPEN with no drop. The heads differ there by less than `HTOL`, and every flow
+    agrees to 1e-6 m3/s; with EPANET's own demands (`_as_epanet`), which on their own move
+    J3 by 7.9e-5 m."""
+    for k, r1 in enumerate((53.8213, 53.82135, 53.8214 - 0.5 * HTOL)):
+        path, results = _run_inp(tmp_path, _prv_line(r1, 50), f"band{k}")
+        model, state, drivers = build_model(read_epanet_inp(path))
+        drivers = _as_epanet(drivers)
+        final = water_steady(model, state, drivers)
+        heads = results.node["head"].loc[0]
+        worst = max(abs(float(final["water.phi"][i]) - float(heads[name]))
+                    for i, name in enumerate(model.node_names))
+        assert worst < HTOL, (r1, worst)
+        flows = results.link["flowrate"].loc[0]
+        assert max(abs(float(final["water.q"][i]) - float(flows[name]))
+                   for i, name in enumerate(model.link_names)) < 1e-6
+        v1 = model.link_names.index("V1")
+        assert int(results.link["status"].loc[0]["V1"]) == 2
+        assert int(link_states(model, final, drivers)[v1]) == 1
+
+
+def _setting_gradient(model, state, drivers, link, node):
+    """`(analytic, fd)`: d(head at `node`)/d(setting of `link`), by the implicit adjoint and
+    by central differences of 1e-4 m."""
+    i, k = model.node_names.index(node), model.link_names.index(link)
+
+    def head(setting):
+        return water_steady(model, state, {**drivers, "water.setting": setting})[
+            "water.phi"][i]
+
+    setting = drivers["water.setting"].clone().requires_grad_(True)
+    (analytic,) = torch.autograd.grad(head(setting), setting)
+    e = torch.zeros_like(setting)
+    e[k] = 1e-4
+    with torch.no_grad():
+        fd = (head(setting + e) - head(setting - e)) / 2e-4
+    return float(analytic[k]), float(fd)
+
+
+def _demand_and_roughness_gradients(model, state, drivers):
+    """`[(analytic, fd)]` of d(sum of junction heads) by the demands (`water.sources`, steps
+    of 1e-6 m3/s) and by the pipe roughnesses (steps of 1e-4)."""
+    layer = model.kirchhoff["water"]
+    junctions = [model.node_names.index(j.name) for j in model.water_network.junctions]
+    pipe = layer._laws[0].pipe   # the resistance form wraps it
+
+    def total(sources):
+        final = water_steady(model, state, {**drivers, "water.sources": sources})
+        return final["water.phi"][junctions].sum()
+
+    sources = drivers["water.sources"].clone().requires_grad_(True)
+    pipe.roughness.requires_grad_(True)
+    try:
+        a_sources, a_rough = torch.autograd.grad(total(sources), (sources, pipe.roughness))
+    finally:
+        pipe.roughness.requires_grad_(False)
+    fd_sources = torch.zeros(len(junctions), dtype=F64)
+    for n, i in enumerate(junctions):
+        e = torch.zeros_like(sources)
+        e[i] = 1e-6
+        with torch.no_grad():
+            fd_sources[n] = (total(sources + e) - total(sources - e)) / 2e-6
+    fd_rough = torch.zeros_like(a_rough)
+    base = drivers["water.sources"]
+    for n in range(len(fd_rough)):
+        with torch.no_grad():
+            pipe.roughness[n] += 1e-4
+            up = total(base)
+            pipe.roughness[n] -= 2e-4
+            down = total(base)
+            pipe.roughness[n] += 1e-4
+        fd_rough[n] = (up - down) / 2e-4
+    return [(a_sources[junctions], fd_sources), (a_rough, fd_rough)]
+
+
+def _assert_scaled(analytic, fd):
+    """`max|analytic - fd| <= 1e-6 max|fd|`, as the other gradient checks here."""
+    scale = float(fd.abs().max())
+    assert float((analytic - fd).abs().max()) <= 1e-6 * max(scale, 1e-12), (analytic, fd)
+
+
+def test_prv_gradients_against_central_differences(tmp_path):
+    """The implicit adjoint through an ACTIVE PRV, against central differences: d(sum of
+    junction heads)/d(demands, roughness) on the two-loop PRV-active case, and
+    d(head)/d(setting). In the tree (`_prv_line`) the downstream head is the setting:
+    dH_J2/dsetting = 1 exactly, and the upstream head does not move with it. An OPEN PRV
+    (two-loop, setting 49.9) is a minor loss whatever its setting: d/dsetting = 0."""
+    path, _ = _run_inp(tmp_path, _PRV_PSV_CASES["prv-active"][0][0], "active")
+    model, state, drivers = build_model(read_epanet_inp(path))
+    for analytic, fd in _demand_and_roughness_gradients(model, state, drivers):
+        _assert_scaled(analytic, fd)
+    analytic, fd = _setting_gradient(model, state, drivers, "V1", "J5")
+    assert analytic == pytest.approx(fd, rel=1e-6)
+
+    path, _ = _run_inp(tmp_path, _prv_line(60, 50), "tree")
+    model, state, drivers = build_model(read_epanet_inp(path))
+    analytic, fd = _setting_gradient(model, state, drivers, "V1", "J2")
+    assert analytic == 1.0 and fd == pytest.approx(1.0, abs=1e-8)
+    analytic, fd = _setting_gradient(model, state, drivers, "V1", "J1")
+    assert analytic == 0.0 and fd == pytest.approx(0.0, abs=1e-8)
+
+    path, _ = _run_inp(tmp_path, _PRV_PSV_CASES["prv-open"][0][0], "open")
+    model, state, drivers = build_model(read_epanet_inp(path))
+    for node in ("J2", "J5"):
+        analytic, fd = _setting_gradient(model, state, drivers, "V1", node)
+        assert analytic == 0.0 and fd == pytest.approx(0.0, abs=1e-8)
+
+
+def test_psv_gradients_against_central_differences(tmp_path):
+    """The same through an ACTIVE PSV (`psv-active`): d(sum of junction heads)/d(demands,
+    roughness), and d(head)/d(setting): the upstream head is the setting
+    (dH_J1/dsetting = 1)."""
+    path, _ = _run_inp(tmp_path, _PRV_PSV_CASES["psv-active"][0][0], "psv")
+    model, state, drivers = build_model(read_epanet_inp(path))
+    for analytic, fd in _demand_and_roughness_gradients(model, state, drivers):
+        _assert_scaled(analytic, fd)
+    analytic, fd = _setting_gradient(model, state, drivers, "V1", "J1")
+    assert analytic == pytest.approx(1.0, abs=1e-12) and fd == pytest.approx(1.0, abs=1e-8)
+    analytic, fd = _setting_gradient(model, state, drivers, "V1", "J2")
+    assert analytic == pytest.approx(fd, rel=1e-6, abs=1e-9)
+
+
+def test_prv_one_sided_gradients_jump(tmp_path):
+    """dH_J2/dsetting of the series PRV either side of its switch (R1 at 55 m: the switch is
+    the setting equal to the upstream head J1): ACTIVE below it (1), OPEN above it (0). At
+    `±delta` the adjoint equals the central difference on its own side, so it jumps from 1
+    to 0 across the switch; a difference straddling the switch gives neither."""
+    path, _ = _run_inp(tmp_path, _prv_line(55, 50), "jump")
+    model, state, drivers = build_model(read_epanet_inp(path))
+    k = model.link_names.index("V1")
+    upstream = float(water_steady(model, state, drivers)["water.phi"][
+        model.node_names.index("J1")])   # the upstream head, the same in both states
+    sides = {}
+    for side, delta in (("below", -1e-2), ("above", 1e-2)):
+        setting = drivers["water.setting"].clone()
+        setting[k] = upstream + delta
+        sides[side] = _setting_gradient(model, state, {**drivers, "water.setting": setting},
+                                        "V1", "J2")
+    assert sides["below"][0] == 1.0 and sides["below"][1] == pytest.approx(1.0, abs=1e-8)
+    assert sides["above"][0] == 0.0 and sides["above"][1] == pytest.approx(0.0, abs=1e-8)
+    setting = drivers["water.setting"].clone()
+    setting[k] = upstream
+    i = model.node_names.index("J2")
+    e = torch.zeros_like(setting)
+    e[k] = 1e-3
+    with torch.no_grad():
+        up = water_steady(model, state, {**drivers, "water.setting": setting + e})
+        down = water_steady(model, state, {**drivers, "water.setting": setting - e})
+    straddle = float(up["water.phi"][i] - down["water.phi"][i]) / 2e-3
+    assert 0.3 < straddle < 0.7
+
+
+def test_parallel_prvs_with_equal_settings_are_refused(tmp_path):
+    """Two PRVs in parallel with one setting both hold J2 at 48 m and leave the split of the
+    flow between them undetermined; EPANET refuses the file (error 220, "illegal valve
+    connection to another valve"). The error names both valves."""
+    path = tmp_path / "parallel.inp"
+    path.write_text(_twoloop_inp(" V1  J7  J2  250  PRV  48  0\n V2  J7  J2  250  PRV  48  0\n"))
+    with pytest.raises(ValueError, match=r"'V1'.*'V2'|'V2'.*'V1'"):
+        build_model(read_epanet_inp(path))
+
+
+def test_smoothed_prv_converges_to_exact(tmp_path):
+    """`build_model(valve_smoothing=1e-3)` (metres): the heads within 2e-3 m of the exact
+    valve's, on the two-loop ACTIVE and OPEN cases and across the near-switch sweep."""
+    texts = [_PRV_PSV_CASES["prv-active"][0][0], _PRV_PSV_CASES["prv-open"][0][0],
+             *(_prv_line(r1, 50) for r1 in (53.80, 53.8214, 53.85))]
+    for k, text in enumerate(texts):
+        path = tmp_path / f"smooth{k}.inp"
+        path.write_text(text)
+        net = read_epanet_inp(path)
+        model, state, drivers = build_model(net)
+        exact = water_steady(model, state, drivers)["water.phi"]
+        model, state, drivers = build_model(net, valve_smoothing=1e-3)
+        smooth = water_steady(model, state, drivers)["water.phi"]
+        assert float((smooth - exact).abs().max()) < 2e-3
+
+
+def test_prv_directly_downstream_of_a_reservoir(tmp_path):
+    """A PRV whose start node is the reservoir: the law reads the head of a boundary node,
+    which has no column of its own. EPANET refuses a PRV touching a reservoir (error 219),
+    so its reference has a 1 mm pipe of 1 m diameter between them (a head loss of order
+    1e-13 m at 20 L/s): heads 1e-6 relative, flows 1e-6 m3/s, the state ACTIVE; and the
+    Jacobian the layer assembles equals autograd of its residual, at a point that is not
+    the solution."""
+    text = _series_inp((("J2", 0), ("J3", 20)), (("R1", 60),), (("P2", "J2", "J3"),),
+                       (("V1", "R1", "J2", "PRV", 50, 0),))
+    path = tmp_path / "direct.inp"
+    path.write_text(text)
+    model, state, drivers = build_model(read_epanet_inp(path))
+    final = water_steady(model, state, drivers)
+    reference = (text.replace("[JUNCTIONS]\n", "[JUNCTIONS]\n J1 0 0\n")
+                 .replace(" V1 R1 J2", " V1 J1 J2")
+                 .replace("[PIPES]\n", "[PIPES]\n P0 R1 J1 0.001 1000 100 0 Open\n"))
+    _, results = _run_inp(tmp_path, reference, "reference")
+    heads, flows = results.node["head"].loc[0], results.link["flowrate"].loc[0]
+    for i, name in enumerate(model.node_names):
+        assert abs(float(final["water.phi"][i]) - float(heads[name])) < 1e-6 * float(
+            heads[name])
+    for i, name in enumerate(model.link_names):
+        assert abs(float(final["water.q"][i]) - float(flows[name])) < 1e-6
+    assert link_states(model, final, drivers).tolist()[model.link_names.index("V1")] == 2
+    assert int(results.link["status"].loc[0]["V1"]) == 2
+    assert float(final["water.phi"][model.node_names.index("J2")]) == pytest.approx(
+        50.0, abs=1e-9)
+
+    layer = model.kirchhoff["water"]
+    phi_b = drivers["water.phi_boundary"]
+    # J2, J3, then P2's and V1's flows: a point that is not the solution
+    x = torch.tensor([47.0, 41.5, 0.013, 0.017], dtype=F64)
+    assert x.numel() == layer.interior.numel() + layer.implicit_edges.numel()
+
+    def residual(x):
+        return layer._residual(x, phi_b, drivers, drivers["water.sources"])[0]
+
+    assert float(residual(x).abs().max()) > 1e-3
+    expected = torch.autograd.functional.jacobian(residual, x)
+    got = layer._operator(x, phi_b, drivers).assemble()
+    torch.testing.assert_close(got, expected, rtol=0, atol=1e-12)
+
+
+def test_a_closed_prv_cutting_off_a_junction_is_held_at_the_limit_head(tmp_path):
+    """A PRV CLOSED by `[STATUS]` leaves J2 and J3 (no demand) with no head of their own:
+    they are held at the `1 / CBIG` limit, J1's 60 m (`_limit`), with no flow. EPANET
+    reports 53.687092 for both, and the same with a closed TCV in the PRV's place: its head
+    of a group fed only through closed links is not a limit (docs/applications/water.md,
+    Limitations). Every other head, every flow and every state match."""
+    text = _series_inp((("J1", 0), ("J2", 0), ("J3", 0)), (("R1", 60),),
+                       (("P1", "R1", "J1"), ("P2", "J2", "J3")),
+                       (("V1", "J1", "J2", "PRV", 50, 0),), status=" V1 Closed\n")
+    path, results = _run_inp(tmp_path, text, "closed")
+    model, state, drivers = build_model(read_epanet_inp(path))
+    final = water_steady(model, state, drivers)
+    heads = dict(zip(model.node_names, final["water.phi"].tolist(), strict=True))
+    assert heads["J2"] == pytest.approx(60.0, abs=1e-9)
+    assert heads["J3"] == pytest.approx(60.0, abs=1e-9)
+    assert float(results.node["head"].loc[0]["J2"]) == pytest.approx(53.687092, abs=1e-5)
+    assert _worst_heads(model, final, results.node["head"].loc[0], skip=("J2", "J3")) < 1e-6
+    _compare_with_epanet(model, final, drivers, results, heads=0.2)
+
+
+@pytest.mark.parametrize("valve, r1, expected", [("PRV", 60, 2), ("PRV", 40, 1),
+                                                 ("PSV", 60, 1)])
+def test_a_valve_feeding_a_dead_end_without_demand_matches_epanet(tmp_path, valve, r1,
+                                                                   expected):
+    """A PRV or PSV feeding a dead end with no demand carries no flow, and every head behind
+    it is still EPANET's: the PRV ACTIVE at its setting (upstream above it) or OPEN at the
+    upstream head (below it); the PSV OPEN. At no flow the valve's own row and its no-flow
+    row tie; the tie takes the valve's own row, which defines the dead end's head."""
+    text = _series_inp((("J1", 0), ("J2", 0), ("J3", 0)), (("R1", r1),),
+                       (("P1", "R1", "J1"), ("P2", "J2", "J3")),
+                       (("V1", "J1", "J2", valve, 50, 0),))
+    path, results = _run_inp(tmp_path, text, "dead")
+    model, state, drivers = build_model(read_epanet_inp(path))
+    final = water_steady(model, state, drivers)
+    _compare_with_epanet(model, final, drivers, results)
+    states = link_states(model, final, drivers).tolist()
+    assert states[model.link_names.index("V1")] == expected
+
+
+def test_prv_and_psv_on_a_darcy_weisbach_pressure_layer(tmp_path):
+    """The PRV-and-PSV series case with `HEADLOSS D-W` (roughness 0.1 mm): the layer works in
+    pressure (`rho g` times head), and so do the valves' elevation and setting. Both valves
+    ACTIVE as EPANET, each controlled head its setting, and the heads within 1e-6 relative
+    of EPANET's with its demands (MEASURED 9.0e-7)."""
+    text = _PRV_PSV_CASES["prv-psv-series"][0][0].replace("H-W", "D-W").replace(
+        " 1000 200 100 0 Open", " 1000 200 0.1 0 Open")
+    path, results = _run_inp(tmp_path, text, "dw")
+    model, state, drivers = build_model(read_epanet_inp(path))
+    assert model.head_scale != 1.0
+    drivers = _as_epanet(drivers)
+    final = water_steady(model, state, drivers)
+    _compare_with_epanet(model, final, drivers, results)
+    heads = dict(zip(model.node_names, (final["water.phi"] / model.head_scale).tolist(),
+                     strict=True))
+    assert heads["J2"] == pytest.approx(60.0, abs=1e-9)
+    assert heads["J3"] == pytest.approx(55.0, abs=1e-9)
+
+
+def test_a_batch_of_prv_settings_takes_each_instance_to_its_own_state(tmp_path):
+    """One solve over three settings of the two-loop PRV (48, 49.9 and 45 m): ACTIVE, OPEN
+    and CLOSED in the one batch, each instance equal to its own single solve."""
+    path, _ = _run_inp(tmp_path, _PRV_PSV_CASES["prv-active"][0][0], "batch")
+    model, state, drivers = build_model(read_epanet_inp(path))
+    k = model.link_names.index("V1")
+    settings = drivers["water.setting"].expand(3, -1).clone()
+    settings[:, k] = torch.tensor([48.0, 49.9, 45.0], dtype=F64)
+    batch = {key: value.expand(3, *value.shape).clone() for key, value in state.items()}
+    final = water_steady(model, batch, {**drivers, "water.setting": settings})
+    states = link_states(model, final, {**drivers, "water.setting": settings})
+    assert states[:, k].tolist() == [2, 1, 0]
+    for b in range(3):
+        single = water_steady(model, state, {**drivers, "water.setting": settings[b]})
+        torch.testing.assert_close(final["water.phi"][b], single["water.phi"], rtol=0,
+                                   atol=1e-9)

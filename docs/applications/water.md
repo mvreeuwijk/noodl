@@ -99,12 +99,12 @@ final = water_steady(model, state, drivers)
 | `Tank(name, elevation, init_level, min_level, max_level, diameter)` | Cylindrical tank. |
 | `WaterPipe(name, u, v, length, diameter, roughness, minor_loss=0.0, status="OPEN")` | A full pipe. |
 | `Pump(name, u, v, curve, power=None, speed=1.0)` | Edge oriented **suction → discharge**. |
-| `Valve(name, u, v, diameter, kind, setting, minor_loss=0.0, curve=None)` | TCV, FCV, PBV or GPV (`curve`: a GPV's head-loss curve). |
+| `Valve(name, u, v, diameter, kind, setting, minor_loss=0.0, curve=None)` | TCV, FCV, PBV, GPV, PRV or PSV (`curve`: a GPV's head-loss curve). |
 | `WaterOptions(demand_model="DDA", minimum_pressure=0.0, required_pressure=0.1, pressure_exponent=0.5, ...)` | Carried from the file's `[OPTIONS]`. |
 
 `WaterNetwork` collects them plus `curves`, `patterns`, `controls` and the timing options.
 `nodes()` returns junctions, then reservoirs, then tanks; `links()` returns pipes, pumps, TCVs,
-FCVs, PBVs, GPVs in that order; `validate()` refuses anything out of scope by name.
+FCVs, PBVs, GPVs, PRVs, PSVs in that order; `validate()` refuses anything out of scope by name.
 
 ## `build_model`
 
@@ -119,6 +119,8 @@ model, state, drivers = build_model(
     dt=None,            # overrides net.hydraulic_timestep for the tank closure
     friction="composite",  # D-W friction law: 'composite' (default) or 'colebrook'
     pipe_form=None,     # 'flow' (resistance form; the default) or 'potential'
+    tank_scheme="forward_euler",
+    valve_smoothing=0.0,  # m: smooth the PRV/PSV switch over a band of this width
 )
 ```
 
@@ -239,18 +241,63 @@ unknown of the layer:
   that brackets $|q|$ (the first or last segment, extended, outside the curve), with
   $\operatorname{sgn}(0) = +1$.
 
-A valve's flow is an unknown of the solve (sparse LU). PRV and PSV, which switch status on the
-absolute head at one end, are not modelled yet.
+A valve's flow is an unknown of the solve (sparse LU).
+
+A **PRV** (`PressureReducingValve`) holds the head at its end node at no more than
+$H_\text{set} = z + s$ (the node's elevation $z$ plus the setting $s$); a **PSV**
+(`PressureSustainingValve`) holds the head at its start node at no less than that node's
+$z + s$. Each is one exact complementarity condition on the absolute head at its controlled
+node (the law reads its end nodes' heads, `ConstitutiveLaw.reads_heads`), solved in the same
+Newton iteration as everything else, with no outer loop over states and no memory of the
+previous one (`docs/plans/water-prv-psv-design.md`):
+
+$$\min\bigl(\kappa q,\ \max(\text{held},\ K_m q|q| - \Delta\phi)\bigr) = 0,$$
+
+with $\text{held} = H_v - H_\text{set}$ for a PRV and $H_\text{set} - H_u$ for a PSV, the
+controlled head beyond its setting. The selected row is the valve's state: $\kappa q$
+(no flow) is `CLOSED`, the held row `ACTIVE` (the controlled head at its setting), the
+minor-loss row `OPEN` (the controlled head short of its setting, the valve fully open).
+That is EPANET 2.2's three states (`hydstatus.c`, `prvstatus` and `psvstatus`) without
+their hysteresis. Inside EPANET's `HTOL` band (1.524e-4 m below the switch) EPANET keeps an
+active PRV active with the downstream head at its setting above the upstream head, a
+negative drop through the valve; noodl gives the ideal valve there, `OPEN` with no drop, and
+the heads differ by less than `HTOL`.
+
+The rows are selected with `torch.where` and fixed tie rules: at a tie of the held and open
+rows the held row; the no-flow row only where the flow is not forward. With the fixed
+$\kappa$ alone (1 m per m³/s for a valve without a minor loss) an iterate carrying 20 L/s
+forward through a PRV whose downstream head is 7 m above its setting picks the no-flow row
+and cuts off the junctions downstream, with their demand (MEASURED: a singular step). A
+side of the valve with no demand and no other way to a reservoir or tank (a dead end)
+carries no flow; the valve then takes the row that ties that side's head, which gives
+EPANET's answer: a PRV feeding a dead end is `ACTIVE` at its setting (or `OPEN` at the
+upstream head below it), a PSV `OPEN` at its upstream head.
+
+The gradient is the implicit-function one of the selected row: through an `ACTIVE` PRV the
+downstream head moves one for one with the setting, through an `OPEN` or `CLOSED` one not at
+all. The solution is continuous across a switch and its derivative jumps there.
+`build_model(valve_smoothing=eps)` (metres) replaces the `min` by the Fischer-Burmeister
+function $a + b - \sqrt{a^2 + b^2 + 2\epsilon^2}$ and the `max` by its smooth counterpart, for an
+optimiser that must cross a switch: the derivative is then continuous, and the answer moves
+by $O(\epsilon)$ near a switch (within 2e-3 m of the exact one at $\epsilon$ = 1 mm,
+`test_smoothed_prv_converges_to_exact`).
+
+`validate()` refuses, by name, a PRV or PSV whose controlled node is a reservoir or tank,
+whose setting or minor loss is negative, and two valves that hold one node twice: two PRVs
+sharing their end node or in series, two PSVs sharing their start node or in series, a PSV
+starting at a PRV's or an FCV's end, a PRV ending at an FCV's start (EPANET's own errors 219
+and 220, `valvecheck`); the error names both valves. Unlike EPANET, a PRV or PSV may start or
+end at a reservoir or tank on its other side.
 
 ### Link status, settings and check valves
 
 Every link's status, setting and allowed direction are drivers, one value per link in
-`model.link_names` order (pipes, pumps, then TCVs, FCVs, PBVs, GPVs):
+`model.link_names` order (pipes, pumps, then TCVs, FCVs, PBVs, GPVs, PRVs, PSVs):
 
 | Driver | Values |
 |---|---|
 | `"water.status"` | `CLOSED` 0, `OPEN` 1, `ACTIVE` 2 (`noodl.apps.water.controls`); `ACTIVE` only for a valve, which then acts on its setting |
-| `"water.setting"` | a pump's relative speed, a PBV's head drop, an FCV's flow (m³/s), a TCV's loss coefficient; unused for pipes and GPVs |
+| `"water.setting"` | a pump's relative speed, a PBV's head drop, a PRV's or PSV's pressure head (m; the layer's potential unit), an FCV's flow (m³/s), a TCV's loss coefficient; unused for pipes and GPVs |
 | `"water.one_way"` | 0 both directions, +1 forward flow only, -1 reverse flow only |
 
 `build_model` fills them from the file: a `CLOSED` pipe or a `[STATUS]` word sets the status, a
@@ -286,7 +333,8 @@ carrying flow the wrong way. Closed links and check valves need the pipes' resis
 (`pipe_form="flow"`, the default); `pipe_form="potential"` refuses them.
 
 `link_states(model, state, drivers)` gives every link's state in a solution: `CLOSED`, `OPEN`
-or `ACTIVE`, the codes `wntr` reports EPANET's in. `water_steady` refuses, before it solves, a
+or `ACTIVE`, the codes `wntr` reports EPANET's in (an `ACTIVE` PRV or PSV: the row its
+condition selects there). `water_steady` refuses, before it solves, a
 junction with a demand that closed links cut off from every reservoir and tank. A group of
 junctions without demand that is cut off at the solution, by closed links or by check valves
 holding no flow, has no head of its own in the exact equations: any head that keeps those
@@ -403,6 +451,8 @@ on-disk reals are **float32**, so roughly 1e-7 relative is EPANET's own precisio
 | Pressure-driven demand vs EPANET's `DEMAND MODEL PDA` | 1e-5 | 3.521e-7 heads, 2.184e-7 demands |
 | A pump feeding pressure-driven demand (two-loop with a pump, every junction pressure-limited), both `pipe_form`s | 1e-5 | 3.526e-7 heads, 2.354e-7 flows, 2.355e-7 demands |
 | PBV (active and open) and GPV on the two-loop: heads, flows, the valve's head loss | 1e-6 / 1e-6 m³/s / 1e-5 | 5.5e-7, 2.6e-7 m³/s, 6.8e-6 |
+| PRV and PSV, the eleven cases below: heads, flows, states, controlled head | 1e-6 / 1e-6 m³/s / equal / 1e-6 m | 9.2e-8, 3.9e-7 m³/s, all equal, 0.0 m |
+| PRV inside EPANET's `HTOL` band (EPANET `ACTIVE`, noodl `OPEN`): heads | `HTOL` = 1.524e-4 m | below `HTOL` at three points in the band |
 | Head loss sums to zero around every cycle-basis loop | 1e-12 | **exactly 0.0** |
 | Autodiff vs central differences | 1e-6 × scale | 3.212e-6 / 2.505e-10 / 1.007e-6 / 2.753e-9 |
 | TRACE water quality, single source | 1e-3 | 6.438e-12 percentage points |
@@ -430,12 +480,42 @@ valve are in series through a demand-free junction, yet EPANET reports them 1.6e
 and the drop across the valve as 4.999997 m for a 5 m setting. noodl physics' flows agree to
 round-off and its drop is the setting.
 
+**PRV and PSV.** The eleven cases of `docs/plans/water-prv-psv-design.md` (section 4),
+`test_prv_psv_match_epanet`. The two-loop cases add junction J7 (P2 ends there) and the valve
+V1 from J7 to J2 (250 mm); the series cases have pipes of 1000 m, 200 mm, C = 100 and valves
+of 200 mm, with a demand of 20 L/s at the end of the PRV line. Heads are compared with the
+demands EPANET computes with (its rounded LPS factor, see Limitations; with the file's demands
+the worst is 2.4e-6, on the C = 100 lines), and the two-loop cases with `ACCURACY 1e-8`: at
+the fixture's 0.001 EPANET stops with an active PRV's flow 5.8e-6 m³/s short of its node
+balance, and its heads 5.8e-6 relative from converged (MEASURED).
+
+| Case | Network | EPANET state | noodl state | Heads (rel) | Flows (m³/s) |
+|---|---|---|---|---|---|
+| PRV active | two-loop, PRV 48 m | ACTIVE, $H_{J2}$ = 48 | ACTIVE, $H_{J2}$ = 48 exactly | 6.4e-8 | 2.2e-7 |
+| PRV open | two-loop, PRV 49.9 m | OPEN | OPEN | 5.3e-8 | 2.5e-7 |
+| PRV open with minor loss | R1 40 m, PRV 50 m, $K$ = 10 | OPEN (0.206 m drop) | OPEN | 7.8e-8 | 1.1e-7 |
+| PRV closed, reverse flow | two-loop, V1 from J2 to J7, 49.9 m | CLOSED | CLOSED | 9.2e-8 | 2.5e-7 |
+| PRV closed, downstream above setting | two-loop, PRV 45 m | CLOSED, $H_{J2}$ = 45.298 | CLOSED | 9.2e-8 | 2.5e-7 |
+| PSV active | R1 100 m, PSV 70 m, R2 20 m | ACTIVE, $H_{J1}$ = 70 | ACTIVE, $H_{J1}$ = 70 exactly | 0 | 3.3e-7 |
+| PSV open | the same, 30 m | OPEN | OPEN | 6.3e-8 | 3.9e-7 |
+| PSV closed, upstream below setting | R1 60 m, 70 m | CLOSED | CLOSED | 0 | 3.7e-8 |
+| PSV closed, reverse | R1 60 m, 30 m, R2 80 m | CLOSED | CLOSED | 0 | 1.9e-8 |
+| PRV and PSV in series | R1 100, PRV 60, J3 10 L/s, PSV 55, R2 10 | both ACTIVE | both ACTIVE, 60 and 55 exactly | 3.2e-8 | 1.3e-7 |
+| Near the switch | PRV 50 m, R1 53.80 to 53.85 m (switch 53.8214) | OPEN below, ACTIVE above | the same | 5.3e-8 | 1.1e-7 |
+
+Also compared: a PRV or PSV feeding a dead end without demand (EPANET's states and heads), a
+PRV directly downstream of a reservoir (against EPANET with a 1 mm pipe between them, which
+EPANET needs), the PRV-and-PSV line with Darcy-Weisbach (9.0e-7), and gradients through an
+active PRV and PSV (demands, roughness, setting) against central differences
+(`max|analytic - fd| <= 1e-6 max|fd|`), with $dH_{J2}/ds = 1$ exactly downstream of an
+active PRV, 0 through an open one, and the jump from 1 to 0 across the switch.
+
 **The loop head-loss row is a formulation identity, not a comparison** — head loss summing to zero around every
 independent loop is a property of the cycle-space formulation, and it holds exactly.
 
 ## Limitations
 
-- **Not modelled, refused by name:** PRV and PSV valves; time-based controls and `[RULES]`;
+- **Not modelled, refused by name:** time-based controls and `[RULES]`;
   variable-speed pumps (a numeric `[STATUS]` on a pump included); non-cylindrical tanks;
   emitters; leakage; energy and cost reports; Chezy-Manning head loss; pipe and valve
   controls. A file using any of these raises an error naming the feature.
@@ -461,6 +541,16 @@ independent loop is a property of the cycle-space formulation, and it holds exac
   with `ACCURACY 1e-8`). A single fenced-off junction, with no link inside the group, matches
   EPANET to 3e-9, and a junction fed from the highest of several reservoirs through one
   check valve, to 8.5e-8 (EPANET's float32 head).
+- **PRV and PSV inside EPANET's `HTOL` band.** Within 1.524e-4 m below a PRV's switch EPANET
+  keeps it `ACTIVE` with a negative drop (its status rules have hysteresis); noodl gives the
+  ideal valve, `OPEN`. The heads differ there by less than `HTOL`
+  (`test_prv_inside_htol_band`). EPANET's `XPRESSURE` (an active valve that cannot deliver its
+  setting) has no counterpart: such a valve is `OPEN` in the exact condition.
+- **A group behind a closed link, fed only through it, has EPANET's head only in the limit.**
+  A PRV (or any valve) `CLOSED` by `[STATUS]` in front of junctions without demand holds them
+  at the `1 / CBIG` limit, the head on the other side (60 m); EPANET reports 53.687 m for the
+  same network, with a PRV or a TCV alike
+  (`test_a_closed_prv_cutting_off_a_junction_is_held_at_the_limit_head`).
 - **Pump curves** are single- or three-point only, with the exponent fixed at $n = 2$. Curves
   with four or more points, which EPANET connects piecewise-linearly, are refused; fit a
   three-point curve instead.

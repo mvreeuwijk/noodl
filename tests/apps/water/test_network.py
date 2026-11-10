@@ -142,12 +142,39 @@ def test_a_multi_point_pump_curve_is_refused():
         ).validate()
 
 
+@pytest.mark.parametrize("kind, u, v", [("PRV", "J1", "R1"), ("PSV", "R1", "J1")])
+def test_a_pressure_valve_controlling_a_reservoir_is_refused(kind, u, v):
+    """A PRV holds its end node's head, a PSV its start node's: a reservoir's (or tank's)
+    head is fixed already (EPANET refuses either, error 219)."""
+    with pytest.raises(ValueError, match=rf"{kind} 'V1' controls the head of 'R1'"):
+        _minimal(valves=(Valve("V1", u, v, 0.2, kind, 30.0),)).validate()
+
+
 @pytest.mark.parametrize("kind", ["PRV", "PSV"])
-def test_the_status_switching_valves_are_refused(kind):
-    with pytest.raises(ValueError, match="out of scope"):
-        _minimal(
-            valves=(Valve("V1", "R1", "J1", 0.2, kind, 30.0),)
-        ).validate()
+def test_a_pressure_valve_needs_a_non_negative_setting(kind):
+    junctions = (Junction("J1", 0.0, 0.005), Junction("J2", 0.0, 0.0))
+    with pytest.raises(ValueError, match=rf"{kind} 'V1' needs a pressure setting"):
+        _minimal(junctions=junctions,
+                 valves=(Valve("V1", "J1", "J2", 0.2, kind, -1.0),)).validate()
+
+
+@pytest.mark.parametrize("first, second", [
+    (("PRV", "J1", "J2"), ("PRV", "J3", "J2")),   # two PRVs sharing their end node
+    (("PRV", "J1", "J2"), ("PRV", "J2", "J3")),   # two PRVs in series
+    (("PSV", "J1", "J2"), ("PSV", "J1", "J3")),   # two PSVs sharing their start node
+    (("PSV", "J1", "J2"), ("PSV", "J3", "J1")),   # two PSVs in series
+    (("PRV", "J1", "J2"), ("PSV", "J2", "J3")),   # a PSV starting at a PRV's end
+    (("FCV", "J1", "J2"), ("PSV", "J2", "J3")),   # a PSV starting at an FCV's end
+    (("FCV", "J2", "J3"), ("PRV", "J1", "J2")),   # a PRV ending at an FCV's start
+])
+def test_pressure_valves_sharing_a_controlled_node_are_refused(first, second):
+    """EPANET 2.2's own refusals (`valvecheck`, error 220): each pair holds one node's head
+    twice, or a head and a flow through one node. The error names both valves."""
+    junctions = tuple(Junction(n, 0.0, 0.0) for n in ("J1", "J2", "J3"))
+    valves = (Valve("V1", *first[1:], 0.2, first[0], 1.0),
+              Valve("V2", *second[1:], 0.2, second[0], 1.0))
+    with pytest.raises(ValueError, match=r"'V2'.*'V1'"):
+        _minimal(junctions=junctions, valves=valves).validate()
 
 
 def test_a_pbv_needs_a_non_negative_setting():

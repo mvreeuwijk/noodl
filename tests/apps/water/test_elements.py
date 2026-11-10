@@ -1,5 +1,7 @@
 """Hazen-Williams, the fitted pump curve, the minor-loss valve and pressure-driven demand."""
 
+import math
+
 import pytest
 import torch
 
@@ -307,3 +309,99 @@ def test_a_general_purpose_valve_follows_its_bracketing_curve_segment():
         [0.0, 2.0],      # zero flow: sgn(0) = +1, the curve's own intercept
     ], dtype=torch.float64)
     torch.testing.assert_close(head, expected)
+
+
+# ------------------------------------------------------------------ PRV and PSV
+def _head_valve(kind, **kwargs):
+    from noodl.apps.water.elements import PressureReducingValve, PressureSustainingValve
+
+    cls = PressureReducingValve if kind == "prv" else PressureSustainingValve
+    return cls(torch.tensor([10.0], dtype=F64), torch.tensor([100.0], dtype=F64),
+               kappa=torch.tensor([2.0], dtype=F64), setting=torch.tensor([40.0], dtype=F64),
+               **kwargs)
+
+
+def _context(phi_from, phi_to):
+    from noodl.elements.base import LawContext
+
+    return LawContext("dc", phi_from=torch.tensor(phi_from, dtype=F64),
+                      phi_to=torch.tensor(phi_to, dtype=F64))
+
+
+@pytest.mark.parametrize("kind, heads, q, expected", [
+    # kappa = 2, m = 100. PRV, Hset = 10 + 40 = 50 at the end node. ACTIVE: held =
+    # 50.5 - 50 = 0.5 above loss = 100 * 0.3^2 - 9.5 = -0.5, and below kappa q = 0.6
+    ("prv", ([60.0], [50.5]), [0.3], 0.5),
+    # OPEN: loss = 9 - 8.75 = 0.25 above held = 41.25 - 50
+    ("prv", ([50.0], [41.25]), [0.3], 0.25),
+    # CLOSED: reverse flow, kappa q = -0.2 below g = held = 3 (q = 0 is its root)
+    ("prv", ([60.0], [53.0]), [-0.1], -0.2),
+    # PSV, Hset = 50 at the start node: ACTIVE, held = 50 - 49.5 above loss = 9 - 9.5
+    ("psv", ([49.5], [40.0]), [0.3], 0.5),
+    # OPEN: loss = 9 - 8.75 above held = 50 - 60
+    ("psv", ([60.0], [51.25]), [0.3], 0.25),
+])
+def test_a_head_valve_residual_is_the_complementarity_of_its_flow_and_its_reason_to_close(
+        kind, heads, q, expected):
+    """`r = min(kappa q, max(held, loss))`, `held` the controlled head beyond its setting
+    (PRV `H_v - Hset`, PSV `Hset - H_u`) and `loss` the open loss less the drop."""
+    valve = _head_valve(kind)
+    ctx = _context(*heads)
+    dp = ctx.phi_from - ctx.phi_to
+    r = valve.residual(dp, torch.tensor(q, dtype=F64), {}, ctx)
+    torch.testing.assert_close(r, torch.tensor([expected], dtype=F64))
+
+
+def test_a_head_valve_tie_takes_the_active_row():
+    """At `held == loss` the residual is the ACTIVE row (its derivative by the controlled
+    head is 1, by the start head and the flow 0), not an average of the two; and at
+    `kappa q == g` it is the valve's own row, not the no-flow row."""
+    from noodl.elements.base import LawContext
+
+    valve = _head_valve("prv")
+    phi_from = torch.tensor([52.0], dtype=F64, requires_grad=True)
+    phi_to = torch.tensor([50.2], dtype=F64, requires_grad=True)   # held = 0.2
+    q = torch.tensor([0.02**0.5], dtype=F64, requires_grad=True)    # loss = 2 - 1.8 = 0.2
+    ctx = LawContext("dc", phi_from=phi_from, phi_to=phi_to)
+    r = valve.residual(phi_from - phi_to, q, {}, ctx)
+    assert float(r.detach()) == pytest.approx(0.2, abs=1e-12)
+    grads = torch.autograd.grad(r, (phi_from, phi_to, q))
+    assert [float(g) for g in grads] == [0.0, 1.0, 0.0]
+    # kappa q == g == 1: the valve's own (ACTIVE) row
+    q = torch.tensor([0.5], dtype=F64, requires_grad=True)
+    phi_to = torch.tensor([51.0], dtype=F64, requires_grad=True)
+    ctx = LawContext("dc", phi_from=torch.tensor([100.0], dtype=F64), phi_to=phi_to)
+    r = valve.residual(ctx.phi_from - phi_to, q, {}, ctx)
+    grads = torch.autograd.grad(r, (phi_to, q))
+    assert [float(r.detach()), *(float(g) for g in grads)] == [1.0, 1.0, 0.0]
+
+
+def test_a_smoothed_head_valve_is_fischer_burmeister():
+    """`smoothing = eps` (the layer's potential unit) replaces the `min` by
+    `a + b - sqrt(a^2 + b^2 + 2 eps^2)`, whose root is `a b = eps^2`, and the inner `max`
+    by `(x + y + sqrt((x - y)^2 + 4 eps^2)) / 2`."""
+    eps = 1e-3
+    valve = _head_valve("prv", smoothing=eps)
+    ctx = _context([60.0], [50.5])
+    q = torch.tensor([0.1], dtype=F64)
+    r = valve.residual(ctx.phi_from - ctx.phi_to, q, {}, ctx)
+    held, loss = 0.5, 100 * 0.01 - 9.5
+    g = 0.5 * (held + loss + math.sqrt((held - loss) ** 2 + 4 * eps**2))
+    a = 2.0 * 0.1
+    assert float(r) == pytest.approx(a + g - math.sqrt(a * a + g * g + 2 * eps**2), rel=1e-14)
+
+
+def test_a_head_valve_reads_its_status_and_setting_from_the_drivers():
+    from noodl.apps.water.controls import ACTIVE, CLOSED, OPEN
+    from noodl.apps.water.elements import PressureReducingValve
+
+    valve = PressureReducingValve(torch.tensor([0.0, 0.0, 0.0], dtype=F64),
+                                  torch.tensor([100.0] * 3, dtype=F64),
+                                  kappa=torch.tensor([2.0] * 3, dtype=F64), links=slice(1, 4))
+    drivers = {"water.status": torch.tensor([1.0, CLOSED, OPEN, ACTIVE], dtype=F64),
+               "water.setting": torch.tensor([0.0, 50.0, 50.0, 50.0], dtype=F64)}
+    ctx = _context([60.0] * 3, [50.5] * 3)
+    q = torch.tensor([0.3] * 3, dtype=F64)
+    r = valve.residual(ctx.phi_from - ctx.phi_to, q, drivers, ctx)
+    # CLOSED: kappa q; OPEN: the drop less the open loss; ACTIVE: H_v - Hset
+    torch.testing.assert_close(r, torch.tensor([0.6, 9.5 - 9.0, 0.5], dtype=F64))

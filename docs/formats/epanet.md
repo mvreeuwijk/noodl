@@ -31,12 +31,15 @@ with different units is refused by name when the file is read.
 **Read, then refused by name.** The reader converts every feature above to SI, and
 `WaterNetwork.validate()` (called by `build_model`) refuses, naming the feature, each one the
 builder does not model yet, so a file never loads into a network that quietly means something
-else: PRV and PSV valves; a closed pipe or check valve; `[STATUS]` entries; a constant-**power**
+else: a numeric `[STATUS]` pump speed; a constant-**power**
 pump (its power is read in kW: horsepower in a US file, kilowatts in an SI one); a curve of more than
 three points; a pump speed pattern; a tank volume curve or overflow; emitters; `HEADLOSS C-M`;
 rules; and every `[CONTROLS]` form except
-`LINK <pump> OPEN|CLOSED IF NODE <tank> BELOW|ABOVE <level>`. The reader itself refuses what it
-cannot read: a malformed record or a name that is not in the network.
+`LINK <pump> OPEN|CLOSED IF NODE <tank> BELOW|ABOVE <level>`. Of EPANET's own valve checks
+(`valvecheck`), `validate()` refuses a PRV or PSV whose controlled node (a PRV's end, a PSV's
+start) is a reservoir or tank, and two valves that hold one node twice (EPANET's errors 219 and
+220), naming the valves. The reader itself refuses what it cannot read: a malformed record or a
+name that is not in the network.
 
 **Units** follow `[OPTIONS] UNITS`: `CFS GPM MGD IMGD AFD` are US, `LPS LPM MLD CMH CMD` are SI,
 and everything is converted to SI on read. D-W roughness is millimetres (SI) or millifeet (US).

@@ -827,6 +827,11 @@ class _Valve(ImplicitLaw):
         """The residual of the ACTIVE valve."""
         raise NotImplementedError
 
+    def _active(self, dp, q, drivers, ctx):
+        """The residual of the ACTIVE valve, given the context too (a valve that reads the
+        heads at its ends needs it)."""
+        return self.active(dp, q, drivers)
+
     def _setting(self, own, drivers, like: Tensor) -> Tensor:
         """The valve's setting: the driver ``"water.setting"`` with ``links``, else ``own``."""
         if self.link_range is None:
@@ -838,7 +843,7 @@ class _Valve(ImplicitLaw):
         return link_driver(self, drivers, SETTING_KEY, like)
 
     def residual(self, dp, q, drivers, ctx):
-        active = self.active(dp, q, drivers)
+        active = self._active(dp, q, drivers, ctx)
         if self.link_range is None:
             return active
         # `None` when every valve is ACTIVE, the usual case: no `where` in the graph
@@ -956,6 +961,182 @@ class GeneralPurposeValve(_Valve):
         h0 = y1.squeeze(-1) - r * x1.squeeze(-1)
         sign = torch.where(q < 0, -torch.ones_like(q), torch.ones_like(q))
         return dp - sign * (h0 + r * a)
+
+
+#: A flow (m^3/s) below which a pressure valve's no-flow row does not win a near tie
+#: (`_PressureValve`, THE SELECTION).
+NO_FLOW_TIE = 1e-10
+
+#: The per-link driver `water_steady` sets on a PRV or PSV with a dead end (`_dead_ends` in
+#: `network.py`): +1 where the group of junctions behind its END node has no demand and no
+#: other way to a reservoir or tank, -1 behind its START node, 0 elsewhere. Absent: none.
+DEAD_END_KEY = "water.dead_end"
+
+
+class _PressureValve(_Valve):
+    """What a PRV and a PSV share: one complementarity condition on the absolute head at one
+    end (`docs/plans/water-prv-psv-design.md`, section 2).
+
+    The valve ``u -> v`` holds the head at its controlled node at ``Hset = elevation +
+    setting``: ``elevation`` is the controlled node's, in the layer's potential unit, and the
+    setting is the driver ``"water.setting"`` with ``links``, else ``setting``. With
+    ``held`` the controlled head beyond its setting (PRV ``H_v - Hset``, PSV
+    ``Hset - H_u``), ``loss = open_valve_loss(q) - dp`` (the open valve's loss less the
+    drop; ``minor`` its coefficient, as for every valve, EPANET's `valvecoeff`) and
+    ``g = max(held, loss)``, the residual of the ACTIVE valve is::
+
+        r = min(kappa q, g)        that is   q >= 0,  g >= 0,  q g = 0
+
+    It selects EPANET 2.2's three states with no memory of the previous one; EPANET's own
+    transition rules (`hydstatus.c`, `prvstatus` and `psvstatus`) reach the same states
+    outside their ``HTOL`` hysteresis band. The ``kappa q`` row, ``q = 0``, is CLOSED
+    (reverse flow, or the controlled head beyond its setting with no flow); the ``held``
+    row is ACTIVE (the controlled head at its setting); the ``loss`` row is OPEN (a minor
+    loss, the controlled head short of its setting). ``kappa`` (the layer's potential per
+    m^3/s) scales the no-flow row only; the solution does not depend on it. A
+    ``"water.status"`` of OPEN or CLOSED overrides the condition, as for every valve
+    (`_Valve`).
+
+    THE SELECTION. The rows are taken with ``torch.where``, never ``torch.maximum`` or
+    ``minimum``, whose gradient splits 0.5/0.5 at a tie: at ``held == loss`` the ``held``
+    row (ACTIVE), and the ``kappa q`` row only where the flow is not forward, ``q <= 0``,
+    and ``kappa q < g - kappa NO_FLOW_TIE``. At a solution these agree with the ``min``
+    (a CLOSED valve has ``q = 0``, an ACTIVE or OPEN one ``g = 0``), so the solution set,
+    the converged row and its gradient are the ``min``'s. Away from one, the fixed
+    ``kappa`` alone misjudges an iterate that flows forward: MEASURED, a PRV line (20 L/s
+    to a junction downstream, ``kappa`` = 1 m per m^3/s) whose first iterate leaves the
+    downstream head 7 m above the setting picks the no-flow row, which cuts that junction
+    and its demand off, and the next step is singular; with ``q <= 0`` it takes the ACTIVE
+    row and converges in two steps. EPANET, too, closes an active or open PRV/PSV only on
+    reverse flow (`prvstatus`, ``q < -Qtol``). The margin ``kappa NO_FLOW_TIE`` matters at a
+    solution with no flow and ``g = 0``: both rows vanish there, the no-flow row would
+    leave a side without demand without an equation, and rounding alone would pick it. It
+    moves no solution by more than ``kappa NO_FLOW_TIE`` in head.
+
+    A DEAD END. Where ``"water.dead_end"`` (`DEAD_END_KEY`) marks a side of the valve whose
+    junctions have no demand and no other way to a reservoir or tank, no water flows
+    through the valve, and the no-flow row would leave that side's head without an
+    equation (a singular step). The valve then takes the row that ties that side and gives
+    EPANET's answer (MEASURED, wntr 1.5.0, a dead end behind the valve): ``g`` where the
+    dead side is the controlled node (a PRV's end: ACTIVE at the setting, or OPEN at the
+    upstream head when that is below it), else the open row ``loss`` (a PSV's end, OPEN at
+    the upstream head; a PRV's start). The ``held`` row of a PSV ties only its start node.
+
+    Newton's method solves the row each iterate selects (a semismooth Newton method), and
+    the Jacobian and the implicit-function gradient at the solution are the selected row's:
+    ``dH_v/dsetting = 1`` through an ACTIVE PRV, 0 through an OPEN or CLOSED one. Across a
+    switch the solution is continuous and its derivative jumps.
+
+    ``smoothing = eps > 0`` (the layer's potential unit) replaces the ``min`` by the
+    Fischer-Burmeister function ``a + b - sqrt(a^2 + b^2 + 2 eps^2)`` (its root: ``a, b > 0``
+    with ``a b = eps^2``) and the ``max`` by ``(x + y + sqrt((x - y)^2 + 4 eps^2)) / 2``.
+    The solution moves by ``O(eps)`` near a switch, and its derivative is continuous across
+    it (``dH_v/dsetting`` rises from 0 to 1 over a band of width ``O(eps)``), for an
+    optimiser that must cross one.
+    """
+
+    reads_heads = True
+    #: The side of the valve whose head it holds: +1 the end node (PRV), -1 the start (PSV).
+    HELD_SIDE = 0
+
+    def __init__(self, elevation, minor, *, kappa, smoothing: float = 0.0, setting=None,
+                 gradient_floor: float = 0.0, links: slice | None = None,
+                 kind: str) -> None:
+        super().__init__(minor=minor, kappa=kappa, gradient_floor=gradient_floor,
+                         links=links, kind=kind)
+        self.elevation = self._param(elevation, False)
+        self.setting = None if setting is None else self._param(setting, False)
+        self.smoothing = float(smoothing)
+        if not self.smoothing >= 0:
+            raise ValueError(f"{type(self).__name__} (kind {kind!r}): smoothing must be >= 0, "
+                             f"got {smoothing!r}")
+
+    def _held(self, ctx, hset: Tensor) -> Tensor:
+        """The controlled head beyond its setting, positive where it is a reason to close."""
+        raise NotImplementedError
+
+    def _rows(self, dp, q, drivers, ctx) -> tuple[Tensor, Tensor, Tensor]:
+        """`(kappa q, held, loss)`: the no-flow, ACTIVE and OPEN rows."""
+        if ctx is None or ctx.phi_from is None or ctx.phi_to is None:
+            raise ValueError(
+                f"{type(self).__name__} (kind {self.kind!r}) reads the heads at its end "
+                f"nodes: its context must carry phi_from and phi_to")
+        hset = self.elevation + self._setting(self.setting, drivers, dp)
+        loss = open_valve_loss(q, self.minor, self.gradient_floor) - dp
+        return self.kappa * q, self._held(ctx, hset), loss
+
+    def _active(self, dp, q, drivers, ctx):
+        flow, held, loss = self._rows(dp, q, drivers, ctx)
+        g = torch.where(held >= loss, held, loss)
+        eps = self.smoothing
+        if eps > 0:
+            smooth = 0.5 * (held + loss + torch.sqrt((held - loss) ** 2 + 4.0 * eps * eps))
+            r = flow + smooth - torch.sqrt(flow * flow + smooth * smooth + 2.0 * eps * eps)
+        else:
+            r = torch.where(self._closed(q, flow, g), flow, g)
+        dead = None if drivers is None else drivers.get(DEAD_END_KEY)
+        if dead is None or self.link_range is None:
+            return r
+        dead = dead[..., slice(*self.link_range)]
+        if not bool(dead.any()):
+            return r
+        tie = torch.where(dead == self.HELD_SIDE, g, loss)
+        return torch.where(dead != 0, tie, r)
+
+    def _closed(self, q, flow, g) -> Tensor:
+        """Where the no-flow row is taken (THE SELECTION)."""
+        return (q <= 0) & (flow < g - self.kappa * NO_FLOW_TIE)
+
+    def states(self, dp, q, drivers, ctx) -> Tensor:
+        """The state the ACTIVE residual selects at ``(dp, q)`` and the heads in ``ctx``, per
+        valve: `CLOSED`, `ACTIVE` or `OPEN` (`noodl.apps.water.controls`), by the rule of THE
+        SELECTION; a smoothed valve, whose closed flow is small but positive, is CLOSED where
+        ``kappa q < g``."""
+        with torch.no_grad():
+            flow, held, loss = self._rows(dp, q, drivers, ctx)
+            g = torch.where(held >= loss, held, loss)
+            closed = self._closed(q, flow, g) if self.smoothing == 0 else flow < g
+            return torch.where(closed, torch.full_like(g, CLOSED),
+                               torch.where(held >= loss, torch.full_like(g, ACTIVE),
+                                           torch.full_like(g, OPEN)))
+
+
+class PressureReducingValve(_PressureValve):
+    """A pressure reducing valve (PRV): it holds the head at its END node at no more than
+    ``Hset = elevation + setting`` (``elevation`` the end node's). EPANET 2.2's PRV
+    (`hydstatus.c`, `prvstatus`; `hydcoeffs.c`, `prvcoeff`), with ``held = H_v - Hset``: a
+    downstream head above the setting is the reason for it to close. See `_PressureValve`.
+    """
+
+    HELD_SIDE = 1
+
+    def __init__(self, elevation, minor, *, kappa, smoothing: float = 0.0, setting=None,
+                 gradient_floor: float = 0.0, links: slice | None = None,
+                 kind: str = "prv") -> None:
+        super().__init__(elevation, minor, kappa=kappa, smoothing=smoothing, setting=setting,
+                         gradient_floor=gradient_floor, links=links, kind=kind)
+
+    def _held(self, ctx, hset):
+        return ctx.phi_to - hset
+
+
+class PressureSustainingValve(_PressureValve):
+    """A pressure sustaining valve (PSV): it holds the head at its START node at no less
+    than ``Hset = elevation + setting`` (``elevation`` the start node's). EPANET 2.2's PSV
+    (`hydstatus.c`, `psvstatus`; `hydcoeffs.c`, `psvcoeff`), with ``held = Hset - H_u``: an
+    upstream head below the setting is the reason for it to close. See `_PressureValve`.
+    """
+
+    HELD_SIDE = -1
+
+    def __init__(self, elevation, minor, *, kappa, smoothing: float = 0.0, setting=None,
+                 gradient_floor: float = 0.0, links: slice | None = None,
+                 kind: str = "psv") -> None:
+        super().__init__(elevation, minor, kappa=kappa, smoothing=smoothing, setting=setting,
+                         gradient_floor=gradient_floor, links=links, kind=kind)
+
+    def _held(self, ctx, hset):
+        return hset - ctx.phi_from
 
 
 #: EPANET's floor on a head-loss gradient, ``RQTOL = 1e-7`` ft per cfs (`hydraul.c`,

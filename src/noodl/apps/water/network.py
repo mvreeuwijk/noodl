@@ -35,6 +35,7 @@ from noodl.apps.water.controls import ACTIVE, CLOSED, OPEN, Control, Rule, statu
 from noodl.apps.water.demand import PressureDrivenDemand
 from noodl.apps.water.elements import (
     CBIG_FT_PER_CFS,
+    DEAD_END_KEY,
     EPANET_QCF,
     M_PER_FT,
     NU_WATER_REF,
@@ -50,6 +51,8 @@ from noodl.apps.water.elements import (
     FlowControlValve,
     GeneralPurposeValve,
     HazenWilliams,
+    PressureReducingValve,
+    PressureSustainingValve,
     PumpCurve,
     ThrottleValve,
     _joined_groups,
@@ -57,6 +60,7 @@ from noodl.apps.water.elements import (
     three_point_curve,
 )
 from noodl.apps.water.tanks import TankLevels, TankStorageControls
+from noodl.elements.base import LawContext
 from noodl.elements.duct import Duct
 from noodl.layers.kirchhoff import KirchhoffLayer
 from noodl.layers.transport import TransportLayer, UndefinedSteadyState
@@ -77,11 +81,30 @@ RHO_W = 998.2
 MU_W = 1.002e-3
 G = 9.80665
 
-#: Valve types this application models, and the ones it refuses. PRV and PSV switch status
-#: (open / closed / active) on the ABSOLUTE head at one end, with the if/else logic and
-#: hysteresis of the EPANET 2.2 Manual p.113; neither is implemented.
-_VALVES_MODELLED = ("TCV", "FCV", "PBV", "GPV")
-_VALVES_REFUSED = ("PRV", "PSV")
+#: Valve types this application models, in the order of their columns among the links.
+_VALVES_MODELLED = ("TCV", "FCV", "PBV", "GPV", "PRV", "PSV")
+
+#: The layer's edge kind of each valve type.
+_VALVE_KINDS = {"TCV": "valve", "FCV": "fcv", "PBV": "pbv", "GPV": "gpv", "PRV": "prv",
+                "PSV": "psv"}
+
+
+def _valve_clash(a, b) -> bool:
+    """Whether valves `a` and `b` hold one node twice (EPANET 2.2's error 220, `valvecheck`
+    in `project.c`): two PRVs sharing their end node or in series, two PSVs sharing their
+    start node or in series, a PSV starting at a PRV's or an FCV's end, a PRV ending at an
+    FCV's start. Symmetric."""
+    for x, y in ((a, b), (b, a)):
+        kx, ky = x.kind.upper(), y.kind.upper()
+        if kx == ky == "PRV" and (x.v == y.v or x.v == y.u):
+            return True
+        if kx == ky == "PSV" and (x.u == y.u or x.u == y.v):
+            return True
+        if kx in ("PRV", "FCV") and ky == "PSV" and x.v == y.u:
+            return True
+        if kx == "PRV" and ky == "FCV" and x.v == y.u:
+            return True
+    return False
 
 
 @dataclass(frozen=True)
@@ -287,7 +310,7 @@ class WaterNetwork:
         return [v for v in self.valves if v.kind.upper() == kind]
 
     def _all_links(self) -> list:
-        """Every link by name, including the valve kinds this application refuses."""
+        """Every link by name, including valves of a type this application refuses."""
         modelled = {id(v) for v in self.links()}
         return [*self.links(), *(v for v in self.valves if id(v) not in modelled)]
 
@@ -476,14 +499,9 @@ class WaterNetwork:
                     f"WaterNetwork: pump {pump.name!r} has speed {pump.speed!r}; a "
                     f"relative speed setting must be positive"
                 )
+        junction_names = {j.name for j in self.junctions}
         for valve in self.valves:
             kind = valve.kind.upper()
-            if kind in _VALVES_REFUSED:
-                raise ValueError(
-                    f"WaterNetwork: valve {valve.name!r} is a {kind}; PRV and PSV switch "
-                    f"status on the absolute head at one end, with the if/else logic and "
-                    f"hysteresis of EPANET 2.2 Manual p.113, and are out of scope"
-                )
             if kind not in _VALVES_MODELLED:
                 raise ValueError(
                     f"WaterNetwork: valve {valve.name!r} has type {valve.kind!r}; only "
@@ -499,6 +517,19 @@ class WaterNetwork:
                     f"WaterNetwork: PBV {valve.name!r} needs a head drop and a minor loss "
                     f">= 0, got {valve.setting!r} and {valve.minor_loss!r}"
                 )
+            if kind in ("PRV", "PSV"):
+                if not (valve.setting >= 0 and valve.minor_loss >= 0):
+                    raise ValueError(
+                        f"WaterNetwork: {kind} {valve.name!r} needs a pressure setting and a "
+                        f"minor loss >= 0, got {valve.setting!r} and {valve.minor_loss!r}"
+                    )
+                held = valve.v if kind == "PRV" else valve.u
+                if held not in junction_names:
+                    raise ValueError(
+                        f"WaterNetwork: {kind} {valve.name!r} controls the head of {held!r}, "
+                        f"a reservoir or tank, whose head is fixed already (EPANET refuses "
+                        f"it too, error 219)"
+                    )
             if kind == "GPV":
                 points = self.curves.get(valve.curve)
                 if points is None:
@@ -511,6 +542,17 @@ class WaterNetwork:
                     raise ValueError(
                         f"WaterNetwork: GPV {valve.name!r} uses curve {valve.curve!r}, "
                         f"which needs at least two points with increasing flows"
+                    )
+        held = [v for v in self.valves if v.kind.upper() in ("PRV", "PSV", "FCV")]
+        for k, b in enumerate(held):
+            for a in held[:k]:
+                if _valve_clash(a, b):
+                    raise ValueError(
+                        f"WaterNetwork: valve {b.name!r} ({b.kind.upper()} {b.u} -> {b.v}) "
+                        f"and valve {a.name!r} ({a.kind.upper()} {a.u} -> {a.v}) hold one "
+                        f"node twice: the head a PRV or PSV holds, or the flow an FCV holds, "
+                        f"leaves the other's undetermined (EPANET refuses the pair too, "
+                        f"error 220)"
                     )
         if self.headloss not in ("H-W", "D-W"):
             raise ValueError(
@@ -615,6 +657,7 @@ def build_model(
     friction: str = "composite",
     pipe_form: str | None = None,
     tank_scheme: str = "forward_euler",
+    valve_smoothing: float = 0.0,
 ) -> tuple[Model, State, Drivers]:
     """Assemble the water model and return `(model, state, drivers)`.
 
@@ -692,8 +735,17 @@ def build_model(
     levels are read from the heads (`"water.phi"`, `tank_levels`), the inflows from
     `"water.storage_flow"` (`tank_inflow`), and the level-triggered controls are closures
     (`TankLevels`, `TankStorageControls`).
+
+    A PRV or PSV is `PressureReducingValve` or `PressureSustainingValve` (edge kinds `"prv"`
+    and `"psv"`): one complementarity condition on the head at its controlled node, solved
+    exactly by default. `valve_smoothing` (m of head, >= 0) smooths that condition over a
+    band of its width instead (`_PressureValve`), which moves the answer by about that much
+    near a switch and makes it differentiable across one.
     """
     net.validate()
+    if not valve_smoothing >= 0:
+        raise ValueError(f"build_model: valve_smoothing must be >= 0 (m), got "
+                         f"{valve_smoothing!r}")
     if tank_scheme not in ("forward_euler", "backward_euler", "trapezoidal"):
         raise ValueError(
             f"build_model: tank_scheme must be 'forward_euler', 'backward_euler' or "
@@ -767,16 +819,15 @@ def build_model(
         graph.add_edge(pipe.u, pipe.v, kind="pipe", name=pipe.name)
     for pump in net.pumps:
         graph.add_edge(pump.u, pump.v, kind="pump", name=pump.name)
-    tcv, fcv, pbv, gpv = (net.valves_of(kind) for kind in _VALVES_MODELLED)
-    for valves, kind in ((tcv, "valve"), (fcv, "fcv"), (pbv, "pbv"), (gpv, "gpv")):
-        for valve in valves:
-            graph.add_edge(valve.u, valve.v, kind=kind, name=valve.name)
+    tcv, fcv, pbv, gpv, prv, psv = (net.valves_of(kind) for kind in _VALVES_MODELLED)
+    for kind in _VALVES_MODELLED:
+        for valve in net.valves_of(kind):
+            graph.add_edge(valve.u, valve.v, kind=_VALVE_KINDS[kind], name=valve.name)
     # Each kind's columns of the per-link drivers, in `net.links()` (= layer column) order.
     link_slice: dict[str, slice] = {}
     start = 0
     for kind, count in (("pipe", len(net.pipes)), ("pump", len(net.pumps)),
-                        ("valve", len(tcv)), ("fcv", len(fcv)), ("pbv", len(pbv)),
-                        ("gpv", len(gpv))):
+                        *((_VALVE_KINDS[k], len(net.valves_of(k))) for k in _VALVES_MODELLED)):
         link_slice[kind] = slice(start, start + count)
         start += count
 
@@ -929,6 +980,15 @@ def build_model(
         laws.append(GeneralPurposeValve(flows, heads, [len(c) for c in curves],
                                         links=link_slice["gpv"], kind="gpv",
                                         **valve_terms(gpv)))
+    elevation = {j.name: j.elevation for j in net.junctions}
+    for valves, cls, kind, end in ((prv, PressureReducingValve, "prv", "v"),
+                                   (psv, PressureSustainingValve, "psv", "u")):
+        if valves:
+            # the controlled node's elevation: a PRV's end node, a PSV's start node
+            held = torch.tensor([elevation[getattr(v, end)] * scale for v in valves],
+                                dtype=F64)
+            laws.append(cls(held, smoothing=valve_smoothing * scale, links=link_slice[kind],
+                            kind=kind, **valve_terms(valves)))
 
     storages: list = []
     boundary = [r.name for r in net.reservoirs]
@@ -985,6 +1045,12 @@ def build_model(
         # A pump's first iterate is EPANET's too, its design flow. From zero flow it sits on
         # the `RQtol` tangent of its curve, where it is a near-ideal head source of h0.
         state["water.q"][layer.kind_slice("pump")] = torch.tensor(q_design_list, dtype=F64)
+    for valves, kind in ((prv, "prv"), (psv, "psv")):
+        if valves:
+            # EPANET starts every PRV and PSV ACTIVE (`hydraul.c`, `inithyd`) at 1 ft/s
+            # (`initlinkflow`), the pipes' first iterate
+            area = torch.tensor([torch.pi * v.diameter**2 / 4.0 for v in valves], dtype=F64)
+            state["water.q"][layer.kind_slice(kind)] = area * M_PER_FT
 
     link_names = [link.name for link in net.links()]
     drivers.update(_link_drivers(net, scale))
@@ -1082,8 +1148,9 @@ def build_model(
                         "its setting)", over=link_names, ordering="model.link_names"),
         SETTING_KEY: dict(
             description="each link's setting: a pump's relative speed, a PBV's head drop, "
-                        "an FCV's flow (m3/s), a TCV's loss coefficient; unused for pipes "
-                        "and GPVs", over=link_names, ordering="model.link_names"),
+                        "a PRV's or PSV's pressure head (the layer's potential unit), an "
+                        "FCV's flow (m3/s), a TCV's loss coefficient; unused for pipes and "
+                        "GPVs", over=link_names, ordering="model.link_names"),
         ONE_WAY_KEY: dict(
             description="each link's allowed flow direction: 0 both, +1 forward only, -1 "
                         "reverse only", over=link_names, ordering="model.link_names"),
@@ -1129,8 +1196,8 @@ def _link_drivers(net: WaterNetwork, scale: float) -> Drivers:
     per link in `net.links()` order.
 
     A pipe is OPEN, or CLOSED by its status column; a CV pipe is OPEN and forward-only. A
-    pump is OPEN at its speed. A valve is ACTIVE at its setting (a PBV's scaled to the
-    layer's potential unit). A `[STATUS]` word then sets the status, and a numeric
+    pump is OPEN at its speed. A valve is ACTIVE at its setting (a PBV's, PRV's or PSV's
+    scaled to the layer's potential unit). A `[STATUS]` word then sets the status, and a numeric
     `[STATUS]` value a valve's setting, the valve staying ACTIVE (EPANET 2.2 Manual,
     Appendix C.2.17)."""
     links = net.links()
@@ -1140,7 +1207,7 @@ def _link_drivers(net: WaterNetwork, scale: float) -> Drivers:
     for i, link in enumerate(links):
         kind = "PIPE" if isinstance(link, WaterPipe) else (
             "PUMP" if isinstance(link, Pump) else link.kind.upper())
-        unit = scale if kind == "PBV" else 1.0
+        unit = scale if kind in ("PBV", "PRV", "PSV") else 1.0
         if kind == "PIPE":
             if link.status.upper() == "CLOSED":
                 status[i] = CLOSED
@@ -1302,7 +1369,7 @@ def water_steady(model: Model, state: State, drivers: Drivers, **solve_kwargs) -
     layer = model.kirchhoff["water"]
     if seed is not None and layer.implicit_edges.numel():
         q = state["water.q"]
-        for kind in ("pipe", "pump"):
+        for kind in ("pipe", "pump", "prv", "psv"):
             if kind in layer.kinds:
                 cols = layer.kind_slice(kind)
                 if not bool(q[..., cols].any()):
@@ -1480,12 +1547,19 @@ def _cut_off_plan(model: Model, state: State, drivers: Drivers, caller: str):
     n_l = len(model.link_names)
     closed = status == CLOSED
     one_way_any = one_way is not None and bool(one_way.any())
-    if not n_j or not (bool(closed.any()) or one_way_any):
+    pressure_valves = "prv" in layer.kinds or "psv" in layer.kinds
+    if not n_j or not (bool(closed.any()) or one_way_any or pressure_valves):
         return drivers, None
     if any(isinstance(w, PressureDrivenDemand) for w in layer.withdrawals):
         demand = torch.tensor([j.demand != 0 for j in net.junctions])
     else:
         demand = drivers["water.sources"][..., :n_j].detach() != 0
+    if pressure_valves:
+        dead = _dead_ends(model, status, demand)
+        if dead is not None:
+            drivers = {**drivers, DEAD_END_KEY: dead}
+        if not (bool(closed.any()) or one_way_any):
+            return drivers, None
     if bool(closed.any()):
         open_, wanted = torch.broadcast_tensors(~closed[..., None, :], demand[..., :, None])
         batch = open_.shape[:-2]
@@ -1508,6 +1582,59 @@ def _cut_off_plan(model: Model, state: State, drivers: Drivers, caller: str):
         return _limit(model, solution, closed, demand, one_way, caller)
 
     return drivers, limit
+
+
+def _dead_ends(model: Model, status: Tensor, demand: Tensor) -> Tensor | None:
+    """`DEAD_END_KEY` for one solve: per link, +1 where a PRV or PSV that is ACTIVE has its
+    end node in a dead end, -1 its start node, 0 elsewhere; `None` when no valve has one.
+
+    A dead end of a valve is the group of junctions on one side of it that only the valve
+    joins to a reservoir or tank (through links that are not CLOSED) and that has no
+    demand. No water can flow through the valve then, and the exact condition leaves the
+    group's head anywhere that keeps the valve shut; the valve's law then ties the group
+    (`_PressureValve`, A DEAD END), as EPANET's answer does. Remembered per set of statuses
+    and demands."""
+    layer = model.kirchhoff["water"]
+    status, demand = torch.broadcast_tensors(
+        status.detach()[..., None, :], demand[..., :, None])
+    status, demand = status[..., 0, :], demand[..., 0]
+    batch = status.shape[:-1]
+    n_l = status.shape[-1]
+    pattern = torch.cat([status, demand.to(status.dtype)], dim=-1).reshape(-1, n_l
+                                                                          + demand.shape[-1])
+    rows, inverse = torch.unique(pattern, dim=0, return_inverse=True)
+    cache = model.__dict__.setdefault("_dead_ends", {})
+    cols = [layer.law_for(kind)[1] for kind in ("prv", "psv") if kind in layer.kinds]
+    out = []
+    for row in rows.tolist():
+        key = tuple(row)
+        if key not in cache:
+            cache[key] = _dead_ends_of(model, row[:n_l], row[n_l:], cols)
+        out.append(cache[key])
+    if not any(any(r) for r in out):
+        return None
+    table = torch.tensor(out, dtype=F64)
+    return table[inverse].reshape(batch + (n_l,))
+
+
+def _dead_ends_of(model: Model, status: list, demand: list, cols: list) -> list[float]:
+    """`_dead_ends` for one set of link statuses and junction demands (lists)."""
+    ends, fixed = _topology(model)
+    n_j = len(demand)
+    out = [0.0] * len(status)
+    for sl in cols:
+        for j in range(sl.start, sl.stop):
+            if status[j] != ACTIVE:
+                continue
+            group, fed = _joined_groups(ends, fixed, tuple(
+                k != j and status[k] != CLOSED for k in range(len(status))))
+            for side, node in ((1.0, ends[j][1]), (-1.0, ends[j][0])):
+                g = group[node]
+                if g in fed:
+                    continue
+                if not any(demand[i] for i in range(n_j) if group.get(i) == g):
+                    out[j] = side
+    return out
 
 
 #: A flow below this (m3/s) is zero for a check valve: it holds no flow.
@@ -1849,8 +1976,9 @@ def link_states(model: Model, state: State, drivers: Drivers) -> Tensor:
     A link whose status is CLOSED is closed. A one-way pipe (a check valve) carrying flow is
     open; one holding no flow is closed, unless EPANET's limit would push water through it
     (`_limit`: the multiplier of its constraint is positive, as for a valve that feeds a
-    zero-demand junction from the highest of several reservoirs). A valve otherwise has its
-    status (ACTIVE or OPEN); every other link is OPEN.
+    zero-demand junction from the highest of several reservoirs). An ACTIVE PRV or PSV is in
+    the state its residual selects at the solution (`_PressureValve.states`: CLOSED, ACTIVE
+    or OPEN). A valve otherwise has its status (ACTIVE or OPEN); every other link is OPEN.
     """
     drivers, limit = _cut_off_plan(model, state, drivers, "link_states")
     status = _link_status(model, state, drivers)
@@ -1861,6 +1989,20 @@ def link_states(model: Model, state: State, drivers: Drivers) -> Tensor:
         _, open_ = limit(state)
         shut = (one_way != 0) & (q.detach().abs() <= _NO_FLOW) & ~open_
         out = torch.where(shut, torch.full_like(out, CLOSED), out)
+    layer = model.kirchhoff["water"]
+    ends = None
+    for kind in ("prv", "psv"):
+        if kind not in layer.kinds:
+            continue
+        if ends is None:
+            ends = torch.tensor(_topology(model)[0], dtype=torch.long)
+        law, cols = layer.law_for(kind)
+        phi = state["water.phi"].detach()
+        phi_from, phi_to = phi[..., ends[cols, 0]], phi[..., ends[cols, 1]]
+        ctx = LawContext("dc", phi_from=phi_from, phi_to=phi_to)
+        selected = law.states(phi_from - phi_to, q[..., cols].detach(), drivers, ctx)
+        active = out[..., cols] == ACTIVE
+        out[..., cols] = torch.where(active, selected.to(out.dtype), out[..., cols])
     return out.detach().to(torch.long)
 
 
