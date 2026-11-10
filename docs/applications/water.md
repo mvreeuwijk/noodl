@@ -134,7 +134,8 @@ Newton gets there. The potential form's slope grows without bound as a pipe's fl
 zero, so on Net1's 24 h run the step where a control closes the pump and leaves pipe 10
 dead-ended needs 136 Newton iterations; the resistance form's slope goes to EPANET's `RQtol`
 floor instead, and no step needs more than 6. The whole 24 h run over eight demand
-multipliers (`benchmarks/water_eps.py`) takes 2.5 times less time.
+multipliers (`benchmarks/water_eps.py`) takes 2.1 times less time (1.84 s against 3.94 s, medians
+of five interleaved runs).
 
 `water_steady(model, state, drivers, **solve_kwargs)` wraps `model.steady` with defaults
 `atol=rtol=1e-11`, `max_iter=200` (both empirically tuned, the iteration cap for the
@@ -811,6 +812,12 @@ on-disk reals are **float32**, so roughly 1e-7 relative is EPANET's own precisio
 | Emitters at J4 and J6 vs EPANET, the file's demands and coefficients (heads, emitter outflows, flows) | 1e-6, 1e-6 m3/s, 1e-6 m3/s | 8.6e-8, 7.3e-10, 4.0e-9 |
 | An emitter at negative pressure (J4 at 60 m, an inflow) vs EPANET | 1e-6, 1e-6 m3/s, 1e-6 m3/s | 6.99e-8, 5.7e-8, 2.6e-7 |
 | `HEADLOSS C-M` (n = 0.011) vs EPANET | 1e-6, 1e-6 m3/s | 7.6e-8 heads, 8.3e-9 m3/s flows |
+| Check valve and closed pipe on the two-loop: heads, flows, every link's state | 1e-6 / 1e-6 m³/s / equal | 6.6e-8, 2.2e-9 m³/s, all equal |
+| A junction without demand cut off by closed links (held at the average of its far ends, flows into it exactly zero) | 1e-6 / 1e-6 m³/s | 2.9e-7, 2.2e-9 m³/s |
+| Every pipe a check valve at five times the demand (two close) | 2e-6 (EPANET's closed-link leak, see Limitations) / 1e-6 m³/s / equal | 1.4e-6, 5.7e-8 m³/s |
+| A junction fenced off by two check valves (held at 75 m, the `1 / CBIG` limit) | 1e-6 | 3e-9, both valves CLOSED |
+| TCV on the two-loop: heads, flows, the valve's head loss | 1e-6 / 1e-6 m³/s / 1e-5 m | within bounds; head loss 3.2e-6 m |
+| Emitters behind a closed pipe; Darcy-Weisbach emitters (heads, emitter outflows) | 1e-6 relative to the 50 m reservoir (one case 1e-3 m: EPANET's closed-link leak) / 1e-6 m³/s | 5.4e-8, 3.1e-9 m³/s (Darcy-Weisbach); the leak case 6.9e-4 m |
 | Emitter coefficient gradient vs central differences | 1e-8 | 4.8e-11 |
 | Pressure-driven demand vs EPANET's `DEMAND MODEL PDA` | 1e-5 | 3.521e-7 heads, 2.184e-7 demands |
 | A pump feeding pressure-driven demand (two-loop with a pump, every junction pressure-limited), both `pipe_form`s | 1e-5 | 3.526e-7 heads, 2.354e-7 flows, 2.355e-7 demands |
@@ -837,11 +844,12 @@ on-disk reals are **float32**, so roughly 1e-7 relative is EPANET's own precisio
 | Every network `wntr` ships (37 files, the two malformed ones aside) builds, or is refused by name | as listed | 36 build; `bad_times.inp` refused ("is not a time of the form HH:MM[:SS]") |
 | Head loss sums to zero around every cycle-basis loop | 1e-12 | **exactly 0.0** |
 | Autodiff vs central differences | 1e-6 × scale | 3.212e-6 / 2.505e-10 / 9.2e-10 / 2.753e-9 |
+| d(junction heads)/d(demands) through a closed check valve, vs central differences | 1e-6 × scale | within bound |
 | d(junction heads)/d(pump speed), every curve kind, vs central differences | 1e-6 relative | 3.1e-10 or better |
 | TRACE water quality, single source | 1e-3 | 6.438e-12 percentage points |
 | Golden regression | 1e-10 | **0.0** |
 
-Four rows deserve comment.
+A few rows deserve comment.
 
 **Continuity** is machine-precision exact for noodl physics (2.093e-14), while EPANET itself misses
 continuity at Net1 node 13 by 4.5e-10 m³/s. The ~1e-7 residuals on `twoloop_si.inp` and the
@@ -899,8 +907,8 @@ independent loop is a property of the cycle-space formulation, and it holds exac
 ## Limitations
 
 - **Not modelled, refused by name:** a numeric `[STATUS]` on a pump (a pump's speed is the driver
-  `"water.setting"`); a valve at a full or empty tank;
-  leakage. A file using any of these raises an error naming the feature.
+  `"water.setting"`); a valve at a full or empty tank. A file using either raises an error naming
+  the feature.
 - **Rules.** `FILLTIME` and `DRAINTIME` premises and the `DAY` and `POWER` ones are refused. A
   pump closed by a rule is at speed 0 in `"water.link_setting"`, as EPANET (`setlinkstatus`)
   and as a closing control leaves it; a `SETTING` premise on it reads 0, as EPANET.
