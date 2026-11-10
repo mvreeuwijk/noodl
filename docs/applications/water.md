@@ -600,13 +600,20 @@ independent loop is a property of the cycle-space formulation, and it holds exac
   below its setting, EPANET 35.791 m behind it; a valve with the dead end on its start,
   EPANET 39.997, 60.0006 or 53.687 m against the limit's 40 or 60 m; the states agree
   (`test_a_valve_feeding_a_dead_end_without_demand_matches_epanet`).
-- **A zero-demand group between a pump and a check valve to a higher reservoir.** With
-  no demand behind them, noodl runs the pump at zero flow and holds the group at its
-  shut-off head (63.3334 m, both R1 at 50 m and R2 at 100 m); EPANET shuts the pump too and
-  reports 74.48 m, between the reservoirs, the answer of its iteration path (with a CLOSED
-  pipe in place of the check valve it gives noodl's 63.3334 m and an OPEN pump). With any
-  demand, or R2 below 70 m, the two agree
+- **A zero-demand group between a pump and a check valve to a higher reservoir has no
+  unique head.** Every head from R1 plus the pump's shut-off head up to R2 satisfies every
+  link with no flow anywhere. EPANET's value is set by the ratio of its closed-link leaks
+  and its status path: with R1 at 50 m and R2 at 100 m it shuts the pump and reports
+  74.48 m. noodl returns the lower end, the pump running at zero flow at its shut-off head
+  (63.3334 m), which EPANET also returns when a CLOSED pipe replaces the check valve. With
+  any demand, or R2 below that shut-off head, the two agree
   (`test_a_pump_and_a_check_valve_shutting_together_match_epanet`).
+- **A zero-demand group between a stopped pump and a check valve has no unique head
+  either.** With the pump CLOSED or at speed 0 every head up to R2 satisfies every link;
+  noodl gives the `1 / CBIG` limit with the check valve shut (the average of R1 and R2:
+  75 m for 50 and 100 m), the same for a CLOSED pump and one at speed 0, and EPANET keeps
+  the check valve OPEN from its first iterate (its `cvstatus` holds a status inside `HTOL`)
+  and reports R2's head (`test_a_stopped_pump_and_a_check_valve_fencing_a_group`).
 - **The Colebrook option is not EPANET below Re = 4000.** With `friction="colebrook"` a laminar
   D-W pipe's head loss follows a straight line to the Colebrook value at Re = 2000, not
   Hagen-Poiseuille, and Dunlop's transition cubic is not used. The default `friction="composite"`

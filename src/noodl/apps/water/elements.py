@@ -420,7 +420,7 @@ class PumpCurve(ConstitutiveLaw):
         """The flow at zero head gain, ``w (h0/r)^(1/n)``, at ``speed`` (default: the pump's
         own); see the class docstring."""
         w = self.speed if speed is None else speed
-        return w * (self.h0 / self.r) ** (1.0 / self.n)
+        return w * (self.h0 / self.r) ** (1.0 / self._n)
 
     def flow(self, dp: Tensor, drivers=None) -> Tensor:
         status = self._status(dp, drivers)
@@ -1408,21 +1408,56 @@ class ShutLinks:
     no longer each count the other as open (the singular step it made, MEASURED on a
     reservoir, a pump, a junction with a demand and a check valve to a higher reservoir:
     `test_a_pump_and_a_check_valve_shutting_together_match_epanet`). The pipe law's own
-    test, made before the pumps' exists, reopens what the check valves alone cut off."""
+    test, made before the pumps' exists, reopens what the check valves alone cut off.
 
-    def __init__(self, n_links: int) -> None:
+    THE RECORD IS PER EVALUATION. It is kept with the drivers it was made with (the same
+    mapping the layer hands every law of one evaluation), and `links_for` gives it only to
+    a law evaluated with that same mapping. A pump law evaluated on its own, with drivers
+    of its own, finds no record and tests its pumps alone, as a law without `shut_links`
+    does: it cannot recompute the check valves' set, whose heads and flows it is not given.
+
+    STOPPED PUMPS. `closed` is every link a cut-off test counts as shut whatever the
+    iterate: a ``CLOSED`` status, and a pump (``pumps``, the pumps' columns) at speed 0 in
+    ``"water.setting"``, which is on its no-flow row as a CLOSED pump is
+    (`FlowControlledPump`). Both laws' tests read it, so a group fenced by a stopped pump
+    and a check valve is cut off for both."""
+
+    def __init__(self, n_links: int, pumps: slice | None = None) -> None:
         self.n_links = int(n_links)
-        self.links: Tensor | None = None
+        self.pumps = _link_range(pumps)
+        # the record and the drivers it was made with live in `_memo_cache`, which the
+        # layer's scan for held tensors skips and a move empties (a stale record is none)
+        self._memo_cache: dict = {}
 
-    def record(self, held: Tensor | None, link_range: tuple[int, int]) -> None:
-        """Record `held` (a law's own columns) as the links shut on this iterate."""
-        if held is None or not bool(held.any()):
-            self.links = None
-            return
-        lo, hi = link_range
-        links = torch.zeros(held.shape[:-1] + (self.n_links,), dtype=torch.bool)
-        links[..., lo:hi] = held
-        self.links = links
+    def record(self, held: Tensor | None, link_range: tuple[int, int], drivers) -> None:
+        """Record `held` (a law's own columns) as the links shut on the evaluation with
+        `drivers`."""
+        links = None
+        if held is not None and bool(held.any()):
+            lo, hi = link_range
+            links = torch.zeros(held.shape[:-1] + (self.n_links,), dtype=torch.bool)
+            links[..., lo:hi] = held
+        self._memo_cache["record"] = (drivers, links)
+
+    def links_for(self, drivers) -> Tensor | None:
+        """The links recorded on the evaluation with `drivers`, else `None` (stale)."""
+        recorded, links = self._memo_cache.get("record", (None, None))
+        return links if recorded is drivers else None
+
+    def closed(self, drivers) -> Tensor:
+        """Per link, whether it is shut whatever the iterate: status CLOSED, or a pump at
+        speed 0."""
+        closed = drivers[STATUS_KEY].detach() == CLOSED
+        if self.pumps is None:
+            return closed
+        lo, hi = self.pumps
+        stopped = drivers[SETTING_KEY][..., lo:hi].detach() == 0
+        if not bool(stopped.any()):
+            return closed
+        batch = torch.broadcast_shapes(closed.shape[:-1], stopped.shape[:-1])
+        closed = closed.expand(batch + closed.shape[-1:]).clone()
+        closed[..., lo:hi] |= stopped
+        return closed
 
 
 def _reopen(law, held: Tensor, ahead: Tensor, drivers, shut: Tensor | None = None) -> Tensor:
@@ -1432,18 +1467,21 @@ def _reopen(law, held: Tensor, ahead: Tensor, drivers, shut: Tensor | None = Non
     link touching it whose open equation predicts the most flow in its own direction
     (`ahead`), until no group is cut off. `law` carries `ends`, `fixed` and `link_range`;
     links marked by `PIN_KEY` count as joined, and so does every link of another law that
-    is not CLOSED and not in `shut` (the other links shut on this iterate, `ShutLinks`)."""
+    is not CLOSED (nor, with `law.shut_links`, a pump at speed 0: `ShutLinks.closed`) and not
+    in `shut` (the other links shut on this iterate, `ShutLinks`)."""
     if law.ends is None or not bool(held.any()):
         return held
     n_links = len(law.ends)
     lo, hi = law.link_range
-    status = drivers[STATUS_KEY].detach()
+    shut_links = getattr(law, "shut_links", None)
+    closed = (drivers[STATUS_KEY].detach() == CLOSED if shut_links is None
+              else shut_links.closed(drivers))
     pin = drivers.get(PIN_KEY)
-    batch = held.shape[:-1]
+    batch = torch.broadcast_shapes(held.shape[:-1], closed.shape[:-1])
     if shut is not None:
         batch = torch.broadcast_shapes(batch, shut.shape[:-1])
-        held = held.expand(batch + held.shape[-1:])
-    joined = (status != CLOSED).expand(batch + (n_links,))
+    held = held.expand(batch + held.shape[-1:])
+    joined = (~closed).expand(batch + (n_links,))
     if shut is not None:
         joined = joined & ~shut.expand(batch + (n_links,))
     if pin is not None:
@@ -1596,12 +1634,12 @@ class FlowControlledPipe(ImplicitLaw):
                 held[..., cols], ahead[..., cols] = held_c, ahead_c
             held = _reopen(self, held, ahead, drivers)
             if self.shut_links is not None:
-                self.shut_links.record(held, self.link_range)
+                self.shut_links.record(held, self.link_range, drivers)
             return held
 
     def residual(self, dp, q, drivers, ctx):
         if self.shut_links is not None:
-            self.shut_links.record(None, self.link_range)
+            self.shut_links.record(None, self.link_range, drivers)
         loss = self._loss(dp, q)
         if self.link_range is None:
             return loss
@@ -1788,7 +1826,7 @@ class FlowControlledPump(ImplicitLaw):
             held = by_kappa & (r < -slope * q)
             if not bool(held.any()):
                 return None
-            shut = None if self.shut_links is None else self.shut_links.links
+            shut = None if self.shut_links is None else self.shut_links.links_for(drivers)
             held = _reopen(self, held, q + r / slope, drivers, shut)
             return held if bool(held.any()) else None
 

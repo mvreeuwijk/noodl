@@ -850,7 +850,7 @@ def build_model(
     rqtol = RQTOL_FT_PER_CFS * M_PER_FT * epanet_cfs * scale
     laws: list = []
     # the check valves and pumps shut on each Newton iterate, for one cut-off test over both
-    shut_links = ShutLinks(len(net.links()))
+    shut_links = ShutLinks(len(net.links()), pumps=link_slice["pump"])
     if net.pipes:
         if headloss == "H-W":
             laws.append(

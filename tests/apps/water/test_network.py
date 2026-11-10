@@ -857,3 +857,33 @@ def test_a_pump_iterate_on_its_floor_tangent_with_reverse_flow_still_converges(r
     torch.testing.assert_close(final["water.q"], reference["water.q"], rtol=0, atol=1e-12)
     assert link_states(model, final, drivers).tolist() == link_states(
         model, reference, drivers).tolist()
+
+
+def test_the_shut_check_valves_reach_only_the_pump_evaluation_they_were_made_for():
+    """`ShutLinks` hands the check valves the pipe law shut to a pump law evaluated with the
+    same drivers mapping (one layer evaluation), and nothing to one evaluated with drivers
+    of its own, which tests its pumps alone."""
+    net = WaterNetwork(
+        junctions=(Junction("J", 0.0, 0.0005), Junction("K", 0.0, 0.0)),
+        reservoirs=(Reservoir("R1", 50.0), Reservoir("R2", 100.0)),
+        pipes=(WaterPipe("P1", "J", "K", 100.0, 0.3, 130.0),
+               WaterPipe("P2", "K", "R2", 100.0, 0.3, 130.0, status="CV")),
+        pumps=(Pump("PU", "R1", "J", "C1"),), curves={"C1": ((0.004, 10.0),)},
+    )
+    model, state, drivers = build_model(net)
+    layer = model.kirchhoff["water"]
+    pipes, pcols = layer.law_for("pipe")
+    pumps, ucols = layer.law_for("pump")
+    # an iterate with P2 flowing backwards and PU beyond its shut-off head: both shut
+    q = torch.tensor([0.0, -0.01, -0.001], dtype=F64)
+    dp_pipes = torch.tensor([0.0, -5.0], dtype=F64)
+    dp_pump = torch.tensor([-60.0], dtype=F64)
+    pipes(dp_pipes, q[pcols], drivers, None)
+    shut = pumps.shut_links.links_for(drivers)
+    assert shut is not None and shut.tolist() == [False, True, False]
+    assert pumps.shut_links.links_for(dict(drivers)) is None
+    # the pump law with its own drivers: its pumps alone, so PU is shut (J looks fed
+    # through P2); with the layer's, P2 is shut too and PU is kept on its curve
+    alone = pumps.states(dp_pump, q[ucols], dict(drivers))
+    joint = pumps.states(dp_pump, q[ucols], drivers)
+    assert alone.tolist() == [CLOSED] and joint.tolist() == [OPEN]

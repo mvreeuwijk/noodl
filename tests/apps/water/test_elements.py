@@ -605,6 +605,7 @@ def test_the_pump_jacobian_is_the_derivative_of_its_residual(dp, q, drivers, row
     torch.testing.assert_close(d_dp, a_dp.diagonal(), rtol=1e-12, atol=0)
     torch.testing.assert_close(d_dq, a_dq.diagonal(), rtol=1e-12, atol=0)
     assert torch.count_nonzero(a_dp - torch.diag(a_dp.diagonal())) == 0
+    assert torch.count_nonzero(a_dq - torch.diag(a_dq.diagonal())) == 0
     states = law.states(dp, q, drivers)
     if rows == "open":
         assert bool((states == OPEN).all())

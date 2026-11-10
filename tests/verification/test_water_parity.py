@@ -2096,10 +2096,12 @@ def test_a_pump_and_a_check_valve_shutting_together_match_epanet(tmp_path, deman
     solution PU feeds J's demand (or runs at zero flow, J at R1 plus the shut-off head) and
     P2 is shut, as EPANET has it. Heads 1e-6 relative, flows 1e-6 m3/s, states equal.
 
-    (With no demand and R2 at 100 m EPANET instead shuts PU too and reports J at 74.48 m,
-    between the reservoirs: its answer there follows its own iteration path, as with the
-    fenced groups of Limitations; noodl gives the limit with PU running at zero flow,
-    63.3334 m.)"""
+    With no demand and R2 above R1 plus the shut-off head (100 m), J's head is not unique:
+    every value from 63.3334 m (PU at zero flow at its shut-off head) up to R2 satisfies
+    every link. EPANET's value is set by the ratio of its closed-link leaks and its status
+    path (74.48 m, PU shut); noodl returns the lower end, which EPANET also returns when a
+    CLOSED pipe replaces the check valve (`test_a_zero_demand_group_behind_a_pump_matches_
+    epanet`). That case is therefore not compared here."""
     path, results = _run_inp(tmp_path, _PUMP_AND_CHECK_VALVE.format(demand=demand, r2=r2))
     model, state, drivers = build_model(read_epanet_inp(path))
     final = water_steady(model, state, drivers)
@@ -2107,3 +2109,45 @@ def test_a_pump_and_a_check_valve_shutting_together_match_epanet(tmp_path, deman
     states = dict(zip(model.link_names, link_states(model, final, drivers).tolist(),
                       strict=True))
     assert states["PU"] == 1 and states["P2"] == 0
+
+
+_STOPPED_PUMP_AND_CHECK_VALVE = _PUMP_AND_CHECK_VALVE.replace("[OPTIONS]", "{status}[OPTIONS]")
+
+
+@pytest.mark.parametrize("r2", [100, 55])
+def test_a_stopped_pump_and_a_check_valve_fencing_a_group(tmp_path, r2):
+    """R1 (50 m) - PU - J - P1 - K - P2 (a check valve) - R2, no demand, the pump at speed 0
+    through `"water.setting"` (EPANET: `[STATUS] PU 0`, which it reports CLOSED). The step was
+    singular: a pump at speed 0 counted as open in the cut-off test (`ShutLinks.closed`).
+    Now it is solved as with the pump CLOSED by its status, to the same heads, every flow
+    exactly zero, PU CLOSED as EPANET reports it, flows within 1e-6 m3/s of EPANET's leaks.
+
+    J's head is not unique (every value up to R2 satisfies every link): noodl gives the
+    `1 / CBIG` limit with P2 shut, the average of R1 and R2; EPANET keeps P2 OPEN from its
+    first iterate (`cvstatus` holds a status inside `HTOL`) and reports R2's head. MEASURED:
+    EPANET J = R2 with P2 OPEN at both R2."""
+    text = _STOPPED_PUMP_AND_CHECK_VALVE.format(demand=0, r2=r2, status="{status}")
+    _, results = _run_inp(tmp_path, text.format(status="[STATUS]\n PU 0\n"), "epanet")
+    path = tmp_path / "noodl.inp"
+    path.write_text(text.format(status=""))
+    model, state, drivers = build_model(read_epanet_inp(path))
+    k = model.link_names.index("PU")
+    stopped = drivers["water.setting"].clone()
+    stopped[k] = 0.0
+    by_speed = {**drivers, "water.setting": stopped}
+    final = water_steady(model, state, by_speed)
+    closed = drivers["water.status"].clone()
+    closed[k] = 0.0
+    by_status = {**drivers, "water.status": closed}
+    reference = water_steady(model, state, by_status)
+    assert torch.equal(final["water.phi"], reference["water.phi"])
+    phi = dict(zip(model.node_names, final["water.phi"].tolist(), strict=True))
+    assert phi["J"] == phi["K"] == pytest.approx(0.5 * (50.0 + r2), abs=1e-9)
+    assert bool((final["water.q"] == 0).all())
+    flows = results.link["flowrate"].loc[0]
+    assert max(abs(float(flows[name])) for name in model.link_names) < 1e-6
+    states = dict(zip(model.link_names, link_states(model, final, by_speed).tolist(),
+                      strict=True))
+    assert states["PU"] == int(results.link["status"].loc[0]["PU"]) == 0
+    assert states["P2"] == 0 and int(results.link["status"].loc[0]["P2"]) == 1
+    assert float(results.node["head"].loc[0]["J"]) == pytest.approx(r2, abs=1e-4)

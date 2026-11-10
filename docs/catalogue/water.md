@@ -89,7 +89,7 @@ Supporting types.
 
 | Name | What it does | How to call it |
 |---|---|---|
-| `ShutLinks` | The one-way links the laws of one layer shut on the current iterate, shared between them so that the cut-off test (`_reopen`) sees all of them at once. | `ShutLinks(n_links)` |
+| `ShutLinks` | The one-way links the laws of one layer shut on the current iterate, shared between them so that the cut-off test (`_reopen`) sees all of them at once. | `ShutLinks(n_links, pumps=None)` |
 
 ## Functions
 
