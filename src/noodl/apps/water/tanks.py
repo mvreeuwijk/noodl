@@ -507,7 +507,8 @@ class TankLevels:
     def _completed(self, remembered: dict[str, Tensor], state, drivers) -> dict[str, Tensor]:
         """A remembered answer with its `_GRAPH_KEYS` entries built from this call's
         `drivers` wherever they are missing or the driver they are built from requires grad
-        (no graph is ever reused across calls)."""
+        (no graph is ever reused across calls). `"water.status"` is categorical: `_link_status`
+        detaches it, so the memo never holds a graph from it."""
         out = dict(remembered)
         heads = drivers.get(RESERVOIR_HEAD_KEY)
         if "water.phi_boundary" not in out or (heads is not None and heads.requires_grad):
@@ -548,7 +549,7 @@ class TankLevels:
         limited = self._full_and_empty(level, drivers, out[STATUS_KEY])
         if limited is not None:
             out[STATUS_KEY], out[ONE_WAY_KEY] = limited
-        self._memo = (tuple(None if t is None else t.clone() for t in read),
+        self._memo = (tuple(None if t is None else t.detach().clone() for t in read),
                       self._graph_free(out))
         return out
 
@@ -568,7 +569,7 @@ class TankLevels:
         """Every link's status: the drivers' `"water.status"` (the build's when they carry
         none), with the pumps' and the controlled links' entries from the carried
         `link_status`."""
-        base = drivers.get(STATUS_KEY, self.link_status).to(link_status.dtype)
+        base = drivers.get(STATUS_KEY, self.link_status).detach().to(link_status.dtype)
         base, link_status = torch.broadcast_tensors(base, link_status)
         out = base.clone()
         out[..., self._status_links] = link_status[..., self._status_links]

@@ -603,3 +603,17 @@ def test_an_equal_valued_new_setting_leaf_receives_the_gradient():
     want = _net1_setting_gradient(fresh_model, fresh_state, fresh_drivers,
                                   base.clone().requires_grad_(True))
     torch.testing.assert_close(got, want, rtol=0, atol=0)
+
+
+def test_a_second_backward_through_a_status_driver_has_no_stale_graph():
+    """`"water.status"` is categorical: the closure's memo must keep no graph from a
+    grad-requiring status driver (regression: "Trying to backward through the graph a
+    second time")."""
+    model, state, drivers = build_model(read_epanet_inp(NET1))
+    status = drivers["water.status"].clone().to(torch.float64).requires_grad_(True)
+    setting = drivers["water.setting"].clone().requires_grad_(True)   # gives backward a path
+    for _ in range(2):
+        out = water_steady(model, state, {**drivers, "water.status": status,
+                                          "water.setting": setting})
+        out["water.phi"][0].backward()
+    assert status.grad is None
