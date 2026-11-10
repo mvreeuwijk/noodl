@@ -243,7 +243,9 @@ def read_epanet_inp(path) -> WaterNetwork:
     # A demand with no pattern uses the default pattern (`[OPTIONS] PATTERN`, else a pattern
     # named "1" if one exists, else a constant 1.0), so categories are compared by EFFECTIVE
     # pattern: "no pattern" and an explicit naming of the default are the same.
-    default_pattern = demand_pattern or ("1" if "1" in patterns else None)
+    default_pattern = demand_pattern or "1"
+    if default_pattern not in patterns:      # EPANET: no such pattern, a constant 1
+        default_pattern = None
 
     def effective(name: str | None) -> str | None:
         return name if name is not None else default_pattern

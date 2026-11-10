@@ -2672,11 +2672,9 @@ def link_states_from_cut_off(model: Model, state: State, drivers: Drivers, limit
             held = drivers
             closure = model.control_closure
             if closure is not None:
-                # the status and speed the solve took are the closure's (a pump a control
-                # has just opened or closed, or a speed pattern has moved), not the drivers'
-                held = {**drivers, STATUS_KEY: status,
-                        SETTING_KEY: closure.effective_setting(drivers,
-                                                               state["water.link_setting"])}
+                # the drivers the solve took: the closure's status and speed (a pump a
+                # control has just opened or closed, or a speed pattern has moved), memoised
+                held = {**drivers, **closure(state, drivers)}
             selected = law.states(dp, q[..., cols].detach(), held)
             out[..., cols] = torch.where(running, selected.to(out.dtype), out[..., cols])
     ends = None

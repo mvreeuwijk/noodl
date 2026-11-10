@@ -123,10 +123,10 @@ def _period(net, t: int) -> int:
 
 def _default_pattern(net) -> str | None:
     """The pattern of a demand that names none: `[OPTIONS] PATTERN`, else a pattern named
-    "1", else none (EPANET's `DefPat`; the reader's rule)."""
-    if net.demand_pattern is not None:
-        return net.demand_pattern
-    return "1" if "1" in net.patterns else None
+    "1", provided it exists, else none: a constant 1 (EPANET's `DefPat = findpattern(DefPatID)`,
+    0 when there is none, `input1.c`, `adjustdata`; the reader's rule)."""
+    name = net.demand_pattern if net.demand_pattern is not None else "1"
+    return name if name in net.patterns else None
 
 
 def _round(x: Tensor) -> Tensor:
@@ -321,8 +321,13 @@ class _Recorder:
         return setting.detach() / self.setting_scale
 
     def pump_speeds(self, solved, drivers, cols) -> Tensor:
-        """The pumps' (`cols`) relative speeds in this solve, as `WaterResults.setting`."""
-        return self._setting(solved, drivers)[..., cols]
+        """The pumps' (`cols`) relative speeds in this solve as the solve takes them (a pump
+        that is shut is not read: the energy skips it)."""
+        if self.closure is not None:
+            setting = self.closure.effective_setting(drivers, solved["water.link_setting"])
+        else:
+            setting = drivers[SETTING_KEY]
+        return setting.detach()[..., cols]
 
     def record(self, solved, drivers, cut_off, levels, overflow, status=None) -> None:
         phi = solved["water.phi"]
@@ -501,7 +506,9 @@ def water_run(model, state=None, drivers=None, *, duration: float | None = None,
         if counted:
             # `addenergy` takes the step as EPANET's `timestep` finds it, past the duration
             # as well; the reported results end at the duration
-            whole = plan(False)[0] if t + step >= clock.duration else step
+            whole = step
+            if t + clock.free_step(t, hydraulic_report) > clock.duration:
+                whole = plan(False)[0]          # the duration cut this step: EPANET's is whole
             meter.add(_period(net, t), whole / 3600.0, solved, status[..., meter.cols],
                       speeds_of(solved, d))
         if report:

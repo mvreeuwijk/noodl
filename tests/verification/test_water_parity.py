@@ -2233,13 +2233,13 @@ def _at_unit_speed(path):
 @pytest.mark.parametrize("kind", list(_PUMP_KINDS))
 def test_pump_speed_setting(tmp_path, kind):
     """A relative speed of 0.8 given through the driver `"water.setting"` on a model built
-    at speed 1 matches EPANET with `SPEED 1.2` in the file (`hydcoeffs.c`, `pumpcoeff`: the
+    at speed 1 matches EPANET with `SPEED 0.8` in the file (`hydcoeffs.c`, `pumpcoeff`: the
     affinity laws). Heads 1e-6 relative, flows 1e-6 m3/s, states equal. MEASURED heads
     (flows 1.8e-9 m3/s each): one point 3.8e-7, three points 2.9e-7, segments 2.2e-7,
     constant power 3.6e-7."""
     parameters, curve = _PUMP_KINDS[kind]
     path, results = _epanet(tmp_path, "twoloop_si.inp",
-                            edits=_pump_edits(parameters + " SPEED 1.2", curve))
+                            edits=_pump_edits(parameters + " SPEED 0.8", curve))
     model, state, drivers = build_model(_at_unit_speed(path))
     k = model.link_names.index("PU1")
     assert float(drivers["water.setting"][k]) == 1.0
@@ -3253,4 +3253,25 @@ def test_energy_of_an_unaligned_and_a_zero_duration_matches_epanet(tmp_path, dur
         assert run.time.tolist() == [0.0, 3600.0]
         assert theirs["9"][0] > 100.0
     assert theirs["9"][5] > 0
+    assert worst < 1e-5, worst
+
+
+@pytest.mark.parametrize("speed", [None, 0.8])
+@pytest.mark.parametrize("kind", list(_PUMP_KINDS))
+def test_energy_of_every_pump_kind_matches_epanet(tmp_path, kind, speed):
+    """Each kind of pump (`_PUMP_KINDS`: one-point, three-point and multipoint curves and
+    constant power) on the two-loop network through `water_run` for 2:30 (the last step
+    counted whole), at speed 1 and with `SPEED 0.8` in the file, against EPANET's energy
+    section: every per-pump figure and the demand charge, 1e-5 relative, with a price and a
+    demand charge added."""
+    parameters, curve = _PUMP_KINDS[kind]
+    if speed is not None:
+        parameters += f" SPEED {speed}"
+    edits = _pump_edits(parameters, curve) + (
+        ("Duration           \t0:00", "Duration           \t2:30"),
+        (" Global Price       \t0.0", " Global Price       \t0.15"),
+        (" Demand Charge      \t0.0", " Demand Charge      \t6.0"))
+    path, _ = _epanet(tmp_path, "twoloop_si.inp", edits=edits)
+    worst, theirs, run = _compare_energy(path, tmp_path, "kind")
+    assert theirs["PU1"][0] == pytest.approx(300.0 / 2.5) and theirs["PU1"][5] > 0
     assert worst < 1e-5, worst

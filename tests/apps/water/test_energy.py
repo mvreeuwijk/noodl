@@ -217,3 +217,40 @@ def test_energy_of_a_batch_equals_the_single_runs():
                                        getattr(alone.energy, field), rtol=1e-12, atol=0)
         torch.testing.assert_close(batch.energy.demand_charge[k], alone.energy.demand_charge,
                                    rtol=1e-12, atol=0)
+
+
+def test_energy_of_a_batch_with_a_pump_on_in_one_instance_only():
+    """Two instances, the second pump at speed 0 (closed) in the second one only: the
+    time on line, the average and peak power, the cost and the network's peak total power
+    are each the single run's, and differ between the instances."""
+    net = WaterNetwork(
+        junctions=(Junction("J", 0.0, 0.01),), reservoirs=(Reservoir("R", 20.0),),
+        pumps=(Pump("PU", "R", "J", None, power=5.0), Pump("PV", "R", "J", None, power=5.0)),
+        duration=7200.0, options=WaterOptions(flow_units="LPS"),
+        energy=EnergyOptions(global_efficiency=75.0, global_price=0.1, demand_charge=3.0))
+    model, _, drivers = build_model(net)
+    both = drivers["water.setting"].clone()
+    one = both.clone()
+    one[model.link_names.index("PV")] = 0.0
+    batch = water_run(model, drivers={**drivers, "water.setting": torch.stack([both, one])})
+    e = batch.energy
+    assert e.utilisation.tolist() == [[100.0, 100.0], [100.0, 0.0]]
+    assert float(e.peak_power[1, 1]) == 0.0 and float(e.peak_power[0, 1]) > 0.0
+    assert float(e.demand_charge[0]) != float(e.demand_charge[1])
+    for k, setting in enumerate((both, one)):
+        alone = water_run(model, drivers={**drivers, "water.setting": setting}).energy
+        for field in ("utilisation", "efficiency", "energy_per_volume", "average_power",
+                      "peak_power", "cost", "demand_charge"):
+            torch.testing.assert_close(getattr(e, field)[k], getattr(alone, field),
+                                       rtol=1e-12, atol=0)
+
+
+def test_an_undefined_default_pattern_is_a_constant_one():
+    """EPANET looks `[OPTIONS] PATTERN` (default "1") up among the patterns and uses none
+    when it is not there (`input1.c`, `adjustdata`: `DefPat = findpattern(...)` is 0): the
+    demands are their base values, where the run used to raise a KeyError."""
+    net = _constant_pump(demand_pattern="1")
+    assert "1" not in net.patterns
+    _, out = _run(net)
+    assert out.head.shape[0] == 3
+    torch.testing.assert_close(out.head[0], out.head[2], rtol=1e-12, atol=0)

@@ -43,6 +43,8 @@ F64 = torch.float64
 KW_PER_HP = 0.7457
 #: The constant of `getenergy`: horsepower = `dh q SpGrav / 8.814` in feet and cfs.
 _HP_FT_CFS = 8.814
+#: EPANET's `TINY` (`types.h`): `interp` returns `y[k]` across a step in `x` below it.
+TINY = 1e-6
 #: Metres per foot (EPANET's `MperFT`), the head conversion of every SI file.
 _M_PER_FT = 0.3048
 
@@ -83,8 +85,8 @@ def interpolate_curves(x: Tensor, y: Tensor, xx: Tensor) -> Tensor:
     x0, x1 = x.gather(1, lower), x.gather(1, upper)
     y0, y1 = y.gather(1, lower), y.gather(1, upper)
     dx = x1 - x0
-    inside = y1 - (x1 - xx) * (y1 - y0) / torch.where(dx.abs() < 1e-12, torch.ones_like(dx), dx)
-    inside = torch.where(dx.abs() < 1e-12, y1, inside)
+    inside = y1 - (x1 - xx) * (y1 - y0) / torch.where(dx.abs() < TINY, torch.ones_like(dx), dx)
+    inside = torch.where(dx.abs() < TINY, y1, inside)
     return torch.where(k <= 0, y[:, :1], torch.where(k > top, y[:, -1:], inside))
 
 
@@ -128,30 +130,38 @@ class EnergyMeter:
         self.curve_x, self.curve_y = xs, ys
         # EPANET limits the efficiency to 1..100 percent (`getenergy`)
         self.global_fraction = min(max(global_eff, 1.0), 100.0) / 100.0
-        self._periods: dict[int, Tensor] = {}
+        # price and price pattern per pump (`addenergy`): a pump's own price when positive,
+        # else the global; its own pattern, else the global one, else a constant 1. The
+        # patterns used are rows of one table, so a period's prices are one gather.
+        rows = [(1.0,)]
+        index = {None: 0}
+        for name in [energy.global_pattern] + [p.price_pattern for p in pumps]:
+            if name is not None and name not in index:
+                index[name] = len(rows)
+                rows.append(tuple(net.patterns[name]))
+        self._pattern_length = torch.tensor([len(r) for r in rows], dtype=torch.long)
+        self._pattern_table = torch.ones(len(rows), max(len(r) for r in rows), dtype=F64)
+        for i, r in enumerate(rows):
+            self._pattern_table[i, :len(r)] = torch.tensor(r, dtype=F64)
+        self._pattern_row = torch.tensor(
+            [index[p.price_pattern if p.price_pattern is not None else energy.global_pattern]
+             for p in pumps], dtype=torch.long)
+        self._base_price = torch.tensor(
+            [p.price if p.price is not None and p.price > 0.0 else energy.global_price
+             for p in pumps], dtype=F64)
+        self._period = None
         zeros = torch.zeros(n, dtype=F64)
         self.on = self.eff = self.per_flow = self.kwh = self.cost = zeros
         self.peak = zeros
         self.emax = torch.zeros((), dtype=F64)
 
     def _price(self, period: int) -> Tensor:
-        """Each pump's price at the pattern period `period` (`addenergy`: a pump's own price,
-        else the global one, times its own pattern, else the global pattern)."""
-        if period not in self._periods:
-            net = self.net
-            energy = net.energy
-
-            def factor(name):
-                values = net.patterns[name]
-                return float(values[period % len(values)])
-
-            f0 = 1.0 if energy.global_pattern is None else factor(energy.global_pattern)
-            out = []
-            for p in net.pumps:
-                c = p.price if p.price is not None and p.price > 0.0 else energy.global_price
-                out.append(c * (f0 if p.price_pattern is None else factor(p.price_pattern)))
-            self._periods = {period: torch.tensor(out, dtype=F64)}
-        return self._periods[period]
+        """Each pump's price at the pattern period `period` (`addenergy`)."""
+        if self._period is None or self._period[0] != period:
+            length = self._pattern_length[self._pattern_row]
+            factor = self._pattern_table[self._pattern_row, period % length]
+            self._period = (period, self._base_price * factor)
+        return self._period[1]
 
     def add(self, period: int, hours: float, solved, states: Tensor,
             speed: Tensor | None) -> None:
