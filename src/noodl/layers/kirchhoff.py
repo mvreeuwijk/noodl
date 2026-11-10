@@ -42,6 +42,8 @@ from noodl.layers._topology import TopologyGuard
 from noodl.operators.graph import GraphLaplacianOperator
 from noodl.operators.shifted import ShiftedOperator
 from noodl.operators.sparse import SparseOperator
+from noodl.solvers.continuation import storage_ramp
+from noodl.solvers.errors import ConvergenceError
 from noodl.solvers.grounding import spd_certificate, spd_diagnosis
 from noodl.solvers.implicit import adjoint as _adjoint_solve
 from noodl.solvers.implicit import implicit_solve
@@ -70,6 +72,37 @@ _LINEAR_SOLVERS = ("auto", "cg", "gmres", "direct", "sparse_direct")
 #: The steady context: what a law that reads the context sees outside a solve (`flows`,
 #: `dflows`, `linear_init` called directly) and in a solve without a step.
 _DC = LawContext(mode="dc")
+
+
+#: The rungs of the fallback ladder (`KirchhoffLayer(fallback=)`), in the order of the docs.
+FALLBACK_RUNGS = ("linear_guess", "storage_ramp")
+
+
+def check_fallback(layer_name: str, fallback) -> tuple[str, ...]:
+    """`fallback` as a tuple of rung names, each one of `FALLBACK_RUNGS` and given once;
+    anything else is refused by name."""
+    if isinstance(fallback, str):
+        raise TypeError(
+            f"KirchhoffLayer {layer_name!r}: fallback takes a sequence of rung names, e.g. "
+            f"({fallback!r},), not the string {fallback!r}"
+        )
+    rungs = tuple(fallback)
+    unknown = [r for r in rungs if r not in FALLBACK_RUNGS]
+    if unknown:
+        raise ValueError(
+            f"KirchhoffLayer {layer_name!r}: unknown fallback rung(s) {unknown}; the rungs "
+            f"are {list(FALLBACK_RUNGS)}"
+        )
+    if len(set(rungs)) != len(rungs):
+        raise ValueError(
+            f"KirchhoffLayer {layer_name!r}: fallback {list(rungs)} names a rung twice"
+        )
+    return rungs
+
+
+def _converged(diagnostics: dict) -> bool:
+    """Whether every instance of the solve that wrote `diagnostics` converged."""
+    return bool(torch.as_tensor(diagnostics["converged"]).all())
 
 
 def check_scheme(layer_name: str, scheme) -> None:
@@ -275,7 +308,13 @@ class KirchhoffLayer(TopologyGuard):
     sewer dynamic wave sets ``line_search="convex"`` and ``step_floor`` (its kinked laws are
     each non-decreasing, so the residual is the gradient of a convex function). A layer
     with flow unknowns refuses ``line_search="convex"``, by keyword or here: its residual is
-    not the gradient of a convex function."""
+    not the gradient of a convex function.
+
+    `fallback` (default none) is the ladder `solve` climbs when Newton does not converge,
+    rungs from `FALLBACK_RUNGS` tried in order: `"linear_guess"` solves again from the
+    linear initial guess, `"storage_ramp"` lets the network settle from it through a
+    fictitious storage removed in steps (`noodl.solvers.continuation.storage_ramp`) and
+    solves again from there. A `solve` call may give its own; see `solve`."""
 
     def __init__(
         self,
@@ -293,10 +332,12 @@ class KirchhoffLayer(TopologyGuard):
         newton_defaults: Mapping | None = None,
         scheme: str = "trapezoidal",
         storage: Sequence[NodeStorage] = (),
+        fallback: Sequence[str] = (),
     ) -> None:
         check_scheme(name, scheme)
         self.scheme = scheme
         self.newton_defaults = dict(newton_defaults or {})
+        self.fallback = check_fallback(name, fallback)
         if linear_solver not in _LINEAR_SOLVERS:
             raise ValueError(
                 f"unknown linear_solver {linear_solver!r} in layer {name!r}; expected one "
@@ -1942,6 +1983,7 @@ class KirchhoffLayer(TopologyGuard):
         storage_flow=None,
         differentiable=True,
         diagnostics: dict | None = None,
+        fallback=None,
         **newton_kwargs,
     ):
         """Solve for interior potentials and branch flows.
@@ -2063,21 +2105,113 @@ class KirchhoffLayer(TopologyGuard):
         `storage_flow` too, so a chain of steps back-propagates through time. There
         `diagnostics["method"]` is likewise the method requested and `"backend"` the one that
         ran; `method="cg"` is refused (the system is not symmetric positive definite).
+
+        `fallback` is the ladder climbed when Newton does not converge (`None`, the default,
+        is the layer's own `fallback`; `()` none). It runs only then, in every `on_failure`
+        mode, and tries its rungs in order until one converges; the whole batch is solved
+        again on each rung:
+
+        - `"linear_guess"`: solve again from the linear initial guess (`linear_init`). It is
+          skipped when the failed solve already started there (a layer without flow
+          unknowns and no `phi0`); the initial point with held storage of a layer without
+          flow unknowns, which has no linear guess, starts again from zeros instead.
+        - `"storage_ramp"`: from that same start, let the network settle through a
+          fictitious storage at every node, `g (x - x_prev)` added to its balance with `g` a
+          multiple of the node's own Jacobian diagonal, removed over four stages, each with
+          a storage ten times smaller (`noodl.solvers.continuation.storage_ramp`), and
+          solve again from where it settled. The storage sits on the potential (balance)
+          rows only: a relation's row has no sign convention a positive storage could
+          respect, and an ideal source's row has no diagonal to scale. The stages are a
+          starting point and carry no gradient; the solve that follows is this one's own,
+          so the gradient is at the exact root.
+
+        `diagnostics`, when given, then also receives `"fallback"`, the rung that converged
+        (`None` if the first solve did, or no rung did), and `"fallback_iterations"`, the
+        storage stages' Newton iterations (0 for `"linear_guess"`); the other entries are
+        the converged solve's. When no rung converges, the first failure stands: its error
+        is raised (naming the rungs tried and the last one's error), or, under
+        `on_failure="return"`/`"return_primal"`, its result and diagnostics are returned.
+        Only non-convergence (`ConvergenceError`) climbs the ladder; every other error passes
+        through. With no fallback (the default) none of this runs and `diagnostics` gains
+        no entry.
         """
         try:
-            return self._solve(phi_boundary, drivers, sources, phi0, q0=q0, history=history,
-                               dt=dt, t=t, scheme=scheme, mode=mode,
-                               storage_flow=storage_flow, differentiable=differentiable,
-                               diagnostics=diagnostics, **newton_kwargs)
+            rungs = self.fallback if fallback is None else check_fallback(self.name, fallback)
+            if not rungs:
+                return self._solve(phi_boundary, drivers, sources, phi0, q0=q0,
+                                   history=history, dt=dt, t=t, scheme=scheme, mode=mode,
+                                   storage_flow=storage_flow, differentiable=differentiable,
+                                   diagnostics=diagnostics, **newton_kwargs)
+            return self._solve_with_fallback(
+                rungs, phi_boundary, drivers, sources, phi0, q0=q0, history=history, dt=dt,
+                t=t, scheme=scheme, mode=mode, storage_flow=storage_flow,
+                differentiable=differentiable, diagnostics=diagnostics, **newton_kwargs)
         finally:
             # The restrictions of this solve's context (`_law_ctx`) hold its step-start
             # tensors, and their graph in a differentiable chain: none outlives the solve
             # (a later solve builds a new context, so nothing is reused across solves).
             self._law_ctxs = (None, {})
 
+    def _solve_with_fallback(self, rungs, phi_boundary, drivers, sources, phi0, *, q0,
+                             diagnostics, **kwargs):
+        """`_solve`, then, if Newton did not converge, the rungs of `rungs` in order until
+        one does (see `solve`'s `fallback`)."""
+        report: dict = {}
+        first_error = None
+        try:
+            out = self._solve(phi_boundary, drivers, sources, phi0, q0=q0,
+                              diagnostics=diagnostics, _report=report, **kwargs)
+        except ConvergenceError as exc:
+            first_error = exc
+        else:
+            if diagnostics is None or _converged(diagnostics):
+                if diagnostics is not None:
+                    diagnostics.update(fallback=None, fallback_iterations=0)
+                return out
+            first = (out, dict(diagnostics))
+        # The rungs start from the linear guess, or from zeros at the held initial point of
+        # a layer without flow unknowns (which has none).
+        rung_start = "zeros" if report.get("held") else "linear"
+        last_error = None
+        for rung in rungs:
+            if rung == "linear_guess" and report.get("start") == rung_start:
+                continue
+            ramp: dict = {}
+            try:
+                out = self._solve(phi_boundary, drivers, sources, None, q0=None,
+                                  diagnostics=diagnostics,
+                                  _start="ramp" if rung == "storage_ramp" else "linear",
+                                  _report=ramp, **kwargs)
+            except ConvergenceError as exc:
+                last_error = exc
+                continue
+            if diagnostics is None or _converged(diagnostics):
+                if diagnostics is not None:
+                    diagnostics.update(fallback=rung,
+                                       fallback_iterations=ramp.get("ramp_iterations", 0))
+                return out
+        if first_error is not None:
+            if last_error is None:
+                raise first_error
+            raise ConvergenceError(
+                f"{first_error}; the fallback {list(rungs)} did not converge either: "
+                f"{last_error}"
+            ) from last_error
+        out, diag = first
+        diagnostics.clear()
+        diagnostics.update(diag, fallback=None, fallback_iterations=0)
+        return out
+
     def _solve(self, phi_boundary, drivers, sources, phi0, *, q0, history, dt, t, scheme,
-               mode, storage_flow, differentiable, diagnostics, **newton_kwargs):
-        """The body of `solve`, which see."""
+               mode, storage_flow, differentiable, diagnostics, _start=None, _report=None,
+               **newton_kwargs):
+        """The body of `solve`, which see. `_start` and `_report` are the fallback ladder's
+        (`_solve_with_fallback`): `_start="linear"` starts from the linear initial guess
+        (zeros at the held initial point of a layer without flow unknowns), `"ramp"` from
+        where `storage_ramp` settles from there; `_report` receives where the solve
+        started (`"start"`: `"linear"`, `"zeros"` or `"warm"`), whether it is that held
+        initial point (`"held"`) and the storage stages' Newton iterations
+        (`"ramp_iterations"`)."""
         self._require_current_topology()
         if scheme is None:
             scheme = self.scheme
@@ -2104,7 +2238,17 @@ class KirchhoffLayer(TopologyGuard):
             self, newton_kwargs, diagnostics, differentiable, drivers, sources, phi_boundary,
             step_start(step, history),
         )
-        x0, start = self._starting_point(phi0, phi_boundary, drivers, sources, step, q0=q0)
+        if _start is None:
+            x0, start = self._starting_point(phi0, phi_boundary, drivers, sources, step,
+                                             q0=q0)
+        else:
+            x0, start = self._starting_point(None, phi_boundary, drivers, sources, step,
+                                             linear=True)
+        if _report is not None:
+            _report["held"] = step.layout is not None
+            _report["start"] = ("warm" if phi0 is not None or q0 is not None
+                                else "zeros" if u is not None and _start is None
+                                else "linear")
         # A tensor held where the solve does not thread it is refused before solving, by
         # name; one reached only through a closure, at every residual the forward Newton
         # evaluates, the starting guess first and the root last (`_newton_differentiable`).
@@ -2135,6 +2279,11 @@ class KirchhoffLayer(TopologyGuard):
             def on_fail(exc):
                 if singular(last.get("op"), u.n, first_failing(last, newton_kwargs)):
                     raise self._singular_error(step.ctx.mode) from exc
+
+        if _start == "ramp":
+            # the storage ramp's starting point; the solve below starts from it
+            x0 = self._ramp(x0, phi_boundary, drivers, sources, step, newton_kwargs, _report)
+            start = None
 
         if fn is None:
             # The primal solve (with flow unknowns also a differentiable one that nothing
@@ -2179,7 +2328,7 @@ class KirchhoffLayer(TopologyGuard):
         if u is None:
             # the threaded residual and operator of the fast path
             residual_fn = fn.residual_fn
-            reuse_start = fn.layer_slopes
+            reuse_start = fn.layer_slopes and start is not None
 
             def operator_fn(x, *params):
                 # At the starting point the grounding check's slopes are the first
@@ -2562,7 +2711,8 @@ class KirchhoffLayer(TopologyGuard):
         batch = broadcast_shapes(*(p.shape[:-1] for p in parts))
         return torch.cat([p.expand(batch + p.shape[-1:]) for p in parts], dim=-1)
 
-    def _starting_point(self, phi0, phi_boundary, drivers, sources, step=None, *, q0=None):
+    def _starting_point(self, phi0, phi_boundary, drivers, sources, step=None, *, q0=None,
+                        linear: bool = False):
         """The Newton starting guess `x0` and, on the fast path, the slopes there `start`.
 
         The fast path starts from `linear_init` (or `phi0`), certified grounded; `start` is
@@ -2571,7 +2721,8 @@ class KirchhoffLayer(TopologyGuard):
         potentials) and `q0` (the flow unknowns), in the real view; `start` is `None`.
         `step` is the solve's `_Step`. (Its linear guess, `linear_init`, is not used here:
         starting the general path from it moved the pinned roots by up to Newton's
-        tolerance, so a cold solve keeps the zero start.)
+        tolerance, so a cold solve keeps the zero start.) `linear=True` (the fallback
+        ladder's) starts a layer with flow unknowns from it instead.
         """
         # The initial guess is NOT a differentiable quantity, and neither is the grounding
         # check below. Both are computed under no_grad (and a caller-supplied phi0 is
@@ -2597,6 +2748,11 @@ class KirchhoffLayer(TopologyGuard):
                     shapes.append(q0.shape[:-1])
                 B = broadcast_shapes(*shapes)
                 x0 = torch.zeros(B + (u.n,), dtype=real_dtype, device=phi_boundary.device)
+                if linear and self._unknowns is not None:
+                    # outside no_grad: the guess may take a law's slope by autograd
+                    with torch.enable_grad():
+                        guess = self._linear_guess(phi_boundary, drivers, sources, step)
+                    x0 = x0 + guess
                 n_phi = u.w * u.n_I
                 if phi0 is not None:
                     x0[..., :n_phi] = to_real(self, phi0.detach())
@@ -2629,6 +2785,29 @@ class KirchhoffLayer(TopologyGuard):
             node_slopes0 = self._withdrawal_slopes(phi0_full, drivers, step)
             self._grounding_check(dq0, where="solve", node_slopes=node_slopes0)
         return phi0, (dq0, node_slopes0)
+
+    def _ramp(self, x0, phi_boundary, drivers, sources, step, newton_kwargs, report):
+        """`storage_ramp` from `x0` on this solve's own residual and Jacobian (the laws
+        called on their modules, without gradients), the storage on the potential rows:
+        the starting point of the fallback ladder's `"storage_ramp"` rung."""
+        call = self._owner_call
+        u = self._unknowns if step.layout is None else step.layout
+
+        def residual(x):
+            return self._residual(x, phi_boundary, drivers, sources, step, call)[0]
+
+        def operator(x):
+            return self._operator(x, phi_boundary, drivers, step)
+
+        rows = None
+        if u is not None:
+            rows = torch.arange(u.n, device=x0.device) < u.w * u.n_I
+        stages: dict = {}
+        x = storage_ramp(residual, operator, x0, rows=rows, diagnostics=stages,
+                         **{k: v for k, v in newton_kwargs.items() if k != "on_failure"})
+        if report is not None:
+            report["ramp_iterations"] = stages["newton_iterations"]
+        return x
 
     def _held_grounding_check(self, x0, phi_boundary, drivers, step) -> None:
         """The grounding certificate of the held initial point of a layer without flow

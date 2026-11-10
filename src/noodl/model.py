@@ -178,7 +178,9 @@ class Model:
     verdict raises (or accepts, below). When the last pass's potential solve also stopped
     short, the error is `noodl.solvers.ConvergenceError` (a `RuntimeError`), so a caller can
     retry the step from another starting point (`warm_start=False`) and let every other
-    failure through. A step that is going to raise stops early, before `iterate_max`, once
+    failure through. A layer built with a `fallback` ladder climbs it inside the pass, before
+    the pass is judged (`KirchhoffLayer.solve`), so a pass whose solve a rung rescued is an
+    ordinary converged one. A step that is going to raise stops early, before `iterate_max`, once
     every unconverged instance's potential solve has failed again from a fed state within
     the tolerances of the previous pass's: the next pass would only repeat it. A potential
     solve that is differentiated still raises (`KirchhoffLayer.solve`'s
@@ -562,6 +564,12 @@ class Model:
         as an input (a retry after a warm start failed to converge, without losing that
         input).
 
+        `diagnostics["fallbacks"]` is `{layer: count}` over the Kirchhoff layers whose solve
+        ran with a fallback ladder (`KirchhoffLayer(fallback=)`, or a `fallback=` solve
+        keyword): how many of the step's passes had that layer's solve converge on a rung of
+        it, not on its first Newton solve. Under `coupling="iterate"` the passes are summed,
+        the differentiated one included. Absent when no layer has a ladder.
+
         `layer_options` maps a Kirchhoff layer's name to keywords for that layer's solve
         only, applied over `**solve_kwargs` (and so over the layer's own `newton_defaults`):
         `{"airflow": {"atol": 1e-11}}`; and a transport layer's name to the scheme of this
@@ -692,6 +700,7 @@ class Model:
             )
             if diagnostics is not None:
                 diagnostics.update({"passes": 1, "layers": diag})
+                _report_fallbacks(diagnostics, _fallbacks(self, (diag,)))
             return new
         return self._iterate(
             state, drivers, dt, diagnostics, solve_kwargs, t=t,
@@ -972,6 +981,7 @@ class Model:
             new = dict(zip(out_keys, flat, strict=True))
             # The differentiated pass's own diagnostics, DETACHED: see `detached`.
             diag = detached(adjoint_diag)
+            _add_fallbacks(problem.fallbacks, _fallbacks(self, (diag,)))
             adjoint = "implicit"
             adjoint_batched = bool(adjoint_report["batched"])
         else:
@@ -981,6 +991,7 @@ class Model:
                 {"passes": passes, "converged": converged, "max_change": change,
                  "layers": diag, "adjoint": adjoint, "adjoint_batched": adjoint_batched}
             )
+            _report_fallbacks(diagnostics, problem.fallbacks)
         return new
 
     def _unsolved(self, diag: Mapping) -> Tensor | None:
@@ -1178,6 +1189,31 @@ class Model:
                      flow_keys=flow_keys)
 
 
+def _fallbacks(model: Model, diags) -> dict[str, int]:
+    """Per Kirchhoff layer of `model` whose solve ran with a fallback ladder in the passes'
+    diagnostics `diags`, how many of those solves converged on a rung of it
+    (`KirchhoffLayer.solve`'s `fallback`). A layer without a ladder is left out."""
+    out: dict[str, int] = {}
+    for name in model.kirchhoff:
+        for d in diags:
+            layer = d.get(name, {})
+            if "fallback" in layer:
+                out[name] = out.get(name, 0) + (layer["fallback"] is not None)
+    return out
+
+
+def _add_fallbacks(total: dict[str, int], counts: Mapping[str, int]) -> None:
+    for name, count in counts.items():
+        total[name] = total.get(name, 0) + count
+
+
+def _report_fallbacks(diagnostics: dict, counts: Mapping[str, int]) -> None:
+    """`diagnostics["fallbacks"]`, only when some layer ran with a fallback ladder, so a
+    model without one reports exactly what it did before ladders existed."""
+    if counts:
+        diagnostics["fallbacks"] = dict(counts)
+
+
 class _ModelPasses:
     """`Model._iterate`'s side of `noodl._fixed_point_loop.PassProblem`.
 
@@ -1202,6 +1238,8 @@ class _ModelPasses:
         self.change: dict[str, Tensor] = {}
         self.prev: State | None = None
         self.inner_failed: Tensor | None = None
+        # per Kirchhoff layer, the passes whose potential solve took a fallback rung
+        self.fallbacks: dict[str, int] = {}
         self.anderson = (
             _AndersonHistory(model, model.iterate_memory)
             if model.iterate_acceleration == "anderson" else None
@@ -1227,6 +1265,7 @@ class _ModelPasses:
               needs_adjoint: bool) -> Verdict | None:
         model = self.model
         new, diag = out
+        _add_fallbacks(self.fallbacks, _fallbacks(model, (diag,)))
         self.inner_failed = inner_failed = model._unsolved(diag)
         prev = self.prev
         if prev is None:

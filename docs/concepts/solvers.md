@@ -169,6 +169,49 @@ stiff law at a large potential) cannot be met: the iterate stands still and the 
 iterate in every component, i.e. at the floor. Both options are off by default; a layer that
 needs them sets them as its `newton_defaults` (the sewer's dynamic wave does).
 
+## When Newton fails: the fallback ladder
+
+A potential solve that does not converge from its starting point can often be rescued by
+starting again from a better one. A `KirchhoffLayer` built with `fallback=` (or a `solve` call
+given one) climbs a short ladder when, and only when, Newton did not converge, and stops at the
+first rung that does:
+
+```python
+air = KirchhoffLayer(net, "air", laws, boundary=["ambient"],
+                     fallback=("linear_guess", "storage_ramp"))
+```
+
+- **`"linear_guess"`: start again from the linear guess.** The network linearised at zero
+  (`linear_init`) is solved once and Newton starts from there. A warm start from the previous
+  step's potentials is usually better, but after a large change (a fan slowing down, whose
+  iterates then swing between the ends of its curve) it may not be. The rung is skipped when
+  the failed solve already started from the linear guess, which a cold solve of a layer
+  without flow unknowns does; a layer with flow unknowns starts a cold solve from zeros, so
+  the rung runs there.
+- **`"storage_ramp"`: let the network settle from the linear guess through a fictitious
+  storage that is removed in steps.** Every node gets a storage term, as if it held some
+  amount that resists a change of its potential: its balance gains $g\,(x - x_\text{prev})$,
+  with $g$ a multiple of that node's own Jacobian diagonal. A large storage makes each change
+  small and the Jacobian strongly diagonal, so Newton converges from a poor start; the storage
+  is then divided by ten, three times (multiples 1, 0.1, 0.01 and 0.001), each stage starting
+  from the last one's result, and the ordinary solve starts from where it settled. This is
+  pseudo-time stepping: the stages are steps of a made-up transient whose end is the steady
+  solution (`noodl.solvers.continuation.storage_ramp`). The storage sits on the potential
+  (balance) rows only; on a layer without flow unknowns the shift keeps the operator
+  symmetric positive definite, so the SPD certificate and its solvers still apply.
+
+The whole batch is solved again on each rung. Only non-convergence (`ConvergenceError`) climbs
+the ladder; any other error passes through, and so does the rank test of a layer with flow
+unknowns, which reports a singular system as such. Nothing of the ladder is differentiated:
+the rung's solve is the layer's ordinary one from a new starting point, so the gradient is
+the implicit one at the exact root. `diagnostics["fallback"]` names the rung that converged
+(`None` when none was needed or none worked) and `diagnostics["fallback_iterations"]` the
+storage stages' Newton iterations; `Model.step` sums the rungs taken per layer over a step's
+passes into `diagnostics["fallbacks"]` (present only when some layer has a ladder). When no
+rung converges the first failure stands. The
+default is no ladder (`fallback=()`), which runs exactly the plain solve. The building
+application's air layers are built with `fallback=("linear_guess",)`.
+
 ## Monotone scalar solves
 
 `noodl.solvers.scalar.solve_monotone` is a batched bracketed root-finder for a scalar equation
