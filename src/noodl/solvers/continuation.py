@@ -70,14 +70,14 @@ def storage_ramp(
     from the last stage's root and with g ten times smaller, and return the last root.
 
     `g = scale * |diag(operator(x_prev))|` at every row, `x_prev` being the stage's start:
-    each row's own Jacobian diagonal sets its units, so the storage is relative.
-    On the rows of `signed` (a `(n,)` bool mask; `None` is none) `g` keeps the diagonal's
-    sign, `scale * diag`, so the shifted diagonal `(1 + scale) diag` never cancels: a row
-    written with a negative diagonal (a
-    relation `dp - f(q)`) gets an inertia rather than a storage of the wrong sign. `scales`
-    are the stages' factors. Each stage is one `newton` solve with `newton_kwargs` and
-    `on_failure="return"`, under `no_grad`: a stage that does not converge still hands its
-    last iterate on, and an instance whose iterate is not finite keeps the stage's start.
+    each row's own Jacobian diagonal sets its units, so the storage is relative. On the
+    rows of `signed` (a `(n,)` bool mask; `None` is none) `g` keeps the diagonal's sign,
+    `scale * diag`, so the shifted diagonal `(1 + scale) diag` never cancels: a row written
+    with a negative diagonal (an implicit law `dp - f(q)`) gets an inertia rather than a
+    storage of the wrong sign. `scales` are the stages' factors. Each stage is one `newton`
+    solve with `newton_kwargs` and `on_failure="return"`, under `no_grad`: a stage that
+    does not converge still hands its last iterate on, and an instance whose iterate is
+    not finite keeps the stage's start.
     `diagnostics`, when given, receives `"newton_iterations"`, the stages' Newton iterations
     summed. The result is detached; it is a starting point, not a solution.
     """
