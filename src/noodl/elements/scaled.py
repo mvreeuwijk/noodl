@@ -40,7 +40,7 @@ class Scaled(ConstitutiveLaw):
                 or law._takes_ctx):
             raise ValueError(
                 f"Scaled (kind {law.kind!r}): {type(law).__name__} is not an explicit "
-                f"single-edge law q = F(dp) (relation={isinstance(law, ImplicitLaw)}, "
+                f"single-edge law q = F(dp) (implicit={isinstance(law, ImplicitLaw)}, "
                 f"ports={law.ports}, dynamic={law.dynamic}, takes ctx={law._takes_ctx}); "
                 f"only such a law's "
                 f"flow can be scaled"

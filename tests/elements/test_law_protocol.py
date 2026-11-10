@@ -104,7 +104,7 @@ def test_implicit_law_routes_forward_to_residual_and_has_no_flow():
     r = law(torch.tensor([5.0]), torch.tensor([0.3]), {}, LawContext(mode="dc"))
     assert torch.equal(r, torch.tensor([0.0]))
     assert law._takes_ctx
-    with pytest.raises(TypeError, match="relation"):
+    with pytest.raises(TypeError, match="implicit law"):
         law.flow(torch.tensor([1.0]))
 
 

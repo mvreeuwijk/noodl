@@ -201,7 +201,7 @@ class ConstitutiveLaw(torch.nn.Module):
     def __init_subclass__(cls, **kwargs) -> None:
         super().__init_subclass__(**kwargs)
         for gone, use in (
-                ("law_form", "a law that gives a relation subclasses ImplicitLaw"),
+                ("law_form", "an implicit law subclasses ImplicitLaw"),
                 ("contextual", "declare a `ctx` parameter in `flow` to receive the context")):
             if gone in cls.__dict__:
                 raise TypeError(
@@ -382,9 +382,9 @@ class ConstitutiveLaw(torch.nn.Module):
 
 
 class ImplicitLaw(ConstitutiveLaw):
-    """A law that cannot give the flow from the potential difference (an ideal source, a
-    flow-controlled pipe, an inductance) gives a relation `residual(dp, q, drivers, ctx) = 0`
-    instead, and the layer adds its flow as an unknown.
+    """An implicit law: a law whose flow is an unknown of the layer (an ideal source, a
+    flow-controlled pipe, an inductance). It cannot give the flow from the potential
+    difference; it is a relation `residual(dp, q, drivers, ctx) = 0` instead.
 
     Subclasses implement `residual`, which returns one value per edge, with the shape of
     `dp`. `flow` and `dflow` refuse: the flow is read from the layer's solved `q`.
@@ -406,7 +406,7 @@ class ImplicitLaw(ConstitutiveLaw):
 
     def _no_flow(self) -> TypeError:
         return TypeError(
-            f"{type(self).__name__} (kind {self.kind!r}) is a relation: its flow is an "
+            f"{type(self).__name__} (kind {self.kind!r}) is an implicit law: its flow is an "
             f"unknown of the layer; read it from the solved q"
         )
 
@@ -417,7 +417,7 @@ class ImplicitLaw(ConstitutiveLaw):
         raise self._no_flow()
 
     def linear_init(self, drivers=None):
-        """Refused: a relation has no tangent `(c, k)`. A layer's linear guess
+        """Refused: an implicit law has no tangent `(c, k)`. A layer's linear guess
         (`KirchhoffLayer.linear_init`) takes its `residual` and `jacobian` at zero flow
         instead."""
         raise self._no_flow()

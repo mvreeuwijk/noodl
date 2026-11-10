@@ -117,7 +117,7 @@ class _StepMixin:
         the flow into every storage entry at the step start; `history=(phi, None)` is the
         step of a layer whose storage is all that steps. A layer with no storage, no dynamic
         law and no law that reads the context takes no step: it refuses `dt` and `history`.
-        In practice that is a fast-path layer only: a layer with an ideal or relation law
+        In practice that is a fast-path layer only: a layer with an ideal or implicit law
         reads the context, so it steps. A scheme outside `SCHEMES` is refused on every
         layer but a phasor one, which ignores it. Every keyword is checked by name;
         `check_dt=False` skips the positivity of `dt` (a host sync for a tensor `dt`) when

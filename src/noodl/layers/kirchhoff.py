@@ -169,15 +169,15 @@ class KirchhoffLayer(
     step-start values: a time-dependent current source, a storing law in flow form) is such a
     law too. The grounding of this system is certified at the start of every solve.
 
-    A law that gives a relation adds its flow as an unknown. A law that cannot give the flow
-    from the potential difference (`ImplicitLaw`: an ideal source, a flow-controlled law, a
-    capacitance or inductance) gives a relation `residual(dp, q) = 0` instead, and a coupled
+    An implicit law adds its flow as an unknown. A law that cannot give the flow from the
+    potential difference (`ImplicitLaw`: an ideal source, a flow-controlled law, a
+    capacitance or inductance) is a relation `residual(dp, q) = 0` instead, and a coupled
     multi-port law gives its edges' flows together; the flows of those edges
-    (`implicit_edges`) become unknowns alongside the interior potentials, the relations add
-    their rows, and the Jacobian is a sparse, nonsymmetric matrix. Every connected part of
-    such a layer's edges must contain a boundary node (a ground). Every method (`solve`,
+    (`implicit_edges`) become unknowns alongside the interior potentials, the implicit laws
+    add their rows, and the Jacobian is a sparse, nonsymmetric matrix. Every connected part
+    of such a layer's edges must contain a boundary node (a ground). Every method (`solve`,
     `flows`, `dflows`, `residual`, `jacobian`, `adjoint`, `linear_init`) is defined on every
-    layer; those that need the flows of the relations take the solved `q`.
+    layer; those that need the flows of the implicit edges take the solved `q`.
 
     Phasor. With `phasor=True` the layer solves the sinusoidal steady state, always with the
     sparse operator of the previous paragraph: potentials and flows are complex amplitudes
@@ -280,8 +280,8 @@ class KirchhoffLayer(
         self.name = name
         self.head_key = f"{name}.edge_head"
         self._laws = list(laws)
-        # A relation (`ImplicitLaw`) has its flow as an unknown of the layer, read once here.
-        self._relation = [isinstance(el, ImplicitLaw) for el in laws]
+        # An implicit law has its flow as an unknown of the layer, read once here.
+        self._implicit = [isinstance(el, ImplicitLaw) for el in laws]
         self.kinds = [el.kind for el in laws]
         self._storage = list(storage)
         for st in self._storage:
@@ -296,7 +296,7 @@ class KirchhoffLayer(
         self._boundary_storage: list[NodeStorage] = []
         if scheme == "forward_euler":
             self._boundary_storage, self._storage = self._storage, []
-        # Flow unknowns: a law whose flow is an unknown (a relation) or that couples several
+        # Flow unknowns: an implicit law or one that couples several
         # edges (ports > 1), or a phasor layer, cannot be solved by the fast path; such a
         # layer adds flow unknowns (`_flow_unknowns`). A law that reads the law context (the
         # time, its step-start values) still gives its flow from the potential difference,
@@ -304,10 +304,10 @@ class KirchhoffLayer(
         # and a storing law or a storage makes the layer dynamic (it steps from its state).
         self.phasor = phasor
         self.dynamic = any(el.dynamic for el in self._laws) or bool(self._storage)
-        # every flow follows from the potentials: no law is a relation, none couples edges, and
+        # every flow follows from the potentials: no law is implicit, none couples edges, and
         # the layer is real, so the Jacobian is the symmetric network matrix (plus the storage
         # and withdrawal diagonal)
-        self._eliminated = not self.phasor and not any(self._relation) and all(
+        self._eliminated = not self.phasor and not any(self._implicit) and all(
             el.ports == 1 for el in self._laws)
         # The laws that read the law context, by position: the fast path passes them the
         # step's context (restricted to their edges, `_law_ctx`); every other law keeps the
@@ -474,7 +474,7 @@ class KirchhoffLayer(
         self._takes_step = bool(dyn) or bool(self._storage) or any(
             el._takes_ctx for el in self._laws)
         # whether a law reads the step-start potential differences and flows of its edges
-        self._reads_history = bool(dyn) or any(self._relation) or any(
+        self._reads_history = bool(dyn) or any(self._implicit) or any(
             el._takes_ctx for el in self._laws)
 
         # The layout of the flow unknowns; `None` on the fast path. The one attribute every
@@ -551,7 +551,7 @@ class KirchhoffLayer(
     @property
     def implicit_edges(self) -> torch.Tensor:
         """Positions, in layer edge order (the columns of `solve`'s `q`), of the edges whose
-        flow is an unknown of the layer (the edges of relations and multi-port laws); empty
+        flow is an unknown of the layer (the edges of implicit and multi-port laws); empty
         on a layer without flow unknowns."""
         if self._unknowns is None:
             return torch.zeros(0, dtype=torch.long)
@@ -570,22 +570,23 @@ class KirchhoffLayer(
         Hz, one value per instance); `None` for a layer that is not a phasor layer."""
         return f"{self.name}.frequency" if self.phasor else None
 
-    def _relation_kinds(self) -> list[str]:
-        """The kinds of this layer that give a relation, whose flows are its unknowns."""
-        return [el.kind for el, rel in zip(self._laws, self._relation, strict=True) if rel]
+    def _implicit_kinds(self) -> list[str]:
+        """The kinds of this layer that are implicit laws, whose flows are its unknowns."""
+        return [el.kind for el, implicit in zip(self._laws, self._implicit, strict=True)
+                if implicit]
 
     def _flow_unknown_columns(self, q, what: str, like: torch.Tensor) -> torch.Tensor:
         """`q`'s columns of the flow unknowns, for a layer with flow unknowns. `q` is every
-        edge's flow, as `solve` returns it. Without it a layer with relations cannot give
+        edge's flow, as `solve` returns it. Without it a layer with implicit laws cannot give
         `what` (the unknown flows are not functions of the potentials) and refuses by name;
-        a layer with no relation needs none (`like` sets the empty columns' type)."""
+        a layer with no implicit law needs none (`like` sets the empty columns' type)."""
         edges = self._unknowns.edges
         if q is None:
             if len(edges):
                 raise ValueError(
-                    f"KirchhoffLayer {self.name!r}: kinds {self._relation_kinds()} give a "
-                    f"relation, so their flows are unknowns of the layer; pass q (the flows "
-                    f"solve returned) to {what}")
+                    f"KirchhoffLayer {self.name!r}: kinds {self._implicit_kinds()} are "
+                    f"implicit laws, so their flows are unknowns of the layer; pass q (the "
+                    f"flows solve returned) to {what}")
             return like.new_zeros(like.shape[:-1] + (0,))
         n_edges = len(self.cols)
         if q.shape[-1] != n_edges:
@@ -908,7 +909,7 @@ class KirchhoffLayer(
         (`mode="dc"`). The result is differentiable in `phi`, `drivers` and the laws'
         parameters on the potential edges, and carries `q`'s graph on the implicit edges.
         At `solve`'s own `(phi, q)` it returns `q`. A phasor layer has no such accessor.
-        Without `q` such a layer raises `ValueError`, naming the kinds that give a relation.
+        Without `q` such a layer raises `ValueError`, naming the implicit kinds.
         """
         if self._unknowns is not None:
             return self._flows_given(phi, drivers or {}, q)
@@ -967,10 +968,10 @@ class KirchhoffLayer(
         that reads the law context in the steady context, as `flows`).
 
         On a layer without flow unknowns that is each law's own slope. On a layer with flow
-        unknowns the edges of a flow-form law give theirs the same way, and an edge of a
-        relation `r(dp, q) = 0` gives the slope the relation implies, `-(d r / d dp) / (d r /
+        unknowns the edges of a flow-form law give theirs the same way, and an edge of an
+        implicit law `r(dp, q) = 0` gives the slope the law implies, `-(d r / d dp) / (d r /
         d q)`, taken at `q`'s flow on that edge: `q` is every edge's flow, as `solve` returns
-        it, and is required when the layer has a relation (`ValueError` without it, as for
+        it, and is required when the layer has an implicit law (`ValueError` without it, as for
         `flows`). The implied slope is `nan` where `d r / d q` is zero, as on an ideal
         potential source, whose flow does not follow from its potential difference. Every
         edge of a law with several ports is `nan` too: its slope is a matrix, not a number
@@ -988,12 +989,12 @@ class KirchhoffLayer(
         ctx = LawContext(mode="dc")
         d = self.dp(phi, drivers)
         parts = []
-        for i, (el, rel, (s, e)) in enumerate(zip(self._laws, self._relation,
+        for i, (el, implicit, (s, e)) in enumerate(zip(self._laws, self._implicit,
                                                   self._law_slices, strict=True)):
             dp_s = d[..., s:e]
             if el.ports != 1:
                 parts.append(torch.full_like(dp_s, math.nan))
-            elif rel:
+            elif implicit:
                 f0 = int(index[s])
                 dr_dp, dr_dq = el.jacobian(dp_s, q_F[..., f0:f0 + e - s], drivers,
                                            self._law_ctx(ctx, s, e))
@@ -1096,8 +1097,8 @@ class KirchhoffLayer(
 
         On a layer without flow unknowns it is the interior balance `A_I q(phi) - s_I (+
         w(phi))`, `n_I` rows; `q` is ignored. On a layer with flow unknowns the unknowns are
-        the interior potentials and the flows of the relations' edges, `[phi_I, q_F]` in that
-        order, and the residual is the balance rows, then the relations' own residuals:
+        the interior potentials and the flows of the implicit edges, `[phi_I, q_F]` in that
+        order, and the residual is the balance rows, then the implicit laws' own residuals:
         `q` is every edge's flow, as `solve` returns it (its flow-unknown columns are read),
         and is required (`ValueError` without it). A phasor layer's rows are complex.
 
@@ -1135,7 +1136,7 @@ class KirchhoffLayer(
         `q`; `None` leaves storage out (a steady state). Zero (to solver tolerance) at a
         solved state. Unlike `residual`, which recomputes the flows from `phi`, this takes
         them as given, so it is defined on every layer, including one with flow unknowns,
-        whose relations' flows are not functions of `phi`.
+        whose implicit laws' flows are not functions of `phi`.
         """
         self._require_current_topology()
         phi_i = phi[..., self.interior]
@@ -1156,7 +1157,7 @@ class KirchhoffLayer(
         On the fast path `x` is the interior potentials, and the residual is the balance
         `A_I q(phi) - s_I (+ w(phi))`, with the storage withdrawal on a step; `call` is not
         used (the laws are the layer's own). With flow unknowns `x` is `[phi_I, q_F]` in the
-        real view, the residual is the balance rows, then the relations' own residuals, and
+        real view, the residual is the balance rows, then the implicit laws' own residuals, and
         `call(i, args)` evaluates owner `i` (`_owner_call`, the default, or the threaded
         parameters of the differentiable solve); a step adds the storage withdrawal, and the
         initial point replaces the held rows (`_Held`). The layout is the step's when it
@@ -1219,7 +1220,7 @@ class KirchhoffLayer(
         phi = self.assemble(phi_I, phi_boundary)
         dp = self.dp(phi, drivers)
         blocks = []
-        for i, (el, rel, (s, e)) in enumerate(zip(self._laws, self._relation,
+        for i, (el, implicit, (s, e)) in enumerate(zip(self._laws, self._implicit,
                                                   self._law_slices, strict=True)):
             lctx = self._law_ctx(ctx, s, e)
             dp_s = dp[..., s:e]
@@ -1227,7 +1228,7 @@ class KirchhoffLayer(
             # equal those of a `functional_call` with the threaded parameters, because the
             # threaded tensors ARE the module's own parameters (the same argument as
             # `dp_independent` in `_functional.py`), and the blocks carry no graph.
-            if rel:
+            if implicit:
                 f0 = int(u.index[s])
                 q_s = q_F[..., f0:f0 + e - s]
             else:
@@ -1320,7 +1321,7 @@ class KirchhoffLayer(
 
     def _flows_and_residuals(self, phi, q_F, drivers, ctx, call, u=None, tangents=None):
         """`(q, r_F)`: every edge's flow (the law flow on potential-controlled edges, the
-        unknown on relation edges) and the relations' residuals, in layer edge order; `u` is
+        unknown on implicit edges) and the implicit laws' residuals, in layer edge order; `u` is
         the layout (the layer's own by default). A law listed in `tangents` (`_tangents`)
         gives its tangent at zero, `c + k dp`, in place of its flow."""
         index = (self._unknowns if u is None else u).index
@@ -1330,7 +1331,7 @@ class KirchhoffLayer(
                 zip(self._laws, self._law_slices, strict=True)):
             lctx = self._law_ctx(ctx, s, e)
             dp_s = dp[..., s:e]
-            if self._relation[i]:
+            if self._implicit[i]:
                 f0 = int(index[s])
                 q_s = q_F[..., f0:f0 + e - s]
                 r_s = call(i, (dp_s, q_s, drivers, lctx))
@@ -1440,21 +1441,21 @@ class KirchhoffLayer(
 
     def _tangents(self, drivers, ctx: LawContext, device=None) -> dict:
         """`{i: (c, k)}`: the tangent at zero (`_law_tangent`) of every law `i` of a layer with
-        flow unknowns that has one, a real one-port law with a flow. A relation has none (its
+        flow unknowns that has one, a real one-port law with a flow. An implicit law has none (its
         flow is an unknown), and neither has a law of several ports or a phasor law, whose
         tangent couples edges or is complex: the linear guess evaluates those as Newton does,
         at the potentials it starts from."""
         if self.phasor:
             return {}
         return {i: self._law_tangent(i, el, drivers, ctx, device)
-                for i, (el, rel) in enumerate(zip(self._laws, self._relation, strict=True))
-                if not rel and el.ports == 1}
+                for i, (el, implicit) in enumerate(zip(self._laws, self._implicit, strict=True))
+                if not implicit and el.ports == 1}
 
     def _linear_guess(self, phi_boundary, drivers, sources, step: _Step) -> torch.Tensor:
         """The linear guess of a layer with flow unknowns, `[phi_I, q_F]` in the real view:
         one Newton step from zero (interior potentials and flow unknowns zero) on the system
         whose laws with a flow are replaced by their tangents at zero (`_tangents`). The
-        relations give their residual and Jacobian at that point, the withdrawals and the
+        implicit laws give their residual and Jacobian at that point, the withdrawals and the
         storages their value and slope there, and the initial point holds its held rows.
         `step` is the solve's `_Step`. Runs without gradients."""
         u = self._unknowns
@@ -1484,8 +1485,9 @@ class KirchhoffLayer(
             return -result.x
 
     def _singular_error(self, mode: str) -> SingularSystemError:
-        """`singular_error` of this layer, naming its relation kinds."""
-        kinds = [el.kind for el, rel in zip(self._laws, self._relation, strict=True) if rel]
+        """`singular_error` of this layer, naming its implicit kinds."""
+        kinds = [el.kind for el, implicit in zip(self._laws, self._implicit, strict=True)
+                 if implicit]
         return singular_error(self, kinds, mode)
 
     def _extra_grounded(self, node_slopes: torch.Tensor | None) -> torch.Tensor | None:
@@ -1571,7 +1573,7 @@ class KirchhoffLayer(
         potentials and the flow unknowns together: each law with a flow is replaced by its
         tangent at zero (a law with several ports, and every law on a phasor layer, is taken
         at its flow and Jacobian at the starting potentials instead: the same for a linear
-        law), each relation by its residual and Jacobian at zero interior potentials and
+        law), each implicit law by its residual and Jacobian at zero interior potentials and
         zero flows, and the system is solved once. On a layer with flow unknowns the result
         is detached: no gradient flows to `phi_boundary`, `sources`, the drivers or the law
         parameters, unlike on a layer without flow unknowns. A phasor layer returns complex

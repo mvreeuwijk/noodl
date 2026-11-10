@@ -99,10 +99,10 @@ step for any instance whose residual did NOT shrink under a full step — a dead
 square-root-law edge otherwise cycles $\Delta p \to -\Delta p$ forever). Nodal analysis handles
 flow sources trivially (add to $s$) but a branch whose *natural* law fixes a flow or
 potential directly (an ideal pump, a fixed-flow fan, a prescribed pressure boundary)
-cannot be written as $f = g(e)$. Such a law gives a relation between its potential difference
-and its flow instead, and noodl makes that branch's flow an extra unknown of the layer, with one
+cannot be written as $f = g(e)$. Such a law is an implicit law: a relation between its potential difference
+and its flow, and noodl makes that branch's flow an extra unknown of the layer, with one
 extra row for the relation, at the cost of a larger, indefinite (saddle-point) system; see
-*Laws that give a relation* below.
+*Implicit laws* below.
 
 **Loop (mesh) analysis.** Unknowns are the $l = b - n + c$ cycle amplitudes $\lambda$. Set
 
@@ -127,26 +127,26 @@ unknowns; a branch with a *prescribed potential drop* needs the dual augmentatio
 Neither formulation is unconditionally better-conditioned — both reduce to a congruence
 transform of the same branch Jacobian — so the practical choice is driven by $n$ vs
 $l$ and by which sources are naturally flow- or potential-type. `noodl`'s Kirchhoff
-layers are nodal, with flow unknowns added where a constitutive law gives a relation
+layers are nodal, with flow unknowns added where a constitutive law is implicit
 (below). The cycle space is kept for flows that are not potential-driven — prescribed or
 closure-computed flows, and the closed-form continuity solve on a tree
 (`cycles.particular_flow`, §9). `cycles.assert_forward_oriented` encodes a related constraint:
 only an entrywise non-negative cycle basis guarantees non-negative $\lambda$ maps to
 non-negative $f$, needed for the constant upwind operator of §2.
 
-### Laws that give a relation
+### Implicit laws
 
 A `KirchhoffLayer` whose constitutive laws all give their flow from the potential difference,
-$f_e = g_e(e_e)$, is solved by nodal analysis exactly as above. A law that gives a relation
-$r_F(e_F, f_F) = 0$ instead of a flow adds that flow as an unknown of the layer: an ideal
+$f_e = g_e(e_e)$, is solved by nodal analysis exactly as above. A law that is a relation
+$r_F(e_F, f_F) = 0$ instead of a flow (an implicit law) adds that flow as an unknown of the layer: an ideal
 potential source ($e = V$), a flow-controlled law ($e = h(f)$), an inductance over one time
 step, the coupled constraints of a two-port such as an ideal transformer. Circuit simulators
 call this formulation Modified Nodal Analysis (Ho, Ruehli & Brennan, *The modified nodal
 approach to network analysis*, IEEE Trans. Circuits Syst. 22(6):504–509, 1975): a layer with
-flow unknowns is that system, and the laws that give a relation are the branches it adds
+flow unknowns is that system, and the implicit laws are the branches it adds
 unknowns for. Partition the branches into those whose law gives the flow, $P$, and those whose
-law gives a relation, $F$. The unknowns are the interior potentials $\phi_I$ and the flows
-$f_F$, and the equations are the flow balance (KCL) at the interior nodes and the relations:
+law is implicit, $F$. The unknowns are the interior potentials $\phi_I$ and the flows
+$f_F$, and the equations are the flow balance (KCL) at the interior nodes and the implicit laws' relations:
 
 $$
 \begin{aligned}
@@ -265,7 +265,7 @@ None of these is differentiable in the autograd sense (uncertain: no published
 [power-flow optimisation](https://arxiv.org/pdf/2603.28203)). Two patterns matter for
 `noodl`: every mature tool is **nodal** in the pressure/head variable (cheap, robust
 SPD systems), and `noodl`'s Kirchhoff layers are nodal too, with flow unknowns added only
-where a constitutive law gives a relation (§1); and Modelica's stream
+where a constitutive law is implicit (§1); and Modelica's stream
 connectors are the strongest existing precedent for carrying enthalpy
 and species *with* the flow, matching the advection-matrix construction in §2.
 

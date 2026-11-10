@@ -325,13 +325,13 @@ def test_layer_methods_on_a_layer_with_flow_unknowns():
     torch.testing.assert_close(slopes[1:], Orifice().dflow(dp[1:], drivers))
 
     # q is an argument of the methods that need the flows
-    with pytest.raises(ValueError, match=r"kinds \['fan'\] give a relation.*pass q"):
+    with pytest.raises(ValueError, match=r"kinds \['fan'\] are implicit laws.*pass q"):
         layer.flows(phi, drivers)
     for call in (lambda: layer.dflows(phi, drivers),
                  lambda: layer.residual(phi_i, pb, drivers, src),
                  lambda: layer.jacobian(phi_i, pb, drivers),
                  lambda: layer.adjoint(phi_i, pb, drivers, grad)):
-        with pytest.raises(ValueError, match=r"kinds \['fan'\] give a relation.*pass q"):
+        with pytest.raises(ValueError, match=r"kinds \['fan'\] are implicit laws.*pass q"):
             call()
     with pytest.raises(ValueError, match="every edge"):
         layer.residual(phi_i, pb, drivers, src, q=q[..., :2])
@@ -829,7 +829,7 @@ def test_flows_of_mna_layer_return_the_solved_q_and_need_q():
     drivers = {"head": torch.tensor([5.0]), "c": torch.tensor([0.7])}
     phi, q = layer.solve(torch.zeros(1), drivers, torch.zeros(3), differentiable=False)
     torch.testing.assert_close(layer.flows(phi, drivers, q), q, rtol=1e-10, atol=1e-12)
-    with pytest.raises(ValueError, match="give a relation"):
+    with pytest.raises(ValueError, match="are implicit laws"):
         layer.flows(phi, drivers)
     with pytest.raises(ValueError, match="every edge"):
         layer.flows(phi, drivers, q[..., :2])

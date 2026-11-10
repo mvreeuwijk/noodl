@@ -41,7 +41,7 @@ all four:
   request, clipped against capacity and headroom.
 - The **electrical circuits** application solves for a potential, the node voltage, with the
   currents of ideal sources, inductors and transformers as extra unknowns: the nodal solve the
-  building and water applications use, with the relations' flows added as unknowns.
+  building and water applications use, with the implicit laws' flows added as unknowns.
 
 And they share machinery in ways that would be coincidence if the abstraction were wrong. The
 sewer's headspace air layer uses the *same* `Stack` buoyancy term the

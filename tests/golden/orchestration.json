@@ -4271,7 +4271,7 @@
       },
       "flows_without_q": {
         "refused": {
-          "message": "KirchhoffLayer 'air': kinds ['fan'] give a relation, so their flows are unknowns",
+          "message": "KirchhoffLayer 'air': kinds ['fan'] are implicit laws, so their flows are unknow",
           "type": "ValueError"
         }
       },

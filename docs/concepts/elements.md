@@ -2,7 +2,7 @@
 
 A **constitutive law** is the relation, on an edge kind, between the potential
 difference across each edge of that kind and the flow along it. Most constitutive laws give the
-flow as a function of the potential difference; some are relations between the two, with the
+flow as a function of the potential difference; some are implicit laws, with the
 flow an unknown (an ideal source, an inductance), and some couple several edges (a
 transformer's two windings). A **head term** is a term added to that potential difference before
 the constitutive law sees it — buoyancy, wind pressure, interfacial drag.
@@ -198,9 +198,9 @@ analysis. A law that cannot (a flow-controlled law, an ideal source, an inductan
 potential difference and the flow, zero when they agree; the layer then adds its flow as an
 unknown. Every law has `residual`: for a law with a flow it is `q - flow(dp)`, which the solve
 never calls. To read the law context (time, frequency, step-start values), name the third
-parameter of `flow` `ctx`. A `KirchhoffLayer` with a relation or a multi-port law adds those
+parameter of `flow` `ctx`. A `KirchhoffLayer` with an implicit law or a multi-port law adds those
 edges' flows as unknowns
-([Laws that give a relation](layers.md#laws-that-give-a-relation-implicit-coupled-and-dynamic-laws));
+([Implicit, coupled and dynamic laws](layers.md#implicit-coupled-and-dynamic-laws));
 a dynamic or `ctx`-reading law that gives its flow adds none. Three class-level declarations on `ConstitutiveLaw` describe the rest.
 
 | Declaration | Default | Meaning |

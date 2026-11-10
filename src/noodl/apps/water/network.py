@@ -12,7 +12,7 @@ tanks' only where they are not held at boundary nodes (`tank_scheme="forward_eul
 them at their heads in the step-start `"water.phi"`), in that order.
 Edge kinds partition by device type: `pipe`, `pump`, `valve` (a TCV, i.e. a settable minor
 loss), `fcv` (a `FixedFlow`), `pbv` (a `BreakerValve`) and `gpv` (a `GeneralPurposeValve`).
-The two last are relations (their flow is an unknown of the solve); every other device gives
+The two last are implicit laws (their flow is an unknown of the solve); every other device gives
 its flow from the head difference.
 """
 
