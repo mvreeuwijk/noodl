@@ -39,7 +39,7 @@ model).
 Reproduce: `python -m benchmarks.profile_forward` and compare the residual's share of the
 profile.
 
-## Backend of the classic solve
+## Backend of the fast path
 
 For the sparse-direct versus PCG ratios (about 4.6x slower PCG on the single-instance
 forward solve) and the ensemble crossover at `select._SPARSE_DIRECT_MAX_BATCH`, see

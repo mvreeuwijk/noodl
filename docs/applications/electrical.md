@@ -792,8 +792,8 @@ the solver's own error; any other error passes through unchanged.
 ### The DC model
 
 `dc_power_flow(net)` builds the DC approximation (all voltage magnitudes 1 p.u., no branch
-resistance or charging, small angle differences) as plain nodal analysis on a classic real
-`KirchhoffLayer` named `"power_dc"`. The potential is the voltage angle `theta` (rad) at
+resistance or charging, small angle differences) on a real `KirchhoffLayer` with no flow
+unknowns (the fast path) named `"power_dc"`. The potential is the voltage angle `theta` (rad) at
 the buses; there is no ground node. Each in-service branch is one edge from bus `->` to bus with
 a `Conductance(1 / (x tau))` (`tau` the tap ratio, 0 meaning 1), and the phase shifts `sigma`
 are the layer's head driver `"power_dc.edge_head"` (per branch, in edge order) holding `-sigma`, so the

@@ -194,8 +194,8 @@ keys stop changing, and returns the last pass's state. It is what `street_steady
 `street_steady_with_plume` and `sewer_steady` run on, and its gradient is that of the fixed
 point (implicit adjoint), not of the unrolled passes; `relaxation`, a per-instance `measure`
 and `diagnostics` are described in its docstring.
-Each potential solve starts from the state's last potentials (and a layer solved by Modified
-Nodal Analysis from its last implicit-law flows too); `warm_start=False` starts it
+Each potential solve starts from the state's last potentials (and a layer with flow unknowns
+from its last flows too); `warm_start=False` starts it
 from the layer's linear initial guess instead, while closures still read those potentials
 (a retry when a warm start does not converge). Non-convergence raises
 `noodl.solvers.ConvergenceError`, under either coupling (with `coupling="iterate"`, when the

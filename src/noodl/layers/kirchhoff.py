@@ -235,8 +235,9 @@ class KirchhoffLayer(TopologyGuard):
     Phasor. With `phasor=True` the layer solves the sinusoidal steady state, always with the
     sparse operator of the previous paragraph: potentials and flows are complex amplitudes
     (complex128), the frequency in Hz comes from the driver `"<name>.frequency"` (one per
-    instance) and reaches the laws as `LawContext.omega` (`2 pi f`). Each complex unknown is solved as its (real, imaginary) pair, so a law that is
-    not holomorphic in `dp` (a constant-power load, `q = conj(S / dp)`) is handled exactly.
+    instance) and reaches the laws as `LawContext.omega` (`2 pi f`). Each complex unknown is
+    solved as its (real, imaginary) pair, so a law that is not holomorphic in `dp` (a
+    constant-power load, `q = conj(S / dp)`) is handled exactly.
     Every law must declare `phasor_capable`, withdrawals are refused (a load is an edge to
     ground), and `power_residual` is the complex power balance.
 
@@ -2808,7 +2809,7 @@ class KirchhoffLayer(TopologyGuard):
             raise ValueError(
                 f"KirchhoffLayer {self.name!r}: grad must have the width of the unknowns "
                 f"[phi_I, q_F], {u.n} ({u.n_I} interior potentials, then {u.n_F} flow "
-                f"unknowns{', each a (Re, Im) pair: the real view' if u.w == 2 else ''}); "
+                f"unknown(s){', each a (Re, Im) pair: the real view' if u.w == 2 else ''}); "
                 f"got {got}")
 
     def power_residual(self, phi, q, drivers, sources=None):
