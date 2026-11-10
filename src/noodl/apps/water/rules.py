@@ -219,11 +219,27 @@ def take_actions(
     setting in the carried unit (`head_scale` for a PRV, PSV or PBV on a pressure layer).
     A pump CLOSED is at speed 0 (`setlinkstatus`), as a CLOSED control leaves it
     (`controls._action`), so a CLOSED control that follows on the same pump changes nothing
-    and ends no step."""
+    and ends no step. `take_actions_per_link` says which links the actions were taken on."""
+    status, setting, acted = take_actions_per_link(
+        actions, status=status, setting=setting, link_names=link_names, link_kinds=link_kinds,
+        setting_scale=setting_scale, setting_tolerance=setting_tolerance, solved=solved)
+    return status, setting, bool(acted.any())
+
+
+def take_actions_per_link(
+    actions: Sequence[Action], *, status: Tensor, setting: Tensor, link_names: Sequence[str],
+    link_kinds: Sequence[str], setting_scale: Sequence[float] | None = None,
+    setting_tolerance: Sequence[float] | None = None, solved: Tensor | None = None,
+) -> tuple[Tensor, Tensor, Tensor]:
+    """`take_actions` with `acted` (`(n_links,)`, bool) in place of `changed`: the links an
+    action was TAKEN on (`takeactions`' `flag` per action: it ends the step and is counted,
+    whether or not it moved the carried values). An OPEN taken on a pump the solve shut at its
+    shut-off head (its carried status already OPEN) is such a link: EPANET's `setlinkstatus`
+    opens its `XHEAD` status and `addenergy` then charges the step (`simulate`)."""
     status, setting = status.clone(), setting.clone()
+    acted = torch.zeros(status.shape, dtype=torch.bool)
     found = status if solved is None else solved
     index = {name: j for j, name in enumerate(link_names)}
-    changed = False
     for action in actions:
         j = index[action.link]
         kind = link_kinds[j]
@@ -238,12 +254,12 @@ def take_actions(
                 status[j] = OPEN
                 if kind == "PUMP":
                     setting[j] = 1.0
-                changed = True
+                acted[j] = True
             elif wanted == CLOSED and s > CLOSED:
                 status[j] = CLOSED
                 if kind == "PUMP":
                     setting[j] = 0.0
-                changed = True
+                acted[j] = True
             continue
         x = action.value * (1.0 if setting_scale is None else setting_scale[j])
         tol = SETTING_TOLERANCE if setting_tolerance is None else setting_tolerance[j]
@@ -255,9 +271,9 @@ def take_actions(
                     status[j] = OPEN
                 if x == 0.0:
                     status[j] = CLOSED   # a speed of 0 is a shut pump (never a 0-speed curve)
-                changed = True
+                acted[j] = True
         elif int(status[j]) != ACTIVE or abs(x - float(setting[j])) > tol:
             # a valve set after its status was fixed (EPANET's MISSING setting) is ACTIVE
             status[j], setting[j] = ACTIVE, x
-            changed = True
-    return status, setting, changed
+            acted[j] = True
+    return status, setting, acted

@@ -466,6 +466,38 @@ def test_energy_under_rules_matches_epanet(tmp_path, pump):
     assert worst < 1e-5, worst
 
 
+@pytest.mark.parametrize("action", ["STATUS IS OPEN", "SETTING IS 0.9"], ids=["open", "setting"])
+def test_a_pump_shut_at_shut_off_that_a_rule_opens_is_charged_as_epanet(tmp_path, action):
+    """The four rules' network with its pump on the curve `25 20` (shut-off 26.7 m under a
+    tank head of 41 m and more: the solve shuts it, EPANET's `XHEAD`) and one rule, `IF SYSTEM
+    TIME >= 2 THEN PUMP PU1 STATUS IS OPEN` (or `SETTING IS 0.9`), with a price. EPANET's
+    `takeactions` tests the solved `LinkStatus` (`XHEAD <= CLOSED`), so the action is taken
+    at the end of every step from 2 h while the pump stays shut, and `addenergy` then counts
+    the step on line (`setlinkstatus`: speed 1, the flow left at the closed link's `dh /
+    CBIG`, as `resetpumpflow` runs only from `CLOSED` proper); the carried status is OPEN
+    throughout, so the charge cannot be read off its movement. The energy section against
+    EPANET's, 1e-5 relative, while the reported state of the pump at those hours is CLOSED
+    (the solve's). MEASURED: open 7.4e-7 (before, EPANET 95.8 % on line and 6.67 against
+    noodl's 67.6 %: 0.417 relative), setting 9.9e-7 (a SETTING acts once, as EPANET's
+    `LinkSetting` then holds 0.9: 71.8 % on line, where the pump genuinely runs 67.6 %;
+    before, 0.062)."""
+    text = _RULES_NETWORK.format(night=3)
+    a, b = text.index("[RULES]"), text.index("[OPTIONS]")
+    text = (text[:a] + f"[RULES]\nRULE GO\nIF SYSTEM TIME >= 2\nTHEN PUMP PU1 {action}\n\n"
+            + text[b:])
+    text = text.replace("[OPTIONS]", "[ENERGY]\n Global Price 0.1\n[OPTIONS]", 1)
+    assert " C1  25  65" in text
+    text = text.replace(" C1  25  65", " C1  25  20")
+    path = tmp_path / "shut-off.inp"
+    path.write_text(text)
+    worst, theirs, run = _compare_energy(path, tmp_path, "epanet")
+    pump = run.link_names.index("PU1")
+    assert run.status[3, pump].item() == 0                    # shut by the solve at 3 h
+    on, cost = theirs["PU1"][0], theirs["PU1"][5]
+    assert cost > 0 and (on > 95.0 if action == "STATUS IS OPEN" else 70.0 < on < 72.0), on
+    assert worst < 1e-5, (worst, theirs["PU1"], float(run.energy.utilisation[0]))
+
+
 def test_an_unaligned_report_start_follows_epanets_output_rule(tmp_path):
     """REPORT START 1:30 with a 1 h REPORT TIMESTEP: EPANET's hydraulic steps still land on
     the whole hours (`hydraul.c`, `Rtime` from REPORT TIMESTEP), and its output takes, for

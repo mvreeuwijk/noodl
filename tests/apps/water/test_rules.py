@@ -31,7 +31,7 @@ from noodl.apps.water.network import (
     build_model,
     water_steady,
 )
-from noodl.apps.water.rules import evaluate_rules, take_actions
+from noodl.apps.water.rules import evaluate_rules, take_actions, take_actions_per_link
 
 F64 = torch.float64
 DATA = Path(__file__).resolve().parents[2] / "data" / "water"
@@ -323,6 +323,32 @@ def test_status_actions_as_takeactions_applies_them():
     assert (status[0], changed) == (CLOSED, True)
     status, setting, changed = _take([Action("P1", "SETTING", 1.0)], *start)
     assert not changed
+
+
+def test_the_links_an_action_is_taken_on_are_marked_though_nothing_carried_moved():
+    """`take_actions_per_link` marks each link an action was taken on, EPANET's per-action
+    `flag` in `takeactions`, which tests the SOLVED status: an OPEN on a pump the solve shut at
+    its shut-off head (carried OPEN at speed 1, solved CLOSED) is taken and marked though it
+    moves neither the carried status nor the speed, as is a changed positive SETTING on it; a
+    CLOSED on it is not. `take_actions`' `changed` is the mask's any."""
+    start = dict(status=_t([OPEN, OPEN, ACTIVE, ACTIVE]), setting=_t([0.0, 1.0, 30.0, 0.1]),
+                 link_names=NAMES, link_kinds=KINDS, solved=_t([OPEN, CLOSED, ACTIVE, ACTIVE]))
+    status, setting, acted = take_actions_per_link([Action("PU", "STATUS", float(OPEN))],
+                                                   **start)
+    assert acted.tolist() == [False, True, False, False]
+    assert status.tolist() == start["status"].tolist() and setting.tolist() == [0.0, 1.0, 30.0,
+                                                                                0.1]
+    assert take_actions([Action("PU", "STATUS", float(OPEN))], **start)[2] is True
+    status, setting, acted = take_actions_per_link([Action("PU", "SETTING", 0.9)], **start)
+    assert acted.tolist() == [False, True, False, False] and setting[1].item() == 0.9
+    _, _, acted = take_actions_per_link([Action("PU", "STATUS", float(CLOSED))], **start)
+    assert not acted.any() and take_actions([Action("PU", "STATUS", float(CLOSED))],
+                                            **start)[2] is False
+    # two actions, two links; a valve already ACTIVE at its setting is left alone
+    _, _, acted = take_actions_per_link(
+        [Action("P1", "STATUS", float(CLOSED)), Action("V1", "SETTING", 30.0),
+         Action("F1", "SETTING", 0.2)], **start)
+    assert acted.tolist() == [True, False, False, True]
 
 
 def test_setting_actions_with_epanets_tolerance_and_units():

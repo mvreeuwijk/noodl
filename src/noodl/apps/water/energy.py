@@ -13,7 +13,8 @@ Transcribed from EPANET 2.2 (tag v2.2):
   the pump's own price, else the global one, times the pump's price pattern, else the
   global price pattern, at the pattern period `(t + Pstart) / Pstep`.
 - `hydraul.c`, `getenergy`: no energy for a pump whose status is CLOSED (or shut by the
-  solve at its shut-off head); `p = dh q SpGrav / 8.814 / e kw_per_hp` in feet, cfs and
+  solve at its shut-off head, `XHEAD`, unless a rule's action opened it at the step's end,
+  `takeactions`); `p = dh q SpGrav / 8.814 / e kw_per_hp` in feet, cfs and
   horsepower, the same for a constant-power pump (its power enters through the solved head
   gain, not directly); the efficiency `e` is the pump's efficiency curve at the flow
   `q / speed` (`interp`: linear, the end values beyond the curve), adjusted for the pump's
@@ -167,17 +168,21 @@ class EnergyMeter:
         (..., n_pumps) their relative speeds (needed only for efficiency curves). The
         statistics are accumulated over all the steps at once, in `result`.
 
-        `opened` (..., n_pumps) marks the pumps that were CLOSED in the solve and that a rule
-        opened at the step's end (a STATUS OPEN, or a positive SETTING). EPANET charges them
-        with the `LinkFlow` they then have (`hydraul.c`, `getenergy`):
+        `opened` (..., n_pumps) marks the pumps that were CLOSED in the solve (closed, or shut
+        at their shut-off head, EPANET's `XHEAD`) and that a rule's action opened at the
+        step's end (a STATUS OPEN, or a changed positive SETTING). EPANET charges them with
+        the `LinkFlow` they then have (`hydraul.c`, `getenergy`):
 
-        - a constant-power pump: its `Q0`, 1 cfs, which `setlinkstatus` / `setlinksetting`
-          write when they reopen it (`resetpumpflow`; `input2.c`, `updatepumpparams`:
-          ``Q0 = 1.0``, "Init. flow = 1 cfs");
+        - a constant-power pump: its `Q0`, 1 cfs, which `setlinkstatus` (from `CLOSED`
+          proper) and `setlinksetting` (from any status `<= CLOSED`) write when they reopen
+          it (`resetpumpflow`; `input2.c`, `updatepumpparams`: ``Q0 = 1.0``, "Init. flow =
+          1 cfs"). A STATUS OPEN on an `XHEAD` pump would leave its flow, but a
+          constant-power pump is never `XHEAD` (`hydstatus.c`, `pumpstatus`: its `hmax` is
+          `BIG`), so the two cases do not part here;
         - any other pump (`resetpumpflow` leaves it): the flow its closed link carried in the
-          solve, ``|dh| / CBIG`` (`hydcoeffs.c`: a closed link's conductance ``1 / CBIG``,
-          CBIG = 1e8 ft per cfs), where this model's closed link carries none. Its power is
-          negligible, but its energy per volume ``p / q`` is not.
+          solve, ``|dh| / CBIG`` (`hydcoeffs.c`, `pumpcoeff`: a closed or `XHEAD` pump's
+          conductance ``1 / CBIG``, CBIG = 1e8 ft per cfs), where this model's closed link
+          carries none. Its power is negligible, but its energy per volume ``p / q`` is not.
 
         A control or a pattern that reopens a pump acts at the start of a step, before its
         solve (`runhyd`), so the solve's flow is the one charged."""

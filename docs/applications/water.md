@@ -283,7 +283,13 @@ positive SETTING) is on line over it with the `LinkFlow` EPANET then has: a cons
 its `Q0` of 1 cfs, which `setlinkstatus` and `setlinksetting` write when they reopen it
 (`resetpumpflow`); any other pump the flow its closed link carried in the solve, `dh / CBIG`,
 which sets its energy per volume (`test_energy_under_rules_matches_epanet`: 3.9e-7 for a curve,
-1.6e-7 for a constant-power pump). A step the duration cuts is charged whole, as EPANET does,
+1.6e-7 for a constant-power pump). Which pumps a rule acted on is read from the actions taken
+(`take_actions_per_link`, EPANET's per-action `flag` in `takeactions`), not from the movement of
+the carried status: `takeactions` tests the solved status (`LinkStatus`), so a STATUS OPEN or a
+changed positive SETTING on a pump the solve shut at its shut-off head (`XHEAD`) is taken, and
+charges the step, though the pump was carried OPEN throughout (the four rules' network with its
+pump at shut-off under `IF SYSTEM TIME >= 2 THEN PUMP PU1 STATUS IS OPEN`: 95.8 % on line, as
+EPANET, 7.4e-7; before, 67.6 %). A step the duration cuts is charged whole, as EPANET does,
 with its tanks moved and its rules checked to its own end: a rule that acts after the
 duration ends that step there and is charged. A simple control or a pattern acts at the start
 of the next step, before its solve, and does not reach the energy of the step before.
@@ -816,6 +822,7 @@ on-disk reals are **float32**, so roughly 1e-7 relative is EPANET's own precisio
 | Anytown edited (`_anytown`), 24 h at a 1 min step; 11 s | heads 1e-4 (EPANET's closed-link leak out of the empty tanks, at a head of 0.55 m; see Limitations) | 5.1e-5 (1.8e-4 m; 9.3e-8 at t = 0), 1.8e-6 m, 2.9e-7 m³/s, equal, 3.7e-7 |
 | Net1 6 h, pump 9 CLOSED at 2 h and OPENed at 4 h by time controls; closed at 2 h by a rule, given a CLOSED control at 2:30, then OPENed: the hydraulic steps, heads, level, flows, states, the pump's speed, the energy | equal / 1e-5 / 2e-4 m / 1e-6 m³/s / equal / 1e-5 | steps equal (no step at 2:30), 1.9e-7, 2.0e-5 m, 5.1e-8 m³/s, speed 0 then 1, energy within 1e-5 |
 | The four rules' network with a price and a demand charge (both priorities), its pump on a curve or at constant power: the pump's energy section against EPANET's toolkit | 1e-5 relative | 3.9e-7 (curve), 1.6e-7 (power) |
+| The four rules' network with its pump at shut-off (curve `25 20` under a tank head of 41 m) and one rule opening it from 2 h, `STATUS IS OPEN` or `SETTING IS 0.9`, with a price: energy section (EPANET counts the shut pump on line from 2 h; the reported state stays CLOSED) | 1e-5 relative | 7.4e-7 (open), 9.9e-7 (setting) |
 | Net1 with pump 9 into tank 2, 24 h: energy section | 1e-5 relative | 3.8e-7 |
 | Net1 1:30 with a rule closing the pump at 1:45 (past the duration, inside EPANET's whole last step): energy section | 1e-5 relative | 3.8e-8 |
 | Every network `wntr` ships (37 files, the two malformed ones aside) builds, or is refused by name | as listed | 36 build; `bad_times.inp` refused ("is not a time of the form HH:MM[:SS]") |

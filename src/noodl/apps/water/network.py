@@ -68,7 +68,7 @@ from noodl.apps.water.elements import (
     epanet_minor_coefficient,
     three_point_curve,
 )
-from noodl.apps.water.rules import evaluate_rules, take_actions
+from noodl.apps.water.rules import evaluate_rules, take_actions_per_link
 from noodl.apps.water.tanks import TankLevels, TankStorageControls, TankVolumeCurve
 from noodl.elements.base import LawContext
 from noodl.elements.duct import Duct
@@ -1636,19 +1636,25 @@ def apply_rules(model: Model, state: State, drivers: Drivers, *, time,
 
     Batched states are tested instance by instance (the rules select: they are not
     differentiable)."""
-    return apply_rules_with_states(model, state, drivers, time=time, step=step)
+    out, changed, _ = apply_rules_with_states(model, state, drivers, time=time, step=step)
+    return out, changed
 
 
-def apply_rules_with_states(model: Model, state: State, drivers: Drivers, *, time,
-                            step: float, solved: Tensor | None = None) -> tuple[State, Tensor]:
+def apply_rules_with_states(
+    model: Model, state: State, drivers: Drivers, *, time, step: float,
+    solved: Tensor | None = None) -> tuple[State, Tensor, Tensor]:
     """`apply_rules`, with the links' solved states `solved` (`solved_link_states`) given:
     within one hydraulic step EPANET checks the rules on the step's one solution, the tanks
-    moved on (`hydraul.c`, `ruletimestep`), so `water_run` computes them once per step.
-    Internal to `noodl.apps.water` (run support)."""
+    moved on (`hydraul.c`, `ruletimestep`), so `water_run` computes them once per step. Also
+    returns `acted` (..., n_links), the links an action was taken on
+    (`take_actions_per_link`): `changed` is its any. Internal to `noodl.apps.water` (run
+    support)."""
     closure = model.control_closure
     rules = () if closure is None else closure.rules
     if not rules:
-        return state, torch.zeros((), dtype=torch.bool)
+        return (state, torch.zeros((), dtype=torch.bool),
+                torch.zeros(state["water.q"].shape[:-1] + (len(model.link_names),),
+                            dtype=torch.bool))
     premises = [p for r in rules for p in r.premises]
     with torch.no_grad():
         if solved is None:
@@ -1669,24 +1675,25 @@ def apply_rules_with_states(model: Model, state: State, drivers: Drivers, *, tim
         times = time.expand(batch).reshape(-1)
         status_rows, setting_rows = rows(carried_status), rows(carried_setting)
         solved_rows = rows(solved)
-        new_status, new_setting, changed = [], [], []
+        new_status, new_setting, acted = [], [], []
         for b in range(status_rows.shape[0]):
             snapshot = {a: {i: float(flat[a][b, k]) for k, i in enumerate(ids)}
                         for a, ids in names.items()}
             actions = evaluate_rules(rules, snapshot, time=float(times[b]), step=step,
                                      clocktime=closure.start_clocktime)
-            st, se, moved = take_actions(
+            st, se, taken = take_actions_per_link(
                 actions, status=status_rows[b], setting=setting_rows[b],
                 link_names=closure.link_names, link_kinds=closure.link_kinds,
                 setting_scale=closure.setting_scale,
                 setting_tolerance=closure.setting_tolerance, solved=solved_rows[b])
             new_status.append(st)
             new_setting.append(se)
-            changed.append(moved)
+            acted.append(taken)
     out = {**state,
            "water.link_status": torch.stack(new_status).reshape(batch + (n,)),
            "water.link_setting": torch.stack(new_setting).reshape(batch + (n,))}
-    return out, torch.tensor(changed).reshape(batch)
+    acted = torch.stack(acted).reshape(batch + (n,))
+    return out, acted.any(dim=-1), acted
 
 
 def solved_link_states(model: Model, state: State, drivers: Drivers) -> Tensor:
