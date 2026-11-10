@@ -1387,7 +1387,7 @@ def test_diagnostics_linear_reports_gmres_backend_and_at_least_one_iteration():
 
 def test_diagnostics_linear_reports_sparse_direct_backend_under_the_default_auto():
     """The default `linear_solver="auto"` at a small batch (1 instance, well under
-    `_SPARSE_DIRECT_MAX_BATCH`) reports `sparse_direct`, not `gmres` -- the companion of
+    `_SPARSE_DIRECT_MAX_BATCH`) reports `sparse_direct`, not `gmres` -- the counterpart of
     the test above, which pins the same problem's diagnostics under the explicit spelling.
     """
     net = flow_through_zone()

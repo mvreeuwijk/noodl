@@ -1,7 +1,7 @@
 """`Buildings.Fluid.Movers.FlowControlled_dp` read from hand-written `noodl-modelica/1` models.
 
 The mover is an implicit law (`port_b.p - port_a.p = dp`, the flow an unknown), so the air layer
-of such a model is solved by Modified Nodal Analysis. Reference values are the MBL power law of
+of such a model is solved with flow unknowns. Reference values are the MBL power law of
 `Orifice.mo` (as in `test_assemble.py`), never computed by the elements under test.
 """
 

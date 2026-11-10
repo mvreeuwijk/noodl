@@ -1,4 +1,4 @@
-"""Modified Nodal Analysis in KirchhoffLayer: dynamic laws stepped by companion forms."""
+"""KirchhoffLayer with flow unknowns: dynamic laws stepped by their discretised storage terms."""
 
 import json
 import math
@@ -419,7 +419,7 @@ class _WrongWidthFlow(ConstitutiveLaw):
                                         (_WrongWidthFlow("w"), "flow"),
                                         (_ScalarResidual("w"), "residual")])
 def test_law_of_the_wrong_width_is_refused_by_layer_and_kind(law, what):
-    # the source edge makes the layer an MNA layer even when the bad law is a potential law
+    # the source edge gives the layer flow unknowns even when the bad law is a potential law
     net = _net(["gnd", "a", "b"], [("a", "gnd", "source"), ("a", "b", "w"), ("b", "gnd", "w")])
     layer = KirchhoffLayer(net, "bad", [Source(torch.tensor([1.0])), law],
                            boundary=["gnd"])
