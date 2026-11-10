@@ -45,19 +45,18 @@ from noodl.apps.water.elements import (
     DEMAND_FACTOR_KEY,
     RESERVOIR_HEAD_KEY,
     SETTING_KEY,
-    TANK_INFLOW_KEY,
     TIME_KEY,
 )
 from noodl.apps.water.network import (
     Pump,
     WaterPipe,
-    _apply_rules,
-    _link_states,
-    _settle_tanks,
-    _solved_states,
-    _steady_and_plan,
+    apply_rules_with_states,
     initial_drivers,
     initial_state,
+    link_states_from_cut_off,
+    settle_tanks,
+    solved_link_states,
+    water_steady_and_cut_off,
 )
 from noodl.apps.water.tanks import TankVolumeCurve
 
@@ -305,17 +304,14 @@ class _Recorder:
     def _setting(self, solved, drivers) -> Tensor:
         closure = self.closure
         if closure is not None:
-            carried = solved["water.link_setting"]
-            setting = (closure._link_setting(drivers, carried)
-                       if closure._setting_links.numel()
-                       else drivers.get(SETTING_KEY, closure.link_setting))
+            setting = closure.effective_setting(drivers, solved["water.link_setting"])
             shut = self.pumps & (solved["water.link_status"] <= CLOSED)
             setting = torch.where(shut, torch.zeros_like(setting), setting)
         else:
             setting = drivers[SETTING_KEY]
         return setting.detach() / self.setting_scale
 
-    def record(self, solved, drivers, plan, overflow) -> None:
+    def record(self, solved, drivers, cut_off, levels, overflow) -> None:
         phi = solved["water.phi"]
         head = phi / self.scale
         n_j = self.junction_nodes.numel()
@@ -331,11 +327,11 @@ class _Recorder:
                 demand = demand + full
             else:
                 emitted = emitted + full
-        levels = (self.closure.levels(solved) if self.storage is not None
-                  else phi.new_zeros(phi.shape[:-1] + (0,)))
+        if levels is None:
+            levels = phi.new_zeros(phi.shape[:-1] + (0,))
         self.rows.append(dict(
             head=head, pressure=head - self.elevation, flow=solved["water.q"],
-            status=_link_states(self.model, solved, *plan),
+            status=link_states_from_cut_off(self.model, solved, *cut_off),
             setting=self._setting(solved, drivers), tank_level=levels,
             tank_overflow=overflow if overflow is not None else torch.zeros_like(levels),
             demand=demand, emitter_flow=emitted))
@@ -396,28 +392,30 @@ def water_run(model, state=None, drivers=None, *, duration: float | None = None,
     hydraulic_report = clock.report_step      # EPANET's `Rtime` in the hydraulic run
     next_report = clock.report_start          # ... and in the output (`runqual`)
     reported: list[int] = []
-    inflow = None                             # the previous solve's, for the controls
     while next_report <= clock.duration:
         d = patterns.drivers_at(t)
-        if inflow is not None:
-            d = {**d, TANK_INFLOW_KEY: inflow.detach()}
         state = patterns.speeds(state, t)
         if diagnostics is not None:
             solve = {}
-            solved, plan = _steady_and_plan(model, state, d, diagnostics=solve,
-                                            **solve_kwargs)
+            solved, cut_off = water_steady_and_cut_off(model, state, d, diagnostics=solve,
+                                                       **solve_kwargs)
             diagnostics["times"].append(float(t))
             diagnostics["newton_iterations"].append(
                 solve.get("layers", {}).get("water", {}).get("newton_iterations"))
         else:
-            solved, plan = _steady_and_plan(model, state, d, **solve_kwargs)
+            solved, cut_off = water_steady_and_cut_off(model, state, d, **solve_kwargs)
+        # the drivers the solve took, the level controls' tank inflow margin among them
+        # (`with_tank_inflow`: the previous solve's), for everything read of this solve
+        d = cut_off[0]
+        levels = closure.levels(solved) if storage is not None else None
         report = t >= next_report
         if report:
             reported.append(next_report)
             next_report += clock.report_step
         if t >= clock.duration:
             if report:
-                recorder.record(solved, d, plan, _final_overflow(model, storage, solved, d))
+                recorder.record(solved, d, cut_off, levels,
+                                _final_overflow(model, storage, solved, d))
             break
         step = clock.step(t, hydraulic_report)
         inflow = solved["water.storage_flow"] if storage is not None else None
@@ -427,7 +425,6 @@ def water_run(model, state=None, drivers=None, *, duration: float | None = None,
                 area = storage.area_toward(heads, inflow)
             else:
                 area = storage.capacity(heads, heads, d) * closure.head_scale
-            levels = closure.levels(solved)
             rate = inflow / area
             # `tanktimestep`: `t = ROUND(v / q)` to fill or empty, when positive and shorter
             fill = _round(closure.time_to_limit(levels, rate, inflow))
@@ -442,7 +439,7 @@ def water_run(model, state=None, drivers=None, *, duration: float | None = None,
                 step = int(ahead)
 
         if rules:                           # `ruletimestep`
-            links = _solved_states(model, closure, solved, d)
+            links = solved_link_states(model, solved, d)
             dt = min(clock.rule_step, step)
             dt1 = min(clock.rule_step - t % clock.rule_step, step) or dt
             elapsed, current = 0, solved
@@ -451,8 +448,8 @@ def water_run(model, state=None, drivers=None, *, duration: float | None = None,
                 if storage is not None:
                     current = {**current, "water.phi": _advance(
                         model, current["water.phi"], inflow, dt1, d)}
-                current, changed = _apply_rules(model, current, d, time=t + elapsed,
-                                                step=float(dt1), solved=links)
+                current, changed = apply_rules_with_states(
+                    model, current, d, time=t + elapsed, step=float(dt1), solved=links)
                 if bool(changed.any()):
                     break
                 dt = min(dt, step - elapsed)
@@ -466,7 +463,8 @@ def water_run(model, state=None, drivers=None, *, duration: float | None = None,
         else:
             advanced = solved
         if report:
-            recorder.record(solved, d, plan, _overflow(model, storage, solved, advanced, step))
+            recorder.record(solved, d, cut_off, levels,
+                            _overflow(model, storage, solved, advanced, step))
         t += step
         if t >= hydraulic_report:
             hydraulic_report += clock.report_step
@@ -477,10 +475,10 @@ def water_run(model, state=None, drivers=None, *, duration: float | None = None,
 def _advance(model, phi: Tensor, inflow: Tensor, dt: int, drivers) -> Tensor:
     """`phi` with the tanks moved over `dt` s at `inflow` (`hydraul.c`, `tanklevels`):
     `V += q dt` (`KirchhoffLayer.advance_storage`), a tank within one second's inflow of a
-    limit put on it (`_settle_tanks`)."""
+    limit put on it (`settle_tanks`)."""
     layer = model.kirchhoff["water"]
     moved = layer.advance_storage(phi, inflow, float(dt), drivers)
-    return _settle_tanks(model, layer.storage[0], moved, inflow, drivers)
+    return settle_tanks(model, layer.storage[0], moved, inflow, drivers)
 
 
 def _overflow(model, storage, solved, advanced, step: int) -> Tensor | None:

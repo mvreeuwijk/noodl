@@ -53,7 +53,8 @@ RESERVOIR_HEAD_KEY = "water.reservoir_head"
 DEMAND_FACTOR_KEY = "water.demand_factor"
 #: `"water.tank_inflow"`: one inflow per tank (m3/s), the previous solve's, which the level
 #: controls take as their one-second margin (EPANET's `controls` reads the tank's
-#: `NodeDemand` of the last solve; `water_run` sets it each step).
+#: `NodeDemand` of the last solve). `water_steady` takes it from the state it starts from
+#: (`"water.storage_flow"`) when the drivers carry none (`network.with_tank_inflow`).
 TANK_INFLOW_KEY = "water.tank_inflow"
 
 _DRIVER_MEANING = {

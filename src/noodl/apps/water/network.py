@@ -36,15 +36,18 @@ from noodl.apps.water.demand import EmitterOutflow, PressureDrivenDemand
 from noodl.apps.water.elements import (
     CBIG_FT_PER_CFS,
     DEAD_END_KEY,
+    DEMAND_FACTOR_KEY,
     EPANET_QCF,
     KW_PER_HP,
     M_PER_FT,
     NU_WATER_REF,
     ONE_WAY_KEY,
     PIN_KEY,
+    RESERVOIR_HEAD_KEY,
     RQTOL_FT_PER_CFS,
     SETTING_KEY,
     STATUS_KEY,
+    TANK_INFLOW_KEY,
     TIME_KEY,
     BreakerValve,
     ChezyManning,
@@ -1302,6 +1305,23 @@ def build_model(
             description="each link's allowed flow direction: 0 both, +1 forward only, -1 "
                         "reverse only", over=link_names, ordering="model.link_names"),
     }
+    if net.tanks:
+        model.input_specs[TANK_INFLOW_KEY] = dict(
+            unit="m3/s",
+            description="each tank's inflow (m3/s) of the previous solve, the one-second "
+                        "margin of the level controls; taken from the state's "
+                        "water.storage_flow when not given",
+            over=[t.name for t in net.tanks], ordering="net.tanks", required=False)
+    if net.reservoirs and control_closure is not None:
+        model.input_specs[RESERVOIR_HEAD_KEY] = dict(
+            description="each reservoir's head (the layer's potential unit) in place of the "
+                        "built one; water_run sets it from the head patterns",
+            over=[r.name for r in net.reservoirs], ordering="net.reservoirs", required=False)
+    if pda:
+        model.input_specs[DEMAND_FACTOR_KEY] = dict(
+            description="each junction's multiplier of its pressure-driven required demand; "
+                        "water_run sets it from the demand patterns",
+            over=[j.name for j in net.junctions], ordering="net.junctions", required=False)
     if TIME_KEY in drivers:
         model.input_specs[TIME_KEY] = dict(
             description="seconds since the simulation start, which the network's AT TIME and "
@@ -1616,14 +1636,15 @@ def apply_rules(model: Model, state: State, drivers: Drivers, *, time,
 
     Batched states are tested instance by instance (the rules select: they are not
     differentiable)."""
-    return _apply_rules(model, state, drivers, time=time, step=step)
+    return apply_rules_with_states(model, state, drivers, time=time, step=step)
 
 
-def _apply_rules(model: Model, state: State, drivers: Drivers, *, time, step: float,
-                 solved: Tensor | None = None) -> tuple[State, Tensor]:
-    """`apply_rules`, with the links' solved states `solved` (`_solved_states`) given: within
-    one hydraulic step EPANET checks the rules on the step's one solution, the tanks moved
-    on (`hydraul.c`, `ruletimestep`), so `water_run` computes them once per step."""
+def apply_rules_with_states(model: Model, state: State, drivers: Drivers, *, time,
+                            step: float, solved: Tensor | None = None) -> tuple[State, Tensor]:
+    """`apply_rules`, with the links' solved states `solved` (`solved_link_states`) given:
+    within one hydraulic step EPANET checks the rules on the step's one solution, the tanks
+    moved on (`hydraul.c`, `ruletimestep`), so `water_run` computes them once per step.
+    Internal to `noodl.apps.water` (run support)."""
     closure = model.control_closure
     rules = () if closure is None else closure.rules
     if not rules:
@@ -1631,7 +1652,7 @@ def _apply_rules(model: Model, state: State, drivers: Drivers, *, time, step: fl
     premises = [p for r in rules for p in r.premises]
     with torch.no_grad():
         if solved is None:
-            solved = _solved_states(model, closure, state, drivers)
+            solved = solved_link_states(model, state, drivers)
         arrays, names = _rule_readings(closure, premises, state, drivers, solved)
         carried_status = state["water.link_status"].detach()
         carried_setting = state["water.link_setting"].detach()
@@ -1668,13 +1689,14 @@ def _apply_rules(model: Model, state: State, drivers: Drivers, *, time, step: fl
     return out, torch.tensor(changed).reshape(batch)
 
 
-def _solved_states(model, closure, state, drivers) -> Tensor:
+def solved_link_states(model: Model, state: State, drivers: Drivers) -> Tensor:
     """Every link's state as the solve found it, EPANET's `LinkStatus` (`link_states`), in the
     codes of `noodl.apps.water.controls`, except that an FCV the flow runs back through (the
     head falls along the flow, or the flow is negative: `hydstatus.c`, `fcvstatus`) is OPEN,
     EPANET's `XFCV`, which `checkstatus` reads as open. (EPANET's hysteresis, an FCV that
     stays `XFCV` until the flow regains its setting, needs the last step's state, which is not
-    carried.)"""
+    carried.) Internal to `noodl.apps.water` (run support)."""
+    closure = model.control_closure
     codes = link_states(model, state, drivers)
     fcv = [model.link_names.index(v.name) for v in model.water_network.valves
            if v.kind.upper() == "FCV"]
@@ -1742,8 +1764,7 @@ def _rule_readings(closure, premises, state, drivers, solved):
     if ids:
         idx = [closure.link_names.index(i) for i in ids]
         carried = state["water.link_setting"].detach()
-        effective = (closure._link_setting(drivers, carried) if closure._setting_links.numel()
-                     else drivers.get(SETTING_KEY, closure.link_setting))
+        effective = closure.effective_setting(drivers, carried)
         status = closure._link_status(drivers, state["water.link_status"].detach())
         scale = torch.tensor([closure.setting_scale[j] for j in idx], dtype=F64)
         value = effective[..., idx].to(F64) / scale
@@ -1808,13 +1829,36 @@ def water_steady(model: Model, state: State, drivers: Drivers, **solve_kwargs) -
     pipe's slope sits on its `RQtol` floor and Newton's first step overshoots without bound.
     The pumps' flows, likewise, start from their design flows when they are all zero.
     """
-    return _steady_and_plan(model, state, drivers, **solve_kwargs)[0]
+    return water_steady_and_cut_off(model, state, drivers, **solve_kwargs)[0]
 
 
-def _steady_and_plan(model: Model, state: State, drivers: Drivers,
-                     **solve_kwargs) -> tuple[State, tuple]:
-    """`water_steady`, with the cut-off plan (`_cut_off_plan`: the drivers and `limit`) of
-    its last solve, which `water_run` hands to `_link_states` instead of planning again."""
+# ----------------------------------------------------------------------------------------
+# Run support. Internal to `noodl.apps.water` (`noodl.apps.water.simulate.water_run` calls
+# these; they are not exported from the package): each is a step of EPANET's hydraulic loop
+# that `water_steady`, `link_states` and `apply_rules` also take, exposed with the inputs
+# the run already has so that it does not compute them twice.
+
+
+def with_tank_inflow(model: Model, state: State, drivers: Drivers) -> Drivers:
+    """`drivers` with the tanks' inflow `"water.tank_inflow"` (`TANK_INFLOW_KEY`), the
+    one-second margin of the level controls (EPANET's `controls` reads the tank's
+    `NodeDemand`), taken from `state`'s `"water.storage_flow"` when the drivers carry none.
+    At a step's start that is exactly the previous solve's inflow, and at `initial_state` it
+    is zero, as EPANET's at t = 0. A network without tanks takes no margin."""
+    closure = model.control_closure
+    if (closure is None or closure.storage is None or TANK_INFLOW_KEY in drivers
+            or "water.storage_flow" not in state):
+        return drivers
+    return {**drivers, TANK_INFLOW_KEY: state["water.storage_flow"].detach()}
+
+
+def water_steady_and_cut_off(model: Model, state: State, drivers: Drivers,
+                             **solve_kwargs) -> tuple[State, tuple]:
+    """`(state, (drivers, limit))`: `water_steady`, with the cut-off analysis of its last solve
+    (`_cut_off_plan`: the drivers it solved with, the tank inflow margin among them
+    (`with_tank_inflow`), and `limit`), which `link_states_from_cut_off` takes instead of
+    analysing the solution again."""
+    drivers = with_tank_inflow(model, state, drivers)
     plan: list = []
     result = _solve_steady(model, state, drivers, plan=plan, **solve_kwargs)
     closure = model.control_closure
@@ -2581,12 +2625,22 @@ def link_states(model: Model, state: State, drivers: Drivers) -> Tensor:
     (`FlowControlledPump.states`), and OPEN elsewhere. An ACTIVE PRV or PSV is in
     the state its residual selects at the solution (`_PressureValve.states`: CLOSED, ACTIVE
     or OPEN). A valve otherwise has its status (ACTIVE or OPEN); every other link is OPEN.
+
+    The status is the control closure's for `state` and `drivers`, so the tank-level controls
+    are tested again with their one-second margin: the drivers' `"water.tank_inflow"`, else
+    `state`'s `"water.storage_flow"` (`with_tank_inflow`). For a solved state that is the
+    solve's own inflow, not the previous one the solve's controls used; pass the solve's
+    drivers with `"water.tank_inflow"` set to the state it started from to read its own
+    statuses (`water_run` does: `water_steady_and_cut_off`, `link_states_from_cut_off`).
     """
-    return _link_states(model, state, *_cut_off_plan(model, state, drivers, "link_states"))
+    drivers = with_tank_inflow(model, state, drivers)
+    return link_states_from_cut_off(
+        model, state, *_cut_off_plan(model, state, drivers, "link_states"))
 
 
-def _link_states(model: Model, state: State, drivers: Drivers, limit) -> Tensor:
-    """`link_states` with the cut-off plan `(drivers, limit)` given (`_cut_off_plan`)."""
+def link_states_from_cut_off(model: Model, state: State, drivers: Drivers, limit) -> Tensor:
+    """`link_states` with the cut-off analysis `(drivers, limit)` of the solve given
+    (`water_steady_and_cut_off`). Internal to `noodl.apps.water` (run support)."""
     status = _link_status(model, state, drivers)
     q = state["water.q"]
     out = torch.broadcast_to(status, q.shape[:-1] + status.shape[-1:]).clone()
@@ -2652,6 +2706,7 @@ def water_step(model: Model, state: State, drivers: Drivers, dt: float, *,
     solve_kwargs.setdefault("atol", 1e-11)
     solve_kwargs.setdefault("rtol", 1e-11)
     solve_kwargs.setdefault("max_iter", 200)
+    drivers = with_tank_inflow(model, state, drivers)
     drivers, limit = _cut_off_plan(model, state, drivers, "water_step")
     result = model.step(state, drivers, dt, scheme=scheme, **solve_kwargs)
     _refuse_pump_overflow(model, result, drivers)
@@ -2661,7 +2716,7 @@ def water_step(model: Model, state: State, drivers: Drivers, dt: float, *,
     return result
 
 
-def _settle_tanks(model: Model, storage, phi: Tensor, inflow: Tensor, drivers) -> Tensor:
+def settle_tanks(model: Model, storage, phi: Tensor, inflow: Tensor, drivers) -> Tensor:
     """`phi` with every tank that is within one second of filling or emptying put on its
     limit, EPANET 2.2's `tanklevels` (`hydraul.c`), transcribed as it is: `V + q >= Vmax`
     puts it at its maximum, else `V - q <= Vmin` at its minimum (`q` the inflow, m3/s, over
@@ -2670,7 +2725,7 @@ def _settle_tanks(model: Model, storage, phi: Tensor, inflow: Tensor, drivers) -
     The head put there is EPANET's `tankgrade(Vmax)` (`tankgrade(Vmin)`): the maximum
     (minimum) level, except on a volume curve whose volume is flat across that level, where
     it is the lower end of the flat stretch (`project.c`, `interp`, takes the first point at
-    or above the volume)."""
+    or above the volume). Internal to `noodl.apps.water` (run support)."""
     closure = model.control_closure
     heads = phi[..., storage.nodes]
     with torch.no_grad():

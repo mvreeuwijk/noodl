@@ -8,7 +8,7 @@ import pytest
 import torch
 
 from noodl.apps.water import simulate
-from noodl.apps.water.controls import CLOSED, OPEN, Control
+from noodl.apps.water.controls import CLOSED, OPEN, Action, Control, Premise, Rule
 from noodl.apps.water.inp import read_epanet_inp
 from noodl.apps.water.network import (
     Junction,
@@ -217,6 +217,58 @@ def test_batched_run_equals_single_runs(monkeypatch):
         assert diagnostics["times"] == shared
         torch.testing.assert_close(alone.tank_level, batch.tank_level[k], rtol=0, atol=1e-9)
         torch.testing.assert_close(alone.flow, batch.flow[k], rtol=0, atol=1e-9)
+
+
+def _ruled_tank():
+    """A pump filling a tank under two rules: STOP above 6 m, FILL below 3 m."""
+    return WaterNetwork(
+        junctions=(Junction("J", 10.0, 0.004),),
+        reservoirs=(Reservoir("R", 5.0),),
+        tanks=(Tank("T", 40.0, 4.0, 1.0, 9.0, 8.0),),
+        pipes=(WaterPipe("P1", "J", "T", 400.0, 0.25, 100.0),),
+        pumps=(Pump("PU", "R", "J", "C"),),
+        curves={"C": ((0.025, 65.0),)},
+        rules=(Rule("STOP", (Premise("IF", "NODE", "T", "LEVEL", ">", 6.0),),
+                    (Action("PU", "STATUS", CLOSED),), ()),
+               Rule("FILL", (Premise("IF", "NODE", "T", "LEVEL", "<", 3.0),),
+                    (Action("PU", "STATUS", OPEN),), ())),
+        duration=12 * 3600.0)
+
+
+def test_a_rule_acting_in_one_instance_ends_the_batchs_step(monkeypatch):
+    """`ruletimestep` with a batch: a rule that acts in one instance ends the shared step
+    for all (the other's rules then find nothing to do at that time), and each instance is
+    its single run forced onto the batch's step boundaries, to rounding. Run alone, STOP
+    acts at 3240 s at 0.8 times the demand (inside the first hydraulic step), and at 1.6 at
+    3600 s and again at 33840 s after FILL. In the batch instance 1.6 takes the 3240 s
+    boundary too, an extra solve of EPANET's explicit step, so its later rules act at other
+    rule steps (MEASURED: 28440 s and 33480 s), which its forced single run reproduces."""
+    model, _, drivers = build_model(_ruled_tank())
+    base = drivers["water.sources"]
+    multipliers = (0.8, 1.6)
+    times = []
+    for m in multipliers:
+        diagnostics: dict = {}
+        water_run(model, drivers={**drivers, "water.sources": base * m},
+                  diagnostics=diagnostics)
+        times.append(diagnostics["times"])
+    assert 3240.0 in times[0] and 3240.0 not in times[1]
+    assert 33840.0 in times[1] and 33840.0 not in times[0]
+    diagnostics = {}
+    batch = water_run(model, drivers={**drivers, "water.sources": torch.stack(
+        [base * m for m in multipliers])}, diagnostics=diagnostics)
+    shared = diagnostics["times"]
+    # instance 0.8's STOP at 3240 s ends the step for both; instance 1.6's FILL and STOP,
+    # moved by that extra boundary, end it at 28440 s and 33480 s
+    assert {3240.0, 28440.0, 33480.0} <= set(shared)
+    _forced(monkeypatch, shared)
+    for k, m in enumerate(multipliers):
+        diagnostics = {}
+        alone = water_run(model, drivers={**drivers, "water.sources": base * m},
+                          diagnostics=diagnostics)
+        assert diagnostics["times"] == shared
+        torch.testing.assert_close(alone.tank_level, batch.tank_level[k], rtol=0, atol=1e-9)
+        assert alone.status.tolist() == batch.status[k].tolist()
 
 
 def test_the_run_owns_the_time_driver():

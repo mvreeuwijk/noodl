@@ -536,3 +536,33 @@ def test_time_to_limit_skips_a_tank_with_no_net_inflow():
     inflow = torch.tensor([2e-8, 3e-8], dtype=F64)   # QZERO = 2.83e-8 m3/s
     out = closure.time_to_limit(level, rate, inflow)
     assert math.isinf(float(out[0])) and float(out[1]) == pytest.approx(1e9)
+
+
+@pytest.mark.parametrize("curved", [False, True], ids=["cylinder", "volume-curve"])
+def test_water_steady_takes_the_level_margin_from_the_state(tmp_path, curved):
+    """EPANET tests a level control by volume with one second of the previous solve's
+    inflow as margin (`hydraul.c`, `controls`). `water_steady` takes that inflow from the
+    state's `"water.storage_flow"` when the drivers carry no `"water.tank_inflow"`
+    (`with_tank_inflow`): a stepped state just short of the 140 ft ABOVE trigger, within
+    the margin, closes the pump; the same level with no inflow (the margin of t = 0) does
+    not."""
+    path = _net1_with_volume_curve(tmp_path) if curved else NET1
+    model, state, drivers = build_model(read_epanet_inp(path))
+    closure = model.control_closure
+    solved = water_steady(model, state, drivers)
+    inflow = solved["water.storage_flow"]
+    (storage,) = model.kirchhoff["water"].storage
+    heads = solved["water.phi"][..., storage.nodes]
+    area = (storage.area_toward(heads, inflow) if curved
+            else storage.capacity(heads, heads) * closure.head_scale)
+    above = next(c for c in closure.controls if c.trigger == "node" and c.above)
+    phi = solved["water.phi"].clone()
+    level = above.value - 0.5 * float(inflow[0] / area[0])
+    phi[storage.nodes[0]] = (closure.bottom[0] + level) * closure.head_scale
+    pump = model.link_names.index("9")
+    stepped = {**solved, "water.phi": phi}
+    assert int(water_steady(model, stepped, drivers)["water.link_status"][pump]) == CLOSED
+    with_key = water_steady(model, stepped, {**drivers, "water.tank_inflow": inflow})
+    assert int(with_key["water.link_status"][pump]) == CLOSED
+    at_start = {**stepped, "water.storage_flow": torch.zeros_like(inflow)}
+    assert int(water_steady(model, at_start, drivers)["water.link_status"][pump]) == OPEN

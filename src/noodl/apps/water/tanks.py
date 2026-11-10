@@ -427,7 +427,8 @@ class TankLevels:
             )
         level = self.levels(state)
         # every tank tests its level controls by volume, with a margin of one second of the
-        # previous solve's inflow (`_apply_controls`): an input of the step, not the state's
+        # previous solve's inflow (`_apply_controls`): an input of the step (the driver, which
+        # `water_steady` sets from the state it starts from), not the state's
         # `"water.storage_flow"`, which the solve itself overwrites
         inflow = drivers.get(TANK_INFLOW_KEY) if self.storage is not None else None
         time = self._time(drivers)
@@ -494,6 +495,14 @@ class TankLevels:
         out = base.clone()
         out[..., idx] = torch.where(moved, link_setting[..., idx], base[..., idx])
         return out
+
+    def effective_setting(self, drivers, link_setting: Tensor) -> Tensor:
+        """Every link's setting as the solve takes it: `_link_setting` (the carried value
+        where a control, a rule or a speed pattern has moved it) when any link's setting can
+        move, else the drivers' `"water.setting"` (the build's when they carry none)."""
+        if self._setting_links.numel():
+            return self._link_setting(drivers, link_setting)
+        return drivers.get(SETTING_KEY, self.link_setting)
 
     @contextmanager
     def held_controls(self):
@@ -666,9 +675,9 @@ class TankLevels:
         (`apply_controls`). Every tank is tested by volume, as EPANET 2.2's `controls`
         (`hydraul.c`) tests it: ``V(level) >= V(value) - |q|`` (ABOVE),
         ``V(level) <= V(value) + |q|`` (BELOW), ``q`` the previous solve's inflow over one
-        second (`inflow`, m3/s: the driver `"water.tank_inflow"`, which `water_run` sets
-        each step; 0 when not given, as at EPANET's start, where a tank's `NodeDemand`
-        is 0). A control so fires
+        second (`inflow`, m3/s: the driver `"water.tank_inflow"`, which `water_steady`
+        takes from the state it starts from, `with_tank_inflow`; zero at `initial_state`,
+        as EPANET's `NodeDemand` of a tank at t = 0). A control so fires
         at equality and up to one second's inflow early: the margin that lets a step rounded
         to whole seconds (`controltimestep`) end just short of a crossing and still fire.
         A cylinder's volume is its area times its level, so for it the test is

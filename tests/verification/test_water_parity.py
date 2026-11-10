@@ -24,7 +24,7 @@ import pytest
 import torch
 
 from noodl.apps.water.demand import EmitterOutflow, PressureDrivenDemand
-from noodl.apps.water.inp import read_epanet_inp
+from noodl.apps.water.inp import FLOW_UNITS, read_epanet_inp
 from noodl.apps.water.network import (
     build_model,
     initial_state,
@@ -419,6 +419,54 @@ def test_rules_match_epanet(tmp_path):
     assert not torch.equal(by_priority, states[:, pump])               # PRIORITY decides
 
 
+def test_an_unaligned_report_start_follows_epanets_output_rule(tmp_path):
+    """REPORT START 1:30 with a 1 h REPORT TIMESTEP: EPANET's hydraulic steps still land on
+    the whole hours (`hydraul.c`, `Rtime` from REPORT TIMESTEP), and its output takes, for
+    each report time from 1:30, the first solve at or after it (`quality.c`, `runqual`:
+    `Htime >= Rtime`, `Rtime += Rstep`). wntr 1.5.0 cannot read that output file, so EPANET
+    runs through its toolkit here and `runqual`'s rule is applied to its solves: the report
+    times, and the tank level, heads and flows of each, against `water_run`'s. MEASURED:
+    levels 1.2e-5 m, heads 2.2e-7 relative, flows 5.3e-8 m3/s (EPANET's own convergence: the
+    toolkit's values are not rounded to float32)."""
+    edits = [(" Report Start       	0:00", " Report Start       	1:30")]
+    path, _ = _epanet(tmp_path, "Net1.inp", edits=edits, duration=0)
+    net = read_epanet_inp(path)
+    model, _, _ = build_model(net)
+    toolkit = pytest.importorskip("wntr.epanet.toolkit")
+    from wntr.epanet.util import EN
+    en = toolkit.ENepanet()
+    en.ENopen(str(path), str(tmp_path / "t.rpt"), str(tmp_path / "t.bin"))
+    en.ENopenH()
+    en.ENinitH(0)
+    solves = []
+    while True:
+        t = en.ENrunH()
+        solves.append((t, [en.ENgetnodevalue(en.ENgetnodeindex(k), EN.HEAD) * _M_PER_FT
+                           for k in model.node_names],
+                       [en.ENgetlinkvalue(en.ENgetlinkindex(k), EN.FLOW) * FLOW_UNITS["GPM"]
+                        for k in model.link_names]))
+        if en.ENnextH() <= 0:
+            break
+    en.ENcloseH()
+    en.ENclose()
+    reported, rtime = [], 5400
+    for t, heads, flows in solves:              # `runqual`
+        if t >= rtime:
+            reported.append((rtime, heads, flows))
+            rtime += 3600
+    run = water_run(model)
+    assert run.time.tolist() == [float(r[0]) for r in reported]
+    assert run.time[0] == 5400.0 and len(reported) == 23
+    heads = torch.tensor([r[1] for r in reported], dtype=F64)
+    flows = torch.tensor([r[2] for r in reported], dtype=F64)
+    tank = model.node_names.index("2")
+    level = heads[:, tank] - net.tanks[0].elevation
+    worst_l = float((run.tank_level[:, 0] - level).abs().max())
+    worst_h = float(((run.head - heads).abs() / heads.abs()).max())
+    worst_q = float((run.flow - flows).abs().max())
+    assert worst_l < 2e-4 and worst_h < 1e-5 and worst_q < 1e-6, (worst_l, worst_h, worst_q)
+
+
 _HEAVY = """[TITLE]
 Specific gravity on an SI file
 [JUNCTIONS]
@@ -522,7 +570,7 @@ def test_net1_time_clocktime_and_pressure_controls(tmp_path, name, lines, clock)
     levels, _ = _extended_period(model)
     reference = results.node["head"]["2"] - net.tanks[0].elevation
     worst = max(abs(a - float(b)) for a, b in zip(levels, reference.tolist(), strict=True))
-    assert worst < 2e-4, worst
+    assert worst < 1e-4, worst
     # the control did something: EPANET's own levels differ from the tank-level controls alone
     (tmp_path / "base").mkdir()
     _, plain = _epanet(tmp_path / "base", "Net1.inp")

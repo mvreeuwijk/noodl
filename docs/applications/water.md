@@ -560,7 +560,11 @@ That shortening is not optional. A fixed one-hour step was measured to diverge f
 trajectory matches to **2.5e-5 m**. The margin of the level test matters as much: a crossing
 rounded to whole seconds may end half a second short, and with a strict level test instead
 the pump switches a step late (MEASURED: 0.76 m off on Net1 with time controls added). The
-previous solve's inflow is the driver `"water.tank_inflow"`, which `water_run` sets.
+previous solve's inflow is the driver `"water.tank_inflow"`, which `water_steady` takes
+from the state it starts from (its `"water.storage_flow"`: the previous solve's at a step
+start, zero at `initial_state` as at EPANET's t = 0) when the drivers carry none.
+`link_states` reads it the same way, so for a solved state it tests the controls against that
+solve's own inflow; `water_run` reads its statuses with the drivers the solve took.
 
 [Running over time](#running-over-time) is the run that takes these steps. Gradients with
 respect to a tank's area (the storage's capacity `C`) reach the levels through the move of
@@ -717,9 +721,11 @@ on-disk reals are **float32**, so roughly 1e-7 relative is EPANET's own precisio
 | `twoloop_si.inp`, noodl physics' own nodal continuity | 1e-13 | **2.093e-14** |
 | Net1 single period: heads, flows, pump head gain, pump flow | 1e-6 / 1e-6 / 1e-6 / 1e-8 m³/s | 7.224e-8, 2.647e-7, 1.942e-7, 3.2e-9 m³/s |
 | Net1 24 h tank level with level-triggered pump controls (`water_run`) | 2e-4 m | **2.5e-5 m** worst of 25 steps (26 hydraulic steps) |
-| Net1 24 h tank level with `AT TIME`, `AT CLOCKTIME` (START CLOCKTIME 8 am) and junction-pressure pump controls added | 2e-4 m | 2.4e-5 m (time and clock time; 1.8e-4 m before EPANET's whole-second crossings and volume margin), 2.2e-5 m (pressure) |
+| Net1 24 h tank level with `AT TIME`, `AT CLOCKTIME` (START CLOCKTIME 8 am) and junction-pressure pump controls added | 1e-4 m | 2.4e-5 m (time and clock time; 1.8e-4 m before EPANET's whole-second crossings and volume margin), 2.2e-5 m (pressure) |
 | Net1 24 h with REPORT START and TIMESTEP 2 h; PATTERN START 1 h; a pump speed pattern (with a 0); a reservoir head pattern: report times, heads, levels, flows, states, pump setting | 1e-5 / 2e-4 m / 1e-6 m³/s / equal | heads 1.8e-7, 2.4e-7, 8.5e-8, 9.3e-8; levels 1.9e-5, 2.4e-5, 2.0e-5, 2.8e-5 m; flows 5.2e-8 to 5.9e-8 m³/s |
 | Four rules (ELSE, PRIORITY, CLOCKTIME, a PRESSURE premise) on a tank, a pump and a PRV, 24 h, RULE TIMESTEP 5 min, against EPANET's toolkit; PRIORITY flipped too | 2e-4 m / 1e-5 / 1e-6 m³/s / equal | 2.6e-5 m, 1.1e-6, 4.0e-8 m³/s; pump states and PRV settings equal at every hour |
+| Net1 with REPORT START 1:30 (not a multiple of the report step), against EPANET's toolkit with `runqual`'s rule applied: report times, levels, heads, flows | equal / 2e-4 m / 1e-5 / 1e-6 m³/s | equal, 1.2e-5 m, 2.2e-7, 5.3e-8 m³/s |
+| A rule acting in one instance of a batch: the shared step ends for both, each instance its forced single run | 1e-9 m / equal | exact to 1e-9 m, states equal |
 | A batch of two Net1 instances (0.8 and 1.25 times the demand) against each run alone on the batch's step boundaries; against the plain single runs | 1e-9 m / 1e-2 m | exact to 1e-9 m; 6.5e-3 m (the extra boundaries' explicit-step difference, see Limitations) |
 | SPECIFIC GRAVITY 1.2 on an LPS file with pressure-driven demand and an emitter, 2 h of a pattern: heads, flows, demand plus emitter outflow | 1e-6 / 1e-6 m³/s / 1e-6 m³/s | 1.3e-7, 2.2e-7, 1.0e-7 (EPANET's LPS factor applied) |
 | Net1 24 h, tank on a five-point volume curve: levels, pipe 110 flow | 2e-4 m / 1e-6 m³/s | 2.8e-5 m, 5.5e-8 m³/s |
@@ -909,7 +915,9 @@ independent loop is a property of the cycle-space formulation, and it holds exac
 - **The run ends at the duration.** EPANET's last step is not cut at `DURATION` (it solves
   once more past it, and reports nothing there); `water_run` ends the last step at the duration.
   A REPORT START that is not a multiple of the REPORT TIMESTEP follows EPANET's rule (the first
-  solve at or after each report time) but is not compared: wntr 1.5.0 cannot read that output.
+  solve at or after each report time, `runqual`). wntr 1.5.0 cannot read that output file, so
+  it is compared through EPANET's toolkit with `runqual`'s rule applied to EPANET's solves
+  (`test_an_unaligned_report_start_follows_epanets_output_rule`), not against the file.
 - **PATTERN START is transcribed with EPANET's own step rule.** EPANET looks for the next
   pattern period at `n * PATTERN TIMESTEP - t` (`timestep`), which ignores PATTERN START: a
   step that starts between two of the shifted period boundaries runs to the unshifted one,
