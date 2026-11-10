@@ -18,13 +18,31 @@ from noodl.layers.transport import (
     TransportLayer,
     _expm_action,
     _linear_solve,
-    _van_loan_step_dense,
 )
 from noodl.operators.base import SolveResult, SolverStatus
 from noodl.operators.shifted import ShiftedOperator
 from noodl.solvers import select as select_module
 from noodl.solvers.select import solve as _solve_operator
 from noodl.topology import Network
+
+
+def _van_loan_step_dense(
+    M: torch.Tensor, x: torch.Tensor, b0: torch.Tensor, dt: float
+) -> torch.Tensor:
+    """Exact linear step via the augmented matrix exponential (Van Loan, 1978).
+
+    The dense reference the matrix-free `_expm_action` is checked against; it forms the
+    (2m, 2m) block that `_expm_action` never does.
+    """
+    m = M.shape[-1]
+    batch = M.shape[:-2]
+    Z = torch.zeros(*batch, 2 * m, 2 * m, dtype=M.dtype)
+    Z[..., :m, :m] = M * dt
+    Z[..., :m, m:] = torch.eye(m, dtype=M.dtype) * dt
+    E = torch.linalg.matrix_exp(Z)
+    Ed = E[..., :m, :m]
+    Phi = E[..., :m, m:]
+    return (Ed @ x.unsqueeze(-1)).squeeze(-1) + (Phi @ b0.unsqueeze(-1)).squeeze(-1)
 
 
 def _full(layer, s_interior, node_dim=-1):
