@@ -60,7 +60,6 @@ def storage_ramp(
     operator: Callable[[Tensor], LinearOperator | Tensor],
     x0: Tensor,
     *,
-    rows: Tensor | None = None,
     signed: Tensor | None = None,
     scales: Sequence[float] = RAMP_SCALES,
     diagnostics: dict | None = None,
@@ -70,11 +69,11 @@ def storage_ramp(
     residual(x) + g (x - x_prev) = 0 with a fictitious storage g at every row, each stage
     from the last stage's root and with g ten times smaller, and return the last root.
 
-    `g = scale * |diag(operator(x_prev))|` on `rows` (a `(n,)` bool mask; `None` is every
-    row) and zero elsewhere, `x_prev` being the stage's start: each row's own Jacobian
-    diagonal sets its units, so the storage is relative. On the rows of `signed` (a `(n,)`
-    bool mask; `None` is none) `g` keeps the diagonal's sign, `scale * diag`, so the shifted
-    diagonal `(1 + scale) diag` never cancels: a row written with a negative diagonal (a
+    `g = scale * |diag(operator(x_prev))|` at every row, `x_prev` being the stage's start:
+    each row's own Jacobian diagonal sets its units, so the storage is relative.
+    On the rows of `signed` (a `(n,)` bool mask; `None` is none) `g` keeps the diagonal's
+    sign, `scale * diag`, so the shifted diagonal `(1 + scale) diag` never cancels: a row
+    written with a negative diagonal (a
     relation `dp - f(q)`) gets an inertia rather than a storage of the wrong sign. `scales`
     are the stages' factors. Each stage is one `newton` solve with `newton_kwargs` and
     `on_failure="return"`, under `no_grad`: a stage that does not converge still hands its
@@ -93,8 +92,6 @@ def storage_ramp(
                 g = scale * diag.abs()
             else:
                 g = scale * torch.where(signed.to(device=diag.device), diag, diag.abs())
-            if rows is not None:
-                g = g * rows.to(dtype=g.dtype, device=g.device)
 
             def stage_residual(x, x_prev=x_prev, g=g):
                 return residual(x) + g * (x - x_prev)
