@@ -6,7 +6,8 @@ import torch
 import noodl.solvers.select as select_module
 from noodl.elements import Conductance, ConstitutiveLaw, FixedFlow, ImplicitLaw, LawContext
 from noodl.heads import EdgeHeads
-from noodl.layers.kirchhoff import KirchhoffLayer, _Step
+from noodl.layers._step import _Step
+from noodl.layers.kirchhoff import KirchhoffLayer
 from noodl.solvers.implicit import TransposeOperator
 from noodl.topology import Network
 from noodl.withdrawals import NodeWithdrawal
