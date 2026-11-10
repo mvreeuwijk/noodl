@@ -17,6 +17,7 @@ from noodl.apps.water.controls import (
     Premise,
     Rule,
     apply_controls,
+    next_control_time,
 )
 from noodl.apps.water.inp import PSI_TO_M, read_epanet_inp
 from noodl.apps.water.network import (
@@ -155,6 +156,33 @@ def test_control_and_rule_on_one_link():
         [Control("P1", CLOSED, None, "time", value=7200.0)], time=_t(3600.0),
         status=_t([OPEN, OPEN]), setting=setting, link_names=names, link_kinds=kinds)
     assert status[0].item() == OPEN
+
+
+def test_a_pump_closed_by_a_rule_is_at_speed_zero_as_a_closing_control_leaves_it():
+    """EPANET's `setlinkstatus` (`hydraul.c`) puts a pump a rule CLOSES at speed 0, as a
+    CLOSED control does (`input3.c`, `controldata`): a CLOSED control that follows on the
+    same pump then changes nothing and ends no step (`controltimestep`), and an OPEN, from a
+    rule or a control, runs it at speed 1 again."""
+    names, kinds = ["P1", "PU"], ["PIPE", "PUMP"]
+    close = Action("PU", "STATUS", float(CLOSED))
+    status, setting, changed = take_actions(
+        [close], status=_t([OPEN, OPEN]), setting=_t([0.0, 1.0]), link_names=names,
+        link_kinds=kinds)
+    assert (status[1].item(), setting[1].item(), changed) == (CLOSED, 0.0, True)
+    control = [Control("PU", CLOSED, None, "time", value=1800.0)]
+    ahead = next_control_time(control, time=_t(0.0), levels={}, rates={}, status=status,
+                              setting=setting, link_names=names, link_kinds=kinds)
+    assert ahead == torch.inf
+    _, _, changed = apply_controls(control, time=_t(1800.0), status=status, setting=setting,
+                                   link_names=names, link_kinds=kinds)
+    assert not bool(changed)
+    opened, speed, _ = take_actions([Action("PU", "STATUS", float(OPEN))], status=status,
+                                    setting=setting, link_names=names, link_kinds=kinds)
+    assert (opened[1].item(), speed[1].item()) == (OPEN, 1.0)
+    opened, speed, _ = apply_controls([Control("PU", OPEN, None, "time", value=0.0)],
+                                      time=_t(0.0), status=status, setting=setting,
+                                      link_names=names, link_kinds=kinds)
+    assert (opened[1].item(), speed[1].item()) == (OPEN, 1.0)
 
 
 def test_the_rule_step_must_be_positive():

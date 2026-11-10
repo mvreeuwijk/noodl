@@ -217,9 +217,9 @@ def take_actions(
     link, default 1e-3 as EPANET's `tol`, in the carried unit) of the present one, a closed
     pump counting as set to 0. `setting_scale` (per link, default 1) puts an action's SI
     setting in the carried unit (`head_scale` for a PRV, PSV or PBV on a pressure layer).
-
-    A pump CLOSED keeps its carried speed here, where EPANET sets it to 0 (the speed changes
-    no flow of a shut pump, and `TankLevels` carries the build's speed on)."""
+    A pump CLOSED is at speed 0 (`setlinkstatus`), as a CLOSED control leaves it
+    (`controls._action`), so a CLOSED control that follows on the same pump changes nothing
+    and ends no step."""
     status, setting = status.clone(), setting.clone()
     found = status if solved is None else solved
     index = {name: j for j, name in enumerate(link_names)}
@@ -241,6 +241,8 @@ def take_actions(
                 changed = True
             elif wanted == CLOSED and s > CLOSED:
                 status[j] = CLOSED
+                if kind == "PUMP":
+                    setting[j] = 0.0
                 changed = True
             continue
         x = action.value * (1.0 if setting_scale is None else setting_scale[j])
