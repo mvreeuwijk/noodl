@@ -126,22 +126,26 @@ storages in list order, then their nodes.
 
 **Storage at boundary nodes, stepped by forward Euler.** With `scheme="forward_euler"` the
 storage sits at boundary nodes instead (an EPANET tank), and is never an unknown. The solve
-holds each storage node at its potential at the step start (`layer.holds_storage` is True):
-the layer writes the step-start `"<layer>.phi"` into those columns of
-`"<layer>.phi_boundary"` (`hold_storage`), whatever the driver gives there, on every `Model`
-path (`step`, `steady`, `residuals`, `current_flows`, `check`), so a closure may fill those
-columns with anything. During a step a closure reading `"<layer>.phi"` sees such a node at
-its step-start potential too (`hold_potentials`), even in the later passes of
-`coupling="iterate"`. After the solve the step moves each storage node by
-$\Delta t\,w / C$ (`advance_storage(phi, storage_flow, dt)`), with $w$ the flow the solve
-delivered to the node and $C$ the storage's capacity. That is explicit Euler, EPANET's own
-tank method; the solve itself takes no step and does not depend on `dt`.
+holds each storage node at its potential at the step start (`layer.holds_storage` is True),
+which it reads from `history=(phi, None)`, `phi` every node's potential then: every call
+that evaluates the layer at a boundary (`solve`, `residual`, `jacobian`, `adjoint`,
+`linear_init`) takes it, steady or not, and refuses by name to run without it.
+`"<layer>.phi_boundary"` gives the other boundary nodes only, `layer.prescribed` in boundary
+order. A `Model` passes the step-start `"<layer>.phi"` as `history` on every path (`step`,
+`steady`, `residuals`, `current_flows`, `check`), as it passes every other layer's step start.
+During a step a closure reading `"<layer>.phi"` sees such a node at its step-start potential
+too (`hold_potentials`), even in the later passes of `coupling="iterate"`. After the solve
+the step moves each storage node by $\Delta t\,w / C$ (`advance_storage(phi, storage_flow,
+dt)`), with $w$ the flow the solve delivered to the node and $C$ the storage's capacity.
+That is explicit Euler, EPANET's own tank method; the solve itself takes no step and does
+not depend on `dt`.
 
 ```py
 store = LinearStorage(nodes=[tank], capacity=[area])
 layer = KirchhoffLayer(net, "water", laws, boundary=["R1", "T1"],
                        storage=[store], scheme="forward_euler")
-phi, q = layer.solve(phi_boundary, drivers, sources)    # T1 held at its column of phi_boundary
+phi, q = layer.solve(phi_boundary, drivers, sources,    # phi_boundary: R1 only
+                     history=(phi_start, None))         # T1 held at phi_start[tank]
 w = layer.storage_flows(phi, drivers, dt=None, q=q)     # the flow into T1
 phi_next = layer.advance_storage(phi, w, dt=600.0)      # T1 moved by dt * w / area
 ```

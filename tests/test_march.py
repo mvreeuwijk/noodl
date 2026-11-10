@@ -259,7 +259,7 @@ def _tank_model():
     layer = KirchhoffLayer(net, "water", [law], boundary=["res", "tank"],
                            storage=[LinearStorage([2], 10.0)], scheme="forward_euler")
     model = Model(net, [layer])
-    drivers = {"water.phi_boundary": torch.tensor([10.0, 0.0], dtype=F64)}
+    drivers = {"water.phi_boundary": torch.tensor([10.0], dtype=F64)}
     state = {"water.phi": torch.tensor([10.0, 5.0, 1.0], dtype=F64),
              "water.q": torch.zeros(2, dtype=F64)}
     return model, layer, state, drivers

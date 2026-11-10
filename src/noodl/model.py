@@ -85,7 +85,6 @@ from noodl._model_setup import (
 )
 from noodl._pass import (
     LAYER_OPTIONS,
-    boundary_values,
     circuit_kwargs,
     kind_flows,
     require,
@@ -391,6 +390,8 @@ class Model:
         so an iterated coupling re-steps every pass from the same start -- and `dt` the step;
         a layer with storage also gets `storage_flow` from the step-start state's
         `"<name>.storage_flow"`, read by the trapezoidal scheme (zeros when it is missing).
+        A layer that holds its storage at boundary nodes gets `history=(phi, None)` from the
+        step-start state on every solve, steady or not: the potentials it holds them at.
         """
         return circuit_kwargs(name, layer, state, base, dt, t)
 
@@ -1101,8 +1102,9 @@ class Model:
                                           drv)
                 continue
             out[name] = layer.residual(
-                phi[..., layer.interior], boundary_values(name, layer, drv, state), drv,
+                phi[..., layer.interior], self._require(drv, f"{name}.phi_boundary"), drv,
                 drv.get(f"{name}.sources"),
+                **circuit_kwargs(name, layer, state, state, None, None),
             )
         for name, layer in self.transport.items():
             xb = self._require(drv, f"{name}.x_boundary")
@@ -1164,15 +1166,17 @@ class Model:
             phi_prev = state.get(f"{owner}.phi")
             phi0 = None if phi_prev is None else phi_prev[..., layer.interior]
             _phi, q = layer.solve(
-                boundary_values(owner, layer, drv, state), drv,
+                self._require(drv, f"{owner}.phi_boundary"), drv,
                 drv.get(f"{owner}.sources"), phi0=phi0,
+                **circuit_kwargs(owner, layer, state, state, None, None),
             )
             return layer.flows_of_kind(q, self.transport[name].flow_kinds)
         return self._kind_flows(name, state, drv)
 
     def ports(self, state) -> Ports:
         """Boundary nodes, the driver keys that prescribe them, and (Kirchhoff layers) the net
-        flow INTO each boundary node at `state`.
+        flow INTO each boundary node at `state`. A Kirchhoff layer's are its `prescribed`
+        nodes: a storage node it holds at a boundary node is no port.
 
         Allocation layers contribute NOTHING here, and that is deliberate rather than the
         same omission `residuals` refuses. `Ports` answers "which NODES may a coupled model
@@ -1191,9 +1195,9 @@ class Model:
         keys: dict[str, str] = {}
         flows: dict[str, Tensor] = {}
         for name, layer in self.kirchhoff.items():
-            nodes[name] = [layer.net.nodes[i] for i in layer.bound.tolist()]
+            nodes[name] = [layer.net.nodes[i] for i in layer.prescribed.tolist()]
             keys[name] = f"{name}.phi_boundary"
-            flows[name] = -layer.net_outflow(state[f"{name}.q"])[..., layer.bound]
+            flows[name] = -layer.net_outflow(state[f"{name}.q"])[..., layer.prescribed]
         flow_keys: dict[str, str] = {}
         for name, layer in self.transport.items():
             nodes[name] = list(layer.boundary)

@@ -138,7 +138,7 @@ named for the physics it carries:
 |---|---|---|---|
 | `.pressure`, `.head` (Kirchhoff layers) | `"<layer>.phi"` | state | full node order |
 | `.flow` | `"<layer>.q"` | state (driver for a transport layer whose flows nothing solves) | edge order of the layer's kinds |
-| `.boundary_pressure`, `.boundary_head` | `"<layer>.phi_boundary"` | driver | the layer's boundary order |
+| `.boundary_pressure`, `.boundary_head` | `"<layer>.phi_boundary"` | driver | the layer's boundary order, without the storage nodes a forward-Euler layer holds (`layer.prescribed`) |
 | `.temperature`, `.mass_fraction`, `.concentration` | `"<layer>.x"` | state | the layer's active interior order |
 | `.boundary_temperature`, ... | `"<layer>.x_boundary"` | driver | the layer's boundary order |
 | `.sources` | `"<layer>.sources"` | driver | full node order |

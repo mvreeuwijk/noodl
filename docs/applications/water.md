@@ -257,7 +257,9 @@ returns. `build_model(tank_scheme=...)` chooses how the level moves.
 With the default `tank_scheme="forward_euler"` the tank steps by EPANET's own method. It is a
 boundary node of the layer, held at its step-start head through the hydraulic solve, and the
 step then moves it by explicit Euler, $H \mathrel{+}= q\,\Delta t / A$
-(`KirchhoffLayer.advance_storage`). `TankLevels` is a `Model` closure declaring
+(`KirchhoffLayer.advance_storage`). The held head is the tank's in the step-start
+`"water.phi"`, which `Model` passes to the solve as `history`, so `"water.phi_boundary"` gives
+the reservoirs' heads only. `TankLevels` is a `Model` closure declaring
 `state_keys = ("water.link_status",)`. Its `__call__` applies the controls to the levels and
 returns updated drivers. `event_step(level, rate, dt)` implements EPANET's adaptive
 step-shortening to the next control crossing.

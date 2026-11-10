@@ -353,8 +353,9 @@ class KirchhoffLayer(TopologyGuard):
 
     With `scheme="forward_euler"` the storage sits at BOUNDARY nodes instead, and is stepped
     by forward Euler (EPANET's tank): it is never an unknown. The solve holds each storage
-    node at its potential at the step start (`hold_storage`; every `Model` path writes it
-    into `"<name>.phi_boundary"`, whatever the driver gives there), and the step then moves
+    node at its potential at the step start, which it reads from `history=(phi, None)` on
+    every call (`Model` passes the state's `"<name>.phi"`); `"<name>.phi_boundary"` gives
+    the other boundary nodes only (`prescribed`). The step then moves
     it by `dt * inflow / C` (`advance_storage`), `inflow` being the flow the solve delivers
     to the node (`storage_flows`) and `C` the storage's capacity. Only a linear storage (a constant
     capacity, `LinearStorage`) is accepted there, and only one entry per node. Such a
@@ -606,6 +607,13 @@ class KirchhoffLayer(TopologyGuard):
             offset += pos.numel()
         self._boundary_storage_cols = self._check_boundary_storage(net, name, scheme)
         offset += sum(int(cols.numel()) for cols in self._boundary_storage_cols)
+        # The boundary columns `phi_boundary` gives (every one but the boundary storage's,
+        # which the solve reads from `history`), and the boundary storage's own.
+        held = torch.zeros(len(self.bound), dtype=torch.bool)
+        for cols in self._boundary_storage_cols:
+            held[cols] = True
+        self._held_cols = held.nonzero().flatten()
+        self._prescribed_cols = (~held).nonzero().flatten()
         self._n_entries = offset
 
         # The edges of the laws that store (dynamic), and whether a step has anything to
@@ -805,9 +813,16 @@ class KirchhoffLayer(TopologyGuard):
     @property
     def holds_storage(self) -> bool:
         """True when this layer's storage sits at boundary nodes (`scheme="forward_euler"`):
-        every solve holds those nodes at their step-start potentials (`hold_storage`), and a
-        step moves them afterwards (`advance_storage`)."""
+        every solve holds those nodes at their potentials in `history=(phi, None)`, the step
+        start, and a step moves them afterwards (`advance_storage`)."""
         return bool(self._boundary_storage)
+
+    @property
+    def prescribed(self) -> torch.Tensor:
+        """The boundary nodes whose potentials `phi_boundary` gives, full-node positions in
+        boundary order: every boundary node but the storage nodes of a layer that holds its
+        storage at boundary nodes (`holds_storage`), whose potentials come from `history`."""
+        return self.bound[self._prescribed_cols]
 
     # ------------------------------------------------------- dense references (lazy)
     @property
@@ -1286,12 +1301,15 @@ class KirchhoffLayer(TopologyGuard):
         The step keywords are `solve`'s. On a layer with storage, with `dt` the storage
         withdrawal of that step is included (the residual `solve` drives to zero); without
         `dt` it is the steady residual, where storage is absent. A layer without storage
-        refuses them. `t` is the evaluation time of a law that reads it (a time-dependent
-        source), as in `solve`; such a law refuses `t=None` by name."""
+        refuses them. A layer that holds its storage at boundary nodes takes
+        `history=(phi, None)` on every call, as `solve` does. `t` is the evaluation time of a
+        law that reads it (a time-dependent source), as in `solve`; such a law refuses
+        `t=None` by name."""
         try:
             self._require_current_topology()
             drivers = drivers or {}
-            step = self._public_step(dt, t, scheme, history, storage_flow, drivers)
+            step, phi_boundary = self._public_step(phi_boundary, dt, t, scheme, history,
+                                                   storage_flow, drivers)
             if self._unknowns is None:
                 return self._residual(phi_interior, phi_boundary, drivers, sources, step)[0]
             phi_boundary, sources, phi_interior, q = self._complex_inputs(
@@ -1303,13 +1321,16 @@ class KirchhoffLayer(TopologyGuard):
             # the law context's restrictions hold the caller's step start
             self._law_ctxs = ()
 
-    def _public_step(self, dt, t, scheme, history, storage_flow, drivers) -> _Step:
-        """The `_Step` of `residual`, `jacobian` and `adjoint`: their step keywords,
-        checked as `solve` checks them (refused on a layer that takes no step)."""
+    def _public_step(self, phi_boundary, dt, t, scheme, history, storage_flow,
+                     drivers) -> tuple[_Step, torch.Tensor]:
+        """The `_Step` of `residual`, `jacobian` and `adjoint`, and every boundary node's
+        potential (`_hold_boundary`): their step keywords, checked as `solve` checks them
+        (refused on a layer that takes no step)."""
         if scheme is None:
             scheme = self.scheme
         self._check_forward_euler(scheme)
-        return self._step(None, dt, t, scheme, history, storage_flow, drivers)
+        phi_boundary, history = self._hold_boundary(phi_boundary, history, dt)
+        return self._step(None, dt, t, scheme, history, storage_flow, drivers), phi_boundary
 
     def balance(self, phi, q, sources=None, drivers=None, storage_flow=None):
         """The interior flow balance `A_I q - s_I (+ w(phi)) (+ storage)` of a state's own
@@ -1629,7 +1650,8 @@ class KirchhoffLayer(TopologyGuard):
         try:
             self._require_current_topology()
             drivers = drivers or {}
-            step = self._public_step(dt, t, scheme, history, storage_flow, drivers)
+            step, phi_boundary = self._public_step(phi_boundary, dt, t, scheme, history,
+                                                   storage_flow, drivers)
             if self._unknowns is not None:
                 phi_boundary, _, phi_interior, q = self._complex_inputs(
                     phi_boundary, drivers, None, phi_interior, q)
@@ -1813,7 +1835,7 @@ class KirchhoffLayer(TopologyGuard):
             + "".join(f" ({h})" for h in hints)
         )
 
-    def linear_init(self, phi_boundary, drivers, sources, *, q=False):
+    def linear_init(self, phi_boundary, drivers, sources, *, q=False, history=None):
         """The solution of the network linearised at zero interior potentials
         (`ConstitutiveLaw.linear_init`): the Newton starting guess, the interior potentials,
         of the steady operating point (on a phasor layer the phasor one).
@@ -1828,8 +1850,10 @@ class KirchhoffLayer(TopologyGuard):
         parameters, unlike on a layer without flow unknowns. A phasor layer returns complex
         values. `q=True` returns
         `(phi_interior, q_implicit)`, the second the flows of `implicit_edges` (empty on a
-        layer without flow unknowns)."""
+        layer without flow unknowns). A layer that holds its storage at boundary nodes takes
+        `history=(phi, None)`, as `solve` does."""
         drivers = drivers or {}
+        phi_boundary, _ = self._hold_boundary(phi_boundary, history, None)
         step = self._step(None, None, None, self.scheme, None, None, drivers)
         return self._linear_init_at(step, phi_boundary, drivers, sources, q=q)
 
@@ -2162,7 +2186,11 @@ class KirchhoffLayer(TopologyGuard):
         `storage_flow`, the flow into every storage entry at the step start, in
         `storage_flows`' order. A layer with no storage, no dynamic law and no law that reads
         the context takes no step and refuses `dt`, `history` and `storage_flow`; it accepts
-        and ignores `t`, `q0` and a valid `scheme`. Without `dt` storage is absent.
+        and ignores `t`, `q0` and a valid `scheme`. Without `dt` storage is absent. A layer
+        that holds its storage at boundary nodes (`holds_storage`) is the exception: it takes
+        `history=(phi, None)` on every solve, steady or not, holds each storage node at its
+        potential in `phi`, and takes `phi_boundary` at its `prescribed` nodes only; a solve
+        without `history` is refused by name.
 
         A layer with flow unknowns (`implicit_edges`) solves for the interior potentials and the
         flows of its implicit-law edges together (`noodl.layers._flow_unknowns`), from zeros
@@ -2303,6 +2331,7 @@ class KirchhoffLayer(TopologyGuard):
         if scheme is None:
             scheme = self.scheme
         self._check_forward_euler(scheme)
+        phi_boundary, history = self._hold_boundary(phi_boundary, history, dt)
         for key, value in self.newton_defaults.items():
             newton_kwargs.setdefault(key, value)
         drivers = drivers or {}
@@ -2760,19 +2789,50 @@ class KirchhoffLayer(TopologyGuard):
         out[..., idx] = held.to(out.dtype)
         return out
 
-    def hold_storage(self, phi_boundary, phi_start) -> torch.Tensor:
-        """`phi_boundary` with the column of every storage node at a boundary node
-        (`scheme="forward_euler"`) replaced by its potential in `phi_start` (full-node, the
-        step start): the value the solve holds it at, whatever the driver gave there.
-        Unchanged on a layer without boundary storage."""
+    def _hold_boundary(self, phi_boundary, history, dt):
+        """`(phi_boundary, history)` as the rest of a call takes them. On a layer that holds
+        its storage at boundary nodes, `phi_boundary` gives the `prescribed` nodes only and
+        the storage nodes are held at their potentials in `history[0]` (full-node, the step
+        start); the result is every boundary node's potential, and the `history` a step of
+        the layer's laws reads (`None` unless the layer steps with `dt`). Unchanged on any
+        other layer."""
         if not self._boundary_storage:
-            return phi_boundary
-        cols = torch.cat(self._boundary_storage_cols).to(phi_boundary.device)
-        held = phi_start[..., self.bound[cols].to(phi_start.device)]
-        batch = broadcast_shapes(phi_boundary.shape[:-1], held.shape[:-1])
-        out = phi_boundary.expand(batch + phi_boundary.shape[-1:]).clone()
-        out[..., cols] = held.to(out.dtype)
-        return out
+            return phi_boundary, history
+        name = self.name
+        nodes = self.net.nodes
+        held = [nodes[i] for i in self.bound[self._held_cols].tolist()]
+        given = [nodes[i] for i in self.prescribed.tolist()]
+        if history is None:
+            raise ValueError(
+                f"KirchhoffLayer {name!r} holds its storage nodes {held} at their potentials "
+                f"at the step start, and reads them from history=(phi, None), phi being "
+                f"every node's potential then (the state's {name + '.phi'!r}); pass history"
+            )
+        if not isinstance(history, (tuple, list)) or len(history) != 2:
+            raise ValueError(
+                f"KirchhoffLayer {name!r}: history must be the pair (phi, q) at the step "
+                f"start; got {type(history).__name__}"
+            )
+        phi_start = history[0]
+        if phi_start.shape[-1] != len(nodes):
+            raise ValueError(
+                f"KirchhoffLayer {name!r}: history's phi must hold every node's potential "
+                f"({len(nodes)}); got last dimension {phi_start.shape[-1]}"
+            )
+        if phi_boundary.shape[-1] != len(given):
+            raise ValueError(
+                f"KirchhoffLayer {name!r}: phi_boundary must give the potentials of the "
+                f"boundary nodes {given} only ({len(given)}), the storage nodes {held} being "
+                f"held at their potentials in history; got last dimension "
+                f"{phi_boundary.shape[-1]}"
+            )
+        start = phi_start[..., self.bound[self._held_cols].to(phi_start.device)]
+        batch = broadcast_shapes(phi_boundary.shape[:-1], start.shape[:-1])
+        out = phi_boundary.new_empty(batch + (len(self.bound),))
+        out[..., self._prescribed_cols.to(out.device)] = phi_boundary.expand(
+            batch + phi_boundary.shape[-1:])
+        out[..., self._held_cols.to(out.device)] = start.to(out.dtype)
+        return out, history if dt is not None and self._takes_step else None
 
     def advance_storage(self, phi, storage_flow, dt, drivers=None) -> torch.Tensor:
         """The potentials `phi` (full-node) after one forward-Euler step of `dt` of the
@@ -3087,7 +3147,8 @@ class KirchhoffLayer(TopologyGuard):
         try:
             self._require_current_topology()
             drivers = drivers or {}
-            step = self._public_step(dt, t, scheme, history, storage_flow, drivers)
+            step, phi_boundary = self._public_step(phi_boundary, dt, t, scheme, history,
+                                                   storage_flow, drivers)
             if self._unknowns is not None:
                 phi_boundary, _, phi_interior, q = self._complex_inputs(
                     phi_boundary, drivers, None, phi_interior, q)

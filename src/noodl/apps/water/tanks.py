@@ -12,12 +12,11 @@ the solve holds at its step-start head and the step then moves by `dt * inflow /
 Per call the closure (1) applies every control's level test with EPANET's semantics, under
 `no_grad` -- the switch itself is a combinatorial decision; and (2) writes the reservoir heads
 into `"water.phi_boundary"` and the per-pump status into `"water.status"`. A tank held at a
-boundary node has a column of `"water.phi_boundary"` too, which the closure fills with zeros:
-the layer holds the tank at its step-start head there on every path (`Model` steps, steady
-solves, `residuals`, `current_flows`; `KirchhoffLayer.hold_storage`), so it is the only
-authority for the tank heads. During a step the controls read the step-start levels: a
-`Model` pass shows a closure the held head of such a node, not the level a previous pass of
-the same step has advanced it to (`coupling="iterate"`).
+boundary node has no column there: the layer holds it at its head in the step-start state
+`"water.phi"`, which `Model` passes to every solve as `history` (`KirchhoffLayer.solve`),
+so that state is the only authority for the tank heads. During a step the controls read the
+step-start levels: a `Model` pass shows a closure the held head of such a node, not the
+level a previous pass of the same step has advanced it to (`coupling="iterate"`).
 
 `event_step` is EPANET's ADAPTIVE shortening, and it is not optional: with a fixed step
 the pump switches up to a whole step late and the tank level diverges from EPANET; the step
@@ -62,10 +61,10 @@ class TankLevels:
 
     A tank's level is its head in `"water.phi"` at `tank_nodes` less its bottom (`levels`).
     Per call it applies the controls to those levels, refuses a level outside `[min, max]`
-    by name, and writes the reservoir heads into `"water.phi_boundary"`, then zeros in the
-    tanks' columns, which the layer fills with their step-start heads
-    (`KirchhoffLayer.hold_storage`). Only the link status is carried. `event_step` is
-    EPANET's shortening of the step to the next control crossing.
+    by name, and writes the reservoir heads into `"water.phi_boundary"` (the layer holds the
+    tanks at their step-start heads, `KirchhoffLayer.solve`'s `history`). Only the link
+    status is carried. `event_step` is EPANET's shortening of the step to the next control
+    crossing.
     """
 
     state_keys = ("water.link_status",)
@@ -138,18 +137,9 @@ class TankLevels:
         with torch.no_grad():
             status = self._apply_controls(level, status)
         self._refuse_outside(level)
-        return {"water.phi_boundary": self._boundary(state, level), "water.status": status,
+        heads = self.reservoir_heads.expand(level.shape[:-1] + self.reservoir_heads.shape)
+        return {"water.phi_boundary": heads, "water.status": status,
                 "water.link_status": status}
-
-    def _boundary(self, state, level: Tensor) -> Tensor:
-        """The reservoir heads, then zeros in the tanks' columns (boundary nodes here, whose
-        heads the layer holds: `KirchhoffLayer.hold_storage`)."""
-        batch = level.shape[:-1]
-        return torch.cat(
-            [self.reservoir_heads.expand(batch + self.reservoir_heads.shape),
-             torch.zeros(batch + level.shape[-1:], dtype=level.dtype, device=level.device)],
-            dim=-1,
-        )
 
     def _refuse_outside(self, level: Tensor) -> None:
         """Refuse, by name, a tank outside its `[min, max]` levels."""
@@ -206,14 +196,9 @@ class TankLevels:
 
 class TankStorageControls(TankLevels):
     """`TankLevels` for tanks stepped inside the solve, as interior storage nodes
-    (`build_model(tank_scheme="backward_euler")` or `"trapezoidal"`): it writes only the
-    reservoir heads into `"water.phi_boundary"`, and its `event_step` never shortens a step
-    below `min_step`.
+    (`build_model(tank_scheme="backward_euler")` or `"trapezoidal"`): its `event_step` never
+    shortens a step below `min_step`.
     """
-
-    def _boundary(self, state, level: Tensor) -> Tensor:
-        """The reservoir heads (the tanks are interior nodes here)."""
-        return self.reservoir_heads.expand(level.shape[:-1] + self.reservoir_heads.shape)
 
     def event_step(self, level: Tensor, rate: Tensor, dt: float,
                    min_step: float = 1.0) -> float:

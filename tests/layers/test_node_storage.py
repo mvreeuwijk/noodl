@@ -433,13 +433,14 @@ def test_boundary_storage_advances_by_dt_inflow_over_capacity_exactly():
     layer = _tank_layer()
     assert not layer.dynamic and len(layer.storage) == 1
     model = Model(layer.net, [layer])
-    # the closure-free driver gives the tank column 0.0: the pass holds it at the state's 2.0
-    drivers = {"w.phi_boundary": torch.tensor([1.25, 0.0]),
+    # the driver gives the other boundary node only: the pass holds the tank at the state's 2.0
+    drivers = {"w.phi_boundary": torch.tensor([1.25]),
                "w.sources": torch.tensor([0.0, 0.3, -0.2, 0.0])}
     state = {"w.phi": torch.tensor([1.25, 0.0, 0.0, 2.0])}
     dt = 0.7
     new = model.step(state, drivers, dt)
-    held, _ = layer.solve(torch.tensor([1.25, 2.0]), {}, drivers["w.sources"])
+    held, _ = layer.solve(torch.tensor([1.25]), {}, drivers["w.sources"],
+                          history=(state["w.phi"], None))
     torch.testing.assert_close(new["w.phi"][:3], held[:3], rtol=0, atol=1e-14)
     # the flow into the tank is what the step's own flows deliver to it, and the tank
     # moves by exactly dt * inflow / C
@@ -463,7 +464,8 @@ def test_boundary_storage_advances_by_dt_inflow_over_capacity_exactly():
 def test_boundary_storage_gradient_reaches_the_capacity():
     storage = LinearStorage([3], TANK_C.clone(), learnable=True)
     layer = _tank_layer(storage)
-    phi, q = layer.solve(torch.tensor([1.25, 2.0]), {}, torch.tensor([0.0, 0.3, -0.2, 0.0]))
+    phi, q = layer.solve(torch.tensor([1.25]), {}, torch.tensor([0.0, 0.3, -0.2, 0.0]),
+                         history=(torch.tensor([1.25, 0.0, 0.0, 2.0]), None))
     inflow = layer.storage_flows(phi, {}, dt=None, q=q)
     layer.advance_storage(phi, inflow, 0.7)[3].backward()
     torch.testing.assert_close(storage.C.grad, -0.7 * inflow.detach() / TANK_C ** 2)
@@ -493,7 +495,7 @@ def test_forward_euler_refusals():
     # a per-call scheme other than forward_euler on boundary storage
     layer = _tank_layer()
     with pytest.raises(ValueError, match="step by scheme='forward_euler' only"):
-        layer.solve(torch.tensor([1.25, 2.0]), {}, None, scheme="backward_euler")
+        layer.solve(torch.tensor([1.25]), {}, None, scheme="backward_euler")
     # forward_euler on a layer that steps interior storage
     rc, _ = _rc()
     with pytest.raises(ValueError, match="boundary nodes only"):
@@ -508,15 +510,15 @@ def test_forward_euler_refusals():
     # the pass needs the step-start potentials it holds the storage at
     model = Model(layer.net, [layer])
     with pytest.raises(KeyError, match="held at its potential at the step start"):
-        model.steady({}, {"w.phi_boundary": torch.tensor([1.25, 2.0])})
+        model.steady({}, {"w.phi_boundary": torch.tensor([1.25])})
 
 
 def test_the_layer_holds_boundary_storage_on_every_model_path():
     """`steady`, `step`, `residuals` and `current_flows` all hold the tank at the state's
-    potential, whatever the driver's column says (the stale 0.0 here)."""
+    potential: the driver gives the other boundary node only."""
     layer = _tank_layer()
     model = Model(layer.net, [layer])
-    drivers = {"w.phi_boundary": torch.tensor([1.25, 0.0]),
+    drivers = {"w.phi_boundary": torch.tensor([1.25]),
                "w.sources": torch.tensor([0.0, 0.3, -0.2, 0.0])}
     steady = model.steady({"w.phi": torch.tensor([1.25, 0.0, 0.0, 2.0])}, drivers)
     assert layer.holds_storage and float(steady["w.phi"][3]) == 2.0
@@ -524,6 +526,28 @@ def test_the_layer_holds_boundary_storage_on_every_model_path():
     torch.testing.assert_close(residual, torch.zeros_like(residual), rtol=0, atol=1e-12)
     report = model.check(steady, drivers, steady=True)
     assert report.ok, str(report)
+
+
+def test_a_direct_call_without_history_is_refused_by_name():
+    """The layer reads the held potentials from `history` only: a direct `solve`,
+    `residual` or `linear_init` without it is refused, and so is a `phi_boundary` that
+    still gives the held node."""
+    layer = _tank_layer()
+    src = torch.tensor([0.0, 0.3, -0.2, 0.0])
+    start = torch.tensor([1.25, 0.0, 0.0, 2.0])
+    with pytest.raises(ValueError, match=r"holds its storage nodes \['t'\].*pass history"):
+        layer.solve(torch.tensor([1.25]), {}, src)
+    with pytest.raises(ValueError, match="pass history"):
+        layer.residual(torch.zeros(2), torch.tensor([1.25]), {}, src)
+    with pytest.raises(ValueError, match="pass history"):
+        layer.linear_init(torch.tensor([1.25]), {}, src)
+    with pytest.raises(ValueError, match=r"boundary nodes \['gnd'\] only \(1\)"):
+        layer.solve(torch.tensor([1.25, 2.0]), {}, src, history=(start, None))
+    phi, _ = layer.solve(torch.tensor([1.25]), {}, src, history=(start, None))
+    assert float(phi[3]) == 2.0
+    r = layer.residual(phi[layer.interior], torch.tensor([1.25]), {}, src,
+                       history=(start, None))
+    torch.testing.assert_close(r, torch.zeros_like(r), rtol=0, atol=1e-12)
 
 
 def test_forward_euler_without_storage_is_refused():
