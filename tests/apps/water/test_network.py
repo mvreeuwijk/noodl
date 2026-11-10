@@ -558,13 +558,19 @@ def test_an_unknown_friction_law_is_refused(friction):
 
 
 def test_a_files_flow_units_select_epanets_rounded_cfs_factor(tmp_path):
-    """An LPS file reaches EPANET as q / 28.317 cfs, not q / 28.3168466."""
+    """An LPS file reaches EPANET as q / 28.317 cfs, not q / 28.3168466: both the D-W and the
+    H-W pipe laws take that factor; a network without a flow unit keeps the exact one."""
     net = dataclasses.replace(
         twoloop(), headloss="D-W", options=WaterOptions(flow_units="LPS")
     )
     model, _, _ = build_model(net)
     pipe = model.kirchhoff["water"]._laws[0].pipe   # the resistance form wraps it
     assert pipe.cfs_per_m3s == pytest.approx(1000.0 / 28.317, rel=1e-15)
+    model, _, _ = build_model(dataclasses.replace(net, headloss="H-W"))
+    pipe = model.kirchhoff["water"]._laws[0].pipe
+    assert pipe.cfs_per_m3s == pytest.approx(1000.0 / 28.317, rel=1e-15)
+    model, _, _ = build_model(twoloop())         # no file flow unit: the exact conversion
+    assert model.kirchhoff["water"]._laws[0].pipe.cfs_per_m3s is None
 
 
 def test_initial_state_refuses_an_unknown_quantity():

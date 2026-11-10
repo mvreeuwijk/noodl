@@ -939,7 +939,7 @@ def build_model(
                     torch.tensor([p.diameter for p in net.pipes], dtype=F64),
                     torch.tensor([p.roughness for p in net.pipes], dtype=F64),
                     minor_loss=torch.tensor([p.minor_loss for p in net.pipes], dtype=F64),
-                    kind="pipe",
+                    cfs_per_m3s=_rounded_cfs_per_m3s(options.flow_units), kind="pipe",
                 )
             )
         elif headloss == "C-M":

@@ -13,8 +13,7 @@ EPANET runs at `ACCURACY 1e-8` (TRIALS 400) on every network, not at the files' 
 1e-4: EPANET stops when the flow change is below that fraction of the total flow
 (`hydsolver.c`, `newflows`), and at the files' values its own answer is off by more than the
 bounds (MEASURED: Net6 at t = 0, heads 5.7e-5 relative at 1e-3 and 3.1e-7 at 1e-8; Net3,
-flows 3.0e-5 m3/s at 1e-3 and 2.2e-7 at 1e-8 before the first one-second shift below; ky4,
-1.1e-5 m3/s, `test_ky4_at_time_zero`).
+flows 3.0e-5 m3/s at 1e-3 at 1 h; ky4, 1.1e-5 m3/s, `test_ky4_at_time_zero`).
 """
 
 import math
@@ -59,14 +58,11 @@ def _anytown_edited(tmp_path):
 #: each with its measured cause and the MEASURED worst values.
 _NETWORKS = {
     # Net3: 168 h, AT TIME controls on pump 10, level controls on pump 335 and pipe 330, a
-    # closed pipe, 3-point pumps. MEASURED: heads 2.7e-6, levels 1.28e-4 m, states equal,
-    # energy 9.1e-8; flows 2.2e-7 m3/s up to 21 h. FLOWS 3e-6: at 75600 s tank 1's
-    # level trigger (149 ft, pump 335 OPEN) is 1178.44 s ahead in EPANET, which ROUNDs it to
-    # 1178 s (`controltimestep`); noodl's tank is 6.4e-6 m higher (the float accumulation of
-    # 21 h of steps, inside the level bound), its crossing at least 1178.5 s ahead (1179):
-    # the pump starts one second later, the three tanks then differ by up to 1.3e-4 m and the
-    # flows on their pipes by 2.1e-6 m3/s (pipe 20) for five hours.
-    "Net3": dict(path=_library("Net3"), flows=3e-6),
+    # closed pipe, 3-point pumps. MEASURED: heads 1.2e-7, levels 5.2e-6 m, flows 3.0e-7 m3/s,
+    # states equal, energy 4.2e-8. (With the exact GPM factor in Hazen-Williams, before the
+    # law took EPANET's rounded one, tank 1 drifted 6.4e-6 m above EPANET's by 21 h, which
+    # rounded a level trigger to a second later: levels 1.3e-4 m, flows 2.1e-6 m3/s.)
+    "Net3": dict(path=_library("Net3")),
     # Net6: 96 h, 3323 junctions, 61 pumps (one constant-power), two PRVs, a check valve,
     # 124 IF NODE controls, 18 pumps closed in [STATUS]. MEASURED: heads 9.4e-6, states equal
     # at every hour, levels 1.95e-3 m, flows 2.9e-4 m3/s, energy 1.95e-4 (PUMP-3866's time
@@ -78,10 +74,12 @@ _NETWORKS = {
     # LINK-3584, which carries -2.559e-7 m3/s in EPANET and 0 in noodl; noodl's head drop of
     # 91.82 m across each of the closed pumps divided by CBIG is -8.531e-8 m3/s each,
     # -2.5592e-7 m3/s together. That leak fills TANK-3355 1.7e-6 m an hour faster in
-    # EPANET; such drifts move level triggers that fall near a half second: the first
-    # (PUMP-3845 CLOSED on TANK-3336 at 19 ft) is 386.509 s ahead in EPANET (387) when noodl's
-    # tank is 7.1e-7 m higher (386). By 96 h 609 steps in both, every one matched, up to a
-    # minute apart late in the run.
+    # EPANET; such drifts move level triggers that fall near a half second. The first
+    # (PUMP-3845 CLOSED on TANK-3336 at 19 ft) is 386.509 s ahead in EPANET at 18535 s, from
+    # its toolkit's double-precision level and inflow (`ENgetnodevalue`), so EPANET rounds
+    # it to 387 s and noodl, whose TANK-3336 is 7.1e-7 m higher at 5 h than the toolkit's
+    # level, takes 386 s. By 96 h 609 steps in both, every one matched, up to a minute apart
+    # late in the run. (The closed-link leak is not modelled: Ruling 30.)
     "Net6": dict(path=_library("Net6"), levels=3e-3, flows=5e-4, energy=3e-4),
     # ky4: DURATION 0, 959 junctions, two constant-power pumps (one closed), T-2 empty.
     # MEASURED: heads 8.2e-8, flows 2.0e-7 m3/s off the two parallel pairs. FLOWS 3e-6 on
@@ -92,17 +90,18 @@ _NETWORKS = {
     # on `~@`-named pumps. MEASURED: heads 6.3e-7, flows 9.1e-8 m3/s.
     "ky10": dict(path=_library("ky10")),
     # Anytown edited (Ruling 21): 24 h at a 1 min hydraulic step, three pumps on a
-    # five-point curve, the tanks empty within the first hour. MEASURED: levels 1.8e-6 m,
-    # flows 2.9e-7 m3/s, states equal, energy below 1e-5; heads 1.16e-5 relative at
-    # junction 3, at -1.509 m (a pressure of -16.7 m), 1.75e-5 m apart (2e-7 of the 90 m the
-    # network spans). HEADS 2e-5: EPANET's GPMperCFS is rounded (448.831 against
-    # 448.8311688, `types.h`), so its internal flows are 3.8e-7 larger than the file's and its
-    # Hazen-Williams losses 1.852 times that, up to 7e-5 m over the 100 m lost between the
-    # pumps and the low junctions (MEASURED: noodl with its Hazen-Williams coefficient
-    # multiplied by (448.8311688 / 448.831)^1.852 gives heads 1.5e-8 m from EPANET's at
-    # t = 0); the head relative to the node's own value is large only where the head is
-    # near the datum.
-    "Anytown": dict(path=_anytown_edited, heads=2e-5),
+    # five-point curve, the tanks empty within the first hour. MEASURED: heads 9.3e-8 at
+    # t = 0 and 5.1e-5 relative over the day (junction 14, whose head is 0.554 m, 5.1e-5 m
+    # apart; the worst absolute is 1.8e-4 m, junction 17 at -120.8 m, 1.9e-6 relative),
+    # levels 1.8e-6 m, flows 2.9e-7 m3/s, states equal, energy 3.7e-7. HEADS 1e-4: from the
+    # first hour the empty tanks' pipes 142 and 143 are closed, and EPANET's closed links
+    # conduct `1 / CBIG`: at this model's 68 to 159 m across them they leak 1.4e-7 to
+    # 2.7e-7 m3/s out of the tanks, and EPANET's pumps deliver 1.1e-7 to 2.6e-7 m3/s less
+    # than noodl's (MEASURED at 1, 3 and 12 h), the heads at the junctions far from the
+    # pumps moving by up to 1.8e-4 m; relative to the node's own head that is large only
+    # where the head is near the datum. (Before Hazen-Williams took EPANET's rounded GPM
+    # factor, 448.831 against 448.8311688, its 3.8e-7 partly offset that: 1.16e-5.)
+    "Anytown": dict(path=_anytown_edited, heads=1e-4),
 }
 
 
@@ -162,12 +161,12 @@ def test_network_matches_epanet(tmp_path, name):
     status = torch.tensor(results.link["status"][links].to_numpy()).to(run.status.dtype)
     mismatched = [(float(run.time[t]), links[j]) for t, j in (run.status != status).nonzero()]
     worst_e = _worst_energy(net, run.energy, theirs, demand)
+    assert not math.isnan(worst_h + worst_l + worst_q + worst_e)
     assert not mismatched, mismatched
     assert worst_h < case.get("heads", 1e-5), worst_h
     assert worst_l < case.get("levels", 2e-4), worst_l
     assert worst_q < case.get("flows", 1e-6), worst_q
     assert worst_e < case.get("energy", 1e-5), worst_e
-    assert not math.isnan(worst_h + worst_l + worst_q + worst_e)
 
 
 #: The outcome of reading and building each network `wntr` ships: `None` builds, a string is

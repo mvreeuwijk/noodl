@@ -106,6 +106,34 @@ def test_a_minor_loss_term_is_inverted_by_the_bracketed_root():
     assert float(q) < float(bare.flow(dp))
 
 
+def test_hazen_williams_takes_epanets_rounded_flow_factor():
+    """Given EPANET's cfs per m3/s (an LPS file: 1000 / 28.317), ``K`` is EPANET's 4.727 law
+    in feet and those cfs, ``HW_SI (c 0.3048^3)^1.852``, and the minor loss EPANET's
+    ``0.02517 K / d^4``; the loss, its closed-form gradient and the inversion stay
+    consistent (the gradient against central differences, the flow against the loss)."""
+    c = 1000.0 / 28.317
+    args = (torch.tensor([500.0, 300.0], dtype=F64), torch.tensor([0.300, 0.150], dtype=F64),
+            torch.tensor([130.0, 100.0], dtype=F64))
+    exact, rounded = HazenWilliams(*args), HazenWilliams(*args, cfs_per_m3s=c)
+    ratio = rounded.resistance() / exact.resistance()
+    torch.testing.assert_close(ratio, torch.full_like(ratio, (c * 0.3048**3) ** 1.852),
+                               rtol=1e-14, atol=0)
+    us = 4.727 * 0.3048 * (500.0 / 0.3048) * 130.0**-1.852 * (0.300 / 0.3048) ** -4.871
+    assert float(rounded.resistance()[0]) == pytest.approx(us * c**1.852, rel=1e-8)
+    minor = HazenWilliams(*args, minor_loss=torch.tensor([2.0, 0.5], dtype=F64),
+                          cfs_per_m3s=c)
+    d_ft = torch.tensor([0.300, 0.150], dtype=F64) / 0.3048
+    km = 0.3048 * 0.02517 * torch.tensor([2.0, 0.5], dtype=F64) / d_ft**4 * c**2
+    torch.testing.assert_close(minor._minor(), km, rtol=1e-14, atol=0)
+    q = torch.tensor([0.05, -0.01], dtype=F64)
+    eps = 1e-7
+    fd = (minor.head_loss(q + eps) - minor.head_loss(q - eps)) / (2 * eps)
+    torch.testing.assert_close(minor.head_gradient(q), fd, rtol=1e-7, atol=0)
+    dp = torch.tensor([1.5, -0.7], dtype=F64)
+    torch.testing.assert_close(minor.head_loss(minor.flow(dp)), dp, rtol=1e-10, atol=0)
+    torch.testing.assert_close(rounded.head_loss(rounded.flow(dp)), dp, rtol=1e-12, atol=0)
+
+
 def test_the_three_point_fit_reproduces_epanets_own_coefficients():
     """Net1's single point, 1500 GPM / 250 ft: EPANET's points (0, 1.33334 H), (q, H),
     (2 q, 0) fitted by `powercurve` (`input2.c`, `input3.c`), n = 1.99998 (wntr's own

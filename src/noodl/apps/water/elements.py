@@ -195,6 +195,17 @@ class HazenWilliams(ConstitutiveLaw):
     6.4922e-5 m at 1e-3, which is a coincidence of EPANET's own unquantified low-flow
     linearisation, not a better answer). 1e-9 is therefore the converged, faithful choice,
     and it is what fixes ``water_steady``'s ``max_iter`` at 200.
+
+    ``cfs_per_m3s`` is the flow conversion EPANET itself applies (as `ChezyManning` and
+    `CompositeDarcyWeisbach` take it): EPANET divides a file's flows by its own ROUNDED
+    factor (``GPMperCFS = 448.831`` against 448.8311688, ``LPSperCFS = 28.317`` against
+    28.3168466, `types.h`) and evaluates ``4.727 C^-1.852 d^-4.871 L q^1.852`` in feet and
+    those cfs (`hydcoeffs.c`, `resistcoeff`, `pipecoeff`). Given, ``K`` is ``HW_SI`` times
+    ``(cfs_per_m3s 0.3048^3)^1.852`` and the minor loss is EPANET's ``0.02517 K / d^4``
+    (`epanet_minor_coefficient`); ``None`` (a network without a file flow unit) selects the
+    exact conversion and ``K_minor / (2 g A^2)``. MEASURED: on Anytown (GPM) the exact
+    factor leaves heads 1.75e-5 m from EPANET's at a junction 100 m of losses from the pumps,
+    the rounded one 1.5e-8 m at t = 0 (`test_water_networks`).
     """
 
     def __init__(
@@ -204,6 +215,7 @@ class HazenWilliams(ConstitutiveLaw):
         roughness,
         *,
         minor_loss=0.0,
+        cfs_per_m3s: float | None = None,
         dp_transition: float = 1e-9,
         kind: str = "pipe",
         learnable: bool = False,
@@ -213,20 +225,23 @@ class HazenWilliams(ConstitutiveLaw):
         self.diameter = self._param(diameter, False)
         self.roughness = self._param(roughness, learnable)
         self.minor_loss = self._param(minor_loss, False)
+        self.cfs_per_m3s = None if cfs_per_m3s is None else float(cfs_per_m3s)
         self.dp_transition = float(dp_transition)
         self._has_minor = bool(torch.any(torch.as_tensor(minor_loss) != 0))
 
     def resistance(self) -> Tensor:
-        """``K`` in ``h_L = K q^1.852`` (s^1.852 m^-4.556)."""
-        return (
-            HW_SI
-            * self.roughness ** (-1.852)
-            * self.diameter ** (-4.871)
-            * self.length
-        )
+        """``K`` in ``h_L = K q^1.852`` (s^1.852 m^-4.556), with EPANET's rounded flow factor
+        when ``cfs_per_m3s`` is given."""
+        k = HW_SI * self.roughness ** (-1.852) * self.diameter ** (-4.871) * self.length
+        if self.cfs_per_m3s is None:
+            return k
+        return k * (self.cfs_per_m3s * M_PER_FT**3) ** 1.852
 
     def _minor(self) -> Tensor:
-        """``m`` in ``h_m = m q^2``: ``K_minor / (2 g A^2)``."""
+        """``m`` in ``h_m = m q^2``: EPANET's ``0.02517 K / d^4`` with its rounded flow factor
+        when ``cfs_per_m3s`` is given, else ``K_minor / (2 g A^2)``."""
+        if self.cfs_per_m3s is not None:
+            return epanet_minor_coefficient(self.minor_loss, self.diameter, self.cfs_per_m3s)
         area = torch.pi * self.diameter**2 / 4.0
         return self.minor_loss / (2.0 * G * area**2)
 

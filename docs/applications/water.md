@@ -283,7 +283,15 @@ m = \frac{K_{\text{minor}}}{2 g A^2}
 $$
 
 The SI constant was re-derived from EPANET's own US constant 4.727 and matches `wntr`'s `hw_k` to
-1.04e-9 relative. With no minor loss the inversion is closed form; with one, it is a batched
+1.04e-9 relative. For a network read from a file, $K$ carries EPANET's own rounded flow-unit
+factor, as Chezy-Manning and Darcy-Weisbach do: EPANET divides a file's flows by `LPSperCFS =
+28.317`, `GPMperCFS = 448.831`, ... (`types.h`; exact 28.3168466 and 448.8311688) and evaluates
+the law in those cfs, so $K$ is multiplied by $(c \cdot 0.3048^3)^{1.852}$ with $c$ EPANET's cfs
+per m³/s (`HazenWilliams(cfs_per_m3s=...)`), and the minor loss is EPANET's $0.02517\,K/d^4$
+(ft, cfs) with the same factor. A network built by hand has no flow unit and keeps the exact
+conversion and $m = K_{\text{minor}}/(2 g A^2)$. With the exact factor an LPS file's heads are
+1.0e-5 of the losses off EPANET's (3.1e-5 relative on a network with 110 m of losses); with the
+rounded one the two-loop heads agree to 5.3e-8. With no minor loss the inversion is closed form; with one, it is a batched
 monotone root solve bracketed by the pure Hazen-Williams flow as an upper bound.
 
 Below `dp_transition` (default $10^{-9}$ m) the law blends to a laminar linear form to keep the
@@ -748,9 +756,9 @@ on-disk reals are **float32**, so roughly 1e-7 relative is EPANET's own precisio
 
 | Check | Tolerance | Measured |
 |---|---|---|
-| `twoloop_si.inp` heads and flows | rel 1e-6 | **4.361e-7** heads, **8.090e-8** flows |
+| `twoloop_si.inp` heads and flows | rel 1e-6 | **5.3e-8** heads, **8.090e-8** flows |
 | `twoloop_si.inp`, noodl physics' own nodal continuity | 1e-13 | **2.093e-14** |
-| Net1 single period: heads, flows, pump head gain, pump flow | 1e-6 / 1e-6 / 1e-6 / 1e-8 m³/s | 7.224e-8, 2.647e-7, 1.942e-7, 3.2e-9 m³/s |
+| Net1 single period: heads, flows, pump head gain, pump flow | 1e-6 / 1e-6 / 1e-6 / 1e-8 m³/s | 7.3e-8, 1.1e-7, 1.0e-7, 5.4e-9 m³/s |
 | Net1 24 h tank level with level-triggered pump controls (`water_run`) | 2e-4 m | **2.5e-5 m** worst of 25 steps (26 hydraulic steps) |
 | Net1 24 h tank level with `AT TIME`, `AT CLOCKTIME` (START CLOCKTIME 8 am) and junction-pressure pump controls added | 1e-4 m | 2.4e-5 m (time and clock time; 1.8e-4 m before EPANET's whole-second crossings and volume margin), 2.2e-5 m (pressure) |
 | Net1 24 h with REPORT START and TIMESTEP 2 h; PATTERN START 1 h; a pump speed pattern (with a 0); a reservoir head pattern: report times, heads, levels, flows, states, pump setting | 1e-5 / 2e-4 m / 1e-6 m³/s / equal | heads 1.8e-7, 2.4e-7, 8.5e-8, 9.3e-8; levels 1.9e-5, 2.4e-5, 2.0e-5, 2.8e-5 m; flows 5.2e-8 to 5.9e-8 m³/s |
@@ -758,7 +766,7 @@ on-disk reals are **float32**, so roughly 1e-7 relative is EPANET's own precisio
 | Net1 with REPORT START 1:30 (not a multiple of the report step), against EPANET's toolkit with `runqual`'s rule applied: report times, levels, heads, flows | equal / 2e-4 m / 1e-5 / 1e-6 m³/s | equal, 1.2e-5 m, 2.2e-7, 5.3e-8 m³/s |
 | A rule acting in one instance of a batch: the shared step ends for both, each instance its forced single run | 1e-9 m / equal | exact to 1e-9 m, states equal |
 | A batch of two Net1 instances (0.8 and 1.25 times the demand) against each run alone on the batch's step boundaries; against the plain single runs | 1e-9 m / 1e-2 m | exact to 1e-9 m; 6.5e-3 m (the extra boundaries' explicit-step difference, see Limitations) |
-| SPECIFIC GRAVITY 1.2 on an LPS file with pressure-driven demand and an emitter, 2 h of a pattern: heads, flows, demand plus emitter outflow | 1e-6 / 1e-6 m³/s / 1e-6 m³/s | 1.3e-7, 2.2e-7, 1.0e-7 (EPANET's LPS factor applied) |
+| SPECIFIC GRAVITY 1.2 on an LPS file with pressure-driven demand and an emitter, 2 h of a pattern: heads, flows, demand plus emitter outflow | 1e-6 / 1e-6 m³/s / 1e-6 m³/s | 1.3e-7, 1.9e-8, 1.0e-8 |
 | Pump energy and cost (`WaterResults.energy`): Net3 over 7 days (two control-switched pumps; a global price on a price pattern, a pump price, a demand charge), Anytown 24 h (efficiency curves, a pump at speed 1.2 for the speed adjustment, shut-off), Net1 with a duration of 1:30 (the last step counted whole) and of 0, against the energy section of EPANET's binary output: on-time, efficiency, kWh per volume, average and peak kW, cost per day, demand charge | 1e-5 relative | 2.2e-6 (Net3), 2.6e-6 (Anytown), 8.7e-8 and 1.1e-7 (Net1) |
 | Net1 24 h, tank on a five-point volume curve: levels, pipe 110 flow | 2e-4 m / 1e-6 m³/s | 2.8e-5 m, 5.5e-8 m³/s |
 | Net1 24 h, tank on a volume curve with a flat segment: below the range, crossed by the level (110-120 ft), the tail from 110 ft: levels, pipe 110 flow | 2e-4 m / 1e-6 m³/s | 2.8e-5, 2.7e-5, 2.4e-5 m; 5.5e-8, 5.6e-8, 5.1e-8 m³/s |
@@ -769,27 +777,28 @@ on-disk reals are **float32**, so roughly 1e-7 relative is EPANET's own precisio
 | Darcy-Weisbach, `twoloop_si.inp` heads and flows | rel 1e-6 | 5.819e-8 heads, 6.482e-8 flows |
 | Darcy-Weisbach, Net1 single period: heads, flows | 1e-6 / 1e-5 | 7.009e-8, 3.986e-6 |
 | Darcy-Weisbach, laminar + transitional + turbulent pipes (`lowflow_dw_si.inp`): heads, flows, per-pipe head loss | 1e-6 / 1e-6 / 2.65e-7 m | 3.5e-8, 9.4e-8, 9.6e-8 m |
-| Emitters at J4 and J6 vs EPANET, with EPANET's flow unit (heads, emitter outflows, flows) | 1e-6, 1e-6 m3/s, 1e-6 m3/s | 8.640e-8, 7.4e-8, 3.7e-7 (file's values: heads 1.03e-6) |
+| Emitters at J4 and J6 vs EPANET, the file's demands and coefficients (heads, emitter outflows, flows) | 1e-6, 1e-6 m3/s, 1e-6 m3/s | 8.6e-8, 7.3e-10, 4.0e-9 |
 | An emitter at negative pressure (J4 at 60 m, an inflow) vs EPANET | 1e-6, 1e-6 m3/s, 1e-6 m3/s | 6.99e-8, 5.7e-8, 2.6e-7 |
 | `HEADLOSS C-M` (n = 0.011) vs EPANET | 1e-6, 1e-6 m3/s | 7.6e-8 heads, 8.3e-9 m3/s flows |
 | Emitter coefficient gradient vs central differences | 1e-8 | 4.8e-11 |
 | Pressure-driven demand vs EPANET's `DEMAND MODEL PDA` | 1e-5 | 3.521e-7 heads, 2.184e-7 demands |
 | A pump feeding pressure-driven demand (two-loop with a pump, every junction pressure-limited), both `pipe_form`s | 1e-5 | 3.526e-7 heads, 2.354e-7 flows, 2.355e-7 demands |
 | PBV (active and open) and GPV on the two-loop: heads, flows, the valve's head loss | 1e-6 / 1e-6 m³/s / 1e-5 | 5.5e-7, 2.6e-7 m³/s, 6.8e-6 |
-| PRV and PSV, the eleven cases below: heads, flows, states, controlled head | 1e-6 / 1e-6 m³/s / equal / 1e-6 m | 9.2e-8, 3.9e-7 m³/s, all equal, 0.0 m |
+| PRV and PSV, the eleven cases below: heads, flows, states, controlled head | 1e-6 / 1e-6 m³/s / equal / 1e-6 m | 9.2e-8, 3.7e-8 m³/s, all equal, 0.0 m |
 | PRV inside EPANET's `HTOL` band (EPANET `ACTIVE`, noodl `OPEN`): heads | `HTOL` = 1.524e-4 m | below `HTOL` at three points in the band |
-| Pumps on the two-loop (heads, flows, states): Net3's three-point curve ($n = 1.77$); Anytown's five-point curve on its first and second segments; Net6's constant-power pump | 1e-6 / 1e-6 m³/s / equal | 2.4e-7, 1.8e-9; 1.3e-7 and 2.2e-6 (5.2e-7 with EPANET's LPS factor, see Limitations), 7.2e-9; 2.8e-7, 1.8e-9 |
+| Pumps on the two-loop (heads, flows, states): Net3's three-point curve ($n = 1.77$); Anytown's five-point curve on its first and second segments; Net6's constant-power pump | 1e-6 / 1e-6 m³/s / equal | 6.4e-8, 1.8e-9; 7.1e-8 and 5.7e-8, 7.2e-9; 5.4e-8, 1.8e-9 |
 | A pump shut beyond its shut-off head; a zero-demand group behind a pump (shut and running at zero flow); a pump and a check valve shutting together around a group; a segmented curve starting above zero flow, shut at its first point's head | 1e-6 / 1e-6 m³/s / equal | 1.1e-7, 1.8e-8 m³/s (EPANET's leak); all states equal |
 | Pump speed 0.8 through `"water.setting"` against `SPEED 0.8` in the file, every curve kind | 1e-6 / 1e-6 m³/s / equal | 2.2e-7 to 3.8e-7, 1.8e-9 |
 | ky10 at time zero (13 constant-power pumps, PRVs, tanks), EPANET's demands | 1e-6 / 1e-6 m³/s / equal | 6.3e-7, 9.1e-8 |
 | ky4 at time zero (two constant-power pumps, one closed, an empty tank, 959 junctions), demand pattern at t = 0, EPANET at `ACCURACY 1e-8` | 1e-6 / 1e-6 m³/s / equal | 8.2e-8, 2.0e-7 (two parallel-pipe pairs: 1.9e-6, see Limitations) |
-| Anytown at time zero, pumps running, tanks at mid-level, the five placeholder pipes feeding junctions 5-7 at 12 in (three parallel pumps on the five-point curve; pipe 125 still 0.0001 in) | 1e-6 / 1e-6 m³/s / equal | 5.6e-7, 4.3e-7 |
+| Anytown at time zero, pumps running, tanks at mid-level, the five placeholder pipes feeding junctions 5-7 at 12 in (three parallel pumps on the five-point curve; pipe 125 still 0.0001 in) | 1e-6 / 1e-6 m³/s / equal | 5.4e-7, 4.7e-7 |
 | Whole networks through `water_run` for their full DURATION, EPANET at `ACCURACY 1e-8` (`test_water_networks.py`): heads (relative to the larger of the head and 1 m), tank levels, flows, states at every report time, and the energy section | 1e-5 / 2e-4 m / 1e-6 m³/s / equal / 1e-5, except where noted | the next five rows, in that order |
-| Net3, 168 h (AT TIME and level controls, a closed pipe, three-point pumps); 6 s | flows 3e-6 m³/s (a level trigger 0.03 s from a half second, rounded the other way: pump 335 starts 1 s later at 21 h) | 2.7e-6, 1.3e-4 m, 2.1e-6 m³/s (2.2e-7 before 21 h), equal, 9.1e-8 |
+| Net3, 168 h (AT TIME and level controls, a closed pipe, three-point pumps); 6 s | as above | 1.2e-7, 5.2e-6 m, 3.0e-7 m³/s, equal, 4.2e-8 |
 | Net6, 96 h (3323 junctions, 61 pumps, PRVs, a check valve, 124 level controls); 120 s | levels 3e-3 m, flows 5e-4 m³/s, energy 3e-4 (EPANET's closed-link leak, see Limitations) | 9.4e-6, 1.95e-3 m, 2.9e-4 m³/s, equal, 1.95e-4 |
 | ky4, DURATION 0 | the two parallel-pipe pairs 3e-6 m³/s (see Limitations) | 8.2e-8, 6.0e-6 m, 2.0e-7 m³/s (pairs 1.9e-6), equal, 1.6e-8 |
 | ky10, DURATION 0 (level controls on `~@`-named pumps) | as above | 6.3e-7, 1.3e-5 m, 9.1e-8 m³/s, equal, 6.1e-7 |
-| Anytown edited (`_anytown`), 24 h at a 1 min step; 11 s | heads 2e-5 (EPANET's rounded GPM factor at a head of -1.5 m, see Limitations) | 1.16e-5, 1.8e-6 m, 2.9e-7 m³/s, equal, 3.7e-7 |
+| Anytown edited (`_anytown`), 24 h at a 1 min step; 11 s | heads 1e-4 (EPANET's closed-link leak out of the empty tanks, at a head of 0.55 m; see Limitations) | 5.1e-5 (1.8e-4 m; 9.3e-8 at t = 0), 1.8e-6 m, 2.9e-7 m³/s, equal, 3.7e-7 |
+| Net1 6 h, pump 9 CLOSED at 2 h and OPENed at 4 h by time controls; closed at 2 h by a rule, given a CLOSED control at 2:30, then OPENed: the hydraulic steps, heads, level, flows, states, the pump's speed, the energy (controls only) | equal / 1e-5 / 2e-4 m / 1e-6 m³/s / equal / 1e-5 | steps equal (no step at 2:30), 1.9e-7, 2.0e-5 m, 5.1e-8 m³/s, speed 0 then 1, energy within 1e-5 |
 | Every network `wntr` ships (37 files, the two malformed ones aside) builds, or is refused by name | as listed | 36 build; `bad_times.inp` refused ("is not a time of the form HH:MM[:SS]") |
 | Head loss sums to zero around every cycle-basis loop | 1e-12 | **exactly 0.0** |
 | Autodiff vs central differences | 1e-6 × scale | 3.212e-6 / 2.505e-10 / 9.2e-10 / 2.753e-9 |
@@ -823,8 +832,8 @@ round-off and its drop is the setting.
 `test_prv_psv_match_epanet`. The two-loop cases add junction J7 (P2 ends there) and the valve
 V1 from J7 to J2 (250 mm); the series cases have pipes of 1000 m, 200 mm, C = 100 and valves
 of 200 mm, with a demand of 20 L/s at the end of the PRV line. Heads are compared with the
-demands EPANET computes with (its rounded LPS factor, see Limitations; with the file's demands
-the worst is 2.4e-6, on the C = 100 lines), and the two-loop cases with `ACCURACY 1e-8`: at
+file's demands (the pipes carry EPANET's rounded LPS factor; with the exact one the worst was
+2.4e-6, on the C = 100 lines), and the two-loop cases with `ACCURACY 1e-8`: at
 the fixture's 0.001 EPANET stops with an active PRV's flow 5.8e-6 m³/s short of its node
 balance, and its heads 5.8e-6 relative from converged (MEASURED).
 
@@ -858,34 +867,36 @@ independent loop is a property of the cycle-space formulation, and it holds exac
   `"water.setting"`); a valve at a full or empty tank;
   leakage. A file using any of these raises an error naming the feature.
 - **Rules.** `FILLTIME` and `DRAINTIME` premises and the `DAY` and `POWER` ones are refused. A
-  pump closed by a rule keeps its speed in `"water.link_setting"` (EPANET sets it to 0); a
-  `SETTING` premise on it reads 0, as EPANET.
+  pump closed by a rule is at speed 0 in `"water.link_setting"`, as EPANET (`setlinkstatus`)
+  and as a closing control leaves it; a `SETTING` premise on it reads 0, as EPANET.
 - **Controls.** `validate()` refuses a control on a reservoir (`IF NODE <reservoir>`): EPANET
   2.2 compares tank volumes and a reservoir has area 0, so such a control always holds. A pump
   closed by a control is at speed 0 in `"water.link_setting"`, as in EPANET, so a `CLOSED`
   control reaching a pump closed by `[STATUS]` (which keeps its speed 1) ends a step at its
-  trigger as EPANET's does (Net6, PUMP-3881 at 1050 s); a pump closed otherwise keeps its speed
-  (read `"water.status"` too). A control that sets a pump's
+  trigger as EPANET's does (Net6, PUMP-3881 at 1050 s); a pump closed by `[STATUS]` or by the
+  solve keeps its speed (read `"water.status"` too). A control that sets a pump's
   built speed leaves the `"water.setting"` driver in force (a calibration driver at 0.9 stays
   0.9 after an `OPEN`, EPANET gives 1.0). `water_step` and the implicit schemes never shorten
   a step to a time control, which fires only if a step starts exactly on its second
   (`water_run` refuses them).
-- **Hazen-Williams heads carry EPANET's rounded flow-unit factor as a difference.** EPANET
-  converts an LPS file's flows with `LPSperCFS = 28.317` (exact 28.3168466), so its internal
-  flows are 5.4e-6 relative smaller and its Hazen-Williams losses 1.0e-5 smaller than this
-  model's (MEASURED: scaling the demands by that factor removes 88-95% of the head differences).
-  On ordinary networks that is below 1e-6 relative in the heads; on one with 110 m of losses
-  it is 3e-5. A GPM file's (`GPMperCFS = 448.831`, exact 448.8311688) is 3.8e-7: on Anytown
-  over 24 h it leaves 1.75e-5 m at junction 3, whose head is -1.5 m, 1.16e-5 relative to that
-  head (MEASURED: with the Hazen-Williams coefficient scaled by that factor to the power 1.852
-  the heads at t = 0 agree to 1.5e-8 m).
 - **Closed links carry no flow; EPANET's carry `dh / CBIG`.** EPANET gives a closed link the
   conductance `1 / CBIG` (`CBIG = 1e8` ft per cfs), so a head drop across it leaks: on Net6 at
   3600 s, 2.56e-7 m³/s through three closed pumps from a dead-ended suction (noodl's head drop
   over CBIG gives the same 2.5592e-7 m³/s). Integrated over hours that is 1.7e-6 m an hour in
   a tank's level, enough to move a level trigger that falls near a half second by one second
   (EPANET rounds the time to it); over Net6's 96 h the 609 steps all match, up to a minute
-  apart late in the run, and the tank levels differ by up to 1.95e-3 m.
+  apart late in the run, and the tank levels differ by up to 1.95e-3 m. On Anytown the empty
+  tanks' closed pipes leak 1.4e-7 to 2.7e-7 m³/s out of them, EPANET's pumps deliver about as
+  much less, and the heads far from the pumps differ by up to 1.8e-4 m; on the two-loop with
+  every pipe a check valve at five times the demand the two closed ones leak 5.7e-8 and
+  3.1e-8 m³/s (heads 1.4e-6 relative; 7.6e-8 with the leaks added as demands). The leak is
+  not modelled.
+- **EPANET charges a step's energy with the pump status the rules leave at its end.**
+  `nexthyd` calls `addenergy` after `timestep`, whose `ruletimestep` takes a rule's action at
+  the step's end, so the hour before a rule closes a pump counts as off. `WaterResults.energy`
+  charges each step with the status it was solved with. MEASURED on Net1, a rule closing pump 9
+  at 2 h and an OPEN at 4 h over 6 h: EPANET 50.0 percent on line, here 66.7 percent, with the
+  hydraulics equal at every step (`test_a_pump_closed_and_opened_again_matches_epanet`).
 - **A zero-demand group of several junctions joined by a link inside it, fenced off by
   check valves**, is held at the `1 / CBIG` limit head (75 m between reservoirs at 100 and
   50 m). EPANET's head there is not that limit. MEASURED, for J - P5 - L fenced off between
