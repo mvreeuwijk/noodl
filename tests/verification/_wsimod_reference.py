@@ -211,8 +211,16 @@ def reset_wsimod_globals() -> None:
     `NON_ADDITIVE_POLLUTANTS` and `FLOAT_ACCURACY` for the whole process (`model.py:232-241`,
     `create_oxford.py:171-180`); every WSIMOD build starts from the defaults listed in
     `constants.py:21-50`, with `FLOAT_ACCURACY = 1e-11` (`constants.py:3`).
+
+    The mutable defaults of WSIMOD's constructors are restored too. An override of a dict
+    parameter updates the dict in place (`land.py:397`, `demand.py:76`, `tanks.py:439`), so an
+    override applied to an instance built with the shared default `{}` changes that default for
+    every later instance in the process (the spec's defect table). Within one model WSIMOD's
+    behaviour is untouched; across builds each one starts as a fresh process would.
     """
     from wsimod.core import constants
+
+    _restore_constructor_defaults()
 
     constants.POLLUTANTS = [
         "do", "org-phosphorus", "phosphate", "ammonia", "solids", "bod", "cod", "ph",
@@ -224,6 +232,34 @@ def reset_wsimod_globals() -> None:
         "nitrite", "org-nitrogen",
     ]  # fmt: skip
     constants.FLOAT_ACCURACY = 1e-11
+
+
+_CONSTRUCTOR_DEFAULTS: dict | None = None
+
+
+def _restore_constructor_defaults() -> None:
+    """Every ``__init__`` default of the classes in ``wsimod.nodes`` and ``wsimod.arcs`` as it was
+    at the first call (before any build of this process could mutate it)."""
+    global _CONSTRUCTOR_DEFAULTS
+    if _CONSTRUCTOR_DEFAULTS is None:
+        import importlib
+        import pkgutil
+
+        import wsimod.arcs
+        import wsimod.nodes
+
+        functions = {}
+        for package in (wsimod.nodes, wsimod.arcs):
+            for info in pkgutil.iter_modules(package.__path__):
+                module = importlib.import_module(f"{package.__name__}.{info.name}")
+                for value in vars(module).values():
+                    init = vars(value).get("__init__") if isinstance(value, type) else None
+                    if inspect.isfunction(init) and init.__module__.startswith("wsimod"):
+                        functions[init] = (init.__defaults__, init.__kwdefaults__)
+        _CONSTRUCTOR_DEFAULTS = copy.deepcopy(functions)
+    for function, (defaults, kwdefaults) in _CONSTRUCTOR_DEFAULTS.items():
+        function.__defaults__ = copy.deepcopy(defaults)
+        function.__kwdefaults__ = copy.deepcopy(kwdefaults)
 
 
 def wsimod_model(source: Path | Mapping, *, config_name: str = "config.yml"):
@@ -401,7 +437,10 @@ def _store_paths(node) -> tuple[str, ...]:
     from noodl.apps.wsimod.node import NODE_CLASSES
 
     _register_all()
-    return NODE_CLASSES[type(node).__qualname__].store_paths
+    cls = NODE_CLASSES[type(node).__qualname__]
+    if hasattr(cls, "store_paths_of"):  # Land: the paths depend on its surfaces
+        return cls.store_paths_of([(type(s).__name__, s.surface) for s in node.surfaces])
+    return cls.store_paths
 
 
 def _wsimod_store(node, path: str):
@@ -419,8 +458,12 @@ def _wsimod_store(node, path: str):
 
 
 def _attribute(obj, path: str):
-    for part in path.split("."):
-        obj = getattr(obj, part)
+    """``obj``'s attribute at the dotted ``path``; ``surfaces.<name>`` is a ``Land``'s surface of
+    that name (``get_surface``, ``land.py:279-292``)."""
+    parts = path.split(".")
+    while parts:
+        part = parts.pop(0)
+        obj = obj.get_surface(parts.pop(0)) if part == "surfaces" else getattr(obj, part)
     return obj
 
 

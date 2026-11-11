@@ -382,3 +382,132 @@ def test_foul_sewers_run_in_their_own_slot_and_match_wsimod_day_by_day():
     assert foul.slot_key == "Foul"
     foul.slot_key = "Sewer"  # the wrong slot: foul_main would run before the trunk
     assert _arc_flows(network, spec.days) != ours
+
+
+# --- Land (Task 12) -----------------------------------------------------------------------------
+LAND_CASES = (
+    "impervious_only",
+    "pervious_only",
+    "evaporation_clamp",
+    "temperature_blending",
+    "land_percolation_threshold",
+    "residential_with_land",
+)
+
+
+@pytest.mark.parametrize("case", LAND_CASES)
+def test_the_land_cases_match_wsimod_day_by_day(case):
+    """The stand-in day driver on each Land case against WSIMOD's own run: every arc's flow
+    and quality, every surface's storage and quality (``record_all``, ``model.py:1135-1170``)
+    and the Land residence tanks, bitwise on every day."""
+    spec = CASES[case]
+    reference = record_wsimod_run(wsimod_model(spec.build()), days=spec.days)
+    network = read_wsimod_config(spec.build())
+    tanks = [
+        (k, node, prop)
+        for k, (node, prop) in enumerate(reference.tank_names)
+        if prop in ("percolation", "subsurface_runoff", "surface_runoff")
+    ]
+    assert reference.surface_names and tanks
+    for day, _, engine in step_days(network, network.pollutants, spec.days):
+        for i, name in enumerate(reference.arc_names):
+            ours = engine.arcs[name].vqip_out
+            assert float(ours[0]) == float(reference.arc_flow[day, i]), (day, name)
+            assert ours[1:].tolist() == reference.arc_quality[day, i].tolist(), (day, name)
+        for j, (node, surface) in enumerate(reference.surface_names):
+            ours = engine.nodes[node]._surface(surface).storage
+            assert float(ours[0]) == float(reference.surface["storage"][day, j]), (day, surface)
+            assert ours[1:].tolist() == reference.surface_quality[day, j].tolist(), (day, surface)
+        for k, node, prop in tanks:
+            ours = getattr(engine.nodes[node], prop).storage
+            assert float(ours[0]) == float(reference.tank_storage[day, k]), (day, node, prop)
+
+
+def test_the_land_cases_reach_the_branches_they_are_built_for():
+    # impervious_only: the roofs (capacity 0) keep water only when the sewer's check refuses
+    # part of their runoff, which it does on some days
+    town = [c for c in captured("impervious_only")["town"] if c.method == "run"]
+    kept = [c.post["surfaces.roofs.storage"]["volume"] > 0 for c in town]
+    assert any(kept) and not all(kept)
+    dry = [c.post["surfaces.roads.evaporation"]["volume"] for c in town]
+    assert len(set(dry)) > 1
+    # pervious_only: each soil passes water through its store on some days and evaporates on
+    # others (land.py:985-1001)
+    farm = [c for c in captured("pervious_only")["farm"] if c.method == "run"]
+    for name in ("grass", "wood"):
+        through = [
+            c.post[f"surfaces.{name}.tank_recharge"]
+            + c.post[f"surfaces.{name}.subsurface_flow"]["volume"]
+            + c.post[f"surfaces.{name}.percolation"]["volume"]
+            > 0
+            for c in farm
+        ]
+        assert any(through) and not all(through), name
+    # land_percolation_threshold: rejections above FLOAT_ACCURACY, in (0, FLOAT_ACCURACY] and 0
+    plot = [c for c in captured("land_percolation_threshold")["plot"] if c.method == "run"]
+    rejected = [
+        a.reply["volume"]
+        for c in plot
+        for a in c.arc_calls
+        if a.arc == "plot_to_aquifer" and a.method == "send_push_request"
+    ]
+    assert len(rejected) == CASES["land_percolation_threshold"].days
+    assert any(r > 1e-11 for r in rejected) and any(0 < r <= 1e-11 for r in rejected)
+    assert any(r == 0 for r in rejected)
+    # residential_with_land: the land answers the garden check 0 twice a day (the garden
+    # demand's get_connected, demand.py:262, then push_distributed's, nodes.py:444), so with two
+    # out-arcs the push loop never runs and the land receives no garden push
+    gardens = captured("residential_with_land")["gardens"]
+    garden = [c for c in gardens if c.tag == ("Demand", "Garden")]
+    assert [c.method for c in garden] == ["push_check"] * 2 * CASES["residential_with_land"].days
+    assert all(c.vqip is None and c.reply["volume"] == 0 for c in garden)
+    # temperature_blending: the surfaces' temperature changes from day to day
+    suburb = [c for c in captured("temperature_blending")["suburb"] if c.method == "run"]
+    assert len({c.post["surfaces.roofs.storage"]["temperature"] for c in suburb}) > 5
+
+
+def _printed_on(case: str, node: str, method: str, text: str) -> set[int]:
+    """The days on which WSIMOD's ``node.method`` printed a line containing ``text``."""
+    spec = CASES[case]
+    model = wsimod_model(spec.build())
+    index = {d: i for i, d in enumerate(model.dates)}
+    target = model.nodes[node]
+    original = getattr(target, method)
+    days: set[int] = set()
+
+    def watched(*args, **kwargs):
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            out = original(*args, **kwargs)
+        if text in buffer.getvalue():
+            days.add(index[target.t])
+        print(buffer.getvalue(), end="")
+        return out
+
+    setattr(target, method, watched)
+    record_wsimod_run(model, days=spec.days)
+    return days
+
+
+def test_inaccurate_evaporation_falls_on_the_days_wsimod_printed_it():
+    """D13: ``"inaccurate_evaporation"`` (``land.py:1003-1021``) on exactly the days WSIMOD's
+    ``Land.run`` printed "inaccurate evaporation calculation"."""
+    case = "evaporation_clamp"
+    theirs = _printed_on(case, "heath", "run", "inaccurate evaporation calculation")
+    ours = _noodl_event_days(case, "inaccurate_evaporation", "heath")
+    assert ours == theirs and 0 < len(theirs) < CASES[case].days
+
+
+def test_the_dropped_percolation_falls_on_the_days_wsimod_reports_a_land_imbalance():
+    """``land.py:213-215``: on the days noodl records the vanished percolation rejection as
+    dropped water, WSIMOD's own node balance of the land is out by it ("mass balance error")."""
+    case = "land_percolation_threshold"
+    spec = CASES[case]
+    network = read_wsimod_config(spec.build())
+    ours = {
+        day
+        for day, ctx, _ in step_days(network, network.pollutants, spec.days)
+        if float(ctx.dropped[0]) != 0
+    }
+    theirs = _printed_on(case, "plot", "node_mass_balance", "mass balance error for volume")
+    assert ours == theirs and ours

@@ -953,6 +953,313 @@ def _wtw_zero_input() -> dict:
     )
 
 
+# --- land and its surfaces (Task 12) -----------------------------------------------------------
+_LAND_DAYS = 40
+
+
+def _land_forcing(
+    days: int,
+    seed: int,
+    *,
+    rain: tuple[float, ...] = (0.0, 0.0, 2e-4, 1e-3, 4e-3, 8e-3, 1.5e-2),
+    et0: tuple[float, float] = (5e-4, 4e-3),
+) -> dict:
+    """A ``Land``'s daily ``precipitation`` (drawn from ``rain``, jittered), ``et0`` and
+    ``temperature`` (``land.py:451-460``; all three are read every day, spec Forcing checks)."""
+    rng = random.Random(seed)
+    data = {}
+    for date in _dates(days):
+        depth = rng.choice(rain)
+        data[("precipitation", date)] = round(depth * rng.uniform(0.8, 1.2), 7)
+        data[("et0", date)] = round(rng.uniform(*et0), 7)
+        data[("temperature", date)] = round(rng.uniform(4.0, 20.0), 4)
+    return data
+
+
+def _land(name: str, surfaces: list[dict], forcing: dict, **values) -> dict:
+    return {
+        "name": name,
+        "type_": "Land",
+        "surfaces": surfaces,
+        "data_input_dict": forcing,
+        **values,
+    }
+
+
+def _pervious(name: str, **values) -> dict:
+    return {"surface": name, "type_": "PerviousSurface", **values}
+
+
+def _impervious(name: str, **values) -> dict:
+    return {"surface": name, "type_": "ImperviousSurface", **values}
+
+
+def _neutral_soil(land: str, *surfaces: str) -> dict:
+    """The neutral soil temperature (spec, Pollutants in 3a: 3b) as WSIMOD's overrides, the only
+    way to set it (``land.py:753-756``, ``:843-879``). Each surface's physical depth is a power
+    of two so that the override's ``depth / total_porosity * total_porosity`` round trip
+    (``:858``, ``:883``) is exact and the derived values equal construction's bitwise."""
+    neutral = {"soil_temp_w_prev": 1, "soil_temp_w_air": 0, "soil_temp_w_deep": 0}
+    return {
+        "nodes": {
+            land: {"type_": "Land", "name": land, "surfaces": {s: dict(neutral) for s in surfaces}}
+        }
+    }
+
+
+def _impervious_only() -> dict:
+    """Two impervious surfaces drain into a sewer whose outlet takes 10 a day: ``roads`` has
+    pores (2 mm) that evaporate on dry days, ``roofs`` none, so every wet day ponds at once
+    (``land.py:645-721``). On wet days the sewer fills and its push check sends part of the
+    runoff back into the surfaces."""
+    days = _LAND_DAYS
+    return {
+        **_POLLUTANTS,
+        "dates": _dates(days),
+        "nodes": [
+            _land(
+                "town",
+                [
+                    _impervious(
+                        "roads", area=2000.0, pore_depth=0.002, et0_to_e=0.9, initial_storage=1.0
+                    ),
+                    _impervious("roofs", area=1000.0),
+                ],
+                _land_forcing(days, 41),
+            ),
+            _store("drain", "Sewer", capacity=25.0),
+            _store("sea", "Waste"),
+        ],
+        "arcs": [
+            _arc("town_to_drain", "town", "drain"),
+            _arc("drain_to_sea", "drain", "sea", capacity=10.0),
+        ],
+        "orchestration": [{"Land": "run"}, {"Sewer": "make_discharge"}],
+    }
+
+
+def _pervious_only() -> dict:
+    """Two IHACRES soils near field capacity: wet days pass water through the soil store and
+    dry days evaporate from it (both branches of ``land.py:985-1001``). Percolation goes to a
+    groundwater, runoff through a node to the sea."""
+    days = _LAND_DAYS
+    return {
+        **_POLLUTANTS,
+        "dates": _dates(days),
+        "nodes": [
+            _land(
+                "farm",
+                [
+                    _pervious(
+                        "grass",
+                        area=1e4,
+                        depth=0.5,
+                        infiltration_capacity=0.01,
+                        initial_storage=1700.0,
+                    ),
+                    _pervious(
+                        "wood",
+                        area=5000.0,
+                        depth=1.0,
+                        total_porosity=0.45,
+                        field_capacity=0.32,
+                        wilting_point=0.15,
+                        infiltration_capacity=0.008,
+                        et0_coefficient=0.7,
+                        ihacres_p=5,
+                        initial_storage=1900.0,
+                    ),
+                ],
+                _land_forcing(days, 42),
+                subsurface_residence_time=3,
+                percolation_residence_time=10,
+            ),
+            _store("aquifer", "Groundwater", capacity=1e5, residence_time=20.0),
+            {"name": "brook", "type_": "Node"},
+            _store("sea", "Waste"),
+        ],
+        "arcs": [
+            _arc("farm_to_aquifer", "farm", "aquifer"),
+            _arc("farm_to_brook", "farm", "brook"),
+            _arc("aquifer_to_sea", "aquifer", "sea"),
+            _arc("brook_to_sea", "brook", "sea"),
+        ],
+        "overrides": _neutral_soil("farm", "grass", "wood"),
+        "orchestration": [{"Land": "run"}, {"Groundwater": "distribute"}],
+    }
+
+
+def _evaporation_clamp() -> dict:
+    """A dry moor whose rain often exceeds its infiltration capacity of 0.5 mm under a high
+    evaporative demand: the soil store evaporates (``land.py:997-1001``) and WSIMOD prints
+    "inaccurate evaporation calculation" (``:1003-1021``), on some days and not others."""
+    days = _LAND_DAYS
+    return {
+        **_POLLUTANTS,
+        "dates": _dates(days),
+        "nodes": [
+            _land(
+                "heath",
+                [
+                    _pervious(
+                        "moor",
+                        area=1000.0,
+                        depth=0.5,
+                        infiltration_capacity=0.0005,
+                        initial_storage=5.0,
+                    )
+                ],
+                _land_forcing(days, 43, rain=(0.0, 3e-4, 2e-3, 4e-3), et0=(0.01, 0.03)),
+            ),
+            {"name": "ditch", "type_": "Node"},
+            _store("sea", "Waste"),
+        ],
+        "arcs": [_arc("heath_to_ditch", "heath", "ditch"), _arc("ditch_to_sea", "ditch", "sea")],
+        "overrides": _neutral_soil("heath", "moor"),
+        "orchestration": [{"Land": "run"}],
+    }
+
+
+def _temperature_blending() -> dict:
+    """Rain enters roofs and lawns at the day's air temperature (``land.py:685``, ``:991``,
+    ``:1028``); the non-additive temperature blends in the surfaces, the residence tanks, the
+    sewer's queue and a node, so every ``sum_vqip`` blend is on the replayed path."""
+    days = _LAND_DAYS
+    return {
+        **_POLLUTANTS,
+        "dates": _dates(days),
+        "nodes": [
+            _land(
+                "suburb",
+                [
+                    _impervious("roofs", area=1500.0, pore_depth=0.001),
+                    _pervious(
+                        "lawns",
+                        area=3000.0,
+                        depth=0.25,
+                        wilting_point=0.1,
+                        infiltration_capacity=0.006,
+                        initial_storage=250.0,
+                    ),
+                ],
+                _land_forcing(days, 44),
+                surface_residence_time=2,
+            ),
+            _store("storm", "Sewer", capacity=20.0, pipe_time=1),
+            {"name": "brook", "type_": "Node"},
+            _store("river", "Waste"),
+        ],
+        "arcs": [
+            _arc("suburb_to_storm", "suburb", "storm"),
+            _arc("suburb_to_brook", "suburb", "brook"),
+            _arc("storm_to_river", "storm", "river", capacity=15.0),
+            _arc("brook_to_river", "brook", "river"),
+        ],
+        "overrides": _neutral_soil("suburb", "lawns"),
+        "orchestration": [{"Land": "run"}, {"Sewer": "make_discharge"}],
+    }
+
+
+def _land_percolation_threshold() -> dict:
+    """``Land.run`` forces the percolation the groundwater rejects back only above
+    ``FLOAT_ACCURACY`` (``land.py:213-215``). A plot of 1e-8 m2 percolates about 1e-10 a day into
+    an aquifer that takes 5e-11 and empties daily, so the rejection is above the threshold on
+    wet days, in (0, 1e-11] on some days (where it vanishes) and 0 on dry ones."""
+    days = _LAND_DAYS
+    return {
+        **_POLLUTANTS,
+        "dates": _dates(days),
+        "nodes": [
+            _land(
+                "plot",
+                [
+                    _pervious(
+                        "patch",
+                        area=1e-8,
+                        depth=0.5,
+                        infiltration_capacity=0.02,
+                        initial_storage=1.7e-9,
+                    )
+                ],
+                _land_forcing(days, 45),
+                percolation_residence_time=1,
+            ),
+            _store("aquifer", "Groundwater", capacity=5e-11, residence_time=1.0),
+            _store("sea", "Waste"),
+        ],
+        "arcs": [
+            _arc("plot_to_aquifer", "plot", "aquifer"),
+            _arc("aquifer_to_sea", "aquifer", "sea"),
+        ],
+        "overrides": _neutral_soil("plot", "patch"),
+        "orchestration": [{"Land": "run"}, {"Groundwater": "distribute"}],
+    }
+
+
+def _residential_with_land() -> dict:
+    """A ``ResidentialDemand`` with a garden ``Land`` (one pervious surface) and a sewer: the
+    garden check asks the land (``demand.py:250-301``), which answers 0 without a
+    ``GardenSurface`` (``land.py:93-94``, W16). With two out-arcs the garden push of 0 runs no
+    round (``nodes.py:453``), so the land is asked twice a day and pushed nothing."""
+    days = _LAND_DAYS
+    return {
+        **_POLLUTANTS,
+        "dates": _dates(days),
+        "nodes": [
+            _store("supply", "Storage", capacity=1e4, initial_storage=_stocked(800.0)),
+            _homes("homes", days, 46),
+            _land(
+                "gardens",
+                [_pervious("lawn", area=2000.0, depth=0.5, initial_storage=340.0)],
+                _land_forcing(days, 47),
+            ),
+            _store("drain", "Sewer", capacity=50.0),
+            {"name": "brook", "type_": "Node"},
+            _store("sea", "Waste"),
+        ],
+        "arcs": [
+            _arc("supply_to_homes", "supply", "homes"),
+            _arc("homes_to_gardens", "homes", "gardens"),
+            _arc("homes_to_drain", "homes", "drain"),
+            _arc("gardens_to_brook", "gardens", "brook"),
+            _arc("brook_to_sea", "brook", "sea"),
+            _arc("drain_to_sea", "drain", "sea"),
+        ],
+        "overrides": _neutral_soil("gardens", "lawn"),
+        "orchestration": [
+            {"ResidentialDemand": "create_demand"},
+            {"Land": "run"},
+            {"Sewer": "make_discharge"},
+        ],
+    }
+
+
+def _land_sewer_ponding() -> dict:
+    """noodl only: a city's streets drain into a combined sewer whose outlet takes 5 a day, and
+    the sewer has a ponding arc back to the city: the ``Land -> Sewer`` and ``Sewer -> Land``
+    arcs are a legal topological cycle. Ponding with the tag ``"Sewer"`` (``sewer.py:233-237``)
+    crashes WSIMOD (``land.py:262`` reads ``self.surface``; W4). With these fixed parameters the
+    sewer never ponds (every push into it is clipped by its check), so WSIMOD runs this mapping;
+    ``test_land_sewer_ponding_runs_the_cycle_and_ponds_into_the_streets`` lowers the sewer's
+    capacity for one day to reach the ponding."""
+    days = _LAND_DAYS
+    return {
+        **_POLLUTANTS,
+        "dates": _dates(days),
+        "nodes": [
+            _land("city", [_impervious("streets", area=5000.0)], _land_forcing(days, 48)),
+            _store("combined", "Sewer", capacity=10.0),
+            _store("sea", "Waste"),
+        ],
+        "arcs": [
+            _arc("city_to_combined", "city", "combined"),
+            _arc("combined_to_sea", "combined", "sea", capacity=5.0),
+            _arc("combined_to_city", "combined", "city"),
+        ],
+        "orchestration": [{"Land": "run"}, {"Sewer": "make_discharge"}],
+    }
+
+
 CASES: dict[str, Case] = {
     "three_out_arcs": Case(
         build=_three_out_arcs,
@@ -1102,6 +1409,48 @@ CASES: dict[str, Case] = {
         build=_wtw_zero_input,
         days=_STORAGE_DAYS,
         scale=30.0,
+        wsimod=False,
+    ),
+    "impervious_only": Case(
+        build=_impervious_only,
+        days=_LAND_DAYS,
+        scale=50.0,
+        replay=("town", "drain"),
+    ),
+    "pervious_only": Case(
+        build=_pervious_only,
+        days=_LAND_DAYS,
+        scale=2000.0,
+        replay=("farm",),
+    ),
+    "evaporation_clamp": Case(
+        build=_evaporation_clamp,
+        days=_LAND_DAYS,
+        scale=5.0,
+        replay=("heath",),
+    ),
+    "temperature_blending": Case(
+        build=_temperature_blending,
+        days=_LAND_DAYS,
+        scale=300.0,
+        replay=("suburb", "storm"),
+    ),
+    "land_percolation_threshold": Case(
+        build=_land_percolation_threshold,
+        days=_LAND_DAYS,
+        scale=2e-9,
+        replay=("plot",),
+    ),
+    "residential_with_land": Case(
+        build=_residential_with_land,
+        days=_LAND_DAYS,
+        scale=800.0,
+        replay=("homes", "gardens"),
+    ),
+    "land_sewer_ponding": Case(
+        build=_land_sewer_ponding,
+        days=_LAND_DAYS,
+        scale=100.0,
         wsimod=False,
     ),
 }

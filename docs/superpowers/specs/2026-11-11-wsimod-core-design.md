@@ -665,8 +665,13 @@ shape:
     `node:N/treat_current_input/liquor_zero_denominator` (`wtw.py:155-161`, `:174-182`), a
     `WWTW`'s `node:N/calculate_discharge/{stormwater,spare,clip}`,
     `node:N/make_discharge/rejected`, `node:N/push_check_sewer/clip`,
-    `node:N/push_set_sewer/{direct,all_direct,below_fa}` and `node:N/pull_set_reuse/clip`, and
-    an `FWTW`'s `node:N/treat_water/{target,deficit}`. Later classes extend the pattern.
+    `node:N/push_set_sewer/{direct,all_direct,below_fa}` and `node:N/pull_set_reuse/clip`, an
+    `FWTW`'s `node:N/treat_water/{target,deficit}`, and a `Land`'s
+    `node:N/run/{percolation_reply,runoff,rejected,rejected_surface,rejected_subsurface}`
+    (`land.py:213`, `:223`, `:228`, `:241`, `:243`). A surface is a tank under the path
+    `surfaces.<name>` and adds `node:N/surfaces.<name>/precipitation_evaporation/dry` (`:660`)
+    and `node:N/surfaces.<name>/ihacres/{infiltration,excess,evaporation_kink,outflow_kink,
+    moisture,through_soil}` (`:927-985`). Later classes extend the pattern.
   - `call` is noodl's static per-day index of the enclosing (element, method) call. It counts
     the calls noodl's structure makes, masked ones included, so it is the same every day; it is
     not WSIMOD's dynamic count.
@@ -688,7 +693,10 @@ shape:
   ponded water at or below `FLOAT_ACCURACY` (pulled from the tank and sent nowhere,
   `sewer.py:234-235`), and the `QueueTank` storage-without-queue entry (Nodes › QueueTank). All are
   `(..., T, 1 + K_additive)`, with the residual. This is what WSIMOD's system check
-  (`model.py:1011-1060`) meant to compute (W4).
+  (`model.py:1011-1060`) meant to compute (W4). A `Land`'s terms are WSIMOD's own
+  (`land.py:158-162`): its outflow is the IHACRES evaporation, not what `evaporate` removed, so
+  on an `"inaccurate_evaporation"` day the residual is WSIMOD's printed gap (WSIMOD's node check
+  prints "mass balance error" on those days too).
 
 ## Nodes and arcs: equations, state, quirks
 
@@ -942,8 +950,11 @@ marked W4.
     - `tank_recharge` (`:974`).
   - If water passes through the soil store (`> 0`), it is forced in at air temperature, and
     the subsurface and percolation flows are pulled out (`:985-996`). Otherwise
-    `evaporate(−total)` runs and those flows are empty (`:997-1001`). The `evaporate` clamp can
-    break the balance; WSIMOD prints when it does (`:1003-1021`), and noodl records the event.
+    `evaporate(−total)` runs and those flows are empty (`:997-1001`). WSIMOD then prints
+    "inaccurate evaporation calculation" when `|evap + P_inf·area − evaporation − excess| >
+    FLOAT_ACCURACY` (`:1003-1021`). Unclamped, that gap is the infiltration excess itself, so it
+    prints on every evaporating day with rain above the infiltration capacity, and also when the
+    `evaporate` clamp bites. noodl records the event `"inaccurate_evaporation"`.
   - `route` forces the three flows into the parent's tanks (`:1046-1058`).
   - The soil-temperature process is neutral only (3b).
 
@@ -1198,7 +1209,10 @@ where pollutants matter). Each exercises a feature the demos skip:
 - `AltQueueArc` as a user arc (shifted every day, flushed only by a push); `PullArc` and
   `PushArc`;
 - `Land → Sewer` runoff with a `Sewer → Land` ponding arc, which is a legal topological cycle.
-  The model is built, and the ponding is noodl-only per the defect table;
+  The model is built, and the ponding is noodl-only per the defect table. No WSIMOD push takes
+  a sewer above its capacity (each is clipped by the sewer's check), so with fixed parameters
+  the sewer never ponds and WSIMOD runs the case; the ponding needs a sewer capacity that drops
+  between `Land.run` and `make_discharge` (a driver);
 - forced pushes that make an arc's pipe excess negative, seen through `check_basic`;
 - a `QueueTank` entry with total time 0, active on the same day;
 - a `WWTW` and an `FWTW` with zero input on day 1. These are noodl-only: WSIMOD divides by zero;

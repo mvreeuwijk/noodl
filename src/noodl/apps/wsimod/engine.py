@@ -56,7 +56,14 @@ Decision records (spec, Diagnostics). Each is a :class:`Decision`
   ``"ponded_water_cant_reenter"`` (``sewer.py:230-239``), ``"more_treated_than_input"``,
   ``"wwtw_couldnt_push"``, ``"service_reservoirs_not_filled"``, ``"sludge_nowhere"``,
   ``"excess_treated_water"`` (``wtw.py:213``, ``:349``, ``:598``, ``:610``, ``:616``) and noodl's
-  ``"wtw_liquor_zero_denominator"``. Later classes extend the same pattern.
+  ``"wtw_liquor_zero_denominator"``. A ``Land`` adds
+  ``node:N/run/{percolation_reply,runoff,rejected,rejected_surface,rejected_subsurface}``
+  (``land.py:213``, ``:223``, ``:228``, ``:241``, ``:243``); its surfaces are tanks under the
+  path ``surfaces.<name>`` and add ``node:N/surfaces.<name>/precipitation_evaporation/dry``
+  (``:660``) and ``node:N/surfaces.<name>/ihacres/{infiltration,excess,evaporation_kink,
+  outflow_kink,moisture,through_soil}`` (``:927``, ``:928``, ``:935``, ``:948``, ``:957``,
+  ``:985``); its event is ``"inaccurate_evaporation"`` (``:1003-1021``). Later classes extend
+  the same pattern.
 - ``call`` is noodl's static per-day index of the enclosing ``(element, method)`` call
   (:meth:`Ctx.call`, which :meth:`Ctx.loop_site` uses too). It counts the calls noodl's
   structure makes, masked ones included, so it is the same on every day and for every
@@ -247,6 +254,7 @@ def _register_all() -> None:
     """Import every module that registers node classes."""
     import noodl.apps.wsimod.catchment  # noqa: F401
     import noodl.apps.wsimod.demand  # noqa: F401
+    import noodl.apps.wsimod.land  # noqa: F401
     import noodl.apps.wsimod.sewer  # noqa: F401
     import noodl.apps.wsimod.storage  # noqa: F401
     import noodl.apps.wsimod.wtw  # noqa: F401
