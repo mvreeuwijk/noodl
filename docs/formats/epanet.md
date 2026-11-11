@@ -50,7 +50,8 @@ correlation likewise; a `DIFFUSIVITY` above 1e-4 multiplies water's own, anythin
 value in m²/s (ft²/s in a US file); a `MASS` source is mass per minute to per second;
 `QUALITY TIMESTEP 0` is EPANET's default (a tenth of the hydraulic step, `None`); its value is
 the line's last token, or its last two when the last is a unit, whatever words lie between
-(`timedata`: `QUAL FOO 10` is 10 hours).
+(`timedata`: `QUAL FOO 10` is 10 hours). EPANET's `hour` would also take an `AM`/`PM` after the
+value, which the reader refuses: meaningless for a time step.
 `WaterQuality.node_order` and `link_order` carry EPANET's own node and link indices.
 
 *Refused by name:* `ORDER WALL` other than 0 or 1, `GLOBAL TANK` (EPANET error 213), `QUALITY

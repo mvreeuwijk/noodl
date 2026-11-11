@@ -1,13 +1,15 @@
 """The EPANET 2.2 water-quality reference of the quality parity tests.
 
-EPANET runs through its toolkit (`wntr` 1.5.0's `ENepanet` and its ctypes handle `ENlib` on
-the bundled `epanet22.dll`) on the committed file, never on `EpanetSimulator`'s rewrite of
-it. Its copy (`epanet_copy`) adds only `[OPTIONS] ACCURACY 1e-8`, `TRIALS 400` (the hydraulic
-parity's setting, `test_water_networks.py`) and `[REPORT] STATUS YES` (for the mass-balance
-section of the report); noodl reads the unedited file. EPANET's reader clamps a file's
-ACCURACY to [1e-5, 1e-1] (`input3.c`, `optionvalue`; only `EN_setoption` takes 1e-8), so the
-copy runs at 1e-5, as do the hydraulic parity's copies. EPANET's files live in a temporary
-directory, never next to the input.
+EPANET runs through its toolkit (`wntr` 1.5.0's `ENepanet` and its ctypes handle `ENlib` on the
+bundled `epanet22.dll`) on the committed file, never on `EpanetSimulator`'s rewrite of it. Its
+copy (`epanet_copy`) adds only `[OPTIONS] ACCURACY 1e-8`, `TRIALS 400` (the hydraulic parity's
+setting, `test_water_networks.py`) and `[REPORT] STATUS YES` (for the mass-balance section of
+the report); noodl reads the unedited file. EPANET's reader clamps a file's ACCURACY to [1e-5,
+1e-1] (`input3.c`, `optionvalue`), so `_open` sets it to 1e-7 after `EN_open` through
+`EN_setoption(EN_ACCURACY)` (`epanet.c`, which takes 1e-8 to 1e-1; Rulings Q11, Q14: at 1e-8
+EPANET is itself unbalanced on Net2 and Net3, see `_open`). Every run asserts that EPANET raised
+no warning (wntr's `ENepanet` only logs codes below 100, e.g. 1, "hydraulically unbalanced").
+EPANET's files live in a temporary directory, never next to the input.
 
 The quality loop is `EN_solveQ`'s own (`epanet.c`, v2.2): `EN_openQ`, `EN_initQ(EN_NOSAVE)`,
 then `EN_runQ` and `EN_nextQ` until the step is 0, reading every node's `EN_QUALITY` (12) and
@@ -18,7 +20,7 @@ ug/L for a chemical, hours for AGE, percent for TRACE. The mass-balance ratio is
 `EN_getstatistic(EN_MASSBALANCE = 4)` after the last `EN_nextQ` (`MassBalance.ratio`, in
 full); the five terms are the report's (`report.c`, `writemassbalance`: `%12.5e`, the ratio
 `%.5f`), in EPANET's internal sums (a chemical in its mass unit, AGE and TRACE in quality
-times ft3).
+times ft3); `mass_balance_si` converts them.
 
 EPANET's quality reads its flows back from the hydraulics file as float32 (`output.c`,
 `savehyd`/`readhyd`): a ~6e-8 relative floor under every comparison.
@@ -46,6 +48,12 @@ EN_ELEVATION, EN_HEAD, EN_QUALITY = 0, 10, 12
 EN_FLOW, EN_LINKQUAL = 8, 14
 EN_NODECOUNT, EN_LINKCOUNT = 0, 2
 EN_MASSBALANCE = 4
+EN_TRIALS, EN_ACCURACY = 0, 1
+#: The accuracy `_open` sets (Ruling Q14; the measured cause in its docstring).
+REFERENCE_ACCURACY = 1e-7
+#: EPANET's litres per ft3 (`types.h`, ``LperFT3 = 28.317``; the exact value is 28.3168466).
+L_PER_FT3 = 28.317
+_FT3 = 0.3048**3
 #: `EN_FlowUnits` in code order; the first five are US (feet).
 _FLOW_UNIT_CODES = ("CFS", "GPM", "MGD", "IMGD", "AFD", "LPS", "LPM", "MLD", "CMH", "CMD")
 _FOOT = 0.3048
@@ -88,11 +96,10 @@ def edited(source: Path, tmp_path: Path, name: str, *,
     return out
 
 
-def epanet_copy(path: Path, directory: Path | None = None) -> Path:
-    """EPANET's copy of `path` in `directory` (a fresh temporary directory when `None`): the
-    file with `[OPTIONS] ACCURACY 1e-8` (read as 1e-5, module docstring), `TRIALS 400` and
-    `[REPORT] STATUS YES` inserted before its `[END]` (appended when it has none), and nothing
-    else changed."""
+def epanet_copy(path: Path, directory: Path) -> Path:
+    """EPANET's copy of `path` in `directory`: the file with `[OPTIONS] ACCURACY 1e-8` (which
+    EPANET's reader clamps to 1e-5; `_open` sets 1e-7), `TRIALS 400` and `[REPORT] STATUS
+    YES` inserted before its `[END]` (appended when it has none), and nothing else changed."""
     text = Path(path).read_text()
     found = list(re.finditer(r"^[ \t]*\[END\]", text, re.IGNORECASE | re.MULTILINE))
     if found:
@@ -100,7 +107,6 @@ def epanet_copy(path: Path, directory: Path | None = None) -> Path:
         text = text[:at] + _REFERENCE_SETTINGS + text[at:]
     else:
         text = text + ("" if text.endswith("\n") else "\n") + _REFERENCE_SETTINGS
-    directory = Path(tempfile.mkdtemp(prefix="epanet-")) if directory is None else directory
     copy = Path(directory) / f"{Path(path).stem}.epanet.inp"
     copy.write_text(text)
     return copy
@@ -128,6 +134,33 @@ def _toolkit():
     return ENepanet()
 
 
+def _open(en, copy: Path, report: Path, binary: Path) -> None:
+    """`EN_open` of the reference `copy`, then `EN_setoption(EN_ACCURACY, REFERENCE_ACCURACY)`
+    (the file's 1e-8 is clamped to 1e-5 on reading; module docstring).
+
+    Why 1e-7 and not 1e-8 (Ruling Q14), MEASURED (EPANET warning 1, hydraulically unbalanced,
+    at the steps listed): at 1e-8 with TRIALS 400, Net2 at t = 25200, 28800 and 82800 s (411
+    iterations each) and Net3 at t = 3600 and 336761 s; at 1e-8 with TRIALS 5000, Net2 none,
+    Net3 still 3600 and 336761 s (it never converges there); at 1e-7 and 1e-6 with TRIALS 400,
+    none on Net1, Net2, Net3 or `quality_base.inp`. A reference EPANET itself flags as
+    unbalanced is no reference; 1e-7 is still 100 times tighter than a file can give."""
+    en.ENopen(str(copy), str(report), str(binary))
+    code = en.ENlib.EN_setoption(en._project, EN_ACCURACY, ctypes.c_double(REFERENCE_ACCURACY))
+    assert code == 0, f"EN_setoption(EN_ACCURACY, {REFERENCE_ACCURACY}) returned {code}"
+
+
+def _no_warnings(en, path) -> None:
+    """EPANET's warnings (codes 1 to 6) are only logged by wntr: refuse a run that had one."""
+    assert not en.Warnflag, f"EPANET warned on {path}: {en.errcodelist}"
+
+
+def option(en, code: int) -> float:
+    """`EN_getoption(code)` of an open project."""
+    value = ctypes.c_double()
+    assert en.ENlib.EN_getoption(en._project, code, ctypes.byref(value)) == 0
+    return value.value
+
+
 def _names(en) -> tuple[list[str], list[str]]:
     nodes = [en.ENgetnodeid(k) for k in range(1, en.ENgetcount(EN_NODECOUNT) + 1)]
     links = []
@@ -149,6 +182,16 @@ def mass_balance_terms(report: str) -> dict[str, float]:
     return terms
 
 
+def mass_balance_si(terms: Mapping[str, float], mode: str) -> dict[str, float]:
+    """The report's mass-balance `terms` (`writemassbalance`'s internal sums) in quality
+    units times m3, the ratio unchanged: a CHEMICAL's mass is `C * V(ft3) * LperFT3` (in the
+    chemical's mass unit, `LperFT3 = 28.317`), so `/ 28.317 * ft3`; AGE and TRACE are
+    `quality * V(ft3)`, so `* ft3` (`quality.c`, `evalmassbalance`; `report.c`). For a
+    chemical in mg/L, mg/L * m3 is grams."""
+    scale = _FT3 / L_PER_FT3 if mode == "CHEMICAL" else _FT3
+    return {key: value if key == "ratio" else value * scale for key, value in terms.items()}
+
+
 def epanet_quality(path: Path) -> QualityReference:
     """EPANET 2.2's quality on `path` (`EN_solveH`, then `EN_solveQ`'s `EN_runQ`/`EN_nextQ`
     loop; module docstring), in a temporary directory."""
@@ -157,7 +200,7 @@ def epanet_quality(path: Path) -> QualityReference:
         copy = epanet_copy(path, directory)
         report = directory / "quality.rpt"
         en = _toolkit()
-        en.ENopen(str(copy), str(report), str(directory / "quality.bin"))
+        _open(en, copy, report, directory / "quality.bin")
         try:
             node_names, link_names = _names(en)
             en.ENsolveH()
@@ -176,6 +219,7 @@ def epanet_quality(path: Path) -> QualityReference:
             code = en.ENlib.EN_getstatistic(en._project, EN_MASSBALANCE, ctypes.byref(ratio))
             assert code == 0, f"EN_getstatistic(EN_MASSBALANCE) returned {code}"
             en.ENcloseQ()
+            _no_warnings(en, path)
         finally:
             en.ENclose()
         terms = mass_balance_terms(report.read_text(errors="replace"))
@@ -192,7 +236,7 @@ def epanet_hydraulics(path: Path) -> dict:
         directory = Path(tmp)
         copy = epanet_copy(path, directory)
         en = _toolkit()
-        en.ENopen(str(copy), str(directory / "h.rpt"), str(directory / "h.bin"))
+        _open(en, copy, directory / "h.rpt", directory / "h.bin")
         try:
             node_names, link_names = _names(en)
             units = _FLOW_UNIT_CODES[en.ENgetflowunits()]
@@ -209,6 +253,7 @@ def epanet_hydraulics(path: Path) -> dict:
                 if en.ENnextH() <= 0:
                     break
             en.ENcloseH()
+            _no_warnings(en, path)
         finally:
             en.ENclose()
     return {"times": times, "node_names": node_names, "link_names": link_names,
@@ -243,26 +288,31 @@ def first_divergence(times, ours, theirs, names, *, limit: float):
 
 def assert_matches_epanet(diagnostics: dict, reference: QualityReference, *, ctol: float,
                           admitted: Sequence[tuple[int, str]] = (), instance: int = 0) -> dict:
-    """noodl's quality (`diagnostics["quality"][instance]`: `"times"` s, `"node_quality"`
-    and `"link_quality"` `(T, n)` in the file's quality units, columns named by
-    `diagnostics["node_names"]` and `["link_names"]`, else in the reference's order) against
-    EPANET's at the common times, over the whole (time, node and link) matrix (the spec's
-    Verification bounds): with `scale = max(|reference|, ctol)`, the worst difference within
-    `ctol` and every point beyond `1e-5 * scale` one of `admitted` (`(time, name)`, a node or
-    link of that name; the spec admits one only with its flipped merge written in the test).
-    That per-point rule is the spec's "99.9th percentile within 1e-5 of the scale" made
-    strict: at most the admitted points exceed it, whatever the matrix's size (a 99.9th
-    percentile of a matrix under a thousand points is its worst). A failure names
-    `first_divergence`. Returns `{"p999"` (of the whole matrix, the spec's measure),
-    `"worst", "scale", "first"}`."""
+    """noodl's quality (`diagnostics["quality"][instance]`: `"times"` s, `"node_quality"` and
+    `"link_quality"` `(T, n)` in the file's quality units, columns named by
+    `diagnostics["node_names"]` and `["link_names"]`, else in the reference's order; the same
+    names as EPANET's) against EPANET's at every one of EPANET's times (noodl may have more),
+    over the whole (time, node and link) matrix (the spec's Verification bounds): with `scale =
+    max(|reference|, ctol)`, the worst difference within `ctol` and every point beyond `1e-5 *
+    scale` one of `admitted` (`(time, name)`, a node or link of that name; the spec admits one
+    only with its flipped merge written in the test). That per-point rule is the spec's "99.9th
+    percentile within 1e-5 of the scale" made strict: at most the admitted points exceed it,
+    whatever the matrix's size (on a matrix under a thousand points the 99.9th percentile
+    interpolates between its two largest differences, so a single admitted point would decide
+    it; Ruling Q13). A failure names `first_divergence`. Returns `{"p999"` (of the whole matrix,
+    the spec's measure), `"worst", "scale", "first"}`."""
     ours = diagnostics["quality"][instance]
     node_names = list(diagnostics.get("node_names", reference.node_names))
     link_names = list(diagnostics.get("link_names", reference.link_names))
+    assert sorted(node_names) == sorted(reference.node_names), "the nodes differ from EPANET's"
+    assert sorted(link_names) == sorted(reference.link_names), "the links differ from EPANET's"
     nodes = [reference.node_names.index(n) for n in node_names]
     links = [reference.link_names.index(n) for n in link_names]
     our_times = [round(float(t)) for t in ours["times"]]
     common = [t for t in reference.times if t in our_times]
-    assert common, f"no common times: noodl {our_times[:5]}..., EPANET {reference.times[:5]}..."
+    missing = [t for t in reference.times if t not in our_times]
+    assert not missing, (f"noodl's quality covers {len(common)} of EPANET's "
+                         f"{len(reference.times)} times; missing {missing[:5]}")
     mine = [our_times.index(t) for t in common]
     rows = [reference.times.index(t) for t in common]
     computed = torch.cat([torch.as_tensor(ours["node_quality"], dtype=F64)[mine],

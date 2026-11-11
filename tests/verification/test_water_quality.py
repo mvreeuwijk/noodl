@@ -22,12 +22,16 @@ wntr = pytest.importorskip("wntr")
 
 from tests.verification._epanet_quality import (  # noqa: E402
     QualityReference,
+    _open,
+    _toolkit,
     assert_matches_epanet,
     edited,
     epanet_copy,
     epanet_hydraulics,
     epanet_quality,
     first_divergence,
+    mass_balance_si,
+    option,
 )
 
 F64 = torch.float64
@@ -45,20 +49,22 @@ def _binary(path, tmp_path):
     """EPANET's own `EN_solveH`, `EN_solveQ` on the reference copy of `path`, its binary
     output read by wntr's `BinFile`."""
     from wntr.epanet.io import BinFile
-    from wntr.epanet.toolkit import ENepanet
     copy = epanet_copy(path, tmp_path)
-    en = ENepanet()
-    en.ENopen(str(copy), str(tmp_path / "solve.rpt"), str(tmp_path / "solve.bin"))
-    en.ENsolveH()
-    en.ENsolveQ()
-    en.ENclose()
+    en = _toolkit()
+    _open(en, copy, tmp_path / "solve.rpt", tmp_path / "solve.bin")
+    try:
+        en.ENsolveH()
+        en.ENsolveQ()
+    finally:
+        en.ENclose()
     return BinFile().read(str(tmp_path / "solve.bin"))
 
 
 @pytest.mark.parametrize("name", list(_NETWORKS))
 def test_the_step_harness_reproduces_epanets_binary_output(tmp_path, name):
     """At the report times, every node's and link's quality from the `EN_runQ`/`EN_nextQ` loop
-    is EPANET's own `EN_solveQ` binary output (float32 on disk) within 1e-6 relative."""
+    is EPANET's own `EN_solveQ` binary output (float32 on disk) within 1e-6 relative.
+    MEASURED: 1.3e-7 (Net1), 1.6e-7 (Net2), 5.9e-8 (Net3); exact where the binary holds 0."""
     path, si = _NETWORKS[name]
     reference = epanet_quality(path)
     results = _binary(path, tmp_path)
@@ -68,9 +74,8 @@ def test_the_step_harness_reproduces_epanets_binary_output(tmp_path, name):
         rows = [reference.times.index(int(t)) for t in theirs.index]
         binary = torch.tensor(theirs[names].to_numpy(), dtype=F64) / si
         assert len(rows) == len(theirs.index) > 1
-        scale = float(binary.abs().max())
-        assert scale > 0
-        torch.testing.assert_close(ours[rows], binary, rtol=1e-6, atol=1e-6 * scale)
+        assert float(binary.abs().max()) > 0
+        torch.testing.assert_close(ours[rows], binary, rtol=1e-6, atol=0.0)
 
 
 def test_the_mass_balance_is_read_in_full_and_from_the_report():
@@ -82,6 +87,22 @@ def test_the_mass_balance_is_read_in_full_and_from_the_report():
     assert reference.terms["initial"] > 0
     assert reference.terms["reacted"] != 0      # Net1's chlorine decays
     assert 0.9 < reference.ratio < 1.1
+
+
+def test_the_mass_balance_terms_convert_to_quality_times_cubic_metres(tmp_path):
+    """Net1 with every node's initial quality 1 mg/L: the report's initial mass, through
+    `mass_balance_si`, is the network's water volume (every pipe's and the tank's; pumps and
+    valves start empty, a reservoir holds none) in mg/L x m3, to the report's 6 digits."""
+    import math
+    net = read_epanet_inp(DATA / "Net1.inp")
+    lines = [f" {n.name}  1.0" for n in (*net.junctions, *net.tanks)]
+    reference = epanet_quality(edited(DATA / "Net1.inp", tmp_path, "ones.inp",
+                                      add={"QUALITY": lines}))
+    volume = sum(math.pi / 4 * p.diameter**2 * p.length for p in net.pipes)
+    volume += sum(math.pi / 4 * t.diameter**2 * t.init_level for t in net.tanks)
+    converted = mass_balance_si(reference.terms, "CHEMICAL")
+    assert converted["initial"] == pytest.approx(volume, rel=1e-5)
+    assert converted["ratio"] == reference.terms["ratio"]
 
 
 def _synthetic(delta, at=7200, node="J3"):
@@ -160,21 +181,22 @@ def test_edited_replaces_literally_and_appends_to_sections(tmp_path):
 
 def test_epanets_copy_adds_only_the_accuracy_trials_and_status(tmp_path):
     """The copy is the file plus three lines before `[END]`. EPANET reads them as TRIALS 400
-    and ACCURACY 1e-5: `optionvalue` (`input3.c`) clamps a file's ACCURACY to [1e-5, 1e-1]
-    (only `EN_setoption` reaches 1e-8), as it does on the hydraulic parity's copies."""
-    import ctypes
-
-    from tests.verification._epanet_quality import _toolkit
+    and ACCURACY 1e-5: `optionvalue` (`input3.c`) clamps a file's ACCURACY to [1e-5, 1e-1],
+    so the harness's `_open` sets 1e-7 through `EN_setoption` (Rulings Q11, Q14)."""
+    from tests.verification._epanet_quality import EN_ACCURACY, EN_TRIALS
     copy = epanet_copy(BASE, tmp_path)
     en = _toolkit()
     en.ENopen(str(copy), str(tmp_path / "o.rpt"), str(tmp_path / "o.bin"))
-    options = []
-    for code in (0, 1):        # EN_TRIALS, EN_ACCURACY
-        value = ctypes.c_double()
-        assert en.ENlib.EN_getoption(en._project, code, ctypes.byref(value)) == 0
-        options.append(value.value)
-    en.ENclose()
-    assert options == [400.0, 1e-5]
+    try:
+        assert (option(en, EN_TRIALS), option(en, EN_ACCURACY)) == (400.0, 1e-5)
+    finally:
+        en.ENclose()
+    en = _toolkit()
+    _open(en, copy, tmp_path / "p.rpt", tmp_path / "p.bin")
+    try:
+        assert (option(en, EN_TRIALS), option(en, EN_ACCURACY)) == (400.0, 1e-7)
+    finally:
+        en.ENclose()
     original, text = BASE.read_text(), copy.read_text()
     head, _, tail = original.rpartition("[END]")
     assert text.startswith(head)
@@ -186,9 +208,11 @@ def test_epanets_copy_adds_only_the_accuracy_trials_and_status(tmp_path):
 
 def test_the_quality_base_network_has_its_properties():
     """EPANET on `quality_base.inp`: P6 (the tank's pipe) changes sign at least twice; T1 rises
-    and falls inside its limits; the dead end P7 is stagnant (below `Q_STAGNANT`, EPANET's
-    residual flow there, MEASURED up to 1.6e-8 m3/s) at every step, every other link carries
-    more than `Q_STAGNANT`; the reservoir is the 1 mg/L source and the tank sees it."""
+    and falls inside its limits; the dead end P7 carries only EPANET's solver residual (below
+    1e-8 m3/s, 1/30 of `Q_STAGNANT`, 3.2e-7 m3/s: the residual of the stopping test, not a
+    flow; MEASURED up to 3.7e-9 m3/s at the harness's ACCURACY 1e-7, 1.5e-10 at 1e-8, 1.6e-8
+    at the file's clamped 1e-5) at every step, every other link carries more than
+    `Q_STAGNANT`; the reservoir is the 1 mg/L source and the tank sees it."""
     net = read_epanet_inp(BASE)
     hydraulics = epanet_hydraulics(BASE)
     links = hydraulics["link_names"]
@@ -203,7 +227,7 @@ def test_the_quality_base_network_has_its_properties():
     assert tank.min_level < float(level.min()) < float(level.max()) < tank.max_level
     assert float(level.max()) > float(level[0]) + 1.0
     assert float((torch.cummax(level, 0).values - level).max()) > 1.0     # and falls
-    assert float(flow[:, links.index("P7")].abs().max()) < 0.1 * stagnant
+    assert float(flow[:, links.index("P7")].abs().max()) < 1e-8
     others = [k for k, n in enumerate(links) if n != "P7"]
     assert float(flow[:, others].abs().min()) > stagnant
     reference = epanet_quality(BASE)
@@ -218,7 +242,7 @@ def test_the_quality_base_network_has_its_properties():
 def test_the_quality_base_hydraulics_match_epanet():
     """`water_run` on `quality_base.inp` against EPANET (its reference copy) at every hour:
     heads 1e-5 relative (to `max(|H|, 1 m)`), flows 1e-6 m3/s, the tank level 2e-4 m.
-    MEASURED: heads 1.9e-7, flows 2.6e-8 m3/s, level 1.7e-5 m."""
+    MEASURED (EPANET at ACCURACY 1e-7): heads 1.9e-7, flows 1.2e-8 m3/s, level 1.7e-5 m."""
     net = read_epanet_inp(BASE)
     model, _, _ = build_model(net)
     run = water_run(model)

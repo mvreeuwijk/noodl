@@ -151,7 +151,8 @@ def read_quality(
         if is_quality_time(line):
             # `timedata` sets Qstep for any line whose first token matches QUAL, from the
             # last token (`getfloat` or `hour(Tok[n], "")`), else from the last two (`hour(
-            # Tok[n-1], Tok[n])`, a value and its unit), whatever words lie in between
+            # Tok[n-1], Tok[n])`, a value and its unit), whatever words lie in between;
+            # `hour` also takes AM/PM there, refused here (meaningless for a time step)
             index = len(line.fields) - 1
             if index > 1 and time_unit_scale(line.fields[index]) is not None:
                 index -= 1
