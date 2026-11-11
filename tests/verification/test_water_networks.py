@@ -152,7 +152,7 @@ def test_network_matches_epanet(tmp_path, name):
     results, theirs, demand = _epanet(path, case.get("warnings", ()))
     net = read_epanet_inp(path)
     model, _, _ = build_model(net)
-    run = water_run(model)
+    run = water_run(model, quality=False)
     names, links = model.node_names, model.link_names
     assert run.time.tolist() == [float(t) for t in results.node["head"].index]
     heads = torch.tensor(results.node["head"][names].to_numpy(), dtype=F64)

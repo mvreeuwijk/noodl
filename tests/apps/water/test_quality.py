@@ -308,38 +308,42 @@ def test_a_source_strength_of_the_wrong_shape_is_refused():
                   duration=3600, quality=True)
 
 
-def test_a_batched_quality_run_and_a_network_without_quality_are_refused():
+def test_a_batched_quality_input_runs_one_router_per_instance():
     model, _, _ = build_model(read_epanet_inp(BASE))
     state = initial_state(model)
     state["quality.initial"] = torch.zeros(2, len(model.node_names), dtype=F64)
-    with pytest.raises(ValueError, match="batched"):
-        water_run(model, state, duration=3600, quality=True)
+    diagnostics: dict = {}
+    run = water_run(model, state, duration=3600, quality=True, diagnostics=diagnostics)
+    assert run.node_quality.shape == (2, 2, len(model.node_names))
+    assert len(diagnostics["quality"]) == 2
+
+
+def test_a_network_without_quality_refuses_quality_true():
     model, _, _ = build_model(dataclasses.replace(read_epanet_inp(BASE), quality=None))
     with pytest.raises(ValueError, match="QUALITY"):
         water_run(model, duration=3600, quality=True)
 
 
-def test_quality_is_off_unless_asked_for():
-    """Until the integration (`quality=None` follows the network later), `None` and `False`
-    run no quality: the results carry none, and the hydraulics are the same."""
+def test_quality_false_runs_no_quality():
+    """`False` runs no quality (`None` follows the network): the results carry none, and the
+    hydraulics are the same."""
     model, _, _ = build_model(read_epanet_inp(BASE))
-    off = water_run(model, duration=7200)
-    on = water_run(model, duration=7200, quality=True)
+    off = water_run(model, duration=7200, quality=False)
+    on = water_run(model, duration=7200)
     assert off.node_quality is None and off.link_quality is None and off.quality_units is None
     assert on.node_quality.shape == (3, len(model.node_names))
     assert on.link_quality.shape == (3, len(model.link_names))
     assert torch.equal(off.head, on.head) and torch.equal(off.flow, on.flow)
 
 
-@pytest.mark.parametrize("quality", [None, False])
-def test_a_quality_input_without_quality_is_refused(quality):
+def test_a_quality_input_without_quality_is_refused():
     """`quality.initial` in the state of a run without quality would be dropped: refused
     by name."""
     model, _, _ = build_model(read_epanet_inp(BASE))
     state = initial_state(model)
     state["quality.initial"] = torch.zeros(len(model.node_names), dtype=F64)
     with pytest.raises(ValueError, match="quality.initial"):
-        water_run(model, state, duration=3600, quality=quality)
+        water_run(model, state, duration=3600, quality=False)
 
 
 # ---- reactions and water age (`quality_react`; `qualreact.c`) -------------------------------
@@ -564,7 +568,7 @@ def test_a_reaction_coefficient_of_the_wrong_shape_or_without_quality_is_refused
     drivers["quality.bulk_coefficient"] = torch.zeros(len(model.water_network.pipes),
                                                       dtype=F64)
     with pytest.raises(ValueError, match="quality.bulk_coefficient"):
-        water_run(model, drivers=drivers, duration=3600)
+        water_run(model, drivers=drivers, duration=3600, quality=False)
 
 
 def test_the_reaction_coefficients_are_declared_inputs():
@@ -713,7 +717,7 @@ def test_the_mass_balance_of_a_run_closes_and_follows_updatemassbalance():
     assert float(balance.ratio) == pytest.approx(1.0, abs=1e-6)
     assert float(balance.final) == pytest.approx(
         float(balance.initial + balance.inflow - balance.outflow), rel=1e-6)
-    assert water_run(model).mass_balance is None
+    assert water_run(model, quality=False).mass_balance is None
 
 
 def test_the_mass_balance_keeps_the_autograd_graph():

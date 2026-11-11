@@ -351,3 +351,59 @@ def test_the_control_closure_follows_every_driver_it_reads():
     del scaled
     gc.collect()
     assert ref() is None
+
+
+TWOLOOP = NET1.with_name("twoloop_si.inp")
+TWOLOOP_TRACE = NET1.with_name("twoloop_trace.inp")
+
+
+def test_quality_runs_by_default_when_the_network_defines_it():
+    """`quality=None` runs EPANET's quality when `[OPTIONS] QUALITY` names a mode and the
+    duration is positive (`adjustdata`: `DURATION 0` turns it off)."""
+    model, _, _ = build_model(read_epanet_inp(NET1))
+    run = water_run(model)
+    assert run.node_quality is not None and run.quality_units == "mg/L"
+    assert run.node_quality.shape == (len(run.time), len(run.node_names))
+    assert run.mass_balance is not None
+    model, _, _ = build_model(read_epanet_inp(TWOLOOP))
+    run = water_run(model)
+    assert run.node_quality is None and run.mass_balance is None
+    model, _, _ = build_model(read_epanet_inp(NET1))
+    run = water_run(model, duration=0.0)
+    assert run.node_quality is None and run.quality_units is None
+
+
+def test_quality_false_turns_it_off_and_true_demands_it():
+    model, _, _ = build_model(read_epanet_inp(NET1))
+    assert water_run(model, quality=False).node_quality is None
+    assert water_run(model, quality=True).node_quality is not None
+    with pytest.raises(ValueError, match="DURATION"):
+        water_run(model, duration=0.0, quality=True)
+    plain, _, _ = build_model(read_epanet_inp(TWOLOOP))
+    with pytest.raises(ValueError, match="QUALITY"):
+        water_run(plain, quality=True)
+
+
+def test_the_steady_tracer_is_refused_alongside_epanet_quality():
+    """The steady layer "quality" of `build_model(quality=float)` is not EPANET's quality: a
+    network whose quality resolves on is refused by name; `quality=False` runs."""
+    model, _, _ = build_model(read_epanet_inp(TWOLOOP_TRACE), quality=0.0)
+    with pytest.raises(ValueError, match="steady tracer"):
+        water_run(model)
+    assert water_run(model, quality=False).node_quality is None
+
+
+def test_quality_leaves_the_hydraulics_unchanged():
+    """The quality never feeds back (Net1, 24 h): heads, flows, tank levels, statuses and the
+    energy are bit-identical with it on and off."""
+    model, _, _ = build_model(read_epanet_inp(NET1))
+    on, off = water_run(model, quality=True), water_run(model, quality=False)
+    assert on.node_quality is not None and off.node_quality is None
+    for name in ("head", "flow", "tank_level", "status", "setting", "demand", "pressure"):
+        assert torch.equal(getattr(on, name), getattr(off, name)), name
+    for field in dataclasses.fields(on.energy):
+        mine, theirs = getattr(on.energy, field.name), getattr(off.energy, field.name)
+        if isinstance(mine, torch.Tensor):
+            assert torch.equal(mine, theirs), field.name
+        else:
+            assert mine == theirs, field.name

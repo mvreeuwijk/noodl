@@ -38,6 +38,8 @@ instance ends the step for all. A single run follows EPANET's step sequence exac
 from __future__ import annotations
 
 import contextlib
+import dataclasses
+import math
 from dataclasses import dataclass, field
 
 import torch
@@ -91,7 +93,7 @@ class WaterResults:
     `None` for a network without pumps). Heads, flows, levels, demands and emitter flows
     keep their autograd graph.
 
-    With EPANET's water quality on (`water_run(quality=True)`), `node_quality` (..., T,
+    With EPANET's water quality on (`water_run`'s `quality`), `node_quality` (..., T,
     n_nodes) and `link_quality` (..., T, n_links) are the quality at the report times in
     the file's quality unit `quality_units` (mg/L, ug/L, hours, percent): a node's as
     EPANET reports it, a link's the volume-weighted mean of its segments (`quality.c`,
@@ -387,7 +389,13 @@ def water_run(model, state=None, drivers=None, *, duration: float | None = None,
     pattern sets its carried speed in the state each step. `"water.time"` is the run's own:
     a value the caller passes is replaced.
 
-    `quality=True` runs EPANET's water quality of `net.quality` alongside
+    `quality=None` (the default) runs EPANET's water quality of `net.quality` alongside when the
+    network defines a quality mode other than NONE and the run's duration is positive (`input1.c`,
+    `adjustdata`: a zero duration turns the quality off); `False` never runs it; `True` demands
+    it and raises a `ValueError` naming `[OPTIONS] QUALITY` when the network has no mode and
+    `DURATION 0` at a zero duration. A model built with `build_model(quality=float)` (the
+    steady tracer) is refused by name alongside the EPANET quality; pass `quality=False` for it.
+    The quality runs
     (`noodl.apps.water.quality`, `QualityRouter`): after the solve at `t` the quality as it
     stands is kept (EPANET's `saveoutput`), then it is routed over the step with that
     solve's flows, link states and delivered demands (`runqual`, `nextqual`); it never
@@ -397,12 +405,13 @@ def water_run(model, state=None, drivers=None, *, duration: float | None = None,
     its reaction coefficients (SI per second, `WaterQuality`), and
     `drivers["quality.source_strength"]` (n_nodes) its sources' strengths. The quality keeps its
     autograd graph when a quality input or the solve's flows require gradients, and runs
-    detached otherwise.
-    `None` and `False` run no quality.
+    detached otherwise. A batched run (leading dimensions of the flows or the quality inputs)
+    runs one `QualityRouter` per instance of their broadcast shape, fed its slices, and the
+    results are stacked (..., T, n); `mass_balance` fields are then (...,) tensors.
 
     `diagnostics`, when given a dict, receives `"times"` (the time of every solve, s) and
-    `"newton_iterations"` (each solve's), and with quality on `"quality"`
-    (`QualityRouter`). Gradients reach every result except the statuses
+    `"newton_iterations"` (each solve's), and with quality on `"quality"` (`QualityRouter`: one
+    entry per instance). Gradients reach every result except the statuses
     through the solves and the tank moves; not through the step lengths or a switch.
 
     The implicit tank schemes (`tank_scheme="backward_euler"`, `"trapezoidal"`) are refused
@@ -420,17 +429,26 @@ def water_run(model, state=None, drivers=None, *, duration: float | None = None,
     quality_inputs = {key: state.pop(key) for key in _QUALITY_STATE if key in state}
     quality_inputs.update({key: drivers.pop(key) for key in _QUALITY_DRIVERS
                            if key in drivers})
+    defined = net.quality is not None and net.quality.mode != "NONE"
+    if quality is True and not defined:
+        raise ValueError("water_run: quality=True, but the network defines no water quality "
+                         "([OPTIONS] QUALITY is NONE or absent)")
+    if quality is True and clock.duration == 0:
+        raise ValueError("water_run: quality=True, but the run's duration is 0 (`[TIMES] "
+                         "DURATION 0`, a steady state), which EPANET runs without quality")
+    quality = defined and clock.duration > 0 if quality is None else bool(quality)
     if quality_inputs and not quality:
         raise ValueError(f"water_run: the state or the drivers carry "
                          f"{sorted(quality_inputs)}, but no water quality runs "
                          f"(quality={quality!r}); pass quality=True")
-    if quality and (net.quality is None or net.quality.mode == "NONE"):
-        raise ValueError("water_run: quality=True, but the network defines no water quality "
-                         "([OPTIONS] QUALITY is NONE or absent)")
+    if quality and "quality" in model.layers:
+        raise ValueError("water_run: the model carries the steady tracer "
+                         "(`build_model(quality=...)`), which is not EPANET's quality; build it "
+                         "without, or pass quality=False")
     if quality and net.tanks:
         # the tanks' initial segments hold the run's initial volumes (`initsegs`)
         quality_inputs["quality.tank_level"] = model.control_closure.levels(state)
-    router = quiet = None
+    routers = quiet = None
     patterns = _Patterns(model, drivers)
     recorder = _Recorder(model)
     closure = model.control_closure
@@ -519,11 +537,11 @@ def water_run(model, state=None, drivers=None, *, duration: float | None = None,
         report = t >= next_report
         quality_row = demands = None
         if quality:
-            if router is None:
-                router = _router(model, quality_inputs, solved, clock, diagnostics)
-                quiet = contextlib.nullcontext if router.attached else torch.no_grad
+            if routers is None:
+                routers = _Routers(model, quality_inputs, solved, clock, diagnostics)
+                quiet = contextlib.nullcontext if routers.attached else torch.no_grad
             with quiet():
-                quality_row = router.record(t, link=report)
+                quality_row = routers.record(t, link=report)
             demands = recorder.demands(solved, d)
         if report:
             reported.append(next_report)
@@ -546,15 +564,15 @@ def water_run(model, state=None, drivers=None, *, duration: float | None = None,
                                 demands=demands, quality=quality_row)
             break
         step, advanced, acted = plan(True, t, hydraulic_report, solved, levels, d)
+        # `addenergy` takes the step as EPANET's `timestep` finds it, past the duration as
+        # well (the reported results end at the duration); so does `nextqual` (`Htime`). When
+        # the duration cut this step, EPANET's is whole, its tanks moved and its rules checked
+        # to its own end (a rule acting past the duration ends it there)
+        whole, seen, taken = step, advanced, acted
+        if ((counted or routers is not None)
+                and t + clock.free_step(t, hydraulic_report) > clock.duration):
+            whole, seen, taken = plan(False, t, hydraulic_report, solved, levels, d)
         if counted:
-            # `addenergy` takes the step as EPANET's `timestep` finds it, past the duration
-            # as well; the reported results end at the duration
-            whole, seen, taken = step, advanced, acted
-            if t + clock.free_step(t, hydraulic_report) > clock.duration:
-                # the duration cut this step: EPANET's is whole, its tanks moved and its rules
-                # checked to its own end (a rule acting past the duration ends it there)
-                whole, seen, taken = plan(False, t, hydraulic_report, solved, levels,
-                                           d)
             pumps_now, opened = _as_addenergy_sees(seen, taken, status[..., meter.cols],
                                                    meter.cols)
             meter.add(pattern_period(net, t), whole / 3600.0,
@@ -564,20 +582,22 @@ def water_run(model, state=None, drivers=None, *, duration: float | None = None,
             recorder.record(solved, d, cut_off, levels,
                             _overflow(model, storage, solved, advanced, step), status,
                             demands=demands, quality=quality_row)
-        if router is not None:
+        if routers is not None and t + whole <= clock.duration:
+            # `nextqual`: transport only when the next hydraulic time `Htime = t + whole` is
+            # within the duration (`whole` EPANET's step, not shortened to the duration)
             states = (status if report
                       else link_states_from_cut_off(model, solved, *cut_off))
             with quiet():
-                router.advance(t, step, flow=solved["water.q"], closed=states == CLOSED,
-                               demand=demands[0] + demands[1])
+                routers.advance(t, whole, flow=solved["water.q"], closed=states == CLOSED,
+                                demand=demands[0] + demands[1])
         t += step
         if t >= hydraulic_report:
             hydraulic_report += clock.report_step
         state = advanced
     results = recorder.results(reported, None if meter is None else meter.result(),
-                               None if router is None else net.quality.units)
-    if router is not None:
-        results.mass_balance = router.mass_balance()
+                               None if routers is None else net.quality.units)
+    if routers is not None:
+        results.mass_balance = routers.mass_balance()
     return results
 
 
@@ -588,18 +608,50 @@ _QUALITY_DRIVERS = ("quality.bulk_coefficient", "quality.wall_coefficient",
                     "quality.tank_coefficient", "quality.source_strength")
 
 
-def _router(model, inputs: dict, solved, clock: _Clock, diagnostics):
-    """The run's `QualityRouter`, made at the first solve: attached when gradients are on
-    and a quality input or the solve's flows require them (the spec's Ruling Q5)."""
-    net = model.water_network
-    flow = solved["water.q"]
-    if flow.dim() > 1 or any(v.dim() > 1 for v in inputs.values()):
-        raise ValueError("water_run: a batched run with water quality is not yet modelled")
-    attached = torch.is_grad_enabled() and (
-        flow.requires_grad or any(v.requires_grad for v in inputs.values()))
-    return QualityRouter(model, net.quality, inputs=inputs,
-                         quality_step=quality_step(net, clock.hydraulic_step),
-                         attached=attached, diagnostics=diagnostics)
+class _Routers:
+    """The run's `QualityRouter`s, one per instance of the broadcast shape of the flows' and
+    the quality inputs' leading dimensions, made at the first solve and fed their slices.
+    Attached when gradients are on and a quality input or the solve's flows require them (the
+    spec's Ruling Q5)."""
+
+    def __init__(self, model, inputs: dict, solved, clock: _Clock, diagnostics) -> None:
+        net = model.water_network
+        flow = solved["water.q"]
+        self.shape = torch.broadcast_shapes(flow.shape[:-1],
+                                            *(v.shape[:-1] for v in inputs.values()))
+        self.attached = torch.is_grad_enabled() and (
+            flow.requires_grad or any(v.requires_grad for v in inputs.values()))
+        step = quality_step(net, clock.hydraulic_step)
+        self.routers = [
+            QualityRouter(model, net.quality,
+                          inputs={k: self.slice(v, i) for k, v in inputs.items()},
+                          quality_step=step, attached=self.attached, diagnostics=diagnostics)
+            for i in range(math.prod(self.shape))]
+
+    def slice(self, value: Tensor, i: int) -> Tensor:
+        """Instance `i` (row-major over the batch shape) of `value` (..., n)."""
+        n = value.shape[-1]
+        return value.expand(self.shape + (n,)).reshape(-1, n)[i]
+
+    def _stack(self, rows: list[Tensor]) -> Tensor:
+        return torch.stack(rows).reshape(self.shape + rows[0].shape)
+
+    def record(self, t: int, *, link: bool):
+        rows = [r.record(t, link=link) for r in self.routers]
+        return (self._stack([n for n, _ in rows]),
+                self._stack([k for _, k in rows]) if link else None)
+
+    def advance(self, t: int, step: int, *, flow: Tensor, closed: Tensor,
+                demand: Tensor) -> None:
+        for i, router in enumerate(self.routers):
+            router.advance(t, step, flow=self.slice(flow, i), closed=self.slice(closed, i),
+                           demand=self.slice(demand, i))
+
+    def mass_balance(self) -> QualityMassBalance:
+        balances = [r.mass_balance() for r in self.routers]
+        return QualityMassBalance(**{
+            f.name: self._stack([torch.as_tensor(getattr(b, f.name)) for b in balances])
+            for f in dataclasses.fields(QualityMassBalance)})
 
 
 def _as_addenergy_sees(advanced, acted: Tensor | None, pump_states: Tensor, cols: Tensor):

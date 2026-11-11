@@ -8,7 +8,7 @@ directions are taken (`flowdirchanged`), a chain is reversed when its flow chang
 taking each link's inflow from its leading segments (`evalnodeinflow`), mixing it at the
 node (`findnodequal`, a tank by its mixing model, `quality_tanks`) and releasing the node's water
 into its outflow links, merged into their last segment when within `Ctol` of it
-(`evalnodeoutflow`). `QualityRouter` is that procedure; `water_run(quality=True)` drives it
+(`evalnodeoutflow`). `QualityRouter` is that procedure; `water_run` drives it
 after every solve with that solve's flows, link states and delivered demands (EPANET's
 `runqual` then `nextqual`), and reports the quality as it stands before the transport
 (`saveoutput`).
@@ -87,9 +87,10 @@ class QualityMassBalance:
     reservoirs' inflow removed, the mass `reacted` away (negative when a reaction made
     mass), the `final` mass stored, and the `ratio` of what left to what came in
     (`evalmassbalance`: `(outflow + final + max(reacted, 0)) / (initial + inflow -
-    min(reacted, 0))`, 1 when that denominator is 0). Each a 0-d tensor (`()`: the router
-    is not batched) that keeps the autograd graph of an attached run (the spec's Ruling
-    Q5; only decisions are detached). Mass is the physical mass: a CHEMICAL's
+    min(reacted, 0))`, 1 when that denominator is 0). Each a 0-d tensor (`()` for one router;
+    a batched run stacks them to the batch shape) that keeps the autograd graph of an
+    attached run (the spec's Ruling Q5; only decisions are detached). Mass is the physical
+    mass: a CHEMICAL's
     `c v 1000` (`EXACT_LITRES_PER_M3`: 1 m3 at 1 mg/L is 1000 mg, the chemical's mass unit);
     AGE's and TRACE's `c v` (quality x m3; the ratio is unit-free)."""
 

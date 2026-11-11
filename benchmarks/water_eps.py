@@ -43,7 +43,7 @@ def _run(net, multiplier: float, pipe_form: str = "potential") -> tuple[list[flo
     model, _, drivers = build_model(net, pipe_form=pipe_form)
     drivers = {**drivers, "water.sources": drivers["water.sources"] * multiplier}
     diagnostics: dict = {}
-    results = water_run(model, drivers=drivers, diagnostics=diagnostics)
+    results = water_run(model, drivers=drivers, quality=False, diagnostics=diagnostics)
     steps = len(diagnostics["times"]) - 1
     return results.tank_level[:, 0].tolist(), steps, max(diagnostics["newton_iterations"])
 

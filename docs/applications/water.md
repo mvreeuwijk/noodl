@@ -157,7 +157,7 @@ both.
 
 ## Running over time
 
-`water_run(model, state=None, drivers=None, *, duration=None, diagnostics=None, **solve_kwargs)`
+`water_run(model, state=None, drivers=None, *, duration=None, quality=None, diagnostics=None, **solve_kwargs)`
 is EPANET 2.2's extended-period run (`hydraul.c`, `runhyd` and `nexthyd`), on a model built
 with the default `tank_scheme="forward_euler"`. From `state` (`initial_state(model)` when
 `None`) it repeats, at each step's start time $t$ in whole seconds:
@@ -179,6 +179,16 @@ with the default `tank_scheme="forward_euler"`. From `state` (`initial_state(mod
    steps: the first to the next multiple of `RULE TIMESTEP`, the tanks moved and the rules
    checked after each (`apply_rules`); a rule that takes an action ends the step there
    (`ruletimestep`), and the next solve applies the simple controls first.
+
+`quality=None` (the default) also runs EPANET's water quality (`QualityRouter`, after every solve)
+when the network defines a mode other than NONE in `[OPTIONS] QUALITY` and the duration is
+positive; `quality=False` never does, which is what a hydraulics-only run (a benchmark, a parity
+check against EPANET's heads and flows) asks for, and `quality=True` demands it, raising a
+`ValueError` naming `[OPTIONS] QUALITY` when there is no mode and `DURATION 0` at a zero
+duration. The quality never feeds back: the hydraulics are bit-identical with it on and off.
+A batched run routes each instance on its own. The steady tracer (a model built with
+`build_model(quality=...)`) is a different thing, a steady layer of the model; `water_run`
+refuses it by name ("steady tracer") when EPANET's quality runs, so give `quality=False`.
 
 The results are kept at the report times, `REPORT START` and every `REPORT TIMESTEP` after it
 to the duration, as EPANET writes them: each the solve at that time (a tank's level is its
@@ -855,7 +865,7 @@ physics'.
 | Autodiff vs central differences | 1e-6 × scale | 3.212e-6 / 2.505e-10 / 9.2e-10 / 2.753e-9 |
 | d(junction heads)/d(demands) through a closed check valve, vs central differences | 1e-6 × scale | 2.7e-11 × scale (2.6e-8 at scale 983) |
 | d(junction heads)/d(pump speed), every curve kind, vs central differences | 1e-6 relative | 3.1e-10 or better |
-| TRACE water quality, single source | 1e-3 | 2.8e-14 percentage points |
+| steady tracer, single source | 1e-3 | 2.8e-14 percentage points |
 | Golden regression | 1e-10 | **0.0** |
 
 A few rows deserve comment.
@@ -1005,7 +1015,7 @@ independent loop is a property of the cycle-space formulation, and it holds exac
   D-W pipe's head loss follows a straight line to the Colebrook value at Re = 2000, not
   Hagen-Poiseuille, and Dunlop's transition cubic is not used. The default `friction="composite"`
   reproduces both.
-- **Water-quality tracing is verified on a single source only.** The TRACE check uses a
+- **The steady tracer is verified on a single source only.** The check uses a
   network with one source, where the answer is 100 % everywhere it reaches; mixing of several
   traced sources has not been compared against EPANET.
 - **Tank area does not enter a single `water_steady` call.** Only the tank's head enters the

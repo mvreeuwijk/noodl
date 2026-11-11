@@ -17,6 +17,7 @@ import torch
 from noodl.apps.water.inp import read_epanet_inp
 from noodl.apps.water.network import build_model, initial_state
 from noodl.apps.water.quality import EXACT_LITRES_PER_M3
+from noodl.apps.water.quality_react import pipe_coefficients
 from noodl.apps.water.simulate import water_run
 from noodl.apps.water.units import Q_STAGNANT_CFS, rounded_cfs_per_m3s
 
@@ -334,13 +335,21 @@ def _flow_cycle(tmp_path: Path) -> Path:
                   add={"PUMPS": [" PU2  J3     J1     HEAD C2"], "CURVES": [" C2   20    15"]})
 
 
+def _past_last_whole_step(tmp_path: Path) -> Path:
+    """The base with initial qualities, run for 5:30: the step from 5:00 is EPANET's whole
+    hour, which ends at 6:00, past the duration."""
+    return edited(BASE, tmp_path, "last_step.inp",
+                  replace=[(" Duration            24:00", " Duration            5:30")],
+                  add={"QUALITY": [" J3 0.5", " J6 0.8", " J5 0.4", " T1 0.25"]})
+
+
 #: Every quality case by name: the `.inp` it runs, made in a temporary directory (Task 7's
 #: mass balance runs them all).
 QUALITY_CASES: dict[str, Callable[[Path], Path]] = {
     "base": _base, "chemical": _chemical, "trace_junction": _trace("J1"),
     "trace_reservoir": _trace("R1"), "trace_tank": _trace("T1"), "dead_end": _dead_end,
     "tank_limit": _tank_limit, "check_valve": _check_valve, "closed_turn": _closed_turn,
-    "flow_cycle": _flow_cycle,
+    "flow_cycle": _flow_cycle, "last_step": _past_last_whole_step,
 }
 
 
@@ -1065,3 +1074,63 @@ def test_a_2comp_tank_without_net_flow_loses_mass_in_both(tmp_path):
     outflow or reaction)."""
     ours, reference, *_ = _mass_balance_differences(tmp_path, "mixing_2comp_no_flow")
     assert float(ours.ratio) < 1.0 and reference.ratio < 1.0
+
+
+def test_a_duration_past_the_last_whole_step_matches_epanet(tmp_path):
+    """`DURATION 5:30` with an hourly hydraulic step: the step from 5:00 would end at 6:00
+    and EPANET does not transport it (`nextqual`: `Htime <= Dur`; the hydraulic step is not
+    shortened to the duration), so the quality ends at 5:00 after exactly 60 quality steps of
+    300 s, none after 5:00; noodl's qualities and mass balance match EPANET's by the spec's
+    bounds (`_compare`, the mass balance by `test_mass_balance_matches_epanet`'s over the
+    same case)."""
+    results, diagnostics, reference, _ = _compare(tmp_path, "last_step")
+    entry = diagnostics["quality"][0]
+    assert len(entry["segments"]) == 60
+    assert max(entry["times"]) == 5 * 3600 and results.time[-1] == 5 * 3600
+    assert reference.times[-1] == 5 * 3600
+    *_, relative, ratio = _mass_balance_differences(tmp_path, "last_step")
+    assert ratio < 1e-6 and max(relative.values()) < 2e-5
+
+
+def test_a_batch_runs_each_instance_as_its_own_run(tmp_path):
+    """Each instance of a batch is its own `QualityRouter` and its own run. A bulk
+    coefficient batched over two values equals each single run exactly (`torch.equal`: the
+    same flows, the same arithmetic); the demands scaled by 0.8 and 1.2 (`water.sources`)
+    equal each single run within 1e-8 of the quality's scale over the first 23 h; two
+    `diagnostics` entries. A batch shares one step plan (the shortest tank time over its
+    instances, `water_run`), so the instances equal their single runs only while no instance
+    has a step event the others lack. MEASURED: at 0.8 times the demands `T1` fills to its
+    maximum at 23:33:37 (84817 s), a step the single 1.2 run does not have, which moves the
+    batched 1.2 instance by 9.8e-5 in `T1`'s quality (and its heads by 1.5e-3 m); the base
+    itself, at 1 times, has no such event, and none occurs before 23 h at either multiplier."""
+    path = _reacting("batch", bulk=-0.5)(tmp_path)
+    net = read_epanet_inp(path)
+    model, state, drivers = build_model(net)
+    coefficient, _ = pipe_coefficients(net, net.quality)
+    values = torch.stack([coefficient, coefficient * 2.0])
+    diagnostics: dict = {}
+    batch = water_run(model, state, {**drivers, "quality.bulk_coefficient": values},
+                      diagnostics=diagnostics)
+    assert len(diagnostics["quality"]) == 2
+    assert batch.node_quality.shape[0] == 2 and batch.link_quality.shape[0] == 2
+    assert batch.mass_balance.ratio.shape == (2,)
+    for i in range(2):
+        alone = water_run(model, state, {**drivers, "quality.bulk_coefficient": values[i]})
+        assert torch.equal(batch.node_quality[i], alone.node_quality)
+        assert torch.equal(batch.link_quality[i], alone.link_quality)
+        assert torch.equal(batch.mass_balance.final[i], alone.mass_balance.final)
+    assert not torch.equal(batch.node_quality[0], batch.node_quality[1])
+
+    demands = drivers["water.sources"]
+    scaled = torch.stack([demands * 0.8, demands * 1.2])
+    diagnostics = {}
+    batch = water_run(model, state, {**drivers, "water.sources": scaled},
+                      duration=23 * 3600, diagnostics=diagnostics)
+    assert len(diagnostics["quality"]) == 2
+    scale = float(batch.node_quality.abs().max())
+    for i in range(2):
+        alone = water_run(model, state, {**drivers, "water.sources": scaled[i]},
+                          duration=23 * 3600)
+        assert float((batch.node_quality[i] - alone.node_quality).abs().max()) < 1e-8 * scale
+        assert float((batch.link_quality[i] - alone.link_quality).abs().max()) < 1e-8 * scale
+    assert float((batch.node_quality[0] - batch.node_quality[1]).abs().max()) > 1e-3 * scale
