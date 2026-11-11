@@ -196,8 +196,8 @@ Two rules worth stating explicitly, because both produce wrong answers rather th
   and takes its slope from that call by autograd, not from its `dflow` or `jacobian`: in
   every solve, with or without `differentiable`, with or without flow unknowns; in the
   starting guess (the call's value and slope at `dp = 0` replace its `linear_init`) and the
-  storage-ramp fallback; and in the layer's public `flows`, `residual`, `jacobian`,
-  `dflows`, `adjoint` and `linear_init`. A `dp_independent` law is still checked against
+  storage-ramp fallback; and in the layer's public `flows`, `residual`, `balance`,
+  `storage_flows`, `jacobian`, `dflows`, `adjoint` and `linear_init`. A `dp_independent` law is still checked against
   its own `dflow`, but a hook may make its call depend on `dp`, so the slope of that call is
   taken by autograd too, zero where it does not depend on `dp`. The same holds for a
   withdrawal and a storage. A law without either (every library law) keeps its own `flow`,

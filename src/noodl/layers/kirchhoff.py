@@ -103,10 +103,11 @@ def _autograd_slope(fn, z: torch.Tensor) -> torch.Tensor:
 
 
 def _dp_dependence_error(el, i: int) -> RuntimeError:
+    culprit = "flow()" if plain_call(el) else "flow() or a forward hook on it"
     return RuntimeError(
         f"law {i} of kind {el.kind!r} (type {type(el).__name__}) produced a "
         f"flow that does not depend on dp; if that is intended, set "
-        f"dp_independent = True on this law's class, otherwise its flow() is "
+        f"dp_independent = True on this law's class, otherwise its {culprit} is "
         f"dropping the autograd graph (e.g. a stray dp.detach())."
     )
 
@@ -128,10 +129,14 @@ def _dp_independent_slope(i: int, el, dp, drivers) -> torch.Tensor:
     return torch.zeros_like(dp)
 
 
-def _autograd_law_slope(i: int, el, dp, drivers, call) -> torch.Tensor:
-    """Law `i`'s slope by autograd through `call(i, (dp, drivers))`, its flow with the
-    threaded parameters. Whether a missing dependence on `dp` is legitimate is decided ONLY
-    by `el.dp_independent`, a declaration, never inferred from the graph the flow happens to
+def _autograd_law_slope(i: int, el, dp, drivers, call, ctx=None,
+                        create_graph: bool = False) -> torch.Tensor:
+    """Law `i`'s slope by autograd through `call(i, (dp, drivers))` (`(dp, drivers, ctx)`
+    with `ctx`), its flow with the threaded parameters. `create_graph`: the slope keeps
+    the graph of the law's parameters (the public `linear_init`, `_law_tangent`).
+
+    Whether a missing dependence on `dp` is legitimate is decided ONLY by
+    `el.dp_independent`, a declaration, never inferred from the graph the flow happens to
     carry: a flow that lost its graph (a stray `dp.detach()`) would otherwise give an
     exact-zero Jacobian column and a silently wrong adjoint gradient. A law that declares it
     (one whose module call is not its own `flow`: `_law_slopes`) gives zero where its call
@@ -142,13 +147,13 @@ def _autograd_law_slope(i: int, el, dp, drivers, call) -> torch.Tensor:
     # outer no_grad of Newton's forward solve, and `.sum()` under no_grad hands
     # `autograd.grad` an output without a grad_fn even though `flow` carries one.
     with torch.enable_grad():
-        flow = call(i, (dp_slice, drivers))
+        flow = call(i, (dp_slice, drivers) if ctx is None else (dp_slice, drivers, ctx))
         if not flow.requires_grad:
             if independent:
                 return torch.zeros_like(dp_slice.detach())
             raise _dp_dependence_error(el, i)
         try:
-            (grad,) = torch.autograd.grad(flow.sum(), dp_slice, create_graph=False,
+            (grad,) = torch.autograd.grad(flow.sum(), dp_slice, create_graph=create_graph,
                                           allow_unused=independent)
         except RuntimeError as exc:
             raise _dp_dependence_error(el, i) from exc
@@ -1519,19 +1524,32 @@ class KirchhoffLayer(
         `linear_init`; a law that reads the context has none with one, and gives its flow and
         slope at zero in the solve's context `ctx` (`_law_slopes`). With `call`, a law whose
         module call is not its own `flow` (`plain_call`) gives that call's value and slope
-        at zero the same way: its `linear_init` is not the call's."""
+        at zero the same way: its `linear_init` is not the call's.
+
+        Under grad mode (the public `linear_init`, which is differentiable) such a slope,
+        and that of a law that reads the context without its own `jacobian`, is taken with
+        its graph (`_autograd_law_slope` with `create_graph`), as a `linear_init` gives its
+        `k` with its graph. A solve takes the tangent under `no_grad`, without one."""
         hooked = call is not None and not plain_call(el)
         if el._takes_ctx or hooked:
             s, e = self._law_slices[i]
             zero = torch.zeros(e - s, dtype=el._dtype(), device=device)
-            args = ((zero, drivers, self._law_ctx(ctx, s, e)) if el._takes_ctx
-                    else (zero, drivers))
-            if not hooked:
+            lctx = self._law_ctx(ctx, s, e) if el._takes_ctx else None
+            args = (zero, drivers) if lctx is None else (zero, drivers, lctx)
+            graph = torch.is_grad_enabled() and (
+                hooked or type(el).jacobian is ConstitutiveLaw.jacobian)
+            if not (hooked or graph):
                 return el.flow(*args), self._law_slopes(i, el, zero, drivers, ctx)
-            c = call(i, args)
+            c = call(i, args) if hooked else el.flow(*args)
             # the slope per instance of a batch the call's drivers give it, not summed over it
             zero = zero.expand(broadcast_shapes(c.shape, zero.shape))
-            return c, self._law_slopes(i, el, zero, drivers, ctx, call=call)
+            if not graph:
+                return c, self._law_slopes(i, el, zero, drivers, ctx, call=call)
+            if hooked and el.dp_independent:
+                _dp_independent_slope(i, el, zero, drivers)   # the declaration, checked
+            return c, _autograd_law_slope(i, el, zero, drivers,
+                                          call if hooked else (lambda j, a: el.flow(*a)),
+                                          lctx, create_graph=True)
         return el.linear_init(drivers)
 
     def _tangents(self, drivers, ctx: LawContext, device=None, call=None) -> dict:

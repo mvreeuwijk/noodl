@@ -574,6 +574,50 @@ def test_the_linear_guess_of_a_hooked_linear_law_is_the_hooked_root():
                                rtol=1e-12, atol=0)
 
 
+class _CtxConductance(ConstitutiveLaw):
+    """`G dp`, written with a context it does not read: a law that reads the context, with
+    no `jacobian` of its own."""
+
+    def __init__(self, G):
+        super().__init__("conduction")
+        self.G = self._param(torch.tensor([G], dtype=F64), True)
+
+    def flow(self, dp, drivers=None, ctx=None):
+        return self.G * dp
+
+
+@pytest.mark.parametrize("how", ["hooked", "context"])
+def test_the_public_linear_guess_is_differentiable_in_a_tangent_taken_by_autograd(how):
+    """The public `linear_init` keeps the graph of a tangent's slope taken by autograd (a
+    hooked law's, a context law's): the guess `3 / (s G)` at b has `d / d G = -3 / (s G^2)`,
+    as for a plain conductance, whose `linear_init` carries its graph."""
+    if how == "hooked":
+        law = Conductance(torch.tensor([1.0], dtype=F64), kind="conduction", learnable=True)
+        law.register_forward_hook(lambda module, args, out: 2.0 * out)
+        G, scale = law.g, 2.0
+    else:
+        law = _CtxConductance(1.0)
+        G, scale = law.G, 1.0
+    layer = KirchhoffLayer(_net(), "heat", [law], boundary=["a"])
+    guess = layer.linear_init(torch.zeros(1, dtype=F64), {}, HOOKED_SOURCES)
+    assert float(guess[0].detach()) == pytest.approx(3.0 / scale, rel=1e-14)
+    (grad,) = torch.autograd.grad(guess.sum(), G)
+    assert float(grad) == pytest.approx(-3.0 / scale, rel=1e-12)
+    # a solve takes the same tangent without a graph: its root is unchanged
+    phi, _ = layer.solve(torch.zeros(1, dtype=F64), sources=HOOKED_SOURCES,
+                         differentiable=False)
+    assert float(phi[1]) == pytest.approx(3.0 / scale, rel=1e-12)
+
+
+def test_the_dp_dependence_error_names_a_hook_on_a_hooked_law():
+    """A hooked law whose call loses its dependence on `dp` is told the hook may be why."""
+    law = Conductance(torch.tensor([1.0], dtype=F64), kind="conduction")
+    law.register_forward_hook(lambda module, args, out: out.detach())
+    layer = KirchhoffLayer(_net(), "heat", [law], boundary=["a"])
+    with pytest.raises(RuntimeError, match="flow\\(\\) or a forward hook on it is dropping"):
+        layer.dflows(torch.tensor([1.0, 0.0], dtype=F64), {})
+
+
 def test_the_linear_guess_takes_a_hooked_laws_slope_per_instance():
     """A hook that reads a batched driver gives each instance its own tangent: the guess of
     the conductance scaled by `s` is `3 / s` at b, instance by instance."""
