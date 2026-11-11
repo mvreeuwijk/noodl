@@ -340,7 +340,7 @@ def test_an_unrecognised_option_is_recorded_not_dropped():
     net = read_epanet_inp(DATA / "twoloop_si.inp")
     assert "unrecognised_options" in net.notes
     assert "Trials" in net.notes["unrecognised_options"]
-    assert "Quality" in net.notes["unrecognised_options"]
+    assert "Quality" not in net.notes["unrecognised_options"]
 
 
 def test_required_pressure_in_a_us_units_file_is_converted_from_psi(tmp_path):
@@ -774,7 +774,7 @@ def test_the_rule_timestep_follows_the_hydraulic_step_and_is_capped(tmp_path):
 
 def test_unrecognised_times_are_recorded_and_the_tank_minimum_volume_is_read(tmp_path):
     net = _times(tmp_path, "Quality Timestep 0:05\nStatistic NONE")
-    assert net.notes["unrecognised_times"] == "Quality Timestep 0:05; Statistic NONE"
+    assert net.notes["unrecognised_times"] == "Statistic NONE"
     assert "unrecognised_times" not in _times(tmp_path, "Hydraulic Timestep 1").notes
     path = _edit(
         tmp_path, "Net1.inp",

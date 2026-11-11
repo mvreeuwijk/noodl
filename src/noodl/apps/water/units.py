@@ -65,3 +65,16 @@ def rounded_cfs_per_m3s(flow_units: str | None) -> float | None:
     if flow_units is None:
         return None
     return 1.0 / (FLOW_UNITS[flow_units] * EPANET_QCF[flow_units])
+
+#: EPANET's default molecular diffusivity of a chemical in water, ft2/s (`input1.c`,
+#: `setdefaults`: ``DIFFUS = 1.3e-8``), and the same in m2/s. `[OPTIONS] DIFFUSIVITY` is a
+#: multiplier of it when above 1e-4 and the actual value otherwise (`adjustdata`).
+DIFFUSIVITY_FT2 = 1.3e-8
+DIFFUSIVITY_M2 = DIFFUSIVITY_FT2 * M_PER_FT**2
+
+#: EPANET's stagnation flow, cfs (`quality.c`, ``Q_STAGNANT = 0.005 / 448.831``): a link
+#: flowing less is taken to be stagnant by the quality's flow-reversal test.
+Q_STAGNANT_CFS = 0.005 / 448.831
+
+#: Litres per cubic metre, for a chemical's concentration (mass per litre) against volumes in m3.
+LITRES_PER_M3 = 1000.0

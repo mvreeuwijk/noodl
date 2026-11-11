@@ -20,12 +20,38 @@ reads `12 am`, `6:30 PM` and `18`).
 EPANET caps it), `PATTERN TIMESTEP` and `PATTERN START` (the pattern period
 `(t + PATTERN START) / PATTERN TIMESTEP`), `REPORT TIMESTEP` and `REPORT START` (the report
 times), `RULE TIMESTEP` (a tenth of the hydraulic step unless given) and `START CLOCKTIME` (for
-`AT CLOCKTIME` controls and `CLOCKTIME` premises). `QUALITY TIMESTEP` and `STATISTIC` are read
-past and change nothing (`net.notes["unrecognised_times"]`).
+`AT CLOCKTIME` controls and `CLOCKTIME` premises). `STATISTIC` is read past and
+changes nothing (`net.notes["unrecognised_times"]`); `QUALITY TIMESTEP` goes to
+`WaterNetwork.quality` (below).
 
 **Ignored** because nothing in the hydraulics references them: `[TITLE]`, `[REPORT]`,
-`[COORDINATES]`, `[VERTICES]`, `[LABELS]`, `[BACKDROP]`, `[TAGS]`, `[END]`, and the
-quality sections (a quality run is configured through `build_model(quality=...)` instead).
+`[COORDINATES]`, `[VERTICES]`, `[LABELS]`, `[BACKDROP]`, `[TAGS]` and `[END]`.
+
+**Water quality** is read, in full, into `WaterNetwork.quality` (a `WaterQuality`; always set by
+the reader, mode `NONE` when the file has none) in SI: `[QUALITY]`, `[SOURCES]`, `[REACTIONS]`,
+`[MIXING]`, `[OPTIONS] QUALITY` (`NONE`, `CHEMICAL`, `AGE`, `TRACE <node>`, and EPANET's
+"any other word [units]", a chemical so named: `Chlorine mg/L`), `DIFFUSIVITY`, `TOLERANCE`, and
+`[TIMES] QUALITY TIMESTEP`. Keywords are recognised as EPANET's `match` does (case-insensitive,
+the token begins with the keyword: `chem` is `CHEMICAL`), and a later line overrides an earlier.
+`QUALITY CHEMICAL ug/L` keeps the chemical `Chemical` in `mg/L` (EPANET ignores the word that
+follows). The range forms `id1 id2 value` of `[QUALITY]` and of `[REACTIONS] BULK|WALL|TANK` are
+numeric when the C `atol` of both ids is positive (`10x` reads as 10) and in `strcmp` order
+otherwise; a legacy 3-token `[SOURCES]` line is a `CONCEN` source and `*` is no pattern; a
+`[MIXING]` fraction of 0 means 1. Units: bulk and tank coefficients per day to per second; a
+wall coefficient of order 1 is length per day (feet in a US file) to m/s, of order 0 mass per
+area per day (ft² to m²) to per second, whatever the order line's position; the roughness
+correlation likewise; a `DIFFUSIVITY` above 1e-4 multiplies water's own, anything else is the
+value in m²/s (ft²/s in a US file); a `MASS` source is mass per minute to per second;
+`QUALITY TIMESTEP 0` is EPANET's default (a tenth of the hydraulic step, `None`).
+`WaterQuality.node_order` and `link_order` carry EPANET's own node and link indices.
+
+*Refused by name:* `ORDER WALL` other than 0 or 1, `GLOBAL TANK` (EPANET error 213), `QUALITY
+TRACE` without a node or with an unknown one (212), a negative initial quality (209), an unknown
+mixing model or source type, a negative `TOLERANCE` or `DIFFUSIVITY`, an unknown reaction
+keyword, and a node, link or pattern that is not in the network (EPANET skips or refuses these;
+the reader refuses). *Skipped as EPANET does, and recorded in `net.notes["ignored_quality"]`:*
+a `[MIXING]` line on a junction or a reservoir, a `TANK` coefficient on a junction, a `BULK` or
+`WALL` coefficient on a pump or valve, and a line too short to mean anything.
 
 **Aggregated / interpreted:** several `[DEMANDS]` categories of one junction add up (they replace
 the `[JUNCTIONS]` demand); categories with different patterns are refused (a category with no pattern uses the default pattern, so it equals one naming that default explicitly), since one demand pattern

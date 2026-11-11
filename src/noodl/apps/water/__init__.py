@@ -53,6 +53,7 @@ from noodl.apps.water.network import (
     water_steady,
     water_step,
 )
+from noodl.apps.water.quality_data import QualitySource, WaterQuality
 from noodl.apps.water.report import link_table, pressure_head, to_kilopascal
 from noodl.apps.water.rules import evaluate_rules, take_actions
 from noodl.apps.water.simulate import WaterResults, pattern_factor, water_run
@@ -71,11 +72,11 @@ __all__ = [
     "PressureSustainingValve",
     "Junction", "LinkData",
     "MinorLoss", "PiecewisePumpCurve", "Premise", "PressureDrivenDemand", "Pump", "PumpCurve",
-    "PumpEnergy",
+    "PumpEnergy", "QualitySource",
     "Reservoir", "Rule", "ShutLinks",
     "Tank",
     "TankLevels", "TankVolumeCurve", "ThrottleValve", "Valve", "WaterNetwork", "WaterOptions",
-    "WaterPipe", "WaterResults",
+    "WaterPipe", "WaterQuality", "WaterResults",
     "apply_rules", "build_model", "initial_drivers", "initial_state", "link_states",
     "link_table", "pressure_head",
     "composite_friction_factor", "evaluate_rules", "pattern_factor", "power_curve",
