@@ -158,6 +158,11 @@ class Storage(Node):
         """This day's parameters by name: ``capacity``, ``area`` and ``datum`` reach the tank;
         the class's own parameters (``parameter_defaults``) are read by name."""
         super().bind(parameters)
+        pct = self.params.get("infiltration_pct")
+        if pct is not None and bool((pct < 0).any()):
+            raise ValueError(
+                f"node {self.name!r}: infiltration_pct is negative (storage.py:236 takes a root)"
+            )
         for tank in self._tanks():
             for name in ("capacity", "area", "datum"):
                 if name in self.params:
@@ -411,7 +416,8 @@ class QueueGroundwater(Storage):
 
         WSIMOD walks the queue dict in insertion order; the slots are walked in ascending time,
         and a slot absent from WSIMOD's key set (``present``) is skipped. The two orders agree
-        for a time-area whose keys are contiguous and entered in ascending order.
+        for a time-area whose keys are entered in ascending order (the queue starts as {0, 1},
+        ``arcs.py:567``, so gaps are harmless; only an order such as {3: ..., 2: ...} could differ).
         """
         p, ctx, tank = self.p, self.ctx, self.tank
         active = torch.as_tensor(active, dtype=torch.bool)

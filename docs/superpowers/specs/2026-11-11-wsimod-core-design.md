@@ -741,8 +741,9 @@ marked W4.
     `max(capacity − initial storage, 0)` for ever, whatever has been pushed in. Reproduced
     (`check_tank`); the pull handlers are rebound (`:297-298`).
   - `pull_set_active` walks the queue dict in insertion order. noodl walks the slots in
-    ascending time, which is the same order for a time-area whose keys are contiguous from 0
-    and entered in ascending order.
+    ascending time, which is the same order for a time-area whose keys are entered in
+    ascending order. The queue starts as {0, 1} (`arcs.py:567`), so gaps are harmless; only an
+    order such as {3: …, 2: …} could differ.
   - `pull_check_active` reports `active_storage` (`:370-384`). `pull_set_active` instead pulls
     from **total** storage, pro rata over every queue slot and the active store
     (`:386-433`). That inconsistency, which WSIMOD marks with a TODO, is transcribed.

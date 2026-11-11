@@ -264,8 +264,8 @@ def test_a_spill_is_forced_back_into_the_reservoir():
 
 
 def test_a_reservoir_above_capacity_is_never_clamped():
-    """Review Focus 4: a tank started above its capacity has no excess, so nothing is requested
-    and the storage stays."""
+    """Review Focus 4: a tank started above its capacity has no excess, so WSIMOD still issues
+    one pull request, of volume 0 (``storage.py:985``), and the storage stays."""
     res = make("Reservoir", capacity=10.0, initial_storage=12.0)
     supply = scripted("from_supply", [call("from_supply", "send_pull_request", 0.0, 0.0)])
     res.connect(supply, "in")
@@ -493,3 +493,10 @@ def test_the_river_reservoir_gradient_reaches_the_environmental_flow():
     assert float(rr.tank.storage[0].detach()) == 3.0
     rr.tank.storage[0].backward()
     assert float(flow.grad) == -1.0
+
+
+def test_a_negative_bound_infiltration_pct_is_refused_by_name():
+    gw = make("Groundwater")
+    gw.bind({"infiltration_pct": torch.tensor([0.1, 0.0])})
+    with pytest.raises(ValueError, match=r"node 'n'.*infiltration_pct is negative"):
+        gw.bind({"infiltration_pct": torch.tensor([0.1, -0.2])})
