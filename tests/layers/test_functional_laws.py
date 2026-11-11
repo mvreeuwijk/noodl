@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import pytest
 import torch
 
 from noodl.layers._functional import FunctionalLaws
-from tests.layers.test_kirchhoff_solve_policy import _classic
+from tests.layers.test_kirchhoff_solve_policy import _classic, _phasor
 
 
 def test_residual_and_operator_match_the_layer():
@@ -34,3 +35,13 @@ def test_residual_is_differentiable_in_the_driver():
     x = torch.tensor([3.0, 1.0], dtype=torch.float64)
     fn.residual_fn(x, *fn.all_params).sum().backward()
     assert leaf.grad is not None
+
+
+def test_a_phasor_layer_without_a_step_is_refused_by_name():
+    """The laws of a phasor layer read the angular frequency from the step's context; with
+    no step they would get none, so the construction is refused rather than run silently
+    without it."""
+    layer, call = _phasor()
+    (phi_b, drivers, sources, _), _, _ = call(False)
+    with pytest.raises(ValueError, match=r"KirchhoffLayer 'e' is a phasor layer.*step"):
+        FunctionalLaws(layer, drivers, sources, phi_b)

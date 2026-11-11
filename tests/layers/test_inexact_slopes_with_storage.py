@@ -1,4 +1,4 @@
-"""`exact_slope` on laws and on node storage together, on the classic and the MNA path.
+"""`exact_slope` on laws and on node storage together, on the classic and the flow-unknowns paths.
 
 A law whose `dflow` is a Newton aid and a storage whose `rate_slope` is one (3x the true
 slope), both declaring `exact_slope = False`, on one layer: the differentiable step solve
@@ -58,9 +58,10 @@ def _net(edges):
 
 def _layer(path: str, aided: bool, law_exact: bool = False, storage_exact: bool = False):
     """`(layer, law, storage)`: g -(r)- a -(load)- b -(r2)- g with storage at a and b on the
-    classic path; on the MNA path an ideal source g -> a makes it an MNA layer, with storage at
-    b. `aided` swaps in the Newton-aid law (on "load") and storage, with the given
-    `exact_slope` declarations (a wrong declaration corrupts the gradients)."""
+    classic path; on the flow-unknowns path an ideal source g -> a gives the layer flow
+    unknowns, with storage at b. `aided` swaps in the Newton-aid law (on "load") and
+    storage, with the given `exact_slope` declarations (a wrong declaration corrupts the
+    gradients)."""
     law_cls = _AidedPowerLaw if aided else PowerLaw
     st_cls = _AidedStorage if aided else LinearStorage
     load = law_cls(_t([0.3]), _t(0.8), kind="load", dp_transition=1e-6, learnable=True)

@@ -287,10 +287,10 @@ def test_a_solve_nothing_differentiable_reaches_is_the_primal_solve(network, mon
         assert diag_d["newton_iterations"] == diag_p["newton_iterations"], key
 
 
-# ---------------------------------------------------------------------------- MNA twin
+# ---------------------------------------------------------------------------- flow-unknowns twin
 def _mna_aided(exact: bool):
     """A prescribed potential in series with a power law and an aided power-law load: the
-    ideal source makes the layer an MNA one."""
+    ideal source gives the layer flow unknowns."""
     from tests._circuit_laws import Source
 
     net = _net(["g", "a", "b"], [("a", "g", "source"), ("a", "b", "r"), ("b", "g", "load")])
@@ -312,7 +312,7 @@ def test_mna_a_newton_aid_declared_inexact_keeps_correct_gradients():
 
 
 def test_mna_a_newton_aid_declared_exact_corrupts_the_gradient():
-    """The gate matters on the MNA path too: claiming `exact_slope` hands the adjoint the
+    """The gate matters on the flow-unknowns path too: claiming `exact_slope` hands the adjoint the
     aid's doubled slope."""
     layer, aided = _mna_aided(True)
     phi_b, sources = _t([0.0]), _t([0.0, 0.2, -0.1])

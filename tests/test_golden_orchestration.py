@@ -554,7 +554,7 @@ def case_integrating_closure_iterate():
     return record(out, diag, grads_of(out["gas.x"].sum() + out["acc.v"], params))
 
 
-# ---- MNA layers (dynamic and phasor)
+# ---- layers with flow unknowns (dynamic and phasor)
 
 
 def _mna_net(nodes, edges):

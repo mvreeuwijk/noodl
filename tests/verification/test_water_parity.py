@@ -1292,7 +1292,7 @@ def test_pressure_breaker_and_general_purpose_valves(tmp_path, edits):
 
 
 def test_gradient_through_a_valve_network_against_central_differences(tmp_path):
-    """d(sum of junction heads)/d(demands) on the GPV network: the MNA layer's implicit
+    """d(sum of junction heads)/d(demands) on the GPV network: the layer's implicit
     adjoint against central differences, `max|analytic - fd| <= 1e-6 max|fd|`."""
     path, _ = _epanet(tmp_path, "twoloop_si.inp", edits=_GPV)
     model, state, drivers = build_model(read_epanet_inp(path))

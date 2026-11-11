@@ -106,6 +106,7 @@ Constitutive laws are grouped below by the physics they express, as in
 ::: noodl.layers.kirchhoff
     options:
       members: [KirchhoffLayer]
+      merge_init_into_class: true
 
 ::: noodl.layers.transport
     options:

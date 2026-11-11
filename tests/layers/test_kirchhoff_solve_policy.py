@@ -2,9 +2,10 @@
 
 The policy (how `on_failure`, `differentiable`, `diagnostics=` and whether
 anything differentiable reaches the solve combine) is implemented separately for the classic
-(nodal Newton) path and the MNA path (real and phasor). This file runs the full matrix on one
-small nonlinear layer of each kind, with and without a forced non-convergence, and compares
-what comes back with `tests/golden/orchestration.json["solve_policy"]`, generated on the
+(nodal Newton) path and the flow-unknowns path (real and phasor). This file runs the
+full matrix on one small nonlinear layer of each kind, with and without a forced
+non-convergence, and compares what comes back with
+`tests/golden/orchestration.json["solve_policy"]`, generated on the
 unrefactored code by `benchmarks/regenerate_orchestration_golden.py`.
 
 Per combination the record is the exception type and the first 80 characters of its message,
@@ -74,7 +75,8 @@ def _classic():
 
 
 def _mna():
-    """A potential source in series with a nonlinear conductance and a cubic load (MNA)."""
+    """A potential source in series with a nonlinear conductance and a cubic
+    load (flow unknowns)."""
     net = _net(["g", "a", "b"], [("a", "g", "source"), ("a", "b", "r"), ("b", "g", "load")])
     layer = KirchhoffLayer(
         net, "e", [Source(torch.tensor([1.0], dtype=F64)),

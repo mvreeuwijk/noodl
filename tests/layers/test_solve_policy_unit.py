@@ -1,5 +1,5 @@
 """Unit tests of `noodl.layers._solve_policy`, called on `resolve` directly, on a fast-path
-layer (`_classic`) and on a layer with flow unknowns (`_mna`)."""
+layer (`_classic`) and on a layer with flow unknowns (`_mna`, flow unknowns)."""
 
 from __future__ import annotations
 
