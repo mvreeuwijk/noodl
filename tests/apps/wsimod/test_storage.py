@@ -839,3 +839,46 @@ def test_the_stepped_river_chain_equals_wsimod_day_by_day(quantity_only):
             assert float(ours[0]) == float(reference.tank_storage[day_, row]), (day_, name)
             for k, column in enumerate(columns):
                 assert float(ours[1 + k]) == float(reference.tank_quality[day_, row, column])
+
+
+def test_the_river_pull_gradient_is_finite_clipped_and_masked():
+    """Three rivers pulled through an upstream arc: 0 is in the differentiable range of
+    ``max(V + upstream - mrf / riverrc, 0)``, 1 sits on the clip at 0 (constant), 2 is inactive."""
+    node = river(initial_storage=3.0, length=17280.0, velocity=17280.0, damp=0.5)
+    upstream = StoreNode("up", P, storage=5.0, wsimod_type="River")
+    pipe = arc("up_pipe", upstream, node)
+    day(node, upstream, pipe, shape=(3,))
+    mrf = torch.tensor([2.0, 100.0, 2.0], dtype=torch.float64, requires_grad=True)
+    damp = torch.tensor([0.5, 0.5, 0.5], dtype=torch.float64, requires_grad=True)
+    node.bind({"mrf": mrf, "damp": damp})
+    active = torch.tensor([True, True, False])
+    reply = node.pull_set(vol(6.0), active=active)
+    held = node.tank.storage[..., 0] + upstream.storage[..., 0]
+    assert held[2].item() == 8.0  # the inactive instance is unchanged
+    assert node.tank.storage[2, 0].item() == 3.0 and upstream.storage[2, 0].item() == 5.0
+    assert reply[1, 0].item() == 0.0  # mrf / riverrc exceeds everything: the clip at 0
+    held.sum().backward()
+    for grad in (mrf.grad, damp.grad):
+        assert torch.isfinite(grad).all()
+    assert mrf.grad[0].item() != 0.0 and damp.grad[0].item() != 0.0
+    # the clipped and the inactive instances take no gradient
+    assert mrf.grad[1].item() == 0.0 and mrf.grad[2].item() == 0.0
+    assert damp.grad[1].item() == 0.0 and damp.grad[2].item() == 0.0
+
+
+def test_the_river_distribute_gradient_of_the_arc_flow():
+    """The flow alone: tank plus flow is conserved, so its gradient would be 0."""
+    node = river(initial_storage=40.0, length=17280.0, velocity=17280.0)
+    sea = Waste(NodeSpec("sea", "Waste", "Waste", {}), P)
+    pipe = arc("out", node, sea)
+    day(node, sea, pipe, shape=(3,))
+    damp = torch.tensor([0.2, 0.5, 0.9], dtype=torch.float64, requires_grad=True)
+    node.bind({"damp": damp})
+    node.distribute(active=torch.tensor([True, True, False]))
+    assert pipe.flow_in[2].item() == 0.0
+    pipe.flow_in.sum().backward()
+    assert torch.isfinite(damp.grad).all()
+    for i, d in enumerate((0.2, 0.5)):  # flow = 40 x riverrc(damp), d riverrc / d kt at kt = d
+        e = math.exp(-1 / d)
+        assert damp.grad[i].item() == pytest.approx(40.0 * (-1 + e + e / d), rel=1e-12)
+    assert damp.grad[2].item() == 0.0

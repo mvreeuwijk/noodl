@@ -33,9 +33,11 @@ def river_order(network: WsimodNetwork) -> list[str]:
     The arcs with both ends of WSIMOD type River, Node, Waste or Reservoir give every ``Waste``
     node upstreamness 0 and each layer upstream of it one more; a node keeps the first (lowest)
     value it gets. Only nodes under the type key ``"River"`` enter, and a river no river path
-    links to a ``Waste`` is left out. WSIMOD breaks ties by set hash order; this breaks them by
-    configuration order (spec, W13). River arcs without any ``Waste`` raise ``ValueError``
-    (``max([])``, ``model.py:799``).
+    links to a ``Waste`` is left out. WSIMOD breaks ties within a level by the set-hash order of
+    the node names (``model.py:780-807``), which varies with ``PYTHONHASHSEED``, so there is no
+    fixed order to copy; this breaks them by configuration order (spec, W13). ``river_chain``'s
+    ties sit on independent chains, so no value depends on that order.
+    River arcs without any ``Waste`` raise ``ValueError`` (``max([])``, ``model.py:799``).
     """
     types = {n.name: NODE_SCHEMAS[n.cls].renamed_type for n in network.nodes}
     arcs = [
