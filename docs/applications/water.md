@@ -190,6 +190,12 @@ A batched run routes each instance on its own. The steady tracer (a model built 
 `build_model(quality=...)`) is a different thing, a steady layer of the model; `water_run`
 refuses it by name ("steady tracer") when EPANET's quality runs, so give `quality=False`.
 
+This default changes what an existing call does on a file with a quality mode: `water_run(model)`
+now also routes the quality (on Net1, 0.84 s more for 24 h), runs it attached when the run is
+`differentiable=True` (its graph grows with the quality steps, see Differentiability below),
+refuses the steady tracer, and refuses a quality step under one second. `quality=False` restores
+the hydraulics-only run.
+
 The results are kept at the report times, `REPORT START` and every `REPORT TIMESTEP` after it
 to the duration, as EPANET writes them: each the solve at that time (a tank's level is its
 level at the step's start, the flows are those of the step that starts there).
