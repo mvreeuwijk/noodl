@@ -4,10 +4,12 @@ read by `read_epanet_inp`.
 `test_network_matches_epanet` runs Net3 (168 h), Net6 (96 h), ky4 and ky10 (DURATION 0, one
 steady solve) and the edited Anytown (24 h, `_anytown`, Ruling 21) for their full DURATION
 against EPANET 2.2 (`wntr` 1.5.0): heads, tank levels, flows and link states at every report
-time, and the pump energy section. The bounds are the whole-network ones of the plan: heads
-1e-5 relative (to `max(|H|, 1 m)`), tank levels 2e-4 m; flows 1e-6 m3/s; states equal; the
-energy 1e-5 relative. A network that misses one carries its own bound with the measured cause
-in `_NETWORKS`.
+time, and the pump energy section; `test_ky_extended_period_hydraulics_match_epanet` runs
+ky4 and ky10 for 24 h (the quality's period), where ky10 misses from 6:54:59 for a cause
+`test_ky10_divergence_is_epanets_dead_headed_constant_power_pump` shows. The bounds are
+the whole-network ones of the plan: heads 1e-5 relative (to `max(|H|, 1 m)`), tank levels
+2e-4 m; flows 1e-6 m3/s; states equal; the energy 1e-5 relative. A network that misses one
+carries its own bound with the measured cause in `_NETWORKS`.
 
 EPANET runs through its toolkit on the file itself (`epanet_results`) at a true
 `ACCURACY 1e-7` (TRIALS 400) on every network, not at the files' 1e-3 or 1e-4: EPANET stops
@@ -119,11 +121,11 @@ _NETWORKS = {
 }
 
 
-def _epanet(path, warnings=()):
-    """EPANET at ACCURACY 1e-7, TRIALS 400 (`epanet_results`, permitting `warnings`):
-    `(results, energy section, demand charge)`."""
+def _epanet(path, warnings=(), trials=None):
+    """EPANET at ACCURACY 1e-7, TRIALS 400 or `trials` (`epanet_results`, permitting
+    `warnings`): `(results, energy section, demand charge)`."""
     reader = _EnergyBin()
-    results = epanet_results(path, reader=reader, warnings=warnings)
+    results = epanet_results(path, reader=reader, warnings=warnings, trials=trials)
     return results, reader.energy, float(reader.peak_energy[0])
 
 
@@ -142,6 +144,44 @@ def _worst_energy(net, energy, theirs, demand):
     return max(worst, abs(float(energy.demand_charge) - demand) / (abs(demand) or 1.0))
 
 
+def _hydraulic_differences(path, results, *, duration=None, skip_nodes=()):
+    """noodl (`water_run(quality=False)` on `path`, for `duration` s or the file's) against
+    EPANET's `results` at every report time noodl gives: `(model, run, differences)`,
+    `differences` the worst head (relative to `max(|H|, 1 m)`, the nodes `skip_nodes` left
+    out), tank level (m) and flow (m3/s), each `(value, time s, element)`, and the
+    `(time, link)` pairs whose states differ."""
+    net = read_epanet_inp(path)
+    model, _, _ = build_model(net)
+    run = water_run(model, quality=False, duration=duration)
+    names, links = model.node_names, model.link_names
+    rows = len(run.time)
+    assert run.time.tolist() == [float(t) for t in results.node["head"].index[:rows]]
+
+    def worst(diff, labels):
+        k = int(diff.argmax())
+        t, j = divmod(k, diff.shape[1])
+        return float(diff.flatten()[k]), float(run.time[t]), labels[j]
+
+    heads = torch.tensor(results.node["head"][names].to_numpy()[:rows], dtype=F64)
+    relative = (run.head - heads).abs() / heads.abs().clamp(min=1.0)
+    relative[:, [names.index(n) for n in skip_nodes]] = 0.0
+    differences = {"heads": worst(relative, names)}
+    if net.tanks:
+        level = torch.stack([heads[:, names.index(t.name)] - t.elevation for t in net.tanks],
+                            dim=1)
+        differences["levels"] = worst((run.tank_level - level).abs(),
+                                      [t.name for t in net.tanks])
+    else:
+        differences["levels"] = (0.0, 0.0, None)
+    flows = torch.tensor(results.link["flowrate"][links].to_numpy()[:rows], dtype=F64)
+    differences["flows"] = worst((run.flow - flows).abs(), links)
+    status = torch.tensor(results.link["status"][links].to_numpy()[:rows]).to(run.status.dtype)
+    differences["states"] = [(float(run.time[t]), links[j])
+                             for t, j in (run.status != status).nonzero()]
+    assert not math.isnan(sum(differences[q][0] for q in ("heads", "levels", "flows")))
+    return model, run, differences
+
+
 @pytest.mark.slow
 @pytest.mark.parametrize("name", list(_NETWORKS))
 def test_network_matches_epanet(tmp_path, name):
@@ -150,27 +190,131 @@ def test_network_matches_epanet(tmp_path, name):
     case = _NETWORKS[name]
     path = case["path"](tmp_path)
     results, theirs, demand = _epanet(path, case.get("warnings", ()))
-    net = read_epanet_inp(path)
-    model, _, _ = build_model(net)
-    run = water_run(model, quality=False)
-    names, links = model.node_names, model.link_names
-    assert run.time.tolist() == [float(t) for t in results.node["head"].index]
-    heads = torch.tensor(results.node["head"][names].to_numpy(), dtype=F64)
-    worst_h = float(((run.head - heads).abs() / heads.abs().clamp(min=1.0)).max())
-    worst_l = max((float((run.tank_level[:, k] - (heads[:, names.index(t.name)]
-                                                 - t.elevation)).abs().max())
-                   for k, t in enumerate(net.tanks)), default=0.0)
-    flows = torch.tensor(results.link["flowrate"][links].to_numpy(), dtype=F64)
-    worst_q = float((run.flow - flows).abs().max())
-    status = torch.tensor(results.link["status"][links].to_numpy()).to(run.status.dtype)
-    mismatched = [(float(run.time[t]), links[j]) for t, j in (run.status != status).nonzero()]
-    worst_e = _worst_energy(net, run.energy, theirs, demand)
-    assert not math.isnan(worst_h + worst_l + worst_q + worst_e)
-    assert not mismatched, mismatched
-    assert worst_h < case.get("heads", 1e-5), worst_h
-    assert worst_l < case.get("levels", 2e-4), worst_l
-    assert worst_q < case.get("flows", 1e-6), worst_q
+    model, run, differences = _hydraulic_differences(path, results)
+    worst_e = _worst_energy(model.water_network, run.energy, theirs, demand)
+    assert not math.isnan(worst_e)
+    assert not differences["states"], differences["states"]
+    assert differences["heads"][0] < case.get("heads", 1e-5), differences["heads"]
+    assert differences["levels"][0] < case.get("levels", 2e-4), differences["levels"]
+    assert differences["flows"][0] < case.get("flows", 1e-6), differences["flows"]
     assert worst_e < case.get("energy", 1e-5), worst_e
+
+
+def _ky_24h(tmp_path, name):
+    """ky4 or ky10 as `wntr` ships it (DURATION 0) with its `[TIMES] Duration` set to
+    24:00 and nothing else changed."""
+    text = _LIBRARY.joinpath(f"{name}.inp").read_text()
+    line = " Duration           \t0\n"
+    assert text.count(line) == 1
+    path = tmp_path / f"{name}-24h.inp"
+    path.write_text(text.replace(line, " Duration           \t24:00\n"))
+    return path
+
+
+#: EPANET's settings for the 24 h ky4 and ky10 (`_ky_24h`). ky10: TRIALS 5000, since at
+#: TRIALS 400 EPANET (ACCURACY 1e-7) exceeds its trials at 3:29:28 and is unbalanced at
+#: 3:58:15 (warnings 2 and 1), balanced at 5000 after 410 and 437 trials (MEASURED; at 1e-6
+#: and 1e-5 with 400 trials it needs 8 and 7); its warning 6, negative pressures at 20:52:41
+#: and 21:00, is the network's state.
+_KY_EPANET = {"ky4": {}, "ky10": dict(trials=5000, warnings=(6,))}
+
+#: ky10 from 6:54:59 (24899 s), the cause `test_ky10_divergence_is_epanets_dead_headed_
+#: constant_power_pump` shows. MEASURED over the 24 h (EPANET at 1e-7, TRIALS 5000; within
+#: 0.1 % of these at 1e-6 and 1e-5): heads 5.016 relative (O-Pump-10 at 7 h, 1659.8 m against
+#: 275.9 m), levels 0.422 m (T-9, 12 h), flows 2.33e-2 m3/s (P-948, 12 h), states differing
+#: at 7-10 h (P-75, ~@RV-5) and 15 h (P-5); every report time before 7 h within the bounds.
+_KY10_EXTENDED = (
+    "ky10 24 h: from 6:54:59 EPANET's iteration dead-heads the constant-power pump "
+    "~@Pump-10 (its flow halved to 6e-72 GPM, CV P-75 and PRV ~@RV-5 closed) where "
+    "noodl's pump runs at 5.4e-4 m3/s and 1396 m (ConstantPowerPump's tangent "
+    "below EPANET's CBIG slope); MEASURED heads 5.016 relative (O-Pump-10, 7 h), "
+    "levels 0.422 m (T-9, 12 h), flows 2.33e-2 m3/s (P-948, 12 h), states at 7-10 h and "
+    "15 h; 0-6 h within the bounds")
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("name", [
+    "ky4", pytest.param("ky10", marks=pytest.mark.xfail(strict=True, reason=_KY10_EXTENDED))])
+def test_ky_extended_period_hydraulics_match_epanet(tmp_path, name):
+    """ky4 (TRACE) and ky10 (AGE) ship with DURATION 0; their quality runs a 24 h period,
+    whose hydraulics this compares with EPANET's at every report time (`_ky_24h`, EPANET as
+    `_KY_EPANET`): heads 1e-5 relative, tank levels 2e-4 m, flows 1e-6 m3/s on every link,
+    states equal. MEASURED, ky4: heads 1.13e-7 (J-483, 16 h), levels 2.57e-5 m (T-3, 16 h),
+    flows 2.55e-7 m3/s (P-625 at 0 h; 1.9e-6 with EPANET at 1e-5), states equal. ky10
+    misses from 7 h (`_KY10_EXTENDED`)."""
+    path = _ky_24h(tmp_path, name)
+    results, _, _ = _epanet(path, **_KY_EPANET[name])
+    _, run, differences = _hydraulic_differences(path, results)
+    assert run.time.tolist() == [3600.0 * k for k in range(25)]
+    assert not differences["states"], differences["states"]
+    assert differences["heads"][0] < 1e-5, differences
+    assert differences["levels"][0] < 2e-4, differences
+    assert differences["flows"][0] < 1e-6, differences
+
+
+#: ky10's dead-ended branch: J-702 -P-208- I-Pump-10 -~@Pump-10 (POWER 10 hp)- O-Pump-10
+#: -P-22- I-RV-5 -~@RV-5 (PRV, 150 psi)- O-RV-5 -P-75 (CV)- J-11; the nodes between the
+#: pump and the check valve, which no open link joins to a reservoir or tank once all three
+#: shut.
+_KY10_ISLAND = ("O-Pump-10", "I-RV-5", "O-RV-5")
+
+
+@pytest.mark.slow
+def test_ky10_divergence_is_epanets_dead_headed_constant_power_pump(tmp_path):
+    """The cause of ky10's 24 h miss (`_KY10_EXTENDED`), checked. At 6:54:59 (24899 s, a
+    step both take) ~@Pump-8 shuts on T-13's control and J-11's head rises past ~@RV-5's
+    setting; EPANET closes the check valve P-75 and the PRV, which leaves the constant-power
+    ~@Pump-10 pumping into a dead end. EPANET's `pumpcoeff` (`hydcoeffs.c`) caps a CONST_HP
+    pump's slope at CBIG, its line there `hloss = -CBIG q` a head gain that vanishes with the
+    flow, and `newflows` (`hydsolver.c`) halves a CONST_HP flow whose change would turn it
+    negative: the pump's flow goes to zero (MEASURED, `EN_FLOW`: 2.3e-24 GPM at 24899 s,
+    6.3e-72 at 25200 s, the pump OPEN throughout) and it acts as a closed link until the
+    valves reopen at 10:40:29 (38429 s). noodl's `ConstantPowerPump` continues its curve by
+    its tangent below that slope (a law, not an iteration), so its pump keeps the PRV
+    active: 5.4e-4 m3/s at 1396 m of head at 7 h, O-Pump-10 at 1659.8 m.
+
+    Checked here: (1) to 6 h noodl and EPANET agree within the bounds (states equal); (2)
+    at 7-10 h EPANET's pump carries no flow while OPEN, noodl's 5.4e-4 to 2.0e-3 m3/s at
+    388 to 1396 m of head; (3) with ~@Pump-10 closed AT TIME 6:54:59 (noodl's file only) noodl
+    takes EPANET's steps (26515, 30365, 33647 s, which the unedited run takes a few seconds
+    later) and its heads, levels, flows and states to 10 h are EPANET's within the bounds
+    (MEASURED: heads 5.0e-7, levels 3.1e-5 m, flows 9.0e-8 m3/s), but for the pump's own
+    state and the heads of the three nodes the closed links cut off (`_KY10_ISLAND`), for
+    which EPANET's 1 / CBIG conductances give 275.91, 275.91 and 288.33 m at 7 h and noodl's
+    limit 282.21 m for all three, the PRV's dead end tied to its inlet (2.3e-2 relative)."""
+    path = _ky_24h(tmp_path, "ky10")
+    results, _, _ = _epanet(path, **_KY_EPANET["ky10"])
+    _, run, differences = _hydraulic_differences(path, results, duration=6 * 3600.0)
+    assert not differences["states"], differences["states"]
+    assert differences["heads"][0] < 1e-5, differences
+    assert differences["levels"][0] < 2e-4, differences
+    assert differences["flows"][0] < 1e-6, differences
+
+    model, run, before = _hydraulic_differences(path, results, duration=10 * 3600.0)
+    assert {link for t, link in before["states"]} == {"P-75", "~@RV-5"}
+    names, links = model.node_names, model.link_names
+    pump = links.index("~@Pump-10")
+    gain = run.head[:, names.index("O-Pump-10")] - run.head[:, names.index("I-Pump-10")]
+    theirs = results.link["flowrate"]["~@Pump-10"].to_numpy()
+    status = results.link["status"]["~@Pump-10"].to_numpy()
+    for hour in range(7, 11):
+        assert abs(theirs[hour]) < 1e-30, theirs[hour]
+        assert int(status[hour]) == int(run.status[hour, pump])
+        assert float(run.flow[hour, pump]) > 5e-4 and float(gain[hour]) > 300.0
+    text = path.read_text()
+    assert text.count("[CONTROLS]\n") == 1
+    forced = tmp_path / "ky10-24h-pump-10-closed.inp"
+    forced.write_text(text.replace(
+        "[CONTROLS]\n", "[CONTROLS]\nLINK ~@Pump-10 CLOSED AT TIME 6:54:59\n"))
+    _, run, differences = _hydraulic_differences(forced, results, duration=10 * 3600.0,
+                                                 skip_nodes=_KY10_ISLAND)
+    assert differences["states"] == [(3600.0 * h, "~@Pump-10") for h in range(7, 11)]
+    assert differences["heads"][0] < 1e-5, differences
+    assert differences["levels"][0] < 2e-4, differences
+    assert differences["flows"][0] < 1e-6, differences
+    island = [names.index(n) for n in _KY10_ISLAND]
+    heads = torch.tensor(results.node["head"][names].to_numpy()[:11], dtype=F64)
+    assert float(((run.head - heads)[7:, island].abs() / heads[7:, island]).max()) < 3e-2
 
 
 #: Anytown's tank pipes and the junction each joins its tank to.
