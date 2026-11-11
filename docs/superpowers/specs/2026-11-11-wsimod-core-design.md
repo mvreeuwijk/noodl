@@ -233,8 +233,9 @@ naming the sub-project that will port it:
 - **Soil temperature (3b).** When `temperature` is a pollutant, `PerviousSurface` must have
   `soil_temp_w_air = soil_temp_w_deep = 0` and `soil_temp_w_prev > 0` (`land.py:1060-1079`).
 - **River biochemistry (3b).** `River` with `"nitrate"` among the pollutants runs biochemistry
-  (`storage.py:917-924`), so it is refused. Without nitrate, WSIMOD skips biochemistry and so
-  does noodl.
+  (`storage.py:917-924`), so it is refused when the run carries pollutants. Without nitrate, WSIMOD skips biochemistry
+  and so does noodl; a quantity-only run reads no pollutant (W10), so it runs a River whatever
+  the lists say (the volumes do not depend on biochemistry).
 - **Decay (3b).** `decays` must be `None` on the `Storage` family; a dict, even `{}`, is
   refused (Nodes › Storage). On `Surface`, `decays` must be empty. Arcs may not carry `decays`,
   which belongs to the `Decay*` arc classes of 3b.
@@ -650,8 +651,9 @@ shape:
     send_push_request/below_fa, send_push_request/clip}`. The storage family adds
     `node:N/infiltrate/excess`, `node:N/pull_check_active/clip`,
     `node:N/pull_set_active/{clip,below_fa}`, `node:N/push_check_river_reservoir/clip` and
-    `node:N/satisfy_environmental/owed`; a `QueueGroundwater`'s frozen push-check tank is
-    `node:N/check_tank/get_excess/{headroom,clip}`. Later classes extend the pattern.
+    `node:N/satisfy_environmental/owed`; a `River`'s `node:N/pull_check_river/{mrf,clip}` (the
+    `max(..., 0)` against `mrf / riverrc` and the clip to the request); a `QueueGroundwater`'s
+    frozen push-check tank is `node:N/check_tank/get_excess/{headroom,clip}`. Later classes extend the pattern.
   - `call` is noodl's static per-day index of the enclosing (element, method) call. It counts
     the calls noodl's structure makes, masked ones included, so it is the same every day; it is
     not WSIMOD's dynamic count.
@@ -762,8 +764,10 @@ marked W4.
     (`:386-433`). That inconsistency, which WSIMOD marks with a TODO, is transcribed.
 - **River** (`:452-955`), without biochemistry.
   - `area = length·width`, `capacity = 1e15` (`:524-533`); `depth ≠ 2` warns (`:514-518`).
-  - `riverrc = 1 − kt + kt·exp(−1/kt)`, with `kt = damp·length/velocity`, and 1 when `kt = 0`
-    (`:900-915`).
+  - `riverrc = 1 − kt + kt·exp(−1/kt)`, with `kt = damp·(length/velocity)` (the source's order,
+    `:906-908`), and 1 when `kt = 0` (`:900-915`). `exp` is Python's `math.exp`, called per instance
+    (`exp_python`, as `pow_half` does for the root), because `torch.exp` differs in the last bit;
+    the River replay is bitwise.
   - `distribute` (`:926-936`): `V·riverrc` to River, Node and Waste, with the rest forced back.
   - Push accepts everything by force, and its check returns `1e15` (`:582-583`, `:711-721`).
   - `pull_check_river` (`:660-686`): the tank's VQIP with its volume raised by the

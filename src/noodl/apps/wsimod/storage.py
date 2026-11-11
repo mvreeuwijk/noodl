@@ -17,6 +17,8 @@ events (D13).
 
 from __future__ import annotations
 
+import math
+import warnings
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, ClassVar
 
@@ -25,6 +27,7 @@ from torch import Tensor
 from torch.autograd.function import once_differentiable
 
 from noodl.apps.wsimod.arcs import _put_row, check_travel_time
+from noodl.apps.wsimod.constants import UNBOUNDED_CAPACITY
 from noodl.apps.wsimod.engine import Ctx, dmax, dmin
 from noodl.apps.wsimod.node import NODE_CLASSES, Node, Tag
 from noodl.apps.wsimod.tanks import QueueTank, Tank
@@ -40,11 +43,25 @@ from noodl.apps.wsimod.vqip import (
 if TYPE_CHECKING:  # pragma: no cover
     from noodl.apps.wsimod.config import NodeSpec, WsimodNetwork
 
-__all__ = ["Groundwater", "QueueGroundwater", "Reservoir", "RiverReservoir", "Storage"]
+__all__ = [
+    "Groundwater",
+    "QueueGroundwater",
+    "Reservoir",
+    "River",
+    "RiverReservoir",
+    "Storage",
+    "exp_python",
+    "pow_half",
+    "river_derived",
+    "riverrc",
+]
 
 # storage.py:226, :1064, :1102: where a groundwater baseflow, a reservoir spill and the
 # reservoir's downstream capacity go
 DOWNSTREAM_TYPES = ("Node", "River", "Waste")
+# storage.py:673, :703: what a river pulls from upstream; :933: where it discharges
+RIVER_UPSTREAM_TYPES = ("River", "Node")
+RIVER_DOWNSTREAM_TYPES = ("River", "Node", "Waste")
 
 
 def _f64(x) -> Tensor:
@@ -79,6 +96,47 @@ class _PowHalf(torch.autograd.Function):
 def pow_half(x: Tensor) -> Tensor:
     """``x ** 0.5`` bitwise as Python computes it; gradient 0 at ``x == 0``."""
     return _PowHalf.apply(_f64(x))
+
+
+class _ExpPython(torch.autograd.Function):
+    """``math.exp(x)`` as WSIMOD calls it (``storage.py:911``), elementwise.
+
+    ``torch.exp`` differs from the C library's ``exp`` in the last bit for about 1 % of the
+    arguments on the developer machine, so ``River.get_riverrc`` calls the same ``math.exp``
+    WSIMOD does, once per instance (the :func:`pow_half` pattern). The gradient is
+    ``exp(x)``.
+    """
+
+    @staticmethod
+    def forward(ctx, x: Tensor) -> Tensor:
+        flat = x.detach().reshape(-1).tolist()
+        out = torch.tensor([math.exp(v) for v in flat], dtype=torch.float64).reshape(x.shape)
+        ctx.save_for_backward(out)
+        return out
+
+    @staticmethod
+    @once_differentiable
+    def backward(ctx, grad: Tensor) -> Tensor:
+        (out,) = ctx.saved_tensors
+        return grad * out
+
+
+def exp_python(x: Tensor) -> Tensor:
+    """``math.exp(x)`` bitwise as Python computes it; gradient ``exp(x)``."""
+    return _ExpPython.apply(_f64(x))
+
+
+def riverrc(kt: Tensor) -> Tensor:
+    """``1 - kt + kt * exp(-1 / kt)``, and 1 where ``kt == 0`` (``storage.py:900-915``).
+
+    The evaluation order is WSIMOD's: ``(1 - kt) + (kt * exp((-1) / kt))``. Where ``kt == 0`` the
+    expression runs on a safe ``kt = 1`` (double ``where``), so the gradient stays finite.
+    """
+    kt = _f64(kt)
+    nonzero = (kt != 0).detach()
+    safe = torch.where(nonzero, kt, torch.ones_like(kt))
+    value = 1 - safe + safe * exp_python(-1 / safe)
+    return torch.where(nonzero, value, torch.ones_like(value))
 
 
 class Storage(Node):
@@ -587,6 +645,176 @@ class RiverReservoir(Reservoir):
         return direction == "push" and tag == "default"
 
 
+def river_derived(spec: NodeSpec) -> dict[str, float]:
+    """What a ``River`` computes itself, from ``spec``'s merged ``length`` and ``width``.
+
+    ``area = length * width`` and ``capacity = UNBOUNDED_CAPACITY`` (``storage.py:524-533``);
+    WSIMOD forces both over whatever the configuration or an override says
+    (``:536-540``, ``:643-658``), so the merged ``area`` and ``capacity`` are never read. A
+    ``depth`` other than 2 warns that it is unused (``:514-518``).
+    """
+    values = spec.parameters
+    if values.get("depth", 2) != 2:
+        warnings.warn(
+            "warning: the depth parameter is unused by River nodes because it is "
+            "intended for capacity to be unbounded. It may be removed in a future version.",
+            stacklevel=2,
+        )
+    area = float(values.get("length", 200) * values.get("width", 20))
+    return {"area": area, "capacity": UNBOUNDED_CAPACITY}
+
+
+class River(Storage):
+    """``River`` (``storage.py:452-955``) without ``biochemical_processes`` (``:738-898``): a
+    tank that is never full, discharged by the routing coefficient :func:`riverrc` and pulled
+    from with a minimum residual flow.
+
+    Biochemistry runs when ``"nitrate"`` is a pollutant (``:917-924``): that is sub-project 3b,
+    and :meth:`validate` refuses it, so :meth:`calculate_discharge` is a no-op. The tank's
+    ``area`` and ``capacity`` are derived (:func:`river_derived`) and re-derived by :meth:`bind`.
+    The ``("RiparianBuffer", "volume")`` check (``:589``, ``:938-949``) belongs to 3c.
+    """
+
+    wsimod_type: ClassVar[str] = "River"
+    step_methods: ClassVar[tuple[str, ...]] = ("distribute", "calculate_discharge")
+    distributes: ClassVar[tuple[str, ...]] = ("out", "in")
+    parameter_defaults: ClassVar[dict[str, float]] = {
+        "length": 200,
+        "width": 20,
+        "velocity": 17280.0,  # 0.2 * constants.M_S_TO_M_DT
+        "damp": 0.1,
+        "mrf": 0,
+    }
+
+    def _make_tank(self, values: Mapping) -> Tank:
+        """``storage.py:524-540``: ``area`` and ``capacity`` are derived, never configured."""
+        return super()._make_tank({**values, **river_derived(self.spec)})
+
+    def _set_handlers(self) -> None:
+        """``storage.py:575-589``."""
+        super()._set_handlers()
+        self.push_set_handler["default"] = self.push_set_river
+        self.push_check_handler["default"] = self.push_check_accept
+        self.pull_check_handler["default"] = self.pull_check_river
+        self.pull_set_handler["default"] = self.pull_set_river
+        self.pull_check_handler[("RiparianBuffer", "volume")] = self.pull_check_fp
+
+    def bind(self, parameters: Mapping[str, Tensor]) -> None:
+        """The day's parameters; ``area = length * width`` and the unbounded capacity are
+        derived from them again (``storage.py:524-533``)."""
+        super().bind(parameters)
+        area = self._param("length") * self._param("width")
+        self.tank.area = area
+        self.tank.capacity = torch.full_like(area, UNBOUNDED_CAPACITY)
+
+    def get_riverrc(self) -> Tensor:
+        """``storage.py:900-915``: ``kt = damp * (length / velocity)``, then :func:`riverrc`."""
+        total_time = self._param("length") / self._param("velocity")
+        return riverrc(self._param("damp") * total_time)
+
+    # --- the handlers -----------------------------------------------------------------------
+    def push_set_river(self, vqip: Tensor, *, active: Tensor) -> Tensor:
+        """``storage.py:711-721``: the tank takes everything, by force."""
+        self.tank.push_storage(vqip, force=True, active=active)
+        return self.ctx.empty()
+
+    def pull_check_river(self, vqip: Tensor | None = None, *, active: Tensor) -> Tensor:
+        """``storage.py:660-686``: the tank's VQIP with its volume raised by what the upstream
+        River and Node arcs report, cut to ``max(volume - mrf / riverrc, 0)`` and to the request.
+
+        The rescale (``v_change_vqip``) takes the **raised** volume as its base, so the tank's
+        pollutant mass is spread over the upstream water too (spec, River).
+        """
+        ctx = self.ctx
+        call = ctx.call(self.site, "pull_check_river")
+        avail = self.tank.get_avail(active=active)
+        upstream = self.get_connected("pull", RIVER_UPSTREAM_TYPES, active=active)
+        raised = avail[..., 0] + upstream.avail
+        avail = torch.cat([raised[..., None], avail[..., 1:]], dim=-1)
+        mrf = self._param("mrf") / self.get_riverrc()
+        volume = dmax(
+            ctx,
+            f"{self.site}/pull_check_river/mrf",
+            raised - mrf,
+            0.0,
+            active=active,
+            call=call,
+        )
+        if vqip is not None:
+            volume = dmin(
+                ctx,
+                f"{self.site}/pull_check_river/clip",
+                volume,
+                vqip[..., 0],
+                active=active,
+                call=call,
+            )
+        return v_change_vqip(self.p, avail, volume)
+
+    def pull_set_river(self, vqip: Tensor, *, active: Tensor) -> Tensor:
+        """``storage.py:688-709``: what the check allows, first from the tank, the rest from
+        the upstream River and Node arcs."""
+        avail = self.pull_check_river(vqip, active=active)
+        pulled = self.tank.pull_storage(avail, active=active)
+        to_pull = self._volume(avail[..., 0] - pulled[..., 0])
+        pulled_ = self.pull_distributed(to_pull, of_type=RIVER_UPSTREAM_TYPES, active=active)
+        return sum_vqip(self.p, pulled, pulled_)
+
+    def pull_check_fp(self, vqip: Tensor | None = None, *, active: Tensor) -> Tensor:
+        """``storage.py:938-949`` reads a ``river_tank`` that does not exist: the riparian
+        buffer is sub-project 3c and is refused by name."""
+        raise KeyError(
+            f"node {self.name!r}: the ('RiparianBuffer', 'volume') pull check is sub-project 3c "
+            "(storage.py:938-949 reads a nonexistent river_tank)"
+        )
+
+    # --- orchestration ----------------------------------------------------------------------
+    def calculate_discharge(self, *, active: Tensor) -> None:
+        """``storage.py:917-924``: runs biochemistry only with ``"nitrate"`` among the
+        pollutants, which :meth:`validate` refuses (3b); nothing otherwise."""
+
+    def distribute(self, *, active: Tensor) -> None:
+        """``storage.py:926-936``: ``V * riverrc`` to River, Node and Waste, the rest forced
+        back (``"river_cant_push"`` above ``FLOAT_ACCURACY``)."""
+        volume = self.tank.storage[..., 0] * self.get_riverrc()
+        outflow = self.tank.pull_storage(self._volume(volume), active=active)
+        retained = self.push_distributed(outflow, of_type=RIVER_DOWNSTREAM_TYPES, active=active)
+        self._force_back(retained, "river_cant_push", active=active)
+
+    # --- validation -------------------------------------------------------------------------
+    @classmethod
+    def validate(cls, spec: NodeSpec, network: WsimodNetwork, *, pollutants: bool) -> list[str]:
+        """Refused: ``"nitrate"`` among the pollutants of a run that carries them (WSIMOD would
+        run ``biochemical_processes``, ``storage.py:917-924``: 3b; a quantity-only run reads no
+        pollutant, spec W10); ``velocity <= 0`` (``storage.py:907`` divides); ``damp < 0``
+        (``exp(-1 / kt)`` overflows for a small negative ``kt``); a routing coefficient that is
+        not positive (``:683`` divides by it)."""
+        ignored = super().validate(spec, network, pollutants=pollutants)
+        where = f"node {spec.name!r}"
+        if pollutants and "nitrate" in network.pollutants.names:
+            raise ValueError(
+                f"{where}: a River with 'nitrate' among the pollutants runs biochemistry "
+                "(storage.py:917-924), which is sub-project 3b; declare pollutant lists "
+                "without nitrate"
+            )
+        values = {**cls.parameter_defaults, **spec.parameters}
+        if values["velocity"] <= 0:
+            raise ValueError(f"{where}: velocity {values['velocity']} is not positive")
+        if values["damp"] < 0:
+            raise ValueError(f"{where}: damp {values['damp']} is negative")
+        kt = values["damp"] * (values["length"] / values["velocity"])
+        rc = 1 - kt + kt * math.exp(-1 / kt) if kt != 0 else 1
+        if not rc > 0:
+            raise ValueError(f"{where}: the routing coefficient {rc} is not positive")
+        return ignored
+
+    @classmethod
+    def check_recurses(cls, spec: NodeSpec, direction: str, tag: Tag) -> bool:
+        """``pull_check_river`` asks the upstream arcs (``get_connected``, ``storage.py:672``);
+        the push check accepts without asking."""
+        return direction == "pull" and tag == "default"
+
+
 NODE_CLASSES.update(
     {
         "Storage": Storage,
@@ -594,5 +822,6 @@ NODE_CLASSES.update(
         "QueueGroundwater": QueueGroundwater,
         "Reservoir": Reservoir,
         "RiverReservoir": RiverReservoir,
+        "River": River,
     }
 )

@@ -35,9 +35,10 @@ Decision records (spec, Diagnostics). Each is a :class:`Decision`
   ``send_push_request/{below_fa,clip}``). The storage family adds
   ``node:N/infiltrate/excess``, ``node:N/pull_check_active/clip``,
   ``node:N/pull_set_active/{clip,below_fa}``, ``node:N/push_check_river_reservoir/clip`` and
-  ``node:N/satisfy_environmental/owed``; a ``QueueGroundwater``'s frozen push-check tank
-  (``storage.py:71``) is ``node:N/check_tank/get_excess/{headroom,clip}``. Later classes
-  extend the same pattern.
+  ``node:N/satisfy_environmental/owed``; a ``River``'s ``node:N/pull_check_river/{mrf,clip}``
+  (the ``max(.., 0)`` against the minimum residual flow and the clip to the request); a
+  ``QueueGroundwater``'s frozen push-check tank (``storage.py:71``) is
+  ``node:N/check_tank/get_excess/{headroom,clip}``. Later classes extend the same pattern.
 - ``call`` is noodl's static per-day index of the enclosing ``(element, method)`` call
   (:meth:`Ctx.call`, which :meth:`Ctx.loop_site` uses too). It counts the calls noodl's
   structure makes, masked ones included, so it is the same on every day and for every

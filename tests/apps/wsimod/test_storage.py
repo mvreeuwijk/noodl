@@ -7,6 +7,7 @@ The values asserted are WSIMOD's, worked out from ``storage.py`` by hand; the re
 
 from __future__ import annotations
 
+import math
 import random
 
 import pytest
@@ -20,11 +21,15 @@ from noodl.apps.wsimod.storage import (
     Groundwater,
     QueueGroundwater,
     Reservoir,
+    River,
     RiverReservoir,
     Storage,
+    exp_python,
     pow_half,
+    river_derived,
+    riverrc,
 )
-from noodl.apps.wsimod.vqip import QUANTITY_ONLY
+from noodl.apps.wsimod.vqip import QUANTITY_ONLY, Pollutants
 from tests.apps.wsimod._replay import ScriptedArc, StoreNode
 from tests.verification._wsimod_reference import ArcCall
 
@@ -88,11 +93,13 @@ def test_the_classes_are_registered_under_the_names_wsimod_gives_them():
         ("QueueGroundwater", QueueGroundwater),
         ("Reservoir", Reservoir),
         ("RiverReservoir", RiverReservoir),
+        ("River", River),
     ):
         assert NODE_CLASSES[name] is cls
     # storage.py:294, :1043: the renames other nodes' of_type filters see
     assert QueueGroundwater.wsimod_type == "Groundwater"
     assert RiverReservoir.wsimod_type == "Reservoir"
+    assert River.wsimod_type == "River"
 
 
 # --- Groundwater.infiltrate ---------------------------------------------------------------
@@ -500,3 +507,335 @@ def test_a_negative_bound_infiltration_pct_is_refused_by_name():
     gw.bind({"infiltration_pct": torch.tensor([0.1, 0.0])})
     with pytest.raises(ValueError, match=r"node 'n'.*infiltration_pct is negative"):
         gw.bind({"infiltration_pct": torch.tensor([0.1, -0.2])})
+
+
+# --- River ----------------------------------------------------------------------------------
+PP = Pollutants(("phosphate",), ("phosphate",), ())  # one additive pollutant
+
+
+def river(**parameters):
+    return make("River", **parameters)
+
+
+def test_the_river_routing_coefficient():
+    # storage.py:900-915: kt = damp x (length / velocity) = 0.1 x 5000 = 500
+    node = river(damp=0.1, length=1000.0, velocity=0.2)
+    day(node)
+    rc = node.get_riverrc()
+    assert float(rc) == pytest.approx(1 - 500 + 500 * math.exp(-1 / 500), rel=1e-15, abs=0)
+    # damp 0: kt == 0 gives 1, and the gradient with respect to the velocity is finite
+    still = river(damp=0.0, length=1000.0)
+    day(still)
+    velocity = torch.tensor(0.2, dtype=torch.float64, requires_grad=True)
+    still.bind({"velocity": velocity})
+    rc = still.get_riverrc()
+    assert float(rc.detach()) == 1.0
+    rc.backward()
+    assert float(velocity.grad) == 0.0
+    # the gradient with respect to damp where kt > 0: d/dkt (1 - kt + kt exp(-1/kt)) x dkt/ddamp
+    damp = torch.tensor(0.1, dtype=torch.float64, requires_grad=True)
+    node.bind({"damp": damp})
+    node.get_riverrc().backward()
+    kt = 0.1 * (1000.0 / 0.2)
+    slope = -1 + math.exp(-1 / kt) + math.exp(-1 / kt) / kt
+    assert float(damp.grad) == pytest.approx(slope * (1000.0 / 0.2), rel=1e-12)
+
+
+def test_exp_python_is_pythons_exp_bitwise():
+    rng = random.Random(7)
+    values = [-1 / rng.uniform(1e-3, 50) for _ in range(20000)] + [0.0, -1.0, -700.0]
+    x = torch.tensor(values, dtype=torch.float64, requires_grad=True)
+    y = exp_python(x)
+    assert y.tolist() == [math.exp(v) for v in values]
+    y.sum().backward()
+    assert x.grad.tolist() == pytest.approx(y.tolist(), rel=1e-15, abs=0)
+    # riverrc is a batch of instances, each its own value
+    kt = torch.tensor([0.0, 0.5, 500.0], dtype=torch.float64)
+    assert riverrc(kt).tolist() == [
+        1.0,
+        1 - 0.5 + 0.5 * math.exp(-1 / 0.5),
+        1 - 500.0 + 500.0 * math.exp(-1 / 500.0),
+    ]
+
+
+def upstream_check(volume):
+    """The WSIMOD call a river's pull check makes on its upstream arc (no request)."""
+    return ArcCall(
+        "up",
+        "send_pull_check",
+        None,
+        "default",
+        False,
+        {"volume": volume, "phosphate": 0.0},
+        0.0,
+        {"volume": 0.0, "phosphate": 0.0},
+        0.0,
+        {"volume": 0.0, "phosphate": 0.0},
+    )
+
+
+def test_pull_check_spreads_the_rivers_mass_over_upstream_water():
+    """storage.py:660-686: tank volume 4 with phosphate 2, upstream 6, mrf 1, riverrc 0.5. The
+    reply volume is max(4 + 6 - 1 / 0.5, 0) = 8 and the phosphate 2 x 8 / 10: the rescale's base
+    is the raised volume 10, not the tank's 4."""
+    spec = NodeSpec(
+        "n", "River", "River", {"initial_storage": {"volume": 4.0, "phosphate": 2.0}, "mrf": 1.0}
+    )
+    node = make_node(spec, None, PP)
+    node.get_riverrc = lambda: torch.tensor(0.5, dtype=torch.float64)  # riverrc fixed at 0.5
+    script: list = []
+    upstream = ScriptedArc(
+        ArcSpec("up", "Arc", "other", "n"),
+        script,
+        PP,
+        scale=1.0,
+        in_type="River",
+        out_type="River",
+    )
+    node.connect(upstream, "in")
+    node.ctx = Ctx(PP, FA, torch.Size(()), day=0, node_names=["n"])
+    script[:] = [upstream_check(6.0)]
+    reply = node.pull_check(None, active=TRUE)
+    assert float(reply[0]) == 8.0
+    assert float(reply[1]) == 2.0 * (8.0 / 10.0)
+    upstream.assert_exhausted()
+    # a request of 3 clips the volume; the base is still 10
+    script[:] = [upstream_check(6.0)]
+    reply = node.pull_check(PP.to_vqip({"volume": 3.0}), active=TRUE)
+    assert float(reply[0]) == 3.0 and float(reply[1]) == 2.0 * (3.0 / 10.0)
+    # an mrf above everything leaves nothing (the max against 0)
+    node.bind({"mrf": torch.tensor(100.0, dtype=torch.float64)})
+    script[:] = [upstream_check(6.0)]
+    assert float(node.pull_check(None, active=TRUE)[0]) == 0.0
+
+
+def test_pull_set_takes_the_tank_first_then_the_upstream_arcs():
+    # storage.py:688-709: avail = min(max(3 + 5 - 0, 0), 6) = 6; the tank gives 3 and the single
+    # upstream River arc is asked for the other 3
+    node = river(initial_storage=3.0, mrf=0.0)
+    script: list = [
+        upstream_check(5.0),
+        call("up", "send_pull_request", 3.0, 3.0),
+    ]
+    upstream = ScriptedArc(
+        ArcSpec("up", "Arc", "other", "n"),
+        script,
+        P,
+        scale=1.0,
+        in_type="River",
+        out_type="River",
+    )
+    script[0] = ArcCall(
+        "up",
+        "send_pull_check",
+        None,
+        "default",
+        False,
+        {"volume": 5.0},
+        0.0,
+        {"volume": 0.0},
+        0.0,
+        {"volume": 0.0},
+    )
+    node.connect(upstream, "in")
+    day(node)
+    reply = node.pull_set(vol(6.0), active=TRUE)
+    upstream.assert_exhausted()
+    assert float(reply[0]) == 6.0 and float(node.tank.storage[0]) == 0.0
+
+
+def test_push_is_forced_and_the_check_returns_the_unbounded_capacity():
+    node = river(initial_storage=1e16)  # far above the capacity: still accepted
+    day(node)
+    assert float(node.push_set(vol(5.0), active=TRUE)[0]) == 0.0
+    assert float(node.tank.storage[0]) == 1e16 + 5.0
+    assert float(node.push_check(None, active=TRUE)[0]) == 1e15
+    assert float(node.push_check(vol(7.0), active=TRUE)[0]) == 7.0
+
+
+def test_distribute_sends_the_routing_share_and_forces_the_rest_back():
+    node = river(initial_storage=100.0, length=17280.0, velocity=17280.0, damp=0.5)
+    sea = Waste(NodeSpec("sea", "Waste", "Waste", {}), P)
+    pipe = arc("out", node, sea, capacity=10.0)
+    ctx = day(node, sea)
+    rc = float(node.get_riverrc())  # kt = 0.5
+    assert rc == 1 - 0.5 + 0.5 * math.exp(-1 / 0.5)
+    node.distribute(active=TRUE)
+    # 100 x rc is asked of the pipe, which takes 10; the rest is forced back
+    assert float(pipe.flow_in) == 10.0
+    assert float(node.tank.storage[0]) == 90.0
+    assert bool(ctx.events["river_cant_push"]["n"])
+    node.calculate_discharge(active=TRUE)  # a no-op without biochemistry
+    assert float(node.tank.storage[0]) == 90.0
+
+
+def test_the_tank_is_never_full_and_area_is_length_times_width():
+    node = river(length=50.0, width=4.0, capacity=3.0, area=1.0, initial_storage=2.0)
+    day(node)
+    # the merged capacity and area are ignored (storage.py:524-540, :643-658)
+    assert float(node.tank.area) == 200.0 and float(node.tank.capacity) == 1e15
+    node.bind({"length": torch.tensor([10.0, 20.0], dtype=torch.float64)})
+    assert node.tank.area.tolist() == [40.0, 80.0]
+    assert node.tank.capacity.tolist() == [1e15, 1e15]
+
+
+def test_river_derived_warns_when_the_depth_is_not_the_default():
+    spec = NodeSpec("r", "River", "River", {"length": 10, "width": 3, "depth": 5})
+    with pytest.warns(UserWarning, match="depth parameter is unused"):
+        assert river_derived(spec) == {"area": 30.0, "capacity": 1e15}
+    quiet = NodeSpec("r", "River", "River", {"length": 10, "width": 3, "depth": 2})
+    assert river_derived(quiet) == {"area": 30.0, "capacity": 1e15}
+
+
+def test_a_river_with_nitrate_is_refused():
+    network = read_wsimod_config(
+        {
+            "pollutants": ["nitrate", "temperature"],
+            "additive_pollutants": ["nitrate"],
+            "non_additive_pollutants": ["temperature"],
+            "dates": ["2000-01-01"],
+            "nodes": [{"name": "r", "type_": "River"}],
+            "arcs": [],
+        }
+    )
+    with pytest.raises(ValueError, match="nitrate.*3b"):
+        River.validate(network.nodes[0], network, pollutants=True)
+    # a quantity-only run reads no pollutant (W10)
+    assert River.validate(network.nodes[0], network, pollutants=False) == []
+
+
+@pytest.mark.parametrize(
+    ("parameters", "match"),
+    [
+        ({"velocity": 0.0}, "velocity 0.0 is not positive"),
+        ({"damp": -0.1}, "damp -0.1 is negative"),
+    ],
+)
+def test_parameters_that_wsimod_cannot_run_a_river_on_are_refused(parameters, match):
+    with pytest.raises(ValueError, match=match):
+        _validate("River", **parameters)
+    assert _validate("River", damp=0.0, mrf=2.0) == []
+
+
+def test_the_riparian_buffer_check_is_refused_by_name_with_3c():
+    node = river()
+    day(node)
+    with pytest.raises(KeyError, match="3c"):
+        node.pull_check(None, ("RiparianBuffer", "volume"), active=TRUE)
+
+
+def test_river_handlers_and_recursion():
+    spec = NodeSpec("n", "River", "River", {})
+    assert River.check_recurses(spec, "pull", "default")
+    assert not River.check_recurses(spec, "push", "default")
+    assert River.step_methods == ("distribute", "calculate_discharge")
+    assert River.distributes == ("out", "in")
+
+
+def test_a_batch_of_rivers_equals_its_instances():
+    def run(damp, active, shape):
+        node = river(initial_storage=40.0, length=17280.0, velocity=17280.0)
+        sea = Waste(NodeSpec("sea", "Waste", "Waste", {}), P)
+        pipe = arc("out", node, sea, capacity=15.0)
+        day(node, sea, pipe, shape=shape)
+        node.bind({"damp": damp})
+        node.distribute(active=active)
+        return node.tank.storage[..., 0], pipe.flow_in
+
+    damps = torch.tensor([0.2, 0.0, 1.5], dtype=torch.float64)
+    active = torch.tensor([True, False, True])
+    tank, flow = run(damps, active, (3,))
+    assert float(tank[1]) == 40.0 and float(flow[1]) == 0.0
+    for i in (0, 2):
+        single_tank, single_flow = run(damps[i], TRUE, ())
+        assert float(single_tank) == float(tank[i]) and float(single_flow) == float(flow[i])
+
+
+@pytest.mark.filterwarnings("ignore::UserWarning")
+def test_river_derives_what_construction_derives():
+    pytest.importorskip("wsimod")
+    from tests.verification._wsimod_reference import wsimod_model
+
+    mapping = {
+        "pollutants": ["phosphate", "temperature"],
+        "additive_pollutants": ["phosphate"],
+        "non_additive_pollutants": ["temperature"],
+        "dates": ["2000-01-01"],
+        "nodes": [
+            {"name": "r", "type_": "River", "length": 300.0, "width": 7.0},
+            {"name": "plain", "type_": "River"},
+        ],
+        "arcs": [],
+        "overrides": {
+            "nodes": {
+                "r": {
+                    "type_": "River",
+                    "name": "r",
+                    "length": 450.0,
+                    "width": 9.0,
+                    "area": 5.0,  # ignored by WSIMOD (a warning), and by noodl
+                    "capacity": 3.0,
+                }
+            }
+        },
+    }
+    model = wsimod_model(mapping)
+    network = read_wsimod_config(mapping)
+    for spec in network.nodes:
+        theirs = model.nodes[spec.name]
+        derived = river_derived(spec)
+        assert derived["area"] == pytest.approx(theirs.tank.area, rel=1e-15, abs=0)
+        assert derived["capacity"] == pytest.approx(theirs.tank.capacity, rel=1e-15, abs=0)
+        ours = make_node(spec, network, QUANTITY_ONLY)
+        assert float(ours.tank.area) == theirs.tank.area
+        assert float(ours.tank.capacity) == theirs.tank.capacity
+        assert float(ours.get_riverrc()) == theirs.get_riverrc()
+    assert river_derived(network.nodes[0])["area"] == 450.0 * 9.0
+
+
+# --- the river order and a stepped chain --------------------------------------------------------
+def test_the_river_order_is_most_upstream_first_with_ties_in_configuration_order():
+    from tests.apps.wsimod._stepping import river_order
+    from tests.verification._wsimod_cases import CASES
+
+    network = read_wsimod_config(CASES["river_chain"].build())
+    # r_lost links to no Waste and is left out (model.py:730-735, :780-807)
+    assert river_order(network) == ["r_head", "r_mid", "r_side", "r_low", "r_end"]
+    # no river arc at all: no order
+    no_river_arcs = read_wsimod_config(
+        {**CASES["river_chain"].build(), "arcs": [], "orchestration": []}
+    )
+    assert river_order(no_river_arcs) == []
+    mapping = CASES["river_chain"].build()
+    mapping["nodes"] = [n for n in mapping["nodes"] if n["name"] != "sea"]
+    mapping["arcs"] = [a for a in mapping["arcs"] if "sea" not in (a["in_port"], a["out_port"])]
+    with pytest.raises(ValueError, match="no Waste"):
+        river_order(read_wsimod_config(mapping))
+
+
+@pytest.mark.parametrize("quantity_only", [True, False])
+def test_the_stepped_river_chain_equals_wsimod_day_by_day(quantity_only):
+    pytest.importorskip("wsimod")
+    from tests.apps.wsimod._stepping import step_days
+    from tests.verification._wsimod_cases import CASES
+    from tests.verification._wsimod_reference import wsimod_model, wsimod_reference
+
+    case = CASES["river_chain"]
+    days = case.days
+    model = wsimod_model(case.build())
+    # WSIMOD's own river order, tied rivers in hash order
+    assert model.river_discharge_order[0] == "r_head"
+    assert set(model.river_discharge_order[1:3]) == {"r_mid", "r_side"}
+    assert set(model.river_discharge_order[3:]) == {"r_low", "r_end"}
+    reference = wsimod_reference(case.build(), days=days)
+    network = read_wsimod_config(case.build())
+    p = QUANTITY_ONLY if quantity_only else network.pollutants
+    columns = [reference.pollutants.index(n) for n in p.names]
+    rivers = ["r_head", "r_mid", "r_low", "r_side", "r_end", "r_lost", "res"]
+    for day_, _, engine in step_days(network, p, days):
+        for name in rivers:
+            row = reference.tank_names.index((name, "tank"))
+            ours = engine.nodes[name].tank.storage
+            assert float(ours[0]) == float(reference.tank_storage[day_, row]), (day_, name)
+            for k, column in enumerate(columns):
+                assert float(ours[1 + k]) == float(reference.tank_quality[day_, row, column])

@@ -372,6 +372,64 @@ def _river_reservoir_environmental() -> dict:
     )
 
 
+def _river(name: str, *, damp: float = 0.5, mrf: float = 0.0, length=20000.0, **values) -> dict:
+    """A ``River`` whose routing coefficient is well below 1 (``kt = damp * length / 17280``)."""
+    return _store(name, "River", length=length, damp=damp, mrf=mrf, **values)
+
+
+def _river_chain() -> dict:
+    """Rivers in three levels with ties (``river_discharge_order``, ``model.py:697-807``).
+
+    Two independent chains reach the sea: ``r_head`` (level 3, ``damp = 0`` so it discharges
+    everything) -> ``r_mid`` (2, ``mrf > 0``) -> ``r_low`` (1), and ``r_side`` (2) -> ``r_end``
+    (1), so each of levels 1 and 2 holds a tie that changes no value (W13). ``r_side`` is fed
+    through a ``Node``. A ``Reservoir``, which empties 25 a day into the sea,
+    pulls from ``r_low`` (which pulls ``r_mid``, which pulls ``r_head``) and from ``r_end``
+    (which pulls ``r_side`` and the node), so the river pull check recurses three deep, with
+    ``mrf`` and with the pull split over two arcs. ``r_lost`` links to no ``Waste`` and never
+    distributes. Pollutants without nitrate (River biochemistry is 3b).
+    """
+    days = _STORAGE_DAYS
+    return _storage_case(
+        [
+            _catchment("src_head", days, 21),
+            _catchment("src_side", days, 23),
+            _catchment("src_lost", days, 24),
+            _store("feed", "Node"),
+            _river("r_head", damp=0.0, initial_storage=_stocked(8.0)),
+            _river("r_mid", damp=0.4, mrf=6.0, initial_storage=_stocked(3.0)),
+            _river("r_low", damp=0.8, mrf=3.0, length=12000.0, initial_storage=_stocked(10.0)),
+            _river("r_side", damp=0.3, initial_storage=_stocked(12.0)),
+            _river("r_end", damp=0.6, mrf=4.0, initial_storage=_stocked(6.0)),
+            _river("r_lost", initial_storage=_stocked(5.0)),
+            _store("pond", "Node"),
+            _store("res", "Reservoir", capacity=60.0, initial_storage=_stocked(10.0)),
+            _store("sea", "Waste"),
+        ],
+        [
+            _arc("head_in", "src_head", "r_head"),
+            _arc("side_in", "src_side", "feed"),
+            _arc("feed_to_side", "feed", "r_side"),
+            _arc("lost_in", "src_lost", "r_lost"),
+            _arc("head_to_mid", "r_head", "r_mid"),
+            _arc("mid_to_low", "r_mid", "r_low"),
+            _arc("low_to_sea", "r_low", "sea"),
+            _arc("side_to_end", "r_side", "r_end"),
+            _arc("end_to_sea", "r_end", "sea"),
+            _arc("lost_to_pond", "r_lost", "pond"),
+            _arc("low_to_res", "r_low", "res"),
+            _arc("end_to_res", "r_end", "res"),
+            _arc("res_to_sea", "res", "sea", capacity=25.0),
+        ],
+        [
+            {"Catchment": "route"},
+            {"Reservoir": "make_abstractions"},
+            {"River": "calculate_discharge"},
+            {"Reservoir": "distribute"},
+        ],
+    )
+
+
 def _catchment_abstraction() -> dict:
     """A reservoir abstracts from a catchment through the pull path (``pull_check`` and
     ``pull_set``); the catchment then routes what is left."""
@@ -551,6 +609,12 @@ CASES: dict[str, Case] = {
         days=_STORAGE_DAYS,
         scale=_largest_volume(_catchment_abstraction()),
         replay=("res", "src"),
+    ),
+    "river_chain": Case(
+        build=_river_chain,
+        days=_STORAGE_DAYS,
+        scale=_largest_volume(_river_chain()),
+        replay=("r_head", "r_mid", "r_low", "r_side", "r_end", "r_lost", "res"),
     ),
     "queue_arc": Case(
         build=_queue_arc,
