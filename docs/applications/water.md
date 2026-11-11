@@ -421,7 +421,7 @@ residual of each pump, with $r = dp + h_{\text{gain}}(q)$, is
 - otherwise $\max(-\kappa q, r)$: the pump runs on its curve with $q \ge 0$, or it is shut,
   $q = 0$, where the head asked of it is at or above its shut-off head $h_{\text{gain}}(0)$.
   EPANET closes such a pump (`pumpstatus`, `XHEAD`) and leaves it the closed-link leak
-  `excess / CBIG`; here its flow is exactly zero, and `link_states` reports it `CLOSED`.
+  `excess / CBIG`; here there is no leak: its row is $\kappa q = 0$, so its flow is zero to round-off, and `link_states` reports it `CLOSED`.
 
 The branch is selected as for a check valve (`FlowControlledPipe`): the no-flow row only where
 $r < -\kappa q$ and the open row's own Newton step would reverse the flow, never at a tie (a

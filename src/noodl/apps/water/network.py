@@ -780,7 +780,7 @@ def build_model(
     `phi_discharge - phi_suction = gain(q)` with the pump's flow an unknown, as EPANET writes
     them, each on EPANET's own curve for it (`_pump_kind`: a power function, straight
     segments, or constant power) with EPANET's `RQtol` floor and `CBIG` cap on the curve's
-    slope, and shut, with exactly zero flow, where the head asked of it exceeds its
+    slope, and shut, with zero flow (to round-off), where the head asked of it exceeds its
     shut-off head. The inverted curve, `q = g(dp)`, has a zero slope beyond shut-off that
     leaves a pump with a pressure-driven demand downstream singular (`FlowControlledPump`'s
     docstring).
@@ -1815,7 +1815,7 @@ def water_steady(model: Model, state: State, drivers: Drivers, **solve_kwargs) -
     `max_iter` defaults to 200, NOT Newton's own 50. It is the POTENTIAL pipe form that
     needs it (`build_model(pipe_form="potential")`; the default resistance form needs at most
     6 iterations on the same duty cycle). When a `[CONTROLS]` line CLOSES a
-    pump, the pipe immediately downstream of it is left carrying exactly zero flow, and
+    pump, the pipe immediately downstream of it is left carrying zero flow (to round-off), and
     Hazen-Williams' laminar blend gives that one edge a tangent slope of order
     `(dp_transition / K)^(1/1.852) / dp_transition` -- about 630 on Net1's pipe 10 against
     ~1e-2 elsewhere, a jump of four orders of magnitude in the Jacobian's conditioning at

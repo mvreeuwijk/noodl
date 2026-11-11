@@ -114,7 +114,7 @@ def link_flags(law, drivers, keys: tuple[str, ...], like: Tensor, summarise):
 #: links cut off from every reservoir and tank with no demand: 1 there, 0 elsewhere. Such a
 #: group has no head of its own (EPANET gives it one through its closed links' `1 / CBIG`
 #: conductance); the marked link's row is then `dp = 0` instead of `kappa q = 0`, which ties
-#: the group to the far end of that link with every flow still exactly zero, and
+#: the group to the far end of that link with every flow still zero to round-off, and
 #: `water_steady` then sets the group's head to EPANET's limit (`cut_off_plan`). Absent: no
 #: link is marked.
 PIN_KEY = "water.closed_tie"
@@ -168,7 +168,7 @@ class HazenWilliams(ConstitutiveLaw):
     candidate, and the whole `test_two_loop_heads_and_flows` comparison is bit-identical
     at 1e-3, 1e-6, 1e-9 and 1e-12.
     Where it bites is a pipe carrying EXACTLY zero flow, which Net1 produces the moment a
-    control closes its pump and leaves pipe 10 dead-ended: there ``dp`` is exactly 0, the
+    control closes its pump and leaves pipe 10 dead-ended: there ``dp`` is zero to round-off, the
     blend is the only thing keeping the Jacobian finite, and its tangent slope
     ``(dp_transition/K)^(1/1.852) / dp_transition`` grows as the transition shrinks. Over
     Net1's 24 h duty cycle the worst Newton iteration count runs 50, 93, 136, 179 at
@@ -1765,7 +1765,8 @@ class FlowControlledPump(ImplicitLaw):
       ``q = 0`` with ``r <= 0``, the head the network asks of the pump at or above its
       shut-off head ``gain(0)``. EPANET closes such a pump (`hydstatus.c`, `pumpstatus`:
       ``XHEAD`` when the gain exceeds ``w^2 Hmax``) and gives it the closed-link
-      conductance ``1 / CBIG``; here its flow is exactly zero.
+      conductance ``1 / CBIG``; here there is no leak: its row is ``kappa q = 0``, so its
+      flow is zero to round-off.
 
     ``kappa`` (the layer's potential per m^3/s) only scales the no-flow row; `build_model`
     sets it to 1 m per m^3/s (its comment gives the measured reason).

@@ -18,11 +18,7 @@ from noodl.apps.water.network import (
     link_states,
     water_steady,
 )
-
-# A closed link's flow is an unknown of the Newton solve whose row is `kappa q = 0`, so it
-# is zero to round-off (flows here are ~1e-2 m3/s, eps ~ 2e-16: well below 1e-15), not
-# bit-exactly, and the last bit depends on the BLAS.
-ZERO_FLOW = 1e-15
+from tests.apps.water import ZERO_FLOW
 
 F64 = torch.float64
 

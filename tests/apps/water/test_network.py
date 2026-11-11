@@ -27,11 +27,7 @@ from noodl.apps.water.network import (
     water_steady,
 )
 from noodl.apps.water.report import link_table, pressure_head, to_kilopascal
-
-# A closed link's flow is an unknown of the Newton solve whose row is `kappa q = 0`, so it
-# is zero to round-off (flows here are ~1e-2 m3/s, eps ~ 2e-16: well below 1e-15), not
-# bit-exactly, and the last bit depends on the BLAS.
-ZERO_FLOW = 1e-15
+from tests.apps.water import ZERO_FLOW
 
 F64 = torch.float64
 
@@ -697,8 +693,8 @@ def test_a_pump_feeding_pressure_driven_demand_converges(pipe_form):
 @pytest.mark.parametrize("pipe_form", ["flow", "potential"])
 def test_a_pump_held_beyond_shut_off_is_shut_with_no_flow(pipe_form):
     """R1 (50 m) - PUMP (shut-off 13.3334 m) - J - pipe - R2 (100 m): the pump cannot lift
-    to R2, so it is shut, as EPANET closes it (`pumpstatus`, ``XHEAD``): zero flow (to round-off)
-    (EPANET's closed link leaks `excess / CBIG`, 3e-8 m3/s here), J at R2's head, and the
+    to R2, so it is shut, as EPANET closes it (`pumpstatus`, ``XHEAD``): zero flow to
+    round-off (EPANET's closed link leaks `excess / CBIG`, 3e-8 m3/s here), J at R2's head, and the
     pump's state CLOSED."""
     net = WaterNetwork(
         junctions=(Junction("J", 0.0, 0.0),),
