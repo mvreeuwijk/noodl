@@ -18,10 +18,32 @@ from __future__ import annotations
 
 import torch
 
+from noodl.apps.water.quality_react import L_PER_FT3
+
 
 def detached(x) -> float:
     """A decision's operand: `x` as a Python float, detached."""
     return float(x.detach()) if isinstance(x, torch.Tensor) else float(x)
+
+
+class QualityTolerance:
+    """EPANET's merge decision `|c_seg - c| < Ctol` (`qualroute.c`, `evalnodeoutflow`;
+    `qualreact.c`, `tankmix3`, `tankmix4`) taken in EPANET's internal quality unit, so that a
+    tie at exactly `Ctol` resolves as EPANET's does (Ruling Q32). EPANET keeps a CHEMICAL's
+    concentration per ft3, `Ucf[QUALITY] = 1 / LperFT3` (`input1.c`, `initunits`; AGE and
+    TRACE 1), and divides the qualities (`C0 /= Ucf`, `input1.c`, `convertunits`;
+    `sourcequal`, `quality.c`) and the tolerance (`Ctol /= Ucf`, `convertunits`) by it:
+    `0.09 - 0.08 < 0.01` in mg/L, but `0.09 / Ucf - 0.08 / Ucf = 0.28317000000000014` is not
+    below `0.01 / Ucf = 0.28317`. Only the decision is converted (detached, Ruling Q5); the
+    qualities keep their unit and their graph."""
+
+    def __init__(self, tolerance: float, mode: str) -> None:
+        self.ucf = 1.0 / L_PER_FT3 if mode == "CHEMICAL" else 1.0
+        self.internal = float(tolerance) / self.ucf
+
+    def merges(self, c_seg, c) -> bool:
+        """Whether a quality `c` joins a segment at `c_seg` (EPANET's `< Ctol`)."""
+        return abs(detached(c_seg) / self.ucf - detached(c) / self.ucf) < self.internal
 
 
 def initial_segments(pool, chain: int, model: str, volume, c, vmz: float) -> None:
@@ -38,14 +60,14 @@ def initial_segments(pool, chain: int, model: str, volume, c, vmz: float) -> Non
     pool.add(chain, volume - stagnant, c)
 
 
-def mix_tank(pool, chain: int, model: str, vmz: float, ctol: float, vin, win, vnet,
+def mix_tank(pool, chain: int, model: str, vmz: float, ctol: QualityTolerance, vin, win, vnet,
              c_tank):
     """`mixtank` (`qualreact.c`): tank chain `chain` mixed by `model` ("MIXED", "2COMP",
     "FIFO", "LIFO") with inflow volume `vin`, inflow mass `win` and `vnet = vin - vout` over
     the step; `vmz` is the 2COMP mixing zone's full volume `V1max` and `ctol` the quality
-    tolerance (FIFO and LIFO merge an inflow within it of the last segment). Returns the
-    tank's quality; `c_tank`, the tank's current quality (`Stank.C`), is returned unchanged when
-    a model returns early (a chain with no segment).
+    tolerance's decision (`QualityTolerance`; FIFO and LIFO merge an inflow within it of
+    the last segment). Returns the tank's quality; `c_tank`, the tank's current quality
+    (`Stank.C`), is returned unchanged when a model returns early (a chain with no segment).
     The pool's scalars must be open."""
     if model == "MIXED":
         return _tankmix1(pool, chain, vin, win, vnet, c_tank)
@@ -149,7 +171,7 @@ def _tankmix3(pool, chain, ctol, vin, win, vnet, c_tank):
     if detached(vin) > 0.0:
         cin = win / vin
         seg = pool.last[chain]
-        if abs(detached(cs[seg]) - detached(cin)) < ctol:
+        if ctol.merges(cs[seg], cin):
             vs[seg] = vs[seg] + vin
         else:
             pool.add(chain, vin, cin)
@@ -176,7 +198,7 @@ def _tankmix4(pool, chain, ctol, vin, win, vnet, c_tank):
     c_tank = cs[seg]
     net = detached(vnet)
     if net > 0.0:
-        if abs(detached(cs[seg]) - detached(cin)) < ctol:
+        if ctol.merges(cs[seg], cin):
             vs[seg] = vs[seg] + vnet
         else:
             pool.add(chain, vnet, cin)

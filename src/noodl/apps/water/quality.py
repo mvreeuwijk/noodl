@@ -51,7 +51,12 @@ from noodl.apps.water.quality_react import (
     wall_coefficients,
     wall_rate,
 )
-from noodl.apps.water.quality_tanks import detached, initial_segments, mix_tank
+from noodl.apps.water.quality_tanks import (
+    QualityTolerance,
+    detached,
+    initial_segments,
+    mix_tank,
+)
 from noodl.apps.water.units import M_PER_FT, Q_STAGNANT_CFS, rounded_cfs_per_m3s
 
 Tensor = torch.Tensor
@@ -402,7 +407,7 @@ class QualityRouter:
         self.mode = quality.mode
         self.qstep = int(quality_step)
         self.attached = attached
-        self.ctol = float(quality.tolerance)
+        self.ctol = QualityTolerance(quality.tolerance, quality.mode)
         # flows and demands as EPANET's quality reads them (cfs, as m3 per s), and its
         # `Q_STAGNANT` (0.005 gpm in cfs, `quality.c`) in the same units
         self.flow_scale = flow_volume_scale(net.options.flow_units)
@@ -955,7 +960,7 @@ class QualityRouter:
             return
         pool = self.pool
         seg = pool.last[k]
-        if seg >= 0 and abs(detached(pool.cs[seg]) - detached(c)) < self.ctol:
+        if seg >= 0 and self.ctol.merges(pool.cs[seg], c):
             cs, vs = pool.cs, pool.vs
             cs[seg] = (cs[seg] * vs[seg] + c * v) / (vs[seg] + v)
             vs[seg] = vs[seg] + v

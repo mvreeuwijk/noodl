@@ -29,6 +29,7 @@ from noodl.apps.water.quality_react import (
     wall_coefficients,
     wall_rate,
 )
+from noodl.apps.water.quality_tanks import QualityTolerance
 from noodl.apps.water.simulate import water_run
 
 F64 = torch.float64
@@ -758,3 +759,19 @@ def test_the_mass_balance_keeps_the_autograd_graph():
         assert term.requires_grad
     (grad,) = torch.autograd.grad(balance.final, c0)
     assert float(grad.abs().sum()) > 0.0
+
+
+def test_the_tolerance_decides_a_tie_in_epanets_internal_unit():
+    """Ruling Q32: `|c_seg - c| < Ctol` in EPANET's internal quality unit (a CHEMICAL's per
+    ft3, `Ucf = 1 / LperFT3`, both sides and `Ctol` divided by it; AGE and TRACE as they
+    are). At 0.09 against 0.08 mg/L with `Ctol` 0.01 (Net2's pattern-3 step) mg/L says merge
+    (`0.009999999999999995 < 0.01`) and EPANET's unit does not (`0.28317000000000014` against
+    `0.28317`); the decision takes tensors detached and keeps nothing of their graph."""
+    assert abs(0.09 - 0.08) < 0.01
+    chemical = QualityTolerance(0.01, "CHEMICAL")
+    assert not chemical.merges(0.09, 0.08)
+    assert not chemical.merges(torch.tensor(0.09, dtype=F64, requires_grad=True), 0.08)
+    assert chemical.merges(0.09, 0.0801)
+    assert QualityTolerance(0.01, "AGE").merges(0.09, 0.08)
+    assert QualityTolerance(0.01, "TRACE").merges(0.09, 0.08)
+    assert not QualityTolerance(0.0, "CHEMICAL").merges(0.5, 0.5)
