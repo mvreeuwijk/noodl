@@ -46,6 +46,7 @@ from noodl.apps.water.network import (
     initial_drivers,
     initial_state,
     link_states,
+    pattern_factor,
     power_curve,
     tank_inflow,
     tank_levels,
@@ -53,9 +54,24 @@ from noodl.apps.water.network import (
     water_steady,
     water_step,
 )
+from noodl.apps.water.quality import (
+    QualityMassBalance,
+    QualityRouter,
+    SegmentPool,
+    quality_step,
+    sort_nodes,
+)
+from noodl.apps.water.quality_data import QualitySource, WaterQuality
+from noodl.apps.water.quality_react import (
+    bulk_rate,
+    pipe_coefficients,
+    tank_coefficients,
+    wall_coefficients,
+    wall_rate,
+)
 from noodl.apps.water.report import link_table, pressure_head, to_kilopascal
 from noodl.apps.water.rules import evaluate_rules, take_actions
-from noodl.apps.water.simulate import WaterResults, pattern_factor, water_run
+from noodl.apps.water.simulate import WaterResults, water_run
 from noodl.apps.water.tanks import LinkData, TankLevels, TankVolumeCurve
 from noodl.apps.water.units import EPANET_QCF, FLOW_UNITS
 
@@ -71,15 +87,17 @@ __all__ = [
     "PressureSustainingValve",
     "Junction", "LinkData",
     "MinorLoss", "PiecewisePumpCurve", "Premise", "PressureDrivenDemand", "Pump", "PumpCurve",
-    "PumpEnergy",
-    "Reservoir", "Rule", "ShutLinks",
+    "PumpEnergy", "QualityMassBalance", "QualityRouter", "QualitySource",
+    "Reservoir", "Rule", "SegmentPool", "ShutLinks",
     "Tank",
     "TankLevels", "TankVolumeCurve", "ThrottleValve", "Valve", "WaterNetwork", "WaterOptions",
-    "WaterPipe", "WaterResults",
-    "apply_rules", "build_model", "initial_drivers", "initial_state", "link_states",
+    "WaterPipe", "WaterQuality", "WaterResults",
+    "apply_rules", "build_model", "bulk_rate", "initial_drivers", "initial_state", "link_states",
     "link_table", "pressure_head",
-    "composite_friction_factor", "evaluate_rules", "pattern_factor", "power_curve",
-    "read_epanet_inp", "tank_inflow", "tank_levels",
+    "composite_friction_factor", "evaluate_rules", "pattern_factor", "pipe_coefficients",
+    "power_curve", "quality_step", "read_epanet_inp", "sort_nodes", "tank_coefficients",
+    "tank_inflow", "tank_levels",
     "take_actions", "three_point_curve",
-    "to_kilopascal", "twoloop", "water_run", "water_step", "water_steady",
+    "to_kilopascal", "twoloop", "wall_coefficients", "wall_rate", "water_run", "water_step",
+    "water_steady",
 ]
