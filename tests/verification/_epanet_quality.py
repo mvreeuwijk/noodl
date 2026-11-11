@@ -161,6 +161,14 @@ def _open(en, copy: Path, report: Path, binary: Path, *,
         raise AssertionError(f"EN_setoption(EN_ACCURACY, {accuracy}) returned {code}")
 
 
+def _set_trials(en, trials: int | None) -> None:
+    """`EN_setoption(EN_TRIALS, trials)` on the open project, replacing the copy's TRIALS 400
+    (`epanet_copy`); nothing when `trials` is None."""
+    if trials is not None:
+        code = en.ENlib.EN_setoption(en._project, EN_TRIALS, ctypes.c_double(trials))
+        assert code == 0, f"EN_setoption(EN_TRIALS, {trials}) returned {code}"
+
+
 def _no_warnings(en, path) -> None:
     """EPANET's warnings (codes 1 to 6) are only logged by wntr: refuse a run that had one."""
     assert not en.Warnflag, f"EPANET warned on {path}: {en.errcodelist}"
@@ -268,10 +276,11 @@ def mass_balance_si(terms: Mapping[str, float], mode: str) -> dict[str, float]:
     return {key: value if key == "ratio" else value * scale for key, value in terms.items()}
 
 
-def epanet_quality(path: Path, *, setup=None) -> QualityReference:
+def epanet_quality(path: Path, *, setup=None, trials: int | None = None) -> QualityReference:
     """EPANET 2.2's quality on `path` (`EN_solveH`, then `EN_solveQ`'s `EN_runQ`/`EN_nextQ`
     loop; module docstring), in a temporary directory. `setup(en)`, when given, is called
-    on the open project before the run (e.g. `EN_setnodevalue`)."""
+    on the open project before the run (e.g. `EN_setnodevalue`); `trials` replaces the
+    copy's TRIALS 400 (as `epanet_results`; a test that passes it says why)."""
     with tempfile.TemporaryDirectory(prefix="epanet-q-", ignore_cleanup_errors=True) as tmp:
         directory = Path(tmp)
         copy = epanet_copy(path, directory)
@@ -280,6 +289,7 @@ def epanet_quality(path: Path, *, setup=None) -> QualityReference:
         _open(en, copy, report, directory / "quality.bin")
         try:
             node_names, link_names = node_and_link_ids(en)
+            _set_trials(en, trials)
             if setup is not None:
                 setup(en)
             en.ENsolveH()
@@ -343,9 +353,10 @@ def epanet_hydraulics(path: Path, *, setup=None) -> dict:
 
 
 @contextmanager
-def epanet_session(path: Path) -> Iterator:
+def epanet_session(path: Path, *, trials: int | None = None) -> Iterator:
     """wntr's `ENepanet` open on EPANET's copy of `path` (`epanet_copy`, `_open`: ACCURACY
-    `REFERENCE_ACCURACY`) in a temporary directory, for a caller that drives the toolkit
+    `REFERENCE_ACCURACY`; `trials` as for `epanet_quality`) in a temporary directory, for a
+    caller that drives the toolkit
     itself (`ENopenH`, `ENrunH`, ...); on leaving, `_no_warnings` (unless the body raised)
     and `ENclose`."""
     with tempfile.TemporaryDirectory(prefix="epanet-s-", ignore_cleanup_errors=True) as tmp:
@@ -354,6 +365,7 @@ def epanet_session(path: Path) -> Iterator:
         en = _toolkit()
         _open(en, copy, directory / "session.rpt", directory / "session.bin")
         try:
+            _set_trials(en, trials)
             yield en
             _no_warnings(en, path)
         finally:
@@ -388,9 +400,7 @@ def epanet_results(path: Path, *, duration: float | None = None, reader=None,
         en = _toolkit()
         _open(en, copy, report, binary, accuracy=accuracy)
         try:
-            if trials is not None:
-                code = en.ENlib.EN_setoption(en._project, EN_TRIALS, ctypes.c_double(trials))
-                assert code == 0, f"EN_setoption(EN_TRIALS, {trials}) returned {code}"
+            _set_trials(en, trials)
             en.ENsolveH()
             en.ENsolveQ()
             darcy_weisbach = option(en, EN_HEADLOSSFORM) == EN_DW
