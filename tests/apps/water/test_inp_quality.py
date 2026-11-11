@@ -296,3 +296,12 @@ def test_check_refuses_a_hand_built_quality_by_name(tmp_path):
     refused("source type 'FOO'", sources=(QualitySource("J1", "FOO", 1.0),))
     refused("mixing model 'PLUG'", mixing={"T1": ("PLUG", 1.0)})
     dataclasses.replace(net, quality=WaterQuality(initial={"J1": 1.0})).check()
+
+
+@pytest.mark.parametrize("line, seconds", [
+    ("QUAL FOO 10", 36000.0), ("Quality Timestep 5 MIN", 300.0), ("QUAL 0:10", 600.0),
+    ("Quality Timestep 0:10", 600.0), ("QUAL X Y 90 SEC", 90.0), ("QUAL 2", 7200.0)])
+def test_the_quality_step_is_the_last_token_or_the_last_two(tmp_path, line, seconds):
+    """`timedata` (`input3.c`) reads the value from the last token, or from the last two when
+    the last is a unit, whatever words come between the keyword and it."""
+    assert _quality(tmp_path, times=line).quality_timestep == seconds

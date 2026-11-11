@@ -19,7 +19,7 @@ from __future__ import annotations
 import re
 
 from noodl.apps.inpfile import InpLine, as_float
-from noodl.apps.water.inp_times import time_with_unit
+from noodl.apps.water.inp_times import time_unit_scale, time_with_unit
 from noodl.apps.water.quality_data import (
     MIXING_MODELS,
     SOURCE_KINDS,
@@ -149,8 +149,12 @@ def read_quality(
                 diffusivity_file = value
     for line in sections.get("TIMES", []):
         if is_quality_time(line):
-            # `timedata` sets Qstep for any line whose first token matches QUAL
-            index = 2 if len(line.fields) > 2 and match(line.fields[1], "TIME") else 1
+            # `timedata` sets Qstep for any line whose first token matches QUAL, from the
+            # last token (`getfloat` or `hour(Tok[n], "")`), else from the last two (`hour(
+            # Tok[n-1], Tok[n])`, a value and its unit), whatever words lie in between
+            index = len(line.fields) - 1
+            if index > 1 and time_unit_scale(line.fields[index]) is not None:
+                index -= 1
             step = time_with_unit(line.fields, index, path, line)
             quality_timestep = step if step > 0 else None
 
