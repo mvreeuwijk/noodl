@@ -931,8 +931,13 @@ def _drain_points(tmp_path: Path, model: str):
     CAUSE, a FRONT SHIFT. The edge of a segment reaches `P6` in one quality step. noodl's
     hydraulics and EPANET's differ by up to 2e-8 m3/s in `P6` (the base's measured 1.2e-8 and
     the float32 read-back), so by `dV = sum |dq| dt` over the drain so far (up to 4e-4 m3), and
-    the edge falls that much earlier or later: that step's quality moves by at most the whole
-    jump (`scale`) times `dV` over the volume of the step's outflow, `|q| Qstep` (1.5 m3).
+    the edge falls that much earlier or later: that step's quality moves by at most the jump
+    (EPANET's own range of that quality within an hour either side of the point, 0.4 to 1.0
+    mg/L here) times `dV` over the volume of the step's outflow, `|q| Qstep` (1.5 m3). Each
+    admitted point must lie between a fifteenth of that prediction and the prediction itself.
+    MEASURED, error over prediction: FIFO P6 11 h 4.4e-5 / 6.0e-4 (0.07), LIFO P6 15 h
+    4.2e-5 / 2.7e-4 (0.15), LIFO T1 16 h 3.4e-5 / 1.0e-4 (0.32), with `dV` 4.7e-4 to 6.4e-4 m3
+    (P6 flow differences of 2e-8 m3/s and less, summed over the drain).
     Not a flipped merge: noodl at `Tolerance` 0.01001 and 0.00999 (the other sides of every
     `fabs(seg->c - cin) < Ctol` near 0.01; checked by hand) leaves these points as they are."""
     path = QUALITY_CASES[f"mixing_{model}_segments"](tmp_path)
@@ -966,8 +971,14 @@ def _drain_points(tmp_path: Path, model: str):
             assert names[column] in ("T1", "P6"), (t, names[column], float(error[column]))
             moved = float(dq[:sum(1 for h in hours if h < t)].sum())
             flow = abs(float(theirs_q[max(i for i, h in enumerate(hours) if h <= t)]))
-            assert float(error[column]) <= scale * moved / (flow * qstep), (
-                t, names[column], float(error[column]))
+            ref = (reference.node[:, reference.node_names.index(names[column])]
+                   if names[column] in reference.node_names
+                   else reference.link[:, reference.link_names.index(names[column])])
+            near = ref[max(0, row - 1):row + 2]        # the jump: EPANET's range within +-1 h
+            jump = float(near.max() - near.min())
+            predicted = jump * moved / (flow * qstep)
+            assert predicted / 15 <= float(error[column]) <= predicted, (
+                t, names[column], float(error[column]), predicted)
     assert_matches_epanet(diagnostics, reference, ctol=0.01, admitted=beyond)
     return diagnostics, beyond
 
@@ -1001,5 +1012,9 @@ def test_a_2comp_tank_without_net_flow_matches_epanet(tmp_path):
     closed = [i for i, t in enumerate(hydraulics["times"]) if 3 * 3600 <= t < 5 * 3600]
     assert closed and bool((p6[closed] == 0.0).all())
     results, *_ = _matches(tmp_path, "mixing_2comp_no_flow")
+    # noodl's own closed `P6` carries exactly 0 (a closed link's flow is set to 0), not merely
+    # below `ZERO_FLOW`
+    hours = [i for i, t in enumerate(results.time.tolist()) if 3 * 3600 <= t < 5 * 3600]
+    assert hours and bool((results.flow[hours, results.link_names.index("P6")] == 0.0).all())
     open_, *_ = _compare(tmp_path, "mixing_2comp")
     assert float((_quality(results, "T1") - _quality(open_, "T1")).abs().max()) > 1e-4

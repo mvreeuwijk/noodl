@@ -64,7 +64,6 @@ TRACE_QUALITY = 100.0
 _M3_PER_FT3 = 0.3048**3
 
 
-_value = detached      # a decision's operand: `x` as a detached Python float (Ruling Q5)
 
 
 def flow_volume_scale(flow_units: str | None) -> float:
@@ -313,7 +312,7 @@ def _interp(points, x):
     if len(xs) == 1:
         return ys[0]
     m = 1
-    while m < len(xs) - 1 and _value(x) > xs[m]:
+    while m < len(xs) - 1 and detached(x) > xs[m]:
         m += 1
     dx = xs[m] - xs[m - 1]
     if abs(dx) < 1e-6:
@@ -321,7 +320,7 @@ def _interp(points, x):
     return ys[m] - (xs[m] - x) * (ys[m] - ys[m - 1]) / dx
 
 
-def _refuse_later_features(net, quality: WaterQuality) -> None:
+def _refuse_unanswerable_orders(net, quality: WaterQuality) -> None:
     """The reaction orders EPANET itself has no finite answer for, refused by name
     (Ruling Q20)."""
     if quality.mode == "CHEMICAL":
@@ -370,7 +369,7 @@ class QualityRouter:
     def __init__(self, model, quality: WaterQuality, *, inputs: Mapping[str, Tensor],
                  quality_step: int, attached: bool, diagnostics: dict | None = None) -> None:
         net = model.water_network
-        _refuse_later_features(net, quality)
+        _refuse_unanswerable_orders(net, quality)
         self.net = net
         self.quality = quality
         self.mode = quality.mode
@@ -444,7 +443,7 @@ class QualityRouter:
             model, fraction = quality.mixing.get(tank.name, ("MIXED", 1.0))
             # `V1max = fraction x Vmax` (`input1.c`, `convertunits`), Vmax the volume at the
             # maximum level (the curve there, or `Vmin + A (max - min)`)
-            vmz = fraction * _value(_tank_volume(net, tank, tank.max_level))
+            vmz = fraction * detached(_tank_volume(net, tank, tank.max_level))
             self.tank_mix.append((model, vmz))
             initial_segments(self.pool, n_links + i, model, _tank_volume(net, tank, levels[i]),
                              c0[node_index[tank.name]], vmz)
@@ -559,15 +558,15 @@ class QualityRouter:
         in `flow_volume_scale`'s EPANET m3); SETPOINT `max(c - quality, 0)`; FLOWPACED `c`.
         Concentrations keep their graph; the decisions are on detached values."""
         base = self.source_base.get(n)
-        if base is None or _value(base) == 0.0:
+        if base is None or detached(base) == 0.0:
             return 0.0
-        if _value(volout) / dt <= self.q_stagnant:
+        if detached(volout) / dt <= self.q_stagnant:
             return 0.0
         c = self.source_c[n]
         kind = self.source_kind[n]
         if kind == "CONCEN":
             if self.junction[n]:
-                if _value(self.demand[n]) < 0.0:
+                if detached(self.demand[n]) < 0.0:
                     return -c * self.demand[n] * dt / volout
                 return 0.0
             return c
@@ -575,7 +574,7 @@ class QualityRouter:
             return c * dt / (volout * EPANET_LITRES_PER_M3)
         if kind == "SETPOINT":
             gap = c - self.node[n]
-            return gap if _value(gap) > 0.0 else 0.0
+            return gap if detached(gap) > 0.0 else 0.0
         return c
 
     # ---- results -------------------------------------------------------------------
@@ -596,7 +595,7 @@ class QualityRouter:
             for seg in pool.segments(k):
                 vsum = vsum + vs[seg]
                 msum = msum + cs[seg] * vs[seg]
-            if _value(vsum) > 0.0:
+            if detached(vsum) > 0.0:
                 out.append(msum / vsum)
             else:
                 u, v = self.ends[k]
@@ -670,7 +669,7 @@ class QualityRouter:
         then negative is never reversed); True when any direction changed."""
         changed = False
         for k in range(self.n_links):
-            q = _value(self.flow[k])
+            q = detached(self.flow[k])
             new = (q > 0.0) - (q < 0.0)
             if abs(q) < self.q_stagnant:
                 new = 0
@@ -729,8 +728,8 @@ class QualityRouter:
                 if (v if self.direction[k] < 0 else u) == n:
                     self._outflow(k, quality, dt)
             if record:
-                inflow_v[n], inflow_m[n], outflow_v[n] = (_value(volin), _value(massin),
-                                                          _value(volout))
+                inflow_v[n], inflow_m[n], outflow_v[n] = (detached(volin), detached(massin),
+                                                          detached(volout))
         pool.close()
         if record:
             self.diagnostics["segments"].append(pool.counts())
@@ -783,16 +782,16 @@ class QualityRouter:
         pool = self.pool
         cs, vs = pool.cs, pool.vs
         v = abs(self.flow[k]) * dt
-        while _value(v) > 0.0:
+        while detached(v) > 0.0:
             seg = pool.first[k]
             if seg < 0:
                 break
             vseg = vs[seg]
-            vseg = vseg if _value(vseg) < _value(v) else v        # MIN(vseg, v)
+            vseg = vseg if detached(vseg) < detached(v) else v        # MIN(vseg, v)
             volin = volin + vseg
             massin = massin + vseg * cs[seg]
             v = v - vseg
-            if _value(v) >= 0.0 and _value(vseg) >= _value(vs[seg]):
+            if detached(v) >= 0.0 and detached(vseg) >= detached(vs[seg]):
                 pool.remove_first(k)
             else:
                 vs[seg] = vs[seg] - vseg
@@ -811,7 +810,7 @@ class QualityRouter:
         returned."""
         if self.junction[n]:
             volin = volin - min(0.0, self.demand[n]) * dt
-            if _value(volin) > 0.0:
+            if detached(volin) > 0.0:
                 self.node[n] = massin / volin
             elif self.reactive:
                 self.node[n] = self._no_flow_quality(n)
@@ -821,7 +820,7 @@ class QualityRouter:
             self.node[n] = TRACE_QUALITY
             return self.node[n]
         added = self._source_quality(n, volout, dt)
-        if _value(added) == 0.0:
+        if detached(added) == 0.0:
             return self.node[n]
         if self.junction[n]:
             self.node[n] = self.node[n] + added
@@ -864,11 +863,11 @@ class QualityRouter:
         quality `c`, merged into its last (upstream) segment when within `Ctol` of its
         quality, else added as a new segment."""
         v = abs(self.flow[k]) * dt
-        if _value(v) == 0.0:
+        if detached(v) == 0.0:
             return
         pool = self.pool
         seg = pool.last[k]
-        if seg >= 0 and abs(_value(pool.cs[seg]) - _value(c)) < self.ctol:
+        if seg >= 0 and abs(detached(pool.cs[seg]) - detached(c)) < self.ctol:
             cs, vs = pool.cs, pool.vs
             cs[seg] = (cs[seg] * vs[seg] + c * v) / (vs[seg] + v)
             vs[seg] = vs[seg] + v

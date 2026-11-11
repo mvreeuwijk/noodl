@@ -39,12 +39,13 @@ def initial_segments(pool, chain: int, model: str, volume, c, vmz: float) -> Non
 
 
 def mix_tank(pool, chain: int, model: str, vmz: float, ctol: float, vin, win, vnet,
-             c_tank=0.0):
+             c_tank):
     """`mixtank` (`qualreact.c`): tank chain `chain` mixed by `model` ("MIXED", "2COMP",
     "FIFO", "LIFO") with inflow volume `vin`, inflow mass `win` and `vnet = vin - vout` over
     the step; `vmz` is the 2COMP mixing zone's full volume `V1max` and `ctol` the quality
     tolerance (FIFO and LIFO merge an inflow within it of the last segment). Returns the
-    tank's quality; `c_tank` is returned unchanged when a model returns early (no segment).
+    tank's quality; `c_tank`, the tank's current quality (`Stank.C`), is returned unchanged when
+    a model returns early (a chain with no segment).
     The pool's scalars must be open."""
     if model == "MIXED":
         return _tankmix1(pool, chain, vin, win, vnet, c_tank)
