@@ -336,6 +336,24 @@ def test_quality_false_runs_no_quality():
     assert torch.equal(off.head, on.head) and torch.equal(off.flow, on.flow)
 
 
+def test_quality_none_on_a_network_without_quality_refuses_a_quality_input():
+    """`quality=None` resolves off on a network with no mode: the error names the cause and the
+    inputs, not `quality=False`, and does not advise `quality=True` (which would raise)."""
+    model, _, _ = build_model(read_epanet_inp(
+        BASE.with_name("twoloop_si.inp")))
+    state = initial_state(model)
+    state["quality.initial"] = torch.zeros(len(model.node_names), dtype=F64)
+    with pytest.raises(ValueError, match=r"quality\.initial.*quality=None, and the network "
+                                         r"defines no water quality") as info:
+        water_run(model, state, duration=3600)
+    assert "quality=True" not in str(info.value)
+    model, _, _ = build_model(read_epanet_inp(BASE))
+    state = initial_state(model)
+    state["quality.initial"] = torch.zeros(len(model.node_names), dtype=F64)
+    with pytest.raises(ValueError, match=r"quality=None, and the run's duration is 0"):
+        water_run(model, state, duration=0.0)
+
+
 def test_a_quality_input_without_quality_is_refused():
     """`quality.initial` in the state of a run without quality would be dropped: refused
     by name."""

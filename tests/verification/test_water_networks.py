@@ -192,7 +192,7 @@ def test_anytown_heads_with_epanets_tank_leaks_as_demands(tmp_path):
     path, _ = _anytown(tmp_path, placeholders=12)
     results, _, _ = _epanet(path, (6,))
     model, _, _ = build_model(read_epanet_inp(path))
-    run = water_run(model)
+    run = water_run(model, quality=False)
     nodes, links = model.node_names, model.link_names
     theirs = torch.tensor(results.node["head"][nodes].to_numpy(), dtype=F64)[:24]
 
@@ -227,7 +227,7 @@ def test_anytown_heads_with_epanets_tank_leaks_as_demands(tmp_path):
     leaky = tmp_path / "anytown-leaky.inp"
     leaky.write_text(text)
     model2, _, _ = build_model(read_epanet_inp(leaky))
-    assert worst(water_run(model2), model2.node_names) < 1e-6
+    assert worst(water_run(model2, quality=False), model2.node_names) < 1e-6
 
 
 #: The outcome of reading and building each network `wntr` ships: `None` builds, a string is

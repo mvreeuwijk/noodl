@@ -399,11 +399,15 @@ def test_quality_leaves_the_hydraulics_unchanged():
     model, _, _ = build_model(read_epanet_inp(NET1))
     on, off = water_run(model, quality=True), water_run(model, quality=False)
     assert on.node_quality is not None and off.node_quality is None
-    for name in ("head", "flow", "tank_level", "status", "setting", "demand", "pressure"):
-        assert torch.equal(getattr(on, name), getattr(off, name)), name
-    for field in dataclasses.fields(on.energy):
-        mine, theirs = getattr(on.energy, field.name), getattr(off.energy, field.name)
-        if isinstance(mine, torch.Tensor):
-            assert torch.equal(mine, theirs), field.name
+    skipped = {"node_quality", "link_quality", "quality_units", "mass_balance"}
+    for field in dataclasses.fields(WaterResults):
+        if field.name in skipped:
+            continue
+        mine, theirs = getattr(on, field.name), getattr(off, field.name)
+        if field.name == "energy":
+            pairs = [(getattr(mine, f.name), getattr(theirs, f.name))
+                     for f in dataclasses.fields(mine)]
         else:
-            assert mine == theirs, field.name
+            pairs = [(mine, theirs)]
+        for a, b in pairs:
+            assert torch.equal(a, b) if isinstance(a, torch.Tensor) else a == b, field.name

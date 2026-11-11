@@ -210,7 +210,7 @@ def _extended_period(model):
     """Net1's run through `water_run` (EPANET's step rule): the tank level at every report
     time from t = 0, and the number of hydraulic steps taken."""
     diagnostics: dict = {}
-    out = water_run(model, diagnostics=diagnostics)
+    out = water_run(model, quality=False, diagnostics=diagnostics)
     return out.tank_level[:, 0].tolist(), len(diagnostics["times"]) - 1
 
 
@@ -296,7 +296,7 @@ def test_net1_report_times_and_patterns_match_epanet(tmp_path, case):
     path, results = _epanet(tmp_path, "Net1.inp", edits=_NET1_TIMING[case])
     net = read_epanet_inp(path)
     model, _, _ = build_model(net)
-    run = water_run(model)
+    run = water_run(model, quality=False)
     _compare_run(model, run, results, tanks={"2"})
     pump = model.link_names.index("9")
     theirs = torch.tensor(results.link["setting"]["9"].to_numpy(), dtype=F64)
@@ -411,7 +411,7 @@ def test_rules_match_epanet(tmp_path):
         net = read_epanet_inp(path)
         model, _, _ = build_model(net)
         rows = _toolkit_run(path, model.link_names, model.node_names)
-        run = water_run(model)
+        run = water_run(model, quality=False)
         assert run.time.tolist() == [float(t) for t in sorted(rows)]
         heads = torch.tensor([rows[t]["head"] for t in sorted(rows)], dtype=F64)
         flows = torch.tensor([rows[t]["flow"] for t in sorted(rows)], dtype=F64)
@@ -457,7 +457,7 @@ def test_energy_under_rules_matches_epanet(tmp_path, pump):
         reader = _EnergyBin()
         epanet_results(path, reader=reader)
         model, _, _ = build_model(read_epanet_inp(path))
-        energy = water_run(model).energy
+        energy = water_run(model, quality=False).energy
         ours = [float(energy.utilisation[0]), float(energy.efficiency[0]),
                 float(energy.energy_per_volume[0]), float(energy.average_power[0]),
                 float(energy.peak_power[0]), float(energy.cost[0])]
@@ -536,7 +536,7 @@ def test_an_unaligned_report_start_follows_epanets_output_rule(tmp_path):
         if t >= rtime:
             reported.append((rtime, heads, flows))
             rtime += 3600
-    run = water_run(model)
+    run = water_run(model, quality=False)
     assert run.time.tolist() == [float(r[0]) for r in reported]
     assert run.time[0] == 5400.0 and len(reported) == 23
     heads = torch.tensor([r[1] for r in reported], dtype=F64)
@@ -602,7 +602,7 @@ def test_specific_gravity_on_an_si_file_matches_epanet(tmp_path):
     net = read_epanet_inp(path)
     assert net.options.specific_gravity == 1.2
     model, _, _ = build_model(net)
-    run = water_run(model)
+    run = water_run(model, quality=False)
     _compare_run(model, run, results, heads=1e-6)
     junctions = [j.name for j in net.junctions]
     demand = torch.tensor(results.node["demand"][junctions].to_numpy(), dtype=F64)
@@ -1126,7 +1126,7 @@ def test_gradient_reaches_the_tank_area_through_a_step(tmp_path):
     assert model.head_scale == 1.0
 
     def level_sum():
-        return water_run(model, duration=3600.0).tank_level[-1].sum()
+        return water_run(model, duration=3600.0, quality=False).tank_level[-1].sum()
 
     storage.C.requires_grad_(True)
     level_sum().backward()
@@ -2599,7 +2599,7 @@ def test_anytown_as_shipped_is_refused_by_name(tmp_path):
     demand = [j.name for j in shipped.junctions if j.demand]
     with pytest.raises(ValueError, match=r"junction\(s\) (\[.*\]) have a demand that no "
                                          r"reservoir, tank or inflow reaches") as info:
-        water_run(model)
+        water_run(model, quality=False)
     assert info.match(r"\[" + ", ".join(repr(name) for name in demand) + r"\]")
     path, _ = _anytown(tmp_path, pumps="closed", tanks="shipped")
     net = read_epanet_inp(path)
@@ -3088,7 +3088,7 @@ def _tank_run(model):
     """`(levels, flows, results)` at every report time from 0 to the duration: every tank's
     level and the link flows of the solve at that time (EPANET reports the solution of the
     step that starts there), from `water_run`."""
-    out = water_run(model)
+    out = water_run(model, quality=False)
     return out.tank_level, out.flow, out
 
 
@@ -3283,7 +3283,7 @@ def test_tank_overflow_like_epanet(tmp_path):
     assert bool((run.tank_overflow[: int((~full).sum()) - 1, 0] == 0).all())
     # over a step that starts full, everything that flows in overflows
     full_state = initial_state(model, values={"water.tank_level": {"2": 150 * 0.3048}})
-    short = water_run(model, full_state, duration=600.0)
+    short = water_run(model, full_state, duration=600.0, quality=False)
     assert short.time.tolist() == [0.0]
     solved = water_steady(model, full_state, drivers)
     assert float(short.tank_overflow[0, 0]) > 0.03
@@ -3327,7 +3327,8 @@ def _compare_energy(path, *, duration=None, warnings=()):
     theirs, demand = _epanet_energy(path, warnings)
     net = read_epanet_inp(path)
     model, _, _ = build_model(net)
-    run = water_run(model) if duration is None else water_run(model, duration=duration)
+    run = (water_run(model, quality=False) if duration is None
+           else water_run(model, duration=duration, quality=False))
     energy = run.energy
     volume = _M3_PER_MGAL if net.options.flow_units in _US_FLOW_UNITS else 1.0
     worst = 0.0
@@ -3447,7 +3448,7 @@ def test_a_pump_closed_and_opened_again_matches_epanet(tmp_path, case):
     assert run.status[:, pump].tolist() == [OPEN, OPEN, CLOSED, CLOSED, OPEN, OPEN, OPEN]
     assert run.setting[:, pump].tolist() == [1.0, 1.0, 0.0, 0.0, 1.0, 1.0, 1.0]
     diagnostics: dict = {}
-    water_run(model, diagnostics=diagnostics)
+    water_run(model, quality=False, diagnostics=diagnostics)
     steps = _toolkit_step_times(path)
     assert [float(t) for t in diagnostics["times"]] == steps
     assert 9000.0 not in steps
@@ -3568,7 +3569,7 @@ def test_reservoir_head_pattern_with_an_idle_tank_matches_epanet(tmp_path):
     path.write_text(_RESERVOIR_PATTERN)
     results = epanet_results(path)
     model, _, _ = build_model(read_epanet_inp(path))
-    run = water_run(model)
+    run = water_run(model, quality=False)
     j = model.node_names.index("J1")
     ours = [float(h) for h in run.head[:, j]]
     theirs = [float(h) for h in results.node["head"]["J1"]]

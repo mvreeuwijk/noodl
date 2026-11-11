@@ -436,11 +436,20 @@ def water_run(model, state=None, drivers=None, *, duration: float | None = None,
     if quality is True and clock.duration == 0:
         raise ValueError("water_run: quality=True, but the run's duration is 0 (`[TIMES] "
                          "DURATION 0`, a steady state), which EPANET runs without quality")
+    asked = quality
     quality = defined and clock.duration > 0 if quality is None else bool(quality)
     if quality_inputs and not quality:
+        if asked is not None:
+            why, advice = "quality=False", "; drop the inputs or pass quality=True"
+        elif not defined:
+            why = "quality=None, and the network defines no water quality"
+            advice = "; the network needs a `[OPTIONS] QUALITY` mode to use them"
+        else:
+            why = "quality=None, and the run's duration is 0 (`DURATION 0`)"
+            advice = "; a positive duration is needed to use them"
         raise ValueError(f"water_run: the state or the drivers carry "
                          f"{sorted(quality_inputs)}, but no water quality runs "
-                         f"(quality={quality!r}); pass quality=True")
+                         f"({why}){advice}")
     if quality and "quality" in model.layers:
         raise ValueError("water_run: the model carries the steady tracer "
                          "(`build_model(quality=...)`), which is not EPANET's quality; build it "
@@ -622,16 +631,17 @@ class _Routers:
         self.attached = torch.is_grad_enabled() and (
             flow.requires_grad or any(v.requires_grad for v in inputs.values()))
         step = quality_step(net, clock.hydraulic_step)
+        rows = {k: self.rows(v) for k, v in inputs.items()}
         self.routers = [
             QualityRouter(model, net.quality,
-                          inputs={k: self.slice(v, i) for k, v in inputs.items()},
+                          inputs={k: v[i] for k, v in rows.items()},
                           quality_step=step, attached=self.attached, diagnostics=diagnostics)
             for i in range(math.prod(self.shape))]
 
-    def slice(self, value: Tensor, i: int) -> Tensor:
-        """Instance `i` (row-major over the batch shape) of `value` (..., n)."""
+    def rows(self, value: Tensor) -> Tensor:
+        """`value` (..., n) as (instances, n), row-major over the batch shape."""
         n = value.shape[-1]
-        return value.expand(self.shape + (n,)).reshape(-1, n)[i]
+        return value.expand(self.shape + (n,)).reshape(-1, n)
 
     def _stack(self, rows: list[Tensor]) -> Tensor:
         return torch.stack(rows).reshape(self.shape + rows[0].shape)
@@ -643,9 +653,9 @@ class _Routers:
 
     def advance(self, t: int, step: int, *, flow: Tensor, closed: Tensor,
                 demand: Tensor) -> None:
+        flow, closed, demand = self.rows(flow), self.rows(closed), self.rows(demand)
         for i, router in enumerate(self.routers):
-            router.advance(t, step, flow=self.slice(flow, i), closed=self.slice(closed, i),
-                           demand=self.slice(demand, i))
+            router.advance(t, step, flow=flow[i], closed=closed[i], demand=demand[i])
 
     def mass_balance(self) -> QualityMassBalance:
         balances = [r.mass_balance() for r in self.routers]
