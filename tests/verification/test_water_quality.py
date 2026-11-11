@@ -15,7 +15,7 @@ import pytest
 import torch
 
 from noodl.apps.water.inp import read_epanet_inp
-from noodl.apps.water.network import build_model
+from noodl.apps.water.network import build_model, initial_state
 from noodl.apps.water.simulate import water_run
 from noodl.apps.water.units import Q_STAGNANT_CFS, rounded_cfs_per_m3s
 
@@ -343,7 +343,8 @@ QUALITY_CASES: dict[str, Callable[[Path], Path]] = {
 }
 
 
-def _residual_admitted(path: Path, diagnostics: dict, reference) -> list[tuple[int, str]]:
+def _residual_admitted(path: Path, diagnostics: dict, reference, *,
+                       setup=None) -> list[tuple[int, str]]:
     """The points of the dead end `P7` admitted beyond 1e-5 of the scale, each with its
     cause checked. MEASURED CAUSE: EPANET's `P7` carries its solver's residual (up to
     3.7e-9 m3/s at ACCURACY 1e-7, `test_the_quality_base_network_has_its_properties`) as a
@@ -351,8 +352,9 @@ def _residual_admitted(path: Path, diagnostics: dict, reference) -> list[tuple[i
     moves its actual flow); noodl's `P7` carries 1e-25 m3/s and keeps its initial
     segment. Every difference at `P7` must stay within what that residual can move: the
     scale times EPANET's `sum |q| dt` through `P7` so far over `P7`'s volume. Only for a
-    case whose EPANET `P7` flow stays below 1e-8 m3/s (a true residual)."""
-    hydraulics = epanet_hydraulics(path)
+    case whose EPANET `P7` flow stays below 1e-8 m3/s (a true residual). `setup` is the
+    reference's own (`epanet_quality`)."""
+    hydraulics = epanet_hydraulics(path, setup=setup)
     flow = hydraulics["flow"][:, hydraulics["link_names"].index("P7")].abs()
     if float(flow.max()) >= 1e-8:
         return []
@@ -506,3 +508,59 @@ def test_a_directed_flow_cycle_matches_epanet(tmp_path):
     for name in ("P2", "P3", "PU2"):
         assert bool((_link_flow(results, name) > 0).all())
     assert max(diagnostics["quality"][0]["cycle_breaks"]) > 0
+
+
+#: `EN_NodeProperty` `EN_TANKLEVEL` (`epanet2_enums.h`, v2.2).
+EN_TANKLEVEL = 8
+
+
+def test_a_tank_started_below_its_file_level_matches_epanet(tmp_path):
+    """`T1` started at 3.0 m (the file says 5 m) through `initial_state`'s tank levels, and
+    in EPANET through `EN_setnodevalue(EN_TANKLEVEL, 3.0)` (`epanet.c`: `V0 =
+    tankvolume(H0)`): the tank's initial segment holds the volume at 3.0 m, not the
+    file's, and the qualities match EPANET's."""
+    path = _chemical(tmp_path)
+    model, _, _ = build_model(read_epanet_inp(path))
+    state = initial_state(model, values={"water.tank_level": {"T1": 3.0}})
+    diagnostics: dict = {}
+    results = water_run(model, state, quality=True, diagnostics=diagnostics)
+    diagnostics["node_names"], diagnostics["link_names"] = (list(model.node_names),
+                                                            list(model.link_names))
+
+    def start_at_3(en):
+        en.ENsetnodevalue(en.ENgetnodeindex("T1"), EN_TANKLEVEL, 3.0)
+
+    reference = epanet_quality(path, setup=start_at_3)
+    assert float(results.tank_level[0, 0]) == pytest.approx(3.0, abs=1e-12)
+    assert_matches_epanet(diagnostics, reference, ctol=0.01,
+                          admitted=_residual_admitted(path, diagnostics, reference,
+                                                      setup=start_at_3))
+    # the file's 5 m would mix the tank otherwise
+    file_level = epanet_quality(path)
+    t1 = reference.node_names.index("T1")
+    assert float((file_level.node[:, t1] - reference.node[:, t1]).abs().max()) > 1e-3
+
+
+def test_the_quality_has_the_gradient_of_the_initial_tank_level(tmp_path):
+    """d(`T1`'s quality at 3 h)/d(its initial level) by autograd against a central
+    difference (h = 1e-3 m): the initial segment's volume comes from the state's tank
+    head and keeps its graph (Ruling Q5)."""
+    model, _, _ = build_model(read_epanet_inp(_chemical(tmp_path)))
+    t1 = model.node_names.index("T1")
+    tank = model.water_network.tanks[0]
+
+    def quality_at(level):
+        state = initial_state(model)
+        phi = state["water.phi"].clone()
+        phi[t1] = (tank.elevation + level) * model.head_scale
+        state["water.phi"] = phi
+        return water_run(model, state, duration=3 * 3600, quality=True).node_quality[-1, t1]
+
+    level = torch.tensor(4.0, dtype=F64, requires_grad=True)
+    (grad,) = torch.autograd.grad(quality_at(level), level)
+    h = 1e-3
+    with torch.no_grad():
+        central = (quality_at(torch.tensor(4.0 + h, dtype=F64))
+                   - quality_at(torch.tensor(4.0 - h, dtype=F64))) / (2 * h)
+    assert float(grad) != 0.0
+    assert float(grad) == pytest.approx(float(central), rel=1e-5)

@@ -151,6 +151,10 @@ def test_a_quality_step_of_zero_seconds_is_refused():
     assert quality_step(_base(quality_timestep=7200.0), 3600) == 3600
     with pytest.raises(ValueError, match="QUALITY TIMESTEP"):
         quality_step(net, 5)
+    # and through the run: a 5 s hydraulic step and no QUALITY TIMESTEP
+    model, _, _ = build_model(dataclasses.replace(net, hydraulic_timestep=5.0))
+    with pytest.raises(ValueError, match="QUALITY TIMESTEP"):
+        water_run(model, duration=60, quality=True)
 
 
 def test_an_attached_run_equals_a_detached_run():
@@ -211,3 +215,14 @@ def test_quality_is_off_unless_asked_for():
     assert on.node_quality.shape == (3, len(model.node_names))
     assert on.link_quality.shape == (3, len(model.link_names))
     assert torch.equal(off.head, on.head) and torch.equal(off.flow, on.flow)
+
+
+@pytest.mark.parametrize("quality", [None, False])
+def test_a_quality_input_without_quality_is_refused(quality):
+    """`quality.initial` in the state of a run without quality would be dropped: refused
+    by name."""
+    model, _, _ = build_model(read_epanet_inp(BASE))
+    state = initial_state(model)
+    state["quality.initial"] = torch.zeros(len(model.node_names), dtype=F64)
+    with pytest.raises(ValueError, match="quality.initial"):
+        water_run(model, state, duration=3600, quality=quality)

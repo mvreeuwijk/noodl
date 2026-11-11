@@ -279,19 +279,21 @@ def _select_non_stack_node(order: list[int], indegree: list[int],
     return -1
 
 
-def _tank_volume(net, tank) -> float:
-    """A tank's initial volume (m3), EPANET's `V0` (`input1.c`, `inittanks`; `epanet.c`):
-    on a volume curve, the curve at the initial level (`interp`); otherwise `Vmin + A (H0 -
-    Hmin)`, `Vmin` the file's MinVol when positive, else `A Hmin`, `A = pi D^2 / 4`."""
+def _tank_volume(net, tank, level):
+    """A tank's volume (m3) at `level` (m above its bottom; a float or a 0-d tensor, whose
+    graph is kept), EPANET's `tankvolume` (`hydraul.c`), which gives `V0` for the initial
+    level (`input1.c`, `inittanks`; `epanet.c`, `EN_setnodevalue(EN_TANKLEVEL)`): on a
+    volume curve, the curve at the level (`interp`); otherwise `Vmin + A (h - Hmin)`,
+    `Vmin` the file's MinVol when positive, else `A Hmin`, `A = pi D^2 / 4`."""
     if tank.volume_curve is not None:
         points = net.curves[tank.volume_curve]
-        return _interp(points, tank.init_level)
+        return _interp(points, level)
     area = torch.pi * tank.diameter**2 / 4.0
     vmin = tank.min_volume if tank.min_volume > 0.0 else area * tank.min_level
-    return vmin + area * (tank.init_level - tank.min_level)
+    return vmin + area * (level - tank.min_level)
 
 
-def _interp(points, x: float) -> float:
+def _interp(points, x):
     """EPANET's `interp` (`project.c`): linear in the curve's points, its end segments
     extended beyond them."""
     xs = [p[0] for p in points]
@@ -299,7 +301,7 @@ def _interp(points, x: float) -> float:
     if len(xs) == 1:
         return ys[0]
     m = 1
-    while m < len(xs) - 1 and x > xs[m]:
+    while m < len(xs) - 1 and _value(x) > xs[m]:
         m += 1
     dx = xs[m] - xs[m - 1]
     if abs(dx) < 1e-6:
@@ -332,14 +334,16 @@ class QualityRouter:
     hydraulic step.
 
     `inputs["quality.initial"]` (n_nodes, `model.node_names`, quality units) replaces the
-    network's initial qualities (`quality.initial`, 0 where absent). `quality_step` is the
-    quality step (s, `quality_step`). `attached` keeps the autograd graph (module
-    docstring). `diagnostics`, a dict, receives under `"quality"` a list with one dict for
-    this run: `"times"` (s) and `"node_quality"`, `"link_quality"` (`record`, per solve,
-    before the transport), `"node_order"` (`(t, node names)` per sort), `"cycle_breaks"`
-    (per sort), `"reversals"` (`(t, link name)` per reversed chain), `"segments"`
-    (`SegmentPool.counts()` after every quality step) and `"inflow_volume"`,
-    `"inflow_mass"`, `"outflow_volume"` (per quality step, per node of
+    network's initial qualities (`quality.initial`, 0 where absent);
+    `inputs["quality.tank_level"]` (n_tanks, m) the tanks' initial levels (`water_run`
+    passes its initial state's), from which their initial segment volumes are taken.
+    `quality_step` is the quality step (s, `quality_step`). `attached` keeps the autograd
+    graph (module docstring). `diagnostics`, a dict, receives under `"quality"` a list
+    with one dict for this run: `"times"` (s) and `"node_quality"`, `"link_quality"`
+    (`record`, per solve, before the transport), `"node_order"` (`(t, node names)` per
+    sort), `"cycle_breaks"` (per sort), `"reversals"` (`(t, link name)` per reversed
+    chain), `"segments"` (`SegmentPool.counts()` after every quality step) and
+    `"inflow_volume"`, `"inflow_mass"`, `"outflow_volume"` (per quality step, per node of
     `model.node_names`: m3, quality x m3, m3)."""
 
     def __init__(self, model, quality: WaterQuality, *, inputs: Mapping[str, Tensor],
@@ -407,9 +411,16 @@ class QualityRouter:
                 continue      # a check-valve pipe is a CVPIPE, not a PIPE: no segment
             self.pool.add(k, LINKVOL_FACTOR * pipe.length * pipe.diameter**2,
                           self.node[self.ends[k][1]])
+        # each tank at the run's initial level (`inputs["quality.tank_level"]`, else the
+        # file's) and the file's initial quality, even in TRACE
+        levels = inputs.get("quality.tank_level")
+        if levels is None:
+            levels = [tank.init_level for tank in net.tanks]
+        else:
+            levels = list(levels.unbind()) if attached else levels.detach().tolist()
         for i, tank in enumerate(net.tanks):
-            # the file's initial quality, even in TRACE
-            self.pool.add(n_links + i, _tank_volume(net, tank), c0[node_index[tank.name]])
+            self.pool.add(n_links + i, _tank_volume(net, tank, levels[i]),
+                          c0[node_index[tank.name]])
         self.pool.close()
 
         self.direction = [0] * n_links         # `FlowDir`, ZERO_FLOW at the start

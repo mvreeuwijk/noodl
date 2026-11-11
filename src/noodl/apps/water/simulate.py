@@ -427,9 +427,15 @@ def water_run(model, state=None, drivers=None, *, duration: float | None = None,
     clock = _Clock(net, duration)
     state = initial_state(model) if state is None else dict(state)
     quality_inputs = {key: state.pop(key) for key in _QUALITY_STATE if key in state}
+    if quality_inputs and not quality:
+        raise ValueError(f"water_run: the state carries {sorted(quality_inputs)}, but no "
+                         f"water quality runs (quality={quality!r}); pass quality=True")
     if quality and (net.quality is None or net.quality.mode == "NONE"):
         raise ValueError("water_run: quality=True, but the network defines no water quality "
                          "([OPTIONS] QUALITY is NONE or absent)")
+    if quality and net.tanks:
+        # the tanks' initial segments hold the run's initial volumes (`initsegs`)
+        quality_inputs["quality.tank_level"] = model.control_closure.levels(state)
     router = quiet = None
     drivers = initial_drivers(model) if drivers is None else dict(drivers)
     patterns = _Patterns(model, drivers)

@@ -248,9 +248,10 @@ def mass_balance_si(terms: Mapping[str, float], mode: str) -> dict[str, float]:
     return {key: value if key == "ratio" else value * scale for key, value in terms.items()}
 
 
-def epanet_quality(path: Path) -> QualityReference:
+def epanet_quality(path: Path, *, setup=None) -> QualityReference:
     """EPANET 2.2's quality on `path` (`EN_solveH`, then `EN_solveQ`'s `EN_runQ`/`EN_nextQ`
-    loop; module docstring), in a temporary directory."""
+    loop; module docstring), in a temporary directory. `setup(en)`, when given, is called
+    on the open project before the run (e.g. `EN_setnodevalue`)."""
     with tempfile.TemporaryDirectory(prefix="epanet-q-", ignore_cleanup_errors=True) as tmp:
         directory = Path(tmp)
         copy = epanet_copy(path, directory)
@@ -259,6 +260,8 @@ def epanet_quality(path: Path) -> QualityReference:
         _open(en, copy, report, directory / "quality.bin")
         try:
             node_names, link_names = _names(en)
+            if setup is not None:
+                setup(en)
             en.ENsolveH()
             en.ENopenQ()
             en.ENinitQ(0)
@@ -285,9 +288,10 @@ def epanet_quality(path: Path) -> QualityReference:
         ratio=float(ratio.value), terms=terms)
 
 
-def epanet_hydraulics(path: Path) -> dict:
+def epanet_hydraulics(path: Path, *, setup=None) -> dict:
     """EPANET 2.2's hydraulics on `path` at every `EN_runH` time, in SI: `{"times",
-    "node_names", "link_names", "head" (T, n) m, "flow" (T, m) m3/s}`."""
+    "node_names", "link_names", "head" (T, n) m, "flow" (T, m) m3/s}`; `setup` as for
+    `epanet_quality`."""
     with tempfile.TemporaryDirectory(prefix="epanet-h-", ignore_cleanup_errors=True) as tmp:
         directory = Path(tmp)
         copy = epanet_copy(path, directory)
@@ -295,6 +299,8 @@ def epanet_hydraulics(path: Path) -> dict:
         _open(en, copy, directory / "h.rpt", directory / "h.bin")
         try:
             node_names, link_names = _names(en)
+            if setup is not None:
+                setup(en)
             units = _FLOW_UNIT_CODES[en.ENgetflowunits()]
             length = _FOOT if units in _FLOW_UNIT_CODES[:5] else 1.0
             en.ENopenH()
