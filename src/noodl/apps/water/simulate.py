@@ -439,14 +439,15 @@ def water_run(model, state=None, drivers=None, *, duration: float | None = None,
     asked = quality
     quality = defined and clock.duration > 0 if quality is None else bool(quality)
     if quality_inputs and not quality:
-        if asked is not None:
-            why, advice = "quality=False", "; drop the inputs or pass quality=True"
-        elif not defined:
-            why = "quality=None, and the network defines no water quality"
+        why = f"quality={asked!r}"
+        if not defined:
+            why += ", and the network defines no water quality"
             advice = "; the network needs a `[OPTIONS] QUALITY` mode to use them"
-        else:
-            why = "quality=None, and the run's duration is 0 (`DURATION 0`)"
+        elif clock.duration == 0:
+            why += ", and the run's duration is 0 (`DURATION 0`)"
             advice = "; a positive duration is needed to use them"
+        else:
+            advice = "; drop the inputs or pass quality=True"
         raise ValueError(f"water_run: the state or the drivers carry "
                          f"{sorted(quality_inputs)}, but no water quality runs "
                          f"({why}){advice}")
