@@ -16,6 +16,7 @@ import torch
 
 from noodl.apps.water.inp import read_epanet_inp
 from noodl.apps.water.network import build_model, initial_state
+from noodl.apps.water.quality import EXACT_LITRES_PER_M3
 from noodl.apps.water.simulate import water_run
 from noodl.apps.water.units import Q_STAGNANT_CFS, rounded_cfs_per_m3s
 
@@ -1021,17 +1022,18 @@ def test_a_2comp_tank_without_net_flow_matches_epanet(tmp_path):
 
 
 def _mass_balance_differences(tmp_path: Path, case: str):
-    """`(ours, theirs, relative, ratio_difference)` for `case`: noodl's mass balance
+    """`(ours, reference, theirs, relative, ratio_difference)` for `case`: noodl's mass balance
     (`WaterResults.mass_balance`, physical mass) and EPANET's report terms in the same
     unit (`mass_balance_si`, quality x m3, times 1000 for a CHEMICAL: EPANET's rounded
-    `LperFT3` is removed, Ruling Q28), each term's difference over the larger of the
-    reference's term and the initial mass (a term of 0 on both sides compares equal)."""
+    `LperFT3` is removed, Ruling Q28); `theirs` is EPANET's terms in quality x m3, `relative`
+    each term's difference over the absolute reference term (0 when both are 0), and
+    `ratio_difference` the ratio's absolute difference."""
     path = QUALITY_CASES[case](tmp_path)
     results, _ = run_quality(path)      # the qualities' parity is the case's own test's
     reference = epanet_quality(path)
     mode = read_epanet_inp(path).quality.mode
     theirs = mass_balance_si(reference.terms, mode)
-    unit = 1000.0 if mode == "CHEMICAL" else 1.0
+    unit = EXACT_LITRES_PER_M3 if mode == "CHEMICAL" else 1.0
     ours = results.mass_balance
     relative = {}
     for key in ("initial", "inflow", "outflow", "reacted", "final"):

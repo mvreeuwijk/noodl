@@ -113,9 +113,9 @@ class WaterResults:
     node_quality: Tensor | None = None
     link_quality: Tensor | None = None
     quality_units: str | None = None
-    mass_balance: QualityMassBalance | None = None
     node_names: list[str] = field(default_factory=list)
     link_names: list[str] = field(default_factory=list)
+    mass_balance: QualityMassBalance | None = None
 
 
 def _default_pattern(net) -> str | None:
