@@ -298,7 +298,7 @@ SPECS = {
     ),
     "catchment flow": Spec(
         "three_out_arcs",
-        9,  # 40 days: day 9 is a capacity tie at scale 1
+        9,  # the first 9 of the case's 40 days: day 9 is a capacity tie at scale 1
         False,
         ("scale", "wsimod.flow"),
         ("flow", "junction_to_a"),
