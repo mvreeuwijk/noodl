@@ -9,6 +9,7 @@ live WSIMOD 0.8.1 through ``Model.run`` on the same mapping, and compare every d
 from __future__ import annotations
 
 import copy
+import random
 
 import pytest
 import torch
@@ -322,25 +323,185 @@ def test_rows_and_anchors_are_carried_state():
         other.load_stores({"register": q.rows})
     with pytest.raises(ValueError, match="rows of shape"):
         other.load_stores({"rows": torch.zeros(2, 3, 1, 1 + PQ.K)})
+    with pytest.raises(ValueError, match=r"arc 'q': since of shape \(3,\)"):
+        other.load_stores({"since": torch.zeros(3)})
+    for bad in ([3.0, 0.0], [-1.0, 0.0], [0.5, 1.0]):
+        with pytest.raises(ValueError, match=r"arc 'q': since must hold whole days in \[0, 2\]"):
+            other.load_stores({"since": torch.tensor(bad)})
+    other.load_stores({"since": torch.tensor([[0.0, 2.0], [1.0, 1.0]])})  # batched
+
+
+def test_a_fully_clipped_push_leaves_its_row_empty():
+    """A push into a full reservoir enters with volume 0; the row stays absent (all zero), not
+    a zero volume carrying the request's temperature."""
+    src = Node(NodeSpec("src", "Node", "Node", {}), PQ)
+    full = {"capacity": 5.0, "initial_storage": 5.0}
+    res = Reservoir(NodeSpec("res", "Reservoir", "Reservoir", full), PQ)
+    q = QueueArc(ArcSpec("q", "QueueArc", "src", "res", number_of_timesteps=1), src, res, PQ)
+    _day(src, res, q)
+    push = PQ.to_vqip({"volume": 3.0, "phosphate": 0.03, "temperature": 12.0})
+    reply = q.send_push_request(push, active=TRUE)
+    assert reply.tolist() == push.tolist()  # all of it refused at the clip
+    assert q.rows.shape[-2] == 1 and float(q.rows.abs().sum()) == 0.0
 
 
 def test_a_request_waits_n_days_and_goes_out_on_the_next_push():
-    """``n = 2``: day 0's push is due on day 2, but only a push hands it over (``:399``);
-    the rows are delivered oldest first (``i = n-1 ... 0``)."""
-    src = Node(NodeSpec("src", "Node", "Node", {}), QUANTITY_ONLY)
-    sink = Waste(NodeSpec("sink", "Waste", "Waste", {}), QUANTITY_ONLY)
-    q = QueueArc(
-        ArcSpec("q", "QueueArc", "src", "sink", number_of_timesteps=2), src, sink, QUANTITY_ONLY
-    )
-    out = []
-    for volume in [3.0, 0.0, 0.0, 5.0, 7.0, 0.0, 1.0]:
-        _day(src, sink, q, p=QUANTITY_ONLY)
-        q.send_push_request(QUANTITY_ONLY.to_vqip({"volume": volume}), active=TRUE)
-        out.append(float(q.vqip_out[0]))
+    """``n = 2``: day 0's push is due on day 2, but only a push hands it over (``:399``). The
+    due rows go out oldest first (``i = n-1 ... 0``, WSIMOD's list order): on day 6 the reservoir
+    takes all of day 3's request and part of day 4's, so the backflow is day 4's rejected part,
+    at day 4's temperature."""
+    src = Node(NodeSpec("src", "Node", "Node", {}), PQ)
+    res = Reservoir(NodeSpec("res", "Reservoir", "Reservoir", {"capacity": 6.0}), PQ)
+    q = QueueArc(ArcSpec("q", "QueueArc", "src", "res", number_of_timesteps=2), src, res, PQ)
+    pushes = {0: (3.0, 10.0), 3: (5.0, 20.0), 4: (2.5, 25.0), 6: (1.0, 30.0)}
+    out, replies = [], []
+    for day in range(7):
+        _day(src, res, q)
+        volume, temperature = pushes.get(day, (0.0, 0.0))
+        push = PQ.to_vqip(
+            {"volume": volume, "phosphate": 0.01 * volume, "temperature": temperature}
+        )
+        replies.append(q.send_push_request(push, active=TRUE))
+        out.append(q.vqip_out.clone())
         q.end_timestep()
+        if day == 3:
+            res.tank.storage = PQ.to_vqip({})  # emptied, so day 4 enters in full
     # day 3 hands over day 0's 3 (days 1 and 2 pushed nothing, so nothing reached update_queue);
     # day 4's push finds day 3's request one day old; day 6 hands over days 3 and 4
-    assert out == [0.0, 0.0, 0.0, 3.0, 0.0, 0.0, 12.0]
+    assert [float(v[0]) for v in out] == [0.0, 0.0, 0.0, 3.0, 0.0, 0.0, 6.0]
+    backflow = replies[6]
+    assert float(backflow[0]) == 1.5  # day 4's 2.5, of which 1 fitted after day 3's 5
+    assert float(backflow[2]) == 25.0  # at day 4's temperature, not day 3's 20
+    assert float(backflow[1]) == pytest.approx(0.025 * 1.5 / 2.5, rel=1e-15)
+    assert float(res.tank.storage[0]) == 6.0
+
+
+def _random_schedule_run(seed: int, n: int, batch: int = 4, days: int = 25) -> int:
+    """One random schedule of push and pull calls on a QueueArc from a storage into a
+    reservoir: noodl runs the ``batch`` instances at once (independent schedules, a masked call
+    where an instance makes none), WSIMOD one model per instance. Every reply, ``vqip_out``,
+    both tanks and the queued volume are compared bitwise; returns the number of values."""
+    from wsimod.arcs.arcs import QueueArc as WQueueArc
+    from wsimod.nodes.storage import Reservoir as WReservoir
+    from wsimod.nodes.storage import Storage as WStorage
+
+    rng = random.Random(seed)
+    cap_arc = rng.choice([1e15, 4.0, 2.5])
+    cap_res = rng.choice([3.0, 6.0, 20.0])
+    slots = [rng.choice(["push", "push", "pull"]) for _ in range(rng.randint(1, 5))]
+
+    def volume():
+        r = rng.random()
+        if r < 0.1:
+            return 0.0
+        if r < 0.2:
+            return 1e-12
+        if r < 0.25:
+            return FA * rng.uniform(1.0, 1.5)
+        return rng.uniform(0.0, 4.0)
+
+    schedule = [
+        [
+            [volume() if rng.random() < rng.choice([0.3, 0.6, 0.9]) else None for _ in slots]
+            for _ in range(days)
+        ]
+        for _ in range(batch)
+    ]
+    empties = [[rng.random() < 0.25 for _ in range(days)] for _ in range(batch)]
+    stocked = {"volume": 60.0, "phosphate": 0.3, "temperature": 0.0}
+    theirs = []
+    for _ in range(batch):
+        w_well = WStorage(name="well", capacity=1e4, initial_storage=dict(stocked))
+        w_res = WReservoir(name="res", capacity=cap_res)
+        w_arc = WQueueArc(
+            name="q", capacity=cap_arc, number_of_timesteps=n, in_port=w_well, out_port=w_res
+        )
+        theirs.append((w_well, w_res, w_arc))
+    well = Storage(
+        NodeSpec("well", "Storage", "Storage", {"capacity": 1e4, "initial_storage": stocked}), PQ
+    )
+    res = Reservoir(NodeSpec("res", "Reservoir", "Reservoir", {"capacity": cap_res}), PQ)
+    spec = ArcSpec("q", "QueueArc", "well", "res", capacity=cap_arc, number_of_timesteps=n)
+    q = QueueArc(spec, well, res, PQ)
+    check = Bitwise(KEYS)
+
+    def per_instance(t):
+        return torch.broadcast_to(t, (batch, *t.shape[-1:]))
+
+    for day in range(days):
+        ctx = _day(well, res, q, shape=(batch,))
+        empty = torch.tensor([empties[b][day] for b in range(batch)])
+        res.tank.storage = torch.where(
+            empty[:, None], torch.zeros(1 + PQ.K, dtype=torch.float64), res.tank.storage
+        )
+        for b in range(batch):
+            if empties[b][day]:
+                theirs[b][1].tank.storage = theirs[b][1].empty_vqip()
+        for j, direction in enumerate(slots):
+            given = [schedule[b][day][j] for b in range(batch)]
+            active = torch.tensor([v is not None for v in given])
+            volumes = torch.tensor([0.0 if v is None else v for v in given], dtype=torch.float64)
+            temperature = torch.full_like(volumes, 10.0 + j + 0.37 * day)
+            with ctx.frame(f"slot {j}"):
+                if direction == "push":
+                    request = torch.stack([volumes, volumes * 0.013, temperature], -1)
+                    reply = q.send_push_request(request, active=active)
+                else:
+                    request = torch.stack([volumes, volumes * 0, volumes * 0], -1)
+                    reply = q.send_pull_request(request, active=active)
+            for b in range(batch):
+                if given[b] is None:
+                    continue
+                w_arc = theirs[b][2]
+                if direction == "push":
+                    row = {k: float(request[b, i]) for i, k in enumerate(KEYS)}
+                    ref = w_arc.send_push_request(row)
+                else:
+                    ref = w_arc.send_pull_request({"volume": given[b]})
+                check.vqip(f"seed {seed} n {n} day {day} {direction} {j} [{b}]", reply[b], ref)
+        out = per_instance(q.vqip_out)
+        res_storage = per_instance(res.tank.storage)
+        well_storage = per_instance(well.tank.storage)
+        rows = torch.broadcast_to(q.rows, (batch, *q.rows.shape[-4:]))
+        for b, (w_well, w_res, w_arc) in enumerate(theirs):
+            label = f"seed {seed} n {n} day {day} [{b}]"
+            check.vqip(f"{label} vqip_out", out[b], w_arc.vqip_out)
+            check.vqip(f"{label} res", res_storage[b], w_res.tank.storage)
+            check.vqip(f"{label} well", well_storage[b], w_well.tank.storage)
+            queued = 0.0
+            for request in w_arc.queue:
+                queued += request["vqip"]["volume"]
+            # the row sum is torch's, not WSIMOD's order: equal to rounding only
+            assert float(rows[b, ..., 0].sum()) == pytest.approx(queued, rel=1e-12, abs=1e-12)
+        q.end_timestep()
+        well.end_timestep()
+        res.end_timestep()
+        for objects in theirs:
+            for obj in objects:
+                obj.end_timestep()
+    assert check.worst == 0.0
+    return check.count
+
+
+@pytest.fixture
+def simple_wsimod(monkeypatch):
+    pytest.importorskip("wsimod")
+    from wsimod.core import constants
+
+    monkeypatch.setattr(constants, "POLLUTANTS", ["phosphate", "temperature"])
+    monkeypatch.setattr(constants, "ADDITIVE_POLLUTANTS", ["phosphate"])
+    monkeypatch.setattr(constants, "NON_ADDITIVE_POLLUTANTS", ["temperature"])
+    monkeypatch.setattr(constants, "FLOAT_ACCURACY", FA)
+    return constants
+
+
+@pytest.mark.parametrize("n", [0, 1, 2, 3])
+@pytest.mark.parametrize("seed", [0, 1, 2, 3, 4])
+def test_queue_arc_equals_wsimod_on_random_schedules(simple_wsimod, seed, n):
+    """Random schedules of up to five push and pull call sites a day, tiny and zero requests,
+    a clipping arc, a receiver emptied at random: noodl's rows (D1) hand over in WSIMOD's list
+    order, bitwise, for every instance of the batch."""
+    assert _random_schedule_run(seed, n) > 0
 
 
 def test_the_call_sequence_is_recorded_once_and_then_enforced():
@@ -390,30 +551,46 @@ def test_the_call_sequence_is_recorded_once_and_then_enforced():
 
 
 def test_a_batch_equals_its_instances_and_a_masked_call_changes_nothing():
-    def run(volumes, active, shape):
+    """Three instances push on different days, so their ``since`` differ; each equals its own
+    single run, and the instance that never pushes is untouched."""
+    pushes = torch.tensor(
+        [
+            [True, False, True],
+            [False, False, True],
+            [True, False, False],
+            [True, False, True],
+            [False, False, False],
+            [True, False, True],
+        ]
+    )  # (day, instance)
+
+    def run(volumes, schedule, shape):
         src = Node(NodeSpec("src", "Node", "Node", {}), PQ)
         res = Reservoir(NodeSpec("res", "Reservoir", "Reservoir", {"capacity": 5.0}), PQ)
-        q = QueueArc(ArcSpec("q", "QueueArc", "src", "res", number_of_timesteps=1), src, res, PQ)
-        replies = []
-        for day in range(4):
+        q = QueueArc(ArcSpec("q", "QueueArc", "src", "res", number_of_timesteps=2), src, res, PQ)
+        replies, since = [], []
+        for day in range(schedule.shape[0]):
             _day(src, res, q, shape=shape)
             push = torch.stack(
                 [volumes * (day + 1), volumes * 0.01, torch.full_like(volumes, 10.0 + day)], -1
             )
-            replies.append(q.send_push_request(push, active=active))
+            replies.append(q.send_push_request(push, active=schedule[day]))
             q.end_timestep()
-        return torch.stack(replies), res.tank.storage, q.rows, q.since
+            since.append(torch.broadcast_to(q.since, (*shape, 2)).clone())
+        return torch.stack(replies), res.tank.storage, q.rows, torch.stack(since)
 
     volumes = torch.tensor([1.0, 2.0, 3.0], dtype=torch.float64)
-    active = torch.tensor([True, False, True])
-    batch = run(volumes, active, (3,))
+    batch = run(volumes, pushes, (3,))
+    assert not torch.equal(batch[3][:, 0], batch[3][:, 2])  # the anchors differ
     for b in (0, 2):
-        single = run(volumes[b], TRUE, ())
-        assert torch.equal(batch[0][:, b], single[0])
+        single = run(volumes[b], pushes[:, b], ())
+        for day in range(pushes.shape[0]):
+            if pushes[day, b]:
+                assert torch.equal(batch[0][day, b], single[0][day])
         assert torch.equal(batch[1][b], single[1])
-        assert torch.equal(batch[2][b], single[2]) and torch.equal(batch[3][b], single[3])
+        assert torch.equal(batch[2][b], single[2]) and torch.equal(batch[3][:, b], single[3])
     assert float(batch[1][1, 0]) == 0.0 and float(batch[2][1].abs().sum()) == 0.0
-    assert batch[3][1].tolist() == [1.0, 1.0]
+    assert batch[3][-1, 1].tolist() == [2.0, 2.0]
 
 
 def test_the_queue_arc_is_registered_and_validates_its_delay():

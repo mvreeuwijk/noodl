@@ -460,7 +460,18 @@ class QueueArc(Arc):
                 )
             self.rows = rows
         if "since" in stores:
-            self.since = torch.as_tensor(stores["since"], dtype=torch.float64)
+            since = torch.as_tensor(stores["since"], dtype=torch.float64)
+            n = self.number_of_timesteps
+            if since.ndim < 1 or since.shape[-1] != 2:
+                raise ValueError(
+                    f"arc {self.name!r}: since of shape {tuple(since.shape)}, expected (..., 2)"
+                )
+            if bool(((since < 0) | (since > n) | (since != since.round())).any()):
+                raise ValueError(
+                    f"arc {self.name!r}: since must hold whole days in [0, {n}], got "
+                    f"{since.tolist()}"
+                )
+            self.since = since
 
     def end_timestep(self) -> None:
         """``arcs.py:530-545``: reset the day's accumulators and age every request by a day
@@ -606,7 +617,9 @@ class QueueArc(Arc):
         left = visit(new, torch.full(ctx.shape, n == 0), "new", tag)
         if n > 0:
             self._shift(d, active)
-            self._put(d, 0, j, new, active & ~left)
+            # a zero request is absent: storing it would leave its non-additive entries behind
+            stored = active & ~left & (new[..., 0] != 0).detach()
+            self._put(d, 0, j, new, stored)
             hit = torch.as_tensor(active)[..., None] & (torch.arange(2) == d)
             self.since = torch.where(hit, torch.zeros_like(self.since), self.since)
         # :516: vqip_out = sum_vqip(vqip_out, total_removed), on every call that got here

@@ -308,7 +308,7 @@ delivered or returned as backflow (`backflow_enabled` is always true on these pa
   grows, and the loop polls again.
 - **Delivery order.** A row is due at a later call iff `since + i ≥ n`. Due rows are delivered
   in the order `i = n−1 … 0`, then `j`, which is WSIMOD's list order. After delivery the
-  waiting rows move to `i + since` (a masked sum over `i`, static operations) and `since`
+  waiting rows move to `i + since` (a masked selection over `i` (at most one source per slot), static operations) and `since`
   becomes 0. A row's `average_flow` is `V/(n+1)`, because a waiting row's volume never changes.
 - **Absence and the update-time drop.** A row with zero volume is absent. WSIMOD removes a
   waiting request below `FLOAT_ACCURACY` on update (`:483-485`). This is reachable, because the
