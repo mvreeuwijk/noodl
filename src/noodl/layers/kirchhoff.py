@@ -1492,11 +1492,12 @@ class KirchhoffLayer(
 
     def _linear_guess(self, phi_boundary, drivers, sources, step: _Step) -> torch.Tensor:
         """The linear guess of a layer with flow unknowns, `[phi_I, q_F]` in the real view:
-        one Newton step from zero (interior potentials and flow unknowns zero) on the system
-        whose laws with a flow are replaced by their tangents at zero (`_tangents`). The
-        implicit laws give their residual and Jacobian at that point, the withdrawals and the
-        storages their value and slope there, and the initial point holds its held rows.
-        `step` is the solve's `_Step`. Runs without gradients."""
+        one Newton step from zero interior potentials and each flow unknown at its law's
+        start flow (`_start_flows`: zero unless the law gives one) on the system whose laws
+        with a flow are replaced by their tangents at zero (`_tangents`). The implicit laws
+        give their residual and Jacobian at that point, the withdrawals and the storages their
+        value and slope there, and the initial point holds its held rows. `step` is the
+        solve's `_Step`. Runs without gradients."""
         u = self._unknowns
         real_dtype = (phi_boundary.real.dtype if phi_boundary.is_complex()
                       else phi_boundary.dtype)
@@ -1507,6 +1508,10 @@ class KirchhoffLayer(
         tangents = self._tangents(drivers, step.ctx, device)
         with torch.no_grad():
             x = torch.zeros(u.n, dtype=real_dtype, device=device)
+            q_start = self._start_flows(drivers, step.ctx, real_dtype, device)
+            if q_start is not None:
+                x = torch.cat([x[: u.w * u.n_I].expand(q_start.shape[:-1] + (-1,)), q_start],
+                              dim=-1)
             r = self._residual(x, phi_boundary, drivers, sources, step, call, tangents)[0]
             op = self._operator(x, phi_boundary, drivers, step, tangents=tangents)
             batch = broadcast_shapes(op.values.shape[:-1], r.shape[:-1])
@@ -1521,7 +1526,29 @@ class KirchhoffLayer(
                 if singular(op, u.n, failing):
                     raise self._singular_error(step.ctx.mode)
                 result.raise_on_failure(where)
-            return -result.x
+            return -result.x if q_start is None else x - result.x
+
+    def _start_flows(self, drivers, ctx: LawContext, dtype, device) -> torch.Tensor | None:
+        """The flow unknowns the linear guess starts from, in the real view: each implicit
+        law's `start_flow`, zero for a law that gives none; `None` when no law gives one (the
+        guess then starts from zero flow, as it always has)."""
+        parts, given = [], False
+        for el, implicit, (s, e) in zip(self._laws, self._implicit, self._law_slices,
+                                        strict=True):
+            if not implicit:
+                continue
+            q_e = el.start_flow(drivers, self._law_ctx(ctx, s, e))
+            if q_e is None:
+                q_e = torch.zeros(e - s, dtype=dtype, device=device)
+            else:
+                q_e = torch.as_tensor(q_e).detach()
+                self._check_width(el, q_e, e - s, "start flow")
+                q_e = q_e.to(device=device, dtype=q_e.dtype if q_e.is_complex() else dtype)
+                given = True
+            parts.append(to_real(self, q_e))
+        if not given:
+            return None
+        return _cat(parts, parts[0]).to(dtype)
 
     def _singular_error(self, mode: str) -> SingularSystemError:
         """`singular_error` of this layer, naming its implicit kinds."""
@@ -1613,7 +1640,8 @@ class KirchhoffLayer(
         tangent at zero (a law with several ports, and every law on a phasor layer, is taken
         at its flow and Jacobian at the starting potentials instead: the same for a linear
         law), each implicit law by its residual and Jacobian at zero interior potentials and
-        zero flows, and the system is solved once. On a layer with flow unknowns the result
+        its start flow (`ImplicitLaw.start_flow`, zero unless the law gives one), and the
+        system is solved once. On a layer with flow unknowns the result
         is detached: no gradient flows to `phi_boundary`, `sources`, the drivers or the law
         parameters, unlike on a layer without flow unknowns. A phasor layer returns complex
         values. `q=True` returns

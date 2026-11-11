@@ -9,7 +9,7 @@ import torch
 
 from noodl import LinearStorage
 from noodl.apps.electrical import JunctionDiode, PrescribedVoltage, Resistance
-from noodl.elements import Conductance, ConstitutiveLaw
+from noodl.elements import Conductance, ConstitutiveLaw, ImplicitLaw
 from noodl.layers.kirchhoff import KirchhoffLayer
 from tests._circuit_laws import Cap, Ind, Source
 from tests.layers.test_mna import Orifice, _fan_layer, _net, _transformer_layer
@@ -188,3 +188,74 @@ def test_a_starting_point_refusal_comes_before_the_unreachable_tensor_refusal():
     layer = KirchhoffLayer(net, "e", [Source(torch.tensor([1.0])), Wide()], boundary=["gnd"])
     with pytest.raises(ValueError, match="the flow of the 'wide' law is width 2"):
         layer.solve(GROUND)
+
+
+class _QuadraticLoss(ImplicitLaw):
+    """dp = r q |q|, a loss with no slope at zero flow; its start flow is `start` (`None`:
+    the default, zero) or the driver `"q_start"` when `start` is `"driver"`."""
+
+    def __init__(self, r, start=None):
+        super().__init__("loss")
+        self.r = self._param(r, False)
+        self.start = start
+
+    def residual(self, dp, q, drivers, ctx):
+        return dp - self.r * q * q.abs()
+
+    def start_flow(self, drivers=None, ctx=None):
+        if isinstance(self.start, str):
+            return drivers[self.start]
+        return None if self.start is None else torch.tensor([self.start])
+
+
+def _loss_layer(law):
+    # in(10) -loss- mid -g=1- out(0)
+    net = _net(["in", "mid", "out"], [("in", "mid", "loss"), ("mid", "out", "pipe")])
+    return KirchhoffLayer(net, "w", [law, Conductance(torch.tensor([1.0]), kind="pipe")],
+                          boundary=["in", "out"])
+
+
+PB = torch.tensor([10.0, 0.0], dtype=F64)
+
+
+def test_the_guess_linearises_an_implicit_law_at_its_start_flow():
+    # By hand, at q_s: 10 - phi - r q_s^2 - 2 r q_s (q - q_s) = 0 and q = g phi, so
+    # phi = (10 + r q_s^2) / (1 + 2 r q_s g); r = 2, g = 1, q_s = 1 gives 12 / 5.
+    phi_i, q_f = _loss_layer(_QuadraticLoss(torch.tensor([2.0]), 1.0)).linear_init(
+        PB, {}, None, q=True)
+    _close(phi_i, torch.tensor([2.4]), 1e-12)
+    _close(q_f, torch.tensor([2.4]), 1e-12)
+    # at the root, q_s = 2, the linearisation is exact: the guess is the solution
+    phi_i, q_f = _loss_layer(_QuadraticLoss(torch.tensor([2.0]), 2.0)).linear_init(
+        PB, {}, None, q=True)
+    _close(phi_i, torch.tensor([2.0]), 1e-12)
+    _close(q_f, torch.tensor([2.0]), 1e-12)
+
+
+def test_a_law_without_a_start_flow_keeps_the_zero_flow_guess_bit_for_bit():
+    # zero flow: no slope, so the loss carries the whole 10 at q = 10
+    none = _loss_layer(_QuadraticLoss(torch.tensor([2.0]))).linear_init(PB, {}, None, q=True)
+    zero = _loss_layer(_QuadraticLoss(torch.tensor([2.0]), 0.0)).linear_init(
+        PB, {}, None, q=True)
+    _close(none[1], torch.tensor([10.0]), 1e-12)
+    assert torch.equal(none[0], zero[0]) and torch.equal(none[1], zero[1])
+
+
+def test_a_start_flow_from_the_drivers_batches_the_guess():
+    layer = _loss_layer(_QuadraticLoss(torch.tensor([2.0]), "q_start"))
+    _, q_f = layer.linear_init(PB, {"q_start": torch.tensor([[1.0], [2.0]])}, None, q=True)
+    _close(q_f, torch.tensor([[2.4], [2.0]]), 1e-12)
+
+
+def test_a_start_flow_of_the_wrong_width_is_refused_by_name():
+    layer = _loss_layer(_QuadraticLoss(torch.tensor([2.0]), "q_start"))
+    with pytest.raises(ValueError, match="the start flow of the 'loss' law is width 2"):
+        layer.linear_init(PB, {"q_start": torch.tensor([1.0, 2.0])}, None)
+
+
+def test_the_start_flow_moves_no_solve_from_zeros():
+    # a cold solve still starts from zeros, with or without a start flow
+    plain = _loss_layer(_QuadraticLoss(torch.tensor([2.0]))).solve(PB, differentiable=False)
+    given = _loss_layer(_QuadraticLoss(torch.tensor([2.0]), 1.0)).solve(
+        PB, differentiable=False)
+    assert torch.equal(plain[0], given[0]) and torch.equal(plain[1], given[1])
