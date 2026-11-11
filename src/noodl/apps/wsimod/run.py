@@ -91,6 +91,7 @@ class WsimodMassBalance:
     storage_change: Tensor
     residual: Tensor
     terms: dict[str, Tensor]
+    dropped_arcs: Tensor | None = None  # part of terms["dropped"] lost inside a QueueArc
 
 
 @dataclass
@@ -167,6 +168,7 @@ def _balance(day, records: list[DayRecord], shape: torch.Size) -> WsimodMassBala
         storage_change=change,
         residual=inflow - outflow - change,
         terms=terms,
+        dropped_arcs=_stack([r.dropped_arcs for r in records], shape),
     )
 
 

@@ -156,6 +156,7 @@ class Ctx:
         self.events: dict[str, dict[str, Tensor]] = {}
         self.maxiter: dict[tuple[str, str, int], Tensor] = {}
         self.dropped: Tensor = self.empty()
+        self.dropped_arcs: Tensor = self.empty()  # the part of ``dropped`` lost inside an arc
         self.terms: dict[str, Tensor] = {}
         # each WWTW's current_input as of its last treat_current_input (the water that was
         # treated); what is pushed in later vanishes at end_timestep (W69)
@@ -193,9 +194,14 @@ class Ctx:
         table = self.events.setdefault(condition, {})
         table[node] = table[node] | mask if node in table else mask.clone()
 
-    def drop(self, vqip: Tensor, mask: Tensor) -> None:
-        """Water WSIMOD drops below ``FLOAT_ACCURACY`` (the mass balance's ``"dropped"``)."""
-        self.dropped = self.dropped + _masked(vqip, mask)
+    def drop(self, vqip: Tensor, mask: Tensor, *, arc: bool = False) -> None:
+        """Water WSIMOD drops below ``FLOAT_ACCURACY`` (the mass balance's ``"dropped"``).
+        ``arc=True`` marks a drop inside a ``QueueArc``, between two nodes: it is also summed in
+        ``dropped_arcs``, which no node's own balance sees."""
+        lost = _masked(vqip, mask)
+        self.dropped = self.dropped + lost
+        if arc:
+            self.dropped_arcs = self.dropped_arcs + lost
 
     def term(self, name: str, vqip: Tensor, mask: Tensor) -> None:
         """Add ``vqip`` where ``mask`` to the mass-balance term ``name`` (D11)."""

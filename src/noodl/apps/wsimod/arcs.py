@@ -332,7 +332,7 @@ class AltQueueArc(Arc):
             call=call,
         )
         if record_drop:
-            ctx.drop(vqip, active & tiny)
+            ctx.drop(vqip, active & tiny, arc=True)
         run = active & ~tiny
         if force:
             not_pushed = torch.zeros_like(vqip)
@@ -593,7 +593,7 @@ class QueueArc(Arc):
             below = ctx.decide(
                 f"{where}:{label}/below_fa", volume, "<", ctx.fa, active=present, call=call
             )
-            ctx.drop(row, present & below)
+            ctx.drop(row, present & below, arc=True)
             deliver = present & ~below & due
             if direction == "push":
                 reply = self.out_port.push_set(row, row_tag, active=deliver)
@@ -659,7 +659,7 @@ class QueueArc(Arc):
             active=active,
             call=call,
         )
-        ctx.drop(vqip, active & tiny)
+        ctx.drop(vqip, active & tiny, arc=True)
         run = active & ~tiny
         if force:
             not_pushed = torch.zeros_like(vqip)

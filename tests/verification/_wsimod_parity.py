@@ -12,7 +12,9 @@ Nothing here loosens a bound: the demos match bitwise (worst exactly 0), the bou
 
 from __future__ import annotations
 
+import io
 import re
+import types
 from collections.abc import Sequence
 from dataclasses import dataclass
 
@@ -20,9 +22,17 @@ import torch
 from torch import Tensor
 
 from noodl.apps.wsimod import WsimodResults
-from tests.verification._wsimod_reference import WsimodReference
+from tests.verification import _wsimod_reference
+from tests.verification._wsimod_reference import WsimodReference, record_wsimod_run, wsimod_model
 
-__all__ = ["ADMISSION_MARGIN", "BOUND", "Admission", "assert_matches_wsimod", "mass_balance_worst"]
+__all__ = [
+    "ADMISSION_MARGIN",
+    "BOUND",
+    "Admission",
+    "assert_matches_wsimod",
+    "mass_balance_worst",
+    "wsimod_reference_by_day",
+]
 
 BOUND = 1e-12
 ADMISSION_MARGIN = 1e-9
@@ -115,7 +125,7 @@ def assert_matches_wsimod(
     case: str,
     quality: bool,
     admitted: Sequence[Admission] = (),
-    arc_drops: bool = False,
+    print_days: Sequence[int] | None = None,
 ) -> dict:
     """Assert noodl's run equals WSIMOD's within ``BOUND * scale`` on every day (module text).
 
@@ -123,9 +133,8 @@ def assert_matches_wsimod(
     ``"arc_quality:<arc>:<pollutant>"``, ``"tank_storage:<node>.<attribute>"``,
     ``"tank_quality:<node>.<attribute>:<pollutant>"``, ``"surface.<field>:<node>.<surface>"``,
     ``"surface_quality:<node>.<surface>:<pollutant>"``. ``quality=False`` (a quantity-only noodl
-    run) compares the volumes alone. ``arc_drops=True`` says the case drops water inside a
-    ``QueueArc`` (a push below ``FLOAT_ACCURACY``), between two nodes, where WSIMOD's node check
-    sees nothing: noodl's ``"dropped"`` is then not part of the errors WSIMOD prints.
+    run) compares the volumes alone. ``print_days`` is the day of each line of ``theirs.printed``
+    (:func:`wsimod_reference_by_day`): the undated prints are then checked day by day.
 
     ``diagnostics`` is the dict ``wsimod_run`` filled, plus ``"node_names"`` (``model.wsimod_day
     .node_names``), and ``"decisions"`` when an admission needs one.
@@ -211,7 +220,7 @@ def assert_matches_wsimod(
                 worst, worst_scale = top, float(scale[at])
 
     names = diagnostics["node_names"]
-    _check_prints(ours, theirs, diagnostics, case, names, arc_drops)
+    _check_prints(ours, theirs, diagnostics, case, names, print_days)
     return {"worst": worst, "scale": worst_scale, "admissions": used}
 
 
@@ -221,7 +230,7 @@ def _check_prints(
     diagnostics: dict,
     case: str,
     names,
-    arc_drops: bool,
+    print_days: Sequence[int] | None,
 ):
     """Every print of WSIMOD is one of the kinds above and agrees with noodl's records (module
     text, D13); an unknown print is refused.
@@ -230,8 +239,18 @@ def _check_prints(
     check. Its lines, in order, equal the days' ``residual + dropped`` that exceed the bound
     (ruling W86): the evaporation-clamp gap, which noodl leaves in the residual, and the water a
     node drops below ``FLOAT_ACCURACY`` (``Land.run``'s percolation push-back), which noodl
-    counts as ``"dropped"`` and so closes (not with ``arc_drops``: a ``QueueArc``'s drop is in no
-    node). Any other line, or a missing one, fails."""
+    counts as ``"dropped"`` and so closes. A ``QueueArc``'s drop is inside an arc, in no node's
+    balance: it is left out (``dropped - dropped_arcs``). With ``print_days`` each error line must
+    also fall on its day. Any other line, or a missing one, fails.
+
+    Limits of the comparison: WSIMOD's check is per node and relative (the values normalised by
+    the largest power of ten, against ``1e-11``), noodl's expectation is the system sum against
+    ``1e-12 * scale``. They agree on single-node error cases, which is all the corpus has; two
+    nodes with opposite errors on one day could cancel in noodl's sum.
+
+    The undated prints are checked per day when ``print_days`` is given: on each day, lines of a
+    kind exist exactly when noodl flags the event at some node that day (and over the run there
+    are at least as many lines as flags); without it, over the whole run only."""
     events = diagnostics["events"]
     printed = list(theirs.printed)
     kinds: dict[str, list[str]] = {}
@@ -262,13 +281,23 @@ def _check_prints(
                 f"{case}: {what} differ: noodl-only {sorted(flagged - got)[:3]}, "
                 f"WSIMOD-only {sorted(got - flagged)[:3]}"
             )
-    for name in _UNDATED:
+    for name, pattern in _UNDATED.items():
         lines, flagged = len(kinds.get(name, [])), int(events[name].sum())
         if (lines > 0) != (flagged > 0) or lines < flagged:
             raise AssertionError(
                 f"{case}: WSIMOD printed {lines} {name!r} lines, noodl flagged {flagged} "
                 "(node, day) pairs"
             )
+        if print_days is not None:
+            days = {
+                d for d, line in zip(print_days, printed, strict=True) if pattern.fullmatch(line)
+            }
+            flagged_days = {d for d in range(events[name].shape[0]) if bool(events[name][d].any())}
+            if days != flagged_days:
+                raise AssertionError(
+                    f"{case}: {name!r} printed on days {sorted(days - flagged_days)[:3]} that "
+                    f"noodl does not flag, not on {sorted(flagged_days - days)[:3]} that it does"
+                )
     maxiter = {
         (site[0], theirs.dates[d])
         for site, hit in diagnostics["maxiter"].items()
@@ -282,18 +311,18 @@ def _check_prints(
             f"WSIMOD-only {sorted(got - maxiter)[:3]}"
         )
     balance = ours.mass_balance
-    volume = balance.residual[:, 0]
-    if not arc_drops:
-        volume = volume + balance.terms["dropped"][:, 0]
+    volume = balance.residual[:, 0] + (balance.terms["dropped"] - balance.dropped_arcs)[:, 0]
     scale = float(
         torch.stack([balance.inflow.abs(), balance.outflow.abs(), balance.storage_change.abs()])[
             ..., 0
         ].max()
     )
-    expected = volume[volume.abs() > BOUND * scale]
-    errors = []
-    for line in printed:
+    significant = volume.abs() > BOUND * scale
+    expected = volume[significant]
+    errors, error_days = [], []
+    for k, line in enumerate(printed):
         if m := _MASS_BALANCE.fullmatch(line):
+            error_days.append(-1 if print_days is None else print_days[k])
             if m.group(1) != "volume" or m.group(3) not in names:
                 raise AssertionError(f"{case}: WSIMOD printed {line!r}")
             errors.append(float(m.group(2)))
@@ -305,6 +334,11 @@ def _check_prints(
         raise AssertionError(
             f"{case}: WSIMOD's mass balance errors {errors[:3]} differ from noodl's residual plus "
             f"dropped water {expected.tolist()[:3]} ({len(errors)} lines, {len(expected)} days)"
+        )
+    if print_days is not None and error_days != significant.nonzero().flatten().tolist():
+        raise AssertionError(
+            f"{case}: WSIMOD's mass balance errors fall on days {error_days[:3]}, noodl's on "
+            f"{significant.nonzero().flatten().tolist()[:3]}"
         )
 
 
@@ -319,3 +353,45 @@ def mass_balance_worst(ours: WsimodResults) -> float:
     ).amax(dim=(0, 1))
     scale = torch.where(scale > 0, scale, 1.0)
     return float((balance.residual.abs() / scale).max())
+
+
+class _DayTaggedStdout(io.StringIO):
+    """A ``StringIO`` that also records the day (``days[0]``) each completed line was written on."""
+
+    def __init__(self, days: list[int], lines: list[tuple[int, str]]):
+        super().__init__()
+        self._days, self._lines, self._pending = days, lines, ""
+
+    def write(self, text: str) -> int:
+        self._pending += text
+        *complete, self._pending = self._pending.split("\n")
+        self._lines.extend((self._days[0], line) for line in complete)
+        return super().write(text)
+
+
+def wsimod_reference_by_day(source) -> tuple[WsimodReference, list[int]]:
+    """``wsimod_reference(source)`` plus the day (0-based) of each line of its ``printed``.
+
+    The run is WSIMOD's own (``record_wsimod_run``), its stdout going to a writer that tags each
+    line with a day counter; the counter is bumped by the first node's ``end_timestep``, and every
+    print of a day (the node checks included) comes before it (``model.py:995-1060``). The
+    reference module is not edited: its ``io`` is swapped for the run's duration."""
+    model = wsimod_model(source)
+    day, lines = [0], []
+    first = next(iter(model.nodes.values()))
+    original = first.end_timestep
+
+    def end_timestep(*args, **kwargs):
+        day[0] += 1
+        return original(*args, **kwargs)
+
+    first.end_timestep = end_timestep
+    saved = _wsimod_reference.io
+    _wsimod_reference.io = types.SimpleNamespace(StringIO=lambda: _DayTaggedStdout(day, lines))
+    try:
+        reference = record_wsimod_run(model)
+    finally:
+        _wsimod_reference.io = saved
+    if [line for _, line in lines] != reference.printed:
+        raise AssertionError("wsimod_reference_by_day: the tagged lines differ from the printed")
+    return reference, [d for d, _ in lines]

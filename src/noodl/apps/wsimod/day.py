@@ -198,7 +198,8 @@ class DayRecord:
       key ``"Land"`` (``WsimodDay.surface_names``), NaN where WSIMOD records no such field (an
       ``ImperviousSurface``'s flows); ``surface_quality`` ``(..., n_surfaces, K)``.
     - ``terms``: the mass-balance terms ``"<Class>.<term>"`` (D11), VQIPs ``(..., 1+K)``;
-      ``dropped`` the water WSIMOD drops below ``FLOAT_ACCURACY``, ``storage_start`` the water
+      ``dropped`` the water WSIMOD drops below ``FLOAT_ACCURACY`` and ``dropped_arcs`` the part
+      of it lost inside a ``QueueArc``, ``storage_start`` the water
       held in every carried store when the day began and ``storage_total`` when it was
       recorded, all ``(..., 1 + K_additive)`` (the volume and the additive columns).
       ``wsimod_run`` assembles the balance from them. A ``QueueTank`` push below
@@ -218,6 +219,7 @@ class DayRecord:
     surface_quality: Tensor
     terms: dict[str, Tensor]
     dropped: Tensor
+    dropped_arcs: Tensor
     storage_total: Tensor
     storage_start: Tensor
     events: dict[str, Tensor]
@@ -1014,6 +1016,7 @@ class WsimodDay:
             surface_quality=stack(quality, (p.K,)),
             terms=dict(ctx.terms),
             dropped=torch.broadcast_to(ctx.dropped, (*shape, 1 + p.K))[..., additive],
+            dropped_arcs=torch.broadcast_to(ctx.dropped_arcs, (*shape, 1 + p.K))[..., additive],
             storage_total=held,
             storage_start=storage_start,
             events=events,

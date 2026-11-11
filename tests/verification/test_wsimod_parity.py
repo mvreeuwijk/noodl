@@ -43,6 +43,7 @@ from tests.verification._wsimod_parity import (  # noqa: E402
     Admission,
     assert_matches_wsimod,
     mass_balance_worst,
+    wsimod_reference_by_day,
 )
 from tests.verification._wsimod_reference import wsimod_model, wsimod_reference  # noqa: E402
 
@@ -329,7 +330,6 @@ def test_a_print_noodl_does_not_record_is_refused():
 
 # --- the purpose-built cases ---------------------------------------------------------------------
 MODES = {"quantity": False, "pollutants": True}
-ARC_DROPS = {"queue_arc", "float_accuracy_override"}  # water dropped inside a QueueArc
 CASE_RUNS = [
     pytest.param(name, mode, id=f"{name}-{mode}")
     for name, spec in CASES.items()
@@ -339,8 +339,12 @@ CASE_RUNS = [
 
 
 @functools.cache
+def case_theirs_by_day(name: str):
+    return wsimod_reference_by_day(CASES[name].build())
+
+
 def case_theirs(name: str):
-    return wsimod_reference(CASES[name].build())
+    return case_theirs_by_day(name)[0]
 
 
 @functools.cache
@@ -360,14 +364,14 @@ def test_case_matches_wsimod(name, mode):
     every pollutant in ``pollutants`` mode); every WSIMOD print is one noodl records on the same
     node and day or in the same count (``assert_matches_wsimod``); the mass balance closes."""
     results, diagnostics = case_ours(name, mode)
-    reference = case_theirs(name)
+    reference, print_days = case_theirs_by_day(name)
     found = assert_matches_wsimod(
         results,
         reference,
         diagnostics=diagnostics,
         case=f"{name}-{mode}",
         quality=MODES[mode],
-        arc_drops=name in ARC_DROPS,
+        print_days=print_days,
     )
     assert found["worst"] == 0.0 and found["admissions"] == []
     assert len(results.dates) == CASES[name].days
@@ -433,7 +437,13 @@ def test_the_new_cases_exercise_what_they_are_named_for():
     results, _ = case_ours("capacity_first_come", "pollutants")
     column = results.arc_names.index("hub_to_sea")
     assert float(results.arc_flow[:, column].max()) == 30.0
-    assert float(results.arc_flow[:, results.arc_names.index("res_to_hub")].min()) < 25.0
+    from_src = results.arc_flow[:, results.arc_names.index("src_to_hub")]
+    from_res = results.arc_flow[:, results.arc_names.index("res_to_hub")]
+    # first come, first served: on a day the outlet is full, the reservoir (second slot) got only
+    # what the catchment left, less than both its arc's capacity and what it held
+    full = (from_src + from_res - 30.0).abs() < 1e-12
+    assert bool(full.any()) and bool((from_res[full] < 25.0).any())
+    assert bool((from_src[full] > 0).all()) and float(from_res[full].min()) < 25.0 - 1e-9
     network = read_wsimod_config(CASES["float_accuracy_override"].build())
     assert network.float_accuracy == 1e-6
     tiny = case_ours("float_accuracy_override", "pollutants")[0]
@@ -501,6 +511,47 @@ def test_an_undated_print_needs_noodls_event_and_a_dated_one_its_node_and_day():
     assert_matches_wsimod(results, reference, **kwargs)
 
 
+def test_an_undated_print_moved_to_another_flagged_day_is_refused():
+    """The undated prints are checked day by day: moving one ``storage_unable_to_push`` flag of
+    ``storage_distribute`` to another flagged day (the totals unchanged) fails."""
+    results, diagnostics = case_ours("storage_distribute", "pollutants")
+    reference, print_days = case_theirs_by_day("storage_distribute")
+    kwargs = {"diagnostics": diagnostics, "case": "storage_distribute", "quality": True}
+    assert_matches_wsimod(results, reference, print_days=print_days, **kwargs)
+    flags = diagnostics["events"]["storage_unable_to_push"]
+    days = [d for d in range(flags.shape[0]) if bool(flags[d].any())]
+    assert len(days) >= 2
+    moved = flags.clone()
+    moved[days[0]] = False
+    moved[days[1]] = flags[days[0]] | flags[days[1]]  # the same count of lines overall
+    with pytest.raises(AssertionError, match="storage_unable_to_push"):
+        assert_matches_wsimod(
+            results,
+            reference,
+            print_days=print_days,
+            **{
+                **kwargs,
+                "diagnostics": {
+                    **diagnostics,
+                    "events": {**diagnostics["events"], "storage_unable_to_push": moved},
+                },
+            },
+        )
+
+
+@pytest.mark.parametrize("name", ["wwtw_storm_tank", "land_sewer_ponding"])
+def test_the_deny_prints_come_as_one_push_set_and_three_push_checks_a_day(name):
+    """The accepted ``Attempted ... deny`` prints have a fixed structure: on each of the 40 days,
+    one ``push set`` line and three ``push check`` lines (the works' and the land's deny
+    handlers, called once and three times a day by the neighbours' pushes and checks)."""
+    reference, print_days = case_theirs_by_day(name)
+    for kind, count in (("push set to deny", 1), ("push check to deny", 3)):
+        per_day = [0] * CASES[name].days
+        for day, line in zip(print_days, reference.printed, strict=True):
+            per_day[day] += line == f"Attempted {kind}"
+        assert per_day == [count] * CASES[name].days, kind
+
+
 # --- the cases where WSIMOD crashes --------------------------------------------------------------
 def _wsimod_run_of(model) -> None:
     with contextlib.redirect_stdout(io.StringIO()):
@@ -547,7 +598,7 @@ def test_case_runs_where_wsimod_crashes_land_sewer_ponding():
     spec = CASES["land_sewer_ponding"]
     model = wsimod_model(spec.build())
     _lower_sewer_capacity(model.nodes["combined"], None, 0.5, 10.0)
-    with pytest.raises((AttributeError, KeyError)):
+    with pytest.raises(KeyError, match="Sewer"):
         _wsimod_run_of(model)
 
     noodl_model, state, drivers = build_model(read_wsimod_config(spec.build()))
@@ -561,6 +612,7 @@ def test_case_runs_where_wsimod_crashes_land_sewer_ponding():
         if d.site == "node:combined/make_discharge/ponded"
     ]
     assert len(ponded) == spec.days and any(ponded)
+    assert ponded[0]  # day 0: the day WSIMOD crashes on (its first ponding)
     column = results.arc_names.index("combined_to_city")
     assert float(results.arc_flow[:, column].max()) > 0.0  # water went back to the streets
     assert bool(torch.isfinite(results.arc_flow).all())
