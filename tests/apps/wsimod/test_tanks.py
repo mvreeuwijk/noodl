@@ -511,3 +511,109 @@ def test_a_forced_push_into_a_user_alt_queue_arc_skips_the_clip():
     # not_pushed = max(3 - (-2), 0) = 5, so -2 enters and 5 comes back
     assert arc.send_push_request(vol(3.0), active=TRUE).tolist() == [5.0]
     assert arc.vqip_in.tolist() == [1.0]
+
+
+@pytest.mark.parametrize("n", [0, 2])
+def test_user_alt_queue_arc_equals_wsimod_on_random_pushes(wsimod_tanks, n):
+    """A user arc's slot 0 waits for a push, so the shift's ``new[0] = sum_vqip(old[0],
+    old[1])`` meets a non-empty ``old[0]`` on the days without a push (arcs.py:660)."""
+    from wsimod.arcs.arcs import AltQueueArc as WAltQueueArc
+    from wsimod.nodes.nodes import Node as WNode
+    from wsimod.nodes.waste import Waste as WWaste
+
+    g = torch.Generator().manual_seed(70 + n)
+    theirs = []
+    for b in range(B):
+        src, out = WNode(name=f"src{b}"), WWaste(name=f"out{b}")
+        theirs.append(WAltQueueArc(name="q", in_port=src, out_port=out, number_of_timesteps=n))
+    src = Node(NodeSpec("src", "Node", "Node", {}), PQ)
+    out = Waste(NodeSpec("out", "Waste", "Waste", {}), PQ)
+    spec = ArcSpec("q", "AltQueueArc", "src", "out", number_of_timesteps=n)
+    ours = AltQueueArc(spec, src, out, PQ, length=n + 2)
+    length = ours.length
+    w = Worst()
+    old0_full = 0
+    for d in range(60):
+        day(src, out, ours, p=PQ, shape=(B,), d=d)
+        for k in range(int(torch.randint(0, 4, (), generator=g))):
+            kind = ["push", "push", "force", "tiny"][int(torch.randint(4, (), generator=g))]
+            time = int(torch.randint(3, (), generator=g))
+            active = torch.rand(B, generator=g) < 0.85
+            requests = [random_vqip(g, 6.0) for _ in range(B)]
+            if kind == "tiny":
+                for r in requests:
+                    r["volume"] = 1e-12
+            got = ours.send_push_request(
+                stack(requests), active=active, force=kind == "force", time=time
+            )
+            for b, arc in enumerate(theirs):
+                if active[b]:
+                    full = {name: 0.0 for name in wsimod_tanks.constants.POLLUTANTS}
+                    full.update(requests[b])
+                    ref = arc.send_push_request(full, force=kind == "force", time=time)
+                    w.vqip(f"n={n} day {d} call {k} {kind} [{b}]", got[b], ref)
+        flow_in = ours.flow_in.expand(B)
+        flow_out = ours.flow_out.expand(B)
+        vqip_in = torch.broadcast_to(ours.vqip_in, (B, 1 + PQ.K))
+        vqip_out = torch.broadcast_to(ours.vqip_out, (B, 1 + PQ.K))
+        for b, arc in enumerate(theirs):
+            label = f"n={n} day {d} [{b}]"
+            w.value(f"{label} flow_in", flow_in[b], arc.flow_in)
+            w.value(f"{label} flow_out", flow_out[b], arc.flow_out)
+            w.vqip(f"{label} vqip_in", vqip_in[b], arc.vqip_in)
+            w.vqip(f"{label} vqip_out", vqip_out[b], arc.vqip_out)
+            old0_full += arc.queue[0]["volume"] > 0 and arc.queue[1]["volume"] > 0
+        ours.end_timestep()
+        for arc in theirs:
+            arc.end_timestep()
+        register = torch.broadcast_to(ours.register, (B, length + 1, 1 + PQ.K))
+        present = torch.broadcast_to(ours.present, (B, length + 1))
+        for b, arc in enumerate(theirs):
+            label = f"n={n} end of day {d} [{b}]"
+            assert max(arc.queue) <= length
+            rows, keys = wsimod_register(arc.queue, length)
+            for i, row in enumerate(rows):
+                w.vqip(f"{label} register[{i}]", register[b, i], row)
+            assert present[b].tolist() == keys, label
+    assert old0_full > 0  # the shift summed two non-empty slots
+    assert w.worst == 0.0
+
+
+def test_gradients_through_the_tanks_and_the_register_are_finite():
+    """The V == 0 branch of pull_storage, a tiny queue push and a masked instance stay finite:
+    every division goes through a safe denominator and every branch is a detached ``where``."""
+    x = torch.tensor([2.0, 0.0, 3.0], dtype=torch.float64, requires_grad=True)
+    tank = Tank(PQ, capacity=5.0, area=1.0, datum=0.0, initial_storage=0.0, owner="N")
+    qtank = QueueTank(
+        PQ,
+        number_of_timesteps=1,
+        push_times=(0, 1),
+        capacity=10.0,
+        area=1.0,
+        datum=0.0,
+        initial_storage=0.0,
+        owner="N",
+        path="sewer_tank",
+    )
+    day(tank, qtank, p=PQ, shape=(3,))
+    active = torch.tensor([True, True, False])
+    push = torch.stack([x, 0.5 * x, 10.0 + x], dim=-1)  # instance 1 has volume 0
+    tank.push_storage(push, active=active)
+    pulled = tank.pull_storage(push * 0.5, active=active)  # instance 1: V == 0, empty
+    tiny = torch.stack([x * 0 + 1e-12, x, x], dim=-1)  # below FLOAT_ACCURACY everywhere
+    qtank.push_storage(tiny, active=active, time=1)
+    qtank.push_storage(push, active=active, time=0)
+    qtank.end_timestep()
+    out = qtank.pull_storage(push, active=active)
+    stores = (
+        tank.storage.sum()
+        + qtank.storage.sum()
+        + qtank.active_storage.sum()
+        + qtank.internal_arc.register.sum()
+    )
+    (grad,) = torch.autograd.grad(stores + pulled.sum() + out.sum(), x, retain_graph=True)
+    assert torch.isfinite(grad).all()
+    (grad,) = torch.autograd.grad(stores, x)
+    assert torch.isfinite(grad).all()
+    assert grad[2] == 0.0  # the masked instance's stores do not depend on its inputs
+    assert grad[0] != 0.0

@@ -131,7 +131,7 @@ class Tank:
 
     def get_avail(self, vqip: Tensor | None = None, *, active: Tensor) -> Tensor:
         """``tanks.py:102-130``: the storage, at ``min(V, request)`` when a request is given."""
-        reply = self.storage
+        reply = self.storage.clone()  # copy_vqip (tanks.py:123)
         if vqip is None:
             return reply
         volume = dmin(
@@ -342,7 +342,7 @@ class QueueTank(Tank):
         """``tanks.py:505-511``: ``active_storage``. WSIMOD's method takes no request."""
         if vqip is not None:
             raise TypeError(f"{self.site}: QueueTank.get_avail takes no request (tanks.py:505)")
-        return self.active_storage
+        return self.active_storage.clone()  # copy_vqip (tanks.py:511)
 
     def push_storage(
         self, vqip: Tensor, *, active: Tensor, time: int = 0, force: bool = False
