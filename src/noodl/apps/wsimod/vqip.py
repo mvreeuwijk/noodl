@@ -131,16 +131,24 @@ def extract_vqip(p: Pollutants, t1: Tensor, t2: Tensor) -> Tensor:
     return torch.where(p.volume_or_additive_mask, t1 - t2, t1)
 
 
+def _broadcast(t: Tensor, v) -> tuple[Tensor, Tensor]:
+    """A VQIP ``(..., 1 + K)`` and a volume ``(...)`` brought to one batch shape."""
+    v = torch.as_tensor(v, dtype=torch.float64)
+    shape = torch.broadcast_shapes(t.shape[:-1], v.shape)
+    return t.expand(shape + t.shape[-1:]), v.expand(shape)
+
+
 def v_distill_vqip(t: Tensor, v: Tensor) -> Tensor:
     """core.py:209-223. Remove volume ``v``; pollutants unchanged."""
-    v = torch.as_tensor(v, dtype=torch.float64)
+    t, v = _broadcast(t, v)
     return torch.cat([t[..., :1] - v[..., None], t[..., 1:]], dim=-1)
 
 
 def v_change_vqip(p: Pollutants, t: Tensor, v: Tensor) -> Tensor:
     """core.py:251-284. ``V > 0``: ``ratio = v/V``, volume ``V·ratio``, additive columns
     times ``ratio``; otherwise volume ``v`` and pollutants unchanged."""
-    v = torch.as_tensor(v, dtype=torch.float64)[..., None]
+    t, v = _broadcast(t, v)
+    v = v[..., None]
     pos = t[..., :1] > 0
     ratio = v / safe_den(t[..., :1])
     scaled = torch.where(p.volume_or_additive_mask, t * ratio, t)

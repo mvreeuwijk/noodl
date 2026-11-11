@@ -51,8 +51,9 @@ is ever called.
 from __future__ import annotations
 
 import copy
+import inspect
 import io
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager, redirect_stdout
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -60,8 +61,11 @@ from pathlib import Path
 import torch
 
 __all__ = [
+    "ArcCall",
+    "NodeCall",
     "WsimodReference",
     "capture_events",
+    "capture_node_calls",
     "extract_topology",
     "record_wsimod_run",
     "reset_wsimod_globals",
@@ -340,3 +344,197 @@ def wsimod_reference(
 ) -> WsimodReference:
     """`wsimod_model(source)` run for `days` days (all dates by default), recorded."""
     return record_wsimod_run(wsimod_model(source, config_name=config_name), days=days)
+
+
+# --- per-node call capture (spec, Verification 1) --------------------------------------------
+@dataclass
+class ArcCall:
+    """One arc call a captured node made: the arguments as they were at entry (deep copies,
+    before WSIMOD can mutate them), the reply, and the arc's accumulators at entry."""
+
+    arc: str
+    method: str  # send_push_request, send_pull_request, send_push_check, send_pull_check
+    vqip: dict | None
+    tag: object
+    force: bool
+    reply: dict
+    flow_in: float
+    vqip_in: dict
+
+
+@dataclass
+class NodeCall:
+    """One call into a captured node: an orchestration method (``tag`` and ``vqip`` None) or
+    one of its four handler entry points, with its stores before and after and the arc calls
+    it made itself, in order. ``pre``/``post`` hold the stores by ``Node.stores``' attribute
+    paths and ``"arcs.<name>.vqip_in"``/``"arcs.<name>.flow_in"`` of the node's out-arcs."""
+
+    day: int
+    method: str
+    vqip: dict | None
+    tag: object
+    reply: dict | None
+    pre: dict[str, object]
+    post: dict[str, object]
+    arc_calls: list[ArcCall]
+
+
+_HANDLERS = ("pull_set", "push_set", "pull_check", "push_check")
+_ARC_METHODS = {  # the end of the arc that makes the call (arcs.py:112-228)
+    "send_push_request": "in_port",
+    "send_push_check": "in_port",
+    "send_pull_request": "out_port",
+    "send_pull_check": "out_port",
+}
+
+
+def _store_paths(node) -> tuple[str, ...]:
+    """``Node.store_paths`` of the noodl class of ``node``. ``__qualname__`` survives the
+    renames that set ``__class__.__name__`` (``storage.py:294``, ``:1043``, ``demand.py:214``)."""
+    from noodl.apps.wsimod.engine import _register_all
+    from noodl.apps.wsimod.node import NODE_CLASSES
+
+    _register_all()
+    return NODE_CLASSES[type(node).__qualname__].store_paths
+
+
+def _attribute(obj, path: str):
+    for part in path.split("."):
+        obj = getattr(obj, part)
+    return obj
+
+
+@contextmanager
+def capture_node_calls(model, nodes: Sequence[str]) -> Iterator[dict[str, list[NodeCall]]]:
+    """Record every call into the named nodes while ``model`` runs (spec, Verification 1).
+
+    Wraps each target's orchestration methods (the slots that name it, and ``distribute`` when
+    it is in the river order), its four handler entry points, and the ``send_*`` methods of the
+    arcs it calls (out-arcs push, in-arcs pull). Every argument is deep-copied at entry, before
+    WSIMOD can mutate it (spec, Protocol, Request mutation). A call into a target that is
+    already in a captured call is refused (D22); the error is raised again at exit, because
+    WSIMOD's ``query_handler`` swallows exceptions and retries (``nodes.py:335-343``).
+    Everything is restored on exit.
+    """
+    targets = {name: model.nodes[name] for name in nodes}
+    calls: dict[str, list[NodeCall]] = {name: [] for name in targets}
+    current: dict[str, NodeCall | None] = dict.fromkeys(targets)
+    errors: list[str] = []
+    restore: list[tuple[object, str, bool, object]] = []
+    date_index = {date: i for i, date in enumerate(model.dates)}
+
+    def snapshot(node) -> dict[str, object]:
+        out: dict[str, object] = {
+            path: copy.deepcopy(_attribute(node, path)) for path in _store_paths(node)
+        }
+        for arc in node.out_arcs.values():
+            out[f"arcs.{arc.name}.vqip_in"] = copy.deepcopy(arc.vqip_in)
+            out[f"arcs.{arc.name}.flow_in"] = arc.flow_in
+        return out
+
+    def install(obj, attr: str, make) -> None:
+        own = attr in vars(obj)
+        restore.append((obj, attr, own, vars(obj).get(attr)))
+        setattr(obj, attr, make(getattr(obj, attr)))
+
+    def node_wrapper(node, method: str, handler: bool) -> None:
+        def make(original):
+            signature = inspect.signature(original)
+
+            def wrapped(*args, **kwargs):
+                if current[node.name] is not None:
+                    message = (
+                        f"capture_node_calls: {method} re-enters {node.name!r} during "
+                        f"{current[node.name].method} (D22)"
+                    )
+                    errors.append(message)
+                    raise RuntimeError(message)
+                vqip = tag = None
+                if handler:
+                    bound = signature.bind(*args, **kwargs)
+                    bound.apply_defaults()
+                    vqip, tag = bound.arguments["vqip"], bound.arguments["tag"]
+                call = NodeCall(
+                    day=date_index[node.t],
+                    method=method,
+                    vqip=copy.deepcopy(vqip),
+                    tag=copy.deepcopy(tag),
+                    reply=None,
+                    pre=snapshot(node),
+                    post={},
+                    arc_calls=[],
+                )
+                calls[node.name].append(call)
+                current[node.name] = call
+                try:
+                    reply = original(*args, **kwargs)
+                finally:
+                    current[node.name] = None
+                call.reply = copy.deepcopy(reply)
+                call.post = snapshot(node)
+                return reply
+
+            return wrapped
+
+        install(node, method, make)
+
+    def arc_wrapper(arc, method: str) -> None:
+        owner = getattr(arc, _ARC_METHODS[method]).name
+
+        def make(original):
+            signature = inspect.signature(original)
+
+            def wrapped(*args, **kwargs):
+                call = current.get(owner)
+                if call is None:
+                    return original(*args, **kwargs)
+                bound = signature.bind(*args, **kwargs)
+                bound.apply_defaults()
+                record = ArcCall(
+                    arc=arc.name,
+                    method=method,
+                    vqip=copy.deepcopy(bound.arguments.get("vqip")),
+                    tag=copy.deepcopy(bound.arguments.get("tag", "default")),
+                    force=bool(bound.arguments.get("force", False)),
+                    reply={},
+                    flow_in=arc.flow_in,
+                    vqip_in=copy.deepcopy(arc.vqip_in),
+                )
+                call.arc_calls.append(record)
+                reply = original(*args, **kwargs)
+                record.reply = copy.deepcopy(reply)
+                return reply
+
+            return wrapped
+
+        install(arc, method, make)
+
+    for name, node in targets.items():
+        steps = {
+            method
+            for slot in model.orchestration
+            for key, method in slot.items()
+            if any(other is node for other in model.nodes_type.get(key, {}).values())
+        }
+        if name in getattr(model, "river_discharge_order", []):
+            steps.add("distribute")
+        for method in sorted(steps):
+            node_wrapper(node, method, handler=False)
+        for method in _HANDLERS:
+            node_wrapper(node, method, handler=True)
+        for arc in node.out_arcs.values():
+            arc_wrapper(arc, "send_push_request")
+            arc_wrapper(arc, "send_push_check")
+        for arc in node.in_arcs.values():
+            arc_wrapper(arc, "send_pull_request")
+            arc_wrapper(arc, "send_pull_check")
+    try:
+        yield calls
+    finally:
+        for obj, attr, own, value in reversed(restore):
+            if own:
+                setattr(obj, attr, value)
+            else:
+                delattr(obj, attr)
+    if errors:
+        raise RuntimeError(errors[0])
