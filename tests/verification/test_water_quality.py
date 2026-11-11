@@ -1147,7 +1147,8 @@ def _gradient_case(tmp_path: Path) -> Path:
     hydraulics; `P3`'s roughness at 120 (1 + 1e-4) flips it, so `P7`'s segment count stays
     at 1 from 2 h where the unperturbed run's grows to 20 by 6 h (a different decision path,
     Ruling Q5; 1e-5 flips it too, from 70 min).
-    1 L/s gives `P7` a definite flow, and every perturbation below keeps the decisions."""
+    `J5`'s 1 L/s is there for the roughness case's fixed decision path: it gives `P7` a
+    definite flow, and every perturbation below keeps the decisions."""
     return edited(BASE, tmp_path, "gradients.inp",
                   replace=[(" Global Bulk  0", " Global Bulk  -0.5"),
                            (" Global Wall  0", " Global Wall  -0.05"),
@@ -1161,38 +1162,57 @@ def _with(vector: torch.Tensor, index: int, value: torch.Tensor) -> torch.Tensor
     return torch.cat([vector[:index], value.reshape(1), vector[index + 1:]])
 
 
-@pytest.mark.parametrize("parameter", ["bulk", "wall", "source", "initial", "roughness"])
-def test_quality_gradients_against_central_differences(tmp_path, parameter):
-    """d(`J4`'s quality at 6 h) by autograd (`water_run(..., differentiable=True)`) against a
-    central difference (h = 1e-4 |p|) with respect to `quality.bulk_coefficient[P5]`,
-    `quality.wall_coefficient[P5]`, `quality.source_strength[R1]`, `quality.initial[T1]` and
-    `P3`'s roughness: `|ad - fd| <= 1e-5 max(|ad|, |fd|)`, and the three runs' `"segments"`
-    and `"node_order"` identical (Ruling Q5: only decisions are detached, so the gradient is
-    the derivative along a fixed decision path). MEASURED relative differences: bulk 8.5e-12,
-    wall 9.1e-12, source 8.7e-13, roughness 1.1e-8. `T1` fills over the 6 h, so `J4` never
-    sees its initial water: that derivative is exactly 0 in both, and `T1`'s own (0.63) is
-    checked alongside."""
+#: Each gradient case: `(parameter, the entry it perturbs, the node whose quality at the end
+#: is differentiated, the run's duration in hours, a floor on |fd|)`. The floors are about
+#: 1/10 of each measured derivative (MEASURED: bulk 6.2e3, wall 1.6e5, source 1.8, initial
+#: J3 1.2e-3, initial T1 0.63, roughness -3.9e-5), so a derivative that collapses to noise fails.
+_GRADIENT_CASES = {
+    "bulk": ("bulk", "P5", "J4", 6, 6e2),
+    "wall": ("wall", "P5", "J4", 6, 1.6e4),
+    "source": ("source", "R1", "J4", 6, 0.18),
+    "initial_junction": ("initial", "J3", "J4", 10, 1.2e-4),
+    "initial_tank": ("initial", "T1", "T1", 6, 0.063),
+    "roughness": ("roughness", "P3", "J4", 6, 3.9e-6),
+}
+
+
+@pytest.mark.parametrize("case", sorted(_GRADIENT_CASES))
+def test_quality_gradients_against_central_differences(tmp_path, case):
+    """d(a node's quality at the end of the run) by autograd (`water_run(...,
+    differentiable=True)`) against a central difference (h = 1e-4 |p|): `J4`'s with respect to
+    `quality.bulk_coefficient[P5]`, `quality.wall_coefficient[P5]`,
+    `quality.source_strength[R1]` and `P3`'s roughness at 6 h, `J4`'s with respect to
+    `quality.initial[J3]` at 10 h (the downstream path: MEASURED, `J3`'s initial water passes
+    `J4` in the first hour only, so the derivative at 2 h to 8 h is exactly 0, and returns
+    from 9 h through `T1`, which it filled and which drains from 8 h), and `T1`'s with respect
+    to `quality.initial[T1]` at 6 h (the tank's initial segment; `T1` fills over the 6 h, so
+    `J4` never sees that water and its derivative there is exactly 0).
+    `|ad - fd| <= 1e-5 max(|ad|, |fd|)`, `|fd|` above the case's floor (`_GRADIENT_CASES`),
+    and the three runs' `"segments"` and `"node_order"` identical (Ruling Q5: only decisions
+    are detached, so the gradient is the derivative along a fixed decision path). MEASURED
+    relative differences: bulk 8.5e-12, wall 9.1e-12, source 8.7e-13, initial J3 1.7e-9,
+    initial T1 6.3e-13, roughness 1.1e-8."""
+    parameter, at, target, hours, floor = _GRADIENT_CASES[case]
     path = _gradient_case(tmp_path)
     net = read_epanet_inp(path)
     model, state, drivers = build_model(net)
     nodes, pipes = model.node_names, [p.name for p in net.pipes]
-    j4, t1, r1 = nodes.index("J4"), nodes.index("T1"), nodes.index("R1")
-    p5, p3 = pipes.index("P5"), pipes.index("P3")
+    node = nodes.index(target)
     bulk, wall = pipe_coefficients(net, net.quality)
     source = torch.zeros(len(nodes), dtype=F64)
-    source[r1] = 2.0
+    source[nodes.index("R1")] = 2.0
     initial = torch.zeros(len(nodes), dtype=F64)
     for name, value in (("R1", 1.0), ("J3", 0.5), ("J6", 0.8), ("T1", 0.6)):
         initial[nodes.index(name)] = value
     pipe = model.kirchhoff["water"]._laws[0].pipe
     roughness = pipe.roughness
     inputs = {"bulk": bulk, "wall": wall, "source": source, "initial": initial}
-    index = {"bulk": p5, "wall": p5, "source": r1, "initial": t1, "roughness": p3}[parameter]
+    index = (pipes if parameter in ("bulk", "wall", "roughness") else nodes).index(at)
     p0 = float((roughness if parameter == "roughness" else inputs[parameter])[index])
 
-    def run(value=None, node=j4):
+    def run(value=None):
         """The run with the parameter at `value` (a 0-d tensor; the roughness is set in place
-        when None): `(quality of node at 6 h, the router's diagnostics)`."""
+        when None): `(the target's quality at the end, the router's diagnostics)`."""
         given = dict(inputs)
         if value is not None:
             given[parameter] = _with(given[parameter], index, value)
@@ -1202,7 +1222,8 @@ def test_quality_gradients_against_central_differences(tmp_path, parameter):
             {**drivers, "quality.bulk_coefficient": given["bulk"],
              "quality.wall_coefficient": given["wall"],
              "quality.source_strength": given["source"]},
-            duration=6 * 3600, quality=True, diagnostics=diagnostics, differentiable=True)
+            duration=hours * 3600, quality=True, diagnostics=diagnostics,
+            differentiable=True)
         return results.node_quality[-1, node], diagnostics["quality"][0]
 
     h = 1e-4 * abs(p0) if p0 != 0.0 else 1e-4
@@ -1232,13 +1253,7 @@ def test_quality_gradients_against_central_differences(tmp_path, parameter):
     for key in ("segments", "node_order"):
         assert entry[key] == entry_plus[key] == entry_minus[key], key
     assert abs(ad - fd) <= 1e-5 * max(abs(ad), abs(fd)), (ad, fd)
-    if parameter == "initial":
-        assert ad == fd == 0.0
-        leaf = torch.tensor(p0, dtype=F64, requires_grad=True)
-        (own,) = torch.autograd.grad(run(leaf, node=t1)[0], leaf)
-        assert float(own) > 0.1
-    else:
-        assert ad != 0.0
+    assert abs(fd) > floor, (fd, floor)
 
 
 def test_the_router_runs_detached_unless_asked(tmp_path):
@@ -1252,7 +1267,7 @@ def test_the_router_runs_detached_unless_asked(tmp_path):
     detached = water_run(model, state, {**drivers, "quality.bulk_coefficient": bulk},
                          duration=6 * 3600, quality=True)
     attached = water_run(model, state,
-                         {**drivers, "quality.bulk_coefficient": bulk.requires_grad_(True)},
+                         {**drivers, "quality.bulk_coefficient": bulk.clone().requires_grad_(True)},
                          duration=6 * 3600, quality=True)
     assert not detached.node_quality.requires_grad
     assert not detached.link_quality.requires_grad
