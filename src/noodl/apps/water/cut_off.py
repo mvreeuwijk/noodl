@@ -126,7 +126,7 @@ def cut_off_plan(model: Model, state: State, drivers: Drivers, caller: str):
 
     A cut-off group without demand is solved, as EPANET solves it: `drivers` gains
     `PIN_KEY` on one closed link per group (`_cut_off_groups`), which ties the group's head
-    to that link's far end with every flow exactly zero, and `limit(solution)` then gives
+    to that link's far end with every flow zero to round-off, and `limit(solution)` then gives
     the heads with every part cut off AT THE SOLUTION at EPANET's limit, and which check
     valves holding no flow are open there (`_limit`). `limit` is `None` when no link is
     closed and none is one-way."""
