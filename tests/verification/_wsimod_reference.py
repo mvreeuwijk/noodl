@@ -50,9 +50,34 @@ is ever called.
 
 from __future__ import annotations
 
-from contextlib import contextmanager
+import copy
+import io
+from collections.abc import Mapping
+from contextlib import contextmanager, redirect_stdout
+from dataclasses import dataclass, field
+from pathlib import Path
 
-__all__ = ["capture_events", "extract_topology"]
+import torch
+
+__all__ = [
+    "WsimodReference",
+    "capture_events",
+    "extract_topology",
+    "record_wsimod_run",
+    "reset_wsimod_globals",
+    "wsimod_model",
+    "wsimod_reference",
+]
+
+_SURFACE_FIELDS = (
+    ("storage", "storage"),
+    ("evaporation", "evaporation"),
+    ("precipitation", "precipitation"),
+    ("percolation", "percolation"),
+    ("subsurface_r", "subsurface_r"),
+    ("surface_r", "surface_r"),
+    ("tank_recharge", "tank_recharge"),
+)
 
 
 @contextmanager
@@ -173,3 +198,145 @@ def extract_topology(model) -> dict:
             for a in model.arcs.values()
         ],
     }
+
+
+def reset_wsimod_globals() -> None:
+    """Restores `wsimod.core.constants`' mutable globals to WSIMOD 0.8.1's defaults.
+
+    `Model.load` and `create_oxford_model` overwrite `POLLUTANTS`, `ADDITIVE_POLLUTANTS`,
+    `NON_ADDITIVE_POLLUTANTS` and `FLOAT_ACCURACY` for the whole process (`model.py:232-241`,
+    `create_oxford.py:171-180`); every WSIMOD build starts from the defaults listed in
+    `constants.py:21-50`, with `FLOAT_ACCURACY = 1e-11` (`constants.py:3`).
+    """
+    from wsimod.core import constants
+
+    constants.POLLUTANTS = [
+        "do", "org-phosphorus", "phosphate", "ammonia", "solids", "bod", "cod", "ph",
+        "temperature", "nitrate", "nitrite", "org-nitrogen",
+    ]  # fmt: skip
+    constants.NON_ADDITIVE_POLLUTANTS = ["do", "temperature", "ph"]
+    constants.ADDITIVE_POLLUTANTS = [
+        "org-phosphorus", "phosphate", "ammonia", "solids", "bod", "cod", "nitrate",
+        "nitrite", "org-nitrogen",
+    ]  # fmt: skip
+    constants.FLOAT_ACCURACY = 1e-11
+
+
+def wsimod_model(source: Path | Mapping, *, config_name: str = "config.yml"):
+    """A WSIMOD `Model` built from a configuration directory or a mapping, from default globals.
+
+    A directory goes through `Model.load(source, config_name)`. A mapping (in `Model.load`'s
+    post-read form: inline `data_input_dict` keyed `(variable, date string)`, surfaces as a
+    list or dict) goes through the same steps on a deep copy (`model.py:232-274`): the
+    globals, the orchestration, `add_nodes`, `add_arcs`, `add_overrides`, the dates.
+    """
+    from wsimod.extensions import apply_patches
+    from wsimod.orchestration.model import Model, to_datetime
+
+    reset_wsimod_globals()
+    model = Model()
+    if not isinstance(source, Mapping):
+        model.load(str(source), config_name)
+        return model
+    from wsimod.core import constants
+
+    data = copy.deepcopy(dict(source))
+    constants.POLLUTANTS = data.get("pollutants", constants.POLLUTANTS)
+    constants.ADDITIVE_POLLUTANTS = data.get("additive_pollutants", constants.ADDITIVE_POLLUTANTS)
+    constants.NON_ADDITIVE_POLLUTANTS = data.get(
+        "non_additive_pollutants", constants.NON_ADDITIVE_POLLUTANTS
+    )
+    constants.FLOAT_ACCURACY = float(data.get("float_accuracy", constants.FLOAT_ACCURACY))
+    model.extensions = data.get("extensions", [])
+    if "orchestration" in data:
+        model.orchestration = data["orchestration"]
+    nodes = data["nodes"]
+    nodes = list(nodes.values()) if isinstance(nodes, Mapping) else list(nodes)
+    arcs = data.get("arcs", {})
+    arcs = list(arcs.values()) if isinstance(arcs, Mapping) else list(arcs)
+
+    def keyed(table):
+        return {(variable, to_datetime(date)): value for (variable, date), value in table.items()}
+
+    for node in nodes:
+        if "data_input_dict" in node:
+            node["data_input_dict"] = keyed(node["data_input_dict"])
+        surfaces = node.get("surfaces")
+        if isinstance(surfaces, Mapping):
+            surfaces = node["surfaces"] = list(surfaces.values())
+        for surface in surfaces or []:
+            if "data_input_dict" in surface:
+                surface["data_input_dict"] = keyed(surface["data_input_dict"])
+    if "dates" in data:
+        model.dates = [to_datetime(x) for x in data["dates"]]
+    model.add_nodes(nodes)
+    model.add_arcs(arcs)
+    model.add_overrides(data.get("overrides", {}))
+    apply_patches(model)
+    return model
+
+
+@dataclass
+class WsimodReference:
+    """What WSIMOD's own `run` recorded, as tensors (`record_all=True`, `model.py:1075-1133`)."""
+
+    pollutants: tuple[str, ...]
+    dates: list[str]
+    arc_names: list[str]
+    arc_flow: torch.Tensor  # (T, n_arcs)
+    arc_quality: torch.Tensor  # (T, n_arcs, K)
+    tank_names: list[tuple[str, str]]  # (node, prop)
+    tank_storage: torch.Tensor  # (T, n_tanks)
+    tank_quality: torch.Tensor  # (T, n_tanks, K)
+    surface_names: list[tuple[str, str]]  # (node, surface)
+    surface: dict[str, torch.Tensor]  # field -> (T, n_surfaces), NaN where not recorded
+    surface_quality: torch.Tensor  # (T, n_surfaces, K)
+    printed: list[str] = field(default_factory=list)
+
+
+def _tensor(rows, key, n_days, width):
+    values = [float("nan") if key not in row else row[key] for row in rows]
+    return torch.tensor(values, dtype=torch.float64).reshape(n_days, width)
+
+
+def record_wsimod_run(model, *, days: int | None = None) -> WsimodReference:
+    """Runs `model` for its first `days` dates under `redirect_stdout` and records everything."""
+    from wsimod.core import constants
+
+    dates = list(model.dates)[:days]
+    pollutants = tuple(constants.POLLUTANTS)
+    out = io.StringIO()
+    with redirect_stdout(out):
+        flows, tanks, _, surfaces = model.run(dates=dates, verbose=True, record_all=True)
+    n_days = len(dates)
+
+    def quality(rows, width):
+        values = [[row[p] for p in pollutants] for row in rows]
+        return torch.tensor(values, dtype=torch.float64).reshape(n_days, width, len(pollutants))
+
+    n_arcs = len(flows) // n_days
+    n_tanks = len(tanks) // n_days
+    n_surfaces = len(surfaces) // n_days
+    return WsimodReference(
+        pollutants=pollutants,
+        dates=[str(d) for d in dates],
+        arc_names=[row["arc"] for row in flows[:n_arcs]],
+        arc_flow=_tensor(flows, "flow", n_days, n_arcs),
+        arc_quality=quality(flows, n_arcs),
+        tank_names=[(row["node"], row["prop"]) for row in tanks[:n_tanks]],
+        tank_storage=_tensor(tanks, "storage", n_days, n_tanks),
+        tank_quality=quality(tanks, n_tanks),
+        surface_names=[(row["node"], row["surface"]) for row in surfaces[:n_surfaces]],
+        surface={
+            name: _tensor(surfaces, key, n_days, n_surfaces) for name, key in _SURFACE_FIELDS
+        },
+        surface_quality=quality(surfaces, n_surfaces),
+        printed=out.getvalue().splitlines(),
+    )
+
+
+def wsimod_reference(
+    source, *, config_name: str = "config.yml", days: int | None = None
+) -> WsimodReference:
+    """`wsimod_model(source)` run for `days` days (all dates by default), recorded."""
+    return record_wsimod_run(wsimod_model(source, config_name=config_name), days=days)

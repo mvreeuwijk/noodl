@@ -49,7 +49,7 @@ APPS = {
          "tests/verification/test_wsimod_", "tests/verification/test_allocation_wsimod_",
          "tests/verification/_wsimod_reference.py", "tests/verification/_wsimod_cases.py",
          "tests/verification/_wsimod_parity.py", "scripts/regenerate_wsimod_fixtures.py"],
-        ["tests/verification/test_allocation_wsimod_*.py"],
+        ["tests/verification/test_allocation_wsimod_*.py", "tests/verification/test_wsimod_*.py"],
     ),
     "street": (
         ["src/noodl/apps/street_aq/", "tests/apps/street_aq/", "tests/data/street/",
