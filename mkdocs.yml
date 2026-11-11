@@ -85,6 +85,7 @@ nav:
       - SWMM (.inp): formats/swmm.md
       - EPANET (.inp): formats/epanet.md
       - MATPOWER (.m): formats/matpower.md
+      - WSIMOD (config.yml): formats/wsimod.md
   - Design notes:
       - design/index.md
       - Building physics and electrical: design/building_electrical.md
