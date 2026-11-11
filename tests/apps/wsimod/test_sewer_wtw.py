@@ -182,6 +182,44 @@ def test_zero_input_on_day_one_keeps_the_previous_liquor_value():
         works.end_timestep()
 
 
+def test_a_zero_denominator_keeps_the_liquor_value_of_the_day_before():
+    """Defect table, the kept branch: a ``WWTW`` treats 10 at temperature 10 on day 1. On day 2
+    nothing comes in and ``liquor_multiplier["volume"]`` is 0: only the recycled liquor (0.3 at
+    10) is treated, so the blend divides by 0.3 and the liquor volume becomes 0. On day 3 the
+    denominator is ``0 + 0 x 0 = 0``: the liquor keeps day 2's temperature, 10, not 0."""
+    works = make("WWTW", pollutants=PP, **neutral())
+    m_v = torch.tensor([0.03, 0.0, 0.0], dtype=torch.float64, requires_grad=True)
+    inflows = (10.0, 0.0, 0.0)
+    fired = []
+    for number, inflow in enumerate(inflows):
+        ctx = day(works, pollutants=PP, number=number)
+        works.bind({"liquor_multiplier": m_v[number]})
+        if inflow:
+            vqip = PP.to_vqip({"volume": inflow, "phosphate": 0.1, "temperature": 10.0})
+            works.push_set(vqip, active=TRUE)
+        works.calculate_discharge(active=TRUE)
+        fired.append(bool(ctx.events["wtw_liquor_zero_denominator"]["n"]))
+        liquor = PP.to_dict(works.liquor.detach())
+        assert liquor["temperature"] == 10.0, number
+        works.end_timestep()
+    assert liquor["volume"] == 0.0
+    assert fired == [False, False, True]
+    (grad,) = torch.autograd.grad(works.liquor.sum() + works.treated.sum(), m_v)
+    assert torch.isfinite(grad).all()
+
+
+def test_without_non_additive_pollutants_there_is_no_liquor_blend_to_divide():
+    """``wtw.py:174`` loops over the non-additive pollutants only: a quantity-only run (or one
+    with additive pollutants only) never divides, so no decision or event is recorded."""
+    only_additive = Pollutants(("phosphate",), ("phosphate",), ())
+    for pollutants in (P, only_additive):
+        works = make("WWTW", pollutants=pollutants)
+        ctx = day(works, pollutants=pollutants)
+        works.calculate_discharge(active=TRUE)  # zero input, no liquor: the denominator is 0
+        assert "wtw_liquor_zero_denominator" not in ctx.events
+        assert not any("liquor_zero_denominator" in d.site for d in ctx.decisions)
+
+
 def test_the_zero_input_case_runs_and_records_the_event_where_wsimod_would_raise():
     from tests.apps.wsimod._stepping import step_days
     from tests.verification._wsimod_cases import CASES
@@ -482,6 +520,21 @@ def test_ponded_water_goes_to_land_and_the_rest_is_forced_back():
     ponded = [d for d in ctx.decisions if d.site == "node:n/make_discharge/ponded"]
     assert len(ponded) == 1 and bool(ponded[0].outcome)
     assert not bool(ctx.events.get("ponded_water_cant_reenter", {}).get("n", False))
+
+
+def test_ponded_water_at_or_below_float_accuracy_vanishes_and_is_dropped():
+    """``sewer.py:234-235``: ``pull_ponded`` takes the excess out of the tank; at or below
+    ``FLOAT_ACCURACY`` nothing pushes it anywhere, so it is recorded as dropped water."""
+    sewer = make("Sewer", capacity=10.0)
+    ctx = day(sewer)
+    over = 10.0 + 1e-12
+    sewer.sewer_tank.storage = P.to_vqip({"volume": over})
+    sewer.sewer_tank.active_storage = P.to_vqip({"volume": over})
+    sewer.make_discharge(active=TRUE)  # no out-arcs: nothing is pushed downstream
+    excess = over - 10.0
+    assert 0 < excess < FA
+    assert float(ctx.dropped[0]) == excess
+    assert float(sewer.sewer_tank.storage[0]) == over - excess == 10.0
 
 
 def test_sewer_travel_times_are_whole_days_and_the_diagram_sums_to_one_or_warns():

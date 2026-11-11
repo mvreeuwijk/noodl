@@ -199,19 +199,23 @@ class WTW(Node):
         v_in = influent[..., :1]
         old = self.liquor
         v_liq = old[..., :1]
-        # wtw.py:174-182: num / den, kept as the old value where den == 0 (double where)
-        num = old * v_liq + influent * v_in * m_v[..., None]
-        den = v_liq + v_in * m_v[..., None]
-        zero = ctx.decide(
-            f"{self.site}/treat_current_input/liquor_zero_denominator",
-            den[..., 0],
-            "==",
-            0.0,
-            active=active,
-            call=call,
-        )
-        ctx.event("wtw_liquor_zero_denominator", self.name, active & zero)
-        blended = torch.where(zero[..., None], old, num / safe_den(den))
+        # wtw.py:174-182: num / den, kept as the old value where den == 0 (double where). The
+        # loop runs over the non-additive pollutants only, so without any (a quantity-only
+        # run among them) WSIMOD never divides and nothing is decided or recorded.
+        blended = old
+        if p.non_additive:
+            num = old * v_liq + influent * v_in * m_v[..., None]
+            den = v_liq + v_in * m_v[..., None]
+            zero = ctx.decide(
+                f"{self.site}/treat_current_input/liquor_zero_denominator",
+                den[..., 0],
+                "==",
+                0.0,
+                active=active,
+                call=call,
+            )
+            ctx.event("wtw_liquor_zero_denominator", self.name, active & zero)
+            blended = torch.where(zero[..., None], old, num / safe_den(den))
         # wtw.py:188-201: volume and additive columns
         treated_add = influent * c_v[..., None]
         liquor_add = influent * m_v[..., None]

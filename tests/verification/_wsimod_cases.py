@@ -707,7 +707,13 @@ def _sewer_timearea() -> dict:
     """A sewer reached through the ``"Demand"`` tag (a ``ResidentialDemand``'s foul water, spread
     over ``pipe_timearea``, ``sewer.py:178-199``) and the default tag (a catchment's water through
     a node and a reservoir, entering at ``pipe_time``, ``:163-176``). Its outlet is narrower
-    than the inflow on wet days, so the sewer fills and its push check limits both senders."""
+    than the inflow on wet days, so the sewer fills and its push check limits both senders.
+
+    The default-tag sender is the reservoir (``Storage.distribute`` pushes with no ``of_type``,
+    ``storage.py:120-127``), not the node: a ``Node`` pushes and checks only towards Node, River,
+    Waste and Reservoir (``nodes.py:62-71``), and its single-arc push drops any other type
+    (``:430-438``). A node wired straight to a sewer moves nothing in WSIMOD; run live, every
+    arc of that model carries 0 on every day."""
     days = _STORAGE_DAYS
     return _storage_case(
         [
@@ -746,7 +752,9 @@ def _foul_sewers() -> dict:
     """``foul_main`` (a name with "foul", so the ``"Foul"`` slot, ``model.py:658-660``) takes a
     demand's foul water over its time-area diagram and passes it to ``trunk`` (the ``"Sewer"``
     slot) through the default tag at ``trunk``'s pipe time of 2 days. The trunk's outlet takes
-    3 a day of the 6, so the trunk fills, then ``foul_main``, then the demand backs up."""
+    3 a day of the 6, so the trunk fills, then ``foul_main``, then the demand backs up. The
+    ``"Sewer"`` slot runs before the ``"Foul"`` slot, so the trunk discharges before
+    ``foul_main`` pushes into it: a foul sewer filed under the wrong slot changes the flows."""
     days = _STORAGE_DAYS
     return _storage_case(
         [
@@ -764,8 +772,8 @@ def _foul_sewers() -> dict:
         ],
         [
             {"ResidentialDemand": "create_demand"},
-            {"Foul": "make_discharge"},
             {"Sewer": "make_discharge"},
+            {"Foul": "make_discharge"},
         ],
     )
 

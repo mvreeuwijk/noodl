@@ -681,11 +681,12 @@ shape:
   precipitation, `FWTW` deficits, `UnlimitedDistribution` supply, demand loads), its outflow
   (Waste, evaporation, demand consumption, unpushed sludge, WTW solids, unrouted catchment
   water, and the water WSIMOD drops below `FLOAT_ACCURACY`), and its storage change. WSIMOD
-  drops that water in six places: `QueueArc` pushes (`arcs.py:378-379`), waiting `QueueArc`
+  drops that water in seven places: `QueueArc` pushes (`arcs.py:378-379`), waiting `QueueArc`
   requests removed on update (`arcs.py:483-485`), the
   `Land.run` percolation push-back (`land.py:213-215`), the `WWTW` storm-tank rejection
-  (`wtw.py:403-404`), the `WWTW.make_discharge` push-back (`:347-348`), and the `QueueTank`
-  storage-without-queue entry (Nodes › QueueTank). All are
+  (`wtw.py:403-404`), the `WWTW.make_discharge` push-back (`:347-348`), the `Sewer.make_discharge`
+  ponded water at or below `FLOAT_ACCURACY` (pulled from the tank and sent nowhere,
+  `sewer.py:234-235`), and the `QueueTank` storage-without-queue entry (Nodes › QueueTank). All are
   `(..., T, 1 + K_additive)`, with the residual. This is what WSIMOD's system check
   (`model.py:1011-1060`) meant to compute (W4).
 

@@ -357,3 +357,28 @@ def test_pipe_time_zero_water_leaves_the_sewer_the_day_it_arrives():
     for day, _, engine in step_days(network, network.pollutants, spec.days):
         ours_in = engine.arcs["basin_to_sewer"].flow_in
         assert float(engine.arcs["sewer_to_sea"].flow_in) == float(ours_in) == float(inflow[day])
+
+
+def _arc_flows(network, days: int) -> dict[str, list[float]]:
+    flows: dict[str, list[float]] = {}
+    for _, _, engine in step_days(network, network.pollutants, days):
+        for name, arc in engine.arcs.items():
+            flows.setdefault(name, []).append(float(arc.flow_in))
+    return flows
+
+
+def test_foul_sewers_run_in_their_own_slot_and_match_wsimod_day_by_day():
+    """``model.py:658-660``: ``foul_main`` runs in the ``"Foul"`` slot, after the ``"Sewer"`` slot
+    in this orchestration, so the trunk discharges before ``foul_main`` pushes into it. Every
+    arc's daily flow equals WSIMOD's; filing ``foul_main`` under ``"Sewer"`` changes them."""
+    spec = CASES["foul_sewers"]
+    reference = record_wsimod_run(wsimod_model(spec.build()), days=spec.days)
+    network = read_wsimod_config(spec.build())
+    ours = _arc_flows(network, spec.days)
+    for name, flows in ours.items():
+        theirs = reference.arc_flow[:, reference.arc_names.index(name)].tolist()
+        assert flows == theirs, name
+    foul = next(n for n in network.nodes if n.name == "foul_main")
+    assert foul.slot_key == "Foul"
+    foul.slot_key = "Sewer"  # the wrong slot: foul_main would run before the trunk
+    assert _arc_flows(network, spec.days) != ours

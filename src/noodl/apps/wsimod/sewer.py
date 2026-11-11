@@ -182,7 +182,8 @@ class Sewer(Node):
         3. ``pull_storage_exact`` of what was sent (``"miscalculated_tank_storage"`` when the
            reply exceeds it by more than ``FLOAT_ACCURACY``);
         4. ``pull_ponded``; ponded water above ``FLOAT_ACCURACY`` goes to ``Land`` with the tag
-           ``"Sewer"``, and what ``Land`` rejects is forced back at time 0.
+           ``"Sewer"``, and what ``Land`` rejects is forced back at time 0. Ponded water at or
+           below it has left the tank and vanishes, recorded as dropped water.
 
         Step 4's forced push returns empty, so WSIMOD's ``"ponded water cant reenter"``
         (``:238-239``) never prints; the event is recorded where it would.
@@ -208,6 +209,8 @@ class Sewer(Node):
             active=active,
             call=call,
         )
+        # ponded water at or below FLOAT_ACCURACY has left the tank and goes nowhere: dropped
+        ctx.drop(ponded, active & ~flood)
         reply_ = self.push_distributed(ponded, of_type=PONDED_TYPES, tag=PONDED_TAG, active=flood)
         reply_ = tank.push_storage(reply_, active=flood, time=0, force=True)
         ctx.event("ponded_water_cant_reenter", self.name, flood & (reply_[..., 0] != 0).detach())
@@ -217,7 +220,9 @@ class Sewer(Node):
     def validate(cls, spec: NodeSpec, network: WsimodNetwork, *, pollutants: bool) -> list[str]:
         """``pipe_time`` and every ``pipe_timearea`` key are whole numbers of days >= 0 (W50;
         an ``AltQueueArc`` shifts integer keys only). A diagram whose fractions do not sum to 1
-        warns and runs, as WSIMOD prints and runs (``sewer.py:135-141``)."""
+        warns and runs, as WSIMOD prints and runs (``sewer.py:135-141``). WSIMOD checks only a
+        ``pipe_timearea`` given through the overrides (``apply_overrides``); noodl, which sees
+        the merged parameters (D5), warns whatever the diagram's source."""
         ignored = super().validate(spec, network, pollutants=pollutants)
         where = f"node {spec.name!r}"
         check_travel_time(where, "pipe_time", spec.parameters.get("pipe_time", 0))
