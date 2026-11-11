@@ -1,9 +1,12 @@
 """A documented EPANET 2.2 `.inp` subset.
 
 READ: `[JUNCTIONS] [RESERVOIRS] [TANKS] [PIPES] [PUMPS] [VALVES] [DEMANDS] [PATTERNS]
-[CURVES] [CONTROLS] [RULES] [STATUS] [EMITTERS] [ENERGY] [OPTIONS] [TIMES]`, with the column
-layouts of the EPANET 2.2 manual's Appendix C.2. Everything EPANET 2.2's hydraulics reads is
-READ and converted to SI here; `WaterNetwork.validate()` (called by `build_model`) then
+[CURVES] [CONTROLS] [RULES] [STATUS] [EMITTERS] [ENERGY] [OPTIONS] [TIMES]` and the water-quality
+sections `[QUALITY] [SOURCES] [REACTIONS] [MIXING]` (with `[OPTIONS] QUALITY DIFFUSIVITY
+TOLERANCE` and `[TIMES] QUALITY TIMESTEP`, into `WaterNetwork.quality`, see `inp_quality`),
+with the column layouts of the EPANET 2.2 manual's Appendix C.2. Everything EPANET 2.2's
+hydraulics reads is READ and converted to SI here; `WaterNetwork.validate()` (called by
+`build_model`) then
 REFUSES, by name, the one form the builder does not model (a numeric `[CONTROLS]` setting on
 a pipe) and what EPANET itself refuses: its valve checks (a PRV or PSV that controls a
 reservoir or tank, two valves holding one node: errors 219 and 220), its tank checks (an
@@ -22,9 +25,7 @@ A curve no device uses is converted as a head curve, as before.
 
 IGNORED because nothing in the hydraulics references them: `[TITLE]`, `[REPORT]` ("for the
 Windows version of EPANET, the only [REPORT] option recognized is STATUS", Manual p.142),
-`[COORDINATES]`, `[VERTICES]`, `[LABELS]`, `[BACKDROP]`, `[TAGS]`, `[END]`, and the
-water-quality sections `[QUALITY] [SOURCES] [REACTIONS] [MIXING]` (this reader returns
-hydraulics; a quality run is configured through `build_model(quality=...)`). Any other
+`[COORDINATES]`, `[VERTICES]`, `[LABELS]`, `[BACKDROP]`, `[TAGS]` and `[END]`. Any other
 section carrying content is refused.
 
 UNITS. EPANET computes internally in feet and cfs whatever the file says, converting at the
@@ -39,11 +40,10 @@ everything else".
 onto `WaterNetwork.options` (a `WaterOptions`, EPANET's own defaults) rather than dropped;
 `build_model` defaults its own `pda`/`p_min`/`p_req`/`exponent` arguments from them.
 `EMITTER EXPONENT` is read too. Any OTHER `[OPTIONS]` line (`TRIALS`, `ACCURACY`,
-`UNBALANCED`, the in-section `QUALITY`
-mode, ...) is recorded verbatim in `notes["unrecognised_options"]` instead of being
+`UNBALANCED`, ...) is recorded verbatim in `notes["unrecognised_options"]` instead of being
 silently ignored, since most of them are solver/report cosmetics this reader does not need
-but a few (an unimplemented `QUALITY CHEMICAL`, say) would silently change the network if
-dropped without a trace.
+but a few would silently change the network if dropped without a trace. The quality keys
+(`QUALITY`, `DIFFUSIVITY`, `TOLERANCE`) are read, not recorded.
 """
 
 from __future__ import annotations
@@ -54,6 +54,7 @@ from pathlib import Path
 from noodl.apps.inpfile import as_float, read_sections, require_fields
 from noodl.apps.water.controls import Control, status_code
 from noodl.apps.water.elements import NU_WATER_FT2
+from noodl.apps.water.inp_quality import is_quality_option, is_quality_time, read_quality
 from noodl.apps.water.inp_rules import read_rules
 from noodl.apps.water.inp_times import clock_time, time_with_unit
 from noodl.apps.water.network import (
@@ -80,14 +81,14 @@ PSI_TO_M = M_PER_FT / 0.4333
 _IGNORED = frozenset(
     {
         "TITLE", "REPORT", "COORDINATES", "VERTICES", "LABELS", "BACKDROP", "TAGS",
-        "END", "QUALITY", "SOURCES", "REACTIONS", "MIXING",
+        "END",
     }
 )
 _READ = frozenset(
     {
         "JUNCTIONS", "RESERVOIRS", "TANKS", "PIPES", "PUMPS", "VALVES", "DEMANDS",
         "PATTERNS", "CURVES", "CONTROLS", "RULES", "STATUS", "EMITTERS", "ENERGY", "OPTIONS",
-        "TIMES",
+        "TIMES", "QUALITY", "SOURCES", "REACTIONS", "MIXING",
     }
 )
 #: Horsepower in kW (`wntr`'s `HydParam.Power`, 745.699872 W per hp).
@@ -162,6 +163,8 @@ def read_epanet_inp(path) -> WaterNetwork:
         elif key == "VISCOSITY":
             require_fields(line, 2, "VISCOSITY", path)
             viscosity = as_float(line, 1, "VISCOSITY", path)
+        elif is_quality_option(line):
+            pass            # read by `read_quality`
         else:
             unrecognised.append(line.raw.strip())
 
@@ -611,8 +614,15 @@ def read_epanet_inp(path) -> WaterNetwork:
             start_clocktime = clock_time(
                 line.fields[2], line.fields[3] if len(line.fields) > 3 else None, path, line
             )
+        elif is_quality_time(line):
+            pass            # read by `read_quality`
         else:
             unrecognised_times.append(line.raw.strip())
+
+    quality, ignored_quality = read_quality(
+        sections, path, us=us, junctions=junctions, reservoirs=reservoirs, tanks=tanks,
+        pipes=pipes, pumps=pumps, valves=valves, patterns=patterns,
+    )
 
     network = WaterNetwork(
         junctions=tuple(junctions),
@@ -648,8 +658,10 @@ def read_epanet_inp(path) -> WaterNetwork:
             viscosity=viscosity,
             flow_units=flow_unit,
         ),
+        quality=quality,
         notes={
             "flow_units": flow_unit,
+            **({"ignored_quality": "; ".join(ignored_quality)} if ignored_quality else {}),
             **({"unrecognised_options": "; ".join(unrecognised)} if unrecognised else {}),
             **({"unrecognised_times": "; ".join(unrecognised_times)}
                if unrecognised_times else {}),

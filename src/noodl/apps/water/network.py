@@ -69,6 +69,12 @@ from noodl.apps.water.elements import (
     three_point_curve,
 )
 from noodl.apps.water.graph import link_topology
+from noodl.apps.water.quality_data import (
+    MIXING_MODELS,
+    QUALITY_MODES,
+    SOURCE_KINDS,
+    WaterQuality,
+)
 from noodl.apps.water.rules import evaluate_rules, take_actions_per_link
 from noodl.apps.water.tanks import LinkData, TankLevels, TankStorageControls, TankVolumeCurve
 from noodl.apps.water.units import KW_PER_HP, M_PER_FT, TINY, rounded_cfs_per_m3s
@@ -303,6 +309,7 @@ class WaterNetwork:
     headloss: str = "H-W"
     options: WaterOptions = field(default_factory=WaterOptions)
     notes: dict[str, str] = field(default_factory=dict)
+    quality: WaterQuality | None = None
 
     @property
     def rule_timestep(self) -> float:
@@ -504,6 +511,57 @@ class WaterNetwork:
                         f"WaterNetwork: rule {rule.name!r} sets a numeric setting on the "
                         f"GPV {action.link!r}, whose head loss is its curve (EPANET error "
                         f"202)")
+        if self.quality is not None:
+            self._check_quality(self.quality, seen, link_names)
+
+    def _check_quality(self, quality: WaterQuality, nodes: set[str], links: set[str]) -> None:
+        """Refuse a `WaterQuality` that names what is not there, by name."""
+        if quality.mode not in QUALITY_MODES:
+            raise ValueError(f"WaterNetwork: quality mode {quality.mode!r}; use "
+                             f"{', '.join(QUALITY_MODES)}")
+        if quality.wall_order not in (0.0, 1.0):
+            raise ValueError(f"WaterNetwork: quality wall order {quality.wall_order!r}; "
+                             f"EPANET reads only 0 or 1 (error 213)")
+        if quality.mode == "TRACE" and quality.trace_node not in nodes:
+            raise ValueError(f"WaterNetwork: quality mode TRACE names the node "
+                             f"{quality.trace_node!r}, which is not a node (EPANET error 212)")
+        for name in quality.initial:
+            if name not in nodes:
+                raise ValueError(f"WaterNetwork: initial quality at node {name!r}, which is "
+                                 f"not a node")
+        pipes = {p.name for p in self.pipes}
+        for what, table in (("bulk", quality.pipe_bulk), ("wall", quality.pipe_wall)):
+            for name in table:
+                if name not in pipes:
+                    raise ValueError(f"WaterNetwork: the {what} coefficient of pipe "
+                                     f"{name!r}, which is not a pipe")
+        tanks = {t.name for t in self.tanks}
+        for name in quality.tank_bulk:
+            if name not in tanks:
+                raise ValueError(f"WaterNetwork: the bulk coefficient of tank {name!r}, "
+                                 f"which is not a tank")
+        for name, (model, _) in quality.mixing.items():
+            if name not in tanks:
+                raise ValueError(f"WaterNetwork: mixing model of tank {name!r}, which is "
+                                 f"not a tank")
+            if model not in MIXING_MODELS:
+                raise ValueError(f"WaterNetwork: tank {name!r} has the mixing model "
+                                 f"{model!r}; use {', '.join(MIXING_MODELS)}")
+        for source in quality.sources:
+            if source.node not in nodes:
+                raise ValueError(f"WaterNetwork: quality source at node {source.node!r}, "
+                                 f"which is not a node")
+            if source.kind not in SOURCE_KINDS:
+                raise ValueError(f"WaterNetwork: quality source at {source.node!r} has the "
+                                 f"source type {source.kind!r}; use {', '.join(SOURCE_KINDS)}")
+            if source.pattern is not None and source.pattern not in self.patterns:
+                raise ValueError(f"WaterNetwork: quality source at {source.node!r} names "
+                                 f"pattern {source.pattern!r}, which has no [PATTERNS] entry")
+        for what, order, known in (("node", quality.node_order, nodes),
+                                   ("link", quality.link_order, links)):
+            if order and set(order) != known:
+                raise ValueError(f"WaterNetwork: quality {what}_order does not list exactly "
+                                 f"the network's {what}s")
 
     def validate(self) -> None:
         """Refuse, BY NAME, everything this application does not model."""
@@ -1312,6 +1370,32 @@ def build_model(
             description="each junction's multiplier of its pressure-driven required demand; "
                         "water_run sets it from the demand patterns",
             over=[j.name for j in net.junctions], ordering="net.junctions", required=False)
+    if net.quality is not None and net.quality.mode != "NONE":
+        # EPANET's reaction coefficients (`water_run(quality=True)`, `QualityRouter`), SI per
+        # second; their defaults are `quality_react.pipe_coefficients`/`tank_coefficients`
+        pipes = [p.name for p in net.pipes]
+        model.input_specs["quality.bulk_coefficient"] = dict(
+            description="each pipe's bulk reaction coefficient, (quality unit)^(1-n)/s for "
+                        "the bulk order n (1/s for order 1); the file's BULK, else GLOBAL "
+                        "BULK, when not given", over=pipes, ordering="net.pipes",
+            required=False)
+        model.input_specs["quality.wall_coefficient"] = dict(
+            description="each pipe's wall reaction coefficient, m/s for wall order 1, "
+                        "quality unit x L/m2/s for order 0; the file's WALL, else the "
+                        "ROUGHNESS CORRELATION's or GLOBAL WALL, when not given", over=pipes,
+            ordering="net.pipes", required=False)
+        if net.tanks:
+            model.input_specs["quality.tank_coefficient"] = dict(
+                description="each tank's bulk reaction coefficient at the tank order, "
+                            "(quality unit)^(1-n)/s; the file's TANK, else GLOBAL BULK, "
+                            "when not given", over=[t.name for t in net.tanks],
+                ordering="net.tanks", required=False)
+    if net.quality is not None and net.quality.mode == "CHEMICAL" and net.quality.sources:
+        model.input_specs["quality.source_strength"] = dict(
+            description="each node's quality source strength (read at the nodes with a "
+                        "[SOURCES] entry), in quality units, a MASS source's per second; "
+                        "the file's, when not given", over=node_names,
+            ordering="model.node_names", required=False)
     if TIME_KEY in drivers:
         model.input_specs[TIME_KEY] = dict(
             description="seconds since the simulation start, which the network's AT TIME and "
@@ -1842,6 +1926,25 @@ def water_steady(model: Model, state: State, drivers: Drivers, **solve_kwargs) -
     The pumps' flows, likewise, start from their design flows when they are all zero.
     """
     return water_steady_and_cut_off(model, state, drivers, **solve_kwargs)[0]
+
+
+def pattern_factor(net, pattern: str | None, time: float) -> float:
+    """The multiplier of `pattern` (a `net.patterns` name; `None` is the constant 1) at
+    `time` s since the start: EPANET's `F[p mod length]` with the pattern period
+    `p = (t + Pstart) / Pstep` in whole seconds (`hydraul.c`, `demands`; `net.pattern_start`,
+    `net.pattern_timestep`)."""
+    if pattern is None:
+        return 1.0
+    if pattern not in net.patterns:
+        raise KeyError(f"pattern_factor: {pattern!r} is not a pattern of this network "
+                       f"({sorted(net.patterns)})")
+    values = net.patterns[pattern]
+    return float(values[pattern_period(net, int(round(time))) % len(values)])
+
+
+def pattern_period(net, t: int) -> int:
+    """EPANET's elapsed pattern periods at `t` s (`demands`: `(Htime + Pstart) / Pstep`)."""
+    return (t + int(round(net.pattern_start))) // int(round(net.pattern_timestep))
 
 
 # ----------------------------------------------------------------------------------------

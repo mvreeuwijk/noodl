@@ -105,6 +105,40 @@ def test_a_pattern_boundary_inside_a_hydraulic_step_ends_the_step():
     assert _demand_factors(out) == [1.0, 0.5, 1.0]
 
 
+def test_the_run_solves_every_whole_step_to_the_duration_past_the_last_report():
+    """EPANET solves at every hydraulic time its whole steps reach within the duration,
+    reported or not (`hydraul.c`, `nexthyd`), and its quality reports there too (`runqual`;
+    `test_water_quality_networks.py::test_ky10_age_matches_epanet`, whose duration ends at
+    6:54:59, a control's time, after a step at 6:24:10). A 1:00 run with a two-hour report
+    step reports only 0:00, but solves at 0:30 (the control) and at 1:00 (the pattern
+    boundary); before, the run stopped after its last report time. A step cut short by the
+    duration ends the run without a solve there: EPANET's own step runs past the duration
+    (`test_water_quality.py`'s `last_step` case)."""
+    model, _, _ = build_model(_patterned_network())
+    diagnostics: dict = {}
+    out = water_run(model, duration=3600.0, diagnostics=diagnostics)
+    assert diagnostics["times"] == [0.0, 1800.0, 3600.0]
+    assert out.time.tolist() == [0.0]
+    cut: dict = {}
+    water_run(model, duration=2700.0, diagnostics=cut)
+    assert cut["times"] == [0.0, 1800.0]
+    # the extra solves' energy: Net1's pump 9 opens on tank 2's level at 81690 s, past the
+    # 22:00 report; run to 22:46:40 its time on line and power are those of the run to
+    # 23:00 (EPANET counts the step from 81690 s whole, `addenergy`). Before, the run
+    # stopped at 79200 s and lost the pump's 1110 s on line from 81690 s (45154 s, not 46264)
+    net1, _, _ = build_model(_net1())
+    short: dict = {}
+    off_grid = water_run(net1, duration=82000.0, quality=False, diagnostics=short).energy
+    on_grid = water_run(net1, duration=82800.0, quality=False).energy
+    assert short["times"][-2:] == [79200.0, 81690.0]
+    on_line = float(off_grid.utilisation[0]) / 100.0 * 82000.0
+    assert on_line == pytest.approx(float(on_grid.utilisation[0]) / 100.0 * 82800.0,
+                                    rel=1e-12)
+    assert on_line == pytest.approx(46264.0, rel=1e-12)
+    torch.testing.assert_close(off_grid.average_power, on_grid.average_power, rtol=1e-12,
+                               atol=0.0)
+
+
 def test_pattern_start_shifts_the_pattern_as_epanet_does():
     """PATTERN START 0:30 makes the period at time t `(t + 1800) / 3600`, so it changes at
     0:30, 1:30, ... (`demands`). EPANET's step rule looks for `n Pstep - Htime`, not
@@ -351,3 +385,63 @@ def test_the_control_closure_follows_every_driver_it_reads():
     del scaled
     gc.collect()
     assert ref() is None
+
+
+TWOLOOP = NET1.with_name("twoloop_si.inp")
+TWOLOOP_TRACE = NET1.with_name("twoloop_trace.inp")
+
+
+def test_quality_runs_by_default_when_the_network_defines_it():
+    """`quality=None` runs EPANET's quality when `[OPTIONS] QUALITY` names a mode and the
+    duration is positive (`adjustdata`: `DURATION 0` turns it off)."""
+    model, _, _ = build_model(read_epanet_inp(NET1))
+    run = water_run(model)
+    assert run.node_quality is not None and run.quality_units == "mg/L"
+    assert run.node_quality.shape == (len(run.time), len(run.node_names))
+    assert run.mass_balance is not None
+    model, _, _ = build_model(read_epanet_inp(TWOLOOP))
+    run = water_run(model)
+    assert run.node_quality is None and run.mass_balance is None
+    model, _, _ = build_model(read_epanet_inp(NET1))
+    run = water_run(model, duration=0.0)
+    assert run.node_quality is None and run.quality_units is None
+
+
+def test_quality_false_turns_it_off_and_true_demands_it():
+    model, _, _ = build_model(read_epanet_inp(NET1))
+    assert water_run(model, quality=False).node_quality is None
+    assert water_run(model, quality=True).node_quality is not None
+    with pytest.raises(ValueError, match="DURATION"):
+        water_run(model, duration=0.0, quality=True)
+    plain, _, _ = build_model(read_epanet_inp(TWOLOOP))
+    with pytest.raises(ValueError, match="QUALITY"):
+        water_run(plain, quality=True)
+
+
+def test_the_steady_tracer_is_refused_alongside_epanet_quality():
+    """The steady layer "quality" of `build_model(quality=float)` is not EPANET's quality: a
+    network whose quality resolves on is refused by name; `quality=False` runs."""
+    model, _, _ = build_model(read_epanet_inp(TWOLOOP_TRACE), quality=0.0)
+    with pytest.raises(ValueError, match="steady tracer"):
+        water_run(model)
+    assert water_run(model, quality=False).node_quality is None
+
+
+def test_quality_leaves_the_hydraulics_unchanged():
+    """The quality never feeds back (Net1, 24 h): heads, flows, tank levels, statuses and the
+    energy are bit-identical with it on and off."""
+    model, _, _ = build_model(read_epanet_inp(NET1))
+    on, off = water_run(model, quality=True), water_run(model, quality=False)
+    assert on.node_quality is not None and off.node_quality is None
+    skipped = {"node_quality", "link_quality", "quality_units", "mass_balance"}
+    for field in dataclasses.fields(WaterResults):
+        if field.name in skipped:
+            continue
+        mine, theirs = getattr(on, field.name), getattr(off, field.name)
+        if field.name == "energy":
+            pairs = [(getattr(mine, f.name), getattr(theirs, f.name))
+                     for f in dataclasses.fields(mine)]
+        else:
+            pairs = [(mine, theirs)]
+        for a, b in pairs:
+            assert torch.equal(a, b) if isinstance(a, torch.Tensor) else a == b, field.name
