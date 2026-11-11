@@ -274,7 +274,7 @@ def test_ky_extended_period_hydraulics_match_epanet(tmp_path, name):
 #: shut.
 _KY10_ISLAND = ("O-Pump-10", "I-RV-5", "O-RV-5")
 #: EPANET's hydraulic steps (s) from 6:54:59 to 10 h, MEASURED with the toolkit's `EN_runH`
-#: (ACCURACY 1e-7, TRIALS 5000); the binary output keeps only the report times.
+#: (ACCURACY 1e-7, TRIALS 5000, DAMPLIMIT 1e-2); the binary output keeps only the report times.
 _KY10_EPANET_STEPS = [24899, 25200, 26515, 28800, 29096, 30365, 32400, 33647, 36000]
 
 
@@ -340,6 +340,8 @@ def test_ky10_divergence_is_epanets_dead_headed_constant_power_pump(tmp_path):
         assert max(island) - min(island) < 1e-4, (hour, island)
         assert (float(results.node["head"]["I-Pump-10"].iloc[hour]) < min(island)
                 and max(island) < float(results.node["head"]["J-11"].iloc[hour])), hour
+        if hour == 7:  # 281.805 m (Windows), 282.138 m (Linux): one value, either build
+            assert abs(island[0] - 282.0) < 0.5, island
     text = path.read_text()
     assert text.count("[CONTROLS]\n") == 1
     forced = tmp_path / "ky10-24h-pump-10-closed.inp"
