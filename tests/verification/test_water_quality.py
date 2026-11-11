@@ -774,6 +774,35 @@ QUALITY_CASES["setpoint_baseline"] = _source(
     "setpoint_baseline", " J1 SETPOINT 0", quality=_ALL_ONE)
 
 
+for _kind, _line in (("mass", " T1 MASS 1200"), ("flowpaced", " T1 FLOWPACED 0.5"),
+                     ("concen", " T1 CONCEN 0.8")):
+    QUALITY_CASES[f"source_tank_{_kind}"] = _source(f"tank_{_kind}", _line)
+QUALITY_CASES["source_tank_none"] = _source("tank_none", " T1 CONCEN 0")
+
+
+@pytest.mark.parametrize("kind", ["mass", "flowpaced", "concen"])
+def test_a_tank_source_is_added_to_its_outflow_only(tmp_path, kind):
+    """A source at `T1` (MASS 1200 mg/min, FLOWPACED 0.5 mg/L, CONCEN 0.8 mg/L: plain `c`,
+    a tank has no negative-demand rule): `findnodequal` adds it to the water leaving the
+    tank, not to the tank's own quality. `T1` drains above `Q_STAGNANT` from 8 h and refills
+    from 17 h or so (`P6`'s flow changes sign again): until the water it sent out returns,
+    its node quality equals the run without the source bit for bit, while `J4` downstream
+    carries the source; all match EPANET's, afterwards included."""
+    results, *_ = _matches(tmp_path, f"source_tank_{kind}")
+    plain, *_ = _compare(tmp_path, "source_tank_none")
+    t1 = results.node_names.index("T1")
+    j4 = results.node_names.index("J4")
+    flow = results.flow[:, results.link_names.index("P6")]
+    drain = [i for i in range(len(flow)) if float(flow[i]) < 0.0]
+    assert drain and float(flow[drain].max()) < -Q_STAGNANT_CFS / rounded_cfs_per_m3s("LPS")
+    refill = next(i for i in range(drain[0], len(flow)) if float(flow[i]) > 0.0)
+    assert refill < len(flow) - 1
+    assert torch.equal(results.node_quality[: refill + 1, t1], plain.node_quality[: refill + 1, t1])
+    assert float((results.node_quality[drain, j4] - plain.node_quality[drain, j4]).abs().max()
+                 ) > 0.01
+    assert float((results.node_quality[-1, t1] - plain.node_quality[-1, t1]).abs()) > 1e-3
+
+
 @pytest.mark.parametrize("pattern", ["constant", "pattern"])
 @pytest.mark.parametrize("kind", list(_SOURCE_LINES))
 def test_source_matches_epanet(tmp_path, kind, pattern):

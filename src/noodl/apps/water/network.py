@@ -1928,6 +1928,25 @@ def water_steady(model: Model, state: State, drivers: Drivers, **solve_kwargs) -
     return water_steady_and_cut_off(model, state, drivers, **solve_kwargs)[0]
 
 
+def pattern_factor(net, pattern: str | None, time: float) -> float:
+    """The multiplier of `pattern` (a `net.patterns` name; `None` is the constant 1) at
+    `time` s since the start: EPANET's `F[p mod length]` with the pattern period
+    `p = (t + Pstart) / Pstep` in whole seconds (`hydraul.c`, `demands`; `net.pattern_start`,
+    `net.pattern_timestep`)."""
+    if pattern is None:
+        return 1.0
+    if pattern not in net.patterns:
+        raise KeyError(f"pattern_factor: {pattern!r} is not a pattern of this network "
+                       f"({sorted(net.patterns)})")
+    values = net.patterns[pattern]
+    return float(values[pattern_period(net, int(round(time))) % len(values)])
+
+
+def pattern_period(net, t: int) -> int:
+    """EPANET's elapsed pattern periods at `t` s (`demands`: `(Htime + Pstart) / Pstep`)."""
+    return (t + int(round(net.pattern_start))) // int(round(net.pattern_timestep))
+
+
 # ----------------------------------------------------------------------------------------
 # Run support. Internal to `noodl.apps.water` (`noodl.apps.water.simulate.water_run` calls
 # these; they are not exported from the package): each is a step of EPANET's hydraulic loop

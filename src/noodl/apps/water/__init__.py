@@ -46,6 +46,7 @@ from noodl.apps.water.network import (
     initial_drivers,
     initial_state,
     link_states,
+    pattern_factor,
     power_curve,
     tank_inflow,
     tank_levels,
@@ -64,7 +65,7 @@ from noodl.apps.water.quality_react import (
 )
 from noodl.apps.water.report import link_table, pressure_head, to_kilopascal
 from noodl.apps.water.rules import evaluate_rules, take_actions
-from noodl.apps.water.simulate import WaterResults, pattern_factor, water_run
+from noodl.apps.water.simulate import WaterResults, water_run
 from noodl.apps.water.tanks import LinkData, TankLevels, TankVolumeCurve
 from noodl.apps.water.units import EPANET_QCF, FLOW_UNITS
 

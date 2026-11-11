@@ -58,6 +58,8 @@ from noodl.apps.water.network import (
     initial_state,
     link_setting_scale,
     link_states_from_cut_off,
+    pattern_factor,
+    pattern_period,
     settle_tanks,
     solved_link_states,
     water_steady_and_cut_off,
@@ -111,25 +113,6 @@ class WaterResults:
     quality_units: str | None = None
     node_names: list[str] = field(default_factory=list)
     link_names: list[str] = field(default_factory=list)
-
-
-def pattern_factor(net, pattern: str | None, time: float) -> float:
-    """The multiplier of `pattern` (a `net.patterns` name; `None` is the constant 1) at
-    `time` s since the start: EPANET's `F[p mod length]` with the pattern period
-    `p = (t + Pstart) / Pstep` in whole seconds (`hydraul.c`, `demands`; `net.pattern_start`,
-    `net.pattern_timestep`)."""
-    if pattern is None:
-        return 1.0
-    if pattern not in net.patterns:
-        raise KeyError(f"pattern_factor: {pattern!r} is not a pattern of this network "
-                       f"({sorted(net.patterns)})")
-    values = net.patterns[pattern]
-    return float(values[_period(net, int(round(time))) % len(values)])
-
-
-def _period(net, t: int) -> int:
-    """EPANET's elapsed pattern periods at `t` s (`demands`: `(Htime + Pstart) / Pstep`)."""
-    return (t + int(round(net.pattern_start))) // int(round(net.pattern_timestep))
 
 
 def _default_pattern(net) -> str | None:
@@ -242,7 +225,7 @@ class _Patterns:
         return torch.tensor(out, dtype=F64)
 
     def drivers_at(self, t: int) -> dict:
-        p = _period(self.net, t)
+        p = pattern_period(self.net, t)
         if p not in self._cache:
             d = dict(self.drivers)
             if self.demand_patterned:
@@ -267,7 +250,7 @@ class _Patterns:
         positive value when it was closed."""
         if not self.pumps:
             return state
-        p = _period(self.net, t)
+        p = pattern_period(self.net, t)
         status = state["water.link_status"].clone()
         setting = state["water.link_setting"].clone()
         for j, name in self.pumps:
@@ -552,7 +535,7 @@ def water_run(model, state=None, drivers=None, *, duration: float | None = None,
             status = link_states_from_cut_off(model, solved, *cut_off, valves=False)
         if t >= clock.duration:
             if counted:
-                meter.add(_period(net, t), 1.0, solved, status[..., meter.cols],
+                meter.add(pattern_period(net, t), 1.0, solved, status[..., meter.cols],
                           speeds_of(solved, d))
             if report:
                 recorder.record(solved, d, cut_off, levels,
@@ -571,7 +554,7 @@ def water_run(model, state=None, drivers=None, *, duration: float | None = None,
                                            d)
             pumps_now, opened = _as_addenergy_sees(seen, taken, status[..., meter.cols],
                                                    meter.cols)
-            meter.add(_period(net, t), whole / 3600.0,
+            meter.add(pattern_period(net, t), whole / 3600.0,
                       {"water.phi": seen["water.phi"], "water.q": solved["water.q"]},
                       pumps_now, speeds_of(seen, d), opened=opened)
         if report:

@@ -39,6 +39,7 @@ from collections.abc import Mapping, Sequence
 import torch
 
 from noodl.apps.water.elements import NU_WATER_FT2
+from noodl.apps.water.network import pattern_factor
 from noodl.apps.water.quality_data import WaterQuality
 from noodl.apps.water.quality_react import (
     BULK_TINY,
@@ -543,7 +544,6 @@ class QualityRouter:
         """Every source's strength at the step starting at `t`: `sourcequal` (`quality.c`),
         the base strength times its pattern's factor at `Qtime`, which is the step's start
         for every quality step of it (`nextqual` advances it after the transport)."""
-        from noodl.apps.water.simulate import pattern_factor  # simulate imports this module
         self.source_c = {
             m: (base if self.source_pattern[m] is None
                 else base * pattern_factor(self.net, self.source_pattern[m], t))
