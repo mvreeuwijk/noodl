@@ -256,7 +256,8 @@ shape, and the model's labels give each row a name.
 | `"wsimod.storage"` | (..., n_tanks, 1+K) | every `Tank`/`ResidenceTank`/`QueueTank` `.storage` and every surface's `.storage`, labelled `(node, attribute)` in WSIMOD's attribute names: `tank`, `sewer_tank`, `stormwater_tank`, `service_reservoir_tank`, `surface_runoff`, `subsurface_runoff`, `percolation`, `surface:<name>` |
 | `"wsimod.active_storage"` | (..., n_queue_tanks, 1+K) | `QueueTank.active_storage` (`tanks.py:478`) |
 | `"wsimod.travel_queue"` | (..., n_alt_queues, L+1, 1+K) | the `{time: vqip}` queue of every `AltQueueArc` as a dense shift register: each `QueueTank`'s internal arc, and each user `AltQueueArc`. `L` is the largest travel time the structure can enter (pipe time, time-area keys, `number_of_timesteps`). A user `AltQueueArc` shifts at `end_timestep` but is flushed only by its next push, because nothing calls its `update_queue` at the end of the day (`arcs.py:603-660`). A `QueueTank`'s arc is also flushed at the end of the day (`tanks.py:633-634`) |
-| `"wsimod.arc_queue"` | (..., n_slots, 1+K) | `QueueArc` request slots (below) |
+| `"wsimod.arc_queue"` | (..., n_rows, 1+K) | `QueueArc` request rows (below), labelled `(arc, direction, i, j)` |
+| `"wsimod.arc_queue_since"` | (..., n_anchors) | per `(arc, direction)`, the days since the arc's last call in that direction that reached `update_queue`, saturating at `n` (below); `n` at the start |
 | `"wsimod.liquor"` | (..., n_wtw, 1+K) | `WTW.liquor` of every `WWTW` and `FWTW`, empty at the start. Neither `end_timestep` resets it (`wtw.py:447-453`, `:646-653`), and every treatment blends with it (`:174-182`). For a `WWTW` it is also an inflow to the next day (`:340`). For an `FWTW` only its non-additive entries and volume matter. `solids` needs no state, because each treatment overwrites it completely (`:204-208`) |
 | `"wsimod.previous_pulled"` | (..., n_fwtw, 1+K) | `FWTW.previous_pulled` (`wtw.py:650`) |
 | `"wsimod.treated"` | (..., n_wwtw, 1+K) | `WWTW.treated`. Only `make_discharge` empties it (`wtw.py:346`). `end_timestep_` does not (`:447-453`), so a custom orchestration without `WWTW.make_discharge` lets it accumulate from day to day |
@@ -277,8 +278,20 @@ first entry `assign` equals `sum_vqip(empty, v)` to rounding.
 **`QueueArc` slots.** WSIMOD keeps `QueueArc.queue` as a Python list of requests
 (`arcs.py:290`, `:432-446`). Each request is delivered one at a time, in list order, at the
 next `send_push_request` on that arc after its `time` reaches 0 (`update_queue`,
-`arcs.py:448-528`; `end_timestep` only decrements, `:544-545`). noodl keeps fixed slots indexed by (entry day
-modulo `n + 1`, call site, round), with `n = number_of_timesteps` and `round ≤ MAXITER`.
+`arcs.py:448-528`; `end_timestep` only decrements, `:544-545`). noodl keeps fixed rows indexed by
+`(i, j)`, with `n = number_of_timesteps`: `i ∈ [0, n−1]` is the request's entry day counted back
+from the arc's last call (in that direction) that reached `update_queue`, and `j` is the
+request call's index in the arc's static daily call order, which merges the call site and the
+`push_distributed` round in their static order (WSIMOD's list order). A per-(arc, direction)
+counter `since` holds the days since that call, saturating at `n`.
+
+An earlier revision indexed the slots by (entry day modulo `n + 1`, site, round). That cannot
+tell a request's age once it waits more than `n + 1` days for a push: with `n = 2` and pushes
+on days 1 and 5, day 1's request (age 4, due) shares its residue with day 4 (age 1, not due).
+The anchored rows are exact: after a call on day `d0` that reached `update_queue`, every
+request still waiting was entered on a day `e` with `e + n > d0`, because due requests are
+delivered or returned as backflow (`backflow_enabled` is always true on these paths,
+`arcs.py:393-396`, `:466-512`) and sub-`FLOAT_ACCURACY` ones are removed.
 
 - **Why the round index.** One call site can send up to `MAXITER` requests to the same arc on
   one day. Each round of `push_distributed` (`nodes.py:453-473`) is its own
@@ -288,27 +301,32 @@ modulo `n + 1`, call site, round), with `n = number_of_timesteps` and `round ≤
   the first really happen on a `QueueArc`: the backflow of due requests is added to the
   rejection (`:399-400`), so `sent = extract(to_send, reply)` goes negative, `not_pushed_`
   grows, and the loop polls again.
-- **Delivery order.** Requests are delivered in (day, the site's position in the day's
-  sequence, round) order, which is WSIMOD's list order.
-- **Slot timing and absence.** A slot's `time` follows from its age. A slot with zero volume is
-  absent: WSIMOD drops requests below `FLOAT_ACCURACY` on update (`:483-485`).
+- **Delivery order.** A row is due at a later call iff `since + i ≥ n`. Due rows are delivered
+  in the order `i = n−1 … 0`, then `j`, which is WSIMOD's list order. After delivery the
+  waiting rows move to `i + since` (a masked sum over `i`, static operations) and `since`
+  becomes 0. A row's `average_flow` is `V/(n+1)`, because a waiting row's volume never changes.
+- **Absence and the update-time drop.** A row with zero volume is absent. WSIMOD removes a
+  waiting request below `FLOAT_ACCURACY` on update (`:483-485`). This is reachable, because the
+  clip at entry (`:409-412`) can leave a request between 0 and `FLOAT_ACCURACY`, which
+  `enter_arc` has already added to `vqip_in`. noodl removes such rows and records their water
+  as dropped.
 - **The early return.** A push below `FLOAT_ACCURACY` returns before both `enter_queue` and
   `update_queue` (`:378-379`). On such a call nothing is enqueued and nothing due is delivered.
   Fable ran it: a tiny push on a due day left the due 10 units queued with `vqip_out` 0, and the
   next real push delivered them. noodl reproduces this by masking that call's delivery with
   `V ≥ FLOAT_ACCURACY` of the triggering push (defect table).
-- **Bound.** The number of slots is bounded by the structure. Every waiting request was entered
-  at or before the most recent push that reached `update_queue`, and within `n` days of it.
-  Pushes that returned early do not count towards that bound.
+- **Bound.** The number of rows is `n·J` per direction, bounded by the structure. Pushes that
+  returned early do not reset `since`. A pull always reaches `update_queue` (no early return),
+  so `since` for pulls resets on every pull call.
 - **Order of enqueue and delivery.** noodl delivers the waiting requests in list order before
   it enqueues the new one. For `n ≥ 1` this matches WSIMOD's "enqueue then deliver" order
   (`:393-399`), because the new request cannot be due. For `n = 0`, noodl delivers the new
   request last.
-- **Directions.** Push and pull requests have separate slots (`direction`, `:480`).
+- **Directions.** Push and pull requests have separate rows and counters (`direction`, `:480`).
 
 The W21 test proves this layout against WSIMOD's delivery order. It drives the arc with pushes
 on irregular days, with several pushes and several distribute rounds on one day, and with a
-tiny push on a due day.
+tiny push on a due day, and with a gap between pushes longer than `n + 1` days.
 
 ### Batches
 
@@ -596,7 +614,8 @@ shape:
   precipitation, `FWTW` deficits, `UnlimitedDistribution` supply, demand loads), its outflow
   (Waste, evaporation, demand consumption, unpushed sludge, WTW solids, unrouted catchment
   water, and the water WSIMOD drops below `FLOAT_ACCURACY`), and its storage change. WSIMOD
-  drops that water in five places: `QueueArc` pushes (`arcs.py:378-379`), the
+  drops that water in six places: `QueueArc` pushes (`arcs.py:378-379`), waiting `QueueArc`
+  requests removed on update (`arcs.py:483-485`), the
   `Land.run` percolation push-back (`land.py:213-215`), the `WWTW` storm-tank rejection
   (`wtw.py:403-404`), the `WWTW.make_discharge` push-back (`:347-348`), and the `QueueTank`
   storage-without-queue entry (Nodes › QueueTank). All are
@@ -1248,8 +1267,8 @@ W22 is this revision.
   order. 1e15, not inf. Cost if wrong: a re-layout of the transcription.
 - S4: the state keys and representations above:
   - one shift register for every `AltQueueArc`, internal and user;
-  - `QueueArc` slots by (entry day, call site, round), with delivery masked by the early
-    return;
+  - `QueueArc` rows by (entry day counted back from the last delivering call, daily call
+    index), with a per-direction `since` counter and delivery masked by the early return;
   - liquor carried for every WTW, and `WWTW.treated` carried.
 
   Cost if wrong: a state-format change before release.
