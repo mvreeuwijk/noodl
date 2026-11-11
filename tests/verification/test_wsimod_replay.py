@@ -23,10 +23,10 @@ import re  # noqa: E402
 import torch  # noqa: E402
 
 from noodl.apps.wsimod.config import read_wsimod_config  # noqa: E402
+from noodl.apps.wsimod.day import WsimodDay  # noqa: E402
 from noodl.apps.wsimod.engine import Ctx, Engine, make_node  # noqa: E402
 from noodl.apps.wsimod.vqip import QUANTITY_ONLY  # noqa: E402
 from tests.apps.wsimod._replay import Mismatch, replay  # noqa: E402
-from tests.apps.wsimod._stepping import step_days  # noqa: E402
 from tests.verification._wsimod_cases import CASES  # noqa: E402
 from tests.verification._wsimod_reference import (  # noqa: E402
     capture_node_calls,
@@ -34,6 +34,13 @@ from tests.verification._wsimod_reference import (  # noqa: E402
     wsimod_model,
     wsimod_reference,
 )
+
+
+def _days(network, days: int):
+    """Step ``network`` with its own pollutants through the day driver
+    (``WsimodDay.run_days``): ``(day, ctx, engine)`` after each day's orchestration."""
+    return WsimodDay(network, pollutants=True).run_days(days=days)
+
 
 PAIRS = [(case, name) for case, spec in CASES.items() if spec.wsimod for name in spec.replay]
 
@@ -186,7 +193,7 @@ def _noodl_event_days(case: str, condition: str, node: str) -> set[int]:
     spec = CASES[case]
     network = read_wsimod_config(spec.build())
     days = set()
-    for day, ctx, _ in step_days(network, network.pollutants, spec.days):
+    for day, ctx, _ in _days(network, spec.days):
         if bool(ctx.events.get(condition, {}).get(node, torch.tensor(False))):
             days.add(day)
     return days
@@ -267,7 +274,7 @@ def test_reservoir_spill_days_are_the_days_wsimod_printed_spill_at_reservoir():
     assert ours == printed_on
     assert 0 < len(ours) < spec.days  # the supply runs dry part-way
     ours_end = {}
-    for day, _, engine in step_days(network, network.pollutants, spec.days):
+    for day, _, engine in _days(network, spec.days):
         ours_end[day] = float(engine.nodes["res"].tank.storage[0])
     for day in ours:
         assert ours_end[day] > capacity and float(theirs_end[day]) > capacity
@@ -354,14 +361,14 @@ def test_pipe_time_zero_water_leaves_the_sewer_the_day_it_arrives():
     outflow = reference.arc_flow[:, reference.arc_names.index("sewer_to_sea")]
     assert bool((inflow > 0).all()) and torch.equal(inflow, outflow)
     network = read_wsimod_config(spec.build())
-    for day, _, engine in step_days(network, network.pollutants, spec.days):
+    for day, _, engine in _days(network, spec.days):
         ours_in = engine.arcs["basin_to_sewer"].flow_in
         assert float(engine.arcs["sewer_to_sea"].flow_in) == float(ours_in) == float(inflow[day])
 
 
 def _arc_flows(network, days: int) -> dict[str, list[float]]:
     flows: dict[str, list[float]] = {}
-    for _, _, engine in step_days(network, network.pollutants, days):
+    for _, _, engine in _days(network, days):
         for name, arc in engine.arcs.items():
             flows.setdefault(name, []).append(float(arc.flow_in))
     return flows
@@ -397,7 +404,7 @@ LAND_CASES = (
 
 @pytest.mark.parametrize("case", LAND_CASES)
 def test_the_land_cases_match_wsimod_day_by_day(case):
-    """The stand-in day driver on each Land case against WSIMOD's own run: every arc's flow
+    """The day driver on each Land case against WSIMOD's own run: every arc's flow
     and quality, every surface's storage and quality (``record_all``, ``model.py:1135-1170``)
     and the Land residence tanks, bitwise on every day."""
     spec = CASES[case]
@@ -409,7 +416,7 @@ def test_the_land_cases_match_wsimod_day_by_day(case):
         if prop in ("percolation", "subsurface_runoff", "surface_runoff")
     ]
     assert reference.surface_names and tanks
-    for day, _, engine in step_days(network, network.pollutants, spec.days):
+    for day, _, engine in _days(network, spec.days):
         for i, name in enumerate(reference.arc_names):
             ours = engine.arcs[name].vqip_out
             assert float(ours[0]) == float(reference.arc_flow[day, i]), (day, name)
@@ -506,7 +513,7 @@ def test_the_dropped_percolation_falls_on_the_days_wsimod_reports_a_land_imbalan
     network = read_wsimod_config(spec.build())
     ours = {
         day
-        for day, ctx, _ in step_days(network, network.pollutants, spec.days)
+        for day, ctx, _ in _days(network, spec.days)
         if float(ctx.dropped[0]) != 0
     }
     theirs = _printed_on(case, "plot", "node_mass_balance", "mass balance error for volume")

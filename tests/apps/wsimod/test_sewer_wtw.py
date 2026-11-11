@@ -221,14 +221,14 @@ def test_without_non_additive_pollutants_there_is_no_liquor_blend_to_divide():
 
 
 def test_the_zero_input_case_runs_and_records_the_event_where_wsimod_would_raise():
-    from tests.apps.wsimod._stepping import step_days
+    from noodl.apps.wsimod.day import WsimodDay
     from tests.verification._wsimod_cases import CASES
 
     spec = CASES["wtw_zero_input"]
     assert not spec.wsimod and not spec.replay
     network = read_wsimod_config(spec.build())
     events = {"plant": [], "works": []}
-    for _, ctx, engine in step_days(network, network.pollutants, 3):
+    for _, ctx, engine in WsimodDay(network, pollutants=True).run_days(days=3):
         table = ctx.events["wtw_liquor_zero_denominator"]
         for name in events:
             events[name].append(bool(table.get(name, torch.tensor(False))))

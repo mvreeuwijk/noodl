@@ -793,30 +793,11 @@ def test_river_derives_what_construction_derives():
     assert river_derived(network.nodes[0])["area"] == 450.0 * 9.0
 
 
-# --- the river order and a stepped chain --------------------------------------------------------
-def test_the_river_order_is_most_upstream_first_with_ties_in_configuration_order():
-    from tests.apps.wsimod._stepping import river_order
-    from tests.verification._wsimod_cases import CASES
-
-    network = read_wsimod_config(CASES["river_chain"].build())
-    # r_lost links to no Waste and is left out (model.py:730-735, :780-807)
-    assert river_order(network) == ["r_head", "r_mid", "r_side", "r_low", "r_end"]
-    # no river arc at all: no order
-    no_river_arcs = read_wsimod_config(
-        {**CASES["river_chain"].build(), "arcs": [], "orchestration": []}
-    )
-    assert river_order(no_river_arcs) == []
-    mapping = CASES["river_chain"].build()
-    mapping["nodes"] = [n for n in mapping["nodes"] if n["name"] != "sea"]
-    mapping["arcs"] = [a for a in mapping["arcs"] if "sea" not in (a["in_port"], a["out_port"])]
-    with pytest.raises(ValueError, match="no Waste"):
-        river_order(read_wsimod_config(mapping))
-
-
+# --- a stepped river chain (the river order: test_build.py) -------------------------------------
 @pytest.mark.parametrize("quantity_only", [True, False])
 def test_the_stepped_river_chain_equals_wsimod_day_by_day(quantity_only):
     pytest.importorskip("wsimod")
-    from tests.apps.wsimod._stepping import step_days
+    from noodl.apps.wsimod.day import WsimodDay
     from tests.verification._wsimod_cases import CASES
     from tests.verification._wsimod_reference import wsimod_model, wsimod_reference
 
@@ -832,7 +813,7 @@ def test_the_stepped_river_chain_equals_wsimod_day_by_day(quantity_only):
     p = QUANTITY_ONLY if quantity_only else network.pollutants
     columns = [reference.pollutants.index(n) for n in p.names]
     rivers = ["r_head", "r_mid", "r_low", "r_side", "r_end", "r_lost", "res"]
-    for day_, _, engine in step_days(network, p, days):
+    for day_, _, engine in WsimodDay(network, pollutants=not quantity_only).run_days(days=days):
         for name in rivers:
             row = reference.tank_names.index((name, "tank"))
             ours = engine.nodes[name].tank.storage

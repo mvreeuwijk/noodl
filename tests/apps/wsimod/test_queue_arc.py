@@ -1,6 +1,6 @@
 """``QueueArc`` request rows (W21, D1, D2): ``arcs.py:273-552``.
 
-The whole-mapping tests step noodl's :class:`Engine` day by day (``_stepping.step_days``) and
+The whole-mapping tests step noodl's day driver (``WsimodDay.run_days``) day by day and
 live WSIMOD 0.8.1 through ``Model.run`` on the same mapping, and compare every day's arc
 ``vqip_out``, every request call's reply and every tank's storage bitwise: ``QueueArc`` is
 ``+ - * /`` and ``min``/``max`` only, in WSIMOD's order (rulings W41, W47).
@@ -16,11 +16,11 @@ import torch
 
 from noodl.apps.wsimod.arcs import ARC_CLASSES, QueueArc
 from noodl.apps.wsimod.config import ArcSpec, NodeSpec, read_wsimod_config
-from noodl.apps.wsimod.engine import Ctx, Engine
+from noodl.apps.wsimod.day import WsimodDay
+from noodl.apps.wsimod.engine import Ctx
 from noodl.apps.wsimod.node import Node, Waste
 from noodl.apps.wsimod.storage import Reservoir, Storage
 from noodl.apps.wsimod.vqip import QUANTITY_ONLY, Pollutants, empty, sum_vqip
-from tests.apps.wsimod._stepping import step_days
 from tests.verification._wsimod_cases import CASES
 
 PQ = Pollutants(("phosphate", "temperature"), ("phosphate",), ("temperature",))
@@ -65,7 +65,9 @@ class Run:
 
     def __init__(self, mapping: dict, pollutants: Pollutants, days: int) -> None:
         network = read_wsimod_config(mapping)
-        engine = Engine(network, pollutants=pollutants)
+        day = WsimodDay(network, pollutants=pollutants is not QUANTITY_ONLY)
+        assert day.p == pollutants
+        engine = day.engine
         self.engine, self.p = engine, pollutants
         self.calls: list[tuple] = []
         for arc in _queue_arcs(engine.arcs):
@@ -77,8 +79,9 @@ class Run:
         self.residual: list[torch.Tensor] = []
         self.unbalanced: list[torch.Tensor] = []  # the residual without the dropped water
         self.stores: list[dict[str, dict[str, torch.Tensor]]] = []
+        day.load_state(day.initial_state())  # the tracing day (D2) left its values behind
         held = self._held()
-        for _, ctx, _ in step_days(network, pollutants, days, engine=engine):
+        for _, ctx, _ in day.run_days(days=days):
             self.vqip_out.append({n: a.vqip_out.clone() for n, a in engine.arcs.items()})
             self.storage.append(
                 {n: x.tank.storage.clone() for n, x in engine.nodes.items() if hasattr(x, "tank")}
@@ -86,9 +89,7 @@ class Run:
             self.stores.append(
                 {a.name: {k: v.clone() for k, v in a.stores().items()} for a in self._qs()}
             )
-            for node in engine.nodes.values():
-                node.record_terms()
-            now = self._held()
+            now = self._held()  # the driver has recorded the day's terms (D11)
             inflow = ctx.terms.get("Catchment.flow", ctx.empty())
             outflow = sum_vqip(
                 pollutants,
