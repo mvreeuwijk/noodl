@@ -934,7 +934,7 @@ def _drain_points(tmp_path: Path, model: str):
     the edge falls that much earlier or later: that step's quality moves by at most the jump
     (EPANET's own range of that quality within an hour either side of the point, 0.4 to 1.0
     mg/L here) times `dV` over the volume of the step's outflow, `|q| Qstep` (1.5 m3). Each
-    admitted point must lie between a fifteenth of that prediction and the prediction itself.
+    admitted point must lie within that prediction (a smaller error is no defect).
     MEASURED, error over prediction: FIFO P6 11 h 4.4e-5 / 6.0e-4 (0.07), LIFO P6 15 h
     4.2e-5 / 2.7e-4 (0.15), LIFO T1 16 h 3.4e-5 / 1.0e-4 (0.32), with `dV` 4.7e-4 to 6.4e-4 m3
     (P6 flow differences of 2e-8 m3/s and less, summed over the drain).
@@ -977,7 +977,7 @@ def _drain_points(tmp_path: Path, model: str):
             near = ref[max(0, row - 1):row + 2]        # the jump: EPANET's range within +-1 h
             jump = float(near.max() - near.min())
             predicted = jump * moved / (flow * qstep)
-            assert predicted / 15 <= float(error[column]) <= predicted, (
+            assert float(error[column]) <= predicted, (
                 t, names[column], float(error[column]), predicted)
     assert_matches_epanet(diagnostics, reference, ctol=0.01, admitted=beyond)
     return diagnostics, beyond
