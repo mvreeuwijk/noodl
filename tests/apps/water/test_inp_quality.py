@@ -6,10 +6,11 @@ import dataclasses
 from pathlib import Path
 
 import pytest
-import wntr
 
 from noodl.apps.water import QualitySource, WaterQuality, read_epanet_inp
 from noodl.apps.water.units import DIFFUSIVITY_M2
+
+wntr = pytest.importorskip("wntr")
 
 DATA = Path(__file__).resolve().parents[2] / "data" / "water"
 WNTR = Path(wntr.__file__).parent / "library" / "networks"
