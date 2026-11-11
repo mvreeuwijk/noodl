@@ -13,7 +13,7 @@ Build the model and its starting state and inputs.
 
 | Name | What it does | How to call it |
 |---|---|---|
-| `build_model` | Assemble the water model and return `(model, state, drivers)`. | `build_model(net, *, headloss=None, pda=None, p_min=None, p_req=None, exponent=None, quality=None, coupling='pingpong', dt=None, friction='composite', pipe_form=None, tank_scheme='forward_euler')` |
+| `build_model` | Assemble the water model and return `(model, state, drivers)`. | `build_model(net, *, headloss=None, pda=None, p_min=None, p_req=None, exponent=None, quality=None, coupling='pingpong', dt=None, friction='composite', pipe_form=None, tank_scheme='forward_euler', valve_smoothing=0.0)` |
 | `initial_drivers` | `build_model`'s driver template (copied), then `values` by name (see `noodl.refs.drivers_from`), then `demand`: `{junction: m3/s withdrawn}`, positive, stored as the negative nodal source the head solve takes. | `initial_drivers(model, *, values=None, demand=None)` |
 | `initial_state` | All-zero state, dispatching on each layer's `quantity` (the app convention), tank levels from the network file; then `values` by node, tank or pump name (see `noodl.refs.state_from`). | `initial_state(model, *, values=None)` |
 
@@ -23,15 +23,23 @@ Descriptions of the physical objects a network is built from.
 
 | Name | What it does | How to call it |
 |---|---|---|
-| `Control` | One `LINK <id> OPEN\|CLOSED IF NODE <tank> BELOW\|ABOVE <level>` line. | `Control(link, status, node, test, level)` |
+| `Action` | A `THEN`/`ELSE` action: set `attribute` (`"STATUS"`: a status code, or `"SETTING"`: a number, in SI) of `link` to `value`. | `Action(link, attribute, value)` |
+| `Control` | One line of `[CONTROLS]`: set `link` to `status` (`CLOSED`, `OPEN`, `ACTIVE`) or to a numeric `setting` (exactly one of the two is not `None`) when the trigger holds. | `Control(link, status, setting, trigger, node=None, above=None, value=0.0)` |
+| `Emitter` | An emitter at junction `node`: the outflow is `coefficient * p^n` with `p` the pressure head (m) and `n` `WaterOptions.emitter_exponent`; `coefficient` is in m3/s per m^n. | `Emitter(node, coefficient)` |
+| `EnergyOptions` | `[ENERGY]` defaults: `global_efficiency` (percent), `global_price` ($/kWh) with an optional `global_pattern` and the monthly `demand_charge` ($/kW). Reporting only: none of them changes a head or a flow. | `EnergyOptions(global_efficiency=75.0, global_price=0.0, global_pattern=None, demand_charge=0.0)` |
 | `Junction` | A junction: `elevation` (m) and base `demand` (m3/s, withdrawn), optionally scaled by a time `pattern`. | `Junction(name, elevation, demand=0.0, pattern=None)` |
-| `Pump` | A pump from `u` to `v` on a head-flow `curve` (by name), at relative `speed`. | `Pump(name, u, v, curve, power=None, speed=1.0)` |
+| `LinkData` | Every link of the network as `TankLevels` carries it, each field one value per link in `names` order (`model.link_names`). | `LinkData(names, status, kinds=None, setting=None, setting_scale=None, setting_tolerance=None, one_way=None)` |
+| `Premise` | One `IF`/`AND`/`OR` clause of a rule: `object id attribute relation value`. | `Premise(conjunction, object, id, attribute, relation, value, tolerance=None)` |
+| `Pump` | A pump from `u` to `v` on a head-flow `curve` (by name) or at constant `power` (kW), at relative `speed`, optionally varied by `speed_pattern`. | `Pump(name, u, v, curve, power=None, speed=1.0, speed_pattern=None, efficiency_curve=None, price=None, price_pattern=None)` |
+| `PumpEnergy` | Each pump's energy use over a run (`pump_names` in `WaterNetwork.pumps` order), as EPANET reports it (`output.c`, `saveenergy`). `...` is the batch shape of the run. | `PumpEnergy(pump_names, utilisation, efficiency, energy_per_volume, average_power, peak_power, cost, demand_charge)` |
 | `Reservoir` | A fixed-head node: total `head` (m), optionally varied by a time `pattern`. | `Reservoir(name, head, pattern=None)` |
-| `Tank` | A cylindrical tank: bottom `elevation`, initial, minimum and maximum water levels and `diameter` (all m); its level is its node's head less its bottom, stepped by the layer's storage (`build_model(tank_scheme=...)`). | `Tank(name, elevation, init_level, min_level, max_level, diameter)` |
+| `Rule` | One `[RULES]` entry: the `premises` (in file order, joined by their conjunctions), the actions when they hold (`then_actions`) and when they do not (`else_actions`). | `Rule(name, premises, then_actions, else_actions, priority=0.0)` |
+| `Tank` | A tank: bottom `elevation`, initial, minimum and maximum water levels and `diameter` (all m); its level is its node's head less its bottom, stepped by the layer's storage (`build_model(tank_scheme=...)`). | `Tank(name, elevation, init_level, min_level, max_level, diameter, volume_curve=None, overflow=False, min_volume=0.0)` |
 | `Valve` | A valve from `u` to `v`: `diameter` (m), EPANET `kind` (for example `TCV`) and its `setting` (TCV: a loss coefficient; FCV: a flow, m3/s; PBV: a head drop, m), with a minor-loss coefficient. A GPV's setting is its head-loss `curve` (a `curves` key). | `Valve(name, u, v, diameter, kind, setting, minor_loss=0.0, curve=None)` |
-| `WaterNetwork` | A pressurised distribution network, in SI, with everything the builder needs. | `WaterNetwork(junctions, reservoirs=(), tanks=(), pipes=(), pumps=(), valves=(), curves=<factory>, patterns=<factory>, controls=(), demand_pattern=None, pattern_timestep=3600.0, hydraulic_timestep=3600.0, report_timestep=3600.0, duration=0.0, headloss='H-W', options=<factory>, notes=<factory>)` |
-| `WaterOptions` | `[OPTIONS]` keys that change the physics, with EPANET 2.2's own defaults. | `WaterOptions(demand_model='DDA', minimum_pressure=0.0, required_pressure=0.1, pressure_exponent=0.5, specific_gravity=1.0, viscosity=1.0, flow_units=None)` |
+| `WaterNetwork` | A pressurised distribution network, in SI, with everything the builder needs. | `WaterNetwork(junctions, reservoirs=(), tanks=(), pipes=(), pumps=(), valves=(), curves=<factory>, patterns=<factory>, controls=(), rules=(), emitters=(), initial_status=<factory>, energy=<factory>, demand_pattern=None, pattern_timestep=3600.0, hydraulic_timestep=3600.0, report_timestep=3600.0, duration=0.0, explicit_rule_timestep=None, pattern_start=0.0, report_start=0.0, start_clocktime=0.0, headloss='H-W', options=<factory>, notes=<factory>)` |
+| `WaterOptions` | `[OPTIONS]` keys that change the physics, with EPANET 2.2's own defaults. | `WaterOptions(demand_model='DDA', minimum_pressure=0.0, required_pressure=0.1, pressure_exponent=0.5, specific_gravity=1.0, viscosity=1.0, flow_units=None, emitter_exponent=0.5)` |
 | `WaterPipe` | A pipe from `u` to `v`: `length` and `diameter` (m), `roughness` (in the network's head-loss formula's units), a minor-loss coefficient and its `status`. | `WaterPipe(name, u, v, length, diameter, roughness, minor_loss=0.0, status='OPEN')` |
+| `WaterResults` | A run's results at its report times. `...` is the batch shape of the run. | `WaterResults(time, head, pressure, flow, status, setting, tank_level, tank_overflow, demand, emitter_flow, energy=None, node_names=<factory>, link_names=<factory>)` |
 
 ## Constitutive laws
 
@@ -39,14 +47,21 @@ The relation between the flow through an edge and the potential difference acros
 
 | Name | What it does | How to call it |
 |---|---|---|
-| `BreakerValve` | A pressure breaker valve (PBV): EPANET 2.2's `pbvcoeff` (`hydcoeffs.c`). | `BreakerValve(setting, minor, *, kind='pbv')` |
+| `BreakerValve` | A pressure breaker valve (PBV): EPANET 2.2's `pbvcoeff` (`hydcoeffs.c`). | `BreakerValve(setting, minor, *, kappa=1.0, gradient_floor=0.0, links=None, kind='pbv')` |
+| `ChezyManning` | ``h_L = R q^2 + m q^2`` with EPANET 2.2's Chezy-Manning resistance, in feet and cfs, | `ChezyManning(length, diameter, roughness, *, minor_loss=0.0, cfs_per_m3s=None, dp_transition=1e-09, kind='pipe', learnable=False)` |
 | `CompositeDarcyWeisbach` | Composite Darcy-Weisbach pipe: Hagen-Poiseuille, Dunlop's cubic, then Swamee-Jain. | `CompositeDarcyWeisbach(length, diameter, roughness, *, minor_loss=0.0, nu=1.02193344e-06, cfs_per_m3s=None, scale=1.0, rtol=1e-15, max_iter=100, kind='pipe', learnable=False)` |
-| `FlowControlledPipe` | A pipe in its resistance form, ``dp = scale h(q)``, with the flow an unknown of the layer (`build_model`'s ``pipe_form="flow"``): ``pipe`` is the pipe's potential-form law (`HazenWilliams` or `CompositeDarcyWeisbach`), whose ``head_loss`` gives ``h``. | `FlowControlledPipe(pipe, *, gradient_floor=0.0, kind='pipe')` |
-| `FlowControlledPump` | A pump in its head-gain form, ``phi_discharge - phi_suction = gain(q)``, with the flow an unknown of the layer, as EPANET's and wntr's own solvers write it. ``pump`` is the pump's `PumpCurve`, whose ``head_gain`` gives the gain (with ``gradient_floor``, EPANET's ``RQtol``, and ``closed_slope``, its ``CBIG``, both in the layer's potential per m^3/s). `build_model` writes every pump in this form, whatever the ``pipe_form``. | `FlowControlledPump(pump, *, gradient_floor, closed_slope, kind='pump')` |
-| `GeneralPurposeValve` | A general purpose valve (GPV): EPANET 2.2's `gpvcoeff` (`hydcoeffs.c`). | `GeneralPurposeValve(flows, heads, n_points, *, kind='gpv')` |
-| `HazenWilliams` | ``h_L = K q^1.852 + m q^2`` with ``K = 10.666829500036 C^-1.852 d^-4.871 L``. | `HazenWilliams(length, diameter, roughness, *, minor_loss=0.0, dp_transition=1e-09, kind='pipe', learnable=False)` |
-| `MinorLoss` | ``h = m q \|q\|`` with ``m = K / (2 g A^2)``: a throttle control valve (TCV) or any pure minor-loss link. Inverted in closed form, ``q = sign(h) sqrt(\|h\| / m)``, with the same laminar blend and both-branch safe substitution as ``HazenWilliams``. | `MinorLoss(setting, diameter, *, dp_transition=1e-09, kind='valve', learnable=False)` |
-| `PumpCurve` | Constant-speed pump on its own edge kind: ``h_gain = w^2 (h0 - r (q/w)^n)``. | `PumpCurve(h0, r, n=2.0, *, speed=1.0, dp_transition=1e-06, status_key=None, kind='pump', learnable=False)` |
+| `ConstantPowerPump` | A pump that delivers a constant power: EPANET 2.2's ``CONST_HP`` pump (`[PUMPS]` ``POWER``). Its head gain is ``8.814 P w^3 / q`` in feet, horsepower and cfs (`input2.c`, `updatepumpparams`: ``R = -8.814 P``, ``N = -1``; `hydcoeffs.c`, `pumpcoeff`: ``r = R w^(2-N)``, ``hloss = r / q``), here in the layer's potential unit and m3/s: ``a w^3 / q`` with ``a = scale 0.3048 * 8.814 P / (kw_per_hp cfs_per_m3s)``. | `ConstantPowerPump(power_kw, *, kw_per_hp=0.7457, cfs_per_m3s=None, scale=1.0, speed=1.0, links=None, kind='pump')` |
+| `FlowControlledPipe` | A pipe in its resistance form, ``dp = scale h(q)``, with the flow an unknown of the layer (`build_model`'s ``pipe_form="flow"``): ``pipe`` is the pipe's potential-form law (`HazenWilliams` or `CompositeDarcyWeisbach`), whose ``head_loss`` gives ``h``. | `FlowControlledPipe(pipe, *, gradient_floor=0.0, kappa=1.0, links=None, ends=None, fixed=(), shut_links=None, kind='pipe')` |
+| `FlowControlledPump` | Every pump of a layer in its head-gain form, ``phi_discharge - phi_suction = gain(q)``, with the flow an unknown of the layer, as EPANET's and wntr's own solvers write it. `build_model` writes every pump in this form, whatever the ``pipe_form``. | `FlowControlledPump(pump, *, gradient_floor=0.0, max_slope=inf, kappa=1.0, links=None, ends=None, fixed=(), shut_links=None, kind='pump')` |
+| `FlowControlValve` | A flow control valve (FCV), active: its flow is its setting (m^3/s), ``kappa (q - setting) = 0``, whatever the heads. The setting is ``setting``, or the driver ``"water.setting"`` with ``links``; see `_Valve` for the status. Implicit: the flow is an unknown of the layer. | `FlowControlValve(*, setting=None, minor=0.0, kappa=1.0, gradient_floor=0.0, links=None, kind='fcv')` |
+| `GeneralPurposeValve` | A general purpose valve (GPV): EPANET 2.2's `gpvcoeff` (`hydcoeffs.c`). | `GeneralPurposeValve(flows, heads, n_points, *, minor=0.0, kappa=1.0, gradient_floor=0.0, links=None, kind='gpv')` |
+| `HazenWilliams` | ``h_L = K q^1.852 + m q^2`` with ``K = 10.666829500036 C^-1.852 d^-4.871 L``. | `HazenWilliams(length, diameter, roughness, *, minor_loss=0.0, cfs_per_m3s=None, dp_transition=1e-09, kind='pipe', learnable=False)` |
+| `PressureReducingValve` | A pressure reducing valve (PRV): it holds the head at its END node at no more than ``Hset = elevation + setting`` (``elevation`` the end node's). EPANET 2.2's PRV (`hydstatus.c`, `prvstatus`; `hydcoeffs.c`, `prvcoeff`), with ``held = H_v - Hset``: a downstream head above the setting is the reason for it to close. See `_PressureValve`. | `PressureReducingValve(elevation, minor, *, kappa, smoothing=0.0, setting=None, gradient_floor=0.0, links=None, kind='prv')` |
+| `PressureSustainingValve` | A pressure sustaining valve (PSV): it holds the head at its START node at no less than ``Hset = elevation + setting`` (``elevation`` the start node's). EPANET 2.2's PSV (`hydstatus.c`, `psvstatus`; `hydcoeffs.c`, `psvcoeff`), with ``held = Hset - H_u``: an upstream head below the setting is the reason for it to close. See `_PressureValve`. | `PressureSustainingValve(elevation, minor, *, kappa, smoothing=0.0, setting=None, gradient_floor=0.0, links=None, kind='psv')` |
+| `MinorLoss` | ``h = m q \|q\|`` with ``m = K / (2 g A^2)``: any pure minor-loss link, in its potential form. Inverted in closed form, ``q = sign(h) sqrt(\|h\| / m)``, with the same laminar blend and both-branch safe substitution as ``HazenWilliams``. (`build_model` writes a throttle control valve as `ThrottleValve`, with EPANET's own coefficient and its status.) | `MinorLoss(setting, diameter, *, dp_transition=1e-09, kind='valve', learnable=False)` |
+| `PiecewisePumpCurve` | A pump on a curve of straight segments: EPANET 2.2's ``CUSTOM`` pump, every head curve that is neither one point nor three with the first at zero flow (`input2.c`, `updatepumpparams`). | `PiecewisePumpCurve(flows, heads, n_points, *, speed=1.0, links=None, kind='pump')` |
+| `PumpCurve` | A pump on a power-law curve, ``h_gain = w^2 (h0 - r (q/w)^n)``: EPANET 2.2's ``POWER_FUNC`` pump (`input2.c`, `updatepumpparams`: one point, or three with the first at zero flow, fitted by `input3.c`, `powercurve`; `hydcoeffs.c`, `pumpcoeff`). ``h0``, ``r`` and ``n`` are per pump; ``w`` is the relative speed (EPANET's affinity laws, Manual p.108: ``h0 w^2`` and ``r w^(2-n)``). | `PumpCurve(h0, r, n=2.0, *, speed=1.0, dp_transition=1e-06, links=None, kind='pump', learnable=False)` |
+| `ThrottleValve` | A throttle control valve (TCV): EPANET 2.2's `tcvcoeff` (`hydcoeffs.c`). | `ThrottleValve(diameter, *, setting=None, cfs_per_m3s=None, scale=1.0, minor=0.0, kappa=1.0, gradient_floor=0.0, links=None, kind='valve')` |
 
 ## Closures
 
@@ -54,7 +69,7 @@ Functions of the state that compute drivers each step (densities, flows, levels)
 
 | Name | What it does | How to call it |
 |---|---|---|
-| `TankLevels` | Simple controls on tank levels, and the boundary heads of a water layer whose tanks are held at boundary nodes (`build_model(tank_scheme="forward_euler")`). | `TankLevels(net, tanks, controls, pump_names, *, tank_nodes, dt, reservoir_heads, head_scale=1.0)` |
+| `TankLevels` | Every simple `[CONTROLS]` form (time, clock time, tank level, junction pressure), and the boundary heads of a water layer whose tanks are held at boundary nodes (`build_model(tank_scheme="forward_euler")`); on a network without tanks it carries the controls alone. | `TankLevels(tanks, controls, pump_names, *, links, tank_nodes, dt, reservoir_heads, head_scale=1.0, tank_links=(), storage=None, junctions=None, start_clocktime=0.0, rules=(), node_info=None, speed_patterns=())` |
 
 ## Sources and storage
 
@@ -62,7 +77,9 @@ Nodal sources, withdrawals and storage.
 
 | Name | What it does | How to call it |
 |---|---|---|
+| `EmitterOutflow` | EPANET's emitters as a `NodeWithdrawal` (withdrawal, positive OUT): at each node the outflow is ``q = sign(p) C \|p\|^n`` with ``p = phi - elevation`` the pressure head (m), ``C`` the discharge coefficient (m3/s per m^n) and ``n`` the emitter exponent. | `EmitterOutflow(nodes, coefficient, elevation, *, exponent=0.5, dp_transition=1e-09, learnable=False)` |
 | `PressureDrivenDemand` | The Wagner demand function as a `NodeWithdrawal` (withdrawal, positive OUT). | `PressureDrivenDemand(nodes, q_required, elevation, *, p_min=0.0, p_req=0.0, exponent=0.5, learnable=False)` |
+| `TankVolumeCurve` | Tanks whose volume is a piecewise linear function of the level: EPANET's volume curve (`[TANKS]` VolCurve, `[CURVES]` level against volume). | `TankVolumeCurve(nodes, bottom, levels, volumes, *, head_scale=1.0, learnable=False)` |
 
 ## Files
 
@@ -72,21 +89,35 @@ Readers and writers of other tools' file formats.
 |---|---|---|
 | `read_epanet_inp` | Read the documented subset of an EPANET 2.2 `.inp` into a `WaterNetwork`, in SI. | `read_epanet_inp(path)` |
 
+## Other classes
+
+Supporting types.
+
+| Name | What it does | How to call it |
+|---|---|---|
+| `ShutLinks` | The one-way links the laws of one layer shut on the current iterate, shared between them so that the cut-off test (`_reopen`) sees all of them at once. | `ShutLinks(n_links, pumps=None)` |
+
 ## Functions
 
 Calculations and helpers.
 
 | Name | What it does | How to call it |
 |---|---|---|
+| `apply_rules` | `(state, changed)`: `state` after the network's `[RULES]` are tested on it at `time` (s since the start) and the actions that stand are taken (EPANET 2.2, `rules.c`, `checkrules`; `evaluate_rules`, `take_actions`); `changed` says per instance whether any action was TAKEN, EPANET's action count (`takeactions`), which asks for a new solve. It is not movement of the carried values: a pump the solver shut at its shut-off head is closed to `STATUS IS OPEN`, which is then taken (and `changed`) on every check while the pump stays shut, though the carried status is OPEN throughout. `water_run` follows `ruletimestep`: a taken action ends the step, the next solve is at the action's time, and the rules are next checked a rule step later -- never again at the same time until nothing changes. `step` (s, positive) is the length of the interval since the previous check (the rule time step), which `SYSTEM TIME` and `CLOCKTIME` premises test; EPANET checks nothing before the first step has passed. A network without rules returns `state` itself. | `apply_rules(model, state, drivers, *, time, step)` |
+| `link_states` | Every link's state in `state` (a solution), in `model.link_names` order, as the codes of `"water.status"` (`noodl.apps.water.controls`): `CLOSED` (0), `OPEN` (1) or `ACTIVE` (2). These are also the codes `wntr` reports EPANET's link states in (`results.link["status"]`). | `link_states(model, state, drivers)` |
 | `link_table` | One row per link: flow (m3/s), head loss (m) and velocity (m/s); optionally to CSV. | `link_table(model, state, names=None, *, path=None)` |
 | `pressure_head` | Pressure head (m) at every node: the solved head minus the node's elevation. | `pressure_head(model, state, elevations=None)` |
 | `composite_friction_factor` | Composite friction factor for ``Re > 2000``: ``(f, df/dq)``. | `composite_friction_factor(q, e, s)` |
-| `tank_inflow` | Net inflow (m3/s) at every tank node: the flow into every tank's storage, `"water.storage_flow"`, which a solve writes (`KirchhoffLayer.storage_flows`). Under `tank_scheme="forward_euler"` it is the inflow the solve delivered to the held tank, the rate over the step `water_event_step` takes. | `tank_inflow(model, state)` |
+| `evaluate_rules` | The actions that stand after every rule is tested at `time`, in the order their links first appear: one per link. EPANET 2.2, `rules.c`, `checkrules`, `evalpremises`, `updateactionlist` and `onactionlist`. | `evaluate_rules(rules, snapshot, *, time, step, clocktime=0.0)` |
+| `pattern_factor` | The multiplier of `pattern` (a `net.patterns` name; `None` is the constant 1) at `time` s since the start: EPANET's `F[p mod length]` with the pattern period `p = (t + Pstart) / Pstep` in whole seconds (`hydraul.c`, `demands`; `net.pattern_start`, `net.pattern_timestep`). | `pattern_factor(net, pattern, time)` |
+| `power_curve` | `(h0, r, n)` of EPANET 2.2's power-function pump curve ``h = h0 - r q^n`` through `points` (`(flow, head)` pairs): one point, or three with the first at zero flow (`input2.c`, `updatepumpparams`; `input3.c`, `powercurve`). | `power_curve(points)` |
+| `tank_inflow` | Net inflow (m3/s) at every tank node: the flow into every tank's storage, `"water.storage_flow"`, which a solve writes (`KirchhoffLayer.storage_flows`). Under `tank_scheme="forward_euler"` it is the inflow the solve delivered to the held tank, the rate over the step `water_run` takes. | `tank_inflow(model, state)` |
 | `tank_levels` | Every tank's level (m above its bottom) in `state`: its head less its bottom. | `tank_levels(model, state)` |
+| `take_actions` | `(status, setting, changed)`: the links' status and setting (`(n_links,)`, in `link_names` order, of `link_kinds` `"PIPE"`, `"PUMP"` or `"VALVE"`) after `actions`, and whether any link changed. EPANET 2.2, `rules.c`, `takeactions`, with `hydraul.c`, `setlinkstatus` and `setlinksetting`. | `take_actions(actions, *, status, setting, link_names, link_kinds, setting_scale=None, setting_tolerance=None, solved=None)` |
 | `three_point_curve` | EPANET's single-point pump-curve fit: ``(h0, r, n)`` for ``h = h0 - r q^n``. | `three_point_curve(q_design, h_design)` |
 | `to_kilopascal` | Metres of head -> kPa, at `rho = 998.2 kg/m3` and `g = 9.80665 m/s2`. | `to_kilopascal(head)` |
 | `twoloop` | The committed hand-made SI fixture (`tests/data/water/twoloop_si.inp`). | `twoloop()` |
-| `water_event_step` | One hydraulic step of EPANET's extended period, `(state, dt)`, on a model built with `tank_scheme="forward_euler"`: one hydraulic solve, the step shortened to the next control crossing, then the tanks moved. | `water_event_step(model, state, drivers, dt_max, **solve_kwargs)` |
+| `water_run` | EPANET 2.2's extended-period hydraulic run of `model` (built with `tank_scheme="forward_euler"`, the default) from `state` (`initial_state(model)` when `None`) under `drivers` (`initial_drivers(model)` when `None`) for `duration` s (the network's `[TIMES] DURATION` when `None`); the results at the report times (`WaterResults`). The step rule and the order of patterns, controls, solve, rules and tank moves are EPANET's (module docstring); `solve_kwargs` go to every `water_steady`. | `water_run(model, state=None, drivers=None, *, duration=None, diagnostics=None, **solve_kwargs)` |
 | `water_step` | One step of `dt` (s) of a model built with `tank_scheme="backward_euler"` or `"trapezoidal"`: `Model.step` with `water_steady`'s Newton defaults and pump check, the tank levels stepped implicitly (`LinearStorage`, `scheme` `"backward_euler"` or `"trapezoidal"`; trapezoidal needs a step-start state whose tank flows are solved, not the build's zeros). The level controls act on the step-start levels, as EPANET's do. `"backward_euler"` is the default because it starts from any state, the build's included, and does not ring after the flow jumps that pump and level controls cause. | `water_step(model, state, drivers, dt, *, scheme='backward_euler', **solve_kwargs)` |
 | `water_steady` | The quasi-steady state: one `Model.steady` with tight Newton tolerances. | `water_steady(model, state, drivers, **solve_kwargs)` |
 
@@ -96,8 +127,11 @@ Named values and option tables.
 
 | Name | Value |
 |---|---|
+| `ACTIVE` | `2` |
+| `CLOSED` | `0` |
 | `DW_SI` | `0.0826` |
 | `EPANET_QCF` | table of 10 entries: `CFS`, `GPM`, `MGD`, `IMGD`, `AFD`, `LPS`, `LPM`, `MLD`, ... |
 | `FLOW_UNITS` | table of 10 entries: `CFS`, `GPM`, `MGD`, `IMGD`, `AFD`, `LPS`, `LPM`, `MLD`, ... |
 | `G` | `9.80665` |
 | `HW_SI` | `10.666829500036` |
+| `OPEN` | `1` |

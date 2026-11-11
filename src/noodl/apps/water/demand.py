@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import torch
 
+from noodl.apps.water.elements import DEMAND_FACTOR_KEY
 from noodl.withdrawals import NodeWithdrawal
 
 Tensor = torch.Tensor
@@ -40,6 +41,11 @@ class PressureDrivenDemand(NodeWithdrawal):
     negative there) -- the same both-branches-safe pattern `HazenWilliams` and `PumpCurve`
     use, so `where`'s backward never multiplies an infinite derivative (a fractional power's
     derivative at a zero or negative base) by a zero mask and produces `nan`.
+
+    The driver `"water.demand_factor"` (`DEMAND_FACTOR_KEY`, one multiplier per node of this
+    withdrawal), when given, scales `q_required`: the demand pattern's multiplier, which
+    `water_run` sets every step (EPANET's `demands` scales the required demand,
+    `hydraul.c`).
     """
 
     def __init__(
@@ -80,5 +86,64 @@ class PressureDrivenDemand(NodeWithdrawal):
         # `torch.where` are evaluated in the forward pass, so the substitution must be safe
         # regardless of which branch is finally selected.
         safe = torch.where(active, fraction.clamp(max=1.0), torch.ones_like(fraction))
-        delivered = self.q_required * safe**self.exponent
+        required = self.q_required
+        factor = None if drivers is None else drivers.get(DEMAND_FACTOR_KEY)
+        if factor is not None:
+            required = required * factor
+        delivered = required * safe**self.exponent
         return torch.where(active, delivered, torch.zeros_like(delivered))
+
+
+class EmitterOutflow(NodeWithdrawal):
+    """EPANET's emitters as a `NodeWithdrawal` (withdrawal, positive OUT): at each node the
+    outflow is ``q = sign(p) C |p|^n`` with ``p = phi - elevation`` the pressure head (m), ``C``
+    the discharge coefficient (m3/s per m^n) and ``n`` the emitter exponent.
+
+    Transcribed from EPANET 2.2 (tag v2.2): `hydcoeffs.c`, `emittercoeffs` and
+    `emitterheadloss` model the emitter as a fictitious pipe to a reservoir at the junction's
+    elevation whose head loss is ``Ke q^(1/n)`` (``Ke = ucf / C^(1/n)``, `input1.c`,
+    `convertunits`; ``Qexp = 1/n``, `input3.c`, `EMITTER EXPONENT`), with the loss
+    ``hgrad q / Qexp`` carrying the SIGN of ``q``: the emitter is odd in the pressure, so at
+    negative pressure it is an INFLOW of ``C |p|^n`` (EPANET does not clip it; `hydsolver.c`,
+    `emitflowchange`, updates the same signed `EmitterFlow`). Inverting that law gives the
+    flow above, which is what a potential-dependent withdrawal needs.
+
+    EPANET linearises the fictitious pipe where its gradient falls below ``RQtol``; this
+    law instead is linear below ``dp_transition`` in the pressure, tangent to the power
+    law there, which keeps the slope at ``p = 0`` finite as `HazenWilliams` does.
+    ``dp_transition`` is in the units of ``phi`` (the layer's potential); `build_model` gives
+    it as 1e-9 m of head whatever the layer's unit (times ``rho g`` on a pressure layer,
+    whose ``elevation`` and ``coefficient`` it also scales), so the transition is the same
+    physical head difference on a Hazen-Williams, Chezy-Manning or Darcy-Weisbach network. Both
+    branches of the ``torch.where`` are finite (the base fed to the power on the linear side
+    is the constant ``dp_transition``), as `PressureDrivenDemand` does.
+    """
+
+    def __init__(
+        self,
+        nodes,
+        coefficient,
+        elevation,
+        *,
+        exponent: float = 0.5,
+        dp_transition: float = 1e-9,
+        learnable: bool = False,
+    ) -> None:
+        super().__init__(nodes)
+        value = torch.as_tensor(coefficient, dtype=F64)
+        self.coefficient = (
+            torch.nn.Parameter(value) if learnable else torch.nn.Parameter(value, False)
+        )
+        self.register_buffer("elevation", torch.as_tensor(elevation, dtype=F64))
+        self.exponent = float(exponent)
+        self.dp_transition = float(dp_transition)
+
+    def flow(self, phi_nodes: Tensor, drivers=None) -> Tensor:
+        pressure = phi_nodes - self.elevation
+        dpt = self.dp_transition
+        linear = pressure.abs() < dpt
+        safe = torch.where(linear, torch.full_like(pressure, dpt), pressure.abs())
+        slope = self.coefficient * dpt ** (self.exponent - 1.0)
+        return torch.where(
+            linear, slope * pressure, torch.sign(pressure) * self.coefficient * safe**self.exponent
+        )

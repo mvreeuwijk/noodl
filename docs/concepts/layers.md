@@ -138,7 +138,10 @@ too (`hold_potentials`), even in the later passes of `coupling="iterate"`. After
 the step moves each storage node by $\Delta t\,w / C$ (`advance_storage(phi, storage_flow,
 dt)`), with $w$ the flow the solve delivered to the node and $C$ the storage's capacity.
 That is explicit Euler, EPANET's own tank method; the solve itself takes no step and does
-not depend on `dt`.
+not depend on `dt`. A storage whose capacity changes with the potential gives the inverse of
+its amount, `potential_of`, and moves to `potential_of(amount(phi) + dt * w)` instead, so its
+amount changes by exactly $\Delta t\,w$ (EPANET's tank on a volume curve,
+`noodl.apps.water.TankVolumeCurve`).
 
 ```py
 store = LinearStorage(nodes=[tank], capacity=[area])
@@ -154,8 +157,9 @@ phi_next = layer.advance_storage(phi, w, dt=600.0)      # T1 moved by dt * w / a
   solve as on a step; a `Model` writes it to `"<layer>.storage_flow"` after every solve and
   moves the storage when the pass has a `dt`. `"<layer>.phi"` is then required by every
   solve, steady or not.
-- Only a linear storage (`LinearStorage`, a constant capacity) is accepted at a boundary node,
-  one entry per node; a nonlinear one is refused by name.
+- A linear storage (`LinearStorage`, a constant capacity) or one that gives `potential_of` is
+  accepted at a boundary node, one entry per node; a nonlinear one without it is refused by
+  name.
 - A layer whose storage sits at interior nodes, with dynamic laws, or with no storage at
   all refuses `"forward_euler"`; a layer with boundary storage refuses the other schemes, and a storage at
   a boundary node of a layer with another scheme is refused.

@@ -16,13 +16,16 @@ the headloss element for `solve_monotone` and time `benchmarks/water_eps.py`.
 
 ## Event step
 
-`water/tanks.py`: `event_step` shortens the hydraulic step to the linearly projected control
-crossing, as EPANET does (Manual section 13.1 item 17, p. 113). On Net1 over 24 h:
+`water/simulate.py`: `water_run` shortens the hydraulic step to the linearly projected control
+crossing, as EPANET does (Manual section 13.1 item 17, p. 113; `hydraul.c`,
+`controltimestep`), rounded to whole seconds, with the level test's one-second margin
+(`TankLevels.control_time`, `next_control_time`). On Net1 over 24 h:
 
 | step rule | worst reported-step tank-level difference to EPANET |
 | --- | --- |
 | fixed 1 h | 2.07 m (the pump switches a whole hour late) |
-| shortened to the control crossing (2 extra sub-steps) | 8.181e-5 m |
+| shortened to the exact control crossing (2 extra steps; an earlier step rule, since replaced) | 8.181e-5 m (3.8e-5 m with EPANET's 1.99998 pump exponent) |
+| EPANET's step rule (`water_run`: rounded crossings, volume margin, 26 steps) | 2.5e-5 m |
 
 Reproduce: `tests/verification/test_water_parity.py::test_net1_extended_period_tank_level`
 (run with `-m slow` if it is marked so), or the driver `benchmarks/water_eps.py`.

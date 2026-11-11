@@ -1,7 +1,35 @@
 # Design note: PRV and PSV in `apps.water`
 
-Status: design only, for decision. Follow-up of #23 ("PRV and PSV valves, which switch status
-on the absolute head at one end"). Nothing here is implemented.
+Status: **decided and implemented** (EPANET hydraulics completion, 2026-11). The sections
+below are the analysis the decisions were taken on and describe the code as it stood then;
+the implementation is in [Water distribution](../applications/water.md#valves) and
+[Link status, settings and check valves](../applications/water.md#link-status-settings-and-check-valves).
+Follow-up of #23 ("PRV and PSV valves, which switch status on the absolute head at one end").
+
+## Decisions (answers to section 5)
+
+1. **Exact by default, smoothing opt-in.** The valve is one exact complementarity condition,
+   option B, matching EPANET outside `HTOL`. `build_model(valve_smoothing=eps)` (metres)
+   offers the smoothed form (option C) for calibrating a setting across a switch.
+2. **Hysteresis.** Inside EPANET's `HTOL` band noodl gives the ideal-valve answer (`OPEN`, no
+   drop) where EPANET reports `ACTIVE` with a negative drop; the heads differ by less than
+   `HTOL` (`test_prv_inside_htol_band`). EPANET's history-dependent status is not reproduced.
+3. **Absolute heads** come through the law's end-node heads (`ConstitutiveLaw.reads_heads`), a
+   core extension, not sense edges to `DATUM`: no hidden edges, nothing in `link_names`,
+   reporting or the quality layer.
+4. **Setting** is a driver (`"water.setting"`), so controls, rules and patterns change it per
+   step, and learnable: a calibration passes a tensor that requires grad.
+5. **Unreachable settings** are reported, not raised: a valve that cannot deliver its setting
+   is `OPEN` in the exact condition (EPANET's `XPRESSURE` has no counterpart), and an error is
+   raised only where the step is singular (a valve with both sides dead, refused by name).
+   Equal-setting PRVs in parallel are refused when the network is built, by EPANET's own input
+   rules (errors 219 and 220, `valvecheck`), naming both valves.
+6. **Scope.** The same complementarity machinery brings in check-valve pipes, `CLOSED` pipes
+   and fixed statuses (`[STATUS] OPEN/CLOSED`): all in scope, solved exactly.
+7. **Fixed status.** A PRV or PSV with a fixed `OPEN` or `CLOSED` status is supported
+   (`"water.status"`): `OPEN` is its minor loss, `CLOSED` no flow.
+
+---
 
 ## 0. Where the code stands
 

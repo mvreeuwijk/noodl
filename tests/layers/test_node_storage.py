@@ -452,7 +452,7 @@ def test_boundary_storage_advances_by_dt_inflow_over_capacity_exactly():
     steady = model.steady(state, drivers)
     assert float(steady["w.phi"][3]) == 2.0
     torch.testing.assert_close(steady["w.storage_flow"], inflow, rtol=0, atol=1e-14)
-    # the layer's own step from a solve, as `water_event_step` takes it
+    # the layer's own step from a solve, as `noodl.apps.water.water_run` takes it
     solved = dict(new, **{"w.phi": new["w.phi"].clone()})
     solved["w.phi"][3] = 2.0
     torch.testing.assert_close(layer.advance_storage(solved["w.phi"], inflow, dt),
@@ -471,13 +471,65 @@ def test_boundary_storage_gradient_reaches_the_capacity():
     torch.testing.assert_close(storage.C.grad, -0.7 * inflow.detach() / TANK_C ** 2)
 
 
-def test_a_nonlinear_boundary_storage_is_refused():
+def test_a_nonlinear_boundary_storage_without_an_inverse_is_refused():
     class Cubic(NodeStorage):
         def amount(self, phi_nodes, drivers=None):
             return phi_nodes + phi_nodes ** 3 / 3
 
-    with pytest.raises(ValueError, match="Cubic at boundary nodes is not linear"):
+    assert Cubic([3]).potential_of(torch.ones(1)) is None
+    with pytest.raises(ValueError, match="Cubic at boundary nodes is not linear and"):
         _tank_layer(Cubic([3]))
+
+
+def test_linear_storage_advance_is_unchanged():
+    """`LinearStorage` moves a boundary node by `dt * flow / C`, the arithmetic it had before
+    `potential_of` existed, bit for bit (not `(C phi + dt flow) / C`)."""
+    storage = LinearStorage([3], torch.tensor([0.37], dtype=F64))
+    assert storage.potential_of(torch.ones(1)) is None
+    layer = _tank_layer(storage)
+    phi = torch.tensor([1.25, 0.1, 0.2, 2.0 / 3.0], dtype=F64)
+    flow = torch.tensor([0.123456789], dtype=F64)
+    for dt in (0.7, 3600.0, 1e-3):
+        out = layer.advance_storage(phi, flow, dt)
+        assert torch.equal(out[:3], phi[:3])
+        assert torch.equal(out[3], phi[3] + dt * flow[0] / storage.C[0])
+
+
+class _SquareRoot(NodeStorage):
+    """S = phi^2 (phi > 0), with its inverse: a storage whose capacity changes."""
+
+    def amount(self, phi_nodes, drivers=None):
+        return phi_nodes ** 2
+
+    def potential_of(self, amount, drivers=None):
+        return amount.sqrt()
+
+
+def test_a_potential_of_that_returns_none_is_refused_by_name():
+    class Declines(_SquareRoot):
+        def potential_of(self, amount, drivers=None):
+            return None
+
+    layer = _tank_layer(Declines([3]))
+    with pytest.raises(ValueError, match=r"Declines at boundary nodes \[3\] is not linear "
+                                         "and its potential_of returned None"):
+        layer.advance_storage(torch.tensor([1.25, 0.1, 0.2, 2.0], dtype=F64),
+                              torch.tensor([0.3], dtype=F64), 0.5)
+
+
+def test_a_storage_with_an_inverse_advances_by_its_amount():
+    """A boundary storage that gives `potential_of` moves its node to
+    `potential_of(amount(start) + dt * flow)`: the amount changes by exactly dt * flow."""
+    layer = _tank_layer(_SquareRoot([3]))
+    phi = torch.tensor([1.25, 0.1, 0.2, 2.0], dtype=F64)
+    flow = torch.tensor([0.3], dtype=F64)
+    out = layer.advance_storage(phi, flow, 0.5)
+    assert float(out[3]) == pytest.approx((4.0 + 0.15) ** 0.5, rel=1e-15)
+    assert torch.equal(out[:3], phi[:3])
+    # differentiable in the flow: d phi / d flow = dt / (2 phi_new)
+    flow.requires_grad_(True)
+    layer.advance_storage(phi, flow, 0.5)[3].backward()
+    assert float(flow.grad[0]) == pytest.approx(0.5 / (2 * (4.15) ** 0.5), rel=1e-12)
 
 
 def test_forward_euler_refusals():

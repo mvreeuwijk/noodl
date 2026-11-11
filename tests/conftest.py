@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+
 import pytest
 import torch
 
@@ -92,3 +94,29 @@ def pytest_runtest_makereport(item, call):
     report = yield
     report.user_properties = [(k, _builtin(v)) for k, v in report.user_properties]
     return report
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _private_scratch_directory(tmp_path_factory):
+    """Give every test process its own TMP/TEMP/TMPDIR for EPANET's scratch files.
+
+    MEASURED: EPANET 2.2 (the `epanet22.dll` inside `wntr`, driven by
+    `wntr.sim.EpanetSimulator`) leaves scratch files `enN` in the directory named by `TMP`,
+    and under `pytest -n 4` with one shared `TMP` a run read another network's results:
+    heads off by ~100 m in `test_two_loop_heads_and_flows`, a different test failing in about
+    every second run, each one passing alone; with a per-worker directory none has failed.
+    The likely mechanism, not confirmed in the DLL: the file names come from a counter that
+    restarts in each process, so two workers open the same file. (The tests' own
+    `file_prefix` already lives in their `tmp_path`.)
+    """
+    names = ("TMP", "TEMP", "TMPDIR")
+    saved = {name: os.environ.get(name) for name in names}
+    scratch = str(tmp_path_factory.mktemp("epanet-tmp"))
+    for name in names:
+        os.environ[name] = scratch
+    yield
+    for name, value in saved.items():
+        if value is None:
+            os.environ.pop(name, None)
+        else:
+            os.environ[name] = value

@@ -201,8 +201,9 @@ def _building_cases() -> dict[type, Callable[[], list[Case]]]:
 
 
 def _water_cases() -> dict[type, Callable[[], list[Case]]]:
-    from noodl.apps.water.demand import PressureDrivenDemand
+    from noodl.apps.water.demand import EmitterOutflow, PressureDrivenDemand
     from noodl.apps.water.elements import (
+        ChezyManning,
         CompositeDarcyWeisbach,
         HazenWilliams,
         MinorLoss,
@@ -215,12 +216,27 @@ def _water_cases() -> dict[type, Callable[[], list[Case]]]:
                  _grid(2, -12, 3)),
             Case(HazenWilliams(_t([1000.0]), _t([0.3]), _t([100.0]), minor_loss=_t([2.0])),
                  _grid(1, -12, 3)),
+            # EPANET's rounded LPS factor, with and without its 0.02517 K / d^4 minor loss
+            Case(HazenWilliams(_t([1000.0, 300.0]), _t([0.3, 0.15]), _t([100.0, 130.0]),
+                               cfs_per_m3s=1000.0 / 28.317), _grid(2, -12, 3)),
+            Case(HazenWilliams(_t([1000.0]), _t([0.3]), _t([100.0]), minor_loss=_t([2.0]),
+                               cfs_per_m3s=1000.0 / 28.317), _grid(1, -12, 3)),
         ],
+        ChezyManning: lambda: [
+            Case(ChezyManning(_t([1000.0, 300.0]), _t([0.3, 0.15]), _t([0.011, 0.013])),
+                 _grid(2, -12, 3)),
+            Case(ChezyManning(_t([1000.0]), _t([0.3]), _t([0.011]), minor_loss=_t([2.0])),
+                 _grid(1, -12, 3)),
+        ],
+        EmitterOutflow: lambda: [Case(
+            EmitterOutflow(torch.tensor([0, 1]), _t([0.002, 0.004]), _t([0.0, 5.0])),
+            _grid(2, -6, 1.6, centre=5.0))],
         MinorLoss: lambda: [Case(MinorLoss(_t([3.0]), _t([0.2])), _grid(1, -12, 3))],
         PumpCurve: lambda: [
             Case(PumpCurve(_t([40.0]), _t([2000.0])), _grid(1, -9, 2.5, centre=-40.0)),
-            Case(PumpCurve(_t([40.0]), _t([2000.0]), speed=_t([0.8]), status_key="st"),
-                 _grid(1, -9, 2.5, centre=-25.6), {"st": _t([1.0])}),
+            Case(PumpCurve(_t([40.0]), _t([2000.0]), links=slice(0, 1)),
+                 _grid(1, -9, 2.5, centre=-25.6),
+                 {"water.status": _t([1.0]), "water.setting": _t([0.8])}),
         ],
         CompositeDarcyWeisbach: lambda: [
             Case(CompositeDarcyWeisbach(_t([500.0]), _t([0.25]), _t([0.0005])),
@@ -465,6 +481,7 @@ def _storage_cases() -> dict[type, Callable[[], list[StorageCase]]]:
     from noodl.apps.building_physics.modelica.storage import ZoneStorage, thermo
     from noodl.apps.building_physics.prj import ZoneAirMassChange
     from noodl.apps.sewer.dynwave import JunctionStorage
+    from noodl.apps.water.tanks import TankVolumeCurve
     from noodl.elements import medium
     from noodl.storage import LinearStorage
 
@@ -509,6 +526,12 @@ def _storage_cases() -> dict[type, Callable[[], list[StorageCase]]]:
             StorageCase(LinearStorage([0], 2.5), _grid(1), _t([0.3]), _t([0.01])),
             StorageCase(LinearStorage([0, 1], _t([1e-6, 40.0]), learnable=True),
                         _grid(2, -8, 3), _t([1.0, -2.0]), _t([0.0, 0.5])),
+        ],
+        # EPANET's volume curve: on its segments and beyond both ends (slope 0 there)
+        TankVolumeCurve: lambda: [
+            StorageCase(TankVolumeCurve([0, 1], _t([0.0, 0.5]), [[0.0, 1.0, 3.0], [0.0, 2.5]],
+                                        [[0.0, 2.0, 10.0], [1.0, 6.0]], head_scale=1.5),
+                        _grid(2, -6, 0.5, centre=2.5), _t([2.0, 2.0]), _t([0.0, 0.1])),
         ],
         JunctionStorage: lambda: [
             StorageCase(JunctionStorage(torch.tensor([0, 1]), bed=_t([1.0, 1.0]), bed_area=0.5),

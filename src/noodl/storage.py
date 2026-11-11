@@ -30,6 +30,10 @@ Which method to write:
   an override that is not the true derivative (a Newton aid) declares
   `exact_slope = False`, and the differentiable solve then differentiates `rate` instead.
 
+`potential_of`, the inverse of `amount`, is read only under `scheme="forward_euler"`, where a
+storage at a boundary node is moved after the solve: one that gives it moves to
+`potential_of(amount(phi_start) + dt * flow)`, a `LinearStorage` by `dt * flow / C`.
+
 `initial` gives the potential a node is held at in the consistent initial point
 (`mode="initial"`) of a Kirchhoff layer: that node's flow balance is
 replaced by `phi = initial`, and the flow into its storage is whatever balances the node
@@ -112,6 +116,17 @@ class NodeStorage(torch.nn.Module):
                 )
             (grad,) = torch.autograd.grad(value.sum(), leaf)
         return grad
+
+    def potential_of(self, amount: Tensor, drivers: Mapping | None = None) -> Tensor | None:
+        """The potential at which each node stores `amount`, the inverse of `amount`, or
+        `None` (the default) when this storage gives none.
+
+        Only `scheme="forward_euler"` reads it: a storage at a boundary node that gives it
+        is moved to `potential_of(amount(phi_start) + dt * flow)` (EPANET's `V += q dt;
+        H = tankgrade(V)`, `KirchhoffLayer.advance_storage`), which is how a storage whose
+        capacity changes with the potential steps there. A `LinearStorage` gives none and
+        moves by `dt * flow / C`."""
+        return None
 
     def initial(self, drivers: Mapping | None = None) -> Tensor | None:
         """The potential each node is held at in `mode="initial"`, or `None` (the default)

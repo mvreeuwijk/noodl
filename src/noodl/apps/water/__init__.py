@@ -1,27 +1,38 @@
 """A differentiable, pressurised water distribution network with EPANET 2.2 as the reference
 implementation."""
 
-from noodl.apps.water.demand import PressureDrivenDemand
+from noodl.apps.water.controls import ACTIVE, CLOSED, OPEN, Action, Control, Premise, Rule
+from noodl.apps.water.demand import EmitterOutflow, PressureDrivenDemand
 from noodl.apps.water.elements import (
     DW_SI,
-    EPANET_QCF,
     HW_SI,
     BreakerValve,
+    ChezyManning,
     CompositeDarcyWeisbach,
+    ConstantPowerPump,
     EpanetDarcyWeisbach,  # noqa: F401  (alias)
     FlowControlledPipe,
     FlowControlledPump,
+    FlowControlValve,
     G,
     GeneralPurposeValve,
     HazenWilliams,
     MinorLoss,
+    PiecewisePumpCurve,
+    PressureReducingValve,
+    PressureSustainingValve,
     PumpCurve,
+    ShutLinks,
+    ThrottleValve,
     composite_friction_factor,
     epanet_friction_factor,  # noqa: F401  (alias)
     three_point_curve,
 )
-from noodl.apps.water.inp import FLOW_UNITS, read_epanet_inp
+from noodl.apps.water.energy import PumpEnergy
+from noodl.apps.water.inp import read_epanet_inp
 from noodl.apps.water.network import (
+    Emitter,
+    EnergyOptions,
     Junction,
     Pump,
     Reservoir,
@@ -30,30 +41,45 @@ from noodl.apps.water.network import (
     WaterNetwork,
     WaterOptions,
     WaterPipe,
+    apply_rules,
     build_model,
     initial_drivers,
     initial_state,
+    link_states,
+    power_curve,
     tank_inflow,
     tank_levels,
     twoloop,
-    water_event_step,
     water_steady,
     water_step,
 )
 from noodl.apps.water.report import link_table, pressure_head, to_kilopascal
-from noodl.apps.water.tanks import Control, TankLevels
+from noodl.apps.water.rules import evaluate_rules, take_actions
+from noodl.apps.water.simulate import WaterResults, pattern_factor, water_run
+from noodl.apps.water.tanks import LinkData, TankLevels, TankVolumeCurve
+from noodl.apps.water.units import EPANET_QCF, FLOW_UNITS
 
 # Reference-model aliases (the imports marked `# noqa: F401  (alias)`) are importable from
 # here but kept out of `__all__`: an alias is named in its target's docstring, not catalogued.
 __all__ = [
-    "DW_SI", "EPANET_QCF", "FLOW_UNITS", "G", "HW_SI", "BreakerValve", "Control",
-    "CompositeDarcyWeisbach", "FlowControlledPipe", "FlowControlledPump",
-    "GeneralPurposeValve", "HazenWilliams",
-    "Junction",
-    "MinorLoss", "PressureDrivenDemand", "Pump", "PumpCurve", "Reservoir", "Tank",
-    "TankLevels", "Valve", "WaterNetwork", "WaterOptions", "WaterPipe",
-    "build_model", "initial_drivers", "initial_state", "link_table", "pressure_head",
-    "composite_friction_factor", "read_epanet_inp", "tank_inflow", "tank_levels",
-    "three_point_curve",
-    "to_kilopascal", "twoloop", "water_event_step", "water_step", "water_steady",
+    "ACTIVE", "CLOSED", "DW_SI", "EPANET_QCF", "FLOW_UNITS", "G", "HW_SI", "OPEN", "Action",
+    "BreakerValve", "ChezyManning", "Control", "CompositeDarcyWeisbach", "ConstantPowerPump",
+    "Emitter", "EmitterOutflow",
+    "EnergyOptions",
+    "FlowControlledPipe", "FlowControlledPump", "FlowControlValve",
+    "GeneralPurposeValve", "HazenWilliams", "PressureReducingValve",
+    "PressureSustainingValve",
+    "Junction", "LinkData",
+    "MinorLoss", "PiecewisePumpCurve", "Premise", "PressureDrivenDemand", "Pump", "PumpCurve",
+    "PumpEnergy",
+    "Reservoir", "Rule", "ShutLinks",
+    "Tank",
+    "TankLevels", "TankVolumeCurve", "ThrottleValve", "Valve", "WaterNetwork", "WaterOptions",
+    "WaterPipe", "WaterResults",
+    "apply_rules", "build_model", "initial_drivers", "initial_state", "link_states",
+    "link_table", "pressure_head",
+    "composite_friction_factor", "evaluate_rules", "pattern_factor", "power_curve",
+    "read_epanet_inp", "tank_inflow", "tank_levels",
+    "take_actions", "three_point_curve",
+    "to_kilopascal", "twoloop", "water_run", "water_step", "water_steady",
 ]

@@ -261,7 +261,7 @@ the cases rather than leaving you to discover them.
   calibrated constant, not a parameter to fit.
 - **For a tank's area.** In the water application, tank area is not reached by a single
   `water_steady` call — only the tank's head enters the steady solve. Gradients with respect to
-  it flow through the forward-Euler move of `water_event_step`, not through the steady state.
+  it flow through the forward-Euler move of each `water_run` step, not through the steady state.
 
 ## Verification
 

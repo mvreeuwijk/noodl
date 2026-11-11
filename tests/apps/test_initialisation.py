@@ -44,7 +44,7 @@ def test_water_tank_levels_and_demands_by_name():
     model, state0, drivers0 = water.build_model(net)
     # "water.tank_level" is an input key of initial_state only: the level is written into
     # the tank node's head, "water.phi"
-    tanks = [t.name for t in model.tank_closure.tanks]
+    tanks = [t.name for t in model.control_closure.tanks]
     state = water.initial_state(model, values={"water.tank_level": {tanks[0]: 30.0}})
     assert "water.tank_level" not in state
     assert float(water.tank_levels(model, state)[0]) == 30.0

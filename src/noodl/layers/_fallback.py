@@ -77,14 +77,19 @@ class _FallbackMixin:
           would cancel its diagonal). A row with a zero diagonal (an ideal source; a node
           whose every edge is a flow unknown) gets none. The stages are a starting point and
           carry no gradient; the solve that follows is this one's own, so the gradient is at
-          the exact root.
+          the exact root. When the ramp from the linear guess does not converge and the
+          failed solve had a warm start (`phi0` or `q0`), the ramp runs once more from that
+          start: a linear guess may be formed and still settle nowhere (a water network in
+          its resistance form at zero flow carries the head difference between its reservoir
+          and its tank over the `RQtol` slope floor, a flow of 1e7 m3/s).
 
         `diagnostics`, when given, then also receives `"fallback"`, the rung that converged
         (`None` if the first solve did, or no rung did), and `"fallback_iterations"`, the
-        storage stages' Newton iterations (0 for `"linear_guess"`); the other entries are
-        the converged solve's. When no rung converges, the first failure stands: its error
-        is raised (naming the rungs tried and the last one's error), or, under
-        `on_failure="return"`/`"return_primal"`, its result and diagnostics are returned.
+        storage stages' Newton iterations, both ramps' when the second was needed (0 for
+        `"linear_guess"`); the other entries are the converged solve's. When no rung
+        converges, the first failure stands: its error is raised (naming the rungs tried and
+        the last one's error), or, under `on_failure="return"`/`"return_primal"`, its result
+        and diagnostics are returned.
         Only non-convergence (`ConvergenceError`) of the first solve climbs the ladder; every
         other error of it passes through. A rung that does not converge, or whose linear guess
         is singular, not grounded or cannot be solved, has failed, and the next is tried;
@@ -112,31 +117,42 @@ class _FallbackMixin:
         # a layer without flow unknowns (which has none).
         rung_start = "zeros" if report.get("held") else "linear"
         last_error = None
+        warm = phi0 is not None or q0 is not None
         for rung in rungs:
             if rung == "linear_guess" and report.get("start") == rung_start:
                 continue
-            ramp: dict = {}
             ramped = rung == "storage_ramp"
-            try:
-                # the storage ramp falls back to the failed solve's own start when the
-                # linear guess cannot be formed (`_solve`)
-                out = self._solve(phi_boundary, drivers, sources, phi0 if ramped else None,
-                                  q0=q0 if ramped else None, diagnostics=diagnostics,
-                                  _start="ramp" if ramped else "linear",
-                                  _report=ramp, **kwargs)
-            except (ConvergenceError, SingularSystemError, GroundingError,
-                    LinearSolveError) as exc:
-                # a rung that does not converge, whose linear guess is singular or not
-                # grounded, or whose linear guess's solve does not converge, has failed; the
-                # first failure still stands. Any other error (a law's own bug, say) is not
-                # a failure of the rung and passes through.
-                last_error = exc
-                continue
-            if diagnostics is None or _converged(diagnostics):
-                if diagnostics is not None:
-                    diagnostics.update(fallback=rung,
-                                       fallback_iterations=ramp.get("ramp_iterations", 0))
-                return out
+            # the storage ramp falls back to the failed solve's own start when the linear
+            # guess cannot be formed (`_solve`); when the guess is formed but the ramp from
+            # it does not converge, the ramp runs again from that own start
+            starts = ["ramp", "ramp_warm"] if ramped and warm else [
+                "ramp" if ramped else "linear"]
+            iterations = 0
+            for start in starts:
+                ramp: dict = {}
+                try:
+                    out = self._solve(phi_boundary, drivers, sources,
+                                      phi0 if ramped else None, q0=q0 if ramped else None,
+                                      diagnostics=diagnostics, _start=start, _report=ramp,
+                                      **kwargs)
+                except (ConvergenceError, SingularSystemError, GroundingError,
+                        LinearSolveError) as exc:
+                    # a rung that does not converge, whose linear guess is singular or not
+                    # grounded, or whose linear guess's solve does not converge, has failed;
+                    # the first failure still stands. Any other error (a law's own bug, say)
+                    # is not a failure of the rung and passes through.
+                    last_error = exc
+                    iterations += ramp.get("ramp_iterations", 0)
+                    if ramp.get("ramp_from") == "warm":
+                        break   # it settled from the warm start already
+                    continue
+                iterations += ramp.get("ramp_iterations", 0)
+                if diagnostics is None or _converged(diagnostics):
+                    if diagnostics is not None:
+                        diagnostics.update(fallback=rung, fallback_iterations=iterations)
+                    return out
+                if ramp.get("ramp_from") == "warm":
+                    break
         if first_error is not None:
             if "singular" in report:
                 # the rank test of the first solve, diagnosed once every rung has failed

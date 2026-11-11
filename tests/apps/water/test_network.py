@@ -8,9 +8,9 @@ from pathlib import Path
 import pytest
 import torch
 
+from noodl.apps.water.controls import CLOSED, OPEN, Control
 from noodl.apps.water.inp import read_epanet_inp
 from noodl.apps.water.network import (
-    Control,
     Junction,
     Pump,
     Reservoir,
@@ -21,6 +21,8 @@ from noodl.apps.water.network import (
     WaterPipe,
     build_model,
     initial_state,
+    link_states,
+    power_curve,
     twoloop,
     water_steady,
 )
@@ -93,11 +95,21 @@ def test_a_non_positive_pipe_property_is_refused(length, diameter, roughness):
 
 
 @pytest.mark.parametrize("status", ["CLOSED", "CV"])
-def test_a_closed_pipe_or_check_valve_is_refused(status):
-    with pytest.raises(ValueError, match="status-switching"):
-        _minimal(
-            pipes=(WaterPipe("P1", "R1", "J1", 500.0, 0.3, 130.0, status=status),)
-        ).validate()
+def test_a_closed_pipe_or_check_valve_is_valid(status):
+    _minimal(
+        pipes=(WaterPipe("P1", "R1", "J1", 500.0, 0.3, 130.0, status=status),)
+    ).validate()
+
+
+@pytest.mark.parametrize("link, value, match", [
+    ("P1", "AJAR", "only OPEN, CLOSED, ACTIVE"),
+    ("P1", "ACTIVE", "only a valve can take"),
+    ("PU1", -0.5, "a speed is not negative"),
+])
+def test_an_unmodelled_status_line_is_refused(link, value, match):
+    with pytest.raises(ValueError, match=match):
+        _minimal(pumps=(Pump("PU1", "R1", "J1", "C1"),), curves={"C1": ((0.004, 10.0),)},
+                 initial_status={link: value}).validate()
 
 
 def test_an_unknown_pipe_status_is_refused():
@@ -107,11 +119,10 @@ def test_an_unknown_pipe_status_is_refused():
         ).validate()
 
 
-def test_a_constant_power_pump_is_refused():
-    with pytest.raises(ValueError, match="constant-POWER pump"):
-        _minimal(
-            pumps=(Pump("PU1", "R1", "J1", None, power=50.0),)
-        ).validate()
+def test_a_constant_power_pump_needs_a_positive_power():
+    _minimal(pumps=(Pump("PU1", "R1", "J1", None, power=50.0),)).validate()
+    with pytest.raises(ValueError, match="needs a positive power"):
+        _minimal(pumps=(Pump("PU1", "R1", "J1", None, power=0.0),)).validate()
 
 
 def test_a_pump_with_no_curve_and_no_power_is_refused():
@@ -124,20 +135,73 @@ def test_a_pump_naming_an_unknown_curve_is_refused():
         _minimal(pumps=(Pump("PU1", "R1", "J1", "C9"),)).validate()
 
 
-def test_a_multi_point_pump_curve_is_refused():
-    with pytest.raises(ValueError, match="which is out of scope"):
-        _minimal(
-            pumps=(Pump("PU1", "R1", "J1", "C1"),),
-            curves={"C1": ((0.0, 100.0), (0.05, 80.0), (0.1, 40.0), (0.15, 0.0))},
-        ).validate()
+def test_a_multipoint_pump_curve_needs_falling_heads_and_rising_flows():
+    """EPANET refuses a segmented pump curve whose heads do not fall (error 227) or whose
+    flows do not rise (error 230)."""
+    pumps = (Pump("PU1", "R1", "J1", "C1"),)
+    _minimal(pumps=pumps, curves={"C1": ((0.0, 100.0), (0.05, 80.0), (0.1, 40.0),
+                                         (0.15, 0.0))}).validate()
+    for points in (((0.0, 100.0), (0.05, 80.0), (0.1, 80.0), (0.15, 0.0)),
+                   ((0.0, 100.0), (0.05, 80.0), (0.05, 40.0), (0.15, 0.0))):
+        with pytest.raises(ValueError, match="flows rising and its heads falling"):
+            _minimal(pumps=pumps, curves={"C1": points}).validate()
+
+
+@pytest.mark.parametrize("points, match", [
+    (((0.0, 30.0), (0.1, 31.0), (0.2, 10.0)), "EPANET error 227"),     # heads rise
+    (((0.0, 30.0), (0.1, 10.0), (0.1000001, 9.0)), "EPANET error 227"),  # flows too close
+    (((0.0, 30.0), (0.1, 29.99999), (0.2, 0.0)), r"exponent .* outside \(0, 20\]"),
+])
+def test_a_three_point_curve_without_a_power_fit_is_refused(points, match):
+    """EPANET's `powercurve` (`input3.c`) fails, and EPANET stops with error 227."""
+    with pytest.raises(ValueError, match=match):
+        _minimal(pumps=(Pump("PU1", "R1", "J1", "C1"),), curves={"C1": points}).validate()
+
+
+def test_a_three_point_curve_takes_its_fitted_exponent():
+    """``n = ln((h0 - h2) / (h0 - h1)) / ln(q2 / q1)``, ``r = (h0 - h1) / q1^n``
+    (`input3.c`, `powercurve`)."""
+    h0, r, n = power_curve(((0.0, 104.0), (2000.0, 92.0), (4000.0, 63.0)))
+    assert n == pytest.approx(math.log(41 / 12) / math.log(2), rel=1e-15)
+    assert (h0, r) == pytest.approx((104.0, 12.0 / 2000.0**n), rel=1e-15)
+
+
+@pytest.mark.parametrize("kind, u, v", [("PRV", "J1", "R1"), ("PSV", "R1", "J1"),
+                                        ("PRV", "J1", "T1"), ("PSV", "T1", "J1")])
+def test_a_pressure_valve_controlling_a_reservoir_or_tank_is_refused(kind, u, v):
+    """A PRV holds its end node's head, a PSV its start node's: a reservoir's or tank's
+    head is fixed already (EPANET refuses either, error 219)."""
+    tanks = (Tank("T1", 10.0, 2.0, 0.0, 5.0, 10.0),)
+    held = v if kind == "PRV" else u
+    with pytest.raises(ValueError, match=rf"{kind} 'V1' controls the head of '{held}'"):
+        _minimal(tanks=tanks, valves=(Valve("V1", u, v, 0.2, kind, 30.0),)).validate()
 
 
 @pytest.mark.parametrize("kind", ["PRV", "PSV"])
-def test_the_status_switching_valves_are_refused(kind):
-    with pytest.raises(ValueError, match="out of scope"):
-        _minimal(
-            valves=(Valve("V1", "R1", "J1", 0.2, kind, 30.0),)
-        ).validate()
+def test_a_pressure_valve_needs_a_non_negative_setting(kind):
+    junctions = (Junction("J1", 0.0, 0.005), Junction("J2", 0.0, 0.0))
+    with pytest.raises(ValueError, match=rf"{kind} 'V1' needs a pressure setting"):
+        _minimal(junctions=junctions,
+                 valves=(Valve("V1", "J1", "J2", 0.2, kind, -1.0),)).validate()
+
+
+@pytest.mark.parametrize("first, second", [
+    (("PRV", "J1", "J2"), ("PRV", "J3", "J2")),   # two PRVs sharing their end node
+    (("PRV", "J1", "J2"), ("PRV", "J2", "J3")),   # two PRVs in series
+    (("PSV", "J1", "J2"), ("PSV", "J1", "J3")),   # two PSVs sharing their start node
+    (("PSV", "J1", "J2"), ("PSV", "J3", "J1")),   # two PSVs in series
+    (("PRV", "J1", "J2"), ("PSV", "J2", "J3")),   # a PSV starting at a PRV's end
+    (("FCV", "J1", "J2"), ("PSV", "J2", "J3")),   # a PSV starting at an FCV's end
+    (("FCV", "J2", "J3"), ("PRV", "J1", "J2")),   # a PRV ending at an FCV's start
+])
+def test_pressure_valves_sharing_a_controlled_node_are_refused(first, second):
+    """EPANET 2.2's own refusals (`valvecheck`, error 220): each pair holds one node's head
+    twice, or a head and a flow through one node. The error names both valves."""
+    junctions = tuple(Junction(n, 0.0, 0.0) for n in ("J1", "J2", "J3"))
+    valves = (Valve("V1", *first[1:], 0.2, first[0], 1.0),
+              Valve("V2", *second[1:], 0.2, second[0], 1.0))
+    with pytest.raises(ValueError, match=r"'V2'.*'V1'"):
+        _minimal(junctions=junctions, valves=valves).validate()
 
 
 def test_a_pbv_needs_a_non_negative_setting():
@@ -146,7 +210,7 @@ def test_a_pbv_needs_a_non_negative_setting():
 
 
 @pytest.mark.parametrize("curves, match", [
-    ({}, "has no \[CURVES\] entry"),
+    ({}, r"has no \[CURVES\] entry"),
     ({"HL": ((0.0, 0.0),)}, "at least two points"),
     ({"HL": ((0.0, 0.0), (0.0, 1.0))}, "increasing flows"),
 ])
@@ -162,21 +226,25 @@ def test_an_unknown_valve_type_is_refused():
 
 
 def test_an_unmodelled_headloss_formula_is_refused():
-    with pytest.raises(ValueError, match="only H-W and D-W"):
-        _minimal(headloss="C-M").validate()
+    with pytest.raises(ValueError, match="Z-Q"):
+        _minimal(headloss="Z-Q").validate()
 
 
-def test_a_control_on_a_non_tank_is_refused():
-    with pytest.raises(ValueError, match="which is not a tank"):
-        _minimal(controls=(Control("PU1", "OPEN", "J1", "BELOW", 1.0),)).validate()
+def test_every_control_form_is_accepted():
+    """Time, clock-time, tank, junction and (with a pipe or a pump as its link) every
+    control the reader reads is modelled."""
+    _minimal(controls=(Control("P1", OPEN, None, "node", "J1", False, 1.0),
+                       Control("P1", 0, None, "time", value=3600.0),
+                       Control("P1", 0, None, "clocktime", value=21600.0))).validate()
+    _minimal(
+        tanks=(Tank("T1", 10.0, 5.0, 1.0, 9.0, 3.0),),
+        controls=(Control("P1", OPEN, None, "node", "T1", False, 1.0),),
+    ).validate()
 
 
-def test_a_control_on_a_non_pump_is_refused():
-    with pytest.raises(ValueError, match="which is not a pump"):
-        _minimal(
-            tanks=(Tank("T1", 10.0, 5.0, 1.0, 9.0, 3.0),),
-            controls=(Control("P1", "OPEN", "T1", "BELOW", 1.0),),
-        ).validate()
+def test_a_numeric_setting_on_a_pipe_is_refused():
+    with pytest.raises(ValueError, match="not a pipe"):
+        _minimal(controls=(Control("P1", None, 0.5, "time", value=0.0),)).validate()
 
 
 # ---------------------------------------------------------------------- builder
@@ -188,7 +256,8 @@ def test_the_builder_returns_a_model_a_state_and_drivers():
     assert model.link_names == ["P1", "P2", "P3", "P4", "P5", "P6", "P7", "P8"]
     assert [model.net.nodes[i] for i in model.kirchhoff["water"].bound] == ["R1"]
     assert set(state) == {"water.phi", "water.q"}
-    assert set(drivers) == {"water.phi_boundary", "water.sources"}
+    assert set(drivers) == {"water.phi_boundary", "water.sources", "water.status",
+                            "water.setting", "water.one_way"}
     assert float(drivers["water.phi_boundary"][0]) == 50.0
     assert model.head_scale == 1.0
 
@@ -302,8 +371,16 @@ def test_a_junction_touching_no_pipe_is_refused_for_quality():
 
 
 def test_an_unmodelled_headloss_argument_is_refused():
-    with pytest.raises(ValueError, match="must be 'H-W' or 'D-W'"):
-        build_model(twoloop(), headloss="C-M")
+    with pytest.raises(ValueError, match="must be 'H-W', 'D-W' or 'C-M'"):
+        build_model(twoloop(), headloss="Z-Q")
+
+
+def test_chezy_manning_refuses_a_non_default_viscosity_by_name():
+    net = dataclasses.replace(twoloop(), headloss="C-M", options=WaterOptions(viscosity=0.9))
+    with pytest.raises(ValueError, match="Chezy-Manning does not take the fluid's viscosity"):
+        build_model(net)
+    # a non-default specific gravity is accepted: EPANET uses it for pressures only
+    build_model(dataclasses.replace(net, options=WaterOptions(specific_gravity=0.9)))
 
 
 # --------------------------------------------------------------------- [OPTIONS]
@@ -333,10 +410,13 @@ def test_a_non_default_viscosity_on_hazen_williams_is_refused():
         build_model(net)
 
 
-def test_a_non_default_specific_gravity_on_hazen_williams_is_refused():
+def test_a_non_default_specific_gravity_on_hazen_williams_moves_no_head():
+    """EPANET uses SPECIFIC GRAVITY on H-W only to turn a pressure into a head, which the
+    reader does; a network built in SI heads solves the same whatever it says."""
+    plain = water_steady(*build_model(twoloop()))
     net = dataclasses.replace(twoloop(), options=WaterOptions(specific_gravity=1.1))
-    with pytest.raises(ValueError, match="SPECIFIC GRAVITY"):
-        build_model(net)
+    heavy = water_steady(*build_model(net))
+    torch.testing.assert_close(heavy["water.phi"], plain["water.phi"], rtol=0, atol=0)
 
 
 def _hand_head_losses(q, length, diameter, eps, nu, g=9.80665):
@@ -478,13 +558,19 @@ def test_an_unknown_friction_law_is_refused(friction):
 
 
 def test_a_files_flow_units_select_epanets_rounded_cfs_factor(tmp_path):
-    """An LPS file reaches EPANET as q / 28.317 cfs, not q / 28.3168466."""
+    """An LPS file reaches EPANET as q / 28.317 cfs, not q / 28.3168466: both the D-W and the
+    H-W pipe laws take that factor; a network without a flow unit keeps the exact one."""
     net = dataclasses.replace(
         twoloop(), headloss="D-W", options=WaterOptions(flow_units="LPS")
     )
     model, _, _ = build_model(net)
     pipe = model.kirchhoff["water"]._laws[0].pipe   # the resistance form wraps it
     assert pipe.cfs_per_m3s == pytest.approx(1000.0 / 28.317, rel=1e-15)
+    model, _, _ = build_model(dataclasses.replace(net, headloss="H-W"))
+    pipe = model.kirchhoff["water"]._laws[0].pipe
+    assert pipe.cfs_per_m3s == pytest.approx(1000.0 / 28.317, rel=1e-15)
+    model, _, _ = build_model(twoloop())         # no file flow unit: the exact conversion
+    assert model.kirchhoff["water"]._laws[0].pipe.cfs_per_m3s is None
 
 
 def test_initial_state_refuses_an_unknown_quantity():
@@ -540,7 +626,7 @@ def test_tank_inflow_is_the_net_inflow_at_the_tank():
     inflow = -layer.net_outflow(final["water.q"])[..., layer.bound]
     # the reservoir supplies the whole demand
     assert float(inflow[0]) == pytest.approx(-0.045, abs=1e-12)
-    assert model.tank_closure is None
+    assert model.control_closure is None
 
 
 # --------------------------------------------------------- q_max is refused by name
@@ -594,7 +680,7 @@ def test_a_pump_feeding_pressure_driven_demand_converges(pipe_form):
     phi, q = out["water.phi"], out["water.q"]
     # the pump lifts B above A by its own curve's gain at its own flow
     pump = model.kirchhoff["water"].law_for("pump")[0].pump
-    gain = float(pump.head_gain(q[2:3], 0.0, 0.0))
+    gain = float(pump.head_gain(q[2:3]))
     assert float(phi[1] - phi[0]) == pytest.approx(gain, rel=1e-10)
     # C (p ~ 59.96 m) is short of its 60 m required pressure: the demand really is limited
     source = model.kirchhoff["water"].withdrawals[0]
@@ -604,10 +690,11 @@ def test_a_pump_feeding_pressure_driven_demand_converges(pipe_form):
 
 
 @pytest.mark.parametrize("pipe_form", ["flow", "potential"])
-def test_a_pump_held_beyond_shut_off_carries_only_the_closed_link_leak(pipe_form):
-    """R1 (50 m) - PUMP (shut-off 13.3 m) - J - pipe - R2 (100 m): the pump cannot lift
-    to R2, so it is shut, as EPANET closes it, with EPANET's closed-link leak
-    `excess / CBIG` (36.7 m over CBIG = 1e8 ft/cfs) and not a reverse flow."""
+def test_a_pump_held_beyond_shut_off_is_shut_with_no_flow(pipe_form):
+    """R1 (50 m) - PUMP (shut-off 13.3334 m) - J - pipe - R2 (100 m): the pump cannot lift
+    to R2, so it is shut, as EPANET closes it (`pumpstatus`, ``XHEAD``): exactly zero flow
+    (EPANET's closed link leaks `excess / CBIG`, 3e-8 m3/s here), J at R2's head, and the
+    pump's state CLOSED."""
     net = WaterNetwork(
         junctions=(Junction("J", 0.0, 0.0),),
         reservoirs=(Reservoir("R1", 50.0), Reservoir("R2", 100.0)),
@@ -616,10 +703,43 @@ def test_a_pump_held_beyond_shut_off_carries_only_the_closed_link_leak(pipe_form
     )
     model, state, drivers = build_model(net, pipe_form=pipe_form)
     out = water_steady(model, state, drivers)
-    excess = 100.0 - 50.0 - 40.0 / 3.0
-    cbig = 1e8 * 0.3048 * (1.0 / 0.3048**3)
-    assert float(out["water.q"][-1]) == pytest.approx(-excess / cbig, rel=1e-6)
+    assert float(out["water.q"][-1]) == 0.0
     assert float(out["water.phi"][0]) == pytest.approx(100.0, abs=1e-9)
+    assert link_states(model, out, drivers).tolist() == [OPEN, CLOSED]
+
+
+def test_a_pump_at_speed_zero_is_closed():
+    """A speed of 0 in `"water.setting"` closes the pump, as EPANET's `pumpcoeff` does: no
+    flow, state CLOSED, and the junction it alone fed, without demand, held at the limit
+    head of its closed link (the suction side's)."""
+    net = WaterNetwork(
+        junctions=(Junction("J", 0.0, 0.0),),
+        reservoirs=(Reservoir("R1", 50.0),),
+        pumps=(Pump("PU", "R1", "J", "C1"),), curves={"C1": ((0.004, 10.0),)},
+    )
+    model, state, drivers = build_model(net)
+    drivers = {**drivers, "water.setting": torch.zeros(1, dtype=F64)}
+    out = water_steady(model, state, drivers)
+    assert float(out["water.q"][0]) == 0.0
+    assert float(out["water.phi"][0]) == pytest.approx(50.0, abs=1e-12)
+    assert link_states(model, out, drivers).tolist() == [CLOSED]
+
+
+def test_a_zero_demand_junction_fed_only_by_a_pump_sits_at_its_shut_off_head():
+    """With no demand behind it the pump runs at zero flow on its curve (a tie of the
+    no-flow and open rows takes the open one): the junction sits at the suction head plus
+    the shut-off head, and the pump is OPEN, as EPANET reports it (its `pumpstatus` closes
+    a pump only above the shut-off head)."""
+    net = WaterNetwork(
+        junctions=(Junction("J", 0.0, 0.0),),
+        reservoirs=(Reservoir("R1", 50.0),),
+        pumps=(Pump("PU", "R1", "J", "C1"),), curves={"C1": ((0.004, 10.0),)},
+    )
+    model, state, drivers = build_model(net)
+    out = water_steady(model, state, drivers)
+    assert abs(float(out["water.q"][0])) < 1e-12
+    assert float(out["water.phi"][0]) == pytest.approx(50.0 + 1.33334 * 10.0, abs=1e-9)
+    assert link_states(model, out, drivers).tolist() == [OPEN]
 
 
 # ---------------------------------------------------------- quality: constant-tracer invariants
@@ -710,3 +830,81 @@ def test_storage_tanks_with_quality_are_refused_explicitly(pda):
     with pytest.raises(ValueError, match="tank_scheme='backward_euler' with quality"):
         build_model(_tank_device_network("tcv"), quality=0.0, tank_scheme="backward_euler",
                     **kwargs)
+
+
+@pytest.mark.parametrize("scheme, interior", [("forward_euler", False),
+                                              ("backward_euler", True)])
+def test_a_pressure_valve_leaves_the_tank_scheme_alone(scheme, interior):
+    """A PRV's controlled elevations once took the name of the tank-scheme flag in
+    `build_model`, so a network with a PRV and a tank stepped inside the solve held its tank
+    as a boundary node and the layer refused it (MEASURED at 8c2fa66)."""
+    net = _minimal(
+        junctions=(Junction("J1", 0.0, 0.001), Junction("J2", 5.0, 0.0)),
+        tanks=(Tank("T1", 10.0, 2.0, 0.0, 5.0, 10.0),),
+        pipes=(WaterPipe("P1", "R1", "J1", 500.0, 0.3, 130.0),
+               WaterPipe("P2", "J2", "T1", 500.0, 0.3, 130.0)),
+        valves=(Valve("V1", "J1", "J2", 0.2, "PRV", 30.0),),
+    )
+    model, _, _ = build_model(net, tank_scheme=scheme)
+    tank = model.node_names.index("T1")
+    assert (tank in model.kirchhoff["water"].interior.tolist()) is interior
+
+
+@pytest.mark.parametrize("r2", [None, 100.0])
+def test_a_pump_iterate_on_its_floor_tangent_with_reverse_flow_still_converges(r2):
+    """An adversarial first iterate: the pump's flow reversed (-1 L/s, on the RQtol
+    tangent below its floor flow) with ``0 < r < -kappa q``, so THE SELECTION keeps the
+    curve's row and its Newton step is of order ``r / RQtol``. The solve still ends in the
+    state it reaches from its own first iterate: on the curve feeding J's demand (no R2),
+    or shut beyond its shut-off head under R2 at 100 m."""
+    pipes = () if r2 is None else (WaterPipe("P", "J", "R2", 500.0, 0.3, 130.0),)
+    reservoirs = (Reservoir("R1", 50.0),) + (() if r2 is None else (Reservoir("R2", r2),))
+    net = WaterNetwork(junctions=(Junction("J", 0.0, 0.002),), reservoirs=reservoirs,
+                       pipes=pipes, pumps=(Pump("PU", "R1", "J", "C1"),),
+                       curves={"C1": ((0.004, 10.0),)})
+    model, state, drivers = build_model(net)
+    reference = water_steady(model, state, drivers)
+    law, cols = model.kirchhoff["water"].law_for("pump")
+    q0 = torch.tensor([-1e-3], dtype=F64)
+    shut_off = float(law.head_gain(q0, torch.ones(1, dtype=F64)))
+    adversarial = {k: v.clone() for k, v in state.items()}
+    adversarial["water.q"][cols] = q0
+    adversarial["water.phi"][model.node_names.index("J")] = 50.0 + shut_off - 5e-4
+    adversarial["water.phi"][model.node_names.index("R1")] = 50.0
+    r = float(law.residual(torch.tensor([-(shut_off - 5e-4)], dtype=F64), q0, drivers, None))
+    assert 0.0 < r < -float(law.kappa[0]) * float(q0)       # the iterate is the one asked
+    final = water_steady(model, adversarial, drivers)
+    torch.testing.assert_close(final["water.phi"], reference["water.phi"], rtol=0, atol=1e-9)
+    torch.testing.assert_close(final["water.q"], reference["water.q"], rtol=0, atol=1e-12)
+    assert link_states(model, final, drivers).tolist() == link_states(
+        model, reference, drivers).tolist()
+
+
+def test_the_shut_check_valves_reach_only_the_pump_evaluation_they_were_made_for():
+    """`ShutLinks` hands the check valves the pipe law shut to a pump law evaluated with the
+    same drivers mapping (one layer evaluation), and nothing to one evaluated with drivers
+    of its own, which tests its pumps alone."""
+    net = WaterNetwork(
+        junctions=(Junction("J", 0.0, 0.0005), Junction("K", 0.0, 0.0)),
+        reservoirs=(Reservoir("R1", 50.0), Reservoir("R2", 100.0)),
+        pipes=(WaterPipe("P1", "J", "K", 100.0, 0.3, 130.0),
+               WaterPipe("P2", "K", "R2", 100.0, 0.3, 130.0, status="CV")),
+        pumps=(Pump("PU", "R1", "J", "C1"),), curves={"C1": ((0.004, 10.0),)},
+    )
+    model, state, drivers = build_model(net)
+    layer = model.kirchhoff["water"]
+    pipes, pcols = layer.law_for("pipe")
+    pumps, ucols = layer.law_for("pump")
+    # an iterate with P2 flowing backwards and PU beyond its shut-off head: both shut
+    q = torch.tensor([0.0, -0.01, -0.001], dtype=F64)
+    dp_pipes = torch.tensor([0.0, -5.0], dtype=F64)
+    dp_pump = torch.tensor([-60.0], dtype=F64)
+    pipes(dp_pipes, q[pcols], drivers, None)
+    shut = pumps.shut_links.links_for(drivers)
+    assert shut is not None and shut.tolist() == [False, True, False]
+    assert pumps.shut_links.links_for(dict(drivers)) is None
+    # the pump law with its own drivers: its pumps alone, so PU is shut (J looks fed
+    # through P2); with the layer's, P2 is shut too and PU is kept on its curve
+    alone = pumps.states(dp_pump, q[ucols], dict(drivers))
+    joint = pumps.states(dp_pump, q[ucols], drivers)
+    assert alone.tolist() == [CLOSED] and joint.tolist() == [OPEN]

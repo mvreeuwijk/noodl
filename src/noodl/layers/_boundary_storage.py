@@ -11,6 +11,7 @@ from __future__ import annotations
 import torch
 
 from noodl._broadcast import broadcast_shapes
+from noodl.storage import NodeStorage
 
 
 class _BoundaryStorageMixin:
@@ -47,11 +48,12 @@ class _BoundaryStorageMixin:
                     f"only (storage at interior nodes steps with 'backward_euler' or "
                     f"'trapezoidal')"
                 )
-            if not st.linear:
+            if not st.linear and type(st).potential_of is NodeStorage.potential_of:
                 raise ValueError(
                     f"KirchhoffLayer {name!r}: storage {type(st).__name__} at boundary nodes "
-                    f"is not linear; scheme='forward_euler' steps a node by dt * inflow / C "
-                    f"with a constant capacity C (a LinearStorage)"
+                    f"is not linear and gives no potential_of; scheme='forward_euler' steps "
+                    f"a node by dt * inflow / C with a constant capacity C (a LinearStorage), "
+                    f"or to potential_of(amount + dt * inflow)"
                 )
             again = [net.nodes[i] for i in nodes if i in seen]
             if again:
@@ -128,11 +130,14 @@ class _BoundaryStorageMixin:
 
     def advance_storage(self, phi, storage_flow, dt, drivers=None) -> torch.Tensor:
         """The potentials `phi` (full-node) after one forward-Euler step of `dt` of the
-        storage at boundary nodes (`scheme="forward_euler"`): each storage node moves by
-        `dt * storage_flow / C`, with `storage_flow` the flow into every entry over the step
-        (`storage_flows`, `"<name>.storage_flow"`) and `C` the storage's capacity. Every
-        other potential is unchanged. Differentiable in `phi`, `storage_flow`, `dt` and the
-        capacities."""
+        storage at boundary nodes (`scheme="forward_euler"`): each storage node of a linear
+        storage moves by `dt * storage_flow / C`, with `storage_flow` the flow into every
+        entry over the step (`storage_flows`, `"<name>.storage_flow"`) and `C` the
+        storage's capacity; a node of a storage that gives `NodeStorage.potential_of` moves
+        to `potential_of(amount(phi) + dt * storage_flow)`, so that its amount changes by
+        exactly `dt * storage_flow` whatever its capacity does over the step. Every other
+        potential is unchanged. Differentiable in `phi`, `storage_flow`, `dt` and the
+        storages' parameters."""
         if not self._boundary_storage:
             raise ValueError(
                 f"KirchhoffLayer {self.name!r} has no storage at boundary nodes "
@@ -149,17 +154,27 @@ class _BoundaryStorageMixin:
                 f"KirchhoffLayer {self.name!r}: storage_flow must hold one flow per storage "
                 f"entry ({self._n_entries}); got last dimension {storage_flow.shape[-1]}"
             )
-        nodes, moves, offset = [], [], 0
+        nodes, moved, offset = [], [], 0
         for st in self._boundary_storage:
             n = st.nodes.numel()
             start = phi[..., st.nodes]
-            moves.append(dt * storage_flow[..., offset:offset + n]
-                         / st.capacity(start, start, drivers))
+            flow = storage_flow[..., offset:offset + n]
+            if st.linear:
+                moved.append(start + dt * flow / st.capacity(start, start, drivers))
+            else:   # `_check_boundary_storage`: it overrides `potential_of`
+                target = st.potential_of(st.amount(start, drivers) + dt * flow, drivers)
+                if target is None:
+                    raise ValueError(
+                        f"KirchhoffLayer {self.name!r}: storage {type(st).__name__} at "
+                        f"boundary nodes {st.nodes.tolist()} is not linear and its "
+                        f"potential_of returned None; scheme='forward_euler' moves it to "
+                        f"potential_of(amount + dt * inflow), which must be a tensor")
+                moved.append(target)
             nodes.append(st.nodes)
             offset += n
-        move = torch.cat(moves, dim=-1)
+        batch = broadcast_shapes(phi.shape[:-1], *(m.shape[:-1] for m in moved))
+        value = torch.cat([m.expand(batch + m.shape[-1:]) for m in moved], dim=-1)
         idx = torch.cat(nodes)
-        batch = broadcast_shapes(phi.shape[:-1], move.shape[:-1])
         out = phi.expand(batch + phi.shape[-1:]).clone()
-        out[..., idx] = out[..., idx] + move
+        out[..., idx] = value
         return out

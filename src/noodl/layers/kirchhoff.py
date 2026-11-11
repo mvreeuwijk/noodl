@@ -207,9 +207,11 @@ class KirchhoffLayer(
     every call (`Model` passes the state's `"<name>.phi"`); `"<name>.phi_boundary"` gives
     the other boundary nodes only (`prescribed`). The step then moves
     it by `dt * inflow / C` (`advance_storage`), `inflow` being the flow the solve delivers
-    to the node (`storage_flows`) and `C` the storage's capacity. Only a linear storage (a constant
-    capacity, `LinearStorage`) is accepted there, and only one entry per node. Such a
-    layer's solve takes no step and does not depend on `dt`.
+    to the node (`storage_flows`) and `C` the storage's capacity, or, for a storage that is
+    not linear, to `potential_of(amount + dt * inflow)` (`NodeStorage.potential_of`). Only a
+    linear storage (a constant capacity, `LinearStorage`) or one that gives `potential_of` is
+    accepted there, and only one entry per node. Such a layer's solve takes no step and does
+    not depend on `dt`.
 
     `scheme` (default `"trapezoidal"`; `"backward_euler"` the other) is the time-integration
     scheme of a transient step of a layer with dynamic laws or storage, one of `SCHEMES`
@@ -274,6 +276,12 @@ class KirchhoffLayer(
             if el.kind in seen_kinds:
                 raise ValueError(f"duplicate law kind {el.kind!r} in layer {name!r}")
             seen_kinds.add(el.kind)
+            if el.reads_heads and (not isinstance(el, ImplicitLaw) or el.ports != 1):
+                raise TypeError(
+                    f"KirchhoffLayer {name!r}: law {type(el).__name__} (kind {el.kind!r}) "
+                    f"declares reads_heads, which only a one-port implicit law (an ImplicitLaw "
+                    f"with ports=1) may: the heads at its end nodes enter its residual row"
+                )
 
         self.net = net
         self._record_topology(net)
@@ -973,7 +981,9 @@ class KirchhoffLayer(
         d q)`, taken at `q`'s flow on that edge: `q` is every edge's flow, as `solve` returns
         it, and is required when the layer has an implicit law (`ValueError` without it, as for
         `flows`). The implied slope is `nan` where `d r / d q` is zero, as on an ideal
-        potential source, whose flow does not follow from its potential difference. Every
+        potential source, whose flow does not follow from its potential difference. For an
+        implicit law that reads the heads at its end nodes (`reads_heads`) the slope is taken
+        with those heads held fixed (`nan` where it holds a head). Every
         edge of a law with several ports is `nan` too: its slope is a matrix, not a number
         per edge. A phasor layer has no such accessor (`TypeError`: its slopes are
         complex)."""
@@ -996,8 +1006,10 @@ class KirchhoffLayer(
                 parts.append(torch.full_like(dp_s, math.nan))
             elif implicit:
                 f0 = int(index[s])
-                dr_dp, dr_dq = el.jacobian(dp_s, q_F[..., f0:f0 + e - s], drivers,
-                                           self._law_ctx(ctx, s, e))
+                lctx = self._law_ctx(ctx, s, e)
+                if el.reads_heads:
+                    lctx = self._with_heads(lctx, phi, dp_s, s, e)
+                dr_dp, dr_dq = el.jacobian(dp_s, q_F[..., f0:f0 + e - s], drivers, lctx)[:2]
                 dr_dp, dr_dq = dr_dp[..., 0, 0, 0, 0], dr_dq[..., 0, 0, 0, 0]
                 parts.append(torch.where(dr_dq != 0, -dr_dp / torch.where(
                     dr_dq != 0, dr_dq, torch.ones_like(dr_dq)),
@@ -1224,6 +1236,8 @@ class KirchhoffLayer(
                                                   self._law_slices, strict=True)):
             lctx = self._law_ctx(ctx, s, e)
             dp_s = dp[..., s:e]
+            if el.reads_heads:
+                lctx = self._with_heads(lctx, phi, dp_s, s, e)
             # Called on the law module itself, also on the differentiable path: the values
             # equal those of a `functional_call` with the threaded parameters, because the
             # threaded tensors ARE the module's own parameters (the same argument as
@@ -1236,10 +1250,20 @@ class KirchhoffLayer(
             if tangents is not None and i in tangents:
                 k = tangents[i][1] + torch.zeros_like(dp_s)
                 blocks.append(k[..., None, None, None, None])
-            elif adjoint and not el.exact_slope:
-                blocks += el._coloured_jacobian(dp_s, q_s, drivers, lctx)
             else:
-                blocks += el.jacobian(dp_s, q_s, drivers, lctx)
+                law_blocks = (el._coloured_jacobian(dp_s, q_s, drivers, lctx)
+                              if adjoint and not el.exact_slope
+                              else el.jacobian(dp_s, q_s, drivers, lctx))
+                if el.reads_heads:
+                    if len(law_blocks) != 4:
+                        raise ValueError(
+                            f"{type(el).__name__} (kind {el.kind!r}) reads_heads, so its "
+                            f"jacobian must return 4 blocks (d r / d dp, d r / d q, "
+                            f"d r / d phi_from, d r / d phi_to); got {len(law_blocks)}")
+                    # each end node's column: dp's share plus the head's own (`flow_unknowns`)
+                    dr_dp, dr_dq, dr_dfrom, dr_dto = law_blocks
+                    law_blocks = (dr_dp + dr_dfrom, dr_dq, dr_dto - dr_dp)
+                blocks += law_blocks
         parts = [blk.flatten(-5) for blk in blocks]
         parts.append(torch.ones(1, dtype=x.dtype, device=x.device))
         if u.diag:
@@ -1311,6 +1335,15 @@ class KirchhoffLayer(
             lctx = by_slice[key] = dataclasses.replace(ctx, **changes)
         return lctx
 
+    def _with_heads(self, lctx: LawContext, phi, dp_s, s: int, e: int) -> LawContext:
+        """`lctx` with the heads at the start and end nodes of the edges `[s, e)` (the
+        full-node potentials `phi`), shaped like their `dp_s`: the context of a law that
+        `reads_heads`. Built afresh on every call, never cached: the heads change with the
+        iterate."""
+        return dataclasses.replace(
+            lctx, phi_from=phi[..., self._src[s:e]].expand(dp_s.shape),
+            phi_to=phi[..., self._tgt[s:e]].expand(dp_s.shape))
+
     def _check_width(self, el, out, n_edges: int, what: str) -> None:
         """A law returns one value per edge of its kind: refuse any other trailing width."""
         if out.dim() == 0 or out.shape[-1] != n_edges:
@@ -1334,6 +1367,8 @@ class KirchhoffLayer(
             if self._implicit[i]:
                 f0 = int(index[s])
                 q_s = q_F[..., f0:f0 + e - s]
+                if el.reads_heads:
+                    lctx = self._with_heads(lctx, phi, dp_s, s, e)
                 r_s = call(i, (dp_s, q_s, drivers, lctx))
                 self._check_width(el, r_s, e - s, "residual")
                 r_parts.append(r_s)
@@ -1719,10 +1754,12 @@ class KirchhoffLayer(
         """The body of `solve`, which see. `_start` and `_report` are the fallback ladder's
         (`_solve_with_fallback`): `_start="linear"` starts from the linear initial guess
         (zeros at the held initial point of a layer without flow unknowns), `"ramp"` from
-        where `storage_ramp` settles from there; `_report` receives where the solve
-        started (`"start"`: `"linear"`, `"zeros"` or `"warm"`), whether it is that held
-        initial point (`"held"`) and the storage stages' Newton iterations
-        (`"ramp_iterations"`)."""
+        where `storage_ramp` settles from there (from the failed solve's own start, `phi0`
+        and `q0`, when no linear guess can be formed) and `"ramp_warm"` from where it
+        settles from that own start; `_report` receives where the solve started (`"start"`:
+        `"linear"`, `"zeros"` or `"warm"`), whether it is that held initial point
+        (`"held"`), where a ramp settled from (`"ramp_from"`: `"linear"` or `"warm"`) and
+        the storage stages' Newton iterations (`"ramp_iterations"`)."""
         self._require_current_topology()
         if scheme is None:
             scheme = self.scheme
@@ -1751,9 +1788,11 @@ class KirchhoffLayer(
             self, newton_kwargs, diagnostics, differentiable, drivers, sources, phi_boundary,
             starts,
         )
-        if _start is None:
+        ramp_from = "linear"
+        if _start is None or _start == "ramp_warm":
             x0, start = self._starting_point(phi0, phi_boundary, drivers, sources, step,
                                              q0=q0)
+            ramp_from = "warm"
         else:
             try:
                 x0, start = self._starting_point(None, phi_boundary, drivers, sources, step,
@@ -1765,11 +1804,14 @@ class KirchhoffLayer(
                 # storage ramp starts where the failed solve did
                 x0, start = self._starting_point(phi0, phi_boundary, drivers, sources, step,
                                                  q0=q0)
+                ramp_from = "warm"
         if _report is not None:
             _report["held"] = step.layout is not None
             _report["start"] = ("warm" if phi0 is not None or q0 is not None
                                 else "zeros" if u is not None and _start is None
                                 else "linear")
+            if _start in ("ramp", "ramp_warm"):
+                _report["ramp_from"] = ramp_from
         # A tensor held where the solve does not thread it is refused before solving, by
         # name; one reached only through a closure, at every residual the forward Newton
         # evaluates, the starting guess first and the root last (`_newton_differentiable`).
@@ -1825,7 +1867,7 @@ class KirchhoffLayer(
                         return
                     raise error from exc
 
-        if _start == "ramp":
+        if _start in ("ramp", "ramp_warm"):
             # the storage ramp's starting point; the solve below starts from it
             x0 = self._ramp(x0, phi_boundary, drivers, sources, step, newton_kwargs, _report)
             start = None
