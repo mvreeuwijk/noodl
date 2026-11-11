@@ -285,7 +285,7 @@ def test_queue_tank_equals_wsimod_on_random_pushes(wsimod_tanks, n):
                     w.vqip(label, got[b], ref)
                 else:
                     w.value(label, got[b], ref)
-        dropped += float(ctx.dropped[..., 0].sum())
+        dropped += float(ctx.dropped[..., 0].sum())  # W49: a tiny push is storage, no drop
         ours.end_timestep()
         for tank in theirs:
             tank.end_timestep()
@@ -307,7 +307,7 @@ def test_queue_tank_equals_wsimod_on_random_pushes(wsimod_tanks, n):
                 ours.internal_arc.flow_out.expand(B)[b],
                 tank.internal_arc.flow_out,
             )
-    assert dropped > 0  # the tiny pushes were reached
+    assert dropped == 0.0
     assert w.worst == 0.0
 
 
@@ -342,7 +342,7 @@ def test_a_tiny_push_is_kept_in_storage_but_never_queued():
     assert tank.internal_arc.register.abs().sum() == 0
     assert tank.internal_arc.present.tolist() == [True, True]
     assert tank.active_storage.tolist() == [0.0]
-    assert ctx.dropped[..., 0] == 1e-12
+    assert ctx.dropped[..., 0] == 0.0  # W49: held in storage, so not also a drop
 
 
 def test_a_tiny_push_does_not_flush_what_is_due():

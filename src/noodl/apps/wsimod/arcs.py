@@ -302,12 +302,14 @@ class AltQueueArc(Arc):
         tag: Tag = "default",
         force: bool = False,
         time: int = 0,
+        record_drop: bool = True,
     ) -> Tensor:
         """``QueueArc.send_push_request`` (``arcs.py:360-407``); returns what was not pushed.
 
         A push below ``FLOAT_ACCURACY`` returns empty before the queue (``:378-379``): it is
         neither enqueued nor does it deliver slot 0, and its water is recorded as dropped
-        (spec, defect table; for a ``QueueTank`` the tank's ``storage`` keeps it). Otherwise
+        (spec, defect table). A ``QueueTank`` passes ``record_drop=False``: its ``storage``
+        keeps the water, so the mass balance counts it there and not as dropped (W49). Otherwise
         the clip (``:382-390``), the entry under ``time + number_of_timesteps`` (``:393-396``,
         ``enter_arc`` ``:409-430``, ``enter_queue`` ``:581-601``), then ``update_queue``
         (``:399``), whose backflow joins the reply and leaves ``vqip_in`` (``:400-405``).
@@ -329,7 +331,8 @@ class AltQueueArc(Arc):
             active=active,
             call=call,
         )
-        ctx.drop(vqip, active & tiny)
+        if record_drop:
+            ctx.drop(vqip, active & tiny)
         run = active & ~tiny
         if force:
             not_pushed = torch.zeros_like(vqip)

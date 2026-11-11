@@ -72,7 +72,8 @@ print(round(float(state["wsimod.storage"][0, 0]), 4))
 The state is the stores WSIMOD carries from day to day; the drivers are every numeric parameter,
 `"wsimod.<Class>.<parameter>"` with one row per node of that class, the arcs' capacities and
 preferences, and the forcing series `(T, n)`. `model.wsimod_day.last_record` is the last day's
-record: arc flows and qualities, tank and surface storages, events and the mass-balance terms.
+record: arc flows and qualities, tank and surface storages, events and the mass-balance terms;
+`wsimod_run` records every day.
 
 Values are given by name. Any driver or state key may carry leading batch dimensions, which
 broadcast; each instance runs its own WSIMOD day and equals its own single run bit for bit.
@@ -113,6 +114,98 @@ print(f"{velocity.grad.item():.3e}")
 WSIMOD's branches (`if x > FLOAT_ACCURACY`, `min`, `max`, the distribute loops) are decided on
 detached values per instance, so the gradient is that of the branch each instance took; it jumps
 where a branch changes.
+
+## Running over the dates
+
+`wsimod_run(model, state, drivers, days=...)` is WSIMOD's loop: it steps the same `WsimodDay`
+closure over the configuration's dates (or the first `days` of them, `1 <= days <= len(dates)`)
+and records each day as WSIMOD's `Model.run(record_all=True)` does. `state` and `drivers`
+default to the configured ones and may carry batch dimensions. The run is under
+`torch.no_grad()` unless a state or driver tensor requires grad (a long run with gradients
+builds a large graph, so fit in windows). Stepping with `model.step` and running with
+`wsimod_run` give identical values.
+
+```python
+from noodl.apps.wsimod import wsimod_run
+
+model, state, drivers = build_model(network)
+diagnostics = {}
+results = wsimod_run(model, state, drivers, days=5, diagnostics=diagnostics)
+print(results.dates[:2], results.arc_names, tuple(results.arc_flow.shape))
+print(results.tank_names, [round(x, 4) for x in results.tank_storage[:, 0].tolist()])
+balance = results.mass_balance
+print(sorted(balance.terms))
+print(float(balance.residual.abs().max()) < 1e-12)
+print(sorted(diagnostics["events"])[:3], tuple(diagnostics["events"]["demand_deficit"].shape))
+print(round(float(balance.inflow[0, 0]), 4), round(float(balance.storage_change[0, 0]), 4))
+```
+
+```text
+['2000-01-01', '2000-01-02'] ['inflow_to_river', 'river_to_outlet'] (5, 2)
+[('river', 'tank')] [0.1389, 0.1275, 0.1101, 0.1043, 0.2316]
+['Catchment.flow', 'Catchment.unrouted', 'Waste.total_in', 'dropped']
+True
+['demand_deficit', 'demand_not_able_to_push', 'environmental_not_able_to_push'] (5, 3)
+120.0 0.1389
+```
+
+**Results.** `WsimodResults` holds what WSIMOD records, with the batch dimensions in front and
+the days next:
+
+- `dates` (as written in the configuration), `arc_names`, `arc_flow` `(..., T, n_arcs)` (each
+  arc's `vqip_out` volume) and `arc_quality` `(..., T, n_arcs, K)`;
+- `tank_names`, `tank_storage` `(..., T, n_tanks)` and `tank_quality`: the attributes WSIMOD's
+  `record_all` reports (`Tank`, `QueueTank` and `ResidenceTank`), nodes in configuration order and
+  each node's attributes alphabetically;
+- `surface_names`, `surface` (`storage`, `evaporation`, `precipitation`, `percolation`,
+  `subsurface_r`, `surface_r` and `tank_recharge`, each `(..., T, n_surfaces)`) and
+  `surface_quality`: the surfaces of the nodes under the type key `"Land"`, as WSIMOD records
+  them. A field WSIMOD does not record for an impervious surface is NaN;
+- `mass_balance`, below.
+
+The records are taken at the state the day reached, before `end_timestep`, as WSIMOD records
+them. Nothing is converted: volumes are m³, flows m³/d, additive pollutants kg.
+
+**Diagnostics.** A dict passed as `diagnostics` receives:
+
+- `"maxiter"`: for every distribute loop `(node, method, call index)` a `(..., T)` bool, true on
+  the days the loop ended at `MAXITER` (WSIMOD prints "Maxiter reached in <node> at <date>");
+- `"events"`: for every name in `EVENT_NAMES` a `(..., T, n_nodes)` bool, WSIMOD's warning
+  prints as recorded facts: `"storage_unable_to_push"`, `"demand_deficit"` ("demand deficit of
+  ... at <node> on <date>"), `"reservoir_spill"`, `"wwtw_couldnt_push"`,
+  `"service_reservoirs_not_filled"`, `"sludge_nowhere"`, `"river_cant_push"`,
+  `"ponded_water_cant_reenter"` (never fires: the forced push before WSIMOD's print returns
+  empty), `"groundwater_couldnt_push_all"`, `"miscalculated_tank_storage"`,
+  `"environmental_not_able_to_push"`, `"demand_not_able_to_push"`, `"leakage_not_going_to_gw"`,
+  `"more_treated_than_input"`, `"excess_treated_water"` and `"more_backflow_than_vqip"`, and
+  noodl's own `"zero_priority"` (a distribute round with priority 0 where WSIMOD divides by
+  zero), `"wtw_liquor_zero_denominator"` and `"inaccurate_evaporation"`;
+- `"decisions"`, only when `diagnostics["decisions"] = True` on entry: a list over the days of
+  that day's branch records `Decision(site, call, round, active, outcome, margin)` in call
+  order, per instance. The gradient tests and the parity admission rule use it;
+- `"mass_balance"`, the same object as `results.mass_balance`.
+
+**The mass balance.** WSIMOD's own system check never ran; noodl computes what it meant to.
+Per day, `inflow` is the sum of the nodes' `mass_balance_in` terms (catchment flows,
+precipitation, `FWTW` deficits, `UnlimitedDistribution` supply, demand loads), `outflow` that of
+their `mass_balance_out` terms (Waste, evaporation, demand consumption and backup, unrouted
+catchment water, unpushed sludge, treatment solids) plus the water WSIMOD loses without a
+trace, and `storage_change` the change of every carried store; `residual = inflow - outflow -
+storage_change`. Each is `(..., T, 1 + K_additive)`: the volume, then the additive pollutants'
+masses. `terms` lists every term by `"<Class>.<term>"` (arcs' flows cancel and are not listed).
+The lost water is `terms["dropped"]`: the pushes below `FLOAT_ACCURACY` that a `QueueArc` or
+`AltQueueArc` discards, the waiting `QueueArc` requests removed on update, the `Land` percolation
+push-back, the `WWTW` storm-tank rejection and `make_discharge` push-back and a `Sewer`'s ponded
+water below `FLOAT_ACCURACY`; and `terms["WWTW.unprocessed_input"]`, the water pushed into a
+`WWTW` after its `calculate_discharge` (a custom orchestration), which WSIMOD empties at
+`end_timestep` without ever treating it. A push below `FLOAT_ACCURACY` into a `QueueTank` stays
+in the tank's storage and never enters its queue, so it is storage and not a drop. Per-day
+values (a `Demand`'s totals, a `Land`'s running flows) are terms, not storage.
+
+The residual closes to rounding on every day, except where a `Land`'s IHACRES evaporation is
+more than its soil can supply: WSIMOD's balance counts the IHACRES evaporation as the
+outflow, and the soil gives less, so on a day with the `"inaccurate_evaporation"` event the
+residual is WSIMOD's own printed gap.
 
 ## State and drivers
 

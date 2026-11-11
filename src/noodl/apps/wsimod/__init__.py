@@ -10,13 +10,18 @@
 from noodl.apps.wsimod.build import build_model, initial_drivers, initial_state
 from noodl.apps.wsimod.config import WsimodNetwork, read_wsimod_config
 from noodl.apps.wsimod.day import DayRecord, WsimodDay
+from noodl.apps.wsimod.run import EVENT_NAMES, WsimodMassBalance, WsimodResults, wsimod_run
 
 __all__ = [
+    "EVENT_NAMES",
     "DayRecord",
     "WsimodDay",
+    "WsimodMassBalance",
     "WsimodNetwork",
+    "WsimodResults",
     "build_model",
     "initial_drivers",
     "initial_state",
     "read_wsimod_config",
+    "wsimod_run",
 ]

@@ -157,6 +157,9 @@ class Ctx:
         self.maxiter: dict[tuple[str, str, int], Tensor] = {}
         self.dropped: Tensor = self.empty()
         self.terms: dict[str, Tensor] = {}
+        # each WWTW's current_input as of its last treat_current_input (the water that was
+        # treated); what is pushed in later vanishes at end_timestep (W69)
+        self.treated_input: dict[str, Tensor] = {}
         self.frames: list[str] = []
         # every (element, method, index) of :meth:`call`, in call order: the day's static call
         # sequence, which D2 fixes on the tracing day

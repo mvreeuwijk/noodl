@@ -1260,6 +1260,48 @@ def _land_sewer_ponding() -> dict:
     }
 
 
+def _batch_divergence() -> dict:
+    """``three_out_arcs``' split ``Node`` fed by a ``Land`` instead of the catchments (Task 14,
+    Review Focus 2): the Land's runoff and soil-through flows follow the weather, so a batch
+    of capacities and soil moistures sends its instances down different branches (the
+    over-subscription switch at the junction, IHACRES's moisture and through-soil branches) on
+    the same day."""
+    days = _LAND_DAYS
+    return {
+        **_POLLUTANTS,
+        "dates": _dates(days),
+        "nodes": [
+            _land(
+                "farm",
+                [
+                    _pervious(
+                        "grass",
+                        area=1e4,
+                        depth=0.5,
+                        infiltration_capacity=0.01,
+                        initial_storage=1700.0,
+                    )
+                ],
+                _land_forcing(days, 44, rain=(0.0, 2e-3, 5e-3, 8e-3, 1.5e-2)),
+                subsurface_residence_time=2,
+                surface_residence_time=1,
+            ),
+            {"name": "junction", "type_": "Node"},
+            _store("outlet_a", "Waste"),
+            _store("outlet_b", "Waste"),
+            _store("outlet_c", "Waste"),
+        ],
+        "arcs": [
+            _arc("farm_to_junction", "farm", "junction"),
+            _arc("junction_to_a", "junction", "outlet_a", capacity=20.0, preference=1.0),
+            _arc("junction_to_b", "junction", "outlet_b", capacity=30.0, preference=2.0),
+            _arc("junction_to_c", "junction", "outlet_c", capacity=10.0, preference=3.0),
+        ],
+        "overrides": _neutral_soil("farm", "grass"),
+        "orchestration": [{"Land": "run"}],
+    }
+
+
 CASES: dict[str, Case] = {
     "three_out_arcs": Case(
         build=_three_out_arcs,
@@ -1452,5 +1494,10 @@ CASES: dict[str, Case] = {
         days=_LAND_DAYS,
         scale=100.0,
         wsimod=False,
+    ),
+    "batch_divergence": Case(
+        build=_batch_divergence,
+        days=_LAND_DAYS,
+        scale=100.0,
     ),
 }

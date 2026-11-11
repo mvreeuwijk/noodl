@@ -41,6 +41,7 @@ from noodl.apps.wsimod.tanks import Tank
 from noodl.apps.wsimod.vqip import (
     Pollutants,
     empty,
+    extract_vqip,
     safe_den,
     sum_vqip,
     v_change_vqip,
@@ -230,6 +231,8 @@ class WTW(Node):
         self.solids = write(active, solids, self.solids)
         # wtw.py:211
         self.treated = write(active, sum_vqip(p, self.treated, discharge), self.treated)
+        seen = ctx.treated_input.get(self.name, ctx.empty())
+        ctx.treated_input[self.name] = write(active, influent, seen)
         more = (self.treated[..., 0] > self.current_input[..., 0]).detach()
         ctx.event("more_treated_than_input", self.name, active & more)
 
@@ -314,7 +317,12 @@ class WWTW(WTW):
     step_methods: ClassVar[tuple[str, ...]] = ("calculate_discharge", "make_discharge")
     distributes: ClassVar[tuple[str, ...]] = ("out",)  # make_discharge's push_distributed
     # wtw.py:293: solids go to landfill; :294-297 the storage changes are the engine's (D11)
-    mass_balance: ClassVar[dict[str, str]] = {"WWTW.solids": "out"}
+    mass_balance: ClassVar[dict[str, str]] = {
+        "WWTW.solids": "out",
+        # W69: water pushed in after the last treatment sits in current_input and vanishes at
+        # end_timestep_ (wtw.py:447-453); the balance counts it as an outflow
+        "WWTW.unprocessed_input": "out",
+    }
     parameter_defaults: ClassVar[dict[str, float]] = {
         **WTW.parameter_defaults,
         "stormwater_storage_capacity": 10,
@@ -360,7 +368,11 @@ class WWTW(WTW):
 
     def record_terms(self) -> None:
         ctx = self.ctx
-        ctx.term("WWTW.solids", self.solids, torch.ones(ctx.shape, dtype=torch.bool))
+        every = torch.ones(ctx.shape, dtype=torch.bool)
+        ctx.term("WWTW.solids", self.solids, every)
+        treated = ctx.treated_input.get(self.name, ctx.empty())
+        late = extract_vqip(self.p, self.current_input, treated)
+        ctx.term("WWTW.unprocessed_input", late, every)
 
     # --- orchestration ----------------------------------------------------------------------
     def calculate_discharge(self, *, active: Tensor) -> None:

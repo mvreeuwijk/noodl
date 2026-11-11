@@ -701,7 +701,10 @@ shape:
   `Land.run` percolation push-back (`land.py:213-215`), the `WWTW` storm-tank rejection
   (`wtw.py:403-404`), the `WWTW.make_discharge` push-back (`:347-348`), the `Sewer.make_discharge`
   ponded water at or below `FLOAT_ACCURACY` (pulled from the tank and sent nowhere,
-  `sewer.py:234-235`), and the `QueueTank` storage-without-queue entry (Nodes › QueueTank). All are
+  `sewer.py:234-235`), and the `QueueTank` storage-without-queue entry (Nodes › QueueTank): that
+  last one stays in the tank's `storage`, so the storage change counts it and it is not also a drop
+  (W49). Water pushed into a `WWTW` after its `calculate_discharge` vanishes at `end_timestep_`
+  (W69) and is the term `"WWTW.unprocessed_input"`. All are
   `(..., T, 1 + K_additive)`, with the residual. This is what WSIMOD's system check
   (`model.py:1011-1060`) meant to compute (W4). A `Land`'s terms are WSIMOD's own
   (`land.py:158-162`): its outflow is the IHACRES evaporation, not what `evaporate` removed, so

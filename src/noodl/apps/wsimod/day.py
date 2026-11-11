@@ -92,6 +92,9 @@ STATE_KEYS = (
 )
 """The state keys :class:`WsimodDay` carries (spec, State)."""
 
+# keys that are not water held: a QueueTank's active storage is inside its storage, and an
+# FWTW's previous_pulled is the quality of yesterday's pulled water (W75)
+_NOT_HELD = ("wsimod.active_storage", "wsimod.previous_pulled")
 # keys of one value per row, not a VQIP
 _FLAT_KEYS = ("wsimod.travel_queue_present", "wsimod.arc_queue_since")
 _STATE_UNITS = {
@@ -195,14 +198,13 @@ class DayRecord:
       key ``"Land"`` (``WsimodDay.surface_names``), NaN where WSIMOD records no such field (an
       ``ImperviousSurface``'s flows); ``surface_quality`` ``(..., n_surfaces, K)``.
     - ``terms``: the mass-balance terms ``"<Class>.<term>"`` (D11), VQIPs ``(..., 1+K)``;
-      ``dropped`` the water WSIMOD drops below ``FLOAT_ACCURACY`` and ``storage_total`` the
-      water held in every carried store, both ``(..., 1 + K_additive)`` (the volume and the
-      additive columns). Task 14 assembles the balance from them, minding two known
-      overlaps: a ``QueueTank`` push below ``FLOAT_ACCURACY`` stays in the tank's storage (so
-      in ``storage_total``) and is also in ``dropped`` (W49); and water pushed into a ``WWTW``
-      after its ``calculate_discharge`` sits in its ``current_input``, a per-day value no
-      store carries, and vanishes at ``end_timestep`` as in WSIMOD (W69). Neither is
-      corrected here.
+      ``dropped`` the water WSIMOD drops below ``FLOAT_ACCURACY``, ``storage_start`` the water
+      held in every carried store when the day began and ``storage_total`` when it was
+      recorded, all ``(..., 1 + K_additive)`` (the volume and the additive columns).
+      ``wsimod_run`` assembles the balance from them. A ``QueueTank`` push below
+      ``FLOAT_ACCURACY`` stays in the tank's storage, so it is not in ``dropped`` (W49); water
+      pushed into a ``WWTW`` after its ``calculate_discharge`` is the term
+      ``"WWTW.unprocessed_input"`` (W69).
     - ``events``: ``{condition: (..., n_nodes) bool}`` (D13); ``maxiter``: ``{(node, method,
       call index): (...) bool}``; ``decisions``: the branch records (D12) when
       ``WsimodDay.record_decisions``, else ``None``.
@@ -217,6 +219,7 @@ class DayRecord:
     terms: dict[str, Tensor]
     dropped: Tensor
     storage_total: Tensor
+    storage_start: Tensor
     events: dict[str, Tensor]
     maxiter: dict
     decisions: list | None
@@ -850,9 +853,10 @@ class WsimodDay:
         engine.begin_day(ctx)
         self._reset_day(shape)
         self._load(state, shape)
+        storage_start = self._held(shape, {})
         self._bind(drivers, k)
         self._run_plan(torch.ones(shape, dtype=torch.bool))
-        self.last_record = self._record(ctx)
+        self.last_record = self._record(ctx, storage_start)
         yield ctx
         engine.end_day()
         self.last_call_sequence = list(ctx.sequence)
@@ -931,7 +935,32 @@ class WsimodDay:
             self.last_state = state
 
     # --- the record (model.py:1063-1170) ----------------------------------------------------
-    def _record(self, ctx: Ctx) -> DayRecord:
+    def _held(self, shape: torch.Size, stores: dict) -> Tensor:
+        """The water held in the carried stores, ``(..., 1 + K_additive)``: every carried store
+        but a ``QueueTank``'s active storage and queue (inside its storage), an ``FWTW``'s
+        liquor (pushed on the day it is made, ``wtw.py:603-605``), its ``previous_pulled`` (the
+        quality of yesterday's pulled water, not water held, W75) and a ``QueueTank``'s
+        register (inside its storage), added row by row in the state's order. ``stores`` caches
+        ``node.stores()`` by element ``id``."""
+        p = self.p
+        additive = p.volume_or_additive_mask
+        held = torch.zeros((*shape, int(additive.sum())), dtype=F64)
+        for slot in self._slots:
+            if slot.key in _FLAT_KEYS or slot.key in _NOT_HELD:
+                continue
+            if slot.key == "wsimod.liquor" and slot.element.spec.cls != "WWTW":
+                continue
+            if slot.key == "wsimod.travel_queue" and not isinstance(slot.element, Arc):
+                continue
+            if id(slot.element) not in stores:
+                stores[id(slot.element)] = slot.element.stores()
+            value = stores[id(slot.element)][slot.path]
+            value = torch.broadcast_to(_f64(value), (*shape, *slot.shape))
+            for row in value.reshape(*shape, -1, 1 + p.K).unbind(-2):
+                held = held + row[..., additive]
+        return held
+
+    def _record(self, ctx: Ctx, storage_start: Tensor) -> DayRecord:
         p, shape, nodes = self.p, ctx.shape, self.engine.nodes
         for node in nodes.values():
             node.record_terms()
@@ -964,24 +993,8 @@ class WsimodDay:
                 else:  # WSIMOD records no such field for this surface (model.py:1155-1167)
                     surface[f].append(nan)
             quality.append(s.storage[..., 1:])
-        # the water held: every carried store but a QueueTank's active storage and queue
-        # (inside its storage) and an FWTW's liquor (pushed on the day it is made,
-        # wtw.py:603-605), added row by row in the state's order
         additive = p.volume_or_additive_mask
-        held = torch.zeros((*shape, int(additive.sum())), dtype=F64)
-        for slot in self._slots:
-            if slot.key in _FLAT_KEYS or slot.key == "wsimod.active_storage":
-                continue
-            if slot.key == "wsimod.liquor" and slot.element.spec.cls != "WWTW":
-                continue
-            if slot.key == "wsimod.travel_queue" and not isinstance(slot.element, Arc):
-                continue
-            if id(slot.element) not in stores:
-                stores[id(slot.element)] = slot.element.stores()
-            value = stores[id(slot.element)][slot.path]
-            value = torch.broadcast_to(_f64(value), (*shape, *slot.shape))
-            for row in value.reshape(*shape, -1, 1 + p.K).unbind(-2):
-                held = held + row[..., additive]
+        held = self._held(shape, stores)
         events = {
             condition: torch.stack(
                 [
@@ -1002,6 +1015,7 @@ class WsimodDay:
             terms=dict(ctx.terms),
             dropped=torch.broadcast_to(ctx.dropped, (*shape, 1 + p.K))[..., additive],
             storage_total=held,
+            storage_start=storage_start,
             events=events,
             maxiter=dict(ctx.maxiter),
             decisions=list(ctx.decisions) if ctx.record_decisions else None,

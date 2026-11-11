@@ -396,7 +396,8 @@ def test_the_wwtw_records_its_solids_as_an_outflow():
     works.current_input = P.to_vqip({"volume": 100.0})
     works.treat_current_input(active=TRUE)
     works.record_terms()
-    assert set(ctx.terms) == set(WWTW.mass_balance) == {"WWTW.solids"}
+    assert set(ctx.terms) == set(WWTW.mass_balance) == {"WWTW.solids", "WWTW.unprocessed_input"}
+    assert float(ctx.terms["WWTW.unprocessed_input"][0]) == 0.0  # everything was treated
     assert float(ctx.terms["WWTW.solids"][0]) == 100.0 * 0.0002
     works.end_timestep()
     assert float(works.solids[0]) == 0.0 and float(works.current_input[0]) == 0.0

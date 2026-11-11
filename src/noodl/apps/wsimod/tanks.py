@@ -376,7 +376,8 @@ class QueueTank(Tank):
         the queue; otherwise the internal arc's ``send_push_request`` with ``time``, and
         ``storage`` gains ``v_change(vqip, V - reply V)``. A push below ``FLOAT_ACCURACY``
         returns empty from the arc, so ``storage`` keeps it while the queue never sees it
-        (spec, Nodes, QueueTank; recorded as dropped by the arc)."""
+        (spec, Nodes, QueueTank). The arc does not record it as dropped (W49): the tank's storage
+        holds it and the mass balance counts it there."""
         p = self.p
         active = torch.as_tensor(active, dtype=torch.bool)
         if force:
@@ -385,7 +386,9 @@ class QueueTank(Tank):
                 active, sum_vqip(p, self.active_storage, vqip), self.active_storage
             )
             return self.ctx.empty()
-        reply = self.internal_arc.send_push_request(vqip, active=active, time=time)
+        reply = self.internal_arc.send_push_request(
+            vqip, active=active, time=time, record_drop=False
+        )
         entered = v_change_vqip(p, vqip, vqip[..., 0] - reply[..., 0])
         self.storage = write(active, sum_vqip(p, self.storage, entered), self.storage)
         return reply
