@@ -28,7 +28,12 @@ Decision records (spec, Diagnostics). Each is a :class:`Decision`
   ``QueueTank`` ``node:N/<tank>/push_check/clip`` and
   ``node:N/<tank>/pull_storage_exact/clip:<volume|additive pollutant>``; its internal arc's
   sites are ``node:N/<tank>/internal_arc/...`` (``get_excess/push/min``,
-  ``send_push_request/{below_fa,clip}``). Later classes extend the same pattern.
+  ``send_push_request/{below_fa,clip}``). The storage family adds
+  ``node:N/infiltrate/excess``, ``node:N/pull_check_active/clip``,
+  ``node:N/pull_set_active/{clip,below_fa}``, ``node:N/push_check_river_reservoir/clip`` and
+  ``node:N/satisfy_environmental/owed``; a ``QueueGroundwater``'s frozen push-check tank
+  (``storage.py:71``) is ``node:N/check_tank/get_excess/{headroom,clip}``. Later classes
+  extend the same pattern.
 - ``call`` is noodl's static per-day index of the enclosing ``(element, method)`` call
   (:meth:`Ctx.call`, which :meth:`Ctx.loop_site` uses too). It counts the calls noodl's
   structure makes, masked ones included, so it is the same on every day and for every
@@ -205,6 +210,7 @@ def make_node(spec: NodeSpec, network: WsimodNetwork, pollutants: Pollutants) ->
 def _register_all() -> None:
     """Import every module that registers node classes."""
     import noodl.apps.wsimod.catchment  # noqa: F401
+    import noodl.apps.wsimod.storage  # noqa: F401
 
 
 class Engine:

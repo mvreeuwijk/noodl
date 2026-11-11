@@ -634,7 +634,11 @@ shape:
     `node:N/<tank>/pull_ponded/excess`, `node:N/<tank>/evaporate/clip`, and for a `QueueTank`
     `node:N/<tank>/push_check/clip` and `node:N/<tank>/pull_storage_exact/clip:<column>`; its
     internal arc's are `node:N/<tank>/internal_arc/{get_excess/push/min,
-    send_push_request/below_fa, send_push_request/clip}`. Later classes extend the pattern.
+    send_push_request/below_fa, send_push_request/clip}`. The storage family adds
+    `node:N/infiltrate/excess`, `node:N/pull_check_active/clip`,
+    `node:N/pull_set_active/{clip,below_fa}`, `node:N/push_check_river_reservoir/clip` and
+    `node:N/satisfy_environmental/owed`; a `QueueGroundwater`'s frozen push-check tank is
+    `node:N/check_tank/get_excess/{headroom,clip}`. Later classes extend the pattern.
   - `call` is noodl's static per-day index of the enclosing (element, method) call. It counts
     the calls noodl's structure makes, masked ones included, so it is the same every day; it is
     not WSIMOD's dynamic count.
@@ -722,13 +726,23 @@ marked W4.
   - `distribute` (`:222-229`): `V/residence_time` to Node, River and Waste, with the rest
     forced back.
   - `infiltrate` (`:231-245`): `(max(V − cap·threshold, 0)·pct) ** 0.5` pushed to `Sewer`.
-    Note the square root. noodl uses a safe root: the value is exact, the gradient is 0 where
-    the argument is 0, and the infinite slope at 0⁺ is documented.
+    Note the square root. noodl evaluates it with Python's own `pow` (`torch.sqrt` differs in
+    the last bit for about 1 % of arguments), so the value is bitwise WSIMOD's. The gradient
+    is that of the square root, 0 where the argument is 0, and the infinite slope at 0⁺ is
+    documented.
 - **QueueGroundwater** (`:248-433`).
   - `push_set_timearea` (`:330-348`) splits the inflow over `timearea` into the `QueueTank`.
   - `distribute` (`:350-364`): `update_queue`, then push all of `active_storage`, then pull
     what was sent.
   - `infiltrate` is a no-op (`:366-368`).
+  - Its push check is the frozen plain tank's `get_excess`. `Storage.__init__` binds the
+    handler to the first tank it builds (`:53-59`, `:71`), and `QueueGroundwater` then replaces
+    `self.tank` by the `QueueTank` (`:301`) without rebinding it. The check therefore reports
+    `max(capacity − initial storage, 0)` for ever, whatever has been pushed in. Reproduced
+    (`check_tank`); the pull handlers are rebound (`:297-298`).
+  - `pull_set_active` walks the queue dict in insertion order. noodl walks the slots in
+    ascending time, which is the same order for a time-area whose keys are contiguous from 0
+    and entered in ascending order.
   - `pull_check_active` reports `active_storage` (`:370-384`). `pull_set_active` instead pulls
     from **total** storage, pro rata over every queue slot and the active store
     (`:386-433`). That inconsistency, which WSIMOD marks with a TODO, is transcribed.

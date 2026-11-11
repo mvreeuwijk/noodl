@@ -404,6 +404,20 @@ def _store_paths(node) -> tuple[str, ...]:
     return NODE_CLASSES[type(node).__qualname__].store_paths
 
 
+def _wsimod_store(node, path: str):
+    """The WSIMOD value of a noodl store path: an attribute, except that noodl's dense queue
+    (``<tank>.internal_arc.register``/``.present``) is WSIMOD's ``queue`` dict (the rows, by
+    time) and its key set (``tanks.py:481-486``, ``arcs.py:567``)."""
+    for suffix, make in (
+        (".internal_arc.register", lambda queue: queue),
+        (".internal_arc.present", lambda queue: sorted(queue)),
+    ):
+        if path.endswith(suffix):
+            arc = _attribute(node, path[: -len(suffix)] + ".internal_arc")
+            return copy.deepcopy(make(arc.queue))
+    return copy.deepcopy(_attribute(node, path))
+
+
 def _attribute(obj, path: str):
     for part in path.split("."):
         obj = getattr(obj, part)
@@ -430,9 +444,7 @@ def capture_node_calls(model, nodes: Sequence[str]) -> Iterator[dict[str, list[N
     date_index = {date: i for i, date in enumerate(model.dates)}
 
     def snapshot(node) -> dict[str, object]:
-        out: dict[str, object] = {
-            path: copy.deepcopy(_attribute(node, path)) for path in _store_paths(node)
-        }
+        out: dict[str, object] = {path: _wsimod_store(node, path) for path in _store_paths(node)}
         for arc in node.out_arcs.values():
             out[f"arcs.{arc.name}.vqip_in"] = copy.deepcopy(arc.vqip_in)
             out[f"arcs.{arc.name}.flow_in"] = arc.flow_in
@@ -499,7 +511,10 @@ def capture_node_calls(model, nodes: Sequence[str]) -> Iterator[dict[str, list[N
                 record = ArcCall(
                     arc=arc.name,
                     method=method,
-                    vqip=copy.deepcopy(bound.arguments.get("vqip")),
+                    # QueueArc.send_push_request names the request ``vqip_`` (arcs.py:360)
+                    vqip=copy.deepcopy(
+                        bound.arguments.get("vqip", bound.arguments.get("vqip_"))
+                    ),
                     tag=copy.deepcopy(bound.arguments.get("tag", "default")),
                     force=bool(bound.arguments.get("force", False)),
                     reply={},

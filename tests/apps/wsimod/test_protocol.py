@@ -435,3 +435,85 @@ def test_gradients_flow_through_the_masked_rounds():
     # everything above the total capacity comes back: d reply / d capacity = -1, d / d V = 1
     assert capacities.grad.tolist() == [-1.0, -1.0, -1.0]
     assert request.grad.tolist() == [1.0]
+
+
+def test_arcs_equal_wsimod_arcs_on_random_requests(monkeypatch):
+    """Two ``Storage`` nodes joined by an ``Arc`` of random capacity, 50 days of 5 random
+    push, pull and check calls (some forced, some below ``FLOAT_ACCURACY``): every reply, the
+    arc's ``flow_in`` and ``vqip_out``, and both stores equal WSIMOD's bitwise (an arc's
+    arithmetic is ``+ - * /``, ``min`` and ``max`` only)."""
+    pytest.importorskip("wsimod")
+    from wsimod.arcs import arcs as wsimod_arcs
+    from wsimod.core import constants
+    from wsimod.nodes import storage as wsimod_storage
+
+    monkeypatch.setattr(constants, "POLLUTANTS", ["phosphate", "temperature"])
+    monkeypatch.setattr(constants, "ADDITIVE_POLLUTANTS", ["phosphate"])
+    monkeypatch.setattr(constants, "NON_ADDITIVE_POLLUTANTS", ["temperature"])
+    monkeypatch.setattr(constants, "FLOAT_ACCURACY", FA)
+    keys = ("volume", "phosphate", "temperature")
+    g = torch.Generator().manual_seed(8)
+
+    def uniform(lo, hi):
+        return lo + (hi - lo) * float(torch.rand((), generator=g, dtype=torch.float64))
+
+    def random_request():
+        pick = float(torch.rand((), generator=g))
+        volume = 0.0 if pick < 0.1 else uniform(0, 1e-12) if pick < 0.3 else uniform(0, 8)
+        phosphate, temperature = uniform(0, 3) * volume, uniform(4, 20)
+        return {"volume": volume, "phosphate": phosphate, "temperature": temperature}
+
+    worst = 0.0
+
+    def same(label, ours, theirs):
+        nonlocal worst
+        for i, key in enumerate(keys):
+            worst = max(worst, abs(float(ours[i]) - float(theirs[key])))
+            assert float(ours[i]) == float(theirs[key]), f"{label}[{key}]: {ours!r} vs {theirs!r}"
+
+    for _ in range(6):
+        pipe = uniform(2, 12)
+        caps = (uniform(5, 20), uniform(5, 20))
+        init = [random_request() for _ in range(2)]
+        theirs = [
+            wsimod_storage.Storage(name=n, capacity=c, initial_storage=dict(v))
+            for n, c, v in zip("ab", caps, init, strict=True)
+        ]
+        their_arc = wsimod_arcs.Arc(
+            name="pipe", in_port=theirs[0], out_port=theirs[1], capacity=pipe
+        )
+        a, b = (
+            make_node(
+                NodeSpec(n, "Storage", "Storage", {"capacity": c, "initial_storage": v}), None, PQ
+            )
+            for n, c, v in zip("ab", caps, init, strict=True)
+        )
+        our_arc = arc("pipe", a, b, capacity=pipe, p=PQ)
+        day(a, b, our_arc, p=PQ)
+        for _ in range(50):
+            for _ in range(5):
+                op = ("push", "pull", "push_check", "pull_check")[
+                    int(torch.randint(4, (), generator=g))
+                ]
+                request = random_request()
+                forced = op == "push" and float(torch.rand((), generator=g)) < 0.3
+                use_request = op in ("push", "pull") or float(torch.rand((), generator=g)) < 0.5
+                vqip = PQ.to_vqip(request)
+                if op == "push":
+                    got = our_arc.send_push_request(vqip, active=TRUE, force=forced)
+                    ref = their_arc.send_push_request(dict(request), force=forced)
+                elif op == "pull":
+                    got = our_arc.send_pull_request(vqip, active=TRUE)
+                    ref = their_arc.send_pull_request(dict(request))
+                else:
+                    ours = getattr(our_arc, f"send_{op}")
+                    got = ours(vqip if use_request else None, active=TRUE)
+                    ref = getattr(their_arc, f"send_{op}")(dict(request) if use_request else None)
+                same(op, got, ref)
+                assert float(our_arc.flow_in) == their_arc.flow_in
+                same("vqip_out", our_arc.vqip_out, their_arc.vqip_out)
+                same("a", a.tank.storage, theirs[0].tank.storage)
+                same("b", b.tank.storage, theirs[1].tank.storage)
+            our_arc.end_timestep()
+            their_arc.end_timestep()
+    assert worst == 0.0

@@ -16,8 +16,12 @@ import pytest
 
 pytest.importorskip("wsimod")
 
+import re  # noqa: E402
+
+import torch  # noqa: E402
+
 from noodl.apps.wsimod.config import read_wsimod_config  # noqa: E402
-from noodl.apps.wsimod.engine import make_node  # noqa: E402
+from noodl.apps.wsimod.engine import Ctx, Engine, make_node  # noqa: E402
 from noodl.apps.wsimod.vqip import QUANTITY_ONLY  # noqa: E402
 from tests.apps.wsimod._replay import Mismatch, replay  # noqa: E402
 from tests.verification._wsimod_cases import CASES  # noqa: E402
@@ -25,6 +29,7 @@ from tests.verification._wsimod_reference import (  # noqa: E402
     capture_node_calls,
     record_wsimod_run,
     wsimod_model,
+    wsimod_reference,
 )
 
 PAIRS = [(case, name) for case, spec in CASES.items() if spec.wsimod for name in spec.replay]
@@ -89,3 +94,86 @@ def test_the_replay_notices_a_difference():
     call.arc_calls[3], call.arc_calls[4] = call.arc_calls[4], call.arc_calls[3]
     with pytest.raises(Mismatch):
         replay(network, "junction", calls, scale=spec.scale)
+
+
+def test_maxiter_pull_reaches_maxiter_and_noodl_says_so_on_the_same_days():
+    """W38: the pull path and the ``MAXITER`` exit, live. WSIMOD's ``pull_distributed`` into the
+    reservoir ends at ``MAXITER`` every day (it prints "Maxiter reached"); noodl's
+    ``"maxiter"`` diagnostic fires on exactly those days."""
+    spec = CASES["maxiter_pull"]
+    printed = wsimod_reference(spec.build(), days=spec.days).printed
+    network = read_wsimod_config(spec.build())
+    index = {str(d.date()): i for i, d in enumerate(network.dates)}
+    days = {
+        index[m.group(1)]
+        for line in printed
+        if (m := re.fullmatch(r"Maxiter reached in res at (.*)", line))
+    }
+    assert "Maxiter reached in res at 2000-01-01" in printed
+    assert days == set(range(spec.days))  # every day of the case
+    engine = Engine(network, pollutants=network.pollutants)
+    ours = set()
+    for day in range(spec.days):
+        ctx = Ctx(
+            network.pollutants,
+            network.float_accuracy,
+            torch.Size(()),
+            day=day,
+            node_names=list(engine.nodes),
+        )
+        engine.begin_day(ctx)
+        for node in engine.nodes.values():
+            node.bind(node.configured_parameters(network.dates[day]))
+        res = engine.nodes["res"]
+        res.make_abstractions(active=torch.tensor(True))
+        if bool(ctx.maxiter[("res", "pull_distributed", 0)]):
+            ours.add(day)
+        res.distribute(active=torch.tensor(True))
+        engine.end_day()
+    assert ours == days
+
+
+def test_the_storage_cases_reach_the_branches_they_are_built_for():
+    # forced_negative_excess: the reservoir starts above capacity, so its push check is empty
+    res = captured("forced_negative_excess")["res"]
+    assert res[0].pre["tank.storage"]["volume"] > 12.0
+    checks = [c for c in res if c.method == "push_check" and c.day == 0]
+    assert checks and all(c.reply["volume"] == 0.0 for c in checks)
+    # queue_groundwater: pro rata pulls from a queue that holds water, and its frozen check
+    gw = captured("queue_groundwater")["gw"]
+    pulls = [c for c in gw if c.method == "pull_set" and c.reply["volume"] > 0]
+    assert pulls and any(
+        any(row["volume"] > 0 for time, row in c.pre["tank.internal_arc.register"].items() if time)
+        for c in pulls
+    )
+    assert any(c.method == "push_check" for c in gw) and any(c.method == "pull_check" for c in gw)
+    # river_reservoir_environmental: some water counts as environmental flow before the
+    # satisfy step, and the step runs short of the flow on some days and not others
+    rr = captured("river_reservoir_environmental")["rr"]
+    pushes = [c for c in rr if c.method == "push_set"]
+    assert any(c.post["total_environmental_satisfied"] > 0 for c in pushes)
+    satisfy = [c for c in rr if c.method == "satisfy_environmental"]
+    assert len(satisfy) == CASES["river_reservoir_environmental"].days
+    # catchment_abstraction: the pull path of a Catchment
+    src = captured("catchment_abstraction")["src"]
+    assert any(c.method == "pull_set" and c.reply["volume"] > 0 for c in src)
+    assert any(c.method == "pull_check" for c in src)
+    # pull_and_push_arcs: the deny handlers answered both ways
+    a = captured("pull_and_push_arcs")["a"]
+    denied_push = [
+        x for c in a for x in c.arc_calls if x.arc == "pull_ab" and x.method == "send_push_request"
+    ]
+    assert denied_push and all(x.reply["volume"] == x.vqip["volume"] for x in denied_push)
+    # user_alt_queue_arc: the storage pushed through the queue arc
+    pushes = [
+        x for c in captured("user_alt_queue_arc")["a"] for x in c.arc_calls if x.arc == "a_to_b"
+    ]
+    assert any(x.method == "send_push_request" for x in pushes)
+    # reservoir_over_capacity: day 0 asks for no water, later days do
+    over = [
+        c
+        for c in captured("reservoir_over_capacity")["res"]
+        if c.method == "make_abstractions"
+    ]
+    asked = [x.vqip["volume"] for c in over for x in c.arc_calls if x.method == "send_pull_request"]
+    assert asked[0] == 0.0 and max(asked) > 0.0

@@ -1,0 +1,592 @@
+"""WSIMOD 0.8.1's storage family (``wsimod/nodes/storage.py``): ``Storage``, ``Groundwater``,
+``QueueGroundwater``, ``Reservoir`` and ``RiverReservoir``, batched.
+
+A storage node wraps one tank under the attribute ``tank`` (:mod:`noodl.apps.wsimod.tanks`) and
+answers the four calls with the tank's methods (``storage.py:70-73``). The orchestration methods
+(``distribute``, ``infiltrate``, ``make_abstractions``, ``satisfy_environmental``) call the tank
+and the node's own ``push_distributed``/``pull_distributed``, in WSIMOD's order and with its
+arithmetic, so every value is bitwise WSIMOD's.
+
+Every method takes the caller's ``active`` mask. The tank's state is written only where it holds
+(D3), and a data-dependent branch is a :meth:`Ctx.decide` (D12). WSIMOD's warning prints are
+events (D13).
+
+``decays`` must be ``None`` (:meth:`Storage.validate`): a dict, ``{}`` included, builds a
+``DecayTank`` (``storage.py:53``, ``:300``), which is sub-project 3b.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Mapping
+from typing import TYPE_CHECKING, ClassVar
+
+import torch
+from torch import Tensor
+from torch.autograd.function import once_differentiable
+
+from noodl.apps.wsimod.arcs import _put_row, check_travel_time
+from noodl.apps.wsimod.engine import Ctx, dmax, dmin
+from noodl.apps.wsimod.node import NODE_CLASSES, Node, Tag
+from noodl.apps.wsimod.tanks import QueueTank, Tank
+from noodl.apps.wsimod.vqip import (
+    Pollutants,
+    extract_vqip,
+    safe_den,
+    sum_vqip,
+    v_change_vqip,
+    write,
+)
+
+if TYPE_CHECKING:  # pragma: no cover
+    from noodl.apps.wsimod.config import NodeSpec, WsimodNetwork
+
+__all__ = ["Groundwater", "QueueGroundwater", "Reservoir", "RiverReservoir", "Storage"]
+
+# storage.py:226, :1064, :1102: where a groundwater baseflow, a reservoir spill and the
+# reservoir's downstream capacity go
+DOWNSTREAM_TYPES = ("Node", "River", "Waste")
+
+
+def _f64(x) -> Tensor:
+    return torch.as_tensor(x, dtype=torch.float64)
+
+
+class _PowHalf(torch.autograd.Function):
+    """``x ** 0.5`` as Python evaluates it (the C library's ``pow``), elementwise.
+
+    ``torch.sqrt`` (and ``torch.pow(x, 0.5)``, which torch turns into a square root) differs
+    from ``float.__pow__`` in the last bit for about 1 % of the arguments on the developer
+    machine, so ``Groundwater.infiltrate`` (``storage.py:236``) calls the same ``pow`` WSIMOD
+    does. The gradient is that of the square root, and 0 (not infinity) where ``x == 0``: the
+    infinite slope at 0+ is documented, not propagated.
+    """
+
+    @staticmethod
+    def forward(ctx, x: Tensor) -> Tensor:
+        ctx.save_for_backward(x)
+        flat = x.detach().reshape(-1).tolist()
+        return torch.tensor([v**0.5 for v in flat], dtype=torch.float64).reshape(x.shape)
+
+    @staticmethod
+    @once_differentiable
+    def backward(ctx, grad: Tensor) -> Tensor:
+        (x,) = ctx.saved_tensors
+        positive = x > 0
+        root = torch.sqrt(torch.where(positive, x, torch.ones_like(x)))
+        return torch.where(positive, grad * 0.5 / root, torch.zeros_like(grad))
+
+
+def pow_half(x: Tensor) -> Tensor:
+    """``x ** 0.5`` bitwise as Python computes it; gradient 0 at ``x == 0``."""
+    return _PowHalf.apply(_f64(x))
+
+
+class Storage(Node):
+    """``Storage`` (``storage.py:15-143``): a node around one :class:`Tank`.
+
+    Constructor parameters come from ``spec.parameters`` (``capacity``, ``area``, ``datum``,
+    ``initial_storage``: a volume or a VQIP mapping); :meth:`bind` replaces them with the day's
+    (batched) values. The tank is ``self.tank``.
+    """
+
+    wsimod_type: ClassVar[str] = "Storage"
+    store_paths: ClassVar[tuple[str, ...]] = ("tank.storage",)
+    step_methods: ClassVar[tuple[str, ...]] = ("distribute",)
+    distributes: ClassVar[tuple[str, ...]] = ("out",)  # distribute's push_distributed
+    # storage.py:76: the storage change is the engine's, from the stores (D11)
+    mass_balance: ClassVar[dict[str, str]] = {}
+    # parameter name -> WSIMOD default, the node's own numeric parameters (bind replaces them)
+    parameter_defaults: ClassVar[dict[str, float]] = {}
+
+    def __init__(self, spec: NodeSpec, pollutants: Pollutants) -> None:
+        super().__init__(spec, pollutants)
+        self.site = f"node:{self.name}"
+        self._ctx: Ctx | None = None
+        values = spec.parameters
+        self.defaults: dict[str, Tensor] = {
+            name: _f64(values.get(name, default))
+            for name, default in self.parameter_defaults.items()
+        }
+        self.tank = self._make_tank(values)
+        self._set_handlers()
+
+    # --- construction -----------------------------------------------------------------------
+    def _initial_storage(self, values: Mapping) -> Tensor:
+        """``Tank``'s ``initial_storage`` (``tanks.py:36-53``): a number is a volume, a mapping
+        a VQIP (keys outside the run's pollutants are left out, as a quantity-only run does)."""
+        initial = values.get("initial_storage", 0)
+        if isinstance(initial, Mapping):
+            known = {k: v for k, v in initial.items() if k == "volume" or k in self.p.names}
+            return self.p.to_vqip(known)
+        return _f64(initial)
+
+    def _make_tank(self, values: Mapping) -> Tank:
+        """``storage.py:53-59``: a plain tank (``decays`` is ``None``)."""
+        return Tank(
+            self.p,
+            capacity=_f64(values.get("capacity", 0)),
+            area=_f64(values.get("area", 0)),
+            datum=_f64(values.get("datum", 0)),
+            initial_storage=self._initial_storage(values),
+            owner=self.name,
+            path="tank",
+        )
+
+    def _set_handlers(self) -> None:
+        """``storage.py:70-73``."""
+        self.push_set_handler["default"] = self.push_set_storage
+        self.push_check_handler["default"] = self._push_check_tank
+        self.pull_set_handler["default"] = self._pull_set_tank
+        self.pull_check_handler["default"] = self._pull_check_tank
+
+    @property
+    def ctx(self) -> Ctx:
+        if self._ctx is None:
+            raise RuntimeError(f"node {self.name!r}: no day context")
+        return self._ctx
+
+    @ctx.setter
+    def ctx(self, ctx: Ctx) -> None:
+        self._ctx = ctx
+        for tank in self._tanks():
+            tank.ctx = ctx
+
+    def _tanks(self) -> list[Tank]:
+        return [self.tank]
+
+    def bind(self, parameters: Mapping[str, Tensor]) -> None:
+        """This day's parameters by name: ``capacity``, ``area`` and ``datum`` reach the tank;
+        the class's own parameters (``parameter_defaults``) are read by name."""
+        super().bind(parameters)
+        for tank in self._tanks():
+            for name in ("capacity", "area", "datum"):
+                if name in self.params:
+                    setattr(tank, name, self.params[name])
+
+    def _param(self, name: str) -> Tensor:
+        return self.params.get(name, self.defaults[name])
+
+    def _volume(self, volume: Tensor) -> Tensor:
+        return self._volume_vqip(volume)
+
+    # --- the handlers (storage.py:70-73, :106-118) --------------------------------------------
+    def push_set_storage(self, vqip: Tensor, *, active: Tensor) -> Tensor:
+        """``storage.py:106-118``: the tank's ``push_storage``; returns what it rejects."""
+        return self.tank.push_storage(vqip, active=active)
+
+    def _push_check_tank(self, vqip: Tensor | None = None, *, active: Tensor) -> Tensor:
+        return self.tank.get_excess(vqip, active=active)
+
+    def _pull_set_tank(self, vqip: Tensor, *, active: Tensor) -> Tensor:
+        return self.tank.pull_storage(vqip, active=active)
+
+    def _pull_check_tank(self, vqip: Tensor | None = None, *, active: Tensor) -> Tensor:
+        return self.tank.get_avail(vqip, active=active)
+
+    # --- state ------------------------------------------------------------------------------
+    def stores(self) -> dict[str, Tensor]:
+        return {f"tank.{path}": value for path, value in self.tank.stores().items()}
+
+    def end_timestep(self) -> None:
+        """``storage.py:134-136``."""
+        self.tank.end_timestep()
+
+    # --- orchestration ----------------------------------------------------------------------
+    def _force_back(self, retained: Tensor, event: str, *, active: Tensor) -> None:
+        """``_ = tank.push_storage(retained, force=True)`` and the print when ``retained`` is
+        above ``FLOAT_ACCURACY`` (``storage.py:125-127``, ``:227-229``)."""
+        self.tank.push_storage(retained, force=True, active=active)
+        self.ctx.event(event, self.name, active & (retained[..., 0] > self.ctx.fa).detach())
+
+    def distribute(self, *, active: Tensor) -> None:
+        """``storage.py:120-127``: discharge all of the tank's storage with
+        ``push_distributed`` (no ``of_type``) and force back what is not pushed."""
+        storage = self.tank.pull_storage(self.tank.get_avail(active=active), active=active)
+        retained = self.push_distributed(storage, active=active)
+        self._force_back(retained, "storage_unable_to_push", active=active)
+
+    # --- validation -------------------------------------------------------------------------
+    @classmethod
+    def validate(cls, spec: NodeSpec, network: WsimodNetwork, *, pollutants: bool) -> list[str]:
+        """``decays`` other than ``None`` builds a ``DecayTank`` (``storage.py:53``, ``:300``)
+        and is refused (3b). A quantity-only run ignores a VQIP ``initial_storage``'s
+        pollutants."""
+        super().validate(spec, network, pollutants=pollutants)
+        decays = spec.parameters.get("decays")
+        if decays is not None:
+            raise ValueError(
+                f"node {spec.name!r}: 'decays' {decays!r} is not supported (decay is "
+                "sub-project 3b); use decays: None"
+            )
+        initial = spec.parameters.get("initial_storage", 0)
+        if not pollutants and isinstance(initial, Mapping):
+            if any(k != "volume" for k in initial):
+                return ["initial_storage"]
+        return []
+
+    @classmethod
+    def check_recurses(cls, spec: NodeSpec, direction: str, tag: Tag) -> bool:
+        """The tank's ``get_excess`` and ``get_avail`` call no neighbour."""
+        return False
+
+
+class Groundwater(Storage):
+    """``Groundwater`` (``storage.py:146-245``): a tank with a residence time, and infiltration
+    to sewers above a threshold."""
+
+    wsimod_type: ClassVar[str] = "Groundwater"
+    step_methods: ClassVar[tuple[str, ...]] = ("infiltrate", "distribute")
+    parameter_defaults: ClassVar[dict[str, float]] = {
+        "residence_time": 200,
+        "infiltration_threshold": 1,
+        "infiltration_pct": 0,
+    }
+
+    def distribute(self, *, active: Tensor) -> None:
+        """``storage.py:222-229``: ``V / residence_time`` to Node, River and Waste, the rest
+        forced back."""
+        avail = self.tank.get_avail(active=active)[..., 0] / self._param("residence_time")
+        to_send = self.tank.pull_storage(self._volume(avail), active=active)
+        retained = self.push_distributed(to_send, of_type=DOWNSTREAM_TYPES, active=active)
+        self._force_back(retained, "storage_unable_to_push", active=active)
+
+    def infiltrate(self, *, active: Tensor) -> None:
+        """``storage.py:231-245``: ``(max(V - capacity x threshold, 0) x pct) ** 0.5`` pushed to
+        Sewer nodes, the rest left in the tank.
+
+        The root is Python's ``** 0.5`` (:func:`pow_half`), with gradient 0 where the argument
+        is 0: the slope of the root is infinite at 0+ and is not propagated.
+        """
+        ctx, tank = self.ctx, self.tank
+        call = ctx.call(self.site, "infiltrate")
+        avail = tank.get_avail(active=active)[..., 0]
+        excess = dmax(
+            ctx,
+            f"{self.site}/infiltrate/excess",
+            avail - tank.capacity * self._param("infiltration_threshold"),
+            0.0,
+            active=active,
+            call=call,
+        )
+        avail = pow_half(excess * self._param("infiltration_pct"))
+        to_send = tank.pull_storage(self._volume(avail), active=active)
+        retained = self.push_distributed(to_send, of_type="Sewer", active=active)
+        tank.push_storage(retained, force=True, active=active)
+
+    @classmethod
+    def validate(cls, spec: NodeSpec, network: WsimodNetwork, *, pollutants: bool) -> list[str]:
+        """``residence_time`` divides the volume (``storage.py:224``) and the root's argument
+        must not be negative (``:236``: a negative base to ``0.5`` is a complex number)."""
+        ignored = super().validate(spec, network, pollutants=pollutants)
+        if float(spec.parameters.get("residence_time", 200)) == 0:
+            raise ValueError(f"node {spec.name!r}: residence_time is 0 (storage.py:224 divides)")
+        if float(spec.parameters.get("infiltration_pct", 0)) < 0:
+            raise ValueError(f"node {spec.name!r}: infiltration_pct is negative (storage.py:236)")
+        return ignored
+
+
+class QueueGroundwater(Storage):
+    """``QueueGroundwater`` (``storage.py:248-433``): baseflow routed by a time-area diagram
+    through a :class:`QueueTank`. WSIMOD renames the class ``Groundwater`` (``:294``).
+
+    Its push check is a **frozen plain tank's** ``get_excess``: ``Storage.__init__`` binds the
+    handler to the tank it builds first (``storage.py:53-59``, ``:71``), and ``QueueGroundwater``
+    then replaces ``self.tank`` by the ``QueueTank`` (``:301``) without rebinding it. The check
+    therefore reports ``max(capacity - initial storage, 0)`` for ever, which ``check_tank``
+    reproduces (it is never pushed into). The pull handlers are rebound (``:297-298``).
+    """
+
+    wsimod_type: ClassVar[str] = "Groundwater"
+    store_paths: ClassVar[tuple[str, ...]] = (
+        "tank.storage",
+        "tank.active_storage",
+        "tank.internal_arc.register",
+        "tank.internal_arc.present",
+    )
+    step_methods: ClassVar[tuple[str, ...]] = ("infiltrate", "distribute")
+
+    def __init__(self, spec: NodeSpec, pollutants: Pollutants) -> None:
+        values = spec.parameters
+        where = f"node {spec.name!r}"
+        timearea = values.get("timearea", {0: 1})
+        self.timearea: dict[int, Tensor] = {
+            check_travel_time(where, "timearea key", k): _f64(v) for k, v in timearea.items()
+        }
+        super().__init__(spec, pollutants)
+        # storage.py:301-306 (the first tank built is the frozen one; see the class text)
+        self.check_tank = Tank(
+            self.p,
+            capacity=self.tank.capacity,
+            area=self.tank.area,
+            datum=self.tank.datum,
+            initial_storage=self._initial_storage(values),
+            owner=self.name,
+            path="check_tank",
+        )
+        self.push_check_handler["default"] = self._push_check_frozen
+
+    def _make_tank(self, values: Mapping) -> QueueTank:
+        return QueueTank(
+            self.p,
+            number_of_timesteps=0,
+            push_times=tuple(self.timearea),
+            capacity=_f64(values.get("capacity", 0)),
+            area=_f64(values.get("area", 0)),
+            datum=_f64(values.get("datum", 0)),
+            initial_storage=self._initial_storage(values),
+            owner=self.name,
+            path="tank",
+        )
+
+    def _set_handlers(self) -> None:
+        """``storage.py:296-298``; the push check stays the frozen tank's (see the class)."""
+        super()._set_handlers()
+        self.push_set_handler["default"] = self.push_set_timearea
+        self.pull_set_handler["default"] = self.pull_set_active
+        self.pull_check_handler["default"] = self.pull_check_active
+
+    def _tanks(self) -> list[Tank]:
+        return [self.tank, self.check_tank] if hasattr(self, "check_tank") else [self.tank]
+
+    def _push_check_frozen(self, vqip: Tensor | None = None, *, active: Tensor) -> Tensor:
+        """``storage.py:71`` bound to the first tank (see the class text)."""
+        return self.check_tank.get_excess(vqip, active=active)
+
+    def push_set_timearea(self, vqip: Tensor, *, active: Tensor) -> Tensor:
+        """``storage.py:330-348``: split the push over the time-area diagram, each share into
+        the tank under its time; the replies are summed."""
+        p = self.p
+        reply = self.ctx.empty()
+        for time, normalised in self.timearea.items():
+            share = v_change_vqip(p, vqip, vqip[..., 0] * normalised)
+            reply_ = self.tank.push_storage(share, active=active, time=time)
+            reply = sum_vqip(p, reply, reply_)
+        return reply
+
+    def distribute(self, *, active: Tensor) -> None:
+        """``storage.py:350-364``: ``update_queue``, push all ``active_storage``, pull what was
+        sent."""
+        p, ctx, tank = self.p, self.ctx, self.tank
+        tank.internal_arc.update_queue(active=active)
+        remaining = self.push_distributed(tank.active_storage, active=active)
+        ctx.event(
+            "groundwater_couldnt_push_all",
+            self.name,
+            active & (remaining[..., 0] > ctx.fa).detach(),
+        )
+        sent = v_change_vqip(
+            p, tank.active_storage, tank.active_storage[..., 0] - remaining[..., 0]
+        )
+        reply = tank.pull_storage(sent, active=active)
+        ctx.event(
+            "miscalculated_tank_storage",
+            self.name,
+            active & ((reply[..., 0] - sent[..., 0]) > ctx.fa).detach(),
+        )
+
+    def infiltrate(self, *, active: Tensor) -> None:
+        """``storage.py:366-368``: nothing."""
+
+    def pull_check_active(self, vqip: Tensor | None = None, *, active: Tensor) -> Tensor:
+        """``storage.py:370-384``: the active storage, at ``min(request, V)`` when a request is
+        given."""
+        tank = self.tank
+        if vqip is None:
+            return tank.active_storage
+        volume = dmin(
+            self.ctx,
+            f"{self.site}/pull_check_active/clip",
+            vqip[..., 0],
+            tank.active_storage[..., 0],
+            active=active,
+            call=self.ctx.call(self.site, "pull_check_active"),
+        )
+        return v_change_vqip(self.p, tank.active_storage, volume)
+
+    def pull_set_active(self, vqip: Tensor, *, active: Tensor) -> Tensor:
+        """``storage.py:386-433``: pull ``min(total storage, request)`` pro rata from every
+        queue slot and the active store, each in proportion to its volume over the **total**
+        storage (inconsistent with :meth:`pull_check_active`, as WSIMOD notes), then take the
+        sum out of ``storage``. A pull below ``FLOAT_ACCURACY`` returns empty.
+
+        WSIMOD walks the queue dict in insertion order; the slots are walked in ascending time,
+        and a slot absent from WSIMOD's key set (``present``) is skipped. The two orders agree
+        for a time-area whose keys are contiguous and entered in ascending order.
+        """
+        p, ctx, tank = self.p, self.ctx, self.tank
+        active = torch.as_tensor(active, dtype=torch.bool)
+        call = ctx.call(self.site, "pull_set_active")
+        total_storage = tank.storage[..., 0]
+        total_pull = dmin(
+            ctx,
+            f"{self.site}/pull_set_active/clip",
+            total_storage,
+            vqip[..., 0],
+            active=active,
+            call=call,
+        )
+        small = ctx.decide(
+            f"{self.site}/pull_set_active/below_fa",
+            total_pull,
+            "<",
+            ctx.fa,
+            active=active,
+            call=call,
+        )
+        run = active & ~small
+        den = safe_den(total_storage)
+        arc = tank.internal_arc
+        pulled = ctx.empty()
+        for t in range(arc.length + 1):
+            row = arc.register[..., t, :]
+            here = arc.present[..., t] & run
+            t_pulled = v_change_vqip(p, row, row[..., 0] * total_pull / den)
+            arc.register = _put_row(arc.register, t, extract_vqip(p, row, t_pulled), here)
+            pulled = write(here, sum_vqip(p, pulled, t_pulled), pulled)
+        storage = tank.active_storage
+        a_pulled = v_change_vqip(p, storage, storage[..., 0] * total_pull / den)
+        tank.active_storage = write(run, extract_vqip(p, storage, a_pulled), storage)
+        pulled = write(run, sum_vqip(p, pulled, a_pulled), pulled)
+        tank.storage = write(run, extract_vqip(p, tank.storage, pulled), tank.storage)
+        return pulled
+
+    @classmethod
+    def validate(cls, spec: NodeSpec, network: WsimodNetwork, *, pollutants: bool) -> list[str]:
+        """Every time-area key and the tank's ``number_of_timesteps`` (0 here) are whole numbers
+        of days >= 0 (W50; an ``AltQueueArc`` shifts integer keys only, ``arcs.py:653-660``)."""
+        ignored = super().validate(spec, network, pollutants=pollutants)
+        where = f"node {spec.name!r}"
+        timearea = spec.parameters.get("timearea", {0: 1})
+        if not isinstance(timearea, Mapping) or not timearea:
+            raise ValueError(f"{where}: timearea {timearea!r} is not a non-empty mapping")
+        for key in timearea:
+            check_travel_time(where, "timearea key", key)
+        check_travel_time(where, "number_of_timesteps", 0)
+        return ignored
+
+
+class Reservoir(Storage):
+    """``Reservoir`` (``storage.py:958-989``): a tank refilled by pulling through its in-arcs."""
+
+    wsimod_type: ClassVar[str] = "Reservoir"
+    step_methods: ClassVar[tuple[str, ...]] = ("distribute", "make_abstractions")
+    distributes: ClassVar[tuple[str, ...]] = ("out", "in")
+
+    def make_abstractions(self, *, active: Tensor) -> None:
+        """``storage.py:983-989``: pull the tank's excess (the full VQIP) from upstream, push it
+        into the tank without force, then force the spill in too. The tank is never clamped:
+        a tank above capacity has no excess, and anything pulled all spills back in
+        (``reservoir_spill``; nothing is pushed downstream)."""
+        reply = self.pull_distributed(self.tank.get_excess(active=active), active=active)
+        spill = self.tank.push_storage(reply, active=active)
+        self.tank.push_storage(spill, force=True, active=active)
+        self.ctx.event(
+            "reservoir_spill", self.name, active & (spill[..., 0] > self.ctx.fa).detach()
+        )
+
+
+class RiverReservoir(Reservoir):
+    """``RiverReservoir`` (``storage.py:992-1133``): a reservoir that receives water from its
+    in-arcs, spills downstream and owes an environmental flow. WSIMOD renames the class
+    ``Reservoir`` (``:1043``)."""
+
+    wsimod_type: ClassVar[str] = "Reservoir"
+    store_paths: ClassVar[tuple[str, ...]] = ("tank.storage", "total_environmental_satisfied")
+    step_methods: ClassVar[tuple[str, ...]] = (
+        "distribute",
+        "make_abstractions",
+        "satisfy_environmental",
+    )
+    distributes: ClassVar[tuple[str, ...]] = ("out", "in")
+    parameter_defaults: ClassVar[dict[str, float]] = {"environmental_flow": 0}
+
+    def __init__(self, spec: NodeSpec, pollutants: Pollutants) -> None:
+        super().__init__(spec, pollutants)
+        # storage.py:1019
+        self.total_environmental_satisfied = torch.zeros((), dtype=torch.float64)
+
+    def _set_handlers(self) -> None:
+        """``storage.py:1021-1022``."""
+        super()._set_handlers()
+        self.push_set_handler["default"] = self.push_set_river_reservoir
+        self.push_check_handler["default"] = self.push_check_river_reservoir
+
+    def stores(self) -> dict[str, Tensor]:
+        return {
+            **super().stores(),
+            "total_environmental_satisfied": self.total_environmental_satisfied,
+        }
+
+    def end_timestep(self) -> None:
+        """``storage.py:1130-1133``."""
+        super().end_timestep()
+        self.total_environmental_satisfied = torch.zeros((), dtype=torch.float64)
+
+    def push_set_river_reservoir(self, vqip: Tensor, *, active: Tensor) -> Tensor:
+        """``storage.py:1060-1084``: force the water in, pull the ponded water out and push it
+        downstream; what goes downstream counts as environmental flow."""
+        self.tank.push_storage(vqip, force=True, active=active)
+        spill = self.tank.pull_ponded(active=active)
+        reply = self.push_distributed(spill, of_type=DOWNSTREAM_TYPES, active=active)
+        satisfied = self.total_environmental_satisfied + (spill[..., 0] - reply[..., 0])
+        self.total_environmental_satisfied = write(
+            active, satisfied, self.total_environmental_satisfied
+        )
+        return reply
+
+    def push_check_river_reservoir(self, vqip: Tensor | None = None, *, active: Tensor) -> Tensor:
+        """``storage.py:1086-1110``: the tank's excess plus the downstream ``avail``, clipped to
+        the request when one is given."""
+        ctx = self.ctx
+        downstream = self.get_connected("push", DOWNSTREAM_TYPES, active=active).avail
+        excess = self.tank.get_excess(active=active)
+        new_v = excess[..., 0] + downstream
+        if vqip is not None:
+            new_v = dmin(
+                ctx,
+                f"{self.site}/push_check_river_reservoir/clip",
+                vqip[..., 0],
+                new_v,
+                active=active,
+                call=ctx.call(self.site, "push_check_river_reservoir"),
+            )
+        return v_change_vqip(self.p, excess, new_v)
+
+    def satisfy_environmental(self, *, active: Tensor) -> None:
+        """``storage.py:1112-1128``: pull what is still owed from the tank, push it on
+        (``push_distributed``, no ``of_type``) and force back the rest."""
+        ctx, tank = self.ctx, self.tank
+        to_satisfy = dmax(
+            ctx,
+            f"{self.site}/satisfy_environmental/owed",
+            self._param("environmental_flow") - self.total_environmental_satisfied,
+            0.0,
+            active=active,
+            call=ctx.call(self.site, "satisfy_environmental"),
+        )
+        environmental = tank.pull_storage(self._volume(to_satisfy), active=active)
+        reply = self.push_distributed(environmental, active=active)
+        tank.push_storage(reply, force=True, active=active)
+        ctx.event(
+            "environmental_not_able_to_push", self.name, active & (reply[..., 0] > ctx.fa).detach()
+        )
+        satisfied = self.total_environmental_satisfied + environmental[..., 0]
+        self.total_environmental_satisfied = write(
+            active, satisfied, self.total_environmental_satisfied
+        )
+
+    @classmethod
+    def check_recurses(cls, spec: NodeSpec, direction: str, tag: Tag) -> bool:
+        """The push check asks the downstream arcs (``get_connected``, ``storage.py:1102``)."""
+        return direction == "push" and tag == "default"
+
+
+NODE_CLASSES.update(
+    {
+        "Storage": Storage,
+        "Groundwater": Groundwater,
+        "QueueGroundwater": QueueGroundwater,
+        "Reservoir": Reservoir,
+        "RiverReservoir": RiverReservoir,
+    }
+)

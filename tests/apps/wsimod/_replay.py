@@ -227,6 +227,53 @@ class StoreNode(Node):
         return self._clip(self._spare(), vqip)
 
 
+def _is_register(path: str) -> bool:
+    return path.endswith("internal_arc.register")
+
+
+def _is_present(path: str) -> bool:
+    return path.endswith("internal_arc.present")
+
+
+def load_value(p: Pollutants, node: Node, path: str, value) -> Tensor:
+    """A captured store as the noodl tensor ``Node.load_stores`` takes. A ``QueueTank``'s queue
+    is WSIMOD's ``{time: vqip}`` dict, captured under the ``register`` path, and its key list
+    under the ``present`` path; a store that is a number is a scalar."""
+    if _is_register(path):
+        length = node.tank.internal_arc.length
+        rows = torch.zeros(length + 1, 1 + p.K, dtype=torch.float64)
+        for time, vqip in value.items():
+            rows[time] = to_vqip(p, vqip)
+        return rows
+    if _is_present(path):
+        mask = torch.zeros(node.tank.internal_arc.length + 1, dtype=torch.bool)
+        mask[list(value)] = True
+        return mask
+    if isinstance(value, Mapping):
+        return to_vqip(p, value)
+    return torch.tensor(float(value), dtype=torch.float64)
+
+
+def compare_store(compare: _Comparer, label: str, path: str, ours: Tensor, theirs) -> None:
+    """``ours`` against the captured store ``theirs`` (see :func:`load_value`); an absent queue
+    key is an empty row."""
+    if _is_register(path):
+        for time in range(ours.shape[-2]):
+            vqip = theirs.get(time)
+            row = {} if vqip is None else vqip
+            expected = {k: row.get(k, 0.0) for k in _keys(compare.p)}
+            compare.vqip(f"{label}[{time}]", ours[..., time, :], expected)
+    elif _is_present(path):
+        keys = sorted(theirs)
+        got = [t for t in range(ours.shape[-1]) if bool(ours[..., t])]
+        if got != keys:
+            raise Mismatch(f"{label}: noodl's key set {got}, WSIMOD's {keys}")
+    elif isinstance(theirs, Mapping):
+        compare.vqip(label, ours, theirs)
+    else:
+        compare.value(label, ours, theirs)
+
+
 def _spec(network: WsimodNetwork, name: str) -> NodeSpec:
     for spec in network.nodes:
         if spec.name == name:
@@ -283,7 +330,9 @@ def replay(
             arc.flow_in = torch.tensor(float(flow_in), dtype=torch.float64)
             arc.vqip_in = to_vqip(p, call.pre.get(f"arcs.{arc.name}.vqip_in", {}))
         node.bind(node.configured_parameters(network.dates[call.day]))
-        node.load_stores({path: to_vqip(p, call.pre[path]) for path in node.store_paths})
+        node.load_stores(
+            {path: load_value(p, node, path, call.pre[path]) for path in node.store_paths}
+        )
         if call.method in type(node).step_methods:
             reply = getattr(node, call.method)(active=active)
         else:
@@ -295,7 +344,7 @@ def replay(
             compare.vqip(f"{label} reply", reply, call.reply)
         stores = node.stores()
         for path in node.store_paths:
-            compare.vqip(f"{label} post {path}", stores[path], call.post[path])
+            compare_store(compare, f"{label} post {path}", path, stores[path], call.post[path])
         for arc in arcs.values():
             key = f"arcs.{arc.name}"
             if f"{key}.flow_in" in call.post:
