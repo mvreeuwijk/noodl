@@ -191,6 +191,9 @@ Two rules worth stating explicitly, because both produce wrong answers rather th
   `forward` or a forward hook is part of the law. On a layer without flow unknowns, which
   otherwise calls `flow` and `dflow` directly, such a law is evaluated by its module call
   and its slope is taken from that call by autograd, with or without `differentiable`.
+  The solve's starting guess, the storage-ramp fallback, the layer's public `jacobian`,
+  `dflows` and `adjoint`, and a layer with flow unknowns still use each law's own
+  `jacobian` or `dflow`, so a hook there changes the root but not those slopes.
 
 ## Implicit, coupled and dynamic constitutive laws
 
