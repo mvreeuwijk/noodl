@@ -22,6 +22,11 @@ from noodl.apps.water.network import (
 )
 from noodl.apps.water.simulate import WaterResults, pattern_factor, water_run
 
+# A closed link's flow is an unknown of the Newton solve whose row is `kappa q = 0`, so it
+# is zero to round-off (flows here are ~1e-2 m3/s, eps ~ 2e-16: well below 1e-15), not
+# bit-exactly, and the last bit depends on the BLAS.
+ZERO_FLOW = 1e-15
+
 F64 = torch.float64
 NET1 = Path(__file__).resolve().parents[2] / "data" / "water" / "Net1.inp"
 
@@ -136,7 +141,7 @@ def test_a_speed_pattern_drives_the_pump_and_zero_stops_it():
     assert out.status[:, pump].tolist() == [OPEN, CLOSED, OPEN, OPEN]
     torch.testing.assert_close(out.setting[:, pump], torch.tensor([1.0, 0.0, 0.8, 1.2],
                                                                   dtype=F64))
-    assert float(out.flow[1, pump]) == 0.0
+    assert abs(float(out.flow[1, pump])) <= ZERO_FLOW
     assert float(out.flow[3, pump]) > float(out.flow[2, pump]) > 0.0
 
 

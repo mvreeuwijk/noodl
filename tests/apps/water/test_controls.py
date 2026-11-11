@@ -27,6 +27,11 @@ from noodl.apps.water.network import (
 )
 from noodl.apps.water.simulate import water_run
 
+# A closed link's flow is an unknown of the Newton solve whose row is `kappa q = 0`, so it
+# is zero to round-off (flows here are ~1e-2 m3/s, eps ~ 2e-16: well below 1e-15), not
+# bit-exactly, and the last bit depends on the BLAS.
+ZERO_FLOW = 1e-15
+
 F64 = torch.float64
 LINKS = ["P1", "PU", "V1"]
 KINDS = ["PIPE", "PUMP", "VALVE"]
@@ -156,7 +161,7 @@ def test_pressure_control_needs_a_resolve():
     assert float(open_flows[1]) != 0.0   # P2 carries water without the control
     out = water_steady(model, state, drivers)
     assert out["water.link_status"][1].item() == CLOSED
-    assert float(out["water.q"][1]) == 0.0
+    assert abs(float(out["water.q"][1])) <= ZERO_FLOW
     assert float(out["water.q"][0]) == pytest.approx(0.005, abs=1e-9)
 
 
@@ -207,9 +212,9 @@ def test_time_controls_act_in_a_network_over_time():
     state = water_steady(model, state, at(0.0))
     assert float(state["water.q"][1]) != 0.0
     state = water_steady(model, state, at(3600.0))
-    assert float(state["water.q"][1]) == 0.0 and state["water.link_status"][1] == CLOSED
+    assert abs(float(state["water.q"][1])) <= ZERO_FLOW and state["water.link_status"][1] == CLOSED
     state = water_steady(model, state, at(7200.0))
-    assert float(state["water.q"][1]) == 0.0
+    assert abs(float(state["water.q"][1])) <= ZERO_FLOW
 
 
 def test_a_step_ends_at_the_next_time_control():
@@ -227,7 +232,7 @@ def test_a_step_ends_at_the_next_time_control():
     out = water_run(model, diagnostics=diagnostics)
     assert diagnostics["times"] == [0.0, 600.0, 3600.0, 7200.0]
     assert float(out.flow[0, 1]) > 0.0
-    assert float(out.flow[1, 1]) == 0.0 and int(out.status[1, 1]) == CLOSED
+    assert abs(float(out.flow[1, 1])) <= ZERO_FLOW and int(out.status[1, 1]) == CLOSED
 
 
 def test_a_time_control_without_the_time_driver_is_refused_by_name():
@@ -402,4 +407,5 @@ def test_a_pressure_switch_loop_that_has_settled_on_its_last_solve_is_not_an_err
     model, state, drivers = build_model(net)
     monkeypatch.setattr(network, "MAX_PRESSURE_SWITCHES", 1)
     out = water_steady(model, state, drivers)
-    assert out["water.link_status"][1].item() == CLOSED and float(out["water.q"][1]) == 0.0
+    assert out["water.link_status"][1].item() == CLOSED
+    assert abs(float(out["water.q"][1])) <= ZERO_FLOW
