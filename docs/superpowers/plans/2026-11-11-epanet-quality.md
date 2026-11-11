@@ -136,7 +136,7 @@ def edited(source: Path, tmp_path: Path, name: str, *, add: Mapping[str, Sequenc
            replace: Sequence[tuple[str, str]] = ()) -> Path
     # noodl's input: literal replacements (each must match), lines appended to named sections
     # (a missing section is created before [END])
-def epanet_copy(path: Path) -> Path   # + ACCURACY 1e-8, TRIALS 400, [REPORT] STATUS YES, before [END]
+def epanet_copy(path: Path) -> Path   # + ACCURACY 1e-8 (clamped to 1e-5; _open sets 1e-7), TRIALS 400, [REPORT] STATUS YES, before [END]
 @dataclass
 class QualityReference:
     times: list[int]                  # every EN_runQ time
@@ -330,7 +330,7 @@ ky4 (TRACE) and ky10 (AGE) ship with `DURATION 0`; their quality needs a 24 h ru
 **Files:**
 - Test: `tests/verification/test_water_networks.py`
 
-- [ ] **Step 1: Write the test** `test_ky_extended_period_hydraulics_match_epanet[ky4|ky10]` (slow): ` Duration           \t0` replaced by `24:00` (asserted to match), EPANET through the file's `_epanet` helper (ACCURACY 1e-8), `water_run(model, quality=False)`; heads 1e-5 relative, levels 2e-4 m, flows 1e-6 m³/s (ky4's `_KY4_PARALLEL` 3e-6), states equal, every report time.
+- [ ] **Step 1: Write the test** `test_ky_extended_period_hydraulics_match_epanet[ky4|ky10]` (slow): ` Duration           \t0` replaced by `24:00` (asserted to match), EPANET through the file's `_epanet` helper (`epanet_results`: the toolkit at a true ACCURACY 1e-7, Task 2b), `water_run(model, quality=False)`; heads 1e-5 relative, levels 2e-4 m, flows 1e-6 m³/s on every link (ky4's parallel-pair exemption was removed in Task 2b: 2.6e-7 at 1e-7), states equal, every report time.
 - [ ] **Step 2:** Run `-m slow`. A miss is debugged; a measured cause (as Net6's closed-link leak) is written beside a loosened bound and carried into Task 11. **Stop condition:** no cause found by the debugging skill's process: record the measured values, mark the test `xfail(strict=True, reason=<values>)`, skip Task 11, tell the user; Task 13's docs list ky4/ky10 quality as unverified.
 - [ ] **Step 3:** Commit: `test(water): ky4 and ky10 extended-period hydraulics against EPANET`.
 

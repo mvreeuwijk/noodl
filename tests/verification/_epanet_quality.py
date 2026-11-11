@@ -171,10 +171,32 @@ def _no_warnings(en, path) -> None:
 #: deliver, 6 negative pressures. 1 (unbalanced) and 2 (unstable: converged only with the
 #: statuses held) say the reference is no solution and are never permitted.
 NETWORK_STATE_WARNINGS = frozenset({3, 4, 5, 6})
-#: `writehydwarn`'s report lines for warnings 1 and 2 (`text.h`, WARN01 and WARN02), read
-#: from the report as well: the function returns one flag per step, the last it set, so a
-#: 4, 5 or 6 there hides a 2.
-_UNCONVERGED = ("WARNING: System unbalanced", "WARNING: Maximum trials exceeded")
+#: The report's warning lines (`text.h`: `writehydwarn`'s per-step WARN01 to WARN06, and
+#: the WARN1 to WARN6 summary) and their codes, read from the report as well as from wntr:
+#: `writehydwarn` returns one flag per step, the last it set (2, 6, 5, 4, 1 in that order),
+#: so an earlier warning hides behind a later one there. WARN05 starts with the valve's type.
+_REPORT_WARNINGS = (
+    ("WARNING: System unbalanced", 1), ("WARNING: System hydraulically unbalanced", 1),
+    ("WARNING: Maximum trials exceeded", 2), ("WARNING: System may be hydraulically", 2),
+    ("WARNING: Node ", 3), ("WARNING: System disconnected", 3),
+    ("additional nodes disconnected", 3), ("WARNING: Pump", 4),
+    ("WARNING: Valves cannot deliver", 5),
+    *((f"WARNING: {kind} ", 5) for kind in ("PRV", "PSV", "PBV", "FCV", "TCV", "GPV")),
+    ("WARNING: Negative pressures", 6), ("WARNING: System has negative pressures", 6),
+)
+
+
+def _report_warning_codes(report: str) -> list[int]:
+    """The code (1 to 6) of every `WARNING` line of an EPANET report; an unknown one fails."""
+    codes = []
+    for line in (ln.strip() for ln in report.splitlines()):
+        if "WARNING" not in line:
+            continue
+        found = {c for text, c in _REPORT_WARNINGS
+                 if line.startswith(text) or (not text.startswith("WARNING") and text in line)}
+        assert len(found) == 1, f"unrecognised EPANET report warning {line!r}"
+        codes.append(found.pop())
+    return codes
 
 
 def _warning_codes(en) -> list[int]:
@@ -323,10 +345,10 @@ def epanet_results(path: Path, *, duration: float | None = None, reader=None,
     the copy's TRIALS 400 (`EN_TRIALS`): a test that passes either says why. Refused if
     EPANET warned, but for the network-state warnings `warnings` names, each of which must
     occur (`NETWORK_STATE_WARNINGS`: the case is about a pump shut by its head, or a
-    negative pressure), and always on an unconverged or unstable step, read from the report
-    too (`_UNCONVERGED`). `duration` (s) sets `[TIMES] DURATION` in the copy; `reader` is
-    the `BinFile` (or a subclass keeping more of the file, e.g. its energy section) that
-    reads the output."""
+    negative pressure), and always on an unconverged or unstable step; every warning line of
+    the report counts too (`_REPORT_WARNINGS`). `duration` (s) sets `[TIMES] DURATION` in
+    the copy; `reader` is the `BinFile` (or a subclass keeping more of the file, e.g. its
+    energy section) that reads the output."""
     assert set(warnings) <= NETWORK_STATE_WARNINGS, warnings
     from wntr.epanet.io import BinFile
     with tempfile.TemporaryDirectory(prefix="epanet-r-", ignore_cleanup_errors=True) as tmp:
@@ -348,14 +370,14 @@ def epanet_results(path: Path, *, duration: float | None = None, reader=None,
             darcy_weisbach = option(en, EN_HEADLOSSFORM) == EN_DW
         finally:
             en.ENclose()
-        codes = _warning_codes(en)
-        unexpected = [c for c in codes if c not in warnings]
-        assert not unexpected, f"EPANET warned on {path}: {en.errcodelist}"
-        absent = set(warnings) - set(codes)
+        text = report.read_text(errors="replace")
+        codes = set(_warning_codes(en)) | set(_report_warning_codes(text))
+        unexpected = sorted(codes - set(warnings))
+        lines = [ln.strip() for ln in text.splitlines() if "WARNING" in ln]
+        assert not unexpected, (f"EPANET warned ({unexpected}) on {path}: {en.errcodelist} "
+                                f"{lines[:3]}")
+        absent = set(warnings) - codes
         assert not absent, f"EPANET did not give the warnings {sorted(absent)} on {path}"
-        lines = [ln.strip() for ln in report.read_text(errors="replace").splitlines()]
-        unconverged = [ln for ln in lines if ln.startswith(_UNCONVERGED)]
-        assert not unconverged, f"EPANET did not converge on {path}: {unconverged[:3]}"
         return (reader or BinFile()).read(str(binary), False, darcy_weisbach)
 
 

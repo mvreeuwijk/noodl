@@ -2049,60 +2049,73 @@ def test_a_closed_prv_cutting_off_a_junction_is_held_at_the_limit_head(tmp_path)
 
 
 #: The reference ACCURACY of a network with no demand anywhere, every flow in it EPANET's
-#: closed-link leak (`dh / CBIG`): the copy's clamped 1e-5 (`epanet_results`,
-#: `accuracy=None`). EPANET's stopping test is the relative flow change (`hydsolver.c`,
-#: `newflows`), here against a total flow of leaks alone, and its answer is where the
-#: iteration stops. MEASURED at a true 1e-7 (400 trials): unbalanced, the change stalling
-#: at 8e-3 to 3.5e-1, for the PRV (R1 60 m) and the PSV (R1 40 m) feeding a dead end on
-#: their end, the PSV (R1 40 m) on its start, three of the four groups behind a pump, both
-#: stopped pumps and the pump and check valve without demand, their heads as at 1e-5;
-#: converged, but on another answer, for the dead end on a valve's start: the PRV (R1 60 m)
-#: at 64.4245, 61.3567 and 59.9298 m at 1e-6, 1e-7 and 1e-8 (60.000637 at 1e-5), the PRV
-#: (R1 40 m) and the PSV (R1 60 m) OPEN at the limit, 40 and 60 m, where this model and
-#: EPANET at 1e-5 have them CLOSED. At 1e-5 every one converges in 2 to 7 iterations: the
-#: values the tests record are that iterate's.
+#: closed-link leak (`dh / CBIG`), where EPANET does not converge at 1e-7: the copy's clamped
+#: 1e-5 (`epanet_results`, `accuracy=None`). EPANET's stopping test is the relative flow
+#: change (`hydsolver.c`, `newflows`), here against a total flow of leaks alone. MEASURED at
+#: a true 1e-7 (400 trials): unbalanced, the change stalling at 8e-3 to 3.5e-1, for the PRV
+#: (R1 60 m) and the PSV (R1 40 m) feeding a dead end on their end, the PSV (R1 40 m) on its
+#: start, three of the four groups behind a pump, both stopped pumps and the pump and check
+#: valve without demand, their heads as at 1e-5; and ill-conditioned for the PRV (R1 60 m)
+#: with the dead end on its start, 60.000637, 64.4245, 61.3567 and 59.9298 m at 1e-5, 1e-6,
+#: 1e-7 and 1e-8. At 1e-5 each converges in 2 to 7 iterations; the values recorded are that
+#: iterate's. Every other dead end runs at `REFERENCE_ACCURACY` (`_DEAD_ENDS`).
 _NO_FLOW_ACCURACY = None
 
-#: `(valve, R1, which end is the dead end, EPANET's state, EPANET's dead-end head or None)`:
-#: the dead end is J2 - P2 - J3 with no demand, on the valve's end (`"end"`: J1 -> J2) or its
-#: start (`"start"`: J2 -> J1). `None`: EPANET's head there is its own, compared exactly.
+#: `(valve, R1, which end is the dead end, this model's state, EPANET's state, EPANET's
+#: dead-end head or None, EPANET's accuracy)`: the dead end is J2 - P2 - J3 with no demand,
+#: on the valve's end (`"end"`: J1 -> J2) or its start (`"start"`: J2 -> J1). `None`:
+#: EPANET's head there is its own, compared at 1e-6 relative with everything else.
 _DEAD_ENDS = [
-    ("PRV", 60, "end", 2, None),          # ACTIVE at the setting
-    ("PRV", 40, "end", 1, None),          # OPEN at the upstream head
-    ("PSV", 60, "end", 1, None),          # OPEN at the upstream head
-    ("PSV", 40, "end", 0, 35.791393),     # CLOSED: the upstream head below the setting
-    ("PRV", 40, "start", 0, 39.996788),   # CLOSED: no water flows out of a dead end
-    ("PRV", 60, "start", 0, 60.000637),
-    ("PSV", 40, "start", 0, 39.996788),
-    ("PSV", 60, "start", 0, 53.687092),
+    # ACTIVE at the setting; at 1e-7 EPANET is unbalanced (`_NO_FLOW_ACCURACY`)
+    ("PRV", 60, "end", 2, 2, None, _NO_FLOW_ACCURACY),
+    ("PRV", 40, "end", 1, 1, None, REFERENCE_ACCURACY),       # OPEN at the upstream head
+    ("PSV", 60, "end", 1, 1, None, REFERENCE_ACCURACY),       # OPEN at the upstream head
+    # CLOSED: the upstream head below the setting; at 1e-7 EPANET is unbalanced
+    ("PSV", 40, "end", 0, 0, 35.791393, _NO_FLOW_ACCURACY),
+    # CLOSED here, OPEN in EPANET, both at the limit head 40 m (the state is not determined)
+    ("PRV", 40, "start", 0, 1, 40.0, REFERENCE_ACCURACY),
+    # ill-conditioned: EPANET's head moves with its accuracy (`_NO_FLOW_ACCURACY`)
+    ("PRV", 60, "start", 0, 0, 60.000637, _NO_FLOW_ACCURACY),
+    # at 1e-7 EPANET is unbalanced
+    ("PSV", 40, "start", 0, 0, 39.996788, _NO_FLOW_ACCURACY),
+    # CLOSED here, OPEN in EPANET, both at the limit head 60 m (the state is not determined)
+    ("PSV", 60, "start", 0, 1, 60.0, REFERENCE_ACCURACY),
 ]
 
 
-@pytest.mark.parametrize("valve, r1, side, expected, epanet_head", _DEAD_ENDS)
+@pytest.mark.parametrize("valve, r1, side, expected, epanet_state, epanet_head, accuracy",
+                         _DEAD_ENDS)
 def test_a_valve_feeding_a_dead_end_without_demand_matches_epanet(
-        tmp_path, valve, r1, side, expected, epanet_head):
+        tmp_path, valve, r1, side, expected, epanet_state, epanet_head, accuracy):
     """A PRV or PSV with a dead end on one side (J2 - P2 - J3, no demand, joined to the rest
-    only through the valve) carries no flow, and its state is EPANET's: on its end, a PRV
-    ACTIVE at its setting (upstream above it) or OPEN at the upstream head (below it), a PSV
-    OPEN, or CLOSED where the upstream head is below its setting; on its start, CLOSED
-    (`_PressureValve`, A DEAD END). Every flow matches to 1e-6 m3/s.
+    only through the valve) carries no flow: on its end, a PRV ACTIVE at its setting
+    (upstream above it) or OPEN at the upstream head (below it), a PSV OPEN, or CLOSED where
+    the upstream head is below its setting; on its start, CLOSED (`_PressureValve`, A DEAD
+    END). Every flow matches EPANET's to 1e-6 m3/s.
 
-    Where the valve is CLOSED the dead end has no head of its own: this model holds it at
+    Where this model's valve is CLOSED the dead end has no head of its own: it is held at
     the `1 / CBIG` limit, the valve's other end (`dp = 0`, as `_limit` does for any closed
-    link). EPANET's head there is not that limit (MEASURED, `epanet_head`: 3.2e-3 m and
-    6.4e-4 m off it; 53.687 m and 35.791 m, the values a closed TCV or PRV by `[STATUS]` in
-    its place has at the same accuracy, `test_a_closed_prv_cutting_off_a_junction_is_held_
-    at_the_limit_head`): compared as recorded, and every other head at 1e-6 relative. The
-    network has no demand: EPANET at `_NO_FLOW_ACCURACY`, with the cause."""
+    link). Converged, EPANET agrees on the head: MEASURED at ACCURACY 1e-7 and 1e-8 alike, no
+    warning, J2 = J3 = 40 m (PRV, R1 40 m) and 60 m (PSV, R1 60 m) on the valve's start,
+    exactly the limit, heads 0.0 and flows 1e-10 m3/s apart; but it reports the valve OPEN.
+    At zero flow between equal heads OPEN and CLOSED both satisfy every link, so the state is
+    not determined there; this model's CLOSED is asserted, and EPANET's OPEN, with that cause
+    (at 1e-5 EPANET stopped early, at 39.996788 and 53.687092 m, CLOSED). The other three
+    CLOSED cases keep EPANET at `_NO_FLOW_ACCURACY` (no converged answer at 1e-7; see there),
+    where its heads are its early stop, 3.2e-3 m and 6.4e-4 m off the limit and 35.791 m for
+    the PSV behind an upstream head below its setting: compared as recorded, every other
+    head at 1e-6 relative."""
     u, v = ("J1", "J2") if side == "end" else ("J2", "J1")
     text = _series_inp((("J1", 0), ("J2", 0), ("J3", 0)), (("R1", r1),),
                        (("P1", "R1", "J1"), ("P2", "J2", "J3")),
                        (("V1", u, v, valve, 50, 0),))
-    path, results = _run_inp(tmp_path, text, "dead", accuracy=_NO_FLOW_ACCURACY)
+    path, results = _run_inp(tmp_path, text, "dead", accuracy=accuracy)
     model, state, drivers = build_model(read_epanet_inp(path))
     final = water_steady(model, state, drivers)
     states = link_states(model, final, drivers).tolist()
-    assert states[model.link_names.index("V1")] == expected
+    k = model.link_names.index("V1")
+    assert states[k] == expected
+    assert int(results.link["status"].loc[0]["V1"]) == epanet_state
     if epanet_head is None:
         _compare_with_epanet(model, final, drivers, results)
         return
@@ -2111,6 +2124,15 @@ def test_a_valve_feeding_a_dead_end_without_demand_matches_epanet(
     for name in ("J2", "J3"):
         assert heads[name] == pytest.approx(heads["J1"], abs=1e-12)   # the limit
         assert float(reference[name]) == pytest.approx(epanet_head, abs=1e-5)
+    if epanet_state != expected:          # converged EPANET: OPEN at the limit head
+        assert _worst_heads(model, final, reference) < 1e-6
+        flows = results.link["flowrate"].loc[0]
+        assert max(abs(float(final["water.q"][i]) - float(flows[name]))
+                   for i, name in enumerate(model.link_names)) < 1e-6
+        status = results.link["status"].loc[0]
+        assert [s for i, s in enumerate(states) if i != k] == [
+            int(status[n]) for i, n in enumerate(model.link_names) if i != k]
+        return
     assert _worst_heads(model, final, reference, skip=("J2", "J3")) < 1e-6
     _compare_with_epanet(model, final, drivers, results, heads=0.2)
 
@@ -2961,7 +2983,7 @@ def test_emitters_behind_a_closed_pipe_match_epanet(tmp_path, case):
     EPANET's 0."""
     junctions, pipes, emitters = _BEHIND_A_CLOSED_PIPE[case]
     path, results = _run_inp(tmp_path, _series_text(junctions, pipes, emitters), case,
-                             warnings=(6,) if case == "demand-fed-by-an-emitter-inflow" else ())
+                             warnings=(3, 6) if case == "demand-fed-by-an-emitter-inflow" else ())
     net = read_epanet_inp(path)
     model, state, drivers = build_model(net)
     final = water_steady(model, state, drivers)
@@ -2973,7 +2995,8 @@ def test_emitters_behind_a_closed_pipe_match_epanet(tmp_path, case):
     # `pipecoeff`), so the 75 m across it leaks 7e-5 LPS, 1.4e-5 of the 5 LPS demand the
     # emitter supplies, which shifts the emitter's head by twice that; this model's closed
     # link carries zero to round-off (and the emitter's junction is at a negative pressure,
-    # EPANET's warning 6). The first two are 1e-6 relative to the 50 m reservoir.
+    # EPANET's warning 6, and, a demand behind a closed link, "disconnected", its warning 3,
+    # in the report). The first two are 1e-6 relative to the 50 m reservoir.
     tolerance = 1e-3 if case == "demand-fed-by-an-emitter-inflow" else 1e-6 * 50
     assert worst_h < tolerance, worst_h
     reference = results.link["flowrate"].loc[0]
@@ -3346,7 +3369,8 @@ def test_anytown_energy_matches_epanet(tmp_path):
     with a price and a demand charge: three pumps on the efficiency curve E1 (a three-point
     curve) and the Sarbu-Borza adjustment for a pump at speed 1.2 (the first one, edited; the
     other two are shut by the solve for a part of the day and draw no energy then). MEASURED:
-    2.6e-6. Over the day some junctions' pressures are negative, EPANET's warning 6."""
+    2.6e-6. Over the day some junctions' pressures are negative, EPANET's warning 6, and
+    pumps 79 and 80 are shut by their head, its warning 4 (in the report)."""
     path, _ = _anytown(tmp_path, placeholders=12)
     text = path.read_text()
     old = " Global Price       \t0\n Demand Charge      \t0\n"
@@ -3355,7 +3379,7 @@ def test_anytown_energy_matches_epanet(tmp_path):
     assert text.count("HEAD 2\t;") == 3
     text = text.replace("HEAD 2\t;", "HEAD 2\tSPEED 1.2\t;", 1)
     path.write_text(text)
-    worst, theirs, run = _compare_energy(path, warnings=(6,))
+    worst, theirs, run = _compare_energy(path, warnings=(4, 6))
     assert set(theirs) == {"78", "79", "80"}
     assert all(row[5] > 0 for row in theirs.values())
     assert worst < 1e-5, worst

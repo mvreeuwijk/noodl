@@ -975,15 +975,18 @@ independent loop is a property of the cycle-space formulation, and it holds exac
   same network at `ACCURACY 1e-7` and 1e-8 (53.687 m at 1e-5, where it stops after two
   iterations), with a PRV or a TCV alike
   (`test_a_closed_prv_cutting_off_a_junction_is_held_at_the_limit_head`, 1.2e-3 relative).
-  The same holds for a PRV or PSV that closes itself in front of a dead end: a PSV whose
-  upstream head (40 m) is below its setting, EPANET 35.791 m behind it; a valve with the dead
-  end on its start, EPANET 39.997, 60.0006 or 53.687 m against the limit's 40 or 60 m; the
-  states agree (`test_a_valve_feeding_a_dead_end_without_demand_matches_epanet`). These
-  networks have no demand at all, so EPANET's relative stopping test runs against its
-  closed-link leaks alone: they are compared with EPANET at 1e-5, as at 1e-7 it does not
-  converge on three of them and on the others reaches other heads and states (a dead end on
-  a valve's start at 64.42, 61.36 and 59.93 m at 1e-6, 1e-7 and 1e-8; two valves OPEN at the
-  limit head); the same holds for the zero-demand groups behind a pump below.
+  A PRV or PSV that closes itself in front of a dead end (no demand anywhere) is held at the
+  limit head too. With the dead end on the valve's start, EPANET converged (`ACCURACY` 1e-7
+  and 1e-8 alike) holds it at exactly that head, 40 m for a PRV under 40 m and 60 m for a PSV
+  under 60 m, but reports the valve OPEN where noodl reports it CLOSED: at zero flow between
+  equal heads both states satisfy every link, so the state is not determined there (at 1e-5
+  EPANET stops early, at 39.997 and 53.687 m, CLOSED). On three other dead-end networks
+  EPANET does not converge at 1e-7 at all (its relative stopping test runs against its
+  closed-link leaks alone) and on one, a PRV under 60 m with the dead end on its start, its
+  head moves with its accuracy (60.0006, 64.42, 61.36 and 59.93 m at 1e-5, 1e-6, 1e-7 and
+  1e-8); those are compared with EPANET at 1e-5, its early stop (35.791 m behind a PSV whose
+  upstream head of 40 m is below its setting), and so are the zero-demand groups behind a
+  pump below (`test_a_valve_feeding_a_dead_end_without_demand_matches_epanet`).
 - **A zero-demand group between a pump and a check valve to a higher reservoir has no
   unique head.** Every head from R1 plus the pump's shut-off head up to R2 satisfies every
   link with no flow anywhere. EPANET's value is set by the ratio of its closed-link leaks
