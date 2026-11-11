@@ -2055,7 +2055,7 @@ class FlowControlledPump(ImplicitLaw):
             if q0 is None:
                 if cols is None:
                     return None
-                parts.append(torch.zeros(len(cols), dtype=F64))
+                parts.append(curve.speed.new_zeros(len(cols), dtype=F64))
                 continue
             given = True
             q0 = q0.detach()

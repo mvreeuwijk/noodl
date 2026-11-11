@@ -117,3 +117,14 @@ def test_a_design_flow_that_does_not_broadcast_to_the_pumps_is_refused_by_name()
         PumpCurve(torch.tensor([101.6, 30.0], dtype=F64), torch.tensor([2836.0, 40.0],
                                                                        dtype=F64),
                   design_flow=torch.tensor([0.1, 0.2, 0.3], dtype=F64))
+
+
+def test_a_curve_without_a_design_flow_starts_at_zero_on_the_curves_device():
+    """The zeros of a curve without a design flow are made where the curves' tensors are
+    (here the `meta` device, which no CPU tensor may be concatenated with)."""
+    bare = PumpCurve(torch.tensor([101.6], dtype=F64), torch.tensor([2836.0], dtype=F64))
+    power = PumpCurve(torch.tensor([30.0], dtype=F64), torch.tensor([40.0], dtype=F64),
+                      design_flow=0.02)
+    law = FlowControlledPump([(bare, [0]), (power, [1])]).to("meta")
+    q = law.start_flow()
+    assert q.device.type == "meta" and q.shape == (2,)
