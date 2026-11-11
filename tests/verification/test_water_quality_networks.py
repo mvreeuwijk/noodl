@@ -23,6 +23,7 @@ import torch
 from noodl.apps.water.inp import read_epanet_inp
 from noodl.apps.water.network import build_model
 from noodl.apps.water.quality import EXACT_LITRES_PER_M3, QualityRouter, quality_step
+from noodl.apps.water.quality_tanks import QualityTolerance
 from noodl.apps.water.simulate import water_run
 from noodl.apps.water.units import EPANET_QCF, rounded_cfs_per_m3s
 
@@ -229,14 +230,19 @@ def _matrix(diagnostics: dict, reference: QualityReference) -> tuple[torch.Tenso
     return mine, theirs
 
 
-#: Net2's first merge tie: pipe 1 from junction 1 (the source) carries 0.09 mg/L through
-#: hour 30 and takes 0.08 mg/L from 31 h (pattern 3), 0.01 mg/L apart: `Ctol` exactly.
+#: Net2's merge ties: pipe 1 from junction 1 (the source) carries 0.09 mg/L through hour 30
+#: and takes 0.08 mg/L from 31 h (pattern 3), 0.01 mg/L apart: `Ctol` exactly; again 0.08 to
+#: 0.09 at 37 h and 0.09 to 0.08 at 49 h.
 _NET2_FIRST_TIE = 31 * 3600
-#: Pattern 3 and EPANET's junction-1 demand (cfs) as its hydraulics file saves them
-#: (float32; `savehyd`, `output.c`) at 30 h and 31 h, MEASURED (`EN_savehydfile`).
-_NET2_JUNCTION_1 = ((0.09, -1.3924171924591064), (0.08, -0.6962085962295532))
-#: EPANET's next tie it decides the other way (0.08 to 0.09 mg/L at 37 h, measured at 38 h).
+_NET2_LAST_TIE = 49 * 3600
+#: EPANET's 37 h tie, which it merges (measured at 38 h).
 _NET2_EPANET_MERGES = 38 * 3600
+#: Pipe 1's last segment and junction 1's outflow at the 31 h tie, MEASURED: EPANET's in its
+#: internal unit (its outflow from `findsourcequal` on its float32 saved demand,
+#: `EN_savehydfile`; its segment the reported 0.09000000000000001 mg/L), noodl's in mg/L
+#: after the merges of hour 30 (instrumented `QualityTolerance.merges`).
+_NET2_TIE_31H = {"EPANET": (2.5485300000000004, 2.2653600000000003),
+                 "noodl": (0.08999999999999998, 0.08)}
 
 
 @pytest.mark.slow
@@ -245,27 +251,30 @@ def test_net2_as_shipped_differs_from_epanet_only_at_its_ctol_ties(tmp_path):
     32 h and within `Ctol` everywhere; the rest is a decision at a `Ctol` tie, which the
     spec does not admit as accuracy (Ruling Q25) and this test identifies.
 
-    MEASURED: 791 of 4256 points beyond 1e-5 of the scale, all from 32 h (115200 s), the
-    first at pipe 1 (0.08283 mg/L in noodl, 0.08 in EPANET); worst 2.83e-3 mg/L there.
-    CAUSE: pattern 3 steps from 0.09 to 0.08 at 31 h (and at 49 h; 0.08 to 0.09 at 37 h),
-    and junction 1's outflow, `c = C0 F` (`findsourcequal`; junction 1 has no other inflow
-    and pipe 1 is its only outflow, so `-D dt / volout` is 1), meets pipe 1's last segment
-    at exactly `Ctol` (`evalnodeoutflow`: merged when `|c_seg - c| < Ctol`). noodl decides
-    in mg/L: `0.09 - 0.08 = 0.009999999999999995 < 0.01`, merged. EPANET decides in its
-    internal unit (`Ucf[QUALITY] = 1 / LperFT3`, `input1.c`, `initunits`; `C0 / Ucf`,
-    `sourcequal`), where `-c D dt / volout` on its saved float32 demand (`D` and pipe 1's
-    flow equal and opposite) rounds 28.317 x 0.09 up by an ulp at 30 h: `|2.5485300000000004
-    - 2.2653600000000003| = 0.28317000000000014`, not below `Ctol / Ucf = 0.28317`, a new
-    segment (`_NET2_JUNCTION_1`, read from `EN_savehydfile`). At 37 h EPANET
-    merges (its segment of 0.08 is a few ulps off after twelve merges of equal values). The
-    test checks the decisions from the runs: noodl at 0.01 is noodl at 0.01 + 1e-8 at every
-    point (merged at every tie); EPANET at 0.01 is EPANET at 0.01 - 1e-8 until 38 h
-    (not merged at 31 h), then neither; pipe 1 holds one segment in noodl after the first
-    quality step of hour 31, two where the tie is not merged. Off the tie both agree within
-    1e-5 of the scale (`test_net2_quality_matches_epanet`). Not a bug: the tie is decided by
-    the last bit of the arithmetic, which noodl, running in SI with float64 flows, does not
-    reproduce; noodl's router fed EPANET's own saved hydraulics makes the same decisions.
-    """
+    MEASURED: 667 of 4256 points beyond 1e-5 of the scale, all from 32 h (115200 s), the
+    first at pipe 1 (0.08283 mg/L in noodl, 0.08 in EPANET); worst 2.83e-3 mg/L there
+    (791 points before the decisions moved to EPANET's unit, Ruling Q32). CAUSE: pattern 3
+    steps by exactly `Ctol` at 31, 37 and 49 h, where junction 1's outflow meets pipe 1's
+    last segment (`evalnodeoutflow`: merged when `|c_seg - c| < Ctol`). noodl decides in
+    EPANET's internal unit (`QualityTolerance`), so a clean tie goes EPANET's way, and the
+    49 h one does (0.09000000000000001 against 0.08000000000000002 mg/L: not merged in
+    both). At 31 h the operands themselves differ in their last bits (`_NET2_TIE_31H`):
+    EPANET's segment holds 28.317 x 0.09 rounded up by an ulp, noodl's 0.08999999999999998
+    mg/L after the hour's merges of equal values (`(c v1 + c v2) / (v1 + v2)` rounds by
+    the values' unit and the volumes'), so EPANET does not merge and noodl does. At 37 h
+    both merge. That last bit cannot be reproduced in float64 without carrying EPANET's
+    internal units through every value (MEASURED, Ruling Q32's evidence): noodl with every
+    quality, source and `Ctol` given in EPANET's internal unit still flips at 31 h on its
+    own hydraulics (791 points); fed EPANET's own float32 saved hydraulics in those units
+    it resolves 31 h but flips at 49 h (124 points, its volumes in m3 not ft3); fed them in
+    mg/L (`_router_on_epanets_hydraulics`) its 49 h segment is 0.08999999999999997 and it
+    flips at 31 and 49 h (791 points). The tie follows the arithmetic's last bit; off it both
+    agree within 1e-5 of the scale (`test_net2_quality_matches_epanet`, Ruling Q32's
+    fallback). The test checks the decisions from the runs: EPANET at 0.01 is EPANET at
+    0.01 - 1e-8 until 38 h (not merged at 31 h); noodl at 0.01 is noodl at 0.01 + 1e-8
+    until 50 h (merged at 31 and 37 h), and after the first quality step of hour 31 pipe 1
+    holds one segment in noodl, two where the tie is not merged; after hour 49's first two,
+    as many as where it is not."""
     results, diagnostics = run_quality(NET2)
     reference = epanet_quality(NET2)
     ctol = read_epanet_inp(NET2).quality.tolerance
@@ -282,34 +291,35 @@ def test_net2_as_shipped_differs_from_epanet_only_at_its_ctol_ties(tmp_path):
     pipe = len(diagnostics["node_names"]) + diagnostics["link_names"].index("1")
     assert float(error[reference.times.index(first[0]), pipe]) == pytest.approx(
         float(error.max()), rel=1e-9)
-    # the arithmetic of the two decisions: EPANET's `findsourcequal` in its internal unit
-    # on its saved float32 demands (cfs), noodl's in mg/L
-    ucf = 1.0 / 28.317
-    epanet = [-(1.0 / ucf * f) * d * 300 / (-d * 300) for f, d in _NET2_JUNCTION_1]
-    assert not abs(epanet[0] - epanet[1]) < ctol / ucf
-    assert abs(0.09 - 0.08) < ctol
+    # the 31 h decision on each side's operands
+    tolerance = QualityTolerance(ctol, "CHEMICAL")
+    segment, outflow = _NET2_TIE_31H["EPANET"]
+    assert not abs(segment - outflow) < ctol / tolerance.ucf
+    assert tolerance.merges(*_NET2_TIE_31H["noodl"])
     # the decisions, from the runs
     below, above = (_net2_tolerance(tmp_path, t) for t in ("0.00999999", "0.01000001"))
-    _, merged = run_quality(above)
-    assert torch.equal(_matrix(merged, reference)[0], mine)
-    split_results, split = run_quality(below)
-    epanet_below = epanet_quality(below)
     early = [k for k, t in enumerate(reference.times) if t < _NET2_EPANET_MERGES]
+    epanet_below = epanet_quality(below)
     assert torch.equal(epanet_below.node[early], reference.node[early])
     assert torch.equal(epanet_below.link[early], reference.link[early])
     assert not torch.equal(epanet_quality(above).link, reference.link)
+    _, merged = run_quality(above)
+    before = [k for k, t in enumerate(reference.times) if t <= _NET2_LAST_TIE]
+    assert torch.equal(_matrix(merged, reference)[0][before], mine[before])
+    _, split = run_quality(below)
     link = diagnostics["link_names"].index("1")
+    segments = diagnostics["quality"][0]["segments"]
     step = _NET2_FIRST_TIE // 300     # the quality steps of 300 s before hour 31's first
-    assert diagnostics["quality"][0]["segments"][step][link] == 1
+    assert segments[step][link] == 1
     assert split["quality"][0]["segments"][step][link] == 2
-    # not the hydraulics: noodl's router on EPANET's own saved hydraulics makes the same
-    # decision (MEASURED: the same 791 points, the same worst)
+    late = _NET2_LAST_TIE // 300 + 1
+    assert segments[late][link] == split["quality"][0]["segments"][late][link] == 2
+    assert merged["quality"][0]["segments"][late][link] == 1
+    # EPANET's own saved hydraulics, fed in mg/L, flip at the same first tie
     driven = _router_on_epanets_hydraulics(NET2)
-    on_theirs = _matrix(driven, reference)[0]
-    assert first_divergence(reference.times, on_theirs, theirs, names,
+    assert first_divergence(reference.times, _matrix(driven, reference)[0], theirs, names,
                             limit=1e-5 * scale)[0] == _NET2_FIRST_TIE + 3600
-    assert float((on_theirs - mine).abs().max()) < 1e-5 * scale
-    # the mass balance is within the spec's bounds even so (MEASURED: outflow 1.6e-5, final
+    # the mass balance is within the spec's bounds even so (MEASURED: outflow 1.3e-5, final
     # 1.3e-5 relative, ratio 6.2e-9)
     _assert_mass_balance(NET2, results, reference)
 
@@ -363,54 +373,32 @@ def test_net6_quality_is_a_smoke_case():
 @pytest.mark.slow
 def test_net6_with_an_added_source_matches_epanet(tmp_path):
     """Net6 with a CONCEN source of 1 mg/L at its reservoir (`_net6_with_a_source`), 96 h:
-    within the spec's bounds for as long as noodl's hydraulic step plan is EPANET's, and the
-    mass balance within them over the whole run; past that the difference is the
-    hydraulics', not the quality's.
+    `water_run` within the spec's bounds for as long as noodl's hydraulic step plan is
+    EPANET's and the mass balance within them over the whole run; and noodl's router driven
+    by EPANET's own saved hydraulics (`_router_on_epanets_hydraulics`) at every one of
+    EPANET's 609 quality times, every point within 1e-9 of the scale (Ruling Q33).
 
-    MEASURED: before 18922 s (40 steps) worst 5.9e-6 mg/L, 99.9th percentile 7.0e-7 (scale
-    1 mg/L); mass-balance terms within 1.9e-6 relative, the ratio 8.8e-8 from EPANET's.
-    From 18922 s EPANET's step plan and noodl's part (`_NET6_PLANS_PART`): 252 of EPANET's
-    609 step times are 1 to 55 s from noodl's, and the source's fronts reach the junctions
-    at shifted times. Over the 357 times both share: worst 0.57 mg/L (JUNCTION-2292 at
-    107083 s, 0.317 against 0.888), 99.9th percentile 1.1e-2, 32 % of the points beyond
-    1e-5 of the scale. ADMITTED, with that measured cause: the step plan's (Net6's hydraulic
-    parity: levels 3e-3 m, flows 5e-4 m3/s at its switching times, the closed-link leak noodl
-    does not model, Ruling 30). The router itself is held to the spec's bounds over the
-    whole run on EPANET's own hydraulics
-    (`test_the_router_on_epanets_net6_hydraulics_matches_epanet`)."""
+    MEASURED, `water_run`: before 18922 s (40 steps) worst 5.9e-6 mg/L, 99.9th percentile
+    7.0e-7 (scale 1 mg/L); mass-balance terms within 1.9e-6 relative, the ratio 8.8e-8 from
+    EPANET's. From 18922 s the step plans part (`_NET6_PLANS_PART`; 252 of EPANET's 609 step
+    times 1 to 55 s from noodl's, the source's fronts arriving at shifted times: over the
+    357 times both share, worst 0.57 mg/L at JUNCTION-2292 at 107083 s, 32 % of the points
+    beyond 1e-5 of the scale), Net6's hydraulic parity (levels 3e-3 m, flows 5e-4 m3/s at its
+    switching times, the closed-link leak noodl does not model, Ruling 30): that span is not
+    compared on `water_run`'s hydraulics. MEASURED, the router on EPANET's hydraulics: worst
+    5.2e-11 mg/L, 99.9th percentile 4.7e-11 (EPANET's flows in double precision instead of
+    its saved float32 give 1.8e-5 at one point, JUNCTION-1361 at 236260 s: the float32
+    floor)."""
     path = _net6_with_a_source(tmp_path)
     results, diagnostics = run_quality(path)
     reference = epanet_quality(path)
+    assert len(reference.times) == 609
     ours = [round(float(t)) for t in diagnostics["quality"][0]["times"]]
     parted = [t for t in reference.times if t not in ours]
     assert parted[0] == _NET6_PLANS_PART and _NET6_PLANS_PART - 1 in ours
     ctol = read_epanet_inp(path).quality.tolerance
     found = assert_matches_epanet(diagnostics, _until(reference, _NET6_PLANS_PART), ctol=ctol)
     assert found["worst"] < 1e-5 * found["scale"]
-    shared = [k for k, t in enumerate(reference.times) if t in ours]
-    common = QualityReference(times=[reference.times[k] for k in shared],
-                              node_names=reference.node_names,
-                              link_names=reference.link_names, node=reference.node[shared],
-                              link=reference.link[shared], ratio=reference.ratio,
-                              terms=reference.terms)
-    mine, theirs = _matrix(diagnostics, common)
-    assert bool(torch.isfinite(mine).all()) and float(mine.min()) >= 0.0
-    assert float(mine.max()) <= 1.0 + 1e-12      # the source's 1 mg/L bounds every point
     _assert_mass_balance(path, results, reference)
-
-
-@pytest.mark.slow
-def test_the_router_on_epanets_net6_hydraulics_matches_epanet(tmp_path):
-    """The cause of the admission in `test_net6_with_an_added_source_matches_epanet`, checked:
-    noodl's router driven by EPANET's own saved hydraulics (`_router_on_epanets_hydraulics`)
-    on Net6 with the source matches EPANET's quality at all 609 of its times, every point
-    within 1e-5 of the scale, no point admitted. MEASURED: worst 5.2e-11 mg/L, 99.9th
-    percentile 4.7e-11 (with EPANET's flows in double precision instead of its saved
-    float32: worst 1.8e-5 at one point, JUNCTION-1361 at 236260 s, the float32 floor)."""
-    path = _net6_with_a_source(tmp_path)
-    driven = _router_on_epanets_hydraulics(path)
-    reference = epanet_quality(path)
-    assert len(reference.times) == 609
-    found = assert_matches_epanet(driven, reference,
-                                  ctol=read_epanet_inp(path).quality.tolerance)
-    assert found["worst"] < 1e-8 * found["scale"]
+    driven = assert_matches_epanet(_router_on_epanets_hydraulics(path), reference, ctol=ctol)
+    assert driven["worst"] < 1e-9 * driven["scale"]
