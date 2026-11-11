@@ -187,6 +187,13 @@ Two rules worth stating explicitly, because both produce wrong answers rather th
   other built-in law's `dflow` is exact, which `tests/elements/test_dflow_exact.py` checks.
   The same attribute exists on `NodeWithdrawal`, and on `NodeStorage` for its `rate_slope`
   (audited by the same test).
+- **A law is its module call.** A layer calls each law as a module, so an overridden
+  `forward` or a forward hook is part of the law. On a layer without flow unknowns, which
+  otherwise calls `flow` and `dflow` directly, such a law is evaluated by its module call
+  and its slope is taken from that call by autograd, with or without `differentiable`.
+  The solve's starting guess, the storage-ramp fallback, the layer's public `jacobian`,
+  `dflows` and `adjoint`, and a layer with flow unknowns still use each law's own
+  `jacobian` or `dflow`, so a hook there changes the root but not those slopes.
 
 ## Implicit, coupled and dynamic constitutive laws
 
@@ -265,6 +272,24 @@ phi_mid = 2.000000, q = [2.0, 2.0]
 
 The flow satisfies `2 q^2 + q = 10`, so `q = 2` and `phi_mid = 2`. `implicit_edges` lists the
 edges whose flow is an unknown, in layer edge order.
+
+**The start flow.** A layer's linear guess (`linear_init`, and the rungs of its
+[fallback ladder](solvers.md#when-newton-fails-the-fallback-ladder)) takes each implicit law's
+residual and Jacobian at zero interior potentials and at the law's start flow,
+`start_flow(drivers, ctx)`: one value per edge (with any batch dimensions in front, which must
+broadcast against the layer's batch), or `None`, the default, for zero flow. A start flow of
+another width or batch is refused, naming the law. The loss above has no slope at zero flow, so a guess taken there
+puts the whole 10 across it, at `q = 10`; with a start flow of 1 the guess is
+`phi_mid = q = 2.4`, and with the root, 2, it is the solution. Give one where a law's tangent at
+zero flow says little about its operating point: the water application's pipes start at 1 ft/s
+and its pumps at their design flow, EPANET's own first iterate. It moves only the guess: a solve
+still starts from zeros, or from its warm start, and the start flow carries no gradient.
+
+```py
+class StartedLoss(QuadraticLoss):
+    def start_flow(self, drivers=None, ctx=None):
+        return torch.ones(1, dtype=F64)      # one value per edge of the kind
+```
 
 **One scheme vocabulary for every layer.** A dynamic law reads `ctx.scheme`, one of the names in
 `SCHEMES = ("exact", "backward_euler", "trapezoidal")` (`noodl.elements.base`): the same names and

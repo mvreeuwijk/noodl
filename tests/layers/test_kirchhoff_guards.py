@@ -6,7 +6,7 @@ import pickle
 import pytest
 import torch
 
-from noodl.elements import Conductance
+from noodl.elements import Conductance, PowerLaw
 from noodl.elements.base import ConstitutiveLaw, ImplicitLaw
 from noodl.layers.kirchhoff import KirchhoffLayer
 from noodl.topology import Network
@@ -418,9 +418,11 @@ class _ForwardLaw(ConstitutiveLaw):
 
 
 @pytest.mark.parametrize("how", ["forward", "hook"])
-def test_a_law_whose_module_call_is_not_its_flow_keeps_the_threaded_solve(how):
-    """The primal Newton calls `flow`, the threaded one the module (`forward` and its
-    hooks): where they may differ the solve stays threaded and refuses, as before."""
+def test_a_law_whose_module_call_is_not_its_flow_is_called_as_a_module(how):
+    """The fast path's primal Newton calls a law's own `flow` where that is its module call;
+    where they may differ (`forward` overridden or hooked) it calls the module, as the
+    differentiated solve does, so a solve that nothing differentiable reaches refuses the
+    captured tensor as the differentiated solve would."""
     g = torch.tensor([2.0], dtype=F64, requires_grad=True)
     if how == "forward":
         law = _ForwardLaw(g)
@@ -432,6 +434,53 @@ def test_a_law_whose_module_call_is_not_its_flow_keeps_the_threaded_solve(how):
     with pytest.raises(ValueError, match="residual depends on a tensor"):
         layer.solve(torch.zeros(1, dtype=F64), sources=torch.tensor([0.0, 1.0], dtype=F64),
                     on_failure="return_primal", diagnostics={})
+
+
+def _hooked_power_law(learnable=False):
+    """`2 C dp |dp|^0.5`: a power law whose forward hook doubles its flow, on a heat layer
+    a -> b with 3 into b. The root is the scaled law's, `phi_b = (3 / (2 C))^(1 / 1.5)`."""
+    law = PowerLaw(torch.tensor([1.0], dtype=F64), 1.5, kind="conduction",
+                   learnable=learnable)
+    law.register_forward_hook(lambda module, args, out: 2.0 * out)
+    return law, KirchhoffLayer(_net(), "heat", [law], boundary=["a"])
+
+
+HOOKED_SOURCES = torch.tensor([0.0, 3.0], dtype=F64)
+
+
+def test_a_hooked_law_is_solved_on_its_module_call_on_the_fast_path():
+    """The module call, hook included, is the user's law: on the fast path the residual
+    and the slopes both come from it, with `differentiable=False`, a `return_primal` solve
+    that nothing differentiable reaches and the differentiated solve alike. Before, the
+    slopes were the law's own `dflow`, half the hooked one: `differentiable=False` solved
+    the unhooked law (residual from `flow`), and the other two did not converge."""
+    expected = 1.5 ** (1 / 1.5)
+    out = {}
+    for name, kw in (("primal", {"differentiable": False}),
+                     ("return_primal", {"on_failure": "return_primal"}),
+                     ("differentiated", {})):
+        _, layer = _hooked_power_law()
+        diag: dict = {}
+        out[name] = layer.solve(torch.zeros(1, dtype=F64), sources=HOOKED_SOURCES,
+                                diagnostics=diag, atol=1e-12, rtol=0.0, **kw), diag
+        assert bool(diag["converged"].all()), name
+        assert float(out[name][0][0][1]) == pytest.approx(expected, rel=1e-12), name
+    (phi_p, q_p), diag_p = out["primal"]
+    for name in ("return_primal", "differentiated"):
+        (phi, q), diag = out[name]
+        assert torch.equal(phi.detach(), phi_p) and torch.equal(q.detach(), q_p), name
+        assert diag["newton_iterations"] == diag_p["newton_iterations"], name
+
+
+def test_the_gradient_through_a_hooked_law_is_the_module_calls():
+    """The adjoint's Jacobian is the hooked law's slope too, so the gradient is that of the
+    scaled root: `d phi_b / d C = -phi_b / (1.5 C)`."""
+    law, layer = _hooked_power_law(learnable=True)
+    phi, _ = layer.solve(torch.zeros(1, dtype=F64), sources=HOOKED_SOURCES, atol=1e-12,
+                         rtol=0.0)
+    phi[1].backward()
+    expected = -(1.5 ** (1 / 1.5)) / 1.5
+    assert float(law.C.grad) == pytest.approx(expected, rel=1e-10)
 
 
 def test_the_storage_columns_are_taken_once_with_the_graph_of_the_step_start():

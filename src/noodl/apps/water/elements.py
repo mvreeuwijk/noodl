@@ -150,6 +150,24 @@ def open_valve_loss(q: Tensor, minor: Tensor, gradient_floor: float) -> Tensor:
                        minor * q * a)
 
 
+def area_flow(diameter: Tensor) -> Tensor:
+    """EPANET's first iterate of a pipe's or a valve's flow: 1 ft/s through its section,
+    ``pi d^2 / 4 * 0.3048`` m3/s (``d`` in metres), in the link's own direction (`hydraul.c`,
+    `initlinkflow`). Detached: a starting point carries no gradient."""
+    return torch.pi * diameter.detach() ** 2 / 4.0 * M_PER_FT
+
+
+def open_start(law, drivers, q: Tensor) -> Tensor:
+    """`q`, a law's start flow (`ImplicitLaw.start_flow`), with zero where the law's
+    ``"water.status"`` is CLOSED: a closed link's row is ``kappa q = 0``, no flow (EPANET
+    starts it at its ``1 / CBIG`` leak, which these laws do not carry). A law without
+    ``links`` reads no status."""
+    if law.link_range is None:
+        return q
+    status = link_driver(law, drivers, STATUS_KEY, q).detach()
+    return torch.where(status == CLOSED, torch.zeros_like(q), q)
+
+
 class HazenWilliams(ConstitutiveLaw):
     """``h_L = K q^1.852 + m q^2`` with ``K = 10.666829500036 C^-1.852 d^-4.871 L``.
 
@@ -487,6 +505,12 @@ class PumpCurve(ConstitutiveLaw):
     ``q_max`` is the flow at zero head gain, ``w (h0/r)^(1/n)`` (EPANET's ``Qmax``,
     `updatepumpparams`); the curve is only DEFINED up to there, and `water_steady` refuses a
     converged flow beyond it by name rather than extrapolate the fit.
+
+    ``design_flow`` (m3/s per pump, at speed 1; optional) is EPANET's ``Q0``, the flow its
+    iteration starts from (`hydraul.c`, `initlinkflow`): the middle point of a three-point
+    curve, the point of a one-point curve. `FlowControlledPump.start_flow` reads it. It is
+    broadcast to ``h0``'s shape (a scalar is every pump's); a shape that does not broadcast
+    there is refused.
     """
 
     def __init__(
@@ -496,6 +520,7 @@ class PumpCurve(ConstitutiveLaw):
         n=2.0,
         *,
         speed=1.0,
+        design_flow=None,
         dp_transition: float = 1e-6,
         links: slice | None = None,
         kind: str = "pump",
@@ -506,6 +531,21 @@ class PumpCurve(ConstitutiveLaw):
         self.r = self._param(r, learnable)
         self.n = self._param(n, False)
         self.speed = self._param(speed, False)
+        if design_flow is not None:
+            # one per pump, as `h0`: a scalar is every pump's
+            design_flow = torch.as_tensor(design_flow, dtype=F64, device=self.h0.device)
+            shape = self.h0.shape
+            try:
+                fits = torch.broadcast_shapes(design_flow.shape, shape) == shape
+            except RuntimeError:
+                fits = False
+            if not fits:
+                raise ValueError(
+                    f"PumpCurve (kind {kind!r}): design_flow has shape "
+                    f"{tuple(design_flow.shape)}, which does not broadcast to the pumps' "
+                    f"shape {tuple(shape)} (that of h0)")
+            design_flow = design_flow.expand(shape).clone()
+        self.register_buffer("design_flow", design_flow, persistent=False)
         self.dp_transition = float(dp_transition)
         self.link_range = _link_range(links)
         # The exponent's constants, once: EPANET treats an exponent within TINY of 1 as a
@@ -659,7 +699,8 @@ class PiecewisePumpCurve(ImplicitLaw):
     ``inf`` flows to the longest curve, as `GeneralPurposeValve`'s; ``n_points`` gives each
     row's own length (at least 2). The speed is ``speed``, or the driver ``"water.setting"``
     with ``links``. ``residual`` is the running pump's row, ``dp + gain``;
-    `FlowControlledPump` adds the status and the shut-off.
+    `FlowControlledPump` adds the status and the shut-off. Its start flow (`start_flow`) is
+    EPANET's: the speed times ``design_flow``.
     """
 
     def __init__(self, flows, heads, n_points, *, speed=1.0, links: slice | None = None,
@@ -671,6 +712,19 @@ class PiecewisePumpCurve(ImplicitLaw):
         self.speed = self._param(speed, False)
         self.link_range = _link_range(links)
         self._above_zero = bool((self.flows[..., 0] > 0).any())
+
+    @property
+    def design_flow(self) -> Tensor:
+        """EPANET's ``Q0`` of a custom curve, m3/s per pump at speed 1: the mean of its first
+        and last points' flows (`input2.c`, `updatepumpparams`)."""
+        flows = self.flows.detach()
+        last = flows.gather(-1, (self.n_points - 1).unsqueeze(-1)).squeeze(-1)
+        return 0.5 * (flows[..., 0] + last)
+
+    def start_flow(self, drivers=None, ctx=None):
+        """The design flow times the speed (`hydraul.c`, `initlinkflow`)."""
+        q0 = self.design_flow
+        return q0 * _pump_speed(self, None, drivers, q0).detach()
 
     def _segment(self, x: Tensor) -> tuple[Tensor, Tensor]:
         """`(h0, r)` of the segment bracketing ``x`` (`curvecoeff`)."""
@@ -738,7 +792,8 @@ class ConstantPowerPump(ImplicitLaw):
     ``speed``, or the driver ``"water.setting"`` with ``links``. ``residual`` is the
     running pump's row, ``dp + gain``; `FlowControlledPump` adds the status and the
     shut-off (EPANET never shuts one on head, `hydstatus.c`, `pumpstatus`; with the tangent
-    its shut-off head is ``2 sqrt(a w^3 CBIG)``, beyond any network's).
+    its shut-off head is ``2 sqrt(a w^3 CBIG)``, beyond any network's). Its start flow
+    (`start_flow`) is EPANET's: the speed times ``design_flow``, 1 cfs.
     """
 
     def __init__(self, power_kw, *, kw_per_hp: float = KW_PER_HP,
@@ -754,6 +809,18 @@ class ConstantPowerPump(ImplicitLaw):
         self.max_slope = float(scale) * CBIG_FT_PER_CFS * M_PER_FT * cfs
         self.speed = self._param(speed, False)
         self.link_range = _link_range(links)
+        self._cfs_per_m3s = cfs
+
+    @property
+    def design_flow(self) -> Tensor:
+        """EPANET's ``Q0`` of a constant-power pump, 1 cfs per pump at speed 1, in m3/s
+        (`input2.c`, `updatepumpparams`)."""
+        return torch.full_like(self.coefficient.detach(), 1.0 / self._cfs_per_m3s)
+
+    def start_flow(self, drivers=None, ctx=None):
+        """The design flow times the speed (`hydraul.c`, `initlinkflow`)."""
+        q0 = self.design_flow
+        return q0 * _pump_speed(self, None, drivers, q0).detach()
 
     def gain_and_slope(self, q: Tensor, gradient_floor: float = 0.0,
                        max_slope: float = math.inf, speed=None) -> tuple[Tensor, Tensor]:
@@ -1125,15 +1192,27 @@ class _Valve(ImplicitLaw):
     Without ``links`` the valve is always ``ACTIVE`` and reads no driver. ``minor`` is in
     the layer's potential unit per (m^3/s)^2 and ``gradient_floor`` (EPANET's ``RQtol``) per
     m^3/s.
+
+    ``diameter`` (m, per valve; optional) gives the valve its start flow (`start_flow`),
+    EPANET's first iterate: 1 ft/s through its section (`area_flow`), zero where CLOSED.
+    Without it the linear guess starts the valve from zero flow.
     """
 
     def __init__(self, *, minor=0.0, kappa=1.0, gradient_floor: float = 0.0,
-                 links: slice | None = None, kind: str) -> None:
+                 diameter=None, links: slice | None = None, kind: str) -> None:
         super().__init__(kind)
         self.minor = self._param(minor, False)
         self.kappa = self._param(kappa, False)
         self.gradient_floor = float(gradient_floor)
         self.link_range = _link_range(links)
+        self.diameter = None if diameter is None else self._param(diameter, False)
+
+    def start_flow(self, drivers=None, ctx=None):
+        """1 ft/s through the valve's section, zero where CLOSED (`hydraul.c`,
+        `initlinkflow`); `None` without a ``diameter``."""
+        if self.diameter is None:
+            return None
+        return open_start(self, drivers, area_flow(self.diameter))
 
     def active(self, dp, q, drivers):
         """The residual of the ACTIVE valve."""
@@ -1183,8 +1262,7 @@ class ThrottleValve(_Valve):
                  scale: float = 1.0, minor=0.0, kappa=1.0, gradient_floor: float = 0.0,
                  links: slice | None = None, kind: str = "valve") -> None:
         super().__init__(minor=minor, kappa=kappa, gradient_floor=gradient_floor,
-                         links=links, kind=kind)
-        self.diameter = self._param(diameter, False)
+                         diameter=diameter, links=links, kind=kind)
         self.setting = None if setting is None else self._param(setting, False)
         self.cfs_per_m3s = cfs_per_m3s
         self.scale = float(scale)
@@ -1203,9 +1281,9 @@ class FlowControlValve(_Valve):
     """
 
     def __init__(self, *, setting=None, minor=0.0, kappa=1.0, gradient_floor: float = 0.0,
-                 links: slice | None = None, kind: str = "fcv") -> None:
+                 diameter=None, links: slice | None = None, kind: str = "fcv") -> None:
         super().__init__(minor=minor, kappa=kappa, gradient_floor=gradient_floor,
-                         links=links, kind=kind)
+                         diameter=diameter, links=links, kind=kind)
         self.setting = None if setting is None else self._param(setting, False)
 
     def active(self, dp, q, drivers):
@@ -1226,9 +1304,9 @@ class BreakerValve(_Valve):
     """
 
     def __init__(self, setting, minor, *, kappa=1.0, gradient_floor: float = 0.0,
-                 links: slice | None = None, kind: str = "pbv") -> None:
+                 diameter=None, links: slice | None = None, kind: str = "pbv") -> None:
         super().__init__(minor=minor, kappa=kappa, gradient_floor=gradient_floor,
-                         links=links, kind=kind)
+                         diameter=diameter, links=links, kind=kind)
         self.setting = None if setting is None else self._param(setting, False)
 
     def active(self, dp, q, drivers):
@@ -1251,10 +1329,10 @@ class GeneralPurposeValve(_Valve):
     """
 
     def __init__(self, flows, heads, n_points, *, minor=0.0, kappa=1.0,
-                 gradient_floor: float = 0.0, links: slice | None = None,
+                 gradient_floor: float = 0.0, diameter=None, links: slice | None = None,
                  kind: str = "gpv") -> None:
         super().__init__(minor=minor, kappa=kappa, gradient_floor=gradient_floor,
-                         links=links, kind=kind)
+                         diameter=diameter, links=links, kind=kind)
         self.flows = self._param(flows, False)
         self.heads = self._param(heads, False)
         self.register_buffer("n_points", torch.as_tensor(n_points, dtype=torch.long))
@@ -1357,10 +1435,10 @@ class _PressureValve(_Valve):
     HELD_SIDE = 0
 
     def __init__(self, elevation, minor, *, kappa, smoothing: float = 0.0, setting=None,
-                 gradient_floor: float = 0.0, links: slice | None = None,
+                 gradient_floor: float = 0.0, diameter=None, links: slice | None = None,
                  kind: str) -> None:
         super().__init__(minor=minor, kappa=kappa, gradient_floor=gradient_floor,
-                         links=links, kind=kind)
+                         diameter=diameter, links=links, kind=kind)
         self.elevation = self._param(elevation, False)
         self.setting = None if setting is None else self._param(setting, False)
         self.smoothing = float(smoothing)
@@ -1446,10 +1524,11 @@ class PressureReducingValve(_PressureValve):
     HELD_SIDE = 1
 
     def __init__(self, elevation, minor, *, kappa, smoothing: float = 0.0, setting=None,
-                 gradient_floor: float = 0.0, links: slice | None = None,
+                 gradient_floor: float = 0.0, diameter=None, links: slice | None = None,
                  kind: str = "prv") -> None:
         super().__init__(elevation, minor, kappa=kappa, smoothing=smoothing, setting=setting,
-                         gradient_floor=gradient_floor, links=links, kind=kind)
+                         gradient_floor=gradient_floor, diameter=diameter, links=links,
+                         kind=kind)
 
     def _held(self, ctx, hset):
         return ctx.phi_to - hset
@@ -1465,10 +1544,11 @@ class PressureSustainingValve(_PressureValve):
     HELD_SIDE = -1
 
     def __init__(self, elevation, minor, *, kappa, smoothing: float = 0.0, setting=None,
-                 gradient_floor: float = 0.0, links: slice | None = None,
+                 gradient_floor: float = 0.0, diameter=None, links: slice | None = None,
                  kind: str = "psv") -> None:
         super().__init__(elevation, minor, kappa=kappa, smoothing=smoothing, setting=setting,
-                         gradient_floor=gradient_floor, links=links, kind=kind)
+                         gradient_floor=gradient_floor, diameter=diameter, links=links,
+                         kind=kind)
 
     def _held(self, ctx, hset):
         return hset - ctx.phi_from
@@ -1741,6 +1821,13 @@ class FlowControlledPipe(ImplicitLaw):
                 return loss
         return torch.where(closed, closed_row(self, dp, q, drivers), loss)
 
+    def start_flow(self, drivers=None, ctx=None):
+        """EPANET's first iterate (`hydraul.c`, `initlinkflow`): 1 ft/s through the pipe's
+        section, forward (`area_flow`), zero where CLOSED. Without it the linear guess takes
+        each pipe at zero flow, on its ``RQtol`` floor, and carries a head difference across
+        the network as a flow millions of times the real one."""
+        return open_start(self, drivers, area_flow(self.pipe.diameter))
+
 
 class FlowControlledPump(ImplicitLaw):
     """Every pump of a layer in its head-gain form, ``phi_discharge - phi_suction = gain(q)``,
@@ -1956,6 +2043,42 @@ class FlowControlledPump(ImplicitLaw):
                     d_dp = torch.where(closed, 0.0, d_dp)
                     d_dq = torch.where(closed, self.kappa, d_dq)
         return one_port_blocks(d_dp, dp, q), one_port_blocks(d_dq, dp, q)
+
+    def start_flow(self, drivers=None, ctx=None):
+        """EPANET's first iterate (`hydraul.c`, `initlinkflow`): each pump's ``design_flow``
+        times its speed, zero where it is CLOSED or at speed 0, and zero for a curve that
+        gives no design flow (a `PumpCurve` built without one); `None` when no curve gives
+        one."""
+        parts, given = [], False
+        for curve, cols in zip(self.curves, self._columns, strict=True):
+            q0 = getattr(curve, "design_flow", None)
+            if q0 is None:
+                if cols is None:
+                    return None
+                parts.append(curve.speed.new_zeros(len(cols), dtype=F64))
+                continue
+            given = True
+            q0 = q0.detach()
+            if self.link_range is None:   # each curve's own speed
+                q0 = q0 * curve.speed.detach()
+            if cols is not None:
+                q0 = q0.expand(q0.shape[:-1] + (len(cols),)) if q0.dim() else q0.expand(
+                    len(cols))
+            parts.append(q0)
+        if not given:
+            return None
+        if self._order is None:
+            q = parts[0]
+        else:
+            batch = torch.broadcast_shapes(*(part.shape[:-1] for part in parts))
+            q = torch.cat([part.expand(batch + part.shape[-1:]) for part in parts],
+                          dim=-1)[..., list(self._order)]
+        speed = self._speed(drivers, q)
+        if speed is None:
+            return q
+        q = q * speed.detach()
+        stopped = self._stopped(drivers, q)
+        return q if stopped is None else torch.where(stopped, torch.zeros_like(q), q)
 
     def states(self, dp, q, drivers) -> Tensor:
         """Per pump, `CLOSED` where its residual takes the no-flow row at ``(dp, q)``,
