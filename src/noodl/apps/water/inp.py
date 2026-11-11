@@ -54,7 +54,7 @@ from pathlib import Path
 from noodl.apps.inpfile import as_float, read_sections, require_fields
 from noodl.apps.water.controls import Control, status_code
 from noodl.apps.water.elements import NU_WATER_FT2
-from noodl.apps.water.inp_quality import is_quality_option, read_quality
+from noodl.apps.water.inp_quality import is_quality_option, is_quality_time, read_quality
 from noodl.apps.water.inp_rules import read_rules
 from noodl.apps.water.inp_times import clock_time, time_with_unit
 from noodl.apps.water.network import (
@@ -614,7 +614,7 @@ def read_epanet_inp(path) -> WaterNetwork:
             start_clocktime = clock_time(
                 line.fields[2], line.fields[3] if len(line.fields) > 3 else None, path, line
             )
-        elif key == "QUALITY TIMESTEP":
+        elif is_quality_time(line):
             pass            # read by `read_quality`
         else:
             unrecognised_times.append(line.raw.strip())

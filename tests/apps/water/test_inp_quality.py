@@ -108,6 +108,38 @@ def test_diffusivity_multiplier_actual_and_zero(tmp_path):
     assert _quality(tmp_path, options="Diffusivity 0").diffusivity == 0.0
 
 
+def test_epanets_short_keywords_are_read(tmp_path):
+    """`match` is a prefix test of `text.h`'s strings (`QUAL`, `DIFF`, `TOLER`, `GLOB`, `LIMIT`,
+    `ROUG`), not of the full words."""
+    net = read_epanet_inp(_write(
+        tmp_path, "[REACTIONS]\nGLOB BULK -1\nGLOB WALL -2\nLIMIT POTENTIAL 0.5\n"
+        "ROUG CORRELATION 0.5\nORDER BULK 2",
+        options="QUAL AGE\nDIFF 2\nTOLER 0.5", times="QUAL TIMESTEP 0:10"))
+    quality = net.quality
+    assert quality.mode == "AGE" and quality.tolerance == 0.5
+    assert quality.diffusivity == 2 * DIFFUSIVITY_M2
+    assert quality.quality_timestep == 600.0
+    assert quality.global_bulk == -1 / 86400 and quality.global_wall == -2 / 86400
+    assert quality.limiting_potential == 0.5
+    assert quality.roughness_correlation == 0.5 / 86400
+    assert quality.bulk_order == 2.0
+    assert "unrecognised_options" not in net.notes
+    assert "unrecognised_times" not in net.notes
+    assert _quality(tmp_path, times="QUAL 0:10").quality_timestep == 600.0
+
+
+def test_name_and_units_are_overridden_field_by_field(tmp_path):
+    """EPANET's `optionchoice`: NONE and CHEM keep the name and units, another word without a
+    units token keeps the units, AGE and TRACE set both."""
+    kept = _quality(tmp_path, options="Quality Chlorine ug/L\nQuality CHEMICAL")
+    assert (kept.chemical, kept.units) == ("Chlorine", "ug/L")
+    renamed = _quality(tmp_path, options="Quality Chlorine ug/L\nQuality Fluoride")
+    assert (renamed.chemical, renamed.units) == ("Fluoride", "ug/L")
+    aged = _quality(tmp_path, options="Quality Chlorine ug/L\nQuality AGE\nQuality CHEM")
+    assert (aged.mode, aged.chemical, aged.units) == ("CHEMICAL", "Age", "hrs")
+    assert _quality(tmp_path, options="Quality TRACE J1\nQuality NONE").trace_node is None
+
+
 # ------------------------------------------------------------------ ranges
 _NUMERIC_NODES = "J1 0 0\nJ2 0 0\n10 0 0\n11 0 0\n12 0 0\n110 0 0"
 _ALPHA_NODES = "J1 0 0\nJ2 0 0\nA 0 0\nAB 0 0\nB 0 0\nBA 0 0"
@@ -208,17 +240,17 @@ def test_later_lines_mixing_fractions_and_epanet_orders(tmp_path):
     [
         ("[REACTIONS]\nORDER WALL 2", "", "ORDER WALL"),
         ("[REACTIONS]\nGLOBAL TANK -1", "", "GLOBAL TANK"),
-        ("", "Quality TRACE", "QUALITY TRACE needs a node"),
-        ("", "Quality TRACE NOPE", "QUALITY TRACE names the node 'NOPE'"),
+        ("", "Quality TRACE", "QUALITY TRACE needs a node.*error 201"),
+        ("", "Quality TRACE NOPE", "QUALITY TRACE names the node 'NOPE'.*error 212"),
         ("[QUALITY]\nJ1 -1", "", "negative initial quality"),
-        ("[MIXING]\nT1 PLUG", "", "mixing model 'PLUG'"),
+        ("[MIXING]\nT1 PLUG", "", "mixing model 'PLUG'.*error 213"),
         ("[QUALITY]\nNOPE 1", "", "node 'NOPE'"),
         ("[REACTIONS]\nBULK NOPE -1", "", "link 'NOPE'"),
         ("[REACTIONS]\nTANK NOPE -1", "", "node 'NOPE'"),
         ("[SOURCES]\nJ1 CONCEN 1 NOPAT", "", "pattern 'NOPAT'"),
         ("[SOURCES]\nJ1 FOO 1", "", "source type"),
         ("[SOURCES]\nNOPE 1", "", "node 'NOPE'"),
-        ("[REACTIONS]\nFOO P1 1", "", "FOO"),
+        ("[REACTIONS]\nFOO P1 1", "", "FOO.*error 213"),
     ],
 )
 def test_refusals_name_the_feature(tmp_path, sections, options, match):
@@ -238,6 +270,9 @@ def test_lines_epanet_ignores_are_recorded(tmp_path):
     assert net.quality == base.quality
     recorded = net.notes["ignored_quality"]
     assert "J1 FIFO" in recorded and "TANK J1 -1" in recorded and "BULK PU1 -1" in recorded
+    # a junction is skipped before the model is read, so even an unknown one is ignored
+    junction = read_epanet_inp(_write(tmp_path, "[MIXING]\nJ1 PLUG"))
+    assert junction.quality.mixing == {} and "J1 PLUG" in junction.notes["ignored_quality"]
     reservoir = read_epanet_inp(_write(tmp_path, "[MIXING]\nR1 FIFO"))
     assert reservoir.quality.mixing == {}
     assert "R1 FIFO" in reservoir.notes["ignored_quality"]

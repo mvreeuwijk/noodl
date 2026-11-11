@@ -9,7 +9,7 @@ with the keyword), `input1.c` (`adjustdata`, `convertunits`) for the units. A la
 overrides an earlier one. EPANET silently skips a few lines (a `[MIXING]` entry on a junction
 or a reservoir, a `TANK` coefficient on a junction, a `BULK` or `WALL` one on a pump or valve)
 and so does this reader, but it RECORDS each in the returned list (`notes["ignored_quality"]`).
-What EPANET refuses it refuses by name (errors 209, 212, 213), and an unknown node, link or
+What EPANET refuses it refuses by name (errors 201, 209, 212, 213), and an unknown node, link or
 pattern is refused as the rest of this reader refuses it (EPANET: 203, 205, or silently
 skipped).
 """
@@ -29,7 +29,10 @@ from noodl.apps.water.quality_data import (
 from noodl.apps.water.units import DIFFUSIVITY_M2, M_PER_FT
 
 #: The `[OPTIONS]` keys this module reads (the reader must not also record them as unknown).
-OPTION_KEYS = ("QUALITY", "DIFFUSIVITY", "TOLERANCE")
+#: EPANET's own keyword strings (`text.h`: `w_QUALITY "QUAL"`, `w_DIFFUSIVITY "DIFF"`,
+#: `w_TOLERANCE "TOLER"`), which `match` takes as prefixes of the token: `QUAL`, `DIFF 2` and
+#: `TOLER 0.5` are the options too.
+OPTION_KEYS = ("QUAL", "DIFF", "TOLER")
 
 _SECONDS_PER_DAY = 86400.0
 _ATOL = re.compile(r"\s*([+-]?\d+)")
@@ -43,6 +46,12 @@ def match(token: str, keyword: str) -> bool:
 def is_quality_option(line: InpLine) -> bool:
     """Whether an `[OPTIONS]` line is one of `OPTION_KEYS` (`match` on its first token)."""
     return any(match(line.fields[0], key) for key in OPTION_KEYS)
+
+
+def is_quality_time(line: InpLine) -> bool:
+    """Whether a `[TIMES]` line is the quality step (`timedata`: the first token matches
+    `w_QUALITY`, "QUAL")."""
+    return match(line.fields[0], "QUAL")
 
 
 def _atol(text: str) -> int:
@@ -93,6 +102,9 @@ def read_quality(
         ignored.append(f"[{line.section}] {line.raw.strip()} ({why})")
 
     # ---- [OPTIONS] and [TIMES]: `optionchoice`, `optionvalue`; `[TIMES] QUALITY TIMESTEP`
+    # `optionchoice` overrides the name and units field by field: NONE and CHEM change
+    # neither, another word sets the name (and the units only if a units token follows), AGE
+    # and TRACE set both; the mode is the last line's.
     mode, chemical, units, trace_node = "NONE", "Chemical", "mg/L", None
     tolerance, diffusivity_file, quality_timestep = 0.01, 1.0, None
     for line in sections.get("OPTIONS", []):
@@ -101,39 +113,45 @@ def read_quality(
         key, n = line.fields[0], len(line.fields)
         if n < 2:
             skip(line, "no value")
-        elif match(key, "QUALITY"):
+        elif match(key, "QUAL"):
             word = line.fields[1]
             if match(word, "NONE"):
-                mode, chemical, units, trace_node = "NONE", "Chemical", "mg/L", None
+                mode = "NONE"
             elif match(word, "CHEM"):
-                mode, chemical, units, trace_node = "CHEMICAL", "Chemical", "mg/L", None
+                mode = "CHEMICAL"
             elif match(word, "AGE"):
-                mode, chemical, units, trace_node = "AGE", "Age", "hrs", None
+                mode = "AGE"
             elif match(word, "TRACE"):
+                mode = "TRACE"
+            else:
+                # "any other word [units]": a chemical so named (`optionchoice`)
+                mode, chemical = "CHEMICAL", word
+                if n >= 3:
+                    units = line.fields[2]
+            if mode == "AGE":
+                chemical, units = "Age", "hrs"
+            elif mode == "TRACE":
                 if n < 3:
-                    raise _fail(path, line, "QUALITY TRACE needs a node (EPANET error 212)")
+                    raise _fail(path, line, "QUALITY TRACE needs a node (EPANET error 201)")
                 if line.fields[2] not in nodes:
                     raise _fail(path, line, f"QUALITY TRACE names the node "
                                 f"{line.fields[2]!r}, which is not a node of this network "
                                 f"(EPANET error 212)")
-                mode, trace_node, units = "TRACE", line.fields[2], "%"
+                trace_node, units = line.fields[2], "%"
                 chemical = f"Trace {trace_node}"
-            else:
-                # "any other word [units]": a chemical so named (`optionchoice`)
-                mode, chemical, units, trace_node = "CHEMICAL", word, "mg/L", None
-                if n >= 3:
-                    units = line.fields[2]
         else:
             value = as_float(line, 1, f"the {key.upper()} value", path)
             if value < 0:
                 raise _fail(path, line, f"{key.upper()} {value} is negative (EPANET error 213)")
-            if match(key, "TOLERANCE"):
+            if match(key, "TOLER"):
                 tolerance = value
             else:
                 diffusivity_file = value
     for line in sections.get("TIMES", []):
-        if " ".join(f.upper() for f in line.fields[:2]) == "QUALITY TIMESTEP":
-            step = time_with_unit(line.fields, 2, path, line)
+        if is_quality_time(line):
+            # `timedata` sets Qstep for any line whose first token matches QUAL
+            index = 2 if len(line.fields) > 2 and match(line.fields[1], "TIME") else 1
+            step = time_with_unit(line.fields, index, path, line)
             quality_timestep = step if step > 0 else None
 
     # ---- [QUALITY]: `qualdata`
@@ -212,11 +230,11 @@ def read_quality(
                 raise _fail(path, line, f"ORDER WALL {value:g} must be 0 or 1 (EPANET "
                             f"error 213)")
             orders[which] = value
-        elif match(first, "ROUGHNESS"):
+        elif match(first, "ROUG"):
             roughness = as_float(line, n - 1, "the roughness correlation", path)
-        elif match(first, "LIMITING"):
+        elif match(first, "LIMIT"):
             limiting = as_float(line, n - 1, "the limiting potential", path)
-        elif match(first, "GLOBAL"):
+        elif match(first, "GLOB"):
             value = as_float(line, n - 1, "the global coefficient", path)
             if match(second, "BULK"):
                 global_bulk = value
@@ -259,7 +277,7 @@ def read_quality(
                         target[name] = value
         else:
             raise _fail(path, line, f"unknown [REACTIONS] keyword {first.upper()!r} "
-                        f"(EPANET error 201)")
+                        f"(EPANET error 213)")
 
     # ---- [MIXING]: `mixingdata`
     mixing: dict[str, tuple[str, float]] = {}
@@ -272,17 +290,20 @@ def read_quality(
         if node not in nodes:
             raise _fail(path, line, f"names node {node!r}, which is not a node of this "
                         f"network")
+        if node in junction_names:      # `mixingdata` returns before it reads the model
+            skip(line, f"{node!r} is a junction, not a tank")
+            continue
         model = next((m for m in MIXING_MODELS if match(line.fields[1], m)), None)
         if model is None:
             raise _fail(path, line, f"unknown mixing model {line.fields[1]!r}; use "
-                        f"{', '.join(MIXING_MODELS)} (EPANET error 201)")
+                        f"{', '.join(MIXING_MODELS)} (EPANET error 213)")
         fraction = 1.0
         if model == "2COMP" and n == 3:
             fraction = as_float(line, 2, "the mixing zone fraction", path)
         if fraction == 0.0:
             fraction = 1.0
         if node not in tank_names:
-            skip(line, f"{node!r} is not a tank")
+            skip(line, f"{node!r} is a reservoir, not a tank")
         else:
             mixing[node] = (model, fraction)
 
@@ -301,7 +322,8 @@ def read_quality(
         diffusivity = diffusivity_file * (length**2)
 
     quality = WaterQuality(
-        mode=mode, chemical=chemical, units=units, trace_node=trace_node,
+        mode=mode, chemical=chemical, units=units,
+        trace_node=trace_node if mode == "TRACE" else None,
         quality_timestep=quality_timestep, tolerance=tolerance, diffusivity=diffusivity,
         bulk_order=orders["BULK"], wall_order=orders["WALL"], tank_order=orders["TANK"],
         global_bulk=global_bulk / _SECONDS_PER_DAY, global_wall=global_wall * wall_factor,
