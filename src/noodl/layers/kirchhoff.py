@@ -1521,11 +1521,14 @@ class KirchhoffLayer(
         tangents = self._tangents(drivers, step.ctx, device)
         with torch.no_grad():
             x = torch.zeros(u.n, dtype=real_dtype, device=device)
-            q_start = self._start_flows(drivers, step.ctx, real_dtype, device)
+            r = self._residual(x, phi_boundary, drivers, sources, step, call, tangents)[0]
+            # the layer's batch is the residual's at zero flow
+            q_start = self._start_flows(drivers, step.ctx, real_dtype, device, r.shape[:-1])
             if q_start is not None:
                 x = torch.cat([x[: u.w * u.n_I].expand(q_start.shape[:-1] + (-1,)), q_start],
                               dim=-1)
-            r = self._residual(x, phi_boundary, drivers, sources, step, call, tangents)[0]
+                r = self._residual(x, phi_boundary, drivers, sources, step, call,
+                                   tangents)[0]
             op = self._operator(x, phi_boundary, drivers, step, tangents=tangents)
             batch = broadcast_shapes(op.values.shape[:-1], r.shape[:-1])
             values = op.values.expand(batch + op.values.shape[-1:])
@@ -1541,11 +1544,15 @@ class KirchhoffLayer(
                 result.raise_on_failure(where)
             return -result.x if q_start is None else x - result.x
 
-    def _start_flows(self, drivers, ctx: LawContext, dtype, device) -> torch.Tensor | None:
+    def _start_flows(self, drivers, ctx: LawContext, dtype, device,
+                     batch=()) -> torch.Tensor | None:
         """The flow unknowns the linear guess starts from, in the real view: each implicit
         law's `start_flow`, zero for a law that gives none; `None` when no law gives one (the
-        guess then starts from zero flow, as it always has)."""
+        guess then starts from zero flow, as it always has). A start flow whose batch does
+        not broadcast against the layer's `batch` (and the start flows before it) is refused
+        by name."""
         parts, given = [], False
+        batch = tuple(batch)
         for el, implicit, (s, e) in zip(self._laws, self._implicit, self._law_slices,
                                         strict=True):
             if not implicit:
@@ -1556,6 +1563,13 @@ class KirchhoffLayer(
             else:
                 q_e = torch.as_tensor(q_e).detach()
                 self._check_width(el, q_e, e - s, "start flow")
+                try:
+                    batch = tuple(broadcast_shapes(batch, q_e.shape[:-1]))
+                except RuntimeError:
+                    raise ValueError(
+                        f"layer {self.name!r}: the start flow of the {el.kind!r} law has "
+                        f"batch {tuple(q_e.shape[:-1])} but the layer's batch is "
+                        f"{batch}") from None
                 q_e = q_e.to(device=device, dtype=q_e.dtype if q_e.is_complex() else dtype)
                 given = True
             parts.append(to_real(self, q_e))

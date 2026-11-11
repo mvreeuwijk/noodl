@@ -456,7 +456,8 @@ class ImplicitLaw(ConstitutiveLaw):
                    ctx: LawContext | None = None) -> Tensor | None:
         """The flow at which a layer's linear guess (`KirchhoffLayer.linear_init`) takes this
         law's `residual` and `jacobian`: one value per edge, with any batch dimensions in
-        front, or `None` (the default) for zero flow on every edge.
+        front (broadcasting against the layer's batch), or `None` (the default) for zero
+        flow on every edge.
 
         Give one where the law is far from linear around zero flow, so that its tangent
         there says little about its operating point: a pipe whose head loss has no slope at

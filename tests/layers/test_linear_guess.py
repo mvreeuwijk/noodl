@@ -253,6 +253,17 @@ def test_a_start_flow_of_the_wrong_width_is_refused_by_name():
         layer.linear_init(PB, {"q_start": torch.tensor([1.0, 2.0])}, None)
 
 
+def test_a_start_flow_whose_batch_does_not_broadcast_is_refused_by_name():
+    layer = _loss_layer(_QuadraticLoss(torch.tensor([2.0]), "q_start"))
+    pb = torch.stack([PB, PB])
+    with pytest.raises(ValueError, match=r"the start flow of the 'loss' law has batch "
+                                         r"\(3,\) but the layer's batch is \(2,\)"):
+        layer.linear_init(pb, {"q_start": torch.ones(3, 1)}, None)
+    # one that broadcasts is taken
+    _, q_f = layer.linear_init(pb, {"q_start": torch.ones(1, 1)}, None, q=True)
+    assert q_f.shape == (2, 1)
+
+
 def test_the_start_flow_moves_no_solve_from_zeros():
     # a cold solve still starts from zeros, with or without a start flow
     plain = _loss_layer(_QuadraticLoss(torch.tensor([2.0]))).solve(PB, differentiable=False)

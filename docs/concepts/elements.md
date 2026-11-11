@@ -273,8 +273,9 @@ edges whose flow is an unknown, in layer edge order.
 **The start flow.** A layer's linear guess (`linear_init`, and the rungs of its
 [fallback ladder](solvers.md#when-newton-fails-the-fallback-ladder)) takes each implicit law's
 residual and Jacobian at zero interior potentials and at the law's start flow,
-`start_flow(drivers, ctx)`: one value per edge (with any batch dimensions in front), or `None`,
-the default, for zero flow. The loss above has no slope at zero flow, so a guess taken there
+`start_flow(drivers, ctx)`: one value per edge (with any batch dimensions in front, which must
+broadcast against the layer's batch), or `None`, the default, for zero flow. A start flow of
+another width or batch is refused, naming the law. The loss above has no slope at zero flow, so a guess taken there
 puts the whole 10 across it, at `q = 10`; with a start flow of 1 the guess is
 `phi_mid = q = 2.4`, and with the root, 2, it is the solution. Give one where a law's tangent at
 zero flow says little about its operating point: the water application's pipes start at 1 ft/s
