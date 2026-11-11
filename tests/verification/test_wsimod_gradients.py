@@ -7,7 +7,8 @@ final storage or a pollutant mass) is compared with ``(f(p + h) - f(p - h)) / 2h
 are ``torch.where`` on detached decisions), so each point is also checked off the jumps from the
 ``"decisions"`` record: the outcome of every active decision, keyed by (day, site, call, round),
 is the same in the base and the two ``+-h`` runs, and no active decision has
-``|margin| <= 1e-6 * scale`` (``scale`` the largest arc flow of the base run) in any of the three.
+``|margin| <= 1e-6 * scale`` (``scale`` the largest arc flow of the base run) in any of the
+three, except margin-invariant decisions (see ``_jumps``).
 This file is also the whole-model check of the hand-written gradients of ``pow_half``,
 ``exp_python`` and ``pow_python`` (bitwise Python math).
 """
@@ -142,6 +143,8 @@ def _jumps(runs, scale):
             if any(f is not None and abs(f[1]) > NOISE * scale for f in found):
                 same = False
         elif abs(up[key][1] - down[key][1]) <= NOISE * scale:
+            if len({f[0] for f in found}) > 1 and max(abs(f[1]) for f in found) > NOISE * scale:
+                same = False
             continue
         elif len({f[0] for f in found}) > 1:
             same = False
@@ -162,7 +165,7 @@ def check(spec: Spec) -> dict:
     with torch.no_grad():
         up, _, up_decisions = _run(model, spec, torch.tensor(point + h, dtype=F64))
         down, _, down_decisions = _run(model, spec, torch.tensor(point - h, dtype=F64))
-    scale = float(results.arc_flow.abs().max())
+    scale = float(results.arc_flow.detach().abs().max())
     same, margin = _jumps([_records(d) for d in (base, up_decisions, down_decisions)], scale)
     return {
         "point": point,
@@ -192,7 +195,7 @@ SPECS = {
         False,
         ("driver", "wsimod.Arc.preference", "junction_to_a"),
         ("flow", "junction_to_a"),
-        1.37,
+        1.37,  # 1.0 ends a distribute loop on a rounding tie on days 9 and 29
     ),
     "Groundwater.residence_time": Spec(
         set=("driver", "wsimod.Groundwater.residence_time", "my_groundwater"),
@@ -217,12 +220,12 @@ SPECS = {
     "ImperviousSurface.et0_to_e": Spec(
         set=("driver", "wsimod.ImperviousSurface.et0_to_e", _URBAN),
         scalar=("flow", "urban_drainage"),
-        **{**_Q, "days": 160},
+        **{**_Q, "days": 160},  # day 162: the sewer sits at its 0.04 capacity edge
     ),
     "Land.surface_residence_time": Spec(
         set=("driver", "wsimod.Land.surface_residence_time", "my_land"),
         scalar=("flow", "runoff"),
-        point=3.0,
+        point=3.0,  # 1.0 leaves a ~1e-9 tank tail on the emptying branch
         **_Q,
     ),
     "Land.subsurface_residence_time": Spec(
@@ -255,7 +258,7 @@ SPECS = {
         False,
         ("driver", "wsimod.WWTW.treatment_throughput_capacity", "works"),
         ("flow", "works_to_river"),
-        27.3,
+        27.3,  # 30 sits on a stormwater-tank tie on days 35 and 38
     ),
     "FWTW.treatment_throughput_capacity": Spec(
         # the service reservoir fills to its capacity within a week whatever the throughput, so
@@ -290,11 +293,15 @@ SPECS = {
     "precipitation": Spec(
         set=("scale", "wsimod.precipitation"),
         scalar=("flow", "catchment_outflow"),
-        point=1.02,
+        point=1.02,  # 1.0 puts day 162's sewer inflow on the 0.04 capacity edge
         **_Q,
     ),
     "catchment flow": Spec(
-        "three_out_arcs", 9, False, ("scale", "wsimod.flow"), ("flow", "junction_to_a")
+        "three_out_arcs",
+        9,  # 40 days: day 9 is a capacity tie at scale 1
+        False,
+        ("scale", "wsimod.flow"),
+        ("flow", "junction_to_a"),
     ),
     "initial storage": Spec(
         "capacity_first_come",
