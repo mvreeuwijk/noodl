@@ -27,6 +27,7 @@ from noodl.apps.water.network import (
     water_steady,
 )
 from noodl.apps.water.report import link_table, pressure_head, to_kilopascal
+from tests.apps.water import ZERO_FLOW
 
 F64 = torch.float64
 
@@ -692,8 +693,8 @@ def test_a_pump_feeding_pressure_driven_demand_converges(pipe_form):
 @pytest.mark.parametrize("pipe_form", ["flow", "potential"])
 def test_a_pump_held_beyond_shut_off_is_shut_with_no_flow(pipe_form):
     """R1 (50 m) - PUMP (shut-off 13.3334 m) - J - pipe - R2 (100 m): the pump cannot lift
-    to R2, so it is shut, as EPANET closes it (`pumpstatus`, ``XHEAD``): exactly zero flow
-    (EPANET's closed link leaks `excess / CBIG`, 3e-8 m3/s here), J at R2's head, and the
+    to R2, so it is shut, as EPANET closes it (`pumpstatus`, ``XHEAD``): zero flow to
+    round-off (EPANET's closed link leaks `excess / CBIG`, 3e-8 m3/s here), J at R2's head, and the
     pump's state CLOSED."""
     net = WaterNetwork(
         junctions=(Junction("J", 0.0, 0.0),),
@@ -703,7 +704,7 @@ def test_a_pump_held_beyond_shut_off_is_shut_with_no_flow(pipe_form):
     )
     model, state, drivers = build_model(net, pipe_form=pipe_form)
     out = water_steady(model, state, drivers)
-    assert float(out["water.q"][-1]) == 0.0
+    assert abs(float(out["water.q"][-1])) <= ZERO_FLOW
     assert float(out["water.phi"][0]) == pytest.approx(100.0, abs=1e-9)
     assert link_states(model, out, drivers).tolist() == [OPEN, CLOSED]
 
@@ -720,7 +721,7 @@ def test_a_pump_at_speed_zero_is_closed():
     model, state, drivers = build_model(net)
     drivers = {**drivers, "water.setting": torch.zeros(1, dtype=F64)}
     out = water_steady(model, state, drivers)
-    assert float(out["water.q"][0]) == 0.0
+    assert abs(float(out["water.q"][0])) <= ZERO_FLOW
     assert float(out["water.phi"][0]) == pytest.approx(50.0, abs=1e-12)
     assert link_states(model, out, drivers).tolist() == [CLOSED]
 
