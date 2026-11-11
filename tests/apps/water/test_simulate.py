@@ -105,6 +105,25 @@ def test_a_pattern_boundary_inside_a_hydraulic_step_ends_the_step():
     assert _demand_factors(out) == [1.0, 0.5, 1.0]
 
 
+def test_the_run_solves_every_whole_step_to_the_duration_past_the_last_report():
+    """EPANET solves at every hydraulic time its whole steps reach within the duration,
+    reported or not (`hydraul.c`, `nexthyd`), and its quality reports there too (`runqual`;
+    `test_water_quality_networks.py::test_ky10_age_matches_epanet`, whose duration ends at
+    6:54:59, a control's time, after a step at 6:24:10). A 1:00 run with a two-hour report
+    step reports only 0:00, but solves at 0:30 (the control) and at 1:00 (the pattern
+    boundary); before, the run stopped after its last report time. A step cut short by the
+    duration ends the run without a solve there: EPANET's own step runs past the duration
+    (`test_water_quality.py`'s `last_step` case)."""
+    model, _, _ = build_model(_patterned_network())
+    diagnostics: dict = {}
+    out = water_run(model, duration=3600.0, diagnostics=diagnostics)
+    assert diagnostics["times"] == [0.0, 1800.0, 3600.0]
+    assert out.time.tolist() == [0.0]
+    cut: dict = {}
+    water_run(model, duration=2700.0, diagnostics=cut)
+    assert cut["times"] == [0.0, 1800.0]
+
+
 def test_pattern_start_shifts_the_pattern_as_epanet_does():
     """PATTERN START 0:30 makes the period at time t `(t + 1800) / 3600`, so it changes at
     0:30, 1:30, ... (`demands`). EPANET's step rule looks for `n Pstep - Htime`, not

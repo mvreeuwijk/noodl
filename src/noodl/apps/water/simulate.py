@@ -23,9 +23,12 @@ the duration), transcribed from `hydraul.c` (tag v2.2):
 
 Results are kept at the report times (`quality.c`, `runqual`, which writes EPANET's output):
 every solve at a time at or past the next report time `Rtime`, which starts at REPORT START
-and grows by REPORT TIMESTEP. They are labelled with those report times. The run ends at the
-duration (EPANET solves once more past it when the duration is not a multiple of the step,
-which reports nothing; here the last step ends at the duration). The pumps' energy
+and grows by REPORT TIMESTEP. They are labelled with those report times. The run goes on past
+its last report time to the duration, solving at every time EPANET's whole steps reach within
+it (`nexthyd`), reported or not, the quality kept and routed there (`runqual`, `nextqual`). A
+last step the duration cuts short ends the run without a solve at the duration unless that is
+a report time (EPANET's own step runs past the duration and solves there, which reports
+nothing). The pumps' energy
 (`energy.py`, `addenergy`) is accumulated over every step that starts before the duration,
 the last one at EPANET's own length, not shortened to the duration.
 
@@ -528,7 +531,11 @@ def water_run(model, state=None, drivers=None, *, duration: float | None = None,
     def speeds_of(solved, d):
         return recorder.pump_speeds(solved, d, meter.cols) if meter.any_curve else None
 
-    while next_report <= clock.duration:
+    # past the last report time as well, to every time EPANET's whole steps reach within the
+    # duration (module docstring); a step cut short by the duration ends the run unless the
+    # duration is a report time
+    reached = True                            # `t` is where EPANET's whole step ends
+    while next_report <= clock.duration or t < clock.duration or reached:
         d = patterns.drivers_at(t)
         state = patterns.speeds(state, t)
         if diagnostics is not None:
@@ -579,8 +586,7 @@ def water_run(model, state=None, drivers=None, *, duration: float | None = None,
         # the duration cut this step, EPANET's is whole, its tanks moved and its rules checked
         # to its own end (a rule acting past the duration ends it there)
         whole, seen, taken = step, advanced, acted
-        if ((counted or routers is not None)
-                and t + clock.free_step(t, hydraulic_report) > clock.duration):
+        if t + clock.free_step(t, hydraulic_report) > clock.duration:
             whole, seen, taken = plan(False, t, hydraulic_report, solved, levels, d)
         if counted:
             pumps_now, opened = _as_addenergy_sees(seen, taken, status[..., meter.cols],
@@ -600,6 +606,7 @@ def water_run(model, state=None, drivers=None, *, duration: float | None = None,
             with quiet():
                 routers.advance(t, whole, flow=solved["water.q"], closed=states == CLOSED,
                                 demand=demands[0] + demands[1])
+        reached = step == whole
         t += step
         if t >= hydraulic_report:
             hydraulic_report += clock.report_step

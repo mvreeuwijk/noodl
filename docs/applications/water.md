@@ -1039,8 +1039,11 @@ independent loop is a property of the cycle-space formulation, and it holds exac
   extra step boundaries, each an extra solve of EPANET's explicit step (6.5e-3 m on Net1 at
   0.8 and 1.25 times the demand; exact to 1e-9 m against its single run forced onto the same
   boundaries). Run instances one at a time to reproduce EPANET's own sequence for each.
-- **The run ends at the duration.** EPANET's last step is not cut at `DURATION` (it solves
-  once more past it, and reports nothing there); `water_run` ends the last step at the duration.
+- **The run ends at the duration.** `water_run` solves at every time EPANET's whole steps reach
+  within `DURATION`, past the last report time too (a tank or control event there; the quality
+  is kept and routed there as EPANET's is). EPANET's last step is not cut at `DURATION` (it
+  solves once more past it, and reports nothing there); `water_run` ends the run at the
+  duration without that solve.
   A REPORT START that is not a multiple of the REPORT TIMESTEP follows EPANET's rule (the first
   solve at or after each report time, `runqual`). wntr 1.5.0 cannot read that output file, so
   it is compared through EPANET's toolkit with `runqual`'s rule applied to EPANET's solves
