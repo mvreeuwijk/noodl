@@ -384,9 +384,9 @@ mg/L (7, 11) (7, 13)
 
 **Learnable inputs.** Optional overrides of what the file says: `state["quality.initial"]`
 (n_nodes, quality units) and the drivers `"quality.bulk_coefficient"` and
-`"quality.wall_coefficient"` (n_pipes, in `net.pipes` order; 1/s for bulk, m/s for a wall
+`"quality.wall_coefficient"` (n_pipes, in `net.pipes` order; (quality unit)^(1-n)/s for a bulk reaction of order n, 1/s for order 1; m/s for a wall
 coefficient of order 1, quality units per m² per s of order 0), `"quality.tank_coefficient"`
-(n_tanks, 1/s) and `"quality.source_strength"` (n_nodes, scaled by the source's pattern; a MASS
+(n_tanks, (quality unit)^(1-n)/s for the bulk order n, 1/s for order 1) and `"quality.source_strength"` (n_nodes, scaled by the source's pattern; a MASS
 source in mass per second). A wrong shape, or any of them on a run without quality, is refused
 by name.
 
@@ -1057,9 +1057,9 @@ independent loop is a property of the cycle-space formulation, and it holds exac
 
 The reference is EPANET 2.2 through the toolkit on the committed file, with the same settings as
 above (`ACCURACY 1e-7` through `EN_setoption`, `TRIALS 400`, 5000 for ky10; any warning fails the
-test unless it is named). Quality is read at every quality step through `EN_runQ` and `EN_nextQ`
-(the loop `EN_solveQ` runs; `EN_stepQ` splits a step at a hydraulic event, which EPANET's own
-runs do not). The bound, over every node and link at every report time: each point within 1e-5 of
+test unless it is named). Quality is read at every hydraulic step (the time of each `EN_runQ`; `EN_nextQ`
+advances the quality to the next one, the loop `EN_solveQ` runs; `EN_stepQ` splits a step at a hydraulic event, which EPANET's own
+runs do not). The bound, over every node and link at every hydraulic step time: each point within 1e-5 of
 the quality's scale (1 for a chemical, 100 for a trace, the largest age of the run for an
 age: 24 h on the base network, 6.92 h on ky10) and the worst within `Ctol`; mass-balance terms within 2e-5 relative and the ratio within
 1e-6. A point beyond 1e-5 is admitted only with a measured cause asserted in the test. EPANET reads its hydraulics back as
@@ -1095,7 +1095,7 @@ EPANET's example networks (`test_water_quality_networks.py`):
 | Net1 (chlorine, 24 h) | all nodes and links, 27 times | 1.6e-6 mg/L (p99.9 1.4e-6); mass terms 7.7e-7, ratio 1.8e-8 | |
 | Net2 (fluoride, a `CONCEN` source on a pattern, 55 h, one tank), hydraulics | 56 steps | heads 1.1e-7 relative, levels 8.9e-6 m, flows 1.9e-8 m³/s | states and step times equal |
 | Net2, `Tolerance` 0.01 moved by 1e-8 either way | all nodes and links | 4.2e-6 mg/L (p99.9 6.6e-7) | |
-| Net2 as shipped (`Tolerance` 0.01) | | 2.83e-3 mg/L, within `Ctol`; 791 of 4256 points beyond 1e-5, all from 32 h | a tie at exactly `Ctol`, below |
+| Net2 as shipped (`Tolerance` 0.01) | | 2.83e-3 mg/L, within `Ctol`; 667 of 4256 points beyond 1e-5, all from 32 h | a tie at exactly `Ctol`, below |
 | Net3 (TRACE from the lake, 168 h, 1226 flow reversals, 154 node sorts) | 183 times | 2.5e-4 % (p99.9 9.7e-5 %); mass terms 1.4e-6, ratio 1.3e-8 | |
 | Net6 as shipped (quality identically 0) | smoke | exactly 0 in both; ratio exactly 1 | |
 | Net6 with a source added, before 18922 s | 40 steps | 5.9e-6 mg/L; mass terms (whole run) 1.9e-6 | hydraulic cause below |
@@ -1110,7 +1110,7 @@ The causes admitted, each asserted in its test:
   `0.09 - 0.08 = 0.009999999999999995`, below `Ctol`, and merges; EPANET, in its internal unit, gets a
   difference one ulp above `Ctol` and starts a new segment. The test checks the decision (the
   segment counts, and that EPANET at 0.01 equals EPANET at 0.00999999) and does not count it as accuracy.
-  noodl's router driven by EPANET's own hydraulics flips the same 791 points. Accuracy is tested with `Tolerance` moved by 1e-8.
+  noodl's own run flips those 667 points; its router fed EPANET's saved hydraulics in mg/L (`_router_on_epanets_hydraulics`) flips 791. Accuracy is tested with `Tolerance` moved by 1e-8.
   A tie at 49 h does resolve as EPANET's, since the decisions are made in EPANET's unit.
 - **Net6 with a source: closed-link leaks.** The step plans part at 18922 s (EPANET's PUMP-3845
   switch; noodl's is at 18921 s, see Limitations, closed links), after which 252 of
