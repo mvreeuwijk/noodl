@@ -69,7 +69,7 @@ def _pollutant_labels(names: Sequence[str], pollutants: Sequence[str]) -> list[s
 def _decision_margin(decisions: list, day: int, site: str) -> float | None:
     """The smallest ``|margin|`` of an active decision at ``site`` on ``day``."""
     margins = [
-        float(d.margin.abs().min())
+        float(d.margin[d.active].abs().min())
         for d in decisions[day]
         if d.site == site and bool(d.active.any())
     ]
@@ -112,6 +112,9 @@ def assert_matches_wsimod(
         raise AssertionError(f"{case}: surface names differ")
     if len(ours.dates) != len(theirs.dates):
         raise AssertionError(f"{case}: {len(ours.dates)} days against {len(theirs.dates)}")
+    # ours keeps the labels as written ("2009-03-03 00:00:00"), WSIMOD records str(date)
+    if [d[:10] for d in ours.dates] != [d[:10] for d in theirs.dates]:
+        raise AssertionError(f"{case}: the dates differ")
     groups = [
         _series("arc_flow", ours.arc_flow, theirs.arc_flow, ours.arc_names),
         _series(
@@ -148,23 +151,22 @@ def assert_matches_wsimod(
         bound = BOUND * scale
         for day, column in (diff > bound).nonzero().tolist():
             label = labels[column]
-            decisions = diagnostics.get("decisions")
+            decisions = diagnostics.get("decisions") or None
             sites = [k for k in allowed if k[0] == case and k[1] == label and k[2] == day]
-            margin = None
-            for key in sites:
-                if decisions is None:
-                    break
+            admitted_key = None
+            for key in sites if decisions is not None else ():
                 margin = _decision_margin(decisions, day, key[3])
                 if margin is not None and margin <= ADMISSION_MARGIN * float(scale[column]):
-                    used.append(allowed[key])
+                    admitted_key = key
                     break
-            else:
+            if admitted_key is None:
                 raise AssertionError(
                     f"{case}: first divergence {label} on day {day} ({ours.dates[day]}): noodl "
                     f"differs from WSIMOD by {float(diff[day, column]):.3e} against the bound "
                     f"{float(bound[column]):.3e} (scale {float(scale[column]):.3e}); no "
                     f"admission with a decision margin <= {ADMISSION_MARGIN:g} * scale"
                 )
+            used.append(allowed[admitted_key])
         if diff.numel():
             at = int(diff.amax(dim=0).argmax())
             top = float(diff.amax())
@@ -175,6 +177,9 @@ def assert_matches_wsimod(
     errors = [line for line in theirs.printed if "mass balance error" in line]
     if errors:
         raise AssertionError(f"{case}: WSIMOD printed {errors[0]!r}")
+    for line in theirs.printed:
+        if not (_DEFICIT.fullmatch(line) or _MAXITER.fullmatch(line)):
+            raise AssertionError(f"{case}: WSIMOD printed a line no check covers: {line!r}")
     flags = diagnostics["events"]["demand_deficit"]
     deficits = {
         (names[i], theirs.dates[d])

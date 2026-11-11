@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import copy
 import functools
+import re
 from pathlib import Path
 
 import pytest
@@ -82,6 +83,8 @@ def test_demo_matches_wsimod(case, mode, days):
     )
     assert found["worst"] == 0.0 and found["admissions"] == []
     assert reference.printed == []
+    assert len(results.dates) == days
+    assert results.arc_flow.shape[1] > 0 and results.tank_storage.shape[1] > 0
     assert set(EVENT_NAMES) <= set(diagnostics["events"])
     assert not bool(diagnostics["events"]["inaccurate_evaporation"].any())
     assert mass_balance_worst(results) <= BOUND
@@ -140,15 +143,68 @@ def _busiest_arc(reference):
     return column, float(reference.arc_flow[:, column].abs().max())
 
 
-def test_a_difference_beyond_the_bound_is_named_by_element_and_day():
+def _name(label: tuple[str, str] | str) -> str:
+    return label if isinstance(label, str) else f"{label[0]}.{label[1]}"
+
+
+@pytest.mark.parametrize(
+    ("group", "element"),
+    [
+        ("arc_flow", None),
+        ("tank_storage", "my_groundwater.tank"),
+        ("surface.storage", "my_land.urban"),
+        ("arc_quality", None),
+    ],
+)
+def test_a_difference_beyond_the_bound_is_named_by_element_and_day(group, element):
     results, diagnostics, reference = _perturbed()
-    column, scale = _busiest_arc(reference)
-    results.arc_flow[7, column] += 1e-9 * scale
-    name = results.arc_names[column]
-    with pytest.raises(AssertionError, match=f"first divergence arc_flow:{name} on day 7"):
+    if group == "arc_flow":
+        column, scale = _busiest_arc(reference)
+        results.arc_flow[7, column] += 1e-9 * scale
+        label = f"arc_flow:{results.arc_names[column]}"
+    elif group == "tank_storage":
+        names = [_name(t) for t in results.tank_names]
+        column = names.index(element)
+        scale = float(reference.tank_storage[:, column].abs().max())
+        # the groundwater holds nothing in these 30 days: scale 0, any difference counts
+        results.tank_storage[7, column] += 1e-9 * scale or 1e-3
+        label = f"tank_storage:{element}"
+    elif group == "surface.storage":
+        names = [_name(t) for t in results.surface_names]
+        column = names.index(element)
+        scale = float(reference.surface["storage"][:, column].abs().max())
+        assert scale > 0.0
+        results.surface["storage"][7, column] += 1e-9 * scale
+        label = f"surface.storage:{element}"
+    else:
+        column, _ = _busiest_arc(reference)
+        quality = reference.arc_quality[:, column]  # (T, K)
+        k = int(quality.abs().amax(dim=0).argmax())
+        scale = float(quality[:, k].abs().max())
+        assert scale > 0.0
+        results.arc_quality[7, column, k] += 1e-9 * scale
+        label = f"arc_quality:{results.arc_names[column]}:{reference.pollutants[k]}"
+    with pytest.raises(AssertionError, match=re.escape(f"first divergence {label} on day 7")):
         assert_matches_wsimod(
             results, reference, diagnostics=diagnostics, case="quickstart", quality=True
         )
+
+
+def test_different_arc_names_or_day_counts_are_refused():
+    results, diagnostics, reference = _perturbed()
+    kwargs = {"diagnostics": diagnostics, "case": "quickstart", "quality": True}
+    renamed = copy.deepcopy(results)
+    renamed.arc_names = [*renamed.arc_names[:-1], "other"]
+    with pytest.raises(AssertionError, match="arc names differ"):
+        assert_matches_wsimod(renamed, reference, **kwargs)
+    shorter = copy.deepcopy(results)
+    shorter.dates = shorter.dates[:-1]
+    with pytest.raises(AssertionError, match="29 days against 30"):
+        assert_matches_wsimod(shorter, reference, **kwargs)
+    shifted = copy.deepcopy(results)
+    shifted.dates = ["2000-01-01", *shifted.dates[1:]]
+    with pytest.raises(AssertionError, match="the dates differ"):
+        assert_matches_wsimod(shifted, reference, **kwargs)
 
 
 def test_an_admission_needs_a_decision_within_its_margin_that_day():
@@ -178,20 +234,86 @@ def test_an_admission_needs_a_decision_within_its_margin_that_day():
         run(None)  # no decision at the site that day
     with pytest.raises(AssertionError, match="no admission"):
         run(1e-3)  # a decision, but its margin is beyond 1e-9 * scale
+    with pytest.raises(AssertionError, match="no admission"):  # no decisions recorded at all
+        assert_matches_wsimod(
+            results,
+            reference,
+            diagnostics={k: v for k, v in diagnostics.items() if k != "decisions"},
+            case="quickstart",
+            quality=True,
+            admitted=[admission],
+        )
     found = run(1e-10)
     assert found["admissions"] == [admission] and found["worst"] > 0.0
+
+
+def _with_print(kind: str, day: int, node: int, *, names: list[str] | None = None):
+    """The 10-day run with one noodl flag set (a demand deficit at node ``node``, or a Maxiter
+    at the first site) and WSIMOD's matching print, naming the node by ``names``."""
+    results, diagnostics, reference = _perturbed(10)
+    reference = copy.deepcopy(reference)
+    real = list(diagnostics["node_names"])
+    events = {k: v.clone() for k, v in diagnostics["events"].items()}
+    maxiter = {k: v.clone() for k, v in diagnostics["maxiter"].items()}
+    date = reference.dates[day]
+    if kind == "deficit":
+        events["demand_deficit"][day, node] = True
+        reference.printed = [f"demand deficit of 1.5 at {real[node]} on {date}"]
+    else:
+        site = next(iter(maxiter))
+        maxiter[site][day] = True
+        reference.printed = [f"Maxiter reached in {site[0]} at {date}"]
+    diagnostics = {
+        **diagnostics,
+        "events": events,
+        "maxiter": maxiter,
+        "node_names": real if names is None else names,
+    }
+    return results, diagnostics, reference
+
+
+@pytest.mark.parametrize("kind", ["deficit", "maxiter"])
+def test_a_dated_print_matches_the_flag_of_its_node_and_day(kind):
+    kwargs = {"case": "quickstart", "quality": True}
+    results, diagnostics, reference = _with_print(kind, 3, 0)
+    assert_matches_wsimod(results, reference, diagnostics=diagnostics, **kwargs)
+    # the wrong day
+    results, diagnostics, reference = _with_print(kind, 3, 0)
+    reference.printed = [reference.printed[0].replace(reference.dates[3], reference.dates[4])]
+    with pytest.raises(AssertionError, match="differ"):
+        assert_matches_wsimod(results, reference, diagnostics=diagnostics, **kwargs)
+
+
+def test_a_wrong_node_name_mapping_fails_the_deficit_check():
+    names = list(ours("quickstart", "neutral", 10, True)[1]["node_names"])
+    assert len(names) > 1
+    # flag at node 0, the print names node 0 by its right name; the mapping is reversed
+    results, diagnostics, reference = _with_print("deficit", 3, 0, names=names[::-1])
+    with pytest.raises(AssertionError, match="demand deficits differ"):
+        assert_matches_wsimod(
+            results, reference, diagnostics=diagnostics, case="quickstart", quality=True
+        )
+
+
+def test_a_wrong_maxiter_site_name_fails_the_maxiter_check():
+    results, diagnostics, reference = _with_print("maxiter", 3, 0)
+    reference.printed = [reference.printed[0].replace("reached in ", "reached in not_")]
+    with pytest.raises(AssertionError, match="Maxiter days differ"):
+        assert_matches_wsimod(
+            results, reference, diagnostics=diagnostics, case="quickstart", quality=True
+        )
 
 
 def test_a_print_noodl_does_not_record_is_refused():
     results, diagnostics, reference = _perturbed(10)
     reference = copy.deepcopy(reference)
-    reference.printed = ["demand deficit of 1.0 at my_land on 2009-03-05 00:00:00"]
+    kwargs = {"diagnostics": diagnostics, "case": "quickstart", "quality": True}
+    reference.printed = ["demand deficit of 1.0 at my_land on 2009-03-05"]
     with pytest.raises(AssertionError, match="demand deficits differ"):
-        assert_matches_wsimod(
-            results, reference, diagnostics=diagnostics, case="quickstart", quality=True
-        )
+        assert_matches_wsimod(results, reference, **kwargs)
     reference.printed = ["mass balance error for volume of 1.0 in my_land"]
     with pytest.raises(AssertionError, match="mass balance error"):
-        assert_matches_wsimod(
-            results, reference, diagnostics=diagnostics, case="quickstart", quality=True
-        )
+        assert_matches_wsimod(results, reference, **kwargs)
+    reference.printed = ["something unexpected"]
+    with pytest.raises(AssertionError, match="no check covers: 'something unexpected'"):
+        assert_matches_wsimod(results, reference, **kwargs)
