@@ -1,4 +1,6 @@
-"""The EPANET 2.2 water-quality reference of the quality parity tests.
+"""The EPANET 2.2 water-quality reference of the quality parity tests, and the hydraulic
+parity's (`epanet_results` and `epanet_session`, for `test_water_parity.py` and
+`test_water_networks.py`).
 
 EPANET runs through its toolkit (`wntr` 1.5.0's `ENepanet` and its ctypes handle `ENlib` on the
 bundled `epanet22.dll`) on the committed file, never on `EpanetSimulator`'s rewrite of it. Its
@@ -31,7 +33,8 @@ from __future__ import annotations
 import ctypes
 import re
 import tempfile
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -48,7 +51,9 @@ EN_ELEVATION, EN_HEAD, EN_QUALITY = 0, 10, 12
 EN_FLOW, EN_LINKQUAL = 8, 14
 EN_NODECOUNT, EN_LINKCOUNT = 0, 2
 EN_MASSBALANCE = 4
-EN_TRIALS, EN_ACCURACY = 0, 1
+EN_TRIALS, EN_ACCURACY, EN_HEADLOSSFORM = 0, 1, 7
+#: `EN_HeadLossType` (`epanet2_enums.h`, v2.2): `EN_DW`.
+EN_DW = 1
 #: The accuracy `_open` sets (Ruling Q14; the measured cause in its docstring).
 REFERENCE_ACCURACY = 1e-7
 #: EPANET's litres per ft3 (`types.h`, ``LperFT3 = 28.317``; the exact value is 28.3168466).
@@ -134,9 +139,12 @@ def _toolkit():
     return ENepanet()
 
 
-def _open(en, copy: Path, report: Path, binary: Path) -> None:
-    """`EN_open` of the reference `copy`, then `EN_setoption(EN_ACCURACY, REFERENCE_ACCURACY)`
-    (the file's 1e-8 is clamped to 1e-5 on reading; module docstring).
+def _open(en, copy: Path, report: Path, binary: Path, *,
+          accuracy: float | None = REFERENCE_ACCURACY) -> None:
+    """`EN_open` of the reference `copy`, then `EN_setoption(EN_ACCURACY, accuracy)` (the
+    file's 1e-8 is clamped to 1e-5 on reading; module docstring); `accuracy=None` leaves
+    the copy's clamped 1e-5, for a hydraulic reference that names its measured cause
+    (`epanet_results`). The project is closed if the option is refused.
 
     Why 1e-7 and not 1e-8 (Ruling Q14), MEASURED (EPANET warning 1, hydraulically unbalanced,
     at the steps listed): at 1e-8 with TRIALS 400, Net2 at t = 25200, 28800 and 82800 s (411
@@ -145,13 +153,39 @@ def _open(en, copy: Path, report: Path, binary: Path) -> None:
     none on Net1, Net2, Net3 or `quality_base.inp`. A reference EPANET itself flags as
     unbalanced is no reference; 1e-7 is still 100 times tighter than a file can give."""
     en.ENopen(str(copy), str(report), str(binary))
-    code = en.ENlib.EN_setoption(en._project, EN_ACCURACY, ctypes.c_double(REFERENCE_ACCURACY))
-    assert code == 0, f"EN_setoption(EN_ACCURACY, {REFERENCE_ACCURACY}) returned {code}"
+    if accuracy is None:
+        return
+    code = en.ENlib.EN_setoption(en._project, EN_ACCURACY, ctypes.c_double(accuracy))
+    if code != 0:
+        en.ENclose()
+        raise AssertionError(f"EN_setoption(EN_ACCURACY, {accuracy}) returned {code}")
 
 
 def _no_warnings(en, path) -> None:
     """EPANET's warnings (codes 1 to 6) are only logged by wntr: refuse a run that had one."""
     assert not en.Warnflag, f"EPANET warned on {path}: {en.errcodelist}"
+
+
+#: EPANET's warnings that describe the network's state, not the solve (`report.c`,
+#: `writehydwarn`): 3 disconnected, 4 a pump shut or beyond its curve, 5 a valve that cannot
+#: deliver, 6 negative pressures. 1 (unbalanced) and 2 (unstable: converged only with the
+#: statuses held) say the reference is no solution and are never permitted.
+NETWORK_STATE_WARNINGS = frozenset({3, 4, 5, 6})
+#: `writehydwarn`'s report lines for warnings 1 and 2 (`text.h`, WARN01 and WARN02), read
+#: from the report as well: the function returns one flag per step, the last it set, so a
+#: 4, 5 or 6 there hides a 2.
+_UNCONVERGED = ("WARNING: System unbalanced", "WARNING: Maximum trials exceeded")
+
+
+def _warning_codes(en) -> list[int]:
+    """The codes (1 to 6) of the warnings wntr logged on `en` (`ENgetwarning`'s texts)."""
+    from wntr.epanet.toolkit import EN_ERROR_CODES
+    codes = []
+    for text in en.errcodelist:
+        found = [c for c in range(1, 7) if text.endswith(EN_ERROR_CODES[c].split("%s", 1)[1])]
+        assert len(found) == 1, f"unrecognised EPANET warning {text!r}"
+        codes.append(found[0])
+    return codes
 
 
 def option(en, code: int) -> float:
@@ -258,6 +292,71 @@ def epanet_hydraulics(path: Path) -> dict:
             en.ENclose()
     return {"times": times, "node_names": node_names, "link_names": link_names,
             "head": torch.tensor(head, dtype=F64), "flow": torch.tensor(flow, dtype=F64)}
+
+
+@contextmanager
+def epanet_session(path: Path) -> Iterator:
+    """wntr's `ENepanet` open on EPANET's copy of `path` (`epanet_copy`, `_open`: ACCURACY
+    `REFERENCE_ACCURACY`) in a temporary directory, for a caller that drives the toolkit
+    itself (`ENopenH`, `ENrunH`, ...); on leaving, `_no_warnings` (unless the body raised)
+    and `ENclose`."""
+    with tempfile.TemporaryDirectory(prefix="epanet-s-", ignore_cleanup_errors=True) as tmp:
+        directory = Path(tmp)
+        copy = epanet_copy(path, directory)
+        en = _toolkit()
+        _open(en, copy, directory / "session.rpt", directory / "session.bin")
+        try:
+            yield en
+            _no_warnings(en, path)
+        finally:
+            en.ENclose()
+
+
+def epanet_results(path: Path, *, duration: float | None = None, reader=None,
+                   accuracy: float | None = REFERENCE_ACCURACY, trials: int | None = None,
+                   warnings: Collection[int] = ()):
+    """EPANET 2.2's results on `path`, the hydraulic parity's reference: what wntr's
+    `EpanetSimulator.run_sim` returns (`EN_solveH`, `EN_solveQ`, the binary output read by
+    wntr's `BinFile`, in SI at the report times), but on EPANET's copy of the file itself
+    (`epanet_copy`), not on wntr's rewrite of it, and at a true ACCURACY `accuracy` (`_open`).
+    A file's ACCURACY is clamped to 1e-5, which `accuracy=None` keeps, and `trials` replaces
+    the copy's TRIALS 400 (`EN_TRIALS`): a test that passes either says why. Refused if
+    EPANET warned, but for the network-state warnings `warnings` names, each of which must
+    occur (`NETWORK_STATE_WARNINGS`: the case is about a pump shut by its head, or a
+    negative pressure), and always on an unconverged or unstable step, read from the report
+    too (`_UNCONVERGED`). `duration` (s) sets `[TIMES] DURATION` in the copy; `reader` is
+    the `BinFile` (or a subclass keeping more of the file, e.g. its energy section) that
+    reads the output."""
+    assert set(warnings) <= NETWORK_STATE_WARNINGS, warnings
+    from wntr.epanet.io import BinFile
+    with tempfile.TemporaryDirectory(prefix="epanet-r-", ignore_cleanup_errors=True) as tmp:
+        directory = Path(tmp)
+        source = Path(path)
+        if duration is not None:
+            source = edited(source, directory, f"{source.stem}.duration.inp",
+                            add={"TIMES": [f" DURATION {int(duration)} SEC"]})
+        copy = epanet_copy(source, directory)
+        binary, report = directory / "results.bin", directory / "results.rpt"
+        en = _toolkit()
+        _open(en, copy, report, binary, accuracy=accuracy)
+        try:
+            if trials is not None:
+                code = en.ENlib.EN_setoption(en._project, EN_TRIALS, ctypes.c_double(trials))
+                assert code == 0, f"EN_setoption(EN_TRIALS, {trials}) returned {code}"
+            en.ENsolveH()
+            en.ENsolveQ()
+            darcy_weisbach = option(en, EN_HEADLOSSFORM) == EN_DW
+        finally:
+            en.ENclose()
+        codes = _warning_codes(en)
+        unexpected = [c for c in codes if c not in warnings]
+        assert not unexpected, f"EPANET warned on {path}: {en.errcodelist}"
+        absent = set(warnings) - set(codes)
+        assert not absent, f"EPANET did not give the warnings {sorted(absent)} on {path}"
+        lines = [ln.strip() for ln in report.read_text(errors="replace").splitlines()]
+        unconverged = [ln for ln in lines if ln.startswith(_UNCONVERGED)]
+        assert not unconverged, f"EPANET did not converge on {path}: {unconverged[:3]}"
+        return (reader or BinFile()).read(str(binary), False, darcy_weisbach)
 
 
 def run_quality(path: Path, **water_run_kwargs):

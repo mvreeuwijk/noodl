@@ -29,6 +29,7 @@ from tests.verification._epanet_quality import (  # noqa: E402
     epanet_copy,
     epanet_hydraulics,
     epanet_quality,
+    epanet_results,
     first_divergence,
     mass_balance_si,
     option,
@@ -45,29 +46,15 @@ _NETWORKS = {"Net1": (DATA / "Net1.inp", 1e-3), "Net2": (LIBRARY / "Net2.inp", 1
              "Net3": (LIBRARY / "Net3.inp", 1.0)}
 
 
-def _binary(path, tmp_path):
-    """EPANET's own `EN_solveH`, `EN_solveQ` on the reference copy of `path`, its binary
-    output read by wntr's `BinFile`."""
-    from wntr.epanet.io import BinFile
-    copy = epanet_copy(path, tmp_path)
-    en = _toolkit()
-    _open(en, copy, tmp_path / "solve.rpt", tmp_path / "solve.bin")
-    try:
-        en.ENsolveH()
-        en.ENsolveQ()
-    finally:
-        en.ENclose()
-    return BinFile().read(str(tmp_path / "solve.bin"))
-
-
 @pytest.mark.parametrize("name", list(_NETWORKS))
-def test_the_step_harness_reproduces_epanets_binary_output(tmp_path, name):
+def test_the_step_harness_reproduces_epanets_binary_output(name):
     """At the report times, every node's and link's quality from the `EN_runQ`/`EN_nextQ` loop
-    is EPANET's own `EN_solveQ` binary output (float32 on disk) within 1e-6 relative.
-    MEASURED: 1.3e-7 (Net1), 1.6e-7 (Net2), 5.9e-8 (Net3); exact where the binary holds 0."""
+    is EPANET's own `EN_solveQ` binary output (float32 on disk, read by wntr's `BinFile`:
+    `epanet_results`, the hydraulic parity's reference) within 1e-6 relative. MEASURED:
+    1.3e-7 (Net1), 1.6e-7 (Net2), 5.9e-8 (Net3); exact where the binary holds 0."""
     path, si = _NETWORKS[name]
     reference = epanet_quality(path)
-    results = _binary(path, tmp_path)
+    results = epanet_results(path)
     for theirs, ours, names in (
             (results.node["quality"], reference.node, reference.node_names),
             (results.link["quality"], reference.link, reference.link_names)):
@@ -89,19 +76,44 @@ def test_the_mass_balance_is_read_in_full_and_from_the_report():
     assert 0.9 < reference.ratio < 1.1
 
 
-def test_the_mass_balance_terms_convert_to_quality_times_cubic_metres(tmp_path):
-    """Net1 with every node's initial quality 1 mg/L: the report's initial mass, through
-    `mass_balance_si`, is the network's water volume (every pipe's and the tank's; pumps and
-    valves start empty, a reservoir holds none) in mg/L x m3, to the report's 6 digits."""
+def _net1_with_ones(tmp_path, name, replace=()):
+    """Net1 with every junction's and the tank's initial quality 1 (edited, `replace` too),
+    EPANET's quality on it, and the volume (m3) that quality fills: every pipe's and the
+    tank's (pumps and valves start empty, a reservoir holds none)."""
     import math
     net = read_epanet_inp(DATA / "Net1.inp")
     lines = [f" {n.name}  1.0" for n in (*net.junctions, *net.tanks)]
-    reference = epanet_quality(edited(DATA / "Net1.inp", tmp_path, "ones.inp",
+    reference = epanet_quality(edited(DATA / "Net1.inp", tmp_path, name, replace=replace,
                                       add={"QUALITY": lines}))
     volume = sum(math.pi / 4 * p.diameter**2 * p.length for p in net.pipes)
     volume += sum(math.pi / 4 * t.diameter**2 * t.init_level for t in net.tanks)
+    return reference, volume
+
+
+def test_the_mass_balance_terms_convert_to_quality_times_cubic_metres(tmp_path):
+    """Net1 with every node's initial quality 1 mg/L: the report's initial mass, through
+    `mass_balance_si`, is the network's water volume in mg/L x m3, to the report's 6
+    digits."""
+    reference, volume = _net1_with_ones(tmp_path, "ones.inp")
     converted = mass_balance_si(reference.terms, "CHEMICAL")
     assert converted["initial"] == pytest.approx(volume, rel=1e-5)
+    assert converted["ratio"] == reference.terms["ratio"]
+
+
+def test_the_mass_balance_of_age_converts_to_hours_times_cubic_metres(tmp_path):
+    """`QUALITY AGE` on Net1 with every node's initial age 1 h (`initqual` takes a node's
+    initial quality for AGE, `quality.c`): the report's initial mass is age times ft3, with
+    no `LperFT3` (`writemassbalance`), and through `mass_balance_si(..., "AGE")` it is the
+    network's water volume in h x m3, to the report's 6 digits; read as a CHEMICAL it would
+    be 28.317 times too small."""
+    reference, volume = _net1_with_ones(
+        tmp_path, "age.inp", replace=[(" Quality            \tChlorine mg/L",
+                                       " Quality            \tAge")])
+    assert bool((reference.node[0] == 1.0).all()) and float(reference.node.max()) > 1.0
+    converted = mass_balance_si(reference.terms, "AGE")
+    assert converted["initial"] == pytest.approx(volume, rel=1e-5)
+    assert mass_balance_si(reference.terms, "CHEMICAL")["initial"] == pytest.approx(
+        volume / 28.317, rel=1e-5)
     assert converted["ratio"] == reference.terms["ratio"]
 
 

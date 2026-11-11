@@ -1,12 +1,19 @@
 """EPANET 2.2 parity for `noodl.apps.water`.
 
-The reference implementation is the REAL EPANET 2.2 engine: `wntr` 1.5.0 bundles `epanet22.dll` and
-`wntr.sim.EpanetSimulator` drives it. `EpanetSimulator` reads EPANET's binary output, whose
-on-disk reals are FLOAT32 (`wntr/epanet/io.py`, `ftype = '=f4'`, matching the manual's
-Appendix C.4), so roughly 1e-7 relative is the reference's own floor and tightening
-`ACCURACY`/`HEADERROR`/`FLOWCHANGE` is bit-identical -- measured on both committed
-fixtures. Every test copies its fixture into `tmp_path` and passes `file_prefix`, so
-EPANET's `.rpt`/`.bin` side files never land in the repository.
+The reference implementation is the REAL EPANET 2.2 engine: `wntr` 1.5.0 bundles `epanet22.dll`,
+and `epanet_results` (`tests/verification/_epanet_quality.py`) drives it through its toolkit
+on the very file this model reads (EPANET's copy of it, `epanet_copy`), not on wntr's
+rewrite of it as `EpanetSimulator` would: `EN_solveH`, `EN_solveQ`, and the binary output
+read by wntr's `BinFile`. EPANET runs at a true `ACCURACY 1e-7`, set through
+`EN_setoption` after `EN_open`: its reader clamps a file's ACCURACY to at least 1e-5
+(`input3.c`, `optionvalue`), which is all an `ACCURACY 1e-8` in a file got (before, these
+tests ran EPANET at each file's own ACCURACY, mostly the default 0.001, and at 1e-5 where
+the file or the test asked for 1e-8). A test that keeps the clamped 1e-5 (`accuracy=None`)
+or more trials says why. A run on which EPANET does not converge is refused, and one on
+which it warns of the network's state (a pump shut, a negative pressure) unless the test
+names that warning. The binary output's reals are FLOAT32 (`wntr/epanet/io.py`, `ftype =
+'=f4'`, matching the manual's Appendix C.4), so roughly 1e-7 relative is the reference's
+own floor. EPANET's files live in a temporary directory, never in the repository.
 
 Newton runs at `water_steady`'s own defaults, `atol=rtol=1e-11` and `max_iter=200`. Both
 are measured, and both matter here: 1e-14 does not converge at all (the residual floors at
@@ -16,7 +23,6 @@ pipe 10 dead-ended (136 are needed there). See `apps.water.network.water_steady`
 """
 
 import math
-import warnings
 from dataclasses import replace
 from pathlib import Path
 
@@ -36,6 +42,11 @@ from noodl.apps.water.network import (
 )
 from noodl.apps.water.simulate import water_run
 from tests.apps.water import ZERO_FLOW
+from tests.verification._epanet_quality import (
+    REFERENCE_ACCURACY,
+    epanet_results,
+    epanet_session,
+)
 
 wntr = pytest.importorskip("wntr")
 
@@ -43,8 +54,10 @@ F64 = torch.float64
 DATA = Path(__file__).resolve().parents[1] / "data" / "water"
 
 
-def _epanet(tmp_path, name, *, edits=(), duration=None):
-    """Copy a committed fixture into `tmp_path`, optionally edit it, and run EPANET.
+def _epanet(tmp_path, name, *, edits=(), duration=None, **reference):
+    """Copy a committed fixture into `tmp_path`, optionally edit it, and run EPANET on it
+    (`epanet_results`; `duration` s its DURATION, `reference` its `accuracy` and
+    `warnings`).
 
     Returns `(path, results)`. `edits` is a sequence of `(old, new)` literal replacements
     applied to the file's text, which is how the D-W and PDA variants are produced without
@@ -56,11 +69,7 @@ def _epanet(tmp_path, name, *, edits=(), duration=None):
         assert old in text, old
         text = text.replace(old, new)
     path.write_text(text)
-    model = wntr.network.WaterNetworkModel(str(path))
-    if duration is not None:
-        model.options.time.duration = duration
-    results = wntr.sim.EpanetSimulator(model).run_sim(file_prefix=str(tmp_path / "epanet"))
-    return path, results
+    return path, epanet_results(path, duration=duration, **reference)
 
 
 def _worst_heads(model, state, heads, skip=()):
@@ -136,8 +145,8 @@ def test_net1_single_period(tmp_path):
     (`three_point_curve`) the flows were 2.868e-6 apart (pipe 113, 0.00185 m3/s, the
     smallest in the network) and the pump's 1.15e-7 m3/s. EPANET's own reported flows miss
     continuity at node 13 by 4.5e-10 m3/s while this model's satisfy it to 1e-17, and
-    tightening ACCURACY/HEADERROR/FLOWCHANGE to 1e-8/1e-9/1e-9 with 500 trials leaves
-    EPANET's output BIT-IDENTICAL.
+    EPANET's float32 output at the reference's ACCURACY 1e-7 is BIT-IDENTICAL to its output
+    at the file's 0.001 (MEASURED, here and on the two-loop).
     """
     path, results = _epanet(tmp_path, "Net1.inp", duration=0)
     net = read_epanet_inp(path)
@@ -211,7 +220,7 @@ def test_net1_extended_period_tank_level(tmp_path):
     Through `water_run`, EPANET's step rule: the hydraulic, pattern and report steps,
     shortened to the instant the level reaches a trigger (rounded to whole seconds, as
     `controltimestep` rounds it), the trigger tested by volume with one second's inflow as
-    margin (`controls`). MEASURED: 2.5e-5 m worst over the 25 reported steps, with
+    margin (`controls`). MEASURED: 3.9e-5 m worst over the 25 reported steps, with
     26 hydraulic steps for 24 report steps. A FIXED 1 h step instead diverges by
     2.07 m, because EPANET shortens its own step to the instant the level reaches the 140 ft
     trigger and a fixed step switches the pump a whole hour late. The floor is the
@@ -280,9 +289,10 @@ def test_net1_report_times_and_patterns_match_epanet(tmp_path, case):
     """Net1, 24 h, with REPORT START and TIMESTEP, PATTERN START, a pump speed pattern and a
     reservoir head pattern, through `water_run`: the report times EPANET writes, heads,
     flows, link states and the tank level at each, and the pump's speed setting.
-    MEASURED: heads 1.8e-7, 2.4e-7, 8.5e-8, 9.3e-8 relative; levels 1.9e-5, 2.4e-5,
-    2.0e-5, 2.8e-5 m; flows 5.2e-8, 5.5e-8, 5.9e-8, 5.9e-8 m3/s (report, pattern-start,
-    speed, reservoir)."""
+    MEASURED: heads 9.0e-8, 9.6e-8, 7.7e-8, 9.7e-8 relative; levels 2.0e-5, 2.5e-5,
+    2.1e-5, 2.9e-5 m; flows 5.2e-8, 5.5e-8, 5.9e-8, 5.9e-8 m3/s (report, pattern-start,
+    speed, reservoir; heads 1.9e-7 and 2.5e-7 for the first two with EPANET at the file's
+    ACCURACY 0.001)."""
     path, results = _epanet(tmp_path, "Net1.inp", edits=_NET1_TIMING[case])
     net = read_epanet_inp(path)
     model, _, _ = build_model(net)
@@ -356,30 +366,28 @@ ELSE VALVE V1 SETTING IS 25
 
 
 def _toolkit_run(path, links, nodes):
-    """EPANET 2.2 through wntr's toolkit (wntr's own reader takes no clock time in a rule):
-    `{t: {"head": [...], "flow": [...] (m3/s, an LPS file), "status": [...],
+    """EPANET 2.2 through wntr's toolkit (`epanet_session`; wntr's own reader takes no clock
+    time in a rule): `{t: {"head": [...], "flow": [...] (m3/s, an LPS file), "status": [...],
     "setting": [...]}}` at every whole hour."""
-    toolkit = pytest.importorskip("wntr.epanet.toolkit")
     from wntr.epanet.util import EN
-    en = toolkit.ENepanet()
-    en.ENopen(str(path), str(path.with_suffix(".rpt")), str(path.with_suffix(".bin")))
-    en.ENopenH()
-    en.ENinitH(0)
     rows = {}
-    while True:
-        t = en.ENrunH()
-        if t % 3600 == 0:
-            rows[t] = {
-                "head": [en.ENgetnodevalue(en.ENgetnodeindex(k), EN.HEAD) for k in nodes],
-                "flow": [en.ENgetlinkvalue(en.ENgetlinkindex(k), EN.FLOW) / 1000.0
-                         for k in links],
-                "status": [en.ENgetlinkvalue(en.ENgetlinkindex(k), EN.STATUS) for k in links],
-                "setting": [en.ENgetlinkvalue(en.ENgetlinkindex(k), EN.SETTING)
-                            for k in links]}
-        if en.ENnextH() <= 0:
-            break
-    en.ENcloseH()
-    en.ENclose()
+    with epanet_session(path) as en:
+        en.ENopenH()
+        en.ENinitH(0)
+        while True:
+            t = en.ENrunH()
+            if t % 3600 == 0:
+                rows[t] = {
+                    "head": [en.ENgetnodevalue(en.ENgetnodeindex(k), EN.HEAD) for k in nodes],
+                    "flow": [en.ENgetlinkvalue(en.ENgetlinkindex(k), EN.FLOW) / 1000.0
+                             for k in links],
+                    "status": [en.ENgetlinkvalue(en.ENgetlinkindex(k), EN.STATUS)
+                               for k in links],
+                    "setting": [en.ENgetlinkvalue(en.ENgetlinkindex(k), EN.SETTING)
+                                for k in links]}
+            if en.ENnextH() <= 0:
+                break
+        en.ENcloseH()
     return rows
 
 
@@ -391,8 +399,10 @@ def test_rules_match_epanet(tmp_path):
     and PRESSURE sets the PRV to 18 m above 32 m at J2, ELSE back to 25 m. Heads, flows,
     the tank level, the pump's state and the PRV's setting at every hour against EPANET's.
     NIGHT's priority decides something: EPANET's pump runs differently with it at 1.
-    MEASURED: levels 2.6e-5 m, heads 1.1e-6 relative, flows 4.0e-8 m3/s; the pump states
-    and PRV settings equal at every hour, for either priority."""
+    MEASURED: levels 3.2e-5 m, heads 6.9e-7 relative, flows 4.0e-8 m3/s; the pump states
+    and PRV settings equal at every hour, for either priority. EPANET's answer does not move
+    from ACCURACY 1e-5 to 1e-8 (heads 6.905e-7 and levels 3.172e-5 m at each); at the
+    file's default 0.001 it gave 6.8e-7 and 3.1e-5 m."""
     for night in (3, 1):
         folder = tmp_path / f"night{night}"
         folder.mkdir()
@@ -436,7 +446,6 @@ def test_energy_under_rules_matches_epanet(tmp_path, pump):
     0.1394 against EPANET's 0.1600 kWh per m3, and the hour before a rule closes the pump
     counted on); power 1.6e-7 (before, at priority 3: 7.636 kW average, 8.0 peak, $16.80
     against EPANET's 8.291, 14.40 and $18.24)."""
-    toolkit = pytest.importorskip("wntr.epanet.toolkit")
     worst = 0.0
     for night in (3, 1):
         text = _RULES_NETWORK.format(night=night).replace(
@@ -445,13 +454,8 @@ def test_energy_under_rules_matches_epanet(tmp_path, pump):
         text = text.replace(" PU1  R1  J1  HEAD C1", " PU1  R1  J1  " + pump)
         path = tmp_path / f"rules{night}.inp"
         path.write_text(text)
-        en = toolkit.ENepanet()
-        en.ENopen(str(path), str(path.with_suffix(".rpt")), str(path.with_suffix(".bin")))
-        en.ENsolveH()
-        en.ENsaveH()
-        en.ENclose()
         reader = _EnergyBin()
-        reader.read(str(path.with_suffix(".bin")))
+        epanet_results(path, reader=reader)
         model, _, _ = build_model(read_epanet_inp(path))
         energy = water_run(model).energy
         ours = [float(energy.utilisation[0]), float(energy.efficiency[0]),
@@ -481,7 +485,7 @@ def test_a_pump_shut_at_shut_off_that_a_rule_opens_is_charged_as_epanet(tmp_path
     (the solve's). MEASURED: open 7.4e-7 (before, EPANET 95.8 % on line and 6.67 against
     noodl's 67.6 %: 0.417 relative), setting 9.9e-7 (a SETTING acts once, as EPANET's
     `LinkSetting` then holds 0.9: 71.8 % on line, where the pump genuinely runs 67.6 %;
-    before, 0.062)."""
+    before, 0.062). EPANET's warning 4 (a pump shut by its head) is this case's subject."""
     text = _RULES_NETWORK.format(night=3)
     a, b = text.index("[RULES]"), text.index("[OPTIONS]")
     text = (text[:a] + f"[RULES]\nRULE GO\nIF SYSTEM TIME >= 2\nTHEN PUMP PU1 {action}\n\n"
@@ -491,7 +495,7 @@ def test_a_pump_shut_at_shut_off_that_a_rule_opens_is_charged_as_epanet(tmp_path
     text = text.replace(" C1  25  65", " C1  25  20")
     path = tmp_path / "shut-off.inp"
     path.write_text(text)
-    worst, theirs, run = _compare_energy(path, tmp_path, "epanet")
+    worst, theirs, run = _compare_energy(path, warnings=(4,))
     pump = run.link_names.index("PU1")
     assert run.status[3, pump].item() == 0                    # shut by the solve at 3 h
     on, cost = theirs["PU1"][0], theirs["PU1"][5]
@@ -506,29 +510,27 @@ def test_an_unaligned_report_start_follows_epanets_output_rule(tmp_path):
     `Htime >= Rtime`, `Rtime += Rstep`). wntr 1.5.0 cannot read that output file, so EPANET
     runs through its toolkit here and `runqual`'s rule is applied to its solves: the report
     times, and the tank level, heads and flows of each, against `water_run`'s. MEASURED:
-    levels 1.2e-5 m, heads 2.2e-7 relative, flows 5.3e-8 m3/s (EPANET's own convergence: the
-    toolkit's values are not rounded to float32)."""
+    levels 1.1e-5 m, heads 3.9e-8 relative, flows 5.3e-8 m3/s (the toolkit's values are not
+    rounded to float32; at the file's ACCURACY 0.001 EPANET's own convergence left the heads
+    2.3e-7 apart)."""
     edits = [(" Report Start       	0:00", " Report Start       	1:30")]
     path, _ = _epanet(tmp_path, "Net1.inp", edits=edits, duration=0)
     net = read_epanet_inp(path)
     model, _, _ = build_model(net)
-    toolkit = pytest.importorskip("wntr.epanet.toolkit")
     from wntr.epanet.util import EN
-    en = toolkit.ENepanet()
-    en.ENopen(str(path), str(tmp_path / "t.rpt"), str(tmp_path / "t.bin"))
-    en.ENopenH()
-    en.ENinitH(0)
     solves = []
-    while True:
-        t = en.ENrunH()
-        solves.append((t, [en.ENgetnodevalue(en.ENgetnodeindex(k), EN.HEAD) * _M_PER_FT
-                           for k in model.node_names],
-                       [en.ENgetlinkvalue(en.ENgetlinkindex(k), EN.FLOW) * FLOW_UNITS["GPM"]
-                        for k in model.link_names]))
-        if en.ENnextH() <= 0:
-            break
-    en.ENcloseH()
-    en.ENclose()
+    with epanet_session(path) as en:
+        en.ENopenH()
+        en.ENinitH(0)
+        while True:
+            t = en.ENrunH()
+            solves.append((t, [en.ENgetnodevalue(en.ENgetnodeindex(k), EN.HEAD) * _M_PER_FT
+                               for k in model.node_names],
+                           [en.ENgetlinkvalue(en.ENgetlinkindex(k), EN.FLOW)
+                            * FLOW_UNITS["GPM"] for k in model.link_names]))
+            if en.ENnextH() <= 0:
+                break
+        en.ENcloseH()
     reported, rtime = [], 5400
     for t, heads, flows in solves:              # `runqual`
         if t >= rtime:
@@ -627,8 +629,8 @@ def test_net1_time_clocktime_and_pressure_controls(tmp_path, name, lines, clock)
     without that rule the 7:30 `OPEN` of the first case, the pump running since 6.07 h, splits
     a step EPANET takes whole and the level is 1.2e-3 m off.
 
-    MEASURED: 2.4e-5 m for the time and clock-time runs (the same run: START CLOCKTIME 8 am
-    makes 11 AM the 3 h of the first), 2.2e-5 m for the pressure run, the reference's
+    MEASURED: 3.8e-5 m for the time and clock-time runs (the same run: START CLOCKTIME 8 am
+    makes 11 AM the 3 h of the first), 3.5e-5 m for the pressure run, the reference's
     float32 floor. Before EPANET's whole-second rounding of a crossing (`controltimestep`,
     `ROUND`) and its volume test with one second's inflow as margin (`controls`), both now
     transcribed, the time run was 1.8e-4 m off; with the rounding but the old strict level
@@ -718,14 +720,6 @@ _DW_NET1 = [
 ]
 
 
-def _dw_epanet(tmp_path, name, edits=(), duration=None):
-    # The edits' roughness is already in D-W units, so wntr's warning that switching
-    # HEADLOSS to D-W leaves the roughness units unchanged is expected and benign.
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore", UserWarning)
-        return _epanet(tmp_path, name, edits=edits, duration=duration)
-
-
 def test_darcy_weisbach_two_loop(tmp_path):
     """1e-6 relative on heads and flows, as for Hazen-Williams.
 
@@ -735,7 +729,7 @@ def test_darcy_weisbach_two_loop(tmp_path):
     the rounding is part of what EPANET computes, and reproducing it is what reaches the
     floor.
     """
-    path, results = _dw_epanet(tmp_path, "twoloop_si.inp", _DW_TWO_LOOP)
+    path, results = _epanet(tmp_path, "twoloop_si.inp", edits=_DW_TWO_LOOP)
     net = read_epanet_inp(path)
     assert net.headloss == "D-W"
     assert net.options.flow_units == "LPS"
@@ -749,13 +743,13 @@ def test_darcy_weisbach_two_loop(tmp_path):
 
 
 def test_darcy_weisbach_net1_single_period(tmp_path):
-    """Heads 1e-6, flows 1e-5: the Hazen-Williams Net1 tolerances, for the same reason.
+    """Heads 1e-6, flows 1e-6 relative: the Hazen-Williams Net1 tolerances.
 
-    MEASURED: heads 7.009e-8, flows 3.986e-6. The flow residual is again the smallest
-    flow in the network, where EPANET's own reported flows miss continuity (see
-    `test_net1_single_period`); Colebrook gave 1.344e-4 / 1.466e-3.
+    MEASURED: heads 7.1e-8, flows 9.6e-8 (1.7e-7 with EPANET at the file's ACCURACY 0.001,
+    when this bound was 1e-5 for a flow residual of 4.0e-6 on the network's smallest flow);
+    Colebrook gave 1.344e-4 / 1.466e-3.
     """
-    path, results = _dw_epanet(tmp_path, "Net1.inp", _DW_NET1, duration=0)
+    path, results = _epanet(tmp_path, "Net1.inp", edits=_DW_NET1, duration=0)
     net = read_epanet_inp(path)
     assert net.headloss == "D-W"
     assert net.pipes[0].roughness == pytest.approx(0.5e-3 * 0.3048, rel=1e-15)
@@ -764,7 +758,7 @@ def test_darcy_weisbach_net1_single_period(tmp_path):
     worst_h = _worst_heads(model, final, results.node["head"].loc[0], skip=("9", "2"))
     worst_q = _worst_flows(model, final, results.link["flowrate"].loc[0])
     assert worst_h < 1e-6, worst_h
-    assert worst_q < 1e-5, worst_q
+    assert worst_q < 1e-6, worst_q
 
 
 def test_darcy_weisbach_laminar_transitional_and_turbulent_pipes(tmp_path):
@@ -772,9 +766,10 @@ def test_darcy_weisbach_laminar_transitional_and_turbulent_pipes(tmp_path):
 
     `lowflow_dw_si.inp` is built so that EPANET's own flows put pipe P6 laminar
     (Re ~ 1000), P2, P3, P4, P5 in Dunlop's transition (2017..3513) and P1 turbulent
-    (Re ~ 5731); P5 also carries a minor loss K = 2. Its `Accuracy` is 1e-8, because at
-    EPANET's default 1e-3 the REFERENCE stops short of its float32 floor on the loop
-    flows (5.0e-7 measured on P4; 9.4e-8 at 1e-8).
+    (Re ~ 5731); P5 also carries a minor loss K = 2. Its `Accuracy` is 1e-8 (EPANET's reader
+    clamps it to 1e-5; the reference runs at 1e-7), because at EPANET's default 1e-3 the
+    REFERENCE stops short of its float32 floor on the loop flows (5.0e-7 measured on P4;
+    9.4e-8 at 1e-5 and at 1e-7).
 
     Heads and flows: 1e-6 relative, as above. MEASURED 3.5e-8 / 9.4e-8.
     Per-pipe head LOSS is the sharp check here, because losses are only a few per cent
@@ -787,7 +782,7 @@ def test_darcy_weisbach_laminar_transitional_and_turbulent_pipes(tmp_path):
     MEASURED 9.6e-8 m worst (P4). The Colebrook `Duct` misses these losses by 2 % (P1,
     turbulent) to 81 % (P3, Re just above 2000).
     """
-    path, results = _dw_epanet(tmp_path, "lowflow_dw_si.inp")
+    path, results = _epanet(tmp_path, "lowflow_dw_si.inp")
     net = read_epanet_inp(path)
     assert net.headloss == "D-W"
     flows = results.link["flowrate"].loc[0]
@@ -824,7 +819,7 @@ def test_the_colebrook_duct_remains_available_and_is_not_epanet(tmp_path, name, 
     """`friction="colebrook"` keeps the generic `Duct`. It is a DIFFERENT law (implicit
     Colebrook throughout, a straight laminar line to its Re = 2000 value), so it does not
     reproduce EPANET. MEASURED heads 3.566e-4 (two-loop) and 3.574e-2 (low-flow)."""
-    path, results = _dw_epanet(tmp_path, name, edits)
+    path, results = _epanet(tmp_path, name, edits=edits)
     net = read_epanet_inp(path)
     model, state, drivers = build_model(net, friction="colebrook")
     final = water_steady(model, state, drivers)
@@ -844,7 +839,7 @@ def test_pressure_driven_demand(tmp_path):
     """1e-5 relative on heads and delivered demands.
 
     MEASURED against EPANET's own `DEMAND MODEL PDA` at `MINIMUM PRESSURE 0`,
-    `REQUIRED PRESSURE 60`, `PRESSURE EXPONENT 0.5`: heads 3.521e-7, demands 2.184e-7. This
+    `REQUIRED PRESSURE 60`, `PRESSURE EXPONENT 0.5`: heads 5.5e-8, demands 8.4e-8. This
     test verifies the core's potential-dependent nodal sources -- EPANET itself formulates PDA
     as "a virtual pipe from the junction to a fictitious reservoir" (Manual section 13.1, p.110),
     i.e. as exactly this potential-dependent nodal source.
@@ -889,8 +884,9 @@ def test_pda_delivers_less_than_the_required_demand(tmp_path):
 
 # The two-loop with a pump between the reservoir and a new demand-free junction J0, which
 # P1 now leaves: every junction downstream of the pump is pressure-limited (56-58 m against
-# the required 60 m). EPANET is run to ACCURACY 1e-8: at its default 1e-3 its own flows stop
-# up to 1.9e-4 relative short of converged on this network (P7, the smallest flow).
+# the required 60 m). The file asks EPANET for ACCURACY 1e-8 (its reader clamps that to 1e-5;
+# the reference runs at 1e-7) and HEADERROR and FLOWCHANGE 1e-9: at its default 1e-3 its own
+# flows stop up to 1.9e-4 relative short of converged on this network (P7, the smallest flow).
 _PUMP_EDITS = (
     (" J1              \t0           \t5 ",
      " J0              \t0           \t0           \t                \t;\n"
@@ -909,7 +905,7 @@ _PUMP_EDITS = (
 def test_a_pump_feeding_pressure_driven_demand(tmp_path, pipe_form):
     """1e-5 relative on heads, flows and delivered demands, as for the PDA row above.
 
-    MEASURED (both pipe forms): heads 3.526e-7, flows 2.354e-7, demands 2.355e-7, the
+    MEASURED (both pipe forms): heads 6.3e-8, flows 7.9e-8, demands 9.8e-8, the
     reference's float32 floor. Before pumps entered in their head-gain form
     (`FlowControlledPump`) this network did not solve at all: the system went singular.
     """
@@ -1164,7 +1160,7 @@ def test_gradient_reaches_a_learnable_roughness(tmp_path):
 
 # --------------------------------------------------------------------------- trace quality
 def test_trace_quality_on_the_two_loop(tmp_path):
-    """1e-3 on the steady trace fraction. MEASURED: 6.438e-12 percentage points
+    """1e-3 on the steady trace fraction. MEASURED: 2.8e-14 percentage points
     (noise many orders below the 1e-3 tolerance, floating on the reference's own float32 output and
     this solve's Newton tolerance rather than on any physics this test could regress).
 
@@ -1259,20 +1255,25 @@ _GPV = _valve_edits(" V1  J7  J2  250  GPV  HL1  0\n",
                     " HL1 0 0\n HL1 10 1\n HL1 30 6\n HL1 60 20\n")
 
 
-@pytest.mark.parametrize("edits", [_PBV_ACTIVE, _PBV_OPEN, _GPV],
+@pytest.mark.parametrize("edits, accuracy", [(_PBV_ACTIVE, 1e-6), (_PBV_OPEN, REFERENCE_ACCURACY),
+                                             (_GPV, REFERENCE_ACCURACY)],
                          ids=["pbv-active", "pbv-open", "gpv"])
-def test_pressure_breaker_and_general_purpose_valves(tmp_path, edits):
+def test_pressure_breaker_and_general_purpose_valves(tmp_path, edits, accuracy):
     """Heads 1e-6 relative; flows 1e-6 m3/s absolute; the valve's head loss 1e-5 relative.
 
     Flows are compared absolutely because EPANET's own are not continuous through an
     active PBV (its `pbvcoeff` holds the head drop by a 1e8 penalty, `CBIG`): P2 and V1 are
-    in series through the demand-free J7, yet EPANET reports them 1.6e-7 m3/s apart, and
-    its head loss across the active valve is 4.999997 m for a 5 m setting (MEASURED); this
-    model's flows agree to round-off and its head drop is the setting. MEASURED: PBV active
-    heads 3.2e-7, flows 2.6e-7 m3/s, loss 5.7e-7; PBV open loss 6.8e-6 (an open valve's
-    `m q^2` doubles the flows' relative difference); GPV heads 5.5e-7, loss 3.9e-6.
+    in series through the demand-free J7, yet EPANET reports them 5.9e-8 m3/s apart, and
+    its head loss across the active valve is 5.000002 m for a 5 m setting (MEASURED; 1.5e-7
+    m3/s and 4.999997 m at the file's clamped ACCURACY 1e-5); this model's flows agree to
+    round-off and its head drop is the setting. The active PBV's reference runs at ACCURACY
+    1e-6, not 1e-7: at 1e-7 EPANET's relative flow change stalls at 1.9e-6 after 400 trials
+    (1.5e-6 after 5000) and it reports the system unbalanced, its `CBIG` penalty holding the
+    valve's flows only that far (MEASURED). MEASURED: heads 4.3e-8, 6.7e-8 and 3.5e-8
+    (PBV active, PBV open, GPV), flows 6.4e-8, 1.8e-9 and 1.8e-9 m3/s, head loss 3.8e-7,
+    3.9e-7 and 2.0e-6 relative.
     """
-    path, results = _epanet(tmp_path, "twoloop_si.inp", edits=edits)
+    path, results = _epanet(tmp_path, "twoloop_si.inp", edits=edits, accuracy=accuracy)
     model, state, drivers = build_model(read_epanet_inp(path))
     assert model.kirchhoff["water"].implicit_edges.numel() > 0
     final = water_steady(model, state, drivers)
@@ -1401,7 +1402,7 @@ _J6_CUT_OFF = (
 
 def test_a_junction_cut_off_without_demand_matches_epanet(tmp_path):
     """J6 is held at EPANET's limit head, the average of J5 and J3 (its closed links' far
-    ends), with every flow into it zero to round-off. MEASURED: heads 2.9e-7 relative (J6 too),
+    ends), with every flow into it zero to round-off. MEASURED: heads 7.5e-8 relative (J6 too),
     flows 2.2e-9 m3/s."""
     path, results = _epanet(tmp_path, "twoloop_si.inp", edits=_J6_CUT_OFF)
     model, state, drivers = build_model(read_epanet_inp(path))
@@ -1431,8 +1432,10 @@ def test_every_pipe_a_check_valve_at_five_times_the_demand_matches_epanet(tmp_pa
     1.2e-3 m). HEADS 2e-6: EPANET's closed check valves P4 and P8 conduct `1 / CBIG`
     (`hydcoeffs.c`), leaking 5.7e-8 and 3.1e-8 m3/s at this model's 61.3 and 33.7 m across
     them, and this model's closed links carry none; adding those leaks as demands brings the
-    heads to 7.6e-8 (MEASURED). The leak is not modelled (Ruling 30)."""
-    path, results = _epanet(tmp_path, "twoloop_si.inp", edits=_ALL_CV_FIVE_FOLD)
+    heads to 7.6e-8 (MEASURED). The leak is not modelled (Ruling 30). At five times the
+    demand some junctions' pressures are negative, EPANET's warning 6."""
+    path, results = _epanet(tmp_path, "twoloop_si.inp", edits=_ALL_CV_FIVE_FOLD,
+                            warnings=(6,))
     model, state, drivers = build_model(read_epanet_inp(path))
     final = water_steady(model, state, drivers)
     _compare_with_epanet(model, final, drivers, results, heads=2e-6)
@@ -1486,9 +1489,9 @@ def test_gradient_through_a_closed_check_valve_against_central_differences(tmp_p
 
 
 # --------------------------------------------------------------------------- fenced by CVs
-def _hand_built(tmp_path, junctions, reservoirs, pipes):
+def _hand_built(tmp_path, junctions, reservoirs, pipes, **reference):
     """`(model, final, drivers, results)` for a hand-built network: this model's steady
-    state and EPANET's, the latter from the same network written through wntr."""
+    state and EPANET's, the latter on the same network written to a file by wntr."""
     from noodl.apps.water.network import WaterNetwork
 
     net = WaterNetwork(junctions=junctions, reservoirs=reservoirs, pipes=pipes)
@@ -1504,8 +1507,9 @@ def _hand_built(tmp_path, junctions, reservoirs, pipes):
                    roughness=p.roughness, check_valve=p.status == "CV",
                    initial_status="CLOSED" if p.status == "CLOSED" else "OPEN")
     w.options.time.duration = 0
-    results = wntr.sim.EpanetSimulator(w).run_sim(file_prefix=str(tmp_path / "epanet"))
-    return model, final, drivers, results
+    path = tmp_path / "hand-built.inp"
+    wntr.network.write_inpfile(w, str(path))
+    return model, final, drivers, epanet_results(path, **reference)
 
 
 def _fenced(*middle):
@@ -1538,14 +1542,18 @@ def test_a_junction_fenced_off_by_check_valves_matches_epanet(tmp_path):
 def test_a_group_fenced_off_by_check_valves_is_held_at_the_limit_head(tmp_path):
     """J - P5 - L, fenced off by the two check valves. This model holds both at 75 m, the
     `1 / CBIG` limit. EPANET reports 75.021263, which is not a limit: MEASURED with P5
-    5 m, 500 m and 5000 m long it gives 73.2097, 75.0213 and 74.9940 (not monotonic),
-    unchanged with ACCURACY 1e-8. Its 2.3e-8 m3/s in P5 is the `1 / CBIG` flow through the
-    closed check valves (25 m = 82.0 ft over 1e8). The mechanism is a HYPOTHESIS: EPANET may
-    stop on an unconverged iterate for a group whose flows are all below its relative-flow
-    test. So J and L are compared at 3e-4 relative (MEASURED 2.8e-4); every
-    other head at 1e-6, every flow at 1e-6 m3/s, every state exactly. Documented in
+    5 m, 500 m and 5000 m long it gives 73.2097, 75.0213 and 74.9940 (not monotonic). Its
+    2.3e-8 m3/s in P5 is the `1 / CBIG` flow through the closed check valves (25 m = 82.0 ft
+    over 1e8). The group's head is the last thing EPANET's iteration settles, as its flows
+    are all below the relative-flow test: the reference stays at the copy's clamped
+    ACCURACY 1e-5 (`accuracy=None`), because at a true 1e-7 EPANET stops one iteration
+    later (8, against 7) on 74.912220 m, and with FLOWCHANGE 1e-10 it goes on to a relative
+    change of 8e-17 (15 iterations) and returns to 75.021263 m (MEASURED): the 1e-5 value
+    is EPANET's fixed point, the 1e-7 one an iterate on the way. Why that fixed point is
+    not the limit remains open. So J and L are compared at 3e-4 relative (MEASURED 2.8e-4);
+    every other head at 1e-6, every flow at 1e-6 m3/s, every state exactly. Documented in
     docs/applications/water.md, Limitations."""
-    model, final, drivers, results = _hand_built(tmp_path, *_fenced("J", "L"))
+    model, final, drivers, results = _hand_built(tmp_path, *_fenced("J", "L"), accuracy=None)
     heads = results.node["head"].loc[0]
     assert _worst_heads(model, final, heads, skip=("J", "L")) < 1e-6
     for name in ("J", "L"):
@@ -1621,10 +1629,14 @@ def test_check_valves_fencing_a_junction_match_epanet(tmp_path, case):
     "internal-opens" is compared at 5e-5 (MEASURED 4.1e-5: J1 and J2 at 56.666667, the
     limit, against EPANET's 56.668983), and the cause is EPANET's, not this model's: its
     head there is not a limit at all. MEASURED with P7 5 m, 500 m and 5000 m long, EPANET
-    gives 55.3140, 56.6690 and 56.6655 m, unchanged with `ACCURACY 1e-8`; the same family
-    as the two-junction group of the test above (docs/applications/water.md,
-    Limitations)."""
-    model, final, drivers, results = _hand_built(tmp_path, *_fence_cases()[case])
+    gives 55.3140, 56.6690 and 56.6655 m; the same family as the two-junction group of the
+    test above (docs/applications/water.md, Limitations), and like it at the copy's clamped
+    ACCURACY 1e-5: at a true 1e-7 EPANET stops on another iterate, 56.682732 m (8
+    iterations, against 7), and with FLOWCHANGE 1e-10 it does not settle in 5000 trials
+    (warning 2, unstable) and ends on 56.668984 m, the 1e-5 value (MEASURED)."""
+    accuracy = None if case == "internal-opens" else REFERENCE_ACCURACY
+    model, final, drivers, results = _hand_built(tmp_path, *_fence_cases()[case],
+                                                 accuracy=accuracy)
     _compare_with_epanet(model, final, drivers, results,
                          heads=5e-5 if case == "internal-opens" else 1e-6)
 
@@ -1701,14 +1713,14 @@ def _psv_line(r1, setting, r2):
 
 
 def _twoloop_inp(valve):
-    """The two-loop fixture with J7 and the valve line `valve` (`_valve_edits`), and EPANET's
-    `ACCURACY` at 1e-8 instead of the fixture's 0.001. At 0.001 EPANET stops with an ACTIVE
-    PRV's flow 5.8e-6 m3/s short of its own node balance (its `CBIG` penalty on J2 absorbs
-    the rest): heads 5.8e-6 relative from this model's, J7 by 2.8e-4 m; at 1e-8 they agree
-    to 6e-8 (MEASURED, case "prv-active")."""
+    """The two-loop fixture with J7 and the valve line `valve` (`_valve_edits`). EPANET runs
+    at the reference's ACCURACY 1e-7 (`epanet_results`), not the fixture's 0.001: at 0.001
+    it stops with an ACTIVE PRV's flow 5.8e-6 m3/s short of its own node balance (its `CBIG`
+    penalty on J2 absorbs the rest), heads 5.8e-6 relative from this model's, J7 by
+    2.8e-4 m; at 1e-7 they agree to 4.2e-8, flows to 1.8e-9 m3/s (MEASURED, case
+    "prv-active"; 6.4e-8 and 2.6e-8 m3/s at 1e-5, all a file's `ACCURACY 1e-8` gave)."""
     text = (DATA / "twoloop_si.inp").read_text()
-    for old, new in (*_valve_edits(valve),
-                     (" Accuracy           \t0.001", " Accuracy           \t1e-8")):
+    for old, new in _valve_edits(valve):
         assert old in text, old
         text = text.replace(old, new)
     return text
@@ -1740,13 +1752,12 @@ _PRV_PSV_CASES = {
 }
 
 
-def _run_inp(tmp_path, text, tag="case"):
-    """`(path, results)`: `text` written to `tmp_path` and run by EPANET."""
+def _run_inp(tmp_path, text, tag="case", **reference):
+    """`(path, results)`: `text` written to `tmp_path` and run by EPANET (`epanet_results`,
+    with `reference`'s `accuracy` and `warnings`)."""
     path = tmp_path / f"{tag}.inp"
     path.write_text(text)
-    model = wntr.network.WaterNetworkModel(str(path))
-    results = wntr.sim.EpanetSimulator(model).run_sim(file_prefix=str(tmp_path / tag))
-    return path, results
+    return path, epanet_results(path, **reference)
 
 
 def _controlled(model, name):
@@ -1795,7 +1806,7 @@ def test_prv_inside_htol_band(tmp_path):
     downstream head at the setting while the upstream head is below it (a negative head drop
     through an active valve, MEASURED 8.8e-5 m at 53.8213); this model gives the ideal
     valve, OPEN with no drop. The heads differ there by less than `HTOL`, and every flow
-    agrees to 1e-6 m3/s. MEASURED: heads 6.7e-5 m worst over the three points."""
+    agrees to 1e-6 m3/s. MEASURED: heads 9.1e-5 m worst over the three points."""
     for k, r1 in enumerate((53.8213, 53.82135, 53.8214 - 0.5 * HTOL)):
         path, results = _run_inp(tmp_path, _prv_line(r1, 50), f"band{k}")
         model, state, drivers = build_model(read_epanet_inp(path))
@@ -2017,9 +2028,12 @@ def test_prv_directly_downstream_of_a_reservoir(tmp_path):
 def test_a_closed_prv_cutting_off_a_junction_is_held_at_the_limit_head(tmp_path):
     """A PRV CLOSED by `[STATUS]` leaves J2 and J3 (no demand) with no head of their own:
     they are held at the `1 / CBIG` limit, J1's 60 m (`_limit`), with no flow. EPANET
-    reports 53.687092 for both, and the same with a closed TCV in the PRV's place: its head
-    of a group fed only through closed links is not a limit (docs/applications/water.md,
-    Limitations). Every other head, every flow and every state match."""
+    reports 59.929776 for both (12 iterations, at ACCURACY 1e-7 and 1e-8 alike), and the
+    same with a closed TCV in the PRV's place: its head of a group fed only through closed
+    links is not a limit (docs/applications/water.md, Limitations). J2 and J3 are compared
+    at 2e-3 relative (MEASURED 1.2e-3; at the file's clamped 1e-5 EPANET stopped after 2
+    iterations at 53.687092, and the bound was 0.2), every other head at 1e-6, every flow
+    and every state exactly."""
     text = _series_inp((("J1", 0), ("J2", 0), ("J3", 0)), (("R1", 60),),
                        (("P1", "R1", "J1"), ("P2", "J2", "J3")),
                        (("V1", "J1", "J2", "PRV", 50, 0),), status=" V1 Closed\n")
@@ -2029,10 +2043,25 @@ def test_a_closed_prv_cutting_off_a_junction_is_held_at_the_limit_head(tmp_path)
     heads = dict(zip(model.node_names, final["water.phi"].tolist(), strict=True))
     assert heads["J2"] == pytest.approx(60.0, abs=1e-9)
     assert heads["J3"] == pytest.approx(60.0, abs=1e-9)
-    assert float(results.node["head"].loc[0]["J2"]) == pytest.approx(53.687092, abs=1e-5)
+    assert float(results.node["head"].loc[0]["J2"]) == pytest.approx(59.929776, abs=1e-5)
     assert _worst_heads(model, final, results.node["head"].loc[0], skip=("J2", "J3")) < 1e-6
-    _compare_with_epanet(model, final, drivers, results, heads=0.2)
+    _compare_with_epanet(model, final, drivers, results, heads=2e-3)
 
+
+#: The reference ACCURACY of a network with no demand anywhere, every flow in it EPANET's
+#: closed-link leak (`dh / CBIG`): the copy's clamped 1e-5 (`epanet_results`,
+#: `accuracy=None`). EPANET's stopping test is the relative flow change (`hydsolver.c`,
+#: `newflows`), here against a total flow of leaks alone, and its answer is where the
+#: iteration stops. MEASURED at a true 1e-7 (400 trials): unbalanced, the change stalling
+#: at 8e-3 to 3.5e-1, for the PRV (R1 60 m) and the PSV (R1 40 m) feeding a dead end on
+#: their end, the PSV (R1 40 m) on its start, three of the four groups behind a pump, both
+#: stopped pumps and the pump and check valve without demand, their heads as at 1e-5;
+#: converged, but on another answer, for the dead end on a valve's start: the PRV (R1 60 m)
+#: at 64.4245, 61.3567 and 59.9298 m at 1e-6, 1e-7 and 1e-8 (60.000637 at 1e-5), the PRV
+#: (R1 40 m) and the PSV (R1 60 m) OPEN at the limit, 40 and 60 m, where this model and
+#: EPANET at 1e-5 have them CLOSED. At 1e-5 every one converges in 2 to 7 iterations: the
+#: values the tests record are that iterate's.
+_NO_FLOW_ACCURACY = None
 
 #: `(valve, R1, which end is the dead end, EPANET's state, EPANET's dead-end head or None)`:
 #: the dead end is J2 - P2 - J3 with no demand, on the valve's end (`"end"`: J1 -> J2) or its
@@ -2061,14 +2090,15 @@ def test_a_valve_feeding_a_dead_end_without_demand_matches_epanet(
     Where the valve is CLOSED the dead end has no head of its own: this model holds it at
     the `1 / CBIG` limit, the valve's other end (`dp = 0`, as `_limit` does for any closed
     link). EPANET's head there is not that limit (MEASURED, `epanet_head`: 3.2e-3 m and
-    6.4e-4 m off it; 53.687 m and 35.791 m, the same values as a closed TCV or PRV by
-    `[STATUS]` in its place, `test_a_closed_prv_cutting_off_a_junction_is_held_at_the_limit_
-    head`): compared as recorded, and every other head at 1e-6 relative."""
+    6.4e-4 m off it; 53.687 m and 35.791 m, the values a closed TCV or PRV by `[STATUS]` in
+    its place has at the same accuracy, `test_a_closed_prv_cutting_off_a_junction_is_held_
+    at_the_limit_head`): compared as recorded, and every other head at 1e-6 relative. The
+    network has no demand: EPANET at `_NO_FLOW_ACCURACY`, with the cause."""
     u, v = ("J1", "J2") if side == "end" else ("J2", "J1")
     text = _series_inp((("J1", 0), ("J2", 0), ("J3", 0)), (("R1", r1),),
                        (("P1", "R1", "J1"), ("P2", "J2", "J3")),
                        (("V1", u, v, valve, 50, 0),))
-    path, results = _run_inp(tmp_path, text, "dead")
+    path, results = _run_inp(tmp_path, text, "dead", accuracy=_NO_FLOW_ACCURACY)
     model, state, drivers = build_model(read_epanet_inp(path))
     final = water_steady(model, state, drivers)
     states = link_states(model, final, drivers).tolist()
@@ -2164,8 +2194,10 @@ _ONE_POINT = " C1\t45\t8\n"
 
 def _pump_edits(parameters, curve="", extra=()):
     """The two-loop fixture with R1 feeding J1 through the pump `PU1` (R1 -> J0) and pipe P1
-    (J0 -> J1), the pump on `[PUMPS]` `parameters` with `[CURVES]` lines `curve`, at EPANET
-    `ACCURACY` 1e-8 (as `_PUMP_EDITS`)."""
+    (J0 -> J1), the pump on `[PUMPS]` `parameters` with `[CURVES]` lines `curve`, with
+    `ACCURACY 1e-8` (clamped to 1e-5 on reading; the reference runs at 1e-7), `HEADERROR`
+    and `FLOWCHANGE` 1e-9 and `TRIALS 500` in the file, which EPANET's copy's TRIALS 400
+    overrides (as `_PUMP_EDITS`)."""
     return (
         (" J1              \t0           \t5 ",
          " J0              \t0           \t0           \t                \t;\n"
@@ -2197,9 +2229,9 @@ _R2_ABOVE_SHUT_OFF = (
 )
 
 
-def _pump_case(tmp_path, edits):
+def _pump_case(tmp_path, edits, **reference):
     """`(model, state, drivers, results)` of the two-loop pump network `edits`."""
-    path, results = _epanet(tmp_path, "twoloop_si.inp", edits=edits)
+    path, results = _epanet(tmp_path, "twoloop_si.inp", edits=edits, **reference)
     model, state, drivers = build_model(read_epanet_inp(path))
     return model, state, drivers, results
 
@@ -2208,7 +2240,7 @@ def test_three_point_pump_with_general_exponent(tmp_path):
     """Net3's pump curve (three points, the first at zero flow): EPANET fits
     `h = A - B q^C` through them (`input2.c`, `updatepumpparams`; `input3.c`, `powercurve`),
     here with `C = ln(41/12) / ln 2 = 1.77`. Heads 1e-6 relative, flows 1e-6 m3/s, states
-    equal. MEASURED: heads 2.4e-7, flows 1.8e-9 m3/s."""
+    equal. MEASURED: heads 6.4e-8, flows 1.8e-9 m3/s."""
     model, state, drivers, results = _pump_case(tmp_path, _pump_edits("HEAD C1", _NET3_CURVE))
     pump = model.kirchhoff["water"].law_for("pump")[0]
     assert float(pump.curves[0].n) == pytest.approx(math.log(41 / 12) / math.log(2),
@@ -2236,7 +2268,7 @@ def test_constant_power_pump(tmp_path):
     """Net6's constant-power pump, `h = 8.814 P / q` in feet, horsepower and cfs
     (`hydcoeffs.c`, `pumpcoeff`; `input2.c`, `updatepumpparams`). Heads 1e-6 relative,
     flows 1e-6 m3/s, states equal; no `q_max` refusal (EPANET has no flow limit for it).
-    MEASURED: heads 2.8e-7, flows 1.8e-9 m3/s."""
+    MEASURED: heads 5.4e-8, flows 1.8e-9 m3/s."""
     model, state, drivers, results = _pump_case(tmp_path, _pump_edits(_NET6_POWER))
     final = water_steady(model, state, drivers)
     _compare_with_epanet(model, final, drivers, results)
@@ -2245,10 +2277,14 @@ def test_constant_power_pump(tmp_path):
 def test_pump_closes_beyond_shut_off(tmp_path):
     """R2 holds J0 above the pump's shut-off head (50 + 10.667 m): the pump is shut, with
     zero flow to round-off (EPANET: its closed-link leak, reported as 0) and state CLOSED, as
-    EPANET reports it. Heads 1e-6 relative, flows 1e-6 m3/s. MEASURED: heads 1.1e-7, flows
-    1.8e-8 m3/s (EPANET's leak through the shut pump)."""
+    EPANET reports it. Heads 1e-6 relative, flows 1e-6 m3/s. MEASURED: heads 7.3e-8, flows
+    1.8e-8 m3/s (EPANET's leak through the shut pump). EPANET's warning 4 (the pump shut) is
+    the case's subject; it runs with 5000 trials, as the file's `FLOWCHANGE 1e-9` takes it
+    1277 iterations here at any ACCURACY from 1e-5 to 1e-8, and at 400 (410 with its status
+    held) it reports the system unstable, the same heads (MEASURED)."""
     model, state, drivers, results = _pump_case(
-        tmp_path, _pump_edits("HEAD C1", _ONE_POINT, _R2_ABOVE_SHUT_OFF))
+        tmp_path, _pump_edits("HEAD C1", _ONE_POINT, _R2_ABOVE_SHUT_OFF), trials=5000,
+        warnings=(4,))
     final = water_steady(model, state, drivers)
     _compare_with_epanet(model, final, drivers, results)
     k = model.link_names.index("PU1")
@@ -2277,8 +2313,8 @@ def test_pump_speed_setting(tmp_path, kind):
     """A relative speed of 0.8 given through the driver `"water.setting"` on a model built
     at speed 1 matches EPANET with `SPEED 0.8` in the file (`hydcoeffs.c`, `pumpcoeff`: the
     affinity laws). Heads 1e-6 relative, flows 1e-6 m3/s, states equal. MEASURED heads
-    (flows 1.8e-9 m3/s each): one point 3.8e-7, three points 2.9e-7, segments 2.2e-7,
-    constant power 3.6e-7."""
+    (flows 1.8e-9 m3/s each): one point 3.3e-8, three points 6.6e-8, segments 4.0e-8,
+    constant power 5.5e-8."""
     parameters, curve = _PUMP_KINDS[kind]
     path, results = _epanet(tmp_path, "twoloop_si.inp",
                             edits=_pump_edits(parameters + " SPEED 0.8", curve))
@@ -2377,11 +2413,10 @@ def test_ky10_constant_power_pumps_at_time_zero(tmp_path):
     """ky10 (`wntr/library/networks/ky10.inp`): thirteen constant-power pumps, PRVs and
     tanks, solved at time zero with EPANET's own demands there (the demand patterns are
     applied over time by `water_run`). Heads 1e-6 relative, flows 1e-6 m3/s, every link's
-    state as EPANET's. MEASURED: heads 6.3e-7, flows 9.1e-8 m3/s."""
+    state as EPANET's. MEASURED: heads 1.3e-7, flows 5.4e-8 m3/s (6.3e-7 and 9.1e-8 with
+    EPANET at the file's 1e-4)."""
     path = Path(wntr.__file__).parent / "library" / "networks" / "ky10.inp"
-    reference = wntr.network.WaterNetworkModel(str(path))
-    reference.options.time.duration = 0
-    results = wntr.sim.EpanetSimulator(reference).run_sim(file_prefix=str(tmp_path / "ky10"))
+    results = epanet_results(path, duration=0)
     net = read_epanet_inp(path)
     assert all(p.power is not None for p in net.pumps)
     model, state, drivers = build_model(net)
@@ -2417,27 +2452,25 @@ def test_ky4_at_time_zero(tmp_path):
     t = 0: T-3 starts at 100.751 ft. Without the pattern the demands are 1/0.33 times
     EPANET's and P-539's flow is 1.4e-2 m3/s off (MEASURED; the reviewer's report).
 
-    Heads 1e-6 relative, link states equal, flows 1e-6 m3/s on every link but the four
-    below. MEASURED: heads 8.2e-8, flows 2.0e-7 on the others.
+    Heads 1e-6 relative, link states equal, flows 1e-6 m3/s on every link. MEASURED:
+    heads 8.2e-8, flows 9.1e-8, and 2.6e-7 on the four pipes below.
 
-    EPANET runs with `ACCURACY 1e-8`, not the file's 1e-4: EPANET stops when the flow
-    change is below that fraction of the total flow (`hydsolver.c`, `newflows`), and at
-    1e-4 its flows are off by up to 1.1e-5 m3/s (P-965, 2.8e-5 m3/s); at 1e-6 and 1e-8 its
-    answer no longer moves (MEASURED).
+    EPANET runs at the reference's ACCURACY 1e-7, not the file's 1e-4: EPANET stops when
+    the flow change is below that fraction of the total flow (`hydsolver.c`, `newflows`),
+    and at 1e-4 its flows are off by up to 1.1e-5 m3/s (P-965, 2.8e-5 m3/s, MEASURED).
 
-    The two pairs of parallel pipes in `_KY4_PARALLEL` carry near-zero flows (1e-6 to
+    The two pairs of parallel pipes in `_KY4_PARALLEL` carry near-zero flows (1e-7 to
     2e-5 m3/s) on a head-loss slope of 1e-4 to 1e-2 m per m3/s, so a head difference of
-    1e-10 m moves their split by 1e-6 m3/s. EPANET's split does not satisfy its own
-    equations: the two pipes' Hazen-Williams losses at its flows differ by 1.0e-7 m
-    (P-952/P-969) and 5.9e-9 m (P-625/P-696), though they join the same nodes (MEASURED),
-    and its flows there differ from noodl's by up to 1.9e-6 m3/s. Those four are held to
-    3e-6 m3/s and, instead, to energy balance: noodl's losses around each pair cancel to
-    1e-9 m (MEASURED 3.5e-10 m).
+    1e-10 m moves their split by 1e-6 m3/s: they are the last flows EPANET's iteration
+    settles. MEASURED, the two pipes' Hazen-Williams losses at EPANET's flows, which join
+    the same nodes and must be equal: 1.0e-7 and 5.9e-9 m apart at 1e-5 (P-952/P-969,
+    P-625/P-696), all a file's `ACCURACY 1e-8` gave, when its flows there were 1.9e-6 m3/s
+    from noodl's and these four were held to 3e-6 m3/s; 4.4e-9 and 3.6e-10 m at 1e-6; 3.1e-11
+    and 1.1e-10 m at 1e-7. They are also held to energy balance: noodl's losses around each
+    pair cancel to 1e-9 m (MEASURED 3.5e-10 m).
     """
     path = Path(wntr.__file__).parent / "library" / "networks" / "ky4.inp"
-    reference = wntr.network.WaterNetworkModel(str(path))
-    reference.options.hydraulic.accuracy = 1e-8
-    results = wntr.sim.EpanetSimulator(reference).run_sim(file_prefix=str(tmp_path / "ky4"))
+    results = epanet_results(path)
     net = read_epanet_inp(path)
     assert net.duration == 0 and net.demand_pattern == "1"
     assert [p.power is not None for p in net.pumps] == [True, True]
@@ -2448,11 +2481,9 @@ def test_ky4_at_time_zero(tmp_path):
     skip = tuple(r.name for r in net.reservoirs)
     assert _worst_heads(model, final, results.node["head"].loc[0], skip=skip) < 1e-6
     flows = results.link["flowrate"].loc[0]
-    parallel = {name for pair in _KY4_PARALLEL for name in pair}
     q = dict(zip(model.link_names, final["water.q"].tolist(), strict=True))
-    worst = max(abs(q[name] - float(flows[name])) for name in q if name not in parallel)
+    worst = max(abs(q[name] - float(flows[name])) for name in q)
     assert worst < 1e-6, worst
-    assert max(abs(q[name] - float(flows[name])) for name in parallel) < 3e-6
     pipes = {p.name: p for p in net.pipes}
 
     def loss(name):   # Hazen-Williams, m, signed along the pipe
@@ -2478,7 +2509,8 @@ _ANYTOWN_FEEDERS = ("110", "113", "114", "115", "116")
 _ANYTOWN_PLACEHOLDER = "\t0.0001      \t130"
 
 
-def _anytown(tmp_path, *, run=False, pumps="running", tanks="mid", placeholders=None):
+def _anytown(tmp_path, *, run=False, pumps="running", tanks="mid", placeholders=None,
+             warnings=()):
     """wntr's Anytown edited as text, written to `tmp_path`; `(path, EPANET results at t = 0
     or None)`. As shipped, speed patterns 2, 3 and 4 of the three pumps are all zero and
     both tanks start at their minimum, so every junction is cut off for the whole day
@@ -2524,10 +2556,7 @@ def _anytown(tmp_path, *, run=False, pumps="running", tanks="mid", placeholders=
     path.write_text(text)
     if not run:
         return path, None
-    reference = wntr.network.WaterNetworkModel(str(path))
-    reference.options.time.duration = 0
-    return path, wntr.sim.EpanetSimulator(reference).run_sim(
-        file_prefix=str(tmp_path / "anytown"))
+    return path, epanet_results(path, duration=0, warnings=warnings)
 
 
 def _at_time_zero(net, drivers):
@@ -2569,7 +2598,7 @@ def test_anytown_placeholder_pipes_give_no_head(tmp_path):
     head loss and head difference are each 9.9e24 m, where one rounding step is 2^30 m, and
     the residual stalls at 2^31 m for all 200 iterations; the Jacobian there (slopes of
     1e27 against 1e1 elsewhere) is numerically singular, which is the error raised."""
-    path, results = _anytown(tmp_path, run=True)
+    path, results = _anytown(tmp_path, run=True, warnings=(6,))   # its -9.9e24 m
     heads = results.node["head"].loc[0]
     assert all(float(heads[n]) < -1e24 for n in ("5", "6", "7"))
     net = read_epanet_inp(path)
@@ -2586,7 +2615,8 @@ def test_anytown_at_time_zero(tmp_path):
     pipes that feed junctions 5-7 12 in across (`_anytown`; pipe 125 stays 0.0001 in), at
     t = 0 (demand pattern 1 at t = 0 applied here): three identical parallel pumps on the
     five-point curve, against EPANET on the same file. Heads 1e-6 relative, flows 1e-6
-    m3/s, states equal. MEASURED: heads 5.4e-7, flows 4.7e-7 m3/s; each pump 0.0956532
+    m3/s, states equal. MEASURED: heads 9.3e-8, flows 3.1e-8 m3/s (5.4e-7 and 4.7e-7 with
+    EPANET at the file's ACCURACY 0.001); each pump 0.0956532
     m3/s, as EPANET; pipe 125 carries 3e-15 m3/s."""
     path, results = _anytown(tmp_path, run=True, placeholders=12)
     net = read_epanet_inp(path)
@@ -2636,8 +2666,11 @@ def test_a_zero_demand_group_behind_a_pump_matches_epanet(tmp_path, status, pump
     leaks 3e-8 m3/s backwards through the pump, too little for `pumpstatus` to close it).
     P2 OPEN: R2 holds them above the shut-off head and the pump is CLOSED. Heads 1e-6
     relative, flows 1e-6 m3/s, states equal. (With the exact 4/3 the single point's J was
-    6.7e-5 m low, 1.05e-6 relative, MEASURED.)"""
-    path, results = _run_inp(tmp_path, _BEHIND_A_PUMP.format(status=status, curve=curve))
+    6.7e-5 m low, 1.05e-6 relative, MEASURED.) The network has no demand: EPANET at
+    `_NO_FLOW_ACCURACY`, with the cause; its warning 4 is the pump's leak backwards (P2
+    CLOSED) or the pump shut (P2 OPEN), this case's subject."""
+    path, results = _run_inp(tmp_path, _BEHIND_A_PUMP.format(status=status, curve=curve),
+                             accuracy=_NO_FLOW_ACCURACY, warnings=(4,))
     model, state, drivers = build_model(read_epanet_inp(path))
     final = water_steady(model, state, drivers)
     _compare_with_epanet(model, final, drivers, results)
@@ -2679,8 +2712,10 @@ def test_a_segmented_curve_starting_above_zero_flow_shuts_at_its_first_head(
     """A four-point curve from (10 L/s, 30 m): its first segment extended reaches 35 m at
     zero flow, but EPANET shuts the pump once more than the first point's 30 m is asked of
     it (`pumpstatus`, ``Hmax``): at R2 = 82 m the extended segment would still deliver
-    6 L/s. Heads 1e-6 relative, flows 1e-6 m3/s, states equal."""
-    path, results = _run_inp(tmp_path, _ABOVE_ZERO_FLOW.format(r2=r2))
+    6 L/s. Heads 1e-6 relative, flows 1e-6 m3/s, states equal; EPANET's warning 4 where it
+    shuts the pump."""
+    path, results = _run_inp(tmp_path, _ABOVE_ZERO_FLOW.format(r2=r2),
+                             warnings=(4,) if pump_state == 0 else ())
     model, state, drivers = build_model(read_epanet_inp(path))
     final = water_steady(model, state, drivers)
     _compare_with_epanet(model, final, drivers, results)
@@ -2725,8 +2760,12 @@ def test_a_pump_and_a_check_valve_shutting_together_match_epanet(tmp_path, deman
     every link. EPANET's value is set by the ratio of its closed-link leaks and its status
     path (74.48 m, PU shut); noodl returns the lower end, which EPANET also returns when a
     CLOSED pipe replaces the check valve (`test_a_zero_demand_group_behind_a_pump_matches_
-    epanet`). That case is therefore not compared here."""
-    path, results = _run_inp(tmp_path, _PUMP_AND_CHECK_VALVE.format(demand=demand, r2=r2))
+    epanet`). That case is therefore not compared here. Without demand (R2 70 m) the
+    network has none: EPANET at `_NO_FLOW_ACCURACY`, with the cause, and its warning 4, the
+    pump shut."""
+    path, results = _run_inp(tmp_path, _PUMP_AND_CHECK_VALVE.format(demand=demand, r2=r2),
+                             accuracy=_NO_FLOW_ACCURACY if demand == 0 else REFERENCE_ACCURACY,
+                             warnings=(4,) if demand == 0 else ())
     model, state, drivers = build_model(read_epanet_inp(path))
     final = water_steady(model, state, drivers)
     _compare_with_epanet(model, final, drivers, results)
@@ -2749,9 +2788,11 @@ def test_a_stopped_pump_and_a_check_valve_fencing_a_group(tmp_path, r2):
     J's head is not unique (every value up to R2 satisfies every link): noodl gives the
     `1 / CBIG` limit with P2 shut, the average of R1 and R2; EPANET keeps P2 OPEN from its
     first iterate (`cvstatus` holds a status inside `HTOL`) and reports R2's head. MEASURED:
-    EPANET J = R2 with P2 OPEN at both R2."""
+    EPANET J = R2 with P2 OPEN at both R2. The network has no demand: EPANET at
+    `_NO_FLOW_ACCURACY`, with the cause."""
     text = _STOPPED_PUMP_AND_CHECK_VALVE.format(demand=0, r2=r2, status="{status}")
-    _, results = _run_inp(tmp_path, text.format(status="[STATUS]\n PU 0\n"), "epanet")
+    _, results = _run_inp(tmp_path, text.format(status="[STATUS]\n PU 0\n"), "epanet",
+                          accuracy=_NO_FLOW_ACCURACY)
     path = tmp_path / "noodl.inp"
     path.write_text(text.format(status=""))
     model, state, drivers = build_model(read_epanet_inp(path))
@@ -2799,13 +2840,14 @@ def test_emitters_match_epanet(tmp_path, elevation_j4):
 
     With the file's demands and coefficients (the pipes carry EPANET's rounded LPS factor).
     MEASURED: heads 8.6e-8 and 7.0e-8 (positive and negative pressure), emitter outflows
-    7.3e-10 and 1.5e-9 m3/s, flows 4.0e-9 and 2.0e-9 m3/s (heads 1.03e-6 before the rounded
+    7.3e-10 and 7.3e-10 m3/s, flows 4.0e-9 and 2.8e-9 m3/s (heads 1.03e-6 before the rounded
     factor). The reference's emitter flow is its own `demand` minus the junction's base
-    demand."""
+    demand; at negative pressure EPANET gives its warning 6."""
     text = (DATA / "twoloop_si.inp").read_text().replace(*_EMITTERS[0])
     text = text.replace(" J4              	0           	10 ",
                         f" J4              	{elevation_j4}           	10 ")
-    path, results = _run_inp(tmp_path, text, "emitters")
+    path, results = _run_inp(tmp_path, text, "emitters",
+                             warnings=(6,) if elevation_j4 == 60 else ())
     net = read_epanet_inp(path)
     assert [e.node for e in net.emitters] == ["J4", "J6"]
     model, state, drivers = build_model(net)
@@ -2829,7 +2871,7 @@ def test_chezy_manning_matches_epanet(tmp_path):
     """Heads 1e-6 relative, flows 1e-6 m3/s with `HEADLOSS C-M` and roughness 0.011 on
     every pipe (the file's `HEADLOSS H-W` replaced, the roughness 130 replaced).
 
-    MEASURED with the file's own demands: heads 7.6e-8 relative, flows 8.3e-9 m3/s. The law
+    MEASURED with the file's own demands: heads 7.6e-8 relative, flows 1.8e-9 m3/s. The law
     carries EPANET's own LPS factor (`ChezyManning(cfs_per_m3s=...)`, as Hazen-Williams and
     Darcy-Weisbach do), so it needs no correction (scaling the demands by 28.3168466 / 28.317 on top
     of it gives heads 4.8e-7, WORSE: the correction applied twice)."""
@@ -2880,7 +2922,8 @@ def test_emitter_coefficient_gradient_against_central_differences(tmp_path):
 def _series_text(junctions, pipes, emitters, *, head="H-W", options=""):
     """R1 (50 m) and the junctions `(name, elevation, demand)`, pipes
     `(name, from, to, status)` (1000 m, 200 mm, C = 100) and emitters `(junction, coefficient)`,
-    as LPS `.inp` text with EPANET run to ACCURACY 1e-8."""
+    as LPS `.inp` text asking EPANET for ACCURACY 1e-8 (clamped to 1e-5 on reading; the
+    reference runs at 1e-7), HEADERROR and FLOWCHANGE 1e-9."""
     return ("[JUNCTIONS]\n" + "".join(f" {n} {z} {d}\n" for n, z, d in junctions)
             + "[RESERVOIRS]\n R1 50\n[PIPES]\n"
             + "".join(f" {n} {a} {b} 1000 200 100 0 {s}\n" for n, a, b, s in pipes)
@@ -2917,7 +2960,8 @@ def test_emitters_behind_a_closed_pipe_match_epanet(tmp_path, case):
     EPANET's. Before `WaterNetwork.fixed_head_nodes` the first case gave J2 = 49.976 m,
     EPANET's 0."""
     junctions, pipes, emitters = _BEHIND_A_CLOSED_PIPE[case]
-    path, results = _run_inp(tmp_path, _series_text(junctions, pipes, emitters), case)
+    path, results = _run_inp(tmp_path, _series_text(junctions, pipes, emitters), case,
+                             warnings=(6,) if case == "demand-fed-by-an-emitter-inflow" else ())
     net = read_epanet_inp(path)
     model, state, drivers = build_model(net)
     final = water_steady(model, state, drivers)
@@ -2928,7 +2972,8 @@ def test_emitters_behind_a_closed_pipe_match_epanet(tmp_path, case):
     # measured: EPANET gives the closed P2 the conductance `1 / CBIG` (`hydcoeffs.c`,
     # `pipecoeff`), so the 75 m across it leaks 7e-5 LPS, 1.4e-5 of the 5 LPS demand the
     # emitter supplies, which shifts the emitter's head by twice that; this model's closed
-    # link carries zero to round-off. The first two are 1e-6 relative to the 50 m reservoir.
+    # link carries zero to round-off (and the emitter's junction is at a negative pressure,
+    # EPANET's warning 6). The first two are 1e-6 relative to the 50 m reservoir.
     tolerance = 1e-3 if case == "demand-fed-by-an-emitter-inflow" else 1e-6 * 50
     assert worst_h < tolerance, worst_h
     reference = results.link["flowrate"].loc[0]
@@ -2988,9 +3033,7 @@ def test_emitters_on_a_darcy_weisbach_network_match_epanet(tmp_path):
     for old, new in _DW_TWO_LOOP:
         assert old in text, old
         text = text.replace(old, new)
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore", UserWarning)
-        path, results = _run_inp(tmp_path, text, "dw-emitters")
+    path, results = _run_inp(tmp_path, text, "dw-emitters")
     net = read_epanet_inp(path)
     assert net.headloss == "D-W"
     model, state, drivers = build_model(net)
@@ -3028,12 +3071,10 @@ def _tank_run(model):
 
 def _compare_tank_run(tmp_path, text, tag, *, tanks, links=()):
     """Run `text` through EPANET and `water_run`; return the worst level difference (m)
-    over every reported time and tank, and the worst flow difference (m3/s) of `links`.
-    The file is read from its own name: EPANET's run rewrites `<tag>.inp` in wntr's words."""
+    over every reported time and tank, and the worst flow difference (m3/s) of `links`."""
     path = tmp_path / f"{tag}-input.inp"
     path.write_text(text)
-    results = wntr.sim.EpanetSimulator(wntr.network.WaterNetworkModel(str(path))).run_sim(
-        file_prefix=str(tmp_path / tag))
+    results = epanet_results(path)
     net = read_epanet_inp(path)
     model, start, drivers = build_model(net)
     levels, flows, run = _tank_run(model)
@@ -3115,7 +3156,7 @@ def test_flat_volume_curve_tank_matches_epanet(tmp_path, case):
 def test_tank_fills_and_closes_its_inlet_like_epanet(tmp_path):
     """Net1 without its pump controls: the tank fills at about 15.5 h and stays full, with
     pipe 110 closed against inflow (`tankstatus`) and the pump supplying only the demand.
-    MEASURED: 2.5e-5 m levels, 3.7e-8 m3/s in pipe 110 and the pump."""
+    MEASURED: 2.6e-5 m levels, 3.7e-8 m3/s in pipe 110 and the pump."""
     text = (DATA / "Net1.inp").read_text().replace(*_NET1_CONTROLS)
     worst, worst_q, (net, model, levels, flows, _s, _d, _r) = _compare_tank_run(
         tmp_path, text, "fill", tanks={"2"}, links=("110", "9"))
@@ -3129,7 +3170,7 @@ def test_tank_fills_and_closes_its_inlet_like_epanet(tmp_path):
 def test_tank_empties_like_epanet(tmp_path):
     """Net1 without its controls at 1.5 times the demand and a minimum level of 115 ft: the
     tank empties at about 6.5 h, pipe 110 then refuses to drain it while the pump alone
-    supplies the network, and from 12 h the network refills it. MEASURED: 2.3e-5 m levels,
+    supplies the network, and from 12 h the network refills it. MEASURED: 2.4e-5 m levels,
     3.2e-8 m3/s in pipe 110 and the pump."""
     text = (DATA / "Net1.inp").read_text().replace(*_NET1_CONTROLS)
     text = text.replace(" Demand Multiplier  \t1.0", " Demand Multiplier  \t1.5")
@@ -3186,7 +3227,7 @@ def test_full_tank_at_start_closes_the_pump(tmp_path):
     has drained below the band; from then on it fills the tank to full and closes again
     many times an hour, each fill ended by the step to the instant the tank is full
     (`tanktimestep`, rounded to whole seconds as EPANET does). MEASURED: 5.3e-6 m levels,
-    8.9e-9 m3/s in the pump and the pipe."""
+    1.4e-9 m3/s in the pump and the pipe."""
     worst, worst_q, (net, model, levels, flows, start, drivers, _r) = _compare_tank_run(
         tmp_path, _FULL_AT_START, "full", tanks={"T1"}, links=("PU1", "P1"))
     pump = model.link_names.index("PU1")
@@ -3201,7 +3242,7 @@ def test_full_tank_at_start_closes_the_pump(tmp_path):
 def test_tank_overflow_like_epanet(tmp_path):
     """Net1 without its pump controls and tank 2 allowed to overflow: once full the tank
     keeps its inlet open, its level is held at the maximum, and what flows in is the
-    overflow (`WaterResults.tank_overflow`). MEASURED: 2.5e-5 m levels, 2.5e-8 m3/s in pipe
+    overflow (`WaterResults.tank_overflow`). MEASURED: 2.6e-5 m levels, 9.8e-9 m3/s in pipe
     110 and the pump."""
     text = (DATA / "Net1.inp").read_text().replace(*_NET1_CONTROLS)
     text = text.replace(_NET1_TANK, _NET1_TANK.replace("\t                \t;",
@@ -3250,19 +3291,17 @@ class _EnergyBin(wntr.epanet.io.BinFile):
         self.energy[pump_name] = [float(v) for v in values]
 
 
-def _epanet_energy(path, prefix):
-    """EPANET's energy section for the file `path` (run with `file_prefix=prefix`)."""
-    wntr.sim.EpanetSimulator(wntr.network.WaterNetworkModel(str(path))).run_sim(
-        file_prefix=str(prefix))
+def _epanet_energy(path, warnings=()):
+    """EPANET's energy section for the file `path` (`epanet_results`)."""
     reader = _EnergyBin()
-    reader.read(str(prefix) + ".bin")
+    epanet_results(path, reader=reader, warnings=warnings)
     return reader.energy, float(reader.peak_energy[0])
 
 
-def _compare_energy(path, tmp_path, tag, *, duration=None):
+def _compare_energy(path, *, duration=None, warnings=()):
     """The worst relative difference of every pump's six energy fields and the demand
     charge between `water_run` and EPANET on the file `path`; also the run."""
-    theirs, demand = _epanet_energy(path, tmp_path / tag)
+    theirs, demand = _epanet_energy(path, warnings)
     net = read_epanet_inp(path)
     model, _, _ = build_model(net)
     run = water_run(model) if duration is None else water_run(model, duration=duration)
@@ -3287,8 +3326,9 @@ def test_net3_energy_matches_epanet(tmp_path):
     """Net3 over its seven days, with a price (a global price on the global price pattern 1
     scaled by a per-pump price on pump 335) and a demand charge added to its `[ENERGY]`: its
     two pumps (control-switched, the first at the start of every day) against EPANET's energy
-    section, all six per-pump figures and the demand charge, 1e-5 relative. MEASURED: 2.2e-6
-    (the heads and flows agree to 1e-6; the energy is their product)."""
+    section, all six per-pump figures and the demand charge, 1e-5 relative. MEASURED: 5.0e-8
+    (4.7e-6 with EPANET at the file's ACCURACY 0.001: the heads and flows agree to 1e-6, and
+    the energy is their product)."""
     text = _NET3.read_text()
     old = " Global Price       \t0.0\n Demand Charge      \t0.0\n"
     assert old in text
@@ -3296,7 +3336,7 @@ def test_net3_energy_matches_epanet(tmp_path):
                              " Demand Charge      \t5.0\n Pump 335 Price 0.2\n")
     path = tmp_path / "net3-priced.inp"
     path.write_text(text)
-    worst, theirs, run = _compare_energy(path, tmp_path, "net3")
+    worst, theirs, run = _compare_energy(path)
     assert theirs["10"][0] == pytest.approx(58.333, abs=1e-3) and theirs["10"][5] > 0
     assert worst < 1e-5, worst
 
@@ -3306,7 +3346,7 @@ def test_anytown_energy_matches_epanet(tmp_path):
     with a price and a demand charge: three pumps on the efficiency curve E1 (a three-point
     curve) and the Sarbu-Borza adjustment for a pump at speed 1.2 (the first one, edited; the
     other two are shut by the solve for a part of the day and draw no energy then). MEASURED:
-    2.6e-6."""
+    2.6e-6. Over the day some junctions' pressures are negative, EPANET's warning 6."""
     path, _ = _anytown(tmp_path, placeholders=12)
     text = path.read_text()
     old = " Global Price       \t0\n Demand Charge      \t0\n"
@@ -3315,7 +3355,7 @@ def test_anytown_energy_matches_epanet(tmp_path):
     assert text.count("HEAD 2\t;") == 3
     text = text.replace("HEAD 2\t;", "HEAD 2\tSPEED 1.2\t;", 1)
     path.write_text(text)
-    worst, theirs, run = _compare_energy(path, tmp_path, "anytown")
+    worst, theirs, run = _compare_energy(path, warnings=(6,))
     assert set(theirs) == {"78", "79", "80"}
     assert all(row[5] > 0 for row in theirs.values())
     assert worst < 1e-5, worst
@@ -3332,19 +3372,17 @@ _NET1_CLOSE_OPEN = {
 
 
 def _toolkit_step_times(path):
-    """Every hydraulic step EPANET takes on the file `path` (its toolkit's `ENrunH`)."""
-    toolkit = pytest.importorskip("wntr.epanet.toolkit")
-    en = toolkit.ENepanet()
-    en.ENopen(str(path), str(path.with_suffix(".rpt")), str(path.with_suffix(".bin")))
-    en.ENopenH()
-    en.ENinitH(0)
+    """Every hydraulic step EPANET takes on the file `path` (its toolkit's `ENrunH`,
+    `epanet_session`)."""
     times = []
-    while True:
-        times.append(float(en.ENrunH()))
-        if en.ENnextH() <= 0:
-            break
-    en.ENcloseH()
-    en.ENclose()
+    with epanet_session(path) as en:
+        en.ENopenH()
+        en.ENinitH(0)
+        while True:
+            times.append(float(en.ENrunH()))
+            if en.ENnextH() <= 0:
+                break
+        en.ENcloseH()
     return times
 
 
@@ -3373,13 +3411,12 @@ def test_a_pump_closed_and_opened_again_matches_epanet(tmp_path, case):
         text = text.replace(old, new)
     path = tmp_path / f"net1-{case}.inp"
     path.write_text(text)
-    worst, theirs, run = _compare_energy(path, tmp_path, case)
+    worst, theirs, run = _compare_energy(path)
     assert worst < 1e-5, worst
     on_line = 100.0 * (4 if case == "controls" else 3) / 6
     assert theirs["9"][0] == pytest.approx(on_line, abs=1e-3)
     assert float(run.energy.utilisation[0]) == pytest.approx(on_line, rel=1e-12)
-    results = wntr.sim.EpanetSimulator(wntr.network.WaterNetworkModel(str(path))).run_sim(
-        file_prefix=str(tmp_path / f"{case}-run"))
+    results = epanet_results(path)
     model, _, _ = build_model(read_epanet_inp(path))
     _compare_run(model, run, results, tanks=("2",))
     pump = model.link_names.index("9")
@@ -3396,8 +3433,8 @@ def test_energy_of_a_pump_into_a_tank_matches_epanet(tmp_path):
     """Net1 with pump 9 discharging straight into tank 2 (its controls kept), 24 h, with a
     price: EPANET's `addenergy` runs after `tanklevels` has moved the tanks to the step's end
     (`nexthyd`, `timestep`), so a pump next to a tank is charged with the tank's head at the
-    END of the step; every figure 1e-5 relative. MEASURED: 3.8e-7 (with the solve's tank
-    head, 1.9e-2)."""
+    END of the step; every figure 1e-5 relative. MEASURED: 5.4e-8 (3.8e-7 with EPANET at the
+    file's ACCURACY 0.001; with the solve's tank head, 1.9e-2)."""
     text = (DATA / "Net1.inp").read_text()
     pump = " 9               \t9               \t"
     for old, new in ((pump + "10", pump + "2"),
@@ -3406,7 +3443,7 @@ def test_energy_of_a_pump_into_a_tank_matches_epanet(tmp_path):
         text = text.replace(old, new)
     path = tmp_path / "net1-pump-into-tank.inp"
     path.write_text(text)
-    worst, theirs, _ = _compare_energy(path, tmp_path, "pump-into-tank-epanet")
+    worst, theirs, _ = _compare_energy(path)
     assert theirs["9"][5] > 0
     assert worst < 1e-5, worst
 
@@ -3428,7 +3465,7 @@ def test_energy_of_a_step_the_duration_cuts_takes_its_rules_to_the_steps_own_end
         text = text.replace(old, new)
     path = tmp_path / "net1-cut.inp"
     path.write_text(text)
-    worst, theirs, run = _compare_energy(path, tmp_path, "cut-epanet")
+    worst, theirs, run = _compare_energy(path)
     assert theirs["9"][0] == pytest.approx(100.0 / 1.5, abs=1e-3)
     assert float(run.energy.utilisation[0]) == pytest.approx(100.0 / 1.5, rel=1e-12)
     assert worst < 1e-5, worst
@@ -3438,7 +3475,7 @@ def test_energy_of_a_step_the_duration_cuts_takes_its_rules_to_the_steps_own_end
 def test_energy_of_an_unaligned_and_a_zero_duration_matches_epanet(tmp_path, duration, tag):
     """EPANET adds a step that starts before the duration whole, past it (`nexthyd`), and an
     hour for a duration of 0 (`addenergy`): Net1 with a price at a duration of 1:30 (the pump
-    is on line 200/1.5 percent of the time) and 0:00. MEASURED: 8.7e-8 and 1.1e-7."""
+    is on line 200/1.5 percent of the time) and 0:00. MEASURED: 3.8e-8 and 2.3e-8."""
     text = (DATA / "Net1.inp").read_text()
     for old, new in (("Duration           \t24:00", f"Duration           \t{duration}"),
                      (" Global Price       \t0.0", " Global Price       \t0.3")):
@@ -3446,7 +3483,7 @@ def test_energy_of_an_unaligned_and_a_zero_duration_matches_epanet(tmp_path, dur
         text = text.replace(old, new)
     path = tmp_path / f"net1-{tag}.inp"
     path.write_text(text)
-    worst, theirs, run = _compare_energy(path, tmp_path, tag)
+    worst, theirs, run = _compare_energy(path)
     if tag == "unaligned":
         assert run.time.tolist() == [0.0, 3600.0]
         assert theirs["9"][0] > 100.0
@@ -3470,7 +3507,7 @@ def test_energy_of_every_pump_kind_matches_epanet(tmp_path, kind, speed):
         (" Global Price       \t0.0", " Global Price       \t0.15"),
         (" Demand Charge      \t0.0", " Demand Charge      \t6.0"))
     path, _ = _epanet(tmp_path, "twoloop_si.inp", edits=edits)
-    worst, theirs, run = _compare_energy(path, tmp_path, "kind")
+    worst, theirs, run = _compare_energy(path)
     assert theirs["PU1"][0] == pytest.approx(300.0 / 2.5) and theirs["PU1"][5] > 0
     assert worst < 1e-5, worst
 
@@ -3505,8 +3542,7 @@ def test_reservoir_head_pattern_with_an_idle_tank_matches_epanet(tmp_path):
     Against EPANET, heads 1e-6 relative; also the pattern itself, 50, 75, 40, 50 m."""
     path = tmp_path / "rpat.inp"
     path.write_text(_RESERVOIR_PATTERN)
-    results = wntr.sim.EpanetSimulator(wntr.network.WaterNetworkModel(str(path))).run_sim(
-        file_prefix=str(tmp_path / "rpat"))
+    results = epanet_results(path)
     model, _, _ = build_model(read_epanet_inp(path))
     run = water_run(model)
     j = model.node_names.index("J1")

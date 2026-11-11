@@ -9,11 +9,14 @@ time, and the pump energy section. The bounds are the whole-network ones of the 
 energy 1e-5 relative. A network that misses one carries its own bound with the measured cause
 in `_NETWORKS`.
 
-EPANET runs at `ACCURACY 1e-8` (TRIALS 400) on every network, not at the files' 1e-3 or
-1e-4: EPANET stops when the flow change is below that fraction of the total flow
-(`hydsolver.c`, `newflows`), and at the files' values its own answer is off by more than the
-bounds (MEASURED: Net6 at t = 0, heads 5.7e-5 relative at 1e-3 and 3.1e-7 at 1e-8; Net3,
-flows 3.0e-5 m3/s at 1e-3 at 1 h; ky4, 1.1e-5 m3/s, `test_ky4_at_time_zero`).
+EPANET runs through its toolkit on the file itself (`epanet_results`) at a true
+`ACCURACY 1e-7` (TRIALS 400) on every network, not at the files' 1e-3 or 1e-4: EPANET stops
+when the flow change is below that fraction of the total flow (`hydsolver.c`, `newflows`),
+and at the files' values its own answer is off by more than the bounds (MEASURED: Net6 at
+t = 0, heads 5.7e-5 relative at 1e-3 and 3.2e-7 at 1e-5 and 1e-7; Net3, flows 3.0e-5 m3/s
+at 1e-3 at 1 h; ky4, 1.1e-5 m3/s, `test_ky4_at_time_zero`). (Before, wntr's
+`EpanetSimulator` ran with `ACCURACY 1e-8` in its rewrite of the file, which EPANET's reader
+clamps to 1e-5, `input3.c`, `optionvalue`.)
 """
 
 import math
@@ -28,8 +31,8 @@ from noodl.apps.water.simulate import water_run
 
 wntr = pytest.importorskip("wntr")
 
+from tests.verification._epanet_quality import epanet_results  # noqa: E402
 from tests.verification.test_water_parity import (  # noqa: E402
-    _KY4_PARALLEL,
     _M3_PER_MGAL,
     _US_FLOW_UNITS,
     _anytown,
@@ -58,16 +61,21 @@ def _anytown_edited(tmp_path):
 #: each with its measured cause and the MEASURED worst values.
 _NETWORKS = {
     # Net3: 168 h, AT TIME controls on pump 10, level controls on pump 335 and pipe 330, a
-    # closed pipe, 3-point pumps. MEASURED: heads 1.2e-7, levels 5.2e-6 m, flows 3.0e-7 m3/s,
-    # states equal, energy 4.2e-8. (With the exact GPM factor in Hazen-Williams, before the
-    # law took EPANET's rounded one, tank 1 drifted 6.4e-6 m above EPANET's by 21 h, which
-    # rounded a level trigger to a second later: levels 1.3e-4 m, flows 2.1e-6 m3/s.)
+    # closed pipe, 3-point pumps. MEASURED: heads 1.2e-7, levels 5.2e-6 m, flows 1.3e-7 m3/s
+    # (3.0e-7 with EPANET at 1e-5), states equal, energy 4.2e-8. (With the exact GPM factor
+    # in Hazen-Williams, before the law took EPANET's rounded one, tank 1 drifted 6.4e-6 m
+    # above EPANET's by 21 h, which rounded a level trigger to a second later: levels
+    # 1.3e-4 m, flows 2.1e-6 m3/s.)
     "Net3": dict(path=_library("Net3")),
     # Net6: 96 h, 3323 junctions, 61 pumps (one constant-power), two PRVs, a check valve,
-    # 124 IF NODE controls, 18 pumps closed in [STATUS]. MEASURED: heads 9.4e-6, states equal
-    # at every hour, levels 1.95e-3 m, flows 2.9e-4 m3/s, energy 1.95e-4 (PUMP-3866's time
-    # on line, 4.4401 against 4.4410 percent: 3 s of 96 h). LEVELS 3e-3 m, FLOWS 5e-4 m3/s
-    # and ENERGY 3e-4, all from the switching times: EPANET's closed links conduct
+    # 124 IF NODE controls, 18 pumps closed in [STATUS]. MEASURED: heads 1.10e-5, OVER the
+    # default 1e-5 (at 90 h, JUNCTION-2828 1.47e-3 m apart, as TANK-3342's level then: the
+    # level drift below; every hour before 59 h within 5e-6; 9.4e-6 with EPANET at 1e-5,
+    # whose own heads there are 2.4e-6 from its 1e-7 ones, while 1e-6 and 1e-7 agree; the
+    # bound is left for the controller's ruling, not loosened here), states equal at
+    # every hour, levels 1.94e-3 m, flows 3.05e-4 m3/s, energy 1.95e-4 (PUMP-3866's time on
+    # line, 4.4401 against 4.4410 percent: 3 s of 96 h). LEVELS 3e-3 m, FLOWS 5e-4 m3/s and
+    # ENERGY 3e-4, all from the switching times: EPANET's closed links conduct
     # `1 / CBIG` (`hydcoeffs.c`: a closed link's `P = 1 / CBIG`, CBIG = 1e8 ft per cfs),
     # noodl's carry none. MEASURED at 3600 s:
     # JUNCTION-3104, the suction of pumps 3882-3884, all three closed, is fed only by
@@ -82,12 +90,13 @@ _NETWORKS = {
     # late in the run. (The closed-link leak is not modelled: Ruling 30.)
     "Net6": dict(path=_library("Net6"), levels=3e-3, flows=5e-4, energy=3e-4),
     # ky4: DURATION 0, 959 junctions, two constant-power pumps (one closed), T-2 empty.
-    # MEASURED: heads 8.2e-8, flows 2.0e-7 m3/s off the two parallel pairs. FLOWS 3e-6 on
-    # those pairs only (`_KY4_PARALLEL`: EPANET's split leaves their losses 1e-7 m apart;
-    # the energy balance is checked in `test_ky4_at_time_zero`).
-    "ky4": dict(path=_library("ky4"), parallel=3e-6),
+    # MEASURED: heads 8.2e-8, levels 6.0e-6 m, flows 9.1e-8 m3/s, and 2.6e-7 on its two
+    # pairs of parallel pipes (held to 3e-6 when EPANET ran at 1e-5, whose split left their
+    # losses 1.0e-7 m apart: `test_ky4_at_time_zero`), states equal, energy 1.1e-8.
+    "ky4": dict(path=_library("ky4")),
     # ky10: DURATION 0, thirteen constant-power pumps, PRVs, thirteen tanks, level controls
-    # on `~@`-named pumps. MEASURED: heads 6.3e-7, flows 9.1e-8 m3/s.
+    # on `~@`-named pumps. MEASURED: heads 1.3e-7, levels 1.3e-5 m, flows 5.5e-8 m3/s,
+    # states equal, energy 1.1e-7 (heads 6.3e-7, flows 9.1e-8, energy 8.3e-7 at 1e-5).
     "ky10": dict(path=_library("ky10")),
     # Anytown edited (Ruling 21): 24 h at a 1 min hydraulic step, three pumps on a
     # five-point curve, the tanks (at 22.5 ft, `_anytown`) empty within the first hour,
@@ -103,20 +112,17 @@ _NETWORKS = {
     # where the head is near the datum. Those leaks added as demands bring the heads to
     # 1.3e-7 (`test_anytown_heads_with_epanets_tank_leaks_as_demands`). (Before
     # Hazen-Williams took EPANET's rounded GPM factor, 448.831 against 448.8311688, its
-    # 3.8e-7 partly offset that: 1.16e-5.)
-    "Anytown": dict(path=_anytown_edited, heads=1e-4),
+    # 3.8e-7 partly offset that: 1.16e-5.) EPANET at 1e-5 gave the same numbers. Over the
+    # day some junctions' pressures are negative, EPANET's warning 6.
+    "Anytown": dict(path=_anytown_edited, heads=1e-4, warnings=(6,)),
 }
 
 
-def _epanet(path, tmp_path, tag):
-    """EPANET at ACCURACY 1e-8: `(results, energy section, demand charge)`."""
-    reference = wntr.network.WaterNetworkModel(str(path))
-    reference.options.hydraulic.accuracy = 1e-8
-    reference.options.hydraulic.trials = 400
-    prefix = tmp_path / tag
-    results = wntr.sim.EpanetSimulator(reference).run_sim(file_prefix=str(prefix))
+def _epanet(path, warnings=()):
+    """EPANET at ACCURACY 1e-7, TRIALS 400 (`epanet_results`, permitting `warnings`):
+    `(results, energy section, demand charge)`."""
     reader = _EnergyBin()
-    reader.read(str(prefix) + ".bin")
+    results = epanet_results(path, reader=reader, warnings=warnings)
     return results, reader.energy, float(reader.peak_energy[0])
 
 
@@ -142,7 +148,7 @@ def test_network_matches_epanet(tmp_path, name):
     bounds of `_NETWORKS`."""
     case = _NETWORKS[name]
     path = case["path"](tmp_path)
-    results, theirs, demand = _epanet(path, tmp_path, name)
+    results, theirs, demand = _epanet(path, case.get("warnings", ()))
     net = read_epanet_inp(path)
     model, _, _ = build_model(net)
     run = water_run(model)
@@ -154,13 +160,7 @@ def test_network_matches_epanet(tmp_path, name):
                                                  - t.elevation)).abs().max())
                    for k, t in enumerate(net.tanks)), default=0.0)
     flows = torch.tensor(results.link["flowrate"][links].to_numpy(), dtype=F64)
-    dq = (run.flow - flows).abs()
-    parallel = [links.index(p) for pair in _KY4_PARALLEL for p in pair] if "parallel" in case \
-        else []
-    if parallel:
-        assert float(dq[:, parallel].max()) < case["parallel"]
-        dq[:, parallel] = 0.0
-    worst_q = float(dq.max())
+    worst_q = float((run.flow - flows).abs().max())
     status = torch.tensor(results.link["status"][links].to_numpy()).to(run.status.dtype)
     mismatched = [(float(run.time[t]), links[j]) for t, j in (run.status != status).nonzero()]
     worst_e = _worst_energy(net, run.energy, theirs, demand)
@@ -189,7 +189,7 @@ def test_anytown_heads_with_epanets_tank_leaks_as_demands(tmp_path):
     of demand -1 per pipe, on an hourly pattern; the 24 h report repeats the pattern's
     first hour (tanks open, no leak) and is left out."""
     path, _ = _anytown(tmp_path, placeholders=12)
-    results, _, _ = _epanet(path, tmp_path, "anytown")
+    results, _, _ = _epanet(path, (6,))
     model, _, _ = build_model(read_epanet_inp(path))
     run = water_run(model)
     nodes, links = model.node_names, model.link_names
