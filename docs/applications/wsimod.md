@@ -240,7 +240,7 @@ a run does not read — surface deposition loads, a demand's `pollutant_load`, n
 treatment processes, a catchment's pollutant series — are listed by name in
 `model.ignored_by_quantity_only`. With `pollutants=True` (the default) the same configuration is
 refused if any of them is not neutral, since the process that would change the pollutants is not
-ported yet.
+ported yet: until 3b, real configurations need `pollutants=False`.
 
 ## Refusals
 
@@ -251,52 +251,193 @@ mid-run, hang or silently do something else:
 - non-neutral pollutant processes, `decays`, River biochemistry (nitrate among the pollutants);
 - a `total_porosity` not above `field_capacity`, a residence time of 0, `leakage` outside
   `[0, 1)`, preferences that are negative or all zero, travel times that are not whole days;
-- a cycle of checks that recurse into each other, which makes WSIMOD retry at every level and
-  never finish (WSIMOD's own `Land -> Sewer -> Land` ponding is not one: no check enters it);
+- a cycle that makes WSIMOD's checks recurse into each other, which makes WSIMOD retry at
+  every level and never finish: every cycle of pushes, a cycle of pulls only when it lies
+  upstream of a node whose orchestrated step pulls (`create_demand`, `treat_water`,
+  `make_abstractions`), and a base `WTW` in a pull cycle (its pull handlers keep recursing). The
+  rule over-approximates: it may refuse a model WSIMOD runs, never the reverse. WSIMOD's own
+  `Land -> Sewer -> Land` ponding is not a cycle: no check enters it;
 - river arcs without a `Waste`, an arc into a `Catchment`, an orchestration slot whose nodes
   lack the method;
 - missing forcing, naming the node, the variable and the first missing date (a `Land` needs
   `temperature` even in a quantity-only run, as WSIMOD reads it).
 
 `model.step` needs `dt=86400` and a `t` that is a whole number of days inside the dates.
-`model.check(state, drivers, dt=86400, probe=True)` therefore reports `probe-failed`: the probe
-steps without `t`, which the closure refuses; `model.step(state, drivers, dt=86400, t=0)` is the
-check. A
-`leakage` batch that mixes zero and positive values on one `Distribution` is refused when it is
-bound: WSIMOD decorates the node's handlers only for a positive configured leakage.
+`model.check(state, drivers, dt=86400, probe=True)` cannot step this model: the probe steps
+without `t`, which the closure refuses, so it reports `probe-failed` ("model.step needs t=",
+W82). `model.step(state, drivers, dt=86400, t=0)` is the check. A `leakage` batch that mixes
+zero and positive values on one `Distribution` is refused when it is bound: WSIMOD decorates the
+node's handlers only for a positive configured leakage.
+
+## Where WSIMOD is silent or wrong
+
+Where WSIMOD's source is defective, noodl does the evident intent or refuses by name; where
+WSIMOD divides by zero or loses water, noodl records it. Each row is pinned by a test.
+
+| WSIMOD | noodl | Test |
+|---|---|---|
+| `Land.push_set_sewer` lacks `self.surface`, and `Land` has no `"Sewer"` check | evident intent: ponded sewer water is forced into the first impervious surface | `test_sewer_ponding_into_land_is_forced_into_the_first_impervious_surface`; `test_case_runs_where_wsimod_crashes_land_sewer_ponding` |
+| `EnfieldFoulSewer.make_discharge` (`storm_exchange` undefined) | refused by name | `test_refusals_name_the_key[EnfieldFoulSewer]` |
+| `NonResidentialDemand.get_demand` recurses without end | evident intent: its constant demand, as a house | `test_non_residential_demand_is_its_constant_demand_as_house` |
+| `GrowingSurface.residue` is unwired | sub-project 3c; refused as a class | `test_refusals_name_the_key[GrowingSurface]` |
+| the system mass balance compares `sys_in` with itself | a real balance (above) | `test_the_mass_balance_closes_by_hand`; every parity test |
+| `Distribution.apply_overrides` decorates the handlers again | once | `test_an_overridden_leakage_is_applied_once` |
+| `UnlimitedDistribution` loses its leakage | refused | `test_leakage_refusals` |
+| overrides update the shared default dicts | per node | `test_an_override_of_pollutant_load_reaches_only_its_node` |
+| river arcs but no `Waste` | refused | `test_structural_refusals[river_without_waste]` |
+| an arc into a `Catchment` | refused | `test_structural_refusals[arc_into_catchment]` |
+| the WTW liquor blend divides by zero | the previous value is kept, event `"wtw_liquor_zero_denominator"` | `test_zero_input_on_day_one_keeps_the_previous_liquor_value`; `test_case_runs_where_wsimod_crashes_wtw_zero_input` |
+| a partial zero priority in a distribute round divides by zero, depending on the state (W43) | nothing is distributed in that round, event `"zero_priority"` | `tests/apps/wsimod/test_protocol.py` |
+| `QueueArc` drops a push below `FLOAT_ACCURACY` | **reproduced** (a tolerance-scale loss that real models' delivery depends on), recorded as dropped | `test_queue_arc_delivery_matches_wsimod_on_irregular_pushes`; `test_the_tiny_push_is_recorded_as_dropped` |
+| `QueueArc` zero-volume pull with additive keys | the rescale is skipped, as `Arc` does | `test_a_zero_volume_pull_with_pollutants_skips_the_rescale` |
+| `WWTW.make_discharge` rejection at or below `FLOAT_ACCURACY` | a tolerance, recorded as dropped | `test_a_tiny_discharge_rejection_vanishes_and_is_recorded_as_dropped` |
+| `decays: {}` on the `Storage` family builds a `DecayTank` | refused (3b) | `test_a_decays_dict_on_a_storage_node_is_refused` |
+| `total_porosity` not above `field_capacity` or `wilting_point` | refused | `test_porosity_not_above_field_capacity_is_refused` |
+
+WSIMOD's `land_sewer_ponding` case does not crash with fixed parameters (W73): the sewer's own
+check clips every push. The crash test lowers the sewer's capacity between `Land.run` and
+`make_discharge` in both engines, asserts WSIMOD's exception, and that noodl ponds on some days,
+returns the water and balances. WSIMOD's `NonResidentialDemand` raises `RecursionError`
+(`test_case_runs_where_wsimod_crashes_nonresidential_demand`).
+
+## Differentiability
+
+- **Learnable.** Every numeric parameter (`"wsimod.<Class>.<parameter>"`), the arcs' capacities
+  and preferences, the forcing series and the initial stores may require grad. The gradient
+  tests check 22 of them: arc capacity and preference, groundwater and land residence times,
+  impervious and pervious surface coefficients, `ihacres_p`, river `mrf` and `velocity`, a
+  sewer's time-area fractions, `Distribution.leakage`, the `WWTW` and `FWTW` throughput
+  capacities, `ResidentialDemand.per_capita`, a demand's `pollutant_load`, a catchment's flow and
+  concentration, precipitation and an initial storage.
+- **Structural.** The topology, the classes, the pollutant lists, the orchestration, the travel
+  times (whole days: they size the queues) and whether a `Distribution` has leakage at all
+  (WSIMOD decorates its handlers only then) are fixed when the model is built.
+- **Detached.** Every branch (`if x > FLOAT_ACCURACY`, `min`, `max`, the loop exits, the tie
+  rules) is decided on detached values, per instance. The values stay in the graph, so the
+  gradient is that of the branch the instance took.
+- **Jumps and kinks.** The gradient is not defined where a branch changes: at a volume that
+  crosses `FLOAT_ACCURACY`, at a capacity that just clips a push, at the day a tank starts to
+  spill, at a distribute loop that ends one round earlier. A decision's margin (`lhs - rhs`, in
+  `diagnostics["decisions"]`) says how near a run is to such a point. A residence time near
+  one day leaves a recession tail of about 1e-9 that a central difference sees as a kink.
+
+Against central differences at a relative step of 1e-6, all 22 gradients agree within 5.9e-8
+relative (the tolerance is 1e-6), and the `"decisions"` outcomes of the two perturbed runs are
+identical. The tests move a point off a kink where the default one lies on it (the preference
+1.0 to 1.37, the surface residence time 1 to 3), and say so.
+
+## Batches
+
+Any driver or state key may carry leading batch dimensions. Every instance follows its own
+WSIMOD path, so one instance may clip an arc where another does not, run its distribute loop to
+`MAXITER` where another stops, or pond a sewer: each equals its own single run bit for bit (every
+case, both modes, in `tests/apps/wsimod/test_build.py`; `batch_divergence` is a case whose
+instances take different branches). What cannot differ between instances is structure: the
+sequence of calls (fixed by a tracing day at build time and asserted on every later day), the
+travel times, the pollutant lists and whether a `Distribution` has leakage.
+
+## Graph size and fitting in windows
+
+Autograd is on only when a state or driver tensor requires grad (W9); otherwise the run is under
+`torch.no_grad()`. The graph is large because the day is thousands of small operations. The
+benchmark (`benchmarks/wsimod_run.py`) times 60 days with `wsimod.Arc.capacity` requiring grad
+and counts the autograd nodes behind the last day's storage:
+
+| Demo (quantity only) | Batch | `no_grad`, s/day | grad, s/day | Autograd nodes (60 days) |
+|---|---|---|---|---|
+| quickstart | 1 | 0.0185 | 0.0259 | 240,999 |
+| quickstart | 10 | 0.0186 | 0.0307 | 240,999 |
+| quickstart | 100 | 0.0189 | 0.0309 | 240,999 |
+| oxford | 1 | 0.0695 | 0.1053 | 936,765 |
+| oxford | 10 | 0.0707 | 0.1101 | 936,765 |
+| oxford | 100 | 0.0720 | 0.1153 | 936,765 |
+
+That is about 4,000 nodes a day for `quickstart` and 15,600 for `oxford`, independent of the
+batch, which only widens the tensors. Gradients through the full 1,456 days of `oxford` would
+build about 23 million nodes, so fit gradients in windows: run some days, take the gradient,
+`detach` the state and carry on. noodl does not checkpoint in this version. The times are from
+one measurement on the development machine; no budget is asserted. The per-instance Python
+arithmetic that keeps the result bitwise equal to WSIMOD's (`pow_half`, `exp_python` and
+`pow_python`: `** 0.5`, `exp` and `**` per instance, in a loop over the batch) costs time
+proportional to the batch; on these demos it is small next to the many small tensor operations
+of the day, and a batch of 100 costs 2 % to 4 % more than a batch of 1 (no grad) or 10 % to 19 %
+(grad).
+
+## Limitations
+
+- **Sub-projects 3b and 3c.** The processes that change a pollutant (river biochemistry,
+  treatment, decay, deposition, the land's nutrient pools, `GrowingSurface`, the garden and
+  irrigation surfaces) are refused unless neutral. Until 3b, a real configuration needs
+  `pollutants=False`.
+- **Input and output.** A configuration is read, not written. `extensions` and
+  `unified_data_file` are refused.
+- **Speed (W8).** The day is a transcription of many small operations, with no compilation:
+  `oxford` takes about 0.07 s a day without gradients.
+- **The closure is not re-entrant.** One `WsimodDay` holds one engine that every step reuses, so
+  two steps of one model must not run at once (threads, or a step that calls another).
+- **`Model.to`.** `model.to(dtype=torch.float64)` works and changes nothing (tested). Another
+  dtype or a device move is not supported: the closure keeps its float64 tensors on the CPU, and
+  a float32 step silently returns float64 (tested). No GPU was available to try a device move.
+- **River ties.** WSIMOD breaks a tie in the river order by set-hash order, which varies with
+  `PYTHONHASHSEED`; noodl takes the configuration order (W13, W64), so a model whose river ties
+  matter may differ from a WSIMOD run in the last bit. Neither demo has a `River`.
+- **A gapped time-area** (`QueueGroundwater`) may differ from WSIMOD by an ulp: WSIMOD walks the
+  queue in dict insertion order, noodl in ascending time (W54).
+- **The recursion rule over-approximates** and may refuse a model WSIMOD runs.
 
 ## Verification
 
-Against live WSIMOD 0.8.1, on purpose-built cases that reach each class's branches:
+Against live WSIMOD 0.8.1 (`pytest.importorskip("wsimod")`; WSIMOD is never imported by
+`src/`), in four layers. Every comparison is bitwise where the arithmetic is `+ - * /`, `min`,
+`max` and comparisons: the ceiling is `1e-12 * scale` per compared series (the largest magnitude
+over the run), but the tests assert the class's own bound, which is 0, so a last-bit difference
+has to be debugged, not admitted.
 
-- **Per-node replay** (`tests/verification/test_wsimod_replay.py`): WSIMOD runs each case with
-  every call into the chosen nodes captured; noodl replays each node alone on those calls and
-  compares every arc call it makes, every reply and every store, in both modes. The bound is the
-  class's own, zero (bitwise) for every class whose arithmetic is `+ - * /` and comparisons.
-- **Day by day** (the same file and `tests/apps/wsimod`): whole cases stepped by `WsimodDay`
-  against WSIMOD's own run, every arc's flow and quality, every tank and surface storage, bitwise
-  on every day; the `QueueArc` delivery order on random schedules; WSIMOD's printed warnings
-  against noodl's events, day by day.
-- **Batches**: every case, both modes, a batch of two arc capacities equals its two single runs
-  bitwise (`tests/apps/wsimod/test_build.py`).
-
+- **Per-node replay** (`tests/verification/test_wsimod_replay.py` and the class tests under
+  `tests/apps/wsimod`):
+  WSIMOD runs a case with every call into the chosen nodes captured; noodl replays each node
+  alone on those calls and compares every arc call it makes, every reply and every store, in both
+  modes. On the two demos every node class (Land, Sewer, Groundwater, Node, Waste, WWTW, FWTW,
+  Reservoir, ResidentialDemand, Catchment) has worst difference exactly 0, with both IHACRES
+  outcomes sampled.
 - **Whole model** (`tests/verification/test_wsimod_parity.py`): WSIMOD's two demos, `quickstart`
-  and `oxford`, each in two modes, against WSIMOD's own `Model.run`: every arc's flow and
-  pollutants, every recorded tank and every surface field, on every day. The result is bitwise:
-  the worst difference is exactly 0 in every run, against a ceiling of `1e-12 * scale` per series,
-  and no admission is needed. WSIMOD prints nothing on the demos. The system mass balance closes
-  within `1e-12 * scale` every day. A quantity-only run's volumes equal the neutralised run's
-  exactly (`torch.equal`).
+  and `oxford`, each in two modes, against WSIMOD's own `Model.run`, and 36 purpose-built cases
+  (every feature the demos skip: queue arcs, a leaky `Distribution` and the reservoir spill,
+  sewers with time-areas and foul sewers, storm tanks, an `FWTW` deficit, an evaporation clamp,
+  a porous `QueueGroundwater`, rivers, a `float_accuracy` override and others) in two modes.
+  Every arc's flow and pollutants, every recorded tank and every surface field, on every day. The
+  worst difference is exactly 0 for every node of both demos and for all 36 cases in both modes,
+  and no admission was needed. WSIMOD's printed warnings are compared with noodl's events day by
+  day (dated prints) or per day and kind (undated ones); WSIMOD's own "mass balance error" lines
+  equal noodl's residual plus the dropped water. The system mass balance closes within
+  `1e-12 * scale` every day, and every day the residual equals the evaporation clamp's gap (0
+  without a clamp). A quantity-only run's volumes equal the neutralised run's exactly
+  (`torch.equal`).
+- **Crashes** (`test_case_runs_where_wsimod_crashes_*`): the three cases where WSIMOD raises
+  (`land_sewer_ponding` driven by a capacity, `wtw_zero_input`, `nonresidential_demand`) run in
+  noodl, finite and balanced.
+- **Gradients** (`tests/verification/test_wsimod_gradients.py`): 22 parameters, central
+  differences at a relative step of 1e-6, the two perturbed runs' decision outcomes identical.
+  The worst relative disagreement is 5.9e-8 (`Sewer.pipe_timearea`; then `River.mrf` 3.6e-8
+  and `Land.surface_residence_time` 1.1e-8), against a tolerance of 1e-6; the other 19 are
+  within 4e-9. Six of the quickstart ones (200 days) are `-m slow`.
 
 | Run | Days | Modes | Worst difference | Default | Time (`-n 4`) |
 | --- | --- | --- | --- | --- | --- |
 | quickstart | 1456 | quantity-only, neutralised | 0 | yes | 41 s, 38 s |
 | oxford | 365 | quantity-only, neutralised | 0 | yes | 36 s, 37 s |
 | oxford | 1456 | quantity-only, neutralised | 0 | `-m slow` | 142 s, 146 s |
+| 36 cases | 3 to 40 | quantity-only, all pollutants | 0 | yes | at most 2 s a case |
+| 22 gradients | 3 to 200 | quantity-only | 5.9e-8 relative | 16 of 22 (six `-m slow`) | |
 
 The quantity-only mode runs `config.yml` with `pollutants=False` and compares the volumes; the
 neutralised mode runs `config_neutral.yml` (an `overrides` section that makes the water quality
 neutral) with every pollutant and compares all of them. Neither demo has a `River` node, so
-WSIMOD's river-order ties (set-hash order of the names, which varies with `PYTHONHASHSEED`) cannot
-arise, and neither has a `QueueGroundwater`. The wsimod test row (the default selection, every
-test above included) takes about 3 minutes with `-n 4`, so the suite is not cut.
+WSIMOD's river-order ties (set-hash order of the names, which varies with `PYTHONHASHSEED`)
+cannot arise in the demos, and neither has a `QueueGroundwater`; the river and groundwater
+cases cover those classes, with the ties kept independent. WSIMOD's source files are not
+modified; the committed forcing is WSIMOD's (BSD-3, `tests/data/wsimod/LICENSE-WSIMOD`).
+
+**Suite composition.** The wsimod row of the test table (the default selection) takes
+about 160 s with `-n 4` (816 tests), within the 10-minute budget, so no test is cut. `pytest -m slow` on the
+row adds the full `oxford` run, the full per-node replays and the six slow gradients.

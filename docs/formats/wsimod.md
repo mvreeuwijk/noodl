@@ -141,3 +141,15 @@ compute derived quantities.
 - `filename` (a node) and `data_input_dict` (a surface) are refused: WSIMOD opens an override's
   file relative to the current working directory, not the configuration directory
   (`nodes.py:93-99`, `land.py:413-421`).
+
+## Units, order and what runs
+
+The reader converts nothing (W20): volumes are m³, flows and capacities m³/d, additive
+pollutants kg, non-additive ones by name (`temperature` in °C), precipitation and
+evapotranspiration m/d. The order of `nodes` and of `arcs` is the order in which WSIMOD
+constructs them and noodl runs them, so it decides the order of every push and pull and, where
+WSIMOD's river order has a tie, the tie rule (configuration order; WSIMOD's own is set-hash
+order, which changes with `PYTHONHASHSEED`). The two committed demos, `quickstart` and `oxford`
+(`tests/data/wsimod/`, WSIMOD's BSD-3 data in its `Model.save` format), are read by this reader
+and run bit for bit as WSIMOD runs them; a configuration with real pollutant processes needs
+`pollutants=False` until sub-project 3b. See the [WSIMOD application](../applications/wsimod.md).

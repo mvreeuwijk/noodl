@@ -16,7 +16,7 @@ initial point of the circuit.
 | [Sewers](sewer.md) | Gravity hydraulics, headspace air, sulfide | Continuity on a tree for the water (kinematic wave), or Kirchhoff solve on head (dynamic wave); Kirchhoff solve for the headspace air | `build_model` |
 | [Water distribution](water.md) | Pressurised mains, pumps, tanks, demand | Kirchhoff: Newton on hydraulic head | `build_model` |
 | [Flow allocation](allocation.md) | Requested flows clipped to arc capacity and free storage at the receiving node | Clip and allocate | `AllocatedFlowLayer` |
-| [WSIMOD](wsimod.md) | WSIMOD's urban water cycle: land, groundwater, rivers, sewers, treatment and demand, day by day | Closure: WSIMOD's push and pull requests, transcribed | `build_model`, `read_wsimod_config` |
+| [WSIMOD](wsimod.md) | WSIMOD's urban water cycle: land, groundwater, rivers, sewers, treatment and demand, day by day | Closure: WSIMOD's push and pull requests, transcribed; bitwise equal to WSIMOD 0.8.1 | `build_model`, `read_wsimod_config` |
 | [Electrical circuits](electrical.md) | Lumped circuits: DC, transient and AC | Kirchhoff: node voltage, source and inductor currents as unknowns | `build_model`, `Circuit` |
 | [Coupling](coupling.md) | Two models meeting at a shared boundary | Two models exchanging values, iterated to a fixed point | `union` |
 
@@ -41,7 +41,8 @@ all four:
 - The **flow allocation** application has no potential and no continuity solve — a
   request, clipped against capacity and headroom.
 - The **WSIMOD** application is a closure too: WSIMOD's own day of push and pull requests,
-  transcribed call for call, so the flows are WSIMOD's rules, batched and differentiable.
+  transcribed call for call, so the flows are WSIMOD's rules, bitwise equal to WSIMOD 0.8.1 on its
+  demos and on 36 purpose-built cases, batched and differentiable ([verification](../verification.md)).
 - The **electrical circuits** application solves for a potential, the node voltage, with the
   currents of ideal sources, inductors and transformers as extra unknowns: the nodal solve the
   building and water applications use, with the implicit laws' flows added as unknowns.

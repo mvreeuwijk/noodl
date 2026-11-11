@@ -280,8 +280,12 @@ def _wtw_pull_cycle():
             _node("dem", "Demand", constant_demand=1.0),
             _node("sea", "Waste"),
         ],
-        [_arc("res_j", "res", "j"), _arc("j_w", "j", "w"), _arc("w_j", "w", "j"),
-         _arc("j_dem", "j", "dem")],
+        [
+            _arc("res_j", "res", "j"),
+            _arc("j_w", "j", "w"),
+            _arc("w_j", "w", "j"),
+            _arc("j_dem", "j", "dem"),
+        ],
     )
 
 
@@ -479,8 +483,9 @@ def test_a_batch_of_two_capacities_equals_its_single_runs(case, pollutants):
     """Instance 1 caps every arc that carries water at half the largest flow instance 0 puts
     through it, so the cap binds; each instance equals its own single run bitwise, and in one
     variant the state is batched explicitly as well."""
-    model, state, drivers = build_model(read_wsimod_config(CASES[case].build()),
-                                        pollutants=pollutants)
+    model, state, drivers = build_model(
+        read_wsimod_config(CASES[case].build()), pollutants=pollutants
+    )
     capacity = drivers["wsimod.Arc.capacity"]
     _, base_flows = _run(model, state, drivers)
     peak = torch.stack(base_flows).amax(0)
@@ -551,8 +556,9 @@ def test_a_day_after_a_day_that_raised_starts_fresh(case, monkeypatch):
 def test_an_unknown_wsimod_driver_is_refused_with_a_suggestion():
     model, state, drivers = build_model(_small())
     with pytest.raises(KeyError, match="did you mean 'wsimod.Arc.capacity'"):
-        model.step(state, {**drivers, "wsimod.Arc.capacty": drivers["wsimod.Arc.capacity"]},
-                   dt=DAY, t=0.0)
+        model.step(
+            state, {**drivers, "wsimod.Arc.capacty": drivers["wsimod.Arc.capacity"]}, dt=DAY, t=0.0
+        )
 
 
 def test_the_probe_reports_that_a_step_needs_t():
@@ -563,3 +569,24 @@ def test_the_probe_reports_that_a_step_needs_t():
     assert not report.ok
     assert "probe-failed" in {i.code for i in report.issues}
     assert "model.step needs t=" in str(report)
+
+
+def test_model_to_float64_is_a_no_op_and_other_dtypes_are_not_supported():
+    """`Model.to(dtype=torch.float64)` changes nothing and the model steps as before; the
+    closure keeps its float64 tensors, so a float32 move is not supported: the step returns
+    float64 (documented as a limitation on the WSIMOD page)."""
+    model, state, drivers = build_model(_small())
+    expected = model.step(state, drivers, dt=DAY, t=0.0)["wsimod.storage"]
+    other, other_state, other_drivers = build_model(_small())
+    assert other.to(dtype=torch.float64) is other
+    got = other.step(other_state, other_drivers, dt=DAY, t=0.0)["wsimod.storage"]
+    assert torch.equal(got, expected)
+    moved, moved_state, moved_drivers = build_model(_small())
+    moved.to(dtype=torch.float32)
+    stepped = moved.step(
+        {k: v.to(torch.float32) for k, v in moved_state.items()},
+        {k: v.to(torch.float32) for k, v in moved_drivers.items()},
+        dt=DAY,
+        t=0.0,
+    )
+    assert stepped["wsimod.storage"].dtype == torch.float64
