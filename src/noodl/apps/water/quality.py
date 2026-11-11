@@ -120,7 +120,8 @@ def quality_step(net, hydraulic_step: int) -> int:
         raise ValueError(
             f"quality: the QUALITY TIMESTEP is {step} s (a tenth of the hydraulic step of "
             f"{hydraulic_step} s, in whole seconds, when the file gives none); the quality "
-            f"needs a step of at least one second: set [TIMES] QUALITY TIMESTEP")
+            f"needs a step of at least one second: set [TIMES] QUALITY TIMESTEP, or run "
+            f"without quality (water_run(..., quality=False))")
     return step
 
 
