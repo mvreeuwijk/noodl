@@ -258,7 +258,7 @@ The two shipped demos never bind: all but one of their 27 arcs sit at WSIMOD's
 request above about 30,934, and the replay sets $s_{\max} = \infty$. On their own they check
 only the identity path, $\min(x, c) = x$.
 
-`tests/verification/test_wsimod_capacity.py` covers the binding branches against WSIMOD's own
+`tests/verification/test_allocation_wsimod_capacity.py` covers the binding branches against WSIMOD's own
 numbers. It runs small networks built from WSIMOD's own `Arc`, `Node`, `Storage` and `Waste`
 classes, driven by WSIMOD's `push_distributed` and `pull_distributed`, and checks from
 WSIMOD's output that each targeted bound really cut a request before it compares:

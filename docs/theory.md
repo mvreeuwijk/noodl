@@ -803,7 +803,7 @@ symmetric-weight special case; it was also hand-checked against asymmetric prefe
 −0.25).
 
 **Verification, and what it does and does not show.** `tests/verification/
-test_wsimod_parity.py` replays WSIMOD's own captured per-arc requests from its packaged
+test_allocation_wsimod_replay.py` replays WSIMOD's own captured per-arc requests from its packaged
 `quickstart_demo` and `oxford_demo` scripts through `AllocatedFlowLayer` and compares
 against WSIMOD's own realised flows -- WSIMOD is the reference implementation here, the same
 relationship pyswmm and EPANET have with the sewer and water applications above, and it is
@@ -812,7 +812,7 @@ NOT an independent measurement. This comparison has a real, specific limitation:
 unbounded capacity for the whole run, and the one finite-capacity arc never sees its request
 approach its own capacity either -- so neither demo's numbers ever exercise the branch where
 $c_{\text{arc}}$ actually binds, only the identity path $\min(x, c_{\text{arc}}) = x$, and both set
-$s_{\max} = \infty$. `tests/verification/test_wsimod_capacity.py` closes that gap against
+$s_{\max} = \infty$. `tests/verification/test_allocation_wsimod_capacity.py` closes that gap against
 WSIMOD's own numbers: scripted networks of WSIMOD's own classes in which arc capacity and tank
 headroom bind, including several requests on one arc per timestep (WSIMOD clips each against
 the arc's accumulated `flow_in`, so the timestep total is $\min(\sum_k r_k, c_{\text{arc}})$ in

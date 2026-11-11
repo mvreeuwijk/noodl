@@ -323,7 +323,7 @@ def test_every_key_of_every_application_reports_a_unit():
     model, state, drivers = water.build_model(water.twoloop())
     assert model.refs.water.flow.unit == "m3/s" and model.refs.water.sources.unit == "m3/s"
 
-    model, state, drivers = wsimod.build_model(DATA / "wsimod" / "quickstart_topology.json")
+    model, state, drivers = wsimod.build_model(DATA / "allocation" / "quickstart_topology.json")
     w = model.refs.wsimod
     assert w.storage.unit == "m3" and w.requests.unit == "m3/s" and w.flow.unit == "m3/s"
     assert w.quantity == "storage"

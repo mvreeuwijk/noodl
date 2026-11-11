@@ -1,8 +1,7 @@
 """Instruments a live WSIMOD run to capture per-arc requests and realised flows.
 
-Test-only. WSIMOD is never reimplemented: this module runs WSIMOD's OWN engine on WSIMOD's OWN demo
-models and records what it actually did, so `AllocatedFlowLayer` can be validated by replay
-rather than by re-deriving WSIMOD's node science.
+Test-only. This module runs WSIMOD's OWN engine on WSIMOD's OWN demo models and records what
+it actually did, so `AllocatedFlowLayer` can be validated by replay.
 
 This module is a plain helper, not a test file, so it does not itself guard the
 `wsimod` import -- every test module that imports it must call
@@ -30,12 +29,12 @@ seven arcs). Earlier versions of this docstring claimed one event per row for bo
 Anything replaying these events through one
 `AllocatedFlowLayer.step` per timestep must therefore ACCUMULATE a `(arc, t)`
 group's rows rather than assign them one at a time -- `tests/verification/
-test_wsimod_parity.py` does exactly that, and the fixture-writing script
+test_allocation_wsimod_replay.py` does exactly that, and the fixture-writing script
 `scripts/regenerate_wsimod_fixtures.py` sums over (arc, DIRECTION, timestep), leaving
 push and pull as separate rows for the replay to sum. Both sums are exact for a
 per-timestep replay: `get_excess` clips event k at `capacity - flow_in` with `flow_in`
 the sum of events 1..k-1, so the timestep total is `min(sum of requests, capacity)`
-whatever the order (`tests/verification/test_wsimod_capacity.py`).
+whatever the order (`tests/verification/test_allocation_wsimod_capacity.py`).
 
 Timestep index: `wsimod.orchestration.model.Model` has no `.t` or other current-
 timestep attribute of its own (confirmed by inspecting a constructed `Model` directly).

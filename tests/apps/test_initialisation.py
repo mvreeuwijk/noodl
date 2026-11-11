@@ -134,7 +134,7 @@ def test_street_probe_flags_a_misspelt_meteorology_key():
 
 # --------------------------------------------------------------------------- wsimod
 def test_wsimod_requests_by_arc_name_reproduce_the_layer_step():
-    topology = json.loads((DATA / "wsimod" / "quickstart_topology.json").read_text())
+    topology = json.loads((DATA / "allocation" / "quickstart_topology.json").read_text())
     model, state, _ = wsimod.build_model(topology)
     drivers = wsimod.initial_drivers(
         model, values={"wsimod.requests": {"baseflow": 0.3, "runoff": 0.1}}
@@ -162,7 +162,7 @@ def test_wsimod_requests_by_arc_name_reproduce_the_layer_step():
 
 
 def test_wsimod_refuses_an_unknown_name():
-    topology = json.loads((DATA / "wsimod" / "quickstart_topology.json").read_text())
+    topology = json.loads((DATA / "allocation" / "quickstart_topology.json").read_text())
     model, _, _ = wsimod.build_model(topology)
     with pytest.raises(KeyError, match="did you mean 'baseflow'"):
         wsimod.initial_drivers(model, values={"wsimod.requests": {"basefow": 1.0}})

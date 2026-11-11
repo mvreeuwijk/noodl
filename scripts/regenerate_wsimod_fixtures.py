@@ -1,4 +1,4 @@
-"""Regenerates the committed WSIMOD parity fixtures under tests/data/wsimod/.
+"""Regenerates the committed WSIMOD parity fixtures under tests/data/allocation/.
 
 Run manually: `.venv/Scripts/python scripts/regenerate_wsimod_fixtures.py`. Never run by
 CI or by the test suite -- the committed fixtures ARE the
@@ -16,19 +16,19 @@ directory; builds `quickstart_demo`'s model inline (twice: as shipped, and as
 via WSIMOD's own packaged `create_oxford_model`; runs each under the capture harness
 (`tests/verification/_wsimod_reference.py`); and writes six fixtures --
 `{quickstart,quickstart_tight,oxford}_topology.json` and `..._events.csv` -- under
-`tests/data/wsimod/`.
+`tests/data/allocation/`.
 
 Each `_events.csv` holds one row per (arc, DIRECTION, timestep), SUMMED over the
 harness's raw per-event rows. Push and pull are deliberately NOT merged into one row:
 whether to sum them is the replay's decision, and `tests/verification/
-test_wsimod_parity.py` does sum them (it must -- four oxford arcs see both a push and a
+test_allocation_wsimod_replay.py` does sum them (it must -- four oxford arcs see both a push and a
 pull in the same timestep). Same-direction events ARE summed here, and both demos have
 them: a pass-through `Node` forwards each push it receives as its own push, so e.g.
 quickstart's `catchment_outflow` sees two or three pushes every timestep (10184 raw
 events -> 7464 rows) and oxford seven arcs (48995 -> 33880). Summing is exact for the
 per-timestep replay: WSIMOD clips each event against the arc's accumulated `flow_in`, so
 the per-timestep total is `min(sum of requests, capacity)` whatever the order (see
-`tests/verification/test_wsimod_capacity.py`).
+`tests/verification/test_allocation_wsimod_capacity.py`).
 """
 
 from __future__ import annotations
@@ -48,7 +48,7 @@ if str(REPO_ROOT) not in sys.path:
     # `tests.verification._wsimod_reference` import below needs this inserted explicitly.
     sys.path.insert(0, str(REPO_ROOT))
 
-FIXTURE_DIR = REPO_ROOT / "tests" / "data" / "wsimod"
+ALLOCATION_DIR = REPO_ROOT / "tests" / "data" / "allocation"
 DATA_URL = (
     "https://raw.githubusercontent.com/ImperialCollegeLondon/wsi/main/docs/demo/"
     "data/processed/timeseries_data.csv"
@@ -57,10 +57,10 @@ DATA_URL = (
 # `quickstart_demo` with three arcs' capacities lowered below their peak requests:
 # `baseflow`'s own arc clip then cuts 1085 of its daily requests, and `runoff` and
 # `percolation` run at capacity on 866 and 552 days (via `Land`'s check-sized
-# requests, see `tests/verification/test_wsimod_capacity.py`). Chosen on arcs
+# requests, see `tests/verification/test_allocation_wsimod_capacity.py`). Chosen on arcs
 # whose receivers accept everything offered (a pass-through `Node` onto a `Waste`, and
 # `Groundwater` well below its capacity), so no other bound interferes;
-# `tests/verification/test_wsimod_capacity.py` explains why a bottleneck on
+# `tests/verification/test_allocation_wsimod_capacity.py` explains why a bottleneck on
 # `catchment_outflow` would not be a fair case.
 QUICKSTART_TIGHT = {"runoff": 0.03, "baseflow": 0.04, "percolation": 0.08}
 
@@ -83,7 +83,7 @@ def _build_and_capture_quickstart(
     dicts, six arc dicts, `Model.add_nodes`/`add_arcs`), runs it under `capture_events`
     (`tests/verification/_wsimod_reference.py`), and writes `{prefix}_topology.json` and
     `{prefix}_events.csv` (one row per (arc, direction, timestep), aggregated from the
-    harness's raw per-event rows -- see the print-out below) under `FIXTURE_DIR`.
+    harness's raw per-event rows -- see the print-out below) under `ALLOCATION_DIR`.
 
     `capacities` overrides named arcs' WSIMOD `capacity` (default: every arc at WSIMOD's
     `UNBOUNDED_CAPACITY`, i.e. the demo as shipped). `quickstart_tight` uses it to make
@@ -156,8 +156,8 @@ def _build_and_capture_quickstart(
     with capture_events(quickstart_model) as events:
         quickstart_model.run(verbose=False)
 
-    FIXTURE_DIR.mkdir(parents=True, exist_ok=True)
-    (FIXTURE_DIR / f"{prefix}_topology.json").write_text(
+    ALLOCATION_DIR.mkdir(parents=True, exist_ok=True)
+    (ALLOCATION_DIR / f"{prefix}_topology.json").write_text(
         json.dumps(topology, indent=2), encoding="utf-8", newline="\n")
     raw = pd.DataFrame(events)
     aggregated = raw.groupby(["arc", "direction", "t"], as_index=False)[
@@ -174,14 +174,14 @@ def _build_and_capture_quickstart(
             f"{prefix}: some arcs saw more than one same-direction event in a "
             "timestep; their rows are sums (harness docstring)"
         )
-    aggregated.to_csv(FIXTURE_DIR / f"{prefix}_events.csv", index=False)
+    aggregated.to_csv(ALLOCATION_DIR / f"{prefix}_events.csv", index=False)
 
 
 def _build_and_capture_oxford(data_folder: str) -> None:
     """Builds `oxford_demo`'s model via the packaged
     `wsimod.demo.create_oxford.create_oxford_model` (18 nodes,
     21 arcs), runs it under `capture_events` (`tests/verification/_wsimod_reference.py`),
-    and writes `oxford_topology.json` and `oxford_events.csv` under `FIXTURE_DIR`."""
+    and writes `oxford_topology.json` and `oxford_events.csv` under `ALLOCATION_DIR`."""
     import pandas as pd
     from wsimod.demo.create_oxford import create_oxford_model
 
@@ -192,8 +192,8 @@ def _build_and_capture_oxford(data_folder: str) -> None:
     with capture_events(oxford_model) as oxford_events_raw:
         oxford_model.run(verbose=False)
 
-    FIXTURE_DIR.mkdir(parents=True, exist_ok=True)
-    (FIXTURE_DIR / "oxford_topology.json").write_text(
+    ALLOCATION_DIR.mkdir(parents=True, exist_ok=True)
+    (ALLOCATION_DIR / "oxford_topology.json").write_text(
         json.dumps(oxford_topology, indent=2), encoding="utf-8", newline="\n")
     oxford_raw = pd.DataFrame(oxford_events_raw)
     oxford_aggregated = oxford_raw.groupby(
@@ -207,7 +207,7 @@ def _build_and_capture_oxford(data_folder: str) -> None:
             "oxford: some arcs saw more than one same-direction event in a "
             "timestep; their rows are sums (harness docstring)"
         )
-    oxford_aggregated.to_csv(FIXTURE_DIR / "oxford_events.csv", index=False)
+    oxford_aggregated.to_csv(ALLOCATION_DIR / "oxford_events.csv", index=False)
 
 
 if __name__ == "__main__":

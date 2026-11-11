@@ -179,7 +179,7 @@ def _street():
 def _wsimod():
     from noodl.apps.wsimod.network import build_model
 
-    return build_model(DATA / "wsimod" / "quickstart_topology.json")[0]
+    return build_model(DATA / "allocation" / "quickstart_topology.json")[0]
 
 
 def _electrical():

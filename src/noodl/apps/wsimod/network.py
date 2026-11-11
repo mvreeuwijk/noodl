@@ -2,7 +2,7 @@
 
 A thin builder over `AllocatedFlowLayer`, in the `(model, state, drivers)` form the
 sewer, water and street applications return. The topology is the plain structure WSIMOD
-networks reduce to -- the one `tests/data/wsimod/*_topology.json` holds:
+networks reduce to -- the one `tests/data/allocation/*_topology.json` holds:
 
     {"nodes": [{"name": ...}, ...],
      "arcs":  [{"name": ..., "source": ..., "target": ..., "capacity": ...}, ...]}

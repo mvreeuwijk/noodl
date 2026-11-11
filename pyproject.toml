@@ -50,7 +50,7 @@ test = [
 # own code and its four DLLs are 10.8 MB). Test-only (`importorskip`); NOT a runtime extra,
 # for the same reason.
 # wsimod (WSIMOD comparison tests): BSD-3-Clause. Pinned exactly (`==0.8.1`), unlike
-# the `>=` pins above, because the committed fixtures under tests/data/wsimod/ freeze one
+# the `>=` pins above, because the committed fixtures under tests/data/allocation/ freeze one
 # specific wsimod run -- a newer release could
 # silently change quickstart_demo/oxford_demo's forcing or node parameters, which an `>=` pin
 # would not catch. Test-only (`importorskip`); never a runtime dependency of noodl itself.

@@ -12,9 +12,9 @@ sewer benchmark has a hard budget).
 
 Uses random per-step requests scaled to each arc's own capacity (`torch.rand(...) * c_arc`),
 not the committed WSIMOD fixture data: the parity claim itself is already made by
-`tests/verification/test_wsimod_parity.py` against the real captured requests; this script
-only exercises the SAME topology's shape and step count for a throughput number, so random
-per-instance requests are enough and let every batch instance differ (unlike replaying one
+`tests/verification/test_allocation_wsimod_replay.py` against the real captured requests;
+this script only exercises the SAME topology's shape and step count for a throughput number,
+so random per-instance requests are enough and let every batch instance differ (unlike replaying one
 fixture's requests identically B times, which would not exercise the batch dimension's own
 broadcasting any differently to B=1).
 
@@ -26,7 +26,7 @@ no-op. This therefore measures the layer's CHEAPEST path only, not its typical c
 real headroom contention; a benchmark of the sharing/QP machinery would need finite `s_max`
 values and is not what this row claims.
 
-Run: `.venv/Scripts/python benchmarks/wsimod_oxford.py`
+Run: `.venv/Scripts/python benchmarks/allocation_oxford.py`
 """
 
 from __future__ import annotations
@@ -42,7 +42,7 @@ from noodl.topology import Network
 
 F64 = torch.float64
 N_STEPS = 1456
-FIXTURE_DIR = Path(__file__).resolve().parent.parent / "tests" / "data" / "wsimod"
+FIXTURE_DIR = Path(__file__).resolve().parent.parent / "tests" / "data" / "allocation"
 
 
 def build_network() -> tuple[Network, torch.Tensor]:
@@ -73,7 +73,7 @@ def main() -> None:
     for batch_size in (1, 10, 100):
         elapsed = run(batch_size)
         print(
-            f"wsimod_oxford: batch_size={batch_size}: {elapsed:.3f} s for {N_STEPS} steps "
+            f"allocation_oxford: batch_size={batch_size}: {elapsed:.3f} s for {N_STEPS} steps "
             "(WSIMOD's own single-instance run: ~4 s, not a fair comparison, see module "
             "docstring)"
         )
