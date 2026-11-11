@@ -27,8 +27,10 @@ and grows by REPORT TIMESTEP. They are labelled with those report times. The run
 its last report time to the duration, solving at every time EPANET's whole steps reach within
 it (`nexthyd`), reported or not, the quality kept and routed there (`runqual`, `nextqual`). A
 last step the duration cuts short ends the run without a solve at the duration unless that is
-a report time (EPANET's own step runs past the duration and solves there, which reports
-nothing). The pumps' energy
+a report time. That last clause is noodl's choice: where REPORT START is off the REPORT
+TIMESTEP grid and the duration lands on a report time, EPANET's hydraulic steps fall on
+multiples of the report step, its last record lies past the duration and its quality never
+reads it, so it writes no row there, while noodl solves and reports one. The pumps' energy
 (`energy.py`, `addenergy`) is accumulated over every step that starts before the duration,
 the last one at EPANET's own length, not shortened to the duration.
 

@@ -75,6 +75,3 @@ DIFFUSIVITY_M2 = DIFFUSIVITY_FT2 * M_PER_FT**2
 #: EPANET's stagnation flow, cfs (`quality.c`, ``Q_STAGNANT = 0.005 / 448.831``): a link
 #: flowing less is taken to be stagnant by the quality's flow-reversal test.
 Q_STAGNANT_CFS = 0.005 / 448.831
-
-#: Litres per cubic metre, for a chemical's concentration (mass per litre) against volumes in m3.
-LITRES_PER_M3 = 1000.0

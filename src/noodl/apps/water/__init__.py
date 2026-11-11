@@ -54,7 +54,13 @@ from noodl.apps.water.network import (
     water_steady,
     water_step,
 )
-from noodl.apps.water.quality import QualityRouter, SegmentPool, quality_step, sort_nodes
+from noodl.apps.water.quality import (
+    QualityMassBalance,
+    QualityRouter,
+    SegmentPool,
+    quality_step,
+    sort_nodes,
+)
 from noodl.apps.water.quality_data import QualitySource, WaterQuality
 from noodl.apps.water.quality_react import (
     bulk_rate,
@@ -81,7 +87,7 @@ __all__ = [
     "PressureSustainingValve",
     "Junction", "LinkData",
     "MinorLoss", "PiecewisePumpCurve", "Premise", "PressureDrivenDemand", "Pump", "PumpCurve",
-    "PumpEnergy", "QualityRouter", "QualitySource",
+    "PumpEnergy", "QualityMassBalance", "QualityRouter", "QualitySource",
     "Reservoir", "Rule", "SegmentPool", "ShutLinks",
     "Tank",
     "TankLevels", "TankVolumeCurve", "ThrottleValve", "Valve", "WaterNetwork", "WaterOptions",

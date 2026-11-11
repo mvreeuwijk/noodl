@@ -309,6 +309,16 @@ def test_a_source_strength_of_the_wrong_shape_is_refused():
                   duration=3600, quality=True)
 
 
+def test_an_initial_quality_of_the_wrong_shape_is_refused():
+    model, _, _ = build_model(read_epanet_inp(BASE))
+    n = len(model.node_names)
+    for size in (n + 1, n - 1):
+        state = initial_state(model)
+        state["quality.initial"] = torch.zeros(size, dtype=F64)
+        with pytest.raises(ValueError, match="quality.initial"):
+            water_run(model, state, duration=3600, quality=True)
+
+
 def test_a_batched_quality_input_runs_one_router_per_instance():
     model, _, _ = build_model(read_epanet_inp(BASE))
     state = initial_state(model)

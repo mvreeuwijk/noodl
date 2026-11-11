@@ -335,12 +335,15 @@ def _tank_volume(net, tank, level):
 
 
 def _interp(points, x):
-    """EPANET's `interp` (`project.c`): linear in the curve's points, its end segments
-    extended beyond them."""
+    """EPANET's `interp` (`project.c`): linear in the curve's points, the end values beyond
+    them (no extrapolation), as `TankVolumeCurve.amount` (`tanks.py`) transcribes it for
+    the hydraulics."""
     xs = [p[0] for p in points]
     ys = [p[1] for p in points]
-    if len(xs) == 1:
+    if len(xs) == 1 or detached(x) <= xs[0]:
         return ys[0]
+    if detached(x) >= xs[-1]:
+        return ys[-1]
     m = 1
     while m < len(xs) - 1 and detached(x) > xs[m]:
         m += 1
@@ -444,6 +447,10 @@ class QualityRouter:
         # `initqual` (`quality.c`): NodeQual = C0 (TRACE: 0), the tank's C its node's, the
         # trace node 100
         given = inputs.get("quality.initial")
+        if given is not None and tuple(given.shape) != (n_nodes,):
+            raise ValueError(f"quality: quality.initial has the shape "
+                             f"{tuple(given.shape)}; it takes one value per node, "
+                             f"({n_nodes},)")
         if given is None:
             c0 = [float(quality.initial.get(n, 0.0)) for n in node_names]
         elif attached:
