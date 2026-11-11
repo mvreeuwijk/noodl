@@ -841,7 +841,7 @@ physics'.
 | Anytown at time zero, pumps running, tanks at mid-level, the five placeholder pipes feeding junctions 5-7 at 12 in (three parallel pumps on the five-point curve; pipe 125 still 0.0001 in) | 1e-6 / 1e-6 m³/s / equal | 9.3e-8, 3.1e-8 |
 | Whole networks through `water_run` for their full DURATION (`test_water_networks.py`): heads (relative to the larger of the head and 1 m), tank levels, flows, states at every report time, and the energy section | 1e-5 / 2e-4 m / 1e-6 m³/s / equal / 1e-5, except where noted | the next five rows, in that order |
 | Net3, 168 h (AT TIME and level controls, a closed pipe, three-point pumps); 6 s | as above | 1.2e-7, 5.2e-6 m, 1.3e-7 m³/s, equal, 4.2e-8 |
-| Net6, 96 h (3323 junctions, 61 pumps, PRVs, a check valve, 124 level controls); 120 s | levels 3e-3 m, flows 5e-4 m³/s, energy 3e-4 (EPANET's closed-link leak, see Limitations) | 1.1e-5 (over the 1e-5 bound at 90 h, from the same level drift; open), 1.94e-3 m, 3.1e-4 m³/s, equal, 1.95e-4 |
+| Net6, 96 h (3323 junctions, 61 pumps, PRVs, a check valve, 124 level controls); 120 s | heads 2e-5, levels 3e-3 m, flows 5e-4 m³/s, energy 3e-4 (EPANET's closed-link leak, see Limitations: the heads at 90 h follow a tank level 1.5e-3 m apart) | 1.1e-5, 1.94e-3 m, 3.1e-4 m³/s, equal, 1.95e-4 |
 | ky4, DURATION 0 | as above | 8.2e-8, 6.0e-6 m, 9.1e-8 m³/s (pairs 2.6e-7), equal, 1.1e-8 |
 | ky10, DURATION 0 (level controls on `~@`-named pumps) | as above | 1.3e-7, 1.3e-5 m, 5.5e-8 m³/s, equal, 1.1e-7 |
 | Anytown edited (`_anytown`), 24 h at a 1 min step; 11 s | heads 1e-4 (EPANET's closed-link leak out of the empty tanks, at a head of 0.55 m; see Limitations) | 5.1e-5 (1.8e-4 m; 9.3e-8 at t = 0), 1.8e-6 m, 2.9e-7 m³/s, equal, 3.7e-7 |

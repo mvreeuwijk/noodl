@@ -68,13 +68,14 @@ _NETWORKS = {
     # 1.3e-4 m, flows 2.1e-6 m3/s.)
     "Net3": dict(path=_library("Net3")),
     # Net6: 96 h, 3323 junctions, 61 pumps (one constant-power), two PRVs, a check valve,
-    # 124 IF NODE controls, 18 pumps closed in [STATUS]. MEASURED: heads 1.10e-5, OVER the
-    # default 1e-5 (at 90 h, JUNCTION-2828 1.47e-3 m apart, as TANK-3342's level then: the
-    # level drift below; every hour before 59 h within 5e-6; 9.4e-6 with EPANET at 1e-5,
-    # whose own heads there are 2.4e-6 from its 1e-7 ones, while 1e-6 and 1e-7 agree; the
-    # bound is left for the controller's ruling, not loosened here), states equal at
+    # 124 IF NODE controls, 18 pumps closed in [STATUS]. MEASURED: heads 1.10e-5 (identical
+    # with EPANET at 1e-6 and 1e-7; every hour before 59 h within 5e-6), states equal at
     # every hour, levels 1.94e-3 m, flows 3.05e-4 m3/s, energy 1.95e-4 (PUMP-3866's time on
-    # line, 4.4401 against 4.4410 percent: 3 s of 96 h). LEVELS 3e-3 m, FLOWS 5e-4 m3/s and
+    # line, 4.4401 against 4.4410 percent: 3 s of 96 h). HEADS 2e-5 (Ruling Q15): the worst
+    # is at 90 h, JUNCTION-2828 1.47e-3 m apart, following TANK-3342's level, 1.47e-3 m
+    # apart then: the level drift below, which at heads of 130 m is 1.1e-5 relative; at
+    # EPANET's 1e-5 (9.4e-6, its own heads there 2.4e-6 from its 1e-7 ones, no status
+    # different) the default 1e-5 was met by chance. LEVELS 3e-3 m, FLOWS 5e-4 m3/s and
     # ENERGY 3e-4, all from the switching times: EPANET's closed links conduct
     # `1 / CBIG` (`hydcoeffs.c`: a closed link's `P = 1 / CBIG`, CBIG = 1e8 ft per cfs),
     # noodl's carry none. MEASURED at 3600 s:
@@ -88,7 +89,7 @@ _NETWORKS = {
     # it to 387 s and noodl, whose TANK-3336 is 7.1e-7 m higher at 5 h than the toolkit's
     # level, takes 386 s. By 96 h 609 steps in both, every one matched, up to a minute apart
     # late in the run. (The closed-link leak is not modelled: Ruling 30.)
-    "Net6": dict(path=_library("Net6"), levels=3e-3, flows=5e-4, energy=3e-4),
+    "Net6": dict(path=_library("Net6"), heads=2e-5, levels=3e-3, flows=5e-4, energy=3e-4),
     # ky4: DURATION 0, 959 junctions, two constant-power pumps (one closed), T-2 empty.
     # MEASURED: heads 8.2e-8, levels 6.0e-6 m, flows 9.1e-8 m3/s, and 2.6e-7 on its two
     # pairs of parallel pipes (held to 3e-6 when EPANET ran at 1e-5, whose split left their
