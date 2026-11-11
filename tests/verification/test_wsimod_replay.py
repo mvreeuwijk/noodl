@@ -550,6 +550,10 @@ DEMO_PAIRS = [
 DEMO_IDS = [f"{prefix}{demo}-{cls}" for prefix, demo, _, _ in RUNS for cls in DEMO_CLASSES[demo]]
 
 
+# nodes of no arc, which WSIMOD never calls (oxford's cherwell_thames), by class
+UNCALLED = {"quickstart": {}, "oxford": {"Node": {"cherwell_thames"}}}
+
+
 @functools.cache
 def demo_network(demo: str, config: str):
     return read_wsimod_config(DEMOS / demo, config_name=config)
@@ -614,13 +618,14 @@ def _replay_class(demo, config, mode, cls, days, *, every_day, decisions=None):
     network = demo_network(demo, config)
     pollutants = network.pollutants if mode == "pollutants" else QUANTITY_ONLY
     captured_calls = demo_capture(demo, config, days)
-    sizes, worst = {}, 0.0
+    sizes, worst, uncalled = {}, 0.0, set()
     for spec in network.nodes:
         if spec.cls != cls:
             continue
         calls = captured_calls[spec.name]
         if not calls:
-            continue  # WSIMOD never called this node (oxford's cherwell_thames)
+            uncalled.add(spec.name)
+            continue
         keep = None if every_day else set(sample_days(calls))
         used = [c for c in calls if keep is None or c.day in keep]
         sizes[spec.name] = len({c.day for c in used})
@@ -631,6 +636,7 @@ def _replay_class(demo, config, mode, cls, days, *, every_day, decisions=None):
         bound = type(make_node(spec, network, pollutants)).replay_bound
         assert found <= bound * scale, (spec.name, found)
         worst = max(worst, found)
+    assert uncalled == UNCALLED[demo].get(cls, set()), (demo, cls, uncalled)
     assert sizes, f"{demo} has no {cls} that WSIMOD called"
     return sizes, worst
 
@@ -679,6 +685,25 @@ def test_a_demo_replay_notices_a_difference():
     arc.reply["volume"] += 1e-11 * scale
     with pytest.raises(Mismatch):
         replay(network, "oxford_land", calls, scale=scale, pollutants=QUANTITY_ONLY)
+
+
+def test_a_pollutant_mode_demo_replay_notices_a_difference():
+    """A pollutant column of a captured WWTW reply, moved by 1e-11 x scale, fails the replay."""
+    network = demo_network("oxford", "config_neutral.yml")
+    calls = copy.deepcopy(
+        [c for c in demo_capture("oxford", "config_neutral.yml", 365)["oxford_wwtw"] if c.day < 20]
+    )
+    scale = node_scale(calls, volume_only=False)
+    reply, key = next(
+        (c.reply, k)
+        for c in calls
+        if c.reply is not None
+        for k, v in c.reply.items()
+        if k != "volume" and v > 0
+    )
+    reply[key] += 1e-11 * scale
+    with pytest.raises(Mismatch):
+        replay(network, "oxford_wwtw", calls, scale=scale)
 
 
 @pytest.mark.slow
