@@ -234,30 +234,35 @@ def reset_wsimod_globals() -> None:
     constants.FLOAT_ACCURACY = 1e-11
 
 
-_CONSTRUCTOR_DEFAULTS: dict | None = None
+def _snapshot_constructor_defaults() -> dict | None:
+    """Every ``__init__`` default of the classes in ``wsimod.nodes`` and ``wsimod.arcs``, taken
+    when this module is imported, before any build of this process can mutate one; ``None``
+    without WSIMOD (the importing test module skips then, see the module text)."""
+    try:
+        import wsimod.arcs
+        import wsimod.nodes
+    except ImportError:
+        return None
+    import importlib
+    import pkgutil
+
+    functions = {}
+    for package in (wsimod.nodes, wsimod.arcs):
+        for info in pkgutil.iter_modules(package.__path__):
+            module = importlib.import_module(f"{package.__name__}.{info.name}")
+            for value in vars(module).values():
+                init = vars(value).get("__init__") if isinstance(value, type) else None
+                if inspect.isfunction(init) and init.__module__.startswith("wsimod"):
+                    functions[init] = (init.__defaults__, init.__kwdefaults__)
+    return copy.deepcopy(functions)
+
+
+_CONSTRUCTOR_DEFAULTS = _snapshot_constructor_defaults()
 
 
 def _restore_constructor_defaults() -> None:
-    """Every ``__init__`` default of the classes in ``wsimod.nodes`` and ``wsimod.arcs`` as it was
-    at the first call (before any build of this process could mutate it)."""
-    global _CONSTRUCTOR_DEFAULTS
-    if _CONSTRUCTOR_DEFAULTS is None:
-        import importlib
-        import pkgutil
-
-        import wsimod.arcs
-        import wsimod.nodes
-
-        functions = {}
-        for package in (wsimod.nodes, wsimod.arcs):
-            for info in pkgutil.iter_modules(package.__path__):
-                module = importlib.import_module(f"{package.__name__}.{info.name}")
-                for value in vars(module).values():
-                    init = vars(value).get("__init__") if isinstance(value, type) else None
-                    if inspect.isfunction(init) and init.__module__.startswith("wsimod"):
-                        functions[init] = (init.__defaults__, init.__kwdefaults__)
-        _CONSTRUCTOR_DEFAULTS = copy.deepcopy(functions)
-    for function, (defaults, kwdefaults) in _CONSTRUCTOR_DEFAULTS.items():
+    """Restore the import-time snapshot of WSIMOD's constructor defaults."""
+    for function, (defaults, kwdefaults) in (_CONSTRUCTOR_DEFAULTS or {}).items():
         function.__defaults__ = copy.deepcopy(defaults)
         function.__kwdefaults__ = copy.deepcopy(kwdefaults)
 

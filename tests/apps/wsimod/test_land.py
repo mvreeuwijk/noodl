@@ -145,6 +145,22 @@ def test_impervious_surface_ponds_and_evaporates():
         (dry,) = [d for d in ctx.decisions if d.site.endswith("precipitation_evaporation/dry")]
         assert bool(dry.outcome) and float(dry.margin) == 0.0005 - 0.001
 
+    # the tie P == E * et0_to_e is not dry (land.py:660 is a strict <): a net rain of 0 at the
+    # air temperature is forced in, and the blend (0 x 10 + 0.1 x 3) / 3 moves the stored
+    # temperature by an ulp, which the dry branch would not
+    land = make_land(
+        [surface("ImperviousSurface", "roads", area=10.0, pore_depth=1.0)], pollutants=PP
+    )
+    roads = land.surfaces[0]
+    ctx = day(land, pollutants=PP)
+    roads.storage = PP.to_vqip({"volume": 3.0, "temperature": 0.1})
+    land.bind(forcing(0.001, 0.001, 10.0))
+    land.run(active=TRUE)
+    (dry,) = [d for d in ctx.decisions if d.site.endswith("precipitation_evaporation/dry")]
+    assert not bool(dry.outcome) and float(dry.margin) == 0.0
+    assert volume(roads.evaporation) == 0.001 * 10
+    assert float(roads.storage[2]) == (10.0 * 0.0 + 0.1 * 3.0) / 3.0 != 0.1
+
 
 def test_an_impervious_surface_starting_above_capacity_empties_on_day_one():
     """Review Focus 4: oxford's urban surface (area 1e7, capacity 0, initial storage 5e6) into
@@ -540,8 +556,10 @@ def test_a_batch_equals_its_single_runs_and_a_masked_instance_is_unchanged():
 
 
 def test_gradcheck_on_one_ihacres_day():
-    """``torch.autograd.gradcheck`` through one IHACRES day (wet point, away from every kink):
-    ``field_capacity``, ``ihacres_p``, ``et0_coefficient`` and the precipitation."""
+    """``torch.autograd.gradcheck`` through one IHACRES day at two points away from every kink.
+    Wet: ``field_capacity``, ``ihacres_p``, ``et0_coefficient`` and the precipitation (the
+    ``**`` and the soil-store pulls). Dry: ``wilting_point``, ``depth``, ``et0_coefficient`` and
+    the precipitation (``exp`` and the evaporating branch)."""
     spec = surface("PerviousSurface", "rural", **_RURAL)
 
     def f(field_capacity, ihacres_p, et0_coefficient, precipitation):
@@ -572,6 +590,29 @@ def test_gradcheck_on_one_ihacres_day():
         torch.tensor(v, dtype=torch.float64, requires_grad=True) for v in (0.3, 3.0, 0.5, 0.004)
     )
     assert torch.autograd.gradcheck(f, inputs, eps=1e-7, atol=1e-8, rtol=1e-6)
+
+    def g(wilting_point, depth, et0_coefficient, precipitation):
+        land = make_land([spec])
+        ctx = day(land)
+        land.surfaces[0].storage = P.to_vqip({"volume": 5.0})
+        land.bind(
+            {
+                **forcing(precipitation, 0.004),
+                "surfaces.rural.wilting_point": wilting_point,
+                "surfaces.rural.depth": depth,
+                "surfaces.rural.et0_coefficient": et0_coefficient,
+            }
+        )
+        land.run(active=TRUE)
+        outcomes = {d.site.rsplit("/", 1)[1]: bool(d.outcome) for d in ctx.decisions}
+        assert not outcomes["through_soil"] and outcomes["evaporation_kink"]
+        rural = land.surfaces[0]
+        return torch.stack([rural.storage[0], rural.evaporation[0], rural.tank_recharge])
+
+    inputs = tuple(
+        torch.tensor(v, dtype=torch.float64, requires_grad=True) for v in (0.12, 0.5, 0.5, 0.0005)
+    )
+    assert torch.autograd.gradcheck(g, inputs, eps=1e-7, atol=1e-8, rtol=1e-6)
 
 
 def test_pow_python_is_pythons_pow_bitwise_with_a_zero_slope_at_zero():
