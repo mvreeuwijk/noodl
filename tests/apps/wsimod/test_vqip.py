@@ -77,6 +77,14 @@ def test_vqip_operations_equal_wsiobj_bitwise_on_random_inputs(wsiobj):
     both = torch.rand(n, generator=g) < 0.05
     a[both, 0] = 0.0
     b[both, 0] = 0.0
+    # negative volumes: "V > 0 is false" keeps t1 (core.py:107, :270)
+    a = torch.cat([a, -torch.rand(20, 5, generator=g, dtype=torch.float64) * 10])
+    b = torch.cat([b, torch.rand(20, 5, generator=g, dtype=torch.float64) * 5])
+    a[-10:, 0] = a[-10:, 0].abs()
+    b[-10:, 0] = -b[-10:, 0]
+    n = len(a)
+    assert (a[:, 0] == 0).any() and ((a[:, 0] + b[:, 0]) == 0).any()
+    assert (a[:, 0] < 0).any() and ((a[:, 0] + b[:, 0]) < 0).any()
     v = torch.rand(n, generator=g, dtype=torch.float64) * 50
 
     def d(row):
@@ -180,3 +188,19 @@ def test_vqip_operations_pass_gradcheck():
     assert torch.autograd.gradcheck(lambda x, y: ds_vqip(P, x, y), (a, b))
     assert torch.autograd.gradcheck(lambda x, w: v_change_vqip(P, x, w), (a, v))
     assert torch.autograd.gradcheck(v_distill_vqip, (a, v))
+
+
+def test_zero_volume_gradients_are_finite():
+    t1, t2 = vq(0, 0.5, 4), vq(0, 0.2, 6)
+    t1.requires_grad_()
+    t2.requires_grad_()
+    v = f64(2.0).requires_grad_()
+    (sum_vqip(P, t1, t2).sum() + v_change_vqip(P, t1, v).sum()).backward()
+    for x in (t1.grad, t2.grad, v.grad):
+        assert torch.isfinite(x).all()
+
+
+def test_pollutants_accepts_lists():
+    p = Pollutants(["phosphate", "temperature"], ["phosphate"], ["temperature"])
+    assert p.names == ("phosphate", "temperature") and p.additive == ("phosphate",)
+    assert p == P and p.volume_or_additive_mask.tolist() == [True, True, False]

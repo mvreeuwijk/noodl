@@ -24,9 +24,13 @@ class Pollutants:
     K: int = field(init=False)
     additive_mask: Tensor = field(init=False, compare=False, repr=False)
     non_additive_mask: Tensor = field(init=False, compare=False, repr=False)
+    volume_or_additive_mask: Tensor = field(init=False, compare=False, repr=False)
 
     def __post_init__(self) -> None:
         names = tuple(self.names)
+        object.__setattr__(self, "names", names)
+        object.__setattr__(self, "additive", tuple(self.additive))
+        object.__setattr__(self, "non_additive", tuple(self.non_additive))
         if len(set(names)) != len(names):
             dup = next(n for n in names if names.count(n) > 1)
             raise ValueError(f"pollutant {dup!r} is listed twice in names")
@@ -44,6 +48,9 @@ class Pollutants:
         non = torch.tensor([False] + [n in self.non_additive for n in names], dtype=torch.bool)
         object.__setattr__(self, "additive_mask", add)
         object.__setattr__(self, "non_additive_mask", non)
+        object.__setattr__(
+            self, "volume_or_additive_mask", add | torch.tensor([True] + [False] * len(names))
+        )
 
     def column(self, name: str) -> int:
         """Column of pollutant ``name`` (1-based; column 0 is the volume)."""
@@ -76,12 +83,6 @@ QUANTITY_ONLY = Pollutants((), (), ())
 def empty(p: Pollutants, shape) -> Tensor:
     """All-zero VQIP of batch shape ``shape`` (core.py:34-45)."""
     return torch.zeros(*tuple(shape), 1 + p.K, dtype=torch.float64)
-
-
-def _vol_or_add(p: Pollutants) -> Tensor:
-    m = p.additive_mask.clone()
-    m[0] = True
-    return m
 
 
 def safe_den(den: Tensor) -> Tensor:
@@ -122,12 +123,12 @@ def sum_vqip(p: Pollutants, t1: Tensor, t2: Tensor) -> Tensor:
     summed = t1 + t2
     blended = (t2 * t2[..., :1] + t1 * t1[..., :1]) / safe_den(vol)
     mixed = torch.where(p.non_additive_mask & (vol > 0), blended, t1)
-    return torch.where(_vol_or_add(p), summed, mixed)
+    return torch.where(p.volume_or_additive_mask, summed, mixed)
 
 
 def extract_vqip(p: Pollutants, t1: Tensor, t2: Tensor) -> Tensor:
     """core.py:150-178. Volume and additive columns subtract; non-additive keep ``t1``."""
-    return torch.where(_vol_or_add(p), t1 - t2, t1)
+    return torch.where(p.volume_or_additive_mask, t1 - t2, t1)
 
 
 def v_distill_vqip(t: Tensor, v: Tensor) -> Tensor:
@@ -142,10 +143,10 @@ def v_change_vqip(p: Pollutants, t: Tensor, v: Tensor) -> Tensor:
     v = torch.as_tensor(v, dtype=torch.float64)[..., None]
     pos = t[..., :1] > 0
     ratio = v / safe_den(t[..., :1])
-    scaled = torch.where(_vol_or_add(p), t * ratio, t)
+    scaled = torch.where(p.volume_or_additive_mask, t * ratio, t)
     return torch.where(pos, scaled, torch.cat([v, t[..., 1:]], dim=-1))
 
 
 def ds_vqip(p: Pollutants, t1: Tensor, t2: Tensor) -> Tensor:
     """core.py:305-328. Volume and additive differences; non-additive columns 0."""
-    return torch.where(_vol_or_add(p), t1 - t2, torch.zeros_like(t1))
+    return torch.where(p.volume_or_additive_mask, t1 - t2, torch.zeros_like(t1))

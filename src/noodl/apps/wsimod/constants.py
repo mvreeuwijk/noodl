@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-MAXITER = 5  # constants.py:55, maximum iterations of a while loop
+MAXITER = 5  # constants.py:57, maximum iterations of a while loop
 UNBOUNDED_CAPACITY = 1e15  # constants.py:18
 DT_DAYS = 1  # constants.py:20
 FLOAT_ACCURACY = 1e-11  # constants.py:17, default; per model in the port
