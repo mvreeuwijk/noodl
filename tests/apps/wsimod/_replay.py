@@ -2,8 +2,9 @@
 
 The noodl node is built alone (``make_node``). Its arcs are :class:`ScriptedArc`\\ s that
 return WSIMOD's captured replies in order and assert that noodl made the same calls, in the
-same order, with the same arguments to ``1e-12 * scale``. The replay loads the node's stores
-from each call's ``pre``, makes the call, and compares the reply and the ``post`` stores.
+same order, with the same arguments to the class's ``replay_bound * scale``. The replay loads
+the node's stores from each call's ``pre``, makes the call, and compares the reply and the
+``post`` stores.
 
 The comparison is exact for a class whose ``replay_bound`` is 0 (``Node``, ``Waste``,
 ``Catchment``): every value must be bitwise WSIMOD's. A class with ``pow``/``exp``/``sqrt`` may
