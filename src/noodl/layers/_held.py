@@ -92,9 +92,10 @@ class _HeldMixin:
         grounded (a positive slope on its diagonal), so a node that is neither held nor
         joined to a boundary or a held node is refused by name."""
         phi = self.assemble(x0, phi_boundary)
-        dq = self._dflows(phi, drivers, step.ctx)
+        call = self._module_call()
+        dq = self._dflows(phi, drivers, step.ctx, call)
         rows = step.storage.rows
-        ns = self._node_slopes(phi, drivers)
+        ns = self._node_slopes(phi, drivers, None, call)
         held = rows.to(dtype=dq.dtype)
         ns = held if ns is None else torch.where(rows, held, ns)
         self._grounding_check(dq, where="solve", node_slopes=ns)
@@ -113,7 +114,7 @@ class _HeldMixin:
         rows, _ = held
         phi_i = phi[..., self.interior]
         imbalance = self._source_interior(sources, phi_i) - self._accumulate_interior(q)
-        w = self._node_withdrawal(phi, drivers)
+        w = self._node_withdrawal(phi, drivers, None, self._module_call())
         if w is not None:
             imbalance = imbalance - w
         imbalance = torch.where(rows, imbalance, torch.zeros_like(imbalance))

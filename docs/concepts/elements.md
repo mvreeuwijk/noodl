@@ -188,12 +188,20 @@ Two rules worth stating explicitly, because both produce wrong answers rather th
   The same attribute exists on `NodeWithdrawal`, and on `NodeStorage` for its `rate_slope`
   (audited by the same test).
 - **A law is its module call.** A layer calls each law as a module, so an overridden
-  `forward` or a forward hook is part of the law. On a layer without flow unknowns, which
-  otherwise calls `flow` and `dflow` directly, such a law is evaluated by its module call
-  and its slope is taken from that call by autograd, with or without `differentiable`.
-  The solve's starting guess, the storage-ramp fallback, the layer's public `jacobian`,
-  `dflows` and `adjoint`, and a layer with flow unknowns still use each law's own
-  `jacobian` or `dflow`, so a hook there changes the root but not those slopes.
+  `forward` or a forward hook is part of the law. The module call of a law with a flow is
+  `law(dp, drivers, ctx)`, its flow; that of an implicit law is `law(dp, q, drivers, ctx)`,
+  its residual (`ImplicitLaw.forward` returns `residual`), so a hook on an implicit law acts
+  on its residual: scaling it leaves the root where it is, adding a term moves it. Wherever
+  such a law's module call differs from its own method, the layer evaluates it by that call
+  and takes its slope from that call by autograd, not from its `dflow` or `jacobian`: in
+  every solve, with or without `differentiable`, with or without flow unknowns; in the
+  starting guess (the call's value and slope at `dp = 0` replace its `linear_init`) and the
+  storage-ramp fallback; and in the layer's public `flows`, `residual`, `jacobian`,
+  `dflows`, `adjoint` and `linear_init`. A `dp_independent` law is still checked against
+  its own `dflow`, but a hook may make its call depend on `dp`, so the slope of that call is
+  taken by autograd too, zero where it does not depend on `dp`. The same holds for a
+  withdrawal and a storage. A law without either (every library law) keeps its own `flow`,
+  `dflow`, `jacobian` and `linear_init`.
 
 ## Implicit, coupled and dynamic constitutive laws
 
