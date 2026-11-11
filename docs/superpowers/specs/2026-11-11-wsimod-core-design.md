@@ -312,7 +312,7 @@ delivered or returned as backflow (`backflow_enabled` is always true on these pa
   becomes 0. A row's `average_flow` is `V/(n+1)`, because a waiting row's volume never changes.
 - **Absence and the update-time drop.** A row with zero volume is absent. WSIMOD removes a
   waiting request below `FLOAT_ACCURACY` on update (`:483-485`). This is reachable, because the
-  clip at entry (`:409-412`) can leave a request between 0 and `FLOAT_ACCURACY`, which
+  clip at entry (`:382-390`) can leave a request between 0 and `FLOAT_ACCURACY`, which
   `enter_arc` has already added to `vqip_in`. noodl removes such rows and records their water
   as dropped.
 - **The early return.** A push below `FLOAT_ACCURACY` returns before both `enter_queue` and
@@ -328,10 +328,20 @@ delivered or returned as backflow (`backflow_enabled` is always true on these pa
   (`:393-399`), because the new request cannot be due. For `n = 0`, noodl delivers the new
   request last.
 - **Directions.** Push and pull requests have separate rows and counters (`direction`, `:480`).
+- **Call labels (D2).** The arc labels each request call by the enclosing distribute-loop
+  frames (`Ctx.frame`, `"node:N/push_distributed#<call>/round <r>"`, nested frames joined)
+  and the tag; `QueueArc.calls[direction][j]` is call `j`'s label. The first day that calls the
+  arc records them, or `begin_tracing()`/`end_tracing()` bracket `build_model`'s tracing day;
+  every later day must repeat the sequence, or the call (or the day's `end_timestep`, for a
+  short day) raises. `J` grows while the labels are recorded.
 
 The W21 test proves this layout against WSIMOD's delivery order. It drives the arc with pushes
 on irregular days, with several pushes and several distribute rounds on one day, and with a
-tiny push on a due day, and with a gap between pushes longer than `n + 1` days.
+tiny push on a due day, and with a gap between pushes longer than `n + 1` days. An arc has one
+in-port, so the two senders sit upstream of it: node `a` (the arc its only out-arc) receives
+from a catchment and from node `b`, whose `push_distributed` (the arc to `a` and an arc to a
+`Waste`) reaches the `QueueArc` in its rounds. The receiver is a `Reservoir`, because a plain
+node's push reaches only Node, River, Waste and Reservoir (`nodes.py:63-71`).
 
 ### Batches
 
@@ -627,7 +637,10 @@ shape:
     `node:N/pull_distributed/{deficit,avail}`, `node:N/check_basic/<push|pull>/clip`,
     `arc:A/get_excess/<push|pull>/min`, `arc:A/send_push_request/clip`,
     `arc:A/send_pull_request/clip`, `node:N/pull_check_abstraction/clip`,
-    `node:N/pull_set_abstraction/clip`, `arc:A/send_push_request/below_fa` (`AltQueueArc`).
+    `node:N/pull_set_abstraction/clip`, `arc:A/send_push_request/below_fa` (`AltQueueArc`,
+    `QueueArc`), and a `QueueArc`'s `update_queue` rows,
+    `arc:A/update_queue/<push|pull>:<i>,<j>/below_fa` per waiting row and
+    `arc:A/update_queue/<push|pull>:new/below_fa` for the call's own request.
     A tank is not a node: its sites are its owner's with the tank's attribute path,
     `node:N/<tank>/get_excess/{headroom,clip}`, `node:N/<tank>/get_avail/clip`,
     `node:N/<tank>/push_storage/clip`, `node:N/<tank>/pull_storage/{empty,clip}`,

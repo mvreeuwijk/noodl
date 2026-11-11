@@ -396,6 +396,95 @@ def _catchment_abstraction() -> dict:
     )
 
 
+_QUEUE_ARC_DAYS = 30
+_QUEUE_ARC_POLLUTANTS = {  # one additive, one non-additive (W21)
+    "pollutants": ["phosphate", "temperature"],
+    "additive_pollutants": ["phosphate"],
+    "non_additive_pollutants": ["temperature"],
+}
+# The flows of the two catchments by day (0 on every other day). ``src`` pushes through node
+# ``a``, whose only out-arc is the QueueArc ``q`` (n = 2): day 0 is the clip below
+# FLOAT_ACCURACY (below), days 1 and 5 a gap longer than n + 1, day 9 a push of 1e-12 on a day
+# when day 7's request is due, day 10 the push that delivers it. ``src2`` fills the reservoir
+# ``feed`` on days 1 and 7, whose ``distribute`` pushes through node ``b`` (the arc to ``a``
+# and an arc to the sink): on day 7 the due day-5 request meets a full ``res``, and its
+# backflow makes ``b``'s ``push_distributed`` run a second round.
+_QUEUE_ARC_SRC = {0: 80.0, 1: 3.0, 5: 10.0, 9: 1e-12, 10: 2.5, 14: 3.5, 15: 1.25, 20: 4.5, 26: 2.0}
+_QUEUE_ARC_SRC2 = {1: 2.0, 7: 5.0, 20: 3.0, 21: 6.0}
+# res starts 9.998e-12 below its capacity of 6. On day 0 the arc src -> a clips the push of 80
+# to that spare, and rounding at 80 makes it 1.00044e-11 (above FLOAT_ACCURACY); q clips it
+# again to the spare, 9.998e-12, which enters the queue and is removed by update_queue
+# (arcs.py:483-485): the update-time drop. Found by simulating arcs.py:382-390 in floats.
+_QUEUE_ARC_RES_START = 5.999999999990002
+
+
+def _queue_catchment(name: str, flows: dict[int, float], seed: int) -> dict:
+    rng = random.Random(seed)
+    data = {}
+    for k, date in enumerate(_dates(_QUEUE_ARC_DAYS)):
+        data[("flow", date)] = flows.get(k, 0.0)
+        data[("phosphate", date)] = round(rng.uniform(1e-3, 1e-2), 8)
+        data[("temperature", date)] = round(rng.uniform(4.0, 20.0), 4)
+    return {"name": name, "type_": "Catchment", "data_input_dict": data}
+
+
+def _queue_stocked(volume: float) -> dict:
+    return {"volume": volume, "phosphate": 0.002 * volume, "temperature": 11.0}
+
+
+def _queue_arc() -> dict:
+    """W21: the push path of a ``QueueArc`` (``q``, two days) with two senders upstream of
+    its in-port ``a`` (see the flows above), into a reservoir of capacity 6 that rejects; and
+    the pull path of a second ``QueueArc`` (``q_pull``, one day) through which the reservoir
+    ``basin`` abstracts from the storage ``well`` (slot ``Abstraction``), so each pull
+    hands over the previous day's water."""
+    return {
+        **_QUEUE_ARC_POLLUTANTS,
+        "dates": _dates(_QUEUE_ARC_DAYS),
+        "nodes": [
+            _queue_catchment("src", _QUEUE_ARC_SRC, 21),
+            _queue_catchment("src2", _QUEUE_ARC_SRC2, 22),
+            {"name": "a", "type_": "Node"},
+            {"name": "b", "type_": "Node"},
+            {"name": "j", "type_": "Node"},
+            _store("feed", "Reservoir", capacity=100.0),
+            _store(
+                "res",
+                "Reservoir",
+                capacity=6.0,
+                initial_storage=_queue_stocked(_QUEUE_ARC_RES_START),
+            ),
+            _store("well", "Storage", capacity=1000.0, initial_storage=_queue_stocked(500.0)),
+            {
+                "name": "basin",
+                "type_": "Abstraction",
+                "node_type_override": "Reservoir",
+                "capacity": 10.0,
+                "initial_storage": _queue_stocked(2.0),
+            },
+            _store("sink", "Waste"),
+        ],
+        "arcs": [
+            _arc("src_to_a", "src", "a"),
+            _arc("src2_to_j", "src2", "j"),
+            _arc("j_to_feed", "j", "feed"),
+            _arc("feed_to_b", "feed", "b"),
+            _arc("b_to_a", "b", "a", preference=10.0),
+            _arc("b_to_sink", "b", "sink", capacity=1.0),
+            _arc("q", "a", "res", type_="QueueArc", number_of_timesteps=2, capacity=6.0),
+            _arc("res_to_sink", "res", "sink", capacity=1.5),
+            _arc("q_pull", "well", "basin", type_="QueueArc", number_of_timesteps=1, capacity=1.0),
+            _arc("basin_to_sink", "basin", "sink", capacity=2.0),
+        ],
+        "orchestration": [
+            {"Catchment": "route"},
+            {"Reservoir": "distribute"},
+            {"Abstraction": "make_abstractions"},
+            {"Abstraction": "distribute"},
+        ],
+    }
+
+
 CASES: dict[str, Case] = {
     "three_out_arcs": Case(
         build=_three_out_arcs,
@@ -462,5 +551,11 @@ CASES: dict[str, Case] = {
         days=_STORAGE_DAYS,
         scale=_largest_volume(_catchment_abstraction()),
         replay=("res", "src"),
+    ),
+    "queue_arc": Case(
+        build=_queue_arc,
+        days=_QUEUE_ARC_DAYS,
+        scale=_largest_volume(_queue_arc()),
+        replay=("a", "b", "res", "basin"),
     ),
 }

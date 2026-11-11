@@ -20,7 +20,11 @@ Decision records (spec, Diagnostics). Each is a :class:`Decision`
   ``node:N/pull_distributed/{deficit,avail}``, ``node:N/check_basic/<push|pull>/clip``,
   ``arc:A/get_excess/<push|pull>/min``, ``arc:A/send_push_request/clip``,
   ``arc:A/send_pull_request/clip``, ``node:N/pull_check_abstraction/clip``,
-  ``node:N/pull_set_abstraction/clip``; an ``AltQueueArc``'s ``arc:A/send_push_request/below_fa``.
+  ``node:N/pull_set_abstraction/clip``; an ``AltQueueArc``'s ``arc:A/send_push_request/below_fa``;
+  a ``QueueArc``'s ``arc:A/send_push_request/below_fa`` and, in ``update_queue``, one
+  ``arc:A/update_queue/<push|pull>:<i>,<j>/below_fa`` per waiting row and
+  ``arc:A/update_queue/<push|pull>:new/below_fa`` for the call's own request (each evaluated
+  where the row is present).
   A tank is not a node: its sites are its owner's with the tank's attribute path,
   ``node:N/<tank>/get_excess/{headroom,clip}``, ``node:N/<tank>/get_avail/clip``,
   ``node:N/<tank>/push_storage/clip``, ``node:N/<tank>/pull_storage/{empty,clip}``,
@@ -52,7 +56,8 @@ Tests key the records by ``(site, call, round)``.
 from __future__ import annotations
 
 import operator
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -126,6 +131,7 @@ class Ctx:
         self.maxiter: dict[tuple[str, str, int], Tensor] = {}
         self.dropped: Tensor = self.empty()
         self.terms: dict[str, Tensor] = {}
+        self.frames: list[str] = []
         self._calls: dict[tuple[str, str], int] = {}
 
     def empty(self) -> Tensor:
@@ -170,6 +176,17 @@ class Ctx:
         index = self._calls.get((element, method), 0)
         self._calls[(element, method)] = index + 1
         return index
+
+    @contextmanager
+    def frame(self, label: str) -> Iterator[None]:
+        """Name the enclosing call site while the block runs: a distribute loop's round
+        (``"node:N/push_distributed#<call>/round <r>"``). ``frames`` is the stack; a
+        ``QueueArc`` labels its request calls with it (D2)."""
+        self.frames.append(label)
+        try:
+            yield
+        finally:
+            self.frames.pop()
 
     def loop_site(self, node: str, method: str) -> tuple[str, str, int]:
         """The call site ``(node, method, call index this day)`` of a distribute loop."""

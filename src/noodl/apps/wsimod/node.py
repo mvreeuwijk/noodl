@@ -335,11 +335,12 @@ class Node:
             )
             self._zero_priority(connected, running)
             den = safe_den(connected.priority)
-            for key, allocation in connected.allocation.items():
-                received = self.in_arcs[key].send_pull_request(
-                    self._volume_vqip(deficit * allocation / den), active=running, tag=tag
-                )
-                pulled = write(running, sum_vqip(p, pulled, received), pulled)
+            with ctx.frame(f"{where}#{call}/round {r}"):
+                for key, allocation in connected.allocation.items():
+                    received = self.in_arcs[key].send_pull_request(
+                        self._volume_vqip(deficit * allocation / den), active=running, tag=tag
+                    )
+                    pulled = write(running, sum_vqip(p, pulled, received), pulled)
             deficit = write(running, request - pulled[..., 0], deficit)
             connected = self.get_connected("pull", types, tag, active=running)
         ctx.loop_exit(site, running)
@@ -419,11 +420,12 @@ class Node:
             )
             self._zero_priority(connected, running)
             den = safe_den(connected.priority)
-            for key, allocation in connected.allocation.items():
-                to_send = v_change_vqip(p, not_pushed_, amount * allocation / den)
-                reply = self.out_arcs[key].send_push_request(to_send, active=running, tag=tag)
-                sent = extract_vqip(p, to_send, reply)
-                not_pushed_ = write(running, extract_vqip(p, not_pushed_, sent), not_pushed_)
+            with ctx.frame(f"{where}#{call}/round {r}"):
+                for key, allocation in connected.allocation.items():
+                    to_send = v_change_vqip(p, not_pushed_, amount * allocation / den)
+                    reply = self.out_arcs[key].send_push_request(to_send, active=running, tag=tag)
+                    sent = extract_vqip(p, to_send, reply)
+                    not_pushed_ = write(running, extract_vqip(p, not_pushed_, sent), not_pushed_)
             not_pushed = not_pushed_[..., 0]
             connected = self.get_connected("push", types, tag, active=running)
         ctx.loop_exit(site, running)

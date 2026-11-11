@@ -19,6 +19,7 @@ from noodl.apps.wsimod.vqip import (
     Pollutants,
     empty,
     extract_vqip,
+    safe_den,
     sum_vqip,
     v_change_vqip,
     write,
@@ -34,6 +35,7 @@ __all__ = [
     "Arc",
     "PullArc",
     "PushArc",
+    "QueueArc",
     "SewerArc",
     "WeirArc",
     "check_travel_time",
@@ -382,6 +384,320 @@ class AltQueueArc(Arc):
         self.present = torch.cat([here[..., :-1] | here[..., 1:], here[..., -1:]], dim=-1)
 
 
+_DIRECTIONS = ("push", "pull")
+
+
+class QueueArc(Arc):
+    """``QueueArc`` (``arcs.py:272-552``): every request waits ``number_of_timesteps`` days in
+    the arc and is handed over by the arc's next call in that direction once it is due.
+
+    WSIMOD keeps a list of requests, each with a countdown (``:432-446``), and ``update_queue``
+    (``:448-528``) walks it in list order at the end of every request call that gets past the
+    early return. noodl keeps dense rows (D1; spec, Representation, ``QueueArc`` slots):
+    ``rows`` (..., 2, n, J, 1+K), direction ``push``/``pull`` first. Row ``(i, j)`` holds the
+    request entered ``i`` days before the arc's last call in that direction that reached
+    ``update_queue``, by the ``j``-th request call of its day in the arc's static call order.
+    ``since`` (..., 2) counts the days since that call, saturating at ``n``, and starts at
+    ``n``. A row is due iff ``since + i >= n``; due rows go out in the order ``i = n-1 ... 0``,
+    then ``j``, which is WSIMOD's list order, and the waiting ones move to ``i + since``. A
+    row's ``average_flow`` is ``V/(n+1)`` (``:423``): a waiting row's volume never changes,
+    because ``backflow_enabled`` is always true here (``:399``, ``:510-512``). A zero row is
+    absent.
+
+    ``calls`` (D2) holds each direction's static per-day call labels, indexed by ``j``: the
+    enclosing distribute-loop frames (:meth:`Ctx.frame`, which name the site and the round)
+    and the tag. The first day that calls the arc records them, or :meth:`begin_tracing` and
+    :meth:`end_tracing` bracket a tracing day; every later day must make the same calls in the
+    same order, or the call raises (an internal error: noodl's call structure is static).
+    ``J`` grows while the labels are recorded and is fixed afterwards. It is the larger of
+    the two directions' counts, so the other direction's surplus rows stay empty.
+    """
+
+    def __init__(self, spec: ArcSpec, in_port: Node, out_port: Node, pollutants: Pollutants):
+        self.number_of_timesteps = check_travel_time(
+            f"arc {spec.name!r}", "number_of_timesteps", spec.number_of_timesteps
+        )
+        super().__init__(spec, in_port, out_port, pollutants)
+        n = self.number_of_timesteps
+        self.rows = torch.zeros(2, n, 0, 1 + pollutants.K, dtype=torch.float64)
+        self.since = torch.full((2,), float(n), dtype=torch.float64)
+        self.calls: dict[str, list[str]] = {d: [] for d in _DIRECTIONS}
+        self._tags: dict[str, list[Tag]] = {d: [] for d in _DIRECTIONS}
+        self._frozen = False
+        self._seen = dict.fromkeys(_DIRECTIONS, 0)
+
+    @classmethod
+    def validate(cls, spec: ArcSpec, network: WsimodNetwork) -> None:
+        """``number_of_timesteps`` must be a whole number of days >= 0 (spec, Nodes); the error
+        names the arc and the key."""
+        check_travel_time(f"arc {spec.name!r}", "number_of_timesteps", spec.number_of_timesteps)
+
+    # --- state ------------------------------------------------------------------------------
+    def stores(self) -> dict[str, Tensor]:
+        """``rows`` (the waiting requests) and ``since`` (the anchors)."""
+        return {"rows": self.rows, "since": self.since}
+
+    def load_stores(self, stores: Mapping[str, Tensor]) -> None:
+        unknown = set(stores) - {"rows", "since"}
+        if unknown:
+            raise KeyError(f"arc {self.name!r} has no store {sorted(unknown)[0]!r}")
+        if "rows" in stores:
+            rows = torch.as_tensor(stores["rows"], dtype=torch.float64)
+            n = self.number_of_timesteps
+            if (
+                rows.ndim < 4
+                or tuple(rows.shape[-4:-2]) != (2, n)
+                or rows.shape[-1] != 1 + self.p.K
+            ):
+                raise ValueError(
+                    f"arc {self.name!r}: rows of shape {tuple(rows.shape)}, expected "
+                    f"(..., 2, {n}, J, {1 + self.p.K})"
+                )
+            if rows.shape[-2] < self.rows.shape[-2]:
+                raise ValueError(
+                    f"arc {self.name!r}: rows for {rows.shape[-2]} calls, the arc makes "
+                    f"{self.rows.shape[-2]}"
+                )
+            self.rows = rows
+        if "since" in stores:
+            self.since = torch.as_tensor(stores["since"], dtype=torch.float64)
+
+    def end_timestep(self) -> None:
+        """``arcs.py:530-545``: reset the day's accumulators and age every request by a day
+        (``since = min(since + 1, n)``; the rows keep their places). The day's calls are
+        checked against the recorded labels, or recorded if this was the first day that
+        called the arc (D2)."""
+        Arc.end_timestep(self)
+        self.since = torch.clamp(self.since + 1, max=float(self.number_of_timesteps))
+        if self._frozen:
+            for d in _DIRECTIONS:
+                if self._seen[d] and self._seen[d] != len(self.calls[d]):
+                    raise RuntimeError(
+                        f"{self.site}: {self._seen[d]} {d} request calls today, "
+                        f"{len(self.calls[d])} on the traced day (D2)"
+                    )
+        elif any(self._seen.values()):
+            self._frozen = True
+        self._seen = dict.fromkeys(_DIRECTIONS, 0)
+
+    # --- the static call labels (D2) --------------------------------------------------------
+    def begin_tracing(self) -> None:
+        """Forget the recorded labels: the next calls record them afresh (D2's tracing day,
+        whose values the caller discards)."""
+        self.calls = {d: [] for d in _DIRECTIONS}
+        self._tags = {d: [] for d in _DIRECTIONS}
+        self._frozen = False
+        self._seen = dict.fromkeys(_DIRECTIONS, 0)
+
+    def end_tracing(self) -> dict[str, list[str]]:
+        """Fix the labels recorded since :meth:`begin_tracing` (and so ``J``); returns them."""
+        self._frozen = True
+        return {d: list(labels) for d, labels in self.calls.items()}
+
+    def _enter(self, direction: str, tag: Tag) -> int:
+        """This request call's index ``j`` in the day's static call order, recorded or checked
+        (D2)."""
+        j = self._seen[direction]
+        self._seen[direction] = j + 1
+        frames = " > ".join(self.ctx.frames) or "-"
+        label = f"{frames} | tag {tag!r}"
+        labels = self.calls[direction]
+        if self._frozen:
+            if j >= len(labels) or labels[j] != label:
+                expected = labels[j] if j < len(labels) else "no such call"
+                raise RuntimeError(
+                    f"{self.site}: {direction} request call {j} is {label!r}; the traced day "
+                    f"made {expected!r} (D2: the call structure must not change)"
+                )
+            return j
+        labels.append(label)
+        self._tags[direction].append(tag)
+        width = max(len(v) for v in self.calls.values())
+        if width > self.rows.shape[-2]:
+            pad = list(self.rows.shape)
+            pad[-2] = width - self.rows.shape[-2]
+            self.rows = torch.cat([self.rows, self.rows.new_zeros(pad)], dim=-2)
+        return j
+
+    # --- the rows ---------------------------------------------------------------------------
+    def _put(self, d: int, i: int, j: int, row: Tensor, mask: Tensor) -> None:
+        """Row ``(d, i, j)`` set to ``row`` where ``mask``."""
+        one = torch.zeros(self.rows.shape[-4:-1], dtype=torch.bool)
+        one[d, i, j] = True
+        sel = torch.as_tensor(mask, dtype=torch.bool)[..., None, None, None] & one
+        self.rows = torch.where(sel[..., None], row[..., None, None, None, :], self.rows)
+
+    def _shift(self, d: int, mask: Tensor) -> None:
+        """Move direction ``d``'s rows from ``i`` to ``i + since`` where ``mask`` (D1); the due
+        rows are already empty. A selection, not a sum: at most one ``i`` lands on a slot."""
+        old = self.rows[..., d, :, :, :]
+        since = self.since[..., d]
+        slots = []
+        for t in range(self.number_of_timesteps):
+            slot = torch.zeros_like(old[..., t, :, :])
+            for i in range(t + 1):
+                here = (since == float(t - i))[..., None, None]
+                slot = torch.where(here, old[..., i, :, :], slot)
+            slots.append(slot)
+        moved = torch.stack(slots, dim=-3)
+        moved = torch.where(torch.as_tensor(mask)[..., None, None, None], moved, old)
+        other = self.rows[..., 1 - d, :, :, :]
+        pair = (moved, other) if d == 0 else (other, moved)
+        self.rows = torch.stack(torch.broadcast_tensors(*pair), dim=-4)
+
+    def _update_queue(
+        self, direction: str, new: Tensor, j: int, tag: Tag, *, active: Tensor, call: int
+    ) -> Tensor:
+        """``update_queue`` (``arcs.py:448-528``) after the call's own request ``new`` entered
+        (``:393-396``): walk the list in order, the waiting rows ``i = n-1 ... 0`` then ``j``,
+        then ``new``. A request below ``FLOAT_ACCURACY`` is removed and its water dropped
+        (``:483-485``). A due one is handed over: a push to ``out_port.push_set`` under its own
+        tag, the rejected part becoming backflow (``:486-512``), a pull as it is (``:492-494``).
+        Returns the backflow (push) or the water handed over (pull) (``:523-526``).
+
+        The waiting rows are handed over before ``new`` is stored as row ``(0, j)``: for
+        ``n >= 1`` that is WSIMOD's order, because ``new`` is not due; for ``n = 0`` ``new`` is
+        handed over last, where WSIMOD's list has it, and never stored. WSIMOD removes the
+        done requests by equality (``:519-520``); two equal requests meet the same fate, so
+        that is removal by identity."""
+        p, ctx = self.p, self.ctx
+        n = self.number_of_timesteps
+        d = _DIRECTIONS.index(direction)
+        where = f"{self.site}/update_queue/{direction}"
+        total = {"removed": ctx.empty(), "backflow": ctx.empty()}
+
+        def visit(row: Tensor, due: Tensor, label: str, row_tag: Tag) -> Tensor:
+            """One list entry; returns where it leaves the list."""
+            volume = row[..., 0]
+            present = active & (volume != 0).detach()
+            below = ctx.decide(
+                f"{where}:{label}/below_fa", volume, "<", ctx.fa, active=present, call=call
+            )
+            ctx.drop(row, present & below)
+            deliver = present & ~below & due
+            if direction == "push":
+                reply = self.out_port.push_set(row, row_tag, active=deliver)
+                removed = volume - reply[..., 0]
+            else:
+                removed = volume  # :492-494: already pulled
+            # :500: flow_out += average_flow * removed / V, average_flow = V/(n+1) (:423)
+            flow = self.flow_out + volume / (n + 1) * removed / safe_den(volume)
+            self.flow_out = write(deliver, flow, self.flow_out)
+            handed = v_change_vqip(p, row, removed)
+            total["removed"] = write(
+                deliver, sum_vqip(p, total["removed"], handed), total["removed"]
+            )
+            if direction == "push":
+                rejected = v_change_vqip(p, row, volume - removed)
+                # :511: sum_vqip(rejected, total_backflow), in that order
+                total["backflow"] = write(
+                    deliver, sum_vqip(p, rejected, total["backflow"]), total["backflow"]
+                )
+            return present & (below | due)
+
+        tags = self._tags[direction]
+        for i in reversed(range(n)):
+            due = (self.since[..., d] + i >= n).detach()
+            for jj in range(self.rows.shape[-2]):
+                row = self.rows[..., d, i, jj, :]
+                row_tag = tags[jj] if jj < len(tags) else "default"
+                left = visit(row, due, f"{i},{jj}", row_tag)
+                self._put(d, i, jj, torch.zeros_like(row), left)
+        left = visit(new, torch.full(ctx.shape, n == 0), "new", tag)
+        if n > 0:
+            self._shift(d, active)
+            self._put(d, 0, j, new, active & ~left)
+            hit = torch.as_tensor(active)[..., None] & (torch.arange(2) == d)
+            self.since = torch.where(hit, torch.zeros_like(self.since), self.since)
+        # :516: vqip_out = sum_vqip(vqip_out, total_removed), on every call that got here
+        self.vqip_out = write(active, sum_vqip(p, self.vqip_out, total["removed"]), self.vqip_out)
+        return total["backflow"] if direction == "push" else total["removed"]
+
+    # --- the requests -----------------------------------------------------------------------
+    def send_push_request(
+        self, vqip: Tensor, *, active: Tensor, tag: Tag = "default", force: bool = False
+    ) -> Tensor:
+        """``arcs.py:360-407``; returns what was not pushed.
+
+        A push below ``FLOAT_ACCURACY`` returns empty at once (``:378-379``): it is neither
+        enqueued nor does it hand the due rows over, and ``since`` keeps counting; its water is
+        dropped (spec, defect table). Otherwise the clip (``:382-390``), the entry with
+        ``average_flow = V/(n+1)`` (``enter_arc``, ``:409-430``) and ``update_queue``
+        (``:399``), whose backflow joins the reply and leaves ``vqip_in`` (``:400-405``).
+        """
+        p, ctx = self.p, self.ctx
+        active = torch.as_tensor(active, dtype=torch.bool)
+        j = self._enter("push", tag)
+        call = ctx.call(self.site, "send_push_request")
+        tiny = ctx.decide(
+            f"{self.site}/send_push_request/below_fa",
+            vqip[..., 0],
+            "<",
+            ctx.fa,
+            active=active,
+            call=call,
+        )
+        ctx.drop(vqip, active & tiny)
+        run = active & ~tiny
+        if force:
+            not_pushed = torch.zeros_like(vqip)
+        else:
+            excess_in = self.get_excess("push", vqip, active=run, tag=tag)
+            clip = dmax(
+                ctx,
+                f"{self.site}/send_push_request/clip",
+                vqip[..., 0] - excess_in[..., 0],
+                0.0,
+                active=run,
+                call=call,
+            )
+            not_pushed = v_change_vqip(p, vqip, clip)
+        entered = extract_vqip(p, vqip, not_pushed)
+        self._enter_arc(entered, run)
+        backflow = self._update_queue("push", entered, j, tag, active=run, call=call)
+        not_pushed = sum_vqip(p, not_pushed, backflow)
+        # arcs.py:402-403: a print
+        more = (backflow[..., 0] > vqip[..., 0]).detach()
+        ctx.event("more_backflow_than_vqip", self.in_port.name, run & more)
+        self.vqip_in = write(run, extract_vqip(p, self.vqip_in, backflow), self.vqip_in)
+        return torch.where(tiny[..., None], ctx.empty(), not_pushed)
+
+    def send_pull_request(self, vqip: Tensor, *, active: Tensor, tag: Tag = "default") -> Tensor:
+        """``arcs.py:318-358``: pull now, hand over what is due; returns the due pulls.
+
+        The clip and ``pull_set`` take no tag (``:337``, ``:348``), so ``tag`` only labels the
+        call (D2). The request's additive entries are not rescaled (D4): WSIMOD's rescale
+        (``:341-343``) divides by zero for a zero-volume request with additive keys, a defect,
+        and nothing reads the rescaled entries. There is no early return, so every active pull
+        reaches ``update_queue`` and resets ``since``.
+        """
+        p, ctx = self.p, self.ctx
+        active = torch.as_tensor(active, dtype=torch.bool)
+        j = self._enter("pull", tag)
+        call = ctx.call(self.site, "send_pull_request")
+        volume = vqip[..., 0]
+        excess_in = self.get_excess("pull", vqip, active=active)[..., 0]
+        not_pulled = dmax(
+            ctx,
+            f"{self.site}/send_pull_request/clip",
+            volume - excess_in,
+            0.0,
+            active=active,
+            call=call,
+        )
+        volume = volume - not_pulled
+        request = torch.cat([volume[..., None], vqip[..., 1:].expand(volume.shape + (p.K,))], -1)
+        pulled = self.in_port.pull_set(request, active=active)
+        self._enter_arc(pulled, active)
+        return self._update_queue("pull", pulled, j, "default", active=active, call=call)
+
+    def _enter_arc(self, vqip: Tensor, active: Tensor) -> None:
+        """``enter_arc`` (``arcs.py:423-428``): ``flow_in += V/(n+1)``, ``vqip_in += vqip``."""
+        n = self.number_of_timesteps
+        self.flow_in = write(active, self.flow_in + vqip[..., 0] / (n + 1), self.flow_in)
+        self.vqip_in = write(active, sum_vqip(self.p, self.vqip_in, vqip), self.vqip_in)
+
+
 class PullArc(Arc):
     """``PullArc`` (``arcs.py:808-849``): pushes are refused."""
 
@@ -424,6 +740,7 @@ ARC_CLASSES: dict[str, type[Arc]] = {
     "Arc": Arc,
     "AltQueueArc": AltQueueArc,
     "PullArc": PullArc,
+    "QueueArc": QueueArc,
     "PushArc": PushArc,
     "SewerArc": SewerArc,
     "WeirArc": WeirArc,
