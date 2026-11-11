@@ -11,6 +11,7 @@ are storage; a ``Land``'s outflow is IHACRES's evaporation) and every drop site.
 from __future__ import annotations
 
 import copy
+import os
 import re
 import subprocess
 import sys
@@ -238,8 +239,12 @@ def test_wsimod_is_never_imported():
         "w.wsimod_run(model, state, drivers)\n"
         "assert 'wsimod' not in sys.modules, sorted(m for m in sys.modules if 'wsimod' in m)\n"
     )
+    # The child must import this checkout's `src`, as pytest's `pythonpath` does for the parent,
+    # not whichever noodl the interpreter has installed (another worktree's, say).
+    path = os.pathsep.join(p for p in (str(ROOT / "src"), os.environ.get("PYTHONPATH")) if p)
     done = subprocess.run(
-        [sys.executable, "-c", code], capture_output=True, text=True, cwd=ROOT, timeout=300
+        [sys.executable, "-c", code], capture_output=True, text=True, cwd=ROOT, timeout=300,
+        env={**os.environ, "PYTHONPATH": path},
     )
     assert done.returncode == 0, done.stderr
 
