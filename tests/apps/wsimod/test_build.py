@@ -269,6 +269,22 @@ def _missing_flow():
     )
 
 
+def _wtw_pull_cycle():
+    """I1: a bare WTW keeps ``pull_check_basic``, so a demand pulling through ``j`` enters the
+    ``j <-> w`` cycle (WSIMOD hangs there)."""
+    return _mapping(
+        [
+            _node("res", "Reservoir", capacity=100.0, initial_storage=50.0),
+            _node("j", "Node"),
+            _node("w", "WTW"),
+            _node("dem", "Demand", constant_demand=1.0),
+            _node("sea", "Waste"),
+        ],
+        [_arc("res_j", "res", "j"), _arc("j_w", "j", "w"), _arc("w_j", "w", "j"),
+         _arc("j_dem", "j", "dem")],
+    )
+
+
 def _land_without_temperature():
     data = {}
     for d in _dates(3):
@@ -287,7 +303,10 @@ def _land_without_temperature():
         pytest.param(_arc_into_catchment, "accepts no water", id="arc-into-catchment"),
         pytest.param(_river_without_waste, "no Waste node", id="river-without-waste"),
         pytest.param(_waste_distributes, "no step method 'distribute'", id="waste-distribute"),
-        pytest.param(_missing_flow, "has no 'flow' forcing on 2000-01-03", id="missing-flow"),
+        pytest.param(
+            _missing_flow, "catchment 'c' has no 'flow' forcing on 2000-01-03", id="missing-flow"
+        ),
+        pytest.param(_wtw_pull_cycle, "recurse in a cycle: j -> w -> j", id="wtw-pull-cycle"),
         pytest.param(
             _land_without_temperature,
             "land 'farm' has no 'temperature' forcing on 2000-01-01",
@@ -440,3 +459,107 @@ def test_a_time_area_fraction_is_a_driver():
     match = r"pipe_timearea has a non-zero fraction at time\(s\) \[1\]"
     with pytest.raises(ValueError, match=match):
         model.step(state, {**drivers, key: bad}, dt=DAY, t=0.0)
+
+
+# --- batches (C1) and the per-day reset (I2) ---------------------------------------------------
+_BATCH_DAYS = 4
+
+
+def _run(model, state, drivers, days=_BATCH_DAYS, start=0):
+    flows = []
+    for k in range(start, start + days):
+        state = model.step(state, drivers, dt=DAY, t=k * DAY)
+        flows.append(model.wsimod_day.last_record.arc_flow)
+    return state, flows
+
+
+@pytest.mark.parametrize("pollutants", [True, False], ids=["pollutants", "quantity"])
+@pytest.mark.parametrize("case", list(CASES))
+def test_a_batch_of_two_capacities_equals_its_single_runs(case, pollutants):
+    """Instance 1 caps every arc that carries water at half the largest flow instance 0 puts
+    through it, so the cap binds; each instance equals its own single run bitwise, and in one
+    variant the state is batched explicitly as well."""
+    model, state, drivers = build_model(read_wsimod_config(CASES[case].build()),
+                                        pollutants=pollutants)
+    capacity = drivers["wsimod.Arc.capacity"]
+    _, base_flows = _run(model, state, drivers)
+    peak = torch.stack(base_flows).amax(0)
+    batch = torch.stack([capacity, torch.where(peak > 0, 0.5 * peak, capacity)])
+    batched = {**drivers, "wsimod.Arc.capacity": batch}
+    out, flows = _run(model, state, batched)
+    stacked = {k: torch.stack([v, v]) for k, v in state.items()}
+    out_s, flows_s = _run(model, stacked, batched)
+    for k in out:
+        assert torch.equal(out[k], out_s[k]), k
+    singles = [_run(model, state, {**drivers, "wsimod.Arc.capacity": batch[i]}) for i in (0, 1)]
+    for i, (one, one_flows) in enumerate(singles):
+        for k in out:
+            assert torch.equal(out[k][i], one[k]), (k, i)
+        for day_, (f, g) in enumerate(zip(flows, one_flows, strict=True)):
+            assert torch.equal(f[i], g), (day_, i)
+    if not torch.equal(capacity, batch[1]):
+        assert any(not torch.equal(f[0], f[1]) for f in flows) or any(
+            not torch.equal(v[0], v[1]) for v in out.values()
+        )
+
+
+@pytest.mark.parametrize("case", ["fwtw_deficit_sludge", "pervious_only"])
+def test_a_day_of_batch_three_after_a_day_of_batch_two_resets_the_day(case):
+    """I2: the per-day values a class does not reset itself (an FWTW's current_input and
+    solids, a surface's flows) start every day fresh, at the day's batch shape."""
+    network = read_wsimod_config(CASES[case].build())
+    model, state, drivers = build_model(network)
+    capacity = drivers["wsimod.Arc.capacity"]
+    two = {**drivers, "wsimod.Arc.capacity": torch.stack([capacity, 0.5 * capacity])}
+    _run(model, state, two, days=2)
+    three = {**drivers, "wsimod.Arc.capacity": torch.stack([capacity] * 3)}
+    out, flows = _run(model, state, three, days=2)
+    fresh, _, _ = build_model(read_wsimod_config(CASES[case].build()))
+    ref, ref_flows = _run(fresh, state, three, days=2)
+    for k in out:
+        assert torch.equal(out[k], ref[k]), k
+    assert all(torch.equal(f, g) for f, g in zip(flows, ref_flows, strict=True))
+
+
+@pytest.mark.parametrize("case", ["fwtw_deficit_sludge", "pervious_only"])
+def test_a_day_after_a_day_that_raised_starts_fresh(case, monkeypatch):
+    """I2: a day that raised mid-orchestration leaves the per-day values half written; the next
+    day, from another state, equals a fresh model's."""
+    network = read_wsimod_config(CASES[case].build())
+    model, state, drivers = build_model(network)
+    later, _ = _run(model, state, drivers, days=3)
+    _, method, names = model.wsimod_day.plan[-1]
+    node = model.wsimod_day.engine.nodes[names[-1]]
+    original = getattr(node, method)
+
+    def broken(*, active):
+        original(active=active)
+        raise RuntimeError("broken on purpose")
+
+    monkeypatch.setattr(node, method, broken)
+    with pytest.raises(RuntimeError, match="broken on purpose"):
+        model.step(later, drivers, dt=DAY, t=3 * DAY)
+    monkeypatch.undo()
+    out, flows = _run(model, later, drivers, days=1, start=1)
+    fresh, _, _ = build_model(read_wsimod_config(CASES[case].build()))
+    ref, ref_flows = _run(fresh, later, drivers, days=1, start=1)
+    for k in out:
+        assert torch.equal(out[k], ref[k]), k
+    assert torch.equal(flows[0], ref_flows[0])
+
+
+def test_an_unknown_wsimod_driver_is_refused_with_a_suggestion():
+    model, state, drivers = build_model(_small())
+    with pytest.raises(KeyError, match="did you mean 'wsimod.Arc.capacity'"):
+        model.step(state, {**drivers, "wsimod.Arc.capacty": drivers["wsimod.Arc.capacity"]},
+                   dt=DAY, t=0.0)
+
+
+def test_the_probe_reports_that_a_step_needs_t():
+    """``model.check(probe=True)`` steps without ``t``, which the closure refuses (D16); the
+    report says so, and ``model.step(..., t=...)`` is the check."""
+    model, state, drivers = build_model(_small())
+    report = model.check(state, drivers, dt=DAY, probe=True)
+    assert not report.ok
+    assert "probe-failed" in {i.code for i in report.issues}
+    assert "model.step needs t=" in str(report)

@@ -110,8 +110,14 @@ def tmax(a: Tensor, b: Tensor) -> Tensor:
 
 
 def write(active: Tensor, new: Tensor, old: Tensor) -> Tensor:
-    """``where(active, new, old)``; ``active`` ``(...)`` broadcasts over a VQIP's column axis."""
-    if new.ndim > active.ndim:
+    """``where(active, new, old)``; ``active`` ``(...)`` broadcasts over a VQIP's column axis.
+
+    The column axis is added when either value has more dimensions than the mask, so an
+    unbatched ``new`` written into a batched VQIP (or the reverse) is aligned by column, never
+    by batch (a quantity-only VQIP has one column, which would otherwise broadcast against a
+    batch of the same length)."""
+    new, old = torch.as_tensor(new), torch.as_tensor(old)
+    if max(new.ndim, old.ndim) > active.ndim:
         active = active[..., None]
     return torch.where(active, new, old)
 

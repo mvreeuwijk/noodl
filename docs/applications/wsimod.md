@@ -74,8 +74,9 @@ The state is the stores WSIMOD carries from day to day; the drivers are every nu
 preferences, and the forcing series `(T, n)`. `model.wsimod_day.last_record` is the last day's
 record: arc flows and qualities, tank and surface storages, events and the mass-balance terms.
 
-Values are given by name. Here the river starts with 500 m³ and its outlet arc is a batch of
-three capacities; each instance runs its own WSIMOD day:
+Values are given by name. Any driver or state key may carry leading batch dimensions, which
+broadcast; each instance runs its own WSIMOD day and equals its own single run bit for bit.
+Here the river starts with 500 m³ and its outlet arc is a batch of three capacities:
 
 ```python
 import torch
@@ -161,6 +162,27 @@ mid-run, hang or silently do something else:
 - missing forcing, naming the node, the variable and the first missing date (a `Land` needs
   `temperature` even in a quantity-only run, as WSIMOD reads it).
 
-`model.step` needs `dt=86400` and a `t` that is a whole number of days inside the dates. A
+`model.step` needs `dt=86400` and a `t` that is a whole number of days inside the dates.
+`model.check(state, drivers, dt=86400, probe=True)` therefore reports `probe-failed`: the probe
+steps without `t`, which the closure refuses; `model.step(state, drivers, dt=86400, t=0)` is the
+check. A
 `leakage` batch that mixes zero and positive values on one `Distribution` is refused when it is
 bound: WSIMOD decorates the node's handlers only for a positive configured leakage.
+
+## Verification
+
+Against live WSIMOD 0.8.1, on purpose-built cases that reach each class's branches:
+
+- **Per-node replay** (`tests/verification/test_wsimod_replay.py`): WSIMOD runs each case with
+  every call into the chosen nodes captured; noodl replays each node alone on those calls and
+  compares every arc call it makes, every reply and every store, in both modes. The bound is the
+  class's own, zero (bitwise) for every class whose arithmetic is `+ - * /` and comparisons.
+- **Day by day** (the same file and `tests/apps/wsimod`): whole cases stepped by `WsimodDay`
+  against WSIMOD's own run, every arc's flow and quality, every tank and surface storage, bitwise
+  on every day; the `QueueArc` delivery order on random schedules; WSIMOD's printed warnings
+  against noodl's events, day by day.
+- **Batches**: every case, both modes, a batch of two arc capacities equals its two single runs
+  bitwise (`tests/apps/wsimod/test_build.py`).
+
+Whole-model parity on WSIMOD's own demos, with measured bounds, follows in a later release of
+this page.

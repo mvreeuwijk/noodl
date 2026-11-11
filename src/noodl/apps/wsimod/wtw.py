@@ -286,8 +286,10 @@ class WTW(Node):
 
     @classmethod
     def check_recurses(cls, spec: NodeSpec, direction: str, tag: Tag) -> bool:
-        """No check of a treatment works asks a neighbour."""
-        return False
+        """A bare ``WTW`` keeps ``Node``'s default pull check, ``pull_check_basic``, which asks
+        its in-arcs (``wtw.py:95-96`` replace only the push handlers); a ``WWTW``'s
+        ``pull_check_reuse`` (``wtw.py:274``) and an ``FWTW``'s reservoir check terminate."""
+        return cls is WTW and direction == "pull" and tag == "default"
 
 
 class WWTW(WTW):

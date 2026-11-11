@@ -48,6 +48,7 @@ non-additive ones by name (``temperature`` ``degC``); never converted.
 
 from __future__ import annotations
 
+import difflib
 import math
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -335,7 +336,7 @@ class WsimodDay:
             for surface in spec.surfaces
         ]
         self._trace_sequence()
-        self.key_labels ={key: self._state_field(key) for key in STATE_KEYS}
+        self.key_labels = {key: self._state_field(key) for key in STATE_KEYS}
         self.output_units = {key: self.key_labels[key].unit for key in STATE_KEYS}
         self.input_specs = {
             d.key: self._driver_field(d) for d in self._drivers.values() if self._fits(d)
@@ -614,7 +615,15 @@ class WsimodDay:
             unit=_STATE_UNITS.get(key, "m3"),
             required="step",
             default=None,
-            description=f"state carried by WsimodDay: {_STATE_TEXT[key]}",
+            description=(
+                f"state carried by WsimodDay: {_STATE_TEXT[key]}"
+                + (
+                    ""
+                    if flat
+                    else "; the unit is the volume column's, each pollutant column is in its "
+                    "own unit (kg additive, by name otherwise: W20)"
+                )
+            ),
             dtype=F64,
         )
 
@@ -654,6 +663,14 @@ class WsimodDay:
 
     # --- one day ----------------------------------------------------------------------------
     def _batch_shape(self, state: Mapping, drivers: Mapping) -> torch.Size:
+        for key in drivers:
+            if str(key).startswith("wsimod.") and key not in self._drivers:
+                hint = difflib.get_close_matches(str(key), list(self._drivers), n=3, cutoff=0.6)
+                raise KeyError(
+                    f"WsimodDay: no driver {key!r}"
+                    + (f"; did you mean {' or '.join(map(repr, hint))}?" if hint else "")
+                    + " (the layout is model.wsimod_day.drivers)"
+                )
         shapes = []
         for key in STATE_KEYS:
             value = state[key]
@@ -680,12 +697,13 @@ class WsimodDay:
             shapes.append(value.shape[:-rank])
         return torch.broadcast_shapes(*shapes) if shapes else torch.Size(())
 
-    def _reset_day(self) -> None:
+    def _reset_day(self, shape: torch.Size) -> None:
         """The per-day values as WSIMOD resets them (W68, W75), and every arc's
-        accumulators (``arcs.py:259-265``)."""
+        accumulators (``arcs.py:259-265``), at the day's batch shape: every store a class
+        writes under a batched mask is batched before the day starts."""
         for name, node in self.engine.nodes.items():
             fresh = {
-                path: value
+                path: torch.broadcast_to(value, (*shape, *value.shape))
                 for path, value in self._fresh[name].items()
                 if path not in node.carried_paths
             }
@@ -693,18 +711,25 @@ class WsimodDay:
                 node.load_stores(fresh)
         for arc in [*self.engine.arcs.values(), *self._internal_arcs]:
             Arc.end_timestep(arc)
+            arc.vqip_in = torch.broadcast_to(arc.vqip_in, (*shape, *arc.vqip_in.shape))
+            arc.vqip_out = arc.vqip_in
+            arc.flow_in = torch.broadcast_to(arc.flow_in, shape)
+            arc.flow_out = arc.flow_in
 
     def load_state(self, state: Mapping[str, Tensor]) -> None:
         """Put ``state``'s carried stores into the engine's nodes and arcs, with the per-day
         values reset, as every day starts (for inspecting the engine between days)."""
-        self._reset_day()
-        self._load(state)
+        shape = self._batch_shape(state, {})
+        self._reset_day(shape)
+        self._load(state, shape)
 
-    def _load(self, state: Mapping) -> None:
+    def _load(self, state: Mapping, shape: torch.Size) -> None:
+        """Every carried store from ``state``, broadcast to the day's batch shape."""
         by_element: dict[int, tuple[object, dict[str, Tensor]]] = {}
         for slot in self._slots:
             value = _f64(state[slot.key])
             rank = self._rank(slot.key)
+            value = torch.broadcast_to(value, (*shape, *value.shape[value.ndim - rank :]))
             if rank == 2:
                 rows = value[..., slot.start : slot.start + slot.rows, :]
                 batch = rows.shape[:-2]
@@ -823,8 +848,8 @@ class WsimodDay:
         ctx = self._ctx(shape, k, record_decisions=self.record_decisions)
         engine = self.engine
         engine.begin_day(ctx)
-        self._reset_day()
-        self._load(state)
+        self._reset_day(shape)
+        self._load(state, shape)
         self._bind(drivers, k)
         self._run_plan(torch.ones(shape, dtype=torch.bool))
         self.last_record = self._record(ctx)
