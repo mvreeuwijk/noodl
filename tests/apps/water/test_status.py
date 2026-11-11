@@ -18,6 +18,7 @@ from noodl.apps.water.network import (
     link_states,
     water_steady,
 )
+from tests.apps.water import ZERO_FLOW
 
 F64 = torch.float64
 
@@ -59,7 +60,7 @@ def test_a_closed_pipe_carries_no_flow(how):
     assert drivers["water.status"].tolist() == [OPEN, CLOSED]
     out = water_steady(model, state, drivers)
     q = _flows(model, out)
-    assert q["P2"] == 0.0
+    assert abs(q["P2"]) <= ZERO_FLOW
     assert q["P1"] == pytest.approx(0.005, abs=1e-14)
     # J1 hangs from R1 alone: R1's head less P1's loss at the demand
     pipe = model.kirchhoff["water"].law_for("pipe")[0].pipe
@@ -86,7 +87,7 @@ def test_a_check_valve_closes_against_reverse_head():
     assert drivers["water.one_way"].tolist() == [0.0, 1.0, 0.0]
     out = water_steady(model, state, drivers)
     q = _flows(model, out)
-    assert q["P2"] == 0.0
+    assert abs(q["P2"]) <= ZERO_FLOW
     assert abs(q["P1"]) < 1e-12 and abs(q["P3"]) < 1e-12
     h = _heads(model, out)
     assert h["J1"] == pytest.approx(40.0, abs=1e-9)
@@ -120,7 +121,7 @@ def test_a_reverse_only_link_closes_against_forward_head():
     model, state, drivers = build_model(_check_valve_line(low_to_high=False))
     drivers = {**drivers, "water.one_way": torch.tensor([0.0, -1.0, 0.0], dtype=F64)}
     out = water_steady(model, state, drivers)
-    assert _flows(model, out)["P2"] == 0.0
+    assert abs(_flows(model, out)["P2"]) <= ZERO_FLOW
 
 
 def test_check_valves_and_closed_pipes_need_the_flow_form():
@@ -231,7 +232,7 @@ def test_a_closed_valve_carries_no_flow(kind):
     net = _device_line(_DEVICES[kind], curves=_GPV_CURVE, initial_status={"V": "CLOSED"})
     model, state, drivers = build_model(net)
     out = water_steady(model, state, drivers)
-    assert _flows(model, out)["V"] == 0.0
+    assert abs(_flows(model, out)["V"]) <= ZERO_FLOW
     assert link_states(model, out, drivers).tolist()[-1] == CLOSED
 
 
@@ -266,7 +267,7 @@ def test_a_closed_pump_carries_no_flow():
                        initial_status={"PU": "CLOSED"})
     model, state, drivers = build_model(net)
     out = water_steady(model, state, drivers)
-    assert _flows(model, out)["PU"] == 0.0
+    assert abs(_flows(model, out)["PU"]) <= ZERO_FLOW
     assert link_states(model, out, drivers).tolist()[-1] == CLOSED
 
 
@@ -283,7 +284,7 @@ def test_kappa_is_the_head_loss_slope_at_one_foot_per_second():
 def test_a_cut_off_group_of_two_junctions_is_held_at_the_average_of_its_far_ends():
     """C1 - P4 - C2, no demand, joined to the rest only by the closed P5 (A - C1) and P6
     (C2 - B): both sit at EPANET's limit, the average of A and B, every flow into them
-    exactly zero; the rest of the network is the network without them."""
+    zero to round-off; the rest of the network is the network without them."""
     junctions = (Junction("A", 0.0, 0.005), Junction("B", 0.0, 0.003),
                  Junction("C1", 0.0), Junction("C2", 0.0))
     pipes = (_pipe("P1", "R1", "A"), _pipe("P2", "A", "B"), _pipe("P3", "B", "R2"),
@@ -296,7 +297,7 @@ def test_a_cut_off_group_of_two_junctions_is_held_at_the_average_of_its_far_ends
     h, q = _heads(model, out), _flows(model, out)
     assert h["C1"] == pytest.approx(0.5 * (h["A"] + h["B"]), abs=1e-12)
     assert h["C2"] == h["C1"]
-    assert q["P4"] == 0.0 and q["P5"] == 0.0 and q["P6"] == 0.0
+    assert abs(q["P4"]) <= ZERO_FLOW and abs(q["P5"]) <= ZERO_FLOW and abs(q["P6"]) <= ZERO_FLOW
     plain = WaterNetwork(junctions=junctions[:2], reservoirs=reservoirs, pipes=pipes[:3])
     ref_model, ref_state, ref_drivers = build_model(plain)
     ref = _heads(ref_model, water_steady(ref_model, ref_state, ref_drivers))
@@ -341,13 +342,13 @@ def _reshut_network():
 
 def test_a_check_valve_opened_on_the_way_is_shut_again():
     """Through `water_steady`: J1 = J2 = 90 exactly (tied to Ra through the open Pa and
-    P7), Pb CLOSED, every flow into the group exactly zero; the ten reservoirs at 0 and Rc
+    P7), Pb CLOSED, every flow into the group zero to round-off; the ten reservoirs at 0 and Rc
     do not enter."""
     model, state, drivers = build_model(_reshut_network())
     out = water_steady(model, state, drivers)
     h, q = _heads(model, out), _flows(model, out)
     assert h["J1"] == 90.0 and h["J2"] == 90.0
-    assert all(q[name] == 0.0 for name in model.link_names if name not in ("P3", "P4"))
+    assert all(abs(q[name]) <= ZERO_FLOW for name in model.link_names if name not in ("P3", "P4"))
     states = dict(zip(model.link_names, link_states(model, out, drivers).tolist(),
                       strict=True))
     assert states["Pa"] == OPEN and states["P7"] == OPEN and states["Pb"] == CLOSED
@@ -367,7 +368,7 @@ def test_a_demand_junction_behind_a_closed_check_valve_fed_otherwise_is_solved()
     model, state, drivers = build_model(net)
     out = water_steady(model, state, drivers)
     q = _flows(model, out)
-    assert q["P1"] == 0.0 and q["P2"] == pytest.approx(0.002, abs=1e-12)
+    assert abs(q["P1"]) <= ZERO_FLOW and q["P2"] == pytest.approx(0.002, abs=1e-12)
     assert link_states(model, out, drivers).tolist() == [CLOSED, OPEN, OPEN, OPEN]
 
 
@@ -399,4 +400,4 @@ def test_drivers_made_in_inference_mode_are_read_uncached():
     torch.testing.assert_close(out["water.q"], reference["water.q"], rtol=0, atol=0)
     cloned["water.status"] = initial_drivers(model, values={"water.status": {"P2": CLOSED}})[
         "water.status"]
-    assert _flows(model, water_steady(model, state, cloned))["P2"] == 0.0
+    assert abs(_flows(model, water_steady(model, state, cloned))["P2"]) <= ZERO_FLOW

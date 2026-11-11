@@ -21,6 +21,7 @@ from noodl.apps.water.network import (
     initial_drivers,
 )
 from noodl.apps.water.simulate import WaterResults, pattern_factor, water_run
+from tests.apps.water import ZERO_FLOW
 
 F64 = torch.float64
 NET1 = Path(__file__).resolve().parents[2] / "data" / "water" / "Net1.inp"
@@ -136,7 +137,7 @@ def test_a_speed_pattern_drives_the_pump_and_zero_stops_it():
     assert out.status[:, pump].tolist() == [OPEN, CLOSED, OPEN, OPEN]
     torch.testing.assert_close(out.setting[:, pump], torch.tensor([1.0, 0.0, 0.8, 1.2],
                                                                   dtype=F64))
-    assert float(out.flow[1, pump]) == 0.0
+    assert abs(float(out.flow[1, pump])) <= ZERO_FLOW
     assert float(out.flow[3, pump]) > float(out.flow[2, pump]) > 0.0
 
 

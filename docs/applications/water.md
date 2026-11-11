@@ -421,7 +421,7 @@ residual of each pump, with $r = dp + h_{\text{gain}}(q)$, is
 - otherwise $\max(-\kappa q, r)$: the pump runs on its curve with $q \ge 0$, or it is shut,
   $q = 0$, where the head asked of it is at or above its shut-off head $h_{\text{gain}}(0)$.
   EPANET closes such a pump (`pumpstatus`, `XHEAD`) and leaves it the closed-link leak
-  `excess / CBIG`; here its flow is exactly zero, and `link_states` reports it `CLOSED`.
+  `excess / CBIG`; here there is no leak: its row is $\kappa q = 0$, so its flow is zero to round-off, and `link_states` reports it `CLOSED`.
 
 The branch is selected as for a check valve (`FlowControlledPipe`): the no-flow row only where
 $r < -\kappa q$ and the open row's own Newton step would reverse the flow, never at a tie (a
@@ -547,7 +547,7 @@ forward with $\Delta\phi = h(q)$, or it holds $q = 0$ against a reverse head (th
 in `docs/plans/water-prv-psv-design.md`). $\kappa$, a pipe's own head-loss slope at 1 ft/s,
 only scales the row. Newton picks the no-flow branch only where the open equation's residual
 is below both $-\kappa q$ and $-h'(q)\,q$: with $\kappa$ alone, an iterate that overshoots
-forward closes an open check valve, sets every pipe in series with it to exactly zero flow,
+forward closes an open check valve, sets every pipe in series with it to zero flow (to round-off),
 and cycles (`FlowControlledPipe`). An iterate that would close every check valve feeding a
 junction, which leaves the step singular, keeps open the one whose open equation predicts the
 most forward flow, so the step is taken; `water_steady` then refuses a converged check valve
@@ -574,7 +574,7 @@ the group at the solve's own. It is the resistor-and-diode network with one cond
 link and an ideal diode across each check valve: the constraints' multipliers are the diodes'
 flows, so a check valve is `OPEN` where its multiplier is positive (it ties its two ends) and
 `CLOSED` where it is zero. `water_steady` sets the group's heads to that solution, with every
-flow into it exactly zero (`noodl.apps.water.elements.PIN_KEY`), by the dual active-set
+flow into it zero to round-off (`noodl.apps.water.elements.PIN_KEY`), by the dual active-set
 method of Goldfarb and Idnani on the group's nodes alone (`noodl.solvers.qp.solve_qp`: the objective
 rises strictly over every full step and no active set returns, so it ends). For a single
 junction behind shut valves that is the plain average of the far ends; a valve the average
@@ -816,7 +816,7 @@ on-disk reals are **float32**, so roughly 1e-7 relative is EPANET's own precisio
 | `HEADLOSS C-M` (n = 0.011) vs EPANET | 1e-6, 1e-6 m3/s | 7.6e-8 heads, 8.3e-9 m3/s flows |
 | A check valve on the `HEADLOSS C-M` two-loop (P4 closes, P5 open, P7 closed): heads, flows, every link's state | 1e-6 / 1e-6 m³/s / equal | 7.6e-8, 2.2e-9 m³/s, all equal |
 | Check valve and closed pipe on the two-loop: heads, flows, every link's state | 1e-6 / 1e-6 m³/s / equal | 6.6e-8, 2.2e-9 m³/s, all equal |
-| A junction without demand cut off by closed links (held at the average of its far ends, flows into it exactly zero) | 1e-6 / 1e-6 m³/s | 2.9e-7, 2.2e-9 m³/s |
+| A junction without demand cut off by closed links (held at the average of its far ends, flows into it zero to round-off) | 1e-6 / 1e-6 m³/s | 2.9e-7, 2.2e-9 m³/s |
 | Every pipe a check valve at five times the demand (two close) | 2e-6 (EPANET's closed-link leak, see Limitations) / 1e-6 m³/s / equal | 1.4e-6, 5.7e-8 m³/s |
 | A junction fenced off by two check valves (held at 75 m, the `1 / CBIG` limit) | 1e-6 | 3e-9, both valves CLOSED |
 | TCV on the two-loop: heads, flows, the valve's head loss | 1e-6 / 1e-6 m³/s / 1e-5 m | 5.3e-8, 1.8e-9 m³/s, 3.2e-6 m |

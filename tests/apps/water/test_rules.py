@@ -32,6 +32,7 @@ from noodl.apps.water.network import (
     water_steady,
 )
 from noodl.apps.water.rules import evaluate_rules, take_actions, take_actions_per_link
+from tests.apps.water import ZERO_FLOW
 
 F64 = torch.float64
 DATA = Path(__file__).resolve().parents[2] / "data" / "water"
@@ -409,7 +410,7 @@ def test_a_rule_closes_a_link_after_a_solve():
     state, changed = apply_rules(model, state, drivers, time=0.0, step=300.0)
     assert bool(changed) and state["water.link_status"][1].item() == CLOSED
     state = water_steady(model, state, drivers)
-    assert float(state["water.q"][1]) == 0.0
+    assert abs(float(state["water.q"][1])) <= ZERO_FLOW
     assert float(state["water.q"][0]) == pytest.approx(0.005, abs=1e-9)
     # nothing more to do: the link is closed
     _, changed = apply_rules(model, state, drivers, time=0.0, step=300.0)

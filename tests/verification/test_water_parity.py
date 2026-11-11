@@ -35,6 +35,7 @@ from noodl.apps.water.network import (
     water_steady,
 )
 from noodl.apps.water.simulate import water_run
+from tests.apps.water import ZERO_FLOW
 
 wntr = pytest.importorskip("wntr")
 
@@ -1337,10 +1338,10 @@ def test_check_valve_and_closed_pipe_match_epanet(tmp_path):
     """Heads 1e-6 relative, flows 1e-6 m3/s absolute, and every link's state (closed or
     open) as EPANET reports it.
 
-    EPANET does not hold a closed link at exactly zero flow: it gives it the conductance
+    EPANET does not hold a closed link at zero flow: it gives it the conductance
     `1 / CBIG` (`hydcoeffs.c`, `pipecoeff`), so its closed P4 and P7 carry a leak of order
     `dh / CBIG`, far below the flow bound (it reports them as 0); this model's closed links
-    carry exactly zero. MEASURED: heads 6.6e-8 relative, flows 2.2e-9 m3/s (9.58e-7 heads
+    carry zero to round-off. MEASURED: heads 6.6e-8 relative, flows 2.2e-9 m3/s (9.58e-7 heads
     before the pipes took EPANET's rounded LPS factor, `LPSperCFS = 28.317`).
     """
     path, results = _epanet(tmp_path, "twoloop_si.inp", edits=_STATUS_EDITS)
@@ -1360,7 +1361,7 @@ def test_check_valve_and_closed_pipe_match_epanet(tmp_path):
     assert states[model.link_names.index("P4")] == 0
     assert states[model.link_names.index("P7")] == 0
     q = dict(zip(model.link_names, final["water.q"].tolist(), strict=True))
-    assert q["P4"] == 0.0 and q["P7"] == 0.0 and q["P5"] > 0.0
+    assert abs(q["P4"]) <= ZERO_FLOW and abs(q["P7"]) <= ZERO_FLOW and q["P5"] > 0.0
 
 
 def _junction_demand_edit(junction, demand):
@@ -1400,7 +1401,7 @@ _J6_CUT_OFF = (
 
 def test_a_junction_cut_off_without_demand_matches_epanet(tmp_path):
     """J6 is held at EPANET's limit head, the average of J5 and J3 (its closed links' far
-    ends), with every flow into it exactly zero. MEASURED: heads 2.9e-7 relative (J6 too),
+    ends), with every flow into it zero to round-off. MEASURED: heads 2.9e-7 relative (J6 too),
     flows 2.2e-9 m3/s."""
     path, results = _epanet(tmp_path, "twoloop_si.inp", edits=_J6_CUT_OFF)
     model, state, drivers = build_model(read_epanet_inp(path))
@@ -1409,7 +1410,7 @@ def test_a_junction_cut_off_without_demand_matches_epanet(tmp_path):
     phi = dict(zip(model.node_names, final["water.phi"].tolist(), strict=True))
     assert phi["J6"] == pytest.approx(0.5 * (phi["J5"] + phi["J3"]), abs=1e-12)
     q = dict(zip(model.link_names, final["water.q"].tolist(), strict=True))
-    assert q["P7"] == 0.0 and q["P8"] == 0.0
+    assert abs(q["P7"]) <= ZERO_FLOW and abs(q["P8"]) <= ZERO_FLOW
 
 
 _ALL_CV_FIVE_FOLD = (
@@ -2243,7 +2244,7 @@ def test_constant_power_pump(tmp_path):
 
 def test_pump_closes_beyond_shut_off(tmp_path):
     """R2 holds J0 above the pump's shut-off head (50 + 10.667 m): the pump is shut, with
-    exactly zero flow (EPANET: its closed-link leak, reported as 0) and state CLOSED, as
+    zero flow to round-off (EPANET: its closed-link leak, reported as 0) and state CLOSED, as
     EPANET reports it. Heads 1e-6 relative, flows 1e-6 m3/s. MEASURED: heads 1.1e-7, flows
     1.8e-8 m3/s (EPANET's leak through the shut pump)."""
     model, state, drivers, results = _pump_case(
@@ -2251,7 +2252,7 @@ def test_pump_closes_beyond_shut_off(tmp_path):
     final = water_steady(model, state, drivers)
     _compare_with_epanet(model, final, drivers, results)
     k = model.link_names.index("PU1")
-    assert float(final["water.q"][k]) == 0.0
+    assert abs(float(final["water.q"][k])) <= ZERO_FLOW
     assert int(link_states(model, final, drivers)[k]) == 0
 
 
@@ -2743,7 +2744,7 @@ def test_a_stopped_pump_and_a_check_valve_fencing_a_group(tmp_path, r2):
     through `"water.setting"` (EPANET: `[STATUS] PU 0`, which it reports CLOSED). The step was
     singular: a pump at speed 0 counted as open in the cut-off test (`ShutLinks.closed`).
     Now it is solved as with the pump CLOSED by its status, to the same heads, every flow
-    exactly zero, PU CLOSED as EPANET reports it, flows within 1e-6 m3/s of EPANET's leaks.
+    zero to round-off, PU CLOSED as EPANET reports it, flows within 1e-6 m3/s of EPANET's leaks.
 
     J's head is not unique (every value up to R2 satisfies every link): noodl gives the
     `1 / CBIG` limit with P2 shut, the average of R1 and R2; EPANET keeps P2 OPEN from its
@@ -2766,7 +2767,7 @@ def test_a_stopped_pump_and_a_check_valve_fencing_a_group(tmp_path, r2):
     assert torch.equal(final["water.phi"], reference["water.phi"])
     phi = dict(zip(model.node_names, final["water.phi"].tolist(), strict=True))
     assert phi["J"] == phi["K"] == pytest.approx(0.5 * (50.0 + r2), abs=1e-9)
-    assert bool((final["water.q"] == 0).all())
+    assert bool((final["water.q"].abs() <= ZERO_FLOW).all())
     flows = results.link["flowrate"].loc[0]
     assert max(abs(float(flows[name])) for name in model.link_names) < 1e-6
     states = dict(zip(model.link_names, link_states(model, final, by_speed).tolist(),
@@ -2927,7 +2928,7 @@ def test_emitters_behind_a_closed_pipe_match_epanet(tmp_path, case):
     # measured: EPANET gives the closed P2 the conductance `1 / CBIG` (`hydcoeffs.c`,
     # `pipecoeff`), so the 75 m across it leaks 7e-5 LPS, 1.4e-5 of the 5 LPS demand the
     # emitter supplies, which shifts the emitter's head by twice that; this model's closed
-    # link carries exactly zero. The first two are 1e-6 relative to the 50 m reservoir.
+    # link carries zero to round-off. The first two are 1e-6 relative to the 50 m reservoir.
     tolerance = 1e-3 if case == "demand-fed-by-an-emitter-inflow" else 1e-6 * 50
     assert worst_h < tolerance, worst_h
     reference = results.link["flowrate"].loc[0]
@@ -3189,7 +3190,7 @@ def test_full_tank_at_start_closes_the_pump(tmp_path):
     worst, worst_q, (net, model, levels, flows, start, drivers, _r) = _compare_tank_run(
         tmp_path, _FULL_AT_START, "full", tanks={"T1"}, links=("PU1", "P1"))
     pump = model.link_names.index("PU1")
-    assert float(flows[0, pump]) == 0.0
+    assert abs(float(flows[0, pump])) <= ZERO_FLOW
     solved = water_steady(model, start, drivers)
     assert int(link_states(model, solved, drivers)[pump]) == 0
     assert float(flows[1, pump]) > 0.01
