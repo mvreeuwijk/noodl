@@ -280,5 +280,23 @@ Against live WSIMOD 0.8.1, on purpose-built cases that reach each class's branch
 - **Batches**: every case, both modes, a batch of two arc capacities equals its two single runs
   bitwise (`tests/apps/wsimod/test_build.py`).
 
-Whole-model parity on WSIMOD's own demos, with measured bounds, follows in a later release of
-this page.
+- **Whole model** (`tests/verification/test_wsimod_parity.py`): WSIMOD's two demos, `quickstart`
+  and `oxford`, each in two modes, against WSIMOD's own `Model.run`: every arc's flow and
+  pollutants, every recorded tank and every surface field, on every day. The result is bitwise:
+  the worst difference is exactly 0 in every run, against a ceiling of `1e-12 * scale` per series,
+  and no admission is needed. WSIMOD prints nothing on the demos. The system mass balance closes
+  within `1e-12 * scale` every day. A quantity-only run's volumes equal the neutralised run's
+  exactly (`torch.equal`).
+
+| Run | Days | Modes | Worst difference | Default | Time (`-n 4`) |
+| --- | --- | --- | --- | --- | --- |
+| quickstart | 1456 | quantity-only, neutralised | 0 | yes | 41 s, 38 s |
+| oxford | 365 | quantity-only, neutralised | 0 | yes | 36 s, 37 s |
+| oxford | 1456 | quantity-only, neutralised | 0 | `-m slow` | 142 s, 146 s |
+
+The quantity-only mode runs `config.yml` with `pollutants=False` and compares the volumes; the
+neutralised mode runs `config_neutral.yml` (an `overrides` section that makes the water quality
+neutral) with every pollutant and compares all of them. Neither demo has a `River` node, so
+WSIMOD's river-order ties (set-hash order of the names, which varies with `PYTHONHASHSEED`) cannot
+arise, and neither has a `QueueGroundwater`. The wsimod test row (the default selection, every
+test above included) takes about 3 minutes with `-n 4`, so the suite is not cut.
