@@ -201,14 +201,15 @@ def test_network_matches_epanet(tmp_path, name):
     assert worst_e < case.get("energy", 1e-5), worst_e
 
 
-def _ky_24h(tmp_path, name):
+def _ky_24h(tmp_path, name, duration="24:00"):
     """ky4 or ky10 as `wntr` ships it (DURATION 0) with its `[TIMES] Duration` set to
-    24:00 and nothing else changed."""
+    `duration` (24:00 unless a test says otherwise) and nothing else changed."""
     text = _LIBRARY.joinpath(f"{name}.inp").read_text()
     line = " Duration           \t0\n"
     assert text.count(line) == 1
-    path = tmp_path / f"{name}-24h.inp"
-    path.write_text(text.replace(line, " Duration           \t24:00\n"))
+    tag = "24h" if duration == "24:00" else duration.replace(":", "-")
+    path = tmp_path / f"{name}-{tag}.inp"
+    path.write_text(text.replace(line, f" Duration           \t{duration}\n"))
     return path
 
 

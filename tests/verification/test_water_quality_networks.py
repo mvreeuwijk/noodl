@@ -127,6 +127,7 @@ def _router_on_epanets_hydraulics(path: Path, *, trials: int | None = None) -> d
             if t + step <= duration:
                 router.advance(t, step, flow=flow, closed=closed, demand=demand)
         en.ENcloseH()
+    diagnostics["mass_balance"] = router.mass_balance()
     return diagnostics
 
 
@@ -456,10 +457,11 @@ def _with_epanets_closed_link_leaks(path: Path, monkeypatch, *, trials: int | No
     """noodl on `path` with EPANET's closed-link leaks (`_epanets_closed_link_leaks`, EPANET's
     at the latest of its times at or before each solve) added to the junctions' sources: an
     experiment only (the run's `_Patterns.drivers_at` patched). `(diagnostics, injected,
-    closed)`: the junctions a leak is injected at and the links EPANET closes, where the
-    experiment is not EPANET: a junction a leak enters has a negative demand, which EPANET's
-    quality counts as clean inflow (`qualroute.c`, `findnodequal`: `volin -= MIN(0,
-    NodeDemand) tstep`), and a closed link holds what it last took from there."""
+    closed)`, the run's mass balance in `diagnostics["mass_balance"]`: the junctions a leak
+    is injected at and the links EPANET closes, where the experiment is not EPANET: a
+    junction a leak enters has a negative demand, which EPANET's quality counts as clean
+    inflow (`qualroute.c`, `findnodequal`: `volin -= MIN(0, NodeDemand) tstep`), and a closed
+    link holds what it last took from there."""
     model, _, _ = build_model(read_epanet_inp(path))
     leaks, closed = _epanets_closed_link_leaks(path, model, trials=trials)
     times = sorted(leaks)
@@ -470,9 +472,13 @@ def _with_epanets_closed_link_leaks(path: Path, monkeypatch, *, trials: int | No
         at = max(s for s in times if s <= t)
         return {**d, "water.sources": d["water.sources"] + leaks[at]}
 
+    # `water_run`'s `drivers` cannot carry them: a driver is constant over the run, and
+    # `"water.sources"` is scaled by each junction's demand pattern every step, where a leak
+    # changes at every step and follows no pattern; so the run's drivers are patched
     with monkeypatch.context() as patch:
         patch.setattr(simulate._Patterns, "drivers_at", drivers_at)
-        _, diagnostics = run_quality(path)
+        results, diagnostics = run_quality(path)
+    diagnostics["mass_balance"] = results.mass_balance
     injected = {model.node_names[i] for s in leaks.values()
                 for i in s.nonzero().flatten().tolist()}
     return diagnostics, injected, closed
@@ -488,6 +494,27 @@ def _beyond(diagnostics: dict, reference: QualityReference, *, ctol: float,
     bound = 1e-5 * max(float(theirs.abs().max()), ctol)
     return [(reference.times[i], names[j]) for i, j in (error > bound).nonzero().tolist()
             if names[j] not in exclude]
+
+
+def _assert_admitted(diagnostics: dict, reference: QualityReference, *, ctol: float,
+                     groups: dict) -> dict:
+    """Every point beyond 1e-5 of the scale (`_beyond`) is in one of `groups` (`{cause:
+    (points, cap)}`), each group has at least one point beyond, and every point of a group
+    is within its `cap` (absolute, in the quality's units): `{cause: worst}`."""
+    mine, theirs = _matrix(diagnostics, reference)
+    names = diagnostics["node_names"] + diagnostics["link_names"]
+    error = (mine - theirs).abs()
+    admitted = {point for points, _ in groups.values() for point in points}
+    beyond = set(_beyond(diagnostics, reference, ctol=ctol))
+    assert beyond <= admitted, sorted(beyond - admitted)
+    worst = {}
+    for cause, (points, cap) in groups.items():
+        assert beyond & set(points), f"no point of {cause} is beyond the bound"
+        found = {p: float(error[reference.times.index(p[0]), names.index(p[1])])
+                 for p in points}
+        assert max(found.values()) < cap, (cause, max(found.items(), key=lambda x: x[1]), cap)
+        worst[cause] = max(found.values())
+    return worst
 
 
 def _with_accuracy(accuracy: float):
@@ -540,6 +567,12 @@ _KY4_CLOSED_LINK_LEAKS = (
 #: 10800 s, noodl's 4.7469e-6 at both; MEASURED); at ACCURACY 1e-8 these are gone.
 _KY4_EPANETS_ACCURACY = ((83882, "J-703"), (83882, "P-696"), (86400, "P-696"))
 _KY4_ADMITTED = _KY4_P977_TAKES_THE_LEAK + _KY4_CLOSED_LINK_LEAKS + _KY4_EPANETS_ACCURACY
+#: Each group's cap (%): P-977's the leak's predicted trace, `100 V_leak / V_pipe` (6.16e-3
+#: and 9.36e-3 % at 3600 and 5501 s, checked within 2 % in the evidence test), plus 4 %; the
+#: others their MEASURED worst (5.51e-3 % at P-430, 5.41e-3 % at J-703) times 1.3.
+_KY4_GROUPS = {"P-977 takes the leak": (_KY4_P977_TAKES_THE_LEAK, 9.7e-3),
+               "closed-link leaks": (_KY4_CLOSED_LINK_LEAKS, 7.2e-3),
+               "EPANET's accuracy": (_KY4_EPANETS_ACCURACY, 7.0e-3)}
 
 
 @pytest.mark.slow
@@ -555,16 +588,20 @@ def test_ky4_trace_matches_epanet(tmp_path):
     5.5e-3 % (P-430 at 43200 s). The segment counts are those of the router on EPANET's
     hydraulics (`_router_on_epanets_hydraulics`) but at P-977 (two steps) and P-368 (three),
     the leak's links: no merge flips at a `Ctol` tie. Mass balance: terms within 1.9e-6
-    relative, the ratio 8.97e-7 from EPANET's (0.99999997 against 0.99999908)."""
+    relative, the ratio 8.97e-7 from EPANET's (0.99999997 against 0.99999908): EPANET's own
+    |1 - ratio| is 9.25e-7, noodl's 2.8e-8, the cause in the evidence test (the trace EPANET's
+    pump leak carries into I-Pump-1 and O-Pump-1, which no flow leaves)."""
     path = _ky4_trace(tmp_path)
     results, diagnostics = run_quality(path)
     reference = epanet_quality(path)
     assert len(reference.times) == 31
     ctol = read_epanet_inp(path).quality.tolerance
     found = assert_matches_epanet(diagnostics, reference, ctol=ctol, admitted=_KY4_ADMITTED)
-    assert sorted(_beyond(diagnostics, reference, ctol=ctol)) == sorted(_KY4_ADMITTED)
+    _assert_admitted(diagnostics, reference, ctol=ctol, groups=_KY4_GROUPS)
     assert found["worst"] < ctol
     _assert_mass_balance(path, results, reference)
+    # the ratio's difference is EPANET's (its cause in the evidence test); noodl's own
+    assert abs(1.0 - float(results.mass_balance.ratio)) < 1e-7
 
 
 @pytest.mark.slow
@@ -580,13 +617,28 @@ def test_ky4_trace_misses_are_epanets_closed_link_leaks_and_its_accuracy(tmp_pat
     O-Pump-1 and the tank pipes' junctions) and on the closed links (MEASURED there up to
     50 %, I-Pump-1's leak entering as clean water). MEASURED, leaks injected: against 1e-7 J-703
     5.4e-3 % and P-696 1.4e-3 %; against 1e-8 none. (Without the leaks, EPANET at 1e-8 still
-    gives 30 of the 33.)"""
+    gives 30 of the 33.) (3) P-977's trace in EPANET is the leak's volume from R-1 over
+    P-977's: `100 V_leak / V_pipe`, within 2 % (MEASURED 0.3 % and 0.1 %).
+
+    The mass balance. (4) The router on EPANET's hydraulics gives EPANET's ratio to 1e-12
+    (MEASURED 1e-15), so its |1 - ratio| of 9.25e-7 is in EPANET's flows, not its routing; in
+    double precision instead of float32 they give 9.27e-7, so not the float32 floor. (5) The
+    cause: while the pump is closed, its leak routes trace (stagnant, from N1) along P-977
+    into I-Pump-1 and along P-368 into O-Pump-1, junctions without demand whose only other
+    link, the pump, reads 0; no flow leaves them, so that mass is neither outflow nor stored
+    (`findnodequal`, `updatemassbalance`). Estimated from EPANET's flows and its link
+    qualities (the mean of each step's ends): 4.12e-7 and 4.14e-7 of the inflow, 8.26e-7
+    together, 89 % of the 9.25e-7. With the leaks injected, O-Pump-1 has its leak as a
+    demand and the difference halves (MEASURED 4.83e-7; noodl's own |1 - ratio| 2.8e-8)."""
     path = _ky4_trace(tmp_path)
     reference = epanet_quality(path)
     ctol = read_epanet_inp(path).quality.tolerance
-    driven = assert_matches_epanet(_router_on_epanets_hydraulics(path), reference, ctol=ctol)
+    driven_run = _router_on_epanets_hydraulics(path)
+    driven = assert_matches_epanet(driven_run, reference, ctol=ctol)
     assert driven["worst"] < 1e-9 * driven["scale"]
+    assert abs(float(driven_run["mass_balance"].ratio) - reference.ratio) < 1e-12
     leaky, injected, closed = _with_epanets_closed_link_leaks(path, monkeypatch)
+    assert abs(float(leaky["mass_balance"].ratio) - reference.ratio) < 5.5e-7
     assert injected == {"I-Pump-1", "O-Pump-1", "J-475", "J-59f", "J-637"}
     assert closed == {"~@Pump-1", "P-36", "P-539", "P-541"}
     artifacts = injected | closed
@@ -595,6 +647,44 @@ def test_ky4_trace_misses_are_epanets_closed_link_leaks_and_its_accuracy(tmp_pat
         _KY4_EPANETS_ACCURACY)
     tight = epanet_quality(path, setup=_with_accuracy(1e-8), trials=5000)
     assert _beyond(leaky, tight, ctol=ctol, exclude=artifacts) == []
+    # (3) and (5): P-977's trace, and the mass the leak carries into the dead pump ends
+    net = read_epanet_inp(path)
+    p977 = next(pipe for pipe in net.pipes if pipe.name == "P-977")
+    volume = p977.length * torch.pi * p977.diameter**2 / 4.0
+    model, _, _ = build_model(net)
+    leaks, _ = _epanets_closed_link_leaks(path, model)
+    entered, at = 0.0, model.node_names.index("I-Pump-1")
+    times = sorted(leaks)
+    column = reference.link_names.index("P-977")
+    for t0, t1 in zip(times, times[1:], strict=False):
+        entered += float(leaks[t0][at]) * (t1 - t0)
+        if t1 in (3600, 5501):
+            predicted = 100.0 * entered / volume
+            measured = float(reference.link[reference.times.index(t1), column])
+            assert abs(measured / predicted - 1.0) < 0.02, (t1, measured, predicted)
+    lost = 0.0
+    with epanet_session(path) as en:
+        f = FLOW_UNITS[flow_units(en)]
+        _, links = node_and_link_ids(en)
+        pump = links.index("~@Pump-1") + 1
+        dead = {name: links.index(name) + 1 for name in ("P-977", "P-368")}
+        en.ENopenH()
+        en.ENinitH(0)
+        while True:
+            t = int(en.ENrunH())
+            off = en.ENgetlinkvalue(pump, _EN_STATUS) == 0
+            flows = {name: abs(en.ENgetlinkvalue(k, _EN_FLOW)) * f for name, k in dead.items()}
+            step = int(en.ENnextH())
+            if step <= 0 or t + step > net.duration:
+                break
+            if off:
+                rows = [reference.times.index(t), reference.times.index(t + step)]
+                for name, q in flows.items():
+                    c = float(reference.link[rows, reference.link_names.index(name)].mean())
+                    lost += q * step * c
+        en.ENcloseH()
+    share = lost / mass_balance_si(reference.terms, "TRACE")["inflow"] / (1.0 - reference.ratio)
+    assert 0.8 < share < 1.0, share
 
 
 #: ky10's hydraulics part from EPANET's at 6:54:59 (`test_water_networks._KY10_EXTENDED`,
@@ -611,11 +701,10 @@ _KY10_TRIALS = _KY_EPANET["ky10"]["trials"]
 
 def _ky10_age(tmp_path: Path) -> Path:
     """ky10 (AGE, QUALITY TIMESTEP 0:05) run to 6:54:59 (`_KY10_DIVERGES`): `_ky_24h`'s file
-    with its DURATION 24:00 set to 6:54:59, nothing else changed. Stopped there rather than
-    run for 24 h and compared to 6:54:59: the mass balance is then the compared span's, and
-    EPANET's warning 6 (negative pressures at 20:52:41) is not reached."""
-    path = edited(_ky_24h(tmp_path, "ky10"), tmp_path, "ky10-to-divergence.inp",
-                  replace=[(" Duration           \t24:00\n", " Duration           \t6:54:59\n")])
+    with its DURATION 6:54:59, nothing else changed. Stopped there rather than run for 24 h
+    and compared to 6:54:59: the mass balance is then the compared span's, and EPANET's
+    warning 6 (negative pressures at 20:52:41) is not reached."""
+    path = _ky_24h(tmp_path, "ky10", duration="6:54:59")
     net = read_epanet_inp(path)
     assert (net.quality.mode, net.quality.quality_timestep) == ("AGE", 300.0)
     assert net.duration == _KY10_DIVERGES
@@ -634,6 +723,9 @@ _KY10_DEAD_END = ("J-184", "J-185", "J-649", "J-650")
 #: A closed link's leak (`_KY4_CLOSED_LINK_LEAKS`'s cause; Ruling 30).
 _KY10_CLOSED_LINK_LEAKS = ((23050, "J-433"),)
 _KY10_ADMITTED = _KY10_P310 + _KY10_CLOSED_LINK_LEAKS
+#: Each group's cap (h): its MEASURED worst (2.15e-3 h at P-310, 8.05e-5 h at J-433) x 1.3.
+_KY10_GROUPS = {"P-310's continuity": (_KY10_P310, 2.8e-3),
+                "closed-link leaks": (_KY10_CLOSED_LINK_LEAKS, 1.05e-4)}
 
 
 @pytest.mark.slow
@@ -654,7 +746,7 @@ def test_ky10_age_matches_epanet(tmp_path):
     assert len(reference.times) == 18
     ctol = read_epanet_inp(path).quality.tolerance
     found = assert_matches_epanet(diagnostics, reference, ctol=ctol, admitted=_KY10_ADMITTED)
-    assert sorted(_beyond(diagnostics, reference, ctol=ctol)) == sorted(_KY10_ADMITTED)
+    _assert_admitted(diagnostics, reference, ctol=ctol, groups=_KY10_GROUPS)
     assert found["worst"] < ctol
     _assert_mass_balance(path, results, reference)
 
@@ -662,7 +754,8 @@ def test_ky10_age_matches_epanet(tmp_path):
 @pytest.mark.slow
 def test_ky10_age_misses_are_epanets_continuity_and_a_closed_link_leak(tmp_path, monkeypatch):
     """The causes of `_KY10_ADMITTED`, checked. (1) noodl's router on EPANET's saved
-    hydraulics is EPANET within 1e-9 of the scale (MEASURED 1.4e-12 h). (2) P-310 is the only
+    hydraulics is EPANET within 1e-9 of the scale (MEASURED 1.4e-12 h), its mass-balance ratio
+    EPANET's to 1e-12. (2) P-310 is the only
     link on the junctions `_KY10_DEAD_END` but for theirs among themselves: noodl's flow in it
     is their demand to rounding at every report time; EPANET's (`EN_FLOW`, `EN_DEMAND`) is
     9.8e-9 to 6.2e-8 m3/s off theirs at every one of its 18 steps (MEASURED). (3) With
@@ -673,9 +766,10 @@ def test_ky10_age_misses_are_epanets_continuity_and_a_closed_link_leak(tmp_path,
     path = _ky10_age(tmp_path)
     reference = epanet_quality(path, trials=_KY10_TRIALS)
     ctol = read_epanet_inp(path).quality.tolerance
-    driven = assert_matches_epanet(_router_on_epanets_hydraulics(path, trials=_KY10_TRIALS),
-                                   reference, ctol=ctol)
+    driven_run = _router_on_epanets_hydraulics(path, trials=_KY10_TRIALS)
+    driven = assert_matches_epanet(driven_run, reference, ctol=ctol)
     assert driven["worst"] < 1e-9 * driven["scale"]
+    assert abs(float(driven_run["mass_balance"].ratio) - reference.ratio) < 1e-12
     # (2) P-310's flow against its dead end's demand
     net = read_epanet_inp(path)
     model, _, _ = build_model(net)
@@ -711,4 +805,5 @@ def test_ky10_age_misses_are_epanets_continuity_and_a_closed_link_leak(tmp_path,
     on = {name for name, e in ends.items() if e & injected}
     artifacts = injected | closed | on
     assert not artifacts & {name for _, name in _KY10_ADMITTED}
-    assert sorted(_beyond(leaky, reference, ctol=ctol, exclude=artifacts)) == sorted(_KY10_P310)
+    beyond = set(_beyond(leaky, reference, ctol=ctol, exclude=artifacts))
+    assert beyond and beyond <= set(_KY10_P310), sorted(beyond)

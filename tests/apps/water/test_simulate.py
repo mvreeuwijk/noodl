@@ -122,6 +122,21 @@ def test_the_run_solves_every_whole_step_to_the_duration_past_the_last_report():
     cut: dict = {}
     water_run(model, duration=2700.0, diagnostics=cut)
     assert cut["times"] == [0.0, 1800.0]
+    # the extra solves' energy: Net1's pump 9 opens on tank 2's level at 81690 s, past the
+    # 22:00 report; run to 22:46:40 its time on line and power are those of the run to
+    # 23:00 (EPANET counts the step from 81690 s whole, `addenergy`). Before, the run
+    # stopped at 79200 s and lost the pump's 1110 s on line from 81690 s (45154 s, not 46264)
+    net1, _, _ = build_model(_net1())
+    short: dict = {}
+    off_grid = water_run(net1, duration=82000.0, quality=False, diagnostics=short).energy
+    on_grid = water_run(net1, duration=82800.0, quality=False).energy
+    assert short["times"][-2:] == [79200.0, 81690.0]
+    on_line = float(off_grid.utilisation[0]) / 100.0 * 82000.0
+    assert on_line == pytest.approx(float(on_grid.utilisation[0]) / 100.0 * 82800.0,
+                                    rel=1e-12)
+    assert on_line == pytest.approx(46264.0, rel=1e-12)
+    torch.testing.assert_close(off_grid.average_power, on_grid.average_power, rtol=1e-12,
+                               atol=0.0)
 
 
 def test_pattern_start_shifts_the_pattern_as_epanet_does():
