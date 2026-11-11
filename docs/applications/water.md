@@ -384,10 +384,13 @@ mg/L (7, 11) (7, 13)
 
 **Learnable inputs.** Optional overrides of what the file says: `state["quality.initial"]`
 (n_nodes, quality units) and the drivers `"quality.bulk_coefficient"` and
-`"quality.wall_coefficient"` (n_pipes, in `net.pipes` order; (quality unit)^(1-n)/s for a bulk reaction of order n, 1/s for order 1; m/s for a wall
-coefficient of order 1, quality units per m² per s of order 0), `"quality.tank_coefficient"`
-(n_tanks, (quality unit)^(1-n)/s for the bulk order n, 1/s for order 1) and `"quality.source_strength"` (n_nodes, scaled by the source's pattern; a MASS
-source in mass per second). A wrong shape, or any of them on a run without quality, is refused
+`"quality.wall_coefficient"` (n_pipes, in `net.pipes` order; (quality unit)^(1-n)/s for a
+bulk reaction of order n, 1/s for order 1; m/s for a wall coefficient of order 1, quality
+units per m² per s of order 0), `"quality.tank_coefficient"` (n_tanks, (quality
+unit)^(1-n)/s for the bulk order n, 1/s for order 1) and `"quality.source_strength"`
+(n_nodes, scaled by the source's pattern; a MASS source in mass per second). The file gives
+its coefficients per day (and in its own length units); the reader converts them to these
+per-second SI values. A wrong shape, or any of them on a run without quality, is refused
 by name.
 
 **Differentiability.** Volumes and concentrations stay in the autograd graph; only the
