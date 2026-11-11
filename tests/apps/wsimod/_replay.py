@@ -298,12 +298,14 @@ def replay(
     *,
     scale: float,
     pollutants: Pollutants | None = None,
+    decisions: list | None = None,
 ) -> float:
     """Replay ``calls`` (``NodeCall``\\ s captured from WSIMOD) into noodl's node ``name``.
 
     ``pollutants`` defaults to the network's; ``QUANTITY_ONLY`` replays the volumes. Raises
     :class:`Mismatch` at the first difference beyond the node class's ``replay_bound`` x
-    ``scale``; returns the worst difference relative to ``scale``.
+    ``scale``; returns the worst difference relative to ``scale``. A list passed as ``decisions``
+    receives ``(day, Decision)`` for every branch noodl's node took (``Ctx.decisions``).
     """
     p = network.pollutants if pollutants is None else pollutants
     spec = _spec(network, name)
@@ -331,7 +333,14 @@ def replay(
     active = torch.tensor(True)
     for index, call in enumerate(calls):
         label = f"{name} call {index} (day {call.day}, {call.method}, tag {call.tag!r})"
-        node.ctx = Ctx(p, network.float_accuracy, (), day=call.day, node_names=[name])
+        node.ctx = Ctx(
+            p,
+            network.float_accuracy,
+            (),
+            day=call.day,
+            node_names=[name],
+            record_decisions=decisions is not None,
+        )
         script[:] = list(call.arc_calls)
         for arc in arcs.values():
             arc.label, arc.compare = label, compare
@@ -348,6 +357,8 @@ def replay(
         else:
             vqip = None if call.vqip is None else to_vqip(p, call.vqip)
             reply = getattr(node, call.method)(vqip, call.tag, active=active)
+        if decisions is not None:
+            decisions.extend((call.day, d) for d in node.ctx.decisions)
         for arc in arcs.values():
             arc.assert_exhausted()
         if call.reply is not None:

@@ -13,6 +13,7 @@ import contextlib
 import copy
 import functools
 import io
+from pathlib import Path
 
 import pytest
 
@@ -181,9 +182,7 @@ def test_the_storage_cases_reach_the_branches_they_are_built_for():
     assert any(x.method == "send_push_request" for x in pushes)
     # reservoir_over_capacity: day 0 asks for no water, later days do
     over = [
-        c
-        for c in captured("reservoir_over_capacity")["res"]
-        if c.method == "make_abstractions"
+        c for c in captured("reservoir_over_capacity")["res"] if c.method == "make_abstractions"
     ]
     asked = [x.vqip["volume"] for c in over for x in c.arc_calls if x.method == "send_pull_request"]
     assert asked[0] == 0.0 and max(asked) > 0.0
@@ -511,10 +510,180 @@ def test_the_dropped_percolation_falls_on_the_days_wsimod_reports_a_land_imbalan
     case = "land_percolation_threshold"
     spec = CASES[case]
     network = read_wsimod_config(spec.build())
-    ours = {
-        day
-        for day, ctx, _ in _days(network, spec.days)
-        if float(ctx.dropped[0]) != 0
-    }
+    ours = {day for day, ctx, _ in _days(network, spec.days) if float(ctx.dropped[0]) != 0}
     theirs = _printed_on(case, "plot", "node_mass_balance", "mass balance error for volume")
     assert ours == theirs and ours
+
+
+# --- the demos (Task 15) -------------------------------------------------------------------------
+DEMOS = Path(__file__).resolve().parents[1] / "data" / "wsimod"
+DEMO_DAYS = {"quickstart": 1456, "oxford": 365}  # the days the sample can reach (D15, Task 16)
+FULL_DAYS = {"quickstart": 1456, "oxford": 1456}  # the slow run: every day of the demo
+# The classes the demos hold, in the names of ``NodeSpec.cls`` (``ResidentialDemand`` is
+# WSIMOD's ``Demand`` under a different name); the brief's list is the union.
+DEMO_CLASSES = {
+    "quickstart": ("Land", "Sewer", "Groundwater", "Node", "Waste"),
+    "oxford": (
+        "Land",
+        "Sewer",
+        "WWTW",
+        "FWTW",
+        "Reservoir",
+        "Groundwater",
+        "ResidentialDemand",
+        "Catchment",
+        "Node",
+        "Waste",
+    ),
+}
+# (id, demo, config, mode): quantity-only on the demo as saved; every pollutant on the neutral
+# configuration, where each class's processes leave the water quality alone (README there)
+RUNS = (
+    ("", "quickstart", "config.yml", "quantity"),
+    ("", "oxford", "config.yml", "quantity"),
+    ("neutral-", "quickstart", "config_neutral.yml", "pollutants"),
+    ("neutral-", "oxford", "config_neutral.yml", "pollutants"),
+)
+DEMO_PAIRS = [
+    (demo, config, mode, cls) for _, demo, config, mode in RUNS for cls in DEMO_CLASSES[demo]
+]
+DEMO_IDS = [f"{prefix}{demo}-{cls}" for prefix, demo, _, _ in RUNS for cls in DEMO_CLASSES[demo]]
+
+
+@functools.cache
+def demo_network(demo: str, config: str):
+    return read_wsimod_config(DEMOS / demo, config_name=config)
+
+
+@functools.cache
+def demo_capture(demo: str, config: str, days: int):
+    """One live WSIMOD run of the demo with every node wrapped (once per process, so once per
+    xdist worker)."""
+    model = wsimod_model(DEMOS / demo, config_name=config)
+    names = [spec.name for spec in demo_network(demo, config).nodes]
+    with capture_node_calls(model, names) as calls:
+        record_wsimod_run(model, days=days)
+    return calls
+
+
+def _outcome(day_calls) -> tuple:
+    """D15: the ``(arc, method, tag)`` of the node's captured arc calls that day."""
+    return tuple((a.arc, a.method, repr(a.tag)) for c in day_calls for a in c.arc_calls)
+
+
+def sample_days(calls) -> list[int]:
+    """D15: days 0-59 and every 20th, plus each captured day whose branch outcome is new."""
+    by_day: dict[int, list] = {}
+    for call in calls:
+        by_day.setdefault(call.day, []).append(call)
+    last = max(by_day)
+    sample = {d for d in range(last + 1) if d < 60 or d % 20 == 0}
+    seen = {_outcome(by_day.get(d, [])) for d in sample}
+    for day in sorted(by_day):
+        outcome = _outcome(by_day[day])
+        if day not in sample and outcome not in seen:
+            sample.add(day)
+            seen.add(outcome)
+    return sorted(sample)
+
+
+def _magnitudes(value, volume_only: bool):
+    if isinstance(value, bool):
+        return
+    if isinstance(value, (int, float)):
+        yield abs(float(value))
+    elif isinstance(value, dict):
+        for key, item in value.items():
+            if volume_only and isinstance(item, (int, float)) and key != "volume":
+                continue
+            yield from _magnitudes(item, volume_only)
+
+
+def node_scale(calls, volume_only: bool) -> float:
+    """The largest magnitude over the node's captured records (volumes when quantity-only)."""
+    top = 0.0
+    for call in calls:
+        records = [call.vqip, call.reply, call.pre, call.post]
+        for arc in call.arc_calls:
+            records += [arc.vqip, arc.reply]
+        top = max(top, *(m for r in records for m in _magnitudes(r, volume_only)), 0.0)
+    return top or 1.0
+
+
+def _replay_class(demo, config, mode, cls, days, *, every_day, decisions=None):
+    network = demo_network(demo, config)
+    pollutants = network.pollutants if mode == "pollutants" else QUANTITY_ONLY
+    captured_calls = demo_capture(demo, config, days)
+    sizes, worst = {}, 0.0
+    for spec in network.nodes:
+        if spec.cls != cls:
+            continue
+        calls = captured_calls[spec.name]
+        if not calls:
+            continue  # WSIMOD never called this node (oxford's cherwell_thames)
+        keep = None if every_day else set(sample_days(calls))
+        used = [c for c in calls if keep is None or c.day in keep]
+        sizes[spec.name] = len({c.day for c in used})
+        scale = node_scale(calls, volume_only=mode == "quantity")
+        found = replay(
+            network, spec.name, used, scale=scale, pollutants=pollutants, decisions=decisions
+        )
+        bound = type(make_node(spec, network, pollutants)).replay_bound
+        assert found <= bound * scale, (spec.name, found)
+        worst = max(worst, found)
+    assert sizes, f"{demo} has no {cls} that WSIMOD called"
+    return sizes, worst
+
+
+def test_the_demos_hold_the_classes_the_brief_names():
+    named = {
+        "Land", "Sewer", "WWTW", "FWTW", "Reservoir", "Groundwater",
+        "ResidentialDemand", "Catchment", "Node", "Waste",
+    }  # fmt: skip
+    for demo, classes in DEMO_CLASSES.items():
+        held = {spec.cls for spec in demo_network(demo, "config.yml").nodes}
+        assert held == set(classes) and held <= named, demo
+    assert set().union(*map(set, DEMO_CLASSES.values())) == named
+
+
+def _through_soil_outcomes(decisions) -> dict[str, set[bool]]:
+    outcomes: dict[str, set[bool]] = {}
+    for _, d in decisions:
+        if d.site.endswith("/through_soil") and bool(d.active):
+            outcomes.setdefault(d.site.split("/")[0], set()).add(bool(d.outcome))
+    return outcomes
+
+
+@pytest.mark.parametrize(("demo", "config", "mode", "cls"), DEMO_PAIRS, ids=DEMO_IDS)
+def test_demo_nodes_replay_wsimod(demo, config, mode, cls):
+    """Every node of ``cls`` replayed on the sampled days of WSIMOD's captured calls, bitwise."""
+    decisions: list = []
+    _, worst = _replay_class(
+        demo, config, mode, cls, DEMO_DAYS[demo], every_day=False, decisions=decisions
+    )
+    assert worst == 0.0
+    if cls == "Land":
+        outcomes = _through_soil_outcomes(decisions)
+        assert outcomes, "no pervious surface decided through_soil"
+        assert all(found == {True, False} for found in outcomes.values()), outcomes
+
+
+def test_a_demo_replay_notices_a_difference():
+    """A captured Land reply moved by 1e-11 x scale fails the demo replay (it is not vacuous)."""
+    network = demo_network("oxford", "config.yml")
+    calls = copy.deepcopy(
+        [c for c in demo_capture("oxford", "config.yml", 365)["oxford_land"] if c.day < 3]
+    )
+    scale = node_scale(calls, volume_only=True)
+    arc = next(a for c in calls for a in c.arc_calls if a.reply["volume"] > 0)
+    arc.reply["volume"] += 1e-11 * scale
+    with pytest.raises(Mismatch):
+        replay(network, "oxford_land", calls, scale=scale, pollutants=QUANTITY_ONLY)
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize(("demo", "config", "mode", "cls"), DEMO_PAIRS, ids=DEMO_IDS)
+def test_demo_nodes_replay_wsimod_on_every_day(demo, config, mode, cls):
+    """The same on every captured day (oxford's whole 1456-day run)."""
+    _, worst = _replay_class(demo, config, mode, cls, FULL_DAYS[demo], every_day=True)
+    assert worst == 0.0
