@@ -239,7 +239,7 @@ def test_construction_and_argument_refusals():
     with pytest.raises(TypeError, match="NodeStorage"):
         KirchhoffLayer(net, "heat", [Conductance(G.clone(), kind="g")], boundary=["gnd"],
                        storage=[object()])
-    # a layer solved by Modified Nodal Analysis takes storage (tests/layers/test_mna_storage.py)
+    # a layer with flow unknowns takes storage (tests/layers/test_mna_storage.py)
     assert KirchhoffLayer(net, "heat", [Capacitance(torch.ones(3), kind="g")],
                           boundary=["gnd"],
                           storage=[LinearStorage([1], 1.0)]).implicit_edges.numel() > 0

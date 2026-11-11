@@ -1,4 +1,4 @@
-"""Modified Nodal Analysis in KirchhoffLayer: phasor layers (complex potentials and flows
+"""KirchhoffLayer with flow unknowns: phasor layers (complex potentials and flows
 solved in the real view)."""
 
 import math

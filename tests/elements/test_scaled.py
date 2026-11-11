@@ -145,7 +145,7 @@ def test_a_list_or_scalar_multiplier_is_float64(multiplier):
 
 
 def test_a_law_that_is_not_an_explicit_single_edge_flow_is_refused():
-    """Scaling multiplies an explicit flow F(dp); a law solved by Modified Nodal Analysis
+    """Scaling multiplies an explicit flow F(dp); a law solved with flow unknowns
     (implicit flow, several ports, storage or a law context) has none to multiply."""
     from noodl.elements import ImplicitLaw
 

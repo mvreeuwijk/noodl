@@ -344,7 +344,7 @@ EXEMPT: dict[str, str] = {
     "noodl.elements.door_discretized._DoorCompartmentBase":
         "base class; see DoorCompartment and OperableDoorCompartment",
     # several ports: its derivative is the `jacobian` blocks, checked in
-    # tests/apps/electrical/test_law_jacobians.py; it is solved on the MNA path only
+    # tests/apps/electrical/test_law_jacobians.py; it is solved only on a layer with flow unknowns
     "noodl.apps.electrical.power.laws.PiBranch": "two-port law: jacobian, not dflow",
 }
 
@@ -461,7 +461,7 @@ def test_a_wrapping_law_declares_its_inner_law_s_slope():
 
 # ---------------------------------------------------------------------------- node storage
 # `NodeStorage.rate_slope` builds the differentiable solve's Jacobian and adjoint as `dflow`
-# does a law's (classic and Modified Nodal Analysis alike), unless the storage declares
+# does a law's (with or without flow unknowns alike), unless the storage declares
 # `exact_slope = False`. The same audit: `rate_slope` against the autograd derivative of `rate`
 # with respect to the end-of-step potential, under both implicit schemes.
 @dataclass

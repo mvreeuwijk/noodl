@@ -1,4 +1,4 @@
-"""Modified Nodal Analysis in KirchhoffLayer: static real circuits."""
+"""KirchhoffLayer with flow unknowns: static real circuits."""
 
 import pytest
 import torch
@@ -190,7 +190,7 @@ def test_differentiable_matches_finite_difference(monkeypatch):
     V = torch.tensor([3.0], requires_grad=True)
     pb = torch.tensor([0.2], requires_grad=True)
     assert torch.autograd.gradcheck(f, (g, V, pb))
-    # The backward solves the transposed MNA system with the method the layer resolved.
+    # The backward solves the transposed system with the method the layer resolved.
     assert TransposeOperator in adjoint_ops
 
 
@@ -789,7 +789,7 @@ def test_classic_layer_refuses_unknown_mode():
         layer.solve(torch.zeros(1), {}, torch.zeros(2), differentiable=False, mode="bogus")
 
 
-# ------------------------------------------------------------------ flows() on an MNA layer
+# ------------------------------------------------------------- flows() with flow unknowns
 class Head(ImplicitLaw):
     """A fan with a prescribed rise: dp + head = 0, the flow not in the residual at all."""
 

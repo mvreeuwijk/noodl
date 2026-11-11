@@ -61,7 +61,7 @@ def test_batched_counterexample_raises_naming_instance_1_not_empty_list():
 
 
 def test_unbatched_floating_group_error_still_names_nodes():
-    # Companion to the above: the existing (unbatched) tests in test_potential.py must keep
+    # Counterpart of the above: the existing (unbatched) tests in test_potential.py must keep
     # naming actual node identifiers, not a batch index -- this is the ndim==0 certificate
     # branch, checked directly here rather than only implicitly via the unchanged old tests.
     net = Network(dtype=torch.float64)
@@ -475,7 +475,7 @@ def test_hot_path_never_touches_the_dense_incidence(monkeypatch, two_zone_layer)
 
 
 def test_dense_incidence_is_computed_lazily(two_zone_layer):
-    # The companion to the guard above: A/_diff must still EXIST with their old values (the
+    # The counterpart of the guard above: A/_diff must still EXIST with their old values (the
     # composed-model conservation tests read `model.layer.A` directly, and `jacobian()` is
     # built from it), they must simply not be built until someone asks. "Not built" is
     # asserted as "the layer holds no 2-D tensor at all after __init__", which is stronger

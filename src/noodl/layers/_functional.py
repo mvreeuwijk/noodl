@@ -87,6 +87,12 @@ class FunctionalLaws:
     """
 
     def __init__(self, layer, drivers, sources, phi_boundary, step=None, history=None) -> None:
+        if layer.phasor and step is None:
+            raise ValueError(
+                f"KirchhoffLayer {layer.name!r} is a phasor layer: its laws read the angular "
+                f"frequency from the step's context, so pass the step (the layer's `_step`, "
+                f"which takes it from the driver {layer.frequency_key!r})"
+            )
         self.layer = layer
         self.drivers = drivers
         self.step = step

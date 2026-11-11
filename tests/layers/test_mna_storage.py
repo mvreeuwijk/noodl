@@ -1,4 +1,4 @@
-"""Node storage on a layer solved by Modified Nodal Analysis, and the held initial point."""
+"""Node storage on a layer solved with flow unknowns, and the held initial point."""
 
 import pytest
 import torch

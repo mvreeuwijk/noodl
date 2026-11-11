@@ -289,7 +289,7 @@ def test_a_registered_parameter_read_only_at_the_root_is_threaded():
 
 
 class _ImplicitBranchLaw(ImplicitLaw):
-    """`_BranchLaw` as an implicit law, so the layer is solved by MNA: q = f(dp)."""
+    """`_BranchLaw` as an implicit law, so the layer is solved with flow unknowns: q = f(dp)."""
 
     def __init__(self, g):
         super().__init__("conduction")

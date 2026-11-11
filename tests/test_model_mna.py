@@ -1,4 +1,4 @@
-"""Model driving layers solved by Modified Nodal Analysis: step history from the step start,
+"""Model driving layers solved with flow unknowns: step history from the step start,
 the end-of-step time, warm starts, steady with a time, residuals and the iterate coupling."""
 
 import pytest

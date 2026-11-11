@@ -582,7 +582,7 @@ def test_solve_raises_when_an_element_flow_silently_drops_the_autograd_graph():
 
 
 def test_solve_matches_finite_differences_for_the_all_correct_mixed_leak_layer():
-    # Companion to the test above: with the buggy element removed, the same mixed-kind
+    # Counterpart of the test above: with the buggy element removed, the same mixed-kind
     # layer's differentiable solve must still work, and its adjoint gradient of the zone
     # pressure with respect to the interior source must match finite differences.
     net, elements = _mixed_leak_network(include_buggy=False)

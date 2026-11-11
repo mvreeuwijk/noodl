@@ -42,23 +42,25 @@ def test_newton_from_the_storage_ramp_converges_where_plain_newton_cycles():
     assert abs(root + 1.7692923542386) < 1e-10
 
 
-def test_the_storage_is_zero_on_rows_left_out():
-    """Two independent rows; the second is left out, so its stages are plain Newton on it:
-    a linear row lands on its root in the first stage."""
+def test_signed_rows_get_a_signed_storage_and_the_others_the_absolute_diagonal():
+    """A diagonal Jacobian (2, -3): the first row is a conservation row, the second a flow
+    row written with a negative diagonal. One linear stage of scale 1 takes one Newton step
+    x - r / (diag + g): g = |2| = 2 on the first row, g = diag = -3 on the signed second
+    (shifted diagonal -6; without `signed` it would be 0, a singular row)."""
+    diag = torch.tensor([2.0, -3.0], dtype=F64)
+    b = torch.tensor([1.0, 1.0], dtype=F64)
+
     def residual(x):
-        return torch.stack([x[..., 0] ** 3 - 2.0 * x[..., 0] + 2.0, 2.0 * x[..., 1] - 3.0],
-                           dim=-1)
+        return diag * x - b
 
     def jacobian(x):
-        return torch.diag_embed(torch.stack(
-            [3.0 * x[..., 0] ** 2 - 2.0, torch.full_like(x[..., 1], 2.0)], dim=-1))
+        return torch.diag_embed(diag.expand_as(x))
 
-    rows = torch.tensor([True, False])
-    out = storage_ramp(residual, jacobian, torch.tensor([1.0, 0.0], dtype=F64), rows=rows,
-                       scales=(1.0,), omega=1.0, atol=1e-14, rtol=0.0)
-    assert float(out[1]) == 1.5
-    # the stored row moved toward its own root only part of the way
-    assert -1.77 < float(out[0]) < 1.0
+    x0 = torch.tensor([0.0, 0.0], dtype=F64)
+    signed = torch.tensor([False, True])
+    out = storage_ramp(residual, jacobian, x0, signed=signed, scales=(1.0,), omega=1.0,
+                       max_iter=1)
+    torch.testing.assert_close(out, torch.tensor([1.0 / 4.0, -1.0 / 6.0], dtype=F64))
 
 
 def _laplacian(slopes):

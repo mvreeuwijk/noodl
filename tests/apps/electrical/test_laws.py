@@ -1,4 +1,4 @@
-"""Electrical constitutive laws, each solved exactly in a small Modified Nodal Analysis layer."""
+"""Electrical constitutive laws, each solved exactly in a small layer with flow unknowns."""
 
 import math
 
@@ -275,7 +275,7 @@ _CONTEXTS = [
 
 
 @pytest.mark.parametrize("ctx", _CONTEXTS, ids=lambda c: f"{c.mode}-{c.scheme}")
-def test_capacitance_and_inductance_are_the_companion_forms(ctx):
+def test_capacitance_and_inductance_are_the_discretised_storage_forms(ctx):
     dp, q = T([1.5, -0.7]), T([0.2, 0.9])
     if ctx.mode == "phasor":
         dp, q = dp * (1 + 0.5j), q * (0.3 - 1j)
@@ -339,7 +339,7 @@ def test_diode_no_overflow_at_large_forward_voltage():
     dp = T([100.0])
     i = d.flow(dp)
     x = dp.clone().requires_grad_(True)
-    di, = torch.autograd.grad(d.flow(x), x, torch.ones_like(dp))   # as the MNA Jacobian takes it
+    di, = torch.autograd.grad(d.flow(x), x, torch.ones_like(dp))  # as the layer's Jacobian takes it
     assert torch.isfinite(i).all() and torch.isfinite(di).all()
     _close(i, [_diode_current(100.0)], tol=1e-6)
     _close(di, [1e-6 * math.exp(15.0) / 0.04 + 1e-8], tol=1e-9)
@@ -413,7 +413,7 @@ def _controlled(law):
     ("current", "voltage", 5.0, 5.0, [1.0, -1.25]),    # v2 = g i1, v1 = 0
     ("current", "current", 2.0, -8.0, [1.0, 2.0]),     # i2 = g i1, v1 = 0
 ])
-def test_dependent_sources_match_hand_mna(control, output, gain, v_out, q_ports):
+def test_dependent_sources_match_hand_solution(control, output, gain, v_out, q_ports):
     law = DependentSource(T([gain]), control=control, output=output)
     assert law.kind == f"{control[0]}c{output[0]}s"
     net, layer = _controlled(law)
@@ -463,7 +463,7 @@ def test_mutual_inductance_reduces_to_two_inductors_when_M_zero():
         _close(q_c, q_s, tol=1e-13)
 
 
-def test_mutual_inductance_companion_matches_hand_step():
+def test_mutual_inductance_storage_term_matches_hand_step():
     # one backward-Euler step of v = Lmat di/dt from i_prev, both windings driven directly
     L1, L2, M, dt = 0.2, 0.5, 0.25, 0.01
     edges = [("a", "gnd", "voltage_source"), ("b", "gnd", "voltage_source"),
