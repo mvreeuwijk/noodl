@@ -8,6 +8,7 @@ bounds name the first diverging step and node, and the base network has the prop
 later per-feature cases rely on.
 """
 
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -33,6 +34,7 @@ from tests.verification._epanet_quality import (  # noqa: E402
     first_divergence,
     mass_balance_si,
     option,
+    run_quality,
 )
 
 F64 = torch.float64
@@ -271,3 +273,236 @@ def test_the_quality_base_hydraulics_match_epanet():
     assert worst_h < 1e-5, worst_h
     assert worst_q < 1e-6, worst_q
     assert worst_l < 2e-4, worst_l
+
+
+# ---- the router against EPANET (Task 3): non-reactive transport, sort and reversal ----------
+
+def _base(tmp_path: Path) -> Path:
+    return BASE
+
+
+def _trace(node: str) -> Callable[[Path], Path]:
+    def case(tmp_path: Path) -> Path:
+        return edited(BASE, tmp_path, f"trace_{node}.inp",
+                      replace=[(" Quality    CHEMICAL mg/L", f" Quality    TRACE {node}")])
+    return case
+
+
+def _chemical(tmp_path: Path) -> Path:
+    """The base with initial qualities at junctions, the dead end and the tank."""
+    return edited(BASE, tmp_path, "chemical.inp",
+                  add={"QUALITY": [" J3 0.5", " J6 0.8", " J5 0.4", " T1 0.25"]})
+
+
+def _dead_end(tmp_path: Path) -> Path:
+    """`J5` draws 0.2 mL/s (2e-7 m3/s, below `Q_STAGNANT`, 3.15e-7 m3/s) through a `P7` of
+    2 m and 25 mm (0.98 L, emptied in 82 min): `P7` is stagnant (direction 0, out of the
+    sort) but moves its actual flow from `J2` to `J5`, whose quality (0.4 at the start)
+    turns to `J2`'s."""
+    return edited(BASE, tmp_path, "dead_end.inp",
+                  replace=[(" J5   20    0", " J5   20    0.0002"),
+                           (" P7   J2     J5     300     100 ",
+                            " P7   J2     J5     2       25  ")],
+                  add={"QUALITY": [" J5 0.4"]})
+
+
+def _tank_limit(tmp_path: Path) -> Path:
+    """`T1`'s maximum lowered to 7.5 m: it fills inside an hour, ending a step there."""
+    return edited(BASE, tmp_path, "tank_limit.inp",
+                  replace=[(" T1   80    5          0.5       10 ",
+                            " T1   80    5          0.5       7.5")])
+
+
+def _check_valve(tmp_path: Path) -> Path:
+    return edited(BASE, tmp_path, "check_valve.inp",
+                  replace=[(" P5   J3     J4     1500    150       120        0          Open",
+                            " P5   J3     J4     1500    150       120        0          CV")])
+
+
+def _closed_turn(tmp_path: Path) -> Path:
+    """`P6` closed by time controls for the hour (8 h to 9 h) in which `T1` turns from
+    filling to draining: positive, closed (direction 0), then negative."""
+    return edited(BASE, tmp_path, "closed_turn.inp",
+                  add={"CONTROLS": [" LINK P6 CLOSED AT TIME 8", " LINK P6 OPEN AT TIME 9"]})
+
+
+def _flow_cycle(tmp_path: Path) -> Path:
+    """A pump `PU2` from `J3` to `J1` drives water round `J1 -> J2 -> J3 -> J1` (and back
+    through `P4`, `J1 -> J3`): a directed cycle the sort must break."""
+    return edited(BASE, tmp_path, "flow_cycle.inp",
+                  add={"PUMPS": [" PU2  J3     J1     HEAD C2"], "CURVES": [" C2   20    15"]})
+
+
+#: Every quality case by name: the `.inp` it runs, made in a temporary directory (Task 7's
+#: mass balance runs them all).
+QUALITY_CASES: dict[str, Callable[[Path], Path]] = {
+    "base": _base, "chemical": _chemical, "trace_junction": _trace("J1"),
+    "trace_reservoir": _trace("R1"), "trace_tank": _trace("T1"), "dead_end": _dead_end,
+    "tank_limit": _tank_limit, "check_valve": _check_valve, "closed_turn": _closed_turn,
+    "flow_cycle": _flow_cycle,
+}
+
+
+def _residual_admitted(path: Path, diagnostics: dict, reference) -> list[tuple[int, str]]:
+    """The points of the dead end `P7` admitted beyond 1e-5 of the scale, each with its
+    cause checked. MEASURED CAUSE: EPANET's `P7` carries its solver's residual (up to
+    3.7e-9 m3/s at ACCURACY 1e-7, `test_the_quality_base_network_has_its_properties`) as a
+    flow, so `evalnodeoutflow` pushes `J2`'s water into it (`v = |q| dt`: a stagnant link
+    moves its actual flow); noodl's `P7` carries 1e-25 m3/s and keeps its initial
+    segment. Every difference at `P7` must stay within what that residual can move: the
+    scale times EPANET's `sum |q| dt` through `P7` so far over `P7`'s volume. Only for a
+    case whose EPANET `P7` flow stays below 1e-8 m3/s (a true residual)."""
+    hydraulics = epanet_hydraulics(path)
+    flow = hydraulics["flow"][:, hydraulics["link_names"].index("P7")].abs()
+    if float(flow.max()) >= 1e-8:
+        return []
+    times = hydraulics["times"]
+    steps = torch.tensor([b - a for a, b in zip(times[:-1], times[1:], strict=True)],
+                         dtype=F64)
+    moved = torch.cat([torch.zeros(1, dtype=F64), torch.cumsum(flow[:-1] * steps, 0)])
+    pipe = next(p for p in read_epanet_inp(path).pipes if p.name == "P7")
+    volume = 0.785398 * pipe.length * pipe.diameter**2
+    ours = diagnostics["quality"][0]
+    our_times = [round(x) for x in ours["times"]]
+    column = diagnostics["link_names"].index("P7")
+    theirs = reference.link[:, reference.link_names.index("P7")]
+    scale = max(float(reference.node.abs().max()), float(reference.link.abs().max()))
+    admitted = []
+    for row, t in enumerate(reference.times):
+        mine = ours["link_quality"][our_times.index(t)][column]
+        bound = scale * float(moved[times.index(t)]) / volume
+        difference = abs(mine - float(theirs[row]))
+        assert difference <= bound + 1e-12 * scale, (t, difference, bound)
+        admitted.append((t, "P7"))
+    return admitted
+
+
+def _compare(tmp_path: Path, case: str):
+    """`case` (`QUALITY_CASES`) run by noodl and EPANET and compared by the spec's bounds
+    (`assert_matches_epanet`; `P7`'s residual admitted with its cause checked):
+    `(results, diagnostics, reference, found)`."""
+    path = QUALITY_CASES[case](tmp_path)
+    results, diagnostics = run_quality(path)
+    reference = epanet_quality(path)
+    ctol = read_epanet_inp(path).quality.tolerance
+    found = assert_matches_epanet(diagnostics, reference, ctol=ctol,
+                                  admitted=_residual_admitted(path, diagnostics, reference))
+    return results, diagnostics, reference, found
+
+
+def _link_flow(results, name: str) -> torch.Tensor:
+    return results.flow[:, results.link_names.index(name)]
+
+
+@pytest.mark.parametrize("case, node", [("trace_junction", "J1"), ("trace_reservoir", "R1"),
+                                        ("trace_tank", "T1")],
+                         ids=["junction", "reservoir", "tank"])
+def test_trace_matches_epanet(tmp_path, case, node):
+    """TRACE at a junction, the reservoir and the tank: every node starts at 0, the trace
+    node at 100 (`initqual`; a tank's segment at the file's quality, 0 here), and the trace
+    node holds 100 (`findnodequal`). MEASURED: within 4.2e-5 % (the tank, scale 100)
+    everywhere but `P7` (`_residual_admitted`)."""
+    results, *_ = _compare(tmp_path, case)
+    column = results.node_names.index(node)
+    assert bool((results.node_quality[:, column] == 100.0).all())
+    assert results.quality_units == "%"
+    others = [k for k, n in enumerate(results.node_names) if n != node]
+    assert bool((results.node_quality[0, others] == 0.0).all())
+    assert float(results.node_quality[:, others].max()) > 1.0
+
+
+def test_chemical_transport_matches_epanet(tmp_path):
+    """A non-reactive chemical from the reservoir (1 mg/L) into a network with initial
+    qualities at junctions, the dead end and the tank. MEASURED: within 4e-7 mg/L
+    everywhere but `P7`."""
+    results, *_ = _compare(tmp_path, "chemical")
+    assert results.quality_units == "mg/L"
+    t1 = results.node_quality[:, results.node_names.index("T1")]
+    assert float(t1[0]) == 0.25 and 0.25 < float(t1[-1]) < 1.0
+
+
+def test_a_reversing_pipe_matches_epanet(tmp_path):
+    """`P6`, the tank's pipe, reverses twice (the tank fills, drains, fills): its chain is
+    reversed at exactly the solves where its flow changes sign (`flowdirchanged`,
+    `reversesegs`), and it matches EPANET."""
+    results, diagnostics, *_ = _compare(tmp_path, "base")
+    sign = torch.sign(_link_flow(results, "P6"))
+    flips = [round(t) for t, a, b in zip(results.time[1:].tolist(), sign[:-1], sign[1:],
+                                         strict=True) if a * b < 0]
+    assert len(flips) == 2
+    assert diagnostics["quality"][0]["reversals"] == [(t, "P6") for t in flips]
+
+
+def test_a_pump_and_a_valve_in_the_path_match_epanet(tmp_path):
+    """The pump `PU1` and the valve `V1` carry the reservoir's water: they start empty
+    (`initsegs`), and what their upstream node releases into them (`evalnodeoutflow`) their
+    downstream node, later in the order, takes in the same quality step
+    (`evalnodeinflow`), so they hold no volume after any step; their quality is then the
+    mean of their end nodes' (`avgqual`), which matches EPANET's as the front passes."""
+    _, diagnostics, reference, _ = _compare(tmp_path, "base")
+    segments = diagnostics["quality"][0]["segments"]
+    for name in ("PU1", "V1"):
+        chain = diagnostics["link_names"].index(name)
+        assert all(counts[chain] == 0 for counts in segments)
+        link = reference.link[:, reference.link_names.index(name)]
+        assert float(link[0]) == 0.0 and float(link.max()) > 0.99     # the front passed
+
+
+def test_a_dead_end_below_q_stagnant_matches_epanet(tmp_path):
+    """`J5` draws 2e-7 m3/s through a small `P7` (`_dead_end`): `P7` is stagnant, so out of
+    every sort, but still moves its actual flow from `J2` to `J5` (`transport`), and `J5`
+    turns from 0.4 to `J2`'s quality as EPANET's does. MEASURED: within 3.3e-7 mg/L."""
+    results, *_ = _compare(tmp_path, "dead_end")
+    flow = _link_flow(results, "P7")
+    assert bool((flow.abs() < Q_STAGNANT_CFS / rounded_cfs_per_m3s("LPS")).all())
+    assert bool((flow.abs() > 1e-7).all())
+    j5 = results.node_quality[:, results.node_names.index("J5")]
+    j2 = results.node_quality[:, results.node_names.index("J2")]
+    assert float(j5[0]) == 0.4
+    assert abs(float(j5[-1]) - float(j2[-1])) < 0.02
+
+
+def test_a_step_shorter_than_the_quality_step_at_a_tank_limit_matches_epanet(tmp_path):
+    """`T1` fills inside an hour (`_tank_limit`): the hydraulic step ends there, at a time
+    that is no multiple of the 300 s quality step, so the last quality step of that
+    hydraulic step is shorter (`nextqual`: `dt = MIN(Qstep, hydstep - qtime)`)."""
+    _, diagnostics, reference, _ = _compare(tmp_path, "tank_limit")
+    odd = [t for t in diagnostics["quality"][0]["times"] if t % 300]
+    assert odd and all(round(t) in reference.times for t in odd)
+
+
+def test_a_check_valve_pipe_has_no_volume_like_epanet(tmp_path):
+    """Review Focus 1: `P5` made a check-valve pipe is EPANET's `CVPIPE`, not a `PIPE`
+    (`types.h`), so `initsegs` gives it no segment: its chain is empty after every quality
+    step (what `J3` releases into it, `J4` takes in the same step), and the network
+    matches EPANET's, not a pipe's travel time."""
+    _, diagnostics, *_ = _compare(tmp_path, "check_valve")
+    chain = diagnostics["link_names"].index("P5")
+    assert all(counts[chain] == 0 for counts in diagnostics["quality"][0]["segments"])
+
+
+def test_a_pipe_through_stagnant_to_reversed_matches_epanet(tmp_path):
+    """Review Focus 2: `P6` positive to 8 h, closed by a time control from 8 h to 9 h (its
+    direction 0), negative from 9 h (`_closed_turn`): `flowdirchanged` reverses a chain
+    only when the new direction times the old one is negative, so `P6`'s chain is not
+    reversed then (water leaves it at `J4` from the segment that led towards the tank),
+    and the qualities match EPANET's."""
+    results, diagnostics, *_ = _compare(tmp_path, "closed_turn")
+    p6 = _link_flow(results, "P6")
+    hours = results.time.tolist()
+    assert float(p6[hours.index(7 * 3600.0)]) > 0
+    assert abs(float(p6[hours.index(8 * 3600.0)])) < 1e-15
+    assert float(p6[hours.index(9 * 3600.0)]) < 0
+    reversals = diagnostics["quality"][0]["reversals"]
+    assert [link for _, link in reversals] == ["P6"]      # only at the refill
+    assert reversals[0][0] > 9 * 3600
+
+
+def test_a_directed_flow_cycle_matches_epanet(tmp_path):
+    """Review Focus 3: a pump `PU2` from `J3` to `J1` (`_flow_cycle`) drives water round
+    `J1 -> J2 -> J3 -> J1`: `sortnodes` runs out of nodes without inflow and
+    `selectnonstacknode` breaks the cycle, and the qualities match EPANET's."""
+    results, diagnostics, *_ = _compare(tmp_path, "flow_cycle")
+    for name in ("P2", "P3", "PU2"):
+        assert bool((_link_flow(results, name) > 0).all())
+    assert max(diagnostics["quality"][0]["cycle_breaks"]) > 0
