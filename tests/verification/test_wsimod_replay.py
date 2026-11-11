@@ -9,8 +9,10 @@ and quantity-only on the volumes.
 
 from __future__ import annotations
 
+import contextlib
 import copy
 import functools
+import io
 
 import pytest
 
@@ -24,6 +26,7 @@ from noodl.apps.wsimod.config import read_wsimod_config  # noqa: E402
 from noodl.apps.wsimod.engine import Ctx, Engine, make_node  # noqa: E402
 from noodl.apps.wsimod.vqip import QUANTITY_ONLY  # noqa: E402
 from tests.apps.wsimod._replay import Mismatch, replay  # noqa: E402
+from tests.apps.wsimod._stepping import step_days  # noqa: E402
 from tests.verification._wsimod_cases import CASES  # noqa: E402
 from tests.verification._wsimod_reference import (  # noqa: E402
     capture_node_calls,
@@ -177,3 +180,96 @@ def test_the_storage_cases_reach_the_branches_they_are_built_for():
     ]
     asked = [x.vqip["volume"] for c in over for x in c.arc_calls if x.method == "send_pull_request"]
     assert asked[0] == 0.0 and max(asked) > 0.0
+
+
+def _noodl_event_days(case: str, condition: str, node: str) -> set[int]:
+    spec = CASES[case]
+    network = read_wsimod_config(spec.build())
+    days = set()
+    for day, ctx, _ in step_days(network, network.pollutants, spec.days):
+        if bool(ctx.events.get(condition, {}).get(node, torch.tensor(False))):
+            days.add(day)
+    return days
+
+
+def _printed_days(case: str, pattern: str) -> set[int]:
+    """The days of the lines WSIMOD printed that match ``pattern`` (group 1 is the date)."""
+    spec = CASES[case]
+    printed = wsimod_reference(spec.build(), days=spec.days).printed
+    network = read_wsimod_config(spec.build())
+    index = {str(d.date()): i for i, d in enumerate(network.dates)}
+    return {index[m.group(1)] for line in printed if (m := re.fullmatch(pattern, line))}
+
+
+def test_demand_deficits_and_unsuccessful_leaks_fall_on_the_days_wsimod_printed_them():
+    """D13: ``demand deficit of x at <node> on <date>`` and ``warning, distribution leakage not
+    going to GW in <node> at <date>`` against noodl's ``"demand_deficit"`` and
+    ``"leakage_not_going_to_gw"`` events, day by day; every case below has days on both sides."""
+    for case, node in (
+        ("distribution_leakage", "town"),
+        ("unlimited_distribution", "town"),
+        ("demand_constant_and_loads", "town"),
+        ("demand_constant_and_loads", "village"),
+        ("reservoir_spill", "town"),
+    ):
+        ours = _noodl_event_days(case, "demand_deficit", node)
+        theirs = _printed_days(case, rf"demand deficit of \S+ at {node} on (.*)")
+        assert ours == theirs, (case, node)
+        assert 0 < len(theirs) < CASES[case].days, (case, node)
+    for case, node in (("distribution_leakage", "dist_gw"), ("distribution_leakage", "dist_dry")):
+        ours = _noodl_event_days(case, "leakage_not_going_to_gw", node)
+        theirs = _printed_days(
+            case, rf"warning, distribution leakage not going to GW in {node} at (.*)"
+        )
+        assert ours == theirs, (case, node)
+    # dist_gw's groundwater takes the leak on some days and is full on others; dist_dry has none
+    assert 0 < len(_noodl_event_days("distribution_leakage", "leakage_not_going_to_gw", "dist_gw"))
+    assert (
+        len(_noodl_event_days("distribution_leakage", "leakage_not_going_to_gw", "dist_gw"))
+        < CASES["distribution_leakage"].days
+    )
+    # the unpushed foul water of a ResidentialDemand with no Sewer, and a village whose out-arcs
+    # are too small, are "Demand not able to push" on every day
+    assert _noodl_event_days("residential_demand", "demand_not_able_to_push", "homes") == set(
+        range(CASES["residential_demand"].days)
+    )
+    unpushed = _noodl_event_days("demand_constant_and_loads", "demand_not_able_to_push", "town")
+    assert unpushed == set()
+
+
+def test_reservoir_spill_days_are_the_days_wsimod_printed_spill_at_reservoir():
+    """D14, live: a reservoir pulling through a leaking ``Distribution`` with no groundwater gets
+    more than its excess (``distribution.py:40-50``) and spills (``storage.py:983-989``). noodl's
+    ``"reservoir_spill"`` event falls on exactly the days WSIMOD prints "Spill at reservoir",
+    and the tank ends those days above its capacity on both sides."""
+    spec = CASES["reservoir_spill"]
+    model = wsimod_model(spec.build())
+    network = read_wsimod_config(spec.build())
+    index = {d: i for i, d in enumerate(model.dates)}
+    res = model.nodes["res"]
+    printed_on: set[int] = set()
+    original = res.make_abstractions
+
+    def watched():
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            original()
+        if "Spill at reservoir" in buffer.getvalue():
+            printed_on.add(index[res.t])
+        print(buffer.getvalue(), end="")
+
+    res.make_abstractions = watched
+    reference = record_wsimod_run(model, days=spec.days)
+    slot = reference.tank_names.index(("res", "tank"))
+    capacity = 10.0
+    theirs_end = reference.tank_storage[:, slot]
+    ours = _noodl_event_days("reservoir_spill", "reservoir_spill", "res")
+    assert ours == printed_on
+    assert 0 < len(ours) < spec.days  # the supply runs dry part-way
+    ours_end = {}
+    for day, _, engine in step_days(network, network.pollutants, spec.days):
+        ours_end[day] = float(engine.nodes["res"].tank.storage[0])
+    for day in ours:
+        assert ours_end[day] > capacity and float(theirs_end[day]) > capacity
+        assert ours_end[day] == float(theirs_end[day])
+

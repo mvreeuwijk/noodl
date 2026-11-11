@@ -653,7 +653,10 @@ shape:
     `node:N/pull_set_active/{clip,below_fa}`, `node:N/push_check_river_reservoir/clip` and
     `node:N/satisfy_environmental/owed`; a `River`'s `node:N/pull_check_river/{mrf,clip}` (the
     `max(..., 0)` against `mrf / riverrc` and the clip to the request); a `QueueGroundwater`'s
-    frozen push-check tank is `node:N/check_tank/get_excess/{headroom,clip}`. Later classes extend the pattern.
+    frozen push-check tank is `node:N/check_tank/get_excess/{headroom,clip}`; a `Demand`'s
+    `node:N/create_demand/deficit` and `node:N/create_demand/not_able_to_push:<garden|house|default>`
+    (`demand.py:90`, `:114`); a leaking `Distribution`'s `node:N/pull_set_leakage/unsuccessful`
+    (`distribution.py:46`). Later classes extend the pattern.
   - `call` is noodl's static per-day index of the enclosing (element, method) call. It counts
     the calls noodl's structure makes, masked ones included, so it is the same every day; it is
     not WSIMOD's dynamic count.

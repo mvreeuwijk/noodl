@@ -543,6 +543,138 @@ def _queue_arc() -> dict:
     }
 
 
+def _temperatures(days: int, seed: int) -> dict:
+    """Daily air temperatures in [4, 20] for a ``ResidentialDemand``'s ``data_input_dict``."""
+    rng = random.Random(seed)
+    return {("temperature", date): round(rng.uniform(4.0, 20.0), 4) for date in _dates(days)}
+
+
+def _distribution_leakage() -> dict:
+    """A supply feeds a town through two distributions: ``dist_gw`` (leakage 0.2) leaks into a
+    small groundwater that fills, so on some days the leak cannot go anywhere and returns to
+    the caller (``distribution.py:40-50``); ``dist_dry`` (leakage 0.1) has no groundwater at
+    all, so its whole leak returns. The town pulls through both (a check with no request, then
+    the decorated pull sets); the supply runs dry after about two weeks, so the demand falls
+    short on later days."""
+    return _storage_case(
+        [
+            _store("supply", "Storage", capacity=1e4, initial_storage=_stocked(150.0)),
+            _store("dist_gw", "Distribution", leakage=0.2),
+            _store("dist_dry", "Distribution", leakage=0.1),
+            _store("aq", "Groundwater", capacity=3.0, residence_time=4.0),
+            _store(
+                "town",
+                "Demand",
+                constant_demand=9.0,
+                pollutant_load={"phosphate": 0.02, "ammonia": 0.1, "temperature": 15.0},
+            ),
+            _store("sea", "Waste"),
+        ],
+        [
+            _arc("supply_to_gw", "supply", "dist_gw", capacity=8.0),
+            _arc("supply_to_dry", "supply", "dist_dry", capacity=6.0),
+            _arc("gw_to_town", "dist_gw", "town", preference=2.0),
+            _arc("dry_to_town", "dist_dry", "town"),
+            _arc("leak_to_aq", "dist_gw", "aq"),
+            _arc("aq_to_sea", "aq", "sea"),
+            _arc("town_to_sea", "town", "sea"),
+        ],
+        [{"Demand": "create_demand"}, {"Groundwater": "distribute"}],
+    )
+
+
+def _unlimited_distribution() -> dict:
+    """A town pulls from an ``UnlimitedDistribution`` and a well through arcs of capacity 5 and
+    3; the well runs dry, and the demand of 7 then falls short."""
+    return _storage_case(
+        [
+            _store("mains", "UnlimitedDistribution"),
+            _store("well", "Storage", capacity=100.0, initial_storage=_stocked(40.0)),
+            _store("town", "Demand", constant_demand=7.0),
+            _store("sea", "Waste"),
+        ],
+        [
+            _arc("mains_to_town", "mains", "town", capacity=5.0),
+            _arc("well_to_town", "well", "town", capacity=3.0, preference=2.0),
+            _arc("town_to_sea", "town", "sea"),
+        ],
+        [{"Demand": "create_demand"}],
+    )
+
+
+def _demand_constant_and_loads() -> dict:
+    """Two demands with a constant demand and a ``pollutant_load`` push through the ``default``
+    component to a ``Waste``: ``town`` through one arc, ``village`` over two arcs whose
+    capacities (2.5) fall short of the demand, so water is left unpushed every day."""
+    load = {"phosphate": 0.02, "ammonia": 0.1, "temperature": 15.0}
+    return _storage_case(
+        [
+            _store("supply", "Storage", capacity=1e4, initial_storage=_stocked(60.0)),
+            _store("town", "Demand", constant_demand=4.0, pollutant_load=load),
+            _store("village", "Demand", constant_demand=4.0, pollutant_load=load),
+            _store("sea", "Waste"),
+            _store("sea_a", "Waste"),
+            _store("sea_b", "Waste"),
+        ],
+        [
+            _arc("supply_to_town", "supply", "town"),
+            _arc("supply_to_village", "supply", "village"),
+            _arc("town_to_sea", "town", "sea"),
+            _arc("village_to_a", "village", "sea_a", capacity=1.5, preference=1.0),
+            _arc("village_to_b", "village", "sea_b", capacity=1.0, preference=2.0),
+        ],
+        [{"Demand": "create_demand"}],
+    )
+
+
+def _residential_demand() -> dict:
+    """A ``ResidentialDemand`` (it needs its own orchestration key) pulls its demand and builds
+    the foul water of its population with the mixed temperature; with no ``Land`` or ``Sewer``
+    attached, the garden demand is 0 and the foul water has nowhere to go."""
+    days = _STORAGE_DAYS
+    return _storage_case(
+        [
+            _store("supply", "Storage", capacity=1e4, initial_storage=_stocked(500.0)),
+            _store(
+                "homes",
+                "ResidentialDemand",
+                population=20.0,
+                per_capita=0.15,
+                pollutant_load={"phosphate": 0.01, "ammonia": 0.05},
+                constant_temp=14.0,
+                constant_weighting=0.2,
+                data_input_dict=_temperatures(days, 21),
+            ),
+            _store("sea", "Waste"),
+        ],
+        [_arc("supply_to_homes", "supply", "homes"), _arc("homes_to_sea", "homes", "sea")],
+        [{"ResidentialDemand": "create_demand"}],
+    )
+
+
+def _reservoir_spill() -> dict:
+    """D14, live: a reservoir pulls its excess through a leaking ``Distribution`` with no
+    groundwater, which returns the leak to the caller, so the pull exceeds the excess and the
+    surplus spills (``storage.py:983-989``). A town drains the reservoir each day; the tank
+    ends each day above capacity until the supply runs dry."""
+    return _storage_case(
+        [
+            _store("supply", "Storage", capacity=1e4, initial_storage=_stocked(60.0)),
+            _store("dist", "Distribution", leakage=0.2),
+            _store("res", "Reservoir", capacity=10.0, initial_storage=_stocked(5.0)),
+            _store("town", "Demand", constant_demand=3.0),
+            _store("sea", "Waste"),
+        ],
+        [
+            _arc("supply_to_dist", "supply", "dist"),
+            _arc("dist_to_res", "dist", "res", capacity=30.0),
+            _arc("res_to_town", "res", "town"),
+            _arc("town_to_sea", "town", "sea"),
+        ],
+        [{"Demand": "create_demand"}, {"Reservoir": "make_abstractions"}],
+    )
+
+
 CASES: dict[str, Case] = {
     "three_out_arcs": Case(
         build=_three_out_arcs,
@@ -621,5 +753,35 @@ CASES: dict[str, Case] = {
         days=_QUEUE_ARC_DAYS,
         scale=_largest_volume(_queue_arc()),
         replay=("a", "b", "res", "basin"),
+    ),
+    "distribution_leakage": Case(
+        build=_distribution_leakage,
+        days=_STORAGE_DAYS,
+        scale=150.0,
+        replay=("dist_gw", "dist_dry", "town"),
+    ),
+    "unlimited_distribution": Case(
+        build=_unlimited_distribution,
+        days=_STORAGE_DAYS,
+        scale=40.0,
+        replay=("mains", "town"),
+    ),
+    "demand_constant_and_loads": Case(
+        build=_demand_constant_and_loads,
+        days=_STORAGE_DAYS,
+        scale=60.0,
+        replay=("town", "village"),
+    ),
+    "residential_demand": Case(
+        build=_residential_demand,
+        days=_STORAGE_DAYS,
+        scale=500.0,
+        replay=("homes",),
+    ),
+    "reservoir_spill": Case(
+        build=_reservoir_spill,
+        days=_STORAGE_DAYS,
+        scale=60.0,
+        replay=("dist", "res", "town"),
     ),
 }

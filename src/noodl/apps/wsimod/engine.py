@@ -35,7 +35,11 @@ Decision records (spec, Diagnostics). Each is a :class:`Decision`
   ``send_push_request/{below_fa,clip}``). The storage family adds
   ``node:N/infiltrate/excess``, ``node:N/pull_check_active/clip``,
   ``node:N/pull_set_active/{clip,below_fa}``, ``node:N/push_check_river_reservoir/clip`` and
-  ``node:N/satisfy_environmental/owed``; a ``River``'s ``node:N/pull_check_river/{mrf,clip}``
+  ``node:N/satisfy_environmental/owed``; a ``Demand``'s ``node:N/create_demand/deficit`` and
+  ``node:N/create_demand/not_able_to_push:<garden|house|default>`` (``demand.py:90``, ``:114``;
+  events ``"demand_deficit"``, ``"demand_not_able_to_push"``); a leaking ``Distribution``'s
+  ``node:N/pull_set_leakage/unsuccessful`` (``distribution.py:46``; event
+  ``"leakage_not_going_to_gw"``); a ``River``'s ``node:N/pull_check_river/{mrf,clip}``
   (the ``max(.., 0)`` against the minimum residual flow and the clip to the request); a
   ``QueueGroundwater``'s frozen push-check tank (``storage.py:71``) is
   ``node:N/check_tank/get_excess/{headroom,clip}``. Later classes extend the same pattern.
@@ -228,6 +232,7 @@ def make_node(spec: NodeSpec, network: WsimodNetwork, pollutants: Pollutants) ->
 def _register_all() -> None:
     """Import every module that registers node classes."""
     import noodl.apps.wsimod.catchment  # noqa: F401
+    import noodl.apps.wsimod.demand  # noqa: F401
     import noodl.apps.wsimod.storage  # noqa: F401
 
 
