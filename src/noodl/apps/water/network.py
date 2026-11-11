@@ -1370,6 +1370,26 @@ def build_model(
             description="each junction's multiplier of its pressure-driven required demand; "
                         "water_run sets it from the demand patterns",
             over=[j.name for j in net.junctions], ordering="net.junctions", required=False)
+    if net.quality is not None and net.quality.mode != "NONE":
+        # EPANET's reaction coefficients (`water_run(quality=True)`, `QualityRouter`), SI per
+        # second; their defaults are `quality_react.pipe_coefficients`/`tank_coefficients`
+        pipes = [p.name for p in net.pipes]
+        model.input_specs["quality.bulk_coefficient"] = dict(
+            description="each pipe's bulk reaction coefficient, (quality unit)^(1-n)/s for "
+                        "the bulk order n (1/s for order 1); the file's BULK, else GLOBAL "
+                        "BULK, when not given", over=pipes, ordering="net.pipes",
+            required=False)
+        model.input_specs["quality.wall_coefficient"] = dict(
+            description="each pipe's wall reaction coefficient, m/s for wall order 1, "
+                        "quality unit x L/m2/s for order 0; the file's WALL, else the "
+                        "ROUGHNESS CORRELATION's or GLOBAL WALL, when not given", over=pipes,
+            ordering="net.pipes", required=False)
+        if net.tanks:
+            model.input_specs["quality.tank_coefficient"] = dict(
+                description="each tank's bulk reaction coefficient at the tank order, "
+                            "(quality unit)^(1-n)/s; the file's TANK, else GLOBAL BULK, "
+                            "when not given", over=[t.name for t in net.tanks],
+                ordering="net.tanks", required=False)
     if TIME_KEY in drivers:
         model.input_specs[TIME_KEY] = dict(
             description="seconds since the simulation start, which the network's AT TIME and "

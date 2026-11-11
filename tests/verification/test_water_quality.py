@@ -352,8 +352,10 @@ def _residual_admitted(path: Path, diagnostics: dict, reference, *,
     moves its actual flow); noodl's `P7` carries 1e-25 m3/s and keeps its initial
     segment. Every difference at `P7` must stay within what that residual can move: the
     scale times EPANET's `sum |q| dt` through `P7` so far over `P7`'s volume. Only for a
-    case whose EPANET `P7` flow stays below 1e-8 m3/s (a true residual). `setup` is the
-    reference's own (`epanet_quality`)."""
+    case whose EPANET `P7` flow stays below 1e-8 m3/s (a true residual), and none on a
+    network without `P7` (Net1). `setup` is the reference's own (`epanet_quality`)."""
+    if "P7" not in diagnostics["link_names"]:
+        return []
     hydraulics = epanet_hydraulics(path, setup=setup)
     flow = hydraulics["flow"][:, hydraulics["link_names"].index("P7")].abs()
     if float(flow.max()) >= 1e-8:
@@ -564,3 +566,170 @@ def test_the_quality_has_the_gradient_of_the_initial_tank_level(tmp_path):
                    - quality_at(torch.tensor(4.0 - h, dtype=F64))) / (2 * h)
     assert float(grad) != 0.0
     assert float(grad) == pytest.approx(float(central), rel=1e-5)
+
+
+# ---- reactions and water age (Task 4) ---------------------------------------------------------
+
+
+def _reacting(name: str, *, bulk: float = 0.0, wall: float = 0.0, lines=(), options=(),
+              replace=(), quality=(" J3 0.5", " J6 0.8", " T1 0.6")) -> Callable[[Path], Path]:
+    """The base with global coefficients `bulk` (per day) and `wall`, the `[REACTIONS]`
+    `lines`, the `[OPTIONS]` `options` and initial qualities at junctions and the tank."""
+    def case(tmp_path: Path) -> Path:
+        return edited(BASE, tmp_path, f"{name}.inp",
+                      replace=[(" Global Bulk  0", f" Global Bulk  {bulk}"),
+                               (" Global Wall  0", f" Global Wall  {wall}"), *replace],
+                      add={"REACTIONS": list(lines), "OPTIONS": list(options),
+                           "QUALITY": list(quality)})
+    return case
+
+
+def _net1(name: str, *, replace=(), lines=()) -> Callable[[Path], Path]:
+    """The committed Net1 (GPM, chlorine, bulk -0.5, wall -1) edited by `replace` and
+    `[REACTIONS]` `lines`."""
+    def case(tmp_path: Path) -> Path:
+        return edited(DATA / "Net1.inp", tmp_path, f"{name}.inp", replace=list(replace),
+                      add={"REACTIONS": list(lines)})
+    return case
+
+
+_NET1_6H = (" Duration           \t24:00 ", " Duration           \t6:00 ")
+_NET1_WALL0 = [(" Order Wall            \t1", " Order Wall            \t0"),
+               (" Global Wall           \t-1", " Global Wall           \t-0.05"), _NET1_6H]
+#: `test_water_parity._DW_NET1`: Net1 under Darcy-Weisbach, every pipe 0.5 millifeet.
+_DW_NET1 = [(" Headloss           \tH-W", " Headloss           \tD-W"),
+            ("100         \t0           \tOpen", "0.5         \t0           \tOpen")]
+
+_REACTION_CASES: dict[str, Callable[[Path], Path]] = {
+    "bulk_order0": _reacting("bulk_order0", bulk=-1, lines=[" Order Bulk 0"]),
+    "bulk_order1": _reacting("bulk_order1", bulk=-1),
+    "bulk_order2": _reacting("bulk_order2", bulk=-1, lines=[" Order Bulk 2"]),
+    "bulk_michaelis_menten": _reacting("bulk_mm", bulk=-1,
+                                       lines=[" Order Bulk -1", " Limiting Potential 2"]),
+    "bulk_limit_growth": _reacting("bulk_growth", bulk=1, lines=[" Limiting Potential 2"]),
+    "bulk_limit_decay": _reacting("bulk_decay", bulk=-1, lines=[" Limiting Potential 0.3"]),
+    "wall_order0_si": _reacting("wall_order0", wall=-200, lines=[" Order Wall 0"]),
+    "wall_order1": _reacting("wall_order1", wall=-0.05),
+    "wall_order1_mass_transfer": _reacting("wall_mass_transfer", wall=-5),
+    "wall_diffusivity_zero": _reacting("wall_diffusivity_zero", wall=-0.05,
+                                       options=[" Diffusivity 0"]),
+    "wall_order0_diffusivity_zero": _reacting("wall_order0_diffusivity_zero", wall=-200,
+                                              lines=[" Order Wall 0"],
+                                              options=[" Diffusivity 0"]),
+    "wall_order0_us": _net1("wall_order0_us", replace=_NET1_WALL0),
+    "roughness_hazen_williams": _reacting(
+        "roughness_hw", wall=-0.2, lines=[" Roughness Correlation -12", " Wall P1 -0.02"]),
+    "roughness_darcy_weisbach_us": _net1("roughness_dw_us", replace=_DW_NET1,
+                                         lines=[" Roughness Correlation -1"]),
+    "tank_reaction": _reacting("tank_reaction", lines=[" Tank T1 -2", " Order Tank 2"]),
+    "age": _reacting("age", quality=(" J3 2", " T1 5"),
+                     replace=[(" Quality    CHEMICAL mg/L", " Quality    AGE")]),
+    "reactive_dead_end": _reacting(
+        "reactive_dead_end", bulk=-1, quality=(" J5 0.4", " T1 0.6"),
+        replace=[(" P7   J2     J5     300     100       120        0          Open",
+                  " P7   J2     J5     300     100       120        0          Closed")]),
+    "reactive_check_valve": _reacting(
+        "reactive_check_valve", bulk=-1, wall=-0.3,
+        replace=[(" P5   J3     J4     1500    150       120        0          Open",
+                  " P5   J3     J4     1500    150       120        0          CV")]),
+}
+QUALITY_CASES.update(_REACTION_CASES)
+
+
+def _matches(tmp_path: Path, case: str):
+    """`_compare` with the worst difference over the scale noted (`found["relative"]`)."""
+    results, diagnostics, reference, found = _compare(tmp_path, case)
+    found["relative"] = found["worst"] / found["scale"]
+    return results, diagnostics, reference, found
+
+
+def _quality(results, name: str) -> torch.Tensor:
+    return results.node_quality[:, results.node_names.index(name)]
+
+
+@pytest.mark.parametrize("case", ["order0", "order1", "order2", "michaelis_menten",
+                                  "limit_growth", "limit_decay"])
+def test_bulk_reaction_matches_epanet(tmp_path, case):
+    """`bulkrate` in every pipe and the tank (the tank at the global BULK, `adjustdata`):
+    orders 0, 1, 2, Michaelis-Menten (order -1 with `Climit` 2) and a limiting potential
+    for growth (`kb` +1/day to 2 mg/L) and decay (-1/day to 0.3 mg/L), explicit Euler per
+    quality step (`pipereact`). MEASURED: `_matches`' relative worst, in the report."""
+    results, _, reference, _ = _matches(tmp_path, f"bulk_{case}")
+    t1 = _quality(results, "T1")
+    if case == "limit_growth":
+        assert float(t1[-1]) > 1.0          # grown past the source's 1 mg/L
+    elif case == "limit_decay":
+        assert 0.3 < float(t1[-1]) < 0.6
+    else:
+        assert float(t1[-1]) < 1.0          # below the source's 1 mg/L
+
+
+@pytest.mark.parametrize("case", ["order0_si", "order1", "order1_mass_transfer",
+                                  "diffusivity_zero", "order0_diffusivity_zero", "order0_us"])
+def test_wall_reaction_matches_epanet(tmp_path, case):
+    """`wallrate` with `piperate`'s mass transfer (the Reynolds number from each hydraulic
+    step's flow, `ratecoeffs`; DIFFUSIVITY 1, chlorine's, by default): order 0 (-200
+    mg/m2/day in the LPS base, mass-transfer limited where the flow is low or the
+    concentration small; -0.05 mg/ft2/day in the GPM Net1, 6 h) and order 1 (-0.05
+    m/day), a wall coefficient large enough that the mass transfer limits it everywhere
+    (-5 m/day), and DIFFUSIVITY 0 (no limitation: order 0 `BIG`, order 1 `4 kw / d`)."""
+    results, *_ = _matches(tmp_path, f"wall_{case}")
+    assert float(results.node_quality[-1].min()) >= 0.0
+
+
+@pytest.mark.parametrize("limited, free", [("wall_order1", "wall_diffusivity_zero"),
+                                           ("wall_order0_si", "wall_order0_diffusivity_zero")],
+                         ids=["order1", "order0"])
+def test_the_mass_transfer_limits_the_wall_reaction(tmp_path, limited, free):
+    """The same wall coefficient with and without DIFFUSIVITY: in EPANET the mass transfer
+    slows it by more than the parity's bound (1e-5), so the cases matched in
+    `test_wall_reaction_matches_epanet` tell the two apart. MEASURED at `T1`, 24 h: order 1
+    1.0e-3, order 0 (-200 mg/m2/day) 3.1e-4 apart."""
+    limited = epanet_quality(_REACTION_CASES[limited](tmp_path))
+    free = epanet_quality(_REACTION_CASES[free](tmp_path))
+    t1 = limited.node_names.index("T1")
+    assert float(limited.node[-1, t1]) - float(free.node[-1, t1]) > 1e-4
+
+
+@pytest.mark.parametrize("case", ["hazen_williams", "darcy_weisbach_us"])
+def test_roughness_correlation_matches_epanet(tmp_path, case):
+    """ROUGHNESS CORRELATION for the pipes without their own WALL (`adjustdata`, before
+    `convertunits`): H-W `F / C` on the base (`P1` keeps its own -0.02 m/day), D-W `F /
+    |ln(e/d)|` on Net1 under Darcy-Weisbach (`_DW_NET1`), `e/d` in millifeet over inches."""
+    _matches(tmp_path, f"roughness_{case}")
+
+
+def test_tank_reaction_matches_epanet(tmp_path):
+    """`tankreact`: the tank's own coefficient (`TANK T1 -2`, L/mg/day) at the tank order
+    (`ORDER TANK 2`); the pipes do not react (global BULK 0)."""
+    results, *_ = _matches(tmp_path, "tank_reaction")
+    assert float(_quality(results, "T1")[-1]) < 0.6
+
+
+def test_water_age_matches_epanet(tmp_path):
+    """QUALITY AGE: every pipe and tank segment ages `dt / 3600` h per quality step
+    (`pipereact`, `tankreact`); the reservoir keeps its initial age, 1 h (`[QUALITY] R1
+    1.0`)."""
+    results, *_ = _matches(tmp_path, "age")
+    assert results.quality_units == "hrs"
+    assert bool((_quality(results, "R1") == 1.0).all())
+    assert float(_quality(results, "T1")[-1]) > 1.0
+
+
+def test_a_reactive_dead_end_junction_matches_epanet(tmp_path):
+    """`J5` behind the closed `P7` has no inflow: with a reactive chemical it takes the mean
+    of its links' adjoining segments (`noflowqual`, `findnodequal`), `P7`'s decaying
+    segment, not its initial 0.4 mg/L."""
+    results, *_ = _matches(tmp_path, "reactive_dead_end")
+    j5 = _quality(results, "J5")
+    assert float(j5[0]) == 0.4
+    assert float(j5[-1]) == pytest.approx(0.4 * (1 - 300 / 86400) ** (24 * 12), rel=1e-9)
+
+
+def test_a_check_valve_pipe_does_not_react_like_epanet(tmp_path):
+    """Review Focus 1: `P5` made a check-valve pipe under bulk and wall decay: `reactpipes`
+    reacts only `Type == PIPE`, and a CVPIPE holds no segment (`initsegs`); the network
+    matches EPANET's."""
+    _, diagnostics, *_ = _matches(tmp_path, "reactive_check_valve")
+    chain = diagnostics["link_names"].index("P5")
+    assert all(counts[chain] == 0 for counts in diagnostics["quality"][0]["segments"])

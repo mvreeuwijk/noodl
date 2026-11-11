@@ -38,8 +38,17 @@ from collections.abc import Mapping, Sequence
 
 import torch
 
+from noodl.apps.water.elements import NU_WATER_FT2
 from noodl.apps.water.quality_data import WaterQuality
-from noodl.apps.water.units import Q_STAGNANT_CFS, rounded_cfs_per_m3s
+from noodl.apps.water.quality_react import (
+    BULK_TINY,
+    bulk_rate,
+    pipe_coefficients,
+    tank_coefficients,
+    wall_coefficients,
+    wall_rate,
+)
+from noodl.apps.water.units import M_PER_FT, Q_STAGNANT_CFS, rounded_cfs_per_m3s
 
 Tensor = torch.Tensor
 F64 = torch.float64
@@ -92,7 +101,8 @@ class SegmentPool:
     ones are unused), each segment's `prev` (the segment behind it, upstream; -1 is NULL)
     and `owner` chain, and per chain its `first` (leading, downstream: `FirstSeg`) and
     `last` (upstream: `LastSeg`) segment, -1 when the chain is empty. A used-up segment is
-    recycled through the free list (`free`, chained by `prev`), as EPANET recycles it.
+    recycled through the free list (`free`, chained by `prev`), as EPANET recycles it, its
+    `owner` set to -1.
 
     The quality step works on scalars (`open`/`close`): `open` takes the values out once
     (detached, one `tolist`; `attached`, 0-d tensors that keep the graph), the node loop
@@ -181,6 +191,7 @@ class SegmentPool:
         if self.first[chain] < 0:
             self.last[chain] = -1
         self.prev[seg] = self.free
+        self.owner[seg] = -1
         self.free = seg
 
     def reverse(self, chain: int) -> None:
@@ -311,14 +322,6 @@ def _interp(points, x):
 
 def _refuse_later_features(net, quality: WaterQuality) -> None:
     """The features of later tasks, refused by name until they are modelled."""
-    if quality.mode == "AGE":
-        raise ValueError("quality: QUALITY AGE (water age) is not yet modelled")
-    reactive = (quality.global_bulk, quality.global_wall, quality.roughness_correlation,
-                *quality.pipe_bulk.values(), *quality.pipe_wall.values(),
-                *quality.tank_bulk.values())
-    if quality.mode == "CHEMICAL" and any(k != 0.0 for k in reactive):
-        raise ValueError("quality: [REACTIONS] with a nonzero bulk, wall, tank or "
-                         "roughness-correlation coefficient are not yet modelled")
     if quality.sources:
         raise ValueError("quality: [SOURCES] (quality sources) are not yet modelled")
     for tank in net.tanks:
@@ -337,6 +340,16 @@ class QualityRouter:
     network's initial qualities (`quality.initial`, 0 where absent);
     `inputs["quality.tank_level"]` (n_tanks, m) the tanks' initial levels (`water_run`
     passes its initial state's), from which their initial segment volumes are taken.
+    `inputs["quality.bulk_coefficient"]`, `["quality.wall_coefficient"]` (n_pipes,
+    `net.pipes` order) and `["quality.tank_coefficient"]` (n_tanks, `net.tanks`), SI per
+    second (`WaterQuality`), replace the network's reaction coefficients
+    (`quality_react.pipe_coefficients`, `tank_coefficients`), the wall's after its roughness
+    correlation; they keep their graph. A reactive substance (EPANET's `Reactflag`,
+    `setreactflag`: AGE, or a CHEMICAL with a nonzero pipe or tank coefficient) reacts in
+    every quality step before its transport (`react`), the mass it lost kept in `reacted`
+    (quality x m3; EPANET's `MassBalance.reacted`). A CHEMICAL whose coefficients require a
+    gradient reacts even at zero coefficients (adding exactly 0), so their derivative is
+    kept; `noflowqual` still follows `Reactflag`.
     `quality_step` is the quality step (s, `quality_step`). `attached` keeps the autograd
     graph (module docstring). `diagnostics`, a dict, receives under `"quality"` a list
     with one dict for this run: `"times"` (s) and `"node_quality"`, `"link_quality"`
@@ -423,6 +436,7 @@ class QualityRouter:
                           c0[node_index[tank.name]])
         self.pool.close()
 
+        self._init_reactions(net, quality, inputs, attached)
         self.direction = [0] * n_links         # `FlowDir`, ZERO_FLOW at the start
         self.order: list[int] = []              # `SortedNodes`, none until the first sort
         self.diagnostics = None
@@ -432,6 +446,58 @@ class QualityRouter:
                 "cycle_breaks": [], "reversals": [], "segments": [], "inflow_volume": [],
                 "inflow_mass": [], "outflow_volume": []}
             diagnostics.setdefault("quality", []).append(self.diagnostics)
+
+    def _init_reactions(self, net, quality: WaterQuality, inputs: Mapping[str, Tensor],
+                        attached: bool) -> None:
+        """The reaction coefficients (`adjustdata`, or `inputs`), `Reactflag`
+        (`setreactflag`, `qualreact.c`: TRACE never reacts, AGE always does, a CHEMICAL when
+        any pipe's (check-valve pipes included) bulk or wall coefficient or any tank's is
+        nonzero, read detached) and the chain kinds the reactions gather by: 1 a pipe
+        (`Type == PIPE`: not a check-valve pipe, a pump or a valve), 2 a tank, 0 none; one
+        more entry 0 for a free segment's owner -1."""
+        n_pipes, n_tanks = len(net.pipes), len(net.tanks)
+        kb, kw = pipe_coefficients(net, quality)
+        kt = tank_coefficients(net, quality)
+        given = []
+        for key, default, what, count in (("quality.bulk_coefficient", kb, "pipe", n_pipes),
+                                          ("quality.wall_coefficient", kw, "pipe", n_pipes),
+                                          ("quality.tank_coefficient", kt, "tank", n_tanks)):
+            value = inputs.get(key)
+            if value is None:
+                given.append(default)
+                continue
+            if tuple(value.shape) != (count,):
+                raise ValueError(f"quality: {key} has the shape {tuple(value.shape)}; it "
+                                 f"takes one value per {what}, ({count},)")
+            value = value.to(F64)
+            given.append(value if attached else value.detach())
+        self.kb, self.kw, self.kt = given
+        if self.mode == "TRACE":
+            self.reactive = False
+        elif self.mode == "AGE":
+            self.reactive = True
+        else:
+            self.reactive = any(bool((x.detach() != 0).any()) for x in given)
+        # the reactions run when EPANET's do, and in a CHEMICAL run whose coefficients ask
+        # for a gradient: at a zero coefficient they add exactly 0 and carry its derivative
+        self.reacts = self.reactive or (self.mode == "CHEMICAL" and attached and any(
+            key in inputs and inputs[key].requires_grad
+            for key in ("quality.bulk_coefficient", "quality.wall_coefficient",
+                        "quality.tank_coefficient")))
+        self.limit = float(quality.limiting_potential)
+        self.bulk_order = float(quality.bulk_order)
+        self.wall_order = float(quality.wall_order)
+        self.tank_order = float(quality.tank_order)
+        self.diffusivity = float(quality.diffusivity)
+        self.viscosity = float(net.options.viscosity) * NU_WATER_FT2 * M_PER_FT**2
+        self.pipe_diameter = torch.tensor([p.diameter for p in net.pipes], dtype=F64)
+        self.pipe_length = torch.tensor([p.length for p in net.pipes], dtype=F64)
+        self.rc = torch.zeros(n_pipes, dtype=F64)      # `Rc`, set by `ratecoeffs`
+        kinds = [0 if p.status.upper() == "CV" else 1 for p in net.pipes]
+        kinds += [0] * (self.n_links - n_pipes) + [2] * n_tanks + [0]
+        self._chain_kind = torch.tensor(kinds, dtype=torch.long)
+        self.n_pipes = n_pipes
+        self.reacted = torch.zeros((), dtype=F64)
 
     # ---- results -------------------------------------------------------------------
 
@@ -489,6 +555,14 @@ class QualityRouter:
         EPANET's own flow units (`flow_volume_scale`)."""
         shut = closed.tolist()
         flow, demand = flow * self.flow_scale, demand * self.flow_scale
+        if self.reacts and self.mode != "AGE":
+            # `ratecoeffs` (`qualreact.c`), once per hydraulic step, from EPANET's `LinkFlow`
+            # (0 when CLOSED, as `piperate` takes it)
+            pipes = flow[: self.n_pipes]
+            pipes = torch.where(closed[: self.n_pipes], torch.zeros_like(pipes), pipes)
+            self.rc = wall_coefficients(pipes, self.pipe_diameter, self.pipe_length, self.kw,
+                                        order=self.wall_order, viscosity=self.viscosity,
+                                        diffusivity=self.diffusivity)
         if self.attached:
             values = list(flow.unbind())
             demands = list(demand.unbind())
@@ -547,7 +621,10 @@ class QualityRouter:
         and counts the outflow of the others (`|LINKFLOW|`) and, at a junction, its
         demand when positive; its quality follows (`findnodequal`) and is released into
         its outflow links (`evalnodeoutflow`). A stagnant link (direction 0) counts as
-        flowing from its first node to its second, with its actual flow."""
+        flowing from its first node to its second, with its actual flow. A reactive
+        substance reacts first (`reactpipes`, `reacttanks`: `react`)."""
+        if self.reacts:
+            self.react(dt)
         pool = self.pool
         pool.open()
         record = self.diagnostics is not None
@@ -581,6 +658,44 @@ class QualityRouter:
             self.diagnostics["inflow_mass"].append(inflow_m)
             self.diagnostics["outflow_volume"].append(outflow_v)
 
+    def react(self, dt: int) -> None:
+        """`reactpipes` and `reacttanks` (`qualreact.c`) over `dt` s, one vectorised update
+        of the pool: every segment of a pipe (`Type == PIPE`) and of a tank takes
+        `max(0, c + dc)` (`pipereact`, `tankreact`; explicit Euler), its coefficients
+        gathered by its chain. AGE: `dc = dt / 3600` h. A CHEMICAL: a pipe's `dc =
+        bulk_rate(c, kb, ORDER BULK) dt + wall_rate(c, d, kw, Rc, ORDER WALL) dt`, a tank's
+        `bulk_rate(c, kt, ORDER TANK) dt`. The mass lost, `(c - c_new) v`, adds to
+        `reacted`."""
+        pool = self.pool
+        n = pool.size
+        if n == 0:
+            return
+        owner = torch.tensor(pool.owner, dtype=torch.long)
+        kind = self._chain_kind[owner]
+        pipe = (kind == 1).nonzero().squeeze(1)
+        tank = (kind == 2).nonzero().squeeze(1)
+        index = torch.cat([pipe, tank])
+        if index.numel() == 0:
+            return
+        c = pool.c[:n]
+        if self.mode == "AGE":
+            new = torch.clamp(c[index] + dt / 3600.0, min=0.0)
+        else:
+            k = owner[pipe]
+            cp = c[pipe]
+            rbulk = bulk_rate(cp, self.kb[k], self.bulk_order, self.limit, BULK_TINY)
+            rwall = wall_rate(cp, self.pipe_diameter[k], self.kw[k], self.rc[k],
+                              order=self.wall_order)
+            new_pipe = torch.clamp(cp + (rbulk * dt + rwall * dt), min=0.0)
+            i = owner[tank] - self.n_links
+            ct = c[tank]
+            rtank = bulk_rate(ct, self.kt[i], self.tank_order, self.limit, BULK_TINY)
+            new_tank = torch.clamp(ct + rtank * dt, min=0.0)
+            new = torch.cat([new_pipe, new_tank])
+        old = c[index]
+        self.reacted = self.reacted + ((old - new) * pool.v[index]).sum()
+        pool.c = pool.c.index_put((index,), new)
+
     def _inflow(self, k: int, dt: int, volin, massin):
         """`evalnodeinflow` (`qualroute.c`): the volume `|q| dt` of link `k` taken from its
         leading segments into its downstream node, each used-up segment removed; the
@@ -606,20 +721,42 @@ class QualityRouter:
     def _node_quality(self, n: int, volin, massin, volout, dt: int):
         """`findnodequal` (`qualroute.c`): a junction's quality is its inflow's mass over
         its volume, the volume diluted by a negative demand (`volin -= MIN(0, demand)
-        dt`); with no inflow it keeps its quality (nothing reacts: `noflowqual` is for a
-        reactive substance). A tank mixes its inflow by its model (`mixtank`; MIXED:
-        `tankmix1`). A reservoir keeps its quality. In TRACE the trace node holds 100
-        (`SourceQual` 100 at a reservoir, else `max(100 - quality, 0)`). The quality
-        released downstream is returned."""
+        dt`); with no inflow it keeps its quality, or, for a reactive substance, takes its
+        links' adjoining segments' mean (`noflowqual`). A tank mixes its inflow by its model
+        (`mixtank`; MIXED: `tankmix1`). A reservoir keeps its quality. In TRACE the trace
+        node holds 100 (`SourceQual` 100 at a reservoir, else `max(100 - quality, 0)`).
+        The quality released downstream is returned."""
         if self.junction[n]:
             volin = volin - min(0.0, self.demand[n]) * dt
             if _value(volin) > 0.0:
                 self.node[n] = massin / volin
+            elif self.reactive:
+                self.node[n] = self._no_flow_quality(n)
         elif n in self.tank_of:
             self.node[n] = self._mix_tank(self.tank_of[n], volin, massin, volin - volout)
         if self.mode == "TRACE" and n == self.trace:
             self.node[n] = TRACE_QUALITY
         return self.node[n]
+
+    def _no_flow_quality(self, n: int):
+        """`noflowqual` (`qualroute.c`): the mean, over node `n`'s links (its adjacency
+        order), of the segment at `n`'s end of each: the leading one (`FirstSeg`) of a link
+        whose flow ends at `n` (`N2 == n` and direction >= 0, or `N1 == n` and direction <
+        0), else the last one (`LastSeg`); a link without segments is left out, and 0 when
+        none has one."""
+        pool = self.pool
+        total, count = 0.0, 0
+        for k in self.adjacency[n]:
+            u, v = self.ends[k]
+            d = self.direction[k]
+            inflow = (v == n and d >= 0) or (u == n and d < 0)
+            if inflow and pool.first[k] >= 0:
+                total = total + pool.cs[pool.first[k]]
+                count += 1
+            elif not inflow and pool.last[k] >= 0:
+                total = total + pool.cs[pool.last[k]]
+                count += 1
+        return total / count if count else 0.0
 
     def _mix_tank(self, i: int, vin, win, vnet):
         """`mixtank` and `tankmix1` (`qualreact.c`), a completely mixed tank: its segment's

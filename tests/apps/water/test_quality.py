@@ -3,13 +3,14 @@ the initial segments, the reversal rule, the quality step, an attached run and t
 Parity with EPANET itself is `tests/verification/test_water_quality.py`."""
 
 import dataclasses
+import math
 from pathlib import Path
 
 import pytest
 import torch
 
 from noodl.apps.water.inp import read_epanet_inp
-from noodl.apps.water.network import build_model, initial_state
+from noodl.apps.water.network import build_model, initial_drivers, initial_state
 from noodl.apps.water.quality import (
     LINKVOL_FACTOR,
     QualityRouter,
@@ -18,6 +19,16 @@ from noodl.apps.water.quality import (
     sort_nodes,
 )
 from noodl.apps.water.quality_data import QualitySource
+from noodl.apps.water.quality_react import (
+    BULK_TINY,
+    EPANET_LITRES_PER_M3,
+    WALL_BIG,
+    bulk_rate,
+    pipe_coefficients,
+    tank_coefficients,
+    wall_coefficients,
+    wall_rate,
+)
 from noodl.apps.water.simulate import water_run
 
 F64 = torch.float64
@@ -182,9 +193,6 @@ def test_an_attached_run_equals_a_detached_run():
 
 
 @pytest.mark.parametrize("change, match", [
-    (dict(mode="AGE", units="hrs"), "AGE"),
-    (dict(global_bulk=-1e-5), "REACTIONS"),
-    (dict(pipe_wall={"P1": -1e-6}), "REACTIONS"),
     (dict(sources=(QualitySource("J1", "MASS", 1.0),)), "SOURCES"),
     (dict(mixing={"T1": ("FIFO", 1.0)}), "MIXING"),
 ])
@@ -226,3 +234,272 @@ def test_a_quality_input_without_quality_is_refused(quality):
     state["quality.initial"] = torch.zeros(len(model.node_names), dtype=F64)
     with pytest.raises(ValueError, match="quality.initial"):
         water_run(model, state, duration=3600, quality=quality)
+
+
+# ---- reactions and water age (`quality_react`; `qualreact.c`) -------------------------------
+
+def _t(*values):
+    return torch.tensor(values, dtype=F64)
+
+
+def test_bulk_rate_by_hand():
+    """`bulkrate` (`qualreact.c`): order n `kb c^n` (order 0 `kb`); with a limiting potential
+    `c1 = max(0, sgn(kb) (Climit - c))` times `c^(n-1)`; Michaelis-Menten (order < 0) `kb c /
+    (Climit + sgn(kb) c)`, the denominator floored at `+-TINY` (EPANET's 1e-6 mass/ft3 in
+    quality units); a negative potential is 0."""
+    c = _t(0.0, 0.5, 2.0)
+    kb = torch.tensor(-0.3, dtype=F64)
+    assert torch.equal(bulk_rate(c, kb, 1.0, 0.0, BULK_TINY), kb * c)
+    assert torch.equal(bulk_rate(c, kb, 0.0, 0.0, BULK_TINY), kb.expand(3))
+    assert torch.equal(bulk_rate(c, kb, 2.0, 0.0, BULK_TINY), kb * c * c)
+    assert torch.allclose(bulk_rate(c, kb, 1.5, 0.0, BULK_TINY), kb * c**1.5, rtol=1e-15,
+                          atol=0.0)
+    growth = bulk_rate(_t(0.5, 3.0), torch.tensor(0.5, dtype=F64), 1.0, 2.0, BULK_TINY)
+    assert growth.tolist() == [0.75, 0.0]
+    decay = bulk_rate(_t(1.0, 0.1), torch.tensor(-0.5, dtype=F64), 1.0, 0.2, BULK_TINY)
+    assert decay.tolist() == pytest.approx([-0.4, 0.0], abs=1e-15)
+    mm = bulk_rate(_t(1.0), torch.tensor(-1.0, dtype=F64), -1.0, 2.0, BULK_TINY)
+    assert mm.tolist() == [-1.0]
+    # |Climit + sgn(kb) c| < TINY: +TINY at 0 (SGN(0) = 1), -TINY below (then clamped at 0)
+    assert BULK_TINY == 1e-6 / 28.317
+    edge = bulk_rate(_t(1.0, 1.0 + BULK_TINY / 2), torch.tensor(-1.0, dtype=F64), -1.0, 1.0,
+                     BULK_TINY)
+    assert edge.tolist() == [-1.0 / BULK_TINY, 0.0]
+
+
+_NU = 1.1e-5 * 0.3048**2          # VISCOS, m2/s
+_DIFF = 1.3e-8 * 0.3048**2        # DIFFUS, m2/s
+
+
+def _reynolds_flow(re, d):
+    return torch.tensor(re * torch.pi * d * _NU / 4.0, dtype=F64)
+
+
+def test_wall_coefficients_by_hand():
+    """`piperate` (`qualreact.c`): Sherwood 2 below Re 1, Graetz's `3.65 + 0.0668 y / (1 +
+    0.04 y^0.667)`, `y = (d/L) Re Sc`, below 2300, Notter-Sleicher's `0.0149 Re^0.88
+    Sc^0.333` above; `kf = Sh D / d`; order 0 gives `kf`, order 1 `(4/d) kw kf / (kf +
+    |kw|)`; DIFFUSIVITY 0 (`Sc = 0`): order 0 `BIG` (1e10 ft/s), order 1 `4 kw / d`; a pipe
+    without a wall coefficient 0 (`ratecoeffs`)."""
+    d, length, kw = 0.15, 400.0, -2e-6
+    sc = _NU / _DIFF
+    diameter = _t(d, d, d, d)
+    lengths = _t(length, length, length, length)
+    walls = _t(kw, kw, kw, 0.0)
+    flow = torch.stack([-_reynolds_flow(0.5, d), _reynolds_flow(1000.0, d),
+                        _reynolds_flow(1e4, d), _reynolds_flow(1e4, d)])
+    y = d / length * 1000.0 * sc
+    sh = [2.0, 3.65 + 0.0668 * y / (1 + 0.04 * y**0.667), 0.0149 * 1e4**0.88 * sc**0.333]
+    kf = [s * _DIFF / d for s in sh]
+    order0 = wall_coefficients(flow, diameter, lengths, walls, order=0.0, viscosity=_NU,
+                               diffusivity=_DIFF)
+    assert order0.tolist() == pytest.approx([*kf, 0.0], rel=1e-12)
+    order1 = wall_coefficients(flow, diameter, lengths, walls, order=1.0, viscosity=_NU,
+                               diffusivity=_DIFF)
+    assert order1.tolist() == pytest.approx(
+        [4.0 / d * kw * k / (k + abs(kw)) for k in kf] + [0.0], rel=1e-12)
+    off0 = wall_coefficients(flow, diameter, lengths, walls, order=0.0, viscosity=_NU,
+                             diffusivity=0.0)
+    assert off0.tolist() == [WALL_BIG] * 3 + [0.0]
+    assert WALL_BIG == pytest.approx(3.048e9, rel=1e-15)
+    off1 = wall_coefficients(flow, diameter, lengths, walls, order=1.0, viscosity=_NU,
+                             diffusivity=0.0)
+    assert off1.tolist() == pytest.approx([4.0 * kw / d] * 3 + [0.0], rel=1e-15)
+
+
+def test_wall_rate_is_mass_transfer_limited():
+    """`wallrate` (`qualreact.c`), order 0: the smaller in magnitude of the mass transfer
+    `sgn(kw) c kf` and the reaction `kw` (mass per m2 s, over EPANET's litres per m3: its
+    `LperFT3 = 28.317` over the exact ft3), times `4/d`; order 1 `c Rc`; 0 without a wall
+    coefficient."""
+    assert EPANET_LITRES_PER_M3 == 28.317 / 0.3048**3
+    d = _t(0.1, 0.1, 0.1)
+    c = _t(1.0, 1.0, 1.0)
+    kf = _t(1e-6, 1e-6, 1e-6)
+    kw = _t(-1.0, -1e-6, 0.0)
+    rate = wall_rate(c, d, kw, kf, order=0.0)
+    assert rate.tolist() == pytest.approx([-1e-6 * 40.0, -1e-6 / EPANET_LITRES_PER_M3 * 40.0,
+                                           0.0], rel=1e-15)
+    rc = _t(-3e-5, -3e-5, 0.0)
+    assert wall_rate(_t(0.5, 2.0, 1.0), d, kw, rc, order=1.0).tolist() == [-1.5e-5, -6e-5,
+                                                                          0.0]
+
+
+def test_pipe_coefficients_with_a_roughness_correlation():
+    """`adjustdata` (`input1.c`): a pipe's own BULK and WALL, else the global; a pipe without
+    its own WALL under ROUGHNESS CORRELATION `F` takes H-W `F / C`, D-W `F / |ln(e/d)|`
+    (`e/d` in the FILE's units: mm over mm, or millifeet over inches, 83.33 e/d, in a US
+    file) and C-M `F n`; `F = 0` takes the global. A tank its own TANK, else the global
+    BULK."""
+    net = read_epanet_inp(BASE)
+    names = [p.name for p in net.pipes]
+    p2 = net.pipes[names.index("P2")]
+    quality = dataclasses.replace(net.quality, global_bulk=-1e-5, global_wall=-3e-6,
+                                  pipe_bulk={"P3": -2e-5}, pipe_wall={"P1": -4e-6},
+                                  roughness_correlation=-1.2e-4)
+    kb, kw = pipe_coefficients(net, quality)
+    assert kb.tolist() == [-2e-5 if n == "P3" else -1e-5 for n in names]
+    assert kw[names.index("P1")] == -4e-6
+    assert float(kw[names.index("P2")]) == -1.2e-4 / 120.0
+    _, kw = pipe_coefficients(net, dataclasses.replace(quality, roughness_correlation=0.0))
+    assert kw.tolist() == [-4e-6 if n == "P1" else -3e-6 for n in names]
+    # Darcy-Weisbach, e = 0.15 mm: SI e/d, US e/d * 1000 * 0.0254 / 0.3048
+    pipes = tuple(dataclasses.replace(p, roughness=0.15e-3) for p in net.pipes)
+    dw = dataclasses.replace(net, headloss="D-W", pipes=pipes)
+    _, kw = pipe_coefficients(dw, quality)
+    ratio = 0.15e-3 / p2.diameter
+    assert float(kw[names.index("P2")]) == pytest.approx(
+        -1.2e-4 / abs(math.log(ratio)), rel=1e-14)
+    us = dataclasses.replace(dw, options=dataclasses.replace(dw.options, flow_units="GPM"))
+    _, kw = pipe_coefficients(us, quality)
+    assert float(kw[names.index("P2")]) == pytest.approx(
+        -1.2e-4 / abs(math.log(ratio * 1000 * 0.0254 / 0.3048)), rel=1e-14)
+    assert 1000 * 0.0254 / 0.3048 == pytest.approx(83.333, rel=1e-5)
+    pipes = tuple(dataclasses.replace(p, roughness=0.012) for p in net.pipes)
+    cm = dataclasses.replace(net, headloss="C-M", pipes=pipes)
+    _, kw = pipe_coefficients(cm, quality)
+    assert float(kw[names.index("P2")]) == -1.2e-4 * 0.012
+    assert kw[names.index("P1")] == -4e-6
+    tanks = tank_coefficients(net, quality)
+    assert tanks.tolist() == [-1e-5]
+    tanks = tank_coefficients(net, dataclasses.replace(quality, tank_bulk={"T1": -7e-6}))
+    assert tanks.tolist() == [-7e-6]
+
+
+def test_a_check_valve_pipe_and_the_pumps_and_valves_never_react():
+    """`reactpipes` reacts only `Type == PIPE` (`types.h`: `CVPIPE = 0`, `PIPE = 1`): a
+    segment put into the check-valve pipe `P5`, the pump `PU1` or the valve `V1` keeps its
+    quality while `P1`'s and the tank's decay (`reacttanks`); the mass reacted is kept."""
+    net = read_epanet_inp(BASE)
+    pipes = tuple(dataclasses.replace(p, status="CV") if p.name == "P5" else p
+                  for p in net.pipes)
+    net = dataclasses.replace(net, pipes=pipes, quality=dataclasses.replace(
+        net.quality, global_bulk=-1.0 / 86400, initial={"J1": 1.0, "T1": 1.0}))
+    model, router = _router(net)
+    names = model.link_names
+    for name in ("P5", "PU1", "V1"):
+        router.pool.add(names.index(name), 1.0, 1.0)
+    before = router.pool.c.clone()
+    router.react(300)
+    pool = router.pool
+    for name in ("P5", "PU1", "V1"):
+        (seg,) = pool.segments(names.index(name))
+        assert float(pool.c[seg]) == 1.0
+    (p1,) = pool.segments(names.index("P1"))        # at J1's quality, 1
+    (tank,) = pool.segments(len(names))
+    assert float(pool.c[p1]) == pytest.approx(1.0 - 300 / 86400, rel=1e-15)
+    assert float(pool.c[tank]) == pytest.approx(1.0 - 300 / 86400, rel=1e-15)
+    assert float(router.reacted) == pytest.approx(
+        float(((before - pool.c) * pool.v).sum()), rel=1e-12)
+    assert float(router.reacted) > 300 / 86400 * float(pool.v[p1] + pool.v[tank])
+
+
+def test_water_age_adds_the_step_to_every_pipe_and_tank_segment():
+    """`pipereact`/`tankreact` under AGE: `c + dt / 3600` hours, in pipes and tanks only."""
+    model, router = _router(_base(mode="AGE", units="hrs", initial={}))
+    names = model.link_names
+    router.pool.add(names.index("PU1"), 1.0, 0.0)
+    router.react(300)
+    pool = router.pool
+    for k, name in enumerate(names):
+        for seg in pool.segments(k):
+            assert float(pool.c[seg]) == (0.0 if name == "PU1" else 300 / 3600)
+    (tank,) = pool.segments(len(names))
+    assert float(pool.c[tank]) == 300 / 3600
+
+
+def _reactive_base(**changes):
+    return _base(global_bulk=-1.0 / 86400, global_wall=-0.3 / 86400,
+                 initial={"R1": 1.0, "T1": 0.6}, **changes)
+
+
+@pytest.mark.parametrize("key, count", [("quality.bulk_coefficient", "pipes"),
+                                        ("quality.wall_coefficient", "pipes"),
+                                        ("quality.tank_coefficient", "tanks")])
+def test_the_quality_has_the_gradient_of_each_reaction_coefficient(key, count):
+    """d(J4's and T1's quality at 4 h)/d(the coefficients given as drivers) by autograd
+    against a central difference (h = 1e-3 of each): the reaction coefficients are
+    differentiable inputs (`quality.bulk_coefficient`, `quality.wall_coefficient`,
+    `quality.tank_coefficient`, SI per second)."""
+    net = _reactive_base()
+    model, _, _ = build_model(net)
+    kb, kw = pipe_coefficients(net, net.quality)
+    base = {"quality.bulk_coefficient": kb, "quality.wall_coefficient": kw,
+            "quality.tank_coefficient": tank_coefficients(net, net.quality)}[key]
+    assert base.shape == (len(getattr(net, count)),)
+    nodes = [model.node_names.index(n) for n in ("J4", "T1")]
+    weights = torch.tensor([1.0, 0.5], dtype=F64)
+
+    def objective(value):
+        drivers = initial_drivers(model)
+        drivers[key] = value
+        run = water_run(model, drivers=drivers, duration=4 * 3600, quality=True)
+        return (run.node_quality[-1, nodes] * weights).sum()
+
+    value = base.clone().requires_grad_(True)
+    (grad,) = torch.autograd.grad(objective(value), value)
+    assert float(grad.abs().max()) > 0
+    with torch.no_grad():
+        for i in range(base.numel()):
+            h = 1e-3 * abs(float(base[i]))
+            up, down = base.clone(), base.clone()
+            up[i] += h
+            down[i] -= h
+            central = (objective(up) - objective(down)) / (2 * h)
+            assert float(grad[i]) == pytest.approx(float(central), rel=1e-5, abs=1e-9)
+
+
+def test_a_reaction_coefficient_of_the_wrong_shape_or_without_quality_is_refused():
+    model, _, _ = build_model(_reactive_base())
+    drivers = initial_drivers(model)
+    drivers["quality.bulk_coefficient"] = torch.zeros(3, dtype=F64)
+    with pytest.raises(ValueError, match="quality.bulk_coefficient"):
+        water_run(model, drivers=drivers, duration=3600, quality=True)
+    drivers["quality.bulk_coefficient"] = torch.zeros(len(model.water_network.pipes),
+                                                      dtype=F64)
+    with pytest.raises(ValueError, match="quality.bulk_coefficient"):
+        water_run(model, drivers=drivers, duration=3600)
+
+
+def test_the_reaction_coefficients_are_declared_inputs():
+    model, _, _ = build_model(_reactive_base())
+    net = model.water_network
+    for key, over in (("quality.bulk_coefficient", [p.name for p in net.pipes]),
+                      ("quality.wall_coefficient", [p.name for p in net.pipes]),
+                      ("quality.tank_coefficient", [t.name for t in net.tanks])):
+        spec = model.input_specs[key]
+        assert spec["over"] == over and spec["required"] is False
+
+
+@pytest.mark.parametrize("key", ["quality.bulk_coefficient", "quality.wall_coefficient",
+                                 "quality.tank_coefficient"])
+def test_the_gradient_at_zero_coefficients_is_the_reactions(key):
+    """The base network does not react (EPANET's `Reactflag` 0), but coefficients of 0 that
+    require a gradient react (adding exactly 0: the same qualities) and carry the
+    derivative: the gradient along all of them against a central difference (h = 1e-12,
+    which makes EPANET react; small against the smallest mass transfer, `P7`'s 2.4e-8 m/s,
+    whose `kw kf / (kf + |kw|)` curves the wall's difference by `h / kf`: MEASURED 5e-5
+    relative at h = 1e-9)."""
+    net = _base(initial={"R1": 1.0, "T1": 0.6})
+    model, _, _ = build_model(net)
+    count = len(net.tanks) if key == "quality.tank_coefficient" else len(net.pipes)
+    nodes = [model.node_names.index(n) for n in ("J4", "T1")]
+
+    def objective(value):
+        drivers = initial_drivers(model)
+        drivers[key] = value
+        run = water_run(model, drivers=drivers, duration=4 * 3600, quality=True)
+        return run.node_quality[-1, nodes].sum(), run
+
+    value = torch.zeros(count, dtype=F64, requires_grad=True)
+    total, attached = objective(value)
+    (grad,) = torch.autograd.grad(total, value)
+    plain = water_run(model, duration=4 * 3600, quality=True)
+    assert torch.equal(attached.node_quality.detach(), plain.node_quality)
+    h = 1e-12
+    with torch.no_grad():
+        up, _ = objective(torch.full((count,), h, dtype=F64))
+        down, _ = objective(torch.full((count,), -h, dtype=F64))
+    central = (up - down) / (2 * h)
+    assert float(grad.sum()) != 0.0
+    assert float(grad.sum()) == pytest.approx(float(central), rel=1e-5)

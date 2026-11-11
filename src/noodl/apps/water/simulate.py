@@ -406,8 +406,11 @@ def water_run(model, state=None, drivers=None, *, duration: float | None = None,
     stands is kept (EPANET's `saveoutput`), then it is routed over the step with that
     solve's flows, link states and delivered demands (`runqual`, `nextqual`); it never
     feeds back into the hydraulics. `state["quality.initial"]` (n_nodes, quality units)
-    replaces the file's initial qualities. The quality keeps its autograd graph when a
-    quality input or the solve's flows require gradients, and runs detached otherwise.
+    replaces the file's initial qualities, and `drivers["quality.bulk_coefficient"]`,
+    `["quality.wall_coefficient"]` (n_pipes) and `["quality.tank_coefficient"]` (n_tanks)
+    its reaction coefficients (SI per second, `WaterQuality`). The quality keeps its
+    autograd graph when a quality input or the solve's flows require gradients, and runs
+    detached otherwise.
     `None` and `False` run no quality.
 
     `diagnostics`, when given a dict, receives `"times"` (the time of every solve, s) and
@@ -426,10 +429,14 @@ def water_run(model, state=None, drivers=None, *, duration: float | None = None,
             f"build it with tank_scheme='forward_euler', or step it with water_step")
     clock = _Clock(net, duration)
     state = initial_state(model) if state is None else dict(state)
+    drivers = initial_drivers(model) if drivers is None else dict(drivers)
     quality_inputs = {key: state.pop(key) for key in _QUALITY_STATE if key in state}
+    quality_inputs.update({key: drivers.pop(key) for key in _QUALITY_DRIVERS
+                           if key in drivers})
     if quality_inputs and not quality:
-        raise ValueError(f"water_run: the state carries {sorted(quality_inputs)}, but no "
-                         f"water quality runs (quality={quality!r}); pass quality=True")
+        raise ValueError(f"water_run: the state or the drivers carry "
+                         f"{sorted(quality_inputs)}, but no water quality runs "
+                         f"(quality={quality!r}); pass quality=True")
     if quality and (net.quality is None or net.quality.mode == "NONE"):
         raise ValueError("water_run: quality=True, but the network defines no water quality "
                          "([OPTIONS] QUALITY is NONE or absent)")
@@ -437,7 +444,6 @@ def water_run(model, state=None, drivers=None, *, duration: float | None = None,
         # the tanks' initial segments hold the run's initial volumes (`initsegs`)
         quality_inputs["quality.tank_level"] = model.control_closure.levels(state)
     router = quiet = None
-    drivers = initial_drivers(model) if drivers is None else dict(drivers)
     patterns = _Patterns(model, drivers)
     recorder = _Recorder(model)
     closure = model.control_closure
@@ -587,6 +593,9 @@ def water_run(model, state=None, drivers=None, *, duration: float | None = None,
 
 #: The quality inputs `water_run` reads from the state.
 _QUALITY_STATE = ("quality.initial",)
+#: ... and from the drivers (`QualityRouter`: the reaction coefficients, SI per second).
+_QUALITY_DRIVERS = ("quality.bulk_coefficient", "quality.wall_coefficient",
+                    "quality.tank_coefficient")
 
 
 def _router(model, inputs: dict, solved, clock: _Clock, diagnostics):
