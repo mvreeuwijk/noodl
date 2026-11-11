@@ -1,5 +1,5 @@
-"""Whole-model parity: noodl's WSIMOD port against WSIMOD 0.8.1 on its two demos (spec,
-Verification 2 and 3).
+"""Whole-model parity: noodl's WSIMOD port against WSIMOD 0.8.1 on its two demos and on every
+purpose-built case (spec, Verification 2 and 3; Task 17).
 
 ``quickstart`` runs in full (1456 days), ``oxford`` for its first 365 days by default and in full
 under ``-m slow``. Each demo runs twice: quantity-only on ``config.yml`` (WSIMOD runs its own
@@ -7,12 +7,19 @@ pollutants, noodl the volumes alone, the volumes compared) and neutralised on
 ``config_neutral.yml`` (every pollutant compared). Every class replays WSIMOD bitwise (replay bound
 0), so the whole model does: the worst difference of every run is exactly 0, and no admission is
 needed. The bound of ``assert_matches_wsimod`` (``1e-12 * scale``) is only the ceiling.
+
+The purpose-built cases (``_wsimod_cases.CASES``) run in full, in both modes, the same way. Cases
+WSIMOD cannot run (``wtw_zero_input``, ``nonresidential_demand``) or runs only until a documented
+crash (``land_sewer_ponding`` with a lowered sewer capacity) are tested for the crash and for
+noodl's evident-intent run (W4).
 """
 
 from __future__ import annotations
 
+import contextlib
 import copy
 import functools
+import io
 import re
 from pathlib import Path
 
@@ -30,6 +37,7 @@ from noodl.apps.wsimod import (  # noqa: E402
 )
 from noodl.apps.wsimod.engine import Decision  # noqa: E402
 from noodl.apps.wsimod.structure import river_order  # noqa: E402
+from tests.verification._wsimod_cases import CASES  # noqa: E402
 from tests.verification._wsimod_parity import (  # noqa: E402
     BOUND,
     Admission,
@@ -317,3 +325,281 @@ def test_a_print_noodl_does_not_record_is_refused():
     reference.printed = ["something unexpected"]
     with pytest.raises(AssertionError, match="no check covers: 'something unexpected'"):
         assert_matches_wsimod(results, reference, **kwargs)
+
+
+# --- the purpose-built cases ---------------------------------------------------------------------
+MODES = {"quantity": False, "pollutants": True}
+ARC_DROPS = {"queue_arc", "float_accuracy_override"}  # water dropped inside a QueueArc
+CASE_RUNS = [
+    pytest.param(name, mode, id=f"{name}-{mode}")
+    for name, spec in CASES.items()
+    if spec.wsimod
+    for mode in spec.modes
+]
+
+
+@functools.cache
+def case_theirs(name: str):
+    return wsimod_reference(CASES[name].build())
+
+
+@functools.cache
+def case_ours(name: str, mode: str):
+    model, state, drivers = build_model(
+        read_wsimod_config(CASES[name].build()), pollutants=MODES[mode]
+    )
+    diagnostics: dict = {}
+    results = wsimod_run(model, state, drivers, diagnostics=diagnostics)
+    diagnostics["node_names"] = model.wsimod_day.node_names
+    return results, diagnostics
+
+
+@pytest.mark.parametrize(("name", "mode"), CASE_RUNS)
+def test_case_matches_wsimod(name, mode):
+    """Bitwise on every day, both modes: arc flows, every recorded tank and surface field (and
+    every pollutant in ``pollutants`` mode); every WSIMOD print is one noodl records on the same
+    node and day or in the same count (``assert_matches_wsimod``); the mass balance closes."""
+    results, diagnostics = case_ours(name, mode)
+    reference = case_theirs(name)
+    found = assert_matches_wsimod(
+        results,
+        reference,
+        diagnostics=diagnostics,
+        case=f"{name}-{mode}",
+        quality=MODES[mode],
+        arc_drops=name in ARC_DROPS,
+    )
+    assert found["worst"] == 0.0 and found["admissions"] == []
+    assert len(results.dates) == CASES[name].days
+    assert bool(results.arc_flow.abs().sum() > 0)
+    clamp = diagnostics["events"]["inaccurate_evaporation"]
+    if name == "evaporation_clamp":
+        # ruling: WSIMOD prints both "inaccurate evaporation" and "mass balance error" lines, one
+        # of each on every clamp day; ``assert_matches_wsimod`` has checked the first against
+        # noodl's event and the second against its residual (``residual`` + ``dropped``)
+        assert int(clamp.sum()) > 5
+        for pattern in ("inaccurate evaporation", "mass balance error for volume"):
+            assert sum(line.startswith(pattern) for line in reference.printed) == int(clamp.sum())
+    else:
+        assert not bool(clamp.any())
+        # WSIMOD's node check prints the water a node drops below FLOAT_ACCURACY too (the
+        # percolation push-back of land_percolation_threshold); noodl counts it in "dropped"
+        assert mass_balance_worst(results) <= BOUND
+
+
+@pytest.mark.parametrize("name", [n for n, spec in CASES.items() if set(spec.modes) >= set(MODES)])
+def test_quantity_only_equals_the_pollutant_run_volumes(name):
+    """Spec, Verification 3, on every case: a quantity-only run's volumes equal the pollutant
+    run's, exactly (``torch.equal``): every arc flow, tank storage and surface field."""
+    quantity, _ = case_ours(name, "quantity")
+    pollutants, _ = case_ours(name, "pollutants")
+    assert torch.equal(quantity.arc_flow, pollutants.arc_flow)
+    assert torch.equal(quantity.tank_storage, pollutants.tank_storage)
+    for field, values in quantity.surface.items():
+        other = pollutants.surface[field]
+        assert torch.equal(torch.isnan(values), torch.isnan(other)), field
+        assert torch.equal(values.nan_to_num(), other.nan_to_num()), field
+
+
+def test_the_cases_cover_every_listed_feature():
+    """The plan's case list, task by task (Task 17 step 1): no listed case is missing."""
+    listed = """three_out_arcs node_chain forced_negative_excess maxiter_pull pull_and_push_arcs
+    user_alt_queue_arc storage_distribute queue_groundwater reservoir_over_capacity
+    river_reservoir_environmental catchment_abstraction queue_arc river_chain
+    distribution_leakage unlimited_distribution demand_constant_and_loads reservoir_spill
+    sewer_timearea foul_sewers groundwater_infiltrate wwtw_storm_tank fwtw_deficit_sludge
+    queue_tank_time_zero wtw_zero_input impervious_only pervious_only evaporation_clamp
+    temperature_blending land_percolation_threshold residential_with_land land_sewer_ponding
+    batch_divergence capacity_first_come simple_pollutants float_accuracy_override
+    node_type_override""".split()
+    assert set(listed) <= set(CASES)
+    assert {n for n, spec in CASES.items() if not spec.wsimod} == {
+        "wtw_zero_input",
+        "nonresidential_demand",
+    }
+
+
+def tiny_dropped(results) -> torch.Tensor:
+    """The volume the run's mass balance counts as dropped, summed over the days."""
+    return results.mass_balance.terms["dropped"][:, 0].sum()
+
+
+def test_the_new_cases_exercise_what_they_are_named_for():
+    """``capacity_first_come`` fills its shared arc to capacity while the second slot gets what
+    is left; ``float_accuracy_override`` runs with the accuracy it declares, a sub-1e-6 push dropped
+    by the ``QueueArc`` it reaches; ``simple_pollutants`` has the two lists of
+    ``set_simple_pollutants``;
+    ``node_type_override`` is a ``ResidentialDemand`` under the ``Demand`` orchestration key."""
+    results, _ = case_ours("capacity_first_come", "pollutants")
+    column = results.arc_names.index("hub_to_sea")
+    assert float(results.arc_flow[:, column].max()) == 30.0
+    assert float(results.arc_flow[:, results.arc_names.index("res_to_hub")].min()) < 25.0
+    network = read_wsimod_config(CASES["float_accuracy_override"].build())
+    assert network.float_accuracy == 1e-6
+    tiny = case_ours("float_accuracy_override", "pollutants")[0]
+    arrived = tiny.arc_flow[:, tiny.arc_names.index("src_to_head")]
+    queued = tiny.arc_flow[:, tiny.arc_names.index("q")]
+    assert float(arrived[2::3].min()) == pytest.approx(5e-7, rel=1e-12)  # the push reaches q ...
+    assert float(queued[2::3].abs().max()) == 0.0  # ... which drops it (1e-11 < 5e-7 < 1e-6)
+    assert float(tiny_dropped(tiny)) > 0.0  # and the balance counts it as dropped
+    mapping = CASES["float_accuracy_override"].build()
+    del mapping["float_accuracy"]  # the default accuracy queues the push
+    model, state, drivers = build_model(read_wsimod_config(mapping))
+    default = wsimod_run(model, state, drivers)
+    assert float(default.arc_flow[2::3, default.arc_names.index("q")].min()) > 0.0
+    simple = read_wsimod_config(CASES["simple_pollutants"].build())
+    assert tuple(simple.pollutants.names) == ("phosphate", "temperature")
+    override = read_wsimod_config(CASES["node_type_override"].build())
+    homes = next(n for n in override.nodes if n.name == "homes")
+    assert (homes.cls, homes.slot_key) == ("ResidentialDemand", "Demand")
+
+
+def _clamp_run():
+    results, diagnostics = case_ours("evaporation_clamp", "pollutants")
+    return results, diagnostics, copy.deepcopy(case_theirs("evaporation_clamp"))
+
+
+def test_the_evaporation_clamp_prints_are_accepted_only_where_they_match_noodl():
+    """Ruling (evaporation_clamp): WSIMOD prints "inaccurate evaporation" and "mass balance error"
+    lines; they pass only as noodl's ``inaccurate_evaporation`` flags and its residual. A changed
+    error value, a missing line, one more error line or one more evaporation line fails."""
+    kwargs = {"case": "evaporation_clamp", "quality": True}
+    results, diagnostics, reference = _clamp_run()
+    assert_matches_wsimod(results, reference, diagnostics=diagnostics, **kwargs)
+    errors = [i for i, x in enumerate(reference.printed) if x.startswith("mass balance error")]
+    assert len(errors) > 5
+    changed = copy.deepcopy(reference)
+    value = float(re.search(r"volume of (\S+)", changed.printed[errors[2]]).group(1))
+    changed.printed[errors[2]] = f"mass balance error for volume of {value + 1e-3} in heath"
+    with pytest.raises(AssertionError, match="mass balance errors"):
+        assert_matches_wsimod(results, changed, diagnostics=diagnostics, **kwargs)
+    missing = copy.deepcopy(reference)
+    del missing.printed[errors[0]]
+    with pytest.raises(AssertionError, match="mass balance errors"):
+        assert_matches_wsimod(results, missing, diagnostics=diagnostics, **kwargs)
+    extra = copy.deepcopy(reference)
+    extra.printed.append("mass balance error for volume of 1.0 in heath")
+    with pytest.raises(AssertionError, match="mass balance errors"):
+        assert_matches_wsimod(results, extra, diagnostics=diagnostics, **kwargs)
+    unflagged = copy.deepcopy(reference)
+    unflagged.printed = [x for x in unflagged.printed if not x.startswith("inaccurate")]
+    with pytest.raises(AssertionError, match="'inaccurate_evaporation' lines"):
+        assert_matches_wsimod(results, unflagged, diagnostics=diagnostics, **kwargs)
+
+
+def test_an_undated_print_needs_noodls_event_and_a_dated_one_its_node_and_day():
+    results, diagnostics, reference = _perturbed(10)
+    kwargs = {"diagnostics": diagnostics, "case": "quickstart", "quality": True}
+    reference = copy.deepcopy(reference)
+    reference.printed = ["Storage unable to push"]  # noodl flagged no such event
+    with pytest.raises(AssertionError, match="'storage_unable_to_push' lines"):
+        assert_matches_wsimod(results, reference, **kwargs)
+    reference.printed = ["warning, distribution leakage not going to GW in x at 2009-03-03"]
+    with pytest.raises(AssertionError, match="leakage_not_going_to_gw differ"):
+        assert_matches_wsimod(results, reference, **kwargs)
+    reference.printed = ["Attempted push check to deny"]  # WSIMOD's deny handler: no record
+    assert_matches_wsimod(results, reference, **kwargs)
+
+
+# --- the cases where WSIMOD crashes --------------------------------------------------------------
+def _wsimod_run_of(model) -> None:
+    with contextlib.redirect_stdout(io.StringIO()):
+        model.run(dates=list(model.dates), verbose=False)
+
+
+def _lower_sewer_capacity(wsimod_sewer, noodl_sewer, capacity: float, normal: float) -> None:
+    """Lower the sewer's capacity to ``capacity`` between ``Land.run`` and ``make_discharge``, on
+    every day, in both engines, and restore ``normal`` after it (the next day's ``Land.run`` sees
+    the case's own capacity): in WSIMOD by wrapping the sewer's ``make_discharge``, in noodl by
+    binding the ``capacity`` parameter in the same place (a per-day capacity driver)."""
+
+    def lowered(node, original, set_capacity):
+        def wrapped(*args, **kwargs):
+            set_capacity(capacity)
+            try:
+                return original(*args, **kwargs)
+            finally:
+                set_capacity(normal)
+
+        node.make_discharge = wrapped
+
+    if wsimod_sewer is not None:
+
+        def set_wsimod(value):
+            wsimod_sewer.capacity = value
+            wsimod_sewer.sewer_tank.capacity = value
+
+        lowered(wsimod_sewer, wsimod_sewer.make_discharge, set_wsimod)
+    if noodl_sewer is not None:
+
+        def set_noodl(value):
+            noodl_sewer.bind({"capacity": torch.tensor(value, dtype=torch.float64)})
+
+        lowered(noodl_sewer, noodl_sewer.make_discharge, set_noodl)
+
+
+def test_case_runs_where_wsimod_crashes_land_sewer_ponding():
+    """``land_sewer_ponding`` with the sewer's capacity lowered to 0.5 between ``Land.run`` and
+    ``make_discharge``: the sewer holds more than it can, and ponds onto the streets with the tag
+    ``"Sewer"``. WSIMOD has no handler for that tag in ``Land`` and raises; noodl does what the
+    code evidently means (W4): the ponded water re-enters the first impervious surface, and the
+    mass balance closes."""
+    spec = CASES["land_sewer_ponding"]
+    model = wsimod_model(spec.build())
+    _lower_sewer_capacity(model.nodes["combined"], None, 0.5, 10.0)
+    with pytest.raises((AttributeError, KeyError)):
+        _wsimod_run_of(model)
+
+    noodl_model, state, drivers = build_model(read_wsimod_config(spec.build()))
+    _lower_sewer_capacity(None, noodl_model.wsimod_day.engine.nodes["combined"], 0.5, 10.0)
+    diagnostics: dict = {"decisions": True}
+    results = wsimod_run(noodl_model, state, drivers, diagnostics=diagnostics)
+    ponded = [
+        bool(d.outcome)
+        for day in diagnostics["decisions"]
+        for d in day
+        if d.site == "node:combined/make_discharge/ponded"
+    ]
+    assert len(ponded) == spec.days and any(ponded)
+    column = results.arc_names.index("combined_to_city")
+    assert float(results.arc_flow[:, column].max()) > 0.0  # water went back to the streets
+    assert bool(torch.isfinite(results.arc_flow).all())
+    assert mass_balance_worst(results) <= BOUND
+    assert len(results.dates) == spec.days
+
+
+def test_case_runs_where_wsimod_crashes_wtw_zero_input():
+    """``wtw_zero_input``: WSIMOD's liquor blend divides by zero (``wtw.py:176-182``) on the
+    first day of a treatment works with no input and no liquor; noodl keeps the previous liquor
+    and records ``"wtw_liquor_zero_denominator"`` (the hand expectations of Task 11: the full
+    plant on day 1 only, the works every day), everything finite, the balance closing."""
+    spec = CASES["wtw_zero_input"]
+    with pytest.raises(ZeroDivisionError):
+        _wsimod_run_of(wsimod_model(spec.build()))
+    results, diagnostics = case_ours("wtw_zero_input", "pollutants")
+    names = diagnostics["node_names"]
+    flags = diagnostics["events"]["wtw_liquor_zero_denominator"]
+    assert flags[:, names.index("plant")].tolist() == [True] + [False] * (spec.days - 1)
+    assert flags[:, names.index("works")].tolist() == [True] * spec.days
+    assert bool(torch.isfinite(results.arc_flow).all())
+    assert bool(torch.isfinite(results.tank_storage).all())
+    assert mass_balance_worst(results) <= BOUND
+
+
+def test_case_runs_where_wsimod_crashes_nonresidential_demand():
+    """``nonresidential_demand``: WSIMOD's ``NonResidentialDemand.get_demand`` calls itself
+    (``demand.py:143-150``) and recurses until Python gives up; noodl does the evident intent
+    (W4): the constant demand as ``house``, pulled from the supply every day, and the balance
+    closes."""
+    spec = CASES["nonresidential_demand"]
+    with pytest.raises(RecursionError):
+        _wsimod_run_of(wsimod_model(spec.build()))
+    results, diagnostics = case_ours("nonresidential_demand", "pollutants")
+    pulled = results.arc_flow[:, results.arc_names.index("supply_to_factory")]
+    # a supply of 60 serves 3 a day for 20 days, then the demand is a deficit every day
+    assert pulled[:20].tolist() == [3.0] * 20 and float(pulled[20:].abs().max()) == 0.0
+    names = diagnostics["node_names"]
+    deficit = diagnostics["events"]["demand_deficit"][:, names.index("factory")]
+    assert deficit.tolist() == [False] * 20 + [True] * (spec.days - 20)
+    assert bool(torch.isfinite(results.arc_flow).all())
+    assert mass_balance_worst(results) <= BOUND

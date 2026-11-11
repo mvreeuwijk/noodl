@@ -1318,6 +1318,128 @@ def _batch_divergence() -> dict:
     }
 
 
+# --- the cases no node task owns (Task 17) ---------------------------------------------------
+_SIMPLE = {  # ``set_simple_pollutants`` (constants.py:93-97)
+    "pollutants": ["phosphate", "temperature"],
+    "additive_pollutants": ["phosphate"],
+    "non_additive_pollutants": ["temperature"],
+}
+
+
+def _simple_catchment(name: str, days: int, seed: int, *, tiny: float | None = None) -> dict:
+    """A catchment over the simple pollutant lists; with ``tiny``, every third day's flow is
+    that small volume (below 1e-6, above 1e-11), the others in [5, 50]."""
+    rng = random.Random(seed)
+    data = {}
+    for k, date in enumerate(_dates(days)):
+        flow = round(rng.uniform(5.0, _FLOW_MAX), 6)
+        data[("flow", date)] = tiny if tiny is not None and k % 3 == 2 else flow
+        data[("phosphate", date)] = round(rng.uniform(1e-3, 1e-2), 8)
+        data[("temperature", date)] = round(rng.uniform(4.0, 20.0), 4)
+    return {"name": name, "type_": "Catchment", "data_input_dict": data}
+
+
+def _capacity_first_come() -> dict:
+    """Two orchestration slots push into one ``Node`` whose only outlet has capacity 30: the
+    catchment's water (slot 1, flows 5-50) takes the capacity first, the reservoir's
+    distribution (slot 2) gets what is left, and the rest is forced back. The arc's
+    ``flow_in`` accumulates over the day (``arcs.py:130-160``), so the order is the slots'."""
+    days = _STORAGE_DAYS
+    return _storage_case(
+        [
+            _catchment("src", days, 61),
+            _store("res", "Reservoir", capacity=80.0, initial_storage=_stocked(60.0)),
+            _store("hub", "Node"),
+            _store("sea", "Waste"),
+        ],
+        [
+            _arc("src_to_hub", "src", "hub"),
+            _arc("res_to_hub", "res", "hub", capacity=25.0),
+            _arc("hub_to_sea", "hub", "sea", capacity=30.0),
+        ],
+        [{"Catchment": "route"}, {"Reservoir": "distribute"}],
+    )
+
+
+def _simple_pollutants() -> dict:
+    """``set_simple_pollutants``' lists (phosphate and temperature): a catchment through a
+    ``Node`` and a reservoir to a sink."""
+    days = _STORAGE_DAYS
+    return {
+        **_SIMPLE,
+        "dates": _dates(days),
+        "nodes": [
+            _simple_catchment("src", days, 62),
+            _store("head", "Node"),
+            _store(
+                "res",
+                "Reservoir",
+                capacity=60.0,
+                initial_storage={"volume": 10.0, "phosphate": 0.02, "temperature": 11.0},
+            ),
+            _store("sink", "Waste"),
+        ],
+        "arcs": [
+            _arc("src_to_head", "src", "head"),
+            _arc("head_to_res", "head", "res"),
+            _arc("res_to_sink", "res", "sink", capacity=20.0),
+        ],
+        "orchestration": [{"Catchment": "route"}, {"Reservoir": "distribute"}],
+    }
+
+
+def _float_accuracy_override() -> dict:
+    """``float_accuracy: 1e-6`` (``model.py:238-241``): every third day's flow is 5e-7, a push
+    that WSIMOD's default accuracy (1e-11) would move and this one drops. It reaches the
+    ``QueueArc`` ``q`` (``arcs.py:378-379``: a push below ``FLOAT_ACCURACY`` returns an empty
+    VQIP, the water vanishing), which would queue it at the default accuracy."""
+    days = _STORAGE_DAYS
+    return {
+        **_SIMPLE,
+        "float_accuracy": 1e-6,
+        "dates": _dates(days),
+        "nodes": [
+            _simple_catchment("src", days, 63, tiny=5e-7),
+            _store("head", "Node"),
+            _store("buf", "Reservoir", capacity=100.0),
+            _store("sink", "Waste"),
+        ],
+        "arcs": [
+            _arc("src_to_head", "src", "head"),
+            _arc("q", "head", "buf", type_="QueueArc", number_of_timesteps=1, capacity=30.0),
+            _arc("buf_to_sink", "buf", "sink", capacity=12.0),
+        ],
+        "orchestration": [{"Catchment": "route"}, {"Reservoir": "distribute"}],
+    }
+
+
+def _node_type_override() -> dict:
+    """A ``ResidentialDemand`` under ``type_: Demand`` with ``node_type_override`` (``model.py:
+    653-660``): the class is the override's, the orchestration key the ``type_``'s."""
+    days = _STORAGE_DAYS
+    return _storage_case(
+        [
+            _store("supply", "Storage", capacity=1e4, initial_storage=_stocked(500.0)),
+            {
+                **_store(
+                    "homes",
+                    "Demand",
+                    population=20.0,
+                    per_capita=0.15,
+                    pollutant_load={"phosphate": 0.01, "ammonia": 0.05},
+                    constant_temp=14.0,
+                    constant_weighting=0.2,
+                    data_input_dict=_temperatures(days, 21),
+                ),
+                "node_type_override": "ResidentialDemand",
+            },
+            _store("sea", "Waste"),
+        ],
+        [_arc("supply_to_homes", "supply", "homes"), _arc("homes_to_sea", "homes", "sea")],
+        [{"Demand": "create_demand"}],
+    )
+
+
 CASES: dict[str, Case] = {
     "three_out_arcs": Case(
         build=_three_out_arcs,
@@ -1509,7 +1631,6 @@ CASES: dict[str, Case] = {
         build=_land_sewer_ponding,
         days=_LAND_DAYS,
         scale=100.0,
-        wsimod=False,
     ),
     "nonresidential_demand": Case(
         build=_nonresidential_demand,
@@ -1521,5 +1642,29 @@ CASES: dict[str, Case] = {
         build=_batch_divergence,
         days=_LAND_DAYS,
         scale=100.0,
+    ),
+    "capacity_first_come": Case(
+        build=_capacity_first_come,
+        days=_STORAGE_DAYS,
+        scale=_largest_volume(_capacity_first_come()),
+        replay=("res", "hub"),
+    ),
+    "simple_pollutants": Case(
+        build=_simple_pollutants,
+        days=_STORAGE_DAYS,
+        scale=_largest_volume(_simple_pollutants()),
+        replay=("res",),
+    ),
+    "float_accuracy_override": Case(
+        build=_float_accuracy_override,
+        days=_STORAGE_DAYS,
+        scale=_largest_volume(_float_accuracy_override()),
+        replay=("buf",),
+    ),
+    "node_type_override": Case(
+        build=_node_type_override,
+        days=_STORAGE_DAYS,
+        scale=500.0,
+        replay=("homes",),
     ),
 }
