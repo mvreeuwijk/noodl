@@ -11,8 +11,9 @@ own WSIMOD path, and gradients flow through every value.
 The model is read from WSIMOD's own description, a `config.yml` with one forcing file per node
 (see [WSIMOD `config.yml`](../formats/wsimod.md)). `build_model` turns it into a noodl `Model`
 whose one closure, `WsimodDay`, is the day: `model.step(state, drivers, dt=86400, t=k * 86400)`
-runs day `k` of the configuration's dates, so a WSIMOD model couples with other noodl models
-like any other.
+runs day `k` of the configuration's dates. A WSIMOD model composes with other noodl models
+through `union`; a forcing driver is a whole `(T, n)` series, so a coupled run takes the day's
+row from it.
 
 **Units.** As WSIMOD's own (W20), never converted: volumes m³, flows and capacities m³/d,
 additive pollutants kg, non-additive ones by name (`temperature` in °C), precipitation and

@@ -240,10 +240,11 @@ Constitutive laws are grouped below by the physics they express, as in
 
 ::: noodl.apps.wsimod.build
 ::: noodl.apps.wsimod.day
+::: noodl.apps.wsimod.run
 ::: noodl.apps.wsimod.structure
 ::: noodl.apps.wsimod.config
     options:
-      members: [read_wsimod_config, WsimodNetwork]
+      members: [read_wsimod_config, WsimodNetwork, NodeSpec, ArcSpec, SurfaceSpec]
 
 ### Electrical circuits
 

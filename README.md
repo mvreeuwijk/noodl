@@ -85,6 +85,7 @@ physics over the shared core:
 | Water distribution | Pressurised mains, pumps, tanks, demand | Kirchhoff: Newton on hydraulic head | `build_model` |
 | Flow allocation | Requested flows clipped to arc capacity and free storage at the receiving node | Clip and allocate | `AllocatedFlowLayer` |
 | Electrical circuits | Lumped circuits: DC, transient and AC | Kirchhoff: node voltages, with the flows of ideal sources and storing laws as unknowns | `build_model`, `Circuit` |
+| WSIMOD | Urban water cycle: land, groundwater, rivers, sewers, treatment and demand, day by day | Closure: WSIMOD's push and pull requests, transcribed (bitwise equal to WSIMOD 0.8.1) | `build_model`, `read_wsimod_config` |
 | Coupling | Two models meeting at a shared boundary | Two models exchanging values, iterated to a fixed point | `union` |
 
 ## Reading model files
@@ -125,7 +126,7 @@ module. Contributions: [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Status
 
-Version 0.1.0. The core and all seven applications are implemented, each with its verification
+Version 0.1.0. The core and all eight applications are implemented, each with its verification
 cases in the test suite.
 
 ## The name

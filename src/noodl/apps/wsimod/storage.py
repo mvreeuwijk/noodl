@@ -222,6 +222,11 @@ class Storage(Node):
             raise ValueError(
                 f"node {self.name!r}: infiltration_pct is negative (storage.py:236 takes a root)"
             )
+        residence = self.params.get("residence_time")
+        if residence is not None and bool((residence == 0).any()):
+            raise ValueError(
+                f"node {self.name!r}: residence_time is 0 (storage.py:224 divides)"
+            )
         for tank in self._tanks():
             for name in ("capacity", "area", "datum"):
                 if name in self.params:
@@ -536,7 +541,6 @@ class QueueGroundwater(Storage):
             raise ValueError(f"{where}: timearea {timearea!r} is not a non-empty mapping")
         for key in timearea:
             check_travel_time(where, "timearea key", key)
-        check_travel_time(where, "number_of_timesteps", 0)
         return ignored
 
 
@@ -716,6 +720,11 @@ class River(Storage):
         """The day's parameters; ``area = length * width`` and the unbounded capacity are
         derived from them again (``storage.py:524-533``)."""
         super().bind(parameters)
+        where = f"node {self.name!r}"
+        if bool((self._param("velocity") <= 0).any()):
+            raise ValueError(f"{where}: velocity is not positive (storage.py:907 divides)")
+        if bool((self._param("damp") < 0).any()):
+            raise ValueError(f"{where}: damp is negative (exp(-1 / kt) overflows)")
         area = self._param("length") * self._param("width")
         self.tank.area = area
         self.tank.capacity = torch.full_like(area, UNBOUNDED_CAPACITY)
@@ -808,7 +817,7 @@ class River(Storage):
             raise ValueError(
                 f"{where}: a River with 'nitrate' among the pollutants runs biochemistry "
                 "(storage.py:917-924), which is sub-project 3b; declare pollutant lists "
-                "without nitrate"
+                "without nitrate; run build_model(network, pollutants=False) until sub-project 3b"
             )
         values = {**cls.parameter_defaults, **spec.parameters}
         if values["velocity"] <= 0:

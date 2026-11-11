@@ -90,13 +90,6 @@ def safe_den(den: Tensor) -> Tensor:
     return torch.where(den != 0, den, torch.ones_like(den))
 
 
-def safe_sqrt(x: Tensor) -> Tensor:
-    """sqrt(x) with gradient 0 (not infinity) where ``x == 0``."""
-    zero = x == 0
-    root = torch.sqrt(torch.where(zero, torch.ones_like(x), x))
-    return torch.where(zero, torch.zeros_like(x), root)
-
-
 def tmin(a: Tensor, b: Tensor) -> Tensor:
     """Python's ``min(a, b)``: ``a`` unless ``b < a``; detached comparison, gradient to the pick."""
     a, b = torch.as_tensor(a, dtype=torch.float64), torch.as_tensor(b, dtype=torch.float64)

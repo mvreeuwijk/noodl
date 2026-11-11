@@ -332,3 +332,36 @@ def test_every_key_of_every_application_reports_a_unit():
     assert fields["wsimod.Arc.capacity"].unit == "m3/d" and fields["wsimod.flow"].unit == "m3/d"
     # The check table shows them.
     assert "m3/d" in str(model.check(state, drivers))
+
+
+def test_a_closure_key_labels_value_that_is_a_ready_field_is_used_as_given():
+    """`LayerRefs` takes a `{key: Field}` entry of a closure's `key_labels` as the key's own
+    Field (a layout the closure builds itself), without rebuilding it from labels."""
+    from noodl.layers.transport import TransportLayer
+
+    field = Field(
+        "demo.rows", role="state", layer=None, axis="label", labels=(("a", "x"), ("b", "y")),
+        ordering="rows of two columns", required="step", unit="m3", default=None,
+        description="a ready Field", dtype=F64, device=torch.device("cpu"),
+    )
+
+    class Closure:
+        state_keys = ("demo.rows", "demo.plain")
+        key_labels = {"demo.rows": field}
+        integrates = False
+
+        def __call__(self, state, drivers):
+            return {k: state[k] for k in self.state_keys}
+
+    net = Network(dtype=F64)
+    net.add_node("A")
+    net.add_node("B")
+    net.add_edge("A", "B", kind="pipe")
+    layer = TransportLayer(
+        net, "c", capacity=torch.tensor([2.0], dtype=F64), flow_kind="pipe",
+        boundary=[net.nodes[1]], scheme="backward_euler",
+    )
+    model = Model(net, {"c": layer}, closures=[Closure()])
+    state = model.refs.closure_state
+    assert state["demo.rows"] is field
+    assert state["demo.plain"] == "demo.plain" and not isinstance(state["demo.plain"], Field)

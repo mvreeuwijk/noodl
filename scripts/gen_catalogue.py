@@ -109,9 +109,9 @@ waveforms are a role of their own, and the electro-thermal module's `HeatedEdge`
 device to the `JouleHeating` closure (a coupling description, not a network component); the
 Modelica circuit reader's `CircuitNames` and `Column` describe its result (supporting types)."""
 
-NAME_ROLES = {"DayRecord": "class"}
+NAME_ROLES = {"DayRecord": "class", "WsimodResults": "class", "WsimodMassBalance": "class"}
 """Public names whose role their kind does not tell: WSIMOD's day record is a dataclass of
-results, not a description of a network component."""
+results, not a description of a network component; likewise the run's results and mass balance."""
 
 SETUP_NAMES = {"build_model", "initial_state", "initial_drivers", "project_to_model",
                "drivers_from", "state_from", "check_setup", "build_power_flow",

@@ -147,7 +147,8 @@ class Node:
         self.params = {k: torch.as_tensor(v, dtype=torch.float64) for k, v in parameters.items()}
 
     def configured_parameters(self, date: datetime) -> dict[str, Tensor]:
-        """The configuration's values for ``date`` (unbatched), in :meth:`bind`'s form."""
+        """The configuration's values for ``date`` (unbatched), in :meth:`bind`'s form; the
+        replay harness uses it to load a call's day forcing."""
         return {}
 
     def stores(self) -> dict[str, Tensor]:

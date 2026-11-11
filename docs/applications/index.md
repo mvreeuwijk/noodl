@@ -91,7 +91,7 @@ why. Several of the remaining discrepancies are the *reference*'s approximation 
 
 ## Starting a new application
 
-The seven are also a template. A new application is:
+The eight are also a template. A new application is:
 
 1. A **network builder** — domain dataclasses plus a function that turns them into a `Network`
    with the right edge kinds and attributes.

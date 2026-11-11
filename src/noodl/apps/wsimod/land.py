@@ -660,6 +660,9 @@ class Land(Node):
         super().bind(own)
         for name in self._TANKS:
             tank = getattr(self, name)
+            key = f"{name.split('_')[0]}_residence_time"
+            if bool((self._param(key) == 0).any()):
+                raise ValueError(f"node {self.name!r}: {key} is 0 (tanks.py:398 divides)")
             tank.residence_time = self._param(f"{name.split('_')[0]}_residence_time")
         by_surface: dict[str, dict[str, Tensor]] = {s.name: {} for s in self.surfaces}
         for key, value in parameters.items():
@@ -852,7 +855,8 @@ def _validate_surface(
     if variables:
         if pollutants:
             raise ValueError(
-                f"{where}: surface deposition data {sorted(variables)[0]!r} is sub-project 3c"
+                f"{where}: surface deposition data {sorted(variables)[0]!r} is sub-project 3c; "
+                "run build_model(network, pollutants=False) until sub-projects 3b and 3c"
             )
         ignored.append(f"{prefix}.data_input_dict")
     load = surface.parameters.get("pollutant_load") or {}
@@ -862,7 +866,8 @@ def _validate_surface(
                 if float(value) != 0 or key in network.pollutants.non_additive:
                     raise ValueError(
                         f"{where}: pollutant_load {key!r}: {value!r} is deposition, sub-project "
-                        "3c (only zero loads of additive pollutants are accepted)"
+                        "3c (only zero loads of additive pollutants are accepted); "
+                        "run build_model(network, pollutants=False) until sub-projects 3b and 3c"
                     )
         else:
             ignored.append(f"{prefix}.pollutant_load")
@@ -906,7 +911,8 @@ def _validate_surface(
             raise ValueError(
                 f"{where}: the soil temperature process is sub-project 3b; set "
                 "soil_temp_w_air = soil_temp_w_deep = 0 and soil_temp_w_prev > 0 "
-                f"(got {weights})"
+                f"(got {weights}); "
+                "run build_model(network, pollutants=False) until sub-project 3b"
             )
     elif not neutral and "temperature" in network.pollutants.names:
         ignored += [f"{prefix}.{k}" for k in SOIL_TEMPERATURE_DEFAULTS]

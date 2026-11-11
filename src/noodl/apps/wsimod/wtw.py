@@ -272,13 +272,15 @@ class WTW(Node):
             if process.get(name) != neutral:
                 raise ValueError(
                     f"{where}: process_parameters[{name!r}] {process.get(name)!r} is not the "
-                    f"neutral {neutral!r} (WTW pollutant processes are sub-project 3b)"
+                    f"neutral {neutral!r} (WTW pollutant processes are sub-project 3b); "
+                    "run build_model(network, pollutants=False) until sub-project 3b"
                 )
             if liquor.get(name) != m_v:
                 raise ValueError(
                     f"{where}: liquor_multiplier[{name!r}] {liquor.get(name)!r} is not "
                     f"liquor_multiplier['volume'] = {m_v!r}: the process_parameters split is "
-                    "not neutral (WTW pollutant processes are sub-project 3b)"
+                    "not neutral (WTW pollutant processes are sub-project 3b); "
+                    "run build_model(network, pollutants=False) until sub-project 3b"
                 )
         if additive and "temperature" not in network.pollutants.names:
             raise ValueError(

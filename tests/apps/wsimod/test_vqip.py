@@ -10,7 +10,6 @@ from noodl.apps.wsimod.vqip import (
     empty,
     extract_vqip,
     safe_den,
-    safe_sqrt,
     sum_vqip,
     tmax,
     tmin,
@@ -160,13 +159,6 @@ def test_guarded_division_and_root_keep_gradients_finite():
     out = torch.where(d > 0, n / safe_den(d), torch.zeros_like(n))
     out.backward()
     assert out.item() == 0.0 and torch.isfinite(n.grad) and torch.isfinite(d.grad)
-    x = f64(0.0).requires_grad_()
-    safe_sqrt(x).backward()
-    assert x.grad.item() == 0.0
-    x = f64(4.0).requires_grad_()
-    y = safe_sqrt(x)
-    y.backward()
-    assert y.item() == 2.0 and x.grad.item() == 0.25
 
 
 def test_write_broadcasts_over_the_column_axis():

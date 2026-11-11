@@ -13,7 +13,7 @@ building the network directly, shown on each application page.
 | [EPANET](epanet.md) `.inp` | `read_epanet_inp` | Pressurised water distribution | [Water distribution](../applications/water.md) |
 | [Modelica circuits](modelica.md#electrical-circuits) (JSON + CSV export) | `read_modelica_circuit` | Lumped circuits from the Modelica Standard Library and Buildings Library | [Electrical circuits](../applications/electrical.md) |
 | [MATPOWER](matpower.md) `.m` (case format version 2) | `read_matpower` | Balanced power networks: buses, lines, transformers, loads, shunts, generators | [Electrical power flow](../applications/electrical.md#power-flow) |
-| [WSIMOD](wsimod.md) `config.yml` + CSV forcing | `read_wsimod_config` | Integrated catchment, sewer, treatment and river models, as WSIMOD describes them | (the WSIMOD application, in preparation) |
+| [WSIMOD](wsimod.md) `config.yml` + CSV forcing | `read_wsimod_config` | Integrated catchment, sewer, treatment and river models, as WSIMOD describes them | [WSIMOD](../applications/wsimod.md) |
 
 The two `.inp` formats share one lexical layer, `noodl.apps.inpfile`: `[SECTION]` headers, `;`
 comments, whitespace-separated fields and blank lines. Neither reader's own section names, column

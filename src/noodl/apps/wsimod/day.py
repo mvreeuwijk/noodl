@@ -305,6 +305,7 @@ class WsimodDay:
         self.record_decisions = False
         self.last_record: DayRecord | None = None
         self.last_call_sequence: list | None = None
+        self.last_state: dict[str, Tensor] | None = None
         self.arc_names = [a.name for a in network.arcs]
         self.node_names = [n.name for n in network.nodes]
         nodes = self.engine.nodes
@@ -728,6 +729,8 @@ class WsimodDay:
                 node.load_stores(fresh)
         for arc in [*self.engine.arcs.values(), *self._internal_arcs]:
             Arc.end_timestep(arc)
+            if hasattr(arc, "_seen"):
+                arc._seen = dict.fromkeys(arc._seen, 0)
             arc.vqip_in = torch.broadcast_to(arc.vqip_in, (*shape, *arc.vqip_in.shape))
             arc.vqip_out = arc.vqip_in
             arc.flow_in = torch.broadcast_to(arc.flow_in, shape)

@@ -358,8 +358,9 @@ def test_quantity_only_lists_the_ignored_parameters():
     assert "my_land.surfaces.urban.pollutant_load" in ignored
     assert "my_land.surfaces.rural.pollutant_load" in ignored
     model.step(state, drivers, dt=DAY, t=0.0)
-    with pytest.raises(ValueError, match="3c"):
+    with pytest.raises(ValueError, match="3c") as refused:
         build_model(read_wsimod_config(DATA / "quickstart"), pollutants=True)
+    assert "pollutants=False" in str(refused.value)
 
 
 def _residential(type_: str, override: str | None = None) -> dict:
@@ -526,7 +527,7 @@ def test_a_day_of_batch_three_after_a_day_of_batch_two_resets_the_day(case):
     assert all(torch.equal(f, g) for f, g in zip(flows, ref_flows, strict=True))
 
 
-@pytest.mark.parametrize("case", ["fwtw_deficit_sludge", "pervious_only"])
+@pytest.mark.parametrize("case", ["fwtw_deficit_sludge", "pervious_only", "queue_arc"])
 def test_a_day_after_a_day_that_raised_starts_fresh(case, monkeypatch):
     """I2: a day that raised mid-orchestration leaves the per-day values half written; the next
     day, from another state, equals a fresh model's."""
@@ -585,3 +586,28 @@ def test_model_to_refuses_other_dtypes_by_name():
         moved, _, _ = build_model(_small())
         with pytest.raises(TypeError, match="WSIMOD"):
             moved.to(**kwargs)
+
+
+@pytest.mark.parametrize(
+    ("case", "driver", "value", "name"),
+    [
+        ("small", "wsimod.River.velocity", 0.0, "velocity"),
+        ("small", "wsimod.River.damp", -1.0, "damp"),
+        ("quickstart", "wsimod.Groundwater.residence_time", 0.0, "residence_time"),
+        ("pervious_only", "wsimod.Land.percolation_residence_time", 0.0, "percolation_res"),
+    ],
+)
+def test_a_driver_that_breaks_a_division_is_refused_by_name(case, driver, value, name):
+    network = (
+        _small()
+        if case == "small"
+        else read_wsimod_config(DATA / case)
+        if case == "quickstart"
+        else read_wsimod_config(CASES[case].build())
+    )
+    model, state, drivers = build_model(network, pollutants=False)
+    if driver not in drivers:
+        pytest.skip(f"{case} has no {driver}")
+    bad = {**drivers, driver: torch.full_like(drivers[driver], value)}
+    with pytest.raises(ValueError, match=name):
+        model.step(state, bad, dt=DAY, t=0.0)
