@@ -418,9 +418,11 @@ class _ForwardLaw(ConstitutiveLaw):
 
 
 @pytest.mark.parametrize("how", ["forward", "hook"])
-def test_a_law_whose_module_call_is_not_its_flow_keeps_the_threaded_solve(how):
-    """The primal Newton calls `flow`, the threaded one the module (`forward` and its
-    hooks): where they may differ the solve stays threaded and refuses, as before."""
+def test_a_law_whose_module_call_is_not_its_flow_is_called_as_a_module(how):
+    """The fast path's primal Newton calls `flow`, the differentiated solve the module
+    (`forward` and its hooks): where they may differ, a solve that nothing differentiable
+    reaches calls the module too, so it refuses the captured tensor as the differentiated
+    solve would."""
     g = torch.tensor([2.0], dtype=F64, requires_grad=True)
     if how == "forward":
         law = _ForwardLaw(g)

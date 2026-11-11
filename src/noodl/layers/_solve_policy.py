@@ -1,9 +1,9 @@
 """How `on_failure`, `differentiable` and `diagnostics=` combine.
 
 `KirchhoffLayer.solve` decides, from these keywords and from whether anything differentiable
-reaches the solve, whether the solve is differentiated, whether it is a forward Newton alone,
-and what `on_failure` Newton is given: one function, `resolve`, for both paths (the fast path,
-where every flow follows from the potentials, and the path with flow unknowns).
+reaches the solve, whether the solve is differentiated or is the primal solve, and what
+`on_failure` Newton is given: one function, `resolve`, for both paths (the fast path, where
+every flow follows from the potentials, and the path with flow unknowns).
 
 `resolve` completes the `newton_kwargs` in place, in this order, because the error a caller
 sees depends on it: `method` (the layer's `linear_solver` unless given), `on_failure`
@@ -27,10 +27,9 @@ class SolvePolicy:
 
     `differentiable`: the solve is differentiated (the implicit adjoint) and not the primal
     path. `forward_only`: a differentiable solve that nothing reaches
-    (`on_failure="return_primal"`). The fast path runs it as its primal Newton with the
-    closure check at every residual (as its threaded forward Newton alone where the threaded
-    slopes are not the layer's own, or a law is `dp_independent`); a layer with flow
-    unknowns runs its primal solve.
+    (`on_failure="return_primal"`). Both paths run it as their primal solve, the Newton of
+    `differentiable=False` on the layer's own slopes, with the closure check at every
+    residual.
     """
 
     differentiable: bool

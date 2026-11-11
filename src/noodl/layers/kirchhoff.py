@@ -34,7 +34,7 @@ from noodl.layers._flow_unknowns import (
     to_complex,
     to_real,
 )
-from noodl.layers._functional import FunctionalLaws, _analytic, layer_slopes, step_start
+from noodl.layers._functional import FunctionalLaws, _analytic, step_start
 from noodl.layers._guards import _detached, _GuardsMixin, _same_objects
 from noodl.layers._held import _HeldMixin
 from noodl.layers._solve_policy import resolve
@@ -1171,14 +1171,15 @@ class KirchhoffLayer(
         storage).
 
         On the fast path `x` is the interior potentials, and the residual is the balance
-        `A_I q(phi) - s_I (+ w(phi))`, with the storage withdrawal on a step; `call` is not
-        used (the laws are the layer's own). With flow unknowns `x` is `[phi_I, q_F]` in the
-        real view, the residual is the balance rows, then the implicit laws' own residuals, and
-        `call(i, args)` evaluates owner `i` (`_owner_call`, the default, or the threaded
-        parameters of the differentiable solve); a step adds the storage withdrawal, and the
-        initial point replaces the held rows (`_Held`). The layout is the step's when it
-        has one (`_Step.layout`). `tangents` (`_tangents`, the linear guess only) puts each
-        listed law's tangent at zero in place of its flow."""
+        `A_I q(phi) - s_I (+ w(phi))`, with the storage withdrawal on a step; `call(i, args)`
+        evaluates owner `i` (`None` calls each owner's own `flow` and `rate`). With flow
+        unknowns `x` is `[phi_I, q_F]` in the real view, the residual is the balance rows,
+        then the implicit laws' own residuals, and `call(i, args)` evaluates owner `i`
+        (`_owner_call`, the default, or the threaded parameters of the differentiable
+        solve); a step adds the storage withdrawal, and the initial point replaces the held
+        rows (`_Held`). The layout is the step's when it has one (`_Step.layout`).
+        `tangents` (`_tangents`, the linear guess only) puts each listed law's tangent at
+        zero in place of its flow."""
         u = self._unknowns if step is None or step.layout is None else step.layout
         if u is None:
             phi = self.assemble(x, phi_boundary)
@@ -1723,9 +1724,11 @@ class KirchhoffLayer(
         `(phi, q)` are detached.
 
         **Failure.** `on_failure` (among `newton_kwargs`) is `"raise"` by default. `"return"`
-        needs `diagnostics=` and `differentiable=False`; `"return_primal"` is `"return"` on the
-        primal path and `"raise"` where the solve is differentiated, and needs `diagnostics=`
-        (for `Model(coupling="iterate")`). `fallback` is the ladder climbed when Newton does not
+        needs `diagnostics=` and `differentiable=False`; `"return_primal"` is `"raise"` where
+        the solve is differentiated, and elsewhere `"return"` on the primal solve (where
+        nothing differentiable reaches a differentiable solve too, on either path: the
+        Newton of `differentiable=False`), and needs `diagnostics=` (for
+        `Model(coupling="iterate")`). `fallback` is the ladder climbed when Newton does not
         converge (`None` is the layer's own, `()` none); see module `_fallback`.
 
         **Diagnostics.** A dict passed as `diagnostics` is filled with `"newton_iterations"`,
@@ -1819,29 +1822,26 @@ class KirchhoffLayer(
         # A tensor held where the solve does not thread it is refused before solving, by
         # name; one reached only through a closure, at every residual the forward Newton
         # evaluates, the starting guess first and the root last (`_newton_differentiable`).
-        # A differentiable solve that nothing reaches is the primal one, with that closure
-        # check at every residual (`primal_checked`) where nothing it threads requires grad.
-        # With flow unknowns that is all; on the fast path also only where (under `no_grad`
-        # too: the threaded residual detaches what does) the threaded slopes are the primal ones
-        # (`layer_slopes`), no law is `dp_independent` (a declaration the threaded operator
-        # cross-checks) and every owner's module call is its own method (`_plain_calls`).
-        # Its result is the threaded forward Newton's, bit for bit, without the threading's
-        # cost.
+        # A differentiable solve that nothing reaches (`forward_only`) is the primal solve on
+        # either path: the same Newton, on the layer's own slopes, as `differentiable=False`,
+        # with that closure check at every residual (`primal_checked`) where nothing it
+        # threads requires grad (under `no_grad` a threaded tensor may still require grad,
+        # which the check, run under grad mode, would take for a captured one). Its
+        # residual evaluates each owner as the differentiated solve would, by its module
+        # call: the primal solve with flow unknowns always does, and the fast path's calls
+        # the owner's own method, the same thing unless `forward` is overridden or hooked
+        # (`_plain_calls`), where it calls the module instead (`primal_call`).
         fn = None
         primal_checked = False
+        primal_call = None
         if policy.differentiable:
             self._check_no_unreachable_differentiable_tensors()
-            # Under no_grad a threaded tensor may still require grad, which the check
-            # (run under grad mode) would take for a captured one: checked only where none
-            # does.
-            checkable = policy.forward_only and (
-                torch.is_grad_enabled()
-                or not self._threads_grad(drivers, sources, phi_boundary, starts))
-            # With flow unknowns the primal solve calls every owner as a module already.
-            primal_checked = checkable and (u is not None or (
-                layer_slopes(self) and not any(el.dp_independent for el in self._laws)
-                and self._plain_calls()))
-            if not (primal_checked or (policy.forward_only and u is not None)):
+            if policy.forward_only:
+                primal_checked = (torch.is_grad_enabled() or not self._threads_grad(
+                    drivers, sources, phi_boundary, starts))
+                if u is None and not self._plain_calls():
+                    primal_call = self._owner_call
+            else:
                 fn = FunctionalLaws(self, drivers, sources, phi_boundary, step, history)
 
         requested = newton_kwargs["method"]
@@ -1877,9 +1877,9 @@ class KirchhoffLayer(
             start = None
 
         if fn is None:
-            # The primal solve (with flow unknowns also a differentiable one that nothing
-            # reaches). The WHOLE of it runs under no_grad -- the Newton iteration, every
-            # inner linear solve inside it, and the final assemble/flows -- whatever grad
+            # The primal solve (also a differentiable one that nothing reaches). The WHOLE
+            # of it runs under no_grad -- the Newton iteration, every inner linear solve
+            # inside it, and the final assemble/flows -- whatever grad
             # mode the caller is in: there is no legitimate graph to build (any graph would
             # be an unrolled trace through the converged iterate, not the gradient
             # `differentiable=True` computes), and `solvers.select.solve`'s "auto" refuses
@@ -1891,7 +1891,8 @@ class KirchhoffLayer(
             point: dict = {}
 
             def evaluate(x):
-                r, phi, q = self._residual(x, phi_boundary, drivers, sources, step)
+                r, phi, q = self._residual(x, phi_boundary, drivers, sources, step,
+                                           primal_call)
                 point.update(x=x, phi=phi, q=q)
                 if last is not None:
                     remember(r)
@@ -1918,8 +1919,10 @@ class KirchhoffLayer(
             with torch.no_grad():
                 result = self._newton_primal(residual_fn, operator_fn, x0, newton_kwargs,
                                              diagnostics, on_fail, requested=requested)
-                if primal_checked and point.get("x") is not result.x:
-                    residual_fn(result.x)   # the root is checked too
+                if ((primal_checked or primal_call is not None)
+                        and point.get("x") is not result.x):
+                    # the root is checked too, and its flows are those of `primal_call`
+                    residual_fn(result.x)
                 if point.get("x") is result.x:
                     return point["phi"], point["q"]
                 return self._output(result.x, phi_boundary, drivers, step)
@@ -1946,7 +1949,7 @@ class KirchhoffLayer(
                 last["op"] = fn.operator_fn(x, *params)
                 return last["op"]
 
-        x = self._newton_differentiable(fn, residual_fn, operator_fn, x0, policy,
+        x = self._newton_differentiable(fn, residual_fn, operator_fn, x0,
                                         newton_kwargs, diagnostics, on_fail,
                                         requested=requested)
         parts = fn.root_parts(x)
@@ -2121,7 +2124,7 @@ class KirchhoffLayer(
             result.into(diagnostics, method=requested)
         return result
 
-    def _newton_differentiable(self, fn, residual_fn, operator_fn, x0, policy, newton_kwargs,
+    def _newton_differentiable(self, fn, residual_fn, operator_fn, x0, newton_kwargs,
                                diagnostics, on_fail=None, *, requested=None):
         """The differentiable solve of `residual_fn(x, *fn.all_params) = 0`, on either path;
         returns the root, carrying the implicit-function adjoint.
@@ -2129,11 +2132,10 @@ class KirchhoffLayer(
         The forward Newton evaluates each residual with the threaded tensors detached and
         refuses one that still requires grad (`_threaded_residual`: `_require_threaded`'s
         check at no extra evaluation); the adjoint's VJP, under grad mode, takes the
-        residual's graph to `params`. `policy.forward_only` (on the fast path, where `_solve`
-        does not take the primal Newton instead) runs the forward Newton alone: nothing
-        reaches a gradient, so no adjoint is ever asked of a point it may return
-        unconverged. The root is checked again only when Newton's last
-        residual (`fn.last`) was not at it, which leaves `fn.last` at the root either way.
+        residual's graph to `params`. A solve that nothing differentiable reaches never
+        comes here (`_solve` runs the primal Newton). The root is checked again only when
+        Newton's last residual (`fn.last`) was not at it, which leaves `fn.last` at the root
+        either way.
         `on_fail` and `requested` are `_newton_primal`'s."""
         if requested is None:
             requested = newton_kwargs["method"]
@@ -2149,19 +2151,11 @@ class KirchhoffLayer(
                                            detach=False)
 
         try:
-            if policy.forward_only:
-                # `implicit_solve`'s own forward (the same Newton on the same Jacobian)
-                x = self._newton_primal(
-                    lambda x: residual(x, *all_params),
-                    lambda x: operator_fn(x, *all_params),
-                    x0, newton_kwargs, diagnostics, requested=requested,
-                ).x
-            else:
-                x = implicit_solve(residual, operator_fn, x0, all_params,
-                                   diagnostics=diagnostics, **newton_kwargs)
-                if diagnostics is not None:
-                    # `implicit_solve` writes the outcome; the method requested goes here
-                    diagnostics["method"] = requested
+            x = implicit_solve(residual, operator_fn, x0, all_params,
+                               diagnostics=diagnostics, **newton_kwargs)
+            if diagnostics is not None:
+                # `implicit_solve` writes the outcome; the method requested goes here
+                diagnostics["method"] = requested
         except RuntimeError as exc:
             if on_fail is not None:
                 on_fail(exc)

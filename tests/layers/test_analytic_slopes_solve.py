@@ -260,15 +260,14 @@ def test_a_solve_nothing_differentiable_reaches_is_the_primal_solve(network, mon
                                           differentiable=differentiable, **step,
                                           **TIGHT), diag
     # `on_failure="return_primal"`: a differentiable solve nothing reaches is not
-    # differentiated; on the fast path it runs the primal Newton with the closure check at
-    # every residual (no `FunctionalLaws` built), or, under no_grad with a grad-requiring
-    # driver or owner parameter, the threaded forward Newton (which detaches it). All are
-    # the primal solve bit for bit too.
+    # differentiated; it runs the primal Newton (no `FunctionalLaws` built), with the
+    # closure check at every residual, or, under no_grad with a grad-requiring driver or
+    # owner parameter, without it. All are the primal solve bit for bit too.
     unread = {"unread": _t([1.0]).requires_grad_(True)}
     cases = [("checked", {}, torch.enable_grad, None),
-             ("threaded", unread, torch.no_grad, None)]
+             ("grad-requiring driver", unread, torch.no_grad, None)]
     if params:
-        cases.append(("threaded parameter", {}, torch.no_grad, params[0]))
+        cases.append(("grad-requiring parameter", {}, torch.no_grad, params[0]))
     for name, extra, mode, learnable in cases:
         diag = {}
         built.clear()
@@ -279,7 +278,7 @@ def test_a_solve_nothing_differentiable_reaches_is_the_primal_solve(network, mon
                                     on_failure="return_primal", **step, **TIGHT), diag
         if learnable is not None:
             learnable.requires_grad_(False)
-        assert bool(built) == (name != "checked"), name
+        assert not built, name
     (phi_p, q_p), diag_p = out[False]
     for key in (True, *(c[0] for c in cases)):
         (phi_d, q_d), diag_d = out[key]
@@ -330,3 +329,51 @@ def test_mna_a_newton_aid_declared_exact_corrupts_the_gradient():
     with pytest.raises(AssertionError):
         torch.testing.assert_close(adjoint, central.reshape(adjoint.shape), rtol=1e-4,
                                    atol=1e-8)
+
+
+# ---------------------------------------------------------------------------- return_primal
+@pytest.mark.parametrize("path", ["fast", "flow unknowns"])
+@pytest.mark.parametrize("mode", ["grad", "no_grad"])
+def test_return_primal_that_nothing_reaches_is_the_primal_newton_on_both_paths(
+        path, mode, monkeypatch):
+    """`on_failure="return_primal"` with nothing differentiable reaching the solve is the
+    Newton of `differentiable=False` on either path, also for a law whose `dflow` is only a
+    Newton aid (`exact_slope = False`): the same iterates on the law's own slope, so the
+    same `(phi, q)` bit for bit and the same iteration count. Before, the fast path ran the
+    differentiated solve's forward Newton there (autograd slopes: 4 iterations where the
+    aid takes 27), and the path with flow unknowns the primal one."""
+    if path == "fast":
+        layer, aided, drivers = _aided(False)
+        drivers = {k: v.detach() for k, v in drivers.items()}
+        sources = _t([0.0, 0.01, -0.02])
+    else:
+        layer, aided = _mna_aided(False)
+        drivers, sources = {}, _t([0.0, 0.2, -0.1])
+    phi_b = _t([0.0])
+    built: list = []
+    init = FunctionalLaws.__init__
+
+    def spy(self, *args, **kwargs):
+        built.append(1)
+        init(self, *args, **kwargs)
+
+    monkeypatch.setattr(FunctionalLaws, "__init__", spy)
+    tol = dict(atol=1e-10, rtol=0.0)
+    diag_p: dict = {}
+    phi_p, q_p = layer.solve(phi_b, drivers, sources, diagnostics=diag_p,
+                             differentiable=False, **tol)
+    # under grad mode nothing may require grad for nothing to reach the solve; under
+    # no_grad the law's learnable parameter still does
+    for owner in (*layer._laws, *layer._withdrawals, *layer._storage):
+        for p in owner.parameters():
+            p.requires_grad_(False)
+    aided.C.requires_grad_(mode == "no_grad")
+    diag: dict = {}
+    with torch.enable_grad() if mode == "grad" else torch.no_grad():
+        phi, q = layer.solve(phi_b, drivers, sources, diagnostics=diag,
+                             on_failure="return_primal", **tol)
+    assert not built
+    assert not phi.requires_grad and not q.requires_grad
+    assert torch.equal(phi, phi_p) and torch.equal(q, q_p)
+    assert diag["newton_iterations"] == diag_p["newton_iterations"]
+    assert diag["converged"].all()

@@ -880,7 +880,9 @@ Three more things about `iterate_tol`:
   its last Newton iterate and the iteration carries on from it (that pass is never judged
   converged); only the iteration's own verdict raises. A solve that is differentiated still
   raises (`on_failure="return_primal"`, the passes' default), and an explicit `on_failure` is
-  passed through as given.
+  passed through as given. A pass that nothing differentiable reaches is not differentiated:
+  on every layer it is the primal solve, the same Newton iteration as `differentiable=False`,
+  on each law's own slope.
 
 ### Introspection
 
