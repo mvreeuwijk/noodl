@@ -54,6 +54,11 @@ the line's last token, or its last two when the last is a unit, whatever words l
 value, which the reader refuses: meaningless for a time step.
 `WaterQuality.node_order` and `link_order` carry EPANET's own node and link indices.
 
+`water_run` then runs the quality by default ([Water quality](../applications/water.md#water-quality)),
+and refuses by name what EPANET 2.2's own `bulkrate` cannot answer: a bulk or tank reaction order
+between 0 and 1 (zero concentration gives NaN or infinity), and a Darcy-Weisbach roughness not below
+the diameter under `ROUGHNESS CORRELATION`.
+
 *Refused by name:* `ORDER WALL` other than 0 or 1, `GLOBAL TANK` (EPANET error 213), `QUALITY
 TRACE` without a node (201) or with an unknown one (212), a negative initial quality (209), an
 unknown mixing model on a tank (213) or source type, a negative `TOLERANCE` or `DIFFUSIVITY`, an unknown reaction

@@ -312,6 +312,134 @@ with its tanks moved and its rules checked to its own end: a rule that acts afte
 duration ends that step there and is charged. A simple control or a pattern acts at the start
 of the next step, before its solve, and does not reach the energy of the step before.
 
+## Water quality
+
+`water_run` carries EPANET 2.2's water-quality simulation along with the hydraulics: the
+Lagrangian procedure of `quality.c`, `qualroute.c` and `qualreact.c`, transcribed, so it
+reproduces EPANET's answer and not merely the advection-reaction equation's. EPANET moves
+volumes of water through pipes as segments, merges neighbours that differ by less than a
+tolerance and reacts each by an explicit Euler step; an Eulerian discretisation would differ
+from it however fine. The hydraulics are untouched: quality reads each step's flows, link
+states and delivered demands and never feeds back, so a run is bit-identical with it on and
+off. The quality is read from the `.inp` file ([format](../formats/epanet.md)) into
+`WaterNetwork.quality` (a `WaterQuality`, in SI) and run by `QualityRouter`
+(`noodl.apps.water.quality`).
+
+**Modes** (`[OPTIONS] QUALITY`). `CHEMICAL` (named, with its units, `Chlorine mg/L`;
+concentrations stay in the file's unit), `AGE` (hours: every segment gains the quality step as it
+moves) and `TRACE <node>` (percent of the water that came from that node: the node is held at
+100 and every other starts at 0 whatever the file's initial qualities say, except a tank's own
+segments). `NONE`, or a duration of 0, runs no quality.
+
+**Reactions** (`[REACTIONS]`). In the bulk water, order `n` with a limiting concentration
+(`bulkrate`: growth towards or decay to the limit; a negative order is Michaelis-Menten). At
+the wall, order 0 (mass per area per day) or 1 (length per day), limited by mass transfer from
+the Sherwood number (laminar, transitional, turbulent) with the diffusivity relative to
+chlorine's, `DIFFUSIVITY 0` switching the limitation off; a pipe with no wall coefficient of
+its own takes one from the roughness correlation (Hazen-Williams, Darcy-Weisbach,
+Chezy-Manning). In tanks, one global order and a coefficient per tank (default: the global bulk
+coefficient). A reaction step is `c = max(0, c + (rbulk + rwall) dt)`; pumps and valves never
+react. The wall coefficients are recomputed once per hydraulic step from that step's flow.
+
+**Sources** (`[SOURCES]`). `CONCEN` (at a junction only where its demand is negative), `MASS`
+(per minute), `SETPOINT` and `FLOWPACED`, each with an optional pattern. A reservoir whose
+source goes to zero keeps its last quality, as in EPANET.
+
+**Tank mixing** (`[MIXING]`). `MIXED`, `2COMP` (a mixing zone and a stagnant zone, the zone
+fraction given), `FIFO` and `LIFO`. A tank's quality tracks its own segment volumes, not the
+hydraulic tank volume.
+
+**Running.** `quality=None` (the default) runs it when the network defines a mode and the
+duration is positive, [as above](#running-over-time). The results carry:
+
+| Field | Shape | Meaning |
+| --- | --- | --- |
+| `node_quality` | `(..., T, n_nodes)` | each node's quality at the report times, in the file's units; a tank's is the quality of the water it releases |
+| `link_quality` | `(..., T, n_links)` | the volume-weighted mean over the link's segments (the mean of its end nodes for a link with none) |
+| `quality_units` | `str` | `mg/L`, `hrs`, `%` or the file's |
+| `mass_balance` | `QualityMassBalance`, fields of shape `(...,)` | initial, inflow, outflow, reacted and final mass and their ratio, as EPANET's report writes them, in physical units (a chemical in its mass unit, AGE and TRACE as quality times m³) |
+
+All are `None` when no quality ran. `diagnostics={}` additionally receives
+`diagnostics["quality"]`, one entry per instance: the node order of every sort, the cycle
+breaks, the flow reversals, the segment counts per link and quality step, and the per-node
+inflow and outflow.
+
+```python
+from noodl.apps.water import read_epanet_inp, build_model, water_run
+
+net = read_epanet_inp("Net1.inp")        # chlorine, bulk -0.5 per day, wall -1 ft per day
+model, state, drivers = build_model(net)
+run = water_run(model, duration=6 * 3600)
+
+print(run.quality_units, tuple(run.node_quality.shape), tuple(run.link_quality.shape))
+print([round(float(c), 3) for c in run.node_quality[:4, run.node_names.index("11")]])
+print(round(float(run.mass_balance.ratio), 4))
+```
+
+```text
+mg/L (7, 11) (7, 13)
+[0.5, 0.444, 0.866, 0.864]
+1.0
+```
+
+**Learnable inputs.** Optional overrides of what the file says: `state["quality.initial"]`
+(n_nodes, quality units) and the drivers `"quality.bulk_coefficient"` and
+`"quality.wall_coefficient"` (n_pipes, in `net.pipes` order; 1/s for bulk, m/s for a wall
+coefficient of order 1, quality units per m² per s of order 0), `"quality.tank_coefficient"`
+(n_tanks, 1/s) and `"quality.source_strength"` (n_nodes, scaled by the source's pattern; a MASS
+source in mass per second). A wrong shape, or any of them on a run without quality, is refused
+by name.
+
+**Differentiability.** Volumes and concentrations stay in the autograd graph; only the
+decisions are made on detached values: whether a segment is used up, whether two segments merge
+(`|c1 - c2| < Ctol`), the flow direction and the node order. Segment volumes are `|q| dt` from
+the solve's flows, so the quality is piecewise differentiable with respect to the reaction
+coefficients, the source strengths, the initial quality and the hydraulic parameters (demands,
+roughnesses, a pump's speed) through the travel times. It jumps where a decision flips: where a
+merge, a reversal or the node order differs between `p - h` and `p + h`, a central difference
+is not the derivative. Autograd is on only when a quality input or the solve's flows require
+gradients (`differentiable=True` for the hydraulics); otherwise the router runs detached, since
+the graph grows linearly with the quality steps (about 60 nodes per step for a coefficient, 135
+for a hydraulic parameter, on the verification network).
+
+**Batches.** A batched run builds one router per instance (each has its own segments and node
+order) and stacks the results `(..., T, n)`; the `mass_balance` fields have shape `(...,)`. The
+hydraulic step is shared by the batch, [as above](#running-over-time): an instance takes the
+others' step boundaries, so its quality is its own single run's only when no instance has an
+event (a tank filling, a control) that the others lack. Run instances one at a time to
+reproduce EPANET's sequence for each.
+
+**EPANET behaviours transcribed as they are**, not corrected:
+
+- A check-valve pipe (`CV`) holds no initial segment and never reacts; a pump's or valve's
+  chain is filled and emptied within the step and never reacts.
+- A flow below `Q_STAGNANT` (0.005 gpm) has no direction: the link is left out of the node
+  order and its water moves from its first node. A closed link has zero flow. Segments are
+  reversed only when the direction changes from positive to negative or the reverse, not
+  through a stagnant interval.
+- A `2COMP` tank with no net flow loses the mass of its stagnant zone (the zone's volume is
+  set to 0), so the mass balance ratio is below 1 there, in EPANET and here alike.
+- The last hydraulic step is transported only if it ends within the duration: EPANET does not
+  cut it at `DURATION`, so a last step that overruns it is not routed.
+- A reservoir's `[QUALITY]` is its quality, kept until a source overwrites it; a reservoir
+  without a source adds `quality x outflow` to the mass balance.
+- EPANET's rounded unit factors. It divides a file's flows by a rounded factor (28.317 L/s per
+  cfs) but its lengths by the exact foot, so the volume its quality moves is 5.4e-6 smaller than
+  the exact SI volume (in LPS files; other units differ), and a `MASS` source and an order 0 wall
+  coefficient use 28.317 L per ft³ against 1000 L per m³. These are transcribed. The mass
+  balance reports physical mass, so it carries no unit factor; EPANET's terms are divided by it
+  when compared.
+- Segments merge when their quality differs by less than `Ctol` (`TOLERANCE`, default 0.01 in
+  the quality unit). The decision is made in EPANET's internal unit (a chemical divided by
+  28.317 L per ft³), where a tie at exactly `Ctol` can be decided otherwise than in mg/L.
+
+**Refused by name:** a bulk or tank reaction order between 0 and 1 (EPANET's `bulkrate` raises
+zero to a negative power at zero concentration and gives NaN or infinity: there is no finite
+behaviour to reproduce), `ORDER WALL` other than 0 or 1, a Darcy-Weisbach roughness not below
+the diameter under a roughness correlation (EPANET runs it, with an unphysical value), a
+quality step that rounds to 0, a quality input on a run without quality, and the steady tracer
+alongside the EPANET quality (give `quality=False` for that model).
+
 ## The physics
 
 ### Hazen-Williams
@@ -925,6 +1053,86 @@ active PRV, 0 through an open one, and the jump from 1 to 0 across the switch.
 **The loop head-loss row is a formulation identity, not a comparison** — head loss summing to zero around every
 independent loop is a property of the cycle-space formulation, and it holds exactly.
 
+### Water quality
+
+The reference is EPANET 2.2 through the toolkit on the committed file, with the same settings as
+above (`ACCURACY 1e-7` through `EN_setoption`, `TRIALS 400`, 5000 for ky10; any warning fails the
+test unless it is named). Quality is read at every quality step through `EN_runQ` and `EN_nextQ`
+(the loop `EN_solveQ` runs; `EN_stepQ` splits a step at a hydraulic event, which EPANET's own
+runs do not). The bound, over every node and link at every report time: each point within 1e-5 of
+the quality's scale (1 for a chemical, 100 for a trace, the largest age of the run for an
+age: 24 h on the base network, 6.92 h on ky10) and the worst within `Ctol`; mass-balance terms within 2e-5 relative and the ratio within
+1e-6. A point beyond 1e-5 is admitted only with a measured cause asserted in the test. EPANET reads its hydraulics back as
+float32 reals, a floor of about 6e-8 relative.
+
+Per feature, on a small base network (`quality_base.inp`: a reservoir, a tank with a pump line,
+a dead end), each case compared at 25 hourly times; the 54 cases also have their mass balance
+compared:
+
+| Feature | Measured (worst, of the quality's scale, away from the admitted points) |
+|---|---|
+| Base, CHEMICAL, TRACE at a junction, a reservoir and a tank; a dead end below `Q_STAGNANT`; a tank at its limit; a check valve; a closed link; a flow cycle | 1.3e-7 to 4.4e-7 |
+| Bulk order 0, 1, 2, Michaelis-Menten, limiting potential (growth and decay) | 4.9e-8 to 2.2e-7 |
+| Wall order 0 (SI and US), order 1, mass-transfer limited, `DIFFUSIVITY 0`, roughness correlation (Hazen-Williams; Darcy-Weisbach in US units) | 5.7e-8 to 2.8e-7; 2.3e-6 for Darcy-Weisbach (the hydraulics of that file, 1e-6 class) |
+| Tank reaction; water age; reactive dead end and check valve (`noflowqual`) | 2.0e-7 to 2.2e-7 |
+| Sources: each type, with and without a pattern, at a reservoir, a junction (positive and negative demand), a tank; SETPOINT below the node's quality; a reservoir source whose pattern reaches 0 | 1.7e-5 to 2.5e-5 at the admitted dead-end points, none beyond elsewhere |
+| Mixing: MIXED, 2COMP, FIFO, LIFO; 2COMP crossing its mixing-zone volume; FIFO and LIFO emptying through several segments; 2COMP with no net flow | 3.3e-8 to 4.2e-7 |
+| Mass balance, all 54 cases | terms 3.8e-6 (2e-5 bound), ratio 8.3e-8 (1e-6) |
+| A duration past the last whole hydraulic step (5:30; the last step not routed) | 1.98e-6; terms 2.9e-7, ratio 2.6e-8 |
+| A batch against its single runs (bulk batch bit-equal; demands 0.8 and 1.2 over 23 h) | equal; 1e-8 of scale |
+| Gradients of a node's quality with respect to bulk, wall, source, initial quality (a junction and a tank) and a pipe roughness, against central differences (h = 1e-4 of the value; the +h, -h and base runs have identical segment counts and node order) | relative difference 8.5e-12 to 1.1e-8 (bound 1e-5) |
+
+The admitted points on the base network are all at its dead-end pipe P7 (1.2e-5 to 6.3e-5 of the
+scale): EPANET's solver leaves a residual flow of at most 3.7e-9 m³/s in it, and it pushes the
+junction's water into the pipe while noodl's P7 carries 1e-25 m³/s. Each point is checked
+against a bound computed from EPANET's cumulative flow through P7, and admitted only while that flow stays
+below 1e-8 m³/s.
+
+EPANET's example networks (`test_water_quality_networks.py`):
+
+| Network | Compared | Worst | Notes |
+|---|---|---|---|
+| Net1 (chlorine, 24 h) | all nodes and links, 27 times | 1.6e-6 mg/L (p99.9 1.4e-6); mass terms 7.7e-7, ratio 1.8e-8 | |
+| Net2 (fluoride, a `CONCEN` source on a pattern, 55 h, one tank), hydraulics | 56 steps | heads 1.1e-7 relative, levels 8.9e-6 m, flows 1.9e-8 m³/s | states and step times equal |
+| Net2, `Tolerance` 0.01 moved by 1e-8 either way | all nodes and links | 4.2e-6 mg/L (p99.9 6.6e-7) | |
+| Net2 as shipped (`Tolerance` 0.01) | | 2.83e-3 mg/L, within `Ctol`; 791 of 4256 points beyond 1e-5, all from 32 h | a tie at exactly `Ctol`, below |
+| Net3 (TRACE from the lake, 168 h, 1226 flow reversals, 154 node sorts) | 183 times | 2.5e-4 % (p99.9 9.7e-5 %); mass terms 1.4e-6, ratio 1.3e-8 | |
+| Net6 as shipped (quality identically 0) | smoke | exactly 0 in both; ratio exactly 1 | |
+| Net6 with a source added, before 18922 s | 40 steps | 5.9e-6 mg/L; mass terms (whole run) 1.9e-6 | hydraulic cause below |
+| Net6 with a source added, noodl's router on EPANET's saved hydraulics | all 609 times | 5.2e-11 | |
+| ky4 (TRACE, DURATION edited to 24 h) | 65782 points, 31 times | 9.35e-3 % (p99.9 5.5e-4 %); terms 1.8e-6, ratio 9.0e-7; router on EPANET's hydraulics 2.0e-9 % | 33 points admitted, below |
+| ky10 (AGE, DURATION edited to 6:54:59) | 35928 points, 18 times | 2.15e-3 h (p99.9 1.1e-5 h); terms 3.2e-6, ratio 4.8e-9; router on EPANET's hydraulics 1.4e-12 h | 10 points admitted, below |
+
+The causes admitted, each asserted in its test:
+
+- **Net2 as shipped: a decision at an exact tie.** The pattern steps from 0.09 to 0.08 mg/L at 31 h,
+  and pipe 1's last segment then meets the new outflow exactly `Ctol` = 0.01 apart. noodl computes
+  `0.09 - 0.08 = 0.009999999999999995`, below `Ctol`, and merges; EPANET, in its internal unit, gets a
+  difference one ulp above `Ctol` and starts a new segment. The test checks the decision (the
+  segment counts, and that EPANET at 0.01 equals EPANET at 0.00999999) and does not count it as accuracy.
+  noodl's router driven by EPANET's own hydraulics flips the same 791 points. Accuracy is tested with `Tolerance` moved by 1e-8.
+  A tie at 49 h does resolve as EPANET's, since the decisions are made in EPANET's unit.
+- **Net6 with a source: closed-link leaks.** The step plans part at 18922 s (EPANET's PUMP-3845
+  switch; noodl's is at 18921 s, see Limitations, closed links), after which 252 of
+  EPANET's 609 step times are 1 to 55 s from noodl's and the fronts arrive at shifted times (a 1 s
+  shift of one late switch moves EPANET's own quality by 2e-2). The test asserts the bounds up to 18922 s and
+  the mass balance over the whole run; after it the comparison is the router on EPANET's
+  hydraulics, 5.2e-11.
+- **ky4: closed-link leaks and EPANET's own convergence.** 30 of the 33 points are leaks of closed links, which EPANET
+  conducts at `1/CBIG` and noodl does not: the closed pump's 9e-8 m³/s back to the reservoir through
+  P-977 (below `Q_STAGNANT`, so EPANET routes it from its first node and the reservoir's 100 % enters the pipe) and the
+  closed tank pipes' 4e-9 to 2e-8 m³/s. With those leaks injected into noodl as sources, 3 points
+  remain (J-703 and P-696 at 83882 and 86400 s) against EPANET at `ACCURACY 1e-7`, and none against
+  EPANET at 1e-8: EPANET's own convergence moves its flow by 3e-4 relative there.
+  The mass-balance ratio differs by 9.0e-7: the router on EPANET's saved hydraulics reproduces EPANET's
+  ratio to 1e-15, and 89 % of the deficit is the pump's leak routed into dead junctions, whose
+  mass counts as neither outflow nor storage.
+- **ky10: EPANET's unconverged continuity, and one leak.** 9 points are P-310, the only link into four
+  dead-end junctions: noodl's flow equals their demand to 1e-12, EPANET's is 0.1 to 0.6 % off
+  (a 9.8e-9 to 6.2e-8 m³/s residual at its accuracy), and 1e-8 is unbalanced at the start even
+  with 5000 trials. One point (J-433 at 23050 s) is a closed-link leak.
+  The run stops at 6:54:59 because the hydraulics diverge after it (Limitations).
+
 ## Limitations
 
 - **Not modelled, refused by name:** a valve at a full or empty tank. A file using it raises an
@@ -1055,6 +1263,31 @@ independent loop is a property of the cycle-space formulation, and it holds exac
   (`test_pattern_start_shifts_the_pattern_as_epanet_does`).
 - **One demand pattern per junction.** Several `[DEMANDS]` categories of one junction must
   share their pattern (refused by name otherwise).
+- **Water quality: not modelled.** EPANET-MSX (multi-species), EPANET 2.3 features, an Eulerian
+  discretisation, the per-link average reaction-rate output and the `Wbulk`, `Wwall`, `Wtank` and
+  `Wsource` summary of EPANET's report (cosmetics). A reaction order between 0 and 1, `ORDER WALL`
+  other than 0 or 1, and a Darcy-Weisbach roughness not below the diameter under a roughness
+  correlation are refused by name ([Water quality](#water-quality)).
+- **Water quality inherits the hydraulics' closed-link leaks.** EPANET's closed links conduct
+  `1/CBIG` and noodl's do not (above), so a quality front that crosses a closed link's leak, or a
+  switch that falls a second apart (Net6's PUMP-3845), is carried differently: ky4's 33 admitted
+  points, ky10's J-433 and Net6 after 18922 s. They are measured and asserted in the tests; the leak
+  is not modelled.
+- **ky10's quality is verified to 6:54:59 only.** After it EPANET's `pumpcoeff` caps the slope of
+  the constant-power pump `~@Pump-10` (`CBIG`), which dead-heads against its closed CV and PRV and
+  takes it to zero flow, where noodl keeps it on its power curve (5.4e-4 m³/s, 1396 m): the
+  hydraulics, and so the quality, differ from 7 h. Forcing the pump closed in noodl matches EPANET to
+  10 h. The 24 h comparison is an expected failure in `test_water_networks.py` with these values;
+  EPANET itself needs `TRIALS 5000` at `ACCURACY 1e-7` on this file. Left for a later change to
+  the pump physics.
+- **EPANET's own accuracy bounds the comparison.** A file's `ACCURACY` is clamped to 1e-5 by
+  EPANET's reader; the reference sets 1e-7 through the toolkit. At 1e-8 EPANET leaves Net2 and Net3
+  hydraulically unbalanced at several steps, so 1e-7 is the tightest reference that converges
+  everywhere. noodl's quality on EPANET's own saved hydraulics matches EPANET to 5.2e-11 (Net6)
+  and 1.4e-12 h (ky10), so the differences above are in the hydraulics' inputs, not the router.
+- **A tie at exactly `Ctol` cannot always be reproduced.** The decision is made in EPANET's
+  internal unit, but the last bit of the compared values depends on EPANET's merge history in
+  float32-read volumes and ft³; Net2 as shipped (31 h) is decided otherwise than EPANET's (above).
 
 ## Install
 
