@@ -1390,6 +1390,12 @@ def build_model(
                             "(quality unit)^(1-n)/s; the file's TANK, else GLOBAL BULK, "
                             "when not given", over=[t.name for t in net.tanks],
                 ordering="net.tanks", required=False)
+    if net.quality is not None and net.quality.mode == "CHEMICAL" and net.quality.sources:
+        model.input_specs["quality.source_strength"] = dict(
+            description="each node's quality source strength (read at the nodes with a "
+                        "[SOURCES] entry), in quality units, a MASS source's per second; "
+                        "the file's, when not given", over=node_names,
+            ordering="model.node_names", required=False)
     if TIME_KEY in drivers:
         model.input_specs[TIME_KEY] = dict(
             description="seconds since the simulation start, which the network's AT TIME and "

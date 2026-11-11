@@ -735,6 +735,91 @@ def test_a_check_valve_pipe_does_not_react_like_epanet(tmp_path):
     assert all(counts[chain] == 0 for counts in diagnostics["quality"][0]["segments"])
 
 
+# ---- sources (Task 5) -----------------------------------------------------------------------
+
+#: A pattern of zeros and twos (hourly, three times 8 h), the sources' `SRC`.
+_SRC_PATTERN = [" SRC 1 2 2 0 0 2 1 1"] * 3
+
+
+def _source(name: str, line: str, *, patterned: bool = False, quality=(),
+            replace=()) -> Callable[[Path], Path]:
+    """The base with the `[SOURCES]` `line` (the pattern `SRC` appended to it when
+    `patterned`), the `[QUALITY]` lines `quality` and the `replace` edits."""
+    def case(tmp_path: Path) -> Path:
+        return edited(BASE, tmp_path, f"source_{name}.inp", replace=list(replace),
+                      add={"SOURCES": [line + (" SRC" if patterned else "")],
+                           "PATTERNS": _SRC_PATTERN if patterned else [],
+                           "QUALITY": list(quality)})
+    return case
+
+
+_SOURCE_LINES = {"concen_reservoir": " R1 CONCEN 2.0", "mass": " J1 MASS 1200",
+                 "setpoint": " J1 SETPOINT 1.5", "flowpaced": " J1 FLOWPACED 0.5"}
+_ALL_ONE = tuple(f" {n} 1.0" for n in ("J1", "J2", "J3", "J4", "J5", "J6", "J7", "T1"))
+for _kind, _line in _SOURCE_LINES.items():
+    for _pattern in ("constant", "pattern"):
+        QUALITY_CASES[f"source_{_kind}_{_pattern}"] = _source(
+            f"{_kind}_{_pattern}", _line, patterned=_pattern == "pattern")
+QUALITY_CASES["source_setpoint_below"] = _source(
+    "setpoint_below", " J1 SETPOINT 0.5", quality=_ALL_ONE)
+QUALITY_CASES["source_concen_junction_positive"] = _source(
+    "concen_junction_positive", " J6 CONCEN 0.8")
+QUALITY_CASES["source_concen_junction_negative"] = _source(
+    "concen_junction_negative", " J6 CONCEN 0.8",
+    replace=[(" J6   15    3", " J6   15    -3")])
+QUALITY_CASES["inflow_junction_without_source"] = _source(
+    "inflow_junction_without_source", " J6 CONCEN 0",
+    replace=[(" J6   15    3", " J6   15    -3")])
+QUALITY_CASES["setpoint_baseline"] = _source(
+    "setpoint_baseline", " J1 SETPOINT 0", quality=_ALL_ONE)
+
+
+@pytest.mark.parametrize("pattern", ["constant", "pattern"])
+@pytest.mark.parametrize("kind", list(_SOURCE_LINES))
+def test_source_matches_epanet(tmp_path, kind, pattern):
+    """A CHEMICAL source of each type (CONCEN at the reservoir `R1`, 2 mg/L in place of its
+    1; MASS 1200 mg/min, SETPOINT 1.5 mg/L and FLOWPACED 0.5 mg/L at `J1`), constant and
+    scaled by a pattern of zeros and twos (`sourcequal` at the step's start, `Qtime`): the
+    node and link qualities match EPANET's by the spec's bounds (`_matches`; `P7`'s
+    residual admitted, `_residual_admitted`)."""
+    results, *_ = _matches(tmp_path, f"source_{kind}_{pattern}")
+    node = "R1" if kind == "concen_reservoir" else "J1"
+    assert float(_quality(results, node).max()) > 1.4      # the source reached the network
+
+
+def test_a_reservoir_source_whose_pattern_goes_to_zero_keeps_its_last_value(tmp_path):
+    """`findnodequal` returns the node's quality when the source adds 0: a reservoir's
+    pattern `1 2 2 0 0 2 1 1` of a 2 mg/L source is 0 from 3 h to 5 h, and `R1` keeps the
+    4 mg/L of the hour before; it takes 2 mg/L at 6 h."""
+    results, *_ = _matches(tmp_path, "source_concen_reservoir_pattern")
+    r1 = _quality(results, "R1")
+    assert [float(r1[h]) for h in range(1, 8)] == [2.0, 4.0, 4.0, 4.0, 4.0, 4.0, 2.0]
+    assert float(r1[0]) == 1.0                            # the file's, before any transport
+
+
+def test_setpoint_below_the_node_quality_adds_nothing(tmp_path):
+    """A SETPOINT of 0.5 mg/L at `J1` under a 1.0 mg/L supply (every node starts at 1.0):
+    `max(c - quality, 0)` is 0, so every quality equals the run without the source, bit for
+    bit, and EPANET's."""
+    with_source, *_ = _matches(tmp_path, "source_setpoint_below")
+    without, *_ = _matches(tmp_path, "setpoint_baseline")
+    assert torch.equal(with_source.node_quality, without.node_quality)
+    assert torch.equal(with_source.link_quality, without.link_quality)
+    assert bool((with_source.node_quality == 1.0).all())
+
+
+def test_concen_at_a_junction_needs_a_negative_demand(tmp_path):
+    """A CONCEN source at `J6` adds nothing at a demand of +3 L/s (`J6` equals the run
+    without the source), and with -3 L/s (an inflow) adds `-c demand dt / volout`: `J6`'s
+    water leaves at the strength 0.8 mg/L on top of what it took in; both match EPANET's."""
+    positive, *_ = _matches(tmp_path, "source_concen_junction_positive")
+    plain, *_ = _compare(tmp_path, "base")
+    assert torch.equal(positive.node_quality, plain.node_quality)
+    negative, *_ = _matches(tmp_path, "source_concen_junction_negative")
+    none, *_ = _compare(tmp_path, "inflow_junction_without_source")
+    assert float((negative.node_quality - none.node_quality).abs().max()) > 0.1
+
+
 def test_the_mass_balance_reader_takes_non_finite_terms():
     """EPANET's report prints a non-finite term as the C runtime does (MSVC `-1.#IND`,
     `1.#INF`; elsewhere `nan`, `inf`): read as NaN and +-inf, so a failing case reports."""

@@ -42,6 +42,7 @@ from noodl.apps.water.elements import NU_WATER_FT2
 from noodl.apps.water.quality_data import WaterQuality
 from noodl.apps.water.quality_react import (
     BULK_TINY,
+    EPANET_LITRES_PER_M3,
     bulk_rate,
     pipe_coefficients,
     tank_coefficients,
@@ -332,8 +333,6 @@ def _refuse_later_features(net, quality: WaterQuality) -> None:
                     f"concentration and returns NaN (inf with a limiting potential), so "
                     f"there is no finite answer to reproduce; use an order of 0, 1 or "
                     f"more, or a negative (Michaelis-Menten) order")
-    if quality.sources:
-        raise ValueError("quality: [SOURCES] (quality sources) are not yet modelled")
     for tank in net.tanks:
         model, _ = quality.mixing.get(tank.name, ("MIXED", 1.0))
         if model != "MIXED":
@@ -354,7 +353,11 @@ class QualityRouter:
     `net.pipes` order) and `["quality.tank_coefficient"]` (n_tanks, `net.tanks`), SI per
     second (`WaterQuality`), replace the network's reaction coefficients
     (`quality_react.pipe_coefficients`, `tank_coefficients`), the wall's after its roughness
-    correlation; they keep their graph. A reactive substance (EPANET's `Reactflag`,
+    correlation; they keep their graph. `inputs["quality.source_strength"]` (n_nodes,
+    `model.node_names`, read at the nodes that have a `[SOURCES]` entry) replaces their
+    strengths (`QualitySource.strength`: quality units, a MASS source's per second); it
+    keeps its graph. Sources act in a CHEMICAL run only
+    (`findsourcequal`). A reactive substance (EPANET's `Reactflag`,
     `setreactflag`: AGE, or a CHEMICAL with a nonzero pipe or tank coefficient) reacts in
     every quality step before its transport (`react`), the mass it lost kept in `reacted`
     (quality x m3; EPANET's `MassBalance.reacted`). A CHEMICAL whose coefficients require a
@@ -447,6 +450,7 @@ class QualityRouter:
         self.pool.close()
 
         self._init_reactions(net, quality, inputs, attached)
+        self._init_sources(quality, inputs, node_index)
         self.direction = [0] * n_links         # `FlowDir`, ZERO_FLOW at the start
         self.order: list[int] = []              # `SortedNodes`, none until the first sort
         self.diagnostics = None
@@ -508,6 +512,71 @@ class QualityRouter:
         self._chain_kind = torch.tensor(kinds, dtype=torch.long)
         self.n_pipes = n_pipes
         self.reacted = torch.zeros((), dtype=F64)
+
+    def _init_sources(self, quality: WaterQuality, inputs: Mapping[str, Tensor],
+                      node_index: dict[str, int]) -> None:
+        """`[SOURCES]` (`sourcedata`, `input3.c`) of a CHEMICAL run, by node: `source_kind`,
+        `source_pattern` and `source_base` (the strength, `C0`, from
+        `inputs["quality.source_strength"]` when given; a scalar that keeps its graph when
+        attached). Other modes ignore them (`findsourcequal`: `Qualflag != CHEM`)."""
+        self.source_kind: dict[int, str] = {}
+        self.source_pattern: dict[int, str | None] = {}
+        self.source_base: dict[int, object] = {}
+        self.source_c: dict[int, object] = {}
+        given = inputs.get("quality.source_strength")
+        if given is not None and tuple(given.shape) != (self.n_nodes,):
+            raise ValueError(f"quality: quality.source_strength has the shape "
+                             f"{tuple(given.shape)}; it takes one value per node, "
+                             f"({self.n_nodes},)")
+        if self.mode != "CHEMICAL":
+            return
+        for source in quality.sources:
+            m = node_index[source.node]
+            self.source_kind[m] = source.kind
+            self.source_pattern[m] = source.pattern
+            if given is None:
+                self.source_base[m] = float(source.strength)
+            else:
+                self.source_base[m] = given[m] if self.attached else float(given[m].detach())
+
+    def _source_strengths(self, t: int) -> None:
+        """Every source's strength at the step starting at `t`: `sourcequal` (`quality.c`),
+        the base strength times its pattern's factor at `Qtime`, which is the step's start
+        for every quality step of it (`nextqual` advances it after the transport)."""
+        from noodl.apps.water.simulate import pattern_factor  # simulate imports this module
+        self.source_c = {
+            m: (base if self.source_pattern[m] is None
+                else base * pattern_factor(self.net, self.source_pattern[m], t))
+            for m, base in self.source_base.items()}
+
+    def _source_quality(self, n: int, volout, dt: int):
+        """`findsourcequal` (`quality.c`): the concentration node `n`'s source adds to the
+        water leaving it, 0.0 for none. Nothing when the base strength is 0 or the outflow
+        `volout / dt` (m3/s as EPANET's flows) is not above `Q_STAGNANT`. CONCEN at a
+        junction needs a negative demand: `-c demand dt / volout`; MASS (per second)
+        `c dt / volout` over the litres per m3 EPANET's volumes carry (`LperFT3` over the
+        exact ft3, `EPANET_LITRES_PER_M3`, the factor `quality_react` takes: the volumes are
+        in `flow_volume_scale`'s EPANET m3); SETPOINT `max(c - quality, 0)`; FLOWPACED `c`.
+        Concentrations keep their graph; the decisions are on detached values."""
+        base = self.source_base.get(n)
+        if base is None or _value(base) == 0.0:
+            return 0.0
+        if _value(volout) / dt <= self.q_stagnant:
+            return 0.0
+        c = self.source_c[n]
+        kind = self.source_kind[n]
+        if kind == "CONCEN":
+            if self.junction[n]:
+                if _value(self.demand[n]) < 0.0:
+                    return -c * self.demand[n] * dt / volout
+                return 0.0
+            return c
+        if kind == "MASS":
+            return c * dt / (volout * EPANET_LITRES_PER_M3)
+        if kind == "SETPOINT":
+            gap = c - self.node[n]
+            return gap if _value(gap) > 0.0 else 0.0
+        return c
 
     # ---- results -------------------------------------------------------------------
 
@@ -586,6 +655,7 @@ class QualityRouter:
         self.demand = node_demand
         if self._directions_changed(t):
             self._sort(t)
+        self._source_strengths(t)
         qtime = 0
         while qtime < step:
             dt = min(self.qstep, step - qtime)
@@ -735,7 +805,10 @@ class QualityRouter:
         links' adjoining segments' mean (`noflowqual`). A tank mixes its inflow by its model
         (`mixtank`; MIXED: `tankmix1`). A reservoir keeps its quality. In TRACE the trace
         node holds 100 (`SourceQual` 100 at a reservoir, else `max(100 - quality, 0)`).
-        The quality released downstream is returned."""
+        An external source adds its concentration (`findsourcequal`, CHEMICAL only): onto a
+        junction's quality, onto a tank's outflow only, and in place of a reservoir's (which
+        keeps its previous quality when 0 is added). The quality released downstream is
+        returned."""
         if self.junction[n]:
             volin = volin - min(0.0, self.demand[n]) * dt
             if _value(volin) > 0.0:
@@ -746,7 +819,17 @@ class QualityRouter:
             self.node[n] = self._mix_tank(self.tank_of[n], volin, massin, volin - volout)
         if self.mode == "TRACE" and n == self.trace:
             self.node[n] = TRACE_QUALITY
-        return self.node[n]
+            return self.node[n]
+        added = self._source_quality(n, volout, dt)
+        if _value(added) == 0.0:
+            return self.node[n]
+        if self.junction[n]:
+            self.node[n] = self.node[n] + added
+            return self.node[n]
+        if n in self.tank_of:
+            return self.node[n] + added
+        self.node[n] = added
+        return added
 
     def _no_flow_quality(self, n: int):
         """`noflowqual` (`qualroute.c`): the mean, over node `n`'s links (its adjacency

@@ -193,13 +193,105 @@ def test_an_attached_run_equals_a_detached_run():
 
 
 @pytest.mark.parametrize("change, match", [
-    (dict(sources=(QualitySource("J1", "MASS", 1.0),)), "SOURCES"),
     (dict(mixing={"T1": ("FIFO", 1.0)}), "MIXING"),
 ])
 def test_features_of_later_tasks_are_refused_by_name(change, match):
     model, _, _ = build_model(_base(**change))
     with pytest.raises(ValueError, match=match):
         water_run(model, duration=3600, quality=True)
+
+
+# ---- sources (`findsourcequal`, `sourcequal`; `quality.c`) ------------------------------------
+
+def _run(net, *, drivers=None, hours=3):
+    model, _, _ = build_model(net)
+    return model, water_run(model, drivers=drivers, duration=hours * 3600, quality=True)
+
+
+def test_no_source_below_q_stagnant():
+    """A MASS source at the dead end `J5` (no demand, so no outflow above `Q_STAGNANT`: `P7`
+    carries a residual flow into it, and `volout / dt <= Q_STAGNANT` there): nothing is
+    added, and the qualities equal the run without the source, bit for bit."""
+    _, plain = _run(_base(), hours=3)
+    _, sourced = _run(_base(sources=(QualitySource("J5", "MASS", 100.0),)), hours=3)
+    assert torch.equal(sourced.node_quality, plain.node_quality)
+    assert torch.equal(sourced.link_quality, plain.link_quality)
+
+
+def test_sources_act_in_a_chemical_run_only():
+    """`findsourcequal` returns 0 unless `Qualflag == CHEM`: the same source in an AGE run
+    changes nothing."""
+    age = dict(mode="AGE")
+    _, plain = _run(_base(**age))
+    _, sourced = _run(_base(sources=(QualitySource("J1", "FLOWPACED", 5.0),), **age))
+    assert torch.equal(sourced.node_quality, plain.node_quality)
+
+
+def test_each_source_type_adds_its_concentration_by_hand():
+    """`findsourcequal` for a node whose outflow is 19 L/s over a 300 s step: MASS `c dt /
+    (volout LperFT3/ft3)` (c in mg/s), SETPOINT `max(c - quality, 0)`, FLOWPACED `c`, CONCEN
+    at a junction `-c demand dt / volout` with a negative demand and 0 otherwise; at the
+    reservoir CONCEN is `c`. Nothing for a zero base strength or at `Q_STAGNANT`."""
+    net = _base(sources=tuple(QualitySource(n, k, 2.0) for n, k in (
+        ("J1", "MASS"), ("J2", "SETPOINT"), ("J3", "FLOWPACED"), ("J4", "CONCEN"),
+        ("R1", "CONCEN"), ("J7", "MASS"))) + (QualitySource("J6", "MASS", 0.0),))
+    model, router = _router(net)
+    index = {n: i for i, n in enumerate(model.node_names)}
+    router.source_c = {m: 2.0 * 3.0 for m in router.source_base}      # a factor of 3
+    dt, volout = 300, 0.019 * 300
+    router.demand = [0.0] * len(model.node_names)
+    router.node[index["J2"]] = 1.0
+    assert router._source_quality(index["J1"], volout, dt) == pytest.approx(
+        6.0 * dt / (volout * EPANET_LITRES_PER_M3), rel=1e-15)
+    assert router._source_quality(index["J2"], volout, dt) == 5.0       # 6 - 1
+    router.node[index["J2"]] = 7.0
+    assert router._source_quality(index["J2"], volout, dt) == 0.0       # max(6 - 7, 0)
+    assert router._source_quality(index["J3"], volout, dt) == 6.0
+    assert router._source_quality(index["J4"], volout, dt) == 0.0       # a positive demand
+    router.demand[index["J4"]] = -0.003
+    assert router._source_quality(index["J4"], volout, dt) == pytest.approx(
+        6.0 * 0.003 * dt / volout, rel=1e-15)
+    assert router._source_quality(index["R1"], volout, dt) == 6.0
+    assert router._source_quality(index["J6"], volout, dt) == 0.0       # base strength 0
+    assert router._source_quality(index["J7"], router.q_stagnant * dt, dt) == 0.0
+
+
+def test_the_source_strength_input_replaces_the_files_and_keeps_its_gradient():
+    """`drivers["quality.source_strength"]` (n_nodes, read at the source nodes) replaces the
+    file's strength: the file's value gives the same qualities, bit for bit; a different
+    one other qualities, and a run with it requiring a gradient equals the detached one and
+    carries the gradient back."""
+    net = _base(sources=(QualitySource("J1", "FLOWPACED", 0.5),))
+    model, _, _ = build_model(net)
+    n = len(model.node_names)
+    j1 = model.node_names.index("J1")
+    file = torch.zeros(n, dtype=F64)
+    file[j1] = 0.5
+    plain = water_run(model, duration=3 * 3600, quality=True)
+    same = water_run(model, drivers={**initial_drivers(model), "quality.source_strength": file},
+                     duration=3 * 3600, quality=True)
+    assert torch.equal(same.node_quality, plain.node_quality)
+    leaf = file.clone().requires_grad_(True)
+    attached = water_run(model, drivers={**initial_drivers(model),
+                                         "quality.source_strength": leaf},
+                         duration=3 * 3600, quality=True)
+    assert torch.equal(attached.node_quality.detach(), plain.node_quality)
+    attached.node_quality[-1, model.node_names.index("J2")].backward()
+    assert leaf.grad is not None and float(leaf.grad[j1]) > 0.0
+    assert float(leaf.grad.abs().sum()) == pytest.approx(float(leaf.grad[j1]), rel=1e-12)
+    bigger = water_run(model, drivers={**initial_drivers(model),
+                                       "quality.source_strength": file * 2.0},
+                       duration=3 * 3600, quality=True)
+    assert float((bigger.node_quality - plain.node_quality).abs().max()) > 0.1
+
+
+def test_a_source_strength_of_the_wrong_shape_is_refused():
+    net = _base(sources=(QualitySource("J1", "FLOWPACED", 0.5),))
+    model, _, _ = build_model(net)
+    with pytest.raises(ValueError, match="quality.source_strength"):
+        water_run(model, drivers={**initial_drivers(model),
+                                  "quality.source_strength": torch.zeros(3, dtype=F64)},
+                  duration=3600, quality=True)
 
 
 def test_a_batched_quality_run_and_a_network_without_quality_are_refused():

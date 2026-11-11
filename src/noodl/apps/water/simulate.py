@@ -408,7 +408,8 @@ def water_run(model, state=None, drivers=None, *, duration: float | None = None,
     feeds back into the hydraulics. `state["quality.initial"]` (n_nodes, quality units)
     replaces the file's initial qualities, and `drivers["quality.bulk_coefficient"]`,
     `["quality.wall_coefficient"]` (n_pipes) and `["quality.tank_coefficient"]` (n_tanks)
-    its reaction coefficients (SI per second, `WaterQuality`). The quality keeps its
+    its reaction coefficients (SI per second, `WaterQuality`), and
+    `drivers["quality.source_strength"]` (n_nodes) its sources' strengths. The quality keeps its
     autograd graph when a quality input or the solve's flows require gradients, and runs
     detached otherwise.
     `None` and `False` run no quality.
@@ -595,7 +596,7 @@ def water_run(model, state=None, drivers=None, *, duration: float | None = None,
 _QUALITY_STATE = ("quality.initial",)
 #: ... and from the drivers (`QualityRouter`: the reaction coefficients, SI per second).
 _QUALITY_DRIVERS = ("quality.bulk_coefficient", "quality.wall_coefficient",
-                    "quality.tank_coefficient")
+                    "quality.tank_coefficient", "quality.source_strength")
 
 
 def _router(model, inputs: dict, solved, clock: _Clock, diagnostics):
