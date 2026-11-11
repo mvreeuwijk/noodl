@@ -1134,3 +1134,130 @@ def test_a_batch_runs_each_instance_as_its_own_run(tmp_path):
         assert float((batch.node_quality[i] - alone.node_quality).abs().max()) < 1e-8 * scale
         assert float((batch.link_quality[i] - alone.link_quality).abs().max()) < 1e-8 * scale
     assert float((batch.node_quality[0] - batch.node_quality[1]).abs().max()) > 1e-3 * scale
+
+
+# ---- gradients (Task 12, Ruling Q5) ---------------------------------------------------------
+
+
+def _gradient_case(tmp_path: Path) -> Path:
+    """The base with bulk order 1 at -0.5/day, wall order 1 at -0.05 m/day, a CONCEN source
+    at `R1` (2 mg/L) under the pattern `SRC`, initial qualities at junctions and the tank,
+    and `J5` drawing 1 L/s. MEASURED CAUSE of the last: without it the dead end `P7`
+    carries only its solver's residual (`_residual_admitted`), whose sign follows the
+    hydraulics; `P3`'s roughness at 120 (1 + 1e-4) flips it, so `P7`'s segment count stays
+    at 1 from 2 h where the unperturbed run's grows to 20 by 6 h (a different decision path,
+    Ruling Q5; 1e-5 flips it too, from 70 min).
+    1 L/s gives `P7` a definite flow, and every perturbation below keeps the decisions."""
+    return edited(BASE, tmp_path, "gradients.inp",
+                  replace=[(" Global Bulk  0", " Global Bulk  -0.5"),
+                           (" Global Wall  0", " Global Wall  -0.05"),
+                           (" J5   20    0", " J5   20    1")],
+                  add={"SOURCES": [" R1 CONCEN 2.0 SRC"], "PATTERNS": _SRC_PATTERN,
+                       "QUALITY": [" J3 0.5", " J6 0.8", " T1 0.6"]})
+
+
+def _with(vector: torch.Tensor, index: int, value: torch.Tensor) -> torch.Tensor:
+    """`vector` with entry `index` replaced by the 0-d `value` (its graph kept)."""
+    return torch.cat([vector[:index], value.reshape(1), vector[index + 1:]])
+
+
+@pytest.mark.parametrize("parameter", ["bulk", "wall", "source", "initial", "roughness"])
+def test_quality_gradients_against_central_differences(tmp_path, parameter):
+    """d(`J4`'s quality at 6 h) by autograd (`water_run(..., differentiable=True)`) against a
+    central difference (h = 1e-4 |p|) with respect to `quality.bulk_coefficient[P5]`,
+    `quality.wall_coefficient[P5]`, `quality.source_strength[R1]`, `quality.initial[T1]` and
+    `P3`'s roughness: `|ad - fd| <= 1e-5 max(|ad|, |fd|)`, and the three runs' `"segments"`
+    and `"node_order"` identical (Ruling Q5: only decisions are detached, so the gradient is
+    the derivative along a fixed decision path). MEASURED relative differences: bulk 8.5e-12,
+    wall 9.1e-12, source 8.7e-13, roughness 1.1e-8. `T1` fills over the 6 h, so `J4` never
+    sees its initial water: that derivative is exactly 0 in both, and `T1`'s own (0.63) is
+    checked alongside."""
+    path = _gradient_case(tmp_path)
+    net = read_epanet_inp(path)
+    model, state, drivers = build_model(net)
+    nodes, pipes = model.node_names, [p.name for p in net.pipes]
+    j4, t1, r1 = nodes.index("J4"), nodes.index("T1"), nodes.index("R1")
+    p5, p3 = pipes.index("P5"), pipes.index("P3")
+    bulk, wall = pipe_coefficients(net, net.quality)
+    source = torch.zeros(len(nodes), dtype=F64)
+    source[r1] = 2.0
+    initial = torch.zeros(len(nodes), dtype=F64)
+    for name, value in (("R1", 1.0), ("J3", 0.5), ("J6", 0.8), ("T1", 0.6)):
+        initial[nodes.index(name)] = value
+    pipe = model.kirchhoff["water"]._laws[0].pipe
+    roughness = pipe.roughness
+    inputs = {"bulk": bulk, "wall": wall, "source": source, "initial": initial}
+    index = {"bulk": p5, "wall": p5, "source": r1, "initial": t1, "roughness": p3}[parameter]
+    p0 = float((roughness if parameter == "roughness" else inputs[parameter])[index])
+
+    def run(value=None, node=j4):
+        """The run with the parameter at `value` (a 0-d tensor; the roughness is set in place
+        when None): `(quality of node at 6 h, the router's diagnostics)`."""
+        given = dict(inputs)
+        if value is not None:
+            given[parameter] = _with(given[parameter], index, value)
+        diagnostics: dict = {}
+        results = water_run(
+            model, {**state, "quality.initial": given["initial"]},
+            {**drivers, "quality.bulk_coefficient": given["bulk"],
+             "quality.wall_coefficient": given["wall"],
+             "quality.source_strength": given["source"]},
+            duration=6 * 3600, quality=True, diagnostics=diagnostics, differentiable=True)
+        return results.node_quality[-1, node], diagnostics["quality"][0]
+
+    h = 1e-4 * abs(p0) if p0 != 0.0 else 1e-4
+    if parameter == "roughness":
+        roughness.requires_grad_(True)
+        try:
+            value, entry = run()
+            (grad,) = torch.autograd.grad(value, roughness)
+            ad = float(grad[index])
+        finally:
+            roughness.requires_grad_(False)
+        with torch.no_grad():
+            roughness[index] = p0 + h
+            plus, entry_plus = run()
+            roughness[index] = p0 - h
+            minus, entry_minus = run()
+            roughness[index] = p0
+    else:
+        leaf = torch.tensor(p0, dtype=F64, requires_grad=True)
+        value, entry = run(leaf)
+        (grad,) = torch.autograd.grad(value, leaf)
+        ad = float(grad)
+        with torch.no_grad():
+            plus, entry_plus = run(torch.tensor(p0 + h, dtype=F64))
+            minus, entry_minus = run(torch.tensor(p0 - h, dtype=F64))
+    fd = float(plus - minus) / (2 * h)
+    for key in ("segments", "node_order"):
+        assert entry[key] == entry_plus[key] == entry_minus[key], key
+    assert abs(ad - fd) <= 1e-5 * max(abs(ad), abs(fd)), (ad, fd)
+    if parameter == "initial":
+        assert ad == fd == 0.0
+        leaf = torch.tensor(p0, dtype=F64, requires_grad=True)
+        (own,) = torch.autograd.grad(run(leaf, node=t1)[0], leaf)
+        assert float(own) > 0.1
+    else:
+        assert ad != 0.0
+
+
+def test_the_router_runs_detached_unless_asked(tmp_path):
+    """With nothing requiring a gradient the router runs detached (Python floats):
+    `node_quality`, `link_quality` and the mass balance do not require grad, and they equal
+    the attached run's (a bulk coefficient that requires grad) bit for bit."""
+    path = _gradient_case(tmp_path)
+    net = read_epanet_inp(path)
+    model, state, drivers = build_model(net)
+    bulk, _ = pipe_coefficients(net, net.quality)
+    detached = water_run(model, state, {**drivers, "quality.bulk_coefficient": bulk},
+                         duration=6 * 3600, quality=True)
+    attached = water_run(model, state,
+                         {**drivers, "quality.bulk_coefficient": bulk.requires_grad_(True)},
+                         duration=6 * 3600, quality=True)
+    assert not detached.node_quality.requires_grad
+    assert not detached.link_quality.requires_grad
+    assert not detached.mass_balance.final.requires_grad
+    assert attached.node_quality.requires_grad
+    assert torch.equal(detached.node_quality, attached.node_quality.detach())
+    assert torch.equal(detached.link_quality, attached.link_quality.detach())
+    assert torch.equal(detached.mass_balance.final, attached.mass_balance.final.detach())
