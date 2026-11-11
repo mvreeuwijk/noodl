@@ -20,7 +20,15 @@ Decision records (spec, Diagnostics). Each is a :class:`Decision`
   ``node:N/pull_distributed/{deficit,avail}``, ``node:N/check_basic/<push|pull>/clip``,
   ``arc:A/get_excess/<push|pull>/min``, ``arc:A/send_push_request/clip``,
   ``arc:A/send_pull_request/clip``, ``node:N/pull_check_abstraction/clip``,
-  ``node:N/pull_set_abstraction/clip``. Later classes extend the same pattern.
+  ``node:N/pull_set_abstraction/clip``; an ``AltQueueArc``'s ``arc:A/send_push_request/below_fa``.
+  A tank is not a node: its sites are its owner's with the tank's attribute path,
+  ``node:N/<tank>/get_excess/{headroom,clip}``, ``node:N/<tank>/get_avail/clip``,
+  ``node:N/<tank>/push_storage/clip``, ``node:N/<tank>/pull_storage/{empty,clip}``,
+  ``node:N/<tank>/pull_ponded/excess``, ``node:N/<tank>/evaporate/clip``, and for a
+  ``QueueTank`` ``node:N/<tank>/push_check/clip`` and
+  ``node:N/<tank>/pull_storage_exact/clip:<volume|additive pollutant>``; its internal arc's
+  sites are ``node:N/<tank>/internal_arc/...`` (``get_excess/push/min``,
+  ``send_push_request/{below_fa,clip}``). Later classes extend the same pattern.
 - ``call`` is noodl's static per-day index of the enclosing ``(element, method)`` call
   (:meth:`Ctx.call`, which :meth:`Ctx.loop_site` uses too). It counts the calls noodl's
   structure makes, masked ones included, so it is the same on every day and for every

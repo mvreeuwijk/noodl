@@ -256,6 +256,7 @@ shape, and the model's labels give each row a name.
 | `"wsimod.storage"` | (..., n_tanks, 1+K) | every `Tank`/`ResidenceTank`/`QueueTank` `.storage` and every surface's `.storage`, labelled `(node, attribute)` in WSIMOD's attribute names: `tank`, `sewer_tank`, `stormwater_tank`, `service_reservoir_tank`, `surface_runoff`, `subsurface_runoff`, `percolation`, `surface:<name>` |
 | `"wsimod.active_storage"` | (..., n_queue_tanks, 1+K) | `QueueTank.active_storage` (`tanks.py:478`) |
 | `"wsimod.travel_queue"` | (..., n_alt_queues, L+1, 1+K) | the `{time: vqip}` queue of every `AltQueueArc` as a dense shift register: each `QueueTank`'s internal arc, and each user `AltQueueArc`. `L` is the largest travel time the structure can enter (pipe time, time-area keys, `number_of_timesteps`). A user `AltQueueArc` shifts at `end_timestep` but is flushed only by its next push, because nothing calls its `update_queue` at the end of the day (`arcs.py:603-660`). A `QueueTank`'s arc is also flushed at the end of the day (`tanks.py:633-634`) |
+| `"wsimod.travel_queue_present"` | (..., n_alt_queues, L+1) | each register's key set (bool; Shift register below): WSIMOD assigns a first entry and sums later ones, which differ by rounding |
 | `"wsimod.arc_queue"` | (..., n_rows, 1+K) | `QueueArc` request rows (below), labelled `(arc, direction, i, j)` |
 | `"wsimod.arc_queue_since"` | (..., n_anchors) | per `(arc, direction)`, the days since the arc's last call in that direction that reached `update_queue`, saturating at `n` (below); `n` at the start |
 | `"wsimod.liquor"` | (..., n_wtw, 1+K) | `WTW.liquor` of every `WWTW` and `FWTW`, empty at the start. Neither `end_timestep` resets it (`wtw.py:447-453`, `:646-653`), and every treatment blends with it (`:174-182`). For a `WWTW` it is also an inflow to the next day (`:340`). For an `FWTW` only its non-additive entries and volume matter. `solids` needs no state, because each treatment overwrites it completely (`:204-208`) |
@@ -271,9 +272,13 @@ ported.
 
 **Shift register.** `AltQueueArc.end_timestep` (`arcs.py:640-660`) is a shift:
 `new[i] = old[i+1]` for `1 ≤ i < L`, and `new[0] = sum_vqip(old[0], old[1])` in that order. A
-key absent from WSIMOD's dict is an empty VQIP in the register. The register gives the same
-values as WSIMOD's dict to rounding, because an absent key in WSIMOD equals an empty VQIP and a
-first entry `assign` equals `sum_vqip(empty, v)` to rounding.
+key absent from WSIMOD's dict is an empty VQIP in the register. A first entry under an absent
+key is assigned (`arcs.py:599-601`), a later one summed (`:595-598`), and `sum_vqip(empty, v)`
+differs from `v` by rounding in the non-additive columns (`(c·V + 0)/V`). So each register
+carries WSIMOD's key set as a bool `present` (..., L+1): keys 0 and 1 exist from the start
+(`:567`), an entry adds its key, the shift adds key `i` when key `i+1` exists (`:655-658`), and
+no key is removed. With it the register equals WSIMOD's dict bitwise (`test_tanks.py`); without
+it the temperature column differed in the last bit within days.
 
 **`QueueArc` slots.** WSIMOD keeps `QueueArc.queue` as a Python list of requests
 (`arcs.py:290`, `:432-446`). Each request is delivered one at a time, in list order, at the
@@ -622,7 +627,14 @@ shape:
     `node:N/pull_distributed/{deficit,avail}`, `node:N/check_basic/<push|pull>/clip`,
     `arc:A/get_excess/<push|pull>/min`, `arc:A/send_push_request/clip`,
     `arc:A/send_pull_request/clip`, `node:N/pull_check_abstraction/clip`,
-    `node:N/pull_set_abstraction/clip`; later classes extend the pattern.
+    `node:N/pull_set_abstraction/clip`, `arc:A/send_push_request/below_fa` (`AltQueueArc`).
+    A tank is not a node: its sites are its owner's with the tank's attribute path,
+    `node:N/<tank>/get_excess/{headroom,clip}`, `node:N/<tank>/get_avail/clip`,
+    `node:N/<tank>/push_storage/clip`, `node:N/<tank>/pull_storage/{empty,clip}`,
+    `node:N/<tank>/pull_ponded/excess`, `node:N/<tank>/evaporate/clip`, and for a `QueueTank`
+    `node:N/<tank>/push_check/clip` and `node:N/<tank>/pull_storage_exact/clip:<column>`; its
+    internal arc's are `node:N/<tank>/internal_arc/{get_excess/push/min,
+    send_push_request/below_fa, send_push_request/clip}`. Later classes extend the pattern.
   - `call` is noodl's static per-day index of the enclosing (element, method) call. It counts
     the calls noodl's structure makes, masked ones included, so it is the same every day; it is
     not WSIMOD's dynamic count.
