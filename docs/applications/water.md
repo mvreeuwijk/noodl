@@ -983,14 +983,14 @@ physics'.
 | Pumps on the two-loop (heads, flows, states): Net3's three-point curve ($n = 1.77$); Anytown's five-point curve on its first and second segments; Net6's constant-power pump | 1e-6 / 1e-6 m³/s / equal | 6.4e-8, 1.8e-9; 7.1e-8 and 5.7e-8, 7.2e-9; 5.4e-8, 1.8e-9 |
 | A pump shut beyond its shut-off head; a zero-demand group behind a pump (shut and running at zero flow); a pump and a check valve shutting together around a group; a segmented curve starting above zero flow, shut at its first point's head | 1e-6 / 1e-6 m³/s / equal | 8.5e-8, 8.1e-8 m³/s (1.8e-8 at the shut pump, EPANET's leak); all states equal |
 | Pump speed 0.8 through `"water.setting"` against `SPEED 0.8` in the file, every curve kind | 1e-6 / 1e-6 m³/s / equal | 3.3e-8 to 6.6e-8, 1.8e-9 |
-| ky10 at time zero (13 constant-power pumps, PRVs, tanks), EPANET's demands | 1e-6 / 1e-6 m³/s / equal | 1.3e-7, 5.4e-8 |
+| ky10 at time zero (13 constant-power pumps, PRVs, tanks), EPANET's demands; EPANET at `DAMPLIMIT 1e-2` (Limitations, two builds) | 1e-6 / 1e-6 m³/s / equal | 1.2e-7, 5.4e-8 |
 | ky4 at time zero (two constant-power pumps, one closed, an empty tank, 959 junctions), demand pattern at t = 0 | 1e-6 / 1e-6 m³/s / equal | 8.2e-8, 9.1e-8 (two parallel-pipe pairs: 2.6e-7) |
 | Anytown at time zero, pumps running, tanks at mid-level, the five placeholder pipes feeding junctions 5-7 at 12 in (three parallel pumps on the five-point curve; pipe 125 still 0.0001 in) | 1e-6 / 1e-6 m³/s / equal | 9.3e-8, 3.1e-8 |
 | Whole networks through `water_run` for their full DURATION (`test_water_networks.py`): heads (relative to the larger of the head and 1 m), tank levels, flows, states at every report time, and the energy section | 1e-5 / 2e-4 m / 1e-6 m³/s / equal / 1e-5, except where noted | the next five rows, in that order |
 | Net3, 168 h (AT TIME and level controls, a closed pipe, three-point pumps); 6 s | as above | 1.2e-7, 5.2e-6 m, 1.3e-7 m³/s, equal, 4.2e-8 |
 | Net6, 96 h (3323 junctions, 61 pumps, PRVs, a check valve, 124 level controls); 120 s | heads 2e-5, levels 3e-3 m, flows 5e-4 m³/s, energy 3e-4 (EPANET's closed-link leak, see Limitations: the heads at 90 h follow a tank level 1.5e-3 m apart) | 1.1e-5, 1.94e-3 m, 3.1e-4 m³/s, equal, 1.95e-4 |
 | ky4, DURATION 0 | as above | 8.2e-8, 6.0e-6 m, 9.1e-8 m³/s (pairs 2.6e-7), equal, 1.1e-8 |
-| ky10, DURATION 0 (level controls on `~@`-named pumps) | as above | 1.3e-7, 1.3e-5 m, 5.5e-8 m³/s, equal, 1.1e-7 |
+| ky10, DURATION 0 (level controls on `~@`-named pumps); EPANET at `DAMPLIMIT 1e-2` | as above | 1.2e-7, 1.3e-5 m, 5.5e-8 m³/s, equal, 9.0e-7 |
 | Anytown edited (`_anytown`), 24 h at a 1 min step; 11 s | heads 1e-4 (EPANET's closed-link leak out of the empty tanks, at a head of 0.55 m; see Limitations) | 5.1e-5 (1.8e-4 m; 9.3e-8 at t = 0), 1.8e-6 m, 2.9e-7 m³/s, equal, 3.7e-7 |
 | Net1 6 h, pump 9 CLOSED at 2 h and OPENed at 4 h by time controls; closed at 2 h by a rule, given a CLOSED control at 2:30, then OPENed: the hydraulic steps, heads, level, flows, states, the pump's speed, the energy | equal / 1e-5 / 2e-4 m / 1e-6 m³/s / equal / 1e-5 | steps equal (no step at 2:30), 7.3e-8, 2.0e-5 m, 5.1e-8 m³/s, speed 0 then 1, energy within 1e-5 |
 | The four rules' network with a price and a demand charge (both priorities), its pump on a curve or at constant power: the pump's energy section against EPANET's toolkit | 1e-5 relative | 3.9e-7 (curve), 1.6e-7 (power) |
@@ -1065,7 +1065,7 @@ independent loop is a property of the cycle-space formulation, and it holds exac
 ### Water quality
 
 The reference is EPANET 2.2 through the toolkit on the committed file, with the same settings as
-above (`ACCURACY 1e-7` through `EN_setoption`, `TRIALS 400`, 5000 for ky10; any warning fails the
+above (`ACCURACY 1e-7` through `EN_setoption`, `TRIALS 400`, 5000 and `DAMPLIMIT 1e-2` for ky10; any warning fails the
 test unless it is named). Quality is read at every hydraulic step (the time of each `EN_runQ`; `EN_nextQ`
 advances the quality to the next one, the loop `EN_solveQ` runs; `EN_stepQ` splits a step at a hydraulic event, which EPANET's own
 runs do not). The bound, over every node and link at every hydraulic step time: each point within 1e-5 of
@@ -1110,7 +1110,7 @@ EPANET's example networks (`test_water_quality_networks.py`):
 | Net6 with a source added, before 18922 s | 40 steps | 5.9e-6 mg/L; mass terms (whole run) 1.9e-6 | hydraulic cause below |
 | Net6 with a source added, noodl's router on EPANET's saved hydraulics | all 609 times | 5.2e-11 | |
 | ky4 (TRACE, DURATION edited to 24 h) | 65782 points, 31 times | 9.35e-3 % (p99.9 5.5e-4 %); terms 1.8e-6, ratio 9.0e-7; router on EPANET's hydraulics 2.0e-9 % | 33 points admitted, below |
-| ky10 (AGE, DURATION edited to 6:54:59) | 35928 points, 18 times | 2.15e-3 h (p99.9 1.1e-5 h); terms 3.2e-6, ratio 4.8e-9; router on EPANET's hydraulics 1.4e-12 h | 10 points admitted, below |
+| ky10 (AGE, DURATION edited to 6:54:59) | 35928 points, 18 times | 3.53e-3 h (p99.9 1.5e-5 h); terms 3.2e-6, ratio 6.1e-9; router on EPANET's hydraulics 1.4e-12 h | 12 points admitted (10 beyond on Windows, 11 on Linux), below |
 
 The causes admitted, each asserted in its test:
 
@@ -1132,14 +1132,17 @@ The causes admitted, each asserted in its test:
   P-977 (below `Q_STAGNANT`, so EPANET routes it from its first node and the reservoir's 100 % enters the pipe) and the
   closed tank pipes' 4e-9 to 2e-8 m³/s. With those leaks injected into noodl as sources, 3 points
   remain (J-703 and P-696 at 83882 and 86400 s) against EPANET at `ACCURACY 1e-7`, and none against
-  EPANET at 1e-8: EPANET's own convergence moves its flow by 3e-4 relative there.
+  EPANET at 1e-8: EPANET's own convergence moves its flow by 3e-4 relative there. With wntr's
+  Linux build two of the three are beyond at 1e-7 and J-703 still at 1e-8 (2.4e-3 %, from
+  4.3e-3 %): every one shrinks with EPANET's accuracy, on both builds.
   The mass-balance ratio differs by 9.0e-7: the router on EPANET's saved hydraulics reproduces EPANET's
   ratio to 1e-15, and 89 % of the deficit is the pump's leak routed into dead junctions, whose
   mass counts as neither outflow nor storage.
-- **ky10: EPANET's unconverged continuity, and one leak.** 9 points are P-310, the only link into four
-  dead-end junctions: noodl's flow equals their demand to 1e-12, EPANET's is 0.1 to 0.6 % off
-  (a 9.8e-9 to 6.2e-8 m³/s residual at its accuracy), and 1e-8 is unbalanced at the start even
-  with 5000 trials. One point (J-433 at 23050 s) is a closed-link leak.
+- **ky10: EPANET's unconverged continuity, and closed-link leaks.** 10 points are P-310, the only link into four
+  dead-end junctions: noodl's flow equals their demand to 1e-12, EPANET's is up to 0.5 % off
+  (a 1.3e-9 to 5.0e-8 m³/s residual at its accuracy, `DAMPLIMIT 1e-2`), and 1e-8 is unbalanced at the start even
+  with 5000 trials; nine of them are beyond the bound with wntr's Windows build, all ten with
+  its Linux build. Two points (J-433 at 23050 s; J-145 at 14400 s, Windows only) are closed-link leaks.
   The run stops at 6:54:59 because the hydraulics diverge after it (Limitations).
 
 ## Limitations
@@ -1182,9 +1185,13 @@ The causes admitted, each asserted in its test:
   head is the last thing EPANET's iteration settles, its flows all below the relative-flow
   test: at `ACCURACY 1e-7` EPANET stops one iteration later than at 1e-5, on 74.9122 m, and
   driven on (FLOWCHANGE 1e-10, a relative change of 8e-17) it returns to 75.0213 m, so these
-  cases are compared with EPANET at 1e-5, its fixed point. Why that fixed point is not the
-  limit is open. Tests: `test_a_group_fenced_off_by_check_valves_is_held_at_the_limit_head`
-  (2.8e-4 relative) and the internal-check-valve case of
+  cases are compared with EPANET at 1e-5, its fixed point. It is not the limit because
+  EPANET resolves this head only to steps of 0.0546 m: eliminating J leaves L the pivot
+  `(P5 + 1/CBIG) - P5^2 / (P5 + 1/CBIG)` (2e-8 exactly, computed from P5's conductance of
+  8.1e4), and one ulp of 8.1e4 is 7.3e-4 of it; every head EPANET gave the group, over
+  accuracies, options and both of wntr's builds, is one of 74.9122, 74.9667, 75.0213 and 75.0759 m
+  (75.0759 m on Linux at 1e-5). Tests: `test_a_group_fenced_off_by_check_valves_is_held_at_the_limit_head`
+  (two steps, 1.5e-3 relative; MEASURED 2.8e-4 Windows, 1.0e-3 Linux) and the internal-check-valve case of
   `test_check_valves_fencing_a_junction_match_epanet` (4.1e-5: J1 = J2 = 56.6667 m, the
   limit, against EPANET's 56.6690; MEASURED, EPANET's head there moves with the internal
   pipe's length as well, 55.3140 m at 5 m, 56.6690 at 500 m, 56.6655 at 5000 m, and with
@@ -1213,7 +1220,10 @@ The causes admitted, each asserted in its test:
   head moves with its accuracy (60.0006, 64.42, 61.36 and 59.93 m at 1e-5, 1e-6, 1e-7 and
   1e-8); those are compared with EPANET at 1e-5, its early stop (35.791 m behind a PSV whose
   upstream head of 40 m is below its setting), and so are the zero-demand groups behind a
-  pump below (`test_a_valve_feeding_a_dead_end_without_demand_matches_epanet`).
+  pump below (`test_a_valve_feeding_a_dead_end_without_demand_matches_epanet`). These are wntr's
+  Windows build; its Linux build marks the valve `XPRESSURE` on four of the cases (a PSV with
+  the dead end on its end, a PRV on its start) and holds the dead end OPEN at the limit head,
+  noodl's head (below, two builds).
 - **A zero-demand group between a pump and a check valve to a higher reservoir has no
   unique head.** Every head from R1 plus the pump's shut-off head up to R2 satisfies every
   link with no flow anywhere. EPANET's value is set by the ratio of its closed-link leaks
@@ -1283,12 +1293,30 @@ The causes admitted, each asserted in its test:
   points, ky10's J-433 and Net6 after 18922 s. They are measured and asserted in the tests; the leak
   is not modelled.
 - **ky10's quality is verified to 6:54:59 only.** After it EPANET's `pumpcoeff` caps the slope of
-  the constant-power pump `~@Pump-10` (`CBIG`), which dead-heads against its closed CV and PRV and
+  the constant-power pump `~@Pump-10` (`CBIG`), which dead-heads against its closed CV and
   takes it to zero flow, where noodl keeps it on its power curve (5.4e-4 m³/s, 1396 m): the
   hydraulics, and so the quality, differ from 7 h. Forcing the pump closed in noodl matches EPANET to
   10 h. The 24 h comparison is an expected failure in `test_water_networks.py` with these values;
-  EPANET itself needs `TRIALS 5000` at `ACCURACY 1e-7` on this file. Left for a later change to
-  the pump physics.
+  EPANET itself needs `TRIALS 5000` at `ACCURACY 1e-7` on this file, and `DAMPLIMIT 1e-2` (below).
+  Left for a later change to the pump physics.
+- **wntr's two builds of EPANET differ in their last bits, and where EPANET's answer rests on
+  those bits the reference is measured on both.** wntr 1.5.0 ships `libepanet22` built with MSVC
+  (Windows) and with GCC 7.4 (Linux), both version 2.2 with the same toolkit. MEASURED where they
+  part: (1) ky10 at time zero, at EPANET's default `DAMPLIMIT 0`, the Linux build stops on a
+  second branch that is no solution, `~@RV-4` CLOSED and the constant-power pump `~@Pump-11` at
+  2.1e-22 m³/s with 7.9 m of head (its law asks 7e21 m: below `sqrt(r / CBIG)` the `CBIG` slope cap
+  makes it a closed link, as for `~@Pump-10` above), from which its 24 h is another run; at
+  `DAMPLIMIT 1e-2` (PRV and PSV status checks deferred to a relative flow change of 1e-2, the
+  flow updates damped there) both builds take Windows' branch, and noodl's, at time zero to
+  1.2e-7, and the same 50 steps over 24 h, so every ky10 reference runs at 1e-2. (2) A fenced
+  zero-demand group's head (above) is resolved only to steps of 0.0546 m, one ulp of its link's
+  conductance in EPANET's pivot: 75.0213 m on Windows, 75.0759 m on Linux. (3) A PRV or PSV
+  feeding a dead end on the side it does not fix: the dead end's Cholesky pivot is zero up to
+  its last bit, and where the Linux build's is not positive `badvalve` marks the valve
+  `XPRESSURE` (warning 5, "open but cannot deliver pressure"): the valve OPEN and the dead end at
+  the limit head, on four of the eight dead-end cases (above). (4) The age and trace points that
+  follow EPANET's unconverged flows (ky4's J-703 and P-696, ky10's P-310) differ in which pass the
+  bound. Each test names its build's values.
 - **EPANET's own accuracy bounds the comparison.** A file's `ACCURACY` is clamped to 1e-5 by
   EPANET's reader; the reference sets 1e-7 through the toolkit. At 1e-8 EPANET leaves Net2 and Net3
   hydraulically unbalanced at several steps, so 1e-7 is the tightest reference that converges

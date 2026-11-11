@@ -35,6 +35,7 @@ wntr = pytest.importorskip("wntr")
 
 from tests.verification._epanet_quality import epanet_results  # noqa: E402
 from tests.verification.test_water_parity import (  # noqa: E402
+    _KY10_DAMPLIMIT,
     _M3_PER_MGAL,
     _US_FLOW_UNITS,
     _anytown,
@@ -98,9 +99,12 @@ _NETWORKS = {
     # losses 1.0e-7 m apart: `test_ky4_at_time_zero`), states equal, energy 1.1e-8.
     "ky4": dict(path=_library("ky4")),
     # ky10: DURATION 0, thirteen constant-power pumps, PRVs, thirteen tanks, level controls
-    # on `~@`-named pumps. MEASURED: heads 1.3e-7, levels 1.3e-5 m, flows 5.5e-8 m3/s,
-    # states equal, energy 1.1e-7 (heads 6.3e-7, flows 9.1e-8, energy 8.3e-7 at 1e-5).
-    "ky10": dict(path=_library("ky10")),
+    # on `~@`-named pumps. EPANET at DAMPLIMIT 1e-2 (`test_water_parity._KY10_DAMPLIMIT`,
+    # the MEASURED cause there): at 0 wntr's Linux build stalls ~@Pump-11 at zero flow,
+    # ~@RV-4 CLOSED. MEASURED, both of wntr's builds: heads 1.2e-7, levels 1.3e-5 m, flows
+    # 5.5e-8 m3/s, states equal, energy 9.0e-7 (Windows; Linux 4.2e-7); on Windows at
+    # DAMPLIMIT 0 energy 1.1e-7 (heads 6.3e-7, flows 9.1e-8, energy 8.3e-7 at 1e-5).
+    "ky10": dict(path=_library("ky10"), damplimit=_KY10_DAMPLIMIT),
     # Anytown edited (Ruling 21): 24 h at a 1 min hydraulic step, three pumps on a
     # five-point curve, the tanks (at 22.5 ft, `_anytown`) empty within the first hour,
     # the demand outrunning the three pumps from the start. MEASURED: heads 9.3e-8 at
@@ -121,11 +125,12 @@ _NETWORKS = {
 }
 
 
-def _epanet(path, warnings=(), trials=None):
-    """EPANET at ACCURACY 1e-7, TRIALS 400 or `trials` (`epanet_results`, permitting
-    `warnings`): `(results, energy section, demand charge)`."""
+def _epanet(path, warnings=(), trials=None, damplimit=None):
+    """EPANET at ACCURACY 1e-7, TRIALS 400 or `trials`, DAMPLIMIT 0 or `damplimit`
+    (`epanet_results`, permitting `warnings`): `(results, energy section, demand charge)`."""
     reader = _EnergyBin()
-    results = epanet_results(path, reader=reader, warnings=warnings, trials=trials)
+    results = epanet_results(path, reader=reader, warnings=warnings, trials=trials,
+                             damplimit=damplimit)
     return results, reader.energy, float(reader.peak_energy[0])
 
 
@@ -190,7 +195,8 @@ def test_network_matches_epanet(tmp_path, name):
     bounds of `_NETWORKS`."""
     case = _NETWORKS[name]
     path = case["path"](tmp_path)
-    results, theirs, demand = _epanet(path, case.get("warnings", ()))
+    results, theirs, demand = _epanet(path, case.get("warnings", ()),
+                                      damplimit=case.get("damplimit"))
     model, run, differences = _hydraulic_differences(path, results)
     worst_e = _worst_energy(model.water_network, run.energy, theirs, demand)
     assert not math.isnan(worst_e)
@@ -219,19 +225,24 @@ def _ky_24h(tmp_path, name, duration="24:00"):
 #: and 1e-5 with 400 trials those steps need 7 to 9 trials, and their heads, levels, flows
 #: and states against noodl's agree with 1e-7's within 0.1 %, the same nine states
 #: differing); its warning 6, negative pressures at 20:52:41 and 21:00, is the network's
-#: state.
-_KY_EPANET = {"ky4": {}, "ky10": dict(trials=5000, warnings=(6,))}
+#: state. DAMPLIMIT 1e-2 (`test_water_parity._KY10_DAMPLIMIT`): at 0, wntr's Linux build
+#: stalls ~@Pump-11 at zero flow from time zero and its 24 h is another run (its steps from
+#: 1933 s on, states at 0-4 h), MEASURED; at 1e-2 both builds take the same 50 steps, their
+#: states equal and heads within 1e-6 relative at every report time but the three nodes
+#: `_KY10_ISLAND` at 7-10 h, flows within 1.6e-7 m3/s, levels 3.1e-5 m.
+_KY_EPANET = {"ky4": {}, "ky10": dict(trials=5000, damplimit=_KY10_DAMPLIMIT, warnings=(6,))}
 
 #: ky10 from 6:54:59 (24899 s), the cause `test_ky10_divergence_is_epanets_dead_headed_
-#: constant_power_pump` shows. MEASURED over the 24 h (EPANET at 1e-7, TRIALS 5000; within
-#: 0.1 % of these at 1e-6 and 1e-5): heads 5.016 relative (O-Pump-10 at 7 h, 1659.8 m against
-#: 275.9 m), levels 0.422 m (T-9, 12 h), flows 2.33e-2 m3/s (P-948, 12 h), states differing
+#: constant_power_pump` shows. MEASURED over the 24 h (EPANET as `_KY_EPANET`, both of
+#: wntr's builds; at DAMPLIMIT 0, Windows, heads 5.016 at 275.9 m, the rest as here): heads
+#: 4.890 relative (O-Pump-10 at 7 h, 1659.8 m against 281.8 m; 4.883 against Linux's
+#: 282.1 m), levels 0.422 m (T-9, 12 h), flows 2.33e-2 m3/s (P-948, 12 h), states differing
 #: at 7-10 h (P-75, ~@RV-5) and 15 h (P-5); every report time before 7 h within the bounds.
 _KY10_EXTENDED = (
     "ky10 24 h: from 6:54:59 EPANET's iteration dead-heads the constant-power pump "
-    "~@Pump-10 (its flow halved to 6e-72 GPM, CV P-75 and PRV ~@RV-5 closed) where "
+    "~@Pump-10 (its flow at most 1.5e-18 m3/s, CV P-75 closed) where "
     "noodl's pump runs at 5.4e-4 m3/s and 1396 m (ConstantPowerPump's tangent "
-    "below EPANET's CBIG slope); MEASURED heads 5.016 relative (O-Pump-10, 7 h), "
+    "below EPANET's CBIG slope); MEASURED heads 4.89 relative (O-Pump-10, 7 h), "
     "levels 0.422 m (T-9, 12 h), flows 2.33e-2 m3/s (P-948, 12 h), states at 7-10 h and "
     "15 h; 0-6 h within the bounds")
 
@@ -262,9 +273,6 @@ def test_ky_extended_period_hydraulics_match_epanet(tmp_path, name):
 #: pump and the check valve, which no open link joins to a reservoir or tank once all three
 #: shut.
 _KY10_ISLAND = ("O-Pump-10", "I-RV-5", "O-RV-5")
-#: EPANET's heads (m) of `_KY10_ISLAND` at 7 h: its closed links' 1 / CBIG conductances
-#: between I-Pump-10 (263.669 m) and J-11 (300.756 m), MEASURED.
-_KY10_ISLAND_HEADS = (275.9086, 275.9086, 288.3320)
 #: EPANET's hydraulic steps (s) from 6:54:59 to 10 h, MEASURED with the toolkit's `EN_runH`
 #: (ACCURACY 1e-7, TRIALS 5000); the binary output keeps only the report times.
 _KY10_EPANET_STEPS = [24899, 25200, 26515, 28800, 29096, 30365, 32400, 33647, 36000]
@@ -274,28 +282,38 @@ _KY10_EPANET_STEPS = [24899, 25200, 26515, 28800, 29096, 30365, 32400, 33647, 36
 def test_ky10_divergence_is_epanets_dead_headed_constant_power_pump(tmp_path):
     """The cause of ky10's 24 h miss (`_KY10_EXTENDED`), checked. At 6:54:59 (24899 s, a
     step both take) ~@Pump-8 shuts on T-13's control and J-11's head rises past ~@RV-5's
-    setting; EPANET closes the check valve P-75 and the PRV, which leaves the constant-power
-    ~@Pump-10 pumping into a dead end. EPANET's `pumpcoeff` (`hydcoeffs.c`) caps a CONST_HP
-    pump's slope at CBIG, its line there `hloss = -CBIG q` a head gain that vanishes with the
-    flow, and `newflows` (`hydsolver.c`) halves a CONST_HP flow whose change would turn it
-    negative: the pump's flow goes to zero (MEASURED, `EN_FLOW`: 2.3e-24 GPM at 24899 s,
-    6.3e-72 at 25200 s, the pump OPEN throughout) and it acts as a closed link until the
-    valves reopen at 10:40:29 (38429 s). noodl's `ConstantPowerPump` continues its curve by
-    its tangent below that slope (a law, not an iteration), so its pump keeps the PRV
-    active: 5.4e-4 m3/s at 1396 m of head at 7 h, O-Pump-10 at 1659.8 m.
+    setting; EPANET closes the check valve P-75, which leaves the constant-power ~@Pump-10
+    pumping into a dead end. EPANET's `pumpcoeff` (`hydcoeffs.c`) caps a CONST_HP pump's
+    slope at CBIG, its line there `hloss = -CBIG q` a head gain that vanishes with the flow,
+    and `newflows` (`hydsolver.c`) halves a CONST_HP flow whose change would turn it
+    negative: the pump's flow goes to zero (the pump OPEN throughout) and it acts as a
+    closed link until the valves reopen at 10:40:29 (38429 s). noodl's `ConstantPowerPump`
+    continues its curve by its tangent below that slope (a law, not an iteration), so its
+    pump keeps the PRV active: 5.4e-4 m3/s at 1396 m of head at 7 h, O-Pump-10 at 1659.8 m.
+
+    EPANET as `_KY_EPANET` (DAMPLIMIT 1e-2), MEASURED with both of wntr's builds: at 7-10 h
+    the pump's flow 1.5e-18 m3/s and below (Windows; Linux 4.7e-20), 0 by 10 h; ~@RV-5 OPEN
+    with a reverse leak of 1.3e-8 to 1.9e-8 m3/s, so its two ends and O-Pump-10 share one
+    head, set by the closed links' 1 / CBIG conductances between I-Pump-10 (263.669 m at
+    7 h) and J-11 (300.755 m): 281.805 m at 7 h on Windows, 282.138 m on Linux, the head of
+    a group fed only through closed links (as the fenced groups of `test_water_parity`;
+    at DAMPLIMIT 0 on Windows ~@RV-5 was CLOSED, 2.3e-24 GPM in the pump at 24899 s, and the
+    three heads 275.91, 275.91 and 288.33 m).
 
     Checked here: (1) to 6 h noodl and EPANET agree within the bounds (states equal); (2)
-    at 7-10 h EPANET's pump carries no flow while OPEN, P-75 and ~@RV-5 closed and the
-    cut-off nodes at its 1 / CBIG heads at 7 h (`_KY10_ISLAND_HEADS`, to 1e-3 m: measured
-    to 0.1 mm, and they move by 0.4 to 1.5 m an hour), noodl's 5.4e-4 to 2.0e-3 m3/s at
-    388 to 1396 m of head; (3) with ~@Pump-10 closed AT TIME 6:54:59 (noodl's file only) noodl
+    at 7-10 h EPANET's pump carries no flow while OPEN (below 1e-17 m3/s), P-75 closed and
+    ~@RV-5 OPEN with no more than a leak (3e-8 m3/s), the cut-off nodes at one head (to
+    1e-4 m) between I-Pump-10's and J-11's, noodl's pump 5.4e-4 to 2.0e-3 m3/s at 388 to
+    1396 m of head; (3) with ~@Pump-10 closed AT TIME 6:54:59 (noodl's file only) noodl
     takes EPANET's hydraulic steps from 6:54:59 to 10 h (`_KY10_EPANET_STEPS`, from the
     toolkit's `EN_runH` in a probe; the unedited run takes 26516, 30368 and 33650 s) and
     its heads, levels, flows and states to 10 h are EPANET's within the bounds (MEASURED:
-    heads 5.0e-7, levels 3.1e-5 m, flows 9.0e-8 m3/s), but for the pump's own state and
-    the heads of the three nodes the closed links cut off (`_KY10_ISLAND`), for which
-    EPANET's 1 / CBIG conductances give 275.91, 275.91 and 288.33 m at 7 h and noodl's
-    limit 282.21 m for all three, the PRV's dead end tied to its inlet (2.3e-2 relative)."""
+    heads 4.6e-7, levels 3.5e-5 m, flows 3.4e-7 m3/s), but for the pump's own state,
+    ~@RV-5's (CLOSED here, its dead end on its start, OPEN in EPANET; at zero flow between
+    equal heads the state is not determined, as `test_water_parity`'s dead ends) and the
+    heads of the three nodes the closed links cut off (`_KY10_ISLAND`), noodl's limit
+    282.21 m for all three, the PRV's dead end tied to its inlet (MEASURED 2.2e-3 relative
+    on Windows, 3.4e-3 on Linux; bound 5e-3)."""
     path = _ky_24h(tmp_path, "ky10")
     results, _, _ = _epanet(path, **_KY_EPANET["ky10"])
     _, run, differences = _hydraulic_differences(path, results, duration=6 * 3600.0)
@@ -312,13 +330,16 @@ def test_ky10_divergence_is_epanets_dead_headed_constant_power_pump(tmp_path):
     theirs = results.link["flowrate"]["~@Pump-10"].to_numpy()
     status = results.link["status"]["~@Pump-10"].to_numpy()
     for hour in range(7, 11):
-        assert abs(theirs[hour]) < 1e-30, theirs[hour]
-        for link in ("P-75", "~@RV-5"):
-            assert int(results.link["status"][link].iloc[hour]) == 0, (hour, link)
+        assert abs(theirs[hour]) < 1e-17, theirs[hour]
+        assert int(results.link["status"]["P-75"].iloc[hour]) == 0, hour
+        assert int(results.link["status"]["~@RV-5"].iloc[hour]) == 1, hour
+        assert abs(float(results.link["flowrate"]["~@RV-5"].iloc[hour])) < 3e-8, hour
         assert int(status[hour]) == int(run.status[hour, pump])
         assert float(run.flow[hour, pump]) > 5e-4 and float(gain[hour]) > 300.0
-    for node, head in zip(_KY10_ISLAND, _KY10_ISLAND_HEADS, strict=True):
-        assert abs(float(results.node["head"][node].iloc[7]) - head) < 1e-3, node
+        island = [float(results.node["head"][node].iloc[hour]) for node in _KY10_ISLAND]
+        assert max(island) - min(island) < 1e-4, (hour, island)
+        assert (float(results.node["head"]["I-Pump-10"].iloc[hour]) < min(island)
+                and max(island) < float(results.node["head"]["J-11"].iloc[hour])), hour
     text = path.read_text()
     assert text.count("[CONTROLS]\n") == 1
     forced = tmp_path / "ky10-24h-pump-10-closed.inp"
@@ -330,13 +351,14 @@ def test_ky10_divergence_is_epanets_dead_headed_constant_power_pump(tmp_path):
                                                  diagnostics=diagnostics)
     steps = [int(t) for t in diagnostics["times"] if 24899 <= t <= 36000]
     assert steps == _KY10_EPANET_STEPS, steps
-    assert differences["states"] == [(3600.0 * h, "~@Pump-10") for h in range(7, 11)]
+    assert differences["states"] == [(3600.0 * h, link) for h in range(7, 11)
+                                     for link in ("~@Pump-10", "~@RV-5")]
     assert differences["heads"][0] < 1e-5, differences
     assert differences["levels"][0] < 2e-4, differences
     assert differences["flows"][0] < 1e-6, differences
     island = [names.index(n) for n in _KY10_ISLAND]
     heads = torch.tensor(results.node["head"][names].to_numpy()[:11], dtype=F64)
-    assert float(((run.head - heads)[7:, island].abs() / heads[7:, island]).max()) < 3e-2
+    assert float(((run.head - heads)[7:, island].abs() / heads[7:, island]).max()) < 5e-3
 
 
 #: Anytown's tank pipes and the junction each joins its tank to.

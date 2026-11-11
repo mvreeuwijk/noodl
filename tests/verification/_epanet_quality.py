@@ -3,7 +3,9 @@ parity's (`epanet_results` and `epanet_session`, for `test_water_parity.py` and
 `test_water_networks.py`).
 
 EPANET runs through its toolkit (`wntr` 1.5.0's `ENepanet` and its ctypes handle `ENlib` on the
-bundled `epanet22.dll`) on the committed file, never on `EpanetSimulator`'s rewrite of it. Its
+bundled `epanet22.dll`, `libepanet22.so` on Linux: two builds, MSVC and GCC 7.4, that differ in
+their last bits; where a reference rests on them its test measures both, docs/applications/
+water.md, Limitations) on the committed file, never on `EpanetSimulator`'s rewrite of it. Its
 copy (`epanet_copy`) adds only `[OPTIONS] ACCURACY 1e-8`, `TRIALS 400` (the hydraulic parity's
 setting, `test_water_networks.py`) and `[REPORT] STATUS YES` (for the mass-balance section of
 the report); noodl reads the unedited file. EPANET's reader clamps a file's ACCURACY to [1e-5,
@@ -51,7 +53,7 @@ EN_ELEVATION, EN_HEAD, EN_QUALITY = 0, 10, 12
 EN_FLOW, EN_LINKQUAL = 8, 14
 EN_NODECOUNT, EN_LINKCOUNT = 0, 2
 EN_MASSBALANCE = 4
-EN_TRIALS, EN_ACCURACY, EN_HEADLOSSFORM = 0, 1, 7
+EN_TRIALS, EN_ACCURACY, EN_HEADLOSSFORM, EN_DAMPLIMIT = 0, 1, 7, 17
 #: `EN_HeadLossType` (`epanet2_enums.h`, v2.2): `EN_DW`.
 EN_DW = 1
 #: The accuracy `_open` sets (Ruling Q14; the measured cause in its docstring).
@@ -169,6 +171,16 @@ def _set_trials(en, trials: int | None) -> None:
         assert code == 0, f"EN_setoption(EN_TRIALS, {trials}) returned {code}"
 
 
+def _set_damplimit(en, damplimit: float | None) -> None:
+    """`EN_setoption(EN_DAMPLIMIT, damplimit)` on the open project (EPANET's default 0: no
+    damping, PRV and PSV statuses checked at every trial; `hydsolver.c`, `hydsolve`: below
+    a relative flow change of `damplimit` the flow updates are damped by 0.6 and the valves'
+    statuses are checked); nothing when `damplimit` is None."""
+    if damplimit is not None:
+        code = en.ENlib.EN_setoption(en._project, EN_DAMPLIMIT, ctypes.c_double(damplimit))
+        assert code == 0, f"EN_setoption(EN_DAMPLIMIT, {damplimit}) returned {code}"
+
+
 def _no_warnings(en, path) -> None:
     """EPANET's warnings (codes 1 to 6) are only logged by wntr: refuse a run that had one."""
     assert not en.Warnflag, f"EPANET warned on {path}: {en.errcodelist}"
@@ -276,11 +288,13 @@ def mass_balance_si(terms: Mapping[str, float], mode: str) -> dict[str, float]:
     return {key: value if key == "ratio" else value * scale for key, value in terms.items()}
 
 
-def epanet_quality(path: Path, *, setup=None, trials: int | None = None) -> QualityReference:
+def epanet_quality(path: Path, *, setup=None, trials: int | None = None,
+                   damplimit: float | None = None) -> QualityReference:
     """EPANET 2.2's quality on `path` (`EN_solveH`, then `EN_solveQ`'s `EN_runQ`/`EN_nextQ`
     loop; module docstring), in a temporary directory. `setup(en)`, when given, is called
     on the open project before the run (e.g. `EN_setnodevalue`); `trials` replaces the
-    copy's TRIALS 400 (as `epanet_results`; a test that passes it says why)."""
+    copy's TRIALS 400 and `damplimit` sets `EN_DAMPLIMIT` (as `epanet_results`; a test that
+    passes either says why)."""
     with tempfile.TemporaryDirectory(prefix="epanet-q-", ignore_cleanup_errors=True) as tmp:
         directory = Path(tmp)
         copy = epanet_copy(path, directory)
@@ -290,6 +304,7 @@ def epanet_quality(path: Path, *, setup=None, trials: int | None = None) -> Qual
         try:
             node_names, link_names = node_and_link_ids(en)
             _set_trials(en, trials)
+            _set_damplimit(en, damplimit)
             if setup is not None:
                 setup(en)
             en.ENsolveH()
@@ -353,9 +368,11 @@ def epanet_hydraulics(path: Path, *, setup=None) -> dict:
 
 
 @contextmanager
-def epanet_session(path: Path, *, trials: int | None = None) -> Iterator:
+def epanet_session(path: Path, *, trials: int | None = None,
+                   damplimit: float | None = None) -> Iterator:
     """wntr's `ENepanet` open on EPANET's copy of `path` (`epanet_copy`, `_open`: ACCURACY
-    `REFERENCE_ACCURACY`; `trials` as for `epanet_quality`) in a temporary directory, for a
+    `REFERENCE_ACCURACY`; `trials`, `damplimit` as for `epanet_quality`) in a temporary
+    directory, for a
     caller that drives the toolkit
     itself (`ENopenH`, `ENrunH`, ...); on leaving, `_no_warnings` (unless the body raised)
     and `ENclose`."""
@@ -366,6 +383,7 @@ def epanet_session(path: Path, *, trials: int | None = None) -> Iterator:
         _open(en, copy, directory / "session.rpt", directory / "session.bin")
         try:
             _set_trials(en, trials)
+            _set_damplimit(en, damplimit)
             yield en
             _no_warnings(en, path)
         finally:
@@ -374,20 +392,25 @@ def epanet_session(path: Path, *, trials: int | None = None) -> Iterator:
 
 def epanet_results(path: Path, *, duration: float | None = None, reader=None,
                    accuracy: float | None = REFERENCE_ACCURACY, trials: int | None = None,
-                   warnings: Collection[int] = ()):
+                   damplimit: float | None = None, warnings: Collection[int] = (),
+                   may_warn: Collection[int] = ()):
     """EPANET 2.2's results on `path`, the hydraulic parity's reference: what wntr's
     `EpanetSimulator.run_sim` returns (`EN_solveH`, `EN_solveQ`, the binary output read by
     wntr's `BinFile`, in SI at the report times), but on EPANET's copy of the file itself
     (`epanet_copy`), not on wntr's rewrite of it, and at a true ACCURACY `accuracy` (`_open`).
     A file's ACCURACY is clamped to 1e-5, which `accuracy=None` keeps, and `trials` replaces
-    the copy's TRIALS 400 (`EN_TRIALS`): a test that passes either says why. Refused if
-    EPANET warned, but for the network-state warnings `warnings` names, each of which must
-    occur (`NETWORK_STATE_WARNINGS`: the case is about a pump shut by its head, or a
-    negative pressure), and always on an unconverged or unstable step; every warning line of
-    the report counts too (`_REPORT_WARNINGS`). `duration` (s) sets `[TIMES] DURATION` in
+    the copy's TRIALS 400 (`EN_TRIALS`), and `damplimit` sets `EN_DAMPLIMIT`
+    (`_set_damplimit`): a test that passes any of them says why. Refused if EPANET warned,
+    but for the network-state warnings `warnings` names, each of which must occur
+    (`NETWORK_STATE_WARNINGS`: the case is about a pump shut by its head, or a negative
+    pressure), and those `may_warn` names, which may or may not (a warning one EPANET build
+    gives and another does not, MEASURED by the test that names it, which then asserts the
+    outcome of each); and always on an unconverged or unstable step; every warning line of
+    the report counts too (`_REPORT_WARNINGS`). The codes EPANET gave are the returned
+    results' `warning_codes` (a frozenset). `duration` (s) sets `[TIMES] DURATION` in
     the copy; `reader` is the `BinFile` (or a subclass keeping more of the file, e.g. its
     energy section) that reads the output."""
-    assert set(warnings) <= NETWORK_STATE_WARNINGS, warnings
+    assert set(warnings) | set(may_warn) <= NETWORK_STATE_WARNINGS, (warnings, may_warn)
     from wntr.epanet.io import BinFile
     with tempfile.TemporaryDirectory(prefix="epanet-r-", ignore_cleanup_errors=True) as tmp:
         directory = Path(tmp)
@@ -401,6 +424,7 @@ def epanet_results(path: Path, *, duration: float | None = None, reader=None,
         _open(en, copy, report, binary, accuracy=accuracy)
         try:
             _set_trials(en, trials)
+            _set_damplimit(en, damplimit)
             en.ENsolveH()
             en.ENsolveQ()
             darcy_weisbach = option(en, EN_HEADLOSSFORM) == EN_DW
@@ -408,13 +432,15 @@ def epanet_results(path: Path, *, duration: float | None = None, reader=None,
             en.ENclose()
         text = report.read_text(errors="replace")
         codes = set(_warning_codes(en)) | set(_report_warning_codes(text))
-        unexpected = sorted(codes - set(warnings))
+        unexpected = sorted(codes - set(warnings) - set(may_warn))
         lines = [ln.strip() for ln in text.splitlines() if "WARNING" in ln]
         assert not unexpected, (f"EPANET warned ({unexpected}) on {path}: {en.errcodelist} "
                                 f"{lines[:3]}")
         absent = set(warnings) - codes
         assert not absent, f"EPANET did not give the warnings {sorted(absent)} on {path}"
-        return (reader or BinFile()).read(str(binary), False, darcy_weisbach)
+        results = (reader or BinFile()).read(str(binary), False, darcy_weisbach)
+        results.warning_codes = frozenset(codes)
+        return results
 
 
 def run_quality(path: Path, **water_run_kwargs):

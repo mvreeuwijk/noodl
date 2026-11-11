@@ -1549,18 +1549,30 @@ def test_a_group_fenced_off_by_check_valves_is_held_at_the_limit_head(tmp_path):
     ACCURACY 1e-5 (`accuracy=None`), because at a true 1e-7 EPANET stops one iteration
     later (8, against 7) on 74.912220 m, and with FLOWCHANGE 1e-10 it goes on to a relative
     change of 8e-17 (15 iterations) and returns to 75.021263 m (MEASURED): the 1e-5 value
-    is EPANET's fixed point, the 1e-7 one an iterate on the way. Why that fixed point is
-    not the limit remains open. So J and L are compared at 3e-4 relative (MEASURED 2.8e-4);
-    every other head at 1e-6, every flow at 1e-6 m3/s, every state exactly. Documented in
-    docs/applications/water.md, Limitations."""
+    is EPANET's fixed point, the 1e-7 one an iterate on the way (all with wntr's Windows
+    build).
+
+    Why it is not the limit: EPANET's head here is resolved only to a step of 0.0546 m. Its
+    linear solve eliminates J into L's pivot `(P5 + 1/CBIG) - P5^2 / (P5 + 1/CBIG)`, exactly
+    2e-8 (the two check valves' `1/CBIG`), computed from P5's conductance 8.1e4 ft2/s
+    (`1 / hgrad` at 2.3e-8 m3/s, Hazen-Williams): one ulp of 8.1e4 is 1.46e-11, 7.3e-4 of
+    the pivot, so the group's head moves in steps of 7.3e-4 of 75 m = 0.0546 m with the last
+    bits of its flows. MEASURED, every head EPANET gave the group, both of wntr's
+    `libepanet22` builds, ACCURACY 1e-5 to 1e-8, FLOWCHANGE 1e-6 to 1e-12, HEADERROR,
+    CHECKFREQ 1: 74.912216, 74.966705, 75.021263, 75.075905 (steps 0.05449, 0.05456,
+    0.05464); at the reference's 1e-5, 75.021263 on Windows (MSVC) and 75.075905 on Linux
+    (GCC 7.4), same 7 iterations, every other head 0.0 and flow 1.3e-10 m3/s apart. So J
+    and L are compared at two steps, 1.5e-3 relative (MEASURED 2.8e-4 Windows, 1.0e-3
+    Linux); every other head at 1e-6, every flow at 1e-6 m3/s, every state exactly.
+    Documented in docs/applications/water.md, Limitations."""
     model, final, drivers, results = _hand_built(tmp_path, *_fenced("J", "L"), accuracy=None)
     heads = results.node["head"].loc[0]
     assert _worst_heads(model, final, heads, skip=("J", "L")) < 1e-6
     for name in ("J", "L"):
         mine = float(final["water.phi"][model.node_names.index(name)])
         assert mine == pytest.approx(75.0, abs=1e-12)
-        assert abs(mine - float(heads[name])) < 3e-4 * float(heads[name])
-    _compare_with_epanet(model, final, drivers, results, heads=3e-4)
+        assert abs(mine - float(heads[name])) < 1.5e-3 * float(heads[name])
+    _compare_with_epanet(model, final, drivers, results, heads=1.5e-3)
 
 
 def _fence_cases():
@@ -2082,6 +2094,24 @@ _DEAD_ENDS = [
     ("PSV", 60, "start", 0, 1, 60.0, REFERENCE_ACCURACY),
 ]
 
+#: The `_DEAD_ENDS` rows on which wntr's Linux build of EPANET (GCC 7.4) gives warning 5 and
+#: Windows' (MSVC) does not, MEASURED on both: `(valve, R1, side)`, exactly the rows whose
+#: dead end is on the side an ACTIVE valve does not fix (a PSV's end, a PRV's start; the
+#: fixed side gets `CBIG` on its diagonal, `hydcoeffs.c`, `prvcoeff`/`psvcoeff`). There the
+#: dead end J2 - P2 - J3 is a node pair joined only to each other (the ACTIVE valve's own
+#: coefficient is 0), so its second pivot in EPANET's Cholesky solve is `P2 - P2 * P2 /
+#: P2`, zero up to the last bit, and the sign of that bit is the build's. Where it is
+#: not positive `linsolve` (`smatrix.c`, `diagj <= 0.0`) returns the node and `badvalve`
+#: (`hydsolver.c`) sets the ACTIVE valve beside it to XPRESSURE, its only assignment, which
+#: the report gives as "open but cannot deliver pressure" and warning 5; an XPRESSURE valve
+#: is solved as OPEN, so the dead end joins J1 and sits at its head, the limit, with no
+#: flow. MEASURED on Linux, each row converged without another warning: V1 OPEN, J2 = J3 =
+#: J1 exactly (2 to 6 trials at the row's ACCURACY, against 3 to 19 on Windows). Where it
+#: is positive (Windows) EPANET solves through the near-zero pivot and stops on the rows'
+#: recorded iterates. Such a run is asserted as EPANET's converged OPEN at the limit head.
+_XPRESSURE_ON_LINUX = {("PSV", 60, "end"), ("PSV", 40, "end"), ("PRV", 40, "start"),
+                       ("PRV", 60, "start")}
+
 
 @pytest.mark.parametrize("valve, r1, side, expected, epanet_state, epanet_head, accuracy",
                          _DEAD_ENDS)
@@ -2104,12 +2134,19 @@ def test_a_valve_feeding_a_dead_end_without_demand_matches_epanet(
     CLOSED cases keep EPANET at `_NO_FLOW_ACCURACY` (no converged answer at 1e-7; see there),
     where its heads are its early stop, 3.2e-3 m and 6.4e-4 m off the limit and 35.791 m for
     the PSV behind an upstream head below its setting: compared as recorded, every other
-    head at 1e-6 relative."""
+    head at 1e-6 relative.
+
+    wntr's Linux build of EPANET meets the dead end's zero pivot on four rows
+    (`_XPRESSURE_ON_LINUX`, warning 5 there and only there): its valve is then OPEN at the
+    limit head, as the converged rows above, and compared as they are."""
     u, v = ("J1", "J2") if side == "end" else ("J2", "J1")
     text = _series_inp((("J1", 0), ("J2", 0), ("J3", 0)), (("R1", r1),),
                        (("P1", "R1", "J1"), ("P2", "J2", "J3")),
                        (("V1", u, v, valve, 50, 0),))
-    path, results = _run_inp(tmp_path, text, "dead", accuracy=accuracy)
+    may_warn = (5,) if (valve, r1, side) in _XPRESSURE_ON_LINUX else ()
+    path, results = _run_inp(tmp_path, text, "dead", accuracy=accuracy, may_warn=may_warn)
+    if 5 in results.warning_codes:        # the zero pivot: V1 XPRESSURE, OPEN at the limit
+        epanet_state, epanet_head = 1, (None if expected == 1 else float(r1))
     model, state, drivers = build_model(read_epanet_inp(path))
     final = water_steady(model, state, drivers)
     states = link_states(model, final, drivers).tolist()
@@ -2431,14 +2468,34 @@ def test_pump_speed_gradient_against_central_differences(tmp_path, kind):
     assert abs(float(analytic[k]) - fd) <= 1e-6 * abs(fd), (float(analytic[k]), fd)
 
 
+#: EPANET's DAMPLIMIT on ky10 at time zero (`test_ky10_constant_power_pumps_at_time_zero`
+#: has the MEASURED cause): without it wntr's Linux build stalls `~@Pump-11` at zero flow.
+_KY10_DAMPLIMIT = 1e-2
+
+
 def test_ky10_constant_power_pumps_at_time_zero(tmp_path):
     """ky10 (`wntr/library/networks/ky10.inp`): thirteen constant-power pumps, PRVs and
     tanks, solved at time zero with EPANET's own demands there (the demand patterns are
     applied over time by `water_run`). Heads 1e-6 relative, flows 1e-6 m3/s, every link's
-    state as EPANET's. MEASURED: heads 1.3e-7, flows 5.4e-8 m3/s (6.3e-7 and 9.1e-8 with
-    EPANET at the file's 1e-4)."""
+    state as EPANET's. MEASURED: heads 1.2e-7, flows 5.4e-8 m3/s, alike with wntr's Windows
+    (MSVC) and Linux (GCC 7.4) `libepanet22` (1.3e-7 and 5.4e-8 on Windows at DAMPLIMIT 0;
+    6.3e-7 and 9.1e-8 with EPANET at the file's 1e-4).
+
+    EPANET runs at DAMPLIMIT 1e-2 (`_KY10_DAMPLIMIT`): at its default 0 the Linux build
+    stops (25 trials, no warning, as Windows) on a second branch that is no solution:
+    `~@RV-4` CLOSED and its feeding constant-power pump `~@Pump-11` (20 hp) at 2.1e-22 m3/s
+    with a head gain of 7.9 m, where `h = P / (rho g q)` asks 7e21 m. EPANET's pump law
+    clamps the gradient `r / q^2` to CBIG (`hydcoeffs.c`, `pumpcoeff`), so below
+    `sqrt(r / CBIG)` the pump is a closed link's `1 / CBIG` leak and no later trial lifts it;
+    which build's iterate falls in is decided by its rounding. MEASURED on both builds:
+    Windows ACTIVE, 11.6 L/s, at every ACCURACY (1e-5 to 1e-8), CHECKFREQ (1 to 10),
+    MAXCHECK (5 to 100), DAMPLIMIT (0, 1e-2 to 1e-4); Linux stalled at all of these but
+    DAMPLIMIT 1e-2, 1e-3, 1e-4, which reach Windows' branch (763 of 935 heads up to 116 m
+    apart otherwise). DAMPLIMIT defers the PRV and PSV status checks to a relative flow
+    change below it and damps the flow updates by 0.6 there (`hydsolver.c`, `hydsolve`):
+    RV-4 is no longer shut before the pumps' flows have settled."""
     path = Path(wntr.__file__).parent / "library" / "networks" / "ky10.inp"
-    results = epanet_results(path, duration=0)
+    results = epanet_results(path, duration=0, damplimit=_KY10_DAMPLIMIT)
     net = read_epanet_inp(path)
     assert all(p.power is not None for p in net.pumps)
     model, state, drivers = build_model(net)
